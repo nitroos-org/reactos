@@ -54,8 +54,40 @@ typedef __x_ABI_CWindows_CFoundation_CNumerics_CVector3 Vec3;
 #define IID_Clip IID___x_ABI_CWindows_CUI_CComposition_CICompositionClip
 #define IID_Target IID___x_ABI_CWindows_CUI_CComposition_CICompositionTarget
 
-/* ICompositorDesktopInterop: IID and first method from the C# declaration on learn.microsoft.com ("Using the Visual
- * layer with Windows Forms"); only that method is declared there, so only it is used */
+/*
+ * ICompositorDesktopInterop, IDesktopWindowTarget, IDesktopWindowTargetInterop, ICompositorController: IIDs, slot
+ * order and signatures from microsoft/windows-rs (MIT OR Apache-2.0), commit 8ca69fdaa9d69c78b9bcfbee96c6916f2282e7f0:
+ * metadata/win32/windowsuicompositioninterop.rdl (ICompositorDesktopInterop: CreateDesktopWindowTarget, EnsureOnThread;
+ * IDesktopWindowTargetInterop: get_Hwnd), metadata/winrt/Windows.UI.Composition.Desktop.rdl (IDesktopWindowTarget:
+ * get IsTopmost), metadata/winrt/Windows.UI.Composition.Core.rdl (ICompositorController: get Compositor, Commit,
+ * EnsurePreviousCommitCompletedAsync, event CommitNeeded). The ICompositorDesktopInterop IID and its first method
+ * are also on learn.microsoft.com ("Using the Visual layer with Windows Forms"). IAsyncAction/IAsyncInfo: Wine.
+ */
+typedef struct IDesktopTarget IDesktopTarget;
+typedef struct
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(IDesktopTarget *This, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(IDesktopTarget *This);
+    ULONG (STDMETHODCALLTYPE *Release)(IDesktopTarget *This);
+    HRESULT (STDMETHODCALLTYPE *GetIids)(IDesktopTarget *This, ULONG *count, IID **iids);
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(IDesktopTarget *This, HSTRING *name);
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(IDesktopTarget *This, int *level);
+    HRESULT (STDMETHODCALLTYPE *get_IsTopmost)(IDesktopTarget *This, BOOLEAN *value);
+} IDesktopTargetVtbl;
+struct IDesktopTarget { const IDesktopTargetVtbl *lpVtbl; };
+static const GUID IID_DesktopTarget = {0x6329d6ca, 0x3366, 0x490e, {0x9d, 0xb3, 0x25, 0x31, 0x29, 0x29, 0xac, 0x51}};
+
+typedef struct IDesktopTargetInterop IDesktopTargetInterop;
+typedef struct
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(IDesktopTargetInterop *This, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(IDesktopTargetInterop *This);
+    ULONG (STDMETHODCALLTYPE *Release)(IDesktopTargetInterop *This);
+    HRESULT (STDMETHODCALLTYPE *get_Hwnd)(IDesktopTargetInterop *This, HWND *value);
+} IDesktopTargetInteropVtbl;
+struct IDesktopTargetInterop { const IDesktopTargetInteropVtbl *lpVtbl; };
+static const GUID IID_DesktopTargetInterop = {0x35dbf59e, 0xe3f9, 0x45b0, {0x81, 0xe7, 0xfe, 0x75, 0xf4, 0x14, 0x5d, 0xc9}};
+
 typedef struct IDesktopInterop IDesktopInterop;
 typedef struct
 {
@@ -63,10 +95,83 @@ typedef struct
     ULONG (STDMETHODCALLTYPE *AddRef)(IDesktopInterop *This);
     ULONG (STDMETHODCALLTYPE *Release)(IDesktopInterop *This);
     HRESULT (STDMETHODCALLTYPE *CreateDesktopWindowTarget)(IDesktopInterop *This, HWND hwnd, BOOL topmost,
-            IInspectable **result);
+            IDesktopTarget **result);
+    HRESULT (STDMETHODCALLTYPE *EnsureOnThread)(IDesktopInterop *This, DWORD thread_id);
 } IDesktopInteropVtbl;
 struct IDesktopInterop { const IDesktopInteropVtbl *lpVtbl; };
 static const GUID IID_DesktopInterop = {0x29e691fa, 0x4567, 0x4dca, {0xb3, 0x19, 0xd0, 0xf2, 0x07, 0xeb, 0x68, 0x07}};
+
+typedef struct ICtlHandler ICtlHandler;
+typedef struct
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(ICtlHandler *This, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(ICtlHandler *This);
+    ULONG (STDMETHODCALLTYPE *Release)(ICtlHandler *This);
+    HRESULT (STDMETHODCALLTYPE *Invoke)(ICtlHandler *This, void *sender, IInspectable *args);
+} ICtlHandlerVtbl;
+struct ICtlHandler { const ICtlHandlerVtbl *lpVtbl; };
+
+typedef struct ICtlAction ICtlAction;
+typedef struct ICtlActionHandler ICtlActionHandler;
+typedef struct
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(ICtlActionHandler *This, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(ICtlActionHandler *This);
+    ULONG (STDMETHODCALLTYPE *Release)(ICtlActionHandler *This);
+    HRESULT (STDMETHODCALLTYPE *Invoke)(ICtlActionHandler *This, ICtlAction *action, int status);
+} ICtlActionHandlerVtbl;
+struct ICtlActionHandler { const ICtlActionHandlerVtbl *lpVtbl; };
+typedef struct
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(ICtlAction *This, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(ICtlAction *This);
+    ULONG (STDMETHODCALLTYPE *Release)(ICtlAction *This);
+    HRESULT (STDMETHODCALLTYPE *GetIids)(ICtlAction *This, ULONG *count, IID **iids);
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(ICtlAction *This, HSTRING *name);
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(ICtlAction *This, int *level);
+    HRESULT (STDMETHODCALLTYPE *put_Completed)(ICtlAction *This, ICtlActionHandler *handler);
+    HRESULT (STDMETHODCALLTYPE *get_Completed)(ICtlAction *This, ICtlActionHandler **handler);
+    HRESULT (STDMETHODCALLTYPE *GetResults)(ICtlAction *This);
+} ICtlActionVtbl;
+struct ICtlAction { const ICtlActionVtbl *lpVtbl; };
+static const GUID IID_CtlAction = {0x5a648006, 0x843a, 0x4da9, {0x86, 0x5b, 0x9d, 0x26, 0xe5, 0xdf, 0xad, 0x7b}};
+
+typedef struct ICtlInfo ICtlInfo;
+typedef struct
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(ICtlInfo *This, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(ICtlInfo *This);
+    ULONG (STDMETHODCALLTYPE *Release)(ICtlInfo *This);
+    HRESULT (STDMETHODCALLTYPE *GetIids)(ICtlInfo *This, ULONG *count, IID **iids);
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(ICtlInfo *This, HSTRING *name);
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(ICtlInfo *This, int *level);
+    HRESULT (STDMETHODCALLTYPE *get_Id)(ICtlInfo *This, UINT32 *id);
+    HRESULT (STDMETHODCALLTYPE *get_Status)(ICtlInfo *This, int *status);
+    HRESULT (STDMETHODCALLTYPE *get_ErrorCode)(ICtlInfo *This, HRESULT *code);
+    HRESULT (STDMETHODCALLTYPE *Cancel)(ICtlInfo *This);
+    HRESULT (STDMETHODCALLTYPE *Close)(ICtlInfo *This);
+} ICtlInfoVtbl;
+struct ICtlInfo { const ICtlInfoVtbl *lpVtbl; };
+static const GUID IID_CtlInfo = {0x00000036, 0x0000, 0x0000, {0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}};
+
+typedef struct ICtl ICtl;
+typedef struct { INT64 value; } CtlToken;
+typedef struct
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(ICtl *This, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(ICtl *This);
+    ULONG (STDMETHODCALLTYPE *Release)(ICtl *This);
+    HRESULT (STDMETHODCALLTYPE *GetIids)(ICtl *This, ULONG *count, IID **iids);
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(ICtl *This, HSTRING *name);
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(ICtl *This, int *level);
+    HRESULT (STDMETHODCALLTYPE *get_Compositor)(ICtl *This, WICompositor **value);
+    HRESULT (STDMETHODCALLTYPE *Commit)(ICtl *This);
+    HRESULT (STDMETHODCALLTYPE *EnsurePreviousCommitCompletedAsync)(ICtl *This, ICtlAction **operation);
+    HRESULT (STDMETHODCALLTYPE *add_CommitNeeded)(ICtl *This, ICtlHandler *handler, CtlToken *token);
+    HRESULT (STDMETHODCALLTYPE *remove_CommitNeeded)(ICtl *This, CtlToken token);
+} ICtlVtbl;
+struct ICtl { const ICtlVtbl *lpVtbl; };
+static const GUID IID_Ctl = {0x2d75f35a, 0x70a7, 0x4395, {0xba, 0x2d, 0xce, 0xf0, 0xb1, 0x83, 0x99, 0xf9}};
 
 #define QI(p, iid, out) (p)->lpVtbl->QueryInterface(p, iid, (void **)(out))
 #define REL(p) (p)->lpVtbl->Release(p)
@@ -948,12 +1053,26 @@ static ULONG RefOf(IUnknown *u)
     return u->lpVtbl->Release(u);
 }
 
+#define IID_Closable IID___x_ABI_CWindows_CFoundation_CIClosable
+static const GUID IID_AgileObj = {0x94ea2b94, 0xe9cc, 0x49e0, {0xc0, 0xff, 0xee, 0x64, 0xca, 0x8f, 0x5b, 0x90}};
+static const GUID IID_Unknown1 = {0x12345678, 0x1234, 0x1234, {0x12, 0x34, 0x12, 0x34, 0x12, 0x34, 0x12, 0x34}};
+
+static BOOL HasIid(const IID *iids, ULONG count, const GUID *want)
+{
+    ULONG i;
+
+    for (i = 0; i < count; i++) if (IsEqualGUID(&iids[i], want)) return TRUE;
+    return FALSE;
+}
+
 static void TestDesktopTarget(void)
 {
     IDesktopInterop *di = NULL;
-    IInspectable *t = NULL, *t2 = NULL;
+    IDesktopTarget *t = NULL, *t2 = NULL;
+    IDesktopTargetInterop *ti = NULL;
     WICompositionTarget *ct = NULL;
     WICompositionObject *obj = NULL;
+    __x_ABI_CWindows_CFoundation_CIClosable *clo = NULL;
     WICompositor *c2 = NULL;
     WIVisual *v, *got;
     IUnknown *u1 = NULL, *u2 = NULL;
@@ -961,8 +1080,10 @@ static void TestDesktopTarget(void)
     HMODULE combase = GetModuleHandleW(L"combase.dll");
     LPCWSTR (WINAPI *pRaw)(HSTRING, UINT32 *) = combase ? (void *)GetProcAddress(combase, "WindowsGetStringRawBuffer") : NULL;
     HRESULT (WINAPI *pDel)(HSTRING) = combase ? (void *)GetProcAddress(combase, "WindowsDeleteString") : NULL;
-    ULONG comp_ref, vis_ref;
-    HWND hwnd;
+    ULONG comp_ref, vis_ref, count;
+    IID *iids;
+    BOOLEAN topmost;
+    HWND hwnd, got_hwnd;
     HRESULT hr;
 
     hr = QI(Comp, &IID_DesktopInterop, (void **)&di);
@@ -978,9 +1099,19 @@ static void TestDesktopTarget(void)
     if (!hwnd) { REL(di); return; }
     comp_ref = RefOf((IUnknown *)Comp);
 
+    hr = di->lpVtbl->CreateDesktopWindowTarget(di, hwnd, TRUE, NULL);
+    ok(hr == E_POINTER, "CreateDesktopWindowTarget(NULL) %#lx\n", hr);
     hr = di->lpVtbl->CreateDesktopWindowTarget(di, hwnd, TRUE, &t);
     ok(hr == S_OK && t, "CreateDesktopWindowTarget %#lx %p\n", hr, t);
     if (!t) goto out;
+
+    /* the result is the IDesktopWindowTarget itself, not only an IInspectable: its own method is callable directly */
+    topmost = FALSE;
+    hr = t->lpVtbl->get_IsTopmost(t, &topmost);
+    ok(hr == S_OK && topmost, "get_IsTopmost %#lx %u\n", hr, topmost);
+    hr = t->lpVtbl->get_IsTopmost(t, NULL);
+    ok(hr == E_POINTER, "get_IsTopmost(NULL) %#lx\n", hr);
+
     hr = t->lpVtbl->GetRuntimeClassName(t, &cls);
     ok(hr == S_OK, "GetRuntimeClassName %#lx\n", hr);
     if (hr == S_OK && pRaw && pDel)
@@ -988,6 +1119,37 @@ static void TestDesktopTarget(void)
         ok(!lstrcmpW(pRaw(cls, NULL), L"Windows.UI.Composition.Desktop.DesktopWindowTarget"), "class %ls\n",
            pRaw(cls, NULL));
         pDel(cls);
+    }
+
+    iids = NULL; count = 0;
+    hr = t->lpVtbl->GetIids(t, &count, &iids);
+    ok(hr == S_OK && iids, "GetIids %#lx\n", hr);
+    if (iids)
+    {
+        ok(HasIid(iids, count, &IID_DesktopTarget), "GetIids lacks IDesktopWindowTarget\n");
+        ok(HasIid(iids, count, &IID_Target), "GetIids lacks ICompositionTarget\n");
+        ok(HasIid(iids, count, &IID_Closable), "GetIids lacks IClosable\n");
+        CoTaskMemFree(iids);
+    }
+
+    u1 = (IUnknown *)0x1234;
+    hr = QI(t, &IID_Unknown1, (void **)&u1);
+    ok(hr == E_NOINTERFACE && u1 == NULL, "QI(unknown IID) %#lx %p\n", hr, u1);
+
+    hr = QI(t, &IID_DesktopTargetInterop, (void **)&ti);
+    ok(hr == S_OK && ti, "QI IDesktopWindowTargetInterop %#lx\n", hr);
+    if (ti)
+    {
+        got_hwnd = NULL;
+        hr = ti->lpVtbl->get_Hwnd(ti, &got_hwnd);
+        ok(hr == S_OK && got_hwnd == hwnd, "get_Hwnd %#lx %p, expected %p\n", hr, got_hwnd, hwnd);
+        hr = ti->lpVtbl->get_Hwnd(ti, NULL);
+        ok(hr == E_POINTER, "get_Hwnd(NULL) %#lx\n", hr);
+        QI(ti, &IID_IUnknown, (void **)&u1);
+        QI(t, &IID_IUnknown, (void **)&u2);
+        ok(u1 == u2, "interop identity %p vs %p\n", u1, u2);
+        REL(u1); REL(u2);
+        REL(ti);
     }
 
     hr = QI(t, &IID_Target, (void **)&ct);
@@ -1034,23 +1196,259 @@ static void TestDesktopTarget(void)
             hr = ct->lpVtbl->get_Root(ct, &got);
             ok(hr == S_OK && got == NULL, "Root after NULL %#lx %p\n", hr, got);
             ok(RefOf((IUnknown *)v) == vis_ref, "visual refs %lu, were %lu\n", RefOf((IUnknown *)v), vis_ref);
-            /* the target keeps its root alive; releasing the target drops it */
-            ct->lpVtbl->put_Root(ct, v);
+            /* a target that holds a Root, even a Closed one, frees it with its last reference */
+            hr = ct->lpVtbl->put_Root(ct, v);
+            ok(hr == S_OK, "put_Root %#lx\n", hr);
+            ok(RefOf((IUnknown *)v) == vis_ref + 1, "visual refs %lu while the target holds it, were %lu\n",
+               RefOf((IUnknown *)v), vis_ref);
+            hr = QI(t, &IID_Closable, (void **)&clo);
+            ok(hr == S_OK && clo, "QI IClosable %#lx\n", hr);
+            if (clo)
+            {
+                hr = clo->lpVtbl->Close(clo);
+                ok(hr == S_OK, "Close %#lx\n", hr);
+                hr = clo->lpVtbl->Close(clo);
+                ok(hr == S_OK, "second Close %#lx\n", hr);
+                REL(clo);
+            }
+            REL(ct);
+            ct = NULL;
+            REL(t);
+            t = NULL;
+            ok(RefOf((IUnknown *)v) == vis_ref, "visual refs %lu after the target is freed, were %lu\n",
+               RefOf((IUnknown *)v), vis_ref);
             REL(v);
         }
-        REL(ct);
+        if (ct) REL(ct);
     }
-    REL(t);
+    if (t) REL(t);
     ok(RefOf((IUnknown *)Comp) == comp_ref, "Compositor refs %lu after the target, were %lu\n",
        RefOf((IUnknown *)Comp), comp_ref);
 
     /* topmost FALSE works as well */
     hr = di->lpVtbl->CreateDesktopWindowTarget(di, hwnd, FALSE, &t2);
     ok(hr == S_OK && t2, "CreateDesktopWindowTarget(topmost FALSE) %#lx %p\n", hr, t2);
-    if (t2) REL(t2);
+    if (t2)
+    {
+        topmost = TRUE;
+        hr = t2->lpVtbl->get_IsTopmost(t2, &topmost);
+        ok(hr == S_OK && !topmost, "get_IsTopmost(FALSE) %#lx %u\n", hr, topmost);
+        REL(t2);
+    }
+
+    /* the second method; Windows documents nothing about it */
+    hr = di->lpVtbl->EnsureOnThread(di, GetCurrentThreadId());
+    ok(hr == S_OK || hr == E_NOTIMPL, "EnsureOnThread %#lx\n", hr);
 out:
     DestroyWindow(hwnd);
     REL(di);
+}
+
+typedef struct
+{
+    ICtlHandler iface;
+    LONG ref;
+    LONG invoked;
+} TestHandler;
+
+static HRESULT STDMETHODCALLTYPE th_QI(ICtlHandler *i, REFIID iid, void **out)
+{
+    if (IsEqualGUID(iid, &IID_IUnknown)) { *out = i; i->lpVtbl->AddRef(i); return S_OK; }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG STDMETHODCALLTYPE th_AddRef(ICtlHandler *i) { return InterlockedIncrement(&((TestHandler *)i)->ref); }
+static ULONG STDMETHODCALLTYPE th_Release(ICtlHandler *i) { return InterlockedDecrement(&((TestHandler *)i)->ref); }
+static HRESULT STDMETHODCALLTYPE th_Invoke(ICtlHandler *i, void *s, IInspectable *a)
+{ InterlockedIncrement(&((TestHandler *)i)->invoked); return S_OK; }
+static const ICtlHandlerVtbl th_vtbl = { th_QI, th_AddRef, th_Release, th_Invoke };
+
+typedef struct
+{
+    ICtlActionHandler iface;
+    LONG invoked;
+    int status;
+    ICtlAction *action;
+} TestActionHandler;
+
+static HRESULT STDMETHODCALLTYPE ah_QI(ICtlActionHandler *i, REFIID iid, void **out)
+{
+    if (IsEqualGUID(iid, &IID_IUnknown)) { *out = i; return S_OK; }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG STDMETHODCALLTYPE ah_AddRef(ICtlActionHandler *i) { return 2; }
+static ULONG STDMETHODCALLTYPE ah_Release(ICtlActionHandler *i) { return 1; }
+static HRESULT STDMETHODCALLTYPE ah_Invoke(ICtlActionHandler *i, ICtlAction *a, int status)
+{
+    TestActionHandler *h = (TestActionHandler *)i;
+
+    h->invoked++; h->status = status; h->action = a;
+    return S_OK;
+}
+static const ICtlActionHandlerVtbl ah_vtbl = { ah_QI, ah_AddRef, ah_Release, ah_Invoke };
+
+static void TestController(PRO_ACTIVATE pRoActivateInstance, PWCS pWindowsCreateString, PWDS pWindowsDeleteString)
+{
+    const WCHAR name[] = L"Windows.UI.Composition.Core.CompositorController";
+    IInspectable *obj = NULL;
+    ICtl *ctl = NULL;
+    WICompositor *c1 = NULL, *c2 = NULL;
+    WIContainerVisual *cv = NULL;
+    ICtlAction *act = NULL;
+    ICtlInfo *info = NULL;
+    __x_ABI_CWindows_CFoundation_CIClosable *clo = NULL;
+    IUnknown *u1 = NULL, *u2 = NULL, *agile = NULL;
+    TestHandler h1 = { { &th_vtbl }, 1, 0 }, h2 = { { &th_vtbl }, 1, 0 };
+    TestActionHandler ah = { { &ah_vtbl }, 0, -1, NULL };
+    CtlToken tok1, tok2, bogus = { 0x7fffffff };
+    HSTRING cls = NULL;
+    IID *iids = NULL;
+    ULONG count = 0, comp_ref;
+    UINT32 id;
+    int status;
+    HRESULT hr, ehr;
+    HMODULE combase = GetModuleHandleW(L"combase.dll");
+    LPCWSTR (WINAPI *pRaw)(HSTRING, UINT32 *) = combase ? (void *)GetProcAddress(combase, "WindowsGetStringRawBuffer") : NULL;
+
+    hr = pWindowsCreateString(name, lstrlenW(name), &cls);
+    ok(hr == S_OK, "WindowsCreateString %#lx\n", hr);
+    hr = pRoActivateInstance(cls, &obj);
+    pWindowsDeleteString(cls);
+    ok(hr == S_OK && obj, "activate CompositorController %#lx %p\n", hr, obj);
+    if (!obj) return;
+
+    hr = QI(obj, &IID_Ctl, (void **)&ctl);
+    ok(hr == S_OK && ctl, "QI ICompositorController %#lx\n", hr);
+    if (!ctl) { REL(obj); return; }
+    QI(obj, &IID_IUnknown, (void **)&u1);
+    QI(ctl, &IID_IUnknown, (void **)&u2);
+    ok(u1 == u2, "controller identity %p vs %p\n", u1, u2);
+    REL(u1); REL(u2);
+
+    hr = ctl->lpVtbl->GetIids(ctl, &count, &iids);
+    ok(hr == S_OK && iids, "GetIids %#lx\n", hr);
+    if (iids)
+    {
+        ok(HasIid(iids, count, &IID_Ctl), "GetIids lacks ICompositorController\n");
+        ok(HasIid(iids, count, &IID_Closable), "GetIids lacks IClosable\n");
+        CoTaskMemFree(iids);
+    }
+    hr = ctl->lpVtbl->GetRuntimeClassName(ctl, &cls);
+    ok(hr == S_OK, "GetRuntimeClassName %#lx\n", hr);
+    if (hr == S_OK && pRaw)
+    {
+        ok(!lstrcmpW(pRaw(cls, NULL), name), "class %ls\n", pRaw(cls, NULL));
+        pWindowsDeleteString(cls);
+    }
+    hr = QI(ctl, &IID_AgileObj, (void **)&agile);
+    ok(hr == S_OK && agile, "QI IAgileObject %#lx\n", hr);
+    if (agile) REL(agile);
+    u1 = (IUnknown *)0x1234;
+    hr = QI(ctl, &IID_Unknown1, (void **)&u1);
+    ok(hr == E_NOINTERFACE && u1 == NULL, "QI(unknown IID) %#lx %p\n", hr, u1);
+
+    /* Compositor */
+    hr = ctl->lpVtbl->get_Compositor(ctl, NULL);
+    ok(hr == E_POINTER, "get_Compositor(NULL) %#lx\n", hr);
+    hr = ctl->lpVtbl->get_Compositor(ctl, &c1);
+    ok(hr == S_OK && c1, "get_Compositor %#lx %p\n", hr, c1);
+    hr = ctl->lpVtbl->get_Compositor(ctl, &c2);
+    ok(hr == S_OK && c2, "get_Compositor again %#lx %p\n", hr, c2);
+    if (c1 && c2)
+    {
+        QI(c1, &IID_IUnknown, (void **)&u1);
+        QI(c2, &IID_IUnknown, (void **)&u2);
+        ok(u1 == u2, "the controller's Compositor changed: %p vs %p\n", u1, u2);
+        REL(u1); REL(u2);
+        hr = c1->lpVtbl->CreateContainerVisual(c1, &cv);
+        ok(hr == S_OK && cv, "CreateContainerVisual on the controller's Compositor %#lx\n", hr);
+        if (cv) REL(cv);
+    }
+    if (c2) REL(c2);
+
+    /* Commit and EnsurePreviousCommitCompletedAsync */
+    hr = ctl->lpVtbl->Commit(ctl);
+    ok(hr == S_OK, "Commit %#lx\n", hr);
+    hr = ctl->lpVtbl->EnsurePreviousCommitCompletedAsync(ctl, NULL);
+    ok(hr == E_POINTER, "EnsurePreviousCommitCompletedAsync(NULL) %#lx\n", hr);
+    hr = ctl->lpVtbl->EnsurePreviousCommitCompletedAsync(ctl, &act);
+    ok(hr == S_OK && act, "EnsurePreviousCommitCompletedAsync %#lx %p\n", hr, act);
+    if (act)
+    {
+        hr = QI(act, &IID_CtlInfo, (void **)&info);
+        ok(hr == S_OK && info, "QI IAsyncInfo %#lx\n", hr);
+        if (info)
+        {
+            status = -1;
+            hr = info->lpVtbl->get_Status(info, &status);
+            ok(hr == S_OK && status == 1, "AsyncStatus %#lx %d, expected Completed\n", hr, status);
+            id = 0xdead;
+            hr = info->lpVtbl->get_Id(info, &id);
+            ok(hr == S_OK, "get_Id %#lx\n", hr);
+            ehr = E_FAIL;
+            hr = info->lpVtbl->get_ErrorCode(info, &ehr);
+            ok(hr == S_OK && ehr == S_OK, "get_ErrorCode %#lx %#lx\n", hr, ehr);
+            REL(info);
+        }
+        hr = act->lpVtbl->GetResults(act);
+        ok(hr == S_OK, "GetResults %#lx\n", hr);
+        hr = act->lpVtbl->put_Completed(act, &ah.iface);
+        ok(hr == S_OK, "put_Completed %#lx\n", hr);
+        ok(ah.invoked == 1 && ah.status == 1 && ah.action == act, "completed handler: %ld calls, status %d\n",
+           ah.invoked, ah.status);
+        hr = act->lpVtbl->put_Completed(act, &ah.iface);
+        ok(hr == E_ILLEGAL_DELEGATE_ASSIGNMENT, "second put_Completed %#lx\n", hr);
+        REL(act);
+    }
+
+    /* CommitNeeded */
+    tok1.value = tok2.value = 0;
+    hr = ctl->lpVtbl->add_CommitNeeded(ctl, NULL, &tok1);
+    ok(hr == E_INVALIDARG, "add_CommitNeeded(NULL handler) %#lx\n", hr);
+    hr = ctl->lpVtbl->add_CommitNeeded(ctl, &h1.iface, &tok1);
+    ok(hr == S_OK && tok1.value != 0, "add_CommitNeeded %#lx token %I64d\n", hr, tok1.value);
+    hr = ctl->lpVtbl->add_CommitNeeded(ctl, &h2.iface, &tok2);
+    ok(hr == S_OK && tok2.value != 0 && tok2.value != tok1.value, "second add_CommitNeeded %#lx tokens %I64d %I64d\n", hr,
+       tok1.value, tok2.value);
+    ok(h1.ref == 2 && h2.ref == 2, "handler refs %ld %ld after add\n", h1.ref, h2.ref);
+    hr = ctl->lpVtbl->remove_CommitNeeded(ctl, tok1);
+    ok(hr == S_OK, "remove_CommitNeeded %#lx\n", hr);
+    ok(h1.ref == 1 && h2.ref == 2, "handler refs %ld %ld after remove\n", h1.ref, h2.ref);
+    hr = ctl->lpVtbl->remove_CommitNeeded(ctl, tok1);
+    ok(hr == S_OK, "remove_CommitNeeded twice %#lx\n", hr);
+    hr = ctl->lpVtbl->remove_CommitNeeded(ctl, bogus);
+    ok(hr == S_OK, "remove_CommitNeeded(unknown token) %#lx\n", hr);
+    ok(h1.ref == 1 && h2.ref == 2, "handler refs %ld %ld after the bogus removals\n", h1.ref, h2.ref);
+
+    /* Close, then freeing: the Compositor the controller held and the handlers still registered go away */
+    comp_ref = 0;
+    hr = ctl->lpVtbl->get_Compositor(ctl, &c2);
+    if (hr == S_OK && c2)
+    {
+        comp_ref = RefOf((IUnknown *)c2);
+        ok(comp_ref == 3, "Compositor refs %lu while the controller lives\n", comp_ref);
+    }
+    hr = QI(ctl, &IID_Closable, (void **)&clo);
+    ok(hr == S_OK && clo, "QI IClosable %#lx\n", hr);
+    if (clo)
+    {
+        hr = clo->lpVtbl->Close(clo);
+        ok(hr == S_OK, "Close %#lx\n", hr);
+        hr = clo->lpVtbl->Close(clo);
+        ok(hr == S_OK, "second Close %#lx\n", hr);
+        REL(clo);
+    }
+    REL(ctl);
+    REL(obj);
+    ok(h2.ref == 1, "handler ref %ld after the controller is freed, expected 1\n", h2.ref);
+    if (c2)
+    {
+        ok(RefOf((IUnknown *)c2) == comp_ref - 1, "Compositor refs %lu after the controller is freed, were %lu\n",
+           RefOf((IUnknown *)c2), comp_ref);
+        REL(c2);
+    }
+    if (c1) REL(c1);
 }
 
 START_TEST(Composition)
@@ -1095,5 +1493,6 @@ START_TEST(Composition)
         TestDesktopTarget();
         REL(Comp);
     }
+    TestController(pRoActivateInstance, pWindowsCreateString, pWindowsDeleteString);
     CoUninitialize();
 }

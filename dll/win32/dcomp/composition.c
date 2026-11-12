@@ -89,6 +89,8 @@ static const struct iface_entry iface_table[] =
     IE(ICompositionSurface, surface, KM(K_DSURFACE), TRUE),
     IE(ICompositionDrawingSurface, dsurf, KM(K_DSURFACE), TRUE),
     IE(ICompositionTarget, target, KM(K_TARGET), TRUE),
+    { &IID_IDesktopWindowTarget, offsetof(struct cobj, dwt), KM(K_TARGET), TRUE },
+    { &IID_IDesktopWindowTargetInterop, offsetof(struct cobj, dwtinterop), KM(K_TARGET), FALSE },
     { &IID___x_ABI_CWindows_CFoundation_CIClosable, offsetof(struct cobj, closable), KM_ALL, TRUE },
     { &IID_IAgileObject, offsetof(struct cobj, agile), KM_ALL, FALSE },
     { &IID_INitroDrawingSurfaceInterop, offsetof(struct cobj, dsinterop), KM(K_DSURFACE), FALSE },
@@ -219,6 +221,8 @@ INSP_FWD(gdv, WICompositionGraphicsDevice, gdev)
 INSP_FWD(srf, WICompositionSurface, surface)
 INSP_FWD(dsf, WICompositionDrawingSurface, dsurf)
 INSP_FWD(tgt, WICompositionTarget, target)
+INSP_FWD(dwt, WIDesktopWindowTarget, dwt)
+UNK_FWD(dwi, WIDesktopWindowTargetInterop, dwtinterop)
 INSP_FWD(clo, WIClosable, closable)
 UNK_FWD(agl, IAgileObject, agile)
 UNK_FWD(tst, INitroCompositionTest, test)
@@ -318,6 +322,8 @@ static HRESULT STDMETHODCALLTYPE clo_Close(WIClosable *i)
         if (o->kind == K_GDEVICE) gfx_device_free(o);
         else gfx_surface_free(o);
     }
+    /* FIXME: Close on a DesktopWindowTarget should disconnect it from its window and drop Root; it only marks
+     * the object closed (the Root reference is released with the target). Verify on the oracle. */
     o->closed = TRUE;
     return S_OK;
 }
@@ -1167,6 +1173,7 @@ static HRESULT STDMETHODCALLTYPE tgt_put_Root(WICompositionTarget *i, WIVisual *
         FIXME("CompositionTarget.Root: foreign visual %p\n", v);
         return E_INVALIDARG;
     }
+    /* FIXME: a visual of another Compositor or one that already has a parent is accepted; verify on the oracle */
     if (r) id_AddRef(&r->identity);
     comp_lock(); old = o->root; o->root = r; comp_unlock();
     release_cobj(old);
@@ -1175,7 +1182,26 @@ static HRESULT STDMETHODCALLTYPE tgt_put_Root(WICompositionTarget *i, WIVisual *
 
 static const WICompositionTargetVtbl target_vtbl = { INSP_HEAD(tgt), tgt_get_Root, tgt_put_Root };
 
-HRESULT comp_new_desktop_target(IUnknown *compositor, HWND hwnd, BOOL topmost, IInspectable **out)
+static HRESULT STDMETHODCALLTYPE dwt_get_IsTopmost(WIDesktopWindowTarget *i, BOOLEAN *value)
+{
+    if (!value) return E_POINTER;
+    *value = OBJ_OF(i, dwt)->topmost ? TRUE : FALSE;
+    return S_OK;
+}
+
+static const WIDesktopWindowTargetVtbl dwt_vtbl = { INSP_HEAD(dwt), dwt_get_IsTopmost };
+
+static HRESULT STDMETHODCALLTYPE dwi_get_Hwnd(WIDesktopWindowTargetInterop *i, HWND *value)
+{
+    if (!value) return E_POINTER;
+    *value = OBJ_OF(i, dwtinterop)->hwnd;
+    return S_OK;
+}
+
+static const WIDesktopWindowTargetInteropVtbl dwtinterop_vtbl =
+    { dwi_QueryInterface, dwi_AddRef, dwi_Release, dwi_get_Hwnd };
+
+HRESULT comp_new_desktop_target(IUnknown *compositor, HWND hwnd, BOOL topmost, WIDesktopWindowTarget **out)
 {
     struct cobj *o;
     HRESULT hr;
@@ -1184,7 +1210,7 @@ HRESULT comp_new_desktop_target(IUnknown *compositor, HWND hwnd, BOOL topmost, I
     o->hwnd = hwnd;
     o->topmost = topmost;
     FIXME("DesktopWindowTarget for window %p: the visual tree is not presented yet (no window surfaces)\n", hwnd);
-    *out = &o->identity;
+    *out = &o->dwt;                     /* the creation reference moves to the caller */
     return S_OK;
 }
 
@@ -1207,6 +1233,8 @@ HRESULT comp_create(IUnknown *compositor, enum cobj_kind kind, struct cobj **out
     o->surface.lpVtbl = &surface_vtbl;
     o->dsurf.lpVtbl = &dsurf_vtbl;
     o->target.lpVtbl = &target_vtbl;
+    o->dwt.lpVtbl = &dwt_vtbl;
+    o->dwtinterop.lpVtbl = &dwtinterop_vtbl;
     o->dsinterop.lpVtbl = &nitro_dsinterop_vtbl;
     o->test.lpVtbl = &nitro_test_vtbl_impl;
     o->closable.lpVtbl = &closable_vtbl;
