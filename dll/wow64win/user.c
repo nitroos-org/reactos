@@ -376,6 +376,10 @@ static ULONG_PTR MessageCall(ULONG *a)
      * user32 turns the copy into a new global block */
     case WM_COPYGLOBALDATA:
         Param = (LPARAM)P(3); break;
+    /* DDE: lParam is a packed pair of words or a global handle of the sender (an HGLOBAL, zero-extended); the
+     * kernel only tracks the conversation (WM_DDE_ACK across processes) */
+    case WM_DDE_ACK: case WM_DDE_ADVISE: case WM_DDE_DATA: case WM_DDE_POKE: case WM_DDE_EXECUTE:
+        Param = (LPARAM)P(3); break;
     }
     Ret = NtUserMessageCall(H(0), a[1], a[2], Param, ResultInfo, a[5], a[6]);
     if (Copy) RtlFreeHeap(RtlGetProcessHeap(), 0, Copy);
