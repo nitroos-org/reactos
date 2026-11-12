@@ -704,4 +704,75 @@ ObReferenceObjectByHandle(IN HANDLE Handle,
     return Status;
 }
 
+/*
+ * The "WithTag" variants (Windows 7 and later): the tag only names the
+ * reference for the debugger and the Driver Verifier, which this kernel does
+ * not track, so each forwards to its untagged routine.
+ */
+
+LONG_PTR
+FASTCALL
+ObfReferenceObjectWithTag(IN PVOID Object,
+                          IN ULONG Tag)
+{
+    UNREFERENCED_PARAMETER(Tag);
+    return ObfReferenceObject(Object);
+}
+
+LONG_PTR
+FASTCALL
+ObfDereferenceObjectWithTag(IN PVOID Object,
+                            IN ULONG Tag)
+{
+    UNREFERENCED_PARAMETER(Tag);
+    return ObfDereferenceObject(Object);
+}
+
+NTSTATUS
+NTAPI
+ObReferenceObjectByHandleWithTag(IN HANDLE Handle,
+                                 IN ACCESS_MASK DesiredAccess,
+                                 IN POBJECT_TYPE ObjectType,
+                                 IN KPROCESSOR_MODE AccessMode,
+                                 IN ULONG Tag,
+                                 OUT PVOID* Object,
+                                 OUT POBJECT_HANDLE_INFORMATION HandleInformation OPTIONAL)
+{
+    UNREFERENCED_PARAMETER(Tag);
+    return ObReferenceObjectByHandle(Handle, DesiredAccess, ObjectType, AccessMode,
+                                     Object, HandleInformation);
+}
+
+NTSTATUS
+NTAPI
+ObReferenceObjectByPointerWithTag(IN PVOID Object,
+                                  IN ACCESS_MASK DesiredAccess,
+                                  IN POBJECT_TYPE ObjectType,
+                                  IN KPROCESSOR_MODE AccessMode,
+                                  IN ULONG Tag)
+{
+    UNREFERENCED_PARAMETER(Tag);
+    return ObReferenceObjectByPointer(Object, DesiredAccess, ObjectType, AccessMode);
+}
+
+VOID
+NTAPI
+ObDereferenceObjectDeferDeleteWithTag(IN PVOID Object,
+                                      IN ULONG Tag)
+{
+    UNREFERENCED_PARAMETER(Tag);
+    ObDereferenceObjectDeferDelete(Object);
+}
+
+/*
+ * ObGetObjectPointerCount: the number of references the object holds
+ * (documented for drivers that want to know whether they hold the last one).
+ */
+ULONG
+NTAPI
+ObGetObjectPointerCount(IN PVOID Object)
+{
+    return (ULONG)OBJECT_TO_OBJECT_HEADER(Object)->PointerCount;
+}
+
 /* EOF */
