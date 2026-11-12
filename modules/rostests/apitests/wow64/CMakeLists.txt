@@ -55,8 +55,8 @@ target_include_directories(gdi32_wow64_apitest PRIVATE ${REACTOS_SOURCE_DIR}/win
 add_importlibs(gdi32_wow64_apitest gdi32 user32)
 
 # WM_GETDLGCODE, the pointer messages (WM_HELP, WM_COMPAREITEM, ...) and friends reach win32k through the 32-bit message thunk
-add_wow64_apitest(user32 WmGetDlgCode WmPointerMessages)
-add_importlibs(user32_wow64_apitest user32)
+add_wow64_apitest(user32 WmGetDlgCode WmPointerMessages WmMenuDragIme)
+add_importlibs(user32_wow64_apitest imm32 user32)
 
 target_sources(advapi32_wow64_apitest PRIVATE ../advapi32/RegWow64Review.c)
 # LogonUser creates its test user through the SAM
