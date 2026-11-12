@@ -4,6 +4,10 @@
  * PURPOSE:     What a server interface was registered with is enforced: the interface security callback
  *              (allow, deny, cached per client connection or not) and RPC_IF_ALLOW_LOCAL_ONLY, and a call
  *              with an operation number the interface does not have fails without harming the server.
+ *              A refused call is made through a client stub (NdrClientCall2), which raises the status as an
+ *              exception, as Windows 10 does: every refusal (the callback returns RPC_S_ACCESS_DENIED or
+ *              another error, a remote client of a local-only interface) is seen as RPC_S_ACCESS_DENIED.
+ *              (The low-level I_RpcSendReceive path is not used for a refusal: on Windows 10 it faults.)
  *
  * The server and the clients live in this process, over ncalrpc, ncacn_np and ncacn_ip_tcp on the loopback
  * address. A remote client cannot be made from one machine; the remote refusal is covered by the decision
@@ -11,11 +15,17 @@
  */
 
 #include <apitest.h>
+#include <pseh/pseh2.h>
 
 #include <stdio.h>
 #include <windows.h>
 #include <rpc.h>
 #include <rpcdcep.h>
+
+#include "interface_access_c.h"
+
+void *__RPC_USER MIDL_user_allocate(SIZE_T size) { return malloc(size); }
+void __RPC_USER MIDL_user_free(void *ptr) { free(ptr); }
 
 static const RPC_SYNTAX_IDENTIFIER ndr_syntax =
 {
@@ -136,6 +146,30 @@ static RPC_STATUS do_call(RPC_BINDING_HANDLE binding, int index, unsigned int pr
     return status;
 }
 
+static int (__cdecl *const ndr_stub[IF_COUNT])(handle_t) =
+{
+    ndr_plain_call, ndr_local_call, ndr_allow_call, ndr_deny_call, ndr_deny_other_call, ndr_nocache_call, ndr_local_deny_call
+};
+
+/* one call through the client stub: the status of a refused call is the exception code the stub raises
+ * (what RpcExceptionCode returns in an RpcTryExcept / RpcExcept block) */
+static RPC_STATUS do_ndr_call(RPC_BINDING_HANDLE binding, int index, int *result)
+{
+    RPC_STATUS status = RPC_S_OK;
+
+    *result = -1;
+    _SEH2_TRY
+    {
+        *result = ndr_stub[index](binding);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+    return status;
+}
+
 static RPC_BINDING_HANDLE make_binding(const char *protseq, const char *address, const char *endpoint)
 {
     RPC_CSTR string = NULL;
@@ -194,7 +228,7 @@ static void test_transport(struct transport *t)
     /* a local-only interface serves ncalrpc and local named pipe clients; a TCP client is refused, also over
      * the loopback address (measured on Windows 10) */
     binding = make_binding(t->protseq, t->address, t->endpoint);
-    status = do_call(binding, IF_LOCAL, 0, &result);
+    status = do_ndr_call(binding, IF_LOCAL, &result);
     ok_eq_hex(status, t->local ? RPC_S_OK : RPC_S_ACCESS_DENIED);
     ok_eq_int(result, t->local ? 42 : -1);
     RpcBindingFree(&binding);
@@ -214,14 +248,15 @@ static void test_transport(struct transport *t)
     ok_eq_long(dispatch_count[IF_ALLOW], 2);
     RpcBindingFree(&binding);
 
-    /* the callback denies: the call fails with access denied and the server routine does not run, also the
+    /* the callback denies: the stub raises RPC_S_ACCESS_DENIED (measured on Windows 10 over ncalrpc, ncacn_np and
+     * ncacn_ip_tcp, whatever the error the callback returned) and the server routine does not run, also the
      * second time (the verdict is kept) */
     reset_counts();
     binding = make_binding(t->protseq, t->address, t->endpoint);
-    status = do_call(binding, IF_DENY, 0, &result);
+    status = do_ndr_call(binding, IF_DENY, &result);
     ok_eq_hex(status, RPC_S_ACCESS_DENIED);
     ok_eq_int(result, -1);
-    status = do_call(binding, IF_DENY, 0, &result);
+    status = do_ndr_call(binding, IF_DENY, &result);
     ok_eq_hex(status, RPC_S_ACCESS_DENIED);
     ok_eq_long(dispatch_count[IF_DENY], 0);
     /* a refusal ends the client's connection, so the second call may ask again */
@@ -231,7 +266,7 @@ static void test_transport(struct transport *t)
     /* any verdict other than RPC_S_OK refuses the call */
     reset_counts();
     binding = make_binding(t->protseq, t->address, t->endpoint);
-    status = do_call(binding, IF_DENY_OTHER, 0, &result);
+    status = do_ndr_call(binding, IF_DENY_OTHER, &result);
     ok_eq_hex(status, RPC_S_ACCESS_DENIED);
     ok_eq_long(dispatch_count[IF_DENY_OTHER], 0);
     RpcBindingFree(&binding);
@@ -251,7 +286,7 @@ static void test_transport(struct transport *t)
     /* local-only and the callback both apply: a local caller reaches the callback, which denies */
     reset_counts();
     binding = make_binding(t->protseq, t->address, t->endpoint);
-    status = do_call(binding, IF_LOCAL_DENY, 0, &result);
+    status = do_ndr_call(binding, IF_LOCAL_DENY, &result);
     ok_eq_hex(status, RPC_S_ACCESS_DENIED);
     ok_eq_long(dispatch_count[IF_LOCAL_DENY], 0);
     RpcBindingFree(&binding);
