@@ -430,6 +430,7 @@ HRESULT WINAPI RoIsApiContractMajorVersionPresent(const WCHAR *name, UINT16 majo
 }
 
 HRESULT pv_get_activation_factory(HSTRING classid, IActivationFactory **out);
+HRESULT ai_get_activation_factory(HSTRING classid, IActivationFactory **out);
 
 HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **factory)
 {
@@ -441,6 +442,8 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **fac
         return E_POINTER;
     *factory = NULL;
     hr = pv_get_activation_factory(classid, factory);
+    if (hr == CLASS_E_CLASSNOTAVAILABLE)
+        hr = ai_get_activation_factory(classid, factory);
     if (hr == CLASS_E_CLASSNOTAVAILABLE)
         FIXME("%s: no such activatable class\n", debugstr_hstring(classid));
     return hr;
