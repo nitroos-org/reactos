@@ -106,6 +106,11 @@ IntWinStaObjectDelete(
 
     WinSta->Flags |= WSS_DYING;
 
+    /* Under the USER lock from here: the test for CSRSS exiting and the handle close
+       it guards must not interleave with CSRSS's own exit, whose process callout takes
+       the lock before its handle table goes */
+    UserEnterExclusive();
+
     if (WinSta == InputWindowStation)
     {
         ERR("WARNING: Deleting the interactive window station '%wZ'!\n",
@@ -152,7 +157,6 @@ IntWinStaObjectDelete(
 
     /* This runs when the last reference goes, from ObKillProcess for one: the
        clipboard and the assignment locks need the USER lock */
-    UserEnterExclusive();
     if (gpdeskInputDesktop && gpdeskInputDesktop->rpwinstaParent == WinSta)
         gpdeskInputDesktop = NULL;
     UserEmptyClipboardData(WinSta);
