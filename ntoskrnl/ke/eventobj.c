@@ -255,8 +255,8 @@ KeSetEventBoostPriority(IN PKEVENT Event,
                                   KWAIT_BLOCK,
                                   WaitListEntry);
 
-    /* Check if this is a WaitAll */
-    if (WaitBlock->WaitType == WaitAll)
+    /* Check if this is a WaitAll, or a wait packet (no thread to boost) */
+    if ((WaitBlock->WaitType == WaitAll) || (WaitBlock->WaitType == KI_WAIT_PACKET))
     {
         /* Set the Event to Signaled */
         Event->Header.SignalState = 1;

@@ -1397,6 +1397,14 @@ KxUnwaitThread(IN DISPATCHER_HEADER *Object,
         /* Get the current wait block */
         WaitBlock = CONTAINING_RECORD(WaitEntry, KWAIT_BLOCK, WaitListEntry);
 
+        /* A wait packet has no thread: queue its entry (a notification object is not consumed) */
+        if (WaitBlock->WaitType == KI_WAIT_PACKET)
+        {
+            KiSignalWaitPacket(WaitBlock);
+            WaitEntry = WaitList->Flink;
+            continue;
+        }
+
         /* Get the waiting thread */
         WaitThread = WaitBlock->Thread;
 
@@ -1440,6 +1448,13 @@ KxUnwaitThreadForEvent(IN PKEVENT Event,
     {
         /* Get the current wait block */
         WaitBlock = CONTAINING_RECORD(WaitEntry, KWAIT_BLOCK, WaitListEntry);
+
+        /* A wait packet takes the event (un-signals it) and queues its entry, like a WaitAny waiter */
+        if (WaitBlock->WaitType == KI_WAIT_PACKET)
+        {
+            KiSignalWaitPacket(WaitBlock);
+            break;
+        }
 
         /* Get the waiting thread */
         WaitThread = WaitBlock->Thread;
