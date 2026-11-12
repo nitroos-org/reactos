@@ -3996,7 +3996,36 @@ MiProcessValidPteList(IN PMMPTE *ValidPteList,
     MiReleasePfnLock(OldIrql);
 }
 
-ULONG
+#ifdef _WIN64
+/*
+ * For a reservation (a VAD without MemCommit), a range whose page table does not
+ * exist holds only zero PTEs: reserved, not committed, the same state a decommitted
+ * PTE gives. Returns the first PTE at or after PointerPte that may have a page table,
+ * so a decommit of a large reservation (MariaDB reserves 8 TiB) does not build page
+ * tables for all of it. Levels that are present but not resident are not skipped.
+ */
+static
+PMMPTE
+MiSkipAbsentPageTables(IN PMMPTE PointerPte)
+{
+    PMMPDE PointerPde;
+#if (_MI_PAGING_LEVELS == 4)
+    PMMPXE PointerPxe = MiPteToPxe(PointerPte);
+    if (PointerPxe->u.Long == 0) return MiPxeToPte(PointerPxe + 1);
+    if (PointerPxe->u.Hard.Valid == 0) return PointerPte;
+#endif
+#if (_MI_PAGING_LEVELS >= 3)
+    PMMPPE PointerPpe = MiPteToPpe(PointerPte);
+    if (PointerPpe->u.Long == 0) return MiPpeToPte(PointerPpe + 1);
+    if (PointerPpe->u.Hard.Valid == 0) return PointerPte;
+#endif
+    PointerPde = MiPteToPde(PointerPte);
+    if (PointerPde->u.Long == 0) return MiPdeToPte(PointerPde + 1);
+    return PointerPte;
+}
+#endif
+
+PFN_NUMBER
 NTAPI
 MiDecommitPages(IN PVOID StartingAddress,
                 IN PMMPTE EndingPte,
@@ -4005,7 +4034,9 @@ MiDecommitPages(IN PVOID StartingAddress,
 {
     PMMPTE PointerPte, CommitPte = NULL;
     PMMPDE PointerPde;
-    ULONG CommitReduction = 0;
+    /* A 128 TiB user range has more than 2^32 pages */
+    PFN_NUMBER CommitReduction = 0;
+    BOOLEAN FirstPte = TRUE;
     PMMPTE ValidPteList[256];
     ULONG PteCount = 0;
     PMMPFN Pfn1;
@@ -4023,33 +4054,53 @@ MiDecommitPages(IN PVOID StartingAddress,
     MiLockProcessWorkingSetUnsafe(Process, CurrentThread);
 
     //
-    // Make the PDE valid, and now loop through each page's worth of data
+    // Loop through each page's worth of data, making each PDE valid on the way
     //
-    MiMakePdeExistAndMakeValid(PointerPde, Process, MM_NOIRQL);
     while (PointerPte <= EndingPte)
     {
         //
-        // Check if we've crossed a PDE boundary
+        // Check if this is the first PTE or we've crossed a PDE boundary
         //
-        if (MiIsPteOnPdeBoundary(PointerPte))
+        if (FirstPte || MiIsPteOnPdeBoundary(PointerPte))
         {
             //
-            // Get the new PDE and flush the valid PTEs we had built up until
-            // now. This helps reduce the amount of TLB flushing we have to do.
+            // Flush the valid PTEs we had built up until now. This helps
+            // reduce the amount of TLB flushing we have to do.
             // Note that Windows does a much better job using timestamps and
             // such, and does not flush the entire TLB all the time, but right
             // now we have bigger problems to worry about than TLB flushing.
             //
-            PointerPde = MiAddressToPde(StartingAddress);
+            FirstPte = FALSE;
             if (PteCount)
             {
                 MiProcessValidPteList(ValidPteList, PteCount);
                 PteCount = 0;
             }
 
+#ifdef _WIN64
             //
-            // Make this PDE valid
+            // In a reservation, a range without a page table has nothing committed:
+            // count it as already decommitted and do not build page tables for it
             //
+            if (!Vad->u.VadFlags.MemCommit)
+            {
+                PMMPTE NextPte = MiSkipAbsentPageTables(PointerPte);
+                if (NextPte != PointerPte)
+                {
+                    if (NextPte > EndingPte) NextPte = EndingPte + 1;
+                    CommitReduction += NextPte - PointerPte;
+                    PointerPte = NextPte;
+                    StartingAddress = MiPteToAddress(PointerPte);
+                    FirstPte = TRUE;
+                    continue;
+                }
+            }
+#endif
+
+            //
+            // Get the new PDE and make it valid
+            //
+            PointerPde = MiAddressToPde(StartingAddress);
             MiMakePdeExistAndMakeValid(PointerPde, Process, MM_NOIRQL);
         }
 
