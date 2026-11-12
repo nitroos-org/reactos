@@ -964,6 +964,10 @@ MiPagerFreeSlotCount(VOID);
 
 BOOLEAN
 NTAPI
+MiPagerSlotsScarce(VOID);
+
+BOOLEAN
+NTAPI
 MiPagerPagingFileWriteResult(
     _In_ ULONG FileIndex,
     _In_ NTSTATUS Status);
