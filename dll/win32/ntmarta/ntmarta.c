@@ -1195,6 +1195,52 @@ ParseRegErr:
             break;
         }
 
+        case SE_KERNEL_OBJECT:
+        {
+            /* A named kernel object, as the Create/Open functions take the name
+               (e.g. "Global\\name"): the object type is not given, so try each
+               type that has a name in turn. A name that exists with another type
+               fails with ERROR_INVALID_HANDLE and the search goes on; a name that
+               exists but is not readable ends it with ERROR_ACCESS_DENIED. */
+            HANDLE WINAPI OpenJobObjectW(DWORD, BOOL, LPCWSTR);
+            typedef HANDLE (WINAPI *PFN_OPENNAMED)(DWORD, BOOL, LPCWSTR);
+            static const PFN_OPENNAMED OpenFns[] =
+            {
+                (PFN_OPENNAMED)OpenEventW,
+                (PFN_OPENNAMED)OpenMutexW,
+                (PFN_OPENNAMED)OpenSemaphoreW,
+                (PFN_OPENNAMED)OpenWaitableTimerW,
+                (PFN_OPENNAMED)OpenFileMappingW,
+                (PFN_OPENNAMED)OpenJobObjectW,
+            };
+            DWORD Denied = ERROR_SUCCESS;
+            UINT i;
+
+            if (pObjectName[0] == L'\0')
+            {
+                /* Windows: GetNamedSecurityInfo(SE_KERNEL_OBJECT, L"") is ERROR_INVALID_HANDLE */
+                Ret = ERROR_INVALID_HANDLE;
+                goto Cleanup;
+            }
+
+            Ret = ERROR_FILE_NOT_FOUND;
+            for (i = 0; i != sizeof(OpenFns) / sizeof(OpenFns[0]); i++)
+            {
+                HANDLE h = OpenFns[i]((DWORD)DesiredAccess, FALSE, pObjectName);
+                if (h != NULL)
+                {
+                    *Handle = h;
+                    Ret = ERROR_SUCCESS;
+                    goto Cleanup;
+                }
+                if (GetLastError() == ERROR_ACCESS_DENIED)
+                    Denied = ERROR_ACCESS_DENIED;
+            }
+            if (Denied != ERROR_SUCCESS)
+                Ret = Denied;
+            break;
+        }
+
         default:
         {
             UNIMPLEMENTED;

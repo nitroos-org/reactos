@@ -229,7 +229,7 @@ BuildSidListFromDomainAndName(IN PUNICODE_STRING ServerName,
     PUNICODE_STRING NamesArray = NULL;
     ULONG i;
     PLSA_REFERENCED_DOMAIN_LIST Domains = NULL;
-    PLSA_TRANSLATED_SID Sids = NULL;
+    PLSA_TRANSLATED_SID2 Sids = NULL;
     PLOCALGROUP_MEMBERS_INFO_0 MemberBuffer = NULL;
     NET_API_STATUS ApiStatus = NERR_Success;
     NTSTATUS Status = STATUS_SUCCESS;
@@ -263,11 +263,14 @@ BuildSidListFromDomainAndName(IN PUNICODE_STRING ServerName,
         goto done;
     }
 
-    Status = LsaLookupNames(LsaHandle,
-                            EntryCount,
-                            NamesArray,
-                            &Domains,
-                            &Sids);
+    /* LsaLookupNames2 returns the whole SID: the SID of a member such as NT SERVICE\<service>
+     * (S-1-5-80-a-b-c-d-e) cannot be rebuilt from a domain SID and one relative id */
+    Status = LsaLookupNames2(LsaHandle,
+                             0,
+                             EntryCount,
+                             NamesArray,
+                             &Domains,
+                             &Sids);
     if (!NT_SUCCESS(Status))
     {
         /* Windows 10 reports a list that has no name mapped like one with a name that is not */
@@ -297,20 +300,22 @@ BuildSidListFromDomainAndName(IN PUNICODE_STRING ServerName,
 
     for (i = 0; i < EntryCount; i++)
     {
-        /* Defence in depth: a mapped entry always has a domain */
-        if ((ULONG)Sids[i].DomainIndex >= Domains->Entries)
+        /* Defence in depth: a mapped entry always has a domain and a SID */
+        if (Sids[i].Sid == NULL || Sids[i].DomainIndex < 0 ||
+            (ULONG)Sids[i].DomainIndex >= Domains->Entries)
         {
             ApiStatus = ERROR_NO_SUCH_MEMBER;
             goto done;
         }
 
-        ApiStatus = BuildSidFromSidAndRid(Domains->Domains[Sids[i].DomainIndex].Sid,
-                                          Sids[i].RelativeId,
-                                          &MemberBuffer[i].lgrmi0_sid);
+        ApiStatus = NetApiBufferAllocate(RtlLengthSid(Sids[i].Sid),
+                                         (LPVOID*)&MemberBuffer[i].lgrmi0_sid);
         if (ApiStatus != NERR_Success)
         {
             goto done;
         }
+
+        RtlCopySid(RtlLengthSid(Sids[i].Sid), MemberBuffer[i].lgrmi0_sid, Sids[i].Sid);
     }
 
 done:

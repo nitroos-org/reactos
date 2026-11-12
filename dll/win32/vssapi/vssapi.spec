@@ -71,6 +71,20 @@
 @ cdecl -arch=i386 ?Subscribe@CVssWriter@@QAGJK@Z(ptr long) VSSAPI_CVssWriter_Subscribe
 @ stub ?Uninitialize@CVssJetWriter@@QAGXXZ
 @ cdecl -arch=i386 ?Unsubscribe@CVssWriter@@QAGJXZ(ptr) VSSAPI_CVssWriter_Unsubscribe
+@ cdecl -arch=win64 ??0CVssWriter@@QEAA@XZ(ptr) VSSAPI_CVssWriter_default_ctor
+@ cdecl -arch=win64 ??1CVssWriter@@UEAA@XZ(ptr) VSSAPI_CVssWriter_dtor
+@ cdecl -arch=win64 ?Initialize@CVssWriter@@QEAAJU_GUID@@PEBGW4VSS_USAGE_TYPE@@W4VSS_SOURCE_TYPE@@W4_VSS_APPLICATION_LEVEL@@KW4VSS_ALTERNATE_WRITER_STATE@@_N1@Z(ptr ptr wstr long long long long long long wstr) VSSAPI_CVssWriter_Initialize
+@ cdecl -arch=win64 ?Subscribe@CVssWriter@@QEAAJK@Z(ptr long) VSSAPI_CVssWriter_Subscribe
+@ cdecl -arch=win64 ?Unsubscribe@CVssWriter@@QEAAJXZ(ptr) VSSAPI_CVssWriter_Unsubscribe
+@ cdecl -arch=win64 ?SetWriterFailure@CVssWriter@@IEAAJJ@Z(ptr long) VSSAPI_CVssWriter_SetWriterFailure
+@ cdecl -arch=win64 ?IsPathAffected@CVssWriter@@IEBA_NPEBG@Z(ptr wstr) VSSAPI_CVssWriter_IsPathAffected
+@ cdecl -arch=win64 ?GetCurrentSnapshotSetId@CVssWriter@@IEBA?AU_GUID@@XZ(ptr ptr) VSSAPI_CVssWriter_GetCurrentSnapshotSetId
+@ cdecl -arch=win64 ?GetBackupType@CVssWriter@@IEBA?AW4_VSS_BACKUP_TYPE@@XZ(ptr) VSSAPI_CVssWriter_GetBackupType
+@ cdecl -arch=win64 ?AreComponentsSelected@CVssWriter@@IEBA_NXZ(ptr) VSSAPI_CVssWriter_AreComponentsSelected
+@ cdecl -arch=win64 ?OnVSSShutdown@CVssWriter@@UEAA_NXZ(ptr) VSSAPI_CVssWriter_OnVSSShutdown
+@ cdecl -arch=win64 ?OnVSSApplicationStartup@CVssWriter@@UEAA_NXZ(ptr) VSSAPI_CVssWriter_OnVSSApplicationStartup
+@ cdecl -arch=win64 ?OnBackOffIOOnVolume@CVssWriter@@UEAA_NPEAGU_GUID@@1@Z(ptr ptr ptr ptr) VSSAPI_CVssWriter_OnBackOffIOOnVolume
+@ cdecl -arch=win64 ?OnContinueIOOnVolume@CVssWriter@@UEAA_NPEAGU_GUID@@1@Z(ptr ptr ptr ptr) VSSAPI_CVssWriter_OnContinueIOOnVolume
 @ stdcall CreateVssBackupComponentsInternal(ptr)
 @ stub CreateVssExamineWriterMetadataInternal
 @ stub CreateVssExpressWriterInternal
