@@ -9,6 +9,9 @@
 
 #include "resource.h"
 
+/* the icon of the Start menu entry and of the windows: a copy of base/applications/rapps/res/main.ico (in-tree art of the Applications Manager this app replaces, GPL; it has the 16x16 and 32x32 sizes the Start menu asks for) */
+IDI_FEATMGR ICON "res/featmgr.ico"
+
 /* "Add bucket": Scoop's known buckets only, behind an explicit confirmation (checkbox) */
 IDD_ADDBUCKET DIALOGEX 0, 0, 280, 156
 STYLE DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU

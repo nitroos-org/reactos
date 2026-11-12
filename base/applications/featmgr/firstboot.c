@@ -2,7 +2,7 @@
  * PROJECT:     ReactOS-Nitro Optional Features / Addon Manager
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
  * PURPOSE:     optfeatures /firstboot: after logon, once the network is up, install the default components (the
- *              Default=1 entries of components.ini, in file order: PowerShell 7, Firefox, .NET Framework 4.8) with the "Installing additional
+ *              Default=1 entries of components.ini, in file order: PowerShell 7, Firefox, .NET Framework 4.8, plus the catalog entries with FirstBootDefault=1: the AAC decoder) with the "Installing additional
  *              components" window. Started by a HKLM Run entry. It runs to completion once and records the result;
  *              it never blocks logon (it is its own process), waits quietly and without a window while there is no
  *              network, and comes back at the next logon. Switch it off: HKLM\SOFTWARE\ReactOS\Nitro\Featmgr
@@ -107,8 +107,32 @@ static BOOL IsAdmin(void)
 static int NeededJobs(FM_JOB *jobs, int max, LPWSTR probeUrl, DWORD cch, LPCWSTR logFile)
 {
     FM_COMPONENT *arr;
-    int n = FmCompEnum(&arr), i, k = 0;
+    FM_FEATURE *feats;
+    WCHAR hostProbe[512];
+    int n, i, k = 0, nf = FmEnumFeatures(&feats);
     probeUrl[0] = L'\0';
+    hostProbe[0] = L'\0';
+    /* catalog entries that ask for it ([Feature] FirstBootDefault=1: the AAC decoder, a hosted pack): first, they are small.
+     * Only a never-installed entry: one the user turned off is theirs to turn on again. */
+    for (i = 0; i < nf && k < max; i++)
+    {
+        if (!feats[i].FirstBootDefault) continue;
+        if (feats[i].State == FM_STATE_ENABLED) { FmLogLine(logFile, L"%s: already installed", feats[i].Id); continue; }
+        if (feats[i].State == FM_STATE_DISABLED) { FmLogLine(logFile, L"%s: turned off by the user, left off", feats[i].Id); continue; }
+        if (!feats[i].PayloadAvailable)
+        {
+            FmLogLine(logFile, L"%s: not available on this system (%s), skipped", feats[i].Id, feats[i].Unavailable[0] ? feats[i].Unavailable : L"payload not staged");
+            continue;
+        }
+        ZeroMemory(&jobs[k], sizeof(jobs[k]));
+        StringCchCopyW(jobs[k].id, FM_MAX_ID, feats[i].Id);
+        StringCchCopyW(jobs[k].name, FM_MAX_NAME, feats[i].Name);
+        jobs[k].action = FM_JOB_INSTALL;
+        if (!hostProbe[0]) FmHostedProbeUrl(feats[i].ManifestPath, hostProbe, ARRAYSIZE(hostProbe));
+        k++;
+    }
+    FmFree(feats);
+    n = FmCompEnum(&arr);
     for (i = 0; i < n && k < max; i++)
     {
         FM_FEATURE f;
@@ -123,7 +147,32 @@ static int NeededJobs(FM_JOB *jobs, int max, LPWSTR probeUrl, DWORD cch, LPCWSTR
         k++;
     }
     FmCompFree(arr);
+    /* the network probe prefers a component's download address (as before); a pack host only when no component is needed */
+    if (!probeUrl[0] && k) StringCchCopyW(probeUrl, cch, hostProbe);
     return k;
+}
+
+/* The patent notice of a first-boot default add-on, once, on the desktop after the install: informational (nothing was
+ * waiting for a click), and it stays reachable in Optional Features (turning the entry on again shows it) and in the
+ * licence texts the add-on installs. NoticeShown.<id> records that it was shown, so a retry or a later boot stays quiet. */
+static void ShowFirstBootNotices(LPCWSTR logFile)
+{
+    FM_FEATURE *feats;
+    int nf = FmEnumFeatures(&feats), i;
+    for (i = 0; i < nf; i++)
+    {
+        WCHAR val[96], msg[1100];
+        DWORD shown = 0;
+        if (!feats[i].FirstBootDefault || !feats[i].Notice[0] || feats[i].State != FM_STATE_ENABLED) continue;
+        StringCchPrintfW(val, ARRAYSIZE(val), L"NoticeShown.%s", feats[i].Id);
+        if (GetDw(val, &shown) && shown) continue;
+        SetDw(val, 1);                                   /* before the box: it stays up until somebody closes it */
+        FmLogLine(logFile, L"first boot: showing the notice of %s", feats[i].Id);
+        StringCchPrintfW(msg, ARRAYSIZE(msg), L"%s\n\nThis was turned on for you at first boot. You can turn it off any time in Optional Features (Start menu).",
+                         feats[i].Notice);
+        MessageBoxW(NULL, msg, feats[i].Name, MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND | MB_TOPMOST);
+    }
+    FmFree(feats);
 }
 
 int FmFirstBootMain(HINSTANCE hInst, LPCWSTR cmd)
@@ -238,5 +287,7 @@ int FmFirstBootMain(HINSTANCE hInst, LPCWSTR cmd)
             FmLogLine(log, L"first boot: giving up; Turn NitroOS features on or off installs it on demand");
         }
     }
+    /* last: the result is recorded already, so the box (it stays up until somebody closes it) holds nothing back */
+    ShowFirstBootNotices(log);
     return rc;
 }

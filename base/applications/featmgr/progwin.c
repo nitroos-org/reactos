@@ -11,6 +11,7 @@
 
 #include "featmgr.h"
 #include <commctrl.h>
+#include "resource.h"
 #include <strsafe.h>
 #include <stdarg.h>
 
@@ -700,7 +701,7 @@ int FmRunJobsUI(HWND owner, const FM_JOB *jobs, int n, DWORD flags, LPCWSTR logF
         wc.hCursor = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW);
         wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
         wc.lpszClassName = L"NitroComponentsProgress";
-        wc.hIcon = LoadIconW(NULL, (LPCWSTR)IDI_APPLICATION);
+        wc.hIcon = LoadIconW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_FEATMGR));
         RegisterClassExW(&wc);
         registered = TRUE;
     }
