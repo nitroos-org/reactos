@@ -25,6 +25,7 @@ KMT_TESTFUNC Test_ExHardErrorSystemThread;
 KMT_TESTFUNC Test_ExInterlocked;
 KMT_TESTFUNC Test_ExInterlockedIpi;
 KMT_TESTFUNC Test_ExAllocatePool2;
+KMT_TESTFUNC Test_ExLookasideListEx;
 KMT_TESTFUNC Test_ExPools;
 KMT_TESTFUNC Test_ExStubHit;
 KMT_TESTFUNC Test_ProbeCapture;
@@ -182,6 +183,7 @@ const KMT_TEST TestList[] =
     { "ExInterlocked",                      Test_ExInterlocked },
     { "ExInterlockedIpi",                   Test_ExInterlockedIpi },
     { "ExAllocatePool2",                    Test_ExAllocatePool2 },
+    { "ExLookasideListEx",                  Test_ExLookasideListEx },
     { "ExPools",                            Test_ExPools },
     { "ExStubHit",                          Test_ExStubHit },
     { "ProbeCapture",                       Test_ProbeCapture },
