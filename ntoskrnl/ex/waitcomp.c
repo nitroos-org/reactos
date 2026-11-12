@@ -11,16 +11,20 @@
  * the caller's key, context, status and information is queued to the port. Go 1.26 creates one per OS thread and
  * re-associates it with a high-resolution timer around every idle netpoll.
  *
- * Design: every packet that has been associated owns one system thread (created on first use, ended when the packet
- * is deleted) that waits on {target, command event}. Association first tries the wait without blocking (the target is
- * already signalled: queue the packet in the caller, AlreadySignaled = TRUE); otherwise the packet is "armed" and the
- * thread is woken to wait. Cancel wakes the thread and waits for its acknowledgement, so after Cancel returns the
- * target is no longer being waited on. A fired packet is the packet's own entry (IopCompletionPacketWait) in the
- * port's queue, so Cancel(remove) can take it back and the consumer's unpack hands it to WcpPacketDequeued.
+ * Design: a packet costs memory only. It embeds a kernel wait packet (KWAIT_PACKET, ke/queue.c): a wait block that
+ * no thread owns, linked into the target's wait list while the association waits. The code that signals the target
+ * satisfies that block in the signal path, under the dispatcher lock, and inserts the packet's own completion entry
+ * (IopCompletionPacketWait) into the port's queue; Cancel unlinks the block, or takes a queued entry back out of the
+ * queue, under the same lock. So the target is consumed exactly once for a packet that fires and never for one that
+ * was cancelled first, and association (test the target, then consume it or link the block) is atomic against
+ * signalling. The consumer's unpack (io/iomgr/iocomp.c) hands the entry to ExWcpPacketDequeued.
  *
- * States: Idle -> Armed (waiting) -> Queued (entry in the port, holds a reference on the port and on the packet)
- * -> Idle (consumer removed it, or Cancel did). Closing the last handle cancels the association and removes a
- * queued entry, as measured on Windows 10 22H2.
+ * States (KWAIT_PACKET.State, dispatcher lock): Idle -> Armed (waiting) -> Queued (entry handed to the port) -> Idle
+ * (the consumer removed it, or Cancel did). From Associate until the packet is Idle again it holds a reference on the
+ * target, on the port and on itself, so neither the target, the port nor the packet can go away while the wait block
+ * is linked or the entry is in the queue; those references are dropped at PASSIVE_LEVEL by whoever makes it idle,
+ * never in the signal path. Closing the last handle cancels the association and removes a queued entry, as measured
+ * on Windows 10 22H2; after that the packet cannot be associated again (STATUS_INVALID_HANDLE: its handle is gone).
  */
 
 /* INCLUDES *****************************************************************/
@@ -40,41 +44,14 @@
 #define WAIT_COMPLETION_PACKET_ALL_ACCESS   (STANDARD_RIGHTS_REQUIRED | 0x1)
 #define WAIT_COMPLETION_PACKET_VALID_ACCESS (WAIT_COMPLETION_PACKET_ALL_ACCESS | SYNCHRONIZE)
 
-/*
- * The thread of an associated packet is charged to the creating process as nonpaged pool quota (a kernel stack and
- * the thread object), so a process quota limits how many a process can have; and, because the default quota is
- * unlimited, the number of such threads is capped: per process (EPROCESS::WaitCompletionPacketThreads), so that one
- * process cannot take them all, and in the system. Windows has no such thread and no such limit (a packet is only
- * its object there); the per-process failure is the status of an exhausted process quota, the system-wide one the
- * status of exhausted pool.
- */
-#define WCP_THREAD_QUOTA_CHARGE         0x8000
-#define WCP_MAX_THREADS                 4096
-#define WCP_MAX_THREADS_PER_PROCESS     1024
-static volatile LONG ExpWcpThreads;
-
-typedef enum _WCP_STATE
-{
-    WcpIdle,
-    WcpArmed,
-    WcpQueued
-} WCP_STATE;
-
 typedef struct _WAIT_COMPLETION_PACKET
 {
     IOP_MINI_COMPLETION_PACKET Packet;  /* must be first: the port's queue holds &Packet.ListEntry */
+    KWAIT_PACKET Wait;                  /* the wait block on the target and the state */
     FAST_MUTEX OpMutex;                 /* serialises Associate, Cancel and close */
-    KSPIN_LOCK Lock;                    /* state below */
-    WCP_STATE State;
-    BOOLEAN CancelRequested;
-    BOOLEAN Terminate;
-    PVOID TargetObject;                 /* referenced while Armed */
-    PVOID WaitObject;                   /* the dispatcher object inside TargetObject */
-    PKQUEUE Port;                       /* referenced while Armed or Queued */
-    KEVENT Command;                     /* wakes the thread (new association, cancel, terminate) */
-    KEVENT Ack;                         /* the thread's answer to a cancel */
-    PKTHREAD Thread;
-    PEPROCESS ChargedProcess;           /* referenced; the thread's quota was charged to it */
+    BOOLEAN Closed;                     /* the last handle was closed (OpMutex) */
+    PVOID TargetObject;                 /* referenced while associated (Armed or Queued) */
+    PKQUEUE Port;                       /* referenced while associated */
 } WAIT_COMPLETION_PACKET, *PWAIT_COMPLETION_PACKET;
 
 POBJECT_TYPE ExWaitCompletionPacketObjectType;
@@ -110,98 +87,19 @@ ExpWcpGetWaitObject(IN PVOID Target)
     return NULL;
 }
 
-/* The packet is queued: Wcp->Packet is in the port; the caller holds Wcp->Lock. Queue reference on the packet taken. */
+/*
+ * The packet became idle (the caller made it so): drop the references the association held. PASSIVE_LEVEL or
+ * APC_LEVEL. The caller read TargetObject and Port before the packet became idle, or holds OpMutex.
+ */
 static
 VOID
-ExpWcpInsertLocked(IN PWAIT_COMPLETION_PACKET Wcp)
+ExpWcpRelease(IN PWAIT_COMPLETION_PACKET Wcp,
+              IN PVOID TargetObject,
+              IN PKQUEUE Port)
 {
-    Wcp->State = WcpQueued;
-    ObReferenceObject(Wcp);
-    KeInsertQueue(Wcp->Port, &Wcp->Packet.ListEntry);
-}
-
-/* Drops the references of a finished association (not under the lock) */
-static
-VOID
-ExpWcpRelease(IN PVOID TargetObject OPTIONAL,
-              IN PKQUEUE Port OPTIONAL)
-{
-    if (TargetObject) ObDereferenceObject(TargetObject);
-    if (Port) ObDereferenceObject(Port);
-}
-
-static
-VOID
-NTAPI
-ExpWcpThread(IN PVOID Context)
-{
-    PWAIT_COMPLETION_PACKET Wcp = Context;
-    PVOID Objects[2];
-    PVOID TargetObject;
-    PKQUEUE Port;
-    NTSTATUS Status;
-    KIRQL OldIrql;
-
-    for (;;)
-    {
-        /* Idle: wait for a command */
-        KeWaitForSingleObject(&Wcp->Command, Executive, KernelMode, FALSE, NULL);
-
-        for (;;)
-        {
-            KeAcquireSpinLock(&Wcp->Lock, &OldIrql);
-            if (Wcp->Terminate)
-            {
-                KeReleaseSpinLock(&Wcp->Lock, OldIrql);
-                PsTerminateSystemThread(STATUS_SUCCESS);
-            }
-            if (Wcp->State == WcpArmed && Wcp->CancelRequested)
-            {
-                /* Cancelled while armed: give the target and the port back */
-                TargetObject = Wcp->TargetObject;
-                Port = Wcp->Port;
-                Wcp->TargetObject = NULL;
-                Wcp->Port = NULL;
-                Wcp->State = WcpIdle;
-                Wcp->CancelRequested = FALSE;
-                KeReleaseSpinLock(&Wcp->Lock, OldIrql);
-                ExpWcpRelease(TargetObject, Port);
-                KeSetEvent(&Wcp->Ack, IO_NO_INCREMENT, FALSE);
-                break;
-            }
-            if (Wcp->State != WcpArmed)
-            {
-                /* A stale wake-up, or a cancel that lost the race against the target */
-                if (Wcp->CancelRequested)
-                {
-                    Wcp->CancelRequested = FALSE;
-                    KeSetEvent(&Wcp->Ack, IO_NO_INCREMENT, FALSE);
-                }
-                KeReleaseSpinLock(&Wcp->Lock, OldIrql);
-                break;
-            }
-            Objects[0] = Wcp->WaitObject;
-            Objects[1] = &Wcp->Command;
-            KeReleaseSpinLock(&Wcp->Lock, OldIrql);
-
-            Status = KeWaitForMultipleObjects(2, Objects, WaitAny, Executive, KernelMode, FALSE, NULL, NULL);
-            if (Status != STATUS_WAIT_0) continue;      /* a command: the checks above decide */
-
-            /* The target was signalled and this wait consumed it: deliver one packet */
-            KeAcquireSpinLock(&Wcp->Lock, &OldIrql);
-            TargetObject = Wcp->TargetObject;
-            Wcp->TargetObject = NULL;
-            ExpWcpInsertLocked(Wcp);
-            if (Wcp->CancelRequested)
-            {
-                Wcp->CancelRequested = FALSE;
-                KeSetEvent(&Wcp->Ack, IO_NO_INCREMENT, FALSE);
-            }
-            KeReleaseSpinLock(&Wcp->Lock, OldIrql);
-            ExpWcpRelease(TargetObject, NULL);
-            break;
-        }
-    }
+    ObDereferenceObject(TargetObject);
+    ObDereferenceObject(Port);
+    ObDereferenceObject(Wcp);
 }
 
 /* Cancels an association; the caller holds OpMutex. Returns the NtCancelWaitCompletionPacket status. */
@@ -210,54 +108,23 @@ NTSTATUS
 ExpWcpCancel(IN PWAIT_COMPLETION_PACKET Wcp,
              IN BOOLEAN RemoveSignaledPacket)
 {
-    KIRQL OldIrql;
-    PKQUEUE Port;
+    PVOID TargetObject = Wcp->TargetObject;
+    PKQUEUE Port = Wcp->Port;
+    NTSTATUS Status;
 
-    KeAcquireSpinLock(&Wcp->Lock, &OldIrql);
-    if (Wcp->State == WcpIdle)
+    /*
+     * STATUS_SUCCESS: it was waiting (the target was not consumed for it), or queued and taken back out; it is idle.
+     * STATUS_PENDING: queued and staying so; or a consumer has just taken the entry and ExWcpPacketDequeued will make
+     * it idle (too late to cancel, and it cannot be associated again until then).
+     */
+    Status = KeCancelWaitPacket(&Wcp->Wait, RemoveSignaledPacket);
+    if (Status == STATUS_SUCCESS)
     {
-        KeReleaseSpinLock(&Wcp->Lock, OldIrql);
-        return STATUS_CANCELLED;
+        Wcp->TargetObject = NULL;
+        Wcp->Port = NULL;
+        ExpWcpRelease(Wcp, TargetObject, Port);     /* the caller's reference keeps the object */
     }
-
-    if (Wcp->State == WcpArmed)
-    {
-        /* Take the target away from the thread and wait for its answer */
-        Wcp->CancelRequested = TRUE;
-        KeSetEvent(&Wcp->Command, IO_NO_INCREMENT, FALSE);
-        KeReleaseSpinLock(&Wcp->Lock, OldIrql);
-        KeWaitForSingleObject(&Wcp->Ack, Executive, KernelMode, FALSE, NULL);
-        KeAcquireSpinLock(&Wcp->Lock, &OldIrql);
-        if (Wcp->State == WcpIdle)
-        {
-            KeReleaseSpinLock(&Wcp->Lock, OldIrql);
-            return STATUS_SUCCESS;
-        }
-        /* The target fired first: the packet is queued */
-    }
-
-    /* Queued: only Cancel(remove) takes it back, otherwise it is too late (the packet stays queued) */
-    if (!RemoveSignaledPacket)
-    {
-        KeReleaseSpinLock(&Wcp->Lock, OldIrql);
-        return STATUS_PENDING;
-    }
-    if (!KeRemoveEntryQueue(Wcp->Port, &Wcp->Packet.ListEntry))
-    {
-        /*
-         * A consumer has just taken it and ExWcpPacketDequeued has not made the packet idle yet: too late to cancel,
-         * and the packet cannot be associated again until then (the caller of a STATUS_CANCELLED may do that at once).
-         */
-        KeReleaseSpinLock(&Wcp->Lock, OldIrql);
-        return STATUS_PENDING;
-    }
-    Port = Wcp->Port;
-    Wcp->Port = NULL;
-    Wcp->State = WcpIdle;
-    KeReleaseSpinLock(&Wcp->Lock, OldIrql);
-    ObDereferenceObject(Port);
-    ObDereferenceObject(Wcp);       /* the queue's reference; the caller's keeps the object */
-    return STATUS_SUCCESS;
+    return Status;
 }
 
 VOID
@@ -274,6 +141,7 @@ ExpWcpClose(IN PEPROCESS Process OPTIONAL,
     if (SystemHandleCount == 1)
     {
         ExAcquireFastMutex(&Wcp->OpMutex);
+        Wcp->Closed = TRUE;
         ExpWcpCancel(Wcp, TRUE);
         ExReleaseFastMutex(&Wcp->OpMutex);
     }
@@ -285,23 +153,10 @@ ExpWcpDelete(IN PVOID Object)
 {
     PWAIT_COMPLETION_PACKET Wcp = Object;
 
-    if (Wcp->Thread)
-    {
-        KIRQL OldIrql;
-
-        /* Nothing can be armed or queued once the last reference is gone; be safe anyway */
-        ExpWcpCancel(Wcp, TRUE);
-        KeAcquireSpinLock(&Wcp->Lock, &OldIrql);
-        Wcp->Terminate = TRUE;
-        KeReleaseSpinLock(&Wcp->Lock, OldIrql);
-        KeSetEvent(&Wcp->Command, IO_NO_INCREMENT, FALSE);
-        KeWaitForSingleObject(Wcp->Thread, Executive, KernelMode, FALSE, NULL);
-        ObDereferenceObject(Wcp->Thread);
-        PsReturnProcessNonPagedPoolQuota(Wcp->ChargedProcess, WCP_THREAD_QUOTA_CHARGE);
-        InterlockedDecrement(&Wcp->ChargedProcess->WaitCompletionPacketThreads);
-        ObDereferenceObject(Wcp->ChargedProcess);
-        InterlockedDecrement(&ExpWcpThreads);
-    }
+    /* An association holds a reference on the packet: nothing can be armed or queued once the last one is gone */
+    ASSERT(Wcp->Wait.State == KWaitPacketIdle);
+    ASSERT(Wcp->TargetObject == NULL && Wcp->Port == NULL);
+    UNREFERENCED_PARAMETER(Wcp);
 }
 
 CODE_SEG("INIT")
@@ -325,22 +180,23 @@ ExpInitializeWaitCompletionPacketImplementation(VOID)
     return NT_SUCCESS(ObCreateObjectType(&Name, &ObjectTypeInitializer, NULL, &ExWaitCompletionPacketObjectType));
 }
 
-/* The consumer (NtRemoveIoCompletion) took the entry out of the port: the packet is idle again. */
+/*
+ * The consumer (NtRemoveIoCompletion(Ex), after copying the completion out) took the entry out of the port: the
+ * packet is idle again. PASSIVE_LEVEL.
+ */
 VOID
 NTAPI
 ExWcpPacketDequeued(IN PIOP_MINI_COMPLETION_PACKET Packet)
 {
     PWAIT_COMPLETION_PACKET Wcp = CONTAINING_RECORD(Packet, WAIT_COMPLETION_PACKET, Packet);
-    PKQUEUE Port;
-    KIRQL OldIrql;
+    PVOID TargetObject = Wcp->TargetObject;
+    PKQUEUE Port = Wcp->Port;
 
-    KeAcquireSpinLock(&Wcp->Lock, &OldIrql);
-    Port = Wcp->Port;
+    /* Nobody else touches these while the packet is queued; once it is idle an Associate may set them again */
+    Wcp->TargetObject = NULL;
     Wcp->Port = NULL;
-    Wcp->State = WcpIdle;
-    KeReleaseSpinLock(&Wcp->Lock, OldIrql);
-    ObDereferenceObject(Port);
-    ObDereferenceObject(Wcp);
+    KeWaitPacketDequeued(&Wcp->Wait);
+    ExpWcpRelease(Wcp, TargetObject, Port);
 }
 
 /* SERVICES ******************************************************************/
@@ -384,10 +240,8 @@ NtCreateWaitCompletionPacket(OUT PHANDLE WaitCompletionPacketHandle,
 
     RtlZeroMemory(Wcp, sizeof(*Wcp));
     Wcp->Packet.PacketType = IopCompletionPacketWait;
+    KeInitializeWaitPacket(&Wcp->Wait, &Wcp->Packet.ListEntry);
     ExInitializeFastMutex(&Wcp->OpMutex);
-    KeInitializeSpinLock(&Wcp->Lock);
-    KeInitializeEvent(&Wcp->Command, SynchronizationEvent, FALSE);
-    KeInitializeEvent(&Wcp->Ack, SynchronizationEvent, FALSE);
 
     /* Generic bits map first, bits outside the type's mask are dropped */
     if (DesiredAccess & MAXIMUM_ALLOWED) DesiredAccess = WAIT_COMPLETION_PACKET_ALL_ACCESS;
@@ -426,9 +280,7 @@ NtAssociateWaitCompletionPacket(IN HANDLE WaitCompletionPacketHandle,
     PWAIT_COMPLETION_PACKET Wcp;
     PKQUEUE Port = NULL;
     PVOID TargetObject = NULL, WaitObject;
-    BOOLEAN Signaled = FALSE;
-    LARGE_INTEGER NoWait;
-    KIRQL OldIrql;
+    BOOLEAN Signaled;
     NTSTATUS Status;
     PAGED_CODE();
 
@@ -446,7 +298,11 @@ NtAssociateWaitCompletionPacket(IN HANDLE WaitCompletionPacketHandle,
                                        PreviousMode,
                                        (PVOID *)&Port,
                                        NULL);
-    if (!NT_SUCCESS(Status)) goto Fail;
+    if (!NT_SUCCESS(Status))
+    {
+        ObDereferenceObject(Wcp);
+        return Status;
+    }
 
     Status = ObReferenceObjectByHandle(TargetObjectHandle,
                                        SYNCHRONIZE,
@@ -456,8 +312,9 @@ NtAssociateWaitCompletionPacket(IN HANDLE WaitCompletionPacketHandle,
                                        NULL);
     if (!NT_SUCCESS(Status))
     {
-        TargetObject = NULL;
-        goto Fail;
+        ObDereferenceObject(Port);
+        ObDereferenceObject(Wcp);
+        return Status;
     }
 
     WaitObject = ExpWcpGetWaitObject(TargetObject);
@@ -469,90 +326,33 @@ NtAssociateWaitCompletionPacket(IN HANDLE WaitCompletionPacketHandle,
 
     ExAcquireFastMutex(&Wcp->OpMutex);
 
-    if (Wcp->State != WcpIdle)
+    if (Wcp->Closed)
+    {
+        /* Its last handle was closed after this call referenced it: nothing could ever cancel an association */
+        ExReleaseFastMutex(&Wcp->OpMutex);
+        Status = STATUS_INVALID_HANDLE;
+        goto Fail;
+    }
+
+    /* Waiting, or queued and not yet removed (a consumer may be removing it right now) */
+    if (!KeIsWaitPacketIdle(&Wcp->Wait))
     {
         ExReleaseFastMutex(&Wcp->OpMutex);
         Status = STATUS_INVALID_PARAMETER_1;
         goto Fail;
     }
 
-    /* The thread comes first: if it cannot be had, nothing has been consumed */
-    if (!Wcp->Thread)
-    {
-        HANDLE ThreadHandle;
-        PEPROCESS Process = PsGetCurrentProcess();
-        LONG ProcessThreads = InterlockedIncrement(&Process->WaitCompletionPacketThreads);
-
-        if (InterlockedIncrement(&ExpWcpThreads) > WCP_MAX_THREADS)
-        {
-            Status = STATUS_INSUFFICIENT_RESOURCES;
-        }
-        else if (ProcessThreads > WCP_MAX_THREADS_PER_PROCESS)
-        {
-            Status = STATUS_QUOTA_EXCEEDED;
-        }
-        else
-        {
-            Status = PsChargeProcessNonPagedPoolQuota(Process, WCP_THREAD_QUOTA_CHARGE);
-            if (NT_SUCCESS(Status))
-            {
-                Status = PsCreateSystemThread(&ThreadHandle, THREAD_ALL_ACCESS, NULL, NULL, NULL, ExpWcpThread, Wcp);
-                if (NT_SUCCESS(Status))
-                {
-                    Status = ObReferenceObjectByHandle(ThreadHandle, SYNCHRONIZE, PsThreadType, KernelMode, (PVOID *)&Wcp->Thread, NULL);
-                    ZwClose(ThreadHandle);
-                    /* (a thread that cannot be referenced still ends: Terminate is never set, so it stays idle) */
-                }
-                if (NT_SUCCESS(Status))
-                {
-                    ObReferenceObject(Process);
-                    Wcp->ChargedProcess = Process;
-                }
-                else
-                {
-                    PsReturnProcessNonPagedPoolQuota(Process, WCP_THREAD_QUOTA_CHARGE);
-                }
-            }
-        }
-        if (!NT_SUCCESS(Status))
-        {
-            InterlockedDecrement(&Process->WaitCompletionPacketThreads);
-            InterlockedDecrement(&ExpWcpThreads);
-            ExReleaseFastMutex(&Wcp->OpMutex);
-            goto Fail;
-        }
-    }
-
+    /* Idle, and only this call (OpMutex) can change that: the association takes over the three references */
     Wcp->Packet.KeyContext = KeyContext;
     Wcp->Packet.ApcContext = ApcContext;
     Wcp->Packet.IoStatus = IoStatus;
     Wcp->Packet.IoStatusInformation = IoStatusInformation;
+    Wcp->TargetObject = TargetObject;
+    Wcp->Port = Port;
 
     /* Already signalled: the wait is satisfied now and the packet is queued before this call returns */
-    NoWait.QuadPart = 0;
-    if (KeWaitForSingleObject(WaitObject, UserRequest, KernelMode, FALSE, &NoWait) == STATUS_SUCCESS)
-    {
-        Signaled = TRUE;
-        KeAcquireSpinLock(&Wcp->Lock, &OldIrql);
-        Wcp->Port = Port;
-        ExpWcpInsertLocked(Wcp);
-        KeReleaseSpinLock(&Wcp->Lock, OldIrql);
-        Port = NULL;        /* the packet owns this reference now */
-        ObDereferenceObject(TargetObject);
-        TargetObject = NULL;
-    }
-    else
-    {
-        KeAcquireSpinLock(&Wcp->Lock, &OldIrql);
-        Wcp->TargetObject = TargetObject;
-        Wcp->WaitObject = WaitObject;
-        Wcp->Port = Port;
-        Wcp->State = WcpArmed;
-        KeReleaseSpinLock(&Wcp->Lock, OldIrql);
-        KeSetEvent(&Wcp->Command, IO_NO_INCREMENT, FALSE);
-        Port = NULL;
-        TargetObject = NULL;
-    }
+    Signaled = KeArmWaitPacket(&Wcp->Wait, WaitObject, Port);
+
     ExReleaseFastMutex(&Wcp->OpMutex);
 
     /* Windows does not fault on a bad AlreadySignaled pointer, whatever the outcome */
@@ -568,11 +368,13 @@ NtAssociateWaitCompletionPacket(IN HANDLE WaitCompletionPacketHandle,
         }
         _SEH2_END;
     }
-    ObDereferenceObject(Wcp);
+
+    /* The reference of this call on the packet is now the association's */
     return STATUS_SUCCESS;
 
 Fail:
-    ExpWcpRelease(TargetObject, Port);
+    ObDereferenceObject(TargetObject);
+    ObDereferenceObject(Port);
     ObDereferenceObject(Wcp);
     return Status;
 }

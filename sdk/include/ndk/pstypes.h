@@ -1745,8 +1745,6 @@ typedef struct _EPROCESS
     ULONGLONG CycleTime;
     /* PS_PROTECTION: type in bits 0-2, signer in bits 4-7 (0: not protected) */
     UCHAR Protection;
-    /* Wait completion packets of this process that own a kernel thread (ex/waitcomp.c) */
-    LONG WaitCompletionPacketThreads;
 #endif // ]
 } EPROCESS;
 
