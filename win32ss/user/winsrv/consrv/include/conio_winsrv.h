@@ -182,7 +182,16 @@ typedef struct _CONSRV_CONSOLE
     UNICODE_STRING Title;                   /* Title of console. Always NULL-terminated */
     COLORREF   Colors[16];                  /* Colour palette */
 
+/************************ Lifetime of the allocation **************************/
+    /* Number of threads that looked this console up in the console list and have
+     * not finished validating it yet (low bits), and CONSRV_CONSOLE_DELETED once
+     * the console was deleted. The memory is freed when the console is deleted and
+     * no such thread is left: whoever completes that condition frees it. */
+    volatile LONG LookupState;
+
 } CONSRV_CONSOLE, *PCONSRV_CONSOLE;
+
+#define CONSRV_CONSOLE_DELETED  0x40000000
 
 /* console.c */
 VOID ConioPause(PCONSRV_CONSOLE Console, UCHAR Flags);
