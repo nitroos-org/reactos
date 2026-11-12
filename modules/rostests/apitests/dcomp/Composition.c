@@ -1451,6 +1451,479 @@ static void TestController(PRO_ACTIVATE pRoActivateInstance, PWCS pWindowsCreate
     if (c1) REL(c1);
 }
 
+
+/*
+ * Windows.UI.Composition.Interactions.VisualInteractionSource: IIDs, slot order and signatures from microsoft/windows-rs
+ * (MIT OR Apache-2.0), the published `windows` crate 0.62.2 (vcs commit 32c3144490c016fe496a0aed769bce60987a2e9d,
+ * path crates/libs/windows/src/Windows/UI/Composition/Interactions/mod.rs; the rdl at
+ * metadata/winrt/Windows.UI.Composition.Interactions.rdl, commit 8ca69fdaa9d69c78b9bcfbee96c6916f2282e7f0).
+ * Documented behaviour only (learn.microsoft.com): Create(Visual) is static, Source returns the visual, rails are
+ * on by default, DeltaPosition defaults to 0, Scale to 1.
+ */
+typedef struct IVis IVis;
+typedef struct
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(IVis *This, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(IVis *This);
+    ULONG (STDMETHODCALLTYPE *Release)(IVis *This);
+    HRESULT (STDMETHODCALLTYPE *GetIids)(IVis *This, ULONG *count, IID **iids);
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(IVis *This, HSTRING *name);
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(IVis *This, int *level);
+    HRESULT (STDMETHODCALLTYPE *get_RailsX)(IVis *This, BOOLEAN *v);
+    HRESULT (STDMETHODCALLTYPE *put_RailsX)(IVis *This, BOOLEAN v);
+    HRESULT (STDMETHODCALLTYPE *get_RailsY)(IVis *This, BOOLEAN *v);
+    HRESULT (STDMETHODCALLTYPE *put_RailsY)(IVis *This, BOOLEAN v);
+    HRESULT (STDMETHODCALLTYPE *get_Redirect)(IVis *This, INT32 *v);
+    HRESULT (STDMETHODCALLTYPE *put_Redirect)(IVis *This, INT32 v);
+    HRESULT (STDMETHODCALLTYPE *get_PXChain)(IVis *This, INT32 *v);
+    HRESULT (STDMETHODCALLTYPE *put_PXChain)(IVis *This, INT32 v);
+    HRESULT (STDMETHODCALLTYPE *get_PXMode)(IVis *This, INT32 *v);
+    HRESULT (STDMETHODCALLTYPE *put_PXMode)(IVis *This, INT32 v);
+    HRESULT (STDMETHODCALLTYPE *get_PYChain)(IVis *This, INT32 *v);
+    HRESULT (STDMETHODCALLTYPE *put_PYChain)(IVis *This, INT32 v);
+    HRESULT (STDMETHODCALLTYPE *get_PYMode)(IVis *This, INT32 *v);
+    HRESULT (STDMETHODCALLTYPE *put_PYMode)(IVis *This, INT32 v);
+    HRESULT (STDMETHODCALLTYPE *get_SChain)(IVis *This, INT32 *v);
+    HRESULT (STDMETHODCALLTYPE *put_SChain)(IVis *This, INT32 v);
+    HRESULT (STDMETHODCALLTYPE *get_SMode)(IVis *This, INT32 *v);
+    HRESULT (STDMETHODCALLTYPE *put_SMode)(IVis *This, INT32 v);
+    HRESULT (STDMETHODCALLTYPE *get_Source)(IVis *This, WIVisual **v);
+    HRESULT (STDMETHODCALLTYPE *TryRedirect)(IVis *This, void *pp);
+} IVisVtbl;
+struct IVis { const IVisVtbl *lpVtbl; };
+
+typedef struct IVis2 IVis2;
+typedef struct
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(IVis2 *This, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(IVis2 *This);
+    ULONG (STDMETHODCALLTYPE *Release)(IVis2 *This);
+    HRESULT (STDMETHODCALLTYPE *GetIids)(IVis2 *This, ULONG *count, IID **iids);
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(IVis2 *This, HSTRING *name);
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(IVis2 *This, int *level);
+    HRESULT (STDMETHODCALLTYPE *get_DeltaPosition)(IVis2 *This, float *xyz);
+    HRESULT (STDMETHODCALLTYPE *get_DeltaScale)(IVis2 *This, float *v);
+    HRESULT (STDMETHODCALLTYPE *get_Position)(IVis2 *This, float *xyz);
+    HRESULT (STDMETHODCALLTYPE *get_PositionVelocity)(IVis2 *This, float *xyz);
+    HRESULT (STDMETHODCALLTYPE *get_Scale)(IVis2 *This, float *v);
+    HRESULT (STDMETHODCALLTYPE *get_ScaleVelocity)(IVis2 *This, float *v);
+} IVis2Vtbl;
+struct IVis2 { const IVis2Vtbl *lpVtbl; };
+
+typedef struct IVisStatics IVisStatics;
+typedef struct
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(IVisStatics *This, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(IVisStatics *This);
+    ULONG (STDMETHODCALLTYPE *Release)(IVisStatics *This);
+    HRESULT (STDMETHODCALLTYPE *GetIids)(IVisStatics *This, ULONG *count, IID **iids);
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(IVisStatics *This, HSTRING *name);
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(IVisStatics *This, int *level);
+    HRESULT (STDMETHODCALLTYPE *Create)(IVisStatics *This, WIVisual *source, IVis **result);
+} IVisStaticsVtbl;
+struct IVisStatics { const IVisStaticsVtbl *lpVtbl; };
+
+static const GUID IID_IVis = {0xca0e8a86, 0xd8d6, 0x4111, {0xb0, 0x88, 0x70, 0x34, 0x7b, 0x2b, 0xd0, 0xed}};
+static const GUID IID_IVis2 = {0xaa914893, 0xa73c, 0x414d, {0x80, 0xd0, 0x24, 0x9b, 0xad, 0x2f, 0xbd, 0x93}};
+static const GUID IID_IVis3 = {0xd941ef2a, 0x0d5c, 0x4057, {0x92, 0xd7, 0xc9, 0x71, 0x15, 0x33, 0x20, 0x4f}};
+static const GUID IID_IVisStatics = {0x369965e1, 0x8645, 0x4f75, {0xba, 0x00, 0x64, 0x79, 0xcd, 0x10, 0xc8, 0xe6}};
+static const GUID IID_ICompInteractionSource = {0x043b2431, 0x06e3, 0x495a, {0xba, 0x54, 0x40, 0x9f, 0x00, 0x17, 0xfa, 0xc0}};
+
+/*
+ * Windows.UI.Composition.IVisual2: IID, slot order and signatures from microsoft/windows-rs (MIT OR Apache-2.0), the
+ * published `windows` crate 0.62.2 (vcs commit 32c3144490c016fe496a0aed769bce60987a2e9d, src/Windows/UI/Composition/mod.rs
+ * IVisual2_Vtbl; metadata/winrt/Windows.UI.Composition.rdl at commit 8ca69fdaa9d69c78b9bcfbee96c6916f2282e7f0):
+ * 6/7 ParentForTransform, 8/9 RelativeOffsetAdjustment (Vector3), 10/11 RelativeSizeAdjustment (Vector2).
+ */
+typedef struct { float x, y, z; } V3T;
+typedef struct { float x, y; } V2T;
+typedef struct IVisual2T IVisual2T;
+typedef struct
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(IVisual2T *This, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(IVisual2T *This);
+    ULONG (STDMETHODCALLTYPE *Release)(IVisual2T *This);
+    HRESULT (STDMETHODCALLTYPE *GetIids)(IVisual2T *This, ULONG *count, IID **iids);
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(IVisual2T *This, HSTRING *name);
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(IVisual2T *This, int *level);
+    HRESULT (STDMETHODCALLTYPE *get_ParentForTransform)(IVisual2T *This, WIVisual **v);
+    HRESULT (STDMETHODCALLTYPE *put_ParentForTransform)(IVisual2T *This, WIVisual *v);
+    HRESULT (STDMETHODCALLTYPE *get_RelOffset)(IVisual2T *This, float *xyz);
+    HRESULT (STDMETHODCALLTYPE *put_RelOffset)(IVisual2T *This, V3T v);
+    HRESULT (STDMETHODCALLTYPE *get_RelSize)(IVisual2T *This, float *xy);
+    HRESULT (STDMETHODCALLTYPE *put_RelSize)(IVisual2T *This, V2T v);
+} IVisual2TVtbl;
+struct IVisual2T { const IVisual2TVtbl *lpVtbl; };
+static const GUID IID_IVisual2T = {0x3052b611, 0x56c3, 0x4c3e, {0x8b, 0xf3, 0xf6, 0xe1, 0xad, 0x47, 0x3f, 0x06}};
+
+static void TestVisual2(void)
+{
+    WIContainerVisual *cv = NULL, *other = NULL;
+    WISpriteVisual *sp = NULL;
+    WIVisual *v = NULL, *ov = NULL, *got = NULL;
+    IVisual2T *v2 = NULL, *s2 = NULL;
+    IUnknown *u1 = NULL, *u2 = NULL;
+    ULONG oref;
+    float f[3];
+    V3T o3 = { 0.5f, 0.25f, 2.0f };
+    V2T o2 = { 1.0f, 0.5f };
+    HRESULT hr;
+
+    hr = Comp->lpVtbl->CreateContainerVisual(Comp, &cv);
+    ok(hr == S_OK && cv, "CreateContainerVisual %#lx\n", hr);
+    hr = Comp->lpVtbl->CreateContainerVisual(Comp, &other);
+    ok(hr == S_OK && other, "CreateContainerVisual %#lx\n", hr);
+    hr = Comp->lpVtbl->CreateSpriteVisual(Comp, &sp);
+    ok(hr == S_OK && sp, "CreateSpriteVisual %#lx\n", hr);
+    if (!cv || !other || !sp) goto out;
+    QI(cv, &IID___x_ABI_CWindows_CUI_CComposition_CIVisual, (void **)&v);
+    QI(other, &IID___x_ABI_CWindows_CUI_CComposition_CIVisual, (void **)&ov);
+    hr = QI(cv, &IID_IVisual2T, (void **)&v2);
+    ok(hr == S_OK && v2, "QI IVisual2 on ContainerVisual %#lx\n", hr);
+    hr = QI(sp, &IID_IVisual2T, (void **)&s2);
+    ok(hr == S_OK && s2, "QI IVisual2 on SpriteVisual %#lx\n", hr);
+    if (!v2) goto out;
+    QI(v2, &IID_IUnknown, (void **)&u1);
+    QI(cv, &IID_IUnknown, (void **)&u2);
+    ok(u1 == u2, "IVisual2 identity %p vs %p\n", u1, u2);
+    REL(u1); REL(u2);
+
+    got = (WIVisual *)0x1234;
+    hr = v2->lpVtbl->get_ParentForTransform(v2, &got);
+    ok(hr == S_OK && got == NULL, "ParentForTransform default %#lx %p\n", hr, got);
+    hr = v2->lpVtbl->get_ParentForTransform(v2, NULL);
+    ok(hr == E_POINTER, "get_ParentForTransform(NULL) %#lx\n", hr);
+    f[0] = f[1] = f[2] = 9.0f;
+    hr = v2->lpVtbl->get_RelOffset(v2, f);
+    ok(hr == S_OK && f[0] == 0.0f && f[1] == 0.0f && f[2] == 0.0f, "RelativeOffsetAdjustment default %#lx %g %g %g\n", hr, f[0], f[1], f[2]);
+    f[0] = f[1] = 9.0f;
+    hr = v2->lpVtbl->get_RelSize(v2, f);
+    ok(hr == S_OK && f[0] == 0.0f && f[1] == 0.0f, "RelativeSizeAdjustment default %#lx %g %g\n", hr, f[0], f[1]);
+
+    hr = v2->lpVtbl->put_RelOffset(v2, o3);
+    ok(hr == S_OK, "put_RelativeOffsetAdjustment %#lx\n", hr);
+    f[0] = f[1] = f[2] = 0.0f;
+    hr = v2->lpVtbl->get_RelOffset(v2, f);
+    ok(hr == S_OK && f[0] == 0.5f && f[1] == 0.25f && f[2] == 2.0f, "RelativeOffsetAdjustment %#lx %g %g %g\n", hr, f[0], f[1], f[2]);
+    hr = v2->lpVtbl->put_RelSize(v2, o2);
+    ok(hr == S_OK, "put_RelativeSizeAdjustment %#lx\n", hr);
+    f[0] = f[1] = 0.0f;
+    hr = v2->lpVtbl->get_RelSize(v2, f);
+    ok(hr == S_OK && f[0] == 1.0f && f[1] == 0.5f, "RelativeSizeAdjustment %#lx %g %g\n", hr, f[0], f[1]);
+
+    /* ParentForTransform keeps a reference to the other visual until it is replaced or the visual is freed */
+    oref = RefOf((IUnknown *)ov);
+    hr = v2->lpVtbl->put_ParentForTransform(v2, ov);
+    ok(hr == S_OK, "put_ParentForTransform %#lx\n", hr);
+    ok(RefOf((IUnknown *)ov) == oref + 1, "other visual refs %lu, were %lu\n", RefOf((IUnknown *)ov), oref);
+    hr = v2->lpVtbl->get_ParentForTransform(v2, &got);
+    ok(hr == S_OK && got, "get_ParentForTransform %#lx %p\n", hr, got);
+    if (got)
+    {
+        QI(got, &IID_IUnknown, (void **)&u1);
+        QI(ov, &IID_IUnknown, (void **)&u2);
+        ok(u1 == u2, "ParentForTransform is not the visual: %p vs %p\n", u1, u2);
+        REL(u1); REL(u2);
+        REL(got);
+    }
+    hr = v2->lpVtbl->put_ParentForTransform(v2, NULL);
+    ok(hr == S_OK, "put_ParentForTransform(NULL) %#lx\n", hr);
+    ok(RefOf((IUnknown *)ov) == oref, "other visual refs %lu after NULL, were %lu\n", RefOf((IUnknown *)ov), oref);
+    hr = v2->lpVtbl->put_ParentForTransform(v2, ov);
+    ok(hr == S_OK, "put_ParentForTransform again %#lx\n", hr);
+    REL(v2);
+    v2 = NULL;
+    REL(cv);
+    cv = NULL;
+    REL(v);
+    v = NULL;
+    ok(RefOf((IUnknown *)ov) == oref, "other visual refs %lu after the visual is freed, were %lu\n", RefOf((IUnknown *)ov), oref);
+out:
+    if (s2) REL(s2);
+    if (v2) REL(v2);
+    if (v) REL(v);
+    if (ov) REL(ov);
+    if (cv) REL(cv);
+    if (other) REL(other);
+    if (sp) REL(sp);
+}
+
+/*
+ * ICompositor2 (guid 735081dc-5e24-45da-a38f-e32cc349a9a0, slots 6.. CreateAmbientLight, CreateAnimationGroup,
+ * CreateBackdropBrush, CreateDistantLight, CreateDropShadow, CreateImplicitAnimationCollection, CreateLayerVisual, ...)
+ * and ICompositionSurfaceBrush3 (guid 550bb289-1fe0-42e5-8195-1eefa87ff08e, 6/7 get/put SnapToPixels): microsoft/windows-rs
+ * (MIT OR Apache-2.0), the published `windows` crate 0.62.2 (vcs commit 32c3144490c016fe496a0aed769bce60987a2e9d,
+ * src/Windows/UI/Composition/mod.rs). The members of ICompositor2 create classes that are not available yet: S_OK
+ * (Windows) or E_NOTIMPL (here) is accepted.
+ */
+typedef struct ICompositor2T ICompositor2T;
+typedef struct
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(ICompositor2T *This, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(ICompositor2T *This);
+    ULONG (STDMETHODCALLTYPE *Release)(ICompositor2T *This);
+    HRESULT (STDMETHODCALLTYPE *GetIids)(ICompositor2T *This, ULONG *count, IID **iids);
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(ICompositor2T *This, HSTRING *name);
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(ICompositor2T *This, int *level);
+    HRESULT (STDMETHODCALLTYPE *CreateAmbientLight)(ICompositor2T *This, IUnknown **result);
+    HRESULT (STDMETHODCALLTYPE *CreateAnimationGroup)(ICompositor2T *This, IUnknown **result);
+    HRESULT (STDMETHODCALLTYPE *CreateBackdropBrush)(ICompositor2T *This, IUnknown **result);
+    HRESULT (STDMETHODCALLTYPE *CreateDistantLight)(ICompositor2T *This, IUnknown **result);
+    HRESULT (STDMETHODCALLTYPE *CreateDropShadow)(ICompositor2T *This, IUnknown **result);
+    HRESULT (STDMETHODCALLTYPE *CreateImplicitAnimationCollection)(ICompositor2T *This, IUnknown **result);
+    HRESULT (STDMETHODCALLTYPE *CreateLayerVisual)(ICompositor2T *This, IUnknown **result);
+} ICompositor2TVtbl;
+struct ICompositor2T { const ICompositor2TVtbl *lpVtbl; };
+static const GUID IID_ICompositor2T = {0x735081dc, 0x5e24, 0x45da, {0xa3, 0x8f, 0xe3, 0x2c, 0xc3, 0x49, 0xa9, 0xa0}};
+
+typedef struct ISurfBrush3T ISurfBrush3T;
+typedef struct
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(ISurfBrush3T *This, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(ISurfBrush3T *This);
+    ULONG (STDMETHODCALLTYPE *Release)(ISurfBrush3T *This);
+    HRESULT (STDMETHODCALLTYPE *GetIids)(ISurfBrush3T *This, ULONG *count, IID **iids);
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(ISurfBrush3T *This, HSTRING *name);
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(ISurfBrush3T *This, int *level);
+    HRESULT (STDMETHODCALLTYPE *get_SnapToPixels)(ISurfBrush3T *This, BOOLEAN *v);
+    HRESULT (STDMETHODCALLTYPE *put_SnapToPixels)(ISurfBrush3T *This, BOOLEAN v);
+} ISurfBrush3TVtbl;
+struct ISurfBrush3T { const ISurfBrush3TVtbl *lpVtbl; };
+static const GUID IID_ISurfBrush3T = {0x550bb289, 0x1fe0, 0x42e5, {0x81, 0x95, 0x1e, 0xef, 0xa8, 0x7f, 0xf0, 0x8e}};
+
+static void TestCompositor2AndBrush3(void)
+{
+    ICompositor2T *c2 = NULL;
+    ISurfBrush3T *b3 = NULL;
+    WICompositionSurfaceBrush *brush = NULL;
+    IUnknown *u1 = NULL, *u2 = NULL, *made;
+    IID *iids = NULL;
+    ULONG count = 0;
+    BOOLEAN b;
+    HRESULT hr;
+
+    hr = QI(Comp, &IID_ICompositor2T, (void **)&c2);
+    ok(hr == S_OK && c2, "QI ICompositor2 %#lx\n", hr);
+    if (c2)
+    {
+        QI(c2, &IID_IUnknown, (void **)&u1);
+        QI(Comp, &IID_IUnknown, (void **)&u2);
+        ok(u1 == u2, "ICompositor2 identity %p vs %p\n", u1, u2);
+        REL(u1); REL(u2);
+        hr = c2->lpVtbl->GetIids(c2, &count, &iids);
+        ok(hr == S_OK && iids, "GetIids %#lx\n", hr);
+        if (iids)
+        {
+            ok(HasIid(iids, count, &IID_ICompositor2T), "GetIids lacks ICompositor2\n");
+            CoTaskMemFree(iids);
+        }
+        made = (IUnknown *)0x1234;
+        hr = c2->lpVtbl->CreateLayerVisual(c2, &made);
+        ok(hr == S_OK || hr == E_NOTIMPL, "CreateLayerVisual %#lx\n", hr);
+        if (hr == S_OK && made) REL(made);
+        else ok(made == NULL, "CreateLayerVisual failed but returned %p\n", made);
+        made = (IUnknown *)0x1234;
+        hr = c2->lpVtbl->CreateBackdropBrush(c2, &made);
+        ok(hr == S_OK || hr == E_NOTIMPL, "CreateBackdropBrush %#lx\n", hr);
+        if (hr == S_OK && made) REL(made);
+        else ok(made == NULL, "CreateBackdropBrush failed but returned %p\n", made);
+        REL(c2);
+    }
+
+    hr = Comp->lpVtbl->CreateSurfaceBrush(Comp, &brush);
+    ok(hr == S_OK && brush, "CreateSurfaceBrush %#lx\n", hr);
+    if (!brush) return;
+    hr = QI(brush, &IID_ISurfBrush3T, (void **)&b3);
+    ok(hr == S_OK && b3, "QI ICompositionSurfaceBrush3 %#lx\n", hr);
+    if (b3)
+    {
+        QI(b3, &IID_IUnknown, (void **)&u1);
+        QI(brush, &IID_IUnknown, (void **)&u2);
+        ok(u1 == u2, "ICompositionSurfaceBrush3 identity %p vs %p\n", u1, u2);
+        REL(u1); REL(u2);
+        hr = b3->lpVtbl->get_SnapToPixels(b3, NULL);
+        ok(hr == E_POINTER, "get_SnapToPixels(NULL) %#lx\n", hr);
+        hr = b3->lpVtbl->put_SnapToPixels(b3, TRUE);
+        ok(hr == S_OK, "put_SnapToPixels %#lx\n", hr);
+        b = FALSE;
+        hr = b3->lpVtbl->get_SnapToPixels(b3, &b);
+        ok(hr == S_OK && b, "SnapToPixels after put(TRUE) %#lx %u\n", hr, b);
+        hr = b3->lpVtbl->put_SnapToPixels(b3, FALSE);
+        ok(hr == S_OK, "put_SnapToPixels(FALSE) %#lx\n", hr);
+        b = TRUE;
+        hr = b3->lpVtbl->get_SnapToPixels(b3, &b);
+        ok(hr == S_OK && !b, "SnapToPixels after put(FALSE) %#lx %u\n", hr, b);
+        REL(b3);
+    }
+    REL(brush);
+}
+
+static void TestVisualInteractionSource(PRO_ACTIVATE pRoActivateInstance, PWCS pWindowsCreateString, PWDS pWindowsDeleteString)
+{
+    const WCHAR name[] = L"Windows.UI.Composition.Interactions.VisualInteractionSource";
+    HMODULE combase = GetModuleHandleW(L"combase.dll");
+    HRESULT (WINAPI *pGetFactory)(HSTRING, REFIID, void **) = combase ? (void *)GetProcAddress(combase, "RoGetActivationFactory") : NULL;
+    LPCWSTR (WINAPI *pRaw)(HSTRING, UINT32 *) = combase ? (void *)GetProcAddress(combase, "WindowsGetStringRawBuffer") : NULL;
+    HSTRING cls = NULL, fcls = NULL;
+    IVisStatics *st = NULL;
+    IVis *src = NULL, *src2 = NULL;
+    IVis2 *s2 = NULL;
+    IUnknown *u1 = NULL, *u2 = NULL, *x = NULL;
+    WIContainerVisual *cv = NULL;
+    WIVisual *vis = NULL, *got = NULL;
+    IID *iids = NULL;
+    ULONG count = 0, vref;
+    BOOLEAN b;
+    INT32 m;
+    float f[3];
+    HRESULT hr;
+
+    if (!pGetFactory) { skip("no RoGetActivationFactory\n"); return; }
+    hr = pWindowsCreateString(name, lstrlenW(name), &fcls);
+    ok(hr == S_OK, "WindowsCreateString %#lx\n", hr);
+    hr = pGetFactory(fcls, &IID_IVisStatics, (void **)&st);
+    if (hr != S_OK)
+    {
+        skip("VisualInteractionSource is not registered: %#lx\n", hr);
+        pWindowsDeleteString(fcls);
+        return;
+    }
+    ok(st != NULL, "no statics\n");
+
+    hr = Comp->lpVtbl->CreateContainerVisual(Comp, &cv);
+    ok(hr == S_OK && cv, "CreateContainerVisual %#lx\n", hr);
+    if (!cv) goto out;
+    QI(cv, &IID___x_ABI_CWindows_CUI_CComposition_CIVisual, (void **)&vis);
+    vref = RefOf((IUnknown *)vis);
+
+    hr = st->lpVtbl->Create(st, vis, NULL);
+    ok(hr == E_POINTER, "Create(NULL result) %#lx\n", hr);
+    src = (IVis *)0x1234;
+    hr = st->lpVtbl->Create(st, NULL, &src);
+    ok(FAILED(hr) && src == NULL, "Create(NULL visual) %#lx %p\n", hr, src);
+    hr = st->lpVtbl->Create(st, vis, &src);
+    ok(hr == S_OK && src, "Create %#lx %p\n", hr, src);
+    if (!src) goto out;
+    ok(RefOf((IUnknown *)vis) == vref + 1, "the source holds the visual: refs %lu, were %lu\n", RefOf((IUnknown *)vis), vref);
+
+    /* identity, class name, IIDs, other interfaces */
+    QI(src, &IID_IUnknown, (void **)&u1);
+    hr = QI(src, &IID_IVis2, (void **)&s2);
+    ok(hr == S_OK && s2, "QI IVisualInteractionSource2 %#lx\n", hr);
+    QI(s2, &IID_IUnknown, (void **)&u2);
+    ok(u1 == u2, "identity %p vs %p\n", u1, u2);
+    REL(u1); REL(u2);
+    hr = QI(src, &IID_IVis3, (void **)&x);
+    ok(hr == S_OK && x, "QI IVisualInteractionSource3 %#lx\n", hr);
+    if (x) REL(x);
+    x = NULL;
+    hr = QI(src, &IID_ICompInteractionSource, (void **)&x);
+    ok(hr == S_OK && x, "QI ICompositionInteractionSource %#lx\n", hr);
+    if (x) REL(x);
+    x = NULL;
+    hr = QI(src, &IID___x_ABI_CWindows_CUI_CComposition_CICompositionObject, (void **)&x);
+    ok(hr == S_OK && x, "QI ICompositionObject %#lx\n", hr);
+    if (x) REL(x);
+    x = NULL;
+    hr = QI(src, &IID_Closable, (void **)&x);
+    ok(hr == S_OK && x, "QI IClosable %#lx\n", hr);
+    if (x) { hr = ((__x_ABI_CWindows_CFoundation_CIClosable *)x)->lpVtbl->Close((__x_ABI_CWindows_CFoundation_CIClosable *)x); ok(hr == S_OK, "Close %#lx\n", hr); REL(x); }
+    x = (IUnknown *)0x1234;
+    hr = QI(src, &IID_Unknown1, (void **)&x);
+    ok(hr == E_NOINTERFACE && x == NULL, "QI(unknown IID) %#lx %p\n", hr, x);
+    hr = src->lpVtbl->GetIids(src, &count, &iids);
+    ok(hr == S_OK && iids, "GetIids %#lx\n", hr);
+    if (iids)
+    {
+        ok(HasIid(iids, count, &IID_IVis), "GetIids lacks IVisualInteractionSource\n");
+        ok(HasIid(iids, count, &IID_IVis2), "GetIids lacks IVisualInteractionSource2\n");
+        ok(HasIid(iids, count, &IID_ICompInteractionSource), "GetIids lacks ICompositionInteractionSource\n");
+        CoTaskMemFree(iids);
+    }
+    hr = src->lpVtbl->GetRuntimeClassName(src, &cls);
+    ok(hr == S_OK, "GetRuntimeClassName %#lx\n", hr);
+    if (hr == S_OK && pRaw)
+    {
+        ok(!lstrcmpW(pRaw(cls, NULL), name), "class %ls\n", pRaw(cls, NULL));
+        pWindowsDeleteString(cls);
+    }
+
+    /* Source */
+    hr = src->lpVtbl->get_Source(src, NULL);
+    ok(hr == E_POINTER, "get_Source(NULL) %#lx\n", hr);
+    hr = src->lpVtbl->get_Source(src, &got);
+    ok(hr == S_OK && got, "get_Source %#lx %p\n", hr, got);
+    if (got)
+    {
+        QI(got, &IID_IUnknown, (void **)&u1);
+        QI(vis, &IID_IUnknown, (void **)&u2);
+        ok(u1 == u2, "Source is not the visual: %p vs %p\n", u1, u2);
+        REL(u1); REL(u2);
+        REL(got);
+    }
+
+    /* defaults and round trips (the rails default is documented: on) */
+    b = FALSE;
+    hr = src->lpVtbl->get_RailsX(src, &b);
+    ok(hr == S_OK && b, "IsPositionXRailsEnabled default %#lx %u\n", hr, b);
+    b = FALSE;
+    hr = src->lpVtbl->get_RailsY(src, &b);
+    ok(hr == S_OK && b, "IsPositionYRailsEnabled default %#lx %u\n", hr, b);
+    hr = src->lpVtbl->put_RailsX(src, FALSE);
+    ok(hr == S_OK, "put_RailsX %#lx\n", hr);
+    b = TRUE;
+    hr = src->lpVtbl->get_RailsX(src, &b);
+    ok(hr == S_OK && !b, "RailsX after put %#lx %u\n", hr, b);
+    hr = src->lpVtbl->get_RailsX(src, NULL);
+    ok(hr == E_POINTER, "get_RailsX(NULL) %#lx\n", hr);
+#define ROUNDTRIP(N, V) \
+    hr = src->lpVtbl->put_##N(src, V); ok(hr == S_OK, "put_" #N " %#lx\n", hr); \
+    m = -1; hr = src->lpVtbl->get_##N(src, &m); ok(hr == S_OK && m == V, "get_" #N " %#lx %d, expected " #V "\n", hr, m);
+    ROUNDTRIP(Redirect, 3)          /* CapableTouchpadAndPointerWheel */
+    ROUNDTRIP(PXChain, 1)           /* Always */
+    ROUNDTRIP(PXMode, 1)            /* EnabledWithInertia */
+    ROUNDTRIP(PYChain, 2)           /* Never */
+    ROUNDTRIP(PYMode, 2)            /* EnabledWithoutInertia */
+    ROUNDTRIP(SChain, 2)
+    ROUNDTRIP(SMode, 1)
+#undef ROUNDTRIP
+
+    /* values that are only read through expressions: documented defaults (0 and, for Scale, 1) */
+    if (s2)
+    {
+        f[0] = f[1] = f[2] = 9.0f;
+        hr = s2->lpVtbl->get_DeltaPosition(s2, f);
+        ok(hr == S_OK && f[0] == 0.0f && f[1] == 0.0f && f[2] == 0.0f, "DeltaPosition %#lx %g %g %g\n", hr, f[0], f[1], f[2]);
+        f[0] = 9.0f;
+        hr = s2->lpVtbl->get_Scale(s2, f);
+        ok(hr == S_OK && f[0] == 1.0f, "Scale %#lx %g\n", hr, f[0]);
+        hr = s2->lpVtbl->get_Scale(s2, NULL);
+        ok(hr == E_POINTER, "get_Scale(NULL) %#lx\n", hr);
+    }
+
+    /* a second source on the same visual is independent; the visual is freed with the last of them */
+    hr = st->lpVtbl->Create(st, vis, &src2);
+    ok(hr == S_OK && src2 && src2 != src, "second Create %#lx %p\n", hr, src2);
+    if (src2)
+    {
+        b = FALSE;
+        hr = src2->lpVtbl->get_RailsX(src2, &b);
+        ok(hr == S_OK && b, "second source RailsX %#lx %u (independent of the first)\n", hr, b);
+        REL(src2);
+    }
+
+    REL(src);
+    src = NULL;
+    if (s2) { REL(s2); s2 = NULL; }
+    ok(RefOf((IUnknown *)vis) == vref, "visual refs %lu after the sources are freed, were %lu\n", RefOf((IUnknown *)vis), vref);
+out:
+    if (s2) REL(s2);
+    if (vis) REL(vis);
+    if (cv) REL(cv);
+    st->lpVtbl->Release(st);
+    pWindowsDeleteString(fcls);
+}
+
 START_TEST(Composition)
 {
     SetUnhandledExceptionFilter(CrashFilter);
@@ -1491,6 +1964,9 @@ START_TEST(Composition)
         TestSurfaces();
         TestStretch();
         TestDesktopTarget();
+        TestVisual2();
+        TestCompositor2AndBrush3();
+        TestVisualInteractionSource(pRoActivateInstance, pWindowsCreateString, pWindowsDeleteString);
         REL(Comp);
     }
     TestController(pRoActivateInstance, pWindowsCreateString, pWindowsDeleteString);
