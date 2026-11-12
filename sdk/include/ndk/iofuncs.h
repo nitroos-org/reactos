@@ -623,7 +623,7 @@ NtSetIoCompletion(
     _In_ PVOID CompletionKey,
     _In_ PVOID CompletionContext,
     _In_ NTSTATUS CompletionStatus,
-    _In_ ULONG CompletionInformation
+    _In_ ULONG_PTR CompletionInformation
 );
 
 NTSYSCALLAPI

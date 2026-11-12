@@ -95,6 +95,24 @@ IopFreeMiniPacket(PIOP_MINI_COMPLETION_PACKET Packet)
     InterlockedPushEntrySList(&List->L.ListHead, (PSLIST_ENTRY)Packet);
 }
 
+/*
+ * The packet of an IoCompletionReserve object (NtSetIoCompletionEx) lives in the reserve, in the storage of its APC
+ * that this object type never uses. The queued packet holds a reference to the reserve, so the reserve handle can be
+ * closed meanwhile.
+ */
+C_ASSERT(sizeof(IOP_MINI_COMPLETION_PACKET) <= sizeof(KAPC));
+
+/* The packet left its queue (removed, or the port was deleted): the reserve can be used again */
+static
+VOID
+IopReleaseReservePacket(IN PIOP_MINI_COMPLETION_PACKET Packet)
+{
+    PEX_RESERVE_OBJECT Reserve = CONTAINING_RECORD(Packet, EX_RESERVE_OBJECT, Apc);
+
+    InterlockedExchange(&Reserve->InUse, 0);
+    ObDereferenceObject(Reserve);
+}
+
 /* Copies a dequeued completion out and frees the packet or IRP that carried it */
 static
 VOID
@@ -137,6 +155,16 @@ IopUnpackCompletionEntry(IN PLIST_ENTRY ListEntry,
         Entry->IoStatusBlock.Status = Packet->IoStatus;
         Entry->IoStatusBlock.Information = Packet->IoStatusInformation;
         ExWcpPacketDequeued(Packet);
+    }
+    else if (Packet->PacketType == IopCompletionPacketReserve)
+    {
+        /* The storage of an IoCompletionReserve object: the reserve is free to be used again once the entry is out */
+        Entry->KeyContext = Packet->KeyContext;
+        Entry->ApcContext = Packet->ApcContext;
+        RtlZeroMemory(&Entry->IoStatusBlock, sizeof(Entry->IoStatusBlock));
+        Entry->IoStatusBlock.Status = Packet->IoStatus;
+        Entry->IoStatusBlock.Information = Packet->IoStatusInformation;
+        IopReleaseReservePacket(Packet);
     }
     else
     {
@@ -199,6 +227,11 @@ IopDeleteIoCompletion(PVOID ObjectBody)
                 if (Irp->Tail.Overlay.Thread)
                     ObDereferenceObject(Irp->Tail.Overlay.Thread);
                 IoFreeIrp(Irp);
+            }
+            else if (Packet->PacketType == IopCompletionPacketReserve)
+            {
+                /* Nobody removes it: give the reserve back */
+                IopReleaseReservePacket(Packet);
             }
             else
             {
@@ -718,7 +751,7 @@ NtSetIoCompletion(IN HANDLE IoCompletionPortHandle,
                   IN PVOID CompletionKey,
                   IN PVOID CompletionContext,
                   IN NTSTATUS CompletionStatus,
-                  IN ULONG CompletionInformation)
+                  IN ULONG_PTR CompletionInformation)
 {
     NTSTATUS Status;
     PKQUEUE Queue;
@@ -753,37 +786,68 @@ NtSetIoCompletion(IN HANDLE IoCompletionPortHandle,
  * @name NtSetIoCompletionEx
  *
  *    Windows 7 and later: NtSetIoCompletion with the storage of the packet taken from an IoCompletionReserve object
- *    (NtAllocateReserveObject type 1). Not measured against Windows yet: a handle of another type is rejected, the
- *    reserve is otherwise only checked, never marked in use, and the packet is allocated as for NtSetIoCompletion.
+ *    (NtAllocateReserveObject type 1). Measured on Windows 10 22H2: the port handle is checked first (type, then
+ *    IO_COMPLETION_MODIFY_STATE), then the reserve handle (a NULL handle is STATUS_INVALID_HANDLE, another type
+ *    STATUS_OBJECT_TYPE_MISMATCH, the access 0x2 is required). A reserve that already holds a queued packet, on any
+ *    port, is STATUS_INVALID_PARAMETER_2 and nothing is queued; a failed call does not use the reserve up. The reserve
+ *    is free again when the packet is removed or its port is deleted; closing the reserve handle in between does not
+ *    drop the packet.
  */
+#define IO_COMPLETION_RESERVE_MODIFY_STATE 0x2
+
 NTSTATUS
 NTAPI
 NtSetIoCompletionEx(IN HANDLE IoCompletionPortHandle,
-                    IN HANDLE IoCompletionPacketHandle OPTIONAL,
+                    IN HANDLE IoCompletionPacketHandle,
                     IN PVOID CompletionKey,
                     IN PVOID CompletionContext,
                     IN NTSTATUS CompletionStatus,
                     IN ULONG_PTR CompletionInformation)
 {
+    KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
     NTSTATUS Status;
-    PVOID Reserve;
+    PKQUEUE Queue;
+    PEX_RESERVE_OBJECT Reserve;
+    PIOP_MINI_COMPLETION_PACKET Packet;
     PAGED_CODE();
 
-    if (IoCompletionPacketHandle)
+    Status = ObReferenceObjectByHandle(IoCompletionPortHandle,
+                                       IO_COMPLETION_MODIFY_STATE,
+                                       IoCompletionType,
+                                       PreviousMode,
+                                       (PVOID*)&Queue,
+                                       NULL);
+    if (!NT_SUCCESS(Status)) return Status;
+
+    Status = ObReferenceObjectByHandle(IoCompletionPacketHandle,
+                                       IO_COMPLETION_RESERVE_MODIFY_STATE,
+                                       ExIoCompletionReserveObjectType,
+                                       PreviousMode,
+                                       (PVOID*)&Reserve,
+                                       NULL);
+    if (!NT_SUCCESS(Status))
     {
-        Status = ObReferenceObjectByHandle(IoCompletionPacketHandle,
-                                           0,
-                                           ExIoCompletionReserveObjectType,
-                                           ExGetPreviousMode(),
-                                           &Reserve,
-                                           NULL);
-        if (!NT_SUCCESS(Status)) return Status;
-        ObDereferenceObject(Reserve);
+        ObDereferenceObject(Queue);
+        return Status;
     }
 
-    return NtSetIoCompletion(IoCompletionPortHandle,
-                             CompletionKey,
-                             CompletionContext,
-                             CompletionStatus,
-                             (ULONG)CompletionInformation);
+    /* One packet per reserve */
+    if (InterlockedCompareExchange(&Reserve->InUse, 1, 0) != 0)
+    {
+        ObDereferenceObject(Reserve);
+        ObDereferenceObject(Queue);
+        return STATUS_INVALID_PARAMETER_2;
+    }
+
+    /* The reference to the reserve is kept until the packet leaves the queue */
+    Packet = (PIOP_MINI_COMPLETION_PACKET)&Reserve->Apc;
+    Packet->PacketType = IopCompletionPacketReserve;
+    Packet->KeyContext = CompletionKey;
+    Packet->ApcContext = CompletionContext;
+    Packet->IoStatus = CompletionStatus;
+    Packet->IoStatusInformation = CompletionInformation;
+    KeInsertQueue(Queue, &Packet->ListEntry);
+
+    ObDereferenceObject(Queue);
+    return STATUS_SUCCESS;
 }
