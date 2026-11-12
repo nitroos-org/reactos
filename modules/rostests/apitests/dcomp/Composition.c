@@ -1451,6 +1451,250 @@ static void TestController(PRO_ACTIVATE pRoActivateInstance, PWCS pWindowsCreate
     if (c1) REL(c1);
 }
 
+
+/*
+ * Windows.UI.Composition.Interactions.VisualInteractionSource: IIDs, slot order and signatures from microsoft/windows-rs
+ * (MIT OR Apache-2.0), the published `windows` crate 0.62.2 (vcs commit 32c3144490c016fe496a0aed769bce60987a2e9d,
+ * path crates/libs/windows/src/Windows/UI/Composition/Interactions/mod.rs; the rdl at
+ * metadata/winrt/Windows.UI.Composition.Interactions.rdl, commit 8ca69fdaa9d69c78b9bcfbee96c6916f2282e7f0).
+ * Documented behaviour only (learn.microsoft.com): Create(Visual) is static, Source returns the visual, rails are
+ * on by default, DeltaPosition defaults to 0, Scale to 1.
+ */
+typedef struct IVis IVis;
+typedef struct
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(IVis *This, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(IVis *This);
+    ULONG (STDMETHODCALLTYPE *Release)(IVis *This);
+    HRESULT (STDMETHODCALLTYPE *GetIids)(IVis *This, ULONG *count, IID **iids);
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(IVis *This, HSTRING *name);
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(IVis *This, int *level);
+    HRESULT (STDMETHODCALLTYPE *get_RailsX)(IVis *This, BOOLEAN *v);
+    HRESULT (STDMETHODCALLTYPE *put_RailsX)(IVis *This, BOOLEAN v);
+    HRESULT (STDMETHODCALLTYPE *get_RailsY)(IVis *This, BOOLEAN *v);
+    HRESULT (STDMETHODCALLTYPE *put_RailsY)(IVis *This, BOOLEAN v);
+    HRESULT (STDMETHODCALLTYPE *get_Redirect)(IVis *This, INT32 *v);
+    HRESULT (STDMETHODCALLTYPE *put_Redirect)(IVis *This, INT32 v);
+    HRESULT (STDMETHODCALLTYPE *get_PXChain)(IVis *This, INT32 *v);
+    HRESULT (STDMETHODCALLTYPE *put_PXChain)(IVis *This, INT32 v);
+    HRESULT (STDMETHODCALLTYPE *get_PXMode)(IVis *This, INT32 *v);
+    HRESULT (STDMETHODCALLTYPE *put_PXMode)(IVis *This, INT32 v);
+    HRESULT (STDMETHODCALLTYPE *get_PYChain)(IVis *This, INT32 *v);
+    HRESULT (STDMETHODCALLTYPE *put_PYChain)(IVis *This, INT32 v);
+    HRESULT (STDMETHODCALLTYPE *get_PYMode)(IVis *This, INT32 *v);
+    HRESULT (STDMETHODCALLTYPE *put_PYMode)(IVis *This, INT32 v);
+    HRESULT (STDMETHODCALLTYPE *get_SChain)(IVis *This, INT32 *v);
+    HRESULT (STDMETHODCALLTYPE *put_SChain)(IVis *This, INT32 v);
+    HRESULT (STDMETHODCALLTYPE *get_SMode)(IVis *This, INT32 *v);
+    HRESULT (STDMETHODCALLTYPE *put_SMode)(IVis *This, INT32 v);
+    HRESULT (STDMETHODCALLTYPE *get_Source)(IVis *This, WIVisual **v);
+    HRESULT (STDMETHODCALLTYPE *TryRedirect)(IVis *This, void *pp);
+} IVisVtbl;
+struct IVis { const IVisVtbl *lpVtbl; };
+
+typedef struct IVis2 IVis2;
+typedef struct
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(IVis2 *This, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(IVis2 *This);
+    ULONG (STDMETHODCALLTYPE *Release)(IVis2 *This);
+    HRESULT (STDMETHODCALLTYPE *GetIids)(IVis2 *This, ULONG *count, IID **iids);
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(IVis2 *This, HSTRING *name);
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(IVis2 *This, int *level);
+    HRESULT (STDMETHODCALLTYPE *get_DeltaPosition)(IVis2 *This, float *xyz);
+    HRESULT (STDMETHODCALLTYPE *get_DeltaScale)(IVis2 *This, float *v);
+    HRESULT (STDMETHODCALLTYPE *get_Position)(IVis2 *This, float *xyz);
+    HRESULT (STDMETHODCALLTYPE *get_PositionVelocity)(IVis2 *This, float *xyz);
+    HRESULT (STDMETHODCALLTYPE *get_Scale)(IVis2 *This, float *v);
+    HRESULT (STDMETHODCALLTYPE *get_ScaleVelocity)(IVis2 *This, float *v);
+} IVis2Vtbl;
+struct IVis2 { const IVis2Vtbl *lpVtbl; };
+
+typedef struct IVisStatics IVisStatics;
+typedef struct
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(IVisStatics *This, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(IVisStatics *This);
+    ULONG (STDMETHODCALLTYPE *Release)(IVisStatics *This);
+    HRESULT (STDMETHODCALLTYPE *GetIids)(IVisStatics *This, ULONG *count, IID **iids);
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(IVisStatics *This, HSTRING *name);
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(IVisStatics *This, int *level);
+    HRESULT (STDMETHODCALLTYPE *Create)(IVisStatics *This, WIVisual *source, IVis **result);
+} IVisStaticsVtbl;
+struct IVisStatics { const IVisStaticsVtbl *lpVtbl; };
+
+static const GUID IID_IVis = {0xca0e8a86, 0xd8d6, 0x4111, {0xb0, 0x88, 0x70, 0x34, 0x7b, 0x2b, 0xd0, 0xed}};
+static const GUID IID_IVis2 = {0xaa914893, 0xa73c, 0x414d, {0x80, 0xd0, 0x24, 0x9b, 0xad, 0x2f, 0xbd, 0x93}};
+static const GUID IID_IVis3 = {0xd941ef2a, 0x0d5c, 0x4057, {0x92, 0xd7, 0xc9, 0x71, 0x15, 0x33, 0x20, 0x4f}};
+static const GUID IID_IVisStatics = {0x369965e1, 0x8645, 0x4f75, {0xba, 0x00, 0x64, 0x79, 0xcd, 0x10, 0xc8, 0xe6}};
+static const GUID IID_ICompInteractionSource = {0x043b2431, 0x06e3, 0x495a, {0xba, 0x54, 0x40, 0x9f, 0x00, 0x17, 0xfa, 0xc0}};
+
+static void TestVisualInteractionSource(PRO_ACTIVATE pRoActivateInstance, PWCS pWindowsCreateString, PWDS pWindowsDeleteString)
+{
+    const WCHAR name[] = L"Windows.UI.Composition.Interactions.VisualInteractionSource";
+    HMODULE combase = GetModuleHandleW(L"combase.dll");
+    HRESULT (WINAPI *pGetFactory)(HSTRING, REFIID, void **) = combase ? (void *)GetProcAddress(combase, "RoGetActivationFactory") : NULL;
+    LPCWSTR (WINAPI *pRaw)(HSTRING, UINT32 *) = combase ? (void *)GetProcAddress(combase, "WindowsGetStringRawBuffer") : NULL;
+    HSTRING cls = NULL, fcls = NULL;
+    IVisStatics *st = NULL;
+    IVis *src = NULL, *src2 = NULL;
+    IVis2 *s2 = NULL;
+    IUnknown *u1 = NULL, *u2 = NULL, *x = NULL;
+    WIContainerVisual *cv = NULL;
+    WIVisual *vis = NULL, *got = NULL;
+    IID *iids = NULL;
+    ULONG count = 0, vref;
+    BOOLEAN b;
+    INT32 m;
+    float f[3];
+    HRESULT hr;
+
+    if (!pGetFactory) { skip("no RoGetActivationFactory\n"); return; }
+    hr = pWindowsCreateString(name, lstrlenW(name), &fcls);
+    ok(hr == S_OK, "WindowsCreateString %#lx\n", hr);
+    hr = pGetFactory(fcls, &IID_IVisStatics, (void **)&st);
+    if (hr != S_OK)
+    {
+        skip("VisualInteractionSource is not registered: %#lx\n", hr);
+        pWindowsDeleteString(fcls);
+        return;
+    }
+    ok(st != NULL, "no statics\n");
+
+    hr = Comp->lpVtbl->CreateContainerVisual(Comp, &cv);
+    ok(hr == S_OK && cv, "CreateContainerVisual %#lx\n", hr);
+    if (!cv) goto out;
+    QI(cv, &IID___x_ABI_CWindows_CUI_CComposition_CIVisual, (void **)&vis);
+    vref = RefOf((IUnknown *)vis);
+
+    hr = st->lpVtbl->Create(st, vis, NULL);
+    ok(hr == E_POINTER, "Create(NULL result) %#lx\n", hr);
+    src = (IVis *)0x1234;
+    hr = st->lpVtbl->Create(st, NULL, &src);
+    ok(FAILED(hr) && src == NULL, "Create(NULL visual) %#lx %p\n", hr, src);
+    hr = st->lpVtbl->Create(st, vis, &src);
+    ok(hr == S_OK && src, "Create %#lx %p\n", hr, src);
+    if (!src) goto out;
+    ok(RefOf((IUnknown *)vis) == vref + 1, "the source holds the visual: refs %lu, were %lu\n", RefOf((IUnknown *)vis), vref);
+
+    /* identity, class name, IIDs, other interfaces */
+    QI(src, &IID_IUnknown, (void **)&u1);
+    hr = QI(src, &IID_IVis2, (void **)&s2);
+    ok(hr == S_OK && s2, "QI IVisualInteractionSource2 %#lx\n", hr);
+    QI(s2, &IID_IUnknown, (void **)&u2);
+    ok(u1 == u2, "identity %p vs %p\n", u1, u2);
+    REL(u1); REL(u2);
+    hr = QI(src, &IID_IVis3, (void **)&x);
+    ok(hr == S_OK && x, "QI IVisualInteractionSource3 %#lx\n", hr);
+    if (x) REL(x);
+    x = NULL;
+    hr = QI(src, &IID_ICompInteractionSource, (void **)&x);
+    ok(hr == S_OK && x, "QI ICompositionInteractionSource %#lx\n", hr);
+    if (x) REL(x);
+    x = NULL;
+    hr = QI(src, &IID___x_ABI_CWindows_CUI_CComposition_CICompositionObject, (void **)&x);
+    ok(hr == S_OK && x, "QI ICompositionObject %#lx\n", hr);
+    if (x) REL(x);
+    x = NULL;
+    hr = QI(src, &IID_Closable, (void **)&x);
+    ok(hr == S_OK && x, "QI IClosable %#lx\n", hr);
+    if (x) { hr = ((__x_ABI_CWindows_CFoundation_CIClosable *)x)->lpVtbl->Close((__x_ABI_CWindows_CFoundation_CIClosable *)x); ok(hr == S_OK, "Close %#lx\n", hr); REL(x); }
+    x = (IUnknown *)0x1234;
+    hr = QI(src, &IID_Unknown1, (void **)&x);
+    ok(hr == E_NOINTERFACE && x == NULL, "QI(unknown IID) %#lx %p\n", hr, x);
+    hr = src->lpVtbl->GetIids(src, &count, &iids);
+    ok(hr == S_OK && iids, "GetIids %#lx\n", hr);
+    if (iids)
+    {
+        ok(HasIid(iids, count, &IID_IVis), "GetIids lacks IVisualInteractionSource\n");
+        ok(HasIid(iids, count, &IID_IVis2), "GetIids lacks IVisualInteractionSource2\n");
+        ok(HasIid(iids, count, &IID_ICompInteractionSource), "GetIids lacks ICompositionInteractionSource\n");
+        CoTaskMemFree(iids);
+    }
+    hr = src->lpVtbl->GetRuntimeClassName(src, &cls);
+    ok(hr == S_OK, "GetRuntimeClassName %#lx\n", hr);
+    if (hr == S_OK && pRaw)
+    {
+        ok(!lstrcmpW(pRaw(cls, NULL), name), "class %ls\n", pRaw(cls, NULL));
+        pWindowsDeleteString(cls);
+    }
+
+    /* Source */
+    hr = src->lpVtbl->get_Source(src, NULL);
+    ok(hr == E_POINTER, "get_Source(NULL) %#lx\n", hr);
+    hr = src->lpVtbl->get_Source(src, &got);
+    ok(hr == S_OK && got, "get_Source %#lx %p\n", hr, got);
+    if (got)
+    {
+        QI(got, &IID_IUnknown, (void **)&u1);
+        QI(vis, &IID_IUnknown, (void **)&u2);
+        ok(u1 == u2, "Source is not the visual: %p vs %p\n", u1, u2);
+        REL(u1); REL(u2);
+        REL(got);
+    }
+
+    /* defaults and round trips (the rails default is documented: on) */
+    b = FALSE;
+    hr = src->lpVtbl->get_RailsX(src, &b);
+    ok(hr == S_OK && b, "IsPositionXRailsEnabled default %#lx %u\n", hr, b);
+    b = FALSE;
+    hr = src->lpVtbl->get_RailsY(src, &b);
+    ok(hr == S_OK && b, "IsPositionYRailsEnabled default %#lx %u\n", hr, b);
+    hr = src->lpVtbl->put_RailsX(src, FALSE);
+    ok(hr == S_OK, "put_RailsX %#lx\n", hr);
+    b = TRUE;
+    hr = src->lpVtbl->get_RailsX(src, &b);
+    ok(hr == S_OK && !b, "RailsX after put %#lx %u\n", hr, b);
+    hr = src->lpVtbl->get_RailsX(src, NULL);
+    ok(hr == E_POINTER, "get_RailsX(NULL) %#lx\n", hr);
+#define ROUNDTRIP(N, V) \
+    hr = src->lpVtbl->put_##N(src, V); ok(hr == S_OK, "put_" #N " %#lx\n", hr); \
+    m = -1; hr = src->lpVtbl->get_##N(src, &m); ok(hr == S_OK && m == V, "get_" #N " %#lx %d, expected " #V "\n", hr, m);
+    ROUNDTRIP(Redirect, 3)          /* CapableTouchpadAndPointerWheel */
+    ROUNDTRIP(PXChain, 1)           /* Always */
+    ROUNDTRIP(PXMode, 1)            /* EnabledWithInertia */
+    ROUNDTRIP(PYChain, 2)           /* Never */
+    ROUNDTRIP(PYMode, 2)            /* EnabledWithoutInertia */
+    ROUNDTRIP(SChain, 2)
+    ROUNDTRIP(SMode, 1)
+#undef ROUNDTRIP
+
+    /* values that are only read through expressions: documented defaults (0 and, for Scale, 1) */
+    if (s2)
+    {
+        f[0] = f[1] = f[2] = 9.0f;
+        hr = s2->lpVtbl->get_DeltaPosition(s2, f);
+        ok(hr == S_OK && f[0] == 0.0f && f[1] == 0.0f && f[2] == 0.0f, "DeltaPosition %#lx %g %g %g\n", hr, f[0], f[1], f[2]);
+        f[0] = 9.0f;
+        hr = s2->lpVtbl->get_Scale(s2, f);
+        ok(hr == S_OK && f[0] == 1.0f, "Scale %#lx %g\n", hr, f[0]);
+        hr = s2->lpVtbl->get_Scale(s2, NULL);
+        ok(hr == E_POINTER, "get_Scale(NULL) %#lx\n", hr);
+    }
+
+    /* a second source on the same visual is independent; the visual is freed with the last of them */
+    hr = st->lpVtbl->Create(st, vis, &src2);
+    ok(hr == S_OK && src2 && src2 != src, "second Create %#lx %p\n", hr, src2);
+    if (src2)
+    {
+        b = FALSE;
+        hr = src2->lpVtbl->get_RailsX(src2, &b);
+        ok(hr == S_OK && b, "second source RailsX %#lx %u (independent of the first)\n", hr, b);
+        REL(src2);
+    }
+
+    REL(src);
+    src = NULL;
+    if (s2) { REL(s2); s2 = NULL; }
+    ok(RefOf((IUnknown *)vis) == vref, "visual refs %lu after the sources are freed, were %lu\n", RefOf((IUnknown *)vis), vref);
+out:
+    if (s2) REL(s2);
+    if (vis) REL(vis);
+    if (cv) REL(cv);
+    st->lpVtbl->Release(st);
+    pWindowsDeleteString(fcls);
+}
+
 START_TEST(Composition)
 {
     SetUnhandledExceptionFilter(CrashFilter);
@@ -1491,6 +1735,7 @@ START_TEST(Composition)
         TestSurfaces();
         TestStretch();
         TestDesktopTarget();
+        TestVisualInteractionSource(pRoActivateInstance, pWindowsCreateString, pWindowsDeleteString);
         REL(Comp);
     }
     TestController(pRoActivateInstance, pWindowsCreateString, pWindowsDeleteString);

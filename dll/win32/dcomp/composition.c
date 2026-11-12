@@ -91,6 +91,10 @@ static const struct iface_entry iface_table[] =
     IE(ICompositionTarget, target, KM(K_TARGET), TRUE),
     { &IID_IDesktopWindowTarget, offsetof(struct cobj, dwt), KM(K_TARGET), TRUE },
     { &IID_IDesktopWindowTargetInterop, offsetof(struct cobj, dwtinterop), KM(K_TARGET), FALSE },
+    { &IID_IVisualInteractionSource, offsetof(struct cobj, visrc), KM(K_VISRC), TRUE },
+    { &IID_IVisualInteractionSource2, offsetof(struct cobj, visrc2), KM(K_VISRC), TRUE },
+    { &IID_IVisualInteractionSource3, offsetof(struct cobj, visrc3), KM(K_VISRC), TRUE },
+    { &IID_ICompositionInteractionSource, offsetof(struct cobj, intsrc), KM(K_VISRC), TRUE },
     { &IID___x_ABI_CWindows_CFoundation_CIClosable, offsetof(struct cobj, closable), KM_ALL, TRUE },
     { &IID_IAgileObject, offsetof(struct cobj, agile), KM_ALL, FALSE },
     { &IID_INitroDrawingSurfaceInterop, offsetof(struct cobj, dsinterop), KM(K_DSURFACE), FALSE },
@@ -104,6 +108,7 @@ static const WCHAR *const kind_names[] =
     L"Windows.UI.Composition.CompositionSurfaceBrush", L"Windows.UI.Composition.InsetClip",
     L"Windows.UI.Composition.CompositionGraphicsDevice", L"Windows.UI.Composition.CompositionDrawingSurface",
     L"Windows.UI.Composition.Desktop.DesktopWindowTarget",
+    L"Windows.UI.Composition.Interactions.VisualInteractionSource",
 };
 
 static void cobj_destroy(struct cobj *o);
@@ -222,6 +227,10 @@ INSP_FWD(srf, WICompositionSurface, surface)
 INSP_FWD(dsf, WICompositionDrawingSurface, dsurf)
 INSP_FWD(tgt, WICompositionTarget, target)
 INSP_FWD(dwt, WIDesktopWindowTarget, dwt)
+INSP_FWD(vsr, WIVisualInteractionSource, visrc)
+INSP_FWD(vs2, WIVisualInteractionSource2, visrc2)
+INSP_FWD(vs3, WIVisualInteractionSource3, visrc3)
+INSP_FWD(isr, WICompositionInteractionSource, intsrc)
 UNK_FWD(dwi, WIDesktopWindowTargetInterop, dwtinterop)
 INSP_FWD(clo, WIClosable, closable)
 UNK_FWD(agl, IAgileObject, agile)
@@ -277,7 +286,7 @@ static void release_cobj(struct cobj *o)
 static void cobj_destroy(struct cobj *o)
 {
     struct cobj **kids;
-    struct cobj *vclip, *sbrush, *collection, *gfxdev, *root;
+    struct cobj *vclip, *sbrush, *collection, *gfxdev, *root, *isource;
     IUnknown *bsurface;
     int i, n;
 
@@ -291,6 +300,7 @@ static void cobj_destroy(struct cobj *o)
     vclip = o->vclip; o->vclip = NULL;
     sbrush = o->sbrush; o->sbrush = NULL;
     root = o->root; o->root = NULL;
+    isource = o->isource; o->isource = NULL;
     bsurface = o->bsurface; o->bsurface = NULL;
     gfxdev = o->gfxdev;
     comp_unlock();
@@ -301,6 +311,7 @@ static void cobj_destroy(struct cobj *o)
     release_cobj(vclip);
     release_cobj(sbrush);
     release_cobj(root);
+    release_cobj(isource);
     if (bsurface) IUnknown_Release(bsurface);
 
     if (o->kind == K_GDEVICE) gfx_device_free(o);
@@ -1214,6 +1225,128 @@ HRESULT comp_new_desktop_target(IUnknown *compositor, HWND hwnd, BOOL topmost, W
     return S_OK;
 }
 
+
+/* ---- VisualInteractionSource (Windows.UI.Composition.Interactions) ----
+ * Holds the configuration. Nothing drives it yet: no input is redirected to it and there is no InteractionTracker,
+ * so the interaction values stay at their documented defaults (learn.microsoft.com VisualInteractionSource members:
+ * DeltaPosition defaults to 0, Scale to 1; rails are on by default). The defaults of the source and chaining modes
+ * and of ManipulationRedirectionMode are not documented: the enum zero values are used, FIXME verify on the oracle. */
+
+#define VSR(i) OBJ_OF(i, visrc)
+#define VSGETPUT(N, T, F) \
+static HRESULT STDMETHODCALLTYPE vsr_get_##N(WIVisualInteractionSource *i, T *v) \
+{ struct cobj *o = VSR(i); if (!v) return E_POINTER; comp_lock(); *v = o->F; comp_unlock(); return S_OK; } \
+static HRESULT STDMETHODCALLTYPE vsr_put_##N(WIVisualInteractionSource *i, T v) \
+{ struct cobj *o = VSR(i); comp_lock(); o->F = v; comp_unlock(); return S_OK; }
+
+VSGETPUT(IsPositionXRailsEnabled, BOOLEAN, rails_x)
+VSGETPUT(IsPositionYRailsEnabled, BOOLEAN, rails_y)
+
+/* enum setters: the value is stored as given; FIXME: Windows may reject out-of-range values (unmeasured) */
+VSGETPUT(ManipulationRedirectionMode, INT32, redirect_mode)
+VSGETPUT(PositionXChainingMode, INT32, chain_px)
+VSGETPUT(PositionXSourceMode, INT32, mode_px)
+VSGETPUT(PositionYChainingMode, INT32, chain_py)
+VSGETPUT(PositionYSourceMode, INT32, mode_py)
+VSGETPUT(ScaleChainingMode, INT32, chain_s)
+VSGETPUT(ScaleSourceMode, INT32, mode_s)
+
+static HRESULT STDMETHODCALLTYPE vsr_get_Source(WIVisualInteractionSource *i, WIVisual **v)
+{
+    struct cobj *o = VSR(i);
+
+    if (!v) return E_POINTER;
+    comp_lock();
+    *v = o->isource ? &o->isource->visual : NULL;
+    if (o->isource) id_AddRef(&o->isource->identity);
+    comp_unlock();
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE vsr_TryRedirectForManipulation(WIVisualInteractionSource *i, void *pointer_point)
+{
+    /* Documented: redirects the pointer's input to the InteractionTracker. There is no tracker and no input
+     * routing yet, so the request has no effect. */
+    FIXME("VisualInteractionSource::TryRedirectForManipulation(%p): no InteractionTracker, ignored\n", pointer_point);
+    return S_OK;
+}
+
+static const WIVisualInteractionSourceVtbl visrc_vtbl =
+{
+    INSP_HEAD(vsr),
+    vsr_get_IsPositionXRailsEnabled, vsr_put_IsPositionXRailsEnabled,
+    vsr_get_IsPositionYRailsEnabled, vsr_put_IsPositionYRailsEnabled,
+    vsr_get_ManipulationRedirectionMode, vsr_put_ManipulationRedirectionMode,
+    vsr_get_PositionXChainingMode, vsr_put_PositionXChainingMode,
+    vsr_get_PositionXSourceMode, vsr_put_PositionXSourceMode,
+    vsr_get_PositionYChainingMode, vsr_put_PositionYChainingMode,
+    vsr_get_PositionYSourceMode, vsr_put_PositionYSourceMode,
+    vsr_get_ScaleChainingMode, vsr_put_ScaleChainingMode,
+    vsr_get_ScaleSourceMode, vsr_put_ScaleSourceMode,
+    vsr_get_Source,
+    vsr_TryRedirectForManipulation,
+};
+
+/* IVisualInteractionSource2: the values are readable "only via expression/animation" (documented); no interaction
+ * has happened, so the documented defaults are returned. FIXME: verify on the oracle what a direct read returns. */
+static HRESULT STDMETHODCALLTYPE vs2_get_DeltaPosition(WIVisualInteractionSource2 *i, Vec3 *v)
+{ if (!v) return E_POINTER; v->X = v->Y = v->Z = 0.0f; return S_OK; }
+static HRESULT STDMETHODCALLTYPE vs2_get_DeltaScale(WIVisualInteractionSource2 *i, float *v)
+{ if (!v) return E_POINTER; *v = 1.0f; return S_OK; }   /* FIXME: "multiplicative" change in scale, default unmeasured */
+static HRESULT STDMETHODCALLTYPE vs2_get_Position(WIVisualInteractionSource2 *i, Vec3 *v)
+{ if (!v) return E_POINTER; v->X = v->Y = v->Z = 0.0f; return S_OK; }
+static HRESULT STDMETHODCALLTYPE vs2_get_PositionVelocity(WIVisualInteractionSource2 *i, Vec3 *v)
+{ if (!v) return E_POINTER; v->X = v->Y = v->Z = 0.0f; return S_OK; }
+static HRESULT STDMETHODCALLTYPE vs2_get_Scale(WIVisualInteractionSource2 *i, float *v)
+{ if (!v) return E_POINTER; *v = 1.0f; return S_OK; }
+static HRESULT STDMETHODCALLTYPE vs2_get_ScaleVelocity(WIVisualInteractionSource2 *i, float *v)
+{ if (!v) return E_POINTER; *v = 0.0f; return S_OK; }
+
+#define VS2_CONFIGURE(N) \
+static HRESULT STDMETHODCALLTYPE vs2_##N(WIVisualInteractionSource2 *i, void *values) \
+{ FIXME("VisualInteractionSource::" #N ": not implemented (CompositionConditionalValue is not available)\n"); return E_NOTIMPL; }
+VS2_CONFIGURE(ConfigureCenterPointXModifiers)
+VS2_CONFIGURE(ConfigureCenterPointYModifiers)
+VS2_CONFIGURE(ConfigureDeltaPositionXModifiers)
+VS2_CONFIGURE(ConfigureDeltaPositionYModifiers)
+VS2_CONFIGURE(ConfigureDeltaScaleModifiers)
+
+static const WIVisualInteractionSource2Vtbl visrc2_vtbl =
+{
+    INSP_HEAD(vs2),
+    vs2_get_DeltaPosition, vs2_get_DeltaScale, vs2_get_Position, vs2_get_PositionVelocity, vs2_get_Scale,
+    vs2_get_ScaleVelocity,
+    vs2_ConfigureCenterPointXModifiers, vs2_ConfigureCenterPointYModifiers, vs2_ConfigureDeltaPositionXModifiers,
+    vs2_ConfigureDeltaPositionYModifiers, vs2_ConfigureDeltaScaleModifiers,
+};
+
+static HRESULT STDMETHODCALLTYPE vs3_get_PointerWheelConfig(WIVisualInteractionSource3 *i, void **v)
+{
+    FIXME("VisualInteractionSource::PointerWheelConfig: not implemented (InteractionSourceConfiguration)\n");
+    if (v) *v = NULL;
+    return E_NOTIMPL;
+}
+
+static const WIVisualInteractionSource3Vtbl visrc3_vtbl = { INSP_HEAD(vs3), vs3_get_PointerWheelConfig };
+static const WICompositionInteractionSourceVtbl intsrc_vtbl = { INSP_HEAD(isr) };
+
+HRESULT comp_new_visual_interaction_source(WIVisual *source, WIVisualInteractionSource **out)
+{
+    struct cobj *o, *src;
+    HRESULT hr;
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+    /* FIXME: what Windows answers for a NULL or foreign visual is unmeasured; an invalid argument is the usual answer */
+    if (!source || !(src = visual_from(source))) return E_INVALIDARG;
+    if (FAILED(hr = comp_create(src->compositor, K_VISRC, &o))) return hr;
+    id_AddRef(&src->identity);
+    o->isource = src;
+    o->rails_x = o->rails_y = TRUE;
+    *out = &o->visrc;                   /* the creation reference moves to the caller */
+    return S_OK;
+}
+
 HRESULT comp_create(IUnknown *compositor, enum cobj_kind kind, struct cobj **out)
 {
     struct cobj *o = comp_alloc_obj(kind, compositor);
@@ -1235,6 +1368,10 @@ HRESULT comp_create(IUnknown *compositor, enum cobj_kind kind, struct cobj **out
     o->target.lpVtbl = &target_vtbl;
     o->dwt.lpVtbl = &dwt_vtbl;
     o->dwtinterop.lpVtbl = &dwtinterop_vtbl;
+    o->visrc.lpVtbl = &visrc_vtbl;
+    o->visrc2.lpVtbl = &visrc2_vtbl;
+    o->visrc3.lpVtbl = &visrc3_vtbl;
+    o->intsrc.lpVtbl = &intsrc_vtbl;
     o->dsinterop.lpVtbl = &nitro_dsinterop_vtbl;
     o->test.lpVtbl = &nitro_test_vtbl_impl;
     o->closable.lpVtbl = &closable_vtbl;

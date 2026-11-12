@@ -1,7 +1,7 @@
 /*
  * PROJECT:     ReactOS DirectComposition
  * LICENSE:     LGPL-2.1-or-later (https://spdx.org/licenses/LGPL-2.1-or-later)
- * PURPOSE:     Windows.UI.Composition WinRT classes: activation, Compositor and CompositorController (stages 1-3)
+ * PURPOSE:     Windows.UI.Composition WinRT classes: activation, Compositor, CompositorController, VisualInteractionSource (stages 1-3)
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  *
  * Windows registers Windows.UI.Composition.Compositor and Windows.UI.Composition.Core.CompositorController
@@ -21,7 +21,9 @@
  *
  * ICompositorController, ICompositorDesktopInterop (second method) and IDesktopWindowTarget take their IID, slot
  * order and signatures from microsoft/windows-rs (MIT OR Apache-2.0), commit
- * 8ca69fdaa9d69c78b9bcfbee96c6916f2282e7f0 (details at each interface). Known gaps (no source for IID or vtable):
+ * 8ca69fdaa9d69c78b9bcfbee96c6916f2282e7f0 (details at each interface).
+ * Windows.UI.Composition.Interactions.VisualInteractionSource (composition.c) is created through its statics here;
+ * the interfaces come from the same repository (see comp_private.h for path and commit). Known gaps (no source for IID or vtable):
  *   ICompositor2 .. ICompositor7 and the other ICompositorWith* interfaces, ICompositorStatics.
  */
 
@@ -182,6 +184,7 @@ DEFINE_GUID(IID_WIAsyncInfo, 0x00000036, 0x0000, 0x0000, 0xc0, 0x00, 0x00, 0x00,
 
 static const WCHAR name_compositor[] = L"Windows.UI.Composition.Compositor";
 static const WCHAR name_controller[] = L"Windows.UI.Composition.Core.CompositorController";
+static const WCHAR name_visrc[] = L"Windows.UI.Composition.Interactions.VisualInteractionSource";
 
 static IUnknown *comp_identity(ICompositor *i);
 static IUnknown *interop_identity(ICompositorInterop *i);
@@ -1146,6 +1149,182 @@ static ULONG STDMETHODCALLTYPE factory_a_AddRef(IAgileObject *iface) { return 2;
 static ULONG STDMETHODCALLTYPE factory_a_Release(IAgileObject *iface) { return 1; }
 static const IAgileObjectVtbl factory_agile_vtbl = { factory_a_QueryInterface, factory_a_AddRef, factory_a_Release };
 
+
+/* ---- VisualInteractionSource statics ----
+ * The class has no default constructor (it is composable with the statics Create and CreateFromIVisualElement,
+ * microsoft/windows-rs metadata/winrt/Windows.UI.Composition.Interactions.rdl at commit
+ * 8ca69fdaa9d69c78b9bcfbee96c6916f2282e7f0), so ActivateInstance is not supported. The factory object also answers
+ * IActivationFactory so that a generic activation path can obtain it; FIXME verify on the oracle which of the
+ * factory interfaces Windows exposes. */
+
+typedef struct WIVisualInteractionSourceStatics WIVisualInteractionSourceStatics;
+typedef struct WIVisualInteractionSourceStaticsVtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(WIVisualInteractionSourceStatics *This, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(WIVisualInteractionSourceStatics *This);
+    ULONG (STDMETHODCALLTYPE *Release)(WIVisualInteractionSourceStatics *This);
+    HRESULT (STDMETHODCALLTYPE *GetIids)(WIVisualInteractionSourceStatics *This, ULONG *count, IID **iids);
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(WIVisualInteractionSourceStatics *This, HSTRING *name);
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(WIVisualInteractionSourceStatics *This, TrustLevel *level);
+    HRESULT (STDMETHODCALLTYPE *Create)(WIVisualInteractionSourceStatics *This, WIVisual *source,
+            WIVisualInteractionSource **result);
+} WIVisualInteractionSourceStaticsVtbl;
+struct WIVisualInteractionSourceStatics { const WIVisualInteractionSourceStaticsVtbl *lpVtbl; };
+
+typedef struct WIVisualInteractionSourceStatics2 WIVisualInteractionSourceStatics2;
+typedef struct WIVisualInteractionSourceStatics2Vtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(WIVisualInteractionSourceStatics2 *This, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(WIVisualInteractionSourceStatics2 *This);
+    ULONG (STDMETHODCALLTYPE *Release)(WIVisualInteractionSourceStatics2 *This);
+    HRESULT (STDMETHODCALLTYPE *GetIids)(WIVisualInteractionSourceStatics2 *This, ULONG *count, IID **iids);
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(WIVisualInteractionSourceStatics2 *This, HSTRING *name);
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(WIVisualInteractionSourceStatics2 *This, TrustLevel *level);
+    HRESULT (STDMETHODCALLTYPE *CreateFromIVisualElement)(WIVisualInteractionSourceStatics2 *This, void *element,
+            WIVisualInteractionSource **result);
+} WIVisualInteractionSourceStatics2Vtbl;
+struct WIVisualInteractionSourceStatics2 { const WIVisualInteractionSourceStatics2Vtbl *lpVtbl; };
+
+/* IVisualInteractionSourceObjectFactory has no members: a bare IInspectable */
+typedef struct VSObjectFactory { const IInspectableVtbl *lpVtbl; } VSObjectFactory;
+
+struct vsfactory
+{
+    IActivationFactory IActivationFactory_iface;
+    WIVisualInteractionSourceStatics statics;
+    WIVisualInteractionSourceStatics2 statics2;
+    VSObjectFactory objfactory;
+    IAgileObject agile;
+};
+static struct vsfactory vsfactory;
+
+#define VSF_OF(i, f) CONTAINING_RECORD(i, struct vsfactory, f)
+
+static HRESULT STDMETHODCALLTYPE vsf_QueryInterface(IActivationFactory *iface, REFIID iid, void **out)
+{
+    struct vsfactory *This = VSF_OF(iface, IActivationFactory_iface);
+
+    if (!out) return E_POINTER;
+    if (IsEqualGUID(iid, &IID_IUnknown) || IsEqualGUID(iid, &IID_IInspectable) ||
+        IsEqualGUID(iid, &IID_IActivationFactory))
+        *out = &This->IActivationFactory_iface;
+    else if (IsEqualGUID(iid, &IID_IVisualInteractionSourceStatics))
+        *out = &This->statics;
+    else if (IsEqualGUID(iid, &IID_IVisualInteractionSourceStatics2))
+        *out = &This->statics2;
+    else if (IsEqualGUID(iid, &IID_IVisualInteractionSourceObjectFactory))
+        *out = &This->objfactory;
+    else if (IsEqualGUID(iid, &IID_IAgileObject))
+        *out = &This->agile;
+    else
+    {
+        FIXME("factory of %s: interface %s not implemented, returning E_NOINTERFACE.\n",
+              debugstr_w(name_visrc), debugstr_guid(iid));
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    IUnknown_AddRef((IUnknown *)*out);
+    return S_OK;
+}
+static ULONG STDMETHODCALLTYPE vsf_AddRef(IActivationFactory *iface) { return 2; }
+static ULONG STDMETHODCALLTYPE vsf_Release(IActivationFactory *iface) { return 1; }
+
+static HRESULT STDMETHODCALLTYPE vsf_GetIids(IActivationFactory *iface, ULONG *count, IID **iids)
+{
+    const IID *list[] = { &IID_IVisualInteractionSourceStatics, &IID_IVisualInteractionSourceStatics2,
+                          &IID_IVisualInteractionSourceObjectFactory };
+    return make_iids(count, iids, list, ARRAY_SIZE(list));
+}
+
+static HRESULT STDMETHODCALLTYPE vsf_GetRuntimeClassName(IActivationFactory *iface, HSTRING *name)
+{
+    return class_name_out(name_visrc, name);
+}
+
+static HRESULT STDMETHODCALLTYPE vsf_GetTrustLevel(IActivationFactory *iface, TrustLevel *level)
+{
+    if (!level) return E_POINTER;
+    *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE vsf_ActivateInstance(IActivationFactory *iface, IInspectable **instance)
+{
+    /* no default constructor: FIXME verify the error on the oracle */
+    FIXME("VisualInteractionSource has no default constructor\n");
+    if (instance) *instance = NULL;
+    return E_NOTIMPL;
+}
+
+static const IActivationFactoryVtbl vsf_vtbl =
+{
+    vsf_QueryInterface, vsf_AddRef, vsf_Release, vsf_GetIids, vsf_GetRuntimeClassName, vsf_GetTrustLevel,
+    vsf_ActivateInstance
+};
+
+#define VSF_FWD(prefix, T, field) \
+static HRESULT STDMETHODCALLTYPE prefix##_QueryInterface(T *iface, REFIID iid, void **out) \
+{ return vsf_QueryInterface(&VSF_OF(iface, field)->IActivationFactory_iface, iid, out); } \
+static ULONG STDMETHODCALLTYPE prefix##_AddRef(T *iface) { return 2; } \
+static ULONG STDMETHODCALLTYPE prefix##_Release(T *iface) { return 1; } \
+static HRESULT STDMETHODCALLTYPE prefix##_GetIids(T *iface, ULONG *count, IID **iids) \
+{ return vsf_GetIids(&VSF_OF(iface, field)->IActivationFactory_iface, count, iids); } \
+static HRESULT STDMETHODCALLTYPE prefix##_GetRuntimeClassName(T *iface, HSTRING *name) \
+{ return class_name_out(name_visrc, name); } \
+static HRESULT STDMETHODCALLTYPE prefix##_GetTrustLevel(T *iface, TrustLevel *level) \
+{ return vsf_GetTrustLevel(&VSF_OF(iface, field)->IActivationFactory_iface, level); }
+
+VSF_FWD(vss, WIVisualInteractionSourceStatics, statics)
+VSF_FWD(vs2s, WIVisualInteractionSourceStatics2, statics2)
+
+static HRESULT STDMETHODCALLTYPE vss_Create(WIVisualInteractionSourceStatics *iface, WIVisual *source,
+        WIVisualInteractionSource **result)
+{
+    TRACE("%p, %p, %p\n", iface, source, result);
+    return comp_new_visual_interaction_source(source, result);
+}
+
+static HRESULT STDMETHODCALLTYPE vs2s_CreateFromIVisualElement(WIVisualInteractionSourceStatics2 *iface,
+        void *element, WIVisualInteractionSource **result)
+{
+    FIXME("VisualInteractionSource::CreateFromIVisualElement(%p): not implemented\n", element);
+    if (result) *result = NULL;
+    return E_NOTIMPL;
+}
+
+static const WIVisualInteractionSourceStaticsVtbl vss_vtbl =
+{
+    vss_QueryInterface, vss_AddRef, vss_Release, vss_GetIids, vss_GetRuntimeClassName, vss_GetTrustLevel, vss_Create
+};
+static const WIVisualInteractionSourceStatics2Vtbl vs2s_vtbl =
+{
+    vs2s_QueryInterface, vs2s_AddRef, vs2s_Release, vs2s_GetIids, vs2s_GetRuntimeClassName, vs2s_GetTrustLevel,
+    vs2s_CreateFromIVisualElement
+};
+
+/* the empty object factory interface and the agile marker forward to the factory */
+static HRESULT STDMETHODCALLTYPE vsof_QueryInterface(IInspectable *iface, REFIID iid, void **out)
+{ return vsf_QueryInterface(&vsfactory.IActivationFactory_iface, iid, out); }
+static ULONG STDMETHODCALLTYPE vsof_AddRef(IInspectable *iface) { return 2; }
+static ULONG STDMETHODCALLTYPE vsof_Release(IInspectable *iface) { return 1; }
+static HRESULT STDMETHODCALLTYPE vsof_GetIids(IInspectable *iface, ULONG *count, IID **iids)
+{ return vsf_GetIids(&vsfactory.IActivationFactory_iface, count, iids); }
+static HRESULT STDMETHODCALLTYPE vsof_GetRuntimeClassName(IInspectable *iface, HSTRING *name)
+{ return class_name_out(name_visrc, name); }
+static HRESULT STDMETHODCALLTYPE vsof_GetTrustLevel(IInspectable *iface, TrustLevel *level)
+{ return vsf_GetTrustLevel(&vsfactory.IActivationFactory_iface, level); }
+static const IInspectableVtbl vsof_vtbl =
+    { vsof_QueryInterface, vsof_AddRef, vsof_Release, vsof_GetIids, vsof_GetRuntimeClassName, vsof_GetTrustLevel };
+
+static HRESULT STDMETHODCALLTYPE vsa_QueryInterface(IAgileObject *iface, REFIID iid, void **out)
+{ return vsf_QueryInterface(&vsfactory.IActivationFactory_iface, iid, out); }
+static ULONG STDMETHODCALLTYPE vsa_AddRef(IAgileObject *iface) { return 2; }
+static ULONG STDMETHODCALLTYPE vsa_Release(IAgileObject *iface) { return 1; }
+static const IAgileObjectVtbl vsa_vtbl = { vsa_QueryInterface, vsa_AddRef, vsa_Release };
+
+static struct vsfactory vsfactory =
+    { { &vsf_vtbl }, { &vss_vtbl }, { &vs2s_vtbl }, { &vsof_vtbl }, { &vsa_vtbl } };
+
 static struct factory compositor_factory =
     { { &factory_vtbl }, { &factory_agile_vtbl }, name_compositor, compositor_activate };
 static struct factory controller_factory =
@@ -1163,6 +1342,8 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **out
         *out = &compositor_factory.IActivationFactory_iface;
     else if (name && !wcscmp(name, name_controller))
         *out = &controller_factory.IActivationFactory_iface;
+    else if (name && !wcscmp(name, name_visrc))
+        *out = &vsfactory.IActivationFactory_iface;
     else
     {
         FIXME("class %s not implemented\n", debugstr_w(name));
