@@ -105,6 +105,9 @@ KMT_TESTFUNC Test_MmSpecialPoolUseAfterFree;
 KMT_TESTFUNC Test_MmSpecialPoolUseAfterFreeDpc;
 KMT_TESTFUNC Test_MmSpecialPoolUseAfterFreeNoInts;
 KMT_TESTFUNC Test_MmSpecialPoolMalformed;
+KMT_TESTFUNC Test_MmIrqlFaultNullDriver;
+KMT_TESTFUNC Test_MmIrqlFaultNullKernel;
+KMT_TESTFUNC Test_MmIrqlFaultPagedWrite;
 KMT_TESTFUNC Test_MmReservedMapping;
 KMT_TESTFUNC Test_MmSessionSpace;
 KMT_TESTFUNC Test_KeServiceTableAgain;
@@ -256,6 +259,9 @@ const KMT_TEST TestList[] =
     { "-MmSpecialPoolUseAfterFreeDpc",      Test_MmSpecialPoolUseAfterFreeDpc },
     { "-MmSpecialPoolUseAfterFreeNoInts",   Test_MmSpecialPoolUseAfterFreeNoInts },
     { "-MmSpecialPoolMalformed",            Test_MmSpecialPoolMalformed },
+    { "-MmIrqlFaultNullDriver",             Test_MmIrqlFaultNullDriver },
+    { "-MmIrqlFaultNullKernel",             Test_MmIrqlFaultNullKernel },
+    { "-MmIrqlFaultPagedWrite",             Test_MmIrqlFaultPagedWrite },
     { "MmReservedMapping",                  Test_MmReservedMapping },
     { "MmSessionSpace",                     Test_MmSessionSpace },
     { "KeServiceTableAgain",                Test_KeServiceTableAgain },
