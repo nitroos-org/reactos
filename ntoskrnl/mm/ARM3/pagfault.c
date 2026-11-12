@@ -1151,7 +1151,7 @@ MiResolvePageFileFault(_In_ BOOLEAN StoreInstruction,
      */
     if (UserTrap &&
         !Thread->PagerReadAheadWaited &&
-        !(MiNitroPagerDebug & MI_PAGER_DEBUG_NO_READAHEAD) &&
+        !(MiNitroPagerDebug & (MI_PAGER_DEBUG_NO_READAHEAD | MI_PAGER_DEBUG_NO_FAULT_WAIT)) &&
         (MiGetUsablePageCount() <= MI_PAGER_READAHEAD_WAIT_PAGES) &&
         !MiIsPteOnPdeBoundary(PointerPte + 1) &&
         MI_IS_PAGEFILE_PTE(PointerPte + 1) &&
