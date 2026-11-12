@@ -1206,6 +1206,52 @@ MmSetDirtyBit(PEPROCESS Process, PVOID Address, BOOLEAN Bit)
     MiUnlockProcessWorkingSetUnsafe(Process, PsGetCurrentThread());
 }
 
+/*
+ * Takes the hardware dirty bit of a valid user PTE of the current process that maps Page: clears it and flushes the
+ * TB entry on the processors running the process, so a later write through the mapping sets it again.  TRUE if it
+ * was set.  A PTE that is not valid, or maps another page (a private copy), is left alone.
+ */
+BOOLEAN
+NTAPI
+MmTakeDirtyBit(
+    _In_ PEPROCESS Process,
+    _In_ PVOID Address,
+    _In_ PFN_NUMBER Page)
+{
+    PMMPTE PointerPte;
+    MMPTE OldPte, NewPte;
+    BOOLEAN Taken = FALSE;
+
+    ASSERT(Process == PsGetCurrentProcess());
+    ASSERT(Address < MmSystemRangeStart);
+
+    MiLockProcessWorkingSetUnsafe(Process, PsGetCurrentThread());
+
+    if (MiIsPageTablePresent(Address))
+    {
+        MiMakePdeExistAndMakeValid(MiAddressToPde(Address), Process, MM_NOIRQL);
+        PointerPte = MiAddressToPte(Address);
+        for (;;)
+        {
+            OldPte.u.Long = *(volatile ULONG_PTR *)&PointerPte->u.Long;
+            if (!OldPte.u.Hard.Valid || !OldPte.u.Hard.Dirty || (PFN_FROM_PTE(&OldPte) != Page))
+                break;
+            NewPte = OldPte;
+            NewPte.u.Hard.Dirty = 0;
+            /* A processor may set Accessed meanwhile: retry rather than lose it */
+            if ((ULONG_PTR)InterlockedCompareExchangePte(PointerPte, NewPte.u.Long, OldPte.u.Long) == (ULONG_PTR)OldPte.u.Long)
+            {
+                KeFlushSingleTb(Address, FALSE);
+                Taken = TRUE;
+                break;
+            }
+        }
+    }
+
+    MiUnlockProcessWorkingSetUnsafe(Process, PsGetCurrentThread());
+    return Taken;
+}
+
 CODE_SEG("INIT")
 VOID
 NTAPI

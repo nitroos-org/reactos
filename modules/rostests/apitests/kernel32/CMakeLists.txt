@@ -164,6 +164,7 @@ list(APPEND SOURCE
     lstrcpynW.c
     lstrlen.c
     Mailslot.c
+    FlushViewOfFile.c
     MappedFileGrowth.c
     FileCloseLockedDup.c
     FileCutAfterClose.c

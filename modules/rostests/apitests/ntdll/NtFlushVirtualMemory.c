@@ -50,8 +50,10 @@ START_TEST(NtFlushVirtualMemory)
     Status = NtFlushVirtualMemory(NtCurrentProcess(), &Base, &Size, &Io);
     ok_hex(Status, STATUS_SUCCESS);
     ok(Base == View + 0x1000, "base %p, view %p\n", Base, View);
-    /* Windows reports the rounded size, the ReactOS kernel a zero */
-    ok(Size == 0x1000 || Size == 0, "size %Ix\n", Size);
+    /* The rounded size, and the length in the block (Windows 10 22H2) */
+    ok(Size == 0x1000, "size %Ix\n", Size);
+    ok_hex(Io.Status, STATUS_SUCCESS);
+    ok(Io.Information == 0x1000, "information %Ix\n", Io.Information);
 
     /* The data is on its way to the file: another handle reads it */
     Reader = CreateFileW(Path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
@@ -69,7 +71,57 @@ START_TEST(NtFlushVirtualMemory)
     Status = NtFlushVirtualMemory(NtCurrentProcess(), &Base, &Size, &Io);
     ok_hex(Status, STATUS_SUCCESS);
     ok(Base == View, "base %p, view %p\n", Base, View);
-    ok(Size == FILE_SIZE || Size == 0, "size %Ix\n", Size);
+    ok(Size == FILE_SIZE, "size %Ix\n", Size);
+
+    /* Size 0 from inside the view: to its end */
+    Base = View + 0x1000;
+    Size = 0;
+    Status = NtFlushVirtualMemory(NtCurrentProcess(), &Base, &Size, &Io);
+    ok_hex(Status, STATUS_SUCCESS);
+    ok(Size == FILE_SIZE - 0x1000, "size %Ix\n", Size);
+
+    /* Past the end of the view: not mapped, the size is left as given */
+    Base = View + 0x800;
+    Size = FILE_SIZE;
+    Status = NtFlushVirtualMemory(NtCurrentProcess(), &Base, &Size, &Io);
+    ok_hex(Status, STATUS_NOT_MAPPED_VIEW);
+    ok(Base == View, "base %p, view %p\n", Base, View);
+    ok(Size == FILE_SIZE, "size %Ix\n", Size);
+
+    /* Private memory is no view; an image view and a pagefile-backed view have no file data to write */
+    {
+        PVOID Private = VirtualAlloc(NULL, 0x10000, MEM_COMMIT, PAGE_READWRITE);
+        HANDLE PagefileSection = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, 0x10000, NULL);
+        PBYTE PagefileView = PagefileSection ? MapViewOfFile(PagefileSection, FILE_MAP_WRITE, 0, 0, 0) : NULL;
+
+        ok(Private && PagefileView, "allocation failed, error %lu\n", GetLastError());
+        if (Private)
+        {
+            Base = Private;
+            Size = 0x1000;
+            ok_hex(NtFlushVirtualMemory(NtCurrentProcess(), &Base, &Size, &Io), STATUS_NOT_MAPPED_VIEW);
+            ok(!FlushViewOfFile(Private, 0x1000), "FlushViewOfFile of private memory succeeded\n");
+            VirtualFree(Private, 0, MEM_RELEASE);
+            /* A free address */
+            Base = Private;
+            Size = 0x1000;
+            ok_hex(NtFlushVirtualMemory(NtCurrentProcess(), &Base, &Size, &Io), STATUS_NOT_MAPPED_VIEW);
+        }
+        if (PagefileView)
+        {
+            PagefileView[0] = 1;
+            Base = PagefileView;
+            Size = 0x1000;
+            ok_hex(NtFlushVirtualMemory(NtCurrentProcess(), &Base, &Size, &Io), STATUS_NOT_MAPPED_DATA);
+            ok(FlushViewOfFile(PagefileView, 0x1000), "FlushViewOfFile failed, error %lu\n", GetLastError());
+            UnmapViewOfFile(PagefileView);
+        }
+        if (PagefileSection)
+            CloseHandle(PagefileSection);
+        Base = GetModuleHandleW(NULL);
+        Size = 0x1000;
+        ok_hex(NtFlushVirtualMemory(NtCurrentProcess(), &Base, &Size, &Io), STATUS_NOT_MAPPED_DATA);
+    }
 
     Base = View;
     Size = 0;
