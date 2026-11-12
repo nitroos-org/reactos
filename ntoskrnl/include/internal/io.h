@@ -651,6 +651,13 @@ IopInitDriverImplementation(
     VOID
 );
 
+extern volatile LONG IopSystemThreadCount;
+
+VOID
+NTAPI
+IopSystemThreadExit(
+    _In_ PETHREAD Thread
+);
 
 NTSTATUS
 IopGetSystemPowerDeviceObject(
