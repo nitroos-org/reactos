@@ -79,6 +79,11 @@ typedef struct
 } DRAWITEM32;
 typedef struct { UINT cbSize; INT iContextType, iCtrlId; ULONG hItemHandle, dwContextId; POINT MousePos; } HELPINFO32;
 C_ASSERT(sizeof(HELPINFO32) == 28);
+#ifndef WM_COPYGLOBALDATA
+#define WM_COPYGLOBALDATA 0x0049 /* undocuser.h */
+#endif
+typedef struct { ULONG hmenuIn, hmenuNext, hwndNext; } MDINEXTMENU32;
+C_ASSERT(sizeof(MDINEXTMENU32) == 12);
 C_ASSERT(sizeof(STRING32) == 8);
 C_ASSERT(sizeof(MSG32) == 28);
 C_ASSERT(sizeof(PAINT32) == 64);
@@ -101,6 +106,8 @@ VOID WindowPos32ToNative(WINDOWPOS *To, const WINDOWPOS32 *From);
 VOID WindowPosNativeTo32(WINDOWPOS32 *To, const WINDOWPOS *From);
 VOID Help32ToNative(HELPINFO *To, const HELPINFO32 *From);
 VOID HelpNativeTo32(HELPINFO32 *To, const HELPINFO *From);
+VOID NextMenu32ToNative(MDINEXTMENU *To, const MDINEXTMENU32 *From);
+VOID NextMenuNativeTo32(MDINEXTMENU32 *To, const MDINEXTMENU *From);
 ULONG_PTR Wow64WinUserService(ULONG Number, ULONG *a);
 ULONG_PTR Wow64WinExtraService(ULONG Number, ULONG *a);
 ULONG_PTR Wow64WinGdiService(ULONG Number, ULONG *a);
