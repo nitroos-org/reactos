@@ -1104,7 +1104,10 @@ MiResolvePageFileFault(_In_ BOOLEAN StoreInstruction,
     ULONG Protection = (ULONG)PageFilePte.u.Soft.Protection;
     ULONG Owner, Found = 0;
     BOOLEAN Resource;
-    PFN_NUMBER Pages[MI_PAGER_READ_CLUSTER_MAX];
+    /* The pages of the read live in its MDL: one page array on the fault's stack, not two */
+    DECLSPEC_ALIGN(MEMORY_ALLOCATION_ALIGNMENT) UCHAR MdlBase[sizeof(MDL) + MI_PAGER_READ_CLUSTER_MAX * sizeof(PFN_NUMBER)];
+    PMDL Mdl = (PMDL)MdlBase;
+    PPFN_NUMBER Pages = MmGetMdlPfnArray(Mdl);
     ULONG Count = 1, i;
     BOOLEAN FaultInjected = FALSE, Retried = FALSE;
 
@@ -1245,7 +1248,10 @@ MiResolvePageFileFault(_In_ BOOLEAN StoreInstruction,
                 }
             }
             if (NT_SUCCESS(Status))
-                Status = MiReadPageFileCluster(Pages, Count, PageFileIndex, Slot);
+            {
+                MmInitializeMdl(Mdl, NULL, Count * PAGE_SIZE);
+                Status = MiReadPageFileCluster(Mdl, PageFileIndex, Slot);
+            }
         }
         MiPagingIoDone();
     }
