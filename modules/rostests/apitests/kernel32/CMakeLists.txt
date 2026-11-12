@@ -54,6 +54,7 @@ list(APPEND SOURCE
     CreateFile2.c
     CreateFileDirectory.c
     CreateRemoteThreadEx.c
+    CreateThreadFromUserThread.c
     CreateProcess.c
     CreateProcessILOnly.c
     CreateSymbolicLink.c
