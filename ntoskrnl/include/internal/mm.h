@@ -1688,6 +1688,13 @@ MmSetDirtyBit(PEPROCESS Process, PVOID Address, BOOLEAN Bit);
 #define MmSetCleanPage(__P, __A) MmSetDirtyBit(__P, __A, FALSE)
 #define MmSetDirtyPage(__P, __A) MmSetDirtyBit(__P, __A, TRUE)
 
+BOOLEAN
+NTAPI
+MmTakeDirtyBit(
+    _In_ PEPROCESS Process,
+    _In_ PVOID Address,
+    _In_ PFN_NUMBER Page);
+
 PFN_NUMBER
 NTAPI
 MmGetPfnForProcess(
@@ -2153,6 +2160,14 @@ MmIsDataSectionResident(
     _In_ PSECTION_OBJECT_POINTERS SectionObjectPointer,
     _In_ LONGLONG Offset,
     _In_ ULONG Length);
+
+VOID
+NTAPI
+MmTakeViewDirtyBits(
+    _In_ PEPROCESS Process,
+    _In_ PMEMORY_AREA MemoryArea,
+    _In_ ULONG_PTR Start,
+    _In_ ULONG_PTR End);
 
 NTSTATUS
 NTAPI

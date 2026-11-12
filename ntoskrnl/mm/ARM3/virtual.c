@@ -15,6 +15,9 @@
 #define MODULE_INVOLVED_IN_ARM3
 #include <mm/ARM3/miarm.h>
 
+/* MmFlushVirtualMemory writes a view in pieces of this many bytes (MmFlushSegment takes a ULONG length) */
+#define MI_FLUSH_VIEW_CHUNK (256 * 1024 * 1024)
+
 #define MI_MAPPED_COPY_PAGES  14
 #define MI_POOL_COPY_BYTES    512
 #define MI_MAX_TRANSFER_SIZE  64 * 1024
@@ -1631,16 +1634,112 @@ MmFlushVirtualMemory(IN PEPROCESS Process,
                      IN OUT PSIZE_T RegionSize,
                      OUT PIO_STATUS_BLOCK IoStatusBlock)
 {
+    ULONG_PTR Start, End, ViewEnd;
+    PMMADDRESS_NODE Node;
+    PMMVAD Vad;
+    PMEMORY_AREA MemoryArea;
+    PMM_SECTION_SEGMENT Segment = NULL;
+    PFILE_OBJECT FileObject;
+    LARGE_INTEGER Offset;
+    KAPC_STATE ApcState;
+    BOOLEAN Attached = FALSE;
+    NTSTATUS Status;
     PAGED_CODE();
 
-    UNIMPLEMENTED;
-
-    // Report actual state.
-    IoStatusBlock->Status = STATUS_NOT_IMPLEMENTED;
+    /*
+     * FlushViewOfFile: the pages of the range of a data file view that were written (through this view, another view
+     * or the cache) are written to the file before this returns; FlushFileBuffers then makes them durable.  As on
+     * Windows (10 22H2, measured): the base is rounded down to a page and a size of 0 means to the end of the view;
+     * on success the size and Information are the rounded length; a range that is not inside one view gives
+     * STATUS_NOT_MAPPED_VIEW, an image view or a pagefile-backed view STATUS_NOT_MAPPED_DATA (which
+     * FlushViewOfFile reports as success).
+     */
+    IoStatusBlock->Status = STATUS_SUCCESS;
     IoStatusBlock->Information = 0;
+    Start = (ULONG_PTR)PAGE_ALIGN(*BaseAddress);
+    End = ROUND_TO_PAGES((ULONG_PTR)*BaseAddress + *RegionSize);
+    *BaseAddress = (PVOID)Start;
 
-    // Pretend success.
-    return STATUS_SUCCESS; // STATUS_NOT_IMPLEMENTED
+    if (Process != PsGetCurrentProcess())
+    {
+        KeStackAttachProcess(&Process->Pcb, &ApcState);
+        Attached = TRUE;
+    }
+    MmLockAddressSpace(&Process->Vm);
+
+    if (Process->VmDeleted)
+    {
+        Status = STATUS_PROCESS_IS_TERMINATING;
+    }
+    else if (MiCheckForConflictingNode(Start >> PAGE_SHIFT, Start >> PAGE_SHIFT, &Process->VadRoot, &Node) != TableFoundNode)
+    {
+        Status = STATUS_NOT_MAPPED_VIEW;
+    }
+    else
+    {
+        Vad = (PMMVAD)Node;
+        ViewEnd = (Vad->EndingVpn + 1) << PAGE_SHIFT;
+        if (*RegionSize == 0)
+            End = ViewEnd;
+        MemoryArea = MI_IS_MEMORY_AREA_VAD(Vad) ? (PMEMORY_AREA)Vad : NULL;
+
+        if ((End > ViewEnd) || (End <= Start) || (!MemoryArea && Vad->u.VadFlags.PrivateMemory) ||
+            (MemoryArea && ((MemoryArea->Type != MEMORY_AREA_SECTION_VIEW) || MemoryArea->DeleteInProgress)))
+        {
+            Status = STATUS_NOT_MAPPED_VIEW;
+        }
+        else if (!MemoryArea || !(*MemoryArea->SectionData.Segment->Flags & MM_DATAFILE_SEGMENT))
+        {
+            /* A pagefile-backed (ARM3) view, an image view or a physical memory view: no file data to write */
+            Status = STATUS_NOT_MAPPED_DATA;
+        }
+        else
+        {
+            /* Pages written through this view are dirty only in its PTEs: tell the segment, then write them */
+            Segment = MemoryArea->SectionData.Segment;
+            MmTakeViewDirtyBits(Process, MemoryArea, Start, End);
+            Offset.QuadPart = MemoryArea->SectionData.ViewOffset + (Start - MA_GetStartingAddress(MemoryArea));
+            /* The view holds a reference until it is unmapped, which waits for the address space lock */
+            InterlockedIncrement64(Segment->ReferenceCount);
+            Status = STATUS_SUCCESS;
+        }
+    }
+
+    MmUnlockAddressSpace(&Process->Vm);
+    if (Attached)
+        KeUnstackDetachProcess(&ApcState);
+
+    if (!Segment)
+        return Status;
+
+    /* The file system's locks as for a cache flush (a paging write of the file runs under them), then the write */
+    FileObject = Segment->FileObject;
+    Status = FsRtlAcquireFileForCcFlushEx(FileObject);
+    if (NT_SUCCESS(Status))
+    {
+        ULONG_PTR Done;
+
+        for (Done = 0; Done < End - Start; Done += MI_FLUSH_VIEW_CHUNK)
+        {
+            LARGE_INTEGER ChunkOffset;
+            IO_STATUS_BLOCK Iosb;
+
+            ChunkOffset.QuadPart = Offset.QuadPart + Done;
+            Status = MmFlushSegment(FileObject->SectionObjectPointer, &ChunkOffset,
+                                    (ULONG)min(End - Start - Done, (ULONG_PTR)MI_FLUSH_VIEW_CHUNK), &Iosb);
+            if (!NT_SUCCESS(Status))
+                break;
+        }
+        FsRtlReleaseFileForCcFlush(FileObject);
+    }
+    MmDereferenceSegment(Segment);
+
+    if (NT_SUCCESS(Status))
+    {
+        *RegionSize = End - Start;
+        IoStatusBlock->Information = End - Start;
+    }
+    return Status;
 }
 
 ULONG
@@ -5407,7 +5506,9 @@ NtFlushVirtualMemory(IN HANDLE ProcessHandle,
         // Return data to user
         //
         *BaseAddress = PAGE_ALIGN(CapturedBaseAddress);
-        *NumberOfBytesToFlush = 0;
+        /* The rounded length that was flushed; a failure leaves the caller's size (Windows 10 22H2) */
+        if (NT_SUCCESS(Status))
+            *NumberOfBytesToFlush = CapturedBytesToFlush;
         *IoStatusBlock = LocalStatusBlock;
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
