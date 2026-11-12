@@ -55,6 +55,7 @@ list(APPEND SOURCE
     HookInputBatch.c
     UserLowsBatch.c
     HookChainUnhookUaf.c
+    ForegroundIdleHook.c
     HookFamilies.c
     HungWindow.c
     WindowPosChanged.c
