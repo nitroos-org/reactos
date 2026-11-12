@@ -25,6 +25,7 @@
 @ stdcall SignerFreeSignerContext(ptr)
 @ stdcall SignerSign(ptr ptr ptr ptr wstr ptr ptr)
 @ stdcall SignerSignEx(long ptr ptr ptr ptr wstr ptr ptr ptr)
+@ stdcall SignerSignEx2(long ptr ptr ptr ptr long str wstr ptr ptr ptr ptr ptr)
 @ stub SignerTimeStamp
 @ stub SignerTimeStampEx
 @ stub SpcGetCertFromKey
