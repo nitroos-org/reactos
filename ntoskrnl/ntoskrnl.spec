@@ -676,6 +676,15 @@
 @ stdcall KeQueryMaximumProcessorCount()
 @ stdcall KeQueryMaximumProcessorCountEx(long)
 @ stdcall KeQueryActiveProcessorCountEx(long)
+@ stdcall KeGetCurrentProcessorNumberEx(ptr)
+@ stdcall KeQueryActiveGroupCount()
+@ stdcall KeQueryMaximumGroupCount()
+@ stdcall KeQueryGroupAffinity(long)
+@ stdcall KeQueryUnbiasedInterruptTime()
+@ stdcall KeSetSystemAffinityThreadEx(long)
+@ stdcall KeRevertToUserAffinityThreadEx(long)
+@ stdcall KeSetSystemGroupAffinityThread(ptr ptr)
+@ stdcall KeRevertToUserGroupAffinityThread(ptr)
 @ stdcall -arch=i386,arm KeQueryInterruptTime()
 ;@ cdecl -arch=x86_64 KeQueryMultiThreadProcessorSet
 ;@ cdecl -arch=x86_64 KeQueryPrcbAddress

@@ -109,6 +109,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_io/IoPnpEventQueue.c
     ntos_io/IoVolume.c
     ntos_kd/KdSystemDebugControl.c
+    ntos_ke/KeProcessorGroups.c
     ntos_ke/KeApc.c
     ntos_ke/KeApcDelivery.c
     ntos_ke/KeBugCheckCallback.c
