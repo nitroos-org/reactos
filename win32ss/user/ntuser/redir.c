@@ -909,6 +909,25 @@ done:
     REGION_Delete(Trans);
 }
 
+/* Whether a translucent window (or a layered one not set yet) of the desktop window Desk overlaps prc: no pass is needed otherwise */
+static BOOL
+RedirTransNear(PWND Desk, const RECTL *prc)
+{
+    PWND Child;
+    PREDIR r;
+    RECTL rc;
+
+    for (Child = Desk->spwndChild; Child; Child = Child->spwndNext)
+    {
+        if ((Child->style & WS_VISIBLE) && RECTL_bIntersectRect(&rc, prc, &Child->rcWindow) &&
+            RedirTransKind(Child, &r) != TK_NONE)
+        {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
 /* Composes a rectangle of the screen on Wnd's desktop (level 2) */
 static VOID
 RedirComposeRect(PWND Wnd, const RECTL *prc)
@@ -916,7 +935,7 @@ RedirComposeRect(PWND Wnd, const RECTL *prc)
     PREGION Rgn;
     PWND Desk = Wnd ? Wnd->spwndParent : NULL;
 
-    if (gRedirLevel < 2 || !Desk || !UserIsDesktopWindow(Desk) || RECTL_bIsEmptyRect(prc))
+    if (gRedirLevel < 2 || !Desk || !UserIsDesktopWindow(Desk) || RECTL_bIsEmptyRect(prc) || !RedirTransNear(Desk, prc))
         return;
     Rgn = IntSysCreateRectpRgnIndirect(prc);
     if (Rgn)
@@ -932,8 +951,12 @@ FASTCALL
 UserRedirLayoutChanged(PWND Wnd, const RECTL *prcOld)
 {
     PREGION Rgn, New;
+    RECTL rcBoth;
 
     if (gRedirLevel < 2 || !Wnd || !Wnd->spwndParent || !UserIsDesktopWindow(Wnd->spwndParent))
+        return;
+    RECTL_bUnionRect(&rcBoth, prcOld, &Wnd->rcWindow);
+    if (!RedirTransNear(Wnd->spwndParent, &rcBoth))
         return;
     Rgn = IntSysCreateRectpRgnIndirect(prcOld);
     New = IntSysCreateRectpRgnIndirect(&Wnd->rcWindow);
