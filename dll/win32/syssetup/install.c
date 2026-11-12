@@ -1551,6 +1551,41 @@ IsUnattendedSetup(VOID)
 
 static
 VOID
+RecordAddonNoticesAcknowledged(VOID)
+{
+    HKEY hKey;
+    WCHAR szPath[MAX_PATH];
+    WCHAR szValue[16];
+    DWORD dwOne = 1;
+
+    /*
+     * [Unattend] AcknowledgeAddonNotices = yes: the administrator who wrote the
+     * answer file accepts the notices of the add-ons turned on at first boot
+     * (the AAC decoder patent notice) on behalf of the users, so the first-boot
+     * installer shows no box on an automated session. Only an unattended setup
+     * honours it; an interactive setup leaves the notice to be shown once.
+     */
+    if (!IsUnattendedSetup())
+        return;
+    GetSetupInfPath(szPath, _countof(szPath));
+    if (!GetPrivateProfileStringW(L"Unattend", L"AcknowledgeAddonNotices", L"no",
+                                  szValue, _countof(szValue), szPath) ||
+        _wcsicmp(szValue, L"yes") != 0)
+        return;
+
+    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\ReactOS\\Nitro\\Featmgr",
+                        0, NULL, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE,
+                        NULL, &hKey, NULL) != ERROR_SUCCESS)
+    {
+        DPRINT1("RecordAddonNoticesAcknowledged: cannot open the Featmgr key\n");
+        return;
+    }
+    RegSetValueExW(hKey, L"NoticesAcknowledged", 0, REG_DWORD, (const BYTE *)&dwOne, sizeof(dwOne));
+    RegCloseKey(hKey);
+}
+
+static
+VOID
 RegisterBrowserChooser(VOID)
 {
     HKEY hKey;
@@ -1690,6 +1725,7 @@ InstallReactOS(VOID)
     InstallWizard();
 
     RegisterBrowserChooser();
+    RecordAddonNoticesAcknowledged();
 
     SetAutoAdminLogon();
 

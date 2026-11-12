@@ -145,6 +145,10 @@ with `-DNITRO_SHIP_RAPPS=ON`). Everything it did for us is done here:
   Windows 10); browserchooser installs Firefox with `featmgr /install firefox`; syssetup and the language page call
   `featmgr /install <package>`. `rapps://` was never registered by anything in the tree, so there is no compatibility shim;
   programs that rapps' Generate installer registered keep working: `/nat-uninstall` reads the same `RApps` record.
+- `unattend.inf` `[Unattend] AcknowledgeAddonNotices = yes` (default no; only with `UnattendSetupEnabled = yes`): syssetup records
+  `HKLM\SOFTWARE\ReactOS\Nitro\Featmgr\NoticesAcknowledged=1`, and first boot then shows no notice box (it logs that the answer file
+  acknowledged it, and sets `NoticeShown.<id>` as if shown). Without the key the notice is shown once as above. For automated installs
+  (the regtest ISO sets it): a modal box would hang the first logon.
 - `unattend.inf` keeps the old key name `RappsDownload` (existing answer files): it now allows featmgr to download the add-ons.
 - Tests: `tests\roundtrip.cmd` (offline fixtures) and `tests\live-install.cmd` (a real HTTP download of a test installer, hash
   check, silent install, uninstall through the Uninstall key).
