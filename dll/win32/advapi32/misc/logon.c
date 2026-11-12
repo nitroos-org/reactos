@@ -1118,6 +1118,11 @@ Quit:
     if (!Success)
     {
         if (NT_SUCCESS(Status)) Status = STATUS_UNSUCCESSFUL;
+        /*
+         * The handle was created with full access, so this does not fail in practice. If it ever did, the
+         * process (still suspended) would be left behind with nobody holding a handle: there is nothing
+         * more the caller could do with it, so the result is not used.
+         */
         TerminateProcess(lpProcessInformation->hProcess, Status);
         CloseHandle(lpProcessInformation->hThread);
         CloseHandle(lpProcessInformation->hProcess);
