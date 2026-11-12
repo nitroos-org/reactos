@@ -481,6 +481,23 @@ FrLdrCheckCpuCompatibility(VOID)
                                      ProcessorFamily);
         }
     }
+
+#ifdef _M_AMD64
+    /* The 64-bit system needs CMPXCHG16B (CPUID.1:ECX[13]) for the 16 byte SLIST headers,
+       as Windows 8.1 and later do. Fail here with a message instead of in the kernel. */
+    if (NumberOfIds >= 1)
+    {
+        __cpuid(CpuInformation, 1);
+        if (!(CpuInformation[2] & (1 << 13)))
+        {
+            FrLdrBugCheckWithMessage(MISSING_HARDWARE_REQUIREMENTS,
+                                     __FILE__,
+                                     __LINE__,
+                                     "The processor does not support the CMPXCHG16B instruction.\n"
+                                     BRAND_PRODUCT_NAME " requires it on 64-bit systems.\n");
+        }
+    }
+#endif
 }
 
 /* EOF */
