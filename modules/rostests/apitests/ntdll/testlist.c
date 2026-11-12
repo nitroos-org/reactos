@@ -58,6 +58,7 @@ extern void func_NtConnectPortTerminate(void);
 extern void func_ContextExceptionRequest(void);
 extern void func_NtContinue(void);
 extern void func_ThreadDebugRegisters(void);
+extern void func_ThreadLockStress(void);
 extern void func_RtlBitmapRanges(void);
 extern void func_RtlFlsValue(void);
 extern void func_RtlUtf8String(void);
@@ -321,6 +322,7 @@ const struct test winetest_testlist[] =
     { "ContextExceptionRequest",       func_ContextExceptionRequest },
     { "NtContinue",                     func_NtContinue },
     { "ThreadDebugRegisters",           func_ThreadDebugRegisters },
+    { "ThreadLockStress",               func_ThreadLockStress },
     { "RtlBitmapRanges",                func_RtlBitmapRanges },
     { "RtlFlsValue",                    func_RtlFlsValue },
     { "RtlUtf8String",                  func_RtlUtf8String },
