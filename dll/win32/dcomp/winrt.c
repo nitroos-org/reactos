@@ -17,9 +17,11 @@
  * Windows.UI.Composition.Desktop.DesktopWindowTarget (composition.c) that keeps CompositionTarget.Root but does
  * not present anything yet (stage 4). An interface that has no clean public source for its IID stays a FIXME as
  * well: QueryInterface for an IID the object does not know logs it by value, so the log shows which interface a
- * caller asks for next. Known gaps (no IID or vtable from learn.microsoft.com, Wine or mingw-w64):
- *   ICompositorController (Compositor, Commit, EnsurePreviousCommitCompletedAsync, CommitNeeded),
- *   ICompositorDesktopInterop methods after CreateDesktopWindowTarget, IDesktopWindowTarget (IsTopmost),
+ * caller asks for next.
+ *
+ * ICompositorController, ICompositorDesktopInterop (second method) and IDesktopWindowTarget take their IID, slot
+ * order and signatures from microsoft/windows-rs (MIT OR Apache-2.0), commit
+ * 8ca69fdaa9d69c78b9bcfbee96c6916f2282e7f0 (details at each interface). Known gaps (no source for IID or vtable):
  *   ICompositor2 .. ICompositor7 and the other ICompositorWith* interfaces, ICompositorStatics.
  */
 
@@ -55,15 +57,19 @@ typedef __x_ABI_CWindows_CFoundation_CIClosable IClosable;
 typedef __x_ABI_CWindows_CFoundation_CIClosableVtbl IClosableVtbl;
 
 /*
- * ICompositorDesktopInterop (windows.ui.composition.interop.h). Source: the C# declaration of the interface on
- * learn.microsoft.com, "Using the Visual layer with Windows Forms" (MicrosoftDocs/windows-dev-docs-pr,
- * uwp/composition/using-the-visual-layer-with-windows-forms.md, page git_commit_id
- * 6b6b4abfd0405ca8dc14905fd4aa4ab21ca74fee; the WPF page carries the same declaration):
- * [Guid("29E691FA-4567-4DCA-B319-D0F207EB6807")], InterfaceIsIUnknown, first method
- * CreateDesktopWindowTarget(HWND hwndTarget, BOOL isTopmost, IDesktopWindowTarget **result). That page declares no
- * further method, so this vtable ends there: a later method has no public source for its slot.
- * The result is documented as a DesktopWindowTarget; the page's sample only queries it for ICompositionTarget.
- * IDesktopWindowTarget itself has no public IID, so the pointer returned is the object's IInspectable identity.
+ * ICompositorDesktopInterop (windows.ui.composition.interop.h), a plain IUnknown interface, IID
+ * 29E691FA-4567-4DCA-B319-D0F207EB6807. Two sources agree:
+ *  - learn.microsoft.com, "Using the Visual layer with Windows Forms" (MicrosoftDocs/windows-dev-docs-pr,
+ *    uwp/composition/using-the-visual-layer-with-windows-forms.md, page git_commit_id
+ *    6b6b4abfd0405ca8dc14905fd4aa4ab21ca74fee): the IID and the first method
+ *    CreateDesktopWindowTarget(HWND hwndTarget, BOOL isTopmost, IDesktopWindowTarget **result);
+ *  - microsoft/windows-rs (MIT OR Apache-2.0), commit 8ca69fdaa9d69c78b9bcfbee96c6916f2282e7f0,
+ *    metadata/win32/windowsuicompositioninterop.rdl, interface ICompositorDesktopInterop: IUnknown: the same IID and
+ *    exactly two methods in this order: CreateDesktopWindowTarget (slot 3), EnsureOnThread(DWORD threadId) (slot 4).
+ * Windows documents nothing about EnsureOnThread: it logs a FIXME and returns E_NOTIMPL.
+ * The result of CreateDesktopWindowTarget is a Windows.UI.Composition.Desktop.DesktopWindowTarget, returned as its
+ * IDesktopWindowTarget (composition.c; that vtable is complete, it has IsTopmost only).
+ * Both vtables here are complete per the metadata, so nothing is padded after them.
  */
 typedef struct ICompositorDesktopInterop ICompositorDesktopInterop;
 typedef struct ICompositorDesktopInteropVtbl
@@ -72,11 +78,107 @@ typedef struct ICompositorDesktopInteropVtbl
     ULONG (STDMETHODCALLTYPE *AddRef)(ICompositorDesktopInterop *This);
     ULONG (STDMETHODCALLTYPE *Release)(ICompositorDesktopInterop *This);
     HRESULT (STDMETHODCALLTYPE *CreateDesktopWindowTarget)(ICompositorDesktopInterop *This, HWND hwnd, BOOL topmost,
-            IInspectable **result);
+            WIDesktopWindowTarget **result);
+    HRESULT (STDMETHODCALLTYPE *EnsureOnThread)(ICompositorDesktopInterop *This, DWORD thread_id);
 } ICompositorDesktopInteropVtbl;
 struct ICompositorDesktopInterop { const ICompositorDesktopInteropVtbl *lpVtbl; };
 
+/*
+ * ICompositorController (Windows.UI.Composition.Core), the default interface of CompositorController
+ * (Activatable, agile, threading both; also IClosable). Source: microsoft/windows-rs (MIT OR Apache-2.0), commit
+ * 8ca69fdaa9d69c78b9bcfbee96c6916f2282e7f0, metadata/winrt/Windows.UI.Composition.Core.rdl, interface
+ * ICompositorController, guid 2d75f35a-70a7-4395-ba2d-cef0b18399f9, members in order after IInspectable:
+ *   get Compositor: Compositor              (slot 6)
+ *   Commit()                                (slot 7)
+ *   EnsurePreviousCommitCompletedAsync() -> IAsyncAction   (slot 8)
+ *   event CommitNeeded: TypedEventHandler<CompositorController, Object>   (add slot 9, remove slot 10)
+ * Only GUID, order and signatures were taken. The vtable is complete.
+ * IAsyncAction / IAsyncInfo are the ones in sdk/include/psdk (Wine).
+ */
+typedef struct ICompositorController ICompositorController;
+typedef struct ICommitNeededHandler ICommitNeededHandler;
+typedef struct { INT64 value; } EventToken;     /* Windows.Foundation.EventRegistrationToken */
+typedef struct WIAsyncAction WIAsyncAction;
+typedef struct WIAsyncInfo WIAsyncInfo;
+
+/* TypedEventHandler<CompositorController, Object>: a plain delegate, Invoke is slot 3 */
+typedef struct ICommitNeededHandlerVtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(ICommitNeededHandler *This, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(ICommitNeededHandler *This);
+    ULONG (STDMETHODCALLTYPE *Release)(ICommitNeededHandler *This);
+    HRESULT (STDMETHODCALLTYPE *Invoke)(ICommitNeededHandler *This, ICompositorController *sender,
+            IInspectable *args);
+} ICommitNeededHandlerVtbl;
+struct ICommitNeededHandler { const ICommitNeededHandlerVtbl *lpVtbl; };
+
+typedef struct ICompositorControllerVtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(ICompositorController *This, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(ICompositorController *This);
+    ULONG (STDMETHODCALLTYPE *Release)(ICompositorController *This);
+    HRESULT (STDMETHODCALLTYPE *GetIids)(ICompositorController *This, ULONG *count, IID **iids);
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(ICompositorController *This, HSTRING *name);
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(ICompositorController *This, TrustLevel *level);
+    HRESULT (STDMETHODCALLTYPE *get_Compositor)(ICompositorController *This, ICompositor **value);
+    HRESULT (STDMETHODCALLTYPE *Commit)(ICompositorController *This);
+    HRESULT (STDMETHODCALLTYPE *EnsurePreviousCommitCompletedAsync)(ICompositorController *This,
+            WIAsyncAction **operation);
+    HRESULT (STDMETHODCALLTYPE *add_CommitNeeded)(ICompositorController *This, ICommitNeededHandler *handler,
+            EventToken *token);
+    HRESULT (STDMETHODCALLTYPE *remove_CommitNeeded)(ICompositorController *This, EventToken token);
+} ICompositorControllerVtbl;
+struct ICompositorController { const ICompositorControllerVtbl *lpVtbl; };
+
+/* Windows.Foundation.IAsyncAction (5a648006-...), AsyncActionCompletedHandler, IAsyncInfo (00000036-...) */
+typedef struct IAsyncActionHandler IAsyncActionHandler;
+typedef struct IAsyncActionHandlerVtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(IAsyncActionHandler *This, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(IAsyncActionHandler *This);
+    ULONG (STDMETHODCALLTYPE *Release)(IAsyncActionHandler *This);
+    HRESULT (STDMETHODCALLTYPE *Invoke)(IAsyncActionHandler *This, WIAsyncAction *action, INT32 status);
+} IAsyncActionHandlerVtbl;
+struct IAsyncActionHandler { const IAsyncActionHandlerVtbl *lpVtbl; };
+
+typedef struct WIAsyncActionVtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(WIAsyncAction *This, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(WIAsyncAction *This);
+    ULONG (STDMETHODCALLTYPE *Release)(WIAsyncAction *This);
+    HRESULT (STDMETHODCALLTYPE *GetIids)(WIAsyncAction *This, ULONG *count, IID **iids);
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(WIAsyncAction *This, HSTRING *name);
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(WIAsyncAction *This, TrustLevel *level);
+    HRESULT (STDMETHODCALLTYPE *put_Completed)(WIAsyncAction *This, IAsyncActionHandler *handler);
+    HRESULT (STDMETHODCALLTYPE *get_Completed)(WIAsyncAction *This, IAsyncActionHandler **handler);
+    HRESULT (STDMETHODCALLTYPE *GetResults)(WIAsyncAction *This);
+} WIAsyncActionVtbl;
+struct WIAsyncAction { const WIAsyncActionVtbl *lpVtbl; };
+
+typedef struct WIAsyncInfoVtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(WIAsyncInfo *This, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(WIAsyncInfo *This);
+    ULONG (STDMETHODCALLTYPE *Release)(WIAsyncInfo *This);
+    HRESULT (STDMETHODCALLTYPE *GetIids)(WIAsyncInfo *This, ULONG *count, IID **iids);
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(WIAsyncInfo *This, HSTRING *name);
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(WIAsyncInfo *This, TrustLevel *level);
+    HRESULT (STDMETHODCALLTYPE *get_Id)(WIAsyncInfo *This, UINT32 *id);
+    HRESULT (STDMETHODCALLTYPE *get_Status)(WIAsyncInfo *This, INT32 *status);
+    HRESULT (STDMETHODCALLTYPE *get_ErrorCode)(WIAsyncInfo *This, HRESULT *code);
+    HRESULT (STDMETHODCALLTYPE *Cancel)(WIAsyncInfo *This);
+    HRESULT (STDMETHODCALLTYPE *Close)(WIAsyncInfo *This);
+} WIAsyncInfoVtbl;
+struct WIAsyncInfo { const WIAsyncInfoVtbl *lpVtbl; };
+
 DEFINE_GUID(IID_ICompositorDesktopInterop, 0x29e691fa, 0x4567, 0x4dca, 0xb3, 0x19, 0xd0, 0xf2, 0x07, 0xeb, 0x68, 0x07);
+DEFINE_GUID(IID_ICompositorController, 0x2d75f35a, 0x70a7, 0x4395, 0xba, 0x2d, 0xce, 0xf0, 0xb1, 0x83, 0x99, 0xf9);
+DEFINE_GUID(IID_WIAsyncAction, 0x5a648006, 0x843a, 0x4da9, 0x86, 0x5b, 0x9d, 0x26, 0xe5, 0xdf, 0xad, 0x7b);
+DEFINE_GUID(IID_WIAsyncInfo, 0x00000036, 0x0000, 0x0000, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46);
+
+#ifndef RO_E_CLOSED
+#define RO_E_CLOSED ((HRESULT)0x80000013)
+#endif
 
 static const WCHAR name_compositor[] = L"Windows.UI.Composition.Compositor";
 static const WCHAR name_controller[] = L"Windows.UI.Composition.Core.CompositorController";
@@ -291,15 +393,25 @@ struct compositor
     BOOL closed;
 };
 
+struct commit_handler
+{
+    ICommitNeededHandler *handler;      /* referenced */
+    INT64 token;
+};
+
 struct controller
 {
     IInspectable IInspectable_iface;
+    ICompositorController ICompositorController_iface;
     IClosable IClosable_iface;
     IAgileObject IAgileObject_iface;
     IUnknown *marshal;
     LONG ref;
     BOOL closed;
-    struct compositor *compositor;      /* ICompositorController::Compositor, once its IID has a clean source */
+    struct compositor *compositor;      /* ICompositorController::Compositor, referenced */
+    struct commit_handler *handlers;    /* CommitNeeded, under comp_lock */
+    int nhandlers, caphandlers;
+    INT64 next_token;
 };
 
 static LONG object_count;
@@ -318,6 +430,8 @@ static inline struct compositor *comp_from_agile(IAgileObject *i)
 { return CONTAINING_RECORD(i, struct compositor, IAgileObject_iface); }
 static inline struct controller *ctl_from_identity(IInspectable *i)
 { return CONTAINING_RECORD(i, struct controller, IInspectable_iface); }
+static inline struct controller *ctl_from_ctl(ICompositorController *i)
+{ return CONTAINING_RECORD(i, struct controller, ICompositorController_iface); }
 static inline struct controller *ctl_from_closable(IClosable *i)
 { return CONTAINING_RECORD(i, struct controller, IClosable_iface); }
 static inline struct controller *ctl_from_agile(IAgileObject *i)
@@ -496,7 +610,7 @@ static ULONG STDMETHODCALLTYPE desktop_Release(ICompositorDesktopInterop *iface)
 { return IInspectable_Release(&comp_from_desktop(iface)->IInspectable_iface); }
 
 static HRESULT STDMETHODCALLTYPE desktop_CreateDesktopWindowTarget(ICompositorDesktopInterop *iface, HWND hwnd,
-        BOOL topmost, IInspectable **result)
+        BOOL topmost, WIDesktopWindowTarget **result)
 {
     struct compositor *This = comp_from_desktop(iface);
 
@@ -509,10 +623,17 @@ static HRESULT STDMETHODCALLTYPE desktop_CreateDesktopWindowTarget(ICompositorDe
     return comp_new_desktop_target((IUnknown *)&This->IInspectable_iface, hwnd, topmost, result);
 }
 
+static HRESULT STDMETHODCALLTYPE desktop_EnsureOnThread(ICompositorDesktopInterop *iface, DWORD thread_id)
+{
+    FIXME("ICompositorDesktopInterop::EnsureOnThread(%lu): not implemented\n", thread_id);
+    return E_NOTIMPL;
+}
+
 static const ICompositorDesktopInteropVtbl desktop_vtbl =
 {
     desktop_QueryInterface, desktop_AddRef, desktop_Release,
     desktop_CreateDesktopWindowTarget,
+    desktop_EnsureOnThread,
 };
 
 #define IFACE_CLOSABLE(prefix, T, from, ident, ctype) \
@@ -578,6 +699,8 @@ static HRESULT STDMETHODCALLTYPE controller_id_QueryInterface(IInspectable *ifac
     *out = NULL;
     if (IsEqualGUID(iid, &IID_IUnknown) || IsEqualGUID(iid, &IID_IInspectable))
         *out = &This->IInspectable_iface;
+    else if (IsEqualGUID(iid, &IID_ICompositorController))
+        *out = &This->ICompositorController_iface;
     else if (IsEqualGUID(iid, &IID___x_ABI_CWindows_CFoundation_CIClosable))
         *out = &This->IClosable_iface;
     else if (IsEqualGUID(iid, &IID_IAgileObject))
@@ -586,7 +709,6 @@ static HRESULT STDMETHODCALLTYPE controller_id_QueryInterface(IInspectable *ifac
         return IUnknown_QueryInterface(This->marshal, iid, out);
     else
     {
-        /* ICompositorController is the default interface; it has no clean IID source yet */
         FIXME("CompositorController: interface %s not implemented, returning E_NOINTERFACE.\n", debugstr_guid(iid));
         return E_NOINTERFACE;
     }
@@ -606,6 +728,10 @@ static ULONG STDMETHODCALLTYPE controller_id_Release(IInspectable *iface)
 
     if (!ref)
     {
+        int i;
+
+        for (i = 0; i < This->nhandlers; i++) This->handlers[i].handler->lpVtbl->Release(This->handlers[i].handler);
+        HeapFree(GetProcessHeap(), 0, This->handlers);
         if (This->compositor) IInspectable_Release(&This->compositor->IInspectable_iface);
         if (This->marshal) IUnknown_Release(This->marshal);
         HeapFree(GetProcessHeap(), 0, This);
@@ -616,7 +742,7 @@ static ULONG STDMETHODCALLTYPE controller_id_Release(IInspectable *iface)
 
 static HRESULT STDMETHODCALLTYPE controller_id_GetIids(IInspectable *iface, ULONG *count, IID **iids)
 {
-    const IID *list[] = { &IID___x_ABI_CWindows_CFoundation_CIClosable };
+    const IID *list[] = { &IID_ICompositorController, &IID___x_ABI_CWindows_CFoundation_CIClosable };
     return make_iids(count, iids, list, ARRAY_SIZE(list));
 }
 
@@ -638,6 +764,277 @@ static const IInspectableVtbl controller_id_vtbl =
     controller_id_GetIids, controller_id_GetRuntimeClassName, controller_id_GetTrustLevel
 };
 
+/* ---- ICompositorController ---- */
+
+FWD_UNKNOWN(ctl, ICompositorController, ctl_from_ctl, IInspectable_iface)
+
+/* The only asynchronous result of the controller: nothing is ever in flight (Commit has no deferred work yet), so
+ * the IAsyncAction is complete from the start. Completed handlers run at once on the calling thread. */
+struct done_action
+{
+    WIAsyncAction action;
+    WIAsyncInfo info;
+    IAgileObject agile;
+    LONG ref;
+    LONG handler_set;
+    BOOL closed;
+};
+
+static inline struct done_action *da_from_action(WIAsyncAction *i)
+{ return CONTAINING_RECORD(i, struct done_action, action); }
+static inline struct done_action *da_from_info(WIAsyncInfo *i)
+{ return CONTAINING_RECORD(i, struct done_action, info); }
+static inline struct done_action *da_from_agile(IAgileObject *i)
+{ return CONTAINING_RECORD(i, struct done_action, agile); }
+
+static HRESULT STDMETHODCALLTYPE da_QueryInterface(WIAsyncAction *iface, REFIID iid, void **out)
+{
+    struct done_action *This = da_from_action(iface);
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (IsEqualGUID(iid, &IID_IUnknown) || IsEqualGUID(iid, &IID_IInspectable) || IsEqualGUID(iid, &IID_WIAsyncAction))
+        *out = &This->action;
+    else if (IsEqualGUID(iid, &IID_WIAsyncInfo))
+        *out = &This->info;
+    else if (IsEqualGUID(iid, &IID_IAgileObject))
+        *out = &This->agile;
+    else
+        return E_NOINTERFACE;
+    IUnknown_AddRef((IUnknown *)*out);
+    return S_OK;
+}
+
+static ULONG STDMETHODCALLTYPE da_AddRef(WIAsyncAction *iface)
+{ return InterlockedIncrement(&da_from_action(iface)->ref); }
+
+static ULONG STDMETHODCALLTYPE da_Release(WIAsyncAction *iface)
+{
+    struct done_action *This = da_from_action(iface);
+    ULONG ref = InterlockedDecrement(&This->ref);
+
+    if (!ref) HeapFree(GetProcessHeap(), 0, This);
+    return ref;
+}
+
+static HRESULT STDMETHODCALLTYPE da_GetIids(WIAsyncAction *iface, ULONG *count, IID **iids)
+{
+    const IID *list[] = { &IID_WIAsyncAction, &IID_WIAsyncInfo };
+    return make_iids(count, iids, list, ARRAY_SIZE(list));
+}
+
+static HRESULT STDMETHODCALLTYPE da_GetRuntimeClassName(WIAsyncAction *iface, HSTRING *name)
+{ return class_name_out(L"Windows.Foundation.IAsyncAction", name); }
+
+static HRESULT STDMETHODCALLTYPE da_GetTrustLevel(WIAsyncAction *iface, TrustLevel *level)
+{
+    if (!level) return E_POINTER;
+    *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE da_put_Completed(WIAsyncAction *iface, IAsyncActionHandler *handler)
+{
+    struct done_action *This = da_from_action(iface);
+
+    if (!handler) return E_INVALIDARG;
+    if (This->closed) return E_ILLEGAL_METHOD_CALL;
+    if (InterlockedCompareExchange(&This->handler_set, 1, 0)) return E_ILLEGAL_DELEGATE_ASSIGNMENT;
+    handler->lpVtbl->Invoke(handler, iface, 1 /* Completed */);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE da_get_Completed(WIAsyncAction *iface, IAsyncActionHandler **handler)
+{
+    if (!handler) return E_POINTER;
+    *handler = NULL;
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE da_GetResults(WIAsyncAction *iface)
+{ return da_from_action(iface)->closed ? E_ILLEGAL_METHOD_CALL : S_OK; }
+
+static const WIAsyncActionVtbl da_vtbl =
+{
+    da_QueryInterface, da_AddRef, da_Release, da_GetIids, da_GetRuntimeClassName, da_GetTrustLevel,
+    da_put_Completed, da_get_Completed, da_GetResults
+};
+
+static HRESULT STDMETHODCALLTYPE dai_QueryInterface(WIAsyncInfo *i, REFIID iid, void **out)
+{ return da_QueryInterface(&da_from_info(i)->action, iid, out); }
+static ULONG STDMETHODCALLTYPE dai_AddRef(WIAsyncInfo *i) { return da_AddRef(&da_from_info(i)->action); }
+static ULONG STDMETHODCALLTYPE dai_Release(WIAsyncInfo *i) { return da_Release(&da_from_info(i)->action); }
+static HRESULT STDMETHODCALLTYPE dai_GetIids(WIAsyncInfo *i, ULONG *c, IID **iids)
+{ return da_GetIids(&da_from_info(i)->action, c, iids); }
+static HRESULT STDMETHODCALLTYPE dai_GetRuntimeClassName(WIAsyncInfo *i, HSTRING *n)
+{ return da_GetRuntimeClassName(&da_from_info(i)->action, n); }
+static HRESULT STDMETHODCALLTYPE dai_GetTrustLevel(WIAsyncInfo *i, TrustLevel *l)
+{ return da_GetTrustLevel(&da_from_info(i)->action, l); }
+
+static HRESULT STDMETHODCALLTYPE dai_get_Id(WIAsyncInfo *i, UINT32 *id)
+{
+    if (!id) return E_POINTER;
+    *id = 1;
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE dai_get_Status(WIAsyncInfo *i, INT32 *status)
+{
+    if (!status) return E_POINTER;
+    if (da_from_info(i)->closed) return E_ILLEGAL_METHOD_CALL;
+    *status = 1;                        /* Completed */
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE dai_get_ErrorCode(WIAsyncInfo *i, HRESULT *code)
+{
+    if (!code) return E_POINTER;
+    *code = S_OK;
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE dai_Cancel(WIAsyncInfo *i) { return S_OK; }   /* already complete */
+
+static HRESULT STDMETHODCALLTYPE dai_Close(WIAsyncInfo *i)
+{
+    da_from_info(i)->closed = TRUE;
+    return S_OK;
+}
+
+static const WIAsyncInfoVtbl dai_vtbl =
+{
+    dai_QueryInterface, dai_AddRef, dai_Release, dai_GetIids, dai_GetRuntimeClassName, dai_GetTrustLevel,
+    dai_get_Id, dai_get_Status, dai_get_ErrorCode, dai_Cancel, dai_Close
+};
+
+static HRESULT STDMETHODCALLTYPE dag_QueryInterface(IAgileObject *i, REFIID iid, void **out)
+{ return da_QueryInterface(&da_from_agile(i)->action, iid, out); }
+static ULONG STDMETHODCALLTYPE dag_AddRef(IAgileObject *i) { return da_AddRef(&da_from_agile(i)->action); }
+static ULONG STDMETHODCALLTYPE dag_Release(IAgileObject *i) { return da_Release(&da_from_agile(i)->action); }
+static const IAgileObjectVtbl dag_vtbl = { dag_QueryInterface, dag_AddRef, dag_Release };
+
+static HRESULT done_action_create(WIAsyncAction **out)
+{
+    struct done_action *This = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*This));
+
+    if (!This) return E_OUTOFMEMORY;
+    This->action.lpVtbl = &da_vtbl;
+    This->info.lpVtbl = &dai_vtbl;
+    This->agile.lpVtbl = &dag_vtbl;
+    This->ref = 1;
+    *out = &This->action;
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE ctl_get_Compositor(ICompositorController *iface, ICompositor **value)
+{
+    struct controller *This = ctl_from_ctl(iface);
+
+    TRACE("%p, %p\n", iface, value);
+    if (!value) return E_POINTER;
+    *value = NULL;
+    if (This->closed) return RO_E_CLOSED;   /* FIXME: verify on the oracle */
+    *value = &This->compositor->ICompositor_iface;
+    IInspectable_AddRef(&This->compositor->IInspectable_iface);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE ctl_Commit(ICompositorController *iface)
+{
+    struct controller *This = ctl_from_ctl(iface);
+
+    TRACE("%p\n", iface);
+    if (This->closed) return RO_E_CLOSED;   /* FIXME: verify on the oracle */
+    /* Documented: sends the batched changes of the Compositor to the renderer. The object model has no renderer
+     * side to hand them to yet (no window surfaces), so there is nothing to do; the tree stays readable. */
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE ctl_EnsurePreviousCommitCompletedAsync(ICompositorController *iface,
+        WIAsyncAction **operation)
+{
+    struct controller *This = ctl_from_ctl(iface);
+
+    TRACE("%p, %p\n", iface, operation);
+    if (!operation) return E_POINTER;
+    *operation = NULL;
+    if (This->closed) return RO_E_CLOSED;   /* FIXME: verify on the oracle */
+    return done_action_create(operation);
+}
+
+static HRESULT STDMETHODCALLTYPE ctl_add_CommitNeeded(ICompositorController *iface, ICommitNeededHandler *handler,
+        EventToken *token)
+{
+    struct controller *This = ctl_from_ctl(iface);
+    struct commit_handler *grown;
+    HRESULT hr = S_OK;
+
+    TRACE("%p, %p, %p\n", iface, handler, token);
+    if (!token) return E_POINTER;
+    token->value = 0;
+    if (!handler) return E_INVALIDARG;
+    if (This->closed) return RO_E_CLOSED;   /* FIXME: verify on the oracle */
+    handler->lpVtbl->AddRef(handler);
+    comp_lock();
+    if (This->nhandlers == This->caphandlers)
+    {
+        int cap = This->caphandlers ? This->caphandlers * 2 : 4;
+
+        grown = This->handlers ? HeapReAlloc(GetProcessHeap(), 0, This->handlers, cap * sizeof(*grown))
+                               : HeapAlloc(GetProcessHeap(), 0, cap * sizeof(*grown));
+        if (grown)
+        {
+            This->handlers = grown;
+            This->caphandlers = cap;
+        }
+        else
+            hr = E_OUTOFMEMORY;
+    }
+    if (hr == S_OK)
+    {
+        token->value = This->next_token++;
+        This->handlers[This->nhandlers].handler = handler;
+        This->handlers[This->nhandlers++].token = token->value;
+    }
+    comp_unlock();
+    if (hr != S_OK) handler->lpVtbl->Release(handler);
+    /* FIXME: CommitNeeded is documented to fire when the Compositor has changes to commit; the object model has
+     * no change notification, so the handler is kept but never invoked. */
+    FIXME("CompositorController::CommitNeeded: handler %p registered, the event is never raised\n", handler);
+    return hr;
+}
+
+static HRESULT STDMETHODCALLTYPE ctl_remove_CommitNeeded(ICompositorController *iface, EventToken token)
+{
+    struct controller *This = ctl_from_ctl(iface);
+    ICommitNeededHandler *gone = NULL;
+    int i;
+
+    TRACE("%p, %s\n", iface, wine_dbgstr_longlong(token.value));
+    comp_lock();
+    for (i = 0; i < This->nhandlers; i++)
+        if (This->handlers[i].token == token.value)
+        {
+            gone = This->handlers[i].handler;
+            memmove(&This->handlers[i], &This->handlers[i + 1], (This->nhandlers - i - 1) * sizeof(*This->handlers));
+            This->nhandlers--;
+            break;
+        }
+    comp_unlock();
+    if (gone) gone->lpVtbl->Release(gone);
+    return S_OK;                        /* an unknown token is not an error for a WinRT event */
+}
+
+static const ICompositorControllerVtbl controller_vtbl =
+{
+    ctl_QueryInterface, ctl_AddRef, ctl_Release, ctl_GetIids, ctl_GetRuntimeClassName, ctl_GetTrustLevel,
+    ctl_get_Compositor,
+    ctl_Commit,
+    ctl_EnsurePreviousCommitCompletedAsync,
+    ctl_add_CommitNeeded,
+    ctl_remove_CommitNeeded,
+};
+
 static HRESULT controller_create(IInspectable **out)
 {
     struct controller *This = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*This));
@@ -645,9 +1042,11 @@ static HRESULT controller_create(IInspectable **out)
 
     if (!This) return E_OUTOFMEMORY;
     This->IInspectable_iface.lpVtbl = &controller_id_vtbl;
+    This->ICompositorController_iface.lpVtbl = &controller_vtbl;
     This->IClosable_iface.lpVtbl = &controller_closable_vtbl;
     This->IAgileObject_iface.lpVtbl = &controller_agile_vtbl;
     This->ref = 1;
+    This->next_token = 1;
     if (FAILED(hr = compositor_create(&This->compositor)))
     {
         HeapFree(GetProcessHeap(), 0, This);

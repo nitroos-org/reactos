@@ -35,6 +35,9 @@ static const GUID IID_ICompositor = {0xb403ca50, 0x7f8c, 0x4e83, {0x98, 0x5f, 0x
 static const GUID IID_ICompositorInterop = {0x25297d5c, 0x3ad4, 0x4c9c, {0xb5, 0xcf, 0xe3, 0x6a, 0x38, 0x51, 0x23, 0x30}};
 /* ICompositorDesktopInterop: learn.microsoft.com, "Using the Visual layer with Windows Forms" (C# declaration) */
 static const GUID IID_ICompositorDesktopInterop = {0x29e691fa, 0x4567, 0x4dca, {0xb3, 0x19, 0xd0, 0xf2, 0x07, 0xeb, 0x68, 0x07}};
+/* ICompositorController: microsoft/windows-rs (MIT OR Apache-2.0) commit 8ca69fdaa9d69c78b9bcfbee96c6916f2282e7f0,
+ * metadata/winrt/Windows.UI.Composition.Core.rdl: slot 6 get Compositor, slot 7 Commit */
+static const GUID IID_ICompositorController = {0x2d75f35a, 0x70a7, 0x4395, {0xba, 0x2d, 0xce, 0xf0, 0xb1, 0x83, 0x99, 0xf9}};
 static const GUID IID_Unknown1 = {0x12345678, 0x1234, 0x1234, {0x12, 0x34, 0x12, 0x34, 0x12, 0x34, 0x12, 0x34}};
 
 typedef HRESULT (WINAPI *PRO_GET_ACTIVATION_FACTORY)(PVOID, REFIID, void **);
@@ -106,6 +109,29 @@ static void TestClass(const WCHAR *Name, BOOL IsCompositor)
     ok(hr == S_OK && Iface, "%ls: QI(IAgileObject) returned 0x%08lx\n", Name, hr);
     if (Iface)
         Iface->lpVtbl->Release(Iface);
+
+    if (!IsCompositor)
+    {
+        IObj *Comp = NULL;
+
+        Iface = NULL;
+        hr = Obj->lpVtbl->QueryInterface(Obj, &IID_ICompositorController, (void **)&Iface);
+        ok(hr == S_OK && Iface, "QI(ICompositorController) returned 0x%08lx\n", hr);
+        if (Iface)
+        {
+            hr = Iface->lpVtbl->Method6(Iface, &Comp);
+            ok(hr == S_OK && Comp, "ICompositorController::get_Compositor returned 0x%08lx\n", hr);
+            if (Comp)
+                Comp->lpVtbl->Release(Comp);
+            Iids = NULL;
+            Count = 0;
+            hr = Iface->lpVtbl->GetIids(Iface, &Count, &Iids);
+            ok(hr == S_OK && Count >= 2, "ICompositorController::GetIids returned 0x%08lx, %lu IIDs\n", hr, Count);
+            if (hr == S_OK)
+                CoTaskMemFree(Iids);
+            Iface->lpVtbl->Release(Iface);
+        }
+    }
 
     if (IsCompositor)
     {
