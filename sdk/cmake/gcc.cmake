@@ -360,6 +360,9 @@ if(NITRO_REPRODUCIBLE_BUILD)
     string(TIMESTAMP _nitro_time "%H:%M:%S" UTC)
     string(REGEX REPLACE " 0([0-9]) " "  \\1 " _nitro_date "${_nitro_date}")
     add_compile_options(-Wno-builtin-macro-redefined "-D__DATE__=\"${_nitro_date}\"" "-D__TIME__=\"${_nitro_time}\"")
+    # the source and build directories are not part of the output (generated parsers carry their #line path, assertions their __FILE__);
+    # the build directory comes second because it lies inside the source tree in the usual layout
+    add_compile_options("-ffile-prefix-map=${REACTOS_SOURCE_DIR}=/ros-src" "-ffile-prefix-map=${REACTOS_BINARY_DIR}=/ros-bin")
 endif()
 if(NITRO_REPRODUCIBLE_BUILD)
     # ld would write the link time into every PE header (and its debug directory): 0 instead
