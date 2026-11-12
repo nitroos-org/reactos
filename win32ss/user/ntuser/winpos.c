@@ -241,7 +241,7 @@ PWND FASTCALL IntGetLastTopMostWindow(VOID)
     PWND pWnd;
     PDESKTOP rpdesk = gptiCurrent->rpdesk;
 
-    if ( rpdesk &&
+    if ( rpdesk && rpdesk->pDeskInfo && rpdesk->pDeskInfo->spwnd &&
         (pWnd = rpdesk->pDeskInfo->spwnd->spwndChild) &&
          pWnd->ExStyle & WS_EX_TOPMOST)
     {

@@ -1624,6 +1624,13 @@ IntDestroyInputContext(_In_ PIMC pIMC)
         return FALSE;
     }
 
+    /* No desktop window once CSRSS has exited (IntDesktopThreadProcessExit) */
+    if (!pti->rpdesk || !pti->rpdesk->pDeskInfo || !pti->rpdesk->pDeskInfo->spwnd)
+    {
+        EngSetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
     pwndChild = pti->rpdesk->pDeskInfo->spwnd->spwndChild;
     pwl = IntBuildHwndList(pwndChild, IACE_LIST | IACE_CHILDREN, pti);
     if (pwl)

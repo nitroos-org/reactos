@@ -2408,6 +2408,16 @@ co_UserCreateWindowEx(CREATESTRUCTW* Cs,
        goto cleanup;
    }
 
+   /* The desktop and message windows of the desktop are gone once CSRSS has exited
+      (IntDesktopThreadProcessExit): nothing to create a window under */
+   if (!pti->rpdesk->pDeskInfo || !pti->rpdesk->pDeskInfo->spwnd ||
+       (Cs->hwndParent == HWND_MESSAGE && !pti->rpdesk->spwndMessage))
+   {
+       WARN("The desktop of the thread has no desktop window, cannot create %wZ\n", ClassName);
+       EngSetLastError(ERROR_INVALID_PARAMETER);
+       goto cleanup;
+   }
+
    /* Now find the parent and the owner window */
    hWndParent = UserHMGetHandle(pti->rpdesk->pDeskInfo->spwnd);
    hWndOwner = NULL;
