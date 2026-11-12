@@ -25,7 +25,10 @@ DWORD DebugTraceLevel = MIN_TRACE;
 
 /* FIXME: should depend on SystemSize */
 ULONG AfdReceiveWindowSize = 0x2000;
-ULONG AfdSendWindowSize = 0x2000;
+/* The send window of a socket (what SO_SNDBUF reads, and how much a sender can queue before it waits for
+ * the transport). Windows 10 22H2 reports SO_SNDBUF 65536 on a fresh TCP socket, on loopback and Ethernet,
+ * in x64 and WoW64 processes (oracle probe 2026-11-11), and 8 KB made every large send a round trip. */
+ULONG AfdSendWindowSize = 0x10000;
 /* The receive buffer of a datagram socket: Windows 10 reads SO_RCVBUF as 64K and keeps datagrams until the
  * queued bytes reach it (47 of 1400 bytes, 656 of 100 bytes). It is also the largest datagram AFD can take. */
 ULONG AfdDatagramReceiveWindowSize = 0x10000;

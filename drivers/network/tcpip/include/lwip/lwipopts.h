@@ -77,8 +77,11 @@
 
 #define TCP_WND_DEFAULT                 0x10000
 
-/* The send buffer stays 64K: it does not follow TCP_WND */
-#define TCP_SND_BUF                     0xFFFF
+/* The send buffer does not follow TCP_WND. It holds a whole AFD send window (64K, what SO_SNDBUF reads on
+ * Windows) and a little more, so a window goes down in one TdiSend. At 0xFFFF a window left one byte over,
+ * which stayed in flight until the next ACK and made the next non-blocking send fail as WSAEWOULDBLOCK.
+ * (lwIP wants TCP_SNDLOWAT, half of it, below 0xFFFF - 4 * TCP_MSS) */
+#define TCP_SND_BUF                     0x12000
 
 #define TCP_MAXRTX                      8
 

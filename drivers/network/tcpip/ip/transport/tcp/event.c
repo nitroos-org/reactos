@@ -34,6 +34,204 @@ BucketCompletionWorker(PVOID Context)
     ExFreeToNPagedLookasideList(&TdiBucketLookasideList, Bucket);
 }
 
+/* Completions made under the lwIP core lock. The core lock is not recursive and a completion
+ * routine (AFD) can start the next request at once, which takes the lock again, so the buckets wait
+ * here (under the core lock) and sys_unlock_tcpip_core completes them once it has released the lock:
+ * on the thread that made them, with no work item and no thread wake. */
+static LIST_ENTRY DeferredCompletions;
+
+/* Threads inside the receive worker (datalink/lan.c). It is one stage of a pipeline: what it
+ * completes inline (AFD copies data to the reader and posts the next receive) delays the packets
+ * behind it, which the same completions on other CPUs do not (HTTP download from the host:
+ * 97 -> 68 MB/s with inline completion), so its completions go to work items */
+static volatile LONG ReceiveWorkers;
+
+/* Threads that declared themselves a lock-free context (the loopback worker). A completion runs inline
+ * only on such a thread: a thread that is inside AFD or TDI (a send, a connect, a listen) holds the AFD
+ * mutex of its socket, and AFD's completion of another socket takes that socket's mutex, so two threads
+ * could wait for each other's. The worker holds nothing when it unlocks the core. */
+#define INLINE_SLOTS 8
+static PKTHREAD volatile InlineThreads[INLINE_SLOTS];
+
+VOID TCPEnterInlineContext(VOID)
+{
+    ULONG i;
+    PKTHREAD Me = KeGetCurrentThread();
+
+    for (i = 0; i < INLINE_SLOTS; i++)
+    {
+        if (!InlineThreads[i] && InterlockedCompareExchangePointer((PVOID volatile *)&InlineThreads[i], Me, NULL) == NULL)
+            return;
+    }
+}
+
+VOID TCPLeaveInlineContext(VOID)
+{
+    ULONG i;
+    PKTHREAD Me = KeGetCurrentThread();
+
+    for (i = 0; i < INLINE_SLOTS; i++)
+    {
+        if (InlineThreads[i] == Me)
+        {
+            InterlockedExchangePointer((PVOID volatile *)&InlineThreads[i], NULL);
+            return;
+        }
+    }
+}
+
+static BOOLEAN InInlineContext(VOID)
+{
+    ULONG i;
+    PKTHREAD Me = KeGetCurrentThread();
+
+    for (i = 0; i < INLINE_SLOTS; i++)
+    {
+        if (InlineThreads[i] == Me)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+VOID TCPEnterReceiveWorker(VOID) { InterlockedIncrement(&ReceiveWorkers); }
+VOID TCPLeaveReceiveWorker(VOID) { InterlockedDecrement(&ReceiveWorkers); }
+
+/* Stack a completion needs before it runs inline (the routine may start the next request, which
+ * unlocks the core and completes more buckets on the same stack) */
+#define TCP_COMPLETE_INLINE_STACK (KERNEL_STACK_SIZE / 2)
+
+static KSPIN_LOCK BatchLock;
+static LIST_ENTRY BatchList;
+
+VOID
+TCPInitDeferredCompletions(VOID)
+{
+    InitializeListHead(&DeferredCompletions);
+    InitializeListHead(&BatchList);
+    KeInitializeSpinLock(&BatchLock);
+}
+
+/* Under the core lock: takes the buckets that wait; FALSE if there are none */
+BOOLEAN
+TCPTakeDeferredCompletions(PLIST_ENTRY Taken)
+{
+    if (IsListEmpty(&DeferredCompletions))
+        return FALSE;
+
+    Taken->Flink = DeferredCompletions.Flink;
+    Taken->Blink = DeferredCompletions.Blink;
+    Taken->Flink->Blink = Taken;
+    Taken->Blink->Flink = Taken;
+    InitializeListHead(&DeferredCompletions);
+    return TRUE;
+}
+
+static
+VOID
+QueueBucketCompletion(PTDI_BUCKET Bucket)
+{
+    if (!ChewCreate(BucketCompletionWorker, Bucket))
+    {
+        /* The bucket is off its queue, so a cancel cannot complete it */
+        ChewQueueReserved(&Bucket->ReservedItem, BucketCompletionWorker, Bucket);
+    }
+}
+
+/* Buckets that wait for a work item, which completes all that are queued while it runs: one thread
+ * wake for a batch. (The reserved item of workqueue.c is one IO_WORKITEM queued again as soon as its
+ * run ends; under this load it was queued again while the previous run had not returned, and the
+ * queue stopped: a stress run of 16 threads hung. A work item of its own for each batch has no such window.) */
+static KSPIN_LOCK BatchLock;
+static LIST_ENTRY BatchList;
+static BOOLEAN BatchQueued;
+
+static
+VOID
+BatchWorker(PVOID Context)
+{
+    KIRQL OldIrql;
+
+    UNREFERENCED_PARAMETER(Context);
+
+    for (;;)
+    {
+        PTDI_BUCKET Bucket;
+
+        KeAcquireSpinLock(&BatchLock, &OldIrql);
+        if (IsListEmpty(&BatchList))
+        {
+            BatchQueued = FALSE;
+            KeReleaseSpinLock(&BatchLock, OldIrql);
+            return;
+        }
+        Bucket = CONTAINING_RECORD(RemoveHeadList(&BatchList), TDI_BUCKET, Entry);
+        KeReleaseSpinLock(&BatchLock, OldIrql);
+
+        BucketCompletionWorker(Bucket);
+    }
+}
+
+static
+VOID
+QueueBatchedCompletion(PTDI_BUCKET Bucket)
+{
+    KIRQL OldIrql;
+    BOOLEAN Start;
+
+    KeAcquireSpinLock(&BatchLock, &OldIrql);
+    InsertTailList(&BatchList, &Bucket->Entry);
+    Start = !BatchQueued;
+    BatchQueued = TRUE;
+    KeReleaseSpinLock(&BatchLock, OldIrql);
+
+    if (Start && !ChewCreate(BatchWorker, NULL))
+    {
+        /* No work item: what waits goes through the reserved item, which cannot fail */
+        for (;;)
+        {
+            PTDI_BUCKET Waiting;
+
+            KeAcquireSpinLock(&BatchLock, &OldIrql);
+            if (IsListEmpty(&BatchList))
+            {
+                BatchQueued = FALSE;
+                KeReleaseSpinLock(&BatchLock, OldIrql);
+                break;
+            }
+            Waiting = CONTAINING_RECORD(RemoveHeadList(&BatchList), TDI_BUCKET, Entry);
+            KeReleaseSpinLock(&BatchLock, OldIrql);
+            ChewQueueReserved(&Waiting->ReservedItem, BucketCompletionWorker, Waiting);
+        }
+    }
+}
+
+/* With no lock held: completes the buckets taken by TCPTakeDeferredCompletions */
+VOID
+TCPRunDeferredCompletions(PLIST_ENTRY Taken, BOOLEAN TcpipThread)
+{
+    while (!IsListEmpty(Taken))
+    {
+        PTDI_BUCKET Bucket = CONTAINING_RECORD(RemoveHeadList(Taken), TDI_BUCKET, Entry);
+        PCONNECTION_ENDPOINT Connection = Bucket->AssociatedEndpoint;
+
+        if (!TcpipThread && !ReceiveWorkers && InInlineContext() &&
+            KeGetCurrentIrql() == PASSIVE_LEVEL &&
+            IoGetRemainingStackSize() >= TCP_COMPLETE_INLINE_STACK &&
+            !ExIsResourceAcquiredExclusiveLite(&Connection->Resource))
+        {
+            /* The completion routine runs with the AFD mutex of its socket and can start a request that
+             * unlocks the core again: what that completes goes to a work item, not inline */
+            TCPLeaveInlineContext();
+            BucketCompletionWorker(Bucket);
+            TCPEnterInlineContext();
+        }
+        else
+        {
+            QueueBatchedCompletion(Bucket);
+        }
+    }
+}
+
 VOID
 CompleteBucket(PCONNECTION_ENDPOINT Connection, PTDI_BUCKET Bucket, const BOOLEAN Synchronous)
 {
@@ -43,10 +241,14 @@ CompleteBucket(PCONNECTION_ENDPOINT Connection, PTDI_BUCKET Bucket, const BOOLEA
     {
         BucketCompletionWorker(Bucket);
     }
-    else if (!ChewCreate(BucketCompletionWorker, Bucket))
+    else if (sys_tcpip_core_locked())
     {
-        /* The bucket is off its queue, so a cancel cannot complete it */
-        ChewQueueReserved(&Bucket->ReservedItem, BucketCompletionWorker, Bucket);
+        /* The bucket is off its queue; its entry links it here until the core lock is released */
+        InsertTailList(&DeferredCompletions, &Bucket->Entry);
+    }
+    else
+    {
+        QueueBucketCompletion(Bucket);
     }
 }
 

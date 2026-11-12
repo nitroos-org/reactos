@@ -297,6 +297,20 @@ Test_AbortiveCloseWithData(BOOL Blocking)
         if (Result == SOCKET_ERROR)
         {
             Error = WSAGetLastError();
+            if (Error == WSAEWOULDBLOCK)
+            {
+                /* The transport may still be taking the previous send (a loop that sends at once is ahead
+                 * of the acknowledgements): the connection is full when no room comes for a moment */
+                Sleep(300);
+                Result = send(Server, Data, sizeof(Data), 0);
+                if (Result != SOCKET_ERROR)
+                {
+                    Error = 0;
+                    Queued += Result;
+                    continue;
+                }
+                Error = WSAGetLastError();
+            }
             break;
         }
         Queued += Result;
