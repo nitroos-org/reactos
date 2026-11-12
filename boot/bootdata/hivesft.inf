@@ -239,6 +239,11 @@ HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Foundation.Pr
 HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Foundation.PropertyValue","DllPath",0x00020000,"%SystemRoot%\system32\wintypes.dll"
 HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Foundation.PropertyValue","Threading",0x00010001,0
 HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Foundation.PropertyValue","TrustLevel",0x00010001,0
+; Windows.Foundation.Metadata.ApiInformation (IApiInformationStatics): wintypes.dll (Office 16 activates it).
+HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Foundation.Metadata.ApiInformation","ActivationType",0x00010001,0
+HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Foundation.Metadata.ApiInformation","DllPath",0x00020000,"%SystemRoot%\system32\wintypes.dll"
+HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Foundation.Metadata.ApiInformation","Threading",0x00010001,0
+HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Foundation.Metadata.ApiInformation","TrustLevel",0x00010001,0
 HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.DispatcherQueue","ActivationType",0x00010001,0
 HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.DispatcherQueue","DllPath",0x00020000,"%SystemRoot%\system32\CoreMessaging.dll"
 HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.DispatcherQueue","Threading",0x00010001,0
