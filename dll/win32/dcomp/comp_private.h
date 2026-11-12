@@ -233,13 +233,60 @@ typedef struct WICompositionSurfaceBrush3Vtbl
 struct WICompositionSurfaceBrush3 { const WICompositionSurfaceBrush3Vtbl *lpVtbl; };
 DEFINE_GUID(IID_ICompositionSurfaceBrush3, 0x550bb289, 0x1fe0, 0x42e5, 0x81, 0x95, 0x1e, 0xef, 0xa8, 0x7f, 0xf0, 0x8e);
 
+/*
+ * Windows.UI.Composition.ICompositionNineGridBrush. Source: microsoft/windows-rs (MIT OR Apache-2.0), the published
+ * `windows` crate 0.62.2 (vcs commit 32c3144490c016fe496a0aed769bce60987a2e9d), src/Windows/UI/Composition/mod.rs
+ * (ICompositionNineGridBrush_Vtbl, and the wrappers for the the SetInsets and SetInsetScales argument order): guid
+ * f25154e4-bc8c-4be7-b80f-8685b83c0186, slots after IInspectable (get/put pairs unless noted):
+ * 6/7 BottomInset, 8/9 BottomInsetScale, 10/11 IsCenterHollow, 12/13 LeftInset, 14/15 LeftInsetScale,
+ * 16/17 RightInset, 18/19 RightInsetScale, 20/21 Source (ICompositionBrush), 22/23 TopInset, 24/25 TopInsetScale,
+ * 26 SetInsets(inset), 27 SetInsetsWithValues(left, top, right, bottom), 28 SetInsetScales(scale),
+ * 29 SetInsetScalesWithValues(left, top, right, bottom). Facts only.
+ */
+typedef struct WICompositionNineGridBrush WICompositionNineGridBrush;
+typedef struct WICompositionNineGridBrushVtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(WICompositionNineGridBrush *This, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(WICompositionNineGridBrush *This);
+    ULONG (STDMETHODCALLTYPE *Release)(WICompositionNineGridBrush *This);
+    HRESULT (STDMETHODCALLTYPE *GetIids)(WICompositionNineGridBrush *This, ULONG *count, IID **iids);
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(WICompositionNineGridBrush *This, HSTRING *name);
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(WICompositionNineGridBrush *This, TrustLevel *level);
+    HRESULT (STDMETHODCALLTYPE *get_BottomInset)(WICompositionNineGridBrush *This, FLOAT *value);
+    HRESULT (STDMETHODCALLTYPE *put_BottomInset)(WICompositionNineGridBrush *This, FLOAT value);
+    HRESULT (STDMETHODCALLTYPE *get_BottomInsetScale)(WICompositionNineGridBrush *This, FLOAT *value);
+    HRESULT (STDMETHODCALLTYPE *put_BottomInsetScale)(WICompositionNineGridBrush *This, FLOAT value);
+    HRESULT (STDMETHODCALLTYPE *get_IsCenterHollow)(WICompositionNineGridBrush *This, BOOLEAN *value);
+    HRESULT (STDMETHODCALLTYPE *put_IsCenterHollow)(WICompositionNineGridBrush *This, BOOLEAN value);
+    HRESULT (STDMETHODCALLTYPE *get_LeftInset)(WICompositionNineGridBrush *This, FLOAT *value);
+    HRESULT (STDMETHODCALLTYPE *put_LeftInset)(WICompositionNineGridBrush *This, FLOAT value);
+    HRESULT (STDMETHODCALLTYPE *get_LeftInsetScale)(WICompositionNineGridBrush *This, FLOAT *value);
+    HRESULT (STDMETHODCALLTYPE *put_LeftInsetScale)(WICompositionNineGridBrush *This, FLOAT value);
+    HRESULT (STDMETHODCALLTYPE *get_RightInset)(WICompositionNineGridBrush *This, FLOAT *value);
+    HRESULT (STDMETHODCALLTYPE *put_RightInset)(WICompositionNineGridBrush *This, FLOAT value);
+    HRESULT (STDMETHODCALLTYPE *get_RightInsetScale)(WICompositionNineGridBrush *This, FLOAT *value);
+    HRESULT (STDMETHODCALLTYPE *put_RightInsetScale)(WICompositionNineGridBrush *This, FLOAT value);
+    HRESULT (STDMETHODCALLTYPE *get_Source)(WICompositionNineGridBrush *This, WICompositionBrush **value);
+    HRESULT (STDMETHODCALLTYPE *put_Source)(WICompositionNineGridBrush *This, WICompositionBrush *value);
+    HRESULT (STDMETHODCALLTYPE *get_TopInset)(WICompositionNineGridBrush *This, FLOAT *value);
+    HRESULT (STDMETHODCALLTYPE *put_TopInset)(WICompositionNineGridBrush *This, FLOAT value);
+    HRESULT (STDMETHODCALLTYPE *get_TopInsetScale)(WICompositionNineGridBrush *This, FLOAT *value);
+    HRESULT (STDMETHODCALLTYPE *put_TopInsetScale)(WICompositionNineGridBrush *This, FLOAT value);
+    HRESULT (STDMETHODCALLTYPE *SetInsets)(WICompositionNineGridBrush *This, FLOAT inset);
+    HRESULT (STDMETHODCALLTYPE *SetInsetsWithValues)(WICompositionNineGridBrush *This, FLOAT left, FLOAT top, FLOAT right, FLOAT bottom);
+    HRESULT (STDMETHODCALLTYPE *SetInsetScales)(WICompositionNineGridBrush *This, FLOAT scale);
+    HRESULT (STDMETHODCALLTYPE *SetInsetScalesWithValues)(WICompositionNineGridBrush *This, FLOAT left, FLOAT top, FLOAT right, FLOAT bottom);
+} WICompositionNineGridBrushVtbl;
+struct WICompositionNineGridBrush { const WICompositionNineGridBrushVtbl *lpVtbl; };
+DEFINE_GUID(IID_ICompositionNineGridBrush, 0xf25154e4, 0xbc8c, 0x4be7, 0xb8, 0x0f, 0x86, 0x85, 0xb8, 0x3c, 0x01, 0x86);
+
 enum cobj_kind
 {
-    K_CONTAINER, K_SPRITE, K_VCOLL, K_COLORBRUSH, K_SURFBRUSH, K_INSETCLIP, K_GDEVICE, K_DSURFACE, K_TARGET, K_VISRC
+    K_CONTAINER, K_SPRITE, K_VCOLL, K_COLORBRUSH, K_SURFBRUSH, K_INSETCLIP, K_GDEVICE, K_DSURFACE, K_TARGET, K_VISRC, K_NINEGRID
 };
 #define KM(k) (1u << (k))
 #define KM_VISUAL (KM(K_CONTAINER) | KM(K_SPRITE))
-#define KM_BRUSH  (KM(K_COLORBRUSH) | KM(K_SURFBRUSH))
+#define KM_BRUSH  (KM(K_COLORBRUSH) | KM(K_SURFBRUSH) | KM(K_NINEGRID))
 #define KM_ALL    0xffffffffu
 
 struct cobj
@@ -255,6 +302,7 @@ struct cobj
     WICompositionColorBrush colorbrush;
     WICompositionSurfaceBrush surfbrush;
     WICompositionSurfaceBrush3 surfbrush3;
+    WICompositionNineGridBrush ninegrid;
     WICompositionClip clip;
     WIInsetClip inset;
     WICompositionGraphicsDevice gdev;
@@ -307,6 +355,10 @@ struct cobj
     float halign, valign;
     IUnknown *bsurface;             /* the ICompositionSurface identity, referenced */
     BOOLEAN snap;                   /* ICompositionSurfaceBrush3.SnapToPixels (stored, not applied yet) */
+
+    /* nine-grid brush: Source is kept in sbrush (referenced); nothing paints it yet (no brush renderer) */
+    float ng_inset[4], ng_scale[4]; /* left, top, right, bottom */
+    BOOLEAN ng_hollow;
 
     /* inset clip */
     float inset_l, inset_t, inset_r, inset_b;
