@@ -490,8 +490,20 @@ Quit:
                          &DesktopConsoleThreadInfo,
                          sizeof(DesktopConsoleThreadInfo));
 
-    /* Close the duplicated desktop handle */
-    CloseDesktop(DesktopConsoleThreadInfo.DesktopHandle); // NtUserCloseDesktop
+    /*
+     * Close the duplicated desktop handle. A thread cannot close the desktop
+     * handle it is assigned to (win32k refuses it: the handle would be left
+     * open in CSRSS for every console input thread that ever ran), so detach
+     * this thread from its desktop first. Its windows are all gone by now.
+     * If the detach fails (the thread still owns a window), the close below
+     * is refused as well and the handle is left, as before.
+     */
+    if (DesktopConsoleThreadInfo.DesktopHandle)
+    {
+        if (!SetThreadDesktop(NULL))
+            DPRINT1("CONSRV: Input thread 0x%p cannot leave its desktop, error %lu\n", InputThreadId, GetLastError());
+        CloseDesktop(DesktopConsoleThreadInfo.DesktopHandle); // NtUserCloseDesktop
+    }
 
     /* Cleanup CSR thread */
     if (pcsrt)
@@ -1620,7 +1632,18 @@ GuiUnloadFrontEnd(IN OUT PFRONTEND FrontEnd)
     if (FrontEnd == NULL) return STATUS_INVALID_PARAMETER;
 
     if (FrontEnd->Context ) GuiDeinitFrontEnd(FrontEnd);
-    if (FrontEnd->Context2) ConsoleFreeHeap(FrontEnd->Context2);
+    if (FrontEnd->Context2)
+    {
+        /*
+         * The frontend was loaded but never (or not successfully) initialised:
+         * the window station and desktop handles GuiInit opened are still
+         * owned by the initialisation structure.
+         */
+        PGUI_INIT_INFO GuiInitInfo = FrontEnd->Context2;
+        if (GuiInitInfo->Desktop) CloseDesktop(GuiInitInfo->Desktop); // NtUserCloseDesktop
+        if (GuiInitInfo->WinSta)  CloseWindowStation(GuiInitInfo->WinSta); // NtUserCloseWindowStation
+        ConsoleFreeHeap(FrontEnd->Context2);
+    }
 
     return STATUS_SUCCESS;
 }
