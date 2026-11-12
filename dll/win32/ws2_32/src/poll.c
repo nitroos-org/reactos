@@ -292,8 +292,11 @@ WSAPoll(IN OUT LPWSAPOLLFD fdArray,
                 Revents |= POLLRDBAND;
             if (Flags & AFD_EVENT_SEND)
                 Revents |= POLLWRNORM;
-            if (Flags & (AFD_EVENT_ABORT | AFD_EVENT_DISCONNECT))
+            if (Flags & (AFD_EVENT_ABORT | AFD_EVENT_DISCONNECT | AFD_EVENT_CONNECT_FAIL))
                 Revents |= POLLHUP;
+            /* A failed connect also reports POLLWRNORM, as on Windows (measured on Windows 10: 0x13) */
+            if (Flags & AFD_EVENT_CONNECT_FAIL)
+                Revents |= POLLWRNORM;
             if (Flags & (AFD_EVENT_ABORT | AFD_EVENT_CONNECT_FAIL))
                 Revents |= POLLERR;
             if (Flags & AFD_EVENT_CLOSE)

@@ -2172,11 +2172,9 @@ MsafdConnectAPC(
         /* IoStatusBlock->Information is AFD's kernel handle for the connection, no use (or business) here */
     }
 
-    /* Re-enable Async Event */
-    SockReenableAsyncSelectEvent(Socket, FD_WRITE);
-
-    /* FIXME: THIS IS NOT RIGHT!!! HACK HACK HACK! */
-    SockReenableAsyncSelectEvent(Socket, FD_CONNECT);
+    /* The asynchronous events are not re-enabled here: WSPConnect did it when it returned, and a poll
+     * armed since then reports this completion once. Enabling FD_CONNECT and FD_WRITE again after the
+     * message was posted gave a second FD_CONNECT and FD_WRITE, which Windows does not post. */
 
     if (IoStatusBlock->Status == STATUS_SUCCESS && (Socket->HelperEvents & WSH_NOTIFY_CONNECT))
     {
@@ -4824,6 +4822,7 @@ VOID SockAsyncSelectCompletionRoutine(PVOID Context, PIO_STATUS_BLOCK IoStatusBl
     HWND hWnd;
     UINT wMsg;
     BOOLEAN Done;
+    INT ConnectError = 0;
 
     /* Get the Socket */
     Socket = AsyncData->ParentSocket;
@@ -4938,13 +4937,33 @@ VOID SockAsyncSelectCompletionRoutine(PVOID Context, PIO_STATUS_BLOCK IoStatusBl
 
     LeaveCriticalSection(&AsyncSelectLock);
 
+    /* FD_CONNECT carries the error of a failed connect (WSAECONNREFUSED, ...), as on Windows (measured on
+     * Windows 10: a refused non-blocking connect posts FD_CONNECT with 10061). AFD keeps the status. */
+    if ((Ready & AFD_EVENT_CONNECT_FAIL) && !(Ready & AFD_EVENT_CONNECT))
+    {
+        ULONG ConnectStatus = 0;
+
+        for (i = 0; i < Count; i++)
+        {
+            if (Events[i] == FD_CONNECT)
+            {
+                if (GetSocketInformation(Socket, AFD_INFO_CONNECT_ERROR, NULL, &ConnectStatus, NULL, NULL, NULL) == NO_ERROR &&
+                    ConnectStatus != 0)
+                {
+                    ConnectError = TranslateNtStatusError((NTSTATUS)ConnectStatus);
+                }
+                break;
+            }
+        }
+    }
+
     /* Make the notifications */
     for (i = 0; i < Count; i++)
     {
         (Upcalls.lpWPUPostMessage)(hWnd,
                                    wMsg,
                                    Socket->Handle,
-                                   WSAMAKESELECTREPLY(Events[i], 0));
+                                   WSAMAKESELECTREPLY(Events[i], Events[i] == FD_CONNECT ? ConnectError : 0));
     }
 
     if (Done)
