@@ -77,6 +77,7 @@ static const struct iface_entry iface_table[] =
 {
     IE(ICompositionObject, objbase, KM_ALL, TRUE),
     IE(IVisual, visual, KM_VISUAL, TRUE),
+    { &IID_IVisual2, offsetof(struct cobj, visual2), KM_VISUAL, TRUE },
     IE(IContainerVisual, container, KM_VISUAL, TRUE),
     IE(ISpriteVisual, sprite, KM(K_SPRITE), TRUE),
     IE(IVisualCollection, vcoll, KM(K_VCOLL), TRUE),
@@ -214,6 +215,7 @@ static HRESULT STDMETHODCALLTYPE pfx##_GetTrustLevel(T *i, TrustLevel *l) \
 
 INSP_FWD(objb, WICompositionObject, objbase)
 INSP_FWD(vis, WIVisual, visual)
+INSP_FWD(vi2, WIVisual2, visual2)
 INSP_FWD(cont, WIContainerVisual, container)
 INSP_FWD(spr, WISpriteVisual, sprite)
 INSP_FWD(vcol, WIVisualCollection, vcoll)
@@ -286,7 +288,7 @@ static void release_cobj(struct cobj *o)
 static void cobj_destroy(struct cobj *o)
 {
     struct cobj **kids;
-    struct cobj *vclip, *sbrush, *collection, *gfxdev, *root, *isource;
+    struct cobj *vclip, *sbrush, *collection, *gfxdev, *root, *isource, *xparent;
     IUnknown *bsurface;
     int i, n;
 
@@ -301,6 +303,7 @@ static void cobj_destroy(struct cobj *o)
     sbrush = o->sbrush; o->sbrush = NULL;
     root = o->root; o->root = NULL;
     isource = o->isource; o->isource = NULL;
+    xparent = o->xparent; o->xparent = NULL;
     bsurface = o->bsurface; o->bsurface = NULL;
     gfxdev = o->gfxdev;
     comp_unlock();
@@ -312,6 +315,7 @@ static void cobj_destroy(struct cobj *o)
     release_cobj(sbrush);
     release_cobj(root);
     release_cobj(isource);
+    release_cobj(xparent);
     if (bsurface) IUnknown_Release(bsurface);
 
     if (o->kind == K_GDEVICE) gfx_device_free(o);
@@ -1226,6 +1230,56 @@ HRESULT comp_new_desktop_target(IUnknown *compositor, HWND hwnd, BOOL topmost, W
 }
 
 
+/* ---- IVisual2: the values are kept, nothing applies them yet (no renderer) ---- */
+
+#define VIS2(i) OBJ_OF(i, visual2)
+
+static HRESULT STDMETHODCALLTYPE vi2_get_ParentForTransform(WIVisual2 *i, WIVisual **v)
+{
+    struct cobj *o = VIS2(i);
+
+    if (!v) return E_POINTER;
+    comp_lock();
+    *v = o->xparent ? &o->xparent->visual : NULL;
+    if (o->xparent) id_AddRef(&o->xparent->identity);
+    comp_unlock();
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE vi2_put_ParentForTransform(WIVisual2 *i, WIVisual *v)
+{
+    struct cobj *o = VIS2(i), *old, *p = NULL;
+
+    if (v && !(p = visual_from(v)))
+    {
+        FIXME("Visual.ParentForTransform: foreign visual %p\n", v);
+        return E_INVALIDARG;
+    }
+    /* FIXME: cycles and visuals of another Compositor are accepted; verify on the oracle. The transform parent is
+     * not applied by the (not yet existing) renderer. */
+    if (p) id_AddRef(&p->identity);
+    comp_lock(); old = o->xparent; o->xparent = p; comp_unlock();
+    release_cobj(old);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE vi2_get_RelativeOffsetAdjustment(WIVisual2 *i, Vec3 *v)
+{ struct cobj *o = VIS2(i); if (!v) return E_POINTER; comp_lock(); *v = o->reloffset; comp_unlock(); return S_OK; }
+static HRESULT STDMETHODCALLTYPE vi2_put_RelativeOffsetAdjustment(WIVisual2 *i, Vec3 v)
+{ struct cobj *o = VIS2(i); comp_lock(); o->reloffset = v; comp_unlock(); return S_OK; }
+static HRESULT STDMETHODCALLTYPE vi2_get_RelativeSizeAdjustment(WIVisual2 *i, Vec2 *v)
+{ struct cobj *o = VIS2(i); if (!v) return E_POINTER; comp_lock(); *v = o->relsize; comp_unlock(); return S_OK; }
+static HRESULT STDMETHODCALLTYPE vi2_put_RelativeSizeAdjustment(WIVisual2 *i, Vec2 v)
+{ struct cobj *o = VIS2(i); comp_lock(); o->relsize = v; comp_unlock(); return S_OK; }
+
+static const WIVisual2Vtbl visual2_vtbl =
+{
+    INSP_HEAD(vi2),
+    vi2_get_ParentForTransform, vi2_put_ParentForTransform,
+    vi2_get_RelativeOffsetAdjustment, vi2_put_RelativeOffsetAdjustment,
+    vi2_get_RelativeSizeAdjustment, vi2_put_RelativeSizeAdjustment,
+};
+
 /* ---- VisualInteractionSource (Windows.UI.Composition.Interactions) ----
  * Holds the configuration. Nothing drives it yet: no input is redirected to it and there is no InteractionTracker,
  * so the interaction values stay at their documented defaults (learn.microsoft.com VisualInteractionSource members:
@@ -1354,6 +1408,7 @@ HRESULT comp_create(IUnknown *compositor, enum cobj_kind kind, struct cobj **out
     if (!o) return E_OUTOFMEMORY;
     o->objbase.lpVtbl = &objbase_vtbl;
     o->visual.lpVtbl = &visual_vtbl;
+    o->visual2.lpVtbl = &visual2_vtbl;
     o->container.lpVtbl = &container_vtbl;
     o->sprite.lpVtbl = &sprite_vtbl;
     o->vcoll.lpVtbl = &vcoll_vtbl;

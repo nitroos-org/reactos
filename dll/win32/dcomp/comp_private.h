@@ -186,6 +186,32 @@ DEFINE_GUID(IID_IVisualInteractionSourceStatics, 0x369965e1, 0x8645, 0x4f75, 0xb
 DEFINE_GUID(IID_IVisualInteractionSourceStatics2, 0xa979c032, 0x5764, 0x55e0, 0xbc, 0x1f, 0x07, 0x78, 0x78, 0x6d, 0xcf, 0xde);
 DEFINE_GUID(IID_ICompositionInteractionSource, 0x043b2431, 0x06e3, 0x495a, 0xba, 0x54, 0x40, 0x9f, 0x00, 0x17, 0xfa, 0xc0);
 
+/*
+ * Windows.UI.Composition.IVisual2 (second interface of Visual). Source: microsoft/windows-rs (MIT OR Apache-2.0), the
+ * published `windows` crate 0.62.2 (vcs commit 32c3144490c016fe496a0aed769bce60987a2e9d), src/Windows/UI/Composition/mod.rs
+ * (IVisual2_Vtbl), and metadata/winrt/Windows.UI.Composition.rdl at commit 8ca69fdaa9d69c78b9bcfbee96c6916f2282e7f0:
+ * guid 3052b611-56c3-4c3e-8bf3-f6e1ad473f06, slots after IInspectable: 6/7 get/put ParentForTransform (Visual),
+ * 8/9 get/put RelativeOffsetAdjustment (Vector3), 10/11 get/put RelativeSizeAdjustment (Vector2). Facts only.
+ */
+typedef struct WIVisual2 WIVisual2;
+typedef struct WIVisual2Vtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(WIVisual2 *This, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(WIVisual2 *This);
+    ULONG (STDMETHODCALLTYPE *Release)(WIVisual2 *This);
+    HRESULT (STDMETHODCALLTYPE *GetIids)(WIVisual2 *This, ULONG *count, IID **iids);
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(WIVisual2 *This, HSTRING *name);
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(WIVisual2 *This, TrustLevel *level);
+    HRESULT (STDMETHODCALLTYPE *get_ParentForTransform)(WIVisual2 *This, WIVisual **value);
+    HRESULT (STDMETHODCALLTYPE *put_ParentForTransform)(WIVisual2 *This, WIVisual *value);
+    HRESULT (STDMETHODCALLTYPE *get_RelativeOffsetAdjustment)(WIVisual2 *This, Vec3 *value);
+    HRESULT (STDMETHODCALLTYPE *put_RelativeOffsetAdjustment)(WIVisual2 *This, Vec3 value);
+    HRESULT (STDMETHODCALLTYPE *get_RelativeSizeAdjustment)(WIVisual2 *This, Vec2 *value);
+    HRESULT (STDMETHODCALLTYPE *put_RelativeSizeAdjustment)(WIVisual2 *This, Vec2 value);
+} WIVisual2Vtbl;
+struct WIVisual2 { const WIVisual2Vtbl *lpVtbl; };
+DEFINE_GUID(IID_IVisual2, 0x3052b611, 0x56c3, 0x4c3e, 0x8b, 0xf3, 0xf6, 0xe1, 0xad, 0x47, 0x3f, 0x06);
+
 enum cobj_kind
 {
     K_CONTAINER, K_SPRITE, K_VCOLL, K_COLORBRUSH, K_SURFBRUSH, K_INSETCLIP, K_GDEVICE, K_DSURFACE, K_TARGET, K_VISRC
@@ -200,6 +226,7 @@ struct cobj
     IInspectable identity;
     WICompositionObject objbase;
     WIVisual visual;
+    WIVisual2 visual2;
     WIContainerVisual container;
     WISpriteVisual sprite;
     WIVisualCollection vcoll;
@@ -243,6 +270,9 @@ struct cobj
     int nkids, capkids;
     struct cobj *collection;        /* ContainerVisual.Children: weak, the object lives as long as someone holds it */
     struct cobj *sbrush;            /* SpriteVisual.Brush, referenced */
+    struct cobj *xparent;           /* IVisual2.ParentForTransform, referenced (not used for rendering yet) */
+    Vec3 reloffset;                 /* IVisual2.RelativeOffsetAdjustment (stored, not applied yet) */
+    Vec2 relsize;                   /* IVisual2.RelativeSizeAdjustment (stored, not applied yet) */
 
     /* VisualCollection */
     struct cobj *owner;             /* weak, cleared when the owner is destroyed */
