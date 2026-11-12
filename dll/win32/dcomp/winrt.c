@@ -642,7 +642,11 @@ C2_STUB(CreateDropShadow)
 C2_STUB(CreateImplicitAnimationCollection)
 C2_STUB(CreateLayerVisual)
 C2_STUB(CreateMaskBrush)
-C2_STUB(CreateNineGridBrush)
+static HRESULT STDMETHODCALLTYPE compositor2_CreateNineGridBrush(ICompositor2 *iface, void **result)
+{
+    TRACE("%p, %p\n", iface, result);
+    return comp_new_object((IUnknown *)&comp_from_comp2(iface)->IInspectable_iface, K_NINEGRID, &IID_ICompositionNineGridBrush, result);
+}
 C2_STUB(CreatePointLight)
 C2_STUB(CreateSpotLight)
 C2_STUB(CreateStepEasingFunction)

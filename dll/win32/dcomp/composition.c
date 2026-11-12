@@ -85,6 +85,7 @@ static const struct iface_entry iface_table[] =
     IE(ICompositionColorBrush, colorbrush, KM(K_COLORBRUSH), TRUE),
     IE(ICompositionSurfaceBrush, surfbrush, KM(K_SURFBRUSH), TRUE),
     { &IID_ICompositionSurfaceBrush3, offsetof(struct cobj, surfbrush3), KM(K_SURFBRUSH), TRUE },
+    { &IID_ICompositionNineGridBrush, offsetof(struct cobj, ninegrid), KM(K_NINEGRID), TRUE },
     IE(ICompositionClip, clip, KM(K_INSETCLIP), TRUE),
     IE(IInsetClip, inset, KM(K_INSETCLIP), TRUE),
     IE(ICompositionGraphicsDevice, gdev, KM(K_GDEVICE), TRUE),
@@ -111,6 +112,7 @@ static const WCHAR *const kind_names[] =
     L"Windows.UI.Composition.CompositionGraphicsDevice", L"Windows.UI.Composition.CompositionDrawingSurface",
     L"Windows.UI.Composition.Desktop.DesktopWindowTarget",
     L"Windows.UI.Composition.Interactions.VisualInteractionSource",
+    L"Windows.UI.Composition.CompositionNineGridBrush",
 };
 
 static void cobj_destroy(struct cobj *o);
@@ -224,6 +226,7 @@ INSP_FWD(brs, WICompositionBrush, brush)
 INSP_FWD(cbr, WICompositionColorBrush, colorbrush)
 INSP_FWD(sbr, WICompositionSurfaceBrush, surfbrush)
 INSP_FWD(sb3, WICompositionSurfaceBrush3, surfbrush3)
+INSP_FWD(ngb, WICompositionNineGridBrush, ninegrid)
 INSP_FWD(clp, WICompositionClip, clip)
 INSP_FWD(ins, WIInsetClip, inset)
 INSP_FWD(gdv, WICompositionGraphicsDevice, gdev)
@@ -1042,6 +1045,8 @@ static void render_visual(struct cobj *v, struct m2 parentm, float parent_opacit
                 }
             }
         }
+        if (br->kind == K_NINEGRID)
+            ok = FALSE;                 /* FIXME: nine-grid stretching is not rendered (the brush only keeps its values) */
         if (ok)
         {
             m2_apply(m, 0, 0, &xs[0], &ys[0]);
@@ -1137,6 +1142,9 @@ static void dump_visual(struct dump *d, struct cobj *v, int depth)
     {
         if (v->sbrush->kind == K_COLORBRUSH)
             dump_printf(d, " brush=color(a%u,r%u,g%u,b%u)", v->sbrush->color.A, v->sbrush->color.R, v->sbrush->color.G, v->sbrush->color.B);
+        else if (v->sbrush->kind == K_NINEGRID)
+            dump_printf(d, " brush=ninegrid(inset %g,%g,%g,%g)", v->sbrush->ng_inset[0], v->sbrush->ng_inset[1],
+                        v->sbrush->ng_inset[2], v->sbrush->ng_inset[3]);
         else
             dump_printf(d, " brush=surface(%s stretch=%d)", v->sbrush->bsurface ? "set" : "none", v->sbrush->stretch);
     }
@@ -1237,6 +1245,96 @@ static HRESULT STDMETHODCALLTYPE sb3_get_SnapToPixels(WICompositionSurfaceBrush3
 static HRESULT STDMETHODCALLTYPE sb3_put_SnapToPixels(WICompositionSurfaceBrush3 *i, BOOLEAN v)
 { struct cobj *o = OBJ_OF(i, surfbrush3); comp_lock(); o->snap = v; comp_unlock(); return S_OK; }
 static const WICompositionSurfaceBrush3Vtbl surfbrush3_vtbl = { INSP_HEAD(sb3), sb3_get_SnapToPixels, sb3_put_SnapToPixels };
+
+/* ---- CompositionNineGridBrush: the values are kept, nothing paints them yet. Defaults (learn.microsoft.com,
+ * windows.ui.composition.compositionninegridbrush members): insets 0.0f, inset scales 1.0f. IsCenterHollow has no
+ * documented default: FALSE (the center is drawn) used, FIXME verify on the oracle. Source may be a color, surface
+ * or (not available here) effect brush; NULL clears it. ---- */
+
+#define NG(i) OBJ_OF(i, ninegrid)
+#define NG_PROP(N, IDX, ARR) \
+static HRESULT STDMETHODCALLTYPE ngb_get_##N(WICompositionNineGridBrush *i, FLOAT *v) \
+{ struct cobj *o = NG(i); if (!v) return E_POINTER; comp_lock(); *v = o->ARR[IDX]; comp_unlock(); return S_OK; } \
+static HRESULT STDMETHODCALLTYPE ngb_put_##N(WICompositionNineGridBrush *i, FLOAT v) \
+{ struct cobj *o = NG(i); comp_lock(); o->ARR[IDX] = v; comp_unlock(); return S_OK; }
+NG_PROP(LeftInset, 0, ng_inset)
+NG_PROP(TopInset, 1, ng_inset)
+NG_PROP(RightInset, 2, ng_inset)
+NG_PROP(BottomInset, 3, ng_inset)
+NG_PROP(LeftInsetScale, 0, ng_scale)
+NG_PROP(TopInsetScale, 1, ng_scale)
+NG_PROP(RightInsetScale, 2, ng_scale)
+NG_PROP(BottomInsetScale, 3, ng_scale)
+
+static HRESULT STDMETHODCALLTYPE ngb_get_IsCenterHollow(WICompositionNineGridBrush *i, BOOLEAN *v)
+{ struct cobj *o = NG(i); if (!v) return E_POINTER; comp_lock(); *v = o->ng_hollow; comp_unlock(); return S_OK; }
+static HRESULT STDMETHODCALLTYPE ngb_put_IsCenterHollow(WICompositionNineGridBrush *i, BOOLEAN v)
+{ struct cobj *o = NG(i); comp_lock(); o->ng_hollow = v ? TRUE : FALSE; comp_unlock(); return S_OK; }
+
+static HRESULT STDMETHODCALLTYPE ngb_get_Source(WICompositionNineGridBrush *i, WICompositionBrush **v)
+{
+    struct cobj *o = NG(i), *s;
+
+    if (!v) return E_POINTER;
+    comp_lock();
+    s = o->sbrush;
+    if (s) id_AddRef(&s->identity);
+    comp_unlock();
+    *v = s ? &s->brush : NULL;
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE ngb_put_Source(WICompositionNineGridBrush *i, WICompositionBrush *v)
+{
+    struct cobj *o = NG(i), *b = NULL, *old;
+
+    if (v && (!(b = brush_from(v)) || b == o))
+    {
+        FIXME("CompositionNineGridBrush.Source: foreign or unsupported brush %p\n", v);
+        return E_INVALIDARG;
+    }
+    if (b) id_AddRef(&b->identity);
+    comp_lock(); old = o->sbrush; o->sbrush = b; comp_unlock();
+    release_cobj(old);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE ngb_SetInsets(WICompositionNineGridBrush *i, FLOAT v)
+{
+    struct cobj *o = NG(i); int k;
+    comp_lock(); for (k = 0; k < 4; k++) o->ng_inset[k] = v; comp_unlock();
+    return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE ngb_SetInsetsWithValues(WICompositionNineGridBrush *i, FLOAT l, FLOAT t, FLOAT r, FLOAT b)
+{
+    struct cobj *o = NG(i);
+    comp_lock(); o->ng_inset[0] = l; o->ng_inset[1] = t; o->ng_inset[2] = r; o->ng_inset[3] = b; comp_unlock();
+    return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE ngb_SetInsetScales(WICompositionNineGridBrush *i, FLOAT v)
+{
+    struct cobj *o = NG(i); int k;
+    comp_lock(); for (k = 0; k < 4; k++) o->ng_scale[k] = v; comp_unlock();
+    return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE ngb_SetInsetScalesWithValues(WICompositionNineGridBrush *i, FLOAT l, FLOAT t, FLOAT r, FLOAT b)
+{
+    struct cobj *o = NG(i);
+    comp_lock(); o->ng_scale[0] = l; o->ng_scale[1] = t; o->ng_scale[2] = r; o->ng_scale[3] = b; comp_unlock();
+    return S_OK;
+}
+
+static const WICompositionNineGridBrushVtbl ninegrid_vtbl =
+{
+    INSP_HEAD(ngb),
+    ngb_get_BottomInset, ngb_put_BottomInset, ngb_get_BottomInsetScale, ngb_put_BottomInsetScale,
+    ngb_get_IsCenterHollow, ngb_put_IsCenterHollow,
+    ngb_get_LeftInset, ngb_put_LeftInset, ngb_get_LeftInsetScale, ngb_put_LeftInsetScale,
+    ngb_get_RightInset, ngb_put_RightInset, ngb_get_RightInsetScale, ngb_put_RightInsetScale,
+    ngb_get_Source, ngb_put_Source,
+    ngb_get_TopInset, ngb_put_TopInset, ngb_get_TopInsetScale, ngb_put_TopInsetScale,
+    ngb_SetInsets, ngb_SetInsetsWithValues, ngb_SetInsetScales, ngb_SetInsetScalesWithValues,
+};
 
 /* ---- IVisual2: the values are kept, nothing applies them yet (no renderer) ---- */
 
@@ -1424,6 +1522,7 @@ HRESULT comp_create(IUnknown *compositor, enum cobj_kind kind, struct cobj **out
     o->colorbrush.lpVtbl = &colorbrush_vtbl;
     o->surfbrush.lpVtbl = &surfbrush_vtbl;
     o->surfbrush3.lpVtbl = &surfbrush3_vtbl;
+    o->ninegrid.lpVtbl = &ninegrid_vtbl;
     o->clip.lpVtbl = &clip_vtbl;
     o->inset.lpVtbl = &inset_vtbl;
     o->gdev.lpVtbl = &gdev_vtbl;
@@ -1440,6 +1539,8 @@ HRESULT comp_create(IUnknown *compositor, enum cobj_kind kind, struct cobj **out
     o->test.lpVtbl = &nitro_test_vtbl_impl;
     o->closable.lpVtbl = &closable_vtbl;
     o->agile.lpVtbl = &agile_vtbl;
+    if (kind == K_NINEGRID)
+        o->ng_scale[0] = o->ng_scale[1] = o->ng_scale[2] = o->ng_scale[3] = 1.0f;
     *out = o;
     return S_OK;
 }
