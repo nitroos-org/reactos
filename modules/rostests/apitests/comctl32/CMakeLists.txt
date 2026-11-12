@@ -8,6 +8,7 @@ list(APPEND SOURCE
     listview.c
     propsheet.c
     propsheet_title.c
+    TabInsertSelection.c
     testlist.c
     toolbar.c
     tooltip.c)

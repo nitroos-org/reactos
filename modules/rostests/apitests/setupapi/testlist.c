@@ -19,6 +19,8 @@ extern void func_CM_PowerScheme(void);
 extern void func_CM_Get_DevNode_Property_Keys(void);
 extern void func_CM_Get_Device_Interface_Property(void);
 extern void func_CM_Get_Class_Property(void);
+extern void func_CM_Get_Device_Interface_List(void);
+extern void func_RegisterDeviceNotification(void);
 
 const struct test winetest_testlist[] =
 {
@@ -39,5 +41,7 @@ const struct test winetest_testlist[] =
     { "CM_Get_DevNode_Property_Keys", func_CM_Get_DevNode_Property_Keys },
     { "CM_Get_Device_Interface_Property", func_CM_Get_Device_Interface_Property },
     { "CM_Get_Class_Property", func_CM_Get_Class_Property },
+    { "CM_Get_Device_Interface_List", func_CM_Get_Device_Interface_List },
+    { "RegisterDeviceNotification", func_RegisterDeviceNotification },
     { 0, 0 }
 };
