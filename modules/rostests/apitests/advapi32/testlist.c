@@ -93,6 +93,7 @@ extern void func_ServiceControllerQuery(void);
 extern void func_ServiceEnv(void);
 extern void func_ServiceFailureActions(void);
 extern void func_ServiceRecovery(void);
+extern void func_ServiceSid(void);
 extern void func_ServiceNetwork(void);
 extern void func_SetEntriesInAclOld(void);
 extern void func_SetSecurityInfoKey(void);
@@ -222,6 +223,7 @@ const struct test winetest_testlist[] =
     { "ServiceEnv", func_ServiceEnv },
     { "ServiceFailureActions", func_ServiceFailureActions },
     { "ServiceRecovery", func_ServiceRecovery },
+    { "ServiceSid", func_ServiceSid },
     { "ServiceNetwork", func_ServiceNetwork },
     { "SetEntriesInAclOld", func_SetEntriesInAclOld },
     { "SetSecurityInfoKey", func_SetSecurityInfoKey },
