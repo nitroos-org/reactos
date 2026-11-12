@@ -164,6 +164,8 @@ BOOL WINAPIV ShimDbgPrint(SHIM_LOG_LEVEL Level, PCSTR FunctionName, PCSTR Format
 #else
 #define TICKSTO1970         0x019db1ded53e8000i64
 #endif
+time_t g_BuildTime;
+
 VOID NTAPI RtlSecondsSince1970ToTime(IN ULONG SecondsSince1970,
                           OUT PLARGE_INTEGER Time)
 {
@@ -219,6 +221,7 @@ int main(int argc, char * argv[])
     std::string input, output;
     PlatformType platform = PLATFORM_ANY;
     srand(time(0));
+    g_BuildTime = 0;
 
     for (int i = 1; i < argc; ++i)
     {
@@ -238,6 +241,10 @@ int main(int argc, char * argv[])
             break;
         case 'p':
             platform = parse_platform(get_strarg(argc, argv, i));
+            break;
+        case 'e':   /* reproducible output: this many seconds since 1970 instead of the clock, and a seed derived from it */
+            g_BuildTime = (time_t)strtoull(get_strarg(argc, argv, i).c_str(), NULL, 10);
+            srand((unsigned)g_BuildTime);
             break;
         }
     }
