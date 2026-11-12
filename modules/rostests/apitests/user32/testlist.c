@@ -137,6 +137,7 @@ extern void func_SystemMenu(void);
 extern void func_TrackMouseEvent(void);
 extern void func_TrackPopupMenuEx(void);
 extern void func_UnicodeToAnsiMessage(void);
+extern void func_LayeredCompose(void);
 extern void func_UpdateLayeredWindow(void);
 extern void func_UserHandleGrantAccess(void);
 extern void func_UserSrvRegistration(void);
@@ -298,6 +299,7 @@ const struct test winetest_testlist[] =
     { "TrackMouseEvent", func_TrackMouseEvent },
     { "TrackPopupMenuEx", func_TrackPopupMenuEx },
     { "UnicodeToAnsiMessage", func_UnicodeToAnsiMessage },
+    { "LayeredCompose", func_LayeredCompose },
     { "UpdateLayeredWindow", func_UpdateLayeredWindow },
     { "UserHandleGrantAccess", func_UserHandleGrantAccess },
     { "UserSrvRegistration", func_UserSrvRegistration },
