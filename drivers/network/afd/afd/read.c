@@ -734,7 +734,10 @@ AfdConnectedSocketReadData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         FCB->SharedData.State != SOCKET_STATE_CONNECTING ) {
         AFD_DbgPrint(MIN_TRACE,("Called recv on wrong kind of socket (s%x)\n",
                                 FCB->SharedData.State));
-        return UnlockAndMaybeComplete( FCB, STATUS_INVALID_PARAMETER,
+        /* As a send on it: a stream socket that is not connected (fresh, bound, listening, after a
+         * failed connect) is WSAENOTCONN on Windows (checked on Windows 10 22H2). Oracle Net reads
+         * the socket after a refused connect (lsnrctl start) and was given WSAEINVAL */
+        return UnlockAndMaybeComplete( FCB, STATUS_INVALID_CONNECTION,
                                        Irp, 0 );
     }
 
