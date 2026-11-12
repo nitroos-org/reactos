@@ -1646,9 +1646,12 @@ static UINT dialog_edit_control( msi_dialog *dialog, MSIRECORD *rec )
     LPCWSTR prop, text;
     LPWSTR val, begin, end;
     WCHAR num[MAX_NUM_DIGITS];
-    DWORD limit;
+    DWORD limit, style = WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL;
 
-    control = dialog_add_control( dialog, rec, L"Edit", WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL );
+    /* the PasswordInput control attribute masks the typed text */
+    if (MSI_RecordGetInteger( rec, 8 ) & msidbControlAttributesPasswordInput)
+        style |= ES_PASSWORD;
+    control = dialog_add_control( dialog, rec, L"Edit", style );
     control->handler = dialog_edit_handler;
 
     text = MSI_RecordGetString( rec, 10 );
