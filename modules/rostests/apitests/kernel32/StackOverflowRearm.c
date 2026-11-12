@@ -158,8 +158,9 @@ CheckRearm(SIZE_T Reserve, DWORD Flags)
             continue;
         ok(Cfg.Round[i].Code == STATUS_STACK_OVERFLOW, "reserve %lx round %lu: exception %lx\n",
            (ULONG)Reserve, i, Cfg.Round[i].Code);
-        ok(Cfg.Round[i].FaultAddress >= Cfg.Bottom + TEST_PAGE_SIZE &&
-           Cfg.Round[i].FaultAddress < Cfg.Bottom + (ZONE_PAGES + 1) * TEST_PAGE_SIZE,
+        /* Windows 10 raises it from the highest yellow page, the third above the bottom */
+        ok(Cfg.Round[i].FaultAddress >= Cfg.Bottom + (ZONE_PAGES - 1) * TEST_PAGE_SIZE &&
+           Cfg.Round[i].FaultAddress < Cfg.Bottom + ZONE_PAGES * TEST_PAGE_SIZE,
            "reserve %lx round %lu: raised at bottom+%Ix\n", (ULONG)Reserve, i, Cfg.Round[i].FaultOffset);
     }
 }

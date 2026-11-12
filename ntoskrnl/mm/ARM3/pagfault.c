@@ -43,6 +43,14 @@ BOOLEAN UserPdeFault = FALSE;
 #define MI_USER_STACK_GUARD_PAGES 1
 #endif
 
+/*
+ * A guard page hit this many pages above the start of the reservation, or
+ * lower, raises the stack overflow (the guarantee is added). Windows x64
+ * raises it from the third page above the reservation, and the x86 stack
+ * overflow test expects the same.
+ */
+#define MI_USER_STACK_END_PAGES 3
+
 static
 NTSTATUS
 NTAPI
@@ -55,7 +63,6 @@ MiCheckForUserStackOverflow(IN PVOID Address,
     SIZE_T GuaranteedSize, StackSize, RegionSize;
     PVOID GuardAddress, LowestGuard;
     ULONG GuardCount, GuardPages;
-    ULONG_PTR CurrentLimit;
     NTSTATUS Status;
 #if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
     PTEB32 GuestTeb = NULL;
@@ -119,9 +126,9 @@ MiCheckForUserStackOverflow(IN PVOID Address,
     /* This is where the stack will start now */
     NextStackAddress = (PVOID)((ULONG_PTR)PAGE_ALIGN(Address) - PAGE_SIZE);
 
-    /* Is there room for the guard page, the guarantee and the last page? */
+    /* Is there room for the guard page, the guarantee and the last pages? */
     if (((ULONG_PTR)PAGE_ALIGN(Address) - (ULONG_PTR)PAGE_ALIGN(DeallocationStack)) <=
-        (2 * PAGE_SIZE + GuaranteedSize))
+        (MI_USER_STACK_END_PAGES * PAGE_SIZE + GuaranteedSize))
     {
         /* There is not -- give the rest of the stack but its last page to the handler */
         DPRINT1("Close to our death...\n");
@@ -163,31 +170,11 @@ MiCheckForUserStackOverflow(IN PVOID Address,
     }
 
     /*
-     * A guard page above the current stack limit is left over from a guard
-     * region that a deeper hit already passed (the region is several pages
-     * and the stack can be probed out of order). Hardware cleared its guard
-     * on this hit and the page is committed and in use: the stack has grown
-     * past it, so leave the limit and the pages below alone. The limit is
-     * user-writable and only compared here; a forged one can skip the
-     * growth below but never makes the code commit outside the stack.
-     *
-     * This comes after the check for the end of the stack: once an overflow
-     * was raised the limit stays at the bottom of the stack, and a runtime
-     * that arms guard pages in the last pages itself (the JVM, for its
-     * yellow zone) must get its next overflow from them. Taken as left over,
-     * they let the thread run on below its stack.
+     * A hit on any guard page, also one above the stack limit (a page below it
+     * was hit first, the stack can be probed out of order), moves the limit to
+     * the hit page and arms the pages below it again, as on Windows. The pages
+     * between stay committed.
      */
-#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
-    if (GuestTeb) CurrentLimit = (ULONG_PTR)UlongToPtr(GuestTeb->NtTib.StackLimit);
-    else
-#endif
-        CurrentLimit = (ULONG_PTR)Teb->NtTib.StackLimit;
-    if ((ULONG_PTR)PAGE_ALIGN(Address) >= (ULONG_PTR)PAGE_ALIGN(CurrentLimit))
-    {
-        DPRINT("Guard page %p is above the stack limit %p\n", Address, (PVOID)CurrentLimit);
-        return STATUS_PAGE_FAULT_GUARD_PAGE;
-    }
-
     /* Don't handle this flag yet */
     ASSERT((PsGetCurrentProcess()->Peb->NtGlobalFlag & FLG_DISABLE_STACK_EXTENSION) == 0);
 
@@ -216,7 +203,7 @@ MiCheckForUserStackOverflow(IN PVOID Address,
          * if arming the others fails the stack just has a shorter region.
          */
         LowestGuard = (PVOID)((ULONG_PTR)PAGE_ALIGN(DeallocationStack) +
-                              2 * PAGE_SIZE + GuaranteedSize);
+                              MI_USER_STACK_END_PAGES * PAGE_SIZE + GuaranteedSize);
         GuardPages = MI_USER_STACK_GUARD_PAGES;
 #if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
         /* The guest exception and callback code assumes the single guard page of a 32-bit stack */

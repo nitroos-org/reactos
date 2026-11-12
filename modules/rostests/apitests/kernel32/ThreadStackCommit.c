@@ -136,7 +136,11 @@ CheckConfig(SIZE_T Size, DWORD Flags)
 
 
 #ifdef _WIN64
-/* Touching the middle guard page first, then the top one, must not move the limit up or re-guard live pages */
+/*
+ * Touching the middle guard page first, then the top one: as on Windows 10 x64 the top hit
+ * moves the limit to the top page and arms the three pages below it again, the middle one
+ * included, which is a stack page in use then
+ */
 typedef struct _ORDERCFG
 {
     BOOL Queried;
@@ -198,7 +202,7 @@ OrderWorker(PVOID Param)
             Cfg->GuardBelow++;
     }
 
-    /* A system service writing into a stack page that was a guard page */
+    /* A system service writing into a stack page that is a guard page again */
     Tbi = (THREAD_BASIC_INFORMATION *)(G2 + 0x100);
     Cfg->SyscallStatus = NtQueryInformationThread(NtCurrentThread(), ThreadBasicInformation,
                                                   Tbi, sizeof(*Tbi), NULL);
@@ -225,8 +229,9 @@ CheckOrder(void)
           Cfg.ReadFailed[1], Cfg.SyscallStatus);
     ok(!Cfg.ReadFailed[0] && !Cfg.ReadFailed[1], "touching G2 then G1 faulted\n");
     ok(Cfg.Plain[0], "G1 is not a plain committed page after being touched\n");
-    ok(Cfg.Plain[1], "G2 was guarded again by the hit on G1\n");
-    ok(Cfg.Limit <= Cfg.G2, "stack limit %p moved above G2 %p\n", (PVOID)Cfg.Limit, (PVOID)Cfg.G2);
+    ok(!Cfg.Plain[1], "G2 was not guarded again by the hit on G1\n");
+    ok(Cfg.Limit == Cfg.G2 + TEST_PAGE_SIZE, "stack limit %p, expected the hit page %p\n",
+       (PVOID)Cfg.Limit, (PVOID)(Cfg.G2 + TEST_PAGE_SIZE));
     ok(Cfg.GuardBelow == 3, "%lu of the 3 pages below G2 are guard pages\n", Cfg.GuardBelow);
     ok(Cfg.SyscallStatus == STATUS_SUCCESS, "NtQueryInformationThread into G2 returned %lx\n", Cfg.SyscallStatus);
 }
