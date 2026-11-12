@@ -44,8 +44,14 @@ WM_DRAWITEM, WM_COPYDATA and WM_HELP (HELPINFO, 28/40 bytes) are translated in b
 kernel-to-window callbacks. win32k keeps no size for WM_COMPAREITEM, WM_DELETEITEM, WM_MDICREATE, WM_MENUGETOBJECT and
 CB_GETCOMBOBOXINFO and hands the pointer to the window procedure unread, so a guest pointer travels as it is
 (zero-extended) when the receiver is a window of this process and the send waits for it; a window of another process,
-SendNotifyMessage and callback sends are refused. Still unsupported with a non-NULL lParam: WM_NEXTMENU, WM_DRAG*,
-WM_DROPOBJECT, IME and DDE messages, WM_COPYGLOBALDATA.
+SendNotifyMessage and callback sends are refused. WM_NEXTMENU (MDINEXTMENU, 12/24 bytes, written back) is translated in both directions, including the menu loop's own
+send to the owner window. WM_DROPOBJECT, WM_QUERYDROPOBJECT, WM_BEGINDRAG, WM_DRAGLOOP, WM_DRAGSELECT, WM_DRAGMOVE (a
+DROPSTRUCT win32k never reads) and WM_IME_REQUEST / the pointer commands of WM_IME_CONTROL (IMC_GET/SETCANDIDATEPOS,
+COMPOSITIONFONT, COMPOSITIONWINDOW: flat records) travel like the owner-draw messages above, as a same-process guest
+pointer; WM_IME_REQUEST, which is not in win32k's pointer table, is also allowed for SendNotifyMessage and callback sends
+inside the process, as on i386. The scalar IME commands, WM_IME_NOTIFY and WM_IME_SYSTEM carry no pointer. WM_COPYGLOBALDATA
+is a flat block of wParam bytes at the guest pointer: win32k copies it, the receiving user32 makes the new global block.
+WM_DDE_ACK, ADVISE, DATA, POKE and EXECUTE carry a packed pair or a global handle of the sender (no layout), and the DDEPOST / DDEGET callbacks of win32k's DDE hooks widen the message header and return the sender's block pointer and the packed lParam (raw DDE and DDEML between 32-bit processes). Not covered: the CF_BITMAP / CF_DIB / CF_PALETTE formats, where win32k reads an 8-byte HGDIOBJ from the block.
 
 Current limits include hooks on threads of other processes, journal hooks,
 DDE conversation callbacks, IME callbacks,

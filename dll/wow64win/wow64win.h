@@ -79,6 +79,21 @@ typedef struct
 } DRAWITEM32;
 typedef struct { UINT cbSize; INT iContextType, iCtrlId; ULONG hItemHandle, dwContextId; POINT MousePos; } HELPINFO32;
 C_ASSERT(sizeof(HELPINFO32) == 28);
+#ifndef WM_DDE_ACK
+#define WM_DDE_ACK 0x03e4
+#define WM_DDE_ADVISE 0x03e2
+#define WM_DDE_DATA 0x03e5
+#define WM_DDE_POKE 0x03e7
+#define WM_DDE_EXECUTE 0x03e8
+#endif
+#ifndef WM_COPYGLOBALDATA
+#define WM_COPYGLOBALDATA 0x0049 /* undocuser.h */
+#endif
+typedef struct { ULONG hmenuIn, hmenuNext, hwndNext; } MDINEXTMENU32;
+C_ASSERT(sizeof(MDINEXTMENU32) == 12);
+/* DDEPOSTGET_CALLBACK_ARGUMENTS of a 32-bit user32: the buffer follows the header */
+typedef struct { INT Type; MSG32 Msg; INT size; ULONG pvData; BYTE buffer[1]; } DDEPOSTGET32;
+C_ASSERT(FIELD_OFFSET(DDEPOSTGET32, buffer) == 40);
 C_ASSERT(sizeof(STRING32) == 8);
 C_ASSERT(sizeof(MSG32) == 28);
 C_ASSERT(sizeof(PAINT32) == 64);
@@ -101,6 +116,8 @@ VOID WindowPos32ToNative(WINDOWPOS *To, const WINDOWPOS32 *From);
 VOID WindowPosNativeTo32(WINDOWPOS32 *To, const WINDOWPOS *From);
 VOID Help32ToNative(HELPINFO *To, const HELPINFO32 *From);
 VOID HelpNativeTo32(HELPINFO32 *To, const HELPINFO *From);
+VOID NextMenu32ToNative(MDINEXTMENU *To, const MDINEXTMENU32 *From);
+VOID NextMenuNativeTo32(MDINEXTMENU32 *To, const MDINEXTMENU *From);
 ULONG_PTR Wow64WinUserService(ULONG Number, ULONG *a);
 ULONG_PTR Wow64WinExtraService(ULONG Number, ULONG *a);
 ULONG_PTR Wow64WinGdiService(ULONG Number, ULONG *a);
