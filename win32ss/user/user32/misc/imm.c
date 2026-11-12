@@ -1132,9 +1132,26 @@ ImeWndProc_common(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, BOOL unicod
             return (LRESULT)pimeui;
 
         case WM_IME_SETCONTEXT:
-            return ImeWnd_OnImeSetContext(pimeui, wParam, lParam);
+        {
+            /* DefWindowProc forwards the focus changes here. ImmGetContext(NULL) for a thread without a focus
+               window leaves ERROR_INVALID_WINDOW_HANDLE, which a caller of SetWindowPos never sees on Windows
+               (wine user32 win.c test_message_window_topmost) */
+            DWORD dwOldError = GetLastError();
+            ret = ImeWnd_OnImeSetContext(pimeui, wParam, lParam);
+            SetLastError(dwOldError);
+            return ret;
+        }
 
         case WM_IME_SYSTEM:
+            if (wParam == IMS_UPDATEIMEUI)
+            {
+                /* win32k sends this after every SetWindowPos/MoveWindow that changes the geometry. The
+                   IMM calls leave the last error reset to 0 (LocalUnlock), which Windows' caller never sees. */
+                DWORD dwOldError = GetLastError();
+                ret = ImeWnd_OnImeSystem(pimeui, wParam, lParam);
+                SetLastError(dwOldError);
+                return ret;
+            }
             return ImeWnd_OnImeSystem(pimeui, wParam, lParam);
 
         default:

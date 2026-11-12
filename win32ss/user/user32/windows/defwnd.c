@@ -591,13 +591,19 @@ User32DefWindowProc(HWND hWnd,
 
         case WM_HELP:
         {
-            if (bUnicode)
+            /* A window without a parent has nobody to forward to: sending to a NULL window would leave
+               ERROR_INVALID_WINDOW_HANDLE behind, Windows leaves the last error alone */
+            HWND hwndParent = GetParent(hWnd);
+            if (hwndParent)
             {
-                SendMessageW(GetParent(hWnd), Msg, wParam, lParam);
-            }
-            else
-            {
-                SendMessageA(GetParent(hWnd), Msg, wParam, lParam);
+                if (bUnicode)
+                {
+                    SendMessageW(hwndParent, Msg, wParam, lParam);
+                }
+                else
+                {
+                    SendMessageA(hwndParent, Msg, wParam, lParam);
+                }
             }
             break;
         }

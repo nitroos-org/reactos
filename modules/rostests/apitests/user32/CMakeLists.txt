@@ -64,6 +64,7 @@ list(APPEND SOURCE
     SetWindowPosFlags.c
     SetParentCrossProcess.c
     SetParentKillOrder.c
+    SetWindowPosLastError.c
     WmCancelModeLastError.c
     WmGetDlgCode.c
     WmPointerMessages.c
