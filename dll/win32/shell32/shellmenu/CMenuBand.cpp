@@ -226,6 +226,14 @@ HRESULT STDMETHODCALLTYPE  CMenuBand::SetSite(IUnknown *pUnkSite)
         hr = m_SFToolbar->FillToolbar();
         if (FAILED_UNEXPECTEDLY(hr))
             return hr;
+
+        /* No shell folder section on the top level Start menu (nothing pinned): no divider above the static items */
+        if (m_staticToolbar != NULL && !m_shellBottom &&
+            (m_dwFlags & (SMINIT_TOPLEVEL | SMINIT_VERTICAL)) == (SMINIT_TOPLEVEL | SMINIT_VERTICAL) &&
+            m_SFToolbar->GetButtonCount() == 0)
+        {
+            m_staticToolbar->HideLeadingSeparator();
+        }
     }
 
     hr = IUnknown_QueryService(m_site, SID_SMenuPopup, IID_PPV_ARG(IMenuPopup, &m_subMenuParent));
