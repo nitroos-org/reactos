@@ -15,6 +15,21 @@ through `scoop.c` / `engine.c`. Roundtrip test: `tests\roundtrip.cmd` (offline, 
   one with an installed font (Lucida Console) and `pwsh` (else `cmd`); Alacritty's own defaults (Consolas, powershell)
   do not exist here. These two never follow links (reparse-point checks, CREATE_NEW). Same removal rule as above.
 
+## First boot defaults, icon, removed entries (2026-11-11)
+
+- `optfeatures /firstboot` installs the Default=1 components of `components.ini` AND every catalog entry with
+  `[Feature] FirstBootDefault=1` that was never installed and is available on this build (today: `aac`, the full AAC decoder, a
+  hosted pack, amd64: both the 64-bit and the 32-bit decoder). Such entries go first (they are small); a failure never stops the
+  other components; the SHA-256 checks of the hosted download are unchanged. An entry the user turned off (State Disabled) is left off.
+- After the install, first boot shows the entry's `Notice` (the patent notice) once in an informational box on the desktop
+  (nothing waits for a click to install); `NoticeShown.<id>` (HKLM\SOFTWARE\ReactOS\Nitro\Featmgr) records it, so a retry or a later boot
+  stays quiet. The notice stays reachable: Optional Features shows it again when the entry is turned on, and the licence texts
+  (including `aac-patent-notice.txt`) are in `%SystemRoot%\System32\aac-licenses`. `Removable=1`: turning `aac` off removes it as before.
+- `res/featmgr.ico` is a copy of `base/applications/rapps/res/main.ico` (the in-tree icon of the Applications Manager that featmgr replaces, GPL, no new third-party file; it carries the 16x16 sizes the Start menu uses - the 32x32-only appwiz icon showed as a blank icon there); it is the icon
+  resource of `optfeatures.exe` (the Start menu shortcut of `media/inf/shortcuts.inf` uses icon index 0 of the exe) and of its windows.
+- Removed: the Claude Desktop catalog entry (`catalog/claude-desktop.ini` and its `add_cd_file`). Nothing else in featmgr depended on it
+  (the Provider=native code path is generic and stays; RAPPS-format entries still use it).
+
 ## Hosted payloads (OS-tier packs downloaded at enable time)
 
 An OS-tier manifest whose files are not in the image lists them in `[Download]`, one line per file:

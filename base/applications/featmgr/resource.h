@@ -11,3 +11,4 @@
 #define IDC_AB_URL      202
 #define IDC_AB_WARN     203
 #define IDC_AB_TRUST    204
+#define IDI_FEATMGR     1
