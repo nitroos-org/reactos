@@ -36,12 +36,12 @@ typedef void (*PFUNC)(void);
 
 #define FL_VMX 0x20
 #define FL_HV 0x40
-
+#define FL_HVCALL 0x80 // a hypervisor on AMD may emulate it and raise #GP in user mode
 #define FL_PRIV 0x100
 #define FL_ACC 0x200
 #define FL_INVLS 0x400
 #define FL_STKF 0x800 // access violation from a stack fault (#SS)
-
+#define FL_LOCKUD 0x1000 // AMD: the LOCK prefix raises #UD before the privilege check
 typedef struct _TEST_ENTRY
 {
     ULONG Line;
@@ -144,7 +144,7 @@ TEST_ENTRY TestEntries[] =
     { __LINE__, { 0x0F, 0x00, 0x50, 0x00, 0xC3 }, 0, FL_ANY | FL_PRIV },  // LLDT WORD PTR [EAX + 0x00]
     { __LINE__, { 0x0F, 0x00, 0x18, 0xC3 }, 0, FL_ANY | FL_PRIV },  // LTR WORD PTR [EAX]
     { __LINE__, { 0x0F, 0x00, 0x58, 0x00, 0xC3 }, 0, FL_ANY | FL_PRIV },  // LTR WORD PTR [EAX + 0x00]
-    { __LINE__, { 0x0F, 0x01, 0xC1, 0xC3 }, 0, FL_INTEL | FL_HV },  // VMCALL
+    { __LINE__, { 0x0F, 0x01, 0xC1, 0xC3 }, 0, FL_INTEL | FL_HV | FL_HVCALL },  // VMCALL
     { __LINE__, { 0x0F, 0x01, 0xC2, 0xC3 }, 0, FL_INTEL | FL_HV | FL_ACC },  // VMLAUNCH
     { __LINE__, { 0x0F, 0x01, 0xC3, 0xC3 }, 0, FL_INTEL | FL_HV | FL_ACC },  // VMRESUME
     { __LINE__, { 0x0F, 0x01, 0xC4, 0xC3 }, 0, FL_INTEL | FL_HV | FL_ACC },  // VMXOFF
@@ -176,7 +176,7 @@ TEST_ENTRY TestEntries[] =
     { __LINE__, { 0x65, 0xF4, 0xC3 }, 0, FL_ANY | FL_PRIV }, // GS: HLT
     { __LINE__, { 0x66, 0xF4, 0xC3 }, 0, FL_ANY | FL_PRIV }, // DATA HLT
     { __LINE__, { 0x67, 0xF4, 0xC3 }, 0, FL_ANY | FL_PRIV }, // ADDR HLT
-    { __LINE__, { 0xF0, 0xF4, 0xC3 }, 0, FL_ANY | FL_INVLS | FL_PRIV }, // LOCK HLT
+    { __LINE__, { 0xF0, 0xF4, 0xC3 }, 0, FL_ANY | FL_INVLS | FL_PRIV | FL_LOCKUD }, // LOCK HLT
     { __LINE__, { 0xF2, 0xF4, 0xC3 }, 0, FL_ANY | FL_PRIV }, // REP HLT
     { __LINE__, { 0xF3, 0xF4, 0xC3 }, 0, FL_ANY | FL_PRIV }, // REPZ HLT
     { __LINE__, { 0x9B, 0xF4, 0xC3 }, 1, FL_ANY | FL_PRIV }, // WAIT // not a prefix
@@ -191,7 +191,7 @@ TEST_ENTRY TestEntries[] =
 #endif
     { __LINE__, { 0xF0, 0x90, 0xC3 }, 0, FL_INVLS }, // LOCK NOP
     { __LINE__, { 0xF0, 0x83, 0x0C, 0x24, 0x00, 0xC3 }, 0, FL_ANY }, // LOCK OR DWORD PTR [ESP], 0x0 
-    { __LINE__, { 0x3E, 0x66, 0x67, 0xF0, 0xF3, 0xF4, 0xC3 }, 0, FL_ANY | FL_INVLS | FL_PRIV }, // DS: DATA ADDR LOCK REPZ HLT
+    { __LINE__, { 0x3E, 0x66, 0x67, 0xF0, 0xF3, 0xF4, 0xC3 }, 0, FL_ANY | FL_INVLS | FL_PRIV | FL_LOCKUD }, // DS: DATA ADDR LOCK REPZ HLT
 #ifdef _M_AMD64
     /* Check non-canonical address access (causes a #GP) */
     { __LINE__, { 0xA0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0xC3 }, 0, FL_ANY | FL_ACC }, //  MOV AL, [0x1000000000000000]
@@ -250,6 +250,11 @@ void Test_SingleInstruction(
     {
         ExpectedStatus = STATUS_ILLEGAL_INSTRUCTION;
     }
+    else if ((g_CpuVendor == CPU_VENDOR_AMD) && (Flags & FL_LOCKUD))
+    {
+        /* Measured on an AMD EPYC (Zen 4) host: LOCK HLT in user mode raises #UD, not #GP */
+        ExpectedStatus = STATUS_ILLEGAL_INSTRUCTION;
+    }
     else if (Flags & FL_PRIV)
     {
         ExpectedStatus = STATUS_PRIVILEGED_INSTRUCTION;
@@ -261,6 +266,18 @@ void Test_SingleInstruction(
     else
     {
         ExpectedStatus = STATUS_SUCCESS;
+    }
+
+    /* VMCALL raises #UD on AMD, but a hypervisor on AMD may take that #UD and handle the
+       instruction itself: KVM emulates VMCALL there and refuses it in user mode with #GP.
+       The kernel then classifies that #GP: Windows 10 22H2 under KVM on AMD reports an
+       access violation, ReactOS a privileged instruction. Accept either. */
+    if ((g_CpuVendor == CPU_VENDOR_AMD) && (g_CpuFeatures & CPU_FEATURE_HV) &&
+        (Flags & FL_HVCALL) && (ExpectedStatus == STATUS_ILLEGAL_INSTRUCTION) &&
+        ((Status == STATUS_PRIVILEGED_INSTRUCTION) || (Status == STATUS_ACCESS_VIOLATION)))
+    {
+        trace("Line %lu: the hypervisor raised #GP, status 0x%lx\n", TestEntry->Line, Status);
+        ExpectedStatus = Status;
     }
 
     ok_hex_(__FILE__, TestEntry->Line, Status, ExpectedStatus);
