@@ -31,6 +31,13 @@ extern "C" {
 #define MI_PARAM_STATUS(n) \
     ((NtMajorVersion >= 10) ? STATUS_INVALID_PARAMETER : STATUS_INVALID_PARAMETER_##n)
 
+/*
+ * Windows 10 maps a view of \Device\PhysicalMemory at or past the highest
+ * physical page for a user-mode caller too (kmtest MmSection); NT5/NT6 refuse
+ * it with STATUS_INVALID_PARAMETER_6.
+ */
+#define MI_PHYSMEM_USER_MAP_PAST_RAM() (NtMajorVersion >= 10)
+
 /* Behaviour that Windows 8 (6.2) introduced and every later version keeps */
 #define MI_IS_WIN8_OR_LATER() \
     ((NtMajorVersion > 6) || ((NtMajorVersion == 6) && (NtMinorVersion >= 2)))

@@ -4014,7 +4014,12 @@ MiMapViewOfSectionCommon(
 
     if (Section->u.Flags.PhysicalMemory)
     {
-        if (PreviousMode == UserMode &&
+        /* Before Windows 10 a user-mode caller cannot map the physical memory
+         * section at or past the highest physical page; Windows 10 lets it,
+         * like a kernel-mode caller. User mode cannot open the section itself
+         * (it is kernel-exclusive), so only a handle that kernel code gave out
+         * gets here. */
+        if (PreviousMode == UserMode && !MI_PHYSMEM_USER_MAP_PAST_RAM() &&
             SafeSectionOffset.QuadPart + SafeViewSize > MmHighestPhysicalPage << PAGE_SHIFT)
         {
             DPRINT1("Denying map past highest physical page.\n");
