@@ -1606,7 +1606,8 @@ MiPagerFreeSlotCount(VOID)
 }
 
 /*
- * Fewer than an eighth of the paging file slots are free and no paging file can grow any more. A
+ * Fewer than an eighth of the paging file slots are free (until more than a quarter are free again)
+ * and no paging file can grow any more. A
  * private page that becomes valid again then gives up its clean copy (pagfault.c): resident pages give
  * up copies anyway once the slots run out (MiPagerReclaimSlots), but the reclaim frees slots scattered
  * over the files, so every cluster write gets a short run; a page that is paged in gives up the slot
@@ -1619,12 +1620,28 @@ BOOLEAN
 NTAPI
 MiPagerSlotsScarce(VOID)
 {
+    static volatile LONG Scarce;
     ULONGLONG Free = MiFreeSwapPages, Used = MiUsedSwapPages;
     PMMPAGING_FILE PagingFile;
     ULONG i;
 
-    if ((MiNitroPagerMode == 0) || (Free * 8 >= Free + Used))
+    if (MiNitroPagerMode == 0)
         return FALSE;
+
+    /* Hysteresis: enter below an eighth free, leave above a quarter free (a page file at the edge does not flap) */
+    if (Scarce)
+    {
+        if (Free * 4 > Free + Used)
+        {
+            Scarce = 0;
+            return FALSE;
+        }
+    }
+    else
+    {
+        if (Free * 8 >= Free + Used)
+            return FALSE;
+    }
 
     for (i = 0; i < MAX_PAGING_FILES; i++)
     {
@@ -1633,9 +1650,11 @@ MiPagerSlotsScarce(VOID)
             !PagingFile->CannotGrow && (PagingFile->Size < PagingFile->MaximumSize))
         {
             /* The file grows first */
+            Scarce = 0;
             return FALSE;
         }
     }
+    Scarce = 1;
     return TRUE;
 }
 
