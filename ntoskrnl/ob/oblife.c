@@ -19,6 +19,9 @@
 
 extern ULONG NtGlobalFlag;
 
+/* NonPagedPoolNx of the Windows 8 POOL_TYPE: not in this DDK, but what NtQueryObject reports for non-paged types */
+#define ObpNonPagedPoolNx 512
+
 POBJECT_TYPE ObpTypeObjectType = NULL;
 KEVENT ObpDefaultObject;
 KGUARDED_MUTEX ObpDeviceMapLock;
@@ -994,8 +997,10 @@ ObQueryTypeInfo(
             ObjectTypeInfo->HighWaterNumberOfHandles = ObjectType->HighWaterNumberOfHandles;
             ObjectTypeInfo->HighWaterNumberOfObjects = ObjectType->HighWaterNumberOfObjects;
         }
+        /* Windows 8 and later report the no-execute non-paged pool for the types that live in non-paged pool */
         ObjectTypeInfo->PoolType =
-            ObjectType->TypeInfo.PoolType;
+            (ObjectType->TypeInfo.PoolType == NonPagedPool) ? ObpNonPagedPoolNx :
+                                                              ObjectType->TypeInfo.PoolType;
         ObjectTypeInfo->DefaultNonPagedPoolCharge =
             ObjectType->TypeInfo.DefaultNonPagedPoolCharge;
         ObjectTypeInfo->DefaultPagedPoolCharge =
@@ -1767,6 +1772,12 @@ NtQueryObject(IN HANDLE ObjectHandle,
                 /* Fill out the basic information */
                 BasicInfo = (POBJECT_BASIC_INFORMATION)ObjectInformation;
                 BasicInfo->Attributes = HandleInfo.HandleAttributes;
+
+                /* The protect-from-close state is kept in the granted access of the handle table entry */
+                if (HandleInfo.GrantedAccess & ObpAccessProtectCloseBit)
+                {
+                    BasicInfo->Attributes |= OBJ_PROTECT_CLOSE;
+                }
                 BasicInfo->GrantedAccess = HandleInfo.GrantedAccess;
                 BasicInfo->HandleCount = ObjectHeader->HandleCount;
                 BasicInfo->PointerCount = ObjectHeader->PointerCount;
@@ -1885,9 +1896,10 @@ NtQueryObject(IN HANDLE ObjectHandle,
                 HandleFlags = (POBJECT_HANDLE_FLAG_INFORMATION)ObjectInformation;
 
                 /* Set the flags */
-                HandleFlags->Inherit = HandleInfo.HandleAttributes & OBJ_INHERIT;
-                HandleFlags->ProtectFromClose = (HandleInfo.HandleAttributes &
-                                                 OBJ_PROTECT_CLOSE) != 0;
+                /* A BOOLEAN: 1 for an inheritable handle (the raw OBJ_INHERIT bit is 2) */
+                HandleFlags->Inherit = (HandleInfo.HandleAttributes & OBJ_INHERIT) != 0;
+                HandleFlags->ProtectFromClose = ((HandleInfo.HandleAttributes & OBJ_PROTECT_CLOSE) != 0) ||
+                                                ((HandleInfo.GrantedAccess & ObpAccessProtectCloseBit) != 0);
 
                 /* Break out with success */
                 Status = STATUS_SUCCESS;

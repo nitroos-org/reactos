@@ -52,6 +52,8 @@ list(APPEND SOURCE
     NtAlertThreadByThreadId.c
     NtAllocateReserveObject.c
     NtWaitCompletionPacket.c
+    NtSetIoCompletionEx.c
+    NtQueryObjectHandleFlags.c
     RtlWin10Helpers.c
     RtlConvertDeviceFamilyInfo.c
     ZeroBits.c
