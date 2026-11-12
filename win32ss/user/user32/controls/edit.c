@@ -3325,6 +3325,13 @@ static BOOL EDIT_EM_Undo(EDITSTATE *es)
 	if( es->style & ES_READONLY )
             return !(es->style & ES_MULTILINE);
 
+#ifdef __REACTOS__
+	/* Nothing to undo: Windows 10 does nothing (no EN_CHANGE to the parent, so no last error left by a
+	   parentless control) and returns TRUE for a single-line control, FALSE for a multiline one */
+	if (!EDIT_EM_CanUndo(es))
+	    return !(es->style & ES_MULTILINE);
+#endif
+
 	ulength = lstrlenW(es->undo_text);
 
 	utext = HeapAlloc(GetProcessHeap(), 0, (ulength + 1) * sizeof(WCHAR));
