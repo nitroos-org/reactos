@@ -141,6 +141,13 @@ KdpStub(
 
 BOOLEAN
 NTAPI
+KdpIsExceptionReported(
+    IN PEXCEPTION_RECORD ExceptionRecord,
+    IN BOOLEAN SecondChanceException
+);
+
+BOOLEAN
+NTAPI
 KdpTrap(
     IN PKTRAP_FRAME TrapFrame,
     IN PKEXCEPTION_FRAME ExceptionFrame,
