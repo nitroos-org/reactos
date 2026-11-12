@@ -67,9 +67,15 @@ BOOL WINAPI IsThemeDialogTextureEnabled(HWND hwnd)
 }
 
 /***********************************************************************
- *      DrawThemeParentBackground                           (UXTHEME.@)
+ *      DrawParentBackground (internal)
  */
-HRESULT WINAPI DrawThemeParentBackground(HWND hwnd, HDC hdc, RECT *prc)
+#ifndef DTPB_USEERASEBKGND
+#define DTPB_WINDOWDC           0x00000001
+#define DTPB_USECTLCOLORSTATIC  0x00000002
+#define DTPB_USEERASEBKGND      0x00000004
+#endif
+
+static HRESULT DrawParentBackground(HWND hwnd, HDC hdc, DWORD flags, const RECT *prc)
 {
     RECT rt;
     POINT org;
@@ -107,7 +113,19 @@ HRESULT WINAPI DrawThemeParentBackground(HWND hwnd, HDC hdc, RECT *prc)
 
     OffsetViewportOrgEx(hdc, -rt.left, -rt.top, &org);
 
-    SendMessageW(hParent, WM_ERASEBKGND, (WPARAM)hdc, 0);
+    if (flags & DTPB_USECTLCOLORSTATIC)
+    {
+        HBRUSH hbr = (HBRUSH)SendMessageW(hParent, WM_CTLCOLORSTATIC, (WPARAM)hdc, (LPARAM)hwnd);
+        if (hbr)
+        {
+            RECT fill;
+            if (prc) fill = *prc; else GetClientRect(hwnd, &fill);
+            MapWindowPoints(hwnd, hParent, (LPPOINT)&fill, 2);
+            FillRect(hdc, &fill, hbr);
+        }
+    }
+    if (flags & DTPB_USEERASEBKGND)
+        SendMessageW(hParent, WM_ERASEBKGND, (WPARAM)hdc, 0);
     SendMessageW(hParent, WM_PRINTCLIENT, (WPARAM)hdc, PRF_CLIENT);
 
     SetViewportOrgEx(hdc, org.x, org.y, NULL);
@@ -121,6 +139,24 @@ HRESULT WINAPI DrawThemeParentBackground(HWND hwnd, HDC hdc, RECT *prc)
     return S_OK;
 }
 
+
+/***********************************************************************
+ *      DrawThemeParentBackground                           (UXTHEME.@)
+ */
+HRESULT WINAPI DrawThemeParentBackground(HWND hwnd, HDC hdc, RECT *prc)
+{
+    TRACE("(%p,%p,%p)\n", hwnd, hdc, prc);
+    return DrawParentBackground(hwnd, hdc, DTPB_USEERASEBKGND, prc);
+}
+
+/***********************************************************************
+ *      DrawThemeParentBackgroundEx                         (UXTHEME.@)
+ */
+HRESULT WINAPI DrawThemeParentBackgroundEx(HWND hwnd, HDC hdc, DWORD dwFlags, const RECT *prc)
+{
+    TRACE("(%p,%p,0x%08x,%p)\n", hwnd, hdc, dwFlags, prc);
+    return DrawParentBackground(hwnd, hdc, dwFlags, prc);
+}
 
 /***********************************************************************
  *      DrawThemeBackground                                 (UXTHEME.@)
