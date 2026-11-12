@@ -102,3 +102,30 @@ Scored and NOT adopted (round 3): `SDURATION` with a two-digit hour when the tim
 Not reachable from CLDR (no CLDR field carries the value): zero-padded short dates of es/pl/he/hi (CLDR short dates are `d/M/y`), `dd MMMM yyyy` of en-GB, `AM/PM` upper case of en-GB,
 the U+2019 group separator of de-CH (CLDR has the ASCII apostrophe only), `Sep`/`Mrz` abbreviations, he-IL and fa-IR currency/time layout, es-ES `alfabetizacion internacional`,
 the NitroOS culture count (CLDR full names 148 cultures, Windows 859), cs-CZ `ch` collation.
+
+## Round 4 (2026.11-2, lane cldr3): what else CLDR can give, and what it cannot
+Same data rule and same scorer as round 3 (Windows dumps only count matches; no Windows value in this tree). Two rules were added; every other
+candidate that was examined has no CLDR source or would regress a field that matches today (list below).
+
+| Rule | What it does | Effect (10 probe locales: 1120 LCTYPE values; 20 .NET culture lines) |
+|---|---|---|
+| QUOTE-CANON | the quoting of literal text in a LONG date pattern is canonical (`SLONGDATE`, `SRELATIVELONGDATE`, the long date lists of the calendars): a quoted word between two date fields takes the spaces around it into the quotes (CLDR `d 'de' MMMM 'de' y` becomes `d' de 'MMMM' de 'yyyy`), and a quoted word at the end of a pattern takes its trailing punctuation (`y 'г'.` becomes `y 'г.'`). The formatted text is identical (no pattern letter, order or width changes); it keeps a literal phrase in one quoted string, which is how the GetDateFormat custom-format syntax is documented. `SMONTHDAY`, `SYEARMONTH`, the short date and the time patterns keep CLDR's own quoting: a first version of the rule applied to every pattern and the oracle probe showed es-ES `SMONTHDAY` (`d 'de' MMMM`, spaces outside) getting worse while the two long dates improved, so the rule is a measured field selection (long dates), not a global one | LCTYPE differences 146 -> 143 (es-ES `SLONGDATE`, `SRELATIVELONGDATE`, ru-RU `SLONGDATE`), no field worse |
+| APOS-TYPO | a number group separator that is the bare ASCII apostrophe (CLDR: de-CH, de-LI, fr-CH, it-CH, gsw, ...) becomes U+2019, the typographic apostrophe (the Unicode Standard's character for the apostrophe in text; U+0027 is the neutral typewriter form; U+2019 is in code pages 1250-1258). Not a CLDR value: a documented typographic mapping of one. Applies to `STHOUSAND` and `SMONTHOUSANDSEP` | de-CH number segments (3 of 5 differing segments of its .NET line) |
+
+Examined and NOT adopted (the reason is the finding; each was checked against the CLDR data of the locale and its parents):
+| Candidate | Why not |
+|---|---|
+| en-GB `AM/PM`, `dd MMMM yyyy` | CLDR en-GB has `am`/`pm` (lower case) in every width and its `alt-variant` forms are the same; its long date is `d MMMM y`. No field carries the value |
+| `AM/PM` kept for pl, sk, he, th, de-CH but empty for de, fr, ru, pt, es | CLDR data of de and de-CH is identical (`AM`/`PM`, `HH:mm`); pl, sk, ru differ in nothing the generator reads. Only a per-language list would produce it |
+| ru capitalised month names | CLDR `contextTransforms` for ru and es are identical (and also say capitalise the day names, which Windows does not for ru; fr and pl carry the same rule and Windows lowercases them) |
+| ar-SA short date `dd/MM/yy`, hi-IN padded/24-hour, es/pl/he padded short dates | CLDR short dates are `d/M/y`; no padded pattern exists in the locales' data |
+| ar-SA digits | already Latin separators with national digit substitution (round 3); CLDR's default numbering system for ar-SA is `arab`, the `latn` one is used for the formats |
+| `SDURATION` hour width from the time pattern | fixes en-GB, de, fr, ar-SA, breaks zh and ru (their CLDR time pattern is `HH:mm` too): 4 fixed, 2 regressed, rejected again |
+| `SSHORTESTDAYNAME` narrow vs short, `SABBREVMONTHNAME` period/no period, `SKEYBOARDSTOINSTALL`, `IREADINGLAYOUT` (ja, zh = 2), `INEGCURR`/`IPOSITIVEPERCENT` of ru, zh, en-US | opposite or no CLDR signal between locales (es keeps the period that ru drops; zh-CN narrow day `一` but en/ru need `short`), or Windows-only (keyboards, vertical layout) |
+| `SMONTHDAY` unquoted CJK literals (`M月d日`) | Windows quotes the same literals in the long date, so no consistent rule exists |
+
+Measured note, culture count (148 here, 859 on Windows 10; the .NET test prints `cultures=` and `specific=`): the 146 `.nls` files cover 76 languages. CLDR 49 full has 657
+locale ids (a default region is not its own id: `cs`, not `cs-CZ`). Not generated: 222 language-region variants of languages we have, 37 of languages we lack, 79 script
+variants (Hans/Hant/Cyrl/Latn...), 28 neutral languages with modern coverage. Reason: a locale needs an identity that CLDR does not carry (LCID, code pages, GEOID, calling code,
+Windows abbreviations: `data/skeleton.json`, taken from the Wine-era tables of those 146 files), and the public source for it (MS-LCID, ISO 3166) was not applied in this round. Adding locales is a
+data-entry job on `skeleton.json` plus the registry/LCID tables; it is not a mapping-rule change and does not move the .NET culture lines of the 20 test cultures.
