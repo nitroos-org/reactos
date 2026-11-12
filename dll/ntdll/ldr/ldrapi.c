@@ -1545,6 +1545,7 @@ BuildUnloadList:
 
         /* Remove it from the list */
         RemoveEntryList(&CurrentEntry->InLoadOrderLinks);
+        LdrpRemoveImageRange(CurrentEntry);
         CurrentEntry = NULL;
         NextEntry = LdrpUnloadHead.Flink;
     }

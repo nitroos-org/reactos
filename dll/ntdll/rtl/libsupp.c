@@ -673,6 +673,13 @@ RtlPcToFileHeader(IN PVOID PcValue,
     PLDR_DATA_TABLE_ENTRY Module;
     PVOID ImageBase = NULL;
 
+    /* The address ranges of the loaded modules answer without the loader lock */
+    if (LdrpLookupImageRange(PcValue, &ImageBase))
+    {
+        *BaseOfImage = ImageBase;
+        return ImageBase;
+    }
+
     RtlEnterCriticalSection (NtCurrentPeb()->LoaderLock);
     ModuleListHead = &NtCurrentPeb()->Ldr->InLoadOrderModuleList;
     Entry = ModuleListHead->Flink;
