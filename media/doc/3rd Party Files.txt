@@ -33,6 +33,22 @@ License: Unicode License (ICU 58 and later, https://www.unicode.org/copyright.ht
 URL: https://icu.unicode.org/ (https://github.com/unicode-org/icu/releases/tag/release-64-2)
 Modifications: only source/common, source/i18n (.cpp/.h) and stubdata.cpp are vendored; umutex.h/.cpp use Win32 SRW locks instead of std::mutex (win32 thread model); added .spec files, icu_main.cpp (maps the data file), icu_compat.h. data/icudtl.dat is the upstream ICU 64.2 data package filtered to the locales of the ReactOS NLS (data/build-filtered-data.sh, data/nls-locales.txt). See dll/3rdparty/icu/README.ReactOS.
 
+Title: Little CMS 2 (lcms2)
+Path: sdk/lib/3rdparty/lcms2
+Used Version: 2.20 (LCMS_VERSION 2200), the copy bundled by Wine as libs/lcms2 at wine-mirror/wine master 7384c8babcaa411a0014bf223068a633d7bfa899 (2026-11-11); imported 2026-11-12 for dll/win32/mscms
+License: MIT (https://spdx.org/licenses/MIT.html)
+URL: https://www.littlecms.com/ (https://github.com/mm2/Little-CMS)
+Modifications: only libs/lcms2 (src, include, COPYING, AUTHORS) is vendored, unchanged except cmsplugin.c (#ifdef __REACTOS__: _fpclass() instead of fpclassify(), which the ReactOS CRT headers do not give C code); CMakeLists.txt builds a static library linked into mscms.dll. See sdk/lib/3rdparty/lcms2/README.ReactOS.
+
+
+Title: Little CMS 2 (lcms2)
+Path: sdk/lib/3rdparty/lcms2
+Used Version: 2.20 (LCMS_VERSION 2200), the copy bundled by Wine as libs/lcms2 at wine-mirror/wine master 7384c8babcaa411a0014bf223068a633d7bfa899 (2026-11-11); imported 2026-11-12 for dll/win32/mscms
+License: MIT (https://spdx.org/licenses/MIT.html)
+URL: https://www.littlecms.com/ (https://github.com/mm2/Little-CMS)
+Modifications: only libs/lcms2 (src, include, COPYING, AUTHORS) is vendored, unchanged except cmsplugin.c (#ifdef __REACTOS__: _fpclass() instead of fpclassify(), which the ReactOS CRT headers do not give C code). CMakeLists.txt builds a static library linked into mscms.dll. See sdk/lib/3rdparty/lcms2/README.ReactOS.
+
+
 Title: libjpeg
 Path: dll/3rdparty/libjpeg
 Used Version: 10
