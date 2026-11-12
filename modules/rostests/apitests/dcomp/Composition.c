@@ -1672,6 +1672,8 @@ typedef struct
     HRESULT (STDMETHODCALLTYPE *CreateDropShadow)(ICompositor2T *This, IUnknown **result);
     HRESULT (STDMETHODCALLTYPE *CreateImplicitAnimationCollection)(ICompositor2T *This, IUnknown **result);
     HRESULT (STDMETHODCALLTYPE *CreateLayerVisual)(ICompositor2T *This, IUnknown **result);
+    HRESULT (STDMETHODCALLTYPE *CreateMaskBrush)(ICompositor2T *This, IUnknown **result);
+    HRESULT (STDMETHODCALLTYPE *CreateNineGridBrush)(ICompositor2T *This, IUnknown **result);
 } ICompositor2TVtbl;
 struct ICompositor2T { const ICompositor2TVtbl *lpVtbl; };
 static const GUID IID_ICompositor2T = {0x735081dc, 0x5e24, 0x45da, {0xa3, 0x8f, 0xe3, 0x2c, 0xc3, 0x49, 0xa9, 0xa0}};
@@ -1756,6 +1758,235 @@ static void TestCompositor2AndBrush3(void)
         REL(b3);
     }
     REL(brush);
+}
+
+/*
+ * ICompositionNineGridBrush (guid f25154e4-bc8c-4be7-b80f-8685b83c0186; slots after IInspectable: 6/7 BottomInset,
+ * 8/9 BottomInsetScale, 10/11 IsCenterHollow, 12/13 LeftInset, 14/15 LeftInsetScale, 16/17 RightInset,
+ * 18/19 RightInsetScale, 20/21 Source, 22/23 TopInset, 24/25 TopInsetScale, 26 SetInsets, 27 SetInsetsWithValues
+ * (left, top, right, bottom), 28 SetInsetScales, 29 SetInsetScalesWithValues): microsoft/windows-rs (MIT OR
+ * Apache-2.0), the published `windows` crate 0.62.2 (vcs commit 32c3144490c016fe496a0aed769bce60987a2e9d,
+ * src/Windows/UI/Composition/mod.rs). Defaults from learn.microsoft.com (windows.ui.composition.compositionninegridbrush
+ * members): insets 0, inset scales 1.
+ */
+typedef struct INineGridT INineGridT;
+typedef struct
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(INineGridT *This, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(INineGridT *This);
+    ULONG (STDMETHODCALLTYPE *Release)(INineGridT *This);
+    HRESULT (STDMETHODCALLTYPE *GetIids)(INineGridT *This, ULONG *count, IID **iids);
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(INineGridT *This, HSTRING *name);
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(INineGridT *This, int *level);
+    HRESULT (STDMETHODCALLTYPE *get_BottomInset)(INineGridT *This, float *v);
+    HRESULT (STDMETHODCALLTYPE *put_BottomInset)(INineGridT *This, float v);
+    HRESULT (STDMETHODCALLTYPE *get_BottomInsetScale)(INineGridT *This, float *v);
+    HRESULT (STDMETHODCALLTYPE *put_BottomInsetScale)(INineGridT *This, float v);
+    HRESULT (STDMETHODCALLTYPE *get_IsCenterHollow)(INineGridT *This, BOOLEAN *v);
+    HRESULT (STDMETHODCALLTYPE *put_IsCenterHollow)(INineGridT *This, BOOLEAN v);
+    HRESULT (STDMETHODCALLTYPE *get_LeftInset)(INineGridT *This, float *v);
+    HRESULT (STDMETHODCALLTYPE *put_LeftInset)(INineGridT *This, float v);
+    HRESULT (STDMETHODCALLTYPE *get_LeftInsetScale)(INineGridT *This, float *v);
+    HRESULT (STDMETHODCALLTYPE *put_LeftInsetScale)(INineGridT *This, float v);
+    HRESULT (STDMETHODCALLTYPE *get_RightInset)(INineGridT *This, float *v);
+    HRESULT (STDMETHODCALLTYPE *put_RightInset)(INineGridT *This, float v);
+    HRESULT (STDMETHODCALLTYPE *get_RightInsetScale)(INineGridT *This, float *v);
+    HRESULT (STDMETHODCALLTYPE *put_RightInsetScale)(INineGridT *This, float v);
+    HRESULT (STDMETHODCALLTYPE *get_Source)(INineGridT *This, WICompositionBrush **v);
+    HRESULT (STDMETHODCALLTYPE *put_Source)(INineGridT *This, WICompositionBrush *v);
+    HRESULT (STDMETHODCALLTYPE *get_TopInset)(INineGridT *This, float *v);
+    HRESULT (STDMETHODCALLTYPE *put_TopInset)(INineGridT *This, float v);
+    HRESULT (STDMETHODCALLTYPE *get_TopInsetScale)(INineGridT *This, float *v);
+    HRESULT (STDMETHODCALLTYPE *put_TopInsetScale)(INineGridT *This, float v);
+    HRESULT (STDMETHODCALLTYPE *SetInsets)(INineGridT *This, float inset);
+    HRESULT (STDMETHODCALLTYPE *SetInsetsWithValues)(INineGridT *This, float l, float t, float r, float b);
+    HRESULT (STDMETHODCALLTYPE *SetInsetScales)(INineGridT *This, float scale);
+    HRESULT (STDMETHODCALLTYPE *SetInsetScalesWithValues)(INineGridT *This, float l, float t, float r, float b);
+} INineGridTVtbl;
+struct INineGridT { const INineGridTVtbl *lpVtbl; };
+static const GUID IID_INineGridT = {0xf25154e4, 0xbc8c, 0x4be7, {0xb8, 0x0f, 0x86, 0x85, 0xb8, 0x3c, 0x01, 0x86}};
+
+static void Inset4(INineGridT *g, const char *what, float l, float t, float r, float b, BOOL scale)
+{
+    float v[4] = {-1, -1, -1, -1};
+    HRESULT hr[4];
+
+    if (scale)
+    {
+        hr[0] = g->lpVtbl->get_LeftInsetScale(g, &v[0]); hr[1] = g->lpVtbl->get_TopInsetScale(g, &v[1]);
+        hr[2] = g->lpVtbl->get_RightInsetScale(g, &v[2]); hr[3] = g->lpVtbl->get_BottomInsetScale(g, &v[3]);
+    }
+    else
+    {
+        hr[0] = g->lpVtbl->get_LeftInset(g, &v[0]); hr[1] = g->lpVtbl->get_TopInset(g, &v[1]);
+        hr[2] = g->lpVtbl->get_RightInset(g, &v[2]); hr[3] = g->lpVtbl->get_BottomInset(g, &v[3]);
+    }
+    ok(hr[0] == S_OK && hr[1] == S_OK && hr[2] == S_OK && hr[3] == S_OK, "%s getters %#lx %#lx %#lx %#lx\n",
+       what, hr[0], hr[1], hr[2], hr[3]);
+    ok(v[0] == l && v[1] == t && v[2] == r && v[3] == b, "%s l,t,r,b = %g,%g,%g,%g, expected %g,%g,%g,%g\n",
+       what, v[0], v[1], v[2], v[3], l, t, r, b);
+}
+
+static void TestNineGridBrush(void)
+{
+    ICompositor2T *c2 = NULL;
+    INineGridT *g = NULL;
+    IUnknown *made = (IUnknown *)0x1234, *u1 = NULL, *u2 = NULL;
+    WICompositionBrush *base = NULL, *got = NULL, *other = NULL;
+    WICompositionColorBrush *cb = NULL, *cb2 = NULL;
+    WISpriteVisual *sp = NULL;
+    IID *iids = NULL;
+    ULONG count = 0, oref;
+    BOOLEAN hollow;
+    float f;
+    HRESULT hr;
+
+    hr = QI(Comp, &IID_ICompositor2T, (void **)&c2);
+    ok(hr == S_OK && c2, "QI ICompositor2 %#lx\n", hr);
+    if (!c2) return;
+    hr = c2->lpVtbl->CreateNineGridBrush(c2, NULL);
+    ok(hr == E_POINTER, "CreateNineGridBrush(NULL) %#lx\n", hr);
+    hr = c2->lpVtbl->CreateNineGridBrush(c2, &made);
+    ok(hr == S_OK && made, "CreateNineGridBrush %#lx %p\n", hr, made);
+    REL(c2);
+    if (hr != S_OK || !made) return;
+    hr = QI(made, &IID_INineGridT, (void **)&g);
+    ok(hr == S_OK && g, "QI ICompositionNineGridBrush %#lx\n", hr);
+    hr = QI(made, &IID_Brush, (void **)&base);
+    ok(hr == S_OK && base, "QI ICompositionBrush %#lx\n", hr);
+    if (!g || !base) goto out;
+
+    QI(g, &IID_IUnknown, (void **)&u1);
+    QI(base, &IID_IUnknown, (void **)&u2);
+    ok(u1 == u2, "identity %p vs %p\n", u1, u2);
+    REL(u1); REL(u2);
+    hr = g->lpVtbl->GetIids(g, &count, &iids);
+    ok(hr == S_OK && iids, "GetIids %#lx\n", hr);
+    if (iids)
+    {
+        ok(HasIid(iids, count, &IID_INineGridT), "GetIids lacks ICompositionNineGridBrush\n");
+        ok(HasIid(iids, count, &IID_Brush), "GetIids lacks ICompositionBrush\n");
+        CoTaskMemFree(iids);
+    }
+
+    /* documented defaults: insets 0, inset scales 1, no Source */
+    Inset4(g, "default insets", 0, 0, 0, 0, FALSE);
+    Inset4(g, "default scales", 1, 1, 1, 1, TRUE);
+    hr = g->lpVtbl->get_Source(g, &got);
+    ok(hr == S_OK && !got, "default Source %#lx %p\n", hr, got);
+    hr = g->lpVtbl->get_LeftInset(g, NULL);
+    ok(hr == E_POINTER, "get_LeftInset(NULL) %#lx\n", hr);
+    hr = g->lpVtbl->get_IsCenterHollow(g, NULL);
+    ok(hr == E_POINTER, "get_IsCenterHollow(NULL) %#lx\n", hr);
+    hr = g->lpVtbl->get_Source(g, NULL);
+    ok(hr == E_POINTER, "get_Source(NULL) %#lx\n", hr);
+
+    /* each pair stores its own value */
+    ok(g->lpVtbl->put_LeftInset(g, 1.5f) == S_OK, "put_LeftInset\n");
+    ok(g->lpVtbl->put_TopInset(g, 2.5f) == S_OK, "put_TopInset\n");
+    ok(g->lpVtbl->put_RightInset(g, 3.5f) == S_OK, "put_RightInset\n");
+    ok(g->lpVtbl->put_BottomInset(g, 4.5f) == S_OK, "put_BottomInset\n");
+    Inset4(g, "put insets", 1.5f, 2.5f, 3.5f, 4.5f, FALSE);
+    Inset4(g, "scales untouched by insets", 1, 1, 1, 1, TRUE);
+    ok(g->lpVtbl->put_LeftInsetScale(g, 2) == S_OK, "put_LeftInsetScale\n");
+    ok(g->lpVtbl->put_TopInsetScale(g, 3) == S_OK, "put_TopInsetScale\n");
+    ok(g->lpVtbl->put_RightInsetScale(g, 4) == S_OK, "put_RightInsetScale\n");
+    ok(g->lpVtbl->put_BottomInsetScale(g, 5) == S_OK, "put_BottomInsetScale\n");
+    Inset4(g, "put scales", 2, 3, 4, 5, TRUE);
+    Inset4(g, "insets untouched by scales", 1.5f, 2.5f, 3.5f, 4.5f, FALSE);
+
+    /* the setters: one value for all four, or left, top, right, bottom */
+    ok(g->lpVtbl->SetInsets(g, 7) == S_OK, "SetInsets\n");
+    Inset4(g, "SetInsets(7)", 7, 7, 7, 7, FALSE);
+    ok(g->lpVtbl->SetInsetsWithValues(g, 1, 2, 3, 4) == S_OK, "SetInsetsWithValues\n");
+    Inset4(g, "SetInsetsWithValues(1,2,3,4)", 1, 2, 3, 4, FALSE);
+    ok(g->lpVtbl->SetInsetScales(g, 0.5f) == S_OK, "SetInsetScales\n");
+    Inset4(g, "SetInsetScales(0.5)", 0.5f, 0.5f, 0.5f, 0.5f, TRUE);
+    ok(g->lpVtbl->SetInsetScalesWithValues(g, 5, 6, 7, 8) == S_OK, "SetInsetScalesWithValues\n");
+    Inset4(g, "SetInsetScalesWithValues(5,6,7,8)", 5, 6, 7, 8, TRUE);
+    Inset4(g, "insets untouched by SetInsetScales*", 1, 2, 3, 4, FALSE);
+    f = -1;
+    g->lpVtbl->get_BottomInset(g, &f);
+    ok(f == 4, "BottomInset %g\n", f);
+
+    /* IsCenterHollow: FIXME the default is undocumented, only the round trip is checked */
+    ok(g->lpVtbl->put_IsCenterHollow(g, TRUE) == S_OK, "put_IsCenterHollow(TRUE)\n");
+    hollow = FALSE;
+    hr = g->lpVtbl->get_IsCenterHollow(g, &hollow);
+    ok(hr == S_OK && hollow, "IsCenterHollow after TRUE %#lx %u\n", hr, hollow);
+    ok(g->lpVtbl->put_IsCenterHollow(g, FALSE) == S_OK, "put_IsCenterHollow(FALSE)\n");
+    hollow = TRUE;
+    hr = g->lpVtbl->get_IsCenterHollow(g, &hollow);
+    ok(hr == S_OK && !hollow, "IsCenterHollow after FALSE %#lx %u\n", hr, hollow);
+
+    /* Source: a color brush, kept with a reference, replaced, cleared */
+    hr = Comp->lpVtbl->CreateColorBrush(Comp, &cb);
+    ok(hr == S_OK && cb, "CreateColorBrush %#lx\n", hr);
+    hr = Comp->lpVtbl->CreateColorBrush(Comp, &cb2);
+    ok(hr == S_OK && cb2, "CreateColorBrush 2 %#lx\n", hr);
+    if (!cb || !cb2) goto out;
+    QI(cb, &IID_Brush, (void **)&other);
+    oref = RefOf((IUnknown *)cb);
+    hr = g->lpVtbl->put_Source(g, other);
+    ok(hr == S_OK, "put_Source %#lx\n", hr);
+    ok(RefOf((IUnknown *)cb) == oref + 1, "put_Source did not take one reference: %lu, was %lu\n", RefOf((IUnknown *)cb), oref);
+    hr = g->lpVtbl->get_Source(g, &got);
+    ok(hr == S_OK && got, "get_Source %#lx\n", hr);
+    if (got)
+    {
+        QI(got, &IID_IUnknown, (void **)&u1);
+        QI(cb, &IID_IUnknown, (void **)&u2);
+        ok(u1 == u2, "Source is not the brush that was set: %p vs %p\n", u1, u2);
+        REL(u1); REL(u2);
+        REL(got);
+    }
+    hr = g->lpVtbl->put_Source(g, NULL);
+    ok(hr == S_OK, "put_Source(NULL) %#lx\n", hr);
+    got = (WICompositionBrush *)0x1234;
+    hr = g->lpVtbl->get_Source(g, &got);
+    ok(hr == S_OK && !got, "Source after NULL %#lx %p\n", hr, got);
+    hr = g->lpVtbl->put_Source(g, other);
+    ok(hr == S_OK, "put_Source again %#lx\n", hr);
+    REL(other); other = NULL;
+    REL(cb);
+    cb = NULL;                          /* the nine-grid brush now holds the last reference of the color brush */
+    hr = g->lpVtbl->get_Source(g, &got);
+    ok(hr == S_OK && got, "Source kept alive by the brush %#lx %p\n", hr, got);
+    if (got) REL(got);
+    hr = g->lpVtbl->put_Source(g, (WICompositionBrush *)base);
+    ok(hr == E_INVALIDARG, "a brush as its own Source %#lx\n", hr);
+    got = (WICompositionBrush *)0x1234;
+    hr = g->lpVtbl->get_Source(g, &got);
+    ok(hr == S_OK && got && got != (WICompositionBrush *)0x1234, "Source after the rejected put %#lx %p\n", hr, got);
+    if (got && got != (WICompositionBrush *)0x1234) REL(got);
+
+    /* a SpriteVisual accepts it as its Brush (nothing is painted yet) */
+    hr = Comp->lpVtbl->CreateSpriteVisual(Comp, &sp);
+    ok(hr == S_OK && sp, "CreateSpriteVisual %#lx\n", hr);
+    if (sp)
+    {
+        hr = sp->lpVtbl->put_Brush(sp, base);
+        ok(hr == S_OK, "SpriteVisual.put_Brush(nine-grid) %#lx\n", hr);
+        got = NULL;
+        hr = sp->lpVtbl->get_Brush(sp, &got);
+        ok(hr == S_OK && got, "SpriteVisual.get_Brush %#lx\n", hr);
+        if (got)
+        {
+            QI(got, &IID_INineGridT, (void **)&other);
+            ok(other != NULL, "the Brush of the sprite is not the nine-grid brush\n");
+            if (other) REL(other);
+            other = NULL;
+            REL(got);
+        }
+        REL(sp);
+    }
+out:
+    if (cb2) REL(cb2);
+    if (cb) REL(cb);
+    if (other) REL(other);
+    if (g) REL(g);
+    if (base) REL(base);
+    REL(made);
 }
 
 static void TestVisualInteractionSource(PRO_ACTIVATE pRoActivateInstance, PWCS pWindowsCreateString, PWDS pWindowsDeleteString)
@@ -1966,6 +2197,7 @@ START_TEST(Composition)
         TestDesktopTarget();
         TestVisual2();
         TestCompositor2AndBrush3();
+        TestNineGridBrush();
         TestVisualInteractionSource(pRoActivateInstance, pWindowsCreateString, pWindowsDeleteString);
         REL(Comp);
     }
