@@ -43,14 +43,6 @@ add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/winfsp.ini
 add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/payload/gl-sw-pack/glsw-pack.txt
             DESTINATION reactos/Featmgr/Payload/gl-sw-pack FOR all)
 
-# --- Claude Desktop: software-tier entry (amd64 only, Anthropic ships an x64 build) ---
-# Only the manifest ships in the image (Provider=native: featmgr downloads, checks and unpacks it itself). The app is downloaded
-# from Anthropic's release feed at install time (SHA1-checked) and is never bundled.
-if(ARCH STREQUAL "amd64")
-    add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/claude-desktop.ini
-                DESTINATION reactos/Featmgr/Catalog FOR all)
-endif()
-
 # --- PowerShell 7 (LTS) preinstall, and the Firefox entry: software-tier entries (amd64 only; the x86 pwsh does not start yet, PS7-x86-pwsh-mscoree) ---
 # The manifest always ships (Provider=native). The official MSI (MIT) is NOT in git: stage-powershell7.sh downloads it
 # at configure time from the pinned release URL and checks the pinned SHA-256 (POWERSHELL7_MSI=<file> for an offline

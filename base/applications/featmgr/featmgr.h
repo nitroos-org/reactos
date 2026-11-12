@@ -68,6 +68,7 @@ typedef struct _FM_FEATURE
     BOOL    BuiltIn;             /* OS tier: the image itself carries it ([Feature] BuiltInFile=), no featmgr record:
                                   * shown Enabled, not removable here */
     WCHAR   Unavailable[256];    /* !PayloadAvailable: why, for the UI ("" = the payload is simply not staged) */
+    BOOL    FirstBootDefault;    /* [Feature] FirstBootDefault=1: optfeatures /firstboot turns it on (like a Default=1 component), shows Notice once afterwards */
     WCHAR   Notice[768];         /* [Feature] Notice=: text shown before the feature is turned on (GUI: OK/Cancel box,
                                   * CLI/log: printed first); "\n" in the manifest is a line break. "" = none */
 } FM_FEATURE;
@@ -289,6 +290,7 @@ HRESULT FmDownloadFile(LPCWSTR url, LPCWSTR dest, BOOL pinned, ULONGLONG maxByte
 BOOL   FmNetProbe(LPCWSTR url, DWORD timeoutMs);   /* TRUE: the server answered (the network is up) */
 BOOL   FmArchListed(LPCWSTR list);                 /* "x86,amd64" (i386 = x86) lists this build's architecture; "" = all */
 BOOL   FmFileSha256(LPCWSTR path, WCHAR hex[65]);  /* lower-case hex SHA-256 of a file */
+BOOL   FmHostedProbeUrl(LPCWSTR manifest, LPWSTR out, DWORD cch);   /* hosted pack base address (https), for the network probe */
 ULONGLONG FmHostedDownloadSize(LPCWSTR manifest);  /* OS-tier hosted pack: bytes its [Download] files add up to */
 void   FmCompInstallLine(const FM_COMPONENT *c, LPCWSTR file, LPWSTR out, DWORD cch);   /* Install with %FILE% filled in */
 

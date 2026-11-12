@@ -10,6 +10,7 @@
 
 #include "featmgr.h"
 #include <commctrl.h>
+#include "resource.h"
 #include <shlobj.h>
 #include <shlwapi.h>
 #include <strsafe.h>
@@ -671,7 +672,7 @@ int FmFeatTreeMain(HINSTANCE hInst, LPCWSTR cmd, int nShow)
     wc.hCursor = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
     wc.lpszClassName = L"NitroFeatureTree";
-    wc.hIcon = LoadIconW(NULL, (LPCWSTR)IDI_APPLICATION);
+    wc.hIcon = LoadIconW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_FEATMGR));
     RegisterClassExW(&wc);
 
     if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0))
