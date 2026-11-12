@@ -22,6 +22,23 @@ static DWORD system_major_version(void)
     return *(volatile ULONG*)(ULONG_PTR)0x7FFE026C;
 }
 
+/* HKLM\\SYSTEM\\CurrentControlSet\\Control\\ReactOS\\Settings\\Version\\UnmanifestedVersionLie = 1: a program is told the version
+   Windows 10 tells it (6.2 unless its manifest names 8.1 or 10); RtlGetVersion stays 10.0. See versionmatrix.c. */
+static BOOL version_lie_switch_on(void)
+{
+    HKEY hKey;
+    DWORD Value = 0, Size = sizeof(Value), Type;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\ReactOS\\Settings\\Version",
+                      0, KEY_QUERY_VALUE, &hKey) != ERROR_SUCCESS)
+        return FALSE;
+    if (RegQueryValueExW(hKey, L"UnmanifestedVersionLie", NULL, &Type, (PBYTE)&Value, &Size) != ERROR_SUCCESS ||
+        Type != REG_DWORD)
+        Value = 0;
+    RegCloseKey(hKey);
+    return Value == 1;
+}
+
 static DWORD run_path(PCWSTR Path)
 {
     WCHAR Command[MAX_PATH + 4];
@@ -74,7 +91,18 @@ START_TEST(manifestcompat)
     VistaWin10 = run_probe(L"appshim_manifestver_vista_win10.exe");
     trace("none=0x%08lx vista=0x%08lx span=0x%08lx vista_win10=0x%08lx\n", None, Vista, Span, VistaWin10);
 
-    if (is_reactos() && system_major_version() >= 10)
+    if (is_reactos() && system_major_version() >= 10 && version_lie_switch_on())
+    {
+        /* Switch on: GetVersion() follows the manifest as on Windows 10 (6.2 for a manifest that names neither
+           8.1 nor 10), RtlGetVersion()/RtlGetNtVersionNumbers() stay 10.0 */
+        ok(None == 0x06020a00, "no-manifest process reported 0x%08lx, expected 0x06020a00 (6.2/10.0)\n", None);
+        ok(Vista == 0x06020a00, "vista-manifest process reported 0x%08lx, expected 0x06020a00 (6.2/10.0)\n", Vista);
+        ok(Span == VER_10_0, "vista..win10-manifest process reported 0x%08lx, expected 0x%08lx (10.0/10.0)\n",
+           Span, (DWORD)VER_10_0);
+        ok(VistaWin10 == VER_10_0, "vista+win10-manifest process reported 0x%08lx, expected 0x%08lx (10.0/10.0)\n",
+           VistaWin10, (DWORD)VER_10_0);
+    }
+    else if (is_reactos() && system_major_version() >= 10)
     {
         /*
          * Windows 10 identity (the default): the system itself is 10.0, and a manifest does not change what a
