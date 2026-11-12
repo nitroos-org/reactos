@@ -22,9 +22,13 @@
  *   - The array stays contiguous, so all the code that indexes Segment->PrototypePte / SubsectionBase is
  *     unchanged. The private pages are freed with the segment.
  *
- * The pages are resident system memory, not commit: at most one page per 2 MB of committed section plus one
- * page table per 1 GB, and the committed pages themselves are charged as before. The section charges nothing
- * while it is only reserved.
+ * Accounting (the pages are resident and cannot be paged): every page and page table populated here is charged
+ * as non-pageable commitment (MiCommitUser, whose ceiling is RAM less the resident headroom, like the section
+ * pages themselves) and returned when it is freed, so a process committing one page per 2 MB of a huge section
+ * fails with STATUS_COMMITMENT_LIMIT while RAM is still available. The page directories of the range (at most
+ * 2 x 512 pages for the whole system, never freed) and the bitmap are not charged. A process may hold at most a
+ * quarter of the range (MI_SPARSE_OWNER_CHUNKS); a reserved section charges nothing else while it is only
+ * reserved.
  */
 
 #include <ntoskrnl.h>
@@ -40,21 +44,40 @@
 #define MI_SPARSE_CHUNK_SIZE    PDE_MAPPED_VA
 #define MI_SPARSE_CHUNK_COUNT   ((ULONG)((MI_SPARSE_PROTO_END - MI_SPARSE_PROTO_START + 1) / MI_SPARSE_CHUNK_SIZE))
 
-/* Keep this many pages for everybody else: a populate fails (STATUS_INSUFFICIENT_RESOURCES) below it */
+/* What one creating process may hold: a quarter of the range (sixteen 8 TB sections) */
+#define MI_SPARSE_OWNER_CHUNKS  (MI_SPARSE_CHUNK_COUNT / 4)
+
+/* Keep this many pages for everybody else when taking a page for the store */
 #define MI_SPARSE_PAGE_RESERVE  256
+
+BOOLEAN
+NTAPI
+MmRebalanceMemoryConsumersAndWait(VOID);
+
+/* Rounds a populate waits for free pages before it fails (a balancer pass or at least 10 ms each) */
+#define MI_SPARSE_PAGE_WAITS    200
 
 static KGUARDED_MUTEX MiSparseProtoMutex;
 static RTL_BITMAP MiSparseProtoBitmap;
+static RTL_AVL_TABLE MiSparseOwnerTable;
 static BOOLEAN MiSparseProtoReady;
 static PFN_NUMBER MiSparseZeroPage;
 static PFN_NUMBER MiSparseZeroTable;
 static MMPTE MiSparseZeroPte;
 static MMPDE MiSparseZeroPde;
 
-/* Statistics, for the debugger */
+/* Chunks of the range per creating process (the process object is referenced while it has some) */
+typedef struct _MI_SPARSE_OWNER
+{
+    PEPROCESS Process;
+    ULONG Chunks;
+} MI_SPARSE_OWNER, *PMI_SPARSE_OWNER;
+
+/* Statistics, for the debugger: store pages and tables (each charged one page of commitment), chunks in use */
 SIZE_T MiSparseProtoPages;
 SIZE_T MiSparseProtoTables;
 ULONG MiSparseProtoChunksInUse;
+ULONG MiSparseProtoChunksLeaked;
 
 /* Point a valid PTE or PDE of the range at another page (one 64-bit store; the caller flushes) */
 FORCEINLINE
@@ -67,41 +90,107 @@ MiSparseReplaceValidPte(IN PMMPTE PointerPte,
     *PointerPte = TempPte;
 }
 
+static
+RTL_GENERIC_COMPARE_RESULTS
+NTAPI
+MiSparseOwnerCompare(IN PRTL_AVL_TABLE Table,
+                     IN PVOID First,
+                     IN PVOID Second)
+{
+    ULONG_PTR A = (ULONG_PTR)((PMI_SPARSE_OWNER)First)->Process;
+    ULONG_PTR B = (ULONG_PTR)((PMI_SPARSE_OWNER)Second)->Process;
+
+    UNREFERENCED_PARAMETER(Table);
+    if (A < B) return GenericLessThan;
+    if (A > B) return GenericGreaterThan;
+    return GenericEqual;
+}
+
+static
+PVOID
+NTAPI
+MiSparseOwnerAllocate(IN PRTL_AVL_TABLE Table,
+                      IN CLONG ByteSize)
+{
+    UNREFERENCED_PARAMETER(Table);
+    return ExAllocatePoolWithTag(PagedPool, ByteSize, 'oSmM');
+}
+
+static
+VOID
+NTAPI
+MiSparseOwnerFree(IN PRTL_AVL_TABLE Table,
+                  IN PVOID Buffer)
+{
+    UNREFERENCED_PARAMETER(Table);
+    ExFreePoolWithTag(Buffer, 'oSmM');
+}
+
 CODE_SEG("INIT")
 VOID
 NTAPI
 MiInitializeSparsePrototypePtes(VOID)
 {
     KeInitializeGuardedMutex(&MiSparseProtoMutex);
+    RtlInitializeGenericTableAvl(&MiSparseOwnerTable,
+                                 MiSparseOwnerCompare,
+                                 MiSparseOwnerAllocate,
+                                 MiSparseOwnerFree,
+                                 NULL);
 }
 
-/* A page off the free lists, zeroed, not mapped anywhere yet. PFN lock not held on entry or exit. */
+/*
+ * A page off the free lists, zeroed, not mapped anywhere yet. PFN lock not held on entry or exit. Short of
+ * pages, wait for the balancer like the other Mm page takers (a bounded number of rounds; a thread that holds
+ * an address space lock only gets short delays, see MmRebalanceMemoryConsumersAndWait). 0 after that.
+ */
 static
 PFN_NUMBER
 MiSparseGetZeroedPage(VOID)
 {
-    PFN_NUMBER PageFrameIndex = 0;
-    BOOLEAN Zero = FALSE;
+    PFN_NUMBER PageFrameIndex;
+    BOOLEAN Zero;
     KIRQL OldIrql;
-    ULONG Color;
+    ULONG Color, Retry;
 
-    OldIrql = MiAcquirePfnLock();
-    if (MiGetUsablePageCount() > MI_SPARSE_PAGE_RESERVE)
+    for (Retry = 0; ; Retry++)
     {
-        Color = MI_GET_NEXT_COLOR();
-        MI_SET_USAGE(MI_USAGE_PAGE_TABLE);
-        MI_SET_PROCESS2("Proto PTEs");
-        PageFrameIndex = MiRemoveZeroPageSafe(Color);
-        if (PageFrameIndex == 0)
+        PageFrameIndex = 0;
+        Zero = FALSE;
+        OldIrql = MiAcquirePfnLock();
+        if (MiGetUsablePageCount() > MI_SPARSE_PAGE_RESERVE)
         {
-            PageFrameIndex = MiRemoveAnyPageGated(Color);
-            Zero = TRUE;
+            Color = MI_GET_NEXT_COLOR();
+            MI_SET_USAGE(MI_USAGE_PAGE_TABLE);
+            MI_SET_PROCESS2("Proto PTEs");
+            PageFrameIndex = MiRemoveZeroPageSafe(Color);
+            if (PageFrameIndex == 0)
+            {
+                PageFrameIndex = MiRemoveAnyPageGated(Color);
+                Zero = TRUE;
+            }
+        }
+        MiReleasePfnLock(OldIrql);
+
+        if (PageFrameIndex != 0)
+        {
+            if (Zero) MiZeroPhysicalPage(PageFrameIndex);
+            return PageFrameIndex;
+        }
+
+        if ((Retry >= MI_SPARSE_PAGE_WAITS) || (KeGetCurrentIrql() > APC_LEVEL))
+            return 0;
+
+        /* A pass ran (TRUE), or the wait was a short delay (FALSE) */
+        if (MmRebalanceMemoryConsumersAndWait() && (MiGetUsablePageCount() <= MI_SPARSE_PAGE_RESERVE))
+        {
+            LARGE_INTEGER Delay;
+
+            /* The pass freed nothing: give the lazy writer a moment, do not spin on passes */
+            Delay.QuadPart = -10 * 10000;
+            KeDelayExecutionThread(KernelMode, FALSE, &Delay);
         }
     }
-    MiReleasePfnLock(OldIrql);
-
-    if (Zero) MiZeroPhysicalPage(PageFrameIndex);
-    return PageFrameIndex;
 }
 
 /* Give back a page from MiSparseGetZeroedPage that was never made part of the store */
@@ -200,33 +289,63 @@ MiSparseEnsurePageDirectory(IN PVOID Address)
     return STATUS_SUCCESS;
 }
 
+static
+ULONG
+MiSparseChunksFor(IN PFN_COUNT PteCount)
+{
+    return (ULONG)(((ULONG64)PteCount * sizeof(MMPTE) + MI_SPARSE_CHUNK_SIZE - 1) / MI_SPARSE_CHUNK_SIZE);
+}
+
 /*
- * Reserve room for PteCount Prototype PTEs. All of them read as 0. Returns STATUS_INSUFFICIENT_RESOURCES
- * when the range is full.
+ * Reserve room for PteCount Prototype PTEs for a section created by Owner. All of them read as 0. Returns
+ * STATUS_INSUFFICIENT_RESOURCES when the range is full or Owner holds its share of it already.
  */
 NTSTATUS
 NTAPI
 MiAllocateSparsePrototypePtes(IN PFN_COUNT PteCount,
+                              IN PEPROCESS Owner,
                               OUT PMMPTE *PrototypePtes)
 {
+    MI_SPARSE_OWNER Key, *Entry;
+    BOOLEAN NewEntry = FALSE;
     ULONG Chunks, First, i;
     NTSTATUS Status;
     PVOID Base;
 
     PAGED_CODE();
     ASSERT(PteCount != 0);
-    Chunks = (ULONG)(((ULONG64)PteCount * sizeof(MMPTE) + MI_SPARSE_CHUNK_SIZE - 1) / MI_SPARSE_CHUNK_SIZE);
+    Chunks = MiSparseChunksFor(PteCount);
 
     KeAcquireGuardedMutex(&MiSparseProtoMutex);
     Status = MiSparseInitializeStore();
     if (!NT_SUCCESS(Status)) goto Done;
+
+    /* The share of the range one process may hold */
+    Key.Process = Owner;
+    Key.Chunks = 0;
+    Entry = RtlLookupElementGenericTableAvl(&MiSparseOwnerTable, &Key);
+    if (Entry && ((Entry->Chunks + Chunks) > MI_SPARSE_OWNER_CHUNKS))
+    {
+        DPRINT1("Process %p holds %lu chunks of the sparse Prototype PTE range, %lu more refused\n", Owner, Entry->Chunks, Chunks);
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Done;
+    }
+    if (!Entry)
+    {
+        Entry = RtlInsertElementGenericTableAvl(&MiSparseOwnerTable, &Key, sizeof(Key), &NewEntry);
+        if (!Entry)
+        {
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+            goto Done;
+        }
+    }
 
     First = RtlFindClearBitsAndSet(&MiSparseProtoBitmap, Chunks, 0);
     if (First == MAXULONG)
     {
         DPRINT1("Sparse Prototype PTE range full (%lu chunks wanted)\n", Chunks);
         Status = STATUS_INSUFFICIENT_RESOURCES;
-        goto Done;
+        goto DropEntry;
     }
     Base = (PVOID)(MI_SPARSE_PROTO_START + (ULONG64)First * MI_SPARSE_CHUNK_SIZE);
 
@@ -238,13 +357,20 @@ MiAllocateSparsePrototypePtes(IN PFN_COUNT PteCount,
         {
             /* The directories made so far stay: they are shared by the whole range */
             RtlClearBits(&MiSparseProtoBitmap, First, Chunks);
-            goto Done;
+            goto DropEntry;
         }
     }
 
+    /* The owner stays referenced while it holds chunks, so the key cannot be reused by another process */
+    if (NewEntry) ObReferenceObject(Owner);
+    Entry->Chunks += Chunks;
     MiSparseProtoChunksInUse += Chunks;
     *PrototypePtes = Base;
     Status = STATUS_SUCCESS;
+    goto Done;
+
+DropEntry:
+    if (NewEntry) RtlDeleteElementGenericTableAvl(&MiSparseOwnerTable, &Key);
 Done:
     KeReleaseGuardedMutex(&MiSparseProtoMutex);
     return Status;
@@ -253,8 +379,12 @@ Done:
 /*
  * Make the pages that hold the Prototype PTEs FirstPte..LastPte (inclusive) private, so that they can be
  * written. Their contents stay what they read before (0 for a page that was not populated). Callers: the
- * commit paths, at PASSIVE or APC level, before they write the PTEs. May fail with
- * STATUS_INSUFFICIENT_RESOURCES; what was populated stays populated.
+ * commit paths, at PASSIVE or APC level, after they charged the committed pages and before they write the
+ * PTEs.
+ *
+ * Every page and page table made here is charged one page of non-pageable commitment first (returned by
+ * MiFreeSparsePrototypePtes): STATUS_COMMITMENT_LIMIT if that fails, nothing populated then. Short of free
+ * pages after waiting, STATUS_NO_MEMORY; what was populated by then stays populated (and charged).
  */
 NTSTATUS
 NTAPI
@@ -265,6 +395,7 @@ MiPopulateSparsePrototypePtes(IN PMMPTE FirstPte,
     PMMPDE PointerPde;
     PMMPTE PointerPte;
     PFN_NUMBER PageFrameIndex;
+    SIZE_T Needed, Made;
     MMPTE TempPte;
     MMPDE TempPde;
     BOOLEAN Changed = FALSE;
@@ -280,6 +411,33 @@ MiPopulateSparsePrototypePtes(IN PMMPTE FirstPte,
 
     KeAcquireGuardedMutex(&MiSparseProtoMutex);
     ASSERT(MiSparseProtoReady);
+
+    /* Count what is missing (tables, then pages; a missing table means all its pages are missing) */
+    Needed = 0;
+    for (ULONG_PTR CountVa = Va; CountVa <= LastVa; CountVa += PAGE_SIZE)
+    {
+        if (PFN_FROM_PDE(MiAddressToPde((PVOID)CountVa)) == MiSparseZeroTable)
+        {
+            ULONG_PTR TableEnd = ((CountVa & ~((ULONG_PTR)MI_SPARSE_CHUNK_SIZE - 1)) + MI_SPARSE_CHUNK_SIZE) - PAGE_SIZE;
+
+            if (TableEnd > LastVa) TableEnd = LastVa;
+            Needed += 1 + ((TableEnd - CountVa) >> PAGE_SHIFT) + 1;
+            CountVa = TableEnd;
+            continue;
+        }
+        if (PFN_FROM_PTE(MiAddressToPte((PVOID)CountVa)) == MiSparseZeroPage) Needed++;
+    }
+    if (Needed == 0) goto Done;
+
+    /* Resident for as long as the section lives: charged like the section pages (RAM less the headroom) */
+    if (!MiChargeCommit(Needed, MiCommitUser))
+    {
+        DPRINT("Sparse Prototype PTEs: %Iu store pages over the commit limit\n", Needed);
+        Status = STATUS_COMMITMENT_LIMIT;
+        goto Done;
+    }
+    Made = 0;
+
     for (; Va <= LastVa; Va += PAGE_SIZE)
     {
         PointerPde = MiAddressToPde((PVOID)Va);
@@ -291,7 +449,7 @@ MiPopulateSparsePrototypePtes(IN PMMPTE FirstPte,
             PageFrameIndex = MiSparseGetZeroedPage();
             if (!PageFrameIndex)
             {
-                Status = STATUS_INSUFFICIENT_RESOURCES;
+                Status = STATUS_NO_MEMORY;
                 break;
             }
             MiSparseFillPage(PageFrameIndex, MiSparseZeroPte);
@@ -302,14 +460,9 @@ MiPopulateSparsePrototypePtes(IN PMMPTE FirstPte,
             MiInitializePfnForOtherProcess(PageFrameIndex, (PMMPTE)PointerPde, PFN_FROM_PPE(MiAddressToPpe((PVOID)Va)));
             /* Same contents seen through either table: a stale translation reads the same zeros */
             MiSparseReplaceValidPte((PMMPTE)PointerPde, TempPde);
-
-            /*
-             * This processor may still map the page-table page of this chunk (seen through the self-map)
-             * to the shared zero table: the PTE write below must reach the new table.
-             */
-            __invlpg(MiAddressToPte((PVOID)Va));
             MiReleasePfnLock(OldIrql);
             MiSparseProtoTables++;
+            Made++;
             Changed = TRUE;
         }
 
@@ -321,17 +474,31 @@ MiPopulateSparsePrototypePtes(IN PMMPTE FirstPte,
         PageFrameIndex = MiSparseGetZeroedPage();
         if (!PageFrameIndex)
         {
-            Status = STATUS_INSUFFICIENT_RESOURCES;
+            Status = STATUS_NO_MEMORY;
             break;
         }
         MI_MAKE_HARDWARE_PTE_KERNEL(&TempPte, PointerPte, MM_READWRITE, PageFrameIndex);
         OldIrql = MiAcquirePfnLock();
+
+        /*
+         * This processor (the thread may have moved since the table was swapped) may still map the page of the
+         * page table, seen through the self-map, to the shared zero table when it touched it before the swap:
+         * the write below must reach the private table and never the zero table, which every chunk shares.
+         * Invalidate here, at DISPATCH_LEVEL with the PFN lock held, on the processor that writes.
+         */
+        __invlpg(PointerPte);
+        ASSERT(PFN_FROM_PDE(PointerPde) != MiSparseZeroTable);
         MiInitializePfnForOtherProcess(PageFrameIndex, PointerPte, PFN_FROM_PDE(PointerPde));
         MiSparseReplaceValidPte(PointerPte, TempPte);
         MiReleasePfnLock(OldIrql);
         MiSparseProtoPages++;
+        Made++;
         Changed = TRUE;
     }
+
+    /* A failure keeps what was made (charged); the rest of the charge goes back */
+    ASSERT(Made <= Needed);
+    if (Made < Needed) MiReturnCommit(Needed - Made);
 
     /*
      * Another processor may still translate a populated page to the zero page. Both read as zeros, but the
@@ -339,21 +506,28 @@ MiPopulateSparsePrototypePtes(IN PMMPTE FirstPte,
      * anyone can write, with the mutex still held so that a second populate of the same page waits for it.
      */
     if (Changed) KeFlushEntireTb(TRUE, TRUE);
+Done:
     KeReleaseGuardedMutex(&MiSparseProtoMutex);
     return Status;
 }
 
 /*
- * Give back the store of a deleted segment. Every Prototype PTE must be 0 by now and no page of the segment
- * may still be accounted to the pages that hold them (MiSegmentDelete).
+ * Give back the store of a deleted segment created by Owner. Every Prototype PTE must be 0 by now and no page
+ * of the segment may still be accounted to the pages that hold them (MiSegmentDelete). The commitment charged
+ * for each page and table goes back. A table whose pages are still referenced (a bug) is kept, with its
+ * chunk: the chunk is never handed to another section.
  */
 VOID
 NTAPI
 MiFreeSparsePrototypePtes(IN PMMPTE PrototypePtes,
-                          IN PFN_COUNT PteCount)
+                          IN PFN_COUNT PteCount,
+                          IN PEPROCESS Owner)
 {
     PFN_NUMBER Pages[PTE_PER_PAGE];
     ULONG Chunks, First, Chunk, Count, i;
+    MI_SPARSE_OWNER Key, *Entry;
+    PEPROCESS Dereference = NULL;
+    SIZE_T Returned = 0;
     ULONG_PTR Va;
     PMMPDE PointerPde;
     PMMPTE PointerPte;
@@ -365,7 +539,7 @@ MiFreeSparsePrototypePtes(IN PMMPTE PrototypePtes,
     PAGED_CODE();
     ASSERT(MI_IS_SPARSE_PROTOTYPE_PTE(PrototypePtes));
     ASSERT(((ULONG_PTR)PrototypePtes & (MI_SPARSE_CHUNK_SIZE - 1)) == 0);
-    Chunks = (ULONG)(((ULONG64)PteCount * sizeof(MMPTE) + MI_SPARSE_CHUNK_SIZE - 1) / MI_SPARSE_CHUNK_SIZE);
+    Chunks = MiSparseChunksFor(PteCount);
     First = (ULONG)(((ULONG_PTR)PrototypePtes - MI_SPARSE_PROTO_START) / MI_SPARSE_CHUNK_SIZE);
 
     KeAcquireGuardedMutex(&MiSparseProtoMutex);
@@ -374,57 +548,80 @@ MiFreeSparsePrototypePtes(IN PMMPTE PrototypePtes,
         Va = (ULONG_PTR)PrototypePtes + (ULONG64)Chunk * MI_SPARSE_CHUNK_SIZE;
         PointerPde = MiAddressToPde((PVOID)Va);
         TableFrame = PFN_FROM_PDE(PointerPde);
-        if (TableFrame == MiSparseZeroTable) continue;
-
-        /* Collect the private pages of this table; a page still in use keeps the whole table (leaked) */
-        Count = 0;
-        Busy = FALSE;
-        PointerPte = MiAddressToPte((PVOID)Va);
-        OldIrql = MiAcquirePfnLock();
-        for (i = 0; i < PTE_PER_PAGE; i++)
+        if (TableFrame != MiSparseZeroTable)
         {
-            if (PFN_FROM_PTE(&PointerPte[i]) == MiSparseZeroPage) continue;
-            Pages[Count] = PFN_FROM_PTE(&PointerPte[i]);
-            Pfn1 = MI_PFN_ELEMENT(Pages[Count]);
-            if ((Pfn1->u2.ShareCount != 1) || (Pfn1->u3.e2.ReferenceCount != 1)) Busy = TRUE;
-            Count++;
-        }
-        MiReleasePfnLock(OldIrql);
-        if (Busy)
-        {
-            DPRINT1("Sparse Prototype PTE table %p still referenced, not freed\n", (PVOID)Va);
-            continue;
-        }
+            /* Collect the private pages of this table */
+            Count = 0;
+            Busy = FALSE;
+            PointerPte = MiAddressToPte((PVOID)Va);
+            OldIrql = MiAcquirePfnLock();
+            for (i = 0; i < PTE_PER_PAGE; i++)
+            {
+                if (PFN_FROM_PTE(&PointerPte[i]) == MiSparseZeroPage) continue;
+                Pages[Count] = PFN_FROM_PTE(&PointerPte[i]);
+                Pfn1 = MI_PFN_ELEMENT(Pages[Count]);
+                if ((Pfn1->u2.ShareCount != 1) || (Pfn1->u3.e2.ReferenceCount != 1)) Busy = TRUE;
+                Count++;
+            }
+            MiReleasePfnLock(OldIrql);
+            if (Busy)
+            {
+                /* Keep the table, its pages, their charge and the chunk: never reused */
+                DPRINT1("Sparse Prototype PTE table %p still referenced: kept, chunk not reused\n", (PVOID)Va);
+                MiSparseProtoChunksLeaked++;
+                continue;
+            }
 
-        /* Back to the zero page and table everywhere, flushed, before any of the pages can be reused */
-        for (i = 0; i < PTE_PER_PAGE; i++) MiSparseReplaceValidPte(&PointerPte[i], MiSparseZeroPte);
-        MiSparseReplaceValidPte((PMMPTE)PointerPde, MiSparseZeroPde);
-        KeFlushEntireTb(TRUE, TRUE);
+            /* Back to the zero page and table everywhere, flushed, before any of the pages can be reused */
+            for (i = 0; i < PTE_PER_PAGE; i++) MiSparseReplaceValidPte(&PointerPte[i], MiSparseZeroPte);
+            MiSparseReplaceValidPte((PMMPTE)PointerPde, MiSparseZeroPde);
+            KeFlushEntireTb(TRUE, TRUE);
 
-        DirectoryFrame = PFN_FROM_PPE(MiAddressToPpe((PVOID)Va));
-        OldIrql = MiAcquirePfnLock();
-        for (i = 0; i < Count; i++)
-        {
-            Pfn1 = MI_PFN_ELEMENT(Pages[i]);
+            DirectoryFrame = PFN_FROM_PPE(MiAddressToPpe((PVOID)Va));
+            OldIrql = MiAcquirePfnLock();
+            for (i = 0; i < Count; i++)
+            {
+                Pfn1 = MI_PFN_ELEMENT(Pages[i]);
+                MI_SET_PFN_DELETED(Pfn1);
+                MiDecrementShareCount(Pfn1, Pages[i]);
+                MiDecrementShareCount(MI_PFN_ELEMENT(TableFrame), TableFrame);
+            }
+            Pfn1 = MI_PFN_ELEMENT(TableFrame);
+            ASSERT(Pfn1->u2.ShareCount == 1);
             MI_SET_PFN_DELETED(Pfn1);
-            MiDecrementShareCount(Pfn1, Pages[i]);
-            MiDecrementShareCount(MI_PFN_ELEMENT(TableFrame), TableFrame);
-        }
-        Pfn1 = MI_PFN_ELEMENT(TableFrame);
-        ASSERT(Pfn1->u2.ShareCount == 1);
-        MI_SET_PFN_DELETED(Pfn1);
-        MiDecrementShareCount(Pfn1, TableFrame);
-        MiDecrementShareCount(MI_PFN_ELEMENT(DirectoryFrame), DirectoryFrame);
-        MiReleasePfnLock(OldIrql);
+            MiDecrementShareCount(Pfn1, TableFrame);
+            MiDecrementShareCount(MI_PFN_ELEMENT(DirectoryFrame), DirectoryFrame);
+            MiReleasePfnLock(OldIrql);
 
-        MiSparseProtoPages -= Count;
-        MiSparseProtoTables--;
+            MiSparseProtoPages -= Count;
+            MiSparseProtoTables--;
+            Returned += Count + 1;
+        }
+
+        /* This chunk is all zero page again: the address range can be used again */
+        RtlClearBits(&MiSparseProtoBitmap, First + Chunk, 1);
+        MiSparseProtoChunksInUse--;
     }
 
-    /* The page directories stay (shared by the range); the address range can be used again */
-    RtlClearBits(&MiSparseProtoBitmap, First, Chunks);
-    MiSparseProtoChunksInUse -= Chunks;
+    /* The owner's share; its reference goes when it holds nothing */
+    Key.Process = Owner;
+    Key.Chunks = 0;
+    Entry = RtlLookupElementGenericTableAvl(&MiSparseOwnerTable, &Key);
+    ASSERT(Entry && (Entry->Chunks >= Chunks));
+    if (Entry)
+    {
+        Entry->Chunks -= min(Entry->Chunks, Chunks);
+        if (Entry->Chunks == 0)
+        {
+            RtlDeleteElementGenericTableAvl(&MiSparseOwnerTable, &Key);
+            Dereference = Owner;
+        }
+    }
     KeReleaseGuardedMutex(&MiSparseProtoMutex);
+
+    if (Returned) MiReturnCommit(Returned);
+    /* Possibly the last reference of an exited process: its deletion goes to a worker, not this unmap path */
+    if (Dereference) ObDereferenceObjectDeferDelete(Dereference);
 }
 
 /*
@@ -444,5 +641,44 @@ MiSkipEmptySparsePrototypePtes(IN PMMPTE PrototypePte)
 }
 
 #endif /* _M_AMD64 */
+
+/*
+ * Count the zero (not committed) Prototype PTEs in FirstPte..EndPte (exclusive). For a sparse store, what was
+ * never populated is counted a page or a table at a time, so a count over an 8 TB range does not walk 2^31
+ * PTEs while the callers hold the section commit mutex.
+ */
+SIZE_T
+NTAPI
+MiCountZeroPrototypePtes(IN PMMPTE FirstPte,
+                         IN PMMPTE EndPte)
+{
+    PMMPTE PointerPte = FirstPte, PageEnd;
+    SIZE_T Count = 0;
+
+    while (PointerPte < EndPte)
+    {
+#ifdef _M_AMD64
+        if (MI_IS_SPARSE_PROTOTYPE_PTE(PointerPte))
+        {
+            PMMPTE Next = MiSkipEmptySparsePrototypePtes(PointerPte);
+            if (Next != PointerPte)
+            {
+                if (Next > EndPte) Next = EndPte;
+                Count += Next - PointerPte;
+                PointerPte = Next;
+                continue;
+            }
+        }
+#endif
+        /* A populated (or ordinary) page: look at its entries */
+        PageEnd = (PMMPTE)((ULONG_PTR)PAGE_ALIGN(PointerPte) + PAGE_SIZE);
+        if (PageEnd > EndPte) PageEnd = EndPte;
+        for (; PointerPte < PageEnd; PointerPte++)
+        {
+            if (PointerPte->u.Long == 0) Count++;
+        }
+    }
+    return Count;
+}
 
 /* EOF */

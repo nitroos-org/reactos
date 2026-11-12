@@ -3252,6 +3252,7 @@ NTSTATUS
 NTAPI
 MiAllocateSparsePrototypePtes(
     _In_ PFN_COUNT PteCount,
+    _In_ PEPROCESS Owner,
     _Out_ PMMPTE *PrototypePtes);
 
 NTSTATUS
@@ -3264,12 +3265,19 @@ VOID
 NTAPI
 MiFreeSparsePrototypePtes(
     _In_ PMMPTE PrototypePtes,
-    _In_ PFN_COUNT PteCount);
+    _In_ PFN_COUNT PteCount,
+    _In_ PEPROCESS Owner);
 
 PMMPTE
 NTAPI
 MiSkipEmptySparsePrototypePtes(
     _In_ PMMPTE PrototypePte);
 #endif
+
+SIZE_T
+NTAPI
+MiCountZeroPrototypePtes(
+    _In_ PMMPTE FirstPte,
+    _In_ PMMPTE EndPte);
 
 /* EOF */
