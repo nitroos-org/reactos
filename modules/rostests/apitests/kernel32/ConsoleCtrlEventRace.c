@@ -29,6 +29,13 @@
  * reported as a failure, never counted as a silent success. The burst is kept
  * modest so the per-event handler-thread creation finishes on a debug build;
  * the cap-refusal path itself is bounded in code, not forced at runtime here.
+ *
+ * A fourth child sends Ctrl+Break events in a tight loop, unpaced, to a handler
+ * that is slow, and checks that every accepted event is handled. Windows does not
+ * coalesce or cap them (measured on Windows 10 22H2: 1000 events, a thread per
+ * event, 1003 threads in a 64-bit process, 898 in a 32-bit one, handlers run one
+ * at a time); a burst has to stay below what a 32-bit process can hold (about 900
+ * threads on Windows, about 650 with a 2 MB stack on ReactOS under WoW64).
  */
 #define RACE_MS             15000
 #define MAX_UNHANDLED       64
@@ -41,12 +48,16 @@
 #define FLOOD_EVENTS        120
 #define FLOOD_WAIT_MS       240000
 #define FLOOD_TIMEOUT_MS    300000
+#define BURST_EVENTS        300
+#define BURST_HANDLER_MS    20
+#define BURST_WAIT_MS       240000
+#define BURST_TIMEOUT_MS    300000
 #define GUI_MS              8000
 #define GUI_TIMEOUT_MS      (GUI_MS + 60000)
 
 static WCHAR FileName[MAX_PATH];
 static volatile LONG Stop;
-static LONG Events, Sent, Spawned, Handled, HandledC, HandledBreak;
+static LONG Events, Sent, Spawned, Handled, HandledC, HandledBreak, Concurrent, MaxConcurrent;
 
 static
 BOOL
@@ -94,9 +105,9 @@ EventThread(
      * that is attaching) cannot run the threads as fast as events come: events sent in a
      * tight loop pile up a thousand threads in it, each with a 1 MB stack, and a 32-bit
      * process is out of address space (a debug build, which prints from every handler,
-     * gets there in seconds). The race is between the events and the creation, attach and
-     * exit of processes, not the rate: send an event every timer tick, and not more while
-     * this process has many it has not handled.
+     * gets there in seconds; Windows does the same, see BurstChild). The race is between the
+     * events and the creation, attach and exit of processes, not the rate: send an event
+     * every timer tick, and not more while this process has many it has not handled.
      */
     while (!Stop)
     {
@@ -290,6 +301,58 @@ FloodChild(VOID)
     ExitProcess(0);
 }
 
+static
+BOOL
+WINAPI
+SlowCtrlHandler(
+    _In_ DWORD CtrlType)
+{
+    LONG Now;
+
+    if (CtrlType != CTRL_BREAK_EVENT)
+        return FALSE;
+    Now = InterlockedIncrement(&Concurrent);
+    if (Now > MaxConcurrent)
+        MaxConcurrent = Now;
+    Sleep(BURST_HANDLER_MS);
+    InterlockedDecrement(&Concurrent);
+    InterlockedIncrement(&HandledBreak);
+    return TRUE;
+}
+
+/* Child: unpaced Ctrl+Break burst at a slow handler; every accepted event must be handled */
+static
+VOID
+BurstChild(VOID)
+{
+    LONG Accepted = 0;
+    DWORD Start;
+    ULONG i;
+
+    /* A parent that ignores Ctrl+C (an inherited flag) is no concern: only Break is sent */
+    SetConsoleCtrlHandler(SlowCtrlHandler, TRUE);
+
+    for (i = 0; i < BURST_EVENTS; i++)
+    {
+        if (GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, 0))
+            Accepted++;
+    }
+    if (Accepted != BURST_EVENTS)
+        ExitProcess(501);
+
+    Start = GetTickCount();
+    while (HandledBreak < Accepted && GetTickCount() - Start < BURST_WAIT_MS)
+        Sleep(10);
+
+    /* None lost (<), none invented (>) */
+    if (HandledBreak != Accepted)
+        ExitProcess(502);
+    /* The dispatcher runs the handlers one at a time (as on Windows) */
+    if (MaxConcurrent != 1)
+        ExitProcess(503);
+    ExitProcess(0);
+}
+
 /*
  * Thread that closes the active screen buffer over and over. Closing the active
  * buffer takes the console lock and then the terminal lock, the opposite order
@@ -407,11 +470,14 @@ START_TEST(ConsoleCtrlEventRace)
         OrderChild();
     if (argc >= 3 && !strcmp(argv[2], "flood"))
         FloodChild();
+    if (argc >= 3 && !strcmp(argv[2], "burst"))
+        BurstChild();
     if (argc >= 3 && !strcmp(argv[2], "gui"))
         GuiChild();
 
     RunChild(L"race", CHILD_TIMEOUT_MS);
     RunChild(L"order", ORDER_TIMEOUT_MS);
     RunChild(L"flood", FLOOD_TIMEOUT_MS);
+    RunChild(L"burst", BURST_TIMEOUT_MS);
     RunChild(L"gui", GUI_TIMEOUT_MS);
 }
