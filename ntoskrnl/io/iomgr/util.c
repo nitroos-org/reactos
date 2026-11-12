@@ -285,15 +285,35 @@ IoCheckFunctionAccess(IN ACCESS_MASK GrantedAccess,
 }
 
 /*
- * @unimplemented
+ * Checks the access the caller got when it opened the file against the access
+ * a driver wants for an IOCTL (FILE_READ_ACCESS and/or FILE_WRITE_ACCESS),
+ * which is how a driver tightens a FILE_ANY_ACCESS control code.
+ * Written from the public WDK documentation: kernel-mode requests are never
+ * refused (VERIFY ON ORACLE), a user-mode request fails with
+ * STATUS_ACCESS_DENIED when the file object lacks a required access.
  */
 NTSTATUS
 NTAPI
 IoValidateDeviceIoControlAccess(IN PIRP Irp,
                                 IN ULONG RequiredAccess)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PIO_STACK_LOCATION IoStack = IoGetCurrentIrpStackLocation(Irp);
+    PFILE_OBJECT FileObject = IoStack->FileObject;
+
+    if (Irp->RequestorMode == KernelMode)
+        return STATUS_SUCCESS;
+
+    /* FIXME: only the read and write bits are defined for RequiredAccess;
+       VERIFY ON ORACLE: the result for any other bit (we ignore them). */
+    if (FileObject == NULL)
+        return STATUS_ACCESS_DENIED;
+
+    if ((RequiredAccess & FILE_READ_ACCESS) && !FileObject->ReadAccess)
+        return STATUS_ACCESS_DENIED;
+    if ((RequiredAccess & FILE_WRITE_ACCESS) && !FileObject->WriteAccess)
+        return STATUS_ACCESS_DENIED;
+
+    return STATUS_SUCCESS;
 }
 
 /*

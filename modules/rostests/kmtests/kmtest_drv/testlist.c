@@ -67,6 +67,7 @@ KMT_TESTFUNC Test_IoIrp;
 KMT_TESTFUNC Test_IoMdl;
 KMT_TESTFUNC Test_IoCreateSystemThread;
 KMT_TESTFUNC Test_IoNonFileName;
+KMT_TESTFUNC Test_IoValidateDeviceIoControlAccess;
 KMT_TESTFUNC Test_IoWMINotification;
 KMT_TESTFUNC Test_IoPnpEventQueue;
 KMT_TESTFUNC Test_IoVolume;
@@ -221,6 +222,7 @@ const KMT_TEST TestList[] =
     { "IoMdl",                              Test_IoMdl },
     { "IoCreateSystemThread",               Test_IoCreateSystemThread },
     { "IoNonFileName",                      Test_IoNonFileName },
+    { "IoValidateDeviceIoControlAccess",    Test_IoValidateDeviceIoControlAccess },
     { "IoWMINotification",                  Test_IoWMINotification },
     { "IoPnpEventQueue",                    Test_IoPnpEventQueue },
     { "IoVolume",                           Test_IoVolume },
