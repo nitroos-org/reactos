@@ -277,8 +277,15 @@ UnwindOpSlots(
         1, // UWOP_SAVE_XMM128
         2, // UWOP_SAVE_XMM128_FAR
         0, // UWOP_PUSH_MACHFRAME
-        2, // UWOP_SET_FPREG_LARGE
+        2, // UWOP_SET_FPREG_LARGE (rejected when executed, see RtlVirtualUnwind)
+        0, // 12, undefined
+        0, // 13, undefined
+        0, // 14, undefined
+        0, // 15, undefined
     };
+
+    /* The op is a 4-bit field of the image data: every value must index the table */
+    C_ASSERT(RTL_NUMBER_OF(UnwindOpExtraSlotTable) == 16);
 
     if ((UnwindCode.UnwindOp == UWOP_ALLOC_LARGE) &&
         (UnwindCode.OpInfo != 0))
@@ -955,6 +962,13 @@ RepeatChainedInfo:
                 Context->Rsp = *(PDWORD64)(Context->Rsp + 0x18);
                 ASSERT((i + 1) == UnwindInfo->CountOfCodes);
                 goto Exit;
+
+            default:
+                /* Undefined operation in the image data: the walk could not
+                   advance past it. Windows raises this status from
+                   RtlVirtualUnwind for every op from 11 to 15 */
+                RtlRaiseStatus(STATUS_BAD_FUNCTION_TABLE);
+                return NULL;
         }
     }
 
