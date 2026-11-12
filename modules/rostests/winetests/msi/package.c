@@ -10095,6 +10095,53 @@ static const struct externalui_message toplevel_msiinstallproduct_custom_sequenc
     {0}
 };
 
+/* An exe custom action whose program cannot be started fails with ERROR_INSTALL_FAILURE (1721 in the log),
+ * unless it is marked msidbCustomActionTypeContinue; an exe that exits non-zero fails the same way
+ * (1722). Measured on Windows 10 22H2 (MsiDoAction after CostFinalize, and ACTION=ADMIN installs). */
+static void test_exe_custom_action_failure(void)
+{
+    static const struct { const char *entry; const char *name; UINT expect; } tests[] =
+    {
+        { "'NoExe', 50, 'MISSINGEXE', '/x'", "NoExe", ERROR_INSTALL_FAILURE },
+        { "'NoExeCont', 114, 'MISSINGEXE', '/x'", "NoExeCont", ERROR_SUCCESS },
+        { "'NoProp', 50, 'UNSETPROP', '/x'", "NoProp", ERROR_INSTALL_FAILURE },
+        { "'NoPropCont', 114, 'UNSETPROP', '/x'", "NoPropCont", ERROR_SUCCESS },
+        { "'ExitOk', 50, 'CMDEXE', '/c exit 0'", "ExitOk", ERROR_SUCCESS },
+        { "'ExitFail', 50, 'CMDEXE', '/c exit 1'", "ExitFail", ERROR_INSTALL_FAILURE },
+        { "'ExitFailCont', 114, 'CMDEXE', '/c exit 1'", "ExitFailCont", ERROR_SUCCESS },
+    };
+    MSIHANDLE hdb, hpkg;
+    UINT r;
+    int i;
+
+    MsiSetInternalUI(INSTALLUILEVEL_NONE, NULL);
+
+    hdb = create_package_db();
+    ok(hdb, "failed to create package database\n");
+
+    create_property_table(hdb);
+    add_property_entry(hdb, "'ProductCode', '{7262AC98-EEBD-4364-8CE3-D654F6A425B9}'");
+    add_property_entry(hdb, "'MISSINGEXE', 'C:\\msitest-nonexistent\\nope.exe'");
+    add_property_entry(hdb, "'CMDEXE', 'cmd.exe'");
+
+    create_custom_action_table(hdb);
+    for (i = 0; i < ARRAY_SIZE(tests); i++)
+        add_custom_action_entry(hdb, tests[i].entry);
+
+    r = package_from_db(hdb, &hpkg);
+    ok(r == ERROR_SUCCESS, "failed to create package %u\n", r);
+    if (r == ERROR_SUCCESS)
+    {
+        for (i = 0; i < ARRAY_SIZE(tests); i++)
+        {
+            r = MsiDoActionA(hpkg, tests[i].name);
+            ok(r == tests[i].expect, "%s: expected %u, got %u\n", tests[i].name, tests[i].expect, r);
+        }
+        MsiCloseHandle(hpkg);
+    }
+    DeleteFileA(msifile);
+}
+
 /* tests involving top-level actions: INSTALL, ExecuteAction */
 static void test_top_level_action(void)
 {
@@ -10247,6 +10294,7 @@ START_TEST(package)
     test_externalui();
     test_externalui_message();
     test_controlevent();
+    test_exe_custom_action_failure();
     test_top_level_action();
 
     SetCurrentDirectoryA(prev_path);
