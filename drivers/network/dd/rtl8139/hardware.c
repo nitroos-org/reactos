@@ -233,3 +233,25 @@ NICTransmitPacket (
     NdisRawWritePortUlong(Adapter->IoBase + R_TXSTS0 + (TxDesc * sizeof(ULONG)), Length);
     return NDIS_STATUS_SUCCESS;
 }
+
+//
+// Runs at DIRQL (NdisMSynchronizeWithInterrupt): takes the events the ISR accumulated
+// and clears them, so an interrupt arriving while the DPC runs can never have its
+// event erased by the DPC.
+//
+BOOLEAN
+NTAPI
+NICFetchEvents (
+    IN PVOID SynchronizeContext
+    )
+{
+    PNIC_EVENTS events = SynchronizeContext;
+    PRTL_ADAPTER adapter = events->Adapter;
+
+    events->Pending = adapter->InterruptPending;
+    adapter->InterruptPending = 0;
+    events->LinkChange = adapter->LinkChange;
+    adapter->LinkChange = FALSE;
+    events->MediaState = adapter->MediaState;
+    return TRUE;
+}
