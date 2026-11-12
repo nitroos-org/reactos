@@ -1,0 +1,1 @@
+@ stdcall CheckDir(long)
