@@ -1207,16 +1207,20 @@ MmSetDirtyBit(PEPROCESS Process, PVOID Address, BOOLEAN Bit)
 }
 
 /*
- * Takes the hardware dirty bit of a valid user PTE of the current process that maps Page: clears it and flushes the
- * TB entry on the processors running the process, so a later write through the mapping sets it again.  TRUE if it
- * was set.  A PTE that is not valid, or maps another page (a private copy), is left alone.
+ * Takes the hardware dirty bit of a valid user PTE of the current process that maps Page: clears it and adds the
+ * address to FlushList (the caller flushes the list, on the processors running the process, which makes a later
+ * write through the mapping set the bit again).  TRUE if it was set.  A PTE that is not valid, or maps another
+ * page (a private copy), is left alone.
+ * Until the list is flushed a processor may hold a TB entry with Dirty set and write without touching the PTE; that
+ * write lands in the page, which the caller's segment flush (after the TB flush) writes, so no write is lost.
  */
 BOOLEAN
 NTAPI
 MmTakeDirtyBit(
     _In_ PEPROCESS Process,
     _In_ PVOID Address,
-    _In_ PFN_NUMBER Page)
+    _In_ PFN_NUMBER Page,
+    _Inout_ PMM_TB_FLUSH_LIST FlushList)
 {
     PMMPTE PointerPte;
     MMPTE OldPte, NewPte;
@@ -1241,7 +1245,7 @@ MmTakeDirtyBit(
             /* A processor may set Accessed meanwhile: retry rather than lose it */
             if ((ULONG_PTR)InterlockedCompareExchangePte(PointerPte, NewPte.u.Long, OldPte.u.Long) == (ULONG_PTR)OldPte.u.Long)
             {
-                KeFlushSingleTb(Address, FALSE);
+                MmAddToTbFlushList(FlushList, Address);
                 Taken = TRUE;
                 break;
             }
