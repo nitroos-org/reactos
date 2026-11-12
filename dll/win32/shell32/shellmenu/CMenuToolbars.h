@@ -60,6 +60,8 @@ public:
     CMenuToolbarBase(CMenuBand *menuBand, BOOL usePager);
     virtual ~CMenuToolbarBase();
 
+    INT GetButtonCount() { return IsWindow() ? (INT)SendMessageW(TB_BUTTONCOUNT, 0, 0) : 0; }
+
     HRESULT IsWindowOwner(HWND hwnd);
     HRESULT CreateToolbar(HWND hwndParent, DWORD dwFlags);
     HRESULT GetWindow(HWND *phwnd);
@@ -144,6 +146,7 @@ class CMenuStaticToolbar :
 private:
     HMENU m_hmenu;
     HWND m_hwndMenu;
+    BOOL m_skipLeadingSeparator;
 
 public:
     CMenuStaticToolbar(CMenuBand *menuBand);
@@ -151,6 +154,10 @@ public:
 
     HRESULT SetMenu(HMENU hmenu, HWND hwnd, DWORD dwFlags);
     HRESULT GetMenu(HMENU *phmenu, HWND *phwnd, DWORD *pdwFlags);
+
+    /* Drop the separator that leads the static menu: it divides the shell folder section above from the static
+       items, and there is no section above when the folder is empty (the top level Start menu) */
+    HRESULT HideLeadingSeparator();
 
     virtual HRESULT FillToolbar(BOOL clearFirst=FALSE) override;
 
