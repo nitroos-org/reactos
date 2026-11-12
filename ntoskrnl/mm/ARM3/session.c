@@ -463,15 +463,33 @@ MiSessionRemoveProcess(VOID)
     MiDereferenceSession();
 }
 
-VOID
+/*
+ * The new process joins the session of the current process (its creator, or
+ * the process of another session the creator is attached to: NitroSessions).
+ * Returns TRUE when it joined; FALSE when the current process is in no
+ * session, or when the session is going away.
+ *
+ * NitroSessions: when the creator is attached to a process of another session,
+ * that process can leave the session (it exits) or the session can lose its
+ * last process after the attach. Whether the session is still live is decided
+ * here, under the expansion lock, in the same step that takes the new
+ * process's reference: the reference is taken only from a count that is not
+ * zero. MiDereferenceSession drops the count without the lock and the one that
+ * drops it to zero then runs MiDereferenceSessionFinal, so a count of zero is
+ * final: it is never raised again, and a session that reached it is never
+ * joined. A reference taken from a count above zero keeps the session live for
+ * as long as the new process is in it.
+ */
+BOOLEAN
 NTAPI
 MiSessionAddProcess(IN PEPROCESS NewProcess)
 {
     PMM_SESSION_SPACE SessionGlobal;
     KIRQL OldIrql;
+    LONG Count;
 
     /* The current process must already be in a session */
-    if (!(PsGetCurrentProcess()->Flags & PSF_PROCESS_IN_SESSION_BIT)) return;
+    if (!(PsGetCurrentProcess()->Flags & PSF_PROCESS_IN_SESSION_BIT)) return FALSE;
 
     /* Sanity check */
     ASSERT(MmIsAddressValid(MmSessionSpace) == TRUE);
@@ -479,17 +497,39 @@ MiSessionAddProcess(IN PEPROCESS NewProcess)
     /* Get the global session */
     SessionGlobal = MmSessionSpace->GlobalVirtualAddress;
 
-    /* Increment counters */
-    InterlockedIncrement((PLONG)&SessionGlobal->ReferenceCount);
+    /* Acquire the expansion lock while touching the session */
+    OldIrql = MiAcquireExpansionLock();
+
+    /* A session that is being deleted cannot be joined */
+    if (SessionGlobal->u.Flags.DeletePending)
+    {
+        MiReleaseExpansionLock(OldIrql);
+        return FALSE;
+    }
+
+    /* Take the reference only while the session still has one */
+    Count = SessionGlobal->ReferenceCount;
+    for (;;)
+    {
+        LONG Old;
+
+        if (Count <= 0)
+        {
+            MiReleaseExpansionLock(OldIrql);
+            return FALSE;
+        }
+        Old = InterlockedCompareExchange(&SessionGlobal->ReferenceCount, Count + 1, Count);
+        if (Old == Count) break;
+        Count = Old;
+    }
+
+    /* Increment the other counters */
     InterlockedIncrement(&SessionGlobal->ResidentProcessCount);
     InterlockedIncrement(&SessionGlobal->ProcessReferenceToSession);
 
     /* Set the session pointer */
     ASSERT(NewProcess->Session == NULL);
     NewProcess->Session = SessionGlobal;
-
-    /* Acquire the expansion lock while touching the session */
-    OldIrql = MiAcquireExpansionLock();
 
     /* Insert it into the process list */
     InsertTailList(&SessionGlobal->ProcessList, &NewProcess->SessionProcessLinks);
@@ -499,6 +539,7 @@ MiSessionAddProcess(IN PEPROCESS NewProcess)
 
     /* Set the flag */
     PspSetProcessFlag(NewProcess, PSF_PROCESS_IN_SESSION_BIT);
+    return TRUE;
 }
 
 NTSTATUS
@@ -716,15 +757,18 @@ MiSessionLeaderDetachView(
 
 /*
  * NitroSessions (P2). Called by MmCreateProcessAddressSpace once the new
- * process's top-level table is built as a copy of its creator's, and before
- * MiSessionAddProcess. The new process joins its creator's session when the
- * creator is in one, and no session otherwise. Its session tables are set
- * explicitly from that rule, never left as whatever the creator maps:
- *  - amd64: the session PML4 entry is the session's private one
- *    (MmSessionSpace->PageDirectory), or the shared one (session 0, and
- *    processes in no session);
+ * process's top-level table is built as a copy of its creator's, and after
+ * MiSessionAddProcess decided whether it joined the session of the current
+ * process (NewProcess->Session). Its session tables are set explicitly from
+ * that outcome, never left as whatever the creator maps:
+ *  - amd64: the session PML4 entry is the joined session's private one
+ *    (Session->PageDirectory), or the shared one (session 0, and processes in
+ *    no session);
  *  - i386: a process in no session created by the leader gets no session
- *    PDEs while the leader may hold the view of a session other than 0.
+ *    PDEs while the leader may hold the view of a session other than 0; a
+ *    process that did not join the session its creator maps (the creator, or
+ *    the process of another session it is attached to, left that session, or
+ *    the session is going away) gets no session PDEs either.
  * Until a session other than 0 exists, nothing is written: a boot with
  * session 0 only builds its processes exactly as before.
  */
@@ -738,8 +782,6 @@ MiSessionInitializeProcessTables(
     PMMPTE Mapping;
     KIRQL OldIrql;
 
-    UNREFERENCED_PARAMETER(NewProcess);
-
 #if (_MI_PAGING_LEVELS == 4)
     {
         MMPTE Pxe;
@@ -748,12 +790,11 @@ MiSessionInitializeProcessTables(
         if (MiSessionSharedPxe.u.Long == 0) return;
 
         Pxe = MiSessionSharedPxe;
-        if (Creator->Flags & PSF_PROCESS_IN_SESSION_BIT)
+        if (NewProcess->Session)
         {
-            /* The child joins the creator's session, which is the one mapped */
-            ASSERT(MmIsAddressValid(MmSessionSpace) == TRUE);
-            if (MmSessionSpace->PageDirectory.u.Long != 0)
-                Pxe = MmSessionSpace->PageDirectory;
+            /* The child joined the session that is mapped; its reference keeps the tables */
+            if (((PMM_SESSION_SPACE)NewProcess->Session)->PageDirectory.u.Long != 0)
+                Pxe = ((PMM_SESSION_SPACE)NewProcess->Session)->PageDirectory;
         }
 
         Mapping = MiMapPageInHyperSpace(Creator, TableBasePfn, &OldIrql);
@@ -764,10 +805,18 @@ MiSessionInitializeProcessTables(
     {
         ULONG Index, LastIndex;
 
-        /* Only the leader can hold the view of a session it is not in */
-        if (!Creator->Vm.Flags.SessionLeader) return;
-        if (Creator->Flags & PSF_PROCESS_IN_SESSION_BIT) return;
-        if (MiSessionLeaderViewId == 0) return;
+        if (NewProcess->Session) return;
+        if (Creator->Vm.Flags.SessionLeader)
+        {
+            /* Only the leader can hold the view of a session it is not in */
+            if (Creator->Flags & PSF_PROCESS_IN_SESSION_BIT) return;
+            if (MiSessionLeaderViewId == 0) return;
+        }
+        else
+        {
+            /* The creator maps the session it was in, which the child did not join */
+            if (!Creator->Session) return;
+        }
 
         Index = MiGetPdeOffset(MmSessionBase);
         LastIndex = MiGetPdeOffset((PVOID)((ULONG_PTR)MiSessionSpaceEnd - 1));
@@ -779,6 +828,7 @@ MiSessionInitializeProcessTables(
         MiUnmapPageInHyperSpace(Creator, Mapping, OldIrql);
     }
 #else
+    UNREFERENCED_PARAMETER(NewProcess);
     UNREFERENCED_PARAMETER(Creator);
     UNREFERENCED_PARAMETER(TableBasePfn);
     UNREFERENCED_PARAMETER(Mapping);
@@ -1398,6 +1448,14 @@ MmGetSessionById(
          * space is being created, before KeInitializeProcess (so its page directory is not set yet), and
          * stays on it while it exits: never take one whose address space is not complete or is gone.
          * First pass: a live process (not exiting, with threads); second pass: any usable one.
+         *
+         * The flags below are bitfields read without synchronisation with their writers: they only choose
+         * a likely candidate. What makes the candidate safe is that it is on the list under this lock
+         * (MiSessionRemoveProcess takes it out under the same lock, first thing in its exit, so it is not
+         * freed) and the reference that ObReferenceObjectSafe takes (it fails on a dying object). What makes
+         * the placement of a new process safe is not this lookup either: the process can leave the session
+         * right after it. MiSessionAddProcess joins only a live session, and PspCreateProcess fails the
+         * create when the new process did not join the session that was asked for.
          */
         for (Pass = 0; (Pass < 2) && !Process; Pass++)
         {
