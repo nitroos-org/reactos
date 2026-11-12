@@ -130,6 +130,29 @@ START_TEST(FlushViewOfFile)
         }
     }
 
+    /*
+     * Pages written through another view: FlushViewOfFile on a second view of the range, and FlushFileBuffers alone,
+     * write them too (the pages of every mapping of the file, as the flush of the file's cache does on Windows,
+     * where a non-cached read of such a page returns the new data).
+     */
+    {
+        PBYTE View2 = MapViewOfFile(Mapping, FILE_MAP_WRITE, 0, 0, 0);
+
+        ok(View2 != NULL, "second view failed, error %lu\n", GetLastError());
+        if (View2)
+        {
+            WriteChunk(View, 11 * CHUNK, 7);
+            ok(FlushViewOfFile(View2 + 11 * CHUNK, CHUNK), "FlushViewOfFile failed, error %lu\n", GetLastError());
+            ok_eq_ulong(CompareUncached(11 * CHUNK, CHUNK, 7, Buffer), 0UL);
+
+            WriteChunk(View, 12 * CHUNK, 8);
+            WriteChunk(View2, 13 * CHUNK, 8);
+            ok(FlushFileBuffers(File), "FlushFileBuffers failed, error %lu\n", GetLastError());
+            ok_eq_ulong(CompareUncached(12 * CHUNK, 2 * CHUNK, 8, Buffer), 0UL);
+            UnmapViewOfFile(View2);
+        }
+    }
+
     /* Durable: FlushFileBuffers after the view flush succeeds; the data is still there after the unmap */
     ok(FlushFileBuffers(File), "FlushFileBuffers failed, error %lu\n", GetLastError());
     UnmapViewOfFile(View);
