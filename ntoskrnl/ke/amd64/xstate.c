@@ -422,19 +422,69 @@ KiFitXStateContextFeatures(
     return Needed;
 }
 
+/* Every exception dispatched to user mode and every NtContinue of its context take one of these buffers, so they
+   come from a lookaside list instead of the pool: with AVX-512 a buffer is larger than a page, which the pool
+   allocates as whole pages under its locks. The list is set up at the first use, when the pool is ready; until it
+   is (and for a buffer that would not fit, which the sizes below rule out) the pool is used. */
+static NPAGED_LOOKASIDE_LIST KiXStateContextLookaside;
+static ULONG KiXStateContextEntrySize;
+static volatile LONG KiXStateContextLookasideState; /* 0 not set up, 1 being set up, 2 ready */
+
+static
+BOOLEAN
+KiXStateContextLookasideReady(VOID)
+{
+    const XSTATE_CONFIGURATION *Config = &SharedUserData->XState;
+    ULONG64 All;
+
+    if (KiXStateContextLookasideState == 2)
+        return TRUE;
+
+    /* Another processor is setting it up: use the pool meanwhile */
+    if (InterlockedCompareExchange(&KiXStateContextLookasideState, 1, 0) != 0)
+        return FALSE;
+
+    /* Room for the save area and the chunk of a context with every enabled feature, the largest one asked for */
+    All = Config->EnabledFeatures & ~XSTATE_MASK_LEGACY;
+    KiXStateContextEntrySize = XSAVE_ALIGN + ALIGN_UP_BY(KiXStateStandardLength, XSAVE_ALIGN) +
+                               KiFitXStateContextFeatures(&All, MAXULONG);
+    ExInitializeNPagedLookasideList(&KiXStateContextLookaside,
+                                    NULL,
+                                    NULL,
+                                    0,
+                                    KiXStateContextEntrySize,
+                                    TAG_XSTATE_CONTEXT,
+                                    0);
+    InterlockedExchange(&KiXStateContextLookasideState, 2);
+    return TRUE;
+}
+
 static
 NTSTATUS
 KiAllocateXStateContext(
     _Inout_ PKI_XSTATE_CONTEXT XState)
 {
     ULONG SaveLength = ALIGN_UP_BY(KiXStateStandardLength, XSAVE_ALIGN);
+    ULONG Size = XSAVE_ALIGN + SaveLength + XState->Length;
     PUCHAR Allocation;
 
-    Allocation = ExAllocatePoolZero(NonPagedPool,
-                                    XSAVE_ALIGN + SaveLength + XState->Length,
-                                    TAG_XSTATE_CONTEXT);
-    if (!Allocation)
-        return STATUS_INSUFFICIENT_RESOURCES;
+    if (KiXStateContextLookasideReady() && (Size <= KiXStateContextEntrySize))
+    {
+        Allocation = ExAllocateFromNPagedLookasideList(&KiXStateContextLookaside);
+        if (!Allocation)
+            return STATUS_INSUFFICIENT_RESOURCES;
+
+        /* Zeroed like the pool allocation below: XRSTOR needs the reserved bytes of the save area's header clear */
+        RtlZeroMemory(Allocation, Size);
+        XState->FromLookaside = TRUE;
+    }
+    else
+    {
+        Allocation = ExAllocatePoolZero(NonPagedPool, Size, TAG_XSTATE_CONTEXT);
+        if (!Allocation)
+            return STATUS_INSUFFICIENT_RESOURCES;
+        XState->FromLookaside = FALSE;
+    }
 
     XState->Allocation = Allocation;
     XState->Save = (PXSAVE_AREA)ALIGN_UP_POINTER_BY(Allocation, XSAVE_ALIGN);
@@ -642,7 +692,12 @@ KiFreeXStateContext(
     _Inout_ PKI_XSTATE_CONTEXT XState)
 {
     if (XState->Allocation)
-        ExFreePoolWithTag(XState->Allocation, TAG_XSTATE_CONTEXT);
+    {
+        if (XState->FromLookaside)
+            ExFreeToNPagedLookasideList(&KiXStateContextLookaside, XState->Allocation);
+        else
+            ExFreePoolWithTag(XState->Allocation, TAG_XSTATE_CONTEXT);
+    }
     XState->Allocation = NULL;
     XState->Save = NULL;
     XState->Chunk = NULL;

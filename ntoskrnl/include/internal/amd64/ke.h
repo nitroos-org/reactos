@@ -514,6 +514,7 @@ typedef struct _KI_XSTATE_CONTEXT
     PXSAVE_AREA_HEADER Chunk;       /* Kernel copy of the chunk */
     PXSAVE_AREA Save;               /* XSAVE area of the standard format, 64 byte aligned */
     PVOID Allocation;
+    BOOLEAN FromLookaside;          /* Allocation comes from the lookaside list, not the pool */
 } KI_XSTATE_CONTEXT, *PKI_XSTATE_CONTEXT;
 
 NTSTATUS
