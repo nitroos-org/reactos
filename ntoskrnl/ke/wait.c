@@ -33,6 +33,15 @@ KiWaitTest(IN PVOID ObjectPointer,
     {
         /* Get the current wait block */
         WaitBlock = CONTAINING_RECORD(WaitEntry, KWAIT_BLOCK, WaitListEntry);
+
+        /* A wait packet has no thread: it takes its share of the object and queues its entry */
+        if (WaitBlock->WaitType == KI_WAIT_PACKET)
+        {
+            KiSignalWaitPacket(WaitBlock);
+            WaitEntry = WaitList->Flink;
+            continue;
+        }
+
         WaitThread = WaitBlock->Thread;
         WaitStatus = STATUS_KERNEL_APC;
 

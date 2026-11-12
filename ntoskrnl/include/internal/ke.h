@@ -753,11 +753,68 @@ VOID
 NTAPI
 KiCheckForKernelApcDelivery(VOID);
 
+/*
+ * Wait packets (ke/queue.c): a wait block that no thread owns. While armed it sits in the wait list of one dispatcher
+ * object like a WaitAny waiter; the code that signals the object satisfies it (consuming the object exactly as a
+ * satisfied wait would) and inserts the packet's queue entry into its KQUEUE, all under the dispatcher lock. Used by
+ * wait completion packets (ex/waitcomp.c). Every wait-list walker must test for KI_WAIT_PACKET before using
+ * WaitBlock->Thread, which is NULL.
+ */
+#define KI_WAIT_PACKET 4
+
+typedef enum _KWAIT_PACKET_STATE
+{
+    KWaitPacketIdle,
+    KWaitPacketArmed,       /* WaitBlock is in the object's wait list */
+    KWaitPacketQueued       /* QueueEntry went to the queue (still in its entry list while QueueEntry->Flink != NULL) */
+} KWAIT_PACKET_STATE;
+
+typedef struct _KWAIT_PACKET
+{
+    KWAIT_BLOCK WaitBlock;
+    PKQUEUE Queue;
+    PLIST_ENTRY QueueEntry;
+    UCHAR State;            /* KWAIT_PACKET_STATE; dispatcher lock */
+} KWAIT_PACKET, *PKWAIT_PACKET;
+
+VOID
+NTAPI
+KeInitializeWaitPacket(
+    _Out_ PKWAIT_PACKET Packet,
+    _In_ PLIST_ENTRY QueueEntry
+);
+
 BOOLEAN
 NTAPI
-KeRemoveEntryQueue(
-    _In_ PKQUEUE Queue,
-    _In_ PLIST_ENTRY Entry
+KeArmWaitPacket(
+    _Inout_ PKWAIT_PACKET Packet,
+    _In_ PVOID Object,
+    _In_ PKQUEUE Queue
+);
+
+NTSTATUS
+NTAPI
+KeCancelWaitPacket(
+    _Inout_ PKWAIT_PACKET Packet,
+    _In_ BOOLEAN RemoveQueued
+);
+
+VOID
+NTAPI
+KeWaitPacketDequeued(
+    _Inout_ PKWAIT_PACKET Packet
+);
+
+BOOLEAN
+NTAPI
+KeIsWaitPacketIdle(
+    _In_ PKWAIT_PACKET Packet
+);
+
+VOID
+FASTCALL
+KiSignalWaitPacket(
+    _In_ PKWAIT_BLOCK WaitBlock
 );
 
 LONG

@@ -509,33 +509,176 @@ KeRemoveQueue(IN PKQUEUE Queue,
 }
 
 /*
- * Takes one entry back out of the queue if it is still in it (not removed, and not handed straight to a waiting
- * thread). Used by wait completion packets to cancel a packet that was queued but not yet removed.
+ * Wait packets (declared in ke.h): the kernel half of wait completion packets. A KWAIT_PACKET is a wait block of
+ * type KI_WAIT_PACKET that no thread owns. Armed, it is linked into one dispatcher object's wait list, at the tail
+ * like any new waiter. Whoever signals the object walks that list under the dispatcher lock (KiWaitTest,
+ * KxUnwaitThread, KxUnwaitThreadForEvent, KeSetEventBoostPriority); at a wait packet it calls KiSignalWaitPacket,
+ * which satisfies the wait as a WaitAny waiter's would be satisfied (an auto-reset event or timer is reset, a
+ * semaphore count taken, a notification object left signalled), unlinks the block and inserts the packet's entry
+ * into its queue with KiInsertQueue. The dispatcher lock is the only lock taken on that path: KiInsertQueue is the
+ * dispatcher-lock-held half of KeInsertQueue (it may ready a thread waiting on the queue, as an unwait readies a
+ * waiter), so no lock order changes and nothing has to be deferred. The packet's state is protected by the
+ * dispatcher lock too, so arming (test the signal state, then consume or link), signalling, cancelling and taking
+ * the entry back out of the queue are each atomic against the others.
+ *
+ * The entry's Flink tells whether it is still in the queue's entry list: it is NULL from the moment it is queued
+ * until KiInsertQueue links it, and every removal from the list (KeRemoveQueueEx, KiActivateWaiterQueue,
+ * KeCancelWaitPacket) sets it to NULL again. KiInsertQueue may also hand it straight to a waiting thread, in which
+ * case it was never linked.
+ */
+VOID
+NTAPI
+KeInitializeWaitPacket(OUT PKWAIT_PACKET Packet,
+                       IN PLIST_ENTRY QueueEntry)
+{
+    RtlZeroMemory(Packet, sizeof(*Packet));
+    Packet->WaitBlock.WaitType = KI_WAIT_PACKET;
+    Packet->WaitBlock.NextWaitBlock = &Packet->WaitBlock;
+    Packet->QueueEntry = QueueEntry;
+    Packet->State = KWaitPacketIdle;
+}
+
+/* The object was signalled for the packet: its entry goes to the queue. Dispatcher lock held. */
+FORCEINLINE
+VOID
+KiQueueWaitPacket(IN PKWAIT_PACKET Packet)
+{
+    Packet->State = KWaitPacketQueued;
+    Packet->QueueEntry->Flink = NULL;
+    Packet->QueueEntry->Blink = NULL;
+    KiInsertQueue(Packet->Queue, Packet->QueueEntry, FALSE);
+}
+
+/*
+ * Called by the signal paths for a KI_WAIT_PACKET block of a signalled object, with the dispatcher lock held:
+ * satisfy the wait (consume the object as a WaitAny wait does) and queue the packet.
+ */
+VOID
+FASTCALL
+KiSignalWaitPacket(IN PKWAIT_BLOCK WaitBlock)
+{
+    PKWAIT_PACKET Packet = CONTAINING_RECORD(WaitBlock, KWAIT_PACKET, WaitBlock);
+    PKEVENT Object = WaitBlock->Object;
+
+    ASSERT(WaitBlock->WaitType == KI_WAIT_PACKET);
+    ASSERT(Packet->State == KWaitPacketArmed);
+    ASSERT(Object->Header.Type != MutantObject);
+    ASSERT(Object->Header.SignalState > 0);
+
+    RemoveEntryList(&WaitBlock->WaitListEntry);
+    KiSatisfyNonMutantWait(Object);
+    KiQueueWaitPacket(Packet);
+}
+
+/*
+ * Arms an idle packet on a dispatcher object (not a mutant: its ownership needs a thread) and a queue. If the object
+ * is signalled the wait is satisfied at once and the entry queued (returns TRUE); otherwise the packet waits.
  */
 BOOLEAN
 NTAPI
-KeRemoveEntryQueue(IN PKQUEUE Queue,
-                   IN PLIST_ENTRY Entry)
+KeArmWaitPacket(IN OUT PKWAIT_PACKET Packet,
+                IN PVOID Object,
+                IN PKQUEUE Queue)
 {
-    PLIST_ENTRY Current;
-    BOOLEAN Found = FALSE;
+    PKEVENT Header = Object;
+    BOOLEAN Signaled;
     KIRQL OldIrql;
     ASSERT_QUEUE(Queue);
+    ASSERT(Header->Header.Type != MutantObject);
+    ASSERT_IRQL_LESS_OR_EQUAL(APC_LEVEL);
+
+    OldIrql = KiAcquireDispatcherLock();
+    ASSERT(Packet->State == KWaitPacketIdle);
+    Packet->Queue = Queue;
+    Packet->WaitBlock.Object = Object;
+    if (Header->Header.SignalState > 0)
+    {
+        KiSatisfyNonMutantWait(Header);
+        KiQueueWaitPacket(Packet);
+        Signaled = TRUE;
+    }
+    else
+    {
+        Packet->State = KWaitPacketArmed;
+        InsertTailList(&Header->Header.WaitListHead, &Packet->WaitBlock.WaitListEntry);
+        Signaled = FALSE;
+    }
+    KiReleaseDispatcherLock(OldIrql);
+    return Signaled;
+}
+
+/*
+ * Cancels a packet. STATUS_CANCELLED: it was idle. STATUS_SUCCESS: it was waiting, or queued and still in the queue
+ * with RemoveQueued (the entry is taken back out); it is idle now and the object was not consumed for it.
+ * STATUS_PENDING: it was queued and stays so (RemoveQueued FALSE, or a consumer has already taken the entry and will
+ * call KeWaitPacketDequeued).
+ */
+NTSTATUS
+NTAPI
+KeCancelWaitPacket(IN OUT PKWAIT_PACKET Packet,
+                   IN BOOLEAN RemoveQueued)
+{
+    NTSTATUS Status;
+    KIRQL OldIrql;
     ASSERT_IRQL_LESS_OR_EQUAL(DISPATCH_LEVEL);
 
     OldIrql = KiAcquireDispatcherLock();
-    for (Current = Queue->EntryListHead.Flink; Current != &Queue->EntryListHead; Current = Current->Flink)
+    switch (Packet->State)
     {
-        if (Current == Entry)
-        {
-            RemoveEntryList(Entry);
-            Queue->Header.SignalState--;
-            Found = TRUE;
+        case KWaitPacketArmed:
+            RemoveEntryList(&Packet->WaitBlock.WaitListEntry);
+            Packet->State = KWaitPacketIdle;
+            Status = STATUS_SUCCESS;
             break;
-        }
+
+        case KWaitPacketQueued:
+            if (RemoveQueued && Packet->QueueEntry->Flink)
+            {
+                RemoveEntryList(Packet->QueueEntry);
+                Packet->QueueEntry->Flink = NULL;
+                Packet->Queue->Header.SignalState--;
+                Packet->State = KWaitPacketIdle;
+                Status = STATUS_SUCCESS;
+            }
+            else
+            {
+                Status = STATUS_PENDING;
+            }
+            break;
+
+        default:
+            Status = STATUS_CANCELLED;
+            break;
     }
     KiReleaseDispatcherLock(OldIrql);
-    return Found;
+    return Status;
+}
+
+/* A consumer removed the packet's entry from the queue: the packet is idle again */
+VOID
+NTAPI
+KeWaitPacketDequeued(IN OUT PKWAIT_PACKET Packet)
+{
+    KIRQL OldIrql;
+
+    OldIrql = KiAcquireDispatcherLock();
+    ASSERT(Packet->State == KWaitPacketQueued);
+    ASSERT(Packet->QueueEntry->Flink == NULL);
+    Packet->State = KWaitPacketIdle;
+    KiReleaseDispatcherLock(OldIrql);
+}
+
+BOOLEAN
+NTAPI
+KeIsWaitPacketIdle(IN PKWAIT_PACKET Packet)
+{
+    BOOLEAN Idle;
+    KIRQL OldIrql;
+
+    OldIrql = KiAcquireDispatcherLock();
+    Idle = (Packet->State == KWaitPacketIdle);
+    KiReleaseDispatcherLock(OldIrql);
+    return Idle;
 }
 
 /*
