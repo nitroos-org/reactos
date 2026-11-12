@@ -585,6 +585,11 @@ SamValidateUser(
             if (LogonType != Service)
                 return STATUS_LOGON_FAILURE;
 
+            /* The logon has no password: it is for a caller that holds SeTcbPrivilege (the SCM) only.
+             * Windows answers an untrusted caller with access denied. */
+            if (!TrustedClient)
+                return STATUS_ACCESS_DENIED;
+
             *UserInfoPtr = RtlAllocateHeap(RtlGetProcessHeap(),
                                            HEAP_ZERO_MEMORY,
                                            sizeof(SAMPR_USER_ALL_INFORMATION));
@@ -600,6 +605,11 @@ SamValidateUser(
 
             if (LogonType != Service)
                 return STATUS_LOGON_FAILURE;
+
+            /* The logon has no password: it is for a caller that holds SeTcbPrivilege (the SCM) only.
+             * Windows answers an untrusted caller with access denied. */
+            if (!TrustedClient)
+                return STATUS_ACCESS_DENIED;
 
             *UserInfoPtr = RtlAllocateHeap(RtlGetProcessHeap(),
                                            HEAP_ZERO_MEMORY,

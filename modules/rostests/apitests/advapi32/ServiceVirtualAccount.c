@@ -19,7 +19,8 @@
  *
  * The logon of the virtual account has no password, so a service logon of NT SERVICE\<service> must work
  * only for a caller that holds SeTcbPrivilege (the SCM): a standard user, an administrator without
- * SeTcbPrivilege and an untrusted LSA connection are refused.
+ * SeTcbPrivilege and an untrusted LSA connection are refused. The same holds for the password-less
+ * logon of NT AUTHORITY\LocalService and NT AUTHORITY\NetworkService, which are for the SCM too.
  */
 
 /* Service process side */
@@ -54,6 +55,25 @@ TokenUserMatches(PCWSTR Name)
 }
 
 #define NT_STATUS_LOGON_FAILURE ((NTSTATUS)0xC000006D)
+#define NT_STATUS_ACCESS_DENIED ((NTSTATUS)0xC0000022)
+
+/* The accounts whose password-less service logon is for the SCM only, and what Windows gives everybody else:
+ * the virtual account of a service is refused with a logon failure, LocalService and NetworkService with
+ * access denied (measured on Windows 10 22H2: LogonUser as an administrator without SeTcbPrivilege) */
+typedef struct _SERVICE_LOGON_ACCOUNT
+{
+    PCWSTR Domain;
+    PCWSTR Name;        /* NULL: the service of this test */
+    NTSTATUS Refused;   /* LsaLogonUser status for a caller without SeTcbPrivilege */
+    DWORD RefusedError; /* LogonUser error for the same */
+} SERVICE_LOGON_ACCOUNT;
+
+static const SERVICE_LOGON_ACCOUNT Accounts[] =
+{
+    { L"NT SERVICE", NULL, NT_STATUS_LOGON_FAILURE, ERROR_LOGON_FAILURE },
+    { L"NT AUTHORITY", L"LocalService", NT_STATUS_ACCESS_DENIED, ERROR_ACCESS_DENIED },
+    { L"NT AUTHORITY", L"NetworkService", NT_STATUS_ACCESS_DENIED, ERROR_ACCESS_DENIED },
+};
 
 typedef NTSTATUS (NTAPI *LSACONNECTUNTRUSTED)(PHANDLE);
 typedef NTSTATUS (NTAPI *LSAREGISTERLOGONPROCESS)(PLSA_STRING, PHANDLE, PLSA_OPERATIONAL_MODE);
@@ -73,9 +93,8 @@ static LSAFREERETURNBUFFER pLsaFreeReturnBuffer;
 
 /* The service logon of NT SERVICE\<Name> without a password over an LSA handle */
 static NTSTATUS
-ServiceLogon(HANDLE Lsa, PCWSTR Name, PHANDLE Token)
+ServiceLogon(HANDLE Lsa, PCWSTR Domain, PCWSTR Name, SECURITY_LOGON_TYPE Type, PHANDLE Token)
 {
-    static const WCHAR Domain[] = L"NT SERVICE";
     BYTE Buffer[sizeof(MSV1_0_INTERACTIVE_LOGON) + 256 * sizeof(WCHAR)];
     PMSV1_0_INTERACTIVE_LOGON Logon = (PMSV1_0_INTERACTIVE_LOGON)Buffer;
     PWCHAR Ptr = (PWCHAR)(Logon + 1);
@@ -91,10 +110,10 @@ ServiceLogon(HANDLE Lsa, PCWSTR Name, PHANDLE Token)
     RtlZeroMemory(Buffer, sizeof(Buffer));
     Logon->MessageType = MsV1_0InteractiveLogon;
     Logon->LogonDomainName.Buffer = Ptr;
-    Logon->LogonDomainName.Length = sizeof(Domain) - sizeof(WCHAR);
-    Logon->LogonDomainName.MaximumLength = sizeof(Domain);
-    RtlCopyMemory(Ptr, Domain, sizeof(Domain));
-    Ptr += _countof(Domain);
+    Logon->LogonDomainName.Length = (USHORT)(wcslen(Domain) * sizeof(WCHAR));
+    Logon->LogonDomainName.MaximumLength = Logon->LogonDomainName.Length + sizeof(WCHAR);
+    RtlCopyMemory(Ptr, Domain, Logon->LogonDomainName.MaximumLength);
+    Ptr += wcslen(Domain) + 1;
     Logon->UserName.Buffer = Ptr;
     Logon->UserName.Length = (USHORT)(wcslen(Name) * sizeof(WCHAR));
     Logon->UserName.MaximumLength = Logon->UserName.Length + sizeof(WCHAR);
@@ -112,7 +131,7 @@ ServiceLogon(HANDLE Lsa, PCWSTR Name, PHANDLE Token)
     RtlInitString((PSTRING)&Origin, "SvcVAcct");
     RtlCopyMemory(Source.SourceName, "SvcVAcct", 8);
     AllocateLocallyUniqueId(&Source.SourceIdentifier);
-    Status = pLsaLogonUser(Lsa, &Origin, Service, Package, Logon, (ULONG)((PBYTE)Ptr - Buffer + sizeof(WCHAR)),
+    Status = pLsaLogonUser(Lsa, &Origin, Type, Package, Logon, (ULONG)((PBYTE)Ptr - Buffer + sizeof(WCHAR)),
                            NULL, &Source, &Profile, &ProfileLength, &LogonId, Token, &Quotas, &SubStatus);
     if (Profile)
         pLsaFreeReturnBuffer(Profile);
@@ -191,7 +210,7 @@ ImpersonateWithoutTcb(VOID)
 /* The logon (over a registered logon process, as winlogon or the SCM have it) of the virtual account must
  * fail for a thread that does not hold SeTcbPrivilege. A refused registration is fine as well (Windows). */
 static VOID
-CheckRefusedAsLogonProcess(PCSTR What, PCWSTR Name)
+CheckRefusedAsLogonProcess(PCSTR What, const SERVICE_LOGON_ACCOUNT *Account, PCWSTR Name)
 {
     LSA_STRING ProcessName;
     LSA_OPERATIONAL_MODE Mode;
@@ -205,12 +224,55 @@ CheckRefusedAsLogonProcess(PCSTR What, PCWSTR Name)
         trace("%s: LsaRegisterLogonProcess refused: 0x%08lx\n", What, Status);
         return;
     }
-    Status = ServiceLogon(Lsa, Name, &Token);
-    ok(Status == NT_STATUS_LOGON_FAILURE, "%s: service logon of NT SERVICE\\%ls returned 0x%08lx, expected 0x%08lx\n",
-       What, Name, Status, NT_STATUS_LOGON_FAILURE);
+    Status = ServiceLogon(Lsa, Account->Domain, Name, Service, &Token);
+    ok(Status == Account->Refused, "%s: service logon of %ls\\%ls returned 0x%08lx, expected 0x%08lx\n",
+       What, Account->Domain, Name, Status, Account->Refused);
     if (Token)
         CloseHandle(Token);
     pLsaDeregisterLogonProcess(Lsa);
+}
+
+static PCWSTR
+AccountName(const SERVICE_LOGON_ACCOUNT *Account, PCWSTR ServiceName)
+{
+    return Account->Name ? Account->Name : ServiceName;
+}
+
+/* LogonUser of one account as the standard user (the thread impersonates it) */
+static VOID
+CheckStandardUserLogonUser(const SERVICE_LOGON_ACCOUNT *Account, PCWSTR ServiceName)
+{
+    PCWSTR Name = AccountName(Account, ServiceName);
+    HANDLE Token = NULL;
+    BOOL Ret = LogonUserW((PWSTR)Name, (PWSTR)Account->Domain, L"", LOGON32_LOGON_SERVICE, LOGON32_PROVIDER_DEFAULT, &Token);
+    DWORD Err = GetLastError();
+
+    ok(!Ret, "LogonUser of %ls\\%ls as a standard user succeeded\n", Account->Domain, Name);
+    if (!Ret)
+        ok(Err == Account->RefusedError, "LogonUser of %ls\\%ls as a standard user failed with %lu, expected %lu\n",
+           Account->Domain, Name, Err, Account->RefusedError);
+    if (Ret)
+        CloseHandle(Token);
+
+    /* the other logon types of LocalService and NetworkService fail for everybody (Windows: 1326) */
+    if (Account->Name)
+    {
+        static const DWORD Types[] = { LOGON32_LOGON_INTERACTIVE, LOGON32_LOGON_NETWORK };
+        UINT i;
+
+        for (i = 0; i < _countof(Types); i++)
+        {
+            Token = NULL;
+            Ret = LogonUserW((PWSTR)Name, (PWSTR)Account->Domain, NULL, Types[i], LOGON32_PROVIDER_DEFAULT, &Token);
+            Err = GetLastError();
+            ok(!Ret, "LogonUser of %ls\\%ls (type %lu) as a standard user succeeded\n", Account->Domain, Name, Types[i]);
+            if (!Ret)
+                ok(Err == ERROR_LOGON_FAILURE, "LogonUser of %ls\\%ls (type %lu) failed with %lu, expected %d\n",
+                   Account->Domain, Name, Types[i], Err, ERROR_LOGON_FAILURE);
+            if (Ret)
+                CloseHandle(Token);
+        }
+    }
 }
 
 static VOID
@@ -225,6 +287,7 @@ TestVirtualAccountLogon(PCWSTR Name)
     NET_API_STATUS NetStatus = NERR_UserExists;
     NTSTATUS Status;
     DWORD Err, Try;
+    UINT i;
 
     if (Sspicli)
     {
@@ -267,16 +330,10 @@ TestVirtualAccountLogon(PCWSTR Name)
     }
     else
     {
-        BOOL Ret = LogonUserW((PWSTR)Name, L"NT SERVICE", L"", LOGON32_LOGON_SERVICE, LOGON32_PROVIDER_DEFAULT, &Token);
-
-        Err = GetLastError();
-        ok(!Ret, "LogonUser of NT SERVICE\\%ls as a standard user succeeded\n", Name);
-        if (!Ret)
-            ok(Err == ERROR_LOGON_FAILURE, "LogonUser as a standard user failed with %lu, expected %d\n", Err, ERROR_LOGON_FAILURE);
-        if (Ret)
-            CloseHandle(Token);
-        Token = NULL;
-        CheckRefusedAsLogonProcess("standard user", Name);
+        for (i = 0; i < _countof(Accounts); i++)
+            CheckStandardUserLogonUser(&Accounts[i], Name);
+        for (i = 0; i < _countof(Accounts); i++)
+            CheckRefusedAsLogonProcess("standard user", &Accounts[i], AccountName(&Accounts[i], Name));
         RevertToSelf();
     }
     if (hUser)
@@ -289,18 +346,25 @@ TestVirtualAccountLogon(PCWSTR Name)
     ok(Status == STATUS_SUCCESS, "LsaConnectUntrusted failed: 0x%08lx\n", Status);
     if (Status == STATUS_SUCCESS)
     {
-        Status = ServiceLogon(Lsa, Name, &Token);
-        ok(Status == NT_STATUS_LOGON_FAILURE, "untrusted: service logon of NT SERVICE\\%ls returned 0x%08lx, expected 0x%08lx\n",
-           Name, Status, NT_STATUS_LOGON_FAILURE);
-        if (Token)
-            CloseHandle(Token);
+        for (i = 0; i < _countof(Accounts); i++)
+        {
+            PCWSTR Account = AccountName(&Accounts[i], Name);
+
+            Token = NULL;
+            Status = ServiceLogon(Lsa, Accounts[i].Domain, Account, Service, &Token);
+            ok(Status == Accounts[i].Refused, "untrusted: service logon of %ls\\%ls returned 0x%08lx, expected 0x%08lx\n",
+               Accounts[i].Domain, Account, Status, Accounts[i].Refused);
+            if (Token)
+                CloseHandle(Token);
+        }
         pLsaDeregisterLogonProcess(Lsa);
     }
 
     /* An administrator without SeTcbPrivilege */
     if (ImpersonateWithoutTcb())
     {
-        CheckRefusedAsLogonProcess("administrator without SeTcbPrivilege", Name);
+        for (i = 0; i < _countof(Accounts); i++)
+            CheckRefusedAsLogonProcess("administrator without SeTcbPrivilege", &Accounts[i], AccountName(&Accounts[i], Name));
         RevertToSelf();
     }
     else
@@ -316,11 +380,17 @@ TestVirtualAccountLogon(PCWSTR Name)
         ok(Status == STATUS_SUCCESS, "LsaRegisterLogonProcess failed: 0x%08lx\n", Status);
         if (Status == STATUS_SUCCESS)
         {
-            Token = NULL;
-            Status = ServiceLogon(Lsa, Name, &Token);
-            ok(Status == STATUS_SUCCESS, "SeTcbPrivilege: service logon of NT SERVICE\\%ls returned 0x%08lx\n", Name, Status);
-            if (Token)
-                CloseHandle(Token);
+            for (i = 0; i < _countof(Accounts); i++)
+            {
+                PCWSTR Account = AccountName(&Accounts[i], Name);
+
+                Token = NULL;
+                Status = ServiceLogon(Lsa, Accounts[i].Domain, Account, Service, &Token);
+                ok(Status == STATUS_SUCCESS, "SeTcbPrivilege: service logon of %ls\\%ls returned 0x%08lx\n",
+                   Accounts[i].Domain, Account, Status);
+                if (Token)
+                    CloseHandle(Token);
+            }
             pLsaDeregisterLogonProcess(Lsa);
         }
         RevertToSelf();
