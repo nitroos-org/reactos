@@ -707,6 +707,19 @@ MiSegmentDelete(IN PSEGMENT Segment)
     /* Loop all the segment PTEs */
     while (PointerPte < LastPte)
     {
+#ifdef _M_AMD64
+        /* A part of a sparse store that was never populated holds only zeros, and is not writable */
+        if (MI_IS_SPARSE_PROTOTYPE_PTE(PointerPte))
+        {
+            PMMPTE NextPte = MiSkipEmptySparsePrototypePtes(PointerPte);
+            if (NextPte != PointerPte)
+            {
+                PointerPte = NextPte;
+                continue;
+            }
+        }
+#endif
+
         /* Check if it's time to switch master PTEs if we passed a PDE boundary */
         if (MiIsPteOnPdeBoundary(PointerPte) &&
             (PointerPte != Subsection->SubsectionBase))
@@ -799,6 +812,12 @@ MiSegmentDelete(IN PSEGMENT Segment)
     /* The committed pages of the segment are gone */
     MiReturnCommit(Segment->NumberOfCommittedPages);
     InterlockedExchangeAddSizeT(&MmSharedCommit, -(LONG_PTR)Segment->NumberOfCommittedPages);
+
+#ifdef _M_AMD64
+    /* Every Prototype PTE is 0 now and no page is accounted to their pages any more */
+    if (MI_IS_SPARSE_PROTOTYPE_PTE(Subsection->SubsectionBase))
+        MiFreeSparsePrototypePtes(Subsection->SubsectionBase, Segment->NonExtendedPtes);
+#endif
 
     /* Free the structures */
     ExFreePool(ControlArea);
@@ -1697,6 +1716,20 @@ MiMapViewOfDataSection(
             }
         }
 
+#ifdef _M_AMD64
+        /* Sparse Prototype PTEs: make their pages writable first */
+        if (CommitPages && MI_IS_SPARSE_PROTOTYPE_PTE(PointerPte) &&
+            !NT_SUCCESS(MiPopulateSparsePrototypePtes(PointerPte, LastPte - 1)))
+        {
+            MiReturnCommit(CommitPages);
+            KeReleaseGuardedMutex(&MmSectionCommitMutex);
+            MiReturnCommit(ViewCommit);
+            ExFreePoolWithTag(Vad, 'ldaV');
+            MiDereferenceControlArea(ControlArea);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+#endif
+
         /* Loop all prototype PTEs to be committed */
         while (PointerPte < LastPte)
         {
@@ -1813,6 +1846,9 @@ MiCreatePagingFileMap(OUT PSEGMENT *Segment,
     PCONTROL_AREA ControlArea;
     PSEGMENT NewSegment;
     PSUBSECTION Subsection;
+#ifdef _M_AMD64
+    BOOLEAN Sparse = FALSE;
+#endif
     PAGED_CODE();
 
     /* No large pages in ARM3 yet */
@@ -1839,6 +1875,17 @@ MiCreatePagingFileMap(OUT PSEGMENT *Segment,
     SizeLimit /= sizeof(MMPTE);
     SizeLimit <<= PAGE_SHIFT;
 
+#ifdef _M_AMD64
+    /*
+     * A large section that is only reserved keeps its Prototype PTEs in the sparse range, where the pages
+     * of the array are only made when something is committed (protopte.c). Windows 10 x64 creates such a
+     * section of 8 TB (the oracle; 128 TB fails with STATUS_SECTION_TOO_BIG): 8 TB is the cap here, the
+     * largest size measured. Smaller reserved sections stay in paged pool as before.
+     */
+    Sparse = (AllocationAttributes & SEC_RESERVE) && (MaximumSize >= MI_SPARSE_SECTION_MINIMUM);
+    if (Sparse) SizeLimit = MI_SPARSE_SECTION_MAXIMUM;
+#endif
+
     /* Fail if this size is too big */
     if (MaximumSize > SizeLimit)
     {
@@ -1860,6 +1907,21 @@ MiCreatePagingFileMap(OUT PSEGMENT *Segment,
         return STATUS_COMMITMENT_LIMIT;
     }
 
+#ifdef _M_AMD64
+    if (Sparse)
+    {
+        /* Only the segment header in paged pool; the Prototype PTEs all read as 0 (reserved) */
+        NewSegment = ExAllocatePoolWithTag(PagedPool, sizeof(SEGMENT), 'tSmM');
+        if (!NewSegment) return STATUS_INSUFFICIENT_RESOURCES;
+        if (!NT_SUCCESS(MiAllocateSparsePrototypePtes(PteCount, &PointerPte)))
+        {
+            ExFreePoolWithTag(NewSegment, 'tSmM');
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+    }
+    else
+#endif
+    {
     /* The segment contains all the Prototype PTEs, allocate it in paged pool */
     NewSegment = ExAllocatePoolWithTag(PagedPool,
                                        sizeof(SEGMENT) +
@@ -1870,6 +1932,8 @@ MiCreatePagingFileMap(OUT PSEGMENT *Segment,
         if (AllocationAttributes & SEC_COMMIT) MiReturnCommit(PteCount);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
+    PointerPte = &NewSegment->ThePtes[0];
+    }
 
     /* Now allocate the control area, which has the subsection structure */
     ControlArea = ExAllocatePoolWithTag(NonPagedPool,
@@ -1878,6 +1942,9 @@ MiCreatePagingFileMap(OUT PSEGMENT *Segment,
     if (!ControlArea)
     {
         if (AllocationAttributes & SEC_COMMIT) MiReturnCommit(PteCount);
+#ifdef _M_AMD64
+        if (Sparse) MiFreeSparsePrototypePtes(PointerPte, PteCount);
+#endif
         ExFreePoolWithTag(NewSegment, 'tSmM');
         return STATUS_INSUFFICIENT_RESOURCES;
     }
@@ -1904,7 +1971,6 @@ MiCreatePagingFileMap(OUT PSEGMENT *Segment,
     Subsection->u.SubsectionFlags.Protection = ProtectionMask;
 
     /* Zero out the segment's prototype PTEs, and link it with the control area */
-    PointerPte = &NewSegment->ThePtes[0];
     RtlZeroMemory(NewSegment, sizeof(SEGMENT));
     NewSegment->PrototypePte = PointerPte;
     NewSegment->ControlArea = ControlArea;
@@ -1933,9 +1999,14 @@ MiCreatePagingFileMap(OUT PSEGMENT *Segment,
     /* The template PTE itself for the segment should also have the mask set */
     NewSegment->SegmentPteTemplate.u.Soft.Protection = ProtectionMask;
 
-    /* Write out the prototype PTEs, for now they're simply demand zero */
+    /* Write out the prototype PTEs, for now they're simply demand zero (sparse ones read as 0 already) */
 #ifdef _WIN64
-    RtlFillMemoryUlonglong(PointerPte, PteCount * sizeof(MMPTE), TempPte.u.Long);
+#ifdef _M_AMD64
+    if (Sparse)
+        ASSERT(TempPte.u.Long == 0);
+    else
+#endif
+    RtlFillMemoryUlonglong(PointerPte, (SIZE_T)PteCount * sizeof(MMPTE), TempPte.u.Long);
 #else
     RtlFillMemoryUlong(PointerPte, PteCount * sizeof(MMPTE), TempPte.u.Long);
 #endif
@@ -3501,6 +3572,18 @@ MmCommitSessionMappedView(IN PVOID MappedBase,
         KeReleaseGuardedMutex(Session->SystemSpaceViewLockPointer);
         return STATUS_COMMITMENT_LIMIT;
     }
+
+#ifdef _M_AMD64
+    /* Sparse Prototype PTEs: make their pages writable first */
+    if (MI_IS_SPARSE_PROTOTYPE_PTE(ProtoPte) &&
+        !NT_SUCCESS(MiPopulateSparsePrototypePtes(ProtoPte, LastProtoPte - 1)))
+    {
+        MiReturnCommit(QuotaCharge);
+        KeReleaseGuardedMutexUnsafe(&MmSectionCommitMutex);
+        KeReleaseGuardedMutex(Session->SystemSpaceViewLockPointer);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+#endif
 
     /* Pick the segment and template PTE */
     Segment = ControlArea->Segment;

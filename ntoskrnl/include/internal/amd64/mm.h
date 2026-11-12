@@ -13,7 +13,9 @@
 #define MI_USER_PROBE_ADDRESS           (PVOID)0x00007FFFFFFF0000ULL
 #define MI_DEFAULT_SYSTEM_RANGE_START   (PVOID)0xFFFF080000000000ULL
 #define MI_REAL_SYSTEM_RANGE_START             0xFFFF800000000000ULL
-//#define MI_PAGE_TABLE_BASE                   0xFFFFF68000000000ULL // 512 GB page tables
+#define MI_SPARSE_PROTO_START                  0xFFFFF00000000000ULL // 1 TB Prototype PTEs of large reserved sections (protopte.c)
+#define MI_SPARSE_PROTO_END                    0xFFFFF0FFFFFFFFFFULL
+//#define MI_PAGE_TABLE_BASE                  0xFFFFF68000000000ULL // 512 GB page tables
 #define HYPER_SPACE                            0xFFFFF70000000000ULL // 512 GB hyper space [MiVaProcessSpace]
 #define HYPER_SPACE_END                        0xFFFFF77FFFFFFFFFULL
 //#define MI_SHARED_SYSTEM_PAGE                0xFFFFF78000000000ULL
@@ -63,6 +65,8 @@
 #define MI_MAX_NONPAGED_POOL_SIZE               (128ULL * 1024 * 1024 * 1024)
 #define MI_MAX_PAGED_POOL_SIZE                  (4ULL * 1024 * 1024 * 1024) // pool.c and section.c use 32-bit page counts
 #define MI_SYSTEM_VIEW_SIZE                     (512 * _1MB)
+#define MI_SPARSE_SECTION_MINIMUM               (4ULL * 1024 * 1024 * 1024) // SEC_RESERVE page-file sections from here on: sparse Prototype PTEs
+#define MI_SPARSE_SECTION_MAXIMUM               (8ULL * 1024 * 1024 * 1024 * 1024) // largest such section (Windows 10 x64 accepts 8 TB, oracle)
 #define MI_SESSION_VIEW_SIZE                    (512 * _1MB)
 #define MI_SESSION_POOL_SIZE                    (64 * _1MB)
 #define MI_SESSION_IMAGE_SIZE                   (16 * _1MB)
