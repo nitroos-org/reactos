@@ -788,7 +788,6 @@ static void test_sip_create_indirect_data(void)
     subjinfo.DigestAlgorithm.pszObjId = oid_sha1;
     count = 0xdeadbeef;
     ret = CryptSIPCreateIndirectData_p(&subjinfo, &count, NULL);
-    todo_wine
     ok(ret, "CryptSIPCreateIndirectData failed: %ld\n", GetLastError());
     ok(count, "expected a positive count\n");
     if (ret)

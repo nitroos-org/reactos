@@ -10,12 +10,14 @@
 #include <apitest.h>
 
 extern void func_SignatureTimeStamp(void);
+extern void func_SignerSign(void);
 extern void func_SpcIndirectData(void);
 extern void func_WTHelperGetFileHash(void);
 
 const struct test winetest_testlist[] =
 {
     { "SignatureTimeStamp", func_SignatureTimeStamp },
+    { "SignerSign", func_SignerSign },
     { "SpcIndirectData", func_SpcIndirectData },
     { "WTHelperGetFileHash", func_WTHelperGetFileHash },
 
