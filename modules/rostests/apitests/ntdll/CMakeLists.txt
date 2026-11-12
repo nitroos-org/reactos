@@ -252,6 +252,7 @@ list(APPEND SOURCE
     RtlUpcaseUnicodeStringToCountedOemString.c
     RtlValidateUnicodeString.c
     RtlStringSdBounds.c
+    FaultContext.c
     PageFaultAddress.c
     SectionFaultCost.c
     SectionPageLeak.c
@@ -283,6 +284,7 @@ if(ARCH STREQUAL "i386")
         i386/Wow64Continue.S
         i386/NtCreateThread.S
         i386/StackOverflowDispatch.S
+        i386/FaultContext.S
     )
 elseif(ARCH STREQUAL "amd64")
     add_asm_files(ntdll_apitest_asm
@@ -291,6 +293,7 @@ elseif(ARCH STREQUAL "amd64")
         amd64/Wow64Continue.S
         amd64/NtCreateThread.S
         amd64/StackOverflowDispatch.S
+        amd64/FaultContext.S
         amd64/BadSegmentFault.S
         amd64/RtlUnwindExConsolidate.S
     )
