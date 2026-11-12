@@ -3092,7 +3092,24 @@ PNP_GetInterfaceDeviceList(
                                sizeof(PLUGPLAY_CONTROL_INTERFACE_DEVICE_LIST_DATA));
     if (NT_SUCCESS(Status))
     {
+        /* The kernel reports the size the list needs and copies it only when the buffer holds it */
+        if (PlugPlayData.BufferSize > *pulLength)
+            ret = CR_BUFFER_SMALL;
         *pulLength = PlugPlayData.BufferSize;
+    }
+    else if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+    {
+        /* No interface of the class: the list is empty (a lone terminator), not an error */
+        if (*pulLength < sizeof(WCHAR))
+        {
+            *pulLength = sizeof(WCHAR);
+            ret = CR_BUFFER_SMALL;
+        }
+        else
+        {
+            ((PWCHAR)Buffer)[0] = UNICODE_NULL;
+            *pulLength = sizeof(WCHAR);
+        }
     }
     else
     {
@@ -3141,6 +3158,11 @@ PNP_GetInterfaceDeviceListSize(
     if (NT_SUCCESS(Status))
     {
         *pulLen = PlugPlayData.BufferSize;
+    }
+    else if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+    {
+        /* No interface of the class: an empty list is a lone terminator, not an error */
+        *pulLen = sizeof(WCHAR);
     }
     else
     {
@@ -5775,7 +5797,7 @@ DWORD
 WINAPI
 PNP_RegisterNotification(
     handle_t hBinding,
-    DWORD_PTR hRecipient,
+    ULONG64 hRecipient,
     LPWSTR pszName,
     BYTE *pNotificationFilter,
     DWORD ulNotificationFilterSize,
@@ -5790,7 +5812,7 @@ PNP_RegisterNotification(
     DWORD ret = CR_SUCCESS;
 
     DPRINT1("PNP_RegisterNotification(%p %p '%S' %p %lu 0x%lx %p %lx %p)\n",
-           hBinding, hRecipient, pszName, pNotificationFilter,
+           hBinding, (PVOID)(DWORD_PTR)hRecipient, pszName, pNotificationFilter,
            ulNotificationFilterSize, ulFlags, pNotifyHandle, ulProcessId, pulUnknown9);
 
     if (pNotifyHandle == NULL)
@@ -5844,7 +5866,7 @@ PNP_RegisterNotification(
 
         if ((ulFlags & DEVICE_NOTIFY_SERVICE_HANDLE) == DEVICE_NOTIFY_WINDOW_HANDLE)
         {
-            pNotifyData->hRecipient = hRecipient;
+            pNotifyData->hRecipient = (DWORD_PTR)hRecipient;
         }
         else
         {
