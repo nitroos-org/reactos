@@ -545,6 +545,9 @@ PspExitThread(IN NTSTATUS ExitStatus)
     /* Run Thread Notify Routines before we desintegrate the thread */
     PspRunCreateThreadNotifyRoutines(Thread, FALSE);
 
+    /* Release the driver reference of an IoCreateSystemThread thread */
+    if (IopSystemThreadCount) IopSystemThreadExit(Thread);
+
     /* Lock the Process before we modify its thread entries */
     KeEnterCriticalRegion();
     ExAcquirePushLockExclusive(&CurrentProcess->ProcessLock);

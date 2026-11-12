@@ -392,6 +392,7 @@
 @ stdcall IoCreateDriver(ptr ptr)
 @ stdcall IoCreateFile(ptr long ptr ptr ptr long long long long ptr long long ptr long)
 @ stdcall -version=0x600+ IoCreateFileEx(ptr long ptr ptr ptr long long long long ptr long long ptr long ptr)
+@ stdcall IoCreateSystemThread(ptr ptr long ptr ptr ptr ptr ptr)
 @ stdcall IoCreateFileSpecifyDeviceObjectHint(ptr long ptr ptr ptr long long long long ptr long long ptr long ptr)
 @ stdcall IoCreateNotificationEvent(ptr ptr)
 @ stdcall IoCreateStreamFileObject(ptr ptr)
