@@ -274,6 +274,7 @@ list(APPEND SOURCE
     ThreadLockStress.c
     UserModeException.c
     VectoredHandlerChurn.c
+    ModuleRangeTable.c
     ZwQuerySystemInformationEx.c
     Timer.c
     precomp.h)
