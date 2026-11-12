@@ -574,6 +574,125 @@ static void Test_GlassChild(void)
     FreeLibrary(hDwm);
 }
 
+/*
+ * Level 2: the surface budget is used up (windows of falling sizes until what is left is less than the smallest, then
+ * a larger compose pass grows the compose frame buffer, which is counted but never refused, past it). An UpdateLayeredWindow window of constant size keeps animating: its content
+ * follows each update. A resize that no longer fits shows the new content too, not a surface kept from before.
+ */
+static void SetUlwColour(DWORD *Bits, int cx, int cy, DWORD Colour)
+{
+    int i;
+
+    for (i = 0; i < cx * cy; i++)
+        Bits[i] = Colour;
+}
+
+static BOOL Ulw(HWND hWnd, HDC hdc, int x, int y, int cx, int cy)
+{
+    BLENDFUNCTION Blend = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+    POINT Pos = { x, y }, Src = { 0, 0 };
+    SIZE Size = { cx, cy };
+
+    return UpdateLayeredWindow(hWnd, NULL, &Pos, &Size, hdc, &Src, 0, &Blend, ULW_ALPHA);
+}
+
+static void Test_UlwBudget(void)
+{
+    static const int Sizes[] = { 4096, 2048, 1024, 512, 256, 128, 64 };
+    HWND hBack, hBig, hWnd, Fillers[7 * 5] = { 0 };
+    HDC hdc, hdcBig;
+    DWORD *Bits, *BitsBig;
+    HBITMAP hbm, hbmBig;
+    int i, j, cFillers = 0;
+    COLORREF c;
+    const DWORD Green = 0xFF00C800, Blue = 0xFF0000C8;
+    static const POINT Pos[2] = { { 100, 100 }, { 300, 200 } };
+
+    if (g_Level < 2)
+        return;
+
+    hBack = CreateBack();
+    hbm = MakeDib(&hdc, Green, 200, 150, &Bits);
+    hbmBig = MakeDib(&hdcBig, Green, 300, 200, &BitsBig);
+    /* A translucent window with its surface: moving it away later makes one compose pass over it and the ULW window, which needs a larger frame buffer than any pass so far */
+    hBig = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW, L"LcGreen", L"", WS_POPUP | WS_VISIBLE,
+                           0, 0, 300, 300, NULL, NULL, GetModuleHandleW(NULL), NULL);
+    ok(hBig != NULL, "CreateWindowExW failed: %lu\n", GetLastError());
+    SetLayeredWindowAttributes(hBig, 0, 200, LWA_ALPHA);
+    Pump();
+    hWnd = CreateTop(L"LcBlue", WS_EX_LAYERED, TRUE);
+    Pump();
+    ok(Ulw(hWnd, hdc, 100, 100, 200, 150), "UpdateLayeredWindow failed: %lu\n", GetLastError());
+    Pump();
+    c = ScreenPixel(200, 175);
+    ok(Near(c, RGB(0, 200, 0)), "ULW window: 0x%06lx, expected (0,200,0)\n", c);
+
+    /* Opaque windows, each painted so that it has a surface; those past the budget are refused (drawn nowhere visible) */
+    for (i = 0; i < 7; i++)
+    {
+        for (j = 0; j < 5; j++)
+        {
+            HWND hFill = CreateWindowExW(WS_EX_TOOLWINDOW, L"LcNone", L"", WS_POPUP | WS_VISIBLE, 0, 0, Sizes[i], Sizes[i],
+                                         NULL, NULL, GetModuleHandleW(NULL), NULL);
+            if (!hFill)
+                continue;
+            {
+                HDC hdcFill = GetDC(hFill);
+                RECT rc = { 0, 0, 16, 16 };
+                if (hdcFill)
+                {
+                    FillRect(hdcFill, &rc, GetStockObject(WHITE_BRUSH));
+                    ReleaseDC(hFill, hdcFill);
+                }
+            }
+            Fillers[cFillers++] = hFill;
+        }
+        Pump();
+    }
+    trace("%d filler windows\n", cFillers);
+    SetWindowPos(hBig, NULL, 500, 300, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    Pump();
+
+    /* Constant size, moving back and forth (the compose frame buffer grows past the budget), the colour changes each time */
+    for (i = 0; i < 8; i++)
+    {
+        DWORD Colour = (i & 1) ? Blue : Green;
+        COLORREF Expected = (i & 1) ? RGB(0, 0, 200) : RGB(0, 200, 0);
+        int x = Pos[(i + 1) & 1].x, y = Pos[(i + 1) & 1].y;
+
+        SetUlwColour(Bits, 200, 150, Colour);
+        ok(Ulw(hWnd, hdc, x, y, 200, 150), "UpdateLayeredWindow %d failed: %lu\n", i, GetLastError());
+        Pump();
+        c = ScreenPixel(x + 100, y + 75);
+        ok(Near(c, Expected), "animated ULW window at the budget, step %d: 0x%06lx, expected 0x%06lx\n", i, c, Expected);
+    }
+
+    /* Bigger than what is left: the new content (twice) and nothing of the surface it had */
+    for (i = 0; i < 2; i++)
+    {
+        DWORD Colour = i ? Green : Blue;
+        COLORREF Expected = i ? RGB(0, 200, 0) : RGB(0, 0, 200);
+
+        SetUlwColour(BitsBig, 300, 200, Colour);
+        ok(Ulw(hWnd, hdcBig, 100, 100, 300, 200), "UpdateLayeredWindow (resize) %d failed: %lu\n", i, GetLastError());
+        Pump();
+        c = ScreenPixel(150, 150);
+        ok(Near(c, Expected), "resized over the budget, step %d, inside the old size: 0x%06lx, expected 0x%06lx\n", i, c, Expected);
+        c = ScreenPixel(350, 250);
+        ok(Near(c, Expected), "resized over the budget, step %d, outside the old size: 0x%06lx, expected 0x%06lx\n", i, c, Expected);
+    }
+
+    DestroyWindow(hWnd);
+    DestroyWindow(hBig);
+    for (i = 0; i < cFillers; i++)
+        DestroyWindow(Fillers[i]);
+    DestroyWindow(hBack);
+    DeleteDC(hdc);
+    DeleteObject(hbm);
+    DeleteDC(hdcBig);
+    DeleteObject(hbmBig);
+}
+
 START_TEST(LayeredCompose)
 {
     g_Level = GetRedirectionLevel();
@@ -598,4 +717,5 @@ START_TEST(LayeredCompose)
     Test_HitTest();
     Test_UlwSourceRange();
     Test_GlassChild();
+    Test_UlwBudget();
 }
