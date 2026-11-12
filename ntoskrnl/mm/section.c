@@ -6773,6 +6773,47 @@ MiFlushDirtyCluster(
     return Count;
 }
 
+/*
+ * FlushViewOfFile (MmFlushVirtualMemory): a page written through a mapped view is dirty only in the PTE of the view
+ * until the view is unmapped or the page is taken from the process.  Move those dirty bits of [Start, End) of the
+ * view into the segment's page entries, so the segment flush that follows writes the data.  The PTE's bit is
+ * cleared (with its TB entry flushed) before the entry is marked, so a write after this sets it again and is
+ * caught by a later flush.  A private copy (copy-on-write view) maps another page and keeps its dirty bit.
+ * The caller holds the address space lock and is attached to the process.
+ */
+VOID
+NTAPI
+MmTakeViewDirtyBits(
+    _In_ PEPROCESS Process,
+    _In_ PMEMORY_AREA MemoryArea,
+    _In_ ULONG_PTR Start,
+    _In_ ULONG_PTR End)
+{
+    PMM_SECTION_SEGMENT Segment = MemoryArea->SectionData.Segment;
+    ULONG_PTR Address;
+    LARGE_INTEGER Offset;
+    ULONG_PTR Entry;
+
+    ASSERT(Process == PsGetCurrentProcess());
+    ASSERT(MemoryArea->Type == MEMORY_AREA_SECTION_VIEW);
+    ASSERT(FlagOn(*Segment->Flags, MM_DATAFILE_SEGMENT));
+    ASSERT((Start >= MA_GetStartingAddress(MemoryArea)) && (End <= MA_GetEndingAddress(MemoryArea)));
+
+    MmLockSectionSegment(Segment);
+
+    for (Address = Start; Address < End; Address += PAGE_SIZE)
+    {
+        Offset.QuadPart = MemoryArea->SectionData.ViewOffset + (Address - MA_GetStartingAddress(MemoryArea));
+        Entry = MmGetPageEntrySectionSegment(Segment, &Offset);
+        if ((Entry == 0) || IS_SWAP_FROM_SSE(Entry) || MM_IS_WAIT_PTE(Entry))
+            continue;
+        if (MmTakeDirtyBit(Process, (PVOID)Address, PFN_FROM_SSE(Entry)))
+            MmSetPageEntrySectionSegment(Segment, &Offset, DIRTY_SSE(Entry));
+    }
+
+    MmUnlockSectionSegment(Segment);
+}
+
 NTSTATUS
 NTAPI
 MmFlushSegment(

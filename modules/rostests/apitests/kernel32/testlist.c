@@ -166,6 +166,7 @@ extern void func_SetTimeZoneInformation(void);
 extern void func_lstrcpynW(void);
 extern void func_lstrlen(void);
 extern void func_MailslotRead(void);
+extern void func_FlushViewOfFile(void);
 extern void func_MappedFileGrowth(void);
 extern void func_FileCloseLockedDup(void);
 extern void func_FileCutAfterClose(void);
@@ -424,6 +425,7 @@ const struct test winetest_testlist[] =
     { "lstrcpynW",                   func_lstrcpynW },
     { "lstrlen",                     func_lstrlen },
     { "MailslotRead",                func_MailslotRead },
+    { "FlushViewOfFile",             func_FlushViewOfFile },
     { "MappedFileGrowth",            func_MappedFileGrowth },
     { "FileCloseLockedDup",          func_FileCloseLockedDup },
     { "FileCutAfterClose",           func_FileCutAfterClose },
