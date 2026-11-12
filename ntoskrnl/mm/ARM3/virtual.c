@@ -41,7 +41,7 @@ MiFlushTbAndCapture(IN PMMVAD FoundVad,
 
 /* PRIVATE FUNCTIONS **********************************************************/
 
-ULONG
+SIZE_T
 NTAPI
 MiCalculatePageCommitment(IN ULONG_PTR StartingAddress,
                           IN ULONG_PTR EndingAddress,
@@ -6102,7 +6102,8 @@ MiAllocateVirtualMemory(IN HANDLE ProcessHandle,
     KPROCESSOR_MODE PreviousMode = KeGetPreviousMode();
     PETHREAD CurrentThread = PsGetCurrentThread();
     KAPC_STATE ApcState;
-    ULONG ProtectionMask, QuotaCharge = 0, QuotaFree = 0, GrowthRounds = 0;
+    ULONG ProtectionMask, GrowthRounds = 0;
+    SIZE_T QuotaCharge = 0, QuotaFree = 0;
     SIZE_T CommitPages = 0;
     BOOLEAN Attached = FALSE, ChangeProtection = FALSE, QuotaCharged = FALSE;
     MMPTE TempPte;
@@ -6747,7 +6748,7 @@ RetryCommit:
         //
         PointerPte = MI_GET_PROTOTYPE_PTE_FOR_VPN(FoundVad, StartingAddress >> PAGE_SHIFT);
         LastPte = MI_GET_PROTOTYPE_PTE_FOR_VPN(FoundVad, EndingAddress >> PAGE_SHIFT);
-        QuotaCharge = (ULONG)(LastPte - PointerPte + 1);
+        QuotaCharge = (SIZE_T)(LastPte - PointerPte + 1);
         KeAcquireGuardedMutexUnsafe(&MmSectionCommitMutex);
 
         //
