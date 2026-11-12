@@ -28,7 +28,7 @@ endfunction()
 
 add_wow64_apitest(kernel32
     Wow64ReviewThreads Wow64RemoteThread Wow64CreateThreadAccess
-    Wow64ThreadApc Wow64ThreadLifetime Wow64ThreadExitProcess Wow64Threads QueueUserAPC
+    Wow64ThreadApc Wow64ThreadSegments Wow64ThreadLifetime Wow64ThreadExitProcess Wow64Threads QueueUserAPC
     GetCurrentDirectory GetEnvironmentVariable GetDriveType GetCPInfo
     IsDBCSLeadByteEx lstrlen Wow64Environment Wow64ProgramFiles Wow64EnvironmentBlock Wow64ChildEnvironment Wow64SystemDlls RegCurrentVersion DynamicTls HandleList JobObject JobList
     Wow64Console FindFirstStream ProcThreadMitigation RegisterWait QueueUserWorkItem ResolveDelayLoadedAPI InterlockedPushListSListEx

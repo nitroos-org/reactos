@@ -13,6 +13,7 @@ list(APPEND SOURCE
     Wow64ReviewThreads.c
     Wow64RemoteThread.c
     Wow64ThreadApc.c
+    Wow64ThreadSegments.c
     Wow64Threads.c
     Wow64CreateThreadAccess.c
     Wow64Environment.c
