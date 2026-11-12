@@ -352,6 +352,7 @@ extern struct tcp_pcb *tcp_tw_pcbs;      /* List of all TCP PCBs in TIME-WAIT. *
 struct tcp_pcb *tcp_tw_find(const ip_addr_t *local_ip, u16_t local_port,
                             const ip_addr_t *remote_ip, u16_t remote_port, u8_t netif_idx);
 u8_t tcp_tw_port_used(u16_t port);
+u8_t tcp_tw_remote_used(u16_t local_port, const ip_addr_t *remote_ip, u16_t remote_port);
 void tcp_tw_hash_add(struct tcp_pcb *pcb);
 void tcp_tw_hash_remove(struct tcp_pcb *pcb);
 #endif /* LWIP_TCP_TW_HASH */

@@ -142,6 +142,17 @@ AfdBindSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         Status = WarmSocketForBind( FCB, BindReq->ShareType );
     AFD_DbgPrint(MID_TRACE,("FCB->Flags %x\n", FCB->Flags));
 
+    /* The transport has read the connect hint (AFD_TCP_CONNECT_HINT) from the padding of the address; getsockname
+     * returns this address, which has to show zeros there as it always did */
+    if (FCB->LocalAddress &&
+        FCB->LocalAddress->Address[0].AddressType == TDI_ADDRESS_TYPE_IP &&
+        FCB->LocalAddress->Address[0].AddressLength >= TDI_ADDRESS_LENGTH_IP)
+    {
+        PTA_IP_ADDRESS LocalIp = (PTA_IP_ADDRESS)FCB->LocalAddress;
+
+        RtlZeroMemory(LocalIp->Address[0].Address[0].sin_zero, sizeof(LocalIp->Address[0].Address[0].sin_zero));
+    }
+
     if (NT_SUCCESS(Status))
     {
         Status = ObOpenObjectByPointer(FCB->AddressFile.Object,

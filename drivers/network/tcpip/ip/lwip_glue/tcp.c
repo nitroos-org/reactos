@@ -1387,22 +1387,40 @@ void LibTCPFreeSocket(PTCP_PCB pcb)
    loop) are asked through tcp_tw_port_used instead of walked */
 static ULONG LibTCPUsedPorts[65536 / 32];
 
+/* The remote endpoint of the connect the port is for, when it is known (core lock held while set). A port
+   whose TIME-WAIT PCBs are all of other remote endpoints is free for it: the 4-tuple stays unique, as on
+   Windows, so a loop of connects to different servers does not run out of ports after 16k of them */
+static BOOLEAN LibTCPHintValid;
+static ip_addr_t LibTCPHintIp;
+static u16_t LibTCPHintPort;
+/* Without the hint every port that has a TIME-WAIT PCB is skipped; with it a TIME-WAIT of another remote
+   endpoint is ignored. Used by the search that tells "all taken by TIME-WAIT" from "all taken" */
+static BOOLEAN LibTCPIgnoreTimeWait;
+
 /* Called with the core lock held (and the port lock): is this port (host order) marked? */
 static
 BOOLEAN
 LibTCPLocalPortUsed(ULONG Port)
 {
-    return (LibTCPUsedPorts[(Port & 0xFFFF) / 32] & (1UL << (Port % 32))) != 0 ||
-           tcp_tw_port_used((u16_t)(Port & 0xFFFF));
+    u16_t Port16 = (u16_t)(Port & 0xFFFF);
+
+    if ((LibTCPUsedPorts[Port16 / 32] & (1UL << (Port % 32))) != 0)
+        return TRUE;
+    if (LibTCPIgnoreTimeWait)
+        return FALSE;
+    if (LibTCPHintValid)
+        return tcp_tw_remote_used(Port16, &LibTCPHintIp, LibTCPHintPort) != 0;
+    return tcp_tw_port_used(Port16) != 0;
 }
 
 /* Called with the core lock held: one pass over the PCB lists marks every used
    port, so that the search in the port bitmap only tests bits */
 static
 UINT
-LibTCPAllocateEphemeralPortLocked(VOID)
+LibTCPAllocateEphemeralPortLocked(const ip4_addr_t *RemoteIp, u16_t RemotePort)
 {
     struct tcp_pcb *pcb;
+    UINT Port;
     u8_t i;
 
     RtlZeroMemory(LibTCPUsedPorts, sizeof(LibTCPUsedPorts));
@@ -1412,19 +1430,43 @@ LibTCPAllocateEphemeralPortLocked(VOID)
             LibTCPUsedPorts[pcb->local_port / 32] |= 1UL << (pcb->local_port % 32);
     }
 
-    return TCPAllocateEphemeralPort(LibTCPLocalPortUsed);
+    LibTCPIgnoreTimeWait = FALSE;
+    LibTCPHintValid = RemoteIp != NULL;
+    if (RemoteIp)
+    {
+        ip_addr_copy_from_ip4(LibTCPHintIp, *RemoteIp);
+        LibTCPHintPort = RemotePort;
+    }
+
+    Port = TCPAllocateEphemeralPort(LibTCPLocalPortUsed);
+    if (Port == (UINT)-1 && RemoteIp)
+    {
+        /* Every port is taken, or only the TIME-WAIT of this remote endpoint holds the free ones: Windows
+           answers the second with WSAEADDRINUSE and the first with WSAENOBUFS */
+        LibTCPIgnoreTimeWait = TRUE;
+        Port = TCPAllocateEphemeralPort(LibTCPLocalPortUsed);
+        LibTCPIgnoreTimeWait = FALSE;
+        if (Port != (UINT)-1)
+        {
+            TCPFreePort(Port);
+            Port = LIBTCP_PORT_TIME_WAIT;
+        }
+    }
+    LibTCPHintValid = FALSE;
+
+    return Port;
 }
 
 /* Every ephemeral TCP port comes from the port bitmap, which address files
    share; like lwIP's own allocator it skips ports a PCB still uses. Returns
    the port in network order, or (UINT)-1 if the range is exhausted */
 UINT
-LibTCPAllocateEphemeralPort(VOID)
+LibTCPAllocateEphemeralPort(const ip4_addr_t *RemoteIp, u16_t RemotePort)
 {
     UINT Port;
 
     LOCK_TCPIP_CORE();
-    Port = LibTCPAllocateEphemeralPortLocked();
+    Port = LibTCPAllocateEphemeralPortLocked(RemoteIp, RemotePort);
     UNLOCK_TCPIP_CORE();
 
     return Port;
@@ -1452,7 +1494,7 @@ LibTCPBindCallback(void *arg)
     if (!Port)
     {
         /* lwIP would pick a port the bitmap may have given to an address file */
-        Port = LibTCPAllocateEphemeralPortLocked();
+        Port = LibTCPAllocateEphemeralPortLocked(NULL, 0);
         if (Port == (UINT)-1)
         {
             /* Every ephemeral port is taken: WSAENOBUFS, as on Windows */
