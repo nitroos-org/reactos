@@ -174,7 +174,13 @@ converted = {'WM_CREATE','WM_NCCREATE','WM_NCCALCSIZE','WM_WINDOWPOSCHANGING','W
              # reviewed in user.c: scalar handles, or (GETDLGCODE) a raw same-thread MSG pointer
              'WM_GETDLGCODE','WM_NEXTDLGCTL','WM_PARENTNOTIFY',
              # reviewed in user.c: WM_HELP is translated, the others travel as a same-process guest pointer
-             'WM_HELP','WM_DELETEITEM','WM_COMPAREITEM','WM_MDICREATE','WM_MENUGETOBJECT','CB_GETCOMBOBOXINFO'}
+             'WM_HELP','WM_DELETEITEM','WM_COMPAREITEM','WM_MDICREATE','WM_MENUGETOBJECT','CB_GETCOMBOBOXINFO',
+             # reviewed in user.c: WM_NEXTMENU is translated; the drag and IME messages travel as a same-process guest
+             # pointer (or a scalar); WM_COPYGLOBALDATA is a flat block of wParam bytes
+             'WM_NEXTMENU','WM_DROPOBJECT','WM_QUERYDROPOBJECT','WM_BEGINDRAG','WM_DRAGLOOP','WM_DRAGSELECT','WM_DRAGMOVE',
+             'WM_IME_NOTIFY','WM_IME_CONTROL','WM_IME_SYSTEM','WM_IME_REQUEST','WM_COPYGLOBALDATA',
+             # reviewed in user.c: a packed pair or a global handle, no layout to translate
+             'WM_DDE_ADVISE','WM_DDE_ACK','WM_DDE_DATA','WM_DDE_POKE','WM_DDE_EXECUTE'}
 blocked = {}
 for row in csv.DictReader((HERE/'catalog/messages.tsv').open(),delimiter='\t'):
     if row['class'] in ('C','D') and row['message'] not in converted:

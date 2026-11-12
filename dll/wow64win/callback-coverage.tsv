@@ -12,8 +12,8 @@ id	name	implementation	detail
 10	COPYIMAGE	translated	image type chooses GDI or USER result extension
 11	SETWNDICONS	translated	seven guest handles packed to 28 bytes; 56-byte native result
 12	DELIVERUSERAPC	translated	no-payload APC-wakeup callback used by GUI message waits
-13	DDEPOST	unsupported	message and DDE payload conversion required
-14	DDEGET	unsupported	message and DDE payload conversion required
+13	DDEPOST	translated	message header widened, packed lParam and guest block pointer returned
+14	DDEGET	translated	message header widened, packed block copied after it
 15	SETOBM	translated	fixed-width array; validated length and captured result
 16	LPK	translated	44-byte guest header; relative UTF-16 string; fixed-width rectangle; BOOL output
 17	UMPD	unsupported	printer driver payload and opaque kernel pointers
