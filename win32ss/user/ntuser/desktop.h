@@ -62,6 +62,8 @@ extern PTHREADINFO gptiForeground;
 VOID FASTCALL IntSetForegroundProcess(PTHREADINFO ptiNew);
 VOID FASTCALL IntForegroundProcessExit(PEPROCESS Process);
 extern PTHREADINFO gptiDesktopThread;
+BOOLEAN IntIsDesktopOwnedWindow(_In_ PWND pwnd);
+VOID IntDesktopThreadProcessExit(_In_ PPROCESSINFO ppi);
 extern PKEVENT gpDesktopThreadStartedEvent;
 extern PKEVENT gpDesktopSwitchEvent;
 extern HANDLE ghDesktopSwitchEvent;

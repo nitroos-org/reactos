@@ -452,6 +452,7 @@ RawInputThreadMain(VOID)
     HWINSTA hWinSta;
     PINPUT_DEVICE_INFO Mouse;
     PINPUT_DEVICE_INFO Keyboard;
+    BOOLEAN bTerminating = FALSE;
     UNICODE_STRING LegacyMouseName = RTL_CONSTANT_STRING(L"\\Device\\PointerClass0");
     UNICODE_STRING LegacyKeyboardName = RTL_CONSTANT_STRING(L"\\Device\\KeyboardClass0");
 
@@ -524,6 +525,19 @@ RawInputThreadMain(VOID)
                                           NULL,//&WaitTimeout,
                                           WaitBlockArray);
 
+        /*
+         * This thread runs in CSRSS and never returns to user mode, where the
+         * exit APC of a terminated thread runs. Termination alerts it (the
+         * kernel-mode alertable wait returns STATUS_ALERTED): leave then, or the
+         * process never exits. That is how the CSRSS of a session other than 0
+         * ends with its session; session 0's is a critical process.
+         */
+        if (PsIsThreadTerminating(PsGetCurrentThread()))
+        {
+            bTerminating = TRUE;
+            break;
+        }
+
         if ((Status >= STATUS_WAIT_0) &&
             (Status < (STATUS_WAIT_0 + cWaitObjects)))
         {
@@ -548,6 +562,28 @@ RawInputThreadMain(VOID)
             }
             else ASSERT(FALSE);
         }
+    }
+
+    /*
+     * Termination: the other processes of the session may still use the device
+     * list and its lock (raw input calls), and the timers still point to
+     * MasterTimer. Leave them allocated (the session is ending), only close the
+     * devices this thread opened.
+     */
+    if (bTerminating)
+    {
+        AcquireDeviceInfoListMutex();
+        for (DeviceInfo = gpInputDeviceInfo; DeviceInfo; DeviceInfo = DeviceInfo->pNextDeviceInfo)
+        {
+            if (DeviceInfo->Handle)
+            {
+                CloseInputDevice(DeviceInfo);
+                DeviceInfo->Handle = NULL;
+            }
+        }
+        ReleaseDeviceInfoListMutex();
+        ERR("Raw Input Thread Exit (thread terminated)\n");
+        return;
     }
 
     AcquireDeviceInfoListMutex();
