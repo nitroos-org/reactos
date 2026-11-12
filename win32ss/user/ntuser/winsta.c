@@ -795,6 +795,8 @@ IntCreateWindowStation(
     HWINSTA hWinSta;
     PWINSTATION_OBJECT WindowStation;
     BOOLEAN Interactive = FALSE;
+    BOOLEAN Existing;
+    NTSTATUS OpenStatus;
 
     TRACE("IntCreateWindowStation called\n");
 
@@ -808,6 +810,7 @@ IntCreateWindowStation(
                                 dwDesiredAccess,
                                 NULL,
                                 (PVOID*)&hWinSta);
+    OpenStatus = Status;
     if (NT_SUCCESS(Status))
     {
         TRACE("IntCreateWindowStation opened window station '%wZ'\n",
@@ -913,6 +916,14 @@ IntCreateWindowStation(
         return Status;
     }
 
+    /*
+     * With OBJ_OPENIF (user mode can set it) the name may exist by now, e.g. when the open above was refused for
+     * another reason than "not found", or a second session created it meanwhile. ObInsertObject then frees the new
+     * object and returns a handle to the existing one with this success status: WindowStation is gone and must not
+     * be touched again.
+     */
+    Existing = (Status == STATUS_OBJECT_NAME_EXISTS);
+
     /* A symbolic link or a swapped root handle can still have put it into another session's directory */
     Status = IntCheckWindowStationLanded(hWinSta);
     if (!NT_SUCCESS(Status))
@@ -922,6 +933,25 @@ IntCreateWindowStation(
         ZwClose(hWinSta); /* The last handle: the object and its name go */
         SetLastNtError(Status);
         return Status;
+    }
+
+    if (Existing)
+    {
+        /* The open above was refused for a reason other than "not found" (access denied...): keep that answer,
+           do not hand out the handle the insert gave */
+        if ((OpenStatus != STATUS_OBJECT_NAME_NOT_FOUND) && (OpenStatus != STATUS_OBJECT_PATH_NOT_FOUND))
+        {
+            ZwClose(hWinSta);
+            SetLastNtError(OpenStatus);
+            return OpenStatus;
+        }
+
+        /* Opened an existing window station, as the open above would have: nothing of a new one to set up */
+        TRACE("IntCreateWindowStation opened existing window station '%wZ' handle 0x%p\n",
+              ObjectAttributes->ObjectName, hWinSta);
+        *phWinSta = hWinSta;
+        SetLastNtError(STATUS_SUCCESS);
+        return STATUS_SUCCESS;
     }
 
     // FIXME! TODO: Add this new window station to a linked list
