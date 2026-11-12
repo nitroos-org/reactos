@@ -54,6 +54,19 @@ typedef struct _AFD_BIND_DATA {
     TRANSPORT_ADDRESS	Address;
 } AFD_BIND_DATA, *PAFD_BIND_DATA;
 
+/* The implicit bind of a connect (msafd's WSPConnect on an unbound TCP socket) puts the remote endpoint it is about to
+   connect to in the sin_zero padding of the wildcard address it binds, so that the transport picks a local port
+   knowing it: a TIME-WAIT of another remote endpoint then does not make a port unusable, as on Windows. AFD clears
+   the padding once the address is open. Same layout as TCP_CONNECT_HINT in drivers/network/tcpip/include/tcp.h */
+#include <pshpack1.h>
+typedef struct _AFD_TCP_CONNECT_HINT {
+    ULONG  RemoteAddress;   /* network order */
+    USHORT RemotePort;      /* network order */
+    USHORT Magic;           /* AFD_TCP_CONNECT_HINT_MAGIC */
+} AFD_TCP_CONNECT_HINT, *PAFD_TCP_CONNECT_HINT;
+#include <poppack.h>
+#define AFD_TCP_CONNECT_HINT_MAGIC 0xE9F1
+
 typedef struct _AFD_LISTEN_DATA {
     BOOLEAN				UseSAN;
     ULONG				Backlog;

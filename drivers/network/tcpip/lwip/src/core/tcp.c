@@ -1876,6 +1876,29 @@ tcp_tw_port_used(u16_t port)
 {
   return tcp_tw_ports[port] != 0;
 }
+
+/**
+ * Whether a PCB in TIME-WAIT has this local port and this remote endpoint, whatever its local address:
+ * a connect to that remote endpoint from this port would find the 4-tuple taken. A TIME-WAIT of another
+ * remote endpoint does not matter (the hash is keyed by remote endpoint and local port).
+ */
+u8_t
+tcp_tw_remote_used(u16_t local_port, const ip_addr_t *remote_ip, u16_t remote_port)
+{
+  struct tcp_pcb *pcb;
+
+  if (tcp_tw_ports[local_port] == 0) {
+    return 0;
+  }
+  for (pcb = tcp_tw_hash[tcp_tw_hash_index(local_port, remote_port, remote_ip)]; pcb != NULL; pcb = pcb->tw_next) {
+    if (pcb->remote_port == remote_port &&
+        pcb->local_port == local_port &&
+        ip_addr_eq(&pcb->remote_ip, remote_ip)) {
+      return 1;
+    }
+  }
+  return 0;
+}
 #endif /* LWIP_TCP_TW_HASH */
 
 /**

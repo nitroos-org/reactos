@@ -179,6 +179,21 @@ NTSTATUS TCPTranslateError( const INT8 err );
 
 UINT TCPAllocatePort( const UINT HintPort );
 
+/* What AFD puts in the sin_zero of the null address it opens for the implicit bind of a connect, so that the port is chosen
+   knowing the remote endpoint (a TIME-WAIT of another remote endpoint does not make a port unusable, as on Windows).
+   Same layout in drivers/network/afd/afd/connect.c. */
+#include <pshpack1.h>
+typedef struct _TCP_CONNECT_HINT {
+    ULONG  RemoteAddress;  /* network order */
+    USHORT RemotePort;     /* network order */
+    USHORT Magic;          /* TCP_CONNECT_HINT_MAGIC */
+} TCP_CONNECT_HINT, *PTCP_CONNECT_HINT;
+#include <poppack.h>
+#define TCP_CONNECT_HINT_MAGIC 0xE9F1
+#define TCP_PORT_TIME_WAIT ((UINT)-2)
+
+UINT TCPAllocatePortForRemote( ULONG RemoteAddress, USHORT RemotePort );
+
 BOOLEAN TCPReservePort( const UINT Port );
 
 UINT TCPAllocateEphemeralPort( PPORT_IN_USE_ROUTINE InUse );
