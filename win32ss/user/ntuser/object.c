@@ -792,6 +792,13 @@ UserDestroyObjectsForOwner(PUSER_HANDLE_TABLE Table, PVOID Owner)
         if (Entry->flags & HANDLEENTRY_INDESTROY)
             continue;
 
+        /* The desktop thread's desktop and message windows live as long as their desktop */
+        if (Entry->type == TYPE_WINDOW && Owner == gptiDesktopThread &&
+            IntIsDesktopOwnedWindow(Entry->ptr))
+        {
+            continue;
+        }
+
         /* Call destructor */
         if (!ObjectCallbacks[Entry->type].ObjectDestroy(Entry->ptr))
         {
