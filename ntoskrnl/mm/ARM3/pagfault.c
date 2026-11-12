@@ -1371,6 +1371,12 @@ MiResolvePageFileFault(_In_ BOOLEAN StoreInstruction,
         MI_MAKE_DIRTY_PAGE(&TempPte);
         MiMarkPfnDirty(Pfn1);
     }
+    else if (MI_IS_PAGE_WRITEABLE(&TempPte) && MiPagerSlotsScarce())
+    {
+        /* Slots are scarce: the copy goes now, with those of the pages read with it (a whole run comes free) */
+        MiMarkPfnDirty(Pfn1);
+        MiPagerCounters.CopiesDropped++;
+    }
     MI_WRITE_VALID_PTE(PointerPte, TempPte);
     MiPagerCounters.InPageReads++;
 
@@ -1423,6 +1429,7 @@ MiResolveTransitionFault(IN BOOLEAN StoreInstruction,
     PMMPFN Pfn1;
     MMPTE TempPte;
     PMMPTE PointerToPteForProtoPage;
+    BOOLEAN WasStandby;
     DPRINT("Transition fault on 0x%p with PTE 0x%p in process %s\n",
             FaultingAddress, PointerPte, CurrentProcess->ImageFileName);
 
@@ -1478,6 +1485,7 @@ MiResolveTransitionFault(IN BOOLEAN StoreInstruction,
 
     /* This isn't an in-page error. The page is reused: no free page is needed */
     ASSERT(Pfn1->u4.InPageError == 0);
+    WasStandby = (Pfn1->u3.e1.PageLocation == StandbyPageList);
 
     /* Was this a transition page in the valid list, or free/zero list? */
     if (Pfn1->u3.e1.PageLocation == ActiveAndValid)
@@ -1543,6 +1551,23 @@ MiResolveTransitionFault(IN BOOLEAN StoreInstruction,
     TempPte.u.Long = (PointerPte->u.Long & ~0xFFF) |
                      (MmProtectToPteMask[PointerPte->u.Trans.Protection]) |
                      MiDetermineUserGlobalPteMask(PointerPte);
+
+    /*
+     * NitroPager: a private user page back from standby gives up its clean copy while slots are scarce,
+     * as a page read in by its own fault does (MiResolvePageFileFault): the pages read ahead with it
+     * come back this way
+     */
+    if (WasStandby &&
+        (Pfn1->u3.e1.PrototypePte == 0) &&
+        (FaultingAddress <= MM_HIGHEST_USER_ADDRESS) &&
+        MI_IS_PAGEFILE_PTE(&Pfn1->OriginalPte) &&
+        MI_IS_PAGE_WRITEABLE(&TempPte) &&
+        !MI_IS_PAGE_COPY_ON_WRITE(&TempPte) &&
+        MiPagerSlotsScarce())
+    {
+        MiMarkPfnDirty(Pfn1);
+        MiPagerCounters.CopiesDropped++;
+    }
 
     /* Is the PTE writeable? */
     if ((Pfn1->u3.e1.Modified) &&

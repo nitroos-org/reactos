@@ -2928,6 +2928,8 @@ typedef struct _MI_PAGER_COUNTERS
     ULONG InPageClusterReads;
     ULONG InPagePrefetched;
     ULONG ReadAheadRetries;
+    /* pager2: clean copies given up by pages paged in while slots are scarce (MiPagerSlotsScarce) */
+    ULONG CopiesDropped;
 } MI_PAGER_COUNTERS;
 
 extern MI_PAGER_COUNTERS MiPagerCounters;
