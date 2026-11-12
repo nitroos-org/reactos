@@ -4360,7 +4360,7 @@ VOID
 NTAPI
 MmResetDriverPaging(IN PVOID AddressWithinSection)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
 }
 
 /*

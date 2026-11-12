@@ -71,11 +71,14 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_ex/ExHardError.c
     ntos_ex/ExInterlocked.c
     ntos_ex/ExInterlockedIpi.c
+    ntos_ex/ExAllocatePool2.c
+    ntos_ex/ExLookasideListEx.c
     ntos_ex/ExPools.c
     ntos_ex/ExPushLock.c
     ntos_ex/ExResource.c
     ntos_ex/ExSequencedList.c
     ntos_ex/ExSingleList.c
+    ntos_ex/ExStubHit.c
     ntos_ex/ExTimer.c
     ntos_ex/ExTimerResolution.c
     ntos_ex/ExUuid.c
@@ -100,9 +103,14 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_io/KsCapture.c
     ntos_io/IoMdl.c
     ntos_io/IoNonFileName.c
+    ntos_io/IoCreateDeviceSecure.c
+    ntos_io/IoCreateSystemThread.c
+    ntos_io/IoValidateDeviceIoControlAccess.c
+    ntos_io/IoWMINotification.c
     ntos_io/IoPnpEventQueue.c
     ntos_io/IoVolume.c
     ntos_kd/KdSystemDebugControl.c
+    ntos_ke/KeProcessorGroups.c
     ntos_ke/KeApc.c
     ntos_ke/KeApcDelivery.c
     ntos_ke/KeBugCheckCallback.c
@@ -144,6 +152,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_mm/ZwCreateSection.c
     ntos_mm/ZwMapViewOfSection.c
     ntos_ob/ObHandle.c
+    ntos_ob/ObWithTag.c
     ntos_ob/ObQuery.c
     ntos_ob/ObReference.c
     ntos_ob/ObSecurity.c
@@ -178,7 +187,7 @@ endif()
 
 add_library(kmtest_drv MODULE ${KMTEST_DRV_SOURCE})
 set_module_type(kmtest_drv kernelmodedriver)
-target_link_libraries(kmtest_drv kmtest_printf chkstk memcmp ntoskrnl_vista ${PSEH_LIB})
+target_link_libraries(kmtest_drv kmtest_printf chkstk memcmp ntoskrnl_vista wdmsec ${PSEH_LIB})
 add_importlibs(kmtest_drv ntoskrnl hal ks)
 add_dependencies(kmtest_drv bugcodes xdk)
 target_compile_definitions(kmtest_drv PRIVATE KMT_KERNEL_MODE NTDDI_VERSION=NTDDI_WS03SP1)

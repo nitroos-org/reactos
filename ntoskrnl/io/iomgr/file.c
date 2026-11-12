@@ -3572,7 +3572,7 @@ IoCheckQuerySetFileInformation(IN FILE_INFORMATION_CLASS FileInformationClass,
                                IN ULONG Length,
                                IN BOOLEAN SetOperation)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -3585,7 +3585,7 @@ IoCheckQuotaBufferValidity(IN PFILE_QUOTA_INFORMATION QuotaBuffer,
                            IN ULONG QuotaLength,
                            OUT PULONG ErrorOffset)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 

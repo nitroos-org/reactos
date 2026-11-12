@@ -3104,6 +3104,86 @@ ExAllocatePoolWithTagPriority(IN POOL_TYPE PoolType,
 }
 
 /*
+ * ExAllocatePool2 / ExAllocatePool3, implemented from the public WDK
+ * documentation: POOL_FLAGS selects paged / non-paged, zeroing (the default
+ * for the Pool2 family unless POOL_FLAG_UNINITIALIZED), cache alignment,
+ * quota charge and raise-on-failure.
+ *
+ * Documented flag values (wdm.h):
+ */
+#define EXP_POOL2_USE_QUOTA         0x0000000000000001ULL
+#define EXP_POOL2_UNINITIALIZED     0x0000000000000002ULL
+#define EXP_POOL2_SESSION           0x0000000000000004ULL
+#define EXP_POOL2_CACHE_ALIGNED     0x0000000000000008ULL
+#define EXP_POOL2_RAISE_ON_FAILURE  0x0000000000000020ULL
+#define EXP_POOL2_NON_PAGED         0x0000000000000040ULL
+#define EXP_POOL2_NON_PAGED_EXECUTE 0x0000000000000080ULL
+#define EXP_POOL2_PAGED             0x0000000000000100ULL
+#define EXP_POOL2_KNOWN             0x00000000000001EFULL
+
+PVOID
+NTAPI
+ExAllocatePool3(
+    _In_ ULONG64 Flags,
+    _In_ SIZE_T NumberOfBytes,
+    _In_ ULONG Tag,
+    _In_opt_ PVOID ExtendedParameters,
+    _In_ ULONG ExtendedParametersCount)
+{
+    ULONG TypeFlags = (ULONG)(Flags & (EXP_POOL2_NON_PAGED |
+                                       EXP_POOL2_NON_PAGED_EXECUTE |
+                                       EXP_POOL2_PAGED));
+    POOL_TYPE PoolType;
+    PVOID Buffer;
+
+    /* FIXME: extended parameters (priority, NUMA node, secure pool) are
+       ignored; the documented ones are hints. VERIFY ON ORACLE: behaviour for
+       secure-pool parameters (we do not provide a secure pool). */
+    UNREFERENCED_PARAMETER(ExtendedParameters);
+    UNREFERENCED_PARAMETER(ExtendedParametersCount);
+
+    /* Unknown flag bits, or more than one pool type: documented as invalid */
+    if ((Flags & ~EXP_POOL2_KNOWN) != 0 ||
+        (TypeFlags != 0 && (TypeFlags & (TypeFlags - 1)) != 0))
+    {
+        return NULL;
+    }
+
+    /* Paged only when asked; no type flag means non-paged (VERIFY ON ORACLE) */
+    if (TypeFlags == EXP_POOL2_PAGED)
+        PoolType = PagedPool;
+    else
+        PoolType = NonPagedPool;
+
+    if (Flags & EXP_POOL2_CACHE_ALIGNED)
+        PoolType |= (PagedPool == PoolType) ? PagedPoolCacheAligned : NonPagedPoolCacheAligned;
+    /* FIXME: POOL_FLAG_SESSION: ReactOS has no session pool, allocate from
+       the global pool (same as the rest of the pool code does). */
+    if (Flags & EXP_POOL2_RAISE_ON_FAILURE)
+        PoolType |= POOL_RAISE_IF_ALLOCATION_FAILURE;
+
+    if (Flags & EXP_POOL2_USE_QUOTA)
+        Buffer = ExAllocatePoolWithQuotaTag(PoolType, NumberOfBytes, Tag);
+    else
+        Buffer = ExAllocatePoolWithTag(PoolType, NumberOfBytes, Tag);
+
+    if (Buffer != NULL && !(Flags & EXP_POOL2_UNINITIALIZED))
+        RtlZeroMemory(Buffer, NumberOfBytes);
+
+    return Buffer;
+}
+
+PVOID
+NTAPI
+ExAllocatePool2(
+    _In_ ULONG64 Flags,
+    _In_ SIZE_T NumberOfBytes,
+    _In_ ULONG Tag)
+{
+    return ExAllocatePool3(Flags, NumberOfBytes, Tag, NULL, 0);
+}
+
+/*
  * @implemented
  */
 PVOID

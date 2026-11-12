@@ -92,6 +92,7 @@ list(APPEND SOURCE
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ex/rundown.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ex/sem.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ex/shutdown.c
+    ${REACTOS_SOURCE_DIR}/ntoskrnl/ex/stubhit.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ex/sysinfo.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ex/time.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ex/timer.c
@@ -135,6 +136,7 @@ list(APPEND SOURCE
     ${REACTOS_SOURCE_DIR}/ntoskrnl/io/iomgr/driver.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/io/iomgr/error.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/io/iomgr/file.c
+    ${REACTOS_SOURCE_DIR}/ntoskrnl/io/iomgr/iothread.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/io/iomgr/iocomp.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/io/iomgr/ioevent.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/io/iomgr/iofunc.c
@@ -309,6 +311,7 @@ list(APPEND SOURCE
     ${REACTOS_SOURCE_DIR}/ntoskrnl/se/tokenlif.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/vf/driver.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/wmi/guidobj.c
+    ${REACTOS_SOURCE_DIR}/ntoskrnl/wmi/notify.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/wmi/smbios.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/wmi/wmi.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/wmi/wmidrv.c)

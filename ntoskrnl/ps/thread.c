@@ -981,7 +981,7 @@ NTAPI
 PsWrapApcWow64Thread(IN OUT PVOID *ApcContext,
                      IN OUT PVOID *ApcRoutine)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 

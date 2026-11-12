@@ -333,7 +333,7 @@ IoPnPDeliverServicePowerNotification(
     _In_ ULONG PowerNotificationData,
     _In_ BOOLEAN Synchronous)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return 0;
 }
 

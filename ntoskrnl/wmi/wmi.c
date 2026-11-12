@@ -83,7 +83,7 @@ IoWMIAllocateInstanceIds(IN GUID *Guid,
                          IN ULONG InstanceCount,
                          OUT ULONG *FirstInstanceId)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -97,7 +97,7 @@ IoWMISuggestInstanceName(IN PDEVICE_OBJECT PhysicalDeviceObject OPTIONAL,
                          IN BOOLEAN CombineNames,
                          OUT PUNICODE_STRING SuggestedInstanceName)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -116,8 +116,11 @@ IoWMIWriteEvent(_Inout_ PVOID WnodeEventItem)
         return STATUS_INVALID_PARAMETER;
     }
 
-    DPRINT1("IoWMIWriteEvent() called for WnodeEventItem %p (Flags = 0x%08lx), returning success\n",
-            WnodeEventItem, Header->Flags);
+    DPRINT("IoWMIWriteEvent() called for WnodeEventItem %p (Flags = 0x%08lx), returning success\n",
+           WnodeEventItem, Header->Flags);
+
+    /* Hand the event to the kernel callbacks registered for its GUID */
+    WmipNotifyDeliver(Header);
 
     if (Header->Flags & WNODE_FLAG_TRACED_GUID)
     {
@@ -216,7 +219,7 @@ IoWMIQueryAllDataMultiple(IN PVOID *DataBlockObjectList,
                           IN OUT ULONG *InOutBufferSize,
                           OUT PVOID OutBuffer)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -230,7 +233,7 @@ IoWMIQuerySingleInstance(IN PVOID DataBlockObject,
                          IN OUT ULONG *InOutBufferSize,
                          OUT PVOID OutBuffer)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -245,7 +248,7 @@ IoWMIQuerySingleInstanceMultiple(IN PVOID *DataBlockObjectList,
                                  IN OUT ULONG *InOutBufferSize,
                                  OUT PVOID OutBuffer)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -260,7 +263,7 @@ IoWMISetSingleInstance(IN PVOID DataBlockObject,
                        IN ULONG ValueBufferSize,
                        IN PVOID ValueBuffer)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -276,7 +279,7 @@ IoWMISetSingleItem(IN PVOID DataBlockObject,
                    IN ULONG ValueBufferSize,
                    IN PVOID ValueBuffer)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -292,12 +295,14 @@ IoWMIExecuteMethod(IN PVOID DataBlockObject,
                    IN OUT PULONG OutBufferSize,
                    IN OUT PUCHAR InOutBuffer)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
 /*
- * @unimplemented
+ * Registers (or, with a NULL Callback, removes) the callback that receives
+ * the events written with IoWMIWriteEvent for the GUID of a data block
+ * object obtained from IoWMIOpenBlock.
  */
 NTSTATUS
 NTAPI
@@ -305,8 +310,23 @@ IoWMISetNotificationCallback(IN PVOID Object,
                              IN WMI_NOTIFICATION_CALLBACK Callback,
                              IN PVOID Context)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    NTSTATUS Status;
+
+    if (Object == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    /* Validate that this is a WMI GUID object (takes a reference) */
+    Status = ObReferenceObjectByPointer(Object,
+                                        WMIGUID_NOTIFICATION,
+                                        WmipGuidObjectType,
+                                        KernelMode);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = WmipNotifySetCallback(Object, Callback, Context);
+
+    ObDereferenceObject(Object);
+    return Status;
 }
 
 /*
@@ -318,7 +338,7 @@ IoWMIHandleToInstanceName(IN PVOID DataBlockObject,
                           IN HANDLE FileHandle,
                           OUT PUNICODE_STRING InstanceName)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -331,7 +351,7 @@ IoWMIDeviceObjectToInstanceName(IN PVOID DataBlockObject,
                                 IN PDEVICE_OBJECT DeviceObject,
                                 OUT PUNICODE_STRING InstanceName)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -346,7 +366,7 @@ WmiQueryTraceInformation(IN TRACE_INFORMATION_CLASS TraceInformationClass,
                          OUT PULONG RequiredLength OPTIONAL,
                          IN PVOID Buffer OPTIONAL)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -361,7 +381,7 @@ WmiTraceMessage(IN TRACEHANDLE LoggerHandle,
                 IN USHORT MessageNumber,
                 IN ...)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -376,7 +396,7 @@ WmiTraceMessageVa(IN TRACEHANDLE LoggerHandle,
                   IN USHORT MessageNumber,
                   IN va_list MessageArgList)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -384,7 +404,7 @@ NTSTATUS
 NTAPI
 WmiFlushTrace(IN OUT PWMI_LOGGER_INFORMATION LoggerInfo)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -393,7 +413,7 @@ FASTCALL
 WmiGetClock(IN WMI_CLOCK_TYPE ClockType,
             IN PVOID Context)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -401,7 +421,7 @@ NTSTATUS
 NTAPI
 WmiQueryTrace(IN OUT PWMI_LOGGER_INFORMATION LoggerInfo)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -409,7 +429,7 @@ NTSTATUS
 NTAPI
 WmiStartTrace(IN OUT PWMI_LOGGER_INFORMATION LoggerInfo)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -417,7 +437,7 @@ NTSTATUS
 NTAPI
 WmiStopTrace(IN PWMI_LOGGER_INFORMATION LoggerInfo)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -425,7 +445,7 @@ NTSTATUS
 FASTCALL
 WmiTraceFastEvent(IN PWNODE_HEADER Wnode)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -433,7 +453,7 @@ NTSTATUS
 NTAPI
 WmiUpdateTrace(IN OUT PWMI_LOGGER_INFORMATION LoggerInfo)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 

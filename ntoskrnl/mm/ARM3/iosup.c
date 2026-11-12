@@ -288,7 +288,7 @@ NTAPI
 MmIsIoSpaceActive(IN PHYSICAL_ADDRESS StartAddress,
                   IN SIZE_T NumberOfBytes)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return FALSE;
 }
 

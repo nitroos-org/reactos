@@ -1984,7 +1984,7 @@ NTAPI
 IoWMIDeviceObjectToProviderId(
     IN PDEVICE_OBJECT DeviceObject)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return 0;
 }
 #endif

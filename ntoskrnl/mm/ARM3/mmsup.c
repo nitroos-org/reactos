@@ -85,7 +85,7 @@ MmMapUserAddressesToPage(IN PVOID BaseAddress,
                          IN SIZE_T NumberOfBytes,
                          IN PVOID PageAddress)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -276,7 +276,7 @@ MmSetBankedSection(IN HANDLE ProcessHandle,
                    IN PVOID BankRoutine,
                    IN PVOID Context)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -321,7 +321,7 @@ NTSTATUS
 NTAPI
 MmCreateMirror(VOID)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 

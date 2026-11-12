@@ -551,6 +551,6 @@ FsRtlMupGetProviderInfoFromFileObject(IN PFILE_OBJECT pFileObject,
 {
     PAGED_CODE();
 
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
