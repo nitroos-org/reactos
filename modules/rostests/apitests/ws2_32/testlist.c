@@ -7,6 +7,7 @@ extern void func_accept(void);
 extern void func_acceptname(void);
 extern void func_loopbackalias(void);
 extern void func_backlog(void);
+extern void func_basehandle(void);
 extern void func_backlog_listen(void);
 extern void func_backlog_open(void);
 extern void func_backlog_replace(void);
@@ -95,6 +96,7 @@ const struct test winetest_testlist[] =
     { "acceptname", func_acceptname },
     { "loopbackalias", func_loopbackalias },
     { "backlog", func_backlog },
+    { "basehandle", func_basehandle },
     { "backlog_listen", func_backlog_listen },
     { "backlog_open", func_backlog_open },
     { "backlog_replace", func_backlog_replace },

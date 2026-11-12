@@ -118,7 +118,7 @@ HCERTCHAINENGINE CRYPT_CreateChainEngine(HCERTSTORE root, DWORD system_store, co
     HCERTSTORE worldStores[4];
 
     if(!root) {
-        if(config->cbSize >= sizeof(CERT_CHAIN_ENGINE_CONFIG) && config->hExclusiveRoot)
+        if(config->cbSize >= offsetof(CERT_CHAIN_ENGINE_CONFIG, hExclusiveRootTrustedPeople) && config->hExclusiveRoot)
             root = CertDuplicateStore(config->hExclusiveRoot);
         else if (config->hRestrictedRoot)
             root = CertDuplicateStore(config->hRestrictedRoot);
@@ -221,24 +221,35 @@ typedef struct _CERT_CHAIN_ENGINE_CONFIG_NO_EXCLUSIVE_ROOT
 BOOL WINAPI CertCreateCertificateChainEngine(PCERT_CHAIN_ENGINE_CONFIG pConfig,
  HCERTCHAINENGINE *phChainEngine)
 {
+    CERT_CHAIN_ENGINE_CONFIG config;
     BOOL ret;
 
     TRACE("(%p, %p)\n", pConfig, phChainEngine);
 
+    /* Three versions of the structure exist: without the exclusive roots (Vista), with
+     * hExclusiveRoot and hExclusiveTrustedPeople (Windows 7), and with dwExclusiveFlags as well
+     * (Windows 8 and later, the current SDK).  Callers built against the current SDK, such as
+     * rustls-platform-verifier (rustup, cargo), pass the last.  Windows 10 (x64) accepts 64
+     * (the first version) and 80..88 (84 included), and refuses 0, 60, 68, 72, 92 and 96.
+     */
     if (pConfig->cbSize != sizeof(CERT_CHAIN_ENGINE_CONFIG_NO_EXCLUSIVE_ROOT)
-     && pConfig->cbSize != sizeof(CERT_CHAIN_ENGINE_CONFIG))
+     && (pConfig->cbSize < offsetof(CERT_CHAIN_ENGINE_CONFIG, dwExclusiveFlags)
+     || pConfig->cbSize > sizeof(CERT_CHAIN_ENGINE_CONFIG)))
     {
         SetLastError(E_INVALIDARG);
         return FALSE;
     }
-    ret = CRYPT_CheckRestrictedRoot(pConfig->hRestrictedRoot);
+    /* Work on a zero-extended copy so later code never reads past a short struct */
+    memset(&config, 0, sizeof(config));
+    memcpy(&config, pConfig, pConfig->cbSize);
+    ret = CRYPT_CheckRestrictedRoot(config.hRestrictedRoot);
     if (!ret)
     {
         *phChainEngine = NULL;
         return FALSE;
     }
 
-    *phChainEngine = CRYPT_CreateChainEngine(NULL, CERT_SYSTEM_STORE_CURRENT_USER, pConfig);
+    *phChainEngine = CRYPT_CreateChainEngine(NULL, CERT_SYSTEM_STORE_CURRENT_USER, &config);
     return *phChainEngine != NULL;
 }
 
