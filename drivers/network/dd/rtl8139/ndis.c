@@ -70,6 +70,11 @@ MiniportSend (
     if (adapter->TxFull)
     {
         NDIS_DbgPrint(MIN_TRACE, ("All TX descriptors are full\n"));
+        //
+        // NDIS holds the packet until we say the ring has room again
+        // (NdisMSendResourcesAvailable, from the DPC that reclaims a descriptor).
+        //
+        adapter->TxStarved = TRUE;
         NdisReleaseSpinLock(&adapter->Lock);
         return NDIS_STATUS_RESOURCES;
     }
@@ -110,10 +115,17 @@ MiniportSend (
         transmitBuffer = sgList->Elements[0].Address.LowPart;
     }
 
+    //
+    // The chip reads the frame from the packet's memory after we return, so the packet
+    // stays ours until the descriptor completes (NdisMSendComplete in the DPC).
+    //
+    adapter->TxPackets[adapter->CurrentTxDesc] = Packet;
+
     status = NICTransmitPacket(adapter, adapter->CurrentTxDesc, transmitBuffer, transmitLength);
     if (status != NDIS_STATUS_SUCCESS)
     {
         NDIS_DbgPrint(MIN_TRACE, ("Transmit packet failed\n"));
+        adapter->TxPackets[adapter->CurrentTxDesc] = NULL;
         NdisReleaseSpinLock(&adapter->Lock);
         return status;
     }
@@ -129,7 +141,7 @@ MiniportSend (
 
     NdisReleaseSpinLock(&adapter->Lock);
 
-    return NDIS_STATUS_SUCCESS;
+    return NDIS_STATUS_PENDING;
 }
 
 VOID
@@ -139,6 +151,7 @@ MiniportHalt (
     )
 {
     PRTL_ADAPTER adapter = (PRTL_ADAPTER)MiniportAdapterContext;
+    UINT i;
 
     ASSERT(adapter != NULL);
 
@@ -155,6 +168,22 @@ MiniportHalt (
     //
     if (adapter->IoBase != NULL)
     {
+        //
+        // Stop the chip, then give back the packets it was still holding
+        //
+        NdisRawWritePortUchar(adapter->IoBase + R_CMD, 0);
+        NICDisableInterrupts(adapter);
+        for (i = 0; i < TX_DESC_COUNT; i++)
+        {
+            if (adapter->TxPackets[i] != NULL)
+            {
+                PNDIS_PACKET packet = adapter->TxPackets[i];
+
+                adapter->TxPackets[i] = NULL;
+                NdisMSendComplete(adapter->MiniportAdapterHandle, packet, NDIS_STATUS_FAILURE);
+            }
+        }
+
         if (adapter->ReceiveBuffer != NULL)
         {
             //
@@ -359,6 +388,8 @@ MiniportInitialize (
         status = NDIS_STATUS_RESOURCES;
         goto Cleanup;
     }
+    // The receive path tells finished frames by a non-zero header status
+    RtlZeroMemory(adapter->ReceiveBuffer, adapter->ReceiveBufferLength);
 
     NdisMAllocateSharedMemory(MiniportAdapterHandle,
                               MINIMUM_FRAME_SIZE * TX_DESC_COUNT,
