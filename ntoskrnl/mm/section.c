@@ -6681,7 +6681,8 @@ MiIsClusterableDirtyEntry(
  * Writes the dirty page at Start and the dirty pages that follow it (up to MM_FLUSH_CLUSTER_PAGES,
  * not past End) with one paging write, as MmCheckDirtySegment does for one page: each page is held
  * (share count) and marked as being written while the segment is unlocked, and stays dirty when the
- * write fails or the page was dirtied again meanwhile. Returns the pages handled.
+ * write fails or the page was dirtied again meanwhile. Returns the pages handled; *WriteStatus is the status of
+ * the write (STATUS_SUCCESS when there was nothing to write).
  */
 _Requires_exclusive_lock_held_(Segment->Lock)
 static
@@ -6689,7 +6690,8 @@ ULONG
 MiFlushDirtyCluster(
     _In_ PMM_SECTION_SEGMENT Segment,
     _In_ PLARGE_INTEGER Start,
-    _In_ LONGLONG End)
+    _In_ LONGLONG End,
+    _Out_ PNTSTATUS WriteStatus)
 {
     PFN_NUMBER StackPages[MM_FLUSH_STACK_PAGES];
     PFN_NUMBER StackMdl[MM_FLUSH_MDL_WORDS(MM_FLUSH_STACK_PAGES)];
@@ -6703,6 +6705,8 @@ MiFlushDirtyCluster(
 
     ASSERT(Segment->Locked);
     ASSERT(FlagOn(*Segment->Flags, MM_DATAFILE_SEGMENT));
+
+    *WriteStatus = STATUS_SUCCESS;
 
     /* Pool only when a second dirty page follows: a lone page needs none */
     if (MiIsClusterableDirtyEntry(MmGetPageEntrySectionSegment(Segment, &Offset)))
@@ -6734,7 +6738,7 @@ MiFlushDirtyCluster(
     {
         if (Buffer)
             ExFreePoolWithTag(Buffer, TAG_MM_FLUSH);
-        MmCheckDirtySegment(Segment, Start, FALSE, FALSE);
+        MmCheckDirtySegmentEx(Segment, Start, FALSE, FALSE, WriteStatus);
         return 1;
     }
 
@@ -6750,6 +6754,7 @@ MiFlushDirtyCluster(
     Status = MiWritePages(Segment, Start->QuadPart, Pages, Count, MdlBuffer, MdlWords);
     MmLockSectionSegment(Segment);
 
+    *WriteStatus = Status;
     if (!NT_SUCCESS(Status))
         DPRINT1("MiWritePages FAILED: Status 0x%08x (%lu pages at 0x%I64x)\n", Status, Count, Start->QuadPart);
 
@@ -6850,6 +6855,194 @@ MmTakeViewDirtyBits(
     MmUnlockSectionSegment(Segment);
 }
 
+/*
+ * A page of the segment that other views map (this process's other views, other processes' views) can be dirty
+ * only in the PTEs of those views.  MmFlushSegment moves those dirty bits into the segment first.  What Windows
+ * 10 22H2 does, measured: a non-cached read of such a page (written through a live view of this process or of
+ * another one, never flushed) returns the new data, which it can only get from the disk after the file system's
+ * flush of the read range has written it; so the range flush of the file's cache harvests the dirty bits of every
+ * mapping.  FlushFileBuffers and FlushViewOfFile are the same flush (the probe could not separate them from the
+ * flush done by its own non-cached reads); a flush writes only its range (a read of one page did not write the
+ * next page).
+ */
+#define MI_MAPPED_DIRTY_BATCH 128
+
+typedef struct _MI_MAPPED_DIRTY_ENTRY
+{
+    PEPROCESS Process;
+    PVOID Address;
+    PFN_NUMBER Page;
+    ULONG Index;
+} MI_MAPPED_DIRTY_ENTRY;
+
+/*
+ * Moves the hardware dirty bits of the user mappings of the pages of [Start, End) (at most
+ * MM_TAKE_VIEW_DIRTY_MAX_PAGES pages) into the segment's page entries.  The segment lock is held and stays held,
+ * so the argument of MmTakeViewDirtyBits applies unchanged: the PTE bits are cleared, one TB flush per batch and
+ * process follows, and only then are the pages marked dirty, all under the segment lock that the lazy writer and
+ * the page-out path need to look at the entries.
+ *
+ * The mappings come from the page's rmap list.  A process is used only while it holds a rundown reference (the
+ * rmap entry exists under the PFN lock, which is when the reference is taken: a process in rundown is skipped,
+ * its views are unmapped by its exit, which moves the bits itself) and is attached to take its bits.  No address
+ * space lock is taken (it would invert the order of the page-out path, address space before segment): the bit
+ * is taken with a compare-exchange that needs the PTE to be valid and to map this very page, so a view that
+ * is unmapped or remapped meanwhile is left alone.  A page that is already dirty and not being written is not
+ * looked at: it is written by this flush anyway, with whatever the views wrote before.
+ */
+_Requires_exclusive_lock_held_(Segment->Lock)
+static
+VOID
+MiTakeMappedDirtyBits(
+    _In_ PMM_SECTION_SEGMENT Segment,
+    _In_ LONGLONG Start,
+    _In_ LONGLONG End)
+{
+    MI_MAPPED_DIRTY_ENTRY List[MI_MAPPED_DIRTY_BATCH];
+    ULONG_PTR Taken[MM_TAKE_VIEW_DIRTY_MAX_PAGES / (8 * sizeof(ULONG_PTR))];
+    ULONG Index = 0, Pages = (ULONG)((End - Start) >> PAGE_SHIFT), Count, i, j;
+    LARGE_INTEGER Offset;
+    ULONG_PTR Entry;
+    BOOLEAN AnyTaken = FALSE;
+
+    ASSERT(Pages <= MM_TAKE_VIEW_DIRTY_MAX_PAGES);
+    RtlZeroMemory(Taken, sizeof(Taken));
+
+    while (Index < Pages)
+    {
+        /* Collect the mappings of the next pages (under the PFN lock; the segment lock keeps the entries) */
+        Count = 0;
+        for (; Index < Pages; Index++)
+        {
+            PMM_RMAP_ENTRY Rmap;
+            ULONG Found = 0, Room;
+            KIRQL OldIrql;
+
+            Offset.QuadPart = Start + ((LONGLONG)Index << PAGE_SHIFT);
+            Entry = MmGetPageEntrySectionSegment(Segment, &Offset);
+            if ((Entry == 0) || IS_SWAP_FROM_SSE(Entry) || MM_IS_WAIT_PTE(Entry) ||
+                (IS_DIRTY_SSE(Entry) && !IS_WRITE_SSE(Entry)))
+                continue;
+
+            OldIrql = MiAcquirePfnLock();
+            for (Rmap = MmGetRmapListHeadPage(PFN_FROM_SSE(Entry)); Rmap; Rmap = Rmap->Next)
+            {
+                if (RMAP_IS_SEGMENT(Rmap->Address) || ((ULONG_PTR)Rmap->Address >= (ULONG_PTR)MmSystemRangeStart) ||
+                    (Rmap->Process == NULL) || (Rmap->Process == PsInitialSystemProcess))
+                    continue;
+                Found++;
+            }
+            Room = MI_MAPPED_DIRTY_BATCH - Count;
+            if ((Found > Room) && (Count != 0))
+            {
+                /* Does not fit: this page starts the next batch */
+                MiReleasePfnLock(OldIrql);
+                break;
+            }
+            for (Rmap = MmGetRmapListHeadPage(PFN_FROM_SSE(Entry)); Rmap && (Count < MI_MAPPED_DIRTY_BATCH); Rmap = Rmap->Next)
+            {
+                if (RMAP_IS_SEGMENT(Rmap->Address) || ((ULONG_PTR)Rmap->Address >= (ULONG_PTR)MmSystemRangeStart) ||
+                    (Rmap->Process == NULL) || (Rmap->Process == PsInitialSystemProcess))
+                    continue;
+                if (!ExAcquireRundownProtection(&Rmap->Process->RundownProtect))
+                    continue;
+                List[Count].Process = Rmap->Process;
+                List[Count].Address = Rmap->Address;
+                List[Count].Page = PFN_FROM_SSE(Entry);
+                List[Count].Index = Index;
+                Count++;
+            }
+            MiReleasePfnLock(OldIrql);
+        }
+
+        /* One process at a time: attach, take the bits, one TB flush, detach, drop the references */
+        for (i = 0; i < Count; i++)
+        {
+            PEPROCESS Process = List[i].Process;
+            MM_TB_FLUSH_LIST FlushList;
+            KAPC_STATE ApcState;
+            BOOLEAN Attached = FALSE;
+
+            if (Process == NULL)
+                continue;
+
+            if (Process != PsGetCurrentProcess())
+            {
+                KeStackAttachProcess(&Process->Pcb, &ApcState);
+                Attached = TRUE;
+            }
+            MmInitializeTbFlushList(&FlushList, FALSE);
+            for (j = i; j < Count; j++)
+            {
+                if (List[j].Process != Process)
+                    continue;
+                if (MmTakeDirtyBit(Process, List[j].Address, List[j].Page, &FlushList))
+                {
+                    Taken[List[j].Index / (8 * sizeof(ULONG_PTR))] |= (ULONG_PTR)1 << (List[j].Index % (8 * sizeof(ULONG_PTR)));
+                    AnyTaken = TRUE;
+                }
+            }
+            MmFlushTbList(&FlushList);
+            if (Attached)
+                KeUnstackDetachProcess(&ApcState);
+
+            for (j = i; j < Count; j++)
+            {
+                if (List[j].Process == Process)
+                {
+                    List[j].Process = NULL;
+                    ExReleaseRundownProtection(&Process->RundownProtect);
+                }
+            }
+        }
+    }
+
+    if (!AnyTaken)
+        return;
+
+    /* Mark the pages dirty in the segment (the entries cannot have changed: the segment lock is held) */
+    for (Index = 0; Index < Pages; Index++)
+    {
+        if (!(Taken[Index / (8 * sizeof(ULONG_PTR))] & ((ULONG_PTR)1 << (Index % (8 * sizeof(ULONG_PTR))))))
+            continue;
+        Offset.QuadPart = Start + ((LONGLONG)Index << PAGE_SHIFT);
+        Entry = MmGetPageEntrySectionSegment(Segment, &Offset);
+        MmSetPageEntrySectionSegment(Segment, &Offset, DIRTY_SSE(Entry));
+    }
+}
+
+/* How long MmFlushSegment waits for a page that another thread is writing (lazy writer, page-out) */
+#define MI_FLUSH_WRITE_WAIT_100NS (30LL * 10000000LL)
+
+/*
+ * A failed write is a failure of the flush, except the one a file system gives on purpose for a lazy write of a
+ * user-mapped page past its valid data length (the page stays dirty; see MmCheckDirtySegmentEx).
+ */
+static
+BOOLEAN
+MiIsFlushFailure(
+    _In_ PMM_SECTION_SEGMENT Segment,
+    _In_ NTSTATUS Status)
+{
+    PFSRTL_COMMON_FCB_HEADER FcbHeader;
+
+    if (NT_SUCCESS(Status))
+        return FALSE;
+    FcbHeader = Segment->FileObject ? Segment->FileObject->FsContext : NULL;
+    return (Status != STATUS_FILE_LOCK_CONFLICT) || (FcbHeader == NULL) ||
+           !FlagOn(FcbHeader->Flags, FSRTL_FLAG_USER_MAPPED_FILE);
+}
+
+/*
+ * Writes the dirty pages of the range ([Offset, Offset + Length), the whole file for no Offset).  On Windows,
+ * FlushFileBuffers and FlushViewOfFile get the pages written through any view of the file to the disk: the dirty
+ * bits of every mapping of the pages are taken first (MiTakeMappedDirtyBits), in blocks so the segment lock is
+ * never held for more than a block.  A page that another thread is writing (lazy writer, page-out) is waited for,
+ * as CcFlushCache waits for its own writes: it is not clean until that write is done (and stays dirty when it
+ * failed or the page was dirtied again meanwhile, which the flush then writes itself).  The status is the
+ * first write failure (pages that failed stay dirty; the others are still written), Iosb->Information the
+ * bytes written.
+ */
 NTSTATUS
 NTAPI
 MmFlushSegment(
@@ -6858,8 +7051,8 @@ MmFlushSegment(
     _In_ ULONG Length,
     _Out_opt_ PIO_STATUS_BLOCK Iosb)
 {
-    LARGE_INTEGER FlushStart, FlushEnd;
-    NTSTATUS Status;
+    LARGE_INTEGER FlushStart, FlushEnd, BlockEnd;
+    NTSTATUS Status, Failure = STATUS_SUCCESS;
 
     if (Offset)
     {
@@ -6905,29 +7098,63 @@ MmFlushSegment(
 
     while (FlushStart.QuadPart < FlushEnd.QuadPart)
     {
-        ULONG_PTR Entry = MmGetPageEntrySectionSegment(Segment, &FlushStart);
-        ULONG Pages = 1;
+        /* The next block: its pages' dirty bits from every mapping, then its pages written */
+        BlockEnd.QuadPart = FlushStart.QuadPart + ((LONGLONG)MM_TAKE_VIEW_DIRTY_MAX_PAGES << PAGE_SHIFT);
+        if (BlockEnd.QuadPart > FlushEnd.QuadPart)
+            BlockEnd.QuadPart = FlushEnd.QuadPart;
+        /* No view in any process (UserMapCount is raised when a view is set up, before it can have a PTE): no PTE has a bit */
+        if (*(volatile LONG *)&Segment->UserMapCount != 0)
+            MiTakeMappedDirtyBits(Segment, FlushStart.QuadPart, (BlockEnd.QuadPart + PAGE_SIZE - 1) & ~((LONGLONG)PAGE_SIZE - 1));
 
-        if (IS_DIRTY_SSE(Entry))
+        while (FlushStart.QuadPart < BlockEnd.QuadPart)
         {
-            Pages = MiFlushDirtyCluster(Segment, &FlushStart, FlushEnd.QuadPart);
+            ULONG_PTR Entry = MmGetPageEntrySectionSegment(Segment, &FlushStart);
+            ULONG Pages = 1;
 
-            if (Iosb)
-                Iosb->Information += Pages * PAGE_SIZE;
+            if (IS_WRITE_SSE(Entry) && !IS_SWAP_FROM_SSE(Entry))
+            {
+                /* Being written by someone else: wait for that write (bounded: a writer that waits for our locks would never finish) */
+                ULONGLONG WaitStart = KeQueryInterruptTime();
+
+                do
+                {
+                    MmUnlockSectionSegment(Segment);
+                    KeDelayExecutionThread(KernelMode, FALSE, &TinyTime);
+                    MmLockSectionSegment(Segment);
+                    Entry = MmGetPageEntrySectionSegment(Segment, &FlushStart);
+                } while (IS_WRITE_SSE(Entry) && !IS_SWAP_FROM_SSE(Entry) &&
+                         (KeQueryInterruptTime() - WaitStart < (ULONGLONG)MI_FLUSH_WRITE_WAIT_100NS));
+            }
+
+            if (Entry && !IS_SWAP_FROM_SSE(Entry) && IS_DIRTY_SSE(Entry))
+            {
+                NTSTATUS WriteStatus;
+
+                Pages = MiFlushDirtyCluster(Segment, &FlushStart, BlockEnd.QuadPart, &WriteStatus);
+
+                if (!NT_SUCCESS(WriteStatus))
+                {
+                    if (NT_SUCCESS(Failure) && MiIsFlushFailure(Segment, WriteStatus))
+                        Failure = WriteStatus;
+                }
+                else if (Iosb)
+                {
+                    Iosb->Information += Pages * PAGE_SIZE;
+                }
+            }
+
+            FlushStart.QuadPart += Pages * PAGE_SIZE;
         }
-
-        FlushStart.QuadPart += Pages * PAGE_SIZE;
     }
 
     MmUnlockSectionSegment(Segment);
     MmDereferenceSegment(Segment);
 
 Quit:
-    /* FIXME: Handle failures */
     if (Iosb)
-        Iosb->Status = STATUS_SUCCESS;
+        Iosb->Status = Failure;
 
-    return STATUS_SUCCESS;
+    return Failure;
 }
 
 /*
