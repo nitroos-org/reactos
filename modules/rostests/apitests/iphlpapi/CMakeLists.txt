@@ -25,6 +25,7 @@ list(APPEND SOURCE
     NotifyStableUnicastIpAddressTable.c
     SendARP.c
     TcpUdpTableRows.c
+    Win6Exports.c
     testlist.c)
 
 add_executable(iphlpapi_apitest ${SOURCE})

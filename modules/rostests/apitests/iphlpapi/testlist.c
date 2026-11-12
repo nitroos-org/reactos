@@ -27,6 +27,7 @@ extern void func_NotifyRouteChange2(void);
 extern void func_NotifyStableUnicastIpAddressTable(void);
 extern void func_SendARP(void);
 extern void func_TcpUdpTableRows(void);
+extern void func_Win6Exports(void);
 
 const struct test winetest_testlist[] =
 {
@@ -55,6 +56,7 @@ const struct test winetest_testlist[] =
     { "NotifyStableUnicastIpAddressTable", func_NotifyStableUnicastIpAddressTable },
     { "SendARP",                    func_SendARP },
     { "TcpUdpTableRows",            func_TcpUdpTableRows },
+    { "Win6Exports",                func_Win6Exports },
 
     { 0, 0 }
 };
