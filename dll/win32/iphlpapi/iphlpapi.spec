@@ -25,14 +25,17 @@
 @ stdcall -version=0x600+ ConvertInterfaceLuidToNameW(ptr ptr long)
 @ stdcall -version=0x600+ ConvertInterfaceNameToLuidA(str ptr)
 @ stdcall -version=0x600+ ConvertInterfaceNameToLuidW(wstr ptr)
+@ stdcall -version=0x600+ ConvertIpv4MaskToLength(long ptr)
 @ stdcall -version=0x600+ ConvertLengthToIpv4Mask(long ptr)
 @ stdcall -stub -version=0x600+ ConvertStringToGuidW(wstr ptr)
 @ stdcall CreateIpForwardEntry(ptr)
 @ stdcall CreateIpNetEntry(ptr)
+@ stdcall -version=0x600+ CreateUnicastIpAddressEntry(ptr)
 @ stdcall CreateProxyArpEntry(long long long)
 @ stdcall DeleteIPAddress(long)
 @ stdcall DeleteIpForwardEntry(ptr)
 @ stdcall DeleteIpNetEntry(ptr)
+@ stdcall -version=0x600+ DeleteUnicastIpAddressEntry(ptr)
 @ stdcall DeleteProxyArpEntry(long long long)
 @ stdcall DisableMediaSense(ptr ptr)
 @ stdcall EnableRouter(ptr ptr)
@@ -98,6 +101,8 @@
 @ stub GetTcpStatsFromStack
 @ stub GetTcpStatsFromStackEx
 @ stdcall GetTcpTable(ptr ptr long)
+@ stdcall -version=0x600+ GetTcpTable2(ptr ptr long)
+@ stdcall -version=0x600+ GetTcp6Table2(ptr ptr long)
 @ stub GetTcpTableFromStack
 @ stub GetUdpExTable2FromStack
 @ stdcall GetUdpStatistics(ptr)
@@ -121,6 +126,7 @@
 @ stdcall -version=0x600+ if_indextoname(long ptr)
 @ stdcall -version=0x600+ if_nametoindex(str)
 @ stdcall -version=0x600+ InitializeIpInterfaceEntry(ptr)
+@ stdcall -version=0x600+ InitializeUnicastIpAddressEntry(ptr)
 @ stub InternalCreateIpForwardEntry
 @ stub InternalCreateIpNetEntry
 @ stub InternalDeleteIpForwardEntry
