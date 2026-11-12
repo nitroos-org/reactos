@@ -55,6 +55,16 @@ FsType = 2
 ; no  - Don't download addons
 RappsDownload = no
 
+; Choose if the notices of the add-ons that Optional Features turns on at first boot
+; (today: the patent notice of the full AAC decoder) are accepted on behalf of the users.
+; An interactive setup shows each such notice once, on the first desktop.
+; Only honoured when UnattendSetupEnabled = yes: the administrator who sets it is the
+; one who accepts, nobody is there to click the box, and an automated first logon
+; would otherwise wait for it. Recorded as HKLM\SOFTWARE\ReactOS\Nitro\Featmgr\NoticesAcknowledged.
+; yes - Show no notice box, the add-ons are still installed
+; no  - Show the notice once (the default)
+AcknowledgeAddonNotices = no
+
 ; Set this option to automatically specify language in 2nd mode setup.
 ; See hivesys.inf for available languages.
 LocaleID = 409
