@@ -882,8 +882,7 @@ MiReadPageFile(
 NTSTATUS
 NTAPI
 MiReadPageFileCluster(
-    _In_reads_(Count) PPFN_NUMBER Pages,
-    _In_ ULONG Count,
+    _Inout_ PMDL Mdl,
     _In_ ULONG FileIndex,
     _In_ ULONG_PTR FirstSlot);
 
@@ -936,8 +935,13 @@ MiWritePageFileSlot(
     _In_ ULONG FileIndex,
     _In_ ULONG_PTR Slot);
 
-/* NitroPager P1: cluster writes, slot runs, file retirement, the writer thread */
-#define MI_PAGER_CLUSTER_MAX 16
+/*
+ * NitroPager P1: cluster writes, slot runs, file retirement, the writer thread. A cluster is one paging
+ * request of up to 64 pages (256 KB): a paging request costs about the same up to that size (pager2,
+ * 2026-11-12: 4 KB to 256 KB unbuffered requests 115 to 152 us read, 200 to 257 us write on the
+ * benchmark VMs), so the request count, not the bytes, set the time of a paging-bound workload.
+ */
+#define MI_PAGER_CLUSTER_MAX 64
 
 ULONG
 NTAPI
@@ -957,6 +961,10 @@ MiWritePageFileCluster(
 PFN_NUMBER
 NTAPI
 MiPagerFreeSlotCount(VOID);
+
+BOOLEAN
+NTAPI
+MiPagerSlotsScarce(VOID);
 
 BOOLEAN
 NTAPI

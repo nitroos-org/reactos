@@ -2928,6 +2928,10 @@ typedef struct _MI_PAGER_COUNTERS
     ULONG InPageClusterReads;
     ULONG InPagePrefetched;
     ULONG ReadAheadRetries;
+    /* pager2: clean copies given up by pages paged in while slots are scarce (MiPagerSlotsScarce) */
+    ULONG CopiesDropped;
+    /* pager2: page-file faults that waited once for a balancer pass before a cluster read (MI_PAGER_READAHEAD_WAIT_PAGES) */
+    ULONG ReadAheadWaits;
 } MI_PAGER_COUNTERS;
 
 extern MI_PAGER_COUNTERS MiPagerCounters;
@@ -2953,6 +2957,14 @@ extern MI_PAGER_COUNTERS MiPagerCounters;
  */
 #define MI_PAGER_READ_CLUSTER_MAX MI_PAGER_CLUSTER_MAX
 #define MI_PAGER_READAHEAD_MARGIN 512
+
+/*
+ * A user-mode page-file fault whose next page would be read with it, but whose read-ahead the margin
+ * would cut (usable pages at or below this), waits once for a balancer pass first: see
+ * MiResolvePageFileFault (pager2, 2026-11-12: without it 24000 of 29000 reads of a 1400 MB second
+ * pass at 1 GB RAM were single pages).
+ */
+#define MI_PAGER_READAHEAD_WAIT_PAGES (MI_PAGER_WAITABLE_FLOOR + MI_PAGER_READAHEAD_MARGIN + MI_PAGER_READ_CLUSTER_MAX)
 
 /* Paging I/O (writer clusters, page-file reads of faults) starts and ends: the reserve and the stuck-I/O check watch it */
 VOID
