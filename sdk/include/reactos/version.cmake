@@ -1,6 +1,43 @@
 option(NO_REACTOS_BUILDNO "If true, disables the generation of buildno.h and version.h for each configure" OFF)
+# Reproducible builds (OS-update plan, milestone U1): the same commit gives byte-identical installed files on any box.
+#   NITRO_REPRODUCIBLE_BUILD  no wall-clock value reaches a binary: the build date comes from SOURCE_DATE_EPOCH (environment or the
+#                             cache variable of the same name), else from the commit date of HEAD; the linker writes no PE timestamp
+#                             (see gcc.cmake and the other places listed in process/UPDATE-REPRODUCIBLE-BUILDS.md of the harness).
+#   NITRO_STABLE_BUILD_ID     (needs the option above) the per-binary version resources carry the date only, not the git revision, so a
+#                             one-file change between two builds of one series changes only the files that really changed. The exact
+#                             commit is then recorded in the release metadata (build_id), not in every binary.
+option(NITRO_REPRODUCIBLE_BUILD "deterministic output: no build time or random value in any installed file" OFF)
+option(NITRO_STABLE_BUILD_ID "version resources carry the build date only, not the git revision (needs NITRO_REPRODUCIBLE_BUILD)" OFF)
+set(SOURCE_DATE_EPOCH "" CACHE STRING "seconds since the epoch used as the build time when NITRO_REPRODUCIBLE_BUILD is ON (default: the environment variable of the same name, else the HEAD commit date)")
+if(NITRO_STABLE_BUILD_ID AND NOT NITRO_REPRODUCIBLE_BUILD)
+    message(FATAL_ERROR "NITRO_STABLE_BUILD_ID needs NITRO_REPRODUCIBLE_BUILD=ON")
+endif()
+if(NITRO_REPRODUCIBLE_BUILD AND NOT NO_REACTOS_BUILDNO)
+    if(NOT SOURCE_DATE_EPOCH STREQUAL "")
+        set(ENV{SOURCE_DATE_EPOCH} "${SOURCE_DATE_EPOCH}")
+    elseif("$ENV{SOURCE_DATE_EPOCH}" STREQUAL "")
+        find_package(Git)
+        if(GIT_FOUND AND EXISTS "${REACTOS_SOURCE_DIR}/.git")
+            execute_process(COMMAND "${GIT_EXECUTABLE}" log -1 --format=%ct HEAD
+                WORKING_DIRECTORY ${REACTOS_SOURCE_DIR} OUTPUT_VARIABLE _nitro_sde RESULT_VARIABLE _nitro_sde_rc OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+            if(_nitro_sde_rc EQUAL 0 AND _nitro_sde MATCHES "^[0-9]+$")
+                set(ENV{SOURCE_DATE_EPOCH} "${_nitro_sde}")
+            endif()
+        endif()
+        if("$ENV{SOURCE_DATE_EPOCH}" STREQUAL "")
+            message(FATAL_ERROR "NITRO_REPRODUCIBLE_BUILD needs SOURCE_DATE_EPOCH (environment or -DSOURCE_DATE_EPOCH=) or a git checkout")
+        endif()
+    endif()
+endif()
+
+# the build time as an argument for tools that would otherwise read the clock (xml2sdb); empty in a normal build
+set(XML2SDB_EPOCH "")
+if(NITRO_REPRODUCIBLE_BUILD AND NOT NO_REACTOS_BUILDNO)
+    set(XML2SDB_EPOCH -e $ENV{SOURCE_DATE_EPOCH})
+endif()
 
 if (NOT NO_REACTOS_BUILDNO)
+    # string(TIMESTAMP) honours the SOURCE_DATE_EPOCH environment variable
     string(TIMESTAMP KERNEL_VERSION_BUILD %Y%m%d UTC)
 else()
     set(KERNEL_VERSION_BUILD "custom")
@@ -70,6 +107,12 @@ if((EXISTS "${REACTOS_SOURCE_DIR}/.git") AND (NOT NO_REACTOS_BUILDNO))
             endif()
         endif()
     endif()
+endif()
+
+if(NITRO_STABLE_BUILD_ID)
+    # the revision is not a per-binary property in this mode (it is kept in the release metadata)
+    set(REVISION "nitro")
+    set(COMMIT_HASH "see-release-metadata")
 endif()
 
 # NitroOS product identification shown in the OS UI (setup titles, desktop watermark, About/winver, boot text).

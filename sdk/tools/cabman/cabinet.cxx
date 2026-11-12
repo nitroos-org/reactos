@@ -2837,6 +2837,8 @@ ULONG CCabinet::WriteDataBlock()
 
 #if !defined(_WIN32)
 
+static int g_CabUseUtc = 0;   /* SOURCE_DATE_EPOCH honoured: file times are converted in UTC */
+
 void CCabinet::ConvertDateAndTime(time_t* Time,
                                   PUSHORT DosDate,
                                   PUSHORT DosTime)
@@ -2851,7 +2853,7 @@ void CCabinet::ConvertDateAndTime(time_t* Time,
 {
     struct tm *timedef;
 
-    timedef = localtime(Time);
+    timedef = g_CabUseUtc ? gmtime(Time) : localtime(Time);
 
     DPRINT(MAX_TRACE, ("day: %d, mon: %d, year:%d, hour: %d, min: %d, sec: %d\n",
         timedef->tm_mday, timedef->tm_mon, timedef->tm_year,
@@ -2905,6 +2907,16 @@ ULONG CCabinet::GetFileTimes(FILE* FileHandle, PCFFILE_NODE File)
     if (stat(buf, &stbuf) == -1)
         return CAB_STATUS_CANNOT_READ;
 
+    /* reproducible media: SOURCE_DATE_EPOCH replaces the file's modification time, and the conversion uses UTC */
+    {
+        const char *sde = getenv("SOURCE_DATE_EPOCH");
+        if (sde && *sde)
+        {
+            time_t fixed = (time_t)strtoull(sde, NULL, 10);
+            stbuf.st_mtime = fixed;
+            g_CabUseUtc = 1;
+        }
+    }
     ConvertDateAndTime(&stbuf.st_mtime, &File->File.FileDate, &File->File.FileTime);
 #endif
     return CAB_STATUS_SUCCESS;
