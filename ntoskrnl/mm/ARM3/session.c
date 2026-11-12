@@ -405,8 +405,20 @@ MiDereferenceSession(VOID)
          * before it detached): it must still drop its view, its reference to
          * the session data page and its session bit, or it keeps a freed
          * session and every process it creates later joins it.
+         *
+         * A process that is not the leader is out of the session too
+         * (NitroSessions: sessions other than 0 go away when their last
+         * process exits). Its session bit goes now: MmCleanProcessAddressSpace
+         * runs twice for a process that had threads (at its last thread's
+         * exit, then from PspDeleteProcess), and with the bit still set the
+         * second run would take it off the session list again (list
+         * corruption) and dereference the deleted session.
          */
-        if (!Process->Vm.Flags.SessionLeader) return;
+        if (!Process->Vm.Flags.SessionLeader)
+        {
+            RtlInterlockedClearBits(&Process->Flags, PSF_PROCESS_IN_SESSION_BIT);
+            return;
+        }
     }
 
     /* Check if this is the session leader */
