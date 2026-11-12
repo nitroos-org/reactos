@@ -33,10 +33,11 @@
 
 #ifdef HAVE_LCMS2
 
-static inline void adjust_endianness32( ULONG *ptr )
+/* takes void *: callers pass ULONG, DWORD and cmsUInt32Number pointers, which differ on i386 */
+static inline void adjust_endianness32( void *ptr )
 {
 #ifndef WORDS_BIGENDIAN
-    *ptr = RtlUlongByteSwap(*ptr);
+    *(ULONG *)ptr = RtlUlongByteSwap(*(ULONG *)ptr);
 #endif
 }
 
