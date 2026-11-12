@@ -5112,8 +5112,10 @@ MiMapViewOfSection(
         /* Check if the offset and size are bigger than the section itself */
         if (((ULONG64)RequestedOffset + *ViewSize) > (ULONG64)SectionLimit)
         {
-            /* This is allowed for physical memory sections and kernel mode callers */
-            if (!Section->u.Flags.PhysicalMemory || (ExGetPreviousMode() == UserMode))
+            /* This is allowed for physical memory sections and kernel mode callers
+             * (and, since Windows 10, user mode callers too) */
+            if (!Section->u.Flags.PhysicalMemory ||
+                ((ExGetPreviousMode() == UserMode) && !MI_PHYSMEM_USER_MAP_PAST_RAM()))
             {
                 DPRINT1("Section offset and size are larger than section\n");
                 Status = STATUS_INVALID_VIEW_SIZE;
@@ -5136,7 +5138,8 @@ MiMapViewOfSection(
         }
         else if ((ExGetPreviousMode() == UserMode) &&
             (((*ViewSize)+ViewOffset) > Section->SizeOfSection.QuadPart) &&
-            (!Section->u.Flags.Reserve))
+            (!Section->u.Flags.Reserve) &&
+            !(Section->u.Flags.PhysicalMemory && MI_PHYSMEM_USER_MAP_PAST_RAM()))
         {
             /* Dubious */
             (*ViewSize) = MIN(Section->SizeOfSection.QuadPart - ViewOffset, SIZE_T_MAX - PAGE_SIZE);
