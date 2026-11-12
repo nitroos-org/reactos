@@ -114,8 +114,12 @@ IntWinStaObjectDelete(
         /* The window station must NOT be tagged as non-interactive */
         ASSERT(!(WinSta->Flags & WSS_NOIO));
 
-        /* Only Winlogon can close and delete the interactive window station */
-        ASSERT(gpidLogon == PsGetCurrentProcessId());
+        /*
+         * Only Winlogon can close and delete the interactive window station. A session without the
+         * console has no Winlogon: its csrss or TCB creator made the station (see IntCreateWindowStation),
+         * and whoever holds the last handle may close it.
+         */
+        ASSERT(gbHeadlessSession || (gpidLogon == PsGetCurrentProcessId()));
 
         InputWindowStation = NULL;
 
@@ -736,6 +740,43 @@ IntCheckWindowStationDirectory(
     return STATUS_SUCCESS;
 }
 
+/*
+ * The early check above looks at the request. A symbolic link in this session's directory that points into
+ * another session's, or a root directory handle that is replaced between the check and the insert, still gets the
+ * object into the wrong directory. So once the object is inserted, look at where it really is: the directory the
+ * object manager recorded for its name must be this session's WindowStations directory.
+ */
+static
+NTSTATUS
+IntCheckWindowStationLanded(
+    _In_ HWINSTA hWinSta)
+{
+    PVOID Object, OwnDirectory;
+    POBJECT_HEADER_NAME_INFO NameInfo;
+    NTSTATUS Status;
+
+    Status = ObReferenceObjectByHandle(hWinSta, 0, ExWindowStationObjectType, KernelMode, &Object, NULL);
+    if (!NT_SUCCESS(Status)) return Status;
+
+    /* Unnamed: not in any directory */
+    NameInfo = OBJECT_HEADER_TO_NAME_INFO(OBJECT_TO_OBJECT_HEADER(Object));
+    if (!NameInfo || !NameInfo->Name.Length)
+    {
+        ObDereferenceObject(Object);
+        return STATUS_SUCCESS;
+    }
+
+    if (!ghWinStaDir) Status = STATUS_ACCESS_DENIED;
+    else Status = ObReferenceObjectByHandle(ghWinStaDir, 0, NULL, KernelMode, &OwnDirectory, NULL);
+    if (NT_SUCCESS(Status))
+    {
+        if (NameInfo->Directory != OwnDirectory) Status = STATUS_ACCESS_DENIED;
+        ObDereferenceObject(OwnDirectory);
+    }
+    ObDereferenceObject(Object);
+    return Status;
+}
+
 NTSTATUS
 FASTCALL
 IntCreateWindowStation(
@@ -754,6 +795,8 @@ IntCreateWindowStation(
     HWINSTA hWinSta;
     PWINSTATION_OBJECT WindowStation;
     BOOLEAN Interactive = FALSE;
+    BOOLEAN Existing;
+    NTSTATUS OpenStatus;
 
     TRACE("IntCreateWindowStation called\n");
 
@@ -767,6 +810,7 @@ IntCreateWindowStation(
                                 dwDesiredAccess,
                                 NULL,
                                 (PVOID*)&hWinSta);
+    OpenStatus = Status;
     if (NT_SUCCESS(Status))
     {
         TRACE("IntCreateWindowStation opened window station '%wZ'\n",
@@ -858,19 +902,6 @@ IntCreateWindowStation(
         WindowStation->Flags |= WSS_NOIO;
     }
 
-    /* Create the global WinSta0_DesktopSwitch event
-     * only when creating the interactive WinSta0 */
-    if (Interactive)
-    {
-        Status = IntCreateDesktopSwitchEvent();
-        if (!NT_SUCCESS(Status))
-        {
-            ObDereferenceObject(WindowStation);
-            SetLastNtError(Status);
-            return Status;
-        }
-    }
-
     Status = ObInsertObject(WindowStation,
                             NULL,
                             dwDesiredAccess,
@@ -885,7 +916,61 @@ IntCreateWindowStation(
         return Status;
     }
 
+    /*
+     * With OBJ_OPENIF (user mode can set it) the name may exist by now, e.g. when the open above was refused for
+     * another reason than "not found", or a second session created it meanwhile. ObInsertObject then frees the new
+     * object and returns a handle to the existing one with this success status: WindowStation is gone and must not
+     * be touched again.
+     */
+    Existing = (Status == STATUS_OBJECT_NAME_EXISTS);
+
+    /* A symbolic link or a swapped root handle can still have put it into another session's directory */
+    Status = IntCheckWindowStationLanded(hWinSta);
+    if (!NT_SUCCESS(Status))
+    {
+        ERR("Window station '%wZ' landed outside the session's directory (or cannot be checked), Status 0x%08lx\n",
+            ObjectAttributes->ObjectName, Status);
+        ZwClose(hWinSta); /* The last handle: the object and its name go */
+        SetLastNtError(Status);
+        return Status;
+    }
+
+    if (Existing)
+    {
+        /* The open above was refused for a reason other than "not found" (access denied...): keep that answer,
+           do not hand out the handle the insert gave */
+        if ((OpenStatus != STATUS_OBJECT_NAME_NOT_FOUND) && (OpenStatus != STATUS_OBJECT_PATH_NOT_FOUND))
+        {
+            ZwClose(hWinSta);
+            SetLastNtError(OpenStatus);
+            return OpenStatus;
+        }
+
+        /* Opened an existing window station, as the open above would have: nothing of a new one to set up */
+        TRACE("IntCreateWindowStation opened existing window station '%wZ' handle 0x%p\n",
+              ObjectAttributes->ObjectName, hWinSta);
+        *phWinSta = hWinSta;
+        SetLastNtError(STATUS_SUCCESS);
+        return STATUS_SUCCESS;
+    }
+
     // FIXME! TODO: Add this new window station to a linked list
+
+    /*
+     * Create the global WinSta0_DesktopSwitch event only when creating the interactive WinSta0, and only now:
+     * after a failed insert the session must stay able to get an interactive station later.
+     */
+    if (Interactive)
+    {
+        Status = IntCreateDesktopSwitchEvent();
+        if (!NT_SUCCESS(Status))
+        {
+            /* The station is not interactive yet (InputWindowStation is set below), so closing it is plain */
+            ZwClose(hWinSta);
+            SetLastNtError(Status);
+            return Status;
+        }
+    }
 
     if (Interactive)
     {
