@@ -505,8 +505,9 @@ static VOID Test_SpareCode(VOID)
     ULONG_PTR Stack = (ULONG_PTR)g_StackBuffer;
 
     /* Same idea as Test_Epilog, but UWOP_SPARE_CODE consumes 3 slots.
-     * The unwinder hits ASSERT(FALSE) before advancing i, so on debug
-     * (DBG=1) builds the fix path is unreachable; catch and skip. */
+     * The unwinder used to assert on this code in debug builds, which
+     * stopped the test in the debugger; the handler below stays in case
+     * an unwinder raises an exception for it. */
     RtlZeroMemory(g_StackBuffer, sizeof(g_StackBuffer));
     g_StackBuffer[0] = 0xAAAAAAAAAAAAAAAAULL;
     g_StackBuffer[1] = 0xBBBBBBBBBBBBBBBBULL;
@@ -525,7 +526,7 @@ static VOID Test_SpareCode(VOID)
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
-        skip("UWOP_SPARE_CODE triggered exception 0x%08lx (debug build ASSERT)\n",
+        skip("UWOP_SPARE_CODE triggered exception 0x%08lx\n",
              _SEH2_GetExceptionCode());
     }
     _SEH2_END;

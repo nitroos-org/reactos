@@ -212,20 +212,22 @@ DispatchToUser:
     _SEH2_EXCEPT((FaultRecord = *_SEH2_GetExceptionInformation()->ExceptionRecord),
                  EXCEPTION_EXECUTE_HANDLER)
     {
-        /* The frame with the extended state is about 2.7 KB larger than the one without. If the stack has no
-           room for it, whatever the failure was, try the frame without it first: that one may still fit, and
-           only a failure of that frame is a stack overflow of the thread. */
-        if (HaveXState)
-        {
-            KiFreeXStateContext(&XState);
-            HaveXState = FALSE;
-            _SEH2_YIELD(goto DispatchToUser);
-        }
-
         /* Check if we got a stack overflow and raise that instead. The
-           overflow committed the rest of the stack, so one retry is enough. */
+           overflow committed the rest of the stack, so one retry is enough.
+           This comes before the retry without the extended state below: the
+           write hit the last guard page, which is gone now, so the overflow
+           is raised only this once. Delivering the original exception in a
+           smaller frame instead would lose it, and the thread would later
+           fault on the last page with a plain access violation. */
         if (((NTSTATUS)FaultRecord.ExceptionCode == STATUS_STACK_OVERFLOW) && !Retried)
         {
+            /* A stack overflow leaves what is left of the stack to the handlers */
+            if (HaveXState)
+            {
+                KiFreeXStateContext(&XState);
+                HaveXState = FALSE;
+            }
+
             /* Keep the address of the original exception. The caller's
                record is replaced, so a second chance sees the overflow too. */
             FaultRecord.ExceptionAddress = ExceptionRecord->ExceptionAddress;
@@ -234,6 +236,16 @@ DispatchToUser:
             Retried = TRUE;
 
             /* Do the exception again */
+            _SEH2_YIELD(goto DispatchToUser);
+        }
+
+        /* The frame with the extended state is about 2.7 KB larger than the one without. If the stack has no
+           room for it for another reason, try the frame without it: that one may still fit, and a stack
+           overflow while writing that frame is raised as above. */
+        if (HaveXState)
+        {
+            KiFreeXStateContext(&XState);
+            HaveXState = FALSE;
             _SEH2_YIELD(goto DispatchToUser);
         }
 
