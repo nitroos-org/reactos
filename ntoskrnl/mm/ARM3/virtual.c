@@ -3623,11 +3623,18 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
             goto FailPath;
         }
 
-        /* Check if data or page file mapping protection PTE is compatible */
-        if (!Vad->ControlArea->u.Flags.Image)
+        /*
+         * A data or page file view cannot be given more access than it was mapped with (Windows 10:
+         * STATUS_SECTION_PROTECTION). The old protection is still reported, as it is for a change that
+         * succeeds.
+         */
+        if (!Vad->ControlArea->u.Flags.Image &&
+            !MiIsViewProtectionCompatible(Vad->u.VadFlags.Protection, ProtectionMask))
         {
-            /* Not yet */
-            DPRINT1("Fixme: Not checking for valid protection\n");
+            DPRINT("Protection 0x%lx exceeds the view protection\n", NewAccessProtection);
+            if (OldAccessProtection) *OldAccessProtection = MmProtectToValue[Vad->u.VadFlags.Protection];
+            Status = STATUS_SECTION_PROTECTION;
+            goto FailPath;
         }
 
         /*
@@ -6755,6 +6762,19 @@ RetryCommit:
         {
             DPRINT1("Invalid page protection for rotate VAD\n");
             Status = STATUS_INVALID_PAGE_PROTECTION;
+            goto FailPath;
+        }
+
+        //
+        // The protection of the pages must fit the protection the view was mapped with
+        // (Windows 10: STATUS_SECTION_PROTECTION, e.g. committing PAGE_READONLY in a
+        // PAGE_NOACCESS view)
+        //
+        if ((FoundVad->u.VadFlags.VadType != VadRotatePhysical) &&
+            !MiIsViewProtectionCompatible(FoundVad->u.VadFlags.Protection, ProtectionMask))
+        {
+            DPRINT("Commit protection 0x%lx exceeds the view protection\n", Protect);
+            Status = STATUS_SECTION_PROTECTION;
             goto FailPath;
         }
 
