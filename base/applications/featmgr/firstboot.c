@@ -159,6 +159,10 @@ static void ShowFirstBootNotices(LPCWSTR logFile)
 {
     FM_FEATURE *feats;
     int nf = FmEnumFeatures(&feats), i;
+    DWORD acked = 0;
+    /* NoticesAcknowledged=1: an unattended setup whose answer file says [Unattend] AcknowledgeAddonNotices = yes
+     * (written by syssetup). The administrator accepted on the users' behalf: no box, but the entry counts as shown. */
+    GetDw(L"NoticesAcknowledged", &acked);
     for (i = 0; i < nf; i++)
     {
         WCHAR val[96], msg[1100];
@@ -167,6 +171,11 @@ static void ShowFirstBootNotices(LPCWSTR logFile)
         StringCchPrintfW(val, ARRAYSIZE(val), L"NoticeShown.%s", feats[i].Id);
         if (GetDw(val, &shown) && shown) continue;
         SetDw(val, 1);                                   /* before the box: it stays up until somebody closes it */
+        if (acked)
+        {
+            FmLogLine(logFile, L"first boot: the notice of %s was acknowledged by the answer file, not shown", feats[i].Id);
+            continue;
+        }
         FmLogLine(logFile, L"first boot: showing the notice of %s", feats[i].Id);
         StringCchPrintfW(msg, ARRAYSIZE(msg), L"%s\n\nThis was turned on for you at first boot. You can turn it off any time in Optional Features (Start menu).",
                          feats[i].Notice);
