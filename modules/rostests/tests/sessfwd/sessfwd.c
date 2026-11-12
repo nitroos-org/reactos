@@ -28,8 +28,8 @@
  *              the slowest create and the private bytes and handles of SMSS
  *              and of the csrss of that session. Session 0 is the control:
  *              the same creates in the service's own session, no forward.
- *              "detached": no console children (consrv leaks a desktop
- *              handle per console, which exhausts session 1 after about 650).
+ *              "detached": no console children (the old session-1 limit of about 650
+ *              console children is gone; this keeps the forward path alone).
  * COPYRIGHT:   Copyright 2026 Tomas Srnka
  */
 

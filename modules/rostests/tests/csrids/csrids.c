@@ -469,6 +469,50 @@ ProcessLeakTests(VOID)
 }
 
 /*
+ * Every console created for a process that has none (a child of a service) opens a desktop handle for the
+ * console input thread of its desktop. The thread cannot close the handle it is assigned to, so once it
+ * left the desktop first the handle must go with the thread. With the handle left behind, csrss grows by one
+ * Desktop handle per console child (and in a session without a shared desktop heap view the heaps run out
+ * after a few hundred). Readable in the LocalSystem service run only: the service has no console, so each
+ * child below gets one of its own (no DETACHED_PROCESS).
+ */
+#define CONSOLE_CHILDREN 20
+
+static
+VOID
+ConsoleChildLeakTest(VOID)
+{
+    WCHAR Self[MAX_PATH], CommandLine[MAX_PATH + 16];
+    STARTUPINFOW StartupInfo = { sizeof(StartupInfo) };
+    PROCESS_INFORMATION ProcessInfo;
+    DWORD Before, After, I, Code, Bad = 0;
+
+    Before = CsrssHandleCount();
+    if (!Before)
+    {
+        Log("CSRIDS console-child-no-handle-leak: csrss handle count not readable SKIP\n");
+        return;
+    }
+
+    GetModuleFileNameW(NULL, Self, MAX_PATH);
+    _snwprintf(CommandLine, RTL_NUMBER_OF(CommandLine), L"\"%s\" child", Self);
+    for (I = 0; I < CONSOLE_CHILDREN; I++)
+    {
+        if (!CreateProcessW(NULL, CommandLine, NULL, NULL, FALSE, 0, NULL, NULL, &StartupInfo, &ProcessInfo)) { Bad++; continue; }
+        Code = 0;
+        WaitForSingleObject(ProcessInfo.hProcess, 20000);
+        GetExitCodeProcess(ProcessInfo.hProcess, &Code);
+        if (Code != CHILD_OK) Bad++;
+        CloseHandle(ProcessInfo.hProcess);
+        CloseHandle(ProcessInfo.hThread);
+    }
+    Sleep(1500);
+    After = CsrssHandleCount();
+    Log("CSRIDS console-child-no-handle-leak: %lu children, %lu failed; csrss handles %lu -> %lu\n", (DWORD)CONSOLE_CHILDREN, Bad, Before, After);
+    Check("console-child-no-handle-leak", (!Bad && After <= Before + 8) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL, STATUS_SUCCESS);
+}
+
+/*
  * rvcsrss 2: the create-time branch of BaseSrvCheckNewProcess. A spawner process creates an unregistered
  * child and exits; once its pid is free we create processes until one gets that pid. That process names the
  * orphan as its new process: the parent pid matches, but the orphan is older than it: refused.
@@ -662,6 +706,7 @@ Tests(BOOL System)
     ThreadTests();
     DeadThreadTests();
     ProcessLeakTests();
+    ConsoleChildLeakTest();
     PidReuseTest();
     if (System) SbTests();
     Log("CSRIDS done failures=%lu\n", Failures);
