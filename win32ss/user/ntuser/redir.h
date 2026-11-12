@@ -27,6 +27,8 @@ BOOL FASTCALL UserRedirKeepOnHide(PWND Wnd);
 VOID FASTCALL UserRedirLayoutChanged(PWND Wnd, const RECTL *prcOld);
 VOID FASTCALL UserRedirLayeredSet(PWND Wnd, BOOL bFirst);
 BOOL FASTCALL UserRedirLayeredFits(PWND Wnd, LONG cx, LONG cy);
+VOID FASTCALL UserRedirLayeredNoSurface(PWND Wnd);
+BOOL FASTCALL UserRedirLayeredHasSize(PWND Wnd, LONG cx, LONG cy);
 VOID FASTCALL UserRedirUlwSeen(PWND Wnd);
 VOID FASTCALL UserRedirFreeFrameBuffer(VOID);
 BOOL FASTCALL UserRedirUpdateLayered(PWND Wnd, const RECTL *prcOld, HDC hdcSrc, const POINT *pptSrc, const RECT *prcDirty,

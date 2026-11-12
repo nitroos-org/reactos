@@ -242,16 +242,34 @@ BOOL
 FASTCALL
 UserRedirLayeredFits(PWND Wnd, LONG cx, LONG cy)
 {
-    PREDIR r;
-    SIZE_T cjNew;
-
     if (gRedirLevel < 2 || !Wnd || !Wnd->spwndParent || !UserIsDesktopWindow(Wnd->spwndParent) || UserIsMessageWindow(Wnd))
         return FALSE;
-    if (cx <= 0 || cy <= 0 || cx > REDIR_MAX_SIDE || cy > REDIR_MAX_SIDE)
+    return RedirSizeAllowed(UserGetProp(Wnd, AtomRedir, TRUE), cx, cy);
+}
+
+/* layered.c, level 2: Wnd has a record with a surface of exactly cx x cy (UserRedirGet allocates nothing for it) */
+BOOL
+FASTCALL
+UserRedirLayeredHasSize(PWND Wnd, LONG cx, LONG cy)
+{
+    PREDIR r;
+
+    if (gRedirLevel < 2 || !Wnd)
         return FALSE;
     r = UserGetProp(Wnd, AtomRedir, TRUE);
-    cjNew = (SIZE_T)cx * cy * 4;
-    return gRedirBytes - (r ? r->cjBits : 0) + cjNew <= gRedirBudget;
+    return r && r->psurf && r->cx == cx && r->cy == cy;
+}
+
+/*
+ * layered.c, level 2: UpdateLayeredWindow takes the snapshot path for Wnd (no surface of the new size is possible). A
+ * record it has holds an older picture of the window: drop it, or compose would draw that over the blend on the screen.
+ */
+VOID
+FASTCALL
+UserRedirLayeredNoSurface(PWND Wnd)
+{
+    if (gRedirLevel >= 2)
+        UserRedirDetachWindow(Wnd);
 }
 
 /* The top-level window whose surface a DC of Wnd draws into, or NULL (not redirected) */
@@ -527,8 +545,7 @@ UserRedirGet(PWND Root)
         return r;
 
     cjNew = (SIZE_T)max(cx, 0) * max(cy, 0) * 4;
-    if (cx <= 0 || cy <= 0 || cx > REDIR_MAX_SIDE || cy > REDIR_MAX_SIDE ||
-        gRedirBytes - (r ? r->cjBits : 0) + cjNew > gRedirBudget)
+    if (!RedirSizeAllowed(r, cx, cy))
     {
         TRACE("Redirection: %p (%ld x %ld) not redirected, %Iu of %Iu bytes in use\n", Root, cx, cy, gRedirBytes, gRedirBudget);
         gRedirRefused++;
@@ -955,8 +972,8 @@ RedirCompose(PWND Desk, PREGION Damage)
     gRedirComposes++;
     if (gRedirDebug)
     {
-        DbgPrint("win32k: redirection compose %lu: (%ld,%ld)-(%ld,%ld), %lu layers\n", gRedirComposes,
-                 rcBox.left, rcBox.top, rcBox.right, rcBox.bottom, cEntries);
+        DbgPrint("win32k: redirection compose %lu: (%ld,%ld)-(%ld,%ld), %lu layers, %Iu of %Iu bytes in use\n", gRedirComposes,
+                 rcBox.left, rcBox.top, rcBox.right, rcBox.bottom, cEntries, gRedirBytes, gRedirBudget);
     }
 
 done:
