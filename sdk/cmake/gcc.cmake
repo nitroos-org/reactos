@@ -354,6 +354,19 @@ set(CMAKE_RC_CREATE_SHARED_MODULE ${CMAKE_RC_CREATE_SHARED_LIBRARY})
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS_INIT} -Wl,--disable-stdcall-fixup,--gc-sections")
 set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS_INIT} -Wl,--disable-stdcall-fixup")
 set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS_INIT} -Wl,--disable-stdcall-fixup")
+if(NITRO_REPRODUCIBLE_BUILD)
+    # __DATE__ / __TIME__ (ntoskrnl xipdisp.c, ext2fs, ACPICA ...) become the build time given by SOURCE_DATE_EPOCH
+    string(TIMESTAMP _nitro_date "%b %d %Y" UTC)
+    string(TIMESTAMP _nitro_time "%H:%M:%S" UTC)
+    string(REGEX REPLACE " 0([0-9]) " "  \\1 " _nitro_date "${_nitro_date}")
+    add_compile_options(-Wno-builtin-macro-redefined "-D__DATE__=\"${_nitro_date}\"" "-D__TIME__=\"${_nitro_time}\"")
+endif()
+if(NITRO_REPRODUCIBLE_BUILD)
+    # ld would write the link time into every PE header (and its debug directory): 0 instead
+    foreach(_nitro_lf CMAKE_EXE_LINKER_FLAGS CMAKE_SHARED_LINKER_FLAGS CMAKE_MODULE_LINKER_FLAGS)
+        set(${_nitro_lf} "${${_nitro_lf}} -Wl,--no-insert-timestamp")
+    endforeach()
+endif()
 
 set(CMAKE_C_COMPILE_OBJECT "<CMAKE_C_COMPILER> <DEFINES> ${_compress_debug_sections_flag} <INCLUDES> <FLAGS> -o <OBJECT> -c <SOURCE>")
 # FIXME: Once the GCC toolchain bugs are fixed, add _compress_debug_sections_flag to CXX too

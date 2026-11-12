@@ -7,6 +7,7 @@
  */
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include <time.h>
 #include <ctype.h>
 #include "fatfs/ff.h"
@@ -25,6 +26,9 @@ DWORD get_fattime(void)
     time_t rawtime;
     struct tm * timeinfo;
 
+    /* reproducible images: SOURCE_DATE_EPOCH (seconds since 1970) replaces the clock */
+    const char *sde = getenv("SOURCE_DATE_EPOCH");
+    if (sde && *sde) rawtime = (time_t)strtoull(sde, NULL, 10); else
     time(&rawtime);
     timeinfo = localtime(&rawtime);
 

@@ -19,7 +19,7 @@ list(APPEND SOURCE
     testdb.xml)
 
 add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/testdb.sdb
-                   COMMAND native-xml2sdb -i ${CMAKE_CURRENT_SOURCE_DIR}/testdb.xml -o ${CMAKE_CURRENT_BINARY_DIR}/testdb.sdb
+                   COMMAND native-xml2sdb ${XML2SDB_EPOCH} -i ${CMAKE_CURRENT_SOURCE_DIR}/testdb.xml -o ${CMAKE_CURRENT_BINARY_DIR}/testdb.sdb
                    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/testdb.xml native-xml2sdb)
 
 add_rc_deps(testdata.rc ${CMAKE_CURRENT_BINARY_DIR}/testdb.sdb)

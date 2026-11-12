@@ -997,7 +997,9 @@ main(int argc, char *argv[])
 	errx(1, "%s: --offset is invalid with UEFI images\n", argv[0]);
 #endif
 
-    srand((unsigned int)time(NULL) << (getppid() << getpid()));
+    { const char *sde = getenv("SOURCE_DATE_EPOCH");   /* reproducible ISO: a seed (and so the MBR id) derived from it */
+      if (sde && *sde) srand((unsigned int)strtoul(sde, NULL, 10)); else
+    srand((unsigned int)time(NULL) << (getppid() << getpid())); }
 
     if (!(fp = fopen(argv[0], "rb+")))
         err(1, "could not open file `%s'", argv[0]);

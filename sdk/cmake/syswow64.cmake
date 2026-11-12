@@ -163,6 +163,11 @@ function(setup_syswow64)
         endif()
     endforeach()
 
+    if(NITRO_REPRODUCIBLE_BUILD)
+        # the 32-bit guest tree is configured later in a separate cmake run: hand it the same build time
+        list(APPEND _args -DNITRO_REPRODUCIBLE_BUILD=ON -DNITRO_STABLE_BUILD_ID=${NITRO_STABLE_BUILD_ID} -DSOURCE_DATE_EPOCH=$ENV{SOURCE_DATE_EPOCH})
+    endif()
+
     set(_guest_dir ${REACTOS_BINARY_DIR}/syswow64-i386)
     set(_manifest ${_guest_dir}/syswow64-guest.${CMAKE_BUILD_TYPE}.lst)
 
