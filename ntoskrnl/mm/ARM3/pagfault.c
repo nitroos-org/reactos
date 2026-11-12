@@ -1091,8 +1091,10 @@ MiResolvePageFileFault(_In_ BOOLEAN StoreInstruction,
                        _In_ PVOID FaultingAddress,
                        _In_ PMMPTE PointerPte,
                        _In_ PEPROCESS CurrentProcess,
+                       _In_ BOOLEAN UserTrap,
                        _Inout_ KIRQL *OldIrql)
 {
+    PETHREAD Thread = PsGetCurrentThread();
     ULONG Color;
     PFN_NUMBER Page;
     NTSTATUS Status;
@@ -1135,6 +1137,30 @@ MiResolvePageFileFault(_In_ BOOLEAN StoreInstruction,
         MiUserFaultMustLeavePages() &&
         MiCanFaultWaitForPages())
     {
+        return STATUS_NO_MEMORY;
+    }
+
+    /*
+     * A user-mode fault whose next page would be read with it, but whose read-ahead the margin would cut,
+     * gives its locks back and waits for a balancer pass first, as a fault below the floor does. A process
+     * that pages a large working set back in holds the usable pages at the margin with its own faults,
+     * and the balancer can trim it only while none of its faults holds its working set lock (the lock
+     * stays held across the read): without the wait, nearly every read was a single page, and a paging
+     * request costs about the same for one page as for a cluster. Once per page-file read of the thread
+     * (the read clears the flag): the retry goes on with whatever it finds.
+     */
+    if (UserTrap &&
+        !Thread->PagerReadAheadWaited &&
+        !(MiNitroPagerDebug & MI_PAGER_DEBUG_NO_READAHEAD) &&
+        (MiGetUsablePageCount() <= MI_PAGER_READAHEAD_WAIT_PAGES) &&
+        !MiIsPteOnPdeBoundary(PointerPte + 1) &&
+        MI_IS_PAGEFILE_PTE(PointerPte + 1) &&
+        ((ULONG)PointerPte[1].u.Soft.PageFileLow == PageFileIndex) &&
+        (MI_PAGEFILE_PTE_SLOT(PointerPte + 1) == Slot + 1) &&
+        MiCanFaultWaitForPages())
+    {
+        Thread->PagerReadAheadWaited = 1;
+        MiPagerCounters.ReadAheadWaits++;
         return STATUS_NO_MEMORY;
     }
 
@@ -1255,6 +1281,9 @@ MiResolvePageFileFault(_In_ BOOLEAN StoreInstruction,
         }
         MiPagingIoDone();
     }
+
+    /* This thread read (or tried to): its next fault may wait for read-ahead pages again */
+    Thread->PagerReadAheadWaited = 0;
 
     /* Lock the PFN database again */
     *OldIrql = MiAcquirePfnLock();
@@ -1826,7 +1855,8 @@ MiDispatchFault(IN ULONG FaultCode,
                 IN BOOLEAN Recursive,
                 IN PEPROCESS Process,
                 IN PVOID TrapInformation,
-                IN PMMVAD Vad)
+                IN PMMVAD Vad,
+                IN KPROCESSOR_MODE Mode)
 {
     MMPTE TempPte;
     KIRQL OldIrql, LockIrql;
@@ -2121,7 +2151,8 @@ MiDispatchFault(IN ULONG FaultCode,
         LockIrql = MiAcquirePfnLock();
 
         /* Resolve */
-        Status = MiResolvePageFileFault(!MI_IS_NOT_PRESENT_FAULT(FaultCode), Address, PointerPte, Process, &LockIrql);
+        Status = MiResolvePageFileFault(!MI_IS_NOT_PRESENT_FAULT(FaultCode), Address, PointerPte, Process,
+                                        (Mode == UserMode), &LockIrql);
 
         /* And now release the lock and leave*/
         MiReleasePfnLock(LockIrql);
@@ -2599,7 +2630,8 @@ _WARN("Session space stuff is not implemented yet!")
                                  FALSE,
                                  CurrentProcess,
                                  TrapInformation,
-                                 NULL);
+                                 NULL,
+                                 Mode);
 
         /* Release the working set */
         ASSERT(KeAreAllApcsDisabled() == TRUE);
@@ -3174,7 +3206,8 @@ UserFault:
                              FALSE,
                              CurrentProcess,
                              TrapInformation,
-                             Vad);
+                             Vad,
+                             Mode);
 
 ExitUser:
 
