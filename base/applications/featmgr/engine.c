@@ -371,6 +371,8 @@ static BOOL LoadManifestEx(LPCWSTR path, FM_FEATURE *f, BOOL fast)
     f->Tier = ParseTier(tmp);
     IniGet(&ini, L"Feature", L"Removable", L"1", tmp, 16);
     f->Removable = _wtoi(tmp) != 0;
+    IniGet(&ini, L"Feature", L"FirstBootDefault", L"0", tmp, 16);
+    f->FirstBootDefault = _wtoi(tmp) != 0;
     /* [Install] Provider= selects the software-tier install path. A software-tier
      * manifest without it keeps the OS-tier mechanics ([Payload]/[Registry]/[Service]
      * applied from a staged payload), so older/hand-written manifests still work. */
@@ -400,7 +402,7 @@ static BOOL LoadManifestEx(LPCWSTR path, FM_FEATURE *f, BOOL fast)
                 IniGet(&ini, L"Rapps", L"Pkg", L"", pk, ARRAYSIZE(pk));
                 IniGet(&ini, L"Rapps", L"RegName", L"", f->RegName, ARRAYSIZE(f->RegName));
                 if (!f->RegName[0]) IniGet(&ini, L"Rapps", L"UninstallName", L"", f->RegName, ARRAYSIZE(f->RegName));
-                /* entries from the RAPPS catalog say "rapps", the hand-written ones (PowerShell 7, Claude Desktop) "native" */
+                /* entries from the RAPPS catalog say "rapps", the hand-written ones (PowerShell 7) "native" */
                 StringCchCopyW(f->Source, ARRAYSIZE(f->Source), pk[0] && !_wcsnicmp(f->Id, L"rapps-", 6) ? L"rapps" : L"native");
             }
             else
@@ -568,6 +570,12 @@ static BOOL HostedBaseUrl(LPCWSTR manifest, LPWSTR out, DWORD cch)
     n = wcslen(out);
     while (n && out[n - 1] == L'/') out[--n] = L'\0';
     return out[0] != L'\0';
+}
+
+/* An address on the pack host to probe for network access (first boot): the pack base URL ("" = none). */
+BOOL FmHostedProbeUrl(LPCWSTR manifest, LPWSTR out, DWORD cch)
+{
+    return HostedBaseUrl(manifest, out, cch) && !_wcsnicmp(out, L"https://", 8);
 }
 
 /* Total size of a hosted pack's [Download] files (0: none / not a hosted pack). */
