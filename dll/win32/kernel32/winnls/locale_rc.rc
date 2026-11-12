@@ -300,3 +300,7 @@
 #include "nls/ast.nls"   /* 0x04a5  LANG_ASTURIAN, SUBLANG_DEFAULT */
 
 #include "nls/ivl.nls"   /* 0x047f  LANG_INVARIANT, SUBLANG_NEUTRAL */
+
+/* Locales of the [MS-LCID] Language ID table that CLDR has data for (sdk/tools/nlsgen/add_locales.py) */
+
+#include "locale_rc_added.rc"

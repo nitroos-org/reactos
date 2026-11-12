@@ -129,3 +129,28 @@ locale ids (a default region is not its own id: `cs`, not `cs-CZ`). Not generate
 variants (Hans/Hant/Cyrl/Latn...), 28 neutral languages with modern coverage. Reason: a locale needs an identity that CLDR does not carry (LCID, code pages, GEOID, calling code,
 Windows abbreviations: `data/skeleton.json`, taken from the Wine-era tables of those 146 files), and the public source for it (MS-LCID, ISO 3166) was not applied in this round. Adding locales is a
 data-entry job on `skeleton.json` plus the registry/LCID tables; it is not a mapping-rule change and does not move the .NET culture lines of the 20 test cultures.
+
+## Round 5 (2026.11-2, lane nlsloc): more locales, from the [MS-LCID] Language ID table
+The identity of a locale that CLDR does not carry (LCID, LANGUAGE/SUBLANG, default code pages, GEOID, calling code, abbreviations,
+OpenType tag, font signature) comes from `add_locales.py`, which appends entries (`"added": true`) to `data/skeleton.json`; `nlsgen.py` then
+generates `nls/<tag>.nls` (lower-case tag, e.g. `en-in.nls`) like for the first 146, and the `#include` list `winnls/locale_rc_added.rc`
+(`--rc-list`). 85 locales were added (231 generated, 238 `.nls` files with the 7 hand-written ones); the 146 earlier files are byte-identical.
+
+* LCID and name: `data/ms-lcid.tsv` = the Language ID table of [MS-LCID] (revision 2024-04-23, learn.microsoft.com/en-us/openspecs/windows_protocols/ms-lcid/63d3d639-7fd2-4afb-abbe-0d5b5551eef8,
+  retrieved 2026-11-12). Rule: an entry with a language-region(-script) tag, a 16-bit LCID, no `reserved`/sort-order marker, for which CLDR has data for
+  the language (or the tag itself), and whose LCID/name is not in the skeleton yet. LANGUAGE/SUBLANG are the numeric low 10 / high 6 bits of the LCID.
+* GEOID: `data/geo-ids.tsv` (Windows "Table of Geographical Locations", page of 2025-03-11) matched by the CLDR English territory name (five names mapped by hand in `GEO_NAME`);
+  the region of an existing locale keeps that locale's GEOID, calling code and ISO 3166 alpha-3 (CLDR `codeMappings` otherwise). Calling codes of the 27 new territories: ITU-T E.164 (`REGION_CALLING`).
+* Default code pages (ANSI/OEM/MAC/EBCDIC), abbreviations, OpenType tag: **[MS-LCID] does not list code pages** (it maps LCID to tag only). A new locale of a language that has an entry
+  (same script) takes the values of that entry (a region variant has the language's code pages); a new language gets the defaults of its script
+  (Latin 1252/850/10000/500, Cyrillic 1251/866/10007/20880, Arabic 1256/720/10004/20420, scripts without an ANSI page 0/1/2/500 as hi-IN, ka-GE, si-LK; `tk`, `fil`, `ii` have their own),
+  the ISO 639-2/T code (Library of Congress) in upper case as `SABBREVLANGNAME` and as OpenType tag. These are derived, not measured: see "VERIFY ON ORACLE" in the lane evidence.
+* `LOCALE_FONTSIGNATURE`: the signature of an existing locale with the same ANSI code page (language sibling first); for scripts without a sibling the bit of the script in the Unicode subset
+  (OpenType OS/2 `ulUnicodeRange`) is added.
+* Not added (listed in the evidence): CLDR ids without an [MS-LCID] entry (Windows gives them LOCALE_CUSTOM_UNSPECIFIED 0x1000; the lane brief says to skip them unless Windows is shown to enumerate them by name; 417 ids, e.g. `en-AG`, `fr-GP`,
+  `de-BE`); [MS-LCID] entries without CLDR data (`ts-ZA`, `ve-ZA`, `iu-*`, `quz-*`, `kr-Latn-NG`, `gn-PY`, `la-VA`, `arn-CL`, `moh-CA`, `co-FR`, `prs-AF`, `smj-*`, `sma-*`, `sms-FI`);
+  `ku-Arab-IQ` (0x0492 is the language id of the hand-written Cornish file `cor.nls`: two resources with one id are ambiguous); regions without an ISO 3166 code (`yi-001`, `fr-029`, `es-419`);
+  neutral locales (language or language+script tags: `zh-Hant`, `sr-Cyrl`, ...), which the rtl locale table (`sdk/lib/rtl/locale.c`) already names.
+* `ca-ES-valencia`: the CLDR variant `ca-ES-valencia` is the first element of the locale chain.
+* i386 images: kernel32 grows by 0x37000 bytes of `SizeOfImage` (0x3ae000 -> 0x3e5000, i386 Debug), about 2.6 KB per locale (string table + `calendar_data.c`); see `sdk/cmake/baseaddress.cmake`.
+* The ICU data package (`dll/3rdparty/icu/data/icudtl.dat`, 253 names) is NOT regenerated: it lists the locales kernel32 knows; growing it is `build-filtered-data.sh` with the new names (binary change, not part of this round).
