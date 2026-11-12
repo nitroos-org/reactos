@@ -193,6 +193,7 @@ void PerfDataRefresh(void)
     SYSTEM_TIMEOFDAY_INFORMATION               SysTimeInfo;
     SYSTEM_FILECACHE_INFORMATION               SysCacheInfo;
     SYSTEM_HANDLE_INFORMATION                  SysHandleInfoData;
+    ULONG                                      ReturnLength;
     PSYSTEM_PROCESSOR_PERFORMANCE_INFORMATION  SysProcessorTimeInfo;
     LONGLONG                                   TotalBusyKernelTime;
     LONGLONG                                   TotalRunTime;
@@ -229,13 +230,20 @@ void PerfDataRefresh(void)
     }
 
     /* Get handle information
-     * Number of handles is enough, no need for data array.
+     * Number of handles is enough, no need for data array. The query is made with a buffer that holds only
+     * the header and one entry, so it fails with STATUS_INFO_LENGTH_MISMATCH; the system reports the size the
+     * full table needs in ReturnLength, and the entry count follows from it. Do not read NumberOfHandles of a
+     * failed query: it only counts the entries that fit into the buffer.
      */
-    status = NtQuerySystemInformation(SystemHandleInformation, &SysHandleInfoData, sizeof(SysHandleInfoData), NULL);
+    ReturnLength = 0;
+    status = NtQuerySystemInformation(SystemHandleInformation, &SysHandleInfoData, sizeof(SysHandleInfoData), &ReturnLength);
     /* On unexpected error, reuse previous value.
      * STATUS_SUCCESS (0-1 handle) should never happen.
      */
-    if (status != STATUS_INFO_LENGTH_MISMATCH)
+    if (status == STATUS_INFO_LENGTH_MISMATCH && ReturnLength >= FIELD_OFFSET(SYSTEM_HANDLE_INFORMATION, Handles))
+        SysHandleInfoData.NumberOfHandles = (ReturnLength - FIELD_OFFSET(SYSTEM_HANDLE_INFORMATION, Handles)) /
+                                            sizeof(SYSTEM_HANDLE_TABLE_ENTRY_INFO);
+    else
         SysHandleInfoData.NumberOfHandles = SystemNumberOfHandles;
 
     /* Get process information
