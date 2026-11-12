@@ -102,6 +102,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_io/IoMdl.c
     ntos_io/IoNonFileName.c
     ntos_io/IoCreateSystemThread.c
+    ntos_io/IoWMINotification.c
     ntos_io/IoPnpEventQueue.c
     ntos_io/IoVolume.c
     ntos_kd/KdSystemDebugControl.c
