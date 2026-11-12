@@ -27,11 +27,20 @@
 
 #define DRIVER_VERSION 1
 
-// 1/2 packet early RX, 512 byte FIFO threshold, 32K RX buffer, unlimited DMA bursts, WRAP
-#define RC_VAL (0x800B780)
+// No early RX (the receive path only handles completed packets), 512 byte FIFO threshold,
+// 32K RX buffer, unlimited DMA bursts, WRAP
+#define RC_VAL (0x000B780)
 
 // 2048 byte DMA bursts
 #define TC_VAL (0x700)
+
+struct _RTL_ADAPTER;
+typedef struct _NIC_EVENTS {
+    struct _RTL_ADAPTER *Adapter;
+    USHORT Pending;
+    BOOLEAN LinkChange;
+    ULONG MediaState;
+} NIC_EVENTS, *PNIC_EVENTS;
 
 typedef struct _RTL_ADAPTER {
     NDIS_HANDLE MiniportAdapterHandle;
@@ -72,6 +81,8 @@ typedef struct _RTL_ADAPTER {
     UCHAR DirtyTxDesc;
     UCHAR CurrentTxDesc;
     BOOLEAN TxFull;
+    BOOLEAN TxStarved;
+    PNDIS_PACKET TxPackets[TX_DESC_COUNT];
     PUCHAR RuntTxBuffers;
     NDIS_PHYSICAL_ADDRESS RuntTxBuffersPa;
 
@@ -153,6 +164,12 @@ VOID
 NTAPI
 NICAcknowledgeInterrupts (
     IN PRTL_ADAPTER Adapter
+    );
+
+BOOLEAN
+NTAPI
+NICFetchEvents (
+    IN PVOID SynchronizeContext
     );
 
 VOID

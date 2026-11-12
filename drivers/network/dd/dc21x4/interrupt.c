@@ -432,7 +432,7 @@ DcHandleRxReceivedFrames(
 
         ReceiveArray[PacketsToIndicate++] = Packet;
 
-        if (Adapter->FreeRcbList.Next)
+        if (DC_LEND_RECEIVE_BUFFERS && Adapter->FreeRcbList.Next)
         {
             Rcb->Flags = 0;
             NDIS_SET_PACKET_STATUS(Packet, NDIS_STATUS_SUCCESS);
