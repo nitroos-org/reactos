@@ -2146,6 +2146,54 @@ MiDispatchFault(IN ULONG FaultCode,
     return Status;
 }
 
+#if DBG
+DECLSPEC_NORETURN
+VOID
+NTAPI
+MiBugCheckFaultAtRaisedIrql(IN ULONG FaultCode,
+                            IN PVOID Address,
+                            IN PVOID TrapInformation)
+{
+    PKTRAP_FRAME TrapFrame = NULL;
+    ULONG_PTR Pc = 0, Operation;
+    PLDR_DATA_TABLE_ENTRY LdrEntry;
+    BOOLEAN InKernel;
+
+    /* Some Mm callers pass a marker instead of a trap frame */
+    if (TrapInformation && (TrapInformation != (PVOID)(ULONG_PTR)0xBADBADA3BADBADA3ULL))
+        TrapFrame = TrapInformation;
+    if (TrapFrame)
+    {
+#ifdef _M_IX86
+        Pc = TrapFrame->Eip;
+#elif defined(_M_AMD64)
+        Pc = TrapFrame->Rip;
+#endif
+    }
+
+    /* 0 = read, 1 = write, 8 = execute, as on Windows */
+    if (MI_IS_WRITE_ACCESS(FaultCode)) Operation = 1;
+    else if (MI_IS_INSTRUCTION_FETCH(FaultCode)) Operation = 8;
+    else Operation = 0;
+
+    /* A driver's code is named by DRIVER_IRQL_NOT_LESS_OR_EQUAL */
+    if (Pc && KiPcToFileHeader((PVOID)Pc, &LdrEntry, TRUE, &InKernel))
+    {
+        KeBugCheckEx(DRIVER_IRQL_NOT_LESS_OR_EQUAL,
+                     (ULONG_PTR)Address,
+                     KeGetCurrentIrql(),
+                     Operation,
+                     Pc);
+    }
+
+    KeBugCheckEx(IRQL_NOT_LESS_OR_EQUAL,
+                 (ULONG_PTR)Address,
+                 KeGetCurrentIrql(),
+                 Operation,
+                 Pc);
+}
+#endif
+
 NTSTATUS
 NTAPI
 MmArmAccessFault(IN ULONG FaultCode,
@@ -2216,6 +2264,12 @@ MmArmAccessFault(IN ULONG FaultCode,
                 DbgPrint("MM:***R11 %p, R12 %p SP %p, LR %p\n", TrapFrame->R11, TrapFrame->R12, TrapFrame->Sp, TrapFrame->Lr);
 #endif
             }
+
+#if DBG
+            /* Windows bugchecks here. Release keeps the catchable exception for now: it hid a lock leak. */
+            if (Mode == KernelMode)
+                MiBugCheckFaultAtRaisedIrql(FaultCode, Address, TrapInformation);
+#endif
 
             /* Tell the trap handler to fail */
             return STATUS_IN_PAGE_ERROR | 0x10000000;
