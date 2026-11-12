@@ -256,6 +256,22 @@ MiWaitForFreePages(VOID)
 ULONG MiMaxOomSpinRetries = 1024;
 
 /*
+ * The fault is over (resolved, failed or given up): a thread that waited once for read-ahead pages
+ * (MiResolvePageFileFault) is done with that wait also when the retried fault never reached the read
+ * (the page became valid or went to transition meanwhile, the page had gone, an early error). Without
+ * this the stale flag made the thread's next, unrelated page-file read skip its one wait.
+ */
+FORCEINLINE
+VOID
+MiPagerEndOfFault(VOID)
+{
+    PETHREAD Thread = PsGetCurrentThread();
+
+    if (Thread->PagerReadAheadWaited)
+        Thread->PagerReadAheadWaited = 0;
+}
+
+/*
  * Longest a user thread waits, in total, for a fault on a user address to get
  * a page (100 ns units). Each balancer pass resets the no-progress count, so
  * with nothing the balancer can free a thread that cannot get a page waits
@@ -510,9 +526,9 @@ Again:
     {
         if (MiRetryOutOfMemoryFault(&NoProgressSpins, &WaitStart, Address))
             goto Again;
-        return Status;
     }
 
+    MiPagerEndOfFault();
     return Status;
 
 Arm3Done:
@@ -524,6 +540,7 @@ Arm3Done:
     {
         if (MiRetryOutOfMemoryFault(&NoProgressSpins, &WaitStart, Address))
             goto Again;
+        MiPagerEndOfFault();
         return Status;
     }
 
@@ -531,6 +548,7 @@ Arm3Done:
     if (Status == STATUS_MM_RESTART_OPERATION)
         goto Again;
 
+    MiPagerEndOfFault();
     return Status;
 }
 

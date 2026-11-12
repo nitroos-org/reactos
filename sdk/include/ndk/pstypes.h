@@ -1497,8 +1497,6 @@ typedef struct _ETHREAD
            ULONG PriorityRegionActive:4;
 #else
            ULONG ApcNeeded:1;
-           /* ReactOS: a page-file fault of the thread waited once for read-ahead pages; its next page-file read clears it */
-           ULONG PagerReadAheadWaited:1;
 #endif
         };
         ULONG SameThreadApcFlags;
@@ -1534,6 +1532,13 @@ typedef struct _ETHREAD
 #endif
     /* NtAlertThreadByThreadId / NtWaitForAlertByThreadId: one pending alert (auto-reset) */
     KEVENT AlertByThreadIdEvent;
+    /*
+     * NitroPager: a page-file fault of this thread waited once for a balancer pass before a cluster read
+     * (MiResolvePageFileFault); the read, or the end of the fault (MmAccessFault), clears it. A private
+     * byte of the thread, written only by the thread itself: not a bit of SameThreadApcFlags, whose
+     * layout differs between the pre-Longhorn and the Longhorn+ branches above.
+     */
+    UCHAR PagerReadAheadWaited;
 #endif
 } ETHREAD;
 

@@ -1511,6 +1511,9 @@ MiPagerReport(VOID)
             MiPagerCounters.PacedRequests, MiPagerCounters.PaceBudgetSpent, MiPagerCounters.PaceSlotBusy, MiPagerCounters.WsFloorSkips, MiPagerCounters.InjectedAllocFailures,
             IopReserveIrpUses, MiPagerCounters.InPageClusterReads, MiPagerCounters.InPagePrefetched,
             MiPagerCounters.ReadAheadRetries);
+    /* A second line: DbgPrint cuts a message at 512 bytes, and the first one is that long already */
+    DbgPrint("NitroPager: pager2 copiesdropped %lu readaheadwaits %lu scarce %lu\n",
+             MiPagerCounters.CopiesDropped, MiPagerCounters.ReadAheadWaits, (ULONG)MiPagerSlotsScarce());
     InterlockedExchange(&Busy, 0);
 }
 

@@ -2975,6 +2975,9 @@ extern MI_PAGER_COUNTERS MiPagerCounters;
 /* NitroPagerDebug 0x800 (A/B tests): waitable faults use the flag-0 floor (MmAvailablePages < 128) instead */
 #define MI_PAGER_DEBUG_OLD_FAULT_FLOOR 0x800
 
+/* NitroPagerDebug 0x8000 (A/B tests): a page-file fault never waits for a balancer pass before its read (pager2 follow-up) */
+#define MI_PAGER_DEBUG_NO_FAULT_WAIT 0x8000
+
 /* NitroPagerDebug 0x4000 (A/B tests): a page-file fault reads only its own page */
 #define MI_PAGER_DEBUG_NO_READAHEAD 0x4000
 
