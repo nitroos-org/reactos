@@ -7,12 +7,19 @@
 
 #include "precomp.h"
 #include <sddl.h>
+#include <lm.h>
+#include <ntsecapi.h>
+#include <tlhelp32.h>
 
 /*
  * On Windows a service whose start name is NT SERVICE\<its own name> starts without a password and
  * runs with the service SID S-1-5-80-... as the user of its token. QueryServiceConfig returns the
  * start name as it was given. The process of the service looks at its own token, because the token of
  * a service is not open to an administrator's TOKEN_QUERY on every system.
+ *
+ * The logon of the virtual account has no password, so a service logon of NT SERVICE\<service> must work
+ * only for a caller that holds SeTcbPrivilege (the SCM): a standard user, an administrator without
+ * SeTcbPrivilege and an untrusted LSA connection are refused.
  */
 
 /* Service process side */
@@ -44,6 +51,284 @@ TokenUserMatches(PCWSTR Name)
         CloseHandle(hToken);
     }
     return Ret;
+}
+
+#define NT_STATUS_LOGON_FAILURE ((NTSTATUS)0xC000006D)
+
+typedef NTSTATUS (NTAPI *LSACONNECTUNTRUSTED)(PHANDLE);
+typedef NTSTATUS (NTAPI *LSAREGISTERLOGONPROCESS)(PLSA_STRING, PHANDLE, PLSA_OPERATIONAL_MODE);
+typedef NTSTATUS (NTAPI *LSADEREGISTERLOGONPROCESS)(HANDLE);
+typedef NTSTATUS (NTAPI *LSALOOKUPAUTHENTICATIONPACKAGE)(HANDLE, PLSA_STRING, PULONG);
+typedef NTSTATUS (NTAPI *LSALOGONUSER)(HANDLE, PLSA_STRING, SECURITY_LOGON_TYPE, ULONG, PVOID, ULONG,
+                                       PTOKEN_GROUPS, PTOKEN_SOURCE, PVOID *, PULONG, PLUID, PHANDLE,
+                                       PQUOTA_LIMITS, PNTSTATUS);
+typedef NTSTATUS (NTAPI *LSAFREERETURNBUFFER)(PVOID);
+
+static LSACONNECTUNTRUSTED pLsaConnectUntrusted;
+static LSAREGISTERLOGONPROCESS pLsaRegisterLogonProcess;
+static LSADEREGISTERLOGONPROCESS pLsaDeregisterLogonProcess;
+static LSALOOKUPAUTHENTICATIONPACKAGE pLsaLookupAuthenticationPackage;
+static LSALOGONUSER pLsaLogonUser;
+static LSAFREERETURNBUFFER pLsaFreeReturnBuffer;
+
+/* The service logon of NT SERVICE\<Name> without a password over an LSA handle */
+static NTSTATUS
+ServiceLogon(HANDLE Lsa, PCWSTR Name, PHANDLE Token)
+{
+    static const WCHAR Domain[] = L"NT SERVICE";
+    BYTE Buffer[sizeof(MSV1_0_INTERACTIVE_LOGON) + 256 * sizeof(WCHAR)];
+    PMSV1_0_INTERACTIVE_LOGON Logon = (PMSV1_0_INTERACTIVE_LOGON)Buffer;
+    PWCHAR Ptr = (PWCHAR)(Logon + 1);
+    LSA_STRING PackageName, Origin;
+    TOKEN_SOURCE Source;
+    PVOID Profile = NULL;
+    ULONG ProfileLength = 0, Package = 0;
+    LUID LogonId;
+    QUOTA_LIMITS Quotas;
+    NTSTATUS Status, SubStatus = 0;
+
+    *Token = NULL;
+    RtlZeroMemory(Buffer, sizeof(Buffer));
+    Logon->MessageType = MsV1_0InteractiveLogon;
+    Logon->LogonDomainName.Buffer = Ptr;
+    Logon->LogonDomainName.Length = sizeof(Domain) - sizeof(WCHAR);
+    Logon->LogonDomainName.MaximumLength = sizeof(Domain);
+    RtlCopyMemory(Ptr, Domain, sizeof(Domain));
+    Ptr += _countof(Domain);
+    Logon->UserName.Buffer = Ptr;
+    Logon->UserName.Length = (USHORT)(wcslen(Name) * sizeof(WCHAR));
+    Logon->UserName.MaximumLength = Logon->UserName.Length + sizeof(WCHAR);
+    RtlCopyMemory(Ptr, Name, Logon->UserName.MaximumLength);
+    Ptr += wcslen(Name) + 1;
+    Logon->Password.Buffer = Ptr;
+    Logon->Password.Length = 0;
+    Logon->Password.MaximumLength = sizeof(WCHAR);
+
+    RtlInitString((PSTRING)&PackageName, MSV1_0_PACKAGE_NAME);
+    Status = pLsaLookupAuthenticationPackage(Lsa, &PackageName, &Package);
+    if (Status != STATUS_SUCCESS)
+        return Status;
+
+    RtlInitString((PSTRING)&Origin, "SvcVAcct");
+    RtlCopyMemory(Source.SourceName, "SvcVAcct", 8);
+    AllocateLocallyUniqueId(&Source.SourceIdentifier);
+    Status = pLsaLogonUser(Lsa, &Origin, Service, Package, Logon, (ULONG)((PBYTE)Ptr - Buffer + sizeof(WCHAR)),
+                           NULL, &Source, &Profile, &ProfileLength, &LogonId, Token, &Quotas, &SubStatus);
+    if (Profile)
+        pLsaFreeReturnBuffer(Profile);
+    return Status;
+}
+
+/* The thread impersonates the SYSTEM token of winlogon, the caller that holds SeTcbPrivilege */
+static BOOL
+ImpersonateSystem(VOID)
+{
+    PROCESSENTRY32W Entry;
+    HANDLE Snapshot, Process, Token, Duplicate, Self;
+    TOKEN_PRIVILEGES Privileges;
+    BOOL Done = FALSE, More;
+
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &Self))
+    {
+        Privileges.PrivilegeCount = 1;
+        Privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+        if (LookupPrivilegeValueW(NULL, L"SeDebugPrivilege", &Privileges.Privileges[0].Luid))
+            AdjustTokenPrivileges(Self, FALSE, &Privileges, 0, NULL, NULL);
+        CloseHandle(Self);
+    }
+    Snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (Snapshot == INVALID_HANDLE_VALUE)
+        return FALSE;
+    Entry.dwSize = sizeof(Entry);
+    for (More = Process32FirstW(Snapshot, &Entry); More && !Done; More = Process32NextW(Snapshot, &Entry))
+    {
+        if (_wcsicmp(Entry.szExeFile, L"winlogon.exe") != 0)
+            continue;
+        Process = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, Entry.th32ProcessID);
+        if (!Process)
+            continue;
+        if (OpenProcessToken(Process, TOKEN_DUPLICATE | TOKEN_QUERY, &Token))
+        {
+            if (DuplicateTokenEx(Token, MAXIMUM_ALLOWED, NULL, SecurityImpersonation, TokenImpersonation, &Duplicate))
+            {
+                Done = SetThreadToken(NULL, Duplicate);
+                CloseHandle(Duplicate);
+            }
+            CloseHandle(Token);
+        }
+        CloseHandle(Process);
+    }
+    CloseHandle(Snapshot);
+    return Done;
+}
+
+/* The thread impersonates this process's token without SeTcbPrivilege (an administrator without it) */
+static BOOL
+ImpersonateWithoutTcb(VOID)
+{
+    HANDLE Self, Restricted, Duplicate;
+    TOKEN_PRIVILEGES NoTcb;
+    BOOL Done = FALSE;
+
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, &Self))
+        return FALSE;
+    NoTcb.PrivilegeCount = 1;
+    NoTcb.Privileges[0].Attributes = 0;
+    if (LookupPrivilegeValueW(NULL, L"SeTcbPrivilege", &NoTcb.Privileges[0].Luid) &&
+        CreateRestrictedToken(Self, 0, 0, NULL, 1, NoTcb.Privileges, 0, NULL, &Restricted))
+    {
+        if (DuplicateTokenEx(Restricted, MAXIMUM_ALLOWED, NULL, SecurityImpersonation, TokenImpersonation, &Duplicate))
+        {
+            Done = SetThreadToken(NULL, Duplicate);
+            CloseHandle(Duplicate);
+        }
+        CloseHandle(Restricted);
+    }
+    CloseHandle(Self);
+    return Done;
+}
+
+/* The logon (over a registered logon process, as winlogon or the SCM have it) of the virtual account must
+ * fail for a thread that does not hold SeTcbPrivilege. A refused registration is fine as well (Windows). */
+static VOID
+CheckRefusedAsLogonProcess(PCSTR What, PCWSTR Name)
+{
+    LSA_STRING ProcessName;
+    LSA_OPERATIONAL_MODE Mode;
+    HANDLE Lsa = NULL, Token = NULL;
+    NTSTATUS Status;
+
+    RtlInitString((PSTRING)&ProcessName, "SvcVAcctLogonProcess");
+    Status = pLsaRegisterLogonProcess(&ProcessName, &Lsa, &Mode);
+    if (Status != STATUS_SUCCESS)
+    {
+        trace("%s: LsaRegisterLogonProcess refused: 0x%08lx\n", What, Status);
+        return;
+    }
+    Status = ServiceLogon(Lsa, Name, &Token);
+    ok(Status == NT_STATUS_LOGON_FAILURE, "%s: service logon of NT SERVICE\\%ls returned 0x%08lx, expected 0x%08lx\n",
+       What, Name, Status, NT_STATUS_LOGON_FAILURE);
+    if (Token)
+        CloseHandle(Token);
+    pLsaDeregisterLogonProcess(Lsa);
+}
+
+static VOID
+TestVirtualAccountLogon(PCWSTR Name)
+{
+    static WCHAR UserPassword[] = L"Svc-Acct-Logon-2026!";
+    WCHAR UserName[32];
+    HMODULE Sspicli = LoadLibraryW(L"sspicli.dll");
+    HANDLE Lsa = NULL, Token = NULL, hUser = NULL;
+    LSA_STRING ProcessName;
+    LSA_OPERATIONAL_MODE Mode;
+    NET_API_STATUS NetStatus = NERR_UserExists;
+    NTSTATUS Status;
+    DWORD Err, Try;
+
+    if (Sspicli)
+    {
+        pLsaConnectUntrusted = (LSACONNECTUNTRUSTED)GetProcAddress(Sspicli, "LsaConnectUntrusted");
+        pLsaRegisterLogonProcess = (LSAREGISTERLOGONPROCESS)GetProcAddress(Sspicli, "LsaRegisterLogonProcess");
+        pLsaDeregisterLogonProcess = (LSADEREGISTERLOGONPROCESS)GetProcAddress(Sspicli, "LsaDeregisterLogonProcess");
+        pLsaLookupAuthenticationPackage = (LSALOOKUPAUTHENTICATIONPACKAGE)GetProcAddress(Sspicli, "LsaLookupAuthenticationPackage");
+        pLsaLogonUser = (LSALOGONUSER)GetProcAddress(Sspicli, "LsaLogonUser");
+        pLsaFreeReturnBuffer = (LSAFREERETURNBUFFER)GetProcAddress(Sspicli, "LsaFreeReturnBuffer");
+    }
+    if (!pLsaConnectUntrusted || !pLsaRegisterLogonProcess || !pLsaDeregisterLogonProcess ||
+        !pLsaLookupAuthenticationPackage || !pLsaLogonUser || !pLsaFreeReturnBuffer)
+    {
+        skip("an LSA function is missing\n");
+        return;
+    }
+
+    /* A standard user: LogonUser (advapi32 connects as the caller is; its handle is kept, so this is the first
+     * LogonUser of the process) and the LSA directly */
+    for (Try = 0; Try < 5 && NetStatus == NERR_UserExists; Try++)
+    {
+        USER_INFO_1 Info;
+
+        StringCchPrintfW(UserName, _countof(UserName), L"svcvauser%lx", (GetTickCount() + Try * 7919) & 0xffffff);
+        RtlZeroMemory(&Info, sizeof(Info));
+        Info.usri1_name = UserName;
+        Info.usri1_password = UserPassword;
+        Info.usri1_priv = USER_PRIV_USER;
+        Info.usri1_flags = UF_SCRIPT | UF_DONT_EXPIRE_PASSWD;
+        NetStatus = NetUserAdd(NULL, 1, (PBYTE)&Info, &Err);
+    }
+    if (NetStatus != NERR_Success)
+    {
+        skip("NetUserAdd failed with %lu, the standard user is not tested\n", NetStatus);
+    }
+    else if (!LogonUserW(UserName, L".", UserPassword, LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, &hUser) ||
+             !ImpersonateLoggedOnUser(hUser))
+    {
+        skip("the standard user cannot be impersonated (%lu)\n", GetLastError());
+    }
+    else
+    {
+        BOOL Ret = LogonUserW((PWSTR)Name, L"NT SERVICE", L"", LOGON32_LOGON_SERVICE, LOGON32_PROVIDER_DEFAULT, &Token);
+
+        Err = GetLastError();
+        ok(!Ret, "LogonUser of NT SERVICE\\%ls as a standard user succeeded\n", Name);
+        if (!Ret)
+            ok(Err == ERROR_LOGON_FAILURE, "LogonUser as a standard user failed with %lu, expected %d\n", Err, ERROR_LOGON_FAILURE);
+        if (Ret)
+            CloseHandle(Token);
+        Token = NULL;
+        CheckRefusedAsLogonProcess("standard user", Name);
+        RevertToSelf();
+    }
+    if (hUser)
+        CloseHandle(hUser);
+    if (NetStatus == NERR_Success)
+        NetUserDel(NULL, UserName);
+
+    /* No SeTcbPrivilege: an untrusted connection (a standard user's) */
+    Status = pLsaConnectUntrusted(&Lsa);
+    ok(Status == STATUS_SUCCESS, "LsaConnectUntrusted failed: 0x%08lx\n", Status);
+    if (Status == STATUS_SUCCESS)
+    {
+        Status = ServiceLogon(Lsa, Name, &Token);
+        ok(Status == NT_STATUS_LOGON_FAILURE, "untrusted: service logon of NT SERVICE\\%ls returned 0x%08lx, expected 0x%08lx\n",
+           Name, Status, NT_STATUS_LOGON_FAILURE);
+        if (Token)
+            CloseHandle(Token);
+        pLsaDeregisterLogonProcess(Lsa);
+    }
+
+    /* An administrator without SeTcbPrivilege */
+    if (ImpersonateWithoutTcb())
+    {
+        CheckRefusedAsLogonProcess("administrator without SeTcbPrivilege", Name);
+        RevertToSelf();
+    }
+    else
+    {
+        skip("no token without SeTcbPrivilege (%lu)\n", GetLastError());
+    }
+
+    /* A caller with SeTcbPrivilege: the logon works, the token user is the service SID */
+    if (ImpersonateSystem())
+    {
+        RtlInitString((PSTRING)&ProcessName, "SvcVAcctLogonProcess");
+        Status = pLsaRegisterLogonProcess(&ProcessName, &Lsa, &Mode);
+        ok(Status == STATUS_SUCCESS, "LsaRegisterLogonProcess failed: 0x%08lx\n", Status);
+        if (Status == STATUS_SUCCESS)
+        {
+            Token = NULL;
+            Status = ServiceLogon(Lsa, Name, &Token);
+            ok(Status == STATUS_SUCCESS, "SeTcbPrivilege: service logon of NT SERVICE\\%ls returned 0x%08lx\n", Name, Status);
+            if (Token)
+                CloseHandle(Token);
+            pLsaDeregisterLogonProcess(Lsa);
+        }
+        RevertToSelf();
+    }
+    else
+    {
+        skip("the thread cannot impersonate SYSTEM, the trusted caller is not tested\n");
+    }
 }
 
 static VOID
@@ -197,6 +482,7 @@ START_TEST(ServiceVirtualAccount)
             CloseHandle(hProcess);
         }
     }
+    TestVirtualAccountLogon(Account + 11);
     DeleteService(hService);
     CloseServiceHandle(hService);
     CloseServiceHandle(hScm);

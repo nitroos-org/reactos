@@ -210,10 +210,8 @@ LsapCheckLogonProcess(PLSA_API_MSG RequestMsg,
             Context->TrustedCaller = FALSE;
             break;
 
+        /* The client cannot vouch for itself: a claim to be trusted is checked like CHECK */
         case YES:
-            Context->TrustedCaller = TRUE;
-            break;
-
         case CHECK:
         default:
             Context->TrustedCaller = LsapIsTrustedClient(ProcessHandle, &RequestMsg->h.ClientId);

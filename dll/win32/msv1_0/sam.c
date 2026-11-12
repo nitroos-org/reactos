@@ -482,13 +482,15 @@ GetNtAuthorityDomainSid(
 
 /*
  * NT SERVICE\<service>: the virtual account of a service. It exists for the services that exist
- * and logs on without a password, as a service logon only. Its SID is the service SID; the
- * domain SID returned is the SID without its last number, which is the relative id.
+ * and logs on without a password, as a service logon of a trusted caller (SeTcbPrivilege) only.
+ * Its SID is the service SID; the domain SID returned is the SID without its last number, which
+ * is the relative id.
  */
 static
 NTSTATUS
 SamValidateServiceAccount(
     _In_ SECURITY_LOGON_TYPE LogonType,
+    _In_ BOOL TrustedClient,
     _In_ PUNICODE_STRING LogonUserName,
     _Out_ PRPC_SID* AccountDomainSidPtr,
     _Out_ PSAMPR_USER_INFO_BUFFER* UserInfoPtr)
@@ -500,6 +502,11 @@ SamValidateServiceAccount(
     ULONG i;
 
     if (LogonType != Service)
+        return STATUS_LOGON_FAILURE;
+
+    /* The logon is without a password: only a caller that holds SeTcbPrivilege (the SCM) may do it.
+     * Otherwise any process could become the service SID of any service. */
+    if (!TrustedClient)
         return STATUS_LOGON_FAILURE;
 
     if (!LsapServiceExists(LogonUserName->Buffer, Chars) ||
@@ -543,7 +550,8 @@ SamValidateUser(
     _Out_ PRPC_SID* AccountDomainSidPtr,
     _Out_ SAMPR_HANDLE* UserHandlePtr,
     _Out_ PSAMPR_USER_INFO_BUFFER* UserInfoPtr,
-    _Out_ PNTSTATUS SubStatus)
+    _Out_ PNTSTATUS SubStatus,
+    _In_ BOOL TrustedClient)
 {
     static const UNICODE_STRING NtAuthorityU = RTL_CONSTANT_STRING(L"NT AUTHORITY");
     static const UNICODE_STRING NtServiceU = RTL_CONSTANT_STRING(L"NT SERVICE");
@@ -613,6 +621,7 @@ SamValidateUser(
 
         *SpecialAccount = TRUE;
         Status = SamValidateServiceAccount(LogonType,
+                                           TrustedClient,
                                            LogonUserName,
                                            AccountDomainSidPtr,
                                            UserInfoPtr);

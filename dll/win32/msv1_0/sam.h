@@ -50,4 +50,5 @@ SamValidateUser(
     _Out_ PRPC_SID* AccountDomainSidPtr,
     _Out_ SAMPR_HANDLE* UserHandlePtr,
     _Out_ PSAMPR_USER_INFO_BUFFER* UserInfoPtr,
-    _Out_ PNTSTATUS SubStatus);
+    _Out_ PNTSTATUS SubStatus,
+    _In_ BOOL TrustedClient);

@@ -58,6 +58,16 @@ GetLogonByLogonId(
 }
 
 
+/* Does the client of the request hold SeTcbPrivilege? Not told by the LSA = no */
+static
+BOOL
+IsTrustedClient(
+    _In_ PLSA_CLIENT_REQUEST ClientRequest)
+{
+    return DispatchTable.IsTrustedClient != NULL && DispatchTable.IsTrustedClient(ClientRequest);
+}
+
+
 static
 NTSTATUS
 BuildInteractiveProfileBuffer(IN PLSA_CLIENT_REQUEST ClientRequest,
@@ -1420,6 +1430,7 @@ LsaApInitializePackage(IN ULONG AuthenticationPackageId,
     DispatchTable.FreeClientBuffer = LsaDispatchTable->FreeClientBuffer;
     DispatchTable.CopyToClientBuffer = LsaDispatchTable->CopyToClientBuffer;
     DispatchTable.CopyFromClientBuffer = LsaDispatchTable->CopyFromClientBuffer;
+    DispatchTable.IsTrustedClient = LsaDispatchTable->IsTrustedClient;
 
     /* Return the package name */
     NameString = DispatchTable.AllocateLsaHeap(sizeof(LSA_STRING));
@@ -1540,7 +1551,8 @@ LsaApLogonUserEx2_Network(
                              AccountDomainSidPtr,
                              UserHandlePtr,
                              UserInfoPtr,
-                             SubStatus);
+                             SubStatus,
+                             IsTrustedClient(ClientRequest));
     if (!NT_SUCCESS(Status))
     {
         ERR("SamValidateUser failed with 0x%lx\n", Status);
@@ -1783,7 +1795,8 @@ LsaApLogonUserEx2_S4U(
                              AccountDomainSidPtr,
                              UserHandlePtr,
                              UserInfoPtr,
-                             SubStatus);
+                             SubStatus,
+                             IsTrustedClient(ClientRequest));
     if (!NT_SUCCESS(Status))
     {
         ERR("SamValidateUser failed with 0x%lx\n", Status);
@@ -2050,7 +2063,8 @@ LsaApLogonUserEx2(IN PLSA_CLIENT_REQUEST ClientRequest,
                                  &AccountDomainSid,
                                  &UserHandle,
                                  &UserInfo,
-                                 SubStatus);
+                                 SubStatus,
+                                 IsTrustedClient(ClientRequest));
         if (!NT_SUCCESS(Status))
             goto done;
     }

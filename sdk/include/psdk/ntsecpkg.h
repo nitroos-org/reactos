@@ -302,6 +302,11 @@ typedef struct _LSA_DISPATCH_TABLE {
     PLSA_FREE_CLIENT_BUFFER FreeClientBuffer;
     PLSA_COPY_TO_CLIENT_BUFFER CopyToClientBuffer;
     PLSA_COPY_FROM_CLIENT_BUFFER CopyFromClientBuffer;
+#ifdef __REACTOS__
+    /* ReactOS extension: does the client of the request hold SeTcbPrivilege? (a logon process
+     * without it, e.g. LogonUser, is not trusted) */
+    BOOLEAN (NTAPI *IsTrustedClient)(PLSA_CLIENT_REQUEST);
+#endif
 } LSA_DISPATCH_TABLE,
  *PLSA_DISPATCH_TABLE;
 
