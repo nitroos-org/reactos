@@ -1606,6 +1606,40 @@ MiPagerFreeSlotCount(VOID)
 }
 
 /*
+ * Fewer than an eighth of the paging file slots are free and no paging file can grow any more. A
+ * private page that becomes valid again then gives up its clean copy (pagfault.c): resident pages give
+ * up copies anyway once the slots run out (MiPagerReclaimSlots), but the reclaim frees slots scattered
+ * over the files, so every cluster write gets a short run; a page that is paged in gives up the slot
+ * next to the ones its neighbours (read in the same cluster) give up, and the writer gets whole runs
+ * again (pager2, 2026-11-12: 1400 MB working set at 1 GB RAM on an 8 GB disk, whose 1 GB paging file
+ * cannot hold it). A snapshot without the slot lock: the counts and sizes are read as they are; a
+ * paging file is never removed once it exists.
+ */
+BOOLEAN
+NTAPI
+MiPagerSlotsScarce(VOID)
+{
+    ULONGLONG Free = MiFreeSwapPages, Used = MiUsedSwapPages;
+    PMMPAGING_FILE PagingFile;
+    ULONG i;
+
+    if ((MiNitroPagerMode == 0) || (Free * 8 >= Free + Used))
+        return FALSE;
+
+    for (i = 0; i < MAX_PAGING_FILES; i++)
+    {
+        PagingFile = MmPagingFile[i];
+        if ((PagingFile != NULL) && (PagingFile->SlotTags != NULL) && !PagingFile->Retired &&
+            !PagingFile->CannotGrow && (PagingFile->Size < PagingFile->MaximumSize))
+        {
+            /* The file grows first */
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+/*
  * The writer's cluster write to a file ended with Status. A file the volume
  * refuses (STATUS_FILE_INVALID: wrong media, a volume that went away) takes no
  * new slots for the rest of the boot. Other errors retire it only when they
@@ -1854,20 +1888,20 @@ MiWritePageFileCluster(
 }
 
 /*
- * Read Count pages (at most MI_PAGER_CLUSTER_MAX) from Count consecutive ARM3 slots from FirstSlot
- * (zero based), one paging read. A short transfer is a failed read: a page that came unzeroed from
- * the free list must never reach a process half filled.
+ * Read the pages of Mdl (at most MI_PAGER_CLUSTER_MAX; the caller initialized it with
+ * MmInitializeMdl for their size and filled its page array) from as many consecutive ARM3 slots
+ * from FirstSlot (zero based), one paging read. The caller's MDL saves a second page array on the
+ * stack of a page fault. A short transfer is a failed read: a page that came unzeroed from the free
+ * list must never reach a process half filled.
  */
 NTSTATUS
 NTAPI
 MiReadPageFileCluster(
-    _In_reads_(Count) PPFN_NUMBER Pages,
-    _In_ ULONG Count,
+    _Inout_ PMDL Mdl,
     _In_ ULONG FileIndex,
     _In_ ULONG_PTR FirstSlot)
 {
-    DECLSPEC_ALIGN(MEMORY_ALLOCATION_ALIGNMENT) UCHAR MdlBase[sizeof(MDL) + MI_PAGER_CLUSTER_MAX * sizeof(PFN_NUMBER)];
-    PMDL Mdl = (PMDL)MdlBase;
+    ULONG Count = Mdl->ByteCount >> PAGE_SHIFT;
     LARGE_INTEGER FileOffset;
     IO_STATUS_BLOCK Iosb;
     PMMPAGING_FILE PagingFile;
@@ -1875,12 +1909,11 @@ MiReadPageFileCluster(
     NTSTATUS Status;
 
     ASSERT((Count != 0) && (Count <= MI_PAGER_CLUSTER_MAX));
+    ASSERT((Mdl->ByteOffset == 0) && (Mdl->MdlFlags == 0));
     PagingFile = (FileIndex < MAX_PAGING_FILES) ? MmPagingFile[FileIndex] : NULL;
     if ((PagingFile == NULL) || (PagingFile->FileObject == NULL) || (PagingFile->FileObject->DeviceObject == NULL))
         return STATUS_FILE_INVALID;
 
-    MmInitializeMdl(Mdl, NULL, Count * PAGE_SIZE);
-    RtlCopyMemory(MmGetMdlPfnArray(Mdl), Pages, Count * sizeof(PFN_NUMBER));
     Mdl->MdlFlags |= MDL_PAGES_LOCKED | MDL_IO_PAGE_READ;
 
     FileOffset.QuadPart = (LONGLONG)FirstSlot * PAGE_SIZE;

@@ -573,7 +573,15 @@ MiInitBalancerThread(VOID)
     LARGE_INTEGER Timeout;
 
     KeInitializeEvent(&MiBalancerEvent, SynchronizationEvent, FALSE);
-    KeInitializeEvent(&MiBalancerDoneEvent, SynchronizationEvent, FALSE);
+    /*
+     * A notification event: the end of a pass releases every thread that waits for one
+     * (MmRebalanceMemoryConsumersAndWait). As a synchronization event it released one of
+     * them, and the others waited for a later pass, which nobody asked for once the request
+     * flag was cleared: up to the 2 s timer (pager2, 2026-11-12: single waits of 0.3 to
+     * 1.5 s while a process filled RAM with dirty pages). Each waiter resets it before it
+     * asks for a pass, so it never returns on the end of a pass that ended before its request.
+     */
+    KeInitializeEvent(&MiBalancerDoneEvent, NotificationEvent, FALSE);
     KeInitializeTimerEx(&MiBalancerTimer, SynchronizationTimer);
 
     Timeout.QuadPart = -20000000; /* 2 sec */

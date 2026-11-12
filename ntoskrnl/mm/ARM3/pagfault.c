@@ -1091,8 +1091,10 @@ MiResolvePageFileFault(_In_ BOOLEAN StoreInstruction,
                        _In_ PVOID FaultingAddress,
                        _In_ PMMPTE PointerPte,
                        _In_ PEPROCESS CurrentProcess,
+                       _In_ BOOLEAN UserTrap,
                        _Inout_ KIRQL *OldIrql)
 {
+    PETHREAD Thread = PsGetCurrentThread();
     ULONG Color;
     PFN_NUMBER Page;
     NTSTATUS Status;
@@ -1104,7 +1106,10 @@ MiResolvePageFileFault(_In_ BOOLEAN StoreInstruction,
     ULONG Protection = (ULONG)PageFilePte.u.Soft.Protection;
     ULONG Owner, Found = 0;
     BOOLEAN Resource;
-    PFN_NUMBER Pages[MI_PAGER_READ_CLUSTER_MAX];
+    /* The pages of the read live in its MDL: one page array on the fault's stack, not two */
+    DECLSPEC_ALIGN(MEMORY_ALLOCATION_ALIGNMENT) UCHAR MdlBase[sizeof(MDL) + MI_PAGER_READ_CLUSTER_MAX * sizeof(PFN_NUMBER)];
+    PMDL Mdl = (PMDL)MdlBase;
+    PPFN_NUMBER Pages = MmGetMdlPfnArray(Mdl);
     ULONG Count = 1, i;
     BOOLEAN FaultInjected = FALSE, Retried = FALSE;
 
@@ -1132,6 +1137,30 @@ MiResolvePageFileFault(_In_ BOOLEAN StoreInstruction,
         MiUserFaultMustLeavePages() &&
         MiCanFaultWaitForPages())
     {
+        return STATUS_NO_MEMORY;
+    }
+
+    /*
+     * A user-mode fault whose next page would be read with it, but whose read-ahead the margin would cut,
+     * gives its locks back and waits for a balancer pass first, as a fault below the floor does. A process
+     * that pages a large working set back in holds the usable pages at the margin with its own faults,
+     * and the balancer can trim it only while none of its faults holds its working set lock (the lock
+     * stays held across the read): without the wait, nearly every read was a single page, and a paging
+     * request costs about the same for one page as for a cluster. Once per page-file read of the thread
+     * (the read clears the flag): the retry goes on with whatever it finds.
+     */
+    if (UserTrap &&
+        !Thread->PagerReadAheadWaited &&
+        !(MiNitroPagerDebug & MI_PAGER_DEBUG_NO_READAHEAD) &&
+        (MiGetUsablePageCount() <= MI_PAGER_READAHEAD_WAIT_PAGES) &&
+        !MiIsPteOnPdeBoundary(PointerPte + 1) &&
+        MI_IS_PAGEFILE_PTE(PointerPte + 1) &&
+        ((ULONG)PointerPte[1].u.Soft.PageFileLow == PageFileIndex) &&
+        (MI_PAGEFILE_PTE_SLOT(PointerPte + 1) == Slot + 1) &&
+        MiCanFaultWaitForPages())
+    {
+        Thread->PagerReadAheadWaited = 1;
+        MiPagerCounters.ReadAheadWaits++;
         return STATUS_NO_MEMORY;
     }
 
@@ -1245,10 +1274,16 @@ MiResolvePageFileFault(_In_ BOOLEAN StoreInstruction,
                 }
             }
             if (NT_SUCCESS(Status))
-                Status = MiReadPageFileCluster(Pages, Count, PageFileIndex, Slot);
+            {
+                MmInitializeMdl(Mdl, NULL, Count * PAGE_SIZE);
+                Status = MiReadPageFileCluster(Mdl, PageFileIndex, Slot);
+            }
         }
         MiPagingIoDone();
     }
+
+    /* This thread read (or tried to): its next fault may wait for read-ahead pages again */
+    Thread->PagerReadAheadWaited = 0;
 
     /* Lock the PFN database again */
     *OldIrql = MiAcquirePfnLock();
@@ -1365,6 +1400,12 @@ MiResolvePageFileFault(_In_ BOOLEAN StoreInstruction,
         MI_MAKE_DIRTY_PAGE(&TempPte);
         MiMarkPfnDirty(Pfn1);
     }
+    else if (MI_IS_PAGE_WRITEABLE(&TempPte) && MiPagerSlotsScarce())
+    {
+        /* Slots are scarce: the copy goes now, with those of the pages read with it (a whole run comes free) */
+        MiMarkPfnDirty(Pfn1);
+        MiPagerCounters.CopiesDropped++;
+    }
     MI_WRITE_VALID_PTE(PointerPte, TempPte);
     MiPagerCounters.InPageReads++;
 
@@ -1417,6 +1458,7 @@ MiResolveTransitionFault(IN BOOLEAN StoreInstruction,
     PMMPFN Pfn1;
     MMPTE TempPte;
     PMMPTE PointerToPteForProtoPage;
+    BOOLEAN WasStandby;
     DPRINT("Transition fault on 0x%p with PTE 0x%p in process %s\n",
             FaultingAddress, PointerPte, CurrentProcess->ImageFileName);
 
@@ -1472,6 +1514,7 @@ MiResolveTransitionFault(IN BOOLEAN StoreInstruction,
 
     /* This isn't an in-page error. The page is reused: no free page is needed */
     ASSERT(Pfn1->u4.InPageError == 0);
+    WasStandby = (Pfn1->u3.e1.PageLocation == StandbyPageList);
 
     /* Was this a transition page in the valid list, or free/zero list? */
     if (Pfn1->u3.e1.PageLocation == ActiveAndValid)
@@ -1537,6 +1580,23 @@ MiResolveTransitionFault(IN BOOLEAN StoreInstruction,
     TempPte.u.Long = (PointerPte->u.Long & ~0xFFF) |
                      (MmProtectToPteMask[PointerPte->u.Trans.Protection]) |
                      MiDetermineUserGlobalPteMask(PointerPte);
+
+    /*
+     * NitroPager: a private user page back from standby gives up its clean copy while slots are scarce,
+     * as a page read in by its own fault does (MiResolvePageFileFault): the pages read ahead with it
+     * come back this way
+     */
+    if (WasStandby &&
+        (Pfn1->u3.e1.PrototypePte == 0) &&
+        (FaultingAddress <= MM_HIGHEST_USER_ADDRESS) &&
+        MI_IS_PAGEFILE_PTE(&Pfn1->OriginalPte) &&
+        MI_IS_PAGE_WRITEABLE(&TempPte) &&
+        !MI_IS_PAGE_COPY_ON_WRITE(&TempPte) &&
+        MiPagerSlotsScarce())
+    {
+        MiMarkPfnDirty(Pfn1);
+        MiPagerCounters.CopiesDropped++;
+    }
 
     /* Is the PTE writeable? */
     if ((Pfn1->u3.e1.Modified) &&
@@ -1795,7 +1855,8 @@ MiDispatchFault(IN ULONG FaultCode,
                 IN BOOLEAN Recursive,
                 IN PEPROCESS Process,
                 IN PVOID TrapInformation,
-                IN PMMVAD Vad)
+                IN PMMVAD Vad,
+                IN KPROCESSOR_MODE Mode)
 {
     MMPTE TempPte;
     KIRQL OldIrql, LockIrql;
@@ -2090,7 +2151,8 @@ MiDispatchFault(IN ULONG FaultCode,
         LockIrql = MiAcquirePfnLock();
 
         /* Resolve */
-        Status = MiResolvePageFileFault(!MI_IS_NOT_PRESENT_FAULT(FaultCode), Address, PointerPte, Process, &LockIrql);
+        Status = MiResolvePageFileFault(!MI_IS_NOT_PRESENT_FAULT(FaultCode), Address, PointerPte, Process,
+                                        (Mode == UserMode), &LockIrql);
 
         /* And now release the lock and leave*/
         MiReleasePfnLock(LockIrql);
@@ -2568,7 +2630,8 @@ _WARN("Session space stuff is not implemented yet!")
                                  FALSE,
                                  CurrentProcess,
                                  TrapInformation,
-                                 NULL);
+                                 NULL,
+                                 Mode);
 
         /* Release the working set */
         ASSERT(KeAreAllApcsDisabled() == TRUE);
@@ -3143,7 +3206,8 @@ UserFault:
                              FALSE,
                              CurrentProcess,
                              TrapInformation,
-                             Vad);
+                             Vad,
+                             Mode);
 
 ExitUser:
 
