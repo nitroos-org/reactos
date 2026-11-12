@@ -9,10 +9,12 @@
 #include <apitest.h>
 
 extern void func_WcsDefault(void);
+extern void func_ProfileObject(void);
 
 const struct test winetest_testlist[] =
 {
     { "WcsDefault", func_WcsDefault },
+    { "ProfileObject", func_ProfileObject },
 
     { 0, 0 }
 };
