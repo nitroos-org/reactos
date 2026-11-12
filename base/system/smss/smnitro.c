@@ -35,7 +35,8 @@
  */
 ULONG SmpNitroSessions;
 static ULONG SmpNitroSessionsTestKill;
-static ULONG SmpNitroSessionsTestForward;
+ULONG SmpNitroSessionsTestForward;
+ULONG SmpNitroSessionsTestForwardStall;
 UNICODE_STRING SmpNitroSessionsTestCommand;
 UNICODE_STRING SmpNitroSessionsTestCommand0;
 
@@ -107,6 +108,7 @@ SmpReadNitroSessionsConfig(VOID)
     SmpNitroSessions = 0;
     SmpNitroSessionsTestKill = 0;
     SmpNitroSessionsTestForward = 0;
+    SmpNitroSessionsTestForwardStall = 0;
     RtlInitEmptyUnicodeString(&SmpNitroSessionsTestCommand, NULL, 0);
     RtlInitEmptyUnicodeString(&SmpNitroSessionsTestCommand0, NULL, 0);
 
@@ -173,6 +175,21 @@ SmpReadNitroSessionsConfig(VOID)
                 (Info->DataLength == sizeof(ULONG)))
             {
                 SmpNitroSessionsTestForward = *(PULONG)Info->Data;
+            }
+
+            /* Test only: forwards wait this many seconds instead of the target csrss answering (a stuck target) */
+            RtlInitUnicodeString(&ValueName, L"NitroSessionsTestForwardStall");
+            Status = NtQueryValueKey(KeyHandle,
+                                     &ValueName,
+                                     KeyValuePartialInformation,
+                                     Info,
+                                     sizeof(Buffer),
+                                     &ResultLength);
+            if (NT_SUCCESS(Status) &&
+                (Info->Type == REG_DWORD) &&
+                (Info->DataLength == sizeof(ULONG)))
+            {
+                SmpNitroSessionsTestForwardStall = *(PULONG)Info->Data;
             }
         }
     }
@@ -618,7 +635,7 @@ SmpStartNitroCsrSession(VOID)
         DPRINT1("SMSS: NitroSessions: still attached to session %lu, no test command in no session\n",
                 AttachedSessionId);
     }
-    else if (SmpNitroSessionsTestForward && !SmpNitroSessionsTestKill && TestProcessId && CsrProcessId)
+    else if ((SmpNitroSessionsTestForward & SMP_NITRO_TEST_FORWARD_SELF) && !SmpNitroSessionsTestKill && TestProcessId && CsrProcessId)
     {
         /* SMSS is in no session again, so it is a process of another session */
         SmpNitroForwardSelfTest(MuSessionId, CsrProcessId, TestProcessId);

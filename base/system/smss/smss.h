@@ -157,6 +157,13 @@ SmpInit(
 
 /* smloop.c */
 
+/*
+ * The SM API threads (sminit.c starts this many). A forward holds one until the target csrss answers,
+ * so at most SMP_API_THREADS - 1 forwards run at once and one thread is always left for every other
+ * request (smloop.c, SmpForwardProcessRegistration).
+ */
+#define SMP_API_THREADS 2
+
 ULONG
 NTAPI
 SmpApiLoop(
@@ -193,6 +200,11 @@ NTAPI
 SmpCompleteSession(
     _In_ ULONG SessionId,
     _In_ PSMP_SUBSYSTEM Subsystem);
+
+/* The number of session records SMSS holds (for the test log) */
+ULONG
+NTAPI
+SmpCountSessions(VOID);
 
 ULONG
 NTAPI
@@ -265,6 +277,19 @@ SmpUnhandledExceptionFilter(
 #define SMP_NITRO_SESSIONS_CSR_START(f) (((f) == SMP_NITRO_SESSIONS_CSR) || ((f) == SMP_NITRO_SESSIONS_WIN32K))
 
 extern ULONG SmpNitroSessions;
+
+/*
+ * NitroSessionsTestForward (DWORD, test only, flags 4 and 5): bit 0 runs the forward self-test; bit 1 makes
+ * SMSS log its session-record count at every refused forward; bit 2 makes it log the result of every
+ * SmSessionComplete datagram it serves (one line per datagram: not for a long soak).
+ * NitroSessionsTestForwardStall (DWORD, seconds, test only): every forward that passes the checks waits that
+ * long, in place of the target csrss answering, then fails: a stuck target csrss.
+ */
+#define SMP_NITRO_TEST_FORWARD_SELF     0x1
+#define SMP_NITRO_TEST_FORWARD_COUNT    0x2
+#define SMP_NITRO_TEST_FORWARD_COMPLETE 0x4
+extern ULONG SmpNitroSessionsTestForward;
+extern ULONG SmpNitroSessionsTestForwardStall;
 
 NTSTATUS
 NTAPI

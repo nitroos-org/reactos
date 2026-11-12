@@ -30,6 +30,19 @@
  *              the same creates in the service's own session, no forward.
  *              "detached": no console children (the old session-1 limit of about 650
  *              console children is gone; this keeps the forward path alone).
+ *              The datagram path of \SmApiPort (smss smloop.c): the test connects
+ *              as a LocalSystem service (no subsystem, so it is not a csrss) and
+ *              sends datagrams: another API, SmSessionComplete, a short one, a
+ *              flood of DATAGRAM_FLOOD of them with every session id below it.
+ *              SMSS must keep answering (a refused forward is the probe, it
+ *              needs a free API thread), and the record of a child that runs in
+ *              session 1 meanwhile must survive: its csrss's SmSessionComplete
+ *              at exit then finds it (the SMSS log, which the gate reads, says
+ *              SUCCESS, not NOT_FOUND; NitroSessionsTestForward bit 2, value 4).
+ *              "svc <file> stuck": a stuck target csrss (NitroSessionsTestForwardStall
+ *              makes every forward wait in SMSS instead of the target answering):
+ *              concurrent creates into session 1 must neither wedge SMSS (probe
+ *              answers while they are stuck) nor hang (every create returns).
  * COPYRIGHT:   Copyright 2026 Tomas Srnka
  */
 
@@ -62,10 +75,18 @@ typedef NTSTATUS (NTAPI *PRTL_CREATE_USER_THREAD)(HANDLE, PSECURITY_DESCRIPTOR, 
 #define CHILD_OK 0x5E55
 #define TARGET_SESSION 1
 
+#define DATAGRAM_FLOOD 10000
+#define DATAGRAM_HOLD_MS 20000
+#define PROBE_BOUND_MS 15000
+#define STUCK_THREADS 3
+#define STUCK_BOUND_MS 120000
+
 #define STRESS_THREADS 4
 #define STRESS_ROUNDS 15
 #define STRESS_CHILD_WAIT 60000
 #define STRESS_BOUND 300000
+
+static BOOL SmssAnswers(const char *Name, DWORD BoundMs);
 
 static FILE *Out;
 static BOOL StressDetachedOnly;
@@ -532,6 +553,8 @@ Soak(ULONG Seconds, ULONG Session)
         return;
     }
     Start = LastLine = GetTickCount();
+    /* SMSS logs its session-record count for a refused forward (NitroSessionsTestForward bit 1, value 2) */
+    SmssAnswers("soak-start", PROBE_BOUND_MS);
     ProcessUsage(SmssPid, &SmssPrivate, &SmssHandles);
     ProcessUsage(CsrPid, &CsrPrivate, &CsrHandles);
     Log("SESSFWD soak t=0 smss-private=%Iu smss-handles=%lu csrss-private=%Iu csrss-handles=%lu\n",
@@ -563,8 +586,278 @@ Soak(ULONG Seconds, ULONG Session)
         if (GetTickCount() - Start >= Seconds * 1000) break;
     }
     CloseHandle(Token);
+    /* The children are gone; the count then logged by SMSS is the records that stayed behind */
+    Sleep(5000);
+    SmssAnswers("soak-end", PROBE_BOUND_MS);
+    ProcessUsage(SmssPid, &SmssPrivate, &SmssHandles);
+    Log("SESSFWD soak end smss-private=%Iu smss-handles=%lu\n", SmssPrivate, SmssHandles);
     Log("SESSFWD soak done batches=%lu ok=%lu bad=%lu max-create-ms=%lu failures=%lu %s\n",
         Batches, TotalOk, TotalBad, Max, Failures, Failures ? "FAIL" : "PASS");
+}
+
+/* One probe of SMSS: connect to \\SmApiPort and send a forward, which SMSS refuses (we are not a csrss) */
+typedef struct _PROBE
+{
+    NTSTATUS ConnectStatus;
+    NTSTATUS Status;
+    DWORD Ms;
+} PROBE, *PPROBE;
+
+static
+DWORD
+WINAPI
+ProbeThread(PVOID Parameter)
+{
+    PPROBE Probe = Parameter;
+    HANDLE Port;
+    CLIENT_ID OwnId;
+    DWORD Start = GetTickCount();
+
+    OwnId.UniqueProcess = UlongToHandle(GetCurrentProcessId());
+    OwnId.UniqueThread = UlongToHandle(GetCurrentThreadId());
+    Probe->ConnectStatus = SmConnectToSm(NULL, NULL, 0, &Port);
+    if (NT_SUCCESS(Probe->ConnectStatus))
+    {
+        Probe->Status = SmForwardProcessRegistration(Port, &OwnId, TARGET_SESSION, 0);
+        NtClose(Port);
+    }
+    Probe->Ms = GetTickCount() - Start;
+    return 0;
+}
+
+/* TRUE when SMSS answered the probe within the bound. A probe that does not return is left behind */
+static
+BOOL
+SmssAnswers(const char *Name, DWORD BoundMs)
+{
+    PPROBE Probe = calloc(1, sizeof(*Probe));
+    HANDLE Thread;
+    BOOL Pass = FALSE;
+    DWORD Wait = WAIT_FAILED;
+
+    Thread = Probe ? CreateThread(NULL, 0, ProbeThread, Probe, 0, NULL) : NULL;
+    if (Thread)
+    {
+        Wait = WaitForSingleObject(Thread, BoundMs);
+        CloseHandle(Thread);
+    }
+    if (Wait == WAIT_OBJECT_0)
+        Pass = NT_SUCCESS(Probe->ConnectStatus) && (Probe->Status == STATUS_ACCESS_DENIED);
+    Log("SESSFWD %s smss-answers connect=%08lx status=%08lx wait=%lx ms=%lu bound=%lu %s\n", Name,
+        Probe ? Probe->ConnectStatus : 0, Probe ? Probe->Status : 0, Wait, Probe ? Probe->Ms : 0, BoundMs,
+        Pass ? "PASS" : "FAIL");
+    if (!Pass) Failures++;
+    if (Wait == WAIT_OBJECT_0) free(Probe);
+    return Pass;
+}
+
+/* An SM_API_MSG datagram of the given length; the kernel copies only DataLength bytes after the header */
+static
+NTSTATUS
+SendDatagram(HANDLE Port, ULONG Api, ULONG SessionId, USHORT DataLength, PULONG Retries)
+{
+    SM_API_MSG Msg;
+    NTSTATUS Status;
+    ULONG Try;
+
+    RtlZeroMemory(&Msg, sizeof(Msg));
+    Msg.ApiNumber = Api;
+    Msg.u.SessionComplete.SessionId = SessionId;
+    Msg.u.SessionComplete.SessionStatus = STATUS_SUCCESS;
+    Msg.h.u1.s1.DataLength = DataLength;
+    Msg.h.u1.s1.TotalLength = DataLength + sizeof(Msg.h);
+    for (Try = 0; Try < 20000; Try++)
+    {
+        Status = NtRequestPort(Port, &Msg.h);
+        /* The port's message zone is full: SMSS has not drained it yet */
+        if ((Status != STATUS_NO_MEMORY) && (Status != STATUS_INSUFFICIENT_RESOURCES)) break;
+        (*Retries)++;
+        Sleep(1);
+    }
+    return Status;
+}
+
+#define FULL_DATAGRAM (sizeof(SM_SESSION_COMPLETE_MSG) + FIELD_OFFSET(SM_API_MSG, u) - sizeof(PORT_MESSAGE))
+
+/*
+ * The datagram path. Token is a session-1 token, or NULL without a session 1: then only SMSS's answers are
+ * tested; with it a child of session 1 is registered (it holds a session record in SMSS) for the whole flood.
+ */
+static
+VOID
+DatagramTests(HANDLE Token)
+{
+    HANDLE Port = NULL, Child = NULL, ChildThread = NULL;
+    NTSTATUS Status;
+    ULONG Retries = 0, i, Failed = 0;
+    DWORD Start, ExitCode = 0, Wait;
+    WCHAR Self[MAX_PATH], CommandLine[MAX_PATH + 48];
+
+    Status = SmConnectToSm(NULL, NULL, 0, &Port);
+    Log("SESSFWD datagram sm-connect status=%08lx\n", Status);
+    if (!NT_SUCCESS(Status))
+    {
+        Failures++;
+        return;
+    }
+
+    /* A child of session 1 that stays: its record is in SMSS's list now */
+    if (Token)
+    {
+        STARTUPINFOW StartupInfo = { sizeof(StartupInfo) };
+        PROCESS_INFORMATION ProcessInfo;
+
+        GetModuleFileNameW(NULL, Self, MAX_PATH);
+        _snwprintf(CommandLine, RTL_NUMBER_OF(CommandLine), L"\"%s\" child %lu hold %u", Self,
+                   (ULONG)TARGET_SESSION, DATAGRAM_HOLD_MS);
+        if (CreateProcessAsUserW(Token, NULL, CommandLine, NULL, NULL, FALSE, DETACHED_PROCESS,
+                                 NULL, NULL, &StartupInfo, &ProcessInfo))
+        {
+            Child = ProcessInfo.hProcess;
+            ChildThread = ProcessInfo.hThread;
+        }
+        Log("SESSFWD datagram-survival-begin child=%lu error=%lu\n",
+            Child ? GetProcessId(Child) : 0, Child ? 0 : GetLastError());
+        if (!Child) Failures++;
+    }
+
+    /* Datagrams of other APIs are dropped, never dispatched (these would start a process or a csrss) */
+    Check("datagram-other-api-forward", SendDatagram(Port, SmpForwardProcessRegistrationApi, 1, FULL_DATAGRAM, &Retries),
+          STATUS_SUCCESS);
+    Check("datagram-other-api-execpgm", SendDatagram(Port, SmpExecPgmApi, 1, FULL_DATAGRAM, &Retries), STATUS_SUCCESS);
+    Check("datagram-other-api-startcsr", SendDatagram(Port, SmpStartCsrApi, 1, FULL_DATAGRAM, &Retries), STATUS_SUCCESS);
+    /* SmSessionComplete from a connection that is not a csrss: refused, whatever the session id */
+    Check("datagram-session-complete-from-non-csrss",
+          SendDatagram(Port, SmpSessionCompleteApi, 1, FULL_DATAGRAM, &Retries), STATUS_SUCCESS);
+    /* Too short to carry a SessionId: dropped before SMSS reads ApiNumber (the status is the kernel's) */
+    Status = SendDatagram(Port, SmpSessionCompleteApi, 1, 0, &Retries);
+    Log("SESSFWD datagram-short-header-only status=%08lx\n", Status);
+    Status = SendDatagram(Port, SmpSessionCompleteApi, 1, (USHORT)(FIELD_OFFSET(SM_API_MSG, u) - sizeof(PORT_MESSAGE)),
+                          &Retries);
+    Log("SESSFWD datagram-short-no-session-id status=%08lx\n", Status);
+    SmssAnswers("after-single-datagrams", PROBE_BOUND_MS);
+
+    /* The flood: every session id below DATAGRAM_FLOOD (the child's is among them), mixed with other APIs and short ones */
+    Start = GetTickCount();
+    for (i = 0; i < DATAGRAM_FLOOD; i++)
+    {
+        switch (i % 4)
+        {
+            case 0:
+            case 1:
+                Status = SendDatagram(Port, SmpSessionCompleteApi, i, FULL_DATAGRAM, &Retries);
+                break;
+            case 2:
+                Status = SendDatagram(Port, SmpForwardProcessRegistrationApi, i, FULL_DATAGRAM, &Retries);
+                break;
+            default:
+                Status = SendDatagram(Port, SmpSessionCompleteApi, i, 4, &Retries);
+                break;
+        }
+        if (!NT_SUCCESS(Status) && ((i % 4) != 3)) Failed++;
+    }
+    Log("SESSFWD datagram-flood sent=%u failed=%lu retries=%lu ms=%lu\n", DATAGRAM_FLOOD, Failed, Retries,
+        GetTickCount() - Start);
+    if (Failed) Log("SESSFWD datagram-flood: some datagrams could not be queued (LPC), not counted\n");
+    SmssAnswers("after-flood", PROBE_BOUND_MS);
+    NtClose(Port);
+    SmssAnswers("after-flood-reconnect", PROBE_BOUND_MS);
+
+    if (Child)
+    {
+        /* The child exits: its csrss tells SMSS, which must still have the record (SMSS log: SUCCESS) */
+        Wait = WaitForSingleObject(Child, DATAGRAM_HOLD_MS + 60000);
+        GetExitCodeProcess(Child, &ExitCode);
+        Log("SESSFWD datagram-child-after-flood wait=%lu exit=%08lx expect=%08lx %s\n", Wait, ExitCode, CHILD_OK,
+            (Wait == WAIT_OBJECT_0 && ExitCode == CHILD_OK) ? "PASS" : "FAIL");
+        if (!(Wait == WAIT_OBJECT_0 && ExitCode == CHILD_OK)) Failures++;
+        if (Wait != WAIT_OBJECT_0) TerminateProcess(Child, 1);
+        CloseHandle(Child);
+        CloseHandle(ChildThread);
+        /* Let the datagram of that exit reach SMSS before the end marker */
+        Sleep(3000);
+        Log("SESSFWD datagram-survival-end\n");
+    }
+}
+
+typedef struct _STUCK
+{
+    HANDLE Token;
+    BOOL Ok;
+    DWORD CreateMs;
+    DWORD Error;
+} STUCK, *PSTUCK;
+
+static
+DWORD
+WINAPI
+StuckThread(PVOID Parameter)
+{
+    PSTUCK Stuck = Parameter;
+
+    Stuck->Ok = StressChild(Stuck->Token, TARGET_SESSION, DETACHED_PROCESS, &Stuck->CreateMs, &Stuck->Error);
+    return 0;
+}
+
+/*
+ * A stuck target csrss (SMSS test switch NitroSessionsTestForwardStall, longer than the retry of csrsrv):
+ * STUCK_THREADS creates into session 1 at once. One forward is stuck in SMSS, the others are told BUSY
+ * and retried. SMSS must go on answering other requests all the while, and every create must return (fail).
+ */
+static
+VOID
+StuckTests(HANDLE Token)
+{
+    STUCK Stuck[STUCK_THREADS + 1];
+    HANDLE Threads[STUCK_THREADS + 1];
+    ULONG i, Started = 0, Returned = 0, Failed = 0;
+    DWORD Wait;
+    BOOL Late;
+
+    RtlZeroMemory(Stuck, sizeof(Stuck));
+    for (i = 0; i < STUCK_THREADS; i++)
+    {
+        Stuck[i].Token = Token;
+        Threads[i] = CreateThread(NULL, 0, StuckThread, &Stuck[i], 0, NULL);
+        if (!Threads[i]) break;
+        Started++;
+    }
+    Log("SESSFWD stuck started=%lu of %u\n", Started, STUCK_THREADS);
+    if (Started != STUCK_THREADS) Failures++;
+
+    /* While they are in flight (the stall is longer than all of this) */
+    Sleep(1500);
+    SmssAnswers("stuck-while-forwards-in-flight-1", PROBE_BOUND_MS);
+    Sleep(1500);
+    SmssAnswers("stuck-while-forwards-in-flight-2", PROBE_BOUND_MS);
+    Sleep(6000);
+    SmssAnswers("stuck-after-busy-retries-expired", PROBE_BOUND_MS);
+
+    /* One more create, while the first forward is still stuck */
+    Stuck[Started].Token = Token;
+    Threads[Started] = CreateThread(NULL, 0, StuckThread, &Stuck[Started], 0, NULL);
+    Late = (Threads[Started] != NULL);
+    Started += Late ? 1 : 0;
+
+    Wait = WaitForMultipleObjects(Started, Threads, TRUE, STUCK_BOUND_MS);
+    for (i = 0; i < Started; i++)
+    {
+        BOOL Done = (WaitForSingleObject(Threads[i], 0) == WAIT_OBJECT_0);
+
+        Log("SESSFWD stuck create %lu returned=%d ok=%d create-ms=%lu error=%lx\n", i, Done, Stuck[i].Ok,
+            Stuck[i].CreateMs, Stuck[i].Error);
+        if (Done)
+        {
+            Returned++;
+            if (!Stuck[i].Ok) Failed++;
+            CloseHandle(Threads[i]);
+        }
+    }
+    /* A stalled forward ends in a failed create and so does a busy one, none may hang or succeed */
+    Log("SESSFWD stuck-creates-fail-cleanly started=%lu returned=%lu failed=%lu wait=%lx %s\n", Started, Returned,
+        Failed, Wait, ((Wait == WAIT_OBJECT_0) && (Returned == Started) && (Failed == Started)) ? "PASS" : "FAIL");
+    if (!((Wait == WAIT_OBJECT_0) && (Returned == Started) && (Failed == Started))) Failures++;
+    SmssAnswers("stuck-after-all-returned", PROBE_BOUND_MS);
 }
 
 static
@@ -605,6 +898,7 @@ Tests(VOID)
     Log("SESSFWD session-1 %s\n", Session1 ? "present" : "absent");
     if (!Session1)
     {
+        DatagramTests(NULL);
         Skip("session1-detached-child", "no session 1");
         Skip("session1-console-child", "no session 1");
         Skip("concurrent-forwards", "no session 1");
@@ -627,6 +921,9 @@ Tests(VOID)
 
         RunChild("session1-detached-child", Token, TARGET_SESSION, DETACHED_PROCESS);
         RunChild("session1-console-child", Token, TARGET_SESSION, 0);
+
+        /* The datagram path, with a child of session 1 holding a record through the flood */
+        DatagramTests(Token);
 
         /* Concurrent forwards, more than SMSS has API threads, while forwarded children exit */
         Pass = StressRun(Token, TARGET_SESSION, STRESS_ROUNDS, &Ok, &Bad, &MaxCreateMs, &FirstError, &Wait);
@@ -717,6 +1014,29 @@ Done:
     Log("SESSFWD done failures=%lu skipped=%lu\n", Failures, Skips);
 }
 
+/* "svc <file> stuck": only the stuck-target test */
+static
+VOID
+StuckMain(VOID)
+{
+    BOOLEAN Old;
+    HANDLE Token;
+
+    RtlAdjustPrivilege(SE_TCB_PRIVILEGE, TRUE, FALSE, &Old);
+    Log("SESSFWD stuck start session=%lu\n", ProcessSession(NtCurrentProcess()));
+    Token = FindPidInSession(L"csrss.exe", TARGET_SESSION) ? TokenForSession(TARGET_SESSION) : NULL;
+    if (!Token)
+    {
+        Skip("stuck-target", "no session 1");
+    }
+    else
+    {
+        StuckTests(Token);
+        CloseHandle(Token);
+    }
+    Log("SESSFWD done failures=%lu skipped=%lu\n", Failures, Skips);
+}
+
 static SERVICE_STATUS_HANDLE StatusHandle;
 
 static
@@ -728,6 +1048,7 @@ Report(DWORD State)
 }
 
 static ULONG SoakSeconds, SoakSession = TARGET_SESSION;
+static BOOL StuckMode;
 
 static
 VOID
@@ -737,6 +1058,7 @@ ServiceMain(DWORD Argc, LPWSTR *Argv)
     StatusHandle = RegisterServiceCtrlHandlerW(L"sfwd", NULL);
     Report(SERVICE_RUNNING);
     if (SoakSeconds) Soak(SoakSeconds, SoakSession);
+    else if (StuckMode) StuckMain();
     else Tests();
     Report(SERVICE_STOPPED);
 }
@@ -747,6 +1069,7 @@ wmain(int argc, wchar_t *argv[])
     if ((argc > 2) && !_wcsicmp(argv[1], L"child"))
     {
         ULONG Expected = wcstoul(argv[2], NULL, 10);
+        if ((argc > 4) && !_wcsicmp(argv[3], L"hold")) Sleep(wcstoul(argv[4], NULL, 10));
         return (ProcessSession(NtCurrentProcess()) == Expected) ? CHILD_OK : 1;
     }
 
@@ -755,6 +1078,7 @@ wmain(int argc, wchar_t *argv[])
         SERVICE_TABLE_ENTRYW Table[] = { { L"sfwd", ServiceMain }, { NULL, NULL } };
 
         if (argc > 2) Out = _wfopen(argv[2], L"w");
+        if ((argc > 3) && !_wcsicmp(argv[3], L"stuck")) StuckMode = TRUE;
         if ((argc > 4) && !_wcsicmp(argv[3], L"soak")) SoakSeconds = wcstoul(argv[4], NULL, 10);
         if ((argc > 5) && SoakSeconds) SoakSession = wcstoul(argv[5], NULL, 10);
         if ((argc > 6) && SoakSeconds && !_wcsicmp(argv[6], L"detached")) StressDetachedOnly = TRUE;

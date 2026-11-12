@@ -236,6 +236,7 @@ SmSessionComplete(
 {
     SM_API_MSG SmApiMsg = {0};
     PSM_SESSION_COMPLETE_MSG SessionComplete = &SmApiMsg.u.SessionComplete;
+    NTSTATUS Status;
 
 #if 0 //def _WIN64
     /* 64-bit SMSS needs to talk to 32-bit processes so do the LPC conversion */
@@ -255,7 +256,13 @@ SmSessionComplete(
     SmApiMsg.h.u1.s1.DataLength = (CSHORT)sizeof(SM_SESSION_COMPLETE_MSG) +
         FIELD_OFFSET(SM_API_MSG, u) - sizeof(SmApiMsg.h);
     SmApiMsg.h.u1.s1.TotalLength = SmApiMsg.h.u1.s1.DataLength + sizeof(SmApiMsg.h);
-    return NtRequestPort(SmApiPort, &SmApiMsg.h);
+    Status = NtRequestPort(SmApiPort, &SmApiMsg.h);
+    if (!NT_SUCCESS(Status))
+    {
+        /* The SM never sees it, and the record it keeps for this session is never freed */
+        DPRINT1("SmSessionComplete: NtRequestPort failed for session %lu, Status: 0x%08lx\n", SessionId, Status);
+    }
+    return Status;
 }
 
 /**
