@@ -17,11 +17,18 @@
    violation in compiled Java code. */
 
 #define RUN_MS          4000
+#define MAX_RUN_MS      120000
 #define MAX_THREADS     16
+/* Where one processor runs the fault threads and the noise threads in turn, only some of the faults happen while
+   another thread's page fault is in flight on it. The run lasts until this many faults were caught and the noise
+   threads have touched this many pages, so that a kernel that reads the address late cannot get through by luck.
+   A run that is too slow to get there (a checked kernel) is skipped, not passed. */
+#define MIN_FAULTS      1000000
+#define MIN_TOUCHES     200000
 
 static PUCHAR NoAccessPage, ReadOnlyPage;
 static volatile LONG Stop;
-static volatile LONG Faults, WrongAddress, WrongType;
+static volatile LONG Faults, Touches, WrongAddress, WrongType;
 static volatile ULONG_PTR FirstWrong;
 
 static LONG CheckFault(PEXCEPTION_POINTERS Pointers, PVOID Address, ULONG_PTR Type)
@@ -88,6 +95,7 @@ static DWORD WINAPI NoiseThread(PVOID Parameter)
             continue;
         for (i = 0; i < 64; i++)
             Memory[i * PAGE_SIZE] = 1;
+        InterlockedExchangeAdd(&Touches, 64);
         VirtualFree((PVOID)Memory, 0, MEM_RELEASE);
     }
     return 0;
@@ -98,7 +106,8 @@ START_TEST(PageFaultAddress)
     SYSTEM_INFO SystemInfo;
     HANDLE Threads[2 * MAX_THREADS];
     ULONG Count, ThreadCount = 0, i;
-    DWORD OldProtect;
+    DWORD OldProtect, Start, Elapsed;
+    BOOL Ended;
 
     GetSystemInfo(&SystemInfo);
     Count = min(max(2 * SystemInfo.dwNumberOfProcessors, 2), MAX_THREADS);
@@ -120,18 +129,36 @@ START_TEST(PageFaultAddress)
     }
     ok(ThreadCount == 2 * Count, "Created %lu of %lu threads\n", ThreadCount, 2 * Count);
 
-    Sleep(RUN_MS);
+    /* At least RUN_MS, then until enough faults happened (the rate depends on the number of processors) */
+    Start = GetTickCount();
+    do
+    {
+        Sleep(100);
+        Elapsed = GetTickCount() - Start;
+    } while (Elapsed < RUN_MS || ((Faults < MIN_FAULTS || Touches < MIN_TOUCHES) && Elapsed < MAX_RUN_MS));
     Stop = 1;
-    ok(WaitForMultipleObjects(ThreadCount, Threads, TRUE, 30000) == WAIT_OBJECT_0, "Threads did not end\n");
-    for (i = 0; i < ThreadCount; i++)
-        CloseHandle(Threads[i]);
+    Ended = (WaitForMultipleObjects(ThreadCount, Threads, TRUE, 30000) == WAIT_OBJECT_0);
+    ok(Ended, "Threads did not end\n");
+    if (Ended)
+    {
+        for (i = 0; i < ThreadCount; i++)
+            CloseHandle(Threads[i]);
+    }
 
-    trace("%lu processors, %lu fault threads, %ld faults\n", SystemInfo.dwNumberOfProcessors, Count, Faults);
+    trace("%lu processors, %lu fault threads, %ld faults, %ld noise page touches in %lu ms\n",
+          SystemInfo.dwNumberOfProcessors, Count, Faults, Touches, Elapsed);
+    /* A slow configuration (a checked kernel) that did not get there in MAX_RUN_MS proves nothing either way */
+    if (Faults < MIN_FAULTS || Touches < MIN_TOUCHES)
+        skip("Only %ld faults and %ld noise touches in %lu ms, wanted %d and %d\n", Faults, Touches, Elapsed, MIN_FAULTS, MIN_TOUCHES);
     ok(Faults > 0, "No access violation was caught\n");
     ok(WrongAddress == 0, "%ld of %ld access violations reported another address (first %p)\n",
        WrongAddress, Faults, (PVOID)FirstWrong);
     ok(WrongType == 0, "%ld of %ld access violations reported the wrong access type\n", WrongType, Faults);
 
-    VirtualFree(NoAccessPage, 0, MEM_RELEASE);
-    VirtualFree(ReadOnlyPage, 0, MEM_RELEASE);
+    /* A thread that did not end still uses the pages: leave them, the process ends with the test */
+    if (Ended)
+    {
+        VirtualFree(NoAccessPage, 0, MEM_RELEASE);
+        VirtualFree(ReadOnlyPage, 0, MEM_RELEASE);
+    }
 }
