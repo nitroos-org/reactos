@@ -238,6 +238,7 @@ extern void func_RtlWaitOnAddress(void);
 extern void func_RtlVirtualUnwind(void);
 extern void func_RtlxUnicodeStringToAnsiSize(void);
 extern void func_RtlxUnicodeStringToOemSize(void);
+extern void func_PageFaultAddress(void);
 extern void func_SectionFaultCost(void);
 extern void func_SectionPageLeak(void);
 extern void func_SectionVirtualLockLeak(void);
@@ -499,6 +500,7 @@ const struct test winetest_testlist[] =
     { "RtlStringSdBounds",              func_RtlStringSdBounds },
     { "RtlVerifyVersionInfo",           func_RtlVerifyVersionInfo },
     { "RtlWaitOnAddress",               func_RtlWaitOnAddress },
+    { "PageFaultAddress",               func_PageFaultAddress },
     { "SectionFaultCost",               func_SectionFaultCost },
     { "SectionPageLeak",                func_SectionPageLeak },
     { "SectionVirtualLockLeak",         func_SectionVirtualLockLeak },
