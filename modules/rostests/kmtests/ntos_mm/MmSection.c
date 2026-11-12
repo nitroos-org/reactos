@@ -983,6 +983,161 @@ TestPhysicalMemorySection(VOID)
     ExFreePoolWithTag(MyPage, 'MPmK');
 }
 
+/* Generic rights of a section object (documented SECTION_* masks) */
+static GENERIC_MAPPING PhysMemSectionMapping =
+{
+    STANDARD_RIGHTS_READ | SECTION_QUERY | SECTION_MAP_READ,
+    STANDARD_RIGHTS_WRITE | SECTION_MAP_WRITE,
+    STANDARD_RIGHTS_EXECUTE | SECTION_MAP_EXECUTE,
+    SECTION_ALL_ACCESS
+};
+
+static
+BOOLEAN
+PhysMemAccessCheck(
+    _In_ PSECURITY_DESCRIPTOR Sd,
+    _In_ PACCESS_TOKEN Token,
+    _In_ ACCESS_MASK Desired,
+    _Out_ PNTSTATUS AccessStatus)
+{
+    SECURITY_SUBJECT_CONTEXT Context;
+    ACCESS_MASK Granted = 0;
+
+    /* A subject with only a primary token: the access check runs against that token */
+    Context.ClientToken = NULL;
+    Context.ImpersonationLevel = SecurityAnonymous;
+    Context.PrimaryToken = Token;
+    Context.ProcessAuditId = NULL;
+    return SeAccessCheck(Sd, &Context, FALSE, Desired, 0, NULL,
+                         &PhysMemSectionMapping, UserMode, &Granted, AccessStatus);
+}
+
+/*
+ * Who can get at \Device\PhysicalMemory. Windows 10 refuses every user-mode open of
+ * it, also with READ_CONTROL and also for SYSTEM holding SeTcbPrivilege (the object is
+ * kernel-exclusive), so the DACL only matters to kernel code that checks access on
+ * someone's behalf: it must grant nobody but SYSTEM and the Administrators.
+ */
+static
+VOID
+TestPhysicalMemorySectionSecurity(VOID)
+{
+    UNICODE_STRING SectionName = RTL_CONSTANT_STRING(L"\\Device\\PhysicalMemory");
+    static const ACCESS_MASK UserAccess[] = { READ_CONTROL, SECTION_QUERY, SECTION_MAP_READ,
+                                              SECTION_MAP_READ | SECTION_MAP_WRITE, MAXIMUM_ALLOWED };
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE SectionHandle;
+    PVOID SectionObject;
+    PSECURITY_DESCRIPTOR Sd = NULL;
+    BOOLEAN SdAllocated = FALSE, DaclPresent = FALSE, DaclDefaulted = FALSE, Granted;
+    PACL Dacl = NULL;
+    PACE_HEADER Ace;
+    PSID AceSid;
+    ULONG i, AllowedOthers = 0, AllowedSystem = 0;
+    PACCESS_TOKEN SystemToken, OwnToken, StandardToken = NULL;
+    TOKEN_GROUPS DisableAdmins;
+    NTSTATUS Status, AccessStatus;
+    struct
+    {
+        OBJECT_ATTRIBUTES ObjectAttributes;
+        UNICODE_STRING Name;
+        WCHAR Buffer[32];
+    } *UserOpen;
+    PVOID UserMem = NULL;
+    SIZE_T UserSize = PAGE_SIZE;
+
+    /* Kernel mode opens it */
+    InitializeObjectAttributes(&ObjectAttributes, &SectionName, OBJ_KERNEL_HANDLE, NULL, NULL);
+    Status = ZwOpenSection(&SectionHandle, READ_CONTROL, &ObjectAttributes);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (skip(NT_SUCCESS(Status), "No section\n"))
+        return;
+    Status = ObReferenceObjectByHandle(SectionHandle, 0, NULL, KernelMode, &SectionObject, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ObCloseHandle(SectionHandle, KernelMode);
+    if (skip(NT_SUCCESS(Status), "No section object\n"))
+        return;
+
+    /* The DACL grants nobody but SYSTEM and the Administrators */
+    Status = ObGetObjectSecurity(SectionObject, &Sd, &SdAllocated);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!skip(NT_SUCCESS(Status) && Sd != NULL, "No security descriptor\n"))
+    {
+        Status = RtlGetDaclSecurityDescriptor(Sd, &DaclPresent, &Dacl, &DaclDefaulted);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        ok(DaclPresent && Dacl != NULL, "No DACL (present %u, %p): everyone would have access\n", DaclPresent, Dacl);
+        for (i = 0; Dacl != NULL && i < Dacl->AceCount; i++)
+        {
+            if (!NT_SUCCESS(RtlGetAce(Dacl, i, (PVOID*)&Ace)) || Ace->AceType != ACCESS_ALLOWED_ACE_TYPE)
+                continue;
+            AceSid = (PSID)&((PACCESS_ALLOWED_ACE)Ace)->SidStart;
+            if (RtlEqualSid(AceSid, SeExports->SeLocalSystemSid))
+                AllowedSystem++;
+            else if (!RtlEqualSid(AceSid, SeExports->SeAliasAdminsSid))
+                AllowedOthers++;
+        }
+        ok(AllowedSystem >= 1, "No access-allowed ACE for SYSTEM\n");
+        ok_eq_ulong(AllowedOthers, 0UL);
+
+        /* SYSTEM is allowed to map it read/write */
+        SystemToken = PsReferencePrimaryToken(PsInitialSystemProcess);
+        Granted = PhysMemAccessCheck(Sd, SystemToken, SECTION_MAP_READ | SECTION_MAP_WRITE, &AccessStatus);
+        ok(Granted, "SYSTEM refused SECTION_MAP_READ|SECTION_MAP_WRITE\n");
+        ok_eq_hex(AccessStatus, STATUS_SUCCESS);
+        PsDereferencePrimaryToken(SystemToken);
+
+        /* A standard user (our token without the Administrators group and without privileges) is refused */
+        OwnToken = PsReferencePrimaryToken(PsGetCurrentProcess());
+        DisableAdmins.GroupCount = 1;
+        DisableAdmins.Groups[0].Sid = SeExports->SeAliasAdminsSid;
+        DisableAdmins.Groups[0].Attributes = 0;
+        Status = SeFilterToken(OwnToken, DISABLE_MAX_PRIVILEGE, &DisableAdmins, NULL, NULL, &StandardToken);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (!skip(NT_SUCCESS(Status), "No filtered token\n"))
+        {
+            for (i = 0; i < RTL_NUMBER_OF(UserAccess); i++)
+            {
+                if (UserAccess[i] == MAXIMUM_ALLOWED)
+                    continue;
+                Granted = PhysMemAccessCheck(Sd, StandardToken, UserAccess[i], &AccessStatus);
+                ok(!Granted, "Standard user granted 0x%lx\n", UserAccess[i]);
+                ok_eq_hex(AccessStatus, STATUS_ACCESS_DENIED);
+            }
+            ObDereferenceObject(StandardToken);
+        }
+        PsDereferencePrimaryToken(OwnToken);
+        ObReleaseObjectSecurity(Sd, SdAllocated);
+    }
+    ObDereferenceObject(SectionObject);
+
+    /* A user-mode open is refused, whatever access is asked for (our caller is an administrator) */
+    Status = ZwAllocateVirtualMemory(ZwCurrentProcess(), &UserMem, 0, &UserSize, MEM_COMMIT, PAGE_READWRITE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (skip(NT_SUCCESS(Status), "No user memory\n"))
+        return;
+    UserOpen = UserMem;
+    for (i = 0; i < RTL_NUMBER_OF(UserAccess); i++)
+    {
+        KmtStartSeh()
+            RtlCopyMemory(UserOpen->Buffer, SectionName.Buffer, SectionName.Length);
+            UserOpen->Name.Buffer = UserOpen->Buffer;
+            UserOpen->Name.Length = SectionName.Length;
+            UserOpen->Name.MaximumLength = SectionName.Length;
+            InitializeObjectAttributes(&UserOpen->ObjectAttributes, &UserOpen->Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+        KmtEndSeh(STATUS_SUCCESS);
+        /* What NtOpenSection does for a user-mode caller */
+        SectionHandle = NULL;
+        Status = ObOpenObjectByName(&UserOpen->ObjectAttributes, MmSectionObjectType, UserMode,
+                                    NULL, UserAccess[i], NULL, &SectionHandle);
+        ok(Status == STATUS_ACCESS_DENIED, "User-mode open with 0x%lx: 0x%lx\n", UserAccess[i], Status);
+        if (NT_SUCCESS(Status))
+            ObCloseHandle(SectionHandle, UserMode);
+    }
+    UserSize = 0;
+    Status = ZwFreeVirtualMemory(ZwCurrentProcess(), &UserMem, &UserSize, MEM_RELEASE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+}
+
 START_TEST(MmSection)
 {
     NTSTATUS Status;
@@ -1073,4 +1228,5 @@ START_TEST(MmSection)
         ZwClose(FileHandle1);
 
     TestPhysicalMemorySection();
+    TestPhysicalMemorySectionSecurity();
 }
