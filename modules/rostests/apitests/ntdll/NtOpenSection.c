@@ -106,6 +106,42 @@ Cleanup:
     return Impersonation;
 }
 
+/*
+ * Only an elevated administrator or SYSTEM would pass the DACL, so only for them
+ * does an ACCESS_DENIED prove the kernel-exclusive flag; for anyone else the DACL
+ * alone produces it.
+ */
+static
+BOOLEAN
+IsElevatedOrSystem(void)
+{
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    PSID SystemSid = NULL;
+    HANDLE ProcessToken = NULL;
+    TOKEN_ELEVATION Elevation;
+    UCHAR Buffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+    PTOKEN_USER User = (PTOKEN_USER)Buffer;
+    ULONG Length;
+    BOOLEAN Result = FALSE;
+
+    if (!NT_SUCCESS(NtOpenProcessToken(NtCurrentProcess(), TOKEN_QUERY, &ProcessToken)))
+        return FALSE;
+    if (NT_SUCCESS(NtQueryInformationToken(ProcessToken, TokenElevation, &Elevation, sizeof(Elevation), &Length)) &&
+        Elevation.TokenIsElevated)
+    {
+        Result = TRUE;
+    }
+    else if (NT_SUCCESS(NtQueryInformationToken(ProcessToken, TokenUser, User, sizeof(Buffer), &Length)) &&
+             NT_SUCCESS(RtlAllocateAndInitializeSid(&NtAuthority, 1, SECURITY_LOCAL_SYSTEM_RID,
+                                                    0, 0, 0, 0, 0, 0, 0, &SystemSid)))
+    {
+        Result = RtlEqualSid(User->User.Sid, SystemSid);
+    }
+    if (SystemSid) RtlFreeSid(SystemSid);
+    NtClose(ProcessToken);
+    return Result;
+}
+
 START_TEST(NtOpenSection)
 {
     HANDLE Token, NoToken = NULL;
@@ -113,6 +149,8 @@ START_TEST(NtOpenSection)
 
     /* Our own token: an administrator in the test runs, SYSTEM when run from a service */
     TestPhysicalMemoryOpen("own token");
+    if (!IsElevatedOrSystem())
+        skip("Not elevated: the refusals above come from the DACL, kernel-exclusivity is not proven by this run\n");
 
     /* A standard user */
     Token = MakeStandardUserToken();
