@@ -253,6 +253,36 @@ def ldml_to_win(p, era_year=False):
     return s.strip(" \t")
 
 
+def canon_quotes(s):
+    """Rule QUOTE-CANON (round 4), applied to the long date patterns only (SLONGDATE, SRELATIVELONGDATE, the long date lists):
+    one quoted literal per literal phrase. A quoted word between two date fields takes the
+    spaces around it into the quotes (CLDR `d 'de' MMMM 'de' y` -> `d' de 'MMMM' de 'yyyy`), and a quoted word at the end of the
+    pattern takes its trailing punctuation (`y 'г'.` -> `y 'г.'`). The formatted text is identical; only the quoting differs."""
+    toks = [m.group(0) for m in re.finditer(r"'[^']*'|([A-Za-z])\1*|.", s, flags=re.S)]
+    isfield = lambda t: bool(t) and t[0].isascii() and t[0].isalpha()
+    out = []
+    i = 0
+    n = len(toks)
+    while i < n:
+        t = toks[i]
+        if len(t) > 2 and t[0] == "'" and t[-1] == "'":
+            lit = t[1:-1]
+            j = i + 1
+            if len(out) > 1 and out[-1] == " " and isfield(out[-2]) and j + 1 < n and toks[j] == " " and isfield(toks[j + 1]):
+                out.pop()
+                lit = " " + lit + " "
+                j += 1
+            elif j == n - 1 and len(toks[j]) == 1 and not toks[j].isalnum() and toks[j] not in " '":
+                lit = lit + toks[j]
+                j += 1
+            out.append("'" + lit + "'")
+            i = j
+            continue
+        out.append(t)
+        i += 1
+    return "".join(out)
+
+
 def pattern_order(p):
     """IDATE style: 0 month-day-year, 1 day-month-year, 2 year-month-day, from the first appearance in the pattern."""
     seen = []
@@ -579,7 +609,10 @@ def build_locale(cldr, name, sk):
     v["LOCALE_IDIGITSUBSTITUTION"] = "1" if digits == "0123456789" else "2"
     v["LOCALE_SDECIMAL"] = sym("decimal") or "."
     # a narrow no-break space as the group separator (fr, ...) is a no-break space: it converts to every ANSI code page
-    v["LOCALE_STHOUSAND"] = (sym("group") or ",").replace("\u202f", "\u00a0")
+    # Rule APOS-TYPO (round 4): a group separator that is the bare ASCII apostrophe (de-CH, de-LI, it-CH, fr-CH, ...) is the
+    # typographic apostrophe U+2019 (the Unicode Standard's character for the apostrophe in running text; U+0027 is the neutral
+    # typewriter form). It is in the Windows ANSI code pages 1250-1258.
+    v["LOCALE_STHOUSAND"] = (sym("group") or ",").replace("\u202f", "\u00a0").replace("'", "\u2019")
     # Rule LIST-CSV: CLDR's `list` symbol is the separator of a list of numbers in running text (";" nearly everywhere).
     # LOCALE_SLIST is the separator of tabular data (CSV): a comma, unless the comma is the decimal separator.
     v["LOCALE_SLIST"] = ";" if v["LOCALE_SDECIMAL"] == "," else ","
@@ -628,7 +661,7 @@ def build_locale(cldr, name, sk):
     cp, cn = split_pattern(cpat)
     v["LOCALE_SMONGROUPING"] = grouping(cp)
     cdec = sym("currencyDecimal") or v["LOCALE_SDECIMAL"]
-    cgrp = (sym("currencyGroup") or v["LOCALE_STHOUSAND"]).replace("\u202f", "\u00a0")
+    cgrp = (sym("currencyGroup") or v["LOCALE_STHOUSAND"]).replace("\u202f", "\u00a0").replace("'", "\u2019")
     v["LOCALE_SMONDECIMALSEP"] = cdec
     v["LOCALE_SMONTHOUSANDSEP"] = cgrp
     pcan = canon_money(cp, "$")
@@ -669,14 +702,14 @@ def build_locale(cldr, name, sk):
         short = ldml_to_win(iso_short_date(cldr, ch))
     # CLDR short dates have a two-digit year, Windows short dates a four-digit one (an ambiguous short year is a regression)
     short = re.sub(r"(?<![y'])yy(?![y'])", "yyyy", short)
-    longd = dfm("long") if (lang in LONG_DATE_NO_WEEKDAY and dfm("long")) else dfm("full")
+    longd = canon_quotes(dfm("long") if (lang in LONG_DATE_NO_WEEKDAY and dfm("long")) else dfm("full"))
     v["LOCALE_SSHORTDATE"] = short
     v["LOCALE_SLONGDATE"] = longd
     v["LOCALE_SYEARMONTH"] = ldml_to_win(avail("yMMMM"))
     v["LOCALE_SMONTHDAY"] = ldml_to_win(avail("MMMMd"))
     rel = avail("MMMMEd") or avail("MMMEd").replace("MMM", "MMMM").replace("MMMMM", "MMMM")
     rel = re.sub(r"(?<!')\b[Ec]{1,6}\b(?!')", "EEEE", rel) if rel else rel     # the long weekday name
-    v["LOCALE_SRELATIVELONGDATE"] = ldml_to_win(rel)
+    v["LOCALE_SRELATIVELONGDATE"] = canon_quotes(ldml_to_win(rel))
     v["LOCALE_SSHORTTIME"] = tfm("short")
     v["LOCALE_STIMEFORMAT"] = tfm("medium")
     sp_ = strip_quoted(v["LOCALE_SSHORTDATE"])
@@ -898,7 +931,7 @@ def build_calendar_rows(cldr, tag, ch, cals, gv):
         if c == 1 and lang in SHORT_DATE_ISO and iso_short_date(cldr, ch):
             shortf = ldml_to_win(iso_short_date(cldr, ch))
         sd = uniq([re.sub(r"(?<![y'])yy(?![y'])", "yyyy", shortf), f("d", "medium")])
-        ld = uniq([f("d", "long"), f("d", "full")] if (c == 1 and lang in LONG_DATE_NO_WEEKDAY) else [f("d", "full"), f("d", "long")])
+        ld = uniq([canon_quotes(x) for x in ([f("d", "long"), f("d", "full")] if (c == 1 and lang in LONG_DATE_NO_WEEKDAY) else [f("d", "full"), f("d", "long")])])
         md = uniq([avail("MMMMd"), avail("Md")])
         ym = uniq([avail("yMMMM")])
         # the values of the default Gregorian calendar are those of the locale data (LOCALE_SSHORTDATE...): no rows
