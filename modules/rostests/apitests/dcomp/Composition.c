@@ -1529,6 +1529,125 @@ static const GUID IID_IVis3 = {0xd941ef2a, 0x0d5c, 0x4057, {0x92, 0xd7, 0xc9, 0x
 static const GUID IID_IVisStatics = {0x369965e1, 0x8645, 0x4f75, {0xba, 0x00, 0x64, 0x79, 0xcd, 0x10, 0xc8, 0xe6}};
 static const GUID IID_ICompInteractionSource = {0x043b2431, 0x06e3, 0x495a, {0xba, 0x54, 0x40, 0x9f, 0x00, 0x17, 0xfa, 0xc0}};
 
+/*
+ * Windows.UI.Composition.IVisual2: IID, slot order and signatures from microsoft/windows-rs (MIT OR Apache-2.0), the
+ * published `windows` crate 0.62.2 (vcs commit 32c3144490c016fe496a0aed769bce60987a2e9d, src/Windows/UI/Composition/mod.rs
+ * IVisual2_Vtbl; metadata/winrt/Windows.UI.Composition.rdl at commit 8ca69fdaa9d69c78b9bcfbee96c6916f2282e7f0):
+ * 6/7 ParentForTransform, 8/9 RelativeOffsetAdjustment (Vector3), 10/11 RelativeSizeAdjustment (Vector2).
+ */
+typedef struct { float x, y, z; } V3T;
+typedef struct { float x, y; } V2T;
+typedef struct IVisual2T IVisual2T;
+typedef struct
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(IVisual2T *This, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(IVisual2T *This);
+    ULONG (STDMETHODCALLTYPE *Release)(IVisual2T *This);
+    HRESULT (STDMETHODCALLTYPE *GetIids)(IVisual2T *This, ULONG *count, IID **iids);
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(IVisual2T *This, HSTRING *name);
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(IVisual2T *This, int *level);
+    HRESULT (STDMETHODCALLTYPE *get_ParentForTransform)(IVisual2T *This, WIVisual **v);
+    HRESULT (STDMETHODCALLTYPE *put_ParentForTransform)(IVisual2T *This, WIVisual *v);
+    HRESULT (STDMETHODCALLTYPE *get_RelOffset)(IVisual2T *This, float *xyz);
+    HRESULT (STDMETHODCALLTYPE *put_RelOffset)(IVisual2T *This, V3T v);
+    HRESULT (STDMETHODCALLTYPE *get_RelSize)(IVisual2T *This, float *xy);
+    HRESULT (STDMETHODCALLTYPE *put_RelSize)(IVisual2T *This, V2T v);
+} IVisual2TVtbl;
+struct IVisual2T { const IVisual2TVtbl *lpVtbl; };
+static const GUID IID_IVisual2T = {0x3052b611, 0x56c3, 0x4c3e, {0x8b, 0xf3, 0xf6, 0xe1, 0xad, 0x47, 0x3f, 0x06}};
+
+static void TestVisual2(void)
+{
+    WIContainerVisual *cv = NULL, *other = NULL;
+    WISpriteVisual *sp = NULL;
+    WIVisual *v = NULL, *ov = NULL, *got = NULL;
+    IVisual2T *v2 = NULL, *s2 = NULL;
+    IUnknown *u1 = NULL, *u2 = NULL;
+    ULONG oref;
+    float f[3];
+    V3T o3 = { 0.5f, 0.25f, 2.0f };
+    V2T o2 = { 1.0f, 0.5f };
+    HRESULT hr;
+
+    hr = Comp->lpVtbl->CreateContainerVisual(Comp, &cv);
+    ok(hr == S_OK && cv, "CreateContainerVisual %#lx\n", hr);
+    hr = Comp->lpVtbl->CreateContainerVisual(Comp, &other);
+    ok(hr == S_OK && other, "CreateContainerVisual %#lx\n", hr);
+    hr = Comp->lpVtbl->CreateSpriteVisual(Comp, &sp);
+    ok(hr == S_OK && sp, "CreateSpriteVisual %#lx\n", hr);
+    if (!cv || !other || !sp) goto out;
+    QI(cv, &IID___x_ABI_CWindows_CUI_CComposition_CIVisual, (void **)&v);
+    QI(other, &IID___x_ABI_CWindows_CUI_CComposition_CIVisual, (void **)&ov);
+    hr = QI(cv, &IID_IVisual2T, (void **)&v2);
+    ok(hr == S_OK && v2, "QI IVisual2 on ContainerVisual %#lx\n", hr);
+    hr = QI(sp, &IID_IVisual2T, (void **)&s2);
+    ok(hr == S_OK && s2, "QI IVisual2 on SpriteVisual %#lx\n", hr);
+    if (!v2) goto out;
+    QI(v2, &IID_IUnknown, (void **)&u1);
+    QI(cv, &IID_IUnknown, (void **)&u2);
+    ok(u1 == u2, "IVisual2 identity %p vs %p\n", u1, u2);
+    REL(u1); REL(u2);
+
+    got = (WIVisual *)0x1234;
+    hr = v2->lpVtbl->get_ParentForTransform(v2, &got);
+    ok(hr == S_OK && got == NULL, "ParentForTransform default %#lx %p\n", hr, got);
+    hr = v2->lpVtbl->get_ParentForTransform(v2, NULL);
+    ok(hr == E_POINTER, "get_ParentForTransform(NULL) %#lx\n", hr);
+    f[0] = f[1] = f[2] = 9.0f;
+    hr = v2->lpVtbl->get_RelOffset(v2, f);
+    ok(hr == S_OK && f[0] == 0.0f && f[1] == 0.0f && f[2] == 0.0f, "RelativeOffsetAdjustment default %#lx %g %g %g\n", hr, f[0], f[1], f[2]);
+    f[0] = f[1] = 9.0f;
+    hr = v2->lpVtbl->get_RelSize(v2, f);
+    ok(hr == S_OK && f[0] == 0.0f && f[1] == 0.0f, "RelativeSizeAdjustment default %#lx %g %g\n", hr, f[0], f[1]);
+
+    hr = v2->lpVtbl->put_RelOffset(v2, o3);
+    ok(hr == S_OK, "put_RelativeOffsetAdjustment %#lx\n", hr);
+    f[0] = f[1] = f[2] = 0.0f;
+    hr = v2->lpVtbl->get_RelOffset(v2, f);
+    ok(hr == S_OK && f[0] == 0.5f && f[1] == 0.25f && f[2] == 2.0f, "RelativeOffsetAdjustment %#lx %g %g %g\n", hr, f[0], f[1], f[2]);
+    hr = v2->lpVtbl->put_RelSize(v2, o2);
+    ok(hr == S_OK, "put_RelativeSizeAdjustment %#lx\n", hr);
+    f[0] = f[1] = 0.0f;
+    hr = v2->lpVtbl->get_RelSize(v2, f);
+    ok(hr == S_OK && f[0] == 1.0f && f[1] == 0.5f, "RelativeSizeAdjustment %#lx %g %g\n", hr, f[0], f[1]);
+
+    /* ParentForTransform keeps a reference to the other visual until it is replaced or the visual is freed */
+    oref = RefOf((IUnknown *)ov);
+    hr = v2->lpVtbl->put_ParentForTransform(v2, ov);
+    ok(hr == S_OK, "put_ParentForTransform %#lx\n", hr);
+    ok(RefOf((IUnknown *)ov) == oref + 1, "other visual refs %lu, were %lu\n", RefOf((IUnknown *)ov), oref);
+    hr = v2->lpVtbl->get_ParentForTransform(v2, &got);
+    ok(hr == S_OK && got, "get_ParentForTransform %#lx %p\n", hr, got);
+    if (got)
+    {
+        QI(got, &IID_IUnknown, (void **)&u1);
+        QI(ov, &IID_IUnknown, (void **)&u2);
+        ok(u1 == u2, "ParentForTransform is not the visual: %p vs %p\n", u1, u2);
+        REL(u1); REL(u2);
+        REL(got);
+    }
+    hr = v2->lpVtbl->put_ParentForTransform(v2, NULL);
+    ok(hr == S_OK, "put_ParentForTransform(NULL) %#lx\n", hr);
+    ok(RefOf((IUnknown *)ov) == oref, "other visual refs %lu after NULL, were %lu\n", RefOf((IUnknown *)ov), oref);
+    hr = v2->lpVtbl->put_ParentForTransform(v2, ov);
+    ok(hr == S_OK, "put_ParentForTransform again %#lx\n", hr);
+    REL(v2);
+    v2 = NULL;
+    REL(cv);
+    cv = NULL;
+    REL(v);
+    v = NULL;
+    ok(RefOf((IUnknown *)ov) == oref, "other visual refs %lu after the visual is freed, were %lu\n", RefOf((IUnknown *)ov), oref);
+out:
+    if (s2) REL(s2);
+    if (v2) REL(v2);
+    if (v) REL(v);
+    if (ov) REL(ov);
+    if (cv) REL(cv);
+    if (other) REL(other);
+    if (sp) REL(sp);
+}
+
 static void TestVisualInteractionSource(PRO_ACTIVATE pRoActivateInstance, PWCS pWindowsCreateString, PWDS pWindowsDeleteString)
 {
     const WCHAR name[] = L"Windows.UI.Composition.Interactions.VisualInteractionSource";
@@ -1735,6 +1854,7 @@ START_TEST(Composition)
         TestSurfaces();
         TestStretch();
         TestDesktopTarget();
+        TestVisual2();
         TestVisualInteractionSource(pRoActivateInstance, pWindowsCreateString, pWindowsDeleteString);
         REL(Comp);
     }
