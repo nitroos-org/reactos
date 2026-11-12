@@ -26,6 +26,7 @@ KMT_TESTFUNC Test_ExInterlocked;
 KMT_TESTFUNC Test_ExInterlockedIpi;
 KMT_TESTFUNC Test_ExAllocatePool2;
 KMT_TESTFUNC Test_ExPools;
+KMT_TESTFUNC Test_ExStubHit;
 KMT_TESTFUNC Test_ProbeCapture;
 KMT_TESTFUNC Test_ExPushLock;
 KMT_TESTFUNC Test_ExResource;
@@ -180,6 +181,7 @@ const KMT_TEST TestList[] =
     { "ExInterlockedIpi",                   Test_ExInterlockedIpi },
     { "ExAllocatePool2",                    Test_ExAllocatePool2 },
     { "ExPools",                            Test_ExPools },
+    { "ExStubHit",                          Test_ExStubHit },
     { "ProbeCapture",                       Test_ProbeCapture },
     { "ExPushLock",                         Test_ExPushLock },
     { "ExResource",                         Test_ExResource },

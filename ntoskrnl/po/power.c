@@ -535,7 +535,7 @@ NTSTATUS
 NTAPI
 PoCancelDeviceNotify(IN PVOID NotifyBlock)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -551,7 +551,7 @@ PoRegisterDeviceNotify(OUT PVOID Unknown0,
                        IN PVOID Unknown4,
                        IN PVOID Unknown5)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -639,7 +639,7 @@ PoRegisterDeviceForIdleDetection(IN PDEVICE_OBJECT DeviceObject,
                                  IN ULONG PerformanceIdleTime,
                                  IN DEVICE_POWER_STATE State)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return NULL;
 }
 
@@ -651,7 +651,7 @@ NTAPI
 PoRegisterSystemState(IN PVOID StateHandle,
                       IN EXECUTION_STATE Flags)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return NULL;
 }
 
@@ -751,7 +751,7 @@ VOID
 NTAPI
 PoSetSystemState(IN EXECUTION_STATE Flags)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
 }
 
 /*
@@ -771,7 +771,7 @@ VOID
 NTAPI
 PoUnregisterSystemState(IN PVOID StateHandle)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
 }
 
 /*

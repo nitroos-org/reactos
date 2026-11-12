@@ -1723,7 +1723,7 @@ NTAPI
 MmAdvanceMdl(IN PMDL Mdl,
              IN ULONG NumberOfBytes)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -1960,7 +1960,7 @@ NTAPI
 MmPrefetchPages(IN ULONG NumberOfLists,
                 IN PREAD_LIST *ReadLists)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -1972,7 +1972,7 @@ NTAPI
 MmProtectMdlSystemAddress(IN PMDL MemoryDescriptorList,
                           IN ULONG NewProtect)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -2040,7 +2040,7 @@ MmProbeAndLockSelectedPages(IN OUT PMDL MemoryDescriptorList,
                             IN KPROCESSOR_MODE AccessMode,
                             IN LOCK_OPERATION Operation)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
 }
 
 /*
@@ -2050,7 +2050,7 @@ VOID
 NTAPI
 MmMapMemoryDumpMdl(IN PMDL Mdl)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
 }
 
 /* EOF */

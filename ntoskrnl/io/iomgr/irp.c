@@ -2472,7 +2472,7 @@ NTAPI
 IoIsValidNameGraftingBuffer(IN PIRP Irp,
                             IN PREPARSE_DATA_BUFFER ReparseBuffer)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return FALSE;
 }
 

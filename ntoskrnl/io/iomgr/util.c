@@ -280,7 +280,7 @@ IoCheckFunctionAccess(IN ACCESS_MASK GrantedAccess,
                       IN PVOID ExtraData OPTIONAL,
                       IN PVOID ExtraData2 OPTIONAL)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -368,6 +368,6 @@ IoCheckQuerySetVolumeInformation(IN FS_INFORMATION_CLASS FsInformationClass,
                                  IN ULONG Length,
                                  IN BOOLEAN SetOperation)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }

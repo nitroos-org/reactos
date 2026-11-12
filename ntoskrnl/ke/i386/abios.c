@@ -23,7 +23,7 @@ KeI386FlatToGdtSelector(IN ULONG Base,
                         IN USHORT Length,
                         IN USHORT Selector)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -35,7 +35,7 @@ NTAPI
 KeI386ReleaseGdtSelectors(OUT PULONG SelArray,
                           IN ULONG NumOfSelectors)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -47,7 +47,7 @@ NTAPI
 KeI386AllocateGdtSelectors(OUT PULONG SelArray,
                            IN ULONG NumOfSelectors)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -56,7 +56,7 @@ NTAPI
 KeI386SetGdtSelector(IN ULONG Selector,
                      IN PKGDTENTRY GdtValue)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -67,7 +67,7 @@ KeI386AbiosCall(IN USHORT CallId,
                 IN PULONG RequestBlock,
                 IN USHORT EntryPoint)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -79,7 +79,7 @@ KeI386GetLid(IN USHORT DeviceId,
              IN PDRIVER_OBJECT DriverObject,
              OUT PUSHORT LogicalId)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -88,7 +88,7 @@ NTAPI
 KeI386ReleaseLid(IN USHORT LogicalId,
                  IN PDRIVER_OBJECT DriverObject)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -99,7 +99,7 @@ KeI386Call16BitCStyleFunction(IN ULONG EntryOffset,
                               IN PULONG Parameters,
                               IN ULONG Size)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return 0;
 }
 
@@ -107,7 +107,7 @@ VOID
 NTAPI
 KeI386Call16BitFunction(IN OUT PCONTEXT Context)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
 }
 
 /* EOF */

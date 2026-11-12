@@ -606,7 +606,7 @@ SeSetAuditParameter(
     _In_range_(<, SE_MAX_AUDIT_PARAMETERS) ULONG Index,
     _In_reads_(_Inexpressible_("depends on SE_ADT_PARAMETER_TYPE")) PVOID Data)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_SUCCESS;
 }
 
