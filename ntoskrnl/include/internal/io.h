@@ -289,7 +289,8 @@ typedef enum _COMPLETION_PACKET_TYPE
     IopCompletionPacketIrp,
     IopCompletionPacketMini,
     IopCompletionPacketQuota,
-    IopCompletionPacketWait     /* the embedded packet of a wait completion packet object (ex/waitcomp.c) */
+    IopCompletionPacketWait,    /* the embedded packet of a wait completion packet object (ex/waitcomp.c) */
+    IopCompletionPacketReserve  /* the packet storage of an IoCompletionReserve object (NtSetIoCompletionEx) */
 } COMPLETION_PACKET_TYPE, *PCOMPLETION_PACKET_TYPE;
 
 //
