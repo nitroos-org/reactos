@@ -55,6 +55,13 @@ RtlpCallVectoredHandlers(IN PEXCEPTION_RECORD ExceptionRecord,
     HandlerRemoved = FALSE;
     HandlerReturn = EXCEPTION_CONTINUE_SEARCH;
 
+    /* Most processes have no handler on a list (no vectored continue handler
+       at all): do not take the lock that every exception of every thread
+       would otherwise go through, as Windows does not. A handler that another
+       thread adds at this moment is not ordered with this exception anyway. */
+    if (IsListEmpty(VectoredHandlerList))
+        return FALSE;
+
     /* Set up the data to pass to the handler */
     ExceptionInfo.ExceptionRecord = ExceptionRecord;
     ExceptionInfo.ContextRecord = Context;
