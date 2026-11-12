@@ -1514,8 +1514,9 @@ MiResolveTransitionFault(IN BOOLEAN StoreInstruction,
     {
         /* All Windows does here is a bunch of sanity checks */
         DPRINT("Transition in active list\n");
-        ASSERT((Pfn1->PteAddress >= MiAddressToPte(MmPagedPoolStart)) &&
-               (Pfn1->PteAddress <= MiAddressToPte(MmPagedPoolEnd)));
+        ASSERT(((Pfn1->PteAddress >= MiAddressToPte(MmPagedPoolStart)) &&
+                (Pfn1->PteAddress <= MiAddressToPte(MmPagedPoolEnd))) ||
+               MI_IS_PROTOTYPE_PTE_ADDRESS(Pfn1->PteAddress));
         ASSERT(Pfn1->u2.ShareCount != 0);
         ASSERT(Pfn1->u3.e2.ReferenceCount != 0);
     }

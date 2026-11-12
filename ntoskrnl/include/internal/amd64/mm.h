@@ -66,6 +66,7 @@
 #define MI_MAX_PAGED_POOL_SIZE                  (4ULL * 1024 * 1024 * 1024) // pool.c and section.c use 32-bit page counts
 #define MI_SYSTEM_VIEW_SIZE                     (512 * _1MB)
 #define MI_SPARSE_SECTION_MINIMUM               (4ULL * 1024 * 1024 * 1024) // SEC_RESERVE page-file sections from here on: sparse Prototype PTEs
+// Raising MI_SPARSE_SECTION_MAXIMUM to 16 TB or more overflows the 32-bit PTE counts of segments and commit paths
 #define MI_SPARSE_SECTION_MAXIMUM               (8ULL * 1024 * 1024 * 1024 * 1024) // largest such section (Windows 10 x64 accepts 8 TB, oracle)
 #define MI_SESSION_VIEW_SIZE                    (512 * _1MB)
 #define MI_SESSION_POOL_SIZE                    (64 * _1MB)

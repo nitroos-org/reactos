@@ -816,7 +816,7 @@ MiSegmentDelete(IN PSEGMENT Segment)
 #ifdef _M_AMD64
     /* Every Prototype PTE is 0 now and no page is accounted to their pages any more */
     if (MI_IS_SPARSE_PROTOTYPE_PTE(Subsection->SubsectionBase))
-        MiFreeSparsePrototypePtes(Subsection->SubsectionBase, Segment->NonExtendedPtes);
+        MiFreeSparsePrototypePtes(Subsection->SubsectionBase, Segment->NonExtendedPtes, Segment->u1.CreatingProcess);
 #endif
 
     /* Free the structures */
@@ -1660,8 +1660,16 @@ MiMapViewOfDataSection(
     Vad->ControlArea = ControlArea;
     Vad->u.VadFlags.CommitCharge = 0;
     Vad->u.VadFlags.Protection = ProtectionMask;
-    /* 21 bits (the next bit is PagerCommit, P4); nothing reads FileOffset back */
-    Vad->u2.VadFlags2.FileOffset = (ULONG)(SectionOffset->QuadPart >> 16);
+    /*
+     * FileOffset is the view offset in 64 KB units in 21 bits (the next bit is PagerCommit, P4): offsets below
+     * 128 GB. A view further into a section (a reserved section of up to 8 TB) gets all ones instead of a
+     * silently truncated value; its exact offset is (FirstPrototypePte - SubsectionBase) pages. Nothing reads
+     * the field back today.
+     */
+    if ((ULONG64)SectionOffset->QuadPart < (1ULL << (21 + 16)))
+        Vad->u2.VadFlags2.FileOffset = (ULONG)(SectionOffset->QuadPart >> 16);
+    else
+        Vad->u2.VadFlags2.FileOffset = (1UL << 21) - 1;
     Vad->u2.VadFlags2.Inherit = (InheritDisposition == ViewShare);
     if ((AllocationType & SEC_NO_CHANGE) || (Section->u.Flags.NoChange))
     {
@@ -1698,11 +1706,7 @@ MiMapViewOfDataSection(
         for (Round = 0; ; Round++)
         {
             KeAcquireGuardedMutex(&MmSectionCommitMutex);
-            CommitPages = 0;
-            for (PMMPTE ProtoPte = PointerPte; ProtoPte < LastPte; ProtoPte++)
-            {
-                if (ProtoPte->u.Long == 0) CommitPages++;
-            }
+            CommitPages = MiCountZeroPrototypePtes(PointerPte, LastPte);
             if (MiChargeCommit(CommitPages, MiCommitUser))
                 break;
 
@@ -1717,16 +1721,20 @@ MiMapViewOfDataSection(
         }
 
 #ifdef _M_AMD64
-        /* Sparse Prototype PTEs: make their pages writable first */
-        if (CommitPages && MI_IS_SPARSE_PROTOTYPE_PTE(PointerPte) &&
-            !NT_SUCCESS(MiPopulateSparsePrototypePtes(PointerPte, LastPte - 1)))
+        /* Sparse Prototype PTEs: make their pages writable first (charged, may fail like a commit) */
+        if (CommitPages && MI_IS_SPARSE_PROTOTYPE_PTE(PointerPte))
         {
-            MiReturnCommit(CommitPages);
-            KeReleaseGuardedMutex(&MmSectionCommitMutex);
-            MiReturnCommit(ViewCommit);
-            ExFreePoolWithTag(Vad, 'ldaV');
-            MiDereferenceControlArea(ControlArea);
-            return STATUS_INSUFFICIENT_RESOURCES;
+            NTSTATUS PopulateStatus = MiPopulateSparsePrototypePtes(PointerPte, LastPte - 1);
+
+            if (!NT_SUCCESS(PopulateStatus))
+            {
+                MiReturnCommit(CommitPages);
+                KeReleaseGuardedMutex(&MmSectionCommitMutex);
+                MiReturnCommit(ViewCommit);
+                ExFreePoolWithTag(Vad, 'ldaV');
+                MiDereferenceControlArea(ControlArea);
+                return PopulateStatus;
+            }
         }
 #endif
 
@@ -1913,7 +1921,7 @@ MiCreatePagingFileMap(OUT PSEGMENT *Segment,
         /* Only the segment header in paged pool; the Prototype PTEs all read as 0 (reserved) */
         NewSegment = ExAllocatePoolWithTag(PagedPool, sizeof(SEGMENT), 'tSmM');
         if (!NewSegment) return STATUS_INSUFFICIENT_RESOURCES;
-        if (!NT_SUCCESS(MiAllocateSparsePrototypePtes(PteCount, &PointerPte)))
+        if (!NT_SUCCESS(MiAllocateSparsePrototypePtes(PteCount, PsGetCurrentProcess(), &PointerPte)))
         {
             ExFreePoolWithTag(NewSegment, 'tSmM');
             return STATUS_INSUFFICIENT_RESOURCES;
@@ -1943,7 +1951,7 @@ MiCreatePagingFileMap(OUT PSEGMENT *Segment,
     {
         if (AllocationAttributes & SEC_COMMIT) MiReturnCommit(PteCount);
 #ifdef _M_AMD64
-        if (Sparse) MiFreeSparsePrototypePtes(PointerPte, PteCount);
+        if (Sparse) MiFreeSparsePrototypePtes(PointerPte, PteCount, PsGetCurrentProcess());
 #endif
         ExFreePoolWithTag(NewSegment, 'tSmM');
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -3549,12 +3557,7 @@ MmCommitSessionMappedView(IN PVOID MappedBase,
 
     /* Acquire the commit lock and count all the non-committed PTEs */
     KeAcquireGuardedMutexUnsafe(&MmSectionCommitMutex);
-    PointerPte = ProtoPte;
-    while (PointerPte < LastProtoPte)
-    {
-        if (PointerPte->u.Long) QuotaCharge--;
-        PointerPte++;
-    }
+    QuotaCharge = MiCountZeroPrototypePtes(ProtoPte, LastProtoPte);
 
     /* Was everything committed already? */
     if (!QuotaCharge)
@@ -3574,14 +3577,18 @@ MmCommitSessionMappedView(IN PVOID MappedBase,
     }
 
 #ifdef _M_AMD64
-    /* Sparse Prototype PTEs: make their pages writable first */
-    if (MI_IS_SPARSE_PROTOTYPE_PTE(ProtoPte) &&
-        !NT_SUCCESS(MiPopulateSparsePrototypePtes(ProtoPte, LastProtoPte - 1)))
+    /* Sparse Prototype PTEs: make their pages writable first (charged, may fail like a commit) */
+    if (MI_IS_SPARSE_PROTOTYPE_PTE(ProtoPte))
     {
-        MiReturnCommit(QuotaCharge);
-        KeReleaseGuardedMutexUnsafe(&MmSectionCommitMutex);
-        KeReleaseGuardedMutex(Session->SystemSpaceViewLockPointer);
-        return STATUS_INSUFFICIENT_RESOURCES;
+        NTSTATUS PopulateStatus = MiPopulateSparsePrototypePtes(ProtoPte, LastProtoPte - 1);
+
+        if (!NT_SUCCESS(PopulateStatus))
+        {
+            MiReturnCommit(QuotaCharge);
+            KeReleaseGuardedMutexUnsafe(&MmSectionCommitMutex);
+            KeReleaseGuardedMutex(Session->SystemSpaceViewLockPointer);
+            return PopulateStatus;
+        }
     }
 #endif
 
