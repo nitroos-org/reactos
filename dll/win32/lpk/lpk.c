@@ -522,8 +522,13 @@ LpkGetCharacterPlacement(
     if (nSet > lpResults->nGlyphs)
         nSet = lpResults->nGlyphs;
 
+    /* BIDI_Reorder leaves the count alone when it returns early: one glyph for each character then, and
+     * never more than the caller's arrays hold (nGlyphs is their size on input) */
+    cGlyphs = (INT)nSet;
     BIDI_Reorder(hdc, lpString, uCount, dwFlags, WINE_GCPW_FORCE_LTR, lpResults->lpOutString,
                  nSet, lpResults->lpOrder, &lpGlyphs, &cGlyphs);
+    if (cGlyphs < 0 || (UINT)cGlyphs > lpResults->nGlyphs)
+        cGlyphs = (INT)nSet;
 
     lpResults->nGlyphs = (UINT)cGlyphs;
 
@@ -554,9 +559,12 @@ LpkGetCharacterPlacement(
 
         else
         {
+            /* The caller need not ask for the reordered string (SWT asks for the order and the widths only) */
+            LPCWSTR pwsz = lpResults->lpOutString ? lpResults->lpOutString : lpString;
+
             for (i = 0; i < nSet; i++)
             {
-                if (GetCharWidth32W(hdc, lpResults->lpOutString[i], lpResults->lpOutString[i], &c))
+                if (GetCharWidth32W(hdc, pwsz[i], pwsz[i], &c))
                     lpResults->lpDx[i] = c;
             }
         }

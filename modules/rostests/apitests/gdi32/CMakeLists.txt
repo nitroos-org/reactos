@@ -72,6 +72,7 @@ list(APPEND SOURCE
     GetPixel.c
     GetStockObject.c
     GetTextExtentExPoint.c
+    GetCharPlacementReorder.c
     GetTextExtentKerning.c
     GetTextExtentQuality.c
     GetTextFace.c
