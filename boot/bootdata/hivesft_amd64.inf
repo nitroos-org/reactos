@@ -6,6 +6,20 @@ Signature = "$Windows NT$"
 ; Build lab of the Windows 10 22H2 build the version values report (see hivesft_i386.inf).
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion","BuildLabEx",2,"19041.1.amd64fre.vb_release.191206-1406"
 
+; The 32-bit view of the version values hivesft.inf puts in HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion. Windows 10 keeps
+; the same values in both views (measured on 22H2, both views identical) and 32-bit installers read them from Wow6432Node.
+; The kernel writes CurrentVersion, CurrentBuildNumber, BuildLab, CurrentType and SystemRoot to both views at boot
+; (CmpSetVersionDataForView) and syssetup writes InstallationType to both (DoWriteInstallationType). Keep these lines equal to the ones in hivesft.inf: apitests kernel32 RegCurrentVersion compares the views.
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion","ProductName",2,"Windows 10 Pro"
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion","CurrentMajorVersionNumber",0x00010003,10
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion","CurrentMinorVersionNumber",0x00010003,0
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion","CurrentBuild",2,"19045"
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion","EditionID",2,"Professional"
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion","CompositionEditionID",2,"Professional"
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion","DisplayVersion",2,"22H2"
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion","UBR",0x00010003,5247
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion","BuildLabEx",2,"19041.1.amd64fre.vb_release.191206-1406"
+
 ; The 32-bit view of the HideDesktopIcons values of hivesft.inf for CLSID_Internet: shell32 in SysWOW64 reads
 ; Wow6432Node, and uses the value to leave the Internet item out of the Desktop folder enumeration (32-bit file dialogs).
 HKLM,"SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\ClassicStartMenu","{871C5380-42A0-1069-A2EA-08002B30309D}",0x00010001,1
