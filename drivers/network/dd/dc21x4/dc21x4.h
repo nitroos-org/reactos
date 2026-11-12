@@ -31,6 +31,16 @@
 
 #define DC_RECEIVE_ARRAY_SIZE      16
 
+/*
+ * Lend receive buffers to the protocol stack instead of copying (NDIS_STATUS_SUCCESS rather
+ * than NDIS_STATUS_RESOURCES in the indication). The stack keeps a lent TCP segment in its
+ * receive queue until the segment has been processed (tcpip: LAN_MAX_HELD_PACKETS), which
+ * made the TCP window collapse for seconds at a time (0.05 MB/s measured on QEMU user
+ * networking, 32 MB/s with the buffers copied). A 10/100 adapter gains little from zero-copy,
+ * so the buffers stay with the driver and the RX descriptor is reused at once.
+ */
+#define DC_LEND_RECEIVE_BUFFERS    0
+
 #define DC_MULTICAST_LIST_SIZE     36
 
 #define DC_MAXIMUM_FRAME_SIZE      1514
