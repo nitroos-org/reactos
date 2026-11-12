@@ -238,6 +238,41 @@ CsrApiHandleConnectionRequest(IN PCSR_API_MESSAGE ApiMessage)
     return Status;
 }
 
+/*
+ * A thread that was not created through kernel32 (RtlCreateUserThread and with it the thread pool, NtCreateThreadEx)
+ * is not known to CSR: no BasepCreateThread call announced it. Such a thread of a process that is known to CSR still
+ * has to be served, as on Windows: a pool thread of an application calls CreateThread, the console, ... Add it to its
+ * process when its first request arrives. Called with the process lock held, returns with it held.
+ */
+static
+PCSR_THREAD
+CsrpAdoptUnknownThread(
+    _Out_ PCSR_PROCESS *CsrProcess,
+    _In_ PCLIENT_ID ClientId)
+{
+    PCSR_PROCESS Process;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE ThreadHandle;
+    NTSTATUS Status;
+
+    if (!NT_SUCCESS(CsrLockProcessByClientId(ClientId->UniqueProcess, &Process)))
+        return NULL;
+
+    InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, NULL);
+    Status = NtOpenThread(&ThreadHandle, THREAD_ALL_ACCESS, &ObjectAttributes, ClientId);
+    if (NT_SUCCESS(Status))
+    {
+        Status = CsrCreateThread(Process, ThreadHandle, ClientId, FALSE);
+        if (!NT_SUCCESS(Status))
+            NtClose(ThreadHandle);
+    }
+    CsrUnlockProcess(Process);
+
+    if (!NT_SUCCESS(Status))
+        return NULL;
+    return CsrLocateThreadByClientId(CsrProcess, ClientId);
+}
+
 /*++
  * @name CsrpCheckRequestThreads
  *
@@ -462,6 +497,10 @@ CsrApiRequestThread(
         /* Now do the lookup to get the CSR_THREAD */
         CsrThread = CsrLocateThreadByClientId(&CsrProcess,
                                               &ReceiveMsg.Header.ClientId);
+
+        /* A thread CSR does not know yet of a process it does */
+        if (!CsrThread && MessageType == LPC_REQUEST)
+            CsrThread = CsrpAdoptUnknownThread(&CsrProcess, &ReceiveMsg.Header.ClientId);
 
         /* Did we find a thread? */
         if (!CsrThread)
