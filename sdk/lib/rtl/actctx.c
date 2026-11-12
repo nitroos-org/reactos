@@ -1325,8 +1325,9 @@ static void read_xml_elem( xmlbuf_t *xmlbuf, struct xml_elem *elem )
 static BOOL next_xml_elem( xmlbuf_t *xmlbuf, struct xml_elem *elem, const struct xml_elem *parent )
 {
     const WCHAR* ptr;
+    const WCHAR* attr_start;
     struct xml_attr attr;
-    xmlbuf_t attr_buf;
+    BOOL ns_error = FALSE;
     BOOL end = FALSE;
 
     xmlbuf->ns_pos = parent->ns_pos;  /* restore namespace stack to parent state */
@@ -1377,12 +1378,25 @@ static BOOL next_xml_elem( xmlbuf_t *xmlbuf, struct xml_elem *elem, const struct
 
     read_xml_elem( xmlbuf, elem );
 
-    /* parse namespace attributes */
-    attr_buf = *xmlbuf;
-    while (next_xml_attr( &attr_buf, &attr, &end ))
+    /*
+     * Parse the namespace attributes, and leave the buffer where it is. This scans the
+     * buffer itself and puts the position back: a copy of it (the namespace stack takes
+     * 2 KB) in every level of nested elements takes several pages of stack in the loader.
+     * An error of the scan is not kept, the parse of the attributes finds it again; an
+     * error of the namespace stack is.
+     */
+    attr_start = xmlbuf->ptr;
+    while (next_xml_attr( xmlbuf, &attr, &end ))
     {
         if (is_xmlns_attr( &attr )) push_xmlns( xmlbuf, &attr );
+        if (xmlbuf->error)
+        {
+            ns_error = TRUE;
+            break;
+        }
     }
+    xmlbuf->ptr = attr_start;
+    xmlbuf->error = ns_error;
     elem->ns = find_xmlns( xmlbuf, &elem->ns );
     elem->ns_pos = xmlbuf->ns_pos;
 
@@ -3570,6 +3584,8 @@ static NTSTATUS get_manifest_in_associated_manifest( struct actctx_loader* acl, 
     return status;
 }
 
+#define LOOKUP_MANIFEST_BUFFER_SIZE 8192
+
 static WCHAR *lookup_manifest_file( HANDLE dir, struct assembly_identity *ai )
 {
     static const WCHAR lookup_fmtW[] = L"%s_%s_%s_%u.%u.*.*_%s_*.manifest";
@@ -3580,12 +3596,20 @@ static WCHAR *lookup_manifest_file( HANDLE dir, struct assembly_identity *ai )
     IO_STATUS_BLOCK io;
     const WCHAR *lang = ai->language;
     unsigned int data_pos = 0, data_len, len;
-    char buffer[8192];
+    char *buffer;
 
     if (!lang || !wcsicmp( lang, L"neutral" )) lang = L"*";
 
     len = wcslen(ai->arch) + wcslen(ai->name) + wcslen(ai->public_key) + wcslen(lang) + 20 + ARRAY_SIZE(lookup_fmtW);
     if (!(lookup = RtlAllocateHeap( GetProcessHeap(), 0, len * sizeof(WCHAR) ))) return NULL;
+
+    /* The directory buffer is on the heap: 8 KB on the stack of the loader, which runs on a
+     * stack that starts with a single committed page, grows it by several pages */
+    if (!(buffer = RtlAllocateHeap( GetProcessHeap(), 0, LOOKUP_MANIFEST_BUFFER_SIZE )))
+    {
+        RtlFreeHeap( GetProcessHeap(), 0, lookup );
+        return NULL;
+    }
     swprintf( lookup, len, lookup_fmtW, ai->arch, ai->name, ai->public_key,
               ai->version.major, ai->version.minor, lang );
     RtlInitUnicodeString( &lookup_us, lookup );
@@ -3594,7 +3618,7 @@ static WCHAR *lookup_manifest_file( HANDLE dir, struct assembly_identity *ai )
     if (!wcsncmp( lookup, L"amd64_", 6 )) memcpy( lookup, L"a??", 3 * sizeof(WCHAR) );
 #endif
 
-    if (!NtQueryDirectoryFile( dir, 0, NULL, NULL, &io, buffer, sizeof(buffer),
+    if (!NtQueryDirectoryFile( dir, 0, NULL, NULL, &io, buffer, LOOKUP_MANIFEST_BUFFER_SIZE,
                                FileBothDirectoryInformation, FALSE, &lookup_us, TRUE ))
     {
         ULONG min_build = ai->version.build, min_revision = ai->version.revision;
@@ -3608,7 +3632,7 @@ static WCHAR *lookup_manifest_file( HANDLE dir, struct assembly_identity *ai )
         {
             if (data_pos >= data_len)
             {
-                if (NtQueryDirectoryFile( dir, 0, NULL, NULL, &io, buffer, sizeof(buffer),
+                if (NtQueryDirectoryFile( dir, 0, NULL, NULL, &io, buffer, LOOKUP_MANIFEST_BUFFER_SIZE,
                                           FileBothDirectoryInformation, FALSE, &lookup_us, FALSE ))
                     break;
                 data_len = io.Information;
@@ -3650,6 +3674,7 @@ static WCHAR *lookup_manifest_file( HANDLE dir, struct assembly_identity *ai )
         }
     }
     else WARN("no matching file for %s\n", debugstr_w(lookup));
+    RtlFreeHeap( GetProcessHeap(), 0, buffer );
     RtlFreeHeap( GetProcessHeap(), 0, lookup );
     return ret;
 }
