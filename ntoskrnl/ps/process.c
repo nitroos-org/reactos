@@ -13,6 +13,9 @@
 #define NDEBUG
 #include <debug.h>
 
+/* NitroSessions: how many times a create into another session picks a member of it before giving up */
+#define PSP_SESSION_JOIN_TRIES 3
+
 /* GLOBALS *******************************************************************/
 
 extern ULONG PsMinimumWorkingSet, PsMaximumWorkingSet;
@@ -633,9 +636,11 @@ PspCreateProcess(OUT PHANDLE ProcessHandle,
              * lose its last process: then the child did not join it (MiSessionAddProcess joins only a live
              * session, from the attached process's membership). The address space is built, so it is
              * finished below (empty) and freed with the process; the create fails, as for a session that does
-             * not exist. SessionMember->Session stays valid: our reference to that process keeps it.
+             * not exist. SessionMember->Session stays valid: the process looked up is pinned by our object
+             * reference, it never clears its Session, and holds ProcessReferenceToSession until it is deleted.
+             * A NULL Session on either side is a failure too (a refused child has none), never a match.
              */
-            if (Process->Session != SessionMember->Session) SessionJoinFailed = TRUE;
+            if (!Process->Session || (Process->Session != SessionMember->Session)) SessionJoinFailed = TRUE;
         }
         else if (!MmCreateProcessAddressSpace(MinWs,
                                               Process,
@@ -677,8 +682,18 @@ PspCreateProcess(OUT PHANDLE ProcessHandle,
          * Finish the address space empty (no image, as for a child of the System process), so that the
          * process deletion frees all its pages: one left at phase 1 keeps them (MmDeleteProcessAddressSpace)
          */
-        MmInitializeProcessAddressSpace(Process, NULL, NULL, &NoFlags, NULL);
-        Status = STATUS_ACCESS_DENIED;
+        Status = MmInitializeProcessAddressSpace(Process, NULL, NULL, &NoFlags, NULL);
+        if (!NT_SUCCESS(Status))
+        {
+            /* Not enough resources to finish it (the creator is detached again): the create fails either way */
+            DPRINT1("Empty address space for a refused session join failed: 0x%lx\n", Status);
+        }
+
+        /*
+         * STATUS_RETRY is internal: the caller looks the session up again (the process it picked left, the
+         * session may still have others) and turns it into access denied when there is none
+         */
+        Status = STATUS_RETRY;
         goto CleanupWithRef;
     }
 
@@ -1584,6 +1599,7 @@ NtCreateProcessWithAttributes(OUT PHANDLE ProcessHandle,
     BOOLEAN HaveSession = FALSE;
     ULONG TargetSession = 0;
     PEPROCESS SessionMember = NULL;
+    ULONG SessionTries = 0;
     PHANDLE Handles = NULL;
     SIZE_T Count = 0, CaptureSize = 0, i;
     BOOLEAN Empty = FALSE;
@@ -1696,6 +1712,7 @@ NtCreateProcessWithAttributes(OUT PHANDLE ProcessHandle,
             if (!SessionMember) Status = STATUS_ACCESS_DENIED;
         }
     }
+    SessionTries = 0;
 
     if (NT_SUCCESS(Status) && Handles)
     {
@@ -1725,10 +1742,26 @@ NtCreateProcessWithAttributes(OUT PHANDLE ProcessHandle,
             }
         }
     }
-    if (NT_SUCCESS(Status))
+    while (NT_SUCCESS(Status))
+    {
         Status = PspCreateProcess(ProcessHandle, DesiredAccess, ObjectAttributes,
                                   ParentProcess, Flags, SectionHandle, DebugPort,
                                   ExceptionPort, InJob, Handles, Count, SessionMember);
+        if (!SessionMember || (Status != STATUS_RETRY)) break;
+
+        /*
+         * The child did not join: the process of the session we picked left it before we attached. If the
+         * session still has members this is not a denial (a CreateProcessAsUser into a live session must not
+         * fail on a race), so pick again, a few times; a session that is gone is access denied.
+         */
+        MmQuitNextSession(SessionMember);
+        SessionMember = NULL;
+        Status = STATUS_ACCESS_DENIED;
+        if (++SessionTries >= PSP_SESSION_JOIN_TRIES) break;
+        SessionMember = MmGetSessionById(TargetSession);
+        if (!SessionMember) break;
+        Status = STATUS_SUCCESS;
+    }
     if (SessionMember) MmQuitNextSession(SessionMember);
     if (Handles) ExFreePoolWithTag(Handles, 'lHsP');
     if (QuotaCharged)
