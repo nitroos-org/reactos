@@ -121,6 +121,7 @@ list(APPEND SOURCE
     SetWindowPosOwned.c
     SetWindowRgn.c
     ShowWindow.c
+    SizeNoMaxTrack.c
     ShowWindowFrame.c
     SwitchDesktop.c
     SuspendResumeNotification.c
