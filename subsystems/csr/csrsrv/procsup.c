@@ -111,7 +111,10 @@ CsrSetToShutdownPriority(VOID)
  *          thread management routines when a CSR Process has lost all
  *          its references.
  *
- *          This routine is called with the Process Lock held.
+ *          This routine is called with the Process Lock held. CsrRemoveProcess
+ *          releases it (once) before the NT session is dereferenced, so the
+ *          dereference, and the SmSessionComplete it can send, run without
+ *          the lock unless the caller held it recursively.
  *
  *--*/
 VOID

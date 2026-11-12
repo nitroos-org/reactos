@@ -38,6 +38,32 @@ volatile LONG SmTotalApiThreads;
 
 HANDLE SmUniqueProcessId;
 
+/* Forwarded registrations running now, each on an API thread (see SmpForwardProcessRegistration) */
+static volatile LONG SmpForwardsInFlight;
+
+/*
+ * Log lines a client can make SMSS print one at a time (a datagram it sends, a request it gets refused):
+ * the first few, then every SMP_CLIENT_LOG_EVERY-th with its running number, so a flood is one line in
+ * a thousand and not one line each on the serial port.
+ */
+#define SMP_CLIENT_LOG_FIRST 8
+#define SMP_CLIENT_LOG_EVERY 1024
+static volatile LONG SmpClientLogCount;
+
+static
+LONG
+SmpClientLogNumber(VOID)
+{
+    LONG Number = _InterlockedIncrement(&SmpClientLogCount);
+
+    if ((Number <= SMP_CLIENT_LOG_FIRST) || ((Number % SMP_CLIENT_LOG_EVERY) == 0)) return Number;
+    return 0;
+}
+
+/* The data length of the one datagram SMSS serves: SmSessionComplete, as smlib sizes it */
+#define SMP_SESSION_COMPLETE_DATA_LENGTH \
+    (sizeof(SM_SESSION_COMPLETE_MSG) + FIELD_OFFSET(SM_API_MSG, u) - sizeof(PORT_MESSAGE))
+
 /*
  * Security gate S8 (NitroSessions design). \SmApiPort is open to
  * Administrators and SYSTEM (SmpCreateSecurityDescriptors). The APIs below
@@ -509,6 +535,10 @@ SmpForwardProcessRegistration(
     {
         DPRINT1("SMSS: Forwarded registration refused: %lx.%lx is not a csrss SMSS started\n",
                 SmApiMsg->h.ClientId.UniqueProcess, SmApiMsg->h.ClientId.UniqueThread);
+        if (SmpNitroSessionsTestForward & SMP_NITRO_TEST_FORWARD_COUNT)
+        {
+            DPRINT1("SMSS: session records: %lu\n", SmpCountSessions());
+        }
         return STATUS_ACCESS_DENIED;
     }
     SenderSessionId = Sender->MuSessionId;
@@ -526,19 +556,62 @@ SmpForwardProcessRegistration(
     }
 
     /*
-     * The forward holds this API thread until the target csrss's Sb thread answers, and any number of
-     * forwards may do so at once, up to every API thread. That cannot deadlock because nothing the Sb
-     * thread waits for while it answers ever waits for SMSS:
+     * The forward holds this API thread until the target csrss's Sb thread answers. It cannot deadlock
+     * as long as the target answers, because nothing the Sb thread waits for while it answers ever
+     * waits for SMSS:
      * - the Sb thread itself never calls SMSS (on failure it drops the NT session quietly, and SMSS
      *   deletes the session record below);
      * - SmSessionComplete, the only SMSS call a csrss makes while it may hold a lock (the last process
-     *   of an NT session goes), is a datagram: it is queued, nobody waits for an API thread;
+     *   of an NT session goes), is a datagram: it is queued, nobody waits for an API thread. It must
+     *   never become a waiting request again (see SmpApiLoop and CsrDereferenceNtSession);
      * - the other SMSS call of a running csrss is this forward, from a basesrv API thread that holds no
      *   CSR lock while it waits.
      * So the Sb thread only waits for csrss locks held by threads that make progress, each forward
      * ends, and its API thread comes back.
+     *
+     * That is no help if the target never answers (its Sb thread stuck on a console lock or a driver,
+     * the session going down): the forward has no timeout, and enough of them would take every API
+     * thread, and with them every SMSS request of the system (SmExecPgm and SmStartCsr of session 0
+     * included). So at most SMP_API_THREADS - 1 forwards run at once and the others get
+     * STATUS_DEVICE_BUSY at once, which csrsrv retries for a bounded time and then fails the create
+     * with (CsrForwardProcessRegistration). One API thread is always left for everything else; a stuck
+     * target costs one SMSS API thread and one csrss API thread, never SMSS.
      */
-    Status = SmpSbCreateRemoteProcessEx(&ClientId, MuSessionId, MuSessionId, Flags);
+    if (_InterlockedIncrement(&SmpForwardsInFlight) > (SMP_API_THREADS - 1))
+    {
+        LONG Number;
+
+        _InterlockedDecrement(&SmpForwardsInFlight);
+        Number = SmpClientLogNumber();
+        if (Number)
+        {
+            DPRINT1("SMSS: Forwarded registration of %lx.%lx to session %lu busy: %ld forward(s) in flight (#%ld)\n",
+                    ClientId.UniqueProcess, ClientId.UniqueThread, MuSessionId,
+                    (LONG)(SMP_API_THREADS - 1), Number);
+        }
+        return STATUS_DEVICE_BUSY;
+    }
+    _SEH2_TRY
+    {
+        if (SmpNitroSessionsTestForwardStall)
+        {
+            /* Test only: the target csrss that never answers (for a while) */
+            LARGE_INTEGER Stall;
+
+            Stall.QuadPart = -10000000LL * SmpNitroSessionsTestForwardStall;
+            NtDelayExecution(FALSE, &Stall);
+            Status = STATUS_IO_TIMEOUT;
+        }
+        else
+        {
+            Status = SmpSbCreateRemoteProcessEx(&ClientId, MuSessionId, MuSessionId, Flags);
+        }
+    }
+    _SEH2_FINALLY
+    {
+        _InterlockedDecrement(&SmpForwardsInFlight);
+    }
+    _SEH2_END;
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("SMSS: Forwarded registration of %lx.%lx from session %lu to session %lu failed: %lx\n",
@@ -806,29 +879,68 @@ SmpApiLoop(
                  * Only a request has a sender waiting for the reply. Replying to anything else fails
                  * (no thread waits for that message id) without receiving, and this loop would serve
                  * the same message again and again. A datagram is accepted for SmSessionComplete only,
-                 * which subsystems send without waiting (see SmSessionComplete in smlib).
+                 * which subsystems send without waiting (see SmSessionComplete in smlib). It must never
+                 * become a waiting request: csrss sends it with its own locks held (see
+                 * CsrDereferenceNtSession).
+                 *
+                 * The kernel copies only the bytes the sender sent into this thread's reused message
+                 * buffer, so the length is checked before ApiNumber or the SessionId are read: a short
+                 * datagram would otherwise be read as the stale fields of an earlier message.
                  */
                 if (SMP_LPC_TYPE(&RequestMsg) != LPC_REQUEST)
                 {
+                    LONG Number;
+
                     ReplyMsg = NULL;
                     if ((SMP_LPC_TYPE(&RequestMsg) != LPC_DATAGRAM) ||
-                        (RequestMsg.ApiNumber != SmpSessionCompleteApi))
+                        (RequestMsg.h.u1.s1.DataLength < SMP_SESSION_COMPLETE_DATA_LENGTH) ||
+                        (RequestMsg.h.u1.s1.TotalLength < RequestMsg.h.u1.s1.DataLength + sizeof(PORT_MESSAGE)))
                     {
-                        DPRINT1("SMSS: Ignoring message type %x, Api %lu from %lx.%lx\n",
-                                RequestMsg.h.u2.s2.Type, RequestMsg.ApiNumber,
-                                RequestMsg.h.ClientId.UniqueProcess,
-                                RequestMsg.h.ClientId.UniqueThread);
+                        Number = SmpClientLogNumber();
+                        if (Number)
+                        {
+                            DPRINT1("SMSS: Ignoring message type %x, length %u/%u from %lx.%lx (#%ld)\n",
+                                    RequestMsg.h.u2.s2.Type,
+                                    RequestMsg.h.u1.s1.DataLength, RequestMsg.h.u1.s1.TotalLength,
+                                    RequestMsg.h.ClientId.UniqueProcess,
+                                    RequestMsg.h.ClientId.UniqueThread, Number);
+                        }
+                        break;
+                    }
+                    if (RequestMsg.ApiNumber != SmpSessionCompleteApi)
+                    {
+                        Number = SmpClientLogNumber();
+                        if (Number)
+                        {
+                            DPRINT1("SMSS: Ignoring datagram, Api %lu from %lx.%lx (#%ld)\n",
+                                    RequestMsg.ApiNumber,
+                                    RequestMsg.h.ClientId.UniqueProcess,
+                                    RequestMsg.h.ClientId.UniqueThread, Number);
+                        }
                         break;
                     }
                     _SEH2_TRY
                     {
                         Status = SmpApiDispatch[SmpSessionCompleteApi](&RequestMsg, ClientContext, SmApiPort);
-                        if (!NT_SUCCESS(Status) && (Status != STATUS_NOT_FOUND))
+                        if (SmpNitroSessionsTestForward & SMP_NITRO_TEST_FORWARD_COMPLETE)
                         {
-                            DPRINT1("SMSS: SmSessionComplete(%lu) from %lx.%lx: %lx\n",
+                            DPRINT1("SMSS: SmSessionComplete(%lu) from %lx.%lx %s: %lx, session records: %lu\n",
                                     RequestMsg.u.SessionComplete.SessionId,
                                     RequestMsg.h.ClientId.UniqueProcess,
-                                    RequestMsg.h.ClientId.UniqueThread, Status);
+                                    RequestMsg.h.ClientId.UniqueThread,
+                                    ClientContext->Subsystem ? "csrss" : "non-csrss", Status,
+                                    SmpCountSessions());
+                        }
+                        else if (!NT_SUCCESS(Status) && (Status != STATUS_NOT_FOUND))
+                        {
+                            Number = SmpClientLogNumber();
+                            if (Number)
+                            {
+                                DPRINT1("SMSS: SmSessionComplete(%lu) from %lx.%lx: %lx (#%ld)\n",
+                                        RequestMsg.u.SessionComplete.SessionId,
+                                        RequestMsg.h.ClientId.UniqueProcess,
+                                        RequestMsg.h.ClientId.UniqueThread, Status, Number);
+                            }
                         }
                     }
                     _SEH2_EXCEPT(SmpUnhandledExceptionFilter(_SEH2_GetExceptionInformation()))

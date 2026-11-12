@@ -142,6 +142,22 @@ SmpCompleteSession(
 
 ULONG
 NTAPI
+SmpCountSessions(VOID)
+{
+    PLIST_ENTRY NextEntry;
+    ULONG Count = 0;
+
+    RtlEnterCriticalSection(&SmpSessionListLock);
+    for (NextEntry = SmpSessionListHead.Flink; NextEntry != &SmpSessionListHead; NextEntry = NextEntry->Flink)
+    {
+        Count++;
+    }
+    RtlLeaveCriticalSection(&SmpSessionListLock);
+    return Count;
+}
+
+ULONG
+NTAPI
 SmpAllocateSessionId(IN PSMP_SUBSYSTEM Subsystem,
                      IN PSMP_SUBSYSTEM OtherSubsystem)
 {
