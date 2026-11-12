@@ -329,4 +329,5 @@
     SVC_(CreateKeyTransacted, 8)
     SVC_(OpenKeyTransacted, 4)
     SVC_(OpenKeyTransactedEx, 5)
+    SVC_(NotifyChangeDirectoryFileEx, 10)
 #endif

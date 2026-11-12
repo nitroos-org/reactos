@@ -246,18 +246,53 @@ FindNextChangeNotification(IN HANDLE hChangeHandle)
 }
 
 /*
- * @implemented
+ * The plain information class is exactly NtNotifyChangeDirectoryFile (ReadDirectoryChangesW); the extended class
+ * goes through NtNotifyChangeDirectoryFileEx.
  */
+static
+NTSTATUS
+BasepNotifyChangeDirectory(IN HANDLE hDirectory,
+                           IN HANDLE EventHandle,
+                           IN PIO_APC_ROUTINE ApcRoutine,
+                           IN PVOID ApcContext,
+                           OUT PIO_STATUS_BLOCK IoStatusBlock,
+                           OUT PVOID Buffer,
+                           IN ULONG BufferLength,
+                           IN ULONG Filter,
+                           IN BOOLEAN WatchTree,
+                           IN ULONG InformationClass)
+{
+    if (InformationClass == ReadDirectoryNotifyExtendedInformation)
+    {
+        /* Looked up on first use: ntdll only has the function in the NT6 export set, and the ReadDirectoryChangesW
+         * code must still link and run against the older one */
+        static NTSTATUS (NTAPI *NotifyEx)(HANDLE, HANDLE, PIO_APC_ROUTINE, PVOID, PIO_STATUS_BLOCK, PVOID,
+                                          ULONG, ULONG, BOOLEAN, ULONG);
+
+        if (!NotifyEx)
+        {
+            NotifyEx = (PVOID)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtNotifyChangeDirectoryFileEx");
+            if (!NotifyEx)
+                return STATUS_INVALID_DEVICE_REQUEST;
+        }
+        return NotifyEx(hDirectory, EventHandle, ApcRoutine, ApcContext, IoStatusBlock,
+                        Buffer, BufferLength, Filter, WatchTree, InformationClass);
+    }
+    return NtNotifyChangeDirectoryFile(hDirectory, EventHandle, ApcRoutine, ApcContext, IoStatusBlock,
+                                       Buffer, BufferLength, Filter, WatchTree);
+}
+
+static
 BOOL
-WINAPI
-ReadDirectoryChangesW(IN HANDLE hDirectory,
-                      IN LPVOID lpBuffer OPTIONAL,
-                      IN DWORD nBufferLength,
-                      IN BOOL bWatchSubtree,
-                      IN DWORD dwNotifyFilter,
-                      OUT LPDWORD lpBytesReturned,
-                      IN LPOVERLAPPED lpOverlapped OPTIONAL,
-                      IN LPOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine)
+BasepReadDirectoryChanges(IN HANDLE hDirectory,
+                          IN LPVOID lpBuffer OPTIONAL,
+                          IN DWORD nBufferLength,
+                          IN BOOL bWatchSubtree,
+                          IN DWORD dwNotifyFilter,
+                          OUT LPDWORD lpBytesReturned,
+                          IN LPOVERLAPPED lpOverlapped OPTIONAL,
+                          IN LPOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine,
+                          IN ULONG InformationClass)
 {
 
     NTSTATUS Status;
@@ -272,15 +307,16 @@ ReadDirectoryChangesW(IN HANDLE hDirectory,
     if (!lpOverlapped)
     {
         /* Great, just pass in the parameters */
-        Status = NtNotifyChangeDirectoryFile(hDirectory,
-                                             NULL,
-                                             NULL,
-                                             NULL,
-                                             &IoStatusBlock,
-                                             lpBuffer,
-                                             nBufferLength,
-                                             dwNotifyFilter,
-                                             bWatchSubtree);
+        Status = BasepNotifyChangeDirectory(hDirectory,
+                                            NULL,
+                                            NULL,
+                                            NULL,
+                                            &IoStatusBlock,
+                                            lpBuffer,
+                                            nBufferLength,
+                                            dwNotifyFilter,
+                                            (BOOLEAN)bWatchSubtree,
+                                            InformationClass);
         if (Status == STATUS_PENDING)
         {
             /* Wait for completion since we are synchronous */
@@ -353,15 +389,16 @@ ReadDirectoryChangesW(IN HANDLE hDirectory,
 
     /* Set the initial status to pending and call the native API */
     lpOverlapped->Internal = STATUS_PENDING;
-    Status = NtNotifyChangeDirectoryFile(hDirectory,
-                                         EventHandle,
-                                         ApcRoutine,
-                                         ApcContext,
-                                         (PIO_STATUS_BLOCK)lpOverlapped,
-                                         lpBuffer,
-                                         nBufferLength,
-                                         dwNotifyFilter,
-                                         (BOOLEAN)bWatchSubtree);
+    Status = BasepNotifyChangeDirectory(hDirectory,
+                                        EventHandle,
+                                        ApcRoutine,
+                                        ApcContext,
+                                        (PIO_STATUS_BLOCK)lpOverlapped,
+                                        lpBuffer,
+                                        nBufferLength,
+                                        dwNotifyFilter,
+                                        (BOOLEAN)bWatchSubtree,
+                                        InformationClass);
     if (NT_ERROR(Status))
     {
         /* Normally we cleanup the context in the completion routine, but we failed */
@@ -374,6 +411,61 @@ ReadDirectoryChangesW(IN HANDLE hDirectory,
 
     /* Return success */
     return Result;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+ReadDirectoryChangesW(IN HANDLE hDirectory,
+                      IN LPVOID lpBuffer OPTIONAL,
+                      IN DWORD nBufferLength,
+                      IN BOOL bWatchSubtree,
+                      IN DWORD dwNotifyFilter,
+                      OUT LPDWORD lpBytesReturned,
+                      IN LPOVERLAPPED lpOverlapped OPTIONAL,
+                      IN LPOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine)
+{
+    return BasepReadDirectoryChanges(hDirectory, lpBuffer, nBufferLength, bWatchSubtree, dwNotifyFilter,
+                                     lpBytesReturned, lpOverlapped, lpCompletionRoutine,
+                                     ReadDirectoryNotifyInformation);
+}
+
+/*
+ * ReadDirectoryChangesExW (Windows 10 version 1709): ReadDirectoryNotifyInformation behaves exactly like
+ * ReadDirectoryChangesW, ReadDirectoryNotifyExtendedInformation returns FILE_NOTIFY_EXTENDED_INFORMATION records.
+ */
+BOOL
+WINAPI
+ReadDirectoryChangesExW(IN HANDLE hDirectory,
+                        IN LPVOID lpBuffer OPTIONAL,
+                        IN DWORD nBufferLength,
+                        IN BOOL bWatchSubtree,
+                        IN DWORD dwNotifyFilter,
+                        OUT LPDWORD lpBytesReturned,
+                        IN LPOVERLAPPED lpOverlapped OPTIONAL,
+                        IN LPOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine,
+                        IN READ_DIRECTORY_NOTIFY_INFORMATION_CLASS ReadDirectoryNotifyInformationClass)
+{
+    ULONG InformationClass;
+
+    if (ReadDirectoryNotifyInformationClass == ReadDirectoryNotifyInformation)
+    {
+        InformationClass = ReadDirectoryNotifyInformation;
+    }
+    else if (ReadDirectoryNotifyInformationClass == ReadDirectoryNotifyExtendedInformation)
+    {
+        InformationClass = ReadDirectoryNotifyExtendedInformation;
+    }
+    else
+    {
+        BaseSetLastNTError(STATUS_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    return BasepReadDirectoryChanges(hDirectory, lpBuffer, nBufferLength, bWatchSubtree, dwNotifyFilter,
+                                     lpBytesReturned, lpOverlapped, lpCompletionRoutine, InformationClass);
 }
 
 /* EOF */

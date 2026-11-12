@@ -1714,17 +1714,18 @@ NtFlushBuffersFileEx(IN HANDLE FileHandle,
 /*
  * @implemented
  */
+static
 NTSTATUS
-NTAPI
-NtNotifyChangeDirectoryFile(IN HANDLE FileHandle,
-                            IN HANDLE EventHandle OPTIONAL,
-                            IN PIO_APC_ROUTINE ApcRoutine OPTIONAL,
-                            IN PVOID ApcContext OPTIONAL,
-                            OUT PIO_STATUS_BLOCK IoStatusBlock,
-                            OUT PVOID Buffer,
-                            IN ULONG BufferSize,
-                            IN ULONG CompletionFilter,
-                            IN BOOLEAN WatchTree)
+IopNotifyChangeDirectoryFile(IN HANDLE FileHandle,
+                             IN HANDLE EventHandle OPTIONAL,
+                             IN PIO_APC_ROUTINE ApcRoutine OPTIONAL,
+                             IN PVOID ApcContext OPTIONAL,
+                             OUT PIO_STATUS_BLOCK IoStatusBlock,
+                             OUT PVOID Buffer,
+                             IN ULONG BufferSize,
+                             IN ULONG CompletionFilter,
+                             IN BOOLEAN WatchTree,
+                             IN BOOLEAN Extended)
 {
     PIRP Irp;
     PKEVENT Event = NULL;
@@ -1851,12 +1852,17 @@ NtNotifyChangeDirectoryFile(IN HANDLE FileHandle,
     /* Set up Stack Data */
     IoStack = IoGetNextIrpStackLocation(Irp);
     IoStack->MajorFunction = IRP_MJ_DIRECTORY_CONTROL;
-    IoStack->MinorFunction = IRP_MN_NOTIFY_CHANGE_DIRECTORY;
+    IoStack->MinorFunction = Extended ? IRP_MN_NOTIFY_CHANGE_DIRECTORY_EX : IRP_MN_NOTIFY_CHANGE_DIRECTORY;
     IoStack->FileObject = FileObject;
 
-    /* Set parameters */
+    /* Set parameters (NotifyDirectoryEx starts with the same two members) */
     IoStack->Parameters.NotifyDirectory.CompletionFilter = CompletionFilter;
     IoStack->Parameters.NotifyDirectory.Length = BufferSize;
+    if (Extended)
+    {
+        IoStack->Parameters.NotifyDirectoryEx.DirectoryNotifyInformationClass =
+            DirectoryNotifyExtendedInformation;
+    }
     if (WatchTree) IoStack->Flags = SL_WATCH_TREE;
 
 #if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
@@ -1871,6 +1877,58 @@ NtNotifyChangeDirectoryFile(IN HANDLE FileHandle,
                                         PreviousMode,
                                         LockedForSync,
                                         IopOtherTransfer);
+}
+
+/*
+ * @implemented
+ */
+NTSTATUS
+NTAPI
+NtNotifyChangeDirectoryFile(IN HANDLE FileHandle,
+                            IN HANDLE EventHandle OPTIONAL,
+                            IN PIO_APC_ROUTINE ApcRoutine OPTIONAL,
+                            IN PVOID ApcContext OPTIONAL,
+                            OUT PIO_STATUS_BLOCK IoStatusBlock,
+                            OUT PVOID Buffer,
+                            IN ULONG BufferSize,
+                            IN ULONG CompletionFilter,
+                            IN BOOLEAN WatchTree)
+{
+    return IopNotifyChangeDirectoryFile(FileHandle, EventHandle, ApcRoutine, ApcContext, IoStatusBlock,
+                                        Buffer, BufferSize, CompletionFilter, WatchTree, FALSE);
+}
+
+/*
+ * @implemented
+ *
+ * DirectoryNotifyInformation is the plain NtNotifyChangeDirectoryFile (an IRP_MN_NOTIFY_CHANGE_DIRECTORY, so every
+ * file system takes it). DirectoryNotifyExtendedInformation sends IRP_MN_NOTIFY_CHANGE_DIRECTORY_EX: a file system
+ * that does not know that minor function fails it (STATUS_INVALID_DEVICE_REQUEST).
+ */
+NTSTATUS
+NTAPI
+NtNotifyChangeDirectoryFileEx(IN HANDLE FileHandle,
+                              IN HANDLE EventHandle OPTIONAL,
+                              IN PIO_APC_ROUTINE ApcRoutine OPTIONAL,
+                              IN PVOID ApcContext OPTIONAL,
+                              OUT PIO_STATUS_BLOCK IoStatusBlock,
+                              OUT PVOID Buffer,
+                              IN ULONG BufferSize,
+                              IN ULONG CompletionFilter,
+                              IN BOOLEAN WatchTree,
+                              IN ULONG DirectoryNotifyInformationClass)
+{
+    PAGED_CODE();
+
+    if (DirectoryNotifyInformationClass != DirectoryNotifyInformation &&
+        DirectoryNotifyInformationClass != DirectoryNotifyExtendedInformation)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    return IopNotifyChangeDirectoryFile(FileHandle, EventHandle, ApcRoutine, ApcContext, IoStatusBlock,
+                                        Buffer, BufferSize, CompletionFilter, WatchTree,
+                                        DirectoryNotifyInformationClass == DirectoryNotifyExtendedInformation);
 }
 
 /*
