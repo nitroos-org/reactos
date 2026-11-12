@@ -1176,6 +1176,9 @@ LRESULT WINAPI MDIClientWndProc_common( HWND hwnd, UINT message, WPARAM wParam, 
         if (lParam)
         {
             HWND child;
+#ifdef __REACTOS__
+            DWORD dwOldError = GetLastError();
+#endif
 
             if (unicode)
             {
@@ -1195,6 +1198,11 @@ LRESULT WINAPI MDIClientWndProc_common( HWND hwnd, UINT message, WPARAM wParam, 
                                             hwnd, 0, csA->hOwner,
                                             (LPVOID)csA->lParam);
             }
+#ifdef __REACTOS__
+            /* Windows leaves the last error alone when the child is created (CreateWindowEx would reset it) */
+            if (child)
+                SetLastError(dwOldError);
+#endif
             return (LRESULT)child;
         }
         return 0;
