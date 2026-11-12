@@ -273,6 +273,7 @@ list(APPEND SOURCE
     SystemInfo.c
     ThreadLockStress.c
     UserModeException.c
+    VectoredHandlerChurn.c
     ZwQuerySystemInformationEx.c
     Timer.c
     precomp.h)

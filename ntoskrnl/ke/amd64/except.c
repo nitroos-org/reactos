@@ -357,6 +357,48 @@ KiPrepareUserDebugData(void)
        which the caller calls next, can wait */
 }
 
+/*
+ * Whether the kernel debugger is going to stop on a first-chance user mode exception (the decision of KdpReport and
+ * KdpStub), so that it reads the user modules. Windows does no work for the debugger on an exception no debugger
+ * sees; exception-heavy programs (.NET exceptions, the implicit null checks of Java) would otherwise page in the
+ * debug and exception directories of every module on each fault.
+ */
+static
+BOOLEAN
+KiUserExceptionStopsInKd(
+    _In_ PEXCEPTION_RECORD ExceptionRecord)
+{
+    NTSTATUS ExceptionCode = ExceptionRecord->ExceptionCode;
+
+    /* No kernel debugger: KdpStub handles the debug services alone, and only
+       enables the debugger on the event if it was enabled before */
+    if (!KdDebuggerEnabled)
+        return (KdAutoEnableOnEvent && KdPreviouslyEnabled && !KdPitchDebugger);
+
+    /* Debug services that print or prompt do not stop in the debugger */
+    if ((ExceptionCode == STATUS_BREAKPOINT) &&
+        (ExceptionRecord->NumberParameters > 0) &&
+        ((ExceptionRecord->ExceptionInformation[0] == BREAKPOINT_PRINT) ||
+         (ExceptionRecord->ExceptionInformation[0] == BREAKPOINT_PROMPT)))
+    {
+        return FALSE;
+    }
+
+    /* Breakpoints (and the other debug services), single steps and assertion failures always stop */
+    if ((ExceptionCode == STATUS_BREAKPOINT) ||
+        (ExceptionCode == STATUS_SINGLE_STEP) ||
+        (ExceptionCode == STATUS_ASSERTION_FAILURE))
+    {
+        return TRUE;
+    }
+
+    /* Any other first-chance exception only when the debugger asks for it,
+       except those that always go to the handlers first */
+    if (!(NtGlobalFlag & FLG_STOP_ON_EXCEPTION))
+        return FALSE;
+    return !((ExceptionCode == STATUS_PORT_DISCONNECTED) || NT_SUCCESS(ExceptionCode));
+}
+
 static
 BOOLEAN
 KiIsDepEnabled(VOID)
@@ -486,8 +528,10 @@ KiDispatchException(IN PEXCEPTION_RECORD ExceptionRecord,
                  !(KdIgnoreUmExceptions)) ||
                  (KdIsThisAKdTrap(ExceptionRecord, &Context, PreviousMode)))
             {
-                /* Make sure the debugger can access debug directories */
-                KiPrepareUserDebugData();
+                /* Make sure the debugger can access debug directories,
+                   if it is going to stop */
+                if (KiUserExceptionStopsInKd(ExceptionRecord))
+                    KiPrepareUserDebugData();
 
                 /* Call the kernel debugger */
                 if (KiDebugRoutine(TrapFrame,
