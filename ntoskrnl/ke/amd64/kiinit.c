@@ -13,7 +13,10 @@
 #define NDEBUG
 #include <debug.h>
 
-#define REQUIRED_FEATURE_BITS (KF_RDTSC|KF_CR4|KF_CMPXCHG8B|KF_XMMI|KF_XMMI64| \
+/* KF_CMPXCHG16B: as on Windows 8.1 and later, so that every SLIST uses the
+   16 byte header (the 8 byte one keeps 43 address bits only, which cannot hold
+   a pointer anywhere in the 128 TiB user range) */
+#define REQUIRED_FEATURE_BITS (KF_RDTSC|KF_CR4|KF_CMPXCHG8B|KF_CMPXCHG16B|KF_XMMI|KF_XMMI64| \
                                KF_LARGE_PAGE|KF_FAST_SYSCALL|KF_GLOBAL_PAGE| \
                                KF_CMOV|KF_PAT|KF_MMX|KF_FXSR|KF_NX_BIT|KF_MTRR)
 
@@ -190,8 +193,10 @@ KiInitializeCpu(PKIPCR Pcr)
     if ((FeatureBits & REQUIRED_FEATURE_BITS) != REQUIRED_FEATURE_BITS)
     {
         /* If not, bugcheck system */
-        FrLdrDbgPrint("CPU doesn't have needed features! Has: 0x%x, required: 0x%x\n",
-                FeatureBits, REQUIRED_FEATURE_BITS);
+        FrLdrDbgPrint("CPU doesn't have needed features! Has: 0x%x, required: 0x%x, missing: 0x%x%s\n",
+                FeatureBits, REQUIRED_FEATURE_BITS,
+                (ULONG)(REQUIRED_FEATURE_BITS & ~FeatureBits),
+                (FeatureBits & KF_CMPXCHG16B) ? "" : " (CMPXCHG16B)");
         KeBugCheck(0);
     }
 
