@@ -2949,6 +2949,14 @@ WSPGetPeerName(IN SOCKET s,
     return MsafdReturnWithErrno ( Status, lpErrno, 0, NULL );
 }
 
+#ifndef SIO_BASE_HANDLE
+/* mswsock.h has these for _WIN32_WINNT >= 0x0600 only */
+#define SIO_BSP_HANDLE          _WSAIOR(IOC_WS2,27)
+#define SIO_BSP_HANDLE_SELECT   _WSAIOR(IOC_WS2,28)
+#define SIO_BSP_HANDLE_POLL     _WSAIOR(IOC_WS2,29)
+#define SIO_BASE_HANDLE         _WSAIOR(IOC_WS2,34)
+#endif
+
 INT
 WSPAPI
 WSPIoctl(IN  SOCKET Handle,
@@ -3150,6 +3158,27 @@ WSPIoctl(IN  SOCKET Handle,
                 }
             }
 
+            break;
+        case SIO_BASE_HANDLE:
+        case SIO_BSP_HANDLE:
+        case SIO_BSP_HANDLE_SELECT:
+        case SIO_BSP_HANDLE_POLL:
+            /* The handle of the base provider's socket. This is the base provider, so it is
+             * the socket itself. mio (tokio, so rustup and cargo) asks for it for every socket
+             * it registers; Windows 10: an output buffer under sizeof(SOCKET) bytes, or none,
+             * is WSAEFAULT and the byte count stays untouched. */
+            NeedsCompletion = FALSE;
+            if (IS_INTRESOURCE(lpvOutBuffer) || cbOutBuffer < sizeof(SOCKET))
+            {
+                Errno = WSAEFAULT;
+                if (lpcbBytesReturned)
+                    cbRet = *lpcbBytesReturned;
+                break;
+            }
+            *(SOCKET *)lpvOutBuffer = Handle;
+            cbRet = sizeof(SOCKET);
+            Errno = NO_ERROR;
+            Ret = NO_ERROR;
             break;
         case SIO_ADDRESS_LIST_QUERY:
             Errno = MsafdQueryAddressList(Socket, lpvOutBuffer, cbOutBuffer, &cbRet);

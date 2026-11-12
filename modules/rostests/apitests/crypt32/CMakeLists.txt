@@ -1,5 +1,6 @@
 
 list(APPEND SOURCE
+    CertChainEngine.c
     CertEnumSystemStore.c
     CertEnumSystemStoreLocation.c
     ChainTrust.c

@@ -7,6 +7,7 @@ list(APPEND SOURCE
     addresschange.c
     asyncselect.c
     backlog.c
+    basehandle.c
     backlogrefuse.c
     bindconflict.c
     bind.c
