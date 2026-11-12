@@ -13,14 +13,16 @@
 #define NDEBUG
 #include <debug.h>
 
-RTL_CRITICAL_SECTION RtlpVectoredHandlerLock;
+/* Shared while the dispatcher walks a list, exclusive to change one: threads that take exceptions at the same time
+   do not wait for each other */
+RTL_SRWLOCK RtlpVectoredHandlerLock;
 LIST_ENTRY RtlpVectoredExceptionList, RtlpVectoredContinueList;
 
 typedef struct _RTL_VECTORED_HANDLER_ENTRY
 {
     LIST_ENTRY ListEntry;
     PVECTORED_EXCEPTION_HANDLER VectoredHandler;
-    ULONG Refs;
+    LONG Refs;      /* The registration plus the walks that call it; the one that drops the last unlinks it */
 } RTL_VECTORED_HANDLER_ENTRY, *PRTL_VECTORED_HANDLER_ENTRY;
 
 /* FUNCTIONS ***************************************************************/
@@ -30,9 +32,51 @@ NTAPI
 RtlpInitializeVectoredExceptionHandling(VOID)
 {
     /* Initialize our two lists and the common lock */
-    RtlInitializeCriticalSection(&RtlpVectoredHandlerLock);
+    RtlInitializeSRWLock(&RtlpVectoredHandlerLock);
     InitializeListHead(&RtlpVectoredExceptionList);
     InitializeListHead(&RtlpVectoredContinueList);
+}
+
+/* Takes a reference on an entry that is still registered. An entry whose last reference is gone stays on the list
+   until the thread that dropped it gets the lock exclusively, it must not be called any more. */
+static
+BOOLEAN
+RtlpReferenceVectoredHandler(
+    _Inout_ PRTL_VECTORED_HANDLER_ENTRY Entry)
+{
+    LONG Refs = Entry->Refs, Old;
+
+    while (Refs > 0)
+    {
+        Old = InterlockedCompareExchange(&Entry->Refs, Refs + 1, Refs);
+        if (Old == Refs)
+            return TRUE;
+        Refs = Old;
+    }
+
+    return FALSE;
+}
+
+static
+VOID
+RtlpAcquireVectoredHandlerLock(
+    _In_ BOOLEAN Exclusive)
+{
+    if (Exclusive)
+        RtlAcquireSRWLockExclusive(&RtlpVectoredHandlerLock);
+    else
+        RtlAcquireSRWLockShared(&RtlpVectoredHandlerLock);
+}
+
+static
+VOID
+RtlpReleaseVectoredHandlerLock(
+    _In_ BOOLEAN Exclusive)
+{
+    if (Exclusive)
+        RtlReleaseSRWLockExclusive(&RtlpVectoredHandlerLock);
+    else
+        RtlReleaseSRWLockShared(&RtlpVectoredHandlerLock);
 }
 
 BOOLEAN
@@ -45,15 +89,9 @@ RtlpCallVectoredHandlers(IN PEXCEPTION_RECORD ExceptionRecord,
     PRTL_VECTORED_HANDLER_ENTRY VectoredExceptionHandler;
     PVECTORED_EXCEPTION_HANDLER VectoredHandler;
     EXCEPTION_POINTERS ExceptionInfo;
-    BOOLEAN HandlerRemoved;
+    LIST_ENTRY RemovedList;
+    BOOLEAN Exclusive;
     LONG HandlerReturn;
-
-    /*
-     * Initialize these in case there are no entries,
-     * or if no one handled the exception
-     */
-    HandlerRemoved = FALSE;
-    HandlerReturn = EXCEPTION_CONTINUE_SEARCH;
 
     /* Most processes have no handler on a list (no vectored continue handler
        at all): do not take the lock that every exception of every thread
@@ -62,12 +100,18 @@ RtlpCallVectoredHandlers(IN PEXCEPTION_RECORD ExceptionRecord,
     if (IsListEmpty(VectoredHandlerList))
         return FALSE;
 
+    /* Initialize this in case no one handles the exception */
+    HandlerReturn = EXCEPTION_CONTINUE_SEARCH;
+    InitializeListHead(&RemovedList);
+
     /* Set up the data to pass to the handler */
     ExceptionInfo.ExceptionRecord = ExceptionRecord;
     ExceptionInfo.ContextRecord = Context;
 
-    /* Grab the lock */
-    RtlEnterCriticalSection(&RtlpVectoredHandlerLock);
+    /* Walk the list with the lock shared, it only changes when a handler is
+       added or removed */
+    Exclusive = FALSE;
+    RtlpAcquireVectoredHandlerLock(Exclusive);
 
     /* Loop entries */
     CurrentEntry = VectoredHandlerList->Flink;
@@ -78,11 +122,16 @@ RtlpCallVectoredHandlers(IN PEXCEPTION_RECORD ExceptionRecord,
                                                      RTL_VECTORED_HANDLER_ENTRY,
                                                      ListEntry);
 
-        /* Reference it so it doesn't go away while we are using it */
-        VectoredExceptionHandler->Refs++;
+        /* Reference it so it doesn't go away while we are using it. One that
+           was removed and is about to be unlinked is not called. */
+        if (!RtlpReferenceVectoredHandler(VectoredExceptionHandler))
+        {
+            CurrentEntry = CurrentEntry->Flink;
+            continue;
+        }
 
         /* Drop the lock before calling the handler */
-        RtlLeaveCriticalSection(&RtlpVectoredHandlerLock);
+        RtlpReleaseVectoredHandlerLock(Exclusive);
 
         /*
          * Get the function pointer, decoding it so we will crash
@@ -94,62 +143,50 @@ RtlpCallVectoredHandlers(IN PEXCEPTION_RECORD ExceptionRecord,
         /* Call the handler */
         HandlerReturn = VectoredHandler(&ExceptionInfo);
 
-        /* Handler called -- grab the lock to dereference */
-        RtlEnterCriticalSection(&RtlpVectoredHandlerLock);
+        /* Handler called -- grab the lock to dereference. The entry stays
+           linked while we hold a reference, so its link is still valid. */
+        RtlpAcquireVectoredHandlerLock(Exclusive);
 
         /* Dereference and see if it got deleted */
-        VectoredExceptionHandler->Refs--;
-        if (VectoredExceptionHandler->Refs == 0)
+        if (InterlockedDecrement(&VectoredExceptionHandler->Refs) == 0)
         {
-            /* It did -- do we have to free it now? */
-            if (HandlerReturn == EXCEPTION_CONTINUE_EXECUTION)
+            /* It did: unlink it with the lock exclusive, and walk the rest of
+               the list that way, so the next link stays valid. It is freed
+               after the walk, outside of the lock. */
+            if (!Exclusive)
             {
-                /* We don't, just remove it from the list and break out */
-                RemoveEntryList(&VectoredExceptionHandler->ListEntry);
-                HandlerRemoved = TRUE;
-                break;
+                RtlpReleaseVectoredHandlerLock(Exclusive);
+                Exclusive = TRUE;
+                RtlpAcquireVectoredHandlerLock(Exclusive);
             }
-
-            /*
-             * Get the next entry before freeing,
-             * and remove the current one from the list
-             */
             CurrentEntry = VectoredExceptionHandler->ListEntry.Flink;
             RemoveEntryList(&VectoredExceptionHandler->ListEntry);
-
-            /* Free the entry outside of the lock, then reacquire it */
-            RtlLeaveCriticalSection(&RtlpVectoredHandlerLock);
-            RtlFreeHeap(RtlGetProcessHeap(),
-                        0,
-                        VectoredExceptionHandler);
-            RtlEnterCriticalSection(&RtlpVectoredHandlerLock);
+            InsertTailList(&RemovedList, &VectoredExceptionHandler->ListEntry);
         }
         else
         {
-            /* No delete -- should we continue execution? */
-            if (HandlerReturn == EXCEPTION_CONTINUE_EXECUTION)
-            {
-                /* Break out */
-                break;
-            }
-            else
-            {
-                /* Continue searching the list */
-                CurrentEntry = CurrentEntry->Flink;
-            }
+            /* Continue searching the list */
+            CurrentEntry = CurrentEntry->Flink;
+        }
+
+        /* Should we continue execution? */
+        if (HandlerReturn == EXCEPTION_CONTINUE_EXECUTION)
+        {
+            /* Break out */
+            break;
         }
     }
 
     /* Let go of the lock now */
-    RtlLeaveCriticalSection(&RtlpVectoredHandlerLock);
+    RtlpReleaseVectoredHandlerLock(Exclusive);
 
-    /* Anything to free? */
-    if (HandlerRemoved)
+    /* Free what was removed */
+    while (!IsListEmpty(&RemovedList))
     {
-        /* Get rid of it */
+        CurrentEntry = RemoveHeadList(&RemovedList);
         RtlFreeHeap(RtlGetProcessHeap(),
                     0,
-                    VectoredExceptionHandler);
+                    CONTAINING_RECORD(CurrentEntry, RTL_VECTORED_HANDLER_ENTRY, ListEntry));
     }
 
     /* Return whether to continue execution (ignored for continue handlers) */
@@ -175,7 +212,7 @@ RtlpAddVectoredHandler(IN ULONG FirstHandler,
     VectoredHandlerEntry->Refs = 1;
 
     /* Lock the list before modifying it */
-    RtlEnterCriticalSection(&RtlpVectoredHandlerLock);
+    RtlAcquireSRWLockExclusive(&RtlpVectoredHandlerLock);
 
     /*
      * While holding the list lock, insert the handler
@@ -193,7 +230,7 @@ RtlpAddVectoredHandler(IN ULONG FirstHandler,
     }
 
     /* Done with the list, unlock it */
-    RtlLeaveCriticalSection(&RtlpVectoredHandlerLock);
+    RtlReleaseSRWLockExclusive(&RtlpVectoredHandlerLock);
 
     /* Return pointer to the structure as the handle */
     return VectoredHandlerEntry;
@@ -214,7 +251,7 @@ RtlpRemoveVectoredHandler(IN PVOID VectoredHandlerHandle,
     HandlerFound = FALSE;
 
     /* Acquire list lock */
-    RtlEnterCriticalSection(&RtlpVectoredHandlerLock);
+    RtlAcquireSRWLockExclusive(&RtlpVectoredHandlerLock);
 
     /* Loop the list */
     CurrentEntry = VectoredHandlerList->Flink;
@@ -240,8 +277,7 @@ RtlpRemoveVectoredHandler(IN PVOID VectoredHandlerHandle,
              * We could maybe throw in some kind of ASSERT to detect this
              * if this was to become a problem.
              */
-            VectoredExceptionHandler->Refs--;
-            if (VectoredExceptionHandler->Refs == 0)
+            if (InterlockedDecrement(&VectoredExceptionHandler->Refs) == 0)
             {
                 /* Not in use, ok to remove and free */
                 RemoveEntryList(&VectoredExceptionHandler->ListEntry);
@@ -260,7 +296,7 @@ RtlpRemoveVectoredHandler(IN PVOID VectoredHandlerHandle,
     }
 
     /* Done with the list, let go of the lock */
-    RtlLeaveCriticalSection(&RtlpVectoredHandlerLock);
+    RtlReleaseSRWLockExclusive(&RtlpVectoredHandlerLock);
 
     /* Can we free what we found? */
     if (HandlerRemoved)
