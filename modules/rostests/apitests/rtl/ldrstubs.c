@@ -43,3 +43,11 @@ RtlpWow64GetNativeSystemInformation(SYSTEM_INFORMATION_CLASS Class, PVOID Buffer
     return Service ? Service(Class, Buffer, Length, ReturnLength) : STATUS_PROCEDURE_NOT_FOUND;
 }
 #endif
+
+BOOLEAN
+NTAPI
+LdrpLookupImageRange(PVOID Address, PVOID *ImageBase)
+{
+    /* No loader here: RtlPcToFileHeader searches the module list */
+    return FALSE;
+}
