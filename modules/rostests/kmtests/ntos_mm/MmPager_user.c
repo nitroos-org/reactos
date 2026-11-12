@@ -891,7 +891,7 @@ TestRace(VOID)
 {
     HANDLE Threads[5];
     PUCHAR Regions[3];
-    ULONG i, SlotsBefore, SlotsAfter;
+    ULONG i, SlotsBefore, SlotsOut, SlotsAfter;
 
     for (i = 0; i < 3; i++)
     {
@@ -900,7 +900,14 @@ TestRace(VOID)
         if (!Regions[i])
             return;
     }
-    /* Every process out once now: their slots are in the baseline, and only go down from here */
+    /*
+     * The race creates threads and processes, which dirties pages of this process besides the three regions (heap,
+     * thread and process creation state): they go to the paging file with the first page-out after that and stay
+     * there until touched again or the process exits. Do that once now, so that the baseline holds the footprint of
+     * this process and the checks at the end measure what the race and the regions hold. Every process out once
+     * too: their slots are in the baseline, and only go down from here.
+     */
+    ok(RunChild(60000), "warm-up child failed\n");
     MemoryListCommand(MemoryEmptyWorkingSets);
     MemoryListCommand(MemoryFlushModifiedList);
     PageOut();
@@ -932,10 +939,17 @@ TestRace(VOID)
           RaceCycles[0], RaceCycles[1], RaceCycles[2], RaceCycles[3], RaceCycles[4]);
     ok(RaceCycles[3] > 2, "pager cycles %ld\n", RaceCycles[3]);
 
+    /* The threads ended with every page of the three regions written: with the regions out, their slots are in use */
+    PageOut();
+    SlotsOut = SlotsInUse();
+    ok(SlotsOut >= SlotsBefore + 3 * REGION_PAGES / 2, "slots in use %lu with the regions out, %lu before\n", SlotsOut, SlotsBefore);
     for (i = 0; i < 3; i++)
         Release(Regions[i]);
     PageOut();
     SlotsAfter = SlotsInUse();
+    trace("slots in use: %lu before, %lu with the regions out, %lu after the release\n", SlotsBefore, SlotsOut, SlotsAfter);
+    /* The release returns the slot of every page of the regions (measured: exactly 3 * REGION_PAGES, the sample is a few ms apart) */
+    ok(SlotsAfter + 3 * REGION_PAGES - 16 <= SlotsOut, "slots in use %lu after the release, %lu with the regions out\n", SlotsAfter, SlotsOut);
     ok(SlotsAfter <= SlotsBefore + 64, "slots in use %lu after the race, %lu before\n", SlotsAfter, SlotsBefore);
 }
 
