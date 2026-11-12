@@ -7,6 +7,7 @@ add_message_headers(ANSI FormatMessage.mc)
 
 list(APPEND SOURCE
     VirtualAlloc2.c
+    VirtualAllocLarge.c
     Placeholder.c
     PageTargetsFlag.c
     Wow64ReviewThreads.c
