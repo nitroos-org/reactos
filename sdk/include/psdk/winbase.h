@@ -2736,6 +2736,21 @@ ReadDirectoryChangesW(
   _Inout_opt_ LPOVERLAPPED lpOverlapped,
   _In_opt_ LPOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine);
 
+#if (NTDDI_VERSION >= NTDDI_WIN10_RS3) || defined(__REACTOS__)
+BOOL
+WINAPI
+ReadDirectoryChangesExW(
+  _In_ HANDLE hDirectory,
+  _Out_writes_bytes_to_(nBufferLength, *lpBytesReturned) LPVOID lpBuffer,
+  _In_ DWORD nBufferLength,
+  _In_ BOOL bWatchSubtree,
+  _In_ DWORD dwNotifyFilter,
+  _Out_opt_ LPDWORD lpBytesReturned,
+  _Inout_opt_ LPOVERLAPPED lpOverlapped,
+  _In_opt_ LPOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine,
+  _In_ READ_DIRECTORY_NOTIFY_INFORMATION_CLASS ReadDirectoryNotifyInformationClass);
+#endif
+
 BOOL
 WINAPI
 ReadEventLogA(

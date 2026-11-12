@@ -58,6 +58,7 @@
 #define NOTIFY_LATER       0x08
 #define WATCH_ROOT         0x10
 #define DELETE_IN_PROCESS  0x20
+#define NOTIFY_EXTENDED    0x40 /* the watcher reads FILE_NOTIFY_EXTENDED_INFORMATION records */
 
 //
 // Internal structure for NOTIFY_SYNC

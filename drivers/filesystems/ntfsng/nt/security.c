@@ -210,7 +210,7 @@ NTSTATUS NgSetSecurity(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     }
     ExReleaseResourceLite(Fcb->Header.Resource);
     if (NT_SUCCESS(Status))
-        NgNotifyCcb(Vcb, Stack->FileObject->FsContext2, FILE_NOTIFY_CHANGE_SECURITY, FILE_ACTION_MODIFIED);
+        NgNotifyCcb(Vcb, Stack->FileObject->FsContext2, Fcb, FILE_NOTIFY_CHANGE_SECURITY, FILE_ACTION_MODIFIED);
     return Status;
 }
 

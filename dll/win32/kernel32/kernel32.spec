@@ -1098,6 +1098,7 @@
 @ stdcall ReadConsoleOutputW(long ptr long long ptr)
 @ stdcall ReadConsoleW(long ptr long ptr ptr)
 @ stdcall ReadDirectoryChangesW(long ptr long long long ptr ptr ptr)
+@ stdcall -version=0x601+ ReadDirectoryChangesExW(long ptr long long long ptr ptr ptr long)
 @ stdcall ReadFile(long ptr long ptr ptr)
 @ stdcall ReadFileEx(long ptr long ptr ptr)
 @ stdcall ReadFileScatter(long ptr long ptr ptr)
