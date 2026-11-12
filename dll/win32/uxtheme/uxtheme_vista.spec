@@ -52,7 +52,7 @@
 58 stdcall DrawThemeEdge(ptr ptr long long ptr long long ptr)
 59 stdcall DrawThemeIcon(ptr ptr long long ptr ptr long)
 70 stdcall DrawThemeParentBackground(ptr ptr ptr)
-71 stub DrawThemeParentBackgroundEx
+71 stdcall DrawThemeParentBackgroundEx(ptr ptr long ptr)
 89 stdcall DrawThemeText(ptr ptr long long wstr long long long ptr)
 103 stdcall DrawThemeTextEx(ptr ptr long long wstr long long ptr ptr)
 114 stdcall EnableThemeDialogTexture(ptr long)

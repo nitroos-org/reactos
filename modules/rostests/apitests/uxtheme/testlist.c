@@ -4,6 +4,7 @@
 
 extern void func_CloseThemeData(void);
 extern void func_DrawThemeParentBackground(void);
+extern void func_DrawThemeParentBackgroundEx(void);
 extern void func_GetThemeParseErrorInfo(void);
 extern void func_Ordinals(void);
 extern void func_PanningFeedback(void);
@@ -15,6 +16,7 @@ const struct test winetest_testlist[] =
 {
     { "CloseThemeData", func_CloseThemeData },
     { "DrawThemeParentBackground", func_DrawThemeParentBackground },
+    { "DrawThemeParentBackgroundEx", func_DrawThemeParentBackgroundEx },
     { "GetThemeParseErrorInfo", func_GetThemeParseErrorInfo },
     { "Ordinals", func_Ordinals },
     { "PanningFeedback", func_PanningFeedback },
