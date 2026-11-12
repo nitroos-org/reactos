@@ -384,19 +384,9 @@ KiUserExceptionStopsInKd(
         return FALSE;
     }
 
-    /* Breakpoints (and the other debug services), single steps and assertion failures always stop */
-    if ((ExceptionCode == STATUS_BREAKPOINT) ||
-        (ExceptionCode == STATUS_SINGLE_STEP) ||
-        (ExceptionCode == STATUS_ASSERTION_FAILURE))
-    {
-        return TRUE;
-    }
-
-    /* Any other first-chance exception only when the debugger asks for it,
-       except those that always go to the handlers first */
-    if (!(NtGlobalFlag & FLG_STOP_ON_EXCEPTION))
-        return FALSE;
-    return !((ExceptionCode == STATUS_PORT_DISCONNECTED) || NT_SUCCESS(ExceptionCode));
+    /* Everything else is up to KdpReport: breakpoints (and the other debug services), single steps and assertion
+       failures always stop, other first-chance exceptions only when the debugger asks for them */
+    return KdpIsExceptionReported(ExceptionRecord, FALSE);
 }
 
 static
