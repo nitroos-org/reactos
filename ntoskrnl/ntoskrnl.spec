@@ -69,8 +69,9 @@
 @ stdcall ExAllocateFromPagedLookasideList(ptr) ExiAllocateFromPagedLookasideList
 @ stdcall ExAllocatePool(long long)
 @ stdcall ExAllocatePoolWithQuota(long long)
+@ stdcall ExAllocatePool2(int64 long long)
+@ stdcall ExAllocatePool3(int64 long long ptr long)
 @ stdcall ExAllocatePoolWithQuotaTag(long long long)
-@ stdcall ExAllocatePoolWithTag(long long long)
 @ stdcall ExAllocatePoolWithTagPriority(long long long long)
 @ stdcall ExConvertExclusiveToSharedLite(ptr)
 @ stdcall ExCreateCallback(ptr ptr long long)
@@ -88,7 +89,6 @@
 @ stdcall ExExtendZone(ptr ptr long)
 @ stdcall ExFreeCacheAwareRundownProtection(ptr)
 @ stdcall ExFreePool(ptr)
-@ stdcall ExFreePoolWithTag(ptr long)
 @ stdcall ExFreeToPagedLookasideList(ptr ptr) ExiFreeToPagedLookasideList
 @ stdcall ExGetCurrentProcessorCounts(ptr ptr ptr)
 @ stdcall ExGetCurrentProcessorCpuUsage(ptr)
@@ -197,7 +197,6 @@
 @ stdcall FsRtlAllocatePool(long long)
 @ stdcall FsRtlAllocatePoolWithQuota(long long)
 @ stdcall FsRtlAllocatePoolWithQuotaTag(long long long)
-@ stdcall FsRtlAllocatePoolWithTag(long long long)
 @ stdcall FsRtlAllocateResource()
 @ stdcall FsRtlAreNamesEqual(ptr ptr long wstr)
 @ stdcall -version=0x601+ FsRtlAreThereCurrentOrInProgressFileLocks(ptr)
