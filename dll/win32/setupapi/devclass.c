@@ -652,6 +652,45 @@ SetupDiGetClassInstallParamsW(
 }
 
 /***********************************************************************
+ *		SetupDiGetClassBitmapIndex (SETUPAPI.@)
+ *
+ * Returns the mini-icon index of a device class (the same index that
+ * SetupDiLoadClassIcon reports); a NULL or unregistered class gets the
+ * index of the "unknown device" icon.
+ */
+BOOL WINAPI
+SetupDiGetClassBitmapIndex(
+    IN CONST GUID *ClassGuid OPTIONAL,
+    OUT PINT MiniIconIndex)
+{
+    LPWSTR DllName = NULL;
+    INT iconIndex;
+
+    TRACE("%s %p\n", debugstr_guid(ClassGuid), MiniIconIndex);
+
+    if (!MiniIconIndex)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    if (!ClassGuid)
+    {
+        *MiniIconIndex = UNKNOWN_ICON_INDEX;
+        return TRUE;
+    }
+
+    if (!SETUP_GetClassIconInfo(ClassGuid, &iconIndex, &DllName))
+        return FALSE;
+
+    if (DllName)
+        MyFree(DllName);
+
+    *MiniIconIndex = iconIndex;
+    return TRUE;
+}
+
+/***********************************************************************
  *		SetupDiLoadClassIcon(SETUPAPI.@)
  */
 BOOL WINAPI

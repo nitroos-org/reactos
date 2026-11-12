@@ -9,6 +9,7 @@ list(APPEND SOURCE
     propsheet.c
     propsheet_title.c
     TabInsertSelection.c
+    TreeViewCheckState.c
     testlist.c
     toolbar.c
     tooltip.c)

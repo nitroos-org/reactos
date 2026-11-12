@@ -320,6 +320,77 @@ static void test_SetupDiOpenClassRegKeyExA(void)
     ok( err == ERROR_SUCCESS, "Got error %lx\n", err );
 }
 
+static void test_SetupDiGetClassBitmapIndex(void)
+{
+    static const GUID classes[] =
+    {
+        { 0x4d36e967, 0xe325, 0x11ce, { 0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18 } }, /* DiskDrive */
+        { 0x4d36e968, 0xe325, 0x11ce, { 0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18 } }, /* Display */
+        { 0x4d36e972, 0xe325, 0x11ce, { 0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18 } }, /* Net */
+        { 0x4d36e96b, 0xe325, 0x11ce, { 0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18 } }, /* Keyboard */
+    };
+    static const GUID unknown_guid = { 0x12345678, 0x1234, 0x1234, { 0x12, 0x34, 0x12, 0x34, 0x12, 0x34, 0x12, 0x34 } };
+    INT unknown_index, index;
+    unsigned int i;
+    BOOL ret;
+
+    /* Invalid parameters */
+    SetLastError( 0xdeadbeef );
+    ret = SetupDiGetClassBitmapIndex( &classes[0], NULL );
+    ok( !ret, "Fail expected\n" );
+    ok_lasterr( ERROR_INVALID_PARAMETER );
+
+    SetLastError( 0xdeadbeef );
+    ret = SetupDiGetClassBitmapIndex( NULL, NULL );
+    ok( !ret, "Fail expected\n" );
+    ok_lasterr( ERROR_INVALID_PARAMETER );
+
+    /* NULL GUID: index of the unknown device icon */
+    index = 0xdead;
+    ret = SetupDiGetClassBitmapIndex( NULL, &unknown_index );
+    ok( ret, "SetupDiGetClassBitmapIndex failed, error %lx\n", GetLastError() );
+    ok( unknown_index > 0, "Unexpected unknown index %d\n", unknown_index );
+
+    /* A GUID that is not a registered class gets the same index */
+    index = 0xdead;
+    ret = SetupDiGetClassBitmapIndex( &unknown_guid, &index );
+    ok( ret, "SetupDiGetClassBitmapIndex failed, error %lx\n", GetLastError() );
+    ok( index == unknown_index, "Expected %d, got %d\n", unknown_index, index );
+
+    /* Registered classes: the index is the (negated) Icon value of the class key */
+    for ( i = 0; i < ARRAY_SIZE( classes ); i++ )
+    {
+        HKEY key;
+        char buf[32];
+        DWORD size = sizeof( buf ), type;
+        int expected;
+
+        key = SetupDiOpenClassRegKey( &classes[i], KEY_QUERY_VALUE );
+        if ( key == INVALID_HANDLE_VALUE )
+        {
+            skip( "class %u is not registered\n", i );
+            continue;
+        }
+        if ( RegQueryValueExA( key, "Icon", NULL, &type, (BYTE *)buf, &size ) != ERROR_SUCCESS || type != REG_SZ )
+        {
+            RegCloseKey( key );
+            skip( "class %u has no Icon value\n", i );
+            continue;
+        }
+        RegCloseKey( key );
+        expected = atoi( buf );
+        if ( expected >= 0 )
+        {
+            skip( "class %u icon is not a setupapi resource\n", i );
+            continue;
+        }
+        index = 0xdead;
+        ret = SetupDiGetClassBitmapIndex( &classes[i], &index );
+        ok( ret, "SetupDiGetClassBitmapIndex failed for class %u, error %lx\n", i, GetLastError() );
+        ok( index == -expected, "Class %u: expected %d, got %d\n", i, -expected, index );
+    }
+}
+
 START_TEST(devclass)
 {
     test_SetupDiBuildClassInfoList();
@@ -329,4 +400,5 @@ START_TEST(devclass)
     test_SetupDiGetClassDevsA();
     test_SetupDiOpenClassRegKeyExA();
     test_SetupDiGetClassDevsExW();
+    test_SetupDiGetClassBitmapIndex();
 }
