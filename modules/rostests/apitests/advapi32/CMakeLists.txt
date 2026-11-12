@@ -79,6 +79,7 @@ list(APPEND SOURCE
     ServiceFailureActions.c
     ServiceRecovery.c
     ServiceSid.c
+    ServiceVirtualAccount.c
     ServiceNetwork.c
     SetEntriesInAclOld.c
     SetSecurityInfoKey.c

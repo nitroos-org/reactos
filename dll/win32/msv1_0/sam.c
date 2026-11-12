@@ -6,6 +6,7 @@
  */
 
 #include "precomp.h"
+#include <svcsid.h>
 
 #include "wine/debug.h"
 WINE_DEFAULT_DEBUG_CHANNEL(msv1_0_sam);
@@ -479,6 +480,58 @@ GetNtAuthorityDomainSid(
 }
 
 
+/*
+ * NT SERVICE\<service>: the virtual account of a service. It exists for the services that exist
+ * and logs on without a password, as a service logon only. Its SID is the service SID; the
+ * domain SID returned is the SID without its last number, which is the relative id.
+ */
+static
+NTSTATUS
+SamValidateServiceAccount(
+    _In_ SECURITY_LOGON_TYPE LogonType,
+    _In_ PUNICODE_STRING LogonUserName,
+    _Out_ PRPC_SID* AccountDomainSidPtr,
+    _Out_ PSAMPR_USER_INFO_BUFFER* UserInfoPtr)
+{
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    ULONG SubAuthorities[5];
+    ULONG Chars = LogonUserName->Length / sizeof(WCHAR);
+    PSID DomainSid;
+    ULONG i;
+
+    if (LogonType != Service)
+        return STATUS_LOGON_FAILURE;
+
+    if (!LsapServiceExists(LogonUserName->Buffer, Chars) ||
+        !LsapServiceNameToSubAuthorities(LogonUserName->Buffer, Chars, SubAuthorities))
+        return STATUS_NO_SUCH_USER;
+
+    DomainSid = RtlAllocateHeap(RtlGetProcessHeap(), 0, RtlLengthRequiredSid(5));
+    if (DomainSid == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    RtlInitializeSid(DomainSid, &NtAuthority, 5);
+    *RtlSubAuthoritySid(DomainSid, 0) = SECURITY_SERVICE_ID_BASE_RID;
+    for (i = 0; i < 4; i++)
+        *RtlSubAuthoritySid(DomainSid, i + 1) = SubAuthorities[i];
+
+    *UserInfoPtr = RtlAllocateHeap(RtlGetProcessHeap(),
+                                   HEAP_ZERO_MEMORY,
+                                   sizeof(SAMPR_USER_ALL_INFORMATION));
+    if (*UserInfoPtr == NULL)
+    {
+        RtlFreeHeap(RtlGetProcessHeap(), 0, DomainSid);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    (*UserInfoPtr)->All.UserId = SubAuthorities[4];
+    (*UserInfoPtr)->All.PrimaryGroupId = SubAuthorities[4];
+    *AccountDomainSidPtr = DomainSid;
+
+    return STATUS_SUCCESS;
+}
+
+
 NTSTATUS
 SamValidateUser(
     _In_ SECURITY_LOGON_TYPE LogonType,
@@ -493,6 +546,7 @@ SamValidateUser(
     _Out_ PNTSTATUS SubStatus)
 {
     static const UNICODE_STRING NtAuthorityU = RTL_CONSTANT_STRING(L"NT AUTHORITY");
+    static const UNICODE_STRING NtServiceU = RTL_CONSTANT_STRING(L"NT SERVICE");
     static const UNICODE_STRING LocalServiceU = RTL_CONSTANT_STRING(L"LocalService");
     static const UNICODE_STRING NetworkServiceU = RTL_CONSTANT_STRING(L"NetworkService");
 
@@ -552,6 +606,18 @@ SamValidateUser(
         {
             return STATUS_NO_SUCH_USER;
         }
+    }
+    else if (RtlEqualUnicodeString(LogonDomain, &NtServiceU, TRUE))
+    {
+        TRACE("SpecialAccount: NT SERVICE\\%wZ\n", LogonUserName);
+
+        *SpecialAccount = TRUE;
+        Status = SamValidateServiceAccount(LogonType,
+                                           LogonUserName,
+                                           AccountDomainSidPtr,
+                                           UserInfoPtr);
+        if (!NT_SUCCESS(Status))
+            return Status;
     }
     else
     {

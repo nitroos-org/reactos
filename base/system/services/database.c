@@ -446,9 +446,11 @@ ScmLogonService(
     }
 
     /* Get the password of the account: the LSA secret _SC_<service name>. The special accounts of
-     * NT AUTHORITY have none (and the LSA may not be up yet when they are started) */
+     * NT AUTHORITY and the virtual accounts of NT SERVICE have none (and the LSA may not be up yet when they are started) */
     pszPassword = ScmGetServicePassword(pService->lpServiceName,
-                                        pszDomainName != NULL && !_wcsicmp(pszDomainName, L"NT AUTHORITY"));
+                                        pszDomainName != NULL &&
+                                        (!_wcsicmp(pszDomainName, L"NT AUTHORITY") ||
+                                         !_wcsicmp(pszDomainName, L"NT SERVICE")));
     if (pszPassword == NULL)
     {
         dwError = ERROR_NOT_ENOUGH_MEMORY;
