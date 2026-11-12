@@ -4222,7 +4222,11 @@ co_IntSetWindowLongPtr(HWND hWnd, DWORD Index, LONG_PTR NewValue, BOOL Ansi, ULO
 
             /* Layered or not any more: a redirection surface does not hold what the window shows now (redir.c) */
             if ((Style.styleOld ^ Style.styleNew) & WS_EX_LAYERED)
+            {
                UserRedirDetachWindow(Window);
+               if (!(Style.styleNew & WS_EX_LAYERED))
+                  UserRedirUlwForget(Window);
+            }
 
             co_IntSendMessage(hWnd, WM_STYLECHANGED, GWL_EXSTYLE, (LPARAM) &Style);
             break;

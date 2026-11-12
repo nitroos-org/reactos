@@ -693,6 +693,46 @@ static void Test_UlwBudget(void)
     DeleteObject(hbmBig);
 }
 
+/* Level 2: WS_EX_LAYERED removed and set again ends the UpdateLayeredWindow history: a layered window not set shows nothing */
+static void Test_UlwHistoryReset(void)
+{
+    HWND hBack, hWnd;
+    HDC hdc;
+    HBITMAP hbm = MakeDib(&hdc, 0xFF00C800, 200, 150, NULL);
+    COLORREF c;
+    LONG_PTR ExStyle;
+
+    if (g_Level < 2)
+    {
+        DeleteDC(hdc);
+        DeleteObject(hbm);
+        return;
+    }
+
+    hBack = CreateBack();
+    hWnd = CreateTop(L"LcBlue", WS_EX_LAYERED, TRUE);
+    Pump();
+    ok(Ulw(hWnd, hdc, 100, 100, 200, 150), "UpdateLayeredWindow failed: %lu\n", GetLastError());
+    Pump();
+    c = ScreenPixel(200, 175);
+    ok(Near(c, RGB(0, 200, 0)), "ULW window: 0x%06lx, expected (0,200,0)\n", c);
+
+    ExStyle = GetWindowLongPtrW(hWnd, GWL_EXSTYLE);
+    SetWindowLongPtrW(hWnd, GWL_EXSTYLE, ExStyle & ~WS_EX_LAYERED);
+    SetWindowLongPtrW(hWnd, GWL_EXSTYLE, ExStyle);
+    Pump();
+    /* A compose pass over it (the old pixels stay until one runs) */
+    SetWindowPos(hWnd, NULL, 101, 100, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    Pump();
+    c = ScreenPixel(200, 175);
+    ok(Near(c, RGB(200, 0, 0)), "layered again, not set: 0x%06lx, expected what is below (200,0,0)\n", c);
+
+    DestroyWindow(hWnd);
+    DestroyWindow(hBack);
+    DeleteDC(hdc);
+    DeleteObject(hbm);
+}
+
 START_TEST(LayeredCompose)
 {
     g_Level = GetRedirectionLevel();
@@ -718,4 +758,5 @@ START_TEST(LayeredCompose)
     Test_UlwSourceRange();
     Test_GlassChild();
     Test_UlwBudget();
+    Test_UlwHistoryReset();
 }
