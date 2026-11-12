@@ -852,6 +852,8 @@ UserChangeDisplaySettings(
 
         /* Do the mode switch */
         ulResult = PDEVOBJ_bSwitchMode(ppdev, newDevMode);
+        /* Window redirection: the compose frame buffer was for the old mode */
+        UserRedirFreeFrameBuffer();
 
         /* Restore mouse pointer, no hooks called */
         pvOldCursor = UserSetCursor(pvOldCursor, TRUE);

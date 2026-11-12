@@ -68,6 +68,7 @@ PKTIMER gRedirTimer = NULL;
 static LIST_ENTRY gRedirList = { &gRedirList, &gRedirList };
 static SIZE_T gRedirBytes, gRedirBudget;
 static ATOM AtomRedir;
+static ATOM AtomUlwSeen;     /* level 2: the window has had UpdateLayeredWindow content (with or without a surface) */
 static volatile LONG gRedirTimerArmed;
 static volatile LONG gRedirDirtyCount;   /* records with Dirty set: the timer takes the USER lock only then */
 static ULONG gRedirCreated, gRedirRefused, gRedirPresents;
@@ -177,7 +178,8 @@ UserRedirInit(VOID)
 
     gRedirTimer = ExAllocatePoolWithTag(NonPagedPool, sizeof(KTIMER), USERTAG_REDIRSURF);
     AtomRedir = IntAddGlobalAtom(L"NitroRedir", TRUE);
-    if (!gRedirTimer || !AtomRedir)
+    AtomUlwSeen = IntAddGlobalAtom(L"NitroUlwSeen", TRUE);
+    if (!gRedirTimer || !AtomRedir || !AtomUlwSeen)
     {
         ERR("Redirection: no timer or atom, staying off\n");
         gRedirLevel = 0;
@@ -222,7 +224,34 @@ RedirIsUlwWnd(PWND Wnd)
 static BOOL
 RedirIsLayeredUnset(PWND Wnd)
 {
-    return gRedirLevel >= 2 && (Wnd->ExStyle & WS_EX_LAYERED) && !GetLayeredStatus(Wnd) && !RedirIsUlwWnd(Wnd);
+    return gRedirLevel >= 2 && (Wnd->ExStyle & WS_EX_LAYERED) && !GetLayeredStatus(Wnd) && !RedirIsUlwWnd(Wnd) &&
+           !UserGetProp(Wnd, AtomUlwSeen, TRUE);
+}
+
+/* layered.c: UpdateLayeredWindow gave the window content (a window past the budget draws it on the screen: it is shown) */
+VOID
+FASTCALL
+UserRedirUlwSeen(PWND Wnd)
+{
+    if (gRedirLevel >= 2 && Wnd && !UserGetProp(Wnd, AtomUlwSeen, TRUE))
+        UserSetProp(Wnd, AtomUlwSeen, (HANDLE)1, TRUE);
+}
+
+/* layered.c, level 2: whether a top-level window of cx x cy can have a surface (else UpdateLayeredWindow keeps the snapshot path) */
+BOOL
+FASTCALL
+UserRedirLayeredFits(PWND Wnd, LONG cx, LONG cy)
+{
+    PREDIR r;
+    SIZE_T cjNew;
+
+    if (gRedirLevel < 2 || !Wnd || !Wnd->spwndParent || !UserIsDesktopWindow(Wnd->spwndParent) || UserIsMessageWindow(Wnd))
+        return FALSE;
+    if (cx <= 0 || cy <= 0 || cx > REDIR_MAX_SIDE || cy > REDIR_MAX_SIDE)
+        return FALSE;
+    r = UserGetProp(Wnd, AtomRedir, TRUE);
+    cjNew = (SIZE_T)cx * cy * 4;
+    return gRedirBytes - (r ? r->cjBits : 0) + cjNew <= gRedirBudget;
 }
 
 /* The top-level window whose surface a DC of Wnd draws into, or NULL (not redirected) */
@@ -587,7 +616,7 @@ RedirTransKind(PWND Wnd, PREDIR *pr)
     if (gRedirLevel < 2 || !((Wnd->ExStyle & WS_EX_LAYERED) || RedirIsGlass(Wnd)))
         return TK_NONE;
     r = UserGetProp(Wnd, AtomRedir, TRUE);
-    if ((Wnd->ExStyle & WS_EX_LAYERED) && !(r && r->bUlw) && !GetLayeredStatus(Wnd))
+    if ((Wnd->ExStyle & WS_EX_LAYERED) && !(r && r->bUlw) && !GetLayeredStatus(Wnd) && !UserGetProp(Wnd, AtomUlwSeen, TRUE))
         return TK_HIDDEN;
     if (r && r->bTrans && r->psurf)
     {
@@ -715,8 +744,19 @@ RedirComposeDesktop(PSURFACE psurfFB, LONG xFB, LONG yFB, PREGION Rgn)
     return bRet;
 }
 
+/* The compose frame buffer goes (desktop switch, display mode change): no pixel of it outlives what it showed */
+VOID
+FASTCALL
+UserRedirFreeFrameBuffer(VOID)
+{
+    if (!gRedirFB || !UserIsEnteredExclusive())
+        return;
+    gRedirBytes -= (SIZE_T)gRedirFB->SurfObj.sizlBitmap.cx * gRedirFB->SurfObj.sizlBitmap.cy * 4;
+    GreRedirDeleteSurface(gRedirFB);
+    gRedirFB = NULL;
+}
+
 #define RCE_COPY    0
-#define RCE_SCREEN  1
 #define RCE_BLEND   2
 #define RCE_DESKTOP 3
 
@@ -734,7 +774,7 @@ RedirCompose(PWND Desk, PREGION Damage)
 {
     PWND Child;
     PREDIR r;
-    PREGION Trans = NULL, D = NULL, Remaining = NULL, ScreenRgn = NULL, W;
+    PREGION Trans = NULL, D = NULL, Remaining = NULL, ScreenRgn = NULL, ScreenOut = NULL, W;
     PREDIR_COMPOSE_ENTRY Entries = NULL;
     ULONG cEntries = 0, cMax = 0, i, Kind;
     RECTL rcDamage, rcBox, rcScreen;
@@ -824,13 +864,35 @@ RedirCompose(PWND Desk, PREGION Damage)
             }
             else
             {
-                /* No surface (not painted yet, past the budget): what it drew on the screen */
-                Entries[cEntries].Kind = RCE_SCREEN;
-                Entries[cEntries].r = NULL;
+                /*
+                 * No surface of its size (not painted yet, resized and not drawn since, past the budget). The screen
+                 * there can already hold a blend of the translucent windows above it: reading it back would blend them
+                 * again. The pass leaves that part of the screen alone; the window presents (and composes) when it
+                 * paints.
+                 */
+                IntGdiCombineRgn(Remaining, Remaining, W, RGN_DIFF);
+                if (!ScreenOut)
+                    ScreenOut = W;
+                else
+                {
+                    IntGdiCombineRgn(ScreenOut, ScreenOut, W, RGN_OR);
+                    REGION_Delete(W);
+                }
+                continue;
             }
             IntGdiCombineRgn(Remaining, Remaining, W, RGN_DIFF);
         }
         cEntries++;
+    }
+    if (ScreenOut)
+    {
+        if (IntGdiCombineRgn(D, D, ScreenOut, RGN_DIFF) <= NULLREGION)
+            goto done;
+        for (i = 0; i < cEntries; i++)
+            IntGdiCombineRgn(Entries[i].Rgn, Entries[i].Rgn, ScreenOut, RGN_DIFF);
+        REGION_GetRgnBox(D, &rcBox);
+        cx = rcBox.right - rcBox.left;
+        cy = rcBox.bottom - rcBox.top;
     }
     if (REGION_Complexity(Remaining) > NULLREGION)
     {
@@ -849,16 +911,22 @@ RedirCompose(PWND Desk, PREGION Damage)
                                                   max(cy, gRedirFB ? gRedirFB->SurfObj.sizlBitmap.cy : 0), NULL);
         if (!psurfNew)
             goto done;
-        if (gRedirFB)
-            GreRedirDeleteSurface(gRedirFB);
+        UserRedirFreeFrameBuffer();
         gRedirFB = psurfNew;
+        /* Counted like a surface: windows are refused first when it does not fit */
+        gRedirBytes += (SIZE_T)psurfNew->SurfObj.sizlBitmap.cx * psurfNew->SurfObj.sizlBitmap.cy * 4;
     }
 
-    /* Bottom up */
+    /* Nothing of an earlier pass (or desktop) is left where no layer draws (a surface smaller than its window) */
+    if (!GreRedirClearRect(gRedirFB, cx, cy))
+        goto done;
+
+    /* Bottom up; a layer that cannot be drawn ends the pass (nothing half drawn goes to the screen) */
     for (i = cEntries; i-- > 0; )
     {
         PREDIR_COMPOSE_ENTRY e = &Entries[i];
         REDIR_LAYER Layer;
+        BOOL bOk = TRUE;
 
         switch (e->Kind)
         {
@@ -868,20 +936,18 @@ RedirCompose(PWND Desk, PREGION Damage)
                 Layer.x = e->Wnd->rcWindow.left;
                 Layer.y = e->Wnd->rcWindow.top;
                 Layer.Mode = REDIRMODE_COPY;
-                GreRedirComposeLayer(gRedirFB, rcBox.left, rcBox.top, &Layer, e->Rgn);
+                bOk = GreRedirComposeLayer(gRedirFB, rcBox.left, rcBox.top, &Layer, e->Rgn);
                 break;
             case RCE_BLEND:
                 RedirLayerFor(e->Wnd, e->r, &Layer);
-                GreRedirComposeLayer(gRedirFB, rcBox.left, rcBox.top, &Layer, e->Rgn);
+                bOk = GreRedirComposeLayer(gRedirFB, rcBox.left, rcBox.top, &Layer, e->Rgn);
                 break;
-            case RCE_DESKTOP:
-                if (RedirComposeDesktop(gRedirFB, rcBox.left, rcBox.top, e->Rgn))
-                    break;
-                /* Fall through: what the screen shows */
-            default:
-                GreRedirSeedFromScreen(gRedirFB, e->Rgn, rcBox.left, rcBox.top);
+            default: /* RCE_DESKTOP; when it cannot be painted the background stays black (never read from the screen) */
+                RedirComposeDesktop(gRedirFB, rcBox.left, rcBox.top, e->Rgn);
                 break;
         }
+        if (!bOk)
+            goto done;
     }
 
     /* To the screen, in one blit */
@@ -904,6 +970,8 @@ done:
         REGION_Delete(Remaining);
     if (ScreenRgn)
         REGION_Delete(ScreenRgn);
+    if (ScreenOut)
+        REGION_Delete(ScreenOut);
     if (D)
         REGION_Delete(D);
     REGION_Delete(Trans);
@@ -1021,18 +1089,36 @@ UserRedirUpdateLayered(
         return FALSE;
     if (hdcSrc)
     {
+        BOOL bWhole;
+
         RECTL_vSetRect(&rc, 0, 0, r->cx, r->cy);
+        bWhole = !prcDirty;
         if (prcDirty && !RECTL_bIntersectRect(&rc, &rc, (const RECTL *)prcDirty))
             RECTL_vSetEmptyRect(&rc);
+        if (prcDirty && rc.left == 0 && rc.top == 0 && rc.right == r->cx && rc.bottom == r->cy)
+            bWhole = TRUE;
         if (!RECTL_bIsEmptyRect(&rc))
         {
             if (!GreRedirLoadFromDC(r->psurf, hdcSrc, pptSrc ? pptSrc->x : 0, pptSrc ? pptSrc->y : 0, &rc, &bAlpha))
+            {
+                /* Not a memory DC with a bitmap, or its bits could not be read (verify the error code on the oracle) */
+                EngSetLastError(ERROR_INVALID_PARAMETER);
                 return TRUE;
-            r->bUlwAlpha = (BOOLEAN)bAlpha;
+            }
+            /* The alpha of the whole content: taken from a full update, or the first one; a partial update of
+               another format does not change how the rest is blended */
+            if (bWhole || !r->bUlw)
+                r->bUlwAlpha = (BOOLEAN)bAlpha;
         }
     }
     if (!r->bUlw)
     {
+        /* No content given yet (hdcSrc NULL): nothing is shown, as for a layered window not set */
+        if (!hdcSrc)
+        {
+            *pbRet = TRUE;
+            return TRUE;
+        }
         /* From now on GDI drawing into it shows nothing: its DCs get an empty visible region (windc.c) */
         r->bUlw = TRUE;
     }

@@ -859,9 +859,10 @@ UserGetDCEx(PWND Wnd OPTIONAL, HANDLE ClipRegion, ULONG Flags)
    }
 
    /* A window marked as glass (HWNDPARAM_ROUTINE_ROS_SETGLASS): its DC blends 32 bpp DIB copies with alpha.
-      Not when it draws into a surface (level 2): the copies keep their alpha there, the compositor blends them. */
+      Not when it draws into a surface at level 2: the copies keep their alpha there and the compositor blends a glass
+      top-level window; a glass child of an opaque top-level is drawn opaque (DWM glass is for top-level windows: verify). */
    {
-      BOOL bGlass = Wnd && !Dce->pRedir && UserGetProp(Wnd, gpsi->atomFrostedWindowProp, TRUE) != NULL;
+      BOOL bGlass = Wnd && !(gRedirLevel >= 2 && Dce->pRedir) && UserGetProp(Wnd, gpsi->atomFrostedWindowProp, TRUE) != NULL;
 
       if (bGlass || Dce->bGlass)
       {

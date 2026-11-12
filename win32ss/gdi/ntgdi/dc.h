@@ -176,6 +176,7 @@ typedef struct _REDIR_LAYER
     ULONG Key;              /* colour key, as a surface pixel (0x00RRGGBB) */
 } REDIR_LAYER, *PREDIR_LAYER;
 BOOL NTAPI GreRedirComposeLayer(_In_ struct _SURFACE *psurfFB, _In_ LONG xFB, _In_ LONG yFB, _In_ const REDIR_LAYER *pl, _In_ struct _REGION *prgnScreen);
+BOOL NTAPI GreRedirClearRect(_In_ struct _SURFACE *psurf, _In_ LONG cx, _In_ LONG cy);
 BOOL NTAPI GreRedirLoadFromDC(_In_ struct _SURFACE *psurfDst, _In_ HDC hdcSrc, _In_ LONG xSrc, _In_ LONG ySrc, _In_ const RECTL *prclDst, _Out_ PBOOL pbAlpha);
 /* ntuser/redir.c */
 VOID FASTCALL UserRedirMarkDirty(_In_ PVOID pvRedir, _In_opt_ const RECTL *prcl);
