@@ -2301,6 +2301,12 @@ TREEVIEW_GetItemState(const TREEVIEW_INFO *infoPtr, HTREEITEM item, UINT mask)
     if (!item || !TREEVIEW_ValidItem(infoPtr, item))
 	return 0;
 
+    /* With TVS_CHECKBOXES the state image bits are returned whatever the mask
+     * says (measured on Windows 10: an unchecked box reads back 0x1000 even
+     * for a mask without TVIS_STATEIMAGEMASK). */
+    if (infoPtr->dwStyle & TVS_CHECKBOXES)
+        mask |= TVIS_STATEIMAGEMASK;
+
     return (item->state & mask);
 }
 
