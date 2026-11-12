@@ -84,22 +84,22 @@
 @ stdcall UninstallColorProfileW(wstr wstr long)
 @ stdcall UnregisterCMMA(str long)
 @ stdcall UnregisterCMMW(wstr long)
-@ stub WcsAssociateColorProfileWithDevice
+@ stdcall WcsAssociateColorProfileWithDevice(long wstr wstr)
 @ stub WcsCheckColors
-@ stub WcsCreateIccProfile
-@ stub WcsDisassociateColorProfileFromDevice
-@ stub WcsEnumColorProfiles
+@ stdcall WcsCreateIccProfile(ptr long)
+@ stdcall WcsDisassociateColorProfileFromDevice(long wstr wstr)
+@ stdcall WcsEnumColorProfiles(long ptr ptr long ptr)
 @ stdcall WcsEnumColorProfilesSize(long ptr ptr)
-@ stub WcsGetCalibrationManagementState
-@ stub WcsGetDefaultColorProfile
-@ stub WcsGetDefaultColorProfileSize
-@ stub WcsGetDefaultRenderingIntent
+@ stdcall WcsGetCalibrationManagementState(ptr)
+@ stdcall WcsGetDefaultColorProfile(long wstr long long long long ptr)
+@ stdcall WcsGetDefaultColorProfileSize(long wstr long long long ptr)
+@ stdcall WcsGetDefaultRenderingIntent(long ptr)
 @ stdcall WcsGetUsePerUserProfiles(wstr long ptr)
-@ stub WcsGpCanInstallOrUninstallProfiles
+@ stdcall WcsGpCanInstallOrUninstallProfiles(ptr)
 @ stdcall WcsOpenColorProfileA(ptr ptr ptr long long long long)
 @ stdcall WcsOpenColorProfileW(ptr ptr ptr long long long long)
-@ stub WcsSetCalibrationManagementState
-@ stub WcsSetDefaultColorProfile
-@ stub WcsSetDefaultRenderingIntent
-@ stub WcsSetUsePerUserProfiles
+@ stdcall WcsSetCalibrationManagementState(long)
+@ stdcall WcsSetDefaultColorProfile(long wstr long long long wstr)
+@ stdcall WcsSetDefaultRenderingIntent(long long)
+@ stdcall WcsSetUsePerUserProfiles(wstr long long)
 @ stub WcsTranslateColors

@@ -615,8 +615,8 @@ BOOL WINAPI GetStandardColorSpaceProfileA( PCSTR machine, DWORD id, PSTR profile
 BOOL WINAPI GetStandardColorSpaceProfileW( PCWSTR machine, DWORD id, PWSTR profile, PDWORD size )
 {
     static const WCHAR rgbprofilefile[] =
-        { '\\','s','r','g','b',' ','c','o','l','o','r',' ',
-          's','p','a','c','e',' ','p','r','o','f','i','l','e','.','i','c','m',0 };
+        { '\\','s','R','G','B',' ','C','o','l','o','r',' ',
+          'S','p','a','c','e',' ','P','r','o','f','i','l','e','.','i','c','m',0 };
     WCHAR rgbprofile[MAX_PATH];
     DWORD len = sizeof(rgbprofile);
 
@@ -634,35 +634,31 @@ BOOL WINAPI GetStandardColorSpaceProfileW( PCWSTR machine, DWORD id, PWSTR profi
         return FALSE;
     }
 
-    if (!profile)
-    {
-        SetLastError( ERROR_INSUFFICIENT_BUFFER );
-        return FALSE;
-    }
-
-    GetColorDirectoryW( machine, rgbprofile, &len );
-
     switch (id)
     {
         case LCS_sRGB:
         case LCS_WINDOWS_COLOR_SPACE: /* FIXME */
-            lstrcatW( rgbprofile, rgbprofilefile );
-            len = lstrlenW( rgbprofile ) * sizeof(WCHAR);
-
-            if (*size < len)
-            {
-                *size = len;
-                SetLastError( ERROR_MORE_DATA );
-                return FALSE;
-            }
-
-            lstrcpyW( profile, rgbprofile );
             break;
 
         default:
-            SetLastError( ERROR_FILE_NOT_FOUND );
+            if (!profile) SetLastError( ERROR_INSUFFICIENT_BUFFER );
+            else SetLastError( ERROR_FILE_NOT_FOUND );
             return FALSE;
     }
+
+    if (!GetColorDirectoryW( machine, rgbprofile, &len )) return FALSE;
+    lstrcatW( rgbprofile, rgbprofilefile );
+    /* the size is in bytes and counts the terminating null, also when the buffer is too small (measured on Windows 10 22H2) */
+    len = (lstrlenW( rgbprofile ) + 1) * sizeof(WCHAR);
+
+    if (!profile || *size < len)
+    {
+        *size = len;
+        SetLastError( ERROR_INSUFFICIENT_BUFFER );
+        return FALSE;
+    }
+
+    lstrcpyW( profile, rgbprofile );
     return TRUE;
 }
 
@@ -1530,26 +1526,6 @@ BOOL WINAPI CloseColorProfile( HPROFILE profile )
 
 #endif /* HAVE_LCMS2 */
     return ret;
-}
-
-/******************************************************************************
- * WcsGetUsePerUserProfiles               [MSCMS.@]
- */
-BOOL WINAPI WcsGetUsePerUserProfiles( const WCHAR* name, DWORD class, BOOL* use_per_user_profile )
-{
-    FIXME( "%s %s %p\n", debugstr_w(name), dbgstr_tag(class), use_per_user_profile );
-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
-    return FALSE;
-}
-
-/******************************************************************************
- * WcsEnumColorProfilesSize               [MSCMS.@]
- */
-BOOL WINAPI WcsEnumColorProfilesSize( WCS_PROFILE_MANAGEMENT_SCOPE scope, ENUMTYPEW *record, DWORD *size )
-{
-    FIXME( "%d %p %p\n", scope, record, size );
-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
-    return FALSE;
 }
 
 /******************************************************************************
