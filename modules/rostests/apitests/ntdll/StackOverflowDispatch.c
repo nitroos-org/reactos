@@ -77,9 +77,10 @@ DispatchThread(PVOID Parameter)
 
     UNREFERENCED_PARAMETER(Parameter);
     Reserve = (ULONG_PTR)NtCurrentTeb()->DeallocationStack;
-    Target = Reserve + 3 * PAGE_SIZE;
+    Target = Reserve + 4 * PAGE_SIZE;
     /* Grow the stack one guard page at a time until the guard page is at
-     * DeallocationStack + 2 pages, the last one before the overflow */
+     * DeallocationStack + 3 pages, the last one before the overflow (a guard
+     * page hit up to there raises it, on Windows x64 as well) */
     for (i = 0; i < 1024 && (ULONG_PTR)Tib->StackLimit > Target; i++)
         *((volatile CHAR *)Tib->StackLimit - 1) = 0;
     if ((ULONG_PTR)Tib->StackLimit != Target)
