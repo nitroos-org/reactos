@@ -38,9 +38,10 @@ extern "C" {
 #define MM_PAGE_FRAME_NUMBER_SIZE         52
 
 //
-// User space range limit
+// User space range limit: 128 TiB minus the 64 KiB no-access region below
+// MmUserProbeAddress, as on Windows 8.1 and later (Windows 7 used 8 TiB)
 //
-#define MI_HIGHEST_USER_ADDRESS         (PVOID)0x000007FFFFFEFFFFULL
+#define MI_HIGHEST_USER_ADDRESS         (PVOID)0x00007FFFFFFEFFFFULL
 
 //
 // Address of the shared user page

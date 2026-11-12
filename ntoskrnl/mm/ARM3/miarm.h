@@ -770,32 +770,43 @@ MiIsMemoryTypeInvisible(TYPE_OF_MEMORY MemoryType)
 }
 
 #ifdef _M_AMD64
+/*
+ * The page-table entries that map the user range, at each level of the self-map:
+ * from the entry for address 0 up to the entry for MI_HIGHEST_USER_ADDRESS (the
+ * 128 TiB user range is PML4 entries 0-255). Derived from the user range instead of
+ * hard-coded, so the owner bit and the page-table reference counts follow it.
+ */
+#define MI_USER_PXE_END ((ULONG_PTR)MiAddressToPxe(MI_HIGHEST_USER_ADDRESS) + sizeof(MMPTE))
+#define MI_USER_PPE_END ((ULONG_PTR)MiAddressToPpe(MI_HIGHEST_USER_ADDRESS) + sizeof(MMPTE))
+#define MI_USER_PDE_END ((ULONG_PTR)MiAddressToPde(MI_HIGHEST_USER_ADDRESS) + sizeof(MMPTE))
+#define MI_USER_PTE_END ((ULONG_PTR)MiAddressToPte(MI_HIGHEST_USER_ADDRESS) + sizeof(MMPTE))
+
 FORCEINLINE
 BOOLEAN
 MiIsUserPxe(PVOID Address)
 {
-    return ((ULONG_PTR)Address >> 7) == 0x1FFFFEDF6FB7DA0ULL;
+    return ((ULONG_PTR)Address >= PXE_BASE) && ((ULONG_PTR)Address < MI_USER_PXE_END);
 }
 
 FORCEINLINE
 BOOLEAN
 MiIsUserPpe(PVOID Address)
 {
-    return ((ULONG_PTR)Address >> 16) == 0xFFFFF6FB7DA0ULL;
+    return ((ULONG_PTR)Address >= PPE_BASE) && ((ULONG_PTR)Address < MI_USER_PPE_END);
 }
 
 FORCEINLINE
 BOOLEAN
 MiIsUserPde(PVOID Address)
 {
-    return ((ULONG_PTR)Address >> 25) == 0x7FFFFB7DA0ULL;
+    return ((ULONG_PTR)Address >= PDE_BASE) && ((ULONG_PTR)Address < MI_USER_PDE_END);
 }
 
 FORCEINLINE
 BOOLEAN
 MiIsUserPte(PVOID Address)
 {
-    return ((ULONG_PTR)Address >> 34) == 0x3FFFFDA0ULL;
+    return ((ULONG_PTR)Address >= PTE_BASE) && ((ULONG_PTR)Address < MI_USER_PTE_END);
 }
 #else
 FORCEINLINE

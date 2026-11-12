@@ -24,7 +24,7 @@ static VOID GuestProbe(ULONG Address, ULONGLONG Length)
  * at the native user probe address, which fails every probe and access there,
  * so the service fails exactly as for an inaccessible argument of its own.
  * The low bits are kept so that misalignment is still reported first. */
-#define GUEST_UNREADABLE(Address) ((PVOID)(ULONG_PTR)(0x000007FFFFFF0000ULL | ((Address) & 3)))
+#define GUEST_UNREADABLE(Address) ((PVOID)(ULONG_PTR)(0x00007FFFFFFF0000ULL | ((Address) & 3)))
 
 static PUNICODE_STRING StringIn(UNICODE_STRING *To, ULONG Address)
 {
