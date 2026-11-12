@@ -24,6 +24,7 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include "windef.h"
 #include "winbase.h"
 #include "wintrust.h"
@@ -754,18 +755,6 @@ BOOL WINAPI CryptCATCatalogInfoFromContext(HCATINFO hcatinfo, CATALOG_INFO *info
     return TRUE;
 }
 
-/***********************************************************************
- *      CryptSIPCreateIndirectData  (WINTRUST.@)
- */
-BOOL WINAPI CryptSIPCreateIndirectData(SIP_SUBJECTINFO* pSubjectInfo, DWORD* pcbIndirectData,
-                                       SIP_INDIRECT_DATA* pIndirectData)
-{
-    FIXME("(%p %p %p) stub\n", pSubjectInfo, pcbIndirectData, pIndirectData);
- 
-    return FALSE;
-}
-
-
 static BOOL WINTRUST_GetSignedMsgFromPEFile(SIP_SUBJECTINFO *pSubjectInfo,
  DWORD *pdwEncodingType, DWORD dwIndex, DWORD *pcbSignedDataMsg,
  BYTE *pbSignedDataMsg)
@@ -885,6 +874,27 @@ static BOOL WINTRUST_PutSignedMsgToPEFile(SIP_SUBJECTINFO* pSubjectInfo, DWORD p
     cert->wRevision = WIN_CERT_REVISION_2_0;
     cert->wCertificateType = WIN_CERT_TYPE_PKCS_SIGNED_DATA;
     memcpy(cert->bCertificate, pbSignedDataMsg, cbSignedDataMsg);
+
+    /* The certificate table of the first signature starts on an 8-byte boundary; the zeros before it are part of the
+     * image digest (pe_image_hash counts them for the unsigned file) */
+    {
+        DWORD count = 0, end = GetFileSize(file, NULL);
+
+        if (end != INVALID_FILE_SIZE && (end % 8) && ImageEnumerateCertificates(file, CERT_SECTION_TYPE_ANY, &count, NULL, 0) &&
+            !count)
+        {
+            static const BYTE zero[8];
+            DWORD pad = 8 - (end % 8), written;
+
+            SetFilePointer(file, 0, NULL, FILE_END);
+            if (!WriteFile(file, zero, pad, &written, NULL) || written != pad)
+            {
+                free(cert);
+                if (file != pSubjectInfo->hFile) CloseHandle(file);
+                return FALSE;
+            }
+        }
+    }
     ret = ImageAddCertificate(file, cert, pdwIndex);
 
     free(cert);
@@ -1171,24 +1181,455 @@ BOOL WINAPI CryptSIPPutSignedDataMsg(SIP_SUBJECTINFO* pSubjectInfo, DWORD pdwEnc
     return FALSE;
 }
 
-/***********************************************************************
- *      CryptSIPRemoveSignedDataMsg  (WINTRUST.@)
- */
-BOOL WINAPI CryptSIPRemoveSignedDataMsg(SIP_SUBJECTINFO* pSubjectInfo,
-                                       DWORD dwIndex)
+
+/* The page hash attributes of an Authenticode signature
+ * (Windows Authenticode Portable Executable Signature Format) */
+#define SPC_PE_IMAGE_PAGE_HASHES_V1_OBJID "1.3.6.1.4.1.311.2.3.1"
+#define SPC_PE_IMAGE_PAGE_HASHES_V2_OBJID "1.3.6.1.4.1.311.2.3.2"
+#define PE_PAGE_SIZE 4096
+
+static const BYTE page_hash_class_id[16] = { 0xa6,0xb5,0x86,0xd5,0xb4,0xa1,0x24,0x66,
+                                             0xae,0x05,0xa2,0x17,0xda,0x8e,0x60,0xd6 };
+
+static int pe_section_cmp(const void *a, const void *b)
 {
-    FIXME("(%p %ld) stub\n", pSubjectInfo, dwIndex);
- 
-    return FALSE;
+    const IMAGE_SECTION_HEADER *x = *(IMAGE_SECTION_HEADER * const *)a, *y = *(IMAGE_SECTION_HEADER * const *)b;
+    return x->PointerToRawData < y->PointerToRawData ? -1 : x->PointerToRawData > y->PointerToRawData;
+}
+
+static BOOL hash_data_buf(HCRYPTHASH hash, const BYTE *data, DWORD len, DWORD pad)
+{
+    static const BYTE zero[PE_PAGE_SIZE];
+    return (!len || CryptHashData(hash, data, len, 0)) && (!pad || CryptHashData(hash, zero, pad, 0));
+}
+
+/* Table of (file offset, digest of the page) of a PE file, one entry per 4096 bytes of the headers and of each
+ * section's raw data, closed by an entry that holds the end offset and a zero digest. */
+static BOOL pe_page_hash_table(HANDLE file, ALG_ID alg, BYTE **table, DWORD *table_len)
+{
+    HCRYPTPROV prov;
+    HCRYPTHASH hash;
+    HANDLE mapping;
+    BYTE *view = NULL, *out = NULL;
+    const IMAGE_NT_HEADERS32 *nt;
+    IMAGE_SECTION_HEADER **sorted = NULL;
+    DWORD file_size, hdr_size, hash_len, hlen_size = sizeof(DWORD), entry, count = 0, cap, i, off, len;
+    DWORD checksum_off, secdir_off, sig_start;
+    BOOL ret = FALSE;
+    IMAGE_SECTION_HEADER *sec;
+    WORD nsec;
+
+    if ((file_size = GetFileSize(file, NULL)) == INVALID_FILE_SIZE) return FALSE;
+    if (!(mapping = CreateFileMappingW(file, NULL, PAGE_READONLY, 0, 0, NULL))) return FALSE;
+    view = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
+    CloseHandle(mapping);
+    if (!view) return FALSE;
+    if (!CryptAcquireContextW(&prov, NULL, MS_ENH_RSA_AES_PROV_W, PROV_RSA_AES, CRYPT_VERIFYCONTEXT))
+    {
+        UnmapViewOfFile(view);
+        return FALSE;
+    }
+    if (!CryptCreateHash(prov, alg, 0, 0, &hash))
+    {
+        CryptReleaseContext(prov, 0);
+        UnmapViewOfFile(view);
+        return FALSE;
+    }
+    if (!CryptGetHashParam(hash, HP_HASHSIZE, (BYTE *)&hash_len, &hlen_size, 0)) goto done;
+    if (!(nt = (const IMAGE_NT_HEADERS32 *)ImageNtHeader(view))) goto done;
+    if (nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC)
+    {
+        hdr_size = nt->OptionalHeader.SizeOfHeaders;
+        checksum_off = (const BYTE *)&nt->OptionalHeader.CheckSum - view;
+        secdir_off = (const BYTE *)&nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY] - view;
+        sig_start = nt->OptionalHeader.NumberOfRvaAndSizes > IMAGE_DIRECTORY_ENTRY_SECURITY ?
+                    nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY].VirtualAddress : 0;
+    }
+    else if (nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+    {
+        const IMAGE_NT_HEADERS64 *nt64 = (const IMAGE_NT_HEADERS64 *)nt;
+        hdr_size = nt64->OptionalHeader.SizeOfHeaders;
+        checksum_off = (const BYTE *)&nt64->OptionalHeader.CheckSum - view;
+        secdir_off = (const BYTE *)&nt64->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY] - view;
+        sig_start = nt64->OptionalHeader.NumberOfRvaAndSizes > IMAGE_DIRECTORY_ENTRY_SECURITY ?
+                    nt64->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY].VirtualAddress : 0;
+    }
+    else goto done;
+    if (!sig_start || sig_start > file_size) sig_start = file_size;
+    if (hdr_size > sig_start || secdir_off + sizeof(IMAGE_DATA_DIRECTORY) > hdr_size) goto done;
+
+    nsec = nt->FileHeader.NumberOfSections;
+    sec = IMAGE_FIRST_SECTION(nt);
+    if ((BYTE *)(sec + nsec) > view + file_size) goto done;
+    entry = 4 + hash_len;
+    cap = (hdr_size / PE_PAGE_SIZE + 2) * entry;
+    for (i = 0; i < nsec; i++) cap += (sec[i].SizeOfRawData / PE_PAGE_SIZE + 1) * entry;
+    cap += entry;
+    out = calloc(1, cap);
+    sorted = calloc(nsec ? nsec : 1, sizeof(*sorted));
+    if (!out || !sorted) goto done;
+    for (i = 0; i < nsec; i++) sorted[i] = &sec[i];
+    qsort(sorted, nsec, sizeof(*sorted), pe_section_cmp);
+
+    /* the headers, without the checksum and the certificate table entry, padded to a page */
+    for (off = 0; off < hdr_size; off += PE_PAGE_SIZE)
+    {
+        DWORD end = min(off + PE_PAGE_SIZE, hdr_size), pos = off;
+        BYTE *e = out + count * entry;
+
+        if (!CryptCreateHash(prov, alg, 0, 0, &hash)) goto done;
+        ret = TRUE;
+        while (ret && pos < end)
+        {
+            DWORD stop = end;
+            if (pos == checksum_off) { pos += 4; continue; }
+            if (pos == secdir_off) { pos += sizeof(IMAGE_DATA_DIRECTORY); continue; }
+            if (pos < checksum_off && checksum_off < stop) stop = checksum_off;
+            if (pos < secdir_off && secdir_off < stop) stop = secdir_off;
+            ret = CryptHashData(hash, view + pos, stop - pos, 0);
+            pos = stop;
+        }
+        if (ret && end - off < PE_PAGE_SIZE) ret = hash_data_buf(hash, NULL, 0, PE_PAGE_SIZE - (end - off));
+        if (ret)
+        {
+            *(DWORD *)e = off;
+            len = hash_len;
+            ret = CryptGetHashParam(hash, HP_HASHVAL, e + 4, &len, 0);
+        }
+        CryptDestroyHash(hash);
+        hash = 0;
+        if (!ret) goto done;
+        count++;
+    }
+    ret = FALSE;
+    for (i = 0; i < nsec; i++)
+    {
+        DWORD start = sorted[i]->PointerToRawData, size = sorted[i]->SizeOfRawData, done_len;
+
+        if (!size) continue;
+        if (start > file_size || size > file_size - start || start + size > sig_start) goto done;
+        for (done_len = 0; done_len < size; done_len += PE_PAGE_SIZE)
+        {
+            BYTE *e = out + count * entry;
+            DWORD chunk = min(PE_PAGE_SIZE, size - done_len);
+
+            if (!CryptCreateHash(prov, alg, 0, 0, &hash)) goto done;
+            ret = hash_data_buf(hash, view + start + done_len, chunk, PE_PAGE_SIZE - chunk);
+            if (ret)
+            {
+                *(DWORD *)e = start + done_len;
+                len = hash_len;
+                ret = CryptGetHashParam(hash, HP_HASHVAL, e + 4, &len, 0);
+            }
+            CryptDestroyHash(hash);
+            hash = 0;
+            if (!ret) goto done;
+            count++;
+        }
+        ret = FALSE;
+    }
+    /* the closing entry: the end of the hashed data and an empty digest */
+    *(DWORD *)(out + count * entry) = nsec ? max(hdr_size, sorted[nsec - 1]->PointerToRawData +
+                                                 sorted[nsec - 1]->SizeOfRawData) : hdr_size;
+    count++;
+    *table = out;
+    *table_len = count * entry;
+    out = NULL;
+    ret = TRUE;
+
+done:
+    if (hash) CryptDestroyHash(hash);
+    free(out);
+    free(sorted);
+    CryptReleaseContext(prov, 0);
+    UnmapViewOfFile(view);
+    return ret;
+}
+
+/* DER of an OBJECT IDENTIFIER from its dotted string (crypt32 has no encoder for it) */
+static BOOL der_oid(const char *oid, BYTE **out, DWORD *out_len)
+{
+    BYTE body[64], *p = body;
+    DWORD arcs[16], n = 0, i;
+    const char *s = oid;
+    BYTE *ret;
+
+    while (*s && n < ARRAY_SIZE(arcs))
+    {
+        char *end;
+        arcs[n++] = strtoul(s, &end, 10);
+        if (end == s) return FALSE;
+        s = *end == '.' ? end + 1 : end;
+        if (!*end) break;
+    }
+    if (n < 2 || arcs[0] > 2) return FALSE;
+    arcs[1] += arcs[0] * 40;
+    for (i = 1; i < n; i++)
+    {
+        DWORD v = arcs[i], shift = 28;
+
+        if (p - body > 48) return FALSE;
+        while (shift && !(v >> shift)) shift -= 7;
+        for (; shift; shift -= 7) *p++ = 0x80 | ((v >> shift) & 0x7f);
+        *p++ = v & 0x7f;
+    }
+    if (!(ret = malloc(2 + (p - body)))) return FALSE;
+    ret[0] = 6;
+    ret[1] = p - body;
+    memcpy(ret + 2, body, p - body);
+    *out = ret;
+    *out_len = 2 + (p - body);
+    return TRUE;
+}
+
+static BOOL der_len_encode(DWORD len, BYTE *out, DWORD *olen)
+{
+    if (len < 0x80) { out[0] = len; *olen = 1; }
+    else if (len < 0x100) { out[0] = 0x81; out[1] = len; *olen = 2; }
+    else if (len < 0x10000) { out[0] = 0x82; out[1] = len >> 8; out[2] = len; *olen = 3; }
+    else { out[0] = 0x83; out[1] = len >> 16; out[2] = len >> 8; out[3] = len; *olen = 4; }
+    return TRUE;
+}
+
+static BYTE *der_wrap(BYTE tag, const BYTE *a, DWORD alen, const BYTE *b, DWORD blen, DWORD *total)
+{
+    BYTE lenbuf[4], *ret;
+    DWORD ll;
+
+    der_len_encode(alen + blen, lenbuf, &ll);
+    if (!(ret = malloc(1 + ll + alen + blen))) return NULL;
+    ret[0] = tag;
+    memcpy(ret + 1, lenbuf, ll);
+    if (alen) memcpy(ret + 1 + ll, a, alen);
+    if (blen) memcpy(ret + 1 + ll + alen, b, blen);
+    *total = 1 + ll + alen + blen;
+    return ret;
+}
+
+/* SET { SEQUENCE { OID, SET { OCTET STRING table } } }: the serialized data of the moniker that carries the page
+ * hashes */
+static BYTE *encode_page_hash_attr(const char *oid, const BYTE *table, DWORD table_len, DWORD *total)
+{
+    BYTE *octets = NULL, *set1 = NULL, *oidenc = NULL, *seq = NULL, *ret = NULL, *tmp = NULL;
+    DWORD octets_len, set1_len, oid_len = 0, seq_len, tmp_len;
+
+    if (!der_oid(oid, &oidenc, &oid_len)) return NULL;
+    if (!(octets = der_wrap(0x04, table, table_len, NULL, 0, &octets_len))) goto done;
+    if (!(set1 = der_wrap(0x31, octets, octets_len, NULL, 0, &set1_len))) goto done;
+    if (!(seq = der_wrap(0x30, oidenc, oid_len, set1, set1_len, &seq_len))) goto done;
+    if (!(tmp = der_wrap(0x31, seq, seq_len, NULL, 0, &tmp_len))) goto done;
+    ret = tmp;
+    *total = tmp_len;
+done:
+    free(oidenc);
+    free(octets);
+    free(set1);
+    free(seq);
+    return ret;
+}
+
+/* Layout of what CryptSIPCreateIndirectData returns: the structure, then the strings and blobs it points to */
+static BOOL fill_indirect_data(const char *data_oid, const BYTE *data, DWORD data_len, const char *alg_oid,
+                               const BYTE *digest, DWORD digest_len, DWORD *size, SIP_INDIRECT_DATA *out)
+{
+    DWORD need = sizeof(*out) + strlen(data_oid) + 1 + data_len + strlen(alg_oid) + 1 + digest_len;
+    BYTE *p;
+
+    if (!out)
+    {
+        *size = need;
+        return TRUE;
+    }
+    if (*size < need)
+    {
+        *size = need;
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+    memset(out, 0, sizeof(*out));
+    p = (BYTE *)(out + 1);
+    out->Data.pszObjId = (char *)p;
+    strcpy((char *)p, data_oid);
+    p += strlen(data_oid) + 1;
+    out->Data.Value.cbData = data_len;
+    out->Data.Value.pbData = p;
+    memcpy(p, data, data_len);
+    p += data_len;
+    out->DigestAlgorithm.pszObjId = (char *)p;
+    strcpy((char *)p, alg_oid);
+    p += strlen(alg_oid) + 1;
+    out->Digest.cbData = digest_len;
+    out->Digest.pbData = p;
+    memcpy(p, digest, digest_len);
+    return TRUE;
+}
+
+static HANDLE sip_open_subject(const SIP_SUBJECTINFO *info, DWORD access, BOOL *opened)
+{
+    *opened = FALSE;
+    if (info->hFile && info->hFile != INVALID_HANDLE_VALUE) return info->hFile;
+    if (!info->pwsFileName) return INVALID_HANDLE_VALUE;
+    *opened = TRUE;
+    return CreateFileW(info->pwsFileName, access, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+}
+
+static BOOL sip_pe_digest(const SIP_SUBJECTINFO *info, HANDLE file, ALG_ID *alg, BYTE *digest, DWORD *len)
+{
+    BOOL pe = FALSE;
+
+    *alg = info->DigestAlgorithm.pszObjId ? CertOIDToAlgId(info->DigestAlgorithm.pszObjId) : CALG_SHA1;
+    if (!*alg)
+    {
+        SetLastError(NTE_BAD_ALGID);
+        return FALSE;
+    }
+    if (!WINTRUST_CalcFileDigest(file, *alg, len, digest, &pe)) return FALSE;
+    if (!pe)
+    {
+        SetLastError(ERROR_BAD_EXE_FORMAT);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+/***********************************************************************
+ *      CryptSIPCreateIndirectData  (WINTRUST.@)
+ *
+ * Only the PE subject is handled: the data is an SpcPeImageData (the flags of the SPC_*_PE_* options and the
+ * obsolete file link every signing tool writes, or the page hashes when SPC_INC_PE_PAGE_HASHES_FLAG is set) and the
+ * digest is the Authenticode digest of the image.
+ */
+BOOL WINAPI CryptSIPCreateIndirectData(SIP_SUBJECTINFO *info, DWORD *size, SIP_INDIRECT_DATA *out)
+{
+    static WCHAR obsolete[] = L"<<<Obsolete>>>";
+    BYTE digest[64], *encoded = NULL, *attr = NULL, *table = NULL;
+    DWORD digest_len = sizeof(digest), encoded_len = 0, attr_len = 0, table_len;
+    SPC_PE_IMAGE_DATA image = { { 0 } };
+    SPC_LINK link = { SPC_FILE_LINK_CHOICE };
+    const char *alg_oid;
+    BYTE flags_byte = 0;
+    HANDLE file;
+    BOOL opened, ret = FALSE;
+    ALG_ID alg;
+
+    TRACE("(%p %p %p)\n", info, size, out);
+
+    if (!info || !size || info->cbSize < sizeof(*info) || !info->pgSubjectType)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (memcmp(info->pgSubjectType, &unknown, sizeof(unknown)))
+    {
+        FIXME("unimplemented for subject type %s\n", debugstr_guid(info->pgSubjectType));
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    file = sip_open_subject(info, GENERIC_READ, &opened);
+    if (file == INVALID_HANDLE_VALUE) return FALSE;
+    if (!sip_pe_digest(info, file, &alg, digest, &digest_len)) goto done;
+    alg_oid = info->DigestAlgorithm.pszObjId ? info->DigestAlgorithm.pszObjId : szOID_OIWSEC_sha1;
+
+    link.pwszFile = obsolete;
+    image.Flags.cbData = 1;
+    image.Flags.pbData = &flags_byte;
+    image.pFile = &link;
+    if (info->dwFlags & SPC_INC_PE_PAGE_HASHES_FLAG)
+    {
+        const char *oid = alg == CALG_SHA1 ? SPC_PE_IMAGE_PAGE_HASHES_V1_OBJID : SPC_PE_IMAGE_PAGE_HASHES_V2_OBJID;
+
+        if (!pe_page_hash_table(file, alg, &table, &table_len)) goto done;
+        if (!(attr = encode_page_hash_attr(oid, table, table_len, &attr_len)))
+        {
+            SetLastError(ERROR_OUTOFMEMORY);
+            goto done;
+        }
+        link.dwLinkChoice = SPC_MONIKER_LINK_CHOICE;
+        memcpy(link.Moniker.ClassId, page_hash_class_id, sizeof(page_hash_class_id));
+        link.Moniker.SerializedData.cbData = attr_len;
+        link.Moniker.SerializedData.pbData = attr;
+    }
+    if (!CryptEncodeObjectEx(X509_ASN_ENCODING, SPC_PE_IMAGE_DATA_STRUCT, &image, CRYPT_ENCODE_ALLOC_FLAG, NULL,
+                             &encoded, &encoded_len)) goto done;
+    ret = fill_indirect_data(SPC_PE_IMAGE_DATA_OBJID, encoded, encoded_len, alg_oid, digest, digest_len, size, out);
+
+done:
+    LocalFree(encoded);
+    free(attr);
+    free(table);
+    if (opened) CloseHandle(file);
+    return ret;
 }
 
 /***********************************************************************
  *      CryptSIPVerifyIndirectData  (WINTRUST.@)
+ *
+ * Compares the digest of the PE subject with the one in the indirect data.
  */
-BOOL WINAPI CryptSIPVerifyIndirectData(SIP_SUBJECTINFO* pSubjectInfo,
-                                       SIP_INDIRECT_DATA* pIndirectData)
+BOOL WINAPI CryptSIPVerifyIndirectData(SIP_SUBJECTINFO *info, SIP_INDIRECT_DATA *data)
 {
-    FIXME("(%p %p) stub\n", pSubjectInfo, pIndirectData);
- 
-    return FALSE;
+    BYTE digest[64];
+    DWORD len = sizeof(digest);
+    SIP_SUBJECTINFO copy;
+    HANDLE file;
+    BOOL opened, ret = FALSE;
+    ALG_ID alg;
+
+    TRACE("(%p %p)\n", info, data);
+
+    if (!info || !data || info->cbSize < sizeof(*info) || !info->pgSubjectType ||
+        !data->DigestAlgorithm.pszObjId || !data->Digest.pbData)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (memcmp(info->pgSubjectType, &unknown, sizeof(unknown)))
+    {
+        FIXME("unimplemented for subject type %s\n", debugstr_guid(info->pgSubjectType));
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    file = sip_open_subject(info, GENERIC_READ, &opened);
+    if (file == INVALID_HANDLE_VALUE) return FALSE;
+    copy = *info;
+    copy.DigestAlgorithm = data->DigestAlgorithm;
+    if (sip_pe_digest(&copy, file, &alg, digest, &len))
+    {
+        if (len == data->Digest.cbData && !memcmp(digest, data->Digest.pbData, len))
+            ret = TRUE;
+        else
+            SetLastError(TRUST_E_BAD_DIGEST);
+    }
+    if (opened) CloseHandle(file);
+    return ret;
+}
+
+/***********************************************************************
+ *      CryptSIPRemoveSignedDataMsg  (WINTRUST.@)
+ */
+BOOL WINAPI CryptSIPRemoveSignedDataMsg(SIP_SUBJECTINFO *info, DWORD index)
+{
+    HANDLE file;
+    BOOL opened, ret;
+
+    TRACE("(%p %ld)\n", info, index);
+
+    if (!info || info->cbSize < sizeof(*info) || !info->pgSubjectType)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (memcmp(info->pgSubjectType, &unknown, sizeof(unknown)))
+    {
+        FIXME("unimplemented for subject type %s\n", debugstr_guid(info->pgSubjectType));
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    file = sip_open_subject(info, GENERIC_READ | GENERIC_WRITE, &opened);
+    if (file == INVALID_HANDLE_VALUE) return FALSE;
+    ret = ImageRemoveCertificate(file, index);
+    if (opened) CloseHandle(file);
+    return ret;
 }
