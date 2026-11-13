@@ -88,21 +88,23 @@ RandomValidate(DWORD HeapFlags, ULONG Seed, ULONG Ops, SIZE_T MaxSize, ULONG Fro
 }
 
 static void
-TestFixedHeapSweep(void)
+FixedHeapSweep(SIZE_T Initial, SIZE_T Maximum, ULONG Flags)
 {
     HANDLE Heap;
-    PVOID Block[256];
+    PVOID Block[512];
     SIZE_T Size;
-    ULONG i, Count, Failed = 0;
+    ULONG i, Count, Failed = 0, Rounds = 0;
 
-    Heap = HeapCreate(0, 0x10000, 4 * 1024 * 1024);
-    ok(Heap != NULL, "HeapCreate failed\n");
+    Heap = HeapCreate(Flags, Initial, Maximum);
+    ok(Heap != NULL, "HeapCreate(%lx, %Ix, %Ix) failed\n", Flags, Initial, Maximum);
     if (!Heap)
         return;
 
-    /* Sweep sizes: allocate until the fixed heap says no (NULL, never a hang), free everything, validate */
-    for (Size = 16; Size <= 0x80000; Size = Size + Size / 3 + 8)
+    /* Sweep sizes up to past the whole heap: allocate until the fixed heap says no (NULL, never a hang),
+       free everything, validate. Odd sizes, so that the blocks do not line up with pages. */
+    for (Size = 1; Size <= Maximum + Maximum / 4; Size += Size / 5 + 1)
     {
+        Rounds++;
         Count = 0;
         for (i = 0; i < RTL_NUMBER_OF(Block); i++)
         {
@@ -114,18 +116,35 @@ TestFixedHeapSweep(void)
             }
             Count++;
         }
-        ok(Count > 0, "size %Iu: not even one block from a 4 MB heap\n", Size);
         ok(HeapValidate(Heap, 0, NULL), "size %Iu: heap does not validate with %lu blocks\n", Size, Count);
-        while (Count--)
-            ok(HeapFree(Heap, 0, Block[Count]), "HeapFree failed\n");
+
+        /* Free every other block first, so that the heap is fragmented when the sweep asks for more */
+        for (i = 0; i < Count; i += 2)
+            ok(HeapFree(Heap, 0, Block[i]), "HeapFree failed\n");
+        if (Count > 1)
+        {
+            PVOID Again = HeapAlloc(Heap, 0, Size + Size / 2);
+            if (Again)
+                HeapFree(Heap, 0, Again);
+        }
+        for (i = 1; i < Count; i += 2)
+            ok(HeapFree(Heap, 0, Block[i]), "HeapFree failed\n");
         ok(HeapValidate(Heap, 0, NULL), "size %Iu: heap does not validate after freeing\n", Size);
     }
 
     /* A single request larger than the whole heap fails */
     SetLastError(0xDEADBEEF);
-    ok(HeapAlloc(Heap, 0, 8 * 1024 * 1024) == NULL, "8 MB from a 4 MB fixed heap\n");
-    ok(Failed > 0, "no allocation ever failed\n");
+    ok(HeapAlloc(Heap, 0, Maximum * 2) == NULL, "twice the size of a fixed heap\n");
+    ok(Failed > 0, "no allocation ever failed after %lu sizes\n", Rounds);
     ok(HeapDestroy(Heap), "HeapDestroy failed\n");
+}
+
+static void
+TestFixedHeapSweep(void)
+{
+    FixedHeapSweep(0x10000, 4 * 1024 * 1024, 0);
+    FixedHeapSweep(4 * 1024 * 1024, 4 * 1024 * 1024, 0);
+    FixedHeapSweep(4 * 1024 * 1024, 4 * 1024 * 1024, HEAP_NO_SERIALIZE);
 }
 
 START_TEST(RtlHeapValidate)

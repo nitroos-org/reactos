@@ -1142,10 +1142,13 @@ RtlpInitializeHeapSegment(IN OUT PHEAP Heap,
             FreeEntry->PreviousSize = Segment->Entry.Size;
             FreeEntry->SegmentOffset = SegmentIndex;
             FreeEntry->Flags = HEAP_ENTRY_LAST_ENTRY;
-            FreeEntry->Size = (SegmentCommit >> HEAP_ENTRY_SHIFT) - Segment->Entry.Size;
 
-            /* Register the Free Heap Entry */
-            RtlpInsertFreeBlock(Heap, (PHEAP_FREE_ENTRY)FreeEntry, FreeEntry->Size);
+            /* The size does not fit the USHORT of an entry when the segment is fully committed and
+               bigger than 1 MB: let the insertion cut it into blocks of the maximum size */
+            FreeEntry->Size = 0;
+            RtlpInsertFreeBlock(Heap,
+                                (PHEAP_FREE_ENTRY)FreeEntry,
+                                (SegmentCommit >> HEAP_ENTRY_SHIFT) - Segment->Entry.Size);
         }
     }
 
