@@ -98,6 +98,13 @@ static const struct iface_entry iface_table[] =
     { &IID_IVisualInteractionSource2, offsetof(struct cobj, visrc2), KM(K_VISRC), TRUE },
     { &IID_IVisualInteractionSource3, offsetof(struct cobj, visrc3), KM(K_VISRC), TRUE },
     { &IID_ICompositionInteractionSource, offsetof(struct cobj, intsrc), KM(K_VISRC), TRUE },
+    { &IID_ICompositionAnimation, offsetof(struct cobj, anim), KM(K_EXPRANIM), TRUE },
+    { &IID_ICompositionAnimation2, offsetof(struct cobj, anim2), KM(K_EXPRANIM), TRUE },
+    { &IID_ICompositionAnimationBase, offsetof(struct cobj, animbase), KM(K_EXPRANIM), TRUE },
+    { &IID_IExpressionAnimation, offsetof(struct cobj, expr), KM(K_EXPRANIM), TRUE },
+    { &IID_ICompositionPropertySet, offsetof(struct cobj, propset), KM(K_PROPSET), TRUE },
+    { &IID_IInteractionTracker, offsetof(struct cobj, tracker), KM(K_TRACKER), TRUE },
+    { &IID_ICompositionInteractionSourceCollection, offsetof(struct cobj, srccoll), KM(K_ISRCCOLL), TRUE },
     { &IID___x_ABI_CWindows_CFoundation_CIClosable, offsetof(struct cobj, closable), KM_ALL, TRUE },
     { &IID_IAgileObject, offsetof(struct cobj, agile), KM_ALL, FALSE },
     { &IID_INitroDrawingSurfaceInterop, offsetof(struct cobj, dsinterop), KM(K_DSURFACE), FALSE },
@@ -115,9 +122,13 @@ static const WCHAR *const kind_names[] =
     L"Windows.UI.Composition.Desktop.DesktopWindowTarget",
     L"Windows.UI.Composition.Interactions.VisualInteractionSource",
     L"Windows.UI.Composition.CompositionNineGridBrush",
+    L"Windows.UI.Composition.ExpressionAnimation", L"Windows.UI.Composition.CompositionPropertySet",
+    L"Windows.UI.Composition.Interactions.InteractionTracker",
+    L"Windows.UI.Composition.Interactions.CompositionInteractionSourceCollection",
 };
 
 static void cobj_destroy(struct cobj *o);
+static void free_animation_state(struct cobj *o);
 
 static HRESULT STDMETHODCALLTYPE id_QueryInterface(IInspectable *iface, REFIID iid, void **out)
 {
@@ -240,6 +251,13 @@ INSP_FWD(vsr, WIVisualInteractionSource, visrc)
 INSP_FWD(vs2, WIVisualInteractionSource2, visrc2)
 INSP_FWD(vs3, WIVisualInteractionSource3, visrc3)
 INSP_FWD(isr, WICompositionInteractionSource, intsrc)
+INSP_FWD(ani, WICompositionAnimation, anim)
+INSP_FWD(an2, WICompositionAnimation2, anim2)
+INSP_FWD(anb, WICompositionAnimationBase, animbase)
+INSP_FWD(exp, WIExpressionAnimation, expr)
+INSP_FWD(pst, WICompositionPropertySet, propset)
+INSP_FWD(trk, WIInteractionTracker, tracker)
+INSP_FWD(isc, WICompositionInteractionSourceCollection, srccoll)
 UNK_FWD(dwi, WIDesktopWindowTargetInterop, dwtinterop)
 INSP_FWD(clo, WIClosable, closable)
 UNK_FWD(agl, IAgileObject, agile)
@@ -295,7 +313,7 @@ static void release_cobj(struct cobj *o)
 static void cobj_destroy(struct cobj *o)
 {
     struct cobj **kids;
-    struct cobj *vclip, *sbrush, *collection, *gfxdev, *root, *isource, *xparent;
+    struct cobj *vclip, *sbrush, *collection, *gfxdev, *root, *isource, *xparent, *props, *srcs;
     IUnknown *bsurface;
     int i, n;
 
@@ -312,6 +330,8 @@ static void cobj_destroy(struct cobj *o)
     isource = o->isource; o->isource = NULL;
     xparent = o->xparent; o->xparent = NULL;
     bsurface = o->bsurface; o->bsurface = NULL;
+    props = o->props; o->props = NULL;
+    srcs = o->srcs; o->srcs = NULL;
     gfxdev = o->gfxdev;
     comp_unlock();
 
@@ -323,7 +343,10 @@ static void cobj_destroy(struct cobj *o)
     release_cobj(root);
     release_cobj(isource);
     release_cobj(xparent);
+    release_cobj(props);
+    release_cobj(srcs);
     if (bsurface) IUnknown_Release(bsurface);
+    free_animation_state(o);
 
     if (o->kind == K_GDEVICE) gfx_device_free(o);
     if (o->kind == K_DSURFACE) { gfx_surface_free(o); o->gfxdev = NULL; release_cobj(gfxdev); }
@@ -373,21 +396,104 @@ static HRESULT STDMETHODCALLTYPE objb_get_Dispatcher(WICompositionObject *i, __x
 
 static HRESULT STDMETHODCALLTYPE objb_get_Properties(WICompositionObject *i, WUC(ICompositionPropertySet) **value)
 {
-    FIXME("ICompositionObject::Properties: not implemented\n");
-    if (value) *value = NULL;
-    return E_NOTIMPL;
+    struct cobj *o = OBJ_OF(i, objbase), *p = NULL;
+    HRESULT hr = S_OK;
+
+    if (!value) return E_POINTER;
+    *value = NULL;
+    comp_lock();
+    if (!(p = o->props))
+    {
+        if (SUCCEEDED(hr = comp_create(o->compositor, K_PROPSET, &p))) o->props = p;
+    }
+    if (SUCCEEDED(hr))
+    {
+        id_AddRef(&p->identity);        /* o keeps its own reference */
+        *value = &p->propset;
+    }
+    comp_unlock();
+    return hr;
 }
+
+static LONG fixme_expr_logged;
+
+/* The target keeps the started animation alive and the animation keeps its reference parameters alive: an animation
+ * whose reference parameter is (a parent of) its own target is a reference cycle that is only broken by StopAnimation
+ * or ClearParameter. Nothing animates yet, so nothing else would release it. */
 
 static HRESULT STDMETHODCALLTYPE objb_StartAnimation(WICompositionObject *i, HSTRING name, WUC(ICompositionAnimation) *animation)
 {
-    FIXME("ICompositionObject::StartAnimation: not implemented\n");
-    return E_NOTIMPL;
+    struct cobj *o = OBJ_OF(i, objbase);
+    struct canim_start *e;
+    IUnknown *id = NULL;
+    const WCHAR *buf;
+    UINT32 len;
+    HRESULT hr;
+    int k;
+
+    /* FIXME: the error for a NULL animation is unmeasured (VERIFY ON ORACLE) */
+    if (!animation) return E_INVALIDARG;
+    if (FAILED(hr = IUnknown_QueryInterface((IUnknown *)animation, &IID_IUnknown, (void **)&id))) return hr;
+    buf = WindowsGetStringRawBuffer(name, &len);
+    if (!buf) len = 0;
+    if (!InterlockedCompareExchange(&fixme_expr_logged, 1, 0))
+        FIXME("StartAnimation: the animation is stored but never evaluated (no animation engine), the property keeps its value\n");
+    comp_lock();
+    for (k = 0; k < o->nstarted; k++)
+        if (!wcsncmp(o->started[k].name, buf, len) && !o->started[k].name[len]) break;
+    if (k < o->nstarted)
+    {
+        IUnknown *old = o->started[k].anim;
+        o->started[k].anim = id;
+        comp_unlock();
+        IUnknown_Release(old);
+        return S_OK;
+    }
+    if (o->nstarted == o->capstarted)
+    {
+        int n = o->capstarted ? o->capstarted * 2 : 4;
+        struct canim_start *p = o->started ? HeapReAlloc(GetProcessHeap(), 0, o->started, n * sizeof(*p))
+                                           : HeapAlloc(GetProcessHeap(), 0, n * sizeof(*p));
+        if (!p) { comp_unlock(); IUnknown_Release(id); return E_OUTOFMEMORY; }
+        o->started = p; o->capstarted = n;
+    }
+    e = &o->started[o->nstarted];
+    if (!(e->name = HeapAlloc(GetProcessHeap(), 0, (len + 1) * sizeof(WCHAR))))
+    {
+        comp_unlock(); IUnknown_Release(id); return E_OUTOFMEMORY;
+    }
+    memcpy(e->name, buf, len * sizeof(WCHAR));
+    e->name[len] = 0;
+    e->anim = id;
+    o->nstarted++;
+    comp_unlock();
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE objb_StopAnimation(WICompositionObject *i, HSTRING name)
 {
-    FIXME("ICompositionObject::StopAnimation: not implemented\n");
-    return E_NOTIMPL;
+    struct cobj *o = OBJ_OF(i, objbase);
+    const WCHAR *buf;
+    UINT32 len;
+    IUnknown *old = NULL;
+    int k;
+
+    buf = WindowsGetStringRawBuffer(name, &len);
+    if (!buf) len = 0;
+    comp_lock();
+    for (k = 0; k < o->nstarted; k++)
+        if (!wcsncmp(o->started[k].name, buf, len) && !o->started[k].name[len]) break;
+    if (k < o->nstarted)
+    {
+        old = o->started[k].anim;
+        HeapFree(GetProcessHeap(), 0, o->started[k].name);
+        memmove(&o->started[k], &o->started[k + 1], (o->nstarted - k - 1) * sizeof(*o->started));
+        o->nstarted--;
+    }
+    comp_unlock();
+    /* stopping a name that was never started is a no-op (FIXME: unmeasured, VERIFY ON ORACLE) */
+    if (old) IUnknown_Release(old);
+    return S_OK;
 }
 
 static const WICompositionObjectVtbl objbase_vtbl =
@@ -1509,6 +1615,501 @@ HRESULT comp_new_visual_interaction_source(WIVisual *source, WIVisualInteraction
     return S_OK;
 }
 
+/* ---- ExpressionAnimation / CompositionAnimation / CompositionPropertySet ----
+ * Values are stored only: there is no animation engine, so an animation that is started on a property is kept in the
+ * target's bookkeeping (StartAnimation) and logged once with a FIXME, and nothing is ever evaluated. What Windows
+ * answers for an empty key, a NULL reference object, a missing key in ClearParameter/StopAnimation, the case rules
+ * of the names and an Insert* of an existing name with another type is not measured: the choices below are
+ * VERIFY ON ORACLE (empty key and NULL object: E_INVALIDARG, ClearParameter/StopAnimation of a missing key: S_OK,
+ * names compare case-sensitively, Insert* replaces the entry whatever its type). */
+
+typedef __x_ABI_CWindows_CUI_CComposition_CCompositionGetValueStatus GetValueStatus;
+#define GVS_SUCCEEDED 0
+#define GVS_MISMATCH 1
+#define GVS_NOTFOUND 2
+
+static const WCHAR *hs_raw(HSTRING s, UINT32 *len)
+{
+    const WCHAR *b = WindowsGetStringRawBuffer(s, len);
+    if (!b) { *len = 0; return L""; }
+    return b;
+}
+
+static void free_animation_state(struct cobj *o)
+{
+    int k;
+
+    for (k = 0; k < o->nparams; k++)
+    {
+        HeapFree(GetProcessHeap(), 0, o->params[k].name);
+        if (o->params[k].ref) IUnknown_Release(o->params[k].ref);
+    }
+    HeapFree(GetProcessHeap(), 0, o->params);
+    for (k = 0; k < o->nstarted; k++)
+    {
+        HeapFree(GetProcessHeap(), 0, o->started[k].name);
+        IUnknown_Release(o->started[k].anim);
+    }
+    HeapFree(GetProcessHeap(), 0, o->started);
+    for (k = 0; k < o->nsources; k++) IUnknown_Release(o->sources[k]);
+    HeapFree(GetProcessHeap(), 0, o->sources);
+    WindowsDeleteString(o->expression);
+    WindowsDeleteString(o->anim_target);
+    if (o->towner) IUnknown_Release(o->towner);
+    if (o->pdecay) IUnknown_Release(o->pdecay);
+    if (o->sdecay) IUnknown_Release(o->sdecay);
+}
+
+static int param_find(const struct cobj *o, const WCHAR *name, UINT32 len)
+{
+    int k;
+
+    for (k = 0; k < o->nparams; k++)
+        if (!wcsncmp(o->params[k].name, name, len) && !o->params[k].name[len]) return k;
+    return -1;
+}
+
+static HRESULT param_put(struct cobj *o, HSTRING key, enum ptype type, const void *val, size_t size, IUnknown *ref)
+{
+    const WCHAR *name;
+    UINT32 len;
+    struct cparam *p;
+    IUnknown *old = NULL;
+    int k;
+
+    name = hs_raw(key, &len);
+    if (!len) { if (ref) IUnknown_Release(ref); return E_INVALIDARG; }
+    comp_lock();
+    if ((k = param_find(o, name, len)) >= 0)
+    {
+        p = &o->params[k];
+        old = p->ref;
+    }
+    else
+    {
+        if (o->nparams == o->capparams)
+        {
+            int n = o->capparams ? o->capparams * 2 : 8;
+            struct cparam *np = o->params ? HeapReAlloc(GetProcessHeap(), 0, o->params, n * sizeof(*np))
+                                          : HeapAlloc(GetProcessHeap(), 0, n * sizeof(*np));
+            if (!np) { comp_unlock(); if (ref) IUnknown_Release(ref); return E_OUTOFMEMORY; }
+            o->params = np; o->capparams = n;
+        }
+        p = &o->params[o->nparams];
+        if (!(p->name = HeapAlloc(GetProcessHeap(), 0, (len + 1) * sizeof(WCHAR))))
+        {
+            comp_unlock(); if (ref) IUnknown_Release(ref); return E_OUTOFMEMORY;
+        }
+        memcpy(p->name, name, len * sizeof(WCHAR));
+        p->name[len] = 0;
+        o->nparams++;
+    }
+    p->type = type;
+    memset(&p->v, 0, sizeof(p->v));
+    if (val) memcpy(&p->v, val, size);
+    p->ref = ref;
+    comp_unlock();
+    if (old) IUnknown_Release(old);
+    return S_OK;
+}
+
+/* TRUE and *copy filled when the entry exists with this type; *status tells the rest */
+static GetValueStatus param_get(struct cobj *o, HSTRING key, enum ptype type, void *out, size_t size)
+{
+    const WCHAR *name;
+    UINT32 len;
+    GetValueStatus st;
+    int k;
+
+    name = hs_raw(key, &len);
+    comp_lock();
+    if ((k = param_find(o, name, len)) < 0) st = GVS_NOTFOUND;
+    else if (o->params[k].type != type) st = GVS_MISMATCH;
+    else { memcpy(out, &o->params[k].v, size); st = GVS_SUCCEEDED; }
+    comp_unlock();
+    return st;
+}
+
+static HRESULT STDMETHODCALLTYPE ani_ClearAllParameters(WICompositionAnimation *i)
+{
+    struct cobj *o = OBJ_OF(i, anim);
+    struct cparam *p;
+    int k, n;
+
+    comp_lock();
+    p = o->params; n = o->nparams;
+    o->params = NULL; o->nparams = o->capparams = 0;
+    comp_unlock();
+    for (k = 0; k < n; k++)
+    {
+        HeapFree(GetProcessHeap(), 0, p[k].name);
+        if (p[k].ref) IUnknown_Release(p[k].ref);
+    }
+    HeapFree(GetProcessHeap(), 0, p);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE ani_ClearParameter(WICompositionAnimation *i, HSTRING key)
+{
+    struct cobj *o = OBJ_OF(i, anim);
+    const WCHAR *name;
+    UINT32 len;
+    IUnknown *old = NULL;
+    int k;
+
+    name = hs_raw(key, &len);
+    comp_lock();
+    if ((k = param_find(o, name, len)) >= 0)
+    {
+        old = o->params[k].ref;
+        HeapFree(GetProcessHeap(), 0, o->params[k].name);
+        memmove(&o->params[k], &o->params[k + 1], (o->nparams - k - 1) * sizeof(*o->params));
+        o->nparams--;
+    }
+    comp_unlock();
+    if (old) IUnknown_Release(old);
+    return S_OK;
+}
+
+#define ANI_SET(N, T, PT) \
+static HRESULT STDMETHODCALLTYPE ani_Set##N##Parameter(WICompositionAnimation *i, HSTRING key, T value) \
+{ return param_put(OBJ_OF(i, anim), key, PT, &value, sizeof(value), NULL); }
+ANI_SET(Color, __x_ABI_CWindows_CUI_CColor, PT_COLOR)
+ANI_SET(Matrix3x2, Mat3x2, PT_M32)
+ANI_SET(Matrix4x4, Mat4, PT_M44)
+ANI_SET(Quaternion, Quat, PT_QUAT)
+ANI_SET(Scalar, FLOAT, PT_SCALAR)
+ANI_SET(Vector2, Vec2, PT_V2)
+ANI_SET(Vector3, Vec3, PT_V3)
+ANI_SET(Vector4, Vec4, PT_V4)
+
+static HRESULT STDMETHODCALLTYPE ani_SetReferenceParameter(WICompositionAnimation *i, HSTRING key, WICompositionObject *object)
+{
+    IUnknown *id = NULL;
+    HRESULT hr;
+
+    if (!object) return E_INVALIDARG;
+    if (FAILED(hr = IUnknown_QueryInterface((IUnknown *)object, &IID_IUnknown, (void **)&id))) return hr;
+    return param_put(OBJ_OF(i, anim), key, PT_REF, NULL, 0, id);
+}
+
+static const WICompositionAnimationVtbl anim_vtbl =
+{
+    INSP_HEAD(ani),
+    ani_ClearAllParameters, ani_ClearParameter, ani_SetColorParameter, ani_SetMatrix3x2Parameter,
+    ani_SetMatrix4x4Parameter, ani_SetQuaternionParameter, ani_SetReferenceParameter, ani_SetScalarParameter,
+    ani_SetVector2Parameter, ani_SetVector3Parameter, ani_SetVector4Parameter,
+};
+
+static HRESULT STDMETHODCALLTYPE an2_SetBooleanParameter(WICompositionAnimation2 *i, HSTRING key, BOOLEAN value)
+{
+    BOOLEAN b = value ? TRUE : FALSE;
+    return param_put(OBJ_OF(i, anim2), key, PT_BOOL, &b, sizeof(b), NULL);
+}
+
+static HRESULT hstring_get(struct cobj *o, HSTRING *field, HSTRING *out)
+{
+    HRESULT hr;
+
+    if (!out) return E_POINTER;
+    comp_lock();
+    hr = WindowsDuplicateString(*field, out);
+    comp_unlock();
+    return hr;
+}
+
+static HRESULT hstring_put(struct cobj *o, HSTRING *field, HSTRING value)
+{
+    HSTRING copy = NULL, old;
+    HRESULT hr;
+
+    if (FAILED(hr = WindowsDuplicateString(value, &copy))) return hr;
+    comp_lock(); old = *field; *field = copy; comp_unlock();
+    WindowsDeleteString(old);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE an2_get_Target(WICompositionAnimation2 *i, HSTRING *v)
+{ struct cobj *o = OBJ_OF(i, anim2); return hstring_get(o, &o->anim_target, v); }
+static HRESULT STDMETHODCALLTYPE an2_put_Target(WICompositionAnimation2 *i, HSTRING v)
+{ struct cobj *o = OBJ_OF(i, anim2); return hstring_put(o, &o->anim_target, v); }
+
+static const WICompositionAnimation2Vtbl anim2_vtbl = { INSP_HEAD(an2), an2_SetBooleanParameter, an2_get_Target, an2_put_Target };
+static const WICompositionAnimationBaseVtbl animbase_vtbl = { INSP_HEAD(anb) };
+
+static HRESULT STDMETHODCALLTYPE exp_get_Expression(WIExpressionAnimation *i, HSTRING *v)
+{ struct cobj *o = OBJ_OF(i, expr); return hstring_get(o, &o->expression, v); }
+static HRESULT STDMETHODCALLTYPE exp_put_Expression(WIExpressionAnimation *i, HSTRING v)
+{ struct cobj *o = OBJ_OF(i, expr); return hstring_put(o, &o->expression, v); }
+
+static const WIExpressionAnimationVtbl expr_vtbl = { INSP_HEAD(exp), exp_get_Expression, exp_put_Expression };
+
+HRESULT comp_new_expression_animation(IUnknown *compositor, HSTRING expression, WIExpressionAnimation **out)
+{
+    struct cobj *o;
+    HRESULT hr;
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (FAILED(hr = comp_create(compositor, K_EXPRANIM, &o))) return hr;
+    if (expression && FAILED(hr = hstring_put(o, &o->expression, expression)))
+    {
+        id_Release(&o->identity);
+        return hr;
+    }
+    *out = &o->expr;                    /* the creation reference moves to the caller */
+    return S_OK;
+}
+
+#define PS_INSERT(N, T, PT) \
+static HRESULT STDMETHODCALLTYPE pst_Insert##N(WICompositionPropertySet *i, HSTRING name, T value) \
+{ return param_put(OBJ_OF(i, propset), name, PT, &value, sizeof(value), NULL); }
+#define PS_TRYGET(N, T, PT) \
+static HRESULT STDMETHODCALLTYPE pst_TryGet##N(WICompositionPropertySet *i, HSTRING name, T *value, GetValueStatus *result) \
+{ \
+    T tmp; \
+    if (!value || !result) return E_POINTER; \
+    if ((*result = param_get(OBJ_OF(i, propset), name, PT, &tmp, sizeof(tmp))) == GVS_SUCCEEDED) *value = tmp; \
+    return S_OK; \
+}
+#define PS_BOTH(N, T, PT) PS_INSERT(N, T, PT) PS_TRYGET(N, T, PT)
+PS_BOTH(Color, __x_ABI_CWindows_CUI_CColor, PT_COLOR)
+PS_BOTH(Matrix3x2, Mat3x2, PT_M32)
+PS_BOTH(Matrix4x4, Mat4, PT_M44)
+PS_BOTH(Quaternion, Quat, PT_QUAT)
+PS_BOTH(Scalar, FLOAT, PT_SCALAR)
+PS_BOTH(Vector2, Vec2, PT_V2)
+PS_BOTH(Vector3, Vec3, PT_V3)
+PS_BOTH(Vector4, Vec4, PT_V4)
+
+static const WICompositionPropertySetVtbl propset_vtbl =
+{
+    INSP_HEAD(pst),
+    pst_InsertColor, pst_InsertMatrix3x2, pst_InsertMatrix4x4, pst_InsertQuaternion, pst_InsertScalar,
+    pst_InsertVector2, pst_InsertVector3, pst_InsertVector4,
+    pst_TryGetColor, pst_TryGetMatrix3x2, pst_TryGetMatrix4x4, pst_TryGetQuaternion, pst_TryGetScalar,
+    pst_TryGetVector2, pst_TryGetVector3, pst_TryGetVector4,
+};
+
+/* ---- InteractionTracker and its InteractionSources collection (Windows.UI.Composition.Interactions) ----
+ * Stored state only: no input reaches the tracker, nothing moves it, the owner callbacks are never raised, inertia
+ * and the Configure, TryUpdate and Adjust members are not implemented (FIXME, E_NOTIMPL). The documented defaults:
+ * Position 0, Scale 1, MinScale and MaxScale 1. Unmeasured (VERIFY ON ORACLE): MinPosition/MaxPosition defaults (0 is
+ * used: the docs say Position stays 0 while they are not set), the PositionInertiaDecayRate/ScaleInertiaDecayRate
+ * defaults (NULL is used), whether Position is clamped when the bounds change, Add of a source that is already in the
+ * collection (ignored), Remove of a non-member (S_OK), a NULL compositor or source (E_INVALIDARG), a NULL owner (allowed). */
+
+#define COMMA ,
+#define TRK(i) OBJ_OF(i, tracker)
+#define TGETPUT(N, T, F) \
+static HRESULT STDMETHODCALLTYPE trk_get_##N(WIInteractionTracker *i, T *v) \
+{ struct cobj *o = TRK(i); if (!v) return E_POINTER; comp_lock(); *v = o->F; comp_unlock(); return S_OK; } \
+static HRESULT STDMETHODCALLTYPE trk_put_##N(WIInteractionTracker *i, T v) \
+{ struct cobj *o = TRK(i); comp_lock(); o->F = v; comp_unlock(); return S_OK; }
+TGETPUT(MaxPosition, Vec3, tmax)
+TGETPUT(MinPosition, Vec3, tmin)
+TGETPUT(MaxScale, FLOAT, tmaxscale)
+TGETPUT(MinScale, FLOAT, tminscale)
+
+static HRESULT STDMETHODCALLTYPE trk_get_InteractionSources(WIInteractionTracker *i, WICompositionInteractionSourceCollection **v)
+{
+    struct cobj *o = TRK(i);
+
+    if (!v) return E_POINTER;
+    id_AddRef(&o->srcs->identity);      /* set at creation, never changes */
+    *v = &o->srcs->srccoll;
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE trk_get_IsPositionRoundingSuggested(WIInteractionTracker *i, BOOLEAN *v)
+{ if (!v) return E_POINTER; *v = FALSE; return S_OK; }
+
+static HRESULT STDMETHODCALLTYPE trk_get_NaturalRestingPosition(WIInteractionTracker *i, Vec3 *v)
+{ struct cobj *o = TRK(i); if (!v) return E_POINTER; comp_lock(); *v = o->tpos; comp_unlock(); return S_OK; }
+static HRESULT STDMETHODCALLTYPE trk_get_NaturalRestingScale(WIInteractionTracker *i, FLOAT *v)
+{ struct cobj *o = TRK(i); if (!v) return E_POINTER; comp_lock(); *v = o->tscale; comp_unlock(); return S_OK; }
+static HRESULT STDMETHODCALLTYPE trk_get_Position(WIInteractionTracker *i, Vec3 *v)
+{ struct cobj *o = TRK(i); if (!v) return E_POINTER; comp_lock(); *v = o->tpos; comp_unlock(); return S_OK; }
+static HRESULT STDMETHODCALLTYPE trk_get_Scale(WIInteractionTracker *i, FLOAT *v)
+{ struct cobj *o = TRK(i); if (!v) return E_POINTER; comp_lock(); *v = o->tscale; comp_unlock(); return S_OK; }
+static HRESULT STDMETHODCALLTYPE trk_get_PositionVelocityInPixelsPerSecond(WIInteractionTracker *i, Vec3 *v)
+{ if (!v) return E_POINTER; v->X = v->Y = v->Z = 0.0f; return S_OK; }
+static HRESULT STDMETHODCALLTYPE trk_get_ScaleVelocityInPercentPerSecond(WIInteractionTracker *i, FLOAT *v)
+{ if (!v) return E_POINTER; *v = 0.0f; return S_OK; }
+
+static HRESULT STDMETHODCALLTYPE trk_get_Owner(WIInteractionTracker *i, void **v)
+{
+    struct cobj *o = TRK(i);
+
+    if (!v) return E_POINTER;
+    comp_lock();
+    *v = o->towner;
+    if (o->towner) IUnknown_AddRef(o->towner);
+    comp_unlock();
+    return S_OK;
+}
+
+static HRESULT ref_get(struct cobj *o, IUnknown **field, void **out)
+{
+    if (!out) return E_POINTER;
+    comp_lock();
+    *out = *field;
+    if (*field) IUnknown_AddRef(*field);
+    comp_unlock();
+    return S_OK;
+}
+
+static HRESULT ref_put(struct cobj *o, IUnknown **field, void *value)
+{
+    IUnknown *old;
+
+    if (value) IUnknown_AddRef((IUnknown *)value);
+    comp_lock(); old = *field; *field = value; comp_unlock();
+    if (old) IUnknown_Release(old);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE trk_get_PositionInertiaDecayRate(WIInteractionTracker *i, void **v)
+{ struct cobj *o = TRK(i); return ref_get(o, &o->pdecay, v); }
+static HRESULT STDMETHODCALLTYPE trk_put_PositionInertiaDecayRate(WIInteractionTracker *i, void *v)
+{ struct cobj *o = TRK(i); return ref_put(o, &o->pdecay, v); }
+static HRESULT STDMETHODCALLTYPE trk_get_ScaleInertiaDecayRate(WIInteractionTracker *i, void **v)
+{ struct cobj *o = TRK(i); return ref_get(o, &o->sdecay, v); }
+static HRESULT STDMETHODCALLTYPE trk_put_ScaleInertiaDecayRate(WIInteractionTracker *i, void *v)
+{ struct cobj *o = TRK(i); return ref_put(o, &o->sdecay, v); }
+
+#define TRK_NOTIMPL(N, PARAMS) \
+static HRESULT STDMETHODCALLTYPE trk_##N(WIInteractionTracker *i PARAMS) \
+{ FIXME("InteractionTracker::" #N ": not implemented\n"); return E_NOTIMPL; }
+#define TRK_TRYUPDATE(N, PARAMS) \
+static HRESULT STDMETHODCALLTYPE trk_##N(WIInteractionTracker *i PARAMS, INT32 *result) \
+{ FIXME("InteractionTracker::" #N ": not implemented\n"); if (result) *result = 0; return E_NOTIMPL; }
+TRK_NOTIMPL(AdjustPositionXIfGreaterThanThreshold,  COMMA  FLOAT a  COMMA  FLOAT t)
+TRK_NOTIMPL(AdjustPositionYIfGreaterThanThreshold,  COMMA  FLOAT a  COMMA  FLOAT t)
+TRK_NOTIMPL(ConfigurePositionXInertiaModifiers,  COMMA  void *m)
+TRK_NOTIMPL(ConfigurePositionYInertiaModifiers,  COMMA  void *m)
+TRK_NOTIMPL(ConfigureScaleInertiaModifiers,  COMMA  void *m)
+TRK_TRYUPDATE(TryUpdatePosition,  COMMA  Vec3 v)
+TRK_TRYUPDATE(TryUpdatePositionBy,  COMMA  Vec3 v)
+TRK_TRYUPDATE(TryUpdatePositionWithAnimation,  COMMA  WICompositionAnimation *a)
+TRK_TRYUPDATE(TryUpdatePositionWithAdditionalVelocity,  COMMA  Vec3 v)
+TRK_TRYUPDATE(TryUpdateScale,  COMMA  FLOAT v  COMMA  Vec3 c)
+TRK_TRYUPDATE(TryUpdateScaleWithAnimation,  COMMA  WICompositionAnimation *a  COMMA  Vec3 c)
+TRK_TRYUPDATE(TryUpdateScaleWithAdditionalVelocity,  COMMA  FLOAT v  COMMA  Vec3 c)
+
+static const WIInteractionTrackerVtbl tracker_vtbl =
+{
+    INSP_HEAD(trk),
+    trk_get_InteractionSources, trk_get_IsPositionRoundingSuggested,
+    trk_get_MaxPosition, trk_put_MaxPosition, trk_get_MaxScale, trk_put_MaxScale,
+    trk_get_MinPosition, trk_put_MinPosition, trk_get_MinScale, trk_put_MinScale,
+    trk_get_NaturalRestingPosition, trk_get_NaturalRestingScale, trk_get_Owner, trk_get_Position,
+    trk_get_PositionInertiaDecayRate, trk_put_PositionInertiaDecayRate, trk_get_PositionVelocityInPixelsPerSecond,
+    trk_get_Scale, trk_get_ScaleInertiaDecayRate, trk_put_ScaleInertiaDecayRate, trk_get_ScaleVelocityInPercentPerSecond,
+    trk_AdjustPositionXIfGreaterThanThreshold, trk_AdjustPositionYIfGreaterThanThreshold,
+    trk_ConfigurePositionXInertiaModifiers, trk_ConfigurePositionYInertiaModifiers, trk_ConfigureScaleInertiaModifiers,
+    trk_TryUpdatePosition, trk_TryUpdatePositionBy, trk_TryUpdatePositionWithAnimation,
+    trk_TryUpdatePositionWithAdditionalVelocity, trk_TryUpdateScale, trk_TryUpdateScaleWithAnimation,
+    trk_TryUpdateScaleWithAdditionalVelocity,
+};
+
+#define SRC(i) OBJ_OF(i, srccoll)
+
+static HRESULT STDMETHODCALLTYPE isc_get_Count(WICompositionInteractionSourceCollection *i, INT32 *v)
+{ struct cobj *o = SRC(i); if (!v) return E_POINTER; comp_lock(); *v = o->nsources; comp_unlock(); return S_OK; }
+
+static HRESULT STDMETHODCALLTYPE isc_Add(WICompositionInteractionSourceCollection *i, WICompositionInteractionSource *value)
+{
+    struct cobj *o = SRC(i);
+    IUnknown *id = NULL;
+    HRESULT hr;
+    int k;
+
+    if (!value) return E_INVALIDARG;
+    if (FAILED(hr = IUnknown_QueryInterface((IUnknown *)value, &IID_IUnknown, (void **)&id))) return hr;
+    comp_lock();
+    for (k = 0; k < o->nsources; k++)
+        if (o->sources[k] == id)
+        {
+            comp_unlock();
+            IUnknown_Release(id);
+            return S_OK;
+        }
+    if (o->nsources == o->capsources)
+    {
+        int n = o->capsources ? o->capsources * 2 : 4;
+        IUnknown **p = o->sources ? HeapReAlloc(GetProcessHeap(), 0, o->sources, n * sizeof(*p))
+                                  : HeapAlloc(GetProcessHeap(), 0, n * sizeof(*p));
+        if (!p) { comp_unlock(); IUnknown_Release(id); return E_OUTOFMEMORY; }
+        o->sources = p; o->capsources = n;
+    }
+    o->sources[o->nsources++] = id;
+    comp_unlock();
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE isc_Remove(WICompositionInteractionSourceCollection *i, WICompositionInteractionSource *value)
+{
+    struct cobj *o = SRC(i);
+    IUnknown *id = NULL, *old = NULL;
+    HRESULT hr;
+    int k;
+
+    if (!value) return E_INVALIDARG;
+    if (FAILED(hr = IUnknown_QueryInterface((IUnknown *)value, &IID_IUnknown, (void **)&id))) return hr;
+    comp_lock();
+    for (k = 0; k < o->nsources; k++)
+        if (o->sources[k] == id)
+        {
+            old = o->sources[k];
+            memmove(&o->sources[k], &o->sources[k + 1], (o->nsources - k - 1) * sizeof(*o->sources));
+            o->nsources--;
+            break;
+        }
+    comp_unlock();
+    IUnknown_Release(id);
+    if (old) IUnknown_Release(old);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE isc_RemoveAll(WICompositionInteractionSourceCollection *i)
+{
+    struct cobj *o = SRC(i);
+    IUnknown **p;
+    int k, n;
+
+    comp_lock();
+    p = o->sources; n = o->nsources;
+    o->sources = NULL; o->nsources = o->capsources = 0;
+    comp_unlock();
+    for (k = 0; k < n; k++) IUnknown_Release(p[k]);
+    HeapFree(GetProcessHeap(), 0, p);
+    return S_OK;
+}
+
+static const WICompositionInteractionSourceCollectionVtbl srccoll_vtbl =
+    { INSP_HEAD(isc), isc_get_Count, isc_Add, isc_Remove, isc_RemoveAll };
+
+HRESULT comp_new_interaction_tracker(WICompositor *compositor, void *owner, WIInteractionTracker **out)
+{
+    struct cobj *o, *coll;
+    IUnknown *cid = NULL;
+    HRESULT hr;
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!compositor) return E_INVALIDARG;
+    if (FAILED(hr = IUnknown_QueryInterface((IUnknown *)compositor, &IID_IUnknown, (void **)&cid))) return hr;
+    hr = comp_create(cid, K_TRACKER, &o);
+    if (SUCCEEDED(hr) && FAILED(hr = comp_create(cid, K_ISRCCOLL, &coll))) id_Release(&o->identity);
+    IUnknown_Release(cid);
+    if (FAILED(hr)) return hr;
+    o->srcs = coll;
+    if (owner) { IUnknown_AddRef((IUnknown *)owner); o->towner = owner; }
+    *out = &o->tracker;                 /* the creation reference moves to the caller */
+    return S_OK;
+}
+
 HRESULT comp_create(IUnknown *compositor, enum cobj_kind kind, struct cobj **out)
 {
     struct cobj *o = comp_alloc_obj(kind, compositor);
@@ -1537,12 +2138,21 @@ HRESULT comp_create(IUnknown *compositor, enum cobj_kind kind, struct cobj **out
     o->visrc2.lpVtbl = &visrc2_vtbl;
     o->visrc3.lpVtbl = &visrc3_vtbl;
     o->intsrc.lpVtbl = &intsrc_vtbl;
+    o->anim.lpVtbl = &anim_vtbl;
+    o->anim2.lpVtbl = &anim2_vtbl;
+    o->animbase.lpVtbl = &animbase_vtbl;
+    o->expr.lpVtbl = &expr_vtbl;
+    o->propset.lpVtbl = &propset_vtbl;
+    o->tracker.lpVtbl = &tracker_vtbl;
+    o->srccoll.lpVtbl = &srccoll_vtbl;
     o->dsinterop.lpVtbl = &nitro_dsinterop_vtbl;
     o->test.lpVtbl = &nitro_test_vtbl_impl;
     o->closable.lpVtbl = &closable_vtbl;
     o->agile.lpVtbl = &agile_vtbl;
     if (kind == K_NINEGRID)
         o->ng_scale[0] = o->ng_scale[1] = o->ng_scale[2] = o->ng_scale[3] = 1.0f;
+    if (kind == K_TRACKER)
+        o->tscale = o->tminscale = o->tmaxscale = 1.0f;
     *out = o;
     return S_OK;
 }
