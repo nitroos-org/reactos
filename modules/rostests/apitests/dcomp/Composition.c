@@ -3305,6 +3305,7 @@ static void TestPresent(PRO_ACTIVATE pRoActivateInstance, PWCS pWindowsCreateStr
     Vec3 off3 = { 0 };
     COLORREF childpx;
     HRESULT hr;
+    int i;
 
     wc.lpfnWndProc = PresentWndProc;
     wc.hInstance = GetModuleHandleW(NULL);
@@ -3385,7 +3386,7 @@ static void TestPresent(PRO_ACTIVATE pRoActivateInstance, PWCS pWindowsCreateStr
     /* a second commit shows the new colour */
     h.invoked = 0;
     SetSpriteColor(sred, C(255, 255, 255, 0));
-    PumpFor(100);
+    for (i = 0; i < 40 && !h.invoked; i++) PumpFor(50);       /* the commit timer runs about one frame after the change */
     ok(h.invoked >= 1, "CommitNeeded raised %ld times after the second change\n", h.invoked);
     CHECK_WIN(hwnd, 40, 60, PX_RED, "changed, not committed yet");
     ctl->lpVtbl->Commit(ctl);
@@ -3671,22 +3672,15 @@ static void TestPresentAsync(PRO_ACTIVATE pRoActivateInstance, PWCS pWindowsCrea
         ok(st1[3] == st0[3] + 1, "a changed surface is read back once (%ld -> %ld)\n", st0[3], st1[3]);
         CHECK_WIN(hwnd, 120, 30, PX_GREEN, "surface redrawn: green");
 
-        /* a slow GPU: Commit returns at once, the old frame stays until the new one is ready, commits pile up into one */
-        t2i->lpVtbl->SetReadbackDelay(t2i, 700);
+        /* a slow GPU: Commit returns at once, the old frame stays until the new one is ready, commits pile up into one.
+         * The delay is long against what the rest of the block takes even on a loaded guest. */
+        t2i->lpVtbl->SetReadbackDelay(t2i, 4000);
         t2i->lpVtbl->GetStats(t2i, st0, 8);
-        for (i = 0; i < 6; i++)
-        {
-            DrawSurface(dsi, (i & 1) ? 1.0f : 0.0f, (i & 1) ? 0.0f : 1.0f, 1.0f);   /* magenta / cyan, ends on cyan->magenta */
-            q0 = Qpc();
-            ok(ctl->lpVtbl->Commit(ctl) == S_OK, "Commit\n");
-            q1 = Qpc();
-            if (QpcMs(q0, q1) < best) best = QpcMs(q0, q1);
-            if (QpcMs(q0, q1) > worst) worst = QpcMs(q0, q1);
-            Sleep(20);
-        }
-        trace("Commit with a slow surface: fastest %.2f ms, slowest %.2f ms\n", best, worst);
-        ok(best < 5.0, "Commit took %.2f ms at best with a slow surface\n", best);
-        ok(worst < 100.0, "Commit took %.2f ms at worst with a slow surface\n", worst);
+        DrawSurface(dsi, 0.0f, 1.0f, 1.0f);                                      /* cyan */
+        q0 = Qpc();
+        ok(ctl->lpVtbl->Commit(ctl) == S_OK, "Commit\n");
+        q1 = Qpc();
+        best = worst = QpcMs(q0, q1);
         CHECK_WIN(hwnd, 120, 30, PX_GREEN, "the old frame stays while the new one is read back");
         /* a hook does not wait for the render: a paint of the window while the render thread is busy */
         InvalidateRect(hwnd, NULL, TRUE);
@@ -3696,6 +3690,18 @@ static void TestPresentAsync(PRO_ACTIVATE pRoActivateInstance, PWCS pWindowsCrea
         trace("UpdateWindow while rendering: %.2f ms\n", QpcMs(q0, q1));
         ok(QpcMs(q0, q1) < 300.0, "a paint of the window waited %.2f ms for the render\n", QpcMs(q0, q1));
         CHECK_WIN(hwnd, 120, 30, PX_GREEN, "the last frame is blended again while the next one is read back");
+        for (i = 1; i < 6; i++)
+        {
+            DrawSurface(dsi, (i & 1) ? 1.0f : 0.0f, (i & 1) ? 0.0f : 1.0f, 1.0f);   /* magenta / cyan, ends on magenta */
+            q0 = Qpc();
+            ok(ctl->lpVtbl->Commit(ctl) == S_OK, "Commit\n");
+            q1 = Qpc();
+            if (QpcMs(q0, q1) < best) best = QpcMs(q0, q1);
+            if (QpcMs(q0, q1) > worst) worst = QpcMs(q0, q1);
+        }
+        trace("Commit with a slow surface: fastest %.2f ms, slowest %.2f ms\n", best, worst);
+        ok(best < 5.0, "Commit took %.2f ms at best with a slow surface\n", best);
+        ok(worst < 100.0, "Commit took %.2f ms at worst with a slow surface\n", worst);
         WaitPresent(root);
         t2i->lpVtbl->GetStats(t2i, st1, 8);
         ok(st1[1] > st0[1], "frames replaced before they were rendered %ld -> %ld\n", st0[1], st1[1]);
