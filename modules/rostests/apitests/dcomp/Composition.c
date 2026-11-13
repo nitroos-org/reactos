@@ -3282,6 +3282,8 @@ static LRESULT CALLBACK PresentWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
+static void WaitPresent(WIVisual *v);
+
 static void TestPresent(PRO_ACTIVATE pRoActivateInstance, PWCS pWindowsCreateString, PWDS pWindowsDeleteString)
 {
     const WCHAR name[] = L"Windows.UI.Composition.Core.CompositorController";
@@ -3361,6 +3363,7 @@ static void TestPresent(PRO_ACTIVATE pRoActivateInstance, PWCS pWindowsCreateStr
 
     hr = ctl->lpVtbl->Commit(ctl);
     ok(hr == S_OK, "Commit %#lx\n", hr);
+    WaitPresent(root);
     PumpFor(100);
     CHECK_WIN(hwnd, 40, 60, PX_RED, "commit: red sprite");
     CHECK_WIN(hwnd, 120, 30, PX_BLUE, "commit: blue surface");
@@ -3386,11 +3389,13 @@ static void TestPresent(PRO_ACTIVATE pRoActivateInstance, PWCS pWindowsCreateStr
     ok(h.invoked >= 1, "CommitNeeded raised %ld times after the second change\n", h.invoked);
     CHECK_WIN(hwnd, 40, 60, PX_RED, "changed, not committed yet");
     ctl->lpVtbl->Commit(ctl);
+    WaitPresent(root);
     PumpFor(100);
     CHECK_WIN(hwnd, 40, 60, PX_YELLOW, "second commit: yellow");
 
     /* resize: the relative sizes follow the client area */
     SetWindowPos(hwnd, NULL, 0, 0, 240, 120, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    WaitPresent(root);
     PumpFor(300);
     CHECK_WIN(hwnd, 130, 90, PX_GREEN, "resized: green sprite is a quarter of 240");
     CHECK_WIN(hwnd, 150, 90, PX_WHITE, "resized: right of the green sprite");
@@ -3401,11 +3406,13 @@ static void TestPresent(PRO_ACTIVATE pRoActivateInstance, PWCS pWindowsCreateStr
     off3.X = 0; off3.Y = 200;
     vred->lpVtbl->put_Offset(vred, off3);
     ctl->lpVtbl->Commit(ctl);
+    WaitPresent(root);
     PumpFor(300);
     CHECK_WIN(hwnd, 40, 60, PX_WHITE, "moved away: white again");
     off3.Y = 0;
     vred->lpVtbl->put_Offset(vred, off3);
     ctl->lpVtbl->Commit(ctl);
+    WaitPresent(root);
     PumpFor(100);
     CHECK_WIN(hwnd, 40, 60, PX_YELLOW, "moved back: yellow");
 
@@ -3415,6 +3422,7 @@ static void TestPresent(PRO_ACTIVATE pRoActivateInstance, PWCS pWindowsCreateStr
     Comp = saved;
     t2 = vmag ? NewTarget(ccomp, hwnd, TRUE, vmag) : NULL;
     ctl->lpVtbl->Commit(ctl);
+    WaitPresent(root);
     PumpFor(200);
     CHECK_WIN(hwnd, 65, 105, PX_MAGENTA, "topmost target over the child window");
     CHECK_WIN(hwnd, 40, 60, PX_YELLOW, "topmost target: the other target stays");
@@ -3438,6 +3446,8 @@ static void TestPresent(PRO_ACTIVATE pRoActivateInstance, PWCS pWindowsCreateStr
         scyan = NewSprite(0, 0, 50, 60, C(255, 0, 255, 255), &vcyan);
         t3 = vcyan ? NewTarget(Comp, hwnd2, FALSE, vcyan) : NULL;
         PumpFor(400);
+        if (vcyan) WaitPresent(vcyan);
+        PumpFor(50);
         CHECK_WIN(hwnd2, 20, 30, PX_CYAN, "plain Compositor: shown without Commit");
         CHECK_WIN(hwnd2, 80, 30, PX_WHITE, "plain Compositor: right of the sprite");
     }
@@ -3461,6 +3471,279 @@ out:
     if (d3d) ID3D11Device_Release(d3d);
     if (hwnd2) DestroyWindow(hwnd2);
     if (child) DestroyWindow(child);
+    DestroyWindow(hwnd);
+    UnregisterClassW(wc.lpszClassName, wc.hInstance);
+    PumpFor(50);
+}
+
+
+/*
+ * The presentation does not wait for the GPU: ICompositorController::Commit records the frame and returns, a render thread of
+ * dcomp reads back the surfaces that changed (never one that did not), draws and blends; a newer commit replaces a frame
+ * that was not rendered; a window hook only blends the last frame; a window that goes away under a pending frame is
+ * harmless. A slow GPU is simulated with INitroCompositionTest2::SetReadbackDelay.
+ */
+static INitroCompositionTest2 *Test2(WIVisual *v)
+{
+    INitroCompositionTest2 *t = NULL;
+
+    QI(v, &IID_INitroCompositionTest2, (void **)&t);
+    return t;
+}
+
+static void WaitPresent(WIVisual *v)
+{
+    INitroCompositionTest2 *t = Test2(v);
+
+    if (!t) { trace("no INitroCompositionTest2: not waiting\n"); return; }
+    ok(t->lpVtbl->WaitForPresent(t, 60000) == S_OK, "WaitForPresent\n");
+    REL(t);
+}
+
+static double QpcMs(LONGLONG a, LONGLONG b)
+{
+    LARGE_INTEGER f;
+
+    QueryPerformanceFrequency(&f);
+    return (double)(b - a) * 1000.0 / (double)f.QuadPart;
+}
+
+static LONGLONG Qpc(void)
+{
+    LARGE_INTEGER n;
+
+    QueryPerformanceCounter(&n);
+    return n.QuadPart;
+}
+
+/* a 80x60 drawing surface and a brush on it; dsi stays for redrawing */
+static WICompositionBrush *SurfaceBrush2(WICompositor *comp, ID3D11Device *d3d, INitroDrawingSurfaceInterop **dsi_out)
+{
+    WICompositorInterop *interop = NULL;
+    WICompositionGraphicsDevice *gdev = NULL;
+    WICompositionDrawingSurface *ds = NULL;
+    WICompositionSurface *surf = NULL;
+    WICompositionSurfaceBrush *sb = NULL;
+    WICompositionBrush *br = NULL;
+    __x_ABI_CWindows_CFoundation_CSize size;
+
+    *dsi_out = NULL;
+    if (FAILED(QI(comp, &IID_Interop, (void **)&interop))) return NULL;
+    ok(interop->lpVtbl->CreateGraphicsDevice(interop, (IUnknown *)d3d, &gdev) == S_OK, "CreateGraphicsDevice\n");
+    size.Width = 80; size.Height = 60;
+    if (gdev)
+        gdev->lpVtbl->CreateDrawingSurface(gdev, size, DirectXPixelFormat_B8G8R8A8UIntNormalized,
+                                           DirectXAlphaMode_Premultiplied, &ds);
+    if (ds) QI(ds, &IID_INitroDrawingSurfaceInterop, (void **)dsi_out);
+    if (ds && SUCCEEDED(QI(ds, &IID_Surface, (void **)&surf)))
+    {
+        comp->lpVtbl->CreateSurfaceBrushWithSurface(comp, surf, &sb);
+        if (sb)
+        {
+            sb->lpVtbl->put_Stretch(sb, CompositionStretch_Fill);
+            QI(sb, &IID_Brush, (void **)&br);
+            REL(sb);
+        }
+        REL(surf);
+    }
+    if (ds) REL(ds);
+    if (gdev) REL(gdev);
+    REL(interop);
+    return br;
+}
+
+static void DrawSurface(INitroDrawingSurfaceInterop *dsi, float r, float g, float b)
+{
+    ID2D1DeviceContext *dc = NULL;
+    D2D1_COLOR_F clear;
+    POINT off;
+    HRESULT hr = dsi->lpVtbl->BeginDraw(dsi, NULL, &IID_ID2D1DeviceContext, (void **)&dc, &off);
+
+    ok(hr == S_OK && dc, "BeginDraw %#lx\n", hr);
+    if (!dc) return;
+    clear.r = r; clear.g = g; clear.b = b; clear.a = 1;
+    ID2D1DeviceContext_Clear(dc, &clear);
+    ok(dsi->lpVtbl->EndDraw(dsi) == S_OK, "EndDraw\n");
+    REL(dc);
+}
+
+static void TestPresentAsync(PRO_ACTIVATE pRoActivateInstance, PWCS pWindowsCreateString, PWDS pWindowsDeleteString)
+{
+    const WCHAR name[] = L"Windows.UI.Composition.Core.CompositorController";
+    WNDCLASSW wc = { 0 };
+    HWND hwnd = NULL, hwnd2 = NULL;
+    IInspectable *obj = NULL;
+    ICtl *ctl = NULL;
+    WICompositor *ccomp = NULL, *saved = Comp;
+    IDesktopTarget *t = NULL, *t2 = NULL;
+    WIVisual *root = NULL, *vcol = NULL, *vsurf = NULL, *vroot2 = NULL;
+    WISpriteVisual *scol = NULL, *ssurf = NULL, *sroot2 = NULL;
+    WIVisualCollection *col = NULL;
+    WICompositionBrush *sbr = NULL;
+    INitroDrawingSurfaceInterop *dsi = NULL;
+    INitroCompositionTest2 *t2i = NULL;
+    ID3D11Device *d3d = NULL;
+    HSTRING cls = NULL;
+    LONG st0[8], st1[8];
+    LONGLONG q0, q1;
+    double best = 1e9, worst = 0;
+    HRESULT hr;
+    int i;
+    BOOL surf_ok;
+
+    wc.lpfnWndProc = PresentWndProc;
+    wc.hInstance = GetModuleHandleW(NULL);
+    wc.hbrBackground = GetStockObject(WHITE_BRUSH);
+    wc.lpszClassName = L"dcomp_present_async";
+    RegisterClassW(&wc);
+    hwnd = CreateWindowExW(WS_EX_TOPMOST, wc.lpszClassName, L"async", WS_POPUP | WS_VISIBLE, 40, 40, 160, 120,
+                           NULL, NULL, wc.hInstance, NULL);
+    ok(hwnd != NULL, "CreateWindowExW %lu\n", GetLastError());
+    if (!hwnd) return;
+    UpdateWindow(hwnd);
+    PumpFor(300);
+    if (!NearPx(WinPx(hwnd, 40, 60), PX_WHITE))
+    {
+        skip("the window's pixels cannot be read back here\n");
+        goto out;
+    }
+    hr = pWindowsCreateString(name, lstrlenW(name), &cls);
+    hr = pRoActivateInstance(cls, &obj);
+    pWindowsDeleteString(cls);
+    ok(hr == S_OK && obj, "activate CompositorController %#lx\n", hr);
+    if (!obj) goto out;
+    QI(obj, &IID_Ctl, (void **)&ctl);
+    if (!ctl || FAILED(ctl->lpVtbl->get_Compositor(ctl, &ccomp)) || !ccomp) { ok(0, "no controller Compositor\n"); goto out; }
+
+    Comp = ccomp;
+    root = NewContainer(0, 0, 0, 0);
+    SetRelSize(root, 1.0f, 1.0f);
+    col = Children(root);
+    scol = NewSprite(0, 60, 80, 60, C(255, 255, 0, 0), &vcol);               /* red, bottom left */
+    ssurf = NewSprite(80, 0, 80, 60, C(255, 0, 0, 255), &vsurf);              /* the surface, top right */
+    d3d = MakeDevice();
+    surf_ok = d3d && D2DUsable(d3d);
+    if (surf_ok && (sbr = SurfaceBrush2(ccomp, d3d, &dsi)) && dsi)
+    {
+        DrawSurface(dsi, 0, 0, 1);
+        if (ssurf) ssurf->lpVtbl->put_Brush(ssurf, sbr);
+    }
+    else
+    {
+        surf_ok = FALSE;
+        skip("Direct2D cannot draw here: no surface rows\n");
+    }
+    Comp = saved;
+    if (!col || !scol || !ssurf) goto out;
+    col->lpVtbl->InsertAtTop(col, vcol);
+    col->lpVtbl->InsertAtTop(col, vsurf);
+    t = NewTarget(ccomp, hwnd, FALSE, root);
+    if (!t) goto out;
+    t2i = Test2(root);
+    if (!t2i) { skip("no INitroCompositionTest2\n"); goto out; }
+
+    ok(ctl->lpVtbl->Commit(ctl) == S_OK, "Commit\n");
+    WaitPresent(root);
+    CHECK_WIN(hwnd, 40, 90, PX_RED, "first frame: red");
+    if (surf_ok) CHECK_WIN(hwnd, 120, 30, PX_BLUE, "first frame: surface blue");
+
+    /* a commit that changes nothing is not rendered again, and a surface that did not change is not read back */
+    t2i->lpVtbl->GetStats(t2i, st0, 8);
+    ctl->lpVtbl->Commit(ctl);
+    WaitPresent(root);
+    t2i->lpVtbl->GetStats(t2i, st1, 8);
+    ok(st1[0] == st0[0] && st1[3] == st0[3], "an identical commit rendered again (frames %ld -> %ld, read-backs %ld -> %ld)\n",
+       st0[0], st1[0], st0[3], st1[3]);
+    ok(st1[2] > st0[2], "identical commits %ld -> %ld\n", st0[2], st1[2]);
+    SetSpriteColor(scol, C(255, 255, 255, 0));
+    ctl->lpVtbl->Commit(ctl);
+    WaitPresent(root);
+    t2i->lpVtbl->GetStats(t2i, st1, 8);
+    ok(st1[0] == st0[0] + 1, "frames %ld -> %ld\n", st0[0], st1[0]);
+    ok(st1[3] == st0[3], "a surface that did not change was read back (%ld -> %ld)\n", st0[3], st1[3]);
+    CHECK_WIN(hwnd, 40, 90, PX_YELLOW, "colour change shown");
+    if (surf_ok)
+    {
+        DrawSurface(dsi, 0, 1, 0);
+        ctl->lpVtbl->Commit(ctl);
+        WaitPresent(root);
+        t2i->lpVtbl->GetStats(t2i, st1, 8);
+        ok(st1[3] == st0[3] + 1, "a changed surface is read back once (%ld -> %ld)\n", st0[3], st1[3]);
+        CHECK_WIN(hwnd, 120, 30, PX_GREEN, "surface redrawn: green");
+
+        /* a slow GPU: Commit returns at once, the old frame stays until the new one is ready, commits pile up into one */
+        t2i->lpVtbl->SetReadbackDelay(t2i, 700);
+        t2i->lpVtbl->GetStats(t2i, st0, 8);
+        for (i = 0; i < 6; i++)
+        {
+            DrawSurface(dsi, (i & 1) ? 1.0f : 0.0f, (i & 1) ? 0.0f : 1.0f, 1.0f);   /* magenta / cyan, ends on cyan->magenta */
+            q0 = Qpc();
+            ok(ctl->lpVtbl->Commit(ctl) == S_OK, "Commit\n");
+            q1 = Qpc();
+            if (QpcMs(q0, q1) < best) best = QpcMs(q0, q1);
+            if (QpcMs(q0, q1) > worst) worst = QpcMs(q0, q1);
+            Sleep(20);
+        }
+        trace("Commit with a slow surface: fastest %.2f ms, slowest %.2f ms\n", best, worst);
+        ok(best < 5.0, "Commit took %.2f ms at best with a slow surface\n", best);
+        ok(worst < 100.0, "Commit took %.2f ms at worst with a slow surface\n", worst);
+        CHECK_WIN(hwnd, 120, 30, PX_GREEN, "the old frame stays while the new one is read back");
+        /* a hook does not wait for the render: a paint of the window while the render thread is busy */
+        InvalidateRect(hwnd, NULL, TRUE);
+        q0 = Qpc();
+        UpdateWindow(hwnd);
+        q1 = Qpc();
+        trace("UpdateWindow while rendering: %.2f ms\n", QpcMs(q0, q1));
+        ok(QpcMs(q0, q1) < 300.0, "a paint of the window waited %.2f ms for the render\n", QpcMs(q0, q1));
+        CHECK_WIN(hwnd, 120, 30, PX_GREEN, "the last frame is blended again while the next one is read back");
+        WaitPresent(root);
+        t2i->lpVtbl->GetStats(t2i, st1, 8);
+        ok(st1[1] > st0[1], "frames replaced before they were rendered %ld -> %ld\n", st0[1], st1[1]);
+        ok(st1[0] - st0[0] < 6, "%ld frames rendered for 6 commits\n", st1[0] - st0[0]);
+        CHECK_WIN(hwnd, 120, 30, PX_MAGENTA, "the newest commit is the one shown");
+        t2i->lpVtbl->SetReadbackDelay(t2i, 0);
+    }
+
+    /* a window that goes away under a frame that is being rendered */
+    hwnd2 = CreateWindowExW(WS_EX_TOPMOST, wc.lpszClassName, L"async2", WS_POPUP | WS_VISIBLE, 220, 40, 100, 60,
+                            NULL, NULL, wc.hInstance, NULL);
+    ok(hwnd2 != NULL, "CreateWindowExW %lu\n", GetLastError());
+    if (hwnd2)
+    {
+        Comp = ccomp;
+        sroot2 = NewSprite(0, 0, 50, 60, C(255, 0, 255, 255), &vroot2);
+        if (surf_ok && sbr) sroot2->lpVtbl->put_Brush(sroot2, sbr);
+        Comp = saved;
+        t2 = vroot2 ? NewTarget(ccomp, hwnd2, FALSE, vroot2) : NULL;
+        if (surf_ok) { t2i->lpVtbl->SetReadbackDelay(t2i, 400); DrawSurface(dsi, 1, 1, 0); }
+        ctl->lpVtbl->Commit(ctl);
+        DestroyWindow(hwnd2);
+        hwnd2 = NULL;
+        ok(ctl->lpVtbl->Commit(ctl) == S_OK, "Commit with a destroyed window\n");
+        hr = t2i->lpVtbl->WaitForPresent(t2i, 60000);
+        ok(hr == S_OK, "WaitForPresent after a window went away %#lx\n", hr);
+        t2i->lpVtbl->SetReadbackDelay(t2i, 0);
+        ok(ctl->lpVtbl->Commit(ctl) == S_OK, "Commit after\n");
+        WaitPresent(root);
+        CHECK_WIN(hwnd, 40, 90, PX_YELLOW, "the other target is unaffected");
+    }
+
+out:
+    if (t2i) { t2i->lpVtbl->SetReadbackDelay(t2i, 0); WaitPresent(root); REL(t2i); }
+    if (t2) REL(t2);
+    if (t) REL(t);
+    if (col) REL(col);
+    if (scol) { REL(scol); REL(vcol); }
+    if (ssurf) { REL(ssurf); REL(vsurf); }
+    if (sroot2) { REL(sroot2); REL(vroot2); }
+    if (dsi) REL(dsi);
+    if (sbr) REL(sbr);
+    if (root) REL(root);
+    if (ccomp) REL(ccomp);
+    if (ctl) REL(ctl);
+    if (obj) REL(obj);
+    if (d3d) ID3D11Device_Release(d3d);
+    if (hwnd2) DestroyWindow(hwnd2);
     DestroyWindow(hwnd);
     UnregisterClassW(wc.lpszClassName, wc.hInstance);
     PumpFor(50);
@@ -3514,6 +3797,7 @@ START_TEST(Composition)
         TestCreatePropertySet();
         TestGraphicsDeviceInterop();
         TestPresent(pRoActivateInstance, pWindowsCreateString, pWindowsDeleteString);
+        TestPresentAsync(pRoActivateInstance, pWindowsCreateString, pWindowsDeleteString);
         TestExpressionAnimation();
         TestInteractionTracker(pRoActivateInstance, pWindowsCreateString, pWindowsDeleteString);
         REL(Comp);

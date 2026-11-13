@@ -489,6 +489,7 @@ struct cobj
     INitroDrawingSurfaceInterop dsinterop;
     ICompGraphicsDeviceInterop gdinterop;
     INitroCompositionTest test;
+    INitroCompositionTest2 test2;
     WIClosable closable;
     IAgileObject agile;
 
@@ -547,18 +548,31 @@ struct cobj
     IUnknown *dc;                   /* ID2D1DeviceContext between BeginDraw and EndDraw */
     IUnknown *dcbitmap;             /* ID2D1Bitmap1 */
     BOOL drawing, suspended;
+    LONG ver;                       /* surface: content version, bumped (under comp_lock) by every change of the texture */
+    struct snapbuf *rbuf;           /* surface: the last read-back of the texture (CPU copy), referenced, under comp_lock */
+    LONG rbuf_ver;                  /* the version the snapshot was taken at (or later content) */
 
     /* DesktopWindowTarget (present.c) */
     HWND hwnd;                      /* the window it was created for; the tree is drawn into it on commit */
     BOOL topmost;                   /* IDesktopWindowTarget.IsTopmost */
     struct cobj *root;              /* CompositionTarget.Root, referenced */
-    struct cobj *tnext;             /* list of attached targets, under comp_lock */
+    /* everything below is under present_lock (present.c), not comp_lock: a window hook never waits for the object model */
+    struct cobj *tnext;             /* list of attached targets */
     BOOL attached;                  /* in that list */
-    BYTE *frame;                    /* last rendered frame, premultiplied BGRA, fw x fh, under comp_lock */
-    UINT fw, fh;
-    BOOL frame_used;                /* the frame has a pixel that is not transparent */
-    BOOL post_pending;              /* the blend after a WM_PAINT is queued */
+    struct fbuf *frame;             /* the last presented frame (immutable, referenced) */
+    struct frame_desc *pending;     /* the newest committed frame not rendered yet (a newer commit replaces it) */
+    BOOL need_resize;               /* the window changed size: the render thread lays the live tree out again */
+    BOOL have_sig;                  /* sig is the signature of the newest frame description of this target */
+    UINT64 sig;
+    DWORD post_tick;                /* the blend after a WM_PAINT is posted (tick count) and not seen yet; 0 = none */
     DWORD hook_tid;                 /* the window's thread carries our message hooks (window of this process) */
+    HBITMAP cdib;                   /* DIB section the blend reads from, kept between paints (re-made on a size change) */
+    void *cdib_bits;
+    UINT cdib_w, cdib_h;
+    BOOL cdib_busy;
+    struct cobj *dnext;             /* hooks hand their reference over to the render thread (deferred release) */
+    LONG drops;
+    LONG pseq;                      /* order of commits across targets */
 
     /* VisualInteractionSource (nothing is routed to it yet: no input redirection, no InteractionTracker) */
     struct cobj *isource;           /* VisualInteractionSource.Source, referenced */
@@ -594,8 +608,25 @@ void comp_lock(void);
 void comp_unlock(void);
 /* comp_unlock after changing o: the Compositor of o has something to commit */
 void comp_unlock_changed(struct cobj *o);
-/* caller holds comp_lock: render the tree under root into a cleared w x h premultiplied BGRA bitmap */
-void comp_render_locked(struct cobj *root, UINT w, UINT h, BYTE *bgra, UINT stride);
+/*
+ * A frame description is what a commit sends to the renderer: the visual tree below a root laid out for a w x h area,
+ * flattened to the sprites that draw something (matrix, size, opacity, clip stack, colour or surface and the
+ * brush parameters). It holds no pointer into the object model but a reference on each surface it shows, so it can be
+ * rendered with comp_lock released.
+ */
+struct frame_desc;
+/* caller holds comp_lock: describe the tree below root for a w x h area; NULL when out of memory */
+struct frame_desc *comp_frame_collect_locked(struct cobj *root, UINT w, UINT h);
+/* no lock: signature of a description, equal when two commits show the same thing */
+UINT64 comp_frame_sig(const struct frame_desc *f);
+void comp_frame_size(const struct frame_desc *f, UINT *w, UINT *h);
+/* no lock: the CPU copies of the surfaces the description needs; reads a surface back from the GPU only when it
+ * changed after its last read-back. Never called with a lock held. */
+void comp_frame_resolve(struct frame_desc *f);
+/* no lock: draw into a cleared w x h premultiplied BGRA bitmap (w and h of the description) */
+void comp_frame_raster(const struct frame_desc *f, BYTE *bgra, UINT stride);
+/* no lock: releases the surface references; may destroy objects */
+void comp_frame_free(struct frame_desc *f);
 struct cobj *comp_alloc_obj(enum cobj_kind kind, IUnknown *compositor);
 extern LONG comp_object_count;
 
@@ -604,14 +635,50 @@ HRESULT gfx_device_init(struct cobj *dev, IUnknown *device);
 void gfx_device_free(struct cobj *dev);
 HRESULT gfx_surface_create(struct cobj *dev, Vec2 size, int format, int alpha, struct cobj **out);
 void gfx_surface_free(struct cobj *s);
-HRESULT gfx_surface_snapshot(struct cobj *s, BYTE **pixels, UINT *w, UINT *h);
+/* A CPU copy of a surface's texture (premultiplied BGRA), immutable once made, shared by the cache and the frames. */
+struct snapbuf
+{
+    LONG refs;
+    UINT w, h;
+    BYTE px[1];                     /* w * h * 4 bytes */
+};
+void snapbuf_release(struct snapbuf *b);
+/* caller holds comp_lock: the cached copy when it shows at least version want of the surface (one reference), else NULL */
+struct snapbuf *gfx_surface_cached_locked(struct cobj *s, LONG want);
+/* The read-back of a surface in two steps so that several surfaces share one wait: begin queues the GPU copy and
+ * finish waits for it without holding any lock (polling a query, never blocking another thread's D3D calls for
+ * long), maps the staging texture and stores the result in the surface's cache. No lock may be held. */
+struct rb_job;
+struct rb_job *gfx_surface_readback_begin(struct cobj *s);
+HRESULT gfx_surface_readback_finish(struct rb_job *job);
+/* test hook (INitroCompositionTest): every read-back waits this many ms more, like a slow GPU */
+extern volatile LONG comp_test_readback_delay;
+/* counters for tests: [0] frames rendered, [1] frames replaced before they were rendered, [2] commits identical to the
+ * previous one (not rendered), [3] surface read-backs, [4] surface copies taken from the cache */
+extern LONG comp_stats[8];
 EXTERN_C const INitroDrawingSurfaceInteropVtbl nitro_dsinterop_vtbl;
 EXTERN_C const ICompGraphicsDeviceInteropVtbl gfx_device_interop_vtbl;
 
 /* present.c */
 void present_attach(struct cobj *target);
 void present_detach(struct cobj *target);
+void present_free(struct cobj *target);     /* last reference: the target's cached DIB */
 void comp_commit_targets(IUnknown *compositor);
+/* test hook: wait until every committed frame has been presented or dropped; S_OK or HRESULT_FROM_WIN32(WAIT_TIMEOUT) */
+HRESULT comp_wait_present(DWORD ms);
+
+/* a DLL-owned worker thread: started on demand, holds a reference on the DLL, retires itself when idle */
+struct comp_worker
+{
+    LPTHREAD_START_ROUTINE proc;
+    HANDLE event;
+    BOOL running, kicked;
+};
+/* wakes the worker (starting its thread if needed); FALSE when the thread cannot run. Publish the work first. */
+BOOL comp_worker_kick(struct comp_worker *w);
+/* worker side: wait up to ms for a kick. A wake clears the kick (look for work after it). A timeout with retire set
+ * and no kick since ends the thread (this call does not return then), so check for work again after a TRUE return. */
+void comp_worker_sleep(struct comp_worker *w, DWORD ms, BOOL retire);
 
 /* winrt.c: the Compositor (identity) has changes to commit; schedules CommitNeeded or the automatic commit */
 void comp_compositor_changed(IUnknown *compositor);
