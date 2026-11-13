@@ -2975,6 +2975,7 @@ static int ngc_set_size_impl(ngc_vol *v, ngc_node *n, unsigned long long newsize
 		 * step takes the file back to its old size.
 		 */
 		loff_t cur = old;
+		bool retried = false;
 		while (!err && cur < (loff_t)newsize) {
 			loff_t next = min_t(loff_t, newsize, cur + NGC_GROW_STEP);
 			loff_t ahead = ngc_prealloc_target(ni, cur, next);
@@ -2985,6 +2986,19 @@ static int ngc_set_size_impl(ngc_vol *v, ngc_node *n, unsigned long long newsize
 			if (!err && (u64)ni->allocated_size > round_up((u64)next, ni->vol->cluster_size))
 				NInoSetNgAhead(ni);
 			mutex_unlock(&ni->mrec_lock);
+			/*
+			 * Defence in depth for ngc_before_alloc_grow: the counters promised room (ngc_resv_ok), the allocator could
+			 * not find it (it leaves the clusters of uncommitted frees alone, and a free list that overflowed or a
+			 * fragmented rest of the volume can still hide the usable ones).  Commit once, as the old path did, and try
+			 * the step again; a failed step has taken the file back to its old size.  Once per growth.
+			 */
+			if (err == -ENOSPC && !retried && kshim_resv_state(v->bdev) != 0) {
+				retried = true;
+				ngos_prof(NGP_RESV_RETRY, ngos_ticks(), 0);
+				err = ngc_before_alloc(v);
+				if (!err)
+					continue;
+			}
 			if (!err)
 				cur = next;
 		}
