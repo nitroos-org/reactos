@@ -512,8 +512,8 @@ struct cobj
     struct cobj *collection;        /* ContainerVisual.Children: weak, the object lives as long as someone holds it */
     struct cobj *sbrush;            /* SpriteVisual.Brush, referenced */
     struct cobj *xparent;           /* IVisual2.ParentForTransform, referenced (not used for rendering yet) */
-    Vec3 reloffset;                 /* IVisual2.RelativeOffsetAdjustment (stored, not applied yet) */
-    Vec2 relsize;                   /* IVisual2.RelativeSizeAdjustment (stored, not applied yet) */
+    Vec3 reloffset;                 /* IVisual2.RelativeOffsetAdjustment (X and Y applied, times the parent's size) */
+    Vec2 relsize;                   /* IVisual2.RelativeSizeAdjustment (applied, times the parent's size) */
 
     /* VisualCollection */
     struct cobj *owner;             /* weak, cleared when the owner is destroyed */
@@ -545,10 +545,17 @@ struct cobj
     IUnknown *dcbitmap;             /* ID2D1Bitmap1 */
     BOOL drawing, suspended;
 
-    /* DesktopWindowTarget */
-    HWND hwnd;                      /* the window it was created for; nothing is presented to it yet */
+    /* DesktopWindowTarget (present.c) */
+    HWND hwnd;                      /* the window it was created for; the tree is drawn into it on commit */
     BOOL topmost;                   /* IDesktopWindowTarget.IsTopmost */
     struct cobj *root;              /* CompositionTarget.Root, referenced */
+    struct cobj *tnext;             /* list of attached targets, under comp_lock */
+    BOOL attached;                  /* in that list */
+    BYTE *frame;                    /* last rendered frame, premultiplied BGRA, fw x fh, under comp_lock */
+    UINT fw, fh;
+    BOOL frame_used;                /* the frame has a pixel that is not transparent */
+    BOOL post_pending;              /* the blend after a WM_PAINT is queued */
+    DWORD hook_tid;                 /* the window's thread carries our message hooks (window of this process) */
 
     /* VisualInteractionSource (nothing is routed to it yet: no input redirection, no InteractionTracker) */
     struct cobj *isource;           /* VisualInteractionSource.Source, referenced */
@@ -582,6 +589,10 @@ struct cobj
 
 void comp_lock(void);
 void comp_unlock(void);
+/* comp_unlock after changing o: the Compositor of o has something to commit */
+void comp_unlock_changed(struct cobj *o);
+/* caller holds comp_lock: render the tree under root into a cleared w x h premultiplied BGRA bitmap */
+void comp_render_locked(struct cobj *root, UINT w, UINT h, BYTE *bgra, UINT stride);
 struct cobj *comp_alloc_obj(enum cobj_kind kind, IUnknown *compositor);
 extern LONG comp_object_count;
 
@@ -592,6 +603,14 @@ HRESULT gfx_surface_create(struct cobj *dev, Vec2 size, int format, int alpha, s
 void gfx_surface_free(struct cobj *s);
 HRESULT gfx_surface_snapshot(struct cobj *s, BYTE **pixels, UINT *w, UINT *h);
 EXTERN_C const INitroDrawingSurfaceInteropVtbl nitro_dsinterop_vtbl;
+
+/* present.c */
+void present_attach(struct cobj *target);
+void present_detach(struct cobj *target);
+void comp_commit_targets(IUnknown *compositor);
+
+/* winrt.c: the Compositor (identity) has changes to commit; schedules CommitNeeded or the automatic commit */
+void comp_compositor_changed(IUnknown *compositor);
 
 /* winrt.c <-> composition.c */
 HRESULT comp_new_object(IUnknown *compositor, enum cobj_kind kind, REFIID want, void **out);
