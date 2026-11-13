@@ -155,13 +155,43 @@ struct khdr { size_t n; size_t magic; void *caller; size_t pad; };
 #define KMAGIC ((size_t)0x4e474b4dUL)
 #define KSITES 1024
 static struct { void *caller; long live; long long bytes; } ksites[KSITES];
+#ifndef __x86_64__
 static uintptr_t ksites_lock;
+#endif
 long kshim_alloc_live;
 long long kshim_alloc_bytes;
 /* Unused (cached) inodes over all volumes and what they cost, for the Verbose dump (kshim_dump_icache). */
 static long kshim_lru_total;
 static long long kshim_lru_bytes_total;
 static void kshim_dump_icache(void);
+#ifdef __x86_64__
+/*
+ * Every kmalloc and kfree passes here (dozens per file operation), so on
+ * 64-bit it takes no lock: a slot is claimed with a compare-exchange on its
+ * caller and the counters are atomic adds. A spin lock here cost a raise and
+ * a lower of the IRQL per call (two CR8 writes). The dump reads the table
+ * without a lock either way, so it sees the same kind of snapshot.
+ */
+static void ksite_account(void *caller, long d, long long bytes)
+{
+	unsigned int h = ((uintptr_t)caller >> 2) % KSITES;
+	for (unsigned int i = 0; i < KSITES; i++, h = (h + 1) % KSITES) {
+		void *c = __atomic_load_n(&ksites[h].caller, __ATOMIC_ACQUIRE);
+		if (!c) {
+			void *expected = NULL;
+			c = __atomic_compare_exchange_n(&ksites[h].caller, &expected, caller, 0,
+							__ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE) ? caller : expected;
+		}
+		if (c == caller) {
+			__atomic_add_fetch(&ksites[h].live, d, __ATOMIC_RELAXED);
+			__atomic_add_fetch(&ksites[h].bytes, bytes, __ATOMIC_RELAXED);
+			break;
+		}
+	}
+	__atomic_add_fetch(&kshim_alloc_live, d, __ATOMIC_RELAXED);
+	__atomic_add_fetch(&kshim_alloc_bytes, bytes, __ATOMIC_RELAXED);
+}
+#else
 static void ksite_account(void *caller, long d, long long bytes)
 {
 	unsigned int h = ((uintptr_t)caller >> 2) % KSITES;
@@ -178,6 +208,7 @@ static void ksite_account(void *caller, long d, long long bytes)
 	kshim_alloc_bytes += bytes;
 	ngos_spin_unlock(&ksites_lock, irql);
 }
+#endif
 void kshim_dump_allocs(void)
 {
 	int top[12], nt = 0;
