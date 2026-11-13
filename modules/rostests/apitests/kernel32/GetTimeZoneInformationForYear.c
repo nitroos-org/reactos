@@ -442,6 +442,70 @@ static void TestCurrentZone(void)
     }
 }
 
+/* The zones that carry IANA-derived "Dynamic DST" years: 2025-2027 as generated from the tz database (see TestIrregularZones) */
+typedef struct _IRREGULAR_YEAR
+{
+    PCWSTR Key;
+    USHORT Year;
+    LONG Bias, DaylightBias;
+    WORD StdMonth, StdDay, StdWeek, StdHour;  /* wMonth, wDayOfWeek, wDay, wHour; month 0: no transition */
+    WORD DltMonth, DltDay, DltWeek, DltHour;
+} IRREGULAR_YEAR;
+
+static const IRREGULAR_YEAR g_Irregular[] =
+{
+    /* British Columbia, Alberta and Manitoba: the last year of daylight saving time is 2025; from November 2026 the zones stay on the summer offset */
+    { L"British Columbia Standard Time", 2025, 480, -60, 11, 0, 1, 2, 3, 0, 2, 2 },
+    { L"British Columbia Standard Time", 2026, 420, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+    { L"British Columbia Standard Time", 2027, 420, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+    { L"Alberta Standard Time", 2025, 420, -60, 11, 0, 1, 2, 3, 0, 2, 2 },
+    { L"Alberta Standard Time", 2026, 360, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+    { L"Alberta Standard Time", 2027, 360, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+    { L"Manitoba Standard Time", 2025, 360, -60, 11, 0, 1, 2, 3, 0, 2, 2 },
+    { L"Manitoba Standard Time", 2026, 300, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+    { L"Manitoba Standard Time", 2027, 300, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+    /* Paraguay: permanent -03 since October 2024 */
+    { L"Paraguay Standard Time", 2025, 180, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+    { L"Paraguay Standard Time", 2026, 180, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+    { L"Paraguay Standard Time", 2027, 180, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+    /* Morocco: +01 with the Ramadan break (standard time is +00); the last two changes of 2026 are modelled, from 2027 it stays +00 */
+    { L"Morocco Standard Time", 2025, 0, -60, 2, 0, 5, 3, 4, 0, 1, 2 },
+    { L"Morocco Standard Time", 2026, 0, -60, 9, 0, 3, 2, 3, 0, 4, 2 },
+    { L"Morocco Standard Time", 2027, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+};
+
+static void TestIrregularZones(void)
+{
+    ULONG i;
+
+    for (i = 0; i < ARRAYSIZE(g_Irregular); i++)
+    {
+        const IRREGULAR_YEAR *Y = &g_Irregular[i];
+        DYNAMIC_TIME_ZONE_INFORMATION Dynamic;
+        TIME_ZONE_INFORMATION Info;
+        BOOL Ret;
+
+        ZeroMemory(&Dynamic, sizeof(Dynamic));
+        StringCchCopyW(Dynamic.TimeZoneKeyName, ARRAYSIZE(Dynamic.TimeZoneKeyName), Y->Key);
+        Ret = pGetTimeZoneInformationForYear(Y->Year, &Dynamic, &Info);
+        ok(Ret, "%ls %u: failed %lu\n", Y->Key, Y->Year, GetLastError());
+        if (!Ret)
+            continue;
+        ok(Info.Bias == Y->Bias, "%ls %u: bias %ld, expected %ld\n", Y->Key, Y->Year, Info.Bias, Y->Bias);
+        ok(Info.StandardBias == 0, "%ls %u: standard bias %ld\n", Y->Key, Y->Year, Info.StandardBias);
+        ok(Info.DaylightBias == Y->DaylightBias, "%ls %u: daylight bias %ld, expected %ld\n",
+           Y->Key, Y->Year, Info.DaylightBias, Y->DaylightBias);
+        ok(Info.StandardDate.wMonth == Y->StdMonth && Info.StandardDate.wDayOfWeek == Y->StdDay &&
+           Info.StandardDate.wDay == Y->StdWeek && Info.StandardDate.wHour == Y->StdHour,
+           "%ls %u: standard date %u-%u-%u %u\n", Y->Key, Y->Year, Info.StandardDate.wMonth,
+           Info.StandardDate.wDayOfWeek, Info.StandardDate.wDay, Info.StandardDate.wHour);
+        ok(Info.DaylightDate.wMonth == Y->DltMonth && Info.DaylightDate.wDayOfWeek == Y->DltDay &&
+           Info.DaylightDate.wDay == Y->DltWeek && Info.DaylightDate.wHour == Y->DltHour,
+           "%ls %u: daylight date %u-%u-%u %u\n", Y->Key, Y->Year, Info.DaylightDate.wMonth,
+           Info.DaylightDate.wDayOfWeek, Info.DaylightDate.wDay, Info.DaylightDate.wHour);
+    }
+}
+
 START_TEST(GetTimeZoneInformationForYear)
 {
     HKEY hZones, hZone;
@@ -463,6 +527,8 @@ START_TEST(GetTimeZoneInformationForYear)
     StringCchPrintfW(TEST_ZONE, ARRAYSIZE(TEST_ZONE), TEST_ZONE_PREFIX L"%lu", GetCurrentProcessId());
 
     TestCurrentZone();
+    if (is_reactos())
+        TestIrregularZones();
     if (!Windows7Behavior())
     {
         skip("Newer Windows versions read the names from the registry and fail for an unknown zone\n");
