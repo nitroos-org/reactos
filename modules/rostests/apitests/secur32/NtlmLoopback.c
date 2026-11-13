@@ -16,6 +16,7 @@
 #include <winnls.h>
 #include <lmaccess.h>
 #include <lmerr.h>
+#include <winreg.h>
 
 #define SECURITY_WIN32
 #include <sspi.h>
@@ -24,6 +25,7 @@
 #define TEST_PASSWORD L"Ntlm#Test1pw"
 
 static WCHAR g_user[32];
+static const WCHAR *g_expect_user;   /* the account test_exchange expects (g_user unless set) */
 
 static BOOL create_user(void)
 {
@@ -224,7 +226,7 @@ static void test_exchange(CredHandle *cc, CredHandle *sc, ULONG creq, ULONG sreq
     if (sst == SEC_E_OK)
     {
         bs = wcsrchr((WCHAR *)names.sUserName, L'\\');
-        ok(bs && !_wcsicmp(bs + 1, g_user), "the name is %ls\n", names.sUserName);
+        ok(bs && !_wcsicmp(bs + 1, g_expect_user ? g_expect_user : g_user), "the name is %ls\n", names.sUserName);
         FreeContextBuffer(names.sUserName);
     }
 
@@ -274,7 +276,8 @@ static void test_exchange(CredHandle *cc, CredHandle *sc, ULONG creq, ULONG sreq
     if (sst == SEC_E_OK)
     {
         n = ARRAYSIZE(during); ok(GetUserNameW(during, &n), "GetUserNameW failed %lu\n", GetLastError());
-        ok(!_wcsicmp(during, g_user), "impersonating %ls instead of %ls\n", during, g_user);
+        ok(!_wcsicmp(during, g_expect_user ? g_expect_user : g_user), "impersonating %ls instead of %ls\n", during,
+           g_expect_user ? g_expect_user : g_user);
         sst = RevertSecurityContext(&sctx);
         ok_eq_hex(sst, SEC_E_OK);
         n = ARRAYSIZE(after); GetUserNameW(after, &n);
@@ -323,6 +326,101 @@ static void test_refusals(CredHandle *sc, const WCHAR *user, const WCHAR *domain
         DeleteSecurityContext(&cctx);
     }
     free(m);
+}
+
+#define LSA_KEY L"SYSTEM\\CurrentControlSet\\Control\\Lsa"
+#define LIMIT_VALUE L"LimitBlankPasswordUse"
+
+/* set (or with value == -1 remove) Lsa\LimitBlankPasswordUse, return the previous state through had and old */
+static BOOL set_limit_blank(LONG value, BOOL *had, DWORD *old)
+{
+    HKEY key;
+    DWORD type, size = sizeof(*old);
+    LONG err;
+
+    err = RegOpenKeyExW(HKEY_LOCAL_MACHINE, LSA_KEY, 0, KEY_QUERY_VALUE | KEY_SET_VALUE, &key);
+    if (err != ERROR_SUCCESS)
+        return FALSE;
+    if (had)
+    {
+        *old = 0;
+        *had = (RegQueryValueExW(key, LIMIT_VALUE, NULL, &type, (LPBYTE)old, &size) == ERROR_SUCCESS && type == REG_DWORD);
+    }
+    if (value < 0)
+        err = RegDeleteValueW(key, LIMIT_VALUE);
+    else
+    {
+        DWORD v = (DWORD)value;
+        err = RegSetValueExW(key, LIMIT_VALUE, 0, REG_DWORD, (const BYTE *)&v, sizeof(v));
+    }
+    RegCloseKey(key);
+    return err == ERROR_SUCCESS || (value < 0 && err == ERROR_FILE_NOT_FOUND);
+}
+
+/* an account with a blank password: a network logon is refused unless LimitBlankPasswordUse is 0, an interactive one is not */
+static void test_blank_password(CredHandle *sc)
+{
+    WCHAR blank[32];
+    USER_INFO_1 ui;
+    DWORD err, old;
+    BOOL had;
+    HANDLE token;
+    NET_API_STATUS ns;
+
+    _snwprintf(blank, ARRAYSIZE(blank), L"ntlmblank%lu", GetCurrentProcessId() % 100000);
+    memset(&ui, 0, sizeof(ui));
+    ui.usri1_name = blank;
+    ui.usri1_password = (LPWSTR)L"";
+    ui.usri1_priv = USER_PRIV_USER;
+    ui.usri1_flags = UF_SCRIPT | UF_DONT_EXPIRE_PASSWD;
+    ns = NetUserAdd(NULL, 1, (LPBYTE)&ui, &err);
+    if (ns != NERR_Success)
+    {
+        skip("NetUserAdd (blank password) failed (%lu)\n", (unsigned long)ns);
+        return;
+    }
+    if (!set_limit_blank(-1, &had, &old))
+    {
+        skip("cannot write the Lsa key\n");
+        NetUserDel(NULL, blank);
+        return;
+    }
+
+    /* the default (value absent): refused */
+    test_refusals(sc, blank, L".", L"", NULL, SEC_E_LOGON_DENIED, "blank password, policy default");
+    /* value 1: refused */
+    ok(set_limit_blank(1, NULL, NULL), "cannot set the value\n");
+    test_refusals(sc, blank, L".", L"", NULL, SEC_E_LOGON_DENIED, "blank password, LimitBlankPasswordUse=1");
+    /* a wrong (non empty) password for the blank account stays refused with the policy off */
+    ok(set_limit_blank(0, NULL, NULL), "cannot set the value\n");
+    test_refusals(sc, blank, L".", L"x", NULL, SEC_E_LOGON_DENIED, "blank account, wrong password, policy off");
+    /* value 0: accepted, with the full exchange (signing) */
+    {
+        SEC_WINNT_AUTH_IDENTITY_W id;
+        CredHandle cc;
+        TimeStamp ts;
+
+        make_identity(&id, blank, L".", L"");
+        ok_eq_hex(AcquireCredentialsHandleW(NULL, (SEC_WCHAR *)L"NTLM", SECPKG_CRED_OUTBOUND, NULL, &id, NULL, NULL, &cc, &ts),
+                  SEC_E_OK);
+        g_expect_user = blank;
+        test_exchange(&cc, sc, ISC_REQ_INTEGRITY, ASC_REQ_INTEGRITY, TRUE, FALSE);
+        g_expect_user = NULL;
+        FreeCredentialsHandle(&cc);
+    }
+    /* the interactive logon of the account does not depend on the value */
+    ok(set_limit_blank(1, NULL, NULL), "cannot set the value\n");
+    token = NULL;
+    ok(LogonUserW(blank, L".", L"", LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, &token),
+       "interactive logon of the blank account failed (%lu)\n", GetLastError());
+    if (token) CloseHandle(token);
+
+    /* the account with a password is not affected by the policy */
+    test_refusals(sc, g_user, L".", TEST_PASSWORD, NULL, SEC_E_OK, "account with a password, policy on");
+
+    /* restore */
+    set_limit_blank(had ? (LONG)old : -1, NULL, NULL);
+    NetUserDel(NULL, blank);
 }
 
 static void test_replay(CredHandle *cc, CredHandle *sc)
@@ -446,7 +544,18 @@ START_TEST(NtlmLoopback)
                   TRUE, TRUE);
 
     test_replay(&cc, &sc);
-    test_default_credentials(&sc);
+    {
+        /* the logged on user may have a blank password (the test machine's Administrator has): its default
+           credentials are refused over the network unless the policy is off */
+        BOOL had;
+        DWORD old;
+        BOOL changed = set_limit_blank(0, &had, &old);
+
+        test_default_credentials(&sc);
+        if (changed)
+            set_limit_blank(had ? (LONG)old : -1, NULL, NULL);
+    }
+    test_blank_password(&sc);
 
     /* the account and the machine name as the domain, in other cases */
     test_refusals(&sc, g_user, L".", L"wrong password", NULL, SEC_E_LOGON_DENIED, "wrong password");

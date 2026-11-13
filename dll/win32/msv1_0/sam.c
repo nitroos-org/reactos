@@ -65,8 +65,40 @@ done:
 
 
 /*
+ * Lsa\LimitBlankPasswordUse (default 1 when absent): a network logon to an account with a blank password is refused
+ * unless the value is 0. Interactive logons are not affected.
+ */
+static
+bool
+MsvpLimitBlankPasswordUse(VOID)
+{
+    UNICODE_STRING KeyName = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\Lsa");
+    UNICODE_STRING ValueName = RTL_CONSTANT_STRING(L"LimitBlankPasswordUse");
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    UCHAR Buffer[FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data) + sizeof(ULONG)];
+    PKEY_VALUE_PARTIAL_INFORMATION Info = (PKEY_VALUE_PARTIAL_INFORMATION)Buffer;
+    HANDLE KeyHandle;
+    ULONG Length;
+    bool Limit = true;
+    NTSTATUS Status;
+
+    InitializeObjectAttributes(&ObjectAttributes, &KeyName, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = NtOpenKey(&KeyHandle, KEY_QUERY_VALUE, &ObjectAttributes);
+    if (!NT_SUCCESS(Status))
+        return true;
+
+    Status = NtQueryValueKey(KeyHandle, &ValueName, KeyValuePartialInformation, Buffer, sizeof(Buffer), &Length);
+    if (NT_SUCCESS(Status) && Info->Type == REG_DWORD && Info->DataLength == sizeof(ULONG))
+        Limit = (*(PULONG)Info->Data != 0);
+
+    NtClose(KeyHandle);
+    return Limit;
+}
+
+/*
  * The challenge response of a network logon (the NTLM security package of secur32 asks for it). Only an NTLMv2
- * response is checked: an LM or NTLM v1 response is refused. The account's NT OWF is the one of the empty
+ * response is checked: an LM or NTLM v1 response is refused (VERIFY ON ORACLE: whether a Windows 10 server, default
+ * LmCompatibilityLevel 3, accepts an NTLMv1 response; refused for now). The account's NT OWF is the one of the empty
  * password when it has none. On success the user session key (the NTLMv2 session base key) is returned.
  */
 static
@@ -77,6 +109,7 @@ MsvpCheckNetworkPassword(
 {
     PMSV1_0_LM20_LOGON LogonInfo = UserPwdData->LogonInfo;
     UCHAR NtOwf[16];
+    BOOLEAN Blank = FALSE;
     UNICODE_STRING EmptyPassword = RTL_CONSTANT_STRING(L"");
     NTSTATUS Status;
 
@@ -105,6 +138,18 @@ MsvpCheckNetworkPassword(
         Status = SystemFunction007(&EmptyPassword, NtOwf);
         if (!NT_SUCCESS(Status))
             return Status;
+        Blank = TRUE;
+    }
+
+    /* An NT hash that is the one of the empty password is a blank password as well */
+    if (!Blank)
+    {
+        UCHAR BlankOwf[16];
+
+        Status = SystemFunction007(&EmptyPassword, BlankOwf);
+        if (!NT_SUCCESS(Status))
+            return Status;
+        Blank = RtlEqualMemory(NtOwf, BlankOwf, sizeof(NtOwf));
     }
 
     Status = MsvpCheckNtlmv2Response(LogonInfo->ChallengeToClient,
@@ -115,7 +160,19 @@ MsvpCheckNetworkPassword(
                                      LogonInfo->CaseSensitiveChallengeResponse.Length,
                                      (PUCHAR)&UserPwdData->UserSessionKey);
     RtlSecureZeroMemory(NtOwf, sizeof(NtOwf));
-    return Status;
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    /* Blank password: refused over the network by default (checked after the response, so a wrong
+       response still reports the wrong password). VERIFY ON ORACLE: status Windows returns */
+    if (Blank && MsvpLimitBlankPasswordUse())
+    {
+        ERR("Network logon to an account with a blank password refused\n");
+        RtlSecureZeroMemory(&UserPwdData->UserSessionKey, sizeof(UserPwdData->UserSessionKey));
+        return STATUS_ACCOUNT_RESTRICTION;
+    }
+
+    return STATUS_SUCCESS;
 }
 
 static
