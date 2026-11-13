@@ -121,6 +121,10 @@ static void d2d_device_context_flush_fill_batch(struct d2d_device_context *conte
 static BOOL d2d_device_context_batch_fill(struct d2d_device_context *context, struct d2d_brush *brush,
         const D2D_MATRIX_3X2_F *geometry_transform, const D2D1_POINT_2F *vertices, size_t vertex_count,
         const struct d2d_face *faces, size_t face_count);
+static BOOL d2d_device_context_batch_fill_geometry(struct d2d_device_context *context,
+        const struct d2d_geometry *geometry, struct d2d_brush *brush);
+static BOOL d2d_device_context_batch_stroke_geometry(struct d2d_device_context *context,
+        const struct d2d_geometry *geometry, struct d2d_brush *brush, float stroke_width);
 
 static void d2d_device_context_draw(struct d2d_device_context *render_target, enum d2d_shape_type shape_type,
         ID3D11Buffer *ib, unsigned int index_count, ID3D11Buffer *vb, unsigned int vb_stride,
@@ -278,8 +282,11 @@ static ULONG STDMETHODCALLTYPE d2d_device_context_inner_Release(IUnknown *iface)
         unsigned int i, j, k;
 
         d2d_clip_stack_cleanup(&context->clip_stack);
-        free(context->fill_batch.vertices);
-        free(context->fill_batch.faces);
+        for (i = 0; i < D2D_BATCH_STREAM_COUNT; ++i)
+        {
+            free(context->fill_batch.streams[i].vertices);
+            free(context->fill_batch.streams[i].faces);
+        }
         IDWriteRenderingParams_Release(context->default_text_rendering_params);
         if (context->text_rendering_params)
             IDWriteRenderingParams_Release(context->text_rendering_params);
@@ -870,44 +877,76 @@ static HRESULT d2d_device_context_update_vs_cb(struct d2d_device_context *contex
     return S_OK;
 }
 
-/* Issues the held back fills as one draw call. The constants and the vertices
- * are those the individual draws would have used, in the same order. */
+/* The held back draws are kept per shape type, in the order the draws of a
+ * single geometry are made: fills are triangles, curves, arcs; strokes are
+ * outline, curve outline, arc outline. */
+static const struct
+{
+    enum d2d_shape_type shape_type;
+    size_t vertex_size;
+    BOOL indexed;
+    BOOL is_arc;
+    BOOL outline;
+}
+d2d_batch_streams[D2D_BATCH_STREAM_COUNT] =
+{
+    {D2D_SHAPE_TYPE_TRIANGLE,       sizeof(D2D1_POINT_2F),                  TRUE,  FALSE, FALSE},
+    {D2D_SHAPE_TYPE_CURVE,          sizeof(struct d2d_curve_vertex),        FALSE, FALSE, FALSE},
+    {D2D_SHAPE_TYPE_CURVE,          sizeof(struct d2d_curve_vertex),        FALSE, TRUE,  FALSE},
+    {D2D_SHAPE_TYPE_OUTLINE,        sizeof(struct d2d_outline_vertex),      TRUE,  FALSE, TRUE},
+    {D2D_SHAPE_TYPE_BEZIER_OUTLINE, sizeof(struct d2d_curve_outline_vertex), TRUE, FALSE, TRUE},
+    {D2D_SHAPE_TYPE_ARC_OUTLINE,    sizeof(struct d2d_curve_outline_vertex), TRUE, TRUE,  TRUE},
+};
+
+struct d2d_batch_source
+{
+    const void *vertices;
+    size_t vertex_count;
+    const struct d2d_face *faces;
+    size_t face_count;
+};
+
+static BOOL d2d_device_context_write_cb(ID3D11DeviceContext *d3d_context, ID3D11Buffer *buffer,
+        const void *data, size_t size)
+{
+    D3D11_MAPPED_SUBRESOURCE map_desc;
+    HRESULT hr;
+
+    if (FAILED(hr = ID3D11DeviceContext_Map(d3d_context, (ID3D11Resource *)buffer,
+            0, D3D11_MAP_WRITE_DISCARD, 0, &map_desc)))
+    {
+        WARN("Failed to map constant buffer, hr %#lx.\n", hr);
+        return FALSE;
+    }
+    memcpy(map_desc.pData, data, size);
+    ID3D11DeviceContext_Unmap(d3d_context, (ID3D11Resource *)buffer, 0);
+    return TRUE;
+}
+
+/* Issues the held back draws, one draw call per shape type. The constants
+ * and the vertices are those the individual draws would have used, in the
+ * order of the streams. Shapes of different draws are not interleaved. */
 static void d2d_device_context_flush_fill_batch(struct d2d_device_context *context)
 {
     static struct d2d_brush solid_brush = {.type = D2D_BRUSH_TYPE_SOLID};
-    D3D11_MAPPED_SUBRESOURCE map_desc;
     D3D11_SUBRESOURCE_DATA buffer_data;
     ID3D11DeviceContext *d3d_context;
     D3D11_BUFFER_DESC buffer_desc;
-    ID3D11Buffer *ib, *vb;
-    HRESULT hr;
+    struct d2d_ps_cb ps_cb;
+    unsigned int i;
+    int ps_is_arc = -1;
+    BOOL ok;
 
     if (!context->fill_batch.active)
         return;
     context->fill_batch.active = FALSE;
 
     ID3D11Device1_GetImmediateContext(context->d3d_device, &d3d_context);
-
-    if (FAILED(hr = ID3D11DeviceContext_Map(d3d_context, (ID3D11Resource *)context->vs_cb,
-            0, D3D11_MAP_WRITE_DISCARD, 0, &map_desc)))
-    {
-        WARN("Failed to map constant buffer, hr %#lx.\n", hr);
-        ID3D11DeviceContext_Release(d3d_context);
-        return;
-    }
-    memcpy(map_desc.pData, &context->fill_batch.vs_cb, sizeof(context->fill_batch.vs_cb));
-    ID3D11DeviceContext_Unmap(d3d_context, (ID3D11Resource *)context->vs_cb, 0);
-
-    if (FAILED(hr = ID3D11DeviceContext_Map(d3d_context, (ID3D11Resource *)context->ps_cb,
-            0, D3D11_MAP_WRITE_DISCARD, 0, &map_desc)))
-    {
-        WARN("Failed to map constant buffer, hr %#lx.\n", hr);
-        ID3D11DeviceContext_Release(d3d_context);
-        return;
-    }
-    memcpy(map_desc.pData, &context->fill_batch.ps_cb, sizeof(context->fill_batch.ps_cb));
-    ID3D11DeviceContext_Unmap(d3d_context, (ID3D11Resource *)context->ps_cb, 0);
+    ok = d2d_device_context_write_cb(d3d_context, context->vs_cb,
+            &context->fill_batch.vs_cb, sizeof(context->fill_batch.vs_cb));
     ID3D11DeviceContext_Release(d3d_context);
+    if (!ok)
+        return;
 
     buffer_desc.Usage = D3D11_USAGE_DEFAULT;
     buffer_desc.CPUAccessFlags = 0;
@@ -915,93 +954,219 @@ static void d2d_device_context_flush_fill_batch(struct d2d_device_context *conte
     buffer_data.SysMemPitch = 0;
     buffer_data.SysMemSlicePitch = 0;
 
-    buffer_desc.ByteWidth = context->fill_batch.face_count * sizeof(*context->fill_batch.faces);
-    buffer_desc.BindFlags = D3D11_BIND_INDEX_BUFFER;
-    buffer_data.pSysMem = context->fill_batch.faces;
-    if (FAILED(hr = ID3D11Device1_CreateBuffer(context->d3d_device, &buffer_desc, &buffer_data, &ib)))
+    for (i = 0; i < D2D_BATCH_STREAM_COUNT; ++i)
     {
-        WARN("Failed to create index buffer, hr %#lx.\n", hr);
-        return;
+        struct d2d_batch_stream *stream = &context->fill_batch.streams[i];
+        ID3D11Buffer *ib = NULL, *vb;
+        HRESULT hr;
+
+        if (!stream->vertex_count)
+            continue;
+
+        if (ps_is_arc != d2d_batch_streams[i].is_arc)
+        {
+            ps_cb = context->fill_batch.ps_cb;
+            ps_cb.is_arc = ps_is_arc = d2d_batch_streams[i].is_arc;
+            ID3D11Device1_GetImmediateContext(context->d3d_device, &d3d_context);
+            ok = d2d_device_context_write_cb(d3d_context, context->ps_cb, &ps_cb, sizeof(ps_cb));
+            ID3D11DeviceContext_Release(d3d_context);
+            if (!ok)
+            {
+                ps_is_arc = -1;
+                continue;
+            }
+        }
+
+        if (d2d_batch_streams[i].indexed)
+        {
+            buffer_desc.ByteWidth = stream->face_count * sizeof(*stream->faces);
+            buffer_desc.BindFlags = D3D11_BIND_INDEX_BUFFER;
+            buffer_data.pSysMem = stream->faces;
+            if (FAILED(hr = ID3D11Device1_CreateBuffer(context->d3d_device, &buffer_desc, &buffer_data, &ib)))
+            {
+                WARN("Failed to create index buffer, hr %#lx.\n", hr);
+                continue;
+            }
+        }
+
+        buffer_desc.ByteWidth = stream->vertex_count * d2d_batch_streams[i].vertex_size;
+        buffer_desc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        buffer_data.pSysMem = stream->vertices;
+        if (FAILED(hr = ID3D11Device1_CreateBuffer(context->d3d_device, &buffer_desc, &buffer_data, &vb)))
+        {
+            ERR("Failed to create vertex buffer, hr %#lx.\n", hr);
+            if (ib)
+                ID3D11Buffer_Release(ib);
+            continue;
+        }
+
+        d2d_device_context_draw(context, d2d_batch_streams[i].shape_type, ib,
+                ib ? 3 * stream->face_count : stream->vertex_count, vb,
+                d2d_batch_streams[i].vertex_size, &solid_brush, NULL);
+
+        ID3D11Buffer_Release(vb);
+        if (ib)
+            ID3D11Buffer_Release(ib);
     }
 
-    buffer_desc.ByteWidth = context->fill_batch.vertex_count * sizeof(*context->fill_batch.vertices);
-    buffer_desc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-    buffer_data.pSysMem = context->fill_batch.vertices;
-    if (FAILED(hr = ID3D11Device1_CreateBuffer(context->d3d_device, &buffer_desc, &buffer_data, &vb)))
+    for (i = 0; i < D2D_BATCH_STREAM_COUNT; ++i)
     {
-        ERR("Failed to create vertex buffer, hr %#lx.\n", hr);
-        ID3D11Buffer_Release(ib);
-        return;
+        context->fill_batch.streams[i].vertex_count = 0;
+        context->fill_batch.streams[i].face_count = 0;
     }
-
-    d2d_device_context_draw(context, D2D_SHAPE_TYPE_TRIANGLE, ib, 3 * context->fill_batch.face_count, vb,
-            sizeof(*context->fill_batch.vertices), &solid_brush, NULL);
-
-    ID3D11Buffer_Release(vb);
-    ID3D11Buffer_Release(ib);
 }
 
-/* Adds a triangle list to the held back fills, or draws it right away when
- * it can not be held back. Returns FALSE when the caller has to draw it. */
-static BOOL d2d_device_context_batch_fill(struct d2d_device_context *context, struct d2d_brush *brush,
-        const D2D_MATRIX_3X2_F *geometry_transform, const D2D1_POINT_2F *vertices, size_t vertex_count,
-        const struct d2d_face *faces, size_t face_count)
+/* Adds the triangle lists of a geometry to the held back draws, or returns
+ * FALSE when the caller has to draw it. A fill and a stroke are never held
+ * back together, nor draws with different constants. */
+static BOOL d2d_device_context_batch_shapes(struct d2d_device_context *context, struct d2d_brush *brush,
+        const D2D_MATRIX_3X2_F *geometry_transform, BOOL outline, float stroke_width,
+        const struct d2d_batch_source *sources /* indexed by stream, D2D_BATCH_STREAM_COUNT entries */)
 {
     struct d2d_vs_cb vs_cb;
     struct d2d_ps_cb ps_cb;
-    size_t base, i;
+    BOOL any = FALSE;
+    unsigned int i;
 
     if (!context->ops || !context->ops->batch_fills || !brush || brush->type != D2D_BRUSH_TYPE_SOLID
-            || context->target.type != D2D_TARGET_BITMAP || !vertex_count || !face_count
-            || vertex_count > 0x4000 || context->pixel_size.width == 0 || context->pixel_size.height == 0)
+            || context->target.type != D2D_TARGET_BITMAP
+            || context->pixel_size.width == 0 || context->pixel_size.height == 0)
+        return FALSE;
+
+    for (i = 0; i < D2D_BATCH_STREAM_COUNT; ++i)
+    {
+        if (!sources[i].vertex_count)
+            continue;
+        if (sources[i].vertex_count > 0x4000 || (d2d_batch_streams[i].indexed && !sources[i].face_count)
+                || d2d_batch_streams[i].outline != outline)
+            return FALSE;
+        any = TRUE;
+    }
+    if (!any)
         return FALSE;
 
     memset(&vs_cb, 0, sizeof(vs_cb));
     memset(&ps_cb, 0, sizeof(ps_cb));
-    d2d_device_context_fill_vs_cb_data(context, geometry_transform, 0.0f, &vs_cb);
-    d2d_device_context_fill_ps_cb_data(brush, NULL, FALSE, FALSE, &ps_cb);
+    d2d_device_context_fill_vs_cb_data(context, geometry_transform, stroke_width, &vs_cb);
+    d2d_device_context_fill_ps_cb_data(brush, NULL, outline, FALSE, &ps_cb);
 
     if (context->fill_batch.active)
     {
-        if (memcmp(&vs_cb, &context->fill_batch.vs_cb, sizeof(vs_cb))
-                || memcmp(&ps_cb, &context->fill_batch.ps_cb, sizeof(ps_cb))
-                || context->fill_batch.vertex_count + vertex_count > 0xffff
-                || context->fill_batch.face_count > 0x7fff)
+        BOOL full = FALSE;
+
+        for (i = 0; i < D2D_BATCH_STREAM_COUNT; ++i)
+        {
+            const struct d2d_batch_stream *stream = &context->fill_batch.streams[i];
+
+            if (stream->vertex_count + sources[i].vertex_count > 0xffff || stream->face_count > 0x7fff)
+                full = TRUE;
+        }
+        if (full || memcmp(&vs_cb, &context->fill_batch.vs_cb, sizeof(vs_cb))
+                || memcmp(&ps_cb, &context->fill_batch.ps_cb, sizeof(ps_cb)))
             d2d_device_context_flush_fill_batch(context);
+    }
+
+    for (i = 0; i < D2D_BATCH_STREAM_COUNT; ++i)
+    {
+        struct d2d_batch_stream *stream = &context->fill_batch.streams[i];
+
+        if (!sources[i].vertex_count)
+            continue;
+        if (!d2d_array_reserve((void **)&stream->vertices, &stream->vertices_size,
+                stream->vertex_count + sources[i].vertex_count, d2d_batch_streams[i].vertex_size)
+                || (d2d_batch_streams[i].indexed && !d2d_array_reserve((void **)&stream->faces,
+                &stream->faces_size, stream->face_count + sources[i].face_count, sizeof(*stream->faces))))
+        {
+            d2d_device_context_flush_fill_batch(context);
+            return FALSE;
+        }
     }
 
     if (!context->fill_batch.active)
     {
         context->fill_batch.vs_cb = vs_cb;
         context->fill_batch.ps_cb = ps_cb;
-        context->fill_batch.vertex_count = 0;
-        context->fill_batch.face_count = 0;
     }
 
-    if (!d2d_array_reserve((void **)&context->fill_batch.vertices, &context->fill_batch.vertices_size,
-            context->fill_batch.vertex_count + vertex_count, sizeof(*context->fill_batch.vertices))
-            || !d2d_array_reserve((void **)&context->fill_batch.faces, &context->fill_batch.faces_size,
-            context->fill_batch.face_count + face_count, sizeof(*context->fill_batch.faces)))
+    for (i = 0; i < D2D_BATCH_STREAM_COUNT; ++i)
     {
-        d2d_device_context_flush_fill_batch(context);
-        return FALSE;
-    }
+        struct d2d_batch_stream *stream = &context->fill_batch.streams[i];
+        size_t base = stream->vertex_count, j;
 
-    base = context->fill_batch.vertex_count;
-    memcpy(&context->fill_batch.vertices[base], vertices, vertex_count * sizeof(*vertices));
-    for (i = 0; i < face_count; ++i)
-    {
-        struct d2d_face *f = &context->fill_batch.faces[context->fill_batch.face_count + i];
+        if (!sources[i].vertex_count)
+            continue;
 
-        f->v[0] = faces[i].v[0] + base;
-        f->v[1] = faces[i].v[1] + base;
-        f->v[2] = faces[i].v[2] + base;
+        memcpy((BYTE *)stream->vertices + base * d2d_batch_streams[i].vertex_size, sources[i].vertices,
+                sources[i].vertex_count * d2d_batch_streams[i].vertex_size);
+        if (d2d_batch_streams[i].indexed)
+        {
+            for (j = 0; j < sources[i].face_count; ++j)
+            {
+                struct d2d_face *f = &stream->faces[stream->face_count + j];
+
+                f->v[0] = sources[i].faces[j].v[0] + base;
+                f->v[1] = sources[i].faces[j].v[1] + base;
+                f->v[2] = sources[i].faces[j].v[2] + base;
+            }
+            stream->face_count += sources[i].face_count;
+        }
+        stream->vertex_count += sources[i].vertex_count;
     }
-    context->fill_batch.vertex_count += vertex_count;
-    context->fill_batch.face_count += face_count;
     context->fill_batch.active = TRUE;
 
     return TRUE;
+}
+
+static BOOL d2d_device_context_batch_fill(struct d2d_device_context *context, struct d2d_brush *brush,
+        const D2D_MATRIX_3X2_F *geometry_transform, const D2D1_POINT_2F *vertices, size_t vertex_count,
+        const struct d2d_face *faces, size_t face_count)
+{
+    struct d2d_batch_source sources[D2D_BATCH_STREAM_COUNT] = {{0}};
+
+    sources[D2D_BATCH_TRIANGLES].vertices = vertices;
+    sources[D2D_BATCH_TRIANGLES].vertex_count = vertex_count;
+    sources[D2D_BATCH_TRIANGLES].faces = faces;
+    sources[D2D_BATCH_TRIANGLES].face_count = face_count;
+
+    return d2d_device_context_batch_shapes(context, brush, geometry_transform, FALSE, 0.0f, sources);
+}
+
+static BOOL d2d_device_context_batch_fill_geometry(struct d2d_device_context *context,
+        const struct d2d_geometry *geometry, struct d2d_brush *brush)
+{
+    struct d2d_batch_source sources[D2D_BATCH_STREAM_COUNT] = {{0}};
+
+    sources[D2D_BATCH_TRIANGLES].vertices = geometry->fill.vertices;
+    sources[D2D_BATCH_TRIANGLES].vertex_count = geometry->fill.vertex_count;
+    sources[D2D_BATCH_TRIANGLES].faces = geometry->fill.faces;
+    sources[D2D_BATCH_TRIANGLES].face_count = geometry->fill.face_count;
+    sources[D2D_BATCH_CURVES].vertices = geometry->fill.bezier_vertices;
+    sources[D2D_BATCH_CURVES].vertex_count = geometry->fill.bezier_vertex_count;
+    sources[D2D_BATCH_ARCS].vertices = geometry->fill.arc_vertices;
+    sources[D2D_BATCH_ARCS].vertex_count = geometry->fill.arc_vertex_count;
+
+    return d2d_device_context_batch_shapes(context, brush, &geometry->transform, FALSE, 0.0f, sources);
+}
+
+static BOOL d2d_device_context_batch_stroke_geometry(struct d2d_device_context *context,
+        const struct d2d_geometry *geometry, struct d2d_brush *brush, float stroke_width)
+{
+    struct d2d_batch_source sources[D2D_BATCH_STREAM_COUNT] = {{0}};
+
+    sources[D2D_BATCH_OUTLINE].vertices = geometry->outline.vertices;
+    sources[D2D_BATCH_OUTLINE].vertex_count = geometry->outline.vertex_count;
+    sources[D2D_BATCH_OUTLINE].faces = geometry->outline.faces;
+    sources[D2D_BATCH_OUTLINE].face_count = geometry->outline.face_count;
+    sources[D2D_BATCH_BEZIER_OUTLINE].vertices = geometry->outline.beziers;
+    sources[D2D_BATCH_BEZIER_OUTLINE].vertex_count = geometry->outline.bezier_count;
+    sources[D2D_BATCH_BEZIER_OUTLINE].faces = geometry->outline.bezier_faces;
+    sources[D2D_BATCH_BEZIER_OUTLINE].face_count = geometry->outline.bezier_face_count;
+    sources[D2D_BATCH_ARC_OUTLINE].vertices = geometry->outline.arcs;
+    sources[D2D_BATCH_ARC_OUTLINE].vertex_count = geometry->outline.arc_count;
+    sources[D2D_BATCH_ARC_OUTLINE].faces = geometry->outline.arc_faces;
+    sources[D2D_BATCH_ARC_OUTLINE].face_count = geometry->outline.arc_face_count;
+
+    return d2d_device_context_batch_shapes(context, brush, &geometry->transform, TRUE, stroke_width, sources);
 }
 
 static void d2d_device_context_draw_geometry(struct d2d_device_context *render_target,
@@ -1011,6 +1176,9 @@ static void d2d_device_context_draw_geometry(struct d2d_device_context *render_t
     D3D11_BUFFER_DESC buffer_desc;
     ID3D11Buffer *ib, *vb;
     HRESULT hr;
+
+    if (d2d_device_context_batch_stroke_geometry(render_target, geometry, brush, stroke_width))
+        return;
 
     if (FAILED(hr = d2d_device_context_update_vs_cb(render_target, &geometry->transform, stroke_width)))
     {
@@ -1170,9 +1338,7 @@ static void d2d_device_context_fill_geometry(struct d2d_device_context *render_t
     buffer_data.SysMemPitch = 0;
     buffer_data.SysMemSlicePitch = 0;
 
-    if (!opacity_brush && !geometry->fill.bezier_vertex_count && !geometry->fill.arc_vertex_count
-            && d2d_device_context_batch_fill(render_target, brush, &geometry->transform, geometry->fill.vertices,
-            geometry->fill.vertex_count, geometry->fill.faces, geometry->fill.face_count))
+    if (!opacity_brush && d2d_device_context_batch_fill_geometry(render_target, geometry, brush))
         return;
 
     if (FAILED(hr = d2d_device_context_update_vs_cb(render_target, &geometry->transform, 0.0f)))
