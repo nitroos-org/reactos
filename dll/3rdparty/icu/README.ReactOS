@@ -19,7 +19,7 @@ What is vendored (unmodified unless listed below)
   common/   source/common/*.cpp and *.h (incl. unicode/*.h)
   i18n/     source/i18n/*.cpp and *.h (incl. unicode/*.h)
   stubdata/ source/stubdata/stubdata.cpp (the empty icudt64_dat symbol the ICU data loader references)
-  data/     icudtl.dat = the ICU 64.2 data package filtered to the ReactOS NLS locales (24.9 MB; the unfiltered upstream
+  data/     icudtl.dat = the ICU 64.2 data package filtered to the ReactOS NLS locales (25.6 MB; the unfiltered upstream
             icudt64l.dat is 27.5 MB, Windows icudtl.dat 27.3 MB), see "Data file". Named icudtl.dat because add_cd_file
             cannot rename files inside reactos.cab.
             nls-locales.txt, build-filtered-data.sh: the locale list and the script that produce it.
@@ -53,10 +53,16 @@ Data file
   data does not (ValidateICUDataCanLoad), or when a symbol it needs is not exported, so never ship icu.dll without the data.
   The package is the upstream data FILTERED to the locales the ReactOS NLS knows. Reason: .NET in ICU mode builds
   CultureInfo.GetCultures() / Get-Culture -ListAvailable from uloc_getAvailable() and constructs every entry, which needs
-  GetLocaleInfoEx(name, LOCALE_SNAME) to succeed; upstream lists 750 locales, ReactOS knows 253 (146 specific locales
+  GetLocaleInfoEx(name, LOCALE_SNAME) to succeed; upstream lists 750 locales, ReactOS knew 253 at first (146 specific locales
   of the NLS plus the neutral names of the rtl locale table), so the first unknown one (af-NA) made the enumeration throw.
-  data/nls-locales.txt = those 253 ICU locale names, probed on a ReactOS build (every name of the upstream list, converted
-  with uloc_toLanguageTag, tested with GetLocaleInfoEx(LOCALE_SNAME)). build-filtered-data.sh builds the package from the
+  data/nls-locales.txt = those ICU locale names, probed on a ReactOS build (every name of the upstream list, converted
+  with uloc_toLanguageTag, tested with GetLocaleInfoEx(LOCALE_SNAME)). 335 names since the kernel32 NLS grew from 146 to
+  231 locales: the 253 of the first round plus 82 more (the ICU locale files without an alias, whose language tag kernel32
+  now accepts; legacy variants whose tag collapses onto another name, ja_JP_TRADITIONAL and th_TH_TRADITIONAL, are left out).
+  Of the 85 kernel32 locales added in round 5, 71 have an ICU 64.2 locale of the same tag. The other 14 are not
+  listable: st-ZA, tn-ZA, tn-BW, nso-ZA, ba-RU, oc-FR, ca-ES-valencia and tzm-Latn-DZ have no ICU 64.2 (CLDR 35.1) locale;
+  tg-Cyrl-TJ, ha-Latn-NG, sd-Arab-PK, tzm-Arab-MA, tzm-Tfng-MA, ks-Deva-IN and mn-Mong-MN exist in ICU only without the
+  script (tg_TJ, ha_NG, sd_PK, tzm_MA, ks_IN, mn_MN), and kernel32 does not resolve the script-less tag (tg-TJ, ...). build-filtered-data.sh builds the package from the
   ICU 64.2 source + data zip with the ICU data filter (ICU_DATA_FILTER_FILE, localeFilter, includeChildren false): the locale
   files (locales, curr, lang, region, zone, unit, coll, brkitr and rbnf trees) of the listed locales and their ancestors
   (en_001, es_419, root, yue for rbnf, ...) only; everything that is not a locale file (converters, normalization, uprops,
@@ -65,6 +71,11 @@ Data file
   nls-locales.txt (ancestors such as en_001 stay as data but are not enumerated: ReactOS does not know en-001), the sub tree
   indexes list what is present.
   Growing the NLS table: add the names to nls-locales.txt and rerun: build-filtered-data.sh WORKDIR nls-locales.txt icudtl.dat
+  (JOBS=n limits make; downloads icu4c-64_2-src.tgz sha256 627d5d84...1d6c and icu4c-64_2-data.zip sha256
+  fba0e89f5b3f285d722a83317647bffee69b6f1eb8d067d5da03c5677c45e510 from the unicode-org/icu release-64-2 page, both checked.)
+  Provenance of the shipped file: built by that script from the two official release files above; the data in it is
+  Unicode CLDR 35.1 as shipped by ICU 64.2 under the Unicode License (LICENSE in this directory); icudtl.dat is not a
+  Microsoft file and was not taken from a Windows installation (a Windows icudtl.dat was only compared by size).
 
 Updating
   Download the new tarball, replace common/ and i18n/ (re-apply the ReactOS changes to the two umutex files),
