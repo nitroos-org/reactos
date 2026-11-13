@@ -563,6 +563,31 @@ START_TEST(NtlmLoopback)
     test_refusals(&sc, g_user, L".", TEST_PASSWORD, tamper_mic, SEC_E_MESSAGE_ALTERED, "altered MIC");
     test_refusals(&sc, g_user, L".", TEST_PASSWORD, tamper_response, SEC_E_LOGON_DENIED, "altered response");
 
+    /* the Negotiate package over the same exchange (Oracle's NTS adapter and others ask for it): the server context
+       gives the token of the client, impersonates it, and both sides sign and seal */
+    {
+        CredHandle ncc, nsc;
+
+        make_identity(&id, g_user, L".", TEST_PASSWORD);
+        st = AcquireCredentialsHandleW(NULL, (SEC_WCHAR *)L"Negotiate", SECPKG_CRED_OUTBOUND, NULL, &id, NULL, NULL,
+                                       &ncc, &ts);
+        ok_eq_hex(st, SEC_E_OK);
+        if (st == SEC_E_OK)
+        {
+            st = AcquireCredentialsHandleW(NULL, (SEC_WCHAR *)L"Negotiate", SECPKG_CRED_INBOUND, NULL, NULL, NULL, NULL,
+                                           &nsc, &ts);
+            ok_eq_hex(st, SEC_E_OK);
+            if (st == SEC_E_OK)
+            {
+                test_exchange(&ncc, &nsc, ISC_REQ_INTEGRITY, ASC_REQ_INTEGRITY, TRUE, FALSE);
+                test_exchange(&ncc, &nsc, ISC_REQ_CONFIDENTIALITY | ISC_REQ_INTEGRITY,
+                              ASC_REQ_CONFIDENTIALITY | ASC_REQ_INTEGRITY, TRUE, TRUE);
+                FreeCredentialsHandle(&nsc);
+            }
+            FreeCredentialsHandle(&ncc);
+        }
+    }
+
     FreeCredentialsHandle(&cc);
     FreeCredentialsHandle(&sc);
 
