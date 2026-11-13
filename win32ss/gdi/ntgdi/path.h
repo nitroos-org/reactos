@@ -95,6 +95,7 @@ BOOL FASTCALL PATH_FillPathEx(PDC dc, PPATH pPath, PBRUSH pbrFill);
 PPATH FASTCALL PATH_FlattenPath (PPATH pPath);
 PPATH FASTCALL PATH_WidenPathEx(DC *dc, PPATH pPath);
 BOOL FASTCALL PATH_IsWidePen(DC *dc, PBRUSH pbrLine);
+BOOL FASTCALL PATH_IsWorldFlipped(DC *dc);
 VOID FASTCALL PATH_GetPenDeviceWidths(DC *dc, PBRUSH pbrLine, LONG *pcx, LONG *pcy);
 
 BOOL FASTCALL PATH_ReserveEntries (PPATH pPath, INT numEntries);
