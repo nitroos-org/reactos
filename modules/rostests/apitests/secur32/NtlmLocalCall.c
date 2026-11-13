@@ -607,6 +607,112 @@ static void test_unusable_thread_token(void)
     CloseHandle(me);
 }
 
+/* a helper process of the other tests: what MODE says, its answer on stdout; the helper's exit code */
+static DWORD run_helper(const char *mode, DWORD *pid, char *out, DWORD out_size)
+{
+    SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
+    HANDLE out_r, out_w;
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    char path[MAX_PATH], cmd[MAX_PATH + 32];
+    DWORD got, total = 0, code = 0xdead;
+
+    if (out_size) out[0] = 0;
+    if (pid) *pid = 0;
+    if (!CreatePipe(&out_r, &out_w, &sa, 0))
+        return code;
+    SetHandleInformation(out_r, HANDLE_FLAG_INHERIT, 0);
+    GetModuleFileNameA(NULL, path, sizeof(path));
+    sprintf(cmd, "\"%s\" NtlmLocalCall", path);
+    memset(&si, 0, sizeof(si));
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdOutput = out_w;
+    si.hStdError = out_w;
+    SetEnvironmentVariableA(CHILD_VAR, mode);
+    if (!CreateProcessA(NULL, cmd, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi))
+    {
+        SetEnvironmentVariableA(CHILD_VAR, NULL);
+        CloseHandle(out_r);
+        CloseHandle(out_w);
+        return code;
+    }
+    SetEnvironmentVariableA(CHILD_VAR, NULL);
+    CloseHandle(out_w);
+    if (pid) *pid = pi.dwProcessId;
+    while (total + 1 < out_size && ReadFile(out_r, out + total, out_size - 1 - total, &got, NULL) && got)
+        total += got;
+    if (out_size) out[total] = 0;
+    WaitForSingleObject(pi.hProcess, 60000);
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(out_r);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    return code;
+}
+
+static const BYTE helper_challenge[8] = { 2, 7, 1, 8, 2, 8, 1, 8 };
+
+/* the helpers: "issue" issues a context, says its id and exits; "accept <id>" tries to accept that context */
+static BOOL helper_main(const char *mode)
+{
+    ULONG64 context = 0;
+    HANDLE token = NULL;
+    NTSTATUS st;
+
+    if (!strcmp(mode, "issue"))
+    {
+        st = lsa_issue(helper_challenge, &context);
+        printf("LOCALHELPER issue=%08lx id=%08lx%08lx\n", (unsigned long)st, (unsigned long)(context >> 32),
+               (unsigned long)context);
+        return TRUE;
+    }
+    if (!strncmp(mode, "accept ", 7))
+    {
+        context = _strtoui64(mode + 7, NULL, 16);
+        st = lsa_accept(context, &token, NULL);
+        printf("LOCALHELPER accept=%08lx\n", (unsigned long)st);
+        if (token) CloseHandle(token);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+/* The issuer of a context is a process, not a process id: a process that is given the id of an issuer that exited
+ * (on ReactOS at once, in the same tick of the clock as the issuer, so with the same creation time) gets nothing */
+static void test_reused_process_id(void)
+{
+    char out[256], mode[64], *p;
+    unsigned long issue = 1, hi = 0, lo = 0, acc;
+    DWORD issuer = 0, pid, i, reused = 0;
+    ULONG64 context;
+
+    run_helper("issue", &issuer, out, sizeof(out));
+    p = strstr(out, "LOCALHELPER issue=");
+    ok(p && sscanf(p, "LOCALHELPER issue=%lx id=%8lx%8lx", &issue, &hi, &lo) == 3, "no id from the issuer: %s\n", out);
+    ok(issue == 0, "the issuer's issue failed %08lx\n", issue);
+    context = ((ULONG64)hi << 32) | lo;
+    if (issue || !context)
+        return;
+
+    /* a client on this machine answers the CHALLENGE (the issuer is gone: the context may be gone with it) */
+    lsa_bind(context, helper_challenge, NULL);
+
+    sprintf(mode, "accept %08lx%08lx", hi, lo);
+    for (i = 0; i < 30; i++)
+    {
+        acc = run_helper(mode, &pid, out, sizeof(out));
+        p = strstr(out, "LOCALHELPER accept=");
+        ok(p && sscanf(p, "LOCALHELPER accept=%lx", &acc) == 1, "no answer from helper %lu: %s\n", i, out);
+        ok(acc == (unsigned long)STATUS_NOT_FOUND, "helper %lu (pid %lu, issuer pid %lu) accepted: 0x%08lx\n", i, pid,
+           issuer, acc);
+        if (pid == issuer)
+            reused++;
+    }
+    trace("issuer pid %lu reused by %lu of 30 helpers\n", issuer, reused);
+}
+
 /* the child: issues a context, says its id, waits, then tries to accept it */
 static void child_main(void)
 {
@@ -746,9 +852,12 @@ static void test_other_user(void)
 
 START_TEST(NtlmLocalCall)
 {
-    if (GetEnvironmentVariableA(CHILD_VAR, NULL, 0))
+    char mode[64];
+
+    if (GetEnvironmentVariableA(CHILD_VAR, mode, sizeof(mode)))
     {
-        child_main();
+        if (!helper_main(mode))
+            child_main();
         return;
     }
 
@@ -766,5 +875,6 @@ START_TEST(NtlmLocalCall)
     test_lsa_table();
     test_unusable_thread_token();
     test_other_process();
+    test_reused_process_id();
     test_other_user();
 }
