@@ -10,6 +10,7 @@
 
 #include "fltmgr.h"
 #include "fltmgrint.h"
+#include "fltmgrproto.h"
 
 #define NDEBUG
 #include <debug.h>
@@ -18,155 +19,68 @@
 /* DATA *********************************************************************/
 
 static
-BOOLEAN
-IsContextTypeValid(
+LONG
+ContextTypeToIndex(
     _In_ FLT_CONTEXT_TYPE ContextType
-);
+)
+{
+    switch (ContextType)
+    {
+    case FLT_VOLUME_CONTEXT: return FLTP_CTX_INDEX_VOLUME;
+    case FLT_INSTANCE_CONTEXT: return FLTP_CTX_INDEX_INSTANCE;
+    case FLT_FILE_CONTEXT: return FLTP_CTX_INDEX_FILE;
+    case FLT_STREAM_CONTEXT: return FLTP_CTX_INDEX_STREAM;
+    case FLT_STREAMHANDLE_CONTEXT: return FLTP_CTX_INDEX_STREAMHANDLE;
+    case FLT_TRANSACTION_CONTEXT: return FLTP_CTX_INDEX_TRANSACTION;
+    }
 
-static
-NTSTATUS
-SetupContextHeader(
-    _In_ PFLT_FILTER Filter,
-    _In_ PCFLT_CONTEXT_REGISTRATION ContextPtr,
-    _Out_ PALLOCATE_CONTEXT_HEADER ContextHeader
-);
-
-/* EXPORTED FUNCTIONS ******************************************************/
-
-
+    return -1;
+}
 
 
 /* INTERNAL FUNCTIONS ******************************************************/
-
 
 NTSTATUS
 FltpRegisterContexts(_In_ PFLT_FILTER Filter,
                      _In_ const FLT_CONTEXT_REGISTRATION *Context)
 {
     PCFLT_CONTEXT_REGISTRATION ContextPtr;
-    PALLOCATE_CONTEXT_HEADER ContextHeader, Prev;
-    PVOID Buffer;
-    ULONG BufferSize = 0;
-    USHORT i;
-    NTSTATUS Status;
+    LONG Index;
 
     /* Loop through all entries in the context registration array */
-    ContextPtr = Context;
-    while (ContextPtr)
+    for (ContextPtr = Context; ContextPtr->ContextType != FLT_CONTEXT_END; ContextPtr++)
     {
-        /* Bail if we found the terminator */
-        if (ContextPtr->ContextType == FLT_CONTEXT_END)
-            break;
+        Index = ContextTypeToIndex(ContextPtr->ContextType);
+        if (Index < 0 || Filter->ContextDefs[Index].Registered)
+            return STATUS_FLT_INVALID_CONTEXT_REGISTRATION;
 
-        /* Make sure we have a valid context  */
-        if (IsContextTypeValid(ContextPtr->ContextType))
+        /* Size and pooltag are only checked when ContextAllocateCallback is null */
+        if (ContextPtr->ContextAllocateCallback == NULL &&
+            (ContextPtr->PoolTag == 0 || ContextPtr->Size == 0))
         {
-            /* Each context is backed by a crtl struct. Reserve space for it */
-            BufferSize += sizeof(STREAM_LIST_CTRL);
+            return STATUS_FLT_INVALID_CONTEXT_REGISTRATION;
         }
 
-        /* Move to the next entry */
-        ContextPtr++;
+        Filter->ContextDefs[Index].Registered = TRUE;
+        Filter->ContextDefs[Index].Flags = ContextPtr->Flags;
+        Filter->ContextDefs[Index].CleanupCallback = ContextPtr->ContextCleanupCallback;
+        Filter->ContextDefs[Index].Size = ContextPtr->Size;
+        Filter->ContextDefs[Index].PoolTag = ContextPtr->PoolTag;
+        Filter->ContextDefs[Index].AllocateCallback = ContextPtr->ContextAllocateCallback;
+        Filter->ContextDefs[Index].FreeCallback = ContextPtr->ContextFreeCallback;
     }
 
-    /* Bail if we found no valid registration requests */
-    if (BufferSize == 0)
-    {
-        return STATUS_SUCCESS;
-    }
-
-    /* Allocate the pool that'll hold the context crtl structs */
-    Buffer = ExAllocatePoolWithTag(NonPagedPool, BufferSize, FM_TAG_CONTEXT_REGISTA);
-    if (!Buffer) return STATUS_INSUFFICIENT_RESOURCES;
-
-    RtlZeroMemory(Buffer, BufferSize);
-
-    /* Setup our loop data */
-    ContextHeader = Buffer;
-    Prev = NULL;
-    Status = STATUS_SUCCESS;
-
-    for (i = 0; i < MAX_CONTEXT_TYPES; i++)
-    {
-        ContextPtr = (PFLT_CONTEXT_REGISTRATION)Context;
-        while (ContextPtr)
-        {
-            /* We don't support variable sized contents yet */
-            FLT_ASSERT(ContextPtr->Size != FLT_VARIABLE_SIZED_CONTEXTS);
-
-            /* Bail if we found the terminator */
-            if (ContextPtr->ContextType == FLT_CONTEXT_END)
-                break;
-
-            /* Size and pooltag are only checked when ContextAllocateCallback is null */
-            if (ContextPtr->ContextAllocateCallback == FALSE && ContextPtr->PoolTag == FALSE)
-            {
-                Status = STATUS_FLT_INVALID_CONTEXT_REGISTRATION;
-                goto Quit;
-            }
-
-            /* Make sure we have a valid context  */
-            if (IsContextTypeValid(ContextPtr->ContextType))
-            {
-                Status = SetupContextHeader(Filter, ContextPtr, ContextHeader);
-                if (NT_SUCCESS(Status))
-                {
-                    if (Prev)
-                    {
-                        Prev->Next = ContextHeader;
-                    }
-
-                    Filter->SupportedContexts[i] = ContextHeader;
-                }
-            }
-
-            Prev = ContextHeader;
-
-            /* Move to the next entry */
-            ContextPtr++;
-        }
-    }
-
-Quit:
-    if (NT_SUCCESS(Status))
-    {
-        Filter->SupportedContextsListHead = Buffer;
-    }
-    else
-    {
-        ExFreePoolWithTag(Buffer, FM_TAG_CONTEXT_REGISTA);
-        //FIXME: Cleanup anything that SetupContextHeader may have allocated
-    }
-
-    return Status;
+    return STATUS_SUCCESS;
 }
 
-
-/* PRIVATE FUNCTIONS ******************************************************/
-
-static
-BOOLEAN
-IsContextTypeValid(_In_ FLT_CONTEXT_TYPE ContextType)
+VOID
+FltpTeardownInstanceContexts(_In_ PFLT_INSTANCE Instance)
 {
-    switch (ContextType)
-    {
-    case FLT_VOLUME_CONTEXT:
-    case FLT_INSTANCE_CONTEXT:
-    case FLT_FILE_CONTEXT:
-    case FLT_STREAM_CONTEXT:
-    case FLT_STREAMHANDLE_CONTEXT:
-    case FLT_TRANSACTION_CONTEXT:
-        return TRUE;
-    }
-
-    return FALSE;
+    UNREFERENCED_PARAMETER(Instance);
 }
 
-static
-NTSTATUS
-SetupContextHeader(_In_ PFLT_FILTER Filter,
-                   _In_ PCFLT_CONTEXT_REGISTRATION ContextPtr,
-                   _Out_ PALLOCATE_CONTEXT_HEADER ContextHeader)
+VOID
+FltpTeardownVolumeContexts(_In_ PFLT_VOLUME Volume)
 {
-    return 0;
+    UNREFERENCED_PARAMETER(Volume);
 }

@@ -45,18 +45,6 @@ FltFreeSecurityDescriptor(
 
 NTSTATUS
 FLTAPI
-FltGetDiskDeviceObject(
-    _In_ PFLT_VOLUME Volume,
-    _Outptr_ PDEVICE_OBJECT *DiskDeviceObject
-)
-{
-    UNREFERENCED_PARAMETER(Volume);
-    UNREFERENCED_PARAMETER(DiskDeviceObject);
-    return 0;
-}
-
-NTSTATUS
-FLTAPI
 FltGetFileNameInformationUnsafe(
     _In_ PFILE_OBJECT FileObject,
     _In_opt_ PFLT_INSTANCE Instance,
