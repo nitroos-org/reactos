@@ -1347,9 +1347,14 @@ RedirPresentRect(PREDIR r, const REDIR_DIRTY *pd)
                 Clip = NULL;
             }
         }
-        if (Clip)
-            REGION_bOffsetRgn(Clip, Root->rcWindow.left, Root->rcWindow.top);
-        else
+        if (Clip && !REGION_bOffsetRgn(Clip, Root->rcWindow.left, Root->rcWindow.top))
+        {
+            /* The window is too far out for the offset: what was drawn is not known in screen coordinates */
+            REGION_Delete(Clip);
+            Clip = NULL;
+            rc = Root->rcWindow;
+        }
+        if (!Clip)
             Clip = IntSysCreateRectpRgnIndirect(&rc);
         if (Clip)
         {
