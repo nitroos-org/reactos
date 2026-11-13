@@ -190,7 +190,7 @@ VOID AfdAbortPendingReceives( PAFD_FCB FCB ) {
         UnlockBuffers( RecvReq->BufferArray, RecvReq->BufferCount, FALSE );
         NextIrp->IoStatus.Status = STATUS_CONNECTION_ABORTED;
         NextIrp->IoStatus.Information = 0;
-        if( NextIrp->MdlAddress ) UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
+        if (AfdRequestLocked(NextIrp)) UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
         AfdClearCancelRoutine(NextIrp);
         IoCompleteRequest( NextIrp, IO_NETWORK_INCREMENT );
     }
@@ -260,7 +260,7 @@ static NTSTATUS ReceiveActivity( PAFD_FCB FCB, PIRP Irp ) {
             NextIrp->IoStatus.Status = Status;
             NextIrp->IoStatus.Information = 0;
             if( NextIrp == Irp ) RetStatus = Status;
-            if( NextIrp->MdlAddress ) UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
+            if (AfdRequestLocked(NextIrp)) UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
             AfdClearCancelRoutine(NextIrp);
             IoCompleteRequest( NextIrp, IO_NETWORK_INCREMENT );
         }
@@ -299,7 +299,7 @@ static NTSTATUS ReceiveActivity( PAFD_FCB FCB, PIRP Irp ) {
                 if( NextIrp == Irp ) {
                     RetStatus = Status;
                 }
-                if( NextIrp->MdlAddress ) UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
+                if (AfdRequestLocked(NextIrp)) UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
                 AfdClearCancelRoutine(NextIrp);
                 IoCompleteRequest( NextIrp, IO_NETWORK_INCREMENT );
             }
@@ -364,7 +364,7 @@ AcceptExReceiveComplete(PDEVICE_OBJECT DeviceObject, PIRP Irp, PVOID Context)
     IoFreeMdl((PMDL)FCB->AcceptIrp->Tail.Overlay.DriverContext[3]);
     FCB->AcceptIrp->IoStatus.Information = Irp->IoStatus.Information;
     FCB->AcceptIrp->IoStatus.Status = Irp->IoStatus.Status;
-    if (FCB->AcceptIrp->MdlAddress)
+    if (AfdRequestLocked(FCB->AcceptIrp))
         UnlockRequest(FCB->AcceptIrp, IoGetCurrentIrpStackLocation(FCB->AcceptIrp));
     AfdClearCancelRoutine(FCB->AcceptIrp);
     IoCompleteRequest(FCB->AcceptIrp, IO_NETWORK_INCREMENT);
@@ -408,7 +408,7 @@ NTSTATUS NTAPI ReceiveComplete
             NextIrp->IoStatus.Status = STATUS_FILE_CLOSED;
             NextIrp->IoStatus.Information = 0;
             UnlockBuffers(RecvReq->BufferArray, RecvReq->BufferCount, FALSE);
-            if( NextIrp->MdlAddress ) UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
+            if (AfdRequestLocked(NextIrp)) UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
             AfdClearCancelRoutine(NextIrp);
             IoCompleteRequest( NextIrp, IO_NETWORK_INCREMENT );
         }
@@ -882,7 +882,7 @@ PacketSocketRecvComplete(
             NextIrp->IoStatus.Status = STATUS_FILE_CLOSED;
             NextIrp->IoStatus.Information = 0;
             UnlockBuffers(RecvReq->BufferArray, RecvReq->BufferCount, CheckUnlockExtraBuffers(FCB, NextIrpSp));
-            if( NextIrp->MdlAddress ) UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
+            if (AfdRequestLocked(NextIrp)) UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
             AfdClearCancelRoutine(NextIrp);
             IoCompleteRequest( NextIrp, IO_NETWORK_INCREMENT );
         }
@@ -1011,7 +1011,7 @@ PacketSocketRecvComplete(
 
         AFD_DbgPrint(MID_TRACE,("Unlocking\n"));
         UnlockBuffers( RecvReq->BufferArray, RecvReq->BufferCount, CheckUnlockExtraBuffers(FCB, NextIrpSp) );
-        if ( NextIrp->MdlAddress ) UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
+        if (AfdRequestLocked(NextIrp)) UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
 
         AFD_DbgPrint(MID_TRACE,("Completing\n"));
         AfdClearCancelRoutine(NextIrp);

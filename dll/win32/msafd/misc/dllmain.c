@@ -32,6 +32,9 @@ BOOLEAN SockAsyncSelectCalled;
 
 
 
+/* AFD_INFO_SEND_WINDOW_SIZE of a fresh endpoint (0 until the first socket asked) */
+static volatile ULONG MsafdDefaultSendWindow = 0;
+
 /*
  * FUNCTION: Creates a new socket
  * ARGUMENTS:
@@ -390,14 +393,23 @@ WSPSocket(int AddressFamily,
         Socket->SharedData->GroupType = GroupData.u.HighPart;
     }
 
-    /* Get Window Sizes and Save them */
-    GetSocketInformation (Socket,
-                          AFD_INFO_SEND_WINDOW_SIZE,
-                          NULL,
-                          &Socket->SharedData->SizeOfSendBuffer,
-                          NULL,
-                          NULL,
-                          NULL);
+    /* Get Window Sizes and Save them. The send window of a new endpoint is the same for every socket (a
+     * constant of AFD), so it is asked once per process, not once per socket */
+    if (MsafdDefaultSendWindow == 0 &&
+        GetSocketInformation(Socket,
+                             AFD_INFO_SEND_WINDOW_SIZE,
+                             NULL,
+                             &Socket->SharedData->SizeOfSendBuffer,
+                             NULL,
+                             NULL,
+                             NULL) == NO_ERROR)
+    {
+        MsafdDefaultSendWindow = Socket->SharedData->SizeOfSendBuffer;
+    }
+    else if (MsafdDefaultSendWindow != 0)
+    {
+        Socket->SharedData->SizeOfSendBuffer = MsafdDefaultSendWindow;
+    }
 
     /* SO_RCVBUF of a stream socket reads as 64K until it is set, as on Windows; the size AFD reports is
      * that of its own, smaller staging buffer, so it is not asked for (a request per socket) */

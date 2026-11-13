@@ -122,7 +122,7 @@ static NTSTATUS SatisfyPreAccept( PIRP Irp, PAFD_TDI_OBJECT_QELT Qelt ) {
                          (CopyLen > sizeof(TA_IP_ADDRESS) ? CopyLen : sizeof(TA_IP_ADDRESS));
 
     if( IrpSp->Parameters.DeviceIoControl.OutputBufferLength < RequiredSize ) {
-        if( Irp->MdlAddress ) UnlockRequest( Irp, IoGetCurrentIrpStackLocation( Irp ) );
+        if (AfdRequestLocked(Irp)) UnlockRequest( Irp, IoGetCurrentIrpStackLocation( Irp ) );
         Irp->IoStatus.Information = 0;
         Irp->IoStatus.Status = STATUS_BUFFER_TOO_SMALL;
         AfdClearCancelRoutine( Irp );
@@ -153,7 +153,7 @@ static NTSTATUS SatisfyPreAccept( PIRP Irp, PAFD_TDI_OBJECT_QELT Qelt ) {
     AFD_DbgPrint(MID_TRACE,("IPAddr->Address[0].Address[0].sin_addr %x\n",
                             IPAddr->Address[0].Address[0].in_addr));
 
-    if( Irp->MdlAddress ) UnlockRequest( Irp, IoGetCurrentIrpStackLocation( Irp ) );
+    if (AfdRequestLocked(Irp)) UnlockRequest( Irp, IoGetCurrentIrpStackLocation( Irp ) );
 
     Irp->IoStatus.Information = ((PCHAR)&IPAddr[1]) - ((PCHAR)ListenReceive);
     Irp->IoStatus.Status = STATUS_SUCCESS;
@@ -349,7 +349,7 @@ end:
     AfdFreeAcceptMdl(Irp);
     Irp->IoStatus.Information = 0;
     Irp->IoStatus.Status = Status;
-    if( Irp->MdlAddress ) UnlockRequest( Irp, IoGetCurrentIrpStackLocation( Irp ) );
+    if (AfdRequestLocked(Irp)) UnlockRequest( Irp, IoGetCurrentIrpStackLocation( Irp ) );
     AfdClearCancelRoutine(Irp);
     IoCompleteRequest( Irp, IO_NETWORK_INCREMENT );
 
@@ -611,7 +611,7 @@ static NTSTATUS NTAPI ListenComplete( PDEVICE_OBJECT DeviceObject,
            NextIrp = CONTAINING_RECORD(NextIrpEntry, IRP, Tail.Overlay.ListEntry);
            NextIrp->IoStatus.Status = STATUS_FILE_CLOSED;
            NextIrp->IoStatus.Information = 0;
-           if( NextIrp->MdlAddress ) UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
+           if (AfdRequestLocked(NextIrp)) UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
            AfdClearCancelRoutine(NextIrp);
            IoCompleteRequest( NextIrp, IO_NETWORK_INCREMENT );
         }
