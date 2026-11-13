@@ -1281,6 +1281,21 @@ IntFillRect( DC *dc,
         BrushOrigin.x = pbrush->ptOrigin.x;
         BrushOrigin.y = pbrush->ptOrigin.y;
 
+        /* The arc shapes are computed in the coordinates of the DC without its origin (the same pixels in a window DC
+           and in a memory DC); the origin comes in here, with the brush origin the app set, as for any other fill */
+        if (dc->ptlDrawShift.x || dc->ptlDrawShift.y)
+        {
+            DestRect.left += dc->ptlDrawShift.x;
+            DestRect.right += dc->ptlDrawShift.x;
+            DestRect.top += dc->ptlDrawShift.y;
+            DestRect.bottom += dc->ptlDrawShift.y;
+            if (!Pen)
+            {
+                BrushOrigin.x += dc->dclevel.ptlBrushOrigin.x + dc->ptlDrawShift.x;
+                BrushOrigin.y += dc->dclevel.ptlBrushOrigin.y + dc->ptlDrawShift.y;
+            }
+        }
+
         if (pdcattr->jROP2 == R2_XORPEN)
             ROP = ROP4_FROM_INDEX(R3_OPINDEX_PATINVERT);
 

@@ -226,6 +226,7 @@ DC_vInitDc(
     /* Setup more coordinates */
     pdc->ptlDCOrig.x = 0;
     pdc->ptlDCOrig.y = 0;
+    pdc->ptlDrawShift.x = pdc->ptlDrawShift.y = 0;
 	pdc->dcattr.lWindowOrgx = 0;
 	pdc->dcattr.ptlWindowOrg.x = 0;
 	pdc->dcattr.ptlWindowOrg.y = 0;

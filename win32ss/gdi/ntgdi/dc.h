@@ -113,6 +113,7 @@ typedef struct _DC
   HDC         hdcPrev;
   RECTL       erclClip;
   POINTL      ptlDCOrig;
+  POINTL      ptlDrawShift;   /* arc fills: the DC origin, added where a box is written (IntFillRect), the shape itself is computed without it */
   RECTL       erclWindow;
   RECTL       erclBounds;
   RECTL       erclBoundsApp;
