@@ -109,6 +109,7 @@ extern void func_WindowMemoryDC(void);
 extern void func_StretchBlt(void);
 extern void func_UniscribeForwarders(void);
 extern void func_TextTransform(void);
+extern void func_TranslateCharsetInfo(void);
 extern void func_CreateHalftonePalette(void);
 
 const struct test winetest_testlist[] =
@@ -220,6 +221,7 @@ const struct test winetest_testlist[] =
     { "StretchBlt", func_StretchBlt },
     { "UniscribeForwarders", func_UniscribeForwarders },
     { "TextTransform", func_TextTransform },
+    { "TranslateCharsetInfo", func_TranslateCharsetInfo },
     { "CreateHalftonePalette", func_CreateHalftonePalette },
 
     { 0, 0 }
