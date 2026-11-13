@@ -435,6 +435,8 @@ struct compositor
     BOOL zombie;                        /* released while work_items != 0: the last item frees it */
     BOOL dirty;                         /* changed since the last commit */
     BOOL need_raised;                   /* CommitNeeded raised since the last commit */
+    struct compositor *qnext;           /* the queue of the commit thread, under comp_lock */
+    DWORD due;                          /* tick count at which the queued commit_work runs */
 };
 
 struct commit_handler
@@ -772,6 +774,8 @@ static const IAgileObjectVtbl prefix##_agile_vtbl = \
 IFACE_AGILE(compositor, comp_from_agile)
 IFACE_AGILE(controller, ctl_from_agile)
 
+static void commit_thread_start(void);
+
 static HRESULT compositor_create(struct compositor **out)
 {
     struct compositor *This = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*This));
@@ -787,6 +791,7 @@ static HRESULT compositor_create(struct compositor **out)
     This->ref = 1;
     CoCreateFreeThreadedMarshaler((IUnknown *)&This->IInspectable_iface, &This->marshal);
     InterlockedIncrement(&object_count);
+    commit_thread_start();              /* the first change of an object should not pay for creating the thread */
     *out = This;
     return S_OK;
 }
@@ -1051,12 +1056,13 @@ static HRESULT STDMETHODCALLTYPE ctl_Commit(ICompositorController *iface)
     TRACE("%p\n", iface);
     if (This->closed) return RO_E_CLOSED;   /* FIXME: verify on the oracle */
     /* Documented: sends the batched changes of the Compositor to the renderer: every DesktopWindowTarget of the
-     * Compositor draws its tree into its window now (present.c), on the calling thread. */
+     * Compositor gets the tree as it is now (present.c). */
     comp_lock();
     This->compositor->dirty = FALSE;
     This->compositor->need_raised = FALSE;
     comp_unlock();
-    comp_commit_targets((IUnknown *)&This->compositor->IInspectable_iface);
+    /* returns at once: the render thread draws the frames (present.c). A closed Compositor shows nothing new. */
+    if (!This->compositor->closed) comp_commit_targets((IUnknown *)&This->compositor->IInspectable_iface);
     return S_OK;
 }
 
@@ -1187,15 +1193,17 @@ static BOOL controller_grab_locked(struct controller *c)
     }
 }
 
-static DWORD WINAPI commit_work(void *arg)
+/* The commit thread: one DLL-owned thread (started on demand, retires when idle) runs the queued Compositors in
+ * order, each 16 ms after its first change. It runs the CommitNeeded handlers (app code), so it does no rendering. */
+static struct compositor *cq_head, *cq_tail;    /* under comp_lock */
+
+static void commit_work(struct compositor *c)
 {
-    struct compositor *c = arg;
     struct controller *ctl;
     ICommitNeededHandler **list = NULL;
     int n = 0, k;
     BOOL commit = FALSE, free_now;
 
-    Sleep(16);
     comp_lock();
     c->work_queued = FALSE;
     if (c->zombie)
@@ -1203,7 +1211,7 @@ static DWORD WINAPI commit_work(void *arg)
         BOOL last = !--c->work_items;
         comp_unlock();
         if (last) compositor_free(c);
-        return 0;
+        return;
     }
     ctl = c->controller;
     if (ctl && !controller_grab_locked(ctl)) ctl = NULL;
@@ -1244,6 +1252,40 @@ static DWORD WINAPI commit_work(void *arg)
     free_now = !--c->work_items && c->zombie;
     comp_unlock();
     if (free_now) compositor_free(c);
+}
+
+static DWORD WINAPI commit_main(void *arg);
+static struct comp_worker commit_worker = { commit_main };
+
+static void commit_thread_start(void)
+{
+    comp_worker_kick(&commit_worker);
+}
+
+static DWORD WINAPI commit_main(void *arg)
+{
+    for (;;)
+    {
+        struct compositor *c = NULL;
+        LONG left = -1;
+
+        comp_lock();
+        if (cq_head)
+        {
+            left = (LONG)(cq_head->due - GetTickCount());
+            if (left <= 0)
+            {
+                c = cq_head;
+                cq_head = c->qnext;
+                if (!cq_head) cq_tail = NULL;
+                c->qnext = NULL;
+            }
+        }
+        comp_unlock();
+        if (c) { commit_work(c); continue; }
+        if (left > 0) comp_worker_sleep(&commit_worker, left, FALSE);
+        else comp_worker_sleep(&commit_worker, 3000, !object_count);   /* parked while a Compositor exists */
+    }
     return 0;
 }
 
@@ -1255,13 +1297,31 @@ void comp_compositor_changed(IUnknown *identity)
     comp_lock();
     c->dirty = TRUE;
     queue = !c->work_queued && !c->need_raised;
-    if (queue) { c->work_queued = TRUE; c->work_items++; }
+    if (queue)
+    {
+        c->work_queued = TRUE; c->work_items++;
+        c->due = GetTickCount() + 16;
+        c->qnext = NULL;
+        if (cq_tail) cq_tail->qnext = c; else cq_head = c;
+        cq_tail = c;
+    }
     comp_unlock();
     if (!queue) return;
-    if (!QueueUserWorkItem(commit_work, c, WT_EXECUTEDEFAULT))
+    if (!comp_worker_kick(&commit_worker))
     {
-        WARN("QueueUserWorkItem failed: %lu\n", GetLastError());
-        comp_lock(); c->work_queued = FALSE; c->work_items--; comp_unlock();
+        struct compositor **p;
+
+        WARN("no commit thread\n");
+        comp_lock();
+        for (p = &cq_head; *p; p = &(*p)->qnext)
+            if (*p == c)
+            {
+                *p = c->qnext;
+                if (cq_tail == c) { cq_tail = NULL; for (p = &cq_head; *p; p = &(*p)->qnext) cq_tail = *p; }
+                break;
+            }
+        c->work_queued = FALSE; c->work_items--;
+        comp_unlock();
     }
 }
 
