@@ -192,6 +192,22 @@ BltMask(SURFOBJ* psoDest,
     return TRUE;
 }
 
+static BOOL
+RebaseBltMaskPoint(const POINTL *origin, const RECTL *original,
+                   const RECTL *clipped, POINTL *result)
+{
+    LONGLONG xMask = (LONGLONG)origin->x + clipped->left - original->left;
+    LONGLONG yMask = (LONGLONG)origin->y + clipped->top - original->top;
+
+    if (xMask < LONG_MIN || xMask > LONG_MAX ||
+        yMask < LONG_MIN || yMask > LONG_MAX)
+        return FALSE;
+
+    result->x = (LONG)xMask;
+    result->y = (LONG)yMask;
+    return TRUE;
+}
+
 #ifndef _USE_DIBLIB_
 
 static BOOLEAN APIENTRY
@@ -342,6 +358,7 @@ EngBitBlt(
     RECTL              ClipRect;
     ULONG              i;
     POINTL             Pt;
+    POINTL             MaskPoint, ClippedMaskPoint;
     ULONG              Direction;
     BOOL               UsesSource, UsesMask;
     POINTL             AdjustedBrushOrigin;
@@ -509,6 +526,7 @@ EngBitBlt(
     {
         BltRectFunc = BltMask;
     }
+
     else if ((rop4 & 0xFF) == R3_OPINDEX_PATCOPY)
     {
         if (pbo && pbo->iSolidColor == 0xFFFFFFFF)
@@ -519,6 +537,13 @@ EngBitBlt(
     else
     {
         BltRectFunc = CallDibBitBlt;
+    }
+
+    if (UsesMask && pptlMask)
+    {
+        if (!RebaseBltMaskPoint(pptlMask, prclTrg, &OutputRect, &MaskPoint))
+            return FALSE;
+        pptlMask = &MaskPoint;
     }
 
 
@@ -568,13 +593,16 @@ EngBitBlt(
 #endif
                 Pt.x = InputPoint.x + CombinedRect.left - OutputRect.left;
                 Pt.y = InputPoint.y + CombinedRect.top - OutputRect.top;
+                if (UsesMask && pptlMask &&
+                    !RebaseBltMaskPoint(pptlMask, &OutputRect, &CombinedRect, &ClippedMaskPoint))
+                    return FALSE;
                 Ret = (*BltRectFunc)(OutputObj,
                                      InputObj,
                                      psoMask,
                                      pxlo,
                                      &CombinedRect,
                                      &Pt,
-                                     pptlMask,
+                                     UsesMask && pptlMask ? &ClippedMaskPoint : pptlMask,
                                      pbo,
                                      &AdjustedBrushOrigin,
                                      rop4);
@@ -622,13 +650,16 @@ EngBitBlt(
 #endif
                         Pt.x = InputPoint.x + CombinedRect.left - OutputRect.left;
                         Pt.y = InputPoint.y + CombinedRect.top - OutputRect.top;
+                        if (UsesMask && pptlMask &&
+                            !RebaseBltMaskPoint(pptlMask, &OutputRect, &CombinedRect, &ClippedMaskPoint))
+                            return FALSE;
                         Ret = (*BltRectFunc)(OutputObj,
                                              InputObj,
                                              psoMask,
                                              pxlo,
                                              &CombinedRect,
                                              &Pt,
-                                             pptlMask,
+                                             UsesMask && pptlMask ? &ClippedMaskPoint : pptlMask,
                                              pbo,
                                              &AdjustedBrushOrigin,
                                              rop4) && Ret;
