@@ -7305,6 +7305,14 @@ static void test_token_label(void)
     else {
 #endif
     ret = GetTokenInformation(token, TokenLinkedToken, &linked, sizeof(linked), &size);
+#ifdef __REACTOS__
+    /* A token without a split (no UAC, a full administrator token) has no linked token. The test then
+       went on with an uninitialized handle and ended the test program with an access violation. */
+    if (!ret && GetLastError() == ERROR_NO_SUCH_LOGON_SESSION)
+        skip("The token has no linked token\n");
+    else
+    {
+#endif
     ok(ret, "Failed to get linked token, error %lu\n", GetLastError());
 
     check_token_label(linked.LinkedToken, &level2, TRUE);
@@ -7312,6 +7320,7 @@ static void test_token_label(void)
 
     CloseHandle(linked.LinkedToken);
 #ifdef __REACTOS__
+    }
     }
 #endif
 
@@ -7725,8 +7734,11 @@ static void test_GetExplicitEntriesFromAclW(void)
     ok(res == ERROR_SUCCESS, "GetExplicitEntriesFromAclW failed with error %ld\n", GetLastError());
     ok(count == 2, "Expected count == 2, got %ld\n", count);
 #ifdef __REACTOS__
-    if (!access2) {
-        ok(FALSE, "FIXME: access2 should not be null!\n"); // Happens on ReactOS currently
+    /* Fewer entries than expected (REVOKE_ACCESS also drops the deny entry): reading access2[1]
+       would end the test program with an access violation. */
+    if (!access2 || count < 2) {
+        ok(FALSE, "FIXME: access2 should not be null and hold 2 entries (count %ld)!\n", count); // Happens on ReactOS currently
+        if (access2) LocalFree(access2);
     } else {
 #endif
     ok(access2[0].grfAccessMode == GRANT_ACCESS, "Expected GRANT_ACCESS, got %d\n", access2[0].grfAccessMode);

@@ -529,6 +529,14 @@ PerfLanguageSupported(PCWSTR Language)
         return TRUE;
     if (!_wcsicmp(Language, L"CurrentLanguage"))
         return TRUE;
+    /* text that is not a number is no language identifier: the default table (measured on Windows 10: "Counter wine") */
+    for (i = 0; Language[i]; i++)
+    {
+        WCHAR c = Language[i];
+
+        if (!((c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'f') || (c >= L'A' && c <= L'F')))
+            return TRUE;
+    }
     if (Length == 3)
         return !wcscmp(Language, L"009");
     if (Length == 4)
@@ -563,11 +571,19 @@ PerfClassifyName(PCWSTR Name, PCWSTR *Argument)
         return PerfKindCostly;
     if (!_wcsnicmp(Name, L"Foreign", 7) && (Name[7] == UNICODE_NULL || Name[7] == L' '))
         return PerfKindForeign;
-    if (!_wcsnicmp(Name, L"Counter", 7) && (Name[7] == UNICODE_NULL || Name[7] == L' '))
+    /*
+     * Text glued to the word ("Counterwine", "hElPwine") gets the plain table, as measured on
+     * Windows 10 (the Wine advapi32 registry test reads both).
+     */
+    if (!_wcsnicmp(Name, L"Counter", 7))
+    {
+        if (Name[7] != UNICODE_NULL && Name[7] != L' ')
+            return PerfKindCounterText;
         return PerfLanguageSupported(Name + 7) ? PerfKindCounterText : PerfKindNoLanguage;
-    if (!_wcsnicmp(Name, L"Help", 4) && (Name[4] == UNICODE_NULL || Name[4] == L' '))
+    }
+    if (!_wcsnicmp(Name, L"Help", 4))
         return PerfKindHelpText;   /* any language gets the table, as on Windows */
-    if (!_wcsnicmp(Name, L"Explain", 7) && (Name[7] == UNICODE_NULL || Name[7] == L' '))
+    if (!_wcsnicmp(Name, L"Explain", 7))
         return PerfKindHelpText;
 
     *Argument = Name;

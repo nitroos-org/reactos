@@ -4836,6 +4836,15 @@ static void test_RegLoadMUIString(void)
     ret = RegOpenKeyExA(HKEY_LOCAL_MACHINE,
                         "Software\\Microsoft\\Windows NT\\CurrentVersion\\Time Zones\\UTC", 0,
                         KEY_READ, &hkey);
+#ifdef __REACTOS__
+    if (ret != ERROR_SUCCESS)
+    {
+        /* no "UTC" time zone key (and no tzres.dll string resource behind its MUI_Std): the test would
+           go on with a NULL result of strrchr() and end the whole test program with an access violation */
+        skip("Time Zones\\UTC is missing (error %ld)\n", ret);
+        return;
+    }
+#endif
     ok(ret == ERROR_SUCCESS, "got %ld\n", ret);
 
     size = ARRAY_SIZE(buf);
