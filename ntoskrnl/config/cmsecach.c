@@ -34,6 +34,10 @@ CmpInitSecurityCache(IN PCMHIVE Hive)
         /* Initialize it */
         InitializeListHead(&Hive->SecurityHash[i]);
     }
+
+    /* No 'sk' ring known yet (cmlib/cmse.c) */
+    Hive->SecurityRingAnchor[Stable] = HCELL_NIL;
+    Hive->SecurityRingAnchor[Volatile] = HCELL_NIL;
 }
 
 VOID
