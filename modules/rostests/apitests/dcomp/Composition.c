@@ -3005,6 +3005,38 @@ out:
     pWindowsDeleteString(fcls);
 }
 
+/* Compositor.CreatePropertySet (documented): a new, empty CompositionPropertySet each time */
+static void TestCreatePropertySet(void)
+{
+    __x_ABI_CWindows_CUI_CComposition_CICompositionPropertySet *a = NULL, *b = NULL;
+    IPropSet *ps = NULL;
+    HSTRING k;
+    float fv = 0;
+    int st = 99;
+    HRESULT hr;
+
+    hr = Comp->lpVtbl->CreatePropertySet(Comp, &a);
+    ok(hr == S_OK && a, "CreatePropertySet %#lx %p\n", hr, a);
+    hr = Comp->lpVtbl->CreatePropertySet(Comp, &b);
+    ok(hr == S_OK && b, "second CreatePropertySet %#lx %p\n", hr, b);
+    if (a && b) ok(!SameObject((IUnknown *)a, (IUnknown *)b), "CreatePropertySet returned the same object twice\n");
+    if (a && SUCCEEDED(QI(a, &IID_IPropSet, &ps)) && ps)
+    {
+        k = HS(L"Width");
+        hr = ps->lpVtbl->TryGetScalar(ps, k, &fv, &st);
+        ok(hr == S_OK && st == 2, "new set: TryGetScalar %#lx status %d (NotFound is 2)\n", hr, st);
+        ok(ps->lpVtbl->InsertScalar(ps, k, 3.5f) == S_OK, "InsertScalar\n");
+        st = 99;
+        hr = ps->lpVtbl->TryGetScalar(ps, k, &fv, &st);
+        ok(hr == S_OK && st == 0 && fv == 3.5f, "TryGetScalar %#lx status %d value %g\n", hr, st, fv);
+        WindowsDeleteString(k);
+        REL(ps);
+    }
+    else ok(0, "QI ICompositionPropertySet\n");
+    if (a) REL(a);
+    if (b) REL(b);
+}
+
 /*
  * Presentation of a DesktopWindowTarget into its window (redirection level 0: drawn into the window itself).
  * Documented (learn.microsoft.com): a CompositorController's Compositor shows changes after
@@ -3393,6 +3425,7 @@ START_TEST(Composition)
         TestCompositor2AndBrush3();
         TestNineGridBrush();
         TestVisualInteractionSource(pRoActivateInstance, pWindowsCreateString, pWindowsDeleteString);
+        TestCreatePropertySet();
         TestPresent(pRoActivateInstance, pWindowsCreateString, pWindowsDeleteString);
         TestExpressionAnimation();
         TestInteractionTracker(pRoActivateInstance, pWindowsCreateString, pWindowsDeleteString);
