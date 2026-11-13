@@ -27,6 +27,7 @@ IntGdiPolygon(PDC    dc,
     PDC_ATTR pdcattr;
     POINTL BrushOrigin;
     PPATH pPath;
+    RECTL rclOuter;
 //    int Left;
 //    int Top;
 
@@ -87,6 +88,10 @@ IntGdiPolygon(PDC    dc,
             /* Memory DC without a bitmap selected, nothing to do. */
             return TRUE;
         }
+
+        /* What the polygon writes is added below, from DestRect: device coordinates, as the points are by now. The
+           stroke of a wide pen prepares the DC again and replaces what was counted before, so keep it. */
+        rclOuter = dc->rclRedirDraw;
 
         /* Now fill the polygon with the current fill brush. */
         if (!(pbrFill->flAttrs & BR_IS_NULL))
@@ -172,6 +177,20 @@ IntGdiPolygon(PDC    dc,
                 }
             }
         }
+
+        /*
+         * A redirected window presents what was drawn: the fill and a one-pixel pen lie in the device bounds of the
+         * points (the right and bottom points are drawn too, a pixel around for the pen), a wide pen reaches past
+         * them and takes the clip bounds. Nothing is added when no DC is bound to a window.
+         */
+        if ((dc->fs & DC_REDIRECTION) && dc->pvRedir)
+        {
+            DC_vRedirKeepOuter(dc, &rclOuter);
+            if (!(pbrLine->flAttrs & BR_IS_NULL) && IntIsEffectiveWidePen(pbrLine))
+                DC_vRedirAddDrawn(dc, &dc->erclClip);
+            else
+                DC_vRedirAddInclusive(dc, &DestRect, 1);
+        }
     }
 
     return ret;
@@ -208,7 +227,10 @@ IntPolygon(HDC hdc, POINT *Point, int Count)
         return FALSE;
     }
 
+    /* What the polygon writes is added by IntGdiPolygon (a redirected window presents only that) */
+    DC_vPrepareDCsForBlitEx(pdc, NULL, NULL, NULL, DCPREP_ACCUM_DEST);
     bResult = IntGdiPolygon(pdc, Point, Count);
+    DC_vFinishBlit(pdc, NULL);
 
     DC_UnlockDc(pdc);
     return bResult;
@@ -598,53 +620,9 @@ NtGdiPolyPolyDraw( IN HDC hDC,
     }
 
     /*
-     * A redirected window presents what was drawn: every point (and the starting position of the "To" forms) lies in
-     * the logical bounding box of the points, a Bezier lies in the hull of its control points, and the device image of
-     * that box lies in the bounds of its four transformed corners; a one-pixel pen adds a pixel around, a wide pen the
-     * clip bounds. Added after the drawing: the polylines prepare the DC again themselves.
+     * A redirected window presents what the shapes wrote: IntGdiPolygon adds its device bounds, the polylines and
+     * Beziers add their own (IntGdiPolyline); everything lands in the prepare above, which marks it below.
      */
-    if ((dc->fs & DC_REDIRECTION) && dc->pvRedir)
-    {
-        PBRUSH pbrLine = dc->dclevel.pbrLine;
-
-        if (pbrLine && !(pbrLine->flAttrs & BR_IS_NULL) && IntIsEffectiveWidePen(pbrLine))
-        {
-            DC_vRedirAddDrawn(dc, &dc->erclClip);
-        }
-        else
-        {
-            RECTL rcL;
-            POINTL aptl[4];
-
-            rcL.left = rcL.right = SafePoints[0].x;
-            rcL.top = rcL.bottom = SafePoints[0].y;
-            for (i = 1; i < nPoints; i++)
-            {
-                rcL.left = min(rcL.left, SafePoints[i].x);
-                rcL.right = max(rcL.right, SafePoints[i].x);
-                rcL.top = min(rcL.top, SafePoints[i].y);
-                rcL.bottom = max(rcL.bottom, SafePoints[i].y);
-            }
-            if (iFunc == GdiPolyLineTo || iFunc == GdiPolyBezierTo)
-            {
-                rcL.left = min(rcL.left, dc->pdcattr->ptlCurrent.x);
-                rcL.right = max(rcL.right, dc->pdcattr->ptlCurrent.x);
-                rcL.top = min(rcL.top, dc->pdcattr->ptlCurrent.y);
-                rcL.bottom = max(rcL.bottom, dc->pdcattr->ptlCurrent.y);
-            }
-            aptl[0].x = rcL.left;  aptl[0].y = rcL.top;
-            aptl[1].x = rcL.right; aptl[1].y = rcL.top;
-            aptl[2].x = rcL.left;  aptl[2].y = rcL.bottom;
-            aptl[3].x = rcL.right; aptl[3].y = rcL.bottom;
-            IntLPtoDP(dc, (LPPOINT)aptl, 4);
-            for (i = 0; i < 4; i++)
-            {
-                aptl[i].x += dc->ptlDCOrig.x;
-                aptl[i].y += dc->ptlDCOrig.y;
-            }
-            DC_vRedirAddPoints(dc, aptl, 4);
-        }
-    }
 
     /* Cleanup and return */
     DC_vFinishBlit(dc, NULL);
@@ -671,6 +649,7 @@ IntRectangle(PDC dc,
     PDC_ATTR pdcattr;
     POINTL BrushOrigin;
     PPATH pPath;
+    RECTL rclOuter;
 
     ASSERT ( dc ); // Caller's responsibility to set this up
 
@@ -792,8 +771,11 @@ IntRectangle(PDC dc,
             pPath->state = PATH_Closed;
             dc->dclevel.flPath &= ~DCPATH_ACTIVE;
 
-            /* Actually stroke a path */
+            /* Actually stroke a path. The stroke prepares the DC again and counts only its own bounds as drawn: what the
+               rectangle counted before (its fill can lie outside the outline of the stroke) is added back. */
+            rclOuter = dc->rclRedirDraw;
             ret = PATH_StrokePath(dc, pPath);
+            DC_vRedirKeepOuter(dc, &rclOuter);
 
             /* Clear the path */
             PATH_UnlockPath(pPath);
@@ -866,12 +848,16 @@ NtGdiRectangle(HDC  hDC,
         POINTL DestCoords[4];
         ULONG PolyCounts = 4;
 
+        /* What the polygon writes is added by IntGdiPolygon (a redirected window presents only that) */
+        DC_vPrepareDCsForBlitEx(dc, NULL, NULL, NULL, DCPREP_ACCUM_DEST);
+
         DestCoords[0].x = DestCoords[3].x = LeftRect;
         DestCoords[0].y = DestCoords[1].y = TopRect;
         DestCoords[1].x = DestCoords[2].x = RightRect;
         DestCoords[2].y = DestCoords[3].y = BottomRect;
         // Use IntGdiPolyPolygon so to support PATH.
         ret = IntGdiPolyPolygon(dc, DestCoords, &PolyCounts, 1);
+        DC_vFinishBlit(dc, NULL);
     }
     else
     {
