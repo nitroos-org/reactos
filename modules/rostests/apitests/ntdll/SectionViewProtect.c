@@ -359,7 +359,7 @@ static void Test_HugeReserve(void)
 static void Test_CommitToLimit(void)
 {
     LARGE_INTEGER MaximumSize, Offset;
-    LONG_PTR Committed0, Limit0, Available0, Committed, Limit, Available, Committed2, Limit2, Available2;
+    LONG_PTR Committed0, Limit0, Available0, Committed, Limit, Available, Committed2, Limit2, Available2, Cap;
     HANDLE Section;
     NTSTATUS Status = STATUS_SUCCESS;
     PUCHAR View = NULL;
@@ -401,8 +401,16 @@ static void Test_CommitToLimit(void)
               Count, Status, Committed, Limit, Available, Basic.NumberOfPhysicalPages, Committed0, Available0);
         ok_ntstatus(Status, STATUS_COMMITMENT_LIMIT);
         ok(Count > 1000, "only %Iu strides\n", Count);
-        /* RAM is still there: at least 1/16 of physical memory available at the failure */
-        ok(Available >= (LONG_PTR)(Basic.NumberOfPhysicalPages / 16), "available %Id pages at the commit failure\n", Available);
+        /*
+         * The failure comes from the cap on resident store pages, 1/32 of physical memory (tables on top, one
+         * per 512 strides; a few pages of slack for other consumers), long before the commit limit: the
+         * system-wide pin is bounded by the cap, not by half the commit ceiling (about 40 % of RAM).
+         */
+        Cap = (LONG_PTR)(Basic.NumberOfPhysicalPages / 32);
+        ok(Count <= (SIZE_T)(Cap + Cap / 512 + 64), "%Iu strides, the cap is %Id store pages\n", Count, Cap);
+        ok(Count >= (SIZE_T)(Cap / 2), "only %Iu strides, the cap is %Id store pages\n", Count, Cap);
+        ok((Available0 - Available) <= (Cap + Cap / 8 + 2048), "%Id pages taken, the cap is %Id store pages\n", Available0 - Available, Cap);
+        ok(Available >= (LONG_PTR)(Basic.NumberOfPhysicalPages / 3), "available %Id pages at the commit failure\n", Available);
         /* Each stride charged its section page and its store page */
         ok((Committed - Committed0) >= (LONG_PTR)(2 * Count), "commit grew by %Id pages for %Iu strides\n", Committed - Committed0, Count);
 
@@ -418,6 +426,35 @@ static void Test_CommitToLimit(void)
     trace("after close: commit %Id, available %Id\n", Committed2, Available2);
     ok((Committed2 - Committed0) < 256, "commit after close %Id, before %Id\n", Committed2, Committed0);
     ok((Available0 - Available2) < 8192, "available after close %Id, before %Id\n", Available2, Available0);
+
+    /* A normal pattern is not hurt by the cap: 512 MB contiguous in a fresh 8 TB section, and the cap is free again */
+    MaximumSize.QuadPart = 0x80000000000LL;
+    Status = NtCreateSection(&Section, SECTION_ALL_ACCESS, NULL, &MaximumSize, PAGE_READWRITE, SEC_RESERVE, NULL);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        View = NULL;
+        Offset.QuadPart = 0x10000000000LL;
+        ViewSize = 0x20000000;
+        Status = NtMapViewOfSection(Section, NtCurrentProcess(), (PVOID *)&View, 0, 0, &Offset, &ViewSize, ViewShare, 0, PAGE_READWRITE);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        if (NT_SUCCESS(Status))
+        {
+            Address = View;
+            Size = ViewSize;
+            Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Address, 0, &Size, MEM_COMMIT, PAGE_READWRITE);
+            ok_ntstatus(Status, STATUS_SUCCESS);
+            if (NT_SUCCESS(Status))
+            {
+                ok(Touch(View, 0x41) == STATUS_SUCCESS, "first page of the contiguous commit\n");
+                ok(Touch(View + ViewSize - PAGE_SIZE, 0x42) == STATUS_SUCCESS, "last page of the contiguous commit\n");
+                ok(Touch(View + ViewSize / 2, 0x43) == STATUS_SUCCESS, "middle of the contiguous commit\n");
+            }
+            NtUnmapViewOfSection(NtCurrentProcess(), View);
+        }
+        NtClose(Section);
+    }
+
     Private = NULL;
     Size = 64 * 1024 * 1024;
     Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Private, 0, &Size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
