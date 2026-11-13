@@ -414,10 +414,52 @@ ExpPushFreeHandleValue(IN PHANDLE_TABLE HandleTable,
 }
 
 //
-// Free fast path: stash the handle on the owning CPU's private LIFO cache under a
-// brief raise to DISPATCH_LEVEL (which pins the CPU and serialises against a same-
-// CPU DPC; the cache line is nonpaged, so no fault can occur in the window). The
-// pageable entry fix-up and any overflow flush happen at PASSIVE, outside the raise.
+// The per-CPU line is touched with the CPU pinned and a same-CPU DPC excluded. On
+// amd64 that is done with interrupts disabled for the few instructions involved:
+// raising to DISPATCH_LEVEL and back costs two CR8 writes (about 18 ns each in a
+// KVM guest) against about 6 ns for pushfq/cli/popfq. Other architectures raise
+// to DISPATCH_LEVEL. The pageable handle table is read before pinning, so only
+// the nonpaged cache line is touched while pinned.
+//
+#ifdef _M_AMD64
+FORCEINLINE
+ULONG_PTR
+ExpPinHandleCache(VOID)
+{
+    ULONG_PTR Flags = __readeflags();
+    _disable();
+    return Flags;
+}
+
+FORCEINLINE
+VOID
+ExpUnpinHandleCache(IN ULONG_PTR Pin)
+{
+    /* __writeeflags has a memory clobber, so the cache-line accesses stay
+       before the popfq, inside the window in which this CPU cannot be preempted */
+    __writeeflags(Pin);
+}
+#else
+FORCEINLINE
+ULONG_PTR
+ExpPinHandleCache(VOID)
+{
+    return KeRaiseIrqlToDpcLevel();
+}
+
+FORCEINLINE
+VOID
+ExpUnpinHandleCache(IN ULONG_PTR Pin)
+{
+    KeLowerIrql((KIRQL)Pin);
+}
+#endif
+
+//
+// Free fast path: stash the handle on the owning CPU's private LIFO cache while
+// pinned (ExpPinHandleCache: pins the CPU and serialises against a same-CPU DPC;
+// the cache line is nonpaged, so no fault can occur in the window). The pageable
+// entry fix-up and any overflow flush happen at PASSIVE, outside the pinned window.
 //
 static
 VOID
@@ -425,9 +467,9 @@ ExpFreeHandleToCpuCache(IN PHANDLE_TABLE HandleTable,
                         IN EXHANDLE Handle,
                         IN PHANDLE_TABLE_ENTRY HandleTableEntry)
 {
-    KIRQL OldIrql;
-    ULONG Cpu, i;
-    PEX_HANDLE_CPU_CACHE Slot;
+    ULONG_PTR Pin;
+    ULONG Cpu, i, CacheCount;
+    PEX_HANDLE_CPU_CACHE CacheBase, Slot;
     ULONG Flushed[EX_HANDLE_CACHE_FLUSH_BATCH];
     ULONG FlushCount = 0;
 
@@ -436,17 +478,20 @@ ExpFreeHandleToCpuCache(IN PHANDLE_TABLE HandleTable,
      * PASSIVE because the entry lives in pageable pool. */
     HandleTableEntry->NextFreeTableEntry = 0;
 
-    OldIrql = KeRaiseIrqlToDpcLevel();
+    CacheCount = HandleTable->PerCpuFreeCacheCount;
+    CacheBase = EX_HANDLE_CACHE_BASE(HandleTable);
+
+    Pin = ExpPinHandleCache();
     Cpu = KeGetCurrentProcessorNumber();
-    if (Cpu >= HandleTable->PerCpuFreeCacheCount)
+    if (Cpu >= CacheCount)
     {
         /* Table predates this CPU coming online: use the shared list instead. */
-        KeLowerIrql(OldIrql);
+        ExpUnpinHandleCache(Pin);
         ExpPushFreeHandleToList(HandleTable, Handle, HandleTableEntry);
         return;
     }
 
-    Slot = EX_HANDLE_CACHE_SLOT(HandleTable, Cpu);
+    Slot = &CacheBase[Cpu];
 
     if (Slot->Count >= EX_HANDLE_CACHE_CAPACITY)
     {
@@ -464,7 +509,7 @@ ExpFreeHandleToCpuCache(IN PHANDLE_TABLE HandleTable,
     /* Push our freed handle on top of this CPU's private stack. */
     Slot->Handles[Slot->Count++] = Handle.AsULONG;
 
-    KeLowerIrql(OldIrql);
+    ExpUnpinHandleCache(Pin);
 
     /* Return the evicted batch to the shared list (lookups are pageable -> PASSIVE). */
     for (i = 0; i < FlushCount; i++)
@@ -988,36 +1033,38 @@ ExpMaterializeCachedHandle(IN PHANDLE_TABLE HandleTable,
 // cache. Returns NULL only when both the cache and the shared list are empty, in
 // which case the caller falls through to the original growth path.
 //
-// IRQL handling: the per-CPU line is touched only while raised to DISPATCH_LEVEL
-// (pins the CPU, serialises against a same-CPU DPC, nonpaged -> no fault); the
-// batch refill and the pageable entry lookups all run at PASSIVE outside the raise.
+// IRQL handling: the per-CPU line is touched only while pinned (ExpPinHandleCache:
+// pins the CPU, serialises against a same-CPU DPC, nonpaged -> no fault); the
+// batch refill and the pageable entry lookups all run at PASSIVE outside it.
 //
 static
 PHANDLE_TABLE_ENTRY
 ExpAllocateHandleFromCpuCache(IN PHANDLE_TABLE HandleTable,
                              OUT PEXHANDLE NewHandle)
 {
-    KIRQL OldIrql;
-    ULONG Cpu, i;
-    PEX_HANDLE_CPU_CACHE Slot;
+    ULONG_PTR Pin;
+    ULONG Cpu, i, CacheCount;
+    PEX_HANDLE_CPU_CACHE CacheBase, Slot;
     ULONG Value;
     ULONG Batch[EX_HANDLE_CACHE_REFILL_BATCH];
     ULONG Got;
 
     /* Fast pop from this CPU's private cache */
-    OldIrql = KeRaiseIrqlToDpcLevel();
+    CacheCount = HandleTable->PerCpuFreeCacheCount;
+    CacheBase = EX_HANDLE_CACHE_BASE(HandleTable);
+    Pin = ExpPinHandleCache();
     Cpu = KeGetCurrentProcessorNumber();
-    if (Cpu < HandleTable->PerCpuFreeCacheCount)
+    if (Cpu < CacheCount)
     {
-        Slot = EX_HANDLE_CACHE_SLOT(HandleTable, Cpu);
+        Slot = &CacheBase[Cpu];
         if (Slot->Count > 0)
         {
             Value = Slot->Handles[--Slot->Count];
-            KeLowerIrql(OldIrql);
+            ExpUnpinHandleCache(Pin);
             return ExpMaterializeCachedHandle(HandleTable, Value, NewHandle);
         }
     }
-    KeLowerIrql(OldIrql);
+    ExpUnpinHandleCache(Pin);
 
     /* Cache empty: refill a batch off the shared free list (PASSIVE) */
     Got = 0;
@@ -1036,15 +1083,15 @@ ExpAllocateHandleFromCpuCache(IN PHANDLE_TABLE HandleTable,
     Value = Batch[0];
     i = 1;
 
-    OldIrql = KeRaiseIrqlToDpcLevel();
+    Pin = ExpPinHandleCache();
     Cpu = KeGetCurrentProcessorNumber();
-    if (Cpu < HandleTable->PerCpuFreeCacheCount)
+    if (Cpu < CacheCount)
     {
-        Slot = EX_HANDLE_CACHE_SLOT(HandleTable, Cpu);
+        Slot = &CacheBase[Cpu];
         while (i < Got && Slot->Count < EX_HANDLE_CACHE_CAPACITY)
             Slot->Handles[Slot->Count++] = Batch[i++];
     }
-    KeLowerIrql(OldIrql);
+    ExpUnpinHandleCache(Pin);
 
     /* Any surplus we could not cache (racing same-CPU refill, or OOB CPU) goes
      * back onto the shared list (PASSIVE). */

@@ -395,8 +395,14 @@ ULONG MiNumberDescriptors = 0;
 /* Number of free pages in the loader block */
 PFN_NUMBER MiNumberOfFreePages = 0;
 
-/* Timeout value for critical sections (2.5 minutes) */
-ULONG MmCritsectTimeoutSeconds = 150; // NT value: 720 * 60 * 60; (30 days)
+/*
+ * Timeout value for critical sections: the NT default of 30 days, so that ntdll
+ * (anything over one hour) waits without a timeout. 2.5 minutes made any lock
+ * legitimately held that long raise STATUS_POSSIBLE_DEADLOCK in the waiters
+ * (e.g. the wined3d lock while a software renderer draws). The Session Manager
+ * CriticalSectionTimeout registry value still overrides it (in seconds).
+ */
+ULONG MmCritsectTimeoutSeconds = 720 * 60 * 60;
 LARGE_INTEGER MmCriticalSectionTimeout;
 
 //

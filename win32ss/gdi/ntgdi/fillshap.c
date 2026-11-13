@@ -112,7 +112,7 @@ IntGdiPolygon(PDC    dc,
         // Draw the Polygon Edges with the current pen ( if not a NULL pen )
         if (!(pbrLine->flAttrs & BR_IS_NULL))
         {
-            if (IntIsEffectiveWidePen(pbrLine))
+            if (PATH_IsWidePen(dc, pbrLine))
             {
                 /* Clear the path */
                 PATH_Delete(dc->dclevel.hPath);
@@ -191,7 +191,7 @@ IntGdiPolygon(PDC    dc,
         if ((dc->fs & DC_REDIRECTION) && dc->pvRedir)
         {
             DC_vRedirKeepOuter(dc, &rclOuter);
-            if (!(pbrLine->flAttrs & BR_IS_NULL) && IntIsEffectiveWidePen(pbrLine))
+            if (!(pbrLine->flAttrs & BR_IS_NULL) && PATH_IsWidePen(dc, pbrLine))
                 DC_vRedirAddDrawn(dc, &dc->erclClip);
             else
                 DC_vRedirAddInclusive(dc, &DestRect, 1);
@@ -347,16 +347,18 @@ NtGdiEllipse(
 
     IntLPtoDP(dc, (LPPOINT)&RectBounds, 2);
 
+    // Setup for dynamic width and height. The centre is rounded before the DC origin is added: the division
+    // truncates towards zero, so with the origin first a window DC and a memory DC would round negative sums
+    // differently and get ellipses one pixel apart.
+    RadiusX = max((RectBounds.right - RectBounds.left) / 2, 2); // Needs room
+    RadiusY = max((RectBounds.bottom - RectBounds.top) / 2, 2);
+    CenterX = (RectBounds.right + RectBounds.left) / 2 + dc->ptlDCOrig.x;
+    CenterY = (RectBounds.bottom + RectBounds.top) / 2 + dc->ptlDCOrig.y;
+
     RectBounds.left += dc->ptlDCOrig.x;
     RectBounds.right += dc->ptlDCOrig.x;
     RectBounds.top += dc->ptlDCOrig.y;
     RectBounds.bottom += dc->ptlDCOrig.y;
-
-    // Setup for dynamic width and height.
-    RadiusX = max((RectBounds.right - RectBounds.left) / 2, 2); // Needs room
-    RadiusY = max((RectBounds.bottom - RectBounds.top) / 2, 2);
-    CenterX = (RectBounds.right + RectBounds.left) / 2;
-    CenterY = (RectBounds.bottom + RectBounds.top) / 2;
 
     DPRINT("Ellipse 1: Left: %d, Top: %d, Right: %d, Bottom: %d\n",
                RectBounds.left,RectBounds.top,RectBounds.right,RectBounds.bottom);
@@ -610,8 +612,10 @@ NtGdiPolyPolyDraw( IN HDC hDC,
              * UnsafeCounts[0] must be 3 * n + 1 (where n >= 1) */
             if (Count == 1 && UnsafeCounts[0] != 1 && UnsafeCounts[0] % 3 == 1)
             {
+                /* The first point is the current position (gdi32 prepends it): the curve starts at the DC's own
+                   current position, the points after it are the control and end points */
                 SafeCounts[0]--;
-                Ret = IntGdiPolyBezierTo(dc, SafePoints, *SafeCounts);
+                Ret = IntGdiPolyBezierTo(dc, SafePoints + 1, *SafeCounts);
             }
             else
             {
@@ -721,7 +725,7 @@ IntRectangle(PDC dc,
     }
 
     /* The box and a one-pixel pen on its edges; a wide pen reaches further: the clip bounds */
-    if (!(pbrLine->flAttrs & BR_IS_NULL) && IntIsEffectiveWidePen(pbrLine))
+    if (!(pbrLine->flAttrs & BR_IS_NULL) && PATH_IsWidePen(dc, pbrLine))
     {
         DC_vRedirAddDrawn(dc, &dc->erclClip);
     }
@@ -757,7 +761,7 @@ IntRectangle(PDC dc,
 
     if (!(pbrLine->flAttrs & BR_IS_NULL))
     {
-        if (IntIsEffectiveWidePen(pbrLine))
+        if (PATH_IsWidePen(dc, pbrLine))
         {
             /* Clear the path */
             PATH_Delete(dc->dclevel.hPath);

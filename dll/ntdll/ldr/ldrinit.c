@@ -87,6 +87,7 @@ ULONG LdrpActiveUnloadCount;
 //extern LIST_ENTRY RtlCriticalSectionList;
 
 VOID NTAPI RtlpInitializeVectoredExceptionHandling(VOID);
+VOID NTAPI RtlpShutdownThreadVectoredHandlers(VOID);
 VOID NTAPI RtlpInitDeferredCriticalSection(VOID);
 VOID NTAPI RtlInitializeHeapManager(VOID);
 NTSTATUS NTAPI RtlpInitializeLocaleTable(VOID);
@@ -1335,6 +1336,9 @@ LdrShutdownThread(VOID)
 
     /* Free the activation context stack */
     RtlFreeThreadActivationContextStack();
+
+    /* The thread's exception dispatches are over, also one it exits from */
+    RtlpShutdownThreadVectoredHandlers();
     DPRINT("LdrShutdownThread() done\n");
 
     return STATUS_SUCCESS;
@@ -3418,6 +3422,13 @@ LdrpInitializeProcess(IN PCONTEXT Context,
     else if (SharedUserData->NXSupportPolicy == NX_SUPPORT_POLICY_ALWAYSOFF)
     {
         ExecuteOptions = MEM_EXECUTE_OPTION_ENABLE | MEM_EXECUTE_OPTION_PERMANENT;
+    }
+    else if ((SharedUserData->NXSupportPolicy == NX_SUPPORT_POLICY_OPTIN) &&
+             NtHeader &&
+             (NtHeader->OptionalHeader.DllCharacteristics & IMAGE_DLLCHARACTERISTICS_NX_COMPAT))
+    {
+        /* An image that opts in (/NXCOMPAT) runs with DEP under the default policy */
+        ExecuteOptions = MEM_EXECUTE_OPTION_DISABLE;
     }
 #ifndef _M_AMD64 /* a native 64-bit process has DEP fixed by the kernel, as on Windows */
     Status = NtSetInformationProcess(NtCurrentProcess(),

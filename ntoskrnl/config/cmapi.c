@@ -137,6 +137,27 @@ CmpDoFlushAll(IN BOOLEAN ForceFlush)
     return Result;
 }
 
+#if DBG
+/*
+ * The check of a live hive in Debug builds, with the hive's security lock: a
+ * key created meanwhile links its 'sk' cell into the ring, and the check
+ * resets the descriptor of a key whose cell it finds half linked.
+ */
+static
+CM_CHECK_REGISTRY_STATUS
+CmpCheckLiveHive(
+    _In_ PCMHIVE Hive)
+{
+    CM_CHECK_REGISTRY_STATUS Status;
+    BOOLEAN Acquired;
+
+    Acquired = CmpAcquireHiveSecurityLock(&Hive->Hive);
+    Status = CmCheckRegistry(Hive, CM_CHECK_REGISTRY_DONT_PURGE_VOLATILES | CM_CHECK_REGISTRY_VALIDATE_HIVE);
+    CmpReleaseHiveSecurityLock(&Hive->Hive, Acquired);
+    return Status;
+}
+#endif
+
 NTSTATUS
 NTAPI
 CmpSetValueKeyNew(IN PHHIVE Hive,
@@ -2404,7 +2425,7 @@ CmFlushKey(IN PCM_KEY_CONTROL_BLOCK Kcb,
          * other keys hold the flusher lock shared, so check only once it is
          * held exclusively: the check repairs what it takes for damage.
          */
-        CheckStatus = CmCheckRegistry(CmHive, CM_CHECK_REGISTRY_DONT_PURGE_VOLATILES | CM_CHECK_REGISTRY_VALIDATE_HIVE);
+        CheckStatus = CmpCheckLiveHive(CmHive);
         ASSERT(CM_CHECK_REGISTRY_SUCCESS(CheckStatus));
 #endif
 
@@ -2985,19 +3006,22 @@ CmpDeepCopyKeyInternal(IN PHHIVE SourceHive,
         DestNode->ClassLength = 0;
     }
 
-    /* Copy the security cell (FIXME: HACKish poor-man version) */
+    /*
+     * The descriptor: a reference to an 'sk' cell of the destination hive with
+     * the same bytes, shared with the keys copied before that have it (one
+     * cell per distinct descriptor, ReferenceCount = the keys that name it,
+     * linked in the destination's ring). A source cell that is not sound is
+     * not copied: the key then has no stored descriptor.
+     */
     if (SrcNode->Security != HCELL_NIL)
     {
-        NewSecCell = CmpCopyCell(SourceHive,
-                                 SrcNode->Security,
-                                 DestinationHive,
-                                 StorageType);
-        if (NewSecCell == HCELL_NIL)
-        {
-            /* Not enough storage space */
-            Status = STATUS_INSUFFICIENT_RESOURCES;
+        Status = CmpCopyKeySecurityCell(SourceHive,
+                                        SrcNode->Security,
+                                        DestinationHive,
+                                        StorageType,
+                                        &NewSecCell);
+        if (!NT_SUCCESS(Status))
             goto Cleanup;
-        }
     }
     DestNode->Security = NewSecCell;
 
@@ -3066,7 +3090,7 @@ Cleanup:
     if (!NT_SUCCESS(Status))
     {
         if (NewSecCell != HCELL_NIL)
-            HvFreeCell(DestinationHive, NewSecCell);
+            CmpReleaseSecurityCell(DestinationHive, NewSecCell);
 
         if (NewClassCell != HCELL_NIL)
             HvFreeCell(DestinationHive, NewClassCell);
@@ -3141,7 +3165,7 @@ CmSaveKey(IN PCM_KEY_CONTROL_BLOCK Kcb,
 
 #if DBG
     /* Make sure this control block has a sane hive */
-    CheckStatus = CmCheckRegistry(HiveToValidate, CM_CHECK_REGISTRY_DONT_PURGE_VOLATILES | CM_CHECK_REGISTRY_VALIDATE_HIVE);
+    CheckStatus = CmpCheckLiveHive(HiveToValidate);
     ASSERT(CM_CHECK_REGISTRY_SUCCESS(CheckStatus));
 #endif
 
@@ -3185,7 +3209,7 @@ Cleanup:
     if (NT_SUCCESS(Status))
     {
         /* Before we say goodbye, make sure the hive is still OK */
-        CheckStatus = CmCheckRegistry(HiveToValidate, CM_CHECK_REGISTRY_DONT_PURGE_VOLATILES | CM_CHECK_REGISTRY_VALIDATE_HIVE);
+        CheckStatus = CmpCheckLiveHive(HiveToValidate);
         ASSERT(CM_CHECK_REGISTRY_SUCCESS(CheckStatus));
     }
 #endif
@@ -3412,9 +3436,9 @@ CmSaveMergedKeys(IN PCM_KEY_CONTROL_BLOCK HighKcb,
 
 #if DBG
     /* Make sure that both the high and low precedence hives are OK */
-    CheckStatus = CmCheckRegistry(HighHiveToValidate, CM_CHECK_REGISTRY_DONT_PURGE_VOLATILES | CM_CHECK_REGISTRY_VALIDATE_HIVE);
+    CheckStatus = CmpCheckLiveHive(HighHiveToValidate);
     ASSERT(CM_CHECK_REGISTRY_SUCCESS(CheckStatus));
-    CheckStatus = CmCheckRegistry(LowHiveToValidate, CM_CHECK_REGISTRY_DONT_PURGE_VOLATILES | CM_CHECK_REGISTRY_VALIDATE_HIVE);
+    CheckStatus = CmpCheckLiveHive(LowHiveToValidate);
     ASSERT(CM_CHECK_REGISTRY_SUCCESS(CheckStatus));
 #endif
 
@@ -3473,9 +3497,9 @@ done:
     if (NT_SUCCESS(Status))
     {
         /* Check those hives again before we say goodbye */
-        CheckStatus = CmCheckRegistry(HighHiveToValidate, CM_CHECK_REGISTRY_DONT_PURGE_VOLATILES | CM_CHECK_REGISTRY_VALIDATE_HIVE);
+        CheckStatus = CmpCheckLiveHive(HighHiveToValidate);
         ASSERT(CM_CHECK_REGISTRY_SUCCESS(CheckStatus));
-        CheckStatus = CmCheckRegistry(LowHiveToValidate, CM_CHECK_REGISTRY_DONT_PURGE_VOLATILES | CM_CHECK_REGISTRY_VALIDATE_HIVE);
+        CheckStatus = CmpCheckLiveHive(LowHiveToValidate);
         ASSERT(CM_CHECK_REGISTRY_SUCCESS(CheckStatus));
     }
 #endif

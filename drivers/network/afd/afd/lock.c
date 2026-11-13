@@ -14,9 +14,87 @@
  * scatter/gather while keeping the size math clear of a 32-bit wrap. */
 #define AFD_MAX_WSA_BUFFER_SIZE (16 * 1024 * 1024)
 
+/* Captures of at most this many bytes (the input of nearly every socket control request) are copied
+ * into a lookaside block without locking the caller's pages: no MDL, no probe-and-lock, no system
+ * mapping, no pool call. */
+#define AFD_FAST_CAPTURE_MAX 1024
+
+static NPAGED_LOOKASIDE_LIST AfdCaptureLookaside;
+
+VOID AfdInitCapture(VOID)
+{
+    ExInitializeNPagedLookasideList(&AfdCaptureLookaside, NULL, NULL, 0,
+                                    AFD_FAST_CAPTURE_MAX, TAG_AFD_DATA_BUFFER, 0);
+}
+
+VOID AfdFreeCapture(VOID)
+{
+    ExDeleteNPagedLookasideList(&AfdCaptureLookaside);
+}
+
+/* Fast capture of a small METHOD_NEITHER ioctl input. Output asks for the input buffer to be written back
+ * at UnlockRequest: that is only possible without the locked pages when the request is completed by the
+ * thread that issued it (Synchronous), so the caller says so. Returns NULL when the fast path does not
+ * apply (Fallback TRUE) or the buffer is not accessible (Fallback FALSE). */
+static PVOID AfdFastCapture(PIRP Irp, PIO_STACK_LOCATION IrpSp, BOOLEAN Output,
+                            KPROCESSOR_MODE *LockMode, BOOLEAN *Fallback)
+{
+    ULONG Length = IrpSp->Parameters.DeviceIoControl.InputBufferLength;
+    PVOID UserBuffer = IrpSp->Parameters.DeviceIoControl.Type3InputBuffer;
+    PVOID Copy;
+    BOOLEAN Failed = FALSE;
+
+    *Fallback = TRUE;
+
+    if (Length > AFD_FAST_CAPTURE_MAX)
+        return NULL;
+
+    if (Output &&
+        (KeGetCurrentIrql() > APC_LEVEL ||
+         (Irp->RequestorMode != KernelMode && IoGetRequestorProcess(Irp) != PsGetCurrentProcess())))
+        return NULL;
+
+    Copy = ExAllocateFromNPagedLookasideList(&AfdCaptureLookaside);
+    if (!Copy)
+    {
+        *Fallback = FALSE;
+        return NULL;
+    }
+
+    _SEH2_TRY {
+        if (Irp->RequestorMode != KernelMode)
+        {
+            ProbeForRead(UserBuffer, Length, sizeof(UCHAR));
+            if (Output)
+                ProbeForWrite(UserBuffer, Length, sizeof(UCHAR));
+        }
+        RtlCopyMemory(Copy, UserBuffer, Length);
+    } _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
+        Failed = TRUE;
+    } _SEH2_END;
+
+    if (Failed)
+    {
+        AFD_DbgPrint(MIN_TRACE,("Failed to access the request buffer\n"));
+        ExFreeToNPagedLookasideList(&AfdCaptureLookaside, Copy);
+        *Fallback = FALSE;
+        return NULL;
+    }
+
+    /* No MDL: DriverContext[0] marks the request as captured. [1] is the user address to write back to. */
+    Irp->Tail.Overlay.DriverContext[0] = Copy;
+    Irp->Tail.Overlay.DriverContext[1] = Output ? UserBuffer : NULL;
+
+    if (LockMode != NULL)
+        *LockMode = UserMode;
+
+    *Fallback = FALSE;
+    return Copy;
+}
+
 PVOID GetLockedData(PIRP Irp, PIO_STACK_LOCATION IrpSp)
 {
-    ASSERT(Irp->MdlAddress);
+    ASSERT(AfdRequestLocked(Irp));
     ASSERT(Irp->Tail.Overlay.DriverContext[0]);
 
     UNREFERENCED_PARAMETER(IrpSp);
@@ -52,14 +130,14 @@ BOOLEAN AfdRequestLengthValid( PIRP Irp,
     }
 }
 
-/* Lock a method_neither request so it'll be available from DISPATCH_LEVEL */
-PVOID LockRequest( PIRP Irp,
-                   PIO_STACK_LOCATION IrpSp,
-                   BOOLEAN Output,
-                   KPROCESSOR_MODE *LockMode) {
+static PVOID AfdLockRequest( PIRP Irp,
+                             PIO_STACK_LOCATION IrpSp,
+                             BOOLEAN Output,
+                             BOOLEAN Synchronous,
+                             KPROCESSOR_MODE *LockMode) {
     BOOLEAN LockFailed = FALSE;
 
-    ASSERT(!Irp->MdlAddress);
+    ASSERT(!AfdRequestLocked(Irp));
 
     /* Backstop: a NULL or empty request buffer is never valid (ASSERTs vanish
      * in release builds). Callers check their structure's minimum size first. */
@@ -73,6 +151,19 @@ PVOID LockRequest( PIRP Irp,
     {
         case IRP_MJ_DEVICE_CONTROL:
         case IRP_MJ_INTERNAL_DEVICE_CONTROL:
+        {
+            BOOLEAN Fallback;
+            PVOID Fast;
+
+            /* An input that is only read, or one written back by a request that completes in the
+             * caller's own context, needs no locked pages */
+            if (!Output || Synchronous)
+            {
+                Fast = AfdFastCapture(Irp, IrpSp, Output, LockMode, &Fallback);
+                if (Fast || !Fallback)
+                    return Fast;
+            }
+        }
 
             Irp->MdlAddress =
             IoAllocateMdl( IrpSp->Parameters.DeviceIoControl.Type3InputBuffer,
@@ -229,12 +320,49 @@ PVOID LockRequest( PIRP Irp,
     return GetLockedData(Irp, IrpSp);
 }
 
+/* Lock a method_neither request so it'll be available from DISPATCH_LEVEL */
+PVOID LockRequest( PIRP Irp,
+                   PIO_STACK_LOCATION IrpSp,
+                   BOOLEAN Output,
+                   KPROCESSOR_MODE *LockMode) {
+    return AfdLockRequest(Irp, IrpSp, Output, FALSE, LockMode);
+}
+
+/* As LockRequest, for a request that is answered and completed by the thread that issued it, at
+ * PASSIVE_LEVEL, before the dispatch routine returns: the output is written back to the caller's buffer
+ * without ever locking it */
+PVOID LockRequestSync( PIRP Irp,
+                       PIO_STACK_LOCATION IrpSp,
+                       BOOLEAN Output,
+                       KPROCESSOR_MODE *LockMode) {
+    return AfdLockRequest(Irp, IrpSp, Output, TRUE, LockMode);
+}
+
 VOID UnlockRequest( PIRP Irp, PIO_STACK_LOCATION IrpSp )
 {
-    ASSERT(Irp->MdlAddress);
+    ASSERT(AfdRequestLocked(Irp));
     ASSERT(Irp->Tail.Overlay.DriverContext[0]);
 
-    UNREFERENCED_PARAMETER(IrpSp);
+    /* Captured without an MDL (AfdFastCapture) */
+    if (!Irp->MdlAddress)
+    {
+        PVOID Copy = Irp->Tail.Overlay.DriverContext[0];
+        PVOID UserBuffer = Irp->Tail.Overlay.DriverContext[1];
+
+        if (UserBuffer != NULL)
+        {
+            _SEH2_TRY {
+                RtlCopyMemory(UserBuffer, Copy, IrpSp->Parameters.DeviceIoControl.InputBufferLength);
+            } _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
+                AFD_DbgPrint(MIN_TRACE,("Exception writing the request buffer\n"));
+            } _SEH2_END;
+        }
+
+        ExFreeToNPagedLookasideList(&AfdCaptureLookaside, Copy);
+        Irp->Tail.Overlay.DriverContext[0] = NULL;
+        Irp->Tail.Overlay.DriverContext[1] = NULL;
+        return;
+    }
 
     /* Check if we need to copy stuff back */
     if (Irp->Tail.Overlay.DriverContext[1] != NULL)
@@ -248,6 +376,8 @@ VOID UnlockRequest( PIRP Irp, PIO_STACK_LOCATION IrpSp )
     MmUnlockPages( Irp->MdlAddress );
     IoFreeMdl( Irp->MdlAddress );
     Irp->MdlAddress = NULL;
+    Irp->Tail.Overlay.DriverContext[0] = NULL;
+    Irp->Tail.Overlay.DriverContext[1] = NULL;
 }
 
 /* Releases the pages that LockBuffers locked for the first Count slots before a later slot failed:
@@ -521,7 +651,7 @@ NTSTATUS NTAPI UnlockAndMaybeComplete
   UINT Information ) {
     Irp->IoStatus.Status = Status;
     Irp->IoStatus.Information = Information;
-    if ( Irp->MdlAddress ) UnlockRequest( Irp, IoGetCurrentIrpStackLocation( Irp ) );
+    if ( AfdRequestLocked(Irp) ) UnlockRequest( Irp, IoGetCurrentIrpStackLocation( Irp ) );
     AfdClearCancelRoutine(Irp);
     SocketStateUnlock( FCB );
     IoCompleteRequest( Irp, IO_NETWORK_INCREMENT );
@@ -534,7 +664,7 @@ NTSTATUS LostSocket( PIRP Irp ) {
     AFD_DbgPrint(MIN_TRACE,("Called.\n"));
     Irp->IoStatus.Information = 0;
     Irp->IoStatus.Status = Status;
-    if ( Irp->MdlAddress ) UnlockRequest( Irp, IoGetCurrentIrpStackLocation( Irp ) );
+    if ( AfdRequestLocked(Irp) ) UnlockRequest( Irp, IoGetCurrentIrpStackLocation( Irp ) );
     IoCompleteRequest( Irp, IO_NO_INCREMENT );
     return Status;
 }

@@ -1625,7 +1625,7 @@ PATH_StrokePath(
     TRACE("Enter %s\n", __FUNCTION__);
 
     pbrLine = dc->dclevel.pbrLine;
-    if (IntIsEffectiveWidePen(pbrLine))
+    if (PATH_IsWidePen(dc, pbrLine))
     {
         pNewPath = PATH_WidenPathEx(dc, pPath);
         if (pNewPath)
@@ -2146,6 +2146,216 @@ PATH_WidenPath(DC *dc)
     return pNewPath;
 }
 
+/* The value of a FLOATOBJ: on x86 FLOATOBJ_GetFloat returns the bits of a float */
+static
+double
+FASTCALL
+PATH_FloatObjValue(PFLOATOBJ pef)
+{
+#ifdef _M_IX86
+    union { FLOATL bits; float value; } u;
+
+    u.bits = FLOATOBJ_GetFloat(pef);
+    return u.value;
+#else
+    return FLOATOBJ_GetFloat(pef);
+#endif
+}
+
+/* How the DC transform changes the shape of the pen.
+ *
+ * A pen's width is in logical units: the world transform and then the mapping mode scale it (an anisotropic mapping
+ * or world transform makes the pen an ellipse). The page scale is applied to the width in whole device pixels (at
+ * least one) before the world transform scales that, as measured on Windows 10 (CreatePen width 25 under
+ * MM_LOENGLISH is 24 pixels, width 7 under MM_LOENGLISH plus a world scale of 2 is 14).
+ *
+ * Returns PEN_XFORM_NONE (draw with the width as it is), PEN_XFORM_SCALE (a circle of *pDevWidth pixels) or
+ * PEN_XFORM_FULL (an ellipse: pT is the logical-to-device matrix, x' = pT[0] x + pT[2] y, y' = pT[1] x + pT[3] y).
+ * Does floating point: the caller saves the floating point state.
+ */
+#define PEN_XFORM_NONE  0
+#define PEN_XFORM_SCALE 1
+#define PEN_XFORM_FULL  2
+
+static
+INT
+FASTCALL
+PATH_GetPenTransform(
+    DC *dc,
+    UINT penWidth,
+    double *pT,
+    UINT *pDevWidth)
+{
+    MATRIX mxPage;
+    PMATRIX pmxWorld = &dc->pdcattr->mxWorldToPage;
+    double sx, sy, wx, wy, fx, fy, a, b, c, d, n1, n2, dot, dev;
+
+    if (penWidth == 0)
+        return PEN_XFORM_NONE;
+
+    DC_vGetPageToDevice(dc, &mxPage);
+    sx = PATH_FloatObjValue(&mxPage.efM11);
+    sy = PATH_FloatObjValue(&mxPage.efM22);
+    if (sx < 0) sx = -sx;
+    if (sy < 0) sy = -sy;
+    a = PATH_FloatObjValue(&pmxWorld->efM11);
+    b = PATH_FloatObjValue(&pmxWorld->efM12);
+    c = PATH_FloatObjValue(&pmxWorld->efM21);
+    d = PATH_FloatObjValue(&pmxWorld->efM22);
+
+    wx = floor(penWidth * sx + 0.5);
+    wy = floor(penWidth * sy + 0.5);
+    if (wx < 1) wx = 1;
+    if (wy < 1) wy = 1;
+    fx = wx / penWidth;
+    fy = wy / penWidth;
+
+    pT[0] = fx * a;
+    pT[1] = fy * b;
+    pT[2] = fx * c;
+    pT[3] = fy * d;
+
+    n1 = sqrt(pT[0] * pT[0] + pT[1] * pT[1]);
+    n2 = sqrt(pT[2] * pT[2] + pT[3] * pT[3]);
+    dot = pT[0] * pT[2] + pT[1] * pT[3];
+    if (n1 <= 0 || n2 <= 0)
+        return PEN_XFORM_NONE;
+
+    if (fabs(n1 - n2) <= 1e-4 * n1 && fabs(dot) <= 1e-4 * n1 * n2)
+    {
+        dev = n1 * penWidth;
+        if (fabs(dev - penWidth) < 1e-3)
+            return PEN_XFORM_NONE;
+        dev = floor(dev + 0.5);
+        if (dev < 1) dev = 1;
+        if (dev > 100000) return PEN_XFORM_NONE;
+        *pDevWidth = (UINT)dev;
+        return PEN_XFORM_SCALE;
+    }
+
+    if (fabs(pT[0] * pT[3] - pT[1] * pT[2]) < 1e-9)
+        return PEN_XFORM_NONE;
+    return PEN_XFORM_FULL;
+}
+
+/* A one-pixel pen (CreatePen width 1) is scaled like any other pen: wide when the transform makes it more than a pixel */
+BOOL
+FASTCALL
+PATH_IsWidePen(DC *dc, PBRUSH pbrLine)
+{
+    KFLOATING_SAVE fpsave;
+    double T[4];
+    UINT devWidth = 0;
+    INT iKind;
+    BOOL bWide = FALSE;
+
+    if (IntIsEffectiveWidePen(pbrLine))
+        return TRUE;
+
+    if (pbrLine->lWidth != 1 ||
+        !(pbrLine->flAttrs & BR_IS_OLDSTYLEPEN) ||
+        (pbrLine->ulPenStyle & PS_STYLE_MASK) != PS_SOLID)
+        return FALSE;
+
+    if (dc->pdcattr->iMapMode == MM_TEXT && dc->pdcattr->iGraphicsMode == GM_COMPATIBLE)
+        return FALSE;
+
+    KeSaveFloatingPointState(&fpsave);
+    iKind = PATH_GetPenTransform(dc, 1, T, &devWidth);
+    if (iKind == PEN_XFORM_SCALE)
+        bWide = (devWidth > 1);
+    else if (iKind == PEN_XFORM_FULL)
+        bWide = (T[0] * T[0] + T[1] * T[1] > 2.25 || T[2] * T[2] + T[3] * T[3] > 2.25); /* an axis of 1.5 pixels or more */
+    KeRestoreFloatingPointState(&fpsave);
+
+    return bWide;
+}
+
+/* Widens pPath (device points) with a pen of penWidth logical units under the DC transform */
+static
+PPATH
+FASTCALL
+PATH_WidenPathScaled(DC *dc, PPATH pPath, UINT penWidth, UINT penStyle)
+{
+    KFLOATING_SAVE fpsave;
+    double T[4], det;
+    UINT devWidth = 0;
+    INT iKind, i;
+    PPATH pTmp, pNew;
+    const INT K = 16;
+    BOOL bOk;
+
+    KeSaveFloatingPointState(&fpsave);
+    iKind = PATH_GetPenTransform(dc, penWidth, T, &devWidth);
+    KeRestoreFloatingPointState(&fpsave);
+
+    if (iKind == PEN_XFORM_NONE)
+        return IntGdiWidenPath(pPath, penWidth, penStyle, dc->dclevel.laPath.eMiterLimit);
+    if (iKind == PEN_XFORM_SCALE)
+        return IntGdiWidenPath(pPath, devWidth, penStyle, dc->dclevel.laPath.eMiterLimit);
+
+    /* The pen space is K times finer: a width that would overflow keeps its device width */
+    if (penWidth > (1u << 24))
+        return IntGdiWidenPath(pPath, penWidth, penStyle, dc->dclevel.laPath.eMiterLimit);
+
+    /* An ellipse: widen with a round pen in pen space (the logical space, K times finer) and map the outline to the
+       device. Entries are integer points, so K keeps the precision. */
+    det = T[0] * T[3] - T[1] * T[2];
+    pTmp = PATH_CreatePath(pPath->numEntriesUsed);
+    if (!pTmp)
+        return IntGdiWidenPath(pPath, penWidth, penStyle, dc->dclevel.laPath.eMiterLimit);
+
+    bOk = TRUE;
+    KeSaveFloatingPointState(&fpsave);
+    for (i = 0; i < pPath->numEntriesUsed && bOk; i++)
+    {
+        double qx, qy;
+        POINT pt;
+
+        qx = K * (T[3] * pPath->pPoints[i].x - T[2] * pPath->pPoints[i].y) / det;
+        qy = K * (-T[1] * pPath->pPoints[i].x + T[0] * pPath->pPoints[i].y) / det;
+        if (qx > 5e8 || qx < -5e8 || qy > 5e8 || qy < -5e8)
+        {
+            bOk = FALSE;
+            break;
+        }
+        pt.x = (LONG)floor(qx + 0.5);
+        pt.y = (LONG)floor(qy + 0.5);
+        bOk = PATH_AddEntry(pTmp, &pt, pPath->pFlags[i]);
+    }
+    KeRestoreFloatingPointState(&fpsave);
+
+    pTmp->state = pPath->state;
+    if (!bOk)
+    {
+        HPATH hTmp = pTmp->BaseObject.hHmgr;
+        PATH_UnlockPath(pTmp);
+        PATH_Delete(hTmp);
+        return IntGdiWidenPath(pPath, penWidth, penStyle, dc->dclevel.laPath.eMiterLimit);
+    }
+
+    pNew = IntGdiWidenPath(pTmp, penWidth * K, penStyle, dc->dclevel.laPath.eMiterLimit);
+    {
+        HPATH hTmp = pTmp->BaseObject.hHmgr;
+        PATH_UnlockPath(pTmp);
+        PATH_Delete(hTmp);
+    }
+    if (!pNew)
+        return NULL;
+
+    KeSaveFloatingPointState(&fpsave);
+    for (i = 0; i < pNew->numEntriesUsed; i++)
+    {
+        double qx = pNew->pPoints[i].x, qy = pNew->pPoints[i].y;
+
+        pNew->pPoints[i].x = (LONG)floor((T[0] * qx + T[2] * qy) / K + 0.5);
+        pNew->pPoints[i].y = (LONG)floor((T[1] * qx + T[3] * qy) / K + 0.5);
+    }
+    KeRestoreFloatingPointState(&fpsave);
+
+    return pNew;
+}
+
 PPATH
 FASTCALL
 PATH_WidenPathEx(DC *dc, PPATH pPath)
@@ -2210,7 +2420,7 @@ PATH_WidenPathEx(DC *dc, PPATH pPath)
         return FALSE;
     }
 
-    return IntGdiWidenPath(pPath, penWidth, penStyle, dc->dclevel.laPath.eMiterLimit);
+    return PATH_WidenPathScaled(dc, pPath, penWidth, penStyle);
 }
 
 static inline INT int_from_fixed(FIXED f)

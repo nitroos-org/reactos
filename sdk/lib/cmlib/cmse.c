@@ -30,12 +30,26 @@
  *    descriptor can share a cell, so a missing entry costs space, never
  *    correctness.
  *
+ * The work per operation is bounded whatever the hive holds (a crafted hive
+ * can put any number of byte-identical descriptors, or descriptors with the
+ * same hash, in one hash list): a list keeps at most
+ * CMP_SECURITY_BUCKET_LIMIT entries (more cells are simply not offered for
+ * sharing), a search compares the bytes of at most CMP_SECURITY_COMPARE_LIMIT
+ * descriptors, the cell a new cell joins in the ring is kept in
+ * CMHIVE::SecurityRingAnchor instead of being searched for, and an entry is
+ * removed from the list of its descriptor's hash only. Filling the cache at
+ * load visits every cell once (CmpAddSecurityRingToCache).
+ *
  * Nothing below trusts a cell index, a size or a link read from the hive: the
  * hive file is untrusted input. CmpGetCheckedSecurityCell is the only place
  * that turns a cell index into a pointer to an 'sk' cell.
  */
 
 /* DECLARATIONS **************************************************************/
+
+/* Entries a hash list keeps, and descriptors a search compares byte by byte */
+#define CMP_SECURITY_BUCKET_LIMIT   256
+#define CMP_SECURITY_COMPARE_LIMIT  16
 
 #if !defined(CMLIB_HOST) && !defined(_BLDR_)
 BOOLEAN
@@ -311,6 +325,8 @@ CmpAddSecurityCellToCache(IN PCMHIVE CmHive,
 {
     PCM_KEY_SECURITY Security;
     PCM_KEY_SECURITY_CACHE Entry;
+    PLIST_ENTRY List, Head;
+    ULONG ConvKey, Entries = 0;
 
     /* The caller holds the hive's security lock, or the hive is not live yet */
     if (!CmpSecurityCacheReady(CmHive))
@@ -323,14 +339,28 @@ CmpAddSecurityCellToCache(IN PCMHIVE CmHive,
         return FALSE;
     }
 
+    /* A new cell joins the ring of its type after this one (see the insert) */
+    if (CmHive->SecurityRingAnchor[HvGetCellType(SecurityCell)] == HCELL_NIL)
+        CmHive->SecurityRingAnchor[HvGetCellType(SecurityCell)] = SecurityCell;
+
+    /* Once per cell, and a bounded list: a cell not cached is only not shared */
+    ConvKey = CmpHashDescriptor(&Security->Descriptor, Security->DescriptorLength);
+    Head = &CmHive->SecurityHash[ConvKey % CMP_SECURITY_HASH_LISTS];
+    for (List = Head->Flink; List != Head; List = List->Flink)
+    {
+        if (CONTAINING_RECORD(List, CM_KEY_SECURITY_CACHE, List)->Cell == SecurityCell)
+            return TRUE;
+        if (++Entries >= CMP_SECURITY_BUCKET_LIMIT)
+            return TRUE;
+    }
+
     Entry = CmpAllocate(sizeof(*Entry), TRUE, TAG_CMSD);
     if (!Entry)
         return FALSE;
     Entry->Cell = SecurityCell;
     Entry->DescriptorLength = Security->DescriptorLength;
-    Entry->ConvKey = CmpHashDescriptor(&Security->Descriptor, Security->DescriptorLength);
-    InsertTailList(&CmHive->SecurityHash[Entry->ConvKey % CMP_SECURITY_HASH_LISTS],
-                   &Entry->List);
+    Entry->ConvKey = ConvKey;
+    InsertTailList(Head, &Entry->List);
     CmHive->SecurityCount++;
     return TRUE;
 }
@@ -341,20 +371,30 @@ CmpRemoveFromSecurityCache(IN PHHIVE Hive,
                            IN HCELL_INDEX SecurityCell)
 {
     PCMHIVE CmHive = (PCMHIVE)Hive;
-    PLIST_ENTRY List, Next;
+    PLIST_ENTRY List, Next, Head;
     PCM_KEY_SECURITY_CACHE Entry;
-    ULONG i;
+    PCM_KEY_SECURITY Security;
+    ULONG i, First = 0, Last = CMP_SECURITY_HASH_LISTS;
 
     if (!CmpSecurityCacheReady(CmHive))
         return;
 
-    /* The entry is on the list of the descriptor's hash; scan them all rather
-       than read the descriptor of a cell that is going away */
-    for (i = 0; i < CMP_SECURITY_HASH_LISTS; i++)
+    /*
+     * The entry is on the list of the descriptor's hash (the bytes of a cell
+     * never change once it is written), at most CMP_SECURITY_BUCKET_LIMIT
+     * entries long. Only a cell that is no longer a sound 'sk' cell, which no
+     * caller hands in, makes this look at every list.
+     */
+    Security = CmpGetCheckedSecurityCell(Hive, SecurityCell, NULL);
+    if (Security)
     {
-        for (List = CmHive->SecurityHash[i].Flink;
-             List != &CmHive->SecurityHash[i];
-             List = Next)
+        First = CmpHashDescriptor(&Security->Descriptor, Security->DescriptorLength) % CMP_SECURITY_HASH_LISTS;
+        Last = First + 1;
+    }
+    for (i = First; i < Last; i++)
+    {
+        Head = &CmHive->SecurityHash[i];
+        for (List = Head->Flink; List != Head; List = Next)
         {
             Next = List->Flink;
             Entry = CONTAINING_RECORD(List, CM_KEY_SECURITY_CACHE, List);
@@ -389,6 +429,8 @@ CmpFreeSecurityCache(IN PCMHIVE CmHive)
         }
     }
     CmHive->SecurityCount = 0;
+    CmHive->SecurityRingAnchor[Stable] = HCELL_NIL;
+    CmHive->SecurityRingAnchor[Volatile] = HCELL_NIL;
 }
 
 /*
@@ -406,8 +448,8 @@ CmpBuildSecurityCache(IN PCMHIVE CmHive)
     PHHIVE Hive = &CmHive->Hive;
     PCM_KEY_NODE Root;
     PCM_KEY_SECURITY Security;
-    HCELL_INDEX Start, Cell;
-    ULONG Steps, Limit;
+    HCELL_INDEX Start, Cell, Mark;
+    ULONG Steps, Limit, Power;
     BOOLEAN Success = TRUE;
 
     if (!CmpSecurityCacheReady(CmHive) || !Hive->BaseBlock)
@@ -425,8 +467,16 @@ CmpBuildSecurityCache(IN PCMHIVE CmHive)
     if (Start == HCELL_NIL)
         return TRUE;
 
+    /*
+     * A ring that does not come back to Start (a crafted Flink into the
+     * middle of it) is found with Brent's cycle detection: Mark is the cell
+     * met at the last power of two steps, so a loop that misses Start is
+     * seen within a few times its length, not after Limit steps.
+     */
     Limit = CmpSecurityCellLimit(Hive);
     Cell = Start;
+    Mark = Start;
+    Power = 1;
     for (Steps = 0; Steps < Limit; Steps++)
     {
         Security = CmpGetCheckedSecurityCell(Hive, Cell, NULL);
@@ -445,11 +495,69 @@ CmpBuildSecurityCache(IN PCMHIVE CmHive)
         Cell = Security->Flink;
         if (Cell == Start)
             return Success;
+        if (Cell == Mark)
+            break;
+        if (Steps + 1 == Power)
+        {
+            Mark = Cell;
+            Power *= 2;
+        }
     }
 
-    /* More cells than the hive can hold: the ring does not close */
+    /* The ring does not close */
     DPRINT1("Hive 0x%p: security ring does not close\n", Hive);
     return FALSE;
+}
+
+/*
+ * Add to the cache every cell of the ring that SecurityCell is in. For a hive
+ * being loaded, after CmpBuildSecurityCache: a hive whose root has no
+ * descriptor (every hive installed before keys got one) still has rings, made
+ * by the keys created since, and their cells must be found again to be shared
+ * and to join new cells to.
+ *
+ * MarkSeen records every cell any walk of this load has visited (the caller's
+ * set, cmcheck.c): a walk stops at a cell met before, by itself (a loop that
+ * misses its start) or by an earlier walk (the rest of that ring was added
+ * then), so a load visits each cell once however many keys name cells of one
+ * ring and however the hive links them. The walk also stops at the first cell
+ * that is not sound and after as many steps as the hive can hold cells.
+ * Returns FALSE when MarkSeen could not record a cell (no memory): the caller
+ * stops filling the cache. Never fails the load.
+ */
+BOOLEAN
+NTAPI
+CmpAddSecurityRingToCache(IN PCMHIVE CmHive,
+                          IN HCELL_INDEX SecurityCell,
+                          IN PCMP_SECURITY_CELL_SEEN MarkSeen,
+                          IN PVOID Context)
+{
+    PHHIVE Hive = &CmHive->Hive;
+    PCM_KEY_SECURITY Security;
+    HCELL_INDEX Cell = SecurityCell;
+    ULONG Steps, Limit;
+    BOOLEAN Seen;
+
+    if (!CmpSecurityCacheReady(CmHive))
+        return TRUE;
+
+    Limit = CmpSecurityCellLimit(Hive);
+    for (Steps = 0; Steps < Limit; Steps++)
+    {
+        if (!MarkSeen(Context, Cell, &Seen))
+            return FALSE;
+        if (Seen)
+            return TRUE;
+        Security = CmpGetCheckedSecurityCell(Hive, Cell, NULL);
+        if (!Security)
+            return TRUE;
+        if (CmpIsSaneRelativeDescriptor(&Security->Descriptor, Security->DescriptorLength))
+            CmpAddSecurityCellToCache(CmHive, Cell);
+        Cell = Security->Flink;
+        if (Cell == SecurityCell)
+            return TRUE;
+    }
+    return TRUE;
 }
 
 static
@@ -463,17 +571,21 @@ CmpFindMatchingDescriptorCellLocked(IN PCMHIVE CmHive,
     PLIST_ENTRY List;
     PCM_KEY_SECURITY_CACHE Entry;
     PCM_KEY_SECURITY Security;
-    ULONG ConvKey;
+    ULONG ConvKey, Entries = 0, Compares = 0;
 
     *SecurityCell = HCELL_NIL;
     if (!CmpSecurityCacheReady(CmHive) || DescriptorLength == 0)
         return FALSE;
 
+    /* Bounded: a list longer than the limit, or more candidates with the same
+       hash and length than the compare limit, only means no sharing */
     ConvKey = CmpHashDescriptor(Descriptor, DescriptorLength);
     for (List = CmHive->SecurityHash[ConvKey % CMP_SECURITY_HASH_LISTS].Flink;
-         List != &CmHive->SecurityHash[ConvKey % CMP_SECURITY_HASH_LISTS];
+         List != &CmHive->SecurityHash[ConvKey % CMP_SECURITY_HASH_LISTS] &&
+         Entries < CMP_SECURITY_BUCKET_LIMIT && Compares < CMP_SECURITY_COMPARE_LIMIT;
          List = List->Flink)
     {
+        Entries++;
         Entry = CONTAINING_RECORD(List, CM_KEY_SECURITY_CACHE, List);
         if (Entry->ConvKey != ConvKey ||
             Entry->DescriptorLength != DescriptorLength ||
@@ -484,6 +596,7 @@ CmpFindMatchingDescriptorCellLocked(IN PCMHIVE CmHive,
 
         /* Compare in the cell. A shared cell that already has the most
            references a ULONG can count is not given out again */
+        Compares++;
         Security = CmpGetCheckedSecurityCell(&CmHive->Hive, Entry->Cell, NULL);
         if (Security &&
             Security->DescriptorLength == DescriptorLength &&
@@ -532,7 +645,7 @@ CmpInsertSecurityDescriptorLocked(IN PCMHIVE CmHive,
     PCM_KEY_SECURITY Security, Anchor, AnchorFlink;
     HCELL_INDEX Cell, AnchorCell = HCELL_NIL;
     PLIST_ENTRY List;
-    ULONG i;
+    ULONG i, Looked = 0;
 
     *SecurityCell = HCELL_NIL;
 
@@ -557,22 +670,39 @@ CmpInsertSecurityDescriptorLocked(IN PCMHIVE CmHive,
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    /* The cell joins the ring of its storage type after the first cached cell of that type */
-    for (i = 0; i < CMP_SECURITY_HASH_LISTS && AnchorCell == HCELL_NIL; i++)
+    /*
+     * The cell joins the ring of its storage type after the hive's anchor cell
+     * of that type: the first cell of the type cached, moved on to its Flink
+     * when it is unlinked (CmpRemoveSecurityCellList). Should the anchor not
+     * be a sound cell of the ring, any cached cell of the type is taken (a
+     * bounded look), else the new cell starts a ring of its own.
+     */
+    if (CmpSecurityCacheReady(CmHive))
     {
-        for (List = CmHive->SecurityHash[i].Flink;
-             CmpSecurityCacheReady(CmHive) && List != &CmHive->SecurityHash[i];
-             List = List->Flink)
+        AnchorCell = CmHive->SecurityRingAnchor[Type];
+        if (AnchorCell != HCELL_NIL &&
+            (HvGetCellType(AnchorCell) != (ULONG)Type || !CmpValidateSecurityCell(Hive, AnchorCell)))
         {
-            HCELL_INDEX Candidate = CONTAINING_RECORD(List, CM_KEY_SECURITY_CACHE, List)->Cell;
-
-            if (HvGetCellType(Candidate) == (ULONG)Type &&
-                CmpValidateSecurityCell(Hive, Candidate))
+            AnchorCell = HCELL_NIL;
+        }
+        for (i = 0; i < CMP_SECURITY_HASH_LISTS && AnchorCell == HCELL_NIL && Looked < CMP_SECURITY_BUCKET_LIMIT; i++)
+        {
+            for (List = CmHive->SecurityHash[i].Flink;
+                 List != &CmHive->SecurityHash[i] && Looked < CMP_SECURITY_BUCKET_LIMIT;
+                 List = List->Flink)
             {
-                AnchorCell = Candidate;
-                break;
+                HCELL_INDEX Candidate = CONTAINING_RECORD(List, CM_KEY_SECURITY_CACHE, List)->Cell;
+
+                Looked++;
+                if (HvGetCellType(Candidate) == (ULONG)Type &&
+                    CmpValidateSecurityCell(Hive, Candidate))
+                {
+                    AnchorCell = Candidate;
+                    break;
+                }
             }
         }
+        CmHive->SecurityRingAnchor[Type] = AnchorCell;
     }
     Anchor = AnchorCell != HCELL_NIL ? CmpGetCheckedSecurityCell(Hive, AnchorCell, NULL) : NULL;
     AnchorFlink = Anchor ? CmpGetCheckedSecurityCell(Hive, Anchor->Flink, NULL) : NULL;
@@ -659,6 +789,7 @@ CmpRemoveSecurityCellList(IN PHHIVE Hive,
                           IN HCELL_INDEX SecurityCell)
 {
     PCM_KEY_SECURITY SecurityData, FlinkCell, BlinkCell;
+    ULONG Type;
 
     PAGED_CODE();
 
@@ -669,6 +800,15 @@ CmpRemoveSecurityCellList(IN PHHIVE Hive,
 
     FlinkCell = CmpGetCheckedSecurityCell(Hive, SecurityData->Flink, NULL);
     BlinkCell = CmpGetCheckedSecurityCell(Hive, SecurityData->Blink, NULL);
+
+    /* The cell a new one would join: its neighbour, or none if it was alone */
+    Type = HvGetCellType(SecurityCell);
+    if (CmpSecurityCacheReady((PCMHIVE)Hive) && ((PCMHIVE)Hive)->SecurityRingAnchor[Type] == SecurityCell)
+    {
+        ((PCMHIVE)Hive)->SecurityRingAnchor[Type] =
+            (FlinkCell && SecurityData->Flink != SecurityCell && HvGetCellType(SecurityData->Flink) == Type) ?
+            SecurityData->Flink : HCELL_NIL;
+    }
 
     /* A ring that is not intact is left alone; never fail on a bad hive */
     if (FlinkCell && BlinkCell &&

@@ -1841,6 +1841,101 @@ SeAssignSecurityEx(
 
 /**
  * @brief
+ * The checks made on a creator's explicit security descriptor before it is
+ * assigned to a new object on behalf of a user-mode caller, as Windows 10
+ * makes them when a registry key is created with one (oracle probe of the
+ * registry ACL follow-up, NtCreateKey statuses):
+ *  - a SACL that is present (a NULL or an empty one included) needs
+ *    SeSecurityPrivilege enabled, unless it holds nothing but mandatory label
+ *    ACEs: STATUS_PRIVILEGE_NOT_HELD. This is checked first;
+ *  - an owner must be the token's user or one of its groups that has
+ *    SE_GROUP_OWNER (a deny-only group does not), unless SeRestorePrivilege
+ *    is enabled: STATUS_INVALID_OWNER. SeTakeOwnershipPrivilege does not
+ *    help, and the primary group is not checked.
+ * Kernel-mode callers are not checked.
+ *
+ * @param[in] ExplicitDescriptor
+ * The creator's descriptor (captured).
+ *
+ * @param[in] SubjectContext
+ * The creator's subject context.
+ *
+ * @param[in] AccessMode
+ * The mode the request came from.
+ *
+ * @return
+ * STATUS_SUCCESS, STATUS_PRIVILEGE_NOT_HELD or STATUS_INVALID_OWNER.
+ */
+NTSTATUS
+NTAPI
+SepCheckCreatorDescriptor(
+    _In_ PSECURITY_DESCRIPTOR ExplicitDescriptor,
+    _In_ PSECURITY_SUBJECT_CONTEXT SubjectContext,
+    _In_ KPROCESSOR_MODE AccessMode)
+{
+    PRIVILEGE_SET Privilege;
+    BOOLEAN Present, Defaulted, LabelOnly, Valid = FALSE;
+    PACL Sacl;
+    PSID Owner;
+    PACE_HEADER Ace;
+    PTOKEN Token;
+    ULONG i;
+
+    PAGED_CODE();
+
+    if (AccessMode == KernelMode || !ExplicitDescriptor)
+        return STATUS_SUCCESS;
+
+    Privilege.PrivilegeCount = 1;
+    Privilege.Control = PRIVILEGE_SET_ALL_NECESSARY;
+    Privilege.Privilege[0].Attributes = SE_PRIVILEGE_ENABLED;
+
+    /* The SACL */
+    if (NT_SUCCESS(RtlGetSaclSecurityDescriptor(ExplicitDescriptor, &Present, &Sacl, &Defaulted)) && Present)
+    {
+        LabelOnly = (Sacl != NULL && Sacl->AceCount != 0);
+        for (i = 0; LabelOnly && i < Sacl->AceCount; i++)
+        {
+            if (!NT_SUCCESS(RtlGetAce(Sacl, i, (PVOID *)&Ace)) ||
+                Ace->AceType != SYSTEM_MANDATORY_LABEL_ACE_TYPE)
+            {
+                LabelOnly = FALSE;
+            }
+        }
+        Privilege.Privilege[0].Luid = SeSecurityPrivilege;
+        if (!LabelOnly && !SePrivilegeCheck(&Privilege, SubjectContext, AccessMode))
+            return STATUS_PRIVILEGE_NOT_HELD;
+    }
+
+    /* The owner */
+    if (!NT_SUCCESS(RtlGetOwnerSecurityDescriptor(ExplicitDescriptor, &Owner, &Defaulted)) || !Owner)
+        return STATUS_SUCCESS;
+
+    SeLockSubjectContext(SubjectContext);
+    Token = SubjectContext->ClientToken ? SubjectContext->ClientToken : SubjectContext->PrimaryToken;
+    if (Token)
+    {
+        for (i = 0; i < Token->UserAndGroupCount && !Valid; i++)
+        {
+            if (!RtlEqualSid(Token->UserAndGroups[i].Sid, Owner))
+                continue;
+            /* Index 0 is the user; nothing that is deny-only */
+            Valid = !(Token->UserAndGroups[i].Attributes & SE_GROUP_USE_FOR_DENY_ONLY) &&
+                    (i == 0 || (Token->UserAndGroups[i].Attributes & SE_GROUP_OWNER));
+        }
+    }
+    SeUnlockSubjectContext(SubjectContext);
+    if (Valid)
+        return STATUS_SUCCESS;
+
+    Privilege.Privilege[0].Luid = SeRestorePrivilege;
+    if (SePrivilegeCheck(&Privilege, SubjectContext, AccessMode))
+        return STATUS_SUCCESS;
+    return STATUS_INVALID_OWNER;
+}
+
+/**
+ * @brief
  * Assigns a security descriptor for a new object.
  *
  * @param[in] ParentDescriptor

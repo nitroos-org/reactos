@@ -230,7 +230,12 @@ set_subsystem(kernel32 console)
 ################# END  HACK #################
 
 target_link_libraries(kernel32 psapi_static kernel32_vista_static kernel32_shared wine chkstk ${PSEH_LIB})
-add_importlibs(kernel32 ntdll)
+if(DLL_EXPORT_VERSION LESS 0x600)
+    # kernel32_vista_static uses ntdll functions (RtlLcidToLocaleName, ...) that ntdll exports from 0x600 on only
+    add_importlibs(kernel32 ntdll_vista ntdll)
+else()
+    add_importlibs(kernel32 ntdll)
+endif()
 add_pch(kernel32 k32.h SOURCE)
 add_dependencies(kernel32 psdk errcodes asm)
 add_cd_file(TARGET kernel32 DESTINATION reactos/system32 FOR all)

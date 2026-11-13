@@ -62,4 +62,18 @@ if(DLL_EXPORT_VERSION GREATER_EQUAL 0x601)
     file(WRITE ${SYSSETUP_INF} "${SYSSETUP_CONTENT}")
 endif()
 
+if(DLL_EXPORT_VERSION LESS 0x601)
+    # vbscript.dll is only built from 0x601 on and wbemprox.dll from 0x600 on; setup shows an error box
+    # for every DLL on the registration list that is missing, so they are not listed below that
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/syssetup.inf)
+    file(READ ${CMAKE_CURRENT_SOURCE_DIR}/syssetup.inf SYSSETUP_CONTENT)
+    string(REPLACE "11,,vbscript.dll,1\n" "" SYSSETUP_CONTENT "${SYSSETUP_CONTENT}")
+    if(DLL_EXPORT_VERSION LESS 0x600)
+        string(REPLACE "11,wbem,wbemprox.dll,1\n" "" SYSSETUP_CONTENT "${SYSSETUP_CONTENT}")
+    endif()
+    set(SYSSETUP_INF ${CMAKE_CURRENT_BINARY_DIR}/syssetup.inf)
+    string(REPLACE "\n" "\r\n" SYSSETUP_CONTENT "${SYSSETUP_CONTENT}")
+    file(WRITE ${SYSSETUP_INF} "${SYSSETUP_CONTENT}")
+endif()
+
 add_cd_file(FILE ${SYSSETUP_INF} DESTINATION reactos/inf FOR all)

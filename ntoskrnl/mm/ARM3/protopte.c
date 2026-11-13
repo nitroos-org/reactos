@@ -30,6 +30,24 @@
  * of all sections together are capped at 1/32 of physical memory (MiSparseInitializeStore). A process may hold at most a
  * quarter of the range (MI_SPARSE_OWNER_CHUNKS); a reserved section charges nothing else while it is only
  * reserved.
+ *
+ * Charge versus Segment->NumberOfCommittedPages: the segment counts the committed pages of the section (one per
+ * Prototype PTE that was written non-zero) and returns exactly that many when it is deleted. The store pages and
+ * tables are not part of that count: they are charged here, one page each, and returned here (MiFreeSparsePrototypePtes),
+ * so a commit of N section pages costs N + (store pages and tables it had to populate) of the system commit
+ * (SYSTEM_PERFORMANCE_INFORMATION.CommittedPages), which can be N + about N/512 + 2 for a contiguous range and 2N for one
+ * page per 2 MB. NumberOfCommittedPages stays N. The two never overlap, so nothing is returned twice, and a populate that
+ * fails half way keeps what it made (charged, returned when the section goes) and gives back the rest of its charge.
+ *
+ * Limits that are documented here and not enforced differently: four processes holding a quarter of the range each
+ * (sixteen 8 TB sections) fill it, and every later large SEC_RESERVE create fails for everybody until a handle closes;
+ * the page directories of the range (at most 2 x 512 pages, never freed) are not charged to anybody. A chunk that is
+ * leaked (a store table still referenced at free) stays counted against its owner, and keeps the owner referenced.
+ *
+ * Debug builds only: one-shot knobs for the tests (SectionSparseStore), values under
+ * HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management, each reset to 0 when taken:
+ *   SparseInjectPopulateFailAt = N  the Nth store page or table of the next populate cannot be allocated
+ *   SparseInjectBusyChunk      = 1  the next freed store table counts as still referenced (leaked chunk)
  */
 
 #include <ntoskrnl.h>
@@ -67,6 +85,14 @@ static PFN_NUMBER MiSparseZeroPage;
 static PFN_NUMBER MiSparseZeroTable;
 static MMPTE MiSparseZeroPte;
 static MMPDE MiSparseZeroPde;
+
+#if DBG
+/* Fault injection, see the header comment: armed from the registry at the entry of populate and free */
+static ULONG MiSparseDbgFailAt;     /* a populate in progress: fail the Nth page, 0 = none (mutex) */
+static ULONG MiSparseDbgCount;
+static ULONG MiSparseDbgArmedFailAt;
+static LONG MiSparseDbgArmedBusy;
+#endif
 
 /* Chunks of the range per creating process (the process object is referenced while it has some) */
 typedef struct _MI_SPARSE_OWNER
@@ -141,6 +167,36 @@ MiInitializeSparsePrototypePtes(VOID)
                                  NULL);
 }
 
+#if DBG
+/* Take the knobs: read them, set them back to 0, remember them. Callers run at PASSIVE or APC level. */
+static
+VOID
+MiSparseDbgArm(VOID)
+{
+    static const WCHAR Path[] = L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\Session Manager\\Memory Management";
+    static const PCWSTR Names[] = { L"SparseInjectPopulateFailAt", L"SparseInjectBusyChunk" };
+    ULONG Values[2] = { 0, 0 }, Zero = 0, i;
+    RTL_QUERY_REGISTRY_TABLE Table[3];
+
+    if (KeGetCurrentIrql() > APC_LEVEL) return;
+    RtlZeroMemory(Table, sizeof(Table));
+    for (i = 0; i < 2; i++)
+    {
+        Table[i].Flags = RTL_QUERY_REGISTRY_DIRECT;
+        Table[i].Name = (PWSTR)Names[i];
+        Table[i].EntryContext = &Values[i];
+    }
+    if (!NT_SUCCESS(RtlQueryRegistryValues(RTL_REGISTRY_ABSOLUTE, Path, Table, NULL, NULL))) return;
+    for (i = 0; i < 2; i++)
+    {
+        if (Values[i] == 0) continue;
+        RtlWriteRegistryValue(RTL_REGISTRY_ABSOLUTE, Path, Names[i], REG_DWORD, &Zero, sizeof(Zero));
+    }
+    if (Values[0]) InterlockedExchange((PLONG)&MiSparseDbgArmedFailAt, Values[0]);
+    if (Values[1]) InterlockedExchange(&MiSparseDbgArmedBusy, 1);
+}
+#endif
+
 /*
  * A page off the free lists, zeroed, not mapped anywhere yet. PFN lock not held on entry or exit. Short of
  * pages, kick the balancer and sleep a few milliseconds, a bounded number of rounds, then 0.
@@ -161,6 +217,15 @@ MiSparseGetZeroedPage(VOID)
     KIRQL OldIrql;
     ULONG Color, Retry;
     LARGE_INTEGER Delay;
+
+#if DBG
+    if (MiSparseDbgFailAt && (++MiSparseDbgCount == MiSparseDbgFailAt))
+    {
+        DPRINT1("Sparse Prototype PTEs: injected failure of store page %lu\n", MiSparseDbgCount);
+        MiSparseDbgFailAt = 0;
+        return 0;
+    }
+#endif
 
     for (Retry = 0; ; Retry++)
     {
@@ -424,8 +489,15 @@ MiPopulateSparsePrototypePtes(IN PMMPTE FirstPte,
     Va = (ULONG_PTR)PAGE_ALIGN(FirstPte);
     LastVa = (ULONG_PTR)PAGE_ALIGN(LastPte);
 
+#if DBG
+    MiSparseDbgArm();
+#endif
     KeAcquireGuardedMutex(&MiSparseProtoMutex);
     ASSERT(MiSparseProtoReady);
+#if DBG
+    MiSparseDbgFailAt = InterlockedExchange((PLONG)&MiSparseDbgArmedFailAt, 0);
+    MiSparseDbgCount = 0;
+#endif
 
     /* Count what is missing (tables, then pages; a missing table means all its pages are missing) */
     Needed = 0;
@@ -530,6 +602,9 @@ MiPopulateSparsePrototypePtes(IN PMMPTE FirstPte,
      */
     if (Changed) KeFlushEntireTb(TRUE, TRUE);
 Done:
+#if DBG
+    MiSparseDbgFailAt = 0;
+#endif
     KeReleaseGuardedMutex(&MiSparseProtoMutex);
     return Status;
 }
@@ -559,13 +634,25 @@ MiFreeSparsePrototypePtes(IN PMMPTE PrototypePtes,
     BOOLEAN Busy;
     KIRQL OldIrql;
 
+    ULONG Leaked = 0;
+#if DBG
+    BOOLEAN InjectBusy;
+#endif
+
     PAGED_CODE();
     ASSERT(MI_IS_SPARSE_PROTOTYPE_PTE(PrototypePtes));
     ASSERT(((ULONG_PTR)PrototypePtes & (MI_SPARSE_CHUNK_SIZE - 1)) == 0);
     Chunks = MiSparseChunksFor(PteCount);
     First = (ULONG)(((ULONG_PTR)PrototypePtes - MI_SPARSE_PROTO_START) / MI_SPARSE_CHUNK_SIZE);
 
+#if DBG
+    MiSparseDbgArm();
+#endif
     KeAcquireGuardedMutex(&MiSparseProtoMutex);
+#if DBG
+    /* Only a segment that has a table to free takes the injection (see the loop) */
+    InjectBusy = (MiSparseDbgArmedBusy != 0);
+#endif
     for (Chunk = 0; Chunk < Chunks; Chunk++)
     {
         Va = (ULONG_PTR)PrototypePtes + (ULONG64)Chunk * MI_SPARSE_CHUNK_SIZE;
@@ -587,11 +674,20 @@ MiFreeSparsePrototypePtes(IN PMMPTE PrototypePtes,
                 Count++;
             }
             MiReleasePfnLock(OldIrql);
+#if DBG
+            if (InjectBusy)
+            {
+                InjectBusy = FALSE;
+                InterlockedExchange(&MiSparseDbgArmedBusy, 0);
+                Busy = TRUE;
+            }
+#endif
             if (Busy)
             {
-                /* Keep the table, its pages, their charge and the chunk: never reused */
+                /* Keep the table, its pages, their charge and the chunk: never reused, still the owner's */
                 DPRINT1("Sparse Prototype PTE table %p still referenced: kept, chunk not reused\n", (PVOID)Va);
                 MiSparseProtoChunksLeaked++;
+                Leaked++;
                 continue;
             }
 
@@ -633,7 +729,8 @@ MiFreeSparsePrototypePtes(IN PMMPTE PrototypePtes,
     ASSERT(Entry && (Entry->Chunks >= Chunks));
     if (Entry)
     {
-        Entry->Chunks -= min(Entry->Chunks, Chunks);
+        /* A leaked chunk stays counted against its owner, and keeps the owner referenced with it */
+        Entry->Chunks -= min(Entry->Chunks, Chunks - Leaked);
         if (Entry->Chunks == 0)
         {
             RtlDeleteElementGenericTableAvl(&MiSparseOwnerTable, &Key);

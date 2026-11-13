@@ -15,11 +15,17 @@ spec2def(kernelbase_ros.dll kernelbase_ros.spec ADD_IMPORTLIB)
 add_library(kernelbase_ros MODULE
     DllMain.c
     appcontainer.c
-    memory.c
     synch.c
     time.c
     ${CMAKE_CURRENT_BINARY_DIR}/kernelbase_ros_stubs.c
     ${CMAKE_CURRENT_BINARY_DIR}/kernelbase_ros.def)
+
+# NtAllocateVirtualMemoryEx, NtMapViewOfSectionEx, NtUnmapViewOfSectionEx and NtCreateLowBoxToken are exported by
+# ntdll from 0x600 on only
+if(DLL_EXPORT_VERSION GREATER_EQUAL 0x600)
+    target_sources(kernelbase_ros PRIVATE memory.c)
+    target_compile_definitions(kernelbase_ros PRIVATE KERNELBASE_NT6_NTDLL)
+endif()
 
 set_module_type(kernelbase_ros win32dll ENTRYPOINT DllMain 12)
 target_link_libraries(kernelbase_ros psapi_static kernelbase_static wine chkstk)

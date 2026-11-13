@@ -187,6 +187,7 @@ list(APPEND SOURCE
     RtlCopyMappedMemory.c
     RtlCriticalSection.c
     RtlCriticalSectionRace.c
+    RtlCriticalSectionTimeout.c
     RtlDebugInformation.c
     RtlDeleteAce.c
     RtlDetermineDosPathNameType.c
@@ -215,6 +216,8 @@ list(APPEND SOURCE
     RtlGetUnloadEventTrace.c
     RtlPlaceholderCompatibilityMode.c
     RtlHandle.c
+    RtlHeapChurn.c
+    RtlHeapDecommit.c
     RtlHeapFrontEnd.c
     RtlHeapValidate.c
     RtlHeapTailCheck.c
@@ -260,11 +263,13 @@ list(APPEND SOURCE
     RtlUTF8.c
     RtlUpcaseUnicodeStringToCountedOemString.c
     RtlValidateUnicodeString.c
+    RtlNullAcl.c
     RtlStringSdBounds.c
     FaultContext.c
     PageFaultAddress.c
     SectionFaultCost.c
     SectionPageLeak.c
+    SectionSparseStore.c
     SectionViewProtect.c
     SectionVirtualLockLeak.c
     strcpy_s.c

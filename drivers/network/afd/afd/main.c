@@ -1774,6 +1774,7 @@ static VOID NTAPI
 AfdUnload(PDRIVER_OBJECT DriverObject)
 {
     UNREFERENCED_PARAMETER(DriverObject);
+    AfdFreeCapture();
 }
 
 NTSTATUS NTAPI
@@ -1808,6 +1809,8 @@ DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
     {
         return Status;
     }
+
+    AfdInitCapture();
 
     DeviceExt = DeviceObject->DeviceExtension;
     KeInitializeSpinLock( &DeviceExt->Lock );

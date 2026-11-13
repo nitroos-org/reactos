@@ -712,7 +712,7 @@ static HRESULT stringify_array(stringify_ctx_t *ctx, jsdisp_t *obj)
             }
         }
 
-        _itow_s(i, name, ARRAY_SIZE(name), 10);
+        _itow(i, name, 10); /* at most 10 digits and the terminator: msvcrt exports _itow_s from 0x600 on only */
         hres = stringify(ctx, obj, name);
         if(FAILED(hres))
             return hres;

@@ -220,11 +220,80 @@ CmpDoCreateChild(IN PHHIVE Hive,
     PCELL_DATA CellData;
     ULONG StorageType;
     PCM_KEY_CONTROL_BLOCK Kcb;
-    PSECURITY_DESCRIPTOR NewDescriptor;
+    PSECURITY_DESCRIPTOR NewDescriptor, ParentSd = NULL;
+    HCELL_INDEX SecurityCell = HCELL_NIL;
+    BOOLEAN StoreExplicit;
+
+    *KeyCell = HCELL_NIL;
 
     /* Get the storage type */
     StorageType = Stable;
     if (ParseContext->CreateOptions & REG_OPTION_VOLATILE) StorageType = Volatile;
+
+    /*
+     * The new key's descriptor, before anything is allocated: inherited from
+     * the parent's (its effective one when the parent has none stored, see
+     * CmpCaptureParentSecurity) and the caller's explicit descriptor, as on
+     * Windows: the DACL is not auto-inherited (inherited ACEs carry no
+     * INHERITED_ACE), the SACL is (SE_SACL_AUTO_INHERITED is set, as in the
+     * oracle's stored descriptors, control 0x8804). It is stored in an 'sk'
+     * cell of the key's storage type, shared with the keys that have the same
+     * one. Without a parent descriptor (legacy mode) nothing is stored and the
+     * key has none, as before.
+     */
+    if (!ParentDescriptor)
+        ParentDescriptor = ParentSd = CmpCaptureParentSecurity(ParentKcb);
+    /*
+     * Setup stores no inherited descriptors, but the one a user-mode creator names (setup
+     * builds the hives this way). The kernel's own creates, which pass the hive default,
+     * keep leaving the key without one.
+     */
+    StoreExplicit = !ParentDescriptor && AccessMode == UserMode &&
+                    AccessState->SecurityDescriptor && CmpStoreExplicitKeySecurity();
+
+    /*
+     * An explicit descriptor that is stored must be one the caller may
+     * assign, as on Windows: an owner of its own (or SeRestorePrivilege) and
+     * a SACL only with SeSecurityPrivilege (SepCheckCreatorDescriptor). Where
+     * nothing is stored (legacy mode) the descriptor is not used and not
+     * checked, as before.
+     */
+    if ((ParentDescriptor || StoreExplicit) && AccessState->SecurityDescriptor)
+    {
+        Status = SepCheckCreatorDescriptor(AccessState->SecurityDescriptor,
+                                           &AccessState->SubjectSecurityContext,
+                                           AccessMode);
+        if (!NT_SUCCESS(Status))
+        {
+            if (ParentSd)
+                CmpFreeParentSecurity(ParentSd);
+            return Status;
+        }
+    }
+    Status = SeAssignSecurityEx(ParentDescriptor,
+                                AccessState->SecurityDescriptor,
+                                &NewDescriptor,
+                                NULL,
+                                TRUE,
+                                (ParentDescriptor || StoreExplicit) ? SEF_SACL_AUTO_INHERIT : 0,
+                                &AccessState->SubjectSecurityContext,
+                                &CmpKeyObjectType->TypeInfo.GenericMapping,
+                                CmpKeyObjectType->TypeInfo.PoolType);
+    if (ParentSd)
+        CmpFreeParentSecurity(ParentSd);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    if (ParentDescriptor || StoreExplicit)
+    {
+        Status = CmpInsertSecurityDescriptor((PCMHIVE)Hive,
+                                             NewDescriptor,
+                                             RtlLengthSecurityDescriptor(NewDescriptor),
+                                             StorageType,
+                                             &SecurityCell);
+    }
+    SeDeassignSecurity(&NewDescriptor);
+    if (!NT_SUCCESS(Status))
+        return Status;
 
     /* Allocate the child */
     *KeyCell = HvAllocateCell(Hive,
@@ -321,7 +390,7 @@ CmpDoCreateChild(IN PHHIVE Hive,
     KeyNode->SubKeyLists[Volatile] = HCELL_NIL;
     KeyNode->ValueList.Count = 0;
     KeyNode->ValueList.List = HCELL_NIL;
-    KeyNode->Security = HCELL_NIL;
+    KeyNode->Security = SecurityCell;
     KeyNode->Class = ClassCell;
     KeyNode->ClassLength = ParseContext->Class.Length;
     KeyNode->MaxValueDataLen = 0;
@@ -357,42 +426,21 @@ CmpDoCreateChild(IN PHHIVE Hive,
     /* Link it with the KCB */
     EnlistKeyBodyWithKCB(KeyBody, CMP_ENLIST_KCB_LOCKED_EXCLUSIVE);
 
-    /* Assign security */
-    Status = SeAssignSecurity(ParentDescriptor,
-                              AccessState->SecurityDescriptor,
-                              &NewDescriptor,
-                              TRUE,
-                              &AccessState->SubjectSecurityContext,
-                              &CmpKeyObjectType->TypeInfo.GenericMapping,
-                              CmpKeyObjectType->TypeInfo.PoolType);
-    if (NT_SUCCESS(Status))
-    {
-        /*
-         * FIXME: We must acquire a security lock when assigning
-         * a security descriptor to this hive but since the
-         * CmpAssignSecurityDescriptor function does nothing
-         * (we lack the necessary security management implementations
-         * anyway), do not do anything for now.
-         */
-        Status = CmpAssignSecurityDescriptor(Kcb, NewDescriptor);
-    }
-
-    /* Now that the security descriptor is copied in the hive, we can free the original */
-    SeDeassignSecurity(&NewDescriptor);
-
-    if (NT_SUCCESS(Status))
-    {
-        /* Send notification to registered callbacks */
-        CmpReportNotify(Kcb, Hive, Kcb->KeyCell, REG_NOTIFY_CHANGE_NAME);
-    }
+    /* Send notification to registered callbacks */
+    CmpReportNotify(Kcb, Hive, Kcb->KeyCell, REG_NOTIFY_CHANGE_NAME);
 
 Quickie:
     /* Check if we got here because of failure */
     if (!NT_SUCCESS(Status))
     {
-        /* Free any cells we might've allocated */
-        if (ParseContext->Class.Length > 0) HvFreeCell(Hive, ClassCell);
-        HvFreeCell(Hive, *KeyCell);
+        /* Free any cells we might've allocated, and the key's reference to its 'sk' cell */
+        if (ClassCell != HCELL_NIL) HvFreeCell(Hive, ClassCell);
+        if (*KeyCell != HCELL_NIL)
+        {
+            HvFreeCell(Hive, *KeyCell);
+            *KeyCell = HCELL_NIL;
+        }
+        if (SecurityCell != HCELL_NIL) CmpReleaseSecurityCell(Hive, SecurityCell);
     }
 
     /* Return status */
@@ -1051,6 +1099,10 @@ CmpCreateLinkNode(IN PHHIVE Hive,
         KeyNode->ValueList.Count = 0;
         KeyNode->ValueList.List = HCELL_NIL;
         KeyNode->ClassLength = 0;
+        KeyNode->Class = HCELL_NIL;
+
+        /* A link node (a hive exit) has no descriptor: the hive root it leads to has */
+        KeyNode->Security = HCELL_NIL;
 
         /* Reference the root node */
         KeyNode->ChildHiveReference.KeyHive = Context->ChildHive.KeyHive;
