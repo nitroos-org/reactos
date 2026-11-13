@@ -726,6 +726,100 @@ static DWORD WINAPI SeqThread(PVOID Arg)
 
 
 
+/* ---- the focused reopen test: each thread creates its own file, writes it, maps and flushes it, closes everything and opens it
+ * again by name at once.  A name that was just written must always be found (an open may fail for lack of resources, 1450,
+ * which is counted; 2 or 3 is a failure). ---- */
+typedef struct { ULONG Id; WCHAR Path[MAX_PATH]; ULONG Rounds; ULONGLONG Rng; ULONG NoRes; ULONG Missing; ULONG Done; } REOPEN;
+
+static DWORD WINAPI ReopenThread(PVOID Arg)
+{
+    REOPEN *q = Arg;
+    PUCHAR Buf = VirtualAlloc(NULL, 256 * 1024, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ULONG Round;
+    if (!Buf)
+        return 1;
+    memset(Buf, 0x37 + q->Id, 256 * 1024);
+    for (Round = 0; Round < q->Rounds; Round++)
+    {
+        HANDLE H, Map;
+        PUCHAR View;
+        DWORD W, Err = 0;
+        ULONG Sz, Try;
+        q->Rng = q->Rng * 6364136223846793005ULL + 1442695040888963407ULL;
+        Sz = 4096 + (ULONG)(q->Rng >> 33) % (256 * 1024 - 4096);
+        q->Done = Round + 1;
+        H = CreateFileW(q->Path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, 0, NULL);
+        if (H == INVALID_HANDLE_VALUE)
+        {
+            if (GetLastError() == ERROR_NO_SYSTEM_RESOURCES)
+                q->NoRes++;
+            else
+                ok(0, "[r%lu] create failed %lu\n", q->Id, GetLastError());
+            continue;
+        }
+        WriteFile(H, Buf, Sz, &W, NULL);
+        SetEndOfFile(H);
+        Map = CreateFileMappingW(H, NULL, PAGE_READWRITE, 0, 0, NULL);
+        View = Map ? MapViewOfFile(Map, FILE_MAP_WRITE, 0, 0, 0) : NULL;
+        if (View)
+        {
+            View[0] = (UCHAR)Round;
+            if (Round & 1)
+                FlushViewOfFile(View, 0);
+            UnmapViewOfFile(View);
+        }
+        if (Map)
+            CloseHandle(Map);
+        CloseHandle(H);
+        for (Try = 0; Try < 4; Try++)
+        {
+            H = CreateFileW(q->Path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                            (Round & 2) ? FILE_FLAG_NO_BUFFERING : 0, NULL);
+            if (H != INVALID_HANDLE_VALUE)
+            {
+                CloseHandle(H);
+                break;
+            }
+            Err = GetLastError();
+            if (Err == ERROR_NO_SYSTEM_RESOURCES || Err == ERROR_NOT_ENOUGH_MEMORY)
+                q->NoRes++;
+            else
+            {
+                q->Missing++;
+                ok(0, "[r%lu round %lu try %lu] reopen of the file just written failed %lu\n", q->Id, Round, Try, Err);
+                break;
+            }
+        }
+    }
+    return 0;
+}
+
+static VOID RunReopen(PCWSTR DirPath, ULONG Threads, ULONG Rounds)
+{
+    REOPEN Q[8];
+    HANDLE Th[8];
+    ULONG i;
+    if (Threads > 8)
+        Threads = 8;
+    for (i = 0; i < Threads; i++)
+    {
+        memset(&Q[i], 0, sizeof(Q[i]));
+        Q[i].Id = i + 1;
+        Q[i].Rounds = Rounds;
+        Q[i].Rng = 0x9e3779b97f4a7c15ULL * (i + 7) + GetTickCount();
+        _snwprintf(Q[i].Path, MAX_PATH - 1, L"%ls\\reopen%02lu.bin", DirPath, i);
+        Th[i] = CreateThread(NULL, 0, ReopenThread, &Q[i], 0, NULL);
+    }
+    for (i = 0; i < Threads; i++)
+    {
+        WaitForSingleObject(Th[i], 3600000);
+        CloseHandle(Th[i]);
+        DeleteFileW(Q[i].Path);
+        trace("reopen thread %lu: %lu rounds, %lu without resources, %lu not found\n", Q[i].Id, Rounds, Q[i].NoRes, Q[i].Missing);
+        Fails += Q[i].Missing;
+    }
+}
+
 /* Cache churn: a file bigger than the cache written once, then read through again and again (cached,
  * sequential: read-ahead, views recycled by the cache manager). */
 static WCHAR ChurnPath[MAX_PATH];
@@ -866,6 +960,27 @@ START_TEST(FsRegrow)
             Thr4 = _wtoi(Env);
         GetEnvironmentVariableW(L"FSREGROW_SEQROUNDS", Env, MAX_PATH);
         RunSequence(Dir, Thr4, _wtoi(Env));
+        if (ChurnTh)
+        {
+            StopChurn = 1;
+            WaitForSingleObject(ChurnTh, 60000);
+            CloseHandle(ChurnTh);
+        }
+    }
+    if (GetEnvironmentVariableW(L"FSREGROW_REOPEN", Env, MAX_PATH) && _wtoi(Env) > 0)
+    {
+        HANDLE ChurnTh = NULL;
+        WCHAR E2[MAX_PATH];
+        ULONG RThreads = 8, RRounds = _wtoi(Env);
+        if (GetEnvironmentVariableW(L"FSREGROW_CHURNMB", E2, MAX_PATH) && _wtoi(E2) > 0)
+        {
+            ChurnMb = _wtoi(E2);
+            _snwprintf(ChurnPath, MAX_PATH - 1, L"%ls\\churn.bin", Dir);
+            ChurnTh = CreateThread(NULL, 0, ChurnThread, NULL, 0, NULL);
+        }
+        if (GetEnvironmentVariableW(L"FSREGROW_SEQTHREADS", E2, MAX_PATH))
+            RThreads = _wtoi(E2);
+        RunReopen(Dir, RThreads, RRounds);
         if (ChurnTh)
         {
             StopChurn = 1;
