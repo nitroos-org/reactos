@@ -341,9 +341,139 @@ static BOOL RunThreads(PCSTR Name, BOOL Noise, ULONG SuspendMode)
     return Stopped;
 }
 
+/* The exception record of the three kinds of access violation (checked on Windows 10 22H2, x64 and 32-bit
+   under WOW64): ExceptionInformation[0] is 0 for a read, 1 for a write and 8 for an instruction fetch,
+   [1] is the address, there are two parameters and no flags. A process with DEP reports a fetch from a
+   page that is not executable (or not accessible, or at address 0) as 8 (the 32-bit process of the test
+   opts in with /NXCOMPAT, which is what makes DEP apply to it under the default policy). */
+#ifndef PF_NX_ENABLED
+#define PF_NX_ENABLED 12
+#endif
+
+typedef VOID (__cdecl *ACCESS_FN)(ULONG_PTR);
+
+static volatile LONG AccessArmed;
+static volatile DWORD AccessThread;
+static struct
+{
+    LONG Got;
+    ULONG Code, Flags, Parameters;
+    ULONG_PTR Information[2];
+} AccessRecord;
+
+static LONG CALLBACK AccessHandler(PEXCEPTION_POINTERS Pointers)
+{
+    PEXCEPTION_RECORD Record = Pointers->ExceptionRecord;
+    PCONTEXT Context = Pointers->ContextRecord;
+    PULONG_PTR Stack;
+
+    if (!AccessArmed || (GetCurrentThreadId() != AccessThread))
+        return EXCEPTION_CONTINUE_SEARCH;
+
+    AccessRecord.Got = 1;
+    AccessRecord.Code = Record->ExceptionCode;
+    AccessRecord.Flags = Record->ExceptionFlags;
+    AccessRecord.Parameters = Record->NumberParameters;
+    AccessRecord.Information[0] = Record->ExceptionInformation[0];
+    AccessRecord.Information[1] = Record->ExceptionInformation[1];
+
+    /* Every case faults at the first instruction after a call that pushes nothing: return to the caller */
+#ifdef _M_AMD64
+    Stack = (PULONG_PTR)Context->Rsp;
+    Context->Rip = Stack[0];
+    Context->Rsp += sizeof(ULONG_PTR);
+#else
+    Stack = (PULONG_PTR)Context->Esp;
+    Context->Eip = Stack[0];
+    Context->Esp += sizeof(ULONG_PTR);
+#endif
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+static VOID CheckAccess(PCSTR Name, ACCESS_FN Function, ULONG_PTR Argument, ULONG_PTR Address, ULONG_PTR Type)
+{
+    RtlZeroMemory(&AccessRecord, sizeof(AccessRecord));
+    AccessThread = GetCurrentThreadId();
+    AccessArmed = 1;
+    Function(Argument);
+    AccessArmed = 0;
+
+    ok(AccessRecord.Got == 1, "%s: no access violation\n", Name);
+    if (!AccessRecord.Got)
+        return;
+    ok(AccessRecord.Code == STATUS_ACCESS_VIOLATION, "%s: code %lx\n", Name, AccessRecord.Code);
+    ok(AccessRecord.Flags == 0, "%s: flags %lx\n", Name, AccessRecord.Flags);
+    ok(AccessRecord.Parameters == 2, "%s: %lu parameters\n", Name, AccessRecord.Parameters);
+    ok(AccessRecord.Information[0] == Type, "%s: access type %Iu, expected %Iu\n", Name, AccessRecord.Information[0], Type);
+    ok(AccessRecord.Information[1] == Address, "%s: address %Ix, expected %Ix\n", Name, AccessRecord.Information[1], Address);
+}
+
+static VOID TestAccessTypes(VOID)
+{
+#ifdef _M_AMD64
+    static const UCHAR ReadCode[] = { 0x48, 0x8B, 0x01, 0xC3 };     /* mov rax, [rcx]; ret */
+    static const UCHAR WriteCode[] = { 0x48, 0x89, 0x01, 0xC3 };    /* mov [rcx], rax; ret */
+#else
+    static const UCHAR ReadCode[] = { 0x8B, 0x4C, 0x24, 0x04, 0x8B, 0x01, 0xC3 };   /* mov ecx, [esp+4]; mov eax, [ecx]; ret */
+    static const UCHAR WriteCode[] = { 0x8B, 0x4C, 0x24, 0x04, 0x89, 0x01, 0xC3 };  /* mov ecx, [esp+4]; mov [ecx], eax; ret */
+#endif
+    PUCHAR Code, Data, ReadOnly, NoAccess;
+    PIMAGE_NT_HEADERS NtHeaders;
+    PVOID Handler;
+    BOOL Dep;
+
+    Code = VirtualAlloc(NULL, PAGE_SIZE, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+    Data = VirtualAlloc(NULL, PAGE_SIZE, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    ReadOnly = VirtualAlloc(NULL, PAGE_SIZE, MEM_RESERVE | MEM_COMMIT, PAGE_READONLY);
+    NoAccess = VirtualAlloc(NULL, PAGE_SIZE, MEM_RESERVE | MEM_COMMIT, PAGE_NOACCESS);
+    ok(Code && Data && ReadOnly && NoAccess, "VirtualAlloc failed: %lu\n", GetLastError());
+    if (!(Code && Data && ReadOnly && NoAccess))
+        return;
+    RtlCopyMemory(Code, ReadCode, sizeof(ReadCode));
+    RtlCopyMemory(Code + 32, WriteCode, sizeof(WriteCode));
+    Data[0] = 0xC3;     /* ret: executable only if the page were */
+
+    Handler = AddVectoredExceptionHandler(TRUE, AccessHandler);
+    ok(Handler != NULL, "AddVectoredExceptionHandler failed\n");
+    if (!Handler)
+        return;
+
+    CheckAccess("read at 0x10", (ACCESS_FN)Code, 0x10, 0x10, 0);
+    CheckAccess("read of a no-access page", (ACCESS_FN)Code, (ULONG_PTR)NoAccess + 8, (ULONG_PTR)NoAccess + 8, 0);
+    CheckAccess("write at 0x10", (ACCESS_FN)(Code + 32), 0x10, 0x10, 1);
+    CheckAccess("write to a no-access page", (ACCESS_FN)(Code + 32), (ULONG_PTR)NoAccess + 8, (ULONG_PTR)NoAccess + 8, 1);
+    CheckAccess("write to a read-only page", (ACCESS_FN)(Code + 32), (ULONG_PTR)ReadOnly + 8, (ULONG_PTR)ReadOnly + 8, 1);
+
+    /* DEP applies to a process whose image opts in, with the default policy (the x64 kernel and the
+       processors without NX need no check) */
+    NtHeaders = RtlImageNtHeader(GetModuleHandleW(NULL));
+    Dep = IsProcessorFeaturePresent(PF_NX_ENABLED) &&
+          (SharedUserData->NXSupportPolicy != NX_SUPPORT_POLICY_ALWAYSOFF) &&
+          ((SharedUserData->NXSupportPolicy != NX_SUPPORT_POLICY_OPTIN) ||
+           (NtHeaders && (NtHeaders->OptionalHeader.DllCharacteristics & IMAGE_DLLCHARACTERISTICS_NX_COMPAT)));
+    if (Dep)
+    {
+        CheckAccess("execute a data page", (ACCESS_FN)Data, 0, (ULONG_PTR)Data, 8);
+        CheckAccess("execute a no-access page", (ACCESS_FN)NoAccess, 0, (ULONG_PTR)NoAccess, 8);
+        CheckAccess("execute at 0", (ACCESS_FN)0, 0, 0, 8);
+    }
+    else
+    {
+        skip("DEP does not apply to this process\n");
+    }
+
+    RemoveVectoredExceptionHandler(Handler);
+    VirtualFree(Code, 0, MEM_RELEASE);
+    VirtualFree(Data, 0, MEM_RELEASE);
+    VirtualFree(ReadOnly, 0, MEM_RELEASE);
+    VirtualFree(NoAccess, 0, MEM_RELEASE);
+}
+
 START_TEST(FaultContext)
 {
     PVOID Handler;
+
+    TestAccessTypes();
 
     NoAccessPage = VirtualAlloc(NULL, PAGE_SIZE, MEM_RESERVE | MEM_COMMIT, PAGE_NOACCESS);
     ok(NoAccessPage != NULL, "VirtualAlloc failed: %lu\n", GetLastError());
