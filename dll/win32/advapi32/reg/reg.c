@@ -5742,51 +5742,135 @@ RegUnLoadKeyW(HKEY hKey,
 
 #endif // _ADVAPI32_VISTA_
 
+#ifndef LOAD_LIBRARY_AS_IMAGE_RESOURCE
+#define LOAD_LIBRARY_AS_IMAGE_RESOURCE 0x00000020
+#endif
+
 /******************************************************************************
- * load_string [Internal]
+ * find_mui_string [Internal]
  *
- * This is basically a copy of user32/resource.c's LoadStringW. Necessary to
- * avoid importing user32, which is higher level than advapi32. Helper for
- * RegLoadMUIString.
+ * Locates string resource resId in the string table of hModule (the length-prefixed
+ * layout of RT_STRING blocks). Returns the length in characters, 0 with *pError set on failure.
+ * Not user32's LoadStringW: advapi32 must not import user32.
  */
-static int load_string(HINSTANCE hModule, UINT resId, LPWSTR pwszBuffer, INT cMaxChars)
+static DWORD find_mui_string(HMODULE hModule, UINT resId, const WCHAR **ppString, LONG *pError)
 {
-    HGLOBAL hMemory;
     HRSRC hResource;
-    WCHAR* pString;
-    int idxString;
+    HGLOBAL hMemory;
+    const WCHAR *pString;
+    UINT idxString;
 
-    /* Negative values have to be inverted. */
-    if (HIWORD(resId) == 0xffff)
-        resId = (UINT)(-((INT)resId));
-
-    /* Load the resource into memory and get a pointer to it. */
-    hResource = FindResourceW(hModule, MAKEINTRESOURCEW(LOWORD(resId >> 4) + 1), (LPWSTR)RT_STRING);
-    if (!hResource) return 0;
-    hMemory = LoadResource(hModule, hResource);
-    if (!hMemory) return 0;
-    pString = LockResource(hMemory);
-
-    /* Strings are length-prefixed. Lowest nibble of resId is an index. */
-    idxString = resId & 0xf;
-    while (idxString--) pString += *pString + 1;
-
-    /* If no buffer is given, return length of the string. */
-    if (!pwszBuffer) return *pString;
-
-    /* Else copy over the string, respecting the buffer size. */
-    cMaxChars = (*pString < cMaxChars) ? *pString : (cMaxChars - 1);
-    if (cMaxChars >= 0)
+    hResource = FindResourceW(hModule, MAKEINTRESOURCEW((resId >> 4) + 1), (LPWSTR)RT_STRING);
+    if (!hResource)
     {
-        memcpy(pwszBuffer, pString + 1, cMaxChars * sizeof(WCHAR));
-        pwszBuffer[cMaxChars] = L'\0';
+        *pError = GetLastError();
+        return 0;
+    }
+    hMemory = LoadResource(hModule, hResource);
+    pString = hMemory ? LockResource(hMemory) : NULL;
+    if (!pString)
+    {
+        *pError = GetLastError();
+        return 0;
     }
 
-    return cMaxChars;
+    /* Strings are length-prefixed; the lowest nibble of resId is the index in the block. */
+    for (idxString = resId & 0xf; idxString; idxString--)
+        pString += *pString + 1;
+
+    if (!*pString)
+    {
+        *pError = ERROR_NOT_FOUND;
+        return 0;
+    }
+    *ppString = pString + 1;
+    return *pString;
+}
+
+/******************************************************************************
+ * load_mui_string [Internal]
+ *
+ * Helper for RegLoadMUIStringW: loads string resId of the module file_name into the buffer.
+ * *pcchRequired is the length including the terminating NUL.
+ */
+static LONG load_mui_string(LPCWSTR file_name, UINT resId, LPWSTR buffer, DWORD cchBuffer,
+                            DWORD *pcchRequired, DWORD flags)
+{
+    const WCHAR *string = NULL;
+    HMODULE hModule;
+    WCHAR *full_name;
+    DWORD size, cchCopy;
+    LONG result;
+
+    /* Verify the file existence, i.e. do not rely on the PATH variable */
+    if (GetFileAttributesW(file_name) == INVALID_FILE_ATTRIBUTES)
+        return ERROR_FILE_NOT_FOUND;
+
+    size = GetFullPathNameW(file_name, 0, NULL, NULL);
+    if (!size)
+        return GetLastError();
+    full_name = HeapAlloc(GetProcessHeap(), 0, size * sizeof(WCHAR));
+    if (!full_name)
+        return ERROR_NOT_ENOUGH_MEMORY;
+    GetFullPathNameW(file_name, size, full_name, NULL);
+
+    hModule = LoadLibraryExW(full_name, NULL, LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE);
+    HeapFree(GetProcessHeap(), 0, full_name);
+    if (!hModule)
+        return GetLastError();
+
+    result = ERROR_SUCCESS;
+    size = find_mui_string(hModule, resId, &string, &result);
+    if (!size)
+        goto cleanup;
+
+    *pcchRequired = size + 1;
+
+    /* No buffer: report the size only. */
+    if (!buffer)
+    {
+        result = ERROR_MORE_DATA;
+        goto cleanup;
+    }
+
+    cchCopy = cchBuffer;
+    if (size < cchBuffer)
+    {
+        cchCopy = size;
+    }
+    else if (flags & REG_MUI_STRING_TRUNCATE)
+    {
+        if (cchCopy)
+            cchCopy--;
+    }
+    else
+    {
+        result = ERROR_MORE_DATA;
+        goto cleanup;
+    }
+
+    if (cchBuffer)
+    {
+        memcpy(buffer, string, cchCopy * sizeof(WCHAR));
+        buffer[cchCopy] = L'\0';
+    }
+
+cleanup:
+    FreeLibrary(hModule);
+    return result;
 }
 
 /************************************************************************
  *  RegLoadMUIStringW
+ *
+ * Loads the localized string of a registry value of the form
+ * "@[path\]dllname,-resourceId" (REG_SZ or REG_EXPAND_SZ; environment
+ * variables are expanded in both). A value that does not start with '@' is
+ * ERROR_INVALID_DATA, as on Windows.
+ *
+ * pcbData receives the size in bytes of the string including the NUL (also
+ * with ERROR_MORE_DATA). Flags: REG_MUI_STRING_TRUNCATE only, and not
+ * together with pcbData. pszDirectory is prepended to the module path.
  *
  * @implemented
  */
@@ -5805,16 +5889,11 @@ RegLoadMUIStringW(
     LONG result;
 
     /* Parameter sanity checks. */
-    if (!hKey || !pszOutBuf)
+    if (!hKey || (!pszOutBuf && cbOutBuf) || (cbOutBuf % sizeof(WCHAR)) ||
+        ((Flags & REG_MUI_STRING_TRUNCATE) && pcbData) || (Flags & ~REG_MUI_STRING_TRUNCATE))
         return ERROR_INVALID_PARAMETER;
 
-    if (pszDirectory && *pszDirectory)
-    {
-        FIXME("BaseDir parameter not yet supported!\n");
-        return ERROR_INVALID_PARAMETER;
-    }
-
-    /* Check for value existence and correctness of it's type, allocate a buffer and load it. */
+    /* Check for value existence and correctness of its type, allocate a buffer and load it. */
     result = RegQueryValueExW(hKey, pszValue, NULL, &dwValueType, NULL, &cbData);
     if (result != ERROR_SUCCESS) goto cleanup;
     if (!(dwValueType == REG_SZ || dwValueType == REG_EXPAND_SZ) || !cbData)
@@ -5822,7 +5901,8 @@ RegLoadMUIStringW(
         result = ERROR_FILE_NOT_FOUND;
         goto cleanup;
     }
-    pwszTempBuffer = HeapAlloc(GetProcessHeap(), 0, cbData);
+    /* room for a terminator the registry may have left out */
+    pwszTempBuffer = HeapAlloc(GetProcessHeap(), 0, cbData + sizeof(WCHAR));
     if (!pwszTempBuffer)
     {
         result = ERROR_NOT_ENOUGH_MEMORY;
@@ -5830,53 +5910,70 @@ RegLoadMUIStringW(
     }
     result = RegQueryValueExW(hKey, pszValue, NULL, &dwValueType, (LPBYTE)pwszTempBuffer, &cbData);
     if (result != ERROR_SUCCESS) goto cleanup;
+    pwszTempBuffer[cbData / sizeof(WCHAR)] = L'\0';
 
-    /* Expand environment variables, if appropriate, or copy the original string over. */
-    if (dwValueType == REG_EXPAND_SZ)
+    /* '@' is the prefix for resource based string entries. */
+    if (*pwszTempBuffer != L'@')
     {
-        cbData = ExpandEnvironmentStringsW(pwszTempBuffer, NULL, 0) * sizeof(WCHAR);
-        if (!cbData) goto cleanup;
-        pwszExpandedBuffer = HeapAlloc(GetProcessHeap(), 0, cbData);
-        if (!pwszExpandedBuffer)
-        {
-            result = ERROR_NOT_ENOUGH_MEMORY;
-            goto cleanup;
-        }
-        ExpandEnvironmentStringsW(pwszTempBuffer, pwszExpandedBuffer, cbData);
-    }
-    else
-    {
-        pwszExpandedBuffer = HeapAlloc(GetProcessHeap(), 0, cbData);
-        memcpy(pwszExpandedBuffer, pwszTempBuffer, cbData);
+        result = ERROR_INVALID_DATA;
+        goto cleanup;
     }
 
-    /* If the value references a resource based string, parse the value and load the string.
-     * Else just copy over the original value. */
-    result = ERROR_SUCCESS;
-    if (*pwszExpandedBuffer != L'@') /* '@' is the prefix for resource based string entries. */
+    /* Expand environment variables regardless of the type. */
+    cbData = ExpandEnvironmentStringsW(pwszTempBuffer, NULL, 0) * sizeof(WCHAR);
+    if (!cbData)
     {
-        lstrcpynW(pszOutBuf, pwszExpandedBuffer, cbOutBuf / sizeof(WCHAR));
+        result = GetLastError();
+        goto cleanup;
     }
-    else
+    pwszExpandedBuffer = HeapAlloc(GetProcessHeap(), 0, cbData);
+    if (!pwszExpandedBuffer)
     {
-        WCHAR* pComma = wcsrchr(pwszExpandedBuffer, L',');
+        result = ERROR_NOT_ENOUGH_MEMORY;
+        goto cleanup;
+    }
+    ExpandEnvironmentStringsW(pwszTempBuffer, pwszExpandedBuffer, cbData / sizeof(WCHAR));
+
+    /* Parse the value and load the string. */
+    {
+        WCHAR *pComma = wcsrchr(pwszExpandedBuffer, L','), *pNewBuffer;
         UINT uiStringId;
-        HMODULE hModule;
+        SIZE_T baseDirLen;
+        DWORD cchRequired = 0;
 
         /* Format of the expanded value is 'path_to_dll,-resId' */
         if (!pComma || pComma[1] != L'-')
         {
-            result = ERROR_BADKEY;
+            result = ERROR_INVALID_DATA;
             goto cleanup;
         }
 
-        uiStringId = _wtoi(pComma + 2);
+        uiStringId = (UINT)wcstol(pComma + 2, NULL, 10);
         *pComma = L'\0';
 
-        hModule = LoadLibraryExW(pwszExpandedBuffer + 1, NULL, LOAD_LIBRARY_AS_DATAFILE);
-        if (!hModule || !load_string(hModule, uiStringId, pszOutBuf, cbOutBuf / sizeof(WCHAR)))
-            result = ERROR_BADKEY;
-        FreeLibrary(hModule);
+        /* Build the resource dll path. */
+        baseDirLen = pszDirectory ? wcslen(pszDirectory) : 0;
+        cbData = (DWORD)((baseDirLen + 1 + wcslen(pwszExpandedBuffer + 1) + 1) * sizeof(WCHAR));
+        pNewBuffer = HeapReAlloc(GetProcessHeap(), 0, pwszTempBuffer, cbData);
+        if (!pNewBuffer)
+        {
+            result = ERROR_NOT_ENOUGH_MEMORY;
+            goto cleanup;
+        }
+        pwszTempBuffer = pNewBuffer;
+        pwszTempBuffer[0] = L'\0';
+        if (baseDirLen)
+        {
+            wcscpy(pwszTempBuffer, pszDirectory);
+            if (pszDirectory[baseDirLen - 1] != L'\\')
+                wcscat(pwszTempBuffer, L"\\");
+        }
+        wcscat(pwszTempBuffer, pwszExpandedBuffer + 1);
+
+        result = load_mui_string(pwszTempBuffer, uiStringId, pszOutBuf, cbOutBuf / sizeof(WCHAR),
+                                 &cchRequired, Flags);
+        if (pcbData && (result == ERROR_SUCCESS || result == ERROR_MORE_DATA))
+            *pcbData = cchRequired * sizeof(WCHAR);
     }
 
 cleanup:
@@ -5887,6 +5984,8 @@ cleanup:
 
 /************************************************************************
  *  RegLoadMUIStringA
+ *
+ * Not implemented on Windows either (the export exists and fails).
  *
  * @implemented
  */
@@ -5900,36 +5999,7 @@ RegLoadMUIStringA(
     IN DWORD Flags,
     IN LPCSTR pszDirectory  OPTIONAL)
 {
-    UNICODE_STRING valueW, baseDirW;
-    WCHAR* pwszBuffer;
-    DWORD cbData = cbOutBuf * sizeof(WCHAR);
-    LONG result;
-
-    valueW.Buffer = baseDirW.Buffer = pwszBuffer = NULL;
-    if (!RtlCreateUnicodeStringFromAsciiz(&valueW, pszValue) ||
-        !RtlCreateUnicodeStringFromAsciiz(&baseDirW, pszDirectory) ||
-        !(pwszBuffer = HeapAlloc(GetProcessHeap(), 0, cbData)))
-    {
-        result = ERROR_NOT_ENOUGH_MEMORY;
-        goto cleanup;
-    }
-
-    result = RegLoadMUIStringW(hKey, valueW.Buffer, pwszBuffer, cbData, NULL, Flags,
-        baseDirW.Buffer);
-
-    if (result == ERROR_SUCCESS)
-    {
-        cbData = WideCharToMultiByte(CP_ACP, 0, pwszBuffer, -1, pszOutBuf, cbOutBuf, NULL, NULL);
-        if (pcbData)
-            *pcbData = cbData;
-    }
-
-cleanup:
-    HeapFree(GetProcessHeap(), 0, pwszBuffer);
-    RtlFreeUnicodeString(&baseDirW);
-    RtlFreeUnicodeString(&valueW);
-
-    return result;
+    return ERROR_CALL_NOT_IMPLEMENTED;
 }
 
 /* EOF */

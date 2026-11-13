@@ -336,7 +336,11 @@ EnumDynamicTimeZoneInformation(
     RegCloseKey(Zones);
 
     if (Ret == ERROR_SUCCESS)
+    {
         *lpTimeZoneInformation = Zone;
+        /* Windows leaves the last error at ERROR_SUCCESS after a zone was returned (the MUI string loads end with it) */
+        SetLastError(ERROR_SUCCESS);
+    }
     return Ret;
 }
 
