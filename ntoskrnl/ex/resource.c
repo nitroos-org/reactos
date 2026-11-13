@@ -382,6 +382,9 @@ ExpExpandResourceOwnerTable(IN PERESOURCE Resource,
 {
     POWNER_ENTRY Owner, Table;
     KIRQL OldIrql;
+#ifdef _M_AMD64
+    KIRQL CallerIrql;
+#endif
     ULONG NewSize, OldSize;
 
     /* Get the owner table */
@@ -427,6 +430,14 @@ ExpExpandResourceOwnerTable(IN PERESOURCE Resource,
         /* Copy the table */
         if (Owner) RtlCopyMemory(Table, Owner, OldSize * sizeof(OWNER_ENTRY));
 
+#ifdef _M_AMD64
+        /* The resource lock is held with interrupts disabled at the caller's
+           IRQL. The dispatcher exit must see DISPATCH_LEVEL, or it would switch
+           threads here with interrupts off and the resource lock held. Lower
+           only after the resource lock is released. */
+        KeRaiseIrql(DISPATCH_LEVEL, &CallerIrql);
+#endif
+
         /* Acquire dispatcher lock to prevent thread boosting */
         OldIrql = KiAcquireDispatcherLock();
 
@@ -442,6 +453,11 @@ ExpExpandResourceOwnerTable(IN PERESOURCE Resource,
 
         /* Release lock */
         ExReleaseResourceLock(Resource, LockHandle);
+
+#ifdef _M_AMD64
+        /* Back to the caller's IRQL; a pending dispatch runs now */
+        KeLowerIrql(CallerIrql);
+#endif
 
         /* Free the old table */
         if (Owner) ExFreePoolWithTag(Owner, TAG_RESOURCE_TABLE);
@@ -691,6 +707,7 @@ ExpWaitForResource(IN PERESOURCE Resource,
     PKTHREAD Thread, OwnerThread;
 #if DBG
     KLOCK_QUEUE_HANDLE LockHandle;
+    KIRQL DbgIrql;
 #endif
 
     /* Increase contention count and use a 5 second timeout */
@@ -717,7 +734,10 @@ ExpWaitForResource(IN PERESOURCE Resource,
             /* Reset wait count */
             WaitCount = 0;
 #if DBG
-            /* Lock the resource */
+            /* Lock the resource at DISPATCH_LEVEL, as it was held before the
+               lock took interrupts off, so that nothing in the dump can be
+               switched away from while it holds the lock */
+            KeRaiseIrql(DISPATCH_LEVEL, &DbgIrql);
             ExAcquireResourceLock(Resource, &LockHandle);
 
             /* Dump debug information */
@@ -753,6 +773,7 @@ ExpWaitForResource(IN PERESOURCE Resource,
             DbgBreakPoint();
             DPRINT1("EX - Rewaiting\n");
             ExReleaseResourceLock(Resource, &LockHandle);
+            KeLowerIrql(DbgIrql);
 #endif
         }
 
