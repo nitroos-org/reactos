@@ -958,8 +958,10 @@ static void TestSurfacesD2DDevice(void)
                                             DirectXAlphaMode_Premultiplied, &ds);
     ok(hr == S_OK && ds, "CreateDrawingSurface %#lx\n", hr);
     if (!ds) goto out;
-    hr = QI(ds, &IID_INitroDrawingSurfaceInterop, (void **)&dsi);
-    if (hr != S_OK) { skip("no drawing surface interop interface\n"); goto out; }
+    /* the real ICompositionDrawingSurfaceInterop (same layout as the Nitro one) */
+    hr = QI(ds, &IID_ICompositionDrawingSurfaceInterop, (void **)&dsi);
+    ok(hr == S_OK && dsi, "QI ICompositionDrawingSurfaceInterop %#lx\n", hr);
+    if (hr != S_OK) goto out;
 
     /* the texture is on the D3D device of the D2D device */
     hr = dsi->lpVtbl->BeginDraw(dsi, NULL, &IID_ID3D11Texture2D, (void **)&tex, &off);

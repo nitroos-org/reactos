@@ -9,8 +9,8 @@
  * it asks for (ID2D1DeviceContext, IDXGISurface, ID3D11Texture2D ...); the D2D context is returned in the drawing
  * state with the update rectangle as a clip and EndDraw ends it.
  *
- * The real ICompositionDrawingSurfaceInterop has no clean IID / vtable source (see dcomp_nitro.h): the six
- * methods are exposed through the Nitro-private INitroDrawingSurfaceInterop.
+ * The six ICompositionDrawingSurfaceInterop methods are exposed through the real interface (IID and member order
+ * from microsoft/windows-rs, see dcomp_nitro.h) and through the Nitro-private INitroDrawingSurfaceInterop, one vtable.
  * A rendering device that is only an ID2D1Device (Office passes one) is accepted too: the D3D11 / DXGI device
  * under it comes from ID2D1Device2::GetDxgiDevice, and the app's own ID2D1Device is the one the surfaces draw with.
  * Interface id and member order of ID2D1Device2: microsoft/windows-rs commit cd03f9369a89, file
