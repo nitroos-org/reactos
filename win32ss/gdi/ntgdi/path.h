@@ -94,6 +94,7 @@ BOOL FASTCALL PATH_FillPath( PDC dc, PPATH pPath );
 BOOL FASTCALL PATH_FillPathEx(PDC dc, PPATH pPath, PBRUSH pbrFill);
 PPATH FASTCALL PATH_FlattenPath (PPATH pPath);
 PPATH FASTCALL PATH_WidenPathEx(DC *dc, PPATH pPath);
+BOOL FASTCALL PATH_IsWidePen(DC *dc, PBRUSH pbrLine);
 
 BOOL FASTCALL PATH_ReserveEntries (PPATH pPath, INT numEntries);
 BOOL FASTCALL PATH_StrokePath(DC *dc, PPATH pPath);

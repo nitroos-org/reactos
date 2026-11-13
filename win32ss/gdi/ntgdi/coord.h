@@ -213,6 +213,10 @@ DC_vFixIsotropicMapping(PDC pdc);
 
 VOID
 FASTCALL
+DC_vGetPageToDevice(PDC pdc, MATRIX *pmx);
+
+VOID
+FASTCALL
 DC_vUpdateWorldToDevice(PDC pdc);
 
 VOID

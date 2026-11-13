@@ -104,6 +104,7 @@ extern void func_SetSysColors(void);
 extern void func_SetWindowExtEx(void);
 extern void func_SetWorldTransform(void);
 extern void func_ShapeTransform(void);
+extern void func_WidePen(void);
 extern void func_WindowMemoryDC(void);
 extern void func_StretchBlt(void);
 extern void func_UniscribeForwarders(void);
@@ -214,6 +215,7 @@ const struct test winetest_testlist[] =
     { "SetWindowExtEx", func_SetWindowExtEx },
     { "SetWorldTransform", func_SetWorldTransform },
     { "ShapeTransform", func_ShapeTransform },
+    { "WidePen", func_WidePen },
     { "WindowMemoryDC", func_WindowMemoryDC },
     { "StretchBlt", func_StretchBlt },
     { "UniscribeForwarders", func_UniscribeForwarders },
