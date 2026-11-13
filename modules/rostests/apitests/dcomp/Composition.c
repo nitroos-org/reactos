@@ -5,7 +5,8 @@
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  *
  * Stage 2: ContainerVisual, SpriteVisual, VisualCollection, CompositionColorBrush, CompositionSurfaceBrush,
- * InsetClip behave as documented. ICompositorDesktopInterop::CreateDesktopWindowTarget and CompositionTarget.Root.
+ * InsetClip behave as documented. ICompositorDesktopInterop::CreateDesktopWindowTarget and CompositionTarget.Root;
+ * the tree of a DesktopWindowTarget is drawn into its window on commit (TestPresent, pixels read from the window DC).
  * Stage 3: CompositionGraphicsDevice from a D3D11 device, CompositionDrawingSurface
  * drawn through D2D, Resize/Scroll. The pixel tests render the tree with the Nitro-private INitroCompositionTest
  * hook into a bitmap and compare pixels. The parts that use Nitro-private interfaces are skipped where the
@@ -3004,6 +3005,467 @@ out:
     pWindowsDeleteString(fcls);
 }
 
+/* ICompositionGraphicsDeviceInterop (IID and member order: microsoft/windows-rs, dcomp_nitro.h): the rendering device
+ * can be read back and replaced (documented); a surface made before the switch draws on the new device */
+static void TestGraphicsDeviceInterop(void)
+{
+    ID3D11Device *d1 = MakeDevice(), *d2 = MakeDevice();
+    WICompositorInterop *interop = NULL;
+    WICompositionGraphicsDevice *gdev = NULL;
+    WICompositionDrawingSurface *ds = NULL;
+    ICompGraphicsDeviceInterop *gi = NULL;
+    INitroDrawingSurfaceInterop *dsi = NULL;
+    ID2D1DeviceContext *dc = NULL;
+    IUnknown *got = NULL;
+    __x_ABI_CWindows_CFoundation_CSize size;
+    D2D1_COLOR_F clear;
+    POINT off;
+    HRESULT hr;
+
+    if (!d1 || !d2) { skip("no D3D11 device\n"); goto out; }
+    if (FAILED(QI(Comp, &IID_Interop, (void **)&interop))) goto out;
+    hr = interop->lpVtbl->CreateGraphicsDevice(interop, (IUnknown *)d1, &gdev);
+    ok(hr == S_OK && gdev, "CreateGraphicsDevice %#lx\n", hr);
+    if (!gdev) goto out;
+    hr = QI(gdev, &IID_ICompositionGraphicsDeviceInterop, (void **)&gi);
+    ok(hr == S_OK && gi, "QI ICompositionGraphicsDeviceInterop %#lx\n", hr);
+    if (!gi) goto out;
+    hr = gi->lpVtbl->GetRenderingDevice(gi, NULL);
+    ok(hr == E_POINTER, "GetRenderingDevice(NULL) %#lx\n", hr);
+    hr = gi->lpVtbl->GetRenderingDevice(gi, &got);
+    ok(hr == S_OK && got && SameObject(got, (IUnknown *)d1), "GetRenderingDevice %#lx %p\n", hr, got);
+    if (got) { REL(got); got = NULL; }
+
+    size.Width = 16; size.Height = 16;
+    gdev->lpVtbl->CreateDrawingSurface(gdev, size, DirectXPixelFormat_B8G8R8A8UIntNormalized, DirectXAlphaMode_Premultiplied, &ds);
+    ok(ds != NULL, "CreateDrawingSurface\n");
+
+    hr = gi->lpVtbl->SetRenderingDevice(gi, (IUnknown *)d2);
+    ok(hr == S_OK, "SetRenderingDevice %#lx\n", hr);
+    hr = gi->lpVtbl->GetRenderingDevice(gi, &got);
+    ok(hr == S_OK && got && SameObject(got, (IUnknown *)d2), "GetRenderingDevice after the switch %#lx %p\n", hr, got);
+    if (got) { REL(got); got = NULL; }
+    hr = gi->lpVtbl->SetRenderingDevice(gi, (IUnknown *)interop);
+    ok(hr == E_INVALIDARG, "SetRenderingDevice(not a device) (unmeasured) %#lx\n", hr);
+
+    if (ds && D2DUsable(d2) && SUCCEEDED(QI(ds, &IID_INitroDrawingSurfaceInterop, (void **)&dsi)))
+    {
+        hr = dsi->lpVtbl->BeginDraw(dsi, NULL, &IID_ID2D1DeviceContext, (void **)&dc, &off);
+        ok(hr == S_OK && dc, "BeginDraw on the new device %#lx\n", hr);
+        if (dc)
+        {
+            WICompositionSurface *surf = NULL;
+            WICompositionSurfaceBrush *sb = NULL;
+            WICompositionBrush *br = NULL;
+            WISpriteVisual *sp = NULL;
+            WIVisual *v = NULL;
+            BYTE *px = HeapAlloc(GetProcessHeap(), 0, W * H * 4);
+
+            clear.r = 1; clear.g = 0; clear.b = 0; clear.a = 1;
+            ID2D1DeviceContext_Clear(dc, &clear);
+            hr = dsi->lpVtbl->EndDraw(dsi);
+            ok(hr == S_OK, "EndDraw on the new device %#lx\n", hr);
+            REL(dc);
+            /* the renderer reads the surface back from the new device */
+            sp = NewSprite(0, 0, 16, 16, C(255, 0, 0, 255), &v);
+            if (sp && px && SUCCEEDED(QI(ds, &IID_Surface, (void **)&surf)) &&
+                SUCCEEDED(Comp->lpVtbl->CreateSurfaceBrushWithSurface(Comp, surf, &sb)) && SUCCEEDED(QI(sb, &IID_Brush, (void **)&br)))
+            {
+                sp->lpVtbl->put_Brush(sp, br);
+                if (Render(v, px)) CheckPx(px, 8, 8, 255, 255, 0, 0, 2, "surface drawn on the new device");
+            }
+            if (br) REL(br);
+            if (sb) REL(sb);
+            if (surf) REL(surf);
+            if (sp) { REL(sp); REL(v); }
+            HeapFree(GetProcessHeap(), 0, px);
+        }
+        REL(dsi);
+    }
+out:
+    if (gi) REL(gi);
+    if (ds) REL(ds);
+    if (gdev) REL(gdev);
+    if (interop) REL(interop);
+    if (d2) ID3D11Device_Release(d2);
+    if (d1) ID3D11Device_Release(d1);
+}
+
+/* Compositor.CreatePropertySet (documented): a new, empty CompositionPropertySet each time */
+static void TestCreatePropertySet(void)
+{
+    __x_ABI_CWindows_CUI_CComposition_CICompositionPropertySet *a = NULL, *b = NULL;
+    IPropSet *ps = NULL;
+    HSTRING k;
+    float fv = 0;
+    int st = 99;
+    HRESULT hr;
+
+    hr = Comp->lpVtbl->CreatePropertySet(Comp, &a);
+    ok(hr == S_OK && a, "CreatePropertySet %#lx %p\n", hr, a);
+    hr = Comp->lpVtbl->CreatePropertySet(Comp, &b);
+    ok(hr == S_OK && b, "second CreatePropertySet %#lx %p\n", hr, b);
+    if (a && b) ok(!SameObject((IUnknown *)a, (IUnknown *)b), "CreatePropertySet returned the same object twice\n");
+    if (a && SUCCEEDED(QI(a, &IID_IPropSet, &ps)) && ps)
+    {
+        k = HS(L"Width");
+        hr = ps->lpVtbl->TryGetScalar(ps, k, &fv, &st);
+        ok(hr == S_OK && st == 2, "new set: TryGetScalar %#lx status %d (NotFound is 2)\n", hr, st);
+        ok(ps->lpVtbl->InsertScalar(ps, k, 3.5f) == S_OK, "InsertScalar\n");
+        st = 99;
+        hr = ps->lpVtbl->TryGetScalar(ps, k, &fv, &st);
+        ok(hr == S_OK && st == 0 && fv == 3.5f, "TryGetScalar %#lx status %d value %g\n", hr, st, fv);
+        WindowsDeleteString(k);
+        REL(ps);
+    }
+    else ok(0, "QI ICompositionPropertySet\n");
+    if (a) REL(a);
+    if (b) REL(b);
+}
+
+/*
+ * Presentation of a DesktopWindowTarget into its window (redirection level 0: drawn into the window itself).
+ * Documented (learn.microsoft.com): a CompositorController's Compositor shows changes after
+ * ICompositorController::Commit and raises CommitNeeded when it has changes; a plain Compositor commits by
+ * itself; RelativeSizeAdjustment sizes a visual relative to its parent. The pixels are read back from the
+ * window DC. Not measured on Windows (verify on the oracle in an interactive session): that a DesktopWindowTarget
+ * is laid out in client pixels, the CommitNeeded timing, and that a topmost target covers child windows.
+ */
+static COLORREF WinPx(HWND hwnd, int x, int y)
+{
+    HDC dc = GetDC(hwnd);
+    COLORREF c = GetPixel(dc, x, y);
+    ReleaseDC(hwnd, dc);
+    return c;
+}
+
+static void PumpFor(DWORD ms)
+{
+    DWORD end = GetTickCount() + ms;
+    MSG m;
+
+    do
+    {
+        while (PeekMessageW(&m, NULL, 0, 0, PM_REMOVE))
+        {
+            TranslateMessage(&m);
+            DispatchMessageW(&m);
+        }
+        Sleep(10);
+    } while ((LONG)(end - GetTickCount()) > 0);
+}
+
+static BOOL NearPx(COLORREF c, COLORREF want)
+{
+    return c != CLR_INVALID && abs((int)GetRValue(c) - GetRValue(want)) <= 8 &&
+           abs((int)GetGValue(c) - GetGValue(want)) <= 8 && abs((int)GetBValue(c) - GetBValue(want)) <= 8;
+}
+
+#define CHECK_WIN(hwnd, x, y, want, what) do { COLORREF c_ = WinPx(hwnd, x, y); \
+    ok(NearPx(c_, want), "%s: (%d,%d) is %06lx, expected %06lx\n", what, x, y, (ULONG)c_, (ULONG)(want)); } while (0)
+
+#define PX_WHITE RGB(255, 255, 255)
+#define PX_RED RGB(255, 0, 0)
+#define PX_GREEN RGB(0, 255, 0)
+#define PX_BLUE RGB(0, 0, 255)
+#define PX_YELLOW RGB(255, 255, 0)
+#define PX_MAGENTA RGB(255, 0, 255)
+#define PX_CYAN RGB(0, 255, 255)
+
+static void SetRelSize(WIVisual *v, float x, float y)
+{
+    IVisual2T *v2 = NULL;
+    V2T rs;
+
+    if (FAILED(QI(v, &IID_IVisual2T, (void **)&v2))) { ok(0, "QI IVisual2\n"); return; }
+    rs.x = x; rs.y = y;
+    ok(v2->lpVtbl->put_RelSize(v2, rs) == S_OK, "put_RelativeSizeAdjustment\n");
+    REL(v2);
+}
+
+static void SetSpriteColor(WISpriteVisual *s, Color c)
+{
+    WICompositionBrush *b = NULL;
+    WICompositionColorBrush *cb = NULL;
+
+    s->lpVtbl->get_Brush(s, &b);
+    if (b && SUCCEEDED(QI(b, &IID_ColorBrush, (void **)&cb)))
+    {
+        ok(cb->lpVtbl->put_Color(cb, c) == S_OK, "put_Color\n");
+        REL(cb);
+    }
+    if (b) REL(b);
+}
+
+static IDesktopTarget *NewTarget(WICompositor *comp, HWND hwnd, BOOL topmost, WIVisual *root)
+{
+    IDesktopInterop *di = NULL;
+    IDesktopTarget *t = NULL;
+    WICompositionTarget *ct = NULL;
+    HRESULT hr = QI(comp, &IID_DesktopInterop, (void **)&di);
+
+    ok(hr == S_OK, "QI ICompositorDesktopInterop %#lx\n", hr);
+    if (!di) return NULL;
+    hr = di->lpVtbl->CreateDesktopWindowTarget(di, hwnd, topmost, &t);
+    ok(hr == S_OK && t, "CreateDesktopWindowTarget %#lx\n", hr);
+    REL(di);
+    if (!t) return NULL;
+    hr = QI(t, &IID_Target, (void **)&ct);
+    ok(hr == S_OK, "QI ICompositionTarget %#lx\n", hr);
+    if (ct)
+    {
+        hr = ct->lpVtbl->put_Root(ct, root);
+        ok(hr == S_OK, "put_Root %#lx\n", hr);
+        REL(ct);
+    }
+    return t;
+}
+
+/* a 80x60 drawing surface on comp, cleared to blue through Direct2D; NULL when Direct2D cannot draw here */
+static WICompositionBrush *BlueSurfaceBrush(WICompositor *comp, ID3D11Device *d3d)
+{
+    WICompositorInterop *interop = NULL;
+    WICompositionGraphicsDevice *gdev = NULL;
+    WICompositionDrawingSurface *ds = NULL;
+    INitroDrawingSurfaceInterop *dsi = NULL;
+    WICompositionSurface *surf = NULL;
+    WICompositionSurfaceBrush *sb = NULL;
+    WICompositionBrush *br = NULL;
+    ID2D1DeviceContext *dc = NULL;
+    __x_ABI_CWindows_CFoundation_CSize size;
+    D2D1_COLOR_F clear;
+    POINT off;
+    HRESULT hr;
+
+    if (!d3d || !D2DUsable(d3d)) return NULL;
+    if (FAILED(QI(comp, &IID_Interop, (void **)&interop))) return NULL;
+    hr = interop->lpVtbl->CreateGraphicsDevice(interop, (IUnknown *)d3d, &gdev);
+    ok(hr == S_OK, "CreateGraphicsDevice %#lx\n", hr);
+    size.Width = 80; size.Height = 60;
+    if (gdev)
+        hr = gdev->lpVtbl->CreateDrawingSurface(gdev, size, DirectXPixelFormat_B8G8R8A8UIntNormalized,
+                                                DirectXAlphaMode_Premultiplied, &ds);
+    if (ds && SUCCEEDED(QI(ds, &IID_INitroDrawingSurfaceInterop, (void **)&dsi)))
+    {
+        hr = dsi->lpVtbl->BeginDraw(dsi, NULL, &IID_ID2D1DeviceContext, (void **)&dc, &off);
+        ok(hr == S_OK && dc, "BeginDraw %#lx\n", hr);
+        if (dc)
+        {
+            clear.r = 0; clear.g = 0; clear.b = 1; clear.a = 1;
+            ID2D1DeviceContext_Clear(dc, &clear);
+            hr = dsi->lpVtbl->EndDraw(dsi);
+            ok(hr == S_OK, "EndDraw %#lx\n", hr);
+            REL(dc);
+        }
+        REL(dsi);
+    }
+    if (ds && SUCCEEDED(QI(ds, &IID_Surface, (void **)&surf)))
+    {
+        hr = comp->lpVtbl->CreateSurfaceBrushWithSurface(comp, surf, &sb);
+        ok(hr == S_OK && sb, "CreateSurfaceBrushWithSurface %#lx\n", hr);
+        if (sb)
+        {
+            sb->lpVtbl->put_Stretch(sb, CompositionStretch_Fill);
+            QI(sb, &IID_Brush, (void **)&br);
+            REL(sb);
+        }
+        REL(surf);
+    }
+    if (ds) REL(ds);
+    if (gdev) REL(gdev);
+    REL(interop);
+    return br;
+}
+
+static LRESULT CALLBACK PresentWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static void TestPresent(PRO_ACTIVATE pRoActivateInstance, PWCS pWindowsCreateString, PWDS pWindowsDeleteString)
+{
+    const WCHAR name[] = L"Windows.UI.Composition.Core.CompositorController";
+    WNDCLASSW wc = { 0 };
+    HWND hwnd = NULL, hwnd2 = NULL, child = NULL;
+    IInspectable *obj = NULL;
+    ICtl *ctl = NULL;
+    WICompositor *ccomp = NULL, *saved = Comp;
+    IDesktopTarget *t = NULL, *t2 = NULL, *t3 = NULL;
+    WIVisual *root = NULL, *vred = NULL, *vblue = NULL, *vgreen = NULL, *vmag = NULL, *vcyan = NULL;
+    WISpriteVisual *sred = NULL, *sblue = NULL, *sgreen = NULL, *smag = NULL, *scyan = NULL;
+    WIVisualCollection *col = NULL;
+    WICompositionBrush *blue = NULL;
+    ID3D11Device *d3d = NULL;
+    __x_ABI_CWindows_CFoundation_CIClosable *clo = NULL;
+    TestHandler h = { { &th_vtbl }, 1, 0 };
+    CtlToken tok = { 0 };
+    HSTRING cls = NULL;
+    Vec3 off3 = { 0 };
+    COLORREF childpx;
+    HRESULT hr;
+
+    wc.lpfnWndProc = PresentWndProc;
+    wc.hInstance = GetModuleHandleW(NULL);
+    wc.hbrBackground = GetStockObject(WHITE_BRUSH);
+    wc.lpszClassName = L"dcomp_present_test";
+    RegisterClassW(&wc);
+    hwnd = CreateWindowExW(WS_EX_TOPMOST, wc.lpszClassName, L"present", WS_POPUP | WS_VISIBLE, 40, 40, 160, 120,
+                           NULL, NULL, wc.hInstance, NULL);
+    ok(hwnd != NULL, "CreateWindowExW %lu\n", GetLastError());
+    if (!hwnd) return;
+    child = CreateWindowExW(0, L"STATIC", NULL, WS_CHILD | WS_VISIBLE | SS_BLACKRECT, 60, 100, 10, 10, hwnd, NULL, NULL, NULL);
+    UpdateWindow(hwnd);
+    PumpFor(300);
+    childpx = WinPx(hwnd, 65, 105);     /* SS_BLACKRECT paints with the window frame colour of the theme */
+    if (!NearPx(WinPx(hwnd, 40, 60), PX_WHITE) || NearPx(childpx, PX_WHITE) || childpx == CLR_INVALID)
+    {
+        skip("the window's pixels cannot be read back here (%06lx %06lx)\n", (ULONG)WinPx(hwnd, 40, 60), (ULONG)childpx);
+        goto out;
+    }
+
+    hr = pWindowsCreateString(name, lstrlenW(name), &cls);
+    hr = pRoActivateInstance(cls, &obj);
+    pWindowsDeleteString(cls);
+    ok(hr == S_OK && obj, "activate CompositorController %#lx\n", hr);
+    if (!obj) goto out;
+    QI(obj, &IID_Ctl, (void **)&ctl);
+    if (!ctl || FAILED(ctl->lpVtbl->get_Compositor(ctl, &ccomp)) || !ccomp) { ok(0, "no controller Compositor\n"); goto out; }
+    hr = ctl->lpVtbl->add_CommitNeeded(ctl, &h.iface, &tok);
+    ok(hr == S_OK, "add_CommitNeeded %#lx\n", hr);
+
+    /* tree: root (relative size 1,1) with red 80x120 left, blue surface 80x60 top right, green (0.25,0.5) relative */
+    Comp = ccomp;
+    root = NewContainer(0, 0, 0, 0);
+    SetRelSize(root, 1.0f, 1.0f);
+    col = Children(root);
+    sred = NewSprite(0, 0, 80, 120, C(255, 255, 0, 0), &vred);
+    sgreen = NewSprite(80, 60, 0, 0, C(255, 0, 255, 0), &vgreen);
+    SetRelSize(vgreen, 0.25f, 0.5f);
+    d3d = MakeDevice();
+    blue = BlueSurfaceBrush(ccomp, d3d);
+    sblue = NewSprite(80, 0, 80, 60, C(255, 0, 0, 255), &vblue);
+    if (blue) sblue->lpVtbl->put_Brush(sblue, blue);
+    else skip("Direct2D cannot draw here: the top right sprite is a blue colour, not a surface\n");
+    Comp = saved;
+    if (!col || !sred || !sgreen || !sblue) goto out;
+    col->lpVtbl->InsertAtTop(col, vred);
+    col->lpVtbl->InsertAtTop(col, vgreen);
+    col->lpVtbl->InsertAtTop(col, vblue);
+    t = NewTarget(ccomp, hwnd, FALSE, root);
+    if (!t) goto out;
+
+    /* nothing shows before the commit, but the controller asks for one */
+    PumpFor(200);
+    CHECK_WIN(hwnd, 40, 60, PX_WHITE, "before Commit");
+    ok(h.invoked >= 1, "CommitNeeded raised %ld times before Commit\n", h.invoked);
+
+    hr = ctl->lpVtbl->Commit(ctl);
+    ok(hr == S_OK, "Commit %#lx\n", hr);
+    PumpFor(100);
+    CHECK_WIN(hwnd, 40, 60, PX_RED, "commit: red sprite");
+    CHECK_WIN(hwnd, 120, 30, PX_BLUE, "commit: blue surface");
+    CHECK_WIN(hwnd, 100, 90, PX_GREEN, "commit: green relative sprite");
+    CHECK_WIN(hwnd, 130, 90, PX_WHITE, "commit: right of the green sprite");
+    CHECK_WIN(hwnd, 65, 105, childpx, "commit: child window above a non-topmost target");
+
+    /* the window paints itself (sent and posted WM_PAINT): the tree comes back on top */
+    InvalidateRect(hwnd, NULL, TRUE);
+    UpdateWindow(hwnd);
+    PumpFor(100);
+    CHECK_WIN(hwnd, 40, 60, PX_RED, "after UpdateWindow: red");
+    CHECK_WIN(hwnd, 120, 30, PX_BLUE, "after UpdateWindow: blue");
+    InvalidateRect(hwnd, NULL, TRUE);
+    PumpFor(200);
+    CHECK_WIN(hwnd, 40, 60, PX_RED, "after a posted WM_PAINT: red");
+    CHECK_WIN(hwnd, 100, 90, PX_GREEN, "after a posted WM_PAINT: green");
+
+    /* a second commit shows the new colour */
+    h.invoked = 0;
+    SetSpriteColor(sred, C(255, 255, 255, 0));
+    PumpFor(100);
+    ok(h.invoked >= 1, "CommitNeeded raised %ld times after the second change\n", h.invoked);
+    CHECK_WIN(hwnd, 40, 60, PX_RED, "changed, not committed yet");
+    ctl->lpVtbl->Commit(ctl);
+    PumpFor(100);
+    CHECK_WIN(hwnd, 40, 60, PX_YELLOW, "second commit: yellow");
+
+    /* resize: the relative sizes follow the client area */
+    SetWindowPos(hwnd, NULL, 0, 0, 240, 120, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    PumpFor(300);
+    CHECK_WIN(hwnd, 130, 90, PX_GREEN, "resized: green sprite is a quarter of 240");
+    CHECK_WIN(hwnd, 150, 90, PX_WHITE, "resized: right of the green sprite");
+    CHECK_WIN(hwnd, 200, 30, PX_WHITE, "resized: right of the blue sprite");
+    CHECK_WIN(hwnd, 40, 60, PX_YELLOW, "resized: yellow");
+
+    /* a visual that moves away leaves the window's own content behind */
+    off3.X = 0; off3.Y = 200;
+    vred->lpVtbl->put_Offset(vred, off3);
+    ctl->lpVtbl->Commit(ctl);
+    PumpFor(300);
+    CHECK_WIN(hwnd, 40, 60, PX_WHITE, "moved away: white again");
+    off3.Y = 0;
+    vred->lpVtbl->put_Offset(vred, off3);
+    ctl->lpVtbl->Commit(ctl);
+    PumpFor(100);
+    CHECK_WIN(hwnd, 40, 60, PX_YELLOW, "moved back: yellow");
+
+    /* a topmost target on the same window is drawn over the child window */
+    Comp = ccomp;
+    smag = NewSprite(50, 90, 30, 30, C(255, 255, 0, 255), &vmag);
+    Comp = saved;
+    t2 = vmag ? NewTarget(ccomp, hwnd, TRUE, vmag) : NULL;
+    ctl->lpVtbl->Commit(ctl);
+    PumpFor(200);
+    CHECK_WIN(hwnd, 65, 105, PX_MAGENTA, "topmost target over the child window");
+    CHECK_WIN(hwnd, 40, 60, PX_YELLOW, "topmost target: the other target stays");
+    /* Close stops it: the child and the other target show again */
+    if (t2 && SUCCEEDED(QI(t2, &IID_Closable, (void **)&clo)))
+    {
+        ok(clo->lpVtbl->Close(clo) == S_OK, "Close\n");
+        REL(clo);
+        PumpFor(300);
+        CHECK_WIN(hwnd, 65, 105, childpx, "closed topmost target: child window again");
+        CHECK_WIN(hwnd, 55, 95, PX_YELLOW, "closed topmost target: non-topmost tree again");
+    }
+
+    /* a plain Compositor commits by itself */
+    hwnd2 = CreateWindowExW(WS_EX_TOPMOST, wc.lpszClassName, L"present2", WS_POPUP | WS_VISIBLE, 40, 200, 100, 60,
+                            NULL, NULL, wc.hInstance, NULL);
+    if (hwnd2)
+    {
+        UpdateWindow(hwnd2);
+        PumpFor(100);
+        scyan = NewSprite(0, 0, 50, 60, C(255, 0, 255, 255), &vcyan);
+        t3 = vcyan ? NewTarget(Comp, hwnd2, FALSE, vcyan) : NULL;
+        PumpFor(400);
+        CHECK_WIN(hwnd2, 20, 30, PX_CYAN, "plain Compositor: shown without Commit");
+        CHECK_WIN(hwnd2, 80, 30, PX_WHITE, "plain Compositor: right of the sprite");
+    }
+
+out:
+    if (t3) REL(t3);
+    if (t2) REL(t2);
+    if (t) REL(t);
+    if (ctl && tok.value) ctl->lpVtbl->remove_CommitNeeded(ctl, tok);
+    if (col) REL(col);
+    if (sred) { REL(sred); REL(vred); }
+    if (sgreen) { REL(sgreen); REL(vgreen); }
+    if (sblue) { REL(sblue); REL(vblue); }
+    if (smag) { REL(smag); REL(vmag); }
+    if (scyan) { REL(scyan); REL(vcyan); }
+    if (blue) REL(blue);
+    if (root) REL(root);
+    if (ccomp) REL(ccomp);
+    if (ctl) REL(ctl);
+    if (obj) REL(obj);
+    if (d3d) ID3D11Device_Release(d3d);
+    if (hwnd2) DestroyWindow(hwnd2);
+    if (child) DestroyWindow(child);
+    DestroyWindow(hwnd);
+    UnregisterClassW(wc.lpszClassName, wc.hInstance);
+    PumpFor(50);
+}
+
 START_TEST(Composition)
 {
     SetUnhandledExceptionFilter(CrashFilter);
@@ -3049,6 +3511,9 @@ START_TEST(Composition)
         TestCompositor2AndBrush3();
         TestNineGridBrush();
         TestVisualInteractionSource(pRoActivateInstance, pWindowsCreateString, pWindowsDeleteString);
+        TestCreatePropertySet();
+        TestGraphicsDeviceInterop();
+        TestPresent(pRoActivateInstance, pWindowsCreateString, pWindowsDeleteString);
         TestExpressionAnimation();
         TestInteractionTracker(pRoActivateInstance, pWindowsCreateString, pWindowsDeleteString);
         REL(Comp);
