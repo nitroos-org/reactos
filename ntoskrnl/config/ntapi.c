@@ -339,7 +339,9 @@ NtCreateKey(OUT PHANDLE KeyHandle,
  * honored (open the symbolic-link key itself rather than its target).
  * REG_OPTION_BACKUP_RESTORE and REG_OPTION_DONT_VIRTUALIZE (0x10, Win7+)
  * are accepted for application compatibility but have no effect: ReactOS
- * performs neither backup-intent opens nor registry virtualization.
+ * performs neither backup-intent opens nor registry virtualization. The
+ * registry ACL audit (cmacl.c) reads REG_OPTION_BACKUP_RESTORE to model the
+ * Windows decision; it does not change the open.
  */
 #define CMP_OPEN_LEGAL_OPTIONS \
     (REG_OPTION_OPEN_LINK | REG_OPTION_BACKUP_RESTORE | 0x00000010)
@@ -379,8 +381,9 @@ CmpOpenKeyInternal(OUT PHANDLE KeyHandle,
      * folds it into the open's object attributes. This is the OpenOptions
      * equivalent of the OBJ_OPENLINK object attribute. CmpParseKey only
      * consults it on the open path, so NtCreateKey semantics are unaffected.
+     * REG_OPTION_BACKUP_RESTORE rides along for the registry ACL audit only.
      */
-    ParseContext.CreateOptions = OpenOptions & REG_OPTION_OPEN_LINK;
+    ParseContext.CreateOptions = OpenOptions & (REG_OPTION_OPEN_LINK | REG_OPTION_BACKUP_RESTORE);
 
     /* Check for user-mode caller */
     if (PreviousMode != KernelMode)
