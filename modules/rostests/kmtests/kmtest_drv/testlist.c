@@ -33,6 +33,7 @@ KMT_TESTFUNC Test_ExStubHit;
 KMT_TESTFUNC Test_ProbeCapture;
 KMT_TESTFUNC Test_ExPushLock;
 KMT_TESTFUNC Test_ExResource;
+KMT_TESTFUNC Test_ExResourceGrow;
 KMT_TESTFUNC Test_ExSListPopFault;
 KMT_TESTFUNC Test_ExSequencedList;
 KMT_TESTFUNC Test_ExSingleList;
@@ -95,6 +96,7 @@ KMT_TESTFUNC Test_KeFreezeBreakDpc;
 KMT_TESTFUNC Test_KeFreezeBugCheckDpc;
 KMT_TESTFUNC Test_KeFreezeNmiDpc;
 KMT_TESTFUNC Test_KeIrql;
+KMT_TESTFUNC Test_KeIrqlPerf;
 KMT_TESTFUNC Test_KeMutex;
 KMT_TESTFUNC Test_KePriority;
 KMT_TESTFUNC Test_KeProcessor;
@@ -194,6 +196,7 @@ const KMT_TEST TestList[] =
     { "ProbeCapture",                       Test_ProbeCapture },
     { "ExPushLock",                         Test_ExPushLock },
     { "ExResource",                         Test_ExResource },
+    { "-ExResourceGrow",                    Test_ExResourceGrow },
     { "ExSListPopFault",                      Test_ExSListPopFault },
     { "ExSequencedList",                    Test_ExSequencedList },
     { "ExSingleList",                       Test_ExSingleList },
@@ -258,6 +261,7 @@ const KMT_TEST TestList[] =
     { "-KeFreezeBugCheckDpc",             Test_KeFreezeBugCheckDpc },
     { "-KeFreezeNmiDpc",                  Test_KeFreezeNmiDpc },
     { "KeIrql",                             Test_KeIrql },
+    { "-KeIrqlPerf",                        Test_KeIrqlPerf },
     { "KeMutex",                            Test_KeMutex },
     { "KePriority",                         Test_KePriority },
     { "KeProfile",                          Test_KeProfile, Test_KeProfileWithData },
