@@ -154,3 +154,13 @@ generates `nls/<tag>.nls` (lower-case tag, e.g. `en-in.nls`) like for the first 
 * `ca-ES-valencia`: the CLDR variant `ca-ES-valencia` is the first element of the locale chain.
 * i386 images: kernel32 grows by 0x37000 bytes of `SizeOfImage` (0x3ae000 -> 0x3e5000, i386 Debug), about 2.6 KB per locale (string table + `calendar_data.c`); see `sdk/cmake/baseaddress.cmake`.
 * The ICU data package (`dll/3rdparty/icu/data/icudtl.dat`) was regenerated after this round with `build-filtered-data.sh`: 335 names (253 + 82; 69 of the 85 new kernel32 locales have an ICU 64.2 locale of the same tag, the other 16 are listed in `dll/3rdparty/icu/README.ReactOS`).
+
+## Round 6: the derived fields of the 85 added locales, measured on Windows 10
+The code pages, `SABBREVLANGNAME`, `SABBREVCTRYNAME` and `SOPENTYPELANGUAGETAG` that round 5 derived (see above) were compared with Windows 10 22H2 through
+`GetLocaleInfoEx` for all 85 names (one read-only probe; `LOCALE_SNAME` and `LOCALE_ILANGUAGE` matched already). 150 values in 77 locales differed and are now the
+measured Windows values in `data/skeleton.json` (`"added": true` entries). The derivation rules of `add_locales.py` are therefore only the starting point for a
+locale that has not been measured: re-measure before relying on them. Windows is not regular here: scripts without an ANSI page report 0/1/2 (ANSI/OEM/MAC) for
+`st-ZA`, `mt-MT`, `om-ET`, `so-SO`, `mi-NZ`, `ps-AF`, `ii-CN`, `en-AE`; the Nigerian, Rwandan and Hawaiian Latin locales have OEM 437 and EBCDIC 037; Windows abbreviations
+and OpenType tags are often not the ISO 639-2 code (`TNA`, `XHS`, `MYM`, `BOB`, `ZZZ` for a custom abbreviation).
+`LOCALE_FONTSIGNATURE` is NOT changed: Windows 10 reports other signatures than the Wine-era ones for every locale (also the 146 older ones), and the probe captured
+only the first 16 of the 32 bytes (the Unicode subset bits, not the code page bit fields), so the signatures of all 231 locales need one more measurement.
