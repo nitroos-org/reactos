@@ -972,6 +972,7 @@ RPC_STATUS RPCRT4_default_authorize(RpcConnection *conn, BOOL first_time,
       }
       conn->signature_auth_len = secctx_sizes.cbMaxSignature;
       conn->encryption_auth_len = secctx_sizes.cbSecurityTrailer;
+      conn->auth_complete = TRUE;
   }
 
   *out_size = out.cbBuffer;
@@ -1029,9 +1030,15 @@ RPC_STATUS RPCRT4_ServerConnectionAuth(RpcConnection* conn,
     unsigned int out_size;
     RPC_STATUS status;
 
+    /* The caller's length is the auth_len of the packet header, the length of the token; the verifier (RpcAuthVerifier)
+     * precedes the token in the data. The code below counts both. */
+    if (auth_length_in)
+        auth_length_in += sizeof(RpcAuthVerifier);
+
     if (start)
     {
         /* remove any existing authentication information */
+        conn->auth_complete = FALSE;
         if (conn->AuthInfo)
         {
             RpcAuthInfo_Release(conn->AuthInfo);
@@ -1112,11 +1119,13 @@ RPC_STATUS RPCRT4_ServerConnectionAuth(RpcConnection* conn,
         free(out_buffer);
         return RPC_S_SEC_PKG_ERROR;
     }
-    else
+    else if (auth_data_out && auth_length_out)
     {
         *auth_data_out = out_buffer;
         *auth_length_out = out_size;
     }
+    else
+        free(out_buffer);
 
     return status;
 }
@@ -1201,13 +1210,32 @@ RPC_STATUS RPCRT4_default_inquire_auth_client(
 
     if (privs)
     {
-        FIXME("privs not implemented\n");
+        /* the client principal name: for a client authenticated by a security package, the name that package
+         * gives (domain and user), kept with the connection */
         *privs = NULL;
+        if (conn->server && SecIsValidHandle(&conn->ctx) && conn->auth_complete)
+        {
+            if (!conn->client_principal)
+            {
+                SecPkgContext_NamesW names;
+
+                if (QueryContextAttributesW(&conn->ctx, SECPKG_ATTR_NAMES, &names) == SEC_E_OK)
+                {
+                    conn->client_principal = wcsdup(names.sUserName);
+                    FreeContextBuffer(names.sUserName);
+                }
+            }
+            *privs = conn->client_principal;
+        }
+        else
+            FIXME("privs not implemented\n");
     }
     if (server_princ_name)
     {
-        *server_princ_name = wcsdup(conn->AuthInfo->server_principal_name);
-        if (!*server_princ_name) return ERROR_OUTOFMEMORY;
+        /* the connection of a server has no principal name unless the client gave one */
+        *server_princ_name = conn->AuthInfo->server_principal_name ?
+                             wcsdup(conn->AuthInfo->server_principal_name) : NULL;
+        if (conn->AuthInfo->server_principal_name && !*server_princ_name) return ERROR_OUTOFMEMORY;
     }
     if (authn_level) *authn_level = conn->AuthInfo->AuthnLevel;
     if (authn_svc) *authn_svc = conn->AuthInfo->AuthnSvc;
@@ -1466,6 +1494,21 @@ RPC_STATUS RPCRT4_ReceiveWithAuth(RpcConnection *Connection, RpcPktHdr **Header,
       TRACE("invalid packet flags\n");
       status = RPC_S_PROTOCOL_ERROR;
       goto fail;
+    }
+
+    /* A request on a connection that is authenticated by a security package is accepted only when the exchange is
+     * complete, and with the verifier of its authentication level: a client that has not proved who it is (it
+     * stopped after the first message, or sends no signature) gets nothing served */
+    if (Connection->server && CurrentHeader->common.ptype == PKT_REQUEST && Connection->AuthInfo &&
+        SecIsValidHandle(&Connection->AuthInfo->cred))
+    {
+      if (!Connection->auth_complete ||
+          (Connection->AuthInfo->AuthnLevel >= RPC_C_AUTHN_LEVEL_PKT_INTEGRITY && !header_auth_len))
+      {
+        WARN("request without a finished authentication or the required verifier refused\n");
+        status = RPC_S_ACCESS_DENIED;
+        goto fail;
+      }
     }
 
     data_length = CurrentHeader->common.frag_len - hdr_length - header_auth_len;

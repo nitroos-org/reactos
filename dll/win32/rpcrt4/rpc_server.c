@@ -364,11 +364,11 @@ static RPC_STATUS process_bind_packet(RpcConnection *conn, RpcPktBindHdr *hdr,
  * oracle, evidence/rpcverify-20261110):
  * - RPC_IF_ALLOW_LOCAL_ONLY: ncalrpc and a local named pipe are local; a TCP client is not, not even over the
  *   loopback address or the machine's own address.
- * - NOT done: Windows refuses a caller that set no authentication over TCP (unless the interface has
- *   RPC_IF_ALLOW_CALLBACKS_WITH_NO_AUTH) and over a named pipe for RPC_IF_ALLOW_SECURE_ONLY interfaces and interfaces
- *   with a callback but without that flag. Ours has no security package for RPC_C_AUTHN_WINNT yet
- *   (RpcBindingSetAuthInfo fails with RPC_S_UNKNOWN_AUTHN_SERVICE), so no client could ever authenticate and the
- *   refusal would make such interfaces unreachable; add it together with an NTLM client.
+ * - RPC_IF_ALLOW_SECURE_ONLY: a caller that set no authentication over a named pipe or TCP is refused (RPC_S_ACCESS_DENIED,
+ *   as every other refusal). NOT done: the refusal of unauthenticated callers of interfaces with a callback but without
+ *   RPC_IF_ALLOW_CALLBACKS_WITH_NO_AUTH over TCP: the rows of the interface_access test (callback interfaces with
+ *   no flags, measured on the oracle) are served to unauthenticated callers, so what Windows refuses there is not
+ *   known yet.
  * - The interface security callback decides each client when the first call of a connection reaches the interface (not
  *   at bind). Its first argument points to the interface's RPC_SYNTAX_IDENTIFIER (UUID and version); the second is the
  *   binding handle of the call. A verdict other than RPC_S_OK refuses the call with RPC_S_ACCESS_DENIED.
@@ -388,7 +388,15 @@ static RPC_STATUS check_interface_access(RpcConnection *conn, RpcServerInterface
     return RPC_S_ACCESS_DENIED;
   }
   /* a caller that set no authentication over a named pipe or TCP: the verdict is not kept (Windows asks for every call) */
-  if (!conn->AuthInfo && strcmp(rpcrt4_conn_get_name(conn), "ncalrpc")) cacheable = FALSE;
+  if (!conn->AuthInfo && strcmp(rpcrt4_conn_get_name(conn), "ncalrpc"))
+  {
+    if (sif->Flags & RPC_IF_ALLOW_SECURE_ONLY)
+    {
+      WARN("unauthenticated client refused by a secure-only interface %s\n", debugstr_guid(&sif->If->InterfaceId.SyntaxGUID));
+      return RPC_S_ACCESS_DENIED;
+    }
+    cacheable = FALSE;
+  }
   if (!fn) return RPC_S_OK;
 
   if (cacheable)
@@ -573,11 +581,12 @@ static RPC_STATUS process_auth3_packet(RpcConnection *conn,
                                              auth_length, NULL, NULL);
     }
 
-    /* FIXME: client doesn't expect a response to this message so must store
-     * status in connection so that fault packet can be returned when next
-     * packet is received */
-
-    return RPC_S_OK;
+    /* The client does not expect a response to this message. When the authentication fails the connection ends
+     * (the status is returned to the I/O thread, which closes it): a client that fails to prove who it is must not
+     * go on with calls on a connection that has a security context */
+    if (status != RPC_S_OK)
+        WARN("authentication of the client failed with %lu\n", status);
+    return status;
 }
 
 static void RPCRT4_process_packet(RpcConnection* conn, RpcPktHdr* hdr,
