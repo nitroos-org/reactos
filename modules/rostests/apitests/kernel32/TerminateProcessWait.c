@@ -15,6 +15,8 @@
 
 #include "precomp.h"
 
+#if DLL_EXPORT_VERSION >= 0x600 /* uses NT6 exports */
+
 #define SETTLE_MS       500
 #define EXIT_WAIT_MS    20000
 #define STARVE_THREADS  150
@@ -397,3 +399,12 @@ START_TEST(TerminateProcessWait)
         TestWait(i);
     TestStarvedExit();
 }
+
+#else
+
+START_TEST(TerminateProcessWait)
+{
+    skip("TerminateProcessWait needs the NT6 exports\n");
+}
+
+#endif

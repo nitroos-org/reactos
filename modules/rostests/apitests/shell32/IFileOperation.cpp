@@ -15,6 +15,8 @@
 #include <shlwapi.h>
 #include <strsafe.h>
 
+#if DLL_EXPORT_VERSION >= 0x600 /* uses NT6 exports */
+
 // The values the sinks are given (TSF_* flags) and the "done without child items" result
 #define COPYENGINE_S_DONT_PROCESS_CHILDREN 0x00270008
 #define TSF_COPY_FILE   0x22a
@@ -470,3 +472,12 @@ START_TEST(IFileOperation)
     RemoveDirectoryW(s_szDir);
     CoUninitialize();
 }
+
+#else
+
+START_TEST(IFileOperation)
+{
+    skip("IFileOperation needs the NT6 exports\n");
+}
+
+#endif
