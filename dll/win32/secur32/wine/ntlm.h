@@ -43,6 +43,7 @@ typedef struct _NegoHelper {
     WCHAR *user_name;           /* server: the client as it authenticated */
     WCHAR *domain_name;
     HANDLE token;               /* server: the impersonation token of the client */
+    ULONG64 local_context;      /* server: the local call context the LSA issued for the CHALLENGE (0: none) */
     struct {
         struct {
             ULONG seq_num;
