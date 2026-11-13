@@ -216,6 +216,7 @@ list(APPEND SOURCE
     RtlPlaceholderCompatibilityMode.c
     RtlHandle.c
     RtlHeapChurn.c
+    RtlHeapDecommit.c
     RtlHeapFrontEnd.c
     RtlHeapValidate.c
     RtlHeapTailCheck.c
