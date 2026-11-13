@@ -982,6 +982,18 @@ CmpStoreKeySecurity(VOID)
     return CmpAclReady && !CmpAclSetupRunning && CmpRegistryAclEffectiveMode != CM_REGACL_MODE_LEGACY;
 }
 
+/*
+ * A descriptor the creator names is stored even while setup runs (the inherited ones are
+ * not): setup gives the roots of the hives it builds the Windows descriptors this way. Only
+ * legacy mode (nothing stored) and the time before the policy table exists are excluded.
+ */
+BOOLEAN
+NTAPI
+CmpStoreExplicitKeySecurity(VOID)
+{
+    return CmpAclReady && CmpRegistryAclEffectiveMode != CM_REGACL_MODE_LEGACY;
+}
+
 /* SYSTEM\Setup\SystemSetupInProgress (REG_DWORD) is not zero: second-stage setup */
 static
 BOOLEAN

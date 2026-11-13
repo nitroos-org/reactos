@@ -29,6 +29,7 @@
 
 #define NDEBUG
 #include "mkhive.h"
+#include "../../include/reactos/regacl_sd.h"
 
 /* DATA *********************************************************************/
 
@@ -61,290 +62,12 @@ static CMHIVE SamHive;      /* \Registry\Machine\SAM */
 static CMHIVE SecurityHive; /* \Registry\Machine\SECURITY */
 static CMHIVE BcdHive;      /* \Registry\Machine\BCD00000000 */
 
-//
-// TODO: Write these values in a more human-readable form.
-// See http://amnesia.gtisc.gatech.edu/~moyix/suzibandit.ltd.uk/MSc/Registry%20Structure%20-%20Appendices%20V4.pdf
-// Appendix 12 "The Registry NT Security Descriptor" for more information.
-//
-// These SECURITY_DESCRIPTORs were obtained by dumping the security block "sk"
-// of registry hives created by setting their permissions to be the same as
-// the ones of the BCD, SOFTWARE, or SYSTEM, SAM and .DEFAULT system hives.
-// A cross-check was subsequently done with the system hives to verify that
-// the security descriptors were the same.
-//
-static UCHAR BcdSecurity[] =
-{
-    // SECURITY_DESCRIPTOR_RELATIVE
-    0x01,                   // Revision
-    0x00,                   // Sbz1
-    0x04, 0x94,             // Control: SE_SELF_RELATIVE        (0x8000) |
-                            //          SE_DACL_PROTECTED       (0x1000) |
-                            //          SE_DACL_AUTO_INHERITED  (0x0400) |
-                            //          SE_DACL_PRESENT         (0x0004)
-    0x48, 0x00, 0x00, 0x00, // Owner
-    0x58, 0x00, 0x00, 0x00, // Group
-    0x00, 0x00, 0x00, 0x00, // Sacl (None)
-    0x14, 0x00, 0x00, 0x00, // Dacl
-
-    // DACL
-    0x02,       // AclRevision
-    0x00,       // Sbz1
-    0x34, 0x00, // AclSize
-    0x02, 0x00, // AceCount
-    0x00, 0x00, // Sbz2
-
-    // (1st ACE)
-    0x00,                   // AceType : ACCESS_ALLOWED_ACE_TYPE
-    0x02,                   // AceFlags: CONTAINER_INHERIT_ACE
-    0x18, 0x00,             // AceSize
-    0x19, 0x00, 0x06, 0x00, // ACCESS_MASK: "Write DAC"         (0x00040000) |
-                            //              "Read Control"      (0x00020000) |
-                            //              "Notify"            (0x00000010) |
-                            //              "Enumerate Subkeys" (0x00000008) |
-                            //              "Query Value"       (0x00000001)
-    // (SidStart: S-1-5-32-544 "Administrators")
-    0x01, 0x02, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x05,
-    0x20, 0x00, 0x00, 0x00,
-    0x20, 0x02, 0x00, 0x00,
-
-    // (2nd ACE)
-    0x00,                   // AceType : ACCESS_ALLOWED_ACE_TYPE
-    0x02,                   // AceFlags: CONTAINER_INHERIT_ACE
-    0x14, 0x00,             // AceSize
-    0x3F, 0x00, 0x0F, 0x00, // ACCESS_MASK: "Full Control" (0x000F003F)
-    // (SidStart: S-1-5-18 "Local System")
-    0x01, 0x01, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x05,
-    0x12, 0x00, 0x00, 0x00,
-
-    // Owner SID (S-1-5-32-544 "Administrators")
-    0x01, 0x02, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x05,
-    0x20, 0x00, 0x00, 0x00,
-    0x20, 0x02, 0x00, 0x00,
-
-    // Group SID (S-1-5-21-domain-513 "Domain Users")
-    0x01, 0x05, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x05,
-    0x15, 0x00, 0x00, 0x00,
-    0xAC, 0xD0, 0x49, 0xCB,
-    0xE6, 0x52, 0x47, 0x9C,
-    0xE4, 0x31, 0xDB, 0x5C,
-    0x01, 0x02, 0x00, 0x00
-};
-
-static UCHAR SoftwareSecurity[] =
-{
-    // SECURITY_DESCRIPTOR_RELATIVE
-    0x01,                   // Revision
-    0x00,                   // Sbz1
-    0x04, 0x94,             // Control: SE_SELF_RELATIVE        (0x8000) |
-                            //          SE_DACL_PROTECTED       (0x1000) |
-                            //          SE_DACL_AUTO_INHERITED  (0x0400) |
-                            //          SE_DACL_PRESENT         (0x0004)
-    0xA0, 0x00, 0x00, 0x00, // Owner
-    0xB0, 0x00, 0x00, 0x00, // Group
-    0x00, 0x00, 0x00, 0x00, // Sacl (None)
-    0x14, 0x00, 0x00, 0x00, // Dacl
-
-    // DACL
-    0x02,       // AclRevision
-    0x00,       // Sbz1
-    0x8C, 0x00, // AclSize
-    0x06, 0x00, // AceCount
-    0x00, 0x00, // Sbz2
-
-    // (1st ACE)
-    0x00,                   // AceType : ACCESS_ALLOWED_ACE_TYPE
-    0x02,                   // AceFlags: CONTAINER_INHERIT_ACE
-    0x18, 0x00,             // AceSize
-    0x3F, 0x00, 0x0F, 0x00, // ACCESS_MASK: "Full Control" (0x000F003F)
-    // (SidStart: S-1-5-32-544 "Administrators")
-    0x01, 0x02, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x05,
-    0x20, 0x00, 0x00, 0x00,
-    0x20, 0x02, 0x00, 0x00,
-
-    // (2nd ACE)
-    0x00,                   // AceType : ACCESS_ALLOWED_ACE_TYPE
-    0x0A,                   // AceFlags: INHERIT_ONLY_ACE | CONTAINER_INHERIT_ACE
-    0x14, 0x00,             // AceSize
-    0x3F, 0x00, 0x0F, 0x00, // ACCESS_MASK: "Full Control" (0x000F003F)
-    // (SidStart: S-1-3-0 "Creator Owner")
-    0x01, 0x01, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x03,
-    0x00, 0x00, 0x00, 0x00,
-
-    // (3rd ACE)
-    0x00,                   // AceType : ACCESS_ALLOWED_ACE_TYPE
-    0x02,                   // AceFlags: CONTAINER_INHERIT_ACE
-    0x14, 0x00,             // AceSize
-    0x3F, 0x00, 0x0F, 0x00, // ACCESS_MASK: "Full Control" (0x000F003F)
-    // (SidStart: S-1-5-18 "Local System")
-    0x01, 0x01, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x05,
-    0x12, 0x00, 0x00, 0x00,
-
-    // (4th ACE)
-    0x00,                   // AceType : ACCESS_ALLOWED_ACE_TYPE
-    0x02,                   // AceFlags: CONTAINER_INHERIT_ACE
-    0x14, 0x00,             // AceSize
-    0x1F, 0x00, 0x03, 0x00, // ACCESS_MASK: "Read Control"      (0x00020000) |
-                            //              "Delete"            (0x00010000) |
-                            //              "Notify"            (0x00000010) |
-                            //              "Enumerate Subkeys" (0x00000008) |
-                            //              "Create Subkey"     (0x00000004) |
-                            //              "Set Value"         (0x00000002) |
-                            //              "Query Value"       (0x00000001)
-    // (SidStart: S-1-5-13 "Terminal Server Users")
-    0x01, 0x01, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x05,
-    0x0D, 0x00, 0x00, 0x00,
-
-    // (5th ACE)
-    0x00,                   // AceType : ACCESS_ALLOWED_ACE_TYPE
-    0x02,                   // AceFlags: CONTAINER_INHERIT_ACE
-    0x18, 0x00,             // AceSize
-    0x19, 0x00, 0x02, 0x00, // ACCESS_MASK: "Read Control"      (0x00020000) |
-                            //              "Notify"            (0x00000010) |
-                            //              "Enumerate Subkeys" (0x00000008) |
-                            //              "Query Value"       (0x00000001)
-    // (SidStart: S-1-5-32-545 "Users")
-    0x01, 0x02, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x05,
-    0x20, 0x00, 0x00, 0x00,
-    0x21, 0x02, 0x00, 0x00,
-
-    // (6th ACE)
-    0x00,                   // AceType : ACCESS_ALLOWED_ACE_TYPE
-    0x02,                   // AceFlags: CONTAINER_INHERIT_ACE
-    0x18, 0x00,             // AceSize
-    0x1F, 0x00, 0x03, 0x00, // ACCESS_MASK: "Read Control"      (0x00020000) |
-                            //              "Delete"            (0x00010000) |
-                            //              "Notify"            (0x00000010) |
-                            //              "Enumerate Subkeys" (0x00000008) |
-                            //              "Create Subkey"     (0x00000004) |
-                            //              "Set Value"         (0x00000002) |
-                            //              "Query Value"       (0x00000001)
-    // (SidStart: S-1-5-32-547 "Power Users")
-    0x01, 0x02, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x05,
-    0x20, 0x00, 0x00, 0x00,
-    0x23, 0x02, 0x00, 0x00,
-
-    // Owner SID (S-1-5-32-544 "Administrators")
-    0x01, 0x02, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x05,
-    0x20, 0x00, 0x00, 0x00,
-    0x20, 0x02, 0x00, 0x00,
-
-    // Group SID (S-1-5-21-domain-513 "Domain Users")
-    0x01, 0x05, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x05,
-    0x15, 0x00, 0x00, 0x00,
-    0xAC, 0xD0, 0x49, 0xCB,
-    0xE6, 0x52, 0x47, 0x9C,
-    0xE4, 0x31, 0xDB, 0x5C,
-    0x01, 0x02, 0x00, 0x00
-};
-
-// Same security for SYSTEM, SAM and .DEFAULT
-static UCHAR SystemSecurity[] =
-{
-    // SECURITY_DESCRIPTOR_RELATIVE
-    0x01,                   // Revision
-    0x00,                   // Sbz1
-    0x04, 0x94,             // Control: SE_SELF_RELATIVE        (0x8000) |
-                            //          SE_DACL_PROTECTED       (0x1000) |
-                            //          SE_DACL_AUTO_INHERITED  (0x0400) |
-                            //          SE_DACL_PRESENT         (0x0004)
-    0x8C, 0x00, 0x00, 0x00, // Owner
-    0x9C, 0x00, 0x00, 0x00, // Group
-    0x00, 0x00, 0x00, 0x00, // Sacl (None)
-    0x14, 0x00, 0x00, 0x00, // Dacl
-
-    // DACL
-    0x02,       // AclRevision
-    0x00,       // Sbz1
-    0x78, 0x00, // AclSize
-    0x05, 0x00, // AceCount
-    0x00, 0x00, // Sbz2
-
-    // (1st ACE)
-    0x00,                   // AceType : ACCESS_ALLOWED_ACE_TYPE
-    0x02,                   // AceFlags: CONTAINER_INHERIT_ACE
-    0x18, 0x00,             // AceSize
-    0x3F, 0x00, 0x0F, 0x00, // ACCESS_MASK: "Full Control" (0x000F003F)
-    // (SidStart: S-1-5-32-544 "Administrators")
-    0x01, 0x02, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x05,
-    0x20, 0x00, 0x00, 0x00,
-    0x20, 0x02, 0x00, 0x00,
-
-    // (2nd ACE)
-    0x00,                   // AceType : ACCESS_ALLOWED_ACE_TYPE
-    0x0A,                   // AceFlags: INHERIT_ONLY_ACE | CONTAINER_INHERIT_ACE
-    0x14, 0x00,             // AceSize
-    0x3F, 0x00, 0x0F, 0x00, // ACCESS_MASK: "Full Control" (0x000F003F)
-    // (SidStart: S-1-3-0 "Creator Owner")
-    0x01, 0x01, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x03,
-    0x00, 0x00, 0x00, 0x00,
-
-    // (3rd ACE)
-    0x00,                   // AceType : ACCESS_ALLOWED_ACE_TYPE
-    0x02,                   // AceFlags: CONTAINER_INHERIT_ACE
-    0x14, 0x00,             // AceSize
-    0x3F, 0x00, 0x0F, 0x00, // ACCESS_MASK: "Full Control" (0x000F003F)
-    // (SidStart: S-1-5-18 "Local System")
-    0x01, 0x01, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x05,
-    0x12, 0x00, 0x00, 0x00,
-
-    // (4th ACE)
-    0x00,                   // AceType : ACCESS_ALLOWED_ACE_TYPE
-    0x02,                   // AceFlags: CONTAINER_INHERIT_ACE
-    0x18, 0x00,             // AceSize
-    0x19, 0x00, 0x02, 0x00, // ACCESS_MASK: "Read Control"      (0x00020000) |
-                            //              "Notify"            (0x00000010) |
-                            //              "Enumerate Subkeys" (0x00000008) |
-                            //              "Query Value"       (0x00000001)
-    // (SidStart: S-1-5-32-545 "Users")
-    0x01, 0x02, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x05,
-    0x20, 0x00, 0x00, 0x00,
-    0x21, 0x02, 0x00, 0x00,
-
-    // (5th ACE)
-    0x00,                   // AceType : ACCESS_ALLOWED_ACE_TYPE
-    0x02,                   // AceFlags: CONTAINER_INHERIT_ACE
-    0x18, 0x00,             // AceSize
-    0x19, 0x00, 0x02, 0x00, // ACCESS_MASK: "Read Control"      (0x00020000) |
-                            //              "Notify"            (0x00000010) |
-                            //              "Enumerate Subkeys" (0x00000008) |
-                            //              "Query Value"       (0x00000001)
-    // (SidStart: S-1-5-32-547 "Power Users")
-    0x01, 0x02, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x05,
-    0x20, 0x00, 0x00, 0x00,
-    0x23, 0x02, 0x00, 0x00,
-
-    // Owner SID (S-1-5-32-544 "Administrators")
-    0x01, 0x02, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x05,
-    0x20, 0x00, 0x00, 0x00,
-    0x20, 0x02, 0x00, 0x00,
-
-    // Group SID (S-1-5-21-domain-513 "Domain Users")
-    0x01, 0x05, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x05,
-    0x15, 0x00, 0x00, 0x00,
-    0xAC, 0xD0, 0x49, 0xCB,
-    0xE6, 0x52, 0x47, 0x9C,
-    0xE4, 0x31, 0xDB, 0x5C,
-    0x01, 0x02, 0x00, 0x00
-};
+/*
+ * The security descriptors of the hive roots (and of a few keys) are the Windows 10
+ * ones, built from the table in <regacl_sd.h> when the registry is initialized.
+ */
+#define HIVE_SD_SIZE 1024
+static UCHAR HiveSd[MAX_NUMBER_OF_REGISTRY_HIVES][HIVE_SD_SIZE];
 
 /* GLOBALS ******************************************************************/
 
@@ -352,17 +75,52 @@ HIVE_LIST_ENTRY RegistryHives[/*MAX_NUMBER_OF_REGISTRY_HIVES*/] =
 {
     /* Special Setup system registry hive */
     // WARNING: Please *keep* it in first position!
-    { "SETUPREG", L"Registry\\Machine\\SYSTEM"     , &SystemHive  , SystemSecurity  , sizeof(SystemSecurity)   },
+    { "SETUPREG", L"Registry\\Machine\\SYSTEM"     , &SystemHive  , NULL, 0 },
 
     /* Regular registry hives */
-    { "SYSTEM"  , L"Registry\\Machine\\SYSTEM"     , &SystemHive  , SystemSecurity  , sizeof(SystemSecurity)   },
-    { "SOFTWARE", L"Registry\\Machine\\SOFTWARE"   , &SoftwareHive, SoftwareSecurity, sizeof(SoftwareSecurity) },
-    { "DEFAULT" , L"Registry\\User\\.DEFAULT"      , &DefaultHive , SystemSecurity  , sizeof(SystemSecurity)   },
-    { "SAM"     , L"Registry\\Machine\\SAM"        , &SamHive     , SystemSecurity  , sizeof(SystemSecurity)   },
-    { "SECURITY", L"Registry\\Machine\\SECURITY"   , &SecurityHive, NULL            , 0                        },
-    { "BCD"     , L"Registry\\Machine\\BCD00000000", &BcdHive     , BcdSecurity     , sizeof(BcdSecurity)      },
+    { "SYSTEM"  , L"Registry\\Machine\\SYSTEM"     , &SystemHive  , NULL, 0 },
+    { "SOFTWARE", L"Registry\\Machine\\SOFTWARE"   , &SoftwareHive, NULL, 0 },
+    { "DEFAULT" , L"Registry\\User\\.DEFAULT"      , &DefaultHive , NULL, 0 },
+    { "SAM"     , L"Registry\\Machine\\SAM"        , &SamHive     , NULL, 0 },
+    { "SECURITY", L"Registry\\Machine\\SECURITY"   , &SecurityHive, NULL, 0 },
+    { "BCD"     , L"Registry\\Machine\\BCD00000000", &BcdHive     , NULL, 0 },
 };
 C_ASSERT(_countof(RegistryHives) == MAX_NUMBER_OF_REGISTRY_HIVES);
+
+/* The descriptor template of each hive's root key, in the order of RegistryHives */
+static const ULONG HiveRootTemplate[MAX_NUMBER_OF_REGISTRY_HIVES] =
+{
+    REGSD_T_HIVEROOT,   /* SETUPREG (the SYSTEM hive of the setup boot) */
+    REGSD_T_HIVEROOT,   /* SYSTEM */
+    REGSD_T_HIVEROOT,   /* SOFTWARE */
+    REGSD_T_DEFAULT,    /* .DEFAULT */
+    REGSD_T_HIVEROOT,   /* SAM */
+    REGSD_T_SECURITY,   /* SECURITY: SYSTEM only */
+    REGSD_T_BCD,        /* BCD00000000 */
+};
+
+/*
+ * Keys whose descriptor differs from what they inherit on Windows 10. A key that is not in
+ * the hive is created (empty) only when Create is set: the service that fills it later
+ * opens the existing key.
+ */
+typedef struct _SD_OVERRIDE
+{
+    PCSTR Hive;
+    PCWSTR Path;
+    ULONG Template;
+    BOOL Create;
+} SD_OVERRIDE;
+
+static const SD_OVERRIDE SdOverrides[] =
+{
+    { "SAM",      L"Registry\\Machine\\SAM\\SAM", REGSD_T_SAMSAM, TRUE },
+    { "SYSTEM",   L"Registry\\Machine\\SYSTEM\\ControlSet001\\Services\\EventLog", REGSD_T_EVENTLOG, FALSE },
+    { "SYSTEM",   L"Registry\\Machine\\SYSTEM\\ControlSet001\\Services\\Tcpip\\Parameters", REGSD_T_TCPIPPARAMS, FALSE },
+    { "SOFTWARE", L"Registry\\Machine\\SOFTWARE\\Policies", REGSD_T_POLICIES, FALSE },
+    { "SOFTWARE", L"Registry\\Machine\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Schedule\\TaskCache",
+      REGSD_T_TASKCACHE, TRUE },
+};
 
 /* FUNCTIONS ****************************************************************/
 
@@ -1141,6 +899,16 @@ RegInitializeRegistry(
     InitializeListHead(&CmiHiveListHead);
     InitializeListHead(&CmiReparsePointsHead);
 
+    /* The root descriptors of the hives */
+    for (i = 0; i < _countof(RegistryHives); ++i)
+    {
+        RegistryHives[i].SecurityDescriptorLength =
+            RegSdBuild(HiveRootTemplate[i], NULL, HiveSd[i], HIVE_SD_SIZE);
+        RegistryHives[i].SecurityDescriptor = HiveSd[i];
+        if (!RegistryHives[i].SecurityDescriptorLength)
+            DPRINT1("No security descriptor for the %s hive root\n", RegistryHives[i].HiveName);
+    }
+
     Status = CmiInitializeHive(&RootHive, L"");
     if (!NT_SUCCESS(Status))
     {
@@ -1187,6 +955,51 @@ RegInitializeRegistry(
     /* Link S-1-5-18 to .Default */
     CmpLinkKeyToHive(L"\\Registry\\User\\S-1-5-18", L"\\Registry\\User\\.Default");
 #endif
+}
+
+/*
+ * Give the keys of the override table their descriptors (after the INF files are imported,
+ * so that the keys they define exist). They replace the descriptor the key shares with its
+ * parent.
+ */
+VOID
+RegStampSecurity(
+    IN PCSTR HiveList)
+{
+    UINT i;
+    HKEY Key;
+    PMEMKEY MemKey;
+    UCHAR Sd[HIVE_SD_SIZE];
+    ULONG Length;
+    NTSTATUS Status;
+
+    for (i = 0; i < _countof(SdOverrides); ++i)
+    {
+        /* Skip this key if its hive is not in the list */
+        if (!strstr(HiveList, SdOverrides[i].Hive))
+            continue;
+
+        if (SdOverrides[i].Create)
+        {
+            if (RegCreateKeyW(NULL, SdOverrides[i].Path, &Key) != ERROR_SUCCESS)
+                continue;
+        }
+        else
+        {
+            if (RegOpenKeyW(NULL, SdOverrides[i].Path, &Key) != ERROR_SUCCESS)
+                continue;
+        }
+
+        Length = RegSdBuild(SdOverrides[i].Template, NULL, Sd, sizeof(Sd));
+        MemKey = HKEY_TO_MEMKEY(Key);
+        if (Length)
+        {
+            Status = CmiAssignSecurityKey(&MemKey->RegistryHive->Hive, MemKey->KeyCellOffset, Sd, Length, TRUE);
+            if (!NT_SUCCESS(Status))
+                DPRINT1("Failed to add security for '%S' (0x%08x)\n", SdOverrides[i].Path, Status);
+        }
+        RegCloseKey(Key);
+    }
 }
 
 VOID
