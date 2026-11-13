@@ -10,9 +10,11 @@
  *                            HKLM\SOFTWARE\Microsoft\SystemCertificates\Root on that open,
  *                            when the registry lacks one) and print the number of roots.
  *   nitro-certseed /service  The same as an auto-start LocalSystem service: it runs at
- *                            every boot before anyone logs on, does nothing when the
- *                            store is up to date (the import writes only what is missing
- *                            or differs), and stops. It covers a fresh install, where
+ *                            every boot before anyone logs on and stops at once when the
+ *                            seed marker (reactos/certseed.h) matches the crypt32, the
+ *                            AuthRoot list and the Root key it recorded; otherwise it
+ *                            opens the stores (the import writes only what is missing
+ *                            or differs) and records the marker. It covers a fresh install, where
  *                            setup already did it, and an existing install that boots
  *                            with a newer crypt32 or root list.
  *
@@ -31,6 +33,7 @@
 #include <winreg.h>
 #include <winsvc.h>
 #include <wincrypt.h>
+#include <reactos/certseed.h>
 
 static SERVICE_STATUS_HANDLE g_hStatus;
 static SERVICE_STATUS g_Status;
@@ -97,6 +100,8 @@ VOID
 WINAPI
 ServiceMain(DWORD argc, LPWSTR *argv)
 {
+    DWORD Start, Skipped = 0;
+
     UNREFERENCED_PARAMETER(argc);
     UNREFERENCED_PARAMETER(argv);
 
@@ -107,7 +112,18 @@ ServiceMain(DWORD argc, LPWSTR *argv)
         return;
     SetServiceStatus(g_hStatus, &g_Status);
 
-    SeedRootStore();
+    /* Nothing changed since the last seed (same crypt32, same AuthRoot list, Root
+     * key as left): no store is opened */
+    Start = GetTickCount();
+    if (CertSeedMarkerCurrent())
+    {
+        Skipped = 1;
+    }
+    else if (SeedRootStore() > 0)
+    {
+        CertSeedWriteMarker();
+    }
+    CertSeedWriteRun(GetTickCount() - Start, Skipped);
 
     g_Status.dwCurrentState = SERVICE_STOPPED;
     SetServiceStatus(g_hStatus, &g_Status);
@@ -123,6 +139,8 @@ wmain(int argc, WCHAR **argv)
         return StartServiceCtrlDispatcherW(Table) ? 0 : 1;
 
     Count = SeedRootStore();
+    if (Count > 0)
+        CertSeedWriteMarker();
     if (Count < 0)
     {
         wprintf(L"The Root store cannot be opened (error %lu)\n", GetLastError());
