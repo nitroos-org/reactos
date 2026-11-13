@@ -9,6 +9,21 @@
 
 #include <gditools.h>
 
+typedef struct _COPY_BUFFER_CONTEXT
+{
+    HANDLE event;
+    BYTE *buffer;
+} COPY_BUFFER_CONTEXT;
+
+static DWORD WINAPI
+ReleaseCopyBuffer(void *parameter)
+{
+    COPY_BUFFER_CONTEXT *context = parameter;
+    WaitForSingleObject(context->event, INFINITE);
+    VirtualFree(context->buffer, 0, MEM_RELEASE);
+    return 0;
+}
+
 static void
 Test_GetDIBits_BoundedCopy(void)
 {
@@ -51,6 +66,40 @@ Test_GetDIBits_BoundedCopy(void)
         ok(result == 2, "Expected two scan lines, got %d\n", result);
         for (index = 4; index < sizeof(bits); index++)
             ok(bits[index] == 0xA5, "Byte %u changed despite cjMaxBits=4\n", index);
+
+        {
+            COPY_BUFFER_CONTEXT context;
+            HBITMAP largeBitmap = CreateBitmap(1024, 1024, 1, 32, NULL);
+            HANDLE thread;
+            INT copyResult;
+
+            context.buffer = VirtualAlloc(NULL, 1024 * 1024 * 4,
+                                          MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+            context.event = CreateEventW(NULL, TRUE, FALSE, NULL);
+            thread = (largeBitmap && context.buffer && context.event) ?
+                     CreateThread(NULL, 0, ReleaseCopyBuffer, &context, 0, NULL) : NULL;
+            if (thread)
+            {
+                header.bV5Width = 1024;
+                header.bV5Height = 1024;
+                SetEvent(context.event);
+                copyResult = pfnGetDIBits(hdc, largeBitmap, 0, 1024,
+                                         context.buffer, (LPBITMAPINFO)&header,
+                                         DIB_RGB_COLORS, 1024 * 1024 * 4,
+                                         sizeof(header));
+                ok(copyResult == 0 || copyResult == 1024,
+                   "Unexpected line count on concurrent buffer release: %d\n", copyResult);
+                WaitForSingleObject(thread, INFINITE);
+                CloseHandle(thread);
+            }
+            else
+            {
+                skip("Could not allocate concurrent copy resources\n");
+                if (context.buffer) VirtualFree(context.buffer, 0, MEM_RELEASE);
+            }
+            if (context.event) CloseHandle(context.event);
+            if (largeBitmap) DeleteObject(largeBitmap);
+        }
     }
     if (hbm) DeleteObject(hbm);
     if (hdc) DeleteDC(hdc);
