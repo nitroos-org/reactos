@@ -72,9 +72,8 @@ ExReleaseResourceLock(IN PERESOURCE Resource,
 #else
     UNREFERENCED_PARAMETER(Resource);
 #endif
-    /* __writeeflags is no compiler barrier: keep every access of the
-       resource on this side of the popfq */
-    _ReadWriteBarrier();
+    /* __writeeflags has a memory clobber: every access of the resource stays
+       on this side of the popfq */
     __writeeflags((ULONG_PTR)LockHandle->LockQueue.Next);
 }
 
