@@ -410,7 +410,7 @@ static void Test_CommitToLimit(void)
         ok(Count <= (SIZE_T)(Cap + Cap / 512 + 64), "%Iu strides, the cap is %Id store pages\n", Count, Cap);
         ok(Count >= (SIZE_T)(Cap / 2), "only %Iu strides, the cap is %Id store pages\n", Count, Cap);
         ok((Available0 - Available) <= (Cap + Cap / 8 + 2048), "%Id pages taken, the cap is %Id store pages\n", Available0 - Available, Cap);
-        ok(Available >= (LONG_PTR)(Basic.NumberOfPhysicalPages / 3), "available %Id pages at the commit failure\n", Available);
+        ok(Available >= Available0 - Available0 / 4, "available %Id pages at the commit failure, %Id before\n", Available, Available0);
         /* Each stride charged its section page and its store page */
         ok((Committed - Committed0) >= (LONG_PTR)(2 * Count), "commit grew by %Id pages for %Iu strides\n", Committed - Committed0, Count);
 
