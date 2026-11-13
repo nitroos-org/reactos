@@ -22,6 +22,7 @@ list(APPEND SOURCE
 	mesh.c
 	state_block.c
 	stroke.c
+	svg.c
 	wic_render_target.c)
 
 add_library(d2d1 MODULE
