@@ -45,6 +45,7 @@ static ULONG TallyUsed;
 #define TAIL_BYTE 0xbb
 static LONGLONG TailEnd;
 static volatile LONG SeqFails;    /* the mixed sequence runs on several threads: counted separately */
+static volatile LONG StopSeq;     /* set when the sequence threads did not finish in time: they stop at their next round */
 
 static VOID CountFail(PCSTR Variant, PCSTR What)
 {
@@ -439,7 +440,7 @@ static VOID RoundMapBeyond(PCWSTR Path, ULONG Idx, BOOL SectionLarger, BOOL Flus
  * truncate/grow, mapped write), each thread on its own file, all bytes checked against a shadow copy ---- */
 #define BLK 65536
 #define MAXBLK 96
-typedef struct { ULONG Id; WCHAR Path[MAX_PATH]; ULONG Rounds; ULONGLONG Rng; PUCHAR Exp; PUCHAR Buf; PUCHAR Al; LONG Bad; } SEQ;
+typedef struct { ULONG Id; WCHAR Path[MAX_PATH]; ULONG Rounds; ULONGLONG Rng; PUCHAR Exp; PUCHAR Buf; PUCHAR Al; LONG Bad; ULONG Done; } SEQ;
 
 static ULONG SRnd(SEQ *q, ULONG Mod)
 {
@@ -470,6 +471,51 @@ static BOOL SWrite(HANDLE H, ULONG Off, const UCHAR *B, ULONG N)
     return WriteFile(H, B, N, &W, &Ov) && W == N;
 }
 
+/* After "open for verify" failed: is the name really gone, or is the failure transient? Opens again right away and after
+ * waits, and looks the name up in a directory listing. Output goes to the test log. */
+static VOID SDiagOpen(SEQ *q)
+{
+    static const ULONG Waits[] = { 0, 0, 10, 100, 1000 };
+    ULONG i;
+    WIN32_FIND_DATAW Fd;
+    HANDLE Find;
+    for (i = 0; i < ARRAYSIZE(Waits); i++)
+    {
+        HANDLE H;
+        Sleep(Waits[i]);
+        H = CreateFileW(q->Path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, 0, NULL);
+        trace("[t%lu] diag: reopen after %lu ms: %s (%lu)\n", q->Id, Waits[i],
+              H != INVALID_HANDLE_VALUE ? "OK" : "FAILED", H != INVALID_HANDLE_VALUE ? 0 : GetLastError());
+        if (H != INVALID_HANDLE_VALUE)
+            CloseHandle(H);
+    }
+    Find = FindFirstFileW(q->Path, &Fd);
+    trace("[t%lu] diag: FindFirstFile by name: %s (%lu)\n", q->Id, Find != INVALID_HANDLE_VALUE ? "found" : "NOT found",
+          Find != INVALID_HANDLE_VALUE ? 0 : GetLastError());
+    if (Find != INVALID_HANDLE_VALUE)
+        FindClose(Find);
+    {
+        WCHAR Pat[MAX_PATH];
+        PWCHAR Sl;
+        wcscpy(Pat, q->Path);
+        Sl = wcsrchr(Pat, L'\\');
+        if (Sl)
+        {
+            wcscpy(Sl + 1, L"seq*.bin");
+            Find = FindFirstFileW(Pat, &Fd);
+            if (Find != INVALID_HANDLE_VALUE)
+            {
+                do
+                    trace("[t%lu] diag: listing: %ls size %lu\n", q->Id, Fd.cFileName, Fd.nFileSizeLow);
+                while (FindNextFileW(Find, &Fd));
+                FindClose(Find);
+            }
+            else
+                trace("[t%lu] diag: listing seq*.bin failed %lu\n", q->Id, GetLastError());
+        }
+    }
+}
+
 /* Compares the whole file with the shadow, cached and unbuffered; returns TRUE if it matches. */
 static BOOL SVerify(SEQ *q, ULONG Size, PCSTR After, PCSTR Last)
 {
@@ -483,7 +529,9 @@ static BOOL SVerify(SEQ *q, ULONG Size, PCSTR After, PCSTR Last)
         LARGE_INTEGER Sz;
         if (H == INVALID_HANDLE_VALUE)
         {
-            ok(0, "[t%lu] open for verify failed %lu\n", q->Id, GetLastError());
+            DWORD Err = GetLastError();
+            ok(0, "[t%lu after %s] open for verify failed %lu (history %s)\n", q->Id, After, Err, Last);
+            SDiagOpen(q);
             return FALSE;
         }
         GetFileSizeEx(H, &Sz);
@@ -532,7 +580,10 @@ static DWORD WINAPI SeqThread(PVOID Arg)
         HANDLE H;
         BOOL Check = FALSE;
 
+        if (StopSeq)
+            break;
         V++;
+        q->Done = Round + 1;
         if (!Exists || Op < 15)
         {
             ULONG Sz = 4096 + SRnd(q, MAXBLK * BLK - 4096);
@@ -674,6 +725,101 @@ static DWORD WINAPI SeqThread(PVOID Arg)
 }
 
 
+
+/* ---- the focused reopen test: each thread creates its own file, writes it, maps and flushes it, closes everything and opens it
+ * again by name at once.  A name that was just written must always be found (an open may fail for lack of resources, 1450,
+ * which is counted; 2 or 3 is a failure). ---- */
+typedef struct { ULONG Id; WCHAR Path[MAX_PATH]; ULONG Rounds; ULONGLONG Rng; ULONG NoRes; ULONG Missing; ULONG Done; } REOPEN;
+
+static DWORD WINAPI ReopenThread(PVOID Arg)
+{
+    REOPEN *q = Arg;
+    PUCHAR Buf = VirtualAlloc(NULL, 256 * 1024, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ULONG Round;
+    if (!Buf)
+        return 1;
+    memset(Buf, 0x37 + q->Id, 256 * 1024);
+    for (Round = 0; Round < q->Rounds; Round++)
+    {
+        HANDLE H, Map;
+        PUCHAR View;
+        DWORD W, Err = 0;
+        ULONG Sz, Try;
+        q->Rng = q->Rng * 6364136223846793005ULL + 1442695040888963407ULL;
+        Sz = 4096 + (ULONG)(q->Rng >> 33) % (256 * 1024 - 4096);
+        q->Done = Round + 1;
+        H = CreateFileW(q->Path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, 0, NULL);
+        if (H == INVALID_HANDLE_VALUE)
+        {
+            if (GetLastError() == ERROR_NO_SYSTEM_RESOURCES)
+                q->NoRes++;
+            else
+                ok(0, "[r%lu] create failed %lu\n", q->Id, GetLastError());
+            continue;
+        }
+        WriteFile(H, Buf, Sz, &W, NULL);
+        SetEndOfFile(H);
+        Map = CreateFileMappingW(H, NULL, PAGE_READWRITE, 0, 0, NULL);
+        View = Map ? MapViewOfFile(Map, FILE_MAP_WRITE, 0, 0, 0) : NULL;
+        if (View)
+        {
+            View[0] = (UCHAR)Round;
+            if (Round & 1)
+                FlushViewOfFile(View, 0);
+            UnmapViewOfFile(View);
+        }
+        if (Map)
+            CloseHandle(Map);
+        CloseHandle(H);
+        for (Try = 0; Try < 4; Try++)
+        {
+            H = CreateFileW(q->Path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                            (Round & 2) ? FILE_FLAG_NO_BUFFERING : 0, NULL);
+            if (H != INVALID_HANDLE_VALUE)
+            {
+                CloseHandle(H);
+                break;
+            }
+            Err = GetLastError();
+            if (Err == ERROR_NO_SYSTEM_RESOURCES || Err == ERROR_NOT_ENOUGH_MEMORY)
+                q->NoRes++;
+            else
+            {
+                q->Missing++;
+                ok(0, "[r%lu round %lu try %lu] reopen of the file just written failed %lu\n", q->Id, Round, Try, Err);
+                break;
+            }
+        }
+    }
+    return 0;
+}
+
+static VOID RunReopen(PCWSTR DirPath, ULONG Threads, ULONG Rounds)
+{
+    REOPEN Q[8];
+    HANDLE Th[8];
+    ULONG i;
+    if (Threads > 8)
+        Threads = 8;
+    for (i = 0; i < Threads; i++)
+    {
+        memset(&Q[i], 0, sizeof(Q[i]));
+        Q[i].Id = i + 1;
+        Q[i].Rounds = Rounds;
+        Q[i].Rng = 0x9e3779b97f4a7c15ULL * (i + 7) + GetTickCount();
+        _snwprintf(Q[i].Path, MAX_PATH - 1, L"%ls\\reopen%02lu.bin", DirPath, i);
+        Th[i] = CreateThread(NULL, 0, ReopenThread, &Q[i], 0, NULL);
+    }
+    for (i = 0; i < Threads; i++)
+    {
+        WaitForSingleObject(Th[i], 3600000);
+        CloseHandle(Th[i]);
+        DeleteFileW(Q[i].Path);
+        trace("reopen thread %lu: %lu rounds, %lu without resources, %lu not found\n", Q[i].Id, Rounds, Q[i].NoRes, Q[i].Missing);
+        Fails += Q[i].Missing;
+    }
+}
+
 /* Cache churn: a file bigger than the cache written once, then read through again and again (cached,
  * sequential: read-ahead, views recycled by the cache manager). */
 static WCHAR ChurnPath[MAX_PATH];
@@ -709,7 +855,13 @@ static VOID RunSequence(PCWSTR Dir, ULONG Threads, ULONG Rounds)
 {
     SEQ Q[8];
     HANDLE Th[8];
-    ULONG i;
+    ULONG i, T0 = GetTickCount(), Limit = 4 * 3600 * 1000;
+    WCHAR LEnv[32];
+    /* The sequence is only finished when every thread is: a thread's file is deleted after its thread has ended, never
+     * under it (a delete after a timeout of the join made the thread's next open fail with 2). A run that is slower than
+     * the limit is reported as such (FSREGROW_SEQLIMITMS overrides the 4 hours), and the threads are told to stop. */
+    if (GetEnvironmentVariableW(L"FSREGROW_SEQLIMITMS", LEnv, 32))
+        Limit = _wtoi(LEnv);
     if (Threads > 8)
         Threads = 8;
     for (i = 0; i < Threads; i++)
@@ -726,10 +878,30 @@ static VOID RunSequence(PCWSTR Dir, ULONG Threads, ULONG Rounds)
     }
     for (i = 0; i < Threads; i++)
     {
-        WaitForSingleObject(Th[i], 3600000);
+        DWORD W;
+        for (;;)
+        {
+            ULONG Used = GetTickCount() - T0;
+            W = WaitForSingleObject(Th[i], StopSeq ? 600000 : (Used < Limit ? min(Limit - Used, 60000) : 0));
+            if (W != WAIT_TIMEOUT)
+                break;
+            if (!StopSeq && GetTickCount() - T0 >= Limit)
+            {
+                ok(0, "the sequence threads did not finish in %lu ms (thread %lu is at round %lu of %lu); stopping them\n", Limit,
+                   Q[i].Id, Q[i].Done, Rounds);
+                InterlockedExchange(&StopSeq, 1);
+            }
+            else if (StopSeq)
+                break;      /* a thread that does not stop in 10 minutes is left alone, with its file */
+        }
+        if (W == WAIT_OBJECT_0)
+            DeleteFileW(Q[i].Path);
+        else
+            ok(0, "[t%lu] did not end; its file %ls is left\n", Q[i].Id, Q[i].Path);
         CloseHandle(Th[i]);
-        DeleteFileW(Q[i].Path);
+        trace("sequence thread %lu: %lu of %lu rounds run, %lu bad\n", Q[i].Id, Q[i].Done, Rounds, (ULONG)Q[i].Bad);
     }
+    trace("sequence: %lu threads, %lu ms\n", Threads, GetTickCount() - T0);
 }
 
 START_TEST(FsRegrow)
@@ -788,6 +960,27 @@ START_TEST(FsRegrow)
             Thr4 = _wtoi(Env);
         GetEnvironmentVariableW(L"FSREGROW_SEQROUNDS", Env, MAX_PATH);
         RunSequence(Dir, Thr4, _wtoi(Env));
+        if (ChurnTh)
+        {
+            StopChurn = 1;
+            WaitForSingleObject(ChurnTh, 60000);
+            CloseHandle(ChurnTh);
+        }
+    }
+    if (GetEnvironmentVariableW(L"FSREGROW_REOPEN", Env, MAX_PATH) && _wtoi(Env) > 0)
+    {
+        HANDLE ChurnTh = NULL;
+        WCHAR E2[MAX_PATH];
+        ULONG RThreads = 8, RRounds = _wtoi(Env);
+        if (GetEnvironmentVariableW(L"FSREGROW_CHURNMB", E2, MAX_PATH) && _wtoi(E2) > 0)
+        {
+            ChurnMb = _wtoi(E2);
+            _snwprintf(ChurnPath, MAX_PATH - 1, L"%ls\\churn.bin", Dir);
+            ChurnTh = CreateThread(NULL, 0, ChurnThread, NULL, 0, NULL);
+        }
+        if (GetEnvironmentVariableW(L"FSREGROW_SEQTHREADS", E2, MAX_PATH))
+            RThreads = _wtoi(E2);
+        RunReopen(Dir, RThreads, RRounds);
         if (ChurnTh)
         {
             StopChurn = 1;
