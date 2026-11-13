@@ -2119,6 +2119,35 @@ IofCompleteRequest(IN PIRP Irp,
     /* Make sure the IRP isn't canceled */
     if (!Irp->Cancel)
     {
+        /*
+         * An IRP completed by the thread that issued it, at PASSIVE_LEVEL, would have its completion
+         * APC delivered before KeInsertQueueApc returns: the APC interrupt is requested for the
+         * running thread and taken at once. Run the routine of that APC here instead, at the level
+         * the APC would run at. This saves the software interrupt, a self-IPI that is a VM exit on
+         * a virtualised APIC (several microseconds for every IRP that completes in its own caller).
+         * Every other case (another thread, a raised IRQL, special APCs disabled, a thread attached to
+         * another process) keeps the APC.
+         */
+        if (Thread != NULL &&
+            &Thread->Tcb == KeGetCurrentThread() &&
+            KeGetCurrentIrql() == PASSIVE_LEVEL &&
+            Thread->Tcb.SpecialApcDisable == 0 &&
+            Thread->Tcb.ApcStateIndex == (UCHAR)Irp->ApcEnvironment)
+        {
+            PKNORMAL_ROUTINE NormalRoutine = NULL;
+            PVOID NormalContext = NULL;
+            KIRQL OldIrql;
+
+            KeRaiseIrql(APC_LEVEL, &OldIrql);
+            IopCompleteRequest(&Irp->Tail.Apc,
+                               &NormalRoutine,
+                               &NormalContext,
+                               (PVOID*)&FileObject,
+                               (PVOID*)&DataBuffer);
+            KeLowerIrql(OldIrql);
+            return;
+        }
+
         /* Initialize the APC */
         KeInitializeApc(&Irp->Tail.Apc,
                         &Thread->Tcb,
