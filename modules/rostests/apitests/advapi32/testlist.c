@@ -21,6 +21,7 @@ extern void func_DuplicateTokenEx(void);
 extern void func_EnableTraceEx2(void);
 extern void func_EncryptFile(void);
 extern void func_eventlog_supp(void);
+extern void func_eventlog_full(void);
 extern void func_EventRegister(void);
 extern void func_EventProvider(void);
 extern void func_EventSetInformation(void);
@@ -154,6 +155,7 @@ const struct test winetest_testlist[] =
     { "EnableTraceEx2", func_EnableTraceEx2 },
     { "EncryptFile", func_EncryptFile },
     { "eventlog_supp", func_eventlog_supp },
+    { "eventlog_full", func_eventlog_full },
     { "EventRegister", func_EventRegister },
     { "EventProvider", func_EventProvider },
     { "EventSetInformation", func_EventSetInformation },

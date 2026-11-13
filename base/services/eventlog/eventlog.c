@@ -381,7 +381,7 @@ LoadLogFile(HKEY hKey, PWSTR LogName)
                               &ValueLen);
     if ((Result != ERROR_SUCCESS) || (Type != REG_DWORD))
     {
-        ulMaxSize = 512 * 1024; /* 512 kBytes */
+        ulMaxSize = 20 * 1024 * 1024; /* 20 MBytes, as on Windows 10 */
 
         Result = RegSetValueExW(hKey,
                                 L"MaxSize",
@@ -400,7 +400,7 @@ LoadLogFile(HKEY hKey, PWSTR LogName)
                               &ValueLen);
     if ((Result != ERROR_SUCCESS) || (Type != REG_DWORD))
     {
-        /* On Windows 2003 it is 604800 (secs) == 7 days */
+        /* Overwrite events as needed, as the Windows 10 logs do (was 604800 s on Windows 2003) */
         ulRetention = 0;
 
         Result = RegSetValueExW(hKey,
