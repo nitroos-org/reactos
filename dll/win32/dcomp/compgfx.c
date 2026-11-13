@@ -211,6 +211,8 @@ static HRESULT STDMETHODCALLTYPE gdi_SetRenderingDevice(ICompGraphicsDeviceInter
 
     TRACE("%p, %p\n", i, value);
     if (!value) return E_INVALIDARG;    /* FIXME: unmeasured */
+    comp_lock(); hr = dev->closed ? RO_E_CLOSED : S_OK; comp_unlock();
+    if (FAILED(hr)) return hr;          /* FIXME: verify on the oracle; a closed device does not come back to life here */
     if (FAILED(hr = open_device(value, &d3d, &d2d))) return hr;
     IUnknown_AddRef(value);
     comp_lock();
