@@ -45,6 +45,10 @@ static void InitCache(PCMHIVE Cm)
     for (i = 0; i < CMP_SECURITY_HASH_LISTS; i++)
         InitializeListHead(&Cm->SecurityHash[i]);
     Cm->SecurityCount = 0;
+#ifndef BASE_CMLIB
+    Cm->SecurityRingAnchor[Stable] = HCELL_NIL;
+    Cm->SecurityRingAnchor[Volatile] = HCELL_NIL;
+#endif
 }
 
 static PCM_KEY_SECURITY Sk(PHHIVE Hive, HCELL_INDEX Cell)
@@ -1019,6 +1023,129 @@ static void TestFlat(void)
     CHECK(SecOf(Hive, g_Key[K_SOLE]) == HCELL_NIL, "flat: reset");
 }
 
+/* ---- the ring cache of a load is linear, and every search is bounded (hostile hives) ---- */
+
+#define CACHE_FLAGS (RC_FLAGS | CM_CHECK_REGISTRY_CACHE_SECURITY)
+#define IDENT 40000
+#define IDENT_SD 65000
+
+static double NowMs(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec * 1000.0 + t.tv_nsec / 1e6;
+}
+
+/*
+ * IDENT keys under a root without Security, each naming its own 'sk' cell, all
+ * cells in one ring and all with the same bytes (a hive check accepts that:
+ * the cells are just not shared). The load used to cost IDENT^2 / 2 steps
+ * (every cell's ring walk asked whether each cell was cached by scanning the
+ * one hash list all of them are in).
+ */
+static void TestRingCacheIdentical(void)
+{
+    static CMHIVE Cm;
+    static HCELL_INDEX Cell[IDENT], Key[IDENT];
+    PHHIVE Hive = &Cm.Hive;
+    HCELL_INDEX Root, C, Ext;
+    UCHAR Buf[sizeof(g_Sd)];
+    WCHAR Name[32];
+    ULONG i, Len, Deleted = 0;
+    double T0, T1;
+
+    printf("-- ring cache: %d cells with the same descriptor, one key each\n", IDENT);
+    CHECK(NewHive(&Cm), "hive");
+    Root = RootOf(Hive);
+    Len = Sd(IDENT_SD, Buf);
+    for (i = 0; i < IDENT; i++)
+    {
+        Cell[i] = Insert(&Cm, i, Stable);
+        MakeName(Name, i, 0);
+        Key[i] = KeyWith(Hive, Root, Name, Cell[i]);
+    }
+    /* now make the bytes identical */
+    for (i = 0; i < IDENT; i++)
+        memcpy(&Sk(Hive, Cell[i])->Descriptor, Buf, Len);
+    HvMarkCellDirty(Hive, Root, FALSE);
+    CHECK(HvWriteHive(Hive), "write");
+    CmpFreeSecurityCache(&Cm);
+
+    CHECK(NT_SUCCESS(OpenHive(&Cm, HINIT_MEMORY)), "load");
+    InitCache(&Cm);
+    T0 = NowMs();
+    CHECK(CM_CHECK_REGISTRY_SUCCESS(CmCheckRegistry(&Cm, CACHE_FLAGS)), "check");
+    T1 = NowMs();
+    printf("   check + recount + ring cache: %.1f ms\n", T1 - T0);
+#ifndef BASE_CMLIB
+    CHECK(CacheEntries(&Cm) == Cm.SecurityCount && Cm.SecurityCount <= 256, "the list is bounded: %lu entries",
+          (unsigned long)Cm.SecurityCount);
+#endif
+    CHECK(RingLength(Hive, Cell[0]) == IDENT, "one ring of %d", IDENT);
+
+    /* the cache still shares, a new descriptor joins the ring, deletes keep it sound */
+    T0 = NowMs();
+    C = Find_(&Cm, IDENT_SD, Stable);
+    CHECK(C != HCELL_NIL, "an identical cell is found");
+    CHECK(Insert(&Cm, IDENT_SD, Stable) == C && Refs(Hive, C) == 2, "shared");
+    Ext = Insert(&Cm, IDENT + 7, Stable);
+    CHECK(Ext != HCELL_NIL && RingLength(Hive, Ext) == IDENT + 1, "a new cell joins the ring");
+    for (i = 0; i < IDENT; i += 4)
+    {
+        CHECK(CmpFreeKeyByCell(Hive, Key[i], TRUE) == STATUS_SUCCESS, "delete %lu", (unsigned long)i);
+        Deleted++;
+    }
+    T1 = NowMs();
+    printf("   find, insert and %lu deletes: %.1f ms\n", (unsigned long)Deleted, T1 - T0);
+    /* the deleted keys' cells: those of the keys that were shared stay */
+    CHECK(RingLength(Hive, Ext) == (LONG)(IDENT + 1 - Deleted + (Sk(Hive, C) && C == Cell[0] ? 1 : 0)) ||
+          RingLength(Hive, Ext) == (LONG)(IDENT + 1 - Deleted), "ring after deletes: %ld", (long)RingLength(Hive, Ext));
+    CHECK(CacheEntries(&Cm) == Cm.SecurityCount, "cache entries == count");
+    CHECK(Insert(&Cm, IDENT + 8, Stable) != HCELL_NIL && RingLength(Hive, Ext) > 0, "insert after the deletes");
+    CHECK(CM_CHECK_REGISTRY_SUCCESS(CmCheckRegistry(&Cm, RC_FLAGS)), "second check");
+    CmpFreeSecurityCache(&Cm);
+}
+
+/*
+ * Rings that do not close, met by the root walk (CmpBuildSecurityCache) and by
+ * the walks of the cells keys name: a rho (a Flink back into the middle) and a
+ * self loop off the start. Each walk ends after a few times the ring's length.
+ */
+static void TestRingCacheShapes(void)
+{
+    static CMHIVE Cm;
+    PHHIVE Hive = &Cm.Hive;
+    HCELL_INDEX Root, S[6], R[6];
+    WCHAR Name[32];
+    ULONG i;
+
+    printf("-- ring cache: a rho off the root, a self loop, cells named by keys\n");
+    CHECK(NewHive(&Cm), "hive");
+    Root = RootOf(Hive);
+    for (i = 0; i < 6; i++)
+    {
+        S[i] = Insert(&Cm, 500 + i, Stable);
+        MakeName(Name, i, 1);
+        KeyWith(Hive, Root, Name, S[i]);
+    }
+    ((PCM_KEY_NODE)HvGetCell(Hive, Root))->Security = S[0];
+    Sk(Hive, S[0])->ReferenceCount++;
+    /* the cache sees the ring as it is in the file; the check (which would heal it) is not run here */
+    CmpFreeSecurityCache(&Cm);
+    /* the ring in its order from S0: R0 = S0, R1, .. R5 */
+    R[0] = S[0];
+    for (i = 1; i < 6; i++)
+        R[i] = Sk(Hive, R[i - 1])->Flink;
+    CHECK(Sk(Hive, R[5])->Flink == S[0], "a ring of six");
+    Sk(Hive, R[5])->Flink = R[2];     /* R0 .. R5 -> R2: a rho that misses S0 */
+    CHECK(!CmpBuildSecurityCache(&Cm), "the rho is reported");
+    CHECK(Cm.SecurityCount == 6 && CacheEntries(&Cm) == 6, "each cell cached once: %lu", (unsigned long)Cm.SecurityCount);
+    Sk(Hive, R[1])->Flink = R[1];     /* R0 -> R1 -> R1 */
+    CHECK(!CmpBuildSecurityCache(&Cm), "the self loop is reported");
+    CHECK(Cm.SecurityCount == 2, "S0 and S1 cached: %lu", (unsigned long)Cm.SecurityCount);
+    CmpFreeSecurityCache(&Cm);
+}
+
 int main(void)
 {
     setvbuf(stdout, NULL, _IOLBF, 0);
@@ -1040,6 +1167,8 @@ int main(void)
     TestRecountNoMemory();
     TestRecountRestart();
     TestRecountExitNode();
+    TestRingCacheShapes();
+    TestRingCacheIdentical();
     printf(g_Errors ? "RESULT: FAIL (%lu)\n" : "RESULT: PASS\n", (unsigned long)g_Errors);
     return g_Errors != 0;
 }
