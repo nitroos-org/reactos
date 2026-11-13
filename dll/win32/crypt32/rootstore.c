@@ -24,6 +24,7 @@
 #include "windef.h"
 #include "winbase.h"
 #include "winreg.h"
+#include "winuser.h"
 #include "wincrypt.h"
 #include "winternl.h"
 #include "wine/debug.h"
@@ -735,6 +736,23 @@ static HCERTSTORE create_root_store(HCERTSTORE cached, BOOL *delete)
     return memStore;
 }
 
+#define CRYPT_ROOT_CERTS_PATH L"Software\\Microsoft\\SystemCertificates\\Root\\Certificates"
+
+/* The Root store's Certificates key, opened for write the first time something
+ * is written (write access is not asked for by a start that finds the key
+ * up to date, as it is on every start but the first after an install).
+ * Returns the key or NULL, for a caller that may not write there. */
+static HKEY CRYPT_RootCertsForWrite(HKEY *write)
+{
+    if (!*write &&
+     RegOpenKeyExW(HKEY_LOCAL_MACHINE, CRYPT_ROOT_CERTS_PATH, 0, KEY_ALL_ACCESS, write))
+    {
+        WARN("The Root store cannot be written to\n");
+        *write = NULL;
+    }
+    return *write;
+}
+
 #ifdef __REACTOS__
 /* Whether a serialized store element (a registry Blob) carries an enhanced key
  * usage property */
@@ -774,14 +792,60 @@ static BOOL CRYPT_RegBlobEquals(HKEY key, const BYTE *blob, DWORD size)
     return equal;
 }
 
+/* Whether any certificate of store is missing from the Root store's registry
+ * key (rootCerts, opened for read) or differs from its entry there.  The
+ * import writes every certificate it has collected; when each one already is
+ * in the registry as it would be written, the key is not opened for write. */
+static BOOL CRYPT_RootStoreDiffersFromReg(HKEY rootCerts, HCERTSTORE store)
+{
+    const void *context = NULL;
+    BOOL differs = FALSE;
+
+    while (!differs && (context = pCertInterface->enumContextsInStore(store, context)))
+    {
+        BYTE hash[20];
+        DWORD hashSize = sizeof(hash), size = 0, i;
+        WCHAR name[20 * 2 + 1];
+        BYTE *buf;
+        HKEY key;
+
+        if (!pCertInterface->getProp(context, CERT_HASH_PROP_ID, hash, &hashSize))
+            continue;
+        if (!pCertInterface->serialize(context, 0, NULL, &size) || !size ||
+         !(buf = CryptMemAlloc(size)))
+        {
+            differs = TRUE;
+            break;
+        }
+        if (!pCertInterface->serialize(context, 0, buf, &size))
+            differs = TRUE;
+        else
+        {
+            for (i = 0; i < 20; i++)
+                wsprintfW(name + i * 2, L"%02X", hash[i]);
+            if (RegOpenKeyExW(rootCerts, name, 0, KEY_QUERY_VALUE, &key))
+                differs = TRUE;
+            else
+            {
+                differs = !CRYPT_RegBlobEquals(key, buf, size);
+                RegCloseKey(key);
+            }
+        }
+        CryptMemFree(buf);
+    }
+    if (context)
+        Context_Release(context_from_ptr(context));
+    return differs;
+}
+
 /* The import above takes the certificates of the AuthRoot store, not their
  * properties.  A root there that is only trusted for some purposes (its
  * enhanced key usage property says which, see csroots.inf) must keep that
  * restriction in the Root store, or it would be trusted for everything, TLS
  * included: copy those entries whole. */
-static void CRYPT_CopyRestrictedAuthRoots(HKEY rootCerts)
+static void CRYPT_CopyRestrictedAuthRoots(HKEY rootCerts, HKEY *write)
 {
-    HKEY authRoot, src, dst;
+    HKEY authRoot, src, dst, wkey;
     WCHAR name[64];
     DWORD i, size, type;
     BYTE *blob;
@@ -799,14 +863,25 @@ static void CRYPT_CopyRestrictedAuthRoots(HKEY rootCerts)
          type == REG_BINARY && size && (blob = CryptMemAlloc(size)))
         {
             if (!RegQueryValueExW(src, L"Blob", NULL, &type, blob, &size) &&
-             CRYPT_BlobHasUsageProperty(blob, size) &&
-             !RegCreateKeyExW(rootCerts, name, 0, NULL, 0,
-             KEY_QUERY_VALUE | KEY_SET_VALUE, NULL, &dst, NULL))
+             CRYPT_BlobHasUsageProperty(blob, size))
             {
-                if (!CRYPT_RegBlobEquals(dst, blob, size) &&
-                 RegSetValueExW(dst, L"Blob", 0, REG_BINARY, blob, size))
-                    ERR("Failed to restrict root %s\n", debugstr_w(name));
-                RegCloseKey(dst);
+                BOOL same = FALSE;
+
+                /* Read first: a root that is already as it should be is not
+                 * opened for write (the usual case, every start) */
+                if (!RegOpenKeyExW(rootCerts, name, 0, KEY_QUERY_VALUE, &dst))
+                {
+                    same = CRYPT_RegBlobEquals(dst, blob, size);
+                    RegCloseKey(dst);
+                }
+                if (!same && (wkey = CRYPT_RootCertsForWrite(write)) &&
+                 !RegCreateKeyExW(wkey, name, 0, NULL, 0,
+                 KEY_QUERY_VALUE | KEY_SET_VALUE, NULL, &dst, NULL))
+                {
+                    if (RegSetValueExW(dst, L"Blob", 0, REG_BINARY, blob, size))
+                        ERR("Failed to restrict root %s\n", debugstr_w(name));
+                    RegCloseKey(dst);
+                }
             }
             CryptMemFree(blob);
         }
@@ -819,7 +894,7 @@ static void CRYPT_CopyRestrictedAuthRoots(HKEY rootCerts)
 void CRYPT_ImportSystemRootCertsToReg(void)
 {
     HCERTSTORE store = NULL, reg = NULL;
-    HKEY key = NULL;
+    HKEY key = NULL, wkey = NULL;
     LONG rc;
     HANDLE hsem;
     BOOL delete;
@@ -842,8 +917,10 @@ void CRYPT_ImportSystemRootCertsToReg(void)
         goto done;
     }
 
-    rc = RegCreateKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\SystemCertificates\\Root\\Certificates", 0, NULL, 0,
-            KEY_ALL_ACCESS, NULL, &key, 0);
+    /* Opened for read: the writes below open it for write when there is
+     * something to write */
+    rc = RegCreateKeyExW(HKEY_LOCAL_MACHINE, CRYPT_ROOT_CERTS_PATH, 0, NULL, 0,
+            KEY_READ, NULL, &key, 0);
     if (rc)
         goto done;
 
@@ -859,15 +936,31 @@ void CRYPT_ImportSystemRootCertsToReg(void)
         ERR("Failed to create root store\n");
         goto done;
     }
-    if (delete && RegDeleteTreeW(key, NULL))
-        ERR("Error deleting key.\n");
-    if (!CRYPT_SerializeContextsToReg(key, 0, pCertInterface, store))
-        ERR("Failed to import system certs into registry, %08lx\n", GetLastError());
+    {
 #ifdef __REACTOS__
-    CRYPT_CopyRestrictedAuthRoots(key);
+        BOOL need_write = delete || CRYPT_RootStoreDiffersFromReg(key, store);
+#else
+        PCCERT_CONTEXT first = CertEnumCertificatesInStore(store, NULL);
+        BOOL need_write = delete || first != NULL;
+
+        if (first)
+            CertFreeCertificateContext(first);
+#endif
+        if (need_write && CRYPT_RootCertsForWrite(&wkey))
+        {
+            if (delete && RegDeleteTreeW(wkey, NULL))
+                ERR("Error deleting key.\n");
+            if (!CRYPT_SerializeContextsToReg(wkey, 0, pCertInterface, store))
+                ERR("Failed to import system certs into registry, %08lx\n", GetLastError());
+        }
+    }
+#ifdef __REACTOS__
+    CRYPT_CopyRestrictedAuthRoots(key, &wkey);
 #endif
 
 done:
+    if (wkey)
+        RegCloseKey(wkey);
     RegCloseKey(key);
     CertCloseStore(store, 0);
     CertCloseStore(reg, 0);

@@ -475,8 +475,19 @@ static WINECRYPT_CERTSTORE *CRYPT_SysRegOpenStoreW(HCRYPTPROV hCryptProv,
     {
         LONG rc;
         HKEY key;
-        REGSAM sam = dwFlags & CERT_STORE_READONLY_FLAG ? KEY_READ :
-            KEY_ALL_ACCESS;
+        /* Like Windows (measured on Windows 10 with a de-elevated token): a
+         * store opened with CERT_STORE_OPEN_EXISTING_FLAG or
+         * CERT_STORE_READONLY_FLAG is opened for read whatever else the flags
+         * say, and write access is asked for by the store when something is
+         * written (regstore.c), so a caller that only reads a LocalMachine
+         * store is not refused for access it never uses.  Without either flag
+         * the key is created if missing, and that asks for write access: a
+         * caller that may not write is refused (ERROR_ACCESS_DENIED) here. */
+        REGSAM sam = dwFlags & (CERT_STORE_READONLY_FLAG | CERT_STORE_OPEN_EXISTING_FLAG) ?
+            KEY_READ : KEY_READ | KEY_WRITE;
+
+        if (dwFlags & CERT_STORE_DELETE_FLAG)
+            sam = KEY_ALL_ACCESS; /* the delete is the write */
 
         wsprintfW(storePath, L"%s\\%s", base, storeName);
         if (dwFlags & CERT_STORE_OPEN_EXISTING_FLAG)
@@ -496,7 +507,7 @@ static WINECRYPT_CERTSTORE *CRYPT_SysRegOpenStoreW(HCRYPTPROV hCryptProv,
         }
         if (!rc)
         {
-            store = CRYPT_RegOpenStore(hCryptProv, dwFlags, key);
+            store = CRYPT_RegOpenSystemStore(hCryptProv, dwFlags, key, root, storePath);
             RegCloseKey(key);
         }
         else
@@ -589,13 +600,14 @@ static WINECRYPT_CERTSTORE *CRYPT_SysOpenStoreW(HCRYPTPROV hCryptProv,
             {
                 dwFlags &= ~CERT_SYSTEM_STORE_CURRENT_USER;
                 dwFlags |= CERT_SYSTEM_STORE_LOCAL_MACHINE;
+                /* The LocalMachine part of a CurrentUser store is there to
+                 * be read: it is opened for read, so the user is not asked
+                 * for write access to HKLM by a store that adds to HKCU. */
                 regStore = CertOpenStore(CERT_STORE_PROV_SYSTEM_REGISTRY_W, 0,
-                 0, dwFlags, pvPara);
+                 0, dwFlags | CERT_STORE_READONLY_FLAG, pvPara);
                 if (regStore)
                 {
-                    CertAddStoreToCollection(store, regStore,
-                     dwFlags & CERT_STORE_READONLY_FLAG ? 0 :
-                     CERT_PHYSICAL_STORE_ADD_ENABLE_FLAG, 0);
+                    CertAddStoreToCollection(store, regStore, 0, 0);
                     CertCloseStore(regStore, 0);
                 }
             }

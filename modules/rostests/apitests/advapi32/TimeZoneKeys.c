@@ -21,6 +21,9 @@ typedef struct _TZI_FORMAT
     SYSTEMTIME DaylightDate;
 } TZI_FORMAT;
 
+/* like Windows, the module is searched in the base directory (or the current one), not in system32 by itself */
+static WCHAR g_SysDir[MAX_PATH];
+
 static void TestMuiValue(FN_REGLOADMUISTRINGW pLoad, HKEY Zone, PCWSTR Zonename, PCWSTR Mui, PCWSTR Plain)
 {
     WCHAR Text[256], Expected[256];
@@ -29,7 +32,7 @@ static void TestMuiValue(FN_REGLOADMUISTRINGW pLoad, HKEY Zone, PCWSTR Zonename,
 
     Size = sizeof(Text);
     memset(Text, 0, sizeof(Text));
-    Err = pLoad(Zone, Mui, Text, Size, &Size, 0, NULL);
+    Err = pLoad(Zone, Mui, Text, Size, &Size, 0, g_SysDir);
     ok(Err == ERROR_SUCCESS, "%ls %ls: error %ld\n", Zonename, Mui, Err);
     ok(Text[0] != 0, "%ls %ls: empty\n", Zonename, Mui);
 
@@ -58,6 +61,8 @@ START_TEST(TimeZoneKeys)
         skip("RegLoadMUIStringW is not available\n");
         return;
     }
+
+    GetSystemDirectoryW(g_SysDir, ARRAYSIZE(g_SysDir));
 
     Ret = RegOpenKeyExW(HKEY_LOCAL_MACHINE, ZONES_KEY, 0, KEY_ENUMERATE_SUB_KEYS | KEY_QUERY_VALUE, &Zones);
     ok(Ret == ERROR_SUCCESS, "got %lu\n", Ret);
@@ -89,7 +94,7 @@ START_TEST(TimeZoneKeys)
                Tzi.Bias, Tzi.StandardBias, Tzi.DaylightBias);
             ok(!Tzi.StandardDate.wMonth && !Tzi.DaylightDate.wMonth, "UTC has transition dates\n");
             Size = sizeof(Std);
-            Ret = pLoad(Zone, L"MUI_Std", Std, Size, &Size, 0, NULL);
+            Ret = pLoad(Zone, L"MUI_Std", Std, Size, &Size, 0, g_SysDir);
             ok(Ret == ERROR_SUCCESS && !wcscmp(Std, L"Coordinated Universal Time"), "UTC MUI_Std %lu %ls\n", Ret, Std);
         }
         RegCloseKey(Zone);

@@ -19,14 +19,14 @@ int ngos_dev_write_v(void *dev, const struct ngos_iov *iov, unsigned int n);
 
 /*
  * Lock order: FCB MainResource -> FCB PagingIoResource -> Vcb->CoreLock -> core mutexes, and
- * FCB MainResource -> FCB PagingWriteLock -> Vcb->CoreLock -> Vcb->DataIoGate.  PagingWriteLock covers the START of a paging
+ * FCB MainResource -> FCB PagingWriteLock -> Vcb->CoreLock -> Vcb->DioRegLock (a spin lock).  PagingWriteLock covers the START of a paging
  * write (see the comment above NgDioSlotBegin): the transfers of one stream overlap, the initialized size is raised in order.
  * CoreLock is never held across a Cc or Mm call or while touching unlocked user memory.  Paging writes
  * take PagingWriteLock (the lazy writer comes with PagingIoResource shared), then PagingIoResource only
  * by a try that never waits, then CoreLock; nobody holding PagingWriteLock waits for PagingIoResource or
  * MainResource, and nobody holding CoreLock waits for PagingWriteLock, so Cc's lazy writer and Mm's
  * writers cannot deadlock with a user thread that holds FCB resources while it waits inside Cc.
- * DataIoGate: see NgPagingWrite.  The zero fill below a write past the initialized size (NgZeroGap) takes no new lock: it runs
+ * DioRegLock / DioRegList (the transfers in flight and their device ranges): see NgDrainDataIo and NgPagingWrite.  The zero fill below a write past the initialized size (NgZeroGap) takes no new lock: it runs
  * under the same PagingWriteLock (and PagingIoResource shared / MainResource) as the write it belongs to, and takes CoreLock
  * per 1 MB piece like an unlocked paging write.
  *
@@ -42,7 +42,7 @@ int ngos_dev_write_v(void *dev, const struct ngos_iov *iov, unsigned int n);
  * Allocation ahead of the size (ngc_set_size, core/ngcore.c) adds no lock and no order.  Growth takes clusters
  * up to the next multiple of 4 MB for a stream that is already 1 MB long and grows by at most 1 MB at a time; the
  * slack is hidden from NT (ngc_stat) and freed by ngc_trim_alloc at the last cleanup, under MainResource and CoreLock
- * like any shrink (the cluster free drains DataIoGate; a transfer in flight never waits for MainResource or CoreLock).
+ * like any shrink (the cluster free waits for the transfers on its clusters; a transfer in flight never waits for MainResource or CoreLock).
  * Nothing but the stream's own growth uses the slack: reads stop at the size and the initialized size, paging writes
  * are clipped to the size, and a cluster another stream freed before this one took it is committed first
  * (ngc_before_alloc, which a growth inside the allocation does not need).
@@ -56,7 +56,7 @@ int ngos_dev_write_v(void *dev, const struct ngos_iov *iov, unsigned int n);
  * lock rules, none of them a new lock:
  *   - NgCommit drops CoreLock only at CoreDepth 1 and not once a dismount began.  It is called between core operations
  *     (the flusher, FlushFileBuffers and write-through, and NgSetFileSize before a growth), never from inside one.
- *   - While it is dropped the thread counts in DioActive (not in DataIoGate: a cluster free must not wait for a commit),
+ *   - While it is dropped the thread counts in DioActive (not in DioRegList: a cluster free must not wait for a commit),
  *     so a dismount, which waits for DioActive 0 under CoreLock, cannot free the core under the I/O.  The flusher is
  *     stopped before that wait, so it is never inside NgCommit then.
  *   - The journal I/O takes no lock and needs nothing a CoreLock holder owns, so a CoreLock holder may wait for it
@@ -75,27 +75,91 @@ int ngos_dev_write_v(void *dev, const struct ngos_iov *iov, unsigned int n);
 /* At mount, before the core exists. */
 VOID NgInitDataIo(PNG_VCB Vcb)
 {
-    ExInitializeResourceLite(&Vcb->DataIoGate);
+    KeInitializeSpinLock(&Vcb->DioRegLock);
+    InitializeListHead(&Vcb->DioRegList);
+    KeInitializeEvent(&Vcb->DioRegEvent, NotificationEvent, TRUE);
     KeInitializeEvent(&Vcb->DioIdle, NotificationEvent, TRUE);
     KeInitializeEvent(&Vcb->CommitKick, SynchronizationEvent, FALSE);
     ExInitializeNPagedLookasideList(&Vcb->DioBounce, NULL, NULL, 0, NG_DIO_BOUNCE, TAG_NTFSNG, 0);
 }
 
 /*
- * Waits until no paging write is in its unlocked device transfer (CoreLock held).  Called by the core
- * before it frees clusters, before it marks the medium gone or stops writing, before a resize and at
- * unmount (kshim_dio_drain).  A transfer acquires DataIoGate shared only under CoreLock, so none can
- * start while this waits, and it needs nothing a CoreLock holder has to finish.
+ * Does a transfer in flight touch the device bytes [Off, Off + Len)?  (DioRegLock held.)  All: every transfer counts.
+ * A run is taken up to the next 4 KB boundary: a transfer reads or writes whole sectors, never fewer bytes than its run
+ * says, and a cluster is at least a sector, so rounding up only widens the overlap (the wait is never narrower than the
+ * clusters the transfer can reach).
+ */
+static BOOLEAN NgDioRegConflict(PNG_VCB Vcb, ULONGLONG Off, ULONGLONG Len, BOOLEAN All)
+{
+    PLIST_ENTRY Entry;
+    ULONGLONG End = Off + Len;
+
+    if (End < Off)
+        End = ((ULONGLONG)-1);
+    if (All)
+        return !IsListEmpty(&Vcb->DioRegList);
+    for (Entry = Vcb->DioRegList.Flink; Entry != &Vcb->DioRegList; Entry = Entry->Flink)
+    {
+        const struct ngc_dio *Dio = CONTAINING_RECORD(Entry, NG_DIO_REG, Link)->Dio;
+        ULONG r;
+
+        for (r = 0; r < Dio->nruns; r++)
+        {
+            ULONGLONG Start = Dio->run[r].dev, RunEnd;
+
+            if (Start == NGC_DIO_ZERO)
+                continue;
+            RunEnd = Start + (((ULONGLONG)Dio->run[r].len + 4095) & ~4095ULL);
+            if (Start < End && Off < RunEnd)
+                return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static VOID NgDrainDataIo(PNG_VCB Vcb, ULONGLONG Off, ULONGLONG Len, BOOLEAN All)
+{
+    KIRQL Irql;
+    BOOLEAN Busy;
+
+    ASSERT(ExIsResourceAcquiredExclusiveLite(&Vcb->CoreLock));
+    KeEnterCriticalRegion();
+    for (;;)
+    {
+        KeAcquireSpinLock(&Vcb->DioRegLock, &Irql);
+        Busy = NgDioRegConflict(Vcb, Off, Len, All);
+        if (Busy)
+            KeResetEvent(&Vcb->DioRegEvent);
+        KeReleaseSpinLock(&Vcb->DioRegLock, Irql);
+        if (!Busy)
+            break;
+        KeWaitForSingleObject(&Vcb->DioRegEvent, Executive, KernelMode, FALSE, NULL);
+    }
+    KeLeaveCriticalRegion();
+}
+
+/*
+ * Waits until no unlocked data transfer (paging write, gap zero fill, paging or non-cached read) is in flight at all
+ * (CoreLock held).  Called by the core before it marks the medium gone or stops writing, before a resize and at
+ * unmount (kshim_dio_drain), and by the glue before a direct volume write and a sync.  A transfer is registered only under
+ * CoreLock, so none can start while this waits, and it needs nothing a CoreLock holder has to finish.
  */
 VOID NgDrainDataIoCallback(PVOID Context)
 {
-    PNG_VCB Vcb = Context;
-    ASSERT(ExIsResourceAcquiredExclusiveLite(&Vcb->CoreLock));
-    ASSERT(!ExIsResourceAcquiredSharedLite(&Vcb->DataIoGate));
-    KeEnterCriticalRegion();
-    ExAcquireResourceExclusiveLite(&Vcb->DataIoGate, TRUE);
-    ExReleaseResourceLite(&Vcb->DataIoGate);
-    KeLeaveCriticalRegion();
+    NgDrainDataIo(Context, 0, ((ULONGLONG)-1), TRUE);
+}
+
+/*
+ * The same for a cluster free (kshim_dio_drain_range): waits only for the transfers that touch the device bytes
+ * [Off, Off + Len), the clusters being freed.  Called under CoreLock and the volume bitmap lock, so the clusters cannot be
+ * allocated again until it returns, and no new transfer can be registered meanwhile: one that starts later maps the
+ * stream as it is then, which no longer holds these clusters.  A transfer elsewhere on the volume cannot hurt them: the
+ * device ranges of a transfer are the clusters its stream held when it was mapped (ngc_dio_begin / ngc_rdio_begin, in the
+ * same CoreLock hold as the registration), and a cluster belongs to one stream.
+ */
+VOID NgDrainDataIoRangeCallback(PVOID Context, ULONGLONG Off, ULONGLONG Len)
+{
+    NgDrainDataIo(Context, Off, Len, FALSE);
 }
 
 /*
@@ -117,25 +181,42 @@ VOID NgWaitDataIoIdle(PNG_VCB Vcb)
 /*
  * The three steps around an unlocked data transfer (paging writes here, paging and non-cached reads in read.c).
  * The caller holds CoreLock once (CoreDepth 1) and has pinned a core node (ngc_dio_begin / ngc_rdio_begin):
- *   NgDataIoBegin:        counts the transfer (DioActive), takes DataIoGate shared and releases CoreLock; the
- *                         inode cache trim comes before the gate (its evictions may free clusters, which drains)
+ *   NgDataIoBegin:        counts the transfer (DioActive), registers it with its device ranges (Dio, which must stay unchanged
+ *                         until it is unregistered) and releases CoreLock; the inode cache trim comes before the
+ *                         registration (its evictions may free clusters, which drains)
  *   (the transfer, no CoreLock)
- *   NgDataIoTransferred:  releases the gate and takes CoreLock again
+ *   NgDataIoTransferred:  unregisters it and takes CoreLock again
  *   (ngc_dio_end / ngc_rdio_end, which unpin the node)
  *   NgDataIoDone:         the transfer is over (DioActive), still under CoreLock
  */
-VOID NgDataIoBegin(PNG_VCB Vcb)
+VOID NgDataIoBegin(PNG_VCB Vcb, const struct ngc_dio *Dio, PNG_DIO_REG Reg)
 {
+    KIRQL Irql;
+
     ngc_icache_trim(Vcb->Core);
     if (Vcb->DioActive++ == 0)
         KeClearEvent(&Vcb->DioIdle);
-    ExAcquireResourceSharedLite(&Vcb->DataIoGate, TRUE);
+    Reg->Dio = Dio;
+    KeAcquireSpinLock(&Vcb->DioRegLock, &Irql);
+    InsertTailList(&Vcb->DioRegList, &Reg->Link);
+    KeReleaseSpinLock(&Vcb->DioRegLock, Irql);
     NgReleaseCoreNoTrim(Vcb);
 }
 
-VOID NgDataIoTransferred(PNG_VCB Vcb)
+/* The device transfer is over: a drain waiting for these ranges may go on.  No lock needed (or held). */
+VOID NgDataIoUnregister(PNG_VCB Vcb, PNG_DIO_REG Reg)
 {
-    ExReleaseResourceLite(&Vcb->DataIoGate);
+    KIRQL Irql;
+
+    KeAcquireSpinLock(&Vcb->DioRegLock, &Irql);
+    RemoveEntryList(&Reg->Link);
+    KeSetEvent(&Vcb->DioRegEvent, IO_NO_INCREMENT, FALSE);
+    KeReleaseSpinLock(&Vcb->DioRegLock, Irql);
+}
+
+VOID NgDataIoTransferred(PNG_VCB Vcb, PNG_DIO_REG Reg)
+{
+    NgDataIoUnregister(Vcb, Reg);
     NgAcquireCore(Vcb);
 }
 
@@ -150,7 +231,7 @@ VOID NgDataIoDone(PNG_VCB Vcb)
  * return; the commit is complete when it returns 0.  Between the seal and the end of the I/O, which is most of a commit's
  * time, other threads take CoreLock and run: their metadata writes go to a new overlay and their reads see the sealed
  * pages (shim/kshim_jnl.c).  CoreLock is dropped only at depth 1 (nobody up the stack depends on what it protects), not
- * once a dismount started, and the thread counts as an unlocked I/O (DioActive, not DataIoGate: a cluster free does not
+ * once a dismount started, and the thread counts as an unlocked I/O (DioActive, not DioRegList: a cluster free does not
  * wait for a commit) so that no dismount frees the core under it.  It also waits like that for another commit's I/O, which
  * needs no lock, so waiting for it with CoreLock held (inside a core operation: ngc_before_alloc) cannot deadlock.
  * Lock order: whatever the caller holds (FCB resources) -> CoreLock; the I/O takes nothing.
@@ -745,6 +826,7 @@ static int NgDioZeroTransfer(PNG_VCB Vcb, const struct ngc_dio *Dio, PUCHAR Boun
 static long NgZeroGap(PNG_VCB Vcb, PNG_FCB Fcb, LONGLONG Offset, PUCHAR Bounce)
 {
     struct ngc_dio Dio;
+    NG_DIO_REG Reg;
     long Z;
     int IoErr;
 
@@ -771,9 +853,9 @@ static long NgZeroGap(PNG_VCB Vcb, PNG_FCB Fcb, LONGLONG Offset, PUCHAR Bounce)
             return 0;
         if (Z < 0)
             return Z;
-        NgDataIoBegin(Vcb);
+        NgDataIoBegin(Vcb, &Dio, &Reg);
         IoErr = NgDioZeroTransfer(Vcb, &Dio, Bounce);
-        NgDataIoTransferred(Vcb);
+        NgDataIoTransferred(Vcb, &Reg);
         Z = ngc_dio_end(Vcb->Core, &Dio, NULL, IoErr);
         NgDataIoDone(Vcb);
         if (Z == -NGC_EAGAIN)
@@ -810,8 +892,8 @@ static long NgZeroGap(PNG_VCB Vcb, PNG_FCB Fcb, LONGLONG Offset, PUCHAR Bounce)
  *    its data is on the device above the initialized size, unreachable, and the pages stay dirty.
  *  - Every transfer holds PagingIoResource shared until it has ended, as before, so size changes, truncation and non-cached
  *    reads (NgWaitStreamWrites) still wait for all of them.
- *  - A waiting transfer holds no CoreLock and no DataIoGate (released right after its device transfer): the predecessor
- *    needs CoreLock to end, and a cluster free holds CoreLock while it waits for the gate.
+ *  - A waiting transfer holds no CoreLock and is not registered in DioRegList (removed right after its device transfer): the predecessor
+ *    needs CoreLock to end, and a cluster free holds CoreLock while it waits for the transfers on its clusters.
  */
 static LONG NgDioSlotBegin(PNG_FCB Fcb, LONGLONG Start, LONGLONG End)
 {
@@ -918,15 +1000,15 @@ static VOID NgDioSlotEnd(PNG_FCB Fcb, LONG Slot, BOOLEAN Failed)
  * already).  With both, a write of allocated clusters that needs no metadata change other than raising
  * the initialized size runs its device transfer without CoreLock (ngc_dio_begin/end, core/ngcore.c):
  *
- *   CoreLock:   checks, ngc_dio_begin (maps the clusters, pins the node), DioActive++, DataIoGate shared
+ *   CoreLock:   checks, ngc_dio_begin (maps the clusters, pins the node), DioActive++, registered in DioRegList
  *   no lock:    the transfer
  *   CoreLock:   ngc_dio_end (raises the initialized size, updates the core page cache), DioActive--
  *
  * so a create, cleanup or query of another file does not wait behind the disk.  Everything else is
- * written under CoreLock as before.  Invariants for the unlocked part: DataIoGate is held shared exactly
- * across the transfer and is acquired under CoreLock; every cluster free, medium change, direct write
- * hand-over, resize and unmount waits for it under CoreLock first (NgDrainDataIoCallback), so the clusters
- * written are the stream's and the device is this mount's until the transfer ends; a dismount also waits
+ * written under CoreLock as before.  Invariants for the unlocked part: the transfer is registered in DioRegList exactly
+ * across its device transfer, under CoreLock; every cluster free waits under CoreLock for the transfers whose device ranges overlap
+ * the clusters it frees (NgDrainDataIoRangeCallback), and every medium change, direct write hand-over, resize and unmount for all of
+ * them (NgDrainDataIoCallback), so the clusters written are the stream's and the device is this mount's until the transfer ends; a dismount also waits
  * for DioActive to reach 0 (NgWaitDataIoIdle).
  */
 static NTSTATUS NgPagingWrite(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, LONGLONG Offset, ULONG Length)
@@ -938,6 +1020,7 @@ static NTSTATUS NgPagingWrite(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, LONGLONG Offse
     BOOLEAN PagingShared, Unlocked = FALSE, Drop = FALSE, Chain = FALSE, WriteLockHeld = TRUE, Poisoned = FALSE;
     LONG Slot = -1;
     struct ngc_dio Dio;
+    NG_DIO_REG Reg;
     long Done = 0;
     int IoErr;
 
@@ -1005,15 +1088,15 @@ static NTSTATUS NgPagingWrite(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, LONGLONG Offse
     if (Unlocked)
     {
         Slot = NgDioSlotBegin(Fcb, Offset, Offset + Dio.len);
-        NgDataIoBegin(Vcb);
+        NgDataIoBegin(Vcb, &Dio, &Reg);
         /* CoreLock is dropped: the next write of the stream may start (its ngc_dio_begin takes CoreLock) */
         ExReleaseResourceLite(&Fcb->PagingWriteLock);
         WriteLockHeld = FALSE;
 
         IoErr = NgDioTransfer(Vcb, &Dio, Buffer, Bounce, Irp->MdlAddress);
 
-        /* The gate is not needed any more; the transfers that started before this one end first (no CoreLock, no gate held) */
-        ExReleaseResourceLite(&Vcb->DataIoGate);
+        /* The ranges are not needed any more; the transfers that started before this one end first (no CoreLock, nothing registered) */
+        NgDataIoUnregister(Vcb, &Reg);
         Poisoned = NgDioWaitPredecessors(Fcb, Slot);
         NgAcquireCore(Vcb);
         if (Poisoned)

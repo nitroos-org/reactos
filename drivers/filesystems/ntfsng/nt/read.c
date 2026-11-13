@@ -152,7 +152,7 @@ static VOID NgWaitStreamWrites(PNG_FCB Fcb)
 /*
  * Paging and non-cached reads of a stream ngc_read_direct handles do their device transfer without CoreLock
  * (ngc_rdio_begin/end, core/ngcore.c; the steps and invariants are those of the paging write in write.c):
- * under CoreLock the runs are mapped and the node pinned, the transfer runs with DataIoGate held shared, and
+ * under CoreLock the runs are mapped and the node pinned, the transfer is registered with its device ranges (NgDataIoBegin), and
  * CoreLock is taken again only to unpin.  So a create, cleanup or query of another file, and other readers,
  * do not wait behind the disk.  Everything else (resident, compressed, unaligned, dirty shim pages, more than
  * NGC_DIO_RUNS runs, journal-held sectors) takes the locked path below, unchanged.
@@ -264,6 +264,7 @@ NTSTATUS NgRead(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         NG_SHARED_HOLD Hold;
         BOOLEAN Unlocked = FALSE;
         struct ngc_dio Dio;
+        NG_DIO_REG Reg;
         NgAcquireCoreShared(Vcb, &Hold);
         Done = NgEnsureNode(Fcb);
         if (!Done && Vcb->CoreDepth == 1 && !Vcb->Dismounted)
@@ -271,9 +272,9 @@ NTSTATUS NgRead(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         if (Unlocked)
         {
             int IoErr;
-            NgDataIoBegin(Vcb);
+            NgDataIoBegin(Vcb, &Dio, &Reg);
             IoErr = NgRdioTransfer(Vcb, &Dio, Buffer);
-            NgDataIoTransferred(Vcb);
+            NgDataIoTransferred(Vcb, &Reg);
             ngc_rdio_end(Vcb->Core, &Dio);
             NgDataIoDone(Vcb);
             Vcb->DioReads++;

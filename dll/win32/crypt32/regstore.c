@@ -32,6 +32,12 @@ typedef struct _WINE_REGSTOREINFO
     DWORD            dwOpenFlags;
     HCERTSTORE       memStore;
     HKEY             key;
+    /* A system store (CertOpenStore(CERT_STORE_PROV_SYSTEM...)) keeps where its
+     * key is, so key can be a read-only handle and a write opens the key for
+     * write then.  A store handed a key by the caller (CERT_STORE_PROV_REG)
+     * has no path and writes through key. */
+    HKEY             root;
+    LPWSTR           path;
     BOOL             dirty;
     DWORD            resyncThread;
     HANDLE           changeEvent;
@@ -39,6 +45,26 @@ typedef struct _WINE_REGSTOREINFO
 } WINE_REGSTOREINFO;
 
 static const WCHAR * const regSubKeys[] = { L"Certificates", L"CRLs", L"CTLs" };
+
+/* The key to write under, for a store that writes.  Only here is write access
+ * asked for: a store opened without CERT_STORE_READONLY_FLAG that is only read
+ * (a standard user opening a LocalMachine store) never asks for it.  Close
+ * with CRYPT_RegCloseWriteKey. */
+static LONG CRYPT_RegOpenWriteKey(WINE_REGSTOREINFO *store, HKEY *key)
+{
+    if (!store->path)
+    {
+        *key = store->key;
+        return ERROR_SUCCESS;
+    }
+    return RegOpenKeyExW(store->root, store->path, 0, KEY_READ | KEY_WRITE, key);
+}
+
+static void CRYPT_RegCloseWriteKey(WINE_REGSTOREINFO *store, HKEY key)
+{
+    if (store->path)
+        RegCloseKey(key);
+}
 
 static void CRYPT_HashToStr(const BYTE *hash, LPWSTR asciiHash)
 {
@@ -241,7 +267,7 @@ static BOOL CRYPT_RegWriteOneContext(WINE_REGSTOREINFO *store, DWORD type,
     BYTE hash[20];
     DWORD hashSize = sizeof(hash), size = 0;
     LPBYTE buf = NULL;
-    HKEY key;
+    HKEY key, storeKey;
     LONG rc;
     BOOL ret;
 
@@ -260,8 +286,13 @@ static BOOL CRYPT_RegWriteOneContext(WINE_REGSTOREINFO *store, DWORD type,
     ret = contextInterface->serialize(context, 0, buf, &size);
     if (ret)
     {
-        rc = RegCreateKeyExW(store->key, regSubKeys[type], 0, NULL, 0,
-         KEY_ALL_ACCESS, NULL, &key, NULL);
+        rc = CRYPT_RegOpenWriteKey(store, &storeKey);
+        if (!rc)
+        {
+            rc = RegCreateKeyExW(storeKey, regSubKeys[type], 0, NULL, 0,
+             KEY_ALL_ACCESS, NULL, &key, NULL);
+            CRYPT_RegCloseWriteKey(store, storeKey);
+        }
         if (!rc)
         {
             ret = CRYPT_WriteSerializedToReg(key, 0, hash, buf, size);
@@ -287,10 +318,15 @@ static BOOL CRYPT_RegWriteToReg(WINE_REGSTOREINFO *store)
 
     for (i = 0; ret && i < ARRAY_SIZE(regSubKeys); i++)
     {
-        HKEY key;
-        LONG rc = RegCreateKeyExW(store->key, regSubKeys[i], 0, NULL, 0,
-         KEY_ALL_ACCESS, NULL, &key, NULL);
+        HKEY key, storeKey;
+        LONG rc = CRYPT_RegOpenWriteKey(store, &storeKey);
 
+        if (!rc)
+        {
+            rc = RegCreateKeyExW(storeKey, regSubKeys[i], 0, NULL, 0,
+             KEY_ALL_ACCESS, NULL, &key, NULL);
+            CRYPT_RegCloseWriteKey(store, storeKey);
+        }
         if (!rc)
         {
             ret = CRYPT_SerializeContextsToReg(key, 0, interfaces[i], store->memStore);
@@ -369,10 +405,16 @@ static BOOL CRYPT_RegUpdateChanged(WINE_REGSTOREINFO *store)
 
     for (i = 0; ret && i < ARRAY_SIZE(regSubKeys); i++)
     {
-        HKEY key;
+        HKEY key, storeKey;
         const void *context = NULL;
+        LONG rc = CRYPT_RegOpenWriteKey(store, &storeKey);
 
-        if (RegOpenKeyExW(store->key, regSubKeys[i], 0, KEY_ALL_ACCESS, &key))
+        if (!rc)
+        {
+            rc = RegOpenKeyExW(storeKey, regSubKeys[i], 0, KEY_ALL_ACCESS, &key);
+            CRYPT_RegCloseWriteKey(store, storeKey);
+        }
+        if (rc)
             continue;
         while (ret && (context = interfaces[i]->enumContextsInStore(store->memStore, context)))
             ret = CRYPT_RegUpdateContext(key, interfaces[i], context);
@@ -419,6 +461,7 @@ static void WINAPI CRYPT_RegCloseStore(HCERTSTORE hCertStore, DWORD dwFlags)
     CRYPT_RegFlushStore(store, FALSE);
     SetLastError(err);
     RegCloseKey(store->key);
+    CryptMemFree(store->path);
     if (store->changeEvent)
         CloseHandle(store->changeEvent);
     store->cs.DebugInfo->Spare[0] = 0;
@@ -462,7 +505,7 @@ static BOOL CRYPT_RegDeleteContext(WINE_REGSTOREINFO *store, DWORD type,
     BYTE hash[20];
     DWORD size = sizeof(hash);
     WCHAR asciiHash[20 * 2 + 1];
-    HKEY key;
+    HKEY key, storeKey;
     LONG rc;
 
     if (store->resyncThread == GetCurrentThreadId())
@@ -476,7 +519,12 @@ static BOOL CRYPT_RegDeleteContext(WINE_REGSTOREINFO *store, DWORD type,
         return FALSE;
     CRYPT_HashToStr(hash, asciiHash);
     EnterCriticalSection(&store->cs);
-    rc = RegOpenKeyExW(store->key, regSubKeys[type], 0, KEY_ALL_ACCESS, &key);
+    rc = CRYPT_RegOpenWriteKey(store, &storeKey);
+    if (!rc)
+    {
+        rc = RegOpenKeyExW(storeKey, regSubKeys[type], 0, KEY_ALL_ACCESS, &key);
+        CRYPT_RegCloseWriteKey(store, storeKey);
+    }
     if (!rc)
     {
         TRACE("Removing %s\n", debugstr_w(asciiHash));
@@ -560,13 +608,20 @@ static BOOL WINAPI CRYPT_RegDeleteCTL(HCERTSTORE hCertStore,
 static BOOL CRYPT_RegSetContextProperty(WINE_REGSTOREINFO *store, DWORD type,
  const void *context, const WINE_CONTEXT_INTERFACE *contextInterface)
 {
-    HKEY key;
+    HKEY key, storeKey;
     BOOL ret = TRUE;
+    LONG rc;
 
     if (store->dwOpenFlags & CERT_STORE_READONLY_FLAG || store->resyncThread == GetCurrentThreadId())
         return TRUE;
     EnterCriticalSection(&store->cs);
-    if (!RegOpenKeyExW(store->key, regSubKeys[type], 0, KEY_ALL_ACCESS, &key))
+    rc = CRYPT_RegOpenWriteKey(store, &storeKey);
+    if (!rc)
+    {
+        rc = RegOpenKeyExW(storeKey, regSubKeys[type], 0, KEY_ALL_ACCESS, &key);
+        CRYPT_RegCloseWriteKey(store, storeKey);
+    }
+    if (!rc)
     {
         ret = CRYPT_RegUpdateContext(key, contextInterface, context);
         RegCloseKey(key);
@@ -699,8 +754,8 @@ static void *regProvFuncs[] = {
     CRYPT_RegControl,
 };
 
-WINECRYPT_CERTSTORE *CRYPT_RegOpenStore(HCRYPTPROV hCryptProv, DWORD dwFlags,
- const void *pvPara)
+static WINECRYPT_CERTSTORE *CRYPT_RegOpenStoreAt(HCRYPTPROV hCryptProv,
+ DWORD dwFlags, const void *pvPara, HKEY root, LPCWSTR path)
 {
     WINECRYPT_CERTSTORE *store = NULL;
 
@@ -724,7 +779,7 @@ WINECRYPT_CERTSTORE *CRYPT_RegOpenStore(HCRYPTPROV hCryptProv, DWORD dwFlags,
 
         if (DuplicateHandle(GetCurrentProcess(), (HANDLE)pvPara,
          GetCurrentProcess(), (LPHANDLE)&key,
-         dwFlags & CERT_STORE_READONLY_FLAG ? KEY_READ : KEY_ALL_ACCESS,
+         dwFlags & CERT_STORE_READONLY_FLAG || path ? KEY_READ : KEY_ALL_ACCESS,
          TRUE, 0))
         {
             WINECRYPT_CERTSTORE *memStore;
@@ -743,6 +798,12 @@ WINECRYPT_CERTSTORE *CRYPT_RegOpenStore(HCRYPTPROV hCryptProv, DWORD dwFlags,
                     regInfo->dwOpenFlags = dwFlags;
                     regInfo->memStore = memStore;
                     regInfo->key = key;
+                    regInfo->root = root;
+                    regInfo->path = NULL;
+                    if (path && (regInfo->path = CryptMemAlloc((lstrlenW(path) + 1) * sizeof(WCHAR))))
+                        lstrcpyW(regInfo->path, path);
+                    else
+                        regInfo->root = NULL;
                     InitializeCriticalSectionEx(&regInfo->cs, 0, RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO);
                     regInfo->cs.DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": PWINE_REGSTOREINFO->cs");
                     CRYPT_RegReadFromReg(regInfo->key, regInfo->memStore, CERT_STORE_ADD_ALWAYS);
@@ -765,4 +826,18 @@ WINECRYPT_CERTSTORE *CRYPT_RegOpenStore(HCRYPTPROV hCryptProv, DWORD dwFlags,
     }
     TRACE("returning %p\n", store);
     return store;
+}
+
+WINECRYPT_CERTSTORE *CRYPT_RegOpenStore(HCRYPTPROV hCryptProv, DWORD dwFlags,
+ const void *pvPara)
+{
+    return CRYPT_RegOpenStoreAt(hCryptProv, dwFlags, pvPara, NULL, NULL);
+}
+
+/* A system store: key is the store's key opened for read, root and path say
+ * where it is, so a write can open it for write. */
+WINECRYPT_CERTSTORE *CRYPT_RegOpenSystemStore(HCRYPTPROV hCryptProv,
+ DWORD dwFlags, HKEY key, HKEY root, LPCWSTR path)
+{
+    return CRYPT_RegOpenStoreAt(hCryptProv, dwFlags, key, root, path);
 }
