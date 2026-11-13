@@ -10,6 +10,7 @@ list(APPEND SOURCE
     SetCredentialsAttributes.c
     SspiAuthIdentityExports.c
     QueryContextAttributesEx.c
+    NtlmLocalCall.c
     NtlmLoopback.c
     testlist.c)
 

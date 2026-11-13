@@ -1379,6 +1379,14 @@ LsaApCallPackage(IN PLSA_CLIENT_REQUEST ClientRequest,
                                      ProtocolReturnBuffer,
                                      ReturnBufferLength,
                                      ProtocolStatus);
+    if ((ULONG)MessageType >= MsV1_0RosNtlmLocalIssue && (ULONG)MessageType <= MsV1_0RosNtlmLocalDelete)
+        return MsvpRosNtlmLocalCall(ClientRequest,
+                                    (ULONG)MessageType,
+                                    ProtocolSubmitBuffer,
+                                    SubmitBufferLength,
+                                    ProtocolReturnBuffer,
+                                    ReturnBufferLength,
+                                    ProtocolStatus);
 
     switch (MessageType)
     {
@@ -1498,6 +1506,14 @@ LsaApCallPackageUntrusted(IN PLSA_CLIENT_REQUEST ClientRequest,
                                        ProtocolReturnBuffer,
                                        ReturnBufferLength,
                                        ProtocolStatus);
+    else if (MessageType >= MsV1_0RosNtlmLocalIssue && MessageType <= MsV1_0RosNtlmLocalDelete)
+        Status = MsvpRosNtlmLocalCall(ClientRequest,
+                                      MessageType,
+                                      ProtocolSubmitBuffer,
+                                      SubmitBufferLength,
+                                      ProtocolReturnBuffer,
+                                      ReturnBufferLength,
+                                      ProtocolStatus);
     else if (MessageType == MsV1_0ChangePassword)
         Status = MsvpChangePassword(ClientRequest,
                                     ProtocolSubmitBuffer,
@@ -1538,6 +1554,7 @@ LsaApInitializePackage(IN ULONG AuthenticationPackageId,
         NtlmMode = NtlmUserMode;
         InitializeListHead(&LogonListHead);
         RtlInitializeResource(&LogonListResource);
+        MsvpInitLocalCall();
         EnumCounter = 0;
         PackageInitialized = TRUE;
     }
@@ -1556,6 +1573,8 @@ LsaApInitializePackage(IN ULONG AuthenticationPackageId,
     DispatchTable.CopyFromClientBuffer = LsaDispatchTable->CopyFromClientBuffer;
     DispatchTable.IsTrustedClient = LsaDispatchTable->IsTrustedClient;
     DispatchTable.GetClientLogonId = LsaDispatchTable->GetClientLogonId;
+    DispatchTable.OpenClientToken = LsaDispatchTable->OpenClientToken;
+    DispatchTable.GetClientProcess = LsaDispatchTable->GetClientProcess;
 
     /* Return the package name */
     NameString = DispatchTable.AllocateLsaHeap(sizeof(LSA_STRING));

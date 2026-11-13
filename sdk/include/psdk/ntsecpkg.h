@@ -309,6 +309,11 @@ typedef struct _LSA_DISPATCH_TABLE {
     /* ReactOS extension: the logon session of the client of the request (the token its thread impersonates,
      * else that of its process) */
     NTSTATUS (NTAPI *GetClientLogonId)(PLSA_CLIENT_REQUEST, PLUID);
+    /* ReactOS extension: a handle (TOKEN_QUERY | TOKEN_DUPLICATE, for the caller to close) of the token of the client
+     * of the request: the token its thread impersonates, else that of its process */
+    NTSTATUS (NTAPI *OpenClientToken)(PLSA_CLIENT_REQUEST, PHANDLE);
+    /* ReactOS extension: the process of the client of the request (a handle that stays the LSA's: not to close) */
+    NTSTATUS (NTAPI *GetClientProcess)(PLSA_CLIENT_REQUEST, PHANDLE);
 #endif
 } LSA_DISPATCH_TABLE,
  *PLSA_DISPATCH_TABLE;

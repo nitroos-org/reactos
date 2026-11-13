@@ -42,6 +42,7 @@
 WINE_DEFAULT_DEBUG_CHANNEL(ntlm);
 
 #define NTLM_MAX_BUF 1904
+#define NTLM_MAX_NAME 64
 
 /* a message that is not what the exchange expects: the trace names the place */
 static SECURITY_STATUS invalid_token(int line)
@@ -82,6 +83,10 @@ VOID WINAPI MD4Final(NTLM_MD4_CTX *ctx);
 
 /* NEGOTIATE: signature, type, flags, domain, workstation */
 #define NEGOTIATE_HEADER_LEN    32
+/* with the version field: the NEGOTIATE that carries the names of this machine */
+#define NEGOTIATE_HEADER_VERSION_LEN 40
+#define NTLMSSP_NEGOTIATE_VERSION   0x02000000
+#define NTLMSSP_REVISION_W2K3       15
 /* CHALLENGE: signature, type, target name, flags, challenge, reserved, target info */
 #define CHALLENGE_HEADER_LEN    48
 /* AUTHENTICATE: signature, type, 5 fields, session key field, flags, version, mic */
@@ -144,6 +149,86 @@ static BOOL msg_add_field(MsgBuf *m, ULONG at, const void *data, ULONG len)
     if (len) memcpy(m->data + m->len, data, len);
     m->len += len;
     return TRUE;
+}
+
+/***********************************************************************
+ * the MSV1_0 package of the local security authority
+ */
+
+/* A ReactOS private message (ntlmros.h) to the MSV1_0 package; the answer is released with LsaFreeReturnBuffer */
+static NTSTATUS lsa_call_msv1_0(void *req, ULONG size, void **resp, ULONG *resp_len)
+{
+    static const char package_name[] = MSV1_0_PACKAGE_NAME;
+    HANDLE lsa = NULL;
+    LSA_STRING package;
+    ULONG package_id;
+    NTSTATUS status, proto_status = 0;
+
+    *resp = NULL;
+    *resp_len = 0;
+    status = LsaConnectUntrusted(&lsa);
+    if (!NT_SUCCESS(status)) return status;
+    package.Buffer = (PCHAR)package_name;
+    package.Length = sizeof(package_name) - 1;
+    package.MaximumLength = sizeof(package_name);
+    status = LsaLookupAuthenticationPackage(lsa, &package, &package_id);
+    if (NT_SUCCESS(status))
+        status = LsaCallAuthenticationPackage(lsa, package_id, req, size, resp, resp_len, &proto_status);
+    if (NT_SUCCESS(status) && !NT_SUCCESS(proto_status))
+        status = proto_status;
+    if (!NT_SUCCESS(status) && *resp)
+    {
+        LsaFreeReturnBuffer(*resp);
+        *resp = NULL;
+        *resp_len = 0;
+    }
+    if (!NT_SUCCESS(LsaDeregisterLogonProcess(lsa))) NtClose(lsa);
+    return status;
+}
+
+/* The names a NEGOTIATE of this machine carries (OEM): the computer, and the workgroup or domain it belongs to */
+static BOOL local_names(char *workstation, ULONG *ws_len, char *domain, ULONG *domain_len)
+{
+    WCHAR name[MAX_COMPUTERNAME_LENGTH + 1];
+    DWORD name_len = ARRAYSIZE(name);
+    LSA_OBJECT_ATTRIBUTES attrs;
+    LSA_HANDLE policy;
+    POLICY_PRIMARY_DOMAIN_INFO *info = NULL;
+    int len;
+
+    if (!GetComputerNameW(name, &name_len) || !name_len) return FALSE;
+    len = WideCharToMultiByte(CP_OEMCP, 0, name, name_len, workstation, MAX_COMPUTERNAME_LENGTH, NULL, NULL);
+    if (len <= 0) return FALSE;
+    *ws_len = len;
+
+    memset(&attrs, 0, sizeof(attrs));
+    attrs.Length = sizeof(attrs);
+    if (!NT_SUCCESS(LsaOpenPolicy(NULL, &attrs, POLICY_VIEW_LOCAL_INFORMATION, &policy))) return FALSE;
+    if (!NT_SUCCESS(LsaQueryInformationPolicy(policy, PolicyPrimaryDomainInformation, (void **)&info))) info = NULL;
+    LsaClose(policy);
+    if (!info) return FALSE;
+    len = info->Name.Length ? WideCharToMultiByte(CP_OEMCP, 0, info->Name.Buffer, info->Name.Length / sizeof(WCHAR),
+                                                  domain, NTLM_MAX_NAME, NULL, NULL) : 0;
+    LsaFreeMemory(info);
+    if (len <= 0) return FALSE;
+    *domain_len = len;
+    return TRUE;
+}
+
+/* the version field of the messages: the version of the system and the NTLMSSP revision */
+static void put_version(BYTE *p)
+{
+    RTL_OSVERSIONINFOW v;
+
+    memset(p, 0, 8);
+    v.dwOSVersionInfoSize = sizeof(v);
+    if (NT_SUCCESS(RtlGetVersion(&v)))
+    {
+        p[0] = (BYTE)v.dwMajorVersion;
+        p[1] = (BYTE)v.dwMinorVersion;
+        put16(p + 2, v.dwBuildNumber);
+    }
+    p[7] = NTLMSSP_REVISION_W2K3;
 }
 
 /***********************************************************************
@@ -485,9 +570,12 @@ static PNegoHelper ntlm_new_context(HelperMode mode, ULONG req)
     return h;
 }
 
+static void server_release_local(PNegoHelper h);
+
 static void ntlm_free_context(PNegoHelper h)
 {
     if (!h) return;
+    if (h->local_context) server_release_local(h);
     SECUR32_arc4Cleanup(h->crypt.ntlm.a4i);
     SECUR32_arc4Cleanup(h->crypt.ntlm2.send_a4i);
     SECUR32_arc4Cleanup(h->crypt.ntlm2.recv_a4i);
@@ -558,6 +646,31 @@ static SECURITY_STATUS client_negotiate(PNegoHelper h, ULONG req, MsgBuf *m)
 
     flags |= ntlm_requested_security(req);
     if (flags & (NTLMSSP_NEGOTIATE_SIGN | NTLMSSP_NEGOTIATE_SEAL)) flags |= NTLMSSP_NEGOTIATE_KEY_EXCHANGE;
+
+    if (!h->cred->has_identity)
+    {
+        char workstation[MAX_COMPUTERNAME_LENGTH + 1], domain[NTLM_MAX_NAME];
+        ULONG ws_len, domain_len;
+
+        /* the credentials of the logged on user: the names of this machine let a server on it offer the local call
+         * (as Windows, which sends them for the default credentials only) */
+        if (local_names(workstation, &ws_len, domain, &domain_len))
+        {
+            flags |= NTLMSSP_NEGOTIATE_OEM | NTLMSSP_NEGOTIATE_DOMAIN_SUPPLIED |
+                     NTLMSSP_NEGOTIATE_WORKSTATION_SUPPLIED | NTLMSSP_NEGOTIATE_VERSION;
+            if (!msg_reserve(m, NEGOTIATE_HEADER_VERSION_LEN)) return SEC_E_INSUFFICIENT_MEMORY;
+            m->len = NEGOTIATE_HEADER_VERSION_LEN;
+            memcpy(m->data, ntlm_signature, 8);
+            put32(m->data + 8, NTLM_NEGOTIATE_MESSAGE);
+            put32(m->data + 12, flags);
+            put_version(m->data + 32);
+            /* the workstation first, then the domain */
+            if (!msg_add_field(m, 24, workstation, ws_len) || !msg_add_field(m, 16, domain, domain_len))
+                return SEC_E_INSUFFICIENT_MEMORY;
+            h->offered_flags = flags;
+            return SEC_E_OK;
+        }
+    }
 
     if (!msg_reserve(m, NEGOTIATE_HEADER_LEN)) return SEC_E_INSUFFICIENT_MEMORY;
     m->len = NEGOTIATE_HEADER_LEN;
@@ -677,6 +790,64 @@ done:
     return ret;
 }
 
+/* The local call: the server on this machine offered a context of the LSA. The client binds its own logon to it there
+ * (the LSA judges the caller by its token) and answers with an AUTHENTICATE without any response or name. Fails when
+ * the LSA does not know the context (a server elsewhere): the caller then answers as usual. */
+static SECURITY_STATUS client_local_call(PNegoHelper h, const BYTE *challenge, ULONG challenge_len, ULONG flags,
+                                         ULONG64 context, MsgBuf *m)
+{
+    MSV1_0_ROS_NTLM_LOCAL_BIND req;
+    MSV1_0_ROS_NTLM_LOCAL_RESPONSE *resp = NULL;
+    ULONG resp_len = 0, at;
+    BYTE key[16], mic[16];
+    HMAC_MD5_CTX ctx;
+    NTSTATUS status;
+
+    memset(&req, 0, sizeof(req));
+    req.MessageType = MsV1_0RosNtlmLocalBind;
+    req.ImpersonationLevel = (h->req_flags & ISC_REQ_IDENTIFY) ? SecurityIdentification : SecurityImpersonation;
+    req.ContextId = context;
+    memcpy(req.ServerChallenge, challenge + 24, 8);
+    status = lsa_call_msv1_0(&req, sizeof(req), (void **)&resp, &resp_len);
+    if (!NT_SUCCESS(status) || !resp || resp_len < sizeof(*resp) || resp->MessageType != MsV1_0RosNtlmLocalBind)
+    {
+        TRACE("no local call for context %s (0x%08x)\n", wine_dbgstr_longlong(context), status);
+        if (resp)
+        {
+            SecureZeroMemory(resp, resp_len);
+            LsaFreeReturnBuffer(resp);
+        }
+        return SEC_E_NO_CREDENTIALS;
+    }
+    memcpy(key, resp->SessionKey, 16);
+    SecureZeroMemory(resp, resp_len);
+    LsaFreeReturnBuffer(resp);
+
+    /* AUTHENTICATE: every field empty, the version, the MIC with the session key of the context */
+    if (!msg_reserve(m, AUTH_HEADER_LEN))
+    {
+        SecureZeroMemory(key, sizeof(key));
+        return SEC_E_INSUFFICIENT_MEMORY;
+    }
+    m->len = AUTH_HEADER_LEN;
+    memcpy(m->data, ntlm_signature, 8);
+    put32(m->data + 8, NTLM_AUTHENTICATE_MESSAGE);
+    for (at = 12; at <= 52; at += 8) put32(m->data + at + 4, AUTH_HEADER_LEN);
+    put32(m->data + 60, flags);
+    if (flags & NTLMSSP_NEGOTIATE_VERSION) put_version(m->data + 64);
+    HMACMD5Init(&ctx, key, 16);
+    HMACMD5Update(&ctx, h->negotiate_msg, h->negotiate_len);
+    HMACMD5Update(&ctx, challenge, challenge_len);
+    HMACMD5Update(&ctx, m->data, m->len);
+    HMACMD5Final(&ctx, mic);
+    memcpy(m->data + AUTH_MIC_OFFSET, mic, 16);
+
+    h->neg_flags = flags;
+    ntlm_setup_session(h, key);
+    SecureZeroMemory(key, sizeof(key));
+    return SEC_E_OK;
+}
+
 static SECURITY_STATUS client_authenticate(PNegoHelper h, const BYTE *challenge, ULONG challenge_len, MsgBuf *m)
 {
     PNtlmCredentials cred = h->cred;
@@ -717,6 +888,19 @@ static SECURITY_STATUS client_authenticate(PNegoHelper h, const BYTE *challenge,
         return SEC_E_UNSUPPORTED_FUNCTION;
     if ((h->offered_flags & NTLMSSP_NEGOTIATE_SEAL) && !(flags & NTLMSSP_NEGOTIATE_SEAL))
         return SEC_E_UNSUPPORTED_FUNCTION;
+
+    /* a server on this machine offers the local call to the credentials of the logged on user */
+    if (!cred->has_identity && (flags & NTLMSSP_NEGOTIATE_LOCAL_CALL))
+    {
+        ULONG64 context = get32(challenge + 32) | ((ULONG64)get32(challenge + 36) << 32);
+
+        if (context && client_local_call(h, challenge, challenge_len,
+                                         (flags & (h->offered_flags | NTLMSSP_NEGOTIATE_TARGET_INFO) &
+                                          ~NTLMSSP_REQUEST_TARGET) | NTLMSSP_NEGOTIATE_LOCAL_CALL,
+                                         context, m) == SEC_E_OK)
+            return SEC_E_OK;
+        m->len = 0;
+    }
 
     /* what both sides agree on */
     flags &= h->offered_flags & ~NTLMSSP_REQUEST_TARGET;
@@ -976,6 +1160,119 @@ static SECURITY_STATUS SEC_ENTRY ntlm_InitializeSecurityContextA(
 /***********************************************************************
  * server: CHALLENGE and the check of AUTHENTICATE
  */
+/* Does the NEGOTIATE carry the names a client of this machine sends? (exactly: Windows does not offer the local call
+ * for another workstation or domain, nor for the workstation name in another case) */
+static BOOL negotiate_is_local(const BYTE *negotiate, ULONG negotiate_len, ULONG client_flags)
+{
+    char workstation[MAX_COMPUTERNAME_LENGTH + 1], domain[NTLM_MAX_NAME];
+    ULONG ws_len, domain_len, l1, l2;
+    const BYTE *d1, *d2;
+
+    if ((client_flags & (NTLMSSP_NEGOTIATE_DOMAIN_SUPPLIED | NTLMSSP_NEGOTIATE_WORKSTATION_SUPPLIED)) !=
+        (NTLMSSP_NEGOTIATE_DOMAIN_SUPPLIED | NTLMSSP_NEGOTIATE_WORKSTATION_SUPPLIED))
+        return FALSE;
+    if (!get_field(negotiate, negotiate_len, 16, &d1, &l1) || !get_field(negotiate, negotiate_len, 24, &d2, &l2))
+        return FALSE;
+    if (!local_names(workstation, &ws_len, domain, &domain_len)) return FALSE;
+    return l1 == domain_len && !memcmp(d1, domain, l1) && l2 == ws_len && !memcmp(d2, workstation, l2);
+}
+
+/* a local call context of the LSA for this CHALLENGE */
+static SECURITY_STATUS server_issue_local(PNegoHelper h)
+{
+    MSV1_0_ROS_NTLM_LOCAL_ISSUE req;
+    MSV1_0_ROS_NTLM_LOCAL_CONTEXT *resp = NULL;
+    ULONG resp_len = 0;
+    NTSTATUS status;
+
+    memset(&req, 0, sizeof(req));
+    req.MessageType = MsV1_0RosNtlmLocalIssue;
+    memcpy(req.ServerChallenge, h->server_challenge, 8);
+    status = lsa_call_msv1_0(&req, sizeof(req), (void **)&resp, &resp_len);
+    if (NT_SUCCESS(status) && resp && resp_len >= sizeof(*resp) && resp->MessageType == MsV1_0RosNtlmLocalIssue &&
+        resp->ContextId)
+        h->local_context = resp->ContextId;
+    else
+        WARN("no local call context (0x%08x)\n", status);
+    if (resp) LsaFreeReturnBuffer(resp);
+    return h->local_context ? SEC_E_OK : SEC_E_INTERNAL_ERROR;
+}
+
+/* the context leaves the LSA's table: the exchange is over, or was abandoned */
+static void server_release_local(PNegoHelper h)
+{
+    MSV1_0_ROS_NTLM_LOCAL_CONTEXT req;
+    void *resp = NULL;
+    ULONG resp_len = 0;
+
+    if (!h->local_context) return;
+    memset(&req, 0, sizeof(req));
+    req.MessageType = MsV1_0RosNtlmLocalDelete;
+    req.ContextId = h->local_context;
+    h->local_context = 0;
+    lsa_call_msv1_0(&req, sizeof(req), &resp, &resp_len);
+    if (resp) LsaFreeReturnBuffer(resp);
+}
+
+/* the names of the logon of a token, for SECPKG_ATTR_NAMES */
+static BOOL token_names(HANDLE token, WCHAR **user, WCHAR **domain)
+{
+    BYTE buf[SECURITY_MAX_SID_SIZE + sizeof(TOKEN_USER)];
+    WCHAR name[256], dom[256];
+    DWORD size, name_len = ARRAYSIZE(name), dom_len = ARRAYSIZE(dom);
+    SID_NAME_USE use;
+
+    if (!GetTokenInformation(token, TokenUser, buf, sizeof(buf), &size) ||
+        !LookupAccountSidW(NULL, ((TOKEN_USER *)buf)->User.Sid, name, &name_len, dom, &dom_len, &use))
+        return FALSE;
+    *user = dup_identity_string(name, name_len, TRUE);
+    *domain = dup_identity_string(dom, dom_len, TRUE);
+    return *user && *domain;
+}
+
+/* The empty AUTHENTICATE of a local call: the LSA hands over the token of the client that bound the context; it
+ * refuses a context that no client on this machine bound, or that this process did not issue */
+static SECURITY_STATUS server_local_call(PNegoHelper h, ULONG flags)
+{
+    MSV1_0_ROS_NTLM_LOCAL_ACCEPT req;
+    MSV1_0_ROS_NTLM_LOCAL_RESPONSE *resp = NULL;
+    ULONG resp_len = 0;
+    BYTE key[16];
+    NTSTATUS status;
+
+    memset(&req, 0, sizeof(req));
+    req.MessageType = MsV1_0RosNtlmLocalAccept;
+    req.ContextId = h->local_context;
+    /* the context is spent, whatever the answer */
+    h->local_context = 0;
+    status = lsa_call_msv1_0(&req, sizeof(req), (void **)&resp, &resp_len);
+    if (!NT_SUCCESS(status) || !resp || resp_len < sizeof(*resp) || resp->MessageType != MsV1_0RosNtlmLocalAccept ||
+        !resp->TokenHandle)
+    {
+        WARN("local call refused (0x%08x)\n", status);
+        if (resp)
+        {
+            SecureZeroMemory(resp, resp_len);
+            LsaFreeReturnBuffer(resp);
+        }
+        return SEC_E_LOGON_DENIED;
+    }
+    h->token = (HANDLE)(ULONG_PTR)resp->TokenHandle;
+    memcpy(key, resp->SessionKey, 16);
+    SecureZeroMemory(resp, resp_len);
+    LsaFreeReturnBuffer(resp);
+
+    if (!token_names(h->token, &h->user_name, &h->domain_name))
+    {
+        SecureZeroMemory(key, sizeof(key));
+        return SEC_E_INTERNAL_ERROR;
+    }
+    h->neg_flags = flags & h->offered_flags;
+    ntlm_setup_session(h, key);
+    SecureZeroMemory(key, sizeof(key));
+    return SEC_E_OK;
+}
+
 static SECURITY_STATUS server_challenge(PNegoHelper h, const BYTE *negotiate, ULONG negotiate_len, MsgBuf *m)
 {
     ULONG client_flags, flags;
@@ -1018,12 +1315,19 @@ static SECURITY_STATUS server_challenge(PNegoHelper h, const BYTE *negotiate, UL
 
     if (!SystemFunction036(h->server_challenge, sizeof(h->server_challenge))) return SEC_E_INTERNAL_ERROR;
 
+    /* a client that names this machine: offer the local call with a context of the LSA. The names prove nothing
+     * (anyone can send them); only a client on this machine can bind its logon to the context. */
+    if (negotiate_is_local(negotiate, negotiate_len, client_flags) && server_issue_local(h) == SEC_E_OK)
+        flags |= NTLMSSP_NEGOTIATE_LOCAL_CALL;
+
     if (!msg_reserve(m, CHALLENGE_HEADER_LEN)) return SEC_E_INSUFFICIENT_MEMORY;
     m->len = CHALLENGE_HEADER_LEN;
     memcpy(m->data, ntlm_signature, 8);
     put32(m->data + 8, NTLM_CHALLENGE_MESSAGE);
     put32(m->data + 20, flags);
     memcpy(m->data + 24, h->server_challenge, 8);
+    put32(m->data + 32, (ULONG)h->local_context);
+    put32(m->data + 36, (ULONG)(h->local_context >> 32));
     if (!msg_add_field(m, 12, (client_flags & NTLMSSP_REQUEST_TARGET) ? (const void *)name : NULL,
                        (client_flags & NTLMSSP_REQUEST_TARGET) ? name_bytes : 0) ||
         !msg_add_field(m, 40, av, av_len))
@@ -1169,9 +1473,13 @@ static SECURITY_STATUS server_authenticate(PNegoHelper h, const BYTE *msg, ULONG
     if ((flags & ~(h->offered_flags | NTLMSSP_NEGOTIATE_TARGET_INFO | NTLMSSP_NEGOTIATE_TARGET_TYPE_SERVER |
                    NTLMSSP_REQUEST_TARGET | NTLMSSP_NEGOTIATE_DOMAIN_SUPPLIED |
                    NTLMSSP_NEGOTIATE_WORKSTATION_SUPPLIED | NTLMSSP_NEGOTIATE_ANONYMOUS |
-                   NTLMSSP_NEGOTIATE_IDENTIFY)) ||
+                   NTLMSSP_NEGOTIATE_IDENTIFY | NTLMSSP_NEGOTIATE_LOCAL_CALL | NTLMSSP_NEGOTIATE_VERSION)) ||
         !(flags & NTLMSSP_NEGOTIATE_UNICODE) || !(flags & NTLMSSP_NEGOTIATE_NTLM2))
         return TOKEN_FAIL();
+
+    /* the local call: no response and no name, the client is the one that bound the context in the LSA */
+    if (h->local_context && (flags & NTLMSSP_NEGOTIATE_LOCAL_CALL) && !lm_len && !nt_len && !user_len && !domain_len)
+        return server_local_call(h, flags);
 
     if (user_len == 0 || nt_len == 0)
     {
@@ -1257,6 +1565,8 @@ static SECURITY_STATUS server_authenticate(PNegoHelper h, const BYTE *msg, ULONG
     h->neg_flags = flags & h->offered_flags;
     ntlm_setup_session(h, exported);
     SecureZeroMemory(exported, sizeof(exported));
+    /* a client that answered as usual leaves the local call context unused */
+    server_release_local(h);
     return SEC_E_OK;
 }
 

@@ -52,6 +52,8 @@ typedef NTSTATUS (NTAPI *PLSA_COPY_FROM_CLIENT_BUFFER)(PLSA_CLIENT_REQUEST,
 
 typedef BOOLEAN (NTAPI *PLSA_IS_TRUSTED_CLIENT)(PLSA_CLIENT_REQUEST);
 typedef NTSTATUS (NTAPI *PLSA_GET_CLIENT_LOGON_ID)(PLSA_CLIENT_REQUEST, PLUID);
+typedef NTSTATUS (NTAPI *PLSA_OPEN_CLIENT_TOKEN)(PLSA_CLIENT_REQUEST, PHANDLE);
+typedef NTSTATUS (NTAPI *PLSA_GET_CLIENT_PROCESS)(PLSA_CLIENT_REQUEST, PHANDLE);
 
 typedef struct LSA_DISPATCH_TABLE
 {
@@ -68,6 +70,8 @@ typedef struct LSA_DISPATCH_TABLE
     PLSA_COPY_FROM_CLIENT_BUFFER CopyFromClientBuffer;
     PLSA_IS_TRUSTED_CLIENT IsTrustedClient;
     PLSA_GET_CLIENT_LOGON_ID GetClientLogonId;
+    PLSA_OPEN_CLIENT_TOKEN OpenClientToken;
+    PLSA_GET_CLIENT_PROCESS GetClientProcess;
 } LSA_DISPATCH_TABLE, *PLSA_DISPATCH_TABLE;
 
 
@@ -401,6 +405,71 @@ LsapIsTrustedClientRequest(IN PLSA_CLIENT_REQUEST ClientRequest)
 }
 
 
+/*
+ * The token of the client of the request: the one its thread impersonates, else that of its process.
+ * Only a thread that impersonates nobody (STATUS_NO_TOKEN) is judged by its process. Any other failure fails the
+ * request: a thread that impersonates at the anonymous level (STATUS_CANT_OPEN_ANONYMOUS) or whose token the LSA
+ * cannot open must never be taken for its process, whose identity may be a very different one.
+ */
+static
+NTSTATUS
+NTAPI
+LsapOpenClientTokenRequest(
+    IN PLSA_CLIENT_REQUEST ClientRequest,
+    OUT PHANDLE TokenHandle)
+{
+    PLSAP_LOGON_CONTEXT LogonContext = (PLSAP_LOGON_CONTEXT)ClientRequest;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE ThreadHandle = NULL;
+    HANDLE Token = NULL;
+    NTSTATUS Status;
+
+    if (LogonContext == NULL || TokenHandle == NULL)
+        return STATUS_INVALID_PARAMETER;
+    *TokenHandle = NULL;
+
+    InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, NULL);
+    Status = NtOpenThread(&ThreadHandle,
+                          THREAD_QUERY_INFORMATION,
+                          &ObjectAttributes,
+                          &LogonContext->RequestClientId);
+    if (!NT_SUCCESS(Status))
+    {
+        /* the calling thread waits for this reply: it exists, so it is not ours to guess its identity */
+        TRACE("NtOpenThread() failed (Status 0x%08lx)\n", Status);
+        return Status;
+    }
+
+    Status = NtOpenThreadTokenEx(ThreadHandle,
+                                 TOKEN_QUERY | TOKEN_DUPLICATE,
+                                 TRUE,
+                                 0,
+                                 &Token);
+    NtClose(ThreadHandle);
+    if (!NT_SUCCESS(Status))
+    {
+        if (Status != STATUS_NO_TOKEN)
+        {
+            TRACE("NtOpenThreadTokenEx() failed (Status 0x%08lx)\n", Status);
+            return Status;
+        }
+        Token = NULL;
+    }
+
+    if (Token == NULL)
+    {
+        Status = NtOpenProcessToken(LogonContext->ClientProcessHandle,
+                                    TOKEN_QUERY | TOKEN_DUPLICATE,
+                                    &Token);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
+
+    *TokenHandle = Token;
+    return STATUS_SUCCESS;
+}
+
+
 /* The logon session of the client of the request: of the token its thread impersonates, else of its process */
 static
 NTSTATUS
@@ -409,41 +478,14 @@ LsapGetClientLogonIdRequest(
     IN PLSA_CLIENT_REQUEST ClientRequest,
     OUT PLUID LogonId)
 {
-    PLSAP_LOGON_CONTEXT LogonContext = (PLSAP_LOGON_CONTEXT)ClientRequest;
-    OBJECT_ATTRIBUTES ObjectAttributes;
     TOKEN_STATISTICS Statistics;
-    HANDLE ThreadHandle = NULL;
     HANDLE TokenHandle = NULL;
     ULONG Size;
     NTSTATUS Status;
 
-    if (LogonContext == NULL)
-        return STATUS_INVALID_PARAMETER;
-
-    InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, NULL);
-    Status = NtOpenThread(&ThreadHandle,
-                          THREAD_QUERY_INFORMATION,
-                          &ObjectAttributes,
-                          &LogonContext->RequestClientId);
-    if (NT_SUCCESS(Status))
-    {
-        Status = NtOpenThreadTokenEx(ThreadHandle,
-                                     TOKEN_QUERY,
-                                     TRUE,
-                                     0,
-                                     &TokenHandle);
-        if (!NT_SUCCESS(Status))
-            TokenHandle = NULL;
-    }
-
-    if (TokenHandle == NULL)
-    {
-        Status = NtOpenProcessToken(LogonContext->ClientProcessHandle,
-                                    TOKEN_QUERY,
-                                    &TokenHandle);
-        if (!NT_SUCCESS(Status))
-            goto done;
-    }
+    Status = LsapOpenClientTokenRequest(ClientRequest, &TokenHandle);
+    if (!NT_SUCCESS(Status))
+        return Status;
 
     Status = NtQueryInformationToken(TokenHandle,
                                      TokenStatistics,
@@ -453,12 +495,26 @@ LsapGetClientLogonIdRequest(
     if (NT_SUCCESS(Status))
         *LogonId = Statistics.AuthenticationId;
 
-done:
-    if (TokenHandle != NULL)
-        NtClose(TokenHandle);
-    if (ThreadHandle != NULL)
-        NtClose(ThreadHandle);
+    NtClose(TokenHandle);
     return Status;
+}
+
+
+/* The process of the client of the request (the handle stays the LSA's) */
+static
+NTSTATUS
+NTAPI
+LsapGetClientProcessRequest(
+    IN PLSA_CLIENT_REQUEST ClientRequest,
+    OUT PHANDLE ProcessHandle)
+{
+    PLSAP_LOGON_CONTEXT LogonContext = (PLSAP_LOGON_CONTEXT)ClientRequest;
+
+    if (LogonContext == NULL || ProcessHandle == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    *ProcessHandle = LogonContext->ClientProcessHandle;
+    return STATUS_SUCCESS;
 }
 
 
@@ -574,6 +630,8 @@ LsapInitAuthPackages(VOID)
     DispatchTable.CopyFromClientBuffer = &LsapCopyFromClientBuffer;
     DispatchTable.IsTrustedClient = &LsapIsTrustedClientRequest;
     DispatchTable.GetClientLogonId = &LsapGetClientLogonIdRequest;
+    DispatchTable.OpenClientToken = &LsapOpenClientTokenRequest;
+    DispatchTable.GetClientProcess = &LsapGetClientProcessRequest;
 
     /* Add registered authentication packages */
     Status = RtlQueryRegistryValues(RTL_REGISTRY_CONTROL,

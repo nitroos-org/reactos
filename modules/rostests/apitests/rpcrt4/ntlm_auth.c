@@ -3,8 +3,9 @@
  * LICENSE:     LGPL-2.1-or-later (https://spdx.org/licenses/LGPL-2.1-or-later)
  * PURPOSE:     RPC_C_AUTHN_WINNT (NTLM) for RPC clients and servers: an authenticated bind and call over ncacn_np and
  *              ncacn_ip_tcp at every authentication level (CONNECT to PKT_PRIVACY, with a request that spans
- *              fragments), RpcBindingInqAuthClient and RpcImpersonateClient on the server, a wrong password, and the
- *              refusal of a caller without authentication by an RPC_IF_ALLOW_SECURE_ONLY interface.
+ *              fragments), RpcBindingInqAuthClient and RpcImpersonateClient on the server, the credentials of the
+ *              logged on user (a same-machine local call), a wrong password, and the refusal of a caller without
+ *              authentication by an RPC_IF_ALLOW_SECURE_ONLY interface.
  *              The server and the clients live in this process; the account is a local one made for the test.
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
@@ -233,6 +234,40 @@ static void test_levels(const struct transport *t, SEC_WINNT_AUTH_IDENTITY_W *id
         ok_eq_int(result, g_expected_sum);
         ok_eq_long(seen.calls, 2);
 
+        RpcBindingFree(&binding);
+    }
+}
+
+/* the credentials of the logged on user (no identity): a same-machine exchange is a local call, the server
+ * impersonates the user of this process whatever its password (the test machine's Administrator has none) */
+static void test_default_credentials(const struct transport *t)
+{
+    static const ULONG levels[] = { RPC_C_AUTHN_LEVEL_CONNECT, RPC_C_AUTHN_LEVEL_PKT_INTEGRITY, RPC_C_AUTHN_LEVEL_PKT_PRIVACY };
+    RPC_BINDING_HANDLE binding;
+    RPC_STATUS status;
+    WCHAR me[64];
+    DWORD n = ARRAYSIZE(me);
+    int result;
+    ULONG i;
+    BYTE tiny[3] = { 1, 2, 3 };
+
+    GetUserNameW(me, &n);
+    for (i = 0; i < ARRAYSIZE(levels); i++)
+    {
+        binding = make_binding(t->protseq, t->address, t->endpoint);
+        status = RpcBindingSetAuthInfoW(binding, NULL, levels[i], RPC_C_AUTHN_WINNT, NULL, 0);
+        ok_eq_hex(status, RPC_S_OK);
+        seen.calls = 0;
+        status = do_call(binding, IF_AUTH, tiny, sizeof(tiny), &result);
+        ok(status == RPC_S_OK, "%s default credentials level %lu: call status %lu\n", t->name, levels[i],
+           (unsigned long)status);
+        if (status == RPC_S_OK)
+        {
+            ok_eq_int(result, 6);
+            ok_eq_hex(seen.imp_status, RPC_S_OK);
+            ok(!_wcsicmp(seen.imp_user, me), "%s default credentials level %lu: the server impersonated '%ls' instead of '%ls'\n",
+               t->name, levels[i], seen.imp_user, me);
+        }
         RpcBindingFree(&binding);
     }
 }
@@ -496,6 +531,7 @@ START_TEST(ntlm_auth)
     {
         trace("transport %s\n", transports[i].name);
         test_levels(&transports[i], &identity);
+        test_default_credentials(&transports[i]);
         test_wrong_password(&transports[i]);
         if (!strcmp(transports[i].protseq, "ncacn_ip_tcp"))
             test_incomplete_authentication(&transports[i]);
