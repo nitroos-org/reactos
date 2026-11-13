@@ -21,15 +21,21 @@
  *
  * A remote peer can send the messages but cannot call this package, so it cannot bind a context: the empty
  * AUTHENTICATE of a context nobody bound is refused, and a context of another process cannot be accepted.
+ *
+ * The table is bounded, and no caller can keep it full for others: every message first drops the contexts that
+ * expired and those of processes that exited (a context is only good to the process that issued it), and a
+ * process, and all the processes of one user together, may hold only part of the table.
  */
 
 #include "../precomp.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(ntlm);
 
-#define LOCAL_CALL_LIFETIME     (300LL * 10000000LL)   /* 5 minutes, in 100 ns */
+/* An exchange needs its context from the NEGOTIATE to the AUTHENTICATE; Windows completes it up to about 5 minutes */
+#define LOCAL_CALL_LIFETIME     (300LL * 10000000LL)  /* 5 minutes, in 100 ns, as on Windows */
 #define LOCAL_CALL_MAX          4096
 #define LOCAL_CALL_MAX_PROCESS  1024
+#define LOCAL_CALL_MAX_USER     2048    /* all processes of one user together: others always find room */
 
 /* A process that issued contexts: the LSA's own handle of it keeps its process id from being reused */
 typedef struct _LOCAL_CALL_ISSUER
@@ -37,6 +43,8 @@ typedef struct _LOCAL_CALL_ISSUER
     LIST_ENTRY ListEntry;
     HANDLE Process;             /* PROCESS_QUERY_INFORMATION, the LSA's */
     ULONG_PTR ProcessId;
+    PSID User;                  /* the user of its process token */
+    BOOLEAN Exited;
     ULONG Contexts;             /* its contexts in the table; the issuer goes with the last one */
 } LOCAL_CALL_ISSUER, *PLOCAL_CALL_ISSUER;
 
@@ -78,6 +86,7 @@ ReleaseIssuer(
         return;
     RemoveEntryList(&Issuer->ListEntry);
     NtClose(Issuer->Process);
+    RtlFreeHeap(RtlGetProcessHeap(), 0, Issuer->User);
     RtlFreeHeap(RtlGetProcessHeap(), 0, Issuer);
 }
 
@@ -86,7 +95,8 @@ static
 PLOCAL_CALL_ISSUER
 ReferenceIssuer(
     _In_ HANDLE Process,
-    _In_ ULONG_PTR ProcessId)
+    _In_ ULONG_PTR ProcessId,
+    _In_ PSID User)
 {
     PLOCAL_CALL_ISSUER Issuer;
     PLIST_ENTRY Entry;
@@ -106,10 +116,18 @@ ReferenceIssuer(
     Issuer = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*Issuer));
     if (Issuer == NULL)
         return NULL;
+    Issuer->User = RtlAllocateHeap(RtlGetProcessHeap(), 0, RtlLengthSid(User));
+    if (Issuer->User == NULL)
+    {
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Issuer);
+        return NULL;
+    }
+    RtlCopySid(RtlLengthSid(User), Issuer->User, User);
     Status = NtDuplicateObject(NtCurrentProcess(), Process, NtCurrentProcess(), &Issuer->Process,
                                PROCESS_QUERY_INFORMATION, 0, 0);
     if (!NT_SUCCESS(Status))
     {
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Issuer->User);
         RtlFreeHeap(RtlGetProcessHeap(), 0, Issuer);
         return NULL;
     }
@@ -133,20 +151,35 @@ FreeLocalCall(
     RtlFreeHeap(RtlGetProcessHeap(), 0, Context);
 }
 
-/* the contexts nobody completed in time */
+/* The contexts nobody completed in time, and those of processes that exited (nobody can complete them) */
 static
 VOID
 SweepLocalCalls(
     _In_ PLARGE_INTEGER Now)
 {
-    PLIST_ENTRY Entry = LocalCallList.Flink;
+    KERNEL_USER_TIMES Times;
+    PLIST_ENTRY Entry;
 
+    /* a process that exited has an exit time (its exit code says nothing: a live process may report STILL_ACTIVE) */
+    for (Entry = LocalCallIssuers.Flink; Entry != &LocalCallIssuers; Entry = Entry->Flink)
+    {
+        PLOCAL_CALL_ISSUER Issuer = CONTAINING_RECORD(Entry, LOCAL_CALL_ISSUER, ListEntry);
+
+        if (!Issuer->Exited &&
+            NT_SUCCESS(NtQueryInformationProcess(Issuer->Process, ProcessTimes, &Times, sizeof(Times), NULL)) &&
+            Times.ExitTime.QuadPart != 0)
+        {
+            Issuer->Exited = TRUE;
+        }
+    }
+
+    Entry = LocalCallList.Flink;
     while (Entry != &LocalCallList)
     {
         PLOCAL_CALL_CONTEXT Context = CONTAINING_RECORD(Entry, LOCAL_CALL_CONTEXT, ListEntry);
 
         Entry = Entry->Flink;
-        if (Context->Expires.QuadPart <= Now->QuadPart)
+        if (Context->Expires.QuadPart <= Now->QuadPart || Context->Issuer->Exited)
             FreeLocalCall(Context);
     }
 }
@@ -199,6 +232,51 @@ GetCallerProcess(
     return STATUS_SUCCESS;
 }
 
+/* The user of the caller's process token (to free from the process heap) */
+static
+NTSTATUS
+GetProcessUser(
+    _In_ HANDLE Process,
+    _Out_ PSID *User)
+{
+    PTOKEN_USER UserInfo = NULL;
+    HANDLE Token;
+    ULONG Size = 0;
+    NTSTATUS Status;
+
+    *User = NULL;
+    Status = NtOpenProcessToken(Process, TOKEN_QUERY, &Token);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    Status = NtQueryInformationToken(Token, TokenUser, NULL, 0, &Size);
+    if (Status == STATUS_BUFFER_TOO_SMALL && Size != 0)
+    {
+        UserInfo = RtlAllocateHeap(RtlGetProcessHeap(), 0, Size);
+        if (UserInfo == NULL)
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+        else
+            Status = NtQueryInformationToken(Token, TokenUser, UserInfo, Size, &Size);
+    }
+    else if (NT_SUCCESS(Status))
+    {
+        Status = STATUS_INTERNAL_ERROR;
+    }
+    NtClose(Token);
+    if (NT_SUCCESS(Status) && !RtlValidSid(UserInfo->User.Sid))
+        Status = STATUS_INVALID_SID;
+    if (NT_SUCCESS(Status))
+    {
+        *User = RtlAllocateHeap(RtlGetProcessHeap(), 0, RtlLengthSid(UserInfo->User.Sid));
+        if (*User == NULL)
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+        else
+            RtlCopySid(RtlLengthSid(UserInfo->User.Sid), *User, UserInfo->User.Sid);
+    }
+    if (UserInfo != NULL)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, UserInfo);
+    return Status;
+}
+
 /* The answer in the caller's memory */
 static
 NTSTATUS
@@ -240,11 +318,13 @@ MsvpLocalCallIssue(
     PMSV1_0_ROS_NTLM_LOCAL_ISSUE Request = ProtocolSubmitBuffer;
     MSV1_0_ROS_NTLM_LOCAL_CONTEXT Reply;
     PLOCAL_CALL_CONTEXT Context, Other;
+    PLOCAL_CALL_ISSUER Issuer;
     LARGE_INTEGER Now;
     ULONG_PTR ProcessId;
     HANDLE Process;
     PLIST_ENTRY Entry;
-    ULONG Mine = 0;
+    PSID User;
+    ULONG Mine = 0, Users = 0;
     NTSTATUS Status;
 
     if (SubmitBufferLength < sizeof(*Request))
@@ -253,14 +333,21 @@ MsvpLocalCallIssue(
     Status = GetCallerProcess(ClientRequest, &Process, &ProcessId);
     if (!NT_SUCCESS(Status))
         return Status;
+    Status = GetProcessUser(Process, &User);
+    if (!NT_SUCCESS(Status))
+        return Status;
 
     Context = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*Context));
     if (Context == NULL)
+    {
+        RtlFreeHeap(RtlGetProcessHeap(), 0, User);
         return STATUS_INSUFFICIENT_RESOURCES;
+    }
     RtlCopyMemory(Context->ServerChallenge, Request->ServerChallenge, sizeof(Context->ServerChallenge));
     if (!RtlGenRandom(Context->SessionKey, sizeof(Context->SessionKey)))
     {
         RtlFreeHeap(RtlGetProcessHeap(), 0, Context);
+        RtlFreeHeap(RtlGetProcessHeap(), 0, User);
         return STATUS_INTERNAL_ERROR;
     }
 
@@ -275,12 +362,19 @@ MsvpLocalCallIssue(
         if (Other->Issuer->ProcessId == ProcessId)
             Mine++;
     }
-    if (LocalCallCount >= LOCAL_CALL_MAX || Mine >= LOCAL_CALL_MAX_PROCESS)
+    for (Entry = LocalCallIssuers.Flink; Entry != &LocalCallIssuers; Entry = Entry->Flink)
+    {
+        Issuer = CONTAINING_RECORD(Entry, LOCAL_CALL_ISSUER, ListEntry);
+        if (RtlEqualSid(Issuer->User, User))
+            Users += Issuer->Contexts;
+    }
+    if (LocalCallCount >= LOCAL_CALL_MAX || Mine >= LOCAL_CALL_MAX_PROCESS || Users >= LOCAL_CALL_MAX_USER)
     {
         RtlLeaveCriticalSection(&LocalCallLock);
         RtlSecureZeroMemory(Context, sizeof(*Context));
         RtlFreeHeap(RtlGetProcessHeap(), 0, Context);
-        WARN("too many local call contexts (%lu, %lu of the caller)\n", LocalCallCount, Mine);
+        RtlFreeHeap(RtlGetProcessHeap(), 0, User);
+        WARN("too many local call contexts (%lu, %lu of the caller, %lu of its user)\n", LocalCallCount, Mine, Users);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
     /* a random id that no context has (and never 0: 0 is "no local call") */
@@ -291,10 +385,12 @@ MsvpLocalCallIssue(
             RtlLeaveCriticalSection(&LocalCallLock);
             RtlSecureZeroMemory(Context, sizeof(*Context));
             RtlFreeHeap(RtlGetProcessHeap(), 0, Context);
+            RtlFreeHeap(RtlGetProcessHeap(), 0, User);
             return STATUS_INTERNAL_ERROR;
         }
     } while (Context->ContextId == 0 || FindLocalCall(Context->ContextId, &Now) != NULL);
-    Context->Issuer = ReferenceIssuer(Process, ProcessId);
+    Context->Issuer = ReferenceIssuer(Process, ProcessId, User);
+    RtlFreeHeap(RtlGetProcessHeap(), 0, User);
     if (Context->Issuer == NULL)
     {
         RtlLeaveCriticalSection(&LocalCallLock);
@@ -401,6 +497,7 @@ MsvpLocalCallBind(
     RtlZeroMemory(&Reply, sizeof(Reply));
     NtQuerySystemTime(&Now);
     RtlEnterCriticalSection(&LocalCallLock);
+    SweepLocalCalls(&Now);
     Context = FindLocalCall(Request->ContextId, &Now);
     if (Context == NULL || Context->ClientToken != NULL ||
         RtlCompareMemory(Context->ServerChallenge, Request->ServerChallenge, sizeof(Context->ServerChallenge)) !=
@@ -475,6 +572,7 @@ MsvpLocalCallAccept(
     RtlZeroMemory(&Reply, sizeof(Reply));
     NtQuerySystemTime(&Now);
     RtlEnterCriticalSection(&LocalCallLock);
+    SweepLocalCalls(&Now);
     Context = FindOwnLocalCall(Request->ContextId, ProcessId, &Now);
     if (Context == NULL)
     {
@@ -535,6 +633,7 @@ MsvpLocalCallDelete(
 
     NtQuerySystemTime(&Now);
     RtlEnterCriticalSection(&LocalCallLock);
+    SweepLocalCalls(&Now);
     Context = FindOwnLocalCall(Request->ContextId, ProcessId, &Now);
     if (Context != NULL)
         FreeLocalCall(Context);
