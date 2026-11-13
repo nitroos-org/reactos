@@ -560,9 +560,6 @@ FltpFastIoCheckIfPossible(_In_ PFILE_OBJECT FileObject,
     DeviceExtension = DeviceObject->DeviceExtension;
     FLT_ASSERT(DeviceExtension->AttachedToDeviceObject);
 
-    /* A filter which wants to see reads or writes sees them as IRPs */
-    if (FltpFastIoDisallowed(DeviceObject, IRP_MJ_READ) || FltpFastIoDisallowed(DeviceObject, IRP_MJ_WRITE))
-        return FALSE;
 
     /* Get the device that we attached to */
     AttachedDeviceObject = DeviceExtension->AttachedToDeviceObject;
@@ -616,9 +613,9 @@ FltpFastIoRead(_In_ PFILE_OBJECT FileObject,
     DeviceExtension = DeviceObject->DeviceExtension;
     FLT_ASSERT(DeviceExtension->AttachedToDeviceObject);
 
-    /* A filter which wants to see this operation sees it as an IRP */
+    /* A filter which wants to see reads sees this one too */
     if (FltpFastIoDisallowed(DeviceObject, IRP_MJ_READ))
-        return FALSE;
+        return FltpFastIoReadWrite(DeviceObject, FileObject, FALSE, FileOffset, Length, Wait, LockKey, Buffer, IoStatus);
 
     /* Get the device that we attached to */
     AttachedDeviceObject = DeviceExtension->AttachedToDeviceObject;
@@ -672,9 +669,9 @@ FltpFastIoWrite(_In_ PFILE_OBJECT FileObject,
     DeviceExtension = DeviceObject->DeviceExtension;
     FLT_ASSERT(DeviceExtension->AttachedToDeviceObject);
 
-    /* A filter which wants to see this operation sees it as an IRP */
+    /* A filter which wants to see writes sees this one too */
     if (FltpFastIoDisallowed(DeviceObject, IRP_MJ_WRITE))
-        return FALSE;
+        return FltpFastIoReadWrite(DeviceObject, FileObject, TRUE, FileOffset, Length, Wait, LockKey, Buffer, IoStatus);
 
     /* Get the device that we attached to */
     AttachedDeviceObject = DeviceExtension->AttachedToDeviceObject;

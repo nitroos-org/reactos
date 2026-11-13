@@ -500,6 +500,15 @@ PreOperation(_Inout_ PFLT_CALLBACK_DATA Data,
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
     }
 
+    /* What needs to pend, or to change the length, wants an IRP: the fast I/O attempt isn't counted */
+    if (FLT_IS_FASTIO_OPERATION(Data))
+    {
+        ULONG FastMode = FindMode(FileObject);
+
+        if (FastMode == MODE_PEND || FastMode == MODE_HALF)
+            return FLT_PREOP_DISALLOW_FASTIO;
+    }
+
     if (Major < FLTSAMPLE_MAX_MAJOR)
         InterlockedIncrement((PLONG)&Stats.Pre[Major]);
 
@@ -1004,7 +1013,7 @@ PortConnect(_In_ PFLT_PORT Client,
     UNREFERENCED_PARAMETER(ServerPortCookie);
 
     /* A client which says "refuse" in its connection context is turned away */
-    if (SizeOfContext == 6 && RtlEqualMemory(ConnectionContext, "refuse", 6))
+    if (SizeOfContext == 6 && RtlCompareMemory(ConnectionContext, "refuse", 6) == 6)
         return STATUS_ACCESS_DENIED;
 
     ClientPort = Client;

@@ -109,6 +109,19 @@ FltpPerformIrp(
 );
 
 BOOLEAN
+FltpFastIoReadWrite(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_ PFILE_OBJECT FileObject,
+    _In_ BOOLEAN Write,
+    _In_ PLARGE_INTEGER FileOffset,
+    _In_ ULONG Length,
+    _In_ BOOLEAN Wait,
+    _In_ ULONG LockKey,
+    _In_ PVOID Buffer,
+    _Out_ PIO_STATUS_BLOCK IoStatus
+);
+
+BOOLEAN
 FltpFastIoDisallowed(
     _In_ PDEVICE_OBJECT DeviceObject,
     _In_ UCHAR MajorFunction
