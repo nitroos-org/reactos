@@ -269,7 +269,7 @@ NtGdiEllipse(
     RECTL RectBounds;
     PBRUSH pbrush;
     BOOL ret = TRUE;
-    LONG PenWidth, PenOrigWidth;
+    LONG PenWidth, PenOrigWidth, PenWidthY;
     LONG RadiusX, RadiusY, CenterX, CenterY;
     PBRUSH pFillBrushObj;
     BRUSH tmpFillBrushObj;
@@ -326,19 +326,10 @@ NtGdiEllipse(
 
     PenOrigWidth = PenWidth = pbrush->lWidth;
     if (pbrush->ulPenStyle == PS_NULL) PenWidth = 0;
-
-    if (pbrush->ulPenStyle == PS_INSIDEFRAME)
-    {
-       if (2*PenWidth > (Right - Left)) PenWidth = (Right -Left + 1)/2;
-       if (2*PenWidth > (Bottom - Top)) PenWidth = (Bottom -Top + 1)/2;
-       Left   += PenWidth / 2;
-       Right  -= (PenWidth - 1) / 2;
-       Top    += PenWidth / 2;
-       Bottom -= (PenWidth - 1) / 2;
-    }
-
-    if (!PenWidth) PenWidth = 1;
-    pbrush->lWidth = PenWidth;
+    PenWidthY = PenWidth;
+    /* The width of the pen is in logical units: the mapping mode and the world transform scale it */
+    if (PenWidth)
+        PATH_GetPenDeviceWidths(dc, pbrush, &PenWidth, &PenWidthY);
 
     RectBounds.left   = Left;
     RectBounds.right  = Right;
@@ -346,6 +337,31 @@ NtGdiEllipse(
     RectBounds.bottom = Bottom;
 
     IntLPtoDP(dc, (LPPOINT)&RectBounds, 2);
+
+    /* A mapping mode or a world transform that flips an axis turns the box around */
+    if (RectBounds.left > RectBounds.right)
+    {
+        INT tmp = RectBounds.right; RectBounds.right = RectBounds.left; RectBounds.left = tmp;
+    }
+    if (RectBounds.top > RectBounds.bottom)
+    {
+        INT tmp = RectBounds.bottom; RectBounds.bottom = RectBounds.top; RectBounds.top = tmp;
+    }
+
+    /* The pen of a PS_INSIDEFRAME pen lies inside the box, in device pixels */
+    if (pbrush->ulPenStyle == PS_INSIDEFRAME)
+    {
+       if (2*PenWidth > (RectBounds.right - RectBounds.left)) PenWidth = (RectBounds.right - RectBounds.left + 1)/2;
+       if (2*PenWidthY > (RectBounds.bottom - RectBounds.top)) PenWidthY = (RectBounds.bottom - RectBounds.top + 1)/2;
+       RectBounds.left   += PenWidth / 2;
+       RectBounds.right  -= (PenWidth - 1) / 2;
+       RectBounds.top    += PenWidthY / 2;
+       RectBounds.bottom -= (PenWidthY - 1) / 2;
+    }
+
+    if (!PenWidth) PenWidth = 1;
+    if (!PenWidthY) PenWidthY = 1;
+    pbrush->lWidth = PenWidth;
 
     // Setup for dynamic width and height. The centre is rounded before the DC origin is added: the division
     // truncates towards zero, so with the origin first a window DC and a memory DC would round negative sums
@@ -398,7 +414,8 @@ NtGdiEllipse(
                                  CenterY - RadiusY,
                                  RadiusX*2, // Width
                                  RadiusY*2, // Height
-                                 pbrush);
+                                 pbrush,
+                                 PenWidthY);
         }
 
         DC_vFinishBlit(dc, NULL);
@@ -906,7 +923,7 @@ IntRoundRect(
     PDC_ATTR pdcattr;
     PBRUSH   pbrLine, pbrFill;
     RECTL RectBounds;
-    LONG PenWidth, PenOrigWidth;
+    LONG PenWidth, PenOrigWidth, PenWidthY;
     BOOL ret = TRUE; // Default to success
     BRUSH brushTemp;
 
@@ -948,19 +965,10 @@ IntRoundRect(
 
     PenOrigWidth = PenWidth = pbrLine->lWidth;
     if (pbrLine->ulPenStyle == PS_NULL) PenWidth = 0;
-
-    if (pbrLine->ulPenStyle == PS_INSIDEFRAME)
-    {
-       if (2*PenWidth > (Right - Left)) PenWidth = (Right -Left + 1)/2;
-       if (2*PenWidth > (Bottom - Top)) PenWidth = (Bottom -Top + 1)/2;
-       Left   += PenWidth / 2;
-       Right  -= (PenWidth - 1) / 2;
-       Top    += PenWidth / 2;
-       Bottom -= (PenWidth - 1) / 2;
-    }
-
-    if (!PenWidth) PenWidth = 1;
-    pbrLine->lWidth = PenWidth;
+    PenWidthY = PenWidth;
+    /* The width of the pen is in logical units: the mapping mode and the world transform scale it */
+    if (PenWidth)
+        PATH_GetPenDeviceWidths(dc, pbrLine, &PenWidth, &PenWidthY);
 
     RectBounds.left = Left;
     RectBounds.top = Top;
@@ -968,6 +976,31 @@ IntRoundRect(
     RectBounds.bottom = Bottom;
 
     IntLPtoDP(dc, (LPPOINT)&RectBounds, 2);
+
+    /* A mapping mode or a world transform that flips an axis turns the box around */
+    if (RectBounds.left > RectBounds.right)
+    {
+        INT tmp = RectBounds.right; RectBounds.right = RectBounds.left; RectBounds.left = tmp;
+    }
+    if (RectBounds.top > RectBounds.bottom)
+    {
+        INT tmp = RectBounds.bottom; RectBounds.bottom = RectBounds.top; RectBounds.top = tmp;
+    }
+
+    /* The pen of a PS_INSIDEFRAME pen lies inside the box, in device pixels */
+    if (pbrLine->ulPenStyle == PS_INSIDEFRAME)
+    {
+       if (2*PenWidth > (RectBounds.right - RectBounds.left)) PenWidth = (RectBounds.right - RectBounds.left + 1)/2;
+       if (2*PenWidthY > (RectBounds.bottom - RectBounds.top)) PenWidthY = (RectBounds.bottom - RectBounds.top + 1)/2;
+       RectBounds.left   += PenWidth / 2;
+       RectBounds.right  -= (PenWidth - 1) / 2;
+       RectBounds.top    += PenWidthY / 2;
+       RectBounds.bottom -= (PenWidthY - 1) / 2;
+    }
+
+    if (!PenWidth) PenWidth = 1;
+    if (!PenWidthY) PenWidthY = 1;
+    pbrLine->lWidth = PenWidth;
 
     RectBounds.left   += dc->ptlDCOrig.x;
     RectBounds.top    += dc->ptlDCOrig.y;
@@ -1008,7 +1041,8 @@ IntRoundRect(
                     RectBounds.bottom,
                        xCurveDiameter,
                        yCurveDiameter,
-                       pbrLine);
+                       pbrLine,
+                       PenWidthY);
         }
 
         DC_vFinishBlit(dc, NULL);
