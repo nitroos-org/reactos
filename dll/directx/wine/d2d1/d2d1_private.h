@@ -56,6 +56,17 @@ enum d2d_shape_type
     D2D_SHAPE_TYPE_COUNT,
 };
 
+enum d2d_batch_stream_type
+{
+    D2D_BATCH_TRIANGLES,
+    D2D_BATCH_CURVES,
+    D2D_BATCH_ARCS,
+    D2D_BATCH_OUTLINE,
+    D2D_BATCH_BEZIER_OUTLINE,
+    D2D_BATCH_ARC_OUTLINE,
+    D2D_BATCH_STREAM_COUNT,
+};
+
 struct d2d_settings
 {
     unsigned int max_version_factory;
@@ -225,19 +236,23 @@ struct d2d_device_context
 
     struct d2d_indexed_objects vertex_buffers;
 
-    /* Fills with a solid brush that are held back until something else
-     * is drawn, or the target is read: same constants, one draw call. */
+    /* Fills and strokes with a solid brush that are held back until
+     * something else is drawn, or the target is read: same constants, one
+     * draw call per shape type. */
     struct
     {
         BOOL active;
         struct d2d_vs_cb vs_cb;
         struct d2d_ps_cb ps_cb;
-        D2D1_POINT_2F *vertices;
-        size_t vertices_size;
-        size_t vertex_count;
-        struct d2d_face *faces;
-        size_t faces_size;
-        size_t face_count;
+        struct d2d_batch_stream
+        {
+            BYTE *vertices;
+            size_t vertices_size;
+            size_t vertex_count;
+            struct d2d_face *faces;
+            size_t faces_size;
+            size_t face_count;
+        } streams[D2D_BATCH_STREAM_COUNT];
     } fill_batch;
 };
 
