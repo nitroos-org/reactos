@@ -2796,6 +2796,46 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia S
 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","2000",0x00000001,0xe0,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0a,0x00,0x00,0x00,0x05,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","2001",0x00000001,0xe0,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0a,0x00,0x00,0x00,0x05,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","2002",0x00000001,0xe0,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0a,0x00,0x00,0x00,0x05,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","2003",0x00000001,0xe0,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0a,0x00,0x00,0x00,0x05,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","2004",0x00000001,0xe0,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0a,0x00,0x00,0x00,0x05,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","2005",0x00000001,0xe0,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0a,0x00,0x00,0x00,0x05,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","2006",0x00000001,0xe0,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0a,0x00,0x00,0x00,0x05,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","2007",0x00000001,0xe0,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","2008",0x00000001,0xe0,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","2009",0x00000001,0xe0,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","2010",0x00000001,0xe0,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","2011",0x00000001,0xe0,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","2012",0x00000001,0xe0,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","2013",0x00000001,0xe0,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","2014",0x00000001,0xe0,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","2015",0x00000001,0xe0,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","2016",0x00000001,0xe0,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","2017",0x00000001,0xe0,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","2018",0x00000001,0xe0,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","2019",0x00000001,0xe0,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","2020",0x00000001,0xe0,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","2021",0x00000001,0xe0,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","2022",0x00000001,0xe0,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","2023",0x00000001,0xe0,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","2024",0x00000001,0xe0,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","2025",0x00000001,0xe0,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","2026",0x00000001,0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","2027",0x00000001,0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","2028",0x00000001,0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","2029",0x00000001,0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","2030",0x00000001,0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","2031",0x00000001,0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","2032",0x00000001,0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","2033",0x00000001,0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","2034",0x00000001,0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","2035",0x00000001,0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","2036",0x00000001,0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","2037",0x00000001,0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","FirstEntry",0x00010001,2000
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time\Dynamic DST","LastEntry",0x00010001,2037
 
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Yukon Standard Time","Display",0x00000000,"(UTC-07:00) Yukon"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Yukon Standard Time","Dlt",0x00000000,"Yukon Daylight Time"
@@ -2822,6 +2862,46 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard T
 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","2000",0x00000001,0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0a,0x00,0x00,0x00,0x05,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","2001",0x00000001,0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0a,0x00,0x00,0x00,0x05,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","2002",0x00000001,0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0a,0x00,0x00,0x00,0x05,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","2003",0x00000001,0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0a,0x00,0x00,0x00,0x05,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","2004",0x00000001,0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0a,0x00,0x00,0x00,0x05,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","2005",0x00000001,0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0a,0x00,0x00,0x00,0x05,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","2006",0x00000001,0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0a,0x00,0x00,0x00,0x05,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","2007",0x00000001,0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","2008",0x00000001,0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","2009",0x00000001,0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","2010",0x00000001,0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","2011",0x00000001,0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","2012",0x00000001,0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","2013",0x00000001,0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","2014",0x00000001,0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","2015",0x00000001,0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","2016",0x00000001,0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","2017",0x00000001,0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","2018",0x00000001,0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","2019",0x00000001,0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","2020",0x00000001,0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","2021",0x00000001,0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","2022",0x00000001,0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","2023",0x00000001,0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","2024",0x00000001,0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","2025",0x00000001,0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","2026",0x00000001,0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","2027",0x00000001,0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","2028",0x00000001,0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","2029",0x00000001,0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","2030",0x00000001,0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","2031",0x00000001,0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","2032",0x00000001,0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","2033",0x00000001,0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","2034",0x00000001,0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","2035",0x00000001,0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","2036",0x00000001,0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","2037",0x00000001,0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","FirstEntry",0x00010001,2000
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time\Dynamic DST","LastEntry",0x00010001,2037
 
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Easter Island Standard Time","Display",0x00000000,"(UTC-06:00) Easter Island"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Easter Island Standard Time","Dlt",0x00000000,"Easter Island Daylight Time"
@@ -2848,6 +2928,46 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard 
 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","2000",0x00000001,0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0a,0x00,0x00,0x00,0x05,0x00,0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","2001",0x00000001,0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0a,0x00,0x00,0x00,0x05,0x00,0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","2002",0x00000001,0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0a,0x00,0x00,0x00,0x05,0x00,0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","2003",0x00000001,0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0a,0x00,0x00,0x00,0x05,0x00,0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","2004",0x00000001,0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0a,0x00,0x00,0x00,0x05,0x00,0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","2005",0x00000001,0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0a,0x00,0x00,0x00,0x05,0x00,0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","2006",0x00000001,0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0a,0x00,0x00,0x00,0x05,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","2007",0x00000001,0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","2008",0x00000001,0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","2009",0x00000001,0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","2010",0x00000001,0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","2011",0x00000001,0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","2012",0x00000001,0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","2013",0x00000001,0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","2014",0x00000001,0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","2015",0x00000001,0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","2016",0x00000001,0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","2017",0x00000001,0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","2018",0x00000001,0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","2019",0x00000001,0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","2020",0x00000001,0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","2021",0x00000001,0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","2022",0x00000001,0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","2023",0x00000001,0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","2024",0x00000001,0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","2025",0x00000001,0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","2026",0x00000001,0x2c,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","2027",0x00000001,0x2c,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","2028",0x00000001,0x2c,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","2029",0x00000001,0x2c,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","2030",0x00000001,0x2c,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","2031",0x00000001,0x2c,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","2032",0x00000001,0x2c,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","2033",0x00000001,0x2c,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","2034",0x00000001,0x2c,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","2035",0x00000001,0x2c,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","2036",0x00000001,0x2c,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","2037",0x00000001,0x2c,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","FirstEntry",0x00010001,2000
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time\Dynamic DST","LastEntry",0x00010001,2037
 
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Eastern Standard Time (Mexico)","Display",0x00000000,"(UTC-05:00) Chetumal"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Eastern Standard Time (Mexico)","Dlt",0x00000000,"Eastern Daylight Time (Mexico)"
@@ -2913,6 +3033,46 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard 
 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","2000",0x00000001,0xf0,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x03,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x0a,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","2001",0x00000001,0xf0,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x03,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x0a,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","2002",0x00000001,0xf0,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x04,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x09,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","2003",0x00000001,0xf0,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x04,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x09,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","2004",0x00000001,0xf0,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x04,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x0a,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","2005",0x00000001,0xf0,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x0a,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","2006",0x00000001,0xf0,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x0a,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","2007",0x00000001,0xf0,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x0a,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","2008",0x00000001,0xf0,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x0a,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","2009",0x00000001,0xf0,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x0a,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","2010",0x00000001,0xf0,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x04,0x00,0x00,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x0a,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","2011",0x00000001,0xf0,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x04,0x00,0x00,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x0a,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","2012",0x00000001,0xf0,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x04,0x00,0x00,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x0a,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","2013",0x00000001,0xf0,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x03,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x0a,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","2014",0x00000001,0xf0,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x03,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x0a,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","2015",0x00000001,0xf0,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x03,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x0a,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","2016",0x00000001,0xf0,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x03,0x00,0x00,0x00,0x05,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x0a,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","2017",0x00000001,0xf0,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x03,0x00,0x00,0x00,0x05,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x0a,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","2018",0x00000001,0xf0,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x03,0x00,0x00,0x00,0x05,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x0a,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","2019",0x00000001,0xf0,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x03,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x0a,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","2020",0x00000001,0xf0,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x03,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x0a,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","2021",0x00000001,0xf0,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x03,0x00,0x00,0x00,0x05,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x0a,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","2022",0x00000001,0xf0,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x03,0x00,0x00,0x00,0x05,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x0a,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","2023",0x00000001,0xf0,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x03,0x00,0x00,0x00,0x05,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x0a,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","2024",0x00000001,0xf0,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x03,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x0a,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","2025",0x00000001,0xb4,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","2026",0x00000001,0xb4,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","2027",0x00000001,0xb4,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","2028",0x00000001,0xb4,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","2029",0x00000001,0xb4,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","2030",0x00000001,0xb4,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","2031",0x00000001,0xb4,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","2032",0x00000001,0xb4,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","2033",0x00000001,0xb4,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","2034",0x00000001,0xb4,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","2035",0x00000001,0xb4,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","2036",0x00000001,0xb4,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","2037",0x00000001,0xb4,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","FirstEntry",0x00010001,2000
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time\Dynamic DST","LastEntry",0x00010001,2037
 
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Venezuela Standard Time","Display",0x00000000,"(UTC-04:00) Caracas"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Venezuela Standard Time","Dlt",0x00000000,"Venezuela Daylight Time"
@@ -3065,10 +3225,50 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard T
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2112"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time","Index",0x00010001,328
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time","TZI",0x00000001,\
-0xc4,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","2000",0x00000001,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","2001",0x00000001,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","2002",0x00000001,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","2003",0x00000001,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","2004",0x00000001,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","2005",0x00000001,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","2006",0x00000001,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","2007",0x00000001,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","2008",0x00000001,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x09,0x00,0x01,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x06,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","2009",0x00000001,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x08,0x00,0x05,0x00,0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x06,0x00,0x01,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","2010",0x00000001,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x08,0x00,0x00,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x05,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","2011",0x00000001,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x07,0x00,0x00,0x00,0x05,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","2012",0x00000001,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x09,0x00,0x00,0x00,0x05,0x00,0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x08,0x00,0x01,0x00,0x03,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","2013",0x00000001,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0a,0x00,0x00,0x00,0x05,0x00,0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x08,0x00,0x06,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","2014",0x00000001,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0a,0x00,0x00,0x00,0x05,0x00,0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x08,0x00,0x06,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","2015",0x00000001,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0a,0x00,0x00,0x00,0x05,0x00,0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x07,0x00,0x00,0x00,0x03,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","2016",0x00000001,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0a,0x00,0x00,0x00,0x05,0x00,0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x07,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","2017",0x00000001,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x0a,0x00,0x00,0x00,0x05,0x00,0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x07,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","2018",0x00000001,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x05,0x00,0x00,0x00,0x02,0x00,0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x06,0x00,0x00,0x00,0x03,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","2019",0x00000001,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x05,0x00,0x00,0x00,0x01,0x00,0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x06,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","2020",0x00000001,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x04,0x00,0x00,0x00,0x03,0x00,0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x05,0x00,0x00,0x00,0x05,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","2021",0x00000001,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x04,0x00,0x00,0x00,0x02,0x00,0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x05,0x00,0x00,0x00,0x03,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","2022",0x00000001,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x03,0x00,0x00,0x00,0x05,0x00,0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x05,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","2023",0x00000001,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x03,0x00,0x00,0x00,0x03,0x00,0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x04,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","2024",0x00000001,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","2025",0x00000001,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x02,0x00,0x00,0x00,0x05,0x00,0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","2026",0x00000001,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x00,0x00,0x09,0x00,0x00,0x00,0x03,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x04,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","2027",0x00000001,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","2028",0x00000001,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","2029",0x00000001,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","2030",0x00000001,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","2031",0x00000001,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","2032",0x00000001,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","2033",0x00000001,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","2034",0x00000001,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","2035",0x00000001,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","2036",0x00000001,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","2037",0x00000001,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","FirstEntry",0x00010001,2000
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time\Dynamic DST","LastEntry",0x00010001,2037
 
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\W. Central Africa Standard Time","Display",0x00000000,"(UTC+01:00) West Central Africa"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\W. Central Africa Standard Time","Dlt",0x00000000,"W. Central Africa Daylight Time"
@@ -4065,339 +4265,339 @@ COUNTRY_ZA="South Africa"
 COUNTRY_ZM="Zambia"
 COUNTRY_ZW="Zimbabwe"
 
-GMT_MINUS_12_A_DESC    ="(GMT-12:00) International Date Line West"
+GMT_MINUS_12_A_DESC    ="(UTC-12:00) International Date Line West"
 GMT_MINUS_12_A_DAYLIGHT="Dateline Daylight Time"
 GMT_MINUS_12_A_STANDARD="Dateline Standard Time"
 
-GMT_MINUS_11_A_DESC    ="(GMT-11:00) Midway Island, Samoa"
+GMT_MINUS_11_A_DESC    ="(UTC-11:00) Midway Island, Samoa"
 GMT_MINUS_11_A_DAYLIGHT="Samoa Daylight Time"
 GMT_MINUS_11_A_STANDARD="Samoa Standard Time"
 
-GMT_MINUS_10_A_DESC    ="(GMT-10:00) Hawaii"
+GMT_MINUS_10_A_DESC    ="(UTC-10:00) Hawaii"
 GMT_MINUS_10_A_DAYLIGHT="Hawaiian Daylight Time"
 GMT_MINUS_10_A_STANDARD="Hawaiian Standard Time"
 
-GMT_MINUS_09_A_DESC    ="(GMT-09:00) Alaska"
+GMT_MINUS_09_A_DESC    ="(UTC-09:00) Alaska"
 GMT_MINUS_09_A_DAYLIGHT="Alaskan Daylight Time"
 GMT_MINUS_09_A_STANDARD="Alaskan Standard Time"
 
-GMT_MINUS_08_A_DESC    ="(GMT-08:00) Pacific Time (US & Canada)"
+GMT_MINUS_08_A_DESC    ="(UTC-08:00) Pacific Time (US & Canada)"
 GMT_MINUS_08_A_DAYLIGHT="Pacific Daylight Time"
 GMT_MINUS_08_A_STANDARD="Pacific Standard Time"
 
-GMT_MINUS_07_A_DESC    ="(GMT-07:00) Mountain Time (US & Canada)"
+GMT_MINUS_07_A_DESC    ="(UTC-07:00) Mountain Time (US & Canada)"
 GMT_MINUS_07_A_DAYLIGHT="Mountain Daylight Time"
 GMT_MINUS_07_A_STANDARD="Mountain Standard Time"
 
-GMT_MINUS_07_B_DESC    ="(GMT-07:00) Chihuahua, La Paz, Mazatlan"
+GMT_MINUS_07_B_DESC    ="(UTC-07:00) Chihuahua, La Paz, Mazatlan"
 GMT_MINUS_07_B_DAYLIGHT="Mountain Daylight Time (Mexico)"
 GMT_MINUS_07_B_STANDARD="Mountain Standard Time (Mexico)"
 
-GMT_MINUS_07_C_DESC    ="(GMT-07:00) Arizona"
+GMT_MINUS_07_C_DESC    ="(UTC-07:00) Arizona"
 GMT_MINUS_07_C_DAYLIGHT="US Mountain Daylight Time"
 GMT_MINUS_07_C_STANDARD="US Mountain Standard Time"
 
-GMT_MINUS_06_A_DESC    ="(GMT-06:00) Central Time (US & Canada)"
+GMT_MINUS_06_A_DESC    ="(UTC-06:00) Central Time (US & Canada)"
 GMT_MINUS_06_A_DAYLIGHT="Central Daylight Time"
 GMT_MINUS_06_A_STANDARD="Central Standard Time"
 
-GMT_MINUS_06_B_DESC    ="(GMT-06:00) Saskatchewan"
+GMT_MINUS_06_B_DESC    ="(UTC-06:00) Saskatchewan"
 GMT_MINUS_06_B_DAYLIGHT="Canada Central Daylight Time"
 GMT_MINUS_06_B_STANDARD="Canada Central Standard Time"
 
-GMT_MINUS_06_C_DESC    ="(GMT-06:00) Guadalajara, Mexico City, Monterrey"
+GMT_MINUS_06_C_DESC    ="(UTC-06:00) Guadalajara, Mexico City, Monterrey"
 GMT_MINUS_06_C_DAYLIGHT="Central Daylight Time (Mexico)"
 GMT_MINUS_06_C_STANDARD="Central Standard Time (Mexico)"
 
-GMT_MINUS_06_D_DESC    ="(GMT-06:00) Central America"
+GMT_MINUS_06_D_DESC    ="(UTC-06:00) Central America"
 GMT_MINUS_06_D_DAYLIGHT="Central America Daylight Time"
 GMT_MINUS_06_D_STANDARD="Central America Standard Time"
 
-GMT_MINUS_05_A_DESC    ="(GMT-05:00) Eastern Time (US & Canada)"
+GMT_MINUS_05_A_DESC    ="(UTC-05:00) Eastern Time (US & Canada)"
 GMT_MINUS_05_A_DAYLIGHT="Eastern Daylight Time"
 GMT_MINUS_05_A_STANDARD="Eastern Standard Time"
 
-GMT_MINUS_05_B_DESC    ="(GMT-05:00) Indiana (East)"
+GMT_MINUS_05_B_DESC    ="(UTC-05:00) Indiana (East)"
 GMT_MINUS_05_B_DAYLIGHT="US Eastern Daylight Time"
 GMT_MINUS_05_B_STANDARD="US Eastern Standard Time"
 
-GMT_MINUS_05_C_DESC    ="(GMT-05:00) Bogota, Lima, Quito, Rio Branco"
+GMT_MINUS_05_C_DESC    ="(UTC-05:00) Bogota, Lima, Quito, Rio Branco"
 GMT_MINUS_05_C_DAYLIGHT="SA Pacific Daylight Time"
 GMT_MINUS_05_C_STANDARD="SA Pacific Standard Time"
 
-GMT_MINUS_04_A_DESC    ="(GMT-04:00) Atlantic Time (Canada)"
+GMT_MINUS_04_A_DESC    ="(UTC-04:00) Atlantic Time (Canada)"
 GMT_MINUS_04_A_DAYLIGHT="Atlantic Daylight Time"
 GMT_MINUS_04_A_STANDARD="Atlantic Standard Time"
 
-GMT_MINUS_04_B_DESC    ="(GMT-04:00) La Paz"
+GMT_MINUS_04_B_DESC    ="(UTC-04:00) La Paz"
 GMT_MINUS_04_B_DAYLIGHT="SA Western Daylight Time"
 GMT_MINUS_04_B_STANDARD="SA Western Standard Time"
 
-GMT_MINUS_0330_A_DESC    ="(GMT-03:30) Newfoundland"
+GMT_MINUS_0330_A_DESC    ="(UTC-03:30) Newfoundland"
 GMT_MINUS_0330_A_DAYLIGHT="Newfoundland Daylight Time"
 GMT_MINUS_0330_A_STANDARD="Newfoundland Standard Time"
 
-GMT_MINUS_03_A_DESC    ="(GMT-03:00) Santiago"
+GMT_MINUS_03_A_DESC    ="(UTC-03:00) Santiago"
 GMT_MINUS_03_A_DAYLIGHT="Pacific SA Daylight Time"
 GMT_MINUS_03_A_STANDARD="Pacific SA Standard Time"
 
-GMT_MINUS_03_B_DESC    ="(GMT-03:00) Brasilia"
+GMT_MINUS_03_B_DESC    ="(UTC-03:00) Brasilia"
 GMT_MINUS_03_B_DAYLIGHT="E. South America Daylight Time"
 GMT_MINUS_03_B_STANDARD="E. South America Standard Time"
 
-GMT_MINUS_03_C_DESC    ="(GMT-03:00) Buenos Aires, Georgetown"
+GMT_MINUS_03_C_DESC    ="(UTC-03:00) Buenos Aires, Georgetown"
 GMT_MINUS_03_C_DAYLIGHT="SA Eastern Daylight Time"
 GMT_MINUS_03_C_STANDARD="SA Eastern Standard Time"
 
-GMT_MINUS_03_D_DESC    ="(GMT-03:00) Greenland"
+GMT_MINUS_03_D_DESC    ="(UTC-03:00) Greenland"
 GMT_MINUS_03_D_DAYLIGHT="Greenland Daylight Time"
 GMT_MINUS_03_D_STANDARD="Greenland Standard Time"
 
-GMT_MINUS_02_A_DESC    ="(GMT-02:00) Mid-Atlantic"
+GMT_MINUS_02_A_DESC    ="(UTC-02:00) Mid-Atlantic"
 GMT_MINUS_02_A_DAYLIGHT="Mid-Atlantic Daylight Time"
 GMT_MINUS_02_A_STANDARD="Mid-Atlantic Standard Time"
 
-GMT_MINUS_01_A_DESC    ="(GMT-01:00) Azores"
+GMT_MINUS_01_A_DESC    ="(UTC-01:00) Azores"
 GMT_MINUS_01_A_DAYLIGHT="Azores Daylight Time"
 GMT_MINUS_01_A_STANDARD="Azores Standard Time"
 
-GMT_MINUS_01_B_DESC    ="(GMT-01:00) Cape Verde Is."
+GMT_MINUS_01_B_DESC    ="(UTC-01:00) Cape Verde Is."
 GMT_MINUS_01_B_DAYLIGHT="Cape Verde Daylight Time"
 GMT_MINUS_01_B_STANDARD="Cape Verde Standard Time"
 
-GMT_PLUS_00_A_DESC    ="(GMT+00:00) Greenwich Mean Time: Dublin, Edinburgh, Lisbon, London"
+GMT_PLUS_00_A_DESC    ="(UTC+00:00) Greenwich Mean Time: Dublin, Edinburgh, Lisbon, London"
 GMT_PLUS_00_A_DAYLIGHT="GMT Daylight Time"
 GMT_PLUS_00_A_STANDARD="GMT Standard Time"
 
-GMT_PLUS_00_B_DESC    ="(GMT+00:00) Casablanca, Monrovia, Reykjavik"
+GMT_PLUS_00_B_DESC    ="(UTC+00:00) Casablanca, Monrovia, Reykjavik"
 GMT_PLUS_00_B_DAYLIGHT="Greenwich Daylight Time"
 GMT_PLUS_00_B_STANDARD="Greenwich Standard Time"
 
-GMT_PLUS_01_A_DESC    ="(GMT+01:00) Belgrade, Bratislava, Budapest, Ljubljana, Prague"
+GMT_PLUS_01_A_DESC    ="(UTC+01:00) Belgrade, Bratislava, Budapest, Ljubljana, Prague"
 GMT_PLUS_01_A_DAYLIGHT="Central Europe Daylight Time"
 GMT_PLUS_01_A_STANDARD="Central Europe Standard Time"
 
-GMT_PLUS_01_B_DESC    ="(GMT+01:00) Sarajevo, Skopje, Warsaw, Zagreb"
+GMT_PLUS_01_B_DESC    ="(UTC+01:00) Sarajevo, Skopje, Warsaw, Zagreb"
 GMT_PLUS_01_B_DAYLIGHT="Central European Daylight Time"
 GMT_PLUS_01_B_STANDARD="Central European Standard Time"
 
-GMT_PLUS_01_C_DESC    ="(GMT+01:00) Brussels, Copenhagen, Madrid, Paris"
+GMT_PLUS_01_C_DESC    ="(UTC+01:00) Brussels, Copenhagen, Madrid, Paris"
 GMT_PLUS_01_C_DAYLIGHT="Romance Daylight Time"
 GMT_PLUS_01_C_STANDARD="Romance Standard Time"
 
-GMT_PLUS_01_D_DESC    ="(GMT+01:00) Amsterdam, Berlin, Bern, Rome, Stockholm, Vienna"
+GMT_PLUS_01_D_DESC    ="(UTC+01:00) Amsterdam, Berlin, Bern, Rome, Stockholm, Vienna"
 GMT_PLUS_01_D_DAYLIGHT="W. Europe Daylight Time"
 GMT_PLUS_01_D_STANDARD="W. Europe Standard Time"
 
-GMT_PLUS_02_A_DESC    ="(GMT+02:00) Chisinau"
+GMT_PLUS_02_A_DESC    ="(UTC+02:00) Chisinau"
 GMT_PLUS_02_A_DAYLIGHT="E. Europe Daylight Time"
 GMT_PLUS_02_A_STANDARD="E. Europe Standard Time"
 
-GMT_PLUS_02_B_DESC    ="(GMT+02:00) Cairo"
+GMT_PLUS_02_B_DESC    ="(UTC+02:00) Cairo"
 GMT_PLUS_02_B_DAYLIGHT="Egypt Daylight Time"
 GMT_PLUS_02_B_STANDARD="Egypt Standard Time"
 
-GMT_PLUS_02_C_DESC    ="(GMT+02:00) Helsinki, Kyiv, Riga, Sofia, Tallinn, Vilnius"
+GMT_PLUS_02_C_DESC    ="(UTC+02:00) Helsinki, Kyiv, Riga, Sofia, Tallinn, Vilnius"
 GMT_PLUS_02_C_DAYLIGHT="FLE Daylight Time"
 GMT_PLUS_02_C_STANDARD="FLE Standard Time"
 
-GMT_PLUS_02_D_DESC    ="(GMT+02:00) Athens, Bucharest"
+GMT_PLUS_02_D_DESC    ="(UTC+02:00) Athens, Bucharest"
 GMT_PLUS_02_D_DAYLIGHT="GTB Daylight Time"
 GMT_PLUS_02_D_STANDARD="GTB Standard Time"
 
-GMT_PLUS_02_E_DESC    ="(GMT+02:00) Jerusalem"
+GMT_PLUS_02_E_DESC    ="(UTC+02:00) Jerusalem"
 GMT_PLUS_02_E_DAYLIGHT="Israel Daylight Time"
 GMT_PLUS_02_E_STANDARD="Israel Standard Time"
 
-GMT_PLUS_02_F_DESC    ="(GMT+02:00) Harare, Pretoria"
+GMT_PLUS_02_F_DESC    ="(UTC+02:00) Harare, Pretoria"
 GMT_PLUS_02_F_DAYLIGHT="South Africa Daylight Time"
 GMT_PLUS_02_F_STANDARD="South Africa Standard Time"
 
-GMT_PLUS_02_G_DESC    ="(GMT+02:00) Kaliningrad"
+GMT_PLUS_02_G_DESC    ="(UTC+02:00) Kaliningrad"
 GMT_PLUS_02_G_DAYLIGHT="RTZ 1 Daylight Time"
 GMT_PLUS_02_G_STANDARD="RTZ 1 Standard Time"
 
-GMT_PLUS_03_A_DESC    ="(GMT+03:00) Minsk"
+GMT_PLUS_03_A_DESC    ="(UTC+03:00) Minsk"
 GMT_PLUS_03_A_DAYLIGHT="Belarus Daylight Time"
 GMT_PLUS_03_A_STANDARD="Belarus Standard Time"
 
-GMT_PLUS_03_B_DESC    ="(GMT+03:00) Moscow, St. Petersburg"
+GMT_PLUS_03_B_DESC    ="(UTC+03:00) Moscow, St. Petersburg"
 GMT_PLUS_03_B_DAYLIGHT="RTZ 2 Daylight Time"
 GMT_PLUS_03_B_STANDARD="RTZ 2 Standard Time"
 
-GMT_PLUS_03_C_DESC    ="(GMT+03:00) Kuwait, Riyadh"
+GMT_PLUS_03_C_DESC    ="(UTC+03:00) Kuwait, Riyadh"
 GMT_PLUS_03_C_DAYLIGHT="Arab Daylight Time"
 GMT_PLUS_03_C_STANDARD="Arab Standard Time"
 
-GMT_PLUS_03_D_DESC    ="(GMT+03:00) Nairobi"
+GMT_PLUS_03_D_DESC    ="(UTC+03:00) Nairobi"
 GMT_PLUS_03_D_DAYLIGHT="E. Africa Daylight Time"
 GMT_PLUS_03_D_STANDARD="E. Africa Standard Time"
 
-GMT_PLUS_03_E_DESC    ="(GMT+03:00) Baghdad"
+GMT_PLUS_03_E_DESC    ="(UTC+03:00) Baghdad"
 GMT_PLUS_03_E_DAYLIGHT="Arabic Daylight Time"
 GMT_PLUS_03_E_STANDARD="Arabic Standard Time"
 
-GMT_PLUS_03_F_DESC    ="(GMT+03:00) Istanbul"
+GMT_PLUS_03_F_DESC    ="(UTC+03:00) Istanbul"
 GMT_PLUS_03_F_DAYLIGHT="Turkey Daylight Time"
 GMT_PLUS_03_F_STANDARD="Turkey Standard Time"
 
-GMT_PLUS_0330_A_DESC    ="(GMT+03:30) Tehran"
+GMT_PLUS_0330_A_DESC    ="(UTC+03:30) Tehran"
 GMT_PLUS_0330_A_DAYLIGHT="Iran Daylight Time"
 GMT_PLUS_0330_A_STANDARD="Iran Standard Time"
 
-GMT_PLUS_04_A_DESC    ="(GMT+04:00) Abu Dhabi, Muscat"
+GMT_PLUS_04_A_DESC    ="(UTC+04:00) Abu Dhabi, Muscat"
 GMT_PLUS_04_A_DAYLIGHT="Arabian Daylight Time"
 GMT_PLUS_04_A_STANDARD="Arabian Standard Time"
 
-GMT_PLUS_04_B_DESC    ="(GMT+04:00) Yerevan"
+GMT_PLUS_04_B_DESC    ="(UTC+04:00) Yerevan"
 GMT_PLUS_04_B_DAYLIGHT="Caucasus Daylight Time"
 GMT_PLUS_04_B_STANDARD="Caucasus Standard Time"
 
-GMT_PLUS_04_C_DESC    ="(GMT+04:00) Izhevsk, Samara, Volgograd"
+GMT_PLUS_04_C_DESC    ="(UTC+04:00) Izhevsk, Samara, Volgograd"
 GMT_PLUS_04_C_DAYLIGHT="RTZ 3 Daylight Time"
 GMT_PLUS_04_C_STANDARD="RTZ 3 Standard Time"
 
-GMT_PLUS_0430_A_DESC    ="(GMT+04:30) Kabul"
+GMT_PLUS_0430_A_DESC    ="(UTC+04:30) Kabul"
 GMT_PLUS_0430_A_DAYLIGHT="Afghanistan Daylight Time"
 GMT_PLUS_0430_A_STANDARD="Afghanistan Standard Time"
 
-GMT_PLUS_05_A_DESC    ="(GMT+05:00) Ekaterinburg"
+GMT_PLUS_05_A_DESC    ="(UTC+05:00) Ekaterinburg"
 GMT_PLUS_05_A_DAYLIGHT="RTZ 4 Daylight Time"
 GMT_PLUS_05_A_STANDARD="RTZ 4 Standard Time"
 
-GMT_PLUS_05_B_DESC    ="(GMT+05:00) Islamabad, Karachi, Tashkent"
+GMT_PLUS_05_B_DESC    ="(UTC+05:00) Islamabad, Karachi, Tashkent"
 GMT_PLUS_05_B_DAYLIGHT="West Asia Daylight Time"
 GMT_PLUS_05_B_STANDARD="West Asia Standard Time"
 
-GMT_PLUS_0530_A_DESC    ="(GMT+05:30) Chennai, Kolkata, Mumbai, New Delhi"
+GMT_PLUS_0530_A_DESC    ="(UTC+05:30) Chennai, Kolkata, Mumbai, New Delhi"
 GMT_PLUS_0530_A_DAYLIGHT="India Daylight Time"
 GMT_PLUS_0530_A_STANDARD="India Standard Time"
 
-GMT_PLUS_0530_B_DESC    ="(GMT+05:30) Sri Jayawardenepura"
+GMT_PLUS_0530_B_DESC    ="(UTC+05:30) Sri Jayawardenepura"
 GMT_PLUS_0530_B_DAYLIGHT="Sri Lanka Daylight Time"
 GMT_PLUS_0530_B_STANDARD="Sri Lanka Standard Time"
 
-GMT_PLUS_0545_A_DESC    ="(GMT+05:45) Kathmandu"
+GMT_PLUS_0545_A_DESC    ="(UTC+05:45) Kathmandu"
 GMT_PLUS_0545_A_DAYLIGHT="Nepal Daylight Time"
 GMT_PLUS_0545_A_STANDARD="Nepal Standard Time"
 
-GMT_PLUS_06_A_DESC    ="(GMT+06:00) Astana, Dhaka"
+GMT_PLUS_06_A_DESC    ="(UTC+06:00) Astana, Dhaka"
 GMT_PLUS_06_A_DAYLIGHT="Central Asia Daylight Time"
 GMT_PLUS_06_A_STANDARD="Central Asia Standard Time"
 
-GMT_PLUS_06_B_DESC    ="(GMT+06:00) Omsk"
+GMT_PLUS_06_B_DESC    ="(UTC+06:00) Omsk"
 GMT_PLUS_06_B_DAYLIGHT="Omsk Daylight Time"
 GMT_PLUS_06_B_STANDARD="Omsk Standard Time"
 
-GMT_PLUS_0630_A_DESC    ="(GMT+06:30) Yangon (Rangoon)"
+GMT_PLUS_0630_A_DESC    ="(UTC+06:30) Yangon (Rangoon)"
 GMT_PLUS_0630_A_DAYLIGHT="Myanmar Daylight Time"
 GMT_PLUS_0630_A_STANDARD="Myanmar Standard Time"
 
-GMT_PLUS_07_A_DESC    ="(GMT+07:00) Novosibirsk"
+GMT_PLUS_07_A_DESC    ="(UTC+07:00) Novosibirsk"
 GMT_PLUS_07_A_DAYLIGHT="Novosibirsk Daylight Time"
 GMT_PLUS_07_A_STANDARD="Novosibirsk Standard Time"
 
-GMT_PLUS_07_B_DESC    ="(GMT+07:00) Bangkok, Hanoi, Jakarta"
+GMT_PLUS_07_B_DESC    ="(UTC+07:00) Bangkok, Hanoi, Jakarta"
 GMT_PLUS_07_B_DAYLIGHT="SE Asia Daylight Time"
 GMT_PLUS_07_B_STANDARD="SE Asia Standard Time"
 
-GMT_PLUS_07_C_DESC    ="(GMT+07:00) Krasnoyarsk"
+GMT_PLUS_07_C_DESC    ="(UTC+07:00) Krasnoyarsk"
 GMT_PLUS_07_C_DAYLIGHT="RTZ 6 Daylight Time"
 GMT_PLUS_07_C_STANDARD="RTZ 6 Standard Time"
 
-GMT_PLUS_07_D_DESC    ="(GMT+07:00) Tomsk"
+GMT_PLUS_07_D_DESC    ="(UTC+07:00) Tomsk"
 GMT_PLUS_07_D_DAYLIGHT="Tomsk Daylight Time"
 GMT_PLUS_07_D_STANDARD="Tomsk Standard Time"
 
-GMT_PLUS_08_A_DESC    ="(GMT+08:00) Beijing, Chongqing, Hong Kong, Urumqi"
+GMT_PLUS_08_A_DESC    ="(UTC+08:00) Beijing, Chongqing, Hong Kong, Urumqi"
 GMT_PLUS_08_A_DAYLIGHT="China Daylight Time"
 GMT_PLUS_08_A_STANDARD="China Standard Time"
 
-GMT_PLUS_08_B_DESC    ="(GMT+08:00) Kuala Lumpur, Singapore"
+GMT_PLUS_08_B_DESC    ="(UTC+08:00) Kuala Lumpur, Singapore"
 GMT_PLUS_08_B_DAYLIGHT="Singapore Daylight Time"
 GMT_PLUS_08_B_STANDARD="Singapore Standard Time"
 
-GMT_PLUS_08_C_DESC    ="(GMT+08:00) Taipei"
+GMT_PLUS_08_C_DESC    ="(UTC+08:00) Taipei"
 GMT_PLUS_08_C_DAYLIGHT="Taipei Daylight Time"
 GMT_PLUS_08_C_STANDARD="Taipei Standard Time"
 
-GMT_PLUS_08_D_DESC    ="(GMT+08:00) Perth"
+GMT_PLUS_08_D_DESC    ="(UTC+08:00) Perth"
 GMT_PLUS_08_D_DAYLIGHT="W. Australia Daylight Time"
 GMT_PLUS_08_D_STANDARD="W. Australia Standard Time"
 
-GMT_PLUS_08_E_DESC    ="(GMT+08:00) Ulaanbaatar"
+GMT_PLUS_08_E_DESC    ="(UTC+08:00) Ulaanbaatar"
 GMT_PLUS_08_E_DAYLIGHT="Ulaanbaatar Daylight Time"
 GMT_PLUS_08_E_STANDARD="Ulaanbaatar Standard Time"
 
-GMT_PLUS_08_F_DESC    ="(GMT+08:00) Irkutsk"
+GMT_PLUS_08_F_DESC    ="(UTC+08:00) Irkutsk"
 GMT_PLUS_08_F_DAYLIGHT="RTZ 7 Daylight Time"
 GMT_PLUS_08_F_STANDARD="RTZ 7 Standard Time"
 
-GMT_PLUS_09_A_DESC    ="(GMT+09:00) Seoul"
+GMT_PLUS_09_A_DESC    ="(UTC+09:00) Seoul"
 GMT_PLUS_09_A_DAYLIGHT="Korea Daylight Time"
 GMT_PLUS_09_A_STANDARD="Korea Standard Time"
 
-GMT_PLUS_09_B_DESC    ="(GMT+09:00) Osaka, Sapporo, Tokyo"
+GMT_PLUS_09_B_DESC    ="(UTC+09:00) Osaka, Sapporo, Tokyo"
 GMT_PLUS_09_B_DAYLIGHT="Tokyo Daylight Time"
 GMT_PLUS_09_B_STANDARD="Tokyo Standard Time"
 
-GMT_PLUS_09_C_DESC    ="(GMT+09:00) Yakutsk"
+GMT_PLUS_09_C_DESC    ="(UTC+09:00) Yakutsk"
 GMT_PLUS_09_C_DAYLIGHT="RTZ 8 Daylight Time"
 GMT_PLUS_09_C_STANDARD="RTZ 8 Standard Time"
 
-GMT_PLUS_0930_A_DESC    ="(GMT+09:30) Darwin"
+GMT_PLUS_0930_A_DESC    ="(UTC+09:30) Darwin"
 GMT_PLUS_0903_A_DAYLIGHT="AUS Central Daylight Time"
 GMT_PLUS_0930_A_STANDARD="AUS Central Standard Time"
 
-GMT_PLUS_0930_B_DESC    ="(GMT+09:30) Adelaide"
+GMT_PLUS_0930_B_DESC    ="(UTC+09:30) Adelaide"
 GMT_PLUS_0930_B_DAYLIGHT="Cen. Australia Daylight Time"
 GMT_PLUS_0930_B_STANDARD="Cen. Australia Standard Time"
 
-GMT_PLUS_10_A_DESC    ="(GMT+10:00) Canberra, Melbourne, Sydney"
+GMT_PLUS_10_A_DESC    ="(UTC+10:00) Canberra, Melbourne, Sydney"
 GMT_PLUS_10_A_DAYLIGHT="AUS Eastern Daylight Time"
 GMT_PLUS_10_A_STANDARD="AUS Eastern Standard Time"
 
-GMT_PLUS_10_B_DESC    ="(GMT+10:00) Brisbane"
+GMT_PLUS_10_B_DESC    ="(UTC+10:00) Brisbane"
 GMT_PLUS_10_B_DAYLIGHT="E. Australia Daylight Time"
 GMT_PLUS_10_B_STANDARD="E. Australia Standard Time"
 
-GMT_PLUS_10_C_DESC    ="(GMT+10:00) Hobart"
+GMT_PLUS_10_C_DESC    ="(UTC+10:00) Hobart"
 GMT_PLUS_10_C_DAYLIGHT="Tasmania Daylight Time"
 GMT_PLUS_10_C_STANDARD="Tasmania Standard Time"
 
-GMT_PLUS_10_D_DESC    ="(GMT+10:00) Vladivostok"
+GMT_PLUS_10_D_DESC    ="(UTC+10:00) Vladivostok"
 GMT_PLUS_10_D_DAYLIGHT="RTZ 9 Daylight Time"
 GMT_PLUS_10_D_STANDARD="RTZ 9 Standard Time"
 
-GMT_PLUS_10_E_DESC    ="(GMT+10:00) Guam, Port Moresby"
+GMT_PLUS_10_E_DESC    ="(UTC+10:00) Guam, Port Moresby"
 GMT_PLUS_10_E_DAYLIGHT="West Pacific Daylight Time"
 GMT_PLUS_10_E_STANDARD="West Pacific Standard Time"
 
-GMT_PLUS_11_A_DESC    ="(GMT+11:00) Solomon Is., New Caledonia"
+GMT_PLUS_11_A_DESC    ="(UTC+11:00) Solomon Is., New Caledonia"
 GMT_PLUS_11_A_DAYLIGHT="Central Pacific Daylight Time"
 GMT_PLUS_11_A_STANDARD="Central Pacific Standard Time"
 
-GMT_PLUS_11_B_DESC    ="(GMT+11:00) Chokurdakh"
+GMT_PLUS_11_B_DESC    ="(UTC+11:00) Chokurdakh"
 GMT_PLUS_11_B_DAYLIGHT="RTZ 10 Daylight Time"
 GMT_PLUS_11_B_STANDARD="RTZ 10 Standard Time"
 
-GMT_PLUS_11_C_DESC    ="(GMT+11:00) Magadan"
+GMT_PLUS_11_C_DESC    ="(UTC+11:00) Magadan"
 GMT_PLUS_11_C_DAYLIGHT="Magadan Daylight Time"
 GMT_PLUS_11_C_STANDARD="Magadan Standard Time"
 
-GMT_PLUS_12_A_DESC    ="(GMT+12:00) Fiji, Kamchatka, Marshall Is."
+GMT_PLUS_12_A_DESC    ="(UTC+12:00) Fiji, Kamchatka, Marshall Is."
 GMT_PLUS_12_A_DAYLIGHT="Fiji Daylight Time"
 GMT_PLUS_12_A_STANDARD="Fiji Standard Time"
 
-GMT_PLUS_12_B_DESC    ="(GMT+12:00) Anadyr, Petropavlovsk-Kamchatsky"
+GMT_PLUS_12_B_DESC    ="(UTC+12:00) Anadyr, Petropavlovsk-Kamchatsky"
 GMT_PLUS_12_B_DAYLIGHT="RTZ 11 Daylight Time"
 GMT_PLUS_12_B_STANDARD="RTZ 11 Standard Time"
 
-GMT_PLUS_12_C_DESC    ="(GMT+12:00) Auckland, Wellington"
+GMT_PLUS_12_C_DESC    ="(UTC+12:00) Auckland, Wellington"
 GMT_PLUS_12_C_DAYLIGHT="New Zealand Daylight Time"
 GMT_PLUS_12_C_STANDARD="New Zealand Standard Time"
 
-GMT_PLUS_13_A_DESC    ="(GMT+13:00) Nuku'alofa"
+GMT_PLUS_13_A_DESC    ="(UTC+13:00) Nuku'alofa"
 GMT_PLUS_13_A_DAYLIGHT="Tonga Daylight Time"
 GMT_PLUS_13_A_STANDARD="Tonga Standard Time"
 
@@ -5060,339 +5260,339 @@ COUNTRY_ZA="Republika Południowej Afryki"
 COUNTRY_ZM="Zambia"
 COUNTRY_ZW="Zimbabwe"
 
-GMT_MINUS_12_A_DESC    ="(GMT-12:00) Międzynarodowa linia zmiany daty - Zachód"
+GMT_MINUS_12_A_DESC    ="(UTC-12:00) Międzynarodowa linia zmiany daty - Zachód"
 GMT_MINUS_12_A_DAYLIGHT="Czas letni linii zmiany czasu"
 GMT_MINUS_12_A_STANDARD="Czas standardowy linii zmiany czasu"
 
-GMT_MINUS_11_A_DESC    ="(GMT-11:00) Wyspa Midway, Saoma"
+GMT_MINUS_11_A_DESC    ="(UTC-11:00) Wyspa Midway, Saoma"
 GMT_MINUS_11_A_DAYLIGHT="Samoa (czas letni)"
 GMT_MINUS_11_A_STANDARD="Samoa (czas standardowy)"
 
-GMT_MINUS_10_A_DESC    ="(GMT-10:00) Hawaje"
+GMT_MINUS_10_A_DESC    ="(UTC-10:00) Hawaje"
 GMT_MINUS_10_A_DAYLIGHT="Hawaje (czas letni)"
 GMT_MINUS_10_A_STANDARD="Hawaje (czas standardowy)"
 
-GMT_MINUS_09_A_DESC    ="(GMT-09:00) Alaska"
+GMT_MINUS_09_A_DESC    ="(UTC-09:00) Alaska"
 GMT_MINUS_09_A_DAYLIGHT="Alaska (czas letni)"
 GMT_MINUS_09_A_STANDARD="Alaska (czas standardowy)"
 
-GMT_MINUS_08_A_DESC    ="(GMT-08:00) Stany Zjednoczone i Kanada (czas pacyficzny)"
+GMT_MINUS_08_A_DESC    ="(UTC-08:00) Stany Zjednoczone i Kanada (czas pacyficzny)"
 GMT_MINUS_08_A_DAYLIGHT="Pacyfik (czas letni)"
 GMT_MINUS_08_A_STANDARD="Pacyfik (czas standardowy)"
 
-GMT_MINUS_07_A_DESC    ="(GMT-07:00) Stany Zjednoczone i Kanada (czas górski)"
+GMT_MINUS_07_A_DESC    ="(UTC-07:00) Stany Zjednoczone i Kanada (czas górski)"
 GMT_MINUS_07_A_DAYLIGHT="Górski czas letni"
 GMT_MINUS_07_A_STANDARD="Górski czas standardowy"
 
-GMT_MINUS_07_B_DESC    ="(GMT-07:00) Chihuahua, La Paz, Mazatlan"
+GMT_MINUS_07_B_DESC    ="(UTC-07:00) Chihuahua, La Paz, Mazatlan"
 GMT_MINUS_07_B_DAYLIGHT="Górski czas letni (Meksyk)"
 GMT_MINUS_07_B_STANDARD="Górski czas standardowy (Meksyk)"
 
-GMT_MINUS_07_C_DESC    ="(GMT-07:00) Arizona"
+GMT_MINUS_07_C_DESC    ="(UTC-07:00) Arizona"
 GMT_MINUS_07_C_DAYLIGHT="Stany Zjednoczone (górski czas letni)"
 GMT_MINUS_07_C_STANDARD="Stany Zjednoczone (górski czas standardowy)"
 
-GMT_MINUS_06_A_DESC    ="(GMT-06:00) Stany Zjednoczone i Kanada (czas środkowy)"
+GMT_MINUS_06_A_DESC    ="(UTC-06:00) Stany Zjednoczone i Kanada (czas środkowy)"
 GMT_MINUS_06_A_DAYLIGHT="Środkowy czas letni"
 GMT_MINUS_06_A_STANDARD="Środkowy czas standardowy"
 
-GMT_MINUS_06_B_DESC    ="(GMT-06:00) Saskatchewan"
+GMT_MINUS_06_B_DESC    ="(UTC-06:00) Saskatchewan"
 GMT_MINUS_06_B_DAYLIGHT="Kanada (środkowy czas letni)"
 GMT_MINUS_06_B_STANDARD="Kanada (środkowy czas standardowy)"
 
-GMT_MINUS_06_C_DESC    ="(GMT-06:00) Guadalajara, Meksyk, Monterrey"
+GMT_MINUS_06_C_DESC    ="(UTC-06:00) Guadalajara, Meksyk, Monterrey"
 GMT_MINUS_06_C_DAYLIGHT="Meksyk (czas letni)"
 GMT_MINUS_06_C_STANDARD="Meksyk (czas standardowy)"
 
-GMT_MINUS_06_D_DESC    ="(GMT-06:00) Ameryka Środkowa"
+GMT_MINUS_06_D_DESC    ="(UTC-06:00) Ameryka Środkowa"
 GMT_MINUS_06_D_DAYLIGHT="Ameryka Środkowa (czas letni)"
 GMT_MINUS_06_D_STANDARD="Ameryka Środkowa (czas standardowy)"
 
-GMT_MINUS_05_A_DESC    ="(GMT-05:00) Stany Zjednoczone i Kanada (czas wschodni)"
+GMT_MINUS_05_A_DESC    ="(UTC-05:00) Stany Zjednoczone i Kanada (czas wschodni)"
 GMT_MINUS_05_A_DAYLIGHT="Wschodni czas letni"
 GMT_MINUS_05_A_STANDARD="Wschodni czas standardowy"
 
-GMT_MINUS_05_B_DESC    ="(GMT-05:00) Indiana (Wschód)"
+GMT_MINUS_05_B_DESC    ="(UTC-05:00) Indiana (Wschód)"
 GMT_MINUS_05_B_DAYLIGHT="Stany Zjednoczone (wschodni czas letni)"
 GMT_MINUS_05_B_STANDARD="Stany Zjednoczone (wschodni czas standardowy)"
 
-GMT_MINUS_05_C_DESC    ="(GMT-05:00) Bogota, Lima, Quito, Rio Branco"
+GMT_MINUS_05_C_DESC    ="(UTC-05:00) Bogota, Lima, Quito, Rio Branco"
 GMT_MINUS_05_C_DAYLIGHT="Ameryka Południowa (pacyficzny czas letni)"
 GMT_MINUS_05_C_STANDARD="Ameryka Południowa (pacyficzny czas standardowy)"
 
-GMT_MINUS_04_A_DESC    ="(GMT-04:00) Czas atlantycki (Kanada)"
+GMT_MINUS_04_A_DESC    ="(UTC-04:00) Czas atlantycki (Kanada)"
 GMT_MINUS_04_A_DAYLIGHT="Atlantycki czas letni"
 GMT_MINUS_04_A_STANDARD="Atlantycki czas standardowy"
 
-GMT_MINUS_04_B_DESC    ="(GMT-04:00) La Paz"
+GMT_MINUS_04_B_DESC    ="(UTC-04:00) La Paz"
 GMT_MINUS_04_B_DAYLIGHT="Ameryka Południowa (zachodni czas letni)"
 GMT_MINUS_04_B_STANDARD="Ameryka Południowa (zachodni czas standardowy)"
 
-GMT_MINUS_0330_A_DESC    ="(GMT-03:30) Nowa Fundlandia"
+GMT_MINUS_0330_A_DESC    ="(UTC-03:30) Nowa Fundlandia"
 GMT_MINUS_0330_A_DAYLIGHT="Nowa Fundlandia (czas letni)"
 GMT_MINUS_0330_A_STANDARD="Nowa Fundlandia (czas standardowy)"
 
-GMT_MINUS_03_A_DESC    ="(GMT-03:00) Santiago"
+GMT_MINUS_03_A_DESC    ="(UTC-03:00) Santiago"
 GMT_MINUS_03_A_DAYLIGHT="Letni czas pacyficzny (Ameryka Południowa)"
 GMT_MINUS_03_A_STANDARD="Standardowy czas pacyficzny (Ameryka Południowa)"
 
-GMT_MINUS_03_B_DESC    ="(GMT-03:00) Brazylia"
+GMT_MINUS_03_B_DESC    ="(UTC-03:00) Brazylia"
 GMT_MINUS_03_B_DAYLIGHT="Ameryka Południowa (wschodni czas letni)"
 GMT_MINUS_03_B_STANDARD="Ameryka Południowa (wschodni czas standardowy)"
 
-GMT_MINUS_03_C_DESC    ="(GMT-03:00) Buenos Aires, Georgetown"
+GMT_MINUS_03_C_DESC    ="(UTC-03:00) Buenos Aires, Georgetown"
 GMT_MINUS_03_C_DAYLIGHT="Wschodni czas standardowy (Ameryka Południowa)"
 GMT_MINUS_03_C_STANDARD="Wschodni czas letni (Ameryka Południowa)"
 
-GMT_MINUS_03_D_DESC    ="(GMT-03:00) Grenlandia"
+GMT_MINUS_03_D_DESC    ="(UTC-03:00) Grenlandia"
 GMT_MINUS_03_D_DAYLIGHT="Grenlandia (czas letni)"
 GMT_MINUS_03_D_STANDARD="Grenlandia (czas standardowy)"
 
-GMT_MINUS_02_A_DESC    ="(GMT-02:00) Środkowy Atlantyk"
+GMT_MINUS_02_A_DESC    ="(UTC-02:00) Środkowy Atlantyk"
 GMT_MINUS_02_A_DAYLIGHT="Środkowy Atlantyk (czas letni)"
 GMT_MINUS_02_A_STANDARD="Środkowy Atlantyk (czas standardowy)"
 
-GMT_MINUS_01_A_DESC    ="(GMT-01:00) Azory"
+GMT_MINUS_01_A_DESC    ="(UTC-01:00) Azory"
 GMT_MINUS_01_A_DAYLIGHT="Azory (czas letni)"
 GMT_MINUS_01_A_STANDARD="Azory (czas standardowy)"
 
-GMT_MINUS_01_B_DESC    ="(GMT-01:00) Wyspy Zielonego Przylądka."
+GMT_MINUS_01_B_DESC    ="(UTC-01:00) Wyspy Zielonego Przylądka."
 GMT_MINUS_01_B_DAYLIGHT="Wyspy Zielonego Przylądka (czas letni)"
 GMT_MINUS_01_B_STANDARD="Wyspy Zielonego Przylądka (czas standardowy)"
 
-GMT_PLUS_00_A_DESC    ="(GMT+00:00) Czas uniwersalny Greenwich: Dublin, Edynburg, Lizbona, Londyn"
+GMT_PLUS_00_A_DESC    ="(UTC+00:00) Czas uniwersalny Greenwich: Dublin, Edynburg, Lizbona, Londyn"
 GMT_PLUS_00_A_DAYLIGHT="GMT (czas letni)"
 GMT_PLUS_00_A_STANDARD="GMT (czas standardowy)"
 
-GMT_PLUS_00_B_DESC    ="(GMT+00:00) Casablanca, Monrovia, Reykjavik"
+GMT_PLUS_00_B_DESC    ="(UTC+00:00) Casablanca, Monrovia, Reykjavik"
 GMT_PLUS_00_B_DAYLIGHT="Greenwich (czas letni)"
 GMT_PLUS_00_B_STANDARD="Greenwich (czas standardowy)"
 
-GMT_PLUS_01_A_DESC    ="(GMT+01:00) Belgrad, Bratysława, Budapeszt, Ljubljana, Praga"
+GMT_PLUS_01_A_DESC    ="(UTC+01:00) Belgrad, Bratysława, Budapeszt, Ljubljana, Praga"
 GMT_PLUS_01_A_DAYLIGHT="Europa Środkowa (czas letni)"
 GMT_PLUS_01_A_STANDARD="Europa Środkowa (czas standardowy)"
 
-GMT_PLUS_01_B_DESC    ="(GMT+01:00) Sarajewo, Skopie, Warszawa, Zagrzeb"
+GMT_PLUS_01_B_DESC    ="(UTC+01:00) Sarajewo, Skopie, Warszawa, Zagrzeb"
 GMT_PLUS_01_B_DAYLIGHT="Środkowoeuropejski czas letni"
 GMT_PLUS_01_B_STANDARD="Środkowoeuropejski czas standardowy"
 
-GMT_PLUS_01_C_DESC    ="(GMT+01:00) Bruksela, Kopenhaga, Madryt, Paryż"
+GMT_PLUS_01_C_DESC    ="(UTC+01:00) Bruksela, Kopenhaga, Madryt, Paryż"
 GMT_PLUS_01_C_DAYLIGHT="Romański czas letni"
 GMT_PLUS_01_C_STANDARD="Romański czas standardowy"
 
-GMT_PLUS_01_D_DESC    ="(GMT+01:00) Amsterdam, Berlin, Berno, Rzym, Sztokholm, Wiedeń"
+GMT_PLUS_01_D_DESC    ="(UTC+01:00) Amsterdam, Berlin, Berno, Rzym, Sztokholm, Wiedeń"
 GMT_PLUS_01_D_DAYLIGHT="Europa Zachodnia (czas letni)"
 GMT_PLUS_01_D_STANDARD="Europa Zachodnia (czas standardowy)"
 
-GMT_PLUS_02_A_DESC    ="(GMT+02:00) Kiszyniów"
+GMT_PLUS_02_A_DESC    ="(UTC+02:00) Kiszyniów"
 GMT_PLUS_02_A_DAYLIGHT="Europa Wschodnia (czas letni)"
 GMT_PLUS_02_A_STANDARD="Europa Wschodnia (czas standardowy)"
 
-GMT_PLUS_02_B_DESC    ="(GMT+02:00) Kair"
+GMT_PLUS_02_B_DESC    ="(UTC+02:00) Kair"
 GMT_PLUS_02_B_DAYLIGHT="Egipt (czas letni)"
 GMT_PLUS_02_B_STANDARD="Egipt (czas standardowy)"
 
-GMT_PLUS_02_C_DESC    ="(GMT+02:00) Helsinki, Kijów, Ryga, Sofia, Talin, Wilno"
+GMT_PLUS_02_C_DESC    ="(UTC+02:00) Helsinki, Kijów, Ryga, Sofia, Talin, Wilno"
 GMT_PLUS_02_C_DAYLIGHT="FLE (czas letni)"
 GMT_PLUS_02_C_STANDARD="FLE (czas standardowy)"
 
-GMT_PLUS_02_D_DESC    ="(GMT+02:00) Ateny, Bukareszt"
+GMT_PLUS_02_D_DESC    ="(UTC+02:00) Ateny, Bukareszt"
 GMT_PLUS_02_D_DAYLIGHT="GTB (czas letni)"
 GMT_PLUS_02_D_STANDARD="GTB (czas standardowy)"
 
-GMT_PLUS_02_E_DESC    ="(GMT+02:00) Jerozolima"
+GMT_PLUS_02_E_DESC    ="(UTC+02:00) Jerozolima"
 GMT_PLUS_02_E_DAYLIGHT="Izrael (czas letni)"
 GMT_PLUS_02_E_STANDARD="Izrael (czas standardowy)"
 
-GMT_PLUS_02_F_DESC    ="(GMT+02:00) Harare, Pretoria"
+GMT_PLUS_02_F_DESC    ="(UTC+02:00) Harare, Pretoria"
 GMT_PLUS_02_F_DAYLIGHT="Republika Południowej Afryki (czas letni)"
 GMT_PLUS_02_F_STANDARD="Republika Południowej Afryki (czas standardowy)"
 
-GMT_PLUS_02_G_DESC    ="(GMT+02:00) Kaliningrad"
+GMT_PLUS_02_G_DESC    ="(UTC+02:00) Kaliningrad"
 GMT_PLUS_02_G_DAYLIGHT="RTZ 1 (czas letni)"
 GMT_PLUS_02_G_STANDARD="RTZ 1 (czas standardowy)"
 
-GMT_PLUS_03_A_DESC    ="(GMT+03:00) Mińsk"
+GMT_PLUS_03_A_DESC    ="(UTC+03:00) Mińsk"
 GMT_PLUS_03_A_DAYLIGHT="Białoruś (czas letni)"
 GMT_PLUS_03_A_STANDARD="Białoruś (czas standardowy)"
 
-GMT_PLUS_03_B_DESC    ="(GMT+03:00) Moskwa, Sankt Petersburg"
+GMT_PLUS_03_B_DESC    ="(UTC+03:00) Moskwa, Sankt Petersburg"
 GMT_PLUS_03_B_DAYLIGHT="RTZ 2 (czas letni)"
 GMT_PLUS_03_B_STANDARD="RTZ 2 (czas standardowy)"
 
-GMT_PLUS_03_C_DESC    ="(GMT+03:00) Kuwejt, Rijad"
+GMT_PLUS_03_C_DESC    ="(UTC+03:00) Kuwejt, Rijad"
 GMT_PLUS_03_C_DAYLIGHT="Arabia Saudyjska (czas letni)"
 GMT_PLUS_03_C_STANDARD="Arabia Saudyjska (czas standardowy)"
 
-GMT_PLUS_03_D_DESC    ="(GMT+03:00) Nairobi"
+GMT_PLUS_03_D_DESC    ="(UTC+03:00) Nairobi"
 GMT_PLUS_03_D_DAYLIGHT="Afryka Wschodnia (czas letni)"
 GMT_PLUS_03_D_STANDARD="Afryka Wschodnia (czas standardowy)"
 
-GMT_PLUS_03_E_DESC    ="(GMT+03:00) Bagdad"
+GMT_PLUS_03_E_DESC    ="(UTC+03:00) Bagdad"
 GMT_PLUS_03_E_DAYLIGHT="Arabski czas letni"
 GMT_PLUS_03_E_STANDARD="Arabski czas standardowy"
 
-GMT_PLUS_03_F_DESC    ="(GMT+03:00) Stambuł"
+GMT_PLUS_03_F_DESC    ="(UTC+03:00) Stambuł"
 GMT_PLUS_03_F_DAYLIGHT="Turcja (czas letni)"
 GMT_PLUS_03_F_STANDARD="Turcja (czas standardowy)"
 
-GMT_PLUS_0330_A_DESC    ="(GMT+03:30) Teheran"
+GMT_PLUS_0330_A_DESC    ="(UTC+03:30) Teheran"
 GMT_PLUS_0330_A_DAYLIGHT="Iran (czas letni)"
 GMT_PLUS_0330_A_STANDARD="Iran (czas standardowy)"
 
-GMT_PLUS_04_A_DESC    ="(GMT+04:00) Abu Zabi, Maskat"
+GMT_PLUS_04_A_DESC    ="(UTC+04:00) Abu Zabi, Maskat"
 GMT_PLUS_04_A_DAYLIGHT="Arabia (czas letni)"
 GMT_PLUS_04_A_STANDARD="Arabia (czas standardowy)"
 
-GMT_PLUS_04_B_DESC    ="(GMT+04:00) Erywań"
+GMT_PLUS_04_B_DESC    ="(UTC+04:00) Erywań"
 GMT_PLUS_04_B_DAYLIGHT="Kaukaz (czas letni)"
 GMT_PLUS_04_B_STANDARD="Kaukaz (czas standardowy)"
 
-GMT_PLUS_04_C_DESC    ="(GMT+04:00) Iżewsk, Samara, Wołgograd"
+GMT_PLUS_04_C_DESC    ="(UTC+04:00) Iżewsk, Samara, Wołgograd"
 GMT_PLUS_04_C_DAYLIGHT="RTZ 3 (czas letni)"
 GMT_PLUS_04_C_STANDARD="RTZ 3 (czas standardowy)"
 
-GMT_PLUS_0430_A_DESC    ="(GMT+04:30) Kabul"
+GMT_PLUS_0430_A_DESC    ="(UTC+04:30) Kabul"
 GMT_PLUS_0430_A_DAYLIGHT="Afganistan (czas letni)"
 GMT_PLUS_0430_A_STANDARD="Afganistan (czas standardowy)"
 
-GMT_PLUS_05_A_DESC    ="(GMT+05:00) Jekaterynburg"
+GMT_PLUS_05_A_DESC    ="(UTC+05:00) Jekaterynburg"
 GMT_PLUS_05_A_DAYLIGHT="RTZ 4 (czas letni)"
 GMT_PLUS_05_A_STANDARD="RTZ 4 (czas standardowy)"
 
-GMT_PLUS_05_B_DESC    ="(GMT+05:00) Islamabad, Karaczi, Taszkient"
+GMT_PLUS_05_B_DESC    ="(UTC+05:00) Islamabad, Karaczi, Taszkient"
 GMT_PLUS_05_B_DAYLIGHT="Azja Zachodnia (czas letni)"
 GMT_PLUS_05_B_STANDARD="Azja Zachodnia (czas standardowy)"
 
-GMT_PLUS_0530_A_DESC    ="(GMT+05:30) Chennai, Kalkuta, Mumbaj, Nowe Delhi"
+GMT_PLUS_0530_A_DESC    ="(UTC+05:30) Chennai, Kalkuta, Mumbaj, Nowe Delhi"
 GMT_PLUS_0530_A_DAYLIGHT="Indie (czas letni)"
 GMT_PLUS_0530_A_STANDARD="Indie (czas standardowy)"
 
-GMT_PLUS_0530_B_DESC    ="(GMT+05:30) Sri Jayawardenepura"
+GMT_PLUS_0530_B_DESC    ="(UTC+05:30) Sri Jayawardenepura"
 GMT_PLUS_0530_B_DAYLIGHT="Sri Lanka (czas letni)"
 GMT_PLUS_0530_B_STANDARD="Sri Lanka (czas standardowy)"
 
-GMT_PLUS_0545_A_DESC    ="(GMT+05:45) Katmandu"
+GMT_PLUS_0545_A_DESC    ="(UTC+05:45) Katmandu"
 GMT_PLUS_0545_A_DAYLIGHT="Nepal (czas letni)"
 GMT_PLUS_0545_A_STANDARD="Nepal (czas standardowy)"
 
-GMT_PLUS_06_A_DESC    ="(GMT+06:00) Astana, Dhaka"
+GMT_PLUS_06_A_DESC    ="(UTC+06:00) Astana, Dhaka"
 GMT_PLUS_06_A_DAYLIGHT="Azja (środkowy czas letni)"
 GMT_PLUS_06_A_STANDARD="Azja (środkowy czas standardowy)"
 
-GMT_PLUS_06_B_DESC    ="(GMT+06:00) Omsk"
+GMT_PLUS_06_B_DESC    ="(UTC+06:00) Omsk"
 GMT_PLUS_06_B_DAYLIGHT="Omsk (czas letni)"
 GMT_PLUS_06_B_STANDARD="Omsk (czas standardowy)"
 
-GMT_PLUS_0630_A_DESC    ="(GMT+06:30) Yangon (Rangun)"
+GMT_PLUS_0630_A_DESC    ="(UTC+06:30) Yangon (Rangun)"
 GMT_PLUS_0630_A_DAYLIGHT="Myanmar (czas letni)"
 GMT_PLUS_0630_A_STANDARD="Myanmar (czas standardowy)"
 
-GMT_PLUS_07_A_DESC    ="(GMT+07:00) Nowosybirsk"
+GMT_PLUS_07_A_DESC    ="(UTC+07:00) Nowosybirsk"
 GMT_PLUS_07_A_DAYLIGHT="Nowosybirsk (czas letni)"
 GMT_PLUS_07_A_STANDARD="Nowosybirsk (czas standardowy)"
 
-GMT_PLUS_07_B_DESC    ="(GMT+07:00) Bangkok, Hanoi, Dżakarta"
+GMT_PLUS_07_B_DESC    ="(UTC+07:00) Bangkok, Hanoi, Dżakarta"
 GMT_PLUS_07_B_DAYLIGHT="Azja Południowo-Wschodnia (czas letni)"
 GMT_PLUS_07_B_STANDARD="Azja Południowo-Wschodnia (czas standardowy)"
 
-GMT_PLUS_07_C_DESC    ="(GMT+07:00) Krasnojarsk"
+GMT_PLUS_07_C_DESC    ="(UTC+07:00) Krasnojarsk"
 GMT_PLUS_07_C_DAYLIGHT="RTZ 6 (czas letni)"
 GMT_PLUS_07_C_STANDARD="RTZ 6 (czas standardowy)"
 
-GMT_PLUS_07_D_DESC    ="(GMT+07:00) Tomsk"
+GMT_PLUS_07_D_DESC    ="(UTC+07:00) Tomsk"
 GMT_PLUS_07_D_DAYLIGHT="Tomsk (czas letni)"
 GMT_PLUS_07_D_STANDARD="Tomsk (czas standardowy)"
 
-GMT_PLUS_08_A_DESC    ="(GMT+08:00) Pekin, Chongqing, Hongkong, Urumczi"
+GMT_PLUS_08_A_DESC    ="(UTC+08:00) Pekin, Chongqing, Hongkong, Urumczi"
 GMT_PLUS_08_A_DAYLIGHT="Chiny (czas letni)"
 GMT_PLUS_08_A_STANDARD="Chiny (czas standardowy)"
 
-GMT_PLUS_08_B_DESC    ="(GMT+08:00) Kuala Lumpur, Singapur"
+GMT_PLUS_08_B_DESC    ="(UTC+08:00) Kuala Lumpur, Singapur"
 GMT_PLUS_08_B_DAYLIGHT="Singapur (czas letni)"
 GMT_PLUS_08_B_STANDARD="Singapur (czas standardowy)"
 
-GMT_PLUS_08_C_DESC    ="(GMT+08:00) Tajpej"
+GMT_PLUS_08_C_DESC    ="(UTC+08:00) Tajpej"
 GMT_PLUS_08_C_DAYLIGHT="Tajpej (czas letni)"
 GMT_PLUS_08_C_STANDARD="Tajpej (czas standardowy)"
 
-GMT_PLUS_08_D_DESC    ="(GMT+08:00) Perth"
+GMT_PLUS_08_D_DESC    ="(UTC+08:00) Perth"
 GMT_PLUS_08_D_DAYLIGHT="Australia Zachodnia (czas letni)"
 GMT_PLUS_08_D_STANDARD="Australia Zachodnia (czas standardowy)"
 
-GMT_PLUS_08_E_DESC    ="(GMT+08:00) Ułan Bator"
+GMT_PLUS_08_E_DESC    ="(UTC+08:00) Ułan Bator"
 GMT_PLUS_08_E_DAYLIGHT="Ułan Bator (czas letni)"
 GMT_PLUS_08_E_STANDARD="Ułan Bator (czas standardowy)"
 
-GMT_PLUS_08_F_DESC    ="(GMT+08:00) Irkuck"
+GMT_PLUS_08_F_DESC    ="(UTC+08:00) Irkuck"
 GMT_PLUS_08_F_DAYLIGHT="RTZ 7 (czas letni)"
 GMT_PLUS_08_F_STANDARD="RTZ 7 (czas standardowy)"
 
-GMT_PLUS_09_A_DESC    ="(GMT+09:00) Seul"
+GMT_PLUS_09_A_DESC    ="(UTC+09:00) Seul"
 GMT_PLUS_09_A_DAYLIGHT="Korea (czas letni)"
 GMT_PLUS_09_A_STANDARD="Korea (czas standardowy)"
 
-GMT_PLUS_09_B_DESC    ="(GMT+09:00) Osaka, Sapporo, Tokio"
+GMT_PLUS_09_B_DESC    ="(UTC+09:00) Osaka, Sapporo, Tokio"
 GMT_PLUS_09_B_DAYLIGHT="Tokio (czas letni)"
 GMT_PLUS_09_B_STANDARD="Tokio (czas standardowy)"
 
-GMT_PLUS_09_C_DESC    ="(GMT+09:00) Jakuck"
+GMT_PLUS_09_C_DESC    ="(UTC+09:00) Jakuck"
 GMT_PLUS_09_C_DAYLIGHT="RTZ 8 (czas letni)"
 GMT_PLUS_09_C_STANDARD="RTZ 8 (czas standardowy)"
 
-GMT_PLUS_0930_A_DESC    ="(GMT+09:30) Darwin"
+GMT_PLUS_0930_A_DESC    ="(UTC+09:30) Darwin"
 GMT_PLUS_0903_A_DAYLIGHT="Australia (środkowy czas letni)"
 GMT_PLUS_0930_A_STANDARD="Australia (środkowy czas standardowy)"
 
-GMT_PLUS_0930_B_DESC    ="(GMT+09:30) Adelajda"
+GMT_PLUS_0930_B_DESC    ="(UTC+09:30) Adelajda"
 GMT_PLUS_0930_B_DAYLIGHT="Australia Środkowa (czas letni)"
 GMT_PLUS_0930_B_STANDARD="Australia Środkowa (czas standardowy)"
 
-GMT_PLUS_10_A_DESC    ="(GMT+10:00) Canberra, Melbourne, Sydney"
+GMT_PLUS_10_A_DESC    ="(UTC+10:00) Canberra, Melbourne, Sydney"
 GMT_PLUS_10_A_DAYLIGHT="Australia czas wschodni (letni)"
 GMT_PLUS_10_A_STANDARD="Australia czas wschodni (standardowy)"
 
-GMT_PLUS_10_B_DESC    ="(GMT+10:00) Brisbane"
+GMT_PLUS_10_B_DESC    ="(UTC+10:00) Brisbane"
 GMT_PLUS_10_B_DAYLIGHT="Australia Wschodnia (czas letni)"
 GMT_PLUS_10_B_STANDARD="Australia Wschodnia (czas standardowy)"
 
-GMT_PLUS_10_C_DESC    ="(GMT+10:00) Hobart"
+GMT_PLUS_10_C_DESC    ="(UTC+10:00) Hobart"
 GMT_PLUS_10_C_DAYLIGHT="Tasmania (czas letni)"
 GMT_PLUS_10_C_STANDARD="Tasmania (czas standardowy)"
 
-GMT_PLUS_10_D_DESC    ="(GMT+10:00) Władywostok"
+GMT_PLUS_10_D_DESC    ="(UTC+10:00) Władywostok"
 GMT_PLUS_10_D_DAYLIGHT="RTZ 9 (czas letni)"
 GMT_PLUS_10_D_STANDARD="RTZ 9 (czas standardowy)"
 
-GMT_PLUS_10_E_DESC    ="(GMT+10:00) Guam, Port Moresby"
+GMT_PLUS_10_E_DESC    ="(UTC+10:00) Guam, Port Moresby"
 GMT_PLUS_10_E_DAYLIGHT="Zachodni Pacyfik (czas letni)"
 GMT_PLUS_10_E_STANDARD="Zachodni Pacyfik (czas standardowy)"
 
-GMT_PLUS_11_A_DESC    ="(GMT+11:00) Wyspy Salomona, Nowa Kaledonia"
+GMT_PLUS_11_A_DESC    ="(UTC+11:00) Wyspy Salomona, Nowa Kaledonia"
 GMT_PLUS_11_A_DAYLIGHT="Środkowy Pacyfik (czas letni)"
 GMT_PLUS_11_A_STANDARD="Środkowy Pacyfik (czas standardowy)"
 
-GMT_PLUS_11_B_DESC    ="(GMT+11:00) Czokurdach"
+GMT_PLUS_11_B_DESC    ="(UTC+11:00) Czokurdach"
 GMT_PLUS_11_B_DAYLIGHT="RTZ 10 (czas letni)"
 GMT_PLUS_11_B_STANDARD="RTZ 10 (czas standardowy)"
 
-GMT_PLUS_11_C_DESC    ="(GMT+11:00) Magadan"
+GMT_PLUS_11_C_DESC    ="(UTC+11:00) Magadan"
 GMT_PLUS_11_C_DAYLIGHT="Magadan (czas letni)"
 GMT_PLUS_11_C_STANDARD="Magadan (czas standardowy)"
 
-GMT_PLUS_12_A_DESC    ="(GMT+12:00) Fidżi, Kamczatka, Wyspy Marshalla"
+GMT_PLUS_12_A_DESC    ="(UTC+12:00) Fidżi, Kamczatka, Wyspy Marshalla"
 GMT_PLUS_12_A_DAYLIGHT="Fidżi (czas letni)"
 GMT_PLUS_12_A_STANDARD="Fidżi (czas standardowy)"
 
-GMT_PLUS_12_B_DESC    ="(GMT+12:00) Anadyr, Pietropawłowsk Kamczacki"
+GMT_PLUS_12_B_DESC    ="(UTC+12:00) Anadyr, Pietropawłowsk Kamczacki"
 GMT_PLUS_12_B_DAYLIGHT="RTZ 11 (czas letni)"
 GMT_PLUS_12_B_STANDARD="RTZ 11 (czas standardowy)"
 
-GMT_PLUS_12_C_DESC    ="(GMT+12:00) Auckland, Wellington"
+GMT_PLUS_12_C_DESC    ="(UTC+12:00) Auckland, Wellington"
 GMT_PLUS_12_C_DAYLIGHT="Nowa Zelandia (czas letni)"
 GMT_PLUS_12_C_STANDARD="Nowa Zelandia (czas standardowy)"
 
-GMT_PLUS_13_A_DESC    ="(GMT+13:00) Nuku'alofa"
+GMT_PLUS_13_A_DESC    ="(UTC+13:00) Nuku'alofa"
 GMT_PLUS_13_A_DAYLIGHT="Tonga (czas letni)"
 GMT_PLUS_13_A_STANDARD="Tonga (czas standardowy)"
 
@@ -5819,7 +6019,7 @@ GMT_PLUS_03_E_DESC    ="(UTC+03:00) Bagdad"
 GMT_PLUS_03_E_DAYLIGHT="Oră arabă diurnă"
 GMT_PLUS_03_E_STANDARD="Oră arabă standard"
 
-GMT_PLUS_03_F_DESC    ="(GMT+03:00) Istanbul"
+GMT_PLUS_03_F_DESC    ="(UTC+03:00) Istanbul"
 GMT_PLUS_03_F_DAYLIGHT="Oră de Turcia diurnă"
 GMT_PLUS_03_F_STANDARD="Oră de Turcia standard"
 
@@ -6234,90 +6434,90 @@ COUNTRY_ZA="Южно-Африканская Республика"
 COUNTRY_ZM="Замбия"
 COUNTRY_ZW="Зимбабве"
 
-GMT_MINUS_12_A_DESC     ="(GMT-12:00) Меридиан смены дат (запад)"
-GMT_MINUS_11_A_DESC     ="(GMT-11:00) о. Мидуэй, Саома"
-GMT_MINUS_10_A_DESC     ="(GMT-10:00) Гавайи"
-GMT_MINUS_09_A_DESC     ="(GMT-09:00) Аляска"
-GMT_MINUS_08_A_DESC     ="(GMT-08:00) Тихоокеанское время (США и Канада)"
-GMT_MINUS_07_A_DESC     ="(GMT-07:00) Горное время (США и Канада)"
-GMT_MINUS_07_B_DESC     ="(GMT-07:00) Ла Пас, Мазатлан, Чихуахуа"
-GMT_MINUS_07_C_DESC     ="(GMT-07:00) Аризона"
-GMT_MINUS_06_A_DESC     ="(GMT-06:00) Центральное время (США и Канада)"
-GMT_MINUS_06_B_DESC     ="(GMT-06:00) Саскачеван"
-GMT_MINUS_06_C_DESC     ="(GMT-06:00) Гвадалахара, Мехико, Монтеррей"
-GMT_MINUS_06_D_DESC     ="(GMT-06:00) Центральная Америка"
-GMT_MINUS_05_A_DESC     ="(GMT-05:00) Восточное время (США и Канада)"
-GMT_MINUS_05_B_DESC     ="(GMT-05:00) Индиана (Восток)"
-GMT_MINUS_05_C_DESC     ="(GMT-05:00) Богота, Кито, Лима, Риу-Бранку"
-GMT_MINUS_04_A_DESC     ="(GMT-04:00) Атлантическое время (Канада)"
-GMT_MINUS_04_B_DESC     ="(GMT-04:00) Ла-Пас"
-GMT_MINUS_0330_A_DESC   ="(GMT-03:30) Ньюфауленд"
-GMT_MINUS_03_A_DESC     ="(GMT-03:00) Сантьяго"
-GMT_MINUS_03_B_DESC     ="(GMT-03:00) Бразилия"
-GMT_MINUS_03_C_DESC     ="(GMT-03:00) Буэнос-Айрес, Джорджтаун"
-GMT_MINUS_03_D_DESC     ="(GMT-03:00) Гренландия"
-GMT_MINUS_02_A_DESC     ="(GMT-02:00) Среднеатлантическое время"
-GMT_MINUS_01_A_DESC     ="(GMT-01:00) Азорские о-ва"
-GMT_MINUS_01_B_DESC     ="(GMT-01:00) о-ва Зелёного мыса"
-GMT_PLUS_00_A_DESC      ="(GMT+00:00) Время по Гринвичу: Дублин, Лондон, Лиссабон, Эдинбург"
-GMT_PLUS_00_B_DESC      ="(GMT+00:00) Касабланка, Монровия, Рейкьявик"
-GMT_PLUS_01_A_DESC      ="(GMT+01:00) Белград, Братислава, Будапешт, Любляна, Прага"
-GMT_PLUS_01_B_DESC      ="(GMT+01:00) Варшава, Загреб, Сараево, Скопье"
-GMT_PLUS_01_C_DESC      ="(GMT+01:00) Брюссель, Копенгаген, Мадрид, Париж"
-GMT_PLUS_01_D_DESC      ="(GMT+01:00) Амстердам, Берлин, Брен, Вена, Рим, Стокгольм"
-GMT_PLUS_02_A_DESC      ="(GMT+02:00) Кишинэу"
-GMT_PLUS_02_B_DESC      ="(GMT+02:00) Каир"
-GMT_PLUS_02_C_DESC      ="(GMT+02:00) Вильнюс, Киев, Рига, София, Таллин, Хельсинки"
-GMT_PLUS_02_D_DESC      ="(GMT+02:00) Афины, Бухарест"
-GMT_PLUS_02_E_DESC      ="(GMT+02:00) Иерусалим"
-GMT_PLUS_02_F_DESC      ="(GMT+02:00) Хараре, Претория"
-GMT_PLUS_02_G_DESC      ="(GMT+02:00) Калининград"
-GMT_PLUS_03_A_DESC      ="(GMT+03:00) Минск"
-GMT_PLUS_03_B_DESC      ="(GMT+03:00) Москва, Санкт-Петербург"
-GMT_PLUS_03_C_DESC      ="(GMT+03:00) Кувейт, Эр-Рияд"
-GMT_PLUS_03_D_DESC      ="(GMT+03:00) Найроби"
-GMT_PLUS_03_E_DESC      ="(GMT+03:00) Багдад"
-GMT_PLUS_03_F_DESC      ="(GMT+03:00) Стамбул"
-GMT_PLUS_0330_A_DESC    ="(GMT+03:30) Тегеран"
-GMT_PLUS_04_A_DESC      ="(GMT+04:00) Абу-Даби, Мускат"
-GMT_PLUS_04_B_DESC      ="(GMT+04:00) Ереван"
-GMT_PLUS_04_C_DESC      ="(GMT+04:00) Волгоград, Ижевск, Самара"
-GMT_PLUS_0430_A_DESC    ="(GMT+04:30) Кабул"
-GMT_PLUS_05_A_DESC      ="(GMT+05:00) Екатеринбург"
-GMT_PLUS_05_B_DESC      ="(GMT+05:00) Исламабад, Карачи, Ташкент"
-GMT_PLUS_0530_A_DESC    ="(GMT+05:30) Калькутта, Мумбаи, Нью-Дели, Ченнаи"
-GMT_PLUS_0530_B_DESC    ="(GMT+05:30) Шри Джаяварденепура"
-GMT_PLUS_0545_A_DESC    ="(GMT+05:45) Катманду"
-GMT_PLUS_06_A_DESC      ="(GMT+06:00) Астана, Дхака"
-GMT_PLUS_06_B_DESC      ="(GMT+06:00) Омск"
-GMT_PLUS_0630_A_DESC    ="(GMT+06:30) Янгун (Рангун)"
-GMT_PLUS_07_A_DESC      ="(GMT+07:00) Новосибирск"
-GMT_PLUS_07_B_DESC      ="(GMT+07:00) Бангкок, Джакарта, Ханой"
-GMT_PLUS_07_C_DESC      ="(GMT+07:00) Красноярск"
-GMT_PLUS_07_D_DESC      ="(GMT+07:00) Томск"
-GMT_PLUS_08_A_DESC      ="(GMT+08:00) Гонконг, Пекин, Урумчи, Чунцин"
-GMT_PLUS_08_B_DESC      ="(GMT+08:00) Куала-Лумпур, Сингапур"
-GMT_PLUS_08_C_DESC      ="(GMT+08:00) Тайпей"
-GMT_PLUS_08_D_DESC      ="(GMT+08:00) Перт"
-GMT_PLUS_08_E_DESC      ="(GMT+08:00) Улан-Батор"
-GMT_PLUS_08_F_DESC      ="(GMT+08:00) Иркутск"
-GMT_PLUS_09_A_DESC      ="(GMT+09:00) Сеул"
-GMT_PLUS_09_B_DESC      ="(GMT+09:00) Осака, Саппоро, Токио"
-GMT_PLUS_09_C_DESC      ="(GMT+09:00) Якутск"
-GMT_PLUS_0930_A_DESC    ="(GMT+09:30) Дарвин"
-GMT_PLUS_0930_B_DESC    ="(GMT+09:30) Аделаида"
-GMT_PLUS_10_A_DESC      ="(GMT+10:00) Канберра, Мельбурн, Сидней"
-GMT_PLUS_10_B_DESC      ="(GMT+10:00) Брисбейн"
-GMT_PLUS_10_C_DESC      ="(GMT+10:00) Хобарт"
-GMT_PLUS_10_D_DESC      ="(GMT+10:00) Владивосток"
-GMT_PLUS_10_E_DESC      ="(GMT+10:00) Гуам, Порт Моресби"
-GMT_PLUS_11_A_DESC      ="(GMT+11:00) Соломоновы о-ва, Новая Каледония"
-GMT_PLUS_11_B_DESC      ="(GMT+11:00) Чокурдах"
-GMT_PLUS_11_C_DESC      ="(GMT+11:00) Магадан"
-GMT_PLUS_12_A_DESC      ="(GMT+12:00) Камчатка, Маршалловы о-ва, Фиджи"
-GMT_PLUS_12_B_DESC      ="(GMT+12:00) Анадырь, Петропавловск-Камчатский"
-GMT_PLUS_12_C_DESC      ="(GMT+12:00) Окленд, Веллингтон"
-GMT_PLUS_13_A_DESC      ="(GMT+13:00) Нуку-алофа"
+GMT_MINUS_12_A_DESC     ="(UTC-12:00) Меридиан смены дат (запад)"
+GMT_MINUS_11_A_DESC     ="(UTC-11:00) о. Мидуэй, Саома"
+GMT_MINUS_10_A_DESC     ="(UTC-10:00) Гавайи"
+GMT_MINUS_09_A_DESC     ="(UTC-09:00) Аляска"
+GMT_MINUS_08_A_DESC     ="(UTC-08:00) Тихоокеанское время (США и Канада)"
+GMT_MINUS_07_A_DESC     ="(UTC-07:00) Горное время (США и Канада)"
+GMT_MINUS_07_B_DESC     ="(UTC-07:00) Ла Пас, Мазатлан, Чихуахуа"
+GMT_MINUS_07_C_DESC     ="(UTC-07:00) Аризона"
+GMT_MINUS_06_A_DESC     ="(UTC-06:00) Центральное время (США и Канада)"
+GMT_MINUS_06_B_DESC     ="(UTC-06:00) Саскачеван"
+GMT_MINUS_06_C_DESC     ="(UTC-06:00) Гвадалахара, Мехико, Монтеррей"
+GMT_MINUS_06_D_DESC     ="(UTC-06:00) Центральная Америка"
+GMT_MINUS_05_A_DESC     ="(UTC-05:00) Восточное время (США и Канада)"
+GMT_MINUS_05_B_DESC     ="(UTC-05:00) Индиана (Восток)"
+GMT_MINUS_05_C_DESC     ="(UTC-05:00) Богота, Кито, Лима, Риу-Бранку"
+GMT_MINUS_04_A_DESC     ="(UTC-04:00) Атлантическое время (Канада)"
+GMT_MINUS_04_B_DESC     ="(UTC-04:00) Ла-Пас"
+GMT_MINUS_0330_A_DESC   ="(UTC-03:30) Ньюфауленд"
+GMT_MINUS_03_A_DESC     ="(UTC-03:00) Сантьяго"
+GMT_MINUS_03_B_DESC     ="(UTC-03:00) Бразилия"
+GMT_MINUS_03_C_DESC     ="(UTC-03:00) Буэнос-Айрес, Джорджтаун"
+GMT_MINUS_03_D_DESC     ="(UTC-03:00) Гренландия"
+GMT_MINUS_02_A_DESC     ="(UTC-02:00) Среднеатлантическое время"
+GMT_MINUS_01_A_DESC     ="(UTC-01:00) Азорские о-ва"
+GMT_MINUS_01_B_DESC     ="(UTC-01:00) о-ва Зелёного мыса"
+GMT_PLUS_00_A_DESC      ="(UTC+00:00) Время по Гринвичу: Дублин, Лондон, Лиссабон, Эдинбург"
+GMT_PLUS_00_B_DESC      ="(UTC+00:00) Касабланка, Монровия, Рейкьявик"
+GMT_PLUS_01_A_DESC      ="(UTC+01:00) Белград, Братислава, Будапешт, Любляна, Прага"
+GMT_PLUS_01_B_DESC      ="(UTC+01:00) Варшава, Загреб, Сараево, Скопье"
+GMT_PLUS_01_C_DESC      ="(UTC+01:00) Брюссель, Копенгаген, Мадрид, Париж"
+GMT_PLUS_01_D_DESC      ="(UTC+01:00) Амстердам, Берлин, Брен, Вена, Рим, Стокгольм"
+GMT_PLUS_02_A_DESC      ="(UTC+02:00) Кишинэу"
+GMT_PLUS_02_B_DESC      ="(UTC+02:00) Каир"
+GMT_PLUS_02_C_DESC      ="(UTC+02:00) Вильнюс, Киев, Рига, София, Таллин, Хельсинки"
+GMT_PLUS_02_D_DESC      ="(UTC+02:00) Афины, Бухарест"
+GMT_PLUS_02_E_DESC      ="(UTC+02:00) Иерусалим"
+GMT_PLUS_02_F_DESC      ="(UTC+02:00) Хараре, Претория"
+GMT_PLUS_02_G_DESC      ="(UTC+02:00) Калининград"
+GMT_PLUS_03_A_DESC      ="(UTC+03:00) Минск"
+GMT_PLUS_03_B_DESC      ="(UTC+03:00) Москва, Санкт-Петербург"
+GMT_PLUS_03_C_DESC      ="(UTC+03:00) Кувейт, Эр-Рияд"
+GMT_PLUS_03_D_DESC      ="(UTC+03:00) Найроби"
+GMT_PLUS_03_E_DESC      ="(UTC+03:00) Багдад"
+GMT_PLUS_03_F_DESC      ="(UTC+03:00) Стамбул"
+GMT_PLUS_0330_A_DESC    ="(UTC+03:30) Тегеран"
+GMT_PLUS_04_A_DESC      ="(UTC+04:00) Абу-Даби, Мускат"
+GMT_PLUS_04_B_DESC      ="(UTC+04:00) Ереван"
+GMT_PLUS_04_C_DESC      ="(UTC+04:00) Волгоград, Ижевск, Самара"
+GMT_PLUS_0430_A_DESC    ="(UTC+04:30) Кабул"
+GMT_PLUS_05_A_DESC      ="(UTC+05:00) Екатеринбург"
+GMT_PLUS_05_B_DESC      ="(UTC+05:00) Исламабад, Карачи, Ташкент"
+GMT_PLUS_0530_A_DESC    ="(UTC+05:30) Калькутта, Мумбаи, Нью-Дели, Ченнаи"
+GMT_PLUS_0530_B_DESC    ="(UTC+05:30) Шри Джаяварденепура"
+GMT_PLUS_0545_A_DESC    ="(UTC+05:45) Катманду"
+GMT_PLUS_06_A_DESC      ="(UTC+06:00) Астана, Дхака"
+GMT_PLUS_06_B_DESC      ="(UTC+06:00) Омск"
+GMT_PLUS_0630_A_DESC    ="(UTC+06:30) Янгун (Рангун)"
+GMT_PLUS_07_A_DESC      ="(UTC+07:00) Новосибирск"
+GMT_PLUS_07_B_DESC      ="(UTC+07:00) Бангкок, Джакарта, Ханой"
+GMT_PLUS_07_C_DESC      ="(UTC+07:00) Красноярск"
+GMT_PLUS_07_D_DESC      ="(UTC+07:00) Томск"
+GMT_PLUS_08_A_DESC      ="(UTC+08:00) Гонконг, Пекин, Урумчи, Чунцин"
+GMT_PLUS_08_B_DESC      ="(UTC+08:00) Куала-Лумпур, Сингапур"
+GMT_PLUS_08_C_DESC      ="(UTC+08:00) Тайпей"
+GMT_PLUS_08_D_DESC      ="(UTC+08:00) Перт"
+GMT_PLUS_08_E_DESC      ="(UTC+08:00) Улан-Батор"
+GMT_PLUS_08_F_DESC      ="(UTC+08:00) Иркутск"
+GMT_PLUS_09_A_DESC      ="(UTC+09:00) Сеул"
+GMT_PLUS_09_B_DESC      ="(UTC+09:00) Осака, Саппоро, Токио"
+GMT_PLUS_09_C_DESC      ="(UTC+09:00) Якутск"
+GMT_PLUS_0930_A_DESC    ="(UTC+09:30) Дарвин"
+GMT_PLUS_0930_B_DESC    ="(UTC+09:30) Аделаида"
+GMT_PLUS_10_A_DESC      ="(UTC+10:00) Канберра, Мельбурн, Сидней"
+GMT_PLUS_10_B_DESC      ="(UTC+10:00) Брисбейн"
+GMT_PLUS_10_C_DESC      ="(UTC+10:00) Хобарт"
+GMT_PLUS_10_D_DESC      ="(UTC+10:00) Владивосток"
+GMT_PLUS_10_E_DESC      ="(UTC+10:00) Гуам, Порт Моресби"
+GMT_PLUS_11_A_DESC      ="(UTC+11:00) Соломоновы о-ва, Новая Каледония"
+GMT_PLUS_11_B_DESC      ="(UTC+11:00) Чокурдах"
+GMT_PLUS_11_C_DESC      ="(UTC+11:00) Магадан"
+GMT_PLUS_12_A_DESC      ="(UTC+12:00) Камчатка, Маршалловы о-ва, Фиджи"
+GMT_PLUS_12_B_DESC      ="(UTC+12:00) Анадырь, Петропавловск-Камчатский"
+GMT_PLUS_12_C_DESC      ="(UTC+12:00) Окленд, Веллингтон"
+GMT_PLUS_13_A_DESC      ="(UTC+13:00) Нуку-алофа"
 
 ; LANG_UKRAINIAN SUBLANG_NEUTRAL
 [Strings.0022]
@@ -7072,339 +7272,339 @@ COUNTRY_ZA="南アフリカ"
 COUNTRY_ZM="ザンビア"
 COUNTRY_ZW="ジンバブエ"
 
-GMT_MINUS_12_A_DESC    ="(GMT-12:00) 国際日付変更線西"
+GMT_MINUS_12_A_DESC    ="(UTC-12:00) 国際日付変更線西"
 GMT_MINUS_12_A_DAYLIGHT="日付変更線サマータイム"
 GMT_MINUS_12_A_STANDARD="日付変更線標準時"
 
-GMT_MINUS_11_A_DESC    ="(GMT-11:00) サモア・ミッドウェイ島"
+GMT_MINUS_11_A_DESC    ="(UTC-11:00) サモア・ミッドウェイ島"
 GMT_MINUS_11_A_DAYLIGHT="サモア夏時間"
 GMT_MINUS_11_A_STANDARD="サモア標準時"
 
-GMT_MINUS_10_A_DESC    ="(GMT-10:00) ハワイ"
+GMT_MINUS_10_A_DESC    ="(UTC-10:00) ハワイ"
 GMT_MINUS_10_A_DAYLIGHT="ハワイ夏時間"
 GMT_MINUS_10_A_STANDARD="ハワイ標準時"
 
-GMT_MINUS_09_A_DESC    ="(GMT-09:00) アラスカ"
+GMT_MINUS_09_A_DESC    ="(UTC-09:00) アラスカ"
 GMT_MINUS_09_A_DAYLIGHT="アラスカ夏時間"
 GMT_MINUS_09_A_STANDARD="アラスカ標準時"
 
-GMT_MINUS_08_A_DESC    ="(GMT-08:00) 太平洋時間（米国・カナダ）"
+GMT_MINUS_08_A_DESC    ="(UTC-08:00) 太平洋時間（米国・カナダ）"
 GMT_MINUS_08_A_DAYLIGHT="太平洋夏時間"
 GMT_MINUS_08_A_STANDARD="太平洋標準時"
 
-GMT_MINUS_07_A_DESC    ="(GMT-07:00) 山岳部時間（米国・カナダ）"
+GMT_MINUS_07_A_DESC    ="(UTC-07:00) 山岳部時間（米国・カナダ）"
 GMT_MINUS_07_A_DAYLIGHT="山岳部夏時間"
 GMT_MINUS_07_A_STANDARD="山岳部標準時"
 
-GMT_MINUS_07_B_DESC    ="(GMT-07:00) チワワ、ラパス、マサトラン"
+GMT_MINUS_07_B_DESC    ="(UTC-07:00) チワワ、ラパス、マサトラン"
 GMT_MINUS_07_B_DAYLIGHT="山岳部夏時間（メキシコ）"
 GMT_MINUS_07_B_STANDARD="山岳部標準時（メキシコ）"
 
-GMT_MINUS_07_C_DESC    ="(GMT-07:00) アリゾナ"
+GMT_MINUS_07_C_DESC    ="(UTC-07:00) アリゾナ"
 GMT_MINUS_07_C_DAYLIGHT="米国山岳部夏時間"
 GMT_MINUS_07_C_STANDARD="米国山岳部標準時"
 
-GMT_MINUS_06_A_DESC    ="(GMT-06:00) 中部時間（米国・カナダ）"
+GMT_MINUS_06_A_DESC    ="(UTC-06:00) 中部時間（米国・カナダ）"
 GMT_MINUS_06_A_DAYLIGHT="中部夏時間"
 GMT_MINUS_06_A_STANDARD="中央標準時"
 
-GMT_MINUS_06_B_DESC    ="(GMT-06:00) サスカチュワン州"
+GMT_MINUS_06_B_DESC    ="(UTC-06:00) サスカチュワン州"
 GMT_MINUS_06_B_DAYLIGHT="カナダ中部夏時間"
 GMT_MINUS_06_B_STANDARD="カナダ中部標準時"
 
-GMT_MINUS_06_C_DESC    ="(GMT-06:00) グアダラハラ、メキシコシティ、モンテレイ"
+GMT_MINUS_06_C_DESC    ="(UTC-06:00) グアダラハラ、メキシコシティ、モンテレイ"
 GMT_MINUS_06_C_DAYLIGHT="中央夏時間（メキシコ）"
 GMT_MINUS_06_C_STANDARD="中央標準時（メキシコ）"
 
-GMT_MINUS_06_D_DESC    ="(GMT-06:00) 中央アメリカ"
+GMT_MINUS_06_D_DESC    ="(UTC-06:00) 中央アメリカ"
 GMT_MINUS_06_D_DAYLIGHT="中央アメリカ夏時間"
 GMT_MINUS_06_D_STANDARD="中央アメリカ標準時"
 
-GMT_MINUS_05_A_DESC    ="(GMT-05:00) 東部時間（米国・カナダ）"
+GMT_MINUS_05_A_DESC    ="(UTC-05:00) 東部時間（米国・カナダ）"
 GMT_MINUS_05_A_DAYLIGHT="東部夏時間"
 GMT_MINUS_05_A_STANDARD="東部標準時"
 
-GMT_MINUS_05_B_DESC    ="(GMT-05:00) インディアナ（東）"
+GMT_MINUS_05_B_DESC    ="(UTC-05:00) インディアナ（東）"
 GMT_MINUS_05_B_DAYLIGHT="米国東部夏時間"
 GMT_MINUS_05_B_STANDARD="米国東部標準時"
 
-GMT_MINUS_05_C_DESC    ="(GMT-05:00) ボゴタ、リマ、キト、リオブランコ"
+GMT_MINUS_05_C_DESC    ="(UTC-05:00) ボゴタ、リマ、キト、リオブランコ"
 GMT_MINUS_05_C_DAYLIGHT="SA太平洋夏時間"
 GMT_MINUS_05_C_STANDARD="SA太平洋標準時"
 
-GMT_MINUS_04_A_DESC    ="(GMT-04:00) 大西洋時間（カナダ）"
+GMT_MINUS_04_A_DESC    ="(UTC-04:00) 大西洋時間（カナダ）"
 GMT_MINUS_04_A_DAYLIGHT="大西洋夏時間"
 GMT_MINUS_04_A_STANDARD="大西洋標準時"
 
-GMT_MINUS_04_B_DESC    ="(GMT-04:00) ラパス"
+GMT_MINUS_04_B_DESC    ="(UTC-04:00) ラパス"
 GMT_MINUS_04_B_DAYLIGHT="SA 西夏時間"
 GMT_MINUS_04_B_STANDARD="SA 西部標準時"
 
-GMT_MINUS_0330_A_DESC    ="(GMT-03:30) ニューファウンドランド"
+GMT_MINUS_0330_A_DESC    ="(UTC-03:30) ニューファウンドランド"
 GMT_MINUS_0330_A_DAYLIGHT="ニューファンドランド夏時間"
 GMT_MINUS_0330_A_STANDARD="ニューファンドランド標準時"
 
-GMT_MINUS_03_A_DESC    ="(GMT-03:00) サンティアゴ"
+GMT_MINUS_03_A_DESC    ="(UTC-03:00) サンティアゴ"
 GMT_MINUS_03_A_DAYLIGHT="パシフィックSA夏時間"
 GMT_MINUS_03_A_STANDARD="パシフィックSA標準時"
 
-GMT_MINUS_03_B_DESC    ="(GMT-03:00) ブラジリア"
+GMT_MINUS_03_B_DESC    ="(UTC-03:00) ブラジリア"
 GMT_MINUS_03_B_DAYLIGHT="E. 南米夏時間"
 GMT_MINUS_03_B_STANDARD="E. 南米標準時"
 
-GMT_MINUS_03_C_DESC    ="(GMT-03:00) ブエノスアイレス、ジョージタウン"
+GMT_MINUS_03_C_DESC    ="(UTC-03:00) ブエノスアイレス、ジョージタウン"
 GMT_MINUS_03_C_DAYLIGHT="SA 東部夏時間"
 GMT_MINUS_03_C_STANDARD="SA 東部標準時"
 
-GMT_MINUS_03_D_DESC    ="(GMT-03:00) グリーンランド"
+GMT_MINUS_03_D_DESC    ="(UTC-03:00) グリーンランド"
 GMT_MINUS_03_D_DAYLIGHT="グリーンランド夏時間"
 GMT_MINUS_03_D_STANDARD="グリーンランド標準時"
 
-GMT_MINUS_02_A_DESC    ="(GMT-02:00) 中部太平洋"
+GMT_MINUS_02_A_DESC    ="(UTC-02:00) 中部太平洋"
 GMT_MINUS_02_A_DAYLIGHT="中部太平洋夏時間"
 GMT_MINUS_02_A_STANDARD="中部太平洋標準時"
 
-GMT_MINUS_01_A_DESC    ="(GMT-01:00) アゾレス"
+GMT_MINUS_01_A_DESC    ="(UTC-01:00) アゾレス"
 GMT_MINUS_01_A_DAYLIGHT="アゾレス夏時間"
 GMT_MINUS_01_A_STANDARD="アゾレス標準時"
 
-GMT_MINUS_01_B_DESC    ="(GMT-01:00) カーボベルデ島"
+GMT_MINUS_01_B_DESC    ="(UTC-01:00) カーボベルデ島"
 GMT_MINUS_01_B_DAYLIGHT="カーボベルデ夏時間"
 GMT_MINUS_01_B_STANDARD="カーボベルデ標準時"
 
-GMT_PLUS_00_A_DESC    ="(GMT+00:00) グリニッジ標準時: ダブリン、エジンバラ、リスボン、ロンドン"
+GMT_PLUS_00_A_DESC    ="(UTC+00:00) グリニッジ標準時: ダブリン、エジンバラ、リスボン、ロンドン"
 GMT_PLUS_00_A_DAYLIGHT="GMT夏時間"
 GMT_PLUS_00_A_STANDARD="GMT標準時"
 
-GMT_PLUS_00_B_DESC    ="(GMT+00:00) カサブランカ、モンロビア、レイキャビク"
+GMT_PLUS_00_B_DESC    ="(UTC+00:00) カサブランカ、モンロビア、レイキャビク"
 GMT_PLUS_00_B_DAYLIGHT="グリニッジ夏時間"
 GMT_PLUS_00_B_STANDARD="グリニッジ標準時"
 
-GMT_PLUS_01_A_DESC    ="(GMT+01:00) ベオグラード、ブラチスラバ、ブダペスト、リュブリャナ、プラハ"
+GMT_PLUS_01_A_DESC    ="(UTC+01:00) ベオグラード、ブラチスラバ、ブダペスト、リュブリャナ、プラハ"
 GMT_PLUS_01_A_DAYLIGHT="中央ヨーロッパ夏時間"
 GMT_PLUS_01_A_STANDARD="中央ヨーロッパ標準時"
 
-GMT_PLUS_01_B_DESC    ="(GMT+01:00) サラエボ、スコピエ、ワルシャワ、ザグレブ"
+GMT_PLUS_01_B_DESC    ="(UTC+01:00) サラエボ、スコピエ、ワルシャワ、ザグレブ"
 GMT_PLUS_01_B_DAYLIGHT="中央ヨーロッパ夏時間"
 GMT_PLUS_01_B_STANDARD="中央ヨーロッパ標準時"
 
-GMT_PLUS_01_C_DESC    ="(GMT+01:00) ブリュッセル、コペンハーゲン、マドリッド、パリ"
+GMT_PLUS_01_C_DESC    ="(UTC+01:00) ブリュッセル、コペンハーゲン、マドリッド、パリ"
 GMT_PLUS_01_C_DAYLIGHT="ロマンス夏時間"
 GMT_PLUS_01_C_STANDARD="ロマンス標準時"
 
-GMT_PLUS_01_D_DESC    ="(GMT+01:00) アムステルダム、ベルリン、ベルン、ローマ、ストックホルム、ウィーン"
+GMT_PLUS_01_D_DESC    ="(UTC+01:00) アムステルダム、ベルリン、ベルン、ローマ、ストックホルム、ウィーン"
 GMT_PLUS_01_D_DAYLIGHT="西ヨーロッパ夏時間"
 GMT_PLUS_01_D_STANDARD="西ヨーロッパ標準時"
 
-GMT_PLUS_02_A_DESC    ="(GMT+02:00) キシナウ"
+GMT_PLUS_02_A_DESC    ="(UTC+02:00) キシナウ"
 GMT_PLUS_02_A_DAYLIGHT="東ヨーロッパ夏時間"
 GMT_PLUS_02_A_STANDARD="東ヨーロッパ標準時"
 
-GMT_PLUS_02_B_DESC    ="(GMT+02:00) カイロ"
+GMT_PLUS_02_B_DESC    ="(UTC+02:00) カイロ"
 GMT_PLUS_02_B_DAYLIGHT="エジプト夏時間"
 GMT_PLUS_02_B_STANDARD="エジプト標準時"
 
-GMT_PLUS_02_C_DESC    ="(GMT+02:00) ヘルシンキ、キエフ、リガ、ソフィア、タリン、ビリニュス"
+GMT_PLUS_02_C_DESC    ="(UTC+02:00) ヘルシンキ、キエフ、リガ、ソフィア、タリン、ビリニュス"
 GMT_PLUS_02_C_DAYLIGHT="FLE 夏時間"
 GMT_PLUS_02_C_STANDARD="FLE 標準時"
 
-GMT_PLUS_02_D_DESC    ="(GMT+02:00) アテネ、ブカレスト"
+GMT_PLUS_02_D_DESC    ="(UTC+02:00) アテネ、ブカレスト"
 GMT_PLUS_02_D_DAYLIGHT="GTB 夏時間"
 GMT_PLUS_02_D_STANDARD="GTB 標準時"
 
-GMT_PLUS_02_E_DESC    ="(GMT+02:00) エルサレム"
+GMT_PLUS_02_E_DESC    ="(UTC+02:00) エルサレム"
 GMT_PLUS_02_E_DAYLIGHT="イスラエル夏時間"
 GMT_PLUS_02_E_STANDARD="イスラエル標準時"
 
-GMT_PLUS_02_F_DESC    ="(GMT+02:00) ハラレ、プレトリア"
+GMT_PLUS_02_F_DESC    ="(UTC+02:00) ハラレ、プレトリア"
 GMT_PLUS_02_F_DAYLIGHT="南アフリカ夏時間"
 GMT_PLUS_02_F_STANDARD="南アフリカ標準時"
 
-GMT_PLUS_02_G_DESC    ="(GMT+02:00) カリーニングラード"
+GMT_PLUS_02_G_DESC    ="(UTC+02:00) カリーニングラード"
 GMT_PLUS_02_G_DAYLIGHT="RTZ 1 夏時間"
 GMT_PLUS_02_G_STANDARD="RTZ 1 標準時"
 
-GMT_PLUS_03_A_DESC    ="(GMT+03:00) ミンスク"
+GMT_PLUS_03_A_DESC    ="(UTC+03:00) ミンスク"
 GMT_PLUS_03_A_DAYLIGHT="ベラルーシ夏時間"
 GMT_PLUS_03_A_STANDARD="ベラルーシ標準時"
 
-GMT_PLUS_03_B_DESC    ="(GMT+03:00) モスクワ、サンクトペテルブルグ"
+GMT_PLUS_03_B_DESC    ="(UTC+03:00) モスクワ、サンクトペテルブルグ"
 GMT_PLUS_03_B_DAYLIGHT="RTZ 2 夏時間"
 GMT_PLUS_03_B_STANDARD="RTZ 2 標準時"
 
-GMT_PLUS_03_C_DESC    ="(GMT+03:00) クウェート、リヤド"
+GMT_PLUS_03_C_DESC    ="(UTC+03:00) クウェート、リヤド"
 GMT_PLUS_03_C_DAYLIGHT="アラブ夏時間"
 GMT_PLUS_03_C_STANDARD="アラブ標準時"
 
-GMT_PLUS_03_D_DESC    ="(GMT+03:00) ナイロビ"
+GMT_PLUS_03_D_DESC    ="(UTC+03:00) ナイロビ"
 GMT_PLUS_03_D_DAYLIGHT="東アフリカ夏時間"
 GMT_PLUS_03_D_STANDARD="東アフリカ標準時"
 
-GMT_PLUS_03_E_DESC    ="(GMT+03:00) バグダッド"
+GMT_PLUS_03_E_DESC    ="(UTC+03:00) バグダッド"
 GMT_PLUS_03_E_DAYLIGHT="アラビア夏時間"
 GMT_PLUS_03_E_STANDARD="アラビア標準時"
 
-GMT_PLUS_03_F_DESC    ="(GMT+03:00) イスタンブール"
+GMT_PLUS_03_F_DESC    ="(UTC+03:00) イスタンブール"
 GMT_PLUS_03_F_DAYLIGHT="トルコ夏時間"
 GMT_PLUS_03_F_STANDARD="トルコ標準時"
 
-GMT_PLUS_0330_A_DESC    ="(GMT+03:30) テヘラン"
+GMT_PLUS_0330_A_DESC    ="(UTC+03:30) テヘラン"
 GMT_PLUS_0330_A_DAYLIGHT="イラン夏時間"
 GMT_PLUS_0330_A_STANDARD="イラン標準時"
 
-GMT_PLUS_04_A_DESC    ="(GMT+04:00) アブダビ、マスカット"
+GMT_PLUS_04_A_DESC    ="(UTC+04:00) アブダビ、マスカット"
 GMT_PLUS_04_A_DAYLIGHT="アラビア夏時間"
 GMT_PLUS_04_A_STANDARD="アラビア標準時"
 
-GMT_PLUS_04_B_DESC    ="(GMT+04:00) エレバン"
+GMT_PLUS_04_B_DESC    ="(UTC+04:00) エレバン"
 GMT_PLUS_04_B_DAYLIGHT="コーカサス夏時間"
 GMT_PLUS_04_B_STANDARD="コーカサス標準時"
 
-GMT_PLUS_04_C_DESC    ="(GMT+04:00) イジェフスク、サマラ、ヴォルゴグラード"
+GMT_PLUS_04_C_DESC    ="(UTC+04:00) イジェフスク、サマラ、ヴォルゴグラード"
 GMT_PLUS_04_C_DAYLIGHT="RTZ 3 夏時間"
 GMT_PLUS_04_C_STANDARD="RTZ 3 標準時"
 
-GMT_PLUS_0430_A_DESC    ="(GMT+04:30) カブール"
+GMT_PLUS_0430_A_DESC    ="(UTC+04:30) カブール"
 GMT_PLUS_0430_A_DAYLIGHT="アフガニスタン夏時間"
 GMT_PLUS_0430_A_STANDARD="アフガニスタン標準時"
 
-GMT_PLUS_05_A_DESC    ="(GMT+05:00) エカテリンブルク"
+GMT_PLUS_05_A_DESC    ="(UTC+05:00) エカテリンブルク"
 GMT_PLUS_05_A_DAYLIGHT="RTZ 4 夏時間"
 GMT_PLUS_05_A_STANDARD="RTZ 4 標準時"
 
-GMT_PLUS_05_B_DESC    ="(GMT+05:00) イスラマバード、カラチ、タシケント"
+GMT_PLUS_05_B_DESC    ="(UTC+05:00) イスラマバード、カラチ、タシケント"
 GMT_PLUS_05_B_DAYLIGHT="西アジア夏時間"
 GMT_PLUS_05_B_STANDARD="西アジア標準時"
 
-GMT_PLUS_0530_A_DESC    ="(GMT+05:30) チェンナイ、コルカタ、ムンバイ、ニューデリー"
+GMT_PLUS_0530_A_DESC    ="(UTC+05:30) チェンナイ、コルカタ、ムンバイ、ニューデリー"
 GMT_PLUS_0530_A_DAYLIGHT="インド夏時間"
 GMT_PLUS_0530_A_STANDARD="インド標準時"
 
-GMT_PLUS_0530_B_DESC    ="(GMT+05:30) スリ・ジャヤワルデネプーラ"
+GMT_PLUS_0530_B_DESC    ="(UTC+05:30) スリ・ジャヤワルデネプーラ"
 GMT_PLUS_0530_B_DAYLIGHT="スリランカ夏時間"
 GMT_PLUS_0530_B_STANDARD="スリランカ標準時"
 
-GMT_PLUS_0545_A_DESC    ="(GMT+05:45) カトマンズ"
+GMT_PLUS_0545_A_DESC    ="(UTC+05:45) カトマンズ"
 GMT_PLUS_0545_A_DAYLIGHT="ネパール夏時間"
 GMT_PLUS_0545_A_STANDARD="ネパール標準時"
 
-GMT_PLUS_06_A_DESC    ="(GMT+06:00) アスタナ、ダッカ"
+GMT_PLUS_06_A_DESC    ="(UTC+06:00) アスタナ、ダッカ"
 GMT_PLUS_06_A_DAYLIGHT="中央アジア夏時間"
 GMT_PLUS_06_A_STANDARD="中央アジア標準時"
 
-GMT_PLUS_06_B_DESC    ="(GMT+06:00) オムスク"
+GMT_PLUS_06_B_DESC    ="(UTC+06:00) オムスク"
 GMT_PLUS_06_B_DAYLIGHT="オムスク夏時間"
 GMT_PLUS_06_B_STANDARD="オムスク標準時"
 
-GMT_PLUS_0630_A_DESC    ="(GMT+06:30) ヤンゴン（ラングーン）"
+GMT_PLUS_0630_A_DESC    ="(UTC+06:30) ヤンゴン（ラングーン）"
 GMT_PLUS_0630_A_DAYLIGHT="ミャンマー夏時間"
 GMT_PLUS_0630_A_STANDARD="ミャンマー標準時"
 
-GMT_PLUS_07_A_DESC    ="(GMT+07:00) ノボシビルスク"
+GMT_PLUS_07_A_DESC    ="(UTC+07:00) ノボシビルスク"
 GMT_PLUS_07_A_DAYLIGHT="ノボシビルスク夏時間"
 GMT_PLUS_07_A_STANDARD="ノボシビルスク標準時"
 
-GMT_PLUS_07_B_DESC    ="(GMT+07:00) バンコク、ハノイ、ジャカルタ"
+GMT_PLUS_07_B_DESC    ="(UTC+07:00) バンコク、ハノイ、ジャカルタ"
 GMT_PLUS_07_B_DAYLIGHT="東南アジア夏時間"
 GMT_PLUS_07_B_STANDARD="東南アジア標準時"
 
-GMT_PLUS_07_C_DESC    ="(GMT+07:00) クラスノヤルスク"
+GMT_PLUS_07_C_DESC    ="(UTC+07:00) クラスノヤルスク"
 GMT_PLUS_07_C_DAYLIGHT="RTZ 6 夏時間"
 GMT_PLUS_07_C_STANDARD="RTZ 6 標準時"
 
-GMT_PLUS_07_D_DESC    ="(GMT+07:00) トムスク"
+GMT_PLUS_07_D_DESC    ="(UTC+07:00) トムスク"
 GMT_PLUS_07_D_DAYLIGHT="トムスク夏時間"
 GMT_PLUS_07_D_STANDARD="トムスク標準時"
 
-GMT_PLUS_08_A_DESC    ="(GMT+08:00) 北京、重慶、香港、ウルムチ"
+GMT_PLUS_08_A_DESC    ="(UTC+08:00) 北京、重慶、香港、ウルムチ"
 GMT_PLUS_08_A_DAYLIGHT="中国夏時間"
 GMT_PLUS_08_A_STANDARD="中国標準時"
 
-GMT_PLUS_08_B_DESC    ="(GMT+08:00) クアラルンプール、シンガポール"
+GMT_PLUS_08_B_DESC    ="(UTC+08:00) クアラルンプール、シンガポール"
 GMT_PLUS_08_B_DAYLIGHT="シンガポール夏時間"
 GMT_PLUS_08_B_STANDARD="シンガポール標準時"
 
-GMT_PLUS_08_C_DESC    ="(GMT+08:00) 台北"
+GMT_PLUS_08_C_DESC    ="(UTC+08:00) 台北"
 GMT_PLUS_08_C_DAYLIGHT="台北夏時間"
 GMT_PLUS_08_C_STANDARD="台北標準時"
 
-GMT_PLUS_08_D_DESC    ="(GMT+08:00) パース"
+GMT_PLUS_08_D_DESC    ="(UTC+08:00) パース"
 GMT_PLUS_08_D_DAYLIGHT="西オーストラリア夏時間"
 GMT_PLUS_08_D_STANDARD="西オーストラリア標準時"
 
-GMT_PLUS_08_E_DESC    ="(GMT+08:00) ウランバートル"
+GMT_PLUS_08_E_DESC    ="(UTC+08:00) ウランバートル"
 GMT_PLUS_08_E_DAYLIGHT="ウランバートル夏時間"
 GMT_PLUS_08_E_STANDARD="ウランバートル標準時"
 
-GMT_PLUS_08_F_DESC    ="(GMT+08:00) イルクーツク"
+GMT_PLUS_08_F_DESC    ="(UTC+08:00) イルクーツク"
 GMT_PLUS_08_F_DAYLIGHT="RTZ 7 夏時間"
 GMT_PLUS_08_F_STANDARD="RTZ 7 標準時"
 
-GMT_PLUS_09_A_DESC    ="(GMT+09:00) ソウル"
+GMT_PLUS_09_A_DESC    ="(UTC+09:00) ソウル"
 GMT_PLUS_09_A_DAYLIGHT="韓国夏時間"
 GMT_PLUS_09_A_STANDARD="韓国標準時"
 
-GMT_PLUS_09_B_DESC    ="(GMT+09:00) 大阪、札幌、東京"
+GMT_PLUS_09_B_DESC    ="(UTC+09:00) 大阪、札幌、東京"
 GMT_PLUS_09_B_DAYLIGHT="日本夏時間"
 GMT_PLUS_09_B_STANDARD="日本標準時"
 
-GMT_PLUS_09_C_DESC    ="(GMT+09:00) ヤクーツク"
+GMT_PLUS_09_C_DESC    ="(UTC+09:00) ヤクーツク"
 GMT_PLUS_09_C_DAYLIGHT="RTZ 8 夏時間"
 GMT_PLUS_09_C_STANDARD="RTZ 8 標準時"
 
-GMT_PLUS_0930_A_DESC    ="(GMT+09:30) ダーウィン"
+GMT_PLUS_0930_A_DESC    ="(UTC+09:30) ダーウィン"
 GMT_PLUS_0903_A_DAYLIGHT="AUS 中部夏時間"
 GMT_PLUS_0930_A_STANDARD="AUS 中部標準時"
 
-GMT_PLUS_0930_B_DESC    ="(GMT+09:30) アデレード"
+GMT_PLUS_0930_B_DESC    ="(UTC+09:30) アデレード"
 GMT_PLUS_0930_B_DAYLIGHT="中央オーストラリア夏時間"
 GMT_PLUS_0930_B_STANDARD="中央オーストラリア標準時"
 
-GMT_PLUS_10_A_DESC    ="(GMT+10:00) キャンベラ、メルボルン、シドニー"
+GMT_PLUS_10_A_DESC    ="(UTC+10:00) キャンベラ、メルボルン、シドニー"
 GMT_PLUS_10_A_DAYLIGHT="AUS 東部夏時間"
 GMT_PLUS_10_A_STANDARD="AUS 東部標準時"
 
-GMT_PLUS_10_B_DESC    ="(GMT+10:00) ブリスベン"
+GMT_PLUS_10_B_DESC    ="(UTC+10:00) ブリスベン"
 GMT_PLUS_10_B_DAYLIGHT="東オーストラリア夏時間"
 GMT_PLUS_10_B_STANDARD="東オーストラリア標準時"
 
-GMT_PLUS_10_C_DESC    ="(GMT+10:00) ホバート"
+GMT_PLUS_10_C_DESC    ="(UTC+10:00) ホバート"
 GMT_PLUS_10_C_DAYLIGHT="タスマニア州夏時間"
 GMT_PLUS_10_C_STANDARD="タスマニア州標準時"
 
-GMT_PLUS_10_D_DESC    ="(GMT+10:00) ウラジオストク"
+GMT_PLUS_10_D_DESC    ="(UTC+10:00) ウラジオストク"
 GMT_PLUS_10_D_DAYLIGHT="RTZ 9 夏時間"
 GMT_PLUS_10_D_STANDARD="RTZ 9 標準時"
 
-GMT_PLUS_10_E_DESC    ="(GMT+10:00) グアム、ポートモレスビー"
+GMT_PLUS_10_E_DESC    ="(UTC+10:00) グアム、ポートモレスビー"
 GMT_PLUS_10_E_DAYLIGHT="西太平洋夏時間"
 GMT_PLUS_10_E_STANDARD="西太平洋標準時"
 
-GMT_PLUS_11_A_DESC    ="(GMT+11:00) ソロモン諸島、ニューカレドニア"
+GMT_PLUS_11_A_DESC    ="(UTC+11:00) ソロモン諸島、ニューカレドニア"
 GMT_PLUS_11_A_DAYLIGHT="中部太平洋夏時間"
 GMT_PLUS_11_A_STANDARD="中部太平洋標準時"
 
-GMT_PLUS_11_B_DESC    ="(GMT+11:00) チョックルダック"
+GMT_PLUS_11_B_DESC    ="(UTC+11:00) チョックルダック"
 GMT_PLUS_11_B_DAYLIGHT="RTZ 10 夏時間"
 GMT_PLUS_11_B_STANDARD="RTZ 10 標準時"
 
-GMT_PLUS_11_C_DESC    ="(GMT+11:00) マガダン"
+GMT_PLUS_11_C_DESC    ="(UTC+11:00) マガダン"
 GMT_PLUS_11_C_DAYLIGHT="マガダン夏時間"
 GMT_PLUS_11_C_STANDARD="マガダン標準時"
 
-GMT_PLUS_12_A_DESC    ="(GMT+12:00) フィジー、カムチャツカ、マーシャル諸島"
+GMT_PLUS_12_A_DESC    ="(UTC+12:00) フィジー、カムチャツカ、マーシャル諸島"
 GMT_PLUS_12_A_DAYLIGHT="フィジー夏時間"
 GMT_PLUS_12_A_STANDARD="フィジー標準時"
 
-GMT_PLUS_12_B_DESC    ="(GMT+12:00) アナディリ、ペトロパブロフスク・カムチャツキー"
+GMT_PLUS_12_B_DESC    ="(UTC+12:00) アナディリ、ペトロパブロフスク・カムチャツキー"
 GMT_PLUS_12_B_DAYLIGHT="RTZ 11 夏時間"
 GMT_PLUS_12_B_STANDARD="RTZ 11 標準時"
 
-GMT_PLUS_12_C_DESC    ="(GMT+12:00) オークランド、ウェリントン"
+GMT_PLUS_12_C_DESC    ="(UTC+12:00) オークランド、ウェリントン"
 GMT_PLUS_12_C_DAYLIGHT="ニュージーランド夏時間"
 GMT_PLUS_12_C_STANDARD="ニュージーランド標準時"
 
-GMT_PLUS_13_A_DESC    ="(GMT+13:00) ヌクアロファ"
+GMT_PLUS_13_A_DESC    ="(UTC+13:00) ヌクアロファ"
 GMT_PLUS_13_A_DAYLIGHT="トンガ夏時間"
 GMT_PLUS_13_A_STANDARD="トンガ標準時"
 
@@ -7659,339 +7859,339 @@ COUNTRY_ZA="南非"
 COUNTRY_ZM="赞比亚"
 COUNTRY_ZW="津巴布韦"
 
-GMT_MINUS_12_A_DESC    ="(GMT-12:00) 国际日期变更线西"
+GMT_MINUS_12_A_DESC    ="(UTC-12:00) 国际日期变更线西"
 GMT_MINUS_12_A_DAYLIGHT="国际日期变更线夏令时"
 GMT_MINUS_12_A_STANDARD="国际日期变更线标准时间"
 
-GMT_MINUS_11_A_DESC    ="(GMT-11:00) 中途岛，萨摩亚群岛"
+GMT_MINUS_11_A_DESC    ="(UTC-11:00) 中途岛，萨摩亚群岛"
 GMT_MINUS_11_A_DAYLIGHT="萨摩亚群岛夏令时"
 GMT_MINUS_11_A_STANDARD="萨摩亚群岛标准时间"
 
-GMT_MINUS_10_A_DESC    ="(GMT-10:00) 夏威夷"
+GMT_MINUS_10_A_DESC    ="(UTC-10:00) 夏威夷"
 GMT_MINUS_10_A_DAYLIGHT="夏威夷夏令时"
 GMT_MINUS_10_A_STANDARD="夏威夷标准时间"
 
-GMT_MINUS_09_A_DESC    ="(GMT-09:00) 阿拉斯加"
+GMT_MINUS_09_A_DESC    ="(UTC-09:00) 阿拉斯加"
 GMT_MINUS_09_A_DAYLIGHT="阿拉斯加夏令时"
 GMT_MINUS_09_A_STANDARD="阿拉斯加标准时间"
 
-GMT_MINUS_08_A_DESC    ="(GMT-08:00) 太平洋时间（美国和加拿大）"
+GMT_MINUS_08_A_DESC    ="(UTC-08:00) 太平洋时间（美国和加拿大）"
 GMT_MINUS_08_A_DAYLIGHT="太平洋夏令时"
 GMT_MINUS_08_A_STANDARD="太平洋标准时间"
 
-GMT_MINUS_07_A_DESC    ="(GMT-07:00) 山地时间（美国和加拿大）"
+GMT_MINUS_07_A_DESC    ="(UTC-07:00) 山地时间（美国和加拿大）"
 GMT_MINUS_07_A_DAYLIGHT="山地夏令时"
 GMT_MINUS_07_A_STANDARD="山地标准时间"
 
-GMT_MINUS_07_B_DESC    ="(GMT-07:00) 奇瓦瓦，拉巴斯，马萨特兰"
+GMT_MINUS_07_B_DESC    ="(UTC-07:00) 奇瓦瓦，拉巴斯，马萨特兰"
 GMT_MINUS_07_B_DAYLIGHT="山地夏令时（墨西哥）"
 GMT_MINUS_07_B_STANDARD="山地标准时间（墨西哥）"
 
-GMT_MINUS_07_C_DESC    ="(GMT-07:00) 亚利桑那"
+GMT_MINUS_07_C_DESC    ="(UTC-07:00) 亚利桑那"
 GMT_MINUS_07_C_DAYLIGHT="美国山地夏令时"
 GMT_MINUS_07_C_STANDARD="美国山地标准时间"
 
-GMT_MINUS_06_A_DESC    ="(GMT-06:00) 中部时间（美国和加拿大）"
+GMT_MINUS_06_A_DESC    ="(UTC-06:00) 中部时间（美国和加拿大）"
 GMT_MINUS_06_A_DAYLIGHT="中部夏令时"
 GMT_MINUS_06_A_STANDARD="中部标准时间"
 
-GMT_MINUS_06_B_DESC    ="(GMT-06:00) 萨斯喀彻温"
+GMT_MINUS_06_B_DESC    ="(UTC-06:00) 萨斯喀彻温"
 GMT_MINUS_06_B_DAYLIGHT="加拿大中部夏令时"
 GMT_MINUS_06_B_STANDARD="加拿大中部标准时间"
 
-GMT_MINUS_06_C_DESC    ="(GMT-06:00) 瓜达拉哈拉，墨西哥城，蒙特雷"
+GMT_MINUS_06_C_DESC    ="(UTC-06:00) 瓜达拉哈拉，墨西哥城，蒙特雷"
 GMT_MINUS_06_C_DAYLIGHT="中部夏令时（墨西哥）"
 GMT_MINUS_06_C_STANDARD="中部标准时间（墨西哥）"
 
-GMT_MINUS_06_D_DESC    ="(GMT-06:00) 中美洲"
+GMT_MINUS_06_D_DESC    ="(UTC-06:00) 中美洲"
 GMT_MINUS_06_D_DAYLIGHT="中美洲夏令时"
 GMT_MINUS_06_D_STANDARD="中美洲标准时间"
 
-GMT_MINUS_05_A_DESC    ="(GMT-05:00) 东部时间（美国和加拿大）"
+GMT_MINUS_05_A_DESC    ="(UTC-05:00) 东部时间（美国和加拿大）"
 GMT_MINUS_05_A_DAYLIGHT="东部夏令时"
 GMT_MINUS_05_A_STANDARD="东部标准时间"
 
-GMT_MINUS_05_B_DESC    ="(GMT-05:00) 印第安纳州（东部）"
+GMT_MINUS_05_B_DESC    ="(UTC-05:00) 印第安纳州（东部）"
 GMT_MINUS_05_B_DAYLIGHT="美国东部夏令时"
 GMT_MINUS_05_B_STANDARD="美国东部标准时间"
 
-GMT_MINUS_05_C_DESC    ="(GMT-05:00) 波哥大，利马，基多，里奥布朗库"
+GMT_MINUS_05_C_DESC    ="(UTC-05:00) 波哥大，利马，基多，里奥布朗库"
 GMT_MINUS_05_C_DAYLIGHT="南美洲太平洋夏令时"
 GMT_MINUS_05_C_STANDARD="南美洲太平洋标准时间"
 
-GMT_MINUS_04_A_DESC    ="(GMT-04:00) 大西洋时间（加拿大）"
+GMT_MINUS_04_A_DESC    ="(UTC-04:00) 大西洋时间（加拿大）"
 GMT_MINUS_04_A_DAYLIGHT="大西洋夏令时"
 GMT_MINUS_04_A_STANDARD="大西洋标准时间"
 
-GMT_MINUS_04_B_DESC    ="(GMT-04:00) 加拉加斯，拉巴斯"
+GMT_MINUS_04_B_DESC    ="(UTC-04:00) 加拉加斯，拉巴斯"
 GMT_MINUS_04_B_DAYLIGHT="南美洲西部夏令时"
 GMT_MINUS_04_B_STANDARD="南美洲西部标准时间"
 
-GMT_MINUS_0330_A_DESC    ="(GMT-03:30) 纽芬兰"
+GMT_MINUS_0330_A_DESC    ="(UTC-03:30) 纽芬兰"
 GMT_MINUS_0330_A_DAYLIGHT="纽芬兰夏令时"
 GMT_MINUS_0330_A_STANDARD="纽芬兰标准时间"
 
-GMT_MINUS_03_A_DESC    ="(GMT-03:00) 圣地亚哥"
+GMT_MINUS_03_A_DESC    ="(UTC-03:00) 圣地亚哥"
 GMT_MINUS_03_A_DAYLIGHT="太平洋南美洲夏令时"
 GMT_MINUS_03_A_STANDARD="太平洋南美洲标准时间"
 
-GMT_MINUS_03_B_DESC    ="(GMT-03:00) 巴西利亚"
+GMT_MINUS_03_B_DESC    ="(UTC-03:00) 巴西利亚"
 GMT_MINUS_03_B_DAYLIGHT="东部南美洲夏令时"
 GMT_MINUS_03_B_STANDARD="东部南美洲标准时间"
 
-GMT_MINUS_03_C_DESC    ="(GMT-03:00) 布宜诺斯艾利斯，乔治敦"
+GMT_MINUS_03_C_DESC    ="(UTC-03:00) 布宜诺斯艾利斯，乔治敦"
 GMT_MINUS_03_C_DAYLIGHT="南美洲东部夏令时"
 GMT_MINUS_03_C_STANDARD="南美洲东部标准时间"
 
-GMT_MINUS_03_D_DESC    ="(GMT-03:00) 格陵兰"
+GMT_MINUS_03_D_DESC    ="(UTC-03:00) 格陵兰"
 GMT_MINUS_03_D_DAYLIGHT="格陵兰夏令时"
 GMT_MINUS_03_D_STANDARD="格陵兰标准时间"
 
-GMT_MINUS_02_A_DESC    ="(GMT-02:00) 中大西洋"
+GMT_MINUS_02_A_DESC    ="(UTC-02:00) 中大西洋"
 GMT_MINUS_02_A_DAYLIGHT="中大西洋夏令时"
 GMT_MINUS_02_A_STANDARD="中大西洋标准时间"
 
-GMT_MINUS_01_A_DESC    ="(GMT-01:00) 亚速尔群岛"
+GMT_MINUS_01_A_DESC    ="(UTC-01:00) 亚速尔群岛"
 GMT_MINUS_01_A_DAYLIGHT="亚速尔群岛夏令时"
 GMT_MINUS_01_A_STANDARD="亚速尔群岛标准时间"
 
-GMT_MINUS_01_B_DESC    ="(GMT-01:00) 佛得角群岛"
+GMT_MINUS_01_B_DESC    ="(UTC-01:00) 佛得角群岛"
 GMT_MINUS_01_B_DAYLIGHT="佛得角群岛夏令时"
 GMT_MINUS_01_B_STANDARD="佛得角群岛标准时间"
 
-GMT_PLUS_00_A_DESC    ="(GMT+00:00) 格林威治标准时间：都柏林，爱丁堡，里斯本，伦敦"
+GMT_PLUS_00_A_DESC    ="(UTC+00:00) 格林威治标准时间：都柏林，爱丁堡，里斯本，伦敦"
 GMT_PLUS_00_A_DAYLIGHT="GMT 夏令时"
 GMT_PLUS_00_A_STANDARD="GMT 标准时间"
 
-GMT_PLUS_00_B_DESC    ="(GMT+00:00) 卡萨布兰卡，蒙多维亚，雷克雅未克"
+GMT_PLUS_00_B_DESC    ="(UTC+00:00) 卡萨布兰卡，蒙多维亚，雷克雅未克"
 GMT_PLUS_00_B_DAYLIGHT="格林威治夏令时"
 GMT_PLUS_00_B_STANDARD="格林威治标准时间"
 
-GMT_PLUS_01_A_DESC    ="(GMT+01:00) 贝尔格莱德，布拉迪斯拉发，布达佩斯，卢布尔雅那，布拉格"
+GMT_PLUS_01_A_DESC    ="(UTC+01:00) 贝尔格莱德，布拉迪斯拉发，布达佩斯，卢布尔雅那，布拉格"
 GMT_PLUS_01_A_DAYLIGHT="中欧夏令时"
 GMT_PLUS_01_A_STANDARD="中欧标准时间"
 
-GMT_PLUS_01_B_DESC    ="(GMT+01:00) 萨拉热窝，斯科普里，华沙，萨格勒布"
+GMT_PLUS_01_B_DESC    ="(UTC+01:00) 萨拉热窝，斯科普里，华沙，萨格勒布"
 GMT_PLUS_01_B_DAYLIGHT="中欧的夏令时"
 GMT_PLUS_01_B_STANDARD="中欧的标准时间"
 
-GMT_PLUS_01_C_DESC    ="(GMT+01:00) 布鲁塞尔，哥本哈根，马德里，巴黎"
+GMT_PLUS_01_C_DESC    ="(UTC+01:00) 布鲁塞尔，哥本哈根，马德里，巴黎"
 GMT_PLUS_01_C_DAYLIGHT="罗马夏令时"
 GMT_PLUS_01_C_STANDARD="罗马标准时间"
 
-GMT_PLUS_01_D_DESC    ="(GMT+01:00) 阿姆斯特丹，柏林，伯尔尼，罗马，斯德哥尔摩，维也纳"
+GMT_PLUS_01_D_DESC    ="(UTC+01:00) 阿姆斯特丹，柏林，伯尔尼，罗马，斯德哥尔摩，维也纳"
 GMT_PLUS_01_D_DAYLIGHT="西欧夏令时"
 GMT_PLUS_01_D_STANDARD="西欧标准时间"
 
-GMT_PLUS_02_A_DESC    ="(GMT+02:00) 基希讷乌"
+GMT_PLUS_02_A_DESC    ="(UTC+02:00) 基希讷乌"
 GMT_PLUS_02_A_DAYLIGHT="东欧夏令时"
 GMT_PLUS_02_A_STANDARD="东欧标准时间"
 
-GMT_PLUS_02_B_DESC    ="(GMT+02:00) 开罗"
+GMT_PLUS_02_B_DESC    ="(UTC+02:00) 开罗"
 GMT_PLUS_02_B_DAYLIGHT="埃及夏令时"
 GMT_PLUS_02_B_STANDARD="埃及标准时间"
 
-GMT_PLUS_02_C_DESC    ="(GMT+02:00) 赫尔辛基，基辅，里加，索菲亚，塔林，维尔纽斯"
+GMT_PLUS_02_C_DESC    ="(UTC+02:00) 赫尔辛基，基辅，里加，索菲亚，塔林，维尔纽斯"
 GMT_PLUS_02_C_DAYLIGHT="FLE 夏令时"
 GMT_PLUS_02_C_STANDARD="FLE 标准时间"
 
-GMT_PLUS_02_D_DESC    ="(GMT+02:00) 雅典，布加勒斯特"
+GMT_PLUS_02_D_DESC    ="(UTC+02:00) 雅典，布加勒斯特"
 GMT_PLUS_02_D_DAYLIGHT="GTB 夏令时"
 GMT_PLUS_02_D_STANDARD="GTB 标准时间"
 
-GMT_PLUS_02_E_DESC    ="(GMT+02:00) 耶路撒冷"
+GMT_PLUS_02_E_DESC    ="(UTC+02:00) 耶路撒冷"
 GMT_PLUS_02_E_DAYLIGHT="耶路撒冷夏令时"
 GMT_PLUS_02_E_STANDARD="耶路撒冷标准时间"
 
-GMT_PLUS_02_F_DESC    ="(GMT+02:00) 哈拉雷，比勒陀利亚"
+GMT_PLUS_02_F_DESC    ="(UTC+02:00) 哈拉雷，比勒陀利亚"
 GMT_PLUS_02_F_DAYLIGHT="南非夏令时"
 GMT_PLUS_02_F_STANDARD="南非标准时间"
 
-GMT_PLUS_02_G_DESC    ="(GMT+02:00) 加里宁格勒"
+GMT_PLUS_02_G_DESC    ="(UTC+02:00) 加里宁格勒"
 GMT_PLUS_02_G_DAYLIGHT="RTZ 1 夏令时"
 GMT_PLUS_02_G_STANDARD="RTZ 1 标准时间"
 
-GMT_PLUS_03_A_DESC    ="(GMT+03:00) 明斯克"
+GMT_PLUS_03_A_DESC    ="(UTC+03:00) 明斯克"
 GMT_PLUS_03_A_DAYLIGHT="白俄罗斯夏令时"
 GMT_PLUS_03_A_STANDARD="白俄罗斯标准时间"
 
-GMT_PLUS_03_B_DESC    ="(GMT+03:00) 莫斯科，圣彼得堡"
+GMT_PLUS_03_B_DESC    ="(UTC+03:00) 莫斯科，圣彼得堡"
 GMT_PLUS_03_B_DAYLIGHT="RTZ 2 夏令时"
 GMT_PLUS_03_B_STANDARD="RTZ 2 标准时间"
 
-GMT_PLUS_03_C_DESC    ="(GMT+03:00) 科威特，利雅得"
+GMT_PLUS_03_C_DESC    ="(UTC+03:00) 科威特，利雅得"
 GMT_PLUS_03_C_DAYLIGHT="阿拉伯（Arab）夏令时"
 GMT_PLUS_03_C_STANDARD="阿拉伯（Arab）标准时间"
 
-GMT_PLUS_03_D_DESC    ="(GMT+03:00) 内罗毕"
+GMT_PLUS_03_D_DESC    ="(UTC+03:00) 内罗毕"
 GMT_PLUS_03_D_DAYLIGHT="东非夏令时"
 GMT_PLUS_03_D_STANDARD="东非标准时间"
 
-GMT_PLUS_03_E_DESC    ="(GMT+03:00) 巴格达"
+GMT_PLUS_03_E_DESC    ="(UTC+03:00) 巴格达"
 GMT_PLUS_03_E_DAYLIGHT="阿拉伯（Arabic）夏令时"
 GMT_PLUS_03_E_STANDARD="阿拉伯（Arabic）标准时间"
 
-GMT_PLUS_03_F_DESC    ="(GMT+03:00) 伊斯坦布尔"
+GMT_PLUS_03_F_DESC    ="(UTC+03:00) 伊斯坦布尔"
 GMT_PLUS_03_F_DAYLIGHT="土耳其夏令时"
 GMT_PLUS_03_F_STANDARD="土耳其标准时间"
 
-GMT_PLUS_0330_A_DESC    ="(GMT+03:30) 德黑兰"
+GMT_PLUS_0330_A_DESC    ="(UTC+03:30) 德黑兰"
 GMT_PLUS_0330_A_DAYLIGHT="伊朗夏令时"
 GMT_PLUS_0330_A_STANDARD="伊朗标准时间"
 
-GMT_PLUS_04_A_DESC    ="(GMT+04:00) 阿布扎比，马斯喀特"
+GMT_PLUS_04_A_DESC    ="(UTC+04:00) 阿布扎比，马斯喀特"
 GMT_PLUS_04_A_DAYLIGHT="阿拉伯半岛夏令时"
 GMT_PLUS_04_A_STANDARD="阿拉伯半岛标准时间"
 
-GMT_PLUS_04_B_DESC    ="(GMT+04:00) 埃里温"
+GMT_PLUS_04_B_DESC    ="(UTC+04:00) 埃里温"
 GMT_PLUS_04_B_DAYLIGHT="高加索夏令时"
 GMT_PLUS_04_B_STANDARD="高加索标准时间"
 
-GMT_PLUS_04_C_DESC    ="(GMT+04:00) 伊热夫斯克，萨马拉，伏尔加格勒"
+GMT_PLUS_04_C_DESC    ="(UTC+04:00) 伊热夫斯克，萨马拉，伏尔加格勒"
 GMT_PLUS_04_C_DAYLIGHT="RTZ 3 夏令时"
 GMT_PLUS_04_C_STANDARD="RTZ 3 标准时间"
 
-GMT_PLUS_0430_A_DESC    ="(GMT+04:30) 喀布尔"
+GMT_PLUS_0430_A_DESC    ="(UTC+04:30) 喀布尔"
 GMT_PLUS_0430_A_DAYLIGHT="阿富汗夏令时"
 GMT_PLUS_0430_A_STANDARD="阿富汗标准时间"
 
-GMT_PLUS_05_A_DESC    ="(GMT+05:00) 叶卡捷琳堡"
+GMT_PLUS_05_A_DESC    ="(UTC+05:00) 叶卡捷琳堡"
 GMT_PLUS_05_A_DAYLIGHT="RTZ 4 夏令时"
 GMT_PLUS_05_A_STANDARD="RTZ 4 标准时间"
 
-GMT_PLUS_05_B_DESC    ="(GMT+05:00) 伊斯兰堡，卡拉奇，塔什干"
+GMT_PLUS_05_B_DESC    ="(UTC+05:00) 伊斯兰堡，卡拉奇，塔什干"
 GMT_PLUS_05_B_DAYLIGHT="西亚夏令时"
 GMT_PLUS_05_B_STANDARD="西亚标准时间"
 
-GMT_PLUS_0530_A_DESC    ="(GMT+05:30) 钦奈，加尔各答，孟买，新德里"
+GMT_PLUS_0530_A_DESC    ="(UTC+05:30) 钦奈，加尔各答，孟买，新德里"
 GMT_PLUS_0530_A_DAYLIGHT="印度夏令时"
 GMT_PLUS_0530_A_STANDARD="印度标准时间"
 
-GMT_PLUS_0530_B_DESC    ="(GMT+05:30) 斯里贾亚瓦德纳普拉"
+GMT_PLUS_0530_B_DESC    ="(UTC+05:30) 斯里贾亚瓦德纳普拉"
 GMT_PLUS_0530_B_DAYLIGHT="斯里兰卡夏令时"
 GMT_PLUS_0530_B_STANDARD="斯里兰卡标准时间"
 
-GMT_PLUS_0545_A_DESC    ="(GMT+05:45) 加德满都"
+GMT_PLUS_0545_A_DESC    ="(UTC+05:45) 加德满都"
 GMT_PLUS_0545_A_DAYLIGHT="尼泊尔夏令时"
 GMT_PLUS_0545_A_STANDARD="尼泊尔标准时间"
 
-GMT_PLUS_06_A_DESC    ="(GMT+06:00) 阿斯塔纳，达卡"
+GMT_PLUS_06_A_DESC    ="(UTC+06:00) 阿斯塔纳，达卡"
 GMT_PLUS_06_A_DAYLIGHT="中亚夏令时"
 GMT_PLUS_06_A_STANDARD="中亚标准时间"
 
-GMT_PLUS_06_B_DESC    ="(GMT+06:00) 鄂木斯克"
+GMT_PLUS_06_B_DESC    ="(UTC+06:00) 鄂木斯克"
 GMT_PLUS_06_B_DAYLIGHT="鄂木斯克夏令时"
 GMT_PLUS_06_B_STANDARD="鄂木斯克标准时间"
 
-GMT_PLUS_0630_A_DESC    ="(GMT+06:30) 仰光"
+GMT_PLUS_0630_A_DESC    ="(UTC+06:30) 仰光"
 GMT_PLUS_0630_A_DAYLIGHT="缅甸夏令时"
 GMT_PLUS_0630_A_STANDARD="缅甸标准时间"
 
-GMT_PLUS_07_A_DESC    ="(GMT+07:00) 新西伯利亚"
+GMT_PLUS_07_A_DESC    ="(UTC+07:00) 新西伯利亚"
 GMT_PLUS_07_A_DAYLIGHT="新西伯利亚夏令时"
 GMT_PLUS_07_A_STANDARD="新西伯利亚标准时间"
 
-GMT_PLUS_07_B_DESC    ="(GMT+07:00) 曼谷，河内，雅加达"
+GMT_PLUS_07_B_DESC    ="(UTC+07:00) 曼谷，河内，雅加达"
 GMT_PLUS_07_B_DAYLIGHT="东南亚夏令时"
 GMT_PLUS_07_B_STANDARD="东南亚标准时间"
 
-GMT_PLUS_07_C_DESC    ="(GMT+07:00) 克拉斯诺亚尔斯克"
+GMT_PLUS_07_C_DESC    ="(UTC+07:00) 克拉斯诺亚尔斯克"
 GMT_PLUS_07_C_DAYLIGHT="RTZ 6 夏令时"
 GMT_PLUS_07_C_STANDARD="RTZ 6 标准时间"
 
-GMT_PLUS_07_D_DESC    ="(GMT+07:00) 托木斯克"
+GMT_PLUS_07_D_DESC    ="(UTC+07:00) 托木斯克"
 GMT_PLUS_07_D_DAYLIGHT="托木斯克夏令时"
 GMT_PLUS_07_D_STANDARD="托木斯克标准时间"
 
-GMT_PLUS_08_A_DESC    ="(GMT+08:00) 北京，重庆，香港特别行政区，乌鲁木齐"
+GMT_PLUS_08_A_DESC    ="(UTC+08:00) 北京，重庆，香港特别行政区，乌鲁木齐"
 GMT_PLUS_08_A_DAYLIGHT="中国夏令时"
 GMT_PLUS_08_A_STANDARD="中国标准时间"
 
-GMT_PLUS_08_B_DESC    ="(GMT+08:00) 吉隆坡，新加坡"
+GMT_PLUS_08_B_DESC    ="(UTC+08:00) 吉隆坡，新加坡"
 GMT_PLUS_08_B_DAYLIGHT="新加坡夏令时"
 GMT_PLUS_08_B_STANDARD="新加坡标准时间"
 
-GMT_PLUS_08_C_DESC    ="(GMT+08:00) 台北"
+GMT_PLUS_08_C_DESC    ="(UTC+08:00) 台北"
 GMT_PLUS_08_C_DAYLIGHT="台北夏令时"
 GMT_PLUS_08_C_STANDARD="台北标准时间"
 
-GMT_PLUS_08_D_DESC    ="(GMT+08:00) 珀斯"
+GMT_PLUS_08_D_DESC    ="(UTC+08:00) 珀斯"
 GMT_PLUS_08_D_DAYLIGHT="澳大利亚西部夏令时"
 GMT_PLUS_08_D_STANDARD="澳大利亚西部标准时间"
 
-GMT_PLUS_08_E_DESC    ="(GMT+08:00) 乌兰巴托"
+GMT_PLUS_08_E_DESC    ="(UTC+08:00) 乌兰巴托"
 GMT_PLUS_08_E_DAYLIGHT="乌兰巴托夏令时"
 GMT_PLUS_08_E_STANDARD="乌兰巴托标准时间"
 
-GMT_PLUS_08_F_DESC    ="(GMT+08:00) 伊尔库茨克"
+GMT_PLUS_08_F_DESC    ="(UTC+08:00) 伊尔库茨克"
 GMT_PLUS_08_F_DAYLIGHT="RTZ 7 夏令时"
 GMT_PLUS_08_F_STANDARD="RTZ 7 标准时间"
 
-GMT_PLUS_09_A_DESC    ="(GMT+09:00) 首尔"
+GMT_PLUS_09_A_DESC    ="(UTC+09:00) 首尔"
 GMT_PLUS_09_A_DAYLIGHT="韩国夏令时"
 GMT_PLUS_09_A_STANDARD="韩国标准时间"
 
-GMT_PLUS_09_B_DESC    ="(GMT+09:00) 大阪，札幌，东京"
+GMT_PLUS_09_B_DESC    ="(UTC+09:00) 大阪，札幌，东京"
 GMT_PLUS_09_B_DAYLIGHT="东京夏令时"
 GMT_PLUS_09_B_STANDARD="东京标准时间"
 
-GMT_PLUS_09_C_DESC    ="(GMT+09:00) 雅库茨克"
+GMT_PLUS_09_C_DESC    ="(UTC+09:00) 雅库茨克"
 GMT_PLUS_09_C_DAYLIGHT="RTZ 8 夏令时"
 GMT_PLUS_09_C_STANDARD="RTZ 8 标准时间"
 
-GMT_PLUS_0930_A_DESC    ="(GMT+09:30) 达尔文"
+GMT_PLUS_0930_A_DESC    ="(UTC+09:30) 达尔文"
 GMT_PLUS_0903_A_DAYLIGHT="澳大利亚中部夏令时"
 GMT_PLUS_0930_A_STANDARD="澳大利亚中部标准时间"
 
-GMT_PLUS_0930_B_DESC    ="(GMT+09:30) 阿德莱德"
+GMT_PLUS_0930_B_DESC    ="(UTC+09:30) 阿德莱德"
 GMT_PLUS_0930_B_DAYLIGHT="中部澳大利亚夏令时"
 GMT_PLUS_0930_B_STANDARD="中部澳大利亚标准时间"
 
-GMT_PLUS_10_A_DESC    ="(GMT+10:00) 堪培拉，墨尔本，悉尼"
+GMT_PLUS_10_A_DESC    ="(UTC+10:00) 堪培拉，墨尔本，悉尼"
 GMT_PLUS_10_A_DAYLIGHT="澳大利亚东部夏令时"
 GMT_PLUS_10_A_STANDARD="澳大利亚东部标准时间"
 
-GMT_PLUS_10_B_DESC    ="(GMT+10:00) 布里斯班"
+GMT_PLUS_10_B_DESC    ="(UTC+10:00) 布里斯班"
 GMT_PLUS_10_B_DAYLIGHT="东部澳大利亚夏令时"
 GMT_PLUS_10_B_STANDARD="东部澳大利亚标准时间"
 
-GMT_PLUS_10_C_DESC    ="(GMT+10:00) 霍巴特"
+GMT_PLUS_10_C_DESC    ="(UTC+10:00) 霍巴特"
 GMT_PLUS_10_C_DAYLIGHT="塔斯马尼亚岛夏令时"
 GMT_PLUS_10_C_STANDARD="塔斯马尼亚岛标准时间"
 
-GMT_PLUS_10_D_DESC    ="(GMT+10:00) 符拉迪沃斯托克（海参崴）"
+GMT_PLUS_10_D_DESC    ="(UTC+10:00) 符拉迪沃斯托克（海参崴）"
 GMT_PLUS_10_D_DAYLIGHT="RTZ 9 夏令时"
 GMT_PLUS_10_D_STANDARD="RTZ 9 标准时间"
 
-GMT_PLUS_10_E_DESC    ="(GMT+10:00) 关岛，莫尔兹比港"
+GMT_PLUS_10_E_DESC    ="(UTC+10:00) 关岛，莫尔兹比港"
 GMT_PLUS_10_E_DAYLIGHT="太平洋西部夏令时"
 GMT_PLUS_10_E_STANDARD="太平洋西部标准时间"
 
-GMT_PLUS_11_A_DESC    ="(GMT+11:00) 所罗门群岛，新喀里多尼亚"
+GMT_PLUS_11_A_DESC    ="(UTC+11:00) 所罗门群岛，新喀里多尼亚"
 GMT_PLUS_11_A_DAYLIGHT="太平洋中部夏令时"
 GMT_PLUS_11_A_STANDARD="太平洋中部标准时间"
 
-GMT_PLUS_11_B_DESC    ="(GMT+11:00) 乔库尔达赫"
+GMT_PLUS_11_B_DESC    ="(UTC+11:00) 乔库尔达赫"
 GMT_PLUS_11_B_DAYLIGHT="RTZ 10 夏令时"
 GMT_PLUS_11_B_STANDARD="RTZ 10 标准时间"
 
-GMT_PLUS_11_C_DESC    ="(GMT+11:00) 马加丹"
+GMT_PLUS_11_C_DESC    ="(UTC+11:00) 马加丹"
 GMT_PLUS_11_C_DAYLIGHT="马加丹夏令时"
 GMT_PLUS_11_C_STANDARD="马加丹标准时间"
 
-GMT_PLUS_12_A_DESC    ="(GMT+12:00) 斐济，勘察加半岛，马绍尔群岛"
+GMT_PLUS_12_A_DESC    ="(UTC+12:00) 斐济，勘察加半岛，马绍尔群岛"
 GMT_PLUS_12_A_DAYLIGHT="斐济夏令时"
 GMT_PLUS_12_A_STANDARD="斐济标准时间"
 
-GMT_PLUS_12_B_DESC    ="(GMT+12:00) 阿纳德尔，堪察加彼得罗巴甫洛夫斯克"
+GMT_PLUS_12_B_DESC    ="(UTC+12:00) 阿纳德尔，堪察加彼得罗巴甫洛夫斯克"
 GMT_PLUS_12_B_DAYLIGHT="RTZ 11 夏令时"
 GMT_PLUS_12_B_STANDARD="RTZ 11 标准时间"
 
-GMT_PLUS_12_C_DESC    ="(GMT+12:00) 奥克兰，惠灵顿"
+GMT_PLUS_12_C_DESC    ="(UTC+12:00) 奥克兰，惠灵顿"
 GMT_PLUS_12_C_DAYLIGHT="新西兰夏令时"
 GMT_PLUS_12_C_STANDARD="新西兰标准时间"
 
-GMT_PLUS_13_A_DESC    ="(GMT+13:00) 努库阿洛法"
+GMT_PLUS_13_A_DESC    ="(UTC+13:00) 努库阿洛法"
 GMT_PLUS_13_A_DAYLIGHT="汤加夏令时"
 GMT_PLUS_13_A_STANDARD="汤加标准时间"
 
@@ -8246,339 +8446,339 @@ COUNTRY_ZA="África do Sul"
 COUNTRY_ZM="Zambia"
 COUNTRY_ZW="Zimbabwe"
 
-GMT_MINUS_12_A_DESC    ="(GMT-12:00) Eniwetok, Kwajalein"
+GMT_MINUS_12_A_DESC    ="(UTC-12:00) Eniwetok, Kwajalein"
 GMT_MINUS_12_A_DAYLIGHT="Horário de verão da Linha Internacional de data"
 GMT_MINUS_12_A_STANDARD="Horário padrão da Linha Internacional de data"
 
-GMT_MINUS_11_A_DESC    ="(GMT-11:00) Ilhas Midway, Samoa"
+GMT_MINUS_11_A_DESC    ="(UTC-11:00) Ilhas Midway, Samoa"
 GMT_MINUS_11_A_DAYLIGHT="Horário de verão de Samoa"
 GMT_MINUS_11_A_STANDARD="Horário padrão de Samoa"
 
-GMT_MINUS_10_A_DESC    ="(GMT-10:00) Havai"
+GMT_MINUS_10_A_DESC    ="(UTC-10:00) Havai"
 GMT_MINUS_10_A_DAYLIGHT="Horário de verão do Havai"
 GMT_MINUS_10_A_STANDARD="Horário padrão do Havai"
 
-GMT_MINUS_09_A_DESC    ="(GMT-09:00) Alasca"
+GMT_MINUS_09_A_DESC    ="(UTC-09:00) Alasca"
 GMT_MINUS_09_A_DAYLIGHT="Horário de verão do Alasca"
 GMT_MINUS_09_A_STANDARD="Horário padrão do Alasca"
 
-GMT_MINUS_08_A_DESC    ="(GMT-08:00) Hora do Pacífico (E.U.A. e Canadá); Tijuana"
+GMT_MINUS_08_A_DESC    ="(UTC-08:00) Hora do Pacífico (E.U.A. e Canadá); Tijuana"
 GMT_MINUS_08_A_DAYLIGHT="Horário de verão do Pacífico"
 GMT_MINUS_08_A_STANDARD="Horário padrão do Pacífico"
 
-GMT_MINUS_07_A_DESC    ="(GMT-07:00) Hora das Regiões Montanhosas (E.U.A. e Canadá"
+GMT_MINUS_07_A_DESC    ="(UTC-07:00) Hora das Regiões Montanhosas (E.U.A. e Canadá"
 GMT_MINUS_07_A_DAYLIGHT="Horário de verão das Regiões Montanhosas(E.U.A. e Canadá)"
 GMT_MINUS_07_A_STANDARD="Horário padrão das Regiões Montanhosas(E.U.A. e Canadá)"
 
-GMT_MINUS_07_B_DESC    ="(GMT-07:00) Chihuahua, La Paz, Mazatlan"
+GMT_MINUS_07_B_DESC    ="(UTC-07:00) Chihuahua, La Paz, Mazatlan"
 GMT_MINUS_07_B_DAYLIGHT="Horário de verão das Montanhas (México)"
 GMT_MINUS_07_B_STANDARD="Horário padrão das Montanhas (México)"
 
-GMT_MINUS_07_C_DESC    ="(GMT-07:00) Arizona"
+GMT_MINUS_07_C_DESC    ="(UTC-07:00) Arizona"
 GMT_MINUS_07_C_DAYLIGHT="Horário de verão das Regiões Montanhosas(E.U.A.)"
 GMT_MINUS_07_C_STANDARD="Horário padrão das Regiões Montanhosas(E.U.A.)"
 
-GMT_MINUS_06_A_DESC    ="(GMT-06:00) Hora da América Central (E.U.A. e Canadá)"
+GMT_MINUS_06_A_DESC    ="(UTC-06:00) Hora da América Central (E.U.A. e Canadá)"
 GMT_MINUS_06_A_DAYLIGHT="Horário de verão da América Central"
 GMT_MINUS_06_A_STANDARD="Horário padrão da América Central"
 
-GMT_MINUS_06_B_DESC    ="(GMT-06:00)  Saskatchewan"
+GMT_MINUS_06_B_DESC    ="(UTC-06:00)  Saskatchewan"
 GMT_MINUS_06_B_DAYLIGHT="Horário de verão Canadá Central"
 GMT_MINUS_06_B_STANDARD="Horário padrão Canadá Central"
 
-GMT_MINUS_06_C_DESC    ="(GMT-06:00) Guadalajara, Cidade do México, Monterrey"
+GMT_MINUS_06_C_DESC    ="(UTC-06:00) Guadalajara, Cidade do México, Monterrey"
 GMT_MINUxsS_06_C_DAYLIGHT="Horário de verão A. Central (México)"
 GMT_MINUS_06_C_STANDARD="Horário padrão A. Central (México)"
 
-GMT_MINUS_06_D_DESC    ="(GMT-06:00) América Central"
+GMT_MINUS_06_D_DESC    ="(UTC-06:00) América Central"
 GMT_MINUS_06_D_DAYLIGHT="Horário de verão da América Central"
 GMT_MINUS_06_D_STANDARD="Horário padrão da América Central"
 
-GMT_MINUS_05_A_DESC    ="(GMT-05:00) Hora do Leste (E.U.A. e Canadá)"
+GMT_MINUS_05_A_DESC    ="(UTC-05:00) Hora do Leste (E.U.A. e Canadá)"
 GMT_MINUS_05_A_DAYLIGHT="Horário de verão do Leste"
 GMT_MINUS_05_A_STANDARD="Horário padrão do Leste"
 
-GMT_MINUS_05_B_DESC    ="(GMT-05:00) Indiana (Leste)"
+GMT_MINUS_05_B_DESC    ="(UTC-05:00) Indiana (Leste)"
 GMT_MINUS_05_B_DAYLIGHT="Horário de verão do Leste E.U.A."
 GMT_MINUS_05_B_STANDARD="Horário padrão do Leste E.U.A."
 
-GMT_MINUS_05_C_DESC    ="(GMT-05:00) Bogota, Lima, Quito, Rio Branco"
+GMT_MINUS_05_C_DESC    ="(UTC-05:00) Bogota, Lima, Quito, Rio Branco"
 GMT_MINUS_05_C_DAYLIGHT="Horário de verão do SA Pacifico"
 GMT_MINUS_05_C_STANDARD="Horário padrão do SA Pacifico"
 
-GMT_MINUS_04_A_DESC    ="(GMT-04:00) Hora do Atlântico (Canadá)"
+GMT_MINUS_04_A_DESC    ="(UTC-04:00) Hora do Atlântico (Canadá)"
 GMT_MINUS_04_A_DAYLIGHT="Horário de verão do Atlântico"
 GMT_MINUS_04_A_STANDARD="Horário padrão do Atlântico"
 
-GMT_MINUS_04_B_DESC    ="(GMT-04:00) La Paz"
+GMT_MINUS_04_B_DESC    ="(UTC-04:00) La Paz"
 GMT_MINUS_04_B_DAYLIGHT="Horário de verão SA Oeste"
 GMT_MINUS_04_B_STANDARD="Horário padrão SA Oeste"
 
-GMT_MINUS_0330_A_DESC    ="(GMT-03:30) Terra Nova"
+GMT_MINUS_0330_A_DESC    ="(UTC-03:30) Terra Nova"
 GMT_MINUS_0330_A_DAYLIGHT="Horário de verão Terra Nova"
 GMT_MINUS_0330_A_STANDARD="Horário padrão Terra Nova"
 
-GMT_MINUS_03_A_DESC    ="(GMT-03:00) Santiago"
+GMT_MINUS_03_A_DESC    ="(UTC-03:00) Santiago"
 GMT_MINUS_03_A_DAYLIGHT="Horário de verão do SA Pacifico"
 GMT_MINUS_03_A_STANDARD="Horário padrão do SA Pacifico"
 
-GMT_MINUS_03_B_DESC    ="(GMT-03:00) Brasília"
+GMT_MINUS_03_B_DESC    ="(UTC-03:00) Brasília"
 GMT_MINUS_03_B_DAYLIGHT="Horário de verão E. América do Sul"
 GMT_MINUS_03_B_STANDARD="Horário padrão E. América do Sul"
 
-GMT_MINUS_03_C_DESC    ="(GMT-03:00) Buenos Aires, Georgetown"
+GMT_MINUS_03_C_DESC    ="(UTC-03:00) Buenos Aires, Georgetown"
 GMT_MINUS_03_C_DAYLIGHT="Horário de verão SA Leste"
 GMT_MINUS_03_C_STANDARD="Horário padrão SA Leste"
 
-GMT_MINUS_03_D_DESC    ="(GMT-03:00) Gronelândia"
+GMT_MINUS_03_D_DESC    ="(UTC-03:00) Gronelândia"
 GMT_MINUS_03_D_DAYLIGHT="Horário de verão Gronelândia"
 GMT_MINUS_03_D_STANDARD="Horário padrão Gronelândia"
 
-GMT_MINUS_02_A_DESC    ="(GMT-02:00) Atlântico Médio"
+GMT_MINUS_02_A_DESC    ="(UTC-02:00) Atlântico Médio"
 GMT_MINUS_02_A_DAYLIGHT="Horário de verão Atlântico Médio"
 GMT_MINUS_02_A_STANDARD="Horário padrão Atlântico Médio"
 
-GMT_MINUS_01_A_DESC    ="(GMT-01:00) Arquipélago dos Açores"
+GMT_MINUS_01_A_DESC    ="(UTC-01:00) Arquipélago dos Açores"
 GMT_MINUS_01_A_DAYLIGHT="Horário de verão dos Açores"
 GMT_MINUS_01_A_STANDARD="Horário padrão dos Açores"
 
-GMT_MINUS_01_B_DESC    ="(GMT-01:00) Ilha de Cabo Verde"
+GMT_MINUS_01_B_DESC    ="(UTC-01:00) Ilha de Cabo Verde"
 GMT_MINUS_01_B_DAYLIGHT="Horário de verão de Cabo Verde"
 GMT_MINUS_01_B_STANDARD="Horário padrão de Cabo Verde"
 
-GMT_PLUS_00_A_DESC    ="(GMT+00:00)Merid. de Greenwich: Dublin, Edinburgo, Lisboa, Londres"
+GMT_PLUS_00_A_DESC    ="(UTC+00:00)Merid. de Greenwich: Dublin, Edinburgo, Lisboa, Londres"
 GMT_PLUS_00_A_DAYLIGHT="Horário de verão GMT"
 GMT_PLUS_00_A_STANDARD="Horário padrão GMT"
 
-GMT_PLUS_00_B_DESC    ="(GMT+00:00) Casablanca, Monrovia, Reykjavik"
+GMT_PLUS_00_B_DESC    ="(UTC+00:00) Casablanca, Monrovia, Reykjavik"
 GMT_PLUS_00_B_DAYLIGHT="Horário de verão Greenwich"
 GMT_PLUS_00_B_STANDARD="Horário padrão Greenwich"
 
-GMT_PLUS_01_A_DESC    ="(GMT+01:00) Belgrado, Bratislava, Budapest, Ljubljana, Praga"
+GMT_PLUS_01_A_DESC    ="(UTC+01:00) Belgrado, Bratislava, Budapest, Ljubljana, Praga"
 GMT_PLUS_01_A_DAYLIGHT="Horário de verão Europa Central"
 GMT_PLUS_01_A_STANDARD="Horário padrão Europa Central"
 
-GMT_PLUS_01_B_DESC    ="(GMT+01:00) Sarajevo, Skopje, Warsaw, Zagreb"
+GMT_PLUS_01_B_DESC    ="(UTC+01:00) Sarajevo, Skopje, Warsaw, Zagreb"
 GMT_PLUS_01_B_DAYLIGHT="Horário de verão Europa Central"
 GMT_PLUS_01_B_STANDARD="Horário padrão Europa Central"
 
-GMT_PLUS_01_C_DESC    ="(GMT+01:00) Bruxelas, Copenhaga, Madrid, Paris"
+GMT_PLUS_01_C_DESC    ="(UTC+01:00) Bruxelas, Copenhaga, Madrid, Paris"
 GMT_PLUS_01_C_DAYLIGHT="Horário de verão Romance"
 GMT_PLUS_01_C_STANDARD="Horário padrão Romance"
 
-GMT_PLUS_01_D_DESC    ="(GMT+01:00) Amsterdam, Berlin, Berna, Roma, Estocolmo, Viena"
+GMT_PLUS_01_D_DESC    ="(UTC+01:00) Amsterdam, Berlin, Berna, Roma, Estocolmo, Viena"
 GMT_PLUS_01_D_DAYLIGHT="Horário de verão W. Europe"
 GMT_PLUS_01_D_STANDARD="Horário padrão W. Europe"
 
-GMT_PLUS_02_A_DESC    ="(GMT+02:00) Chisinau"
+GMT_PLUS_02_A_DESC    ="(UTC+02:00) Chisinau"
 GMT_PLUS_02_A_DAYLIGHT="Horário de verão E. Europe"
 GMT_PLUS_02_A_STANDARD="Horário padrão E. Europe"
 
-GMT_PLUS_02_B_DESC    ="(GMT+02:00) Cairo"
+GMT_PLUS_02_B_DESC    ="(UTC+02:00) Cairo"
 GMT_PLUS_02_B_DAYLIGHT="Horário de verão Egipto"
 GMT_PLUS_02_B_STANDARD="Horário padrão Egipto"
 
-GMT_PLUS_02_C_DESC    ="(GMT+02:00) Helsinkia, Kyiv, Riga, Sófia, Tallinn, Vilnius"
+GMT_PLUS_02_C_DESC    ="(UTC+02:00) Helsinkia, Kyiv, Riga, Sófia, Tallinn, Vilnius"
 GMT_PLUS_02_C_DAYLIGHT="Horário de verão FLE"
 GMT_PLUS_02_C_STANDARD="Horário padrão FLE"
 
-GMT_PLUS_02_D_DESC    ="(GMT+02:00) Atenas, Bucareste"
+GMT_PLUS_02_D_DESC    ="(UTC+02:00) Atenas, Bucareste"
 GMT_PLUS_02_D_DAYLIGHT="Horário de verão GTB"
 GMT_PLUS_02_D_STANDARD="Horário padrão GTB"
 
-GMT_PLUS_02_E_DESC    ="(GMT+02:00) Jerusalém"
+GMT_PLUS_02_E_DESC    ="(UTC+02:00) Jerusalém"
 GMT_PLUS_02_E_DAYLIGHT="Horário de verão de Israel"
 GMT_PLUS_02_E_STANDARD="Horário padrão de Israel"
 
-GMT_PLUS_02_F_DESC    ="(GMT+02:00) Harare, Pretória"
+GMT_PLUS_02_F_DESC    ="(UTC+02:00) Harare, Pretória"
 GMT_PLUS_02_F_DAYLIGHT="Horário de verão da África do Sul"
 GMT_PLUS_02_F_STANDARD="Horário padrão da África do Sul"
 
-GMT_PLUS_02_G_DESC    ="(GMT+02:00) Kaliningrado"
+GMT_PLUS_02_G_DESC    ="(UTC+02:00) Kaliningrado"
 GMT_PLUS_02_G_DAYLIGHT="Horário de verão RTZ 1"
 GMT_PLUS_02_G_STANDARD="Horário padrão RTZ 1"
 
-GMT_PLUS_03_A_DESC    ="(GMT+03:00) Minsk"
+GMT_PLUS_03_A_DESC    ="(UTC+03:00) Minsk"
 GMT_PLUS_03_A_DAYLIGHT="Horário de verão Belarus"
 GMT_PLUS_03_A_STANDARD="Horário padrão Belarus"
 
-GMT_PLUS_03_B_DESC    ="(GMT+03:00) Moscovo, St. Petersburg"
+GMT_PLUS_03_B_DESC    ="(UTC+03:00) Moscovo, St. Petersburg"
 GMT_PLUS_03_B_DAYLIGHT="Horário de verão RTZ 2"
 GMT_PLUS_03_B_STANDARD="Horário padrão RTZ 2"
 
-GMT_PLUS_03_C_DESC    ="(GMT+03:00) Kuwait, Riyadh"
+GMT_PLUS_03_C_DESC    ="(UTC+03:00) Kuwait, Riyadh"
 GMT_PLUS_03_C_DAYLIGHT="Horário de verão Arábia"
 GMT_PLUS_03_C_STANDARD="Horário padrão Arábia"
 
-GMT_PLUS_03_D_DESC    ="(GMT+03:00) Nairobi"
+GMT_PLUS_03_D_DESC    ="(UTC+03:00) Nairobi"
 GMT_PLUS_03_D_DAYLIGHT="Horário de verão E. África"
 GMT_PLUS_03_D_STANDARD="Horário padrão E. África"
 
-GMT_PLUS_03_E_DESC    ="(GMT+03:00) Baghdad"
+GMT_PLUS_03_E_DESC    ="(UTC+03:00) Baghdad"
 GMT_PLUS_03_E_DAYLIGHT="Horário de verão Iraque"
 GMT_PLUS_03_E_STANDARD="Horário padrão Iraque"
 
-GMT_PLUS_03_F_DESC    ="(GMT+03:00) Istambul"
+GMT_PLUS_03_F_DESC    ="(UTC+03:00) Istambul"
 GMT_PLUS_03_F_DAYLIGHT="Horário de verão Turquia"
 GMT_PLUS_03_F_STANDARD="Horário padrão Turquia"
 
-GMT_PLUS_0330_A_DESC    ="(GMT+03:30) Teerão"
+GMT_PLUS_0330_A_DESC    ="(UTC+03:30) Teerão"
 GMT_PLUS_0330_A_DAYLIGHT="Horário de verão do Irão"
 GMT_PLUS_0330_A_STANDARD="Horário padrão do Irão"
 
-GMT_PLUS_04_A_DESC    ="(GMT+04:00) Abu Dhabi, Muscat"
+GMT_PLUS_04_A_DESC    ="(UTC+04:00) Abu Dhabi, Muscat"
 GMT_PLUS_04_A_DAYLIGHT="Horário de verão Arábia"
 GMT_PLUS_04_A_STANDARD="Horário padrão Arábia"
 
-GMT_PLUS_04_B_DESC    ="(GMT+04:00) Yerevan"
+GMT_PLUS_04_B_DESC    ="(UTC+04:00) Yerevan"
 GMT_PLUS_04_B_DAYLIGHT="Horário de verão Caucasus"
 GMT_PLUS_04_B_STANDARD="Horário padrão Caucasus"
 
-GMT_PLUS_04_C_DESC    ="(GMT+04:00) Izhevsk, Samara, Volgograd"
+GMT_PLUS_04_C_DESC    ="(UTC+04:00) Izhevsk, Samara, Volgograd"
 GMT_PLUS_04_C_DAYLIGHT="Horário de verão RTZ 3"
 GMT_PLUS_04_C_STANDARD="Horário padrão RTZ 3"
 
-GMT_PLUS_0430_A_DESC    ="(GMT+04:30) Kabul"
+GMT_PLUS_0430_A_DESC    ="(UTC+04:30) Kabul"
 GMT_PLUS_0430_A_DAYLIGHT="Horário de verão Afghanistão"
 GMT_PLUS_0430_A_STANDARD="Horário padrão Afghanistão"
 
-GMT_PLUS_05_A_DESC    ="(GMT+05:00) Ekaterinburg"
+GMT_PLUS_05_A_DESC    ="(UTC+05:00) Ekaterinburg"
 GMT_PLUS_05_A_DAYLIGHT="Horário de verão RTZ 4"
 GMT_PLUS_05_A_STANDARD="Horário padrão RTZ 4"
 
-GMT_PLUS_05_B_DESC    ="(GMT+05:00) Islamabad, Karachi, Tashkent"
+GMT_PLUS_05_B_DESC    ="(UTC+05:00) Islamabad, Karachi, Tashkent"
 GMT_PLUS_05_B_DAYLIGHT="Horário de verão West Asia"
 GMT_PLUS_05_B_STANDARD="Horário padrão West Asia"
 
-GMT_PLUS_0530_A_DESC    ="(GMT+05:30) Chennai, Kolkata, Mumbai, Nova Delhi"
+GMT_PLUS_0530_A_DESC    ="(UTC+05:30) Chennai, Kolkata, Mumbai, Nova Delhi"
 GMT_PLUS_0530_A_DAYLIGHT="Horário de verão Índia"
 GMT_PLUS_0530_A_STANDARD="Horário padrão Índia"
 
-GMT_PLUS_0530_B_DESC    ="(GMT+05:30) Sri Jayawardenepura"
+GMT_PLUS_0530_B_DESC    ="(UTC+05:30) Sri Jayawardenepura"
 GMT_PLUS_0530_B_DAYLIGHT="Horário de verão Sri Lanka"
 GMT_PLUS_0530_B_STANDARD="Horário padrão Sri Lanka"
 
-GMT_PLUS_0545_A_DESC    ="(GMT+05:45) Kathmandu"
+GMT_PLUS_0545_A_DESC    ="(UTC+05:45) Kathmandu"
 GMT_PLUS_0545_A_DAYLIGHT="Horário de verão Nepal"
 GMT_PLUS_0545_A_STANDARD="Horário padrão Nepal"
 
-GMT_PLUS_06_A_DESC    ="(GMT+06:00) Astana, Dhaka"
+GMT_PLUS_06_A_DESC    ="(UTC+06:00) Astana, Dhaka"
 GMT_PLUS_06_A_DAYLIGHT="Horário de verão Ásia Central"
 GMT_PLUS_06_A_STANDARD="Horário padrão Ásia Central"
 
-GMT_PLUS_06_B_DESC    ="(GMT+06:00) Omsk"
+GMT_PLUS_06_B_DESC    ="(UTC+06:00) Omsk"
 GMT_PLUS_06_B_DAYLIGHT="Horário de verão Omsk"
 GMT_PLUS_06_B_STANDARD="Horário padrão Omsk"
 
-GMT_PLUS_0630_A_DESC    ="(GMT+06:30) Yangon (Rangoon)"
+GMT_PLUS_0630_A_DESC    ="(UTC+06:30) Yangon (Rangoon)"
 GMT_PLUS_0630_A_DAYLIGHT="Horário de verão Myanmar"
 GMT_PLUS_0630_A_STANDARD="Horário padrão Myanmar"
 
-GMT_PLUS_07_A_DESC    ="(GMT+07:00) Novosibirsk"
+GMT_PLUS_07_A_DESC    ="(UTC+07:00) Novosibirsk"
 GMT_PLUS_07_A_DAYLIGHT="Horário de verão Novosibirsk"
 GMT_PLUS_07_A_STANDARD="Horário padrão Novosibirsk"
 
-GMT_PLUS_07_B_DESC    ="(GMT+07:00) Bangcoque, Hanói, Jakarta"
+GMT_PLUS_07_B_DESC    ="(UTC+07:00) Bangcoque, Hanói, Jakarta"
 GMT_PLUS_07_B_DAYLIGHT="Horário de verão SE Asia"
 GMT_PLUS_07_B_STANDARD="Horário padrão SE Asia"
 
-GMT_PLUS_07_C_DESC    ="(GMT+07:00) Krasnoyarsk"
+GMT_PLUS_07_C_DESC    ="(UTC+07:00) Krasnoyarsk"
 GMT_PLUS_07_C_DAYLIGHT="Horário de verão RTZ 6"
 GMT_PLUS_07_C_STANDARD="Horário padrão RTZ 6"
 
-GMT_PLUS_07_D_DESC    ="(GMT+07:00) Tomsk"
+GMT_PLUS_07_D_DESC    ="(UTC+07:00) Tomsk"
 GMT_PLUS_07_D_DAYLIGHT="Horário de verão de Tomsk"
 GMT_PLUS_07_D_STANDARD="Horário padrão de Tomsk"
 
-GMT_PLUS_08_A_DESC    ="(GMT+08:00) Beijing, Chongqing, Hong Kong, Urumqi"
+GMT_PLUS_08_A_DESC    ="(UTC+08:00) Beijing, Chongqing, Hong Kong, Urumqi"
 GMT_PLUS_08_A_DAYLIGHT="Horário de verão da China"
 GMT_PLUS_08_A_STANDARD="Horário padrão da China"
 
-GMT_PLUS_08_B_DESC    ="(GMT+08:00) Kuala Lumpur, Singapura"
+GMT_PLUS_08_B_DESC    ="(UTC+08:00) Kuala Lumpur, Singapura"
 GMT_PLUS_08_B_DAYLIGHT="Horário de verão em Singapura"
 GMT_PLUS_08_B_STANDARD="Horário padrão em Singapura"
 
-GMT_PLUS_08_C_DESC    ="(GMT+08:00) Taipei"
+GMT_PLUS_08_C_DESC    ="(UTC+08:00) Taipei"
 GMT_PLUS_08_C_DAYLIGHT="Horário de verão em Taipei"
 GMT_PLUS_08_C_STANDARD="Horário padrão de Taipei"
 
-GMT_PLUS_08_D_DESC    ="(GMT+08:00) Perth"
+GMT_PLUS_08_D_DESC    ="(UTC+08:00) Perth"
 GMT_PLUS_08_D_DAYLIGHT="Horário de verão W. Austrália"
 GMT_PLUS_08_D_STANDARD="Horário de padrão W. Austrália"
 
-GMT_PLUS_08_E_DESC    ="(GMT+08:00) UlaanBataar"
+GMT_PLUS_08_E_DESC    ="(UTC+08:00) UlaanBataar"
 GMT_PLUS_08_E_DAYLIGHT="Horário de verão de Ulaanbaatar"
 GMT_PLUS_08_E_STANDARD="Horário padrão de Ulaanbaatar"
 
-GMT_PLUS_08_F_DESC    ="(GMT+08:00) Irkutsk"
+GMT_PLUS_08_F_DESC    ="(UTC+08:00) Irkutsk"
 GMT_PLUS_08_F_DAYLIGHT="Horário de verão da RTZ 7"
 GMT_PLUS_08_F_STANDARD="Horário padrão da RTZ 7"
 
-GMT_PLUS_09_A_DESC    ="(GMT+09:00) Seoul"
+GMT_PLUS_09_A_DESC    ="(UTC+09:00) Seoul"
 GMT_PLUS_09_A_DAYLIGHT="Horário de verão de Coreia"
 GMT_PLUS_09_A_STANDARD="Horário padrão de Coreia"
 
-GMT_PLUS_09_B_DESC    ="(GMT+09:00) Osaka, Sapporo, Tóquio"
+GMT_PLUS_09_B_DESC    ="(UTC+09:00) Osaka, Sapporo, Tóquio"
 GMT_PLUS_09_B_DAYLIGHT="Horário de verão de Tóquio"
 GMT_PLUS_09_B_STANDARD="Horário padrão de Tóquio"
 
-GMT_PLUS_09_C_DESC    ="(GMT+09:00) Yakutsk"
+GMT_PLUS_09_C_DESC    ="(UTC+09:00) Yakutsk"
 GMT_PLUS_09_C_DAYLIGHT="Horário de verão da RTZ 9"
 GMT_PLUS_09_C_STANDARD="Horário padrão da RTZ 9"
 
-GMT_PLUS_0930_A_DESC    ="(GMT+09:30) Darwin"
+GMT_PLUS_0930_A_DESC    ="(UTC+09:30) Darwin"
 GMT_PLUS_0930_A_DAYLIGHT="Horário de verão de Austrália Central"
 GMT_PLUS_0930_A_STANDARD="Horário padrão de Austrália Central"
 
-GMT_PLUS_0930_B_DESC    ="(GMT+09:30) Adelaide"
+GMT_PLUS_0930_B_DESC    ="(UTC+09:30) Adelaide"
 GMT_PLUS_0930_B_DAYLIGHT="Horário de verão de Austrália Central"
 GMT_PLUS_0930_B_STANDARD="Horário padrão de Austrália Central"
 
-GMT_PLUS_10_A_DESC    ="(GMT+10:00) Canberra, Melbourne, Sydney"
+GMT_PLUS_10_A_DESC    ="(UTC+10:00) Canberra, Melbourne, Sydney"
 GMT_PLUS_10_A_DAYLIGHT="Horário de verão de AUS Eastern"
 GMT_PLUS_10_A_STANDARD="Horário padrão de AUS Eastern"
 
-GMT_PLUS_10_B_DESC    ="(GMT+10:00) Brisbane"
+GMT_PLUS_10_B_DESC    ="(UTC+10:00) Brisbane"
 GMT_PLUS_10_B_DAYLIGHT="Horário de verão de E.Austrália"
 GMT_PLUS_10_B_STANDARD="Horário padrão de E.Austrália"
 
-GMT_PLUS_10_C_DESC    ="(GMT+10:00) Hobart"
+GMT_PLUS_10_C_DESC    ="(UTC+10:00) Hobart"
 GMT_PLUS_10_C_DAYLIGHT="Horário de verão da Tasmânia"
 GMT_PLUS_10_C_STANDARD="Horário padrão da Tasmânia"
 
-GMT_PLUS_10_D_DESC    ="(GMT+10:00) Vladivostok"
+GMT_PLUS_10_D_DESC    ="(UTC+10:00) Vladivostok"
 GMT_PLUS_10_D_DAYLIGHT="Horário de verão da RTZ 9"
 GMT_PLUS_10_D_STANDARD="Horário padrão da RTZ 9"
 
-GMT_PLUS_10_E_DESC    ="(GMT+10:00) Guam, Port Moresby"
+GMT_PLUS_10_E_DESC    ="(UTC+10:00) Guam, Port Moresby"
 GMT_PLUS_10_E_DAYLIGHT="Horário de verão Pacífico Oeste"
 GMT_PLUS_10_E_STANDARD="Horário padrão Pacífico Oeste"
 
-GMT_PLUS_11_A_DESC    ="(GMT+11:00) Ilhas Salomão, Nova Caledónia"
+GMT_PLUS_11_A_DESC    ="(UTC+11:00) Ilhas Salomão, Nova Caledónia"
 GMT_PLUS_11_A_DAYLIGHT="Horário de verão Pacífico Central"
 GMT_PLUS_11_A_STANDARD="Horário padrão Pacífico Central"
 
-GMT_PLUS_11_B_DESC    ="(GMT+11:00) Chokurdakh"
+GMT_PLUS_11_B_DESC    ="(UTC+11:00) Chokurdakh"
 GMT_PLUS_11_B_DAYLIGHT="Horário de verão da RTZ 10"
 GMT_PLUS_11_B_STANDARD="Horário padrão da RTZ 10"
 
-GMT_PLUS_11_C_DESC    ="(GMT+11:00) Magadã"
+GMT_PLUS_11_C_DESC    ="(UTC+11:00) Magadã"
 GMT_PLUS_11_C_DAYLIGHT="Horário de verão de Magadan"
 GMT_PLUS_11_C_STANDARD="Horário padrão de Magadan"
 
-GMT_PLUS_12_A_DESC    ="(GMT+12:00) Fiji, Kamchatka, Ilhas Marshall."
+GMT_PLUS_12_A_DESC    ="(UTC+12:00) Fiji, Kamchatka, Ilhas Marshall."
 GMT_PLUS_12_A_DAYLIGHT="Horário de verão de Fiji"
 GMT_PLUS_12_A_STANDARD="Horário padrão de Fiji"
 
-GMT_PLUS_12_B_DESC    ="(GMT+12:00) Anadyr, Petropavlovsk-Kamchatsky"
+GMT_PLUS_12_B_DESC    ="(UTC+12:00) Anadyr, Petropavlovsk-Kamchatsky"
 GMT_PLUS_12_B_DAYLIGHT="Horário de verão da RTZ 11"
 GMT_PLUS_12_B_STANDARD="Horário padrão da RTZ 11"
 
-GMT_PLUS_12_C_DESC    ="(GMT+12:00) Auckland, Wellington"
+GMT_PLUS_12_C_DESC    ="(UTC+12:00) Auckland, Wellington"
 GMT_PLUS_12_C_DAYLIGHT="Horário de verão de Nova Zelandia"
 GMT_PLUS_12_C_STANDARD="Horário padrão de Nova Zelandia"
 
-GMT_PLUS_13_A_DESC    ="(GMT+13:00) Nuku'alofa"
+GMT_PLUS_13_A_DESC    ="(UTC+13:00) Nuku'alofa"
 GMT_PLUS_13_A_DAYLIGHT="Horário de verão de Tonga"
 GMT_PLUS_13_A_STANDARD="Horário padrão de Tonga"
 
@@ -8833,339 +9033,339 @@ COUNTRY_ZA="Güney Afrika"
 COUNTRY_ZM="Zambiya"
 COUNTRY_ZW="Zimbabve"
 
-GMT_MINUS_12_A_DESC    ="(GMT-12:00) Uluslararası Batı Tarih Çizgisi"
+GMT_MINUS_12_A_DESC    ="(UTC-12:00) Uluslararası Batı Tarih Çizgisi"
 GMT_MINUS_12_A_DAYLIGHT="Tarih Çizgisi Yaz Saati"
 GMT_MINUS_12_A_STANDARD="Tarih Çizgisi Standart Saati"
 
-GMT_MINUS_11_A_DESC    ="(GMT-11:00) Midway Adası, Samoa"
+GMT_MINUS_11_A_DESC    ="(UTC-11:00) Midway Adası, Samoa"
 GMT_MINUS_11_A_DAYLIGHT="Samoa Yaz Saati"
 GMT_MINUS_11_A_STANDARD="Samoa Standart Saati"
 
-GMT_MINUS_10_A_DESC    ="(GMT-10:00) Hawaii"
+GMT_MINUS_10_A_DESC    ="(UTC-10:00) Hawaii"
 GMT_MINUS_10_A_DAYLIGHT="Hawaii Yaz Saati"
 GMT_MINUS_10_A_STANDARD="Hawaii Standart Saati"
 
-GMT_MINUS_09_A_DESC    ="(GMT-09:00) Alaska"
+GMT_MINUS_09_A_DESC    ="(UTC-09:00) Alaska"
 GMT_MINUS_09_A_DAYLIGHT="Alaska Yaz Saati"
 GMT_MINUS_09_A_STANDARD="Alaska Standart Saati"
 
-GMT_MINUS_08_A_DESC    ="(GMT-08:00) Pasifik Saati (ABD & Kanada)"
+GMT_MINUS_08_A_DESC    ="(UTC-08:00) Pasifik Saati (ABD & Kanada)"
 GMT_MINUS_08_A_DAYLIGHT="Pasifik Yaz Saati"
 GMT_MINUS_08_A_STANDARD="Pasifik Standart Saati"
 
-GMT_MINUS_07_A_DESC    ="(GMT-07:00) Dağ Saati (ABD & Kanada)"
+GMT_MINUS_07_A_DESC    ="(UTC-07:00) Dağ Saati (ABD & Kanada)"
 GMT_MINUS_07_A_DAYLIGHT="ABD Dağ Yaz Saati"
 GMT_MINUS_07_A_STANDARD="ABD Dağ Standart Saati"
 
-GMT_MINUS_07_B_DESC    ="(GMT-07:00) Chihuahua, La Paz, Mazatlan"
+GMT_MINUS_07_B_DESC    ="(UTC-07:00) Chihuahua, La Paz, Mazatlan"
 GMT_MINUS_07_B_DAYLIGHT="Dağ Yaz Saati (Meksika)"
 GMT_MINUS_07_B_STANDARD="Dağ Standart Saati (Meksika)"
 
-GMT_MINUS_07_C_DESC    ="(GMT-07:00) Arizona"
+GMT_MINUS_07_C_DESC    ="(UTC-07:00) Arizona"
 GMT_MINUS_07_C_DAYLIGHT="ABD Dağ Yaz Saati"
 GMT_MINUS_07_C_STANDARD="ABD Dağ Standart Saati"
 
-GMT_MINUS_06_A_DESC    ="(GMT-06:00) Orta Amerika Saati (ABD & Kanada)"
+GMT_MINUS_06_A_DESC    ="(UTC-06:00) Orta Amerika Saati (ABD & Kanada)"
 GMT_MINUS_06_A_DAYLIGHT="Orta Amerika Yaz Saati"
 GMT_MINUS_06_A_STANDARD="Orta Amerika Standart Saati"
 
-GMT_MINUS_06_B_DESC    ="(GMT-06:00) Saskatchewan"
+GMT_MINUS_06_B_DESC    ="(UTC-06:00) Saskatchewan"
 GMT_MINUS_06_B_DAYLIGHT="Orta Kanada Yaz Saati"
 GMT_MINUS_06_B_STANDARD="Orta Kanada Standart Saati"
 
-GMT_MINUS_06_C_DESC    ="(GMT-06:00) Guadalajara, Mexico City, Monterrey"
+GMT_MINUS_06_C_DESC    ="(UTC-06:00) Guadalajara, Mexico City, Monterrey"
 GMT_MINUS_06_C_DAYLIGHT="Orta Amerika Yaz Saati (Mexico)"
 GMT_MINUS_06_C_STANDARD="Orta Amerika Standart Saati (Mexico)"
 
-GMT_MINUS_06_D_DESC    ="(GMT-06:00) Orta Amerika"
+GMT_MINUS_06_D_DESC    ="(UTC-06:00) Orta Amerika"
 GMT_MINUS_06_D_DAYLIGHT="Orta Amerika Yaz Saati"
 GMT_MINUS_06_D_STANDARD="Orta Amerika Standart Saati"
 
-GMT_MINUS_05_A_DESC    ="(GMT-05:00) Doğu Saati (ABD & Kanada)"
+GMT_MINUS_05_A_DESC    ="(UTC-05:00) Doğu Saati (ABD & Kanada)"
 GMT_MINUS_05_A_DAYLIGHT="Doğu Amerika Yaz Saati"
 GMT_MINUS_05_A_STANDARD="Doğu Amerika Standart Saati"
 
-GMT_MINUS_05_B_DESC    ="(GMT-05:00) Indiana (Doğu)"
+GMT_MINUS_05_B_DESC    ="(UTC-05:00) Indiana (Doğu)"
 GMT_MINUS_05_B_DAYLIGHT="Doğu Amerika Yaz Saati"
 GMT_MINUS_05_B_STANDARD="Doğu Amerika Standart Saati"
 
-GMT_MINUS_05_C_DESC    ="(GMT-05:00) Bogota, Lima, Quito, Rio Branco"
+GMT_MINUS_05_C_DESC    ="(UTC-05:00) Bogota, Lima, Quito, Rio Branco"
 GMT_MINUS_05_C_DAYLIGHT="Güney Amerika Pasifik Yaz Saati"
 GMT_MINUS_05_C_STANDARD="Güney Amerika Pasifik Standart Saati"
 
-GMT_MINUS_04_A_DESC    ="(GMT-04:00) Atlantik Saati (Kanada)"
+GMT_MINUS_04_A_DESC    ="(UTC-04:00) Atlantik Saati (Kanada)"
 GMT_MINUS_04_A_DAYLIGHT="Atlantik Yaz Saati"
 GMT_MINUS_04_A_STANDARD="Atlantik Standart Saati"
 
-GMT_MINUS_04_B_DESC    ="(GMT-04:00) La Paz"
+GMT_MINUS_04_B_DESC    ="(UTC-04:00) La Paz"
 GMT_MINUS_04_B_DAYLIGHT="Güney Amerika Batı Yaz Saati"
 GMT_MINUS_04_B_STANDARD="Güney Amerika Batı Standart Saati"
 
-GMT_MINUS_0330_A_DESC    ="(GMT-03:30) Newfoundland"
+GMT_MINUS_0330_A_DESC    ="(UTC-03:30) Newfoundland"
 GMT_MINUS_0330_A_DAYLIGHT="Newfoundland Yaz Saati"
 GMT_MINUS_0330_A_STANDARD="Newfoundland Standart Saati"
 
-GMT_MINUS_03_A_DESC    ="(GMT-03:00) Santiago"
+GMT_MINUS_03_A_DESC    ="(UTC-03:00) Santiago"
 GMT_MINUS_03_A_DAYLIGHT="Güney Amerika Pasifik Yaz Saati"
 GMT_MINUS_03_A_STANDARD="Güney Amerika Pasifik Standart Saati"
 
-GMT_MINUS_03_B_DESC    ="(GMT-03:00) Brasilia"
+GMT_MINUS_03_B_DESC    ="(UTC-03:00) Brasilia"
 GMT_MINUS_03_B_DAYLIGHT="Güney Amerika Doğu Yaz Saati"
 GMT_MINUS_03_B_STANDARD="Güney Amerika Doğu Standart Saati"
 
-GMT_MINUS_03_C_DESC    ="(GMT-03:00) Buenos Aires, Georgetown"
+GMT_MINUS_03_C_DESC    ="(UTC-03:00) Buenos Aires, Georgetown"
 GMT_MINUS_03_C_DAYLIGHT="Güney Amerika Doğu Yaz Saati"
 GMT_MINUS_03_C_STANDARD="Güney Amerika Doğu Standart Saati"
 
-GMT_MINUS_03_D_DESC    ="(GMT-03:00) Grönland"
+GMT_MINUS_03_D_DESC    ="(UTC-03:00) Grönland"
 GMT_MINUS_03_D_DAYLIGHT="Grönland Yaz Saati"
 GMT_MINUS_03_D_STANDARD="Grönland Standart Saati"
 
-GMT_MINUS_02_A_DESC    ="(GMT-02:00) Orta Atlantik"
+GMT_MINUS_02_A_DESC    ="(UTC-02:00) Orta Atlantik"
 GMT_MINUS_02_A_DAYLIGHT="Orta Atlantik Yaz Saati"
 GMT_MINUS_02_A_STANDARD="Orta Atlantik Standart Saati"
 
-GMT_MINUS_01_A_DESC    ="(GMT-01:00) Azor Adaları"
+GMT_MINUS_01_A_DESC    ="(UTC-01:00) Azor Adaları"
 GMT_MINUS_01_A_DAYLIGHT="Azor Adaları Yaz Saati"
 GMT_MINUS_01_A_STANDARD="Azor Adaları Standart Saati"
 
-GMT_MINUS_01_B_DESC    ="(GMT-01:00) Yeşil Burun Adaları"
+GMT_MINUS_01_B_DESC    ="(UTC-01:00) Yeşil Burun Adaları"
 GMT_MINUS_01_B_DAYLIGHT="Yeşil Burun Adaları Yaz Saati"
 GMT_MINUS_01_B_STANDARD="Yeşil Burun Adaları Standart Saati"
 
-GMT_PLUS_00_A_DESC    ="(GMT+00:00) Greenwich Orta Saati: Dublin, Edinburgh, Lizbon, Londra"
+GMT_PLUS_00_A_DESC    ="(UTC+00:00) Greenwich Orta Saati: Dublin, Edinburgh, Lizbon, Londra"
 GMT_PLUS_00_A_DAYLIGHT="GMT Yaz Saati"
 GMT_PLUS_00_A_STANDARD="GMT Standart Saati"
 
-GMT_PLUS_00_B_DESC    ="(GMT+00:00) Kazablanka, Monrovia, Reykjavik"
+GMT_PLUS_00_B_DESC    ="(UTC+00:00) Kazablanka, Monrovia, Reykjavik"
 GMT_PLUS_00_B_DAYLIGHT="Greenwich Yaz Saati"
 GMT_PLUS_00_B_STANDARD="Greenwich Standart Saati"
 
-GMT_PLUS_01_A_DESC    ="(GMT+01:00) Belgrad, Bratislava, Budapeşte, Lübliyana, Prag"
+GMT_PLUS_01_A_DESC    ="(UTC+01:00) Belgrad, Bratislava, Budapeşte, Lübliyana, Prag"
 GMT_PLUS_01_A_DAYLIGHT="Orta Avrupa Yaz Saati"
 GMT_PLUS_01_A_STANDARD="Orta Avrupa Standart Saati"
 
-GMT_PLUS_01_B_DESC    ="(GMT+01:00) Saraybosna, Üsküp, Varşova, Zagreb"
+GMT_PLUS_01_B_DESC    ="(UTC+01:00) Saraybosna, Üsküp, Varşova, Zagreb"
 GMT_PLUS_01_B_DAYLIGHT="Orta Avrupa Yaz Saati"
 GMT_PLUS_01_B_STANDARD="Orta Avrupa Standart Saati"
 
-GMT_PLUS_01_C_DESC    ="(GMT+01:00) Brüksel, Kopenhag, Madrid, Paris"
+GMT_PLUS_01_C_DESC    ="(UTC+01:00) Brüksel, Kopenhag, Madrid, Paris"
 GMT_PLUS_01_C_DAYLIGHT="Latin Avrupa Yaz Saati"
 GMT_PLUS_01_C_STANDARD="Latin Avrupa Standart Saati"
 
-GMT_PLUS_01_D_DESC    ="(GMT+01:00) Amsterdam, Berlin, Bern, Roma, Stockholm, Viyana"
+GMT_PLUS_01_D_DESC    ="(UTC+01:00) Amsterdam, Berlin, Bern, Roma, Stockholm, Viyana"
 GMT_PLUS_01_D_DAYLIGHT="Batı Avrupa Yaz Saati"
 GMT_PLUS_01_D_STANDARD="Batı Avrupa Standart Saati"
 
-GMT_PLUS_02_A_DESC    ="(GMT+02:00) Kişinev"
+GMT_PLUS_02_A_DESC    ="(UTC+02:00) Kişinev"
 GMT_PLUS_02_A_DAYLIGHT="Doğu Avrupa Yaz Saati"
 GMT_PLUS_02_A_STANDARD="Doğu Avrupa Standart Saati"
 
-GMT_PLUS_02_B_DESC    ="(GMT+02:00) Kahire"
+GMT_PLUS_02_B_DESC    ="(UTC+02:00) Kahire"
 GMT_PLUS_02_B_DAYLIGHT="Mısır Yaz Saati"
 GMT_PLUS_02_B_STANDARD="Mısır Standart Saati"
 
-GMT_PLUS_02_C_DESC    ="(GMT+02:00) Helsinki, Kiev, Riga, Sofya, Tallinn, Vilnius"
+GMT_PLUS_02_C_DESC    ="(UTC+02:00) Helsinki, Kiev, Riga, Sofya, Tallinn, Vilnius"
 GMT_PLUS_02_C_DAYLIGHT="FLE Yaz Saati"
 GMT_PLUS_02_C_STANDARD="FLE Standart Saati"
 
-GMT_PLUS_02_D_DESC    ="(GMT+02:00) Atina, Bükreş"
+GMT_PLUS_02_D_DESC    ="(UTC+02:00) Atina, Bükreş"
 GMT_PLUS_02_D_DAYLIGHT="GTB Yaz Saati"
 GMT_PLUS_02_D_STANDARD="GTB Standart Saati"
 
-GMT_PLUS_02_E_DESC    ="(GMT+02:00) Kudüs"
+GMT_PLUS_02_E_DESC    ="(UTC+02:00) Kudüs"
 GMT_PLUS_02_E_DAYLIGHT="İsrail Yaz Saati"
 GMT_PLUS_02_E_STANDARD="İsrail Standart Saati"
 
-GMT_PLUS_02_F_DESC    ="(GMT+02:00) Harare, Pretoria"
+GMT_PLUS_02_F_DESC    ="(UTC+02:00) Harare, Pretoria"
 GMT_PLUS_02_F_DAYLIGHT="Güney Afrika Yaz Saati"
 GMT_PLUS_02_F_STANDARD="Güney Afrika Standart Saati"
 
-GMT_PLUS_02_G_DESC    ="(GMT+02:00) Kaliningrad"
+GMT_PLUS_02_G_DESC    ="(UTC+02:00) Kaliningrad"
 GMT_PLUS_02_G_DAYLIGHT="RTZ 1 Yaz Saati"
 GMT_PLUS_02_G_STANDARD="RTZ 1 Standart Saati"
 
-GMT_PLUS_03_A_DESC    ="(GMT+03:00) Minsk"
+GMT_PLUS_03_A_DESC    ="(UTC+03:00) Minsk"
 GMT_PLUS_03_A_DAYLIGHT="Belarus Yaz Saati"
 GMT_PLUS_03_A_STANDARD="Belarus Standart Saati"
 
-GMT_PLUS_03_B_DESC    ="(GMT+03:00) Moskova, St. Petersburg"
+GMT_PLUS_03_B_DESC    ="(UTC+03:00) Moskova, St. Petersburg"
 GMT_PLUS_03_B_DAYLIGHT="RTZ 2 Yaz Saati"
 GMT_PLUS_03_B_STANDARD="RTZ 2 Standart Saati"
 
-GMT_PLUS_03_C_DESC    ="(GMT+03:00) Kuveyt, Riyad"
+GMT_PLUS_03_C_DESC    ="(UTC+03:00) Kuveyt, Riyad"
 GMT_PLUS_03_C_DAYLIGHT="Arap Yaz Saati"
 GMT_PLUS_03_C_STANDARD="Arap Standart Saati"
 
-GMT_PLUS_03_D_DESC    ="(GMT+03:00) Nairobi"
+GMT_PLUS_03_D_DESC    ="(UTC+03:00) Nairobi"
 GMT_PLUS_03_D_DAYLIGHT="Doğu Afrika Yaz Saati"
 GMT_PLUS_03_D_STANDARD="Doğu Afrika Standart Saati"
 
-GMT_PLUS_03_E_DESC    ="(GMT+03:00) Bağdat"
+GMT_PLUS_03_E_DESC    ="(UTC+03:00) Bağdat"
 GMT_PLUS_03_E_DAYLIGHT="Arap Yaz Saati"
 GMT_PLUS_03_E_STANDARD="Arap Standart Saati"
 
-GMT_PLUS_03_F_DESC    ="(GMT+03:00) İstanbul"
+GMT_PLUS_03_F_DESC    ="(UTC+03:00) İstanbul"
 GMT_PLUS_03_F_DAYLIGHT="Türkiye Yaz Saati"
 GMT_PLUS_03_F_STANDARD="Türkiye Standart Saati"
 
-GMT_PLUS_0330_A_DESC    ="(GMT+03:30) Tahran"
+GMT_PLUS_0330_A_DESC    ="(UTC+03:30) Tahran"
 GMT_PLUS_0330_A_DAYLIGHT="İran Yaz Saati"
 GMT_PLUS_0330_A_STANDARD="İran Standart Saati"
 
-GMT_PLUS_04_A_DESC    ="(GMT+04:00) Abu Dabi, Muskat"
+GMT_PLUS_04_A_DESC    ="(UTC+04:00) Abu Dabi, Muskat"
 GMT_PLUS_04_A_DAYLIGHT="Arap Yaz Saati"
 GMT_PLUS_04_A_STANDARD="Arap Standart Saati"
 
-GMT_PLUS_04_B_DESC    ="(GMT+04:00) Erivan"
+GMT_PLUS_04_B_DESC    ="(UTC+04:00) Erivan"
 GMT_PLUS_04_B_DAYLIGHT="Kafkas Yaz Saati"
 GMT_PLUS_04_B_STANDARD="Kafkas Standart Saati"
 
-GMT_PLUS_04_C_DESC    ="(GMT+04:00) Izhevsk, Samara, Volgograd"
+GMT_PLUS_04_C_DESC    ="(UTC+04:00) Izhevsk, Samara, Volgograd"
 GMT_PLUS_04_C_DAYLIGHT="RTZ 3 Yaz Saati"
 GMT_PLUS_04_C_STANDARD="RTZ 3 Standart Saati"
 
-GMT_PLUS_0430_A_DESC    ="(GMT+04:30) Kabil"
+GMT_PLUS_0430_A_DESC    ="(UTC+04:30) Kabil"
 GMT_PLUS_0430_A_DAYLIGHT="Afganistan Yaz Saati"
 GMT_PLUS_0430_A_STANDARD="Afganistan Standart Saati"
 
-GMT_PLUS_05_A_DESC    ="(GMT+05:00) Ekaterinburg"
+GMT_PLUS_05_A_DESC    ="(UTC+05:00) Ekaterinburg"
 GMT_PLUS_05_A_DAYLIGHT="RTZ 4 Yaz Saati"
 GMT_PLUS_05_A_STANDARD="RTZ 4 Standart Saati"
 
-GMT_PLUS_05_B_DESC    ="(GMT+05:00) İslamabad, Karaçi, Taşkent"
+GMT_PLUS_05_B_DESC    ="(UTC+05:00) İslamabad, Karaçi, Taşkent"
 GMT_PLUS_05_B_DAYLIGHT="Batı Asya Yaz Saati"
 GMT_PLUS_05_B_STANDARD="Batı Asya Standart Saati"
 
-GMT_PLUS_0530_A_DESC    ="(GMT+05:30) Chennai, Kalküta, Mumbay, Yeni Delhi"
+GMT_PLUS_0530_A_DESC    ="(UTC+05:30) Chennai, Kalküta, Mumbay, Yeni Delhi"
 GMT_PLUS_0530_A_DAYLIGHT="Hindistan Yaz Saati"
 GMT_PLUS_0530_A_STANDARD="Hindistan Standart Saati"
 
-GMT_PLUS_0530_B_DESC    ="(GMT+05:30) Sri Jayawardenepura"
+GMT_PLUS_0530_B_DESC    ="(UTC+05:30) Sri Jayawardenepura"
 GMT_PLUS_0530_B_DAYLIGHT="Sri Lanka Yaz Saati"
 GMT_PLUS_0530_B_STANDARD="Sri Lanka Standart Saati"
 
-GMT_PLUS_0545_A_DESC    ="(GMT+05:45) Kathmandu"
+GMT_PLUS_0545_A_DESC    ="(UTC+05:45) Kathmandu"
 GMT_PLUS_0545_A_DAYLIGHT="Nepal Yaz Saati"
 GMT_PLUS_0545_A_STANDARD="Nepal Standart Saati"
 
-GMT_PLUS_06_A_DESC    ="(GMT+06:00) Astana, Dhaka"
+GMT_PLUS_06_A_DESC    ="(UTC+06:00) Astana, Dhaka"
 GMT_PLUS_06_A_DAYLIGHT="Orta Asya Yaz Saati"
 GMT_PLUS_06_A_STANDARD="Orta Asya Standart Saati"
 
-GMT_PLUS_06_B_DESC    ="(GMT+06:00) Omsk"
+GMT_PLUS_06_B_DESC    ="(UTC+06:00) Omsk"
 GMT_PLUS_06_B_DAYLIGHT="Omsk Yaz Saati"
 GMT_PLUS_06_B_STANDARD="Omsk Standart Saati"
 
-GMT_PLUS_0630_A_DESC    ="(GMT+06:30) Yangon (Rangoon)"
+GMT_PLUS_0630_A_DESC    ="(UTC+06:30) Yangon (Rangoon)"
 GMT_PLUS_0630_A_DAYLIGHT="Myanmar Yaz Saati"
 GMT_PLUS_0630_A_STANDARD="Myanmar Standart Saati"
 
-GMT_PLUS_07_A_DESC    ="(GMT+07:00) Novosibirsk"
+GMT_PLUS_07_A_DESC    ="(UTC+07:00) Novosibirsk"
 GMT_PLUS_07_A_DAYLIGHT="Novosibirsk Yaz Saati"
 GMT_PLUS_07_A_STANDARD="Novosibirsk Standart Saati"
 
-GMT_PLUS_07_B_DESC    ="(GMT+07:00) Bangkok, Hanoi, Jakarta"
+GMT_PLUS_07_B_DESC    ="(UTC+07:00) Bangkok, Hanoi, Jakarta"
 GMT_PLUS_07_B_DAYLIGHT="Güneydoğu Asya Yaz Saati"
 GMT_PLUS_07_B_STANDARD="Güneydoğu Asya Standart Saati"
 
-GMT_PLUS_07_C_DESC    ="(GMT+07:00) Krasnoyarsk"
+GMT_PLUS_07_C_DESC    ="(UTC+07:00) Krasnoyarsk"
 GMT_PLUS_07_C_DAYLIGHT="RTZ 6 Yaz Saati"
 GMT_PLUS_07_C_STANDARD="RTZ 6 Standart Saati"
 
-GMT_PLUS_07_D_DESC    ="(GMT+07:00) Tomsk"
+GMT_PLUS_07_D_DESC    ="(UTC+07:00) Tomsk"
 GMT_PLUS_07_D_DAYLIGHT="Tomsk Yaz Saati"
 GMT_PLUS_07_D_STANDARD="Tomsk Standart Saati"
 
-GMT_PLUS_08_A_DESC    ="(GMT+08:00) Pekin, Çongçing, Hong Kong, Urumçi"
+GMT_PLUS_08_A_DESC    ="(UTC+08:00) Pekin, Çongçing, Hong Kong, Urumçi"
 GMT_PLUS_08_A_DAYLIGHT="Çin Yaz Saati"
 GMT_PLUS_08_A_STANDARD="Çin Standart Saati"
 
-GMT_PLUS_08_B_DESC    ="(GMT+08:00) Kuala Lumpur, Singapur"
+GMT_PLUS_08_B_DESC    ="(UTC+08:00) Kuala Lumpur, Singapur"
 GMT_PLUS_08_B_DAYLIGHT="Singapur Yaz Saati"
 GMT_PLUS_08_B_STANDARD="Singapur Standart Saati"
 
-GMT_PLUS_08_C_DESC    ="(GMT+08:00) Taipei"
+GMT_PLUS_08_C_DESC    ="(UTC+08:00) Taipei"
 GMT_PLUS_08_C_DAYLIGHT="Taipei Yaz Saati"
 GMT_PLUS_08_C_STANDARD="Taipei Standart Saati"
 
-GMT_PLUS_08_D_DESC    ="(GMT+08:00) Perth"
+GMT_PLUS_08_D_DESC    ="(UTC+08:00) Perth"
 GMT_PLUS_08_D_DAYLIGHT="Batı Avustralya Yaz Saati"
 GMT_PLUS_08_D_STANDARD="Batı Avustralya Standart Saati"
 
-GMT_PLUS_08_E_DESC    ="(GMT+08:00) Ulan Bator"
+GMT_PLUS_08_E_DESC    ="(UTC+08:00) Ulan Bator"
 GMT_PLUS_08_E_DAYLIGHT="Ulan Bator Yaz Saati"
 GMT_PLUS_08_E_STANDARD="Ulan Bator Standart Saati"
 
-GMT_PLUS_08_F_DESC    ="(GMT+08:00) Irkutsk"
+GMT_PLUS_08_F_DESC    ="(UTC+08:00) Irkutsk"
 GMT_PLUS_08_F_DAYLIGHT="RTZ 7 Yaz Saati"
 GMT_PLUS_08_F_STANDARD="RTZ 7 Standart Saati"
 
-GMT_PLUS_09_A_DESC    ="(GMT+09:00) Seul"
+GMT_PLUS_09_A_DESC    ="(UTC+09:00) Seul"
 GMT_PLUS_09_A_DAYLIGHT="Kore Yaz Saati"
 GMT_PLUS_09_A_STANDARD="Kore Standart Saati"
 
-GMT_PLUS_09_B_DESC    ="(GMT+09:00) Osaka, Sapporo, Tokyo"
+GMT_PLUS_09_B_DESC    ="(UTC+09:00) Osaka, Sapporo, Tokyo"
 GMT_PLUS_09_B_DAYLIGHT="Tokyo Yaz Saati"
 GMT_PLUS_09_B_STANDARD="Tokyo Standart Saati"
 
-GMT_PLUS_09_C_DESC    ="(GMT+09:00) Yakutsk"
+GMT_PLUS_09_C_DESC    ="(UTC+09:00) Yakutsk"
 GMT_PLUS_09_C_DAYLIGHT="RTZ 8 Yaz Saati"
 GMT_PLUS_09_C_STANDARD="RTZ 8 Standart Saati"
 
-GMT_PLUS_0930_A_DESC    ="(GMT+09:30) Darwin"
+GMT_PLUS_0930_A_DESC    ="(UTC+09:30) Darwin"
 GMT_PLUS_0903_A_DAYLIGHT="Orta Avustralya Yaz Saati"
 GMT_PLUS_0930_A_STANDARD="Orta Avustralya Standart Saati"
 
-GMT_PLUS_0930_B_DESC    ="(GMT+09:30) Adelaide"
+GMT_PLUS_0930_B_DESC    ="(UTC+09:30) Adelaide"
 GMT_PLUS_0930_B_DAYLIGHT="Orta Avustralya Yaz Saati"
 GMT_PLUS_0930_B_STANDARD="Orta Avustralya Standart Saati"
 
-GMT_PLUS_10_A_DESC    ="(GMT+10:00) Canberra, Melbourne, Sydney"
+GMT_PLUS_10_A_DESC    ="(UTC+10:00) Canberra, Melbourne, Sydney"
 GMT_PLUS_10_A_DAYLIGHT="Doğu Avustralya Yaz Saati"
 GMT_PLUS_10_A_STANDARD="Doğu Avustralya Standart Saati"
 
-GMT_PLUS_10_B_DESC    ="(GMT+10:00) Brisbane"
+GMT_PLUS_10_B_DESC    ="(UTC+10:00) Brisbane"
 GMT_PLUS_10_B_DAYLIGHT="Doğu Avustralya Yaz Saati"
 GMT_PLUS_10_B_STANDARD="Doğu Avustralya Standart Saati"
 
-GMT_PLUS_10_C_DESC    ="(GMT+10:00) Hobart"
+GMT_PLUS_10_C_DESC    ="(UTC+10:00) Hobart"
 GMT_PLUS_10_C_DAYLIGHT="Tazmanya Yaz Saati"
 GMT_PLUS_10_C_STANDARD="Tazmanya Standart Saati"
 
-GMT_PLUS_10_D_DESC    ="(GMT+10:00) Vladivostok"
+GMT_PLUS_10_D_DESC    ="(UTC+10:00) Vladivostok"
 GMT_PLUS_10_D_DAYLIGHT="RTZ 9 Yaz Saati"
 GMT_PLUS_10_D_STANDARD="RTZ 9 Standart Saati"
 
-GMT_PLUS_10_E_DESC    ="(GMT+10:00) Guam, Port Moresby"
+GMT_PLUS_10_E_DESC    ="(UTC+10:00) Guam, Port Moresby"
 GMT_PLUS_10_E_DAYLIGHT="Batı Pasifik Yaz Saati"
 GMT_PLUS_10_E_STANDARD="Batı Pasifik Standart Saati"
 
-GMT_PLUS_11_A_DESC    ="(GMT+11:00) Solomon Adaları, Yeni Kaledonya"
+GMT_PLUS_11_A_DESC    ="(UTC+11:00) Solomon Adaları, Yeni Kaledonya"
 GMT_PLUS_11_A_DAYLIGHT="Orta Pasifik Yaz Saati"
 GMT_PLUS_11_A_STANDARD="Orta Pasifik Standart Saati"
 
-GMT_PLUS_11_B_DESC    ="(GMT+11:00) Chokurdakh"
+GMT_PLUS_11_B_DESC    ="(UTC+11:00) Chokurdakh"
 GMT_PLUS_11_B_DAYLIGHT="RTZ 10 Yaz Saati"
 GMT_PLUS_11_B_STANDARD="RTZ 10 Standart Saati"
 
-GMT_PLUS_11_C_DESC    ="(GMT+11:00) Magadan"
+GMT_PLUS_11_C_DESC    ="(UTC+11:00) Magadan"
 GMT_PLUS_11_C_DAYLIGHT="Magadan Yaz Saati"
 GMT_PLUS_11_C_STANDARD="Magadan Standart Saati"
 
-GMT_PLUS_12_A_DESC    ="(GMT+12:00) Fiji, Kamchatka, Marshall Adaları"
+GMT_PLUS_12_A_DESC    ="(UTC+12:00) Fiji, Kamchatka, Marshall Adaları"
 GMT_PLUS_12_A_DAYLIGHT="Fiji Yaz Saati"
 GMT_PLUS_12_A_STANDARD="Fiji Standart Saati"
 
-GMT_PLUS_12_B_DESC    ="(GMT+12:00) Anadyr, Petropavlovsk-Kamchatsky"
+GMT_PLUS_12_B_DESC    ="(UTC+12:00) Anadyr, Petropavlovsk-Kamchatsky"
 GMT_PLUS_12_B_DAYLIGHT="RTZ 11 Yaz Saati"
 GMT_PLUS_12_B_STANDARD="RTZ 11 Standart Saati"
 
-GMT_PLUS_12_C_DESC    ="(GMT+12:00) Auckland, Wellington"
+GMT_PLUS_12_C_DESC    ="(UTC+12:00) Auckland, Wellington"
 GMT_PLUS_12_C_DAYLIGHT="Yeni Zelanda Yaz Saati"
 GMT_PLUS_12_C_STANDARD="Yeni Zelanda Standart Saati"
 
-GMT_PLUS_13_A_DESC    ="(GMT+13:00) Nuku'alofa"
+GMT_PLUS_13_A_DESC    ="(UTC+13:00) Nuku'alofa"
 GMT_PLUS_13_A_DAYLIGHT="Tonga Yaz Saati"
 GMT_PLUS_13_A_STANDARD="Tonga Standart Saati"
 
