@@ -86,6 +86,8 @@ typedef struct _RpcConnection
   ULONG auth_context_id;
   ULONG encryption_auth_len;
   ULONG signature_auth_len;
+  BOOL auth_complete;      /* the security exchange of the connection is complete (SSP authentication) */
+  LPWSTR client_principal; /* server: the client as the security package names it, for RpcBindingInqAuthClient */
   RpcQualityOfService *QOS;
   LPWSTR CookieAuth;
 

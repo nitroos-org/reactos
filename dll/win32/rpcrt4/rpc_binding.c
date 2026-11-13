@@ -1235,7 +1235,7 @@ BOOL RpcAuthInfo_IsEqual(const RpcAuthInfo *AuthInfo1, const RpcAuthInfo *AuthIn
  * rpcrt4_ncalrpc_secure_packet do not call an SSP, as LRPC does not on Windows.
  * Windows always has the NTLM, Negotiate and Kerberos packages, so security on a
  * local binding with one of them succeeds there; it must not depend on an SSP that
- * is missing here (the NTLM package needs Samba's ntlm_auth).
+ * is missing here (Kerberos), or on one that is present (NTLM): the SSP is not used.
  */
 static BOOL is_lrpc_authn_svc(const RpcBinding *bind, ULONG AuthnSvc)
 {
@@ -1760,6 +1760,16 @@ RpcBindingSetAuthInfoExA( RPC_BINDING_HANDLE Binding, RPC_CSTR ServerPrincName,
     return RPC_S_UNKNOWN_AUTHZ_SERVICE;
   }
 
+  /* the ncalrpc transport authenticates the caller; no package is involved, whether one exists or not */
+  if (is_lrpc_authn_svc(bind, AuthnSvc))
+  {
+    WCHAR *principal = NULL;
+
+    if (ServerPrincName && !(principal = RPCRT4_strdupAtoW((char *)ServerPrincName)))
+      return RPC_S_OUT_OF_MEMORY;
+    return set_lrpc_auth_info(bind, AuthnLevel, AuthnSvc, AuthIdentity, principal);
+  }
+
   r = EnumerateSecurityPackagesA(&package_count, &packages);
   if (r != SEC_E_OK)
   {
@@ -1774,14 +1784,6 @@ RpcBindingSetAuthInfoExA( RPC_BINDING_HANDLE Binding, RPC_CSTR ServerPrincName,
   if (i == package_count)
   {
     FreeContextBuffer(packages);
-    if (is_lrpc_authn_svc(bind, AuthnSvc))
-    {
-      WCHAR *principal = NULL;
-
-      if (ServerPrincName && !(principal = RPCRT4_strdupAtoW((char *)ServerPrincName)))
-        return RPC_S_OUT_OF_MEMORY;
-      return set_lrpc_auth_info(bind, AuthnLevel, AuthnSvc, AuthIdentity, principal);
-    }
     FIXME("unsupported AuthnSvc %lu\n", AuthnSvc);
     return RPC_S_UNKNOWN_AUTHN_SERVICE;
   }
@@ -1899,6 +1901,16 @@ RpcBindingSetAuthInfoExW( RPC_BINDING_HANDLE Binding, RPC_WSTR ServerPrincName, 
     return RPC_S_UNKNOWN_AUTHZ_SERVICE;
   }
 
+  /* the ncalrpc transport authenticates the caller; no package is involved, whether one exists or not */
+  if (is_lrpc_authn_svc(bind, AuthnSvc))
+  {
+    WCHAR *principal = NULL;
+
+    if (ServerPrincName && !(principal = wcsdup(ServerPrincName)))
+      return RPC_S_OUT_OF_MEMORY;
+    return set_lrpc_auth_info(bind, AuthnLevel, AuthnSvc, AuthIdentity, principal);
+  }
+
   r = EnumerateSecurityPackagesW(&package_count, &packages);
   if (r != SEC_E_OK)
   {
@@ -1913,14 +1925,6 @@ RpcBindingSetAuthInfoExW( RPC_BINDING_HANDLE Binding, RPC_WSTR ServerPrincName, 
   if (i == package_count)
   {
     FreeContextBuffer(packages);
-    if (is_lrpc_authn_svc(bind, AuthnSvc))
-    {
-      WCHAR *principal = NULL;
-
-      if (ServerPrincName && !(principal = wcsdup(ServerPrincName)))
-        return RPC_S_OUT_OF_MEMORY;
-      return set_lrpc_auth_info(bind, AuthnLevel, AuthnSvc, AuthIdentity, principal);
-    }
     FIXME("unsupported AuthnSvc %lu\n", AuthnSvc);
     return RPC_S_UNKNOWN_AUTHN_SERVICE;
   }
