@@ -18,10 +18,20 @@
  * the events must be what Windows 10 gives a 32-bit debugger of a 32-bit
  * debuggee (one initial breakpoint, STATUS_BREAKPOINT, 32-bit modules, x86
  * thread contexts).
+ *
+ * "exit": the child, created with DEBUG_ONLY_THIS_PROCESS, prints a debug
+ * string and ends with its own exit code. The debugger continues every event
+ * but the exceptions it does not know with DBG_CONTINUE. The events are
+ * CREATE_PROCESS, LOAD_DLL, the initial breakpoint, the debug string and
+ * EXIT_PROCESS with the child's exit code: a debug print exception of a layer
+ * the debugger does not see (the native part of a WoW64 child) must not end
+ * the child with 0x40010006.
  */
 
 #define CHILD_EXIT_THREAD 0x77
 #define CHILD_EXIT_WAIT   0x55
+#define CHILD_EXIT_CODE   0x4b
+#define EXIT_MAX_EVENTS   20000
 #define CHILD_EXCEPTION   0xE0000001
 #define FAULT_ADDRESS     0x1234
 #define MAX_EVENTS        400
@@ -324,6 +334,93 @@ static void TestCatch(const WCHAR *FileName)
     CloseHandle(ProcessInfo.hProcess);
 }
 
+static void TestExit(const WCHAR *FileName)
+{
+    WCHAR CommandLine[MAX_PATH + 64];
+    STARTUPINFOW StartupInfo = { sizeof(StartupInfo) };
+    PROCESS_INFORMATION ProcessInfo;
+    DEBUG_EVENT Event;
+    ULONG_PTR Ntdll = (ULONG_PTR)GetModuleHandleW(L"ntdll.dll");
+    ULONG Events, Creates = 0, Loads = 0, NtdllLoads = 0, Breakpoints = 0, Strings = 0, Others = 0;
+    ULONG ExitCode = 0, Exits = 0;
+    BOOL Exited = FALSE;
+
+    StringCbPrintfW(CommandLine, sizeof(CommandLine), L"\"%ls\" DebugApi exit", FileName);
+    if (!CreateProcessW(FileName, CommandLine, NULL, NULL, FALSE, DEBUG_ONLY_THIS_PROCESS, NULL, NULL,
+                        &StartupInfo, &ProcessInfo))
+    {
+        ok(0, "CreateProcess failed: %lu\n", GetLastError());
+        return;
+    }
+    for (Events = 0; Events < EXIT_MAX_EVENTS && !Exited; Events++)
+    {
+        DWORD Continue = DBG_CONTINUE;
+        if (!WaitForDebugEvent(&Event, EVENT_TIMEOUT))
+        {
+            ok(0, "WaitForDebugEvent failed after %lu events: %lu\n", Events, GetLastError());
+            break;
+        }
+        switch (Event.dwDebugEventCode)
+        {
+        case CREATE_PROCESS_DEBUG_EVENT:
+            Creates++;
+            if (Event.u.CreateProcessInfo.hFile) CloseHandle(Event.u.CreateProcessInfo.hFile);
+            break;
+        case LOAD_DLL_DEBUG_EVENT:
+            Loads++;
+            if ((ULONG_PTR)Event.u.LoadDll.lpBaseOfDll == Ntdll) NtdllLoads++;
+            if (Event.u.LoadDll.hFile) CloseHandle(Event.u.LoadDll.hFile);
+            break;
+        case OUTPUT_DEBUG_STRING_EVENT:
+        {
+            /* Other strings are the child's modules' own (debug builds, the native layer of a native
+             * debugger's view); only the child's string counts */
+            char String[64] = { 0 };
+            SIZE_T Read = 0;
+            ReadProcessMemory(ProcessInfo.hProcess, Event.u.DebugString.lpDebugStringData, String,
+                              min(sizeof(String) - 1, Event.u.DebugString.nDebugStringLength), &Read);
+            if (!strcmp(String, DebugString)) Strings++;
+            break;
+        }
+        case EXCEPTION_DEBUG_EVENT:
+            if (Event.u.Exception.ExceptionRecord.ExceptionCode == (DWORD)STATUS_BREAKPOINT)
+            {
+                Breakpoints++;
+                break;
+            }
+            Others++;
+            trace("exception %08lx at %p, first chance %lu\n", Event.u.Exception.ExceptionRecord.ExceptionCode,
+                  Event.u.Exception.ExceptionRecord.ExceptionAddress, Event.u.Exception.dwFirstChance);
+            Continue = DBG_EXCEPTION_NOT_HANDLED;
+            break;
+        case EXIT_PROCESS_DEBUG_EVENT:
+            Exits++;
+            ExitCode = Event.u.ExitProcess.dwExitCode;
+            Exited = TRUE;
+            break;
+        default:
+            break;
+        }
+        ok(ContinueDebugEvent(Event.dwProcessId, Event.dwThreadId, Continue), "ContinueDebugEvent failed: %lu\n",
+           GetLastError());
+    }
+    ok(Exited, "no EXIT_PROCESS after %lu events\n", Events);
+    ok(Creates == 1, "%lu CREATE_PROCESS events\n", Creates);
+    ok(Loads >= 1, "%lu LOAD_DLL events\n", Loads);
+    ok(NtdllLoads == 1, "%lu ntdll loads\n", NtdllLoads);
+    ok(Breakpoints == 1, "%lu initial breakpoints\n", Breakpoints);
+    ok(Strings == 1, "%lu debug strings of the child\n", Strings);
+    ok(Others == 0, "%lu other exceptions\n", Others);
+    ok(Exits == 1 && ExitCode == CHILD_EXIT_CODE, "%lu EXIT_PROCESS events, exit code %lx\n", Exits, ExitCode);
+    if (!Exited) TerminateProcess(ProcessInfo.hProcess, 1);
+    ok(WaitForSingleObject(ProcessInfo.hProcess, 10000) == WAIT_OBJECT_0, "child did not end\n");
+    ExitCode = 0;
+    GetExitCodeProcess(ProcessInfo.hProcess, &ExitCode);
+    ok(ExitCode == CHILD_EXIT_CODE, "child exit code %lx\n", ExitCode);
+    CloseHandle(ProcessInfo.hThread);
+    CloseHandle(ProcessInfo.hProcess);
+}
+
 static void TestAttach(const WCHAR *FileName)
 {
     WCHAR CommandLine[MAX_PATH + 64];
@@ -433,6 +530,11 @@ START_TEST(DebugApi)
     int Argc = winetest_get_mainargs(&Argv);
 
     if (Argc >= 3 && !strcmp(Argv[2], "fault")) ExitProcess(ChildFault());
+    if (Argc >= 3 && !strcmp(Argv[2], "exit"))
+    {
+        OutputDebugStringA(DebugString);
+        ExitProcess(CHILD_EXIT_CODE);
+    }
     if (Argc >= 4 && !strcmp(Argv[2], "wait"))
     {
         HANDLE Release = (HANDLE)(ULONG_PTR)strtoul(Argv[3], NULL, 10);
@@ -440,6 +542,7 @@ START_TEST(DebugApi)
     }
     if (!IsWow64Process(GetCurrentProcess(), &IsWow64)) IsWow64 = FALSE;
     GetModuleFileNameW(NULL, FileName, _countof(FileName));
+    TestExit(FileName);
     TestCatch(FileName);
     TestAttach(FileName);
 }
