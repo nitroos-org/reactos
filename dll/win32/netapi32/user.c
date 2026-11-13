@@ -553,7 +553,8 @@ BuildUserInfoBuffer(
     _In_ PSID AccountDomainSid,
     _In_ ULONG RelativeId,
     _In_ DWORD level,
-    _Out_ LPVOID *Buffer)
+    _Out_ LPVOID *Buffer,
+    _Out_opt_ PULONG BufferSize)
 {
     UNICODE_STRING LogonServer = RTL_CONSTANT_STRING(L"\\\\*");
     PUSER_ALL_INFORMATION UserInfo = NULL;
@@ -1399,6 +1400,8 @@ done:
     if (ApiStatus == NERR_Success)
     {
         *Buffer = LocalBuffer;
+        if (BufferSize != NULL)
+            *BufferSize = Size;
     }
     else
     {
@@ -2855,8 +2858,169 @@ LookupEnumContext(
     return FoundEnumContext;
 }
 
+static
+ULONG
+GetUserInfoFixedSize(
+    _In_ DWORD level)
+{
+    switch (level)
+    {
+        case 0:  return sizeof(USER_INFO_0);
+        case 1:  return sizeof(USER_INFO_1);
+        case 2:  return sizeof(USER_INFO_2);
+        case 3:  return sizeof(USER_INFO_3);
+        case 4:  return sizeof(USER_INFO_4);
+        case 10: return sizeof(USER_INFO_10);
+        case 11: return sizeof(USER_INFO_11);
+        case 20: return sizeof(USER_INFO_20);
+        case 23: return sizeof(USER_INFO_23);
+    }
+
+    return 0;
+}
+
+
+/* Offsets of the pointer members of the USER_INFO_x structures that BuildUserInfoBuffer
+ * points into the string area behind the structure */
+#define UOFF(type, member) ((USHORT)FIELD_OFFSET(type, member))
+
+static const USHORT UserInfo0Ptrs[] =
+{
+    UOFF(USER_INFO_0, usri0_name)
+};
+
+static const USHORT UserInfo1Ptrs[] =
+{
+    UOFF(USER_INFO_1, usri1_name), UOFF(USER_INFO_1, usri1_home_dir),
+    UOFF(USER_INFO_1, usri1_comment), UOFF(USER_INFO_1, usri1_script_path)
+};
+
+static const USHORT UserInfo2Ptrs[] =
+{
+    UOFF(USER_INFO_2, usri2_name), UOFF(USER_INFO_2, usri2_home_dir),
+    UOFF(USER_INFO_2, usri2_comment), UOFF(USER_INFO_2, usri2_script_path),
+    UOFF(USER_INFO_2, usri2_full_name), UOFF(USER_INFO_2, usri2_usr_comment),
+    UOFF(USER_INFO_2, usri2_parms), UOFF(USER_INFO_2, usri2_workstations),
+    UOFF(USER_INFO_2, usri2_logon_hours), UOFF(USER_INFO_2, usri2_logon_server)
+};
+
+static const USHORT UserInfo3Ptrs[] =
+{
+    UOFF(USER_INFO_3, usri3_name), UOFF(USER_INFO_3, usri3_home_dir),
+    UOFF(USER_INFO_3, usri3_comment), UOFF(USER_INFO_3, usri3_script_path),
+    UOFF(USER_INFO_3, usri3_full_name), UOFF(USER_INFO_3, usri3_usr_comment),
+    UOFF(USER_INFO_3, usri3_parms), UOFF(USER_INFO_3, usri3_workstations),
+    UOFF(USER_INFO_3, usri3_logon_hours), UOFF(USER_INFO_3, usri3_logon_server),
+    UOFF(USER_INFO_3, usri3_profile), UOFF(USER_INFO_3, usri3_home_dir_drive)
+};
+
+static const USHORT UserInfo4Ptrs[] =
+{
+    UOFF(USER_INFO_4, usri4_name), UOFF(USER_INFO_4, usri4_home_dir),
+    UOFF(USER_INFO_4, usri4_comment), UOFF(USER_INFO_4, usri4_script_path),
+    UOFF(USER_INFO_4, usri4_full_name), UOFF(USER_INFO_4, usri4_usr_comment),
+    UOFF(USER_INFO_4, usri4_parms), UOFF(USER_INFO_4, usri4_workstations),
+    UOFF(USER_INFO_4, usri4_logon_hours), UOFF(USER_INFO_4, usri4_logon_server),
+    UOFF(USER_INFO_4, usri4_user_sid), UOFF(USER_INFO_4, usri4_profile),
+    UOFF(USER_INFO_4, usri4_home_dir_drive)
+};
+
+static const USHORT UserInfo10Ptrs[] =
+{
+    UOFF(USER_INFO_10, usri10_name), UOFF(USER_INFO_10, usri10_comment),
+    UOFF(USER_INFO_10, usri10_usr_comment), UOFF(USER_INFO_10, usri10_full_name)
+};
+
+static const USHORT UserInfo11Ptrs[] =
+{
+    UOFF(USER_INFO_11, usri11_name), UOFF(USER_INFO_11, usri11_comment),
+    UOFF(USER_INFO_11, usri11_usr_comment), UOFF(USER_INFO_11, usri11_full_name),
+    UOFF(USER_INFO_11, usri11_home_dir), UOFF(USER_INFO_11, usri11_parms),
+    UOFF(USER_INFO_11, usri11_logon_server), UOFF(USER_INFO_11, usri11_workstations),
+    UOFF(USER_INFO_11, usri11_logon_hours)
+};
+
+static const USHORT UserInfo20Ptrs[] =
+{
+    UOFF(USER_INFO_20, usri20_name), UOFF(USER_INFO_20, usri20_full_name),
+    UOFF(USER_INFO_20, usri20_comment)
+};
+
+static const USHORT UserInfo23Ptrs[] =
+{
+    UOFF(USER_INFO_23, usri23_name), UOFF(USER_INFO_23, usri23_full_name),
+    UOFF(USER_INFO_23, usri23_comment), UOFF(USER_INFO_23, usri23_user_sid)
+};
+
+static
+const USHORT *
+GetUserInfoPointers(
+    _In_ DWORD level,
+    _Out_ PULONG Count)
+{
+#define UPTRS(l) case l: *Count = RTL_NUMBER_OF(UserInfo##l##Ptrs); return UserInfo##l##Ptrs;
+    switch (level)
+    {
+        UPTRS(0)
+        UPTRS(1)
+        UPTRS(2)
+        UPTRS(3)
+        UPTRS(4)
+        UPTRS(10)
+        UPTRS(11)
+        UPTRS(20)
+        UPTRS(23)
+    }
+#undef UPTRS
+
+    *Count = 0;
+    return NULL;
+}
+
+
+static
+VOID
+FreeEnumContextData(
+    _In_ PENUM_CONTEXT EnumContext)
+{
+    ULONG i;
+
+    if (EnumContext->BuiltinDomainHandle != NULL)
+        SamCloseHandle(EnumContext->BuiltinDomainHandle);
+
+    if (EnumContext->AccountDomainHandle != NULL)
+        SamCloseHandle(EnumContext->AccountDomainHandle);
+
+    if (EnumContext->BuiltinDomainSid != NULL)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, EnumContext->BuiltinDomainSid);
+
+    if (EnumContext->AccountDomainSid != NULL)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, EnumContext->AccountDomainSid);
+
+    if (EnumContext->ServerHandle != NULL)
+        SamCloseHandle(EnumContext->ServerHandle);
+
+    if (EnumContext->Buffer != NULL)
+    {
+        for (i = 0; i < EnumContext->Count; i++)
+        {
+            SamFreeMemory(EnumContext->Buffer[i].Name.Buffer);
+        }
+
+        SamFreeMemory(EnumContext->Buffer);
+    }
+
+    FreeEnumContext(EnumContext);
+}
+
+
 /************************************************************
  * NetUserEnum  (NETAPI32.@)
+ *
+ * One call returns as many entries as fit into prefmaxlen (all of them for
+ * MAX_PREFERRED_LENGTH, at least one otherwise) packed into one buffer: the
+ * array of structures first, the strings behind it. ERROR_MORE_DATA means
+ * that entries are left; the resume handle continues the enumeration.
  */
 NET_API_STATUS
 WINAPI
@@ -2873,7 +3037,18 @@ NetUserEnum(LPCWSTR servername,
     PSAM_RID_ENUMERATION CurrentUser;
     PENUM_CONTEXT EnumContext = NULL;
     LPVOID Buffer = NULL;
+    PVOID *Blocks = NULL;
+    PULONG BlockSizes = NULL;
+    const USHORT *Pointers;
+    ULONG PointerCount;
+    ULONG FixedSize;
+    ULONG BlockCount = 0;
+    ULONG BlockSize;
+    ULONG PackedSize;
+    ULONG Used = 0;
+    ULONG Remaining;
     ULONG i;
+    PVOID Block;
     SAM_HANDLE UserHandle = NULL;
     ACCESS_MASK DesiredAccess;
     NET_API_STATUS ApiStatus = NERR_Success;
@@ -2889,9 +3064,17 @@ NetUserEnum(LPCWSTR servername,
     if (servername != NULL)
         RtlInitUnicodeString(&ServerName, servername);
 
+    FixedSize = GetUserInfoFixedSize(level);
+    if (FixedSize == 0)
+        return ERROR_INVALID_LEVEL;
+
+    Pointers = GetUserInfoPointers(level, &PointerCount);
+
     if (resume_handle != NULL && *resume_handle != 0)
     {
         EnumContext = LookupEnumContext(*resume_handle);
+        if (EnumContext == NULL)
+            return ERROR_INVALID_PARAMETER;
     }
     else
     {
@@ -2956,62 +3139,62 @@ NetUserEnum(LPCWSTR servername,
             ApiStatus = NetpNtStatusToApiStatus(Status);
             goto done;
         }
-    }
 
-//    while (TRUE)
-//    {
-        TRACE("EnumContext->Index: %lu\n", EnumContext->Index);
-        TRACE("EnumContext->Count: %lu\n", EnumContext->Count);
-
-        if (EnumContext->Index >= EnumContext->Count)
+        /* Fetch the whole list of users: prefmaxlen limits what one call returns,
+         * not what the SAM lists (a SAM buffer limit would drop the entries
+         * behind the first ones) */
+        TRACE("Calling SamEnumerateUsersInDomain\n");
+        Status = SamEnumerateUsersInDomain(EnumContext->AccountDomainHandle,
+                                           &EnumContext->EnumerationContext,
+                                           0,
+                                           (PVOID *)&EnumContext->Buffer,
+                                           MAX_PREFERRED_LENGTH,
+                                           &EnumContext->Count);
+        TRACE("SamEnumerateUsersInDomain returned (Status %08lx)\n", Status);
+        if (Status == STATUS_NO_MORE_ENTRIES)
         {
-//            if (EnumContext->BuiltinDone != FALSE)
-//            {
-//                ApiStatus = NERR_Success;
-//                goto done;
-//            }
-
-            TRACE("Calling SamEnumerateUsersInDomain\n");
-            Status = SamEnumerateUsersInDomain(EnumContext->AccountDomainHandle, //BuiltinDomainHandle,
-                                               &EnumContext->EnumerationContext,
-                                               0,
-                                               (PVOID *)&EnumContext->Buffer,
-                                               prefmaxlen,
-                                               &EnumContext->Count);
-
-            TRACE("SamEnumerateUsersInDomain returned (Status %08lx)\n", Status);
-            if (!NT_SUCCESS(Status))
-            {
-                ERR("SamEnumerateUsersInDomain failed (Status %08lx)\n", Status);
-                ApiStatus = NetpNtStatusToApiStatus(Status);
-                goto done;
-            }
-
-            if (Status == STATUS_MORE_ENTRIES)
-            {
-                ApiStatus = NERR_BufTooSmall;
-                goto done;
-            }
-            else
-            {
-                EnumContext->BuiltinDone = TRUE;
-            }
+            EnumContext->Buffer = NULL;
+            EnumContext->Count = 0;
+        }
+        else if (!NT_SUCCESS(Status))
+        {
+            ERR("SamEnumerateUsersInDomain failed (Status %08lx)\n", Status);
+            EnumContext->Buffer = NULL;
+            EnumContext->Count = 0;
+            ApiStatus = NetpNtStatusToApiStatus(Status);
+            goto done;
         }
 
-        TRACE("EnumContext: %lu\n", EnumContext);
-        TRACE("EnumContext->Count: %lu\n", EnumContext->Count);
-        TRACE("EnumContext->Buffer: %p\n", EnumContext->Buffer);
+        EnumContext->BuiltinDone = TRUE;
+    }
 
+    TRACE("EnumContext->Index: %lu\n", EnumContext->Index);
+    TRACE("EnumContext->Count: %lu\n", EnumContext->Count);
+
+    Remaining = EnumContext->Count - EnumContext->Index;
+    if (Remaining != 0)
+    {
+        ApiStatus = NetApiBufferAllocate(Remaining * sizeof(PVOID), (PVOID*)&Blocks);
+        if (ApiStatus != NERR_Success)
+            goto done;
+
+        ApiStatus = NetApiBufferAllocate(Remaining * sizeof(ULONG), (PVOID*)&BlockSizes);
+        if (ApiStatus != NERR_Success)
+            goto done;
+    }
+
+    DesiredAccess = READ_CONTROL | USER_READ_GENERAL | USER_READ_PREFERENCES | USER_READ_LOGON | USER_READ_ACCOUNT;
+    if ((level == 1) || (level == 2) || (level == 3) || (level == 4) || (level == 11))
+        DesiredAccess |= USER_LIST_GROUPS;
+
+    while (EnumContext->Index < EnumContext->Count)
+    {
         /* Get a pointer to the current user */
         CurrentUser = &EnumContext->Buffer[EnumContext->Index];
 
         TRACE("RID: %lu\n", CurrentUser->RelativeId);
 
-        DesiredAccess = READ_CONTROL | USER_READ_GENERAL | USER_READ_PREFERENCES | USER_READ_LOGON | USER_READ_ACCOUNT;
-        if ((level == 1) || (level == 2) || (level == 3) || (level == 4) || (level == 11))
-            DesiredAccess |= USER_LIST_GROUPS;
-
-        Status = SamOpenUser(EnumContext->AccountDomainHandle, //BuiltinDomainHandle,
+        Status = SamOpenUser(EnumContext->AccountDomainHandle,
                              DesiredAccess,
                              CurrentUser->RelativeId,
                              &UserHandle);
@@ -3027,7 +3210,8 @@ NetUserEnum(LPCWSTR servername,
                                         EnumContext->AccountDomainSid,
                                         CurrentUser->RelativeId,
                                         level,
-                                        &Buffer);
+                                        &Block,
+                                        &BlockSize);
         if (ApiStatus != NERR_Success)
         {
             ERR("BuildUserInfoBuffer failed (ApiStatus %lu)\n", ApiStatus);
@@ -3037,50 +3221,66 @@ NetUserEnum(LPCWSTR servername,
         SamCloseHandle(UserHandle);
         UserHandle = NULL;
 
-        EnumContext->Index++;
+        /* The size of the entry in the packed buffer: the structure and its strings, aligned */
+        PackedSize = FixedSize + ((BlockSize - FixedSize + 7) & ~7);
 
-        (*entriesread)++;
-//    }
+        /* An entry that does not fit stays the next one (the first one always goes) */
+        if (prefmaxlen != MAX_PREFERRED_LENGTH && BlockCount != 0 &&
+            (Used > prefmaxlen || PackedSize > prefmaxlen - Used))
+        {
+            NetApiBufferFree(Block);
+            break;
+        }
+
+        Blocks[BlockCount] = Block;
+        BlockSizes[BlockCount] = BlockSize;
+        BlockCount++;
+        Used += PackedSize;
+
+        EnumContext->Index++;
+    }
+
+    ApiStatus = NetpPackEnumEntries(BlockCount,
+                                    Blocks,
+                                    BlockSizes,
+                                    FixedSize,
+                                    Pointers,
+                                    PointerCount,
+                                    &Buffer);
+    if (ApiStatus != NERR_Success)
+        goto done;
+
+    *entriesread = BlockCount;
 
 done:
+    if (Blocks != NULL)
+    {
+        for (i = 0; i < BlockCount; i++)
+            NetApiBufferFree(Blocks[i]);
+
+        NetApiBufferFree(Blocks);
+    }
+
+    if (BlockSizes != NULL)
+        NetApiBufferFree(BlockSizes);
+
     if (ApiStatus == NERR_Success && EnumContext != NULL && EnumContext->Index < EnumContext->Count)
         ApiStatus = ERROR_MORE_DATA;
 
-    if (EnumContext != NULL)
-        *totalentries = EnumContext->Count;
-
-    if (resume_handle == NULL || ApiStatus != ERROR_MORE_DATA)
+    if (ApiStatus == NERR_Success || ApiStatus == ERROR_MORE_DATA)
     {
         if (EnumContext != NULL)
-        {
-            if (EnumContext->BuiltinDomainHandle != NULL)
-                SamCloseHandle(EnumContext->BuiltinDomainHandle);
+            *totalentries = EnumContext->Count;
+    }
+    else
+    {
+        *entriesread = 0;
+    }
 
-            if (EnumContext->AccountDomainHandle != NULL)
-                SamCloseHandle(EnumContext->AccountDomainHandle);
-
-            if (EnumContext->BuiltinDomainSid != NULL)
-                RtlFreeHeap(RtlGetProcessHeap(), 0, EnumContext->BuiltinDomainSid);
-
-            if (EnumContext->AccountDomainSid != NULL)
-                RtlFreeHeap(RtlGetProcessHeap(), 0, EnumContext->AccountDomainSid);
-
-            if (EnumContext->ServerHandle != NULL)
-                SamCloseHandle(EnumContext->ServerHandle);
-
-            if (EnumContext->Buffer != NULL)
-            {
-                for (i = 0; i < EnumContext->Count; i++)
-                {
-                    SamFreeMemory(EnumContext->Buffer[i].Name.Buffer);
-                }
-
-                SamFreeMemory(EnumContext->Buffer);
-            }
-
-            FreeEnumContext(EnumContext);
-            EnumContext = NULL;
-        }
+    if (EnumContext != NULL && (resume_handle == NULL || ApiStatus != ERROR_MORE_DATA))
+    {
+        FreeEnumContextData(EnumContext);
+        EnumContext = NULL;
     }
 
     if (UserHandle != NULL)
@@ -3401,7 +3601,8 @@ NetUserGetInfo(LPCWSTR servername,
                                     AccountDomainSid,
                                     RelativeIds[0],
                                     level,
-                                    &Buffer);
+                                    &Buffer,
+                                    NULL);
     if (ApiStatus != NERR_Success)
     {
         ERR("BuildUserInfoBuffer failed (ApiStatus %08lu)\n", ApiStatus);

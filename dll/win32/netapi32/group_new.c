@@ -56,7 +56,8 @@ BuildGroupInfoBuffer(
     _In_ PGROUP_GENERAL_INFORMATION GroupInfo,
     _In_ DWORD Level,
     _In_ DWORD GroupId,
-    _Out_ LPVOID *Buffer)
+    _Out_ LPVOID *Buffer,
+    _Out_opt_ PULONG BufferSize)
 {
     PVOID GroupBuffer = NULL;
     PGROUP_INFO_0 GroupInfo0;
@@ -193,6 +194,8 @@ done:
     if (ApiStatus == NERR_Success)
     {
         *Buffer = GroupBuffer;
+        if (BufferSize != NULL)
+            *BufferSize = Size;
     }
     else
     {
@@ -775,6 +778,69 @@ done:
 }
 
 
+static const USHORT GroupInfo0Ptrs[] =
+{
+    (USHORT)FIELD_OFFSET(GROUP_INFO_0, grpi0_name)
+};
+
+static const USHORT GroupInfo1Ptrs[] =
+{
+    (USHORT)FIELD_OFFSET(GROUP_INFO_1, grpi1_name),
+    (USHORT)FIELD_OFFSET(GROUP_INFO_1, grpi1_comment)
+};
+
+static const USHORT GroupInfo2Ptrs[] =
+{
+    (USHORT)FIELD_OFFSET(GROUP_INFO_2, grpi2_name),
+    (USHORT)FIELD_OFFSET(GROUP_INFO_2, grpi2_comment)
+};
+
+static const USHORT GroupInfo3Ptrs[] =
+{
+    (USHORT)FIELD_OFFSET(GROUP_INFO_3, grpi3_name),
+    (USHORT)FIELD_OFFSET(GROUP_INFO_3, grpi3_comment),
+    (USHORT)FIELD_OFFSET(GROUP_INFO_3, grpi3_group_sid)
+};
+
+
+static
+VOID
+FreeGroupEnumContextData(
+    _In_ PGROUP_ENUM_CONTEXT EnumContext)
+{
+    ULONG i;
+
+    if (EnumContext->BuiltinDomainHandle != NULL)
+        SamCloseHandle(EnumContext->BuiltinDomainHandle);
+
+    if (EnumContext->AccountDomainHandle != NULL)
+        SamCloseHandle(EnumContext->AccountDomainHandle);
+
+    if (EnumContext->ServerHandle != NULL)
+        SamCloseHandle(EnumContext->ServerHandle);
+
+    if (EnumContext->Buffer != NULL)
+    {
+        for (i = 0; i < EnumContext->Returned; i++)
+        {
+            SamFreeMemory(EnumContext->Buffer[i].Name.Buffer);
+        }
+
+        SamFreeMemory(EnumContext->Buffer);
+    }
+
+    NetApiBufferFree(EnumContext);
+}
+
+
+/*
+ * NetGroupEnum
+ *
+ * One call returns as many entries as fit into prefmaxlen (all of them for
+ * MAX_PREFERRED_LENGTH, at least one otherwise) packed into one buffer.
+ * ERROR_MORE_DATA means that entries are left; the resume handle continues
+ * the enumeration.
+ */
 NET_API_STATUS
 WINAPI
 NetGroupEnum(
@@ -789,10 +855,21 @@ NetGroupEnum(
     UNICODE_STRING ServerName;
     PSAM_RID_ENUMERATION CurrentGroup;
     PGROUP_ENUM_CONTEXT EnumContext = NULL;
-    ULONG i;
     SAM_HANDLE GroupHandle = NULL;
     PGROUP_GENERAL_INFORMATION GroupInfo = NULL;
     PVOID Buffer = NULL;
+    PVOID *Blocks = NULL;
+    PULONG BlockSizes = NULL;
+    PVOID Block;
+    const USHORT *Pointers;
+    ULONG PointerCount;
+    ULONG FixedSize;
+    ULONG BlockCount = 0;
+    ULONG BlockSize;
+    ULONG PackedSize;
+    ULONG Used = 0;
+    ULONG Remaining;
+    ULONG i;
     NET_API_STATUS ApiStatus = NERR_Success;
     NTSTATUS Status = STATUS_SUCCESS;
 
@@ -806,6 +883,36 @@ NetGroupEnum(
     if (servername != NULL)
         RtlInitUnicodeString(&ServerName, servername);
 
+    switch (level)
+    {
+        case 0:
+            FixedSize = sizeof(GROUP_INFO_0);
+            Pointers = GroupInfo0Ptrs;
+            PointerCount = RTL_NUMBER_OF(GroupInfo0Ptrs);
+            break;
+
+        case 1:
+            FixedSize = sizeof(GROUP_INFO_1);
+            Pointers = GroupInfo1Ptrs;
+            PointerCount = RTL_NUMBER_OF(GroupInfo1Ptrs);
+            break;
+
+        case 2:
+            FixedSize = sizeof(GROUP_INFO_2);
+            Pointers = GroupInfo2Ptrs;
+            PointerCount = RTL_NUMBER_OF(GroupInfo2Ptrs);
+            break;
+
+        case 3:
+            FixedSize = sizeof(GROUP_INFO_3);
+            Pointers = GroupInfo3Ptrs;
+            PointerCount = RTL_NUMBER_OF(GroupInfo3Ptrs);
+            break;
+
+        default:
+            return ERROR_INVALID_LEVEL;
+    }
+
     if (resume_handle != NULL && *resume_handle != 0)
     {
         EnumContext = (PGROUP_ENUM_CONTEXT)*resume_handle;
@@ -817,11 +924,6 @@ NetGroupEnum(
             goto done;
 
         ZeroMemory(EnumContext, sizeof(GROUP_ENUM_CONTEXT));
-
-        EnumContext->EnumerationContext = 0;
-        EnumContext->Buffer = NULL;
-        EnumContext->Returned = 0;
-        EnumContext->Index = 0;
 
         Status = SamConnect((servername != NULL) ? &ServerName : NULL,
                             &EnumContext->ServerHandle,
@@ -855,45 +957,49 @@ NetGroupEnum(
             goto done;
         }
 
-        EnumContext->Phase = AccountPhase; //BuiltinPhase;
-        EnumContext->DomainHandle = EnumContext->AccountDomainHandle; //BuiltinDomainHandle;
+        EnumContext->Phase = AccountPhase;
+        EnumContext->DomainHandle = EnumContext->AccountDomainHandle;
+
+        /* List the groups whole: prefmaxlen limits what one call returns, not what the SAM lists */
+        TRACE("Calling SamEnumerateGroupsInDomain\n");
+        Status = SamEnumerateGroupsInDomain(EnumContext->DomainHandle,
+                                            &EnumContext->EnumerationContext,
+                                            (PVOID *)&EnumContext->Buffer,
+                                            MAX_PREFERRED_LENGTH,
+                                            &EnumContext->Returned);
+        TRACE("SamEnumerateGroupsInDomain returned (Status %08lx)\n", Status);
+        if (Status == STATUS_NO_MORE_ENTRIES)
+        {
+            EnumContext->Buffer = NULL;
+            EnumContext->Returned = 0;
+        }
+        else if (!NT_SUCCESS(Status))
+        {
+            ERR("SamEnumerateGroupsInDomain failed (Status %08lx)\n", Status);
+            EnumContext->Buffer = NULL;
+            EnumContext->Returned = 0;
+            ApiStatus = NetpNtStatusToApiStatus(Status);
+            goto done;
+        }
     }
 
+    TRACE("EnumContext->Index: %lu\n", EnumContext->Index);
+    TRACE("EnumContext->Returned: %lu\n", EnumContext->Returned);
 
-//    while (TRUE)
-//    {
-        TRACE("EnumContext->Index: %lu\n", EnumContext->Index);
-        TRACE("EnumContext->Returned: %lu\n", EnumContext->Returned);
+    Remaining = EnumContext->Returned - EnumContext->Index;
+    if (Remaining != 0)
+    {
+        ApiStatus = NetApiBufferAllocate(Remaining * sizeof(PVOID), (PVOID*)&Blocks);
+        if (ApiStatus != NERR_Success)
+            goto done;
 
-        if (EnumContext->Index >= EnumContext->Returned)
-        {
-            TRACE("Calling SamEnumerateGroupsInDomain\n");
+        ApiStatus = NetApiBufferAllocate(Remaining * sizeof(ULONG), (PVOID*)&BlockSizes);
+        if (ApiStatus != NERR_Success)
+            goto done;
+    }
 
-            Status = SamEnumerateGroupsInDomain(EnumContext->DomainHandle,
-                                                &EnumContext->EnumerationContext,
-                                                (PVOID *)&EnumContext->Buffer,
-                                                prefmaxlen,
-                                                &EnumContext->Returned);
-
-            TRACE("SamEnumerateGroupsInDomain returned (Status %08lx)\n", Status);
-            if (!NT_SUCCESS(Status))
-            {
-                ERR("SamEnumerateAliasesInDomain failed (Status %08lx)\n", Status);
-                ApiStatus = NetpNtStatusToApiStatus(Status);
-                goto done;
-            }
-
-            if (Status == STATUS_MORE_ENTRIES)
-            {
-                ApiStatus = NERR_BufTooSmall;
-                goto done;
-            }
-        }
-
-        TRACE("EnumContext: %lu\n", EnumContext);
-        TRACE("EnumContext->Returned: %lu\n", EnumContext->Returned);
-        TRACE("EnumContext->Buffer: %p\n", EnumContext->Buffer);
-
+    while (EnumContext->Index < EnumContext->Returned)
+    {
         /* Get a pointer to the current group */
         CurrentGroup = &EnumContext->Buffer[EnumContext->Index];
 
@@ -929,84 +1035,74 @@ NetGroupEnum(
         ApiStatus = BuildGroupInfoBuffer(GroupInfo,
                                          level,
                                          CurrentGroup->RelativeId,
-                                         &Buffer);
+                                         &Block,
+                                         &BlockSize);
         if (ApiStatus != NERR_Success)
             goto done;
 
-        if (GroupInfo != NULL)
+        FreeGroupInfo(GroupInfo);
+        GroupInfo = NULL;
+
+        /* The size of the entry in the packed buffer: the structure and its strings, aligned */
+        PackedSize = FixedSize + ((BlockSize - FixedSize + 7) & ~7);
+
+        /* An entry that does not fit stays the next one (the first one always goes) */
+        if (prefmaxlen != MAX_PREFERRED_LENGTH && BlockCount != 0 &&
+            (Used > prefmaxlen || PackedSize > prefmaxlen - Used))
         {
-            FreeGroupInfo(GroupInfo);
-            GroupInfo = NULL;
+            NetApiBufferFree(Block);
+            break;
         }
+
+        Blocks[BlockCount] = Block;
+        BlockSizes[BlockCount] = BlockSize;
+        BlockCount++;
+        Used += PackedSize;
 
         EnumContext->Index++;
+    }
 
-        (*entriesread)++;
+    ApiStatus = NetpPackEnumEntries(BlockCount,
+                                    Blocks,
+                                    BlockSizes,
+                                    FixedSize,
+                                    Pointers,
+                                    PointerCount,
+                                    &Buffer);
+    if (ApiStatus != NERR_Success)
+        goto done;
 
-        if (EnumContext->Index == EnumContext->Returned)
-        {
-            switch (EnumContext->Phase)
-            {
-                case BuiltinPhase:
-                    EnumContext->Phase = AccountPhase;
-                    EnumContext->DomainHandle = EnumContext->AccountDomainHandle;
-                    EnumContext->EnumerationContext = 0;
-                    EnumContext->Index = 0;
-                    EnumContext->Returned = 0;
-
-                    if (EnumContext->Buffer != NULL)
-                    {
-                        for (i = 0; i < EnumContext->Returned; i++)
-                        {
-                            SamFreeMemory(EnumContext->Buffer[i].Name.Buffer);
-                        }
-
-                        SamFreeMemory(EnumContext->Buffer);
-                        EnumContext->Buffer = NULL;
-                    }
-                    break;
-
-                case AccountPhase:
-                case DonePhase:
-                    EnumContext->Phase = DonePhase;
-                    break;
-            }
-        }
-//    }
+    *entriesread = BlockCount;
 
 done:
-    if (ApiStatus == NERR_Success && EnumContext != NULL && EnumContext->Phase != DonePhase)
+    if (Blocks != NULL)
+    {
+        for (i = 0; i < BlockCount; i++)
+            NetApiBufferFree(Blocks[i]);
+
+        NetApiBufferFree(Blocks);
+    }
+
+    if (BlockSizes != NULL)
+        NetApiBufferFree(BlockSizes);
+
+    if (ApiStatus == NERR_Success && EnumContext != NULL && EnumContext->Index < EnumContext->Returned)
         ApiStatus = ERROR_MORE_DATA;
 
-    if (EnumContext != NULL)
-        *totalentries = EnumContext->Returned;
-
-    if (resume_handle == NULL || ApiStatus != ERROR_MORE_DATA)
+    if (ApiStatus == NERR_Success || ApiStatus == ERROR_MORE_DATA)
     {
         if (EnumContext != NULL)
-        {
-            if (EnumContext->BuiltinDomainHandle != NULL)
-                SamCloseHandle(EnumContext->BuiltinDomainHandle);
+            *totalentries = EnumContext->Returned;
+    }
+    else
+    {
+        *entriesread = 0;
+    }
 
-            if (EnumContext->AccountDomainHandle != NULL)
-                SamCloseHandle(EnumContext->AccountDomainHandle);
-
-            if (EnumContext->ServerHandle != NULL)
-                SamCloseHandle(EnumContext->ServerHandle);
-
-            if (EnumContext->Buffer != NULL)
-            {
-                for (i = 0; i < EnumContext->Returned; i++)
-                {
-                    SamFreeMemory(EnumContext->Buffer[i].Name.Buffer);
-                }
-
-                SamFreeMemory(EnumContext->Buffer);
-            }
-
-            NetApiBufferFree(EnumContext);
-            EnumContext = NULL;
-        }
+    if (EnumContext != NULL && (resume_handle == NULL || ApiStatus != ERROR_MORE_DATA))
+    {
+        FreeGroupEnumContextData(EnumContext);
+        EnumContext = NULL;
     }
 
     if (GroupHandle != NULL)
@@ -1104,7 +1200,8 @@ NetGroupGetInfo(
     ApiStatus = BuildGroupInfoBuffer(GroupInfo,
                                      level,
                                      RelativeId,
-                                     &Buffer);
+                                     &Buffer,
+                                     NULL);
     if (ApiStatus != NERR_Success)
         goto done;
 
@@ -1262,6 +1359,9 @@ NetGroupGetUsers(
     }
     else
     {
+        /* The count is of this call: a resumed call starts a new part */
+        EnumContext->Count = 0;
+
         for (i = EnumContext->Start; i < EnumContext->MemberCount; i++)
         {
             Size += (level == 0) ? sizeof(GROUP_USERS_INFO_0) : sizeof(GROUP_USERS_INFO_1);
