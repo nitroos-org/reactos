@@ -1617,9 +1617,9 @@ SeFilterToken(
 
     /* Call the internal API */
     Status = SepPerformTokenFiltering(ExistingToken,
-                                      PrivilegesToDelete->Privileges,
-                                      SidsToDisable->Groups,
-                                      RestrictedSids->Groups,
+                                      PrivilegesToDelete ? PrivilegesToDelete->Privileges : NULL,
+                                      SidsToDisable ? SidsToDisable->Groups : NULL,
+                                      RestrictedSids ? RestrictedSids->Groups : NULL,
                                       PrivilegesCount,
                                       SidsCount,
                                       RestrictedSidsCount,
