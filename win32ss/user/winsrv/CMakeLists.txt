@@ -30,6 +30,11 @@ target_link_libraries(winsrv consrv usersrv)
 target_link_libraries(winsrv ${CONSRV_TARGET_LINK_LIBS} win32ksys libcntpr ${PSEH_LIB})
 
 add_delay_importlibs(winsrv ${CONSRV_DELAY_IMPORT_LIBS} ${USERSRV_DELAY_IMPORT_LIBS} advapi32)
-add_importlibs(winsrv ${CONSRV_IMPORT_LIBS} ${USERSRV_IMPORT_LIBS} csrsrv gdi32 user32 kernel32 ntdll)
+if(DLL_EXPORT_VERSION LESS 0x600)
+    # ntdll exports the slim reader/writer lock functions (guiterm.c) from 0x600 on only
+    add_importlibs(winsrv ${CONSRV_IMPORT_LIBS} ${USERSRV_IMPORT_LIBS} csrsrv gdi32 user32 kernel32 ntdll_vista ntdll)
+else()
+    add_importlibs(winsrv ${CONSRV_IMPORT_LIBS} ${USERSRV_IMPORT_LIBS} csrsrv gdi32 user32 kernel32 ntdll)
+endif()
 add_dependencies(winsrv bugcodes xdk)
 add_cd_file(TARGET winsrv DESTINATION reactos/system32 FOR all)
