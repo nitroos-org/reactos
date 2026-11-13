@@ -268,6 +268,49 @@ QueryConnectionTableByEntity(
     return Status;
 }
 
+/* The connections in TIME_WAIT, as an array of TCP_TIMEWAIT_ROW. They have no address file, so
+ * the per-entity queries cannot return them. As for any table, a caller whose buffer does not hold
+ * the whole answer gets the size that does; the table can change between the two calls, and the
+ * caller asks again when the sizes differ. */
+#define MAX_TIME_WAIT_ROWS (1024 * 1024)
+
+static
+TDI_STATUS
+InfoTdiQueryGetTimeWaitTable(
+    PNDIS_BUFFER Buffer,
+    PUINT BufferSize)
+{
+    PTCP_TIMEWAIT_ROW Rows = NULL;
+    ULONG Max = 0, Count;
+    TDI_STATUS Status;
+
+    if (Buffer && *BufferSize >= sizeof(TCP_TIMEWAIT_ROW))
+    {
+        Max = min(*BufferSize / sizeof(TCP_TIMEWAIT_ROW), MAX_TIME_WAIT_ROWS);
+        Rows = ExAllocatePoolWithTag(NonPagedPool, Max * sizeof(TCP_TIMEWAIT_ROW), TDI_ENTITY_TAG);
+        if (!Rows)
+            return TDI_NO_RESOURCES;
+    }
+
+    Count = TCPEnumTimeWait(Rows, Max);
+    if (Count > MAX_TIME_WAIT_ROWS)
+        Count = MAX_TIME_WAIT_ROWS;
+
+    if (Count > Max || Count == 0)
+    {
+        /* Does not fit (only the size is reported), or nothing to copy */
+        Status = InfoCopyOut(NULL, Count * sizeof(TCP_TIMEWAIT_ROW), NULL, BufferSize);
+    }
+    else
+    {
+        Status = InfoCopyOut((PCHAR)Rows, Count * sizeof(TCP_TIMEWAIT_ROW), Buffer, BufferSize);
+    }
+
+    if (Rows)
+        ExFreePoolWithTag(Rows, TDI_ENTITY_TAG);
+    return Status;
+}
+
 /* The interface of an interface entity (IF, AT, CL_NL, CO_NL), referenced for the caller
  * (IPDereferenceInterface), or NULL. IPDestroyInterface removes the entities under
  * EntityListLock before it drops the interface's own reference, so an interface found
@@ -588,6 +631,14 @@ TDI_STATUS InfoTdiQueryInformationEx(
                      return QueryConnectionTableByEntity(ID->toi_entity, FALSE, Buffer, BufferSize, TcpUdpClassOwner);
                  else
                      return TDI_INVALID_PARAMETER;
+
+              case IP_TCP_TIMEWAIT_ENTRY_ID:
+                 if (ID->toi_type != INFO_TYPE_PROVIDER ||
+                     ID->toi_entity.tei_entity != CO_TL_ENTITY ||
+                     ID->toi_entity.tei_instance != 0)
+                     return TDI_INVALID_PARAMETER;
+
+                 return InfoTdiQueryGetTimeWaitTable(Buffer, BufferSize);
 
 #if 0
               case IP_INTFC_INFO_ID:
