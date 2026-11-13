@@ -6791,11 +6791,7 @@ RetryCommit:
         // limit is reached, wait for a paging file to grow without any lock
         // held, then look everything up again.
         //
-        CommitPages = 0;
-        for (PMMPTE ProtoPte = PointerPte; ProtoPte <= LastPte; ProtoPte++)
-        {
-            if (ProtoPte->u.Long == 0) CommitPages++;
-        }
+        CommitPages = MiCountZeroPrototypePtes(PointerPte, LastPte + 1);
         if (!MiChargeCommit(CommitPages, MiCommitUser))
         {
             KeReleaseGuardedMutexUnsafe(&MmSectionCommitMutex);
@@ -6807,6 +6803,23 @@ RetryCommit:
             Status = STATUS_COMMITMENT_LIMIT;
             goto FailPathNoLock;
         }
+
+#ifdef _M_AMD64
+        //
+        // Sparse Prototype PTEs: make their pages writable first
+        //
+        if (CommitPages && MI_IS_SPARSE_PROTOTYPE_PTE(PointerPte))
+        {
+            Status = MiPopulateSparsePrototypePtes(PointerPte, LastPte);
+            if (!NT_SUCCESS(Status))
+            {
+                /* Charged like the commit itself: STATUS_COMMITMENT_LIMIT, or STATUS_NO_MEMORY */
+                MiReturnCommit(CommitPages);
+                KeReleaseGuardedMutexUnsafe(&MmSectionCommitMutex);
+                goto FailPath;
+            }
+        }
+#endif
 
         //
         // Get the segment template PTE and start looping each page
