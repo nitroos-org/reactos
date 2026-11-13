@@ -16,6 +16,9 @@ Specify the build output dir as commandline argument to the script:
 Multiple directories can be specified:
 `python gen_baseaddress r:/build/msvc r:/build/gcc`
 
+Specify --max first to build one table from several directories, sizing each module by its largest image:
+`python gen_baseaddress.py --max output-i386-Release output-dwarf-i386-Debug`
+
 Specify -64 as first argument to use 64-bit addresses:
 `python gen_baseaddress -64 r:\\build\\msvc-x64`
 """
@@ -27,8 +30,8 @@ import sys
 try:
     import pefile
 except ImportError:
-    print('# Please install pefile from pip or https://github.com/erocarrera/pefile')
-    sys.exit(-1)
+    # Only used to pick the output file name from the debug-info flavour; without it the table goes to stdout
+    pass
 
 
 ALL_EXTENSIONS = (
@@ -294,6 +297,7 @@ def size_of_image(filename):
 class Module(object):
     def __init__(self, name, address, size, filename):
         self._name = name
+        self.name = name
         self.address = address
         self.size = size
         self._reserved = address != 0
@@ -316,6 +320,20 @@ class Module(object):
     def __repr__(self):
         return '%s (0x%08x - 0x%08x)' % (self._name, self.address, self.end())
 
+# Growth room kept above every module, so a module can grow without touching the one placed above it: a quarter of its size,
+# at least 64 KB, rounded up to 64 KB. kernel32 (one locale resource per supported locale, ~2.6 KB each) gets 4 MB on top
+# of that, which is room for more than 1500 further locales.
+MIN_SLACK = 0x10000
+SLACK_DIVISOR = 4
+EXTRA_SLACK = {
+    'kernel32.dll': 0x400000,
+}
+
+def module_slack(name, size):
+    slack = max(MIN_SLACK, size // SLACK_DIVISOR) + EXTRA_SLACK.get(name, 0)
+    return (slack + 0xffff) & ~0xffff
+
+
 class MemoryLayout(object):
     def __init__(self, startaddress):
         self.addresses = []
@@ -332,7 +350,12 @@ class MemoryLayout(object):
         size = size_of_image(filename)
         addr = 0
         if name in self.found:
-            return  # Assume duplicate files (rshell, ...) are 1:1 copies
+            # Duplicate files (rshell, ...) are 1:1 copies; with --max the same module from several build directories
+            # (Release and Debug) keeps the largest size
+            self.found[name].size = max(self.found[name].size, size)
+            if name in self.reserved:
+                self.reserved[name] = (self.reserved[name][0], self.found[name].size)
+            return
         if name in self.reserved:
             addr = self.reserved[name][0]
             self.reserved[name] = (addr, size)
@@ -346,7 +369,9 @@ class MemoryLayout(object):
             addr = self.start_at = self.initial
         return addr
 
-    def next_address(self, size):
+    def next_address(self, size, name=''):
+        if not IS_64_BIT:
+            self.module_padding = module_slack(name, size)
         while True:
             current_start = self._next_address(size)
             current_end = current_start + size + self.module_padding
@@ -377,12 +402,12 @@ class MemoryLayout(object):
                 obj = self.found[curr]
                 del self.found[curr]
                 if not obj.address:
-                    obj.address = self.next_address(obj.size)
+                    obj.address = self.next_address(obj.size, obj.name)
                 self.addresses.append(obj)
         # We handled all known modules now, run over the rest we found
         for key in sorted(self.found):
             obj = self.found[key]
-            obj.address = self.next_address(obj.size)
+            obj.address = self.next_address(obj.size, obj.name)
             self.addresses.append(obj)
 
     def gen_baseaddress(self, output_file):
@@ -407,6 +432,10 @@ def get_target_file(ntdll_path):
     return None
 
 def run_dir(target):
+    run_dirs([target])
+
+def run_dirs(targets):
+    target = ', '.join(targets)
     if IS_64_BIT:
         layout = MemoryLayout(0x7FFB7000000)
     else:
@@ -414,10 +443,11 @@ def run_dir(target):
         layout.add_reserved('user32.dll', 0x77a20000)
     IMAGE_TYPES[IMAGE_NT_OPTIONAL_HDR64_MAGIC] = 0
     IMAGE_TYPES[IMAGE_NT_OPTIONAL_HDR32_MAGIC] = 0
-    for root, _, files in os.walk(target):
-        for dll in [filename for filename in files if filename.endswith(ALL_EXTENSIONS)]:
-            if not dll in EXCLUDE and not dll.startswith('api-ms-win-'):
-                layout.add(os.path.join(root, dll), dll)
+    for onedir in targets:
+        for root, _, files in os.walk(onedir):
+            for dll in [filename for filename in files if filename.endswith(ALL_EXTENSIONS)]:
+                if not dll in EXCLUDE and not dll.startswith('api-ms-win-'):
+                    layout.add(os.path.join(root, dll), dll)
     ntdll_path = layout.found['ntdll.dll'].filename
     target_file = get_target_file(ntdll_path)
     if target_file:
@@ -440,6 +470,11 @@ def main():
         global IS_64_BIT
         IS_64_BIT = True
         dirs = sys.argv[2:]
+    if len(dirs) > 0 and dirs[0] == '--max':
+        # One table for several configurations that share it (i386 Release and Debug NO_ROSSYM both use
+        # baseaddress_dwarf.cmake): every module is sized by its largest image
+        run_dirs(dirs[1:])
+        return
     if len(dirs) < 1:
         trydir = os.getcwd()
         print(USAGE)
