@@ -1657,7 +1657,12 @@ MmMakeSegmentResident(
                     goto AssignPagesToSegment;
                 }
 
-                Mdl->ByteCount = (ULONG)ROUND_TO_PAGES(ValidDataLength->QuadPart - FileOffset.QuadPart);
+                /* ReadLength is not a page multiple when the raw data of an
+                   image section ends inside a page (it was clamped above):
+                   rounding up to whole pages must not describe more than the
+                   MDL was allocated for */
+                Mdl->ByteCount = (ULONG)min(ROUND_TO_PAGES(ValidDataLength->QuadPart - FileOffset.QuadPart),
+                                            (ULONGLONG)ReadLength);
                 ASSERT(Mdl->ByteCount <= ReadLength);
             }
 
