@@ -1287,6 +1287,8 @@ RtlpCoalesceFreeBlocks (PHEAP Heap,
     return FreeEntry;
 }
 
+static BOOLEAN RtlpHeapTrim(PHEAP Heap, SIZE_T Keep, ULONG MaxBlocks);
+
 static
 PHEAP_FREE_ENTRY
 RtlpExtendHeap(PHEAP Heap,
@@ -1298,8 +1300,12 @@ RtlpExtendHeap(PHEAP Heap,
     PHEAP_SEGMENT Segment;
     PHEAP_FREE_ENTRY FreeEntry;
     NTSTATUS Status;
+    BOOLEAN Trimmed = FALSE;
 
     DPRINT("RtlpExtendHeap(%p %x)\n", Heap, Size);
+    Heap->TrimExtends++;
+
+Retry:
 
     /* Calculate amount in pages */
     Pages = (ULONG)((Size + PAGE_SIZE - 1) / PAGE_SIZE);
@@ -1430,6 +1436,14 @@ RtlpExtendHeap(PHEAP Heap,
             {
                 return FreeEntry;
             }
+        }
+
+        /* Nowhere to grow: the cached free pages may be what keeps the uncommitted ranges of the
+           segments apart. Give all of them back and look again. */
+        if (!Trimmed && !Heap->CommitRoutine && RtlpHeapTrim(Heap, 0, MAXULONG))
+        {
+            Trimmed = TRUE;
+            goto Retry;
         }
     }
 
@@ -2000,12 +2014,83 @@ RtlpSplitEntry(PHEAP Heap,
     return InUseEntry;
 }
 
+/* Free pages a heap keeps committed instead of handing them back at once.
+ *
+ * A free of a block that spans a whole page used to decommit it whenever the heap held DeCommitTotalFreeThreshold
+ * (64 KB, the PEB / Session Manager value) of free blocks in total, which is true of every heap that has run for a
+ * while. The next allocation the free lists could not serve committed the same pages again: two system calls made
+ * with the heap lock held and one more descriptor in the segment's list of uncommitted ranges, which the commit and
+ * decommit paths walk from the start. A program that builds and drops a lot of memory (a JIT compiler) spent a
+ * third of its time there.
+ *
+ * Now a user-mode heap decommits a block of at least DeCommitFreeBlockThreshold only when the free blocks, the new
+ * one included, reach a quarter of what the heap has committed (never less than DeCommitTotalFreeThreshold). Below
+ * that the free pages are a cache. The cache is trimmed back to DeCommitTotalFreeThreshold when the heap went a
+ * whole second without having to grow: then the cache was not needed, and an idle process does not keep memory it
+ * stopped using. */
+#define HEAP_TRIM_INTERVAL_MS   1000
+#define HEAP_TRIM_CAP_SHIFT     2
+#define HEAP_TRIM_MAX_BLOCKS    512
+
+static SIZE_T
+RtlpHeapCommittedUnits(PHEAP Heap)
+{
+    SIZE_T Units = 0;
+    ULONG i;
+
+    for (i = 0; i < HEAP_SEGMENTS; i++)
+    {
+        PHEAP_SEGMENT Segment = Heap->Segments[i];
+        if (Segment)
+            Units += (SIZE_T)(Segment->NumberOfPages - Segment->NumberOfUnCommittedPages) * (PAGE_SIZE >> HEAP_ENTRY_SHIFT);
+    }
+    return Units;
+}
+
+static ULONG
+RtlpHeapTickMs(VOID)
+{
+    return (ULONG)((SharedUserData->TickCountQuad * SharedUserData->TickCountMultiplier) >> 24);
+}
+
+/* Gives committed free pages back, largest free block first, until Keep entry units of free blocks are left or
+   MaxBlocks blocks were looked at. Returns whether any page was given back. The heap lock is held. */
+static BOOLEAN
+RtlpHeapTrim(PHEAP Heap, SIZE_T Keep, ULONG MaxBlocks)
+{
+    ULONG Budget = MaxBlocks;
+    BOOLEAN Done = FALSE;
+
+    while (Budget-- &&
+           Heap->TotalFreeSize > Keep &&
+           !IsListEmpty(&Heap->FreeLists))
+    {
+        PHEAP_FREE_ENTRY Entry = CONTAINING_RECORD(Heap->FreeLists.Blink, HEAP_FREE_ENTRY, FreeList);
+        SIZE_T Size = Entry->Size, Before = Heap->TotalFreeSize;
+
+        /* The list is sorted by size: nothing that spans a page is left */
+        if (Size <= Heap->DeCommitFreeBlockThreshold)
+            break;
+
+        RtlpRemoveFreeBlock(Heap, Entry, FALSE);
+        Heap->TotalFreeSize -= Size;
+        RtlpDeCommitFreeBlock(Heap, Entry, Size);
+
+        /* The block had no whole page to give back and went into the lists again */
+        if (Heap->TotalFreeSize >= Before)
+            break;
+        Done = TRUE;
+    }
+    return Done;
+}
+
 /* Gives an in-use block back to the heap proper: coalesce, decommit or insert. The heap lock is held. */
 VOID NTAPI
 RtlpFreeBlockLocked(PHEAP Heap,
                     PHEAP_ENTRY HeapEntry)
 {
     SIZE_T BlockSize = HeapEntry->Size;
+    BOOLEAN Decommit;
 
     /* Coalesce in kernel mode, and in usermode if it's not disabled */
     if (RtlpGetMode() == KernelMode ||
@@ -2018,8 +2103,23 @@ RtlpFreeBlockLocked(PHEAP Heap,
     }
 
     /* See if we should decommit this block */
-    if ((BlockSize >= Heap->DeCommitFreeBlockThreshold) ||
-        (Heap->TotalFreeSize + BlockSize >= Heap->DeCommitTotalFreeThreshold))
+    if (RtlpGetMode() == UserMode)
+    {
+        SIZE_T Cap = RtlpHeapCommittedUnits(Heap) >> HEAP_TRIM_CAP_SHIFT;
+
+        if (Cap < Heap->DeCommitTotalFreeThreshold)
+            Cap = Heap->DeCommitTotalFreeThreshold;
+
+        Decommit = (BlockSize >= Heap->DeCommitFreeBlockThreshold) &&
+                   (Heap->TotalFreeSize + BlockSize >= Cap);
+    }
+    else
+    {
+        Decommit = (BlockSize >= Heap->DeCommitFreeBlockThreshold) ||
+                   (Heap->TotalFreeSize + BlockSize >= Heap->DeCommitTotalFreeThreshold);
+    }
+
+    if (Decommit)
     {
         RtlpDeCommitFreeBlock(Heap, (PHEAP_FREE_ENTRY)HeapEntry, BlockSize);
     }
@@ -2027,6 +2127,24 @@ RtlpFreeBlockLocked(PHEAP Heap,
     {
         /* Insert into the free list */
         RtlpInsertFreeBlock(Heap, (PHEAP_FREE_ENTRY)HeapEntry, BlockSize);
+
+        if (RtlpGetMode() == UserMode)
+        {
+            ULONG Now = RtlpHeapTickMs();
+
+            if (Now - Heap->TrimTick >= HEAP_TRIM_INTERVAL_MS)
+            {
+                /* A whole interval without growing: the cached free pages were not needed */
+                if (Heap->TrimTick != 0 &&
+                    Heap->TrimExtends == 0 &&
+                    Heap->TotalFreeSize > Heap->DeCommitTotalFreeThreshold)
+                {
+                    RtlpHeapTrim(Heap, Heap->DeCommitTotalFreeThreshold, HEAP_TRIM_MAX_BLOCKS);
+                }
+                Heap->TrimTick = Now ? Now : 1;
+                Heap->TrimExtends = 0;
+            }
+        }
     }
 }
 
