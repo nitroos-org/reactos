@@ -261,6 +261,7 @@ list(APPEND SOURCE
     PageFaultAddress.c
     SectionFaultCost.c
     SectionPageLeak.c
+    SectionViewProtect.c
     SectionVirtualLockLeak.c
     strcpy_s.c
     RtlWaitOnAddress.c
