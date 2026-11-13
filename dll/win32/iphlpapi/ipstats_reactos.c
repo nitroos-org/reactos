@@ -859,6 +859,34 @@ PVOID getUdpTable(CLASS_TABLE Class)
     return IpUdpTable;
 }
 
+/* The connections in TIME_WAIT have no address file, so tcpip lists them apart from the entities.
+   A tcpip that does not know the request just has none. Free the rows with tdiFreeThingSet */
+static DWORD getTimeWaitRows(
+    _In_ HANDLE tcpFile,
+    _Out_ PTCP_TIMEWAIT_ROW *Rows)
+{
+    DWORD count = 0;
+    NTSTATUS status;
+
+    *Rows = NULL;
+    status = tdiGetSetOfThings(tcpFile,
+        INFO_CLASS_PROTOCOL,
+        INFO_TYPE_PROVIDER,
+        IP_TCP_TIMEWAIT_ENTRY_ID,
+        CO_TL_ENTITY,
+        0,
+        0,
+        sizeof(TCP_TIMEWAIT_ROW),
+        (PVOID *)Rows,
+        &count);
+    if (!NT_SUCCESS(status))
+    {
+        *Rows = NULL;
+        return 0;
+    }
+    return count;
+}
+
 DWORD getNumTcpEntries(void)
 {
     DWORD numEntities = 0;
@@ -901,6 +929,13 @@ DWORD getNumTcpEntries(void)
                 IpTcpTable = NULL;
             }
         }
+    }
+
+    {
+        PTCP_TIMEWAIT_ROW TimeWait;
+
+        totalNumber += getTimeWaitRows(tcpFile, &TimeWait);
+        if (TimeWait) tdiFreeThingSet(TimeWait);
     }
 
     closeTcpFile(tcpFile);
@@ -961,6 +996,26 @@ PVOID getTcpTable(CLASS_TABLE Class)
                 tdiFreeThingSet(AdapterTcpTable);
             }
         }
+    }
+
+    {
+        PTCP_TIMEWAIT_ROW TimeWait;
+        DWORD TimeWaitCount = getTimeWaitRows(tcpFile, &TimeWait);
+
+        for (TmpIdx = 0; TmpIdx < TimeWaitCount && CurrIdx < totalNumber; TmpIdx++, CurrIdx++)
+        {
+            PVOID Row = Add2Ptr(IpTcpTable, UdpTcpTableCall[Class].TcpOffset + UdpTcpTableCall[Class].TcpSize * CurrIdx);
+
+            /* No owner: the connection is no process's any more */
+            ZeroMemory(Row, UdpTcpTableCall[Class].TcpSize);
+            /* All three rows start with the state and the two endpoints */
+            ((PMIB_TCPROW)Row)->dwState = MIB_TCP_STATE_TIME_WAIT;
+            ((PMIB_TCPROW)Row)->dwLocalAddr = TimeWait[TmpIdx].LocalAddr;
+            ((PMIB_TCPROW)Row)->dwLocalPort = TimeWait[TmpIdx].LocalPort;
+            ((PMIB_TCPROW)Row)->dwRemoteAddr = TimeWait[TmpIdx].RemoteAddr;
+            ((PMIB_TCPROW)Row)->dwRemotePort = TimeWait[TmpIdx].RemotePort;
+        }
+        if (TimeWait) tdiFreeThingSet(TimeWait);
     }
 
     closeTcpFile(tcpFile);

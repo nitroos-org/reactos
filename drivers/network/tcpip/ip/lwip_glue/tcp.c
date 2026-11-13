@@ -2214,3 +2214,34 @@ LibTCPGetSocketStatus(
     /* Translate state from enum tcp_state -> MIB_TCP_STATE */
     *State = pcb->state + 1;
 }
+
+/* Copies up to MaxRows of the connections in TIME-WAIT (lwIP keeps them in tcp_tw_pcbs, with no
+   connection endpoint any more) and returns how many there are, which may be more than MaxRows.
+   Only IPv4 connections are listed. The caller must not hold the core lock */
+ULONG
+LibTCPEnumTimeWait(
+    PLIBTCP_TIMEWAIT_ROW Rows,
+    ULONG MaxRows)
+{
+    struct tcp_pcb *pcb;
+    ULONG Total = 0;
+
+    LOCK_TCPIP_CORE();
+    for (pcb = tcp_tw_pcbs; pcb != NULL; pcb = pcb->next)
+    {
+        if (!IP_IS_V4_VAL(pcb->local_ip) || !IP_IS_V4_VAL(pcb->remote_ip))
+            continue;
+
+        if (Total < MaxRows)
+        {
+            Rows[Total].LocalAddr = ip4_addr_get_u32(ip_2_ip4(&pcb->local_ip));
+            Rows[Total].LocalPort = lwip_htons(pcb->local_port);
+            Rows[Total].RemoteAddr = ip4_addr_get_u32(ip_2_ip4(&pcb->remote_ip));
+            Rows[Total].RemotePort = lwip_htons(pcb->remote_port);
+        }
+        Total++;
+    }
+    UNLOCK_TCPIP_CORE();
+
+    return Total;
+}

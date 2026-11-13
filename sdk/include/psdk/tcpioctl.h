@@ -69,6 +69,18 @@
 /* Non public TOIID used to query modules info */
 #ifdef __REACTOS__
 #define IP_SPECIFIC_MODULE_ENTRY_ID     0x110
+/* Non public TOIID: the connections in TIME_WAIT, which have no address file and so no entity of
+   their own. Asked of the TCP entity (CO_TL_ENTITY, instance 0); the answer is an array of
+   TCP_TIMEWAIT_ROW, with the addresses and ports in network byte order */
+#define IP_TCP_TIMEWAIT_ENTRY_ID        0x111
+
+typedef struct _TCP_TIMEWAIT_ROW
+{
+    ULONG LocalAddr;
+    ULONG LocalPort;
+    ULONG RemoteAddr;
+    ULONG RemotePort;
+} TCP_TIMEWAIT_ROW, *PTCP_TIMEWAIT_ROW;
 #endif
 #define MAX_PHYSADDR_SIZE               8
 
