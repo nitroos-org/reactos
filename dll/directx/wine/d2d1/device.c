@@ -17,6 +17,7 @@
  */
 
 #include "d2d1_private.h"
+#include "svg_private.h"
 #include <d3dcompiler.h>
 
 WINE_DEFAULT_DEBUG_CHANNEL(d2d);
@@ -2144,8 +2145,14 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_EndDraw(ID2D1DeviceContext6 
 
     if (context->target.type == D2D_TARGET_COMMAND_LIST)
     {
-        FIXME("Unimplemented for command list target.\n");
-        return E_NOTIMPL;
+        /* Nothing to present: the drawing was recorded into the list, which is finished by Close(). */
+        if (tag1)
+            *tag1 = context->error.tag1;
+        if (tag2)
+            *tag2 = context->error.tag2;
+        if (context->target.command_list->state == D2D_COMMAND_LIST_STATE_ERROR)
+            return D2DERR_WRONG_STATE;
+        return context->error.code;
     }
 
     if (tag1)
@@ -2749,6 +2756,7 @@ static void STDMETHODCALLTYPE d2d_device_context_DrawImage(ID2D1DeviceContext6 *
         D2D1_COMPOSITE_MODE composite_mode)
 {
     struct d2d_device_context *context = impl_from_ID2D1DeviceContext(iface);
+    ID2D1CommandList *command_list;
     ID2D1Bitmap *bitmap;
 
     TRACE("iface %p, image %p, target_offset %s, image_rect %s, interpolation_mode %#x, composite_mode %#x.\n",
@@ -2764,6 +2772,16 @@ static void STDMETHODCALLTYPE d2d_device_context_DrawImage(ID2D1DeviceContext6 *
 
     if (d2d_device_context_draw_effect(context, image, target_offset, image_rect, interpolation_mode, composite_mode))
         return;
+
+    if (SUCCEEDED(ID2D1Image_QueryInterface(image, &IID_ID2D1CommandList, (void **)&command_list)))
+    {
+        if (composite_mode != D2D1_COMPOSITE_MODE_SOURCE_OVER)
+            FIXME("Unhandled composite mode %#x for a command list.\n", composite_mode);
+        d2d_command_list_play(unsafe_impl_from_ID2D1CommandList(command_list), (ID2D1DeviceContext *)iface,
+                target_offset, image_rect);
+        ID2D1CommandList_Release(command_list);
+        return;
+    }
 
     if (composite_mode != D2D1_COMPOSITE_MODE_SOURCE_OVER)
         FIXME("Unhandled composite mode %#x.\n", composite_mode);
@@ -3098,7 +3116,21 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_CreateSvgDocument(ID2D1Devic
 static void STDMETHODCALLTYPE d2d_device_context_DrawSvgDocument(ID2D1DeviceContext6 *iface,
         ID2D1SvgDocument *svg_document)
 {
-    FIXME("iface %p, svg_document %p stub!\n", iface, svg_document);
+    struct d2d_svg_document *document;
+
+    TRACE("iface %p, svg_document %p.\n", iface, svg_document);
+
+    if (!svg_document)
+        return;
+    if (!(document = unsafe_impl_from_ID2D1SvgDocument(svg_document)))
+    {
+        FIXME("Unsupported SVG document implementation %p.\n", svg_document);
+        return;
+    }
+
+    /* Only public device context methods are used: this draws on a bitmap target and records into a
+     * command list target alike. */
+    d2d_svg_draw_document(document, (ID2D1DeviceContext *)iface);
 }
 
 static HRESULT STDMETHODCALLTYPE d2d_device_context_CreateColorContextFromDxgiColorSpace(
