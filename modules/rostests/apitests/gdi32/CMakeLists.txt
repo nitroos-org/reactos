@@ -107,6 +107,7 @@ list(APPEND SOURCE
     StretchBlt.c
     TextTransform.c
     UniscribeForwarders.c
+    WidePen.c
     WindowMemoryDC.c)
 
 list(APPEND PCH_SKIP_SOURCE
