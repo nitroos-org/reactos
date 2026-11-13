@@ -36,6 +36,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(ntlm);
 #define LOCAL_CALL_MAX          4096
 #define LOCAL_CALL_MAX_PROCESS  1024
 #define LOCAL_CALL_MAX_USER     2048    /* all processes of one user together: others always find room */
+#define LOCAL_CALL_SWEEP_PERIOD 30000   /* ms: a bound token leaves the LSA at most this long after its expiry */
 
 /* A process that issued contexts: the LSA's own handle of it keeps its process id from being reused */
 typedef struct _LOCAL_CALL_ISSUER
@@ -63,6 +64,7 @@ static LIST_ENTRY LocalCallList;
 static LIST_ENTRY LocalCallIssuers;
 static RTL_CRITICAL_SECTION LocalCallLock;
 static ULONG LocalCallCount;
+static HANDLE LocalCallTimer;
 static BOOLEAN LocalCallInitialized = FALSE;
 
 VOID
@@ -182,6 +184,25 @@ SweepLocalCalls(
         if (Context->Expires.QuadPart <= Now->QuadPart || Context->Issuer->Exited)
             FreeLocalCall(Context);
     }
+}
+
+/* The sweep without a message: a context a client bound holds a copy of its token (and so its logon session) */
+static
+VOID
+NTAPI
+LocalCallTimerCallback(
+    _In_ PVOID Parameter,
+    _In_ BOOLEAN TimerOrWaitFired)
+{
+    LARGE_INTEGER Now;
+
+    UNREFERENCED_PARAMETER(Parameter);
+    UNREFERENCED_PARAMETER(TimerOrWaitFired);
+
+    NtQuerySystemTime(&Now);
+    RtlEnterCriticalSection(&LocalCallLock);
+    SweepLocalCalls(&Now);
+    RtlLeaveCriticalSection(&LocalCallLock);
 }
 
 static
@@ -317,7 +338,7 @@ MsvpLocalCallIssue(
 {
     PMSV1_0_ROS_NTLM_LOCAL_ISSUE Request = ProtocolSubmitBuffer;
     MSV1_0_ROS_NTLM_LOCAL_CONTEXT Reply;
-    PLOCAL_CALL_CONTEXT Context, Other;
+    PLOCAL_CALL_CONTEXT Context;
     PLOCAL_CALL_ISSUER Issuer;
     LARGE_INTEGER Now;
     ULONG_PTR ProcessId;
@@ -356,15 +377,12 @@ MsvpLocalCallIssue(
 
     RtlEnterCriticalSection(&LocalCallLock);
     SweepLocalCalls(&Now);
-    for (Entry = LocalCallList.Flink; Entry != &LocalCallList; Entry = Entry->Flink)
-    {
-        Other = CONTAINING_RECORD(Entry, LOCAL_CALL_CONTEXT, ListEntry);
-        if (Other->Issuer->ProcessId == ProcessId)
-            Mine++;
-    }
+    /* the record of the caller is that of this process (see ReferenceIssuer) */
     for (Entry = LocalCallIssuers.Flink; Entry != &LocalCallIssuers; Entry = Entry->Flink)
     {
         Issuer = CONTAINING_RECORD(Entry, LOCAL_CALL_ISSUER, ListEntry);
+        if (Issuer->ProcessId == ProcessId)
+            Mine = Issuer->Contexts;
         if (RtlEqualSid(Issuer->User, User))
             Users += Issuer->Contexts;
     }
@@ -511,6 +529,19 @@ MsvpLocalCallBind(
     RtlCopyMemory(Reply.SessionKey, Context->SessionKey, sizeof(Reply.SessionKey));
     RtlLeaveCriticalSection(&LocalCallLock);
 
+    /* the timer is made outside the lock its callback takes (if it cannot be made, the next message sweeps) */
+    if (LocalCallTimer == NULL)
+    {
+        HANDLE Timer = NULL;
+
+        if (NT_SUCCESS(RtlCreateTimer(NULL, &Timer, LocalCallTimerCallback, NULL, LOCAL_CALL_SWEEP_PERIOD,
+                                      LOCAL_CALL_SWEEP_PERIOD, WT_EXECUTEINTIMERTHREAD)) &&
+            InterlockedCompareExchangePointer(&LocalCallTimer, Timer, NULL) != NULL)
+        {
+            RtlDeleteTimer(NULL, Timer, NULL);
+        }
+    }
+
     Reply.MessageType = MsV1_0RosNtlmLocalBind;
     Status = ReturnToClient(ClientRequest, &Reply, sizeof(Reply), ProtocolReturnBuffer, ReturnBufferLength);
     RtlSecureZeroMemory(&Reply, sizeof(Reply));
@@ -594,8 +625,9 @@ MsvpLocalCallAccept(
     FreeLocalCall(Context);
     RtlLeaveCriticalSection(&LocalCallLock);
 
-    Status = NtDuplicateObject(NtCurrentProcess(), Token, Process, &Remote, 0, 0,
-                               DUPLICATE_SAME_ACCESS | DUPLICATE_CLOSE_SOURCE);
+    /* the LSA's handle goes whether or not the server gets its own */
+    Status = NtDuplicateObject(NtCurrentProcess(), Token, Process, &Remote, 0, 0, DUPLICATE_SAME_ACCESS);
+    NtClose(Token);
     if (!NT_SUCCESS(Status))
     {
         RtlSecureZeroMemory(&Reply, sizeof(Reply));
