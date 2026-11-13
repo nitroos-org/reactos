@@ -29,6 +29,17 @@ RtlpCheckForActiveDebugger(VOID)
     return NtCurrentPeb()->BeingDebugged;
 }
 
+#ifdef _M_AMD64
+VOID NTAPI RtlUserThreadStart(VOID);
+
+PVOID
+NTAPI
+RtlpGetUserThreadStart(VOID)
+{
+    return (PVOID)RtlUserThreadStart;
+}
+#endif
+
 BOOLEAN
 NTAPI
 RtlpSetInDbgPrint(VOID)

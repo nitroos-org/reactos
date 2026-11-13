@@ -271,6 +271,7 @@ extern void func_RtlCrc64(void);
 extern void func_RtlExtractBitMap(void);
 extern void func_RtlFls(void);
 extern void func_RtlGetPreciseTime(void);
+extern void func_RtlCreateUserThreadReturn(void);
 extern void func_RtlInitializeContext(void);
 extern void func_RtlWow64GetProcessMachines(void);
 extern void func_ZwQuerySystemInformationEx(void);
@@ -543,6 +544,7 @@ const struct test winetest_testlist[] =
     { "RtlExtractBitMap",               func_RtlExtractBitMap },
     { "RtlFls",                         func_RtlFls },
     { "RtlGetPreciseTime",              func_RtlGetPreciseTime },
+    { "RtlCreateUserThreadReturn",      func_RtlCreateUserThreadReturn },
     { "RtlInitializeContext",           func_RtlInitializeContext },
     { "RtlWow64GetProcessMachines",     func_RtlWow64GetProcessMachines },
     { "ZwQuerySystemInformationEx",     func_ZwQuerySystemInformationEx },
