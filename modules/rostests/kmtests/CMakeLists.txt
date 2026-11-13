@@ -79,6 +79,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_ex/ExPushLock.c
     ntos_ex/ExSListPopFault.c
     ntos_ex/ExResource.c
+    ntos_ex/ExResourceGrow.c
     ntos_ex/ExSequencedList.c
     ntos_ex/ExSingleList.c
     ntos_ex/ExStubHit.c
@@ -129,6 +130,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_ke/KeGuardedMutex.c
     ntos_ke/KeFreezeDpc.c
     ntos_ke/KeIrql.c
+    ntos_ke/KeIrqlPerf.c
     ntos_ke/KeMutex.c
     ntos_ke/KePriority.c
     ntos_ke/KeProfile.c
