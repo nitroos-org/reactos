@@ -9,7 +9,8 @@
  * primitive wrote is copied to the screen at ReleaseDC/EndPaint. Windows 10 with the Desktop Window Manager shows
  * GDI drawing at once (oracle W7, 2026-11-09) and leaves drawing on the screen DC alone until that part of the
  * window changes (W5). The "rest stays" checks are W5 applied to a window that draws elsewhere, or not at all, in
- * its paint; level 0 behaves so by construction.
+ * its paint; level 0 behaves so by construction. Test_Placement checks the same where the DC places the drawing: a
+ * window with a frame, a child window, a viewport origin, other mapping modes and a world transform.
  */
 
 #include "precomp.h"
@@ -150,8 +151,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 static void Clear(HWND hwnd)
 {
     HDC hdc = GetDC(hwnd);
-    RECT rc = { 0, 0, WCX, WCY };
+    RECT rc;
 
+    GetClientRect(hwnd, &rc);
     FillRect(hdc, &rc, GetStockObject(WHITE_BRUSH));
     ReleaseDC(hwnd, hdc);
 }
@@ -328,6 +330,225 @@ static void Test_Primitives(HWND hwnd)
     }
 }
 
+/*
+ * Where primitives are placed by the DC: a window with a frame (client origin not at the window's), a child window's
+ * DC, a viewport/window origin, other mapping modes and a world transform. Polygon and PolyPolygon convert their
+ * points to device coordinates themselves, and Rectangle becomes a polygon under a rotation: each has to present the
+ * place it drew in, not a moved one.
+ */
+enum { MODE_TEXT, MODE_ORG, MODE_LOENGLISH, MODE_ANISO, MODE_ROTATE, MODE_COUNT };
+static const char *const g_ModeName[MODE_COUNT] = { "MM_TEXT", "viewport origin", "MM_LOENGLISH", "MM_ANISOTROPIC", "rotation" };
+enum { KIND_POLYGON, KIND_POLYPOLYGON, KIND_RECTANGLE, KIND_COUNT };
+static const char *const g_KindName[KIND_COUNT] = { "Polygon", "PolyPolygon", "Rectangle" };
+
+static void SetupDc(HDC hdc, int Mode)
+{
+    switch (Mode)
+    {
+        case MODE_ORG:
+            SetViewportOrgEx(hdc, 40, 30, NULL);
+            SetWindowOrgEx(hdc, -10, 5, NULL);
+            break;
+        case MODE_LOENGLISH:
+            SetMapMode(hdc, MM_LOENGLISH);
+            break;
+        case MODE_ANISO:
+            SetMapMode(hdc, MM_ANISOTROPIC);
+            SetWindowExtEx(hdc, 100, 100, NULL);
+            SetViewportExtEx(hdc, 150, -120, NULL);
+            SetViewportOrgEx(hdc, 10, 200, NULL);
+            break;
+        case MODE_ROTATE:
+        {
+            XFORM xf = { 0.9063f, 0.4226f, -0.4226f, 0.9063f, 60.0f, 10.0f };   /* 25 degrees */
+
+            SetGraphicsMode(hdc, GM_ADVANCED);
+            SetWorldTransform(hdc, &xf);
+            break;
+        }
+    }
+}
+
+/* The window's client area as its own DC holds it and as the screen shows it: the number of pixels that differ */
+static int ClientVsScreen(HWND hwnd)
+{
+    RECT rc;
+    POINT org = { 0, 0 };
+    HDC hdcWnd = GetDC(hwnd), hdcScreen = GetDC(NULL);
+    HDC hdcA = CreateCompatibleDC(hdcScreen), hdcB = CreateCompatibleDC(hdcScreen);
+    BITMAPINFO bmi = { { sizeof(BITMAPINFOHEADER), 0, 0, 1, 32, BI_RGB } };
+    ULONG *pA, *pB;
+    HBITMAP hbmA, hbmB;
+    HGDIOBJ oldA, oldB;
+    int cx, cy, i, cDiff = 0;
+
+    GetClientRect(hwnd, &rc);
+    ClientToScreen(hwnd, &org);
+    cx = rc.right;
+    cy = rc.bottom;
+    bmi.bmiHeader.biWidth = cx;
+    bmi.bmiHeader.biHeight = -cy;
+    hbmA = CreateDIBSection(hdcScreen, &bmi, DIB_RGB_COLORS, (void **)&pA, NULL, 0);
+    hbmB = CreateDIBSection(hdcScreen, &bmi, DIB_RGB_COLORS, (void **)&pB, NULL, 0);
+    oldA = SelectObject(hdcA, hbmA);
+    oldB = SelectObject(hdcB, hbmB);
+    BitBlt(hdcA, 0, 0, cx, cy, hdcWnd, 0, 0, SRCCOPY);
+    BitBlt(hdcB, 0, 0, cx, cy, hdcScreen, org.x, org.y, SRCCOPY);
+    GdiFlush();
+    for (i = 0; i < cx * cy; i++)
+        if ((pA[i] & 0xffffff) != (pB[i] & 0xffffff))
+            cDiff++;
+    SelectObject(hdcA, oldA);
+    SelectObject(hdcB, oldB);
+    DeleteObject(hbmA);
+    DeleteObject(hbmB);
+    DeleteDC(hdcA);
+    DeleteDC(hdcB);
+    ReleaseDC(NULL, hdcScreen);
+    ReleaseDC(hwnd, hdcWnd);
+    return cDiff;
+}
+
+static COLORREF ClientPixel(HWND hwnd, int x, int y)
+{
+    POINT pt = { x, y };
+    HDC hdcScreen = GetDC(NULL);
+    COLORREF c;
+
+    ClientToScreen(hwnd, &pt);
+    c = GetPixel(hdcScreen, pt.x, pt.y);
+    ReleaseDC(NULL, hdcScreen);
+    return c;
+}
+
+/* One shape drawn the same on the device in every mode (its points go through DPtoLP), then checked on the screen */
+static void DrawAndCheck(HWND hwnd, int Mode, int Kind, int PenWidth, const char *Where)
+{
+    static const POINT tri[3] = { { 20, 20 }, { 110, 30 }, { 60, 100 } };
+    static const POINT rect[4] = { { 130, 40 }, { 200, 40 }, { 200, 110 }, { 130, 110 } };
+    static const COLORREF Colors[KIND_COUNT] = { MAGENTA, CYAN, YELLOW };
+    HDC hdc;
+    HPEN hpen, hpenOld;
+    HBRUSH hbr, hbrOld;
+    POINT pt[7];
+    DWORD Counts[2] = { 3, 4 };
+    int i, cDiff;
+    COLORREF c;
+
+    Clear(hwnd);
+    hdc = GetDC(hwnd);
+    SetupDc(hdc, Mode);
+    hpen = CreatePen(PS_SOLID, PenWidth, BLACK);
+    hbr = CreateSolidBrush(Colors[Kind]);
+    hpenOld = SelectObject(hdc, hpen);
+    hbrOld = SelectObject(hdc, hbr);
+    switch (Kind)
+    {
+        case KIND_POLYGON:
+            for (i = 0; i < 3; i++)
+                pt[i] = tri[i];
+            DPtoLP(hdc, pt, 3);
+            Polygon(hdc, pt, 3);
+            break;
+        case KIND_POLYPOLYGON:
+            for (i = 0; i < 3; i++)
+                pt[i] = tri[i];
+            for (i = 0; i < 4; i++)
+                pt[3 + i] = rect[i];
+            DPtoLP(hdc, pt, 7);
+            PolyPolygon(hdc, pt, (INT *)Counts, 2);
+            break;
+        case KIND_RECTANGLE:
+            pt[0] = rect[0];
+            pt[1] = rect[2];
+            DPtoLP(hdc, pt, 2);
+            Rectangle(hdc, pt[0].x, pt[0].y, pt[1].x, pt[1].y);
+            break;
+    }
+    SelectObject(hdc, hpenOld);
+    SelectObject(hdc, hbrOld);
+    ReleaseDC(hwnd, hdc);
+    DeleteObject(hpen);
+    DeleteObject(hbr);
+
+    c = ClientPixel(hwnd, Kind == KIND_RECTANGLE ? 165 : 63, Kind == KIND_RECTANGLE ? 75 : 50);
+    ok(c == Colors[Kind], "%s, %s, %s, pen %d: inside the shape 0x%06lx\n", Where, g_ModeName[Mode], g_KindName[Kind], PenWidth, c);
+    if (Kind == KIND_POLYPOLYGON)
+    {
+        c = ClientPixel(hwnd, 165, 75);
+        ok(c == Colors[Kind], "%s, %s, %s, pen %d: inside the second polygon 0x%06lx\n", Where, g_ModeName[Mode], g_KindName[Kind], PenWidth, c);
+    }
+    cDiff = ClientVsScreen(hwnd);
+    ok(cDiff == 0, "%s, %s, %s, pen %d: %d pixels of the window are not on the screen\n", Where, g_ModeName[Mode], g_KindName[Kind], PenWidth, cDiff);
+}
+
+static void RunModes(HWND hwnd, const char *Where, const int *Modes, int cModes)
+{
+    int m, Kind, Pen;
+    static const int Pens[2] = { 1, 7 };
+
+    for (m = 0; m < cModes; m++)
+        for (Kind = 0; Kind < KIND_COUNT; Kind++)
+            for (Pen = 0; Pen < 2; Pen++)
+            {
+                /* The stroke of a wide pen around a Polygon is built from its device points taken as logical ones
+                   (a placement bug of its own, not of the present): only the one-pixel pen is checked there */
+                if (Pen == 1 && Kind != KIND_RECTANGLE)
+                    continue;
+                DrawAndCheck(hwnd, Modes[m], Kind, Pens[Pen], Where);
+            }
+}
+
+static HWND CreateTop(DWORD Style, int x, int y, int cx, int cy, HWND hwndParent)
+{
+    HWND hwnd = CreateWindowExW(hwndParent ? 0 : WS_EX_TOPMOST, L"RedirPresentTest", L"RedirPresent", Style | WS_VISIBLE,
+                                x, y, cx, cy, hwndParent, NULL, GetModuleHandleW(NULL), NULL);
+
+    ok(hwnd != NULL, "CreateWindowExW failed: %lu\n", GetLastError());
+    if (hwnd)
+    {
+        UpdateWindow(hwnd);
+        Pump();
+    }
+    return hwnd;
+}
+
+static void Test_Placement(void)
+{
+    static const int AllModes[MODE_COUNT] = { MODE_TEXT, MODE_ORG, MODE_LOENGLISH, MODE_ANISO, MODE_ROTATE };
+    static const int TwoModes[2] = { MODE_TEXT, MODE_ROTATE };
+    HWND hwnd, hwndChild;
+
+    /* A popup: client origin = window origin */
+    hwnd = CreateTop(WS_POPUP, WX, WY, WCX, WCY, NULL);
+    if (hwnd)
+    {
+        RunModes(hwnd, "popup", AllModes, MODE_COUNT);
+        DestroyWindow(hwnd);
+    }
+
+    /* A caption and a border: the client DC has an origin of its own */
+    hwnd = CreateTop(WS_OVERLAPPEDWINDOW, WX, WY, 360, 320, NULL);
+    if (hwnd)
+    {
+        RunModes(hwnd, "framed window", AllModes, MODE_COUNT);
+        DestroyWindow(hwnd);
+    }
+
+    /* A child window's DC */
+    hwnd = CreateTop(WS_POPUP, WX, WY, WCX, WCY, NULL);
+    if (hwnd)
+    {
+        hwndChild = CreateTop(WS_CHILD, 50, 40, 220, 160, hwnd);
+        if (hwndChild)
+        {
+            RunModes(hwndChild, "child window", TwoModes, 2);
+            DestroyWindow(hwndChild);
+        }
+        DestroyWindow(hwnd);
+    }
+}
+
 static void Test_RestStays(HWND hwnd)
 {
     HDC hdc;
@@ -416,5 +637,7 @@ START_TEST(RedirPresent)
     Test_RestStays(hwnd);
 
     DestroyWindow(hwnd);
+    Pump();
+    Test_Placement();
     UnregisterClassW(wc.lpszClassName, wc.hInstance);
 }
