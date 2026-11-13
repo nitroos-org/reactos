@@ -3423,6 +3423,13 @@ LdrpInitializeProcess(IN PCONTEXT Context,
     {
         ExecuteOptions = MEM_EXECUTE_OPTION_ENABLE | MEM_EXECUTE_OPTION_PERMANENT;
     }
+    else if ((SharedUserData->NXSupportPolicy == NX_SUPPORT_POLICY_OPTIN) &&
+             NtHeader &&
+             (NtHeader->OptionalHeader.DllCharacteristics & IMAGE_DLLCHARACTERISTICS_NX_COMPAT))
+    {
+        /* An image that opts in (/NXCOMPAT) runs with DEP under the default policy */
+        ExecuteOptions = MEM_EXECUTE_OPTION_DISABLE;
+    }
 #ifndef _M_AMD64 /* a native 64-bit process has DEP fixed by the kernel, as on Windows */
     Status = NtSetInformationProcess(NtCurrentProcess(),
                                      ProcessExecuteFlags,
