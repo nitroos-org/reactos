@@ -41,7 +41,7 @@ IntArc( DC *dc,
     PBRUSH pbrPen;
     SURFACE *psurf;
     BOOL ret = TRUE;
-    LONG PenWidth, PenOrigWidth;
+    LONG PenWidth, PenOrigWidth, PenWidthY;
     double AngleStart, AngleEnd;
     LONG CenterX, CenterY;
 
@@ -77,19 +77,10 @@ IntArc( DC *dc,
 
     PenOrigWidth = PenWidth = pbrPen->lWidth;
     if (pbrPen->ulPenStyle == PS_NULL) PenWidth = 0;
-
-    if (pbrPen->ulPenStyle == PS_INSIDEFRAME)
-    {
-       if (2*PenWidth > (Right - Left)) PenWidth = (Right -Left + 1)/2;
-       if (2*PenWidth > (Bottom - Top)) PenWidth = (Bottom -Top + 1)/2;
-       Left   += PenWidth / 2;
-       Right  -= (PenWidth - 1) / 2;
-       Top    += PenWidth / 2;
-       Bottom -= (PenWidth - 1) / 2;
-    }
-
-    if (!PenWidth) PenWidth = 1;
-    pbrPen->lWidth = PenWidth;
+    PenWidthY = PenWidth;
+    /* The width of the pen is in logical units: the mapping mode and the world transform scale it */
+    if (PenWidth)
+        PATH_GetPenDeviceWidths(dc, pbrPen, &PenWidth, &PenWidthY);
 
     RectBounds.left   = Left;
     RectBounds.right  = Right;
@@ -103,6 +94,32 @@ IntArc( DC *dc,
 
     IntLPtoDP(dc, (LPPOINT)&RectBounds, 2);
     IntLPtoDP(dc, (LPPOINT)&RectSEpts, 2);
+
+    /* A mapping mode or a world transform that flips an axis turns the box around: the arc is computed on the device
+       box (the radial points are device points as well, so the arc runs the same way on the screen) */
+    if (RectBounds.left > RectBounds.right)
+    {
+        INT tmp = RectBounds.right; RectBounds.right = RectBounds.left; RectBounds.left = tmp;
+    }
+    if (RectBounds.top > RectBounds.bottom)
+    {
+        INT tmp = RectBounds.bottom; RectBounds.bottom = RectBounds.top; RectBounds.top = tmp;
+    }
+
+    /* The pen of a PS_INSIDEFRAME pen lies inside the box, in device pixels */
+    if (pbrPen->ulPenStyle == PS_INSIDEFRAME)
+    {
+       if (2*PenWidth > (RectBounds.right - RectBounds.left)) PenWidth = (RectBounds.right - RectBounds.left + 1)/2;
+       if (2*PenWidthY > (RectBounds.bottom - RectBounds.top)) PenWidthY = (RectBounds.bottom - RectBounds.top + 1)/2;
+       RectBounds.left   += PenWidth / 2;
+       RectBounds.right  -= (PenWidth - 1) / 2;
+       RectBounds.top    += PenWidthY / 2;
+       RectBounds.bottom -= (PenWidthY - 1) / 2;
+    }
+
+    if (!PenWidth) PenWidth = 1;
+    if (!PenWidthY) PenWidthY = 1;
+    pbrPen->lWidth = PenWidth;
 
     /* From here the shape is computed in the coordinates of the DC without its origin, so that a window DC and a memory
        DC get the same pixels: the centre and the radial points are rounded (and the engine rasteriser steps) the same
@@ -149,7 +166,8 @@ IntArc( DC *dc,
                   AngleStart,
                   AngleEnd,
                   arctype,
-                  pbrPen);
+                  pbrPen,
+                  PenWidthY);
     }
 
     dc->ptlDrawShift.x = dc->ptlDrawShift.y = 0;
