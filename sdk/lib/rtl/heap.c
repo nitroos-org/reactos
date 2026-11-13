@@ -202,6 +202,7 @@ RtlpInitializeHeap(OUT PHEAP Heap,
     Heap->FrontEndHeapType = 0;
     Heap->FrontHeapLockCount = 0;
     Heap->Counters.LockCollisions = 0;
+    Heap->FeAct = NULL;
 
     /* Initialise the Heap validation info */
     Heap->HeaderValidateCopy = NULL;
@@ -2345,6 +2346,9 @@ RtlpAllocateNonDedicated(PHEAP Heap,
         /* Split it */
         InUseEntry = RtlpSplitEntry(Heap, Flags, FreeBlock, AllocationSize, Index, Size);
 
+        if (HeapLocked && Heap->FrontEndHeapType == HEAP_FRONTEND_CACHE)
+            RtlpHeapFeRefill(Heap, InUseEntry);
+
         /* Release the lock */
         if (HeapLocked) RtlLeaveHeapLock(Heap->LockVariable);
 
@@ -2499,6 +2503,10 @@ RtlAllocateHeap(IN PVOID HeapPtr,
     {
         RtlpHeapEnterLock(Heap);
         HeapLocked = TRUE;
+
+        /* A heap without a front end counts what it hands out, and gets one as Windows does */
+        if (Heap->FrontEndHeapType == 0 && Heap->FeAct != HEAP_FE_ACT_OFF && EntryFlags == HEAP_ENTRY_BUSY)
+            RtlpHeapFeCountAlloc(Heap, Index);
     }
 
     /* Depending on the size, the allocation is going to be done from dedicated,
@@ -2550,6 +2558,10 @@ RtlAllocateHeap(IN PVOID HeapPtr,
         /* Remove the free block, split, profit. */
         RtlpRemoveFreeBlock(Heap, FreeEntry, FALSE);
         InUseEntry = RtlpSplitEntry(Heap, Flags, FreeEntry, AllocationSize, Index, Size);
+
+        /* A thread whose slot keeps missing gets a batch of the class while the lock is held */
+        if (HeapLocked && Heap->FrontEndHeapType == HEAP_FRONTEND_CACHE)
+            RtlpHeapFeRefill(Heap, InUseEntry);
 
         /* Release the lock */
         if (HeapLocked) RtlLeaveHeapLock(Heap->LockVariable);
@@ -2725,6 +2737,10 @@ BOOLEAN NTAPI RtlFreeHeap(
     {
         RtlpHeapEnterLock(Heap);
         Locked = TRUE;
+
+        if (Heap->FrontEndHeapType == 0 && Heap->FeAct > HEAP_FE_ACT_OFF &&
+            !(HeapEntry->Flags & HEAP_ENTRY_VIRTUAL_ALLOC))
+            RtlpHeapFeCountFree(Heap, HeapEntry);
     }
 
     if (HeapEntry->Flags & HEAP_ENTRY_VIRTUAL_ALLOC)

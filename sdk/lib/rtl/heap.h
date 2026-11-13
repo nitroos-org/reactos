@@ -227,6 +227,20 @@ typedef struct _HEAP_LIST_LOOKUP
     USHORT Reserved;                        \
     LIST_ENTRY UCRSegmentList
 
+/* Counters that decide when a heap gets the front end (heapfe.c), a block of the heap itself that
+   is made at the first allocation under its lock and given back when the front end is on. The class
+   tables are indexed by HEAP_FE_CLASS_FOR_ALLOC. (They are not part of the HEAP header: that one
+   has to fit the first page together with the free hints, the lock and the UCR descriptors.) */
+typedef struct _HEAP_FE_ACT
+{
+    UCHAR Live[80];         /* allocations minus frees, per size class (HEAP_FE_CLASSES) */
+    USHORT Ops[80];         /* allocations since the heap was created, per size class (saturating) */
+    SIZE_T BigLive;         /* bytes in use of blocks too big for the front end */
+} HEAP_FE_ACT, *PHEAP_FE_ACT;
+
+/* HEAP.FeAct of a heap that is not counting any more (front end on, or none possible) */
+#define HEAP_FE_ACT_OFF         ((PHEAP_FE_ACT)(ULONG_PTR)1)
+
 typedef struct _HEAP
 {
     HEAP_SEGMENT_MEMBERS;
@@ -274,7 +288,10 @@ typedef struct _HEAP
     HEAP_TUNING_PARAMETERS TuningParameters;
     ULONG TrimTick;      /* user mode: tick (ms) of the last check of the free page cache */
     ULONG TrimExtends;   /* times the heap had to grow since that check */
-    ULONG TrimReserved[2]; /* keeps sizeof(HEAP) and so the alignment of the first block as it was */
+    PHEAP_FE_ACT FeAct;  /* front end activation counters (heapfe.c); with TrimTick and TrimExtends it keeps the size of HEAP and so the alignment of the first block as it was */
+#ifndef _WIN64
+    ULONG TrimReserved;
+#endif
     RTL_BITMAP FreeHintBitmap;  // FIXME: non-Vista
     PLIST_ENTRY FreeHints[ANYSIZE_ARRAY]; // FIXME: non-Vista
 } HEAP, *PHEAP;
@@ -383,6 +400,25 @@ RtlpEnumerateHeap(_In_opt_ PRTLP_HEAP_READ_ROUTINE Read,
 #define HEAP_FE_NOT_HANDLED     0
 #define HEAP_FE_CACHED          1
 #define HEAP_FE_INVALID         2
+
+/* When a heap gets the front end without contention, measured on Windows 10 (x64, fresh private heap):
+   - 17th live block of one size class (Windows: the 18th allocation of one size when none was freed; with a
+     free in between every second allocation: 33 allocations, 16 frees),
+   - the 2041st allocation of one size class when each block is freed right away,
+   - about 3.2 MB in use in blocks of 4000 bytes and bigger.
+   A heap that cannot have it (fixed size, no lock, checking flags) never gets it. */
+#define HEAP_FE_ACT_LIVE        17
+#define HEAP_FE_ACT_CHURN       2041
+/* Blocks up to this many bytes (header included) are counted by size class, bigger ones by bytes in use:
+   Windows counted 2000 byte blocks like the small ones and 4000 byte blocks like the big ones */
+#define HEAP_FE_ACT_SMALL_BYTES 2048
+#define HEAP_FE_ACT_BIG_BYTES   3200000
+/* A thread whose slot missed this many times in a size class (since the last refill) gets a batch of blocks of the
+   class from the heap in the same lock hold: at most REFILL_MAX blocks, about REFILL_BYTES bytes */
+#define HEAP_FE_REFILL_MISSES   3
+#define HEAP_FE_REFILL_MAX      15
+#define HEAP_FE_REFILL_BYTES    2048
+
 /* Parked bytes (all slots) above which a heap that needs room gives them back before it grows */
 #define HEAP_FE_FLUSH_LIMIT     (1024 * 1024)
 /* A serialized heap that its own lock made wait this often gets the front end */
@@ -425,6 +461,15 @@ RtlpHeapFeRoundIndex(SIZE_T Index)
 
 BOOLEAN NTAPI
 RtlpHeapFeEnable(PHEAP Heap);
+
+VOID NTAPI
+RtlpHeapFeCountAlloc(PHEAP Heap, SIZE_T Index);
+
+VOID NTAPI
+RtlpHeapFeRefill(PHEAP Heap, PHEAP_ENTRY Served);
+
+VOID NTAPI
+RtlpHeapFeCountFree(PHEAP Heap, PHEAP_ENTRY Entry);
 
 VOID NTAPI
 RtlpHeapFeDestroy(PHEAP Heap);
