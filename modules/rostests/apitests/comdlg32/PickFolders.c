@@ -23,6 +23,8 @@
 #include <shobjidl.h>
 #include <strsafe.h>
 
+#if DLL_EXPORT_VERSION >= 0x600 /* uses NT6 exports */
+
 typedef enum
 {
     HOW_TYPE_ENTER,     /* type the text into the name box, press Enter */
@@ -709,3 +711,12 @@ START_TEST(PickFolders)
     DeleteCriticalSection(&s_Lock);
     CoUninitialize();
 }
+
+#else
+
+START_TEST(PickFolders)
+{
+    skip("PickFolders needs the NT6 exports\n");
+}
+
+#endif
