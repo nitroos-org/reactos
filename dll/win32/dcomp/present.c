@@ -479,8 +479,11 @@ static DWORD WINAPI render_main(void *arg)
 {
     for (;;)
     {
+        BOOL keep;
+
         if (render_step()) continue;
-        comp_worker_sleep(&render_worker, RENDER_IDLE_MS, TRUE);
+        present_lock(); keep = targets != NULL; present_unlock();
+        comp_worker_sleep(&render_worker, RENDER_IDLE_MS, !keep);   /* parked while a target exists: no thread creation in Commit */
     }
     return 0;
 }
@@ -688,6 +691,7 @@ void present_attach(struct cobj *t)
     t->tnext = targets;
     targets = t;
     present_unlock();
+    comp_worker_kick(&render_worker);
     TRACE("target %p for window %p (thread %lx, topmost %d)\n", t, t->hwnd, tid, t->topmost);
 }
 

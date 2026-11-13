@@ -774,6 +774,8 @@ static const IAgileObjectVtbl prefix##_agile_vtbl = \
 IFACE_AGILE(compositor, comp_from_agile)
 IFACE_AGILE(controller, ctl_from_agile)
 
+static void commit_thread_start(void);
+
 static HRESULT compositor_create(struct compositor **out)
 {
     struct compositor *This = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*This));
@@ -789,6 +791,7 @@ static HRESULT compositor_create(struct compositor **out)
     This->ref = 1;
     CoCreateFreeThreadedMarshaler((IUnknown *)&This->IInspectable_iface, &This->marshal);
     InterlockedIncrement(&object_count);
+    commit_thread_start();              /* the first change of an object should not pay for creating the thread */
     *out = This;
     return S_OK;
 }
@@ -1254,6 +1257,11 @@ static void commit_work(struct compositor *c)
 static DWORD WINAPI commit_main(void *arg);
 static struct comp_worker commit_worker = { commit_main };
 
+static void commit_thread_start(void)
+{
+    comp_worker_kick(&commit_worker);
+}
+
 static DWORD WINAPI commit_main(void *arg)
 {
     for (;;)
@@ -1276,7 +1284,7 @@ static DWORD WINAPI commit_main(void *arg)
         comp_unlock();
         if (c) { commit_work(c); continue; }
         if (left > 0) comp_worker_sleep(&commit_worker, left, FALSE);
-        else comp_worker_sleep(&commit_worker, 3000, TRUE);
+        else comp_worker_sleep(&commit_worker, 3000, !object_count);   /* parked while a Compositor exists */
     }
     return 0;
 }
