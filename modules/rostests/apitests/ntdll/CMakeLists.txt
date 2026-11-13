@@ -218,6 +218,7 @@ list(APPEND SOURCE
     RtlHandle.c
     RtlHeapChurn.c
     RtlHeapDecommit.c
+    RtlHeapExtendReuse.c
     RtlHeapFrontEnd.c
     RtlHeapValidate.c
     RtlHeapTailCheck.c
