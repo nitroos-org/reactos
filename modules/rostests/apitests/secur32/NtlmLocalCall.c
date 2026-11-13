@@ -23,6 +23,7 @@
 #include <lmerr.h>
 #include <ntsecapi.h>
 #include <sddl.h>
+#include <tlhelp32.h>
 #include <ntlmros.h>
 
 #define SECURITY_WIN32
@@ -831,6 +832,59 @@ static void test_table_limits(void)
     lsa_delete(context);
 }
 
+static HANDLE open_lsass(void)
+{
+    PROCESSENTRY32W pe = { sizeof(pe) };
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0), lsass = NULL;
+
+    if (snap == INVALID_HANDLE_VALUE)
+        return NULL;
+    if (Process32FirstW(snap, &pe))
+        do
+        {
+            if (!_wcsicmp(pe.szExeFile, L"lsass.exe"))
+            {
+                lsass = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pe.th32ProcessID);
+                break;
+            }
+        } while (Process32NextW(snap, &pe));
+    CloseHandle(snap);
+    return lsass;
+}
+
+/* The tokens of the contexts that expired leave the LSA even when no message comes: 200 bound contexts hold 200
+ * handles in the LSA, gone once the contexts expired (5 minutes) and the LSA swept (every 30 s) */
+static void test_expired_tokens(void)
+{
+    HANDLE lsass = open_lsass();
+    DWORD before = 0, bound = 0, after = 0;
+    ULONG64 context;
+    ULONG i, n = 0;
+
+    if (!lsass || !GetProcessHandleCount(lsass, &before))
+    {
+        skip("no handle count of the LSA (%lu)\n", GetLastError());
+        if (lsass) CloseHandle(lsass);
+        return;
+    }
+    for (i = 0; i < 200; i++)
+    {
+        if (lsa_issue(helper_challenge, &context))
+            break;
+        if (!lsa_bind(context, helper_challenge, NULL))
+            n++;
+    }
+    ok(n == 200, "%lu contexts bound\n", n);
+    GetProcessHandleCount(lsass, &bound);
+    ok(bound >= before + n - 10, "the LSA holds %lu handles, %lu before %lu bound contexts\n", bound, before, n);
+    /* no message to the package meanwhile */
+    Sleep(340 * 1000);
+    GetProcessHandleCount(lsass, &after);
+    ok(after <= before + 10, "the LSA still holds %lu handles, %lu before the contexts\n", after, before);
+    trace("LSA handles: %lu before, %lu with %lu bound contexts, %lu after expiry\n", before, bound, n, after);
+    CloseHandle(lsass);
+}
+
 /* The issuer of a context is a process, not a process id: a process that is given the id of an issuer that exited
  * (on ReactOS at once, in the same tick of the clock as the issuer, so with the same creation time) gets nothing */
 static void test_reused_process_id(void)
@@ -1030,4 +1084,10 @@ START_TEST(NtlmLocalCall)
     test_reused_process_id();
     test_table_limits();
     test_other_user();
+}
+
+/* apart: it waits for the contexts to expire (almost 6 minutes) */
+START_TEST(NtlmLocalCallExpiry)
+{
+    test_expired_tokens();
 }
