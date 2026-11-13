@@ -289,7 +289,7 @@ START_TEST(CsrAdoptedThreadChurn)
     ok(HandlesEnd <= Handles0 + 64, "csrss handles %lu -> %lu after %lu adopted threads\n", Handles0, HandlesEnd, N);
     ok(PrivateEnd <= Private0 + 2 * 1024 * 1024, "csrss private bytes %Iu -> %Iu\n", Private0, PrivateEnd);
 
-    /* DefineDosDevice of a drive letter: CSRSS starts a thread to broadcast the change, its private bytes must stay flat (within 1.5 MB: the first broadcast thread allocates some once) */
+    /* DefineDosDevice of a drive letter: CSRSS starts a thread to broadcast the change, its private bytes must stay flat (within 1.5 MB after a warm-up of 6000 pairs, see below) */
     {
         SIZE_T Before = 0, After = 0;
         ULONG D = 12000, Pairs = 0;
@@ -303,6 +303,18 @@ START_TEST(CsrAdoptedThreadChurn)
             return;
         }
         DefineDosDeviceW(DDD_REMOVE_DEFINITION | DDD_EXACT_MATCH_ON_REMOVE, L"Y:", L"C:\\");
+        /*
+         * Warm-up: the commit of CSRSS moves by a few hundred KB over the first few thousand
+         * pairs (heap segment commit and decommit, measured on i386 Debug: +0.5 MB to a plateau,
+         * with transients up to +1 MB, no growth per pair afterwards), so the baseline is taken
+         * after it. What is measured below is growth per pair, not that one-time burst.
+         */
+        for (i = 0; i < 6000; i++)
+        {
+            if (!DefineDosDeviceW(0, L"Y:", L"C:\\") ||
+                !DefineDosDeviceW(DDD_REMOVE_DEFINITION | DDD_EXACT_MATCH_ON_REMOVE, L"Y:", L"C:\\"))
+                break;
+        }
         Sleep(1000);
         if (!GetCsrssStats(&Handles1, &Before))
             return;
