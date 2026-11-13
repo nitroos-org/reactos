@@ -242,6 +242,27 @@ CmpDoCreateChild(IN PHHIVE Hive,
      */
     if (!ParentDescriptor)
         ParentDescriptor = ParentSd = CmpCaptureParentSecurity(ParentKcb);
+
+    /*
+     * An explicit descriptor that is stored must be one the caller may
+     * assign, as on Windows: an owner of its own (or SeRestorePrivilege) and
+     * a SACL only with SeSecurityPrivilege (SepCheckCreatorDescriptor). Where
+     * nothing is stored (legacy mode, setup) the descriptor is not used and
+     * not checked, as before.
+     */
+    if (ParentDescriptor && AccessState->SecurityDescriptor)
+    {
+        Status = SepCheckCreatorDescriptor(AccessState->SecurityDescriptor,
+                                           &AccessState->SubjectSecurityContext,
+                                           AccessMode);
+        if (!NT_SUCCESS(Status))
+        {
+            if (ParentSd)
+                CmpFreeParentSecurity(ParentSd);
+            return Status;
+        }
+    }
+
     Status = SeAssignSecurityEx(ParentDescriptor,
                                 AccessState->SecurityDescriptor,
                                 &NewDescriptor,
@@ -407,7 +428,11 @@ Quickie:
     {
         /* Free any cells we might've allocated, and the key's reference to its 'sk' cell */
         if (ClassCell != HCELL_NIL) HvFreeCell(Hive, ClassCell);
-        if (*KeyCell != HCELL_NIL) HvFreeCell(Hive, *KeyCell);
+        if (*KeyCell != HCELL_NIL)
+        {
+            HvFreeCell(Hive, *KeyCell);
+            *KeyCell = HCELL_NIL;
+        }
         if (SecurityCell != HCELL_NIL) CmpReleaseSecurityCell(Hive, SecurityCell);
     }
 

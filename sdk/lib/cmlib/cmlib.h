@@ -385,6 +385,8 @@ typedef struct _CMHIVE
     LONG SecurityHitHint;
     PCM_KEY_SECURITY_CACHE_ENTRY SecurityCache;
     LIST_ENTRY SecurityHash[CMP_SECURITY_HASH_LISTS];
+    /* A cell of each storage type's 'sk' ring that a new cell joins (HCELL_NIL: none known), cmse.c */
+    HCELL_INDEX SecurityRingAnchor[HTYPE_COUNT];
     PKEVENT UnloadEvent;
     PCM_KEY_CONTROL_BLOCK RootKcb;
     BOOLEAN Frozen;
@@ -1045,11 +1047,21 @@ CmpBuildSecurityCache(
     IN PCMHIVE CmHive
 );
 
-VOID
+/* Walk state of CmpAddSecurityRingToCache: the cells met by any walk of one load */
+typedef BOOLEAN
+(NTAPI *PCMP_SECURITY_CELL_SEEN)(
+    IN PVOID Context,
+    IN HCELL_INDEX Cell,
+    OUT PBOOLEAN Seen
+);
+
+BOOLEAN
 NTAPI
 CmpAddSecurityRingToCache(
     IN PCMHIVE CmHive,
-    IN HCELL_INDEX SecurityCell
+    IN HCELL_INDEX SecurityCell,
+    IN PCMP_SECURITY_CELL_SEEN MarkSeen,
+    IN PVOID Context
 );
 
 VOID

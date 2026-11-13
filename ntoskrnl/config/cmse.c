@@ -313,6 +313,17 @@ CmpAssignSecurityDescriptor(IN PCM_KEY_CONTROL_BLOCK Kcb,
  * hive is untrusted); a source cell that is not sound gives the copy no
  * descriptor (HCELL_NIL), as the hive check would. The two security locks are
  * never held together.
+ *
+ * Known race (save against delete, not closed here): CmSaveKey holds the
+ * registry lock shared and only the root KCB of the saved tree, without the
+ * flusher lock, so a key deeper in the tree can be deleted while the copy
+ * runs (that is older than stored descriptors, for the key node itself).
+ * The cell index read from the source node can then be released, and the
+ * cell reused for another key's descriptor, before the lock below is taken.
+ * The cell is checked again under the lock ('sk' signature, bounds, a
+ * reference count above zero, the copy validated), so the worst case is a
+ * saved key with another key's valid descriptor: no fault, no leak. Closing
+ * it needs the source key's KCB or the flusher lock held across the copy.
  */
 NTSTATUS
 NTAPI
