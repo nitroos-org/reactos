@@ -435,10 +435,8 @@ FORCEINLINE
 VOID
 ExpUnpinHandleCache(IN ULONG_PTR Pin)
 {
-    /* __writeeflags is no compiler barrier (no memory clobber): without this
-       the compiler may move cache-line accesses past the popfq, i.e. outside
-       the window in which this CPU cannot be preempted */
-    _ReadWriteBarrier();
+    /* __writeeflags has a memory clobber, so the cache-line accesses stay
+       before the popfq, inside the window in which this CPU cannot be preempted */
     __writeeflags(Pin);
 }
 #else
