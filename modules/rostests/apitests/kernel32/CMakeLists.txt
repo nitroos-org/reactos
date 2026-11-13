@@ -162,6 +162,7 @@ list(APPEND SOURCE
     LoadLibraryNoExecute.c
     LocalDumps.c
     CrashDialog.c
+    LocaleDerivedFields.c
     LocaleNameToLCID.c
     LocaleTable.c
     LocalTimeZone.c
