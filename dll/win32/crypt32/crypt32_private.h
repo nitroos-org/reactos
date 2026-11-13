@@ -338,6 +338,8 @@ WINECRYPT_CERTSTORE *CRYPT_ProvOpenStore(LPCSTR lpszStoreProvider,
  const void *pvPara);
 WINECRYPT_CERTSTORE *CRYPT_RegOpenStore(HCRYPTPROV hCryptProv, DWORD dwFlags,
  const void *pvPara);
+WINECRYPT_CERTSTORE *CRYPT_RegOpenSystemStore(HCRYPTPROV hCryptProv,
+ DWORD dwFlags, HKEY key, HKEY root, LPCWSTR path);
 WINECRYPT_CERTSTORE *CRYPT_FileOpenStore(HCRYPTPROV hCryptProv, DWORD dwFlags,
  const void *pvPara);
 WINECRYPT_CERTSTORE *CRYPT_FileNameOpenStoreA(HCRYPTPROV hCryptProv,
