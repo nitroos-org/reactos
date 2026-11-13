@@ -1162,8 +1162,8 @@ RtlValidRelativeSecurityDescriptor(IN PSECURITY_DESCRIPTOR SecurityDescriptorInp
         return FALSE;
     }
 
-    /* Is there a DACL? */
-    if ((Sd->Control & SE_DACL_PRESENT) == SE_DACL_PRESENT)
+    /* Is there a DACL? A present DACL at offset 0 is a NULL DACL, which Windows accepts */
+    if (((Sd->Control & SE_DACL_PRESENT) == SE_DACL_PRESENT) && (Sd->Dacl != 0))
     {
         /* Try to access it */
         if (!RtlpValidateSDOffsetAndSize(Sd->Dacl,
@@ -1181,8 +1181,8 @@ RtlValidRelativeSecurityDescriptor(IN PSECURITY_DESCRIPTOR SecurityDescriptorInp
         if ((Length < Dacl->AclSize) || !RtlValidAcl(Dacl)) return FALSE;
     }
 
-    /* Is there a SACL? */
-    if ((Sd->Control & SE_SACL_PRESENT) == SE_SACL_PRESENT)
+    /* Is there a SACL? A present SACL at offset 0 is a NULL SACL, which Windows accepts */
+    if (((Sd->Control & SE_SACL_PRESENT) == SE_SACL_PRESENT) && (Sd->Sacl != 0))
     {
         /* Try to access it */
         if (!RtlpValidateSDOffsetAndSize(Sd->Sacl,
