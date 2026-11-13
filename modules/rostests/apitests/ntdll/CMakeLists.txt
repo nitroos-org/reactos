@@ -58,6 +58,7 @@ list(APPEND SOURCE
     RtlWin10Helpers.c
     RtlConvertDeviceFamilyInfo.c
     ZeroBits.c
+    ImagePlacement.c
     CommitCharge.c
     CommitStress.c
     RtlCurrentTransaction.c
