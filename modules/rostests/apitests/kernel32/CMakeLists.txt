@@ -225,6 +225,7 @@ list(APPEND SOURCE
     ThreadContextNpx.c
     ThreadContextObjects.c
     ThreadFairness.c
+    ThreadGroupAffinity.c
     ThreadHandleLeak.c
     ThreadInformation.c
     ThreadStartFrame.c
