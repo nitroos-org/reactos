@@ -158,6 +158,10 @@ static struct { void *caller; long live; long long bytes; } ksites[KSITES];
 static uintptr_t ksites_lock;
 long kshim_alloc_live;
 long long kshim_alloc_bytes;
+/* Unused (cached) inodes over all volumes and what they cost, for the Verbose dump (kshim_dump_icache). */
+static long kshim_lru_total;
+static long long kshim_lru_bytes_total;
+static void kshim_dump_icache(void);
 static void ksite_account(void *caller, long d, long long bytes)
 {
 	unsigned int h = ((uintptr_t)caller >> 2) % KSITES;
@@ -177,6 +181,7 @@ static void ksite_account(void *caller, long d, long long bytes)
 void kshim_dump_allocs(void)
 {
 	int top[12], nt = 0;
+	kshim_dump_icache();
 	for (int k = 0; k < 12; k++) {
 		int best = -1;
 		for (int i = 0; i < KSITES; i++) {
@@ -1334,6 +1339,8 @@ static void lru_del_locked(struct inode *i)
 	i->kshim_in_lru = 0;
 	sb->kshim_lru_count--;
 	sb->kshim_lru_bytes -= i->kshim_lru_bytes;
+	kshim_lru_total--;
+	kshim_lru_bytes_total -= i->kshim_lru_bytes;
 	i->kshim_lru_bytes = 0;
 }
 static void lru_add_locked(struct inode *i)
@@ -1351,6 +1358,8 @@ static void lru_add_locked(struct inode *i)
 	/* Nobody uses an unused inode, so what it holds cannot change while it is on the list. */
 	i->kshim_lru_bytes = kshim_icache_cost ? kshim_icache_cost(i) : 0;
 	sb->kshim_lru_bytes += i->kshim_lru_bytes;
+	kshim_lru_total++;
+	kshim_lru_bytes_total += i->kshim_lru_bytes;
 }
 void inode_init_once(struct inode *i) { memset(i, 0, sizeof(*i)); }
 static void kshim_inode_init(struct super_block *sb, struct inode *i)
@@ -1690,6 +1699,15 @@ void kshim_icache_trim(struct super_block *sb)
  * writes it, instead of eviction dropping its dirty pages.
  */
 unsigned long kshim_counter_wb_kept;
+/* Verbose dump: where the inode cache stands against its limits (inodes live = unused on the LRU lists + in use). */
+static void kshim_dump_icache(void)
+{
+	printk("icache: %lu inodes live, %ld unused (%lld KB cost) + %ld in use; limits %lu inodes / %lu KB, pages %lu of %lu; "
+	       "evicted %lu (byte %lu, pressure %lu, wb kept %lu)\n",
+	       kshim_inodes_live, kshim_lru_total, kshim_lru_bytes_total / 1024, (long)kshim_inodes_live - kshim_lru_total,
+	       KSHIM_ICACHE_UNUSED, KSHIM_ICACHE_BYTES / 1024, kshim_pc_pages, KSHIM_PC_PAGES_SOFT,
+	       kshim_icache_evicted, kshim_icache_byte_evicted, kshim_icache_pressure_evicted, kshim_counter_wb_kept);
+}
 static bool kshim_writeback_last(struct inode *i)
 {
 	if (i->i_nlink && !(i->i_state & (I_FREEING | I_NEW)) && i->i_sb && !sb_rdonly(i->i_sb) &&
