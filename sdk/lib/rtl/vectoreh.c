@@ -33,6 +33,19 @@
  * the dispatcher) leaves its walk counted: entries removed after that are not
  * freed any more. That costs memory only; the old reference count lost the
  * entries such a walk held in the same way.
+ *
+ * Memory ordering: the code relies on the x86/x64 memory model (loads are not
+ * reordered with other loads, stores not with other stores or with earlier
+ * loads; only a store may pass a later load, and the interlocked operations,
+ * which are full barriers, cover that). The walk reads the epoch and counts
+ * itself in its counter before it reads Flink, and reads Removed before it
+ * calls the handler; the remover writes Removed and the Flink pointers, and
+ * only later reads the counters. A port to a weakly ordered CPU (ARM) needs
+ * acquire loads for the Flink, Removed and epoch reads, release stores for
+ * the Flink and Removed writes, and a full barrier between a walk counting
+ * itself in and its first read of the list, and between the epoch switch and
+ * the read of the counters in RtlpVehEpochDrained. The volatile qualifiers
+ * here only keep the compiler from reordering or caching, they are not enough.
  */
 RTL_SRWLOCK RtlpVectoredHandlerLock;
 LIST_ENTRY RtlpVectoredExceptionList, RtlpVectoredContinueList;

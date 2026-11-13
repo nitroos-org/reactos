@@ -139,6 +139,16 @@ void        LibTCPSetNoDelay(PTCP_PCB pcb, BOOLEAN Set);
 void        LibTCPSetKeepAlive(PTCP_PCB pcb, BOOLEAN Set);
 void        LibTcpSetKeepAliveValues(PTCP_PCB pcb, u32_t KeepAliveTime, u32_t KeepAliveInterval);
 void        LibTCPGetSocketStatus(PTCP_PCB pcb, PULONG State);
+/* A connection in TIME-WAIT: addresses and ports in network byte order (the layout of TCP_TIMEWAIT_ROW) */
+typedef struct _LIBTCP_TIMEWAIT_ROW
+{
+    ULONG LocalAddr;
+    ULONG LocalPort;
+    ULONG RemoteAddr;
+    ULONG RemotePort;
+} LIBTCP_TIMEWAIT_ROW, *PLIBTCP_TIMEWAIT_ROW;
+
+ULONG       LibTCPEnumTimeWait(PLIBTCP_TIMEWAIT_ROW Rows, ULONG MaxRows);
 
 VOID        LibTCPInitQueueLimits(VOID);
 

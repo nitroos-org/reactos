@@ -216,6 +216,12 @@ static DWORD WINAPI SuspendThreadProc(PVOID Parameter)
     HANDLE Thread;
     BOOL Bad;
 
+    /* The faulting threads stay runnable (they do not wait for anything), so a suspender of their
+       priority gets few turns on a slow build (checked i386) and suspends hardly any of them. A higher
+       priority makes it run when it wants; it sleeps for a tick now and then so that the faulting
+       threads run on a single processor too. */
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+
     while (!Stop)
     {
         Thread = Faulters[Round++ % FaulterCount];
@@ -247,7 +253,7 @@ static DWORD WINAPI SuspendThreadProc(PVOID Parameter)
         if (Bad)
             Report(&BadSuspend, "suspended at %p: registers %lx differ", (PVOID)Pc, Mask);
         if ((Round & 15) == 0)
-            Sleep(0);
+            Sleep(1);
     }
     return 0;
 }

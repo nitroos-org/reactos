@@ -258,3 +258,4 @@ void
 LibTCPDumpPcb(PVOID SocketContext);
 
 NTSTATUS TCPGetSocketStatus(PCONNECTION_ENDPOINT Connection, PULONG State);
+ULONG TCPEnumTimeWait(PTCP_TIMEWAIT_ROW Rows, ULONG MaxRows);

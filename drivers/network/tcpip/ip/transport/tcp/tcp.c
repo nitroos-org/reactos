@@ -857,4 +857,14 @@ TCPGetSocketStatus(
     return STATUS_SUCCESS;
 }
 
+ULONG
+TCPEnumTimeWait(
+    PTCP_TIMEWAIT_ROW Rows,
+    ULONG MaxRows)
+{
+    C_ASSERT(sizeof(LIBTCP_TIMEWAIT_ROW) == sizeof(TCP_TIMEWAIT_ROW));
+
+    return LibTCPEnumTimeWait((PLIBTCP_TIMEWAIT_ROW)Rows, MaxRows);
+}
+
 /* EOF */

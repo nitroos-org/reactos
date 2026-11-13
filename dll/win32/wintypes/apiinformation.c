@@ -185,9 +185,14 @@ static BOOL class_is_registered(const WCHAR *name, UINT32 len)
             (type == REG_SZ || type == REG_EXPAND_SZ))
         {
             dll[size / sizeof(WCHAR)] = 0;
-            if (type == REG_EXPAND_SZ && ExpandEnvironmentStringsW(dll, expanded, ARRAYSIZE(expanded)) &&
-                expanded[0])
-                wcscpy(dll, expanded);
+            /* The return value is the size needed: a larger one means that expanded was not filled in */
+            if (type == REG_EXPAND_SZ)
+            {
+                DWORD expanded_len = ExpandEnvironmentStringsW(dll, expanded, ARRAYSIZE(expanded));
+
+                if (expanded_len && expanded_len <= ARRAYSIZE(expanded) && expanded[0])
+                    wcscpy(dll, expanded);
+            }
             attrs = GetFileAttributesW(dll);
             found = attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY);
         }
