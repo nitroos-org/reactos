@@ -3005,6 +3005,92 @@ out:
     pWindowsDeleteString(fcls);
 }
 
+/* ICompositionGraphicsDeviceInterop (IID and member order: microsoft/windows-rs, dcomp_nitro.h): the rendering device
+ * can be read back and replaced (documented); a surface made before the switch draws on the new device */
+static void TestGraphicsDeviceInterop(void)
+{
+    ID3D11Device *d1 = MakeDevice(), *d2 = MakeDevice();
+    WICompositorInterop *interop = NULL;
+    WICompositionGraphicsDevice *gdev = NULL;
+    WICompositionDrawingSurface *ds = NULL;
+    ICompGraphicsDeviceInterop *gi = NULL;
+    INitroDrawingSurfaceInterop *dsi = NULL;
+    ID2D1DeviceContext *dc = NULL;
+    IUnknown *got = NULL;
+    __x_ABI_CWindows_CFoundation_CSize size;
+    D2D1_COLOR_F clear;
+    POINT off;
+    HRESULT hr;
+
+    if (!d1 || !d2) { skip("no D3D11 device\n"); goto out; }
+    if (FAILED(QI(Comp, &IID_Interop, (void **)&interop))) goto out;
+    hr = interop->lpVtbl->CreateGraphicsDevice(interop, (IUnknown *)d1, &gdev);
+    ok(hr == S_OK && gdev, "CreateGraphicsDevice %#lx\n", hr);
+    if (!gdev) goto out;
+    hr = QI(gdev, &IID_ICompositionGraphicsDeviceInterop, (void **)&gi);
+    ok(hr == S_OK && gi, "QI ICompositionGraphicsDeviceInterop %#lx\n", hr);
+    if (!gi) goto out;
+    hr = gi->lpVtbl->GetRenderingDevice(gi, NULL);
+    ok(hr == E_POINTER, "GetRenderingDevice(NULL) %#lx\n", hr);
+    hr = gi->lpVtbl->GetRenderingDevice(gi, &got);
+    ok(hr == S_OK && got && SameObject(got, (IUnknown *)d1), "GetRenderingDevice %#lx %p\n", hr, got);
+    if (got) { REL(got); got = NULL; }
+
+    size.Width = 16; size.Height = 16;
+    gdev->lpVtbl->CreateDrawingSurface(gdev, size, DirectXPixelFormat_B8G8R8A8UIntNormalized, DirectXAlphaMode_Premultiplied, &ds);
+    ok(ds != NULL, "CreateDrawingSurface\n");
+
+    hr = gi->lpVtbl->SetRenderingDevice(gi, (IUnknown *)d2);
+    ok(hr == S_OK, "SetRenderingDevice %#lx\n", hr);
+    hr = gi->lpVtbl->GetRenderingDevice(gi, &got);
+    ok(hr == S_OK && got && SameObject(got, (IUnknown *)d2), "GetRenderingDevice after the switch %#lx %p\n", hr, got);
+    if (got) { REL(got); got = NULL; }
+    hr = gi->lpVtbl->SetRenderingDevice(gi, (IUnknown *)interop);
+    ok(hr == E_INVALIDARG, "SetRenderingDevice(not a device) (unmeasured) %#lx\n", hr);
+
+    if (ds && D2DUsable(d2) && SUCCEEDED(QI(ds, &IID_INitroDrawingSurfaceInterop, (void **)&dsi)))
+    {
+        hr = dsi->lpVtbl->BeginDraw(dsi, NULL, &IID_ID2D1DeviceContext, (void **)&dc, &off);
+        ok(hr == S_OK && dc, "BeginDraw on the new device %#lx\n", hr);
+        if (dc)
+        {
+            WICompositionSurface *surf = NULL;
+            WICompositionSurfaceBrush *sb = NULL;
+            WICompositionBrush *br = NULL;
+            WISpriteVisual *sp = NULL;
+            WIVisual *v = NULL;
+            BYTE *px = HeapAlloc(GetProcessHeap(), 0, W * H * 4);
+
+            clear.r = 1; clear.g = 0; clear.b = 0; clear.a = 1;
+            ID2D1DeviceContext_Clear(dc, &clear);
+            hr = dsi->lpVtbl->EndDraw(dsi);
+            ok(hr == S_OK, "EndDraw on the new device %#lx\n", hr);
+            REL(dc);
+            /* the renderer reads the surface back from the new device */
+            sp = NewSprite(0, 0, 16, 16, C(255, 0, 0, 255), &v);
+            if (sp && px && SUCCEEDED(QI(ds, &IID_Surface, (void **)&surf)) &&
+                SUCCEEDED(Comp->lpVtbl->CreateSurfaceBrushWithSurface(Comp, surf, &sb)) && SUCCEEDED(QI(sb, &IID_Brush, (void **)&br)))
+            {
+                sp->lpVtbl->put_Brush(sp, br);
+                if (Render(v, px)) CheckPx(px, 8, 8, 255, 255, 0, 0, 2, "surface drawn on the new device");
+            }
+            if (br) REL(br);
+            if (sb) REL(sb);
+            if (surf) REL(surf);
+            if (sp) { REL(sp); REL(v); }
+            HeapFree(GetProcessHeap(), 0, px);
+        }
+        REL(dsi);
+    }
+out:
+    if (gi) REL(gi);
+    if (ds) REL(ds);
+    if (gdev) REL(gdev);
+    if (interop) REL(interop);
+    if (d2) ID3D11Device_Release(d2);
+    if (d1) ID3D11Device_Release(d1);
+}
+
 /* Compositor.CreatePropertySet (documented): a new, empty CompositionPropertySet each time */
 static void TestCreatePropertySet(void)
 {
@@ -3426,6 +3512,7 @@ START_TEST(Composition)
         TestNineGridBrush();
         TestVisualInteractionSource(pRoActivateInstance, pWindowsCreateString, pWindowsDeleteString);
         TestCreatePropertySet();
+        TestGraphicsDeviceInterop();
         TestPresent(pRoActivateInstance, pWindowsCreateString, pWindowsDeleteString);
         TestExpressionAnimation();
         TestInteractionTracker(pRoActivateInstance, pWindowsCreateString, pWindowsDeleteString);

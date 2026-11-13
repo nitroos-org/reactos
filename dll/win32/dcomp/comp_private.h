@@ -487,6 +487,7 @@ struct cobj
     WICompositionInteractionSourceCollection srccoll;
     WICompositionInteractionSource intsrc;
     INitroDrawingSurfaceInterop dsinterop;
+    ICompGraphicsDeviceInterop gdinterop;
     INitroCompositionTest test;
     WIClosable closable;
     IAgileObject agile;
@@ -537,6 +538,8 @@ struct cobj
     /* graphics device and drawing surface (compgfx.c) */
     IUnknown *d3d;                  /* ID3D11Device */
     IUnknown *d2d;                  /* ID2D1Device */
+    IUnknown *rdev;                 /* graphics device: the rendering device as the app gave it, referenced */
+    LONG gen;                       /* graphics device: bumped by SetRenderingDevice; surface: gen of its texture */
     struct cobj *gfxdev;            /* drawing surface: its device, referenced */
     IUnknown *tex;                  /* ID3D11Texture2D */
     UINT width, height;
@@ -603,6 +606,7 @@ HRESULT gfx_surface_create(struct cobj *dev, Vec2 size, int format, int alpha, s
 void gfx_surface_free(struct cobj *s);
 HRESULT gfx_surface_snapshot(struct cobj *s, BYTE **pixels, UINT *w, UINT *h);
 EXTERN_C const INitroDrawingSurfaceInteropVtbl nitro_dsinterop_vtbl;
+EXTERN_C const ICompGraphicsDeviceInteropVtbl gfx_device_interop_vtbl;
 
 /* present.c */
 void present_attach(struct cobj *target);

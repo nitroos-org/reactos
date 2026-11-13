@@ -16,6 +16,10 @@
  * Interface id and member order of ID2D1Device2: microsoft/windows-rs commit cd03f9369a89, file
  * crates/libs/windows/src/Windows/Win32/d2d/mod.rs (IID a44472e1-8dfb-4e60-8492-6e2861c9ca8b; GetDxgiDevice is the
  * last member after CreateDeviceContext and FlushDeviceContexts).
+ * ICompositionGraphicsDeviceInterop (IID and member order: microsoft/windows-rs, see dcomp_nitro.h): GetRenderingDevice
+ * returns the device the app gave; SetRenderingDevice switches to another one, and every surface of the device gets a new,
+ * empty texture on it the next time it is used (documented: the content of the surfaces is lost with the device, the app
+ * draws again). FIXME: RenderingDeviceReplaced is not raised.
  * FIXME: not implemented here: DirectXPixelFormat other than B8G8R8A8UIntNormalized and R8G8B8A8UIntNormalized,
  * device-lost handling and RenderingDeviceReplaced, ICompositionDrawingSurface2
  * (SizeInt32, Resize, Scroll as WinRT members), Trim.
@@ -58,7 +62,9 @@ WINE_DEFAULT_DEBUG_CHANNEL(dcomp);
 
 typedef HRESULT (WINAPI *PFN_D2D1CreateDevice)(IDXGIDevice *, const D2D1_CREATION_PROPERTIES *, ID2D1Device **);
 
-HRESULT gfx_device_init(struct cobj *dev, IUnknown *device)
+static HRESULT make_texture(ID3D11Device *d3d, UINT w, UINT h, int fmt, ID3D11Texture2D **tex);
+
+static HRESULT open_device(IUnknown *device, IUnknown **out_d3d, IUnknown **out_d2d)
 {
     ID3D11Device *d3d = NULL;
     IDXGIDevice *dxgi = NULL;
@@ -119,22 +125,100 @@ HRESULT gfx_device_init(struct cobj *dev, IUnknown *device)
         ID3D11Device_Release(d3d);
         return hr;
     }
-    dev->d3d = (IUnknown *)d3d;
-    dev->d2d = (IUnknown *)d2d;
+    *out_d3d = (IUnknown *)d3d;
+    *out_d2d = (IUnknown *)d2d;
     return S_OK;
+}
+
+HRESULT gfx_device_init(struct cobj *dev, IUnknown *device)
+{
+    HRESULT hr = open_device(device, &dev->d3d, &dev->d2d);
+
+    if (SUCCEEDED(hr))
+    {
+        dev->rdev = device;
+        IUnknown_AddRef(device);
+    }
+    return hr;
 }
 
 void gfx_device_free(struct cobj *dev)
 {
-    IUnknown *d3d, *d2d;
+    IUnknown *d3d, *d2d, *rdev;
 
     comp_lock();
     d3d = dev->d3d; dev->d3d = NULL;
     d2d = dev->d2d; dev->d2d = NULL;
+    rdev = dev->rdev; dev->rdev = NULL;
     comp_unlock();
     if (d2d) IUnknown_Release(d2d);
     if (d3d) IUnknown_Release(d3d);
+    if (rdev) IUnknown_Release(rdev);
 }
+
+/* caller holds comp_lock: after SetRenderingDevice a surface gets a new texture on the device's current D3D device */
+static void surface_sync_locked(struct cobj *s)
+{
+    struct cobj *dev = s->gfxdev;
+    ID3D11Texture2D *tex;
+
+    if (!dev || !dev->d3d || !s->tex || s->gen == dev->gen || s->drawing) return;
+    if (FAILED(make_texture((ID3D11Device *)dev->d3d, s->width, s->height, s->pixfmt, &tex)))
+    {
+        WARN("no texture for surface %p on the new rendering device\n", s);
+        return;
+    }
+    IUnknown_Release(s->tex);
+    s->tex = (IUnknown *)tex;
+    s->gen = dev->gen;
+}
+
+#define GDI(i) CONTAINING_RECORD(i, struct cobj, gdinterop)
+
+static HRESULT STDMETHODCALLTYPE gdi_QueryInterface(ICompGraphicsDeviceInterop *i, REFIID iid, void **o)
+{ return IInspectable_QueryInterface(&GDI(i)->identity, iid, o); }
+static ULONG STDMETHODCALLTYPE gdi_AddRef(ICompGraphicsDeviceInterop *i)
+{ return IInspectable_AddRef(&GDI(i)->identity); }
+static ULONG STDMETHODCALLTYPE gdi_Release(ICompGraphicsDeviceInterop *i)
+{ return IInspectable_Release(&GDI(i)->identity); }
+
+static HRESULT STDMETHODCALLTYPE gdi_GetRenderingDevice(ICompGraphicsDeviceInterop *i, IUnknown **value)
+{
+    struct cobj *dev = GDI(i);
+
+    if (!value) return E_POINTER;
+    comp_lock();
+    *value = dev->rdev;
+    if (*value) IUnknown_AddRef(*value);
+    comp_unlock();
+    return *value ? S_OK : RO_E_CLOSED;
+}
+
+static HRESULT STDMETHODCALLTYPE gdi_SetRenderingDevice(ICompGraphicsDeviceInterop *i, IUnknown *value)
+{
+    struct cobj *dev = GDI(i);
+    IUnknown *d3d, *d2d, *old_d3d, *old_d2d, *old_rdev;
+    HRESULT hr;
+
+    TRACE("%p, %p\n", i, value);
+    if (!value) return E_INVALIDARG;    /* FIXME: unmeasured */
+    if (FAILED(hr = open_device(value, &d3d, &d2d))) return hr;
+    IUnknown_AddRef(value);
+    comp_lock();
+    old_d3d = dev->d3d; old_d2d = dev->d2d; old_rdev = dev->rdev;
+    dev->d3d = d3d; dev->d2d = d2d; dev->rdev = value;
+    dev->gen++;
+    comp_unlock();
+    if (old_d2d) IUnknown_Release(old_d2d);
+    if (old_d3d) IUnknown_Release(old_d3d);
+    if (old_rdev) IUnknown_Release(old_rdev);
+    return S_OK;
+}
+
+const ICompGraphicsDeviceInteropVtbl gfx_device_interop_vtbl =
+{
+    gdi_QueryInterface, gdi_AddRef, gdi_Release, gdi_GetRenderingDevice, gdi_SetRenderingDevice
+};
 
 static HRESULT make_texture(ID3D11Device *d3d, UINT w, UINT h, int fmt, ID3D11Texture2D **tex)
 {
@@ -193,6 +277,7 @@ HRESULT gfx_surface_create(struct cobj *dev, Vec2 size, int format, int alpha, s
     }
     s->tex = (IUnknown *)tex; s->width = w; s->height = h; s->pixfmt = format; s->alphamode = alpha;
     s->gfxdev = dev;
+    comp_lock(); s->gen = dev->gen; comp_unlock();
     InterlockedIncrement(&dev->ref);
     *out = s;
     return S_OK;
@@ -228,6 +313,8 @@ HRESULT gfx_surface_snapshot(struct cobj *s, BYTE **pixels, UINT *w, UINT *h)
     HRESULT hr;
 
     *pixels = NULL;
+    surface_sync_locked(s);
+    src_tex = (ID3D11Texture2D *)s->tex;
     if (!s->tex || !d3d) return RO_E_CLOSED;
     ID3D11Texture2D_GetDesc(src_tex, &desc);
     desc.Usage = D3D11_USAGE_STAGING;
@@ -293,6 +380,7 @@ static HRESULT STDMETHODCALLTYPE dsi_BeginDraw(INitroDrawingSurfaceInterop *i, c
     if (!updateObject || !updateOffset) return E_POINTER;
     *updateObject = NULL;
     comp_lock();
+    surface_sync_locked(s);
     tex = (ID3D11Texture2D *)s->tex;
     d2d = s->gfxdev ? (ID2D1Device *)s->gfxdev->d2d : NULL;
     if (!tex || !d2d) { comp_unlock(); return RO_E_CLOSED; }
@@ -407,6 +495,7 @@ static HRESULT STDMETHODCALLTYPE dsi_Resize(INitroDrawingSurfaceInterop *i, SIZE
 
     if (size.cx < 1 || size.cy < 1 || size.cx > 16384 || size.cy > 16384) return E_INVALIDARG;
     comp_lock();
+    surface_sync_locked(s);
     d3d = s->gfxdev ? (ID3D11Device *)s->gfxdev->d3d : NULL;
     if (!s->tex || !d3d) { comp_unlock(); return RO_E_CLOSED; }
     if (s->drawing) { comp_unlock(); return E_FAIL; }
@@ -436,6 +525,7 @@ static HRESULT STDMETHODCALLTYPE dsi_Scroll(INitroDrawingSurfaceInterop *i, cons
     HRESULT hr;
 
     comp_lock();
+    surface_sync_locked(s);
     d3d = s->gfxdev ? (ID3D11Device *)s->gfxdev->d3d : NULL;
     if (!s->tex || !d3d) { comp_unlock(); return RO_E_CLOSED; }
     if (s->drawing) { comp_unlock(); return E_FAIL; }
