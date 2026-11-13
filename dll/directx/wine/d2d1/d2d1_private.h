@@ -878,6 +878,8 @@ HRESULT d2d_command_list_create(ID2D1Factory *factory, struct d2d_command_list *
 HRESULT d2d_svg_document_create(ID2D1Factory *factory, IStream *input_xml_stream, D2D1_SIZE_F viewport_size,
         ID2D1SvgDocument **out);
 struct d2d_command_list *unsafe_impl_from_ID2D1CommandList(ID2D1CommandList *iface);
+BOOL d2d_command_list_play(struct d2d_command_list *command_list, ID2D1DeviceContext *context,
+        const D2D1_POINT_2F *target_offset, const D2D1_RECT_F *image_rect);
 void d2d_command_list_begin_draw(struct d2d_command_list *command_list, const struct d2d_device_context *context);
 void d2d_command_list_set_antialias_mode(struct d2d_command_list *command_list, D2D1_ANTIALIAS_MODE mode);
 void d2d_command_list_set_primitive_blend(struct d2d_command_list *command_list,
