@@ -184,6 +184,113 @@ static VOID TestProtectedTemplate(PCSTR Self)
     CloseHandle(ProcessInfo.hThread);
 }
 
+/*
+ * Child process: code that keeps the TLS vector pointer of its thread in a
+ * register across a call (compilers do: Oracle's server does it around a
+ * callout that loads a DLL with TLS) reads the vector it had before the call.
+ * The loading thread's vector is replaced when a second module with TLS grows
+ * the vectors; the old one must stay readable and unchanged.
+ */
+#define OLDVEC_INTACT 0x10
+#define OLDVEC_CHANGED 0x11
+#define OLDVEC_UNREADABLE 0x12
+#define OLDVEC_NOT_REPLACED 0x13
+
+static VOID OldVectorChild(PCSTR CopyPath)
+{
+    FN_TlsDynGetIndex pGetIndex;
+    PVOID *OldVector, Saved[8], *Churn[64];
+    HMODULE hFirst, hSecond;
+    ULONG Index, Count, i;
+    BOOL Same = TRUE, Faulted = FALSE;
+
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+    hFirst = LoadLibraryW(L"kernel32_tlsdyn.dll");
+    if (!hFirst)
+        ExitProcess(0xD1);
+    pGetIndex = (FN_TlsDynGetIndex)GetProcAddress(hFirst, "TlsDynGetIndex");
+    if (!pGetIndex)
+        ExitProcess(0xD2);
+    Index = pGetIndex();
+    OldVector = (PVOID *)NtCurrentTeb()->ThreadLocalStoragePointer;
+    if (!OldVector || Index >= ARRAYSIZE(Saved))
+        ExitProcess(0xD3);
+    Count = Index + 1;
+    for (i = 0; i < Count; i++)
+        Saved[i] = OldVector[i];
+
+    /* The same DLL under another name is another module: it takes the next index, every vector grows */
+    hSecond = LoadLibraryA(CopyPath);
+    if (!hSecond)
+        ExitProcess(0xD4);
+    if ((PVOID *)NtCurrentTeb()->ThreadLocalStoragePointer == OldVector)
+        ExitProcess(OLDVEC_NOT_REPLACED);
+
+    /* Heap blocks of the vector's size: memory that was given back is handed out again and overwritten */
+    for (i = 0; i < ARRAYSIZE(Churn); i++)
+    {
+        Churn[i] = HeapAlloc(GetProcessHeap(), 0, (Count + 1) * sizeof(PVOID));
+        if (Churn[i])
+            memset(Churn[i], 0xCC, (Count + 1) * sizeof(PVOID));
+    }
+
+    _SEH2_TRY
+    {
+        for (i = 0; i < Count; i++)
+        {
+            if (OldVector[i] != Saved[i])
+                Same = FALSE;
+        }
+        /* The block of the first DLL, reached through the old vector, is still the thread's block */
+        if (Same && OldVector[Index] != ((PVOID *)NtCurrentTeb()->ThreadLocalStoragePointer)[Index])
+            Same = FALSE;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Faulted = TRUE;
+    }
+    _SEH2_END;
+
+    ExitProcess(Faulted ? OLDVEC_UNREADABLE : (Same ? OLDVEC_INTACT : OLDVEC_CHANGED));
+}
+
+static VOID TestOldVectorOfLoadingThread(PCSTR Self, PCWSTR DllPath)
+{
+    STARTUPINFOA StartupInfo = { sizeof(StartupInfo) };
+    PROCESS_INFORMATION ProcessInfo;
+    WCHAR TempDir[MAX_PATH], CopyPathW[MAX_PATH];
+    char CopyPath[MAX_PATH], CommandLine[2 * MAX_PATH + 32];
+    DWORD Code = 0xDEAD;
+
+    GetTempPathW(ARRAYSIZE(TempDir), TempDir);
+    StringCchPrintfW(CopyPathW, ARRAYSIZE(CopyPathW), L"%stlsdyn_oldvec_%lu.dll", TempDir, GetCurrentProcessId());
+    if (!CopyFileW(DllPath, CopyPathW, FALSE))
+    {
+        skip("CopyFile failed: %lu\n", GetLastError());
+        return;
+    }
+    WideCharToMultiByte(CP_ACP, 0, CopyPathW, -1, CopyPath, ARRAYSIZE(CopyPath), NULL, NULL);
+    StringCchPrintfA(CommandLine, ARRAYSIZE(CommandLine), "\"%s\" DynamicTls oldvector \"%s\"", Self, CopyPath);
+    if (!CreateProcessA(NULL, CommandLine, NULL, NULL, FALSE, 0, NULL, NULL, &StartupInfo, &ProcessInfo))
+    {
+        skip("CreateProcess failed: %lu\n", GetLastError());
+        DeleteFileW(CopyPathW);
+        return;
+    }
+    if (WaitForSingleObject(ProcessInfo.hProcess, 30000) != WAIT_OBJECT_0)
+    {
+        ok(0, "The child did not exit\n");
+        TerminateProcess(ProcessInfo.hProcess, 0xDEAD);
+        WaitForSingleObject(ProcessInfo.hProcess, 10000);
+    }
+    ok(GetExitCodeProcess(ProcessInfo.hProcess, &Code), "GetExitCodeProcess failed: %lu\n", GetLastError());
+    ok(Code == OLDVEC_INTACT, "Old TLS vector of the loading thread after a second load: child exit code 0x%lx "
+       "(0x11 changed, 0x12 unreadable, 0x13 not replaced)\n", Code);
+    CloseHandle(ProcessInfo.hProcess);
+    CloseHandle(ProcessInfo.hThread);
+    DeleteFileW(CopyPathW);
+}
+
 /* Copies of the DLL whose TLS directory, or image size, wraps around the address space on i386 */
 static VOID TestBadImage(PCWSTR DllPath, BOOL BadSize)
 {
@@ -683,6 +790,11 @@ START_TEST(DynamicTls)
         ProtectedTemplateChild();
         return;
     }
+    if (argc >= 4 && !strcmp(argv[2], "oldvector"))
+    {
+        OldVectorChild(argv[3]);
+        return;
+    }
     if (argc >= 4 && !strcmp(argv[2], "flsexit"))
     {
         FlsExitChild(argv[3]);
@@ -769,6 +881,7 @@ START_TEST(DynamicTls)
     if (Slash)
     {
         StringCchCopyW(Slash + 1, ARRAYSIZE(DllPath) - (Slash + 1 - DllPath), L"kernel32_tlsdyn.dll");
+        TestOldVectorOfLoadingThread(argv[0], DllPath);
         TestBadImage(DllPath, FALSE);
         TestBadImage(DllPath, TRUE);
     }
