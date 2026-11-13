@@ -1703,9 +1703,18 @@ __INTRIN_INLINE unsigned long long __rdtsc(void)
 }
 #endif /* !HAS_BUILTIN(__rdtsc) */
 
+/*
+ * EFLAGS.IF is the interrupt-enable state that kernel critical sections are built on, so __writeeflags
+ * must not let the compiler move memory accesses across the popf: a load or store of the protected data
+ * hoisted/sunk past it would run with interrupts enabled. Microsoft documents no barrier semantics for
+ * __writeeflags/_disable/_enable (learn.microsoft.com, 2026-11-13), so this is the conservative GCC
+ * equivalent, matching what _disable/_enable/__halt already do. __readeflags stays an asm volatile without
+ * a memory clobber: GCC never reorders volatile asms against each other, so it keeps its place relative to
+ * _disable/_enable/__writeeflags, and it reads no memory.
+ */
 __INTRIN_INLINE void __writeeflags(uintptr_t Value)
 {
-	__asm__ __volatile__("push %0\n popf" : : "rim"(Value));
+	__asm__ __volatile__("push %0\n popf" : : "rim"(Value) : "memory", "cc");
 }
 
 __INTRIN_INLINE uintptr_t __readeflags(void)
