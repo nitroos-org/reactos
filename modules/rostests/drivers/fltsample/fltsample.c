@@ -29,6 +29,7 @@
 #define MODE_SYNC       5
 #define MODE_SAFE       6
 #define MODE_NODEL      7
+#define MODE_MSG        8
 
 #define MAX_OPEN        256
 
@@ -64,6 +65,9 @@ static volatile LONG PendingWorkers;
 static KEVENT WorkersDone;
 static WCHAR ServiceName[48];
 static BOOLEAN UseContexts = TRUE;
+static PFLT_PORT ServerPort;
+static PFLT_PORT ClientPort;
+static BOOLEAN ArmAsk;
 
 typedef struct _SAMPLE_CONTEXT
 {
@@ -77,6 +81,7 @@ static WCHAR RegistryPathBuffer[160];
 
 DRIVER_INITIALIZE DriverEntry;
 static DRIVER_DISPATCH ControlDispatch;
+static BOOLEAN ClientRefuses(_In_ PCUNICODE_STRING Name);
 
 
 /* HELPERS ****************************************************************/
@@ -88,7 +93,7 @@ ModeFromName(_In_ PCUNICODE_STRING Name)
     static const struct { PCWSTR Extension; ULONG Mode; } Map[] =
     {
         { L".blk", MODE_BLK }, { L".nowr", MODE_NOWR }, { L".half", MODE_HALF }, { L".pend", MODE_PEND },
-        { L".sync", MODE_SYNC }, { L".safe", MODE_SAFE }, { L".nodel", MODE_NODEL },
+        { L".sync", MODE_SYNC }, { L".safe", MODE_SAFE }, { L".nodel", MODE_NODEL }, { L".msg", MODE_MSG },
     };
     ULONG i, Length;
 
@@ -509,6 +514,8 @@ PreOperation(_Inout_ PFLT_CALLBACK_DATA Data,
             RtlZeroMemory(Stats.LastCreate, sizeof(Stats.LastCreate));
             RtlCopyMemory(Stats.LastCreate, FileObject->FileName.Buffer,
                           min(FileObject->FileName.Length, sizeof(Stats.LastCreate) - sizeof(WCHAR)));
+            if (Mode == MODE_MSG && ClientRefuses(&FileObject->FileName))
+                return Veto(Data);
             if (VetoEnabled && Mode == MODE_BLK)
                 return Veto(Data);
             if (VetoEnabled && Mode == MODE_NODEL && (Data->Iopb->Parameters.Create.Options & FILE_DELETE_ON_CLOSE))
@@ -772,6 +779,13 @@ FilterUnload(_In_ FLT_FILTER_UNLOAD_FLAGS Flags)
     if (RefuseUnload && !(Flags & FLTFL_FILTER_UNLOAD_MANDATORY))
         return STATUS_FLT_DO_NOT_DETACH;
 
+    /* No new clients; the connected ones are disconnected by the unregistering */
+    if (ServerPort)
+    {
+        FltCloseCommunicationPort(ServerPort);
+        ServerPort = NULL;
+    }
+
     /* Pended operations need their worker, which needs our code, so wait for those */
     FltUnregisterFilter(SampleFilter);
     SampleFilter = NULL;
@@ -976,6 +990,166 @@ ControlDispatch(_In_ PDEVICE_OBJECT DeviceObject,
 }
 
 
+/* PORT *******************************************************************/
+
+static
+NTSTATUS
+FLTAPI
+PortConnect(_In_ PFLT_PORT Client,
+            _In_opt_ PVOID ServerPortCookie,
+            _In_reads_bytes_opt_(SizeOfContext) PVOID ConnectionContext,
+            _In_ ULONG SizeOfContext,
+            _Outptr_result_maybenull_ PVOID *ConnectionPortCookie)
+{
+    UNREFERENCED_PARAMETER(ServerPortCookie);
+
+    /* A client which says "refuse" in its connection context is turned away */
+    if (SizeOfContext == 6 && RtlEqualMemory(ConnectionContext, "refuse", 6))
+        return STATUS_ACCESS_DENIED;
+
+    ClientPort = Client;
+    *ConnectionPortCookie = (PVOID)(ULONG_PTR)0x4C4F4B43;
+    InterlockedIncrement((PLONG)&Stats.PortConnects);
+    return STATUS_SUCCESS;
+}
+
+static
+VOID
+FLTAPI
+PortDisconnect(_In_opt_ PVOID ConnectionCookie)
+{
+    UNREFERENCED_PARAMETER(ConnectionCookie);
+
+    InterlockedIncrement((PLONG)&Stats.PortDisconnects);
+    FltCloseClientPort(SampleFilter, &ClientPort);
+}
+
+static
+NTSTATUS
+FLTAPI
+PortMessage(_In_opt_ PVOID PortCookie,
+            _In_reads_bytes_opt_(InputBufferLength) PVOID InputBuffer,
+            _In_ ULONG InputBufferLength,
+            _Out_writes_bytes_to_opt_(OutputBufferLength, *ReturnOutputBufferLength) PVOID OutputBuffer,
+            _In_ ULONG OutputBufferLength,
+            _Out_ PULONG ReturnOutputBufferLength)
+{
+    PFLTSAMPLE_MSG Message = InputBuffer;
+    NTSTATUS Status;
+    ULONG Reply = 0;
+    LARGE_INTEGER Timeout;
+
+    *ReturnOutputBufferLength = 0;
+    InterlockedIncrement((PLONG)&Stats.PortMessages);
+
+    if (PortCookie != (PVOID)(ULONG_PTR)0x4C4F4B43 || Message == NULL || InputBufferLength < FIELD_OFFSET(FLTSAMPLE_MSG, Data))
+        return STATUS_INVALID_PARAMETER;
+
+    switch (Message->Code)
+    {
+        case FLTSAMPLE_MSG_PING:
+        {
+            ULONG Length = InputBufferLength - FIELD_OFFSET(FLTSAMPLE_MSG, Data);
+
+            if (Length > OutputBufferLength)
+                Length = OutputBufferLength;
+            if (Length)
+                RtlCopyMemory(OutputBuffer, Message->Data, Length);
+            *ReturnOutputBufferLength = Length;
+            return STATUS_SUCCESS;
+        }
+
+        case FLTSAMPLE_MSG_GET_STATS:
+            if (OutputBufferLength < sizeof(Stats))
+                return STATUS_BUFFER_TOO_SMALL;
+            RtlCopyMemory(OutputBuffer, &Stats, sizeof(Stats));
+            *ReturnOutputBufferLength = sizeof(Stats);
+            return STATUS_SUCCESS;
+
+        case FLTSAMPLE_MSG_ARM:
+            ArmAsk = Message->Arg != 0;
+            return STATUS_SUCCESS;
+
+        case FLTSAMPLE_MSG_NOTIFY:
+        case FLTSAMPLE_MSG_ASK:
+        {
+            UCHAR Buffer[64];
+            ULONG Length = min(Message->Arg, sizeof(Buffer));
+            ULONG ReplyLength = Message->Code == FLTSAMPLE_MSG_ASK ? sizeof(Reply) : 0;
+            BOOLEAN Forever;
+            PFLTSAMPLE_ASK_RESULT Result = OutputBuffer;
+
+            /* A message to the client; the first ULONG says what it is */
+            *(PULONG)Buffer = Message->Code == FLTSAMPLE_MSG_ASK ? FLTSAMPLE_KIND_ASK : FLTSAMPLE_KIND_NOTIFY;
+            if (Length > sizeof(ULONG))
+                RtlFillMemory(Buffer + sizeof(ULONG), Length - sizeof(ULONG), 'k');
+            else
+                Length = sizeof(ULONG);
+
+            /* The wait, in ms, comes after the message code: ULONG Data[0]. Zero is for ever. */
+            if (InputBufferLength >= FIELD_OFFSET(FLTSAMPLE_MSG, Data) + sizeof(ULONG))
+                Timeout.QuadPart = -10000LL * (LONGLONG)*(PULONG)Message->Data;
+            else
+                Timeout.QuadPart = -10000LL * 1000;
+            Forever = Timeout.QuadPart == 0;
+
+            Status = FltSendMessage(SampleFilter,
+                                    &ClientPort,
+                                    Buffer,
+                                    Length,
+                                    ReplyLength ? &Reply : NULL,
+                                    ReplyLength ? &ReplyLength : NULL,
+                                    Forever ? NULL : &Timeout);
+            Stats.PortLastStatus = Status;
+            InterlockedIncrement((PLONG)&Stats.PortSent);
+
+            if (Result && OutputBufferLength >= sizeof(*Result))
+            {
+                RtlZeroMemory(Result, sizeof(*Result));
+                Result->Status = Status;
+                Result->ReplyLength = ReplyLength;
+                RtlCopyMemory(Result->Reply, &Reply, min(ReplyLength, sizeof(Reply)));
+                *ReturnOutputBufferLength = sizeof(*Result);
+            }
+            return STATUS_SUCCESS;
+        }
+
+        default:
+            return STATUS_INVALID_DEVICE_REQUEST;
+    }
+}
+
+/* A create the client has a say in: it gets the name, and a reply other than 0 refuses the create */
+static
+BOOLEAN
+ClientRefuses(_In_ PCUNICODE_STRING Name)
+{
+    UCHAR Buffer[sizeof(ULONG) + 200];
+    ULONG Length, Verdict = 0, VerdictLength = sizeof(Verdict);
+    LARGE_INTEGER Timeout;
+    NTSTATUS Status;
+
+    if (!ArmAsk || ClientPort == NULL)
+        return FALSE;
+
+    *(PULONG)Buffer = FLTSAMPLE_KIND_CREATE;
+    Length = min(Name->Length, sizeof(Buffer) - sizeof(ULONG));
+    RtlCopyMemory(Buffer + sizeof(ULONG), Name->Buffer, Length);
+
+    Timeout.QuadPart = -10000LL * 5000;
+    InterlockedIncrement((PLONG)&Stats.PortAsked);
+    Status = FltSendMessage(SampleFilter, &ClientPort, Buffer, sizeof(ULONG) + Length, &Verdict, &VerdictLength, &Timeout);
+    if (!NT_SUCCESS(Status) || Status == STATUS_TIMEOUT)
+    {
+        InterlockedIncrement((PLONG)&Stats.PortAskFailed);
+        return FALSE;
+    }
+
+    if (Verdict)
+        InterlockedIncrement((PLONG)&Stats.PortDenied);
+    return Verdict != 0;
+}
+
 /* ENTRY ******************************************************************/
 
 static const FLT_OPERATION_REGISTRATION Operations[] =
@@ -1090,9 +1264,29 @@ DriverEntry(_In_ PDRIVER_OBJECT DriverObject,
 
     ControlDevice->Flags &= ~DO_DEVICE_INITIALIZING;
 
+    {
+        OBJECT_ATTRIBUTES PortAttributes;
+        UNICODE_STRING PortName;
+        WCHAR PortNameBuffer[80];
+
+        RtlStringCbPrintfW(PortNameBuffer, sizeof(PortNameBuffer), L"\\%wsPort", ServiceName);
+        RtlInitUnicodeString(&PortName, PortNameBuffer);
+        InitializeObjectAttributes(&PortAttributes, &PortName, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
+        Status = FltCreateCommunicationPort(SampleFilter, &ServerPort, &PortAttributes, NULL,
+                                            PortConnect, PortDisconnect, PortMessage, 1);
+        if (!NT_SUCCESS(Status))
+        {
+            FltUnregisterFilter(SampleFilter);
+            SampleFilter = NULL;
+            goto Fail;
+        }
+    }
+
     Status = FltStartFiltering(SampleFilter);
     if (!NT_SUCCESS(Status))
     {
+        FltCloseCommunicationPort(ServerPort);
+        ServerPort = NULL;
         FltUnregisterFilter(SampleFilter);
         SampleFilter = NULL;
         goto Fail;

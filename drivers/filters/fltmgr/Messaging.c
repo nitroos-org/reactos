@@ -4,12 +4,23 @@
 * FILE:            drivers/filters/fltmgr/Messaging.c
 * PURPOSE:         Contains the routines to handle the comms layer
 * PROGRAMMERS:     Ged Murphy (gedmurphy@reactos.org)
+*
+* A mini-filter creates a server port with FltCreateCommunicationPort. A user mode program connects
+* to it with FilterConnectCommunicationPort, which opens the device \FileSystem\Filters\FltMgrMsg with
+* the connection request as extended attribute; the open file is the connection. Then:
+*   FilterSendMessage       -> IOCTL_FILTER_SEND_MESSAGE -> the message callback of the server port
+*   FltSendMessage          -> queued for the connection, handed to a FilterGetMessage
+*                              (IOCTL_FILTER_GET_MESSAGE), answered with FilterReplyMessage
+*                              (IOCTL_FILTER_REPLY_MESSAGE) if the sender waits for an answer
+* The documentation is the Windows Driver Kit's for FltCreateCommunicationPort, FltSendMessage,
+* FltCloseClientPort and fltuser.h. The format of the connection request is our own.
 */
 
 /* INCLUDES ******************************************************************/
 
 #include "fltmgr.h"
 #include "fltmgrint.h"
+#include "fltmgrproto.h"
 #include <fltmgr_shared.h>
 
 #define NDEBUG
@@ -21,41 +32,402 @@
 UNICODE_STRING CommsDeviceName = RTL_CONSTANT_STRING(L"\\FileSystem\\Filters\\FltMgrMsg");
 PDEVICE_OBJECT CommsDeviceObject;
 
-POBJECT_TYPE ServerPortObjectType;
-POBJECT_TYPE ClientPortObjectType;
+typedef struct _FLT_SERVER_PORT
+{
+    LIST_ENTRY Link;                /* FltpServerPorts, under FltpPortsLock */
+    PFLT_FILTER Filter;
+    PFLT_CONNECT_NOTIFY ConnectNotify;
+    PFLT_DISCONNECT_NOTIFY DisconnectNotify;
+    PFLT_MESSAGE_NOTIFY MessageNotify;
+    PVOID Cookie;
+    LONG MaxConnections;
+    LONG NumberOfConnections;
+    BOOLEAN Closed;
+    LONG RefCount;                  /* the creator, and each connection */
+    UNICODE_STRING Name;
+
+} FLT_SERVER_PORT, *PFLT_SERVER_PORT;
+
+typedef struct _FLT_CONNECTION
+{
+    LIST_ENTRY FilterLink;          /* Filter->ConnectionList */
+    PFLT_SERVER_PORT ServerPort;
+    PFLT_FILTER Filter;
+    PVOID Cookie;
+    EX_RUNDOWN_REF MsgNotifRundownRef;  /* message callbacks in flight */
+    KSPIN_LOCK Lock;
+    LIST_ENTRY Queued;              /* messages for the client, not taken yet */
+    LIST_ENTRY Waiting;             /* messages the client has, waiting for the reply */
+    LIST_ENTRY GetIrps;             /* FilterGetMessage requests waiting for a message */
+    ULONGLONG NextId;
+    volatile LONG Disconnected;
+    volatile LONG ClientPortClosed; /* the filter has let go of the port */
+    volatile LONG RefCount;         /* the file object of the client, the filter's port */
+
+} FLT_CONNECTION, *PFLT_CONNECTION;
+
+typedef struct _FLT_MESSAGE
+{
+    LIST_ENTRY Link;
+    ULONGLONG Id;
+    PVOID Data;
+    ULONG Length;
+    PVOID ReplyBuffer;
+    ULONG ReplyCapacity;
+    ULONG ReplyLength;
+    NTSTATUS Status;
+    BOOLEAN Linked;
+    BOOLEAN Done;
+    KEVENT Event;
+
+} FLT_MESSAGE, *PFLT_MESSAGE;
+
+static LIST_ENTRY FltpServerPorts = { &FltpServerPorts, &FltpServerPorts };
+static FAST_MUTEX FltpPortsLock;
 
 static
-BOOLEAN
-FltpDisconnectPort(
-    _In_ PFLT_PORT_OBJECT PortObject
+VOID
+DisconnectConnection(
+    _In_ PFLT_CONNECTION Connection
 );
+
+
+/* PRIVATE FUNCTIONS ******************************************************/
+
+static
+VOID
+ReleaseServerPort(_In_ PFLT_SERVER_PORT Port)
+{
+    if (InterlockedDecrement(&Port->RefCount) == 0)
+    {
+        FltpFreeUnicodeString(&Port->Name);
+        ExFreePoolWithTag(Port, FM_TAG_MESSAGE);
+    }
+}
+
+static
+VOID
+ReleaseConnection(_In_ PFLT_CONNECTION Connection)
+{
+    if (InterlockedDecrement(&Connection->RefCount) == 0)
+    {
+        ReleaseServerPort(Connection->ServerPort);
+        ExFreePoolWithTag(Connection, FM_TAG_MESSAGE);
+    }
+}
+
+/* Gives a message to a request for one, if both are there. Lock held. */
+static
+PIRP
+MatchMessage(_In_ PFLT_CONNECTION Connection,
+             _Out_ PFLT_MESSAGE *Message)
+{
+    PLIST_ENTRY Entry;
+    PFLT_MESSAGE Candidate;
+    PIRP Irp;
+
+    *Message = NULL;
+
+    while (!IsListEmpty(&Connection->Queued) && !IsListEmpty(&Connection->GetIrps))
+    {
+        Candidate = CONTAINING_RECORD(Connection->Queued.Flink, FLT_MESSAGE, Link);
+        Entry = Connection->GetIrps.Flink;
+        Irp = CONTAINING_RECORD(Entry, IRP, Tail.Overlay.ListEntry);
+
+        /* A request being cancelled isn't ours anymore */
+        if (IoSetCancelRoutine(Irp, NULL) == NULL)
+        {
+            RemoveEntryList(Entry);
+            InitializeListHead(Entry);
+            continue;
+        }
+
+        RemoveEntryList(Entry);
+        *Message = Candidate;
+        return Irp;
+    }
+
+    return NULL;
+}
+
+/* Hands the message to the request, completing it. Called with the lock held; the IRP is completed after. */
+static
+NTSTATUS
+DeliverMessage(_In_ PFLT_CONNECTION Connection,
+               _In_ PFLT_MESSAGE Message,
+               _In_ PIRP Irp,
+               _Out_ PULONG_PTR Information)
+{
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    ULONG Capacity = Stack->Parameters.DeviceIoControl.OutputBufferLength;
+    PFILTER_MESSAGE_HEADER Header = Irp->AssociatedIrp.SystemBuffer;
+
+    *Information = 0;
+
+    if (Capacity < sizeof(*Header) + Message->Length)
+        return STATUS_BUFFER_TOO_SMALL;
+
+    Header->ReplyLength = Message->ReplyCapacity;
+    Header->MessageId = Message->Id;
+    RtlCopyMemory(Header + 1, Message->Data, Message->Length);
+    *Information = sizeof(*Header) + Message->Length;
+
+    /* Out of the queue. A message which wants an answer waits for it, the others are done */
+    RemoveEntryList(&Message->Link);
+    if (Message->ReplyBuffer)
+    {
+        InsertTailList(&Connection->Waiting, &Message->Link);
+    }
+    else
+    {
+        InitializeListHead(&Message->Link);
+        Message->Linked = FALSE;
+        Message->Status = STATUS_SUCCESS;
+        Message->Done = TRUE;
+        KeSetEvent(&Message->Event, IO_NO_INCREMENT, FALSE);
+    }
+
+    return STATUS_SUCCESS;
+}
+
+static
+VOID
+NTAPI
+CancelGetMessage(_Inout_ PDEVICE_OBJECT DeviceObject,
+                 _Inout_ PIRP Irp)
+{
+    PFLT_CONNECTION Connection = IoGetCurrentIrpStackLocation(Irp)->FileObject->FsContext2;
+    KIRQL OldIrql;
+
+    UNREFERENCED_PARAMETER(DeviceObject);
+
+    IoReleaseCancelSpinLock(Irp->CancelIrql);
+
+    KeAcquireSpinLock(&Connection->Lock, &OldIrql);
+    RemoveEntryList(&Irp->Tail.Overlay.ListEntry);
+    InitializeListHead(&Irp->Tail.Overlay.ListEntry);
+    KeReleaseSpinLock(&Connection->Lock, OldIrql);
+
+    Irp->IoStatus.Status = STATUS_CANCELLED;
+    Irp->IoStatus.Information = 0;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+}
+
+/* Parses the connection request out of the extended attributes of the create */
+static
+NTSTATUS
+ParseConnectRequest(_In_ PIRP Irp,
+                    _Out_ PFLT_CONNECT_REQUEST *Request,
+                    _Out_ PULONG ValueLength)
+{
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    PFILE_FULL_EA_INFORMATION Ea = Irp->AssociatedIrp.SystemBuffer;
+    ULONG Length = Stack->Parameters.Create.EaLength;
+    ULONG Required;
+    static const CHAR Name[] = FLT_CONNECT_EA_NAME;
+
+    if (Ea == NULL || Length < FIELD_OFFSET(FILE_FULL_EA_INFORMATION, EaName))
+        return STATUS_INVALID_PARAMETER;
+
+    Required = FIELD_OFFSET(FILE_FULL_EA_INFORMATION, EaName) + Ea->EaNameLength + 1 + Ea->EaValueLength;
+    if (Required > Length ||
+        Ea->EaNameLength != sizeof(Name) - 1 ||
+        RtlCompareMemory(Ea->EaName, Name, sizeof(Name) - 1) != sizeof(Name) - 1 ||
+        Ea->EaValueLength < sizeof(FLT_CONNECT_REQUEST))
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    *Request = (PFLT_CONNECT_REQUEST)(Ea->EaName + Ea->EaNameLength + 1);
+    *ValueLength = Ea->EaValueLength;
+
+    if ((ULONG)sizeof(FLT_CONNECT_REQUEST) + (*Request)->NameLength + (*Request)->ContextSize > *ValueLength)
+        return STATUS_INVALID_PARAMETER;
+
+    return STATUS_SUCCESS;
+}
 
 static
 NTSTATUS
-CreateClientPort(
-    _In_ PFILE_OBJECT FileObject,
-    _Inout_ PIRP Irp
-);
+CreateConnection(_Inout_ PIRP Irp)
+{
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    PFLT_CONNECT_REQUEST Request;
+    PFLT_SERVER_PORT Server = NULL;
+    PFLT_CONNECTION Connection;
+    PLIST_ENTRY Entry;
+    UNICODE_STRING PortName;
+    ULONG ValueLength;
+    NTSTATUS Status;
 
+    Status = ParseConnectRequest(Irp, &Request, &ValueLength);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    PortName.Buffer = (PWCH)(Request + 1);
+    PortName.Length = PortName.MaximumLength = Request->NameLength;
+
+    /* The server port of that name, which isn't being closed */
+    ExAcquireFastMutex(&FltpPortsLock);
+    for (Entry = FltpServerPorts.Flink; Entry != &FltpServerPorts; Entry = Entry->Flink)
+    {
+        PFLT_SERVER_PORT Candidate = CONTAINING_RECORD(Entry, FLT_SERVER_PORT, Link);
+
+        if (!Candidate->Closed && RtlEqualUnicodeString(&Candidate->Name, &PortName, TRUE))
+        {
+            Server = Candidate;
+            InterlockedIncrement(&Server->RefCount);
+            break;
+        }
+    }
+    ExReleaseFastMutex(&FltpPortsLock);
+
+    if (Server == NULL)
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+
+    if (InterlockedIncrement(&Server->NumberOfConnections) > Server->MaxConnections)
+    {
+        InterlockedDecrement(&Server->NumberOfConnections);
+        ReleaseServerPort(Server);
+        return STATUS_CONNECTION_COUNT_LIMIT;
+    }
+
+    Connection = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Connection), FM_TAG_MESSAGE);
+    if (Connection == NULL)
+    {
+        InterlockedDecrement(&Server->NumberOfConnections);
+        ReleaseServerPort(Server);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    RtlZeroMemory(Connection, sizeof(*Connection));
+    Connection->ServerPort = Server;
+    Connection->Filter = Server->Filter;
+    Connection->RefCount = 1;
+    Connection->NextId = 1;
+    InitializeListHead(&Connection->FilterLink);
+    InitializeListHead(&Connection->Queued);
+    InitializeListHead(&Connection->Waiting);
+    InitializeListHead(&Connection->GetIrps);
+    KeInitializeSpinLock(&Connection->Lock);
+    ExInitializeRundownProtection(&Connection->MsgNotifRundownRef);
+
+    /* The filter is told, and may refuse. The port is the filter's too: it closes it when the client goes. */
+    InterlockedIncrement(&Connection->RefCount);
+    Stack->FileObject->FsContext2 = Connection;
+    Status = Server->ConnectNotify((PFLT_PORT)Connection,
+                                   Server->Cookie,
+                                   Request->ContextSize ? (PUCHAR)(Request + 1) + Request->NameLength : NULL,
+                                   Request->ContextSize,
+                                   &Connection->Cookie);
+    if (!NT_SUCCESS(Status))
+    {
+        /* Never connected: nothing to tell the filter, and no port to close */
+        Stack->FileObject->FsContext2 = NULL;
+        InterlockedDecrement(&Server->NumberOfConnections);
+        Connection->Disconnected = TRUE;
+        Connection->ClientPortClosed = TRUE;
+        ReleaseConnection(Connection);
+        ReleaseConnection(Connection);
+        return Status;
+    }
+
+    ExAcquireFastMutex(&Server->Filter->ConnectionList.mLock);
+    InsertTailList(&Server->Filter->ConnectionList.mList, &Connection->FilterLink);
+    Server->Filter->ConnectionList.mCount++;
+    ExReleaseFastMutex(&Server->Filter->ConnectionList.mLock);
+
+    Irp->IoStatus.Information = FILE_OPENED;
+    return STATUS_SUCCESS;
+}
+
+/*
+ * The connection is over, from either side: the waiting ones are told, the filter is told once.
+ * The connection itself stays as long as the filter has its port.
+ */
 static
-NTSTATUS
-CloseClientPort(
-    _In_ PFILE_OBJECT FileObject,
-    _Inout_ PIRP Irp
-);
+VOID
+DisconnectConnection(_In_ PFLT_CONNECTION Connection)
+{
+    LIST_ENTRY Irps;
+    PLIST_ENTRY Entry;
+    KIRQL OldIrql;
+    PFLT_SERVER_PORT Server = Connection->ServerPort;
 
+    if (InterlockedExchange(&Connection->Disconnected, TRUE))
+        return;
+
+    InitializeListHead(&Irps);
+
+    KeAcquireSpinLock(&Connection->Lock, &OldIrql);
+
+    /* The senders wake up and take their messages out of the lists */
+    for (Entry = Connection->Queued.Flink; Entry != &Connection->Queued; Entry = Entry->Flink)
+    {
+        PFLT_MESSAGE Message = CONTAINING_RECORD(Entry, FLT_MESSAGE, Link);
+
+        Message->Status = STATUS_PORT_DISCONNECTED;
+        Message->Done = TRUE;
+        KeSetEvent(&Message->Event, IO_NO_INCREMENT, FALSE);
+    }
+    for (Entry = Connection->Waiting.Flink; Entry != &Connection->Waiting; Entry = Entry->Flink)
+    {
+        PFLT_MESSAGE Message = CONTAINING_RECORD(Entry, FLT_MESSAGE, Link);
+
+        Message->Status = STATUS_PORT_DISCONNECTED;
+        Message->Done = TRUE;
+        KeSetEvent(&Message->Event, IO_NO_INCREMENT, FALSE);
+    }
+
+    while (!IsListEmpty(&Connection->GetIrps))
+    {
+        PIRP Irp;
+
+        Entry = RemoveHeadList(&Connection->GetIrps);
+        Irp = CONTAINING_RECORD(Entry, IRP, Tail.Overlay.ListEntry);
+        if (IoSetCancelRoutine(Irp, NULL) != NULL)
+            InsertTailList(&Irps, Entry);
+        else
+            InitializeListHead(Entry);  /* the cancel routine completes it */
+    }
+    KeReleaseSpinLock(&Connection->Lock, OldIrql);
+
+    while (!IsListEmpty(&Irps))
+    {
+        PIRP Irp = CONTAINING_RECORD(RemoveHeadList(&Irps), IRP, Tail.Overlay.ListEntry);
+
+        Irp->IoStatus.Status = STATUS_PORT_DISCONNECTED;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    }
+
+    /* Callbacks for messages of the client, running at this moment */
+    ExWaitForRundownProtectionRelease(&Connection->MsgNotifRundownRef);
+
+    ExAcquireFastMutex(&Connection->Filter->ConnectionList.mLock);
+    if (!IsListEmpty(&Connection->FilterLink))
+    {
+        RemoveEntryList(&Connection->FilterLink);
+        InitializeListHead(&Connection->FilterLink);
+        Connection->Filter->ConnectionList.mCount--;
+    }
+    ExReleaseFastMutex(&Connection->Filter->ConnectionList.mLock);
+
+    InterlockedDecrement(&Server->NumberOfConnections);
+    if (Server->DisconnectNotify)
+        Server->DisconnectNotify(Connection->Cookie);
+}
+
+/* The filter lets go of its port to the client */
 static
-NTSTATUS
-InitializeMessageWaiterQueue(
-    _Inout_ PFLT_MESSAGE_WAITER_QUEUE MsgWaiterQueue
-);
+VOID
+CloseClientPortReference(_In_ PFLT_CONNECTION Connection)
+{
+    DisconnectConnection(Connection);
 
-static
-PPORT_CCB
-CreatePortCCB(
-    _In_ PFLT_PORT_OBJECT PortObject
-);
-
+    if (!InterlockedExchange(&Connection->ClientPortClosed, TRUE))
+        ReleaseConnection(Connection);
+}
 
 
 /* EXPORTED FUNCTIONS ******************************************************/
@@ -73,25 +445,32 @@ FltCreateCommunicationPort(_In_ PFLT_FILTER Filter,
                            _In_opt_ PFLT_MESSAGE_NOTIFY MessageNotifyCallback,
                            _In_ LONG MaxConnections)
 {
-    PFLT_SERVER_PORT_OBJECT PortObject;
+    PFLT_SERVER_PORT Port;
+    PLIST_ENTRY Entry;
     NTSTATUS Status;
 
+    PAGED_CODE();
+
+    *ServerPort = NULL;
+
     /* The caller must allow at least one connection */
-    if (MaxConnections == 0)
+    if (MaxConnections <= 0 || ConnectNotifyCallback == NULL)
     {
         return STATUS_INVALID_PARAMETER;
     }
 
-    /* The request must be for a kernel handle */
-    if (!(ObjectAttributes->Attributes & OBJ_KERNEL_HANDLE))
+    /* The request must be for a kernel handle, with a name */
+    if (!(ObjectAttributes->Attributes & OBJ_KERNEL_HANDLE) ||
+        ObjectAttributes->ObjectName == NULL ||
+        ObjectAttributes->ObjectName->Length == 0)
     {
         return STATUS_INVALID_PARAMETER;
     }
 
     /*
      * Get rundown protection on the target to stop the owner
-     * from unloading whilst this port object is open. It gets
-     * removed in the FltpServerPortClose callback
+     * from unloading whilst this port is open. It gets removed in
+     * FltCloseCommunicationPort
      */
     Status = FltObjectReference(Filter);
     if (!NT_SUCCESS(Status))
@@ -99,60 +478,60 @@ FltCreateCommunicationPort(_In_ PFLT_FILTER Filter,
         return Status;
     }
 
-    /* Create the server port object for this filter */
-    Status = ObCreateObject(KernelMode,
-                            ServerPortObjectType,
-                            ObjectAttributes,
-                            KernelMode,
-                            NULL,
-                            sizeof(FLT_SERVER_PORT_OBJECT),
-                            0,
-                            0,
-                            (PVOID *)&PortObject);
-    if (NT_SUCCESS(Status))
+    Port = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Port), FM_TAG_MESSAGE);
+    if (Port == NULL)
     {
-        /* Zero out the struct */
-        RtlZeroMemory(PortObject, sizeof(FLT_SERVER_PORT_OBJECT));
+        FltObjectDereference(Filter);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
 
-        /* Increment the ref count on the target filter */
-        FltpObjectPointerReference((PFLT_OBJECT)Filter);
+    RtlZeroMemory(Port, sizeof(*Port));
+    Port->RefCount = 1;
+    Port->Filter = Filter;
+    Port->ConnectNotify = ConnectNotifyCallback;
+    Port->DisconnectNotify = DisconnectNotifyCallback;
+    Port->MessageNotify = MessageNotifyCallback;
+    Port->Cookie = ServerPortCookie;
+    Port->MaxConnections = MaxConnections;
 
-        /* Setup the filter port object */
-        PortObject->Filter = Filter;
-        PortObject->ConnectNotify = ConnectNotifyCallback;
-        PortObject->DisconnectNotify = DisconnectNotifyCallback;
-        PortObject->MessageNotify = MessageNotifyCallback;
-        PortObject->Cookie = ServerPortCookie;
-        PortObject->MaxConnections = MaxConnections;
+    Status = FltpReallocateUnicodeString(&Port->Name, ObjectAttributes->ObjectName->Length, FALSE);
+    if (!NT_SUCCESS(Status))
+    {
+        FltObjectDereference(Filter);
+        ExFreePoolWithTag(Port, FM_TAG_MESSAGE);
+        return Status;
+    }
+    RtlCopyUnicodeString(&Port->Name, ObjectAttributes->ObjectName);
 
-        /* Insert the object */
-        Status = ObInsertObject(PortObject,
-                                NULL,
-                                STANDARD_RIGHTS_ALL | FILE_READ_DATA,
-                                0,
-                                NULL,
-                                (PHANDLE)ServerPort);
-        if (NT_SUCCESS(Status))
+    ExAcquireFastMutex(&FltpPortsLock);
+    for (Entry = FltpServerPorts.Flink; Entry != &FltpServerPorts; Entry = Entry->Flink)
+    {
+        PFLT_SERVER_PORT Other = CONTAINING_RECORD(Entry, FLT_SERVER_PORT, Link);
+
+        if (RtlEqualUnicodeString(&Other->Name, &Port->Name, TRUE))
         {
-            /* Lock the connection list */
-            ExAcquireFastMutex(&Filter->ConnectionList.mLock);
-
-            /* Add the new port object to the connection list and increment the count */
-            InsertTailList(&Filter->ConnectionList.mList, &PortObject->FilterLink);
-            Filter->ConnectionList.mCount++;
-
-            /* Unlock the connection list*/
-            ExReleaseFastMutex(&Filter->ConnectionList.mLock);
+            Status = STATUS_OBJECT_NAME_COLLISION;
+            break;
         }
     }
+    if (NT_SUCCESS(Status))
+        InsertTailList(&FltpServerPorts, &Port->Link);
+    ExReleaseFastMutex(&FltpPortsLock);
 
     if (!NT_SUCCESS(Status))
     {
-        /* Allow the filter to be cleaned up */
         FltObjectDereference(Filter);
+        ReleaseServerPort(Port);
+        return Status;
     }
 
-    return Status;
+    /* The list of ports of the filter */
+    ExAcquireFastMutex(&Filter->PortList.mLock);
+    Filter->PortList.mCount++;
+    ExReleaseFastMutex(&Filter->PortList.mLock);
+
+    *ServerPort = (PFLT_PORT)Port;
+    return STATUS_SUCCESS;
 }
 
 _IRQL_requires_max_(PASSIVE_LEVEL)
@@ -160,8 +539,24 @@ VOID
 FLTAPI
 FltCloseCommunicationPort(_In_ PFLT_PORT ServerPort)
 {
-    /* Just close the handle to initiate the cleanup callbacks */
-    ZwClose(ServerPort);
+    PFLT_SERVER_PORT Port = (PFLT_SERVER_PORT)ServerPort;
+
+    PAGED_CODE();
+
+    /* No new clients. The ones there stay until they go or the filter does. */
+    ExAcquireFastMutex(&FltpPortsLock);
+    Port->Closed = TRUE;
+    RemoveEntryList(&Port->Link);
+    InitializeListHead(&Port->Link);
+    ExReleaseFastMutex(&FltpPortsLock);
+
+    ExAcquireFastMutex(&Port->Filter->PortList.mLock);
+    Port->Filter->PortList.mCount--;
+    ExReleaseFastMutex(&Port->Filter->PortList.mLock);
+
+    /* The filter may unload now */
+    FltObjectDereference(Port->Filter);
+    ReleaseServerPort(Port);
 }
 
 _IRQL_requires_max_(PASSIVE_LEVEL)
@@ -172,26 +567,18 @@ FltCloseClientPort(_In_ PFLT_FILTER Filter,
 {
     PFLT_PORT Port;
 
-    /* Protect against the handle being used whilst we're closing it */
-    FltAcquirePushLockShared(&Filter->PortLock);
+    /* Protect against the port being used whilst we're closing it */
+    FltAcquirePushLockExclusive(&Filter->PortLock);
 
-    /* Store the port handle while we have the lock held */
+    /* Store the port while we have the lock held */
     Port = *ClientPort;
-
-    if (*ClientPort)
-    {
-        /* Set the hadle to null */
-        *ClientPort = NULL;
-    }
+    *ClientPort = NULL;
 
     /* Unlock the port */
     FltReleasePushLock(&Filter->PortLock);
 
     if (Port)
-    {
-        /* Close the safe handle */
-        ZwClose(Port);
-    }
+        CloseClientPortReference((PFLT_CONNECTION)Port);
 }
 
 _Must_inspect_result_
@@ -206,49 +593,275 @@ FltSendMessage(_In_ PFLT_FILTER Filter,
                _Inout_opt_ PULONG ReplyLength,
                _In_opt_ PLARGE_INTEGER Timeout)
 {
-    UNREFERENCED_PARAMETER(Filter);
-    UNREFERENCED_PARAMETER(ClientPort);
-    UNREFERENCED_PARAMETER(SenderBuffer);
-    UNREFERENCED_PARAMETER(SenderBufferLength);
-    UNREFERENCED_PARAMETER(ReplyBuffer);
-    UNREFERENCED_PARAMETER(ReplyLength);
-    UNREFERENCED_PARAMETER(Timeout);
-    return STATUS_NOT_IMPLEMENTED;
+    PFLT_CONNECTION Connection;
+    FLT_MESSAGE Message;
+    KIRQL OldIrql;
+    PIRP Irp;
+    PFLT_MESSAGE Matched;
+    ULONG_PTR Information = 0;
+    NTSTATUS Status, DeliverStatus = STATUS_SUCCESS;
+
+    PAGED_CODE();
+
+    if ((ReplyBuffer == NULL) != (ReplyLength == NULL))
+        return STATUS_INVALID_PARAMETER;
+
+    /* The pointer is the filter's own while it holds the lock */
+    FltAcquirePushLockShared(&Filter->PortLock);
+    Connection = (PFLT_CONNECTION)*ClientPort;
+    if (Connection == NULL || Connection->Disconnected)
+    {
+        FltReleasePushLock(&Filter->PortLock);
+        return Connection ? STATUS_PORT_DISCONNECTED : STATUS_INVALID_PARAMETER;
+    }
+
+    RtlZeroMemory(&Message, sizeof(Message));
+    Message.Data = SenderBuffer;
+    Message.Length = SenderBufferLength;
+    Message.ReplyBuffer = ReplyBuffer;
+    Message.ReplyCapacity = ReplyBuffer ? *ReplyLength : 0;
+    KeInitializeEvent(&Message.Event, NotificationEvent, FALSE);
+
+    KeAcquireSpinLock(&Connection->Lock, &OldIrql);
+    Message.Id = Connection->NextId++;
+    InsertTailList(&Connection->Queued, &Message.Link);
+    Message.Linked = TRUE;
+
+    /* A request waiting for a message takes it right away */
+    Irp = MatchMessage(Connection, &Matched);
+    if (Irp)
+        DeliverStatus = DeliverMessage(Connection, Matched, Irp, &Information);
+    KeReleaseSpinLock(&Connection->Lock, OldIrql);
+
+    if (Irp)
+    {
+        Irp->IoStatus.Status = DeliverStatus;
+        Irp->IoStatus.Information = Information;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    }
+
+    /* Until a client has taken it, or answered it */
+    Status = KeWaitForSingleObject(&Message.Event, Executive, KernelMode, FALSE, Timeout);
+
+    KeAcquireSpinLock(&Connection->Lock, &OldIrql);
+    if (Status == STATUS_TIMEOUT && !Message.Done)
+        Message.Status = STATUS_TIMEOUT;
+    if (Message.Linked)
+        RemoveEntryList(&Message.Link);
+    KeReleaseSpinLock(&Connection->Lock, OldIrql);
+
+    FltReleasePushLock(&Filter->PortLock);
+
+    if (ReplyLength)
+        *ReplyLength = Message.ReplyLength;
+    return Message.Status;
 }
 
 /* INTERNAL FUNCTIONS ******************************************************/
-
 
 NTSTATUS
 FltpMsgCreate(_In_ PDEVICE_OBJECT DeviceObject,
               _Inout_ PIRP Irp)
 {
-    PIO_STACK_LOCATION StackPtr;
     NTSTATUS Status;
 
-    /* Get the stack location */
-    StackPtr = IoGetCurrentIrpStackLocation(Irp);
+    UNREFERENCED_PARAMETER(DeviceObject);
 
-    FLT_ASSERT(StackPtr->MajorFunction == IRP_MJ_CREATE);
+    Irp->IoStatus.Information = 0;
+    Status = CreateConnection(Irp);
 
-    /* Check if this is a caller wanting to connect */
-    if (StackPtr->MajorFunction == IRP_MJ_CREATE)
+    Irp->IoStatus.Status = Status;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return Status;
+}
+
+static
+NTSTATUS
+HandleSendMessage(_In_ PFLT_CONNECTION Connection,
+                  _Inout_ PIRP Irp,
+                  _Out_ PULONG_PTR Information)
+{
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    ULONG InLength = Stack->Parameters.DeviceIoControl.InputBufferLength;
+    ULONG OutLength = Stack->Parameters.DeviceIoControl.OutputBufferLength;
+    PFLT_SERVER_PORT Server = Connection->ServerPort;
+    PVOID Input = NULL;
+    ULONG Returned = 0;
+    NTSTATUS Status;
+
+    *Information = 0;
+
+    if (Server->MessageNotify == NULL)
+        return STATUS_INVALID_DEVICE_REQUEST;
+
+    /* The buffer is shared by the message and the answer: the filter gets a copy of the message */
+    if (InLength)
     {
-        /* Create the client port for this connection and exit */
-        Status = CreateClientPort(StackPtr->FileObject, Irp);
+        Input = ExAllocatePoolWithTag(NonPagedPool, InLength, FM_TAG_MESSAGE);
+        if (Input == NULL)
+            return STATUS_INSUFFICIENT_RESOURCES;
+        RtlCopyMemory(Input, Irp->AssociatedIrp.SystemBuffer, InLength);
+    }
+
+    if (!ExAcquireRundownProtection(&Connection->MsgNotifRundownRef))
+    {
+        if (Input) ExFreePoolWithTag(Input, FM_TAG_MESSAGE);
+        return STATUS_PORT_DISCONNECTED;
+    }
+
+    Status = Server->MessageNotify(Connection->Cookie,
+                                   Input,
+                                   InLength,
+                                   OutLength ? Irp->AssociatedIrp.SystemBuffer : NULL,
+                                   OutLength,
+                                   &Returned);
+    ExReleaseRundownProtection(&Connection->MsgNotifRundownRef);
+
+    if (Input) ExFreePoolWithTag(Input, FM_TAG_MESSAGE);
+
+    if (Returned > OutLength)
+        Returned = OutLength;
+    *Information = Returned;
+    return Status;
+}
+
+static
+NTSTATUS
+HandleGetMessage(_In_ PFLT_CONNECTION Connection,
+                 _Inout_ PIRP Irp,
+                 _Out_ PULONG_PTR Information)
+{
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    KIRQL OldIrql;
+    PFLT_MESSAGE Message;
+    NTSTATUS Status;
+
+    *Information = 0;
+
+    if (Stack->Parameters.DeviceIoControl.OutputBufferLength < sizeof(FILTER_MESSAGE_HEADER))
+        return STATUS_BUFFER_TOO_SMALL;
+
+    KeAcquireSpinLock(&Connection->Lock, &OldIrql);
+    if (Connection->Disconnected)
+    {
+        KeReleaseSpinLock(&Connection->Lock, OldIrql);
+        return STATUS_PORT_DISCONNECTED;
+    }
+
+    if (!IsListEmpty(&Connection->Queued))
+    {
+        Message = CONTAINING_RECORD(Connection->Queued.Flink, FLT_MESSAGE, Link);
+        Status = DeliverMessage(Connection, Message, Irp, Information);
+        KeReleaseSpinLock(&Connection->Lock, OldIrql);
+        return Status;
+    }
+
+    /* Nothing yet: the request waits */
+    IoMarkIrpPending(Irp);
+    InsertTailList(&Connection->GetIrps, &Irp->Tail.Overlay.ListEntry);
+    IoSetCancelRoutine(Irp, CancelGetMessage);
+    if (Irp->Cancel && IoSetCancelRoutine(Irp, NULL) != NULL)
+    {
+        RemoveEntryList(&Irp->Tail.Overlay.ListEntry);
+        InitializeListHead(&Irp->Tail.Overlay.ListEntry);
+        KeReleaseSpinLock(&Connection->Lock, OldIrql);
+        Irp->IoStatus.Status = STATUS_CANCELLED;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return STATUS_PENDING;
+    }
+    KeReleaseSpinLock(&Connection->Lock, OldIrql);
+    return STATUS_PENDING;
+}
+
+static
+NTSTATUS
+HandleReplyMessage(_In_ PFLT_CONNECTION Connection,
+                   _Inout_ PIRP Irp)
+{
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    ULONG InLength = Stack->Parameters.DeviceIoControl.InputBufferLength;
+    PFILTER_REPLY_HEADER Header = Irp->AssociatedIrp.SystemBuffer;
+    PLIST_ENTRY Entry;
+    KIRQL OldIrql;
+    NTSTATUS Status = STATUS_NOT_FOUND;
+
+    if (InLength < sizeof(*Header))
+        return STATUS_INVALID_PARAMETER;
+
+    KeAcquireSpinLock(&Connection->Lock, &OldIrql);
+    for (Entry = Connection->Waiting.Flink; Entry != &Connection->Waiting; Entry = Entry->Flink)
+    {
+        PFLT_MESSAGE Message = CONTAINING_RECORD(Entry, FLT_MESSAGE, Link);
+        ULONG Data = InLength - sizeof(*Header);
+
+        if (Message->Id != Header->MessageId)
+            continue;
+
+        /* What the sender has room for is what it gets */
+        if (Data > Message->ReplyCapacity)
+            Data = Message->ReplyCapacity;
+        RtlCopyMemory(Message->ReplyBuffer, Header + 1, Data);
+        Message->ReplyLength = Data;
+        Message->Status = Header->Status;
+        Message->Done = TRUE;
+        RemoveEntryList(&Message->Link);
+        InitializeListHead(&Message->Link);
+        Message->Linked = FALSE;
+        KeSetEvent(&Message->Event, IO_NO_INCREMENT, FALSE);
+        Status = STATUS_SUCCESS;
+        break;
+    }
+    KeReleaseSpinLock(&Connection->Lock, OldIrql);
+
+    return Status;
+}
+
+NTSTATUS
+FltpMsgDeviceControl(_In_ PDEVICE_OBJECT DeviceObject,
+                     _Inout_ PIRP Irp)
+{
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    PFLT_CONNECTION Connection = Stack->FileObject->FsContext2;
+    ULONG_PTR Information = 0;
+    NTSTATUS Status;
+
+    UNREFERENCED_PARAMETER(DeviceObject);
+
+    if (Connection == NULL)
+    {
+        Status = STATUS_INVALID_HANDLE;
+    }
+    else if (Connection->Disconnected)
+    {
+        Status = STATUS_PORT_DISCONNECTED;
     }
     else
     {
-        Status = STATUS_INVALID_PARAMETER;
+        switch (Stack->Parameters.DeviceIoControl.IoControlCode)
+        {
+            case IOCTL_FILTER_SEND_MESSAGE:
+                Status = HandleSendMessage(Connection, Irp, &Information);
+                break;
+
+            case IOCTL_FILTER_GET_MESSAGE:
+                Status = HandleGetMessage(Connection, Irp, &Information);
+                if (Status == STATUS_PENDING)
+                    return STATUS_PENDING;
+                break;
+
+            case IOCTL_FILTER_REPLY_MESSAGE:
+                Status = HandleReplyMessage(Connection, Irp);
+                break;
+
+            default:
+                Status = STATUS_INVALID_DEVICE_REQUEST;
+                break;
+        }
     }
 
-    if (Status != STATUS_PENDING)
-    {
-        Irp->IoStatus.Status = Status;
-        Irp->IoStatus.Information = 0;
-        IoCompleteRequest(Irp, 0);
-    }
-
+    Irp->IoStatus.Status = Status;
+    Irp->IoStatus.Information = NT_SUCCESS(Status) ? Information : 0;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
     return Status;
 }
 
@@ -257,168 +870,81 @@ FltpMsgDispatch(_In_ PDEVICE_OBJECT DeviceObject,
                 _Inout_ PIRP Irp)
 {
     PIO_STACK_LOCATION StackPtr;
-    NTSTATUS Status;
+    PFLT_CONNECTION Connection;
+    NTSTATUS Status = STATUS_SUCCESS;
 
-    /* Get the stack location */
+    UNREFERENCED_PARAMETER(DeviceObject);
+
     StackPtr = IoGetCurrentIrpStackLocation(Irp);
+    Connection = StackPtr->FileObject ? StackPtr->FileObject->FsContext2 : NULL;
 
-    /* Check if this is a caller wanting to connect */
-    if (StackPtr->MajorFunction == IRP_MJ_CLOSE)
+    switch (StackPtr->MajorFunction)
     {
-        /* Create the client port for this connection and exit */
-        Status = CloseClientPort(StackPtr->FileObject, Irp);
-    }
-    else
-    {
-        // We don't support anything else yet
-        Status = STATUS_NOT_IMPLEMENTED;
+        case IRP_MJ_CLEANUP:
+            /* The last handle of the client is gone */
+            if (Connection)
+                DisconnectConnection(Connection);
+            break;
+
+        case IRP_MJ_CLOSE:
+            if (Connection)
+            {
+                StackPtr->FileObject->FsContext2 = NULL;
+                ReleaseConnection(Connection);
+            }
+            break;
+
+        case IRP_MJ_DEVICE_CONTROL:
+            return FltpMsgDeviceControl(DeviceObject, Irp);
+
+        default:
+            Status = STATUS_INVALID_DEVICE_REQUEST;
+            break;
     }
 
-    if (Status != STATUS_PENDING)
-    {
-        Irp->IoStatus.Status = Status;
-        Irp->IoStatus.Information = 0;
-        IoCompleteRequest(Irp, 0);
-    }
-
+    Irp->IoStatus.Status = Status;
+    Irp->IoStatus.Information = 0;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
     return Status;
 }
 
+/* A filter goes away: whoever is still connected is disconnected */
 VOID
-NTAPI
-FltpServerPortClose(_In_opt_ PEPROCESS Process,
-                    _In_ PVOID Object,
-                    _In_ ACCESS_MASK GrantedAccess,
-                    _In_ ULONG_PTR ProcessHandleCount,
-                    _In_ ULONG_PTR SystemHandleCount)
+FltpDisconnectFilterPorts(_In_ PFLT_FILTER Filter)
 {
-    PFLT_SERVER_PORT_OBJECT PortObject;
-    PFAST_MUTEX Lock;
+    PFLT_CONNECTION Connection;
+    PLIST_ENTRY Entry;
 
-    /* Cast the object to a server port object */
-    PortObject = (PFLT_SERVER_PORT_OBJECT)Object;
-
-    /* Lock the connection list */
-    Lock = &PortObject->Filter->ConnectionList.mLock;
-    ExAcquireFastMutex(Lock);
-
-    /* Remove the server port object from the list */
-    RemoveEntryList(&PortObject->FilterLink);
-
-    /* Unlock the connection list */
-    ExReleaseFastMutex(Lock);
-
-    /* Remove the rundown protection we added to stop the owner from tearing us down */
-    FltObjectDereference(PortObject->Filter);
-}
-
-VOID
-NTAPI
-FltpServerPortDelete(PVOID Object)
-{
-    /* Decrement the filter count we added in the create routine */
-    PFLT_SERVER_PORT_OBJECT PortObject = (PFLT_SERVER_PORT_OBJECT)Object;
-    FltpObjectPointerDereference((PFLT_OBJECT)PortObject->Filter);
-
-}
-
-VOID
-NTAPI
-FltpClientPortClose(_In_opt_ PEPROCESS Process,
-                    _In_ PVOID Object,
-                    _In_ ACCESS_MASK GrantedAccess,
-                    _In_ ULONG_PTR ProcessHandleCount,
-                    _In_ ULONG_PTR SystemHandleCount)
-{
-    PFLT_PORT_OBJECT PortObject = (PFLT_PORT_OBJECT)Object;
-
-    if (FltpDisconnectPort(PortObject))
+    for (;;)
     {
-        InterlockedDecrement(&PortObject->ServerPort->NumberOfConnections);
+        Connection = NULL;
+
+        ExAcquireFastMutex(&Filter->ConnectionList.mLock);
+        for (Entry = Filter->ConnectionList.mList.Flink;
+             Entry != &Filter->ConnectionList.mList;
+             Entry = Entry->Flink)
+        {
+            Connection = CONTAINING_RECORD(Entry, FLT_CONNECTION, FilterLink);
+            InterlockedIncrement(&Connection->RefCount);
+            break;
+        }
+        ExReleaseFastMutex(&Filter->ConnectionList.mLock);
+
+        if (Connection == NULL)
+            break;
+
+        CloseClientPortReference(Connection);
+        ReleaseConnection(Connection);
     }
 }
-
-BOOLEAN
-FltpDisconnectPort(_In_ PFLT_PORT_OBJECT PortObject)
-{
-    BOOLEAN Disconnected = FALSE;
-
-    /* Lock the port object while we disconnect it */
-    ExAcquireFastMutex(&PortObject->Lock);
-
-    /* Make sure we have a valid connection */
-    if (PortObject->Disconnected == FALSE)
-    {
-        /* Let any waiters know we're dusconnecing */
-        KeSetEvent(&PortObject->DisconnectEvent, 0, 0);
-
-        // cleanup everything in the message queue (PortObject->MsgQ.Csq)
-
-        /* Set the disconnected state to true */
-        PortObject->Disconnected = TRUE;
-        Disconnected = TRUE;
-    }
-
-    /* Unlock and exit*/
-    ExReleaseFastMutex(&PortObject->Lock);
-    return Disconnected;
-}
-
-VOID
-NTAPI
-FltpClientPortDelete(PVOID Object)
-{
-    PFLT_PORT_OBJECT PortObject = (PFLT_PORT_OBJECT)Object;
-    ObDereferenceObject(PortObject->ServerPort);
-}
-
 
 NTSTATUS
 FltpSetupCommunicationObjects(_In_ PDRIVER_OBJECT DriverObject)
 {
-    OBJECT_TYPE_INITIALIZER ObjectTypeInitializer;
     UNICODE_STRING SymLinkName;
-    UNICODE_STRING Name;
     NTSTATUS Status;
 
-    GENERIC_MAPPING Mapping =
-    {
-        STANDARD_RIGHTS_READ,
-        STANDARD_RIGHTS_WRITE,
-        STANDARD_RIGHTS_EXECUTE | SYNCHRONIZE,
-        FLT_PORT_ALL_ACCESS
-    };
-
-    /* Create the server comms object type */
-    RtlZeroMemory(&ObjectTypeInitializer, sizeof(OBJECT_TYPE_INITIALIZER));
-    RtlInitUnicodeString(&Name, L"FilterConnectionPort");
-    ObjectTypeInitializer.Length = sizeof(OBJECT_TYPE_INITIALIZER);
-    ObjectTypeInitializer.InvalidAttributes = OBJ_OPENLINK;
-    ObjectTypeInitializer.GenericMapping = Mapping;
-    ObjectTypeInitializer.PoolType = NonPagedPool;
-    ObjectTypeInitializer.DefaultNonPagedPoolCharge = sizeof(FLT_SERVER_PORT_OBJECT);
-    ObjectTypeInitializer.ValidAccessMask = GENERIC_ALL;
-    ObjectTypeInitializer.CloseProcedure = FltpServerPortClose;
-    ObjectTypeInitializer.DeleteProcedure = FltpServerPortDelete;
-    Status = ObCreateObjectType(&Name, &ObjectTypeInitializer, NULL, &ServerPortObjectType);
-    if (!NT_SUCCESS(Status)) return Status;
-
-    /* Create the client comms object type */
-    RtlZeroMemory(&ObjectTypeInitializer, sizeof(OBJECT_TYPE_INITIALIZER));
-    RtlInitUnicodeString(&Name, L"FilterCommunicationPort");
-    ObjectTypeInitializer.Length = sizeof(OBJECT_TYPE_INITIALIZER);
-    ObjectTypeInitializer.InvalidAttributes = OBJ_OPENLINK;
-    ObjectTypeInitializer.GenericMapping = Mapping;
-    ObjectTypeInitializer.PoolType = NonPagedPool;
-    ObjectTypeInitializer.DefaultNonPagedPoolCharge = sizeof(FLT_PORT_OBJECT);
-    ObjectTypeInitializer.ValidAccessMask = GENERIC_ALL;
-    ObjectTypeInitializer.CloseProcedure = FltpClientPortClose;
-    ObjectTypeInitializer.DeleteProcedure = FltpClientPortDelete;
-    Status = ObCreateObjectType(&Name, &ObjectTypeInitializer, NULL, &ClientPortObjectType);
-    if (!NT_SUCCESS(Status))
-    {
-        goto Quit;
-    }
+    ExInitializeFastMutex(&FltpPortsLock);
 
     /* Create the device object */
     Status = IoCreateDevice(DriverObject,
@@ -433,401 +959,16 @@ FltpSetupCommunicationObjects(_In_ PDRIVER_OBJECT DriverObject)
         /* Setup a symbolic link for the device */
         RtlInitUnicodeString(&SymLinkName, L"\\DosDevices\\FltMgrMsg");
         Status = IoCreateSymbolicLink(&SymLinkName, &CommsDeviceName);
-    }
-
-Quit:
-    if (!NT_SUCCESS(Status))
-    {
-        /* Something went wrong, undo */
-        if (CommsDeviceObject)
+        if (NT_SUCCESS(Status))
+        {
+            ClearFlag(CommsDeviceObject->Flags, DO_DEVICE_INITIALIZING);
+        }
+        else
         {
             IoDeleteDevice(CommsDeviceObject);
             CommsDeviceObject = NULL;
         }
-        if (ClientPortObjectType)
-        {
-            ObMakeTemporaryObject(ClientPortObjectType);
-            ObDereferenceObject(ClientPortObjectType);
-            ClientPortObjectType = NULL;
-        }
-
-        if (ServerPortObjectType)
-        {
-            ObMakeTemporaryObject(ServerPortObjectType);
-            ObDereferenceObject(ServerPortObjectType);
-            ServerPortObjectType = NULL;
-        }
     }
 
     return Status;
-}
-
-/* CSQ IRP CALLBACKS *******************************************************/
-
-
-NTSTATUS
-NTAPI
-FltpAddMessageWaiter(_In_ PIO_CSQ Csq,
-                     _In_ PIRP Irp,
-                     _In_ PVOID InsertContext)
-{
-    PFLT_MESSAGE_WAITER_QUEUE MessageWaiterQueue;
-
-    /* Get the start of the waiter queue struct */
-    MessageWaiterQueue = CONTAINING_RECORD(Csq,
-                                           FLT_MESSAGE_WAITER_QUEUE,
-                                           Csq);
-
-    /* Insert the IRP at the end of the queue */
-    InsertTailList(&MessageWaiterQueue->WaiterQ.mList,
-                   &Irp->Tail.Overlay.ListEntry);
-
-    /* return success */
-    return STATUS_SUCCESS;
-}
-
-VOID
-NTAPI
-FltpRemoveMessageWaiter(_In_ PIO_CSQ Csq,
-                        _In_ PIRP Irp)
-{
-    /* Remove the IRP from the queue */
-    RemoveEntryList(&Irp->Tail.Overlay.ListEntry);
-}
-
-PIRP
-NTAPI
-FltpGetNextMessageWaiter(_In_ PIO_CSQ Csq,
-                         _In_ PIRP Irp,
-                         _In_ PVOID PeekContext)
-{
-    PFLT_MESSAGE_WAITER_QUEUE MessageWaiterQueue;
-    PIRP NextIrp = NULL;
-    PLIST_ENTRY NextEntry;
-    PIO_STACK_LOCATION IrpStack;
-
-    /* Get the start of the waiter queue struct */
-    MessageWaiterQueue = CONTAINING_RECORD(Csq,
-                                           FLT_MESSAGE_WAITER_QUEUE,
-                                           Csq);
-
-    /* Is the IRP valid? */
-    if (Irp == NULL)
-    {
-        /* Start peeking from the listhead */
-        NextEntry = MessageWaiterQueue->WaiterQ.mList.Flink;
-    }
-    else
-    {
-        /* Start peeking from that IRP onwards */
-        NextEntry = Irp->Tail.Overlay.ListEntry.Flink;
-    }
-
-    /* Loop through the queue */
-    while (NextEntry != &MessageWaiterQueue->WaiterQ.mList)
-    {
-        /* Store the next IRP in the list */
-        NextIrp = CONTAINING_RECORD(NextEntry, IRP, Tail.Overlay.ListEntry);
-
-        /* Did we supply a PeekContext on insert? */
-        if (!PeekContext)
-        {
-            /* We already have the next IRP */
-            break;
-        }
-        else
-        {
-            /* Get the stack of the next IRP */
-            IrpStack = IoGetCurrentIrpStackLocation(NextIrp);
-
-            /* Does the PeekContext match the object? */
-            if (IrpStack->FileObject == (PFILE_OBJECT)PeekContext)
-            {
-                /* We have a match */
-                break;
-            }
-
-            /* Move to the next IRP */
-            NextIrp = NULL;
-            NextEntry = NextEntry->Flink;
-        }
-    }
-
-    return NextIrp;
-}
-
-_Acquires_lock_(((PFLT_MESSAGE_WAITER_QUEUE)CONTAINING_RECORD(Csq, FLT_MESSAGE_WAITER_QUEUE, Csq))->WaiterQ.mLock)
-_IRQL_saves_global_(Irql, ((PFLT_MESSAGE_WAITER_QUEUE)CONTAINING_RECORD(Csq, DEVICE_EXTENSION, IrpQueue))->WaiterQ.mLock)
-_IRQL_raises_(DISPATCH_LEVEL)
-VOID
-NTAPI
-FltpAcquireMessageWaiterLock(_In_ PIO_CSQ Csq,
-                             _Out_ PKIRQL Irql)
-{
-    PFLT_MESSAGE_WAITER_QUEUE MessageWaiterQueue;
-
-    UNREFERENCED_PARAMETER(Irql);
-
-    /* Get the start of the waiter queue struct */
-    MessageWaiterQueue = CONTAINING_RECORD(Csq,
-                                           FLT_MESSAGE_WAITER_QUEUE,
-                                           Csq);
-
-    /* Acquire the IRP queue lock */
-    ExAcquireFastMutex(&MessageWaiterQueue->WaiterQ.mLock);
-}
-
-_Releases_lock_(((PFLT_MESSAGE_WAITER_QUEUE)CONTAINING_RECORD(Csq, DEVICE_EXTENSION, IrpQueue))->WaiterQ.mLock)
-_IRQL_restores_global_(Irql, ((PFLT_MESSAGE_WAITER_QUEUE)CONTAINING_RECORD(Csq, DEVICE_EXTENSION, IrpQueue))->WaiterQ.mLock)
-_IRQL_requires_(DISPATCH_LEVEL)
-VOID
-NTAPI
-FltpReleaseMessageWaiterLock(_In_ PIO_CSQ Csq,
-                             _In_ KIRQL Irql)
-{
-    PFLT_MESSAGE_WAITER_QUEUE MessageWaiterQueue;
-
-    UNREFERENCED_PARAMETER(Irql);
-
-    /* Get the start of the waiter queue struct */
-    MessageWaiterQueue = CONTAINING_RECORD(Csq,
-                                           FLT_MESSAGE_WAITER_QUEUE,
-                                           Csq);
-
-    /* Release the IRP queue lock */
-    ExReleaseFastMutex(&MessageWaiterQueue->WaiterQ.mLock);
-}
-
-VOID
-NTAPI
-FltpCancelMessageWaiter(_In_ PIO_CSQ Csq,
-                        _In_ PIRP Irp)
-{
-    /* Cancel the IRP */
-    Irp->IoStatus.Status = STATUS_CANCELLED;
-    Irp->IoStatus.Information = 0;
-    IoCompleteRequest(Irp, IO_NO_INCREMENT);
-}
-
-
-/* PRIVATE FUNCTIONS ******************************************************/
-
-static
-NTSTATUS
-CreateClientPort(_In_ PFILE_OBJECT FileObject,
-                   _Inout_ PIRP Irp)
-{
-    PFLT_SERVER_PORT_OBJECT ServerPortObject = NULL;
-    OBJECT_ATTRIBUTES ObjectAttributes;
-    PFILTER_PORT_DATA FilterPortData;
-    PFLT_PORT_OBJECT ClientPortObject = NULL;
-    PFLT_PORT PortHandle = NULL;
-    PPORT_CCB PortCCB = NULL;
-    //ULONG BufferLength;
-    LONG NumConns;
-    NTSTATUS Status;
-
-    /* We received the buffer via FilterConnectCommunicationPort, cast it back to its original form */
-    FilterPortData = Irp->AssociatedIrp.SystemBuffer;
-
-    /* Get a reference to the server port the filter created */
-    Status = ObReferenceObjectByName(&FilterPortData->PortName,
-                                     0,
-                                     0,
-                                     FLT_PORT_ALL_ACCESS,
-                                     ServerPortObjectType,
-                                     ExGetPreviousMode(),
-                                     0,
-                                     (PVOID *)&ServerPortObject);
-    if (!NT_SUCCESS(Status))
-    {
-        return Status;
-    }
-
-    /* Increment the number of connections on the server port */
-    NumConns = InterlockedIncrement(&ServerPortObject->NumberOfConnections);
-    if (NumConns > ServerPortObject->MaxConnections)
-    {
-        Status = STATUS_CONNECTION_COUNT_LIMIT;
-        goto Quit;
-    }
-
-    /* Initialize a basic kernel handle request */
-    InitializeObjectAttributes(&ObjectAttributes,
-                               NULL,
-                               OBJ_KERNEL_HANDLE,
-                               NULL,
-                               NULL);
-
-    /* Now create the new client port object */
-    Status = ObCreateObject(KernelMode,
-                            ClientPortObjectType,
-                            &ObjectAttributes,
-                            KernelMode,
-                            NULL,
-                            sizeof(FLT_PORT_OBJECT),
-                            0,
-                            0,
-                            (PVOID *)&ClientPortObject);
-    if (!NT_SUCCESS(Status))
-    {
-        goto Quit;
-    }
-
-    /* Clear out the buffer */
-    RtlZeroMemory(ClientPortObject, sizeof(FLT_PORT_OBJECT));
-
-    /* Initialize the locks */
-    ExInitializeRundownProtection(&ClientPortObject->MsgNotifRundownRef);
-    ExInitializeFastMutex(&ClientPortObject->Lock);
-
-    /* Set the server port object this belongs to */
-    ClientPortObject->ServerPort = ServerPortObject;
-
-    /* Setup the message queue */
-    Status = InitializeMessageWaiterQueue(&ClientPortObject->MsgQ);
-    if (!NT_SUCCESS(Status))
-    {
-        goto Quit;
-    }
-
-    /* Create the CCB which we'll attach to the file object */
-    PortCCB = CreatePortCCB(ClientPortObject);
-    if (PortCCB == NULL)
-    {
-        Status = STATUS_INSUFFICIENT_RESOURCES;
-        goto Quit;
-    }
-
-    /* Now insert the new client port into the object manager */
-    Status = ObInsertObject(ClientPortObject, NULL, FLT_PORT_ALL_ACCESS, 1, NULL, (PHANDLE)&PortHandle);
-    if (!NT_SUCCESS(Status))
-    {
-        /* ObInsertObject() failed and already dereferenced ClientPortObject */
-        ClientPortObject = NULL;
-        goto Quit;
-    }
-
-    /* Add a reference to the filter to keep it alive while we do some work with it */
-    Status = FltObjectReference(ServerPortObject->Filter);
-    if (NT_SUCCESS(Status))
-    {
-        /* Invoke the callback to let the filter know we have a connection */
-        Status = ServerPortObject->ConnectNotify(PortHandle,
-                                                 ServerPortObject->Cookie,
-                                                 NULL, //ConnectionContext
-                                                 0, //SizeOfContext
-                                                 &ClientPortObject->Cookie);
-        if (NT_SUCCESS(Status))
-        {
-            /* Add the client port CCB to the file object */
-            FileObject->FsContext2 = PortCCB;
-
-            /* Lock the port list on the filter and add this new port object to the list */
-            ExAcquireFastMutex(&ServerPortObject->Filter->PortList.mLock);
-            InsertTailList(&ServerPortObject->Filter->PortList.mList, &ClientPortObject->FilterLink);
-            ExReleaseFastMutex(&ServerPortObject->Filter->PortList.mLock);
-        }
-
-        /* We're done with the filter object, decremement the count */
-        FltObjectDereference(ServerPortObject->Filter);
-    }
-
-
-Quit:
-    if (!NT_SUCCESS(Status))
-    {
-        if (ClientPortObject)
-        {
-            ObDereferenceObject(ClientPortObject);
-        }
-
-        if (PortHandle)
-        {
-            ZwClose(PortHandle);
-        }
-        else if (ServerPortObject)
-        {
-            InterlockedDecrement(&ServerPortObject->NumberOfConnections);
-            ObDereferenceObject(ServerPortObject);
-        }
-
-        if (PortCCB)
-        {
-            ExFreePoolWithTag(PortCCB, FM_TAG_CCB);
-        }
-    }
-
-    return Status;
-}
-
-static
-NTSTATUS
-CloseClientPort(_In_ PFILE_OBJECT FileObject,
-                _Inout_ PIRP Irp)
-{
-    PFLT_CCB Ccb;
-
-    Ccb = (PFLT_CCB)FileObject->FsContext2;
-
-    /* Remove the reference on the filter we added when we opened the port */
-    ObDereferenceObject(Ccb->Data.Port.Port);
-
-    // FIXME: Free the CCB
-
-    return STATUS_SUCCESS;
-}
-
-static
-NTSTATUS
-InitializeMessageWaiterQueue(_Inout_ PFLT_MESSAGE_WAITER_QUEUE MsgWaiterQueue)
-{
-    NTSTATUS Status;
-
-    /* Setup the IRP queue */
-    Status = IoCsqInitializeEx(&MsgWaiterQueue->Csq,
-                               FltpAddMessageWaiter,
-                               FltpRemoveMessageWaiter,
-                               FltpGetNextMessageWaiter,
-                               FltpAcquireMessageWaiterLock,
-                               FltpReleaseMessageWaiterLock,
-                               FltpCancelMessageWaiter);
-    if (!NT_SUCCESS(Status))
-    {
-        return Status;
-    }
-
-    /* Initialize the waiter queue */
-    ExInitializeFastMutex(&MsgWaiterQueue->WaiterQ.mLock);
-    InitializeListHead(&MsgWaiterQueue->WaiterQ.mList);
-    MsgWaiterQueue->WaiterQ.mCount = 0;
-
-    /* We don't have a minimum waiter length */
-    MsgWaiterQueue->MinimumWaiterLength = (ULONG)-1;
-
-    /* Init the semaphore and event used for counting and signaling available IRPs */
-    KeInitializeSemaphore(&MsgWaiterQueue->Semaphore, 0, MAXLONG);
-    KeInitializeEvent(&MsgWaiterQueue->Event, NotificationEvent, FALSE);
-
-    return STATUS_SUCCESS;
-}
-
-static
-PPORT_CCB
-CreatePortCCB(_In_ PFLT_PORT_OBJECT PortObject)
-{
-    PPORT_CCB PortCCB;
-
-    /* Allocate a CCB struct to hold the client port object info */
-    PortCCB = ExAllocatePoolWithTag(NonPagedPool, sizeof(PORT_CCB), FM_TAG_CCB);
-    if (PortCCB)
-    {
-        /* Initialize the structure */
-        PortCCB->Port = PortObject;
-        PortCCB->ReplyWaiterList.mCount = 0;
-        ExInitializeFastMutex(&PortCCB->ReplyWaiterList.mLock);
-        KeInitializeEvent(&PortCCB->ReplyWaiterList.mLock.Event, SynchronizationEvent, 0);
-    }
-
-    return PortCCB;
 }
