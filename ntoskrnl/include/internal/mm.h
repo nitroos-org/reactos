@@ -2059,6 +2059,12 @@ MmGetProcessImageInformation(
     OUT PSECTION_IMAGE_INFORMATION ImageInformation
 );
 
+ULONG_PTR
+NTAPI
+MmGetProcessAutoPlacementLimit(
+    IN PEPROCESS Process
+);
+
 PFILE_OBJECT
 NTAPI
 MmGetFileObjectForSection(

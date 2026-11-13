@@ -6490,6 +6490,9 @@ MiAllocateVirtualMemory(IN HANDLE ProcessHandle,
             if (HighestRequired && (HighestRequired < HighestAddress))
                 HighestAddress = HighestRequired;
 
+            /* A 64-bit process without LARGEADDRESSAWARE gets automatic placement below 2 GB */
+            HighestAddress = min(HighestAddress, MmGetProcessAutoPlacementLimit(Process));
+
         }
         else
         {

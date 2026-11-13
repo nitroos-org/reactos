@@ -11,6 +11,7 @@
 #include <winuser.h>
 
 #define EMPTY_DLL_ID        102
+#define NONLAA_EXE_ID       108
 #define FOUR_GB             0x100000000ULL
 
 static BOOL
@@ -154,6 +155,106 @@ Done:
     DeleteFileW(Path);
 }
 
+static BOOL
+ExtractResource(PCWSTR Path, UINT Id)
+{
+    HRSRC hRsrc = FindResourceW(NULL, MAKEINTRESOURCEW(Id), (PCWSTR)RT_RCDATA);
+    HGLOBAL hGlobal = hRsrc ? LoadResource(NULL, hRsrc) : NULL;
+    PVOID Data = hGlobal ? LockResource(hGlobal) : NULL;
+    DWORD Size = hRsrc ? SizeofResource(NULL, hRsrc) : 0, Written = 0;
+    HANDLE hFile;
+    BOOL Ret;
+
+    if (!Data)
+        return FALSE;
+    hFile = CreateFileW(Path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE)
+        return FALSE;
+    Ret = WriteFile(hFile, Data, Size, &Written, NULL) && Written == Size;
+    CloseHandle(hFile);
+    return Ret;
+}
+
+/* Rewrites the file characteristics of an executable: without IMAGE_FILE_LARGE_ADDRESS_AWARE */
+static BOOL
+ClearLargeAddressAware(PCWSTR Path)
+{
+    HANDLE hFile = CreateFileW(Path, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    IMAGE_DOS_HEADER Dos;
+    DWORD Done, Offset;
+    WORD Characteristics;
+    BOOL Ret = FALSE;
+
+    if (hFile == INVALID_HANDLE_VALUE)
+        return FALSE;
+    if (ReadFile(hFile, &Dos, sizeof(Dos), &Done, NULL) && Done == sizeof(Dos) && Dos.e_magic == IMAGE_DOS_SIGNATURE)
+    {
+        Offset = Dos.e_lfanew + FIELD_OFFSET(IMAGE_NT_HEADERS, FileHeader.Characteristics);
+        if (SetFilePointer(hFile, Offset, NULL, FILE_BEGIN) == Offset &&
+            ReadFile(hFile, &Characteristics, sizeof(Characteristics), &Done, NULL) && Done == sizeof(Characteristics))
+        {
+            Characteristics &= ~IMAGE_FILE_LARGE_ADDRESS_AWARE;
+            Ret = SetFilePointer(hFile, Offset, NULL, FILE_BEGIN) == Offset &&
+                  WriteFile(hFile, &Characteristics, sizeof(Characteristics), &Done, NULL) &&
+                  Done == sizeof(Characteristics);
+        }
+    }
+    CloseHandle(hFile);
+    return Ret;
+}
+
+/* A 64-bit process without LARGEADDRESSAWARE: its relocated images and its allocations stay below 2 GB */
+static void
+TestNonLargeAddressAware(void)
+{
+    WCHAR Dir[MAX_PATH], ExePath[MAX_PATH], DllPath[MAX_PATH], Cmd[3 * MAX_PATH];
+    STARTUPINFOW Si = { sizeof(Si) };
+    PROCESS_INFORMATION Pi;
+    DWORD Code = 0xdeadbeef;
+
+    GetTempPathW(_countof(Dir), Dir);
+    wcscat(Dir, L"imgplace_nonlaa_dir");
+    if (!CreateDirectoryW(Dir, NULL) && GetLastError() != ERROR_ALREADY_EXISTS)
+    {
+        skip("Cannot create %ls\n", Dir);
+        return;
+    }
+    StringCchPrintfW(ExePath, _countof(ExePath), L"%ls\\imgplace_nonlaa.exe", Dir);
+    StringCchPrintfW(DllPath, _countof(DllPath), L"%ls\\imgplace_nonlaa_dyn.dll", Dir);
+    if (!ExtractResource(ExePath, NONLAA_EXE_ID))
+    {
+        skip("Cannot extract the helper to %ls: %lu\n", ExePath, GetLastError());
+        goto Cleanup;
+    }
+    if (!ClearLargeAddressAware(ExePath))
+    {
+        skip("Cannot patch the helper: %lu\n", GetLastError());
+        goto Cleanup;
+    }
+    if (!WriteVariant(DllPath, IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE))
+    {
+        skip("Cannot create %ls: %lu\n", DllPath, GetLastError());
+        goto Cleanup;
+    }
+
+    StringCchPrintfW(Cmd, _countof(Cmd), L"\"%ls\" \"%ls\"", ExePath, DllPath);
+    if (!CreateProcessW(ExePath, Cmd, NULL, NULL, TRUE, 0, NULL, NULL, &Si, &Pi))
+    {
+        skip("Cannot start the helper: %lu\n", GetLastError());
+        goto Cleanup;
+    }
+    WaitForSingleObject(Pi.hProcess, 60000);
+    GetExitCodeProcess(Pi.hProcess, &Code);
+    CloseHandle(Pi.hThread);
+    CloseHandle(Pi.hProcess);
+    ok(Code == 0, "non-LAA helper: failed checks %lx\n", Code);
+
+Cleanup:
+    DeleteFileW(ExePath);
+    DeleteFileW(DllPath);
+    RemoveDirectoryW(Dir);
+}
+
 START_TEST(ImagePlacement)
 {
     if (!FindResourceW(NULL, MAKEINTRESOURCEW(EMPTY_DLL_ID), (PCWSTR)RT_RCDATA))
@@ -167,4 +268,6 @@ START_TEST(ImagePlacement)
     TestVariant(L"imgplace_heva.dll", IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE | 0x0020, ExpectHigh);
     /* No ASLR: the lowest free gap, as before */
     TestVariant(L"imgplace_fixed.dll", 0, ExpectLow);
+
+    TestNonLargeAddressAware();
 }
