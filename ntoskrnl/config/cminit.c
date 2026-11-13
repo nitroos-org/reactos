@@ -211,7 +211,9 @@ CmpInitializeHive(
     {
         /* Verify integrity */
         /* Nothing else can change this hive yet: have the 'sk' counts recounted */
-        CM_CHECK_REGISTRY_STATUS CheckStatus = CmCheckRegistry(Hive, CheckFlags | CM_CHECK_REGISTRY_RECOUNT_SECURITY);
+        CM_CHECK_REGISTRY_STATUS CheckStatus = CmCheckRegistry(Hive, CheckFlags |
+                                                               CM_CHECK_REGISTRY_RECOUNT_SECURITY |
+                                                               CM_CHECK_REGISTRY_CACHE_SECURITY);
         if (!CM_CHECK_REGISTRY_SUCCESS(CheckStatus))
         {
             /* Cleanup allocations and fail */
@@ -226,9 +228,17 @@ CmpInitializeHive(
     /*
      * Fill the security cache from the ring of 'sk' cells. This is after the
      * check, which has reset any bad Security. It never fails the load: a
-     * cache that is short only means less sharing of descriptors.
+     * cache that is short only means less sharing of descriptors. A checked
+     * hive got its cache from the check (CM_CHECK_REGISTRY_CACHE_SECURITY),
+     * with the rings that the root is not in.
      */
-    CmpBuildSecurityCache(Hive);
+    if ((OperationType != HINIT_FILE) &&
+        (OperationType != HINIT_MEMORY) &&
+        (OperationType != HINIT_MEMORY_INPLACE) &&
+        (OperationType != HINIT_MAPFILE))
+    {
+        CmpBuildSecurityCache(Hive);
+    }
 
     /* Reset the loading flag */
     Hive->HiveIsLoading = FALSE;
