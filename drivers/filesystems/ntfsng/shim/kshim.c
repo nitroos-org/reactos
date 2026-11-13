@@ -922,9 +922,24 @@ int submit_bio_wait(struct bio *b) { return kshim_bio_do(b); }
  * Private metadata/data page cache: a per-mapping hash of 4 KiB folios in
  * nonpaged pool.  One shim-wide spin lock guards the hash chains; folio
  * contents are guarded by PG_locked as in Linux.  A mapping keeps at most
- * KSHIM_PC_MAX pages: beyond that, unreferenced clean folios are dropped.
+ * KSHIM_PC_MAX pages: beyond that, unreferenced clean folios are dropped (all of them, so a
+ * working set above the limit is read again from the device by every pass over it).
+ * The limit is half the volume-wide soft limit of folio pages (1024 at least, 8192 at most:
+ * 32 MB): a directory of 10,000 files with long names has an index of about 1,400 pages,
+ * which a flat 1024 made every listing read from the device.  The unused inodes are
+ * evicted by the soft limit itself, so this does not raise the memory a volume may use.
  */
-#define KSHIM_PC_MAX 1024
+unsigned long kshim_pc_soft_limit(void);
+static unsigned long kshim_pc_default_max(void)
+{
+	static unsigned long lim;
+	if (!lim) {
+		unsigned long l = kshim_pc_soft_limit() / 2;
+		lim = l > 8192 ? 8192 : l < 1024 ? 1024 : l;
+	}
+	return lim;
+}
+#define KSHIM_PC_MAX kshim_pc_default_max()
 unsigned long kshim_pc_pages;
 static struct folio *pc_find_locked(struct address_space *m, pgoff_t idx)
 {
