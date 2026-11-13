@@ -258,6 +258,14 @@ HRESULT WINAPI DwmSetWindowAttribute(HWND hwnd, DWORD attributenum, LPCVOID attr
             return E_INVALIDARG;
         return set_ncrendering_policy(hwnd, *(const DWORD *)attribute);
     }
+    /*
+     * DWMWA_BORDER_COLOR (34) and DWMWA_CAPTION_COLOR (35), measured on Windows 10 22H2 build 19045: E_INVALIDARG.
+     * DWMWA_TEXT_COLOR (36) belongs to the same Windows 11 family and is treated alike, it was not measured.
+     * DWMWA_USE_IMMERSIVE_DARK_MODE (20) returns S_OK there and below. Applications fall back to their own
+     * caption painting on the failure.
+     */
+    if (attributenum >= 34 && attributenum <= 36)
+        return E_INVALIDARG;
 #endif
     {
         static BOOL once;
