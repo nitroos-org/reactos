@@ -5,9 +5,10 @@
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  *
  * INitroDrawingSurfaceInterop has the six methods of the documented ICompositionDrawingSurfaceInterop with the
- * documented signatures (learn.microsoft.com), but its IID and vtable order are OURS: no clean public source
- * (learn, Wine IDLs, mingw-w64) gives the real IID or vtable order, so the real interface stays unimplemented
- * until one does. Nothing running on Windows asks for this IID.
+ * documented signatures (learn.microsoft.com). Its own IID is OURS and nothing running on Windows asks for it; the
+ * vtable is the one of the real interface, which is answered for the real IID too (IID_ICompositionDrawingSurfaceInterop):
+ * IID and member order (BeginDraw, EndDraw, Resize, Scroll, ResumeDraw, SuspendDraw) from microsoft/windows-rs commit
+ * cd03f9369a896b62151242c1c3321e695df63cfc, file metadata/win32/windowsuicompositioninterop.rdl.
  * INitroCompositionTest is a test hook: render the visual tree below a visual into a bitmap on the CPU and dump
  * the tree as text. The real presentation path (stage 4) does not use it.
  */
@@ -50,4 +51,5 @@ typedef struct INitroCompositionTestVtbl
 struct INitroCompositionTest { const INitroCompositionTestVtbl *lpVtbl; };
 
 DEFINE_GUID(IID_INitroDrawingSurfaceInterop, 0xc8b9638c, 0x5641, 0x4d99, 0xac, 0xac, 0x26, 0xbe, 0xa9, 0x29, 0x6a, 0xb5);
+DEFINE_GUID(IID_ICompositionDrawingSurfaceInterop, 0xfd04e6e3, 0xfe0c, 0x4c3c, 0xab, 0x19, 0xa0, 0x76, 0x01, 0xa5, 0x76, 0xee);
 DEFINE_GUID(IID_INitroCompositionTest, 0x37168b4f, 0xcb77, 0x4388, 0xa4, 0xf1, 0xa4, 0x71, 0x38, 0xfb, 0xcd, 0x25);
