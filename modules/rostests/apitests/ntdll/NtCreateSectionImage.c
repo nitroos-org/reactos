@@ -808,6 +808,81 @@ static void Test_SizeUnaligned(void)
     DeleteFileW(Path);
 }
 
+/*
+ * A section whose raw data ends beyond the end of the file, while the last
+ * section header is complete (Windows only checks that one against the file
+ * size). .text has 0x300 raw bytes at 0x1e00 and the file ends inside them.
+ * The page-in reads up to the valid data length of the file and must leave
+ * the rest of the page zero. The raw size ends inside a page, and the read
+ * used to describe a whole page more than it asked for (a Debug kernel
+ * stopped at an assertion, a Release one went on with the larger MDL).
+ * VERIFY ON ORACLE: the status Windows gives for each of these file sizes.
+ */
+static void Test_TruncatedRaw(void)
+{
+    static const ULONG FileSizes[] = { 0x1e01, 0x1f00, 0x1fff, 0x2000 };
+    ULONG i, j;
+
+    for (i = 0; i < ARRAYSIZE(FileSizes); i++)
+    {
+        WCHAR Path[MAX_PATH];
+        HANDLE hFile, hSection = NULL;
+        PVOID Base = NULL;
+        SIZE_T ViewSize = 0;
+        NTSTATUS Status;
+        ULONG Wrong = 0, Valid = FileSizes[i] - 0x1e00;
+
+        NtOffset = IMG_NT_OFFSET;
+        ImageFileSize = FileSizes[i];
+        BuildImage(NATIVE_PE64, NATIVE_PE64 ? IMAGE_FILE_MACHINE_AMD64 : IMAGE_FILE_MACHINE_I386, TRUE, TRUE);
+        SetSection(0, ".text", 0x1000, 0x100, 0x1e00, 0x300, SCN_TEXT);
+        memset(Image + 0x1e00, 0xAA, Valid);
+        Image[0x1e00] = 0xC3;
+        if (!GetTempFileNameW(TempDir, L"nct", 0, Path) || !WriteImage(Path))
+        {
+            skip("TruncatedRaw: cannot write the image, error %lu\n", GetLastError());
+            ImageFileSize = IMG_FILE_SIZE;
+            return;
+        }
+        hFile = CreateFileW(Path, GENERIC_READ | GENERIC_EXECUTE, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+        if (hFile == INVALID_HANDLE_VALUE)
+        {
+            skip("TruncatedRaw: cannot open %ls, error %lu\n", Path, GetLastError());
+            DeleteFileW(Path);
+            ImageFileSize = IMG_FILE_SIZE;
+            return;
+        }
+
+        Status = NtCreateSection(&hSection, SECTION_MAP_READ | SECTION_QUERY, NULL, NULL,
+                                 PAGE_READONLY, SEC_IMAGE, hFile);
+        trace("CASE TruncatedRaw size 0x%lx: %08lx\n", FileSizes[i], Status);
+        ok(Status == STATUS_SUCCESS || Status == STATUS_INVALID_IMAGE_FORMAT,
+           "TruncatedRaw 0x%lx: NtCreateSection: 0x%08lx\n", FileSizes[i], Status);
+        if (NT_SUCCESS(Status))
+        {
+            Status = NtMapViewOfSection(hSection, NtCurrentProcess(), &Base, 0, 0, NULL, &ViewSize,
+                                        ViewShare, 0, PAGE_READONLY);
+            ok(NT_SUCCESS(Status), "TruncatedRaw 0x%lx: NtMapViewOfSection: 0x%08lx\n", FileSizes[i], Status);
+            if (NT_SUCCESS(Status))
+            {
+                /* the .text page: the file bytes, then zero to the end of the page */
+                for (j = 0; j < 0x1000; j++)
+                {
+                    BYTE Expected = (j >= Valid || j >= 0x300) ? 0 : (j == 0 ? 0xC3 : 0xAA);
+                    if (((PBYTE)Base)[0x1000 + j] != Expected)
+                        Wrong++;
+                }
+                ok(Wrong == 0, "TruncatedRaw 0x%lx: %lu wrong bytes in .text\n", FileSizes[i], Wrong);
+                NtUnmapViewOfSection(NtCurrentProcess(), Base);
+            }
+            NtClose(hSection);
+        }
+        CloseHandle(hFile);
+        DeleteFileW(Path);
+    }
+    ImageFileSize = IMG_FILE_SIZE;
+}
+
 START_TEST(NtCreateSectionImage)
 {
     SYSTEM_INFO SystemInfo;
@@ -840,4 +915,5 @@ START_TEST(NtCreateSectionImage)
         Test_Layout(FALSE, IMAGE_FILE_MACHINE_I386);
     Test_SizeLimit();
     Test_SizeUnaligned();
+    Test_TruncatedRaw();
 }
