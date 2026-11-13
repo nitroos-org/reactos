@@ -10,8 +10,6 @@ list(APPEND SOURCE
     stubs.c
     thunks.c
     wrapper.c
-    wine/base64_codec.c
-    wine/dispatcher.c
     wine/hmac_md5.c
     wine/kerberos.c
     wine/negotiate.c

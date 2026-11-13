@@ -2,8 +2,6 @@
 #ifndef __WINE_NTLM_H__
 #define __WINE_NTLM_H__
 
-#include <sys/types.h>
-#define CP_UNIXCP CP_ACP
 
 void SECUR32_initNTLMSP(void) DECLSPEC_HIDDEN;
 
@@ -18,23 +16,33 @@ typedef struct tag_arc4_info {
     unsigned char state[256];
 } arc4_info;
 
+/* the identity of the credentials of an outbound use */
+typedef struct _NtlmCredentials
+{
+    ULONG use;              /* SECPKG_CRED_INBOUND, _OUTBOUND or _BOTH */
+    BOOL has_identity;      /* explicit user, domain and password; otherwise the caller's own */
+    WCHAR *username;
+    WCHAR *domain;
+    BYTE nt_hash[16];       /* NT hash of the password */
+} NtlmCredentials, *PNtlmCredentials;
+
+/* a security context of one side of an exchange (the name is from the helper process based version) */
 typedef struct _NegoHelper {
-#ifndef __REACTOS__
-    pid_t helper_pid;
-#else
-    HANDLE helper_pid;
-#endif
     HelperMode mode;
-    int pipe_in;
-    int pipe_out;
-    int major;
-    int minor;
-    int micro;
-    char *com_buf;
-    int com_buf_size;
-    int com_buf_offset;
-    BYTE *session_key;
-    ULONG neg_flags;
+    int state;                  /* 0: the exchange is not complete, 1: complete */
+    ULONG req_flags;            /* the request flags of the context */
+    ULONG offered_flags;        /* the NTLMSSP flags this side put in its message */
+    ULONG neg_flags;            /* the negotiated NTLMSSP flags */
+    BYTE *session_key;          /* the (exported) session key, 16 bytes */
+    BYTE *negotiate_msg;        /* the messages that the MIC covers */
+    ULONG negotiate_len;
+    BYTE *challenge_msg;
+    ULONG challenge_len;
+    BYTE server_challenge[8];
+    PNtlmCredentials cred;      /* client: copy of the credentials */
+    WCHAR *user_name;           /* server: the client as it authenticated */
+    WCHAR *domain_name;
+    HANDLE token;               /* server: the impersonation token of the client */
     struct {
         struct {
             ULONG seq_num;
@@ -52,18 +60,6 @@ typedef struct _NegoHelper {
         } ntlm2;
     } crypt;
 } NegoHelper, *PNegoHelper;
-
-typedef struct _NtlmCredentials
-{
-    HelperMode mode;
-
-    /* these are all in the Unix codepage */
-    char *username_arg;
-    char *domain_arg;
-    char *password; /* not nul-terminated */
-    int pwlen;
-    int no_cached_credentials; /* don't try to use cached Samba credentials */
-} NtlmCredentials, *PNtlmCredentials;
 
 typedef enum _sign_direction {
     NTLM_SEND,
@@ -110,6 +106,8 @@ SECURITY_STATUS SEC_ENTRY ntlm_DeleteSecurityContext(PCtxtHandle) DECLSPEC_HIDDE
 SECURITY_STATUS SEC_ENTRY ntlm_MakeSignature(PCtxtHandle, ULONG, PSecBufferDesc, ULONG) DECLSPEC_HIDDEN;
 SECURITY_STATUS SEC_ENTRY ntlm_VerifySignature(PCtxtHandle, PSecBufferDesc, ULONG, PULONG) DECLSPEC_HIDDEN;
 
+SecPkgInfoW *ntlm_copy_package_infoW(void) DECLSPEC_HIDDEN;
+SecPkgInfoA *ntlm_copy_package_infoA(void) DECLSPEC_HIDDEN;
 extern SecPkgInfoW *ntlm_package_infoW DECLSPEC_HIDDEN;
 extern SecPkgInfoA *ntlm_package_infoA DECLSPEC_HIDDEN;
 
