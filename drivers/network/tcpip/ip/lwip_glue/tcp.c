@@ -466,6 +466,35 @@ WaitForEventSafely(PRKEVENT Event)
     }
 }
 
+/* Stack a request must have left to run lwIP on the caller's own thread */
+#define LIBTCP_INLINE_STACK (KERNEL_STACK_SIZE / 2)
+
+/* Runs a request callback under the core lock on the calling thread, as a send does, rather than
+ * queueing it for the tcpip thread and waiting for the answer: that costs two thread switches per
+ * request, and a connect, accept and close is eight of them. The tcpip thread runs the same callbacks
+ * under the same lock, so they see the same state. With the lock held already (a request made from
+ * an event handler) the callback just runs; with too little stack left it goes to the tcpip thread */
+static
+err_t
+LibTCPDispatch(tcpip_callback_fn Function, void *Msg)
+{
+    if (sys_tcpip_core_locked())
+    {
+        Function(Msg);
+        return ERR_OK;
+    }
+
+    if (IoGetRemainingStackSize() >= LIBTCP_INLINE_STACK)
+    {
+        LOCK_TCPIP_CORE();
+        Function(Msg);
+        UNLOCK_TCPIP_CORE();
+        return ERR_OK;
+    }
+
+    return tcpip_callback_with_block(Function, Msg, 1);
+}
+
 static
 err_t
 InternalSendEventHandler(void *arg, PTCP_PCB pcb, const u16_t space)
@@ -1342,7 +1371,7 @@ LibTCPSocket(void *arg)
         KeInitializeEvent(&msg->Event, NotificationEvent, FALSE);
         msg->Input.Socket.Arg = arg;
 
-        tcpip_callback_with_block(LibTCPSocketCallback, msg, 1);
+        LibTCPDispatch(LibTCPSocketCallback, msg);
 
         if (WaitForEventSafely(&msg->Event))
             ret = msg->Output.Socket.NewPcb;
@@ -1378,7 +1407,7 @@ void LibTCPFreeSocket(PTCP_PCB pcb)
     KeInitializeEvent(&msg.Event, NotificationEvent, FALSE);
     msg.Input.FreeSocket.pcb = pcb;
 
-    tcpip_callback_with_block(LibTCPFreeSocketCallback, &msg, 1);
+    LibTCPDispatch(LibTCPFreeSocketCallback, &msg);
 
     WaitForEventSafely(&msg.Event);
 }
@@ -1540,7 +1569,7 @@ LibTCPBind(PCONNECTION_ENDPOINT Connection, ip4_addr_t *const ipaddr, const u16_
         msg->Input.Bind.Port = port;
         msg->Output.Bind.Port = port;
 
-        tcpip_callback_with_block(LibTCPBindCallback, msg, 1);
+        LibTCPDispatch(LibTCPBindCallback, msg);
 
         if (WaitForEventSafely(&msg->Event))
             ret = msg->Output.Bind.Error;
@@ -1597,7 +1626,7 @@ LibTCPListen(PCONNECTION_ENDPOINT Connection, UINT Backlog)
         /* lwIP keeps the backlog in a u8_t, a plain cast turned 1024 into 0 */
         msg->Input.Listen.Backlog = (u8_t)min(Backlog, 0xFF);
 
-        tcpip_callback_with_block(LibTCPListenCallback, msg, 1);
+        LibTCPDispatch(LibTCPListenCallback, msg);
 
         if (WaitForEventSafely(&msg->Event))
             ret = msg->Output.Listen.NewPcb;
@@ -1810,7 +1839,7 @@ LibTCPConnect(PCONNECTION_ENDPOINT Connection, ip_addr_t *const ipaddr, const u1
         msg->Input.Connect.IpAddress = ipaddr;
         msg->Input.Connect.Port = port;
 
-        tcpip_callback_with_block(LibTCPConnectCallback, msg, 1);
+        LibTCPDispatch(LibTCPConnectCallback, msg);
 
         if (WaitForEventSafely(&msg->Event))
         {
@@ -1927,7 +1956,7 @@ LibTCPShutdown(PCONNECTION_ENDPOINT Connection, const int shut_rx, const int shu
         msg->Input.Shutdown.shut_rx = shut_rx;
         msg->Input.Shutdown.shut_tx = shut_tx;
 
-        tcpip_callback_with_block(LibTCPShutdownCallback, msg, 1);
+        LibTCPDispatch(LibTCPShutdownCallback, msg);
 
         if (WaitForEventSafely(&msg->Event))
             ret = msg->Output.Shutdown.Error;
@@ -1997,7 +2026,7 @@ LibTCPAbort(PCONNECTION_ENDPOINT Connection)
     KeInitializeEvent(&msg->Event, NotificationEvent, FALSE);
     msg->Input.Shutdown.Connection = Connection;
 
-    if (tcpip_callback_with_block(LibTCPAbortCallback, msg, 1) != ERR_OK)
+    if (LibTCPDispatch(LibTCPAbortCallback, msg) != ERR_OK)
         ret = ERR_MEM;
     else if (WaitForEventSafely(&msg->Event))
         ret = msg->Output.Shutdown.Error;
@@ -2081,7 +2110,7 @@ LibTCPClose(PCONNECTION_ENDPOINT Connection, const int safe, const int callback)
         if (safe)
             LibTCPCloseCallback(msg);
         else
-            tcpip_callback_with_block(LibTCPCloseCallback, msg, 1);
+            LibTCPDispatch(LibTCPCloseCallback, msg);
 
         if (WaitForEventSafely(&msg->Event))
             ret = msg->Output.Close.Error;

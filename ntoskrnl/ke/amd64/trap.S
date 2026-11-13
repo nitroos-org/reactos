@@ -18,6 +18,7 @@ EXTERN KiSystemServiceIrqlFault:PROC
 EXTERN KiSystemFatalException:PROC
 EXTERN KiNpxNotAvailableFaultHandler:PROC
 EXTERN KiGeneralProtectionFaultHandler:PROC
+EXTERN KiCheckSListFault:PROC
 EXTERN KiXmmExceptionHandler:PROC
 EXTERN KiFloatingErrorHandler:PROC
 EXTERN KiRaiseSecurityCheckFailureKernel:PROC
@@ -507,6 +508,14 @@ FUNC KiPageFault
     /* Save page fault address */
     mov rdx, cr2
     mov [rbp  + KTRAP_FRAME_FaultAddress], rdx
+
+    /* A fault inside the interlocked S-list pop is a lost race with a concurrent pop that freed the entry,
+       not an error: restart the pop without invoking the memory manager */
+    mov rcx, rbp
+    call KiCheckSListFault
+    test al, al
+    jnz PageFaultReturn
+    mov rdx, [rbp + KTRAP_FRAME_FaultAddress]
 
     /* If interrupts are off, do not enable them */
     test dword ptr [rbp + KTRAP_FRAME_EFlags], EFLAGS_IF_MASK
