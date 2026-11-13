@@ -69,6 +69,11 @@
 #if 0 // See sdk/lib/cmlib/cmlib.h
 #define CMP_SECURITY_HASH_LISTS                         64
 #endif
+
+//
+// Longest descriptor read back from an 'sk' cell: two ACLs of 64 KB and the SIDs
+//
+#define CMP_MAX_STORED_SD_LENGTH                        (2 * 0x10000 + 0x400)
 #define CMP_MAX_CALLBACKS                               100
 
 //
@@ -807,6 +812,32 @@ CmpShadowAccessCheck(
     _In_ ACCESS_MASK LegacyGranted,
     _In_ KPROCESSOR_MODE AccessMode,
     _In_ ULONG Options
+);
+
+BOOLEAN
+NTAPI
+CmpStoreKeySecurity(VOID);
+
+PSECURITY_DESCRIPTOR
+NTAPI
+CmpCaptureParentSecurity(
+    _In_ PCM_KEY_CONTROL_BLOCK ParentKcb
+);
+
+VOID
+NTAPI
+CmpFreeParentSecurity(
+    _In_ PSECURITY_DESCRIPTOR ParentSd
+);
+
+NTSTATUS
+NTAPI
+CmpCopyKeySecurityCell(
+    _In_ PHHIVE SourceHive,
+    _In_ HCELL_INDEX SourceCell,
+    _In_ PHHIVE DestinationHive,
+    _In_ HSTORAGE_TYPE StorageType,
+    _Out_ PHCELL_INDEX DestinationCell
 );
 
 NTSTATUS

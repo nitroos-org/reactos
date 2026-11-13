@@ -14,6 +14,7 @@ KMT_TESTFUNC Test_MmMapViewAligned;
 KMT_TESTFUNC Test_CcPurgeCacheSection;
 KMT_TESTFUNC Test_CmAclAudit;
 KMT_TESTFUNC Test_CmRename;
+KMT_TESTFUNC Test_CmSkStore;
 KMT_TESTFUNC Test_CmSecurity;
 KMT_TESTFUNC Test_Example;
 KMT_TESTFUNC Test_KsCapture;
@@ -176,6 +177,7 @@ const KMT_TEST TestList[] =
     { "CcPurgeCacheSection",                Test_CcPurgeCacheSection },
     { "CmAclAudit",                         Test_CmAclAudit },
     { "CmRename",                           Test_CmRename },
+    { "CmSkStore",                          Test_CmSkStore },
     { "CmSecurity",                         Test_CmSecurity },
     { "ExCallback",                         Test_ExCallback },
     { "ExDoubleList",                       Test_ExDoubleList },
