@@ -215,6 +215,7 @@ list(APPEND SOURCE
     RtlGetUnloadEventTrace.c
     RtlPlaceholderCompatibilityMode.c
     RtlHandle.c
+    RtlHeapChurn.c
     RtlHeapFrontEnd.c
     RtlHeapValidate.c
     RtlHeapTailCheck.c
