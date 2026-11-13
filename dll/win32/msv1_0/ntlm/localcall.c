@@ -1,0 +1,513 @@
+/*
+ * PROJECT:     Authentication Package DLL
+ * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
+ * PURPOSE:     The local call of a same-machine NTLM exchange (ReactOS private messages, see ntlmros.h)
+ * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
+ */
+
+/*
+ * When client and server of an NTLM exchange are on this machine, no password-derived response is computed or
+ * checked: the server gets a copy of the client's own token. The table of contexts lives here, in the LSA:
+ *
+ *  - Issue (server, after the NEGOTIATE): a new context with a random id and session key, owned by the calling
+ *    process (process id and creation time). The id goes into the CHALLENGE.
+ *  - Bind (client, after the CHALLENGE): the context named by the CHALLENGE gets a copy of the caller's token
+ *    (the token its thread impersonates, else that of its process), at most at the impersonation level the client
+ *    allows. The caller is judged by its token, never by the content of a message. A context binds once.
+ *  - Accept (server, after the empty AUTHENTICATE): only the process that issued the context, and only once a client
+ *    bound it, gets the token (a handle in its process) and the session key. The context is gone afterwards.
+ *
+ * A remote peer can send the messages but cannot call this package, so it cannot bind a context: the empty
+ * AUTHENTICATE of a context nobody bound is refused, and a context of another process cannot be accepted.
+ */
+
+#include "../precomp.h"
+
+WINE_DEFAULT_DEBUG_CHANNEL(ntlm);
+
+#define LOCAL_CALL_LIFETIME     (300LL * 10000000LL)   /* 5 minutes, in 100 ns */
+#define LOCAL_CALL_MAX          4096
+#define LOCAL_CALL_MAX_PROCESS  1024
+
+typedef struct _LOCAL_CALL_CONTEXT
+{
+    LIST_ENTRY ListEntry;
+    ULONG64 ContextId;
+    ULONG_PTR ServerProcessId;
+    LARGE_INTEGER ServerCreateTime;
+    LARGE_INTEGER Expires;
+    UCHAR ServerChallenge[8];
+    UCHAR SessionKey[16];
+    HANDLE ClientToken;         /* the copy of the client's token, once a client bound the context */
+} LOCAL_CALL_CONTEXT, *PLOCAL_CALL_CONTEXT;
+
+static LIST_ENTRY LocalCallList;
+static RTL_CRITICAL_SECTION LocalCallLock;
+static ULONG LocalCallCount;
+static BOOLEAN LocalCallInitialized = FALSE;
+
+VOID
+MsvpInitLocalCall(VOID)
+{
+    if (LocalCallInitialized)
+        return;
+    InitializeListHead(&LocalCallList);
+    RtlInitializeCriticalSection(&LocalCallLock);
+    LocalCallCount = 0;
+    LocalCallInitialized = TRUE;
+}
+
+static
+VOID
+FreeLocalCall(
+    _In_ PLOCAL_CALL_CONTEXT Context)
+{
+    RemoveEntryList(&Context->ListEntry);
+    LocalCallCount--;
+    if (Context->ClientToken != NULL)
+        NtClose(Context->ClientToken);
+    RtlSecureZeroMemory(Context, sizeof(*Context));
+    RtlFreeHeap(RtlGetProcessHeap(), 0, Context);
+}
+
+/* the contexts nobody completed in time */
+static
+VOID
+SweepLocalCalls(
+    _In_ PLARGE_INTEGER Now)
+{
+    PLIST_ENTRY Entry = LocalCallList.Flink;
+
+    while (Entry != &LocalCallList)
+    {
+        PLOCAL_CALL_CONTEXT Context = CONTAINING_RECORD(Entry, LOCAL_CALL_CONTEXT, ListEntry);
+
+        Entry = Entry->Flink;
+        if (Context->Expires.QuadPart <= Now->QuadPart)
+            FreeLocalCall(Context);
+    }
+}
+
+static
+PLOCAL_CALL_CONTEXT
+FindLocalCall(
+    _In_ ULONG64 ContextId,
+    _In_ PLARGE_INTEGER Now)
+{
+    PLIST_ENTRY Entry;
+
+    for (Entry = LocalCallList.Flink; Entry != &LocalCallList; Entry = Entry->Flink)
+    {
+        PLOCAL_CALL_CONTEXT Context = CONTAINING_RECORD(Entry, LOCAL_CALL_CONTEXT, ListEntry);
+
+        if (Context->ContextId == ContextId)
+            return Context->Expires.QuadPart > Now->QuadPart ? Context : NULL;
+    }
+    return NULL;
+}
+
+/* The process of the caller: its id and its creation time (a process id alone may be reused) */
+static
+NTSTATUS
+GetCallerProcess(
+    _In_ PLSA_CLIENT_REQUEST ClientRequest,
+    _Out_opt_ PHANDLE ProcessHandle,
+    _Out_ PULONG_PTR ProcessId,
+    _Out_ PLARGE_INTEGER CreateTime)
+{
+    PROCESS_BASIC_INFORMATION Basic;
+    KERNEL_USER_TIMES Times;
+    HANDLE Process = NULL;
+    NTSTATUS Status;
+
+    if (DispatchTable.GetClientProcess == NULL)
+        return STATUS_NOT_SUPPORTED;
+    Status = DispatchTable.GetClientProcess(ClientRequest, &Process);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    if (Process == NULL)
+        return STATUS_INVALID_HANDLE;
+
+    Status = NtQueryInformationProcess(Process, ProcessBasicInformation, &Basic, sizeof(Basic), NULL);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    Status = NtQueryInformationProcess(Process, ProcessTimes, &Times, sizeof(Times), NULL);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    if (ProcessHandle != NULL)
+        *ProcessHandle = Process;
+    *ProcessId = Basic.UniqueProcessId;
+    *CreateTime = Times.CreateTime;
+    return STATUS_SUCCESS;
+}
+
+/* The answer in the caller's memory */
+static
+NTSTATUS
+ReturnToClient(
+    _In_ PLSA_CLIENT_REQUEST ClientRequest,
+    _In_ PVOID Data,
+    _In_ ULONG Size,
+    _Out_ PVOID *ProtocolReturnBuffer,
+    _Out_ PULONG ReturnBufferLength)
+{
+    NTLM_CLIENT_BUFFER Buffer;
+    NTSTATUS Status;
+
+    Status = NtlmAllocateClientBuffer(ClientRequest, Size, &Buffer);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    RtlCopyMemory(Buffer.LocalBuffer, Data, Size);
+    Status = NtlmCopyToClientBuffer(ClientRequest, Size, &Buffer);
+    RtlSecureZeroMemory(Buffer.LocalBuffer, Size);
+    if (NT_SUCCESS(Status))
+    {
+        *ProtocolReturnBuffer = Buffer.ClientBaseAddress;
+        *ReturnBufferLength = Size;
+    }
+    /* The client's copy stays when all went well */
+    NtlmFreeClientBuffer(ClientRequest, !NT_SUCCESS(Status), &Buffer);
+    return Status;
+}
+
+static
+NTSTATUS
+MsvpLocalCallIssue(
+    _In_ PLSA_CLIENT_REQUEST ClientRequest,
+    _In_ PVOID ProtocolSubmitBuffer,
+    _In_ ULONG SubmitBufferLength,
+    _Out_ PVOID *ProtocolReturnBuffer,
+    _Out_ PULONG ReturnBufferLength)
+{
+    PMSV1_0_ROS_NTLM_LOCAL_ISSUE Request = ProtocolSubmitBuffer;
+    MSV1_0_ROS_NTLM_LOCAL_CONTEXT Reply;
+    PLOCAL_CALL_CONTEXT Context, Other;
+    LARGE_INTEGER Now, CreateTime;
+    ULONG_PTR ProcessId;
+    PLIST_ENTRY Entry;
+    ULONG Mine = 0;
+    NTSTATUS Status;
+
+    if (SubmitBufferLength < sizeof(*Request))
+        return STATUS_INVALID_PARAMETER;
+
+    Status = GetCallerProcess(ClientRequest, NULL, &ProcessId, &CreateTime);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Context = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*Context));
+    if (Context == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    Context->ServerProcessId = ProcessId;
+    Context->ServerCreateTime = CreateTime;
+    RtlCopyMemory(Context->ServerChallenge, Request->ServerChallenge, sizeof(Context->ServerChallenge));
+    if (!RtlGenRandom(Context->SessionKey, sizeof(Context->SessionKey)))
+    {
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Context);
+        return STATUS_INTERNAL_ERROR;
+    }
+
+    NtQuerySystemTime(&Now);
+    Context->Expires.QuadPart = Now.QuadPart + LOCAL_CALL_LIFETIME;
+
+    RtlEnterCriticalSection(&LocalCallLock);
+    SweepLocalCalls(&Now);
+    for (Entry = LocalCallList.Flink; Entry != &LocalCallList; Entry = Entry->Flink)
+    {
+        Other = CONTAINING_RECORD(Entry, LOCAL_CALL_CONTEXT, ListEntry);
+        if (Other->ServerProcessId == ProcessId)
+            Mine++;
+    }
+    if (LocalCallCount >= LOCAL_CALL_MAX || Mine >= LOCAL_CALL_MAX_PROCESS)
+    {
+        RtlLeaveCriticalSection(&LocalCallLock);
+        RtlSecureZeroMemory(Context, sizeof(*Context));
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Context);
+        WARN("too many local call contexts (%lu, %lu of the caller)\n", LocalCallCount, Mine);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    /* a random id that no context has (and never 0: 0 is "no local call") */
+    do
+    {
+        if (!RtlGenRandom(&Context->ContextId, sizeof(Context->ContextId)))
+        {
+            RtlLeaveCriticalSection(&LocalCallLock);
+            RtlSecureZeroMemory(Context, sizeof(*Context));
+            RtlFreeHeap(RtlGetProcessHeap(), 0, Context);
+            return STATUS_INTERNAL_ERROR;
+        }
+    } while (Context->ContextId == 0 || FindLocalCall(Context->ContextId, &Now) != NULL);
+    InsertTailList(&LocalCallList, &Context->ListEntry);
+    LocalCallCount++;
+    Reply.ContextId = Context->ContextId;
+    RtlLeaveCriticalSection(&LocalCallLock);
+
+    Reply.MessageType = MsV1_0RosNtlmLocalIssue;
+    Reply.Reserved = 0;
+    Status = ReturnToClient(ClientRequest, &Reply, sizeof(Reply), ProtocolReturnBuffer, ReturnBufferLength);
+    if (!NT_SUCCESS(Status))
+    {
+        RtlEnterCriticalSection(&LocalCallLock);
+        Context = FindLocalCall(Reply.ContextId, &Now);
+        if (Context != NULL)
+            FreeLocalCall(Context);
+        RtlLeaveCriticalSection(&LocalCallLock);
+    }
+    return Status;
+}
+
+/* A copy of the caller's token for the server, at most at the level the client allows */
+static
+NTSTATUS
+CopyCallerToken(
+    _In_ PLSA_CLIENT_REQUEST ClientRequest,
+    _In_ SECURITY_IMPERSONATION_LEVEL Level,
+    _Out_ PHANDLE Copy)
+{
+    SECURITY_QUALITY_OF_SERVICE Qos;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    SECURITY_IMPERSONATION_LEVEL TokenLevel;
+    TOKEN_TYPE Type;
+    HANDLE Token = NULL;
+    ULONG Size;
+    NTSTATUS Status;
+
+    *Copy = NULL;
+    if (DispatchTable.OpenClientToken == NULL)
+        return STATUS_NOT_SUPPORTED;
+    Status = DispatchTable.OpenClientToken(ClientRequest, &Token);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = NtQueryInformationToken(Token, TokenType, &Type, sizeof(Type), &Size);
+    if (NT_SUCCESS(Status) && Type == TokenImpersonation)
+    {
+        /* a thread that only identifies the user (or is anonymous) cannot act as the user towards a server */
+        Status = NtQueryInformationToken(Token, TokenImpersonationLevel, &TokenLevel, sizeof(TokenLevel), &Size);
+        if (NT_SUCCESS(Status) && TokenLevel < SecurityImpersonation)
+            Status = STATUS_BAD_IMPERSONATION_LEVEL;
+    }
+    if (!NT_SUCCESS(Status))
+    {
+        NtClose(Token);
+        return Status;
+    }
+
+    Qos.Length = sizeof(Qos);
+    Qos.ImpersonationLevel = Level;
+    Qos.ContextTrackingMode = SECURITY_STATIC_TRACKING;
+    Qos.EffectiveOnly = FALSE;
+    InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, NULL);
+    ObjectAttributes.SecurityQualityOfService = &Qos;
+    Status = NtDuplicateToken(Token, TOKEN_ALL_ACCESS, &ObjectAttributes, FALSE, TokenImpersonation, Copy);
+    NtClose(Token);
+    return Status;
+}
+
+static
+NTSTATUS
+MsvpLocalCallBind(
+    _In_ PLSA_CLIENT_REQUEST ClientRequest,
+    _In_ PVOID ProtocolSubmitBuffer,
+    _In_ ULONG SubmitBufferLength,
+    _Out_ PVOID *ProtocolReturnBuffer,
+    _Out_ PULONG ReturnBufferLength)
+{
+    PMSV1_0_ROS_NTLM_LOCAL_BIND Request = ProtocolSubmitBuffer;
+    MSV1_0_ROS_NTLM_LOCAL_RESPONSE Reply;
+    SECURITY_IMPERSONATION_LEVEL Level;
+    PLOCAL_CALL_CONTEXT Context;
+    LARGE_INTEGER Now;
+    HANDLE Copy = NULL;
+    NTSTATUS Status;
+
+    if (SubmitBufferLength < sizeof(*Request) || Request->ContextId == 0)
+        return STATUS_INVALID_PARAMETER;
+
+    /* NTLM does not delegate: identification when the client asks for it, impersonation otherwise */
+    Level = (Request->ImpersonationLevel <= SecurityIdentification) ? SecurityIdentification : SecurityImpersonation;
+    Status = CopyCallerToken(ClientRequest, Level, &Copy);
+    if (!NT_SUCCESS(Status))
+    {
+        WARN("no token of the client for the local call (0x%08lx)\n", Status);
+        return Status;
+    }
+
+    RtlZeroMemory(&Reply, sizeof(Reply));
+    NtQuerySystemTime(&Now);
+    RtlEnterCriticalSection(&LocalCallLock);
+    Context = FindLocalCall(Request->ContextId, &Now);
+    if (Context == NULL || Context->ClientToken != NULL ||
+        RtlCompareMemory(Context->ServerChallenge, Request->ServerChallenge, sizeof(Context->ServerChallenge)) !=
+            sizeof(Context->ServerChallenge))
+    {
+        RtlLeaveCriticalSection(&LocalCallLock);
+        NtClose(Copy);
+        return STATUS_NOT_FOUND;
+    }
+    Context->ClientToken = Copy;
+    RtlCopyMemory(Reply.SessionKey, Context->SessionKey, sizeof(Reply.SessionKey));
+    RtlLeaveCriticalSection(&LocalCallLock);
+
+    Reply.MessageType = MsV1_0RosNtlmLocalBind;
+    Status = ReturnToClient(ClientRequest, &Reply, sizeof(Reply), ProtocolReturnBuffer, ReturnBufferLength);
+    RtlSecureZeroMemory(&Reply, sizeof(Reply));
+    if (!NT_SUCCESS(Status))
+    {
+        /* the client does not know the key: the context cannot complete */
+        RtlEnterCriticalSection(&LocalCallLock);
+        Context = FindLocalCall(Request->ContextId, &Now);
+        if (Context != NULL)
+            FreeLocalCall(Context);
+        RtlLeaveCriticalSection(&LocalCallLock);
+    }
+    return Status;
+}
+
+/* The context the caller issued: NULL for any other (a context of another process looks like none at all) */
+static
+PLOCAL_CALL_CONTEXT
+FindOwnLocalCall(
+    _In_ ULONG64 ContextId,
+    _In_ ULONG_PTR ProcessId,
+    _In_ PLARGE_INTEGER CreateTime,
+    _In_ PLARGE_INTEGER Now)
+{
+    PLOCAL_CALL_CONTEXT Context = FindLocalCall(ContextId, Now);
+
+    if (Context == NULL || Context->ServerProcessId != ProcessId ||
+        Context->ServerCreateTime.QuadPart != CreateTime->QuadPart)
+        return NULL;
+    return Context;
+}
+
+static
+NTSTATUS
+MsvpLocalCallAccept(
+    _In_ PLSA_CLIENT_REQUEST ClientRequest,
+    _In_ PVOID ProtocolSubmitBuffer,
+    _In_ ULONG SubmitBufferLength,
+    _Out_ PVOID *ProtocolReturnBuffer,
+    _Out_ PULONG ReturnBufferLength)
+{
+    PMSV1_0_ROS_NTLM_LOCAL_ACCEPT Request = ProtocolSubmitBuffer;
+    MSV1_0_ROS_NTLM_LOCAL_RESPONSE Reply;
+    PLOCAL_CALL_CONTEXT Context;
+    LARGE_INTEGER Now, CreateTime;
+    ULONG_PTR ProcessId;
+    HANDLE Process = NULL, Token, Remote = NULL;
+    NTSTATUS Status;
+
+    if (SubmitBufferLength < sizeof(*Request) || Request->ContextId == 0)
+        return STATUS_INVALID_PARAMETER;
+
+    Status = GetCallerProcess(ClientRequest, &Process, &ProcessId, &CreateTime);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    RtlZeroMemory(&Reply, sizeof(Reply));
+    NtQuerySystemTime(&Now);
+    RtlEnterCriticalSection(&LocalCallLock);
+    Context = FindOwnLocalCall(Request->ContextId, ProcessId, &CreateTime, &Now);
+    if (Context == NULL)
+    {
+        RtlLeaveCriticalSection(&LocalCallLock);
+        return STATUS_NOT_FOUND;
+    }
+    if (Context->ClientToken == NULL)
+    {
+        /* no client on this machine answered this CHALLENGE: the AUTHENTICATE came from elsewhere */
+        FreeLocalCall(Context);
+        RtlLeaveCriticalSection(&LocalCallLock);
+        WARN("local call context of no client\n");
+        return STATUS_LOGON_FAILURE;
+    }
+    /* the context completes once: it leaves the table with its token */
+    Token = Context->ClientToken;
+    Context->ClientToken = NULL;
+    RtlCopyMemory(Reply.SessionKey, Context->SessionKey, sizeof(Reply.SessionKey));
+    FreeLocalCall(Context);
+    RtlLeaveCriticalSection(&LocalCallLock);
+
+    Status = NtDuplicateObject(NtCurrentProcess(), Token, Process, &Remote, 0, 0,
+                               DUPLICATE_SAME_ACCESS | DUPLICATE_CLOSE_SOURCE);
+    if (!NT_SUCCESS(Status))
+    {
+        RtlSecureZeroMemory(&Reply, sizeof(Reply));
+        return Status;
+    }
+
+    Reply.MessageType = MsV1_0RosNtlmLocalAccept;
+    Reply.TokenHandle = (ULONG64)(ULONG_PTR)Remote;
+    Status = ReturnToClient(ClientRequest, &Reply, sizeof(Reply), ProtocolReturnBuffer, ReturnBufferLength);
+    RtlSecureZeroMemory(&Reply, sizeof(Reply));
+    if (!NT_SUCCESS(Status))
+        NtDuplicateObject(Process, Remote, NULL, NULL, 0, 0, DUPLICATE_CLOSE_SOURCE);
+    return Status;
+}
+
+static
+NTSTATUS
+MsvpLocalCallDelete(
+    _In_ PLSA_CLIENT_REQUEST ClientRequest,
+    _In_ PVOID ProtocolSubmitBuffer,
+    _In_ ULONG SubmitBufferLength)
+{
+    PMSV1_0_ROS_NTLM_LOCAL_CONTEXT Request = ProtocolSubmitBuffer;
+    PLOCAL_CALL_CONTEXT Context;
+    LARGE_INTEGER Now, CreateTime;
+    ULONG_PTR ProcessId;
+    NTSTATUS Status;
+
+    if (SubmitBufferLength < sizeof(*Request) || Request->ContextId == 0)
+        return STATUS_INVALID_PARAMETER;
+
+    Status = GetCallerProcess(ClientRequest, NULL, &ProcessId, &CreateTime);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    NtQuerySystemTime(&Now);
+    RtlEnterCriticalSection(&LocalCallLock);
+    Context = FindOwnLocalCall(Request->ContextId, ProcessId, &CreateTime, &Now);
+    if (Context != NULL)
+        FreeLocalCall(Context);
+    RtlLeaveCriticalSection(&LocalCallLock);
+    return Context != NULL ? STATUS_SUCCESS : STATUS_NOT_FOUND;
+}
+
+/* The messages of the local call, for any caller (secur32 connects untrusted) */
+NTSTATUS
+MsvpRosNtlmLocalCall(
+    _In_ PLSA_CLIENT_REQUEST ClientRequest,
+    _In_ ULONG MessageType,
+    _In_ PVOID ProtocolSubmitBuffer,
+    _In_ ULONG SubmitBufferLength,
+    _Out_ PVOID *ProtocolReturnBuffer,
+    _Out_ PULONG ReturnBufferLength,
+    _Out_ PNTSTATUS ProtocolStatus)
+{
+    *ProtocolStatus = STATUS_SUCCESS;
+    *ProtocolReturnBuffer = NULL;
+    *ReturnBufferLength = 0;
+
+    if (!LocalCallInitialized)
+        return STATUS_NOT_SUPPORTED;
+
+    switch (MessageType)
+    {
+        case MsV1_0RosNtlmLocalIssue:
+            return MsvpLocalCallIssue(ClientRequest, ProtocolSubmitBuffer, SubmitBufferLength,
+                                      ProtocolReturnBuffer, ReturnBufferLength);
+        case MsV1_0RosNtlmLocalBind:
+            return MsvpLocalCallBind(ClientRequest, ProtocolSubmitBuffer, SubmitBufferLength,
+                                     ProtocolReturnBuffer, ReturnBufferLength);
+        case MsV1_0RosNtlmLocalAccept:
+            return MsvpLocalCallAccept(ClientRequest, ProtocolSubmitBuffer, SubmitBufferLength,
+                                       ProtocolReturnBuffer, ReturnBufferLength);
+        case MsV1_0RosNtlmLocalDelete:
+            return MsvpLocalCallDelete(ClientRequest, ProtocolSubmitBuffer, SubmitBufferLength);
+        default:
+            return STATUS_INVALID_PARAMETER;
+    }
+}

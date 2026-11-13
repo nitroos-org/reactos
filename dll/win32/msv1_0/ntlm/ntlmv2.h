@@ -32,3 +32,17 @@ MsvpComputeNtlmv2Response(
     _Out_writes_bytes_(16) UCHAR *NtProof,
     _Out_writes_bytes_(16) UCHAR *LmProof,
     _Out_writes_bytes_(16) UCHAR *SessionBaseKey);
+
+/* The local call of a same-machine exchange (localcall.c) */
+VOID
+MsvpInitLocalCall(VOID);
+
+NTSTATUS
+MsvpRosNtlmLocalCall(
+    _In_ PLSA_CLIENT_REQUEST ClientRequest,
+    _In_ ULONG MessageType,
+    _In_ PVOID ProtocolSubmitBuffer,
+    _In_ ULONG SubmitBufferLength,
+    _Out_ PVOID *ProtocolReturnBuffer,
+    _Out_ PULONG ReturnBufferLength,
+    _Out_ PNTSTATUS ProtocolStatus);
