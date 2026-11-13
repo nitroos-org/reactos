@@ -96,6 +96,7 @@ list(APPEND SOURCE
     EnumSystemCodePages.c
     EnumUILanguages.c
     ExitThread.c
+    ThreadReturnClobber.c
     FindActCtxSectionStringW.c
     FindFiles.c
     FindFirstFileEx.c
