@@ -1367,7 +1367,7 @@ MiDecrementShareCount(IN PMMPFN Pfn1,
         {
             /* Grab the PTE address and make sure it's in prototype pool */
             PointerPte = Pfn1->PteAddress;
-            ASSERT(MI_IS_PROTOTYPE_PTE_ADDRESS(PointerPte));
+            ASSERT((PointerPte >= (PMMPTE)MmPagedPoolStart) && (PointerPte <= (PMMPTE)MmPagedPoolEnd));
 
             /* The PTE that backs it should also be valdi */
             PointerPte = MiAddressToPte(PointerPte);

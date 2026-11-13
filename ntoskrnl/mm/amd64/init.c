@@ -256,17 +256,6 @@ MiInitializePageTable(VOID)
             RtlZeroMemory(MiPteToAddress(PointerPxe), PAGE_SIZE);
         }
     }
-    /* And the PDPTs of the sparse Prototype PTE range, which lies below hyper space (protopte.c) */
-    for (PointerPxe = MiAddressToPxe((PVOID)MI_SPARSE_PROTO_START);
-         PointerPxe <= MiAddressToPxe((PVOID)MI_SPARSE_PROTO_END);
-         PointerPxe++)
-    {
-        ASSERT(!PointerPxe->u.Hard.Valid);
-        TmplPte.u.Flush.PageFrameNumber = MxGetNextPage(1);
-        *PointerPxe = TmplPte;
-        RtlZeroMemory(MiPteToAddress(PointerPxe), PAGE_SIZE);
-    }
-
     PxePfn = PFN_FROM_PXE(MiAddressToPxe((PVOID)HYPER_SPACE));
     PsGetCurrentProcess()->Pcb.DirectoryTableBase[1] = PxePfn << PAGE_SHIFT;
 
@@ -740,7 +729,6 @@ MiInitMachineDependent(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
     PrototypePte.u.Soft.PageFileHigh = MI_PTE_LOOKUP_NEEDED;
 
     MiInitializePageTable();
-    MiInitializeSparsePrototypePtes();
 
     MiBuildNonPagedPool();
 
