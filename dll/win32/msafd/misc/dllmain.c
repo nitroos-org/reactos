@@ -399,18 +399,22 @@ WSPSocket(int AddressFamily,
                           NULL,
                           NULL);
 
-    GetSocketInformation (Socket,
-                          AFD_INFO_RECEIVE_WINDOW_SIZE,
-                          NULL,
-                          &Socket->SharedData->SizeOfRecvBuffer,
-                          NULL,
-                          NULL,
-                          NULL);
-
     /* SO_RCVBUF of a stream socket reads as 64K until it is set, as on Windows; the size AFD reports is
-     * that of its own, smaller staging buffer */
+     * that of its own, smaller staging buffer, so it is not asked for (a request per socket) */
     if (Socket->SharedData->SocketType == SOCK_STREAM)
+    {
         Socket->SharedData->SizeOfRecvBuffer = 0x10000;
+    }
+    else
+    {
+        GetSocketInformation (Socket,
+                              AFD_INFO_RECEIVE_WINDOW_SIZE,
+                              NULL,
+                              &Socket->SharedData->SizeOfRecvBuffer,
+                              NULL,
+                              NULL,
+                              NULL);
+    }
 ok:
 
     /* Save in Process Sockets List */
