@@ -1043,6 +1043,82 @@ test_open(VOID)
 
 static
 VOID
+test_other_apis(VOID)
+{
+    static const HKEY Keys[] = { HKEY_PERFORMANCE_DATA, HKEY_PERFORMANCE_TEXT, HKEY_PERFORMANCE_NLSTEXT };
+    CHAR Name[64];
+    WCHAR NameW[64];
+    DWORD Size, SubKeys, Values, i;
+    LONG Len;
+    HKEY Key;
+    LONG ret;
+    LONG (WINAPI *pRegSetKeyValueW)(HKEY, LPCWSTR, LPCWSTR, DWORD, LPCVOID, DWORD);
+
+    pRegSetKeyValueW = (PVOID)GetProcAddress(GetModuleHandleW(L"advapi32.dll"), "RegSetKeyValueW");
+
+    for (i = 0; i < PERF_ARRAY_SIZE(Keys); i++)
+    {
+        HKEY Perf = Keys[i];
+
+        Key = (HKEY)0x1234;
+        ret = RegOpenKeyA(Perf, NULL, &Key);
+        ok(ret == ERROR_INVALID_HANDLE, "%p: RegOpenKeyA without a subkey returned %ld\n", Perf, ret);
+        ret = RegOpenKeyExW(Perf, L"Global", 0, KEY_READ, &Key);
+        ok(ret == ERROR_INVALID_HANDLE, "%p: RegOpenKeyExW returned %ld\n", Perf, ret);
+
+        Len = 0;
+        ret = RegQueryValueA(Perf, "Global", NULL, &Len);
+        ok(ret == ERROR_INVALID_HANDLE, "%p: RegQueryValueA returned %ld\n", Perf, ret);
+        ret = RegSetValueA(Perf, "Global", REG_SZ, "dummy", 5);
+        ok(ret == ERROR_INVALID_HANDLE, "%p: RegSetValueA returned %ld\n", Perf, ret);
+
+        /* writing: the data key is no valid handle, the text keys are no valid key */
+        ret = RegSetValueExA(Perf, "Global", 0, REG_SZ, (const BYTE *)"dummy", 5);
+        ok(ret == (Perf == HKEY_PERFORMANCE_DATA ? ERROR_INVALID_HANDLE : ERROR_BADKEY),
+           "%p: RegSetValueExA returned %ld\n", Perf, ret);
+        ret = RegSetValueExW(Perf, L"Global", 0, REG_SZ, (const BYTE *)L"dummy", 12);
+        ok(ret == (Perf == HKEY_PERFORMANCE_DATA ? ERROR_INVALID_HANDLE : ERROR_BADKEY),
+           "%p: RegSetValueExW returned %ld\n", Perf, ret);
+        if (pRegSetKeyValueW)
+        {
+            ret = pRegSetKeyValueW(Perf, NULL, L"Global", REG_SZ, L"dummy", 12);
+            ok(ret == (Perf == HKEY_PERFORMANCE_DATA ? ERROR_INVALID_HANDLE : ERROR_BADKEY),
+               "%p: RegSetKeyValueW returned %ld\n", Perf, ret);
+        }
+
+        /* two values, no subkeys */
+        SubKeys = 0x900ddeed;
+        Values = 0x900ddeed;
+        ret = RegQueryInfoKeyA(Perf, NULL, NULL, NULL, &SubKeys, NULL, NULL, &Values, NULL, NULL, NULL, NULL);
+        ok(ret == ERROR_SUCCESS, "%p: RegQueryInfoKeyA returned %ld\n", Perf, ret);
+        ok(SubKeys == 0, "%p: %lu subkeys\n", Perf, SubKeys);
+        ok(Values == 2, "%p: %lu values\n", Perf, Values);
+
+        /* the values are asked for without a data buffer: more data, and the size stays */
+        Size = 64;
+        ret = RegEnumValueA(Perf, 0, Name, &Size, NULL, NULL, NULL, NULL);
+        ok(ret == ERROR_MORE_DATA, "%p: RegEnumValueA returned %ld\n", Perf, ret);
+        ok(Size == 64, "%p: size %lu\n", Perf, Size);
+        Size = 64;
+        ret = RegEnumValueW(Perf, 0, NameW, &Size, NULL, NULL, NULL, NULL);
+        ok(ret == ERROR_MORE_DATA, "%p: RegEnumValueW returned %ld\n", Perf, ret);
+        ok(Size == 64, "%p: size %lu\n", Perf, Size);
+        Size = 64;
+        ret = RegEnumValueW(Perf, 100, NameW, &Size, NULL, NULL, NULL, NULL);
+        ok(ret == ERROR_NO_MORE_ITEMS, "%p: RegEnumValueW 100 returned %ld\n", Perf, ret);
+
+        /* the plain RegEnumKey refuses the data key; the others have no subkeys */
+        ret = RegEnumKeyA(Perf, 0, Name, sizeof(Name));
+        ok(ret == (Perf == HKEY_PERFORMANCE_DATA ? ERROR_INVALID_HANDLE : ERROR_NO_MORE_ITEMS),
+           "%p: RegEnumKeyA returned %ld\n", Perf, ret);
+        Size = 64;
+        ret = RegEnumKeyExW(Perf, 0, NameW, &Size, NULL, NULL, NULL, NULL);
+        ok(ret == ERROR_NO_MORE_ITEMS, "%p: RegEnumKeyExW returned %ld\n", Perf, ret);
+    }
+}
+
+static
+VOID
 test_new_objects(VOID)
 {
     static const struct { DWORD Index; PCWSTR Name; DWORD Counters; DWORD DefaultName; } Objects[] =
@@ -1132,6 +1208,7 @@ START_TEST(RegPerformanceData)
     test_processor_time();
     test_ansi();
     test_open();
+    test_other_apis();
 
     /* the pseudo handle can be closed any number of times */
     ret = RegCloseKey(HKEY_PERFORMANCE_DATA);
