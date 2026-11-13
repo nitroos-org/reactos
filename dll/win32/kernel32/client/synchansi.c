@@ -23,6 +23,7 @@ CreateWaitableTimerA(IN LPSECURITY_ATTRIBUTES lpTimerAttributes OPTIONAL,
     ConvertWin32AnsiObjectApiToUnicodeApi(WaitableTimer, lpTimerName, lpTimerAttributes, bManualReset);
 }
 
+#if (DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA)
 /* kernel32 is built for an older _WIN32_WINNT */
 HANDLE
 WINAPI
@@ -49,6 +50,7 @@ CreateWaitableTimerExA(IN LPSECURITY_ATTRIBUTES lpTimerAttributes OPTIONAL,
         return CreateWaitableTimerExW(lpTimerAttributes, UnicodeCache->Buffer, dwFlags, dwDesiredAccess);
     ConvertAnsiToUnicodeEpilogue
 }
+#endif /* DLL_EXPORT_VERSION */
 
 /*
  * @implemented
