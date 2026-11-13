@@ -7,6 +7,8 @@
 
 #include "precomp.h"
 
+#if DLL_EXPORT_VERSION >= 0x600 /* uses NT6 exports */
+
 typedef struct
 {
     PTP_CALLBACK_INSTANCE Instance;
@@ -94,3 +96,12 @@ START_TEST(CallbackCompletion)
         ok(GetModuleHandleW(L"lz32.dll") == NULL, "lz32.dll is still loaded\n");
     }
 }
+
+#else
+
+START_TEST(CallbackCompletion)
+{
+    skip("CallbackCompletion needs the NT6 exports\n");
+}
+
+#endif
