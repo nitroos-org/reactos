@@ -4761,6 +4761,26 @@ NtQuerySection(
     return Status;
 }
 
+/*
+ * An image that opts into address space layout randomization (DYNAMICBASE) is not tied to its preferred base on
+ * Windows: a 64-bit one is loaded high in the address space, below the system DLLs. When we have to relocate such an
+ * image anyway (its preferred base is taken) it is placed top-down for the same reason. Fixed-base images and every
+ * 32-bit image (WoW64 included) keep the lowest free gap.
+ */
+static
+BOOLEAN
+MiImageWantsHighAddress(
+    _In_ const SECTION_IMAGE_INFORMATION *ImageInformation)
+{
+#ifdef _M_AMD64
+    return (ImageInformation->Machine == IMAGE_FILE_MACHINE_AMD64) &&
+           ((ImageInformation->DllCharacteristics & IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE) != 0);
+#else
+    UNREFERENCED_PARAMETER(ImageInformation);
+    return FALSE;
+#endif
+}
+
 /**********************************************************************
  * NAME       EXPORTED
  * MmMapViewOfSection
@@ -4964,11 +4984,16 @@ MiMapViewOfSection(
                 Status = STATUS_CONFLICTING_ADDRESSES;
                 goto Exit;
             }
-            /* Otherwise find a gap to map the image. */
+            /*
+             * Otherwise find a gap to map the image: the lowest free one, but for a randomizable 64-bit image the
+             * highest one below HighestAddress (so ZeroBits are still honoured). The .NET JIT needs this: with
+             * coreclr and its code heap below 2 GB, it encodes an indirect call as an absolute address and then
+             * fails its own consistency check, so every such method is compiled again without optimization.
+             */
             ImageBase = (ULONG_PTR)MmFindGapInRange(AddressSpace,
                                                   PAGE_ROUND_UP(ImageSize),
                                                   MM_VIRTMEM_GRANULARITY,
-                                                  FALSE,
+                                                  MiImageWantsHighAddress(&ImageSectionObject->ImageInformation),
                                                   HighestAddress);
             if (ImageBase == 0)
             {
