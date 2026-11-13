@@ -2991,12 +2991,6 @@ static void test_LocaleNameToLCID(void)
         win_skip( "LocaleNameToLCID not available\n" );
         return;
     }
-#if defined(__REACTOS__) && defined(_WIN64)
-    if (is_reactos()) {
-        ok(FALSE, "FIXME: Most of test_LocaleNameToLCID() crashes on ReactOS x64\n");
-        return;
-    }
-#endif
 
     /* special cases */
     buffer[0] = 0;
