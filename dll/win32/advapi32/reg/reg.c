@@ -51,11 +51,34 @@ static VOID CloseDefaultKeys(VOID);
     (((ULONG_PTR)(HKey) & 0xF0000000) == 0x80000000)
 #define GetPredefKeyIndex(HKey)                                                \
     ((ULONG_PTR)(HKey) & 0x0FFFFFFF)
+/* The three performance pseudo keys: their data is not in the registry */
+#define IsPerfKey(HKey)                                                        \
+    ((HKey) == HKEY_PERFORMANCE_DATA || (HKey) == HKEY_PERFORMANCE_TEXT ||     \
+     (HKey) == HKEY_PERFORMANCE_NLSTEXT)
+/* Number of values the performance keys report (Counter and Help) */
+#define PERFKEY_VALUE_COUNT   2
 
 static NTSTATUS OpenClassesRootKey(PHANDLE KeyHandle);
 static NTSTATUS OpenLocalMachineKey (PHANDLE KeyHandle);
 static NTSTATUS OpenUsersKey (PHANDLE KeyHandle);
 static NTSTATUS OpenCurrentConfigKey(PHANDLE KeyHandle);
+
+#ifndef _ADVAPI32_VISTA_
+/* The registry key that holds the counter and help texts the text performance keys stand for */
+static LONG
+OpenPerflibTextKey(OUT PHKEY KeyHandle)
+{
+    return RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                         L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Perflib\\009",
+                         0,
+                         KEY_READ,
+                         KeyHandle);
+}
+#endif
+
+/* The error of the registry functions that write to a performance key */
+#define PerfKeyWriteError(HKey) \
+    ((HKey) == HKEY_PERFORMANCE_DATA ? ERROR_INVALID_HANDLE : ERROR_BADKEY)
 
 
 /* FUNCTIONS ****************************************************************/
@@ -2502,6 +2525,9 @@ RegSetKeyValueW(IN HKEY hKey,
     NTSTATUS Status;
     LONG Ret;
 
+    if (IsPerfKey(hKey))
+        return PerfKeyWriteError(hKey);
+
     Status = MapDefaultKey(&KeyHandle,
                            hKey);
     if (!NT_SUCCESS(Status))
@@ -2572,6 +2598,9 @@ RegSetKeyValueA(IN HKEY hKey,
     HANDLE KeyHandle, CurKey, SubKeyHandle = NULL;
     NTSTATUS Status;
     LONG Ret;
+
+    if (IsPerfKey(hKey))
+        return PerfKeyWriteError(hKey);
 
     Status = MapDefaultKey(&KeyHandle,
                            hKey);
@@ -2727,6 +2756,10 @@ RegEnumKeyA(HKEY hKey,
 {
     DWORD dwLength;
 
+    /* unlike RegEnumKeyEx, the plain function refuses the performance data key */
+    if (hKey == HKEY_PERFORMANCE_DATA)
+        return ERROR_INVALID_HANDLE;
+
     dwLength = cbName;
     return RegEnumKeyExA(hKey,
                          dwIndex,
@@ -2751,6 +2784,9 @@ RegEnumKeyW(HKEY hKey,
             DWORD cbName)
 {
     DWORD dwLength;
+
+    if (hKey == HKEY_PERFORMANCE_DATA)
+        return ERROR_INVALID_HANDLE;
 
     dwLength = cbName;
     return RegEnumKeyExW(hKey,
@@ -2880,9 +2916,9 @@ RegEnumKeyExW(
     LONG ErrorCode = ERROR_SUCCESS;
     NTSTATUS Status;
 
-    if (hKey == HKEY_PERFORMANCE_DATA)
+    if (IsPerfKey(hKey))
     {
-        /* The performance data key has no subkeys */
+        /* The performance keys have no subkeys */
         return ERROR_NO_MORE_ITEMS;
     }
 
@@ -3027,6 +3063,65 @@ Cleanup:
  * The general RegEnumValueA: it asks for the size of the longest value name, then lists the value twice (the first
  * time for its type). It serves the keys the quick one below does not (HKEY_CLASSES_ROOT and the performance data).
  */
+/*
+ * The performance keys report two values (Counter and Help). Asked without a data buffer, the first
+ * two indexes answer ERROR_MORE_DATA and leave the sizes alone, as Windows does. With a data buffer
+ * the texts are those of the Perflib language key.
+ */
+static LONG
+EnumPerfValueW(
+    _In_ DWORD dwIndex,
+    _Out_ LPWSTR lpName,
+    _Inout_ LPDWORD lpcbName,
+    _Out_opt_ LPDWORD lpdwType,
+    _Out_opt_ LPBYTE lpData,
+    _Inout_opt_ LPDWORD lpcbData)
+{
+    HKEY TextKey;
+    LONG ErrorCode;
+
+    if (dwIndex >= PERFKEY_VALUE_COUNT)
+        return ERROR_NO_MORE_ITEMS;
+
+    if (lpData == NULL || lpcbData == NULL)
+        return ERROR_MORE_DATA;
+
+    ErrorCode = OpenPerflibTextKey(&TextKey);
+    if (ErrorCode != ERROR_SUCCESS)
+        return ERROR_NO_MORE_ITEMS;
+
+    ErrorCode = RegEnumValueW(TextKey, dwIndex, lpName, lpcbName, NULL, lpdwType, lpData, lpcbData);
+    RegCloseKey(TextKey);
+    return ErrorCode;
+}
+
+static LONG
+EnumPerfValueA(
+    _In_ DWORD dwIndex,
+    _Out_ LPSTR lpName,
+    _Inout_ LPDWORD lpcbName,
+    _Out_opt_ LPDWORD lpdwType,
+    _Out_opt_ LPBYTE lpData,
+    _Inout_opt_ LPDWORD lpcbData)
+{
+    HKEY TextKey;
+    LONG ErrorCode;
+
+    if (dwIndex >= PERFKEY_VALUE_COUNT)
+        return ERROR_NO_MORE_ITEMS;
+
+    if (lpData == NULL || lpcbData == NULL)
+        return ERROR_MORE_DATA;
+
+    ErrorCode = OpenPerflibTextKey(&TextKey);
+    if (ErrorCode != ERROR_SUCCESS)
+        return ERROR_NO_MORE_ITEMS;
+
+    ErrorCode = RegEnumValueA(TextKey, dwIndex, lpName, lpcbName, NULL, lpdwType, lpData, lpcbData);
+    RegCloseKey(TextKey);
+    return ErrorCode;
+}
+
 static LONG
 RegEnumValueAGeneral(
     _In_ HKEY hKey,
@@ -3207,9 +3302,10 @@ RegEnumValueA(
     if ((lpData && !lpcbData) || lpdwReserved)
         return ERROR_INVALID_PARAMETER;
 
-    /* The performance data and the classes root have their own ways */
-    if (hKey == HKEY_PERFORMANCE_DATA)
-        goto General;
+    if (IsPerfKey(hKey))
+        return EnumPerfValueA(dwIndex, lpName, lpcbName, lpdwType, lpData, lpcbData);
+
+    /* The classes root has its own way */
 
     Status = MapDefaultKey(&KeyHandle, hKey);
     if (!NT_SUCCESS(Status))
@@ -3356,9 +3452,8 @@ RegEnumValueW(
     if ((data && !count) || reserved)
         return ERROR_INVALID_PARAMETER;
 
-    /* The performance data key has no enumerable values */
-    if (hKey == HKEY_PERFORMANCE_DATA)
-        return ERROR_NO_MORE_ITEMS;
+    if (IsPerfKey(hKey))
+        return EnumPerfValueW(index, value, val_count, type, data, count);
 
     status = MapDefaultKey(&KeyHandle, hKey);
     if (!NT_SUCCESS(status))
@@ -3870,7 +3965,7 @@ RegOpenKeyExW(HKEY hKey,
     }
 
     /* The performance data is not in the registry: there is nothing to open, with or without a subkey */
-    if (hKey == HKEY_PERFORMANCE_DATA)
+    if (IsPerfKey(hKey))
     {
         return ERROR_INVALID_HANDLE;
     }
@@ -4205,10 +4300,37 @@ RegQueryInfoKeyW(HKEY hKey,
         return ERROR_INVALID_PARAMETER;
     }
 
-    if (hKey == HKEY_PERFORMANCE_DATA)
+    if (IsPerfKey(hKey))
     {
-        /* The performance data key is not backed by the registry:
-         * it has no subkeys and no class */
+        /* The performance keys are not backed by the registry: they have no subkeys and no
+         * class, and two values (Counter and Help), sized as those of the Perflib language key */
+        HKEY TextKey;
+
+        if (OpenPerflibTextKey(&TextKey) == ERROR_SUCCESS)
+        {
+            ErrorCode = RegQueryInfoKeyW(TextKey, NULL, NULL, NULL, NULL, lpcMaxSubKeyLen,
+                                         lpcMaxClassLen, lpcValues, lpcMaxValueNameLen,
+                                         lpcMaxValueLen, lpcbSecurityDescriptor,
+                                         lpftLastWriteTime);
+            RegCloseKey(TextKey);
+            if (ErrorCode == ERROR_SUCCESS && lpcValues != NULL)
+                *lpcValues = PERFKEY_VALUE_COUNT;
+            if (ErrorCode == ERROR_SUCCESS)
+            {
+                if (lpClass != NULL && lpcClass != NULL && *lpcClass > 0)
+                    lpClass[0] = UNICODE_NULL;
+                if (lpcClass != NULL)
+                    *lpcClass = 0;
+                if (lpcSubKeys != NULL)
+                    *lpcSubKeys = 0;
+                if (lpcMaxSubKeyLen != NULL)
+                    *lpcMaxSubKeyLen = 0;
+                if (lpcMaxClassLen != NULL)
+                    *lpcMaxClassLen = 0;
+                return ERROR_SUCCESS;
+            }
+        }
+
         if (lpClass != NULL && lpcClass != NULL && *lpcClass > 0)
             lpClass[0] = UNICODE_NULL;
         if (lpcClass != NULL)
@@ -4220,7 +4342,7 @@ RegQueryInfoKeyW(HKEY hKey,
         if (lpcMaxClassLen != NULL)
             *lpcMaxClassLen = 0;
         if (lpcValues != NULL)
-            *lpcValues = 0;
+            *lpcValues = PERFKEY_VALUE_COUNT;
         if (lpcMaxValueNameLen != NULL)
             *lpcMaxValueNameLen = 0;
         if (lpcMaxValueLen != NULL)
@@ -5438,6 +5560,9 @@ RegSetValueExA(HKEY hKey,
     DWORD DataSize;
     NTSTATUS Status;
 
+    if (IsPerfKey(hKey))
+        return PerfKeyWriteError(hKey);
+
     /* Convert SubKey name to Unicode */
     if (lpValueName != NULL && lpValueName[0] != '\0')
     {
@@ -5517,6 +5642,9 @@ RegSetValueExW(
     HANDLE KeyHandle;
     NTSTATUS Status;
 
+    if (IsPerfKey(hKey))
+        return PerfKeyWriteError(hKey);
+
     Status = MapDefaultKey(&KeyHandle,
                            hKey);
     if (!NT_SUCCESS(Status))
@@ -5592,6 +5720,9 @@ RegSetValueA(HKEY hKeyOriginal,
 
     if (dwType != REG_SZ || !lpData) return ERROR_INVALID_PARAMETER;
 
+    if (IsPerfKey(hKeyOriginal))
+        return ERROR_INVALID_HANDLE;
+
     Status = MapDefaultKey(&hKey, hKeyOriginal);
     if (!NT_SUCCESS(Status))
     {
@@ -5638,6 +5769,9 @@ RegSetValueW(HKEY hKeyOriginal,
 
     if (dwType != REG_SZ || !lpData)
         return ERROR_INVALID_PARAMETER;
+
+    if (IsPerfKey(hKeyOriginal))
+        return ERROR_INVALID_HANDLE;
 
     Status = MapDefaultKey(&hKey,
                            hKeyOriginal);
