@@ -1,0 +1,12 @@
+/*
+ * PROJECT:     ReactOS API tests
+ * LICENSE:     LGPL-2.1-or-later (https://spdx.org/licenses/LGPL-2.1-or-later)
+ * PURPOSE:     Client stub for the secure-only interface of the ntlm_auth test: a refused call is seen the way an
+ *              application sees it (the stub raises the status as an exception)
+ */
+
+[uuid(5ec0ad00-4321-1234-0000-000000000001), version(1.0)]
+interface ndr_secure_only
+{
+    int ndr_secure_only_call([in] handle_t handle);
+}
