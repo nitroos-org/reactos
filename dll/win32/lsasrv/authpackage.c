@@ -405,7 +405,12 @@ LsapIsTrustedClientRequest(IN PLSA_CLIENT_REQUEST ClientRequest)
 }
 
 
-/* The token of the client of the request: the one its thread impersonates, else that of its process */
+/*
+ * The token of the client of the request: the one its thread impersonates, else that of its process.
+ * Only a thread that impersonates nobody (STATUS_NO_TOKEN) is judged by its process. Any other failure fails the
+ * request: a thread that impersonates at the anonymous level (STATUS_CANT_OPEN_ANONYMOUS) or whose token the LSA
+ * cannot open must never be taken for its process, whose identity may be a very different one.
+ */
 static
 NTSTATUS
 NTAPI
@@ -428,16 +433,27 @@ LsapOpenClientTokenRequest(
                           THREAD_QUERY_INFORMATION,
                           &ObjectAttributes,
                           &LogonContext->RequestClientId);
-    if (NT_SUCCESS(Status))
+    if (!NT_SUCCESS(Status))
     {
-        Status = NtOpenThreadTokenEx(ThreadHandle,
-                                     TOKEN_QUERY | TOKEN_DUPLICATE,
-                                     TRUE,
-                                     0,
-                                     &Token);
-        if (!NT_SUCCESS(Status))
-            Token = NULL;
-        NtClose(ThreadHandle);
+        /* the calling thread waits for this reply: it exists, so it is not ours to guess its identity */
+        TRACE("NtOpenThread() failed (Status 0x%08lx)\n", Status);
+        return Status;
+    }
+
+    Status = NtOpenThreadTokenEx(ThreadHandle,
+                                 TOKEN_QUERY | TOKEN_DUPLICATE,
+                                 TRUE,
+                                 0,
+                                 &Token);
+    NtClose(ThreadHandle);
+    if (!NT_SUCCESS(Status))
+    {
+        if (Status != STATUS_NO_TOKEN)
+        {
+            TRACE("NtOpenThreadTokenEx() failed (Status 0x%08lx)\n", Status);
+            return Status;
+        }
+        Token = NULL;
     }
 
     if (Token == NULL)
