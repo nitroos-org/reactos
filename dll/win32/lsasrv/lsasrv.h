@@ -81,6 +81,7 @@ typedef struct _LSAP_LOGON_CONTEXT
     HANDLE ClientProcessHandle;
     HANDLE ConnectionHandle;
     BOOL TrustedCaller;
+    CLIENT_ID RequestClientId;  /* the client (thread) of the request in progress */
 } LSAP_LOGON_CONTEXT, *PLSAP_LOGON_CONTEXT;
 
 typedef struct _SAMPR_ULONG_ARRAY

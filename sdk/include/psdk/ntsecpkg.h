@@ -306,6 +306,9 @@ typedef struct _LSA_DISPATCH_TABLE {
     /* ReactOS extension: does the client of the request hold SeTcbPrivilege? (a logon process
      * without it, e.g. LogonUser, is not trusted) */
     BOOLEAN (NTAPI *IsTrustedClient)(PLSA_CLIENT_REQUEST);
+    /* ReactOS extension: the logon session of the client of the request (the token its thread impersonates,
+     * else that of its process) */
+    NTSTATUS (NTAPI *GetClientLogonId)(PLSA_CLIENT_REQUEST, PLUID);
 #endif
 } LSA_DISPATCH_TABLE,
  *PLSA_DISPATCH_TABLE;
