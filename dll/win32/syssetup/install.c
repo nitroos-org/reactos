@@ -18,6 +18,7 @@
 #include <wincon.h>
 #include <winnls.h>
 #include <winsvc.h>
+#include <wincrypt.h>
 #include <userenv.h>
 #include <shlobj.h>
 #include <shlwapi.h>
@@ -1584,6 +1585,70 @@ RecordAddonNoticesAcknowledged(VOID)
     RegCloseKey(hKey);
 }
 
+/*
+ * Fill the LocalMachine Root certificate store, as SYSTEM, while setup runs (and
+ * create the empty keys of the other stores).
+ * Opening the store makes crypt32 import its built-in roots and the AuthRoot
+ * entries that carry a usage restriction into the registry when they are not
+ * there yet. Done here, a standard user's first use of crypt32 finds the store
+ * filled and never has to write to HKLM (Windows has the roots in the hive
+ * from setup). The NitroCertSeed service repeats this at every boot, which
+ * covers an existing install that starts with a newer crypt32 or root list.
+ * crypt32 is loaded here only, so setup does not depend on it otherwise.
+ */
+static
+VOID
+SeedRootCertificates(VOID)
+{
+    typedef HCERTSTORE (WINAPI *PFN_OPEN)(LPCSTR, DWORD, HCRYPTPROV_LEGACY, DWORD, const void *);
+    typedef BOOL (WINAPI *PFN_CLOSE)(HCERTSTORE, DWORD);
+    HMODULE hCrypt32;
+    PFN_OPEN pOpen;
+    PFN_CLOSE pClose;
+    HCERTSTORE hStore;
+    HKEY hKey;
+    WCHAR szName[256];
+    DWORD i;
+
+    hCrypt32 = LoadLibraryW(L"crypt32.dll");
+    if (!hCrypt32)
+    {
+        DPRINT1("SeedRootCertificates: cannot load crypt32 (0x%lx)\n", GetLastError());
+        return;
+    }
+    pOpen = (PFN_OPEN)GetProcAddress(hCrypt32, "CertOpenStore");
+    pClose = (PFN_CLOSE)GetProcAddress(hCrypt32, "CertCloseStore");
+    if (pOpen && pClose)
+    {
+        /* Root first (it runs the import), then the other stores of the hive:
+         * their first open creates their Certificates, CRLs and CTLs keys */
+        hStore = pOpen(CERT_STORE_PROV_SYSTEM_W, 0, 0,
+                       CERT_SYSTEM_STORE_LOCAL_MACHINE | CERT_STORE_READONLY_FLAG,
+                       L"Root");
+        if (hStore)
+            pClose(hStore, 0);
+        else
+            DPRINT1("SeedRootCertificates: cannot open the Root store (0x%lx)\n", GetLastError());
+
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\SystemCertificates", 0,
+                          KEY_READ, &hKey) == ERROR_SUCCESS)
+        {
+            for (i = 0; RegEnumKeyW(hKey, i, szName, _countof(szName)) == ERROR_SUCCESS; i++)
+            {
+                if (!_wcsicmp(szName, L"Root"))
+                    continue;
+                hStore = pOpen(CERT_STORE_PROV_SYSTEM_W, 0, 0,
+                               CERT_SYSTEM_STORE_LOCAL_MACHINE | CERT_STORE_READONLY_FLAG,
+                               szName);
+                if (hStore)
+                    pClose(hStore, 0);
+            }
+            RegCloseKey(hKey);
+        }
+    }
+    FreeLibrary(hCrypt32);
+}
+
 static
 VOID
 RegisterBrowserChooser(VOID)
@@ -1724,6 +1789,7 @@ InstallReactOS(VOID)
 
     InstallWizard();
 
+    SeedRootCertificates();
     RegisterBrowserChooser();
     RecordAddonNoticesAcknowledged();
 

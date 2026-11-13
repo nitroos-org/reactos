@@ -1,0 +1,4 @@
+#define REACTOS_STR_FILE_DESCRIPTION  "NitroOS Root Certificate Store Seeding Service"
+#define REACTOS_STR_INTERNAL_NAME     "nitro-certseed"
+#define REACTOS_STR_ORIGINAL_FILENAME "nitro-certseed.exe"
+#include <reactos/version.rc>
