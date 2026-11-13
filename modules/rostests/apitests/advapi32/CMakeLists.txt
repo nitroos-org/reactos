@@ -68,6 +68,7 @@ list(APPEND SOURCE
     RegRenameKey.c
     RegSdTemplates.c
     RegSecurity.c
+    RegSharedKeyName.c
     RegGetValue.c
     RtlEncryptMemory.c
     SaferIdentifyLevel.c
