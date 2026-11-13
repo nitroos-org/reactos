@@ -103,6 +103,7 @@ list(APPEND SOURCE
     SetSysColors.c
     SetWindowExtEx.c
     SetWorldTransform.c
+    ShapeTransform.c
     StretchBlt.c
     TextTransform.c
     UniscribeForwarders.c)

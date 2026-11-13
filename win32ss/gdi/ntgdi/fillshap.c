@@ -27,6 +27,7 @@ IntGdiPolygon(PDC    dc,
     PDC_ATTR pdcattr;
     POINTL BrushOrigin;
     PPATH pPath;
+    BOOL bPathOk;
     RECTL rclOuter;
 //    int Left;
 //    int Top;
@@ -117,26 +118,30 @@ IntGdiPolygon(PDC    dc,
                 PATH_Delete(dc->dclevel.hPath);
                 dc->dclevel.hPath = NULL;
 
-                /* Begin a path */
+                /* Begin a path. Points are device coordinates plus the DC origin by now, and a path holds device
+                   coordinates without the origin: add the entries as they are (PATH_LineTo would transform them again). */
                 pPath = PATH_CreatePath(Count + 1);
                 dc->dclevel.flPath |= DCPATH_ACTIVE;
                 dc->dclevel.hPath = pPath->BaseObject.hHmgr;
-                pPath->pos = Points[0];
-                IntLPtoDP(dc, &pPath->pos, 1);
-
-                PATH_MoveTo(dc, pPath);
-                for (i = 1; i < Count; ++i)
+                for (i = 0; i <= Count; ++i)
                 {
-                    PATH_LineTo(dc, Points[i].x, Points[i].y);
+                    POINT ptDev = Points[i % Count];
+
+                    ptDev.x -= dc->ptlDCOrig.x;
+                    ptDev.y -= dc->ptlDCOrig.y;
+                    if (!PATH_AddEntry(pPath, &ptDev, (i == 0) ? PT_MOVETO : PT_LINETO))
+                        break;
                 }
-                PATH_LineTo(dc, Points[0].x, Points[0].y);
+                bPathOk = (i > Count);
+                if (bPathOk)
+                    pPath->pos = pPath->pPoints[0];
 
                 /* Close the path */
                 pPath->state = PATH_Closed;
                 dc->dclevel.flPath &= ~DCPATH_ACTIVE;
 
                 /* Actually stroke a path */
-                ret = PATH_StrokePath(dc, pPath);
+                ret = bPathOk && PATH_StrokePath(dc, pPath);
 
                 /* Clear the path */
                 PATH_UnlockPath(pPath);
@@ -649,6 +654,9 @@ IntRectangle(PDC dc,
     PDC_ATTR pdcattr;
     POINTL BrushOrigin;
     PPATH pPath;
+    POINT ptCorner[4];
+    BOOL bPathOk;
+    INT i;
     RECTL rclOuter;
 
     ASSERT ( dc ); // Caller's responsibility to set this up
@@ -661,13 +669,15 @@ IntRectangle(PDC dc,
         return PATH_Rectangle ( dc, LeftRect, TopRect, RightRect, BottomRect );
     }
 
-	/* Make sure rectangle is not inverted */
-    DestRect.left   = min(LeftRect, RightRect);
-    DestRect.right  = max(LeftRect, RightRect);
-    DestRect.top    = min(TopRect,  BottomRect);
-    DestRect.bottom = max(TopRect,  BottomRect);
+    /* Transform the corners, then make sure the rectangle is not inverted: a flipped axis (a negative extent, MM_LOENGLISH)
+       reverses the device edges, ordering the logical corners first leaves the device rectangle inverted. */
+    DestRect.left   = LeftRect;
+    DestRect.top    = TopRect;
+    DestRect.right  = RightRect;
+    DestRect.bottom = BottomRect;
 
     IntLPtoDP(dc, (LPPOINT)&DestRect, 2);
+    RECTL_vMakeWellOrdered(&DestRect);
 
     DestRect.left   += dc->ptlDCOrig.x;
     DestRect.right  += dc->ptlDCOrig.x;
@@ -753,19 +763,25 @@ IntRectangle(PDC dc,
             PATH_Delete(dc->dclevel.hPath);
             dc->dclevel.hPath = NULL;
 
-            /* Begin a path */
+            /* Begin a path: the four corners and back to the first, in device coordinates (PATH_MoveTo would start
+               at the current position, and PATH_LineTo would move it, which Rectangle must not do) */
+            ptCorner[0].x = LeftRect;  ptCorner[0].y = TopRect;
+            ptCorner[1].x = RightRect; ptCorner[1].y = TopRect;
+            ptCorner[2].x = RightRect; ptCorner[2].y = BottomRect;
+            ptCorner[3].x = LeftRect;  ptCorner[3].y = BottomRect;
+            IntLPtoDP(dc, (PPOINTL)ptCorner, 4);
+
             pPath = PATH_CreatePath(5);
             dc->dclevel.flPath |= DCPATH_ACTIVE;
             dc->dclevel.hPath = pPath->BaseObject.hHmgr;
-            pPath->pos.x = LeftRect;
-            pPath->pos.y = TopRect;
-            IntLPtoDP(dc, &pPath->pos, 1);
-
-            PATH_MoveTo(dc, pPath);
-            PATH_LineTo(dc, RightRect, TopRect);
-            PATH_LineTo(dc, RightRect, BottomRect);
-            PATH_LineTo(dc, LeftRect, BottomRect);
-            PATH_LineTo(dc, LeftRect, TopRect);
+            for (i = 0; i < 5; i++)
+            {
+                if (!PATH_AddEntry(pPath, &ptCorner[i & 3], (i == 0) ? PT_MOVETO : PT_LINETO))
+                    break;
+            }
+            bPathOk = (i == 5);
+            if (bPathOk)
+                pPath->pos = ptCorner[0];
 
             /* Close the path */
             pPath->state = PATH_Closed;
@@ -774,7 +790,7 @@ IntRectangle(PDC dc,
             /* Actually stroke a path. The stroke prepares the DC again and counts only its own bounds as drawn: what the
                rectangle counted before (its fill can lie outside the outline of the stroke) is added back. */
             rclOuter = dc->rclRedirDraw;
-            ret = PATH_StrokePath(dc, pPath);
+            ret = bPathOk && PATH_StrokePath(dc, pPath);
             DC_vRedirKeepOuter(dc, &rclOuter);
 
             /* Clear the path */
@@ -842,7 +858,9 @@ NtGdiRectangle(HDC  hDC,
         return FALSE;
     }
 
-    /* Do we rotate or shear? */
+    /* Do we rotate or shear? mxWorldToDevice (and its flAccel) is recalculated on demand: bring it up to date before
+       reading the flag, it can still describe the previous transform (a scale under a new rotation). */
+    DC_vUpdateWorldToDevice(dc);
     if (!(dc->pdcattr->mxWorldToDevice.flAccel & XFORM_SCALE))
     {
         POINTL DestCoords[4];

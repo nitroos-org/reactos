@@ -31,7 +31,6 @@
 #define CYAN    RGB(0, 255, 255)
 
 static int g_Level;
-static BOOL g_bAmd64;
 static int g_PaintMode;   /* 0: the paint draws nothing, 1: a red line at y 200 */
 static LONG g_cPaint;
 
@@ -44,8 +43,7 @@ static int GetRedirectionLevel(void)
     SYSTEM_INFO si;
 
     GetNativeSystemInfo(&si);
-    g_bAmd64 = (si.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64);
-    if (!g_bAmd64)
+    if (si.wProcessorArchitecture != PROCESSOR_ARCHITECTURE_AMD64)
         return 0;
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\GraphicsDrivers", 0, KEY_READ, &hKey) == ERROR_SUCCESS)
     {
@@ -493,14 +491,6 @@ static void RunModes(HWND hwnd, const char *Where, const int *Modes, int cModes)
         for (Kind = 0; Kind < KIND_COUNT; Kind++)
             for (Pen = 0; Pen < 2; Pen++)
             {
-                /* The stroke of a wide pen around a Polygon is built from its device points taken as logical ones
-                   (a placement bug of its own, not of the present): only the one-pixel pen is checked there */
-                if (Pen == 1 && Kind != KIND_RECTANGLE)
-                    continue;
-                /* On i386 a Rectangle whose device edges come out reversed (a flipped axis) draws nothing, at level 0
-                   too: not what is checked here */
-                if (Kind == KIND_RECTANGLE && !g_bAmd64 && (Modes[m] == MODE_LOENGLISH || Modes[m] == MODE_ANISO))
-                    continue;
                 DrawAndCheck(hwnd, Modes[m], Kind, Pens[Pen], Where);
             }
 }
