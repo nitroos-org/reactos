@@ -766,7 +766,7 @@ RegInitializeRegistry(
     HANDLE KeyHandle;
     UNICODE_STRING KeyName;
     OBJECT_ATTRIBUTES ObjectAttributes;
-    BOOLEAN PrivilegeSet[2] = {FALSE, FALSE};
+    BOOLEAN PrivilegeSet[3] = {FALSE, FALSE, FALSE};
     ULONG Disposition;
     UINT i;
 
@@ -788,6 +788,14 @@ RegInitializeRegistry(
         /* Exit prematurely here.... */
         return Status;
     }
+
+    /*
+     * The root descriptors of the hives carry a (NULL) SACL, as on Windows, and a
+     * descriptor with a SACL is only accepted from a caller holding the security privilege.
+     */
+    Status = RtlAdjustPrivilege(SE_SECURITY_PRIVILEGE, TRUE, FALSE, &PrivilegeSet[2]);
+    if (!NT_SUCCESS(Status))
+        DPRINT1("RtlAdjustPrivilege(SE_SECURITY_PRIVILEGE) failed (Status 0x%08lx)\n", Status);
 
     /*
      * Create the template proto-hive for each hive: its key is saved as the hive's root, so
@@ -1074,7 +1082,8 @@ RegInitializeRegistry(
 
 
 Quit:
-    /* Remove restore and backup privileges */
+    /* Remove the security, restore and backup privileges */
+    RtlAdjustPrivilege(SE_SECURITY_PRIVILEGE, PrivilegeSet[2], FALSE, &PrivilegeSet[2]);
     RtlAdjustPrivilege(SE_BACKUP_PRIVILEGE, PrivilegeSet[1], FALSE, &PrivilegeSet[1]);
     RtlAdjustPrivilege(SE_RESTORE_PRIVILEGE, PrivilegeSet[0], FALSE, &PrivilegeSet[0]);
 
