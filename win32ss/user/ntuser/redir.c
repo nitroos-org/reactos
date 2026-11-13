@@ -41,6 +41,20 @@ DBG_DEFAULT_CHANNEL(UserPainting);
 
 #define REDIR_MAGIC 0x52444952 /* "RIDR" */
 
+/*
+ * What DCs drew since the last present, as a few rectangles (surface coordinates): text, lines and blits all over a
+ * window are presented where they are, not as their bounding box (the frame of a window, a caret and a status bar).
+ * A rectangle that lies inside another one or adds no area to it when merged is merged; when the list is full the
+ * pair that wastes the least area is merged.
+ */
+#define REDIR_DIRTY_RECTS 8
+typedef struct _REDIR_DIRTY
+{
+    ULONG c;
+    RECTL rcBound;
+    RECTL arc[REDIR_DIRTY_RECTS];
+} REDIR_DIRTY, *PREDIR_DIRTY;
+
 typedef struct _REDIR
 {
     ULONG Magic;
@@ -52,8 +66,8 @@ typedef struct _REDIR
     LONG cx, cy;
     SIZE_T cjBits;
     KSPIN_LOCK DirtyLock;
-    RECTL rcDirty;          /* what DCs drew since the last present (surface coordinates), DirtyLock */
-    volatile LONG Dirty;    /* rcDirty is not empty (counted in gRedirDirtyCount) */
+    REDIR_DIRTY DirtyRects; /* what DCs drew since the last present (surface coordinates), DirtyLock */
+    volatile LONG Dirty;    /* DirtyRects is not empty (counted in gRedirDirtyCount) */
     /* Level 2 */
     BOOLEAN bTrans;         /* layered or glass when the record was made: composed (blended), never copied as it is */
     BOOLEAN bUlw;           /* the content is UpdateLayeredWindow's; GDI drawing into the window shows nothing */
@@ -70,6 +84,7 @@ static SIZE_T gRedirBytes, gRedirBudget;
 static ATOM AtomRedir;
 static ATOM AtomUlwSeen;     /* level 2: the window has had UpdateLayeredWindow content (with or without a surface) */
 static volatile LONG gRedirTimerArmed;
+static LONG gRedirBusyFrames;           /* frame-timer passes that found the USER lock held (raw input thread only) */
 static volatile LONG gRedirDirtyCount;   /* records with Dirty set: the timer takes the USER lock only then */
 static ULONG gRedirCreated, gRedirRefused, gRedirPresents;
 static volatile LONG gRedirRetries;     /* DCEs with DCE_REDIR_RETRY (windc.c) */
@@ -84,6 +99,7 @@ static KSPIN_LOCK gRedirDeferLock;
 #define REDIR_FRAME_100NS   (16 * 10000)
 #define REDIR_RETRY_100NS   (100 * 10000)
 #define REDIR_RETRY_BUDGET  8               /* busy DCs tried per frame-timer pass */
+#define REDIR_BUSY_FRAMES   4               /* frames the timer leaves a held USER lock alone before it waits for it */
 
 static VOID
 RedirArmTimer(LONGLONG Due100ns)
@@ -359,9 +375,86 @@ UserRedirKeepOnHide(PWND Wnd)
     return Wnd && RedirIsUlwWnd(Wnd);
 }
 
+static __inline LONGLONG
+RedirArea(const RECTL *prc)
+{
+    return (LONGLONG)(prc->right - prc->left) * (prc->bottom - prc->top);
+}
+
+/* What merging a and b into their bounding box adds to the area they cover (an estimate: their overlap counts twice) */
+static LONGLONG
+RedirMergeWaste(const RECTL *a, const RECTL *b, PRECTL prcUnion)
+{
+    RECTL rcI;
+    LONGLONG Waste;
+
+    RECTL_bUnionRect(prcUnion, a, b);
+    Waste = RedirArea(prcUnion) - RedirArea(a) - RedirArea(b);
+    if (RECTL_bIntersectRect(&rcI, a, b))
+        Waste += RedirArea(&rcI);
+    return Waste;
+}
+
+/* Adds a non-empty rectangle (DirtyLock) */
+static VOID
+RedirDirtyAdd(PREDIR_DIRTY pd, const RECTL *prc)
+{
+    RECTL rcU, rcBest;
+    LONGLONG Waste, BestWaste;
+    ULONG i, j, iBest, jBest;
+
+    if (pd->c == 0)
+    {
+        pd->c = 1;
+        pd->arc[0] = *prc;
+        pd->rcBound = *prc;
+        return;
+    }
+    RECTL_bUnionRect(&pd->rcBound, &pd->rcBound, prc);
+    /* Merged where that adds no area (inside, or one rectangle extending another one) */
+    for (i = 0; i < pd->c; i++)
+    {
+        if (RedirMergeWaste(&pd->arc[i], prc, &rcU) <= 0)
+        {
+            pd->arc[i] = rcU;
+            return;
+        }
+    }
+    if (pd->c < REDIR_DIRTY_RECTS)
+    {
+        pd->arc[pd->c++] = *prc;
+        return;
+    }
+    /* Full: the new one goes in last and the pair that wastes the least is merged */
+    BestWaste = MAXLONGLONG;
+    iBest = jBest = 0;
+    RtlZeroMemory(&rcBest, sizeof(rcBest));
+    for (i = 0; i < REDIR_DIRTY_RECTS; i++)
+    {
+        const RECTL *a = &pd->arc[i];
+
+        for (j = i + 1; j <= REDIR_DIRTY_RECTS; j++)
+        {
+            const RECTL *b = (j == REDIR_DIRTY_RECTS) ? prc : &pd->arc[j];
+
+            Waste = RedirMergeWaste(a, b, &rcU);
+            if (Waste < BestWaste)
+            {
+                BestWaste = Waste;
+                iBest = i;
+                jBest = j;
+                rcBest = rcU;
+            }
+        }
+    }
+    pd->arc[iBest] = rcBest;
+    if (jBest < REDIR_DIRTY_RECTS)
+        pd->arc[jBest] = *prc;
+}
+
 /* Takes what was drawn since the last present (FALSE: nothing) */
 static BOOL
-RedirTakeDirty(PREDIR r, PRECTL prc)
+RedirTakeDirty(PREDIR r, PREDIR_DIRTY pd)
 {
     KIRQL OldIrql;
 
@@ -369,21 +462,21 @@ RedirTakeDirty(PREDIR r, PRECTL prc)
     if (InterlockedExchange(&r->Dirty, 0))
         InterlockedDecrement(&gRedirDirtyCount);
     KeAcquireSpinLock(&r->DirtyLock, &OldIrql);
-    *prc = r->rcDirty;
-    RECTL_vSetEmptyRect(&r->rcDirty);
+    *pd = r->DirtyRects;
+    r->DirtyRects.c = 0;
     KeReleaseSpinLock(&r->DirtyLock, OldIrql);
-    return !RECTL_bIsEmptyRect(prc);
+    return pd->c != 0;
 }
 
 /* No reference is left: the record goes (USER lock) */
 static VOID
 RedirFree(PREDIR r)
 {
-    RECTL rc;
+    REDIR_DIRTY Dirty;
 
     ASSERT(r->cRefs == 0);
     ASSERT(r->pwnd == NULL);
-    RedirTakeDirty(r, &rc);
+    RedirTakeDirty(r, &Dirty);
     RemoveEntryList(&r->Link);
     gRedirBytes -= r->cjBits;
     if (r->psurf)
@@ -628,7 +721,7 @@ UserRedirGet(PWND Root)
     r->cjBits = cjNew;
     r->bTrans = RedirIsTransWnd(Root);
     KeInitializeSpinLock(&r->DirtyLock);
-    RECTL_vSetEmptyRect(&r->rcDirty);
+    r->DirtyRects.c = 0;
     if (!UserSetProp(Root, AtomRedir, r, TRUE))
     {
         GreRedirDeleteSurface(psurf);
@@ -1205,13 +1298,14 @@ UserRedirUpdateLayered(
     return TRUE;
 }
 
-/* Copies prcSurf (surface coordinates; NULL: all) of the window's surface onto the screen through its visible region */
+/* Copies pd (surface coordinates; NULL: all) of the window's surface onto the screen through its visible region */
 static VOID
-RedirPresentRect(PREDIR r, const RECTL *prcSurf)
+RedirPresentRect(PREDIR r, const REDIR_DIRTY *pd)
 {
     PWND Root = r->pwnd;
     PREGION Rgn, Clip;
     RECTL rc;
+    ULONG i;
 
     if (!Root || Root->head.rpdesk != gpdeskInputDesktop)
         return;
@@ -1221,9 +1315,9 @@ RedirPresentRect(PREDIR r, const RECTL *prcSurf)
         UserRedirDetachWindow(Root);
         return;
     }
-    if (prcSurf)
+    if (pd)
     {
-        rc = *prcSurf;
+        rc = pd->rcBound;
         RECTL_vOffsetRect(&rc, Root->rcWindow.left, Root->rcWindow.top);
     }
     else
@@ -1241,9 +1335,22 @@ RedirPresentRect(PREDIR r, const RECTL *prcSurf)
     Rgn = VIS_ComputeVisibleRegion(Root, FALSE, FALSE, TRUE);
     if (!Rgn)
         return;
-    if (prcSurf)
+    if (pd)
     {
-        Clip = IntSysCreateRectpRgnIndirect(&rc);
+        /* Only what was drawn: the rectangles (their bounding box if the region cannot be made) */
+        Clip = IntSysCreateRectpRgnIndirect(&pd->arc[0]);
+        for (i = 1; Clip && i < pd->c; i++)
+        {
+            if (!REGION_UnionRectWithRgn(Clip, &pd->arc[i]))
+            {
+                REGION_Delete(Clip);
+                Clip = NULL;
+            }
+        }
+        if (Clip)
+            REGION_bOffsetRgn(Clip, Root->rcWindow.left, Root->rcWindow.top);
+        else
+            Clip = IntSysCreateRectpRgnIndirect(&rc);
         if (Clip)
         {
             IntGdiCombineRgn(Rgn, Rgn, Clip, RGN_AND);
@@ -1257,27 +1364,28 @@ RedirPresentRect(PREDIR r, const RECTL *prcSurf)
     RedirComposeRect(Root, &rc);
 }
 
-/* What was drawn goes to the screen (bWholeIfClean: an EndPaint that drew through no tracked primitive presents all) */
+/*
+ * What was drawn goes to the screen. Every primitive that draws into a surface marks what it wrote, so a paint that
+ * drew nothing (a window that only validates, or paints later from a timer) presents nothing, as a ReleaseDC.
+ */
 static VOID
-RedirPresentDirty(PREDIR r, BOOL bWholeIfClean)
+RedirPresentDirty(PREDIR r)
 {
-    RECTL rc;
+    REDIR_DIRTY Dirty;
 
-    if (RedirTakeDirty(r, &rc))
-        RedirPresentRect(r, &rc);
-    else if (bWholeIfClean)
-        RedirPresentRect(r, NULL);
+    if (RedirTakeDirty(r, &Dirty))
+        RedirPresentRect(r, &Dirty);
 }
 
-/* A DC bound to the record is released (EndPaint: the window painted) */
+/* A DC bound to the record is released (ReleaseDC or EndPaint): what it drew goes to the screen */
 VOID
 FASTCALL
-UserRedirReleased(PVOID pv, BOOL bEndPaint)
+UserRedirReleased(PVOID pv)
 {
     PREDIR r = pv;
 
     if (r->pwnd)
-        RedirPresentDirty(r, bEndPaint);
+        RedirPresentDirty(r);
 }
 
 /* The window moved: all of its content goes to its new place */
@@ -1286,14 +1394,14 @@ FASTCALL
 UserRedirWindowMoved(PWND Wnd)
 {
     PREDIR r;
-    RECTL rc;
+    REDIR_DIRTY Dirty;
 
     if (!gRedirLevel || !Wnd)
         return;
     r = UserGetProp(Wnd, AtomRedir, TRUE);
     if (r)
     {
-        RedirTakeDirty(r, &rc);
+        RedirTakeDirty(r, &Dirty);
         RedirPresentRect(r, NULL);
     }
 }
@@ -1333,10 +1441,7 @@ UserRedirMarkDirty(PVOID pv, const RECTL *prcl)
     }
 
     KeAcquireSpinLock(&r->DirtyLock, &OldIrql);
-    if (RECTL_bIsEmptyRect(&r->rcDirty))
-        r->rcDirty = rc;
-    else
-        RECTL_bUnionRect(&r->rcDirty, &r->rcDirty, &rc);
+    RedirDirtyAdd(&r->DirtyRects, &rc);
     KeReleaseSpinLock(&r->DirtyLock, OldIrql);
 
     if (InterlockedExchange(&r->Dirty, 1) != 0)
@@ -1368,7 +1473,25 @@ UserRedirPresentPending(VOID)
     /* Released DCs present at once: usually nothing is left, and the USER lock is not taken for nothing */
     if (gRedirDirtyCount == 0 && gRedirRetries == 0 && IsListEmpty(&gRedirDeferred))
         return;
-    UserEnterExclusive();
+    /*
+     * Whoever holds the USER lock is usually a window painting or drawing, whose ReleaseDC/EndPaint presents what it
+     * drew anyway: the timer comes back a frame later instead of queueing behind it (and making it wait in turn), and
+     * waits for the lock only after REDIR_BUSY_FRAMES such frames, so a DC held across frames is still shown.
+     */
+    if (gRedirBusyFrames < REDIR_BUSY_FRAMES)
+    {
+        if (!UserTryEnterExclusive())
+        {
+            gRedirBusyFrames++;
+            RedirArmTimer(REDIR_FRAME_100NS);
+            return;
+        }
+    }
+    else
+    {
+        UserEnterExclusive();
+    }
+    gRedirBusyFrames = 0;
     RedirFreeDeferred();
     for (Entry = gRedirList.Flink; Entry != &gRedirList; )
     {
@@ -1379,14 +1502,14 @@ UserRedirPresentPending(VOID)
         {
             /* RedirPresentDirty may detach r; the next entry was taken first, and r stays alive while a DC holds it */
             InterlockedIncrement(&r->cRefs);
-            RedirPresentDirty(r, FALSE);
+            RedirPresentDirty(r);
             RedirRelease(r);
         }
         else if (r->Dirty)
         {
             /* Detached, still held by a DC not unbound yet: nothing to show */
-            RECTL rc;
-            RedirTakeDirty(r, &rc);
+            REDIR_DIRTY Dirty;
+            RedirTakeDirty(r, &Dirty);
         }
     }
     /* Bindings that could not be changed, and DCs of freed DCEs, are tried again */

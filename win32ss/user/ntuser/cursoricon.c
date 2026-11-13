@@ -1811,8 +1811,8 @@ UserDrawIconEx(
     IntLPtoDP(pdc, (LPPOINT)&rcDest, 2);
     RECTL_vOffsetRect(&rcDest, pdc->ptlDCOrig.x, pdc->ptlDCOrig.y);
 
-    /* Prepare the underlying surface */
-    DC_vPrepareDCsForBlit(pdc, &rcDest, NULL, NULL);
+    /* Prepare the underlying surface (the icon is drawn into rcDest only) */
+    DC_vPrepareDCsForBlitEx(pdc, &rcDest, NULL, NULL, DCPREP_EXACT_DEST);
 
     /* We now have our destination surface and rectangle */
     psurfDest = pdc->dclevel.pSurface;

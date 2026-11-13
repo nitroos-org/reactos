@@ -12,7 +12,7 @@ VOID FASTCALL UserRedirAddRef(PVOID pvRedir);
 VOID FASTCALL UserRedirRelease(PVOID pvRedir);
 struct _SURFACE *FASTCALL UserRedirSurface(PVOID pvRedir);
 PWND FASTCALL UserRedirWindow(PVOID pvRedir);
-VOID FASTCALL UserRedirReleased(PVOID pvRedir, BOOL bEndPaint);
+VOID FASTCALL UserRedirReleased(PVOID pvRedir);
 VOID FASTCALL UserRedirRetryCount(LONG Delta);
 VOID FASTCALL UserRedirDcRelease(PVOID pvRedir);
 VOID FASTCALL UserRedirWindowMoved(PWND Wnd);

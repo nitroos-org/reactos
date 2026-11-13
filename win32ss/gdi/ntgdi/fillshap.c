@@ -554,7 +554,8 @@ NtGdiPolyPolyDraw( IN HDC hDC,
         return FALSE;
     }
 
-    DC_vPrepareDCsForBlit(dc, NULL, NULL, NULL);
+    /* What the shapes write is added after them (a redirected window presents only that) */
+    DC_vPrepareDCsForBlitEx(dc, NULL, NULL, NULL, DCPREP_ACCUM_DEST);
 
     if (dc->pdcattr->ulDirty_ & (DIRTY_FILL | DC_BRUSH_DIRTY))
         DC_vUpdateFillBrush(dc);
@@ -594,6 +595,55 @@ NtGdiPolyPolyDraw( IN HDC hDC,
         default:
             EngSetLastError(ERROR_INVALID_PARAMETER);
             Ret = FALSE;
+    }
+
+    /*
+     * A redirected window presents what was drawn: every point (and the starting position of the "To" forms) lies in
+     * the logical bounding box of the points, a Bezier lies in the hull of its control points, and the device image of
+     * that box lies in the bounds of its four transformed corners; a one-pixel pen adds a pixel around, a wide pen the
+     * clip bounds. Added after the drawing: the polylines prepare the DC again themselves.
+     */
+    if ((dc->fs & DC_REDIRECTION) && dc->pvRedir)
+    {
+        PBRUSH pbrLine = dc->dclevel.pbrLine;
+
+        if (pbrLine && !(pbrLine->flAttrs & BR_IS_NULL) && IntIsEffectiveWidePen(pbrLine))
+        {
+            DC_vRedirAddDrawn(dc, &dc->erclClip);
+        }
+        else
+        {
+            RECTL rcL;
+            POINTL aptl[4];
+
+            rcL.left = rcL.right = SafePoints[0].x;
+            rcL.top = rcL.bottom = SafePoints[0].y;
+            for (i = 1; i < nPoints; i++)
+            {
+                rcL.left = min(rcL.left, SafePoints[i].x);
+                rcL.right = max(rcL.right, SafePoints[i].x);
+                rcL.top = min(rcL.top, SafePoints[i].y);
+                rcL.bottom = max(rcL.bottom, SafePoints[i].y);
+            }
+            if (iFunc == GdiPolyLineTo || iFunc == GdiPolyBezierTo)
+            {
+                rcL.left = min(rcL.left, dc->pdcattr->ptlCurrent.x);
+                rcL.right = max(rcL.right, dc->pdcattr->ptlCurrent.x);
+                rcL.top = min(rcL.top, dc->pdcattr->ptlCurrent.y);
+                rcL.bottom = max(rcL.bottom, dc->pdcattr->ptlCurrent.y);
+            }
+            aptl[0].x = rcL.left;  aptl[0].y = rcL.top;
+            aptl[1].x = rcL.right; aptl[1].y = rcL.top;
+            aptl[2].x = rcL.left;  aptl[2].y = rcL.bottom;
+            aptl[3].x = rcL.right; aptl[3].y = rcL.bottom;
+            IntLPtoDP(dc, (LPPOINT)aptl, 4);
+            for (i = 0; i < 4; i++)
+            {
+                aptl[i].x += dc->ptlDCOrig.x;
+                aptl[i].y += dc->ptlDCOrig.y;
+            }
+            DC_vRedirAddPoints(dc, aptl, 4);
+        }
     }
 
     /* Cleanup and return */
@@ -657,7 +707,8 @@ IntRectangle(PDC dc,
         DestRect.bottom--;
     }
 
-    DC_vPrepareDCsForBlit(dc, &DestRect, NULL, NULL);
+    /* What the rectangle writes is added below (a redirected window presents only that) */
+    DC_vPrepareDCsForBlitEx(dc, &DestRect, NULL, NULL, DCPREP_ACCUM_DEST);
 
     if (pdcattr->ulDirty_ & (DIRTY_FILL | DC_BRUSH_DIRTY))
         DC_vUpdateFillBrush(dc);
@@ -678,6 +729,16 @@ IntRectangle(PDC dc,
     {
         ret = TRUE;
         goto cleanup;
+    }
+
+    /* The box and a one-pixel pen on its edges; a wide pen reaches further: the clip bounds */
+    if (!(pbrLine->flAttrs & BR_IS_NULL) && IntIsEffectiveWidePen(pbrLine))
+    {
+        DC_vRedirAddDrawn(dc, &dc->erclClip);
+    }
+    else
+    {
+        DC_vRedirAddInclusive(dc, &DestRect, 1);
     }
 
     if (pbrFill)
@@ -1088,7 +1149,28 @@ GreGradientFill(
       IntUpdateBoundsRect(pdc, &rclExtent);
    }
 
-    DC_vPrepareDCsForBlit(pdc, &rclExtent, NULL, NULL);
+    /* A redirected window presents what the fill writes: the rectangles lie within the bounds of their device
+       vertices; triangles count the clip bounds */
+    DC_vPrepareDCsForBlitEx(pdc, &rclExtent, NULL, NULL, DCPREP_ACCUM_DEST);
+    if (ulMode == GRADIENT_FILL_RECT_H || ulMode == GRADIENT_FILL_RECT_V)
+    {
+        RECTL rcDrawn;
+
+        rcDrawn.left = rcDrawn.right = pVertex[0].x;
+        rcDrawn.top = rcDrawn.bottom = pVertex[0].y;
+        for (i = 1; i < nVertex; i++)
+        {
+            rcDrawn.left = min(rcDrawn.left, pVertex[i].x);
+            rcDrawn.right = max(rcDrawn.right, pVertex[i].x);
+            rcDrawn.top = min(rcDrawn.top, pVertex[i].y);
+            rcDrawn.bottom = max(rcDrawn.bottom, pVertex[i].y);
+        }
+        DC_vRedirAddInclusive(pdc, &rcDrawn, 0);
+    }
+    else
+    {
+        DC_vRedirAddDrawn(pdc, &pdc->erclClip);
+    }
 
     psurf = pdc->dclevel.pSurface;
 
