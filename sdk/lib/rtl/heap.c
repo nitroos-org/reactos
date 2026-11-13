@@ -1418,8 +1418,24 @@ Retry:
 
             /* Commit needed amount, in a range that follows a free block if that saves committing a new one */
             FreeEntry = RtlpFindAndCommitPagesAfterFree(Heap, Segment, Size, &FreeSize);
-            if (!FreeEntry)
-                FreeEntry = RtlpFindAndCommitPages(Heap, Segment, &FreeSize, NULL);
+
+            /* That path commits less than the request and counts on the neighbours joining the new pages. The caller
+               takes the entry as it is, so an entry that came out short (a neighbour that did not merge) stays on the
+               free lists as a free block and the request is committed in full the usual way. */
+            if (FreeEntry)
+            {
+                FreeSize = FreeSize >> HEAP_ENTRY_SHIFT;
+                FreeEntry = RtlpCoalesceFreeBlocks(Heap, FreeEntry, &FreeSize, FALSE);
+                RtlpInsertFreeBlock(Heap, FreeEntry, FreeSize);
+                if ((FreeSize << HEAP_ENTRY_SHIFT) >= Size)
+                    return FreeEntry;
+
+                FreeSize = Pages * PAGE_SIZE;
+                if (Pages > Segment->NumberOfUnCommittedPages)
+                    continue;
+            }
+
+            FreeEntry = RtlpFindAndCommitPages(Heap, Segment, &FreeSize, NULL);
 
             /* Coalesce it with adjacent entries */
             if (FreeEntry)
