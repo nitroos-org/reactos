@@ -54,6 +54,9 @@ NtlmAllocate(
         }
     }
 
+    if (buffer == NULL)
+        return NULL;
+
     memcpy(buffer, NTLM_ALLOC_TAG, NTLM_ALLOC_TAG_SIZE);
     buffer = (PBYTE)buffer + NTLM_ALLOC_TAG_SIZE;
 

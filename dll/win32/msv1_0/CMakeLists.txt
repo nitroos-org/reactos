@@ -5,6 +5,7 @@ list(APPEND SOURCE
     lsa.c
     msv1_0.c
     ntlm/global.c
+    ntlm/ntlmv2.c
     ntlm/util.c
     sam.c
     user.c

@@ -9,6 +9,7 @@
 /* INCLUDES ****************************************************************/
 
 #include "precomp.h"
+#include "ntlm/ntlmv2.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(msv1_0);
 
@@ -21,6 +22,8 @@ typedef struct _LOGON_LIST_ENTRY
     UNICODE_STRING LogonDomainName;
     UNICODE_STRING LogonServer;
     SECURITY_LOGON_TYPE LogonType;
+    UCHAR NtOwf[16];        /* NT hash of the password of the logon, when it was given */
+    BOOLEAN HasNtOwf;
 } LOGON_LIST_ENTRY, *PLOGON_LIST_ENTRY;
 
 /* GLOBALS *****************************************************************/
@@ -304,6 +307,12 @@ BuildLm20LogonProfileBuffer(
         Status = ERROR_INTERNAL_ERROR;
         goto done;
     }
+    /* The strings of the profile are read by the caller: their pointers are those of the client's copy */
+    if (LocalBuffer->LogonServer.Buffer != NULL)
+        LocalBuffer->LogonServer.Buffer = (PWSTR)((PBYTE)LocalBuffer->LogonServer.Buffer -
+                                                  (PBYTE)LocalBuffer +
+                                                  (PBYTE)Buffer.ClientBaseAddress);
+
     /* not supported */
     RtlInitUnicodeString(&LocalBuffer->UserParameters, NULL);
     /* Build user flags */
@@ -1241,6 +1250,103 @@ done:
 
 
 /*
+ * ReactOS private (MsV1_0RosNtlmV2Response): the NTLMv2 proofs of the logon session of the caller for a challenge,
+ * for the NTLM client of secur32 when the caller gave no credentials. The caller is judged by its token, not by a
+ * field of the request: a process gets answers for its own logon only.
+ */
+static
+NTSTATUS
+MsvpRosNtlmV2Response(
+    _In_ PLSA_CLIENT_REQUEST ClientRequest,
+    _In_ PVOID ProtocolSubmitBuffer,
+    _In_ ULONG SubmitBufferLength,
+    _Out_ PVOID *ProtocolReturnBuffer,
+    _Out_ PULONG ReturnBufferLength,
+    _Out_ PNTSTATUS ProtocolStatus)
+{
+    PMSV1_0_ROS_NTLMV2_REQUEST Request = ProtocolSubmitBuffer;
+    PMSV1_0_ROS_NTLMV2_RESPONSE Response;
+    PLOGON_LIST_ENTRY LogonEntry;
+    NTLM_CLIENT_BUFFER Buffer;
+    UNICODE_STRING User = {0}, Domain = {0};
+    UCHAR NtOwf[16];
+    LUID LogonId;
+    ULONG Size;
+    NTSTATUS Status;
+
+    *ProtocolStatus = STATUS_SUCCESS;
+
+    if (SubmitBufferLength < sizeof(*Request) ||
+        Request->BlobLength > SubmitBufferLength - sizeof(*Request) ||
+        Request->BlobLength > 0x4000)
+        return STATUS_INVALID_PARAMETER;
+
+    if (DispatchTable.GetClientLogonId == NULL)
+        return STATUS_NOT_SUPPORTED;
+
+    Status = DispatchTable.GetClientLogonId(ClientRequest, &LogonId);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    /* Copy what the answer needs while the list is held */
+    RtlAcquireResourceShared(&LogonListResource, TRUE);
+    LogonEntry = GetLogonByLogonId(&LogonId);
+    if (LogonEntry == NULL || !LogonEntry->HasNtOwf)
+    {
+        RtlReleaseResource(&LogonListResource);
+        return STATUS_NO_SUCH_LOGON_SESSION;
+    }
+    RtlCopyMemory(NtOwf, LogonEntry->NtOwf, sizeof(NtOwf));
+    User.Length = User.MaximumLength = LogonEntry->UserName.Length;
+    Domain.Length = Domain.MaximumLength = LogonEntry->LogonDomainName.Length;
+    User.Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, User.Length + Domain.Length + sizeof(WCHAR));
+    if (User.Buffer == NULL)
+    {
+        RtlReleaseResource(&LogonListResource);
+        RtlSecureZeroMemory(NtOwf, sizeof(NtOwf));
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    Domain.Buffer = (PWSTR)((PUCHAR)User.Buffer + User.Length);
+    RtlCopyMemory(User.Buffer, LogonEntry->UserName.Buffer, User.Length);
+    RtlCopyMemory(Domain.Buffer, LogonEntry->LogonDomainName.Buffer, Domain.Length);
+    RtlReleaseResource(&LogonListResource);
+
+    Size = sizeof(*Response) + User.Length + Domain.Length;
+    Status = NtlmAllocateClientBuffer(ClientRequest, Size, &Buffer);
+    if (!NT_SUCCESS(Status))
+        goto done;
+
+    Response = Buffer.LocalBuffer;
+    Response->MessageType = MsV1_0RosNtlmV2Response;
+    Status = MsvpComputeNtlmv2Response(NtOwf, &User, &Domain,
+                                       Request->ServerChallenge, Request->ClientChallenge,
+                                       (PUCHAR)(Request + 1), Request->BlobLength,
+                                       Response->NtProof, Response->LmProof, Response->SessionBaseKey);
+    if (NT_SUCCESS(Status))
+    {
+        Response->UserNameLength = User.Length;
+        Response->DomainNameLength = Domain.Length;
+        RtlCopyMemory(Response + 1, User.Buffer, User.Length);
+        RtlCopyMemory((PUCHAR)(Response + 1) + User.Length, Domain.Buffer, Domain.Length);
+        Status = NtlmCopyToClientBuffer(ClientRequest, Size, &Buffer);
+    }
+    if (NT_SUCCESS(Status))
+    {
+        *ProtocolReturnBuffer = Buffer.ClientBaseAddress;
+        *ReturnBufferLength = Size;
+    }
+    RtlSecureZeroMemory(Response, Size);
+    /* The client's copy stays when all went well */
+    NtlmFreeClientBuffer(ClientRequest, !NT_SUCCESS(Status), &Buffer);
+
+done:
+    RtlSecureZeroMemory(NtOwf, sizeof(NtOwf));
+    RtlFreeHeap(RtlGetProcessHeap(), 0, User.Buffer);
+    return Status;
+}
+
+
+/*
  * @unimplemented
  */
 NTSTATUS
@@ -1265,6 +1371,14 @@ LsaApCallPackage(IN PLSA_CLIENT_REQUEST ClientRequest,
 
     *ProtocolReturnBuffer = NULL;
     *ReturnBufferLength = 0;
+
+    if ((ULONG)MessageType == MsV1_0RosNtlmV2Response)
+        return MsvpRosNtlmV2Response(ClientRequest,
+                                     ProtocolSubmitBuffer,
+                                     SubmitBufferLength,
+                                     ProtocolReturnBuffer,
+                                     ReturnBufferLength,
+                                     ProtocolStatus);
 
     switch (MessageType)
     {
@@ -1377,7 +1491,14 @@ LsaApCallPackageUntrusted(IN PLSA_CLIENT_REQUEST ClientRequest,
     *ProtocolReturnBuffer = NULL;
     *ReturnBufferLength = 0;
 
-    if (MessageType == MsV1_0ChangePassword)
+    if (MessageType == MsV1_0RosNtlmV2Response)
+        Status = MsvpRosNtlmV2Response(ClientRequest,
+                                       ProtocolSubmitBuffer,
+                                       SubmitBufferLength,
+                                       ProtocolReturnBuffer,
+                                       ReturnBufferLength,
+                                       ProtocolStatus);
+    else if (MessageType == MsV1_0ChangePassword)
         Status = MsvpChangePassword(ClientRequest,
                                     ProtocolSubmitBuffer,
                                     ClientBufferBase,
@@ -1412,6 +1533,9 @@ LsaApInitializePackage(IN ULONG AuthenticationPackageId,
 
     if (!PackageInitialized)
     {
+        /* The allocation helpers of the NTLM code (the profile of a network logon) have no LSA function table
+           here (this lsasrv initializes the package through LsaApInitializePackage): its heap is the process heap */
+        NtlmMode = NtlmUserMode;
         InitializeListHead(&LogonListHead);
         RtlInitializeResource(&LogonListResource);
         EnumCounter = 0;
@@ -1431,6 +1555,7 @@ LsaApInitializePackage(IN ULONG AuthenticationPackageId,
     DispatchTable.CopyToClientBuffer = LsaDispatchTable->CopyToClientBuffer;
     DispatchTable.CopyFromClientBuffer = LsaDispatchTable->CopyFromClientBuffer;
     DispatchTable.IsTrustedClient = LsaDispatchTable->IsTrustedClient;
+    DispatchTable.GetClientLogonId = LsaDispatchTable->GetClientLogonId;
 
     /* Return the package name */
     NameString = DispatchTable.AllocateLsaHeap(sizeof(LSA_STRING));
@@ -1483,6 +1608,7 @@ LsaApLogonTerminated(
         if (LogonEntry->LogonServer.Buffer)
             RtlFreeHeap(RtlGetProcessHeap(), 0, LogonEntry->LogonServer.Buffer);
 
+        RtlSecureZeroMemory(LogonEntry->NtOwf, sizeof(LogonEntry->NtOwf));
         RtlFreeHeap(RtlGetProcessHeap(), 0, LogonEntry);
     }
 }
@@ -2044,6 +2170,9 @@ LsaApLogonUserEx2(IN PLSA_CLIENT_REQUEST ClientRequest,
                                            SubStatus);
         if (!NT_SUCCESS(Status))
             goto done;
+
+        /* The handler has validated the user (and checked the challenge response) already */
+        UserValidated = TRUE;
     }
     else
     {
@@ -2119,6 +2248,12 @@ LsaApLogonUserEx2(IN PLSA_CLIENT_REQUEST ClientRequest,
         }
 
         LogonEntry->LogonType = LogonType;
+
+        /* Keep the NT hash of the password (a logon with a password): the NTLM client of the logged on user
+           answers challenges from it, the hash itself never leaves the package */
+        if (LogonPwdData.PlainPwd != NULL && !LogonPwdData.IsNetwork && !LogonPwdData.IsS4U &&
+            NT_SUCCESS(SystemFunction007(LogonPwdData.PlainPwd, LogonEntry->NtOwf)))
+            LogonEntry->HasNtOwf = TRUE;
 
         RtlAcquireResourceExclusive(&LogonListResource, TRUE);
         InsertTailList(&LogonListHead, &LogonEntry->ListEntry);

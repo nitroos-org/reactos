@@ -8,6 +8,8 @@
 #include "precomp.h"
 #include <svcsid.h>
 
+#include "ntlm/ntlmv2.h"
+
 #include "wine/debug.h"
 WINE_DEFAULT_DEBUG_CHANNEL(msv1_0_sam);
 
@@ -62,6 +64,60 @@ done:
 }
 
 
+/*
+ * The challenge response of a network logon (the NTLM security package of secur32 asks for it). Only an NTLMv2
+ * response is checked: an LM or NTLM v1 response is refused. The account's NT OWF is the one of the empty
+ * password when it has none. On success the user session key (the NTLMv2 session base key) is returned.
+ */
+static
+NTSTATUS
+MsvpCheckNetworkPassword(
+    _In_ PLSA_SAM_PWD_DATA UserPwdData,
+    _In_ PSAMPR_USER_INFO_BUFFER UserInfo)
+{
+    PMSV1_0_LM20_LOGON LogonInfo = UserPwdData->LogonInfo;
+    UCHAR NtOwf[16];
+    UNICODE_STRING EmptyPassword = RTL_CONSTANT_STRING(L"");
+    NTSTATUS Status;
+
+    RtlZeroMemory(&UserPwdData->UserSessionKey, sizeof(UserPwdData->UserSessionKey));
+    RtlZeroMemory(&UserPwdData->LanmanSessionKey, sizeof(UserPwdData->LanmanSessionKey));
+    UserPwdData->LogonType = NetLogonNtKey;
+
+    if (LogonInfo == NULL ||
+        LogonInfo->CaseSensitiveChallengeResponse.Length == 0 ||
+        LogonInfo->CaseSensitiveChallengeResponse.Buffer == NULL)
+        return STATUS_WRONG_PASSWORD;
+
+    if (UserInfo->All.NtPasswordPresent &&
+        UserInfo->All.NtOwfPassword.Buffer != NULL &&
+        UserInfo->All.NtOwfPassword.Length >= sizeof(NtOwf))
+    {
+        RtlCopyMemory(NtOwf, UserInfo->All.NtOwfPassword.Buffer, sizeof(NtOwf));
+    }
+    else if (UserInfo->All.LmPasswordPresent)
+    {
+        /* Only an LM hash is stored: there is no NT hash to check an NTLMv2 response against */
+        return STATUS_WRONG_PASSWORD;
+    }
+    else
+    {
+        Status = SystemFunction007(&EmptyPassword, NtOwf);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
+
+    Status = MsvpCheckNtlmv2Response(LogonInfo->ChallengeToClient,
+                                     &LogonInfo->UserName,
+                                     &LogonInfo->LogonDomainName,
+                                     NtOwf,
+                                     (const UCHAR *)LogonInfo->CaseSensitiveChallengeResponse.Buffer,
+                                     LogonInfo->CaseSensitiveChallengeResponse.Length,
+                                     (PUCHAR)&UserPwdData->UserSessionKey);
+    RtlSecureZeroMemory(NtOwf, sizeof(NtOwf));
+    return Status;
+}
+
 static
 NTSTATUS
 MsvpCheckPassword(
@@ -77,6 +133,10 @@ MsvpCheckPassword(
     NTSTATUS Status;
 
     TRACE("(%p %p)\n", UserPwdData, UserInfo);
+
+    /* A network logon carries a challenge response, not the password */
+    if (UserPwdData->IsNetwork)
+        return MsvpCheckNetworkPassword(UserPwdData, UserInfo);
 
     /* Calculate the LM password and hash for the users password */
     LmPwdString.Length = 15;
@@ -341,7 +401,8 @@ SamValidateNormalUser(
 
     /* Check the password (an S4U logon has none) */
     if (!PwdData->IsS4U &&
-        (UserInfo->All.UserAccountControl & USER_PASSWORD_NOT_REQUIRED) == 0)
+        (PwdData->IsNetwork ||
+         (UserInfo->All.UserAccountControl & USER_PASSWORD_NOT_REQUIRED) == 0))
     {
         Status = MsvpCheckPassword(PwdData, UserInfo);
         if (!NT_SUCCESS(Status))
