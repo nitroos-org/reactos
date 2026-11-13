@@ -297,34 +297,40 @@ static void CRYPT_CreateMachineGuid(void)
 {
 	LONG r;
 	HKEY key;
+	DWORD size;
+	UUID uuid;
+	WCHAR buf[37];
 
-	r = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Cryptography", 0, KEY_ALL_ACCESS | KEY_WOW64_64KEY,
+	/* The value is there on an installed system, which only needs to read it:
+	 * ask for the access that needs, and write access only to create it */
+	r = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Cryptography", 0, KEY_QUERY_VALUE | KEY_WOW64_64KEY,
 			  &key);
-	if (!r)
+	if (r)
+		return;
+	r = RegQueryValueExW(key, L"MachineGuid", NULL, NULL, NULL, &size);
+	RegCloseKey(key);
+	if (r != ERROR_FILE_NOT_FOUND)
+		return;
+
+	r = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Cryptography", 0, KEY_QUERY_VALUE | KEY_SET_VALUE | KEY_WOW64_64KEY,
+			  &key);
+	if (r)
+		return;
+	/* look again: another process may have created it meanwhile */
+	r = RegQueryValueExW(key, L"MachineGuid", NULL, NULL, NULL, &size);
+	if (r == ERROR_FILE_NOT_FOUND && UuidCreate(&uuid) == S_OK)
 	{
-		DWORD size;
-
-		r = RegQueryValueExW(key, L"MachineGuid", NULL, NULL, NULL, &size);
-		if (r == ERROR_FILE_NOT_FOUND)
-		{
-                    UUID uuid;
-                    WCHAR buf[37];
-
-                    if (UuidCreate(&uuid) == S_OK)
-                    {
-                        swprintf(buf, ARRAY_SIZE(buf), L"%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x",
-                                 uuid.Data1, uuid.Data2, uuid.Data3,
-                                 uuid.Data4[0], uuid.Data4[1],
-                                 uuid.Data4[2], uuid.Data4[3],
-                                 uuid.Data4[4], uuid.Data4[5],
-                                 uuid.Data4[6], uuid.Data4[7] );
-                        RegSetValueExW(key, L"MachineGuid", 0, REG_SZ,
-                                       (const BYTE *)buf,
-                                       (lstrlenW(buf)+1)*sizeof(WCHAR));
-                    }
-		}
-		RegCloseKey(key);
+		swprintf(buf, ARRAY_SIZE(buf), L"%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+			 uuid.Data1, uuid.Data2, uuid.Data3,
+			 uuid.Data4[0], uuid.Data4[1],
+			 uuid.Data4[2], uuid.Data4[3],
+			 uuid.Data4[4], uuid.Data4[5],
+			 uuid.Data4[6], uuid.Data4[7] );
+		RegSetValueExW(key, L"MachineGuid", 0, REG_SZ,
+			       (const BYTE *)buf,
+			       (lstrlenW(buf)+1)*sizeof(WCHAR));
 	}
+	RegCloseKey(key);
 }
 
 
