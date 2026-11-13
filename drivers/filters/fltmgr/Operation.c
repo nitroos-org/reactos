@@ -445,7 +445,8 @@ RunPreOperations(_Inout_ PFLTP_IRPCTRL Ctrl,
  */
 static
 BOOLEAN
-RunPostOperations(_Inout_ PFLTP_IRPCTRL Ctrl)
+RunPostOperations(_Inout_ PFLTP_IRPCTRL Ctrl,
+                  _In_ BOOLEAN InCompletionRoutine)
 {
     FLT_POSTOP_CALLBACK_STATUS PostStatus;
     FLT_POST_OPERATION_FLAGS Flags;
@@ -483,9 +484,30 @@ RunPostOperations(_Inout_ PFLTP_IRPCTRL Ctrl)
 
         if (PostStatus == FLT_POSTOP_MORE_PROCESSING_REQUIRED)
         {
-            /* Either the filter is yet to finish, or it did already */
+            BOOLEAN Marked = FALSE;
+
+            /*
+             * Either the filter is yet to finish, or it did already. From the moment the operation is
+             * parked it isn't ours anymore, the IRP may be done and gone before we are back from here. So
+             * what our dispatch routine needs to know has to be in the IRP by then: if the file system has
+             * completed it without pending, the dispatch routine answers STATUS_PENDING and the IRP is marked.
+             */
+            if (InCompletionRoutine && !Ctrl->Irp->PendingReturned)
+            {
+                Ctrl->ParkedSync = TRUE;
+                IoMarkIrpPending(Ctrl->Irp);
+                Marked = TRUE;
+            }
+
             if (InterlockedCompareExchange(&Ctrl->PostState, 1, 0) == 0)
                 return FALSE;
+
+            /* The filter was quicker: the post-operation is done, and so is the parking */
+            if (Marked)
+            {
+                Ctrl->ParkedSync = FALSE;
+                IoGetCurrentIrpStackLocation(Ctrl->Irp)->Control &= ~SL_PENDING_RETURNED;
+            }
         }
 
         FltObjectDereference(Node->Instance);
@@ -545,19 +567,9 @@ IrpCompletion(_In_ PDEVICE_OBJECT DeviceObject,
         return STATUS_MORE_PROCESSING_REQUIRED;
     }
 
-    if (!RunPostOperations(Ctrl))
-    {
-        /*
-         * The filter takes its time. If the file system has completed the IRP before returning
-         * to our dispatch routine, that one has to answer STATUS_PENDING and the IRP gets marked.
-         */
-        if (!Irp->PendingReturned)
-        {
-            Ctrl->ParkedSync = TRUE;
-            IoMarkIrpPending(Irp);
-        }
+    /* The filter may take its time: the IRP is not ours anymore then, see RunPostOperations */
+    if (!RunPostOperations(Ctrl, TRUE))
         return STATUS_MORE_PROCESSING_REQUIRED;
-    }
 
     return FinishIrp(Ctrl, TRUE);
 }
@@ -603,7 +615,7 @@ CompleteInPreOperation(_In_ PFLTP_IRPCTRL Ctrl)
         }
     }
 
-    if (!RunPostOperations(Ctrl))
+    if (!RunPostOperations(Ctrl, FALSE))
     {
         /* The completion goes on in FltCompletePendedPostOperation */
         return STATUS_PENDING;
@@ -694,7 +706,7 @@ SendDown(_In_ PFLTP_IRPCTRL Ctrl)
     for (;;)
     {
         KeClearEvent(&Ctrl->SyncEvent);
-        if (RunPostOperations(Ctrl))
+        if (RunPostOperations(Ctrl, FALSE))
             break;
 
         /* A post-operation went into MORE_PROCESSING_REQUIRED, wait until it is done */
@@ -1051,7 +1063,7 @@ FltpFastIoReadWrite(_In_ PDEVICE_OBJECT DeviceObject,
             Ctrl->Nodes[i].WantPost = FALSE;
         Ctrl->PostIndex = Ctrl->CompleteIndex;
         Ctrl->Data.Flags |= FLTFL_CALLBACK_DATA_POST_OPERATION;
-        Done = RunPostOperations(Ctrl);
+        Done = RunPostOperations(Ctrl, FALSE);
         if (!Done && Ctrl->Parked && Ctrl->Parked->Instance)
         {
             FltObjectDereference(Ctrl->Parked->Instance);
@@ -1093,7 +1105,7 @@ CallLower:
         Ctrl->Data.IoStatus = *IoStatus;
         Ctrl->Data.Flags |= FLTFL_CALLBACK_DATA_POST_OPERATION;
         Ctrl->PostIndex = Ctrl->Count;
-        Done = RunPostOperations(Ctrl);
+        Done = RunPostOperations(Ctrl, FALSE);
         if (!Done && Ctrl->Parked && Ctrl->Parked->Instance)
         {
             FltObjectDereference(Ctrl->Parked->Instance);
@@ -1153,7 +1165,7 @@ FltCompletePendedPostOperation(_In_ PFLT_CALLBACK_DATA CallbackData)
     FltObjectDereference(Node->Instance);
     Node->Instance = NULL;
 
-    if (!RunPostOperations(Ctrl))
+    if (!RunPostOperations(Ctrl, FALSE))
         return;
 
     (VOID)FinishIrp(Ctrl, FALSE);
