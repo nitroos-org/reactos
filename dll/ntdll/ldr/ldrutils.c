@@ -1970,6 +1970,10 @@ LdrpFinalizeAndDeallocateDataTableEntry(IN PLDR_DATA_TABLE_ENTRY Entry)
         Entry->EntryPointActivationContext = INVALID_HANDLE_VALUE;
     }
 
+    /* Release the base dll name string, a copy of its own made when the DLL was mapped */
+    if (Entry->BaseDllName.Buffer && Entry->BaseDllName.Buffer != Entry->FullDllName.Buffer)
+        LdrpFreeUnicodeString(&Entry->BaseDllName);
+
     /* Release the full dll name string */
     if (Entry->FullDllName.Buffer) LdrpFreeUnicodeString(&Entry->FullDllName);
 
