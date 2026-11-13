@@ -294,6 +294,109 @@ TestIpv6Literal(VOID)
     }
 }
 
+static
+VOID
+TestLocalhostInet6(VOID)
+{
+    static const IN6_ADDR Loopback = { { { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 } } };
+    static const struct
+    {
+        PCSTR NodeName;
+        INT Flags;
+    } Tests[] =
+    {
+        { "localhost",  0 },
+        { "localhost",  AI_PASSIVE },
+        { "LOCALHOST",  0 },
+        { "LocalHost",  AI_PASSIVE },
+        { "localhost.", 0 },
+    };
+    INT i;
+    ADDRINFOA Hints, *AddrInfo;
+    INT Error;
+
+    trace("localhost, AF_INET6\n");
+    for (i = 0; i < (INT)RTL_NUMBER_OF(Tests); i++)
+    {
+        ZeroMemory(&Hints, sizeof(Hints));
+        Hints.ai_family = AF_INET6;
+        Hints.ai_flags = Tests[i].Flags;
+        Hints.ai_socktype = SOCK_STREAM;
+        AddrInfo = InvalidPointer;
+        Error = getaddrinfo(Tests[i].NodeName, "80", &Hints, &AddrInfo);
+        ok(Error == 0, "%d: '%s' flags %x returned %d\n", i, Tests[i].NodeName, Tests[i].Flags, Error);
+        if (Error == 0 && AddrInfo && AddrInfo != InvalidPointer)
+        {
+            SOCKADDR_IN6 *Address = (SOCKADDR_IN6 *)AddrInfo->ai_addr;
+
+            ok_dec(AddrInfo->ai_family, AF_INET6);
+            ok_dec(AddrInfo->ai_socktype, SOCK_STREAM);
+            ok_dec((int)AddrInfo->ai_addrlen, (int)sizeof(SOCKADDR_IN6));
+            ok(AddrInfo->ai_next == NULL, "%d: ai_next = %p\n", i, AddrInfo->ai_next);
+            if (AddrInfo->ai_addr && (int)AddrInfo->ai_addrlen == sizeof(SOCKADDR_IN6))
+            {
+                ok_dec(Address->sin6_family, AF_INET6);
+                ok_dec(ntohs(Address->sin6_port), 80);
+                ok(!memcmp(&Address->sin6_addr, &Loopback, sizeof(IN6_ADDR)), "%d: not ::1\n", i);
+                ok_dec((int)Address->sin6_scope_id, 0);
+            }
+            freeaddrinfo(AddrInfo);
+        }
+    }
+
+    /* The wide-character entry point answers the same */
+    {
+        ADDRINFOW HintsW, *AddrInfoW = NULL;
+
+        ZeroMemory(&HintsW, sizeof(HintsW));
+        HintsW.ai_family = AF_INET6;
+        Error = GetAddrInfoW(L"localhost", L"80", &HintsW, &AddrInfoW);
+        ok(Error == 0, "GetAddrInfoW(localhost) returned %d\n", Error);
+        if (Error == 0 && AddrInfoW)
+        {
+            ok_dec(AddrInfoW->ai_family, AF_INET6);
+            if (AddrInfoW->ai_addrlen == sizeof(SOCKADDR_IN6))
+                ok(!memcmp(&((SOCKADDR_IN6 *)AddrInfoW->ai_addr)->sin6_addr, &Loopback, sizeof(IN6_ADDR)), "not ::1\n");
+            FreeAddrInfoW(AddrInfoW);
+        }
+    }
+
+    /* AF_UNSPEC is deliberately IPv4 only here: every result is IPv4 */
+    ZeroMemory(&Hints, sizeof(Hints));
+    Hints.ai_socktype = SOCK_STREAM;
+    AddrInfo = InvalidPointer;
+    Error = getaddrinfo("localhost", "80", &Hints, &AddrInfo);
+    ok(Error == 0, "AF_UNSPEC localhost returned %d\n", Error);
+    if (Error == 0 && AddrInfo && AddrInfo != InvalidPointer)
+    {
+        PADDRINFOA Cur;
+
+        ok_dec(AddrInfo->ai_family, AF_INET);
+        for (Cur = AddrInfo; Cur; Cur = Cur->ai_next)
+            ok(Cur->ai_family == AF_INET, "AF_UNSPEC localhost returned family %d\n", Cur->ai_family);
+        freeaddrinfo(AddrInfo);
+    }
+
+    /* A name is not a numeric host */
+    ZeroMemory(&Hints, sizeof(Hints));
+    Hints.ai_family = AF_INET6;
+    Hints.ai_flags = AI_NUMERICHOST;
+    AddrInfo = InvalidPointer;
+    Error = getaddrinfo("localhost", "80", &Hints, &AddrInfo);
+    ok(Error != 0, "AI_NUMERICHOST localhost succeeded\n");
+    if (Error == 0 && AddrInfo && AddrInfo != InvalidPointer)
+        freeaddrinfo(AddrInfo);
+
+    /* Other names are not touched */
+    ZeroMemory(&Hints, sizeof(Hints));
+    Hints.ai_family = AF_INET6;
+    AddrInfo = InvalidPointer;
+    Error = getaddrinfo("localhostx", "80", &Hints, &AddrInfo);
+    ok(Error != 0, "localhostx for AF_INET6 returned %d\n", Error);
+    if (Error == 0 && AddrInfo && AddrInfo != InvalidPointer)
+        freeaddrinfo(AddrInfo);
+}
+
 START_TEST(getaddrinfo)
 {
     WSADATA WsaData;
@@ -369,6 +472,7 @@ START_TEST(getaddrinfo)
     TestNodeName();
     TestServiceName();
     TestIpv6Literal();
+    TestLocalhostInet6();
     /* TODO: test passing both node name and service name */
     /* TODO: test hints */
 
