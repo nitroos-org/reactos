@@ -1580,7 +1580,7 @@ SECURITY_STATUS SEC_ENTRY ntlm_QueryContextAttributesA(PCtxtHandle phContext,
 /***********************************************************************
  *              ImpersonateSecurityContext
  */
-static SECURITY_STATUS SEC_ENTRY ntlm_ImpersonateSecurityContext(PCtxtHandle phContext)
+SECURITY_STATUS SEC_ENTRY ntlm_ImpersonateSecurityContext(PCtxtHandle phContext)
 {
     PNegoHelper helper;
 
@@ -1599,7 +1599,7 @@ static SECURITY_STATUS SEC_ENTRY ntlm_ImpersonateSecurityContext(PCtxtHandle phC
 /***********************************************************************
  *              RevertSecurityContext
  */
-static SECURITY_STATUS SEC_ENTRY ntlm_RevertSecurityContext(PCtxtHandle phContext)
+SECURITY_STATUS SEC_ENTRY ntlm_RevertSecurityContext(PCtxtHandle phContext)
 {
     PNegoHelper helper;
 
@@ -1617,7 +1617,7 @@ static SECURITY_STATUS SEC_ENTRY ntlm_RevertSecurityContext(PCtxtHandle phContex
 /***********************************************************************
  *              QuerySecurityContextToken
  */
-static SECURITY_STATUS SEC_ENTRY ntlm_QuerySecurityContextToken(PCtxtHandle phContext, HANDLE *Token)
+SECURITY_STATUS SEC_ENTRY ntlm_QuerySecurityContextToken(PCtxtHandle phContext, HANDLE *Token)
 {
     PNegoHelper helper;
 
