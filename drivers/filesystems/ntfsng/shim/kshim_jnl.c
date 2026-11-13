@@ -1709,6 +1709,43 @@ u64 kshim_resv_skip(struct block_device *b, u64 lcn, u64 *next)
 	return end;
 }
 
+/* Non-zero when some free is noted that no complete commit covers yet. */
+int kshim_resv_any(struct block_device *b)
+{
+	struct kshim_jnl *j = b->jnl;
+	unsigned char irql;
+	int any = 0, i;
+	if (!j || !j->nresv)
+		return 0;
+	irql = ngos_spin_lock(&j->resv_lock);
+	for (i = 0; i < j->nresv; i++)
+		if (j->resv[i].tag > j->aux_done) {
+			any = 1;
+			break;
+		}
+	ngos_spin_unlock(&j->resv_lock, irql);
+	return any;
+}
+
+/* Sets in @bits (bit 0 = cluster @first, @nbits bits) the bits of the clusters that are reserved now. */
+void kshim_resv_mark(struct block_device *b, u64 first, u64 nbits, u8 *bits)
+{
+	struct kshim_jnl *j = b->jnl;
+	unsigned char irql;
+	int i;
+	if (!j || !j->nresv)
+		return;
+	irql = ngos_spin_lock(&j->resv_lock);
+	for (i = 0; i < j->nresv; i++) {
+		u64 lo = j->resv[i].lcn, hi = lo + j->resv[i].len, c;
+		if (j->resv[i].tag <= j->aux_done || hi <= first || lo >= first + nbits)
+			continue;
+		for (c = lo > first ? lo : first; c < hi && c < first + nbits; c++)
+			bits[(c - first) >> 3] |= 1 << ((c - first) & 7);
+	}
+	ngos_spin_unlock(&j->resv_lock, irql);
+}
+
 /* A commit that began when the free count was @tag has been completed: every free numbered up to it is covered, whatever aux_done says. */
 void kshim_resv_drop_upto(struct block_device *b, u64 tag)
 {

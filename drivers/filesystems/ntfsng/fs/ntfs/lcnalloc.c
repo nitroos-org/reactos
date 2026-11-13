@@ -401,7 +401,23 @@ struct runlist_element *ntfs_cluster_alloc(struct ntfs_volume *vol, const s64 st
 					break;
 				}
 			} else {
-				lcn = max_empty_bit_range(buf, buf_size >> 3);
+				/*
+				 * The largest free range of the page, without the clusters that uncommitted frees gave back: they are
+				 * not available (kshim_resv_skip), and a reserved range that wins here would hide the usable free
+				 * clusters of the rest of the page (the allocator goes on to the next page when the range ends).
+				 */
+				u8 *scan = buf, *tmp = NULL;
+
+				if (kshim_resv_any(vol->sb->s_bdev)) {
+					tmp = kmalloc(buf_size >> 3, GFP_NOFS);
+					if (tmp) {
+						memcpy(tmp, buf, buf_size >> 3);
+						kshim_resv_mark(vol->sb->s_bdev, (u64)bmp_pos, (u64)buf_size, tmp);
+						scan = tmp;
+					}
+				}
+				lcn = max_empty_bit_range(scan, buf_size >> 3);
+				kfree(tmp);
 				if (lcn < 0)
 					break;
 				has_guess = 1;

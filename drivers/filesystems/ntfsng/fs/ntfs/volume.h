@@ -252,6 +252,8 @@ DEFINE_NVOL_BIT_OPS(SymlinkNative)
  */
 void kshim_resv_note(struct block_device *b, u64 lcn, u64 nr, u64 tag);
 u64 kshim_resv_skip(struct block_device *b, u64 lcn, u64 *next);
+int kshim_resv_any(struct block_device *b);
+void kshim_resv_mark(struct block_device *b, u64 first, u64 nbits, u8 *bits);
 unsigned long kshim_watch_count(atomic64_t *v);
 
 static inline void ntfs_drain_clusters_only(struct ntfs_volume *vol, s64 lcn, s64 nr)
