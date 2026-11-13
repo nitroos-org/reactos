@@ -213,6 +213,7 @@ list(APPEND SOURCE
     RtlPlaceholderCompatibilityMode.c
     RtlHandle.c
     RtlHeapFrontEnd.c
+    RtlHeapValidate.c
     RtlHeapTailCheck.c
     RtlImageDirectoryEntryToData.c
     RtlImageRvaToVa.c

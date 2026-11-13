@@ -194,6 +194,7 @@ extern void func_RtlPlaceholderCompatibilityMode(void);
 extern void func_RtlHandle(void);
 extern void func_RtlHeapFrontEnd(void);
 extern void func_RtlHeapTailCheck(void);
+extern void func_RtlHeapValidate(void);
 extern void func_RtlImageDirectoryEntryToData(void);
 extern void func_RtlImageRvaToVa(void);
 extern void func_RtlInitializeNtUserPfn(void);
@@ -466,6 +467,7 @@ const struct test winetest_testlist[] =
     { "RtlHandle",                      func_RtlHandle },
     { "RtlHeapFrontEnd",                func_RtlHeapFrontEnd },
     { "RtlHeapTailCheck",               func_RtlHeapTailCheck },
+    { "RtlHeapValidate",                func_RtlHeapValidate },
     { "RtlImageDirectoryEntryToData",   func_RtlImageDirectoryEntryToData },
     { "RtlImageRvaToVa",                func_RtlImageRvaToVa },
     { "RtlInitializeNtUserPfn",         func_RtlInitializeNtUserPfn },

@@ -938,7 +938,7 @@ RtlpDeCommitFreeBlock(PHEAP Heap,
     if (!UcrDescriptor)
     {
         DPRINT1("HEAP: Failed to create UCR descriptor\n");
-        RtlpInsertFreeBlock(Heap, FreeEntry, PrecedingSize);
+        RtlpInsertFreeBlock(Heap, FreeEntry, Size);
         return;
     }
 
@@ -1142,10 +1142,13 @@ RtlpInitializeHeapSegment(IN OUT PHEAP Heap,
             FreeEntry->PreviousSize = Segment->Entry.Size;
             FreeEntry->SegmentOffset = SegmentIndex;
             FreeEntry->Flags = HEAP_ENTRY_LAST_ENTRY;
-            FreeEntry->Size = (SegmentCommit >> HEAP_ENTRY_SHIFT) - Segment->Entry.Size;
 
-            /* Register the Free Heap Entry */
-            RtlpInsertFreeBlock(Heap, (PHEAP_FREE_ENTRY)FreeEntry, FreeEntry->Size);
+            /* The size does not fit the USHORT of an entry when the segment is fully committed and
+               bigger than 1 MB: let the insertion cut it into blocks of the maximum size */
+            FreeEntry->Size = 0;
+            RtlpInsertFreeBlock(Heap,
+                                (PHEAP_FREE_ENTRY)FreeEntry,
+                                (SegmentCommit >> HEAP_ENTRY_SHIFT) - Segment->Entry.Size);
         }
     }
 
@@ -3597,6 +3600,20 @@ RtlpValidateHeapSegment(
             if (CurrentEntry->Flags & HEAP_ENTRY_LAST_ENTRY)
             {
                 CurrentEntry = (PHEAP_ENTRY)((PCHAR)CurrentEntry + Size);
+
+                /* RtlpDeCommitFreeBlock can leave two one-unit guard entries before an uncommitted
+                   range, when only two units are left in front of it: both are marked as last */
+                if (UcrDescriptor &&
+                    Size == HEAP_ENTRY_SIZE &&
+                    (PVOID)CurrentEntry != UcrDescriptor->Address &&
+                    (PVOID)(CurrentEntry + 1) == UcrDescriptor->Address &&
+                    CurrentEntry->Size == 1 &&
+                    CurrentEntry->Flags == (HEAP_ENTRY_BUSY | HEAP_ENTRY_LAST_ENTRY) &&
+                    CurrentEntry->PreviousSize == 1 &&
+                    CurrentEntry->SegmentOffset == SegmentOffset)
+                {
+                    CurrentEntry++;
+                }
 
                 if (!UcrDescriptor)
                 {
