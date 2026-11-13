@@ -79,8 +79,11 @@ Test_SetDIBitsToDevice_RleBounds(void)
             {
                 UINT required = format ? 5 + (pixel - 2) / 2 : 5 + pixel - 2;
                 if (cut >= required)
-                    ok(pixels[pixel] == (pixel + 0) * 0x000a0000,
+                    ok(pixels[pixel] == pixel * 0x000a0000,
                        "RLE%u cut %u pixel %u: %08lx\n",
+                       format ? 4 : 8, cut, pixel, pixels[pixel]);
+                else
+                    ok(!pixels[pixel], "RLE%u cut %u decoded past input at pixel %u: %08lx\n",
                        format ? 4 : 8, cut, pixel, pixels[pixel]);
             }
             for (pixel = 8; pixel < 16; pixel++)
