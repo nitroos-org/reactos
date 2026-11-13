@@ -305,11 +305,11 @@ static HRESULT STDMETHODCALLTYPE compositor_CreateLinearEasingFunction(__x_ABI_C
     return E_NOTIMPL;
 }
 
+/* documented: a new, empty CompositionPropertySet of this Compositor (the class of CompositionObject.Properties) */
 static HRESULT STDMETHODCALLTYPE compositor_CreatePropertySet(__x_ABI_CWindows_CUI_CComposition_CICompositor *This, __x_ABI_CWindows_CUI_CComposition_CICompositionPropertySet **result)
 {
-    FIXME("ICompositor::CreatePropertySet: not implemented\n");
-    if (result) *result = NULL;
-    return E_NOTIMPL;
+    TRACE("%p, %p\n", This, result);
+    return comp_new_object(comp_identity(This), K_PROPSET, &IID_ICompositionPropertySet, (void **)result);
 }
 
 static HRESULT STDMETHODCALLTYPE compositor_CreateQuaternionKeyFrameAnimation(__x_ABI_CWindows_CUI_CComposition_CICompositor *This, __x_ABI_CWindows_CUI_CComposition_CIQuaternionKeyFrameAnimation **result)
