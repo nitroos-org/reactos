@@ -11,8 +11,13 @@
  *
  * The real ICompositionDrawingSurfaceInterop has no clean IID / vtable source (see dcomp_nitro.h): the six
  * methods are exposed through the Nitro-private INitroDrawingSurfaceInterop.
+ * A rendering device that is only an ID2D1Device (Office passes one) is accepted too: the D3D11 / DXGI device
+ * under it comes from ID2D1Device2::GetDxgiDevice, and the app's own ID2D1Device is the one the surfaces draw with.
+ * Interface id and member order of ID2D1Device2: microsoft/windows-rs commit cd03f9369a89, file
+ * crates/libs/windows/src/Windows/Win32/d2d/mod.rs (IID a44472e1-8dfb-4e60-8492-6e2861c9ca8b; GetDxgiDevice is the
+ * last member after CreateDeviceContext and FlushDeviceContexts).
  * FIXME: not implemented here: DirectXPixelFormat other than B8G8R8A8UIntNormalized and R8G8B8A8UIntNormalized,
- * devices that are only an ID2D1Device, device-lost handling and RenderingDeviceReplaced, ICompositionDrawingSurface2
+ * device-lost handling and RenderingDeviceReplaced, ICompositionDrawingSurface2
  * (SizeInt32, Resize, Scroll as WinRT members), Trim.
  */
 
@@ -33,6 +38,7 @@
 #include <initguid.h>
 #include <d3d11.h>
 #include <d2d1_1.h>
+#include <d2d1_3.h>
 #include <dxgi.h>
 #include "wine/debug.h"
 
@@ -57,6 +63,7 @@ HRESULT gfx_device_init(struct cobj *dev, IUnknown *device)
     ID3D11Device *d3d = NULL;
     IDXGIDevice *dxgi = NULL;
     ID2D1Device *d2d = NULL;
+    ID2D1Device2 *d2d2 = NULL;
     PFN_D2D1CreateDevice create;
     HMODULE d2d1;
     HRESULT hr;
@@ -67,9 +74,30 @@ HRESULT gfx_device_init(struct cobj *dev, IUnknown *device)
         if (SUCCEEDED(IUnknown_QueryInterface(device, &IID_IDXGIDevice, (void **)&dxgi)))
             IDXGIDevice_QueryInterface(dxgi, &IID_ID3D11Device, (void **)&d3d);
     }
+    if (!d3d && SUCCEEDED(IUnknown_QueryInterface(device, &IID_ID2D1Device, (void **)&d2d)))
+    {
+        /* only a Direct2D device: take the DXGI device it was made from */
+        if (dxgi) { IDXGIDevice_Release(dxgi); dxgi = NULL; }
+        if (SUCCEEDED(IUnknown_QueryInterface(device, &IID_ID2D1Device2, (void **)&d2d2)))
+        {
+            if (SUCCEEDED(ID2D1Device2_GetDxgiDevice(d2d2, &dxgi)))
+            {
+                if (FAILED(IDXGIDevice_QueryInterface(dxgi, &IID_ID3D11Device, (void **)&d3d)))
+                    WARN("the DXGI device %p of the D2D device is not a D3D11 device\n", dxgi);
+            }
+            else
+                WARN("ID2D1Device2::GetDxgiDevice failed\n");
+            ID2D1Device2_Release(d2d2);
+        }
+        if (!d3d)
+        {
+            ID2D1Device_Release(d2d); d2d = NULL;
+            if (dxgi) { IDXGIDevice_Release(dxgi); dxgi = NULL; }
+        }
+    }
     if (!d3d)
     {
-        FIXME("CreateGraphicsDevice: %p is not an ID3D11Device or an IDXGIDevice of one\n", device);
+        FIXME("CreateGraphicsDevice: %p is not an ID3D11Device, an IDXGIDevice of one or an ID2D1Device on one\n", device);
         if (dxgi) IDXGIDevice_Release(dxgi);
         return E_INVALIDARG;
     }
@@ -78,7 +106,7 @@ HRESULT gfx_device_init(struct cobj *dev, IUnknown *device)
         ID3D11Device_Release(d3d);
         return E_INVALIDARG;
     }
-    if (SUCCEEDED(IUnknown_QueryInterface(device, &IID_ID2D1Device, (void **)&d2d)))
+    if (d2d || SUCCEEDED(IUnknown_QueryInterface(device, &IID_ID2D1Device, (void **)&d2d)))
         hr = S_OK;
     else if (!(d2d1 = LoadLibraryW(L"d2d1.dll")) || !(create = (PFN_D2D1CreateDevice)GetProcAddress(d2d1, "D2D1CreateDevice")))
         hr = HRESULT_FROM_WIN32(ERROR_MOD_NOT_FOUND);
