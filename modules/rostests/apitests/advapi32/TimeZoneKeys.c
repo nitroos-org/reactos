@@ -44,6 +44,75 @@ static void TestMuiValue(FN_REGLOADMUISTRINGW pLoad, HKEY Zone, PCWSTR Zonename,
     trace("%ls: %ls differs from %ls (%ls / %ls)\n", Zonename, Mui, Plain, Text, Expected);
 }
 
+/* Windows 10 style: every Display text starts with "(UTC" (the localized ReactOS strings follow it) */
+static void TestDisplayStyle(HKEY Zone, PCWSTR Name)
+{
+    WCHAR Text[256];
+    DWORD Size = sizeof(Text), Type = 0;
+
+    ZeroMemory(Text, sizeof(Text));
+    if (RegQueryValueExW(Zone, L"Display", NULL, &Type, (PBYTE)Text, &Size) == ERROR_SUCCESS && Type == REG_SZ)
+    {
+        ok(!wcsncmp(Text, L"(UTC", 4), "%ls: Display '%ls' is not in the (UTC...) style\n", Name, Text);
+        ok(wcsncmp(Text, L"(GMT", 4), "%ls: Display '%ls' starts with (GMT\n", Name, Text);
+    }
+}
+
+/* The zones with IANA-derived per-year data: the entries are 44 bytes, FirstEntry..LastEntry has no gap */
+static const struct { PCWSTR Name; DWORD First; } g_DynamicZones[] =
+{
+    { L"British Columbia Standard Time", 2000 },
+    { L"Alberta Standard Time", 2000 },
+    { L"Manitoba Standard Time", 2000 },
+    { L"Paraguay Standard Time", 2000 },
+    { L"Morocco Standard Time", 2000 },
+};
+
+static void TestDynamicDst(HKEY Zones)
+{
+    ULONG i;
+    DWORD Year;
+
+    for (i = 0; i < ARRAYSIZE(g_DynamicZones); i++)
+    {
+        HKEY Dst;
+        DWORD First = 0, Last = 0, Size, Type;
+        TZI_FORMAT Tzi;
+        WCHAR Path[128], YearName[16];
+        LONG Err;
+
+        StringCchPrintfW(Path, ARRAYSIZE(Path), L"%ls\\Dynamic DST", g_DynamicZones[i].Name);
+        Err = RegOpenKeyExW(Zones, Path, 0, KEY_QUERY_VALUE, &Dst);
+        ok(Err == ERROR_SUCCESS, "%ls: no Dynamic DST key (%ld)\n", g_DynamicZones[i].Name, Err);
+        if (Err != ERROR_SUCCESS)
+            continue;
+        Size = sizeof(First);
+        Err = RegQueryValueExW(Dst, L"FirstEntry", NULL, &Type, (PBYTE)&First, &Size);
+        ok(Err == ERROR_SUCCESS && Type == REG_DWORD, "%ls: FirstEntry %ld\n", g_DynamicZones[i].Name, Err);
+        Size = sizeof(Last);
+        Err = RegQueryValueExW(Dst, L"LastEntry", NULL, &Type, (PBYTE)&Last, &Size);
+        ok(Err == ERROR_SUCCESS && Type == REG_DWORD, "%ls: LastEntry %ld\n", g_DynamicZones[i].Name, Err);
+        ok(First == g_DynamicZones[i].First, "%ls: FirstEntry %lu\n", g_DynamicZones[i].Name, First);
+        ok(Last >= 2027, "%ls: LastEntry %lu does not cover 2027\n", g_DynamicZones[i].Name, Last);
+
+        for (Year = First; Year <= Last && Year < 3000; Year++)
+        {
+            StringCchPrintfW(YearName, ARRAYSIZE(YearName), L"%lu", Year);
+            Size = sizeof(Tzi);
+            Type = 0;
+            Err = RegQueryValueExW(Dst, YearName, NULL, &Type, (PBYTE)&Tzi, &Size);
+            ok(Err == ERROR_SUCCESS && Type == REG_BINARY && Size == sizeof(Tzi), "%ls %lu: %ld %lu %lu\n",
+               g_DynamicZones[i].Name, Year, Err, Type, Size);
+            if (Err == ERROR_SUCCESS && Size == sizeof(Tzi) && Tzi.StandardDate.wMonth)
+            {
+                ok(Tzi.DaylightDate.wMonth, "%ls %lu: standard date without daylight date\n", g_DynamicZones[i].Name, Year);
+                ok(Tzi.DaylightBias == -60, "%ls %lu: daylight bias %ld\n", g_DynamicZones[i].Name, Year, Tzi.DaylightBias);
+            }
+        }
+        RegCloseKey(Dst);
+    }
+}
+
 START_TEST(TimeZoneKeys)
 {
     HMODULE hAdvapi32 = GetModuleHandleW(L"advapi32.dll");
@@ -84,6 +153,7 @@ START_TEST(TimeZoneKeys)
         TestMuiValue(pLoad, Zone, Name, L"MUI_Display", L"Display");
         TestMuiValue(pLoad, Zone, Name, L"MUI_Dlt", L"Dlt");
         TestMuiValue(pLoad, Zone, Name, L"MUI_Std", L"Std");
+        TestDisplayStyle(Zone, Name);
 
         if (!wcscmp(Name, L"UTC"))
         {
@@ -100,6 +170,8 @@ START_TEST(TimeZoneKeys)
         RegCloseKey(Zone);
     }
     ok(FoundUtc, "no UTC zone\n");
+    if (is_reactos())
+        TestDynamicDst(Zones);
     ok(Count >= 140, "only %lu zones\n", Count);
 
     if (pEnumTz)

@@ -10,339 +10,339 @@ LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
 STRINGTABLE
 BEGIN
     // Dateline Standard Time
-    1000 "(GMT-12:00) International Date Line West"
+    1000 "(UTC-12:00) International Date Line West"
     1001 "Dateline Daylight Time"
     1002 "Dateline Standard Time"
     // Samoa Standard Time
-    1010 "(GMT-11:00) Midway Island, Samoa"
+    1010 "(UTC-11:00) Midway Island, Samoa"
     1011 "Samoa Daylight Time"
     1012 "Samoa Standard Time"
     // Hawaiian Standard Time
-    1020 "(GMT-10:00) Hawaii"
+    1020 "(UTC-10:00) Hawaii"
     1021 "Hawaiian Daylight Time"
     1022 "Hawaiian Standard Time"
     // Alaskan Standard Time
-    1030 "(GMT-09:00) Alaska"
+    1030 "(UTC-09:00) Alaska"
     1031 "Alaskan Daylight Time"
     1032 "Alaskan Standard Time"
     // Pacific Standard Time
-    1040 "(GMT-08:00) Pacific Time (US & Canada)"
+    1040 "(UTC-08:00) Pacific Time (US & Canada)"
     1041 "Pacific Daylight Time"
     1042 "Pacific Standard Time"
     // Mountain Standard Time
-    1050 "(GMT-07:00) Mountain Time (US & Canada)"
+    1050 "(UTC-07:00) Mountain Time (US & Canada)"
     1051 "Mountain Daylight Time"
     1052 "Mountain Standard Time"
     // Mountain Standard Time (Mexico)
-    1060 "(GMT-07:00) Chihuahua, La Paz, Mazatlan"
+    1060 "(UTC-07:00) Chihuahua, La Paz, Mazatlan"
     1061 "Mountain Daylight Time (Mexico)"
     1062 "Mountain Standard Time (Mexico)"
     // US Mountain Standard Time
-    1070 "(GMT-07:00) Arizona"
+    1070 "(UTC-07:00) Arizona"
     1071 "US Mountain Daylight Time"
     1072 "US Mountain Standard Time"
     // Central Standard Time
-    1080 "(GMT-06:00) Central Time (US & Canada)"
+    1080 "(UTC-06:00) Central Time (US & Canada)"
     1081 "Central Daylight Time"
     1082 "Central Standard Time"
     // Canada Central Standard Time
-    1090 "(GMT-06:00) Saskatchewan"
+    1090 "(UTC-06:00) Saskatchewan"
     1091 "Canada Central Daylight Time"
     1092 "Canada Central Standard Time"
     // Central Standard Time (Mexico)
-    1100 "(GMT-06:00) Guadalajara, Mexico City, Monterrey"
+    1100 "(UTC-06:00) Guadalajara, Mexico City, Monterrey"
     1101 "Central Daylight Time (Mexico)"
     1102 "Central Standard Time (Mexico)"
     // Central America Standard Time
-    1110 "(GMT-06:00) Central America"
+    1110 "(UTC-06:00) Central America"
     1111 "Central America Daylight Time"
     1112 "Central America Standard Time"
     // Eastern Standard Time
-    1120 "(GMT-05:00) Eastern Time (US & Canada)"
+    1120 "(UTC-05:00) Eastern Time (US & Canada)"
     1121 "Eastern Daylight Time"
     1122 "Eastern Standard Time"
     // US Eastern Standard Time
-    1130 "(GMT-05:00) Indiana (East)"
+    1130 "(UTC-05:00) Indiana (East)"
     1131 "US Eastern Daylight Time"
     1132 "US Eastern Standard Time"
     // SA Pacific Standard Time
-    1140 "(GMT-05:00) Bogota, Lima, Quito, Rio Branco"
+    1140 "(UTC-05:00) Bogota, Lima, Quito, Rio Branco"
     1141 "SA Pacific Daylight Time"
     1142 "SA Pacific Standard Time"
     // Atlantic Standard Time
-    1150 "(GMT-04:00) Atlantic Time (Canada)"
+    1150 "(UTC-04:00) Atlantic Time (Canada)"
     1151 "Atlantic Daylight Time"
     1152 "Atlantic Standard Time"
     // SA Western Standard Time
-    1160 "(GMT-04:00) La Paz"
+    1160 "(UTC-04:00) La Paz"
     1161 "SA Western Daylight Time"
     1162 "SA Western Standard Time"
     // Pacific SA Standard Time
-    1170 "(GMT-03:00) Santiago"
+    1170 "(UTC-03:00) Santiago"
     1171 "Pacific SA Daylight Time"
     1172 "Pacific SA Standard Time"
     // Newfoundland Standard Time
-    1180 "(GMT-03:30) Newfoundland"
+    1180 "(UTC-03:30) Newfoundland"
     1181 "Newfoundland Daylight Time"
     1182 "Newfoundland Standard Time"
     // E. South America Standard Time
-    1190 "(GMT-03:00) Brasilia"
+    1190 "(UTC-03:00) Brasilia"
     1191 "E. South America Daylight Time"
     1192 "E. South America Standard Time"
     // SA Eastern Standard Time
-    1200 "(GMT-03:00) Buenos Aires, Georgetown"
+    1200 "(UTC-03:00) Buenos Aires, Georgetown"
     1201 "SA Eastern Daylight Time"
     1202 "SA Eastern Standard Time"
     // Greenland Standard Time
-    1210 "(GMT-03:00) Greenland"
+    1210 "(UTC-03:00) Greenland"
     1211 "Greenland Daylight Time"
     1212 "Greenland Standard Time"
     // Mid-Atlantic Standard Time
-    1220 "(GMT-02:00) Mid-Atlantic"
+    1220 "(UTC-02:00) Mid-Atlantic"
     1221 "Mid-Atlantic Daylight Time"
     1222 "Mid-Atlantic Standard Time"
     // Azores Standard Time
-    1230 "(GMT-01:00) Azores"
+    1230 "(UTC-01:00) Azores"
     1231 "Azores Daylight Time"
     1232 "Azores Standard Time"
     // Cape Verde Standard Time
-    1240 "(GMT-01:00) Cape Verde Is."
+    1240 "(UTC-01:00) Cape Verde Is."
     1241 "Cape Verde Daylight Time"
     1242 "Cape Verde Standard Time"
     // GMT Standard Time
-    1250 "(GMT+00:00) Greenwich Mean Time: Dublin, Edinburgh, Lisbon, London"
+    1250 "(UTC+00:00) Greenwich Mean Time: Dublin, Edinburgh, Lisbon, London"
     1251 "GMT Daylight Time"
     1252 "GMT Standard Time"
     // Greenwich Standard Time
-    1260 "(GMT+00:00) Casablanca, Monrovia, Reykjavik"
+    1260 "(UTC+00:00) Casablanca, Monrovia, Reykjavik"
     1261 "Greenwich Daylight Time"
     1262 "Greenwich Standard Time"
     // Central Europe Standard Time
-    1270 "(GMT+01:00) Belgrade, Bratislava, Budapest, Ljubljana, Prague"
+    1270 "(UTC+01:00) Belgrade, Bratislava, Budapest, Ljubljana, Prague"
     1271 "Central Europe Daylight Time"
     1272 "Central Europe Standard Time"
     // Central European Standard Time
-    1280 "(GMT+01:00) Sarajevo, Skopje, Warsaw, Zagreb"
+    1280 "(UTC+01:00) Sarajevo, Skopje, Warsaw, Zagreb"
     1281 "Central European Daylight Time"
     1282 "Central European Standard Time"
     // Romance Standard Time
-    1290 "(GMT+01:00) Brussels, Copenhagen, Madrid, Paris"
+    1290 "(UTC+01:00) Brussels, Copenhagen, Madrid, Paris"
     1291 "Romance Daylight Time"
     1292 "Romance Standard Time"
     // W. Europe Standard Time
-    1300 "(GMT+01:00) Amsterdam, Berlin, Bern, Rome, Stockholm, Vienna"
+    1300 "(UTC+01:00) Amsterdam, Berlin, Bern, Rome, Stockholm, Vienna"
     1301 "W. Europe Daylight Time"
     1302 "W. Europe Standard Time"
     // E. Europe Standard Time
-    1310 "(GMT+02:00) Chisinau"
+    1310 "(UTC+02:00) Chisinau"
     1311 "E. Europe Daylight Time"
     1312 "E. Europe Standard Time"
     // Egypt Standard Time
-    1320 "(GMT+02:00) Cairo"
+    1320 "(UTC+02:00) Cairo"
     1321 "Egypt Daylight Time"
     1322 "Egypt Standard Time"
     // FLE Standard Time
-    1330 "(GMT+02:00) Helsinki, Kyiv, Riga, Sofia, Tallinn, Vilnius"
+    1330 "(UTC+02:00) Helsinki, Kyiv, Riga, Sofia, Tallinn, Vilnius"
     1331 "FLE Daylight Time"
     1332 "FLE Standard Time"
     // GTB Standard Time
-    1340 "(GMT+02:00) Athens, Bucharest"
+    1340 "(UTC+02:00) Athens, Bucharest"
     1341 "GTB Daylight Time"
     1342 "GTB Standard Time"
     // Israel Standard Time
-    1350 "(GMT+02:00) Jerusalem"
+    1350 "(UTC+02:00) Jerusalem"
     1351 "Israel Daylight Time"
     1352 "Israel Standard Time"
     // South Africa Standard Time
-    1360 "(GMT+02:00) Harare, Pretoria"
+    1360 "(UTC+02:00) Harare, Pretoria"
     1361 "South Africa Daylight Time"
     1362 "South Africa Standard Time"
     // Kaliningrad Standard Time
-    1370 "(GMT+02:00) Kaliningrad"
+    1370 "(UTC+02:00) Kaliningrad"
     1371 "RTZ 1 Daylight Time"
     1372 "RTZ 1 Standard Time"
     // Belarus Standard Time
-    1380 "(GMT+03:00) Minsk"
+    1380 "(UTC+03:00) Minsk"
     1381 "Belarus Daylight Time"
     1382 "Belarus Standard Time"
     // Russian Standard Time
-    1390 "(GMT+03:00) Moscow, St. Petersburg"
+    1390 "(UTC+03:00) Moscow, St. Petersburg"
     1391 "RTZ 2 Daylight Time"
     1392 "RTZ 2 Standard Time"
     // Arab Standard Time
-    1400 "(GMT+03:00) Kuwait, Riyadh"
+    1400 "(UTC+03:00) Kuwait, Riyadh"
     1401 "Arab Daylight Time"
     1402 "Arab Standard Time"
     // E. Africa Standard Time
-    1410 "(GMT+03:00) Nairobi"
+    1410 "(UTC+03:00) Nairobi"
     1411 "E. Africa Daylight Time"
     1412 "E. Africa Standard Time"
     // Arabic Standard Time
-    1420 "(GMT+03:00) Baghdad"
+    1420 "(UTC+03:00) Baghdad"
     1421 "Arabic Daylight Time"
     1422 "Arabic Standard Time"
     // Turkey Standard Time
-    1430 "(GMT+03:00) Istanbul"
+    1430 "(UTC+03:00) Istanbul"
     1431 "Turkey Daylight Time"
     1432 "Turkey Standard Time"
     // Iran Standard Time
-    1440 "(GMT+03:30) Tehran"
+    1440 "(UTC+03:30) Tehran"
     1441 "Iran Daylight Time"
     1442 "Iran Standard Time"
     // Arabian Standard Time
-    1450 "(GMT+04:00) Abu Dhabi, Muscat"
+    1450 "(UTC+04:00) Abu Dhabi, Muscat"
     1451 "Arabian Daylight Time"
     1452 "Arabian Standard Time"
     // Caucasus Standard Time
-    1460 "(GMT+04:00) Yerevan"
+    1460 "(UTC+04:00) Yerevan"
     1461 "Caucasus Daylight Time"
     1462 "Caucasus Standard Time"
     // Russia Time Zone 3
-    1470 "(GMT+04:00) Izhevsk, Samara, Volgograd"
+    1470 "(UTC+04:00) Izhevsk, Samara, Volgograd"
     1471 "RTZ 3 Daylight Time"
     1472 "RTZ 3 Standard Time"
     // Afghanistan Standard Time
-    1480 "(GMT+04:30) Kabul"
+    1480 "(UTC+04:30) Kabul"
     1481 "Afghanistan Daylight Time"
     1482 "Afghanistan Standard Time"
     // Ekaterinburg Standard Time
-    1490 "(GMT+05:00) Ekaterinburg"
+    1490 "(UTC+05:00) Ekaterinburg"
     1491 "RTZ 4 Daylight Time"
     1492 "RTZ 4 Standard Time"
     // West Asia Standard Time
-    1500 "(GMT+05:00) Islamabad, Karachi, Tashkent"
+    1500 "(UTC+05:00) Islamabad, Karachi, Tashkent"
     1501 "West Asia Daylight Time"
     1502 "West Asia Standard Time"
     // India Standard Time
-    1510 "(GMT+05:30) Chennai, Kolkata, Mumbai, New Delhi"
+    1510 "(UTC+05:30) Chennai, Kolkata, Mumbai, New Delhi"
     1511 "India Daylight Time"
     1512 "India Standard Time"
     // Nepal Standard Time
-    1520 "(GMT+05:45) Kathmandu"
+    1520 "(UTC+05:45) Kathmandu"
     1521 "Nepal Daylight Time"
     1522 "Nepal Standard Time"
     // Sri Lanka Standard Time
-    1530 "(GMT+05:30) Sri Jayawardenepura"
+    1530 "(UTC+05:30) Sri Jayawardenepura"
     1531 "Sri Lanka Daylight Time"
     1532 "Sri Lanka Standard Time"
     // Central Asia Standard Time
-    1540 "(GMT+06:00) Astana, Dhaka"
+    1540 "(UTC+06:00) Astana, Dhaka"
     1541 "Central Asia Daylight Time"
     1542 "Central Asia Standard Time"
     // Omsk Standard Time
-    1550 "(GMT+06:00) Omsk"
+    1550 "(UTC+06:00) Omsk"
     1551 "Omsk Daylight Time"
     1552 "Omsk Standard Time"
     // Myanmar Standard Time
-    1560 "(GMT+06:30) Yangon (Rangoon)"
+    1560 "(UTC+06:30) Yangon (Rangoon)"
     1561 "Myanmar Daylight Time"
     1562 "Myanmar Standard Time"
     // N. Central Asia Standard Time
-    1570 "(GMT+07:00) Novosibirsk"
+    1570 "(UTC+07:00) Novosibirsk"
     1571 "Novosibirsk Daylight Time"
     1572 "Novosibirsk Standard Time"
     // SE Asia Standard Time
-    1580 "(GMT+07:00) Bangkok, Hanoi, Jakarta"
+    1580 "(UTC+07:00) Bangkok, Hanoi, Jakarta"
     1581 "SE Asia Daylight Time"
     1582 "SE Asia Standard Time"
     // North Asia Standard Time
-    1590 "(GMT+07:00) Krasnoyarsk"
+    1590 "(UTC+07:00) Krasnoyarsk"
     1591 "RTZ 6 Daylight Time"
     1592 "RTZ 6 Standard Time"
     // Tomsk Standard Time
-    1600 "(GMT+07:00) Tomsk"
+    1600 "(UTC+07:00) Tomsk"
     1601 "Tomsk Daylight Time"
     1602 "Tomsk Standard Time"
     // China Standard Time
-    1610 "(GMT+08:00) Beijing, Chongqing, Hong Kong, Urumqi"
+    1610 "(UTC+08:00) Beijing, Chongqing, Hong Kong, Urumqi"
     1611 "China Daylight Time"
     1612 "China Standard Time"
     // Singapore Standard Time
-    1620 "(GMT+08:00) Kuala Lumpur, Singapore"
+    1620 "(UTC+08:00) Kuala Lumpur, Singapore"
     1621 "Singapore Daylight Time"
     1622 "Singapore Standard Time"
     // Taipei Standard Time
-    1630 "(GMT+08:00) Taipei"
+    1630 "(UTC+08:00) Taipei"
     1631 "Taipei Daylight Time"
     1632 "Taipei Standard Time"
     // W. Australia Standard Time
-    1640 "(GMT+08:00) Perth"
+    1640 "(UTC+08:00) Perth"
     1641 "W. Australia Daylight Time"
     1642 "W. Australia Standard Time"
     // Ulaanbaatar Standard Time
-    1650 "(GMT+08:00) Ulaanbaatar"
+    1650 "(UTC+08:00) Ulaanbaatar"
     1651 "Ulaanbaatar Daylight Time"
     1652 "Ulaanbaatar Standard Time"
     // North Asia East Standard Time
-    1660 "(GMT+08:00) Irkutsk"
+    1660 "(UTC+08:00) Irkutsk"
     1661 "RTZ 7 Daylight Time"
     1662 "RTZ 7 Standard Time"
     // Korea Standard Time
-    1670 "(GMT+09:00) Seoul"
+    1670 "(UTC+09:00) Seoul"
     1671 "Korea Daylight Time"
     1672 "Korea Standard Time"
     // Tokyo Standard Time
-    1680 "(GMT+09:00) Osaka, Sapporo, Tokyo"
+    1680 "(UTC+09:00) Osaka, Sapporo, Tokyo"
     1681 "Tokyo Daylight Time"
     1682 "Tokyo Standard Time"
     // Yakutsk Standard Time
-    1690 "(GMT+09:00) Yakutsk"
+    1690 "(UTC+09:00) Yakutsk"
     1691 "RTZ 8 Daylight Time"
     1692 "RTZ 8 Standard Time"
     // AUS Central Standard Time
-    1700 "(GMT+09:30) Darwin"
+    1700 "(UTC+09:30) Darwin"
     1701 "AUS Central Daylight Time"
     1702 "AUS Central Standard Time"
     // Cen. Australia Standard Time
-    1710 "(GMT+09:30) Adelaide"
+    1710 "(UTC+09:30) Adelaide"
     1711 "Cen. Australia Daylight Time"
     1712 "Cen. Australia Standard Time"
     // AUS Eastern Standard Time
-    1720 "(GMT+10:00) Canberra, Melbourne, Sydney"
+    1720 "(UTC+10:00) Canberra, Melbourne, Sydney"
     1721 "AUS Eastern Daylight Time"
     1722 "AUS Eastern Standard Time"
     // E. Australia Standard Time
-    1730 "(GMT+10:00) Brisbane"
+    1730 "(UTC+10:00) Brisbane"
     1731 "E. Australia Daylight Time"
     1732 "E. Australia Standard Time"
     // Tasmania Standard Time
-    1740 "(GMT+10:00) Hobart"
+    1740 "(UTC+10:00) Hobart"
     1741 "Tasmania Daylight Time"
     1742 "Tasmania Standard Time"
     // Vladivostok Standard Time
-    1750 "(GMT+10:00) Vladivostok"
+    1750 "(UTC+10:00) Vladivostok"
     1751 "RTZ 9 Daylight Time"
     1752 "RTZ 9 Standard Time"
     // West Pacific Standard Time
-    1760 "(GMT+10:00) Guam, Port Moresby"
+    1760 "(UTC+10:00) Guam, Port Moresby"
     1761 "West Pacific Daylight Time"
     1762 "West Pacific Standard Time"
     // Central Pacific Standard Time
-    1770 "(GMT+11:00) Solomon Is., New Caledonia"
+    1770 "(UTC+11:00) Solomon Is., New Caledonia"
     1771 "Central Pacific Daylight Time"
     1772 "Central Pacific Standard Time"
     // Russia Time Zone 10
-    1780 "(GMT+11:00) Chokurdakh"
+    1780 "(UTC+11:00) Chokurdakh"
     1781 "RTZ 10 Daylight Time"
     1782 "RTZ 10 Standard Time"
     // Magadan Standard Time
-    1790 "(GMT+11:00) Magadan"
+    1790 "(UTC+11:00) Magadan"
     1791 "Magadan Daylight Time"
     1792 "Magadan Standard Time"
     // Fiji Standard Time
-    1800 "(GMT+12:00) Fiji, Kamchatka, Marshall Is."
+    1800 "(UTC+12:00) Fiji, Kamchatka, Marshall Is."
     1801 "Fiji Daylight Time"
     1802 "Fiji Standard Time"
     // Russia Time Zone 11
-    1810 "(GMT+12:00) Anadyr, Petropavlovsk-Kamchatsky"
+    1810 "(UTC+12:00) Anadyr, Petropavlovsk-Kamchatsky"
     1811 "RTZ 11 Daylight Time"
     1812 "RTZ 11 Standard Time"
     // New Zealand Standard Time
-    1820 "(GMT+12:00) Auckland, Wellington"
+    1820 "(UTC+12:00) Auckland, Wellington"
     1821 "New Zealand Daylight Time"
     1822 "New Zealand Standard Time"
     // Tonga Standard Time
-    1830 "(GMT+13:00) Nuku'alofa"
+    1830 "(UTC+13:00) Nuku'alofa"
     1831 "Tonga Daylight Time"
     1832 "Tonga Standard Time"
     // UTC-11
