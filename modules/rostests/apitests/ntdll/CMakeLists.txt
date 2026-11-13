@@ -53,6 +53,7 @@ list(APPEND SOURCE
     NtAllocateReserveObject.c
     NtWaitCompletionPacket.c
     NtSetIoCompletionEx.c
+    NtRemoveIoCompletionTerminate.c
     NtQueryObjectHandleFlags.c
     RtlWin10Helpers.c
     RtlConvertDeviceFamilyInfo.c
