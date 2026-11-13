@@ -1855,6 +1855,9 @@ CmInitSystem1(VOID)
         KeBugCheckEx(CONFIG_INITIALIZATION_FAILED, 1, 15, Status, 0);
     }
 
+    /* Registry access control mode and the audit shadow check (never fails the boot) */
+    CmpAclInitialize();
+
     /* Free the load options */
     ExFreePoolWithTag(CmpLoadOptions.Buffer, TAG_CM);
 

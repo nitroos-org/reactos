@@ -746,6 +746,13 @@ DATA_SEG("INITDATA") CM_SYSTEM_CONTROL_VECTOR CmControlVector[] =
         NULL
     },
     {
+        L"Session Manager\\Configuration Manager",
+        L"RegistryAclMode",
+        &CmpRegistryAclModeValue,
+        &CmpRegistryAclModeValueLength,
+        &CmpRegistryAclModeValueType
+    },
+    {
         L"Session Manager",
         L"ForceNpxEmulation",
         &DummyData,

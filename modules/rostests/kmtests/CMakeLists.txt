@@ -63,6 +63,7 @@ list(APPEND KMTEST_DRV_SOURCE
     npfs/NpfsVolumeInfo.c
     novp_fsrtl/FsRtlRemoveDotsFromPath.c
     ntos_cc/CcPurgeCacheSection.c
+    ntos_cm/CmAclAudit.c
     ntos_cm/CmRename.c
     ntos_cm/CmSecurity.c
     ntos_ex/ExCallback.c
