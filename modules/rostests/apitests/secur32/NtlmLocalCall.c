@@ -22,6 +22,7 @@
 #include <lmaccess.h>
 #include <lmerr.h>
 #include <ntsecapi.h>
+#include <sddl.h>
 #include <ntlmros.h>
 
 #define SECURITY_WIN32
@@ -433,6 +434,9 @@ static void test_altered_context(void)
     exchange_free(&x);
 }
 
+/* the thread token the package call is made with (set after the connect, reverted after the call) */
+static HANDLE call_token;
+
 /* the private messages of the MSV1_0 package, as secur32 sends them */
 static NTSTATUS msv_call(void *req, ULONG len, void *out, ULONG out_len)
 {
@@ -446,7 +450,9 @@ static NTSTATUS msv_call(void *req, ULONG len, void *out, ULONG out_len)
     st = LsaConnectUntrusted(&lsa);
     if (st) return st;
     st = LsaLookupAuthenticationPackage(lsa, &package, &id);
+    if (!st && call_token && !SetThreadToken(NULL, call_token)) st = STATUS_UNSUCCESSFUL;
     if (!st) st = LsaCallAuthenticationPackage(lsa, id, req, len, &resp, &resp_len, &proto);
+    if (call_token) RevertToSelf();
     if (!st && proto) st = proto;
     if (!st && out)
     {
@@ -534,6 +540,71 @@ static void test_lsa_table(void)
     }
     /* once */
     ok_ntstatus(lsa_accept(context, &token, NULL), STATUS_NOT_FOUND);
+}
+
+/* A client thread whose token the LSA cannot use is never taken for its process: a thread that impersonates at the
+ * anonymous level, and a thread token the LSA may not open, bind nothing */
+static void test_unusable_thread_token(void)
+{
+    static const BYTE challenge[8] = { 3, 1, 4, 1, 5, 9, 2, 6 };
+    SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, FALSE };
+    PSECURITY_DESCRIPTOR sd = NULL;
+    HANDLE me = NULL, anon = NULL, closed = NULL, token = NULL;
+    ULONG64 context;
+    NTSTATUS st;
+
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, &me))
+    {
+        skip("OpenProcessToken failed %lu\n", GetLastError());
+        return;
+    }
+
+    /* anonymous level: the LSA cannot open it (STATUS_CANT_OPEN_ANONYMOUS) */
+    if (DuplicateTokenEx(me, TOKEN_ALL_ACCESS, NULL, SecurityAnonymous, TokenImpersonation, &anon))
+    {
+        ok_ntstatus(lsa_issue(challenge, &context), STATUS_SUCCESS);
+        call_token = anon;
+        st = lsa_bind(context, challenge, NULL);
+        call_token = NULL;
+        ok(st == STATUS_CANT_OPEN_ANONYMOUS, "anonymous level: bind 0x%08lx\n", (unsigned long)st);
+        /* nobody bound it */
+        ok_ntstatus(lsa_accept(context, &token, NULL), STATUS_LOGON_FAILURE);
+        if (token) CloseHandle(token);
+        token = NULL;
+        CloseHandle(anon);
+    }
+    else
+        skip("DuplicateTokenEx failed %lu\n", GetLastError());
+
+    /* a token whose DACL denies the LSA (SYSTEM) */
+    if (ConvertStringSecurityDescriptorToSecurityDescriptorA("D:(D;;GA;;;SY)(A;;GA;;;WD)", SDDL_REVISION_1, &sd, NULL))
+    {
+        sa.lpSecurityDescriptor = sd;
+        if (DuplicateTokenEx(me, TOKEN_ALL_ACCESS, &sa, SecurityImpersonation, TokenImpersonation, &closed))
+        {
+            ok_ntstatus(lsa_issue(challenge, &context), STATUS_SUCCESS);
+            call_token = closed;
+            st = lsa_bind(context, challenge, NULL);
+            call_token = NULL;
+            ok(st == STATUS_ACCESS_DENIED, "unopenable: bind 0x%08lx\n", (unsigned long)st);
+            ok_ntstatus(lsa_accept(context, &token, NULL), STATUS_LOGON_FAILURE);
+            if (token) CloseHandle(token);
+            token = NULL;
+            CloseHandle(closed);
+        }
+        else
+            skip("DuplicateTokenEx failed %lu\n", GetLastError());
+        LocalFree(sd);
+    }
+    else
+        skip("ConvertStringSecurityDescriptorToSecurityDescriptorA failed %lu\n", GetLastError());
+
+    /* the same thread without a token binds its process (control) */
+    ok_ntstatus(lsa_issue(challenge, &context), STATUS_SUCCESS);
+    ok_ntstatus(lsa_bind(context, challenge, NULL), STATUS_SUCCESS);
+    ok_ntstatus(lsa_accept(context, &token, NULL), STATUS_SUCCESS);
+    if (token) CloseHandle(token);
+    CloseHandle(me);
 }
 
 /* the child: issues a context, says its id, waits, then tries to accept it */
@@ -693,6 +764,7 @@ START_TEST(NtlmLocalCall)
     test_other_names();
     test_altered_context();
     test_lsa_table();
+    test_unusable_thread_token();
     test_other_process();
     test_other_user();
 }
