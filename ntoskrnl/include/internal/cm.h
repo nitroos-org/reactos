@@ -258,7 +258,7 @@ typedef struct _CM_KEY_BODY
 typedef struct _CM_NAME_CONTROL_BLOCK
 {
     BOOLEAN Compressed;
-    USHORT RefCount;
+    ULONG RefCount; // shared by every KCB with this name: not 16-bit bounded
     union
     {
         CM_NAME_HASH NameHash;
