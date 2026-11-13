@@ -52,6 +52,8 @@ typedef NTSTATUS (NTAPI *PLSA_COPY_FROM_CLIENT_BUFFER)(PLSA_CLIENT_REQUEST,
 
 typedef BOOLEAN (NTAPI *PLSA_IS_TRUSTED_CLIENT)(PLSA_CLIENT_REQUEST);
 typedef NTSTATUS (NTAPI *PLSA_GET_CLIENT_LOGON_ID)(PLSA_CLIENT_REQUEST, PLUID);
+typedef NTSTATUS (NTAPI *PLSA_OPEN_CLIENT_TOKEN)(PLSA_CLIENT_REQUEST, PHANDLE);
+typedef NTSTATUS (NTAPI *PLSA_GET_CLIENT_PROCESS)(PLSA_CLIENT_REQUEST, PHANDLE);
 
 typedef struct LSA_DISPATCH_TABLE
 {
@@ -68,6 +70,8 @@ typedef struct LSA_DISPATCH_TABLE
     PLSA_COPY_FROM_CLIENT_BUFFER CopyFromClientBuffer;
     PLSA_IS_TRUSTED_CLIENT IsTrustedClient;
     PLSA_GET_CLIENT_LOGON_ID GetClientLogonId;
+    PLSA_OPEN_CLIENT_TOKEN OpenClientToken;
+    PLSA_GET_CLIENT_PROCESS GetClientProcess;
 } LSA_DISPATCH_TABLE, *PLSA_DISPATCH_TABLE;
 
 
@@ -401,24 +405,23 @@ LsapIsTrustedClientRequest(IN PLSA_CLIENT_REQUEST ClientRequest)
 }
 
 
-/* The logon session of the client of the request: of the token its thread impersonates, else of its process */
+/* The token of the client of the request: the one its thread impersonates, else that of its process */
 static
 NTSTATUS
 NTAPI
-LsapGetClientLogonIdRequest(
+LsapOpenClientTokenRequest(
     IN PLSA_CLIENT_REQUEST ClientRequest,
-    OUT PLUID LogonId)
+    OUT PHANDLE TokenHandle)
 {
     PLSAP_LOGON_CONTEXT LogonContext = (PLSAP_LOGON_CONTEXT)ClientRequest;
     OBJECT_ATTRIBUTES ObjectAttributes;
-    TOKEN_STATISTICS Statistics;
     HANDLE ThreadHandle = NULL;
-    HANDLE TokenHandle = NULL;
-    ULONG Size;
+    HANDLE Token = NULL;
     NTSTATUS Status;
 
-    if (LogonContext == NULL)
+    if (LogonContext == NULL || TokenHandle == NULL)
         return STATUS_INVALID_PARAMETER;
+    *TokenHandle = NULL;
 
     InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, NULL);
     Status = NtOpenThread(&ThreadHandle,
@@ -428,22 +431,45 @@ LsapGetClientLogonIdRequest(
     if (NT_SUCCESS(Status))
     {
         Status = NtOpenThreadTokenEx(ThreadHandle,
-                                     TOKEN_QUERY,
+                                     TOKEN_QUERY | TOKEN_DUPLICATE,
                                      TRUE,
                                      0,
-                                     &TokenHandle);
+                                     &Token);
         if (!NT_SUCCESS(Status))
-            TokenHandle = NULL;
+            Token = NULL;
+        NtClose(ThreadHandle);
     }
 
-    if (TokenHandle == NULL)
+    if (Token == NULL)
     {
         Status = NtOpenProcessToken(LogonContext->ClientProcessHandle,
-                                    TOKEN_QUERY,
-                                    &TokenHandle);
+                                    TOKEN_QUERY | TOKEN_DUPLICATE,
+                                    &Token);
         if (!NT_SUCCESS(Status))
-            goto done;
+            return Status;
     }
+
+    *TokenHandle = Token;
+    return STATUS_SUCCESS;
+}
+
+
+/* The logon session of the client of the request: of the token its thread impersonates, else of its process */
+static
+NTSTATUS
+NTAPI
+LsapGetClientLogonIdRequest(
+    IN PLSA_CLIENT_REQUEST ClientRequest,
+    OUT PLUID LogonId)
+{
+    TOKEN_STATISTICS Statistics;
+    HANDLE TokenHandle = NULL;
+    ULONG Size;
+    NTSTATUS Status;
+
+    Status = LsapOpenClientTokenRequest(ClientRequest, &TokenHandle);
+    if (!NT_SUCCESS(Status))
+        return Status;
 
     Status = NtQueryInformationToken(TokenHandle,
                                      TokenStatistics,
@@ -453,12 +479,26 @@ LsapGetClientLogonIdRequest(
     if (NT_SUCCESS(Status))
         *LogonId = Statistics.AuthenticationId;
 
-done:
-    if (TokenHandle != NULL)
-        NtClose(TokenHandle);
-    if (ThreadHandle != NULL)
-        NtClose(ThreadHandle);
+    NtClose(TokenHandle);
     return Status;
+}
+
+
+/* The process of the client of the request (the handle stays the LSA's) */
+static
+NTSTATUS
+NTAPI
+LsapGetClientProcessRequest(
+    IN PLSA_CLIENT_REQUEST ClientRequest,
+    OUT PHANDLE ProcessHandle)
+{
+    PLSAP_LOGON_CONTEXT LogonContext = (PLSAP_LOGON_CONTEXT)ClientRequest;
+
+    if (LogonContext == NULL || ProcessHandle == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    *ProcessHandle = LogonContext->ClientProcessHandle;
+    return STATUS_SUCCESS;
 }
 
 
@@ -574,6 +614,8 @@ LsapInitAuthPackages(VOID)
     DispatchTable.CopyFromClientBuffer = &LsapCopyFromClientBuffer;
     DispatchTable.IsTrustedClient = &LsapIsTrustedClientRequest;
     DispatchTable.GetClientLogonId = &LsapGetClientLogonIdRequest;
+    DispatchTable.OpenClientToken = &LsapOpenClientTokenRequest;
+    DispatchTable.GetClientProcess = &LsapGetClientProcessRequest;
 
     /* Add registered authentication packages */
     Status = RtlQueryRegistryValues(RTL_REGISTRY_CONTROL,
