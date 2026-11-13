@@ -347,16 +347,18 @@ NtGdiEllipse(
 
     IntLPtoDP(dc, (LPPOINT)&RectBounds, 2);
 
+    // Setup for dynamic width and height. The centre is rounded before the DC origin is added: the division
+    // truncates towards zero, so with the origin first a window DC and a memory DC would round negative sums
+    // differently and get ellipses one pixel apart.
+    RadiusX = max((RectBounds.right - RectBounds.left) / 2, 2); // Needs room
+    RadiusY = max((RectBounds.bottom - RectBounds.top) / 2, 2);
+    CenterX = (RectBounds.right + RectBounds.left) / 2 + dc->ptlDCOrig.x;
+    CenterY = (RectBounds.bottom + RectBounds.top) / 2 + dc->ptlDCOrig.y;
+
     RectBounds.left += dc->ptlDCOrig.x;
     RectBounds.right += dc->ptlDCOrig.x;
     RectBounds.top += dc->ptlDCOrig.y;
     RectBounds.bottom += dc->ptlDCOrig.y;
-
-    // Setup for dynamic width and height.
-    RadiusX = max((RectBounds.right - RectBounds.left) / 2, 2); // Needs room
-    RadiusY = max((RectBounds.bottom - RectBounds.top) / 2, 2);
-    CenterX = (RectBounds.right + RectBounds.left) / 2;
-    CenterY = (RectBounds.bottom + RectBounds.top) / 2;
 
     DPRINT("Ellipse 1: Left: %d, Top: %d, Right: %d, Bottom: %d\n",
                RectBounds.left,RectBounds.top,RectBounds.right,RectBounds.bottom);
