@@ -61,6 +61,7 @@ extern void func_CreateFile2(void);
 extern void func_CreateFileDirectory(void);
 extern void func_CreateRemoteThreadEx(void);
 extern void func_CreateThreadFromUserThread(void);
+extern void func_CsrAdoptedThreadChurn(void);
 extern void func_CreateSymbolicLink(void);
 extern void func_CreateProcess(void);
 extern void func_CreateProcessILOnly(void);
@@ -325,6 +326,7 @@ const struct test winetest_testlist[] =
     { "CreateFileDirectory",         func_CreateFileDirectory },
     { "CreateRemoteThreadEx",        func_CreateRemoteThreadEx },
     { "CreateThreadFromUserThread",  func_CreateThreadFromUserThread },
+    { "CsrAdoptedThreadChurn",       func_CsrAdoptedThreadChurn },
     { "CreateSymbolicLink",          func_CreateSymbolicLink },
     { "CreateProcess",               func_CreateProcess },
     { "CreateProcessILOnly",         func_CreateProcessILOnly },
