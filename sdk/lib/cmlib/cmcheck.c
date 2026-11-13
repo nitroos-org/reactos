@@ -68,6 +68,7 @@ typedef struct _CMP_SK_TALLY
     PCMP_SK_TALLY_ENTRY Table;  /* open addressing, Capacity is a power of two */
     ULONG Capacity;
     ULONG Used;
+    ULONG Multiplier;           /* odd, per table: the cell indexes are the hive's, the slots are not foreseeable */
     BOOLEAN Failed;             /* no memory, or more cells than a table may hold: no recount */
     BOOLEAN Partial;            /* a key that may name a cell was not counted: raise, never lower */
 } CMP_SK_TALLY, *PCMP_SK_TALLY;
@@ -85,13 +86,37 @@ CmpSkTallyReset(
     RtlZeroMemory(Tally, sizeof(*Tally));
 }
 
+/*
+ * The cell indexes come from the hive, so a crafted hive can choose them: in
+ * the kernel the multiplier of the hash is drawn per table, so that the cells
+ * of a hive cannot be picked to fall into one run of slots (which would make
+ * every lookup walk the run). Elsewhere (boot loader, host tools) it is fixed.
+ */
+static
+ULONG
+CmpSkTallyNewMultiplier(VOID)
+{
+#if !defined(CMLIB_HOST) && !defined(_BLDR_)
+    LARGE_INTEGER Counter = KeQueryPerformanceCounter(NULL);
+    ULONG Seed = Counter.LowPart ^ (Counter.HighPart * 0x9E3779B9U) ^ (ULONG)(ULONG_PTR)&Counter;
+
+    Seed ^= Seed >> 16;
+    Seed *= 0x85EBCA6BU;
+    Seed ^= Seed >> 13;
+    return Seed | 1;
+#else
+    return 2654435761U;
+#endif
+}
+
 static
 ULONG
 CmpSkTallySlot(
     _In_ HCELL_INDEX Cell,
-    _In_ ULONG Capacity)
+    _In_ ULONG Capacity,
+    _In_ ULONG Multiplier)
 {
-    ULONG Hash = (Cell >> 3) * 2654435761U;
+    ULONG Hash = (Cell >> 3) * Multiplier;
 
     Hash ^= Hash >> 15;
     return Hash & (Capacity - 1);
@@ -103,9 +128,10 @@ PCMP_SK_TALLY_ENTRY
 CmpSkTallyFind(
     _In_ PCMP_SK_TALLY_ENTRY Table,
     _In_ ULONG Capacity,
+    _In_ ULONG Multiplier,
     _In_ HCELL_INDEX Cell)
 {
-    ULONG Slot = CmpSkTallySlot(Cell, Capacity);
+    ULONG Slot = CmpSkTallySlot(Cell, Capacity, Multiplier);
 
     /* The table is at most half full: a free slot is always found */
     while (Table[Slot].Cell != HCELL_NIL && Table[Slot].Cell != Cell)
@@ -124,6 +150,8 @@ CmpSkTallyGrow(
     NewCapacity = Tally->Capacity ? Tally->Capacity * 2 : CMP_SK_TALLY_FIRST_CAPACITY;
     if (NewCapacity > CMP_SK_TALLY_MAX_CAPACITY)
         return FALSE;
+    if (!Tally->Multiplier)
+        Tally->Multiplier = CmpSkTallyNewMultiplier();
     NewTable = CmpAllocate(NewCapacity * sizeof(CMP_SK_TALLY_ENTRY), TRUE, TAG_CM);
     if (!NewTable)
         return FALSE;
@@ -136,7 +164,7 @@ CmpSkTallyGrow(
     {
         if (Tally->Table[i].Cell == HCELL_NIL)
             continue;
-        Entry = CmpSkTallyFind(NewTable, NewCapacity, Tally->Table[i].Cell);
+        Entry = CmpSkTallyFind(NewTable, NewCapacity, Tally->Multiplier, Tally->Table[i].Cell);
         *Entry = Tally->Table[i];
     }
     if (Tally->Table)
@@ -159,7 +187,7 @@ CmpSkTallyAdd(
         return;
     if (Tally->Table)
     {
-        Entry = CmpSkTallyFind(Tally->Table, Tally->Capacity, Cell);
+        Entry = CmpSkTallyFind(Tally->Table, Tally->Capacity, Tally->Multiplier, Cell);
         if (Entry->Cell == Cell)
         {
             if (Entry->Count != MAXULONG)
@@ -176,7 +204,7 @@ CmpSkTallyAdd(
         Tally->Failed = TRUE;
         return;
     }
-    Entry = CmpSkTallyFind(Tally->Table, Tally->Capacity, Cell);
+    Entry = CmpSkTallyFind(Tally->Table, Tally->Capacity, Tally->Multiplier, Cell);
     Entry->Cell = Cell;
     Entry->Count = 1;
     Tally->Used++;
@@ -246,13 +274,41 @@ CmpApplySecurityRecount(
     }
 }
 
+/* The set of cells the ring walks of one load have visited (a tally whose counts are unused) */
+static
+BOOLEAN
+NTAPI
+CmpSkMarkSeen(
+    _In_ PVOID Context,
+    _In_ HCELL_INDEX Cell,
+    _Out_ PBOOLEAN Seen)
+{
+    PCMP_SK_TALLY Visited = Context;
+    PCMP_SK_TALLY_ENTRY Entry;
+
+    *Seen = FALSE;
+    if (Visited->Table)
+    {
+        Entry = CmpSkTallyFind(Visited->Table, Visited->Capacity, Visited->Multiplier, Cell);
+        if (Entry->Cell == Cell)
+        {
+            *Seen = TRUE;
+            return TRUE;
+        }
+    }
+    CmpSkTallyAdd(Visited, Cell);
+    return !Visited->Failed;
+}
+
 /*
  * The cache of a hive being loaded: the root's ring first, then the ring of
- * every cell a key names that is not cached yet. Keys created since a hive got
- * stored descriptors may name cells of a ring the root is not in (the root has
- * none on hives installed before), and those cells must be found again to be
- * shared. Runs after the walk, which has reset every Security that is not a
- * valid cell. Never fails the load.
+ * every cell a key names. Keys created since a hive got stored descriptors may
+ * name cells of a ring the root is not in (the root has none on hives
+ * installed before), and those cells must be found again to be shared. Runs
+ * after the walk, which has reset every Security that is not a valid cell.
+ * The walks share one set of visited cells, so that the work is linear in the
+ * number of cells whatever the rings look like (a hive with many cells in one
+ * ring, each named by its own key, made it quadratic). Never fails the load.
  */
 static
 VOID
@@ -260,16 +316,23 @@ CmpCacheSecurityRings(
     _In_ PHHIVE Hive,
     _In_ PCMP_SK_TALLY Tally)
 {
+    CMP_SK_TALLY Visited;
     ULONG i;
 
     CmpBuildSecurityCache((PCMHIVE)Hive);
     if (Tally->Failed || !Tally->Table)
         return;
+    RtlZeroMemory(&Visited, sizeof(Visited));
     for (i = 0; i < Tally->Capacity; i++)
     {
-        if (Tally->Table[i].Cell != HCELL_NIL)
-            CmpAddSecurityRingToCache((PCMHIVE)Hive, Tally->Table[i].Cell);
+        if (Tally->Table[i].Cell != HCELL_NIL &&
+            !CmpAddSecurityRingToCache((PCMHIVE)Hive, Tally->Table[i].Cell, CmpSkMarkSeen, &Visited))
+        {
+            DPRINT1("Hive 0x%p: no room to walk the security rings, the cache is short\n", Hive);
+            break;
+        }
     }
+    CmpSkTallyReset(&Visited);
 }
 
 #if defined(_BLDR_)

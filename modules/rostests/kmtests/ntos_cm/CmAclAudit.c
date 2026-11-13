@@ -37,6 +37,9 @@ typedef struct _AUDIT_STATS
     ULONG Denials;
     ULONG Entries;
     ULONG Dropped;
+    ULONG StoresDescriptors;
+    ULONG SetupExclusion;
+    ULONG SwitchesIgnored;
 } AUDIT_STATS, *PAUDIT_STATS;
 
 static
@@ -81,6 +84,9 @@ ReadStats(
     Stats->Denials = ReadDword(Key, L"Denials");
     Stats->Entries = ReadDword(Key, L"Entries");
     Stats->Dropped = ReadDword(Key, L"Dropped");
+    Stats->StoresDescriptors = ReadDword(Key, L"StoresDescriptors");
+    Stats->SetupExclusion = ReadDword(Key, L"SetupExclusion");
+    Stats->SwitchesIgnored = ReadDword(Key, L"SwitchesIgnored");
     ZwClose(Key);
 }
 
@@ -671,6 +677,25 @@ START_TEST(CmAclAudit)
     /* Enforcement does not exist yet: ENFORCE runs as AUDIT */
     ok_eq_ulong(Before.Mode, Before.ConfiguredMode == 2 ? 1UL : Before.ConfiguredMode);
     Audit = (Before.Mode == 1);
+
+    /*
+     * The switches that turn storage off for a boot: legacy mode, and setup
+     * (text mode, or SystemSetupInProgress from a key only administrators can
+     * change). A registry value that would turn storage off from a key that
+     * others may change is ignored (bit 1 the mode value, bit 2 the setup
+     * value), and then storage stays on. A booted, installed system runs with
+     * neither switch.
+     */
+    trace("stores descriptors %lu, setup exclusion %lu, switches ignored 0x%lx\n",
+          Before.StoresDescriptors, Before.SetupExclusion, Before.SwitchesIgnored);
+    ok(Before.SwitchesIgnored <= 3, "SwitchesIgnored = 0x%lx\n", Before.SwitchesIgnored);
+    ok_eq_ulong(Before.StoresDescriptors, (Audit && !Before.SetupExclusion) ? 1UL : 0UL);
+    if (Before.SwitchesIgnored & 1)
+        ok(Audit, "the ignored legacy value did not leave the audit on\n");
+    if (Before.SwitchesIgnored & 2)
+        ok(Before.SetupExclusion == 0, "the ignored setup value still excluded setup\n");
+    if (!Audit)
+        ok(Before.SetupExclusion == 0, "setup exclusion in legacy mode\n");
 
     /* Names nobody else uses, so their log lines are this run's */
     Tag = (ULONG)(KeQueryInterruptTime() / 10000);
