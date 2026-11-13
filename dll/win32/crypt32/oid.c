@@ -1571,7 +1571,7 @@ static void init_registered_oid_info(void)
     HKEY root;
 
     err = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Cryptography\\OID\\EncodingType 0\\CryptDllFindOIDInfo",
-                        0, KEY_ALL_ACCESS, &root);
+                        0, KEY_READ, &root);
     if (err != ERROR_SUCCESS) return;
 
     idx = 0;
