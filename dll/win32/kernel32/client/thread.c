@@ -835,6 +835,14 @@ GetThreadGroupAffinity(IN HANDLE hThread,
     THREAD_BASIC_INFORMATION ThreadBasic;
 
     STUB; // FIXME: Real group support
+
+    /* A NULL output is a parameter error, not something to write through */
+    if (!GroupAffinity)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
     Status = NtQueryInformationThread(hThread,
                                       ThreadBasicInformation,
                                       &ThreadBasic,
