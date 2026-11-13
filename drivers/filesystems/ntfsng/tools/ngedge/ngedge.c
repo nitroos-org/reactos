@@ -8,7 +8,7 @@
  *
  * usage: ngedge DIR TEST [ARG]
  *   TEST: rename-subtree | rename-cycle | delete-open-stream | dir-async | size-race | cache-mix | parallel
- *         | stream-reuse | replace | junction-dos | prealloc | commit-race | prealloc-space | read-pattern FILE | all
+ *         | stream-reuse | replace | free-reuse | junction-dos | prealloc | commit-race | prealloc-space | read-pattern FILE | all
  *         (prealloc-space measures free space, so it is not part of "all": run it on an otherwise idle volume)
  *   One NGE: line per check, NGE:DONE pass=N fail=M at the end.  A test that hangs leaves the
  *   machine to the harness timeout (the watchdog prints NGE:HANG first when it still can).
@@ -747,6 +747,75 @@ static void t_replace(void)
     report("replace-cached-target", ok == 50, "%lu of 50 replaced (the offline check counts orphan records)", ok);
 }
 
+/* ---------------------------------------------------------------- clusters freed by a delete, reused at once */
+#define FR_SIZE (5 * 4096 + 100)
+#define FR_LIVE 24
+
+static void fr_fill(unsigned char *b, DWORD id, DWORD ver)
+{
+    DWORD i;
+    for (i = 0; i < FR_SIZE; i++)
+        b[i] = (unsigned char)((id * 131 + ver * 17 + i * 7 + (i >> 8)) & 0xff);
+}
+
+static void t_free_reuse(void)
+{
+    static unsigned char buf[FR_SIZE], chk[FR_SIZE];
+    DWORD ver[FR_LIVE] = { 0 }, id, round, n, bad = 0, wrong = 0, checked = 0;
+    WCHAR f[MAX_PATH];
+    HANDLE h;
+    DWORD i;
+    LARGE_INTEGER t0, t1, fq;
+    double us = 0;
+    QueryPerformanceFrequency(&fq);
+
+    /* A pool of live files that is renewed one file at a time (delete, then create at once), with every file verified now and then:
+       a cluster handed to a new file while the old owner's delete is not committed would corrupt one of them */
+    for (id = 0; id < FR_LIVE; id++)
+    {
+        _snwprintf(f, MAX_PATH, L"%s\\fr-%lu.dat", Dir, id);
+        fr_fill(buf, id, 0);
+        if (!putfile(f, buf, FR_SIZE))
+            bad++;
+    }
+    for (round = 0; round < 400; round++)
+    {
+        id = (round * 7) % FR_LIVE;
+        _snwprintf(f, MAX_PATH, L"%s\\fr-%lu.dat", Dir, id);
+        QueryPerformanceCounter(&t0);
+        if (round & 1)
+            DeleteFileW(f);
+        ver[id]++;
+        fr_fill(buf, id, ver[id]);
+        if (!putfile(f, buf, FR_SIZE))
+            bad++;
+        QueryPerformanceCounter(&t1);
+        us += (t1.QuadPart - t0.QuadPart) * 1e6 / fq.QuadPart;
+        if (round % 20 == 19)
+        {
+            for (i = 0; i < FR_LIVE; i++)
+            {
+                _snwprintf(f, MAX_PATH, L"%s\\fr-%lu.dat", Dir, i);
+                h = CreateFileW(f, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+                if (h == INVALID_HANDLE_VALUE)
+                {
+                    bad++;
+                    continue;
+                }
+                memset(chk, 0, sizeof(chk));
+                ReadFile(h, chk, sizeof(chk), &n, NULL);
+                CloseHandle(h);
+                fr_fill(buf, i, ver[i]);
+                checked++;
+                if (n != FR_SIZE || memcmp(buf, chk, FR_SIZE))
+                    wrong++;
+            }
+        }
+        InterlockedIncrement(&Current);
+    }
+    report("free-reuse-contents", !bad && !wrong, "%lu file checks, %lu wrong, %lu failed operations; replace cycle %.0f us each", checked, wrong, bad, us / 400);
+}
+
 /* ---------------------------------------------------------------- junction on a DOS-named directory */
 typedef struct
 {
@@ -839,7 +908,7 @@ static void t_pool(void)
         InterlockedIncrement(&Current);
     }
     GlobalMemoryStatus(&ms);
-    report("pool-listing", peak && peak - before < ms.dwTotalPhys / 4096 / 8,
+    report("pool-listing", peak && (peak <= before || peak - before < ms.dwTotalPhys / 4096 / 8),
            "nonpaged pool %lu -> peak %lu pages (%lu MB physical)", before, peak, (ULONG)(ms.dwTotalPhys >> 20));
 }
 
@@ -1202,6 +1271,7 @@ int main(int argc, char **argv)
     RUN("parallel", t_parallel());
     RUN("stream-reuse", t_stream_reuse());
     RUN("replace", t_replace());
+    RUN("free-reuse", t_free_reuse());
     RUN("junction-dos", t_junction_dos());
     RUN("pool", t_pool());
     RUN("prealloc", t_prealloc());
