@@ -26,7 +26,8 @@
  * as non-pageable commitment (MiCommitUser, whose ceiling is RAM less the resident headroom, like the section
  * pages themselves) and returned when it is freed, so a process committing one page per 2 MB of a huge section
  * fails with STATUS_COMMITMENT_LIMIT while RAM is still available. The page directories of the range (at most
- * 2 x 512 pages for the whole system, never freed) and the bitmap are not charged. A process may hold at most a
+ * 2 x 512 pages for the whole system, never freed) and the bitmap are not charged. The resident store pages
+ * of all sections together are capped at 1/32 of physical memory (MiSparseInitializeStore). A process may hold at most a
  * quarter of the range (MI_SPARSE_OWNER_CHUNKS); a reserved section charges nothing else while it is only
  * reserved.
  */
@@ -47,20 +48,21 @@
 /* What one creating process may hold: a quarter of the range (sixteen 8 TB sections) */
 #define MI_SPARSE_OWNER_CHUNKS  (MI_SPARSE_CHUNK_COUNT / 4)
 
+/* Resident store pages and tables are capped at this fraction of physical memory (see MiSparseInitializeStore) */
+#define MI_SPARSE_CAP_DIVISOR   32
+
 /* Keep this many pages for everybody else when taking a page for the store */
 #define MI_SPARSE_PAGE_RESERVE  256
 
-BOOLEAN
-NTAPI
-MmRebalanceMemoryConsumersAndWait(VOID);
-
-/* Rounds a populate waits for free pages before it fails (a balancer pass or at least 10 ms each) */
-#define MI_SPARSE_PAGE_WAITS    200
+/* A populate short of pages sleeps this many rounds of MI_SPARSE_PAGE_WAIT_MS before it fails (see MiSparseGetZeroedPage) */
+#define MI_SPARSE_PAGE_WAITS    50
+#define MI_SPARSE_PAGE_WAIT_MS  10
 
 static KGUARDED_MUTEX MiSparseProtoMutex;
 static RTL_BITMAP MiSparseProtoBitmap;
 static RTL_AVL_TABLE MiSparseOwnerTable;
 static BOOLEAN MiSparseProtoReady;
+static SIZE_T MiSparseStorePageCap;
 static PFN_NUMBER MiSparseZeroPage;
 static PFN_NUMBER MiSparseZeroTable;
 static MMPTE MiSparseZeroPte;
@@ -141,8 +143,14 @@ MiInitializeSparsePrototypePtes(VOID)
 
 /*
  * A page off the free lists, zeroed, not mapped anywhere yet. PFN lock not held on entry or exit. Short of
- * pages, wait for the balancer like the other Mm page takers (a bounded number of rounds; a thread that holds
- * an address space lock only gets short delays, see MmRebalanceMemoryConsumersAndWait). 0 after that.
+ * pages, kick the balancer and sleep a few milliseconds, a bounded number of rounds, then 0.
+ *
+ * Lock-hold: the callers run with MiSparseProtoMutex and the caller's MmSectionCommitMutex held (and, from
+ * NtAllocateVirtualMemory, the address space lock), so this wait is bounded in time (MI_SPARSE_PAGE_WAITS rounds
+ * of MI_SPARSE_PAGE_WAIT_MS, half a second at most) and never waits for a balancer pass to finish
+ * (MmRebalanceMemoryConsumersAndWait does, without a timeout: a pass that needs a lock this thread holds, or
+ * that another thread holds while it waits for one of ours, would never end). Only a real shortage of usable
+ * pages (at most MI_SPARSE_PAGE_RESERVE left) gets here, and the populate then fails cleanly.
  */
 static
 PFN_NUMBER
@@ -152,6 +160,7 @@ MiSparseGetZeroedPage(VOID)
     BOOLEAN Zero;
     KIRQL OldIrql;
     ULONG Color, Retry;
+    LARGE_INTEGER Delay;
 
     for (Retry = 0; ; Retry++)
     {
@@ -181,15 +190,10 @@ MiSparseGetZeroedPage(VOID)
         if ((Retry >= MI_SPARSE_PAGE_WAITS) || (KeGetCurrentIrql() > APC_LEVEL))
             return 0;
 
-        /* A pass ran (TRUE), or the wait was a short delay (FALSE) */
-        if (MmRebalanceMemoryConsumersAndWait() && (MiGetUsablePageCount() <= MI_SPARSE_PAGE_RESERVE))
-        {
-            LARGE_INTEGER Delay;
-
-            /* The pass freed nothing: give the lazy writer a moment, do not spin on passes */
-            Delay.QuadPart = -10 * 10000;
-            KeDelayExecutionThread(KernelMode, FALSE, &Delay);
-        }
+        /* Start a pass and give it time to free pages */
+        MmRebalanceMemoryConsumers();
+        Delay.QuadPart = -(LONGLONG)MI_SPARSE_PAGE_WAIT_MS * 10000;
+        KeDelayExecutionThread(KernelMode, FALSE, &Delay);
     }
 }
 
@@ -258,6 +262,17 @@ MiSparseInitializeStore(VOID)
     RtlClearAllBits(&MiSparseProtoBitmap);
     MiSparseZeroPage = ZeroPage;
     MiSparseZeroTable = ZeroTable;
+
+    /*
+     * System-wide cap on resident store pages and tables: 1/32 of physical memory. The store pages cannot be
+     * paged, and the charge alone (one commit page per store page) lets a process holding one committed page
+     * per 2 MB of a huge section pin about 40 % of RAM. A legitimate user needs about one store page per 512
+     * committed pages of section (a contiguous 1 GB commit: 512 pages and one table), so the cap still allows
+     * committing about 16 times RAM through sparse sections (Java ZGC, MariaDB). A commit that would populate
+     * past the cap fails like one over the commit limit.
+     */
+    MiSparseStorePageCap = MmNumberOfPhysicalPages / MI_SPARSE_CAP_DIVISOR;
+    if (MiSparseStorePageCap < 1024) MiSparseStorePageCap = 1024;
     MiSparseProtoReady = TRUE;
     return STATUS_SUCCESS;
 }
@@ -428,6 +443,14 @@ MiPopulateSparsePrototypePtes(IN PMMPTE FirstPte,
         if (PFN_FROM_PTE(MiAddressToPte((PVOID)CountVa)) == MiSparseZeroPage) Needed++;
     }
     if (Needed == 0) goto Done;
+
+    /* The cap on what the store may hold resident (all sections together) */
+    if ((MiSparseProtoPages + MiSparseProtoTables + Needed) > MiSparseStorePageCap)
+    {
+        DPRINT("Sparse Prototype PTEs: %Iu store pages over the cap of %Iu\n", Needed, MiSparseStorePageCap);
+        Status = STATUS_COMMITMENT_LIMIT;
+        goto Done;
+    }
 
     /* Resident for as long as the section lives: charged like the section pages (RAM less the headroom) */
     if (!MiChargeCommit(Needed, MiCommitUser))
