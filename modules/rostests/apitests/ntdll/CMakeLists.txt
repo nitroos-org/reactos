@@ -261,6 +261,7 @@ list(APPEND SOURCE
     RtlUTF8.c
     RtlUpcaseUnicodeStringToCountedOemString.c
     RtlValidateUnicodeString.c
+    RtlNullAcl.c
     RtlStringSdBounds.c
     FaultContext.c
     PageFaultAddress.c
