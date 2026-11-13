@@ -6,6 +6,7 @@
  */
 
 #include "precomp.h"
+#include <setjmp.h>
 
 #define CHURN_CODE 0xE0000002
 
@@ -408,6 +409,318 @@ static void TestRemoveDuringWalk(LONG Remove, const char *Expected, const char *
     }
 }
 
+/* ---- Walks that do not return: the entries removed after them are freed all the same ---- */
+
+#define LEFT_CODE 0xE0000006
+#define LEFT_JUMPS 10000
+#define LEFT_CHURNS 200000
+#define LEFT_GROWTH (1024 * 1024)
+
+/* Private bytes: a removed entry that is never freed costs a heap block (16-32 bytes plus the heap's header),
+   LEFT_CHURNS of them several MB */
+static SIZE_T PrivateBytes(void)
+{
+    VM_COUNTERS Counters;
+
+    if (!NT_SUCCESS(NtQueryInformationProcess(NtCurrentProcess(), ProcessVmCounters, &Counters, sizeof(Counters), NULL)))
+        return 0;
+    return Counters.PagefileUsage;
+}
+
+static void Churn(ULONG Count)
+{
+    PVOID Handle;
+    ULONG i;
+
+    for (i = 0; i < Count; i++)
+    {
+        Handle = RtlAddVectoredExceptionHandler(i & 1, SearchHandler);
+        if (Handle)
+            RtlRemoveVectoredExceptionHandler(Handle);
+    }
+}
+
+static DWORD WINAPI ChurnThreadCount(PVOID Parameter)
+{
+    Churn(PtrToUlong(Parameter));
+    return 0;
+}
+
+/* Churns in the calling thread; whether the private bytes stayed (nearly) the same */
+static void ExpectChurnFlat(const char *What)
+{
+    SIZE_T Before, After;
+
+    Churn(1000);
+    Before = PrivateBytes();
+    Churn(LEFT_CHURNS);
+    After = PrivateBytes();
+    ok(After < Before + LEFT_GROWTH, "%s: %lu handler changes grew the private bytes by %ld KB\n",
+       What, (ULONG)LEFT_CHURNS, (LONG)((SSIZE_T)(After - Before) / 1024));
+    trace("%s: private bytes %lu KB -> %lu KB\n", What, (ULONG)(Before / 1024), (ULONG)(After / 1024));
+}
+
+static LONG NTAPI LeftContinue(PEXCEPTION_POINTERS ExceptionInfo)
+{
+    return ExceptionInfo->ExceptionRecord->ExceptionCode == LEFT_CODE ? EXCEPTION_CONTINUE_EXECUTION : EXCEPTION_CONTINUE_SEARCH;
+}
+
+/* A handler that longjmps out of the dispatcher, LEFT_JUMPS times and more, while another thread adds and removes
+   handlers */
+static jmp_buf LeftJump;
+static volatile LONG LeftJumpCalls;
+
+static LONG NTAPI JumpingHandler(PEXCEPTION_POINTERS ExceptionInfo)
+{
+    if (ExceptionInfo->ExceptionRecord->ExceptionCode != LEFT_CODE)
+        return EXCEPTION_CONTINUE_SEARCH;
+    InterlockedIncrement(&LeftJumpCalls);
+    longjmp(LeftJump, 1);
+}
+
+static void TestLeftByLongjmp(void)
+{
+    volatile ULONG Jumps = 0, Returns = 0;
+    PVOID Jumping, Continue;
+    HANDLE Churner;
+    SIZE_T Before, After;
+
+    LeftJumpCalls = 0;
+    Continue = RtlAddVectoredExceptionHandler(FALSE, LeftContinue);
+    Jumping = RtlAddVectoredExceptionHandler(TRUE, JumpingHandler);
+    ok(Continue && Jumping, "RtlAddVectoredExceptionHandler failed\n");
+    if (!Continue || !Jumping)
+        return;
+
+    Churn(1000);
+    Before = PrivateBytes();
+    Churner = CreateThread(NULL, 0, ChurnThreadCount, UlongToPtr(LEFT_CHURNS), 0, NULL);
+    ok(Churner != NULL, "CreateThread failed: %lu\n", GetLastError());
+    while (Jumps < LEFT_JUMPS || (Churner && WaitForSingleObject(Churner, 0) == WAIT_TIMEOUT))
+    {
+        if (setjmp(LeftJump) == 0)
+        {
+            RaiseException(LEFT_CODE, 0, 0, NULL);
+            Returns++;
+        }
+        else
+        {
+            Jumps++;
+        }
+    }
+    After = PrivateBytes();
+    if (Churner)
+        CloseHandle(Churner);
+
+    ok(Returns == 0, "The exception returned %lu times\n", Returns);
+    ok(Jumps == (ULONG)LeftJumpCalls, "Jumps %lu, handler calls %ld\n", Jumps, LeftJumpCalls);
+    ok(After < Before + LEFT_GROWTH, "%lu jumps out of a handler while %lu handler changes grew the private bytes by %ld KB\n",
+       Jumps, (ULONG)LEFT_CHURNS, (LONG)((SSIZE_T)(After - Before) / 1024));
+    trace("longjmp: %lu jumps, private bytes %lu KB -> %lu KB\n", Jumps, (ULONG)(Before / 1024), (ULONG)(After / 1024));
+
+    ok(RtlRemoveVectoredExceptionHandler(Jumping) != 0, "Remove failed\n");
+
+    /* The walk the last jump left: this thread's next exception drops it */
+    RaiseException(LEFT_CODE, 0, 0, NULL);
+    ExpectChurnFlat("after the last jump");
+    ok(RtlRemoveVectoredExceptionHandler(Continue) != 0, "Remove failed\n");
+}
+
+/* A handler that raises again and longjmps out of the inner dispatch, back into itself: the outer walk returns */
+static jmp_buf InnerJump;
+#define LEFT_INNER_CODE 0xE0000007
+
+static LONG NTAPI NestingHandler(PEXCEPTION_POINTERS ExceptionInfo)
+{
+    if (ExceptionInfo->ExceptionRecord->ExceptionCode == LEFT_INNER_CODE)
+        longjmp(InnerJump, 1);
+    if (ExceptionInfo->ExceptionRecord->ExceptionCode != LEFT_CODE)
+        return EXCEPTION_CONTINUE_SEARCH;
+    if (setjmp(InnerJump) == 0)
+        RaiseException(LEFT_INNER_CODE, 0, 0, NULL);
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+static void TestLeftNested(void)
+{
+    PVOID Nesting;
+    ULONG i;
+
+    Nesting = RtlAddVectoredExceptionHandler(TRUE, NestingHandler);
+    ok(Nesting != NULL, "RtlAddVectoredExceptionHandler failed\n");
+    if (!Nesting)
+        return;
+    for (i = 0; i < 100; i++)
+        RaiseException(LEFT_CODE, 0, 0, NULL);
+    ExpectChurnFlat("after inner walks that were left");
+    ok(RtlRemoveVectoredExceptionHandler(Nesting) != 0, "Remove failed\n");
+}
+
+/* A thread that exits inside a handler */
+#define LEFT_EXIT_CODE 0xE0000008
+
+static LONG NTAPI ExitingHandler(PEXCEPTION_POINTERS ExceptionInfo)
+{
+    if (ExceptionInfo->ExceptionRecord->ExceptionCode == LEFT_EXIT_CODE)
+        ExitThread(7);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+static DWORD WINAPI ExitRaiser(PVOID Parameter)
+{
+    RaiseException(LEFT_EXIT_CODE, 0, 0, NULL);
+    return 1;
+}
+
+static void TestLeftByExitThread(void)
+{
+    PVOID Exiting;
+    HANDLE Thread;
+    DWORD Code;
+    ULONG i;
+
+    Exiting = RtlAddVectoredExceptionHandler(TRUE, ExitingHandler);
+    ok(Exiting != NULL, "RtlAddVectoredExceptionHandler failed\n");
+    if (!Exiting)
+        return;
+    for (i = 0; i < 20; i++)
+    {
+        Thread = CreateThread(NULL, 0, ExitRaiser, NULL, 0, NULL);
+        ok(Thread != NULL, "CreateThread failed: %lu\n", GetLastError());
+        if (!Thread)
+            break;
+        ok(WaitForSingleObject(Thread, WAIT_MS) == WAIT_OBJECT_0, "The thread did not exit\n");
+        Code = 0;
+        GetExitCodeThread(Thread, &Code);
+        ok(Code == 7, "Exit code %lu\n", Code);
+        CloseHandle(Thread);
+    }
+    ok(RtlRemoveVectoredExceptionHandler(Exiting) != 0, "Remove failed\n");
+    ExpectChurnFlat("after ExitThread in a handler");
+}
+
+/* A thread that is terminated inside a handler (no LdrShutdownThread); and one that stays inside a handler, whose
+   entry must stay allocated whatever is removed meanwhile */
+#define LEFT_BLOCK_CODE 0xE0000009
+
+static LONG NTAPI ParkingHandler(PEXCEPTION_POINTERS ExceptionInfo)
+{
+    if (ExceptionInfo->ExceptionRecord->ExceptionCode != LEFT_BLOCK_CODE)
+        return EXCEPTION_CONTINUE_SEARCH;
+    SetEvent(BlockEntered);
+    WaitForSingleObject(BlockRelease, INFINITE);
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+static DWORD WINAPI BlockRaiser(PVOID Parameter)
+{
+    RaiseException(LEFT_BLOCK_CODE, 0, 0, NULL);
+    return 3;
+}
+
+static void TestLeftByTerminateThread(void)
+{
+    PVOID Parking;
+    HANDLE Thread;
+    DWORD Code;
+
+    ResetEvent(BlockEntered);
+    ResetEvent(BlockRelease);
+    Parking = RtlAddVectoredExceptionHandler(TRUE, ParkingHandler);
+    ok(Parking != NULL, "RtlAddVectoredExceptionHandler failed\n");
+    if (!Parking)
+        return;
+
+    /* Alive inside the handler: its walk holds the entry of the handler, which is removed and stays allocated
+       while other removals pile up */
+    Thread = CreateThread(NULL, 0, BlockRaiser, NULL, 0, NULL);
+    ok(Thread != NULL, "CreateThread failed: %lu\n", GetLastError());
+    if (!Thread)
+        return;
+    ok(WaitForSingleObject(BlockEntered, WAIT_MS) == WAIT_OBJECT_0, "The handler was not entered\n");
+    ok(RtlRemoveVectoredExceptionHandler(Parking) != 0, "Remove failed\n");
+    Churn(5000);
+    ok(!HeapReusedBlock(Parking), "The entry of a handler a live walk is inside was freed\n");
+
+    /* Terminated there: its walk is dropped once removals pile up */
+    ok(TerminateThread(Thread, 9), "TerminateThread failed: %lu\n", GetLastError());
+    ok(WaitForSingleObject(Thread, WAIT_MS) == WAIT_OBJECT_0, "The thread did not end\n");
+    Code = 0;
+    GetExitCodeThread(Thread, &Code);
+    ok(Code == 9, "Exit code %lu\n", Code);
+    CloseHandle(Thread);
+    ExpectChurnFlat("after TerminateThread in a handler");
+}
+
+/* Walks on two stacks: a fiber switches away inside a handler, the other fiber takes exceptions meanwhile; the
+   fiber's walk is still on, so its handler's entry must stay allocated */
+#define LEFT_FIBER_CODE 0xE000000A
+static PVOID MainFiber, OtherFiber;
+static volatile LONG FiberCalls, FiberDone;
+static PVOID FiberHandle;
+
+static LONG NTAPI FiberHandler(PEXCEPTION_POINTERS ExceptionInfo)
+{
+    if (ExceptionInfo->ExceptionRecord->ExceptionCode != LEFT_FIBER_CODE)
+        return EXCEPTION_CONTINUE_SEARCH;
+    InterlockedIncrement(&FiberCalls);
+    if (GetCurrentFiber() == OtherFiber)
+        SwitchToFiber(MainFiber);
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+static VOID WINAPI FiberProc(PVOID Parameter)
+{
+    RaiseException(LEFT_FIBER_CODE, 0, 0, NULL);
+    FiberDone = 1;
+    SwitchToFiber(MainFiber);
+}
+
+static DWORD WINAPI FiberTestThread(PVOID Parameter)
+{
+    ULONG i;
+
+    MainFiber = ConvertThreadToFiber(NULL);
+    OtherFiber = CreateFiber(0, FiberProc, NULL);
+    ok(MainFiber && OtherFiber, "Fibers: %p %p, %lu\n", MainFiber, OtherFiber, GetLastError());
+    if (!MainFiber || !OtherFiber)
+        return 1;
+
+    /* The other fiber is inside the handler now */
+    SwitchToFiber(OtherFiber);
+    ok(FiberCalls == 1, "Calls %ld\n", FiberCalls);
+    for (i = 0; i < 10; i++)
+        RaiseException(LEFT_FIBER_CODE, 0, 0, NULL);
+    ok(RtlRemoveVectoredExceptionHandler(FiberHandle) != 0, "Remove failed\n");
+    Churn(5000);
+    ok(!HeapReusedBlock(FiberHandle), "The entry of a handler a fiber's walk is inside was freed\n");
+
+    /* Back into the handler: its walk ends */
+    SwitchToFiber(OtherFiber);
+    ok(FiberDone == 1, "The fiber did not finish\n");
+    DeleteFiber(OtherFiber);
+    ConvertFiberToThread();
+    return 0;
+}
+
+static void TestFibers(void)
+{
+    HANDLE Thread;
+
+    FiberHandle = RtlAddVectoredExceptionHandler(TRUE, FiberHandler);
+    ok(FiberHandle != NULL, "RtlAddVectoredExceptionHandler failed\n");
+    if (!FiberHandle)
+        return;
+    Thread = CreateThread(NULL, 0, FiberTestThread, NULL, 0, NULL);
+    ok(Thread != NULL, "CreateThread failed: %lu\n", GetLastError());
+    if (!Thread)
+        return;
+    ok(WaitForSingleObject(Thread, WAIT_MS) == WAIT_OBJECT_0, "The fiber thread did not finish\n");
+    CloseHandle(Thread);
+    ok(FiberCalls == 11, "Calls %ld\n", FiberCalls);
+    ExpectChurnFlat("after walks on two fibers");
+}
+
 START_TEST(VectoredHandlerChurn)
 {
     HANDLE Threads[5];
@@ -462,6 +775,11 @@ START_TEST(VectoredHandlerChurn)
     TestRemoveDuringWalk(1, "023", "023");   /* a later one: not called */
     TestRemoveDuringWalk(2, "013", "013");   /* the next one */
     TestRemoveDuringWalk(0, "0213", "213");  /* itself: the walk goes on */
+    TestFibers();
+    TestLeftNested();
+    TestLeftByExitThread();
+    TestLeftByTerminateThread();
+    TestLeftByLongjmp();
     CloseHandle(BlockEntered);
     CloseHandle(BlockRelease);
 }
