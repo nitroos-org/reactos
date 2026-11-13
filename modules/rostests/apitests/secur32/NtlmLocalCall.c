@@ -607,21 +607,17 @@ static void test_unusable_thread_token(void)
     CloseHandle(me);
 }
 
-/* a helper process of the other tests: what MODE says, its answer on stdout; the helper's exit code */
-static DWORD run_helper(const char *mode, DWORD *pid, char *out, DWORD out_size)
+/* a helper process of the other tests, doing what MODE says; its answer comes on the pipe *OUT_R */
+static BOOL start_helper(const char *mode, PROCESS_INFORMATION *pi, HANDLE *out_r)
 {
     SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
-    HANDLE out_r, out_w;
+    HANDLE out_w;
     STARTUPINFOA si;
-    PROCESS_INFORMATION pi;
     char path[MAX_PATH], cmd[MAX_PATH + 32];
-    DWORD got, total = 0, code = 0xdead;
 
-    if (out_size) out[0] = 0;
-    if (pid) *pid = 0;
-    if (!CreatePipe(&out_r, &out_w, &sa, 0))
-        return code;
-    SetHandleInformation(out_r, HANDLE_FLAG_INHERIT, 0);
+    if (!CreatePipe(out_r, &out_w, &sa, 0))
+        return FALSE;
+    SetHandleInformation(*out_r, HANDLE_FLAG_INHERIT, 0);
     GetModuleFileNameA(NULL, path, sizeof(path));
     sprintf(cmd, "\"%s\" NtlmLocalCall", path);
     memset(&si, 0, sizeof(si));
@@ -631,35 +627,107 @@ static DWORD run_helper(const char *mode, DWORD *pid, char *out, DWORD out_size)
     si.hStdOutput = out_w;
     si.hStdError = out_w;
     SetEnvironmentVariableA(CHILD_VAR, mode);
-    if (!CreateProcessA(NULL, cmd, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi))
+    if (!CreateProcessA(NULL, cmd, NULL, NULL, TRUE, 0, NULL, NULL, &si, pi))
     {
         SetEnvironmentVariableA(CHILD_VAR, NULL);
-        CloseHandle(out_r);
+        CloseHandle(*out_r);
         CloseHandle(out_w);
-        return code;
+        return FALSE;
     }
     SetEnvironmentVariableA(CHILD_VAR, NULL);
     CloseHandle(out_w);
-    if (pid) *pid = pi.dwProcessId;
+    return TRUE;
+}
+
+/* what the helper says until the line that starts with PREFIX (any line when NULL) or its end */
+static void read_helper(HANDLE out_r, char *out, DWORD out_size, const char *prefix)
+{
+    DWORD got, total = 0;
+    char *p;
+
+    out[0] = 0;
     while (total + 1 < out_size && ReadFile(out_r, out + total, out_size - 1 - total, &got, NULL) && got)
+    {
         total += got;
-    if (out_size) out[total] = 0;
-    WaitForSingleObject(pi.hProcess, 60000);
-    GetExitCodeProcess(pi.hProcess, &code);
+        out[total] = 0;
+        if (prefix && (p = strstr(out, prefix)) && strchr(p, '\n'))
+            break;
+    }
+}
+
+/* the helper's exit code once it ended */
+static DWORD finish_helper(PROCESS_INFORMATION *pi, HANDLE out_r)
+{
+    DWORD code = 0xdead;
+
+    WaitForSingleObject(pi->hProcess, 60000);
+    GetExitCodeProcess(pi->hProcess, &code);
     CloseHandle(out_r);
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
+    CloseHandle(pi->hProcess);
+    CloseHandle(pi->hThread);
     return code;
+}
+
+/* a helper from its start to its end; its answer in OUT */
+static DWORD run_helper(const char *mode, DWORD *pid, char *out, DWORD out_size)
+{
+    PROCESS_INFORMATION pi;
+    HANDLE out_r;
+
+    out[0] = 0;
+    if (pid) *pid = 0;
+    if (!start_helper(mode, &pi, &out_r))
+        return 0xdead;
+    if (pid) *pid = pi.dwProcessId;
+    read_helper(out_r, out, out_size, NULL);
+    return finish_helper(&pi, out_r);
 }
 
 static const BYTE helper_challenge[8] = { 2, 7, 1, 8, 2, 8, 1, 8 };
 
-/* the helpers: "issue" issues a context, says its id and exits; "accept <id>" tries to accept that context */
+/* issue up to MAX contexts; how many the LSA gave */
+static ULONG fill_table(ULONG max, ULONG64 *ids)
+{
+    ULONG64 context;
+    ULONG n;
+
+    for (n = 0; n < max; n++)
+    {
+        if (lsa_issue(helper_challenge, &context))
+            break;
+        if (ids) ids[n] = context;
+    }
+    return n;
+}
+
+/* the helpers: "issue" issues a context, says its id and exits; "accept <id>" tries to accept that context;
+ * "fill <n>" issues up to n contexts, says how many and exits; "fillwait <n> <event>" does the same, then waits
+ * for the event before it exits */
 static BOOL helper_main(const char *mode)
 {
     ULONG64 context = 0;
-    HANDLE token = NULL;
+    HANDLE token = NULL, event;
+    char name[64];
+    ULONG max;
     NTSTATUS st;
+
+    if (sscanf(mode, "fill %lu", &max) == 1)
+    {
+        printf("LOCALHELPER filled=%lu\n", fill_table(max, NULL));
+        return TRUE;
+    }
+    if (sscanf(mode, "fillwait %lu %63s", &max, name) == 2)
+    {
+        printf("LOCALHELPER filled=%lu\n", fill_table(max, NULL));
+        fflush(stdout);
+        event = OpenEventA(SYNCHRONIZE, FALSE, name);
+        if (event)
+        {
+            WaitForSingleObject(event, 120000);
+            CloseHandle(event);
+        }
+        return TRUE;
+    }
 
     if (!strcmp(mode, "issue"))
     {
@@ -677,6 +745,90 @@ static BOOL helper_main(const char *mode)
         return TRUE;
     }
     return FALSE;
+}
+
+static ULONG helper_filled(const char *out)
+{
+    const char *p = strstr(out, "LOCALHELPER filled=");
+    unsigned long n = 0xffffffff;
+
+    if (p) sscanf(p, "LOCALHELPER filled=%lu", &n);
+    return n;
+}
+
+static void lsa_delete(ULONG64 context)
+{
+    MSV1_0_ROS_NTLM_LOCAL_CONTEXT req = { MsV1_0RosNtlmLocalDelete };
+
+    req.ContextId = context;
+    msv_call(&req, sizeof(req), NULL, 0);
+}
+
+/* The table of the LSA is bounded, but nobody can keep it full for others: the contexts of a process that exited
+ * go at the next message, a process holds at most 1024 and all the processes of a user together at most 2048 */
+static void test_table_limits(void)
+{
+    static ULONG64 mine[1100];
+    PROCESS_INFORMATION pi;
+    HANDLE out_r, event, token = NULL;
+    char out[256], name[64], mode[96];
+    ULONG64 context;
+    ULONG n, i;
+
+    /* processes that filled the table and exited: their contexts are gone, an exchange works */
+    for (i = 0; i < 5; i++)
+    {
+        run_helper("fill 1024", NULL, out, sizeof(out));
+        ok(helper_filled(out) == 1024, "helper %lu issued %lu contexts\n", i, helper_filled(out));
+    }
+    ok_ntstatus(lsa_issue(helper_challenge, &context), STATUS_SUCCESS);
+    ok_ntstatus(lsa_bind(context, helper_challenge, NULL), STATUS_SUCCESS);
+    ok_ntstatus(lsa_accept(context, &token, NULL), STATUS_SUCCESS);
+    if (token) CloseHandle(token);
+    token = NULL;
+    test_local_exchange(ISC_REQ_CONNECTION | ISC_REQ_INTEGRITY, ASC_REQ_CONNECTION | ASC_REQ_INTEGRITY,
+                        SecurityImpersonation, NULL, "after full helpers");
+
+    /* a context of an issuer that exited is gone: a client cannot bind it any more */
+    run_helper("issue", NULL, out, sizeof(out));
+    {
+        unsigned long issue = 1, hi = 0, lo = 0;
+        char *p = strstr(out, "LOCALHELPER issue=");
+
+        ok(p && sscanf(p, "LOCALHELPER issue=%lx id=%8lx%8lx", &issue, &hi, &lo) == 3 && issue == 0,
+           "no context from the helper: %s\n", out);
+        if (p && !issue)
+            ok_ntstatus(lsa_bind(((ULONG64)hi << 32) | lo, helper_challenge, NULL), STATUS_NOT_FOUND);
+    }
+
+    /* per process */
+    n = fill_table(ARRAYSIZE(mine), mine);
+    ok(n == 1024, "this process issued %lu contexts\n", n);
+
+    /* per user: this process and a live helper of the same user */
+    sprintf(name, "ntlmlocalcall_%lu", GetCurrentProcessId());
+    event = CreateEventA(NULL, TRUE, FALSE, name);
+    sprintf(mode, "fillwait 1024 %s", name);
+    if (event && start_helper(mode, &pi, &out_r))
+    {
+        read_helper(out_r, out, sizeof(out), "LOCALHELPER filled=");
+        ok(helper_filled(out) == 1024, "the live helper issued %lu contexts\n", helper_filled(out));
+        run_helper("fill 16", NULL, out, sizeof(out));
+        ok(helper_filled(out) == 0, "a third process of the user issued %lu contexts\n", helper_filled(out));
+        SetEvent(event);
+        finish_helper(&pi, out_r);
+        /* the live helper is gone: room again */
+        run_helper("fill 16", NULL, out, sizeof(out));
+        ok(helper_filled(out) == 16, "after the helper exited a process issued %lu contexts\n", helper_filled(out));
+    }
+    else
+        skip("no live helper %lu\n", GetLastError());
+    if (event) CloseHandle(event);
+
+    for (i = 0; i < n; i++)
+        lsa_delete(mine[i]);
+    ok_ntstatus(lsa_issue(helper_challenge, &context), STATUS_SUCCESS);
+    lsa_delete(context);
 }
 
 /* The issuer of a context is a process, not a process id: a process that is given the id of an issuer that exited
@@ -876,5 +1028,6 @@ START_TEST(NtlmLocalCall)
     test_unusable_thread_token();
     test_other_process();
     test_reused_process_id();
+    test_table_limits();
     test_other_user();
 }
