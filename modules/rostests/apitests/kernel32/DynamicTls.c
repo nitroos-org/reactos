@@ -284,8 +284,13 @@ static VOID TestOldVectorOfLoadingThread(PCSTR Self, PCWSTR DllPath)
         WaitForSingleObject(ProcessInfo.hProcess, 10000);
     }
     ok(GetExitCodeProcess(ProcessInfo.hProcess, &Code), "GetExitCodeProcess failed: %lu\n", GetLastError());
-    ok(Code == OLDVEC_INTACT, "Old TLS vector of the loading thread after a second load: child exit code 0x%lx "
-       "(0x11 changed, 0x12 unreadable, 0x13 not replaced)\n", Code);
+    /* Windows 10 22H2 does not replace the loading thread's vector here (measured: 0x13); only a loader that
+       replaces it must keep the old one readable */
+    if (Code == OLDVEC_NOT_REPLACED)
+        skip("The loader kept the TLS vector of the loading thread: nothing to check\n");
+    else
+        ok(Code == OLDVEC_INTACT, "Old TLS vector of the loading thread after a second load: child exit code 0x%lx "
+           "(0x11 changed, 0x12 unreadable)\n", Code);
     CloseHandle(ProcessInfo.hProcess);
     CloseHandle(ProcessInfo.hThread);
     DeleteFileW(CopyPathW);
