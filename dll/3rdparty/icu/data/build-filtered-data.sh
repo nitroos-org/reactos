@@ -1,7 +1,8 @@
 #!/bin/bash
 # Rebuild data/icudtl.dat: ICU 64.2 data filtered to the locales the ReactOS NLS knows (see README.ReactOS, "Data file").
 #   build-filtered-data.sh WORKDIR LOCALES_FILE OUT_DAT
-# WORKDIR is empty or new; it receives the unpacked ICU sources and the build. Needs Linux, gcc/g++, make, python3, curl, unzip.
+# Env: JOBS (make -j, default nproc).
+# WORKDIR is empty or new; it receives the unpacked ICU sources and the build. Needs Linux, gcc/g++, make, python3, curl.
 #   LOCALES_FILE  one ICU locale name per line (en_GB, sr_Latn_RS, zh_Hant, ...): the locales .NET may enumerate, i.e. those
 #                 for which GetLocaleInfoEx(name, LOCALE_SNAME) succeeds. Their parents and root are kept as data, not listed.
 set -euo pipefail
@@ -11,7 +12,8 @@ base=https://github.com/unicode-org/icu/releases/download/release-64-2
 [ -f src.tgz ]  || curl -sL -o src.tgz  $base/icu4c-64_2-src.tgz
 [ -f data.zip ] || curl -sL -o data.zip $base/icu4c-64_2-data.zip
 echo "627d5d8478e6d96fc8c90fed4851239079a561a6a8b9e48b0892f24e82d31d6c  src.tgz" | sha256sum -c -
-mkdir -p unpack && tar xzf src.tgz -C unpack && unzip -q -o data.zip -d unpack/icu/source
+echo "fba0e89f5b3f285d722a83317647bffee69b6f1eb8d067d5da03c5677c45e510  data.zip" | sha256sum -c -
+mkdir -p unpack && tar xzf src.tgz -C unpack && python3 -I -m zipfile -e data.zip unpack/icu/source
 S=$W/unpack/icu/source
 rm -f "$S/data/in/icudt64l.dat"     # else make copies the prebuilt unfiltered package instead of building from source
 # Filter: only the locale files of the listed locales and their ancestors (includeChildren false: no en_150 just for "en").
@@ -25,7 +27,7 @@ PY
 mkdir -p build && cd build
 ICU_DATA_FILTER_FILE=$W/filter.json $S/runConfigureICU Linux --disable-shared --enable-static \
   --with-data-packaging=archive --disable-samples --disable-tests --disable-extras --disable-layoutex > ../configure.log 2>&1
-make -j"$(nproc)" > ../make.log 2>&1
+make -j"${JOBS:-$(nproc)}" > ../make.log 2>&1
 B=$W/build/data/out/build/icudt64l
 export LD_LIBRARY_PATH=$W/build/lib:$W/build/stubdata
 # The ICU 64.2 filter drops the res_index.res requests (they have no input file), so write them here. Root index =

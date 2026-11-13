@@ -153,4 +153,4 @@ generates `nls/<tag>.nls` (lower-case tag, e.g. `en-in.nls`) like for the first 
   neutral locales (language or language+script tags: `zh-Hant`, `sr-Cyrl`, ...), which the rtl locale table (`sdk/lib/rtl/locale.c`) already names.
 * `ca-ES-valencia`: the CLDR variant `ca-ES-valencia` is the first element of the locale chain.
 * i386 images: kernel32 grows by 0x37000 bytes of `SizeOfImage` (0x3ae000 -> 0x3e5000, i386 Debug), about 2.6 KB per locale (string table + `calendar_data.c`); see `sdk/cmake/baseaddress.cmake`.
-* The ICU data package (`dll/3rdparty/icu/data/icudtl.dat`, 253 names) is NOT regenerated: it lists the locales kernel32 knows; growing it is `build-filtered-data.sh` with the new names (binary change, not part of this round).
+* The ICU data package (`dll/3rdparty/icu/data/icudtl.dat`) was regenerated after this round with `build-filtered-data.sh`: 335 names (253 + 82; 71 of the 85 new kernel32 locales have an ICU 64.2 locale of the same tag, the other 14 are listed in `dll/3rdparty/icu/README.ReactOS`).
