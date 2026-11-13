@@ -1447,8 +1447,10 @@ undo_alloc:
 	if (ntfs_bitmap_clear_bit(vol->lcnbmp_ino, lcn)) {
 		ntfs_error(vol->sb, "Failed to free allocated cluster.%s", es);
 		NVolSetErrors(vol);
-	} else
+	} else {
+		ntfs_drain_clusters(vol, lcn, 1);
 		ntfs_inc_free_clusters(vol, 1);
+	}
 	up_write(&vol->lcnbmp_lock);
 	if (status.mp_rebuilt) {
 		if (ntfs_mapping_pairs_build(vol, (u8 *)a + le16_to_cpu(
