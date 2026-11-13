@@ -64,16 +64,18 @@ endian = 'little'
 [properties]
 needs_exe_wrapper = true
 EOT
-    drivers=$GALLIUM_DRIVERS; vulkan=; llvm_args=-Dllvm=disabled; targets=src/gallium/targets/wgl/libgallium_wgl.dll
+    # The shader disk cache (patch 0003) is only built with llvmpipe, the one driver here that stores
+    # compiled shaders in it; softpipe-only builds keep the cache disabled.
+    drivers=$GALLIUM_DRIVERS; vulkan=; llvm_args=-Dllvm=disabled; shader_cache=disabled; targets=src/gallium/targets/wgl/libgallium_wgl.dll
     if [ "$arch" = amd64 ] && [ "$AMD64_LLVM" = 1 ]; then
         "$HERE/build-llvm.sh" "$W" amd64
-        drivers=llvmpipe,softpipe; vulkan=swrast; llvm_args="-Dllvm=enabled -Dshared-llvm=disabled"
+        drivers=llvmpipe,softpipe; vulkan=swrast; llvm_args="-Dllvm=enabled -Dshared-llvm=disabled"; shader_cache=enabled
         targets="$targets src/gallium/targets/lavapipe/vulkan_lvp.dll src/gallium/targets/lavapipe/lvp_icd.$fam.json"
         # meson finds the cross-built LLVM through its CMake package
         printf "\n[built-in options]\ncmake_prefix_path = ['%s']\n" "$W/llvm-inst/amd64" >> "cross-$arch.ini"
     elif [ "$arch" = i386 ] && [ "$I386_LLVM" = 1 ]; then
         "$HERE/build-llvm.sh" "$W" i386
-        drivers=llvmpipe,softpipe; llvm_args="-Dllvm=enabled -Dshared-llvm=disabled"
+        drivers=llvmpipe,softpipe; llvm_args="-Dllvm=enabled -Dshared-llvm=disabled"; shader_cache=enabled
         printf "\n[built-in options]\ncmake_prefix_path = ['%s']\n" "$W/llvm-inst/i386" >> "cross-$arch.ini"
     fi
     rm -rf "build-$arch"
@@ -83,7 +85,7 @@ EOT
         --buildtype=release -Doptimization="$OPT" -Db_ndebug=true \
         -Dplatforms=windows -Dgallium-drivers="$drivers" -Dvulkan-drivers="$vulkan" $llvm_args \
         -Dglx=disabled -Degl=disabled -Dgbm=disabled -Dgles1=disabled -Dgles2=disabled -Dopengl=true \
-        -Dmin-windows-version=7 -Dxmlconfig=disabled -Dshader-cache=disabled -Dzstd=disabled \
+        -Dmin-windows-version=7 -Dxmlconfig=disabled -Dshader-cache=$shader_cache -Dzstd=disabled \
         -Dlibunwind=disabled -Dvalgrind=disabled -Dbuild-tests=false \
         -Dc_args="-ffile-prefix-map=$W=." -Dcpp_args="-ffile-prefix-map=$W=." \
         -Dc_link_args="-static-libgcc -Wl,--no-insert-timestamp" \
