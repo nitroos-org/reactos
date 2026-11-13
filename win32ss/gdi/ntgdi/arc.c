@@ -104,15 +104,9 @@ IntArc( DC *dc,
     IntLPtoDP(dc, (LPPOINT)&RectBounds, 2);
     IntLPtoDP(dc, (LPPOINT)&RectSEpts, 2);
 
-    RectBounds.left   += dc->ptlDCOrig.x;
-    RectBounds.right  += dc->ptlDCOrig.x;
-    RectBounds.top    += dc->ptlDCOrig.y;
-    RectBounds.bottom += dc->ptlDCOrig.y;
-
-    RectSEpts.left    += dc->ptlDCOrig.x;
-    RectSEpts.top     += dc->ptlDCOrig.y;
-    RectSEpts.right   += dc->ptlDCOrig.x;
-    RectSEpts.bottom  += dc->ptlDCOrig.y;
+    /* From here the shape is computed in the coordinates of the DC without its origin, so that a window DC and a memory
+       DC get the same pixels: the centre and the radial points are rounded (and the engine rasteriser steps) the same
+       way for any DC origin. The origin is added where the boxes and lines are written. */
 
     DPRINT("1: StartX: %d, StartY: %d, EndX: %d, EndY: %d\n",
                RectSEpts.left,RectSEpts.top,RectSEpts.right,RectSEpts.bottom);
@@ -130,6 +124,8 @@ IntArc( DC *dc,
     {
         AngleStart = AngleEnd + 360.0; // Arc(), ArcTo(), Pie() and Chord() are counterclockwise APIs.
     }
+
+    dc->ptlDrawShift = dc->ptlDCOrig;
 
     if ((arctype == GdiTypePie) || (arctype == GdiTypeChord))
     {
@@ -156,6 +152,8 @@ IntArc( DC *dc,
                   pbrPen);
     }
 
+    dc->ptlDrawShift.x = dc->ptlDrawShift.y = 0;
+
     psurf = dc->dclevel.pSurface;
     if (NULL == psurf)
     {
@@ -167,11 +165,14 @@ IntArc( DC *dc,
 
     if (arctype == GdiTypePie)
     {
-        PUTLINE(CenterX, CenterY, RectSEpts.left, RectSEpts.top, dc->eboLine);
-        PUTLINE(RectSEpts.right, RectSEpts.bottom, CenterX, CenterY, dc->eboLine);
+        PUTLINE(CenterX + dc->ptlDCOrig.x, CenterY + dc->ptlDCOrig.y,
+                RectSEpts.left + dc->ptlDCOrig.x, RectSEpts.top + dc->ptlDCOrig.y, dc->eboLine);
+        PUTLINE(RectSEpts.right + dc->ptlDCOrig.x, RectSEpts.bottom + dc->ptlDCOrig.y,
+                CenterX + dc->ptlDCOrig.x, CenterY + dc->ptlDCOrig.y, dc->eboLine);
     }
     if (arctype == GdiTypeChord)
-        PUTLINE(RectSEpts.right, RectSEpts.bottom, RectSEpts.left, RectSEpts.top, dc->eboLine);
+        PUTLINE(RectSEpts.right + dc->ptlDCOrig.x, RectSEpts.bottom + dc->ptlDCOrig.y,
+                RectSEpts.left + dc->ptlDCOrig.x, RectSEpts.top + dc->ptlDCOrig.y, dc->eboLine);
 
     pbrPen->lWidth = PenOrigWidth;
     PEN_ShareUnlockPen(pbrPen);
