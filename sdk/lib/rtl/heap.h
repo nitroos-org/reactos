@@ -272,6 +272,9 @@ typedef struct _HEAP
     UCHAR FrontEndHeapType;
     HEAP_COUNTERS Counters;
     HEAP_TUNING_PARAMETERS TuningParameters;
+    ULONG TrimTick;      /* user mode: tick (ms) of the last check of the free page cache */
+    ULONG TrimExtends;   /* times the heap had to grow since that check */
+    ULONG TrimReserved[2]; /* keeps sizeof(HEAP) and so the alignment of the first block as it was */
     RTL_BITMAP FreeHintBitmap;  // FIXME: non-Vista
     PLIST_ENTRY FreeHints[ANYSIZE_ARRAY]; // FIXME: non-Vista
 } HEAP, *PHEAP;
