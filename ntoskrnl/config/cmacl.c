@@ -37,8 +37,12 @@
  *
  * Everything the check reads from user mode (the name, the desired access,
  * the token) is treated as untrusted: names come from the KCB tree, never
- * from the caller's buffers, and the descriptor read from a hive is
- * validated before use.
+ * from the caller's buffers, and a descriptor stored in a hive is copied
+ * under the hive's security lock and only the copy is validated and used.
+ *
+ * Keys created while the mode is not legacy get a stored descriptor: the
+ * effective descriptor of their parent, inherited (CmpCaptureParentSecurity,
+ * used by CmpDoCreateChild). /REGACL=LEGACY turns that off too.
  */
 
 /* INCLUDES ******************************************************************/
@@ -337,6 +341,9 @@ static PSECURITY_DESCRIPTOR CmpAclSdTable[CmpAclRuleMax];
 static PSID CmpAclSids[CmpAclSidMax];
 static SECURITY_SUBJECT_CONTEXT CmpAclSystemSubject;
 static BOOLEAN CmpAclReady;
+
+/* Setup is running (text mode, or SYSTEM\Setup\SystemSetupInProgress at boot): no stored descriptors */
+static BOOLEAN CmpAclSetupRunning;
 
 /* Dedup table */
 static LONG64 CmpAclSlotKey[CMP_ACL_TABLE_SIZE];
@@ -800,72 +807,136 @@ Done:
     return CmpAclSdTable[*Rule];
 }
 
-/* The key's stored descriptor, if it has a sane one */
+/*
+ * A copy of the key's stored descriptor, or NULL if it has none that is sane.
+ *
+ * The cell is read under the hive's security lock, so that it cannot be
+ * released (and its storage reused) while it is copied, and only the copy is
+ * validated and used: the hive is untrusted input, and the cell may change
+ * once the lock is dropped (its key's descriptor replaced). The copy goes to
+ * Buffer when it fits, otherwise to pool (*PoolCopy, freed with
+ * CmpAclFreeCopy).
+ *
+ * Shortcut: a hive whose security cache is empty has no stored descriptor to
+ * find (every hive installed before keys got one, until a key is created in
+ * it). The audit path takes it; creates read exactly.
+ */
 static
 PSECURITY_DESCRIPTOR
-CmpAclStoredSd(
-    _In_ PCM_KEY_CONTROL_BLOCK Kcb)
+CmpAclCopyStoredSd(
+    _In_ PCM_KEY_CONTROL_BLOCK Kcb,
+    _Out_writes_bytes_(BufferSize) PVOID Buffer,
+    _In_ ULONG BufferSize,
+    _Out_ PVOID *PoolCopy,
+    _In_ BOOLEAN Shortcut)
 {
+    PHHIVE Hive;
     PCM_KEY_NODE Node;
     HCELL_INDEX SecurityCell;
     PCM_KEY_SECURITY Security;
+    PVOID Copy = NULL;
+    ULONG Length = 0;
+    BOOLEAN Acquired;
 
+    *PoolCopy = NULL;
     if (!Kcb->KeyHive || Kcb->KeyCell == HCELL_NIL ||
         (Kcb->ExtFlags & CM_KCB_KEY_NON_EXIST) || Kcb->Delete)
     {
         return NULL;
     }
-
-    /*
-     * A hive whose root names no usable 'sk' cell has an empty security cache
-     * (CmpBuildSecurityCache at load): every installed hive today. Nothing to
-     * read there, and this skips a cell lookup per ancestor on every open.
-     */
-    if (((PCMHIVE)Kcb->KeyHive)->SecurityCount == 0)
+    Hive = Kcb->KeyHive;
+    if (Shortcut && ((PCMHIVE)Hive)->SecurityCount == 0)
         return NULL;
 
-    Node = (PCM_KEY_NODE)HvGetCell(Kcb->KeyHive, Kcb->KeyCell);
+    /* A look without the lock first: most keys of an installed hive have none */
+    Node = (PCM_KEY_NODE)HvGetCell(Hive, Kcb->KeyCell);
     if (!Node)
         return NULL;
     SecurityCell = (Node->Signature == CM_KEY_NODE_SIGNATURE) ? Node->Security : HCELL_NIL;
-    HvReleaseCell(Kcb->KeyHive, Kcb->KeyCell);
+    HvReleaseCell(Hive, Kcb->KeyCell);
     if (SecurityCell == HCELL_NIL)
         return NULL;
 
-    /* The hive is untrusted: the cell and the descriptor are both checked */
-    Security = CmpGetCheckedSecurityCell(Kcb->KeyHive, SecurityCell, NULL);
-    if (!Security || Security->DescriptorLength < sizeof(SECURITY_DESCRIPTOR_RELATIVE))
-        return NULL;
-    if (!RtlValidRelativeSecurityDescriptor(&Security->Descriptor,
-                                            Security->DescriptorLength,
-                                            0))
+    /* Read again and copy under the lock: the cell named then is the one copied */
+    Acquired = CmpAcquireHiveSecurityLock(Hive);
+    Node = (PCM_KEY_NODE)HvGetCell(Hive, Kcb->KeyCell);
+    if (Node)
     {
+        SecurityCell = (Node->Signature == CM_KEY_NODE_SIGNATURE) ? Node->Security : HCELL_NIL;
+        HvReleaseCell(Hive, Kcb->KeyCell);
+
+        /* The cell is checked against its bin (CmpGetCheckedSecurityCell) */
+        Security = CmpGetCheckedSecurityCell(Hive, SecurityCell, NULL);
+        if (Security &&
+            Security->DescriptorLength >= sizeof(SECURITY_DESCRIPTOR_RELATIVE) &&
+            Security->DescriptorLength <= CMP_MAX_STORED_SD_LENGTH)
+        {
+            Length = Security->DescriptorLength;
+            if (Length <= BufferSize)
+                Copy = Buffer;
+            else
+                Copy = *PoolCopy = ExAllocatePoolWithTag(PagedPool, Length, TAG_CM_ACL);
+            if (Copy)
+                RtlCopyMemory(Copy, &Security->Descriptor, Length);
+        }
+    }
+    CmpReleaseHiveSecurityLock(Hive, Acquired);
+    if (!Copy)
+        return NULL;
+
+    /* The copy is what is checked (offsets, SIDs, ACLs and their ACEs) and used */
+    if (!RtlValidRelativeSecurityDescriptor(Copy, Length, 0))
+    {
+        if (*PoolCopy)
+        {
+            ExFreePoolWithTag(*PoolCopy, TAG_CM_ACL);
+            *PoolCopy = NULL;
+        }
         return NULL;
     }
-    return &Security->Descriptor;
+    return Copy;
+}
+
+/* What CmpGetEffectiveKeySd handed out besides its buffer */
+static
+VOID
+CmpAclFreeEffectiveSd(
+    _In_opt_ PSECURITY_DESCRIPTOR ToFree,
+    _In_opt_ PVOID PoolCopy)
+{
+    if (ToFree)
+        SeDeassignSecurity(&ToFree);
+    if (PoolCopy)
+        ExFreePoolWithTag(PoolCopy, TAG_CM_ACL);
 }
 
 /*
  * The descriptor a key would be checked against on Windows (see the top of
- * the file). *ToFree receives a descriptor the caller frees with
- * SeDeassignSecurity. Returns NULL if none could be built.
+ * the file), in Buffer or in what *ToFree / *PoolCopy receive (free both with
+ * CmpAclFreeEffectiveSd). A stored descriptor is always a validated copy.
+ * Returns NULL if none could be built.
  */
 static
 PSECURITY_DESCRIPTOR
 CmpGetEffectiveKeySd(
     _In_ PCM_KEY_CONTROL_BLOCK Kcb,
-    _Out_writes_bytes_(UserBufferSize) PVOID UserBuffer,
-    _In_ ULONG UserBufferSize,
+    _Out_writes_bytes_(BufferSize) PVOID Buffer,
+    _In_ ULONG BufferSize,
     _Out_ PULONG Rule,
-    _Out_ PSECURITY_DESCRIPTOR *ToFree)
+    _Out_ PSECURITY_DESCRIPTOR *ToFree,
+    _Out_ PVOID *PoolCopy,
+    _In_ BOOLEAN Shortcut)
 {
     PSECURITY_DESCRIPTOR Sd, NewSd = NULL;
     PCM_KEY_CONTROL_BLOCK Parent;
+    PVOID AncestorCopy;
+    NTSTATUS Status;
 
     *ToFree = NULL;
+    *PoolCopy = NULL;
 
     /* 1. Stored */
-    Sd = CmpAclStoredSd(Kcb);
+    Sd = CmpAclCopyStoredSd(Kcb, Buffer, BufferSize, PoolCopy, Shortcut);
     if (Sd)
     {
         *Rule = CmpAclRuleCell;
@@ -875,26 +946,110 @@ CmpGetEffectiveKeySd(
     /* 2. The nearest ancestor that has one, inherited as SYSTEM would get it */
     for (Parent = Kcb->ParentKcb; Parent; Parent = Parent->ParentKcb)
     {
-        Sd = CmpAclStoredSd(Parent);
+        Sd = CmpAclCopyStoredSd(Parent, Buffer, BufferSize, &AncestorCopy, Shortcut);
         if (!Sd)
             continue;
-        if (!NT_SUCCESS(SeAssignSecurity(Sd,
-                                         NULL,
-                                         &NewSd,
-                                         TRUE,
-                                         &CmpAclSystemSubject,
-                                         &CmpKeyObjectType->TypeInfo.GenericMapping,
-                                         PagedPool)))
-        {
+        Status = SeAssignSecurity(Sd,
+                                  NULL,
+                                  &NewSd,
+                                  TRUE,
+                                  &CmpAclSystemSubject,
+                                  &CmpKeyObjectType->TypeInfo.GenericMapping,
+                                  PagedPool);
+        if (AncestorCopy)
+            ExFreePoolWithTag(AncestorCopy, TAG_CM_ACL);
+        if (!NT_SUCCESS(Status))
             break;
-        }
         *Rule = CmpAclRuleInherited;
         *ToFree = NewSd;
         return NewSd;
     }
 
     /* 3. Synthesised */
-    return CmpAclSynthesizeSd(Kcb, UserBuffer, UserBufferSize, Rule);
+    return CmpAclSynthesizeSd(Kcb, Buffer, BufferSize, Rule);
+}
+
+/*
+ * New keys get a stored descriptor while the mode is not legacy and the
+ * policy table exists (CmInitSystem1 on), except while setup runs (see
+ * CmpAclInitialize). /REGACL=LEGACY gives the old behaviour back: keys are
+ * created without one, as before audit mode.
+ */
+BOOLEAN
+NTAPI
+CmpStoreKeySecurity(VOID)
+{
+    return CmpAclReady && !CmpAclSetupRunning && CmpRegistryAclEffectiveMode != CM_REGACL_MODE_LEGACY;
+}
+
+/* SYSTEM\Setup\SystemSetupInProgress (REG_DWORD) is not zero: second-stage setup */
+static
+BOOLEAN
+CmpAclSystemSetupInProgress(VOID)
+{
+    UNICODE_STRING KeyName = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\SYSTEM\\Setup");
+    UNICODE_STRING ValueName = RTL_CONSTANT_STRING(L"SystemSetupInProgress");
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    UCHAR Buffer[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)];
+    PKEY_VALUE_PARTIAL_INFORMATION Info = (PKEY_VALUE_PARTIAL_INFORMATION)Buffer;
+    ULONG Length;
+    HANDLE Key;
+    BOOLEAN InProgress = FALSE;
+
+    InitializeObjectAttributes(&ObjectAttributes, &KeyName, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+    if (!NT_SUCCESS(ZwOpenKey(&Key, KEY_QUERY_VALUE, &ObjectAttributes)))
+        return FALSE;
+    if (NT_SUCCESS(ZwQueryValueKey(Key, &ValueName, KeyValuePartialInformation, Info, sizeof(Buffer), &Length)) &&
+        Info->Type == REG_DWORD && Info->DataLength == sizeof(ULONG))
+    {
+        InProgress = (*(PULONG)Info->Data != 0);
+    }
+    ZwClose(Key);
+    return InProgress;
+}
+
+/*
+ * The descriptor a key created under ParentKcb inherits from: the parent's
+ * effective descriptor (stored, else inherited from the nearest ancestor that
+ * has one, else the Windows policy for its place), so that a key created
+ * under a key without one gets what it would get on Windows. Returns a pool
+ * copy for CmpFreeParentSecurity, or NULL: the key is then created without a
+ * stored descriptor. The caller holds the parent's KCB lock.
+ */
+DECLSPEC_NOINLINE
+PSECURITY_DESCRIPTOR
+NTAPI
+CmpCaptureParentSecurity(
+    _In_ PCM_KEY_CONTROL_BLOCK ParentKcb)
+{
+    ULONG Buffer[CMP_ACL_SD_BUFFER / sizeof(ULONG)];
+    PSECURITY_DESCRIPTOR Sd, ToFree, Copy = NULL;
+    PVOID PoolCopy;
+    ULONG Rule, Length;
+
+    if (!CmpStoreKeySecurity() || !ParentKcb)
+        return NULL;
+
+    Sd = CmpGetEffectiveKeySd(ParentKcb, Buffer, sizeof(Buffer), &Rule, &ToFree, &PoolCopy, FALSE);
+    if (Sd)
+    {
+        Length = RtlLengthSecurityDescriptor(Sd);
+        Copy = ExAllocatePoolWithTag(PagedPool, Length, TAG_CM_ACL);
+        if (Copy)
+            RtlCopyMemory(Copy, Sd, Length);
+    }
+    CmpAclFreeEffectiveSd(ToFree, PoolCopy);
+    if (!Copy)
+        InterlockedIncrement(&CmpAclErrors);
+    return Copy;
+}
+
+VOID
+NTAPI
+CmpFreeParentSecurity(
+    _In_ PSECURITY_DESCRIPTOR ParentSd)
+{
+    ExFreePoolWithTag(ParentSd, TAG_CM_ACL);
 }
 
 static
@@ -1930,11 +2085,26 @@ CmpAclInitialize(VOID)
         DbgPrintEx(DPFLTR_CONFIG_ID, DPFLTR_ERROR_LEVEL, "CM-ACL-AUDIT: cannot set up audit mode, legacy\n");
     }
 
+    /*
+     * While setup runs, new keys get no stored descriptor, as before. Setup's
+     * keys would otherwise inherit what the setup hives carry today: mkhive's
+     * SYSTEM root descriptor (an older Windows one, with Power Users) into
+     * every key of the installed SYSTEM, SOFTWARE and DEFAULT hives (and so
+     * every new profile), and the master key's Everyone-read descriptor into
+     * the SAM and SECURITY hives that setup creates; the stamping of keys
+     * without a descriptor and the setup-time descriptors are later slices of
+     * this work (registry ACL plan R5, R6). A key without one is judged by its
+     * place in the namespace (the policy table above), which is the Windows
+     * value.
+     */
+    CmpAclSetupRunning = ExpInTextModeSetup || CmpAclSystemSetupInProgress();
+
     CmpRegistryAclEffectiveMode = Mode;
-    DbgPrintEx(DPFLTR_CONFIG_ID, DPFLTR_ERROR_LEVEL, "CM-ACL-AUDIT: mode %s (configured %s, from %s)\n",
+    DbgPrintEx(DPFLTR_CONFIG_ID, DPFLTR_ERROR_LEVEL, "CM-ACL-AUDIT: mode %s (configured %s, from %s)%s\n",
                CmpAclModeNames[CmpRegistryAclEffectiveMode],
                CmpAclModeNames[CmpRegistryAclMode],
-               CmpAclSourceNames[CmpRegistryAclModeSource]);
+               CmpAclSourceNames[CmpRegistryAclModeSource],
+               CmpAclSetupRunning ? ", setup: keys get no stored descriptor" : "");
 
     /* Publish the mode now; the worker refreshes the counters */
     CmpAclPublish();
@@ -1956,6 +2126,7 @@ CmpAclShadowCheckWorker(
 {
     ULONG SdBuffer[CMP_ACL_SD_BUFFER / sizeof(ULONG)];
     PSECURITY_DESCRIPTOR Sd, ToFree;
+    PVOID PoolCopy;
     ULONG Rule;
     ACCESS_MASK Granted = 0;
     NTSTATUS AccessStatus = STATUS_ACCESS_DENIED;
@@ -1974,7 +2145,7 @@ CmpAclShadowCheckWorker(
         return;
     }
 
-    Sd = CmpGetEffectiveKeySd(Kcb, SdBuffer, sizeof(SdBuffer), &Rule, &ToFree);
+    Sd = CmpGetEffectiveKeySd(Kcb, SdBuffer, sizeof(SdBuffer), &Rule, &ToFree, &PoolCopy, TRUE);
     if (!Sd)
     {
         InterlockedIncrement(&CmpAclErrors);
@@ -2005,8 +2176,7 @@ CmpAclShadowCheckWorker(
         InterlockedIncrement(&CmpAclMaxAllowedReduced);
     }
 
-    if (ToFree)
-        SeDeassignSecurity(&ToFree);
+    CmpAclFreeEffectiveSd(ToFree, PoolCopy);
 }
 
 /*

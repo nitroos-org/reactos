@@ -452,6 +452,67 @@ CmpBuildSecurityCache(IN PCMHIVE CmHive)
     return FALSE;
 }
 
+/* Is this cell in the cache already (the list of its descriptor's hash) */
+static
+BOOLEAN
+CmpIsSecurityCellCached(IN PCMHIVE CmHive,
+                        IN HCELL_INDEX SecurityCell,
+                        IN PCM_KEY_SECURITY Security)
+{
+    PLIST_ENTRY List, Head;
+    ULONG ConvKey;
+
+    ConvKey = CmpHashDescriptor(&Security->Descriptor, Security->DescriptorLength);
+    Head = &CmHive->SecurityHash[ConvKey % CMP_SECURITY_HASH_LISTS];
+    for (List = Head->Flink; List != Head; List = List->Flink)
+    {
+        if (CONTAINING_RECORD(List, CM_KEY_SECURITY_CACHE, List)->Cell == SecurityCell)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+/*
+ * Add to the cache every cell of the ring that SecurityCell is in, unless it
+ * is cached already. For a hive being loaded, after CmpBuildSecurityCache:
+ * a hive whose root has no descriptor (every hive installed before keys got
+ * one) still has rings, made by the keys created since, and their cells must
+ * be found again to be shared and to join new cells to. The walk stops at
+ * the first cell that is not sound, and after as many steps as the hive can
+ * hold cells. Never fails the load.
+ */
+VOID
+NTAPI
+CmpAddSecurityRingToCache(IN PCMHIVE CmHive,
+                          IN HCELL_INDEX SecurityCell)
+{
+    PHHIVE Hive = &CmHive->Hive;
+    PCM_KEY_SECURITY Security;
+    HCELL_INDEX Cell = SecurityCell;
+    ULONG Steps, Limit;
+
+    if (!CmpSecurityCacheReady(CmHive))
+        return;
+
+    Limit = CmpSecurityCellLimit(Hive);
+    for (Steps = 0; Steps < Limit; Steps++)
+    {
+        Security = CmpGetCheckedSecurityCell(Hive, Cell, NULL);
+        if (!Security)
+            return;
+        /* A ring met again is cached already: the rest of it was added then */
+        if (CmpIsSaneRelativeDescriptor(&Security->Descriptor, Security->DescriptorLength))
+        {
+            if (CmpIsSecurityCellCached(CmHive, Cell, Security))
+                return;
+            CmpAddSecurityCellToCache(CmHive, Cell);
+        }
+        Cell = Security->Flink;
+        if (Cell == SecurityCell)
+            return;
+    }
+}
+
 static
 BOOLEAN
 CmpFindMatchingDescriptorCellLocked(IN PCMHIVE CmHive,
