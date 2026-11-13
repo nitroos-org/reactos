@@ -32,6 +32,7 @@ KMT_TESTFUNC Test_ExStubHit;
 KMT_TESTFUNC Test_ProbeCapture;
 KMT_TESTFUNC Test_ExPushLock;
 KMT_TESTFUNC Test_ExResource;
+KMT_TESTFUNC Test_ExSListPopFault;
 KMT_TESTFUNC Test_ExSequencedList;
 KMT_TESTFUNC Test_ExSingleList;
 KMT_TESTFUNC Test_ExTimer;
@@ -191,6 +192,7 @@ const KMT_TEST TestList[] =
     { "ProbeCapture",                       Test_ProbeCapture },
     { "ExPushLock",                         Test_ExPushLock },
     { "ExResource",                         Test_ExResource },
+    { "ExSListPopFault",                      Test_ExSListPopFault },
     { "ExSequencedList",                    Test_ExSequencedList },
     { "ExSingleList",                       Test_ExSingleList },
     { "-ExTimer",                           Test_ExTimer },

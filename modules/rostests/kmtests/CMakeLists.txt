@@ -76,6 +76,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_ex/ExLookasideListEx.c
     ntos_ex/ExPools.c
     ntos_ex/ExPushLock.c
+    ntos_ex/ExSListPopFault.c
     ntos_ex/ExResource.c
     ntos_ex/ExSequencedList.c
     ntos_ex/ExSingleList.c
