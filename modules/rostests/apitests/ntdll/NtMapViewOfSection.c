@@ -557,14 +557,12 @@ Test_PageFileSection(void)
                              SEC_RESERVE,
                              NULL);
 #ifdef _WIN64
-    /* Windows 10 x64 creates it (oracle); Server 2003 x64 returned STATUS_INSUFFICIENT_RESOURCES */
-    ok_ntstatus(Status, (GetNTVersion() >= _WIN32_WINNT_WIN10) ? STATUS_SUCCESS : STATUS_INSUFFICIENT_RESOURCES);
+    ok_ntstatus(Status, STATUS_INSUFFICIENT_RESOURCES);
 #else
-    /* WoW64 returns STATUS_INSUFFICIENT_RESOURCES; a 64-bit Windows 10 kernel may create it */
-    ok((Status == STATUS_INSUFFICIENT_RESOURCES) || (Status == STATUS_SECTION_TOO_BIG) || (Status == STATUS_SUCCESS),
+    /* WoW64 returns STATUS_INSUFFICIENT_RESOURCES */
+    ok((Status == STATUS_INSUFFICIENT_RESOURCES) || (Status == STATUS_SECTION_TOO_BIG),
        "got wrong Status: 0x%lx\n", Status);
 #endif
-    if (NT_SUCCESS(Status)) NtClose(SectionHandle);
 
     /* Try to create a even huger page file backed section, but only reserved */
     MaximumSize.QuadPart = 0x800000000000;
@@ -699,21 +697,18 @@ Test_PageFileSection(void)
     // Windows 2003 returns bogus
 #endif
 
-    /*
-     * Commit a page. Windows 10 x64 (oracle) refuses any protection beyond the view's PAGE_NOACCESS,
-     * also for a commit, and the page then stays inaccessible; Server 2003 committed it.
-     */
+    /* Commit a page */
     ViewSize = 0x1000;
     BaseAddress2 = BaseAddress;
     Status = NtAllocateVirtualMemory(NtCurrentProcess(), &BaseAddress2, 0, &ViewSize, MEM_COMMIT, PAGE_READONLY);
-    ok_ntstatus(Status, (GetNTVersion() >= _WIN32_WINNT_WIN10) ? STATUS_SECTION_PROTECTION : STATUS_SUCCESS);
+    ok_ntstatus(Status, STATUS_SUCCESS);
     ok(BaseAddress2 == BaseAddress, "Invalid base address: %p\n", BaseAddress2);
 
     /* Commit the page again */
     ViewSize = 0x1000;
     BaseAddress2 = BaseAddress;
     Status = NtAllocateVirtualMemory(NtCurrentProcess(), &BaseAddress2, 0, &ViewSize, MEM_COMMIT, PAGE_READONLY);
-    ok_ntstatus(Status, (GetNTVersion() >= _WIN32_WINNT_WIN10) ? STATUS_SECTION_PROTECTION : STATUS_SUCCESS);
+    ok_ntstatus(Status, STATUS_SUCCESS);
     ok(BaseAddress2 == BaseAddress, "Invalid base address: %p\n", BaseAddress2);
 
     /* Test read access */
@@ -727,7 +722,7 @@ Test_PageFileSection(void)
         Status = _SEH2_GetExceptionCode();
     }
     _SEH2_END;
-    ok_ntstatus(Status, (GetNTVersion() >= _WIN32_WINNT_WIN10) ? STATUS_ACCESS_VIOLATION : STATUS_SUCCESS);
+    ok_ntstatus(Status, STATUS_SUCCESS);
 
     /* Test write access */
     Status = STATUS_SUCCESS;
@@ -742,11 +737,11 @@ Test_PageFileSection(void)
     _SEH2_END;
     ok_ntstatus(Status, STATUS_ACCESS_VIOLATION);
 
-    /* Update protection to PAGE_READWRITE (Windows 10: beyond the view, like the commit above) */
+    /* Update protection to PAGE_READWRITE */
     ViewSize = 0x1000;
     BaseAddress2 = BaseAddress;
     Status = NtAllocateVirtualMemory(NtCurrentProcess(), &BaseAddress2, 0, &ViewSize, MEM_COMMIT, PAGE_READWRITE);
-    ok_ntstatus(Status, (GetNTVersion() >= _WIN32_WINNT_WIN10) ? STATUS_SECTION_PROTECTION : STATUS_SUCCESS);
+    ok_ntstatus(Status, STATUS_SUCCESS);
 
     /* Test write access */
     Status = STATUS_SUCCESS;
@@ -759,13 +754,13 @@ Test_PageFileSection(void)
         Status = _SEH2_GetExceptionCode();
     }
     _SEH2_END;
-    ok_ntstatus(Status, (GetNTVersion() >= _WIN32_WINNT_WIN10) ? STATUS_ACCESS_VIOLATION : STATUS_SUCCESS);
+    ok_ntstatus(Status, STATUS_SUCCESS);
 
     /* Update protection to PAGE_EXECUTE_READWRITE (1 page) */
     ViewSize = 0x1000;
     BaseAddress2 = BaseAddress;
     Status = NtAllocateVirtualMemory(NtCurrentProcess(), &BaseAddress2, 0, &ViewSize, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
-    ok_ntstatus(Status, (GetNTVersion() >= _WIN32_WINNT_WIN10) ? STATUS_SECTION_PROTECTION : STATUS_SUCCESS);
+    ok_ntstatus(Status, STATUS_SUCCESS);
 
     Status = NtUnmapViewOfSection(NtCurrentProcess(), BaseAddress);
     ok_ntstatus(Status, STATUS_SUCCESS);
