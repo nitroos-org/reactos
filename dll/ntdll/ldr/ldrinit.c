@@ -1353,9 +1353,10 @@ LdrShutdownThread(VOID)
  * unloaded. Threads allocate their vector in LdrpInitializeThread and free it
  * in LdrShutdownThread. All of this runs with the loader lock held.
  *
- * A thread may be reading its old vector while the kernel replaces it, so the
- * old vectors of other threads are only freed when their thread ends; the
- * loading thread frees its own at once.
+ * A thread may be reading its old vector while the kernel replaces it, and
+ * code keeps a thread's vector pointer in a register across calls (a call that
+ * loads a DLL with TLS included), so old vectors, the loading thread's too, are
+ * only freed when their thread ends.
  */
 
 #ifndef IMAGE_SCN_ALIGN_MASK
@@ -1959,7 +1960,7 @@ LdrpDiscardNoTls(
 {
 }
 
-/* Old vectors from PROCESS_TLS_REPLACE_VECTOR: the loading thread's goes at once, the others' when their thread ends */
+/* Old vectors from PROCESS_TLS_REPLACE_VECTOR: freed when their thread ends (the loading thread's too: its caller may still hold it) */
 static
 VOID
 LdrpRetireTlsVectors(
@@ -1972,12 +1973,6 @@ LdrpRetireTlsVectors(
     {
         if (!(Info->ThreadData[i].Flags & THREAD_TLS_INFORMATION_ASSIGNED) || !Info->ThreadData[i].OldTlsData)
             continue;
-
-        if (Info->ThreadData[i].ThreadId == NtCurrentTeb()->RealClientId.UniqueThread)
-        {
-            LdrpFreeTlsVectorEntries(Info->ThreadData[i].OldTlsData);
-            continue;
-        }
 
         Entry = RtlAllocateHeap(RtlGetProcessHeap(), 0, sizeof(*Entry));
         if (!Entry)
