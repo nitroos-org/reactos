@@ -488,7 +488,7 @@ DceReleaseDC(DCE* dce, BOOL EndPaint)
    /* What a redirected window drew goes to the screen now; a cache DC lets go of its surface */
    if (dce->pRedir)
    {
-      UserRedirReleased(dce->pRedir, EndPaint);
+      UserRedirReleased(dce->pRedir);
       if (dce->DCXFlags & DCX_CACHE)
          DceRedirBind(dce, NULL);
    }

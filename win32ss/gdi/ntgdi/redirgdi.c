@@ -80,6 +80,9 @@ GreRedirDeleteSurface(
     GDIOBJ_vDereferenceObject(&psurf->BaseObject);
 }
 
+/* A present of up to this many rectangles copies them one by one (the pointer hidden around each one only) */
+#define REDIR_PRESENT_SPLIT 32
+
 /* Copies between the screen and a window surface through prgnScreen (screen coordinates); bToScreen: present, else seed */
 static
 BOOL
@@ -125,9 +128,36 @@ RedirScreenCopy(
             if (RECTL_bIntersectRect(&rcBounds, &rcBounds, &rcLimit))
             {
                 IntEngInitClipObj(&xco);
-                MouseSafetyOnDrawStart(ppdev, rcBounds.left, rcBounds.top, rcBounds.right, rcBounds.bottom);
-                if (bToScreen)
+                if (bToScreen && prgnScreen->rdh.nCount <= REDIR_PRESENT_SPLIT)
                 {
+                    /*
+                     * Rectangle by rectangle: the pointer is hidden only while a rectangle it is over is copied, not
+                     * over the bounds of all of them (a window that draws a few lines and a caret far apart)
+                     */
+                    ULONG i;
+
+                    EXLATEOBJ_vInitialize(&exlo, psurf->ppal, psurfScreen->ppal, 0, 0, 0);
+                    for (i = 0; i < prgnScreen->rdh.nCount; i++)
+                    {
+                        RECTL rcPiece;
+
+                        if (!RECTL_bIntersectRect(&rcPiece, &prgnScreen->Buffer[i], &rcBounds))
+                            continue;
+                        ptlSrc.x = rcPiece.left - xWnd;
+                        ptlSrc.y = rcPiece.top - yWnd;
+                        MouseSafetyOnDrawStart(ppdev, rcPiece.left, rcPiece.top, rcPiece.right, rcPiece.bottom);
+                        if (!IntEngBitBlt(&psurfScreen->SurfObj, &psurf->SurfObj, NULL, NULL, &exlo.xlo,
+                                          &rcPiece, &ptlSrc, NULL, NULL, NULL, ROP4_FROM_INDEX(R3_OPINDEX_SRCCOPY)))
+                        {
+                            bRet = FALSE;
+                        }
+                        MouseSafetyOnDrawEnd(ppdev);
+                    }
+                    EXLATEOBJ_vCleanup(&exlo);
+                }
+                else if (bToScreen)
+                {
+                    MouseSafetyOnDrawStart(ppdev, rcBounds.left, rcBounds.top, rcBounds.right, rcBounds.bottom);
                     IntEngUpdateClipRegion(&xco, prgnScreen->rdh.nCount, prgnScreen->Buffer, &rcBounds);
                     EXLATEOBJ_vInitialize(&exlo, psurf->ppal, psurfScreen->ppal, 0, 0, 0);
                     ptlSrc.x = rcBounds.left - xWnd;
@@ -135,9 +165,11 @@ RedirScreenCopy(
                     bRet = IntEngBitBlt(&psurfScreen->SurfObj, &psurf->SurfObj, NULL, (CLIPOBJ *)&xco, &exlo.xlo,
                                         &rcBounds, &ptlSrc, NULL, NULL, NULL, ROP4_FROM_INDEX(R3_OPINDEX_SRCCOPY));
                     EXLATEOBJ_vCleanup(&exlo);
+                    MouseSafetyOnDrawEnd(ppdev);
                 }
                 else
                 {
+                    MouseSafetyOnDrawStart(ppdev, rcBounds.left, rcBounds.top, rcBounds.right, rcBounds.bottom);
                     /* Into the surface: the same region in surface coordinates */
                     prgnSurf = IntSysCreateRectpRgn(0, 0, 0, 0);
                     if (prgnSurf && REGION_bCopy(prgnSurf, prgnScreen))
@@ -154,8 +186,8 @@ RedirScreenCopy(
                     }
                     if (prgnSurf)
                         REGION_Delete(prgnSurf);
+                    MouseSafetyOnDrawEnd(ppdev);
                 }
-                MouseSafetyOnDrawEnd(ppdev);
                 IntEngFreeClipResources(&xco);
             }
         }

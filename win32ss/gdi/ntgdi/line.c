@@ -207,6 +207,9 @@ IntGdiLineTo(DC  *dc,
         {
             if (IntIsEffectiveWidePen(pbrLine))
             {
+                /* A wide pen reaches past the points: the clip bounds count as drawn */
+                DC_vRedirAddDrawn(dc, &dc->erclClip);
+
                 /* Clear the path */
                 PATH_Delete(dc->dclevel.hPath);
                 dc->dclevel.hPath = NULL;
@@ -235,6 +238,7 @@ IntGdiLineTo(DC  *dc,
             }
             else
             {
+                DC_vRedirAddPoints(dc, (PPOINTL)Points, 2);
                 Ret = IntEngLineTo(&psurf->SurfObj,
                                    (CLIPOBJ *)&dc->co,
                                    &dc->eboLine.BrushObject,
@@ -335,13 +339,16 @@ IntGdiPolyline(DC      *dc,
     LONG i;
     PDC_ATTR pdcattr = dc->pdcattr;
     PPATH pPath;
+    RECTL rclOuter;
 
     if (!dc->dclevel.pSurface)
     {
         return TRUE;
     }
 
-    DC_vPrepareDCsForBlit(dc, NULL, NULL, NULL);
+    /* What the lines write is added below (a redirected window presents only that) */
+    rclOuter = dc->rclRedirDraw;
+    DC_vPrepareDCsForBlitEx(dc, NULL, NULL, NULL, DCPREP_ACCUM_DEST);
     psurf = dc->dclevel.pSurface;
 
     /* Get BRUSHOBJ from current pen. */
@@ -370,6 +377,9 @@ IntGdiPolyline(DC      *dc,
 
             if (IntIsEffectiveWidePen(pbrLine))
             {
+                /* A wide pen reaches past the points: the clip bounds count as drawn */
+                DC_vRedirAddDrawn(dc, &dc->erclClip);
+
                 /* Clear the path */
                 PATH_Delete(dc->dclevel.hPath);
                 dc->dclevel.hPath = NULL;
@@ -401,6 +411,7 @@ IntGdiPolyline(DC      *dc,
             }
             else
             {
+                DC_vRedirAddPoints(dc, (PPOINTL)Points, Count);
                 Ret = IntEngPolyline(&psurf->SurfObj,
                                      (CLIPOBJ *)&dc->co,
                                      &dc->eboLine.BrushObject,
@@ -417,6 +428,7 @@ IntGdiPolyline(DC      *dc,
     }
 
     DC_vFinishBlit(dc, NULL);
+    DC_vRedirKeepOuter(dc, &rclOuter);
 
     return Ret;
 }
@@ -522,7 +534,8 @@ NtGdiLineTo(HDC  hDC,
     rcLockRect.right += dc->ptlDCOrig.x;
     rcLockRect.bottom += dc->ptlDCOrig.y;
 
-    DC_vPrepareDCsForBlit(dc, &rcLockRect, NULL, NULL);
+    /* What the line writes is added by IntGdiLineTo (a redirected window presents only that) */
+    DC_vPrepareDCsForBlitEx(dc, &rcLockRect, NULL, NULL, DCPREP_ACCUM_DEST);
 
     Ret = IntGdiLineTo(dc, XEnd, YEnd);
 
