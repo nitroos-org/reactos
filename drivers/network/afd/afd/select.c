@@ -171,7 +171,7 @@ VOID SignalSocket(
 #if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
     if (IoIs32bitProcess(Irp)) AfdCompletePoll32(Irp, PollReq);
 #endif
-    if( Irp->MdlAddress ) UnlockRequest( Irp, IoGetCurrentIrpStackLocation( Irp ) );
+    if (AfdRequestLocked(Irp)) UnlockRequest( Irp, IoGetCurrentIrpStackLocation( Irp ) );
     AFD_DbgPrint(MID_TRACE,("Completing\n"));
     AfdClearCancelRoutine(Irp);
     IoCompleteRequest( Irp, IO_NETWORK_INCREMENT );
