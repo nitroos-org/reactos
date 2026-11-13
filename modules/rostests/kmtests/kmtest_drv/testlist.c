@@ -95,6 +95,7 @@ KMT_TESTFUNC Test_KeFreezeBreakDpc;
 KMT_TESTFUNC Test_KeFreezeBugCheckDpc;
 KMT_TESTFUNC Test_KeFreezeNmiDpc;
 KMT_TESTFUNC Test_KeIrql;
+KMT_TESTFUNC Test_KeIrqlPerf;
 KMT_TESTFUNC Test_KeMutex;
 KMT_TESTFUNC Test_KePriority;
 KMT_TESTFUNC Test_KeProcessor;
@@ -258,6 +259,7 @@ const KMT_TEST TestList[] =
     { "-KeFreezeBugCheckDpc",             Test_KeFreezeBugCheckDpc },
     { "-KeFreezeNmiDpc",                  Test_KeFreezeNmiDpc },
     { "KeIrql",                             Test_KeIrql },
+    { "-KeIrqlPerf",                        Test_KeIrqlPerf },
     { "KeMutex",                            Test_KeMutex },
     { "KePriority",                         Test_KePriority },
     { "KeProfile",                          Test_KeProfile, Test_KeProfileWithData },
