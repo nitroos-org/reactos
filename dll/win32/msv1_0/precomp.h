@@ -30,6 +30,7 @@
 #include <ntmsv1_0.h>
 
 #include <samsrv/samsrv.h>
+#include <ntlmros.h>
 //#include <lsass/lsasrv.h>
 
 #include "ntlm/global.h"
