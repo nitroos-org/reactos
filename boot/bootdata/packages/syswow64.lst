@@ -445,6 +445,7 @@ SysWOW64/shimgvw.dll
 SysWOW64/msxml6.dll
 SysWOW64/iologmsg.dll
 SysWOW64/netevent.dll
+SysWOW64/tzres.dll
 SysWOW64/netmsg.dll
 
 # DirectShow, DirectMusic, DirectPlay, DirectDraw/D3D legacy and the ACM/VfW codecs and MCI drivers (32-bit media players and games).
