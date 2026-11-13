@@ -193,6 +193,7 @@ extern void func_RtlGetProductInfo(void);
 extern void func_RtlGetUnloadEventTrace(void);
 extern void func_RtlPlaceholderCompatibilityMode(void);
 extern void func_RtlHandle(void);
+extern void func_RtlHeapChurn(void);
 extern void func_RtlHeapFrontEnd(void);
 extern void func_RtlHeapTailCheck(void);
 extern void func_RtlHeapValidate(void);
@@ -470,6 +471,7 @@ const struct test winetest_testlist[] =
     { "RtlGetUnloadEventTrace",         func_RtlGetUnloadEventTrace },
     { "RtlPlaceholderCompatibilityMode", func_RtlPlaceholderCompatibilityMode },
     { "RtlHandle",                      func_RtlHandle },
+    { "RtlHeapChurn",                   func_RtlHeapChurn },
     { "RtlHeapFrontEnd",                func_RtlHeapFrontEnd },
     { "RtlHeapTailCheck",               func_RtlHeapTailCheck },
     { "RtlHeapValidate",                func_RtlHeapValidate },
