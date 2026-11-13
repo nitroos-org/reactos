@@ -87,6 +87,7 @@ ULONG LdrpActiveUnloadCount;
 //extern LIST_ENTRY RtlCriticalSectionList;
 
 VOID NTAPI RtlpInitializeVectoredExceptionHandling(VOID);
+VOID NTAPI RtlpShutdownThreadVectoredHandlers(VOID);
 VOID NTAPI RtlpInitDeferredCriticalSection(VOID);
 VOID NTAPI RtlInitializeHeapManager(VOID);
 NTSTATUS NTAPI RtlpInitializeLocaleTable(VOID);
@@ -1335,6 +1336,9 @@ LdrShutdownThread(VOID)
 
     /* Free the activation context stack */
     RtlFreeThreadActivationContextStack();
+
+    /* The thread's exception dispatches are over, also one it exits from */
+    RtlpShutdownThreadVectoredHandlers();
     DPRINT("LdrShutdownThread() done\n");
 
     return STATUS_SUCCESS;
