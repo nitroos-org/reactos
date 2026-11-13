@@ -233,6 +233,10 @@ StartOneService(INT argc, WCHAR **argv)
         goto done;
     }
 
+    /*
+     * The arguments after the service name are the start arguments; the name
+     * itself is not one of them (the service gets it as its argv[0]).
+     */
     lpArgVectors = HeapAlloc(GetProcessHeap(),
                              0,
                              (argc - 2) * sizeof(LPCWSTR));
@@ -243,14 +247,14 @@ StartOneService(INT argc, WCHAR **argv)
         goto done;
     }
 
-    for (i = 2; i < argc; i++)
+    for (i = 3; i < argc; i++)
     {
-        lpArgVectors[i - 2] = argv[i];
+        lpArgVectors[i - 3] = argv[i];
     }
 
     if (!StartServiceW(hService,
-                       (DWORD)argc - 2,
-                       lpArgVectors))
+                       (DWORD)argc - 3,
+                       argc > 3 ? lpArgVectors : NULL))
     {
         dwError = GetLastError();
         nError = 2;
