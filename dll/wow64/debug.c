@@ -78,7 +78,12 @@ static BOOLEAN NativeOnlyEvent(const DBGUI_WAIT_STATE_CHANGE *Change, NTSTATUS *
     case DbgSingleStepStateChange:
         Record = &Change->StateInfo.Exception.ExceptionRecord;
         if (!WOW64_ABOVE_GUEST(Record->ExceptionAddress)) return FALSE;
-        if (Record->ExceptionCode != STATUS_BREAKPOINT && Record->ExceptionCode != STATUS_SINGLE_STEP)
+        /* A debugger continues the debug print and RIP exceptions of the native layer (DbgPrint
+         * raises one while a debugger is attached, with no handler to take it) with DBG_CONTINUE:
+         * left unhandled they end the process with the exception code as its exit status */
+        if (Record->ExceptionCode != STATUS_BREAKPOINT && Record->ExceptionCode != STATUS_SINGLE_STEP &&
+            Record->ExceptionCode != DBG_PRINTEXCEPTION_C && Record->ExceptionCode != DBG_PRINTEXCEPTION_WIDE_C &&
+            Record->ExceptionCode != DBG_RIPEXCEPTION)
             *Continue = DBG_EXCEPTION_NOT_HANDLED;
         return TRUE;
     case DbgLoadDllStateChange:
