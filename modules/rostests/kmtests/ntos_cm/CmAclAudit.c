@@ -340,6 +340,185 @@ GetUserHive(
     return Result;
 }
 
+/*
+ * Find the log line that has Needle and check it is a complete, terminated JSON object line:
+ * starts with '{', ends with '}' and a newline, and its quotes balance (an escaped quote does not count)
+ */
+static
+VOID
+CheckLogLine(
+    _In_ PCSTR Needle)
+{
+    UNICODE_STRING Name = RTL_CONSTANT_STRING(AUDIT_LOG);
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    IO_STATUS_BLOCK Iosb;
+    FILE_STANDARD_INFORMATION Standard;
+    HANDLE File;
+    NTSTATUS Status;
+    PCHAR Buffer, Start, End, p, Hit = NULL;
+    ULONG Length, Quotes = 0;
+    SIZE_T NeedleLength = strlen(Needle);
+    LARGE_INTEGER Offset;
+
+    InitializeObjectAttributes(&ObjectAttributes, &Name, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = ZwCreateFile(&File, FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE, &ObjectAttributes, &Iosb, NULL, 0,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_OPEN,
+                          FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+    Status = ZwQueryInformationFile(File, &Iosb, &Standard, sizeof(Standard), FileStandardInformation);
+    if (!NT_SUCCESS(Status) || Standard.EndOfFile.QuadPart == 0 || Standard.EndOfFile.QuadPart > 8 * 1024 * 1024)
+    {
+        ok(0, "log size %I64d, status 0x%lx\n", Standard.EndOfFile.QuadPart, Status);
+        ZwClose(File);
+        return;
+    }
+    Length = Standard.EndOfFile.LowPart;
+    Buffer = ExAllocatePoolWithTag(PagedPool, Length + 1, 'aAmK');
+    if (!Buffer)
+    {
+        ZwClose(File);
+        skip(FALSE, "No memory\n");
+        return;
+    }
+    Offset.QuadPart = 0;
+    Status = ZwReadFile(File, NULL, NULL, NULL, &Iosb, Buffer, Length, &Offset, NULL);
+    ZwClose(File);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        Length = (ULONG)Iosb.Information;
+        Buffer[Length] = ANSI_NULL;
+        for (p = Buffer; p + NeedleLength <= Buffer + Length; p++)
+        {
+            if (RtlCompareMemory(p, Needle, NeedleLength) == NeedleLength)
+            {
+                Hit = p;
+                break;
+            }
+        }
+        ok(Hit != NULL, "no line with %s\n", Needle);
+        if (Hit)
+        {
+            for (Start = Hit; Start > Buffer && Start[-1] != '\n'; Start--)
+                ;
+            for (End = Hit; End < Buffer + Length && *End != '\n'; End++)
+                ;
+            ok(End < Buffer + Length, "the line with %s has no newline\n", Needle);
+            ok(*Start == '{' && End > Start && End[-1] == '}', "the line with %s is not an object\n", Needle);
+            for (p = Start; p < End; p++)
+            {
+                if (*p == '\\')
+                    p++;
+                else if (*p == '"')
+                    Quotes++;
+            }
+            ok((Quotes % 2) == 0, "the line with %s has unbalanced quotes (%lu)\n", Needle, Quotes);
+            ok(End - Start < 2048, "the line with %s is %lu bytes\n", Needle, (ULONG)(End - Start));
+            /* The fields after the key are still there: the cut is in the key, not the end of the line */
+            ok(strstr(Start, "\"mode\":\"") != NULL && strstr(Start, "\"mode\":\"") < End,
+               "the line with %s lost its tail\n", Needle);
+        }
+    }
+    ExFreePoolWithTag(Buffer, 'aAmK');
+}
+
+/*
+ * A key whose path is far longer than the log keeps (512 characters) and made of characters
+ * that take six bytes each in the log: the line must still be a valid, terminated line
+ */
+#define LONG_LEVELS     3
+#define LONG_LEVEL_CHARS 250
+
+static
+VOID
+TestLongNonAsciiKey(
+    _In_ ULONG Tag)
+{
+    HANDLE Keys[LONG_LEVELS] = {NULL};
+    PWCHAR Name, Path;
+    ULONG Level, i, PathChars = 0;
+    UNICODE_STRING String;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    PACCESS_TOKEN Filtered;
+    HANDLE Key;
+    NTSTATUS Status;
+    CHAR Needle[64];
+    BOOLEAN Impersonating = FALSE;
+
+    Path = ExAllocatePoolWithTag(PagedPool, 4096 * sizeof(WCHAR), 'aAmK');
+    Name = ExAllocatePoolWithTag(PagedPool, 4096 * sizeof(WCHAR), 'aAmK');
+    if (skip(Path && Name, "No memory\n"))
+        goto Cleanup;
+
+    RtlStringCchPrintfW(Path, 4096, L"%ls\\", SOFTWARE);
+    PathChars = (ULONG)wcslen(Path);
+    for (Level = 0; Level < LONG_LEVELS; Level++)
+    {
+        ULONG Chars = 0;
+
+        if (Level == 0)
+            {
+                RtlStringCchPrintfW(Name, 4096, L"KmtAclL-%lu-", Tag);
+                Chars = (ULONG)wcslen(Name);
+            }
+        while (Chars < LONG_LEVEL_CHARS)
+            Name[Chars++] = 0x00E9;
+        Name[Chars] = UNICODE_NULL;
+        RtlCopyMemory(Path + PathChars, Name, Chars * sizeof(WCHAR));
+        PathChars += Chars;
+        Path[PathChars] = UNICODE_NULL;
+
+        /* Made as kernel mode: not checked, not logged */
+        RtlInitUnicodeString(&String, Path);
+        InitializeObjectAttributes(&ObjectAttributes, &String, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
+        Status = ZwCreateKey(&Keys[Level], KEY_ALL_ACCESS, &ObjectAttributes, 0, NULL, REG_OPTION_VOLATILE, NULL);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (!NT_SUCCESS(Status))
+        {
+            Keys[Level] = NULL;
+            goto Cleanup;
+        }
+        if (Level + 1 < LONG_LEVELS)
+            Path[PathChars++] = L'\\';
+    }
+
+    Filtered = MakeFilteredToken();
+    if (skip(Filtered != NULL, "No filtered token\n"))
+        goto Cleanup;
+    Status = PsImpersonateClient(PsGetCurrentThread(), Filtered, FALSE, FALSE, SecurityImpersonation);
+    ObDereferenceObject(Filtered);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (skip(NT_SUCCESS(Status), "Not impersonating\n"))
+        goto Cleanup;
+    Impersonating = TRUE;
+
+    RtlInitUnicodeString(&String, Path);
+    InitializeObjectAttributes(&ObjectAttributes, &String,
+                               OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE | OBJ_FORCE_ACCESS_CHECK, NULL, NULL);
+    Status = ZwOpenKey(&Key, KEY_SET_VALUE, &ObjectAttributes);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+        ZwClose(Key);
+    PsRevertToSelf();
+    Impersonating = FALSE;
+
+    RtlStringCbPrintfA(Needle, sizeof(Needle), "\"key\":\"\\\\REGISTRY\\\\MACHINE\\\\SOFTWARE\\\\KmtAclL-%lu-", Tag);
+    ok(WaitForLog(Needle, 40), "long key not in the audit log\n");
+    CheckLogLine(Needle);
+
+Cleanup:
+    if (Impersonating)
+        PsRevertToSelf();
+    for (i = LONG_LEVELS; i > 0; i--)
+        DeleteKey(Keys[i - 1]);
+    if (Path)
+        ExFreePoolWithTag(Path, 'aAmK');
+    if (Name)
+        ExFreePoolWithTag(Name, 'aAmK');
+}
+
 START_TEST(CmAclAudit)
 {
     AUDIT_STATS Before, After;
@@ -430,6 +609,8 @@ START_TEST(CmAclAudit)
         /* Logged by an earlier run of this test too (same user, same key): only its presence is checked */
         if (HaveUserHive)
             ok(WaitForLog(NeedleE, 15), "write open of the user's Software key with rule user not in the audit log\n");
+
+        TestLongNonAsciiKey(Tag);
 
         ReadStats(&After);
         ok(After.Denials >= Before.Denials + 2, "Denials %lu -> %lu\n", Before.Denials, After.Denials);
