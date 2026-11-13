@@ -194,6 +194,57 @@ START_TEST(SetEntriesInAclOld)
         New = NULL;
     }
 
+    /* REVOKE_ACCESS removes the allowed entries of the trustee, its denied entries stay */
+    {
+        PACL Mixed = NULL;
+        static const EXPECTED_ACE Expected[] =
+        {
+            { ACCESS_DENIED_ACE_TYPE, 0, FILE_GENERIC_WRITE & ~SYNCHRONIZE, WinBuiltinUsersSid },
+            { ACCESS_ALLOWED_ACE_TYPE, 0, FILE_ALL_ACCESS, WinBuiltinAdministratorsSid },
+        };
+        static const EXPECTED_ACE Unchanged[] =
+        {
+            { ACCESS_DENIED_ACE_TYPE, 0, FILE_GENERIC_WRITE & ~SYNCHRONIZE, WinBuiltinUsersSid },
+            { ACCESS_ALLOWED_ACE_TYPE, 0, FILE_ALL_ACCESS, WinBuiltinAdministratorsSid },
+        };
+
+        Entry(&E[0], Users, FILE_GENERIC_WRITE & ~SYNCHRONIZE, DENY_ACCESS, NO_INHERITANCE);
+        Entry(&E[1], Users, FILE_GENERIC_READ & ~SYNCHRONIZE, GRANT_ACCESS, NO_INHERITANCE);
+        Err = SetEntriesInAclW(2, E, Old, &Mixed);
+        ok_dec(Err, ERROR_SUCCESS);
+        if (Err == ERROR_SUCCESS)
+        {
+            ok_dec((int)Mixed->AceCount, 4);
+
+            Entry(&E[0], Users, 0, REVOKE_ACCESS, NO_INHERITANCE);
+            Err = SetEntriesInAclW(1, E, Mixed, &New);
+            ok_dec(Err, ERROR_SUCCESS);
+            /* Old only has Admins and System: remove System as well to compare with Expected */
+            if (New)
+            {
+                LocalFree(Mixed);
+                Mixed = New;
+                New = NULL;
+                Entry(&E[0], System, 0, REVOKE_ACCESS, NO_INHERITANCE);
+                Err = SetEntriesInAclW(1, E, Mixed, &New);
+                ok_dec(Err, ERROR_SUCCESS);
+                Check("revoke keeps deny", New, Expected, _countof(Expected));
+
+                /* a trustee that has only a denied entry loses nothing */
+                Entry(&E[0], Users, 0, REVOKE_ACCESS, NO_INHERITANCE);
+                LocalFree(Mixed);
+                Mixed = New;
+                New = NULL;
+                Err = SetEntriesInAclW(1, E, Mixed, &New);
+                ok_dec(Err, ERROR_SUCCESS);
+                Check("revoke deny only", New, Unchanged, _countof(Unchanged));
+                LocalFree(New);
+                New = NULL;
+            }
+        }
+        LocalFree(Mixed);
+    }
+
 Done:
     LocalFree(Old);
     LocalFree(Admins);
