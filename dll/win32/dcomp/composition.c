@@ -118,6 +118,7 @@ static const struct iface_entry iface_table[] =
     { &IID_INitroDrawingSurfaceInterop, offsetof(struct cobj, dsinterop), KM(K_DSURFACE), FALSE },
     /* the real ICompositionDrawingSurfaceInterop: same six methods, same order (see dcomp_nitro.h) */
     { &IID_ICompositionDrawingSurfaceInterop, offsetof(struct cobj, dsinterop), KM(K_DSURFACE), FALSE },
+    { &IID_ICompositionGraphicsDeviceInterop, offsetof(struct cobj, gdinterop), KM(K_GDEVICE), FALSE },
     { &IID_INitroCompositionTest, offsetof(struct cobj, test), KM_VISUAL, FALSE },
 };
 
@@ -2174,6 +2175,7 @@ HRESULT comp_create(IUnknown *compositor, enum cobj_kind kind, struct cobj **out
     o->tracker.lpVtbl = &tracker_vtbl;
     o->srccoll.lpVtbl = &srccoll_vtbl;
     o->dsinterop.lpVtbl = &nitro_dsinterop_vtbl;
+    o->gdinterop.lpVtbl = &gfx_device_interop_vtbl;
     o->test.lpVtbl = &nitro_test_vtbl_impl;
     o->closable.lpVtbl = &closable_vtbl;
     o->agile.lpVtbl = &agile_vtbl;
