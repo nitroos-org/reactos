@@ -132,8 +132,10 @@ static
 VOID
 test_name_tables(VOID)
 {
-    static const PCWSTR Names[] = { L"Counter 009", L"Counter", L"counter 009", L"Counter 0409", L"Counter CurrentLanguage" };
-    static const PCWSTR Helps[] = { L"Help 009", L"Explain 009", L"Help" };
+    static const PCWSTR Names[] = { L"Counter 009", L"Counter", L"counter 009", L"Counter 0409", L"Counter CurrentLanguage",
+                                      /* text that is no language number: the plain table (measured on Windows 10) */
+                                      L"Counterwine", L"cOuNtErwine", L"Counter wine" };
+    static const PCWSTR Helps[] = { L"Help 009", L"Explain 009", L"Help", L"Helpwine", L"hElPwine", L"Explainwine", L"Help wine" };
     DWORD Type, Size, Required, i, cb;
     BOOL Terminated;
     PCWSTR Text;
@@ -170,6 +172,11 @@ test_name_tables(VOID)
         ok(Text && !lstrcmpW(Text, L"Network Interface"), "%ls: 510 is %ls\n", Names[i], Text);
         Text = FindText((PWSTR)g_Buffer, Size, INDEX_PROCESSOR_TIME);
         ok(Text && !lstrcmpW(Text, L"% Processor Time"), "%ls: 6 is %ls\n", Names[i], Text);
+        /* the table ends with an End Marker, and starts with the index of the one in the help table */
+        Text = FindText((PWSTR)g_Buffer, Size, 1846);
+        ok(Text && !lstrcmpW(Text, L"End Marker"), "%ls: 1846 is %ls\n", Names[i], Text);
+        Text = FindText((PWSTR)g_Buffer, Size, 1);
+        ok(Text && !lstrcmpW(Text, L"1847"), "%ls: 1 is %ls\n", Names[i], Text);
     }
 
     /* the size of a text table is known without a buffer, and returned when the buffer is too small */
@@ -199,6 +206,8 @@ test_name_tables(VOID)
         /* the help of an object has the index after the one of its name */
         Text = FindText((PWSTR)g_Buffer, Size, INDEX_PROCESSOR + 1);
         ok(Text != NULL, "%ls: no help for the Processor object\n", Helps[i]);
+        Text = FindText((PWSTR)g_Buffer, Size, 1847);
+        ok(Text && !lstrcmpW(Text, L"End Marker"), "%ls: 1847 is %ls\n", Helps[i], Text);
     }
 
     /* a language that has no table */
