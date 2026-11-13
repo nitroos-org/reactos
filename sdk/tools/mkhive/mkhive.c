@@ -169,6 +169,9 @@ int main(int argc, char *argv[])
             goto Quit;
     }
 
+    /* The keys whose descriptor is not the inherited one */
+    RegStampSecurity(HiveList);
+
     for (i = 0; i < MAX_NUMBER_OF_REGISTRY_HIVES; ++i)
     {
         /* Skip this registry hive if it's not in the list */

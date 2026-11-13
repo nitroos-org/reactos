@@ -33,6 +33,7 @@
 #include "regutil.h"
 
 #include "registry.h"
+#include <reactos/regacl_sd.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -572,17 +573,23 @@ typedef struct _HIVE_LIST_ENTRY
     HANDLE PredefKeyHandle;
     PCWSTR RegSymLink;
     HIVE_UPDATE_STATE State;
-    // PUCHAR SecurityDescriptor;
-    // ULONG  SecurityDescriptorLength;
+    ULONG SdTemplate;           // REGSD_T_*: the descriptor of the hive's root key (REGSD_T_COUNT: none)
 } HIVE_LIST_ENTRY, *PHIVE_LIST_ENTRY;
 
 #define NUMBER_OF_STANDARD_REGISTRY_HIVES   3
 
+/*
+ * The DEFAULT hive gets no root descriptor here: it is saved as the Default User profile hive,
+ * so every new profile would start with the root descriptor of HKU\.DEFAULT, which has no
+ * entry for the user. The profile code replaces it (userenv, effective once keys can be given
+ * a descriptor), until then the root of a profile keeps none and gets the user's by its SID.
+ */
+
 HIVE_LIST_ENTRY RegistryHives[/*NUMBER_OF_STANDARD_REGISTRY_HIVES*/] =
 {
-    { L"SYSTEM"  , L"\\Registry\\Machine\\USetup_SYSTEM"  , HKEY_LOCAL_MACHINE, L"SYSTEM"  , Create /* , SystemSecurity  , sizeof(SystemSecurity)   */ },
-    { L"SOFTWARE", L"\\Registry\\Machine\\USetup_SOFTWARE", HKEY_LOCAL_MACHINE, L"SOFTWARE", Create /* , SoftwareSecurity, sizeof(SoftwareSecurity) */ },
-    { L"DEFAULT" , L"\\Registry\\User\\USetup_DEFAULT"    , HKEY_USERS        , L".DEFAULT", Create /* , SystemSecurity  , sizeof(SystemSecurity)   */ },
+    { L"SYSTEM"  , L"\\Registry\\Machine\\USetup_SYSTEM"  , HKEY_LOCAL_MACHINE, L"SYSTEM"  , Create, REGSD_T_HIVEROOT },
+    { L"SOFTWARE", L"\\Registry\\Machine\\USetup_SOFTWARE", HKEY_LOCAL_MACHINE, L"SOFTWARE", Create, REGSD_T_HIVEROOT },
+    { L"DEFAULT" , L"\\Registry\\User\\USetup_DEFAULT"    , HKEY_USERS        , L".DEFAULT", Create, REGSD_T_COUNT /* none, see below */ },
 
 //  { L"BCD"     , L"\\Registry\\Machine\\USetup_BCD", HKEY_LOCAL_MACHINE, L"BCD00000000", Create /* , BcdSecurity     , sizeof(BcdSecurity)      */ },
 };
@@ -593,8 +600,8 @@ C_ASSERT(_countof(RegistryHives) == NUMBER_OF_STANDARD_REGISTRY_HIVES);
 /** These hives are created by LSASS during 2nd stage setup */
 HIVE_LIST_ENTRY SecurityRegistryHives[/*NUMBER_OF_SECURITY_REGISTRY_HIVES*/] =
 {
-    { L"SAM"     , L"\\Registry\\Machine\\USetup_SAM"     , HKEY_LOCAL_MACHINE, L"SAM"     , Create /* , SystemSecurity  , sizeof(SystemSecurity)   */ },
-    { L"SECURITY", L"\\Registry\\Machine\\USetup_SECURITY", HKEY_LOCAL_MACHINE, L"SECURITY", Create /* , NULL            , 0                        */ },
+    { L"SAM"     , L"\\Registry\\Machine\\USetup_SAM"     , HKEY_LOCAL_MACHINE, L"SAM"     , Create, REGSD_T_HIVEROOT },
+    { L"SECURITY", L"\\Registry\\Machine\\USetup_SECURITY", HKEY_LOCAL_MACHINE, L"SECURITY", Create, REGSD_T_SECURITY },
 };
 C_ASSERT(_countof(SecurityRegistryHives) == NUMBER_OF_SECURITY_REGISTRY_HIVES);
 
@@ -675,6 +682,82 @@ VerifyRegistryHives(
     return Status;
 }
 
+/*
+ * Keys of the new installation whose descriptor differs from what they inherit on Windows 10.
+ * They are created here, empty and with the descriptor, before the INF files fill the hives:
+ * AddReg then opens the existing key. Only keys the INF files define, or that the service which
+ * fills them later opens as existing, are listed (HKLM relative paths, one component at a time).
+ */
+typedef struct _SD_OVERRIDE
+{
+    PCWSTR Path;
+    ULONG Template;
+} SD_OVERRIDE;
+
+static const SD_OVERRIDE SdOverrides[] =
+{
+    { L"SYSTEM\\ControlSet001\\Services\\EventLog", REGSD_T_EVENTLOG },
+    { L"SOFTWARE\\Policies", REGSD_T_POLICIES },
+    { L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Schedule\\TaskCache", REGSD_T_TASKCACHE },
+};
+
+static VOID
+CreateOverrideKeys(VOID)
+{
+    UINT i;
+    ULONG Length;
+    UCHAR Sd[REGSD_MAX_ACES * 80];
+    WCHAR Path[MAX_PATH];
+    UNICODE_STRING KeyName;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE Parent, Key;
+    PWCHAR Component, Next;
+    NTSTATUS Status;
+
+    for (i = 0; i < ARRAYSIZE(SdOverrides); ++i)
+    {
+        Length = RegSdBuild(SdOverrides[i].Template, NULL, Sd, sizeof(Sd));
+        if (!Length || wcslen(SdOverrides[i].Path) >= ARRAYSIZE(Path))
+            continue;
+        wcscpy(Path, SdOverrides[i].Path);
+
+        Parent = RootKeys[GetPredefKeyIndex(HKEY_LOCAL_MACHINE)].Handle;
+        for (Component = Path; Component; Component = Next)
+        {
+            Next = wcschr(Component, L'\\');
+            if (Next)
+                *Next++ = UNICODE_NULL;
+
+            RtlInitUnicodeString(&KeyName, Component);
+            InitializeObjectAttributes(&ObjectAttributes,
+                                       &KeyName,
+                                       OBJ_CASE_INSENSITIVE,
+                                       Parent,
+                                       /* the descriptor goes on the last key only */
+                                       Next ? NULL : (PSECURITY_DESCRIPTOR)Sd);
+            Key = NULL;
+            Status = NtCreateKey(&Key,
+                                 KEY_ALL_ACCESS,
+                                 &ObjectAttributes,
+                                 0,
+                                 NULL,
+                                 REG_OPTION_NON_VOLATILE,
+                                 NULL);
+            if (Parent != RootKeys[GetPredefKeyIndex(HKEY_LOCAL_MACHINE)].Handle)
+                NtClose(Parent);
+            if (!NT_SUCCESS(Status))
+            {
+                DPRINT1("NtCreateKey(%S) failed (Status 0x%08lx)\n", SdOverrides[i].Path, Status);
+                Parent = NULL;
+                break;
+            }
+            Parent = Key;
+        }
+        if (Parent && Parent != RootKeys[GetPredefKeyIndex(HKEY_LOCAL_MACHINE)].Handle)
+            NtClose(Parent);
+    }
+}
+
 NTSTATUS
 RegInitializeRegistry(
     IN PUNICODE_STRING NtSystemRoot)
@@ -707,7 +790,8 @@ RegInitializeRegistry(
     }
 
     /*
-     * Create the template proto-hive.
+     * Create the template proto-hive for each hive: its key is saved as the hive's root, so
+     * it is created with the descriptor of that hive's root key (the Windows 10 one).
      *
      * Use a dummy root key name:
      * - On 2k/XP/2k3, this is "$$$PROTO.HIV"
@@ -715,49 +799,50 @@ RegInitializeRegistry(
      * See https://github.com/libyal/winreg-kb/blob/main/docs/sources/windows-registry/Files.md
      * for more information.
      */
-    RtlInitUnicodeString(&KeyName, L"\\Registry\\Machine\\SYSTEM\\$$$PROTO.HIV");
-    InitializeObjectAttributes(&ObjectAttributes,
-                               &KeyName,
-                               OBJ_CASE_INSENSITIVE,
-                               NULL,
-                               NULL);
-    Status = NtCreateKey(&KeyHandle,
-                         KEY_ALL_ACCESS,
-                         &ObjectAttributes,
-                         0,
-                         NULL,
-                         REG_OPTION_NON_VOLATILE,
-                         NULL);
-    if (!NT_SUCCESS(Status))
-    {
-        DPRINT1("NtCreateKey() failed to create the proto-hive (Status %lx)\n", Status);
-        goto Quit;
-    }
-    NtFlushKey(KeyHandle);
-
     for (i = 0; i < ARRAYSIZE(RegistryHives); ++i)
     {
+        UCHAR RootSd[512];
+
         if (RegistryHives[i].State != Create && RegistryHives[i].State != Repair)
             continue;
+
+        RtlInitUnicodeString(&KeyName, L"\\Registry\\Machine\\SYSTEM\\$$$PROTO.HIV");
+        InitializeObjectAttributes(&ObjectAttributes,
+                                   &KeyName,
+                                   OBJ_CASE_INSENSITIVE,
+                                   NULL,
+                                   RegSdBuild(RegistryHives[i].SdTemplate, NULL, RootSd, sizeof(RootSd)) ?
+                                       (PSECURITY_DESCRIPTOR)RootSd : NULL);
+        Status = NtCreateKey(&KeyHandle,
+                             KEY_ALL_ACCESS,
+                             &ObjectAttributes,
+                             0,
+                             NULL,
+                             REG_OPTION_NON_VOLATILE,
+                             NULL);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("NtCreateKey() failed to create the proto-hive (Status %lx)\n", Status);
+            goto Quit;
+        }
+        NtFlushKey(KeyHandle);
 
         Status = CreateRegistryFile(NtSystemRoot,
                                     RegistryHives[i].HiveName,
                                     RegistryHives[i].State != Repair, // RegistryHives[i].State == Create,
                                     KeyHandle);
+
+        /* That is now done, remove the proto-hive */
+        NtDeleteKey(KeyHandle);
+        NtClose(KeyHandle);
+
         if (!NT_SUCCESS(Status))
         {
             DPRINT1("CreateRegistryFile(%S) failed, Status 0x%08lx\n", RegistryHives[i].HiveName, Status);
             /* Exit prematurely here.... */
-            /* That is now done, remove the proto-hive */
-            NtDeleteKey(KeyHandle);
-            NtClose(KeyHandle);
             goto Quit;
         }
     }
-
-    /* That is now done, remove the proto-hive */
-    NtDeleteKey(KeyHandle);
-    NtClose(KeyHandle);
 
 
     /*
@@ -981,6 +1066,9 @@ RegInitializeRegistry(
         DPRINT1("CreateSymLinkKey(CurrentControlSet) failed, Status 0x%08lx\n", Status);
     }
 
+
+    /* The keys whose descriptor is not the inherited one */
+    CreateOverrideKeys();
 
     Status = STATUS_SUCCESS;
 

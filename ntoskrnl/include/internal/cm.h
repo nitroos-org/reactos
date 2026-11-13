@@ -818,6 +818,10 @@ BOOLEAN
 NTAPI
 CmpStoreKeySecurity(VOID);
 
+BOOLEAN
+NTAPI
+CmpStoreExplicitKeySecurity(VOID);
+
 PSECURITY_DESCRIPTOR
 NTAPI
 CmpCaptureParentSecurity(

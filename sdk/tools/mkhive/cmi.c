@@ -194,6 +194,152 @@ CmiCreateSecurityKey(
     return STATUS_SUCCESS;
 }
 
+/*
+ * Give a key node a security descriptor. An identical descriptor already in the hive's ring
+ * of "sk" cells is shared (reference count); a new cell is linked into the ring after the
+ * root key's one, as the kernel does. A node that has a descriptor keeps it, unless Replace
+ * is set: the node then drops its reference on the old cell (freed with its last reference,
+ * the root key's cell never) and takes the new descriptor. The same descriptor is a no-op.
+ */
+NTSTATUS
+CmiAssignSecurityKey(
+    IN PHHIVE Hive,
+    IN HCELL_INDEX Cell,
+    IN PUCHAR Descriptor,
+    IN ULONG DescriptorLength,
+    IN BOOLEAN Replace)
+{
+    HCELL_INDEX AnchorCell, Walk, Following, SecurityCell, OldCell;
+    PCM_KEY_NODE Node, RootNode;
+    PCM_KEY_SECURITY Security, Anchor, Next;
+    ULONG Guard = 0;
+
+    Node = (PCM_KEY_NODE)HvGetCell(Hive, Cell);
+    if (!Node)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    OldCell = Node->Security;
+    if (OldCell != HCELL_NIL && !Replace)
+    {
+        HvReleaseCell(Hive, Cell);
+        return STATUS_SUCCESS;
+    }
+
+    RootNode = (PCM_KEY_NODE)HvGetCell(Hive, Hive->BaseBlock->RootCell);
+    AnchorCell = RootNode ? RootNode->Security : HCELL_NIL;
+    if (RootNode)
+        HvReleaseCell(Hive, Hive->BaseBlock->RootCell);
+
+    if (OldCell != HCELL_NIL)
+    {
+        /* Replace: the old descriptor, if it is the one wanted, stays */
+        Security = (PCM_KEY_SECURITY)HvGetCell(Hive, OldCell);
+        if (!Security || Security->Signature != CM_KEY_SECURITY_SIGNATURE || Cell == Hive->BaseBlock->RootCell)
+        {
+            if (Security)
+                HvReleaseCell(Hive, OldCell);
+            HvReleaseCell(Hive, Cell);
+            return STATUS_UNSUCCESSFUL;
+        }
+        if (Security->DescriptorLength == DescriptorLength &&
+            memcmp(&Security->Descriptor, Descriptor, DescriptorLength) == 0)
+        {
+            HvReleaseCell(Hive, OldCell);
+            HvReleaseCell(Hive, Cell);
+            return STATUS_SUCCESS;
+        }
+
+        /* Drop the reference; the last one frees the cell (the root's one has the root key's) */
+        Node->Security = HCELL_NIL;
+        if (Security->ReferenceCount > 1 || OldCell == AnchorCell)
+        {
+            if (Security->ReferenceCount > 1)
+                Security->ReferenceCount--;
+            HvReleaseCell(Hive, OldCell);
+        }
+        else
+        {
+            PCM_KEY_SECURITY Neighbour;
+            HCELL_INDEX Before = Security->Blink, After = Security->Flink;
+
+            Neighbour = (PCM_KEY_SECURITY)HvGetCell(Hive, Before);
+            Neighbour->Flink = After;
+            HvReleaseCell(Hive, Before);
+            Neighbour = (PCM_KEY_SECURITY)HvGetCell(Hive, After);
+            Neighbour->Blink = Before;
+            HvReleaseCell(Hive, After);
+            HvReleaseCell(Hive, OldCell);
+            HvFreeCell(Hive, OldCell);
+        }
+    }
+    HvReleaseCell(Hive, Cell);
+
+    if (AnchorCell == HCELL_NIL)
+    {
+        /* The hive has no ring yet: this descriptor starts it */
+        return CmiCreateSecurityKey(Hive, Cell, Descriptor, DescriptorLength);
+    }
+
+    /* An identical descriptor in the ring is shared */
+    Walk = AnchorCell;
+    do
+    {
+        Security = (PCM_KEY_SECURITY)HvGetCell(Hive, Walk);
+        if (!Security || Security->Signature != CM_KEY_SECURITY_SIGNATURE || ++Guard > 100000)
+            return STATUS_UNSUCCESSFUL;
+        if (Security->DescriptorLength == DescriptorLength &&
+            memcmp(&Security->Descriptor, Descriptor, DescriptorLength) == 0)
+        {
+            Security->ReferenceCount++;
+            HvReleaseCell(Hive, Walk);
+            Node = (PCM_KEY_NODE)HvGetCell(Hive, Cell);
+            Node->Security = Walk;
+            HvReleaseCell(Hive, Cell);
+            return STATUS_SUCCESS;
+        }
+        Following = Security->Flink;
+        HvReleaseCell(Hive, Walk);
+        Walk = Following;
+    } while (Walk != AnchorCell);
+
+    /* A new cell, linked in after the anchor */
+    SecurityCell = HvAllocateCell(Hive,
+                                  FIELD_OFFSET(CM_KEY_SECURITY, Descriptor) + DescriptorLength,
+                                  Stable,
+                                  HCELL_NIL);
+    if (SecurityCell == HCELL_NIL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Security = (PCM_KEY_SECURITY)HvGetCell(Hive, SecurityCell);
+    Anchor = (PCM_KEY_SECURITY)HvGetCell(Hive, AnchorCell);
+    Security->Signature = CM_KEY_SECURITY_SIGNATURE;
+    Security->Reserved = 0;
+    Security->ReferenceCount = 1;
+    Security->DescriptorLength = DescriptorLength;
+    RtlMoveMemory(&Security->Descriptor, Descriptor, DescriptorLength);
+
+    Following = Anchor->Flink;
+    Security->Blink = AnchorCell;
+    Security->Flink = Following;
+    Anchor->Flink = SecurityCell;
+    if (Following == AnchorCell)
+    {
+        Anchor->Blink = SecurityCell;
+    }
+    else
+    {
+        Next = (PCM_KEY_SECURITY)HvGetCell(Hive, Following);
+        Next->Blink = SecurityCell;
+        HvReleaseCell(Hive, Following);
+    }
+    HvReleaseCell(Hive, AnchorCell);
+    HvReleaseCell(Hive, SecurityCell);
+
+    Node = (PCM_KEY_NODE)HvGetCell(Hive, Cell);
+    Node->Security = SecurityCell;
+    HvReleaseCell(Hive, Cell);
+    return STATUS_SUCCESS;
+}
+
 static NTSTATUS
 CmiCreateSubKey(
     IN PCMHIVE RegistryHive,

@@ -67,6 +67,36 @@ SampRegCreateKey(IN HANDLE ParentKeyHandle,
 }
 
 
+/* As SampRegCreateKey, and a new key gets the security descriptor (self-relative) */
+NTSTATUS
+SampRegCreateKeySd(IN HANDLE ParentKeyHandle,
+                   IN LPCWSTR KeyName,
+                   IN ACCESS_MASK DesiredAccess,
+                   IN PSECURITY_DESCRIPTOR SecurityDescriptor,
+                   OUT PHANDLE KeyHandle)
+{
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    UNICODE_STRING Name;
+    ULONG Disposition;
+
+    RtlInitUnicodeString(&Name, KeyName);
+
+    InitializeObjectAttributes(&ObjectAttributes,
+                               &Name,
+                               OBJ_CASE_INSENSITIVE | OBJ_OPENIF,
+                               ParentKeyHandle,
+                               SecurityDescriptor);
+
+    return ZwCreateKey(KeyHandle,
+                       DesiredAccess,
+                       &ObjectAttributes,
+                       0,
+                       NULL,
+                       0,
+                       &Disposition);
+}
+
+
 NTSTATUS
 SampRegDeleteKey(IN HANDLE ParentKeyHandle,
                  IN LPCWSTR KeyName)

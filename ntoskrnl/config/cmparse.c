@@ -222,6 +222,7 @@ CmpDoCreateChild(IN PHHIVE Hive,
     PCM_KEY_CONTROL_BLOCK Kcb;
     PSECURITY_DESCRIPTOR NewDescriptor, ParentSd = NULL;
     HCELL_INDEX SecurityCell = HCELL_NIL;
+    BOOLEAN StoreExplicit;
 
     *KeyCell = HCELL_NIL;
 
@@ -242,12 +243,19 @@ CmpDoCreateChild(IN PHHIVE Hive,
      */
     if (!ParentDescriptor)
         ParentDescriptor = ParentSd = CmpCaptureParentSecurity(ParentKcb);
+    /*
+     * Setup stores no inherited descriptors, but the one a user-mode creator names (setup
+     * builds the hives this way). The kernel's own creates, which pass the hive default,
+     * keep leaving the key without one.
+     */
+    StoreExplicit = !ParentDescriptor && AccessMode == UserMode &&
+                    AccessState->SecurityDescriptor && CmpStoreExplicitKeySecurity();
     Status = SeAssignSecurityEx(ParentDescriptor,
                                 AccessState->SecurityDescriptor,
                                 &NewDescriptor,
                                 NULL,
                                 TRUE,
-                                ParentDescriptor ? SEF_SACL_AUTO_INHERIT : 0,
+                                (ParentDescriptor || StoreExplicit) ? SEF_SACL_AUTO_INHERIT : 0,
                                 &AccessState->SubjectSecurityContext,
                                 &CmpKeyObjectType->TypeInfo.GenericMapping,
                                 CmpKeyObjectType->TypeInfo.PoolType);
@@ -255,7 +263,7 @@ CmpDoCreateChild(IN PHHIVE Hive,
         CmpFreeParentSecurity(ParentSd);
     if (!NT_SUCCESS(Status))
         return Status;
-    if (ParentDescriptor)
+    if (ParentDescriptor || StoreExplicit)
     {
         Status = CmpInsertSecurityDescriptor((PCMHIVE)Hive,
                                              NewDescriptor,
