@@ -136,6 +136,13 @@ IntArc( DC *dc,
     AngleEnd   = atan2((RectSEpts.bottom - CenterY), RectSEpts.right - CenterX)*(360.0/(M_PI*2));
     AngleStart = atan2((RectSEpts.top - CenterY), RectSEpts.left - CenterX)*(360.0/(M_PI*2));
 
+    /* The arc keeps its direction in logical space: a world transform that flips an axis makes it run the other way
+       on the screen */
+    if (PATH_IsWorldFlipped(dc))
+    {
+        double tmp = AngleStart; AngleStart = AngleEnd; AngleEnd = tmp;
+    }
+
     /* Edge Case: Check if the start segments overlaps(is equal) the end segment */
     if (AngleEnd == AngleStart)
     {

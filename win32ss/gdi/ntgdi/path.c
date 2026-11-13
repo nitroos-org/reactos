@@ -2286,6 +2286,28 @@ PATH_IsWidePen(DC *dc, PBRUSH pbrLine)
     return bWide;
 }
 
+/* TRUE when the world transform (advanced graphics mode) reverses orientation, as a flip of one axis does. An arc keeps
+ * its direction in logical space, so on the screen it runs the other way (Windows: Arc under a world transform with
+ * eM22 = -1 draws the mirror image; a mapping mode that flips an axis, MM_LOENGLISH, does not reverse it). */
+BOOL
+FASTCALL
+PATH_IsWorldFlipped(DC *dc)
+{
+    KFLOATING_SAVE fpsave;
+    PMATRIX pmxWorld = &dc->pdcattr->mxWorldToPage;
+    double det;
+
+    if (dc->pdcattr->iGraphicsMode != GM_ADVANCED)
+        return FALSE;
+
+    KeSaveFloatingPointState(&fpsave);
+    det = PATH_FloatObjValue(&pmxWorld->efM11) * PATH_FloatObjValue(&pmxWorld->efM22) -
+          PATH_FloatObjValue(&pmxWorld->efM12) * PATH_FloatObjValue(&pmxWorld->efM21);
+    KeRestoreFloatingPointState(&fpsave);
+
+    return det < 0;
+}
+
 /* The size in device pixels of the pen of pbrLine across a horizontal line (*pcy, the pen's extent in y) and across a
  * vertical line (*pcx, its extent in x), for the shapes the engine draws as rings (Arc, Pie, Chord, Ellipse, RoundRect)
  * and for the bounds of a wide line. The transform changes the pen as PATH_WidenPathScaled applies it. A pen that the
