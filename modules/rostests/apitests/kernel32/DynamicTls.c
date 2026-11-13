@@ -7,6 +7,7 @@
 
 #include "precomp.h"
 #include <ndk/pstypes.h>
+#include <ndk/psfuncs.h>
 #include <stdio.h>
 #include <pseh/pseh2.h>
 
@@ -774,6 +775,81 @@ static VOID RunFlsExitChild(PCSTR Self, PCSTR Mode, PCSTR Expected, PCSTR Altern
     CloseHandle(ProcessInfo.hThread);
 }
 
+/* Committed private bytes by walking the address space: what a process is charged for, VAD by VAD */
+static SIZE_T CountPrivateCommitted(SIZE_T *Regions)
+{
+    MEMORY_BASIC_INFORMATION Info;
+    PUCHAR Address = NULL;
+    SIZE_T Total = 0;
+
+    *Regions = 0;
+    while (VirtualQuery(Address, &Info, sizeof(Info)) == sizeof(Info))
+    {
+        if (Info.State != MEM_FREE)
+            (*Regions)++;
+        if (Info.State == MEM_COMMIT && Info.Type == MEM_PRIVATE)
+            Total += Info.RegionSize;
+        Address = (PUCHAR)Info.BaseAddress + Info.RegionSize;
+        if (Address <= (PUCHAR)Info.BaseAddress)
+            break;
+    }
+    return Total;
+}
+
+static SIZE_T GetPrivateUsage(VOID)
+{
+    VM_COUNTERS_EX Counters;
+    NTSTATUS Status;
+
+    Status = NtQueryInformationProcess(GetCurrentProcess(), ProcessVmCounters, &Counters, sizeof(Counters), NULL);
+    ok(NT_SUCCESS(Status), "NtQueryInformationProcess failed: 0x%08lx\n", Status);
+    return NT_SUCCESS(Status) ? Counters.PrivateUsage : 0;
+}
+
+#define CYCLES_WARMUP 200
+#define CYCLES_MEASURED 10000
+
+/*
+ * Loading and unloading a DLL with TLS over and over leaves the process' private memory where it was.
+ * The loader copies the DLL's base name for its data table entry; the copy must go with the entry.
+ */
+static VOID TestLoadCycles(VOID)
+{
+    SIZE_T Private0, Private1, Walk0, Walk1, Regions0, Regions1;
+    HMODULE hDll;
+    ULONG i;
+
+    for (i = 0; i < CYCLES_WARMUP; i++)
+    {
+        hDll = LoadLibraryW(L"kernel32_tlsdyn.dll");
+        if (!hDll || !FreeLibrary(hDll))
+        {
+            ok(0, "Cycle %lu: load/free failed: %lu\n", i, GetLastError());
+            return;
+        }
+    }
+
+    Private0 = GetPrivateUsage();
+    Walk0 = CountPrivateCommitted(&Regions0);
+    for (i = 0; i < CYCLES_MEASURED; i++)
+    {
+        hDll = LoadLibraryW(L"kernel32_tlsdyn.dll");
+        if (!hDll || !FreeLibrary(hDll))
+        {
+            ok(0, "Cycle %lu: load/free failed: %lu\n", i, GetLastError());
+            return;
+        }
+    }
+    Private1 = GetPrivateUsage();
+    Walk1 = CountPrivateCommitted(&Regions1);
+
+    trace("PrivateUsage %Iu -> %Iu (%+Id), committed private walk %Iu -> %Iu (%+Id), regions %Iu -> %Iu\n",
+          Private0, Private1, (SSIZE_T)(Private1 - Private0), Walk0, Walk1, (SSIZE_T)(Walk1 - Walk0), Regions0, Regions1);
+    ok(Private1 - Private0 < 0x10000, "PrivateUsage grew by %Iu bytes over %u cycles\n", Private1 - Private0, CYCLES_MEASURED);
+    ok(Walk1 - Walk0 < 0x10000, "Committed private memory grew by %Iu bytes over %u cycles\n", Walk1 - Walk0, CYCLES_MEASURED);
+    ok(Regions1 <= Regions0 + 4, "Address space regions: %Iu, %Iu after the cycles\n", Regions0, Regions1);
+}
+
 START_TEST(DynamicTls)
 {
     FN_TlsDynGetEvents pTlsDynGetEvents;
@@ -869,6 +945,7 @@ START_TEST(DynamicTls)
     ok(pTlsDynGetValue() == TEMPLATE_VALUE, "The other thread's set changed this thread's copy: 0x%lx\n", pTlsDynGetValue());
     ok(FreeLibrary(hDll), "FreeLibrary failed: %lu\n", GetLastError());
 
+    TestLoadCycles();
     TestFlsAtThreadExit();
     TestFlsSetAtThreadDetach();
     /* F1I1E1: the callback ran with the thread's data and TLS, before the process detach T0M0. Windows 10 detaches the last thread first. */
