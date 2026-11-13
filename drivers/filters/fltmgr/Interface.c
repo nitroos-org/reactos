@@ -507,6 +507,10 @@ FltpDeviceControl(_In_ PDEVICE_OBJECT DeviceObject,
         return Status;
     }
 
+    /* The communication device */
+    if (DeviceObject == CommsDeviceObject)
+        return FltpMsgDeviceControl(DeviceObject, Irp);
+
     DeviceExtension = DeviceObject->DeviceExtension;
 
     FLT_ASSERT(DeviceExtension &&

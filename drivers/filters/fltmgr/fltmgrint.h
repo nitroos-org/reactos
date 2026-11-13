@@ -217,47 +217,6 @@ typedef struct _STREAM_LIST_CTRL // size = 0xC8 (200)
 } STREAM_LIST_CTRL, *PSTREAM_LIST_CTRL;
 
 
-typedef struct _FLT_SERVER_PORT_OBJECT
-{
-    LIST_ENTRY FilterLink;
-    PFLT_CONNECT_NOTIFY ConnectNotify;
-    PFLT_DISCONNECT_NOTIFY DisconnectNotify;
-    PFLT_MESSAGE_NOTIFY MessageNotify;
-    PFLT_FILTER Filter;
-    PVOID Cookie;
-    ULONG Flags;
-    LONG NumberOfConnections;
-    LONG MaxConnections;
-
-} FLT_SERVER_PORT_OBJECT, *PFLT_SERVER_PORT_OBJECT;
-
-
-typedef struct _FLT_MESSAGE_WAITER_QUEUE
-{
-    IO_CSQ Csq;
-    FLT_MUTEX_LIST_HEAD WaiterQ;
-    ULONG MinimumWaiterLength;
-    KSEMAPHORE Semaphore;
-    KEVENT Event;
-
-} FLT_MESSAGE_WAITER_QUEUE, *PFLT_MESSAGE_WAITER_QUEUE;
-
-
-typedef struct _FLT_PORT_OBJECT
-{
-    LIST_ENTRY FilterLink;
-    PFLT_SERVER_PORT_OBJECT ServerPort;
-    PVOID Cookie;
-    EX_RUNDOWN_REF MsgNotifRundownRef;
-    FAST_MUTEX Lock;
-    FLT_MESSAGE_WAITER_QUEUE MsgQ;
-    ULONGLONG MessageId;
-    KEVENT DisconnectEvent;
-    BOOLEAN Disconnected;
-
-} FLT_PORT_OBJECT, *PFLT_PORT_OBJECT;
-
-
 typedef enum _FLT_VOLUME_FLAGS
 {
     VOLFL_NETWORK_FILESYSTEM = 0x1,
@@ -393,21 +352,12 @@ typedef struct _VOLUME_CCB
 
 } VOLUME_CCB, *PVOLUME_CCB;
 
-typedef struct _PORT_CCB
-{
-    PFLT_PORT_OBJECT Port;
-    FLT_MUTEX_LIST_HEAD ReplyWaiterList;
-
-} PORT_CCB, *PPORT_CCB;
-
-
 typedef union _CCB_TYPE
 {
     MANAGER_CCB Manager;
     FILTER_CCB Filter;
     INSTANCE_CCB Instance;
     VOLUME_CCB Volume;
-    PORT_CCB Port;
 
 } CCB_TYPE, *PCCB_TYPE;
 
@@ -492,6 +442,17 @@ NTSTATUS
 FltpDispatchHandler(
     _In_ PDEVICE_OBJECT DeviceObject,
     _Inout_ PIRP Irp
+);
+
+NTSTATUS
+FltpMsgDeviceControl(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _Inout_ PIRP Irp
+);
+
+VOID
+FltpDisconnectFilterPorts(
+    _In_ PFLT_FILTER Filter
 );
 
 NTSTATUS

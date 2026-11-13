@@ -6,6 +6,7 @@ list(APPEND SOURCE
     instance.c
     operation.c
     context.c
+    comms.c
     testlist.c)
 
 add_executable(fltmgr_apitest ${SOURCE})

@@ -434,6 +434,9 @@ FltUnregisterFilter(_In_ PFLT_FILTER Filter)
     ExReleaseResourceLite(&FilterListLock);
     KeLeaveCriticalRegion();
 
+    /* Whoever is still connected to the filter isn't anymore */
+    FltpDisconnectFilterPorts(Filter);
+
     /* Detach every instance, waiting for the operations in flight */
     FltpTeardownFilterInstances(Filter, FLTFL_INSTANCE_TEARDOWN_FILTER_UNLOAD);
 

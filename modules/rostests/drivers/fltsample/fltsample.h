@@ -78,6 +78,14 @@ typedef struct _FLTSAMPLE_STATS
     ULONG SelfTest[16];             /* results of FLTSAMPLE_IOCTL_CONTEXT_SELFTEST */
     ULONG OpenFiles;                /* file objects the filter has seen opened and not yet closed */
     ULONG VolumeCount;
+    ULONG PortConnects;
+    ULONG PortDisconnects;
+    ULONG PortMessages;             /* messages from the client (FilterSendMessage) */
+    ULONG PortSent;                 /* messages to the client (FltSendMessage) */
+    ULONG PortAsked;                /* creates the client was asked about */
+    ULONG PortDenied;               /* ... and said no to */
+    ULONG PortAskFailed;            /* ... and couldn't be asked, or didn't answer */
+    ULONG PortLastStatus;           /* what the last FltSendMessage returned */
     WCHAR LastCreate[64];           /* name of the last create the filter looked at */
     WCHAR Altitude[16];
     WCHAR InstanceName[32];
@@ -92,6 +100,34 @@ typedef struct _FLTSAMPLE_STATS
 #define FLTSAMPLE_CTX_HANDLE_NEW        5
 #define FLTSAMPLE_CTX_INSTANCE_HITS     6
 #define FLTSAMPLE_CTX_VOLUME_HITS       7
+
+/* The messages the client sends through the port, and the ones it gets */
+typedef struct _FLTSAMPLE_MSG
+{
+    ULONG Code;
+    ULONG Arg;
+    UCHAR Data[1];
+
+} FLTSAMPLE_MSG, *PFLTSAMPLE_MSG;
+
+#define FLTSAMPLE_MSG_PING          1   /* the data comes back */
+#define FLTSAMPLE_MSG_GET_STATS     2   /* the statistics come back */
+#define FLTSAMPLE_MSG_NOTIFY        3   /* the driver sends Arg bytes of data to the client, without a reply; the status comes back */
+#define FLTSAMPLE_MSG_ASK           4   /* the same with a reply, waiting Arg ms (0: forever); { status, reply length, reply } comes back */
+#define FLTSAMPLE_MSG_ARM           5   /* Arg = 1: the creates of .msg files are put to the client, which can refuse them */
+
+/* The messages of the driver to the client (after the FILTER_MESSAGE_HEADER) */
+#define FLTSAMPLE_KIND_CREATE       1   /* followed by the name of the file; the reply is a ULONG, not 0 for no */
+#define FLTSAMPLE_KIND_NOTIFY       2
+#define FLTSAMPLE_KIND_ASK          3   /* the reply is the data of the message */
+
+typedef struct _FLTSAMPLE_ASK_RESULT
+{
+    LONG Status;
+    ULONG ReplyLength;
+    UCHAR Reply[16];
+
+} FLTSAMPLE_ASK_RESULT, *PFLTSAMPLE_ASK_RESULT;
 
 #define FLTSAMPLE_IOCTL_GET_STATS       CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define FLTSAMPLE_IOCTL_RESET           CTL_CODE(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS)
