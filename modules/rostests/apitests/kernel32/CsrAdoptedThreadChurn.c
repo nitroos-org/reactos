@@ -5,9 +5,12 @@
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  *
  * The number of iterations is taken from the environment variable CSRCHURN_N (default 1500).
- * CSRCHURN_MASK selects the requests (1 CreateThread, 2 a console request, 4 DefineDosDevice: csrss itself
- * grows by about 260 bytes per define/remove pair, which is not about threads: off by default).
+ * CSRCHURN_MASK selects the requests (1 CreateThread, 2 a console request, 4 DefineDosDevice from every
+ * thread: off by default, the DefineDosDevice phase below covers it).
  * Every CSR thread holds a handle of its thread in CSRSS, so the handle count of CSRSS is the measure.
+ * The last phase defines and removes a drive letter CSRDDD_N times (default 12000) from this thread: the broadcast
+ * thread that CSRSS starts for each of them must leave nothing behind (it ended without the loader and
+ * left about 260 bytes of the process heap per pair).
  */
 
 #include "precomp.h"
@@ -285,4 +288,41 @@ START_TEST(CsrAdoptedThreadChurn)
     trace("csrss after: %lu handles (peak %lu), %Iu private bytes\n", HandlesEnd, Peak, PrivateEnd);
     ok(HandlesEnd <= Handles0 + 64, "csrss handles %lu -> %lu after %lu adopted threads\n", Handles0, HandlesEnd, N);
     ok(PrivateEnd <= Private0 + 2 * 1024 * 1024, "csrss private bytes %Iu -> %Iu\n", Private0, PrivateEnd);
+
+    /* DefineDosDevice of a drive letter: CSRSS starts a thread to broadcast the change, its private bytes must stay flat (within 1.5 MB: the first broadcast thread allocates some once) */
+    {
+        SIZE_T Before = 0, After = 0;
+        ULONG D = 12000, Pairs = 0;
+
+        if (GetEnvironmentVariableW(L"CSRDDD_N", Env, RTL_NUMBER_OF(Env)) && _wtoi(Env) > 0)
+            D = _wtoi(Env);
+
+        if (!DefineDosDeviceW(0, L"Y:", L"C:\\"))
+        {
+            skip("DefineDosDevice is not allowed here (error %lu)\n", GetLastError());
+            return;
+        }
+        DefineDosDeviceW(DDD_REMOVE_DEFINITION | DDD_EXACT_MATCH_ON_REMOVE, L"Y:", L"C:\\");
+        Sleep(1000);
+        if (!GetCsrssStats(&Handles1, &Before))
+            return;
+        Tick = GetTickCount();
+        for (i = 0; i < D; i++)
+        {
+            if (!DefineDosDeviceW(0, L"Y:", L"C:\\"))
+                break;
+            if (!DefineDosDeviceW(DDD_REMOVE_DEFINITION | DDD_EXACT_MATCH_ON_REMOVE, L"Y:", L"C:\\"))
+                break;
+            Pairs++;
+        }
+        ok(Pairs == D, "%lu of %lu define/remove pairs done (error %lu)\n", Pairs, D, GetLastError());
+        for (i = 0; i < 20; i++)
+        {
+            Sleep(500);
+            if (GetCsrssStats(&Handles1, &After) && After <= Before + 3 * 512 * 1024)
+                break;
+        }
+        trace("%lu DefineDosDevice pairs in %lu ms: csrss private bytes %Iu -> %Iu\n", Pairs, GetTickCount() - Tick, Before, After);
+        ok(After <= Before + 3 * 512 * 1024, "csrss private bytes %Iu -> %Iu after %lu DefineDosDevice pairs\n", Before, After, Pairs);
+    }
 }
