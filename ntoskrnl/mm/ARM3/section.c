@@ -2046,6 +2046,34 @@ MmGetProcessImageInformation(IN PEPROCESS Process,
     return STATUS_SUCCESS;
 }
 
+/*
+ * A 64-bit process whose executable does not carry IMAGE_FILE_LARGE_ADDRESS_AWARE keeps the memory the system places
+ * for it (images that had to be relocated, allocations and views without a requested address) below 2 GB, as the
+ * /LARGEADDRESSAWARE linker documentation describes. Returns the highest address such a placement may use.
+ */
+ULONG_PTR
+NTAPI
+MmGetProcessAutoPlacementLimit(IN PEPROCESS Process)
+{
+#ifdef _WIN64
+    PSECTION SectionObject = Process->SectionObject;
+
+    if (SectionObject != NULL && MiIsRosSectionObject(SectionObject) && SectionObject->u.Flags.Image)
+    {
+        PMM_IMAGE_SECTION_OBJECT ImageSection = (PMM_IMAGE_SECTION_OBJECT)SectionObject->Segment;
+
+        if (ImageSection->ImageInformation.Machine == IMAGE_FILE_MACHINE_AMD64 &&
+            !(ImageSection->ImageInformation.ImageCharacteristics & IMAGE_FILE_LARGE_ADDRESS_AWARE))
+        {
+            return 0x7FFFFFFF;
+        }
+    }
+#else
+    UNREFERENCED_PARAMETER(Process);
+#endif
+    return (ULONG_PTR)MM_HIGHEST_VAD_ADDRESS;
+}
+
 VOID
 NTAPI
 MmGetImageInformation (OUT PSECTION_IMAGE_INFORMATION ImageInformation)

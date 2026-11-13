@@ -3,12 +3,14 @@ add_subdirectory(load_notifications)
 add_subdirectory(empty_dll)
 add_subdirectory(shared_ro_dll)
 add_subdirectory(crtkeydtor)
+add_subdirectory(imgplace_nonlaa)
 add_subdirectory(apiset_win10)
 
 include_directories($<TARGET_FILE_DIR:load_notifications>)
 include_directories($<TARGET_FILE_DIR:empty_dll>)
 include_directories($<TARGET_FILE_DIR:shared_ro_dll>)
 include_directories($<TARGET_FILE_DIR:crtkeydtor>)
+include_directories($<TARGET_FILE_DIR:imgplace_nonlaa>)
 spec2def(ntdll_apitest.exe ntdll_apitest.spec)
 
 list(APPEND SOURCE_CRT_TESTS
@@ -320,6 +322,7 @@ add_rc_deps(testdata.rc
     ${CMAKE_CURRENT_BINARY_DIR}/load_notifications/load_notifications.dll
     ${CMAKE_CURRENT_BINARY_DIR}/empty_dll/empty_dll.dll
     ${CMAKE_CURRENT_BINARY_DIR}/shared_ro_dll/shared_ro_dll.dll
+    ${CMAKE_CURRENT_BINARY_DIR}/imgplace_nonlaa/imgplace_nonlaa.exe
     ${CMAKE_CURRENT_BINARY_DIR}/crtkeydtor/crtkeydtor.dll
     ${CMAKE_CURRENT_BINARY_DIR}/crtkeydtor/crtkeydtor_static.exe
     ${CMAKE_CURRENT_BINARY_DIR}/crtkeydtor/crtkeydtor_tls.dll
@@ -351,7 +354,7 @@ target_link_libraries(ntdll_apitest ntdll_crt_test_lib rtl_test_lib wine uuid ${
 set_module_type(ntdll_apitest win32cui)
 add_delay_importlibs(ntdll_apitest advapi32)
 add_importlibs(ntdll_apitest msvcrt kernel32 ntdll)
-add_dependencies(ntdll_apitest load_notifications empty_dll shared_ro_dll crtkeydtor crtkeydtor_static crtkeydtor_tls crtkeydtor_tls_static)
+add_dependencies(ntdll_apitest imgplace_nonlaa load_notifications empty_dll shared_ro_dll crtkeydtor crtkeydtor_static crtkeydtor_tls crtkeydtor_tls_static)
 
 add_rostests_file(TARGET ntdll_apitest)
 add_rostests_file(TARGET ntdll_apitest SUBDIR testdata)

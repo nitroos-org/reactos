@@ -6,6 +6,7 @@
 105 10 "crtkeydtor_tls.dll"
 106 10 "crtkeydtor_tls_static.exe"
 107 10 "shared_ro_dll.dll"
+108 10 "imgplace_nonlaa.exe"
 
 NORMAL_FRAMECAPTIONMIN BITMAP "bmp1.bmp"
 NORMAL_FRAMECAPTIONMIN_BMP BITMAP "bmp1.bmp"
