@@ -1287,6 +1287,96 @@ RtlpCoalesceFreeBlocks (PHEAP Heap,
     return FreeEntry;
 }
 
+/* Commits pages in an uncommitted range next to free blocks, counting those blocks towards the request.
+ *
+ * Freeing a block decommits its whole pages but keeps the partial page at each end of it committed, as a free block
+ * of just under a page (the one in front also carries the guard entry before the uncommitted range). When the next
+ * request is a little larger than the uncommitted range left behind, say 7.07 pages against 7, the range is too short
+ * on its own, the heap commits a fresh range somewhere else, and the kept pages stay behind between two uncommitted
+ * ranges, where nothing can decommit them again: every such cycle strands another page (the console server asks for
+ * a 29000 byte block to enumerate fonts for every console it creates: 57 bytes per console, a megabyte every 18000
+ * consoles). The free blocks around the range and the range together hold the request, so commit only what is
+ * missing. */
+static
+PHEAP_FREE_ENTRY
+RtlpFindAndCommitPagesAfterFree(PHEAP Heap,
+                                PHEAP_SEGMENT Segment,
+                                SIZE_T Request,
+                                PSIZE_T Size)
+{
+    PLIST_ENTRY Current;
+
+    if (Heap->CommitRoutine) return NULL;
+
+    for (Current = Segment->UCRSegmentList.Flink;
+         Current != &Segment->UCRSegmentList;
+         Current = Current->Flink)
+    {
+        PHEAP_UCR_DESCRIPTOR UcrDescriptor = CONTAINING_RECORD(Current, HEAP_UCR_DESCRIPTOR, SegmentEntry);
+        PHEAP_ENTRY GuardEntry, FreeBlock, NextBlock;
+        SIZE_T Before = 0, After = 0, Missing = 0;
+
+        /* A range that holds the whole request is committed the usual way */
+        if (UcrDescriptor->Size >= *Size) continue;
+
+        /* A single guard entry ends the committed memory in front of the range; a free block may precede it */
+        GuardEntry = (PHEAP_ENTRY)UcrDescriptor->Address - 1;
+        if ((GuardEntry->Flags & HEAP_ENTRY_LAST_ENTRY) &&
+            (GuardEntry->Flags & HEAP_ENTRY_BUSY) &&
+            GuardEntry->Size == 1 &&
+            GuardEntry->PreviousSize > 1)
+        {
+            FreeBlock = GuardEntry - GuardEntry->PreviousSize;
+            if (!(FreeBlock->Flags & HEAP_ENTRY_BUSY) &&
+                FreeBlock->Size == GuardEntry->PreviousSize &&
+                FreeBlock->SegmentOffset == GuardEntry->SegmentOffset)
+            {
+                Before = (SIZE_T)FreeBlock->Size << HEAP_ENTRY_SHIFT;
+            }
+        }
+
+        /* A free block may follow the range */
+        NextBlock = (PHEAP_ENTRY)((PUCHAR)UcrDescriptor->Address + UcrDescriptor->Size);
+        if (NextBlock < Segment->LastValidEntry &&
+            !(NextBlock->Flags & HEAP_ENTRY_BUSY) &&
+            NextBlock->Size != 0 &&
+            NextBlock->SegmentOffset == Segment->Entry.SegmentOffset)
+        {
+            After = (SIZE_T)NextBlock->Size << HEAP_ENTRY_SHIFT;
+        }
+
+        /* Commit just what the block in front does not cover; else, if the range with both blocks is enough,
+           all of it, which joins it with the block behind */
+        if (Before != 0 && Before < Request)
+        {
+            Missing = ROUND_UP(Request - Before, PAGE_SIZE);
+            if (Missing > UcrDescriptor->Size || Missing >= *Size)
+                Missing = 0;
+        }
+
+        if (Missing == 0 &&
+            After != 0 &&
+            Before + After + UcrDescriptor->Size >= Request)
+        {
+            Missing = UcrDescriptor->Size;
+        }
+
+        if (Missing != 0)
+        {
+            SIZE_T CommitSize = Missing;
+            PHEAP_FREE_ENTRY Entry = RtlpFindAndCommitPages(Heap, Segment, &CommitSize, UcrDescriptor->Address);
+
+            if (Entry)
+            {
+                *Size = CommitSize;
+                return Entry;
+            }
+        }
+    }
+
+    return NULL;
+}
+
 static BOOLEAN RtlpHeapTrim(PHEAP Heap, SIZE_T Keep, ULONG MaxBlocks);
 
 static
@@ -1326,7 +1416,25 @@ Retry:
         {
             DPRINT("This segment is suitable\n");
 
-            /* Commit needed amount */
+            /* Commit needed amount, in a range that follows a free block if that saves committing a new one */
+            FreeEntry = RtlpFindAndCommitPagesAfterFree(Heap, Segment, Size, &FreeSize);
+
+            /* That path commits less than the request and counts on the neighbours joining the new pages. The caller
+               takes the entry as it is, so an entry that came out short (a neighbour that did not merge) stays on the
+               free lists as a free block and the request is committed in full the usual way. */
+            if (FreeEntry)
+            {
+                FreeSize = FreeSize >> HEAP_ENTRY_SHIFT;
+                FreeEntry = RtlpCoalesceFreeBlocks(Heap, FreeEntry, &FreeSize, FALSE);
+                RtlpInsertFreeBlock(Heap, FreeEntry, FreeSize);
+                if ((FreeSize << HEAP_ENTRY_SHIFT) >= Size)
+                    return FreeEntry;
+
+                FreeSize = Pages * PAGE_SIZE;
+                if (Pages > Segment->NumberOfUnCommittedPages)
+                    continue;
+            }
+
             FreeEntry = RtlpFindAndCommitPages(Heap, Segment, &FreeSize, NULL);
 
             /* Coalesce it with adjacent entries */
