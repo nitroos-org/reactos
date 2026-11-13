@@ -84,6 +84,7 @@ enum {
 	NGP_SKIP_CHECKED,	/* ... and the verifying scan found nothing dirty, as it must (count) */
 	NGP_SKIP_WRONG,		/* ... and the verifying scan found something dirty while no dirtying was announced: a missed bump (count) */
 	NGP_SKIP_RACED,		/* ... verifying scan found dirt but a dirtier announced itself meanwhile: inconclusive (count) */
+	NGP_RESV_RETRY,		/* a growth that failed with ENOSPC while frees were uncommitted committed and tried again (count; every build) */
 	NGP_IRP = 32,		/* + the IRP major function */
 	NGP_STAGES = 64
 };
