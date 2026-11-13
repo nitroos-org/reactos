@@ -951,6 +951,19 @@ static void Test_RtlLcidToLocaleName(void)
     ok_ntstatus(Status, STATUS_BUFFER_TOO_SMALL);
     ok(Buffer[0] == L'@', "Buffer should not be modified\n");
 
+    // Test AllocateDestinationString: the incoming Buffer / MaximumLength are not used, the result is allocated
+    memset(&LocaleName, 0xcc, sizeof(LocaleName));
+    Status = pRtlLcidToLocaleName(0x0409, &LocaleName, 0, TRUE);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        ok(LocaleName.Buffer != NULL, "Buffer was not allocated\n");
+        ok(memcmp(LocaleName.Buffer, L"en-US", 12) == 0, "Expected null-terminated 'en-US', got %wZ\n", &LocaleName);
+        ok(LocaleName.Length == 5 * sizeof(WCHAR), "Length = %u\n", LocaleName.Length);
+        ok(LocaleName.MaximumLength == LocaleName.Length + sizeof(WCHAR), "MaximumLength = %u\n", LocaleName.MaximumLength);
+        RtlFreeUnicodeString(&LocaleName);
+    }
+
     // Test LOCALE_INVARIANT (0x007F)
     RtlInitEmptyUnicodeString(&LocaleName, Buffer, sizeof(Buffer));
     Status = pRtlLcidToLocaleName(LOCALE_INVARIANT, &LocaleName, 0, FALSE);

@@ -744,8 +744,10 @@ RtlLcidToLocaleName(
         return STATUS_INVALID_PARAMETER_3;
     }
 
-    /* Check if the LocaleName buffer is valid */
-    if ((LocaleName == NULL) || (LocaleName->Buffer == NULL))
+    /* Check if the LocaleName buffer is valid. When the string is to be allocated the
+       caller's Buffer and MaximumLength are output only and not looked at. */
+    if ((LocaleName == NULL) ||
+        (!AllocateDestinationString && (LocaleName->Buffer == NULL)))
     {
         DPRINT1("RtlLcidToLocaleName: Invalid buffer\n");
         return STATUS_INVALID_PARAMETER_2;
@@ -791,6 +793,17 @@ RtlLcidToLocaleName(
     {
         DPRINT("RtlLcidToLocaleName: LCID 0x%lx not found\n", Lcid);
         return STATUS_INVALID_PARAMETER_1;
+    }
+
+    /* Return the name in a newly allocated string (free it with RtlFreeUnicodeString) */
+    if (AllocateDestinationString)
+    {
+        if (!RtlCreateUnicodeStringFromAsciiz(LocaleName, RtlpLocaleTable[LocaleIndex].Locale))
+        {
+            return STATUS_NO_MEMORY;
+        }
+
+        return STATUS_SUCCESS;
     }
 
     /* Copy the locale name to the buffer */
