@@ -66,7 +66,7 @@ START_TEST(bootcheck)
     if (!ServiceExists(BOOT_NAME))
     {
         /* The first boot: the sample as a filter which starts with the system, after the filter manager */
-        if (!LoadSample(&Boot, BOOT_NAME, L"370000", 0xFFFF))
+        if (!StartFilterManager() || !LoadSample(&Boot, BOOT_NAME, L"370000", 0xFFFF))
         {
             skip("Can't set the sample filter up\n");
             return;
