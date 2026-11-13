@@ -106,6 +106,7 @@ list(APPEND SOURCE
     ShapeTransform.c
     StretchBlt.c
     TextTransform.c
+    TranslateCharsetInfo.c
     UniscribeForwarders.c
     WidePen.c
     WindowMemoryDC.c)
