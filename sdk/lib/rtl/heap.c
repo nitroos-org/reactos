@@ -938,7 +938,7 @@ RtlpDeCommitFreeBlock(PHEAP Heap,
     if (!UcrDescriptor)
     {
         DPRINT1("HEAP: Failed to create UCR descriptor\n");
-        RtlpInsertFreeBlock(Heap, FreeEntry, PrecedingSize);
+        RtlpInsertFreeBlock(Heap, FreeEntry, Size);
         return;
     }
 
@@ -3597,6 +3597,20 @@ RtlpValidateHeapSegment(
             if (CurrentEntry->Flags & HEAP_ENTRY_LAST_ENTRY)
             {
                 CurrentEntry = (PHEAP_ENTRY)((PCHAR)CurrentEntry + Size);
+
+                /* RtlpDeCommitFreeBlock can leave two one-unit guard entries before an uncommitted
+                   range, when only two units are left in front of it: both are marked as last */
+                if (UcrDescriptor &&
+                    Size == HEAP_ENTRY_SIZE &&
+                    (PVOID)CurrentEntry != UcrDescriptor->Address &&
+                    (PVOID)(CurrentEntry + 1) == UcrDescriptor->Address &&
+                    CurrentEntry->Size == 1 &&
+                    CurrentEntry->Flags == (HEAP_ENTRY_BUSY | HEAP_ENTRY_LAST_ENTRY) &&
+                    CurrentEntry->PreviousSize == 1 &&
+                    CurrentEntry->SegmentOffset == SegmentOffset)
+                {
+                    CurrentEntry++;
+                }
 
                 if (!UcrDescriptor)
                 {
