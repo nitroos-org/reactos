@@ -18,7 +18,67 @@
 #define IsOwnedExclusive(r)     (r->Flag & ResourceOwnedExclusive)
 #define IsBoostAllowed(r)       (!(r->Flag & ResourceHasDisabledPriorityBoost))
 
-#if !defined(CONFIG_SMP) && !DBG
+#if defined(_M_AMD64)
+
+/*
+ * On amd64 the resource's own lock is held with interrupts disabled rather
+ * than at DISPATCH_LEVEL. Nothing runs under it but a few loads and stores:
+ * the waiters are signalled and the owner table and wait objects are
+ * allocated after the lock has been dropped. With interrupts off nothing else
+ * can run on this processor until the lock is released, which is the
+ * exclusion the DISPATCH_LEVEL raise gave, and a raise/lower pair costs two
+ * CR8 writes (about 18 ns each in a KVM guest; pushfq/cli/popfq about 6 ns).
+ * Other processors are excluded by a test-and-set on Resource->SpinLock; a
+ * waiter spins with interrupts enabled, at its own IRQL. The lock word is
+ * read before interrupts are disabled, so a resource that is not resident
+ * faults at the caller's IRQL exactly as it did before.
+ * The handle keeps the caller's IRQL in OldIrql (ExpCheckForApcsDisabled) and
+ * the caller's RFLAGS in LockQueue.Next.
+ */
+FORCEINLINE
+VOID
+ExAcquireResourceLock(IN PERESOURCE Resource,
+                      IN PKLOCK_QUEUE_HANDLE LockHandle)
+{
+    ULONG_PTR Flags = 0;
+
+    LockHandle->OldIrql = KeGetCurrentIrql();
+    for (;;)
+    {
+        if (!(*(volatile LONG64 *)&Resource->SpinLock & 1))
+        {
+            Flags = __readeflags();
+            _disable();
+#ifdef CONFIG_SMP
+            if (!InterlockedBitTestAndSet64((PLONG64)&Resource->SpinLock, 0))
+                break;
+            __writeeflags(Flags);
+#else
+            break;
+#endif
+        }
+        YieldProcessor();
+    }
+    LockHandle->LockQueue.Next = (PKSPIN_LOCK_QUEUE)Flags;
+}
+
+FORCEINLINE
+VOID
+ExReleaseResourceLock(IN PERESOURCE Resource,
+                      IN PKLOCK_QUEUE_HANDLE LockHandle)
+{
+#ifdef CONFIG_SMP
+    InterlockedAnd64((PLONG64)&Resource->SpinLock, 0);
+#else
+    UNREFERENCED_PARAMETER(Resource);
+#endif
+    /* __writeeflags is no compiler barrier: keep every access of the
+       resource on this side of the popfq */
+    _ReadWriteBarrier();
+    __writeeflags((ULONG_PTR)LockHandle->LockQueue.Next);
+}
+
+#elif !defined(CONFIG_SMP) && !DBG
 
 FORCEINLINE
 VOID
@@ -66,7 +126,7 @@ ExReleaseResourceLock(IN PERESOURCE Resource,
     KeReleaseInStackQueuedSpinLock(LockHandle);
 }
 
-#endif // !defined(CONFIG_SMP) && !DBG
+#endif // defined(_M_AMD64)
 
 /* DATA***********************************************************************/
 
