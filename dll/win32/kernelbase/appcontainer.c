@@ -272,6 +272,7 @@ typedef struct _BASEP_SECURITY_CAPABILITIES
     DWORD Reserved;
 } BASEP_SECURITY_CAPABILITIES, *PBASEP_SECURITY_CAPABILITIES;
 
+#ifdef KERNELBASE_NT6_NTDLL
 /*
  * @implemented
  *
@@ -331,3 +332,4 @@ CreateAppContainerToken(
     *OutToken = NewToken;
     return TRUE;
 }
+#endif /* KERNELBASE_NT6_NTDLL */

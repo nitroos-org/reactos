@@ -1270,6 +1270,7 @@ FindStringOrdinal(
     return -1;
 }
 
+#if (DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA) /* CompareStringEx is exported by kernel32 from 0x600 on only */
 /******************************************************************************
  *           FindNLSStringEx    (KERNEL32.@)
  *
@@ -1360,3 +1361,4 @@ FindNLSStringEx(
     }
     return -1;
 }
+#endif /* DLL_EXPORT_VERSION */

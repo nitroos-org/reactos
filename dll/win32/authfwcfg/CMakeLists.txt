@@ -7,5 +7,5 @@ add_library(authfwcfg MODULE
 
 set_module_type(authfwcfg win32dll UNICODE)
 target_link_libraries(authfwcfg fwstore)
-add_importlibs(authfwcfg netsh shlwapi rpcrt4 advapi32 msvcrt kernel32 ntdll)
+add_importlibs(authfwcfg netsh shlwapi rpcrt4 user32 advapi32 msvcrt kernel32 ntdll)
 add_cd_file(TARGET authfwcfg DESTINATION reactos/system32 FOR all)

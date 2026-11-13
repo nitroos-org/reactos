@@ -6,6 +6,8 @@
 
 #include "shelltest.h"
 
+#if DLL_EXPORT_VERSION >= 0x600 /* uses NT6 exports */
+
 static void test_Registration(void)
 {
     WCHAR buf[64];
@@ -321,3 +323,12 @@ START_TEST(CKnownFolderManager)
 
     CoUninitialize();
 }
+
+#else
+
+START_TEST(CKnownFolderManager)
+{
+    skip("CKnownFolderManager needs the NT6 exports\n");
+}
+
+#endif

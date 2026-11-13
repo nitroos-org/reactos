@@ -345,6 +345,7 @@ CreateWaitableTimerW(IN LPSECURITY_ATTRIBUTES lpTimerAttributes OPTIONAL,
 #define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
 #endif
 
+#if (DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA)
 /*
  * @implemented
  */
@@ -401,6 +402,7 @@ CreateWaitableTimerExW(IN LPSECURITY_ATTRIBUTES lpTimerAttributes OPTIONAL,
                                (dwFlags & CREATE_WAITABLE_TIMER_MANUAL_RESET) ?
                                NotificationTimer : SynchronizationTimer);
 }
+#endif /* DLL_EXPORT_VERSION */
 
 /*
  * @implemented
@@ -455,6 +457,7 @@ SetWaitableTimer(IN HANDLE hTimer,
     return FALSE;
 }
 
+#if (DLL_EXPORT_VERSION >= _WIN32_WINNT_WIN7)
 /*
  * @implemented
  */
@@ -496,6 +499,7 @@ SetWaitableTimerEx(IN HANDLE hTimer,
     BaseSetLastNTError(Status);
     return FALSE;
 }
+#endif /* DLL_EXPORT_VERSION */
 
 /*
  * @implemented
