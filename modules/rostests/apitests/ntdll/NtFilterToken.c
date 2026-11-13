@@ -95,6 +95,68 @@ TestSidToDisableIsDisabled(
     CloseHandle(FilteredToken);
 }
 
+/*
+ * The restricting SID list is optional: no list means no restriction, a list
+ * with a SID makes the token restricted with that SID.
+ */
+static
+VOID
+TestRestrictingSids(
+    _In_ HANDLE Token)
+{
+    NTSTATUS Status;
+    HANDLE FilteredToken = NULL;
+    SID_IDENTIFIER_AUTHORITY WorldAuthority = {SECURITY_WORLD_SID_AUTHORITY};
+    PSID EveryoneSid;
+    BYTE SidsBuffer[sizeof(TOKEN_GROUPS)];
+    PTOKEN_GROUPS Restrict = (PTOKEN_GROUPS)SidsBuffer;
+    BYTE GroupsBuffer[1024];
+    PTOKEN_GROUPS Groups = (PTOKEN_GROUPS)GroupsBuffer;
+    ULONG Length, IsRestricted;
+
+    Status = NtFilterToken(Token, 0, NULL, NULL, NULL, &FilteredToken);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        IsRestricted = 0xDEAD;
+        Status = NtQueryInformationToken(FilteredToken, TokenIsRestricted, &IsRestricted, sizeof(IsRestricted), &Length);
+        ok_hex(Status, STATUS_SUCCESS);
+        ok_int(IsRestricted, 0);
+        Status = NtQueryInformationToken(FilteredToken, TokenRestrictedSids, Groups, sizeof(GroupsBuffer), &Length);
+        ok_hex(Status, STATUS_SUCCESS);
+        ok_int(Groups->GroupCount, 0);
+        CloseHandle(FilteredToken);
+    }
+
+    Status = RtlAllocateAndInitializeSid(&WorldAuthority, 1, SECURITY_WORLD_RID,
+                                         0, 0, 0, 0, 0, 0, 0, &EveryoneSid);
+    if (!NT_SUCCESS(Status))
+    {
+        skip("Failed to build the Everyone SID (0x%lx)\n", Status);
+        return;
+    }
+
+    Restrict->GroupCount = 1;
+    Restrict->Groups[0].Sid = EveryoneSid;
+    Restrict->Groups[0].Attributes = 0;
+    FilteredToken = NULL;
+    Status = NtFilterToken(Token, 0, NULL, NULL, Restrict, &FilteredToken);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        IsRestricted = 0xDEAD;
+        Status = NtQueryInformationToken(FilteredToken, TokenIsRestricted, &IsRestricted, sizeof(IsRestricted), &Length);
+        ok_hex(Status, STATUS_SUCCESS);
+        ok_int(IsRestricted, 1);
+        Status = NtQueryInformationToken(FilteredToken, TokenRestrictedSids, Groups, sizeof(GroupsBuffer), &Length);
+        ok_hex(Status, STATUS_SUCCESS);
+        ok_int(Groups->GroupCount, 1);
+        CloseHandle(FilteredToken);
+    }
+
+    RtlFreeSid(EveryoneSid);
+}
+
 START_TEST(NtFilterToken)
 {
     NTSTATUS Status;
@@ -199,6 +261,8 @@ START_TEST(NtFilterToken)
 
     /* T125 contract: disabling a SID must actually turn it deny-only */
     TestSidToDisableIsDisabled(Token);
+
+    TestRestrictingSids(Token);
 
     /* We're done */
     RtlFreeHeap(RtlGetProcessHeap(), 0, TokenStats);
