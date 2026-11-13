@@ -5,6 +5,9 @@ extern void func_instance(void);
 extern void func_operation(void);
 extern void func_context(void);
 extern void func_comms(void);
+extern void func_load(void);
+extern void func_bootcheck(void);
+extern void func_stress(void);
 
 const struct test winetest_testlist[] =
 {
@@ -12,5 +15,8 @@ const struct test winetest_testlist[] =
     { "operation", func_operation },
     { "context", func_context },
     { "comms", func_comms },
+    { "load", func_load },
+    { "bootcheck", func_bootcheck },
+    { "stress", func_stress },
     { 0, 0 }
 };
