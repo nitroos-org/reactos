@@ -793,6 +793,10 @@ CmpAclInitialize(VOID);
 
 VOID
 NTAPI
+CmpAclShutdownSystem(VOID);
+
+VOID
+NTAPI
 CmpShadowAccessCheck(
     _In_ PCM_KEY_CONTROL_BLOCK Kcb,
     _In_opt_ PCUNICODE_STRING ChildName,

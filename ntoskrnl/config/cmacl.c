@@ -71,6 +71,14 @@
 #define CMP_ACL_MAX_KEY_CHARS       512
 #define CMP_ACL_MAX_NAME_CHARS      256
 
+/*
+ * Encoded bytes a string takes in a log line (a non-ASCII character takes six): the four
+ * together and the fixed text of a line stay under CMP_ACL_LINE_SIZE
+ */
+#define CMP_ACL_LINE_KEY_BYTES      880
+#define CMP_ACL_LINE_NAME_BYTES     280
+#define CMP_ACL_LINE_USER_BYTES     120
+
 /* Levels of a key path the policy table looks at (\REGISTRY is level 0) */
 #define CMP_ACL_LEVELS              8
 
@@ -363,6 +371,16 @@ static KTIMER CmpAclTimer;
 static KDPC CmpAclDpc;
 static WORK_QUEUE_ITEM CmpAclWorkItem;
 static LONG CmpAclTimerArmed;
+
+/*
+ * Shutdown: the worker writes a file, and the file systems are flushed and shut down after
+ * the configuration manager. CmpAclShutdownSystem stops the timer, waits for the work item
+ * (queued or running) to end, and writes what is pending itself, while the file systems
+ * still run. After it nothing arms the timer, queues the work item or touches a file.
+ */
+static volatile LONG CmpAclShutdown;
+static volatile LONG CmpAclWorkItems;       /* queued or running work items */
+static KEVENT CmpAclWorkIdle;
 
 /* Worker-only state (one worker instance runs at a time) */
 static SLIST_ENTRY CmpAclPending;           /* written in order, oldest first */
@@ -902,10 +920,34 @@ CmpAclArmTimer(VOID)
 {
     LARGE_INTEGER Due;
 
+    /* Nothing is written once the system shuts down */
+    if (CmpAclShutdown)
+        return;
     if (InterlockedCompareExchange(&CmpAclTimerArmed, 1, 0) != 0)
         return;
     Due.QuadPart = -(LONGLONG)CMP_ACL_FLUSH_DELAY * 10 * 1000 * 1000;
     KeSetTimer(&CmpAclTimer, Due, &CmpAclDpc);
+}
+
+/*
+ * Give back a claimed slot whose entry could not be made, so the next identical
+ * denial claims it again (and counts as an entry, or as dropped, then). The
+ * denials that matched the claimed key meanwhile found no entry to count on:
+ * they are dropped too.
+ */
+static
+VOID
+CmpAclReleaseSlot(
+    _In_ ULONG Slot)
+{
+    LONG Lost;
+
+    Lost = InterlockedExchange(&CmpAclSlotCount[Slot], 0);
+    InterlockedExchange64(&CmpAclSlotKey[Slot], 0);
+    if (Lost > 0)
+        InterlockedExchangeAdd(&CmpAclDropped, Lost);
+    else
+        InterlockedIncrement(&CmpAclDropped);
 }
 
 /* Copy a counted string into the entry's string area */
@@ -958,12 +1000,19 @@ CmpAclRecordDenial(
     /* Fingerprint: key path hash, depth and last component, operation, access, image, user */
     Fingerprint = CmpAclMix(Fingerprint, Kcb->ConvKey);
     Fingerprint = CmpAclMix(Fingerprint, Kcb->TotalLevels);
+    /*
+     * A bounded prefix and the length of each name: a caller can make a child name 32K
+     * characters long, and the entry keeps no more than CMP_ACL_MAX_NAME_CHARS of it anyway
+     */
     Chars = CmpAclNameChars(Kcb);
-    for (i = 0; i < Chars; i++)
+    Fingerprint = CmpAclMix(Fingerprint, Chars);
+    for (i = 0; i < min(Chars, CMP_ACL_MAX_NAME_CHARS); i++)
         Fingerprint = CmpAclMix(Fingerprint, RtlUpcaseUnicodeChar(CmpAclNameChar(Kcb, i)));
     if (ChildName)
     {
-        for (i = 0; i < ChildName->Length / sizeof(WCHAR); i++)
+        Chars = ChildName->Length / sizeof(WCHAR);
+        Fingerprint = CmpAclMix(Fingerprint, Chars);
+        for (i = 0; i < min(Chars, CMP_ACL_MAX_NAME_CHARS); i++)
             Fingerprint = CmpAclMix(Fingerprint, RtlUpcaseUnicodeChar(ChildName->Buffer[i]));
     }
     Fingerprint = CmpAclMix(Fingerprint, Operation);
@@ -1013,7 +1062,7 @@ CmpAclRecordDenial(
     if (InterlockedIncrement(&CmpAclEntryCount) > CMP_ACL_MAX_ENTRIES)
     {
         InterlockedDecrement(&CmpAclEntryCount);
-        InterlockedIncrement(&CmpAclDropped);
+        CmpAclReleaseSlot(Slot);
         InterlockedExchange(&CmpAclSaturated, 1);
         CmpAclArmTimer();
         return;
@@ -1048,7 +1097,9 @@ CmpAclRecordDenial(
         SeUnlockSubjectContext(Subject);
         if (KeyName)
             CmpFree(KeyName, 0);
-        InterlockedIncrement(&CmpAclDropped);
+        InterlockedDecrement(&CmpAclEntryCount);
+        CmpAclReleaseSlot(Slot);
+        CmpAclArmTimer();
         return;
     }
     RtlZeroMemory(Entry, FIELD_OFFSET(CMP_ACL_ENTRY, Strings));
@@ -1175,14 +1226,19 @@ CmpAclLineFormat(
     CmpAclLineAppend(Line, Text);
 }
 
+/*
+ * A JSON string of at most MaxBytes encoded bytes (not counting the quotes). A character is
+ * written whole or not at all: an escape is never cut, so the string is always closed.
+ */
 static
 VOID
 CmpAclLineString(
     _Inout_ PCMP_ACL_LINE Line,
     _In_reads_(Chars) PCWCH String,
-    _In_ ULONG Chars)
+    _In_ ULONG Chars,
+    _In_ ULONG MaxBytes)
 {
-    ULONG i;
+    ULONG i, Used = 0, Length;
     WCHAR c;
     CHAR Text[8];
 
@@ -1195,17 +1251,23 @@ CmpAclLineString(
             Text[0] = '\\';
             Text[1] = (CHAR)c;
             Text[2] = ANSI_NULL;
+            Length = 2;
         }
         else if (c >= 0x20 && c < 0x7F)
         {
             Text[0] = (CHAR)c;
             Text[1] = ANSI_NULL;
+            Length = 1;
         }
         else
         {
             _snprintf(Text, sizeof(Text), "\\u%04x", c);
             Text[sizeof(Text) - 1] = ANSI_NULL;
+            Length = 6;
         }
+        if (Used + Length > MaxBytes)
+            break;
+        Used += Length;
         CmpAclLineAppend(Line, Text);
     }
     CmpAclLineAppend(Line, "\"");
@@ -1388,20 +1450,20 @@ CmpAclFormatEntry(
 
     CmpAclLineStart(Line, &Entry->Time);
     CmpAclLineFormat(Line, ",\"id\":%lu,\"op\":\"%s\",\"key\":", Entry->Id, CmpAclOpNames[Entry->Operation]);
-    CmpAclLineString(Line, p, Entry->KeyChars);
+    CmpAclLineString(Line, p, Entry->KeyChars, CMP_ACL_LINE_KEY_BYTES);
     p += Entry->KeyChars;
     if (Entry->Operation != CM_REGACL_OP_OPEN)
     {
         CmpAclLineAppend(Line, ",\"child\":");
-        CmpAclLineString(Line, p, Entry->ChildChars);
+        CmpAclLineString(Line, p, Entry->ChildChars, CMP_ACL_LINE_NAME_BYTES);
     }
     p += Entry->ChildChars;
     CmpAclLineFormat(Line, ",\"desired\":\"0x%08lx\",\"granted\":\"0x%08lx\",\"status\":\"0x%08lx\",\"rule\":\"%s\",\"image\":",
                      Entry->Desired, Entry->Granted, (ULONG)Entry->ShadowStatus, CmpAclRuleNames[Entry->Rule]);
-    CmpAclLineString(Line, p, Entry->ImageChars);
+    CmpAclLineString(Line, p, Entry->ImageChars, CMP_ACL_LINE_NAME_BYTES);
     p += Entry->ImageChars;
     CmpAclLineFormat(Line, ",\"pid\":%lu,\"user\":", Entry->Pid);
-    CmpAclLineString(Line, p, Entry->UserChars);
+    CmpAclLineString(Line, p, Entry->UserChars, CMP_ACL_LINE_USER_BYTES);
     CmpAclLineFormat(Line, ",\"il\":\"0x%04lx\",\"admin\":%u,\"restricted\":%u,\"imp\":%u,\"mode\":\"%s\"}\n",
                      Entry->IntegrityRid, Entry->Admin, Entry->Restricted, Entry->Impersonating,
                      CmpAclModeNames[CmpRegistryAclMode]);
@@ -1416,13 +1478,9 @@ CmpAclOut(
 {
     if (Line->Overflow)
     {
-        /* Never write a cut line: end it so the file stays one JSON object per line */
-        if (Line->Size < 3)
-            return TRUE;
-        Line->Length = min(Line->Length, Line->Size - 3);
-        Line->Buffer[Line->Length++] = '}';
-        Line->Buffer[Line->Length++] = '\n';
-        Line->Buffer[Line->Length] = ANSI_NULL;
+        /* The string budgets keep this from happening; a line that was cut is not written, it would not be JSON */
+        InterlockedIncrement(&CmpAclFileErrors);
+        return TRUE;
     }
     if (Out->Length + Line->Length >= Out->Size)
         return FALSE;
@@ -1432,11 +1490,11 @@ CmpAclOut(
     return TRUE;
 }
 
+/* One pass of the worker; TRUE when it wants to run again soon. Final: the shutdown pass. */
 static
-VOID
-NTAPI
-CmpAclWorker(
-    _In_ PVOID Context)
+BOOLEAN
+CmpAclRun(
+    _In_ BOOLEAN Final)
 {
     PSLIST_ENTRY List, Next, Reversed = NULL;
     PCMP_ACL_ENTRY Entry;
@@ -1451,7 +1509,6 @@ CmpAclWorker(
     LONG Count;
     BOOLEAN CountPass, Again = FALSE;
 
-    UNREFERENCED_PARAMETER(Context);
     KeQuerySystemTime(&Now);
 
     /* Move new entries to the pending list, oldest first */
@@ -1487,10 +1544,12 @@ CmpAclWorker(
                    CMP_ACL_MAX_ENTRIES);
     }
 
-    CountPass = (Now.QuadPart - CmpAclLastCountPass.QuadPart) >= (LONGLONG)CMP_ACL_COUNT_INTERVAL * 10000000;
+    /* The last pass writes the counts too */
+    CountPass = Final || (Now.QuadPart - CmpAclLastCountPass.QuadPart) >= (LONGLONG)CMP_ACL_COUNT_INTERVAL * 10000000;
 
-    /* The file */
-    if (!CmpAclFileGivenUp && CmpAclBootBytes < CMP_ACL_BOOT_WRITE_LIMIT &&
+    /* The file (never from an ordinary pass once the system shuts down) */
+    if ((Final || !CmpAclShutdown) &&
+        !CmpAclFileGivenUp && CmpAclBootBytes < CMP_ACL_BOOT_WRITE_LIMIT &&
         (CmpAclPending.Next || CountPass || (CmpAclSaturated && !CmpAclSaturationLogged)))
     {
         Out.Buffer = ExAllocatePoolWithTag(PagedPool, Out.Size, TAG_CM_ACL);
@@ -1630,7 +1689,7 @@ CmpAclWorker(
     }
 
     /* Counters: with new entries, else at most once a minute */
-    if (Reversed || (Now.QuadPart - CmpAclLastPublish.QuadPart) >= (LONGLONG)CMP_ACL_PUBLISH_INTERVAL * 10000000)
+    if (Final || Reversed || (Now.QuadPart - CmpAclLastPublish.QuadPart) >= (LONGLONG)CMP_ACL_PUBLISH_INTERVAL * 10000000)
     {
         CmpAclPublish();
         CmpAclLastPublish = Now;
@@ -1655,10 +1714,30 @@ CmpAclWorker(
         }
     }
 
+    if (Final)
+        return Again;
+
     /* Let the next denial arm the timer again, then catch what arrived meanwhile */
     InterlockedExchange(&CmpAclTimerArmed, 0);
     if (Again || ExQueryDepthSList(&CmpAclQueue) || CmpAclDenials != CmpAclLastDenials)
         CmpAclArmTimer();
+    return Again;
+}
+
+static
+VOID
+NTAPI
+CmpAclWorker(
+    _In_ PVOID Context)
+{
+    UNREFERENCED_PARAMETER(Context);
+
+    /* Once the system shuts down the shutdown pass has the work */
+    if (!CmpAclShutdown)
+        CmpAclRun(FALSE);
+
+    if (InterlockedDecrement(&CmpAclWorkItems) == 0)
+        KeSetEvent(&CmpAclWorkIdle, IO_NO_INCREMENT, FALSE);
 }
 
 static
@@ -1675,8 +1754,55 @@ CmpAclTimerDpc(
     UNREFERENCED_PARAMETER(SystemArgument1);
     UNREFERENCED_PARAMETER(SystemArgument2);
 
-    /* Only one timer is ever armed, so only one work item is queued or running */
+    /*
+     * Only one timer is ever armed, so only one work item is queued or running. Count it
+     * before looking at the shutdown flag: the shutdown waits for the count to reach zero.
+     */
+    InterlockedIncrement(&CmpAclWorkItems);
+    KeClearEvent(&CmpAclWorkIdle);
+    if (CmpAclShutdown)
+    {
+        if (InterlockedDecrement(&CmpAclWorkItems) == 0)
+            KeSetEvent(&CmpAclWorkIdle, IO_NO_INCREMENT, FALSE);
+        return;
+    }
     ExQueueWorkItem(&CmpAclWorkItem, DelayedWorkQueue);
+}
+
+/*
+ * The system is shutting down (before the hives are flushed and before the file systems are):
+ * stop the worker, then write what is pending and the counters once, ourselves.
+ */
+VOID
+NTAPI
+CmpAclShutdownSystem(VOID)
+{
+    LARGE_INTEGER Timeout;
+    ULONG Pass;
+
+    if (!CmpAclReady || InterlockedExchange(&CmpAclShutdown, 1) != 0)
+        return;
+
+    /* No new timer expiry (one that is running counts its work item before it looks at the flag) */
+    KeCancelTimer(&CmpAclTimer);
+    KeFlushQueuedDpcs();
+
+    /* A queued or running work item ends without touching a file; wait for it, but not for ever */
+    Timeout.QuadPart = -(LONGLONG)10 * 10 * 1000 * 1000;
+    if (CmpAclWorkItems != 0 &&
+        KeWaitForSingleObject(&CmpAclWorkIdle, Executive, KernelMode, FALSE, &Timeout) == STATUS_TIMEOUT)
+    {
+        /* The work item is stuck: write nothing, it must not race the pass below */
+        DbgPrintEx(DPFLTR_CONFIG_ID, DPFLTR_ERROR_LEVEL, "CM-ACL-AUDIT: worker did not end at shutdown, nothing written\n");
+        return;
+    }
+
+    /* Nothing runs but this thread: the last pass (a few at most when more than a buffer is pending) */
+    for (Pass = 0; Pass < 4; Pass++)
+    {
+        if (!CmpAclRun(TRUE))
+            break;
+    }
 }
 
 /* Find /REGACL=<mode> in the (upper-cased) load options */
@@ -1796,6 +1922,7 @@ CmpAclInitialize(VOID)
         KeInitializeTimer(&CmpAclTimer);
         KeInitializeDpc(&CmpAclDpc, CmpAclTimerDpc, NULL);
         ExInitializeWorkItem(&CmpAclWorkItem, CmpAclWorker, NULL);
+        KeInitializeEvent(&CmpAclWorkIdle, NotificationEvent, TRUE);
         CmpAclReady = TRUE;
     }
     else if (CmpRegistryAclMode != CM_REGACL_MODE_LEGACY)

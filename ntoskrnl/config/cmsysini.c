@@ -2300,6 +2300,9 @@ CmShutdownSystem(VOID)
     PLIST_ENTRY ListEntry;
     PCMHIVE Hive;
 
+    /* Stop the audit log writer: it must not write once the file systems shut down, and its counters go into the hives */
+    CmpAclShutdownSystem();
+
     /* Kill the workers */
     if (!CmFirstTime) CmpShutdownWorkers();
 
