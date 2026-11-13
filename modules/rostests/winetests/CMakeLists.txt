@@ -163,6 +163,8 @@ add_subdirectory(xmllite)
 
 if(DLL_EXPORT_VERSION GREATER_EQUAL 0x600)
     add_subdirectory(d2d1)
+    add_subdirectory(d3d10core)
+    add_subdirectory(d3d11)
     add_subdirectory(dwrite)
     add_subdirectory(ncrypt)
     add_subdirectory(tdh)
