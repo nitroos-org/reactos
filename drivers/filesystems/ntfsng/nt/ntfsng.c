@@ -968,6 +968,13 @@ NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Registry
         ngc_set_namecache(0);
     else if (NgReadDword(RegistryPath, L"NameCacheVerify"))
         ngc_set_namecache(2);
+    /* NoFreeReservation=1: an allocation after a free waits for the commit that covers the free, as before (comparison, fallback). */
+    if (NgReadDword(RegistryPath, L"NoFreeReservation"))
+    {
+        ngc_free_reservation = 0;
+        DPRINT1("ntfsng: NoFreeReservation: an allocation after a free waits for its commit\n");
+    }
+
     /* NoRetainedCommit=1: every commit puts its pages in place before it returns (comparison, fallback). */
     if (NgReadDword(RegistryPath, L"NoRetainedCommit"))
     {

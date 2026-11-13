@@ -2038,6 +2038,27 @@ static unsigned long ngc_commit_threshold(struct ngc_vol *v)
 	return min_t(unsigned long, NGC_JNL_COMMIT_PAGES, kshim_jnl_capacity(v->bdev) / 2);
 }
 
+int ngc_free_reservation = 1;	/* 0: an allocation after a free waits for the commit (registry NoFreeReservation=1) */
+
+/*
+ * An allocation of about @need clusters can go ahead before the commits that cover pending frees: the allocator leaves
+ * the clusters those frees gave back alone (kshim_resv_skip), and the rest of the volume has room for it.  False when a
+ * free was not recorded (the list was full) or the volume is too full without them: then it waits, as before.
+ */
+static bool ngc_resv_ok(struct ngc_vol *v, s64 need)
+{
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	s64 resv, avail;
+
+	if (!ngc_free_reservation || !v->watched || !v->bdev->jnl || !NVolFreeClusterKnown(vol))
+		return false;
+	resv = kshim_resv_state(v->bdev);
+	if (resv < 0)
+		return false;
+	avail = atomic64_read(&vol->free_clusters) - atomic64_read(&vol->dirty_clusters) - resv;
+	return avail >= need + need / 4 + 64;
+}
+
 /* Free clusters that no complete commit covers yet. */
 static int ngc_frees_pending(struct ngc_vol *v)
 {
@@ -2048,11 +2069,12 @@ static int ngc_frees_pending(struct ngc_vol *v)
  * The overlay is past the threshold, or (@alloc) a free is not committed yet and an allocation follows: the glue commits
  * (ngc_commit_begin) before its next operation of that kind, without the volume lock for the I/O.  Between core operations.
  */
-int ngc_commit_wanted(ngc_vol *v, int alloc)
+int ngc_commit_wanted(ngc_vol *v, long long alloc_bytes)
 {
 	if (!v->bdev->jnl || sb_rdonly(v->sb) || !ngc_unlocked_commit)
 		return 0;
-	return kshim_jnl_pending(v->bdev) > ngc_commit_threshold(v) || (alloc && ngc_frees_pending(v));
+	return kshim_jnl_pending(v->bdev) > ngc_commit_threshold(v) ||
+	       (alloc_bytes > 0 && ngc_frees_pending(v) && !ngc_resv_ok(v, (alloc_bytes + (s64)NTFS_SB(v->sb)->cluster_size - 1) >> NTFS_SB(v->sb)->cluster_size_bits));
 }
 
 /* Past this many overlay pages a core operation commits at once (with the lock), the threshold commit not having come yet. */
@@ -2068,6 +2090,9 @@ static unsigned long ngc_commit_hard(struct ngc_vol *v)
  */
 static int ngc_before_alloc(struct ngc_vol *v)
 {
+	/* The frees up to the count now are committed once this has waited (or are, when none is pending): the allocator may take them. */
+	u64 upto = ngc_aux(v);
+
 	if (ngc_frees_pending(v)) {
 		unsigned long long t0 = ngos_ticks();
 		int err;
@@ -2076,13 +2101,26 @@ static int ngc_before_alloc(struct ngc_vol *v)
 		 * before a growth when it can (ngc_commit_wanted), so this is the case that it could not, or a free since.
 		 */
 		kshim_jnl_settle(v->bdev);
-		if (!ngc_frees_pending(v))
+		if (!ngc_frees_pending(v)) {
+			kshim_resv_drop_upto(v->bdev, upto);
 			return 0;
+		}
 		err = ngc_commit(v);
 		ngos_prof(NGP_COMMIT_ALLOC, t0, 0);
+		if (!err)
+			kshim_resv_drop_upto(v->bdev, upto);
 		return err;
 	}
+	kshim_resv_drop_upto(v->bdev, upto);
 	return 0;
+}
+
+/* ngc_before_alloc for a growth of about @need clusters: no wait when the clusters of pending frees can be left out of it. */
+static int ngc_before_alloc_grow(struct ngc_vol *v, s64 need)
+{
+	if (ngc_frees_pending(v) && ngc_resv_ok(v, need))
+		return 0;
+	return ngc_before_alloc(v);
 }
 
 /*
@@ -2922,8 +2960,12 @@ static int ngc_set_size_impl(ngc_vol *v, ngc_node *n, unsigned long long newsize
 		return -ENOSPC;
 	err = ngc_mark_dirty(v);
 	/* Growth inside the allocation takes no cluster, so nothing a free could hand out (ngc_before_alloc). */
-	if (!err && (loff_t)newsize > old && ngc_grow_allocates(ni, newsize))
-		err = ngc_before_alloc(v);
+	if (!err && (loff_t)newsize > old && ngc_grow_allocates(ni, newsize)) {
+		s64 need = (s64)(round_up((u64)newsize, ni->vol->cluster_size) >> ni->vol->cluster_size_bits) -
+			   (NInoNonResident(ni) ? ((s64)ni->allocated_size >> ni->vol->cluster_size_bits) : 0);
+
+		err = ngc_before_alloc_grow(v, need > 0 ? need : 1);
+	}
 	if (err)
 		return err;
 	if ((loff_t)newsize > old) {
