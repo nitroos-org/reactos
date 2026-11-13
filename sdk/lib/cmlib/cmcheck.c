@@ -246,6 +246,32 @@ CmpApplySecurityRecount(
     }
 }
 
+/*
+ * The cache of a hive being loaded: the root's ring first, then the ring of
+ * every cell a key names that is not cached yet. Keys created since a hive got
+ * stored descriptors may name cells of a ring the root is not in (the root has
+ * none on hives installed before), and those cells must be found again to be
+ * shared. Runs after the walk, which has reset every Security that is not a
+ * valid cell. Never fails the load.
+ */
+static
+VOID
+CmpCacheSecurityRings(
+    _In_ PHHIVE Hive,
+    _In_ PCMP_SK_TALLY Tally)
+{
+    ULONG i;
+
+    CmpBuildSecurityCache((PCMHIVE)Hive);
+    if (Tally->Failed || !Tally->Table)
+        return;
+    for (i = 0; i < Tally->Capacity; i++)
+    {
+        if (Tally->Table[i].Cell != HCELL_NIL)
+            CmpAddSecurityRingToCache((PCMHIVE)Hive, Tally->Table[i].Cell);
+    }
+}
+
 #if defined(_BLDR_)
 /* A name with a character that the loader cannot upper case, see below */
 static
@@ -1740,7 +1766,11 @@ CmpValidateRegistryInternal(
     CmStatusCode = CmpValidateRegistryWalk(Hive, Flags, SecurityDefaulted, FixHive,
                                            (Flags & CM_CHECK_REGISTRY_RECOUNT_SECURITY) ? &Tally : NULL);
     if (CM_CHECK_REGISTRY_SUCCESS(CmStatusCode) && (Flags & CM_CHECK_REGISTRY_RECOUNT_SECURITY))
+    {
         CmpApplySecurityRecount(Hive, &Tally, FixHive);
+        if (Flags & CM_CHECK_REGISTRY_CACHE_SECURITY)
+            CmpCacheSecurityRings(Hive, &Tally);
+    }
     CmpSkTallyReset(&Tally);
     return CmStatusCode;
 }
@@ -2028,7 +2058,8 @@ CmCheckRegistry(
                   CM_CHECK_REGISTRY_BOOTLOADER_PURGE_VOLATILES |
                   CM_CHECK_REGISTRY_VALIDATE_HIVE              |
                   CM_CHECK_REGISTRY_FIX_HIVE                   |
-                  CM_CHECK_REGISTRY_RECOUNT_SECURITY))
+                  CM_CHECK_REGISTRY_RECOUNT_SECURITY           |
+                  CM_CHECK_REGISTRY_CACHE_SECURITY))
     {
         DPRINT1("Invalid flag for registry check given (flag %u)\n", Flags);
         return CM_CHECK_REGISTRY_INVALID_PARAMETER;

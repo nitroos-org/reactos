@@ -65,6 +65,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_cc/CcPurgeCacheSection.c
     ntos_cm/CmAclAudit.c
     ntos_cm/CmRename.c
+    ntos_cm/CmSkStore.c
     ntos_cm/CmSecurity.c
     ntos_ex/ExCallback.c
     ntos_ex/ExDoubleList.c

@@ -247,13 +247,127 @@ CmpSetSecurityDescriptor(IN PCM_KEY_CONTROL_BLOCK Kcb,
     return STATUS_SUCCESS;
 }
 
+/*
+ * The object manager's assign operation. Keys get their descriptor when they
+ * are created (CmpDoCreateChild), so a key normally never sees this; should
+ * it, the descriptor is stored on a key that has none yet (in legacy mode,
+ * nothing is stored, as before). The caller holds the KCB exclusively.
+ */
 NTSTATUS
 CmpAssignSecurityDescriptor(IN PCM_KEY_CONTROL_BLOCK Kcb,
                             IN PSECURITY_DESCRIPTOR SecurityDescriptor)
 {
+    PHHIVE Hive = Kcb->KeyHive;
+    PCM_KEY_NODE Node;
+    HCELL_INDEX SecurityCell;
+    ULONG Length;
+    NTSTATUS Status;
+
     DPRINT("CmpAssignSecurityDescriptor(%p %p)\n",
            Kcb, SecurityDescriptor);
-    return STATUS_SUCCESS;
+
+    if (!CmpStoreKeySecurity() || !SecurityDescriptor ||
+        !Hive || Kcb->KeyCell == HCELL_NIL || (Kcb->ExtFlags & CM_KCB_KEY_NON_EXIST))
+    {
+        return STATUS_SUCCESS;
+    }
+
+    /* A self-relative descriptor is what an 'sk' cell holds */
+    Length = RtlLengthSecurityDescriptor(SecurityDescriptor);
+    if (!(((PISECURITY_DESCRIPTOR)SecurityDescriptor)->Control & SE_SELF_RELATIVE) ||
+        !RtlValidRelativeSecurityDescriptor(SecurityDescriptor, Length, 0))
+    {
+        return STATUS_INVALID_SECURITY_DESCR;
+    }
+
+    Node = (PCM_KEY_NODE)HvGetCell(Hive, Kcb->KeyCell);
+    if (!Node)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    if (Node->Signature != CM_KEY_NODE_SIGNATURE || Node->Security != HCELL_NIL)
+    {
+        /* It has one: replacing it is a set, not an assign */
+        HvReleaseCell(Hive, Kcb->KeyCell);
+        return STATUS_SUCCESS;
+    }
+
+    Status = STATUS_NO_LOG_SPACE;
+    if (HvMarkCellDirty(Hive, Kcb->KeyCell, FALSE))
+    {
+        Status = CmpInsertSecurityDescriptor((PCMHIVE)Hive,
+                                             SecurityDescriptor,
+                                             Length,
+                                             HvGetCellType(Kcb->KeyCell),
+                                             &SecurityCell);
+        if (NT_SUCCESS(Status))
+            Node->Security = SecurityCell;
+    }
+    HvReleaseCell(Hive, Kcb->KeyCell);
+    return Status;
+}
+
+/*
+ * Copying a key into another hive (save, merge): the destination key gets a
+ * reference to a cell of the destination hive holding the same descriptor,
+ * shared with the keys copied before that have it. The source cell is read
+ * under its hive's security lock and the bytes are validated as a copy (the
+ * hive is untrusted); a source cell that is not sound gives the copy no
+ * descriptor (HCELL_NIL), as the hive check would. The two security locks are
+ * never held together.
+ */
+NTSTATUS
+NTAPI
+CmpCopyKeySecurityCell(
+    _In_ PHHIVE SourceHive,
+    _In_ HCELL_INDEX SourceCell,
+    _In_ PHHIVE DestinationHive,
+    _In_ HSTORAGE_TYPE StorageType,
+    _Out_ PHCELL_INDEX DestinationCell)
+{
+    PCM_KEY_SECURITY Security;
+    PVOID Copy = NULL;
+    ULONG Length = 0;
+    BOOLEAN Acquired;
+    NTSTATUS Status;
+
+    *DestinationCell = HCELL_NIL;
+
+    Acquired = CmpAcquireHiveSecurityLock(SourceHive);
+    Security = CmpGetCheckedSecurityCell(SourceHive, SourceCell, NULL);
+    if (Security &&
+        Security->ReferenceCount != 0 &&
+        Security->DescriptorLength >= sizeof(SECURITY_DESCRIPTOR_RELATIVE) &&
+        Security->DescriptorLength <= CMP_MAX_STORED_SD_LENGTH)
+    {
+        Length = Security->DescriptorLength;
+        Copy = ExAllocatePoolWithTag(PagedPool, Length, TAG_CMSD);
+        if (Copy)
+            RtlCopyMemory(Copy, &Security->Descriptor, Length);
+    }
+    CmpReleaseHiveSecurityLock(SourceHive, Acquired);
+
+    if (!Length)
+    {
+        DPRINT1("Security cell 0x%x is not sound, the copy of its key has none\n", SourceCell);
+        return STATUS_SUCCESS;
+    }
+    if (!Copy)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    if (RtlValidRelativeSecurityDescriptor(Copy, Length, 0))
+    {
+        Status = CmpInsertSecurityDescriptor((PCMHIVE)DestinationHive,
+                                             Copy,
+                                             Length,
+                                             StorageType,
+                                             DestinationCell);
+    }
+    else
+    {
+        DPRINT1("Security cell 0x%x holds no valid descriptor, the copy of its key has none\n", SourceCell);
+        Status = STATUS_SUCCESS;
+    }
+    ExFreePoolWithTag(Copy, TAG_CMSD);
+    return Status;
 }
 
 NTSTATUS

@@ -244,6 +244,12 @@ typedef ULONG CM_CHECK_REGISTRY_STATUS;
  * count and the compare. The correction is persistent only with FIX_HIVE.
  */
 #define CM_CHECK_REGISTRY_RECOUNT_SECURITY            0x20
+/*
+ * With RECOUNT_SECURITY, for a hive being loaded into the kernel (a CMHIVE whose
+ * security cache is set up): fill the cache from the root's ring of 'sk' cells
+ * (CmpBuildSecurityCache) and from the ring of every other cell a key names.
+ */
+#define CM_CHECK_REGISTRY_CACHE_SECURITY              0x40
 
 //
 // Check Registry status codes
@@ -1037,6 +1043,13 @@ BOOLEAN
 NTAPI
 CmpBuildSecurityCache(
     IN PCMHIVE CmHive
+);
+
+VOID
+NTAPI
+CmpAddSecurityRingToCache(
+    IN PCMHIVE CmHive,
+    IN HCELL_INDEX SecurityCell
 );
 
 VOID
