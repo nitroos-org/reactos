@@ -31,6 +31,8 @@ static __inline INT GDI_ROUND(FLOAT val)
  *  For TranslateCharsetInfo
  */
 #define MAXTCIINDEX 32
+#define FONT_UTF8_CHARSET 254
+#define FS_UTF8 0x04000000
 static const CHARSETINFO FONT_tci[MAXTCIINDEX] =
 {
     /* ANSI */
@@ -63,7 +65,8 @@ static const CHARSETINFO FONT_tci[MAXTCIINDEX] =
     { DEFAULT_CHARSET, 0, {{0,0,0,0},{FS_LATIN1,0}} },
     { DEFAULT_CHARSET, 0, {{0,0,0,0},{FS_LATIN1,0}} },
     { DEFAULT_CHARSET, 0, {{0,0,0,0},{FS_LATIN1,0}} },
-    { DEFAULT_CHARSET, 0, {{0,0,0,0},{FS_LATIN1,0}} },
+    /* bit 26: UTF-8, as reported by TCI_SRCCODEPAGE 65001 on Windows 10 */
+    { FONT_UTF8_CHARSET, CP_UTF8, {{0,0,0,0},{FS_UTF8,0}} },
     { DEFAULT_CHARSET, 0, {{0,0,0,0},{FS_LATIN1,0}} },
     { DEFAULT_CHARSET, 0, {{0,0,0,0},{FS_LATIN1,0}} },
     { DEFAULT_CHARSET, 0, {{0,0,0,0},{FS_LATIN1,0}} },
@@ -2446,6 +2449,8 @@ TranslateCharsetInfo(
     DWORD flags /* [in] determines interpretation of lpSrc */)
 {
     int index = 0;
+    DWORD dwSupported = 0;
+    BOOL bLocale = FALSE;
     switch (flags)
     {
     case TCI_SRCFONTSIG:
@@ -2465,6 +2470,9 @@ TranslateCharsetInfo(
         if ( GetLocaleInfoW(lCid, LOCALE_FONTSIGNATURE, (LPWSTR)&LocSig, Ret))
         {
            while (index < MAXTCIINDEX && !(LocSig.lsCsbDefault[0]>>index & 0x0001)) index++;
+           /* Windows also returns the supported code page bits of the locale in fsCsb[1] */
+           dwSupported = LocSig.lsCsbSupported[0];
+           bLocale = TRUE;
            break;
         }
     }
@@ -2476,6 +2484,8 @@ TranslateCharsetInfo(
     DPRINT("Index %d Charset %u CodePage %u FontSig %lu\n",
              index,FONT_tci[index].ciCharset,FONT_tci[index].ciACP,FONT_tci[index].fs.fsCsb[0]);
     memcpy(lpCs, &FONT_tci[index], sizeof(CHARSETINFO));
+    if (bLocale)
+        lpCs->fs.fsCsb[1] = dwSupported;
     return TRUE;
 }
 
