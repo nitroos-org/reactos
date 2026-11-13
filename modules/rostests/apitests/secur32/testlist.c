@@ -17,6 +17,7 @@ extern void func_SchannelServerCert(void);
 extern void func_SetCredentialsAttributes(void);
 extern void func_SspiAuthIdentityExports(void);
 extern void func_QueryContextAttributesEx(void);
+extern void func_NtlmLoopback(void);
 
 const struct test winetest_testlist[] =
 {
@@ -30,5 +31,6 @@ const struct test winetest_testlist[] =
     { "SspiAuthIdentityExports", func_SspiAuthIdentityExports },
 
     { "QueryContextAttributesEx", func_QueryContextAttributesEx },
+    { "NtlmLoopback", func_NtlmLoopback },
     { 0, 0 }
 };

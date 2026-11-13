@@ -14,6 +14,7 @@
 #include "wow64p.h"
 #include <ntsecapi.h>
 #include <lsass/lsass.h>
+#include <ntlmros.h>
 
 /* The guest's PORT_MESSAGE: CLIENT_ID and the view size are 32 bits wide */
 typedef struct
@@ -103,6 +104,17 @@ typedef struct
     WOW64_STRING LogonDomainName, UserName, Password;
 } WOW64_MSV1_0_INTERACTIVE_LOGON;
 C_ASSERT(sizeof(WOW64_MSV1_0_INTERACTIVE_LOGON) == 28);
+
+/* MSV1_0_LM20_LOGON (a network logon: the response to a challenge) for i386 */
+typedef struct
+{
+    ULONG MessageType;
+    WOW64_STRING LogonDomainName, UserName, Workstation;
+    UCHAR ChallengeToClient[MSV1_0_CHALLENGE_LENGTH];
+    WOW64_STRING CaseSensitiveChallengeResponse, CaseInsensitiveChallengeResponse;
+    ULONG ParameterControl;
+} WOW64_MSV1_0_LM20_LOGON;
+C_ASSERT(sizeof(WOW64_MSV1_0_LM20_LOGON) == 56);
 
 /* MSV1_0_S4U_LOGON for i386: the strings hold addresses in the guest, or offsets from the start of the buffer */
 typedef struct
@@ -298,6 +310,82 @@ static NTSTATUS InteractiveLogonFrom32(const WOW64_MSV1_0_INTERACTIVE_LOGON *Cap
     return STATUS_SUCCESS;
 }
 
+/* The guest's MSV1_0_LM20_LOGON in the native layout, in one heap block with its five strings: the names as
+ * UTF-16 text and the two responses as bytes. As msv1_0 reads it, the length of a string is all that counts
+ * (it makes its own Maximum from it). */
+static NTSTATUS Lm20LogonFrom32(const WOW64_MSV1_0_LM20_LOGON *Captured, PVOID *Native, ULONG *NativeLength)
+{
+    const WOW64_MSV1_0_LM20_LOGON Logon = *Captured;
+    const WOW64_STRING *From[5];
+    UNICODE_STRING *ToW[3];
+    STRING *ToA[2];
+    PMSV1_0_LM20_LOGON Blob;
+    PUCHAR Next;
+    ULONG Size = sizeof(MSV1_0_LM20_LOGON), i;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    From[0] = &Logon.LogonDomainName;
+    From[1] = &Logon.UserName;
+    From[2] = &Logon.Workstation;
+    From[3] = &Logon.CaseSensitiveChallengeResponse;
+    From[4] = &Logon.CaseInsensitiveChallengeResponse;
+    for (i = 0; i < 5; ++i)
+    {
+        if (From[i]->Length && (!From[i]->Buffer || !InGuest(From[i]->Buffer, From[i]->Length)))
+            return STATUS_INVALID_PARAMETER;
+        if (From[i]->Length > MAXLONG - Size)
+            return STATUS_INVALID_PARAMETER;
+        Size += ALIGN_UP_BY(From[i]->Length, sizeof(WCHAR));
+    }
+    Blob = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, Size);
+    if (!Blob) return STATUS_NO_MEMORY;
+    Blob->MessageType = Logon.MessageType;
+    RtlCopyMemory(Blob->ChallengeToClient, Logon.ChallengeToClient, sizeof(Blob->ChallengeToClient));
+    Blob->ParameterControl = Logon.ParameterControl;
+    ToW[0] = &Blob->LogonDomainName;
+    ToW[1] = &Blob->UserName;
+    ToW[2] = &Blob->Workstation;
+    ToA[0] = &Blob->CaseSensitiveChallengeResponse;
+    ToA[1] = &Blob->CaseInsensitiveChallengeResponse;
+    Next = (PUCHAR)(Blob + 1);
+    _SEH2_TRY
+    {
+        for (i = 0; i < 5; ++i)
+        {
+            USHORT Length = From[i]->Length;
+            PUCHAR Buffer = Length ? Next : NULL;
+
+            if (i < 3)
+            {
+                ToW[i]->Length = Length;
+                ToW[i]->MaximumLength = Length;
+                ToW[i]->Buffer = (PWSTR)Buffer;
+            }
+            else
+            {
+                ToA[i - 3]->Length = Length;
+                ToA[i - 3]->MaximumLength = Length;
+                ToA[i - 3]->Buffer = (PCHAR)Buffer;
+            }
+            if (Length) RtlCopyMemory(Next, PTR32(From[i]->Buffer), Length);
+            Next += ALIGN_UP_BY(Length, sizeof(WCHAR));
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+    if (!NT_SUCCESS(Status))
+    {
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Blob);
+        return Status;
+    }
+    *Native = Blob;
+    *NativeLength = Size;
+    return STATUS_SUCCESS;
+}
+
 /* The guest's MSV1_0_S4U_LOGON in the native layout, in one heap block that holds the two strings after
  * the structure. A string is an address inside the guest's buffer, or an offset from its start, which
  * is how msv1_0 tells them apart; the same rule picks where the characters are read from, once. A
@@ -381,6 +469,7 @@ static NTSTATUS LogonSubmitFrom32(ULONG Number, ULONG Guest, ULONG Length, PVOID
         ULONG MessageType;
         WOW64_MSV1_0_INTERACTIVE_LOGON Interactive;
         WOW64_MSV1_0_S4U_LOGON S4U;
+        WOW64_MSV1_0_LM20_LOGON Lm20;
     } Submit;
     ULONG Captured;
     NTSTATUS Status = STATUS_SUCCESS;
@@ -402,6 +491,12 @@ static NTSTATUS LogonSubmitFrom32(ULONG Number, ULONG Guest, ULONG Length, PVOID
 
     if (Submit.MessageType == MsV1_0S4ULogon)
         return S4ULogonFrom32(Guest, Length, Captured, &Submit.S4U, Native, NativeLength);
+    if (Submit.MessageType == MsV1_0Lm20Logon || Submit.MessageType == MsV1_0NetworkLogon)
+    {
+        if (Length < sizeof(Submit.Lm20))
+            return STATUS_INVALID_PARAMETER;
+        return Lm20LogonFrom32(&Submit.Lm20, Native, NativeLength);
+    }
     if (Length < sizeof(Submit.Interactive))
         return STATUS_INVALID_PARAMETER;
     if (Submit.MessageType != MsV1_0InteractiveLogon)
@@ -996,6 +1091,87 @@ static NTSTATUS ChangePasswordFrom32(ULONG Guest, ULONG Length, PVOID *Native, U
 
 /* LsaCallAuthenticationPackage for the MSV1_0 message types that 32-bit callers use: MsV1_0ChangePassword
  * (NetUserChangePassword), which has no reply buffer. The others, and the other packages, are refused. */
+/* MsV1_0RosNtlmV2Response (ReactOS private, see ntlmros.h): the request and the answer are flat, without pointers.
+ * lsass allocates the answer in this process, maybe above the guest's limit: it is copied into a block below it
+ * and the native one is released. */
+static NTSTATUS RequestRosNtlmV2(HANDLE Port, WOW64_LSA_BODY *Body, LSA_API_MSG *Native, ULONG Package, ULONG Buffer,
+                                 ULONG Length)
+{
+    PVOID Submit;
+    PVOID Return = NULL;
+    ULONG ReturnLength = 0, GuestReturn = 0;
+    NTSTATUS Status = STATUS_SUCCESS, Written = STATUS_SUCCESS, Result;
+
+    if (Length > 0x4100)
+        return STATUS_INVALID_PARAMETER;
+    Submit = RtlAllocateHeap(RtlGetProcessHeap(), 0, Length);
+    if (!Submit) return STATUS_NO_MEMORY;
+    _SEH2_TRY
+    {
+        RtlCopyMemory(Submit, PTR32(Buffer), Length);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+    if (!NT_SUCCESS(Status))
+    {
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Submit);
+        return Status;
+    }
+
+    InitNative(Native, LSASS_REQUEST_CALL_AUTHENTICATION_PACKAGE, LSA_PORT_DATA_SIZE(Native->CallAuthenticationPackage));
+    Native->CallAuthenticationPackage.Request.AuthenticationPackage = Package;
+    Native->CallAuthenticationPackage.Request.ProtocolSubmitBuffer = Submit;
+    Native->CallAuthenticationPackage.Request.SubmitBufferLength = Length;
+    Status = NtRequestWaitReplyPort(Port, &Native->h, &Native->h);
+    RtlFreeHeap(RtlGetProcessHeap(), 0, Submit);
+    if (!NT_SUCCESS(Status)) return Status;
+
+    Result = Native->Status;
+    Return = Native->CallAuthenticationPackage.Reply.ProtocolReturnBuffer;
+    ReturnLength = Native->CallAuthenticationPackage.Reply.ReturnBufferLength;
+    if (NT_SUCCESS(Result) && Return)
+    {
+        PVOID Block = NULL;
+
+        /* The answer holds proofs: wiped when it is released */
+        if (NT_SUCCESS(Wow64Allocate(ReturnLength, &Block)))
+        {
+            RtlCopyMemory(Block, Return, ReturnLength);
+            GuestReturn = PtrToUlong(Block);
+        }
+        else
+        {
+            ReturnLength = 0;
+            Result = STATUS_NO_MEMORY;
+        }
+        RtlSecureZeroMemory(Return, Native->CallAuthenticationPackage.Reply.ReturnBufferLength);
+        FreeBlock(Return);
+    }
+    _SEH2_TRY
+    {
+        Body->Status = Result;
+        Body->CallReply.ProtocolReturnBuffer = GuestReturn;
+        Body->CallReply.ReturnBufferLength = GuestReturn ? ReturnLength : 0;
+        Body->CallReply.ProtocolStatus = Native->CallAuthenticationPackage.Reply.ProtocolStatus;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Written = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+    if (!NT_SUCCESS(Written) && GuestReturn)
+    {
+        SIZE_T Zero = 0;
+        PVOID Block = UlongToPtr(GuestReturn);
+
+        NtFreeVirtualMemory(NtCurrentProcess(), &Block, &Zero, MEM_RELEASE);
+    }
+    return NT_SUCCESS(Written) ? STATUS_SUCCESS : Written;
+}
+
 static NTSTATUS RequestCallPackage(ULONG Number, HANDLE Port, WOW64_LSA_BODY *Body, LSA_API_MSG *Native,
                                    BOOLEAN *Reported)
 {
@@ -1020,6 +1196,8 @@ static NTSTATUS RequestCallPackage(ULONG Number, HANDLE Port, WOW64_LSA_BODY *Bo
     if (!NT_SUCCESS(Status)) return Status;
     Status = Msv1_0PackageId(Port, &Msv1_0);
     if (!NT_SUCCESS(Status)) return Status;
+    if (Package == Msv1_0 && MessageType == MsV1_0RosNtlmV2Response)
+        return RequestRosNtlmV2(Port, Body, Native, Package, Buffer, Length);
     if (Package != Msv1_0 || MessageType != MsV1_0ChangePassword)
     {
         /* Reported with the message type, or 0xffffffff for another package */
