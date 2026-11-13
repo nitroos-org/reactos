@@ -71,6 +71,7 @@ list(APPEND SOURCE
     udpzerolen.c
     v6only.c
     udpoptions.c
+    connectcycle.c
     ephport.c
     timewait.c
     transmitfile.c
