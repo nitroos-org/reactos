@@ -36,6 +36,7 @@ typedef struct _AUDIT_STATS
     ULONG Checks;
     ULONG Denials;
     ULONG Entries;
+    ULONG Dropped;
 } AUDIT_STATS, *PAUDIT_STATS;
 
 static
@@ -79,6 +80,7 @@ ReadStats(
     Stats->Checks = ReadDword(Key, L"Checks");
     Stats->Denials = ReadDword(Key, L"Denials");
     Stats->Entries = ReadDword(Key, L"Entries");
+    Stats->Dropped = ReadDword(Key, L"Dropped");
     ZwClose(Key);
 }
 
@@ -519,6 +521,131 @@ Cleanup:
         ExFreePoolWithTag(Name, 'aAmK');
 }
 
+/*
+ * More distinct denials than the log keeps entries for (2048 a boot): the ones past the cap are
+ * Dropped, and so is every later repeat of one of them (its slot is given back, not left claimed
+ * without an entry). The counters are published at most once a minute.
+ */
+#define CAP_KEYS        2068
+#define CAP_REPEATS     10
+
+static
+BOOLEAN
+WaitDropped(
+    _In_ ULONG Target,
+    _In_ ULONG Seconds,
+    _Out_ PAUDIT_STATS Stats)
+{
+    LARGE_INTEGER Interval;
+    ULONG i;
+
+    Interval.QuadPart = -10 * 1000 * 1000;
+    for (i = 0; i <= Seconds; i++)
+    {
+        ReadStats(Stats);
+        if (Stats->Dropped != MAXULONG && Stats->Dropped >= Target)
+            return TRUE;
+        KeDelayExecutionThread(KernelMode, FALSE, &Interval);
+    }
+    return FALSE;
+}
+
+static
+VOID
+TestEntryCap(
+    _In_ ULONG Tag)
+{
+    WCHAR Path[100], Child[24];
+    UNICODE_STRING String;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE Parent = NULL, Key;
+    PACCESS_TOKEN Filtered;
+    AUDIT_STATS Start, Capped, Repeated;
+    ULONG i, Failed = 0, Created = 0;
+    NTSTATUS Status;
+    BOOLEAN Impersonating = FALSE, Seen;
+
+    RtlStringCbPrintfW(Path, sizeof(Path), L"KmtAclS-%lu", Tag);
+    Parent = KernelCreateKey(SOFTWARE, Path);
+    if (skip(Parent != NULL, "No parent key\n"))
+        return;
+
+    for (i = 0; i < CAP_KEYS; i++)
+    {
+        RtlStringCbPrintfW(Child, sizeof(Child), L"c%lu", i);
+        RtlInitUnicodeString(&String, Child);
+        InitializeObjectAttributes(&ObjectAttributes, &String, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, Parent, NULL);
+        Status = ZwCreateKey(&Key, KEY_ALL_ACCESS, &ObjectAttributes, 0, NULL, REG_OPTION_VOLATILE, NULL);
+        if (NT_SUCCESS(Status))
+        {
+            ZwClose(Key);
+            Created++;
+        }
+    }
+    ok_eq_ulong(Created, (ULONG)CAP_KEYS);
+    if (skip(Created == CAP_KEYS, "Keys missing\n"))
+        goto Cleanup;
+
+    Filtered = MakeFilteredToken();
+    if (skip(Filtered != NULL, "No filtered token\n"))
+        goto Cleanup;
+    Status = PsImpersonateClient(PsGetCurrentThread(), Filtered, FALSE, FALSE, SecurityImpersonation);
+    ObDereferenceObject(Filtered);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (skip(NT_SUCCESS(Status), "Not impersonating\n"))
+        goto Cleanup;
+    Impersonating = TRUE;
+
+    ReadStats(&Start);
+    for (i = 0; i < CAP_KEYS; i++)
+    {
+        RtlStringCbPrintfW(Child, sizeof(Child), L"c%lu", i);
+        RtlInitUnicodeString(&String, Child);
+        InitializeObjectAttributes(&ObjectAttributes, &String,
+                                   OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE | OBJ_FORCE_ACCESS_CHECK, Parent, NULL);
+        Status = ZwOpenKey(&Key, KEY_SET_VALUE, &ObjectAttributes);
+        if (NT_SUCCESS(Status))
+            ZwClose(Key);
+        else
+            Failed++;
+    }
+    ok_eq_ulong(Failed, 0UL);
+
+    /* At least the keys past the cap are dropped */
+    Seen = WaitDropped(Start.Dropped + (CAP_KEYS - 2048), 90, &Capped);
+    ok(Seen, "Dropped %lu -> %lu after %d distinct denials\n", Start.Dropped, Capped.Dropped, CAP_KEYS);
+    ok(Capped.Entries <= 2048, "Entries %lu\n", Capped.Entries);
+
+    /* The last key was dropped: every repeat of it is dropped again */
+    for (i = 0; i < CAP_REPEATS; i++)
+    {
+        Status = ZwOpenKey(&Key, KEY_SET_VALUE, &ObjectAttributes);
+        if (NT_SUCCESS(Status))
+            ZwClose(Key);
+        else
+            Failed++;
+    }
+    ok_eq_ulong(Failed, 0UL);
+    Seen = WaitDropped(Capped.Dropped + CAP_REPEATS, 130, &Repeated);
+    ok(Seen, "Dropped %lu -> %lu after %d repeats of a dropped denial\n", Capped.Dropped, Repeated.Dropped, CAP_REPEATS);
+
+Cleanup:
+    if (Impersonating)
+        PsRevertToSelf();
+    for (i = 0; i < CAP_KEYS; i++)
+    {
+        RtlStringCbPrintfW(Child, sizeof(Child), L"c%lu", i);
+        RtlInitUnicodeString(&String, Child);
+        InitializeObjectAttributes(&ObjectAttributes, &String, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, Parent, NULL);
+        if (NT_SUCCESS(ZwOpenKey(&Key, DELETE, &ObjectAttributes)))
+        {
+            ZwDeleteKey(Key);
+            ZwClose(Key);
+        }
+    }
+    DeleteKey(Parent);
+}
+
 START_TEST(CmAclAudit)
 {
     AUDIT_STATS Before, After;
@@ -611,6 +738,7 @@ START_TEST(CmAclAudit)
             ok(WaitForLog(NeedleE, 15), "write open of the user's Software key with rule user not in the audit log\n");
 
         TestLongNonAsciiKey(Tag);
+        TestEntryCap(Tag);
 
         ReadStats(&After);
         ok(After.Denials >= Before.Denials + 2, "Denials %lu -> %lu\n", Before.Denials, After.Denials);
