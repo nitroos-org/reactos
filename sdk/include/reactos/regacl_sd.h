@@ -59,6 +59,7 @@
 
 /* Control flags of the descriptors (self-relative is added by the builder) */
 #define REGSD_DACL_PRESENT   0x0004
+#define REGSD_SACL_PRESENT   0x0010   /* with no SACL: a present NULL SACL, offset 0 */
 #define REGSD_DACL_AUTOINH   0x0400
 #define REGSD_SACL_AUTOINH   0x0800
 #define REGSD_DACL_PROTECTED 0x1000
@@ -105,14 +106,14 @@ static const REGSD_TEMPLATE RegSdTemplates[REGSD_T_COUNT] =
         { REGSD_CI, REGSD_SID_AC, REGSD_KR }, { REGSD_CI, REGSD_SID_LPAC, REGSD_KR } } },
 
     /* O:BAG:SYD:PAI(A;CI;KR;;;BU)(A;CI;KA;;;BA)(A;CI;KA;;;SY)(A;CI;KA;;;CO)(A;CI;KR;;;AC)(A;CI;KR;;;LPAC)S:AINO_ACCESS_CONTROL */
-    { "hiveroot", REGSD_DACL_PRESENT | REGSD_DACL_PROTECTED | REGSD_DACL_AUTOINH | REGSD_SACL_AUTOINH,
+    { "hiveroot", REGSD_DACL_PRESENT | REGSD_DACL_PROTECTED | REGSD_DACL_AUTOINH | REGSD_SACL_PRESENT | REGSD_SACL_AUTOINH,
       REGSD_SID_BA, REGSD_SID_SY, 6,
       { { REGSD_CI, REGSD_SID_BU, REGSD_KR }, { REGSD_CI, REGSD_SID_BA, REGSD_KA },
         { REGSD_CI, REGSD_SID_SY, REGSD_KA }, { REGSD_CI, REGSD_SID_CO, REGSD_KA },
         { REGSD_CI, REGSD_SID_AC, REGSD_KR }, { REGSD_CI, REGSD_SID_LPAC, REGSD_KR } } },
 
     /* O:BAG:SYD:PAI(A;CI;KR;;;BU)(A;CI;KA;;;BA)(A;CI;KA;;;SY)(A;CI;KA;;;CO)(A;;KR;;;AC)(A;;KR;;;LPAC)S:AINO_ACCESS_CONTROL */
-    { "default", REGSD_DACL_PRESENT | REGSD_DACL_PROTECTED | REGSD_DACL_AUTOINH | REGSD_SACL_AUTOINH,
+    { "default", REGSD_DACL_PRESENT | REGSD_DACL_PROTECTED | REGSD_DACL_AUTOINH | REGSD_SACL_PRESENT | REGSD_SACL_AUTOINH,
       REGSD_SID_BA, REGSD_SID_SY, 6,
       { { REGSD_CI, REGSD_SID_BU, REGSD_KR }, { REGSD_CI, REGSD_SID_BA, REGSD_KA },
         { REGSD_CI, REGSD_SID_SY, REGSD_KA }, { REGSD_CI, REGSD_SID_CO, REGSD_KA },
@@ -123,7 +124,7 @@ static const REGSD_TEMPLATE RegSdTemplates[REGSD_T_COUNT] =
       { { REGSD_CI, REGSD_SID_SY, REGSD_KA }, { REGSD_CI, REGSD_SID_BA, REGSD_RCWD } } },
 
     /* O:BAG:SYD:(A;CI;KA;;;SY)(A;CI;RCWD;;;BA)S:AINO_ACCESS_CONTROL */
-    { "security", REGSD_DACL_PRESENT | REGSD_SACL_AUTOINH, REGSD_SID_BA, REGSD_SID_SY, 2,
+    { "security", REGSD_DACL_PRESENT | REGSD_SACL_PRESENT | REGSD_SACL_AUTOINH, REGSD_SID_BA, REGSD_SID_SY, 2,
       { { REGSD_CI, REGSD_SID_SY, REGSD_KA }, { REGSD_CI, REGSD_SID_BA, REGSD_RCWD } } },
 
     /* O:BAG:SYD:(A;;CCSWRPRCWD;;;BA)(A;;KA;;;SY) */
@@ -131,19 +132,19 @@ static const REGSD_TEMPLATE RegSdTemplates[REGSD_T_COUNT] =
       { { 0, REGSD_SID_BA, REGSD_BCD }, { 0, REGSD_SID_SY, REGSD_KA } } },
 
     /* O:BAG:SYD:P(A;OICI;KA;;;<user>)(A;OICI;KA;;;SY)(A;OICI;KA;;;BA)(A;OICI;KR;;;RC)(A;;KR;;;AC)(A;;KR;;;LPAC)S:AINO_ACCESS_CONTROL */
-    { "user", REGSD_DACL_PRESENT | REGSD_DACL_PROTECTED | REGSD_SACL_AUTOINH,
+    { "user", REGSD_DACL_PRESENT | REGSD_DACL_PROTECTED | REGSD_SACL_PRESENT | REGSD_SACL_AUTOINH,
       REGSD_SID_BA, REGSD_SID_SY, 6,
       { { REGSD_OI | REGSD_CI, REGSD_SID_USER, REGSD_KA }, { REGSD_OI | REGSD_CI, REGSD_SID_SY, REGSD_KA },
         { REGSD_OI | REGSD_CI, REGSD_SID_BA, REGSD_KA }, { REGSD_OI | REGSD_CI, REGSD_SID_RC, REGSD_KR },
         { 0, REGSD_SID_AC, REGSD_KR }, { 0, REGSD_SID_LPAC, REGSD_KR } } },
 
     /* O:SYG:SYD:PAI(A;OICI;CCSWRPSDRC;;;BA)(A;OICI;KA;;;SY)S:AINO_ACCESS_CONTROL */
-    { "taskcache", REGSD_DACL_PRESENT | REGSD_DACL_PROTECTED | REGSD_DACL_AUTOINH | REGSD_SACL_AUTOINH,
+    { "taskcache", REGSD_DACL_PRESENT | REGSD_DACL_PROTECTED | REGSD_DACL_AUTOINH | REGSD_SACL_PRESENT | REGSD_SACL_AUTOINH,
       REGSD_SID_SY, REGSD_SID_SY, 2,
       { { REGSD_OI | REGSD_CI, REGSD_SID_BA, REGSD_TC }, { REGSD_OI | REGSD_CI, REGSD_SID_SY, REGSD_KA } } },
 
     /* O:BAG:SYD:PAI(A;;KR;;;AU)(A;CIIO;GR;;;AU)(A;;KR;;;SO)(A;CIIO;GR;;;SO)(A;;KA;;;BA)(A;CIIO;GA;;;BA)(A;;KA;;;SY)(A;CIIO;GA;;;SY)S:AINO_ACCESS_CONTROL */
-    { "eventlog", REGSD_DACL_PRESENT | REGSD_DACL_PROTECTED | REGSD_DACL_AUTOINH | REGSD_SACL_AUTOINH,
+    { "eventlog", REGSD_DACL_PRESENT | REGSD_DACL_PROTECTED | REGSD_DACL_AUTOINH | REGSD_SACL_PRESENT | REGSD_SACL_AUTOINH,
       REGSD_SID_BA, REGSD_SID_SY, 8,
       { { 0, REGSD_SID_AU, REGSD_KR }, { REGSD_CI | REGSD_IO, REGSD_SID_AU, REGSD_GR },
         { 0, REGSD_SID_SO, REGSD_KR }, { REGSD_CI | REGSD_IO, REGSD_SID_SO, REGSD_GR },
@@ -152,7 +153,7 @@ static const REGSD_TEMPLATE RegSdTemplates[REGSD_T_COUNT] =
 
     /* O:SYG:SYD:PAI(A;;KR;;;AU)(A;;KA;;;SY)(A;;KA;;;BA)(A;OICIIO;GR;;;AU)(A;OICIIO;GA;;;SY)(A;OICIIO;GA;;;BA)
        (A;;KR;;;AC)(A;OICIIO;GR;;;AC)(A;;KR;;;LPAC)(A;OICIIO;GR;;;LPAC)S:AINO_ACCESS_CONTROL */
-    { "policies", REGSD_DACL_PRESENT | REGSD_DACL_PROTECTED | REGSD_DACL_AUTOINH | REGSD_SACL_AUTOINH,
+    { "policies", REGSD_DACL_PRESENT | REGSD_DACL_PROTECTED | REGSD_DACL_AUTOINH | REGSD_SACL_PRESENT | REGSD_SACL_AUTOINH,
       REGSD_SID_SY, REGSD_SID_SY, 10,
       { { 0, REGSD_SID_AU, REGSD_KR }, { 0, REGSD_SID_SY, REGSD_KA }, { 0, REGSD_SID_BA, REGSD_KA },
         { REGSD_OI | REGSD_CI | REGSD_IO, REGSD_SID_AU, REGSD_GR },
@@ -164,7 +165,7 @@ static const REGSD_TEMPLATE RegSdTemplates[REGSD_T_COUNT] =
     /* O:SYG:SYD:PAI(A;CI;KR;;;BU)(A;CI;KA;;;BA)(A;CI;KA;;;SY)(A;CI;CCDCLCSWRPWPSDRC;;;NS)(A;CI;KR;;;LS)
        (A;CI;CCDCLCSWRPSDRC;;;NO)(A;CI;CCDCLCSWRPSDRC;;;<service A>)(A;CIIO;RC;;;OW)(A;CI;CCDCLCSWRPRC;;;<service B>)
        (A;CI;KR;;;AC)(A;CI;KR;;;S-1-15-3-1)(A;CI;KR;;;S-1-15-3-2)(A;CI;KR;;;S-1-15-3-3)(A;CI;KR;;;<capability 4>)S:AINO_ACCESS_CONTROL */
-    { "tcpip\\parameters", REGSD_DACL_PRESENT | REGSD_DACL_PROTECTED | REGSD_DACL_AUTOINH | REGSD_SACL_AUTOINH,
+    { "tcpip\\parameters", REGSD_DACL_PRESENT | REGSD_DACL_PROTECTED | REGSD_DACL_AUTOINH | REGSD_SACL_PRESENT | REGSD_SACL_AUTOINH,
       REGSD_SID_SY, REGSD_SID_SY, 14,
       { { REGSD_CI, REGSD_SID_BU, REGSD_KR }, { REGSD_CI, REGSD_SID_BA, REGSD_KA }, { REGSD_CI, REGSD_SID_SY, REGSD_KA },
         { REGSD_CI, REGSD_SID_NS, REGSD_NETW }, { REGSD_CI, REGSD_SID_LS, REGSD_KR },
@@ -239,7 +240,7 @@ RegSdSidLength(const UCHAR *Sid)
 }
 
 /*
- * Build the self-relative security descriptor of a template (header, DACL, owner, group:
+ * Build the self-relative security descriptor of a template (header, DACL, owner, group (a present NULL SACL has no bytes):
  * the order Windows uses). UserSid is the SID bytes for REGSD_SID_USER, or NULL for the
  * templates that do not name one. Returns the length, or 0 when Buffer is too small or
  * the template needs a user SID and none (or a bad one) was given.
@@ -289,9 +290,8 @@ RegSdBuild(
     Buffer[3] = (UCHAR)((T->Control | 0x8000) >> 8);
     Buffer[4] = (UCHAR)OwnerOff; Buffer[5] = (UCHAR)(OwnerOff >> 8);
     Buffer[8] = (UCHAR)GroupOff; Buffer[9] = (UCHAR)(GroupOff >> 8);
-    /* No SACL. Windows keeps a NULL SACL marked present on these keys (SDDL S:AINO_ACCESS_CONTROL); that is
-       left out here: RtlValidRelativeSecurityDescriptor of this tree rejects a present SACL at offset 0, and the
-       kernel then drops the descriptor when a hive is saved or copied. */
+    /* A template with REGSD_SACL_PRESENT keeps a NULL SACL marked present (SDDL S:AINO_ACCESS_CONTROL), as Windows
+       does: the Sacl offset stays 0. */
     Buffer[16] = 20;                                /* Dacl offset */
 
     /* DACL */
