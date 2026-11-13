@@ -47,7 +47,9 @@ HandleStyles(
 
     if (cStyles > 0)
     {
-        if (deltax > deltay)
+        /* The line functions step along x unless deltax < deltay: the style counts the same axis (at a 45 degree
+           line it counted y, so the dashes started and ended where x == y only: another place in a window DC) */
+        if (deltax >= deltay)
         {
             offStyle = (- Translate->x) % pebo->pbrush->ulStyleSize;
             diStyle = dx;
