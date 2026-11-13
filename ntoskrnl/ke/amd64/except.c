@@ -908,6 +908,56 @@ KiReportKernelGeneralProtectionFault(
     }
 }
 
+/*
+ * A fault in the first read of an interlocked S-list pop is not an error when
+ * another processor popped the same entry and freed it in between: the entry
+ * memory can be unmapped by then. As the i386 trap handler does: if the list
+ * header changed since the pop loaded it, restart the pop with the current
+ * header instead of calling the page fault handler.
+ * An unchanged header means the entry pointer really is bad: not handled here.
+ * Only kernel code can be at these addresses; only Rip is trusted.
+ */
+extern VOID NTAPI ExpInterlockedPopEntrySListFault(VOID);
+extern VOID NTAPI ExpInterlockedPopEntrySListResume(VOID);
+extern VOID NTAPI ExpInterlockedPopEntrySListFault16(VOID);
+extern VOID NTAPI ExpInterlockedPopEntrySListResume16(VOID);
+
+BOOLEAN
+NTAPI
+KiCheckSListFault(
+    IN PKTRAP_FRAME TrapFrame)
+{
+    volatile ULONG64 *Header;
+
+    if (TrapFrame->Rip == (ULONG64)ExpInterlockedPopEntrySListFault16)
+    {
+        /* 16 byte header: R8 = list head, RDX:RAX = the header as loaded */
+        Header = (volatile ULONG64 *)TrapFrame->R8;
+        if ((Header[0] != TrapFrame->Rax) || (Header[1] != TrapFrame->Rdx))
+        {
+            TrapFrame->Rax = Header[0];
+            TrapFrame->Rdx = Header[1];
+            TrapFrame->Rip = (ULONG64)ExpInterlockedPopEntrySListResume16;
+            KeGetCurrentThread()->SListFaultCount++;
+            return TRUE;
+        }
+    }
+    else if (TrapFrame->Rip == (ULONG64)ExpInterlockedPopEntrySListFault)
+    {
+        /* 8 byte header: RCX = list head, RAX = the header as loaded */
+        Header = (volatile ULONG64 *)TrapFrame->Rcx;
+        if (Header[0] != TrapFrame->Rax)
+        {
+            TrapFrame->Rax = Header[0];
+            TrapFrame->Rip = (ULONG64)ExpInterlockedPopEntrySListResume;
+            KeGetCurrentThread()->SListFaultCount++;
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
 NTSTATUS
 NTAPI
 KiGeneralProtectionFaultHandler(
