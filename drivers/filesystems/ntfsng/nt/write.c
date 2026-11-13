@@ -1640,13 +1640,13 @@ int NgFlushVolume(PNG_VCB Vcb)
 
     if (Vcb->ReadOnly)
         return 0;
-    ExAcquireFastMutex(&Vcb->FcbListLock);
+    KeAcquireGuardedMutex(&Vcb->FcbListLock);
     for (Entry = Vcb->FcbList.Flink; Entry != &Vcb->FcbList; Entry = Entry->Flink)
         Cap++;
     List = Cap ? ExAllocatePoolWithTag(NonPagedPool, Cap * sizeof(PNG_FCB), TAG_NTFSNG) : NULL;
     if (Cap && !List)
     {
-        ExReleaseFastMutex(&Vcb->FcbListLock);
+        KeReleaseGuardedMutex(&Vcb->FcbListLock);
         return -NGC_ENOMEM;     /* the streams cannot be listed, so their cached data cannot be flushed */
     }
     if (List)
@@ -1658,7 +1658,7 @@ int NgFlushVolume(PNG_VCB Vcb)
             List[Count++] = Fcb;
         }
     }
-    ExReleaseFastMutex(&Vcb->FcbListLock);
+    KeReleaseGuardedMutex(&Vcb->FcbListLock);
     for (i = 0; i < Count; i++)
     {
         PNG_FCB Fcb = List[i];
@@ -1819,14 +1819,14 @@ BOOLEAN NgQueueDeletedPurge(PNG_FCB Fcb)
 
     if (!Fcb->Deleted || !NgCanQueueDeletedPurge(Vcb))
         return FALSE;
-    ExAcquireFastMutex(&Vcb->FcbListLock);
+    KeAcquireGuardedMutex(&Vcb->FcbListLock);
     if (!Fcb->PurgeLinks.Flink && Vcb->Flusher && !Vcb->Dismounted)
     {
         InterlockedIncrement(&Fcb->RefCount);
         InsertTailList(&Vcb->PurgeList, &Fcb->PurgeLinks);
         Queued = TRUE;
     }
-    ExReleaseFastMutex(&Vcb->FcbListLock);
+    KeReleaseGuardedMutex(&Vcb->FcbListLock);
     if (Queued)
         KeSetEvent(&Vcb->PurgeKick, IO_NO_INCREMENT, FALSE);
     return Queued;
@@ -1838,15 +1838,15 @@ static VOID NgPurgeDeletedQueue(PNG_VCB Vcb)
     for (;;)
     {
         PNG_FCB Fcb;
-        ExAcquireFastMutex(&Vcb->FcbListLock);
+        KeAcquireGuardedMutex(&Vcb->FcbListLock);
         if (IsListEmpty(&Vcb->PurgeList))
         {
-            ExReleaseFastMutex(&Vcb->FcbListLock);
+            KeReleaseGuardedMutex(&Vcb->FcbListLock);
             return;
         }
         Fcb = CONTAINING_RECORD(RemoveHeadList(&Vcb->PurgeList), NG_FCB, PurgeLinks);
         Fcb->PurgeLinks.Flink = Fcb->PurgeLinks.Blink = NULL;
-        ExReleaseFastMutex(&Vcb->FcbListLock);
+        KeReleaseGuardedMutex(&Vcb->FcbListLock);
         if (Fcb->SectionObjectPointers.SharedCacheMap || Fcb->SectionObjectPointers.DataSectionObject)
         {
             ExAcquireResourceExclusiveLite(&Fcb->MainResource, TRUE);

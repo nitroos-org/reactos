@@ -16,6 +16,8 @@
 #include "precomp.h"
 #include <pseh/pseh2.h>
 
+#if DLL_EXPORT_VERSION >= 0x600 /* uses NT6 exports */
+
 typedef struct _TEST_BARRIER { DWORD a, b; ULONG_PTR c[2]; DWORD d, e; } TEST_BARRIER;
 typedef struct _TEST_DISK_SPACE
 {
@@ -1102,3 +1104,12 @@ START_TEST(Win10Exports)
     test_Small();
     test_RegistryForwards();
 }
+
+#else
+
+START_TEST(Win10Exports)
+{
+    skip("Win10Exports needs the NT6 exports\n");
+}
+
+#endif

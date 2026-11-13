@@ -45,6 +45,8 @@ typedef struct { LCID Lcid; int Length; PCWSTR Name; ULONG Error; } LT_LCIDNAME;
 
 #include "LocaleTable.h"
 
+#if DLL_EXPORT_VERSION >= 0x600 /* uses NT6 exports */
+
 static ULONG g_Parity, g_ParityDiffs;
 static BOOL g_Verbose;
 #define parity(cond, ...) \
@@ -503,3 +505,12 @@ START_TEST(LocaleTable)
     trace("%lu of %lu values differ from Windows 10 (locale data generated from Unicode CLDR; LOCALETABLE_VERBOSE=1 lists them)\n",
           g_ParityDiffs, g_Parity);
 }
+
+#else
+
+START_TEST(LocaleTable)
+{
+    skip("LocaleTable needs the NT6 exports\n");
+}
+
+#endif

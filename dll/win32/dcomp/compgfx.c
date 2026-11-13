@@ -156,21 +156,30 @@ void gfx_device_free(struct cobj *dev)
     if (rdev) IUnknown_Release(rdev);
 }
 
-/* caller holds comp_lock: after SetRenderingDevice a surface gets a new texture on the device's current D3D device */
-static void surface_sync_locked(struct cobj *s)
+volatile LONG comp_test_readback_delay;
+LONG comp_stats[8];
+
+/* caller holds comp_lock: after SetRenderingDevice a surface gets a new texture on the device's current D3D device.
+ * FALSE = the texture does not belong to the device's current D3D device (no texture could be made, or the surface
+ * is being drawn on: it keeps its old texture until the next use). */
+static BOOL surface_sync_locked(struct cobj *s)
 {
     struct cobj *dev = s->gfxdev;
     ID3D11Texture2D *tex;
 
-    if (!dev || !dev->d3d || !s->tex || s->gen == dev->gen || s->drawing) return;
+    if (!dev || !dev->d3d || !s->tex) return FALSE;
+    if (s->gen == dev->gen) return TRUE;
+    if (s->drawing) return FALSE;
     if (FAILED(make_texture((ID3D11Device *)dev->d3d, s->width, s->height, s->pixfmt, &tex)))
     {
         WARN("no texture for surface %p on the new rendering device\n", s);
-        return;
+        return FALSE;
     }
     IUnknown_Release(s->tex);
     s->tex = (IUnknown *)tex;
     s->gen = dev->gen;
+    s->ver++;                           /* an empty texture: what was read back is of the old device */
+    return TRUE;
 }
 
 #define GDI(i) CONTAINING_RECORD(i, struct cobj, gdinterop)
@@ -202,6 +211,8 @@ static HRESULT STDMETHODCALLTYPE gdi_SetRenderingDevice(ICompGraphicsDeviceInter
 
     TRACE("%p, %p\n", i, value);
     if (!value) return E_INVALIDARG;    /* FIXME: unmeasured */
+    comp_lock(); hr = dev->closed ? RO_E_CLOSED : S_OK; comp_unlock();
+    if (FAILED(hr)) return hr;          /* FIXME: verify on the oracle; a closed device does not come back to life here */
     if (FAILED(hr = open_device(value, &d3d, &d2d))) return hr;
     IUnknown_AddRef(value);
     comp_lock();
@@ -287,64 +298,174 @@ void gfx_surface_free(struct cobj *s)
 {
     ID2D1DeviceContext *dc;
     IUnknown *bmp, *tex;
+    struct snapbuf *snap;
 
     comp_lock();
     dc = (ID2D1DeviceContext *)s->dc; s->dc = NULL;
     bmp = s->dcbitmap; s->dcbitmap = NULL;
     tex = s->tex; s->tex = NULL;
+    snap = s->rbuf; s->rbuf = NULL;
     s->drawing = FALSE;
     comp_unlock();
+    if (snap) snapbuf_release(snap);
     if (dc) { ID2D1DeviceContext_SetTarget(dc, NULL); ID2D1DeviceContext_Release(dc); }
     if (bmp) IUnknown_Release(bmp);
     if (tex) IUnknown_Release(tex);
 }
 
-/* BGRA premultiplied copy of the texture contents; free with HeapFree */
-HRESULT gfx_surface_snapshot(struct cobj *s, BYTE **pixels, UINT *w, UINT *h)
+/*
+ * Reading a surface back for the CPU renderer. The texture is copied into a staging texture, a query marks the end of
+ * that copy in the GPU's queue, and the renderer polls the query without holding any lock (Map itself would wait for
+ * the whole queue with the process-wide wined3d lock held: behind a software GPU that is seconds in which no thread of
+ * the process can make a D3D call). Only when the query says the copy is done is the staging texture mapped. The
+ * result is cached in the surface (snap, snap_ver): a surface is read back only when its content changed since, and
+ * the frames that show it share the immutable copy.
+ */
+
+void snapbuf_release(struct snapbuf *b)
 {
-    ID3D11Device *d3d = s->gfxdev ? (ID3D11Device *)s->gfxdev->d3d : NULL;
-    ID3D11Texture2D *src_tex = (ID3D11Texture2D *)s->tex;
+    if (b && !InterlockedDecrement(&b->refs)) HeapFree(GetProcessHeap(), 0, b);
+}
+
+struct snapbuf *gfx_surface_cached_locked(struct cobj *s, LONG want)
+{
+    if (!s->rbuf || s->rbuf_ver < want) return NULL;
+    InterlockedIncrement(&s->rbuf->refs);
+    return s->rbuf;
+}
+
+struct rb_job
+{
+    struct cobj *s;                 /* referenced */
     ID3D11DeviceContext *ctx;
     ID3D11Texture2D *stage;
+    ID3D11Query *query;             /* NULL: no query, finish maps and waits */
     D3D11_TEXTURE2D_DESC desc;
-    D3D11_MAPPED_SUBRESOURCE map;
-    BYTE *out;
-    UINT y, x;
-    HRESULT hr;
+    LONG ver;
+    int pixfmt;
+};
 
-    *pixels = NULL;
-    surface_sync_locked(s);
-    src_tex = (ID3D11Texture2D *)s->tex;
-    if (!s->tex || !d3d) return RO_E_CLOSED;
-    ID3D11Texture2D_GetDesc(src_tex, &desc);
-    desc.Usage = D3D11_USAGE_STAGING;
-    desc.BindFlags = 0;
-    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    desc.MiscFlags = 0;
-    if (FAILED(hr = ID3D11Device_CreateTexture2D(d3d, &desc, NULL, &stage))) return hr;
-    ID3D11Device_GetImmediateContext(d3d, &ctx);
-    ID3D11DeviceContext_CopyResource(ctx, (ID3D11Resource *)stage, (ID3D11Resource *)src_tex);
-    if (SUCCEEDED(hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)stage, 0, D3D11_MAP_READ, 0, &map)))
+struct rb_job *gfx_surface_readback_begin(struct cobj *s)
+{
+    ID3D11Device *d3d;
+    ID3D11Texture2D *tex = NULL, *stage = NULL;
+    ID3D11DeviceContext *ctx;
+    D3D11_QUERY_DESC qd;
+    struct rb_job *job;
+    LONG ver;
+    int pixfmt;
+
+    comp_lock();
+    d3d = s->gfxdev ? (ID3D11Device *)s->gfxdev->d3d : NULL;
+    if (d3d && surface_sync_locked(s))
     {
-        if ((out = HeapAlloc(GetProcessHeap(), 0, (size_t)desc.Width * desc.Height * 4)))
-        {
-            for (y = 0; y < desc.Height; y++)
-            {
-                const BYTE *src = (const BYTE *)map.pData + (size_t)y * map.RowPitch;
-                BYTE *dst = out + (size_t)y * desc.Width * 4;
-                if (s->pixfmt == DXGI_FMT_RGBA)
-                    for (x = 0; x < desc.Width; x++)
-                    { dst[x * 4] = src[x * 4 + 2]; dst[x * 4 + 1] = src[x * 4 + 1]; dst[x * 4 + 2] = src[x * 4]; dst[x * 4 + 3] = src[x * 4 + 3]; }
-                else
-                    memcpy(dst, src, (size_t)desc.Width * 4);
-            }
-            *pixels = out; *w = desc.Width; *h = desc.Height;
-        }
-        else hr = E_OUTOFMEMORY;
-        ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)stage, 0);
+        tex = (ID3D11Texture2D *)s->tex;
+        ID3D11Texture2D_AddRef(tex);
+        ID3D11Device_AddRef(d3d);
+        ver = s->ver;               /* the copy below shows this version or a later one */
+        pixfmt = s->pixfmt;
+        IInspectable_AddRef(&s->identity);
     }
-    ID3D11DeviceContext_Release(ctx);
-    ID3D11Texture2D_Release(stage);
+    else d3d = NULL;
+    comp_unlock();
+    if (!d3d) return NULL;
+
+    if (!(job = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*job))))
+        goto fail;
+    ID3D11Texture2D_GetDesc(tex, &job->desc);
+    job->desc.Usage = D3D11_USAGE_STAGING;
+    job->desc.BindFlags = 0;
+    job->desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    job->desc.MiscFlags = 0;
+    if (FAILED(ID3D11Device_CreateTexture2D(d3d, &job->desc, NULL, &stage)))
+    {
+        HeapFree(GetProcessHeap(), 0, job);
+        goto fail;
+    }
+    ID3D11Device_GetImmediateContext(d3d, &ctx);
+    ID3D11DeviceContext_CopyResource(ctx, (ID3D11Resource *)stage, (ID3D11Resource *)tex);
+    qd.Query = D3D11_QUERY_EVENT; qd.MiscFlags = 0;
+    if (SUCCEEDED(ID3D11Device_CreateQuery(d3d, &qd, &job->query)))
+        ID3D11DeviceContext_End(ctx, (ID3D11Asynchronous *)job->query);
+    ID3D11DeviceContext_Flush(ctx);
+    job->s = s; job->ctx = ctx; job->stage = stage; job->ver = ver; job->pixfmt = pixfmt;
+    ID3D11Device_Release(d3d);
+    ID3D11Texture2D_Release(tex);
+    return job;
+fail:
+    ID3D11Device_Release(d3d);
+    ID3D11Texture2D_Release(tex);
+    IInspectable_Release(&s->identity);
+    return NULL;
+}
+
+#define READBACK_GIVE_UP_MS (10 * 60 * 1000)
+
+HRESULT gfx_surface_readback_finish(struct rb_job *job)
+{
+    D3D11_MAPPED_SUBRESOURCE map;
+    struct snapbuf *buf = NULL, *old = NULL;
+    struct cobj *s = job->s;
+    HRESULT hr = S_OK;
+    BOOL gave_up = FALSE;
+    DWORD start = GetTickCount(), nap = 0;
+    LONG delay = comp_test_readback_delay;
+    UINT y, x, w = job->desc.Width, h = job->desc.Height;
+
+    InterlockedIncrement(&comp_stats[3]);
+    if (delay > 0) Sleep(delay);
+    if (job->query)
+    {
+        for (;;)
+        {
+            BOOL done = FALSE;
+
+            hr = ID3D11DeviceContext_GetData(job->ctx, (ID3D11Asynchronous *)job->query, &done, sizeof(done), 0);
+            if (hr == S_OK) break;
+            if (FAILED(hr)) { WARN("event query: %#lx\n", hr); break; }   /* Map below waits instead */
+            if (GetTickCount() - start > READBACK_GIVE_UP_MS) { WARN("surface %p: the GPU copy did not finish\n", s); gave_up = TRUE; hr = E_FAIL; break; }
+            if (nap < 8) nap++;
+            Sleep(nap);
+        }
+        if (gave_up) goto out;
+    }
+    if (FAILED(hr = ID3D11DeviceContext_Map(job->ctx, (ID3D11Resource *)job->stage, 0, D3D11_MAP_READ, 0, &map)))
+        goto out;
+    if ((buf = HeapAlloc(GetProcessHeap(), 0, FIELD_OFFSET(struct snapbuf, px) + (size_t)w * h * 4)))
+    {
+        buf->refs = 1; buf->w = w; buf->h = h;
+        for (y = 0; y < h; y++)
+        {
+            const BYTE *src = (const BYTE *)map.pData + (size_t)y * map.RowPitch;
+            BYTE *dst = buf->px + (size_t)y * w * 4;
+            if (job->pixfmt == DXGI_FMT_RGBA)
+                for (x = 0; x < w; x++)
+                { dst[x * 4] = src[x * 4 + 2]; dst[x * 4 + 1] = src[x * 4 + 1]; dst[x * 4 + 2] = src[x * 4]; dst[x * 4 + 3] = src[x * 4 + 3]; }
+            else
+                memcpy(dst, src, (size_t)w * 4);
+        }
+    }
+    else hr = E_OUTOFMEMORY;
+    ID3D11DeviceContext_Unmap(job->ctx, (ID3D11Resource *)job->stage, 0);
+    if (buf)
+    {
+        comp_lock();
+        if (!s->rbuf || job->ver >= s->rbuf_ver)
+        {
+            old = s->rbuf;
+            s->rbuf = buf; s->rbuf_ver = job->ver;
+            buf = NULL;
+        }
+        comp_unlock();
+        snapbuf_release(old);
+        snapbuf_release(buf);           /* NULL, or the copy of an older version that lost against a newer one */
+    }
+out:
+    if (job->query) ID3D11Query_Release(job->query);
+    ID3D11DeviceContext_Release(job->ctx);
+    ID3D11Texture2D_Release(job->stage);
+    IInspectable_Release(&s->identity);
+    HeapFree(GetProcessHeap(), 0, job);
     return hr;
 }
 
@@ -480,6 +601,7 @@ static HRESULT STDMETHODCALLTYPE dsi_EndDraw(INitroDrawingSurfaceInterop *i)
     }
     if (bmp) IUnknown_Release(bmp);
     comp_lock();
+    s->ver++;                           /* new content: the cached read-back is out of date */
     comp_unlock_changed(s);             /* new content to commit */
     return hr;
 }
@@ -508,6 +630,7 @@ static HRESULT STDMETHODCALLTYPE dsi_Resize(INitroDrawingSurfaceInterop *i, SIZE
     ID3D11DeviceContext_Release(ctx);
     old = (ID3D11Texture2D *)s->tex; s->tex = (IUnknown *)tex;
     s->width = size.cx; s->height = size.cy;
+    s->ver++;
     comp_unlock_changed(s);
     ID3D11Texture2D_Release(old);
     return S_OK;
@@ -546,6 +669,7 @@ static HRESULT STDMETHODCALLTYPE dsi_Scroll(INitroDrawingSurfaceInterop *i, cons
     box.front = 0; box.back = 1;
     ID3D11DeviceContext_CopySubresourceRegion(ctx, (ID3D11Resource *)s->tex, 0, dst.left, dst.top, 0, (ID3D11Resource *)tmp, 0, &box);
     ID3D11DeviceContext_Release(ctx);
+    s->ver++;
     comp_unlock_changed(s);
     ID3D11Texture2D_Release(tmp);
     return S_OK;

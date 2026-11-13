@@ -7,6 +7,9 @@
 
 #include "precomp.h"
 
+/* ndk/rtlfuncs.h declares the NtUser PFN constants for NT6 and later only */
+#if _WIN32_WINNT >= _WIN32_WINNT_VISTA
+
 typedef
 NTSTATUS
 WINAPI
@@ -179,3 +182,12 @@ START_TEST(RtlRetrieveNtUserPfn)
         Status = pRtlRetrieveNtUserPfn(&p1, &p2, NULL);
     EndSeh(STATUS_ACCESS_VIOLATION);
 }
+
+#else
+
+START_TEST(RtlRetrieveNtUserPfn)
+{
+    skip("RtlRetrieveNtUserPfn needs the NT6 headers\n");
+}
+
+#endif

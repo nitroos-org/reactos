@@ -28,7 +28,7 @@ endfunction()
 
 add_wow64_apitest(kernel32
     Wow64ReviewThreads Wow64RemoteThread Wow64CreateThreadAccess
-    Wow64ThreadApc Wow64ThreadSegments Wow64ThreadLifetime Wow64ThreadExitProcess Wow64Threads QueueUserAPC
+    Wow64ThreadApc Wow64ThreadSegments Wow64ThreadLifetime Wow64ThreadExitProcess Wow64Threads ThreadReturnClobber QueueUserAPC
     GetCurrentDirectory GetEnvironmentVariable GetDriveType GetCPInfo
     IsDBCSLeadByteEx lstrlen Wow64Environment Wow64ProgramFiles Wow64EnvironmentBlock Wow64ChildEnvironment Wow64SystemDlls RegCurrentVersion DynamicTls HandleList JobObject JobList
     Wow64Console FindFirstStream ProcThreadMitigation RegisterWait QueueUserWorkItem ResolveDelayLoadedAPI InterlockedPushListSListEx
@@ -36,7 +36,7 @@ add_wow64_apitest(kernel32
     ConsoleWriteLatency SetConsoleWindowInfo WerRegisterMemoryFile
     CancelIoEx ReadDirectoryChanges GetTimeZoneInformationForYear)
 # ConsoleCaret, ConsoleCtrlEventRace, ConsoleCtrlHandler and ConsoleDisplayMode also call user32/gdi32: kernel32_apitest only
-add_wow64_apitest(ntdll StackOverflowDispatch FaultContext NtRaiseHardErrorMode
+add_wow64_apitest(ntdll StackOverflowDispatch FaultContext NtRaiseHardErrorMode RtlCriticalSectionTimeout
     Wow64Continue ThreadDebugRegisters Wow64ServiceArguments Wow64FloatState Wow64QuerySystemTime NtAccessCheckByType NtAccessCheckByTypeResultList Wow64SystemRangeStart Wow64HandleInformation Wow64QueryVirtualMemory NtQueryVirtualMemoryRegion Wow64PowerInformation Wow64QueryInformationProcess Wow64FailedOpenHandle NtOpenKey NtOpenKeyEx NtQueryKey NtQueryValueKey
     RtlDetermineDosPathNameType RtlUnicodeStringToAnsiString StackOverflow StackOverflowThread StackDeepRecursion SystemCallStubs
     Wow64SystemProcessInformation NtSetInformationFile NtQueryInformationFile NtQueryVolumeInformationFile NtQueryDirectoryFile

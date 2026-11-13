@@ -37,8 +37,33 @@
  *
  * Everything the check reads from user mode (the name, the desired access,
  * the token) is treated as untrusted: names come from the KCB tree, never
- * from the caller's buffers, and the descriptor read from a hive is
- * validated before use.
+ * from the caller's buffers, and a descriptor stored in a hive is copied
+ * under the hive's security lock and only the copy is validated and used.
+ *
+ * Keys created while the mode is not legacy get a stored descriptor: the
+ * effective descriptor of their parent, inherited (CmpCaptureParentSecurity,
+ * used by CmpDoCreateChild). /REGACL=LEGACY turns that off too.
+ *
+ * Two switches turn storage (and, for the mode, the audit) off for a whole
+ * boot, and both are read at boot: the mode (above) and setup
+ * (CmpAclSetupRunning). The boot option and text-mode setup come from the
+ * loader block, which only an administrator can change. The two registry
+ * values (RegistryAclMode = 0, SYSTEM\Setup\SystemSetupInProgress != 0) are
+ * honoured only when the key that holds the value has an effective
+ * descriptor that lets nobody but SYSTEM and Administrators (and
+ * TrustedInstaller) change it (CmpAclKeyAdminWriteOnly): no allow ACE for
+ * anyone else with KEY_SET_VALUE, DELETE, WRITE_DAC or WRITE_OWNER, an owner
+ * from that set, a DACL. Otherwise the value is ignored, storage (and the
+ * audit) stay on, and the boot log, the debug output and AuditStats
+ * (SwitchesIgnored) say so. The effective descriptor of those keys is the
+ * Windows one (the policy table) unless a descriptor was stored for them or
+ * an ancestor, so this changes nothing on an installed system; it stops a
+ * descriptor that a non-administrator could plant on such a key (delete and
+ * re-create it with an explicit descriptor, which works while access is not
+ * enforced) from carrying the switch into the time when it is. Until key
+ * access is enforced, anyone can still write the values themselves: the
+ * check is what makes enforcement (registry ACL plan R8) cover them, with no
+ * further change here.
  */
 
 /* INCLUDES ******************************************************************/
@@ -112,6 +137,10 @@ static const PCSTR CmpAclRuleNames[CmpAclRuleMax] =
 static const PCSTR CmpAclOpNames[] = { "open", "create", "createlink", "linknode" };
 static const PCSTR CmpAclModeNames[] = { "legacy", "audit", "enforce" };
 static const PCSTR CmpAclSourceNames[] = { "default", "registry", "bootoption" };
+
+/* AuditStats SwitchesIgnored: a registry value that would turn storage off was not honoured */
+#define CMP_ACL_IGNORED_MODE_VALUE  0x1
+#define CMP_ACL_IGNORED_SETUP_VALUE 0x2
 
 /* Well-known SIDs the policy descriptors use */
 typedef enum _CMP_ACL_SID
@@ -337,6 +366,12 @@ static PSECURITY_DESCRIPTOR CmpAclSdTable[CmpAclRuleMax];
 static PSID CmpAclSids[CmpAclSidMax];
 static SECURITY_SUBJECT_CONTEXT CmpAclSystemSubject;
 static BOOLEAN CmpAclReady;
+
+/* Setup is running (text mode, or SYSTEM\Setup\SystemSetupInProgress at boot): no stored descriptors */
+static BOOLEAN CmpAclSetupRunning;
+
+/* CMP_ACL_IGNORED_*: switches read at boot and not honoured (see the top of the file) */
+static ULONG CmpAclSwitchesIgnored;
 
 /* Dedup table */
 static LONG64 CmpAclSlotKey[CMP_ACL_TABLE_SIZE];
@@ -800,72 +835,136 @@ Done:
     return CmpAclSdTable[*Rule];
 }
 
-/* The key's stored descriptor, if it has a sane one */
+/*
+ * A copy of the key's stored descriptor, or NULL if it has none that is sane.
+ *
+ * The cell is read under the hive's security lock, so that it cannot be
+ * released (and its storage reused) while it is copied, and only the copy is
+ * validated and used: the hive is untrusted input, and the cell may change
+ * once the lock is dropped (its key's descriptor replaced). The copy goes to
+ * Buffer when it fits, otherwise to pool (*PoolCopy, freed with
+ * CmpAclFreeCopy).
+ *
+ * Shortcut: a hive whose security cache is empty has no stored descriptor to
+ * find (every hive installed before keys got one, until a key is created in
+ * it). The audit path takes it; creates read exactly.
+ */
 static
 PSECURITY_DESCRIPTOR
-CmpAclStoredSd(
-    _In_ PCM_KEY_CONTROL_BLOCK Kcb)
+CmpAclCopyStoredSd(
+    _In_ PCM_KEY_CONTROL_BLOCK Kcb,
+    _Out_writes_bytes_(BufferSize) PVOID Buffer,
+    _In_ ULONG BufferSize,
+    _Out_ PVOID *PoolCopy,
+    _In_ BOOLEAN Shortcut)
 {
+    PHHIVE Hive;
     PCM_KEY_NODE Node;
     HCELL_INDEX SecurityCell;
     PCM_KEY_SECURITY Security;
+    PVOID Copy = NULL;
+    ULONG Length = 0;
+    BOOLEAN Acquired;
 
+    *PoolCopy = NULL;
     if (!Kcb->KeyHive || Kcb->KeyCell == HCELL_NIL ||
         (Kcb->ExtFlags & CM_KCB_KEY_NON_EXIST) || Kcb->Delete)
     {
         return NULL;
     }
-
-    /*
-     * A hive whose root names no usable 'sk' cell has an empty security cache
-     * (CmpBuildSecurityCache at load): every installed hive today. Nothing to
-     * read there, and this skips a cell lookup per ancestor on every open.
-     */
-    if (((PCMHIVE)Kcb->KeyHive)->SecurityCount == 0)
+    Hive = Kcb->KeyHive;
+    if (Shortcut && ((PCMHIVE)Hive)->SecurityCount == 0)
         return NULL;
 
-    Node = (PCM_KEY_NODE)HvGetCell(Kcb->KeyHive, Kcb->KeyCell);
+    /* A look without the lock first: most keys of an installed hive have none */
+    Node = (PCM_KEY_NODE)HvGetCell(Hive, Kcb->KeyCell);
     if (!Node)
         return NULL;
     SecurityCell = (Node->Signature == CM_KEY_NODE_SIGNATURE) ? Node->Security : HCELL_NIL;
-    HvReleaseCell(Kcb->KeyHive, Kcb->KeyCell);
+    HvReleaseCell(Hive, Kcb->KeyCell);
     if (SecurityCell == HCELL_NIL)
         return NULL;
 
-    /* The hive is untrusted: the cell and the descriptor are both checked */
-    Security = CmpGetCheckedSecurityCell(Kcb->KeyHive, SecurityCell, NULL);
-    if (!Security || Security->DescriptorLength < sizeof(SECURITY_DESCRIPTOR_RELATIVE))
-        return NULL;
-    if (!RtlValidRelativeSecurityDescriptor(&Security->Descriptor,
-                                            Security->DescriptorLength,
-                                            0))
+    /* Read again and copy under the lock: the cell named then is the one copied */
+    Acquired = CmpAcquireHiveSecurityLock(Hive);
+    Node = (PCM_KEY_NODE)HvGetCell(Hive, Kcb->KeyCell);
+    if (Node)
     {
+        SecurityCell = (Node->Signature == CM_KEY_NODE_SIGNATURE) ? Node->Security : HCELL_NIL;
+        HvReleaseCell(Hive, Kcb->KeyCell);
+
+        /* The cell is checked against its bin (CmpGetCheckedSecurityCell) */
+        Security = CmpGetCheckedSecurityCell(Hive, SecurityCell, NULL);
+        if (Security &&
+            Security->DescriptorLength >= sizeof(SECURITY_DESCRIPTOR_RELATIVE) &&
+            Security->DescriptorLength <= CMP_MAX_STORED_SD_LENGTH)
+        {
+            Length = Security->DescriptorLength;
+            if (Length <= BufferSize)
+                Copy = Buffer;
+            else
+                Copy = *PoolCopy = ExAllocatePoolWithTag(PagedPool, Length, TAG_CM_ACL);
+            if (Copy)
+                RtlCopyMemory(Copy, &Security->Descriptor, Length);
+        }
+    }
+    CmpReleaseHiveSecurityLock(Hive, Acquired);
+    if (!Copy)
+        return NULL;
+
+    /* The copy is what is checked (offsets, SIDs, ACLs and their ACEs) and used */
+    if (!RtlValidRelativeSecurityDescriptor(Copy, Length, 0))
+    {
+        if (*PoolCopy)
+        {
+            ExFreePoolWithTag(*PoolCopy, TAG_CM_ACL);
+            *PoolCopy = NULL;
+        }
         return NULL;
     }
-    return &Security->Descriptor;
+    return Copy;
+}
+
+/* What CmpGetEffectiveKeySd handed out besides its buffer */
+static
+VOID
+CmpAclFreeEffectiveSd(
+    _In_opt_ PSECURITY_DESCRIPTOR ToFree,
+    _In_opt_ PVOID PoolCopy)
+{
+    if (ToFree)
+        SeDeassignSecurity(&ToFree);
+    if (PoolCopy)
+        ExFreePoolWithTag(PoolCopy, TAG_CM_ACL);
 }
 
 /*
  * The descriptor a key would be checked against on Windows (see the top of
- * the file). *ToFree receives a descriptor the caller frees with
- * SeDeassignSecurity. Returns NULL if none could be built.
+ * the file), in Buffer or in what *ToFree / *PoolCopy receive (free both with
+ * CmpAclFreeEffectiveSd). A stored descriptor is always a validated copy.
+ * Returns NULL if none could be built.
  */
 static
 PSECURITY_DESCRIPTOR
 CmpGetEffectiveKeySd(
     _In_ PCM_KEY_CONTROL_BLOCK Kcb,
-    _Out_writes_bytes_(UserBufferSize) PVOID UserBuffer,
-    _In_ ULONG UserBufferSize,
+    _Out_writes_bytes_(BufferSize) PVOID Buffer,
+    _In_ ULONG BufferSize,
     _Out_ PULONG Rule,
-    _Out_ PSECURITY_DESCRIPTOR *ToFree)
+    _Out_ PSECURITY_DESCRIPTOR *ToFree,
+    _Out_ PVOID *PoolCopy,
+    _In_ BOOLEAN Shortcut)
 {
     PSECURITY_DESCRIPTOR Sd, NewSd = NULL;
     PCM_KEY_CONTROL_BLOCK Parent;
+    PVOID AncestorCopy;
+    NTSTATUS Status;
 
     *ToFree = NULL;
+    *PoolCopy = NULL;
 
     /* 1. Stored */
-    Sd = CmpAclStoredSd(Kcb);
+    Sd = CmpAclCopyStoredSd(Kcb, Buffer, BufferSize, PoolCopy, Shortcut);
     if (Sd)
     {
         *Rule = CmpAclRuleCell;
@@ -875,26 +974,266 @@ CmpGetEffectiveKeySd(
     /* 2. The nearest ancestor that has one, inherited as SYSTEM would get it */
     for (Parent = Kcb->ParentKcb; Parent; Parent = Parent->ParentKcb)
     {
-        Sd = CmpAclStoredSd(Parent);
+        Sd = CmpAclCopyStoredSd(Parent, Buffer, BufferSize, &AncestorCopy, Shortcut);
         if (!Sd)
             continue;
-        if (!NT_SUCCESS(SeAssignSecurity(Sd,
-                                         NULL,
-                                         &NewSd,
-                                         TRUE,
-                                         &CmpAclSystemSubject,
-                                         &CmpKeyObjectType->TypeInfo.GenericMapping,
-                                         PagedPool)))
-        {
+        Status = SeAssignSecurity(Sd,
+                                  NULL,
+                                  &NewSd,
+                                  TRUE,
+                                  &CmpAclSystemSubject,
+                                  &CmpKeyObjectType->TypeInfo.GenericMapping,
+                                  PagedPool);
+        if (AncestorCopy)
+            ExFreePoolWithTag(AncestorCopy, TAG_CM_ACL);
+        if (!NT_SUCCESS(Status))
             break;
-        }
         *Rule = CmpAclRuleInherited;
         *ToFree = NewSd;
         return NewSd;
     }
 
     /* 3. Synthesised */
-    return CmpAclSynthesizeSd(Kcb, UserBuffer, UserBufferSize, Rule);
+    return CmpAclSynthesizeSd(Kcb, Buffer, BufferSize, Rule);
+}
+
+/* SYSTEM, Administrators, TrustedInstaller: who may hold the switches */
+static
+BOOLEAN
+CmpAclIsAdminSid(
+    _In_ PSID Sid)
+{
+    static const struct
+    {
+        UCHAR Revision;
+        UCHAR SubAuthorityCount;
+        SID_IDENTIFIER_AUTHORITY Authority;
+        ULONG SubAuthority[6];
+    } TrustedInstaller =
+    {
+        SID_REVISION, 6, {SECURITY_NT_AUTHORITY},
+        { 80, 956008885, 3418522649u, 1831038044, 1853292631, 2271478464u }
+    };
+
+    return RtlEqualSid(Sid, CmpAclSids[CmpAclSidSystem]) ||
+           RtlEqualSid(Sid, CmpAclSids[CmpAclSidAdmins]) ||
+           RtlEqualSid(Sid, (PSID)&TrustedInstaller);
+}
+
+/*
+ * Can only SYSTEM and Administrators change a key with this descriptor (a
+ * validated copy): a DACL, an owner (implicit WRITE_DAC) from that set, and
+ * no ACE that applies to the key and allows a change of its values, its
+ * descriptor or its existence to anyone else. Deny ACEs are not counted (a
+ * deny never makes the answer yes), and an allow ACE of a type other than the
+ * plain one is taken to grant everything. CREATOR OWNER / CREATOR GROUP in an
+ * effective ACE never match a token; OWNER RIGHTS is the owner, checked.
+ */
+static
+BOOLEAN
+CmpAclSdAdminWriteOnly(
+    _In_ PSECURITY_DESCRIPTOR Sd)
+{
+    static const ACCESS_MASK Write = KEY_SET_VALUE | DELETE | WRITE_DAC | WRITE_OWNER;
+    static SID_IDENTIFIER_AUTHORITY CreatorAuthority = {SECURITY_CREATOR_SID_AUTHORITY};
+    BOOLEAN Present, Defaulted;
+    PACL Dacl;
+    PSID Owner, Sid;
+    PACE_HEADER Ace;
+    ACCESS_MASK Mask;
+    ULONG i;
+
+    if (!NT_SUCCESS(RtlGetOwnerSecurityDescriptor(Sd, &Owner, &Defaulted)) ||
+        (Owner && !CmpAclIsAdminSid(Owner)))
+    {
+        return FALSE;
+    }
+    if (!NT_SUCCESS(RtlGetDaclSecurityDescriptor(Sd, &Present, &Dacl, &Defaulted)) || !Present || !Dacl)
+        return FALSE;
+
+    for (i = 0; i < Dacl->AceCount; i++)
+    {
+        if (!NT_SUCCESS(RtlGetAce(Dacl, i, (PVOID *)&Ace)))
+            return FALSE;
+        if (Ace->AceFlags & INHERIT_ONLY_ACE)
+            continue;
+        if (Ace->AceType == ACCESS_DENIED_ACE_TYPE ||
+            Ace->AceType == ACCESS_DENIED_OBJECT_ACE_TYPE ||
+            Ace->AceType == ACCESS_DENIED_CALLBACK_ACE_TYPE ||
+            Ace->AceType == ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE)
+        {
+            continue;
+        }
+        if (Ace->AceType != ACCESS_ALLOWED_ACE_TYPE)
+            return FALSE;
+
+        Mask = ((PACCESS_ALLOWED_ACE)Ace)->Mask;
+        Sid = (PSID)&((PACCESS_ALLOWED_ACE)Ace)->SidStart;
+        RtlMapGenericMask(&Mask, &CmpKeyObjectType->TypeInfo.GenericMapping);
+        if (!(Mask & (Write | MAXIMUM_ALLOWED)))
+            continue;
+        if (CmpAclIsAdminSid(Sid))
+            continue;
+        /* S-1-3-0, S-1-3-1 (never a token's) and S-1-3-4 (the owner, checked above) */
+        if (*RtlSubAuthorityCountSid(Sid) == 1 &&
+            RtlEqualMemory(RtlIdentifierAuthoritySid(Sid), &CreatorAuthority, sizeof(CreatorAuthority)) &&
+            (*RtlSubAuthoritySid(Sid, 0) == SECURITY_CREATOR_OWNER_RID ||
+             *RtlSubAuthoritySid(Sid, 0) == SECURITY_CREATOR_GROUP_RID ||
+             *RtlSubAuthoritySid(Sid, 0) == 4 /* SECURITY_CREATOR_OWNER_RIGHTS_RID */))
+        {
+            continue;
+        }
+        return FALSE;
+    }
+    return TRUE;
+}
+
+/*
+ * The key at Path (a kernel path) can only be changed by SYSTEM and
+ * Administrators, judged by its effective descriptor (stored, inherited or
+ * the policy table). FALSE if it cannot be opened or judged. Boot only
+ * (CmpAclInitialize), after the descriptors and CmpAclSystemSubject are set up.
+ */
+static
+BOOLEAN
+CmpAclKeyAdminWriteOnly(
+    _In_ PCUNICODE_STRING Path)
+{
+    ULONG Buffer[CMP_ACL_SD_BUFFER / sizeof(ULONG)];
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    PSECURITY_DESCRIPTOR Sd, ToFree;
+    PCM_KEY_CONTROL_BLOCK Kcb;
+    PCM_KEY_BODY KeyBody;
+    PVOID PoolCopy;
+    BOOLEAN Result = FALSE;
+    HANDLE Key;
+    ULONG Rule;
+
+    InitializeObjectAttributes(&ObjectAttributes, (PUNICODE_STRING)Path,
+                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+    if (!NT_SUCCESS(ZwOpenKey(&Key, KEY_QUERY_VALUE, &ObjectAttributes)))
+        return FALSE;
+    if (NT_SUCCESS(ObReferenceObjectByHandle(Key, 0, CmpKeyObjectType, KernelMode, (PVOID *)&KeyBody, NULL)))
+    {
+        CmpLockRegistry();
+        Kcb = KeyBody->KeyControlBlock;
+        if (Kcb)
+        {
+            CmpAcquireKcbLockShared(Kcb);
+            Sd = CmpGetEffectiveKeySd(Kcb, Buffer, sizeof(Buffer), &Rule, &ToFree, &PoolCopy, FALSE);
+            if (Sd)
+            {
+                Result = CmpAclSdAdminWriteOnly(Sd);
+                if (!Result)
+                {
+                    DbgPrintEx(DPFLTR_CONFIG_ID, DPFLTR_ERROR_LEVEL,
+                               "CM-ACL-AUDIT: %wZ: non-administrators may change it (descriptor from %s)\n",
+                               Path, CmpAclRuleNames[Rule]);
+                }
+            }
+            CmpAclFreeEffectiveSd(ToFree, PoolCopy);
+            CmpReleaseKcbLock(Kcb);
+        }
+        CmpUnlockRegistry();
+        ObDereferenceObject(KeyBody);
+    }
+    ZwClose(Key);
+    return Result;
+}
+
+/*
+ * New keys get a stored descriptor while the mode is not legacy and the
+ * policy table exists (CmInitSystem1 on), except while setup runs (see
+ * CmpAclInitialize). /REGACL=LEGACY gives the old behaviour back: keys are
+ * created without one, as before audit mode.
+ */
+BOOLEAN
+NTAPI
+CmpStoreKeySecurity(VOID)
+{
+    return CmpAclReady && !CmpAclSetupRunning && CmpRegistryAclEffectiveMode != CM_REGACL_MODE_LEGACY;
+}
+
+/*
+ * A descriptor the creator names is stored even while setup runs (the inherited ones are
+ * not): setup gives the roots of the hives it builds the Windows descriptors this way. Only
+ * legacy mode (nothing stored) and the time before the policy table exists are excluded.
+ */
+BOOLEAN
+NTAPI
+CmpStoreExplicitKeySecurity(VOID)
+{
+    return CmpAclReady && CmpRegistryAclEffectiveMode != CM_REGACL_MODE_LEGACY;
+}
+
+/* SYSTEM\Setup\SystemSetupInProgress (REG_DWORD) is not zero: second-stage setup */
+static
+BOOLEAN
+CmpAclSystemSetupInProgress(VOID)
+{
+    UNICODE_STRING KeyName = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\SYSTEM\\Setup");
+    UNICODE_STRING ValueName = RTL_CONSTANT_STRING(L"SystemSetupInProgress");
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    UCHAR Buffer[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)];
+    PKEY_VALUE_PARTIAL_INFORMATION Info = (PKEY_VALUE_PARTIAL_INFORMATION)Buffer;
+    ULONG Length;
+    HANDLE Key;
+    BOOLEAN InProgress = FALSE;
+
+    InitializeObjectAttributes(&ObjectAttributes, &KeyName, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+    if (!NT_SUCCESS(ZwOpenKey(&Key, KEY_QUERY_VALUE, &ObjectAttributes)))
+        return FALSE;
+    if (NT_SUCCESS(ZwQueryValueKey(Key, &ValueName, KeyValuePartialInformation, Info, sizeof(Buffer), &Length)) &&
+        Info->Type == REG_DWORD && Info->DataLength == sizeof(ULONG))
+    {
+        InProgress = (*(PULONG)Info->Data != 0);
+    }
+    ZwClose(Key);
+    return InProgress;
+}
+
+/*
+ * The descriptor a key created under ParentKcb inherits from: the parent's
+ * effective descriptor (stored, else inherited from the nearest ancestor that
+ * has one, else the Windows policy for its place), so that a key created
+ * under a key without one gets what it would get on Windows. Returns a pool
+ * copy for CmpFreeParentSecurity, or NULL: the key is then created without a
+ * stored descriptor. The caller holds the parent's KCB lock.
+ */
+DECLSPEC_NOINLINE
+PSECURITY_DESCRIPTOR
+NTAPI
+CmpCaptureParentSecurity(
+    _In_ PCM_KEY_CONTROL_BLOCK ParentKcb)
+{
+    ULONG Buffer[CMP_ACL_SD_BUFFER / sizeof(ULONG)];
+    PSECURITY_DESCRIPTOR Sd, ToFree, Copy = NULL;
+    PVOID PoolCopy;
+    ULONG Rule, Length;
+
+    if (!CmpStoreKeySecurity() || !ParentKcb)
+        return NULL;
+
+    Sd = CmpGetEffectiveKeySd(ParentKcb, Buffer, sizeof(Buffer), &Rule, &ToFree, &PoolCopy, FALSE);
+    if (Sd)
+    {
+        Length = RtlLengthSecurityDescriptor(Sd);
+        Copy = ExAllocatePoolWithTag(PagedPool, Length, TAG_CM_ACL);
+        if (Copy)
+            RtlCopyMemory(Copy, Sd, Length);
+    }
+    CmpAclFreeEffectiveSd(ToFree, PoolCopy);
+    if (!Copy)
+        InterlockedIncrement(&CmpAclErrors);
+    return Copy;
+}
+
+VOID
+NTAPI
+CmpFreeParentSecurity(
+    _In_ PSECURITY_DESCRIPTOR ParentSd)
+{
+    ExFreePoolWithTag(ParentSd, TAG_CM_ACL);
 }
 
 static
@@ -1428,6 +1767,9 @@ CmpAclPublish(VOID)
     CmpAclSetDword(Key, L"Mode", CmpRegistryAclEffectiveMode);
     CmpAclSetDword(Key, L"ConfiguredMode", CmpRegistryAclMode);
     CmpAclSetDword(Key, L"ModeSource", CmpRegistryAclModeSource);
+    CmpAclSetDword(Key, L"StoresDescriptors", CmpStoreKeySecurity() ? 1 : 0);
+    CmpAclSetDword(Key, L"SetupExclusion", CmpAclSetupRunning ? 1 : 0);
+    CmpAclSetDword(Key, L"SwitchesIgnored", CmpAclSwitchesIgnored);
     CmpAclSetDword(Key, L"Checks", (ULONG)CmpAclChecks);
     CmpAclSetDword(Key, L"Denials", (ULONG)CmpAclDenials);
     CmpAclSetDword(Key, L"Entries", (ULONG)CmpAclEntryCount);
@@ -1558,10 +1900,13 @@ CmpAclRun(
             if (!CmpAclBootHeaderWritten)
             {
                 CmpAclLineStart(&Line, &Now);
-                CmpAclLineFormat(&Line, ",\"event\":\"start\",\"mode\":\"%s\",\"configured\":\"%s\",\"source\":\"%s\"}\n",
+                CmpAclLineFormat(&Line, ",\"event\":\"start\",\"mode\":\"%s\",\"configured\":\"%s\",\"source\":\"%s\","
+                                 "\"setup\":%s,\"switchesIgnored\":%lu}\n",
                                  CmpAclModeNames[CmpRegistryAclEffectiveMode],
                                  CmpAclModeNames[CmpRegistryAclMode],
-                                 CmpAclSourceNames[CmpRegistryAclModeSource]);
+                                 CmpAclSourceNames[CmpRegistryAclModeSource],
+                                 CmpAclSetupRunning ? "true" : "false",
+                                 CmpAclSwitchesIgnored);
                 CmpAclOut(&Out, &Line);
             }
 
@@ -1854,41 +2199,31 @@ VOID
 NTAPI
 CmpAclInitialize(VOID)
 {
-    ULONG Mode, i;
+    static UNICODE_STRING ModeKey = RTL_CONSTANT_STRING(
+        L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Configuration Manager");
+    static UNICODE_STRING SetupKey = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\SYSTEM\\Setup");
+    ULONG Mode, BootMode, i;
     ULONG Rule;
     UCHAR Buffer[CMP_ACL_SD_BUFFER];
     const CMP_ACL_SD_SPEC *Spec;
     PVOID Copy;
+    BOOLEAN BootOption, Tables = TRUE;
 
-    /* Mode: the default, then the registry value, then the boot option */
-    CmpRegistryAclMode = CM_REGACL_MODE_AUDIT;
-    CmpRegistryAclModeSource = 0;
-    if (CmpRegistryAclModeValueType == REG_DWORD &&
-        CmpRegistryAclModeValueLength == sizeof(ULONG) &&
-        CmpRegistryAclModeValue <= CM_REGACL_MODE_ENFORCE)
-    {
-        CmpRegistryAclMode = CmpRegistryAclModeValue;
-        CmpRegistryAclModeSource = 1;
-    }
-    if (KeLoaderBlock && CmpAclParseBootOption(KeLoaderBlock->LoadOptions, &Mode))
-    {
-        CmpRegistryAclMode = Mode;
-        CmpRegistryAclModeSource = 2;
-    }
-
-    /* Enforcement does not exist yet: ENFORCE audits */
-    Mode = (CmpRegistryAclMode == CM_REGACL_MODE_LEGACY) ? CM_REGACL_MODE_LEGACY : CM_REGACL_MODE_AUDIT;
+    /* The boot option decides alone; legacy from it builds nothing, as before */
+    BootOption = KeLoaderBlock && CmpAclParseBootOption(KeLoaderBlock->LoadOptions, &BootMode);
+    if (BootOption && BootMode == CM_REGACL_MODE_LEGACY)
+        Tables = FALSE;
 
     /* The SIDs and descriptors */
-    for (i = 0; i < CmpAclSidMax; i++)
+    for (i = 0; i < CmpAclSidMax && Tables; i++)
     {
         CmpAclSids[i] = CmpAclAllocateSid(CmpAclSidSpecs[i].Authority, CmpAclSidSpecs[i].Count,
                                           CmpAclSidSpecs[i].SubAuthority);
         if (!CmpAclSids[i])
-            Mode = CM_REGACL_MODE_LEGACY;
+            Tables = FALSE;
     }
 
-    for (Rule = CmpAclRuleMaster; Rule < CmpAclRuleMax && Mode != CM_REGACL_MODE_LEGACY; Rule++)
+    for (Rule = CmpAclRuleMaster; Rule < CmpAclRuleMax && Tables; Rule++)
     {
         switch (Rule)
         {
@@ -1909,15 +2244,82 @@ CmpAclInitialize(VOID)
         }
         CmpAclSdTable[Rule] = Copy;
         if (!Copy)
-            Mode = CM_REGACL_MODE_LEGACY;
+            Tables = FALSE;
+    }
+
+    /* Inheritance from a stored ancestor is computed as for a key SYSTEM creates */
+    if (Tables)
+    {
+        SeCaptureSubjectContext(&CmpAclSystemSubject);
+        ExInitializePushLock(&CmpAclUserCacheLock);
+    }
+
+    /*
+     * Mode: the default, then the registry value, then the boot option. The
+     * value may turn the audit and storage off (legacy) only if the key that
+     * holds it is one only administrators can change (see the top of the file).
+     */
+    CmpRegistryAclMode = CM_REGACL_MODE_AUDIT;
+    CmpRegistryAclModeSource = 0;
+    if (CmpRegistryAclModeValueType == REG_DWORD &&
+        CmpRegistryAclModeValueLength == sizeof(ULONG) &&
+        CmpRegistryAclModeValue <= CM_REGACL_MODE_ENFORCE)
+    {
+        if (CmpRegistryAclModeValue != CM_REGACL_MODE_LEGACY || BootOption ||
+            (Tables && CmpAclKeyAdminWriteOnly(&ModeKey)))
+        {
+            CmpRegistryAclMode = CmpRegistryAclModeValue;
+            CmpRegistryAclModeSource = 1;
+        }
+        else
+        {
+            CmpAclSwitchesIgnored |= CMP_ACL_IGNORED_MODE_VALUE;
+        }
+    }
+    if (BootOption)
+    {
+        CmpRegistryAclMode = BootMode;
+        CmpRegistryAclModeSource = 2;
+    }
+
+    /* Enforcement does not exist yet: ENFORCE audits */
+    Mode = (CmpRegistryAclMode == CM_REGACL_MODE_LEGACY) ? CM_REGACL_MODE_LEGACY : CM_REGACL_MODE_AUDIT;
+    if (!Tables)
+        Mode = CM_REGACL_MODE_LEGACY;
+
+    /*
+     * While setup runs, new keys get no stored descriptor, as before. Setup's
+     * keys would otherwise inherit what the setup hives carry today: mkhive's
+     * SYSTEM root descriptor (an older Windows one, with Power Users) into
+     * every key of the installed SYSTEM, SOFTWARE and DEFAULT hives (and so
+     * every new profile), and the master key's Everyone-read descriptor into
+     * the SAM and SECURITY hives that setup creates; the stamping of keys
+     * without a descriptor and the setup-time descriptors are later slices of
+     * this work (registry ACL plan R5, R6). A key without one is judged by its
+     * place in the namespace (the policy table above), which is the Windows
+     * value. Text-mode setup comes from the loader block; the second stage
+     * (SystemSetupInProgress) only counts from a SYSTEM\Setup key that only
+     * administrators can change. Decided before the mode is published (and
+     * before CmpAclReady), so that no create sees the one without the other.
+     */
+    if (Mode != CM_REGACL_MODE_LEGACY)
+    {
+        if (ExpInTextModeSetup)
+        {
+            CmpAclSetupRunning = TRUE;
+        }
+        else if (CmpAclSystemSetupInProgress())
+        {
+            if (CmpAclKeyAdminWriteOnly(&SetupKey))
+                CmpAclSetupRunning = TRUE;
+            else
+                CmpAclSwitchesIgnored |= CMP_ACL_IGNORED_SETUP_VALUE;
+        }
     }
 
     if (Mode != CM_REGACL_MODE_LEGACY)
     {
-        /* Inheritance from a stored ancestor is computed as for a key SYSTEM creates */
-        SeCaptureSubjectContext(&CmpAclSystemSubject);
         KeInitializeSpinLock(&CmpAclQueueLock);
-        ExInitializePushLock(&CmpAclUserCacheLock);
         InitializeSListHead(&CmpAclQueue);
         KeInitializeTimer(&CmpAclTimer);
         KeInitializeDpc(&CmpAclDpc, CmpAclTimerDpc, NULL);
@@ -1931,10 +2333,15 @@ CmpAclInitialize(VOID)
     }
 
     CmpRegistryAclEffectiveMode = Mode;
-    DbgPrintEx(DPFLTR_CONFIG_ID, DPFLTR_ERROR_LEVEL, "CM-ACL-AUDIT: mode %s (configured %s, from %s)\n",
+    DbgPrintEx(DPFLTR_CONFIG_ID, DPFLTR_ERROR_LEVEL, "CM-ACL-AUDIT: mode %s (configured %s, from %s)%s%s%s\n",
                CmpAclModeNames[CmpRegistryAclEffectiveMode],
                CmpAclModeNames[CmpRegistryAclMode],
-               CmpAclSourceNames[CmpRegistryAclModeSource]);
+               CmpAclSourceNames[CmpRegistryAclModeSource],
+               CmpAclSetupRunning ? ", setup: keys get no stored descriptor" : "",
+               (CmpAclSwitchesIgnored & CMP_ACL_IGNORED_MODE_VALUE) ?
+                   ", RegistryAclMode=0 ignored (its key is not administrators-only)" : "",
+               (CmpAclSwitchesIgnored & CMP_ACL_IGNORED_SETUP_VALUE) ?
+                   ", SystemSetupInProgress ignored (its key is not administrators-only)" : "");
 
     /* Publish the mode now; the worker refreshes the counters */
     CmpAclPublish();
@@ -1956,6 +2363,7 @@ CmpAclShadowCheckWorker(
 {
     ULONG SdBuffer[CMP_ACL_SD_BUFFER / sizeof(ULONG)];
     PSECURITY_DESCRIPTOR Sd, ToFree;
+    PVOID PoolCopy;
     ULONG Rule;
     ACCESS_MASK Granted = 0;
     NTSTATUS AccessStatus = STATUS_ACCESS_DENIED;
@@ -1974,7 +2382,7 @@ CmpAclShadowCheckWorker(
         return;
     }
 
-    Sd = CmpGetEffectiveKeySd(Kcb, SdBuffer, sizeof(SdBuffer), &Rule, &ToFree);
+    Sd = CmpGetEffectiveKeySd(Kcb, SdBuffer, sizeof(SdBuffer), &Rule, &ToFree, &PoolCopy, TRUE);
     if (!Sd)
     {
         InterlockedIncrement(&CmpAclErrors);
@@ -2005,8 +2413,7 @@ CmpAclShadowCheckWorker(
         InterlockedIncrement(&CmpAclMaxAllowedReduced);
     }
 
-    if (ToFree)
-        SeDeassignSecurity(&ToFree);
+    CmpAclFreeEffectiveSd(ToFree, PoolCopy);
 }
 
 /*

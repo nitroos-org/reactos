@@ -99,6 +99,7 @@ extern void func_GetTimeZoneInformationForYear(void);
 extern void func_EnumSystemCodePages(void);
 extern void func_EnumUILanguages(void);
 extern void func_ExitThread(void);
+extern void func_ThreadReturnClobber(void);
 extern void func_FindActCtxSectionStringW(void);
 extern void func_FindFiles(void);
 extern void func_FindFirstFileEx(void);
@@ -164,6 +165,7 @@ extern void func_LoadLibraryMissingImport(void);
 extern void func_LoadLibraryNoExecute(void);
 extern void func_LocalDumps(void);
 extern void func_CrashDialog(void);
+extern void func_LocaleDerivedFields(void);
 extern void func_LocaleNameToLCID(void);
 extern void func_LocaleTable(void);
 extern void func_LocalTimeZone(void);
@@ -365,6 +367,7 @@ const struct test winetest_testlist[] =
     { "EnumSystemCodePages",         func_EnumSystemCodePages },
     { "EnumUILanguages",             func_EnumUILanguages },
     { "ExitThread",                  func_ExitThread },
+    { "ThreadReturnClobber",         func_ThreadReturnClobber },
     { "FindActCtxSectionStringW",    func_FindActCtxSectionStringW },
     { "FindFiles",                   func_FindFiles },
     { "FindFirstFileEx",             func_FindFirstFileEx },
@@ -430,6 +433,7 @@ const struct test winetest_testlist[] =
     { "LoadLibraryNoExecute",         func_LoadLibraryNoExecute },
     { "LocalDumps",                  func_LocalDumps },
     { "CrashDialog",                 func_CrashDialog },
+    { "LocaleDerivedFields",         func_LocaleDerivedFields },
     { "LocaleNameToLCID",            func_LocaleNameToLCID },
     { "LocaleTable",                 func_LocaleTable },
     { "LocalTimeZone",               func_LocalTimeZone },

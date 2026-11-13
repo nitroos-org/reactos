@@ -19,6 +19,7 @@
 #include <windef.h>
 #include <winbase.h>
 #include <winreg.h>
+#include <reactos/certseed.h>
 
 #define ROOT_PATH     L"SOFTWARE\\Microsoft\\SystemCertificates\\Root\\Certificates"
 #define AUTHROOT_PATH L"SOFTWARE\\Microsoft\\SystemCertificates\\AuthRoot\\Certificates"
@@ -96,6 +97,57 @@ static void TestStoreKeys(void)
     RegCloseKey(hStores);
 }
 
+/* Setup records the seed marker (the boot service skips its store opens while it matches the
+ * built-in root list); the service leaves how its last run went next to it */
+static void TestSeedMarker(void)
+{
+    HKEY hKey;
+    CERTSEED_MARKER Stored, Now;
+    DWORD Type, Size = sizeof(Stored), Value, Err;
+
+    Err = RegOpenKeyExW(HKEY_LOCAL_MACHINE, CERTSEED_SERVICE_KEY, 0, KEY_QUERY_VALUE, &hKey);
+    ok(Err == ERROR_SUCCESS, "NitroCertSeed service key cannot be opened: %lu\n", Err);
+    if (Err != ERROR_SUCCESS)
+        return;
+
+    Err = RegQueryValueExW(hKey, CERTSEED_MARKER_VALUE, NULL, &Type, (PBYTE)&Stored, &Size);
+    ok(Err == ERROR_SUCCESS && Type == REG_BINARY && Size == sizeof(Stored),
+       "seed marker is not there: error %lu type %lu size %lu\n", Err, Type, Size);
+    if (Err == ERROR_SUCCESS && Size == sizeof(Stored))
+    {
+        CertSeedGetState(&Now);
+        ok(Stored.Version == CERTSEED_MARKER_VERSION, "marker version %lu\n", Stored.Version);
+        ok(Stored.Crypt32SizeLow == Now.Crypt32SizeLow && Stored.Crypt32TimeLow == Now.Crypt32TimeLow &&
+           Stored.Crypt32TimeHigh == Now.Crypt32TimeHigh, "marker is not for this crypt32.dll\n");
+        ok(Stored.AuthCount == Now.AuthCount && Stored.AuthTimeLow == Now.AuthTimeLow &&
+           Stored.AuthTimeHigh == Now.AuthTimeHigh, "marker is not for this AuthRoot list (%lu now, %lu marked)\n",
+           Now.AuthCount, Stored.AuthCount);
+        ok(Stored.RootCount == Now.RootCount && Stored.RootTimeLow == Now.RootTimeLow &&
+           Stored.RootTimeHigh == Now.RootTimeHigh, "marker is not for this Root key (%lu now, %lu marked)\n",
+           Now.RootCount, Stored.RootCount);
+        ok(Now.RootCount > 0, "the Root key is empty\n");
+        ok(CertSeedMarkerCurrent(), "CertSeedMarkerCurrent is FALSE\n");
+    }
+
+    /* The service's last run: present once it ran at a boot */
+    Size = sizeof(Value);
+    if (RegQueryValueExW(hKey, CERTSEED_SKIPPED_VALUE, NULL, &Type, (PBYTE)&Value, &Size) == ERROR_SUCCESS)
+    {
+        DWORD Ms = 0, Skipped = Value;
+
+        Size = sizeof(Ms);
+        RegQueryValueExW(hKey, CERTSEED_RUNMS_VALUE, NULL, &Type, (PBYTE)&Ms, &Size);
+        trace("NitroCertSeed last run: %s, %lu ms\n", Skipped ? "skipped (marker current)" : "seeded", Ms);
+        if (Skipped)
+            ok(Ms < 500, "the service took %lu ms although it skipped\n", Ms);
+        else
+            skip("the service seeded at its last boot\n");
+    }
+    else
+        skip("the service has not run on this install\n");
+    RegCloseKey(hKey);
+}
+
 START_TEST(RootStoreSeed)
 {
     HKEY hRoot, hAuth;
@@ -137,4 +189,5 @@ START_TEST(RootStoreSeed)
     RegCloseKey(hRoot);
 
     TestStoreKeys();
+    TestSeedMarker();
 }

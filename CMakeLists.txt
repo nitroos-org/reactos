@@ -399,6 +399,38 @@ Enable this if the module uses typeid or dynamic_cast. You will probably need to
     # Create {bootcd, bootcdregtest, livecd}.lst
     create_iso_lists()
 
+    # i386 system DLLs share the 0x70000000..0x7c920000 range: fail the build when two based DLLs overlap or when the DLL
+    # just below ntdll has no headroom left (sdk/cmake/baseaddress.cmake explains the layout)
+    if(ARCH STREQUAL "i386")
+        get_property(_based_dlls GLOBAL PROPERTY BASED_DLL_LIST)
+        set(_image_base_lines "")
+        foreach(_dll ${_based_dlls})
+            string(APPEND _image_base_lines "${_dll}|$<TARGET_FILE:${_dll}>\n")
+        endforeach()
+        file(GENERATE OUTPUT ${CMAKE_BINARY_DIR}/image_bases.txt CONTENT "${_image_base_lines}")
+        # baseaddress_msvc.cmake has not been regenerated with growth room yet: report only there
+        if(MSVC)
+            set(_image_base_warn_only ON)
+        else()
+            set(_image_base_warn_only OFF)
+        endif()
+        add_custom_target(check_image_bases ALL
+            COMMAND ${CMAKE_COMMAND}
+                -DLIST=${CMAKE_BINARY_DIR}/image_bases.txt
+                -DNTDLL_BASE=0x7c920000
+                -DMIN_HEADROOM=0x100000
+                -DWARN_ONLY=${_image_base_warn_only}
+                -P ${REACTOS_SOURCE_DIR}/sdk/cmake/check_image_bases.cmake
+            DEPENDS ${_based_dlls}
+            VERBATIM)
+        # The images are what ships: building an ISO runs the check too (not only "all")
+        foreach(_iso bootcd bootcdregtest livecd)
+            if(TARGET ${_iso})
+                add_dependencies(${_iso} check_image_bases)
+            endif()
+        endforeach()
+    endif()
+
     if(SYSWOW64_GUEST)
         syswow64_guest_end()
     endif()

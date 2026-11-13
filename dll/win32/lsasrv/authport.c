@@ -440,9 +440,58 @@ AuthPortThreadRoutine(PVOID Param)
 }
 
 
+typedef struct _LSAP_AUTH_PORT_SD
+{
+    SECURITY_DESCRIPTOR Sd;     /* the DACL follows */
+} LSAP_AUTH_PORT_SD, *PLSAP_AUTH_PORT_SD;
+
+static
+NTSTATUS
+LsapCreateAuthPortSd(
+    _Out_ PLSAP_AUTH_PORT_SD *PortSd)
+{
+    PLSAP_AUTH_PORT_SD Sd;
+    PACL Dacl;
+    ULONG Length;
+    NTSTATUS Status;
+
+    Length = sizeof(ACL) + 3 * sizeof(ACCESS_ALLOWED_ACE) +
+             RtlLengthSid(LsapLocalSystemSid) +
+             RtlLengthSid(LsapAdministratorsSid) +
+             RtlLengthSid(LsapWorldSid);
+
+    Sd = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(SECURITY_DESCRIPTOR) + Length);
+    if (Sd == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Dacl = (PACL)((PUCHAR)Sd + sizeof(SECURITY_DESCRIPTOR));
+
+    Status = RtlCreateSecurityDescriptor(&Sd->Sd, SECURITY_DESCRIPTOR_REVISION);
+    if (NT_SUCCESS(Status))
+        Status = RtlCreateAcl(Dacl, Length, ACL_REVISION);
+    if (NT_SUCCESS(Status))
+        Status = RtlAddAccessAllowedAce(Dacl, ACL_REVISION, PORT_ALL_ACCESS, LsapLocalSystemSid);
+    if (NT_SUCCESS(Status))
+        Status = RtlAddAccessAllowedAce(Dacl, ACL_REVISION, PORT_ALL_ACCESS, LsapAdministratorsSid);
+    if (NT_SUCCESS(Status))
+        Status = RtlAddAccessAllowedAce(Dacl, ACL_REVISION, PORT_CONNECT | SYNCHRONIZE, LsapWorldSid);
+    if (NT_SUCCESS(Status))
+        Status = RtlSetDaclSecurityDescriptor(&Sd->Sd, TRUE, Dacl, FALSE);
+    if (!NT_SUCCESS(Status))
+    {
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Sd);
+        return Status;
+    }
+
+    *PortSd = Sd;
+    return STATUS_SUCCESS;
+}
+
+
 NTSTATUS
 StartAuthenticationPort(VOID)
 {
+    PLSAP_AUTH_PORT_SD PortSd;
     OBJECT_ATTRIBUTES ObjectAttributes;
     UNICODE_STRING PortName;
     DWORD ThreadId;
@@ -458,17 +507,33 @@ StartAuthenticationPort(VOID)
     RtlInitUnicodeString(&PortName,
                          L"\\LsaAuthenticationPort");
 
+    /*
+     * Anybody may connect (LsaConnectUntrusted needs no privilege, a service
+     * account or a standard user included); what a caller may do is decided
+     * per call, and by the trusted-caller check at the connection.
+     * Without a descriptor the port took the default DACL of the lsass token
+     * (SYSTEM and the Administrators) and NtConnectPort failed with
+     * STATUS_ACCESS_DENIED for everybody else.
+     */
+    Status = LsapCreateAuthPortSd(&PortSd);
+    if (!NT_SUCCESS(Status))
+    {
+        WARN("LsapCreateAuthPortSd() failed (Status %lx)\n", Status);
+        return Status;
+    }
+
     InitializeObjectAttributes(&ObjectAttributes,
                                &PortName,
                                0,
                                NULL,
-                               NULL);
+                               &PortSd->Sd);
 
     Status = NtCreatePort(&AuthPortHandle,
                           &ObjectAttributes,
                           sizeof(LSA_CONNECTION_INFO),
                           sizeof(LSA_API_MSG),
                           sizeof(LSA_API_MSG) * 32);
+    RtlFreeHeap(RtlGetProcessHeap(), 0, PortSd);
     if (!NT_SUCCESS(Status))
     {
         WARN("NtCreatePort() failed (Status %lx)\n", Status);

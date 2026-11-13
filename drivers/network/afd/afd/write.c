@@ -283,7 +283,7 @@ AfdSendCompleted
             NextIrp->IoStatus.Status = STATUS_FILE_CLOSED;
             NextIrp->IoStatus.Information = 0;
             UnlockBuffers(SendReq->BufferArray, SendReq->BufferCount, FALSE);
-            if( NextIrp->MdlAddress ) UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
+            if (AfdRequestLocked(NextIrp)) UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
             AfdClearCancelRoutine(NextIrp);
             IoCompleteRequest( NextIrp, IO_NETWORK_INCREMENT );
         }
@@ -311,7 +311,7 @@ AfdSendCompleted
             NextIrp->IoStatus.Status = Status;
             NextIrp->IoStatus.Information = 0;
 
-            if ( NextIrp->MdlAddress ) UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
+            if (AfdRequestLocked(NextIrp)) UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
             AfdClearCancelRoutine(NextIrp);
             IoCompleteRequest( NextIrp, IO_NETWORK_INCREMENT );
         }
@@ -397,7 +397,7 @@ AfdSendCompleted
                        SendReq->BufferCount,
                        FALSE );
 
-        if (NextIrp->MdlAddress) UnlockRequest(NextIrp, NextIrpSp);
+        if (AfdRequestLocked(NextIrp)) UnlockRequest(NextIrp, NextIrpSp);
 
         IoCompleteRequest(NextIrp, IO_NETWORK_INCREMENT);
     }
@@ -518,7 +518,7 @@ AfdSendCompleted
                         NextIrp->IoStatus.Status = STATUS_INSUFFICIENT_RESOURCES;
                         AfdClearCancelRoutine(NextIrp);
                         UnlockBuffers(SendReq->BufferArray, SendReq->BufferCount, FALSE);
-                        if (NextIrp->MdlAddress) UnlockRequest(NextIrp, NextIrpSp);
+                        if (AfdRequestLocked(NextIrp)) UnlockRequest(NextIrp, NextIrpSp);
                         IoCompleteRequest(NextIrp, IO_NETWORK_INCREMENT);
                     }
                 }

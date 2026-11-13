@@ -166,6 +166,7 @@ extern void func_RtlConditionVariable(void);
 extern void func_RtlCopyMappedMemory(void);
 extern void func_RtlCriticalSection(void);
 extern void func_RtlCriticalSectionRace(void);
+extern void func_RtlCriticalSectionTimeout(void);
 extern void func_RtlDebugInformation(void);
 extern void func_RtlDeleteAce(void);
 extern void func_RtlDetermineDosPathNameType(void);
@@ -193,6 +194,8 @@ extern void func_RtlGetProductInfo(void);
 extern void func_RtlGetUnloadEventTrace(void);
 extern void func_RtlPlaceholderCompatibilityMode(void);
 extern void func_RtlHandle(void);
+extern void func_RtlHeapChurn(void);
+extern void func_RtlHeapDecommit(void);
 extern void func_RtlHeapFrontEnd(void);
 extern void func_RtlHeapTailCheck(void);
 extern void func_RtlHeapValidate(void);
@@ -238,6 +241,7 @@ extern void func_RtlUnwind(void);
 extern void func_RtlUnwindEx(void);
 extern void func_RtlUpcaseUnicodeStringToCountedOemString(void);
 extern void func_RtlValidateUnicodeString(void);
+extern void func_RtlNullAcl(void);
 extern void func_RtlStringSdBounds(void);
 extern void func_RtlVerifyVersionInfo(void);
 extern void func_RtlWaitOnAddress(void);
@@ -248,7 +252,9 @@ extern void func_FaultContext(void);
 extern void func_PageFaultAddress(void);
 extern void func_SectionFaultCost(void);
 extern void func_SectionPageLeak(void);
+extern void func_SectionSparseChild(void);
 extern void func_SectionSparseCommitLimit(void);
+extern void func_SectionSparseStore(void);
 extern void func_SectionViewProtect(void);
 extern void func_SectionVirtualLockLeak(void);
 extern void func_StackDeepRecursion(void);
@@ -442,6 +448,7 @@ const struct test winetest_testlist[] =
     { "RtlCopyMappedMemory",            func_RtlCopyMappedMemory },
     { "RtlCriticalSection",             func_RtlCriticalSection },
     { "RtlCriticalSectionRace",         func_RtlCriticalSectionRace },
+    { "RtlCriticalSectionTimeout",      func_RtlCriticalSectionTimeout },
     { "RtlDebugInformation",            func_RtlDebugInformation },
     { "RtlDeleteAce",                   func_RtlDeleteAce },
     { "RtlDetermineDosPathNameType",    func_RtlDetermineDosPathNameType },
@@ -470,6 +477,8 @@ const struct test winetest_testlist[] =
     { "RtlGetUnloadEventTrace",         func_RtlGetUnloadEventTrace },
     { "RtlPlaceholderCompatibilityMode", func_RtlPlaceholderCompatibilityMode },
     { "RtlHandle",                      func_RtlHandle },
+    { "RtlHeapChurn",                   func_RtlHeapChurn },
+    { "RtlHeapDecommit",                func_RtlHeapDecommit },
     { "RtlHeapFrontEnd",                func_RtlHeapFrontEnd },
     { "RtlHeapTailCheck",               func_RtlHeapTailCheck },
     { "RtlHeapValidate",                func_RtlHeapValidate },
@@ -515,6 +524,7 @@ const struct test winetest_testlist[] =
     { "RtlUnwindIndirect",              func_RtlUnwindIndirect },
     { "RtlUpcaseUnicodeStringToCountedOemString", func_RtlUpcaseUnicodeStringToCountedOemString },
     { "RtlValidateUnicodeString",       func_RtlValidateUnicodeString },
+    { "RtlNullAcl",                    func_RtlNullAcl },
     { "RtlStringSdBounds",              func_RtlStringSdBounds },
     { "RtlVerifyVersionInfo",           func_RtlVerifyVersionInfo },
     { "RtlWaitOnAddress",               func_RtlWaitOnAddress },
@@ -522,7 +532,9 @@ const struct test winetest_testlist[] =
     { "PageFaultAddress",               func_PageFaultAddress },
     { "SectionFaultCost",               func_SectionFaultCost },
     { "SectionPageLeak",                func_SectionPageLeak },
+    { "SectionSparseChild",             func_SectionSparseChild },
     { "SectionSparseCommitLimit",       func_SectionSparseCommitLimit },
+    { "SectionSparseStore",             func_SectionSparseStore },
     { "SectionViewProtect",             func_SectionViewProtect },
     { "SectionVirtualLockLeak",         func_SectionVirtualLockLeak },
     { "StackDeepRecursion",             func_StackDeepRecursion },

@@ -368,7 +368,7 @@ StreamSocketConnectSendComplete(
         AFD_DbgPrint(MID_TRACE,("Completing connectex %p\n", NextIrp));
         NextIrp->IoStatus.Status = Irp->IoStatus.Status;
         NextIrp->IoStatus.Information = Irp->IoStatus.Information;
-        if (NextIrp->MdlAddress)
+        if (AfdRequestLocked(NextIrp))
             UnlockRequest(NextIrp, IoGetCurrentIrpStackLocation(NextIrp));
         AfdClearCancelRoutine(NextIrp);
         IoCompleteRequest(NextIrp, IO_NETWORK_INCREMENT);
@@ -444,7 +444,7 @@ StreamSocketConnectComplete(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                NextIrp = CONTAINING_RECORD(NextIrpEntry, IRP, Tail.Overlay.ListEntry);
                NextIrp->IoStatus.Status = STATUS_FILE_CLOSED;
                NextIrp->IoStatus.Information = 0;
-               if( NextIrp->MdlAddress ) UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
+               if (AfdRequestLocked(NextIrp)) UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
                AfdClearCancelRoutine(NextIrp);
                IoCompleteRequest( NextIrp, IO_NETWORK_INCREMENT );
         }
@@ -454,7 +454,7 @@ StreamSocketConnectComplete(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                NextIrp = CONTAINING_RECORD(NextIrpEntry, IRP, Tail.Overlay.ListEntry);
                NextIrp->IoStatus.Status = STATUS_FILE_CLOSED;
                NextIrp->IoStatus.Information = Irp->IoStatus.Information;
-               if (NextIrp->MdlAddress)
+               if (AfdRequestLocked(NextIrp))
                    UnlockRequest(NextIrp, IoGetCurrentIrpStackLocation(NextIrp));
                AfdClearCancelRoutine(NextIrp);
                IoCompleteRequest(NextIrp, IO_NETWORK_INCREMENT);
@@ -481,7 +481,7 @@ StreamSocketConnectComplete(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         AFD_DbgPrint(MID_TRACE,("Completing connect %p\n", NextIrp));
         NextIrp->IoStatus.Status = Status;
         NextIrp->IoStatus.Information = NT_SUCCESS(Status) ? ((ULONG_PTR)FCB->Connection.Handle) : 0;
-        if( NextIrp->MdlAddress ) UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
+        if (AfdRequestLocked(NextIrp)) UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
         AfdClearCancelRoutine(NextIrp);
         IoCompleteRequest( NextIrp, IO_NETWORK_INCREMENT );
     }
@@ -568,7 +568,7 @@ end:
         AFD_DbgPrint(MID_TRACE,("Completing connectex %p\n", NextIrp));
         NextIrp->IoStatus.Status = Status;
         NextIrp->IoStatus.Information = 0;
-        if (NextIrp->MdlAddress)
+        if (AfdRequestLocked(NextIrp))
             UnlockRequest(NextIrp, IoGetCurrentIrpStackLocation(NextIrp));
         AfdClearCancelRoutine(NextIrp);
         IoCompleteRequest(NextIrp, IO_NETWORK_INCREMENT);
@@ -624,7 +624,7 @@ SubmitConnect(PAFD_FCB FCB, PIRP Irp, UINT Function)
     RemoveEntryList(&Irp->Tail.Overlay.ListEntry);
     Irp->IoStatus.Status = Status;
     Irp->IoStatus.Information = 0;
-    if (Irp->MdlAddress)
+    if (AfdRequestLocked(Irp))
         UnlockRequest(Irp, IoGetCurrentIrpStackLocation(Irp));
     AfdClearCancelRoutine(Irp);
     IoCompleteRequest(Irp, IO_NETWORK_INCREMENT);

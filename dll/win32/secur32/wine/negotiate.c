@@ -336,18 +336,9 @@ static SECURITY_STATUS SEC_ENTRY nego_QueryContextAttributesA(PCtxtHandle phCont
  */
 static SECURITY_STATUS SEC_ENTRY nego_ImpersonateSecurityContext(PCtxtHandle phContext)
 {
-    SECURITY_STATUS ret;
-
     TRACE("%p\n", phContext);
-    if (phContext)
-    {
-        ret = SEC_E_UNSUPPORTED_FUNCTION;
-    }
-    else
-    {
-        ret = SEC_E_INVALID_HANDLE;
-    }
-    return ret;
+
+    return ntlm_ImpersonateSecurityContext( phContext );
 }
 
 /***********************************************************************
@@ -355,18 +346,19 @@ static SECURITY_STATUS SEC_ENTRY nego_ImpersonateSecurityContext(PCtxtHandle phC
  */
 static SECURITY_STATUS SEC_ENTRY nego_RevertSecurityContext(PCtxtHandle phContext)
 {
-    SECURITY_STATUS ret;
-
     TRACE("%p\n", phContext);
-    if (phContext)
-    {
-        ret = SEC_E_UNSUPPORTED_FUNCTION;
-    }
-    else
-    {
-        ret = SEC_E_INVALID_HANDLE;
-    }
-    return ret;
+
+    return ntlm_RevertSecurityContext( phContext );
+}
+
+/***********************************************************************
+ *              QuerySecurityContextToken
+ */
+static SECURITY_STATUS SEC_ENTRY nego_QuerySecurityContextToken(PCtxtHandle phContext, HANDLE *phToken)
+{
+    TRACE("%p %p\n", phContext, phToken);
+
+    return ntlm_QuerySecurityContextToken( phContext, phToken );
 }
 
 /***********************************************************************
@@ -448,7 +440,7 @@ static const SecurityFunctionTableA negoTableA = {
     NULL,   /* ImportSecurityContextA */
     NULL,   /* AddCredentialsA */
     NULL,   /* Reserved8 */
-    NULL,   /* QuerySecurityContextToken */
+    nego_QuerySecurityContextToken,     /* QuerySecurityContextToken */
     nego_EncryptMessage,                /* EncryptMessage */
     nego_DecryptMessage,                /* DecryptMessage */
     NULL,   /* SetContextAttributesA */
@@ -479,7 +471,7 @@ static const SecurityFunctionTableW negoTableW = {
     NULL,   /* ImportSecurityContextW */
     NULL,   /* AddCredentialsW */
     NULL,   /* Reserved8 */
-    NULL,   /* QuerySecurityContextToken */
+    nego_QuerySecurityContextToken,     /* QuerySecurityContextToken */
     nego_EncryptMessage,                /* EncryptMessage */
     nego_DecryptMessage,                /* DecryptMessage */
     NULL,   /* SetContextAttributesW */

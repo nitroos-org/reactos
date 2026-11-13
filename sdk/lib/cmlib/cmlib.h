@@ -244,6 +244,12 @@ typedef ULONG CM_CHECK_REGISTRY_STATUS;
  * count and the compare. The correction is persistent only with FIX_HIVE.
  */
 #define CM_CHECK_REGISTRY_RECOUNT_SECURITY            0x20
+/*
+ * With RECOUNT_SECURITY, for a hive being loaded into the kernel (a CMHIVE whose
+ * security cache is set up): fill the cache from the root's ring of 'sk' cells
+ * (CmpBuildSecurityCache) and from the ring of every other cell a key names.
+ */
+#define CM_CHECK_REGISTRY_CACHE_SECURITY              0x40
 
 //
 // Check Registry status codes
@@ -379,6 +385,8 @@ typedef struct _CMHIVE
     LONG SecurityHitHint;
     PCM_KEY_SECURITY_CACHE_ENTRY SecurityCache;
     LIST_ENTRY SecurityHash[CMP_SECURITY_HASH_LISTS];
+    /* A cell of each storage type's 'sk' ring that a new cell joins (HCELL_NIL: none known), cmse.c */
+    HCELL_INDEX SecurityRingAnchor[HTYPE_COUNT];
     PKEVENT UnloadEvent;
     PCM_KEY_CONTROL_BLOCK RootKcb;
     BOOLEAN Frozen;
@@ -1037,6 +1045,23 @@ BOOLEAN
 NTAPI
 CmpBuildSecurityCache(
     IN PCMHIVE CmHive
+);
+
+/* Walk state of CmpAddSecurityRingToCache: the cells met by any walk of one load */
+typedef BOOLEAN
+(NTAPI *PCMP_SECURITY_CELL_SEEN)(
+    IN PVOID Context,
+    IN HCELL_INDEX Cell,
+    OUT PBOOLEAN Seen
+);
+
+BOOLEAN
+NTAPI
+CmpAddSecurityRingToCache(
+    IN PCMHIVE CmHive,
+    IN HCELL_INDEX SecurityCell,
+    IN PCMP_SECURITY_CELL_SEEN MarkSeen,
+    IN PVOID Context
 );
 
 VOID

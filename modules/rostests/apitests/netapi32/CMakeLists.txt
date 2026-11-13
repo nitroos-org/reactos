@@ -2,6 +2,7 @@
 list(APPEND SOURCE
     DavPaths.c
     DsRoleGetPrimaryDomainInformation.c
+    NetEnum.c
     NetGetAadJoinInformation.c
     NetLocalGroup.c
     NetLocalGroupServiceMember.c

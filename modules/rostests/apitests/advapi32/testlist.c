@@ -21,6 +21,7 @@ extern void func_DuplicateTokenEx(void);
 extern void func_EnableTraceEx2(void);
 extern void func_EncryptFile(void);
 extern void func_eventlog_supp(void);
+extern void func_eventlog_full(void);
 extern void func_EventRegister(void);
 extern void func_EventProvider(void);
 extern void func_EventSetInformation(void);
@@ -74,6 +75,7 @@ extern void func_RegRenameKey(void);
 extern void func_RegRenameKeyPersist(void);
 extern void func_RegRenameKeyStress(void);
 extern void func_RegGetValue(void);
+extern void func_RegSdTemplates(void);
 extern void func_RegSecurityDump(void);
 extern void func_RegSecurityDefaultSd(void);
 extern void func_RegSecurityAccess(void);
@@ -153,6 +155,7 @@ const struct test winetest_testlist[] =
     { "EnableTraceEx2", func_EnableTraceEx2 },
     { "EncryptFile", func_EncryptFile },
     { "eventlog_supp", func_eventlog_supp },
+    { "eventlog_full", func_eventlog_full },
     { "EventRegister", func_EventRegister },
     { "EventProvider", func_EventProvider },
     { "EventSetInformation", func_EventSetInformation },
@@ -206,6 +209,7 @@ const struct test winetest_testlist[] =
     { "RegRenameKeyPersist", func_RegRenameKeyPersist },
     { "RegRenameKeyStress", func_RegRenameKeyStress },
     { "RegGetValue", func_RegGetValue },
+    { "RegSdTemplates", func_RegSdTemplates },
     { "RegSecurityDump", func_RegSecurityDump },
     { "RegSecurityDefaultSd", func_RegSecurityDefaultSd },
     { "RegSecurityAccess", func_RegSecurityAccess },

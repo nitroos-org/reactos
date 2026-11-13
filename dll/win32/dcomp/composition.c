@@ -120,6 +120,7 @@ static const struct iface_entry iface_table[] =
     { &IID_ICompositionDrawingSurfaceInterop, offsetof(struct cobj, dsinterop), KM(K_DSURFACE), FALSE },
     { &IID_ICompositionGraphicsDeviceInterop, offsetof(struct cobj, gdinterop), KM(K_GDEVICE), FALSE },
     { &IID_INitroCompositionTest, offsetof(struct cobj, test), KM_VISUAL, FALSE },
+    { &IID_INitroCompositionTest2, offsetof(struct cobj, test2), KM_VISUAL, FALSE },
 };
 
 static const WCHAR *const kind_names[] =
@@ -358,6 +359,7 @@ static void cobj_destroy(struct cobj *o)
     if (bsurface) IUnknown_Release(bsurface);
     free_animation_state(o);
 
+    if (o->kind == K_TARGET) present_free(o);
     if (o->kind == K_GDEVICE) gfx_device_free(o);
     if (o->kind == K_DSURFACE) { gfx_surface_free(o); o->gfxdev = NULL; release_cobj(gfxdev); }
     if (o->marshal) IUnknown_Release(o->marshal);
@@ -379,7 +381,9 @@ static HRESULT STDMETHODCALLTYPE clo_Close(WIClosable *i)
     }
     /* A closed DesktopWindowTarget stops drawing into its window. FIXME: the Root reference is only released with
      * the target; verify on the oracle whether Close drops it. */
+    comp_lock();
     o->closed = TRUE;
+    comp_unlock();
     if (o->kind == K_TARGET) present_detach(o);
     return S_OK;
 }
@@ -1061,14 +1065,41 @@ static struct m2 visual_local(const struct cobj *v, Vec2 size, Vec3 offset)
 #define MAX_CLIPS 16
 struct clip_rec { struct m2 inv; float l, t, r, b; };
 
-struct rctx
+/* one sprite of a frame description */
+struct fitem
 {
-    BYTE *bgra; UINT width, height, stride;
-    struct clip_rec clips[MAX_CLIPS];
-    int nclips;
+    struct m2 m, inv;               /* local space -> frame pixels and back */
+    float w, h, opacity;            /* effective size, opacity with the parents' */
+    int first_clip, nclips;         /* the clip stack in force, in frame_desc.clips */
+    BOOL is_surface;
+    float color[4];                 /* colour brush: premultiplied BGRA, before the opacity */
+    struct cobj *surf;              /* surface brush: the surface, referenced */
+    LONG want;                      /* the version of the surface this frame shows */
+    struct snapbuf *snap;           /* its CPU copy (referenced), NULL until resolved */
+    int stretch;
+    float halign, valign;
+    BOOL linear;
 };
 
-struct sample_src { BYTE *px; UINT w, h; float ox, oy, sx, sy; BOOL linear; };
+struct frame_desc
+{
+    UINT w, h;
+    struct fitem *items;
+    int n, cap;
+    struct clip_rec *clips;
+    int nclips, capclips;
+    UINT64 sig;
+};
+
+struct cctx
+{
+    struct frame_desc *f;
+    struct clip_rec stack[MAX_CLIPS];
+    int nstack;
+    BOOL oom;
+};
+
+struct sample_src { const BYTE *px; UINT w, h; float ox, oy, sx, sy; BOOL linear; };
 
 static void fetch(const struct sample_src *s, int x, int y, float out[4])
 {
@@ -1080,14 +1111,12 @@ static void fetch(const struct sample_src *s, int x, int y, float out[4])
     out[0] = p[0]; out[1] = p[1]; out[2] = p[2]; out[3] = p[3];
 }
 
-/* premultiplied BGRA of the brush at local point (lx, ly) of a w x h visual; FALSE = no paint */
-static BOOL sample_brush(struct cobj *br, const struct sample_src *s, float lx, float ly, float out[4])
+/* premultiplied BGRA of the item's brush at local point (lx, ly) of its w x h visual; FALSE = no paint */
+static BOOL sample_brush(const struct fitem *it, const struct sample_src *s, float lx, float ly, float out[4])
 {
-    if (br->kind == K_COLORBRUSH)
+    if (!it->is_surface)
     {
-        float a = br->color.A;
-        out[0] = br->color.B * a / 255.0f; out[1] = br->color.G * a / 255.0f;
-        out[2] = br->color.R * a / 255.0f; out[3] = a;
+        out[0] = it->color[0]; out[1] = it->color[1]; out[2] = it->color[2]; out[3] = it->color[3];
         return TRUE;
     }
     if (!s || !s->px) return FALSE;
@@ -1113,15 +1142,49 @@ static BOOL sample_brush(struct cobj *br, const struct sample_src *s, float lx, 
     }
 }
 
-static void render_visual(struct cobj *v, struct m2 parentm, float parent_opacity, Vec2 psize, struct rctx *ctx)
+static struct fitem *frame_new_item(struct cctx *ctx)
+{
+    struct frame_desc *f = ctx->f;
+    struct fitem *it;
+
+    if (f->n == f->cap)
+    {
+        int cap = f->cap ? f->cap * 2 : 16;
+        struct fitem *p = f->items ? HeapReAlloc(GetProcessHeap(), 0, f->items, cap * sizeof(*p))
+                                   : HeapAlloc(GetProcessHeap(), 0, cap * sizeof(*p));
+        if (!p) { ctx->oom = TRUE; return NULL; }
+        f->items = p; f->cap = cap;
+    }
+    if (f->nclips + ctx->nstack > f->capclips)
+    {
+        int cap = f->capclips ? f->capclips * 2 : 32;
+        struct clip_rec *p;
+
+        while (cap < f->nclips + ctx->nstack) cap *= 2;
+        p = f->clips ? HeapReAlloc(GetProcessHeap(), 0, f->clips, cap * sizeof(*p))
+                     : HeapAlloc(GetProcessHeap(), 0, cap * sizeof(*p));
+        if (!p) { ctx->oom = TRUE; return NULL; }
+        f->clips = p; f->capclips = cap;
+    }
+    it = &f->items[f->n++];
+    memset(it, 0, sizeof(*it));
+    it->first_clip = f->nclips;
+    it->nclips = ctx->nstack;
+    memcpy(&f->clips[f->nclips], ctx->stack, ctx->nstack * sizeof(ctx->stack[0]));
+    f->nclips += ctx->nstack;
+    return it;
+}
+
+/* caller holds comp_lock: the layout pass of the renderer; what it keeps is copied, nothing points into the tree */
+static void collect_visual(struct cobj *v, struct m2 parentm, float parent_opacity, Vec2 psize, struct cctx *ctx)
 {
     struct m2 m, inv;
     float opacity;
-    int saved = ctx->nclips, k;
+    int saved = ctx->nstack, k;
     Vec2 size;
     Vec3 offset;
 
-    if (!v->visible) return;
+    if (!v->visible || ctx->oom) return;
     opacity = v->opacity < 0 ? 0 : v->opacity > 1 ? 1 : v->opacity;
     opacity *= parent_opacity;
     size.X = v->size.X + v->relsize.X * psize.X;
@@ -1131,9 +1194,9 @@ static void render_visual(struct cobj *v, struct m2 parentm, float parent_opacit
     offset.Y += v->reloffset.Y * psize.Y;
     m = m2_then(visual_local(v, size, offset), parentm);
 
-    if (v->vclip && v->vclip->kind == K_INSETCLIP && ctx->nclips < MAX_CLIPS && m2_invert(m, &inv))
+    if (v->vclip && v->vclip->kind == K_INSETCLIP && ctx->nstack < MAX_CLIPS && m2_invert(m, &inv))
     {
-        struct clip_rec *c = &ctx->clips[ctx->nclips++];
+        struct clip_rec *c = &ctx->stack[ctx->nstack++];
         c->inv = inv;
         c->l = v->vclip->inset_l; c->t = v->vclip->inset_t;
         c->r = size.X - v->vclip->inset_r; c->b = size.Y - v->vclip->inset_b;
@@ -1141,113 +1204,243 @@ static void render_visual(struct cobj *v, struct m2 parentm, float parent_opacit
 
     if (v->kind == K_SPRITE && v->sbrush && size.X > 0 && size.Y > 0 && opacity > 0 && m2_invert(m, &inv))
     {
-        struct sample_src src = { 0 };
         struct cobj *br = v->sbrush;
-        BYTE *snap = NULL;
-        float xs[4], ys[4], minx, maxx, miny, maxy;
-        int x0, x1, y0, y1, px, py;
-        BOOL ok = TRUE;
 
-        if (br->kind == K_SURFBRUSH)
+        /* FIXME: a nine-grid brush is not rendered (the brush only keeps its values) */
+        if (br->kind == K_COLORBRUSH || (br->kind == K_SURFBRUSH && br->bsurface))
         {
-            struct cobj *surf = br->bsurface ? CONTAINING_RECORD(br->bsurface, struct cobj, identity) : NULL;
-            ok = FALSE;
-            if (surf)
+            struct fitem *it = frame_new_item(ctx);
+
+            if (it)
             {
-                if (SUCCEEDED(gfx_surface_snapshot(surf, &snap, &src.w, &src.h)) && src.w && src.h)
+                it->m = m; it->inv = inv;
+                it->w = size.X; it->h = size.Y; it->opacity = opacity;
+                if (br->kind == K_COLORBRUSH)
                 {
-                    float sx = 1, sy = 1, W = size.X, H = size.Y;
-                    switch (br->stretch)
-                    {
-                    case CompositionStretch_Fill: sx = W / src.w; sy = H / src.h; break;
-                    case CompositionStretch_Uniform: sx = sy = fminf(W / src.w, H / src.h); break;
-                    case CompositionStretch_UniformToFill: sx = sy = fmaxf(W / src.w, H / src.h); break;
-                    default: break;
-                    }
-                    src.px = snap; src.sx = sx; src.sy = sy;
-                    src.ox = (W - src.w * sx) * br->halign;
-                    src.oy = (H - src.h * sy) * br->valign;
-                    src.linear = br->bitmap_interp != CompositionBitmapInterpolationMode_NearestNeighbor;
-                    ok = TRUE;
+                    float a = br->color.A;
+                    it->color[0] = br->color.B * a / 255.0f; it->color[1] = br->color.G * a / 255.0f;
+                    it->color[2] = br->color.R * a / 255.0f; it->color[3] = a;
+                }
+                else
+                {
+                    struct cobj *surf = CONTAINING_RECORD(br->bsurface, struct cobj, identity);
+
+                    IInspectable_AddRef(&surf->identity);
+                    it->is_surface = TRUE;
+                    it->surf = surf;
+                    it->want = surf->ver;
+                    if ((it->snap = gfx_surface_cached_locked(surf, it->want)))
+                        InterlockedIncrement(&comp_stats[4]);
+                    it->stretch = br->stretch;
+                    it->halign = br->halign; it->valign = br->valign;
+                    it->linear = br->bitmap_interp != CompositionBitmapInterpolationMode_NearestNeighbor;
                 }
             }
         }
-        if (br->kind == K_NINEGRID)
-            ok = FALSE;                 /* FIXME: nine-grid stretching is not rendered (the brush only keeps its values) */
-        if (ok)
-        {
-            m2_apply(m, 0, 0, &xs[0], &ys[0]);
-            m2_apply(m, size.X, 0, &xs[1], &ys[1]);
-            m2_apply(m, 0, size.Y, &xs[2], &ys[2]);
-            m2_apply(m, size.X, size.Y, &xs[3], &ys[3]);
-            minx = maxx = xs[0]; miny = maxy = ys[0];
-            for (k = 1; k < 4; k++)
-            {
-                minx = fminf(minx, xs[k]); maxx = fmaxf(maxx, xs[k]);
-                miny = fminf(miny, ys[k]); maxy = fmaxf(maxy, ys[k]);
-            }
-            x0 = (int)floorf(minx); x1 = (int)ceilf(maxx); y0 = (int)floorf(miny); y1 = (int)ceilf(maxy);
-            if (x0 < 0) x0 = 0;
-            if (y0 < 0) y0 = 0;
-            if (x1 > (int)ctx->width) x1 = ctx->width;
-            if (y1 > (int)ctx->height) y1 = ctx->height;
-            for (py = y0; py < y1; py++)
-                for (px = x0; px < x1; px++)
-                {
-                    float lx, ly, c[4], inva;
-                    BYTE *d = ctx->bgra + (size_t)py * ctx->stride + (size_t)px * 4;
-                    BOOL inside = TRUE;
-
-                    m2_apply(inv, px + 0.5f, py + 0.5f, &lx, &ly);
-                    if (lx < 0 || ly < 0 || lx >= size.X || ly >= size.Y) continue;
-                    for (k = 0; k < ctx->nclips && inside; k++)
-                    {
-                        float cx, cy;
-                        /* clip rectangles live in their visual's space: map the pixel through its inverse */
-                        m2_apply(ctx->clips[k].inv, px + 0.5f, py + 0.5f, &cx, &cy);
-                        inside = cx >= ctx->clips[k].l && cx < ctx->clips[k].r && cy >= ctx->clips[k].t && cy < ctx->clips[k].b;
-                    }
-                    if (!inside) continue;
-                    if (!sample_brush(br, &src, lx, ly, c)) continue;
-                    for (k = 0; k < 4; k++) c[k] *= opacity;
-                    inva = 1.0f - c[3] / 255.0f;
-                    for (k = 0; k < 4; k++)
-                    {
-                        float r = c[k] + d[k] * inva + 0.5f;
-                        d[k] = r > 255 ? 255 : (BYTE)r;
-                    }
-                }
-        }
-        HeapFree(GetProcessHeap(), 0, snap);
     }
 
-    for (k = 0; k < v->nkids; k++) render_visual(v->kids[k], m, opacity, size, ctx);
-    ctx->nclips = saved;
+    for (k = 0; k < v->nkids; k++) collect_visual(v->kids[k], m, opacity, size, ctx);
+    ctx->nstack = saved;
+}
+
+static void sig_add(UINT64 *h, const void *p, size_t len)
+{
+    const BYTE *b = p;
+
+    while (len--) { *h ^= *b++; *h *= 0x100000001b3ULL; }
+}
+
+struct frame_desc *comp_frame_collect_locked(struct cobj *root, UINT width, UINT height)
+{
+    struct cctx *ctx;
+    struct frame_desc *f;
+    Vec2 psize;
+    UINT64 h = 0xcbf29ce484222325ULL;
+    int i, k;
+
+    if (!(f = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*f)))) return NULL;
+    if (!(ctx = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*ctx)))) { HeapFree(GetProcessHeap(), 0, f); return NULL; }
+    f->w = width; f->h = height;
+    ctx->f = f;
+    psize.X = (float)width; psize.Y = (float)height;   /* the parent of the root: the bitmap / client area */
+    if (root) collect_visual(root, m2_ident(), 1.0f, psize, ctx);
+    if (ctx->oom)
+    {
+        HeapFree(GetProcessHeap(), 0, ctx);
+        comp_frame_free(f);
+        return NULL;
+    }
+    HeapFree(GetProcessHeap(), 0, ctx);
+    sig_add(&h, &width, sizeof(width)); sig_add(&h, &height, sizeof(height));
+    for (i = 0; i < f->n; i++)
+    {
+        const struct fitem *it = &f->items[i];
+
+        sig_add(&h, &it->m, sizeof(it->m)); sig_add(&h, &it->w, sizeof(it->w)); sig_add(&h, &it->h, sizeof(it->h));
+        sig_add(&h, &it->opacity, sizeof(it->opacity)); sig_add(&h, &it->is_surface, sizeof(it->is_surface));
+        sig_add(&h, &it->nclips, sizeof(it->nclips));
+        for (k = 0; k < it->nclips; k++) sig_add(&h, &f->clips[it->first_clip + k], sizeof(f->clips[0]));
+        if (!it->is_surface) sig_add(&h, it->color, sizeof(it->color));
+        else
+        {
+            sig_add(&h, &it->surf, sizeof(it->surf)); sig_add(&h, &it->want, sizeof(it->want));
+            sig_add(&h, &it->stretch, sizeof(it->stretch)); sig_add(&h, &it->halign, sizeof(it->halign));
+            sig_add(&h, &it->valign, sizeof(it->valign)); sig_add(&h, &it->linear, sizeof(it->linear));
+        }
+    }
+    f->sig = h;
+    return f;
+}
+
+UINT64 comp_frame_sig(const struct frame_desc *f) { return f->sig; }
+void comp_frame_size(const struct frame_desc *f, UINT *w, UINT *h) { *w = f->w; *h = f->h; }
+
+void comp_frame_free(struct frame_desc *f)
+{
+    int i;
+
+    if (!f) return;
+    for (i = 0; i < f->n; i++)
+    {
+        if (f->items[i].snap) snapbuf_release(f->items[i].snap);
+        if (f->items[i].surf) IInspectable_Release(&f->items[i].surf->identity);
+    }
+    HeapFree(GetProcessHeap(), 0, f->items);
+    HeapFree(GetProcessHeap(), 0, f->clips);
+    HeapFree(GetProcessHeap(), 0, f);
+}
+
+void comp_frame_resolve(struct frame_desc *f)
+{
+    struct rb_job **jobs;
+    struct cobj **surfs;
+    int i, j, nj = 0;
+
+    if (!f->n) return;
+    jobs = HeapAlloc(GetProcessHeap(), 0, f->n * (sizeof(*jobs) + sizeof(*surfs)));
+    if (!jobs) return;                  /* the surfaces are skipped, the next commit tries again */
+    surfs = (struct cobj **)(jobs + f->n);
+    for (i = 0; i < f->n; i++)
+    {
+        struct fitem *it = &f->items[i];
+        struct rb_job *job;
+
+        if (!it->is_surface || it->snap) continue;
+        for (j = 0; j < nj && surfs[j] != it->surf; j++) ;
+        if (j < nj) continue;
+        comp_lock();
+        it->snap = gfx_surface_cached_locked(it->surf, it->want);
+        comp_unlock();
+        if (it->snap) continue;
+        if ((job = gfx_surface_readback_begin(it->surf)))
+        {
+            surfs[nj] = it->surf; jobs[nj++] = job;
+        }
+    }
+    for (j = 0; j < nj; j++) gfx_surface_readback_finish(jobs[j]);
+    for (i = 0; i < f->n && nj; i++)
+    {
+        struct fitem *it = &f->items[i];
+
+        if (!it->is_surface || it->snap) continue;
+        comp_lock();
+        it->snap = gfx_surface_cached_locked(it->surf, it->want);
+        comp_unlock();
+    }
+    HeapFree(GetProcessHeap(), 0, jobs);
+}
+
+static void raster_item(const struct frame_desc *f, const struct fitem *it, BYTE *bgra, UINT stride)
+{
+    struct sample_src src = { 0 };
+    float xs[4], ys[4], minx, maxx, miny, maxy;
+    int x0, x1, y0, y1, px, py, k;
+    const struct clip_rec *clips = f->clips + it->first_clip;
+
+    if (it->is_surface)
+    {
+        float sx = 1, sy = 1, W = it->w, H = it->h;
+
+        if (!it->snap || !it->snap->w || !it->snap->h) return;
+        src.w = it->snap->w; src.h = it->snap->h;
+        switch (it->stretch)
+        {
+        case CompositionStretch_Fill: sx = W / src.w; sy = H / src.h; break;
+        case CompositionStretch_Uniform: sx = sy = fminf(W / src.w, H / src.h); break;
+        case CompositionStretch_UniformToFill: sx = sy = fmaxf(W / src.w, H / src.h); break;
+        default: break;
+        }
+        src.px = it->snap->px; src.sx = sx; src.sy = sy;
+        src.ox = (W - src.w * sx) * it->halign;
+        src.oy = (H - src.h * sy) * it->valign;
+        src.linear = it->linear;
+    }
+    m2_apply(it->m, 0, 0, &xs[0], &ys[0]);
+    m2_apply(it->m, it->w, 0, &xs[1], &ys[1]);
+    m2_apply(it->m, 0, it->h, &xs[2], &ys[2]);
+    m2_apply(it->m, it->w, it->h, &xs[3], &ys[3]);
+    minx = maxx = xs[0]; miny = maxy = ys[0];
+    for (k = 1; k < 4; k++)
+    {
+        minx = fminf(minx, xs[k]); maxx = fmaxf(maxx, xs[k]);
+        miny = fminf(miny, ys[k]); maxy = fmaxf(maxy, ys[k]);
+    }
+    x0 = (int)floorf(minx); x1 = (int)ceilf(maxx); y0 = (int)floorf(miny); y1 = (int)ceilf(maxy);
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > (int)f->w) x1 = f->w;
+    if (y1 > (int)f->h) y1 = f->h;
+    for (py = y0; py < y1; py++)
+        for (px = x0; px < x1; px++)
+        {
+            float lx, ly, c[4], inva;
+            BYTE *d = bgra + (size_t)py * stride + (size_t)px * 4;
+            BOOL inside = TRUE;
+
+            m2_apply(it->inv, px + 0.5f, py + 0.5f, &lx, &ly);
+            if (lx < 0 || ly < 0 || lx >= it->w || ly >= it->h) continue;
+            for (k = 0; k < it->nclips && inside; k++)
+            {
+                float cx, cy;
+                /* clip rectangles live in their visual's space: map the pixel through its inverse */
+                m2_apply(clips[k].inv, px + 0.5f, py + 0.5f, &cx, &cy);
+                inside = cx >= clips[k].l && cx < clips[k].r && cy >= clips[k].t && cy < clips[k].b;
+            }
+            if (!inside) continue;
+            if (!sample_brush(it, &src, lx, ly, c)) continue;
+            for (k = 0; k < 4; k++) c[k] *= it->opacity;
+            inva = 1.0f - c[3] / 255.0f;
+            for (k = 0; k < 4; k++)
+            {
+                float r = c[k] + d[k] * inva + 0.5f;
+                d[k] = r > 255 ? 255 : (BYTE)r;
+            }
+        }
+}
+
+void comp_frame_raster(const struct frame_desc *f, BYTE *bgra, UINT stride)
+{
+    int i;
+
+    for (i = 0; i < f->n; i++) raster_item(f, &f->items[i], bgra, stride);
 }
 
 static HRESULT STDMETHODCALLTYPE tst_RenderToBitmap(INitroCompositionTest *i, UINT width, UINT height, void *bgra, UINT stride)
 {
     struct cobj *o = OBJ_OF(i, test);
+    struct frame_desc *f;
     UINT y;
 
     if (!bgra || !width || !height || stride < width * 4) return E_INVALIDARG;
     for (y = 0; y < height; y++) memset((BYTE *)bgra + (size_t)y * stride, 0, width * 4);
     comp_lock();
-    comp_render_locked(o, width, height, bgra, stride);
+    f = comp_frame_collect_locked(o, width, height);
     comp_unlock();
+    if (!f) return E_OUTOFMEMORY;
+    comp_frame_resolve(f);              /* the GPU is waited for with no lock held */
+    comp_frame_raster(f, bgra, stride);
+    comp_frame_free(f);
     return S_OK;
-}
-
-void comp_render_locked(struct cobj *root, UINT width, UINT height, BYTE *bgra, UINT stride)
-{
-    struct rctx *ctx;
-    Vec2 psize;
-
-    if (!(ctx = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*ctx)))) return;
-    ctx->bgra = bgra; ctx->width = width; ctx->height = height; ctx->stride = stride;
-    psize.X = (float)width; psize.Y = (float)height;   /* the parent of the root: the bitmap / client area */
-    render_visual(root, m2_ident(), 1.0f, psize, ctx);
-    HeapFree(GetProcessHeap(), 0, ctx);
 }
 
 struct dump { char *buf; UINT size, len; };
@@ -1304,6 +1497,40 @@ static HRESULT STDMETHODCALLTYPE tst_DumpTree(INitroCompositionTest *i, char *bu
 static const INitroCompositionTestVtbl nitro_test_vtbl_impl =
 {
     tst_QueryInterface, tst_AddRef, tst_Release, tst_RenderToBitmap, tst_DumpTree
+};
+
+#define TEST2(i) CONTAINING_RECORD(i, struct cobj, test2)
+
+static HRESULT STDMETHODCALLTYPE tst2_QueryInterface(INitroCompositionTest2 *i, REFIID iid, void **o)
+{ return IInspectable_QueryInterface(&TEST2(i)->identity, iid, o); }
+static ULONG STDMETHODCALLTYPE tst2_AddRef(INitroCompositionTest2 *i)
+{ return IInspectable_AddRef(&TEST2(i)->identity); }
+static ULONG STDMETHODCALLTYPE tst2_Release(INitroCompositionTest2 *i)
+{ return IInspectable_Release(&TEST2(i)->identity); }
+
+static HRESULT STDMETHODCALLTYPE tst2_WaitForPresent(INitroCompositionTest2 *i, DWORD ms)
+{
+    return comp_wait_present(ms);
+}
+
+static HRESULT STDMETHODCALLTYPE tst2_SetReadbackDelay(INitroCompositionTest2 *i, DWORD ms)
+{
+    comp_test_readback_delay = ms;
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE tst2_GetStats(INitroCompositionTest2 *i, LONG *values, UINT count)
+{
+    UINT k;
+
+    if (!values || count > ARRAY_SIZE(comp_stats)) return E_INVALIDARG;
+    for (k = 0; k < count; k++) values[k] = comp_stats[k];
+    return S_OK;
+}
+
+static const INitroCompositionTest2Vtbl nitro_test2_vtbl_impl =
+{
+    tst2_QueryInterface, tst2_AddRef, tst2_Release, tst2_WaitForPresent, tst2_SetReadbackDelay, tst2_GetStats
 };
 
 /* ---- creation ---- */
@@ -2177,6 +2404,7 @@ HRESULT comp_create(IUnknown *compositor, enum cobj_kind kind, struct cobj **out
     o->dsinterop.lpVtbl = &nitro_dsinterop_vtbl;
     o->gdinterop.lpVtbl = &gfx_device_interop_vtbl;
     o->test.lpVtbl = &nitro_test_vtbl_impl;
+    o->test2.lpVtbl = &nitro_test2_vtbl_impl;
     o->closable.lpVtbl = &closable_vtbl;
     o->agile.lpVtbl = &agile_vtbl;
     if (kind == K_NINEGRID)

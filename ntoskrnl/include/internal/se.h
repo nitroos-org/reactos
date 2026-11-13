@@ -989,6 +989,16 @@ SeCreateAccessStateEx(
     _In_ PGENERIC_MAPPING GenericMapping);
 
 //
+// Creator descriptor checks (owner, SACL) before an assign
+//
+NTSTATUS
+NTAPI
+SepCheckCreatorDescriptor(
+    _In_ PSECURITY_DESCRIPTOR ExplicitDescriptor,
+    _In_ PSECURITY_SUBJECT_CONTEXT SubjectContext,
+    _In_ KPROCESSOR_MODE AccessMode);
+
+//
 // Access check functions
 //
 BOOLEAN

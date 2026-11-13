@@ -145,7 +145,7 @@ generates `nls/<tag>.nls` (lower-case tag, e.g. `en-in.nls`) like for the first 
   (same script) takes the values of that entry (a region variant has the language's code pages); a new language gets the defaults of its script
   (Latin 1252/850/10000/500, Cyrillic 1251/866/10007/20880, Arabic 1256/720/10004/20420, scripts without an ANSI page 0/1/2/500 as hi-IN, ka-GE, si-LK; `tk`, `fil`, `ii` have their own),
   the ISO 639-2/T code (Library of Congress) in upper case as `SABBREVLANGNAME` and as OpenType tag. These are derived, not measured: see "VERIFY ON ORACLE" in the lane evidence.
-* `LOCALE_FONTSIGNATURE`: the signature of an existing locale with the same ANSI code page (language sibling first); for scripts without a sibling the bit of the script in the Unicode subset
+* `LOCALE_FONTSIGNATURE` (superseded: all 231 values were measured in round 7, below): the signature of an existing locale with the same ANSI code page (language sibling first); for scripts without a sibling the bit of the script in the Unicode subset
   (OpenType OS/2 `ulUnicodeRange`) is added.
 * Not added (listed in the evidence): CLDR ids without an [MS-LCID] entry (Windows gives them LOCALE_CUSTOM_UNSPECIFIED 0x1000; the lane brief says to skip them unless Windows is shown to enumerate them by name; 417 ids, e.g. `en-AG`, `fr-GP`,
   `de-BE`); [MS-LCID] entries without CLDR data (`ts-ZA`, `ve-ZA`, `iu-*`, `quz-*`, `kr-Latn-NG`, `gn-PY`, `la-VA`, `arn-CL`, `moh-CA`, `co-FR`, `prs-AF`, `smj-*`, `sma-*`, `sms-FI`);
@@ -154,3 +154,19 @@ generates `nls/<tag>.nls` (lower-case tag, e.g. `en-in.nls`) like for the first 
 * `ca-ES-valencia`: the CLDR variant `ca-ES-valencia` is the first element of the locale chain.
 * i386 images: kernel32 grows by 0x37000 bytes of `SizeOfImage` (0x3ae000 -> 0x3e5000, i386 Debug), about 2.6 KB per locale (string table + `calendar_data.c`); see `sdk/cmake/baseaddress.cmake`.
 * The ICU data package (`dll/3rdparty/icu/data/icudtl.dat`) was regenerated after this round with `build-filtered-data.sh`: 335 names (253 + 82; 69 of the 85 new kernel32 locales have an ICU 64.2 locale of the same tag, the other 16 are listed in `dll/3rdparty/icu/README.ReactOS`).
+
+## Round 6: the derived fields of the 85 added locales, measured on Windows 10
+The code pages, `SABBREVLANGNAME`, `SABBREVCTRYNAME` and `SOPENTYPELANGUAGETAG` that round 5 derived (see above) were compared with Windows 10 22H2 through
+`GetLocaleInfoEx` for all 85 names (one read-only probe; `LOCALE_SNAME` and `LOCALE_ILANGUAGE` matched already). 150 values in 77 locales differed and are now the
+measured Windows values in `data/skeleton.json` (`"added": true` entries). The derivation rules of `add_locales.py` are therefore only the starting point for a
+locale that has not been measured: re-measure before relying on them. Windows is not regular here: scripts without an ANSI page report 0/1/2 (ANSI/OEM/MAC) for
+`st-ZA`, `mt-MT`, `om-ET`, `so-SO`, `mi-NZ`, `ps-AF`, `ii-CN`, `en-AE`; the Nigerian, Rwandan and Hawaiian Latin locales have OEM 437 and EBCDIC 037; Windows abbreviations
+and OpenType tags are often not the ISO 639-2 code (`TNA`, `XHS`, `MYM`, `BOB`, `ZZZ` for a custom abbreviation).
+`LOCALE_FONTSIGNATURE` was first left alone in this round (the probe printed only 16 of the 32 bytes) and measured completely in round 7.
+
+## Round 7: the font signature of all 231 locales, measured on Windows 10
+`LOCALE_FONTSIGNATURE` (16 WCHARs = 32 bytes: 4 DWORD Unicode subset bits, 2 DWORD default code page bits, 2 DWORD supported code page bits) was a Wine-era value
+(for the added locales: copied from a sibling with the same ANSI code page) and differed from Windows 10 22H2 (build 19045) in 228 of the 231 locales (only `bn-IN`, `bn-BD`,
+`ne-NP` matched). One read-only probe (`GetLocaleInfoEx(name, LOCALE_FONTSIGNATURE)` for every name of the skeleton, all 32 bytes printed; `GetLocaleInfoA` for en-US, ja-JP,
+ar-SA gives the same 32-byte image; `LOCALE_FONTSIGNATURE | LOCALE_RETURN_NUMBER` fails with ERROR_INVALID_FLAGS) replaced the value of every entry of `data/skeleton.json`.
+The fields of the earlier rounds are untouched, the table of derivation rules above only applies to a locale that has not been measured.

@@ -65,6 +65,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_cc/CcPurgeCacheSection.c
     ntos_cm/CmAclAudit.c
     ntos_cm/CmRename.c
+    ntos_cm/CmSkStore.c
     ntos_cm/CmSecurity.c
     ntos_ex/ExCallback.c
     ntos_ex/ExDoubleList.c
@@ -78,6 +79,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_ex/ExPushLock.c
     ntos_ex/ExSListPopFault.c
     ntos_ex/ExResource.c
+    ntos_ex/ExResourceGrow.c
     ntos_ex/ExSequencedList.c
     ntos_ex/ExSingleList.c
     ntos_ex/ExStubHit.c
@@ -128,6 +130,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_ke/KeGuardedMutex.c
     ntos_ke/KeFreezeDpc.c
     ntos_ke/KeIrql.c
+    ntos_ke/KeIrqlPerf.c
     ntos_ke/KeMutex.c
     ntos_ke/KePriority.c
     ntos_ke/KeProfile.c
@@ -232,6 +235,7 @@ list(APPEND KMTEST_SOURCE
     ntos_cc/CcPinMappedData_user.c
     ntos_cc/CcPinRead_user.c
     ntos_cc/CcSetFileSizes_user.c
+    ntos_cm/CmCreatorSd_user.c
     ntos_cm/CmFlush_user.c
     ntos_io/IoCreateFile_user.c
     ntos_io/IoCreateFileEx_user.c

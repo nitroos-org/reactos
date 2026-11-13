@@ -96,6 +96,7 @@ list(APPEND SOURCE
     EnumSystemCodePages.c
     EnumUILanguages.c
     ExitThread.c
+    ThreadReturnClobber.c
     FindActCtxSectionStringW.c
     FindFiles.c
     FindFirstFileEx.c
@@ -161,6 +162,7 @@ list(APPEND SOURCE
     LoadLibraryNoExecute.c
     LocalDumps.c
     CrashDialog.c
+    LocaleDerivedFields.c
     LocaleNameToLCID.c
     LocaleTable.c
     LocalTimeZone.c

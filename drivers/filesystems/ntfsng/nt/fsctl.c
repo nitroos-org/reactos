@@ -347,7 +347,7 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     ExInitializeResourceLite(&Vcb->CreateGate);
     ExInitializeResourceLite(&Vcb->NotifyPathLock);
     NgInitDataIo(Vcb);
-    ExInitializeFastMutex(&Vcb->FcbListLock);
+    KeInitializeGuardedMutex(&Vcb->FcbListLock);
     InitializeListHead(&Vcb->FcbList);
     InitializeListHead(&Vcb->IdleList);
     InitializeListHead(&Vcb->PurgeList);
@@ -481,10 +481,10 @@ static NTSTATUS NgLockCheckSections(PNG_VCB Vcb, PNG_FCB VolumeFcb)
     PLIST_ENTRY Entry;
     NTSTATUS Status = STATUS_SUCCESS;
 
-    ExAcquireFastMutex(&Vcb->FcbListLock);
+    KeAcquireGuardedMutex(&Vcb->FcbListLock);
     if (Vcb->PagingFiles)
     {
-        ExReleaseFastMutex(&Vcb->FcbListLock);
+        KeReleaseGuardedMutex(&Vcb->FcbListLock);
         return STATUS_ACCESS_DENIED;
     }
     for (Entry = Vcb->FcbList.Flink; Entry != &Vcb->FcbList; Entry = Entry->Flink)
@@ -494,7 +494,7 @@ static NTSTATUS NgLockCheckSections(PNG_VCB Vcb, PNG_FCB VolumeFcb)
             continue;
         if (F->OpenHandles || F->IsPagingFile)
         {
-            ExReleaseFastMutex(&Vcb->FcbListLock);
+            KeReleaseGuardedMutex(&Vcb->FcbListLock);
             return STATUS_ACCESS_DENIED;
         }
         if (F->SectionObjectPointers.DataSectionObject || F->SectionObjectPointers.ImageSectionObject)
@@ -503,7 +503,7 @@ static NTSTATUS NgLockCheckSections(PNG_VCB Vcb, PNG_FCB VolumeFcb)
     List = Cap ? ExAllocatePoolWithTag(NonPagedPool, Cap * sizeof(PNG_FCB), TAG_NTFSNG) : NULL;
     if (Cap && !List)
     {
-        ExReleaseFastMutex(&Vcb->FcbListLock);
+        KeReleaseGuardedMutex(&Vcb->FcbListLock);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
     for (Entry = Vcb->FcbList.Flink; Entry != &Vcb->FcbList && Count < Cap; Entry = Entry->Flink)
@@ -516,7 +516,7 @@ static NTSTATUS NgLockCheckSections(PNG_VCB Vcb, PNG_FCB VolumeFcb)
             List[Count++] = F;
         }
     }
-    ExReleaseFastMutex(&Vcb->FcbListLock);
+    KeReleaseGuardedMutex(&Vcb->FcbListLock);
 
     for (i = 0; i < Count; i++)
     {
@@ -575,7 +575,7 @@ static NTSTATUS NgLockVolume(PNG_VCB Vcb, PFILE_OBJECT FileObject)
         return Status;
     }
     NgAcquireCore(Vcb);
-    ExAcquireFastMutex(&Vcb->FcbListLock);
+    KeAcquireGuardedMutex(&Vcb->FcbListLock);
     /* Checked again after the flush, in the hold that publishes the lock: also refused for a handle
      * whose cleanup ran meanwhile (nothing would ever unlock it). */
     if (Vcb->Dismounted || Vcb->LockedBy || ((PNG_CCB)FileObject->FsContext2)->CleanedUp || Vcb->PagingFiles)
@@ -601,7 +601,7 @@ static NTSTATUS NgLockVolume(PNG_VCB Vcb, PFILE_OBJECT FileObject)
         Vcb->Vpb->Flags |= VPB_LOCKED;
         IoReleaseVpbSpinLock(Irql);
     }
-    ExReleaseFastMutex(&Vcb->FcbListLock);
+    KeReleaseGuardedMutex(&Vcb->FcbListLock);
     NgReleaseCore(Vcb);
     ExReleaseResourceLite(&Vcb->CreateGate);
     return Status;
@@ -618,7 +618,7 @@ static BOOLEAN NgUnlockVolume(PNG_VCB Vcb, PFILE_OBJECT FileObject)
     BOOLEAN Held;
     ASSERT(ExIsResourceAcquiredExclusiveLite(&Vcb->CreateGate));
     NgAcquireCore(Vcb);
-    ExAcquireFastMutex(&Vcb->FcbListLock);
+    KeAcquireGuardedMutex(&Vcb->FcbListLock);
     Held = Vcb->LockedBy == FileObject;
     if (Held)
     {
@@ -629,7 +629,7 @@ static BOOLEAN NgUnlockVolume(PNG_VCB Vcb, PFILE_OBJECT FileObject)
         Vcb->Vpb->Flags &= ~VPB_LOCKED;
         IoReleaseVpbSpinLock(Irql);
     }
-    ExReleaseFastMutex(&Vcb->FcbListLock);
+    KeReleaseGuardedMutex(&Vcb->FcbListLock);
     NgReleaseCore(Vcb);
     return Held;
 }
@@ -658,10 +658,10 @@ static NTSTATUS NgDismountMount(PNG_VCB Vcb, BOOLEAN Removal, PBOOLEAN Dropped)
     NewVpb = ExAllocatePoolWithTag(NonPagedPool, sizeof(VPB), NG_TAG_VPB);
     if (!NewVpb)
         return STATUS_INSUFFICIENT_RESOURCES;
-    ExAcquireFastMutex(&Vcb->FcbListLock);
+    KeAcquireGuardedMutex(&Vcb->FcbListLock);
     if (Vcb->PagingFiles)
     {
-        ExReleaseFastMutex(&Vcb->FcbListLock);
+        KeReleaseGuardedMutex(&Vcb->FcbListLock);
         ExFreePoolWithTag(NewVpb, NG_TAG_VPB);
         return STATUS_ACCESS_DENIED;
     }
@@ -670,13 +670,13 @@ static NTSTATUS NgDismountMount(PNG_VCB Vcb, BOOLEAN Removal, PBOOLEAN Dropped)
         PNG_FCB F = CONTAINING_RECORD(Entry, NG_FCB, VcbLinks);
         if (F->IsPagingFile)
         {
-            ExReleaseFastMutex(&Vcb->FcbListLock);
+            KeReleaseGuardedMutex(&Vcb->FcbListLock);
             ExFreePoolWithTag(NewVpb, NG_TAG_VPB);
             return STATUS_ACCESS_DENIED;
         }
         Count++;
     }
-    ExReleaseFastMutex(&Vcb->FcbListLock);
+    KeReleaseGuardedMutex(&Vcb->FcbListLock);
 
     /* A volume that cannot be flushed (a write or cache flush fails, or no memory to list its streams)
      * stays mounted (and locked), as NgLockVolume does; a removal goes on without what was not written. */
@@ -706,12 +706,12 @@ static NTSTATUS NgDismountMount(PNG_VCB Vcb, BOOLEAN Removal, PBOOLEAN Dropped)
             return STATUS_INSUFFICIENT_RESOURCES;
         }
         Count = 0;
-        ExAcquireFastMutex(&Vcb->FcbListLock);
+        KeAcquireGuardedMutex(&Vcb->FcbListLock);
         for (Entry = Vcb->FcbList.Flink; Entry != &Vcb->FcbList; Entry = Entry->Flink)
             Count++;
         if (Count <= Capacity)
             break;
-        ExReleaseFastMutex(&Vcb->FcbListLock);
+        KeReleaseGuardedMutex(&Vcb->FcbListLock);
         ExFreePoolWithTag(List, TAG_NTFSNG);
         List = NULL;
     }
@@ -723,7 +723,7 @@ static NTSTATUS NgDismountMount(PNG_VCB Vcb, BOOLEAN Removal, PBOOLEAN Dropped)
         InterlockedIncrement(&F->RefCount);
         List[Count++] = F;
     }
-    ExReleaseFastMutex(&Vcb->FcbListLock);
+    KeReleaseGuardedMutex(&Vcb->FcbListLock);
     for (i = 0; i < Count; i++)
     {
         if (List[i]->SectionObjectPointers.DataSectionObject || List[i]->SectionObjectPointers.SharedCacheMap)
@@ -925,9 +925,9 @@ NTSTATUS NgQueryRemove(PNG_VCB Vcb)
             BOOLEAN VolumeOpen;
 
             /* The volume FCB is not on FcbList: its handles (\\.\X:) are counted here, as FastFAT counts them. */
-            ExAcquireFastMutex(&Vcb->FcbListLock);
+            KeAcquireGuardedMutex(&Vcb->FcbListLock);
             VolumeOpen = Vcb->VolumeFcb && Vcb->VolumeFcb->OpenHandles;
-            ExReleaseFastMutex(&Vcb->FcbListLock);
+            KeReleaseGuardedMutex(&Vcb->FcbListLock);
             Status = VolumeOpen ? STATUS_ACCESS_DENIED : NgLockCheckSections(Vcb, NULL);
         }
         Vcb->RemovePending = NT_SUCCESS(Status);
@@ -992,7 +992,7 @@ BOOLEAN NgEndLock(PNG_VCB Vcb, PFILE_OBJECT FileObject, BOOLEAN Cleanup)
 
     /* One end per lock: a second unlock or the cleanup racing with this one does nothing. */
     NgAcquireCore(Vcb);
-    ExAcquireFastMutex(&Vcb->FcbListLock);
+    KeAcquireGuardedMutex(&Vcb->FcbListLock);
     if (Cleanup && Ccb)
         Ccb->CleanedUp = TRUE;
     Own = Vcb->LockedBy == FileObject && !Vcb->LockEnding;
@@ -1001,7 +1001,7 @@ BOOLEAN NgEndLock(PNG_VCB Vcb, PFILE_OBJECT FileObject, BOOLEAN Cleanup)
         Vcb->LockEnding = TRUE;
         Raw = Vcb->RawWritten && !Vcb->Dismounted;
     }
-    ExReleaseFastMutex(&Vcb->FcbListLock);
+    KeReleaseGuardedMutex(&Vcb->FcbListLock);
     NgReleaseCore(Vcb);
     if (!Own)
         return FALSE;
