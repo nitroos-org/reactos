@@ -342,6 +342,21 @@ ParseV6Address(IN PCWSTR AddressString,
 }
 
 static
+BOOLEAN
+IsLocalhostName(IN PCWSTR Name)
+{
+    static const WCHAR Localhost[] = L"localhost";
+    SIZE_T Length = RTL_NUMBER_OF(Localhost) - 1;
+
+    if (_wcsnicmp(Name, Localhost, Length) != 0)
+        return FALSE;
+
+    /* Optionally followed by the root dot */
+    return Name[Length] == UNICODE_NULL ||
+           (Name[Length] == L'.' && Name[Length + 1] == UNICODE_NULL);
+}
+
+static
 PADDRINFOW
 WINAPI
 NewAddrInfo6(IN INT SocketType,
@@ -849,7 +864,25 @@ GetAddrInfoW(IN PCWSTR pszNodeName,
          * which is the failure a server with an optional "::" bind skips.
          * AF_UNSPEC keeps its IPv4-only answer: this system has no IPv6 transport to serve it.
          */
-        if (!pszNodeName && iFamily == PF_INET6)
+        /*
+         * The name "localhost" (or "localhost.") for PF_INET6 is answered as the no-node loopback
+         * case: Windows 10 (IPv6 installed, measured for "localhost") answers ::1. The match is
+         * case-insensitive here; the case, the trailing-dot form and the flag combinations other
+         * than the plain query were not measured. AI_NUMERICHOST is not satisfied by a name, so it
+         * keeps its previous failure. PF_UNSPEC "localhost" is not changed and stays IPv4 only: a
+         * client that connects to the first result would get ::1 first and fail, since there is no
+         * IPv6 transport to connect with.
+         */
+        if (pszNodeName && iFamily == PF_INET6 && !(iFlags & AI_NUMERICHOST) &&
+            IsLocalhostName(pszNodeName))
+        {
+            RtlZeroMemory(&Address6, sizeof(Address6));
+            ulScope6 = 0;
+            Address6.u.Byte[15] = 1;
+            bNumeric6 = TRUE;
+            bNoNode6 = TRUE;
+        }
+        else if (!pszNodeName && iFamily == PF_INET6)
         {
             RtlZeroMemory(&Address6, sizeof(Address6));
             ulScope6 = 0;
