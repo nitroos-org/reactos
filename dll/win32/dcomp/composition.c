@@ -101,6 +101,8 @@ static const struct iface_entry iface_table[] =
     { &IID___x_ABI_CWindows_CFoundation_CIClosable, offsetof(struct cobj, closable), KM_ALL, TRUE },
     { &IID_IAgileObject, offsetof(struct cobj, agile), KM_ALL, FALSE },
     { &IID_INitroDrawingSurfaceInterop, offsetof(struct cobj, dsinterop), KM(K_DSURFACE), FALSE },
+    /* the real ICompositionDrawingSurfaceInterop: same six methods, same order (see dcomp_nitro.h) */
+    { &IID_ICompositionDrawingSurfaceInterop, offsetof(struct cobj, dsinterop), KM(K_DSURFACE), FALSE },
     { &IID_INitroCompositionTest, offsetof(struct cobj, test), KM_VISUAL, FALSE },
 };
 
