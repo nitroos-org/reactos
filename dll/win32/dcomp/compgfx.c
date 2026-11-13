@@ -391,6 +391,8 @@ static HRESULT STDMETHODCALLTYPE dsi_EndDraw(INitroDrawingSurfaceInterop *i)
         ID2D1DeviceContext_Release(dc);
     }
     if (bmp) IUnknown_Release(bmp);
+    comp_lock();
+    comp_unlock_changed(s);             /* new content to commit */
     return hr;
 }
 
@@ -417,7 +419,7 @@ static HRESULT STDMETHODCALLTYPE dsi_Resize(INitroDrawingSurfaceInterop *i, SIZE
     ID3D11DeviceContext_Release(ctx);
     old = (ID3D11Texture2D *)s->tex; s->tex = (IUnknown *)tex;
     s->width = size.cx; s->height = size.cy;
-    comp_unlock();
+    comp_unlock_changed(s);
     ID3D11Texture2D_Release(old);
     return S_OK;
 }
@@ -454,7 +456,7 @@ static HRESULT STDMETHODCALLTYPE dsi_Scroll(INitroDrawingSurfaceInterop *i, cons
     box.front = 0; box.back = 1;
     ID3D11DeviceContext_CopySubresourceRegion(ctx, (ID3D11Resource *)s->tex, 0, dst.left, dst.top, 0, (ID3D11Resource *)tmp, 0, &box);
     ID3D11DeviceContext_Release(ctx);
-    comp_unlock();
+    comp_unlock_changed(s);
     ID3D11Texture2D_Release(tmp);
     return S_OK;
 }
