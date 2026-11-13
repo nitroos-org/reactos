@@ -78,7 +78,7 @@ VOID NgFcbRemoveLocked(PNG_FCB Fcb)
 static PNG_FCB NgInsertOrFindFcb(PNG_VCB Vcb, PNG_FCB Candidate)
 {
     PLIST_ENTRY Entry, Head = NgFcbBucket(Vcb, Candidate->MftNo);
-    ExAcquireFastMutex(&Vcb->FcbListLock);
+    KeAcquireGuardedMutex(&Vcb->FcbListLock);
     for (Entry = Head->Flink; Entry != Head; Entry = Entry->Flink)
     {
         PNG_FCB Fcb = CONTAINING_RECORD(Entry, NG_FCB, HashLinks);
@@ -96,14 +96,14 @@ static PNG_FCB NgInsertOrFindFcb(PNG_VCB Vcb, PNG_FCB Candidate)
                 Fcb->IdleLinks.Flink = Fcb->IdleLinks.Blink = NULL;
                 Vcb->IdleCount--;
             }
-            ExReleaseFastMutex(&Vcb->FcbListLock);
+            KeReleaseGuardedMutex(&Vcb->FcbListLock);
             return Fcb;
         }
     }
     InsertTailList(&Vcb->FcbList, &Candidate->VcbLinks);
     InsertTailList(Head, &Candidate->HashLinks);
     Candidate->Opening++;
-    ExReleaseFastMutex(&Vcb->FcbListLock);
+    KeReleaseGuardedMutex(&Vcb->FcbListLock);
     return Candidate;
 }
 
@@ -116,7 +116,7 @@ static PNG_FCB NgFindFcbForOpen(PNG_VCB Vcb, ULONGLONG MftNo)
 {
     PLIST_ENTRY Entry, Head = NgFcbBucket(Vcb, MftNo);
     PNG_FCB Found = NULL;
-    ExAcquireFastMutex(&Vcb->FcbListLock);
+    KeAcquireGuardedMutex(&Vcb->FcbListLock);
     for (Entry = Head->Flink; Entry != Head; Entry = Entry->Flink)
     {
         PNG_FCB Fcb = CONTAINING_RECORD(Entry, NG_FCB, HashLinks);
@@ -135,7 +135,7 @@ static PNG_FCB NgFindFcbForOpen(PNG_VCB Vcb, ULONGLONG MftNo)
             break;
         }
     }
-    ExReleaseFastMutex(&Vcb->FcbListLock);
+    KeReleaseGuardedMutex(&Vcb->FcbListLock);
     return Found;
 }
 
@@ -144,7 +144,7 @@ static BOOLEAN NgFcbBlocksQuery(PNG_VCB Vcb, ULONGLONG MftNo)
 {
     PLIST_ENTRY Entry, Head = NgFcbBucket(Vcb, MftNo);
     BOOLEAN Blocks = FALSE;
-    ExAcquireFastMutex(&Vcb->FcbListLock);
+    KeAcquireGuardedMutex(&Vcb->FcbListLock);
     for (Entry = Head->Flink; Entry != Head; Entry = Entry->Flink)
     {
         PNG_FCB Fcb = CONTAINING_RECORD(Entry, NG_FCB, HashLinks);
@@ -154,7 +154,7 @@ static BOOLEAN NgFcbBlocksQuery(PNG_VCB Vcb, ULONGLONG MftNo)
             break;
         }
     }
-    ExReleaseFastMutex(&Vcb->FcbListLock);
+    KeReleaseGuardedMutex(&Vcb->FcbListLock);
     return Blocks;
 }
 
@@ -208,11 +208,11 @@ static NTSTATUS NgOpenVolume(PNG_VCB Vcb, PFILE_OBJECT FileObject, PIO_STACK_LOC
 
     if (!Ccb)
         return STATUS_INSUFFICIENT_RESOURCES;
-    ExAcquireFastMutex(&Vcb->FcbListLock);
+    KeAcquireGuardedMutex(&Vcb->FcbListLock);
     Fcb = Vcb->VolumeFcb;
     if (Fcb)
         InterlockedIncrement(&Fcb->RefCount);
-    ExReleaseFastMutex(&Vcb->FcbListLock);
+    KeReleaseGuardedMutex(&Vcb->FcbListLock);
     if (!Fcb)
     {
         Fcb = NgAllocateFcb(Vcb);
@@ -223,25 +223,25 @@ static NTSTATUS NgOpenVolume(PNG_VCB Vcb, PFILE_OBJECT FileObject, PIO_STACK_LOC
         }
         Fcb->IsVolume = TRUE;
         RtlInitEmptyUnicodeString(&Fcb->Stream, Fcb->StreamBuffer, sizeof(Fcb->StreamBuffer));
-        ExAcquireFastMutex(&Vcb->FcbListLock);
+        KeAcquireGuardedMutex(&Vcb->FcbListLock);
         if (Vcb->VolumeFcb)
         {
             InterlockedIncrement(&Vcb->VolumeFcb->RefCount);
-            ExReleaseFastMutex(&Vcb->FcbListLock);
+            KeReleaseGuardedMutex(&Vcb->FcbListLock);
             ExDeleteResourceLite(&Fcb->MainResource);
             ExDeleteResourceLite(&Fcb->PagingIoResource);
             ExDeleteResourceLite(&Fcb->PagingWriteLock);
             ExFreePoolWithTag(Fcb, TAG_NTFSNG);
-            ExAcquireFastMutex(&Vcb->FcbListLock);
+            KeAcquireGuardedMutex(&Vcb->FcbListLock);
             Fcb = Vcb->VolumeFcb;
         }
         else
         {
             Vcb->VolumeFcb = Fcb;
         }
-        ExReleaseFastMutex(&Vcb->FcbListLock);
+        KeReleaseGuardedMutex(&Vcb->FcbListLock);
     }
-    ExAcquireFastMutex(&Vcb->FcbListLock);
+    KeAcquireGuardedMutex(&Vcb->FcbListLock);
     if (Fcb->OpenHandles)
     {
         Status = IoCheckShareAccess(Stack->Parameters.Create.SecurityContext->DesiredAccess,
@@ -255,7 +255,7 @@ static NTSTATUS NgOpenVolume(PNG_VCB Vcb, PFILE_OBJECT FileObject, PIO_STACK_LOC
     }
     if (NT_SUCCESS(Status))
         Fcb->OpenHandles++;
-    ExReleaseFastMutex(&Vcb->FcbListLock);
+    KeReleaseGuardedMutex(&Vcb->FcbListLock);
     if (!NT_SUCCESS(Status))
     {
         NgFreeCcb(Ccb);
@@ -310,7 +310,7 @@ PNG_FCB NgFindFcb(PNG_VCB Vcb, ULONGLONG MftNo)
 {
     PLIST_ENTRY Entry, Head = NgFcbBucket(Vcb, MftNo);
     PNG_FCB Found = NULL;
-    ExAcquireFastMutex(&Vcb->FcbListLock);
+    KeAcquireGuardedMutex(&Vcb->FcbListLock);
     for (Entry = Head->Flink; Entry != Head; Entry = Entry->Flink)
     {
         PNG_FCB Fcb = CONTAINING_RECORD(Entry, NG_FCB, HashLinks);
@@ -321,7 +321,7 @@ PNG_FCB NgFindFcb(PNG_VCB Vcb, ULONGLONG MftNo)
             break;
         }
     }
-    ExReleaseFastMutex(&Vcb->FcbListLock);
+    KeReleaseGuardedMutex(&Vcb->FcbListLock);
     return Found;
 }
 
@@ -359,7 +359,7 @@ BOOLEAN NgRetireStreams(PNG_VCB Vcb, ULONGLONG MftNo, PNG_FCB Self, BOOLEAN Reti
         /* A parked FCB has no node and is not collected again, so the batches end. */
         Count = 0;
         More = FALSE;
-        ExAcquireFastMutex(&Vcb->FcbListLock);
+        KeAcquireGuardedMutex(&Vcb->FcbListLock);
         Busy = NgStreamsInUseLocked(Vcb, MftNo, Self);
         for (Entry = Head->Flink; Retire && !Busy && Entry != Head; Entry = Entry->Flink)
         {
@@ -374,7 +374,7 @@ BOOLEAN NgRetireStreams(PNG_VCB Vcb, ULONGLONG MftNo, PNG_FCB Self, BOOLEAN Reti
             InterlockedIncrement(&F->RefCount);
             Found[Count++] = F;
         }
-        ExReleaseFastMutex(&Vcb->FcbListLock);
+        KeReleaseGuardedMutex(&Vcb->FcbListLock);
         for (i = 0; i < Count; i++)
         {
             NgParkNode(Found[i]);
@@ -383,9 +383,9 @@ BOOLEAN NgRetireStreams(PNG_VCB Vcb, ULONGLONG MftNo, PNG_FCB Self, BOOLEAN Reti
     } while (More);
     if (Busy || !Retire)
         return !Busy;
-    ExAcquireFastMutex(&Vcb->FcbListLock);
+    KeAcquireGuardedMutex(&Vcb->FcbListLock);
     Busy = NgStreamsInUseLocked(Vcb, MftNo, Self);
-    ExReleaseFastMutex(&Vcb->FcbListLock);
+    KeReleaseGuardedMutex(&Vcb->FcbListLock);
     return !Busy;
 }
 
@@ -396,11 +396,11 @@ BOOLEAN NgRetireStreams(PNG_VCB Vcb, ULONGLONG MftNo, PNG_FCB Self, BOOLEAN Reti
 BOOLEAN NgMarkDeletePending(PNG_VCB Vcb, PNG_FCB Fcb, BOOLEAN CheckStreams)
 {
     BOOLEAN Ok;
-    ExAcquireFastMutex(&Vcb->FcbListLock);
+    KeAcquireGuardedMutex(&Vcb->FcbListLock);
     Ok = !CheckStreams || !NgStreamsInUseLocked(Vcb, Fcb->MftNo, Fcb);
     if (Ok)
         Fcb->DeletePending = TRUE;
-    ExReleaseFastMutex(&Vcb->FcbListLock);
+    KeReleaseGuardedMutex(&Vcb->FcbListLock);
     return Ok;
 }
 
@@ -420,9 +420,9 @@ static BOOLEAN NgBaseDeletePendingLocked(PNG_VCB Vcb, ULONGLONG MftNo)
 static BOOLEAN NgBaseDeletePending(PNG_VCB Vcb, ULONGLONG MftNo)
 {
     BOOLEAN Pending;
-    ExAcquireFastMutex(&Vcb->FcbListLock);
+    KeAcquireGuardedMutex(&Vcb->FcbListLock);
     Pending = NgBaseDeletePendingLocked(Vcb, MftNo);
-    ExReleaseFastMutex(&Vcb->FcbListLock);
+    KeReleaseGuardedMutex(&Vcb->FcbListLock);
     return Pending;
 }
 
@@ -437,7 +437,7 @@ VOID NgDeleteStreams(PNG_VCB Vcb, ULONGLONG MftNo, PNG_FCB Self)
     {
         /* Marked and unlisted under the lock a create checks Deleted under. */
         Count = 0;
-        ExAcquireFastMutex(&Vcb->FcbListLock);
+        KeAcquireGuardedMutex(&Vcb->FcbListLock);
         for (Entry = Head->Flink; Entry != Head && Count < RTL_NUMBER_OF(Found); Entry = Next)
         {
             PNG_FCB F = CONTAINING_RECORD(Entry, NG_FCB, HashLinks);
@@ -449,7 +449,7 @@ VOID NgDeleteStreams(PNG_VCB Vcb, ULONGLONG MftNo, PNG_FCB Self)
             InterlockedIncrement(&F->RefCount);
             Found[Count++] = F;
         }
-        ExReleaseFastMutex(&Vcb->FcbListLock);
+        KeReleaseGuardedMutex(&Vcb->FcbListLock);
         for (i = 0; i < Count; i++)
         {
             NgParkNode(Found[i]);
@@ -461,9 +461,9 @@ VOID NgDeleteStreams(PNG_VCB Vcb, ULONGLONG MftNo, PNG_FCB Self)
 /* Takes a deleted FCB out of the lookup list: its MFT record number may be reused. */
 VOID NgUnlistFcb(PNG_FCB Fcb)
 {
-    ExAcquireFastMutex(&Fcb->Vcb->FcbListLock);
+    KeAcquireGuardedMutex(&Fcb->Vcb->FcbListLock);
     NgFcbRemoveLocked(Fcb);
-    ExReleaseFastMutex(&Fcb->Vcb->FcbListLock);
+    KeReleaseGuardedMutex(&Fcb->Vcb->FcbListLock);
 }
 
 BOOLEAN NgValidName(PCUNICODE_STRING Name)
@@ -538,12 +538,12 @@ VOID NgNotifyCcb(PNG_VCB Vcb, PNG_CCB Ccb, PNG_FCB Fcb, ULONG Filter, ULONG Acti
     UNICODE_STRING Copy;
     if (!Vcb->NotifySync)
         return;
-    ExAcquireFastMutex(&Vcb->FcbListLock);
+    KeAcquireGuardedMutex(&Vcb->FcbListLock);
     Copy.Length = Copy.MaximumLength = Ccb->Path.Length;
     Copy.Buffer = Copy.Length ? ExAllocatePoolWithTag(PagedPool, Copy.Length, TAG_NTFSNG) : NULL;
     if (Copy.Buffer)
         RtlCopyMemory(Copy.Buffer, Ccb->Path.Buffer, Copy.Length);
-    ExReleaseFastMutex(&Vcb->FcbListLock);
+    KeReleaseGuardedMutex(&Vcb->FcbListLock);
     if (!Copy.Buffer)
         return;
     NgNotifyFcb(Vcb, &Copy, Filter, Action, Fcb, Ccb->ParentMftNo);
@@ -1002,7 +1002,7 @@ static NTSTATUS NgCreateLocked(PDEVICE_OBJECT DeviceObject, PIRP Irp, PFILE_NETW
     /* The path from the volume root, built from the related open's current name if any: the new
      * handle's name.  The related name is copied under FcbListLock (a rename may change it). */
     if (RelatedCcb)
-        ExAcquireFastMutex(&Vcb->FcbListLock);
+        KeAcquireGuardedMutex(&Vcb->FcbListLock);
     {
         ULONG FullMax = (ULONG)Name->Length + sizeof(WCHAR) * 2 + (RelatedCcb ? RelatedCcb->Path.Length : 0);
         Full.Buffer = NULL;
@@ -1031,7 +1031,7 @@ static NTSTATUS NgCreateLocked(PDEVICE_OBJECT DeviceObject, PIRP Irp, PFILE_NETW
         }
     }
     if (RelatedCcb)
-        ExReleaseFastMutex(&Vcb->FcbListLock);
+        KeReleaseGuardedMutex(&Vcb->FcbListLock);
     if (!NT_SUCCESS(Status))
     {
         if (Full.Buffer)
@@ -1668,11 +1668,11 @@ walked:
         goto out;
     }
 
-    ExAcquireFastMutex(&Vcb->FcbListLock);
+    KeAcquireGuardedMutex(&Vcb->FcbListLock);
     if (Vcb->LockedBy)
     {
         /* The volume was locked after this open passed its first check. */
-        ExReleaseFastMutex(&Vcb->FcbListLock);
+        KeReleaseGuardedMutex(&Vcb->FcbListLock);
         Status = STATUS_ACCESS_DENIED;
         goto out;
     }
@@ -1729,7 +1729,7 @@ walked:
     }
     Fcb->Opening--;
     Opening = FALSE;
-    ExReleaseFastMutex(&Vcb->FcbListLock);
+    KeReleaseGuardedMutex(&Vcb->FcbListLock);
     if (!NT_SUCCESS(Status))
         goto out;
 
@@ -1802,13 +1802,13 @@ walked:
 out:
     if (Opening)
     {
-        ExAcquireFastMutex(&Vcb->FcbListLock);
+        KeAcquireGuardedMutex(&Vcb->FcbListLock);
         Fcb->Opening--;
-        ExReleaseFastMutex(&Vcb->FcbListLock);
+        KeReleaseGuardedMutex(&Vcb->FcbListLock);
     }
     if (Shared)
     {
-        ExAcquireFastMutex(&Vcb->FcbListLock);
+        KeAcquireGuardedMutex(&Vcb->FcbListLock);
         IoRemoveShareAccess(FileObject, &Fcb->ShareAccess);
         Fcb->OpenHandles--;
         RemoveEntryList(&Ccb->FcbLinks);
@@ -1817,7 +1817,7 @@ out:
             Fcb->IsPagingFile = FALSE;   /* this open promoted it, then failed, and holds the only ref */
             Vcb->PagingFiles--;
         }
-        ExReleaseFastMutex(&Vcb->FcbListLock);
+        KeReleaseGuardedMutex(&Vcb->FcbListLock);
     }
     if (Node || Parent)
     {
@@ -1869,7 +1869,7 @@ VOID NgFcbIdle(PNG_FCB Fcb)
     if (Fcb->OpenHandles || !Fcb->HasNode || Fcb->IsDirectory || Fcb->IsVolume ||
         !Fcb->SectionObjectPointers.DataSectionObject || NgGlobal.FcbCacheMax == MAXULONG)
         return;
-    ExAcquireFastMutex(&Vcb->FcbListLock);
+    KeAcquireGuardedMutex(&Vcb->FcbListLock);
     if (Fcb->VcbLinks.Flink && !Fcb->OpenHandles && !Fcb->Opening && !Fcb->Deleted && !Fcb->DeletePending &&
         !Fcb->IsPagingFile)
     {
@@ -1882,7 +1882,7 @@ VOID NgFcbIdle(PNG_FCB Fcb)
         InsertTailList(&Vcb->IdleList, &Fcb->IdleLinks);
         Vcb->IdleCount++;
     }
-    ExReleaseFastMutex(&Vcb->FcbListLock);
+    KeReleaseGuardedMutex(&Vcb->FcbListLock);
     NgFcbTrimIdle(Vcb);
 }
 
@@ -1902,10 +1902,10 @@ static VOID NgEvictFcb(PNG_FCB Fcb)
     if (ExAcquireResourceExclusiveLite(&Fcb->MainResource, FALSE))
     {
         BOOLEAN Idle;
-        ExAcquireFastMutex(&Vcb->FcbListLock);
+        KeAcquireGuardedMutex(&Vcb->FcbListLock);
         Idle = !Fcb->OpenHandles && !Fcb->Opening && !Fcb->Deleted && !Fcb->DeletePending && !Fcb->IsPagingFile &&
                !Vcb->Dismounted && !Vcb->WrongMedia && !Vcb->LockedBy;
-        ExReleaseFastMutex(&Vcb->FcbListLock);
+        KeReleaseGuardedMutex(&Vcb->FcbListLock);
         if (Idle && Fcb->SectionObjectPointers.SharedCacheMap)
         {
             Requeue = TRUE;
@@ -1921,14 +1921,14 @@ static VOID NgEvictFcb(PNG_FCB Fcb)
     }
     if (Requeue)
     {
-        ExAcquireFastMutex(&Vcb->FcbListLock);
+        KeAcquireGuardedMutex(&Vcb->FcbListLock);
         if (Fcb->VcbLinks.Flink && !Fcb->IdleLinks.Flink && !Fcb->OpenHandles && !Fcb->Opening && !Fcb->Deleted &&
             !Fcb->DeletePending)
         {
             InsertTailList(&Vcb->IdleList, &Fcb->IdleLinks);
             Vcb->IdleCount++;
         }
-        ExReleaseFastMutex(&Vcb->FcbListLock);
+        KeReleaseGuardedMutex(&Vcb->FcbListLock);
     }
     NgDereferenceFcb(Fcb);
 }
@@ -1941,17 +1941,17 @@ static VOID NgFcbTrimIdle(PNG_VCB Vcb)
     for (Round = 0; Round < 8; Round++)
     {
         PNG_FCB Fcb;
-        ExAcquireFastMutex(&Vcb->FcbListLock);
+        KeAcquireGuardedMutex(&Vcb->FcbListLock);
         if ((ULONG)Vcb->IdleCount <= NgGlobal.FcbCacheMax || IsListEmpty(&Vcb->IdleList))
         {
-            ExReleaseFastMutex(&Vcb->FcbListLock);
+            KeReleaseGuardedMutex(&Vcb->FcbListLock);
             return;
         }
         Fcb = CONTAINING_RECORD(RemoveHeadList(&Vcb->IdleList), NG_FCB, IdleLinks);
         Fcb->IdleLinks.Flink = Fcb->IdleLinks.Blink = NULL;
         Vcb->IdleCount--;
         InterlockedIncrement(&Fcb->RefCount);   /* under the lock: a close cannot free it meanwhile */
-        ExReleaseFastMutex(&Vcb->FcbListLock);
+        KeReleaseGuardedMutex(&Vcb->FcbListLock);
         NgEvictFcb(Fcb);
     }
 }
@@ -2208,10 +2208,10 @@ static NTSTATUS NgCleanupGated(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     {
         Posix = TRUE;
     }
-    ExAcquireFastMutex(&Vcb->FcbListLock);
+    KeAcquireGuardedMutex(&Vcb->FcbListLock);
     IoRemoveShareAccess(FileObject, &Fcb->ShareAccess);
     Last = (--Fcb->OpenHandles == 0);
-    ExReleaseFastMutex(&Vcb->FcbListLock);
+    KeReleaseGuardedMutex(&Vcb->FcbListLock);
     Delete = Last && Fcb->DeletePending && !Fcb->Deleted;
     /* Other handles stay open: the POSIX delete removes the name now (info.c); the last cleanup frees the file. */
     if (!Last && Posix && Fcb->DeletePending && !Fcb->Deleted && !Fcb->Orphan)
@@ -2313,11 +2313,11 @@ static NTSTATUS NgCleanupGated(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         BOOLEAN Core = Fcb->Node || Fcb->Grown;
         if (Core)
             NgAcquireCore(Vcb);
-        ExAcquireFastMutex(&Vcb->FcbListLock);
+        KeAcquireGuardedMutex(&Vcb->FcbListLock);
         Last = (Fcb->OpenHandles == 0);
         if (Last && Fcb->Deleted)
             NgFcbRemoveLocked(Fcb);     /* removed with POSIX semantics while handles were open (NgDeleteNow KeepOpen) */
-        ExReleaseFastMutex(&Vcb->FcbListLock);
+        KeReleaseGuardedMutex(&Vcb->FcbListLock);
         if (Last && Core)
         {
             /* The allocation ahead of the size (ngc_set_size) is given back once nobody has the stream open. */
@@ -2349,9 +2349,9 @@ NTSTATUS NgClose(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         /* A volume open's CCB is in no list. */
         if (Fcb && !IsListEmpty(&Ccb->FcbLinks))
         {
-            ExAcquireFastMutex(&Fcb->Vcb->FcbListLock);
+            KeAcquireGuardedMutex(&Fcb->Vcb->FcbListLock);
             RemoveEntryList(&Ccb->FcbLinks);
-            ExReleaseFastMutex(&Fcb->Vcb->FcbListLock);
+            KeReleaseGuardedMutex(&Fcb->Vcb->FcbListLock);
         }
         NgFreeCcb(Ccb);
     }

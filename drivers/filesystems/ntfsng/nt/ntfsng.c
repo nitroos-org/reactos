@@ -463,10 +463,10 @@ VOID NgDereferenceFcb(PNG_FCB Fcb)
      */
     for (;;)
     {
-        ExAcquireFastMutex(&Vcb->FcbListLock);
+        KeAcquireGuardedMutex(&Vcb->FcbListLock);
         if (Core || Fcb->RefCount != 1 || !Fcb->Node)
             break;
-        ExReleaseFastMutex(&Vcb->FcbListLock);
+        KeReleaseGuardedMutex(&Vcb->FcbListLock);
         NgAcquireCore(Vcb);
         Core = TRUE;
     }
@@ -477,7 +477,7 @@ VOID NgDereferenceFcb(PNG_FCB Fcb)
         Vcb->PagingFiles--;
     if (Free && Vcb->VolumeFcb == Fcb)
         Vcb->VolumeFcb = NULL;
-    ExReleaseFastMutex(&Vcb->FcbListLock);
+    KeReleaseGuardedMutex(&Vcb->FcbListLock);
     if (Free && Fcb->Node)
     {
         /* Unreachable without CoreLock (a node with RefCount 1 was seen above); never put into a
@@ -628,10 +628,10 @@ NTSTATUS NgCleanupDismounted(PNG_VCB Vcb, PIRP Irp)
         FsRtlFastUnlockAll(&Fcb->FileLock, FileObject, IoGetRequestorProcess(Irp), NULL);
         CcUninitializeCacheMap(FileObject, NULL, NULL);
     }
-    ExAcquireFastMutex(&Vcb->FcbListLock);
+    KeAcquireGuardedMutex(&Vcb->FcbListLock);
     IoRemoveShareAccess(FileObject, &Fcb->ShareAccess);
     Fcb->OpenHandles--;
-    ExReleaseFastMutex(&Vcb->FcbListLock);
+    KeReleaseGuardedMutex(&Vcb->FcbListLock);
     FileObject->Flags |= FO_CLEANUP_COMPLETE;
     return STATUS_SUCCESS;
 }
