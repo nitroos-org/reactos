@@ -421,12 +421,21 @@ RtlCreateUserProcess(IN PUNICODE_STRING ImageFileName,
 /*
  * @implemented
  */
+/* The cookie of this process, once known (user mode only: in kernel mode
+   the current process changes). It does not change once it is set, so the
+   system call that asks for it is made only until it is known. */
+static volatile ULONG RtlpProcessCookie;
+
 PVOID
 NTAPI
 RtlEncodePointer(IN PVOID Pointer)
 {
     ULONG Cookie;
     NTSTATUS Status;
+
+    Cookie = RtlpProcessCookie;
+    if (Cookie != 0)
+        return (PVOID)((ULONG_PTR)Pointer ^ Cookie);
 
     Status = ZwQueryInformationProcess(NtCurrentProcess(),
                                        ProcessCookie,
@@ -438,6 +447,9 @@ RtlEncodePointer(IN PVOID Pointer)
         DPRINT1("Failed to receive the process cookie! Status: 0x%lx\n", Status);
         return Pointer;
     }
+
+    if (RtlpGetMode() == UserMode)
+        RtlpProcessCookie = Cookie;
 
     return (PVOID)((ULONG_PTR)Pointer ^ Cookie);
 }

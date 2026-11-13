@@ -459,6 +459,42 @@ KiXStateContextLookasideReady(VOID)
     return TRUE;
 }
 
+/* In front of the lookaside list, one spare buffer per processor: the buffer that one exception or NtContinue gives
+   back is the one the next takes, without the list header that every processor would update. A thread that moved to
+   another processor meanwhile only makes it use the spare of that processor. */
+typedef struct DECLSPEC_CACHEALIGN _KI_XSTATE_SPARE
+{
+    PVOID volatile Buffer;
+} KI_XSTATE_SPARE;
+
+static KI_XSTATE_SPARE KiXStateContextSpare[MAXIMUM_PROCESSORS];
+
+static
+PVOID
+KiAllocateXStateContextBuffer(VOID)
+{
+    PVOID Buffer;
+
+    Buffer = InterlockedExchangePointer(&KiXStateContextSpare[KeGetCurrentProcessorNumber()].Buffer, NULL);
+    if (Buffer)
+        return Buffer;
+    return ExAllocateFromNPagedLookasideList(&KiXStateContextLookaside);
+}
+
+static
+VOID
+KiFreeXStateContextBuffer(
+    _In_ PVOID Buffer)
+{
+    if (InterlockedCompareExchangePointer(&KiXStateContextSpare[KeGetCurrentProcessorNumber()].Buffer,
+                                          Buffer,
+                                          NULL) == NULL)
+    {
+        return;
+    }
+    ExFreeToNPagedLookasideList(&KiXStateContextLookaside, Buffer);
+}
+
 static
 NTSTATUS
 KiAllocateXStateContext(
@@ -470,7 +506,7 @@ KiAllocateXStateContext(
 
     if (KiXStateContextLookasideReady() && (Size <= KiXStateContextEntrySize))
     {
-        Allocation = ExAllocateFromNPagedLookasideList(&KiXStateContextLookaside);
+        Allocation = KiAllocateXStateContextBuffer();
         if (!Allocation)
             return STATUS_INSUFFICIENT_RESOURCES;
 
@@ -694,7 +730,7 @@ KiFreeXStateContext(
     if (XState->Allocation)
     {
         if (XState->FromLookaside)
-            ExFreeToNPagedLookasideList(&KiXStateContextLookaside, XState->Allocation);
+            KiFreeXStateContextBuffer(XState->Allocation);
         else
             ExFreePoolWithTag(XState->Allocation, TAG_XSTATE_CONTEXT);
     }

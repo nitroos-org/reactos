@@ -342,6 +342,72 @@ static void TestOrder(void)
 }
 
 
+/* ---- Handlers that remove others or themselves while one exception walks the list ---- */
+
+#define WALK_CODE 0xE0000005
+
+static PVOID WalkHandles[4];
+static char WalkCalls[16];
+static ULONG WalkCount;
+static LONG WalkRemove;   /* What handler 0 removes: -1 none, else the index */
+
+static LONG WalkCall(ULONG Index, PEXCEPTION_POINTERS ExceptionInfo)
+{
+    if (ExceptionInfo->ExceptionRecord->ExceptionCode != WALK_CODE)
+        return EXCEPTION_CONTINUE_SEARCH;
+    if (WalkCount < sizeof(WalkCalls) - 1)
+        WalkCalls[WalkCount++] = (char)('0' + Index);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+static LONG NTAPI WalkHandler0(PEXCEPTION_POINTERS ExceptionInfo)
+{
+    if ((ExceptionInfo->ExceptionRecord->ExceptionCode == WALK_CODE) && (WalkRemove >= 0) && WalkHandles[WalkRemove])
+    {
+        ok(RtlRemoveVectoredExceptionHandler(WalkHandles[WalkRemove]) != 0, "Remove %ld failed\n", WalkRemove);
+        WalkHandles[WalkRemove] = NULL;
+    }
+    return WalkCall(0, ExceptionInfo);
+}
+static LONG NTAPI WalkHandler1(PEXCEPTION_POINTERS ExceptionInfo) { return WalkCall(1, ExceptionInfo); }
+static LONG NTAPI WalkHandler2(PEXCEPTION_POINTERS ExceptionInfo) { return WalkCall(2, ExceptionInfo); }
+static LONG NTAPI WalkHandler3(PEXCEPTION_POINTERS ExceptionInfo)
+{
+    WalkCall(3, ExceptionInfo);
+    return (ExceptionInfo->ExceptionRecord->ExceptionCode == WALK_CODE) ? EXCEPTION_CONTINUE_EXECUTION : EXCEPTION_CONTINUE_SEARCH;
+}
+
+static void TestRemoveDuringWalk(LONG Remove, const char *Expected, const char *ExpectedAfter)
+{
+    ULONG i;
+
+    /* Order on the list: 0 (first), 2, 1, 3 (last, handles the exception) */
+    WalkHandles[1] = RtlAddVectoredExceptionHandler(FALSE, WalkHandler1);
+    WalkHandles[3] = RtlAddVectoredExceptionHandler(FALSE, WalkHandler3);
+    WalkHandles[2] = RtlAddVectoredExceptionHandler(TRUE, WalkHandler2);
+    WalkHandles[0] = RtlAddVectoredExceptionHandler(TRUE, WalkHandler0);
+
+    WalkRemove = Remove;
+    WalkCount = 0;
+    RaiseException(WALK_CODE, 0, 0, NULL);
+    WalkCalls[WalkCount] = 0;
+    ok(!strcmp(WalkCalls, Expected), "Remove %ld: calls '%s', expected '%s'\n", Remove, WalkCalls, Expected);
+
+    /* The removed handler stays removed */
+    WalkRemove = -1;
+    WalkCount = 0;
+    RaiseException(WALK_CODE, 0, 0, NULL);
+    WalkCalls[WalkCount] = 0;
+    ok(!strcmp(WalkCalls, ExpectedAfter), "Remove %ld, again: calls '%s', expected '%s'\n", Remove, WalkCalls, ExpectedAfter);
+
+    for (i = 0; i < 4; i++)
+    {
+        if (WalkHandles[i])
+            ok(RtlRemoveVectoredExceptionHandler(WalkHandles[i]) != 0, "Remove %lu failed\n", i);
+        WalkHandles[i] = NULL;
+    }
+}
+
 START_TEST(VectoredHandlerChurn)
 {
     HANDLE Threads[5];
@@ -392,6 +458,10 @@ START_TEST(VectoredHandlerChurn)
     TestRemoveWhileCalled(FALSE);
     TestRemoveWhileCalled(TRUE);
     TestSelfRemove();
+    TestRemoveDuringWalk(-1, "0213", "0213");
+    TestRemoveDuringWalk(1, "023", "023");   /* a later one: not called */
+    TestRemoveDuringWalk(2, "013", "013");   /* the next one */
+    TestRemoveDuringWalk(0, "0213", "213");  /* itself: the walk goes on */
     CloseHandle(BlockEntered);
     CloseHandle(BlockRelease);
 }

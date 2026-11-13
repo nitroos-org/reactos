@@ -289,6 +289,13 @@ static VOID RunThreads(PCSTR Name, BOOL Noise, ULONG SuspendMode)
     }
 
     Sleep(RUN_MS);
+
+    /* The suspender competes for the processors with the faulting threads.
+       Where every exception goes to the kernel debugger first (checked
+       builds), it may not get a thread in the time above: give it more, up to
+       three times as long, to check at least a few suspended threads. */
+    for (i = 0; SuspendMode && (Suspends < 10) && (i < 3 * RUN_MS / 100); i++)
+        Sleep(100);
     Stop = 1;
     Wait = WaitForMultipleObjects(Count, Threads, TRUE, 60000);
     ok(Wait == WAIT_OBJECT_0, "%s: the threads did not stop: %lu\n", Name, Wait);

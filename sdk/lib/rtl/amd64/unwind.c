@@ -1708,6 +1708,56 @@ RtlpCallConsolidateCallback(
     _In_ PVOID (*Callback)(PEXCEPTION_RECORD),
     _In_ PEXCEPTION_RECORD ExceptionRecord);
 
+/* NtContinue fails, with the thread untouched, for a context whose flags have CONTEXT_XSTATE but which is not followed
+   by the CONTEXT_EX that describes it (KiCaptureXStateContext). Such a context is a copy of the context of an
+   exception without the extended state (runtimes resume like that after a hardware exception): there is no need to
+   make the system call to learn that. Only this first check of the kernel is repeated here, and only on a system with
+   extended state, where the kernel makes it; anything else still goes to NtContinue. */
+typedef struct _RTLP_CONTEXT_EX_CHUNK
+{
+    LONG Offset;
+    ULONG Length;
+} RTLP_CONTEXT_EX_CHUNK;
+
+/* The layout of CONTEXT_EX, which the user mode headers do not have */
+typedef struct _RTLP_CONTEXT_EX
+{
+    RTLP_CONTEXT_EX_CHUNK All;
+    RTLP_CONTEXT_EX_CHUNK Legacy;
+    RTLP_CONTEXT_EX_CHUNK XState;
+} RTLP_CONTEXT_EX;
+
+static
+BOOLEAN
+RtlpIsXStateContextExMissing(
+    _In_ PCONTEXT ContextRecord)
+{
+    RTLP_CONTEXT_EX *ContextEx = (RTLP_CONTEXT_EX *)(ContextRecord + 1);
+    BOOLEAN Missing = FALSE;
+
+    if (!SharedUserData->ProcessorFeatures[PF_XSAVE_ENABLED] ||
+        (SharedUserData->XState.AllFeatureSize == 0) ||
+        ((SharedUserData->XState.EnabledFeatures & ~XSTATE_MASK_LEGACY) == 0))
+    {
+        return FALSE;
+    }
+
+    _SEH2_TRY
+    {
+        Missing = (ContextEx->Legacy.Offset != -(LONG)sizeof(CONTEXT)) ||
+                  (ContextEx->Legacy.Length != sizeof(CONTEXT)) ||
+                  (ContextEx->All.Offset != -(LONG)sizeof(CONTEXT)) ||
+                  (ContextEx->All.Length < sizeof(CONTEXT) + sizeof(RTLP_CONTEXT_EX));
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Missing = FALSE;
+    }
+    _SEH2_END;
+
+    return Missing;
+}
+
 VOID
 RtlRestoreContext(
     _In_ PCONTEXT ContextRecord,
@@ -1762,7 +1812,8 @@ RtlRestoreContext(
        groups the context names and no other, and loads that state too. Without CONTEXT_CONTROL it returns
        here, as RtlRestoreContext does on Windows. The common complete context stays in user mode. */
     if (RtlpGetMode() == UserMode &&
-        (((ContextRecord->ContextFlags & CONTEXT_XSTATE) == CONTEXT_XSTATE) ||
+        ((((ContextRecord->ContextFlags & CONTEXT_XSTATE) == CONTEXT_XSTATE) &&
+          !RtlpIsXStateContextExMissing(ContextRecord)) ||
          ((ContextRecord->ContextFlags & CONTEXT_FULL) != CONTEXT_FULL)))
     {
         ZwContinue(ContextRecord, FALSE);
