@@ -177,7 +177,7 @@ typedef struct _REDIR_LAYER
 } REDIR_LAYER, *PREDIR_LAYER;
 BOOL NTAPI GreRedirComposeLayer(_In_ struct _SURFACE *psurfFB, _In_ LONG xFB, _In_ LONG yFB, _In_ const REDIR_LAYER *pl, _In_ struct _REGION *prgnScreen);
 BOOL NTAPI GreRedirClearRect(_In_ struct _SURFACE *psurf, _In_ LONG cx, _In_ LONG cy);
-BOOL NTAPI GreRedirLoadFromDC(_In_ struct _SURFACE *psurfDst, _In_ HDC hdcSrc, _In_ LONG xSrc, _In_ LONG ySrc, _In_ const RECTL *prclDst, _Out_ PBOOL pbAlpha);
+BOOL NTAPI GreRedirLoadFromDC(_In_ struct _SURFACE *psurfDst, _In_ HDC hdcSrc, _In_ LONG xSrc, _In_ LONG ySrc, _In_ const RECTL *prclDst, _Out_ PBOOL pbAlpha, _Out_ PBOOL pbCopied);
 /* ntuser/redir.c */
 VOID FASTCALL UserRedirMarkDirty(_In_ PVOID pvRedir, _In_opt_ const RECTL *prcl);
 // typedef struct _DC *PDC;

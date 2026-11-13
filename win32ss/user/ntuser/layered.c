@@ -225,8 +225,15 @@ IntUpdateLayeredWindowI( PWND pWnd,
     * leaves the blend on the screen.
     */
    Redirect = UserRedirLayeredFits(pWnd, Window.right - Window.left, Window.bottom - Window.top);
+   if (!Redirect)
+      UserRedirLayeredNoSurface(pWnd);
 
-   if (!Redirect && (info->dwFlags & ULW_ALPHA) && info->hdcSrc && (pWnd->style & WS_VISIBLE) && !(pWnd->style & WS_CHILD))
+   /*
+    * Level 2: a surface of the new size that exists is certain to be there; one that has to be made can fail (memory),
+    * and then the blend falls back to the snapshot, which must be taken before the window moves onto the screen
+    */
+   if ((!Redirect || !UserRedirLayeredHasSize(pWnd, Window.right - Window.left, Window.bottom - Window.top)) &&
+       (info->dwFlags & ULW_ALPHA) && info->hdcSrc && (pWnd->style & WS_VISIBLE) && !(pWnd->style & WS_CHILD))
    {
       NewRect = Window;
       UseBackdrop = GlassBackdropPrepare(UserHMGetHandle(pWnd), (PRECTL)&NewRect);
@@ -274,7 +281,12 @@ IntUpdateLayeredWindowI( PWND pWnd,
        UserRedirUpdateLayered(pWnd, &OldWindow, info->hdcSrc, info->pptSrc, info->prcDirty, info->pblend,
                               info->crKey, info->dwFlags, &ret))
    {
-      /* Done in the window's surface */
+      /* Done in the window's surface: a snapshot taken in case it could not be is not needed */
+      if (UseBackdrop)
+      {
+         GlassBackdropDrop(UserHMGetHandle(pWnd));
+         UseBackdrop = FALSE;
+      }
    }
    else if (info->hdcSrc)
    {

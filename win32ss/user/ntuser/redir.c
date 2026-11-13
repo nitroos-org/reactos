@@ -178,12 +178,21 @@ UserRedirInit(VOID)
 
     gRedirTimer = ExAllocatePoolWithTag(NonPagedPool, sizeof(KTIMER), USERTAG_REDIRSURF);
     AtomRedir = IntAddGlobalAtom(L"NitroRedir", TRUE);
-    AtomUlwSeen = IntAddGlobalAtom(L"NitroUlwSeen", TRUE);
-    if (!gRedirTimer || !AtomRedir || !AtomUlwSeen)
+    if (!gRedirTimer || !AtomRedir)
     {
         ERR("Redirection: no timer or atom, staying off\n");
         gRedirLevel = 0;
         return;
+    }
+    /* Only level 2 uses this atom: without it level 2 is not offered, the level below it is unaffected */
+    if (gRedirLevel >= 2)
+    {
+        AtomUlwSeen = IntAddGlobalAtom(L"NitroUlwSeen", TRUE);
+        if (!AtomUlwSeen)
+        {
+            ERR("Redirection: no atom for level 2, staying at level 1\n");
+            gRedirLevel = 1;
+        }
     }
     /* A synchronization timer: the wait of the raw input thread resets it (a notification timer stays signaled) */
     KeInitializeTimerEx(gRedirTimer, SynchronizationTimer);
@@ -237,21 +246,63 @@ UserRedirUlwSeen(PWND Wnd)
         UserSetProp(Wnd, AtomUlwSeen, (HANDLE)1, TRUE);
 }
 
+/*
+ * Whether a window with record r (or none) can have a surface of cx x cy: its size is in range and, unless r already
+ * has that size, the surfaces of the session plus this one stay within the budget. UserRedirGet and
+ * UserRedirLayeredFits both ask this, so they never disagree.
+ */
+static BOOL
+RedirSizeAllowed(PREDIR r, LONG cx, LONG cy)
+{
+    if (r && r->cx == cx && r->cy == cy)
+        return TRUE;
+    if (cx <= 0 || cy <= 0 || cx > REDIR_MAX_SIDE || cy > REDIR_MAX_SIDE)
+        return FALSE;
+    return gRedirBytes - (r ? r->cjBits : 0) + (SIZE_T)cx * cy * 4 <= gRedirBudget;
+}
+
+/* window.c, level 2: WS_EX_LAYERED was cleared: its UpdateLayeredWindow history ends (a later WS_EX_LAYERED starts as "not set") */
+VOID
+FASTCALL
+UserRedirUlwForget(PWND Wnd)
+{
+    if (gRedirLevel >= 2 && Wnd)
+        UserRemoveProp(Wnd, AtomUlwSeen, TRUE);
+}
+
 /* layered.c, level 2: whether a top-level window of cx x cy can have a surface (else UpdateLayeredWindow keeps the snapshot path) */
 BOOL
 FASTCALL
 UserRedirLayeredFits(PWND Wnd, LONG cx, LONG cy)
 {
-    PREDIR r;
-    SIZE_T cjNew;
-
     if (gRedirLevel < 2 || !Wnd || !Wnd->spwndParent || !UserIsDesktopWindow(Wnd->spwndParent) || UserIsMessageWindow(Wnd))
         return FALSE;
-    if (cx <= 0 || cy <= 0 || cx > REDIR_MAX_SIDE || cy > REDIR_MAX_SIDE)
+    return RedirSizeAllowed(UserGetProp(Wnd, AtomRedir, TRUE), cx, cy);
+}
+
+/* layered.c, level 2: Wnd has a record with a surface of exactly cx x cy (UserRedirGet allocates nothing for it) */
+BOOL
+FASTCALL
+UserRedirLayeredHasSize(PWND Wnd, LONG cx, LONG cy)
+{
+    PREDIR r;
+
+    if (gRedirLevel < 2 || !Wnd)
         return FALSE;
     r = UserGetProp(Wnd, AtomRedir, TRUE);
-    cjNew = (SIZE_T)cx * cy * 4;
-    return gRedirBytes - (r ? r->cjBits : 0) + cjNew <= gRedirBudget;
+    return r && r->psurf && r->cx == cx && r->cy == cy;
+}
+
+/*
+ * layered.c, level 2: UpdateLayeredWindow takes the snapshot path for Wnd (no surface of the new size is possible). A
+ * record it has holds an older picture of the window: drop it, or compose would draw that over the blend on the screen.
+ */
+VOID
+FASTCALL
+UserRedirLayeredNoSurface(PWND Wnd)
+{
+    if (gRedirLevel >= 2)
+        UserRedirDetachWindow(Wnd);
 }
 
 /* The top-level window whose surface a DC of Wnd draws into, or NULL (not redirected) */
@@ -527,8 +578,7 @@ UserRedirGet(PWND Root)
         return r;
 
     cjNew = (SIZE_T)max(cx, 0) * max(cy, 0) * 4;
-    if (cx <= 0 || cy <= 0 || cx > REDIR_MAX_SIDE || cy > REDIR_MAX_SIDE ||
-        gRedirBytes - (r ? r->cjBits : 0) + cjNew > gRedirBudget)
+    if (!RedirSizeAllowed(r, cx, cy))
     {
         TRACE("Redirection: %p (%ld x %ld) not redirected, %Iu of %Iu bytes in use\n", Root, cx, cy, gRedirBytes, gRedirBudget);
         gRedirRefused++;
@@ -869,6 +919,12 @@ RedirCompose(PWND Desk, PREGION Damage)
                  * there can already hold a blend of the translucent windows above it: reading it back would blend them
                  * again. The pass leaves that part of the screen alone; the window presents (and composes) when it
                  * paints.
+                 *
+                 * Tradeoff (kept on purpose): the part is cut out of the pass for every translucent window above it
+                 * too, so for as long as the window has no surface (just resized and not repainted, never drawn, or
+                 * past the budget for good) a translucent window over it is not drawn there: the screen keeps its
+                 * previous pixels (an earlier blend, or the window's old pixels). The alternative, reading the screen
+                 * back, blends the same translucent windows twice.
                  */
                 IntGdiCombineRgn(Remaining, Remaining, W, RGN_DIFF);
                 if (!ScreenOut)
@@ -942,8 +998,14 @@ RedirCompose(PWND Desk, PREGION Damage)
                 RedirLayerFor(e->Wnd, e->r, &Layer);
                 bOk = GreRedirComposeLayer(gRedirFB, rcBox.left, rcBox.top, &Layer, e->Rgn);
                 break;
-            default: /* RCE_DESKTOP; when it cannot be painted the background stays black (never read from the screen) */
-                RedirComposeDesktop(gRedirFB, rcBox.left, rcBox.top, e->Rgn);
+            default: /* RCE_DESKTOP */
+                if (!RedirComposeDesktop(gRedirFB, rcBox.left, rcBox.top, e->Rgn))
+                {
+                    /* The background could not be painted (no memory): that part of the screen is left as it is
+                       (never black, never read back); the windows over it wait for the next pass */
+                    if (IntGdiCombineRgn(D, D, e->Rgn, RGN_DIFF) <= NULLREGION)
+                        goto done;
+                }
                 break;
         }
         if (!bOk)
@@ -955,8 +1017,8 @@ RedirCompose(PWND Desk, PREGION Damage)
     gRedirComposes++;
     if (gRedirDebug)
     {
-        DbgPrint("win32k: redirection compose %lu: (%ld,%ld)-(%ld,%ld), %lu layers\n", gRedirComposes,
-                 rcBox.left, rcBox.top, rcBox.right, rcBox.bottom, cEntries);
+        DbgPrint("win32k: redirection compose %lu: (%ld,%ld)-(%ld,%ld), %lu layers, %Iu of %Iu bytes in use\n", gRedirComposes,
+                 rcBox.left, rcBox.top, rcBox.right, rcBox.bottom, cEntries, gRedirBytes, gRedirBudget);
     }
 
 done:
@@ -1076,7 +1138,7 @@ UserRedirUpdateLayered(
 {
     PREDIR r;
     RECTL rc;
-    BOOL bAlpha = FALSE;
+    BOOL bAlpha = FALSE, bCopied;
 
     *pbRet = FALSE;
     if (gRedirLevel < 2 || !Wnd || !Wnd->spwndParent || !UserIsDesktopWindow(Wnd->spwndParent) ||
@@ -1099,15 +1161,16 @@ UserRedirUpdateLayered(
             bWhole = TRUE;
         if (!RECTL_bIsEmptyRect(&rc))
         {
-            if (!GreRedirLoadFromDC(r->psurf, hdcSrc, pptSrc ? pptSrc->x : 0, pptSrc ? pptSrc->y : 0, &rc, &bAlpha))
+            if (!GreRedirLoadFromDC(r->psurf, hdcSrc, pptSrc ? pptSrc->x : 0, pptSrc ? pptSrc->y : 0, &rc, &bAlpha, &bCopied))
             {
                 /* Not a memory DC with a bitmap, or its bits could not be read (verify the error code on the oracle) */
                 EngSetLastError(ERROR_INVALID_PARAMETER);
                 return TRUE;
             }
             /* The alpha of the whole content: taken from a full update, or the first one; a partial update of
-               another format does not change how the rest is blended */
-            if (bWhole || !r->bUlw)
+               another format does not change how the rest is blended. A source range wholly outside the source
+               bitmap copied nothing: the content (and how it is blended) stays as it was */
+            if (bCopied && (bWhole || !r->bUlw))
                 r->bUlwAlpha = (BOOLEAN)bAlpha;
         }
     }
