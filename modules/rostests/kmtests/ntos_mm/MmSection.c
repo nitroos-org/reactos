@@ -906,6 +906,34 @@ TestPhysicalMemorySection(VOID)
             }
         }
 
+        /* A view whose offset plus size wraps around 64 bits is refused for user mode */
+        if (!skip(UserStruct != NULL, "No user memory\n"))
+        {
+            KmtStartSeh()
+                UserStruct->Mapping = NULL;
+                UserStruct->PhysicalAddress.QuadPart = (LONGLONG)0xFFFFFFFFFFFFF000ULL;
+                UserStruct->ViewSize = 2 * PAGE_SIZE;
+            KmtEndSeh(STATUS_SUCCESS);
+
+            Status = NtMapViewOfSection(SectionHandle,
+                                        NtCurrentProcess(),
+                                        &UserStruct->Mapping,
+                                        0,
+                                        0,
+                                        &UserStruct->PhysicalAddress,
+                                        &UserStruct->ViewSize,
+                                        ViewUnmap,
+                                        0,
+                                        PAGE_READWRITE);
+            ok(!NT_SUCCESS(Status), "Status = 0x%lx\n", Status);
+            if (NT_SUCCESS(Status))
+            {
+                KmtStartSeh()
+                    ZwUnmapViewOfSection(ZwCurrentProcess(), UserStruct->Mapping);
+                KmtEndSeh(STATUS_SUCCESS);
+            }
+        }
+
         /* Free user memory and close section */
         if (!skip(UserStruct != NULL, "No user memory\n"))
         {

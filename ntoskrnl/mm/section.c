@@ -5169,7 +5169,8 @@ MiMapViewOfSection(
 
         /* A page of the physical memory section above what the processor can address cannot be mapped */
         if (Section->u.Flags.PhysicalMemory && (ExGetPreviousMode() == UserMode) &&
-            (((ULONG64)ViewOffset + *ViewSize) > MiPhysMemMaxAddress()))
+            (((ULONG64)ViewOffset >= MiPhysMemMaxAddress()) ||
+             ((ULONG64)*ViewSize > MiPhysMemMaxAddress() - (ULONG64)ViewOffset)))
         {
             DPRINT1("Physical memory view is beyond the highest addressable physical address\n");
             Status = STATUS_INVALID_VIEW_SIZE;
