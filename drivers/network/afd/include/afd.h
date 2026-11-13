@@ -405,7 +405,13 @@ NTSTATUS LockHandles( PAFD_HANDLE HandleArray, UINT HandleCount,
                       PAFD_HANDLE *LockedHandles );
 VOID UnlockHandles( PAFD_HANDLE HandleArray, UINT HandleCount );
 PVOID LockRequest( PIRP Irp, PIO_STACK_LOCATION IrpSp, BOOLEAN Output, KPROCESSOR_MODE *LockMode );
+PVOID LockRequestSync( PIRP Irp, PIO_STACK_LOCATION IrpSp, BOOLEAN Output, KPROCESSOR_MODE *LockMode );
 VOID UnlockRequest( PIRP Irp, PIO_STACK_LOCATION IrpSp );
+VOID AfdInitCapture( VOID );
+VOID AfdFreeCapture( VOID );
+/* A request is captured while LockRequest's copy is attached (with an MDL for the locked pages, or without
+ * one for a small input): UnlockRequest releases it */
+#define AfdRequestLocked(Irp) ((Irp)->MdlAddress != NULL || (Irp)->Tail.Overlay.DriverContext[0] != NULL)
 VOID AfdAbortPendingReceives( PAFD_FCB FCB );
 VOID AfdCompleteReceiveShutdown( PAFD_FCB FCB );
 VOID AfdAbortConnection( PAFD_FCB FCB );
