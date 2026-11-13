@@ -205,7 +205,7 @@ IntGdiLineTo(DC  *dc,
 
         if (!(pbrLine->flAttrs & BR_IS_NULL))
         {
-            if (IntIsEffectiveWidePen(pbrLine))
+            if (PATH_IsWidePen(dc, pbrLine))
             {
                 /* A wide pen reaches past the points: the clip bounds count as drawn */
                 DC_vRedirAddDrawn(dc, &dc->erclClip);
@@ -339,6 +339,7 @@ IntGdiPolyline(DC      *dc,
     LONG i;
     PDC_ATTR pdcattr = dc->pdcattr;
     PPATH pPath;
+    BOOL bPathOk;
     RECTL rclOuter;
 
     if (!dc->dclevel.pSurface)
@@ -375,7 +376,7 @@ IntGdiPolyline(DC      *dc,
                AddPenLinesBounds(dc, Count, Points);
             }
 
-            if (IntIsEffectiveWidePen(pbrLine))
+            if (PATH_IsWidePen(dc, pbrLine))
             {
                 /* A wide pen reaches past the points: the clip bounds count as drawn */
                 DC_vRedirAddDrawn(dc, &dc->erclClip);
@@ -384,25 +385,32 @@ IntGdiPolyline(DC      *dc,
                 PATH_Delete(dc->dclevel.hPath);
                 dc->dclevel.hPath = NULL;
 
-                /* Begin a path */
+                /* Begin a path. Points are device coordinates plus the DC origin by now, and a path holds device
+                   coordinates without the origin: add the entries as they are. PATH_MoveTo/PATH_LineTo would
+                   transform them again, replace the first point by the current position when the application has
+                   moved it, and move the current position (Polyline neither uses nor changes it). */
                 pPath = PATH_CreatePath(Count);
                 dc->dclevel.flPath |= DCPATH_ACTIVE;
                 dc->dclevel.hPath = pPath->BaseObject.hHmgr;
-                pPath->pos = pt[0];
-                IntLPtoDP(dc, &pPath->pos, 1);
-
-                PATH_MoveTo(dc, pPath);
-                for (i = 1; i < Count; ++i)
+                for (i = 0; i < Count; ++i)
                 {
-                    PATH_LineTo(dc, pt[i].x, pt[i].y);
+                    POINT ptDev = Points[i];
+
+                    ptDev.x -= dc->ptlDCOrig.x;
+                    ptDev.y -= dc->ptlDCOrig.y;
+                    if (!PATH_AddEntry(pPath, &ptDev, (i == 0) ? PT_MOVETO : PT_LINETO))
+                        break;
                 }
+                bPathOk = (i == Count);
+                if (bPathOk)
+                    pPath->pos = pPath->pPoints[0];
 
                 /* Close the path */
                 pPath->state = PATH_Closed;
                 dc->dclevel.flPath &= ~DCPATH_ACTIVE;
 
                 /* Actually stroke a path */
-                Ret = PATH_StrokePath(dc, pPath);
+                Ret = bPathOk && PATH_StrokePath(dc, pPath);
 
                 /* Clear the path */
                 PATH_UnlockPath(pPath);

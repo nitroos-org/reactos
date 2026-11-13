@@ -112,7 +112,7 @@ IntGdiPolygon(PDC    dc,
         // Draw the Polygon Edges with the current pen ( if not a NULL pen )
         if (!(pbrLine->flAttrs & BR_IS_NULL))
         {
-            if (IntIsEffectiveWidePen(pbrLine))
+            if (PATH_IsWidePen(dc, pbrLine))
             {
                 /* Clear the path */
                 PATH_Delete(dc->dclevel.hPath);
@@ -191,7 +191,7 @@ IntGdiPolygon(PDC    dc,
         if ((dc->fs & DC_REDIRECTION) && dc->pvRedir)
         {
             DC_vRedirKeepOuter(dc, &rclOuter);
-            if (!(pbrLine->flAttrs & BR_IS_NULL) && IntIsEffectiveWidePen(pbrLine))
+            if (!(pbrLine->flAttrs & BR_IS_NULL) && PATH_IsWidePen(dc, pbrLine))
                 DC_vRedirAddDrawn(dc, &dc->erclClip);
             else
                 DC_vRedirAddInclusive(dc, &DestRect, 1);
@@ -612,8 +612,10 @@ NtGdiPolyPolyDraw( IN HDC hDC,
              * UnsafeCounts[0] must be 3 * n + 1 (where n >= 1) */
             if (Count == 1 && UnsafeCounts[0] != 1 && UnsafeCounts[0] % 3 == 1)
             {
+                /* The first point is the current position (gdi32 prepends it): the curve starts at the DC's own
+                   current position, the points after it are the control and end points */
                 SafeCounts[0]--;
-                Ret = IntGdiPolyBezierTo(dc, SafePoints, *SafeCounts);
+                Ret = IntGdiPolyBezierTo(dc, SafePoints + 1, *SafeCounts);
             }
             else
             {
@@ -723,7 +725,7 @@ IntRectangle(PDC dc,
     }
 
     /* The box and a one-pixel pen on its edges; a wide pen reaches further: the clip bounds */
-    if (!(pbrLine->flAttrs & BR_IS_NULL) && IntIsEffectiveWidePen(pbrLine))
+    if (!(pbrLine->flAttrs & BR_IS_NULL) && PATH_IsWidePen(dc, pbrLine))
     {
         DC_vRedirAddDrawn(dc, &dc->erclClip);
     }
@@ -759,7 +761,7 @@ IntRectangle(PDC dc,
 
     if (!(pbrLine->flAttrs & BR_IS_NULL))
     {
-        if (IntIsEffectiveWidePen(pbrLine))
+        if (PATH_IsWidePen(dc, pbrLine))
         {
             /* Clear the path */
             PATH_Delete(dc->dclevel.hPath);
