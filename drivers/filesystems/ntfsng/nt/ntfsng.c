@@ -145,7 +145,7 @@ VOID NgReleaseCore(PNG_VCB Vcb)
     NgReleaseCoreNoTrim(Vcb);
 }
 
-/* Releases CoreLock without the inode cache trim (whose evictions may free clusters, which drains DataIoGate). */
+/* Releases CoreLock without the inode cache trim (whose evictions may free clusters, which drains the transfers on them). */
 VOID NgReleaseCoreNoTrim(PNG_VCB Vcb)
 {
     if (--Vcb->CoreDepth == 0)

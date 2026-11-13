@@ -806,11 +806,24 @@ struct block_device { void *osdev; u64 size; unsigned int logical_block_size; st
 	 * are freed and before the device stops being the volume's. */
 	void (*kshim_drain)(void *ctx);
 	void *kshim_drain_ctx;
+	/* The same wait, narrowed (NT glue, nt/write.c NgDrainDataIoRangeCallback): only for the transfers that touch the device bytes
+	 * [off, off + len).  Called by a cluster free, under the volume lock and the bitmap lock; without it every free waits for all. */
+	void (*kshim_drain_rng)(void *ctx, unsigned long long off, unsigned long long len);
 	/* Set by the NT glue: asks its flusher to commit soon (the journal overlay is past its threshold).  Called under the volume lock; must not block. */
 	void (*kshim_kick)(void *ctx);
 	void *kshim_kick_ctx; };
 /* Waits for the file-data writes in flight outside the volume lock (see kshim_drain). */
 static inline void kshim_dio_drain(struct block_device *b) { if (b && b->kshim_drain) b->kshim_drain(b->kshim_drain_ctx); }
+/* Waits for the file-data transfers in flight outside the volume lock that touch the device bytes [off, off + len) (a cluster free). */
+static inline void kshim_dio_drain_range(struct block_device *b, unsigned long long off, unsigned long long len)
+{
+	if (!b)
+		return;
+	if (b->kshim_drain_rng)
+		b->kshim_drain_rng(b->kshim_drain_ctx, off, len);
+	else if (b->kshim_drain)
+		b->kshim_drain(b->kshim_drain_ctx);
+}
 static inline u64 bdev_nr_bytes(struct block_device *b) { return b->size; }
 static inline unsigned int bdev_logical_block_size(struct block_device *b) { return b->logical_block_size; }
 static inline unsigned int bdev_physical_block_size(struct block_device *b) { return b->logical_block_size; }

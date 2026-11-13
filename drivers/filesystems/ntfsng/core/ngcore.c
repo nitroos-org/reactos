@@ -673,6 +673,7 @@ void ngc_umount(ngc_vol *v, int discard)
 	/* The glue waited for its unlocked writes to end (ngc_dio_end) before the teardown; none starts now. */
 	kshim_dio_drain(v->bdev);
 	v->bdev->kshim_drain = NULL;
+	v->bdev->kshim_drain_rng = NULL;
 	v->bdev->kshim_kick = NULL;
 	if (discard) {
 		/* Pending journal pages are dropped and the core sees a read-only volume: put_super writes nothing. */
@@ -2450,7 +2451,7 @@ static long ngc_write_impl(ngc_vol *v, ngc_node *n, unsigned long long off, unsi
  * Data writes whose device transfer runs without the volume lock (ngapi.h, ngc_dio_*; the NT glue uses
  * them for paging writes, nt/write.c).  What keeps the unlocked transfer correct:
  *  - The clusters stay the stream's until it ends.  Every cluster free waits for the transfers in flight
- *    first (ntfs_inc_free_clusters -> kshim_dio_drain), and the node is pinned, so not even the eviction
+ *    first (ntfs_drain_clusters -> kshim_dio_drain_range: those whose device ranges overlap the clusters), and the node is pinned, so not even the eviction
  *    of an unlinked file frees them under it.  ngc_dio_end maps the range again and refuses to publish a
  *    write whose mapping changed (the caller then writes again through ngc_write).
  *  - Nothing else writes those sectors meanwhile: they are data clusters, not held in the journal overlay
@@ -2693,7 +2694,7 @@ int ngc_dio_zero_begin(ngc_vol *v, ngc_node *n, unsigned long long upto, struct 
  * the data returned is what the stream held when the runs were mapped (the read is ordered there).  What keeps
  * it correct while the volume lock is not held:
  *  - The clusters read stay allocated until the transfer ends: every cluster free drains the transfers first
- *    (ntfs_inc_free_clusters -> kshim_dio_drain), so they cannot be reallocated and rewritten under the read,
+ *    (ntfs_drain_clusters -> kshim_dio_drain_range), so they cannot be reallocated and rewritten under the read,
  *    and the node is pinned so not even the eviction of an unlinked file frees them.  A truncate meanwhile
  *    waits at its free, so the reader gets the stream as it was before the truncate.
  *  - The sectors are data clusters that the journal overlay does not hold (checked here; it cannot start
@@ -2812,6 +2813,13 @@ void ngc_set_dio_drain(ngc_vol *v, void (*fn)(void *ctx), void *ctx)
 {
 	v->bdev->kshim_drain_ctx = ctx;
 	v->bdev->kshim_drain = fn;
+}
+
+/* The narrowed wait of a cluster free (see kshim_drain_rng); the context is the one of ngc_set_dio_drain. */
+void ngc_set_dio_drain_range(ngc_vol *v, void (*fn)(void *ctx, unsigned long long off, unsigned long long len), void *ctx)
+{
+	v->bdev->kshim_drain_ctx = ctx;
+	v->bdev->kshim_drain_rng = fn;
 }
 
 /* The allocation target of a growth step from @cur to @next bytes, 0 for exactly what @next needs (see NGC_PREALLOC_MIN). */
