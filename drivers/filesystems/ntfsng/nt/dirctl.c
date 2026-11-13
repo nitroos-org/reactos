@@ -489,14 +489,14 @@ NTSTATUS NgDirectoryControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         /* FsRtl keeps the IRP and completes it when a reported change matches the filter.  It reads the
          * directory's name whenever a change is reported: the handle's own path (no allocation per
          * registration), which a rename replaces under NotifyPathLock (info.c NgRetitleCcb). */
-        ExAcquireFastMutex(&Vcb->FcbListLock);
+        KeAcquireGuardedMutex(&Vcb->FcbListLock);
         if (!Ccb->NotifyPath.Buffer)
         {
             NgLockNotifyPath(Vcb);
             Ccb->NotifyPath = Ccb->Path;
             NgUnlockNotifyPath(Vcb);
         }
-        ExReleaseFastMutex(&Vcb->FcbListLock);
+        KeReleaseGuardedMutex(&Vcb->FcbListLock);
         /* the registration reads the name's length too */
         NgLockNotifyPath(Vcb);
         FsRtlNotifyFullChangeDirectory(Vcb->NotifySync, &Vcb->DirNotifyList, Ccb, (PSTRING)&Ccb->NotifyPath,

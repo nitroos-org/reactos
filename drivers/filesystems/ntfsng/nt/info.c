@@ -75,7 +75,7 @@ static NTSTATUS NgName(PNG_VCB Vcb, PNG_CCB Ccb, PFILE_NAME_INFORMATION N, ULONG
     ULONG Len, Copy;
     if (Room < Fixed)
         return STATUS_BUFFER_TOO_SMALL;
-    ExAcquireFastMutex(&Vcb->FcbListLock);
+    KeAcquireGuardedMutex(&Vcb->FcbListLock);
     Len = Ccb->Path.Length ? Ccb->Path.Length : sizeof(WCHAR);
     N->FileNameLength = Len;
     Copy = min(Len, Room - Fixed);
@@ -83,7 +83,7 @@ static NTSTATUS NgName(PNG_VCB Vcb, PNG_CCB Ccb, PFILE_NAME_INFORMATION N, ULONG
         RtlCopyMemory(N->FileName, Ccb->Path.Buffer, Copy);
     else if (Copy)
         N->FileName[0] = L'\\';
-    ExReleaseFastMutex(&Vcb->FcbListLock);
+    KeReleaseGuardedMutex(&Vcb->FcbListLock);
     *Used = Fixed + Copy;
     return Copy < Len ? STATUS_BUFFER_OVERFLOW : STATUS_SUCCESS;
 }
@@ -230,9 +230,9 @@ NTSTATUS NgQueryInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
                 return STATUS_BUFFER_TOO_SMALL;
             if (Fcb->IsRoot || Fcb->Stream.Length)
                 return STATUS_OBJECT_NAME_NOT_FOUND;
-            ExAcquireFastMutex(&Vcb->FcbListLock);
+            KeAcquireGuardedMutex(&Vcb->FcbListLock);
             Dir = Ccb->ParentMftNo;
-            ExReleaseFastMutex(&Vcb->FcbListLock);
+            KeReleaseGuardedMutex(&Vcb->FcbListLock);
             NgAcquireCore(Vcb);
             Err = NgEnsureNode(Fcb);
             if (!Err)
@@ -436,7 +436,7 @@ static BOOLEAN NgDirHasOpenFiles(PNG_VCB Vcb, ULONGLONG DirMftNo)
 
     /* Snapshot the MFT numbers of every open file and create in progress (the parent walk needs
      * CoreLock, which must not be taken under FcbListLock): size the array, then fill it. */
-    ExAcquireFastMutex(&Vcb->FcbListLock);
+    KeAcquireGuardedMutex(&Vcb->FcbListLock);
     for (Entry = Vcb->FcbList.Flink; Entry != &Vcb->FcbList; Entry = Entry->Flink)
     {
         PNG_FCB F = CONTAINING_RECORD(Entry, NG_FCB, VcbLinks);
@@ -454,7 +454,7 @@ static BOOLEAN NgDirHasOpenFiles(PNG_VCB Vcb, ULONGLONG DirMftNo)
                 Open[Count++] = F->MftNo;
         }
     }
-    ExReleaseFastMutex(&Vcb->FcbListLock);
+    KeReleaseGuardedMutex(&Vcb->FcbListLock);
     if (!Cap)
         return FALSE;
     if (!Open)
@@ -646,10 +646,10 @@ VOID NgPosixUnlink(PNG_FCB Fcb)
     NewPath.Length = sizeof(PathBuf);
 
     /* The handles' new names are allocated first: the move done on disk is not undone. */
-    ExAcquireFastMutex(&Vcb->FcbListLock);
+    KeAcquireGuardedMutex(&Vcb->FcbListLock);
     for (Entry = Fcb->CcbList.Flink; Entry != &Fcb->CcbList; Entry = Entry->Flink)
         Spares++;
-    ExReleaseFastMutex(&Vcb->FcbListLock);
+    KeReleaseGuardedMutex(&Vcb->FcbListLock);
     if (Spares)
     {
         Spare = ExAllocatePoolWithTag(PagedPool, Spares * sizeof(NG_RETITLE), TAG_NTFSNG);
@@ -703,7 +703,7 @@ VOID NgPosixUnlink(PNG_FCB Fcb)
     if (Fcb->DelPath.Buffer)
         NgNotifyFcb(Vcb, &Fcb->DelPath, Fcb->IsDirectory ? FILE_NOTIFY_CHANGE_DIR_NAME : FILE_NOTIFY_CHANGE_FILE_NAME,
                     FILE_ACTION_REMOVED, Fcb, Fcb->DelParentMftNo);
-    ExAcquireFastMutex(&Vcb->FcbListLock);
+    KeAcquireGuardedMutex(&Vcb->FcbListLock);
     for (Entry = Fcb->CcbList.Flink; Entry != &Fcb->CcbList; Entry = Entry->Flink)
     {
         PNG_CCB C = CONTAINING_RECORD(Entry, NG_CCB, FcbLinks);
@@ -742,7 +742,7 @@ VOID NgPosixUnlink(PNG_FCB Fcb)
         ExFreePoolWithTag(Fcb->DelPath.Buffer, TAG_NTFSNG);
         RtlZeroMemory(&Fcb->DelPath, sizeof(Fcb->DelPath));
     }
-    ExReleaseFastMutex(&Vcb->FcbListLock);
+    KeReleaseGuardedMutex(&Vcb->FcbListLock);
     NgFreeRetitles(Spare, Spares);
 }
 
@@ -805,7 +805,7 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
     /* The new name, from the target directory handle's current name (FcbListLock: a rename of that
      * directory through another handle changes it). */
     RealT = ExAllocatePoolWithTag(PagedPool, 256 * sizeof(WCHAR), TAG_NTFSNG);
-    ExAcquireFastMutex(&Vcb->FcbListLock);
+    KeAcquireGuardedMutex(&Vcb->FcbListLock);
     if (TargetFo)
     {
         NewDirPath = ((PNG_CCB)TargetFo->FsContext2)->Path;
@@ -832,7 +832,7 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
             RtlAppendUnicodeToString(&NewPath, L"\\");
         RtlAppendUnicodeStringToString(&NewPath, &NewName);
     }
-    ExReleaseFastMutex(&Vcb->FcbListLock);
+    KeReleaseGuardedMutex(&Vcb->FcbListLock);
     if (!NewPath.Buffer || !RealT)
     {
         Status = STATUS_INSUFFICIENT_RESOURCES;
@@ -942,10 +942,10 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
         /* The new names of the file's handles (and of a pending delete) are allocated first: a rename
          * done on disk is not undone. */
         PLIST_ENTRY Entry;
-        ExAcquireFastMutex(&Vcb->FcbListLock);
+        KeAcquireGuardedMutex(&Vcb->FcbListLock);
         for (Entry = Fcb->CcbList.Flink; Entry != &Fcb->CcbList; Entry = Entry->Flink)
             Spares++;
-        ExReleaseFastMutex(&Vcb->FcbListLock);
+        KeReleaseGuardedMutex(&Vcb->FcbListLock);
         Spares = max(Spares, 1);    /* this handle's is Spare[0] */
         Spare = ExAllocatePoolWithTag(PagedPool, Spares * sizeof(NG_RETITLE), TAG_NTFSNG);
         if (Spare)
@@ -1085,7 +1085,7 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
         /* Every handle opened by the old name takes the new one (a directory has a single name;
          * a file's other hard links keep theirs), this handle last: the others are matched
          * against its old name. */
-        ExAcquireFastMutex(&Vcb->FcbListLock);
+        KeAcquireGuardedMutex(&Vcb->FcbListLock);
         Used = 1;   /* Spare[0] is this handle's */
         for (Entry = Fcb->CcbList.Flink; Entry != &Fcb->CcbList; Entry = Entry->Flink)
         {
@@ -1113,7 +1113,7 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
             RtlCopyMemory(Fcb->DelName, NewName.Buffer, NewName.Length);
         }
         NgRetitleCcb(Vcb, Ccb, &Spare[0], &NewPath, NewDirMftNo, &NewName);
-        ExReleaseFastMutex(&Vcb->FcbListLock);
+        KeReleaseGuardedMutex(&Vcb->FcbListLock);
         NgNotifyFcb(Vcb, &NewPath, Filter, Moved ? FILE_ACTION_ADDED : FILE_ACTION_RENAMED_NEW_NAME, Fcb, NewDirMftNo);
     }
 out:
