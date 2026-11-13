@@ -894,6 +894,220 @@ FltpFastIoDisallowed(_In_ PDEVICE_OBJECT DeviceObject,
 }
 
 
+/*
+ * Fast I/O reads and writes go through the instances as well, with callback data that says so
+ * (FLTFL_CALLBACK_DATA_FAST_IO_OPERATION). A filter can't pend them, but it can say
+ * FLT_PREOP_DISALLOW_FASTIO, which sends the caller down the IRP path. Returns TRUE if the operation was
+ * done, with its result in IoStatus, FALSE if the caller has to use an IRP.
+ */
+BOOLEAN
+FltpFastIoReadWrite(_In_ PDEVICE_OBJECT DeviceObject,
+                    _In_ PFILE_OBJECT FileObject,
+                    _In_ BOOLEAN Write,
+                    _In_ PLARGE_INTEGER FileOffset,
+                    _In_ ULONG Length,
+                    _In_ BOOLEAN Wait,
+                    _In_ ULONG LockKey,
+                    _In_ PVOID Buffer,
+                    _Out_ PIO_STATUS_BLOCK IoStatus)
+{
+    PFLTMGR_DEVICE_EXTENSION DeviceExtension = DeviceObject->DeviceExtension;
+    PDEVICE_OBJECT Lower = DeviceExtension->AttachedToDeviceObject;
+    PFAST_IO_DISPATCH FastIoDispatch = Lower->DriverObject->FastIoDispatch;
+    PFLT_VOLUME Volume = DeviceExtension->Volume;
+    UCHAR Major = Write ? IRP_MJ_WRITE : IRP_MJ_READ;
+    PFLTP_IRPCTRL Ctrl = NULL;
+    FLT_RELATED_OBJECTS Related;
+    LARGE_INTEGER Offset = *FileOffset;
+    PLIST_ENTRY Entry;
+    ULONG Count = 0, i;
+    BOOLEAN Done, Result = FALSE, Completed = FALSE;
+
+    /* Without a lower driver for it, there's nothing to do */
+    if (FastIoDispatch == NULL ||
+        (Write ? FastIoDispatch->FastIoWrite : FastIoDispatch->FastIoRead) == NULL)
+    {
+        return FALSE;
+    }
+
+    if (KeGetCurrentIrql() <= APC_LEVEL && Volume->CallbackCount[Major])
+    {
+        KeEnterCriticalRegion();
+        ExAcquireResourceSharedLite(&Volume->InstanceList.rLock, TRUE);
+
+        for (Entry = Volume->InstanceList.rList.Flink; Entry != &Volume->InstanceList.rList; Entry = Entry->Flink)
+        {
+            PFLT_INSTANCE Instance = CONTAINING_RECORD(Entry, FLT_INSTANCE, VolumeLink);
+            PFLT_OPERATION_REGISTRATION Op = Instance->Filter->OperationTable[Major];
+
+            /* Fast I/O is cached I/O */
+            if (Op && !(Instance->Flags & INSFL_DELETING) &&
+                !(Op->Flags & FLTFL_OPERATION_REGISTRATION_SKIP_CACHED_IO))
+            {
+                Count++;
+            }
+        }
+
+        if (Count)
+            Ctrl = ExAllocatePoolWithTag(NonPagedPool, sizeof(FLTP_IRPCTRL) + (Count - 1) * sizeof(FLTP_NODE), FM_TAG_IRPCTRL);
+        if (Ctrl)
+        {
+            RtlZeroMemory(Ctrl, sizeof(FLTP_IRPCTRL) + (Count - 1) * sizeof(FLTP_NODE));
+
+            for (Entry = Volume->InstanceList.rList.Flink;
+                 Entry != &Volume->InstanceList.rList && Ctrl->Count < Count;
+                 Entry = Entry->Flink)
+            {
+                PFLT_INSTANCE Instance = CONTAINING_RECORD(Entry, FLT_INSTANCE, VolumeLink);
+                PFLT_OPERATION_REGISTRATION Op = Instance->Filter->OperationTable[Major];
+
+                if (Op && !(Instance->Flags & INSFL_DELETING) &&
+                    !(Op->Flags & FLTFL_OPERATION_REGISTRATION_SKIP_CACHED_IO) &&
+                    NT_SUCCESS(FltObjectReference(Instance)))
+                {
+                    Ctrl->Nodes[Ctrl->Count++].Instance = Instance;
+                }
+            }
+        }
+
+        ExReleaseResourceLite(&Volume->InstanceList.rLock);
+        KeLeaveCriticalRegion();
+    }
+
+    if (Ctrl && Ctrl->Count == 0)
+    {
+        ExFreePoolWithTag(Ctrl, FM_TAG_IRPCTRL);
+        Ctrl = NULL;
+    }
+
+    if (Ctrl == NULL)
+        goto CallLower;
+
+    Ctrl->RefCount = 1;
+    Ctrl->Volume = Volume;
+    Ctrl->MajorFunction = Major;
+    Ctrl->Iopb.MajorFunction = Major;
+    Ctrl->Iopb.TargetFileObject = FileObject;
+    if (Write)
+    {
+        Ctrl->Iopb.Parameters.Write.Length = Length;
+        Ctrl->Iopb.Parameters.Write.Key = LockKey;
+        Ctrl->Iopb.Parameters.Write.ByteOffset = Offset;
+        Ctrl->Iopb.Parameters.Write.WriteBuffer = Buffer;
+    }
+    else
+    {
+        Ctrl->Iopb.Parameters.Read.Length = Length;
+        Ctrl->Iopb.Parameters.Read.Key = LockKey;
+        Ctrl->Iopb.Parameters.Read.ByteOffset = Offset;
+        Ctrl->Iopb.Parameters.Read.ReadBuffer = Buffer;
+    }
+    *(PFLT_IO_PARAMETER_BLOCK *)&Ctrl->Data.Iopb = &Ctrl->Iopb;
+    *(PETHREAD *)&Ctrl->Data.Thread = PsGetCurrentThread();
+    Ctrl->Data.RequestorMode = ExGetPreviousMode();
+    Ctrl->Data.Flags = FLTFL_CALLBACK_DATA_FAST_IO_OPERATION;
+
+    /* The pre-operations */
+    for (i = 0; i < Ctrl->Count; i++)
+    {
+        PFLTP_NODE Node = &Ctrl->Nodes[i];
+        PFLT_OPERATION_REGISTRATION Op = Node->Instance->Filter->OperationTable[Major];
+        PVOID Context = NULL;
+        FLT_PREOP_CALLBACK_STATUS PreStatus;
+
+        if (Op->PreOperation == NULL)
+        {
+            Node->WantPost = (Op->PostOperation != NULL);
+            continue;
+        }
+
+        Ctrl->Iopb.TargetInstance = Node->Instance;
+        InitRelatedObjects(&Related, Ctrl, Node->Instance);
+        PreStatus = Op->PreOperation(&Ctrl->Data, &Related, &Context);
+
+        if (PreStatus == FLT_PREOP_DISALLOW_FASTIO)
+        {
+            /* The IRP path then, which gives the filters another chance */
+            goto Quit;
+        }
+        else if (PreStatus == FLT_PREOP_COMPLETE)
+        {
+            Completed = TRUE;
+            Ctrl->CompleteIndex = i;
+            break;
+        }
+        else if (PreStatus == FLT_PREOP_SUCCESS_WITH_CALLBACK || PreStatus == FLT_PREOP_SYNCHRONIZE)
+        {
+            Node->WantPost = (Op->PostOperation != NULL);
+            Node->CompletionContext = Context;
+        }
+    }
+
+    if (Completed)
+    {
+        /* The filters above the one which completed it hear about it */
+        *IoStatus = Ctrl->Data.IoStatus;
+        for (i = Ctrl->CompleteIndex; i < Ctrl->Count; i++)
+            Ctrl->Nodes[i].WantPost = FALSE;
+        Ctrl->PostIndex = Ctrl->CompleteIndex;
+        Ctrl->Data.Flags |= FLTFL_CALLBACK_DATA_POST_OPERATION;
+        Done = RunPostOperations(Ctrl);
+        if (!Done && Ctrl->Parked && Ctrl->Parked->Instance)
+        {
+            FltObjectDereference(Ctrl->Parked->Instance);
+            Ctrl->Parked->Instance = NULL;
+        }
+        *IoStatus = Ctrl->Data.IoStatus;
+        Result = TRUE;
+        goto Quit;
+    }
+
+    /* A filter may have changed what is asked */
+    if (Ctrl->Data.Flags & FLTFL_CALLBACK_DATA_DIRTY)
+    {
+        if (Write)
+        {
+            Length = Ctrl->Iopb.Parameters.Write.Length;
+            Offset = Ctrl->Iopb.Parameters.Write.ByteOffset;
+            Buffer = Ctrl->Iopb.Parameters.Write.WriteBuffer;
+            LockKey = Ctrl->Iopb.Parameters.Write.Key;
+        }
+        else
+        {
+            Length = Ctrl->Iopb.Parameters.Read.Length;
+            Offset = Ctrl->Iopb.Parameters.Read.ByteOffset;
+            Buffer = Ctrl->Iopb.Parameters.Read.ReadBuffer;
+            LockKey = Ctrl->Iopb.Parameters.Read.Key;
+        }
+    }
+
+CallLower:
+    if (Write)
+        Result = FastIoDispatch->FastIoWrite(FileObject, &Offset, Length, Wait, LockKey, Buffer, IoStatus, Lower);
+    else
+        Result = FastIoDispatch->FastIoRead(FileObject, &Offset, Length, Wait, LockKey, Buffer, IoStatus, Lower);
+
+    /* The post-operations see it if it was done */
+    if (Ctrl && Result)
+    {
+        Ctrl->Data.IoStatus = *IoStatus;
+        Ctrl->Data.Flags |= FLTFL_CALLBACK_DATA_POST_OPERATION;
+        Ctrl->PostIndex = Ctrl->Count;
+        Done = RunPostOperations(Ctrl);
+        if (!Done && Ctrl->Parked && Ctrl->Parked->Instance)
+        {
+            FltObjectDereference(Ctrl->Parked->Instance);
+            Ctrl->Parked->Instance = NULL;
+        }
+        *IoStatus = Ctrl->Data.IoStatus;
+    }
+
+Quit:
+    if (Ctrl)
+        FreeCtrl(Ctrl);
+    return Result;
+}
+
 /* EXPORTED FUNCTIONS *******************************************************/
 
 VOID

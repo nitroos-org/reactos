@@ -8,6 +8,8 @@ extern void func_comms(void);
 extern void func_load(void);
 extern void func_bootcheck(void);
 extern void func_stress(void);
+extern void func_eof(void);
+extern void func_reload(void);
 
 const struct test winetest_testlist[] =
 {
@@ -18,5 +20,7 @@ const struct test winetest_testlist[] =
     { "load", func_load },
     { "bootcheck", func_bootcheck },
     { "stress", func_stress },
+    { "eof", func_eof },
+    { "reload", func_reload },
     { 0, 0 }
 };

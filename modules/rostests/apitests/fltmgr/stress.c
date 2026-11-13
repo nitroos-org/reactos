@@ -273,7 +273,6 @@ Churn(PVOID Parameter)
         hr = FilterConnectCommunicationPort(L"\\FltSampleChurnPort", 0, NULL, 0, NULL, &Port);
         if (SUCCEEDED(hr))
             CloseHandle(Port);
-        Sleep(3000);
         if (!UnloadSample(&B, FALSE))
         {
             Fail(Stress, L"unload", 0);
@@ -342,4 +341,72 @@ START_TEST(stress)
     UnloadSample(&A, TRUE);
     ok(A.LastLive == 0, "%lu instances left\n", A.LastLive);
     ok(A.LastCtxAlloc == A.LastCtxCleaned, "%lu contexts allocated, %lu freed\n", A.LastCtxAlloc, A.LastCtxCleaned);
+}
+
+/*
+ * eof: a read at the end of a file must set the IO_STATUS_BLOCK, whichever way the file system is reached
+ * (the fast I/O path, or the IRP when a filter wants to see reads).
+ */
+START_TEST(eof)
+{
+    WCHAR Path[MAX_PATH];
+    HANDLE File;
+    IO_STATUS_BLOCK Iosb;
+    LARGE_INTEGER Offset;
+    NTSTATUS Status;
+    UCHAR Buffer[16];
+    DWORD Done;
+    /* (The unbuffered read goes by IRP: this system leaves the status block alone when such a read fails at once, with or without a filter) */
+    ULONG Flags[1] = { 0 };
+    ULONG i;
+
+    EnsureTestDirectory();
+    MakeTestFile(L"eof.txt", Path, RTL_NUMBER_OF(Path));
+
+    for (i = 0; i < RTL_NUMBER_OF(Flags); i++)
+    {
+        File = CreateFileW(Path, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, Flags[i], NULL);
+        ok(File != INVALID_HANDLE_VALUE, "Create failed: %lu\n", GetLastError());
+        if (File == INVALID_HANDLE_VALUE)
+            return;
+        {
+            UCHAR Block[4096] = { 1 };
+            WriteFile(File, Block, sizeof(Block), &Done, NULL);
+        }
+
+        Iosb.Status = -1;
+        Iosb.Information = -1;
+        Offset.QuadPart = 4096;
+        Status = NtReadFile(File, NULL, NULL, NULL, &Iosb, Buffer, i ? 512 : sizeof(Buffer), &Offset, NULL);
+        ok(Status == STATUS_END_OF_FILE, "Flags %lu: NtReadFile returned 0x%lx\n", Flags[i], Status);
+        ok(Iosb.Status == STATUS_END_OF_FILE, "Flags %lu: Iosb.Status is 0x%lx\n", Flags[i], Iosb.Status);
+        ok(Iosb.Information == 0, "Flags %lu: Iosb.Information is %Iu\n", Flags[i], Iosb.Information);
+        CloseHandle(File);
+    }
+    DeleteFileW(Path);
+}
+
+/* reload: what loading and unloading the same sample again and again does */
+START_TEST(reload)
+{
+    SAMPLE A = { { 0 } };
+    HRESULT hr;
+    ULONG i;
+
+    if (!StartFilterManager())
+        return;
+
+    for (i = 0; i < 3; i++)
+    {
+        BOOL Loaded = LoadSample(&A, L"FltSampleR", L"380000", 0xFFFF);
+
+        trace("cycle %lu: load %d (error %lu)\n", i, Loaded, GetLastError());
+        if (!Loaded)
+        {
+            hr = FilterLoad(L"FltSampleR");
+            trace("  FilterLoad again: 0x%lx\n", (ULONG)hr);
+            break;
+        }
+        ok(UnloadSample(&A, TRUE), "unload %lu\n", i);
+    }
 }

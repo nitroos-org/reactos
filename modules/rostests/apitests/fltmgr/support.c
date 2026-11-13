@@ -74,6 +74,7 @@ LoadSample(PSAMPLE Sample, PCWSTR Name, PCWSTR Altitude, ULONG AttachMask)
     HRESULT hr;
     PWCHAR Slash;
     WCHAR Device[64];
+    ULONG i;
 
     ZeroMemory(Sample, sizeof(*Sample));
     Sample->Control = INVALID_HANDLE_VALUE;
@@ -113,7 +114,14 @@ LoadSample(PSAMPLE Sample, PCWSTR Name, PCWSTR Altitude, ULONG AttachMask)
     if (!SetupInstanceKey(Name, Altitude, AttachMask))
         return FALSE;
 
-    hr = FilterLoad(Name);
+    /* The image of an earlier load of the name can take a few seconds to be gone (seen on the i386 debug build) */
+    for (i = 0; i < 150; i++)
+    {
+        hr = FilterLoad(Name);
+        if (hr != HRESULT_FROM_WIN32(ERROR_SERVICE_ALREADY_RUNNING))
+            break;
+        Sleep(100);
+    }
     if (FAILED(hr))
     {
         trace("FilterLoad(%ls) failed with 0x%lx\n", Name, (ULONG)hr);
@@ -125,12 +133,49 @@ LoadSample(PSAMPLE Sample, PCWSTR Name, PCWSTR Altitude, ULONG AttachMask)
     return Sample->Control != INVALID_HANDLE_VALUE;
 }
 
+/* Is there a driver object of that name? */
+static
+BOOL
+DriverObjectExists(PCWSTR Name)
+{
+    UNICODE_STRING Directory = RTL_CONSTANT_STRING(L"\\Driver");
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    UCHAR Buffer[512];
+    POBJECT_DIRECTORY_INFORMATION Info = (POBJECT_DIRECTORY_INFORMATION)Buffer;
+    HANDLE Handle;
+    ULONG Context = 0, Length;
+    BOOLEAN Restart = TRUE;
+    BOOL Found = FALSE;
+    NTSTATUS Status;
+
+    InitializeObjectAttributes(&ObjectAttributes, &Directory, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    if (!NT_SUCCESS(NtOpenDirectoryObject(&Handle, DIRECTORY_QUERY, &ObjectAttributes)))
+        return FALSE;
+
+    for (;;)
+    {
+        Status = NtQueryDirectoryObject(Handle, Buffer, sizeof(Buffer), TRUE, Restart, &Context, &Length);
+        Restart = FALSE;
+        if (!NT_SUCCESS(Status))
+            break;
+        if (Info->Name.Length == lstrlenW(Name) * sizeof(WCHAR) &&
+            !_wcsnicmp(Info->Name.Buffer, Name, Info->Name.Length / sizeof(WCHAR)))
+        {
+            Found = TRUE;
+            break;
+        }
+    }
+    NtClose(Handle);
+    return Found;
+}
+
 BOOL
 UnloadSample(PSAMPLE Sample, BOOL ExpectUnload)
 {
     SC_HANDLE Manager, Service;
     HRESULT hr;
     BOOL Ret;
+    ULONG i;
 
     if (Sample->Control != INVALID_HANDLE_VALUE)
     {
@@ -166,6 +211,9 @@ UnloadSample(PSAMPLE Sample, BOOL ExpectUnload)
         CloseServiceHandle(Manager);
     }
 
+    /* The driver object goes a moment after the call returned, and the next load of the name has to wait for it */
+    for (i = 0; i < 400 && DriverObjectExists(Sample->Name); i++)
+        Sleep(25);
     DeleteFileW(Sample->Image);
     Sample->ServiceCreated = FALSE;
     return TRUE;
