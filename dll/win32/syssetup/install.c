@@ -26,6 +26,7 @@
 #include <rpcproxy.h>
 #include <ndk/cmfuncs.h>
 #include <reactos/rosbrand.h>
+#include <reactos/certseed.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -1645,6 +1646,10 @@ SeedRootCertificates(VOID)
             }
             RegCloseKey(hKey);
         }
+
+        /* The boot service skips its work while this matches */
+        if (!CertSeedWriteMarker())
+            DPRINT1("SeedRootCertificates: cannot record the seed marker\n");
     }
     FreeLibrary(hCrypt32);
 }
