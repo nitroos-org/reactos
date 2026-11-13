@@ -101,6 +101,10 @@ HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.U
 HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Composition.Interactions.VisualInteractionSource","DllPath",0x00020000,"%SystemRoot%\SysWOW64\dcomp.dll"
 HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Composition.Interactions.VisualInteractionSource","Threading",0x00010001,0
 HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Composition.Interactions.VisualInteractionSource","TrustLevel",0x00010001,0
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Composition.Interactions.InteractionTracker","ActivationType",0x00010001,0
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Composition.Interactions.InteractionTracker","DllPath",0x00020000,"%SystemRoot%\SysWOW64\dcomp.dll"
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Composition.Interactions.InteractionTracker","Threading",0x00010001,0
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Composition.Interactions.InteractionTracker","TrustLevel",0x00010001,0
 
 ; Web browser registrations name the 64-bit Internet Explorer through %ProgramW6432%. hivesft.inf and hivecls.inf use
 ; %ProgramFiles%, which a 32-bit process expands to "Program Files (x86)", where this system has no iexplore.exe:

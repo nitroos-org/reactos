@@ -28,6 +28,10 @@ WIFACE(ICompositionSurface)
 WIFACE(ICompositionDrawingSurface)
 WIFACE(ICompositor)
 WIFACE(ICompositionTarget)
+WIFACE(ICompositionAnimation)
+WIFACE(ICompositionAnimationBase)
+WIFACE(IExpressionAnimation)
+WIFACE(ICompositionPropertySet)
 
 typedef __x_ABI_CWindows_CFoundation_CIClosable WIClosable;
 typedef __x_ABI_CWindows_CFoundation_CIClosableVtbl WIClosableVtbl;
@@ -35,6 +39,8 @@ typedef __x_ABI_CWindows_CFoundation_CNumerics_CVector2 Vec2;
 typedef __x_ABI_CWindows_CFoundation_CNumerics_CVector3 Vec3;
 typedef __x_ABI_CWindows_CFoundation_CNumerics_CQuaternion Quat;
 typedef __x_ABI_CWindows_CFoundation_CNumerics_CMatrix4x4 Mat4;
+typedef __x_ABI_CWindows_CFoundation_CNumerics_CMatrix3x2 Mat3x2;
+typedef __x_ABI_CWindows_CFoundation_CNumerics_CVector4 Vec4;
 
 /*
  * Windows.UI.Composition.Desktop.IDesktopWindowTarget and Windows.Win32 IDesktopWindowTargetInterop.
@@ -280,9 +286,167 @@ typedef struct WICompositionNineGridBrushVtbl
 struct WICompositionNineGridBrush { const WICompositionNineGridBrushVtbl *lpVtbl; };
 DEFINE_GUID(IID_ICompositionNineGridBrush, 0xf25154e4, 0xbc8c, 0x4be7, 0xb8, 0x0f, 0x86, 0x85, 0xb8, 0x3c, 0x01, 0x86);
 
+/*
+ * ExpressionAnimation, CompositionAnimation, CompositionPropertySet and the Interactions.InteractionTracker family.
+ * Source: microsoft/windows-rs (MIT OR Apache-2.0), the published `windows` crate 0.62.2 (vcs commit
+ * 32c3144490c016fe496a0aed769bce60987a2e9d), src/Windows/UI/Composition/mod.rs and
+ * src/Windows/UI/Composition/Interactions/mod.rs (the *_Vtbl structs give the slot order; define_interface! the
+ * guids), cross-checked with metadata/winrt/Windows.UI.Composition{,.Interactions}.rdl at commit
+ * 8ca69fdaa9d69c78b9bcfbee96c6916f2282e7f0. Only GUIDs, slot order and signatures were taken, no code. Slots count from
+ * 6 (after IInspectable):
+ *   ICompositionAnimation 464c4c2c-1caa-4061-9b40-e13fde1503ca: 6 ClearAllParameters, 7 ClearParameter, 8 SetColorParameter,
+ *     9 SetMatrix3x2Parameter, 10 SetMatrix4x4Parameter, 11 SetQuaternionParameter, 12 SetReferenceParameter,
+ *     13 SetScalarParameter, 14 SetVector2Parameter, 15 SetVector3Parameter, 16 SetVector4Parameter
+ *   ICompositionAnimation2 369b603e-a80f-4948-93e3-ed23fb38c6cb: 6 SetBooleanParameter, 7/8 get/put Target (string)
+ *   ICompositionAnimationBase 1c2c2999-e818-48d3-a6dd-d78c82f8ace9: no members
+ *   IExpressionAnimation 6acc5431-7d3d-4bf3-abb6-f44bdc4888c1: 6/7 get/put Expression (string)
+ *   ICompositionPropertySet c9d6d202-5f67-4453-9117-9eadd430d3c2: 6..13 InsertColor, Matrix3x2, Matrix4x4, Quaternion,
+ *     Scalar, Vector2, Vector3, Vector4; 14..21 TryGet of the same eight, each (name, out value) -> CompositionGetValueStatus
+ *     (Succeeded 0, TypeMismatch 1, NotFound 2)
+ *   ICompositionInteractionSourceCollection 1b468e4b-a5bf-47d8-a547-3894155a158c: 6 get Count (int32), 7 Add, 8 Remove,
+ *     9 RemoveAll (ICompositionInteractionSource)
+ *   IInteractionTracker 2a8e8cb1-1000-4416-8363-cc27fb877308: 6 get InteractionSources, 7 get IsPositionRoundingSuggested,
+ *     8/9 MaxPosition, 10/11 MaxScale, 12/13 MinPosition, 14/15 MinScale, 16 get NaturalRestingPosition, 17 get
+ *     NaturalRestingScale, 18 get Owner, 19 get Position, 20/21 PositionInertiaDecayRate (IReference<Vector3>), 22 get
+ *     PositionVelocityInPixelsPerSecond, 23 get Scale, 24/25 ScaleInertiaDecayRate (IReference<float>), 26 get
+ *     ScaleVelocityInPercentPerSecond, 27 AdjustPositionXIfGreaterThanThreshold, 28 ..YIf.., 29 ConfigurePositionXInertiaModifiers,
+ *     30 ..Y.., 31 ConfigureScaleInertiaModifiers, 32 TryUpdatePosition, 33 TryUpdatePositionBy, 34 TryUpdatePositionWithAnimation,
+ *     35 TryUpdatePositionWithAdditionalVelocity, 36 TryUpdateScale, 37 TryUpdateScaleWithAnimation, 38 TryUpdateScaleWithAdditionalVelocity
+ *   IInteractionTrackerStatics bba5d7b7-6590-4498-8d6c-eb62b514c92a: 6 Create(Compositor), 7 CreateWithOwner(Compositor, Owner)
+ * Defaults from learn.microsoft.com (MicrosoftDocs/winrt-api commit 4c1e9164521785f82dc63ab57a5ee4644f9d1888,
+ * windows.ui.composition.interactions/interactiontracker*.md): Position 0, Scale 1, MinScale and MaxScale 1.
+ */
+typedef struct WICompositionAnimation2 WICompositionAnimation2;
+typedef struct WICompositionAnimation2Vtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(WICompositionAnimation2 *This, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(WICompositionAnimation2 *This);
+    ULONG (STDMETHODCALLTYPE *Release)(WICompositionAnimation2 *This);
+    HRESULT (STDMETHODCALLTYPE *GetIids)(WICompositionAnimation2 *This, ULONG *count, IID **iids);
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(WICompositionAnimation2 *This, HSTRING *name);
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(WICompositionAnimation2 *This, TrustLevel *level);
+    HRESULT (STDMETHODCALLTYPE *SetBooleanParameter)(WICompositionAnimation2 *This, HSTRING key, BOOLEAN value);
+    HRESULT (STDMETHODCALLTYPE *get_Target)(WICompositionAnimation2 *This, HSTRING *value);
+    HRESULT (STDMETHODCALLTYPE *put_Target)(WICompositionAnimation2 *This, HSTRING value);
+} WICompositionAnimation2Vtbl;
+struct WICompositionAnimation2 { const WICompositionAnimation2Vtbl *lpVtbl; };
+
+typedef struct WICompositionInteractionSourceCollection WICompositionInteractionSourceCollection;
+typedef struct WICompositionInteractionSourceCollectionVtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(WICompositionInteractionSourceCollection *This, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(WICompositionInteractionSourceCollection *This);
+    ULONG (STDMETHODCALLTYPE *Release)(WICompositionInteractionSourceCollection *This);
+    HRESULT (STDMETHODCALLTYPE *GetIids)(WICompositionInteractionSourceCollection *This, ULONG *count, IID **iids);
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(WICompositionInteractionSourceCollection *This, HSTRING *name);
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(WICompositionInteractionSourceCollection *This, TrustLevel *level);
+    HRESULT (STDMETHODCALLTYPE *get_Count)(WICompositionInteractionSourceCollection *This, INT32 *value);
+    HRESULT (STDMETHODCALLTYPE *Add)(WICompositionInteractionSourceCollection *This, WICompositionInteractionSource *value);
+    HRESULT (STDMETHODCALLTYPE *Remove)(WICompositionInteractionSourceCollection *This, WICompositionInteractionSource *value);
+    HRESULT (STDMETHODCALLTYPE *RemoveAll)(WICompositionInteractionSourceCollection *This);
+} WICompositionInteractionSourceCollectionVtbl;
+struct WICompositionInteractionSourceCollection { const WICompositionInteractionSourceCollectionVtbl *lpVtbl; };
+
+typedef struct WIInteractionTracker WIInteractionTracker;
+typedef struct WIInteractionTrackerVtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(WIInteractionTracker *This, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(WIInteractionTracker *This);
+    ULONG (STDMETHODCALLTYPE *Release)(WIInteractionTracker *This);
+    HRESULT (STDMETHODCALLTYPE *GetIids)(WIInteractionTracker *This, ULONG *count, IID **iids);
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(WIInteractionTracker *This, HSTRING *name);
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(WIInteractionTracker *This, TrustLevel *level);
+    HRESULT (STDMETHODCALLTYPE *get_InteractionSources)(WIInteractionTracker *This, WICompositionInteractionSourceCollection **value);
+    HRESULT (STDMETHODCALLTYPE *get_IsPositionRoundingSuggested)(WIInteractionTracker *This, BOOLEAN *value);
+    HRESULT (STDMETHODCALLTYPE *get_MaxPosition)(WIInteractionTracker *This, Vec3 *value);
+    HRESULT (STDMETHODCALLTYPE *put_MaxPosition)(WIInteractionTracker *This, Vec3 value);
+    HRESULT (STDMETHODCALLTYPE *get_MaxScale)(WIInteractionTracker *This, FLOAT *value);
+    HRESULT (STDMETHODCALLTYPE *put_MaxScale)(WIInteractionTracker *This, FLOAT value);
+    HRESULT (STDMETHODCALLTYPE *get_MinPosition)(WIInteractionTracker *This, Vec3 *value);
+    HRESULT (STDMETHODCALLTYPE *put_MinPosition)(WIInteractionTracker *This, Vec3 value);
+    HRESULT (STDMETHODCALLTYPE *get_MinScale)(WIInteractionTracker *This, FLOAT *value);
+    HRESULT (STDMETHODCALLTYPE *put_MinScale)(WIInteractionTracker *This, FLOAT value);
+    HRESULT (STDMETHODCALLTYPE *get_NaturalRestingPosition)(WIInteractionTracker *This, Vec3 *value);
+    HRESULT (STDMETHODCALLTYPE *get_NaturalRestingScale)(WIInteractionTracker *This, FLOAT *value);
+    HRESULT (STDMETHODCALLTYPE *get_Owner)(WIInteractionTracker *This, void **value);
+    HRESULT (STDMETHODCALLTYPE *get_Position)(WIInteractionTracker *This, Vec3 *value);
+    HRESULT (STDMETHODCALLTYPE *get_PositionInertiaDecayRate)(WIInteractionTracker *This, void **value);
+    HRESULT (STDMETHODCALLTYPE *put_PositionInertiaDecayRate)(WIInteractionTracker *This, void *value);
+    HRESULT (STDMETHODCALLTYPE *get_PositionVelocityInPixelsPerSecond)(WIInteractionTracker *This, Vec3 *value);
+    HRESULT (STDMETHODCALLTYPE *get_Scale)(WIInteractionTracker *This, FLOAT *value);
+    HRESULT (STDMETHODCALLTYPE *get_ScaleInertiaDecayRate)(WIInteractionTracker *This, void **value);
+    HRESULT (STDMETHODCALLTYPE *put_ScaleInertiaDecayRate)(WIInteractionTracker *This, void *value);
+    HRESULT (STDMETHODCALLTYPE *get_ScaleVelocityInPercentPerSecond)(WIInteractionTracker *This, FLOAT *value);
+    HRESULT (STDMETHODCALLTYPE *AdjustPositionXIfGreaterThanThreshold)(WIInteractionTracker *This, FLOAT adjustment, FLOAT threshold);
+    HRESULT (STDMETHODCALLTYPE *AdjustPositionYIfGreaterThanThreshold)(WIInteractionTracker *This, FLOAT adjustment, FLOAT threshold);
+    HRESULT (STDMETHODCALLTYPE *ConfigurePositionXInertiaModifiers)(WIInteractionTracker *This, void *modifiers);
+    HRESULT (STDMETHODCALLTYPE *ConfigurePositionYInertiaModifiers)(WIInteractionTracker *This, void *modifiers);
+    HRESULT (STDMETHODCALLTYPE *ConfigureScaleInertiaModifiers)(WIInteractionTracker *This, void *modifiers);
+    HRESULT (STDMETHODCALLTYPE *TryUpdatePosition)(WIInteractionTracker *This, Vec3 value, INT32 *result);
+    HRESULT (STDMETHODCALLTYPE *TryUpdatePositionBy)(WIInteractionTracker *This, Vec3 amount, INT32 *result);
+    HRESULT (STDMETHODCALLTYPE *TryUpdatePositionWithAnimation)(WIInteractionTracker *This, WICompositionAnimation *animation, INT32 *result);
+    HRESULT (STDMETHODCALLTYPE *TryUpdatePositionWithAdditionalVelocity)(WIInteractionTracker *This, Vec3 velocity, INT32 *result);
+    HRESULT (STDMETHODCALLTYPE *TryUpdateScale)(WIInteractionTracker *This, FLOAT value, Vec3 center, INT32 *result);
+    HRESULT (STDMETHODCALLTYPE *TryUpdateScaleWithAnimation)(WIInteractionTracker *This, WICompositionAnimation *animation, Vec3 center, INT32 *result);
+    HRESULT (STDMETHODCALLTYPE *TryUpdateScaleWithAdditionalVelocity)(WIInteractionTracker *This, FLOAT velocity, Vec3 center, INT32 *result);
+} WIInteractionTrackerVtbl;
+struct WIInteractionTracker { const WIInteractionTrackerVtbl *lpVtbl; };
+
+typedef struct WIInteractionTrackerStatics WIInteractionTrackerStatics;
+typedef struct WIInteractionTrackerStaticsVtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(WIInteractionTrackerStatics *This, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(WIInteractionTrackerStatics *This);
+    ULONG (STDMETHODCALLTYPE *Release)(WIInteractionTrackerStatics *This);
+    HRESULT (STDMETHODCALLTYPE *GetIids)(WIInteractionTrackerStatics *This, ULONG *count, IID **iids);
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(WIInteractionTrackerStatics *This, HSTRING *name);
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(WIInteractionTrackerStatics *This, TrustLevel *level);
+    HRESULT (STDMETHODCALLTYPE *Create)(WIInteractionTrackerStatics *This, WICompositor *compositor, WIInteractionTracker **result);
+    HRESULT (STDMETHODCALLTYPE *CreateWithOwner)(WIInteractionTrackerStatics *This, WICompositor *compositor, void *owner,
+            WIInteractionTracker **result);
+} WIInteractionTrackerStaticsVtbl;
+struct WIInteractionTrackerStatics { const WIInteractionTrackerStaticsVtbl *lpVtbl; };
+
+DEFINE_GUID(IID_ICompositionAnimation, 0x464c4c2c, 0x1caa, 0x4061, 0x9b, 0x40, 0xe1, 0x3f, 0xde, 0x15, 0x03, 0xca);
+DEFINE_GUID(IID_ICompositionAnimation2, 0x369b603e, 0xa80f, 0x4948, 0x93, 0xe3, 0xed, 0x23, 0xfb, 0x38, 0xc6, 0xcb);
+DEFINE_GUID(IID_ICompositionAnimationBase, 0x1c2c2999, 0xe818, 0x48d3, 0xa6, 0xdd, 0xd7, 0x8c, 0x82, 0xf8, 0xac, 0xe9);
+DEFINE_GUID(IID_IExpressionAnimation, 0x6acc5431, 0x7d3d, 0x4bf3, 0xab, 0xb6, 0xf4, 0x4b, 0xdc, 0x48, 0x88, 0xc1);
+DEFINE_GUID(IID_ICompositionPropertySet, 0xc9d6d202, 0x5f67, 0x4453, 0x91, 0x17, 0x9e, 0xad, 0xd4, 0x30, 0xd3, 0xc2);
+DEFINE_GUID(IID_ICompositionInteractionSourceCollection, 0x1b468e4b, 0xa5bf, 0x47d8, 0xa5, 0x47, 0x38, 0x94, 0x15, 0x5a, 0x15, 0x8c);
+DEFINE_GUID(IID_IInteractionTracker, 0x2a8e8cb1, 0x1000, 0x4416, 0x83, 0x63, 0xcc, 0x27, 0xfb, 0x87, 0x73, 0x08);
+DEFINE_GUID(IID_IInteractionTrackerStatics, 0xbba5d7b7, 0x6590, 0x4498, 0x8d, 0x6c, 0xeb, 0x62, 0xb5, 0x14, 0xc9, 0x2a);
+
+/* a stored parameter of a CompositionAnimation, or an entry of a CompositionPropertySet */
+enum ptype { PT_COLOR = 1, PT_M32, PT_M44, PT_QUAT, PT_REF, PT_SCALAR, PT_V2, PT_V3, PT_V4, PT_BOOL };
+struct cparam
+{
+    WCHAR *name;
+    enum ptype type;
+    union
+    {
+        __x_ABI_CWindows_CUI_CColor c;
+        Mat3x2 m32;
+        Mat4 m44;
+        Quat q;
+        float f;
+        Vec2 v2;
+        Vec3 v3;
+        Vec4 v4;
+        BOOLEAN b;
+    } v;
+    IUnknown *ref;                  /* PT_REF: referenced */
+};
+
+/* CompositionObject.StartAnimation bookkeeping: the animation started on a property name */
+struct canim_start
+{
+    WCHAR *name;
+    IUnknown *anim;                 /* referenced */
+};
+
 enum cobj_kind
 {
-    K_CONTAINER, K_SPRITE, K_VCOLL, K_COLORBRUSH, K_SURFBRUSH, K_INSETCLIP, K_GDEVICE, K_DSURFACE, K_TARGET, K_VISRC, K_NINEGRID
+    K_CONTAINER, K_SPRITE, K_VCOLL, K_COLORBRUSH, K_SURFBRUSH, K_INSETCLIP, K_GDEVICE, K_DSURFACE, K_TARGET, K_VISRC, K_NINEGRID, K_EXPRANIM, K_PROPSET, K_TRACKER, K_ISRCCOLL
 };
 #define KM(k) (1u << (k))
 #define KM_VISUAL (KM(K_CONTAINER) | KM(K_SPRITE))
@@ -314,6 +478,13 @@ struct cobj
     WIVisualInteractionSource visrc;
     WIVisualInteractionSource2 visrc2;
     WIVisualInteractionSource3 visrc3;
+    WICompositionAnimation anim;
+    WICompositionAnimation2 anim2;
+    WICompositionAnimationBase animbase;
+    WIExpressionAnimation expr;
+    WICompositionPropertySet propset;
+    WIInteractionTracker tracker;
+    WICompositionInteractionSourceCollection srccoll;
     WICompositionInteractionSource intsrc;
     INitroDrawingSurfaceInterop dsinterop;
     INitroCompositionTest test;
@@ -385,6 +556,28 @@ struct cobj
     INT32 redirect_mode;
     INT32 chain_px, chain_py, chain_s;
     INT32 mode_px, mode_py, mode_s;
+
+    /* every CompositionObject: Properties (created on first use, referenced) and the started animations */
+    struct cobj *props;
+    struct canim_start *started;
+    int nstarted, capstarted;
+
+    /* CompositionAnimation / ExpressionAnimation (and the entries of a CompositionPropertySet) */
+    struct cparam *params;
+    int nparams, capparams;
+    HSTRING expression;             /* ExpressionAnimation.Expression, NULL = empty */
+    HSTRING anim_target;            /* CompositionAnimation.Target, NULL = empty */
+
+    /* InteractionTracker (stored state only: no input handling, no inertia, no animation) */
+    struct cobj *srcs;              /* InteractionSources, referenced */
+    IUnknown *towner;               /* IInteractionTrackerOwner, referenced, may be NULL */
+    Vec3 tmin, tmax, tpos;
+    float tscale, tminscale, tmaxscale;
+    IUnknown *pdecay, *sdecay;      /* IReference<Vector3> / IReference<float>, referenced, may be NULL */
+
+    /* CompositionInteractionSourceCollection */
+    IUnknown **sources;             /* identities, referenced */
+    int nsources, capsources;
 };
 
 void comp_lock(void);
@@ -408,5 +601,9 @@ HRESULT comp_surface_brush_set_surface(struct cobj *brush, WICompositionSurface 
 HRESULT comp_create(IUnknown *compositor, enum cobj_kind kind, struct cobj **out);
 /* *out: the IDesktopWindowTarget interface of the new object (one reference) */
 HRESULT comp_new_desktop_target(IUnknown *compositor, HWND hwnd, BOOL topmost, WIDesktopWindowTarget **out);
+/* *out: the IInteractionTracker interface of the new object (one reference); compositor is the ICompositor, owner an IInteractionTrackerOwner or NULL */
+HRESULT comp_new_interaction_tracker(WICompositor *compositor, void *owner, WIInteractionTracker **out);
+/* *out: the IExpressionAnimation interface of the new object (one reference); expression may be NULL */
+HRESULT comp_new_expression_animation(IUnknown *compositor, HSTRING expression, WIExpressionAnimation **out);
 /* *out: the IVisualInteractionSource interface of the new object (one reference); source is a visual of this object model */
 HRESULT comp_new_visual_interaction_source(WIVisual *source, WIVisualInteractionSource **out);
