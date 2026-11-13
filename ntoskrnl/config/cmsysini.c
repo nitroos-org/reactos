@@ -1855,6 +1855,9 @@ CmInitSystem1(VOID)
         KeBugCheckEx(CONFIG_INITIALIZATION_FAILED, 1, 15, Status, 0);
     }
 
+    /* Registry access control mode and the audit shadow check (never fails the boot) */
+    CmpAclInitialize();
+
     /* Free the load options */
     ExFreePoolWithTag(CmpLoadOptions.Buffer, TAG_CM);
 
@@ -2296,6 +2299,9 @@ CmShutdownSystem(VOID)
 {
     PLIST_ENTRY ListEntry;
     PCMHIVE Hive;
+
+    /* Stop the audit log writer: it must not write once the file systems shut down, and its counters go into the hives */
+    CmpAclShutdownSystem();
 
     /* Kill the workers */
     if (!CmFirstTime) CmpShutdownWorkers();

@@ -588,6 +588,18 @@ CmpDoCreate(IN PHHIVE Hive,
             KeyBody->KeyControlBlock->Flags = CellData->u.KeyNode.Flags;
             HvReleaseCell(Hive, KeyCell);
         }
+
+        /* Registry ACL audit: the right Windows checks on the parent (logged only, the create stands) */
+        if (ParseContext->CreateOptions & REG_OPTION_CREATE_LINK)
+        {
+            CmpShadowAccessCheck(ParentKcb, Name, CM_REGACL_OP_CREATELINK, AccessState,
+                                 KEY_CREATE_LINK, 0, 0, AccessMode, ParseContext->CreateOptions);
+        }
+        else
+        {
+            CmpShadowAccessCheck(ParentKcb, Name, CM_REGACL_OP_CREATE, AccessState,
+                                 KEY_CREATE_SUB_KEY, 0, 0, AccessMode, ParseContext->CreateOptions);
+        }
     }
 
 Exit:
@@ -609,6 +621,7 @@ CmpDoOpen(IN PHHIVE Hive,
           IN OUT PCM_KEY_CONTROL_BLOCK *CachedKcb,
           IN PULONG KcbsLocked,
           IN PUNICODE_STRING KeyName,
+          IN ULONG AclOptions,
           OUT PVOID *Object)
 {
     NTSTATUS Status;
@@ -616,6 +629,7 @@ CmpDoOpen(IN PHHIVE Hive,
     BOOLEAN IsLockShared = FALSE;
     PCM_KEY_BODY KeyBody = NULL;
     PCM_KEY_CONTROL_BLOCK Kcb = NULL;
+    ACCESS_MASK AclDesired, AclPrevious;
 
     /* Make sure the hive isn't locked */
     if ((Hive->HiveFlags & HIVE_IS_UNLOADING) &&
@@ -809,6 +823,10 @@ CmpDoOpen(IN PHHIVE Hive,
          */
         KeyBody->KcbLocked = TRUE;
 
+        /* What the access check is asked for, before it updates the access state */
+        AclDesired = AccessState->RemainingDesiredAccess;
+        AclPrevious = AccessState->PreviouslyGrantedAccess;
+
         if (!ObCheckObjectAccess(*Object,
                                  AccessState,
                                  FALSE,
@@ -817,6 +835,19 @@ CmpDoOpen(IN PHHIVE Hive,
         {
             /* Access check failed */
             ObDereferenceObject(*Object);
+        }
+        else
+        {
+            /* Registry ACL audit: what Windows would decide (logged only, the open stands) */
+            CmpShadowAccessCheck(Kcb,
+                                 NULL,
+                                 CM_REGACL_OP_OPEN,
+                                 AccessState,
+                                 AclDesired,
+                                 AclPrevious,
+                                 AccessState->PreviouslyGrantedAccess,
+                                 AccessMode,
+                                 AclOptions);
         }
 
         /*
@@ -941,6 +972,7 @@ CmpCreateLinkNode(IN PHHIVE Hive,
                            &Kcb,
                            KcbsLocked,
                            &Name,
+                           Context->CreateOptions,
                            Object);
         HvReleaseCell(Context->ChildHive.KeyHive, KeyCell);
     }
@@ -962,6 +994,10 @@ CmpCreateLinkNode(IN PHHIVE Hive,
         {
             /* Setup root pointer */
             Context->ChildHive.KeyHive->BaseBlock->RootCell = ChildCell;
+
+            /* Registry ACL audit (hive links are made from kernel mode, so normally not checked) */
+            CmpShadowAccessCheck(ParentKcb, &Name, CM_REGACL_OP_LINKNODE, AccessState,
+                                 KEY_CREATE_SUB_KEY, 0, 0, AccessMode, Context->CreateOptions);
         }
     }
 
@@ -2257,6 +2293,7 @@ CmpParseKeyWorker(IN PVOID ParseObject,
     PULONG LockedKcbs;
     BOOLEAN IsKeyCached = FALSE;
     BOOLEAN Result, Last;
+    ULONG AclOptions;
     PAGED_CODE();
 
     /* Loop path separators at the end */
@@ -2293,6 +2330,9 @@ CmpParseKeyWorker(IN PVOID ParseObject,
     {
         Attributes |= OBJ_OPENLINK;
     }
+
+    /* REG_OPTION_BACKUP_RESTORE of an open or create, for the registry ACL audit */
+    AclOptions = ParseContext ? (ParseContext->CreateOptions & REG_OPTION_BACKUP_RESTORE) : 0;
 
     /* Check if this is a create */
     if (!ParseContext || !ParseContext->CreateOperation)
@@ -2497,6 +2537,7 @@ KeyCachedOpenNow:
                                            &Kcb,
                                            LockedKcbs,
                                            &NextName,
+                                           AclOptions,
                                            Object);
                         if (Status == STATUS_REPARSE)
                         {
@@ -2684,6 +2725,7 @@ KeyCachedOpenNow:
                                &Kcb,
                                LockedKcbs,
                                &NextName,
+                               AclOptions,
                                Object);
             if (Status == STATUS_REPARSE)
             {

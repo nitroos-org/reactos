@@ -90,6 +90,23 @@
 #define CMP_OPEN_KCB_NO_CREATE                          0x4
 
 //
+// Registry access control mode (cmacl.c): /REGACL=LEGACY|AUDIT|ENFORCE boot
+// option, else Configuration Manager\RegistryAclMode. ENFORCE behaves as
+// AUDIT until enforcement exists.
+//
+#define CM_REGACL_MODE_LEGACY                           0
+#define CM_REGACL_MODE_AUDIT                            1
+#define CM_REGACL_MODE_ENFORCE                          2
+
+//
+// Operations the shadow access check records
+//
+#define CM_REGACL_OP_OPEN                               0
+#define CM_REGACL_OP_CREATE                             1
+#define CM_REGACL_OP_CREATELINK                         2
+#define CM_REGACL_OP_LINKNODE                           3
+
+//
 // EnlistKeyBodyWithKCB Flags
 //
 #define CMP_ENLIST_KCB_LOCKED_SHARED                    0x1
@@ -765,6 +782,31 @@ CmpParseKey(
     IN OUT PVOID Context OPTIONAL,
     IN PSECURITY_QUALITY_OF_SERVICE SecurityQos OPTIONAL,
     OUT PVOID *Object
+);
+
+//
+// Registry access control audit (cmacl.c)
+//
+VOID
+NTAPI
+CmpAclInitialize(VOID);
+
+VOID
+NTAPI
+CmpAclShutdownSystem(VOID);
+
+VOID
+NTAPI
+CmpShadowAccessCheck(
+    _In_ PCM_KEY_CONTROL_BLOCK Kcb,
+    _In_opt_ PCUNICODE_STRING ChildName,
+    _In_ ULONG Operation,
+    _In_ PACCESS_STATE AccessState,
+    _In_ ACCESS_MASK Desired,
+    _In_ ACCESS_MASK Previous,
+    _In_ ACCESS_MASK LegacyGranted,
+    _In_ KPROCESSOR_MODE AccessMode,
+    _In_ ULONG Options
 );
 
 NTSTATUS
@@ -1592,6 +1634,11 @@ extern UNICODE_STRING CmpSystemStartOptions;
 extern UNICODE_STRING CmpLoadOptions;
 extern ULONG CmpBootType;
 extern ULONG CmSelfHeal;
+extern ULONG CmpRegistryAclMode;
+extern ULONG CmpRegistryAclEffectiveMode;
+extern ULONG CmpRegistryAclModeValue;
+extern ULONG CmpRegistryAclModeValueLength;
+extern ULONG CmpRegistryAclModeValueType;
 extern BOOLEAN CmpSelfHeal;
 extern HANDLE CmpRegistryRootHandle;
 extern BOOLEAN ExpInTextModeSetup;
