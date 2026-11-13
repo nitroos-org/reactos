@@ -24,6 +24,7 @@ list(APPEND SOURCE
     NotifyRouteChange2.c
     NotifyStableUnicastIpAddressTable.c
     SendARP.c
+    TcpTimeWait.c
     TcpUdpTableRows.c
     Win6Exports.c
     testlist.c)
