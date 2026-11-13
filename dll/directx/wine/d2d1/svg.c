@@ -24,59 +24,20 @@
 #define DEFINE_GUID(name, l, w1, w2, b1, b2, b3, b4, b5, b6, b7, b8) \
     const GUID name = { l, w1, w2, { b1, b2, b3, b4, b5, b6, b7, b8 } }
 #include "reactos/d2d1_svg.h"
+#include "svg_private.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(d2d);
 
-struct d2d_svg_element;
-
-struct d2d_svg_document
-{
-    ID2D1SvgDocument ID2D1SvgDocument_iface;
-    LONG refcount;
-
-    ID2D1Factory *factory;
-    D2D1_SIZE_F viewport;
-    struct d2d_svg_element *root;
-    struct list elements; /* every element created by this document (weak links) */
-};
-
-enum d2d_svg_attr_kind
-{
-    D2D_SVG_ATTR_STRING,
-    D2D_SVG_ATTR_POD,
-    D2D_SVG_ATTR_OBJECT,
-};
-
-struct d2d_svg_attr
-{
-    struct list entry;
-    WCHAR *name;
-    enum d2d_svg_attr_kind kind;
-    WCHAR *string;
-    D2D1_SVG_ATTRIBUTE_STRING_TYPE string_type;
-    D2D1_SVG_ATTRIBUTE_POD_TYPE pod_type;
-    void *pod;
-    UINT32 pod_size;
-    ID2D1SvgAttribute *object;
-};
-
-struct d2d_svg_element
-{
-    ID2D1SvgElement ID2D1SvgElement_iface;
-    LONG refcount;
-
-    struct d2d_svg_document *document; /* weak, cleared when the document goes away */
-    struct list document_entry;
-    struct d2d_svg_element *parent;    /* weak */
-    struct list children;              /* d2d_svg_child_link, each holds a reference */
-    struct list sibling_entry;         /* entry in parent->children */
-    WCHAR *tag;
-    WCHAR *text;
-    struct list attributes;
-};
-
 static const ID2D1SvgDocumentVtbl d2d_svg_document_vtbl;
 static const ID2D1SvgElementVtbl d2d_svg_element_vtbl;
+
+/* our own document, or NULL for NULL / a foreign implementation */
+struct d2d_svg_document *unsafe_impl_from_ID2D1SvgDocument(ID2D1SvgDocument *iface)
+{
+    if (!iface || iface->lpVtbl != &d2d_svg_document_vtbl)
+        return NULL;
+    return CONTAINING_RECORD(iface, struct d2d_svg_document, ID2D1SvgDocument_iface);
+}
 
 static inline struct d2d_svg_document *impl_from_ID2D1SvgDocument(ID2D1SvgDocument *iface)
 {
