@@ -54,6 +54,8 @@ static DECLSPEC_NOINLINE int ChildFault(void)
         WaitForSingleObject(Thread, 10000);
         CloseHandle(Thread);
     }
+    /* A DLL loaded after start-up: its LOAD_DLL file handle is made from the section, not by name */
+    LoadLibraryW(L"version.dll");
     OutputDebugStringA(DebugString);
     RaiseException(CHILD_EXCEPTION, 0, 2, Info);
     *(volatile int *)FAULT_ADDRESS = 1;
@@ -149,6 +151,15 @@ static BOOL EndsWith(const WCHAR *String, const WCHAR *Suffix)
     return Length >= SuffixLength && !_wcsicmp(String + Length - SuffixLength, Suffix);
 }
 
+static DWORD FinalPath(HANDLE File, WCHAR *Path, DWORD Count)
+{
+    typedef DWORD (WINAPI *PGETFINALPATH)(HANDLE, LPWSTR, DWORD, DWORD);
+    PGETFINALPATH Get = (PGETFINALPATH)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetFinalPathNameByHandleW");
+
+    SetLastError(0xdeadbeef);
+    return Get ? Get(File, Path, Count, 0 /* VOLUME_NAME_DOS */) : 0;
+}
+
 static void CheckCreateProcess(const DEBUG_EVENT *Event, BOOL Attach)
 {
     const CREATE_PROCESS_DEBUG_INFO *Info = &Event->u.CreateProcessInfo;
@@ -174,7 +185,80 @@ static void CheckCreateProcess(const DEBUG_EVENT *Event, BOOL Attach)
                "start %p, entry %p\n", Info->lpStartAddress, (PVOID)(DebuggeeBase + Nt.OptionalHeader.AddressOfEntryPoint));
     }
     else ok(0, "cannot read the NT headers: %lu\n", GetLastError());
+    if (Info->hFile)
+    {
+        WCHAR Path[MAX_PATH + 8];
+        DWORD Length = FinalPath(Info->hFile, Path, _countof(Path));
+        ok(Length != 0 && Length < _countof(Path) && EndsWith(Path, L".exe"),
+           "image file: length %lu, '%ls', error %lu\n", Length, Path, GetLastError());
+    }
     if (Info->hFile) CloseHandle(Info->hFile);
+}
+
+/* The file of a LOAD_DLL event is a handle to the DLL's file: Windows answers GetFinalPathNameByHandle for it */
+static BOOL CheckLoadDllFile(const LOAD_DLL_DEBUG_INFO *Info, const WCHAR *Suffix)
+{
+    typedef DWORD (WINAPI *PGETFINALPATH)(HANDLE, LPWSTR, DWORD, DWORD);
+    PGETFINALPATH GetFinalPathNameByHandleW =
+        (PGETFINALPATH)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetFinalPathNameByHandleW");
+    WCHAR Path[MAX_PATH + 8];
+    DWORD Length;
+
+    if (!GetFinalPathNameByHandleW)
+    {
+        skip("GetFinalPathNameByHandleW is not available\n");
+        return TRUE;
+    }
+    ok(Info->hFile != NULL, "no file handle for %ls\n", Suffix);
+    if (!Info->hFile)
+        return FALSE;
+
+    SetLastError(0xdeadbeef);
+    Length = GetFinalPathNameByHandleW(Info->hFile, Path, _countof(Path), 0 /* VOLUME_NAME_DOS */);
+    ok(Length != 0 && Length < _countof(Path), "DOS: length %lu, error %lu\n", Length, GetLastError());
+    if (Length && Length < _countof(Path))
+        ok(!wcsncmp(Path, L"\\\\?\\", 4) && EndsWith(Path, Suffix), "DOS name '%ls', expected ...%ls\n", Path, Suffix);
+
+    /* The handle reads the DLL file: a debugger reads the image headers and symbols from it */
+    {
+        UCHAR Magic[2] = { 0, 0 };
+        DWORD Read = 0;
+
+        SetFilePointer(Info->hFile, 0, NULL, FILE_BEGIN);
+        ok(ReadFile(Info->hFile, Magic, sizeof(Magic), &Read, NULL) && Read == 2 && Magic[0] == 'M' && Magic[1] == 'Z',
+           "ReadFile: %lu bytes %02x%02x, error %lu\n", Read, Magic[0], Magic[1], GetLastError());
+    }
+
+    /* Every flag combination answers what it does for a handle opened by name to the same file */
+    if (Length && Length < _countof(Path))
+    {
+        static const DWORD FlagSets[] = { 0, 1, 2, 4, 8, 9, 10, 12 }; /* VOLUME_NAME_*, FILE_NAME_OPENED (8) */
+        HANDLE Control = CreateFileW(Path, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                                     OPEN_EXISTING, 0, NULL);
+        ULONG i;
+
+        ok(Control != INVALID_HANDLE_VALUE, "cannot open '%ls': %lu\n", Path, GetLastError());
+        for (i = 0; Control != INVALID_HANDLE_VALUE && i < _countof(FlagSets); i++)
+        {
+            WCHAR Expected[MAX_PATH + 8], Actual[MAX_PATH + 8];
+            DWORD ExpectedLength, ActualLength;
+
+            Expected[0] = Actual[0] = 0;
+            ExpectedLength = GetFinalPathNameByHandleW(Control, Expected, _countof(Expected), FlagSets[i]);
+            ActualLength = GetFinalPathNameByHandleW(Info->hFile, Actual, _countof(Actual), FlagSets[i]);
+            ok(ActualLength == ExpectedLength, "flags %lx: length %lu, expected %lu (error %lu)\n",
+               FlagSets[i], ActualLength, ExpectedLength, GetLastError());
+            ok(!wcscmp(Actual, Expected), "flags %lx: '%ls', expected '%ls'\n", FlagSets[i], Actual, Expected);
+        }
+        if (Control != INVALID_HANDLE_VALUE) CloseHandle(Control);
+    }
+
+    SetLastError(0xdeadbeef);
+    Length = GetFinalPathNameByHandleW(Info->hFile, Path, _countof(Path), 0x2 /* VOLUME_NAME_NT */);
+    ok(Length != 0 && Length < _countof(Path), "NT: length %lu, error %lu\n", Length, GetLastError());
+    if (Length && Length < _countof(Path))
+        ok(!_wcsnicmp(Path, L"\\Device\\", 8) && EndsWith(Path, Suffix), "NT name '%ls', expected ...%ls\n", Path, Suffix);
+    return TRUE;
 }
 
 static void TestCatch(const WCHAR *FileName)
@@ -185,7 +269,7 @@ static void TestCatch(const WCHAR *FileName)
     DEBUG_EVENT Event;
     ULONG_PTR Kernel32 = (ULONG_PTR)GetModuleHandleW(L"kernel32.dll");
     ULONG_PTR Ntdll = (ULONG_PTR)GetModuleHandleW(L"ntdll.dll");
-    ULONG Events, Breakpoints = 0, NtdllLoads = 0, Kernel32Loads = 0, Strings = 0, Raised = 0, Faults = 0;
+    ULONG Events, Breakpoints = 0, NtdllLoads = 0, Kernel32Loads = 0, Strings = 0, Raised = 0, Faults = 0, VersionLoads = 0;
     ULONG ThreadCreates = 0, ThreadExits = 0;
     BOOL Exited = FALSE, CreateSeen = FALSE;
     ULONG_PTR Pc;
@@ -243,6 +327,19 @@ static void TestCatch(const WCHAR *FileName)
                 Kernel32Loads++;
                 ok(ReadImageName(Event.u.LoadDll.lpImageName, Name, _countof(Name)) && EndsWith(Name, L"\\kernel32.dll"),
                    "kernel32 load: name pointer %p, name '%ls'\n", Event.u.LoadDll.lpImageName, Name);
+            }
+            if ((ULONG_PTR)Event.u.LoadDll.lpBaseOfDll == Kernel32 || (ULONG_PTR)Event.u.LoadDll.lpBaseOfDll == Ntdll)
+                CheckLoadDllFile(&Event.u.LoadDll,
+                                 (ULONG_PTR)Event.u.LoadDll.lpBaseOfDll == Ntdll ? L"\\ntdll.dll" : L"\\kernel32.dll");
+            else if (Event.u.LoadDll.hFile)
+            {
+                /* Any other module (the one the child loads at run time): the file handle names a .dll file */
+                WCHAR Path[MAX_PATH + 8];
+                DWORD Length = FinalPath(Event.u.LoadDll.hFile, Path, _countof(Path));
+                ok(Length != 0 && Length < _countof(Path), "DLL at %p: length %lu, error %lu\n",
+                   Event.u.LoadDll.lpBaseOfDll, Length, GetLastError());
+                if (Length && Length < _countof(Path) && EndsWith(Path, L"\\version.dll"))
+                    VersionLoads++;
             }
             if (Event.u.LoadDll.hFile) CloseHandle(Event.u.LoadDll.hFile);
             break;
@@ -323,6 +420,7 @@ static void TestCatch(const WCHAR *FileName)
     ok(Breakpoints == 1, "%lu initial breakpoints\n", Breakpoints);
     ok(NtdllLoads == 1, "%lu ntdll loads\n", NtdllLoads);
     ok(Kernel32Loads == 1, "%lu kernel32 loads\n", Kernel32Loads);
+    ok(VersionLoads == 1, "%lu version.dll loads with a file handle that names it\n", VersionLoads);
     ok(ThreadCreates >= 1, "%lu thread starts\n", ThreadCreates);
     ok(ThreadExits == 1, "%lu ChildThread exits\n", ThreadExits);
     ok(Strings == 1, "%lu debug strings\n", Strings);
@@ -475,6 +573,14 @@ static void TestAttach(const WCHAR *FileName)
             break;
         case LOAD_DLL_DEBUG_EVENT:
             if ((ULONG_PTR)Event.u.LoadDll.lpBaseOfDll == Kernel32) Kernel32Loads++;
+            /* The modules of an attached process come with file handles that name them too */
+            if (Event.u.LoadDll.hFile)
+            {
+                WCHAR Path[MAX_PATH + 8];
+                DWORD Length = FinalPath(Event.u.LoadDll.hFile, Path, _countof(Path));
+                ok(Length != 0 && Length < _countof(Path), "attached: DLL at %p: length %lu, error %lu\n",
+                   Event.u.LoadDll.lpBaseOfDll, Length, GetLastError());
+            }
             if (Event.u.LoadDll.hFile) CloseHandle(Event.u.LoadDll.hFile);
             break;
         case EXCEPTION_DEBUG_EVENT:
