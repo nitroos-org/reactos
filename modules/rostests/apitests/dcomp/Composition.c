@@ -905,6 +905,135 @@ out:
 }
 
 /* stretch and alignment of a 2x2 surface on an 8x8 sprite */
+/*
+ * A rendering device that is only an ID2D1Device (what Office hands to CreateGraphicsDevice). Documented: the
+ * graphics device is made from a Direct2D device and its surfaces are drawn with it. The D3D device under the
+ * D2D device must be the one the surface texture lives on.
+ */
+static void TestSurfacesD2DDevice(void)
+{
+    typedef HRESULT (WINAPI *PFN_CREATE)(IDXGIDevice *, const D2D1_CREATION_PROPERTIES *, ID2D1Device **);
+    ID3D11Device *d3d = MakeDevice();
+    HMODULE mod = LoadLibraryW(L"d2d1.dll");
+    PFN_CREATE create = mod ? (PFN_CREATE)GetProcAddress(mod, "D2D1CreateDevice") : NULL;
+    WICompositorInterop *interop = NULL;
+    WICompositionGraphicsDevice *gdev = NULL, *bad = NULL;
+    WICompositionDrawingSurface *ds = NULL;
+    INitroDrawingSurfaceInterop *dsi = NULL;
+    IDXGIDevice *dxgi = NULL;
+    ID2D1Device *d2d = NULL;
+    ID2D1DeviceContext *dc = NULL;
+    ID3D11Texture2D *tex = NULL;
+    ID3D11Device *texdev = NULL;
+    IUnknown *notdev = NULL;
+    __x_ABI_CWindows_CFoundation_CSize size;
+    D2D1_COLOR_F clear;
+    POINT off;
+    HRESULT hr;
+
+    if (!d3d || !create) { skip("no D3D11 device or d2d1\n"); goto out; }
+    if (FAILED(ID3D11Device_QueryInterface(d3d, &IID_IDXGIDevice, (void **)&dxgi)) || FAILED(create(dxgi, NULL, &d2d)) || !d2d)
+    {
+        skip("no ID2D1Device\n");
+        goto out;
+    }
+    hr = QI(Comp, &IID_Interop, (void **)&interop);
+    ok(hr == S_OK, "QI ICompositorInterop %#lx\n", hr);
+    if (!interop) goto out;
+
+    /* anything that is not a device stays E_INVALIDARG */
+    hr = CreateDXGIFactory(&IID_IUnknown, (void **)&notdev);
+    if (SUCCEEDED(hr))
+    {
+        hr = interop->lpVtbl->CreateGraphicsDevice(interop, notdev, &bad);
+        ok(hr == E_INVALIDARG && !bad, "CreateGraphicsDevice(not a device) %#lx %p\n", hr, bad);
+    }
+
+    hr = interop->lpVtbl->CreateGraphicsDevice(interop, (IUnknown *)d2d, &gdev);
+    ok(hr == S_OK && gdev, "CreateGraphicsDevice(ID2D1Device) %#lx\n", hr);
+    if (!gdev) goto out;
+
+    size.Width = 64; size.Height = 32;
+    hr = gdev->lpVtbl->CreateDrawingSurface(gdev, size, DirectXPixelFormat_B8G8R8A8UIntNormalized,
+                                            DirectXAlphaMode_Premultiplied, &ds);
+    ok(hr == S_OK && ds, "CreateDrawingSurface %#lx\n", hr);
+    if (!ds) goto out;
+    /* the real ICompositionDrawingSurfaceInterop (same layout as the Nitro one) */
+    hr = QI(ds, &IID_ICompositionDrawingSurfaceInterop, (void **)&dsi);
+    ok(hr == S_OK && dsi, "QI ICompositionDrawingSurfaceInterop %#lx\n", hr);
+    if (hr != S_OK) goto out;
+
+    /* the texture is on the D3D device of the D2D device */
+    hr = dsi->lpVtbl->BeginDraw(dsi, NULL, &IID_ID3D11Texture2D, (void **)&tex, &off);
+    ok(hr == S_OK && tex, "BeginDraw(ID3D11Texture2D) %#lx\n", hr);
+    if (tex)
+    {
+        ID3D11Texture2D_GetDevice(tex, &texdev);
+        ok(texdev == d3d, "texture device %p, expected %p\n", texdev, d3d);
+        if (texdev) ID3D11Device_Release(texdev);
+        ID3D11Texture2D_Release(tex);
+        hr = dsi->lpVtbl->EndDraw(dsi);
+        ok(hr == S_OK, "EndDraw %#lx\n", hr);
+    }
+
+    if (!D2DUsable(d3d)) { skip("Direct2D device contexts are not available on this renderer\n"); goto out; }
+
+    hr = dsi->lpVtbl->BeginDraw(dsi, NULL, &IID_ID2D1DeviceContext, (void **)&dc, &off);
+    ok(hr == S_OK && dc, "BeginDraw(ID2D1DeviceContext) %#lx\n", hr);
+    if (dc)
+    {
+        ID2D1Device *dcdev = NULL;
+
+        ID2D1DeviceContext_GetDevice(dc, &dcdev);
+        ok(dcdev == d2d, "context device %p, expected the app's %p\n", dcdev, d2d);
+        if (dcdev) ID2D1Device_Release(dcdev);
+        clear.r = 0; clear.g = 0; clear.b = 1; clear.a = 1;
+        ID2D1DeviceContext_Clear(dc, &clear);
+        hr = dsi->lpVtbl->EndDraw(dsi);
+        ok(hr == S_OK, "EndDraw %#lx\n", hr);
+        REL(dc);
+
+        /* read the pixel back: opaque blue, BGRA */
+        {
+            D3D11_TEXTURE2D_DESC desc;
+            D3D11_MAPPED_SUBRESOURCE map;
+            ID3D11Texture2D *stage = NULL, *t2 = NULL;
+            ID3D11DeviceContext *ctx = NULL;
+
+            if (SUCCEEDED(dsi->lpVtbl->BeginDraw(dsi, NULL, &IID_ID3D11Texture2D, (void **)&t2, &off)) && t2)
+            {
+                ID3D11Texture2D_GetDesc(t2, &desc);
+                desc.Usage = D3D11_USAGE_STAGING; desc.BindFlags = 0; desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ; desc.MiscFlags = 0;
+                ID3D11Device_GetImmediateContext(d3d, &ctx);
+                if (SUCCEEDED(ID3D11Device_CreateTexture2D(d3d, &desc, NULL, &stage)))
+                {
+                    ID3D11DeviceContext_CopyResource(ctx, (ID3D11Resource *)stage, (ID3D11Resource *)t2);
+                    if (SUCCEEDED(ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)stage, 0, D3D11_MAP_READ, 0, &map)))
+                    {
+                        const BYTE *px = (const BYTE *)map.pData + 5 * map.RowPitch + 5 * 4;
+                        ok(px[0] == 255 && px[1] == 0 && px[2] == 0 && px[3] == 255, "pixel %u %u %u %u\n", px[0], px[1], px[2], px[3]);
+                        ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)stage, 0);
+                    }
+                    ID3D11Texture2D_Release(stage);
+                }
+                ID3D11DeviceContext_Release(ctx);
+                ID3D11Texture2D_Release(t2);
+                dsi->lpVtbl->EndDraw(dsi);
+            }
+        }
+    }
+
+out:
+    if (dsi) REL(dsi);
+    if (ds) REL(ds);
+    if (gdev) REL(gdev);
+    if (notdev) IUnknown_Release(notdev);
+    if (interop) REL(interop);
+    if (d2d) ID2D1Device_Release(d2d);
+    if (dxgi) IDXGIDevice_Release(dxgi);
+    if (d3d) ID3D11Device_Release(d3d);
+}
+
 static void TestStretch(void)
 {
     ID3D11Device *d3d = MakeDevice();
@@ -2193,6 +2322,7 @@ START_TEST(Composition)
         TestInsetClipObject();
         TestPixels();
         TestSurfaces();
+        TestSurfacesD2DDevice();
         TestStretch();
         TestDesktopTarget();
         TestVisual2();
