@@ -245,4 +245,65 @@ CopySidFromSidAndRid(
     *q = RelativeId;
 }
 
+
+/*
+ * Packs entries that were built one by one (each a structure followed by its
+ * strings, as a separate NetApiBuffer) into the one buffer an enumeration
+ * returns: the array of structures first, the strings behind it. The pointer
+ * members of every structure (PtrOffsets) that point into its own block are
+ * moved to the copy of the strings.
+ */
+NET_API_STATUS
+NetpPackEnumEntries(
+    _In_ ULONG Count,
+    _In_ PVOID *Blocks,
+    _In_ PULONG BlockSizes,   /* size of each block: structure and strings */
+    _In_ ULONG FixedSize,
+    _In_ const USHORT *PtrOffsets,
+    _In_ ULONG OffsetCount,
+    _Out_ PVOID *Buffer)
+{
+    NET_API_STATUS ApiStatus;
+    PBYTE Base, Entry, Strings;
+    ULONG TotalSize, StringSize, i, j;
+    PBYTE *Member;
+
+    *Buffer = NULL;
+
+    if (Count == 0)
+        return NERR_Success;
+
+    TotalSize = Count * FixedSize;
+    for (i = 0; i < Count; i++)
+        TotalSize += (BlockSizes[i] - FixedSize + 7) & ~7;
+
+    ApiStatus = NetApiBufferAllocate(TotalSize, (PVOID*)&Base);
+    if (ApiStatus != NERR_Success)
+        return ApiStatus;
+
+    ZeroMemory(Base, TotalSize);
+
+    Strings = Base + Count * FixedSize;
+    for (i = 0; i < Count; i++)
+    {
+        Entry = Base + i * FixedSize;
+        memcpy(Entry, Blocks[i], FixedSize);
+
+        StringSize = BlockSizes[i] - FixedSize;
+        memcpy(Strings, (PBYTE)Blocks[i] + FixedSize, StringSize);
+
+        for (j = 0; j < OffsetCount; j++)
+        {
+            Member = (PBYTE *)(Entry + PtrOffsets[j]);
+            if (*Member != NULL)
+                *Member = Strings + (*Member - ((PBYTE)Blocks[i] + FixedSize));
+        }
+
+        Strings += (StringSize + 7) & ~7;
+    }
+
+    *Buffer = Base;
+    return NERR_Success;
+}
+
 /* EOF */
