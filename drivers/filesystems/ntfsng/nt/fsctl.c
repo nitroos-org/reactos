@@ -382,6 +382,7 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         Vcb->MajorVersion = Vcb->Info.major;
         Vcb->Serial = Vcb->Info.serial;
         ngc_set_dio_drain(Vcb->Core, NgDrainDataIoCallback, Vcb);
+        ngc_set_dio_drain_range(Vcb->Core, NgDrainDataIoRangeCallback, Vcb);
         ngc_set_fua(Vcb->Core, ngos_dev_fua(Target));
         ngc_set_commit_kick(Vcb->Core, NgCommitKickCallback, Vcb);
         if (!Vcb->Info.read_only)
@@ -415,7 +416,6 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         ExDeleteResourceLite(&Vcb->CoreLock);
         ExDeleteResourceLite(&Vcb->CreateGate);
         ExDeleteResourceLite(&Vcb->NotifyPathLock);
-        ExDeleteResourceLite(&Vcb->DataIoGate);
         ExDeleteNPagedLookasideList(&Vcb->DioBounce);
         IoDeleteDevice(Vdo);
         return STATUS_UNRECOGNIZED_VOLUME;

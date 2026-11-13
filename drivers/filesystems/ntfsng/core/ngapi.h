@@ -262,6 +262,8 @@ int ngc_rdio_begin(ngc_vol *v, ngc_node *n, unsigned long long off, unsigned int
 void ngc_rdio_end(ngc_vol *v, struct ngc_dio *d);
 /* Registers the glue's drain (see kshim_drain in kshim_vfs.h); NULL unregisters. */
 void ngc_set_dio_drain(ngc_vol *v, void (*fn)(void *ctx), void *ctx);
+/* The narrowed wait of a cluster free: only for transfers touching the device bytes [off, off + len); same context as above. */
+void ngc_set_dio_drain_range(ngc_vol *v, void (*fn)(void *ctx, unsigned long long off, unsigned long long len), void *ctx);
 int ngc_set_size(ngc_vol *v, ngc_node *n, unsigned long long newsize);
 /* Frees the clusters ngc_set_size allocated ahead of the size (the stream's last close); 0 when there are none. */
 int ngc_trim_alloc(ngc_vol *v, ngc_node *n);

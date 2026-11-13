@@ -53,9 +53,10 @@ int ntfs_cluster_free_from_rl_nolock(struct ntfs_volume *vol,
 		if (rl->lcn < 0)
 			continue;
 		err = ntfs_bitmap_clear_run(lcnbmp_vi, rl->lcn, rl->length);
-		if (likely(!err))
+		if (likely(!err)) {
+			ntfs_drain_clusters(vol, rl->lcn, rl->length);
 			nr_freed += rl->length;
-		else if (!ret || ret == -ENOMEM)
+		} else if (!ret || ret == -ENOMEM)
 			ret = err;
 	}
 	ntfs_inc_free_clusters(vol, nr_freed);
@@ -916,6 +917,7 @@ s64 __ntfs_cluster_free(struct ntfs_inode *ni, const s64 start_vcn, s64 count,
 					err);
 			goto err_out;
 		}
+		ntfs_drain_clusters(vol, rl->lcn + delta, to_free);
 		/* We have freed @to_free real clusters. */
 		real_freed = to_free;
 	}
@@ -967,6 +969,7 @@ s64 __ntfs_cluster_free(struct ntfs_inode *ni, const s64 start_vcn, s64 count,
 					ntfs_error(vol->sb, "Failed to clear subsequent run.");
 				goto err_out;
 			}
+			ntfs_drain_clusters(vol, rl->lcn, to_free);
 			/* We have freed @to_free real clusters. */
 			real_freed += to_free;
 		}
