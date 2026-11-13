@@ -27,19 +27,19 @@ EnableGuestAccount = 0
 ;NewGuestName =
 
 [Application Log]
-MaximumLogSize = 16384
+MaximumLogSize = 20480
 AuditLogRetentionPeriod = 0
 ;RetentionDays = 7
 RestrictGuestAccess = 1
 
 [Security Log]
-MaximumLogSize = 16384
+MaximumLogSize = 20480
 AuditLogRetentionPeriod = 0
 ;RetentionDays = 7
 RestrictGuestAccess = 1
 
 [System Log]
-MaximumLogSize = 16384
+MaximumLogSize = 20480
 AuditLogRetentionPeriod = 0
 ;RetentionDays = 7
 RestrictGuestAccess = 1
