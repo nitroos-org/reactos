@@ -437,6 +437,9 @@ FltUnregisterFilter(_In_ PFLT_FILTER Filter)
     /* Detach every instance, waiting for the operations in flight */
     FltpTeardownFilterInstances(Filter, FLTFL_INSTANCE_TEARDOWN_FILTER_UNLOAD);
 
+    /* What it left on the volumes goes too */
+    FltpPurgeFilterContexts(Filter);
+
     /* Wait until we're sure nothing else is using the filter (open ports) */
     FltpObjectRundownWait(&Filter->Base.RundownRef);
 

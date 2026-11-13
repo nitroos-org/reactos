@@ -39,6 +39,8 @@ typedef struct _SAMPLE
     ULONG LastTeardownCompletes;
     ULONG LastLive;
     ULONG LastFiltering;
+    ULONG LastCtxAlloc;
+    ULONG LastCtxCleaned;
 
 } SAMPLE, *PSAMPLE;
 

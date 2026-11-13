@@ -488,7 +488,7 @@ FltpAttachToVolumeDevice(_In_ PDEVICE_OBJECT VolumeDeviceObject,
     Volume->DiskDeviceObject = DiskDeviceObject;
     ExInitializeResourceLite(&Volume->InstanceList.rLock);
     InitializeListHead(&Volume->InstanceList.rList);
-    ExInitializeFastMutex(&Volume->VolumeContextLock);
+    InitializeListHead(&Volume->ContextList);
     ExInitializeFastMutex(&Volume->StreamListLock);
     InitializeListHead(&Volume->StreamList);
     InitializeListHead(&Volume->GlobalLink);
