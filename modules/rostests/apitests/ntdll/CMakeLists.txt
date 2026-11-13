@@ -187,6 +187,7 @@ list(APPEND SOURCE
     RtlCopyMappedMemory.c
     RtlCriticalSection.c
     RtlCriticalSectionRace.c
+    RtlCriticalSectionTimeout.c
     RtlDebugInformation.c
     RtlDeleteAce.c
     RtlDetermineDosPathNameType.c
