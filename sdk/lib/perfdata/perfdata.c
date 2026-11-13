@@ -1740,6 +1740,7 @@ WCHAR *perf_builtin_names( BOOL help, DWORD *bytes )
 
     *bytes = 0;
     for (i = 0; i < ARRAY_SIZE(objects); i++) max += 1 + objects[i].count;
+    max += 2;   /* the end marker entries */
     if (!(list = perf_calloc( max, sizeof(*list) ))) return NULL;
 
     for (i = 0; i < ARRAY_SIZE(objects); i++)
@@ -1756,6 +1757,16 @@ WCHAR *perf_builtin_names( BOOL help, DWORD *bytes )
             add_entry( list, &n, help ? ctr->index + 1 : ctr->index, help ? ctr->help : ctr->name, NULL );
         }
     }
+
+    /* the tables are terminated by an "End Marker" entry (counter 1846, help 1847), and the counter
+       table starts with the pair 1, <index of the end marker help> */
+    if (!help)
+    {
+        add_entry( list, &n, 1, L"1847", NULL );
+        add_entry( list, &n, 1846, L"End Marker", NULL );
+    }
+    else
+        add_entry( list, &n, 1847, L"End Marker", NULL );
 
     for (i = 1; i < n; i++)  /* ascending by index, as Windows lists them */
     {
