@@ -40,11 +40,30 @@ _BaseProcessStartThunk@0:
  * its convention (a thread routine pops its parameter, an image entry does not) */
 PUBLIC _BasepCallThreadStart@8
 _BasepCallThreadStart@8:
-    push ebp
+    /* A routine of any origin may return with EBX, ESI, EDI and EBP replaced (the Go runtime's thread
+     * entry does), and its caller may keep state in them: save them in memory, and find the stack
+     * again without EBP (the EBP frame stays for a stack walk). After the call ESP is at the
+     * parameter slot (the routine left it) or one slot above (it popped it); the marker above the
+     * slot holds its own address, which tells the two apart. */
+    push ebp                            /* the frame a stack walk follows to the caller */
     mov ebp, esp
-    push dword ptr [ebp + 12]
-    call dword ptr [ebp + 8]
-    mov esp, ebp
+    push ebx
+    push esi
+    push edi
+    mov eax, dword ptr [ebp + 8]        /* Routine */
+    mov ecx, dword ptr [ebp + 12]       /* Parameter */
+    lea edx, [esp - 4]
+    push edx                            /* marker: its own address */
+    push ecx
+    call eax
+    cmp esp, dword ptr [esp]
+    je BasepCallThreadStartStackFound
+    add esp, 4                          /* the routine left the parameter */
+BasepCallThreadStartStackFound:
+    add esp, 4                          /* the marker */
+    pop edi
+    pop esi
+    pop ebx
     pop ebp
     ret 8
 

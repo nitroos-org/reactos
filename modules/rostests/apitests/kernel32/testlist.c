@@ -99,6 +99,7 @@ extern void func_GetTimeZoneInformationForYear(void);
 extern void func_EnumSystemCodePages(void);
 extern void func_EnumUILanguages(void);
 extern void func_ExitThread(void);
+extern void func_ThreadReturnClobber(void);
 extern void func_FindActCtxSectionStringW(void);
 extern void func_FindFiles(void);
 extern void func_FindFirstFileEx(void);
@@ -365,6 +366,7 @@ const struct test winetest_testlist[] =
     { "EnumSystemCodePages",         func_EnumSystemCodePages },
     { "EnumUILanguages",             func_EnumUILanguages },
     { "ExitThread",                  func_ExitThread },
+    { "ThreadReturnClobber",         func_ThreadReturnClobber },
     { "FindActCtxSectionStringW",    func_FindActCtxSectionStringW },
     { "FindFiles",                   func_FindFiles },
     { "FindFirstFileEx",             func_FindFirstFileEx },
