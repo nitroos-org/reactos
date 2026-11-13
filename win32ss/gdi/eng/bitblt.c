@@ -91,8 +91,8 @@ BltMask(SURFOBJ* psoDest,
     else
         psoPattern = NULL;
 
-    cx = prclDest->right - prclDest->left;
-    cy = prclDest->bottom - prclDest->top;
+    cx = (LONGLONG)prclDest->right - prclDest->left;
+    cy = (LONGLONG)prclDest->bottom - prclDest->top;
     if (cx <= 0 || cy <= 0 || pptlMask->x < 0 || pptlMask->y < 0 ||
         (LONGLONG)pptlMask->x + cx > psoMask->sizlBitmap.cx ||
         (LONGLONG)pptlMask->y + cy > psoMask->sizlBitmap.cy)
