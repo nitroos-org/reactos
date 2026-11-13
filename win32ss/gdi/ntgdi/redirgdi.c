@@ -114,10 +114,14 @@ RedirScreenCopy(
         rcLimit.bottom = psurfScreen->SurfObj.sizlBitmap.cy;
         if (RECTL_bIntersectRect(&rcBounds, &prgnScreen->rdh.rcBound, &rcLimit))
         {
+            /* The window position is the caller's: its far edge is summed in 64 bits and clipped to rcBounds (the screen) */
+            LONGLONG xr = (LONGLONG)xWnd + psurf->SurfObj.sizlBitmap.cx;
+            LONGLONG yb = (LONGLONG)yWnd + psurf->SurfObj.sizlBitmap.cy;
+
             rcLimit.left = xWnd;
             rcLimit.top = yWnd;
-            rcLimit.right = xWnd + psurf->SurfObj.sizlBitmap.cx;
-            rcLimit.bottom = yWnd + psurf->SurfObj.sizlBitmap.cy;
+            rcLimit.right = (LONG)min(xr, (LONGLONG)rcBounds.right);
+            rcLimit.bottom = (LONG)min(yb, (LONGLONG)rcBounds.bottom);
             if (RECTL_bIntersectRect(&rcBounds, &rcBounds, &rcLimit))
             {
                 IntEngInitClipObj(&xco);
@@ -360,7 +364,8 @@ GreRedirLoadFromDC(
     _In_ LONG xSrc,
     _In_ LONG ySrc,
     _In_ const RECTL *prclDst,
-    _Out_ PBOOL pbAlpha)
+    _Out_ PBOOL pbAlpha,
+    _Out_ PBOOL pbCopied)
 {
     PDC pdc;
     PSURFACE psurfSrc;
@@ -368,6 +373,7 @@ GreRedirLoadFromDC(
     BOOL bRet = FALSE;
 
     *pbAlpha = FALSE;
+    *pbCopied = FALSE;
     if (!psurfDst || !psurfDst->SurfObj.pvScan0 || psurfDst->SurfObj.iBitmapFormat != BMF_32BPP)
         return FALSE;
     pdc = DC_LockDc(hdcSrc);
@@ -448,5 +454,6 @@ GreRedirLoadFromDC(
         EXLATEOBJ_vCleanup(&exlo);
     }
     DC_UnlockDc(pdc);
+    *pbCopied = bRet;
     return bRet;
 }
