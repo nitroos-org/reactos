@@ -99,6 +99,18 @@ WINAPI
 NetpRpcStatusToApiStatus(
     _In_ DWORD Status);
 
+/* utils.c */
+
+NET_API_STATUS
+NetpPackEnumEntries(
+    _In_ ULONG Count,
+    _In_ PVOID *Blocks,
+    _In_ PULONG BlockSizes,
+    _In_ ULONG FixedSize,
+    _In_ const USHORT *PtrOffsets,
+    _In_ ULONG OffsetCount,
+    _Out_ PVOID *Buffer);
+
 /* wksta.c */
 
 BOOL
