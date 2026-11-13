@@ -4852,13 +4852,16 @@ MiMapViewOfSection(
     BOOLEAN MachineMismatch = FALSE;
     BOOLEAN IsAttached = FALSE;
     KAPC_STATE ApcState;
-    ULONG_PTR HighestAddress;
+    ULONG_PTR HighestAddress, PlaceHighest;
     SIZE_T Unassigned, ViewCommit;
 
     if (!MiZeroBitsToHighestAddress(ZeroBits, &HighestAddress))
         return MI_PARAM_STATUS(4);
     if (HighestBound && (HighestBound < HighestAddress))
         HighestAddress = HighestBound;
+
+    /* Where the system picks the address, a 64-bit process without LARGEADDRESSAWARE stays below 2 GB */
+    PlaceHighest = min(HighestAddress, MmGetProcessAutoPlacementLimit(Process));
 
     if (MiIsRosSectionObject(SectionObject) == FALSE)
     {
@@ -4994,7 +4997,7 @@ MiMapViewOfSection(
                                                   PAGE_ROUND_UP(ImageSize),
                                                   MM_VIRTMEM_GRANULARITY,
                                                   MiImageWantsHighAddress(&ImageSectionObject->ImageInformation),
-                                                  HighestAddress);
+                                                  PlaceHighest);
             if (ImageBase == 0)
             {
                 Status = STATUS_CONFLICTING_ADDRESSES;
@@ -5207,7 +5210,7 @@ MiMapViewOfSection(
             goto Exit;
         }
 
-        if (ZeroBits || LowestAddress || HighestBound)
+        if (ZeroBits || LowestAddress || HighestBound || PlaceHighest < HighestAddress)
         {
             if (*BaseAddress)
             {
@@ -5224,7 +5227,7 @@ MiMapViewOfSection(
                                                  MM_VIRTMEM_GRANULARITY,
                                                  BooleanFlagOn(AllocationType, MEM_TOP_DOWN),
                                                  LowestAddress,
-                                                 HighestAddress);
+                                                 PlaceHighest);
                 if (!*BaseAddress)
                 {
                     Status = STATUS_NO_MEMORY;
