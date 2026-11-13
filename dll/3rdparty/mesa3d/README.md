@@ -17,7 +17,7 @@ or newer.
 |---|---|
 | `i386/libgallium_wgl.dll`, `amd64/libgallium_wgl.dll` | The prebuilt driver, copied to `system32` of every image by `CMakeLists.txt` |
 | `build-mesa.sh` | Builds both DLLs from the pinned Mesa release tarball |
-| `patches/` | Changes to Mesa that the build applies (two, see below) |
+| `patches/` | Local patches to Mesa that the build applies (three, see "Local patches carried on top of Mesa 26.3") |
 | `SHA256SUMS` | Hashes of the tarball, the two DLLs and the licence file |
 | `mesa3d-licenses.txt` | The licence texts and copyright lines of every file that was compiled into the DLLs (made by `gen-licenses.py`); installed as `system32\mesa3d-licenses.txt` next to the DLL |
 | `gen-licenses.py` | Reads the compiled sources and headers of a build and writes `mesa3d-licenses.txt`, with the copyright files of the packages `mingw-w64-common` and `gcc-mingw-w64-base` of the build host appended (the statically linked runtime); `build-mesa.sh` runs it and stops when those files are missing |
@@ -44,7 +44,12 @@ what it must produce.
 * The options turn off everything that is not the Windows OpenGL driver, and set
   `min-windows-version=7`, so that the DLL uses no function that Windows 7 lacks.
 
-## Changes to Mesa
+## Local patches carried on top of Mesa 26.3
+
+`build-mesa.sh` applies every `patches/*.patch` (in name order, `patch -p1`) to the pinned tarball. We carry no Mesa fork: a
+patch is a self-contained change to one Mesa file area, written in Mesa's coding style, so that it can be offered upstream. When Mesa
+is updated (see "Updating"), each patch is re-applied, rebased, or dropped because Mesa has the change by now.
+
 
 * `0001`: softpipe allocated a texture cache for each of its 768 sampler view slots when a
   context was created, about 250 MB of memory per context. A 32-bit process has 2 GB of address
@@ -56,6 +61,31 @@ what it must produce.
   3 seconds to 50 milliseconds on the i386 test VM. The shaders are now made on the first blit,
   with the shader creation function of the driver (the blitter binds them without the wrappers
   of the Draw stages, so they must not be made through the wrappers).
+
+* `0003`: the shader disk cache (`src/util/disk_cache*.c/h`) for Windows (it was an empty `TODO` there, and meson refused
+  `-Dshader-cache=enabled`). llvmpipe compiles each new fragment or vertex shader variant with LLVM on the draw thread (about 180 ms
+  each; 298 of the 661 draws of Word's Start screen), and stored none of it between program starts. With the cache a later start
+  loads the compiled variants from disk. `build-mesa.sh` builds the cache only into the LLVM builds (llvmpipe is the one driver here
+  that stores compiled shaders in it). The softpipe-only DLLs in this directory were built before the patch (`SHA256SUMS` describes that
+  build): a rebuild with `0003` has the cache compiled out and behaves the same, but it is not byte-identical (the barrier and exit
+  handler fixes are in code every build contains), so rebuilding them gives new hashes.
+  The patch also fixes the fallback `util_barrier_wait` (it returned true to every thread, and `util_queue_finish` destroyed the
+  barrier under the other threads: a hang with three or more queue threads) that the cache's queue runs into.
+  See "Shader disk cache" below for the behaviour.
+
+## Shader disk cache (llvmpipe builds)
+
+The cache directory is `%LOCALAPPDATA%\Mesa\shader_cache` (`%USERPROFILE%\AppData\Local` when `LOCALAPPDATA` is not set), or
+`%MESA_SHADER_CACHE_DIR%\mesa_shader_cache`. One file per compiled shader, in two-hex-digit subdirectories, plus an `index` file
+that holds the size of the cache. The cache key contains the driver DLL's file time, the CPU features and the vector width, so a
+new `libgallium_wgl.dll` or another CPU does not use old entries. The environment variables are Mesa's: `MESA_SHADER_CACHE_DISABLE=true`
+switches it off, `MESA_SHADER_CACHE_MAX_SIZE=<n>[K|M|G]` limits it (default 1 GB; oldest entries go first),
+`MESA_SHADER_CACHE_SHOW_STATS=true` logs the hits and misses when the driver is unloaded (stderr and OutputDebugString, as Mesa's other log lines).
+
+Several processes may share the directory. A directory that cannot be written (read-only volume, no permission) switches the cache
+off for that process; nothing else changes. Entries are checked with a CRC when they are read, and one that fails is deleted. The CRC
+guards against damaged files, not against someone who can write the directory: the entries are machine code that llvmpipe loads, so
+the directory must be writable only by the user it belongs to (the default under `%LOCALAPPDATA%` is).
 
 ## How the system uses it
 
@@ -94,7 +124,7 @@ no program of the test set depends on them.
 ## Updating (softpipe DLLs)
 
 Change `MESA_VERSION` and `MESA_SHA256` in `build-mesa.sh`, rebuild, check that the patches
-still apply, replace the two DLLs, rewrite `SHA256SUMS` and run
+still apply (`patch -p1 --dry-run` in the unpacked tarball; re-make or drop the ones that do not), replace the two DLLs, rewrite `SHA256SUMS` and run
 `opengl32_apitest icd_default` and `ddraw_apitest` on both architectures.
 
 ## llvmpipe and lavapipe (amd64 default GPU, fetched at configure, not committed)
