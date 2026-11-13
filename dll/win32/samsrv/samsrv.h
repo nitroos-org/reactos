@@ -273,6 +273,13 @@ NTSTATUS
 SampRegCloseKey(IN OUT PHANDLE KeyHandle);
 
 NTSTATUS
+SampRegCreateKeySd(IN HANDLE ParentKeyHandle,
+                   IN LPCWSTR KeyName,
+                   IN ACCESS_MASK DesiredAccess,
+                   IN PSECURITY_DESCRIPTOR SecurityDescriptor,
+                   OUT PHANDLE KeyHandle);
+
+NTSTATUS
 SampRegCreateKey(IN HANDLE ParentKeyHandle,
                  IN LPCWSTR KeyName,
                  IN ACCESS_MASK DesiredAccess,

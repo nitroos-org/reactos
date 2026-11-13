@@ -41,6 +41,14 @@ CmiCreateSecurityKey(
     IN ULONG DescriptorLength);
 
 NTSTATUS
+CmiAssignSecurityKey(
+    IN PHHIVE Hive,
+    IN HCELL_INDEX Cell,
+    IN PUCHAR Descriptor,
+    IN ULONG DescriptorLength,
+    IN BOOLEAN Replace);
+
+NTSTATUS
 CmiAddSubKey(
     IN PCMHIVE RegistryHive,
     IN HCELL_INDEX ParentKeyCellOffset,
