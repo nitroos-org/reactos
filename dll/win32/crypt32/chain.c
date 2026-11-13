@@ -116,6 +116,13 @@ HCERTCHAINENGINE CRYPT_CreateChainEngine(HCERTSTORE root, DWORD system_store, co
 {
     CertificateChainEngine *engine;
     HCERTSTORE worldStores[4];
+    /* The engine only reads the stores.  A LocalMachine store is opened for
+     * read, and the ones that are not needed (all but Root) only when they
+     * exist, so a user that may not write HKLM is not refused and nothing is
+     * created there by building a chain. */
+    DWORD ro = (system_store & CERT_SYSTEM_STORE_LOCATION_MASK) == CERT_SYSTEM_STORE_LOCAL_MACHINE ?
+        CERT_STORE_READONLY_FLAG : 0;
+    DWORD ro_existing = ro ? ro | CERT_STORE_OPEN_EXISTING_FLAG : 0;
 
     if(!root) {
         if(config->cbSize >= offsetof(CERT_CHAIN_ENGINE_CONFIG, hExclusiveRootTrustedPeople) && config->hExclusiveRoot)
@@ -123,7 +130,7 @@ HCERTCHAINENGINE CRYPT_CreateChainEngine(HCERTSTORE root, DWORD system_store, co
         else if (config->hRestrictedRoot)
             root = CertDuplicateStore(config->hRestrictedRoot);
         else
-            root = CertOpenStore(CERT_STORE_PROV_SYSTEM_W, 0, 0, system_store, L"Root");
+            root = CertOpenStore(CERT_STORE_PROV_SYSTEM_W, 0, 0, system_store | ro, L"Root");
         if(!root)
             return NULL;
     }
@@ -138,9 +145,9 @@ HCERTCHAINENGINE CRYPT_CreateChainEngine(HCERTSTORE root, DWORD system_store, co
     engine->hRoot = root;
     engine->hWorld = CertOpenStore(CERT_STORE_PROV_COLLECTION, 0, 0, CERT_STORE_CREATE_NEW_FLAG, NULL);
     worldStores[0] = CertDuplicateStore(engine->hRoot);
-    worldStores[1] = CertOpenStore(CERT_STORE_PROV_SYSTEM_W, 0, 0, system_store, L"CA");
-    worldStores[2] = CertOpenStore(CERT_STORE_PROV_SYSTEM_W, 0, 0, system_store, L"My");
-    worldStores[3] = CertOpenStore(CERT_STORE_PROV_SYSTEM_W, 0, 0, system_store, L"Trust");
+    worldStores[1] = CertOpenStore(CERT_STORE_PROV_SYSTEM_W, 0, 0, system_store | ro_existing, L"CA");
+    worldStores[2] = CertOpenStore(CERT_STORE_PROV_SYSTEM_W, 0, 0, system_store | ro_existing, L"My");
+    worldStores[3] = CertOpenStore(CERT_STORE_PROV_SYSTEM_W, 0, 0, system_store | ro_existing, L"Trust");
 
     CRYPT_AddStoresToCollection(engine->hWorld, ARRAY_SIZE(worldStores), worldStores);
     CRYPT_AddStoresToCollection(engine->hWorld, config->cAdditionalStore, config->rghAdditionalStore);

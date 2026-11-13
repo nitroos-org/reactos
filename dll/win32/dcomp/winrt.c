@@ -305,11 +305,11 @@ static HRESULT STDMETHODCALLTYPE compositor_CreateLinearEasingFunction(__x_ABI_C
     return E_NOTIMPL;
 }
 
+/* documented: a new, empty CompositionPropertySet of this Compositor (the class of CompositionObject.Properties) */
 static HRESULT STDMETHODCALLTYPE compositor_CreatePropertySet(__x_ABI_CWindows_CUI_CComposition_CICompositor *This, __x_ABI_CWindows_CUI_CComposition_CICompositionPropertySet **result)
 {
-    FIXME("ICompositor::CreatePropertySet: not implemented\n");
-    if (result) *result = NULL;
-    return E_NOTIMPL;
+    TRACE("%p, %p\n", This, result);
+    return comp_new_object(comp_identity(This), K_PROPSET, &IID_ICompositionPropertySet, (void **)result);
 }
 
 static HRESULT STDMETHODCALLTYPE compositor_CreateQuaternionKeyFrameAnimation(__x_ABI_CWindows_CUI_CComposition_CICompositor *This, __x_ABI_CWindows_CUI_CComposition_CIQuaternionKeyFrameAnimation **result)
@@ -426,6 +426,15 @@ struct compositor
     IUnknown *marshal;                  /* free-threaded marshaler */
     LONG ref;
     BOOL closed;
+    /* commits (under comp_lock): a Compositor without a controller commits by itself shortly after a change; one
+     * made by a CompositorController raises CommitNeeded once and waits for ICompositorController::Commit */
+    struct controller *controller;      /* weak: the controller that made this Compositor, cleared when it goes */
+    BOOL work_queued;                   /* a commit_work item is queued */
+    LONG work_items;                    /* commit_work items queued or running: they use the object without a
+                                         * reference (a reference would show in the Compositor's count) */
+    BOOL zombie;                        /* released while work_items != 0: the last item frees it */
+    BOOL dirty;                         /* changed since the last commit */
+    BOOL need_raised;                   /* CommitNeeded raised since the last commit */
 };
 
 struct commit_handler
@@ -531,6 +540,13 @@ static ULONG STDMETHODCALLTYPE compositor_id_AddRef(IInspectable *iface)
     return InterlockedIncrement(&comp_from_identity(iface)->ref);
 }
 
+static void compositor_free(struct compositor *This)
+{
+    if (This->marshal) IUnknown_Release(This->marshal);
+    HeapFree(GetProcessHeap(), 0, This);
+    InterlockedDecrement(&object_count);
+}
+
 static ULONG STDMETHODCALLTYPE compositor_id_Release(IInspectable *iface)
 {
     struct compositor *This = comp_from_identity(iface);
@@ -538,9 +554,13 @@ static ULONG STDMETHODCALLTYPE compositor_id_Release(IInspectable *iface)
 
     if (!ref)
     {
-        if (This->marshal) IUnknown_Release(This->marshal);
-        HeapFree(GetProcessHeap(), 0, This);
-        InterlockedDecrement(&object_count);
+        BOOL later;
+
+        comp_lock();
+        later = This->work_items != 0;
+        if (later) This->zombie = TRUE;
+        comp_unlock();
+        if (!later) compositor_free(This);
     }
     return ref;
 }
@@ -812,6 +832,9 @@ static ULONG STDMETHODCALLTYPE controller_id_Release(IInspectable *iface)
     {
         int i;
 
+        comp_lock();
+        if (This->compositor && This->compositor->controller == This) This->compositor->controller = NULL;
+        comp_unlock();
         for (i = 0; i < This->nhandlers; i++) This->handlers[i].handler->lpVtbl->Release(This->handlers[i].handler);
         HeapFree(GetProcessHeap(), 0, This->handlers);
         if (This->compositor) IInspectable_Release(&This->compositor->IInspectable_iface);
@@ -1027,8 +1050,13 @@ static HRESULT STDMETHODCALLTYPE ctl_Commit(ICompositorController *iface)
 
     TRACE("%p\n", iface);
     if (This->closed) return RO_E_CLOSED;   /* FIXME: verify on the oracle */
-    /* Documented: sends the batched changes of the Compositor to the renderer. The object model has no renderer
-     * side to hand them to yet (no window surfaces), so there is nothing to do; the tree stays readable. */
+    /* Documented: sends the batched changes of the Compositor to the renderer: every DesktopWindowTarget of the
+     * Compositor draws its tree into its window now (present.c), on the calling thread. */
+    comp_lock();
+    This->compositor->dirty = FALSE;
+    This->compositor->need_raised = FALSE;
+    comp_unlock();
+    comp_commit_targets((IUnknown *)&This->compositor->IInspectable_iface);
     return S_OK;
 }
 
@@ -1080,9 +1108,8 @@ static HRESULT STDMETHODCALLTYPE ctl_add_CommitNeeded(ICompositorController *ifa
     }
     comp_unlock();
     if (hr != S_OK) handler->lpVtbl->Release(handler);
-    /* FIXME: CommitNeeded is documented to fire when the Compositor has changes to commit; the object model has
-     * no change notification, so the handler is kept but never invoked. */
-    FIXME("CompositorController::CommitNeeded: handler %p registered, the event is never raised\n", handler);
+    /* changes made before the handler came are announced to it too */
+    else if (This->compositor->dirty) comp_compositor_changed((IUnknown *)&This->compositor->IInspectable_iface);
     return hr;
 }
 
@@ -1134,10 +1161,108 @@ static HRESULT controller_create(IInspectable **out)
         HeapFree(GetProcessHeap(), 0, This);
         return hr;
     }
+    This->compositor->controller = This;
     CoCreateFreeThreadedMarshaler((IUnknown *)&This->IInspectable_iface, &This->marshal);
     InterlockedIncrement(&object_count);
     *out = &This->IInspectable_iface;
     return S_OK;
+}
+
+/* ---- commits: CommitNeeded, automatic commit ----
+ * Documented (learn.microsoft.com): a Compositor commits its changes by itself; one made by a CompositorController
+ * leaves that to the app (ICompositorController::Commit) and raises CommitNeeded when it has changes to commit.
+ * Here the work runs on a thread-pool thread, about one frame (16 ms) after the first change, so that a batch of
+ * changes ends up in one commit. FIXME, verify on the oracle: the thread CommitNeeded is raised on (here a pool
+ * thread), how often (here once until the next Commit), and its args object (here NULL). */
+
+static BOOL controller_grab_locked(struct controller *c)
+{
+    LONG r;
+
+    for (;;)
+    {
+        r = c->ref;
+        if (r <= 0) return FALSE;
+        if (InterlockedCompareExchange(&c->ref, r + 1, r) == r) return TRUE;
+    }
+}
+
+static DWORD WINAPI commit_work(void *arg)
+{
+    struct compositor *c = arg;
+    struct controller *ctl;
+    ICommitNeededHandler **list = NULL;
+    int n = 0, k;
+    BOOL commit = FALSE, free_now;
+
+    Sleep(16);
+    comp_lock();
+    c->work_queued = FALSE;
+    if (c->zombie)
+    {
+        BOOL last = !--c->work_items;
+        comp_unlock();
+        if (last) compositor_free(c);
+        return 0;
+    }
+    ctl = c->controller;
+    if (ctl && !controller_grab_locked(ctl)) ctl = NULL;
+    if (ctl)
+    {
+        if (!ctl->closed && c->dirty && !c->need_raised && ctl->nhandlers &&
+            (list = HeapAlloc(GetProcessHeap(), 0, ctl->nhandlers * sizeof(*list))))
+        {
+            c->need_raised = TRUE;
+            for (k = 0; k < ctl->nhandlers; k++)
+            {
+                list[n] = ctl->handlers[k].handler;
+                list[n]->lpVtbl->AddRef(list[n]);
+                n++;
+            }
+        }
+    }
+    else if (!c->controller && c->dirty && !c->closed)
+    {
+        c->dirty = FALSE;
+        commit = TRUE;
+    }
+    comp_unlock();
+    if (ctl)
+    {
+        for (k = 0; k < n; k++)
+        {
+            TRACE("CommitNeeded -> handler %p\n", list[k]);
+            list[k]->lpVtbl->Invoke(list[k], &ctl->ICompositorController_iface, NULL);
+            list[k]->lpVtbl->Release(list[k]);
+        }
+        HeapFree(GetProcessHeap(), 0, list);
+        IInspectable_Release(&ctl->IInspectable_iface);
+    }
+    else if (commit)
+        comp_commit_targets((IUnknown *)&c->IInspectable_iface);   /* identity only compared: the targets hold it */
+    comp_lock();
+    free_now = !--c->work_items && c->zombie;
+    comp_unlock();
+    if (free_now) compositor_free(c);
+    return 0;
+}
+
+void comp_compositor_changed(IUnknown *identity)
+{
+    struct compositor *c = comp_from_identity((IInspectable *)identity);
+    BOOL queue;
+
+    comp_lock();
+    c->dirty = TRUE;
+    queue = !c->work_queued && !c->need_raised;
+    if (queue) { c->work_queued = TRUE; c->work_items++; }
+    comp_unlock();
+    if (!queue) return;
+    if (!QueueUserWorkItem(commit_work, c, WT_EXECUTEDEFAULT))
+    {
+        WARN("QueueUserWorkItem failed: %lu\n", GetLastError());
+        comp_lock(); c->work_queued = FALSE; c->work_items--; comp_unlock();
+    }
 }
 
 static HRESULT compositor_activate(IInspectable **out)

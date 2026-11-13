@@ -52,4 +52,18 @@ struct INitroCompositionTest { const INitroCompositionTestVtbl *lpVtbl; };
 
 DEFINE_GUID(IID_INitroDrawingSurfaceInterop, 0xc8b9638c, 0x5641, 0x4d99, 0xac, 0xac, 0x26, 0xbe, 0xa9, 0x29, 0x6a, 0xb5);
 DEFINE_GUID(IID_ICompositionDrawingSurfaceInterop, 0xfd04e6e3, 0xfe0c, 0x4c3c, 0xab, 0x19, 0xa0, 0x76, 0x01, 0xa5, 0x76, 0xee);
+/* ICompositionGraphicsDeviceInterop: IID and member order (GetRenderingDevice, SetRenderingDevice) from
+ * microsoft/windows-rs commit cd03f9369a896b62151242c1c3321e695df63cfc, metadata/win32/windowsuicompositioninterop.rdl */
+typedef struct ICompGraphicsDeviceInterop ICompGraphicsDeviceInterop;
+typedef struct ICompGraphicsDeviceInteropVtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(ICompGraphicsDeviceInterop *This, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(ICompGraphicsDeviceInterop *This);
+    ULONG (STDMETHODCALLTYPE *Release)(ICompGraphicsDeviceInterop *This);
+    HRESULT (STDMETHODCALLTYPE *GetRenderingDevice)(ICompGraphicsDeviceInterop *This, IUnknown **value);
+    HRESULT (STDMETHODCALLTYPE *SetRenderingDevice)(ICompGraphicsDeviceInterop *This, IUnknown *value);
+} ICompGraphicsDeviceInteropVtbl;
+struct ICompGraphicsDeviceInterop { const ICompGraphicsDeviceInteropVtbl *lpVtbl; };
+DEFINE_GUID(IID_ICompositionGraphicsDeviceInterop, 0xa116ff71, 0xf8bf, 0x4c8a, 0x9c, 0x98, 0x70, 0x77, 0x9a, 0x32, 0xa9, 0xc8);
+
 DEFINE_GUID(IID_INitroCompositionTest, 0x37168b4f, 0xcb77, 0x4388, 0xa4, 0xf1, 0xa4, 0x71, 0x38, 0xfb, 0xcd, 0x25);

@@ -444,6 +444,7 @@ static void ngf_repair(struct ngf *f)
 				r->repair_errors++;
 				break;
 			}
+			ntfs_drain_clusters(vol, (s64)first, (s64)run);
 			ntfs_inc_free_clusters(vol, (s64)run);
 			r->fixed_clusters += run;
 			printk(KERN_WARNING "CHECK (repair): clusters %llu+%llu freed in $Bitmap\n", first, run);

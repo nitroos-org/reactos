@@ -84,6 +84,13 @@ enum { NG_HT_COMMIT, NG_HT_SET_SIZE, NG_HT_WRITE, NG_HT_WRITEBACK, NG_HT_JNL, NG
 extern ULONGLONG NgHoldTicks[NG_HT_COUNT];
 #endif
 
+/* One unlocked data transfer in flight (nt/write.c, NgDataIoBegin): Dio is the caller's, valid and unchanged until NgDataIoUnregister. */
+typedef struct _NG_DIO_REG
+{
+    LIST_ENTRY Link;
+    const struct ngc_dio *Dio;
+} NG_DIO_REG, *PNG_DIO_REG;
+
 /* Volume control block: the device extension of the volume device object. */
 typedef struct _NG_VCB
 {
@@ -94,14 +101,17 @@ typedef struct _NG_VCB
     ngc_vol *Core;
     ERESOURCE CoreLock;             /* serialises every call into the fs/ntfs core */
     /*
-     * Paging writes run their data transfer without CoreLock (write.c, NgPagingWrite).  DataIoGate is held
-     * shared by each such transfer, acquired under CoreLock and released before CoreLock is taken again;
-     * it is taken exclusive only under CoreLock, to wait for the transfers in flight (NgDrainDataIoCallback: before
-     * clusters are freed and before the device stops being this mount's).  DioActive counts the unlocked
+     * Paging writes run their data transfer without CoreLock (write.c, NgPagingWrite).  Each such transfer is
+     * registered in DioRegList (with the device ranges of its runs) under CoreLock, before CoreLock is dropped, and
+     * removed again before CoreLock is taken again.  A cluster free waits, under CoreLock, only for the transfers whose
+     * ranges overlap the clusters it frees (NgDrainDataIoRangeCallback); whatever stops the device being this mount's
+     * waits for every transfer (NgDrainDataIoCallback).  DioActive counts the unlocked
      * writes from their start to their end under CoreLock (they pin a core node); DioIdle is set while it
      * is 0, and a dismount waits for it before it frees the core.  Both change under CoreLock only.
      */
-    ERESOURCE DataIoGate;
+    KSPIN_LOCK DioRegLock;          /* DioRegList: the unlocked data transfers in flight, each with the device ranges it touches */
+    LIST_ENTRY DioRegList;          /* NG_DIO_REG entries (DioRegLock); added under CoreLock, removed without it */
+    KEVENT DioRegEvent;             /* a transfer was removed from DioRegList (notification; reset under DioRegLock by a drain that finds a conflict) */
     LONG DioActive;
     KEVENT DioIdle;
     NPAGED_LOOKASIDE_LIST DioBounce;    /* NG_DIO_BOUNCE buffers for those transfers */
@@ -442,12 +452,14 @@ NTSTATUS NgDropPagingWrite(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, ULONG Length);
 #define NG_DIO_IOV 16                       /* requests of one transfer gathered before they are sent */
 VOID NgInitDataIo(PNG_VCB Vcb);
 VOID NgDrainDataIoCallback(PVOID Context);
+VOID NgDrainDataIoRangeCallback(PVOID Context, ULONGLONG Off, ULONGLONG Len);
 VOID NgWaitDataIoIdle(PNG_VCB Vcb);
 int NgCommit(PNG_VCB Vcb);
 int NgCommitEx(PNG_VCB Vcb, BOOLEAN Retain);
 VOID NgCommitKickCallback(PVOID Context);
-VOID NgDataIoBegin(PNG_VCB Vcb);
-VOID NgDataIoTransferred(PNG_VCB Vcb);
+VOID NgDataIoBegin(PNG_VCB Vcb, const struct ngc_dio *Dio, PNG_DIO_REG Reg);
+VOID NgDataIoUnregister(PNG_VCB Vcb, PNG_DIO_REG Reg);
+VOID NgDataIoTransferred(PNG_VCB Vcb, PNG_DIO_REG Reg);
 VOID NgDataIoDone(PNG_VCB Vcb);
 BOOLEAN NgDropIfDiscardable(PNG_VCB Vcb, PIRP Irp, PNTSTATUS Status);
 BOOLEAN NgPurgeFrom(PNG_FCB Fcb, LONGLONG Start);

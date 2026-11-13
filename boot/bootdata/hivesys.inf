@@ -2367,6 +2367,14 @@ HKLM,"SYSTEM\CurrentControlSet\Services\NitroExpand","ImagePath",0x00020000,"%Sy
 HKLM,"SYSTEM\CurrentControlSet\Services\NitroExpand","ObjectName",0x00000000,"LocalSystem"
 HKLM,"SYSTEM\CurrentControlSet\Services\NitroExpand","Start",0x00010001,0x00000002
 HKLM,"SYSTEM\CurrentControlSet\Services\NitroExpand","Type",0x00010001,0x00000010
+; Fills the LocalMachine Root certificate store as SYSTEM at boot (nothing to do once it is up to date)
+HKLM,"SYSTEM\CurrentControlSet\Services\NitroCertSeed","Description",0x00000000,"Imports the built-in root certificates into the LocalMachine Root store at boot, as SYSTEM, so that a standard user never has to write there."
+HKLM,"SYSTEM\CurrentControlSet\Services\NitroCertSeed","DisplayName",0x00000000,"NitroOS Root Certificate Seeding"
+HKLM,"SYSTEM\CurrentControlSet\Services\NitroCertSeed","ErrorControl",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\NitroCertSeed","ImagePath",0x00020000,"%SystemRoot%\system32\nitro-certseed.exe /service"
+HKLM,"SYSTEM\CurrentControlSet\Services\NitroCertSeed","ObjectName",0x00000000,"LocalSystem"
+HKLM,"SYSTEM\CurrentControlSet\Services\NitroCertSeed","Start",0x00010001,0x00000002
+HKLM,"SYSTEM\CurrentControlSet\Services\NitroCertSeed","Type",0x00010001,0x00000010
 HKLM,"SYSTEM\CurrentControlSet\Services\Schedule","DependOnService",0x00010000,"RPCSS"
 HKLM,"SYSTEM\CurrentControlSet\Services\Schedule","Description",0x00000000,%SCHEDULE_SERVICE_DESCRIPTION%
 HKLM,"SYSTEM\CurrentControlSet\Services\Schedule","DisplayName",0x00000000,%SCHEDULE_SERVICE%

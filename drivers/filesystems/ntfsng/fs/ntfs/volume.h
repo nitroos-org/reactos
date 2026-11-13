@@ -244,13 +244,22 @@ DEFINE_NVOL_BIT_OPS(DisableSparse)
 DEFINE_NVOL_BIT_OPS(NativeSymlinkRel)
 DEFINE_NVOL_BIT_OPS(SymlinkNative)
 
+/*
+ * ntfsng: every free of clusters calls this for each run it frees (under the bitmap lock, which keeps the clusters from being
+ * allocated again): data transfers in flight to or from those clusters, outside the volume lock, land before anyone can reuse
+ * them.  Only the transfers that touch these clusters are waited for; the others (other files, on other clusters) cannot be
+ * affected by the free.
+ */
+static inline void ntfs_drain_clusters(struct ntfs_volume *vol, s64 lcn, s64 nr)
+{
+	if (nr > 0)
+		kshim_dio_drain_range(vol->sb->s_bdev, (u64)lcn << vol->cluster_size_bits, (u64)nr << vol->cluster_size_bits);
+}
+
 static inline void ntfs_inc_free_clusters(struct ntfs_volume *vol, s64 nr)
 {
 	if (!NVolFreeClusterKnown(vol))
 		wait_event(vol->free_waitq, NVolFreeClusterKnown(vol));
-	/* ntfsng: every free passes here; data writes in flight to these clusters land before anyone can reuse them. */
-	if (nr > 0)
-		kshim_dio_drain(vol->sb->s_bdev);
 	atomic64_add(nr, &vol->free_clusters);
 }
 
