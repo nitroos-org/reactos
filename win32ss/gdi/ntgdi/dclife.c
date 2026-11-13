@@ -672,8 +672,9 @@ DC_vPrepareDCsForBlitEx(
      */
     if ((pdcDest->fs & DC_REDIRECTION) && pdcDest->pvRedir)
     {
-        if (fl & DCPREP_READ_ONLY)
+        if (fl & (DCPREP_READ_ONLY | DCPREP_ACCUM_DEST))
         {
+            /* Read only: nothing drawn. Accumulated: the primitive adds what it draws (DC_vRedirAddDrawn) */
             RECTL_vSetEmptyRect(&pdcDest->rclRedirDraw);
         }
         else if (rcDest && (fl & DCPREP_EXACT_DEST))

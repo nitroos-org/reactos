@@ -258,11 +258,14 @@ VOID FASTCALL DC_vPrepareDCsForBlit(PDC pdcDest, const RECT* rcDest, PDC pdcSrc,
 #define DCPREP_CLIP_ALPHA      0x04
 #define DCPREP_CLIP_NOTRIVIAL  0x08
 #define DCPREP_CLIP_MASK       0x0E
-/* rcDest is exactly what the primitive writes (blits, fills of rectangles and regions, DIB copies): a redirected
-   window presents only that; without it the DC's clip bounds count as drawn (lines, shapes, text: they draw past
-   their bounding rectangles). DCPREP_READ_ONLY: the destination is only read (GetPixel). */
+/* rcDest is exactly what the primitive writes (blits, fills of rectangles and regions, DIB copies, icons): a
+   redirected window presents only that; without it (or DCPREP_ACCUM_DEST) the DC's clip bounds count as drawn (arcs,
+   ellipses, paths: they draw past their bounding rectangles). DCPREP_READ_ONLY: the destination is only read. */
 #define DCPREP_EXACT_DEST      0x10
 #define DCPREP_READ_ONLY       0x20
+/* DCPREP_ACCUM_DEST: the primitive adds what it writes itself (DC_vRedirAddDrawn) as it draws; nothing counts as
+   drawn before, and DC_vFinishBlit marks what was added (text: its boxes and glyph cells, not the clip bounds) */
+#define DCPREP_ACCUM_DEST      0x40
 VOID FASTCALL DC_vPrepareDCsForBlitEx(PDC pdcDest, const RECT* rcDest, PDC pdcSrc, const RECT* rcSrc, FLONG fl);
 typedef enum _CLIPLIMIT
 {
@@ -283,6 +286,95 @@ HDC FASTCALL IntGdiCreateDisplayDC(HDEV hDev, ULONG DcType, BOOL EmptyDC);
 BOOL FASTCALL IntGdiCleanDC(HDC hDC);
 VOID FASTCALL IntvGetDeviceCaps(PPDEVOBJ, PDEVCAPS);
 VOID FASTCALL IntUpdateBoundsRect(PDC,PRECTL);
+
+/*
+ * A redirected window DC (DC_REDIRECTION) presents what its primitives wrote: prcl (device coordinates, may be
+ * unordered) is added to what the current primitive drew, clipped to the DC's clip bounds. A no-op otherwise.
+ */
+FORCEINLINE
+VOID
+DC_vRedirAddDrawn(PDC pdc, const RECTL *prcl)
+{
+    RECTL rc;
+
+    if (!(pdc->fs & DC_REDIRECTION) || !pdc->pvRedir)
+        return;
+    rc = *prcl;
+    RECTL_vMakeWellOrdered(&rc);
+    if (!RECTL_bIntersectRect(&rc, &rc, &pdc->erclClip))
+        return;
+    if (RECTL_bIsEmptyRect(&pdc->rclRedirDraw))
+        pdc->rclRedirDraw = rc;
+    else
+        RECTL_bUnionRect(&pdc->rclRedirDraw, &pdc->rclRedirDraw, &rc);
+}
+
+/*
+ * The same for a rectangle whose right and bottom edges are drawn too (inclusive bounds of points, a rectangle with
+ * its pen), with lInflate pixels around it; computed in 64 bits and clamped, so extreme coordinates still give a
+ * rectangle that contains what was drawn.
+ */
+FORCEINLINE
+VOID
+DC_vRedirAddInclusive(PDC pdc, const RECTL *prcl, LONG lInflate)
+{
+    RECTL rc;
+    LONGLONG l, t, r, b;
+
+    if (!(pdc->fs & DC_REDIRECTION) || !pdc->pvRedir)
+        return;
+    rc = *prcl;
+    RECTL_vMakeWellOrdered(&rc);
+    l = (LONGLONG)rc.left - lInflate;
+    t = (LONGLONG)rc.top - lInflate;
+    r = (LONGLONG)rc.right + lInflate + 1;
+    b = (LONGLONG)rc.bottom + lInflate + 1;
+    rc.left = (LONG)max(l, -(LONGLONG)0x80000000);
+    rc.top = (LONG)max(t, -(LONGLONG)0x80000000);
+    rc.right = (LONG)min(r, (LONGLONG)0x7FFFFFFF);
+    rc.bottom = (LONG)min(b, (LONGLONG)0x7FFFFFFF);
+    DC_vRedirAddDrawn(pdc, &rc);
+}
+
+/*
+ * A primitive that prepares the DC itself with DCPREP_ACCUM_DEST can run inside another one (a path stroked as
+ * polylines, PolyPolyline): prclOuter, what the outer one counted as drawn before (saved before the inner prepare),
+ * is added back after the inner DC_vFinishBlit, so the outer DC_vFinishBlit still marks it. Outside of another
+ * primitive the value is never marked: every prepare sets rclRedirDraw anew.
+ */
+FORCEINLINE
+VOID
+DC_vRedirKeepOuter(PDC pdc, const RECTL *prclOuter)
+{
+    if (RECTL_bIsEmptyRect(prclOuter))
+        return;
+    if (RECTL_bIsEmptyRect(&pdc->rclRedirDraw))
+        pdc->rclRedirDraw = *prclOuter;
+    else
+        RECTL_bUnionRect(&pdc->rclRedirDraw, &pdc->rclRedirDraw, prclOuter);
+}
+
+/* The same for points drawn with a one-pixel pen (cosmetic lines): their bounds and one pixel around */
+FORCEINLINE
+VOID
+DC_vRedirAddPoints(PDC pdc, const POINTL *ppt, ULONG cpt)
+{
+    RECTL rc;
+    ULONG i;
+
+    if (!(pdc->fs & DC_REDIRECTION) || !pdc->pvRedir || !cpt)
+        return;
+    rc.left = rc.right = ppt[0].x;
+    rc.top = rc.bottom = ppt[0].y;
+    for (i = 1; i < cpt; i++)
+    {
+        rc.left = min(rc.left, ppt[i].x);
+        rc.right = max(rc.right, ppt[i].x);
+        rc.top = min(rc.top, ppt[i].y);
+        rc.bottom = max(rc.bottom, ppt[i].y);
+    }
+    DC_vRedirAddInclusive(pdc, &rc, 1);
+}
 
 BOOL NTAPI GreSetDCOwner(HDC hdc, ULONG ulOwner);
 HDC APIENTRY GreCreateCompatibleDC(HDC hdc, BOOL bAltDc);

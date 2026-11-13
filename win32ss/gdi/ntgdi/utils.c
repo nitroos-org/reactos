@@ -237,6 +237,7 @@ IntEngFillBox(
     DestRect.top = Y;
     DestRect.bottom = Y + Height;
 
+    DC_vRedirAddDrawn(dc, &DestRect);
     IntEngBitBlt(&psurf->SurfObj,
                  NULL,
                  NULL,
@@ -282,5 +283,7 @@ IntEngFillPolygon(
             Rect.bottom = y;
     }
 
+    /* The bounds include the right and bottom edge points */
+    DC_vRedirAddInclusive(dc, (PRECTL)&Rect, 1);
     IntFillPolygon(dc, dc->dclevel.pSurface, BrushObj, pPoints, cPoints, Rect, &g_PointZero);
 }

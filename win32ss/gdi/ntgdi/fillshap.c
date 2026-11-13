@@ -27,6 +27,7 @@ IntGdiPolygon(PDC    dc,
     PDC_ATTR pdcattr;
     POINTL BrushOrigin;
     PPATH pPath;
+    RECTL rclOuter;
 //    int Left;
 //    int Top;
 
@@ -87,6 +88,10 @@ IntGdiPolygon(PDC    dc,
             /* Memory DC without a bitmap selected, nothing to do. */
             return TRUE;
         }
+
+        /* What the polygon writes is added below, from DestRect: device coordinates, as the points are by now. The
+           stroke of a wide pen prepares the DC again and replaces what was counted before, so keep it. */
+        rclOuter = dc->rclRedirDraw;
 
         /* Now fill the polygon with the current fill brush. */
         if (!(pbrFill->flAttrs & BR_IS_NULL))
@@ -172,6 +177,20 @@ IntGdiPolygon(PDC    dc,
                 }
             }
         }
+
+        /*
+         * A redirected window presents what was drawn: the fill and a one-pixel pen lie in the device bounds of the
+         * points (the right and bottom points are drawn too, a pixel around for the pen), a wide pen reaches past
+         * them and takes the clip bounds. Nothing is added when no DC is bound to a window.
+         */
+        if ((dc->fs & DC_REDIRECTION) && dc->pvRedir)
+        {
+            DC_vRedirKeepOuter(dc, &rclOuter);
+            if (!(pbrLine->flAttrs & BR_IS_NULL) && IntIsEffectiveWidePen(pbrLine))
+                DC_vRedirAddDrawn(dc, &dc->erclClip);
+            else
+                DC_vRedirAddInclusive(dc, &DestRect, 1);
+        }
     }
 
     return ret;
@@ -208,7 +227,10 @@ IntPolygon(HDC hdc, POINT *Point, int Count)
         return FALSE;
     }
 
+    /* What the polygon writes is added by IntGdiPolygon (a redirected window presents only that) */
+    DC_vPrepareDCsForBlitEx(pdc, NULL, NULL, NULL, DCPREP_ACCUM_DEST);
     bResult = IntGdiPolygon(pdc, Point, Count);
+    DC_vFinishBlit(pdc, NULL);
 
     DC_UnlockDc(pdc);
     return bResult;
@@ -554,7 +576,8 @@ NtGdiPolyPolyDraw( IN HDC hDC,
         return FALSE;
     }
 
-    DC_vPrepareDCsForBlit(dc, NULL, NULL, NULL);
+    /* What the shapes write is added after them (a redirected window presents only that) */
+    DC_vPrepareDCsForBlitEx(dc, NULL, NULL, NULL, DCPREP_ACCUM_DEST);
 
     if (dc->pdcattr->ulDirty_ & (DIRTY_FILL | DC_BRUSH_DIRTY))
         DC_vUpdateFillBrush(dc);
@@ -596,6 +619,11 @@ NtGdiPolyPolyDraw( IN HDC hDC,
             Ret = FALSE;
     }
 
+    /*
+     * A redirected window presents what the shapes wrote: IntGdiPolygon adds its device bounds, the polylines and
+     * Beziers add their own (IntGdiPolyline); everything lands in the prepare above, which marks it below.
+     */
+
     /* Cleanup and return */
     DC_vFinishBlit(dc, NULL);
     DC_UnlockDc(dc);
@@ -621,6 +649,7 @@ IntRectangle(PDC dc,
     PDC_ATTR pdcattr;
     POINTL BrushOrigin;
     PPATH pPath;
+    RECTL rclOuter;
 
     ASSERT ( dc ); // Caller's responsibility to set this up
 
@@ -657,7 +686,8 @@ IntRectangle(PDC dc,
         DestRect.bottom--;
     }
 
-    DC_vPrepareDCsForBlit(dc, &DestRect, NULL, NULL);
+    /* What the rectangle writes is added below (a redirected window presents only that) */
+    DC_vPrepareDCsForBlitEx(dc, &DestRect, NULL, NULL, DCPREP_ACCUM_DEST);
 
     if (pdcattr->ulDirty_ & (DIRTY_FILL | DC_BRUSH_DIRTY))
         DC_vUpdateFillBrush(dc);
@@ -678,6 +708,16 @@ IntRectangle(PDC dc,
     {
         ret = TRUE;
         goto cleanup;
+    }
+
+    /* The box and a one-pixel pen on its edges; a wide pen reaches further: the clip bounds */
+    if (!(pbrLine->flAttrs & BR_IS_NULL) && IntIsEffectiveWidePen(pbrLine))
+    {
+        DC_vRedirAddDrawn(dc, &dc->erclClip);
+    }
+    else
+    {
+        DC_vRedirAddInclusive(dc, &DestRect, 1);
     }
 
     if (pbrFill)
@@ -731,8 +771,11 @@ IntRectangle(PDC dc,
             pPath->state = PATH_Closed;
             dc->dclevel.flPath &= ~DCPATH_ACTIVE;
 
-            /* Actually stroke a path */
+            /* Actually stroke a path. The stroke prepares the DC again and counts only its own bounds as drawn: what the
+               rectangle counted before (its fill can lie outside the outline of the stroke) is added back. */
+            rclOuter = dc->rclRedirDraw;
             ret = PATH_StrokePath(dc, pPath);
+            DC_vRedirKeepOuter(dc, &rclOuter);
 
             /* Clear the path */
             PATH_UnlockPath(pPath);
@@ -805,12 +848,16 @@ NtGdiRectangle(HDC  hDC,
         POINTL DestCoords[4];
         ULONG PolyCounts = 4;
 
+        /* What the polygon writes is added by IntGdiPolygon (a redirected window presents only that) */
+        DC_vPrepareDCsForBlitEx(dc, NULL, NULL, NULL, DCPREP_ACCUM_DEST);
+
         DestCoords[0].x = DestCoords[3].x = LeftRect;
         DestCoords[0].y = DestCoords[1].y = TopRect;
         DestCoords[1].x = DestCoords[2].x = RightRect;
         DestCoords[2].y = DestCoords[3].y = BottomRect;
         // Use IntGdiPolyPolygon so to support PATH.
         ret = IntGdiPolyPolygon(dc, DestCoords, &PolyCounts, 1);
+        DC_vFinishBlit(dc, NULL);
     }
     else
     {
@@ -1088,7 +1135,28 @@ GreGradientFill(
       IntUpdateBoundsRect(pdc, &rclExtent);
    }
 
-    DC_vPrepareDCsForBlit(pdc, &rclExtent, NULL, NULL);
+    /* A redirected window presents what the fill writes: the rectangles lie within the bounds of their device
+       vertices; triangles count the clip bounds */
+    DC_vPrepareDCsForBlitEx(pdc, &rclExtent, NULL, NULL, DCPREP_ACCUM_DEST);
+    if (ulMode == GRADIENT_FILL_RECT_H || ulMode == GRADIENT_FILL_RECT_V)
+    {
+        RECTL rcDrawn;
+
+        rcDrawn.left = rcDrawn.right = pVertex[0].x;
+        rcDrawn.top = rcDrawn.bottom = pVertex[0].y;
+        for (i = 1; i < nVertex; i++)
+        {
+            rcDrawn.left = min(rcDrawn.left, pVertex[i].x);
+            rcDrawn.right = max(rcDrawn.right, pVertex[i].x);
+            rcDrawn.top = min(rcDrawn.top, pVertex[i].y);
+            rcDrawn.bottom = max(rcDrawn.bottom, pVertex[i].y);
+        }
+        DC_vRedirAddInclusive(pdc, &rcDrawn, 0);
+    }
+    else
+    {
+        DC_vRedirAddDrawn(pdc, &pdc->erclClip);
+    }
 
     psurf = pdc->dclevel.pSurface;
 

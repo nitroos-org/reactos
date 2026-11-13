@@ -261,6 +261,20 @@ VOID FASTCALL UserEnterExclusive(VOID)
     gptiCurrent = PsGetCurrentThreadWin32Thread();
 }
 
+/* The USER lock, exclusive, if no other thread holds it now (FALSE: not taken, nothing to leave) */
+BOOL FASTCALL UserTryEnterExclusive(VOID)
+{
+    ASSERT_NOGDILOCKS();
+    KeEnterCriticalRegion();
+    if (!ExAcquireResourceExclusiveLite(&UserLock, FALSE))
+    {
+        KeLeaveCriticalRegion();
+        return FALSE;
+    }
+    gptiCurrent = PsGetCurrentThreadWin32Thread();
+    return TRUE;
+}
+
 VOID FASTCALL UserLeave(VOID)
 {
     ASSERT_NOGDILOCKS();

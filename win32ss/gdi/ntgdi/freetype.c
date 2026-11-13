@@ -7679,6 +7679,7 @@ IntExtTextOutW(
     const DWORD del = 0x7f, nbsp = 0xa0; // DEL is ASCII DELETE and nbsp is a non-breaking space
     FONTLINK_CHAIN Chain;
     SIZE spaceWidth;
+    RECTL rclOuter;
 
     /* Check if String is valid */
     if (Count > 0xFFFF || (Count > 0 && String == NULL))
@@ -7697,7 +7698,9 @@ IntExtTextOutW(
                                Dx);
     }
 
-    DC_vPrepareDCsForBlit(dc, NULL, NULL, NULL);
+    /* A redirected window presents what the string draws (DC_vRedirAddDrawn below), not the whole clip */
+    rclOuter = dc->rclRedirDraw;
+    DC_vPrepareDCsForBlitEx(dc, NULL, NULL, NULL, DCPREP_ACCUM_DEST);
 
     if (!dc->dclevel.pSurface)
     {
@@ -8050,6 +8053,7 @@ IntExtTextOutW(
                 }
             }
 
+            DC_vRedirAddDrawn(dc, &DestRect);
             if (!IntEngMaskBlt(psoDest,
                                psoGlyph,
                                (CLIPOBJ *)&dc->co,
@@ -8207,6 +8211,7 @@ IntExtTextOutW(
 
 Cleanup:
     DC_vFinishBlit(dc, NULL);
+    DC_vRedirKeepOuter(dc, &rclOuter);
 
     if (TextObj != NULL)
         TEXTOBJ_UnlockText(TextObj);
