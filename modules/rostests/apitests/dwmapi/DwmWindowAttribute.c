@@ -27,6 +27,7 @@
 
 typedef HRESULT (WINAPI *PFN_DWMGETWINDOWATTRIBUTE)(HWND, DWORD, PVOID, DWORD);
 static PFN_DWMGETWINDOWATTRIBUTE pDwmGetWindowAttribute;
+typedef HRESULT (WINAPI *PFN_DWMSETWINDOWATTRIBUTE)(HWND, DWORD, LPCVOID, DWORD);
 
 static UINT SystemDpi(void)
 {
@@ -116,7 +117,7 @@ static void TestInvalidArguments(HWND hwnd)
 
     /* the attributes that cannot be read */
     {
-        static const DWORD Bad[] = { 0, 2, 3, 4, 6, 7, 8, 10, 11, 12, 13, 17, 18, 19, 21, 22, 33, 34, 40 };
+        static const DWORD Bad[] = { 0, 2, 3, 4, 6, 7, 8, 10, 11, 12, 13, 17, 18, 19, 21, 22, 33, 34, 35, 36, 40 };
         BYTE buf[16];
         int i;
 
@@ -126,6 +127,37 @@ static void TestInvalidArguments(HWND hwnd)
             ok(hr == E_INVALIDARG, "attr %lu: 0x%08lx\n", Bad[i], hr);
         }
     }
+}
+
+/* Measured on Windows 10 22H2 build 19045: border (34), caption (35) colour fail, immersive dark mode (20) succeeds.
+ * 36 (text colour) was not measured, it is treated like 34 and 35. */
+static void TestSetColorAttributes(HWND hwnd)
+{
+    PFN_DWMSETWINDOWATTRIBUTE pSet = (PFN_DWMSETWINDOWATTRIBUTE)GetProcAddress(GetModuleHandleW(L"dwmapi.dll"), "DwmSetWindowAttribute");
+    static const DWORD Attrs[] = { 34, 35, 36 };
+    DWORD value;
+    HRESULT hr;
+    int i;
+
+    ok(pSet != NULL, "DwmSetWindowAttribute missing\n");
+    if (!pSet)
+        return;
+
+    for (i = 0; i < 3; i++)
+    {
+        value = 0x00ff8000;
+        hr = pSet(hwnd, Attrs[i], &value, sizeof(value));
+        ok(hr == E_INVALIDARG, "set attr %lu: 0x%08lx\n", Attrs[i], hr);
+        value = 0xFFFFFFFF; /* DWMWA_COLOR_DEFAULT */
+        hr = pSet(hwnd, Attrs[i], &value, sizeof(value));
+        ok(hr == E_INVALIDARG, "set attr %lu default: 0x%08lx\n", Attrs[i], hr);
+    }
+    value = 1;
+    hr = pSet(hwnd, 20, &value, sizeof(value));
+    ok(hr == S_OK, "set immersive dark mode: 0x%08lx\n", hr);
+    value = 0;
+    hr = pSet(hwnd, 20, &value, sizeof(value));
+    ok(hr == S_OK, "set immersive dark mode off: 0x%08lx\n", hr);
 }
 
 static void TestFlags(HWND hwnd, DWORD expectedNc, const char *name)
@@ -216,6 +248,7 @@ START_TEST(DwmWindowAttribute)
     if (!hwnd)
         return;
     TestInvalidArguments(hwnd);
+    TestSetColorAttributes(hwnd);
     TestFlags(hwnd, 1, "overlapped");
     TestCaptionButtons(hwnd, 3, "overlapped");
 
