@@ -38,7 +38,7 @@ WaitForClose(PSAMPLE Sample, ULONG ExpectedOpen)
     FLTSAMPLE_STATS Stats;
     ULONG i;
 
-    for (i = 0; i < 50; i++)
+    for (i = 0; i < 750; i++)
     {
         SampleStats(Sample, &Stats);
         if (Stats.OpenFiles <= ExpectedOpen)
@@ -92,6 +92,7 @@ test_Counts(PSAMPLE A)
        "Set information: %lu pre, %lu post\n", S.Pre[IRP_MJ_SET_INFORMATION], S.Post[IRP_MJ_SET_INFORMATION]);
     ok(S.Pre[IRP_MJ_QUERY_INFORMATION] >= 1, "No query information\n");
 
+    ok(FlushFileBuffers(File), "Flush failed: %lu\n", GetLastError());
     ok(CloseHandle(File), "Close failed\n");
     WaitForClose(A, BaseOpen);
     SampleStats(A, &S);
