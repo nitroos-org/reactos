@@ -359,10 +359,13 @@ BaseSrvBSMThread(PVOID StartupContext)
     --BaseSrvpBSMThreadCount;
     RtlLeaveCriticalSection(&BaseSrvDDDBSMCritSec);
 
-#if (NTDDI_VERSION < NTDDI_LONGHORN)
-    NtCurrentTeb()->FreeStackOnTermination = TRUE;
-#endif
-    NtTerminateThread(NtCurrentThread(), ExitStatus);
+    /*
+     * End the thread through the loader: LdrShutdownThread frees what the thread start
+     * allocated from the process heap (the TLS expansion vector and the activation
+     * context stack). NtTerminateThread alone left both behind for every
+     * broadcast thread, so csrss grew with each DefineDosDevice of a drive letter.
+     */
+    RtlExitUserThread(ExitStatus);
 
     return ExitStatus;
 }
