@@ -8,6 +8,7 @@
  */
 
 #include "samsrv.h"
+#include <reactos/regacl_sd.h>
 
 #include <ntsecapi.h>
 
@@ -809,14 +810,19 @@ SampSetupCreateServer(IN HANDLE hSamKey,
     HANDLE hDomainsKey = NULL;
     PSECURITY_DESCRIPTOR Sd = NULL;
     ULONG SdSize = 0;
+    UCHAR KeySd[256];
     NTSTATUS Status;
 
-    Status = SampRegCreateKey(hSamKey,
-                              L"SAM",
-                              KEY_ALL_ACCESS,
-                              &hServerKey);
+    /* The SAM server key is readable by SYSTEM only, as on Windows */
+    SdSize = RegSdBuild(REGSD_T_SAMSAM, NULL, KeySd, sizeof(KeySd));
+    Status = SampRegCreateKeySd(hSamKey,
+                                L"SAM",
+                                KEY_ALL_ACCESS,
+                                SdSize ? (PSECURITY_DESCRIPTOR)KeySd : NULL,
+                                &hServerKey);
     if (!NT_SUCCESS(Status))
         return Status;
+    SdSize = 0;
 
     Status = SampRegCreateKey(hServerKey,
                               L"Domains",

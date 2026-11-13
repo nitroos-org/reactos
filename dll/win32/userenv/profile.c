@@ -8,6 +8,7 @@
  */
 
 #include "precomp.h"
+#include <reactos/regacl_sd.h>
 
 #include <sddl.h>
 
@@ -104,6 +105,92 @@ AcquireRemoveRestorePrivilege(IN BOOL bAcquire)
 
     return bRet;
 }
+
+/*
+ * The root key of a user's hive carries the descriptor Windows gives it: the user, SYSTEM and
+ * the administrators have full access, restricted code read access, and nothing is inherited
+ * from the hive the profile was copied from (the Default User template carries the descriptor
+ * of HKU\.DEFAULT). Stamped when the profile is created and again when it is loaded, if the
+ * user does not hold an access entry on it yet, so that loading is idempotent.
+ * A failure is not fatal: the key keeps the descriptor it has.
+ */
+static
+BOOL
+UserHiveRootHasUserAce(IN HKEY hKey, IN PSID pSid)
+{
+    BOOL bFound = FALSE, bPresent, bDefaulted;
+    DWORD dwLength = 0, i;
+    PSECURITY_DESCRIPTOR pSd;
+    PACL pAcl;
+    ACCESS_ALLOWED_ACE *pAce;
+
+    RegGetKeySecurity(hKey, DACL_SECURITY_INFORMATION, NULL, &dwLength);
+    if (dwLength == 0)
+        return FALSE;
+    pSd = HeapAlloc(GetProcessHeap(), 0, dwLength);
+    if (!pSd)
+        return FALSE;
+
+    if (RegGetKeySecurity(hKey, DACL_SECURITY_INFORMATION, pSd, &dwLength) == ERROR_SUCCESS &&
+        GetSecurityDescriptorDacl(pSd, &bPresent, &pAcl, &bDefaulted) && bPresent && pAcl)
+    {
+        for (i = 0; i < pAcl->AceCount && !bFound; i++)
+        {
+            if (!GetAce(pAcl, i, (PVOID *)&pAce))
+                break;
+            if (pAce->Header.AceType == ACCESS_ALLOWED_ACE_TYPE &&
+                (pAce->Mask & KEY_ALL_ACCESS) == KEY_ALL_ACCESS &&
+                EqualSid((PSID)&pAce->SidStart, pSid))
+                bFound = TRUE;
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, pSd);
+    return bFound;
+}
+
+static
+VOID
+StampUserHiveRootSecurity(IN PCWSTR pszSidString)
+{
+    UCHAR Sd[512];
+    PSID pSid = NULL;
+    HKEY hKey = NULL;
+    BOOL bRestore;
+    LONG Error;
+
+    if (!ConvertStringSidToSidW(pszSidString, &pSid))
+        return;
+
+    Error = RegOpenKeyExW(HKEY_USERS, pszSidString, 0, READ_CONTROL | WRITE_DAC | WRITE_OWNER, &hKey);
+    if (Error != ERROR_SUCCESS)
+    {
+        DPRINT1("RegOpenKeyExW(%S) failed for the descriptor (Error %ld)\n", pszSidString, Error);
+        goto done;
+    }
+
+    if (UserHiveRootHasUserAce(hKey, pSid))
+        goto done;
+
+    if (RegSdBuild(REGSD_T_USER, (const UCHAR *)pSid, Sd, sizeof(Sd)))
+    {
+        /* The owner is not the caller: that needs the restore privilege */
+        bRestore = AcquireRemoveRestorePrivilege(TRUE);
+        Error = RegSetKeySecurity(hKey,
+                                  OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
+                                  DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                                  (PSECURITY_DESCRIPTOR)Sd);
+        if (bRestore)
+            AcquireRemoveRestorePrivilege(FALSE);
+        DPRINT1("userenv: the root descriptor of HKU\\%S is set (Error %ld)\n", pszSidString, Error);
+    }
+
+done:
+    if (hKey)
+        RegCloseKey(hKey);
+    if (pSid)
+        LocalFree(pSid);
+}
+
 
 
 static
@@ -1101,6 +1188,9 @@ CreateUserProfileExW(
         bRet = FALSE;
         goto done;
     }
+
+    /* The root key gets the descriptor of a user's hive */
+    StampUserHiveRootSecurity(SidString);
 
     /* Initialize user hive */
     if (!CreateUserHive(SidString, szUserProfilePath))
@@ -2195,6 +2285,8 @@ LoadUserProfileW(
             DPRINT1("RegLoadKeyW() failed (Error %ld)\n", dwError);
             goto cleanup;
         }
+
+        StampUserHiveRootSecurity(SidString.Buffer);
 
         SetProfileData(SidString.Buffer,
                        lpProfileInfo->dwFlags,
