@@ -2,6 +2,7 @@
 list(APPEND SOURCE
     AcquireCredentialsHandleVersions.c
     InvalidHandles.c
+    LsaConnectUnprivileged.c
     LsaLogonContext.c
     ReadConfigHandles.c
     SchannelHandshake.c

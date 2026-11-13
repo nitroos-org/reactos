@@ -10,6 +10,7 @@
 
 extern void func_AcquireCredentialsHandleVersions(void);
 extern void func_InvalidHandles(void);
+extern void func_LsaConnectUnprivileged(void);
 extern void func_LsaLogonContext(void);
 extern void func_ReadConfigHandles(void);
 extern void func_SchannelHandshake(void);
@@ -23,6 +24,7 @@ const struct test winetest_testlist[] =
 {
     { "AcquireCredentialsHandleVersions", func_AcquireCredentialsHandleVersions },
     { "InvalidHandles", func_InvalidHandles },
+    { "LsaConnectUnprivileged", func_LsaConnectUnprivileged },
     { "LsaLogonContext", func_LsaLogonContext },
     { "ReadConfigHandles", func_ReadConfigHandles },
     { "SchannelHandshake", func_SchannelHandshake },
