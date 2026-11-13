@@ -55,6 +55,19 @@ FilterToken(VOID)
     ok_irql(PASSIVE_LEVEL);
     ok_eq_hex(Status, STATUS_SUCCESS);
 
+    /*
+     * All three lists are optional: NULL means none, and a token only becomes
+     * restricted when restricting SIDs are given. A NULL RestrictedSids used to
+     * reach SepPerformTokenFiltering as (NULL + member offset, 0), which made a
+     * restricted token with an empty restricting list that every access check
+     * refuses.
+     */
+    if (NT_SUCCESS(Status))
+    {
+        ok(!SeTokenIsRestricted(FilteredToken),
+           "A token filtered with NULL RestrictedSids must not be restricted\n");
+    }
+
     /* Disable a SID */
     SidsToDisable.GroupCount = 1;
     SidsToDisable.Groups[0].Attributes = 0;
@@ -137,6 +150,11 @@ FilterToken(VOID)
                            &FilteredToken);
     ok_irql(PASSIVE_LEVEL);
     ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        ok(SeTokenIsRestricted(FilteredToken),
+           "A token filtered with a restricting SID must be restricted\n");
+    }
 
     /* We're done */
     SeUnlockSubjectContext(SubjectContext);

@@ -964,7 +964,8 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Perflib\009","Help",0x0001000
 "1483","The percentage of elapsed time that the processor spends running the idle thread.",\
 "1485","The rate at which requests to the disk were split into more than one request because the data was fragmented or the request was large.",\
 "3519","Counters for each processor and for each group of processors: how its time is divided between user mode, kernel mode, interrupts and idle, and the work done by deferred procedure calls. Instances are named by group and processor number.",\
-"3573","The amount of work the processor has done, as a percentage of the work it could do at its maximum performance. This system reports no frequency scaling, so the value follows Processor Time."
+"3573","The amount of work the processor has done, as a percentage of the work it could do at its maximum performance. This system reports no frequency scaling, so the value follows Processor Time.",\
+"1847","End Marker"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Perflib\CurrentLanguage","Counter",0x00010000,"1","1847","2","System","4","Memory","6",\
 "% Processor Time","10","File Read Operations/sec","12","File Write Operations/sec","14","File Control Operations/sec","16","File Read Bytes/sec","18",\
 "File Write Bytes/sec","20","File Control Bytes/sec","24","Available Bytes","26","Committed Bytes","28","Page Faults/sec","30","Commit Limit","32",\
@@ -1184,7 +1185,8 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Perflib\CurrentLanguage","Hel
 "1483","The percentage of elapsed time that the processor spends running the idle thread.",\
 "1485","The rate at which requests to the disk were split into more than one request because the data was fragmented or the request was large.",\
 "3519","Counters for each processor and for each group of processors: how its time is divided between user mode, kernel mode, interrupts and idle, and the work done by deferred procedure calls. Instances are named by group and processor number.",\
-"3573","The amount of work the processor has done, as a percentage of the work it could do at its maximum performance. This system reports no frequency scaling, so the value follows Processor Time."
+"3573","The amount of work the processor has done, as a percentage of the work it could do at its maximum performance. This system reports no frequency scaling, so the value follows Processor Time.",\
+"1847","End Marker"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\OpenGLDrivers\Mesa3D","Flags",0x00010001,0x00000001
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\OpenGLDrivers\Mesa3D","RequiresSSE2",0x00010001,0x00000001
 HKLM,"SOFTWARE\ReactOS\OpenGL",,0x00000000,"Mesa3D"
