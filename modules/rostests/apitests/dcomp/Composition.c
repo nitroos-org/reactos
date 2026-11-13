@@ -2284,6 +2284,726 @@ out:
     pWindowsDeleteString(fcls);
 }
 
+/*
+ * ExpressionAnimation, CompositionAnimation, CompositionPropertySet and Interactions.InteractionTracker: IIDs, slot
+ * order and signatures from microsoft/windows-rs (MIT OR Apache-2.0), the published `windows` crate 0.62.2 (vcs commit
+ * 32c3144490c016fe496a0aed769bce60987a2e9d, crates/libs/windows/src/Windows/UI/Composition/mod.rs and
+ * .../Interactions/mod.rs, the *_Vtbl structs), cross-checked with the rdl files of commit
+ * 8ca69fdaa9d69c78b9bcfbee96c6916f2282e7f0. The defaults are from learn.microsoft.com (MicrosoftDocs/winrt-api commit
+ * 4c1e9164521785f82dc63ab57a5ee4644f9d1888, interactiontracker*.md): Position 0, Scale 1, MinScale/MaxScale 1.
+ * What the docs do not say (errors for empty keys, NULL arguments, defaults of the bounds and decay rates, duplicates)
+ * is checked only against what this implementation chose: those expectations are marked "unmeasured" and are
+ * VERIFY ON ORACLE; the tests that are tagged with it must not be taken as Windows behaviour.
+ */
+typedef __x_ABI_CWindows_CFoundation_CNumerics_CVector4 Vec4;
+typedef __x_ABI_CWindows_CFoundation_CNumerics_CMatrix3x2 Mat3x2;
+typedef __x_ABI_CWindows_CFoundation_CNumerics_CMatrix4x4 Mat4;
+typedef __x_ABI_CWindows_CFoundation_CNumerics_CQuaternion Quat;
+
+#define INSP6(T) \
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(T *This, REFIID iid, void **out); \
+    ULONG (STDMETHODCALLTYPE *AddRef)(T *This); \
+    ULONG (STDMETHODCALLTYPE *Release)(T *This); \
+    HRESULT (STDMETHODCALLTYPE *GetIids)(T *This, ULONG *count, IID **iids); \
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(T *This, HSTRING *name); \
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(T *This, int *level);
+
+typedef struct IAnim IAnim;
+typedef struct { INSP6(IAnim)
+    HRESULT (STDMETHODCALLTYPE *ClearAllParameters)(IAnim *This);
+    HRESULT (STDMETHODCALLTYPE *ClearParameter)(IAnim *This, HSTRING key);
+    HRESULT (STDMETHODCALLTYPE *SetColorParameter)(IAnim *This, HSTRING key, Color value);
+    HRESULT (STDMETHODCALLTYPE *SetMatrix3x2Parameter)(IAnim *This, HSTRING key, Mat3x2 value);
+    HRESULT (STDMETHODCALLTYPE *SetMatrix4x4Parameter)(IAnim *This, HSTRING key, Mat4 value);
+    HRESULT (STDMETHODCALLTYPE *SetQuaternionParameter)(IAnim *This, HSTRING key, Quat value);
+    HRESULT (STDMETHODCALLTYPE *SetReferenceParameter)(IAnim *This, HSTRING key, IUnknown *obj);
+    HRESULT (STDMETHODCALLTYPE *SetScalarParameter)(IAnim *This, HSTRING key, float value);
+    HRESULT (STDMETHODCALLTYPE *SetVector2Parameter)(IAnim *This, HSTRING key, Vec2 value);
+    HRESULT (STDMETHODCALLTYPE *SetVector3Parameter)(IAnim *This, HSTRING key, Vec3 value);
+    HRESULT (STDMETHODCALLTYPE *SetVector4Parameter)(IAnim *This, HSTRING key, Vec4 value);
+} IAnimVtbl;
+struct IAnim { const IAnimVtbl *lpVtbl; };
+
+typedef struct IAnim2 IAnim2;
+typedef struct { INSP6(IAnim2)
+    HRESULT (STDMETHODCALLTYPE *SetBooleanParameter)(IAnim2 *This, HSTRING key, BOOLEAN value);
+    HRESULT (STDMETHODCALLTYPE *get_Target)(IAnim2 *This, HSTRING *value);
+    HRESULT (STDMETHODCALLTYPE *put_Target)(IAnim2 *This, HSTRING value);
+} IAnim2Vtbl;
+struct IAnim2 { const IAnim2Vtbl *lpVtbl; };
+
+typedef struct IExprAnim IExprAnim;
+typedef struct { INSP6(IExprAnim)
+    HRESULT (STDMETHODCALLTYPE *get_Expression)(IExprAnim *This, HSTRING *value);
+    HRESULT (STDMETHODCALLTYPE *put_Expression)(IExprAnim *This, HSTRING value);
+} IExprAnimVtbl;
+struct IExprAnim { const IExprAnimVtbl *lpVtbl; };
+
+typedef struct ICompObj ICompObj;
+typedef struct { INSP6(ICompObj)
+    HRESULT (STDMETHODCALLTYPE *get_Compositor)(ICompObj *This, WICompositor **value);
+    HRESULT (STDMETHODCALLTYPE *get_Dispatcher)(ICompObj *This, void **value);
+    HRESULT (STDMETHODCALLTYPE *get_Properties)(ICompObj *This, IUnknown **value);
+    HRESULT (STDMETHODCALLTYPE *StartAnimation)(ICompObj *This, HSTRING name, IUnknown *animation);
+    HRESULT (STDMETHODCALLTYPE *StopAnimation)(ICompObj *This, HSTRING name);
+} ICompObjVtbl;
+struct ICompObj { const ICompObjVtbl *lpVtbl; };
+
+typedef struct IPropSet IPropSet;
+typedef struct { INSP6(IPropSet)
+    HRESULT (STDMETHODCALLTYPE *InsertColor)(IPropSet *This, HSTRING n, Color v);
+    HRESULT (STDMETHODCALLTYPE *InsertMatrix3x2)(IPropSet *This, HSTRING n, Mat3x2 v);
+    HRESULT (STDMETHODCALLTYPE *InsertMatrix4x4)(IPropSet *This, HSTRING n, Mat4 v);
+    HRESULT (STDMETHODCALLTYPE *InsertQuaternion)(IPropSet *This, HSTRING n, Quat v);
+    HRESULT (STDMETHODCALLTYPE *InsertScalar)(IPropSet *This, HSTRING n, float v);
+    HRESULT (STDMETHODCALLTYPE *InsertVector2)(IPropSet *This, HSTRING n, Vec2 v);
+    HRESULT (STDMETHODCALLTYPE *InsertVector3)(IPropSet *This, HSTRING n, Vec3 v);
+    HRESULT (STDMETHODCALLTYPE *InsertVector4)(IPropSet *This, HSTRING n, Vec4 v);
+    HRESULT (STDMETHODCALLTYPE *TryGetColor)(IPropSet *This, HSTRING n, Color *v, int *st);
+    HRESULT (STDMETHODCALLTYPE *TryGetMatrix3x2)(IPropSet *This, HSTRING n, Mat3x2 *v, int *st);
+    HRESULT (STDMETHODCALLTYPE *TryGetMatrix4x4)(IPropSet *This, HSTRING n, Mat4 *v, int *st);
+    HRESULT (STDMETHODCALLTYPE *TryGetQuaternion)(IPropSet *This, HSTRING n, Quat *v, int *st);
+    HRESULT (STDMETHODCALLTYPE *TryGetScalar)(IPropSet *This, HSTRING n, float *v, int *st);
+    HRESULT (STDMETHODCALLTYPE *TryGetVector2)(IPropSet *This, HSTRING n, Vec2 *v, int *st);
+    HRESULT (STDMETHODCALLTYPE *TryGetVector3)(IPropSet *This, HSTRING n, Vec3 *v, int *st);
+    HRESULT (STDMETHODCALLTYPE *TryGetVector4)(IPropSet *This, HSTRING n, Vec4 *v, int *st);
+} IPropSetVtbl;
+struct IPropSet { const IPropSetVtbl *lpVtbl; };
+
+typedef struct ITracker ITracker;
+typedef struct ISrcColl ISrcColl;
+typedef struct { INSP6(ISrcColl)
+    HRESULT (STDMETHODCALLTYPE *get_Count)(ISrcColl *This, INT32 *v);
+    HRESULT (STDMETHODCALLTYPE *Add)(ISrcColl *This, IUnknown *v);
+    HRESULT (STDMETHODCALLTYPE *Remove)(ISrcColl *This, IUnknown *v);
+    HRESULT (STDMETHODCALLTYPE *RemoveAll)(ISrcColl *This);
+} ISrcCollVtbl;
+struct ISrcColl { const ISrcCollVtbl *lpVtbl; };
+typedef struct { INSP6(ITracker)
+    HRESULT (STDMETHODCALLTYPE *get_InteractionSources)(ITracker *This, ISrcColl **v);
+    HRESULT (STDMETHODCALLTYPE *get_IsPositionRoundingSuggested)(ITracker *This, BOOLEAN *v);
+    HRESULT (STDMETHODCALLTYPE *get_MaxPosition)(ITracker *This, Vec3 *v);
+    HRESULT (STDMETHODCALLTYPE *put_MaxPosition)(ITracker *This, Vec3 v);
+    HRESULT (STDMETHODCALLTYPE *get_MaxScale)(ITracker *This, float *v);
+    HRESULT (STDMETHODCALLTYPE *put_MaxScale)(ITracker *This, float v);
+    HRESULT (STDMETHODCALLTYPE *get_MinPosition)(ITracker *This, Vec3 *v);
+    HRESULT (STDMETHODCALLTYPE *put_MinPosition)(ITracker *This, Vec3 v);
+    HRESULT (STDMETHODCALLTYPE *get_MinScale)(ITracker *This, float *v);
+    HRESULT (STDMETHODCALLTYPE *put_MinScale)(ITracker *This, float v);
+    HRESULT (STDMETHODCALLTYPE *get_NaturalRestingPosition)(ITracker *This, Vec3 *v);
+    HRESULT (STDMETHODCALLTYPE *get_NaturalRestingScale)(ITracker *This, float *v);
+    HRESULT (STDMETHODCALLTYPE *get_Owner)(ITracker *This, IUnknown **v);
+    HRESULT (STDMETHODCALLTYPE *get_Position)(ITracker *This, Vec3 *v);
+    HRESULT (STDMETHODCALLTYPE *get_PositionInertiaDecayRate)(ITracker *This, IUnknown **v);
+    HRESULT (STDMETHODCALLTYPE *put_PositionInertiaDecayRate)(ITracker *This, IUnknown *v);
+    HRESULT (STDMETHODCALLTYPE *get_PositionVelocityInPixelsPerSecond)(ITracker *This, Vec3 *v);
+    HRESULT (STDMETHODCALLTYPE *get_Scale)(ITracker *This, float *v);
+    HRESULT (STDMETHODCALLTYPE *get_ScaleInertiaDecayRate)(ITracker *This, IUnknown **v);
+    HRESULT (STDMETHODCALLTYPE *put_ScaleInertiaDecayRate)(ITracker *This, IUnknown *v);
+    HRESULT (STDMETHODCALLTYPE *get_ScaleVelocityInPercentPerSecond)(ITracker *This, float *v);
+    void *rest[12];     /* Adjust*, Configure*, TryUpdate*: not exercised */
+} ITrackerVtbl;
+struct ITracker { const ITrackerVtbl *lpVtbl; };
+
+typedef struct ITrackerStatics ITrackerStatics;
+typedef struct { INSP6(ITrackerStatics)
+    HRESULT (STDMETHODCALLTYPE *Create)(ITrackerStatics *This, WICompositor *c, ITracker **r);
+    HRESULT (STDMETHODCALLTYPE *CreateWithOwner)(ITrackerStatics *This, WICompositor *c, IUnknown *owner, ITracker **r);
+} ITrackerStaticsVtbl;
+struct ITrackerStatics { const ITrackerStaticsVtbl *lpVtbl; };
+
+static const GUID IID_IAnim = {0x464c4c2c, 0x1caa, 0x4061, {0x9b, 0x40, 0xe1, 0x3f, 0xde, 0x15, 0x03, 0xca}};
+static const GUID IID_IAnim2 = {0x369b603e, 0xa80f, 0x4948, {0x93, 0xe3, 0xed, 0x23, 0xfb, 0x38, 0xc6, 0xcb}};
+static const GUID IID_IAnimBase = {0x1c2c2999, 0xe818, 0x48d3, {0xa6, 0xdd, 0xd7, 0x8c, 0x82, 0xf8, 0xac, 0xe9}};
+static const GUID IID_IExprAnim = {0x6acc5431, 0x7d3d, 0x4bf3, {0xab, 0xb6, 0xf4, 0x4b, 0xdc, 0x48, 0x88, 0xc1}};
+static const GUID IID_IPropSet = {0xc9d6d202, 0x5f67, 0x4453, {0x91, 0x17, 0x9e, 0xad, 0xd4, 0x30, 0xd3, 0xc2}};
+static const GUID IID_ISrcColl = {0x1b468e4b, 0xa5bf, 0x47d8, {0xa5, 0x47, 0x38, 0x94, 0x15, 0x5a, 0x15, 0x8c}};
+static const GUID IID_ITracker = {0x2a8e8cb1, 0x1000, 0x4416, {0x83, 0x63, 0xcc, 0x27, 0xfb, 0x87, 0x73, 0x08}};
+static const GUID IID_ITrackerStatics = {0xbba5d7b7, 0x6590, 0x4498, {0x8d, 0x6c, 0xeb, 0x62, 0xb5, 0x14, 0xc9, 0x2a}};
+static const GUID IID_ICompObjW = {0xbcb4ad45, 0x7609, 0x4550, {0x93, 0x4f, 0x16, 0x00, 0x2a, 0x68, 0xfd, 0xed}};
+
+/* a stand-in object (an IInteractionTrackerOwner or an IReference) that counts its references */
+typedef struct { IUnknown iface; LONG ref; } Counted;
+static HRESULT WINAPI Counted_QI(IUnknown *i, REFIID iid, void **o)
+{
+    if (IsEqualGUID(iid, &IID_IUnknown)) { *o = i; i->lpVtbl->AddRef(i); return S_OK; }
+    *o = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI Counted_AddRef(IUnknown *i) { return InterlockedIncrement(&((Counted *)i)->ref); }
+static ULONG WINAPI Counted_Release(IUnknown *i) { return InterlockedDecrement(&((Counted *)i)->ref); }
+static IUnknownVtbl counted_vtbl = { Counted_QI, Counted_AddRef, Counted_Release };
+
+static HSTRING HS(const WCHAR *s)
+{
+    HSTRING h = NULL;
+    HRESULT hr = WindowsCreateString(s, lstrlenW(s), &h);
+    ok(hr == S_OK, "WindowsCreateString %#lx\n", hr);
+    return h;
+}
+
+static BOOL HSEq(HSTRING h, const WCHAR *s)
+{
+    UINT32 len = 0;
+    const WCHAR *b = WindowsGetStringRawBuffer(h, &len);
+    if (!b) len = 0;
+    return len == (UINT32)lstrlenW(s) && !wcsncmp(b ? b : L"", s, len);
+}
+
+static BOOL SameObject(IUnknown *a, IUnknown *b)
+{
+    IUnknown *ua = NULL, *ub = NULL;
+    BOOL same;
+    QI(a, &IID_IUnknown, &ua);
+    QI(b, &IID_IUnknown, &ub);
+    same = ua == ub;
+    if (ua) REL(ua);
+    if (ub) REL(ub);
+    return same;
+}
+
+static void TestExpressionAnimation(void)
+{
+    const WCHAR expr[] = L"this.Target.Offset + Vector3(1, 2, 3)";
+    WIContainerVisual *cv = NULL;
+    IExprAnim *ea = NULL, *ea2 = NULL, *none = (IExprAnim *)0x1234;
+    IAnim *an = NULL;
+    IAnim2 *an2 = NULL;
+    ICompObj *co = NULL, *vco = NULL;
+    IPropSet *ps = NULL, *ps2 = NULL;
+    IUnknown *x = NULL, *u1 = NULL, *u2 = NULL, *props = NULL;
+    WICompositor *c = NULL;
+    HSTRING h, k, v = NULL;
+    IID *iids = NULL;
+    ULONG count = 0, r0, r1;
+    HRESULT hr;
+    int st;
+    float fv;
+    Vec3 v3;
+    Color col;
+    Counted refobj = { { &counted_vtbl }, 1 };
+
+    /* creation */
+    hr = Comp->lpVtbl->CreateExpressionAnimation(Comp, NULL);
+    ok(hr == E_POINTER, "CreateExpressionAnimation(NULL) %#lx\n", hr);
+    hr = Comp->lpVtbl->CreateExpressionAnimation(Comp, (__x_ABI_CWindows_CUI_CComposition_CIExpressionAnimation **)&ea);
+    ok(hr == S_OK && ea, "CreateExpressionAnimation %#lx %p\n", hr, ea);
+    h = HS(expr);
+    hr = Comp->lpVtbl->CreateExpressionAnimationWithExpression(Comp, h, NULL);
+    ok(hr == E_POINTER, "CreateExpressionAnimationWithExpression(NULL result) %#lx\n", hr);
+    hr = Comp->lpVtbl->CreateExpressionAnimationWithExpression(Comp, h, (__x_ABI_CWindows_CUI_CComposition_CIExpressionAnimation **)&ea2);
+    ok(hr == S_OK && ea2, "CreateExpressionAnimationWithExpression %#lx %p\n", hr, ea2);
+    WindowsDeleteString(h);
+    if (!ea || !ea2) { skip("no ExpressionAnimation\n"); goto out; }
+    ok(ea != ea2, "the same object twice\n");
+
+    /* Expression: empty by default, round trip */
+    hr = ea->lpVtbl->get_Expression(ea, &v);
+    ok(hr == S_OK && HSEq(v, L""), "default Expression %#lx\n", hr);
+    WindowsDeleteString(v); v = NULL;
+    hr = ea->lpVtbl->get_Expression(ea, NULL);
+    ok(hr == E_POINTER, "get_Expression(NULL) %#lx\n", hr);
+    hr = ea2->lpVtbl->get_Expression(ea2, &v);
+    ok(hr == S_OK && HSEq(v, expr), "Expression of the created animation %#lx\n", hr);
+    WindowsDeleteString(v); v = NULL;
+    h = HS(L"x + 1");
+    hr = ea->lpVtbl->put_Expression(ea, h);
+    ok(hr == S_OK, "put_Expression %#lx\n", hr);
+    WindowsDeleteString(h);
+    hr = ea->lpVtbl->get_Expression(ea, &v);
+    ok(hr == S_OK && HSEq(v, L"x + 1"), "Expression after put %#lx\n", hr);
+    WindowsDeleteString(v); v = NULL;
+
+    /* identity, interfaces, class name */
+    hr = QI(ea, &IID_IAnim, &an);
+    ok(hr == S_OK && an, "QI ICompositionAnimation %#lx\n", hr);
+    hr = QI(ea, &IID_IAnim2, &an2);
+    ok(hr == S_OK && an2, "QI ICompositionAnimation2 %#lx\n", hr);
+    hr = QI(ea, &IID_ICompObjW, &co);
+    ok(hr == S_OK && co, "QI ICompositionObject %#lx\n", hr);
+    hr = QI(ea, &IID_IAnimBase, &x);
+    ok(hr == S_OK && x, "QI ICompositionAnimationBase %#lx\n", hr);
+    if (x) REL(x);
+    x = NULL;
+    hr = QI(ea, &IID_Closable, &x);
+    ok(hr == S_OK && x, "QI IClosable %#lx\n", hr);
+    if (x) REL(x);
+    x = NULL;
+    hr = QI(ea, &IID_IAgileObject, &x);
+    ok(hr == S_OK && x, "QI IAgileObject %#lx\n", hr);
+    if (x) REL(x);
+    x = (IUnknown *)0x1234;
+    hr = QI(ea, &IID_Unknown1, &x);
+    ok(hr == E_NOINTERFACE && !x, "QI(unknown IID) %#lx %p\n", hr, x);
+    ok(SameObject((IUnknown *)ea, (IUnknown *)an) && SameObject((IUnknown *)ea, (IUnknown *)an2) &&
+       SameObject((IUnknown *)ea, (IUnknown *)co), "the interfaces are not one object\n");
+    hr = ea->lpVtbl->GetIids(ea, &count, &iids);
+    ok(hr == S_OK && iids, "GetIids %#lx\n", hr);
+    if (iids)
+    {
+        ok(HasIid(iids, count, &IID_IExprAnim), "GetIids lacks IExpressionAnimation\n");
+        ok(HasIid(iids, count, &IID_IAnim), "GetIids lacks ICompositionAnimation\n");
+        CoTaskMemFree(iids);
+    }
+    hr = ea->lpVtbl->GetRuntimeClassName(ea, &v);
+    ok(hr == S_OK && HSEq(v, L"Windows.UI.Composition.ExpressionAnimation"), "class name %#lx\n", hr);
+    WindowsDeleteString(v); v = NULL;
+    if (!an || !an2 || !co) goto out;
+
+    /* CompositionObject.Compositor is the creating compositor */
+    hr = co->lpVtbl->get_Compositor(co, &c);
+    ok(hr == S_OK && c && SameObject((IUnknown *)c, (IUnknown *)Comp), "Compositor %#lx %p\n", hr, c);
+    if (c) REL(c);
+
+    /* Target: empty by default, round trip */
+    hr = an2->lpVtbl->get_Target(an2, &v);
+    ok(hr == S_OK && HSEq(v, L""), "default Target %#lx\n", hr);
+    WindowsDeleteString(v); v = NULL;
+    h = HS(L"Offset");
+    hr = an2->lpVtbl->put_Target(an2, h);
+    ok(hr == S_OK, "put_Target %#lx\n", hr);
+    WindowsDeleteString(h);
+    hr = an2->lpVtbl->get_Target(an2, &v);
+    ok(hr == S_OK && HSEq(v, L"Offset"), "Target after put %#lx\n", hr);
+    WindowsDeleteString(v); v = NULL;
+
+    /* parameters: every Set*Parameter stores; a reference parameter holds its object until it is replaced, cleared or
+     * the animation is freed (the only observable part of the stored values) */
+    k = HS(L"tracker");
+    r0 = refobj.ref;
+    hr = an->lpVtbl->SetReferenceParameter(an, k, &refobj.iface);
+    ok(hr == S_OK, "SetReferenceParameter %#lx\n", hr);
+    ok(refobj.ref == r0 + 1, "reference parameter holds the object: %ld, was %lu\n", refobj.ref, r0);
+    hr = an->lpVtbl->SetReferenceParameter(an, k, &refobj.iface);
+    ok(hr == S_OK && refobj.ref == r0 + 1, "same key again: %#lx refs %ld\n", hr, refobj.ref);
+    hr = an->lpVtbl->SetScalarParameter(an, k, 2.5f);
+    ok(hr == S_OK, "SetScalarParameter over a reference %#lx\n", hr);
+    ok(refobj.ref == r0, "replacing the reference releases it: %ld, was %lu\n", refobj.ref, r0);
+    hr = an->lpVtbl->SetReferenceParameter(an, k, &refobj.iface);
+    ok(hr == S_OK && refobj.ref == r0 + 1, "reference again %#lx %ld\n", hr, refobj.ref);
+    hr = an->lpVtbl->ClearParameter(an, k);
+    ok(hr == S_OK && refobj.ref == r0, "ClearParameter %#lx refs %ld, was %lu\n", hr, refobj.ref, r0);
+    hr = an->lpVtbl->ClearParameter(an, k);
+    ok(hr == S_OK, "ClearParameter of a missing key (unmeasured) %#lx\n", hr);
+    hr = an->lpVtbl->SetReferenceParameter(an, k, NULL);
+    ok(hr == E_INVALIDARG, "SetReferenceParameter(NULL) (unmeasured) %#lx\n", hr);
+    WindowsDeleteString(k);
+    {
+        Mat3x2 m32 = {1, 2, 3, 4, 5, 6};
+        Mat4 m44 = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 7, 8, 9, 1};
+        Quat q = {0, 0, 0, 1};
+        Vec2 v2 = {1, 2};
+        Vec4 v4 = {1, 2, 3, 4};
+        Color cc = {1, 2, 3, 4};
+
+        k = HS(L"a");
+        ok(an->lpVtbl->SetColorParameter(an, k, cc) == S_OK, "SetColorParameter\n");
+        ok(an->lpVtbl->SetMatrix3x2Parameter(an, k, m32) == S_OK, "SetMatrix3x2Parameter\n");
+        ok(an->lpVtbl->SetMatrix4x4Parameter(an, k, m44) == S_OK, "SetMatrix4x4Parameter\n");
+        ok(an->lpVtbl->SetQuaternionParameter(an, k, q) == S_OK, "SetQuaternionParameter\n");
+        ok(an->lpVtbl->SetScalarParameter(an, k, 1.0f) == S_OK, "SetScalarParameter\n");
+        ok(an->lpVtbl->SetVector2Parameter(an, k, v2) == S_OK, "SetVector2Parameter\n");
+        v3.X = 1; v3.Y = 2; v3.Z = 3;
+        ok(an->lpVtbl->SetVector3Parameter(an, k, v3) == S_OK, "SetVector3Parameter\n");
+        ok(an->lpVtbl->SetVector4Parameter(an, k, v4) == S_OK, "SetVector4Parameter\n");
+        ok(an2->lpVtbl->SetBooleanParameter(an2, k, TRUE) == S_OK, "SetBooleanParameter\n");
+        WindowsDeleteString(k);
+        k = HS(L"");
+        ok(an->lpVtbl->SetScalarParameter(an, k, 1.0f) == E_INVALIDARG, "SetScalarParameter(empty key) (unmeasured)\n");
+        WindowsDeleteString(k);
+    }
+    k = HS(L"o");
+    r0 = refobj.ref;
+    an->lpVtbl->SetReferenceParameter(an, k, &refobj.iface);
+    ok(refobj.ref == r0 + 1, "reference held\n");
+    hr = an->lpVtbl->ClearAllParameters(an);
+    ok(hr == S_OK && refobj.ref == r0, "ClearAllParameters %#lx refs %ld, was %lu\n", hr, refobj.ref, r0);
+    an->lpVtbl->SetReferenceParameter(an, k, &refobj.iface);
+    WindowsDeleteString(k);
+
+    /* StartAnimation / StopAnimation bookkeeping on a visual: the animation is held while it is started */
+    hr = Comp->lpVtbl->CreateContainerVisual(Comp, &cv);
+    ok(hr == S_OK && cv, "CreateContainerVisual %#lx\n", hr);
+    if (!cv) goto out;
+    hr = QI(cv, &IID_ICompObjW, &vco);
+    ok(hr == S_OK && vco, "QI visual ICompositionObject %#lx\n", hr);
+    if (!vco) goto out;
+    r0 = RefOf((IUnknown *)ea);
+    h = HS(L"Offset");
+    hr = vco->lpVtbl->StartAnimation(vco, h, (IUnknown *)an);
+    ok(hr == S_OK, "StartAnimation %#lx\n", hr);
+    r1 = RefOf((IUnknown *)ea);
+    ok(r1 == r0 + 1, "the started animation is held: %lu, was %lu\n", r1, r0);
+    hr = vco->lpVtbl->StartAnimation(vco, h, (IUnknown *)an);
+    ok(hr == S_OK && RefOf((IUnknown *)ea) == r1, "StartAnimation again on the same name %#lx %lu\n", hr, RefOf((IUnknown *)ea));
+    hr = vco->lpVtbl->StartAnimation(vco, h, NULL);
+    ok(hr == E_INVALIDARG, "StartAnimation(NULL) (unmeasured) %#lx\n", hr);
+    hr = vco->lpVtbl->StopAnimation(vco, h);
+    ok(hr == S_OK && RefOf((IUnknown *)ea) == r0, "StopAnimation %#lx %lu, was %lu\n", hr, RefOf((IUnknown *)ea), r0);
+    hr = vco->lpVtbl->StopAnimation(vco, h);
+    ok(hr == S_OK, "StopAnimation of a name that is not started (unmeasured) %#lx\n", hr);
+    hr = vco->lpVtbl->StartAnimation(vco, h, (IUnknown *)an);
+    ok(hr == S_OK && RefOf((IUnknown *)ea) == r0 + 1, "StartAnimation before the target is freed %#lx\n", hr);
+    WindowsDeleteString(h);
+    REL(vco); vco = NULL;
+    REL(cv); cv = NULL;
+    ok(RefOf((IUnknown *)ea) == r0, "freeing the target releases its animations: %lu, was %lu\n", RefOf((IUnknown *)ea), r0);
+
+    /* CompositionObject.Properties: one CompositionPropertySet per object, values stored */
+    hr = Comp->lpVtbl->CreateContainerVisual(Comp, &cv);
+    QI(cv, &IID_ICompObjW, &vco);
+    hr = vco->lpVtbl->get_Properties(vco, NULL);
+    ok(hr == E_POINTER, "get_Properties(NULL) %#lx\n", hr);
+    hr = vco->lpVtbl->get_Properties(vco, &props);
+    ok(hr == S_OK && props, "get_Properties %#lx %p\n", hr, props);
+    if (props)
+    {
+        hr = QI(props, &IID_IPropSet, &ps);
+        ok(hr == S_OK && ps, "QI ICompositionPropertySet %#lx\n", hr);
+        hr = vco->lpVtbl->get_Properties(vco, &u1);
+        ok(hr == S_OK && u1 && SameObject(props, u1), "second get_Properties is another object\n");
+        if (u1) REL(u1);
+        hr = props->lpVtbl->QueryInterface(props, &IID_IUnknown, (void **)&u2);
+        if (u2) REL(u2);
+    }
+    if (ps)
+    {
+        k = HS(L"Speed");
+        st = 99; fv = 0;
+        hr = ps->lpVtbl->TryGetScalar(ps, k, &fv, &st);
+        ok(hr == S_OK && st == 2, "TryGetScalar of a missing name: %#lx status %d (NotFound is 2)\n", hr, st);
+        hr = ps->lpVtbl->InsertScalar(ps, k, 4.25f);
+        ok(hr == S_OK, "InsertScalar %#lx\n", hr);
+        st = 99; fv = 0;
+        hr = ps->lpVtbl->TryGetScalar(ps, k, &fv, &st);
+        ok(hr == S_OK && st == 0 && fv == 4.25f, "TryGetScalar %#lx status %d value %g\n", hr, st, fv);
+        v3.X = v3.Y = v3.Z = 7;
+        st = 99;
+        hr = ps->lpVtbl->TryGetVector3(ps, k, &v3, &st);
+        ok(hr == S_OK && st == 1 && v3.X == 7 && v3.Y == 7, "TryGetVector3 on a scalar: %#lx status %d (TypeMismatch is 1) %g\n", hr, st, v3.X);
+        hr = ps->lpVtbl->InsertScalar(ps, k, 5.0f);
+        st = 99; fv = 0;
+        ps->lpVtbl->TryGetScalar(ps, k, &fv, &st);
+        ok(st == 0 && fv == 5.0f, "Insert over an existing name: status %d value %g\n", st, fv);
+        v3.X = 1; v3.Y = 2; v3.Z = 3;
+        WindowsDeleteString(k);
+        k = HS(L"Pos");
+        ps->lpVtbl->InsertVector3(ps, k, v3);
+        v3.X = v3.Y = v3.Z = 0; st = 99;
+        hr = ps->lpVtbl->TryGetVector3(ps, k, &v3, &st);
+        ok(hr == S_OK && st == 0 && v3.X == 1 && v3.Y == 2 && v3.Z == 3, "TryGetVector3 %#lx %d %g %g %g\n", hr, st, v3.X, v3.Y, v3.Z);
+        col.A = 1; col.R = 2; col.G = 3; col.B = 4;
+        ps->lpVtbl->InsertColor(ps, k, col);
+        col.A = col.R = col.G = col.B = 0; st = 99;
+        hr = ps->lpVtbl->TryGetColor(ps, k, &col, &st);
+        ok(hr == S_OK && st == 0 && col.A == 1 && col.R == 2 && col.G == 3 && col.B == 4, "TryGetColor %#lx %d\n", hr, st);
+        hr = ps->lpVtbl->TryGetColor(ps, k, NULL, &st);
+        ok(hr == E_POINTER, "TryGetColor(NULL) %#lx\n", hr);
+        WindowsDeleteString(k);
+        /* the property set is a CompositionObject too */
+        hr = QI(ps, &IID_ICompObjW, &x);
+        ok(hr == S_OK && x, "QI property set ICompositionObject %#lx\n", hr);
+        if (x) { REL(x); x = NULL; }
+        REL(ps); ps = NULL;
+    }
+    if (props) REL(props);
+    (void)ps2; (void)none;
+    REL(vco); vco = NULL;
+    REL(cv); cv = NULL;
+
+out:
+    if (co) REL(co);
+    if (an2) REL(an2);
+    if (an) REL(an);
+    if (ea2) REL(ea2);
+    if (ea) REL(ea);
+    ok(refobj.ref == 1, "the stand-in object is still referenced: %ld\n", refobj.ref);
+}
+
+static void TestInteractionTracker(PRO_ACTIVATE pRoActivateInstance, PWCS pWindowsCreateString, PWDS pWindowsDeleteString)
+{
+    const WCHAR name[] = L"Windows.UI.Composition.Interactions.InteractionTracker";
+    const WCHAR visname[] = L"Windows.UI.Composition.Interactions.VisualInteractionSource";
+    HMODULE combase = GetModuleHandleW(L"combase.dll");
+    HRESULT (WINAPI *pGetFactory)(HSTRING, REFIID, void **) = combase ? (void *)GetProcAddress(combase, "RoGetActivationFactory") : NULL;
+    HSTRING fcls = NULL, vcls = NULL, v = NULL;
+    ITrackerStatics *st = NULL;
+    IVisStatics *vst = NULL;
+    ITracker *t = NULL, *t2 = NULL, *t3 = NULL;
+    ISrcColl *sc = NULL, *sc2 = NULL;
+    IVis *src = NULL, *src2 = NULL;
+    WIContainerVisual *cv = NULL;
+    WIVisual *vis = NULL;
+    IUnknown *x = NULL, *u = NULL, *obj = NULL;
+    ICompObj *co = NULL;
+    IInspectable *insp = NULL;
+    IID *iids = NULL;
+    ULONG count = 0, r0;
+    INT32 n;
+    BOOLEAN b;
+    Vec3 p;
+    float f;
+    HRESULT hr;
+    Counted owner = { { &counted_vtbl }, 1 }, decay = { { &counted_vtbl }, 1 };
+
+    if (!pGetFactory) { skip("no RoGetActivationFactory\n"); return; }
+    hr = pWindowsCreateString(name, lstrlenW(name), &fcls);
+    ok(hr == S_OK, "WindowsCreateString %#lx\n", hr);
+    hr = pGetFactory(fcls, &IID_ITrackerStatics, (void **)&st);
+    if (hr == REGDB_E_CLASSNOTREG)
+    {
+        skip("InteractionTracker is not registered: %#lx\n", hr);
+        pWindowsDeleteString(fcls);
+        return;
+    }
+    ok(hr == S_OK, "RoGetActivationFactory(InteractionTracker) %#lx\n", hr);
+    if (hr != S_OK)
+    {
+        pWindowsDeleteString(fcls);
+        return;
+    }
+    ok(st != NULL, "no statics\n");
+
+    /* no default constructor */
+    hr = pRoActivateInstance(fcls, &insp);
+    ok(FAILED(hr) && !insp, "RoActivateInstance of a class without a default constructor: %#lx %p\n", hr, insp);
+    if (insp) REL(insp);
+
+    /* statics */
+    hr = st->lpVtbl->Create(st, (WICompositor *)Comp, NULL);
+    ok(hr == E_POINTER, "Create(NULL result) %#lx\n", hr);
+    t = (ITracker *)0x1234;
+    hr = st->lpVtbl->Create(st, NULL, &t);
+    ok(FAILED(hr) && !t, "Create(NULL compositor) (unmeasured) %#lx %p\n", hr, t);
+    hr = st->lpVtbl->Create(st, (WICompositor *)Comp, &t);
+    ok(hr == S_OK && t, "Create %#lx %p\n", hr, t);
+    hr = st->lpVtbl->CreateWithOwner(st, (WICompositor *)Comp, &owner.iface, &t2);
+    ok(hr == S_OK && t2 && t2 != t, "CreateWithOwner %#lx %p\n", hr, t2);
+    ok(owner.ref == 2, "the tracker holds its owner: %ld\n", owner.ref);
+    if (!t || !t2) goto out;
+
+    /* identity, interfaces, class name */
+    hr = QI(t, &IID_ICompObjW, &co);
+    ok(hr == S_OK && co, "QI ICompositionObject %#lx\n", hr);
+    ok(co && SameObject((IUnknown *)t, (IUnknown *)co), "the interfaces are not one object\n");
+    if (co)
+    {
+        WICompositor *c = NULL;
+        hr = co->lpVtbl->get_Compositor(co, &c);
+        ok(hr == S_OK && c && SameObject((IUnknown *)c, (IUnknown *)Comp), "Compositor %#lx %p\n", hr, c);
+        if (c) REL(c);
+        REL(co);
+    }
+    hr = QI(t, &IID_Closable, &x);
+    ok(hr == S_OK && x, "QI IClosable %#lx\n", hr);
+    if (x) { REL(x); x = NULL; }
+    hr = QI(t, &IID_IAgileObject, &x);
+    ok(hr == S_OK && x, "QI IAgileObject %#lx\n", hr);
+    if (x) { REL(x); x = NULL; }
+    x = (IUnknown *)0x1234;
+    hr = QI(t, &IID_Unknown1, &x);
+    ok(hr == E_NOINTERFACE && !x, "QI(unknown IID) %#lx %p\n", hr, x);
+    hr = t->lpVtbl->GetIids(t, &count, &iids);
+    ok(hr == S_OK && iids, "GetIids %#lx\n", hr);
+    if (iids)
+    {
+        ok(HasIid(iids, count, &IID_ITracker), "GetIids lacks IInteractionTracker\n");
+        CoTaskMemFree(iids);
+    }
+    hr = t->lpVtbl->GetRuntimeClassName(t, &v);
+    ok(hr == S_OK && HSEq(v, name), "class name %#lx\n", hr);
+    pWindowsDeleteString(v);
+
+    /* Owner */
+    hr = t->lpVtbl->get_Owner(t, NULL);
+    ok(hr == E_POINTER, "get_Owner(NULL) %#lx\n", hr);
+    x = (IUnknown *)0x1234;
+    hr = t->lpVtbl->get_Owner(t, &x);
+    ok(hr == S_OK && !x, "Owner of a tracker without one (unmeasured): %#lx %p\n", hr, x);
+    hr = t2->lpVtbl->get_Owner(t2, &x);
+    ok(hr == S_OK && x == &owner.iface, "Owner %#lx %p, expected %p\n", hr, x, &owner.iface);
+    ok(owner.ref == 3, "get_Owner adds a reference: %ld\n", owner.ref);
+    if (x) REL(x);
+
+    /* documented defaults: Position 0, Scale 1, MinScale and MaxScale 1 */
+    p.X = p.Y = p.Z = 9;
+    hr = t->lpVtbl->get_Position(t, &p);
+    ok(hr == S_OK && p.X == 0 && p.Y == 0 && p.Z == 0, "Position %#lx %g %g %g\n", hr, p.X, p.Y, p.Z);
+    f = 9;
+    hr = t->lpVtbl->get_Scale(t, &f);
+    ok(hr == S_OK && f == 1.0f, "Scale %#lx %g\n", hr, f);
+    f = 9;
+    hr = t->lpVtbl->get_MinScale(t, &f);
+    ok(hr == S_OK && f == 1.0f, "MinScale %#lx %g\n", hr, f);
+    f = 9;
+    hr = t->lpVtbl->get_MaxScale(t, &f);
+    ok(hr == S_OK && f == 1.0f, "MaxScale %#lx %g\n", hr, f);
+    p.X = p.Y = p.Z = 9;
+    hr = t->lpVtbl->get_MinPosition(t, &p);
+    ok(hr == S_OK && p.X == 0 && p.Y == 0 && p.Z == 0, "MinPosition default (unmeasured) %#lx %g %g %g\n", hr, p.X, p.Y, p.Z);
+    p.X = p.Y = p.Z = 9;
+    hr = t->lpVtbl->get_MaxPosition(t, &p);
+    ok(hr == S_OK && p.X == 0 && p.Y == 0 && p.Z == 0, "MaxPosition default (unmeasured) %#lx %g %g %g\n", hr, p.X, p.Y, p.Z);
+    b = TRUE;
+    hr = t->lpVtbl->get_IsPositionRoundingSuggested(t, &b);
+    ok(hr == S_OK && !b, "IsPositionRoundingSuggested %#lx %u\n", hr, b);
+    p.X = p.Y = p.Z = 9;
+    hr = t->lpVtbl->get_PositionVelocityInPixelsPerSecond(t, &p);
+    ok(hr == S_OK && p.X == 0 && p.Y == 0 && p.Z == 0, "PositionVelocityInPixelsPerSecond %#lx\n", hr);
+    f = 9;
+    hr = t->lpVtbl->get_ScaleVelocityInPercentPerSecond(t, &f);
+    ok(hr == S_OK && f == 0.0f, "ScaleVelocityInPercentPerSecond %#lx %g\n", hr, f);
+    hr = t->lpVtbl->get_Position(t, NULL);
+    ok(hr == E_POINTER, "get_Position(NULL) %#lx\n", hr);
+    hr = t->lpVtbl->get_MaxScale(t, NULL);
+    ok(hr == E_POINTER, "get_MaxScale(NULL) %#lx\n", hr);
+
+    /* bounds: stored as given, per tracker */
+    p.X = 100; p.Y = 2000; p.Z = 0;
+    hr = t->lpVtbl->put_MaxPosition(t, p);
+    ok(hr == S_OK, "put_MaxPosition %#lx\n", hr);
+    p.X = -5; p.Y = -6; p.Z = -7;
+    hr = t->lpVtbl->put_MinPosition(t, p);
+    ok(hr == S_OK, "put_MinPosition %#lx\n", hr);
+    hr = t->lpVtbl->put_MaxScale(t, 4.0f);
+    ok(hr == S_OK, "put_MaxScale %#lx\n", hr);
+    hr = t->lpVtbl->put_MinScale(t, 0.25f);
+    ok(hr == S_OK, "put_MinScale %#lx\n", hr);
+    hr = t->lpVtbl->get_MaxPosition(t, &p);
+    ok(hr == S_OK && p.X == 100 && p.Y == 2000 && p.Z == 0, "MaxPosition %#lx %g %g %g\n", hr, p.X, p.Y, p.Z);
+    hr = t->lpVtbl->get_MinPosition(t, &p);
+    ok(hr == S_OK && p.X == -5 && p.Y == -6 && p.Z == -7, "MinPosition %#lx %g %g %g\n", hr, p.X, p.Y, p.Z);
+    hr = t->lpVtbl->get_MaxScale(t, &f);
+    ok(hr == S_OK && f == 4.0f, "MaxScale %#lx %g\n", hr, f);
+    hr = t->lpVtbl->get_MinScale(t, &f);
+    ok(hr == S_OK && f == 0.25f, "MinScale %#lx %g\n", hr, f);
+    hr = t2->lpVtbl->get_MaxScale(t2, &f);
+    ok(hr == S_OK && f == 1.0f, "another tracker's MaxScale %#lx %g\n", hr, f);
+    hr = t->lpVtbl->get_Position(t, &p);
+    ok(hr == S_OK && p.X == 0 && p.Y == 0 && p.Z == 0, "Position is not moved by the bounds (unmeasured) %#lx %g %g %g\n", hr, p.X, p.Y, p.Z);
+
+    /* inertia decay rates (IReference): stored and returned, NULL by default (unmeasured) */
+    x = (IUnknown *)0x1234;
+    hr = t->lpVtbl->get_PositionInertiaDecayRate(t, &x);
+    ok(hr == S_OK && !x, "PositionInertiaDecayRate default (unmeasured) %#lx %p\n", hr, x);
+    hr = t->lpVtbl->put_PositionInertiaDecayRate(t, &decay.iface);
+    ok(hr == S_OK && decay.ref == 2, "put_PositionInertiaDecayRate %#lx refs %ld\n", hr, decay.ref);
+    hr = t->lpVtbl->get_PositionInertiaDecayRate(t, &x);
+    ok(hr == S_OK && x == &decay.iface && decay.ref == 3, "get_PositionInertiaDecayRate %#lx %p refs %ld\n", hr, x, decay.ref);
+    if (x) REL(x);
+    hr = t->lpVtbl->put_ScaleInertiaDecayRate(t, &decay.iface);
+    ok(hr == S_OK && decay.ref == 3, "put_ScaleInertiaDecayRate %#lx refs %ld\n", hr, decay.ref);
+    hr = t->lpVtbl->put_PositionInertiaDecayRate(t, NULL);
+    ok(hr == S_OK && decay.ref == 2, "put_PositionInertiaDecayRate(NULL) releases %#lx refs %ld\n", hr, decay.ref);
+    hr = t->lpVtbl->get_ScaleInertiaDecayRate(t, &x);
+    ok(hr == S_OK && x == &decay.iface, "get_ScaleInertiaDecayRate %#lx %p\n", hr, x);
+    if (x) REL(x);
+
+    /* InteractionSources: the collection of the tracker, with the VisualInteractionSource of this dll */
+    hr = t->lpVtbl->get_InteractionSources(t, NULL);
+    ok(hr == E_POINTER, "get_InteractionSources(NULL) %#lx\n", hr);
+    hr = t->lpVtbl->get_InteractionSources(t, &sc);
+    ok(hr == S_OK && sc, "get_InteractionSources %#lx %p\n", hr, sc);
+    hr = t->lpVtbl->get_InteractionSources(t, &sc2);
+    ok(hr == S_OK && sc2 && SameObject((IUnknown *)sc, (IUnknown *)sc2), "the collection is not stable\n");
+    if (sc2) REL(sc2);
+    hr = t2->lpVtbl->get_InteractionSources(t2, &sc2);
+    ok(hr == S_OK && sc2 && !SameObject((IUnknown *)sc, (IUnknown *)sc2), "two trackers share a collection\n");
+    if (sc2) { REL(sc2); sc2 = NULL; }
+    if (!sc) goto out;
+    hr = QI(sc, &IID_ISrcColl, &x);
+    ok(hr == S_OK && x, "QI ICompositionInteractionSourceCollection %#lx\n", hr);
+    if (x) { REL(x); x = NULL; }
+    hr = sc->lpVtbl->GetRuntimeClassName(sc, &v);
+    ok(hr == S_OK && HSEq(v, L"Windows.UI.Composition.Interactions.CompositionInteractionSourceCollection"), "collection class name %#lx\n", hr);
+    pWindowsDeleteString(v);
+    n = 99;
+    hr = sc->lpVtbl->get_Count(sc, &n);
+    ok(hr == S_OK && n == 0, "Count of a new collection %#lx %d\n", hr, n);
+    hr = sc->lpVtbl->get_Count(sc, NULL);
+    ok(hr == E_POINTER, "get_Count(NULL) %#lx\n", hr);
+
+    hr = pWindowsCreateString(visname, lstrlenW(visname), &vcls);
+    hr = pGetFactory(vcls, &IID_IVisStatics, (void **)&vst);
+    pWindowsDeleteString(vcls);
+    ok(hr == S_OK && vst, "VisualInteractionSource statics %#lx\n", hr);
+    hr = Comp->lpVtbl->CreateContainerVisual(Comp, &cv);
+    ok(hr == S_OK && cv, "CreateContainerVisual %#lx\n", hr);
+    if (!vst || !cv) goto out;
+    QI(cv, &IID___x_ABI_CWindows_CUI_CComposition_CIVisual, &vis);
+    hr = vst->lpVtbl->Create(vst, vis, &src);
+    ok(hr == S_OK && src, "VisualInteractionSource Create %#lx\n", hr);
+    hr = vst->lpVtbl->Create(vst, vis, &src2);
+    ok(hr == S_OK && src2, "second VisualInteractionSource %#lx\n", hr);
+    if (!src || !src2) goto out;
+    hr = QI(src, &IID_ICompInteractionSource, &obj);
+    ok(hr == S_OK && obj, "QI ICompositionInteractionSource %#lx\n", hr);
+    if (!obj) goto out;
+    r0 = RefOf((IUnknown *)src);
+    hr = sc->lpVtbl->Add(sc, obj);
+    ok(hr == S_OK, "Add %#lx\n", hr);
+    ok(RefOf((IUnknown *)src) == r0 + 1, "the collection holds the source: %lu, was %lu\n", RefOf((IUnknown *)src), r0);
+    sc->lpVtbl->get_Count(sc, &n);
+    ok(n == 1, "Count after Add %d\n", n);
+    hr = sc->lpVtbl->Add(sc, obj);
+    sc->lpVtbl->get_Count(sc, &n);
+    ok(hr == S_OK && n == 1 && RefOf((IUnknown *)src) == r0 + 1, "Add of a member again (unmeasured) %#lx count %d refs %lu\n", hr, n, RefOf((IUnknown *)src));
+    hr = sc->lpVtbl->Add(sc, NULL);
+    ok(FAILED(hr), "Add(NULL) (unmeasured) %#lx\n", hr);
+    hr = QI(src2, &IID_ICompInteractionSource, &u);
+    hr = sc->lpVtbl->Add(sc, u);
+    sc->lpVtbl->get_Count(sc, &n);
+    ok(hr == S_OK && n == 2, "Add second source %#lx count %d\n", hr, n);
+    hr = sc->lpVtbl->Remove(sc, obj);
+    sc->lpVtbl->get_Count(sc, &n);
+    ok(hr == S_OK && n == 1 && RefOf((IUnknown *)src) == r0, "Remove %#lx count %d refs %lu\n", hr, n, RefOf((IUnknown *)src));
+    hr = sc->lpVtbl->Remove(sc, obj);
+    sc->lpVtbl->get_Count(sc, &n);
+    ok(hr == S_OK && n == 1, "Remove of a non-member (unmeasured) %#lx count %d\n", hr, n);
+    hr = sc->lpVtbl->RemoveAll(sc);
+    sc->lpVtbl->get_Count(sc, &n);
+    ok(hr == S_OK && n == 0, "RemoveAll %#lx count %d\n", hr, n);
+    sc->lpVtbl->Add(sc, obj);
+    sc->lpVtbl->Add(sc, u);
+    /* the sources are released when the tracker (and with it the collection) is freed */
+    r0 = RefOf((IUnknown *)src);
+    REL(sc); sc = NULL;
+    ok(RefOf((IUnknown *)src) == r0, "a collection reference held by the test only: %lu, was %lu\n", RefOf((IUnknown *)src), r0);
+    REL(t); t = NULL;
+    ok(RefOf((IUnknown *)src) == r0 - 1, "freeing the tracker releases its sources: %lu, was %lu\n", RefOf((IUnknown *)src), r0);
+
+    /* Properties of a tracker */
+    {
+        ICompObj *tco = NULL;
+        IUnknown *props = NULL;
+        hr = QI(t2, &IID_ICompObjW, &tco);
+        if (tco)
+        {
+            hr = tco->lpVtbl->get_Properties(tco, &props);
+            ok(hr == S_OK && props, "tracker Properties %#lx\n", hr);
+            if (props) REL(props);
+            REL(tco);
+        }
+    }
+    (void)t3;
+
+out:
+    if (u) REL(u);
+    if (obj) REL(obj);
+    if (src2) REL(src2);
+    if (src) REL(src);
+    if (vis) REL(vis);
+    if (cv) REL(cv);
+    if (vst) vst->lpVtbl->Release(vst);
+    if (sc) REL(sc);
+    if (t2) REL(t2);
+    if (t) REL(t);
+    ok(owner.ref == 1, "the owner is released with its tracker: %ld\n", owner.ref);
+    ok(decay.ref == 1, "the decay rate is released with its tracker: %ld\n", decay.ref);
+    st->lpVtbl->Release(st);
+    pWindowsDeleteString(fcls);
+}
+
 START_TEST(Composition)
 {
     SetUnhandledExceptionFilter(CrashFilter);
@@ -2329,6 +3049,8 @@ START_TEST(Composition)
         TestCompositor2AndBrush3();
         TestNineGridBrush();
         TestVisualInteractionSource(pRoActivateInstance, pWindowsCreateString, pWindowsDeleteString);
+        TestExpressionAnimation();
+        TestInteractionTracker(pRoActivateInstance, pWindowsCreateString, pWindowsDeleteString);
         REL(Comp);
     }
     TestController(pRoActivateInstance, pWindowsCreateString, pWindowsDeleteString);

@@ -1,7 +1,7 @@
 /*
  * PROJECT:     ReactOS DirectComposition
  * LICENSE:     LGPL-2.1-or-later (https://spdx.org/licenses/LGPL-2.1-or-later)
- * PURPOSE:     Windows.UI.Composition WinRT classes: activation, Compositor, CompositorController, VisualInteractionSource (stages 1-3)
+ * PURPOSE:     Windows.UI.Composition WinRT classes: activation, Compositor, CompositorController, VisualInteractionSource, ExpressionAnimation, InteractionTracker (stages 1-3)
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  *
  * Windows registers Windows.UI.Composition.Compositor and Windows.UI.Composition.Core.CompositorController
@@ -219,6 +219,7 @@ DEFINE_GUID(IID_WIAsyncInfo, 0x00000036, 0x0000, 0x0000, 0xc0, 0x00, 0x00, 0x00,
 static const WCHAR name_compositor[] = L"Windows.UI.Composition.Compositor";
 static const WCHAR name_controller[] = L"Windows.UI.Composition.Core.CompositorController";
 static const WCHAR name_visrc[] = L"Windows.UI.Composition.Interactions.VisualInteractionSource";
+static const WCHAR name_tracker[] = L"Windows.UI.Composition.Interactions.InteractionTracker";
 
 static IUnknown *comp_identity(ICompositor *i);
 static IUnknown *interop_identity(ICompositorInterop *i);
@@ -272,16 +273,12 @@ static HRESULT STDMETHODCALLTYPE compositor_CreateEffectFactoryWithProperties(__
 
 static HRESULT STDMETHODCALLTYPE compositor_CreateExpressionAnimation(__x_ABI_CWindows_CUI_CComposition_CICompositor *This, __x_ABI_CWindows_CUI_CComposition_CIExpressionAnimation **result)
 {
-    FIXME("ICompositor::CreateExpressionAnimation: not implemented\n");
-    if (result) *result = NULL;
-    return E_NOTIMPL;
+    return comp_new_expression_animation(comp_identity(This), NULL, (WIExpressionAnimation **)result);
 }
 
 static HRESULT STDMETHODCALLTYPE compositor_CreateExpressionAnimationWithExpression(__x_ABI_CWindows_CUI_CComposition_CICompositor *This, HSTRING expression, __x_ABI_CWindows_CUI_CComposition_CIExpressionAnimation **result)
 {
-    FIXME("ICompositor::CreateExpressionAnimationWithExpression: not implemented\n");
-    if (result) *result = NULL;
-    return E_NOTIMPL;
+    return comp_new_expression_animation(comp_identity(This), expression, (WIExpressionAnimation **)result);
 }
 
 static HRESULT STDMETHODCALLTYPE compositor_CreateInsetClip(__x_ABI_CWindows_CUI_CComposition_CICompositor *This, __x_ABI_CWindows_CUI_CComposition_CIInsetClip **result)
@@ -1407,6 +1404,106 @@ static const IAgileObjectVtbl vsa_vtbl = { vsa_QueryInterface, vsa_AddRef, vsa_R
 static struct vsfactory vsfactory =
     { { &vsf_vtbl }, { &vss_vtbl }, { &vs2s_vtbl }, { &vsof_vtbl }, { &vsa_vtbl } };
 
+
+/* ---- InteractionTracker statics ----
+ * IInteractionTrackerStatics (Create, CreateWithOwner) and the IActivationFactory view of the same factory. The class
+ * has no default constructor (no Activatable attribute in the windows-rs metadata), so ActivateInstance is E_NOTIMPL
+ * (VERIFY ON ORACLE). IInteractionTrackerStatics2 (SetBindingMode/GetBindingMode) is not implemented: QueryInterface
+ * for it logs a FIXME. */
+struct trkfactory
+{
+    IActivationFactory IActivationFactory_iface;
+    WIInteractionTrackerStatics statics;
+    IAgileObject agile;
+};
+static struct trkfactory trkfactory;
+#define TKF_OF(i, f) CONTAINING_RECORD(i, struct trkfactory, f)
+
+static HRESULT STDMETHODCALLTYPE tkf_QueryInterface(IActivationFactory *iface, REFIID iid, void **out)
+{
+    struct trkfactory *This = TKF_OF(iface, IActivationFactory_iface);
+
+    if (!out) return E_POINTER;
+    if (IsEqualGUID(iid, &IID_IUnknown) || IsEqualGUID(iid, &IID_IInspectable) ||
+        IsEqualGUID(iid, &IID_IActivationFactory))
+        *out = &This->IActivationFactory_iface;
+    else if (IsEqualGUID(iid, &IID_IInteractionTrackerStatics))
+        *out = &This->statics;
+    else if (IsEqualGUID(iid, &IID_IAgileObject))
+        *out = &This->agile;
+    else
+    {
+        FIXME("factory of %s: interface %s not implemented, returning E_NOINTERFACE.\n",
+              debugstr_w(name_tracker), debugstr_guid(iid));
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    IUnknown_AddRef((IUnknown *)*out);
+    return S_OK;
+}
+static ULONG STDMETHODCALLTYPE tkf_AddRef(IActivationFactory *iface) { return 2; }
+static ULONG STDMETHODCALLTYPE tkf_Release(IActivationFactory *iface) { return 1; }
+static HRESULT STDMETHODCALLTYPE tkf_GetIids(IActivationFactory *iface, ULONG *count, IID **iids)
+{
+    const IID *list[] = { &IID_IInteractionTrackerStatics };
+    return make_iids(count, iids, list, ARRAY_SIZE(list));
+}
+static HRESULT STDMETHODCALLTYPE tkf_GetRuntimeClassName(IActivationFactory *iface, HSTRING *name)
+{ return class_name_out(name_tracker, name); }
+static HRESULT STDMETHODCALLTYPE tkf_GetTrustLevel(IActivationFactory *iface, TrustLevel *level)
+{
+    if (!level) return E_POINTER;
+    *level = BaseTrust;
+    return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE tkf_ActivateInstance(IActivationFactory *iface, IInspectable **instance)
+{
+    FIXME("InteractionTracker has no default constructor\n");
+    if (instance) *instance = NULL;
+    return E_NOTIMPL;
+}
+static const IActivationFactoryVtbl tkf_vtbl =
+{
+    tkf_QueryInterface, tkf_AddRef, tkf_Release, tkf_GetIids, tkf_GetRuntimeClassName, tkf_GetTrustLevel,
+    tkf_ActivateInstance
+};
+
+static HRESULT STDMETHODCALLTYPE tks_QueryInterface(WIInteractionTrackerStatics *iface, REFIID iid, void **out)
+{ return tkf_QueryInterface(&TKF_OF(iface, statics)->IActivationFactory_iface, iid, out); }
+static ULONG STDMETHODCALLTYPE tks_AddRef(WIInteractionTrackerStatics *iface) { return 2; }
+static ULONG STDMETHODCALLTYPE tks_Release(WIInteractionTrackerStatics *iface) { return 1; }
+static HRESULT STDMETHODCALLTYPE tks_GetIids(WIInteractionTrackerStatics *iface, ULONG *count, IID **iids)
+{ return tkf_GetIids(&TKF_OF(iface, statics)->IActivationFactory_iface, count, iids); }
+static HRESULT STDMETHODCALLTYPE tks_GetRuntimeClassName(WIInteractionTrackerStatics *iface, HSTRING *name)
+{ return class_name_out(name_tracker, name); }
+static HRESULT STDMETHODCALLTYPE tks_GetTrustLevel(WIInteractionTrackerStatics *iface, TrustLevel *level)
+{ return tkf_GetTrustLevel(&TKF_OF(iface, statics)->IActivationFactory_iface, level); }
+static HRESULT STDMETHODCALLTYPE tks_Create(WIInteractionTrackerStatics *iface, WICompositor *compositor,
+        WIInteractionTracker **result)
+{
+    TRACE("%p, %p, %p\n", iface, compositor, result);
+    return comp_new_interaction_tracker(compositor, NULL, result);
+}
+static HRESULT STDMETHODCALLTYPE tks_CreateWithOwner(WIInteractionTrackerStatics *iface, WICompositor *compositor,
+        void *owner, WIInteractionTracker **result)
+{
+    TRACE("%p, %p, %p, %p\n", iface, compositor, owner, result);
+    return comp_new_interaction_tracker(compositor, owner, result);
+}
+static const WIInteractionTrackerStaticsVtbl tks_vtbl =
+{
+    tks_QueryInterface, tks_AddRef, tks_Release, tks_GetIids, tks_GetRuntimeClassName, tks_GetTrustLevel,
+    tks_Create, tks_CreateWithOwner
+};
+
+static HRESULT STDMETHODCALLTYPE tka_QueryInterface(IAgileObject *iface, REFIID iid, void **out)
+{ return tkf_QueryInterface(&trkfactory.IActivationFactory_iface, iid, out); }
+static ULONG STDMETHODCALLTYPE tka_AddRef(IAgileObject *iface) { return 2; }
+static ULONG STDMETHODCALLTYPE tka_Release(IAgileObject *iface) { return 1; }
+static const IAgileObjectVtbl tka_vtbl = { tka_QueryInterface, tka_AddRef, tka_Release };
+
+static struct trkfactory trkfactory = { { &tkf_vtbl }, { &tks_vtbl }, { &tka_vtbl } };
+
 static struct factory compositor_factory =
     { { &factory_vtbl }, { &factory_agile_vtbl }, name_compositor, compositor_activate };
 static struct factory controller_factory =
@@ -1426,6 +1523,8 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **out
         *out = &controller_factory.IActivationFactory_iface;
     else if (name && !wcscmp(name, name_visrc))
         *out = &vsfactory.IActivationFactory_iface;
+    else if (name && !wcscmp(name, name_tracker))
+        *out = &trkfactory.IActivationFactory_iface;
     else
     {
         FIXME("class %s not implemented\n", debugstr_w(name));

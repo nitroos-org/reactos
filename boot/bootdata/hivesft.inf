@@ -265,6 +265,10 @@ HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Compositio
 HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Composition.Interactions.VisualInteractionSource","DllPath",0x00020000,"%SystemRoot%\system32\dcomp.dll"
 HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Composition.Interactions.VisualInteractionSource","Threading",0x00010001,0
 HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Composition.Interactions.VisualInteractionSource","TrustLevel",0x00010001,0
+HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Composition.Interactions.InteractionTracker","ActivationType",0x00010001,0
+HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Composition.Interactions.InteractionTracker","DllPath",0x00020000,"%SystemRoot%\system32\dcomp.dll"
+HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Composition.Interactions.InteractionTracker","Threading",0x00010001,0
+HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Composition.Interactions.InteractionTracker","TrustLevel",0x00010001,0
 HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.ViewManagement.UISettings","ActivationType",0x00010001,0
 HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.ViewManagement.UISettings","DllPath",0x00020000,"%SystemRoot%\system32\Windows.UI.dll"
 HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.ViewManagement.UISettings","Threading",0x00010001,0
