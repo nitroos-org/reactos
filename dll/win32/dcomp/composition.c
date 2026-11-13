@@ -4,7 +4,7 @@
  * PURPOSE:     Windows.UI.Composition object model (stage 2): visual tree, brushes, clip, CPU test renderer
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  *
- * Objects are kept in memory only; nothing is presented (stage 4 needs the win32k window surfaces). One struct
+ * The tree of a DesktopWindowTarget is drawn into its window on commit by the CPU renderer (present.c). One struct
  * cobj serves every class: a table maps interface IIDs to the embedded interface slots a class implements.
  * All objects are agile and share one global lock (the scene graph is small and every call is short).
  *
@@ -60,6 +60,14 @@ static CRITICAL_SECTION comp_cs = { &comp_cs_debug, -1, 0, 0, 0, 0 };
 void comp_lock(void) { EnterCriticalSection(&comp_cs); }
 void comp_unlock(void) { LeaveCriticalSection(&comp_cs); }
 
+void comp_unlock_changed(struct cobj *o)
+{
+    IUnknown *compositor = o->compositor;   /* set at creation, never changes */
+
+    LeaveCriticalSection(&comp_cs);
+    if (compositor) comp_compositor_changed(compositor);
+}
+
 #define OBJ_OF(i, field) CONTAINING_RECORD(i, struct cobj, field)
 
 /* ---- identity and interface table ---- */
@@ -110,6 +118,7 @@ static const struct iface_entry iface_table[] =
     { &IID_INitroDrawingSurfaceInterop, offsetof(struct cobj, dsinterop), KM(K_DSURFACE), FALSE },
     /* the real ICompositionDrawingSurfaceInterop: same six methods, same order (see dcomp_nitro.h) */
     { &IID_ICompositionDrawingSurfaceInterop, offsetof(struct cobj, dsinterop), KM(K_DSURFACE), FALSE },
+    { &IID_ICompositionGraphicsDeviceInterop, offsetof(struct cobj, gdinterop), KM(K_GDEVICE), FALSE },
     { &IID_INitroCompositionTest, offsetof(struct cobj, test), KM_VISUAL, FALSE },
 };
 
@@ -317,6 +326,7 @@ static void cobj_destroy(struct cobj *o)
     IUnknown *bsurface;
     int i, n;
 
+    if (o->kind == K_TARGET) present_detach(o);
     /* a destroyed object has ref 0, keep it from being re-entered while its children are released */
     comp_lock();
     kids = o->kids; n = o->nkids;
@@ -367,9 +377,10 @@ static HRESULT STDMETHODCALLTYPE clo_Close(WIClosable *i)
         if (o->kind == K_GDEVICE) gfx_device_free(o);
         else gfx_surface_free(o);
     }
-    /* FIXME: Close on a DesktopWindowTarget should disconnect it from its window and drop Root; it only marks
-     * the object closed (the Root reference is released with the target). Verify on the oracle. */
+    /* A closed DesktopWindowTarget stops drawing into its window. FIXME: the Root reference is only released with
+     * the target; verify on the oracle whether Close drops it. */
     o->closed = TRUE;
+    if (o->kind == K_TARGET) present_detach(o);
     return S_OK;
 }
 static const WIClosableVtbl closable_vtbl = { INSP_HEAD(clo), clo_Close };
@@ -508,7 +519,7 @@ static const WICompositionObjectVtbl objbase_vtbl =
 static HRESULT STDMETHODCALLTYPE vis_get_##N(WIVisual *i, T *v) \
 { struct cobj *o = VIS(i); if (!v) return E_POINTER; comp_lock(); *v = (T)o->F; comp_unlock(); return S_OK; } \
 static HRESULT STDMETHODCALLTYPE vis_put_##N(WIVisual *i, T v) \
-{ struct cobj *o = VIS(i); comp_lock(); o->F = v; comp_unlock(); return S_OK; }
+{ struct cobj *o = VIS(i); comp_lock(); o->F = v; comp_unlock_changed(o); return S_OK; }
 
 VGETPUT(AnchorPoint, Vec2, anchor)
 VGETPUT(BackfaceVisibility, WUC(CompositionBackfaceVisibility), backface)
@@ -536,7 +547,7 @@ static HRESULT STDMETHODCALLTYPE vis_get_RotationAngleInDegrees(WIVisual *i, FLO
 static HRESULT STDMETHODCALLTYPE vis_put_RotationAngleInDegrees(WIVisual *i, FLOAT v)
 {
     struct cobj *o = VIS(i);
-    comp_lock(); o->rotation = v * (3.14159265358979f / 180.0f); comp_unlock();
+    comp_lock(); o->rotation = v * (3.14159265358979f / 180.0f); comp_unlock_changed(o);
     return S_OK;
 }
 
@@ -567,7 +578,7 @@ static HRESULT STDMETHODCALLTYPE vis_put_Clip(WIVisual *i, WICompositionClip *v)
         return E_INVALIDARG;
     }
     if (c) id_AddRef(&c->identity);
-    comp_lock(); old = o->vclip; o->vclip = c; comp_unlock();
+    comp_lock(); old = o->vclip; o->vclip = c; comp_unlock_changed(o);
     release_cobj(old);
     return S_OK;
 }
@@ -704,7 +715,7 @@ static HRESULT collection_insert(struct cobj *c, WIVisual *childp, WIVisual *sib
     owner->nkids++;
     child->parent = owner;
     if (addref) id_AddRef(&child->identity);
-    comp_unlock();
+    comp_unlock_changed(owner);
     return S_OK;
 }
 
@@ -734,7 +745,7 @@ static HRESULT STDMETHODCALLTYPE vcol_Remove(WIVisualCollection *i, WIVisual *ch
     comp_lock();
     if (!(owner = c->owner)) { comp_unlock(); return RO_E_CLOSED; }
     if (child->parent == owner) { unlink_kid(owner, child); removed = TRUE; }
-    comp_unlock();
+    if (removed) comp_unlock_changed(owner); else comp_unlock();
     if (removed) release_cobj(child);
     return S_OK;
 }
@@ -749,7 +760,7 @@ static HRESULT STDMETHODCALLTYPE vcol_RemoveAll(WIVisualCollection *i)
     kids = owner->kids; n = owner->nkids;
     owner->kids = NULL; owner->nkids = owner->capkids = 0;
     for (k = 0; k < n; k++) kids[k]->parent = NULL;
-    comp_unlock();
+    comp_unlock_changed(owner);
     for (k = 0; k < n; k++) release_cobj(kids[k]);
     HeapFree(GetProcessHeap(), 0, kids);
     return S_OK;
@@ -790,7 +801,7 @@ static HRESULT STDMETHODCALLTYPE spr_put_Brush(WISpriteVisual *i, WICompositionB
         return E_INVALIDARG;
     }
     if (b) id_AddRef(&b->identity);
-    comp_lock(); old = o->sbrush; o->sbrush = b; comp_unlock();
+    comp_lock(); old = o->sbrush; o->sbrush = b; comp_unlock_changed(o);
     release_cobj(old);
     return S_OK;
 }
@@ -806,7 +817,7 @@ static HRESULT STDMETHODCALLTYPE cbr_get_Color(WICompositionColorBrush *i, __x_A
 static HRESULT STDMETHODCALLTYPE cbr_put_Color(WICompositionColorBrush *i, __x_ABI_CWindows_CUI_CColor v)
 {
     struct cobj *o = OBJ_OF(i, colorbrush);
-    comp_lock(); o->color = v; comp_unlock();
+    comp_lock(); o->color = v; comp_unlock_changed(o);
     return S_OK;
 }
 static const WICompositionColorBrushVtbl colorbrush_vtbl = { INSP_HEAD(cbr), cbr_get_Color, cbr_put_Color };
@@ -816,7 +827,7 @@ static const WICompositionColorBrushVtbl colorbrush_vtbl = { INSP_HEAD(cbr), cbr
 static HRESULT STDMETHODCALLTYPE sbr_get_##N(WICompositionSurfaceBrush *i, T *v) \
 { struct cobj *o = SB(i); if (!v) return E_POINTER; comp_lock(); *v = (T)o->F; comp_unlock(); return S_OK; } \
 static HRESULT STDMETHODCALLTYPE sbr_put_##N(WICompositionSurfaceBrush *i, T v) \
-{ struct cobj *o = SB(i); comp_lock(); o->F = v; comp_unlock(); return S_OK; }
+{ struct cobj *o = SB(i); comp_lock(); o->F = v; comp_unlock_changed(o); return S_OK; }
 
 SBGETPUT(BitmapInterpolationMode, WUC(CompositionBitmapInterpolationMode), bitmap_interp)
 SBGETPUT(Stretch, WUC(CompositionStretch), stretch)
@@ -831,7 +842,7 @@ static HRESULT STDMETHODCALLTYPE sbr_get_HorizontalAlignmentRatio(WICompositionS
 static HRESULT STDMETHODCALLTYPE sbr_put_HorizontalAlignmentRatio(WICompositionSurfaceBrush *i, FLOAT v)
 {
     struct cobj *o = SB(i);
-    comp_lock(); o->halign = v < 0 ? 0 : v > 1 ? 1 : v; comp_unlock();      /* documented: clamped to 0..1 */
+    comp_lock(); o->halign = v < 0 ? 0 : v > 1 ? 1 : v; comp_unlock_changed(o);      /* documented: clamped to 0..1 */
     return S_OK;
 }
 static HRESULT STDMETHODCALLTYPE sbr_get_VerticalAlignmentRatio(WICompositionSurfaceBrush *i, FLOAT *v)
@@ -844,7 +855,7 @@ static HRESULT STDMETHODCALLTYPE sbr_get_VerticalAlignmentRatio(WICompositionSur
 static HRESULT STDMETHODCALLTYPE sbr_put_VerticalAlignmentRatio(WICompositionSurfaceBrush *i, FLOAT v)
 {
     struct cobj *o = SB(i);
-    comp_lock(); o->valign = v < 0 ? 0 : v > 1 ? 1 : v; comp_unlock();
+    comp_lock(); o->valign = v < 0 ? 0 : v > 1 ? 1 : v; comp_unlock_changed(o);
     return S_OK;
 }
 
@@ -874,7 +885,7 @@ HRESULT comp_surface_brush_set_surface(struct cobj *brush, WICompositionSurface 
         id = (IUnknown *)&OBJ_OF(surface, surface)->identity;
         IUnknown_AddRef(id);
     }
-    comp_lock(); old = brush->bsurface; brush->bsurface = id; comp_unlock();
+    comp_lock(); old = brush->bsurface; brush->bsurface = id; comp_unlock_changed(brush);
     if (old) IUnknown_Release(old);
     return S_OK;
 }
@@ -898,7 +909,7 @@ static const WICompositionSurfaceBrushVtbl surfbrush_vtbl =
 static HRESULT STDMETHODCALLTYPE ins_get_##N(WIInsetClip *i, FLOAT *v) \
 { struct cobj *o = OBJ_OF(i, inset); if (!v) return E_POINTER; comp_lock(); *v = o->F; comp_unlock(); return S_OK; } \
 static HRESULT STDMETHODCALLTYPE ins_put_##N(WIInsetClip *i, FLOAT v) \
-{ struct cobj *o = OBJ_OF(i, inset); comp_lock(); o->F = v; comp_unlock(); return S_OK; }
+{ struct cobj *o = OBJ_OF(i, inset); comp_lock(); o->F = v; comp_unlock_changed(o); return S_OK; }
 INSETGETPUT(BottomInset, inset_b)
 INSETGETPUT(LeftInset, inset_l)
 INSETGETPUT(RightInset, inset_r)
@@ -1016,8 +1027,9 @@ static struct m2 m2_about(struct m2 lin, float cx, float cy)       /* linear par
     return lin;
 }
 
-/* local space of a visual -> its parent's space (2D part only; order: centre scale/rotate, anchor, matrix, offset) */
-static struct m2 visual_local(const struct cobj *v)
+/* local space of a visual -> its parent's space (2D part only; order: centre scale/rotate, anchor, matrix, offset);
+ * size and offset are the effective ones (with the relative adjustments) */
+static struct m2 visual_local(const struct cobj *v, Vec2 size, Vec3 offset)
 {
     struct m2 m = m2_ident(), t = m2_ident(), s;
     float ang = v->rotation;
@@ -1034,7 +1046,7 @@ static struct m2 visual_local(const struct cobj *v)
         if (v->axis.X != 0 || v->axis.Y != 0) FIXME("rotation axis other than Z ignored by the test renderer\n");
         m = m2_then(m, m2_about(r, v->center.X, v->center.Y));
     }
-    t.e = -v->anchor.X * v->size.X; t.f = -v->anchor.Y * v->size.Y;
+    t.e = -v->anchor.X * size.X; t.f = -v->anchor.Y * size.Y;
     m = m2_then(m, t);
     if (v->xform.M11 != 1 || v->xform.M12 != 0 || v->xform.M21 != 0 || v->xform.M22 != 1 ||
         v->xform.M41 != 0 || v->xform.M42 != 0)
@@ -1042,7 +1054,7 @@ static struct m2 visual_local(const struct cobj *v)
         struct m2 x = { v->xform.M11, v->xform.M12, v->xform.M21, v->xform.M22, v->xform.M41, v->xform.M42 };
         m = m2_then(m, x);
     }
-    t = m2_ident(); t.e = v->offset.X; t.f = v->offset.Y;
+    t = m2_ident(); t.e = offset.X; t.f = offset.Y;
     return m2_then(m, t);
 }
 
@@ -1101,26 +1113,33 @@ static BOOL sample_brush(struct cobj *br, const struct sample_src *s, float lx, 
     }
 }
 
-static void render_visual(struct cobj *v, struct m2 parentm, float parent_opacity, struct rctx *ctx)
+static void render_visual(struct cobj *v, struct m2 parentm, float parent_opacity, Vec2 psize, struct rctx *ctx)
 {
     struct m2 m, inv;
     float opacity;
     int saved = ctx->nclips, k;
+    Vec2 size;
+    Vec3 offset;
 
     if (!v->visible) return;
     opacity = v->opacity < 0 ? 0 : v->opacity > 1 ? 1 : v->opacity;
     opacity *= parent_opacity;
-    m = m2_then(visual_local(v), parentm);
+    size.X = v->size.X + v->relsize.X * psize.X;
+    size.Y = v->size.Y + v->relsize.Y * psize.Y;
+    offset = v->offset;
+    offset.X += v->reloffset.X * psize.X;
+    offset.Y += v->reloffset.Y * psize.Y;
+    m = m2_then(visual_local(v, size, offset), parentm);
 
     if (v->vclip && v->vclip->kind == K_INSETCLIP && ctx->nclips < MAX_CLIPS && m2_invert(m, &inv))
     {
         struct clip_rec *c = &ctx->clips[ctx->nclips++];
         c->inv = inv;
         c->l = v->vclip->inset_l; c->t = v->vclip->inset_t;
-        c->r = v->size.X - v->vclip->inset_r; c->b = v->size.Y - v->vclip->inset_b;
+        c->r = size.X - v->vclip->inset_r; c->b = size.Y - v->vclip->inset_b;
     }
 
-    if (v->kind == K_SPRITE && v->sbrush && v->size.X > 0 && v->size.Y > 0 && opacity > 0 && m2_invert(m, &inv))
+    if (v->kind == K_SPRITE && v->sbrush && size.X > 0 && size.Y > 0 && opacity > 0 && m2_invert(m, &inv))
     {
         struct sample_src src = { 0 };
         struct cobj *br = v->sbrush;
@@ -1137,7 +1156,7 @@ static void render_visual(struct cobj *v, struct m2 parentm, float parent_opacit
             {
                 if (SUCCEEDED(gfx_surface_snapshot(surf, &snap, &src.w, &src.h)) && src.w && src.h)
                 {
-                    float sx = 1, sy = 1, W = v->size.X, H = v->size.Y;
+                    float sx = 1, sy = 1, W = size.X, H = size.Y;
                     switch (br->stretch)
                     {
                     case CompositionStretch_Fill: sx = W / src.w; sy = H / src.h; break;
@@ -1158,9 +1177,9 @@ static void render_visual(struct cobj *v, struct m2 parentm, float parent_opacit
         if (ok)
         {
             m2_apply(m, 0, 0, &xs[0], &ys[0]);
-            m2_apply(m, v->size.X, 0, &xs[1], &ys[1]);
-            m2_apply(m, 0, v->size.Y, &xs[2], &ys[2]);
-            m2_apply(m, v->size.X, v->size.Y, &xs[3], &ys[3]);
+            m2_apply(m, size.X, 0, &xs[1], &ys[1]);
+            m2_apply(m, 0, size.Y, &xs[2], &ys[2]);
+            m2_apply(m, size.X, size.Y, &xs[3], &ys[3]);
             minx = maxx = xs[0]; miny = maxy = ys[0];
             for (k = 1; k < 4; k++)
             {
@@ -1180,7 +1199,7 @@ static void render_visual(struct cobj *v, struct m2 parentm, float parent_opacit
                     BOOL inside = TRUE;
 
                     m2_apply(inv, px + 0.5f, py + 0.5f, &lx, &ly);
-                    if (lx < 0 || ly < 0 || lx >= v->size.X || ly >= v->size.Y) continue;
+                    if (lx < 0 || ly < 0 || lx >= size.X || ly >= size.Y) continue;
                     for (k = 0; k < ctx->nclips && inside; k++)
                     {
                         float cx, cy;
@@ -1202,25 +1221,33 @@ static void render_visual(struct cobj *v, struct m2 parentm, float parent_opacit
         HeapFree(GetProcessHeap(), 0, snap);
     }
 
-    for (k = 0; k < v->nkids; k++) render_visual(v->kids[k], m, opacity, ctx);
+    for (k = 0; k < v->nkids; k++) render_visual(v->kids[k], m, opacity, size, ctx);
     ctx->nclips = saved;
 }
 
 static HRESULT STDMETHODCALLTYPE tst_RenderToBitmap(INitroCompositionTest *i, UINT width, UINT height, void *bgra, UINT stride)
 {
     struct cobj *o = OBJ_OF(i, test);
-    struct rctx *ctx;
     UINT y;
 
     if (!bgra || !width || !height || stride < width * 4) return E_INVALIDARG;
-    if (!(ctx = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*ctx)))) return E_OUTOFMEMORY;
-    ctx->bgra = bgra; ctx->width = width; ctx->height = height; ctx->stride = stride;
-    for (y = 0; y < height; y++) memset(ctx->bgra + (size_t)y * stride, 0, width * 4);
+    for (y = 0; y < height; y++) memset((BYTE *)bgra + (size_t)y * stride, 0, width * 4);
     comp_lock();
-    render_visual(o, m2_ident(), 1.0f, ctx);
+    comp_render_locked(o, width, height, bgra, stride);
     comp_unlock();
-    HeapFree(GetProcessHeap(), 0, ctx);
     return S_OK;
+}
+
+void comp_render_locked(struct cobj *root, UINT width, UINT height, BYTE *bgra, UINT stride)
+{
+    struct rctx *ctx;
+    Vec2 psize;
+
+    if (!(ctx = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*ctx)))) return;
+    ctx->bgra = bgra; ctx->width = width; ctx->height = height; ctx->stride = stride;
+    psize.X = (float)width; psize.Y = (float)height;   /* the parent of the root: the bitmap / client area */
+    render_visual(root, m2_ident(), 1.0f, psize, ctx);
+    HeapFree(GetProcessHeap(), 0, ctx);
 }
 
 struct dump { char *buf; UINT size, len; };
@@ -1308,7 +1335,7 @@ static HRESULT STDMETHODCALLTYPE tgt_put_Root(WICompositionTarget *i, WIVisual *
     }
     /* FIXME: a visual of another Compositor or one that already has a parent is accepted; verify on the oracle */
     if (r) id_AddRef(&r->identity);
-    comp_lock(); old = o->root; o->root = r; comp_unlock();
+    comp_lock(); old = o->root; o->root = r; comp_unlock_changed(o);
     release_cobj(old);
     return S_OK;
 }
@@ -1342,7 +1369,7 @@ HRESULT comp_new_desktop_target(IUnknown *compositor, HWND hwnd, BOOL topmost, W
     if (FAILED(hr = comp_create(compositor, K_TARGET, &o))) return hr;
     o->hwnd = hwnd;
     o->topmost = topmost;
-    FIXME("DesktopWindowTarget for window %p: the visual tree is not presented yet (no window surfaces)\n", hwnd);
+    present_attach(o);
     *out = &o->dwt;                     /* the creation reference moves to the caller */
     return S_OK;
 }
@@ -1444,7 +1471,9 @@ static const WICompositionNineGridBrushVtbl ninegrid_vtbl =
     ngb_SetInsets, ngb_SetInsetsWithValues, ngb_SetInsetScales, ngb_SetInsetScalesWithValues,
 };
 
-/* ---- IVisual2: the values are kept, nothing applies them yet (no renderer) ---- */
+/* ---- IVisual2: RelativeOffsetAdjustment and RelativeSizeAdjustment are applied by the renderer (learn.microsoft.com:
+ * offset/size relative to the parent's size; the parent of a target's Root is the window's client area, verify on the
+ * oracle); ParentForTransform is kept only ---- */
 
 #define VIS2(i) OBJ_OF(i, visual2)
 
@@ -1480,11 +1509,11 @@ static HRESULT STDMETHODCALLTYPE vi2_put_ParentForTransform(WIVisual2 *i, WIVisu
 static HRESULT STDMETHODCALLTYPE vi2_get_RelativeOffsetAdjustment(WIVisual2 *i, Vec3 *v)
 { struct cobj *o = VIS2(i); if (!v) return E_POINTER; comp_lock(); *v = o->reloffset; comp_unlock(); return S_OK; }
 static HRESULT STDMETHODCALLTYPE vi2_put_RelativeOffsetAdjustment(WIVisual2 *i, Vec3 v)
-{ struct cobj *o = VIS2(i); comp_lock(); o->reloffset = v; comp_unlock(); return S_OK; }
+{ struct cobj *o = VIS2(i); comp_lock(); o->reloffset = v; comp_unlock_changed(o); return S_OK; }
 static HRESULT STDMETHODCALLTYPE vi2_get_RelativeSizeAdjustment(WIVisual2 *i, Vec2 *v)
 { struct cobj *o = VIS2(i); if (!v) return E_POINTER; comp_lock(); *v = o->relsize; comp_unlock(); return S_OK; }
 static HRESULT STDMETHODCALLTYPE vi2_put_RelativeSizeAdjustment(WIVisual2 *i, Vec2 v)
-{ struct cobj *o = VIS2(i); comp_lock(); o->relsize = v; comp_unlock(); return S_OK; }
+{ struct cobj *o = VIS2(i); comp_lock(); o->relsize = v; comp_unlock_changed(o); return S_OK; }
 
 static const WIVisual2Vtbl visual2_vtbl =
 {
@@ -2146,6 +2175,7 @@ HRESULT comp_create(IUnknown *compositor, enum cobj_kind kind, struct cobj **out
     o->tracker.lpVtbl = &tracker_vtbl;
     o->srccoll.lpVtbl = &srccoll_vtbl;
     o->dsinterop.lpVtbl = &nitro_dsinterop_vtbl;
+    o->gdinterop.lpVtbl = &gfx_device_interop_vtbl;
     o->test.lpVtbl = &nitro_test_vtbl_impl;
     o->closable.lpVtbl = &closable_vtbl;
     o->agile.lpVtbl = &agile_vtbl;
