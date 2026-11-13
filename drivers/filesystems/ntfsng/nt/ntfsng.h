@@ -117,7 +117,7 @@ typedef struct _NG_VCB
     NPAGED_LOOKASIDE_LIST DioBounce;    /* NG_DIO_BOUNCE buffers for those transfers */
     ULONG DioWrites, DioFallbacks, DioRedone, DioZeroPieces;   /* DioZeroPieces: gap zero-fill pieces written without CoreLock */
     ULONG DioReads, DioReadFallbacks;   /* paging and non-cached reads with / without the transfer outside CoreLock */
-    FAST_MUTEX FcbListLock;
+    KGUARDED_MUTEX FcbListLock;     /* guarded mutex: it holds off special kernel APCs without the CR8 raise and lower of a fast mutex */
     LIST_ENTRY FcbList;
     /* The same FCBs by MFT record number (NgFcbBucket): every lookup by record walks one short chain, not the whole list
      * (thousands of FCBs linger after a create or delete storm).  Both are changed under FcbListLock. */
