@@ -5,6 +5,7 @@ list(APPEND SOURCE
     AuditCategories.c
     CveEventWrite.c
     DynamicTimeZone.c
+    TimeZoneKeys.c
     BuildSecurityDescriptor.c
     NamedPipeSD.c
     ConvertStringSidToSid.c

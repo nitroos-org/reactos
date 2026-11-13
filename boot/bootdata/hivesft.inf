@@ -1700,6 +1700,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones","IndexMapping",0x
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Dateline Standard Time","Display",0x00000000,%GMT_MINUS_12_A_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Dateline Standard Time","Dlt",0x00000000,%GMT_MINUS_12_A_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Dateline Standard Time","Std",0x00000000,%GMT_MINUS_12_A_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Dateline Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1000"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Dateline Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1001"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Dateline Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1002"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Dateline Standard Time","Index",0x00010001,0
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Dateline Standard Time","TZI",0x00000001,\
 0xd0,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -1709,6 +1712,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Dateline Standard 
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Samoa Standard Time","Display",0x00000000,%GMT_MINUS_11_A_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Samoa Standard Time","Dlt",0x00000000,%GMT_MINUS_11_A_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Samoa Standard Time","Std",0x00000000,%GMT_MINUS_11_A_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Samoa Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1010"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Samoa Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1011"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Samoa Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1012"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Samoa Standard Time","Index",0x00010001,1
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Samoa Standard Time","TZI",0x00000001,\
 0x94,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -1718,6 +1724,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Samoa Standard Tim
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Hawaiian Standard Time","Display",0x00000000,%GMT_MINUS_10_A_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Hawaiian Standard Time","Dlt",0x00000000,%GMT_MINUS_10_A_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Hawaiian Standard Time","Std",0x00000000,%GMT_MINUS_10_A_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Hawaiian Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1020"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Hawaiian Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1021"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Hawaiian Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1022"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Hawaiian Standard Time","Index",0x00010001,2
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Hawaiian Standard Time","TZI",0x00000001,\
 0x58,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -1727,6 +1736,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Hawaiian Standard 
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alaskan Standard Time","Display",0x00000000,%GMT_MINUS_09_A_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alaskan Standard Time","Dlt",0x00000000,%GMT_MINUS_09_A_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alaskan Standard Time","Std",0x00000000,%GMT_MINUS_09_A_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alaskan Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1030"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alaskan Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1031"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alaskan Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1032"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alaskan Standard Time","Index",0x00010001,3
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alaskan Standard Time","TZI",0x00000001,\
 0x1c,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -1736,6 +1748,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alaskan Standard T
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Pacific Standard Time","Display",0x00000000,%GMT_MINUS_08_A_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Pacific Standard Time","Dlt",0x00000000,%GMT_MINUS_08_A_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Pacific Standard Time","Std",0x00000000,%GMT_MINUS_08_A_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Pacific Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1040"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Pacific Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1041"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Pacific Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1042"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Pacific Standard Time","Index",0x00010001,4
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Pacific Standard Time","TZI",0x00000001,\
 0xe0,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -1745,6 +1760,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Pacific Standard T
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Mountain Standard Time","Display",0x00000000,%GMT_MINUS_07_A_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Mountain Standard Time","Dlt",0x00000000,%GMT_MINUS_07_A_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Mountain Standard Time","Std",0x00000000,%GMT_MINUS_07_A_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Mountain Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1050"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Mountain Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1051"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Mountain Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1052"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Mountain Standard Time","Index",0x00010001,10
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Mountain Standard Time","TZI",0x00000001,\
 0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -1754,6 +1772,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Mountain Standard 
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Mountain Standard Time (Mexico)","Display",0x00000000,%GMT_MINUS_07_B_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Mountain Standard Time (Mexico)","Dlt",0x00000000,%GMT_MINUS_07_B_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Mountain Standard Time (Mexico)","Std",0x00000000,%GMT_MINUS_07_B_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Mountain Standard Time (Mexico)","MUI_Display",0x00000000,"@tzres.dll,-1060"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Mountain Standard Time (Mexico)","MUI_Dlt",0x00000000,"@tzres.dll,-1061"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Mountain Standard Time (Mexico)","MUI_Std",0x00000000,"@tzres.dll,-1062"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Mountain Standard Time (Mexico)","Index",0x00010001,13
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Mountain Standard Time (Mexico)","TZI",0x00000001,\
 0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -1763,6 +1784,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Mountain Standard 
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\US Mountain Standard Time","Display",0x00000000,%GMT_MINUS_07_C_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\US Mountain Standard Time","Dlt",0x00000000,%GMT_MINUS_07_C_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\US Mountain Standard Time","Std",0x00000000,%GMT_MINUS_07_C_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\US Mountain Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1070"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\US Mountain Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1071"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\US Mountain Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1072"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\US Mountain Standard Time","Index",0x00010001,15
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\US Mountain Standard Time","TZI",0x00000001,\
 0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -1772,6 +1796,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\US Mountain Standa
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Standard Time","Display",0x00000000,%GMT_MINUS_06_A_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Standard Time","Dlt",0x00000000,%GMT_MINUS_06_A_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Standard Time","Std",0x00000000,%GMT_MINUS_06_A_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1080"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1081"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1082"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Standard Time","Index",0x00010001,20
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Standard Time","TZI",0x00000001,\
 0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -1781,6 +1808,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Standard T
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Canada Central Standard Time","Display",0x00000000,%GMT_MINUS_06_B_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Canada Central Standard Time","Dlt",0x00000000,%GMT_MINUS_06_B_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Canada Central Standard Time","Std",0x00000000,%GMT_MINUS_06_B_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Canada Central Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1090"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Canada Central Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1091"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Canada Central Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1092"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Canada Central Standard Time","Index",0x00010001,25
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Canada Central Standard Time","TZI",0x00000001,\
 0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -1790,6 +1820,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Canada Central Sta
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Standard Time (Mexico)","Display",0x00000000,%GMT_MINUS_06_C_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Standard Time (Mexico)","Dlt",0x00000000,%GMT_MINUS_06_C_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Standard Time (Mexico)","Std",0x00000000,%GMT_MINUS_06_C_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Standard Time (Mexico)","MUI_Display",0x00000000,"@tzres.dll,-1100"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Standard Time (Mexico)","MUI_Dlt",0x00000000,"@tzres.dll,-1101"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Standard Time (Mexico)","MUI_Std",0x00000000,"@tzres.dll,-1102"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Standard Time (Mexico)","Index",0x00010001,30
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Standard Time (Mexico)","TZI",0x00000001,\
 0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -1799,6 +1832,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Standard T
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central America Standard Time","Display",0x00000000,%GMT_MINUS_06_D_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central America Standard Time","Dlt",0x00000000,%GMT_MINUS_06_D_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central America Standard Time","Std",0x00000000,%GMT_MINUS_06_D_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central America Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1110"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central America Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1111"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central America Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1112"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central America Standard Time","Index",0x00010001,33
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central America Standard Time","TZI",0x00000001,\
 0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -1808,6 +1844,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central America St
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Eastern Standard Time","Display",0x00000000,%GMT_MINUS_05_A_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Eastern Standard Time","Dlt",0x00000000,%GMT_MINUS_05_A_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Eastern Standard Time","Std",0x00000000,%GMT_MINUS_05_A_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Eastern Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1120"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Eastern Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1121"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Eastern Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1122"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Eastern Standard Time","Index",0x00010001,35
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Eastern Standard Time","TZI",0x00000001,\
 0x2c,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -1817,6 +1856,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Eastern Standard T
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\US Eastern Standard Time","Display",0x00000000,%GMT_MINUS_05_B_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\US Eastern Standard Time","Dlt",0x00000000,%GMT_MINUS_05_B_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\US Eastern Standard Time","Std",0x00000000,%GMT_MINUS_05_B_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\US Eastern Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1130"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\US Eastern Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1131"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\US Eastern Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1132"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\US Eastern Standard Time","Index",0x00010001,40
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\US Eastern Standard Time","TZI",0x00000001,\
 0x2c,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -1826,6 +1868,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\US Eastern Standar
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\SA Pacific Standard Time","Display",0x00000000,%GMT_MINUS_05_C_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\SA Pacific Standard Time","Dlt",0x00000000,%GMT_MINUS_05_C_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\SA Pacific Standard Time","Std",0x00000000,%GMT_MINUS_05_C_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\SA Pacific Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1140"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\SA Pacific Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1141"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\SA Pacific Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1142"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\SA Pacific Standard Time","Index",0x00010001,45
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\SA Pacific Standard Time","TZI",0x00000001,\
 0x2c,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -1835,6 +1880,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\SA Pacific Standar
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Atlantic Standard Time","Display",0x00000000,%GMT_MINUS_04_A_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Atlantic Standard Time","Dlt",0x00000000,%GMT_MINUS_04_A_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Atlantic Standard Time","Std",0x00000000,%GMT_MINUS_04_A_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Atlantic Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1150"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Atlantic Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1151"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Atlantic Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1152"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Atlantic Standard Time","Index",0x00010001,50
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Atlantic Standard Time","TZI",0x00000001,\
 0xf0,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -1844,6 +1892,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Atlantic Standard 
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\SA Western Standard Time","Display",0x00000000,%GMT_MINUS_04_B_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\SA Western Standard Time","Dlt",0x00000000,%GMT_MINUS_04_B_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\SA Western Standard Time","Std",0x00000000,%GMT_MINUS_04_B_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\SA Western Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1160"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\SA Western Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1161"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\SA Western Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1162"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\SA Western Standard Time","Index",0x00010001,55
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\SA Western Standard Time","TZI",0x00000001,\
 0xf0,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -1853,6 +1904,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\SA Western Standar
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Pacific SA Standard Time","Display",0x00000000,%GMT_MINUS_03_A_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Pacific SA Standard Time","Dlt",0x00000000,%GMT_MINUS_03_A_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Pacific SA Standard Time","Std",0x00000000,%GMT_MINUS_03_A_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Pacific SA Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1170"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Pacific SA Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1171"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Pacific SA Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1172"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Pacific SA Standard Time","Index",0x00010001,56
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Pacific SA Standard Time","TZI",0x00000001,\
 0xb4,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -1862,6 +1916,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Pacific SA Standar
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Newfoundland Standard Time","Display",0x00000000,%GMT_MINUS_0330_A_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Newfoundland Standard Time","Dlt",0x00000000,%GMT_MINUS_0330_A_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Newfoundland Standard Time","Std",0x00000000,%GMT_MINUS_0330_A_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Newfoundland Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1180"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Newfoundland Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1181"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Newfoundland Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1182"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Newfoundland Standard Time","Index",0x00010001,60
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Newfoundland Standard Time","TZI",0x00000001,\
 0xd2,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -1871,6 +1928,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Newfoundland Stand
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\E. South America Standard Time","Display",0x00000000,%GMT_MINUS_03_B_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\E. South America Standard Time","Dlt",0x00000000,%GMT_MINUS_03_B_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\E. South America Standard Time","Std",0x00000000,%GMT_MINUS_03_B_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\E. South America Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1190"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\E. South America Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1191"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\E. South America Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1192"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\E. South America Standard Time","Index",0x00010001,65
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\E. South America Standard Time","TZI",0x00000001,\
 0xb4,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -1880,6 +1940,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\E. South America S
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\SA Eastern Standard Time","Display",0x00000000,%GMT_MINUS_03_C_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\SA Eastern Standard Time","Dlt",0x00000000,%GMT_MINUS_03_C_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\SA Eastern Standard Time","Std",0x00000000,%GMT_MINUS_03_C_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\SA Eastern Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1200"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\SA Eastern Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1201"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\SA Eastern Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1202"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\SA Eastern Standard Time","Index",0x00010001,70
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\SA Eastern Standard Time","TZI",0x00000001,\
 0xb4,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -1889,6 +1952,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\SA Eastern Standar
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Greenland Standard Time","Display",0x00000000,%GMT_MINUS_03_D_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Greenland Standard Time","Dlt",0x00000000,%GMT_MINUS_03_D_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Greenland Standard Time","Std",0x00000000,%GMT_MINUS_03_D_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Greenland Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1210"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Greenland Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1211"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Greenland Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1212"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Greenland Standard Time","Index",0x00010001,73
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Greenland Standard Time","TZI",0x00000001,\
 0xb4,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -1898,6 +1964,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Greenland Standard
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Mid-Atlantic Standard Time","Display",0x00000000,%GMT_MINUS_02_A_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Mid-Atlantic Standard Time","Dlt",0x00000000,%GMT_MINUS_02_A_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Mid-Atlantic Standard Time","Std",0x00000000,%GMT_MINUS_02_A_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Mid-Atlantic Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1220"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Mid-Atlantic Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1221"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Mid-Atlantic Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1222"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Mid-Atlantic Standard Time","Index",0x00010001,75
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Mid-Atlantic Standard Time","TZI",0x00000001,\
 0x78,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -1907,6 +1976,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Mid-Atlantic Stand
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Azores Standard Time","Display",0x00000000,%GMT_MINUS_01_A_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Azores Standard Time","Dlt",0x00000000,%GMT_MINUS_01_A_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Azores Standard Time","Std",0x00000000,%GMT_MINUS_01_A_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Azores Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1230"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Azores Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1231"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Azores Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1232"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Azores Standard Time","Index",0x00010001,80
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Azores Standard Time","TZI",0x00000001,\
 0x3c,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -1916,6 +1988,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Azores Standard Ti
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Cape Verde Standard Time","Display",0x00000000,%GMT_MINUS_01_B_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Cape Verde Standard Time","Dlt",0x00000000,%GMT_MINUS_01_B_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Cape Verde Standard Time","Std",0x00000000,%GMT_MINUS_01_B_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Cape Verde Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1240"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Cape Verde Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1241"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Cape Verde Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1242"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Cape Verde Standard Time","Index",0x00010001,83
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Cape Verde Standard Time","TZI",0x00000001,\
 0x3c,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -1925,6 +2000,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Cape Verde Standar
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\GMT Standard Time","Display",0x00000000,%GMT_PLUS_00_A_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\GMT Standard Time","Dlt",0x00000000,%GMT_PLUS_00_A_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\GMT Standard Time","Std",0x00000000,%GMT_PLUS_00_A_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\GMT Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1250"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\GMT Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1251"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\GMT Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1252"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\GMT Standard Time","Index",0x00010001,85
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\GMT Standard Time","TZI",0x00000001,\
 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -1934,6 +2012,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\GMT Standard Time"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Greenwich Standard Time","Display",0x00000000,%GMT_PLUS_00_B_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Greenwich Standard Time","Dlt",0x00000000,%GMT_PLUS_00_B_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Greenwich Standard Time","Std",0x00000000,%GMT_PLUS_00_B_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Greenwich Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1260"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Greenwich Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1261"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Greenwich Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1262"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Greenwich Standard Time","Index",0x00010001,90
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Greenwich Standard Time","TZI",0x00000001,\
 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -1943,6 +2024,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Greenwich Standard
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Europe Standard Time","Display",0x00000000,%GMT_PLUS_01_A_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Europe Standard Time","Dlt",0x00000000,%GMT_PLUS_01_A_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Europe Standard Time","Std",0x00000000,%GMT_PLUS_01_A_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Europe Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1270"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Europe Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1271"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Europe Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1272"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Europe Standard Time","Index",0x00010001,95
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Europe Standard Time","TZI",0x00000001,\
 0xc4,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -1952,6 +2036,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Europe Sta
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central European Standard Time","Display",0x00000000,%GMT_PLUS_01_B_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central European Standard Time","Dlt",0x00000000,%GMT_PLUS_01_B_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central European Standard Time","Std",0x00000000,%GMT_PLUS_01_B_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central European Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1280"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central European Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1281"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central European Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1282"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central European Standard Time","Index",0x00010001,100
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central European Standard Time","TZI",0x00000001,\
 0xc4,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -1961,6 +2048,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central European S
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Romance Standard Time","Display",0x00000000,%GMT_PLUS_01_C_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Romance Standard Time","Dlt",0x00000000,%GMT_PLUS_01_C_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Romance Standard Time","Std",0x00000000,%GMT_PLUS_01_C_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Romance Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1290"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Romance Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1291"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Romance Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1292"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Romance Standard Time","Index",0x00010001,105
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Romance Standard Time","TZI",0x00000001,\
 0xc4,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -1970,6 +2060,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Romance Standard T
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\W. Europe Standard Time","Display",0x00000000,%GMT_PLUS_01_D_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\W. Europe Standard Time","Dlt",0x00000000,%GMT_PLUS_01_D_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\W. Europe Standard Time","Std",0x00000000,%GMT_PLUS_01_D_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\W. Europe Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1300"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\W. Europe Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1301"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\W. Europe Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1302"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\W. Europe Standard Time","Index",0x00010001,110
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\W. Europe Standard Time","TZI",0x00000001,\
 0xc4,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -1979,6 +2072,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\W. Europe Standard
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\E. Europe Standard Time","Display",0x00000000,%GMT_PLUS_02_A_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\E. Europe Standard Time","Dlt",0x00000000,%GMT_PLUS_02_A_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\E. Europe Standard Time","Std",0x00000000,%GMT_PLUS_02_A_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\E. Europe Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1310"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\E. Europe Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1311"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\E. Europe Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1312"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\E. Europe Standard Time","Index",0x00010001,115
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\E. Europe Standard Time","TZI",0x00000001,\
 0x88,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -1988,6 +2084,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\E. Europe Standard
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Egypt Standard Time","Display",0x00000000,%GMT_PLUS_02_B_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Egypt Standard Time","Dlt",0x00000000,%GMT_PLUS_02_B_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Egypt Standard Time","Std",0x00000000,%GMT_PLUS_02_B_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Egypt Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1320"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Egypt Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1321"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Egypt Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1322"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Egypt Standard Time","Index",0x00010001,120
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Egypt Standard Time","TZI",0x00000001,\
 0x88,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -1997,6 +2096,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Egypt Standard Tim
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\FLE Standard Time","Display",0x00000000,%GMT_PLUS_02_C_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\FLE Standard Time","Dlt",0x00000000,%GMT_PLUS_02_C_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\FLE Standard Time","Std",0x00000000,%GMT_PLUS_02_C_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\FLE Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1330"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\FLE Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1331"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\FLE Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1332"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\FLE Standard Time","Index",0x00010001,125
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\FLE Standard Time","TZI",0x00000001,\
 0x88,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2006,6 +2108,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\FLE Standard Time"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\GTB Standard Time","Display",0x00000000,%GMT_PLUS_02_D_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\GTB Standard Time","Dlt",0x00000000,%GMT_PLUS_02_D_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\GTB Standard Time","Std",0x00000000,%GMT_PLUS_02_D_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\GTB Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1340"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\GTB Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1341"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\GTB Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1342"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\GTB Standard Time","Index",0x00010001,130
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\GTB Standard Time","TZI",0x00000001,\
 0x88,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2015,6 +2120,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\GTB Standard Time"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Israel Standard Time","Display",0x00000000,%GMT_PLUS_02_E_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Israel Standard Time","Dlt",0x00000000,%GMT_PLUS_02_E_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Israel Standard Time","Std",0x00000000,%GMT_PLUS_02_E_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Israel Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1350"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Israel Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1351"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Israel Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1352"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Israel Standard Time","Index",0x00010001,135
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Israel Standard Time","TZI",0x00000001,\
 0x88,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2024,6 +2132,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Israel Standard Ti
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\South Africa Standard Time","Display",0x00000000,%GMT_PLUS_02_F_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\South Africa Standard Time","Dlt",0x00000000,%GMT_PLUS_02_F_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\South Africa Standard Time","Std",0x00000000,%GMT_PLUS_02_F_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\South Africa Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1360"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\South Africa Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1361"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\South Africa Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1362"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\South Africa Standard Time","Index",0x00010001,140
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\South Africa Standard Time","TZI",0x00000001,\
 0x88,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2033,6 +2144,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\South Africa Stand
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Kaliningrad Standard Time","Display",0x00000000,%GMT_PLUS_02_G_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Kaliningrad Standard Time","Dlt",0x00000000,%GMT_PLUS_02_G_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Kaliningrad Standard Time","Std",0x00000000,%GMT_PLUS_02_G_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Kaliningrad Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1370"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Kaliningrad Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1371"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Kaliningrad Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1372"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Kaliningrad Standard Time","Index",0x00010001,143
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Kaliningrad Standard Time","TZI",0x00000001,\
 0x88,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2042,6 +2156,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Kaliningrad Standa
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Belarus Standard Time","Display",0x00000000,%GMT_PLUS_03_A_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Belarus Standard Time","Dlt",0x00000000,%GMT_PLUS_03_A_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Belarus Standard Time","Std",0x00000000,%GMT_PLUS_03_A_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Belarus Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1380"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Belarus Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1381"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Belarus Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1382"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Belarus Standard Time","Index",0x00010001,142
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Belarus Standard Time","TZI",0x00000001,\
 0x4c,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2051,6 +2168,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Belarus Standard T
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Russian Standard Time","Display",0x00000000,%GMT_PLUS_03_B_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Russian Standard Time","Dlt",0x00000000,%GMT_PLUS_03_B_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Russian Standard Time","Std",0x00000000,%GMT_PLUS_03_B_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Russian Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1390"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Russian Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1391"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Russian Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1392"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Russian Standard Time","Index",0x00010001,145
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Russian Standard Time","TZI",0x00000001,\
 0x4c,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2060,6 +2180,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Russian Standard T
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Arab Standard Time","Display",0x00000000,%GMT_PLUS_03_C_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Arab Standard Time","Dlt",0x00000000,%GMT_PLUS_03_C_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Arab Standard Time","Std",0x00000000,%GMT_PLUS_03_C_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Arab Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1400"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Arab Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1401"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Arab Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1402"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Arab Standard Time","Index",0x00010001,150
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Arab Standard Time","TZI",0x00000001,\
 0x4c,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2069,6 +2192,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Arab Standard Time
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\E. Africa Standard Time","Display",0x00000000,%GMT_PLUS_03_D_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\E. Africa Standard Time","Dlt",0x00000000,%GMT_PLUS_03_D_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\E. Africa Standard Time","Std",0x00000000,%GMT_PLUS_03_D_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\E. Africa Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1410"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\E. Africa Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1411"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\E. Africa Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1412"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\E. Africa Standard Time","Index",0x00010001,155
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\E. Africa Standard Time","TZI",0x00000001,\
 0x4c,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2078,6 +2204,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\E. Africa Standard
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Arabic Standard Time","Display",0x00000000,%GMT_PLUS_03_E_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Arabic Standard Time","Dlt",0x00000000,%GMT_PLUS_03_E_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Arabic Standard Time","Std",0x00000000,%GMT_PLUS_03_E_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Arabic Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1420"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Arabic Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1421"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Arabic Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1422"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Arabic Standard Time","Index",0x00010001,158
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Arabic Standard Time","TZI",0x00000001,\
 0x4c,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2087,6 +2216,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Arabic Standard Ti
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Turkey Standard Time","Display",0x00000000,%GMT_PLUS_03_F_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Turkey Standard Time","Dlt",0x00000000,%GMT_PLUS_03_F_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Turkey Standard Time","Std",0x00000000,%GMT_PLUS_03_F_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Turkey Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1430"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Turkey Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1431"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Turkey Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1432"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Turkey Standard Time","Index",0x00010001,157
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Turkey Standard Time","TZI",0x00000001,\
 0x4c,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2096,6 +2228,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Turkey Standard Ti
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Iran Standard Time","Display",0x00000000,%GMT_PLUS_0330_A_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Iran Standard Time","Dlt",0x00000000,%GMT_PLUS_0330_A_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Iran Standard Time","Std",0x00000000,%GMT_PLUS_0330_A_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Iran Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1440"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Iran Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1441"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Iran Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1442"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Iran Standard Time","Index",0x00010001,160
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Iran Standard Time","TZI",0x00000001,\
 0x2e,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2105,6 +2240,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Iran Standard Time
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Arabian Standard Time","Display",0x00000000,%GMT_PLUS_04_A_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Arabian Standard Time","Dlt",0x00000000,%GMT_PLUS_04_A_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Arabian Standard Time","Std",0x00000000,%GMT_PLUS_04_A_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Arabian Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1450"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Arabian Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1451"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Arabian Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1452"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Arabian Standard Time","Index",0x00010001,165
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Arabian Standard Time","TZI",0x00000001,\
 0x10,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2114,6 +2252,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Arabian Standard T
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Caucasus Standard Time","Display",0x00000000,%GMT_PLUS_04_B_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Caucasus Standard Time","Dlt",0x00000000,%GMT_PLUS_04_B_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Caucasus Standard Time","Std",0x00000000,%GMT_PLUS_04_B_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Caucasus Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1460"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Caucasus Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1461"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Caucasus Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1462"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Caucasus Standard Time","Index",0x00010001,170
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Caucasus Standard Time","TZI",0x00000001,\
 0x10,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2123,6 +2264,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Caucasus Standard 
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Russia Time Zone 3","Display",0x00000000,%GMT_PLUS_04_C_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Russia Time Zone 3","Dlt",0x00000000,%GMT_PLUS_04_C_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Russia Time Zone 3","Std",0x00000000,%GMT_PLUS_04_C_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Russia Time Zone 3","MUI_Display",0x00000000,"@tzres.dll,-1470"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Russia Time Zone 3","MUI_Dlt",0x00000000,"@tzres.dll,-1471"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Russia Time Zone 3","MUI_Std",0x00000000,"@tzres.dll,-1472"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Russia Time Zone 3","Index",0x00010001,172
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Russia Time Zone 3","TZI",0x00000001,\
 0x10,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2132,6 +2276,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Russia Time Zone 3
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Afghanistan Standard Time","Display",0x00000000,%GMT_PLUS_0430_A_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Afghanistan Standard Time","Dlt",0x00000000,%GMT_PLUS_0430_A_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Afghanistan Standard Time","Std",0x00000000,%GMT_PLUS_0430_A_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Afghanistan Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1480"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Afghanistan Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1481"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Afghanistan Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1482"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Afghanistan Standard Time","Index",0x00010001,175
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Afghanistan Standard Time","TZI",0x00000001,\
 0xf2,0xfe,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2141,6 +2288,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Afghanistan Standa
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Ekaterinburg Standard Time","Display",0x00000000,%GMT_PLUS_05_A_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Ekaterinburg Standard Time","Dlt",0x00000000,%GMT_PLUS_05_A_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Ekaterinburg Standard Time","Std",0x00000000,%GMT_PLUS_05_A_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Ekaterinburg Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1490"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Ekaterinburg Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1491"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Ekaterinburg Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1492"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Ekaterinburg Standard Time","Index",0x00010001,180
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Ekaterinburg Standard Time","TZI",0x00000001,\
 0xd4,0xfe,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2150,6 +2300,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Ekaterinburg Stand
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\West Asia Standard Time","Display",0x00000000,%GMT_PLUS_05_B_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\West Asia Standard Time","Dlt",0x00000000,%GMT_PLUS_05_B_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\West Asia Standard Time","Std",0x00000000,%GMT_PLUS_05_B_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\West Asia Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1500"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\West Asia Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1501"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\West Asia Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1502"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\West Asia Standard Time","Index",0x00010001,185
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\West Asia Standard Time","TZI",0x00000001,\
 0xd4,0xfe,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2159,6 +2312,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\West Asia Standard
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\India Standard Time","Display",0x00000000,%GMT_PLUS_0530_A_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\India Standard Time","Dlt",0x00000000,%GMT_PLUS_0530_A_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\India Standard Time","Std",0x00000000,%GMT_PLUS_0530_A_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\India Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1510"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\India Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1511"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\India Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1512"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\India Standard Time","Index",0x00010001,190
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\India Standard Time","TZI",0x00000001,\
 0xb6,0xfe,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2168,6 +2324,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\India Standard Tim
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Nepal Standard Time","Display",0x00000000,%GMT_PLUS_0545_A_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Nepal Standard Time","Dlt",0x00000000,%GMT_PLUS_0545_A_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Nepal Standard Time","Std",0x00000000,%GMT_PLUS_0545_A_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Nepal Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1520"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Nepal Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1521"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Nepal Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1522"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Nepal Standard Time","Index",0x00010001,193
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Nepal Standard Time","TZI",0x00000001,\
 0xa7,0xfe,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2177,6 +2336,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Nepal Standard Tim
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Sri Lanka Standard Time","Display",0x00000000,%GMT_PLUS_0530_B_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Sri Lanka Standard Time","Dlt",0x00000000,%GMT_PLUS_0530_B_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Sri Lanka Standard Time","Std",0x00000000,%GMT_PLUS_0530_B_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Sri Lanka Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1530"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Sri Lanka Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1531"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Sri Lanka Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1532"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Sri Lanka Standard Time","Index",0x00010001,194
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Sri Lanka Standard Time","TZI",0x00000001,\
 0xb6,0xfe,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2186,6 +2348,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Sri Lanka Standard
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Asia Standard Time","Display",0x00000000,%GMT_PLUS_06_A_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Asia Standard Time","Dlt",0x00000000,%GMT_PLUS_06_A_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Asia Standard Time","Std",0x00000000,%GMT_PLUS_06_A_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Asia Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1540"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Asia Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1541"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Asia Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1542"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Asia Standard Time","Index",0x00010001,195
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Asia Standard Time","TZI",0x00000001,\
 0x98,0xfe,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2195,6 +2360,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Asia Stand
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Omsk Standard Time","Display",0x00000000,%GMT_PLUS_06_B_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Omsk Standard Time","Dlt",0x00000000,%GMT_PLUS_06_B_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Omsk Standard Time","Std",0x00000000,%GMT_PLUS_06_B_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Omsk Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1550"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Omsk Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1551"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Omsk Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1552"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Omsk Standard Time","Index",0x00010001,201
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Omsk Standard Time","TZI",0x00000001,\
 0x98,0xfe,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2204,6 +2372,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Omsk Standard Time
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Myanmar Standard Time","Display",0x00000000,%GMT_PLUS_0630_A_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Myanmar Standard Time","Dlt",0x00000000,%GMT_PLUS_0630_A_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Myanmar Standard Time","Std",0x00000000,%GMT_PLUS_0630_A_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Myanmar Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1560"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Myanmar Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1561"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Myanmar Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1562"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Myanmar Standard Time","Index",0x00010001,203
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Myanmar Standard Time","TZI",0x00000001,\
 0x7a,0xfe,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2213,6 +2384,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Myanmar Standard T
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\N. Central Asia Standard Time","Display",0x00000000,%GMT_PLUS_07_A_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\N. Central Asia Standard Time","Dlt",0x00000000,%GMT_PLUS_07_A_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\N. Central Asia Standard Time","Std",0x00000000,%GMT_PLUS_07_A_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\N. Central Asia Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1570"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\N. Central Asia Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1571"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\N. Central Asia Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1572"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\N. Central Asia Standard Time","Index",0x00010001,204
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\N. Central Asia Standard Time","TZI",0x00000001,\
 0x5c,0xfe,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2222,6 +2396,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\N. Central Asia St
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\SE Asia Standard Time","Display",0x00000000,%GMT_PLUS_07_B_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\SE Asia Standard Time","Dlt",0x00000000,%GMT_PLUS_07_B_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\SE Asia Standard Time","Std",0x00000000,%GMT_PLUS_07_B_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\SE Asia Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1580"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\SE Asia Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1581"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\SE Asia Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1582"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\SE Asia Standard Time","Index",0x00010001,205
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\SE Asia Standard Time","TZI",0x00000001,\
 0x5c,0xfe,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2231,6 +2408,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\SE Asia Standard T
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\North Asia Standard Time","Display",0x00000000,%GMT_PLUS_07_C_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\North Asia Standard Time","Dlt",0x00000000,%GMT_PLUS_07_C_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\North Asia Standard Time","Std",0x00000000,%GMT_PLUS_07_C_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\North Asia Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1590"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\North Asia Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1591"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\North Asia Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1592"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\North Asia Standard Time","Index",0x00010001,207
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\North Asia Standard Time","TZI",0x00000001,\
 0x5c,0xfe,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2240,6 +2420,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\North Asia Standar
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tomsk Standard Time","Display",0x00000000,%GMT_PLUS_07_D_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tomsk Standard Time","Dlt",0x00000000,%GMT_PLUS_07_D_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tomsk Standard Time","Std",0x00000000,%GMT_PLUS_07_D_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tomsk Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1600"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tomsk Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1601"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tomsk Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1602"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tomsk Standard Time","Index",0x00010001,208
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tomsk Standard Time","TZI",0x00000001,\
 0x5c,0xfe,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2249,6 +2432,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tomsk Standard Tim
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\China Standard Time","Display",0x00000000,%GMT_PLUS_08_A_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\China Standard Time","Dlt",0x00000000,%GMT_PLUS_08_A_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\China Standard Time","Std",0x00000000,%GMT_PLUS_08_A_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\China Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1610"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\China Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1611"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\China Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1612"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\China Standard Time","Index",0x00010001,210
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\China Standard Time","TZI",0x00000001,\
 0x20,0xfe,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2258,6 +2444,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\China Standard Tim
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Singapore Standard Time","Display",0x00000000,%GMT_PLUS_08_B_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Singapore Standard Time","Dlt",0x00000000,%GMT_PLUS_08_B_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Singapore Standard Time","Std",0x00000000,%GMT_PLUS_08_B_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Singapore Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1620"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Singapore Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1621"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Singapore Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1622"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Singapore Standard Time","Index",0x00010001,215
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Singapore Standard Time","TZI",0x00000001,\
 0x20,0xfe,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2267,6 +2456,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Singapore Standard
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Taipei Standard Time","Display",0x00000000,%GMT_PLUS_08_C_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Taipei Standard Time","Dlt",0x00000000,%GMT_PLUS_08_C_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Taipei Standard Time","Std",0x00000000,%GMT_PLUS_08_C_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Taipei Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1630"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Taipei Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1631"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Taipei Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1632"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Taipei Standard Time","Index",0x00010001,220
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Taipei Standard Time","TZI",0x00000001,\
 0x20,0xfe,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2276,6 +2468,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Taipei Standard Ti
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\W. Australia Standard Time","Display",0x00000000,%GMT_PLUS_08_D_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\W. Australia Standard Time","Dlt",0x00000000,%GMT_PLUS_08_D_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\W. Australia Standard Time","Std",0x00000000,%GMT_PLUS_08_D_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\W. Australia Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1640"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\W. Australia Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1641"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\W. Australia Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1642"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\W. Australia Standard Time","Index",0x00010001,225
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\W. Australia Standard Time","TZI",0x00000001,\
 0x20,0xfe,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2285,6 +2480,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\W. Australia Stand
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Ulaanbaatar Standard Time","Display",0x00000000,%GMT_PLUS_08_E_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Ulaanbaatar Standard Time","Dlt",0x00000000,%GMT_PLUS_08_E_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Ulaanbaatar Standard Time","Std",0x00000000,%GMT_PLUS_08_E_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Ulaanbaatar Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1650"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Ulaanbaatar Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1651"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Ulaanbaatar Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1652"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Ulaanbaatar Standard Time","Index",0x00010001,226
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Ulaanbaatar Standard Time","TZI",0x00000001,\
 0x20,0xfe,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2294,6 +2492,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Ulaanbaatar Standa
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\North Asia East Standard Time","Display",0x00000000,%GMT_PLUS_08_F_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\North Asia East Standard Time","Dlt",0x00000000,%GMT_PLUS_08_F_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\North Asia East Standard Time","Std",0x00000000,%GMT_PLUS_08_F_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\North Asia East Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1660"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\North Asia East Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1661"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\North Asia East Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1662"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\North Asia East Standard Time","Index",0x00010001,227
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\North Asia East Standard Time","TZI",0x00000001,\
 0x20,0xfe,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2303,6 +2504,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\North Asia East St
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Korea Standard Time","Display",0x00000000,%GMT_PLUS_09_A_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Korea Standard Time","Dlt",0x00000000,%GMT_PLUS_09_A_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Korea Standard Time","Std",0x00000000,%GMT_PLUS_09_A_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Korea Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1670"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Korea Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1671"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Korea Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1672"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Korea Standard Time","Index",0x00010001,230
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Korea Standard Time","TZI",0x00000001,\
 0xe4,0xfd,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2312,6 +2516,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Korea Standard Tim
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tokyo Standard Time","Display",0x00000000,%GMT_PLUS_09_B_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tokyo Standard Time","Dlt",0x00000000,%GMT_PLUS_09_B_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tokyo Standard Time","Std",0x00000000,%GMT_PLUS_09_B_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tokyo Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1680"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tokyo Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1681"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tokyo Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1682"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tokyo Standard Time","Index",0x00010001,235
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tokyo Standard Time","TZI",0x00000001,\
 0xe4,0xfd,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2321,6 +2528,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tokyo Standard Tim
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Yakutsk Standard Time","Display",0x00000000,%GMT_PLUS_09_C_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Yakutsk Standard Time","Dlt",0x00000000,%GMT_PLUS_09_C_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Yakutsk Standard Time","Std",0x00000000,%GMT_PLUS_09_C_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Yakutsk Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1690"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Yakutsk Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1691"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Yakutsk Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1692"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Yakutsk Standard Time","Index",0x00010001,240
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Yakutsk Standard Time","TZI",0x00000001,\
 0xe4,0xfd,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2330,6 +2540,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Yakutsk Standard T
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\AUS Central Standard Time","Display",0x00000002,%GMT_PLUS_0930_A_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\AUS Central Standard Time","Dlt",0x00000002,%GMT_PLUS_0903_A_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\AUS Central Standard Time","Std",0x00000002,%GMT_PLUS_0930_A_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\AUS Central Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1700"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\AUS Central Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1701"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\AUS Central Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1702"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\AUS Central Standard Time","Index",0x00010001,245
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\AUS Central Standard Time","TZI",0x00000001,\
 0xc6,0xfd,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2339,6 +2552,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\AUS Central Standa
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Cen. Australia Standard Time","Display",0x00000000,%GMT_PLUS_0930_B_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Cen. Australia Standard Time","Dlt",0x00000000,%GMT_PLUS_0930_B_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Cen. Australia Standard Time","Std",0x00000000,%GMT_PLUS_0930_B_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Cen. Australia Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1710"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Cen. Australia Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1711"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Cen. Australia Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1712"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Cen. Australia Standard Time","Index",0x00010001,250
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Cen. Australia Standard Time","TZI",0x00000001,\
 0xc6,0xfd,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2348,6 +2564,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Cen. Australia Sta
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\AUS Eastern Standard Time","Display",0x00000000,%GMT_PLUS_10_A_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\AUS Eastern Standard Time","Dlt",0x00000000,%GMT_PLUS_10_A_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\AUS Eastern Standard Time","Std",0x00000000,%GMT_PLUS_10_A_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\AUS Eastern Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1720"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\AUS Eastern Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1721"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\AUS Eastern Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1722"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\AUS Eastern Standard Time","Index",0x00010001,255
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\AUS Eastern Standard Time","TZI",0x00000001,\
 0xa8,0xfd,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2357,6 +2576,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\AUS Eastern Standa
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\E. Australia Standard Time","Display",0x00000000,%GMT_PLUS_10_B_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\E. Australia Standard Time","Dlt",0x00000000,%GMT_PLUS_10_B_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\E. Australia Standard Time","Std",0x00000000,%GMT_PLUS_10_B_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\E. Australia Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1730"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\E. Australia Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1731"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\E. Australia Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1732"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\E. Australia Standard Time","Index",0x00010001,260
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\E. Australia Standard Time","TZI",0x00000001,\
 0xa8,0xfd,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2366,6 +2588,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\E. Australia Stand
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tasmania Standard Time","Display",0x00000000,%GMT_PLUS_10_C_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tasmania Standard Time","Dlt",0x00000000,%GMT_PLUS_10_C_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tasmania Standard Time","Std",0x00000000,%GMT_PLUS_10_C_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tasmania Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1740"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tasmania Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1741"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tasmania Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1742"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tasmania Standard Time","Index",0x00010001,265
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tasmania Standard Time","TZI",0x00000001,\
 0xa8,0xfd,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2375,6 +2600,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tasmania Standard 
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Vladivostok Standard Time","Display",0x00000000,%GMT_PLUS_10_D_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Vladivostok Standard Time","Dlt",0x00000000,%GMT_PLUS_10_D_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Vladivostok Standard Time","Std",0x00000000,%GMT_PLUS_10_D_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Vladivostok Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1750"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Vladivostok Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1751"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Vladivostok Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1752"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Vladivostok Standard Time","Index",0x00010001,270
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Vladivostok Standard Time","TZI",0x00000001,\
 0xa8,0xfd,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2384,6 +2612,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Vladivostok Standa
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\West Pacific Standard Time","Display",0x00000000,%GMT_PLUS_10_E_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\West Pacific Standard Time","Dlt",0x00000000,%GMT_PLUS_10_E_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\West Pacific Standard Time","Std",0x00000000,%GMT_PLUS_10_E_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\West Pacific Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1760"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\West Pacific Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1761"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\West Pacific Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1762"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\West Pacific Standard Time","Index",0x00010001,275
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\West Pacific Standard Time","TZI",0x00000001,\
 0xa8,0xfd,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2393,6 +2624,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\West Pacific Stand
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Pacific Standard Time","Display",0x00000000,%GMT_PLUS_11_A_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Pacific Standard Time","Dlt",0x00000000,%GMT_PLUS_11_A_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Pacific Standard Time","Std",0x00000000,%GMT_PLUS_11_A_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Pacific Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1770"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Pacific Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1771"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Pacific Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1772"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Pacific Standard Time","Index",0x00010001,280
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Pacific Standard Time","TZI",0x00000001,\
 0x6c,0xfd,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2402,6 +2636,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Pacific St
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Russia Time Zone 10","Display",0x00000000,%GMT_PLUS_11_B_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Russia Time Zone 10","Dlt",0x00000000,%GMT_PLUS_11_B_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Russia Time Zone 10","Std",0x00000000,%GMT_PLUS_11_B_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Russia Time Zone 10","MUI_Display",0x00000000,"@tzres.dll,-1780"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Russia Time Zone 10","MUI_Dlt",0x00000000,"@tzres.dll,-1781"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Russia Time Zone 10","MUI_Std",0x00000000,"@tzres.dll,-1782"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Russia Time Zone 10","Index",0x00010001,282
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Russia Time Zone 10","TZI",0x00000001,\
 0x6c,0xfd,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2411,6 +2648,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Russia Time Zone 1
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Magadan Standard Time","Display",0x00000000,%GMT_PLUS_11_C_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Magadan Standard Time","Dlt",0x00000000,%GMT_PLUS_11_C_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Magadan Standard Time","Std",0x00000000,%GMT_PLUS_11_C_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Magadan Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1790"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Magadan Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1791"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Magadan Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1792"
 ;; Was previously 278
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Magadan Standard Time","Index",0x00010001,283
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Magadan Standard Time","TZI",0x00000001,\
@@ -2421,6 +2661,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Magadan Standard T
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Fiji Standard Time","Display",0x00000000,%GMT_PLUS_12_A_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Fiji Standard Time","Dlt",0x00000000,%GMT_PLUS_12_A_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Fiji Standard Time","Std",0x00000000,%GMT_PLUS_12_A_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Fiji Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1800"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Fiji Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1801"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Fiji Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1802"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Fiji Standard Time","Index",0x00010001,285
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Fiji Standard Time","TZI",0x00000001,\
 0x30,0xfd,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2430,6 +2673,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Fiji Standard Time
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Russia Time Zone 11","Display",0x00000000,%GMT_PLUS_12_B_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Russia Time Zone 11","Dlt",0x00000000,%GMT_PLUS_12_B_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Russia Time Zone 11","Std",0x00000000,%GMT_PLUS_12_B_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Russia Time Zone 11","MUI_Display",0x00000000,"@tzres.dll,-1810"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Russia Time Zone 11","MUI_Dlt",0x00000000,"@tzres.dll,-1811"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Russia Time Zone 11","MUI_Std",0x00000000,"@tzres.dll,-1812"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Russia Time Zone 11","Index",0x00010001,288
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Russia Time Zone 11","TZI",0x00000001,\
 0x30,0xfd,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2439,6 +2685,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Russia Time Zone 1
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\New Zealand Standard Time","Display",0x00000000,%GMT_PLUS_12_C_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\New Zealand Standard Time","Dlt",0x00000000,%GMT_PLUS_12_C_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\New Zealand Standard Time","Std",0x00000000,%GMT_PLUS_12_C_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\New Zealand Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1820"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\New Zealand Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1821"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\New Zealand Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1822"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\New Zealand Standard Time","Index",0x00010001,290
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\New Zealand Standard Time","TZI",0x00000001,\
 0x30,0xfd,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
@@ -2448,11 +2697,781 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\New Zealand Standa
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tonga Standard Time","Display",0x00000000,%GMT_PLUS_13_A_DESC%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tonga Standard Time","Dlt",0x00000000,%GMT_PLUS_13_A_DAYLIGHT%
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tonga Standard Time","Std",0x00000000,%GMT_PLUS_13_A_STANDARD%
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tonga Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1830"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tonga Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1831"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tonga Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1832"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tonga Standard Time","Index",0x00010001,300
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tonga Standard Time","TZI",0x00000001,\
 0xf4,0xfc,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC-11","Display",0x00000000,"(UTC-11:00) Coordinated Universal Time-11"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC-11","Dlt",0x00000000,"Coordinated Universal Time-11"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC-11","Std",0x00000000,"Coordinated Universal Time-11"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC-11","MUI_Display",0x00000000,"@tzres.dll,-1840"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC-11","MUI_Dlt",0x00000000,"@tzres.dll,-1841"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC-11","MUI_Std",0x00000000,"@tzres.dll,-1842"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC-11","Index",0x00010001,301
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC-11","TZI",0x00000001,\
+0x94,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Aleutian Standard Time","Display",0x00000000,"(UTC-10:00) Aleutian Islands"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Aleutian Standard Time","Dlt",0x00000000,"Aleutian Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Aleutian Standard Time","Std",0x00000000,"Aleutian Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Aleutian Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1850"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Aleutian Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1851"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Aleutian Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1852"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Aleutian Standard Time","Index",0x00010001,302
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Aleutian Standard Time","TZI",0x00000001,\
+0x58,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
+0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,\
+0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Marquesas Standard Time","Display",0x00000000,"(UTC-09:30) Marquesas Islands"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Marquesas Standard Time","Dlt",0x00000000,"Marquesas Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Marquesas Standard Time","Std",0x00000000,"Marquesas Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Marquesas Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1860"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Marquesas Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1861"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Marquesas Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1862"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Marquesas Standard Time","Index",0x00010001,303
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Marquesas Standard Time","TZI",0x00000001,\
+0x3a,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC-09","Display",0x00000000,"(UTC-09:00) Coordinated Universal Time-09"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC-09","Dlt",0x00000000,"Coordinated Universal Time-09"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC-09","Std",0x00000000,"Coordinated Universal Time-09"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC-09","MUI_Display",0x00000000,"@tzres.dll,-1870"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC-09","MUI_Dlt",0x00000000,"@tzres.dll,-1871"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC-09","MUI_Std",0x00000000,"@tzres.dll,-1872"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC-09","Index",0x00010001,304
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC-09","TZI",0x00000001,\
+0x1c,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Pacific Standard Time (Mexico)","Display",0x00000000,"(UTC-08:00) Baja California"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Pacific Standard Time (Mexico)","Dlt",0x00000000,"Pacific Daylight Time (Mexico)"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Pacific Standard Time (Mexico)","Std",0x00000000,"Pacific Standard Time (Mexico)"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Pacific Standard Time (Mexico)","MUI_Display",0x00000000,"@tzres.dll,-1880"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Pacific Standard Time (Mexico)","MUI_Dlt",0x00000000,"@tzres.dll,-1881"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Pacific Standard Time (Mexico)","MUI_Std",0x00000000,"@tzres.dll,-1882"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Pacific Standard Time (Mexico)","Index",0x00010001,305
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Pacific Standard Time (Mexico)","TZI",0x00000001,\
+0xe0,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
+0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,\
+0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC-08","Display",0x00000000,"(UTC-08:00) Coordinated Universal Time-08"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC-08","Dlt",0x00000000,"Coordinated Universal Time-08"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC-08","Std",0x00000000,"Coordinated Universal Time-08"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC-08","MUI_Display",0x00000000,"@tzres.dll,-1890"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC-08","MUI_Dlt",0x00000000,"@tzres.dll,-1891"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC-08","MUI_Std",0x00000000,"@tzres.dll,-1892"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC-08","Index",0x00010001,306
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC-08","TZI",0x00000001,\
+0xe0,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time","Display",0x00000000,"(UTC-07:00) British Columbia"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time","Dlt",0x00000000,"British Columbia Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time","Std",0x00000000,"British Columbia Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1900"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1901"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1902"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time","Index",0x00010001,307
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\British Columbia Standard Time","TZI",0x00000001,\
+0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Yukon Standard Time","Display",0x00000000,"(UTC-07:00) Yukon"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Yukon Standard Time","Dlt",0x00000000,"Yukon Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Yukon Standard Time","Std",0x00000000,"Yukon Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Yukon Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1910"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Yukon Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1911"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Yukon Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1912"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Yukon Standard Time","Index",0x00010001,308
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Yukon Standard Time","TZI",0x00000001,\
+0xa4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time","Display",0x00000000,"(UTC-06:00) Alberta"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time","Dlt",0x00000000,"Alberta Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time","Std",0x00000000,"Alberta Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1920"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1921"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1922"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time","Index",0x00010001,309
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Alberta Standard Time","TZI",0x00000001,\
+0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Easter Island Standard Time","Display",0x00000000,"(UTC-06:00) Easter Island"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Easter Island Standard Time","Dlt",0x00000000,"Easter Island Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Easter Island Standard Time","Std",0x00000000,"Easter Island Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Easter Island Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1930"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Easter Island Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1931"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Easter Island Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1932"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Easter Island Standard Time","Index",0x00010001,310
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Easter Island Standard Time","TZI",0x00000001,\
+0x68,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
+0x00,0x00,0x04,0x00,0x06,0x00,0x01,0x00,0x16,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x09,0x00,0x06,0x00,0x01,0x00,\
+0x16,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time","Display",0x00000000,"(UTC-05:00) Manitoba"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time","Dlt",0x00000000,"Manitoba Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time","Std",0x00000000,"Manitoba Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1940"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1941"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1942"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time","Index",0x00010001,311
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Manitoba Standard Time","TZI",0x00000001,\
+0x2c,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Eastern Standard Time (Mexico)","Display",0x00000000,"(UTC-05:00) Chetumal"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Eastern Standard Time (Mexico)","Dlt",0x00000000,"Eastern Daylight Time (Mexico)"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Eastern Standard Time (Mexico)","Std",0x00000000,"Eastern Standard Time (Mexico)"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Eastern Standard Time (Mexico)","MUI_Display",0x00000000,"@tzres.dll,-1950"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Eastern Standard Time (Mexico)","MUI_Dlt",0x00000000,"@tzres.dll,-1951"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Eastern Standard Time (Mexico)","MUI_Std",0x00000000,"@tzres.dll,-1952"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Eastern Standard Time (Mexico)","Index",0x00010001,312
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Eastern Standard Time (Mexico)","TZI",0x00000001,\
+0x2c,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Haiti Standard Time","Display",0x00000000,"(UTC-05:00) Haiti"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Haiti Standard Time","Dlt",0x00000000,"Haiti Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Haiti Standard Time","Std",0x00000000,"Haiti Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Haiti Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1960"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Haiti Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1961"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Haiti Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1962"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Haiti Standard Time","Index",0x00010001,313
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Haiti Standard Time","TZI",0x00000001,\
+0x2c,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
+0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,\
+0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Cuba Standard Time","Display",0x00000000,"(UTC-05:00) Havana"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Cuba Standard Time","Dlt",0x00000000,"Cuba Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Cuba Standard Time","Std",0x00000000,"Cuba Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Cuba Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1970"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Cuba Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1971"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Cuba Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1972"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Cuba Standard Time","Index",0x00010001,314
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Cuba Standard Time","TZI",0x00000001,\
+0x2c,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
+0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x01,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Turks And Caicos Standard Time","Display",0x00000000,"(UTC-05:00) Turks and Caicos"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Turks And Caicos Standard Time","Dlt",0x00000000,"Turks And Caicos Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Turks And Caicos Standard Time","Std",0x00000000,"Turks And Caicos Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Turks And Caicos Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1980"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Turks And Caicos Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1981"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Turks And Caicos Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1982"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Turks And Caicos Standard Time","Index",0x00010001,315
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Turks And Caicos Standard Time","TZI",0x00000001,\
+0x2c,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
+0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,\
+0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time","Display",0x00000000,"(UTC-03:00) Asuncion"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time","Dlt",0x00000000,"Paraguay Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time","Std",0x00000000,"Paraguay Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time","MUI_Display",0x00000000,"@tzres.dll,-1990"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-1991"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time","MUI_Std",0x00000000,"@tzres.dll,-1992"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time","Index",0x00010001,316
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Paraguay Standard Time","TZI",0x00000001,\
+0xb4,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Venezuela Standard Time","Display",0x00000000,"(UTC-04:00) Caracas"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Venezuela Standard Time","Dlt",0x00000000,"Venezuela Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Venezuela Standard Time","Std",0x00000000,"Venezuela Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Venezuela Standard Time","MUI_Display",0x00000000,"@tzres.dll,-2000"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Venezuela Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-2001"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Venezuela Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2002"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Venezuela Standard Time","Index",0x00010001,317
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Venezuela Standard Time","TZI",0x00000001,\
+0xf0,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Brazilian Standard Time","Display",0x00000000,"(UTC-04:00) Cuiaba"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Brazilian Standard Time","Dlt",0x00000000,"Central Brazilian Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Brazilian Standard Time","Std",0x00000000,"Central Brazilian Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Brazilian Standard Time","MUI_Display",0x00000000,"@tzres.dll,-2010"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Brazilian Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-2011"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Brazilian Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2012"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Brazilian Standard Time","Index",0x00010001,318
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Central Brazilian Standard Time","TZI",0x00000001,\
+0xf0,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tocantins Standard Time","Display",0x00000000,"(UTC-03:00) Araguaina"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tocantins Standard Time","Dlt",0x00000000,"Tocantins Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tocantins Standard Time","Std",0x00000000,"Tocantins Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tocantins Standard Time","MUI_Display",0x00000000,"@tzres.dll,-2020"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tocantins Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-2021"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tocantins Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2022"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tocantins Standard Time","Index",0x00010001,319
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Tocantins Standard Time","TZI",0x00000001,\
+0xb4,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Argentina Standard Time","Display",0x00000000,"(UTC-03:00) City of Buenos Aires"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Argentina Standard Time","Dlt",0x00000000,"Argentina Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Argentina Standard Time","Std",0x00000000,"Argentina Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Argentina Standard Time","MUI_Display",0x00000000,"@tzres.dll,-2030"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Argentina Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-2031"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Argentina Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2032"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Argentina Standard Time","Index",0x00010001,320
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Argentina Standard Time","TZI",0x00000001,\
+0xb4,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Montevideo Standard Time","Display",0x00000000,"(UTC-03:00) Montevideo"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Montevideo Standard Time","Dlt",0x00000000,"Montevideo Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Montevideo Standard Time","Std",0x00000000,"Montevideo Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Montevideo Standard Time","MUI_Display",0x00000000,"@tzres.dll,-2040"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Montevideo Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-2041"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Montevideo Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2042"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Montevideo Standard Time","Index",0x00010001,321
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Montevideo Standard Time","TZI",0x00000001,\
+0xb4,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Magallanes Standard Time","Display",0x00000000,"(UTC-03:00) Punta Arenas"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Magallanes Standard Time","Dlt",0x00000000,"Magallanes Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Magallanes Standard Time","Std",0x00000000,"Magallanes Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Magallanes Standard Time","MUI_Display",0x00000000,"@tzres.dll,-2050"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Magallanes Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-2051"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Magallanes Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2052"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Magallanes Standard Time","Index",0x00010001,322
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Magallanes Standard Time","TZI",0x00000001,\
+0xb4,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Saint Pierre Standard Time","Display",0x00000000,"(UTC-03:00) Saint Pierre and Miquelon"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Saint Pierre Standard Time","Dlt",0x00000000,"Saint Pierre Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Saint Pierre Standard Time","Std",0x00000000,"Saint Pierre Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Saint Pierre Standard Time","MUI_Display",0x00000000,"@tzres.dll,-2060"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Saint Pierre Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-2061"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Saint Pierre Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2062"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Saint Pierre Standard Time","Index",0x00010001,323
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Saint Pierre Standard Time","TZI",0x00000001,\
+0xb4,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
+0x00,0x00,0x0b,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x02,0x00,\
+0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Bahia Standard Time","Display",0x00000000,"(UTC-03:00) Salvador"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Bahia Standard Time","Dlt",0x00000000,"Bahia Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Bahia Standard Time","Std",0x00000000,"Bahia Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Bahia Standard Time","MUI_Display",0x00000000,"@tzres.dll,-2070"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Bahia Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-2071"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Bahia Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2072"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Bahia Standard Time","Index",0x00010001,324
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Bahia Standard Time","TZI",0x00000001,\
+0xb4,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC-02","Display",0x00000000,"(UTC-02:00) Coordinated Universal Time-02"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC-02","Dlt",0x00000000,"Coordinated Universal Time-02"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC-02","Std",0x00000000,"Coordinated Universal Time-02"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC-02","MUI_Display",0x00000000,"@tzres.dll,-2080"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC-02","MUI_Dlt",0x00000000,"@tzres.dll,-2081"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC-02","MUI_Std",0x00000000,"@tzres.dll,-2082"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC-02","Index",0x00010001,325
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC-02","TZI",0x00000001,\
+0x78,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC","Display",0x00000000,"(UTC) Coordinated Universal Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC","Dlt",0x00000000,"Coordinated Universal Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC","Std",0x00000000,"Coordinated Universal Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC","MUI_Display",0x00000000,"@tzres.dll,-2090"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC","MUI_Dlt",0x00000000,"@tzres.dll,-2091"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC","MUI_Std",0x00000000,"@tzres.dll,-2092"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC","Index",0x00010001,326
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC","TZI",0x00000001,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Sao Tome Standard Time","Display",0x00000000,"(UTC+00:00) Sao Tome"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Sao Tome Standard Time","Dlt",0x00000000,"Sao Tome Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Sao Tome Standard Time","Std",0x00000000,"Sao Tome Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Sao Tome Standard Time","MUI_Display",0x00000000,"@tzres.dll,-2100"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Sao Tome Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-2101"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Sao Tome Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2102"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Sao Tome Standard Time","Index",0x00010001,327
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Sao Tome Standard Time","TZI",0x00000001,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time","Display",0x00000000,"(UTC+01:00) Casablanca"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time","Dlt",0x00000000,"Morocco Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time","Std",0x00000000,"Morocco Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time","MUI_Display",0x00000000,"@tzres.dll,-2110"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-2111"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2112"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time","Index",0x00010001,328
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Morocco Standard Time","TZI",0x00000001,\
+0xc4,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\W. Central Africa Standard Time","Display",0x00000000,"(UTC+01:00) West Central Africa"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\W. Central Africa Standard Time","Dlt",0x00000000,"W. Central Africa Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\W. Central Africa Standard Time","Std",0x00000000,"W. Central Africa Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\W. Central Africa Standard Time","MUI_Display",0x00000000,"@tzres.dll,-2120"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\W. Central Africa Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-2121"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\W. Central Africa Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2122"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\W. Central Africa Standard Time","Index",0x00010001,329
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\W. Central Africa Standard Time","TZI",0x00000001,\
+0xc4,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Jordan Standard Time","Display",0x00000000,"(UTC+03:00) Amman"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Jordan Standard Time","Dlt",0x00000000,"Jordan Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Jordan Standard Time","Std",0x00000000,"Jordan Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Jordan Standard Time","MUI_Display",0x00000000,"@tzres.dll,-2130"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Jordan Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-2131"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Jordan Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2132"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Jordan Standard Time","Index",0x00010001,330
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Jordan Standard Time","TZI",0x00000001,\
+0x4c,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Middle East Standard Time","Display",0x00000000,"(UTC+02:00) Beirut"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Middle East Standard Time","Dlt",0x00000000,"Middle East Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Middle East Standard Time","Std",0x00000000,"Middle East Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Middle East Standard Time","MUI_Display",0x00000000,"@tzres.dll,-2140"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Middle East Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-2141"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Middle East Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2142"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Middle East Standard Time","Index",0x00010001,331
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Middle East Standard Time","TZI",0x00000001,\
+0x88,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
+0x00,0x00,0x0a,0x00,0x00,0x00,0x05,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x05,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Syria Standard Time","Display",0x00000000,"(UTC+03:00) Damascus"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Syria Standard Time","Dlt",0x00000000,"Syria Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Syria Standard Time","Std",0x00000000,"Syria Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Syria Standard Time","MUI_Display",0x00000000,"@tzres.dll,-2150"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Syria Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-2151"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Syria Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2152"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Syria Standard Time","Index",0x00010001,332
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Syria Standard Time","TZI",0x00000001,\
+0x4c,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\West Bank Standard Time","Display",0x00000000,"(UTC+02:00) Gaza, Hebron"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\West Bank Standard Time","Dlt",0x00000000,"West Bank Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\West Bank Standard Time","Std",0x00000000,"West Bank Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\West Bank Standard Time","MUI_Display",0x00000000,"@tzres.dll,-2160"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\West Bank Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-2161"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\West Bank Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2162"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\West Bank Standard Time","Index",0x00010001,333
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\West Bank Standard Time","TZI",0x00000001,\
+0x88,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
+0x00,0x00,0x0a,0x00,0x06,0x00,0x04,0x00,0x02,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x06,0x00,0x05,0x00,\
+0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\South Sudan Standard Time","Display",0x00000000,"(UTC+02:00) Juba"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\South Sudan Standard Time","Dlt",0x00000000,"South Sudan Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\South Sudan Standard Time","Std",0x00000000,"South Sudan Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\South Sudan Standard Time","MUI_Display",0x00000000,"@tzres.dll,-2170"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\South Sudan Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-2171"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\South Sudan Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2172"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\South Sudan Standard Time","Index",0x00010001,334
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\South Sudan Standard Time","TZI",0x00000001,\
+0x88,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Sudan Standard Time","Display",0x00000000,"(UTC+02:00) Khartoum"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Sudan Standard Time","Dlt",0x00000000,"Sudan Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Sudan Standard Time","Std",0x00000000,"Sudan Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Sudan Standard Time","MUI_Display",0x00000000,"@tzres.dll,-2180"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Sudan Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-2181"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Sudan Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2182"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Sudan Standard Time","Index",0x00010001,335
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Sudan Standard Time","TZI",0x00000001,\
+0x88,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Libya Standard Time","Display",0x00000000,"(UTC+02:00) Tripoli"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Libya Standard Time","Dlt",0x00000000,"Libya Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Libya Standard Time","Std",0x00000000,"Libya Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Libya Standard Time","MUI_Display",0x00000000,"@tzres.dll,-2190"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Libya Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-2191"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Libya Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2192"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Libya Standard Time","Index",0x00010001,336
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Libya Standard Time","TZI",0x00000001,\
+0x88,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Namibia Standard Time","Display",0x00000000,"(UTC+02:00) Windhoek"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Namibia Standard Time","Dlt",0x00000000,"Namibia Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Namibia Standard Time","Std",0x00000000,"Namibia Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Namibia Standard Time","MUI_Display",0x00000000,"@tzres.dll,-2200"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Namibia Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-2201"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Namibia Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2202"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Namibia Standard Time","Index",0x00010001,337
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Namibia Standard Time","TZI",0x00000001,\
+0x88,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Astrakhan Standard Time","Display",0x00000000,"(UTC+04:00) Astrakhan, Ulyanovsk"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Astrakhan Standard Time","Dlt",0x00000000,"Astrakhan Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Astrakhan Standard Time","Std",0x00000000,"Astrakhan Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Astrakhan Standard Time","MUI_Display",0x00000000,"@tzres.dll,-2210"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Astrakhan Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-2211"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Astrakhan Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2212"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Astrakhan Standard Time","Index",0x00010001,338
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Astrakhan Standard Time","TZI",0x00000001,\
+0x10,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Azerbaijan Standard Time","Display",0x00000000,"(UTC+04:00) Baku"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Azerbaijan Standard Time","Dlt",0x00000000,"Azerbaijan Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Azerbaijan Standard Time","Std",0x00000000,"Azerbaijan Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Azerbaijan Standard Time","MUI_Display",0x00000000,"@tzres.dll,-2220"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Azerbaijan Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-2221"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Azerbaijan Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2222"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Azerbaijan Standard Time","Index",0x00010001,339
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Azerbaijan Standard Time","TZI",0x00000001,\
+0x10,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Mauritius Standard Time","Display",0x00000000,"(UTC+04:00) Port Louis"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Mauritius Standard Time","Dlt",0x00000000,"Mauritius Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Mauritius Standard Time","Std",0x00000000,"Mauritius Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Mauritius Standard Time","MUI_Display",0x00000000,"@tzres.dll,-2230"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Mauritius Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-2231"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Mauritius Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2232"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Mauritius Standard Time","Index",0x00010001,340
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Mauritius Standard Time","TZI",0x00000001,\
+0x10,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Saratov Standard Time","Display",0x00000000,"(UTC+04:00) Saratov"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Saratov Standard Time","Dlt",0x00000000,"Saratov Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Saratov Standard Time","Std",0x00000000,"Saratov Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Saratov Standard Time","MUI_Display",0x00000000,"@tzres.dll,-2240"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Saratov Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-2241"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Saratov Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2242"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Saratov Standard Time","Index",0x00010001,341
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Saratov Standard Time","TZI",0x00000001,\
+0x10,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Georgian Standard Time","Display",0x00000000,"(UTC+04:00) Tbilisi"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Georgian Standard Time","Dlt",0x00000000,"Georgian Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Georgian Standard Time","Std",0x00000000,"Georgian Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Georgian Standard Time","MUI_Display",0x00000000,"@tzres.dll,-2250"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Georgian Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-2251"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Georgian Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2252"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Georgian Standard Time","Index",0x00010001,342
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Georgian Standard Time","TZI",0x00000001,\
+0x10,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Volgograd Standard Time","Display",0x00000000,"(UTC+03:00) Volgograd"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Volgograd Standard Time","Dlt",0x00000000,"Volgograd Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Volgograd Standard Time","Std",0x00000000,"Volgograd Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Volgograd Standard Time","MUI_Display",0x00000000,"@tzres.dll,-2260"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Volgograd Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-2261"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Volgograd Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2262"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Volgograd Standard Time","Index",0x00010001,343
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Volgograd Standard Time","TZI",0x00000001,\
+0x4c,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Pakistan Standard Time","Display",0x00000000,"(UTC+05:00) Islamabad, Karachi"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Pakistan Standard Time","Dlt",0x00000000,"Pakistan Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Pakistan Standard Time","Std",0x00000000,"Pakistan Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Pakistan Standard Time","MUI_Display",0x00000000,"@tzres.dll,-2270"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Pakistan Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-2271"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Pakistan Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2272"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Pakistan Standard Time","Index",0x00010001,344
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Pakistan Standard Time","TZI",0x00000001,\
+0xd4,0xfe,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Qyzylorda Standard Time","Display",0x00000000,"(UTC+05:00) Qyzylorda"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Qyzylorda Standard Time","Dlt",0x00000000,"Qyzylorda Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Qyzylorda Standard Time","Std",0x00000000,"Qyzylorda Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Qyzylorda Standard Time","MUI_Display",0x00000000,"@tzres.dll,-2280"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Qyzylorda Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-2281"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Qyzylorda Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2282"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Qyzylorda Standard Time","Index",0x00010001,345
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Qyzylorda Standard Time","TZI",0x00000001,\
+0xd4,0xfe,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Bangladesh Standard Time","Display",0x00000000,"(UTC+06:00) Dhaka"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Bangladesh Standard Time","Dlt",0x00000000,"Bangladesh Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Bangladesh Standard Time","Std",0x00000000,"Bangladesh Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Bangladesh Standard Time","MUI_Display",0x00000000,"@tzres.dll,-2290"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Bangladesh Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-2291"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Bangladesh Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2292"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Bangladesh Standard Time","Index",0x00010001,346
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Bangladesh Standard Time","TZI",0x00000001,\
+0x98,0xfe,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Altai Standard Time","Display",0x00000000,"(UTC+07:00) Barnaul, Gorno-Altaysk"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Altai Standard Time","Dlt",0x00000000,"Altai Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Altai Standard Time","Std",0x00000000,"Altai Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Altai Standard Time","MUI_Display",0x00000000,"@tzres.dll,-2300"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Altai Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-2301"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Altai Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2302"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Altai Standard Time","Index",0x00010001,347
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Altai Standard Time","TZI",0x00000001,\
+0x5c,0xfe,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\W. Mongolia Standard Time","Display",0x00000000,"(UTC+07:00) Hovd"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\W. Mongolia Standard Time","Dlt",0x00000000,"W. Mongolia Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\W. Mongolia Standard Time","Std",0x00000000,"W. Mongolia Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\W. Mongolia Standard Time","MUI_Display",0x00000000,"@tzres.dll,-2310"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\W. Mongolia Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-2311"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\W. Mongolia Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2312"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\W. Mongolia Standard Time","Index",0x00010001,348
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\W. Mongolia Standard Time","TZI",0x00000001,\
+0x5c,0xfe,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Aus Central W. Standard Time","Display",0x00000000,"(UTC+08:45) Eucla"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Aus Central W. Standard Time","Dlt",0x00000000,"Aus Central W. Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Aus Central W. Standard Time","Std",0x00000000,"Aus Central W. Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Aus Central W. Standard Time","MUI_Display",0x00000000,"@tzres.dll,-2320"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Aus Central W. Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-2321"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Aus Central W. Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2322"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Aus Central W. Standard Time","Index",0x00010001,349
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Aus Central W. Standard Time","TZI",0x00000001,\
+0xf3,0xfd,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Transbaikal Standard Time","Display",0x00000000,"(UTC+09:00) Chita"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Transbaikal Standard Time","Dlt",0x00000000,"Transbaikal Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Transbaikal Standard Time","Std",0x00000000,"Transbaikal Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Transbaikal Standard Time","MUI_Display",0x00000000,"@tzres.dll,-2330"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Transbaikal Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-2331"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Transbaikal Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2332"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Transbaikal Standard Time","Index",0x00010001,350
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Transbaikal Standard Time","TZI",0x00000001,\
+0xe4,0xfd,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\North Korea Standard Time","Display",0x00000000,"(UTC+09:00) Pyongyang"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\North Korea Standard Time","Dlt",0x00000000,"North Korea Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\North Korea Standard Time","Std",0x00000000,"North Korea Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\North Korea Standard Time","MUI_Display",0x00000000,"@tzres.dll,-2340"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\North Korea Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-2341"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\North Korea Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2342"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\North Korea Standard Time","Index",0x00010001,351
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\North Korea Standard Time","TZI",0x00000001,\
+0xe4,0xfd,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Lord Howe Standard Time","Display",0x00000000,"(UTC+10:30) Lord Howe Island"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Lord Howe Standard Time","Dlt",0x00000000,"Lord Howe Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Lord Howe Standard Time","Std",0x00000000,"Lord Howe Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Lord Howe Standard Time","MUI_Display",0x00000000,"@tzres.dll,-2350"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Lord Howe Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-2351"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Lord Howe Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2352"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Lord Howe Standard Time","Index",0x00010001,352
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Lord Howe Standard Time","TZI",0x00000001,\
+0x8a,0xfd,0xff,0xff,0x00,0x00,0x00,0x00,0xe2,0xff,0xff,0xff,\
+0x00,0x00,0x04,0x00,0x00,0x00,0x01,0x00,0x02,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x0a,0x00,0x00,0x00,0x01,0x00,\
+0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Bougainville Standard Time","Display",0x00000000,"(UTC+11:00) Bougainville Island"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Bougainville Standard Time","Dlt",0x00000000,"Bougainville Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Bougainville Standard Time","Std",0x00000000,"Bougainville Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Bougainville Standard Time","MUI_Display",0x00000000,"@tzres.dll,-2360"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Bougainville Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-2361"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Bougainville Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2362"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Bougainville Standard Time","Index",0x00010001,353
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Bougainville Standard Time","TZI",0x00000001,\
+0x6c,0xfd,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Norfolk Standard Time","Display",0x00000000,"(UTC+11:00) Norfolk Island"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Norfolk Standard Time","Dlt",0x00000000,"Norfolk Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Norfolk Standard Time","Std",0x00000000,"Norfolk Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Norfolk Standard Time","MUI_Display",0x00000000,"@tzres.dll,-2370"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Norfolk Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-2371"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Norfolk Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2372"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Norfolk Standard Time","Index",0x00010001,354
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Norfolk Standard Time","TZI",0x00000001,\
+0x6c,0xfd,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
+0x00,0x00,0x04,0x00,0x00,0x00,0x01,0x00,0x03,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x0a,0x00,0x00,0x00,0x01,0x00,\
+0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Sakhalin Standard Time","Display",0x00000000,"(UTC+11:00) Sakhalin"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Sakhalin Standard Time","Dlt",0x00000000,"Sakhalin Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Sakhalin Standard Time","Std",0x00000000,"Sakhalin Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Sakhalin Standard Time","MUI_Display",0x00000000,"@tzres.dll,-2380"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Sakhalin Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-2381"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Sakhalin Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2382"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Sakhalin Standard Time","Index",0x00010001,355
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Sakhalin Standard Time","TZI",0x00000001,\
+0x6c,0xfd,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC+12","Display",0x00000000,"(UTC+12:00) Coordinated Universal Time+12"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC+12","Dlt",0x00000000,"Coordinated Universal Time+12"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC+12","Std",0x00000000,"Coordinated Universal Time+12"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC+12","MUI_Display",0x00000000,"@tzres.dll,-2390"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC+12","MUI_Dlt",0x00000000,"@tzres.dll,-2391"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC+12","MUI_Std",0x00000000,"@tzres.dll,-2392"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC+12","Index",0x00010001,356
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC+12","TZI",0x00000001,\
+0x30,0xfd,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Chatham Islands Standard Time","Display",0x00000000,"(UTC+12:45) Chatham Islands"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Chatham Islands Standard Time","Dlt",0x00000000,"Chatham Islands Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Chatham Islands Standard Time","Std",0x00000000,"Chatham Islands Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Chatham Islands Standard Time","MUI_Display",0x00000000,"@tzres.dll,-2400"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Chatham Islands Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-2401"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Chatham Islands Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2402"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Chatham Islands Standard Time","Index",0x00010001,357
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Chatham Islands Standard Time","TZI",0x00000001,\
+0x03,0xfd,0xff,0xff,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,\
+0x00,0x00,0x04,0x00,0x00,0x00,0x01,0x00,0x03,0x00,0x2d,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x09,0x00,0x00,0x00,0x05,0x00,\
+0x02,0x00,0x2d,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC+13","Display",0x00000000,"(UTC+13:00) Coordinated Universal Time+13"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC+13","Dlt",0x00000000,"Coordinated Universal Time+13"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC+13","Std",0x00000000,"Coordinated Universal Time+13"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC+13","MUI_Display",0x00000000,"@tzres.dll,-2410"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC+13","MUI_Dlt",0x00000000,"@tzres.dll,-2411"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC+13","MUI_Std",0x00000000,"@tzres.dll,-2412"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC+13","Index",0x00010001,358
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\UTC+13","TZI",0x00000001,\
+0xf4,0xfc,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Line Islands Standard Time","Display",0x00000000,"(UTC+14:00) Kiritimati Island"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Line Islands Standard Time","Dlt",0x00000000,"Line Islands Daylight Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Line Islands Standard Time","Std",0x00000000,"Line Islands Standard Time"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Line Islands Standard Time","MUI_Display",0x00000000,"@tzres.dll,-2420"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Line Islands Standard Time","MUI_Dlt",0x00000000,"@tzres.dll,-2421"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Line Islands Standard Time","MUI_Std",0x00000000,"@tzres.dll,-2422"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Line Islands Standard Time","Index",0x00010001,359
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\Line Islands Standard Time","TZI",0x00000001,\
+0xb8,0xfc,0xff,0xff,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,\
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
 
 ; Available file systems
 HKLM,"SOFTWARE\ReactOS\ReactOS\CurrentVersion\IFS","FAT",0x00000000,"ufat.dll"
