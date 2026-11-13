@@ -721,6 +721,108 @@ static void TestFibers(void)
     ExpectChurnFlat("after walks on two fibers");
 }
 
+/* A thread that is suspended while it holds the lock of the handler lists (a debugger, a profiler, a stack sampler
+   suspends it) must not stop the thread that suspended it: that one takes its first exception, or exits, before it
+   resumes the other, and neither may wait for the lock. A watchdog resumes the churner when the suspender hangs. */
+#define SUSPEND_CODE 0xE000000A
+#define SUSPEND_ROUNDS 40
+#define SUSPEND_WATCHDOG_MS 3000
+
+static volatile LONG SuspendStop;
+static HANDLE SuspendChurner, SuspendGo, SuspendParked;
+
+static LONG NTAPI SuspendContinue(PEXCEPTION_POINTERS ExceptionInfo)
+{
+    if (ExceptionInfo->ExceptionRecord->ExceptionCode != SUSPEND_CODE)
+        return EXCEPTION_CONTINUE_SEARCH;
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+static DWORD WINAPI SuspendChurnThread(PVOID Parameter)
+{
+    PVOID First, Last;
+
+    while (!SuspendStop)
+    {
+        First = RtlAddVectoredExceptionHandler(TRUE, SearchHandler);
+        Last = RtlAddVectoredExceptionHandler(FALSE, SearchHandler);
+        RtlRemoveVectoredExceptionHandler(First);
+        RtlRemoveVectoredExceptionHandler(Last);
+    }
+    return 0;
+}
+
+/* Suspends the churner, then takes the first exception of this thread, and resumes the churner */
+static DWORD WINAPI SuspendFirstExceptionThread(PVOID Parameter)
+{
+    WaitForSingleObject(SuspendGo, INFINITE);
+    SuspendThread(SuspendChurner);
+    RaiseException(SUSPEND_CODE, 0, 0, NULL);
+    ResumeThread(SuspendChurner);
+    return 0;
+}
+
+/* Has taken an exception before (it owns a slot), suspends the churner, and exits: the churner is resumed by the test */
+static DWORD WINAPI SuspendExitThread(PVOID Parameter)
+{
+    RaiseException(SUSPEND_CODE, 0, 0, NULL);
+    SetEvent(SuspendParked);
+    WaitForSingleObject(SuspendGo, INFINITE);
+    SuspendThread(SuspendChurner);
+    return 0;
+}
+
+static void TestSuspendedLockHolder(BOOLEAN ExitMode)
+{
+    PVOID Continue;
+    HANDLE Suspender;
+    ULONG i, Deadlocks = 0;
+
+    SuspendStop = 0;
+    SuspendGo = CreateEventW(NULL, FALSE, FALSE, NULL);
+    SuspendParked = CreateEventW(NULL, FALSE, FALSE, NULL);
+    Continue = RtlAddVectoredExceptionHandler(FALSE, SuspendContinue);
+    SuspendChurner = CreateThread(NULL, 0, SuspendChurnThread, NULL, 0, NULL);
+    ok(SuspendGo && SuspendParked && Continue && SuspendChurner, "Setup failed\n");
+    if (!SuspendGo || !SuspendParked || !Continue || !SuspendChurner)
+        return;
+    Sleep(100);
+
+    for (i = 0; i < SUSPEND_ROUNDS; i++)
+    {
+        Suspender = CreateThread(NULL, 0, ExitMode ? SuspendExitThread : SuspendFirstExceptionThread, NULL, 0, NULL);
+        ok(Suspender != NULL, "CreateThread failed: %lu\n", GetLastError());
+        if (!Suspender)
+            break;
+        if (ExitMode)
+            WaitForSingleObject(SuspendParked, WAIT_MS);
+        else
+            Sleep(10);
+        SetEvent(SuspendGo);
+
+        if (WaitForSingleObject(Suspender, SUSPEND_WATCHDOG_MS) != WAIT_OBJECT_0)
+        {
+            Deadlocks++;
+            ResumeThread(SuspendChurner);
+            WaitForSingleObject(Suspender, WAIT_MS);
+        }
+        else if (ExitMode)
+        {
+            ResumeThread(SuspendChurner);
+        }
+        CloseHandle(Suspender);
+    }
+
+    SuspendStop = 1;
+    WaitForSingleObject(SuspendChurner, WAIT_MS);
+    CloseHandle(SuspendChurner);
+    ok(RtlRemoveVectoredExceptionHandler(Continue) != 0, "Remove failed\n");
+    CloseHandle(SuspendGo);
+    CloseHandle(SuspendParked);
+    ok(Deadlocks == 0, "%s: the suspender of the lock holder hung in %lu of %lu rounds\n",
+       ExitMode ? "Thread exit" : "First exception", Deadlocks, (ULONG)SUSPEND_ROUNDS);
+}
+
 START_TEST(VectoredHandlerChurn)
 {
     HANDLE Threads[5];
@@ -780,6 +882,8 @@ START_TEST(VectoredHandlerChurn)
     TestLeftByExitThread();
     TestLeftByTerminateThread();
     TestLeftByLongjmp();
+    TestSuspendedLockHolder(FALSE);
+    TestSuspendedLockHolder(TRUE);
     CloseHandle(BlockEntered);
     CloseHandle(BlockRelease);
 }
