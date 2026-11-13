@@ -55,7 +55,8 @@ BltMask(SURFOBJ* psoDest,
         POINTL* pptlBrush,
         ROP4 Rop4)
 {
-    LONG x, y, cx, cy;
+    LONG x, y;
+    LONGLONG cx, cy;
     BYTE *pjMskLine, *pjMskCurrent;
     BYTE fjMaskBit0, fjMaskBit;
     /* Pattern brushes */
@@ -92,8 +93,9 @@ BltMask(SURFOBJ* psoDest,
 
     cx = prclDest->right - prclDest->left;
     cy = prclDest->bottom - prclDest->top;
-    if ((pptlMask->x + cx > psoMask->sizlBitmap.cx) ||
-        (pptlMask->y + cy > psoMask->sizlBitmap.cy))
+    if (cx <= 0 || cy <= 0 || pptlMask->x < 0 || pptlMask->y < 0 ||
+        (LONGLONG)pptlMask->x + cx > psoMask->sizlBitmap.cx ||
+        (LONGLONG)pptlMask->y + cy > psoMask->sizlBitmap.cy)
     {
         return FALSE;
     }
@@ -661,6 +663,7 @@ IntEngBitBlt(
     RECTL rclSrc;
     RECTL rclSrcClipped;
     POINTL ptlBrush;
+    POINTL ptlMask;
     PFN_DrvBitBlt pfnBitBlt;
     LONG lTmp;
     BOOLEAN bTopToBottom, bLeftToRight;
@@ -731,6 +734,20 @@ IntEngBitBlt(
     {
         psoSrc = NULL;
         psurfSrc = NULL;
+    }
+
+    if (psoMask && pptlMask)
+    {
+        LONGLONG xMask = (LONGLONG)pptlMask->x + rclClipped.left - prclTrg->left;
+        LONGLONG yMask = (LONGLONG)pptlMask->y + rclClipped.top - prclTrg->top;
+
+        if (xMask < LONG_MIN || xMask > LONG_MAX ||
+            yMask < LONG_MIN || yMask > LONG_MAX)
+            return FALSE;
+
+        ptlMask.x = (LONG)xMask;
+        ptlMask.y = (LONG)yMask;
+        pptlMask = &ptlMask;
     }
 
     if (pptlBrush)
