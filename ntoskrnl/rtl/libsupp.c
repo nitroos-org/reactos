@@ -79,6 +79,15 @@ RtlpCheckForActiveDebugger(VOID)
     return FALSE;
 }
 
+#ifdef _M_AMD64
+PVOID
+NTAPI
+RtlpGetUserThreadStart(VOID)
+{
+    return NULL;
+}
+#endif
+
 BOOLEAN
 NTAPI
 RtlpSetInDbgPrint(VOID)

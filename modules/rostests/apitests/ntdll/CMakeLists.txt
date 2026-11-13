@@ -217,6 +217,7 @@ list(APPEND SOURCE
     RtlHeapTailCheck.c
     RtlImageDirectoryEntryToData.c
     RtlImageRvaToVa.c
+    RtlCreateUserThreadReturn.c
     RtlInitializeContext.c
     RtlInitializeSidEx.c
     RtlInitializeNtUserPfn.c
