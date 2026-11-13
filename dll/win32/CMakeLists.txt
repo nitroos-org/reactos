@@ -256,7 +256,6 @@ add_subdirectory(urlmon)
 add_subdirectory(userenv)
 add_subdirectory(usp10)
 add_subdirectory(uxtheme)
-add_subdirectory(vbscript)
 add_subdirectory(vcruntime140)
 if(ARCH STREQUAL "amd64" AND NOT MSVC)
     add_subdirectory(vcruntime140_1)
@@ -333,6 +332,7 @@ if(DLL_EXPORT_VERSION GREATER_EQUAL 0x600)
 endif()
 
 if(DLL_EXPORT_VERSION GREATER_EQUAL 0x601)
+    add_subdirectory(vbscript) # _create_locale of msvcrt
     add_subdirectory(webservices) # _create_locale of msvcrt, thread pool and critical section functions of kernel32
     add_subdirectory(evr)
     add_subdirectory(bcp47langs)
