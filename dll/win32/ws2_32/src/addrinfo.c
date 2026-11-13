@@ -791,7 +791,7 @@ GetAddrInfoW(IN PCWSTR pszNodeName,
     PSERVENT ptService = NULL;
     PCHAR pc = NULL;
     BOOL bClone = FALSE;
-    BOOL bNumeric, bNumeric6 = FALSE, bTrailingSpace = FALSE;
+    BOOL bNumeric, bNumeric6 = FALSE, bNoNode6 = FALSE, bTrailingSpace = FALSE;
     IN6_ADDR Address6;
     ULONG ulScope6 = 0;
     WORD wTcpPort = 0;
@@ -841,6 +841,24 @@ GetAddrInfoW(IN PCWSTR pszNodeName,
         iFamily = ptHints->ai_family;
         bNumeric6 = (iFamily == PF_UNSPEC || iFamily == PF_INET6) &&
                     ParseV6Address(pszNodeName, &Address6, &ulScope6);
+
+        /*
+         * No node name for the IPv6 family: Windows 10 (IPv6 installed, measured) answers the
+         * wildcard "::" (AI_PASSIVE) or the loopback "::1". Without an IPv6 transport here the
+         * address is only a name; creating an IPv6 socket is what fails, with WSAEAFNOSUPPORT,
+         * which is the failure a server with an optional "::" bind skips.
+         * AF_UNSPEC keeps its IPv4-only answer: this system has no IPv6 transport to serve it.
+         */
+        if (!pszNodeName && iFamily == PF_INET6)
+        {
+            RtlZeroMemory(&Address6, sizeof(Address6));
+            ulScope6 = 0;
+            if (!(iFlags & AI_PASSIVE))
+                Address6.u.Byte[15] = 1;
+            bNumeric6 = TRUE;
+            bNoNode6 = TRUE;
+        }
+
         if ((iFamily != PF_UNSPEC) && (iFamily != PF_INET) && !bNumeric6)
         {
             SetLastError(EAI_FAMILY);
@@ -957,7 +975,9 @@ GetAddrInfoW(IN PCWSTR pszNodeName,
         }
         else
         {
-            (*pptResult)->ai_flags |= AI_NUMERICHOST;
+            /* An address that was not given by the caller is not numeric host input */
+            if (!bNoNode6)
+                (*pptResult)->ai_flags |= AI_NUMERICHOST;
 
             /* The canonical name of an address is its numeric form, as for an IPv4 address */
             if (iFlags & AI_CANONNAME)
