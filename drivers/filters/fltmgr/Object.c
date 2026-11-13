@@ -13,6 +13,7 @@
 
 #include "fltmgr.h"
 #include "fltmgrint.h"
+#include "fltmgrproto.h"
 
 #define NDEBUG
 #include <debug.h>
@@ -230,15 +231,17 @@ FltpExReleaseRundownProtection(_Inout_ PEX_RUNDOWN_REF RundownRef)
 BOOLEAN
 FltpExRundownCompleted(_Inout_ PEX_RUNDOWN_REF RundownRef)
 {
-    return _InterlockedExchange((PLONG)RundownRef, 1);
+    ExRundownCompleted(RundownRef);
+    return TRUE;
 }
 
 NTSTATUS
 NTAPI
 FltpObjectRundownWait(_Inout_ PEX_RUNDOWN_REF RundownRef)
 {
-    //return FltpExWaitForRundownProtectionRelease(RundownRef);
-    return 0;
+    /* Blocks until everybody who got a reference has dropped it, no new ones are granted */
+    ExWaitForRundownProtectionRelease(RundownRef);
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS

@@ -93,6 +93,25 @@ typedef struct _FLTP_FRAME
 
 } FLTP_FRAME, *PFLTP_FRAME;
 
+typedef struct _FLTP_CONTEXT_DEF
+{
+    BOOLEAN Registered;
+    FLT_CONTEXT_REGISTRATION_FLAGS Flags;
+    PFLT_CONTEXT_CLEANUP_CALLBACK CleanupCallback;
+    SIZE_T Size;
+    ULONG PoolTag;
+    PFLT_CONTEXT_ALLOCATE_CALLBACK AllocateCallback;
+    PFLT_CONTEXT_FREE_CALLBACK FreeCallback;
+
+} FLTP_CONTEXT_DEF, *PFLTP_CONTEXT_DEF;
+
+#define FLTP_CTX_INDEX_VOLUME           0
+#define FLTP_CTX_INDEX_INSTANCE         1
+#define FLTP_CTX_INDEX_FILE             2
+#define FLTP_CTX_INDEX_STREAM           3
+#define FLTP_CTX_INDEX_STREAMHANDLE     4
+#define FLTP_CTX_INDEX_TRANSACTION      5
+
 typedef struct _FLT_FILTER   // size = 0x120
 {
     FLT_OBJECT Base;
@@ -122,13 +141,21 @@ typedef struct _FLT_FILTER   // size = 0x120
     FLT_MUTEX_LIST_HEAD PortList;
     EX_PUSH_LOCK PortLock;
 
+    /* Our own bookkeeping */
+    LIST_ENTRY GlobalLink;          /* link in FilterList, ordered by altitude (high first) */
+    ULONG RegistrationFlags;        /* FLTFL_REGISTRATION_* */
+    UNICODE_STRING DefaultInstanceName;
+    PFLT_OPERATION_REGISTRATION OperationTable[IRP_MJ_MAXIMUM_FUNCTION + 1];
+    FLTP_CONTEXT_DEF ContextDefs[MAX_CONTEXT_TYPES];
+
 }  FLT_FILTER, *PFLT_FILTER;
 
 typedef enum _FLT_INSTANCE_FLAGS
 {
     INSFL_CAN_BE_DETACHED = 0x01,
     INSFL_DELETING = 0x02,
-    INSFL_INITING = 0x04
+    INSFL_INITING = 0x04,
+    INSFL_ACTIVE = 0x08
 
 } FLT_INSTANCE_FLAGS, *PFLT_INSTANCE_FLAGS;
 
@@ -148,6 +175,13 @@ typedef struct _FLT_INSTANCE   // size = 0x144 (324)
     PVOID Context; //PCONTEXT_NODE
     PVOID TrackCompletionNodes; //PRACK_COMPLETION_NODES
     PVOID CallbackNodes[50]; //PCALLBACK_NODE
+
+    /* Our own bookkeeping */
+    LIST_ENTRY VolumeLink;          /* link in Volume->InstanceList, ordered by altitude (high first) */
+    PVOID InstanceContext;          /* PFLTP_CONTEXT */
+    FAST_MUTEX InstanceContextLock;
+    FLT_INSTANCE_SETUP_FLAGS SetupFlags;
+    WCHAR AltitudeBuffer[1];        /* private copy of the altitude string, NUL terminated (variable size) */
 
 } FLT_INSTANCE, *PFLT_INSTANCE;
 
@@ -300,7 +334,7 @@ typedef struct _FLT_VOLUME
     FLT_OBJECT Base;
     FLT_VOLUME_FLAGS Flags;
     FLT_FILESYSTEM_TYPE FileSystemType;
-    PDEVICE_OBJECT DeviceObject;
+    PDEVICE_OBJECT DeviceObject;        /* our filter device object, attached on top of the volume */
     PDEVICE_OBJECT DiskDeviceObject;
     PFLT_VOLUME FrameZeroVolume;
     PFLT_VOLUME VolumeInNextFrame;
@@ -320,6 +354,16 @@ typedef struct _FLT_VOLUME
     ULONG TargetedOpenActiveCount;
     EX_PUSH_LOCK TxVolContextListLock;
     TREE_ROOT TxVolContexts;
+
+    /* Our own bookkeeping */
+    LIST_ENTRY GlobalLink;              /* link in FltpVolumeList */
+    PDEVICE_OBJECT AttachedToDeviceObject;  /* the file system volume device object below us */
+    volatile LONG CallbackCount[IRP_MJ_MAXIMUM_FUNCTION + 1]; /* instances with a callback for the major function */
+    PVOID VolumeContext;                /* PFLTP_CONTEXT */
+    FAST_MUTEX VolumeContextLock;
+    LIST_ENTRY StreamList;              /* STREAM_LIST_CTRL of open streams (contexts) */
+    FAST_MUTEX StreamListLock;
+    BOOLEAN Dismounted;
 
 } FLT_VOLUME, *PFLT_VOLUME;
 
@@ -468,5 +512,6 @@ NTSTATUS
 FltpSetupCommunicationObjects(
     _In_ PDRIVER_OBJECT DriverObject
 );
+
 
 #endif /* _FLTMGR_INTERNAL_H */
