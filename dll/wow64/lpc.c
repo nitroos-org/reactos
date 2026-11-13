@@ -1091,7 +1091,9 @@ static NTSTATUS ChangePasswordFrom32(ULONG Guest, ULONG Length, PVOID *Native, U
 
 /* LsaCallAuthenticationPackage for the MSV1_0 message types that 32-bit callers use: MsV1_0ChangePassword
  * (NetUserChangePassword), which has no reply buffer. The others, and the other packages, are refused. */
-/* MsV1_0RosNtlmV2Response (ReactOS private, see ntlmros.h): the request and the answer are flat, without pointers.
+/* MsV1_0RosNtlmV2Response and the local call messages MsV1_0RosNtlmLocal* (ReactOS private, see ntlmros.h): the
+ * request and the answer are flat, without pointers, the same for 32-bit and 64-bit callers (the token handle of
+ * MsV1_0RosNtlmLocalAccept is one of this process).
  * lsass allocates the answer in this process, maybe above the guest's limit: it is copied into a block below it
  * and the native one is released. */
 static NTSTATUS RequestRosNtlmV2(HANDLE Port, WOW64_LSA_BODY *Body, LSA_API_MSG *Native, ULONG Package, ULONG Buffer,
@@ -1196,7 +1198,8 @@ static NTSTATUS RequestCallPackage(ULONG Number, HANDLE Port, WOW64_LSA_BODY *Bo
     if (!NT_SUCCESS(Status)) return Status;
     Status = Msv1_0PackageId(Port, &Msv1_0);
     if (!NT_SUCCESS(Status)) return Status;
-    if (Package == Msv1_0 && MessageType == MsV1_0RosNtlmV2Response)
+    if (Package == Msv1_0 && (MessageType == MsV1_0RosNtlmV2Response ||
+                              (MessageType >= MsV1_0RosNtlmLocalIssue && MessageType <= MsV1_0RosNtlmLocalDelete)))
         return RequestRosNtlmV2(Port, Body, Native, Package, Buffer, Length);
     if (Package != Msv1_0 || MessageType != MsV1_0ChangePassword)
     {
