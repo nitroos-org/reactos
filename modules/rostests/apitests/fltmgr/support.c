@@ -151,6 +151,8 @@ UnloadSample(PSAMPLE Sample, BOOL ExpectUnload)
     Sample->LastTeardownCompletes = SampleLastRun(Sample, L"LastRunTeardownCompletes");
     Sample->LastLive = SampleLastRun(Sample, L"LastRunLive");
     Sample->LastFiltering = SampleLastRun(Sample, L"LastRunWorkers");
+    Sample->LastCtxAlloc = SampleLastRun(Sample, L"LastRunCtxAlloc");
+    Sample->LastCtxCleaned = SampleLastRun(Sample, L"LastRunCtxCleaned");
 
     Manager = OpenSCManagerW(NULL, NULL, SC_MANAGER_ALL_ACCESS);
     if (Manager)

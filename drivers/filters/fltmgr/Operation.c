@@ -534,6 +534,10 @@ IrpCompletion(_In_ PDEVICE_OBJECT DeviceObject,
     Ctrl->Data.IoStatus = Irp->IoStatus;
     Ctrl->Data.Flags |= FLTFL_CALLBACK_DATA_POST_OPERATION;
 
+    /* The contexts of the stream live as long as it is open, so before the filters see the new file */
+    if (Ctrl->MajorFunction == IRP_MJ_CREATE && Ctrl->Volume->ContextTracking && NT_SUCCESS(Irp->IoStatus.Status))
+        FltpStreamOpened(Ctrl->Volume, Ctrl->Iopb.TargetFileObject);
+
     if (Ctrl->Synchronize)
     {
         /* The post-operations run in the thread of the dispatch routine, which is waiting */
@@ -630,6 +634,15 @@ SendDown(_In_ PFLTP_IRPCTRL Ctrl)
         Ctrl->Data.Flags &= ~FLTFL_CALLBACK_DATA_DIRTY;
     }
 
+    if (Ctrl->Volume->ContextTracking)
+    {
+        /* The close is the end of the handle contexts, the create needs a completion routine for the opens */
+        if (Stack->MajorFunction == IRP_MJ_CLOSE && Stack->FileObject)
+            FltpFileObjectClosed(Ctrl->Volume, Stack->FileObject);
+        else if (Stack->MajorFunction == IRP_MJ_CREATE)
+            AnyPost = TRUE;
+    }
+
     /* The instances which don't want the post-operation are done with the operation now */
     for (i = 0; i < Ctrl->Count; i++)
     {
@@ -720,13 +733,50 @@ ContinueAfterPre(_In_ PFLTP_IRPCTRL Ctrl,
     return Pended ? STATUS_PENDING : Status;
 }
 
-/* Hands the IRP to the volume's file system as if we weren't here */
+/* A file object which has been created: the stream gets one more open */
+static
+NTSTATUS
+NTAPI
+TrackCreateCompletion(_In_ PDEVICE_OBJECT DeviceObject,
+                      _In_ PIRP Irp,
+                      _In_ PVOID Context)
+{
+    PFLT_VOLUME Volume = Context;
+
+    UNREFERENCED_PARAMETER(DeviceObject);
+
+    if (NT_SUCCESS(Irp->IoStatus.Status))
+        FltpStreamOpened(Volume, IoGetCurrentIrpStackLocation(Irp)->FileObject);
+
+    if (Irp->PendingReturned)
+        IoMarkIrpPending(Irp);
+
+    return STATUS_SUCCESS;
+}
+
+/* Hands the IRP to the volume's file system as if we weren't here, but for the contexts of the streams */
 static
 NTSTATUS
 PassThrough(_In_ PDEVICE_OBJECT DeviceObject,
             _Inout_ PIRP Irp)
 {
     PFLTMGR_DEVICE_EXTENSION DeviceExtension = DeviceObject->DeviceExtension;
+    PFLT_VOLUME Volume = DeviceExtension->Volume;
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+
+    if (Volume && Volume->ContextTracking)
+    {
+        if (Stack->MajorFunction == IRP_MJ_CLOSE && Stack->FileObject)
+        {
+            FltpFileObjectClosed(Volume, Stack->FileObject);
+        }
+        else if (Stack->MajorFunction == IRP_MJ_CREATE)
+        {
+            IoCopyCurrentIrpStackLocationToNext(Irp);
+            IoSetCompletionRoutine(Irp, TrackCreateCompletion, Volume, TRUE, TRUE, TRUE);
+            return IoCallDriver(DeviceExtension->AttachedToDeviceObject, Irp);
+        }
+    }
 
     IoSkipCurrentIrpStackLocation(Irp);
     return IoCallDriver(DeviceExtension->AttachedToDeviceObject, Irp);

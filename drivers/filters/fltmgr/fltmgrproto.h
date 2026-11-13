@@ -116,6 +116,23 @@ FltpFastIoDisallowed(
 
 /* Context.c */
 VOID
+FltpStreamOpened(
+    _In_ PFLT_VOLUME Volume,
+    _In_ PFILE_OBJECT FileObject
+);
+
+VOID
+FltpFileObjectClosed(
+    _In_ PFLT_VOLUME Volume,
+    _In_ PFILE_OBJECT FileObject
+);
+
+VOID
+FltpPurgeFilterContexts(
+    _In_ PFLT_FILTER Filter
+);
+
+VOID
 FltpTeardownInstanceContexts(
     _In_ PFLT_INSTANCE Instance
 );

@@ -178,8 +178,6 @@ typedef struct _FLT_INSTANCE   // size = 0x144 (324)
 
     /* Our own bookkeeping */
     LIST_ENTRY VolumeLink;          /* link in Volume->InstanceList, ordered by altitude (high first) */
-    PVOID InstanceContext;          /* PFLTP_CONTEXT */
-    FAST_MUTEX InstanceContextLock;
     FLT_INSTANCE_SETUP_FLAGS SetupFlags;
     WCHAR AltitudeBuffer[1];        /* private copy of the altitude string, NUL terminated (variable size) */
 
@@ -359,10 +357,10 @@ typedef struct _FLT_VOLUME
     LIST_ENTRY GlobalLink;              /* link in FltpVolumeList */
     PDEVICE_OBJECT AttachedToDeviceObject;  /* the file system volume device object below us */
     volatile LONG CallbackCount[IRP_MJ_MAXIMUM_FUNCTION + 1]; /* instances with a callback for the major function */
-    PVOID VolumeContext;                /* PFLTP_CONTEXT */
-    FAST_MUTEX VolumeContextLock;
-    LIST_ENTRY StreamList;              /* STREAM_LIST_CTRL of open streams (contexts) */
-    FAST_MUTEX StreamListLock;
+    LIST_ENTRY ContextList;             /* all the contexts of the volume, instance, stream... FLTP_CONTEXT, under ContextLock */
+    LIST_ENTRY StreamList;              /* FLTP_STREAM_OPEN: open counts of the streams, under ContextLock */
+    FAST_MUTEX StreamListLock;          /* the ContextLock */
+    volatile LONG ContextTracking;      /* instances whose filter uses stream or stream handle contexts */
     BOOLEAN Dismounted;
 
 } FLT_VOLUME, *PFLT_VOLUME;

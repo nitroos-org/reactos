@@ -63,6 +63,16 @@ static KSPIN_LOCK OpenLock;
 static volatile LONG PendingWorkers;
 static KEVENT WorkersDone;
 static WCHAR ServiceName[48];
+static BOOLEAN UseContexts = TRUE;
+
+typedef struct _SAMPLE_CONTEXT
+{
+    ULONG Magic;
+    ULONG Mode;
+
+} SAMPLE_CONTEXT, *PSAMPLE_CONTEXT;
+
+#define CONTEXT_MAGIC 0x43544658
 static WCHAR RegistryPathBuffer[160];
 
 DRIVER_INITIALIZE DriverEntry;
@@ -219,6 +229,220 @@ Veto(_Inout_ PFLT_CALLBACK_DATA Data)
 }
 
 
+/* CONTEXTS ***************************************************************/
+
+static
+VOID
+FLTAPI
+ContextCleanup(_In_ PFLT_CONTEXT Context,
+               _In_ FLT_CONTEXT_TYPE ContextType)
+{
+    PSAMPLE_CONTEXT Sample = Context;
+
+    InterlockedIncrement((PLONG)&Stats.Contexts[FLTSAMPLE_CTX_CLEANED]);
+    if (Sample->Magic != CONTEXT_MAGIC)
+        InterlockedIncrement((PLONG)&Stats.ContextMismatch);
+
+    switch (ContextType)
+    {
+        case FLT_INSTANCE_CONTEXT: InterlockedIncrement((PLONG)&Stats.CleanedByType[0]); break;
+        case FLT_VOLUME_CONTEXT: InterlockedIncrement((PLONG)&Stats.CleanedByType[1]); break;
+        case FLT_STREAM_CONTEXT: InterlockedIncrement((PLONG)&Stats.CleanedByType[2]); break;
+        case FLT_STREAMHANDLE_CONTEXT: InterlockedIncrement((PLONG)&Stats.CleanedByType[3]); break;
+        default: InterlockedIncrement((PLONG)&Stats.ContextMismatch); break;
+    }
+}
+
+static
+PSAMPLE_CONTEXT
+NewContext(_In_ FLT_CONTEXT_TYPE Type,
+           _In_ ULONG Mode)
+{
+    PFLT_CONTEXT Context;
+    PSAMPLE_CONTEXT Sample;
+
+    if (!NT_SUCCESS(FltAllocateContext(SampleFilter, Type, sizeof(SAMPLE_CONTEXT), NonPagedPool, &Context)))
+        return NULL;
+
+    InterlockedIncrement((PLONG)&Stats.Contexts[FLTSAMPLE_CTX_ALLOCATED]);
+    Sample = Context;
+    Sample->Magic = CONTEXT_MAGIC;
+    Sample->Mode = Mode;
+    return Sample;
+}
+
+/* What the operations see of the contexts the filter put on the objects around them */
+static
+VOID
+LookAtContexts(_In_ PCFLT_RELATED_OBJECTS FltObjects,
+               _In_ PFILE_OBJECT FileObject,
+               _In_ ULONG Mode)
+{
+    PFLT_CONTEXT Context;
+    PSAMPLE_CONTEXT Sample;
+    NTSTATUS Status;
+
+    if (NT_SUCCESS(FltGetInstanceContext(FltObjects->Instance, &Context)))
+    {
+        InterlockedIncrement((PLONG)&Stats.Contexts[FLTSAMPLE_CTX_INSTANCE_HITS]);
+        FltReleaseContext(Context);
+    }
+
+    /* One volume context per volume, made when the first operation looks for it */
+    Status = FltGetVolumeContext(FltObjects->Filter, FltObjects->Volume, &Context);
+    if (NT_SUCCESS(Status))
+    {
+        InterlockedIncrement((PLONG)&Stats.Contexts[FLTSAMPLE_CTX_VOLUME_HITS]);
+        FltReleaseContext(Context);
+    }
+    else if ((Sample = NewContext(FLT_VOLUME_CONTEXT, 0)) != NULL)
+    {
+        PFLT_CONTEXT Old = NULL;
+
+        Status = FltSetVolumeContext(FltObjects->Volume, FLT_SET_CONTEXT_KEEP_IF_EXISTS, Sample, &Old);
+        FltReleaseContext(Sample);
+        if (Old)
+            FltReleaseContext(Old);
+    }
+
+    if (NT_SUCCESS(FltGetStreamHandleContext(FltObjects->Instance, FileObject, &Context)))
+    {
+        InterlockedIncrement((PLONG)&Stats.Contexts[FLTSAMPLE_CTX_HANDLE_HITS]);
+        if (((PSAMPLE_CONTEXT)Context)->Mode != Mode)
+            InterlockedIncrement((PLONG)&Stats.ContextMismatch);
+        FltReleaseContext(Context);
+    }
+
+    if (NT_SUCCESS(FltGetStreamContext(FltObjects->Instance, FileObject, &Context)))
+    {
+        InterlockedIncrement((PLONG)&Stats.Contexts[FLTSAMPLE_CTX_STREAM_HITS]);
+        FltReleaseContext(Context);
+    }
+}
+
+/* A new file object: its handle context, and the context of its stream if it is the first */
+static
+VOID
+AttachContexts(_In_ PCFLT_RELATED_OBJECTS FltObjects,
+               _In_ PFILE_OBJECT FileObject,
+               _In_ ULONG Mode)
+{
+    PSAMPLE_CONTEXT Sample;
+    PFLT_CONTEXT Old;
+    NTSTATUS Status;
+
+    if ((Sample = NewContext(FLT_STREAMHANDLE_CONTEXT, Mode)) != NULL)
+    {
+        Status = FltSetStreamHandleContext(FltObjects->Instance, FileObject, FLT_SET_CONTEXT_REPLACE_IF_EXISTS, Sample, NULL);
+        if (NT_SUCCESS(Status))
+            InterlockedIncrement((PLONG)&Stats.Contexts[FLTSAMPLE_CTX_HANDLE_NEW]);
+        FltReleaseContext(Sample);
+    }
+
+    if ((Sample = NewContext(FLT_STREAM_CONTEXT, Mode)) != NULL)
+    {
+        Old = NULL;
+        Status = FltSetStreamContext(FltObjects->Instance, FileObject, FLT_SET_CONTEXT_KEEP_IF_EXISTS, Sample, &Old);
+        if (NT_SUCCESS(Status))
+            InterlockedIncrement((PLONG)&Stats.Contexts[FLTSAMPLE_CTX_STREAM_NEW]);
+        else if (Status == STATUS_FLT_CONTEXT_ALREADY_DEFINED)
+            InterlockedIncrement((PLONG)&Stats.Contexts[FLTSAMPLE_CTX_STREAM_HITS]);
+        FltReleaseContext(Sample);
+        if (Old)
+            FltReleaseContext(Old);
+    }
+}
+
+static const FLT_CONTEXT_REGISTRATION ContextRegistration[] =
+{
+    { FLT_INSTANCE_CONTEXT, 0, ContextCleanup, sizeof(SAMPLE_CONTEXT), TAG_SAMPLE },
+    { FLT_VOLUME_CONTEXT, 0, ContextCleanup, sizeof(SAMPLE_CONTEXT), TAG_SAMPLE },
+    { FLT_STREAM_CONTEXT, 0, ContextCleanup, sizeof(SAMPLE_CONTEXT), TAG_SAMPLE },
+    { FLT_STREAMHANDLE_CONTEXT, 0, ContextCleanup, sizeof(SAMPLE_CONTEXT), TAG_SAMPLE },
+    { FLT_CONTEXT_END }
+};
+
+/* Calls of the context functions with known outcomes, on the instance of the first volume */
+static
+VOID
+ContextSelfTest(_Out_writes_(16) PULONG Result)
+{
+    PFLT_VOLUME Volume = NULL;
+    PFLT_VOLUME Volumes[4];
+    PFLT_INSTANCE Instance = NULL;
+    PFLT_INSTANCE Instances[4];
+    PFLT_CONTEXT Ctx1 = NULL, Ctx2 = NULL, Old = NULL, Got = NULL, Bad = NULL;
+    ULONG Count = 0, i, Cleaned;
+
+    RtlZeroMemory(Result, 16 * sizeof(ULONG));
+
+    if (!NT_SUCCESS(FltEnumerateVolumes(SampleFilter, Volumes, RTL_NUMBER_OF(Volumes), &Count)) || Count == 0)
+        return;
+    Volume = Volumes[0];
+    for (i = 1; i < Count; i++)
+        FltObjectDereference(Volumes[i]);
+
+    if (!NT_SUCCESS(FltEnumerateInstances(Volume, SampleFilter, Instances, RTL_NUMBER_OF(Instances), &Count)) || Count == 0)
+    {
+        FltObjectDereference(Volume);
+        return;
+    }
+    Instance = Instances[0];
+    for (i = 1; i < Count; i++)
+        FltObjectDereference(Instances[i]);
+
+    /* A size other than the registered one is refused, and so is a type nobody registered */
+    Result[0] = FltAllocateContext(SampleFilter, FLT_INSTANCE_CONTEXT, sizeof(SAMPLE_CONTEXT) + 1, NonPagedPool, &Bad);
+    Result[13] = FltAllocateContext(SampleFilter, FLT_FILE_CONTEXT, sizeof(SAMPLE_CONTEXT), NonPagedPool, &Bad);
+
+    /* Out of the way what the setup put there */
+    (VOID)FltDeleteInstanceContext(Instance, NULL);
+
+    Result[1] = FltAllocateContext(SampleFilter, FLT_INSTANCE_CONTEXT, sizeof(SAMPLE_CONTEXT), NonPagedPool, &Ctx1);
+    Result[2] = FltSetInstanceContext(Instance, FLT_SET_CONTEXT_KEEP_IF_EXISTS, Ctx1, NULL);
+    FltReleaseContext(Ctx1);
+    InterlockedIncrement((PLONG)&Stats.Contexts[FLTSAMPLE_CTX_ALLOCATED]);
+
+    FltAllocateContext(SampleFilter, FLT_INSTANCE_CONTEXT, sizeof(SAMPLE_CONTEXT), NonPagedPool, &Ctx2);
+    InterlockedIncrement((PLONG)&Stats.Contexts[FLTSAMPLE_CTX_ALLOCATED]);
+    ((PSAMPLE_CONTEXT)Ctx1)->Magic = ((PSAMPLE_CONTEXT)Ctx2)->Magic = CONTEXT_MAGIC;
+
+    /* Keep: the one there stays, and is handed back */
+    Result[3] = FltSetInstanceContext(Instance, FLT_SET_CONTEXT_KEEP_IF_EXISTS, Ctx2, &Old);
+    Result[4] = (Old == Ctx1);
+    if (Old)
+        FltReleaseContext(Old);
+
+    /* Replace: the new one is in, the old one comes back and is freed when we let go of it */
+    Cleaned = Stats.Contexts[FLTSAMPLE_CTX_CLEANED];
+    Old = NULL;
+    Result[5] = FltSetInstanceContext(Instance, FLT_SET_CONTEXT_REPLACE_IF_EXISTS, Ctx2, &Old);
+    Result[6] = (Old == Ctx1);
+    Result[7] = (Stats.Contexts[FLTSAMPLE_CTX_CLEANED] == Cleaned);
+    if (Old)
+        FltReleaseContext(Old);
+    Result[8] = (Stats.Contexts[FLTSAMPLE_CTX_CLEANED] == Cleaned + 1);
+
+    if (NT_SUCCESS(FltGetInstanceContext(Instance, &Got)))
+    {
+        Result[9] = (Got == Ctx2);
+        FltReleaseContext(Got);
+    }
+
+    /* The instance and we hold the second one; a third reference keeps it past the delete and our release */
+    FltReferenceContext(Ctx2);
+    Cleaned = Stats.Contexts[FLTSAMPLE_CTX_CLEANED];
+    Result[10] = FltDeleteInstanceContext(Instance, NULL);
+    FltReleaseContext(Ctx2);
+    Result[11] = (Stats.Contexts[FLTSAMPLE_CTX_CLEANED] == Cleaned);
+    FltReleaseContext(Ctx2);
+    Result[12] = (Stats.Contexts[FLTSAMPLE_CTX_CLEANED] == Cleaned + 1);
+    Result[14] = FltGetInstanceContext(Instance, &Got);
+
+    FltObjectDereference(Instance);
+    FltObjectDereference(Volume);
+}
+
 /* OPERATIONS *************************************************************/
 
 static
@@ -258,8 +482,6 @@ PreOperation(_Inout_ PFLT_CALLBACK_DATA Data,
     BOOLEAN Paging = (Data->Iopb->IrpFlags & IRP_PAGING_IO) != 0;
     ULONG Mode;
 
-    UNREFERENCED_PARAMETER(FltObjects);
-
     *CompletionContext = NULL;
 
     /* Nothing but the test files counts */
@@ -275,6 +497,9 @@ PreOperation(_Inout_ PFLT_CALLBACK_DATA Data,
 
     if (Major < FLTSAMPLE_MAX_MAJOR)
         InterlockedIncrement((PLONG)&Stats.Pre[Major]);
+
+    if (UseContexts && Major != IRP_MJ_CREATE)
+        LookAtContexts(FltObjects, FileObject, FindMode(FileObject));
 
     switch (Major)
     {
@@ -415,6 +640,8 @@ PostOperation(_Inout_ PFLT_CALLBACK_DATA Data,
             Stats.LastCreatePost = KeQueryPerformanceCounter(NULL).QuadPart;
             if (!NT_SUCCESS(Data->IoStatus.Status))
                 RemoveOpen(FileObject);
+            else if (UseContexts)
+                AttachContexts(FltObjects, FileObject, FindMode(FileObject));
             break;
 
         case IRP_MJ_WRITE:
@@ -462,7 +689,6 @@ InstanceSetup(_In_ PCFLT_RELATED_OBJECTS FltObjects,
               _In_ DEVICE_TYPE VolumeDeviceType,
               _In_ FLT_FILESYSTEM_TYPE VolumeFilesystemType)
 {
-    UNREFERENCED_PARAMETER(FltObjects);
     UNREFERENCED_PARAMETER(VolumeDeviceType);
 
     if ((ULONG)VolumeFilesystemType >= FLTSAMPLE_FSTYPES ||
@@ -474,6 +700,16 @@ InstanceSetup(_In_ PCFLT_RELATED_OBJECTS FltObjects,
     InterlockedIncrement((PLONG)&Stats.InstanceSetups);
     InterlockedIncrement((PLONG)&Stats.SetupsByFsType[VolumeFilesystemType]);
     InterlockedIncrement((PLONG)&Stats.LiveInstances);
+    if (UseContexts)
+    {
+        PSAMPLE_CONTEXT Sample = NewContext(FLT_INSTANCE_CONTEXT, 0);
+
+        if (Sample)
+        {
+            (VOID)FltSetInstanceContext(FltObjects->Instance, FLT_SET_CONTEXT_REPLACE_IF_EXISTS, Sample, NULL);
+            FltReleaseContext(Sample);
+        }
+    }
     if (Flags & FLTFL_INSTANCE_SETUP_MANUAL_ATTACHMENT)
         InterlockedIncrement((PLONG)&Stats.ManualSetups);
     if (Flags & FLTFL_INSTANCE_SETUP_NEWLY_MOUNTED_VOLUME)
@@ -548,6 +784,8 @@ FilterUnload(_In_ FLT_FILTER_UNLOAD_FLAGS Flags)
     ReportRun(L"LastRunTeardownCompletes", Stats.InstanceTeardownCompletes);
     ReportRun(L"LastRunLive", Stats.LiveInstances);
     ReportRun(L"LastRunWorkers", PendingWorkers);
+    ReportRun(L"LastRunCtxAlloc", Stats.Contexts[FLTSAMPLE_CTX_ALLOCATED]);
+    ReportRun(L"LastRunCtxCleaned", Stats.Contexts[FLTSAMPLE_CTX_CLEANED]);
 
     IoDeleteSymbolicLink(&SymLinkName);
     if (ControlDevice)
@@ -662,7 +900,8 @@ ControlDispatch(_In_ PDEVICE_OBJECT DeviceObject,
             {
                 LONG Setups = Stats.InstanceSetups, Starts = Stats.InstanceTeardownStarts,
                      Completes = Stats.InstanceTeardownCompletes, Live = Stats.LiveInstances,
-                     Queries = Stats.QueryTeardowns, Manual = Stats.ManualSetups, Open = Stats.OpenFiles;
+                     Queries = Stats.QueryTeardowns, Manual = Stats.ManualSetups, Open = Stats.OpenFiles,
+                     CtxAlloc = Stats.Contexts[FLTSAMPLE_CTX_ALLOCATED], CtxCleaned = Stats.Contexts[FLTSAMPLE_CTX_CLEANED];
 
                 RtlZeroMemory(&Stats, sizeof(Stats));
                 Stats.InstanceSetups = Setups;
@@ -672,6 +911,8 @@ ControlDispatch(_In_ PDEVICE_OBJECT DeviceObject,
                 Stats.QueryTeardowns = Queries;
                 Stats.ManualSetups = Manual;
                 Stats.OpenFiles = Open;
+                Stats.Contexts[FLTSAMPLE_CTX_ALLOCATED] = CtxAlloc;
+                Stats.Contexts[FLTSAMPLE_CTX_CLEANED] = CtxCleaned;
                 break;
             }
 
@@ -695,6 +936,21 @@ ControlDispatch(_In_ PDEVICE_OBJECT DeviceObject,
             case FLTSAMPLE_IOCTL_REFUSE_DETACH:
                 if (InLength < sizeof(ULONG)) { Status = STATUS_INVALID_PARAMETER; break; }
                 RefuseDetach = *(PULONG)Buffer != 0;
+                break;
+
+            case FLTSAMPLE_IOCTL_USE_CONTEXTS:
+                if (InLength < sizeof(ULONG)) { Status = STATUS_INVALID_PARAMETER; break; }
+                UseContexts = *(PULONG)Buffer != 0;
+                break;
+
+            case FLTSAMPLE_IOCTL_CONTEXT_SELFTEST:
+                if (OutLength < sizeof(Stats.SelfTest) || SampleFilter == NULL)
+                {
+                    Status = STATUS_BUFFER_TOO_SMALL;
+                    break;
+                }
+                ContextSelfTest(Buffer);
+                Information = sizeof(Stats.SelfTest);
                 break;
 
             case FLTSAMPLE_IOCTL_SET_VETO:
@@ -740,7 +996,7 @@ static const FLT_REGISTRATION Registration =
     sizeof(FLT_REGISTRATION),
     FLT_REGISTRATION_VERSION,
     0,
-    NULL,
+    ContextRegistration,
     Operations,
     FilterUnload,
     InstanceSetup,

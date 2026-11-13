@@ -46,6 +46,13 @@ UpdateVolumeCallbackCounts(_In_ PFLT_VOLUME Volume,
         if (Filter->OperationTable[i])
             InterlockedAdd((PLONG)&Volume->CallbackCount[i], Delta);
     }
+
+    /* Stream and stream handle contexts live as long as the file is open: someone has to count the opens */
+    if (Filter->ContextDefs[FLTP_CTX_INDEX_STREAM].Registered ||
+        Filter->ContextDefs[FLTP_CTX_INDEX_STREAMHANDLE].Registered)
+    {
+        InterlockedAdd((PLONG)&Volume->ContextTracking, Delta);
+    }
 }
 
 /* An altitude is unique per volume, and so is the name of an instance of a filter. Volume lock held. */
@@ -170,7 +177,6 @@ FltpAttachInstance(_In_ PFLT_FILTER Filter,
     Instance->Filter = Filter;
     InitializeListHead(&Instance->FilterLink);
     InitializeListHead(&Instance->VolumeLink);
-    ExInitializeFastMutex(&Instance->InstanceContextLock);
 
     Instance->Altitude.Buffer = Instance->AltitudeBuffer;
     Instance->Altitude.MaximumLength = UseAltitude->Length + sizeof(WCHAR);
@@ -488,8 +494,8 @@ FltEnumerateInstances(_In_opt_ PFLT_VOLUME Volume,
 
     PAGED_CODE();
 
-    /* One of the two selects the list. Without either we'd need the global instance list */
-    if ((Volume == NULL) == (Filter == NULL))
+    /* One of the two at least selects the list. Without either we'd need the global instance list */
+    if (Volume == NULL && Filter == NULL)
         return STATUS_INVALID_PARAMETER;
 
     Head = Volume ? &Volume->InstanceList : &Filter->InstanceList;
@@ -505,6 +511,13 @@ FltEnumerateInstances(_In_opt_ PFLT_VOLUME Volume,
 
         if (Instance->Flags & INSFL_DELETING)
             continue;
+
+        /* Both given: the instances of the filter on the volume */
+        if ((Volume && Filter && Instance->Filter != Filter) ||
+            (Volume && Filter == NULL && FALSE))
+        {
+            continue;
+        }
 
         if (InstanceList && Total < InstanceListSize)
         {

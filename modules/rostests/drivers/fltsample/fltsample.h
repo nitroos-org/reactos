@@ -73,6 +73,9 @@ typedef struct _FLTSAMPLE_STATS
     LONGLONG LastWritePre;
     LONGLONG LastWritePost;
     ULONG Contexts[8];              /* see the FLTSAMPLE_CTX_* indexes */
+    ULONG CleanedByType[4];         /* instance, volume, stream, stream handle contexts freed */
+    ULONG ContextMismatch;          /* handle contexts which didn't say what the file table did */
+    ULONG SelfTest[16];             /* results of FLTSAMPLE_IOCTL_CONTEXT_SELFTEST */
     ULONG OpenFiles;                /* file objects the filter has seen opened and not yet closed */
     ULONG VolumeCount;
     WCHAR LastCreate[64];           /* name of the last create the filter looked at */
@@ -99,5 +102,6 @@ typedef struct _FLTSAMPLE_STATS
 #define FLTSAMPLE_IOCTL_REFUSE_UNLOAD   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x806, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define FLTSAMPLE_IOCTL_SET_VETO        CTL_CODE(FILE_DEVICE_UNKNOWN, 0x808, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define FLTSAMPLE_IOCTL_USE_CONTEXTS    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x807, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define FLTSAMPLE_IOCTL_CONTEXT_SELFTEST CTL_CODE(FILE_DEVICE_UNKNOWN, 0x809, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 #endif /* _FLTSAMPLE_H */
