@@ -363,6 +363,19 @@ static BOOL format_supported(const D2D1_PIXEL_FORMAT *format)
     return FALSE;
 }
 
+static BOOL d2d_bitmap_resource_is_sampleable(ID3D11Resource *resource)
+{
+    D3D11_TEXTURE2D_DESC desc;
+    ID3D11Texture2D *texture;
+
+    if (FAILED(ID3D11Resource_QueryInterface(resource, &IID_ID3D11Texture2D, (void **)&texture)))
+        return FALSE;
+    ID3D11Texture2D_GetDesc(texture, &desc);
+    ID3D11Texture2D_Release(texture);
+
+    return !!(desc.BindFlags & D3D11_BIND_SHADER_RESOURCE);
+}
+
 static void d2d_bitmap_init(struct d2d_bitmap *bitmap, struct d2d_device_context *context,
         ID3D11Resource *resource, D2D1_SIZE_U size, const D2D1_BITMAP_PROPERTIES1 *desc)
 {
@@ -393,6 +406,15 @@ static void d2d_bitmap_init(struct d2d_bitmap *bitmap, struct d2d_device_context
     {
         if (FAILED(hr = ID3D11Device_CreateShaderResourceView(d3d_device, resource, NULL, &bitmap->srv)))
             WARN("Failed to create SRV, hr %#lx.\n", hr);
+    }
+    else if (d2d_bitmap_resource_is_sampleable(resource))
+    {
+        /* An application that marks its bitmap D2D1_BITMAP_OPTIONS_CANNOT_DRAW and then fills with a bitmap brush
+         * made from it (Office does, for the atlases of its interface) gets what the texture holds on Windows:
+         * a brush without a shader resource view would sample nothing, and an opaque black rectangle
+         * would be drawn instead of the atlas region. */
+        if (FAILED(hr = ID3D11Device_CreateShaderResourceView(d3d_device, resource, NULL, &bitmap->srv)))
+            TRACE("Failed to create SRV for a bitmap that cannot draw, hr %#lx.\n", hr);
     }
     ID3D11Device_Release(d3d_device);
 
