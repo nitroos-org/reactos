@@ -125,6 +125,7 @@ KMT_TESTFUNC Test_MmIrqlFaultNullDriver;
 KMT_TESTFUNC Test_MmIrqlFaultNullKernel;
 KMT_TESTFUNC Test_MmIrqlFaultPagedWrite;
 KMT_TESTFUNC Test_MmReservedMapping;
+KMT_TESTFUNC Test_MmSystemPtes;
 KMT_TESTFUNC Test_MmSessionSpace;
 KMT_TESTFUNC Test_KeServiceTableAgain;
 KMT_TESTFUNC Test_MmSessionImage;
@@ -297,6 +298,7 @@ const KMT_TEST TestList[] =
     { "-MmIrqlFaultNullKernel",             Test_MmIrqlFaultNullKernel },
     { "-MmIrqlFaultPagedWrite",             Test_MmIrqlFaultPagedWrite },
     { "MmReservedMapping",                  Test_MmReservedMapping },
+    { "MmSystemPtes",                       Test_MmSystemPtes },
     { "MmSessionSpace",                     Test_MmSessionSpace },
     { "KeServiceTableAgain",                Test_KeServiceTableAgain },
     { "MmSessionImage",                     Test_MmSessionImage },
