@@ -21,6 +21,21 @@
 
 #define TAG_SAMPLE 'lSlF'
 
+/* Minifilters written for the WDK use these members of FLT_PARAMETERS: they have to compile */
+C_ASSERT(FIELD_OFFSET(FLT_PARAMETERS, DeviceIoControl.Common.IoControlCode) ==
+         FIELD_OFFSET(FLT_PARAMETERS, FileSystemControl.Common.FsControlCode));
+C_ASSERT(FIELD_OFFSET(FLT_PARAMETERS, DeviceIoControl.Buffered.SystemBuffer) ==
+         FIELD_OFFSET(FLT_PARAMETERS, FileSystemControl.Neither.InputBuffer));
+C_ASSERT(sizeof(((PFLT_PARAMETERS)0)->LockControl) != 0 &&
+         sizeof(((PFLT_PARAMETERS)0)->QuerySecurity) != 0 &&
+         sizeof(((PFLT_PARAMETERS)0)->SetSecurity) != 0 &&
+         sizeof(((PFLT_PARAMETERS)0)->QueryQuota) != 0 &&
+         sizeof(((PFLT_PARAMETERS)0)->Pnp) != 0 &&
+         sizeof(((PFLT_PARAMETERS)0)->AcquireForSectionSynchronization) != 0 &&
+         sizeof(((PFLT_PARAMETERS)0)->FastIoCheckIfPossible) != 0 &&
+         sizeof(((PFLT_PARAMETERS)0)->MdlRead) != 0 &&
+         sizeof(((PFLT_PARAMETERS)0)->MountVolume) != 0);
+
 #define MODE_NONE       0
 #define MODE_BLK        1
 #define MODE_NOWR       2
