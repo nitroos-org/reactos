@@ -383,12 +383,45 @@ DetermineACLSize(
  * together the whole SACL.
  */
 
-/* Bytes and number of the label ACEs (Labels) or of the other ACEs of a stored ACL */
+/*
+ * Which ACEs of a SACL a part of the descriptor is made of (Select, SECURITY_INFORMATION
+ * bits): LABEL_SECURITY_INFORMATION the mandatory label ACEs, SACL_SECURITY_INFORMATION
+ * every other ACE, and ATTRIBUTE_, SCOPE_ and PROCESS_TRUST_LABEL_SECURITY_INFORMATION the
+ * ACEs of their own type (a query for one of them on Windows 10 returns the SACL part, as
+ * one for the label does: oracle, registry keys).
+ */
+static
+BOOLEAN
+SepAceSelected(
+    _In_ UCHAR AceType,
+    _In_ SECURITY_INFORMATION Select)
+{
+    if (AceType == SYSTEM_MANDATORY_LABEL_ACE_TYPE)
+        return (Select & LABEL_SECURITY_INFORMATION) != 0;
+    if (Select & SACL_SECURITY_INFORMATION)
+        return TRUE;
+    switch (AceType)
+    {
+        case SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE:
+            return (Select & ATTRIBUTE_SECURITY_INFORMATION) != 0;
+        case SYSTEM_SCOPED_POLICY_ID_ACE_TYPE:
+            return (Select & SCOPE_SECURITY_INFORMATION) != 0;
+        case SYSTEM_PROCESS_TRUST_LABEL_ACE_TYPE:
+            return (Select & PROCESS_TRUST_LABEL_SECURITY_INFORMATION) != 0;
+        default:
+            return FALSE;
+    }
+}
+
+/* The label ACEs (TRUE) or the other ACEs (FALSE), as a selection */
+#define SEP_SELECT_LABELS(Labels) ((Labels) ? LABEL_SECURITY_INFORMATION : SACL_SECURITY_INFORMATION)
+
+/* Bytes and number of the selected ACEs of a stored ACL */
 static
 ULONG
 SepAceBytes(
     _In_ PACL Acl,
-    _In_ BOOLEAN Labels,
+    _In_ SECURITY_INFORMATION Select,
     _Out_ PULONG Count)
 {
     PUCHAR End = (PUCHAR)Acl + Acl->AclSize;
@@ -400,7 +433,7 @@ SepAceBytes(
     {
         if ((PUCHAR)(Ace + 1) > End || Ace->AceSize < sizeof(ACE_HEADER) || (PUCHAR)Ace + Ace->AceSize > End)
             break;
-        if ((Ace->AceType == SYSTEM_MANDATORY_LABEL_ACE_TYPE) == Labels)
+        if (SepAceSelected(Ace->AceType, Select))
         {
             Bytes += Ace->AceSize;
             (*Count)++;
@@ -410,14 +443,14 @@ SepAceBytes(
     return Bytes;
 }
 
-/* Appends the label ACEs (Labels) or the other ACEs of Source to Dest, which has room for them */
+/* Appends the selected ACEs of Source to Dest, which has room for them */
 static
 VOID
 SepAppendAces(
     _Inout_ PACL Dest,
     _Inout_ PULONG Used,
     _In_ PACL Source,
-    _In_ BOOLEAN Labels)
+    _In_ SECURITY_INFORMATION Select)
 {
     PUCHAR End = (PUCHAR)Source + Source->AclSize;
     PACE_HEADER Ace = (PACE_HEADER)(Source + 1);
@@ -427,7 +460,7 @@ SepAppendAces(
     {
         if ((PUCHAR)(Ace + 1) > End || Ace->AceSize < sizeof(ACE_HEADER) || (PUCHAR)Ace + Ace->AceSize > End)
             break;
-        if ((Ace->AceType == SYSTEM_MANDATORY_LABEL_ACE_TYPE) == Labels)
+        if (SepAceSelected(Ace->AceType, Select))
         {
             RtlCopyMemory((PUCHAR)Dest + *Used, Ace, Ace->AceSize);
             *Used += Ace->AceSize;
@@ -741,8 +774,9 @@ SeQuerySecurityDescriptorInfo(
     ULONG DaclLength = 0;
     ULONG SaclLength = 0;
     ULONG LabelCount = 0, LabelAclSize = 0;
-    BOOLEAN LabelsOnly = FALSE;
+    SECURITY_INFORMATION SaclParts = 0;
     SECURITY_DESCRIPTOR_CONTROL Control = 0;
+    SECURITY_INFORMATION Information;
     ULONG_PTR Current;
     ULONG SdLength;
 
@@ -766,9 +800,17 @@ SeQuerySecurityDescriptorInfo(
 
     ObjectSd = *ObjectsSecurityDescriptor;
 
+    /* BACKUP_SECURITY_INFORMATION is every part (on Windows 10 a key query with it returns owner, group, DACL and SACL) */
+    Information = *SecurityInformation;
+    if (Information & BACKUP_SECURITY_INFORMATION)
+    {
+        Information |= OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION |
+                       SACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION;
+    }
+
     /* Calculate the required security descriptor length */
     Control = SE_SELF_RELATIVE;
-    if (*SecurityInformation & OWNER_SECURITY_INFORMATION)
+    if (Information & OWNER_SECURITY_INFORMATION)
     {
         Owner = SepGetOwnerFromDescriptor(ObjectSd);
         if (Owner != NULL)
@@ -778,7 +820,7 @@ SeQuerySecurityDescriptorInfo(
         }
     }
 
-    if (*SecurityInformation & GROUP_SECURITY_INFORMATION)
+    if (Information & GROUP_SECURITY_INFORMATION)
     {
         Group = SepGetGroupFromDescriptor(ObjectSd);
         if (Group != NULL)
@@ -788,7 +830,7 @@ SeQuerySecurityDescriptorInfo(
         }
     }
 
-    if ((*SecurityInformation & DACL_SECURITY_INFORMATION) &&
+    if ((Information & DACL_SECURITY_INFORMATION) &&
         (ObjectSd->Control & SE_DACL_PRESENT))
     {
         Dacl = SepGetDaclFromDescriptor(ObjectSd);
@@ -800,8 +842,8 @@ SeQuerySecurityDescriptorInfo(
         Control |= (ObjectSd->Control & (SE_DACL_DEFAULTED | SE_DACL_PRESENT | SEP_DACL_INHERIT_BITS));
     }
 
-    if ((*SecurityInformation & SACL_SECURITY_INFORMATION) &&
-        (*SecurityInformation & LABEL_SECURITY_INFORMATION) &&
+    if ((Information & SACL_SECURITY_INFORMATION) &&
+        (Information & LABEL_SECURITY_INFORMATION) &&
         (ObjectSd->Control & SE_SACL_PRESENT))
     {
         Sacl = SepGetSaclFromDescriptor(ObjectSd);
@@ -812,20 +854,25 @@ SeQuerySecurityDescriptorInfo(
 
         Control |= (ObjectSd->Control & (SE_SACL_DEFAULTED | SE_SACL_PRESENT | SEP_SACL_INHERIT_BITS));
     }
-    else if ((*SecurityInformation & (SACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION)) &&
+    else if ((Information & (SACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION |
+                             ATTRIBUTE_SECURITY_INFORMATION | SCOPE_SECURITY_INFORMATION |
+                             PROCESS_TRUST_LABEL_SECURITY_INFORMATION)) &&
              (ObjectSd->Control & SE_SACL_PRESENT))
     {
         /*
-         * The label ACEs only, or the other ACEs only, of a present SACL:
-         * possibly none, which is an empty ACL (as after the last label was
-         * removed), not an absent one.
+         * The label ACEs only, or the other ACEs only (or the attribute,
+         * scope or trust label ACEs), of a present SACL: possibly none,
+         * which is an empty ACL (as after the last label was removed), not
+         * an absent one. A NULL SACL comes back as a present NULL SACL.
          */
-        LabelsOnly = (*SecurityInformation & LABEL_SECURITY_INFORMATION) != 0;
+        SaclParts = Information & (SACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION |
+                                   ATTRIBUTE_SECURITY_INFORMATION | SCOPE_SECURITY_INFORMATION |
+                                   PROCESS_TRUST_LABEL_SECURITY_INFORMATION);
         LabelSource = SepGetSaclFromDescriptor(ObjectSd);
         if (LabelSource != NULL)
         {
             /* The ACL's own size, and the DWORD-rounded room it takes in the descriptor */
-            LabelAclSize = sizeof(ACL) + SepAceBytes(LabelSource, LabelsOnly, &LabelCount);
+            LabelAclSize = sizeof(ACL) + SepAceBytes(LabelSource, SaclParts, &LabelCount);
             ASSERT(LabelAclSize <= LabelSource->AclSize);
             SaclLength = ROUND_UP(LabelAclSize, 4);
         }
@@ -882,7 +929,7 @@ SeQuerySecurityDescriptorInfo(
         RtlZeroMemory(LabelAcl, SaclLength);
         LabelAcl->AclRevision = LabelSource->AclRevision;
         LabelAcl->AclSize = (USHORT)LabelAclSize;
-        SepAppendAces(LabelAcl, &Used, LabelSource, LabelsOnly);
+        SepAppendAces(LabelAcl, &Used, LabelSource, SaclParts);
         RelSD->Sacl = (ULONG)(Current - (ULONG_PTR)SecurityDescriptor);
         Current += SaclLength;
     }
@@ -1144,9 +1191,9 @@ SeSetSecurityDescriptorInfoEx(
         OldSacl = (ObjectSd->Control & SE_SACL_PRESENT) ? SepGetSaclFromDescriptor(ObjectSd) : NULL;
         NewLabels = (SecurityDescriptor->Control & SE_SACL_PRESENT) ? SepGetSaclFromDescriptor(SecurityDescriptor) : NULL;
         if (OldSacl)
-            KeepBytes = SepAceBytes(OldSacl, !TakeLabels, &KeepCount);
+            KeepBytes = SepAceBytes(OldSacl, SEP_SELECT_LABELS(!TakeLabels), &KeepCount);
         if (NewLabels)
-            LabelBytes = SepAceBytes(NewLabels, TakeLabels, &LabelCount);
+            LabelBytes = SepAceBytes(NewLabels, SEP_SELECT_LABELS(TakeLabels), &LabelCount);
 
         Sacl = NULL;
         /* A label change keeps the SACL's protection and inheritance state; an audit change sets it */
@@ -1170,9 +1217,9 @@ SeSetSecurityDescriptorInfoEx(
             MergedSacl->AclSize = (USHORT)SaclLength;
             Used = sizeof(ACL);
             if (OldSacl)
-                SepAppendAces(MergedSacl, &Used, OldSacl, !TakeLabels);
+                SepAppendAces(MergedSacl, &Used, OldSacl, SEP_SELECT_LABELS(!TakeLabels));
             if (NewLabels)
-                SepAppendAces(MergedSacl, &Used, NewLabels, TakeLabels);
+                SepAppendAces(MergedSacl, &Used, NewLabels, SEP_SELECT_LABELS(TakeLabels));
 
             Sacl = MergedSacl;
             Control |= SE_SACL_PRESENT;
@@ -1874,11 +1921,10 @@ SepCheckCreatorDescriptor(
     _In_ KPROCESSOR_MODE AccessMode)
 {
     PRIVILEGE_SET Privilege;
-    BOOLEAN Present, Defaulted, LabelOnly, Valid = FALSE;
+    BOOLEAN Present, Defaulted, LabelOnly;
     PACL Sacl;
     PSID Owner;
     PACE_HEADER Ace;
-    PTOKEN Token;
     ULONG i;
 
     PAGED_CODE();
@@ -1910,6 +1956,52 @@ SepCheckCreatorDescriptor(
     /* The owner */
     if (!NT_SUCCESS(RtlGetOwnerSecurityDescriptor(ExplicitDescriptor, &Owner, &Defaulted)) || !Owner)
         return STATUS_SUCCESS;
+
+    return SepCheckOwnerSid(Owner, SubjectContext, AccessMode);
+}
+
+/**
+ * @brief
+ * Whether a caller may make a SID the owner of an object, as Windows 10
+ * decides it when a registry key is created with an owner (oracle probe of
+ * the registry ACL follow-up) or the owner of a key is set: the token's user
+ * or one of its groups that has SE_GROUP_OWNER (not a deny-only one), or any
+ * SID with SeRestorePrivilege enabled. SeTakeOwnershipPrivilege does not
+ * help (it opens for WRITE_OWNER; it does not choose the owner). The primary
+ * group is not checked. Kernel-mode callers are not checked.
+ *
+ * @param[in] Owner
+ * The owner to be set (captured).
+ *
+ * @param[in] SubjectContext
+ * The caller's subject context.
+ *
+ * @param[in] AccessMode
+ * The mode the request came from.
+ *
+ * @return
+ * STATUS_SUCCESS or STATUS_INVALID_OWNER.
+ */
+NTSTATUS
+NTAPI
+SepCheckOwnerSid(
+    _In_ PSID Owner,
+    _In_ PSECURITY_SUBJECT_CONTEXT SubjectContext,
+    _In_ KPROCESSOR_MODE AccessMode)
+{
+    PRIVILEGE_SET Privilege;
+    BOOLEAN Valid = FALSE;
+    PTOKEN Token;
+    ULONG i;
+
+    PAGED_CODE();
+
+    if (AccessMode == KernelMode)
+        return STATUS_SUCCESS;
+
+    Privilege.PrivilegeCount = 1;
+    Privilege.Control = PRIVILEGE_SET_ALL_NECESSARY;
+    Privilege.Privilege[0].Attributes = SE_PRIVILEGE_ENABLED;
 
     SeLockSubjectContext(SubjectContext);
     Token = SubjectContext->ClientToken ? SubjectContext->ClientToken : SubjectContext->PrimaryToken;

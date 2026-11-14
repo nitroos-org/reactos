@@ -7,9 +7,9 @@
 
 /*
  * The configuration manager does not enforce key security yet: the open
- * check in CmpDoOpen runs against the synthetic Everyone:GENERIC_ALL
- * descriptor of CmpQuerySecurityDescriptor, and a create checks nothing on
- * the parent. Audit mode runs a second, shadow access check next to the
+ * check in CmpDoOpen (CmpCheckKeyOpenAccess) runs against the legacy
+ * Everyone:GENERIC_ALL descriptor, not the one the key reports, and a create
+ * checks nothing on the parent. Audit mode runs a second, shadow access check next to the
  * real one, against the descriptor the key would have on Windows 10, and
  * records every open or create that Windows would deny. It never changes a
  * result: the shadow check runs after the real decision, its outcome is only
@@ -203,6 +203,8 @@ typedef struct _CMP_ACL_SD_SPEC
 #define KR  KEY_READ
 #define CI  CONTAINER_INHERIT_ACE
 #define OICI (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE)
+/* A present NULL SACL, auto-inherited (SDDL S:AINO_ACCESS_CONTROL): what these keys report on Windows (oracle) */
+#define CMP_ACL_NULL_SACL_AI (SE_SACL_PRESENT | SE_SACL_AUTO_INHERITED)
 
 /*
  * Windows 10 22H2 descriptors (oracle capture). A synthesised descriptor
@@ -229,8 +231,8 @@ static const CMP_ACL_SD_SPEC CmpAclSdMaster =
 static const CMP_ACL_SD_SPEC CmpAclSdHiveRoot =
 {
     /* HKLM\SYSTEM, HKLM\SOFTWARE, HKLM\SAM:
-       O:BAG:SYD:PAI(A;CI;KR;;;BU)(A;CI;KA;;;BA)(A;CI;KA;;;SY)(A;CI;KA;;;CO)(A;CI;KR;;;AC)(A;CI;KR;;;LPAC) */
-    CmpAclSidAdmins, CmpAclSidSystem, SE_DACL_PROTECTED | SE_DACL_AUTO_INHERITED, 6,
+       O:BAG:SYD:PAI(A;CI;KR;;;BU)(A;CI;KA;;;BA)(A;CI;KA;;;SY)(A;CI;KA;;;CO)(A;CI;KR;;;AC)(A;CI;KR;;;LPAC)S:AINO_ACCESS_CONTROL */
+    CmpAclSidAdmins, CmpAclSidSystem, SE_DACL_PROTECTED | SE_DACL_AUTO_INHERITED | CMP_ACL_NULL_SACL_AI, 6,
     {
         { CI, CmpAclSidUsers, KR },
         { CI, CmpAclSidAdmins, KA },
@@ -243,8 +245,9 @@ static const CMP_ACL_SD_SPEC CmpAclSdHiveRoot =
 
 static const CMP_ACL_SD_SPEC CmpAclSdSamSecurity =
 {
-    /* HKLM\SAM\SAM, HKLM\SECURITY: O:BAG:SYD:(A;CI;KA;;;SY)(A;CI;RCWD;;;BA) */
-    CmpAclSidAdmins, CmpAclSidSystem, 0, 2,
+    /* HKLM\SAM\SAM, HKLM\SECURITY: O:BAG:SYD:(A;CI;KA;;;SY)(A;CI;RCWD;;;BA) (control 0x8804 and
+       0x8814: SE_SACL_AUTO_INHERITED both, the NULL SACL present on SECURITY only) */
+    CmpAclSidAdmins, CmpAclSidSystem, SE_SACL_AUTO_INHERITED, 2,
     {
         { CI, CmpAclSidSystem, KA },
         { CI, CmpAclSidAdmins, READ_CONTROL | WRITE_DAC },
@@ -256,7 +259,7 @@ static const CMP_ACL_SD_SPEC CmpAclSdTaskCache =
     /* ...\Windows NT\CurrentVersion\Schedule\TaskCache: D:PAI(A;OICI;CCSWRPSDRC;;;BA)(A;OICI;KA;;;SY).
        The owner is not in the capture; an admin's MAXIMUM_ALLOWED there was 0x30019 (no WRITE_DAC),
        so it is not BA: SY is used. */
-    CmpAclSidSystem, CmpAclSidSystem, SE_DACL_PROTECTED | SE_DACL_AUTO_INHERITED, 2,
+    CmpAclSidSystem, CmpAclSidSystem, SE_DACL_PROTECTED | SE_DACL_AUTO_INHERITED | CMP_ACL_NULL_SACL_AI, 2,
     {
         { OICI, CmpAclSidAdmins, KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS | KEY_NOTIFY | DELETE | READ_CONTROL },
         { OICI, CmpAclSidSystem, KA },
@@ -268,7 +271,7 @@ static const CMP_ACL_SD_SPEC CmpAclSdEventLog =
     /* SYSTEM\<ControlSet>\Services\EventLog:
        D:PAI(A;;KR;;;AU)(A;CIIO;GR;;;AU)(A;;KR;;;SO)(A;CIIO;GR;;;SO)(A;;KA;;;BA)(A;CIIO;GA;;;BA)(A;;KA;;;SY)(A;CIIO;GA;;;SY)
        in its effective form for the key and its subkeys (GR and GA map to KR and KA) */
-    CmpAclSidSystem, CmpAclSidSystem, SE_DACL_PROTECTED | SE_DACL_AUTO_INHERITED, 4,
+    CmpAclSidSystem, CmpAclSidSystem, SE_DACL_PROTECTED | SE_DACL_AUTO_INHERITED | CMP_ACL_NULL_SACL_AI, 4,
     {
         { CI, CmpAclSidAuthenticated, KR },
         { CI, CmpAclSidServerOperators, KR },
@@ -281,7 +284,7 @@ static const CMP_ACL_SD_SPEC CmpAclSdDefault =
 {
     /* HKU\.DEFAULT (and the S-1-5-18 link):
        O:BAG:SYD:PAI(A;CI;KR;;;BU)(A;CI;KA;;;BA)(A;CI;KA;;;SY)(A;CI;KA;;;CO)(A;;KR;;;AC)(A;;KR;;;LPAC) */
-    CmpAclSidAdmins, CmpAclSidSystem, SE_DACL_PROTECTED | SE_DACL_AUTO_INHERITED, 6,
+    CmpAclSidAdmins, CmpAclSidSystem, SE_DACL_PROTECTED | SE_DACL_AUTO_INHERITED | CMP_ACL_NULL_SACL_AI, 6,
     {
         { CI, CmpAclSidUsers, KR },
         { CI, CmpAclSidAdmins, KA },
@@ -296,7 +299,7 @@ static const CMP_ACL_SD_SPEC CmpAclSdUser =
 {
     /* HKU\<SID> (HKCU root, HKCU\Software, and S-1-5-19/20 with LS/NS):
        O:BAG:SYD:P(A;OICI;KA;;;<SID>)(A;OICI;KA;;;SY)(A;OICI;KA;;;BA)(A;OICI;KR;;;RC)(A;;KR;;;AC)(A;;KR;;;LPAC) */
-    CmpAclSidAdmins, CmpAclSidSystem, SE_DACL_PROTECTED, 6,
+    CmpAclSidAdmins, CmpAclSidSystem, SE_DACL_PROTECTED | CMP_ACL_NULL_SACL_AI, 6,
     {
         { OICI, CmpAclSidUser, KA },
         { OICI, CmpAclSidSystem, KA },
@@ -912,8 +915,15 @@ CmpAclCopyStoredSd(
     if (!Copy)
         return NULL;
 
-    /* The copy is what is checked (offsets, SIDs, ACLs and their ACEs) and used */
-    if (!RtlValidRelativeSecurityDescriptor(Copy, Length, 0))
+    /*
+     * The copy is what is checked (offsets, SIDs, ACLs and their ACEs) and used. Callers copy
+     * RtlLengthSecurityDescriptor() bytes of it, the sum of its parts: a descriptor whose parts
+     * lie beyond that sum (a gap before one of them) or add up to more than it was stored with
+     * (overlapping parts) is not sound either, so the parts must also fit the sum.
+     */
+    if (!RtlValidRelativeSecurityDescriptor(Copy, Length, 0) ||
+        RtlLengthSecurityDescriptor(Copy) > Length ||
+        !RtlValidRelativeSecurityDescriptor(Copy, RtlLengthSecurityDescriptor(Copy), 0))
     {
         if (*PoolCopy)
         {
@@ -1027,7 +1037,9 @@ CmpAclIsAdminSid(
  * descriptor or its existence to anyone else. Deny ACEs are not counted (a
  * deny never makes the answer yes), and an allow ACE of a type other than the
  * plain one is taken to grant everything. CREATOR OWNER / CREATOR GROUP in an
- * effective ACE never match a token; OWNER RIGHTS is the owner, checked.
+ * effective ACE never match a token; OWNER RIGHTS is the owner, checked. A
+ * descriptor without an owner is not judged admin-only: nothing the kernel
+ * stores lacks one, so it came from somewhere else (an edited hive file).
  */
 static
 BOOLEAN
@@ -1044,7 +1056,7 @@ CmpAclSdAdminWriteOnly(
     ULONG i;
 
     if (!NT_SUCCESS(RtlGetOwnerSecurityDescriptor(Sd, &Owner, &Defaulted)) ||
-        (Owner && !CmpAclIsAdminSid(Owner)))
+        !Owner || !CmpAclIsAdminSid(Owner))
     {
         return FALSE;
     }
@@ -1206,15 +1218,35 @@ NTAPI
 CmpCaptureParentSecurity(
     _In_ PCM_KEY_CONTROL_BLOCK ParentKcb)
 {
+    if (!CmpStoreKeySecurity() || !ParentKcb)
+        return NULL;
+
+    return CmpCaptureKeySecurity(ParentKcb);
+}
+
+/*
+ * A pool copy (self-relative, validated) of the descriptor of the key: its
+ * stored one, else the one it would have on Windows (inherited from the
+ * nearest ancestor that has one, else the policy for its place). It is what
+ * the key reports (NtQuerySecurityObject) and what a set merges into. Free
+ * it with CmpFreeParentSecurity. NULL before the tables exist (early boot,
+ * legacy mode) or without memory. The caller holds the KCB lock.
+ */
+DECLSPEC_NOINLINE
+PSECURITY_DESCRIPTOR
+NTAPI
+CmpCaptureKeySecurity(
+    _In_ PCM_KEY_CONTROL_BLOCK Kcb)
+{
     ULONG Buffer[CMP_ACL_SD_BUFFER / sizeof(ULONG)];
     PSECURITY_DESCRIPTOR Sd, ToFree, Copy = NULL;
     PVOID PoolCopy;
     ULONG Rule, Length;
 
-    if (!CmpStoreKeySecurity() || !ParentKcb)
+    if (!CmpAclReady || !Kcb)
         return NULL;
 
-    Sd = CmpGetEffectiveKeySd(ParentKcb, Buffer, sizeof(Buffer), &Rule, &ToFree, &PoolCopy, FALSE);
+    Sd = CmpGetEffectiveKeySd(Kcb, Buffer, sizeof(Buffer), &Rule, &ToFree, &PoolCopy, FALSE);
     if (Sd)
     {
         Length = RtlLengthSecurityDescriptor(Sd);
@@ -2258,6 +2290,9 @@ CmpAclInitialize(VOID)
      * Mode: the default, then the registry value, then the boot option. The
      * value may turn the audit and storage off (legacy) only if the key that
      * holds it is one only administrators can change (see the top of the file).
+     * Only 0 lowers the mode today (the default is audit and enforce audits).
+     * Once enforcement exists (registry ACL plan R8), every value below the
+     * compiled default lowers it and the same judgement must cover all of them.
      */
     CmpRegistryAclMode = CM_REGACL_MODE_AUDIT;
     CmpRegistryAclModeSource = 0;
