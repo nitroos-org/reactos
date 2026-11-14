@@ -1053,11 +1053,24 @@ PATH_Arc(
         corners[1].y = temp;
     }
 
+    /* A mapping that squashes an axis (a zero extent) leaves the arc without area: nothing to draw (the normalized
+       points below would divide by the zero radius, the angles become NaN and the quadrant loop never ends) */
+    if (corners[0].x == corners[1].x || corners[0].y == corners[1].y)
+    {
+        Ret = TRUE;
+        goto ArcExit;
+    }
+
     /* Compute start and end angle */
     PATH_NormalizePoint(corners, &pointStart, &x, &y);
     angleStart = atan2(*(FLOAT*)&y, *(FLOAT*)&x);
     PATH_NormalizePoint(corners, &pointEnd, &x, &y);
     angleEnd = atan2(*(FLOAT*)&y, *(FLOAT*)&x);
+    if (!(fabs(angleStart) <= M_PI + 1e-6) || !(fabs(angleEnd) <= M_PI + 1e-6))
+    {
+        Ret = FALSE;
+        goto ArcExit;
+    }
 
     /* Make sure the end angle is "on the right side" of the start angle */
     if (clockwise)
@@ -1495,6 +1508,231 @@ PATH_FlattenPath(PPATH pPath)
     return newPath;
 }
 
+/* How far past the clip box a polygon may reach before it is cut to the box (plus this margin) */
+#define PATH_CLIP_MARGIN 16384
+
+enum { PATH_CLIP_UNKNOWN, PATH_CLIP_OUTSIDE, PATH_CLIP_INSIDE, PATH_CLIP_REACHES_FAR };
+
+/* Where the bounds of the path (device points of the DC) lie to the clip box of the DC: entirely outside (painting it
+ * changes nothing), reaching far past the box (the region of such an outline has a scanline for every row it spans: a
+ * pen of 2^28 pixels or a box of 2^30 stalls the call for seconds), or neither. *prcClip is the clip box widened by
+ * PATH_CLIP_MARGIN, in the coordinates of the path. */
+static
+INT
+PATH_GetClipState(PDC dc, PPATH pPath, RECTL *prcClip)
+{
+    LONG l, t, r, b;
+    LONGLONG cl, ct, cr, cb;
+    PREGION prgn;
+    INT i;
+
+    if (pPath->numEntriesUsed < 1)
+        return PATH_CLIP_UNKNOWN;
+
+    if (dc->fs & DC_DIRTY_RAO)
+        CLIPPING_UpdateGCRegion(dc);
+
+    prgn = dc->prgnRao;
+    if (!prgn)
+        return PATH_CLIP_UNKNOWN;
+
+    l = r = pPath->pPoints[0].x;
+    t = b = pPath->pPoints[0].y;
+    for (i = 1; i < pPath->numEntriesUsed; i++)
+    {
+        if (pPath->pPoints[i].x < l) l = pPath->pPoints[i].x;
+        if (pPath->pPoints[i].x > r) r = pPath->pPoints[i].x;
+        if (pPath->pPoints[i].y < t) t = pPath->pPoints[i].y;
+        if (pPath->pPoints[i].y > b) b = pPath->pPoints[i].y;
+    }
+
+    /* The clip regions are in surface coordinates: the path is in the coordinates of the DC. One pixel of margin keeps
+       the rounding of the region scan conversion out of the decision. */
+    cl = (LONGLONG)prgn->rdh.rcBound.left - dc->ptlDCOrig.x - 1;
+    ct = (LONGLONG)prgn->rdh.rcBound.top - dc->ptlDCOrig.y - 1;
+    cr = (LONGLONG)prgn->rdh.rcBound.right - dc->ptlDCOrig.x + 1;
+    cb = (LONGLONG)prgn->rdh.rcBound.bottom - dc->ptlDCOrig.y + 1;
+
+    if ((r < cl) || (l > cr) || (b < ct) || (t > cb))
+        return PATH_CLIP_OUTSIDE;
+
+    /* The box of the clip region is a surface rectangle (28 bit coordinates): the widened rectangle fits a LONG */
+    prcClip->left = (LONG)(cl + 1 - PATH_CLIP_MARGIN);
+    prcClip->top = (LONG)(ct + 1 - PATH_CLIP_MARGIN);
+    prcClip->right = (LONG)(cr - 1 + PATH_CLIP_MARGIN);
+    prcClip->bottom = (LONG)(cb - 1 + PATH_CLIP_MARGIN);
+
+    if (l < prcClip->left || r > prcClip->right || t < prcClip->top || b > prcClip->bottom)
+        return PATH_CLIP_REACHES_FAR;
+    return PATH_CLIP_INSIDE;
+}
+
+/* One pass of the Sutherland-Hodgman clip of a polygon: the points on the inner side of one edge of the rectangle
+ * (iSide 0: x >= lim, 1: x <= lim, 2: y >= lim, 3: y <= lim) are kept, an edge that crosses it is cut at it. pOut holds
+ * 2 * n points. Integer arithmetic only (the products fit 64 bits). */
+static
+ULONG
+PATH_ClipPolygonPass(const POINT *pIn, ULONG n, POINT *pOut, INT iSide, LONG lim)
+{
+    ULONG i, m = 0;
+    POINT prev = pIn[n - 1];
+    BOOL bPrevIn;
+
+#define PATH_CLIP_IN(p) ((iSide == 0) ? ((p).x >= lim) : (iSide == 1) ? ((p).x <= lim) : \
+                         (iSide == 2) ? ((p).y >= lim) : ((p).y <= lim))
+    bPrevIn = PATH_CLIP_IN(prev);
+    for (i = 0; i < n; i++)
+    {
+        POINT cur = pIn[i], cut;
+        BOOL bIn = PATH_CLIP_IN(cur);
+
+        if (bIn != bPrevIn)
+        {
+            if (iSide < 2)
+            {
+                cut.x = lim;
+                cut.y = prev.y + (LONG)(((LONGLONG)cur.y - prev.y) * ((LONGLONG)lim - prev.x) / ((LONGLONG)cur.x - prev.x));
+            }
+            else
+            {
+                cut.y = lim;
+                cut.x = prev.x + (LONG)(((LONGLONG)cur.x - prev.x) * ((LONGLONG)lim - prev.y) / ((LONGLONG)cur.y - prev.y));
+            }
+            pOut[m++] = cut;
+        }
+        if (bIn)
+            pOut[m++] = cur;
+        prev = cur;
+        bPrevIn = bIn;
+    }
+#undef PATH_CLIP_IN
+    return m;
+}
+
+/* Fills Rgn like PATH_PathToRegion, from the polygons of the path cut to the rectangle prc (what lies outside the
+ * rectangle is not painted: the region would only be cut to the clip box later). The cut edges run outside the box,
+ * the rounding of their end points (half a pixel at the rectangle) is far from it. Returns FALSE when it fails,
+ * *pbEmpty is set when nothing is left. */
+static
+BOOL
+PATH_PathToRegionClipped(PPATH pPath, INT Mode, PREGION Rgn, const RECTL *prc, PBOOL pbEmpty)
+{
+    POINT *pAll = NULL, *pA = NULL, *pB = NULL, *pTmp;
+    PULONG pCounts = NULL;
+    ULONG nAll = 0, nPoly = 0, nAllocAll = 0, nAllocBuf = 0, nBuf;
+    LONG start = 0, i;
+    BOOL ret = FALSE;
+    *pbEmpty = FALSE;
+
+    pCounts = ExAllocatePoolWithTag(PagedPool, (pPath->numEntriesUsed / 2 + 1) * sizeof(*pCounts), TAG_PATH);
+    if (!pCounts)
+        goto NoMem;
+
+    for (i = 1; i <= pPath->numEntriesUsed; i++)
+    {
+        ULONG n, k;
+
+        /* the polygon start..i-1 ends at the next PT_MOVETO or the end of the path */
+        if (i < pPath->numEntriesUsed && pPath->pFlags[i] != PT_MOVETO)
+            continue;
+        n = i - start;
+
+        if (n >= 3)
+        {
+            /* a polygon is cut in four passes, each at most doubles it */
+            ULONG need = n * 2;
+
+            if (need + 8 > nAllocBuf)
+            {
+                nAllocBuf = need + 8;
+                if (pA) ExFreePoolWithTag(pA, TAG_PATH);
+                if (pB) ExFreePoolWithTag(pB, TAG_PATH);
+                pA = ExAllocatePoolWithTag(PagedPool, nAllocBuf * sizeof(POINT), TAG_PATH);
+                pB = ExAllocatePoolWithTag(PagedPool, nAllocBuf * sizeof(POINT), TAG_PATH);
+                if (!pA || !pB)
+                {
+                    nAllocBuf = 0;
+                    goto NoMem;
+                }
+            }
+            nBuf = n;
+            RtlCopyMemory(pA, &pPath->pPoints[start], n * sizeof(POINT));
+            for (k = 0; k < 4 && nBuf >= 3; k++)
+            {
+                LONG lim = (k == 0) ? prc->left : (k == 1) ? prc->right : (k == 2) ? prc->top : prc->bottom;
+                ULONG m;
+
+                /* each pass can double the points; the buffers hold 2 * n + 8, so the polygon is cut into the second
+                   buffer and, if it grew, the cut stops at what fits (a simple polygon grows by a few points) */
+                if (nBuf * 2 > nAllocBuf)
+                {
+                    ULONG newAlloc = nBuf * 2 + 8;
+                    POINT *pNewA = ExAllocatePoolWithTag(PagedPool, newAlloc * sizeof(POINT), TAG_PATH);
+                    POINT *pNewB = ExAllocatePoolWithTag(PagedPool, newAlloc * sizeof(POINT), TAG_PATH);
+
+                    if (!pNewA || !pNewB)
+                    {
+                        if (pNewA) ExFreePoolWithTag(pNewA, TAG_PATH);
+                        if (pNewB) ExFreePoolWithTag(pNewB, TAG_PATH);
+                        goto NoMem;
+                    }
+                    RtlCopyMemory(pNewA, pA, nBuf * sizeof(POINT));
+                    ExFreePoolWithTag(pA, TAG_PATH);
+                    ExFreePoolWithTag(pB, TAG_PATH);
+                    pA = pNewA;
+                    pB = pNewB;
+                    nAllocBuf = newAlloc;
+                }
+                m = PATH_ClipPolygonPass(pA, nBuf, pB, (INT)k, lim);
+                pTmp = pA; pA = pB; pB = pTmp;
+                nBuf = m;
+            }
+
+            if (nBuf >= 3)
+            {
+                if (nAll + nBuf > nAllocAll)
+                {
+                    ULONG newAlloc = (nAll + nBuf) * 2;
+                    POINT *pNew = ExAllocatePoolWithTag(PagedPool, newAlloc * sizeof(POINT), TAG_PATH);
+
+                    if (!pNew)
+                        goto NoMem;
+                    if (pAll)
+                    {
+                        RtlCopyMemory(pNew, pAll, nAll * sizeof(POINT));
+                        ExFreePoolWithTag(pAll, TAG_PATH);
+                    }
+                    pAll = pNew;
+                    nAllocAll = newAlloc;
+                }
+                RtlCopyMemory(&pAll[nAll], pA, nBuf * sizeof(POINT));
+                nAll += nBuf;
+                pCounts[nPoly++] = nBuf;
+            }
+        }
+        start = i;
+    }
+
+    if (!nPoly)
+    {
+        *pbEmpty = TRUE;
+        ret = TRUE;
+        goto Fail;
+    }
+    ret = REGION_SetPolyPolygonRgn(Rgn, pAll, pCounts, nPoly, Mode);
+    goto Fail;
+
+NoMem:
+    EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+
+Fail:
+    if (pA) ExFreePoolWithTag(pA, TAG_PATH);
+    if (pB) ExFreePoolWithTag(pB, TAG_PATH);
+    if (pAll) ExFreePoolWithTag(pAll, TAG_PATH);
+    if (pCounts) ExFreePoolWithTag(pCounts, TAG_PATH);
+    return ret;
+}
+
 /* PATH_PathToRegion
  *
  * Fills Rgn from the specified path using the specified polygon
@@ -1578,6 +1816,15 @@ PATH_FillPathEx(
     XFORML xform;
     PREGION  Rgn;
     PDC_ATTR pdcattr = dc->pdcattr;
+    RECTL rcClip;
+    INT iClip;
+    BOOL bEmpty = FALSE, bOk;
+
+    /* Nothing of the path is inside the clip box: there is nothing to paint (the region of a huge outline has a
+       scanline for every row it spans) */
+    iClip = PATH_GetClipState(dc, pPath, &rcClip);
+    if (iClip == PATH_CLIP_OUTSIDE)
+        return TRUE;
 
     /* Allocate a temporary region */
     Rgn = IntSysCreateRectpRgn(0, 0, 0, 0);
@@ -1587,12 +1834,22 @@ PATH_FillPathEx(
         return FALSE;
     }
 
-    if (!PATH_PathToRegion(pPath, pdcattr->jFillMode, Rgn))
+    /* An outline that reaches far past the clip box is cut to the box (and a margin) first */
+    if (iClip == PATH_CLIP_REACHES_FAR)
+        bOk = PATH_PathToRegionClipped(pPath, pdcattr->jFillMode, Rgn, &rcClip, &bEmpty);
+    else
+        bOk = PATH_PathToRegion(pPath, pdcattr->jFillMode, Rgn);
+    if (!bOk)
     {
         TRACE("PFP : Fail P2R\n");
         /* EngSetLastError ? */
         REGION_Delete(Rgn);
         return FALSE;
+    }
+    if (bEmpty)
+    {
+        REGION_Delete(Rgn);
+        return TRUE;
     }
 
     /* Since PaintRgn interprets the region as being in logical coordinates

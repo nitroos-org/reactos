@@ -327,6 +327,182 @@ static void test_ArcToFailure(void)
     ok_still_draws("ArcToFailure");
 }
 
+/* The pen and the shape make an outline that does not touch the DC, or reaches millions of pixels past it: the
+   region of the outline used to have a scanline for each row it spans, and the call took seconds to minutes (or did
+   not return). Nothing of the outline that lies outside the DC is painted, and what lies inside is exact. */
+static void test_HugeOutlines(void)
+{
+    static const struct
+    {
+        int sh, box[4], p[4];
+        int width;
+        BOOL rot;
+        int ink; /* >= 0: the exact number of pixels painted (-1: not checked) */
+    } c[] =
+    {
+        /* a pen wider than the world: the outline covers the DIB (its pixels are not counted: Windows paints all of
+           them, the outline of the widened path keeps a hole as wide as the pen's overhang) */
+        { SH_ELLIPSE, { 8, 8, 56, 56 }, { 0 }, 1 << 28, FALSE, -1 },
+        { SH_ELLIPSE, { 8, 8, 56, 56 }, { 0 }, 100000, FALSE, -1 },
+        { SH_ROUNDRECT, { 8, 8, 56, 56 }, { 10, 10 }, 1 << 28, FALSE, -1 },
+        /* a box of 2^30: the outline is nowhere near the DIB */
+        { SH_ELLIPSE, { -(1 << 30), -(1 << 30), 1 << 30, 1 << 30 }, { 0 }, 7, FALSE, 0 },
+        { SH_CHORD, { -(1 << 30), -(1 << 30), 1 << 30, 1 << 30 }, { 1 << 30, 0, 0, -(1 << 30) }, 7, FALSE, 0 },
+        /* a big box under a rotation: the outline is a curve through the DIB's neighbourhood */
+        { SH_ELLIPSE, { -(1 << 25), -(1 << 25), 1 << 25, 1 << 25 }, { 0 }, 7, TRUE, -1 },
+        { SH_ELLIPSE, { 0, 0, 100000, 100000 }, { 0 }, 7, FALSE, -1 },
+        { SH_ROUNDRECT, { 0, 0, 100000, 100000 }, { 5000, 5000 }, 7, FALSE, -1 },
+        { SH_ARC, { 0, 0, 100000, 100000 }, { 100000, 50000, 50000, 0 }, 25, FALSE, -1 },
+    };
+    static const XFORM x30 = { 0.8660254f, 0.5f, -0.5f, 0.8660254f, 32.0f, 32.0f };
+    int i, n;
+
+    for (i = 0; i < (int)(sizeof(c) / sizeof(c[0])); i++)
+    {
+        HPEN pen = CreatePen(PS_SOLID, c[i].width, RGB(0, 128, 0));
+        double t0;
+        BOOL ret;
+
+        ResetDC_();
+        Clear();
+        SelectObject(g_dc, pen);
+        SelectObject(g_dc, GetStockObject(NULL_BRUSH));
+        if (c[i].rot)
+        {
+            SetGraphicsMode(g_dc, GM_ADVANCED);
+            SetWorldTransform(g_dc, &x30);
+        }
+        t0 = Now();
+        ret = DrawShape(c[i].sh, c[i].box, c[i].p);
+        ok(Now() - t0 < MAX_MS, "[%d] the call took %.0f ms (returned %d)\n", i, Now() - t0, ret);
+        n = CountInk();
+        if (c[i].ink >= 0)
+            ok(n == c[i].ink, "[%d] painted %d pixels, expected %d\n", i, n, c[i].ink);
+        SelectObject(g_dc, GetStockObject(BLACK_PEN));
+        DeleteObject(pen);
+    }
+
+    /* An outline cut at a distance of 100000 pixels leaves the visible part exact: a circle of radius 100000 whose
+       rightmost point is at x = 32; its edge is a vertical line there (it bends by 0.005 pixel over the DIB). With a
+       black pen of 7 and a red brush: red to the left, the pen in columns 29..35, white to the right. */
+    {
+        HBRUSH hbr = CreateSolidBrush(RGB(255, 0, 0));
+        int y, x, black;
+        double t0_;
+
+        ResetDC_();
+        Clear();
+        SelectObject(g_dc, CreatePen(PS_SOLID, 7, 0));
+        SelectObject(g_dc, hbr);
+        t0_ = Now();
+        BeginPath(g_dc);
+        ok(Ellipse(g_dc, 32 - 200000, 32 - 100000, 32, 32 + 100000), "big Ellipse fails\n");
+        EndPath(g_dc);
+        ok(StrokeAndFillPath(g_dc), "StrokeAndFillPath fails\n");
+        ok(Now() - t0_ < MAX_MS, "big Ellipse took %.0f ms\n", Now() - t0_);
+        for (y = 2; y < DIMS - 2; y += 10)
+        {
+            ok(Pixel(10, y) == 0xFF0000, "row %d: x=10 is %06lx\n", y, Pixel(10, y));
+            ok(Pixel(50, y) == 0xFFFFFF, "row %d: x=50 is %06lx\n", y, Pixel(50, y));
+            black = 0;
+            for (x = 20; x < 45; x++)
+                if (Pixel(x, y) == 0)
+                    black++;
+            ok(black >= 6 && black <= 8, "row %d: the pen is %d pixels wide\n", y, black);
+            ok(Pixel(31, y) == 0 && Pixel(32, y) == 0, "row %d: x=31, 32 are %06lx, %06lx\n", y, Pixel(31, y), Pixel(32, y));
+        }
+        DeleteObject(SelectObject(g_dc, GetStockObject(BLACK_PEN)));
+        SelectObject(g_dc, GetStockObject(NULL_BRUSH));
+        DeleteObject(hbr);
+    }
+    ok_still_draws("HugeOutlines");
+}
+
+/* A transform that squashes an axis (a zero extent of an isotropic mapping, a -Inf entry in the world transform): the
+   corners of the shape lie on a line, the normalized points divide by the radius 0 and the angles are NaN. The loop that
+   adds the Bezier parts of an arc ran forever and grew the path without end. */
+static void test_DegenerateTransform(void)
+{
+    static const int arc[] = { 194, -403197, 237, -402937, 143, 123, 43, -995077 };
+    static const XFORM xw = { -0.815967f, -0.946544f, 0.0f, -1.44263f, 130.0f, 158.0f };
+    XFORM xinf = { -2.64025e-29f, -2.77164f, 0.0f, -1.0f, 126.0f, 0.0f };
+    LOGBRUSH lb = { BS_SOLID, RGB(0, 128, 0), 0 };
+    int dd, n, sh;
+    BOOL bZero = FALSE;
+    double t0;
+    HPEN pen;
+
+    /* the isotropic mapping adjusts the viewport extent: window 18:5 and viewport -2:d gives -2:0 for some d */
+    for (dd = 1; dd <= 20 && !bZero; dd++)
+    {
+        SIZE ve;
+
+        ResetDC_();
+        SetMapMode(g_dc, MM_ISOTROPIC);
+        SetWindowExtEx(g_dc, 18, 5, NULL);
+        SetViewportExtEx(g_dc, -2, dd, NULL);
+        GetViewportExtEx(g_dc, &ve);
+        bZero = (ve.cx == -2 && ve.cy == 0);
+    }
+    if (!bZero)
+        skip("the isotropic mapping does not give a zero extent here\n");
+    else
+    {
+        pen = CreatePen(PS_SOLID, 132, RGB(0, 128, 0));
+        for (sh = SH_ARC; sh <= SH_CHORD; sh++)
+        {
+            HRGN hrgn;
+
+            SelectObject(g_dc, pen);
+            SelectObject(g_dc, GetStockObject(DKGRAY_BRUSH));
+            SetGraphicsMode(g_dc, GM_ADVANCED);
+            SetWorldTransform(g_dc, &xw);
+            SetArcDirection(g_dc, AD_CLOCKWISE);
+            t0 = Now();
+            DrawShape(sh, arc, arc + 4);
+            ok(Now() - t0 < MAX_MS, "shape %d under a zero extent took %.0f ms\n", sh, Now() - t0);
+
+            t0 = Now();
+            BeginPath(g_dc);
+            DrawShape(sh, arc, arc + 4);
+            EndPath(g_dc);
+            n = GetPath(g_dc, NULL, NULL, 0);
+            ok(n <= 0 || n >= 2, "shape %d: the path holds %d points\n", sh, n);
+            hrgn = PathToRegion(g_dc);
+            if (hrgn)
+                DeleteObject(hrgn);
+            AbortPath(g_dc);
+            ok(Now() - t0 < MAX_MS, "shape %d in a path under a zero extent took %.0f ms\n", sh, Now() - t0);
+        }
+        SelectObject(g_dc, GetStockObject(BLACK_PEN));
+        DeleteObject(pen);
+    }
+
+    /* a -Inf entry: SetWorldTransform may refuse it (and Windows might), then there is nothing to test */
+    pen = ExtCreatePen(PS_GEOMETRIC | PS_DASH | PS_JOIN_BEVEL | PS_ENDCAP_SQUARE, 7, &lb, 0, NULL);
+    ResetDC_();
+    SelectObject(g_dc, pen);
+    SelectObject(g_dc, CreateSolidBrush(RGB(116, 0, 0)));
+    SetGraphicsMode(g_dc, GM_ADVANCED);
+    xinf.eM22 = -1.0f / 0.0f;
+    if (SetWorldTransform(g_dc, &xinf))
+    {
+        SetLayout(g_dc, LAYOUT_RTL);
+        SetMiterLimit(g_dc, 8.0f, NULL);
+        SetROP2(g_dc, R2_NOTMERGEPEN);
+        t0 = Now();
+        Pie(g_dc, 153, 127, 2147483647, 245, 7, 50, -4, 1073741824);
+        ok(Now() - t0 < MAX_MS, "Pie under a -Inf transform took %.0f ms\n", Now() - t0);
+        t0 = Now();
+        Ellipse(g_dc, 153, 127, 2147483647, 245);
+        ok(Now() - t0 < MAX_MS, "Ellipse under a -Inf transform took %.0f ms\n", Now() - t0);
+    }
+    DeleteObject(SelectObject(g_dc, GetStockObject(NULL_BRUSH)));
+    SelectObject(g_dc, GetStockObject(BLACK_PEN));
+    DeleteObject(pen);
+    ok_still_draws("DegenerateTransform");
+}
+
 START_TEST(ShapeRobustness)
 {
     BITMAPINFO bi;
@@ -354,6 +530,8 @@ START_TEST(ShapeRobustness)
     test_RotatedCosmeticPens();
     test_WideRoundRectRange();
     test_ArcToFailure();
+    test_HugeOutlines();
+    test_DegenerateTransform();
 
     SelectObject(g_dc, bmpOld);
     DeleteObject(bmp);
