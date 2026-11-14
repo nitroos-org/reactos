@@ -1220,23 +1220,6 @@ PrnDcCreate(
         return NULL;
     }
 
-#ifndef _WIN64
-    /*
-     * FIXME: The spooler marshals its structures (PRINTER_INFO, DRIVER_INFO, DOC_INFO) with the
-     * pointer size of the spooler, which does not match a 32-bit client of a 64-bit spooler.
-     * Do not print from such a process until the layouts are converted.
-     */
-    {
-        BOOL bWow64 = FALSE;
-
-        if (IsWow64Process(GetCurrentProcess(), &bWow64) && bWow64)
-        {
-            SetLastError(ERROR_NOT_SUPPORTED);
-            return NULL;
-        }
-    }
-#endif
-
     if (!fpOpenPrinterW((LPWSTR)pwszName, &hPrinter, NULL))
         return NULL;
 
