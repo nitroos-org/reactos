@@ -633,7 +633,7 @@ static VOID LanReceivePacket(
             TI_DbgPrint(MID_TRACE,("Received IP Packet\n"));
             /* The receive worker hands TDI completions to other threads (see CompleteBucket) */
             TCPEnterReceiveWorker();
-            IPReceive(Adapter->Context, &IPPacket);
+            IPReceiveVersion(Adapter->Context, &IPPacket, PacketType == ETYPE_IPv6 ? 6 : 4);
             TCPLeaveReceiveWorker();
             break;
         case ETYPE_ARP:

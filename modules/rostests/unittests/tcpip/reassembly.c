@@ -318,6 +318,65 @@ TestIPv6Switch(VOID)
     TCPIpv6Enabled = FALSE;
 }
 
+/* A frame's ethertype decides: an IPv6 header in an IPv4 frame never reaches lwIP, an IPv4 header in an
+   IPv6 frame never reaches the IPv4 dispatch; both are freed */
+static VOID
+TestEtherTypeVersion(VOID)
+{
+    IP_INTERFACE If = { 0 };
+    IP_PACKET Packet;
+    PNDIS_PACKET Ndis;
+    UINT Case;
+
+    TCPIpv6Enabled = TRUE;
+    for (Case = 0; Case < 4; Case++)
+    {
+        /* 0: v6 header, v4 frame; 1: v4 header, v6 frame; 2: v6 in v6 (control); 3: v4 in v4 (control) */
+        BOOLEAN V6Header = (Case == 0 || Case == 2);
+        UINT FrameVersion = (Case == 0 || Case == 3) ? 4 : 6;
+
+        Receive6Count = 0;
+        ResetDispatch();
+
+        Ndis = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*Ndis));
+        Ndis->Data = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 40);
+        Ndis->Length = 40;
+        if (V6Header)
+        {
+            Ndis->Data[0] = 0x60;
+            Ndis->Data[6] = 59;
+        }
+        else
+        {
+            /* An unfragmented UDP datagram of 20 bytes of data, as SendFragment builds them: dispatched */
+            PIPv4_HEADER Header = (PIPv4_HEADER)Ndis->Data;
+            UINT i;
+
+            Header->VerIHL = 0x45;
+            Header->TotalLength = H2WN(40);
+            Header->Id = 77;
+            Header->Ttl = 64;
+            Header->Protocol = 17;
+            Header->SrcAddr = 0x0100000A;
+            Header->DstAddr = 0x0200000A;
+            for (i = 0; i < 20; i++)
+                Ndis->Data[20 + i] = PatternByte(i);
+        }
+        InterlockedIncrement(&TestNdisPackets);
+
+        IPInitializePacket(&Packet, IP_ADDRESS_V4);
+        Packet.NdisPacket = Ndis;
+        Packet.TotalSize = 40;
+        Packet.Position = 0;
+        IPReceiveVersion(&If, &Packet, FrameVersion);
+
+        ok(Receive6Count == (Case == 2 ? 1 : 0), "case %u: TCPReceive6 called %lu times\n", Case, Receive6Count);
+        ok(DispatchCount == (Case == 3 ? 1 : 0), "case %u: IPv4 dispatch %lu times\n", Case, DispatchCount);
+        ExpectNothingLeft("ethertype/version");
+    }
+    TCPIpv6Enabled = FALSE;
+}
+
 START_TEST(Reassembly)
 {
     IPDRList.Size = sizeof(IPDATAGRAM_REASSEMBLY);
@@ -329,4 +388,5 @@ START_TEST(Reassembly)
     TestMaximumSize();
     TestOversize();
     TestIPv6Switch();
+    TestEtherTypeVersion();
 }

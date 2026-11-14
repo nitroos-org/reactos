@@ -67,4 +67,11 @@ VOID IPReceive(
     PIP_INTERFACE IF,
     PIP_PACKET IPPacket);
 
+/* A datagram from a frame of the given IP version (4 or 6, from the frame's ethertype): a datagram of
+   the other version is dropped. IPReceive takes either (the loopback queue) */
+VOID IPReceiveVersion(
+    PIP_INTERFACE IF,
+    PIP_PACKET IPPacket,
+    UINT FrameVersion);
+
 /* EOF */
