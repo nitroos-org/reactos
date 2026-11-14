@@ -697,6 +697,24 @@ typedef struct _SD_OVERRIDE
 static const SD_OVERRIDE SdOverrides[] =
 {
     { L"SYSTEM\\ControlSet001\\Services\\EventLog", REGSD_T_EVENTLOG },
+    /*
+     * Keys Windows 10 does not hold as an auto-inherited copy of their hive root's DACL (parents first,
+     * so that a key made on the way is not left without it). Their ACEs are the root's as inherited here.
+     */
+    { L"SOFTWARE\\Microsoft", REGSD_T_INHPLAIN },
+    { L"SOFTWARE\\Microsoft\\Windows", REGSD_T_INHPLAIN },
+    { L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion", REGSD_T_INHPAI },
+    { L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall", REGSD_T_INHPAI },
+    { L"SOFTWARE\\Microsoft\\Windows NT", REGSD_T_INHPLAIN },
+    { L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", REGSD_T_INHPAI },
+    { L"SYSTEM\\Select", REGSD_T_INHPLAIN },
+    { L"SYSTEM\\Setup", REGSD_T_INHPLAIN },
+    { L"SYSTEM\\ControlSet001\\Control", REGSD_T_INHPLAIN },
+    { L"SYSTEM\\ControlSet001\\Control\\Lsa", REGSD_T_INHPAI },
+    { L"SYSTEM\\ControlSet001\\Control\\Session Manager", REGSD_T_INHPLAIN },
+    { L"SYSTEM\\ControlSet001\\Enum", REGSD_T_INHPLAIN },
+    { L"SYSTEM\\ControlSet001\\Services\\Tcpip", REGSD_T_INHPAI },
+    /* below the keys above, which it would otherwise create without their descriptor on the way */
     { L"SOFTWARE\\Policies", REGSD_T_POLICIES },
     { L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Schedule\\TaskCache", REGSD_T_TASKCACHE },
 };
@@ -769,6 +787,7 @@ RegInitializeRegistry(
     BOOLEAN PrivilegeSet[3] = {FALSE, FALSE, FALSE};
     ULONG Disposition;
     UINT i;
+    UCHAR ClassesSd[REGSD_MAX_ACES * 80];
 
     /* Acquire restore privilege */
     Status = RtlAdjustPrivilege(SE_RESTORE_PRIVILEGE, TRUE, FALSE, &PrivilegeSet[0]);
@@ -1006,11 +1025,13 @@ RegInitializeRegistry(
                                NULL);
 #else
     RtlInitUnicodeString(&KeyName, RootKeys[GetPredefKeyIndex(HKEY_CLASSES_ROOT)].MountPoint);
+    /* Windows 10: HKLM\SOFTWARE\Classes is protected and auto-inherited (created here, so it gets it here) */
     InitializeObjectAttributes(&ObjectAttributes,
                                &KeyName,
                                OBJ_CASE_INSENSITIVE,
                                NULL,
-                               NULL);
+                               RegSdBuild(REGSD_T_INHPAI, NULL, ClassesSd, sizeof(ClassesSd)) ?
+                                   (PSECURITY_DESCRIPTOR)ClassesSd : NULL);
 #endif
     KeyHandle = NULL;
     /* We use NtCreateKey instead of NtOpenKey because Software\Classes doesn't exist originally */

@@ -279,6 +279,17 @@ CmpDoCreateChild(IN PHHIVE Hive,
      * A DACL of the creator's own is stored as given.
      */
     DaclAutoInherit = FALSE;
+    /*
+     * The descriptor setup names for the root of a hive or an override key is
+     * stored as it is, auto-inheritance mark included (Windows: HKLM\SOFTWARE is
+     * D:PAI). With no parent there is nothing to inherit, the flag only marks it.
+     */
+    if (StoreExplicit && AccessState->SecurityDescriptor &&
+        (((PISECURITY_DESCRIPTOR)AccessState->SecurityDescriptor)->Control &
+         (SE_DACL_PRESENT | SE_DACL_AUTO_INHERITED)) == (SE_DACL_PRESENT | SE_DACL_AUTO_INHERITED))
+    {
+        DaclAutoInherit = TRUE;
+    }
     if (ParentDescriptor &&
         (((PISECURITY_DESCRIPTOR)ParentDescriptor)->Control & SE_DACL_AUTO_INHERITED) &&
         !(AccessState->SecurityDescriptor &&

@@ -120,6 +120,21 @@ static const SD_OVERRIDE SdOverrides[] =
     { "SOFTWARE", L"Registry\\Machine\\SOFTWARE\\Policies", REGSD_T_POLICIES, FALSE },
     { "SOFTWARE", L"Registry\\Machine\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Schedule\\TaskCache",
       REGSD_T_TASKCACHE, TRUE },
+    /* Keys Windows 10 does not hold as an auto-inherited copy of their hive root's DACL (see setuplib) */
+    { "SOFTWARE", L"Registry\\Machine\\SOFTWARE\\Microsoft", REGSD_T_INHPLAIN, FALSE },
+    { "SOFTWARE", L"Registry\\Machine\\SOFTWARE\\Microsoft\\Windows", REGSD_T_INHPLAIN, FALSE },
+    { "SOFTWARE", L"Registry\\Machine\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion", REGSD_T_INHPAI, FALSE },
+    { "SOFTWARE", L"Registry\\Machine\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall", REGSD_T_INHPAI, FALSE },
+    { "SOFTWARE", L"Registry\\Machine\\SOFTWARE\\Microsoft\\Windows NT", REGSD_T_INHPLAIN, FALSE },
+    { "SOFTWARE", L"Registry\\Machine\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", REGSD_T_INHPAI, FALSE },
+    { "SOFTWARE", L"Registry\\Machine\\SOFTWARE\\Classes", REGSD_T_INHPAI, FALSE },
+    { "SYSTEM",   L"Registry\\Machine\\SYSTEM\\Select", REGSD_T_INHPLAIN, FALSE },
+    { "SYSTEM",   L"Registry\\Machine\\SYSTEM\\Setup", REGSD_T_INHPLAIN, FALSE },
+    { "SYSTEM",   L"Registry\\Machine\\SYSTEM\\ControlSet001\\Control", REGSD_T_INHPLAIN, FALSE },
+    { "SYSTEM",   L"Registry\\Machine\\SYSTEM\\ControlSet001\\Control\\Lsa", REGSD_T_INHPAI, FALSE },
+    { "SYSTEM",   L"Registry\\Machine\\SYSTEM\\ControlSet001\\Control\\Session Manager", REGSD_T_INHPLAIN, FALSE },
+    { "SYSTEM",   L"Registry\\Machine\\SYSTEM\\ControlSet001\\Enum", REGSD_T_INHPLAIN, FALSE },
+    { "SYSTEM",   L"Registry\\Machine\\SYSTEM\\ControlSet001\\Services\\Tcpip", REGSD_T_INHPAI, FALSE },
 };
 
 /* FUNCTIONS ****************************************************************/

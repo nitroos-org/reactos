@@ -987,13 +987,22 @@ CmpGetEffectiveKeySd(
         Sd = CmpAclCopyStoredSd(Parent, Buffer, BufferSize, &AncestorCopy, Shortcut);
         if (!Sd)
             continue;
-        Status = SeAssignSecurity(Sd,
-                                  NULL,
-                                  &NewSd,
-                                  TRUE,
-                                  &CmpAclSystemSubject,
-                                  &CmpKeyObjectType->TypeInfo.GenericMapping,
-                                  PagedPool);
+        /*
+         * Under an auto-inherited DACL the key's own is auto-inherited too (its
+         * inherited ACEs are flagged, control AI), as on Windows, where the keys
+         * setup creates below such a key inherit that way. A key created under it
+         * later gets the same (CmpDoCreateChild).
+         */
+        Status = SeAssignSecurityEx(Sd,
+                                    NULL,
+                                    &NewSd,
+                                    NULL,
+                                    TRUE,
+                                    (((PISECURITY_DESCRIPTOR)Sd)->Control & SE_DACL_AUTO_INHERITED) ?
+                                        SEF_DACL_AUTO_INHERIT : 0,
+                                    &CmpAclSystemSubject,
+                                    &CmpKeyObjectType->TypeInfo.GenericMapping,
+                                    PagedPool);
         if (AncestorCopy)
             ExFreePoolWithTag(AncestorCopy, TAG_CM_ACL);
         if (!NT_SUCCESS(Status))
