@@ -31,6 +31,7 @@ list(APPEND SOURCE
     CopyFileStreams.c
     ConsoleBufferSwitch.c
     ConsoleCaret.c
+    ConsoleUtf8CP.c
     ConsoleCreateRace.c
     ConsoleOrphanChild.c
     UnbufferedReadLimit.c
