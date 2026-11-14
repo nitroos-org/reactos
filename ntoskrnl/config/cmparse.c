@@ -222,7 +222,7 @@ CmpDoCreateChild(IN PHHIVE Hive,
     PCM_KEY_CONTROL_BLOCK Kcb;
     PSECURITY_DESCRIPTOR NewDescriptor, ParentSd = NULL;
     HCELL_INDEX SecurityCell = HCELL_NIL;
-    BOOLEAN StoreExplicit;
+    BOOLEAN StoreExplicit, DaclAutoInherit;
 
     *KeyCell = HCELL_NIL;
 
@@ -270,12 +270,29 @@ CmpDoCreateChild(IN PHHIVE Hive,
             return Status;
         }
     }
+    /*
+     * A parent whose DACL is auto-inherited (one set through SetSecurityInfo, see
+     * ntmarta, or by SetNamedSecurityInfo with an auto-inherit request) passes that
+     * on: the child's inherited ACEs carry INHERITED_ACE and its control has
+     * SE_DACL_AUTO_INHERITED, as the oracle shows for keys created under such a
+     * parent. Under any other parent the DACL is not auto-inherited (see above).
+     * A DACL of the creator's own is stored as given.
+     */
+    DaclAutoInherit = FALSE;
+    if (ParentDescriptor &&
+        (((PISECURITY_DESCRIPTOR)ParentDescriptor)->Control & SE_DACL_AUTO_INHERITED) &&
+        !(AccessState->SecurityDescriptor &&
+          (((PISECURITY_DESCRIPTOR)AccessState->SecurityDescriptor)->Control & SE_DACL_PRESENT)))
+    {
+        DaclAutoInherit = TRUE;
+    }
     Status = SeAssignSecurityEx(ParentDescriptor,
                                 AccessState->SecurityDescriptor,
                                 &NewDescriptor,
                                 NULL,
                                 TRUE,
-                                (ParentDescriptor || StoreExplicit) ? SEF_SACL_AUTO_INHERIT : 0,
+                                ((ParentDescriptor || StoreExplicit) ? SEF_SACL_AUTO_INHERIT : 0) |
+                                (DaclAutoInherit ? SEF_DACL_AUTO_INHERIT : 0),
                                 &AccessState->SubjectSecurityContext,
                                 &CmpKeyObjectType->TypeInfo.GenericMapping,
                                 CmpKeyObjectType->TypeInfo.PoolType);
