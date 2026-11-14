@@ -1380,6 +1380,43 @@ RtlpFindAndCommitPagesAfterFree(PHEAP Heap,
 
 static BOOLEAN RtlpHeapTrim(PHEAP Heap, SIZE_T Keep, ULONG MaxBlocks);
 
+/* The reserve of a new segment doubles with every segment (1, 2, 4, 8 MB for the default 1 MB), up to a cap. Windows
+   was measured to stop at 16192 KB (x86 and x64): a long run of large blocks then needs a few dozen segments of that
+   size, not segments of hundreds of MB that a 32-bit process cannot find the address space for. */
+#define HEAP_SEGMENT_RESERVE_CAP    (16192 * 1024)
+
+/* When this few unused segment slots are left the cap is lifted, so that a heap that really needs more than
+   (HEAP_SEGMENTS - 8) segments of the cap keeps growing, with segments twice the size of the last (a 64-bit heap can
+   reach many GB; a 32-bit one falls back to what the address space still has) */
+#define HEAP_SEGMENT_SLOTS_LOW      8
+
+static
+SIZE_T
+RtlpNextSegmentReserve(IN SIZE_T Current,
+                       IN SIZE_T Reserved,
+                       IN ULONG FreeSlots)
+{
+    SIZE_T Base = Current;
+
+    /* A reserve that had to be cut down to fit is where the next one starts. A larger one for a big request
+       does not change the policy */
+    if (Reserved < Base)
+        Base = Reserved;
+
+    if (Base > ((SIZE_T)-1) / 4)
+        return Base;
+
+    /* A reserve above the cap (a caller's SegmentReserve) stays as it is, unless the slots run low */
+    if (Base >= HEAP_SEGMENT_RESERVE_CAP && FreeSlots > HEAP_SEGMENT_SLOTS_LOW)
+        return Base;
+
+    Base *= 2;
+    if (Base > HEAP_SEGMENT_RESERVE_CAP && FreeSlots > HEAP_SEGMENT_SLOTS_LOW)
+        Base = HEAP_SEGMENT_RESERVE_CAP;
+
+    return Base;
+}
+
 static
 PHEAP_FREE_ENTRY
 RtlpExtendHeap(PHEAP Heap,
@@ -1387,6 +1424,7 @@ RtlpExtendHeap(PHEAP Heap,
 {
     ULONG Pages;
     UCHAR Index, EmptyIndex;
+    ULONG EmptySlots;
     SIZE_T FreeSize, CommitSize, ReserveSize;
     PHEAP_SEGMENT Segment;
     PHEAP_FREE_ENTRY FreeEntry;
@@ -1405,6 +1443,7 @@ Retry:
 
     /* Find an empty segment */
     EmptyIndex = HEAP_SEGMENTS;
+    EmptySlots = 0;
     for (Index = 0; Index < HEAP_SEGMENTS; Index++)
     {
         Segment = Heap->Segments[Index];
@@ -1447,12 +1486,15 @@ Retry:
                 return FreeEntry;
             }
         }
-        else if (!Segment &&
-                 EmptyIndex == HEAP_SEGMENTS)
+        else if (!Segment)
         {
             /* Remember the first unused segment index */
-            EmptyIndex = Index;
+            if (EmptyIndex == HEAP_SEGMENTS)
+                EmptyIndex = Index;
         }
+
+        if (!Segment)
+            EmptySlots++;
     }
 
     /* No luck, need to grow the heap */
@@ -1494,7 +1536,7 @@ Retry:
         /* Proceed only if it's success */
         if (NT_SUCCESS(Status))
         {
-            Heap->SegmentReserve += ReserveSize;
+            Heap->SegmentReserve = RtlpNextSegmentReserve(Heap->SegmentReserve, ReserveSize, EmptySlots);
 
             /* Now commit the memory */
             if ((Size + PAGE_SIZE) <= Heap->SegmentCommit)
