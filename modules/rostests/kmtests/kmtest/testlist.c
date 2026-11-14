@@ -15,6 +15,7 @@ KMT_TESTFUNC Test_CcCopyWrite;
 KMT_TESTFUNC Test_CcZeroData;
 KMT_TESTFUNC Test_CcLazyWriteDelete;
 KMT_TESTFUNC Test_CcMapData;
+KMT_TESTFUNC Test_CcPinLazyWrite;
 KMT_TESTFUNC Test_CcPinMappedData;
 KMT_TESTFUNC Test_CcPinRead;
 KMT_TESTFUNC Test_CcPurgeCacheSectionView;
@@ -64,6 +65,7 @@ const KMT_TEST TestList[] =
     { "CcZeroData",                    Test_CcZeroData },
     { "-CcLazyWriteDelete",            Test_CcLazyWriteDelete },
     { "-CcMapData",                    Test_CcMapData },
+    { "-CcPinLazyWrite",               Test_CcPinLazyWrite },
     { "-CcPinMappedData",              Test_CcPinMappedData },
     { "-CcPinRead",                    Test_CcPinRead },
     { "-CcPurgeCacheSectionView",      Test_CcPurgeCacheSectionView },

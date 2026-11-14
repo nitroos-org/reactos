@@ -235,6 +235,7 @@ list(APPEND KMTEST_SOURCE
     ntos_cc/CcZeroData_user.c
     ntos_cc/CcLazyWriteDelete_user.c
     ntos_cc/CcMapData_user.c
+    ntos_cc/CcPinLazyWrite_user.c
     ntos_cc/CcPinMappedData_user.c
     ntos_cc/CcPinRead_user.c
     ntos_cc/CcSetFileSizes_user.c
