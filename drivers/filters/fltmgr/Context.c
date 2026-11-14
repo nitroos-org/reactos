@@ -172,14 +172,61 @@ FreeContext(_In_ PFLTP_CONTEXT Context)
         ExFreePoolWithTag(Context->Pool, Context->PoolTag);
 }
 
+typedef struct _FLTP_CONTEXT_FREE_ITEM
+{
+    WORK_QUEUE_ITEM WorkItem;
+    PFLTP_CONTEXT Context;
+
+} FLTP_CONTEXT_FREE_ITEM, *PFLTP_CONTEXT_FREE_ITEM;
+
+static
+VOID
+NTAPI
+FreeContextWorker(_In_ PVOID Parameter)
+{
+    PFLTP_CONTEXT_FREE_ITEM Item = Parameter;
+    PFLT_FILTER Filter = Item->Context->Filter;
+
+    FreeContext(Item->Context);
+    FltObjectDereference(Filter);
+    ExFreePoolWithTag(Item, FM_TAG_CONTEXT);
+}
+
+/*
+ * The last reference went: cleanup callback and free. FltReleaseContext may be called at DISPATCH_LEVEL
+ * (a post-operation in a completion routine), the cleanup callback is documented for IRQL <= APC_LEVEL
+ * and the context memory may be paged: above APC_LEVEL a worker does it, with the filter kept until
+ * then (its unregister waits for that). Only if that isn't possible (no memory for the work item, the
+ * filter already past its rundown) it is done right here, as before.
+ */
 static
 VOID
 ReleaseContextHeader(_In_ PFLTP_CONTEXT Context)
 {
+    PFLTP_CONTEXT_FREE_ITEM Item;
+
     FLT_ASSERT(Context->RefCount > 0);
 
-    if (InterlockedDecrement(&Context->RefCount) == 0)
-        FreeContext(Context);
+    if (InterlockedDecrement(&Context->RefCount) != 0)
+        return;
+
+    if (KeGetCurrentIrql() > APC_LEVEL)
+    {
+        Item = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Item), FM_TAG_CONTEXT);
+        if (Item)
+        {
+            if (NT_SUCCESS(FltObjectReference(Context->Filter)))
+            {
+                Item->Context = Context;
+                ExInitializeWorkItem(&Item->WorkItem, FreeContextWorker, Item);
+                ExQueueWorkItem(&Item->WorkItem, DelayedWorkQueue);
+                return;
+            }
+            ExFreePoolWithTag(Item, FM_TAG_CONTEXT);
+        }
+    }
+
+    FreeContext(Context);
 }
 
 /* Does the context (type, owner, key) match? Volume contexts belong to the filter, the others to the instance. */
