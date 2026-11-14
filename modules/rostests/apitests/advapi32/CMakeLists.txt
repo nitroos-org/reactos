@@ -30,6 +30,7 @@ list(APPEND SOURCE
     EventSetInformation.c
     GetSecurityInfoSequence.c
     ObjectLockStress.c
+    OpenThreadTokenLeak.c
     Hash.c
     HKEY_CLASSES_ROOT.c
     IsTextUnicode.c
