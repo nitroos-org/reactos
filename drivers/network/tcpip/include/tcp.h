@@ -239,6 +239,10 @@ TCPAddLoopbackAddress6(PIP_INTERFACE IF);
 VOID
 TCPReceive6(PIP_INTERFACE IF, PIP_PACKET IPPacket);
 
+/* The IP_IPV6_TABLE_ENTRY_ID answer; returns its size (what fits in Out is written) */
+ULONG
+TCPQueryIpv6Table(PVOID Out, ULONG OutSize);
+
 #if DBG || defined(TCPIP_IPV6_SELFTEST)
 /* ip/transport/tcp/selftest6.c: runs with Tcpip\Parameters\Ipv6SelfTest set */
 VOID

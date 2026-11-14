@@ -81,6 +81,48 @@ typedef struct _TCP_TIMEWAIT_ROW
     ULONG RemoteAddr;
     ULONG RemotePort;
 } TCP_TIMEWAIT_ROW, *PTCP_TIMEWAIT_ROW;
+
+/* Non public TOIID: the IPv6 state of the stack, for iphlpapi and ws2_32. Asked of any network layer entity
+   (CL_NL_ENTITY, instance 0); the answer is a TCP_IPV6_TABLE_HEADER, then InterfaceCount
+   TCP_IPV6_INTERFACE_ROW, then AddressCount TCP_IPV6_ADDRESS_ROW. Enabled is 0 (and both counts 0) while the
+   IPv6 switch (Tcpip\Parameters\Ipv6Enable) is off: that is the only thing user mode may take as "this
+   system has no IPv6". The sizes are the whole answer, as for the other tables: a caller whose buffer is too
+   small gets the size that does and asks again */
+#define IP_IPV6_TABLE_ENTRY_ID          0x112
+
+typedef struct _TCP_IPV6_TABLE_HEADER
+{
+    ULONG Enabled;
+    ULONG InterfaceCount;
+    ULONG AddressCount;
+} TCP_IPV6_TABLE_HEADER, *PTCP_IPV6_TABLE_HEADER;
+
+/* IPv6 is usable on the interface */
+#define TCP_IPV6_IF_ENABLED             0x1
+/* the loopback interface */
+#define TCP_IPV6_IF_LOOPBACK            0x2
+
+typedef struct _TCP_IPV6_INTERFACE_ROW
+{
+    ULONG IfIndex;
+    ULONG Flags;
+    ULONG Mtu;
+    ULONG Reserved;
+} TCP_IPV6_INTERFACE_ROW, *PTCP_IPV6_INTERFACE_ROW;
+
+/* DadState, PrefixOrigin and SuffixOrigin use the values of NL_DAD_STATE, NL_PREFIX_ORIGIN and
+   NL_SUFFIX_ORIGIN; the lifetimes are in seconds, 0xffffffff is infinite */
+typedef struct _TCP_IPV6_ADDRESS_ROW
+{
+    ULONG IfIndex;
+    UCHAR Address[16];
+    ULONG PrefixLength;
+    ULONG DadState;
+    ULONG PrefixOrigin;
+    ULONG SuffixOrigin;
+    ULONG ValidLifetime;
+    ULONG PreferredLifetime;
+} TCP_IPV6_ADDRESS_ROW, *PTCP_IPV6_ADDRESS_ROW;
 #endif
 #define MAX_PHYSADDR_SIZE               8
 

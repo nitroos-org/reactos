@@ -786,6 +786,30 @@ LookupAddressForName(IN LPCSTR NodeName,
     return iError;
 }
 
+/* The canonical name of "localhost" is the name of this computer (Windows 10 measured). 0 or an EAI_ error */
+static
+INT
+SetComputerNameCanon(IN PADDRINFOW AddrInfo)
+{
+    CHAR HostName[256];
+    SIZE_T Length;
+
+    if (AddrInfo->ai_canonname)
+    {
+        HeapFree(WsSockHeap, 0, AddrInfo->ai_canonname);
+        AddrInfo->ai_canonname = NULL;
+    }
+    if (gethostname(HostName, sizeof(HostName)) != 0)
+        return 0;
+
+    Length = strlen(HostName) + 1;
+    AddrInfo->ai_canonname = HeapAlloc(WsSockHeap, 0, Length * sizeof(WCHAR));
+    if (!AddrInfo->ai_canonname)
+        return EAI_MEMORY;
+    MultiByteToWideChar(CP_ACP, 0, HostName, -1, AddrInfo->ai_canonname, (int)Length);
+    return 0;
+}
+
 /*
  * @implemented
  */
@@ -807,6 +831,8 @@ GetAddrInfoW(IN PCWSTR pszNodeName,
     PCHAR pc = NULL;
     BOOL bClone = FALSE;
     BOOL bNumeric, bNumeric6 = FALSE, bNoNode6 = FALSE, bTrailingSpace = FALSE;
+    BOOL bV6On;
+    WS_IPV6_INFO V6Info;
     IN6_ADDR Address6;
     ULONG ulScope6 = 0;
     WORD wTcpPort = 0;
@@ -829,6 +855,17 @@ GetAddrInfoW(IN PCWSTR pszNodeName,
         SetLastError(EAI_NONAME);
         return EAI_NONAME;
     }
+
+    /*
+     * Whether the stack has IPv6 on (Tcpip\Parameters\Ipv6Enable, off by default). Off, every answer below is
+     * the one of a system without IPv6. On, the names that mean this machine (no node, "localhost") answer
+     * IPv6 before IPv4 as Windows 10 does, AI_ADDRCONFIG leaves the IPv6 answers out while no non-loopback IPv6
+     * address is usable, and the IPv6 family is a family: it finds no IPv4 address (WSAHOST_NOT_FOUND) instead
+     * of failing (WSAEAFNOSUPPORT). Host names are still resolved to IPv4 addresses only (no AAAA queries).
+     */
+    bV6On = WsQueryIpv6((ptHints && (ptHints->ai_flags & AI_ADDRCONFIG)) ? &V6Info : NULL);
+    if (!(ptHints && (ptHints->ai_flags & AI_ADDRCONFIG)))
+        V6Info.NonLoopback = V6Info.Global = 0;
 
     /* Check if we got hints */
     if (ptHints)
@@ -892,7 +929,7 @@ GetAddrInfoW(IN PCWSTR pszNodeName,
             bNoNode6 = TRUE;
         }
 
-        if ((iFamily != PF_UNSPEC) && (iFamily != PF_INET) && !bNumeric6)
+        if ((iFamily != PF_UNSPEC) && (iFamily != PF_INET) && !bNumeric6 && !(bV6On && iFamily == PF_INET6))
         {
             SetLastError(EAI_FAMILY);
             return EAI_FAMILY;
@@ -1018,7 +1055,8 @@ GetAddrInfoW(IN PCWSTR pszNodeName,
                 ULONG CanonicalLength = RTL_NUMBER_OF(CanonicalName);
 
                 CanonicalName[0] = UNICODE_NULL;
-                RtlIpv6AddressToStringExW(&Address6, ulScope6, 0, CanonicalName, &CanonicalLength);
+                /* Windows 10 (measured): with a service the name is "[::1]:80", the port in it */
+                RtlIpv6AddressToStringExW(&Address6, ulScope6, bV6On ? wPort : 0, CanonicalName, &CanonicalLength);
 
                 (*pptResult)->ai_canonname = HeapAlloc(WsSockHeap,
                                                        0,
@@ -1105,13 +1143,78 @@ GetAddrInfoW(IN PCWSTR pszNodeName,
                             NULL,
                             0);
 
-        /* Non-numeric name, do DNS lookup */
-        iError = LookupAddressForName(AnsiNodeName,
-                                      iSocketType,
-                                      iProtocol,
-                                      wPort,
-                                      (iFlags & AI_CANONNAME),
-                                      pptResult);
+        /* Non-numeric name, do DNS lookup. Windows 10 answers "localhost" itself (with or without the root dot)
+           and does not look at the hosts file for it; with IPv6 on, so do we */
+        if (bV6On && IsLocalhostName(pszNodeName))
+        {
+            *pptResult = NewAddrInfo(iSocketType, iProtocol, wPort, htonl(INADDR_LOOPBACK));
+            iError = *pptResult ? 0 : EAI_MEMORY;
+            if (!iError && (iFlags & AI_CANONNAME) && iFamily != PF_UNSPEC)
+                iError = SetComputerNameCanon(*pptResult);
+        }
+        else
+        {
+            iError = LookupAddressForName(AnsiNodeName,
+                                          iSocketType,
+                                          iProtocol,
+                                          wPort,
+                                          (iFlags & AI_CANONNAME),
+                                          pptResult);
+        }
+    }
+
+    if (!iError && bV6On && *pptResult)
+    {
+        /* The IPv6 family finds IPv6 addresses only: what resolved to IPv4 ones is no answer */
+        if (iFamily == PF_INET6 && (*pptResult)->ai_family != PF_INET6)
+        {
+            FreeAddrInfoW(*pptResult);
+            *pptResult = NULL;
+            iError = EAI_NONAME;
+        }
+        /* No IPv6 address that can be used as a source: AI_ADDRCONFIG asks for no IPv6 answer */
+        else if (iFamily == PF_INET6 && (iFlags & AI_ADDRCONFIG) && !V6Info.NonLoopback &&
+                 (!bNumeric6 || bNoNode6))
+        {
+            FreeAddrInfoW(*pptResult);
+            *pptResult = NULL;
+            iError = EAI_NONAME;
+        }
+        /* This machine, for either family: ::1 (or :: for a server) before the IPv4 answer */
+        else if (iFamily == PF_UNSPEC && !bNumeric6 && !bNumeric &&
+                 (!pszNodeName || (IsLocalhostName(pszNodeName) && !(iFlags & AI_NUMERICHOST))) &&
+                 (*pptResult)->ai_family == PF_INET &&
+                 (!(iFlags & AI_ADDRCONFIG) || V6Info.NonLoopback))
+        {
+            PADDRINFOW Head;
+
+            RtlZeroMemory(&Address6, sizeof(Address6));
+            /* the wildcard :: for a server without a node name, the loopback ::1 otherwise */
+            if (pszNodeName || !(iFlags & AI_PASSIVE))
+                Address6.u.Byte[15] = 1;
+
+            Head = NewAddrInfo6((*pptResult)->ai_socktype, (*pptResult)->ai_protocol, wPort, &Address6, 0);
+            if (!Head)
+            {
+                iError = EAI_MEMORY;
+            }
+            else
+            {
+                Head->ai_next = *pptResult;
+                *pptResult = Head;
+
+                /* the name of this computer goes with the first entry only */
+                if ((iFlags & AI_CANONNAME) && pszNodeName)
+                {
+                    iError = SetComputerNameCanon(Head);
+                    if (!iError && Head->ai_next->ai_canonname)
+                    {
+                        HeapFree(WsSockHeap, 0, Head->ai_next->ai_canonname);
+                        Head->ai_next->ai_canonname = NULL;
+                    }
+                }
+            }
+        }
     }
 
     /* If all was good and the caller requested UDP and TCP */
