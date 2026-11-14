@@ -336,11 +336,12 @@ MiFindContiguousMemory(IN PFN_NUMBER LowestPfn,
                        IN PFN_NUMBER SizeInPages,
                        IN MEMORY_CACHING_TYPE CacheType)
 {
-    PFN_NUMBER Page;
+    PFN_NUMBER Page, PageFrame;
     PHYSICAL_ADDRESS PhysicalAddress;
     PMMPFN Pfn1, EndPfn;
     PMMPTE PointerPte;
     PVOID BaseAddress;
+    KIRQL OldIrql;
     PAGED_CODE();
     ASSERT(SizeInPages != 0);
 
@@ -359,11 +360,29 @@ MiFindContiguousMemory(IN PFN_NUMBER LowestPfn,
     //
     PhysicalAddress.QuadPart = Page << PAGE_SHIFT;
     BaseAddress = MmMapIoSpace(PhysicalAddress, SizeInPages << PAGE_SHIFT, CacheType);
-    ASSERT(BaseAddress);
-
-    /* Loop the PFN entries */
     Pfn1 = MiGetPfnEntry(Page);
     EndPfn = Pfn1 + SizeInPages;
+    if (!BaseAddress)
+    {
+        /*
+         * No system PTEs left to map the pages (easy to hit on x86 with large non-cached
+         * allocations). Give back what MiFindContiguousPages took: clear the allocation
+         * markers and drop the single share/reference each page holds.
+         */
+        Pfn1->u3.e1.StartOfAllocation = 0;
+        (EndPfn - 1)->u3.e1.EndOfAllocation = 0;
+        PageFrame = Page;
+        OldIrql = MiAcquirePfnLock();
+        do
+        {
+            MI_SET_PFN_DELETED(Pfn1);
+            MiDecrementShareCount(Pfn1++, PageFrame++);
+        } while (Pfn1 < EndPfn);
+        MiReleasePfnLock(OldIrql);
+        return NULL;
+    }
+
+    /* Loop the PFN entries */
     PointerPte = MiAddressToPte(BaseAddress);
     do
     {
