@@ -30,6 +30,7 @@
 #define FM_TAG_STREAMCTRL       'tsMF'
 #define FM_TAG_WORKITEM         'iwMF'
 #define FM_TAG_MESSAGE          'gmMF'
+#define FM_TAG_SECURITY         'dsMF'
 
 #define MAX_DEVNAME_LENGTH  64
 

@@ -45,6 +45,7 @@ typedef struct _FLT_SERVER_PORT
     BOOLEAN Closed;
     LONG RefCount;                  /* the creator, and each connection */
     UNICODE_STRING Name;
+    PSECURITY_DESCRIPTOR SecurityDescriptor;    /* who may connect (FLT_PORT_CONNECT) */
 
 } FLT_SERVER_PORT, *PFLT_SERVER_PORT;
 
@@ -85,6 +86,15 @@ typedef struct _FLT_MESSAGE
 static LIST_ENTRY FltpServerPorts = { &FltpServerPorts, &FltpServerPorts };
 static FAST_MUTEX FltpPortsLock;
 
+/* The only specific right of a port is FLT_PORT_CONNECT, which every generic right includes */
+static GENERIC_MAPPING FltpPortMapping =
+{
+    STANDARD_RIGHTS_READ | FLT_PORT_CONNECT,
+    STANDARD_RIGHTS_WRITE | FLT_PORT_CONNECT,
+    STANDARD_RIGHTS_EXECUTE | FLT_PORT_CONNECT,
+    FLT_PORT_ALL_ACCESS
+};
+
 static
 VOID
 DisconnectConnection(
@@ -100,6 +110,8 @@ ReleaseServerPort(_In_ PFLT_SERVER_PORT Port)
 {
     if (InterlockedDecrement(&Port->RefCount) == 0)
     {
+        if (Port->SecurityDescriptor)
+            SeDeassignSecurity(&Port->SecurityDescriptor);
         FltpFreeUnicodeString(&Port->Name);
         ExFreePoolWithTag(Port, FM_TAG_MESSAGE);
     }
@@ -247,6 +259,53 @@ ParseConnectRequest(_In_ PIRP Irp,
     return STATUS_SUCCESS;
 }
 
+/*
+ * May the opener connect? The descriptor of the server port decides, checked for FLT_PORT_CONNECT
+ * against the token the I/O manager captured for the open (impersonation included). An open from
+ * kernel mode is not checked, unless the caller asked for it (OBJ_FORCE_ACCESS_CHECK).
+ */
+static
+NTSTATUS
+CheckConnectAccess(_In_ PFLT_SERVER_PORT Server,
+                   _In_ PIRP Irp)
+{
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    PIO_SECURITY_CONTEXT SecurityContext = Stack->Parameters.Create.SecurityContext;
+    KPROCESSOR_MODE AccessMode;
+    PPRIVILEGE_SET Privileges = NULL;
+    ACCESS_MASK Granted = 0;
+    NTSTATUS Status = STATUS_ACCESS_DENIED;
+    BOOLEAN Allowed;
+
+    AccessMode = (Stack->Flags & SL_FORCE_ACCESS_CHECK) ? UserMode : Irp->RequestorMode;
+    if (AccessMode == KernelMode)
+        return STATUS_SUCCESS;
+
+    if (SecurityContext == NULL || SecurityContext->AccessState == NULL || Server->SecurityDescriptor == NULL)
+        return STATUS_ACCESS_DENIED;
+
+    SeLockSubjectContext(&SecurityContext->AccessState->SubjectSecurityContext);
+    Allowed = SeAccessCheck(Server->SecurityDescriptor,
+                            &SecurityContext->AccessState->SubjectSecurityContext,
+                            TRUE,
+                            FLT_PORT_CONNECT,
+                            0,
+                            &Privileges,
+                            &FltpPortMapping,
+                            AccessMode,
+                            &Granted,
+                            &Status);
+    SeUnlockSubjectContext(&SecurityContext->AccessState->SubjectSecurityContext);
+
+    if (Privileges)
+        SeFreePrivileges(Privileges);
+
+    if (!Allowed)
+        return NT_SUCCESS(Status) ? STATUS_ACCESS_DENIED : Status;
+
+    return STATUS_SUCCESS;
+}
+
 static
 NTSTATUS
 CreateConnection(_Inout_ PIRP Irp)
@@ -284,6 +343,14 @@ CreateConnection(_Inout_ PIRP Irp)
 
     if (Server == NULL)
         return STATUS_OBJECT_NAME_NOT_FOUND;
+
+    /* Nobody gets to the filter's callbacks without the right to connect */
+    Status = CheckConnectAccess(Server, Irp);
+    if (!NT_SUCCESS(Status))
+    {
+        ReleaseServerPort(Server);
+        return Status;
+    }
 
     if (InterlockedIncrement(&Server->NumberOfConnections) > Server->MaxConnections)
     {
@@ -447,6 +514,8 @@ FltCreateCommunicationPort(_In_ PFLT_FILTER Filter,
 {
     PFLT_SERVER_PORT Port;
     PLIST_ENTRY Entry;
+    PSECURITY_DESCRIPTOR Explicit, Default = NULL;
+    SECURITY_SUBJECT_CONTEXT Subject;
     NTSTATUS Status;
 
     PAGED_CODE();
@@ -502,6 +571,39 @@ FltCreateCommunicationPort(_In_ PFLT_FILTER Filter,
         return Status;
     }
     RtlCopyUnicodeString(&Port->Name, ObjectAttributes->ObjectName);
+
+    /*
+     * The descriptor the filter gave decides who may connect. Without one the port gets the default
+     * of FltBuildDefaultSecurityDescriptor: the system and the administrators. What the given
+     * descriptor leaves out (owner, group) comes from the creator, as for any other object.
+     */
+    Explicit = ObjectAttributes->SecurityDescriptor;
+    if (Explicit == NULL)
+    {
+        Status = FltBuildDefaultSecurityDescriptor(&Default, FLT_PORT_ALL_ACCESS);
+        Explicit = Default;
+    }
+    if (NT_SUCCESS(Status))
+    {
+        SeCaptureSubjectContext(&Subject);
+        Status = SeAssignSecurity(NULL,
+                                  Explicit,
+                                  &Port->SecurityDescriptor,
+                                  FALSE,
+                                  &Subject,
+                                  &FltpPortMapping,
+                                  PagedPool);
+        SeReleaseSubjectContext(&Subject);
+    }
+    if (Default)
+        FltFreeSecurityDescriptor(Default);
+    if (!NT_SUCCESS(Status))
+    {
+        Port->SecurityDescriptor = NULL;
+        FltObjectDereference(Filter);
+        ReleaseServerPort(Port);
+        return Status;
+    }
 
     ExAcquireFastMutex(&FltpPortsLock);
     for (Entry = FltpServerPorts.Flink; Entry != &FltpServerPorts; Entry = Entry->Flink)

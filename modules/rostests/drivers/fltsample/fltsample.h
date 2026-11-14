@@ -147,4 +147,9 @@ typedef struct _FLTSAMPLE_ASK_RESULT
 #define FLTSAMPLE_RV_PARK_WRITE_POST    0x4 /* the same for writes */
 #define FLTSAMPLE_IOCTL_CONTEXT_SELFTEST CTL_CODE(FILE_DEVICE_UNKNOWN, 0x809, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
+/* Service key value PortSecurity (REG_DWORD): the descriptor the sample gives its port */
+#define PORT_SECURITY_NONE              0   /* none: the filter manager's default */
+#define PORT_SECURITY_EVERYONE          1   /* a DACL that lets everybody connect */
+#define PORT_SECURITY_BUILT_DEFAULT     2   /* FltBuildDefaultSecurityDescriptor(FLT_PORT_ALL_ACCESS) */
+
 #endif /* _FLTSAMPLE_H */

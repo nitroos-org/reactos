@@ -80,6 +80,7 @@ static volatile LONG PendingWorkers;
 static KEVENT WorkersDone;
 static volatile ULONG RvFlags;
 static ULONG RvDenyAllPort;    /* review test: the port gets a descriptor with an empty DACL */
+static ULONG PortSecurity;     /* PORT_SECURITY_*: the descriptor the port is created with */
 static WCHAR ServiceName[48];
 static BOOLEAN UseContexts = TRUE;
 static PFLT_PORT ServerPort;
@@ -1317,6 +1318,20 @@ ReadParameters(_In_ PUNICODE_STRING RegistryPath)
         if (NT_SUCCESS(RtlQueryRegistryValues(RTL_REGISTRY_ABSOLUTE, Path, Table, NULL, NULL)))
             RvDenyAllPort = Deny;
     }
+
+    {
+        ULONG Value = 0, DefaultValue = 0;
+
+        RtlZeroMemory(Table, sizeof(Table));
+        Table[0].Flags = RTL_QUERY_REGISTRY_DIRECT;
+        Table[0].Name = L"PortSecurity";
+        Table[0].EntryContext = &Value;
+        Table[0].DefaultType = REG_DWORD;
+        Table[0].DefaultData = &DefaultValue;
+        Table[0].DefaultLength = sizeof(ULONG);
+        if (NT_SUCCESS(RtlQueryRegistryValues(RTL_REGISTRY_ABSOLUTE, Path, Table, NULL, NULL)))
+            PortSecurity = Value;
+    }
 }
 
 NTSTATUS
@@ -1377,6 +1392,7 @@ DriverEntry(_In_ PDRIVER_OBJECT DriverObject,
         OBJECT_ATTRIBUTES PortAttributes;
         UNICODE_STRING PortName;
         WCHAR PortNameBuffer[80];
+        PSECURITY_DESCRIPTOR BuiltDescriptor = NULL;
 
         RtlStringCbPrintfW(PortNameBuffer, sizeof(PortNameBuffer), L"\\%wsPort", ServiceName);
         RtlInitUnicodeString(&PortName, PortNameBuffer);
@@ -1392,8 +1408,39 @@ DriverEntry(_In_ PDRIVER_OBJECT DriverObject,
             RtlSetDaclSecurityDescriptor(&DenyAll, TRUE, &EmptyAcl, FALSE);
             PortAttributes.SecurityDescriptor = &DenyAll;
         }
+        else if (PortSecurity == PORT_SECURITY_EVERYONE)
+        {
+            /* Everybody may connect */
+            static SECURITY_DESCRIPTOR Everyone;
+            static UCHAR AclBuffer[sizeof(ACL) + sizeof(ACCESS_ALLOWED_ACE) + SECURITY_MAX_SID_SIZE];
+            PACL Acl = (PACL)AclBuffer;
+
+            RtlCreateSecurityDescriptor(&Everyone, SECURITY_DESCRIPTOR_REVISION);
+            RtlCreateAcl(Acl, sizeof(AclBuffer), ACL_REVISION);
+            RtlAddAccessAllowedAce(Acl, ACL_REVISION, FLT_PORT_ALL_ACCESS, SeExports->SeWorldSid);
+            RtlSetDaclSecurityDescriptor(&Everyone, TRUE, Acl, FALSE);
+            PortAttributes.SecurityDescriptor = &Everyone;
+        }
+        else if (PortSecurity == PORT_SECURITY_BUILT_DEFAULT)
+        {
+            /* What the WDK samples do: the system and the administrators */
+            Status = FltBuildDefaultSecurityDescriptor(&BuiltDescriptor, FLT_PORT_ALL_ACCESS);
+            if (!NT_SUCCESS(Status))
+            {
+                FltUnregisterFilter(SampleFilter);
+                SampleFilter = NULL;
+                goto Fail;
+            }
+            PortAttributes.SecurityDescriptor = BuiltDescriptor;
+        }
         Status = FltCreateCommunicationPort(SampleFilter, &ServerPort, &PortAttributes, NULL,
                                             PortConnect, PortDisconnect, PortMessage, 1);
+        if (BuiltDescriptor)
+        {
+            /* The port has its own copy */
+            FltFreeSecurityDescriptor(BuiltDescriptor);
+            BuiltDescriptor = NULL;
+        }
         if (!NT_SUCCESS(Status))
         {
             FltUnregisterFilter(SampleFilter);
