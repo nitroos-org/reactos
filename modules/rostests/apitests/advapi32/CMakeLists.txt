@@ -93,6 +93,7 @@ list(APPEND SOURCE
     ServiceNetwork.c
     SetEntriesInAclOld.c
     SetSecurityInfoKey.c
+    SetSecurityInfoKeyInherit.c
     SetNamedSecurityInfoInherit.c
     SddlRights.c
     SddlSids.c

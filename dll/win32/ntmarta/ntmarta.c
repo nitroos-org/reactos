@@ -647,6 +647,521 @@ AccpGetTrusteeSid(IN PTRUSTEE_W Trustee,
 }
 
 
+/*
+ * Registry keys: DACL auto-inheritance.
+ *
+ * A key's stored descriptor knows nothing of what its parent passes on. Like Windows, a DACL set
+ * through here is merged with the inheritable ACEs of the parent (they carry INHERITED_ACE and the
+ * descriptor SE_DACL_AUTO_INHERITED, unless the caller protects the DACL), and the change goes down
+ * to the existing subkeys. A query marks the ACEs that are the parent's inheritable ones.
+ * RegSetKeySecurity itself stays a plain set.
+ */
+
+#ifndef SEF_DACL_AUTO_INHERIT
+#define SEF_DACL_AUTO_INHERIT 0x01
+#endif
+
+#define ACCP_MAX_KEY_DEPTH 520
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlNewSecurityObjectEx(IN PSECURITY_DESCRIPTOR ParentDescriptor,
+                       IN PSECURITY_DESCRIPTOR CreatorDescriptor,
+                       OUT PSECURITY_DESCRIPTOR *NewDescriptor,
+                       IN LPGUID ObjectType,
+                       IN BOOLEAN IsDirectoryObject,
+                       IN ULONG AutoInheritFlags,
+                       IN HANDLE Token,
+                       IN PGENERIC_MAPPING GenericMapping);
+
+static GENERIC_MAPPING AccpKeyMapping = { KEY_READ, KEY_WRITE, KEY_EXECUTE, KEY_ALL_ACCESS };
+
+/* The descriptor of a key (LocalAlloc, self-relative), or NULL. The key is reopened for READ_CONTROL if it lacks it. */
+static PSECURITY_DESCRIPTOR
+AccpQueryKeySd(IN HKEY Key,
+               IN SECURITY_INFORMATION Info)
+{
+    PSECURITY_DESCRIPTOR Sd;
+    HKEY Reopened = NULL;
+    DWORD Size = 0x200, Needed, Ret;
+    BOOL Retried = FALSE;
+
+    for (;;)
+    {
+        Sd = LocalAlloc(LMEM_FIXED, Size);
+        if (Sd == NULL)
+            break;
+        Needed = Size;
+        Ret = RegGetKeySecurity(Reopened ? Reopened : Key, Info, Sd, &Needed);
+        if (Ret == ERROR_SUCCESS)
+            goto Done;
+        LocalFree(Sd);
+        Sd = NULL;
+        if (Ret == ERROR_INSUFFICIENT_BUFFER && Needed > Size)
+        {
+            Size = Needed;
+            continue;
+        }
+        if (Ret == ERROR_ACCESS_DENIED && !Retried &&
+            RegOpenKeyExW(Key, L"", REG_OPTION_OPEN_LINK, READ_CONTROL, &Reopened) == ERROR_SUCCESS)
+        {
+            Retried = TRUE;
+            continue;
+        }
+        break;
+    }
+Done:
+    if (Reopened != NULL)
+        RegCloseKey(Reopened);
+    return Sd;
+}
+
+/*
+ * The descriptor of the parent of a key, found through the key's NT name. NULL when there is none to
+ * inherit from (a hive root's parent is not one) or it cannot be read.
+ */
+static PSECURITY_DESCRIPTOR
+AccpQueryParentKeySd(IN HKEY Key)
+{
+    HKEY Reopened = NULL;
+    PKEY_NAME_INFORMATION Name = NULL;
+    PSECURITY_DESCRIPTOR Sd = NULL;
+    OBJECT_ATTRIBUTES Attributes;
+    UNICODE_STRING ParentName;
+    HANDLE Parent = NULL;
+    ULONG Size = 0x200, Length, Components = 0, i;
+    NTSTATUS Status;
+    PWCHAR Last;
+
+    if (RegOpenKeyExW(Key, L"", REG_OPTION_OPEN_LINK, READ_CONTROL, &Reopened) != ERROR_SUCCESS)
+        return NULL;
+
+    for (;;)
+    {
+        Name = (PKEY_NAME_INFORMATION)LocalAlloc(LMEM_FIXED, Size);
+        if (Name == NULL)
+            goto Cleanup;
+        Status = NtQueryKey(Reopened, KeyNameInformation, Name, Size, &Length);
+        if (NT_SUCCESS(Status))
+            break;
+        LocalFree(Name);
+        Name = NULL;
+        if ((Status != STATUS_BUFFER_OVERFLOW && Status != STATUS_BUFFER_TOO_SMALL) || Length <= Size)
+            goto Cleanup;
+        Size = Length;
+    }
+
+    /* the parent is three components deep at least: \REGISTRY\MACHINE\SOFTWARE is the first */
+    Length = Name->NameLength / sizeof(WCHAR);
+    Last = NULL;
+    for (i = 0; i < Length; i++)
+    {
+        if (Name->Name[i] == L'\\')
+        {
+            Last = &Name->Name[i];
+            if (i != 0)
+                Components++;
+        }
+    }
+    if (Last == NULL || Last == Name->Name || Components < 3)
+        goto Cleanup;
+
+    ParentName.Buffer = Name->Name;
+    ParentName.Length = ParentName.MaximumLength = (USHORT)((Last - Name->Name) * sizeof(WCHAR));
+    InitializeObjectAttributes(&Attributes, &ParentName, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    if (!NT_SUCCESS(NtOpenKey(&Parent, READ_CONTROL, &Attributes)))
+        goto Cleanup;
+
+    Size = 0x200;
+    for (;;)
+    {
+        Sd = LocalAlloc(LMEM_FIXED, Size);
+        if (Sd == NULL)
+            break;
+        Status = NtQuerySecurityObject(Parent,
+                                       OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                                       Sd,
+                                       Size,
+                                       &Length);
+        if (NT_SUCCESS(Status))
+            break;
+        LocalFree(Sd);
+        Sd = NULL;
+        if (Status != STATUS_BUFFER_TOO_SMALL || Length <= Size)
+            break;
+        Size = Length;
+    }
+
+Cleanup:
+    if (Parent != NULL)
+        NtClose(Parent);
+    if (Name != NULL)
+        LocalFree(Name);
+    RegCloseKey(Reopened);
+    return Sd;
+}
+
+/*
+ * Removes from an ACL (in place) every ACE that repeats an earlier one: the same type and size, the same
+ * flags but INHERITED_ACE, the same mask and SID. A key does not inherit the same ACE twice (the inherited
+ * ACEs of its parent repeat the explicit ones). The ACL keeps its size; the freed bytes are zeroed.
+ */
+static VOID
+AccpDropDuplicateAces(IN OUT PACL Acl)
+{
+    PUCHAR Out = (PUCHAR)(Acl + 1), In = Out, End = (PUCHAR)Acl + Acl->AclSize, Scan;
+    PACE_HEADER Ace, Kept;
+    ULONG i, Count = Acl->AceCount, Written = 0;
+
+    /* an ACL that does not parse to its end is left as it is */
+    for (i = 0; i < Count; i++)
+    {
+        if (In + sizeof(ACE_HEADER) > End)
+            return;
+        Ace = (PACE_HEADER)In;
+        if (Ace->AceSize < sizeof(ACE_HEADER) || In + Ace->AceSize > End)
+            return;
+        In += Ace->AceSize;
+    }
+    In = (PUCHAR)(Acl + 1);
+
+    for (i = 0; i < Count; i++)
+    {
+        BOOLEAN Duplicate = FALSE;
+
+        Ace = (PACE_HEADER)In;
+        for (Scan = (PUCHAR)(Acl + 1); Scan < Out; Scan += Kept->AceSize)
+        {
+            Kept = (PACE_HEADER)Scan;
+            if (Kept->AceType == Ace->AceType && Kept->AceSize == Ace->AceSize &&
+                (Kept->AceFlags & ~INHERITED_ACE) == (Ace->AceFlags & ~INHERITED_ACE) &&
+                RtlEqualMemory(Kept + 1, Ace + 1, Ace->AceSize - sizeof(ACE_HEADER)))
+            {
+                Duplicate = TRUE;
+                break;
+            }
+        }
+
+        if (!Duplicate)
+        {
+            if (Out != In)
+                RtlMoveMemory(Out, In, Ace->AceSize);
+            Out += Ace->AceSize;
+            Written++;
+        }
+        In += Ace->AceSize;
+    }
+
+    if (Written != Count)
+    {
+        RtlZeroMemory(Out, In - Out);
+        Acl->AceCount = (USHORT)Written;
+    }
+}
+
+/*
+ * The descriptor Key would get from its parent if the ACEs it has of its own were Explicit and everything
+ * else were inherited: its explicit ACEs, then the parent's inheritable ones flagged INHERITED_ACE (ACEs of
+ * Explicit that are flagged already are replaced). Without Protected, SE_DACL_AUTO_INHERITED is set.
+ */
+static NTSTATUS
+AccpMergeInheritedDacl(IN PSECURITY_DESCRIPTOR ParentSd,
+                       IN PSID Owner OPTIONAL,
+                       IN PSID Group OPTIONAL,
+                       IN PACL Explicit OPTIONAL,
+                       IN BOOLEAN Protected,
+                       OUT PSECURITY_DESCRIPTOR *NewSd)
+{
+    SECURITY_DESCRIPTOR Creator;
+    PACL ParentDacl = NULL;
+    BOOL Present, Defaulted;
+
+    /* the parent's descriptor is a private copy of the caller's: the repeated ACEs go from it */
+    if (GetSecurityDescriptorDacl(ParentSd, &Present, &ParentDacl, &Defaulted) && Present && ParentDacl != NULL)
+        AccpDropDuplicateAces(ParentDacl);
+
+    if (!InitializeSecurityDescriptor(&Creator, SECURITY_DESCRIPTOR_REVISION))
+        return STATUS_UNSUCCESSFUL;
+    if (Owner != NULL && !SetSecurityDescriptorOwner(&Creator, Owner, FALSE))
+        return STATUS_UNSUCCESSFUL;
+    if (Group != NULL && !SetSecurityDescriptorGroup(&Creator, Group, FALSE))
+        return STATUS_UNSUCCESSFUL;
+    if (Explicit != NULL && !SetSecurityDescriptorDacl(&Creator, TRUE, Explicit, FALSE))
+        return STATUS_UNSUCCESSFUL;
+    if (Protected && !SetSecurityDescriptorControl(&Creator, SE_DACL_PROTECTED, SE_DACL_PROTECTED))
+        return STATUS_UNSUCCESSFUL;
+
+    return RtlNewSecurityObjectEx(ParentSd, &Creator, NewSd, NULL, TRUE, SEF_DACL_AUTO_INHERIT, NULL, &AccpKeyMapping);
+}
+
+/*
+ * Flags the ACEs of the DACL of Sd (in place) that the parent's inheritable ACEs account for. A DACL that is
+ * auto-inherited already, or protected, says what it inherits itself and is left alone.
+ */
+static VOID
+AccpMarkInheritedAces(IN OUT PSECURITY_DESCRIPTOR Sd,
+                      IN PSECURITY_DESCRIPTOR ParentSd)
+{
+    SECURITY_DESCRIPTOR_CONTROL Control;
+    PSECURITY_DESCRIPTOR Expected = NULL;
+    PACL Dacl = NULL, ExpectedDacl = NULL;
+    PSID Owner = NULL, Group = NULL;
+    PBOOLEAN Used = NULL;
+    PACE_HEADER Ace, Other;
+    BOOL Present, Defaulted;
+    DWORD Revision, i, j;
+
+    if (!GetSecurityDescriptorControl(Sd, &Control, &Revision) ||
+        (Control & (SE_DACL_AUTO_INHERITED | SE_DACL_PROTECTED)))
+        return;
+    if (!GetSecurityDescriptorDacl(Sd, &Present, &Dacl, &Defaulted) || !Present || Dacl == NULL || Dacl->AceCount == 0)
+        return;
+    GetSecurityDescriptorOwner(Sd, &Owner, &Defaulted);
+    GetSecurityDescriptorGroup(Sd, &Group, &Defaulted);
+
+    if (!NT_SUCCESS(AccpMergeInheritedDacl(ParentSd, Owner, Group, NULL, FALSE, &Expected)))
+        return;
+    if (!GetSecurityDescriptorDacl(Expected, &Present, &ExpectedDacl, &Defaulted) || !Present ||
+        ExpectedDacl == NULL || ExpectedDacl->AceCount == 0)
+        goto Cleanup;
+    Used = (PBOOLEAN)LocalAlloc(LMEM_FIXED | LMEM_ZEROINIT, ExpectedDacl->AceCount * sizeof(BOOLEAN));
+    if (Used == NULL)
+        goto Cleanup;
+
+    for (i = 0; i < Dacl->AceCount; i++)
+    {
+        if (!GetAce(Dacl, i, (PVOID *)&Ace) || (Ace->AceFlags & INHERITED_ACE))
+            continue;
+        for (j = 0; j < ExpectedDacl->AceCount; j++)
+        {
+            if (Used[j] || !GetAce(ExpectedDacl, j, (PVOID *)&Other) || !(Other->AceFlags & INHERITED_ACE))
+                continue;
+            /* the same ACE but for the flag: type, size, the other flags, mask and SID */
+            if (Other->AceType == Ace->AceType && Other->AceSize == Ace->AceSize &&
+                (Other->AceFlags & ~INHERITED_ACE) == Ace->AceFlags &&
+                RtlEqualMemory((PUCHAR)Other + sizeof(ACE_HEADER), (PUCHAR)Ace + sizeof(ACE_HEADER),
+                               Ace->AceSize - sizeof(ACE_HEADER)))
+            {
+                Used[j] = TRUE;
+                Ace->AceFlags |= INHERITED_ACE;
+                break;
+            }
+        }
+    }
+
+Cleanup:
+    if (Used != NULL)
+        LocalFree(Used);
+    RtlDeleteSecurityObject(&Expected);
+}
+
+/*
+ * The subkeys of Key: each unprotected one gets its explicit ACEs plus what the new descriptor of Key
+ * (ParentSd) passes on, and its own subkeys follow if it changed. OldParentSd is what Key had before:
+ * the ACEs of a subkey that match what that passed on were inherited, though not flagged yet.
+ * A subkey that cannot be opened for READ_CONTROL | WRITE_DAC (or set) is skipped with its subtree.
+ */
+static VOID
+AccpPropagateToSubkeys(IN HKEY Key,
+                       IN PSECURITY_DESCRIPTOR ParentSd,
+                       IN PSECURITY_DESCRIPTOR OldParentSd OPTIONAL,
+                       IN ULONG Depth)
+{
+    HKEY Enumerate = NULL, Child;
+    WCHAR Name[256];
+    DWORD Index, Length, Revision;
+
+    if (Depth >= ACCP_MAX_KEY_DEPTH)
+        return;
+    if (RegOpenKeyExW(Key, L"", REG_OPTION_OPEN_LINK, KEY_ENUMERATE_SUB_KEYS, &Enumerate) != ERROR_SUCCESS)
+        return;
+
+    for (Index = 0;; Index++)
+    {
+        PSECURITY_DESCRIPTOR OldSd = NULL, NewSd = NULL;
+        SECURITY_DESCRIPTOR_CONTROL Control;
+        SECURITY_DESCRIPTOR Absolute;
+        PSID Owner = NULL, Group = NULL;
+        PACL OldDacl = NULL, NewDacl = NULL;
+        BOOL Present, Defaulted, Same;
+
+        Length = RTL_NUMBER_OF(Name);
+        if (RegEnumKeyExW(Enumerate, Index, Name, &Length, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
+            break;
+        if (RegOpenKeyExW(Enumerate, Name, REG_OPTION_OPEN_LINK, READ_CONTROL | WRITE_DAC, &Child) != ERROR_SUCCESS)
+            continue;
+
+        OldSd = AccpQueryKeySd(Child, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION);
+        if (OldSd != NULL &&
+            GetSecurityDescriptorControl(OldSd, &Control, &Revision) &&
+            !(Control & SE_DACL_PROTECTED) &&
+            GetSecurityDescriptorDacl(OldSd, &Present, &OldDacl, &Defaulted) && Present && OldDacl != NULL)
+        {
+            if (OldParentSd != NULL)
+                AccpMarkInheritedAces(OldSd, OldParentSd);
+            GetSecurityDescriptorOwner(OldSd, &Owner, &Defaulted);
+            GetSecurityDescriptorGroup(OldSd, &Group, &Defaulted);
+            GetSecurityDescriptorControl(OldSd, &Control, &Revision);
+
+            if (NT_SUCCESS(AccpMergeInheritedDacl(ParentSd, Owner, Group, OldDacl, FALSE, &NewSd)) &&
+                GetSecurityDescriptorDacl(NewSd, &Present, &NewDacl, &Defaulted) && Present && NewDacl != NULL)
+            {
+                /* nothing to do, here or below, if the key has what it would get */
+                Same = (Control & SE_DACL_AUTO_INHERITED) && OldDacl->AclSize == NewDacl->AclSize &&
+                       RtlEqualMemory(OldDacl, NewDacl, NewDacl->AclSize);
+                if (!Same &&
+                    InitializeSecurityDescriptor(&Absolute, SECURITY_DESCRIPTOR_REVISION) &&
+                    SetSecurityDescriptorDacl(&Absolute, TRUE, NewDacl, FALSE) &&
+                    SetSecurityDescriptorControl(&Absolute,
+                                                 SE_DACL_AUTO_INHERIT_REQ | SE_DACL_AUTO_INHERITED,
+                                                 SE_DACL_AUTO_INHERIT_REQ | SE_DACL_AUTO_INHERITED) &&
+                    RegSetKeySecurity(Child, DACL_SECURITY_INFORMATION, &Absolute) == ERROR_SUCCESS)
+                {
+                    AccpPropagateToSubkeys(Child, NewSd, OldSd, Depth + 1);
+                }
+            }
+        }
+
+        if (NewSd != NULL)
+            RtlDeleteSecurityObject(&NewSd);
+        if (OldSd != NULL)
+            LocalFree(OldSd);
+        RegCloseKey(Child);
+    }
+
+    RegCloseKey(Enumerate);
+}
+
+/* A plain RegSetKeySecurity; an access denied is retried on a key reopened for what the change needs */
+static DWORD
+AccpSetKeySecurityPlain(IN HKEY Key,
+                        IN SECURITY_INFORMATION SecurityInfo,
+                        IN PSECURITY_DESCRIPTOR pSecurityDescriptor)
+{
+    DWORD Ret;
+
+    Ret = (DWORD)RegSetKeySecurity(Key,
+                                   SecurityInfo,
+                                   pSecurityDescriptor);
+    if (Ret == ERROR_ACCESS_DENIED)
+    {
+        /* Like Windows, reopen the key with the rights the change needs
+         * instead of requiring them on the caller's handle: Google Updater
+         * sets the DACL through a KEY_WRITE handle (READ_CONTROL only).
+         * The reopen is access checked against the key's own security. */
+        HKEY hReopened;
+        REGSAM Access = 0;
+
+        if (SecurityInfo & DACL_SECURITY_INFORMATION)
+            Access |= WRITE_DAC;
+        if (SecurityInfo & (OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION))
+            Access |= WRITE_OWNER;
+        if (SecurityInfo & SACL_SECURITY_INFORMATION)
+            Access |= ACCESS_SYSTEM_SECURITY;
+
+        if (Access != 0 &&
+            RegOpenKeyExW(Key, L"", 0, Access, &hReopened) == ERROR_SUCCESS)
+        {
+            Ret = (DWORD)RegSetKeySecurity(hReopened,
+                                           SecurityInfo,
+                                           pSecurityDescriptor);
+            RegCloseKey(hReopened);
+        }
+    }
+    return Ret;
+}
+
+/*
+ * SetSecurityInfo on a key: a DACL is an auto-inherit request. The explicit ACEs of the caller's DACL are
+ * kept, the parent's inheritable ACEs are added (not for a protected DACL), the descriptor is marked
+ * SE_DACL_AUTO_INHERITED, and the existing subkeys are brought up to date. Anything that does not fit
+ * (no DACL, no parent to inherit from) is a plain set.
+ */
+static DWORD
+AccpSetKeySecurity(IN HKEY Key,
+                   IN SECURITY_INFORMATION SecurityInfo,
+                   IN PSECURITY_DESCRIPTOR pSecurityDescriptor)
+{
+    PSECURITY_DESCRIPTOR ParentSd = NULL, OldSd = NULL, MergedSd = NULL, NewSd = NULL;
+    SECURITY_DESCRIPTOR_CONTROL Control, MergedControl;
+    SECURITY_DESCRIPTOR Final;
+    PSID Owner = NULL, Group = NULL, OldOwner = NULL, OldGroup = NULL;
+    PACL Dacl = NULL, MergedDacl = NULL, Sacl = NULL;
+    BOOL Present, Defaulted, SaclPresent = FALSE;
+    DWORD Revision, Ret;
+
+    if (!(SecurityInfo & DACL_SECURITY_INFORMATION) ||
+        !GetSecurityDescriptorDacl(pSecurityDescriptor, &Present, &Dacl, &Defaulted) || !Present || Dacl == NULL)
+        return AccpSetKeySecurityPlain(Key, SecurityInfo, pSecurityDescriptor);
+
+    ParentSd = AccpQueryParentKeySd(Key);
+    if (ParentSd == NULL)
+        return AccpSetKeySecurityPlain(Key, SecurityInfo, pSecurityDescriptor);
+
+    OldSd = AccpQueryKeySd(Key, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION);
+    if (OldSd != NULL)
+    {
+        GetSecurityDescriptorOwner(OldSd, &OldOwner, &Defaulted);
+        GetSecurityDescriptorGroup(OldSd, &OldGroup, &Defaulted);
+    }
+    /* CREATOR OWNER and CREATOR GROUP ACEs become the key's owner and group, the new ones if they are set too */
+    Owner = OldOwner;
+    Group = OldGroup;
+    if (SecurityInfo & OWNER_SECURITY_INFORMATION)
+        GetSecurityDescriptorOwner(pSecurityDescriptor, &Owner, &Defaulted);
+    if (SecurityInfo & GROUP_SECURITY_INFORMATION)
+        GetSecurityDescriptorGroup(pSecurityDescriptor, &Group, &Defaulted);
+
+    if (!GetSecurityDescriptorControl(pSecurityDescriptor, &Control, &Revision) ||
+        !NT_SUCCESS(AccpMergeInheritedDacl(ParentSd, Owner, Group, Dacl, (Control & SE_DACL_PROTECTED) != 0, &MergedSd)) ||
+        !GetSecurityDescriptorControl(MergedSd, &MergedControl, &Revision) ||
+        !GetSecurityDescriptorDacl(MergedSd, &Present, &MergedDacl, &Defaulted) || !Present || MergedDacl == NULL ||
+        !InitializeSecurityDescriptor(&Final, SECURITY_DESCRIPTOR_REVISION) ||
+        !SetSecurityDescriptorDacl(&Final, TRUE, MergedDacl, FALSE) ||
+        !SetSecurityDescriptorControl(&Final,
+                                      SE_DACL_PROTECTED | SE_DACL_AUTO_INHERIT_REQ | SE_DACL_AUTO_INHERITED,
+                                      (MergedControl & (SE_DACL_PROTECTED | SE_DACL_AUTO_INHERITED)) |
+                                      SE_DACL_AUTO_INHERIT_REQ))
+    {
+        Ret = AccpSetKeySecurityPlain(Key, SecurityInfo, pSecurityDescriptor);
+        goto Cleanup;
+    }
+
+    /* the other parts of the caller's descriptor go along as they are */
+    if (SecurityInfo & OWNER_SECURITY_INFORMATION)
+        SetSecurityDescriptorOwner(&Final, Owner, FALSE);
+    if (SecurityInfo & GROUP_SECURITY_INFORMATION)
+        SetSecurityDescriptorGroup(&Final, Group, FALSE);
+    if ((SecurityInfo & (SACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION)) &&
+        GetSecurityDescriptorSacl(pSecurityDescriptor, &SaclPresent, &Sacl, &Defaulted))
+    {
+        SetSecurityDescriptorSacl(&Final, SaclPresent, Sacl, FALSE);
+        SetSecurityDescriptorControl(&Final,
+                                     SE_SACL_PROTECTED | SE_SACL_AUTO_INHERIT_REQ | SE_SACL_AUTO_INHERITED,
+                                     Control & (SE_SACL_PROTECTED | SE_SACL_AUTO_INHERIT_REQ | SE_SACL_AUTO_INHERITED));
+    }
+
+    Ret = AccpSetKeySecurityPlain(Key, SecurityInfo, &Final);
+    if (Ret == ERROR_SUCCESS)
+    {
+        NewSd = AccpQueryKeySd(Key, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION);
+        if (NewSd != NULL)
+            AccpPropagateToSubkeys(Key, NewSd, OldSd, 0);
+    }
+
+Cleanup:
+    if (NewSd != NULL)
+        LocalFree(NewSd);
+    if (MergedSd != NULL)
+        RtlDeleteSecurityObject(&MergedSd);
+    if (OldSd != NULL)
+        LocalFree(OldSd);
+    LocalFree(ParentSd);
+    return Ret;
+}
+
+
 /**********************************************************************
  * AccRewriteGetHandleRights				EXPORTED
  *
@@ -768,6 +1283,18 @@ AccRewriteGetHandleRights(HANDLE handle,
     {
         BOOL Present, Defaulted;
 
+        /* the ACEs of a key that its parent passes on are reported as inherited */
+        if (ObjectType == SE_REGISTRY_KEY && (SecurityInfo & DACL_SECURITY_INFORMATION))
+        {
+            PSECURITY_DESCRIPTOR ParentSd = AccpQueryParentKeySd((HKEY)handle);
+
+            if (ParentSd != NULL)
+            {
+                AccpMarkInheritedAces(pSD, ParentSd);
+                LocalFree(ParentSd);
+            }
+        }
+
         if (SecurityInfo & OWNER_SECURITY_INFORMATION && ppsidOwner != NULL)
         {
             *ppsidOwner = NULL;
@@ -860,34 +1387,9 @@ AccRewriteSetHandleRights(HANDLE handle,
     {
         case SE_REGISTRY_KEY:
         {
-            Ret = (DWORD)RegSetKeySecurity((HKEY)handle,
-                                           SecurityInfo,
-                                           pSecurityDescriptor);
-            if (Ret == ERROR_ACCESS_DENIED)
-            {
-                /* Like Windows, reopen the key with the rights the change needs
-                 * instead of requiring them on the caller's handle: Google Updater
-                 * sets the DACL through a KEY_WRITE handle (READ_CONTROL only).
-                 * The reopen is access checked against the key's own security. */
-                HKEY hReopened;
-                REGSAM Access = 0;
-
-                if (SecurityInfo & DACL_SECURITY_INFORMATION)
-                    Access |= WRITE_DAC;
-                if (SecurityInfo & (OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION))
-                    Access |= WRITE_OWNER;
-                if (SecurityInfo & SACL_SECURITY_INFORMATION)
-                    Access |= ACCESS_SYSTEM_SECURITY;
-
-                if (Access != 0 &&
-                    RegOpenKeyExW((HKEY)handle, L"", 0, Access, &hReopened) == ERROR_SUCCESS)
-                {
-                    Ret = (DWORD)RegSetKeySecurity(hReopened,
-                                                   SecurityInfo,
-                                                   pSecurityDescriptor);
-                    RegCloseKey(hReopened);
-                }
-            }
+            Ret = AccpSetKeySecurity((HKEY)handle,
+                                     SecurityInfo,
+                                     pSecurityDescriptor);
             break;
         }
 

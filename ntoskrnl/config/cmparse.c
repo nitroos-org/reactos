@@ -199,6 +199,66 @@ Exit:
     return Result;
 }
 
+/*
+ * Removes from an ACL (in place) every ACE that repeats an earlier one: the same type and size, the same
+ * flags but INHERITED_ACE, the same mask and SID. The ACL keeps its size; the freed bytes are zeroed.
+ */
+static
+VOID
+CmpDropDuplicateAces(
+    _Inout_ PACL Acl)
+{
+    PUCHAR Out = (PUCHAR)(Acl + 1), In = Out, End = (PUCHAR)Acl + Acl->AclSize, Scan;
+    PACE_HEADER Ace, Kept;
+    ULONG i, Count = Acl->AceCount, Written = 0;
+
+    /* an ACL that does not parse to its end is left as it is */
+    for (i = 0; i < Count; i++)
+    {
+        if (In + sizeof(ACE_HEADER) > End)
+            return;
+        Ace = (PACE_HEADER)In;
+        if (Ace->AceSize < sizeof(ACE_HEADER) || In + Ace->AceSize > End)
+            return;
+        In += Ace->AceSize;
+    }
+    In = (PUCHAR)(Acl + 1);
+
+    for (i = 0; i < Count; i++)
+    {
+        BOOLEAN Duplicate = FALSE;
+
+        Ace = (PACE_HEADER)In;
+
+        for (Scan = (PUCHAR)(Acl + 1); Scan < Out; Scan += Kept->AceSize)
+        {
+            Kept = (PACE_HEADER)Scan;
+            if (Kept->AceType == Ace->AceType && Kept->AceSize == Ace->AceSize &&
+                (Kept->AceFlags & ~INHERITED_ACE) == (Ace->AceFlags & ~INHERITED_ACE) &&
+                RtlEqualMemory(Kept + 1, Ace + 1, Ace->AceSize - sizeof(ACE_HEADER)))
+            {
+                Duplicate = TRUE;
+                break;
+            }
+        }
+
+        if (!Duplicate)
+        {
+            if (Out != In)
+                RtlMoveMemory(Out, In, Ace->AceSize);
+            Out += Ace->AceSize;
+            Written++;
+        }
+        In += Ace->AceSize;
+    }
+
+    if (Written != Count)
+    {
+        RtlZeroMemory(Out, In - Out);
+        Acl->AceCount = (USHORT)Written;
+    }
+}
+
 NTSTATUS
 NTAPI
 CmpDoCreateChild(IN PHHIVE Hive,
@@ -222,7 +282,7 @@ CmpDoCreateChild(IN PHHIVE Hive,
     PCM_KEY_CONTROL_BLOCK Kcb;
     PSECURITY_DESCRIPTOR NewDescriptor, ParentSd = NULL;
     HCELL_INDEX SecurityCell = HCELL_NIL;
-    BOOLEAN StoreExplicit;
+    BOOLEAN StoreExplicit, DaclAutoInherit;
 
     *KeyCell = HCELL_NIL;
 
@@ -270,12 +330,42 @@ CmpDoCreateChild(IN PHHIVE Hive,
             return Status;
         }
     }
+    /*
+     * A parent whose DACL is auto-inherited (one set through SetSecurityInfo, see
+     * ntmarta, or by SetNamedSecurityInfo with an auto-inherit request) passes that
+     * on: the child's inherited ACEs carry INHERITED_ACE and its control has
+     * SE_DACL_AUTO_INHERITED, as the oracle shows for keys created under such a
+     * parent. Under any other parent the DACL is not auto-inherited (see above).
+     * A DACL of the creator's own is stored as given.
+     */
+    DaclAutoInherit = FALSE;
+    if (ParentDescriptor &&
+        (((PISECURITY_DESCRIPTOR)ParentDescriptor)->Control & SE_DACL_AUTO_INHERITED) &&
+        !(AccessState->SecurityDescriptor &&
+          (((PISECURITY_DESCRIPTOR)AccessState->SecurityDescriptor)->Control & SE_DACL_PRESENT)))
+    {
+        DaclAutoInherit = TRUE;
+
+        /* the key does not get the same ACE twice (the parent's inherited ones repeat its explicit ones): oracle */
+        if (ParentSd == ParentDescriptor)
+        {
+            PACL ParentAcl = NULL;
+            BOOLEAN Present, Defaulted;
+
+            if (NT_SUCCESS(RtlGetDaclSecurityDescriptor(ParentSd, &Present, &ParentAcl, &Defaulted)) &&
+                Present && ParentAcl)
+            {
+                CmpDropDuplicateAces(ParentAcl);
+            }
+        }
+    }
     Status = SeAssignSecurityEx(ParentDescriptor,
                                 AccessState->SecurityDescriptor,
                                 &NewDescriptor,
                                 NULL,
                                 TRUE,
-                                (ParentDescriptor || StoreExplicit) ? SEF_SACL_AUTO_INHERIT : 0,
+                                ((ParentDescriptor || StoreExplicit) ? SEF_SACL_AUTO_INHERIT : 0) |
+                                (DaclAutoInherit ? SEF_DACL_AUTO_INHERIT : 0),
                                 &AccessState->SubjectSecurityContext,
                                 &CmpKeyObjectType->TypeInfo.GenericMapping,
                                 CmpKeyObjectType->TypeInfo.PoolType);
