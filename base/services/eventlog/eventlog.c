@@ -411,6 +411,24 @@ LoadLogFile(HKEY hKey, PWSTR LogName)
                                 sizeof(ulRetention));
     }
 
+    /*
+     * The workstation security template of the earlier releases set 512 KB
+     * and 7 days (604800 s) on the Application, System and Security logs,
+     * which fill up after a few thousand events. Move the logs that still have
+     * exactly this pair to the defaults; any other value is a choice that
+     * stays as it is.
+     */
+    if (ulMaxSize == 512 * 1024 && ulRetention == 604800)
+    {
+        ulMaxSize = 20 * 1024 * 1024; /* 20 MBytes, as on Windows 10 */
+        ulRetention = 0;
+
+        RegSetValueExW(hKey, L"MaxSize", 0, REG_DWORD,
+                       (LPBYTE)&ulMaxSize, sizeof(ulMaxSize));
+        RegSetValueExW(hKey, L"Retention", 0, REG_DWORD,
+                       (LPBYTE)&ulRetention, sizeof(ulRetention));
+    }
+
     // TODO: Add, or use, default values for "AutoBackupLogFiles" (REG_DWORD)
     // and "CustomSD" (REG_SZ).
 
