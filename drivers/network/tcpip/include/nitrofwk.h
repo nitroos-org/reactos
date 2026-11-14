@@ -44,3 +44,19 @@ VOID NitroFwAddressFileCreated(PADDRESS_FILE AddrFile);
 #define NITROFW_ADDRFILE_CREATED(AddrFile) \
     do { if (NitroFwWantImages) NitroFwAddressFileCreated(AddrFile); } while (0)
 VOID NitroFwReleaseImage(PVOID Image);
+
+/* IPv6 receive (ip/transport/tcp/if6.c, only with Ipv6Enable): one whole datagram (header and payload
+   contiguous, Length bytes, at least 40) before lwIP sees it. TRUE = hand it to lwIP. */
+BOOLEAN NitroFwInboundAllowed6(PIP_INTERFACE Interface, const UCHAR *Datagram, ULONG Length, BOOLEAN FromOwnLink);
+
+/* if6.c, for the filter: is Address (16 bytes, network order) one of our valid IPv6 addresses; is there a TCP
+   control block with these addresses and ports (our side first) */
+BOOLEAN TCP6IsLocalAddress(const UCHAR *Address);
+BOOLEAN TCP6HasTcpFlow(const UCHAR *Local, USHORT LocalPort, const UCHAR *Remote, USHORT RemotePort);
+
+#if DBG || defined(TCPIP_IPV6_SELFTEST)
+/* test builds, for the IPv6 self-test (ip/transport/tcp/selftest6.c) */
+NTSTATUS NitroFwTestSetPolicy(PVOID Blob, ULONG Size);
+NTSTATUS NitroFwTestGetDropLog(ULONGLONG From, PVOID Buf, ULONG Size);
+VOID NitroFwTestCounters(PLONG64 Dropped, PLONG64 Passed);
+#endif

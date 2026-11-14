@@ -59,9 +59,11 @@
  * that never completes its datagrams holds at most this many for IPV6_REASS_MAXAGE, and a 64K datagram in
  * 1280-byte fragments still fits */
 #define IP6_REASS_MAX_PBUFS             128
-/* A segment to an IPv6 listener is taken only from this machine until the firewall filters IPv6 (if6.c) */
+/* A segment to an IPv6 listener is taken only if it came from this machine or passed the firewall (if6.c) */
 #define LWIP_HOOK_TCP_INPACKET_PCB(pcb, hdr, optlen, opt1len, opt2, p) \
     (((pcb)->state == LISTEN && ip_current_is_v6()) ? LibTCPListenerInput6() : ERR_OK)
+/* ICMPv6 error messages (destination unreachable, parameter problem...) are rate limited (if6.c) */
+#define LWIP_HOOK_ICMP6_ERROR_ALLOWED() LibIcmp6ErrorAllowed()
 #define LWIP_ICMP                       0
 
 #define LWIP_RAW                        0

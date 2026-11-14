@@ -18,4 +18,5 @@ struct netif;
 int LibTCPReopenTimeWait(struct pbuf *p, struct netif *inp);
 /* ip/transport/tcp/if6.c */
 err_t LibTCPListenerInput6(void);
+int LibIcmp6ErrorAllowed(void);
 u32_t LibTCPNextIss(const ip_addr_t *LocalIp, u16_t LocalPort, const ip_addr_t *RemoteIp, u16_t RemotePort);

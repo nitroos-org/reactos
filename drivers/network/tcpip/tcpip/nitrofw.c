@@ -20,7 +20,9 @@
  * (no memory, wrong type, registry error) keeps the opt-in the previous push established (at load: on), so a
  * transient registry fault or a malformed value cannot silently turn enforcement off (or on); it is logged.
  *
- * Scope: IPv4 inbound only (the IP layer has no IPv6). Dropped: unsolicited TCP SYNs, unsolicited UDP,
+ * Scope: inbound. IPv4 here (NitroFwInboundAllowed); IPv6 (only with Tcpip\Parameters\Ipv6Enable, lwIP's
+ * stack) in NitroFwInboundAllowed6 further down, which applies the same rules and defaults.
+ * Dropped: unsolicited TCP SYNs, unsolicited UDP,
  * ICMP requests and other protocols that no Allow rule admits, or that a Block rule matches. Passed
  * without rule evaluation: loopback, TCP segments that are not a connection request (established
  * connections, the stack answers the rest as before), UDP replies from a peer the host sent to recently
@@ -272,6 +274,18 @@ static BOOLEAN FwBootOptionOff(VOID)
  * Policy reference counting and the enforcing flag
  * ---------------------------------------------------------------------------------------------- */
 
+#if DBG || defined(TCPIP_IPV6_SELFTEST)
+/* Test builds only (the IPv6 self-test): a policy that stands in for the installed one for IPv6 packets, so
+   the test does not depend on what the rule service pushed or when */
+#define FW_TESTHOOKS 1
+static PFW_POLICY FwTestPolicy = NULL;      /* under FwPolicyLock */
+static volatile LONG FwTestActive = 0;      /* FwTestPolicy is set and enforced */
+static volatile LONG FwTestLog = 0;
+#else
+#define FwTestActive 0
+#define FwTestLog 0
+#endif
+
 static VOID FwFreePolicy(PFW_POLICY Policy)
 {
     if (Policy->InRuleOffsets)
@@ -286,6 +300,10 @@ static PFW_POLICY FwRefPolicy(VOID)
 
     KeAcquireSpinLock(&FwPolicyLock, &OldIrql);
     Policy = FwPolicy;
+#ifdef FW_TESTHOOKS
+    if (FwTestPolicy)
+        Policy = FwTestPolicy;
+#endif
     if (Policy)
         InterlockedIncrement(&Policy->RefCount);
     KeReleaseSpinLock(&FwPolicyLock, OldIrql);
@@ -633,7 +651,7 @@ static NTSTATUS FwDeviceControl(PIRP Irp, PIO_STACK_LOCATION IrpSp)
                 return STATUS_BUFFER_TOO_SMALL;
             RtlZeroMemory(Info, sizeof(*Info));
             Info->AbiVersion = NITROFW_ABI_VERSION;
-            Info->Features = NITROFW_FEATURE_INBOUND;
+            Info->Features = NITROFW_FEATURE_INBOUND | (TCPIpv6Enabled ? NITROFW_FEATURE_IPV6 : 0);
             Info->MaxRules = NITROFW_MAX_RULES;
             Irp->IoStatus.Information = sizeof(*Info);
             return STATUS_SUCCESS;
@@ -1380,6 +1398,9 @@ typedef struct _FW_PKT
     PFW_IMAGE Owner;
     BOOLEAN OwnerLooked;
     BOOLEAN IcmpUnsolicitedReply;   /* an ICMP reply with no request of ours behind it */
+    BOOLEAN Is6;            /* IPv6: Src6/Dst6 (network order) are the addresses, LocalAddr/RemoteAddr are unused */
+    const UCHAR *Src6;
+    const UCHAR *Dst6;
 } FW_PKT, *PFW_PKT;
 
 /* ------------------------------------------------------------------------------------------------
@@ -1409,8 +1430,17 @@ static VOID FwLogDrop(PFW_PKT Pkt, ULONG Size, UCHAR Reason)
     RtlZeroMemory(Rec, sizeof(*Rec));
     Rec->Sequence = FwLogNext++;
     KeQuerySystemTime((PLARGE_INTEGER)&Rec->Time);
-    Rec->SrcAddr = Pkt->RemoteAddr;
-    Rec->DstAddr = Pkt->LocalAddr;
+    if (Pkt->Is6)
+    {
+        Rec->Flags = NITROFW_DROP_F_IPV6;
+        RtlCopyMemory(Rec->SrcAddr6, Pkt->Src6, 16);
+        RtlCopyMemory(Rec->DstAddr6, Pkt->Dst6, 16);
+    }
+    else
+    {
+        Rec->SrcAddr = Pkt->RemoteAddr;
+        Rec->DstAddr = Pkt->LocalAddr;
+    }
     Rec->SrcPort = Pkt->RemotePort;
     Rec->DstPort = Pkt->LocalPort;
     Rec->Protocol = (UCHAR)Pkt->Protocol;
@@ -1531,6 +1561,16 @@ static BOOLEAN FwAddrIn(PUCHAR Rule, ULONG Count, ULONG Offset, ULONG Addr)
     return FALSE;
 }
 
+static BOOLEAN FwAddr6In(PUCHAR Rule, ULONG Count, ULONG Offset, const UCHAR *Addr)
+{
+    PNITROFW_ADDR6_RANGE R = (PNITROFW_ADDR6_RANGE)(Rule + Offset);
+    ULONG i;
+    for (i = 0; i < Count; i++)
+        if (FwCompare16(Addr, R[i].Low) >= 0 && FwCompare16(Addr, R[i].High) <= 0)
+            return TRUE;
+    return FALSE;
+}
+
 static BOOLEAN FwRuleMatches(PNITROFW_RULE Rule, PFW_PKT Pkt)
 {
     PUCHAR R = (PUCHAR)Rule;
@@ -1551,6 +1591,22 @@ static BOOLEAN FwRuleMatches(PNITROFW_RULE Rule, PFW_PKT Pkt)
             return FALSE;
     }
 
+    if (Pkt->Is6)
+    {
+        /* an address condition given only for IPv4 never matches an IPv6 packet (and the reverse below) */
+        if (Rule->LocalAddr4Count || Rule->LocalAddr6Count)
+        {
+            if (!Rule->LocalAddr6Count || !FwAddr6In(R, Rule->LocalAddr6Count, Rule->LocalAddr6Offset, Pkt->Dst6))
+                return FALSE;
+        }
+        if (Rule->RemoteAddr4Count || Rule->RemoteAddr6Count)
+        {
+            if (!Rule->RemoteAddr6Count || !FwAddr6In(R, Rule->RemoteAddr6Count, Rule->RemoteAddr6Offset, Pkt->Src6))
+                return FALSE;
+        }
+    }
+    else
+    {
     /* an address condition given only for IPv6 never matches an IPv4 packet */
     if (Rule->LocalAddr4Count || Rule->LocalAddr6Count)
     {
@@ -1561,6 +1617,7 @@ static BOOLEAN FwRuleMatches(PNITROFW_RULE Rule, PFW_PKT Pkt)
     {
         if (!Rule->RemoteAddr4Count || !FwAddrIn(R, Rule->RemoteAddr4Count, Rule->RemoteAddr4Offset, Pkt->RemoteAddr))
             return FALSE;
+    }
     }
 
     if (Rule->IcmpCount && Pkt->IsIcmp)
@@ -1600,14 +1657,74 @@ static BOOLEAN FwRuleMatches(PNITROFW_RULE Rule, PFW_PKT Pkt)
     return TRUE;
 }
 
-BOOLEAN NitroFwInboundAllowed(PIP_INTERFACE Interface, PIP_PACKET IPPacket, UINT Protocol)
+/* The policy's decision for one inbound packet (IPv4 or IPv6, Pkt filled in): the profile's block-all,
+   then the Block and Allow rules, then the default. Counts, and logs a drop. TRUE = pass. A policy that is
+   not enforced passes everything without counting. */
+static BOOLEAN FwEvaluateInbound(PFW_PKT Pkt, ULONG Size)
 {
     PFW_POLICY Policy;
+    ULONG i;
+    BOOLEAN Allow, AllowRule = FALSE, Decided = FALSE, LogOn;
+    UCHAR DropReason = NITROFW_DROP_DEFAULT;
+
+    Policy = FwRefPolicy();
+    if (!FwPolicyEnforced(Policy))
+    {
+        if (Policy)
+            FwDerefPolicy(Policy);
+        return TRUE;
+    }
+
+    if (Policy->BlockAllInbound)
+    {
+        Allow = FALSE;
+        Decided = TRUE;
+        DropReason = NITROFW_DROP_BLOCK_ALL;
+    }
+    for (i = 0; !Decided && i < Policy->InRuleCount; i++)
+    {
+        PNITROFW_RULE Rule = (PNITROFW_RULE)(Policy->Blob + Policy->InRuleOffsets[i]);
+        if (!(Rule->ProfileMask & Policy->EnabledProfiles))
+            continue;
+        if (Rule->Action == NITROFW_ACTION_ALLOW && AllowRule)
+            continue;   /* already allowed; only a Block rule can change the outcome */
+        if (!FwRuleMatches(Rule, Pkt))
+            continue;
+        if (Rule->Action == NITROFW_ACTION_BLOCK)
+        {
+            Allow = FALSE;      /* block beats allow */
+            Decided = TRUE;
+            DropReason = NITROFW_DROP_BLOCK_RULE;
+        }
+        else
+            AllowRule = TRUE;
+    }
+    if (!Decided)
+        Allow = AllowRule || !Policy->DefaultBlockInbound;
+
+    LogOn = FwLogEnabled || Policy->LogDropped;
+    FwDerefPolicy(Policy);
+    if (Pkt->Owner)
+        NitroFwReleaseImage(Pkt->Owner);
+
+    if (!Allow)
+    {
+        InterlockedIncrement64(&FwDroppedInbound);
+        if (LogOn)
+            FwLogDrop(Pkt, Size, (DropReason == NITROFW_DROP_DEFAULT && Pkt->IcmpUnsolicitedReply) ? NITROFW_DROP_ICMP_REPLY : DropReason);
+        return FALSE;
+    }
+
+
+    InterlockedIncrement64(&FwPassedInbound);
+    return TRUE;
+}
+
+BOOLEAN NitroFwInboundAllowed(PIP_INTERFACE Interface, PIP_PACKET IPPacket, UINT Protocol)
+{
     FW_PKT Pkt;
     PUCHAR Data;
-    ULONG DataLen, i;
-    BOOLEAN Allow, AllowRule = FALSE, Decided = FALSE;
-    UCHAR DropReason = NITROFW_DROP_DEFAULT;
+    ULONG DataLen;
 
     /* loopback passes: by interface only. A 127/8 address on a real interface is not loopback
        (spoofed or misrouted) and goes through the rules or the default like any other packet. */
@@ -1686,54 +1803,355 @@ BOOLEAN NitroFwInboundAllowed(PIP_INTERFACE Interface, PIP_PACKET IPPacket, UINT
         }
     }
 
-    Policy = FwRefPolicy();
-    if (!FwPolicyEnforced(Policy))
-    {
-        if (Policy)
-            FwDerefPolicy(Policy);
-        return TRUE;
-    }
-
-    if (Policy->BlockAllInbound)
-    {
-        Allow = FALSE;
-        Decided = TRUE;
-        DropReason = NITROFW_DROP_BLOCK_ALL;
-    }
-    for (i = 0; !Decided && i < Policy->InRuleCount; i++)
-    {
-        PNITROFW_RULE Rule = (PNITROFW_RULE)(Policy->Blob + Policy->InRuleOffsets[i]);
-        if (!(Rule->ProfileMask & Policy->EnabledProfiles))
-            continue;
-        if (Rule->Action == NITROFW_ACTION_ALLOW && AllowRule)
-            continue;   /* already allowed; only a Block rule can change the outcome */
-        if (!FwRuleMatches(Rule, &Pkt))
-            continue;
-        if (Rule->Action == NITROFW_ACTION_BLOCK)
-        {
-            Allow = FALSE;      /* block beats allow */
-            Decided = TRUE;
-            DropReason = NITROFW_DROP_BLOCK_RULE;
-        }
-        else
-            AllowRule = TRUE;
-    }
-    if (!Decided)
-        Allow = AllowRule || !Policy->DefaultBlockInbound;
-
-    FwDerefPolicy(Policy);
-    if (Pkt.Owner)
-        NitroFwReleaseImage(Pkt.Owner);
-
-    if (!Allow)
-    {
-        InterlockedIncrement64(&FwDroppedInbound);
-        if (FwLogEnabled)
-            FwLogDrop(&Pkt, IPPacket->TotalSize, (DropReason == NITROFW_DROP_DEFAULT && Pkt.IcmpUnsolicitedReply) ? NITROFW_DROP_ICMP_REPLY : DropReason);
-        return FALSE;
-    }
+    return FwEvaluateInbound(&Pkt, IPPacket->TotalSize);
 
 PassCounted:
     InterlockedIncrement64(&FwPassedInbound);
     return TRUE;
 }
+
+/* ------------------------------------------------------------------------------------------------
+ * IPv6 inbound (lwIP's stack, only with Tcpip\Parameters\Ipv6Enable; ip/transport/tcp/if6.c)
+ *
+ * One complete datagram as the adapter delivered it (before lwIP sees it, so before reassembly, neighbour
+ * discovery, and any ICMPv6 error lwIP would send for it). The same policy, rules and defaults as IPv4:
+ *
+ *   Passed without rule evaluation: loopback; a frame our own send path looped back (source one of our
+ *     addresses, or :: for duplicate address detection); neighbour discovery (RS, RA, NS, NA, redirect:
+ *     RFC 4861 7.1: hop limit 255, code 0, the source rules of each type; a message that fails is dropped
+ *     and logged, no rule is consulted) and MLD (RFC 2710, 3810: hop limit 1, link-local or unspecified
+ *     source); ICMPv6 errors that answer a TCP segment we sent (the invoking packet is ours and a TCP
+ *     control block with its addresses and ports exists); echo replies (nothing in this stack sends an echo
+ *     request yet, so none can be unsolicited-by-us: Windows parity needs the oracle, see the ticket); TCP
+ *     segments that are not a connection request (as IPv4: the stack answers the rest); fragments after the
+ *     first (the first fragment was judged; lwIP drops overlaps, RFC 5722).
+ *   Evaluated (Block rules, Allow rules, the profile default): connection requests (SYN without ACK), UDP,
+ *     the other ICMPv6 types (echo request, ...), and every other protocol.
+ *   Dropped before any rule: a multicast source address, ::1 from a link, a datagram whose extension
+ *     headers or transport header do not fit, a first fragment too short to judge, an ICMPv6 message
+ *     shorter than its header.
+ *
+ * A rule's addresses apply by family: a rule with only IPv4 addresses never matches an IPv6 packet and the
+ * reverse. A rule without addresses applies to both. Program-image rules never match IPv6 for now (there is
+ * no IPv6 socket to own the port).
+ * ---------------------------------------------------------------------------------------------- */
+
+#define FW6_MAX_EXT_HEADERS 8
+#define FW6_PROTO_ICMPV6    58
+
+static BOOLEAN Fw6IsUnspecified(const UCHAR *A)
+{
+    ULONG i;
+    for (i = 0; i < 16; i++)
+        if (A[i])
+            return FALSE;
+    return TRUE;
+}
+
+static BOOLEAN Fw6IsLoopback(const UCHAR *A)
+{
+    ULONG i;
+    for (i = 0; i < 15; i++)
+        if (A[i])
+            return FALSE;
+    return A[15] == 1;
+}
+
+static BOOLEAN Fw6IsLinkLocal(const UCHAR *A)
+{
+    return A[0] == 0xFE && (A[1] & 0xC0) == 0x80;
+}
+
+static BOOLEAN Fw6IsMulticast(const UCHAR *A)
+{
+    return A[0] == 0xFF;
+}
+
+/* Walks the extension headers of the IPv6 datagram D (Len bytes, at least 40) whose first next-header value
+   is Nh. TRUE: *Proto is the upper-layer protocol and *Offset where it starts; *Fragment is 0 (not
+   fragmented), 1 (the first fragment, or an atomic one: the transport header starts at *Offset) or 2 (a
+   later fragment: *Offset is the fragment payload, not a transport header). FALSE: truncated, or too many. */
+static BOOLEAN Fw6FindTransport(const UCHAR *D, ULONG Len, UCHAR Nh, PUCHAR Proto, PULONG Offset, PUCHAR Fragment)
+{
+    ULONG Pos = 40, n;
+
+    *Fragment = 0;
+    for (n = 0; n < FW6_MAX_EXT_HEADERS; n++)
+    {
+        switch (Nh)
+        {
+            case 0:     /* hop-by-hop options */
+            case 43:    /* routing */
+            case 60:    /* destination options */
+            {
+                ULONG HeaderLength;
+                if (Len - Pos < 8)
+                    return FALSE;
+                HeaderLength = ((ULONG)D[Pos + 1] + 1) * 8;
+                if (HeaderLength > Len - Pos)
+                    return FALSE;
+                Nh = D[Pos];
+                Pos += HeaderLength;
+                break;
+            }
+            case 44:    /* fragment */
+            {
+                ULONG FragOffset;
+                if (Len - Pos < 8)
+                    return FALSE;
+                FragOffset = (((ULONG)D[Pos + 2] << 8) | D[Pos + 3]) & 0xFFF8;
+                Nh = D[Pos];
+                Pos += 8;
+                if (FragOffset)
+                {
+                    *Fragment = 2;
+                    *Proto = Nh;
+                    *Offset = Pos;
+                    return TRUE;
+                }
+                *Fragment = 1;
+                break;
+            }
+            default:
+                *Proto = Nh;
+                *Offset = Pos;
+                return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+/* An ICMPv6 error (type 1-4) at D + Off: does it answer a TCP segment this host sent? */
+static BOOLEAN Fw6ErrorRelated(const UCHAR *D, ULONG Len, ULONG Off)
+{
+    const UCHAR *In;
+    ULONG InLen, TransportOff;
+    UCHAR Proto, Fragment;
+
+    /* the 8-byte ICMPv6 header, the invoking packet's header, and the ports of its transport header */
+    if (Len - Off < 8 + 40 + 4)
+        return FALSE;
+    In = D + Off + 8;
+    InLen = Len - Off - 8;
+    if ((In[0] >> 4) != 6 || !TCP6IsLocalAddress(In + 8))
+        return FALSE;
+    if (!Fw6FindTransport(In, InLen, In[6], &Proto, &TransportOff, &Fragment) || Fragment == 2)
+        return FALSE;
+    if (Proto != IPPROTO_TCP || InLen - TransportOff < 4)
+        return FALSE;
+    return TCP6HasTcpFlow(In + 8, (USHORT)((In[TransportOff] << 8) | In[TransportOff + 1]),
+                          In + 24, (USHORT)((In[TransportOff + 2] << 8) | In[TransportOff + 3]));
+}
+
+static BOOLEAN Fw6DropInvalid(PFW_PKT Pkt, ULONG Len)
+{
+    InterlockedIncrement64(&FwDroppedInbound);
+    if (FwLogEnabled || FwTestLog)
+        FwLogDrop(Pkt, Len, NITROFW_DROP_V6_INVALID);
+    return FALSE;
+}
+
+/* Neighbour discovery and MLD per type. Returns 1 = pass, 0 = drop as invalid, -1 = not one of these */
+static int Fw6BuiltinIcmp(const UCHAR *D, ULONG Avail, ULONG Off, UCHAR Type, UCHAR Code)
+{
+    const UCHAR *Src = D + 8;
+    UCHAR HopLimit = D[7];
+
+    switch (Type)
+    {
+        case 133:   /* router solicitation */
+            return (HopLimit == 255 && Code == 0 && !Fw6IsMulticast(Src)) ? 1 : 0;
+        case 134:   /* router advertisement: only from a router's link-local address */
+            return (HopLimit == 255 && Code == 0 && Fw6IsLinkLocal(Src) && Avail >= 16) ? 1 : 0;
+        case 135:   /* neighbour solicitation (the source is :: for duplicate address detection) */
+        case 136:   /* neighbour advertisement */
+            return (HopLimit == 255 && Code == 0 && !Fw6IsMulticast(Src) && Avail >= 24) ? 1 : 0;
+        case 137:   /* redirect */
+            return (HopLimit == 255 && Code == 0 && Fw6IsLinkLocal(Src) && Avail >= 40) ? 1 : 0;
+        case 130:   /* MLD query, report, done, MLDv2 report */
+        case 131:
+        case 132:
+        case 143:
+            return (HopLimit == 1 && (Fw6IsLinkLocal(Src) || Fw6IsUnspecified(Src))) ? 1 : 0;
+    }
+    (void)Off;
+    return -1;
+}
+
+BOOLEAN NitroFwInboundAllowed6(PIP_INTERFACE Interface, const UCHAR *D, ULONG Len, BOOLEAN FromOwnLink)
+{
+    FW_PKT Pkt;
+    const UCHAR *Src, *Dst;
+    UCHAR Proto, Fragment;
+    ULONG Off, Avail;
+
+    /* nothing enforced: nothing is filtered (as IPv4) */
+    if (!NitroFwEnforcing && !FwTestActive)
+        return TRUE;
+    if (Interface == Loopback)
+        return TRUE;
+    if (Len < 40)
+        return FALSE;   /* the caller hands over whole datagrams; a runt is not one */
+
+    Src = D + 8;
+    Dst = D + 24;
+
+    /* One of our own sends, looped back by the adapter: tagged inside the send call, a frame from the wire
+       never is. The source must be ours (or :: for DAD); the destination can be a multicast group we sent to */
+    if (FromOwnLink && (Fw6IsUnspecified(Src) || TCP6IsLocalAddress(Src)))
+        goto PassCounted;
+
+    RtlZeroMemory(&Pkt, sizeof(Pkt));
+    Pkt.Is6 = TRUE;
+    Pkt.Src6 = Src;
+    Pkt.Dst6 = Dst;
+    Pkt.IfType = LANGetFwIfType(Interface);
+    Pkt.OwnerLooked = TRUE;     /* no owner: a program rule does not match an IPv6 packet */
+
+    if (!Fw6FindTransport(D, Len, D[6], &Proto, &Off, &Fragment))
+    {
+        Pkt.Protocol = D[6];
+        return Fw6DropInvalid(&Pkt, Len);
+    }
+    Pkt.Protocol = Proto;
+
+    /* RFC 4291: a multicast address is never a source; ::1 is never on a link */
+    if (Fw6IsMulticast(Src) || Fw6IsLoopback(Src) || Fw6IsLoopback(Dst))
+        return Fw6DropInvalid(&Pkt, Len);
+
+    /* later fragments carry no transport header: the first fragment decided, lwIP reassembles (and drops
+       overlaps) */
+    if (Fragment == 2)
+        goto PassCounted;
+
+    Avail = Len - Off;
+
+    switch (Proto)
+    {
+        case IPPROTO_TCP:
+            if (Avail < 14)
+            {
+                /* too short to hold the flags: a first fragment cannot be judged; an unfragmented one is
+                   discarded by the transport as for IPv4 */
+                if (Fragment)
+                    return Fw6DropInvalid(&Pkt, Len);
+                goto PassCounted;
+            }
+            /* only a connection request (SYN without ACK) is unsolicited */
+            if ((D[Off + 13] & 0x12) != 0x02)
+                goto PassCounted;
+            Pkt.HasPorts = TRUE;
+            break;
+
+        case IPPROTO_UDP:
+            if (Avail < 8)
+            {
+                if (Fragment)
+                    return Fw6DropInvalid(&Pkt, Len);
+                goto PassCounted;
+            }
+            Pkt.HasPorts = TRUE;
+            break;
+
+        case FW6_PROTO_ICMPV6:
+        {
+            int Builtin;
+
+            if (Avail < 8)
+                return Fw6DropInvalid(&Pkt, Len);
+            Pkt.IsIcmp = TRUE;
+            Pkt.IcmpType = D[Off];
+            Pkt.IcmpCode = D[Off + 1];
+
+            Builtin = Fw6BuiltinIcmp(D, Avail, Off, Pkt.IcmpType, Pkt.IcmpCode);
+            if (Builtin == 1)
+                goto PassCounted;
+            if (Builtin == 0)
+                return Fw6DropInvalid(&Pkt, Len);
+
+            switch (Pkt.IcmpType)
+            {
+                case 1: case 2: case 3: case 4:
+                    /* destination unreachable, packet too big, time exceeded, parameter problem: those
+                       that answer our own TCP segment pass; the others are judged by the rules */
+                    if (Fw6ErrorRelated(D, Len, Off))
+                        goto PassCounted;
+                    break;
+                case 129:   /* echo reply */
+                    goto PassCounted;
+            }
+            break;
+        }
+    }
+
+    if (Pkt.HasPorts)
+    {
+        Pkt.RemotePort = (USHORT)((D[Off] << 8) | D[Off + 1]);
+        Pkt.LocalPort = (USHORT)((D[Off + 2] << 8) | D[Off + 3]);
+        Pkt.LocalPortN = *(USHORT UNALIGNED *)(D + Off + 2);
+    }
+
+    return FwEvaluateInbound(&Pkt, Len);
+
+PassCounted:
+    InterlockedIncrement64(&FwPassedInbound);
+    return TRUE;
+}
+
+#ifdef FW_TESTHOOKS
+/* The IPv6 self-test: Blob is a NITROFW_POLICY that replaces the installed policy for filtering until it is
+   called again with NULL. Not reachable from user mode. */
+NTSTATUS NitroFwTestSetPolicy(PVOID Blob, ULONG Size)
+{
+    PFW_POLICY Policy = NULL, Old;
+    KIRQL OldIrql;
+    NTSTATUS Status;
+
+    if (Blob)
+    {
+        if (Size < sizeof(NITROFW_POLICY) || Size > NITROFW_MAX_POLICY_SIZE)
+            return STATUS_INVALID_PARAMETER;
+        Policy = ExAllocatePoolWithTag(NonPagedPool, FIELD_OFFSET(FW_POLICY, Blob) + Size, NITROFW_TAG);
+        if (!Policy)
+            return STATUS_INSUFFICIENT_RESOURCES;
+        RtlZeroMemory(Policy, FIELD_OFFSET(FW_POLICY, Blob));
+        RtlCopyMemory(Policy->Blob, Blob, Size);
+        Policy->BlobSize = Size;
+        Policy->RefCount = 1;
+        Status = FwCompilePolicy(Policy);
+        if (!NT_SUCCESS(Status))
+        {
+            FwFreePolicy(Policy);
+            return Status;
+        }
+    }
+
+    KeAcquireSpinLock(&FwPolicyLock, &OldIrql);
+    Old = FwTestPolicy;
+    FwTestPolicy = Policy;
+    InterlockedExchange((PLONG)&FwTestActive, (Policy && Policy->EnabledProfiles != 0 && (Policy->Flags & NITROFW_POLICY_ENFORCE)) ? 1 : 0);
+    InterlockedExchange((PLONG)&FwTestLog, (Policy && Policy->LogDropped) ? 1 : 0);
+    KeReleaseSpinLock(&FwPolicyLock, OldIrql);
+
+    if (Old)
+        FwDerefPolicy(Old);
+    return STATUS_SUCCESS;
+}
+
+/* The drop log from sequence From on, as IOCTL_NITROFW_GET_DROPLOG returns it (Buf: NITROFW_DROPLOG, records) */
+NTSTATUS NitroFwTestGetDropLog(ULONGLONG From, PVOID Buf, ULONG Size)
+{
+    ULONG_PTR Information;
+
+    if (Size < sizeof(ULONGLONG))
+        return STATUS_BUFFER_TOO_SMALL;
+    *(PULONGLONG)Buf = From;
+    return FwGetDropLog(Buf, sizeof(ULONGLONG), Size, &Information);
+}
+
+VOID NitroFwTestCounters(PLONG64 Dropped, PLONG64 Passed)
+{
+    *Dropped = FwDroppedInbound;
+    *Passed = FwPassedInbound;
+}
+#endif
