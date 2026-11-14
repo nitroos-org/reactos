@@ -198,9 +198,11 @@ extern void func_RtlGetUnloadEventTrace(void);
 extern void func_RtlPlaceholderCompatibilityMode(void);
 extern void func_RtlHandle(void);
 extern void func_RtlHeapChurn(void);
+extern void func_RtlHeapCompact(void);
 extern void func_RtlHeapDecommit(void);
 extern void func_RtlHeapExtendReuse(void);
 extern void func_RtlHeapFrontEnd(void);
+extern void func_RtlHeapGrowFail(void);
 extern void func_RtlHeapTailCheck(void);
 extern void func_RtlHeapValidate(void);
 extern void func_RtlImageDirectoryEntryToData(void);
@@ -485,9 +487,11 @@ const struct test winetest_testlist[] =
     { "RtlPlaceholderCompatibilityMode", func_RtlPlaceholderCompatibilityMode },
     { "RtlHandle",                      func_RtlHandle },
     { "RtlHeapChurn",                   func_RtlHeapChurn },
+    { "RtlHeapCompact",                 func_RtlHeapCompact },
     { "RtlHeapDecommit",                func_RtlHeapDecommit },
     { "RtlHeapExtendReuse",             func_RtlHeapExtendReuse },
     { "RtlHeapFrontEnd",                func_RtlHeapFrontEnd },
+    { "RtlHeapGrowFail",                func_RtlHeapGrowFail },
     { "RtlHeapTailCheck",               func_RtlHeapTailCheck },
     { "RtlHeapValidate",                func_RtlHeapValidate },
     { "RtlImageDirectoryEntryToData",   func_RtlImageDirectoryEntryToData },
