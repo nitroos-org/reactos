@@ -231,6 +231,69 @@ CmpConvertHandleToKernelHandle(
     return Status;
 }
 
+/*
+ * Gets a referenced key object from the caller's OBJECT_ATTRIBUTES, for a service that
+ * needs the object only for its own use. The attributes are captured once, and the
+ * temporary handle lives in the kernel handle table, so that no other thread of the
+ * caller can close or replace it. The caller's access rights are still checked.
+ */
+static
+NTSTATUS
+CmpReferenceKeyByAttributes(
+    _In_ POBJECT_ATTRIBUTES TargetKey,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_ KPROCESSOR_MODE PreviousMode,
+    _Out_ PCM_KEY_BODY *KeyBody)
+{
+    NTSTATUS Status;
+    OBJECT_ATTRIBUTES Captured;
+    UNICODE_STRING Name;
+    HANDLE KmRootDir = NULL, Handle;
+
+    *KeyBody = NULL;
+
+    Status = ProbeAndCaptureObjectAttributes(&Captured, &Name, PreviousMode, TargetKey, TRUE);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    /* A root directory is only used to resolve the name: no access to it is required */
+    Status = CmpConvertHandleToKernelHandle(Captured.RootDirectory,
+                                            NULL,
+                                            0,
+                                            PreviousMode,
+                                            &KmRootDir);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+    Captured.RootDirectory = KmRootDir;
+    Captured.Attributes |= OBJ_KERNEL_HANDLE;
+    if (PreviousMode != KernelMode)
+        Captured.Attributes |= OBJ_FORCE_ACCESS_CHECK;
+
+    Status = ObOpenObjectByName(&Captured,
+                                CmpKeyObjectType,
+                                KernelMode,
+                                NULL,
+                                DesiredAccess,
+                                NULL,
+                                &Handle);
+    if (NT_SUCCESS(Status))
+    {
+        Status = ObReferenceObjectByHandle(Handle,
+                                           DesiredAccess,
+                                           CmpKeyObjectType,
+                                           KernelMode,
+                                           (PVOID*)KeyBody,
+                                           NULL);
+        ObCloseHandle(Handle, KernelMode);
+    }
+
+Cleanup:
+    if (KmRootDir)
+        ObCloseHandle(KmRootDir, KernelMode);
+    ReleaseCapturedObjectAttributes(&Captured, PreviousMode);
+    return Status;
+}
+
 
 /* FUNCTIONS *****************************************************************/
 
@@ -1892,7 +1955,6 @@ NtQueryOpenSubKeys(IN POBJECT_ATTRIBUTES TargetKey,
 {
     KPROCESSOR_MODE PreviousMode;
     PCM_KEY_BODY KeyBody = NULL;
-    HANDLE KeyHandle;
     NTSTATUS Status;
     ULONG SubKeys;
 
@@ -1925,27 +1987,8 @@ NtQueryOpenSubKeys(IN POBJECT_ATTRIBUTES TargetKey,
         _SEH2_END;
     }
 
-    /* Open a handle to the key */
-    Status = ObOpenObjectByName(TargetKey,
-                                CmpKeyObjectType,
-                                PreviousMode,
-                                NULL,
-                                KEY_READ,
-                                NULL,
-                                &KeyHandle);
-    if (NT_SUCCESS(Status))
-    {
-        /* Reference the key object */
-        Status = ObReferenceObjectByHandle(KeyHandle,
-                                           KEY_READ,
-                                           CmpKeyObjectType,
-                                           PreviousMode,
-                                           (PVOID*)&KeyBody,
-                                           NULL);
-
-        /* Close the handle */
-        NtClose(KeyHandle);
-    }
+    /* Get the key object, without a handle in the caller's handle table */
+    Status = CmpReferenceKeyByAttributes(TargetKey, KEY_READ, PreviousMode, &KeyBody);
 
     /* Fail, if the key object could not be referenced */
     if (!NT_SUCCESS(Status))
@@ -2000,7 +2043,6 @@ NtQueryOpenSubKeysEx(IN POBJECT_ATTRIBUTES TargetKey,
     KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
     PCM_KEY_BODY KeyBody = NULL;
     PCM_OPEN_SUBKEYS_INFO Snapshot = NULL;
-    HANDLE KeyHandle;
     NTSTATUS Status;
     ULONG SnapshotSize = 0, i;
     PUCHAR UserBuffer = Buffer;
@@ -2027,24 +2069,8 @@ NtQueryOpenSubKeysEx(IN POBJECT_ATTRIBUTES TargetKey,
         _SEH2_END;
     }
 
-    /* Open the key and get its object */
-    Status = ObOpenObjectByName(TargetKey,
-                                CmpKeyObjectType,
-                                PreviousMode,
-                                NULL,
-                                KEY_READ,
-                                NULL,
-                                &KeyHandle);
-    if (NT_SUCCESS(Status))
-    {
-        Status = ObReferenceObjectByHandle(KeyHandle,
-                                           KEY_READ,
-                                           CmpKeyObjectType,
-                                           PreviousMode,
-                                           (PVOID*)&KeyBody,
-                                           NULL);
-        NtClose(KeyHandle);
-    }
+    /* Get the key object, without a handle in the caller's handle table */
+    Status = CmpReferenceKeyByAttributes(TargetKey, KEY_READ, PreviousMode, &KeyBody);
     if (!NT_SUCCESS(Status))
         return Status;
 
