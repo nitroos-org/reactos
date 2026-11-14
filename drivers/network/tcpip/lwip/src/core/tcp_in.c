@@ -141,6 +141,14 @@ tcp_input(struct pbuf *p, struct netif *inp)
   tcp_debug_print(tcphdr);
 #endif
 
+  /* NitroOS: a reassembled datagram is a chain of the fragments' pbufs, and a fragment may end inside the
+   * TCP header (a fragment only needs a multiple of 8 bytes). Make the chain one buffer so that the header
+   * is contiguous; a chain that is too short for a header is dropped below, as before. */
+  if (p->len < TCP_HLEN && p->next != NULL && p->tot_len >= TCP_HLEN) {
+    p = pbuf_coalesce(p, PBUF_RAW);
+    tcphdr = (struct tcp_hdr *)p->payload;
+  }
+
   /* Check that TCP header fits in payload */
   if (p->len < TCP_HLEN) {
     /* drop short packets */
