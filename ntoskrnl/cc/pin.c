@@ -123,6 +123,152 @@ CcpCountPinnedOverlaps(
     return Count;
 }
 
+/*
+ * A pin for writing begins, or the range is made dirty under a pin: it is held
+ * back from the lazy write, for at most CC_PIN_HOLD_MAX from the last such
+ * event (CcpGetPinHeldPages). Caller holds BcbSpinLock.
+ */
+static
+VOID
+CcpMarkPinWrite(
+    IN PINTERNAL_BCB Bcb,
+    IN UCHAR Flag)
+{
+    Bcb->PinWrite |= Flag;
+    Bcb->PinWriteTime = KeQueryInterruptTime();
+}
+
+/*
+ * Caller holds BcbSpinLock and has just dropped one pin or repin of the BCB.
+ * When that was the last, the range is no longer held back from the lazy
+ * write. Returns TRUE if it was made dirty while pinned: the caller makes it
+ * dirty again (CcpRedirtyBcb) before it lets the pin go.
+ */
+static
+BOOLEAN
+CcpEndPinWrite(
+    IN PINTERNAL_BCB Bcb)
+{
+    BOOLEAN Redirty;
+
+    if (Bcb->PinCount != 0 || Bcb->RepinCount != 0)
+    {
+        return FALSE;
+    }
+
+    Redirty = BooleanFlagOn(Bcb->PinWrite, CC_BCB_WRITE_DIRTY);
+    Bcb->PinWrite = 0;
+    return Redirty;
+}
+
+/*
+ * The last pin of a BCB made dirty while pinned goes: everything the file
+ * system changed under the pin is in the view now. A lazy write leaves such a
+ * range alone, but a write that does not (CcFlushCache, a trim or shutdown
+ * flush, Mm) may have written it, and cleaned it, between the
+ * CcSetDirtyPinnedData call and later changes: mark it dirty again. If it is
+ * still dirty this changes nothing.
+ */
+static
+VOID
+CcpRedirtyBcb(
+    IN PINTERNAL_BCB Bcb)
+{
+    PROS_VACB Vacb = Bcb->Vacb;
+
+    /* Mm takes the segment lock; CcUnpinData may be called at DISPATCH_LEVEL,
+     * where only the view can be marked (its clean pages are not written) */
+    if (KeGetCurrentIrql() <= APC_LEVEL)
+    {
+        MmMakeSegmentDirty(Vacb->SharedCacheMap->FileObject->SectionObjectPointer,
+                           Bcb->PFCB.MappedFileOffset.QuadPart,
+                           Bcb->PFCB.MappedLength);
+    }
+
+    /* Vacb->Dirty is read without the master lock, as CcSetDirtyPinnedData's CcRosMarkDirtyVacb does inside it:
+     * a stale FALSE is harmless (CcRosMarkDirtyVacb checks again under the lock); a stale TRUE means the view was
+     * dirty an instant ago and is being written, which is what the mark above covers (Mm's pages are dirty again) */
+    if (!Vacb->Dirty)
+    {
+        CcRosMarkDirtyVacb(Vacb);
+    }
+}
+
+/*
+ * Which pages of [Start, Start + Pages pages) a lazy write must leave alone:
+ * those of a BCB pinned (or repinned) for writing, see CC_BCB_WRITE_*. Start
+ * is page aligned. Sets one bit per held page in Held and returns TRUE if any.
+ * The answer is a snapshot: a pin taken after it is not held back by the
+ * write that asked (if it makes the range dirty, CcSetDirtyPinnedData marks
+ * the view again and its last unpin does, see CcpRedirtyBcb).
+ * Safety valve: a BCB whose last pin-for-writing event (an exclusive pin, a
+ * CcSetDirtyPinnedData call) is older than CC_PIN_HOLD_MAX is not held back:
+ * a file system that keeps dirty metadata pinned for minutes (ext2 buffer
+ * heads) would otherwise have no lazy write of it at all, and a power cut
+ * would lose it. Its pins stay; what the file system changes later is marked
+ * dirty again by CcSetDirtyPinnedData or by the last unpin (CcpRedirtyBcb).
+ * A thread that waits for dirty pages to fall (CcCanIWrite) while it holds
+ * such a pin waits at most that long for the lazy writer.
+ */
+BOOLEAN
+CcpGetPinHeldPages(
+    _In_ PROS_SHARED_CACHE_MAP SharedCacheMap,
+    _In_ LONGLONG Start,
+    _In_ ULONG Pages,
+    _Out_writes_((Pages + 31) / 32) PULONG Held)
+{
+    LONGLONG End = Start + ((LONGLONG)Pages << PAGE_SHIFT);
+    LONGLONG First, Last;
+    PLIST_ENTRY NextEntry;
+    PINTERNAL_BCB Bcb;
+    BOOLEAN Any = FALSE;
+    KIRQL OldIrql;
+    ULONG Page, EndPage;
+    ULONGLONG Now;
+
+    RtlZeroMemory(Held, ((Pages + 31) / 32) * sizeof(ULONG));
+
+    /* Every pin API fails on a map without pin access: nothing to hold back */
+    if (!SharedCacheMap->PinAccess)
+    {
+        return FALSE;
+    }
+
+    Now = KeQueryInterruptTime();
+
+    KeAcquireSpinLock(&SharedCacheMap->BcbSpinLock, &OldIrql);
+    for (NextEntry = SharedCacheMap->BcbList.Flink;
+         NextEntry != &SharedCacheMap->BcbList;
+         NextEntry = NextEntry->Flink)
+    {
+        Bcb = CONTAINING_RECORD(NextEntry, INTERNAL_BCB, BcbEntry);
+
+        if (!Bcb->Pinned || Bcb->PinWrite == 0 ||
+            (Bcb->PinCount == 0 && Bcb->RepinCount == 0) ||
+            Now - Bcb->PinWriteTime > CC_PIN_HOLD_MAX)
+        {
+            continue;
+        }
+
+        First = max(Bcb->PFCB.MappedFileOffset.QuadPart, Start);
+        Last = min(Bcb->PFCB.MappedFileOffset.QuadPart + Bcb->PFCB.MappedLength, End);
+        if (First >= Last)
+        {
+            continue;
+        }
+
+        EndPage = (ULONG)((Last - Start + PAGE_SIZE - 1) >> PAGE_SHIFT);
+        for (Page = (ULONG)((First - Start) >> PAGE_SHIFT); Page < EndPage; Page++)
+        {
+            Held[Page / 32] |= 1UL << (Page % 32);
+        }
+        Any = TRUE;
+    }
+    KeReleaseSpinLock(&SharedCacheMap->BcbSpinLock, OldIrql);
+
+    return Any;
+}
+
 static
 VOID
 CcpDereferenceBcb(
@@ -247,6 +393,8 @@ CcpGetAppropriateBcb(
             /* PinCount is serialized by BcbSpinLock (see CcpDereferenceBcb). */
             KeAcquireSpinLock(&SharedCacheMap->BcbSpinLock, &OldIrql);
             DupBcb->PinCount++;
+            if (BooleanFlagOn(PinFlags, PIN_EXCLUSIVE))
+                CcpMarkPinWrite(DupBcb, CC_BCB_WRITE_EXCLUSIVE);
             KeReleaseSpinLock(&SharedCacheMap->BcbSpinLock, OldIrql);
         }
 
@@ -283,6 +431,7 @@ CcpGetAppropriateBcb(
 
             if (BooleanFlagOn(PinFlags, PIN_EXCLUSIVE))
             {
+                CcpMarkPinWrite(iBcb, CC_BCB_WRITE_EXCLUSIVE);
                 Result = ExAcquireResourceExclusiveLite(&iBcb->Lock, BooleanFlagOn(PinFlags, PIN_WAIT));
             }
             else
@@ -467,7 +616,7 @@ CcpUnpinObcbMembers(
 {
     PROS_SHARED_CACHE_MAP SharedCacheMap = Obcb->Bcbs[0]->Vacb->SharedCacheMap;
     PINTERNAL_BCB Bcb;
-    BOOLEAN Pinned;
+    BOOLEAN Pinned, Redirty;
     KIRQL OldIrql;
 
     while (Count-- > 0)
@@ -475,13 +624,20 @@ CcpUnpinObcbMembers(
         Bcb = Obcb->Bcbs[Count];
 
         /* Same discipline as CcUnpinDataForThread */
+        Redirty = FALSE;
         KeAcquireSpinLock(&SharedCacheMap->BcbSpinLock, &OldIrql);
         Pinned = (Bcb->PinCount != 0);
         if (Pinned)
         {
             Bcb->PinCount--;
+            Redirty = CcpEndPinWrite(Bcb);
         }
         KeReleaseSpinLock(&SharedCacheMap->BcbSpinLock, OldIrql);
+
+        if (Redirty)
+        {
+            CcpRedirtyBcb(Bcb);
+        }
 
         ASSERT(Pinned);
         if (Pinned)
@@ -553,6 +709,8 @@ CcpAcquireObcb(
 
         KeAcquireSpinLock(&SharedCacheMap->BcbSpinLock, &OldIrql);
         Bcb->PinCount++;
+        if (BooleanFlagOn(Flags, PIN_EXCLUSIVE))
+            CcpMarkPinWrite(Bcb, CC_BCB_WRITE_EXCLUSIVE);
         KeReleaseSpinLock(&SharedCacheMap->BcbSpinLock, OldIrql);
     }
 
@@ -614,6 +772,8 @@ TryAgain:
         /* PinCount is serialized by BcbSpinLock (see CcpDereferenceBcb). */
         KeAcquireSpinLock(&SharedCacheMap->BcbSpinLock, &OldIrql);
         NewBcb->PinCount++;
+        if (BooleanFlagOn(Flags, PIN_EXCLUSIVE))
+            CcpMarkPinWrite(NewBcb, CC_BCB_WRITE_EXCLUSIVE);
         KeReleaseSpinLock(&SharedCacheMap->BcbSpinLock, OldIrql);
 
         Handle = &NewBcb->PFCB;
@@ -940,6 +1100,24 @@ CcPreparePinWrite (
     return CcPinRead(FileObject, FileOffset, Length, Flags, Bcb, Buffer);
 }
 
+/* A pinned range made dirty is held back from the lazy write until its last
+ * pin goes (CC_BCB_WRITE_DIRTY); a mapped BCB (CcMapData) is not pinned */
+static
+VOID
+CcpSetPinWriteDirty(
+    IN PROS_SHARED_CACHE_MAP SharedCacheMap,
+    IN PINTERNAL_BCB Bcb)
+{
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&SharedCacheMap->BcbSpinLock, &OldIrql);
+    if (Bcb->Pinned && (Bcb->PinCount != 0 || Bcb->RepinCount != 0))
+    {
+        CcpMarkPinWrite(Bcb, CC_BCB_WRITE_DIRTY);
+    }
+    KeReleaseSpinLock(&SharedCacheMap->BcbSpinLock, OldIrql);
+}
+
 /*
  * @implemented
  */
@@ -950,14 +1128,26 @@ CcSetDirtyPinnedData (
 {
     PPUBLIC_BCB PublicBcb = Bcb;
     PROS_VACB Vacb;
+    PINTERNAL_OBCB Obcb;
+    ULONG i;
 
     CCTRACE(CC_API_DEBUG, "Bcb=%p Lsn=%p\n", Bcb, Lsn);
 
     /* All BCBs of an overlap BCB share the VACB; dirty the pinned range */
     if (PublicBcb->NodeTypeCode == CC_NTC_OBCB)
-        Vacb = CONTAINING_RECORD(Bcb, INTERNAL_OBCB, PFCB)->Bcbs[0]->Vacb;
+    {
+        Obcb = CONTAINING_RECORD(Bcb, INTERNAL_OBCB, PFCB);
+        Vacb = Obcb->Bcbs[0]->Vacb;
+        for (i = 0; i < Obcb->Count; i++)
+        {
+            CcpSetPinWriteDirty(Vacb->SharedCacheMap, Obcb->Bcbs[i]);
+        }
+    }
     else
+    {
         Vacb = CONTAINING_RECORD(Bcb, INTERNAL_BCB, PFCB)->Vacb;
+        CcpSetPinWriteDirty(Vacb->SharedCacheMap, CONTAINING_RECORD(Bcb, INTERNAL_BCB, PFCB));
+    }
 
     /* Tell Mm */
     MmMakeSegmentDirty(Vacb->SharedCacheMap->FileObject->SectionObjectPointer,
@@ -995,7 +1185,7 @@ CcUnpinDataForThread (
     PINTERNAL_BCB iBcb;
     PROS_SHARED_CACHE_MAP SharedCacheMap;
     KIRQL OldIrql;
-    BOOLEAN Pinned;
+    BOOLEAN Pinned, Redirty = FALSE;
 
     CCTRACE(CC_API_DEBUG, "Bcb=%p ResourceThreadId=%lu\n", Bcb, ResourceThreadId);
 
@@ -1026,8 +1216,14 @@ CcUnpinDataForThread (
     if (Pinned)
     {
         iBcb->PinCount--;
+        Redirty = CcpEndPinWrite(iBcb);
     }
     KeReleaseSpinLock(&SharedCacheMap->BcbSpinLock, OldIrql);
+
+    if (Redirty)
+    {
+        CcpRedirtyBcb(iBcb);
+    }
 
     /* Release the resource outside the spinlock: this unpin owns one
      * acquisition of the ERESOURCE and the resource has its own locking. */
@@ -1055,8 +1251,19 @@ CcRepinBcb (
 
     if (((PPUBLIC_BCB)Bcb)->NodeTypeCode == CC_NTC_OBCB)
     {
-        /* The overlap BCB holds a reference on each member */
-        InterlockedIncrement(&CONTAINING_RECORD(Bcb, INTERNAL_OBCB, PFCB)->RefCount);
+        PINTERNAL_OBCB Obcb = CONTAINING_RECORD(Bcb, INTERNAL_OBCB, PFCB);
+        ULONG i;
+
+        /* The overlap BCB holds a reference on each member; the members
+         * stay pinned for the lazy writer until CcUnpinRepinnedBcb */
+        InterlockedIncrement(&Obcb->RefCount);
+        SharedCacheMap = Obcb->Bcbs[0]->Vacb->SharedCacheMap;
+        KeAcquireSpinLock(&SharedCacheMap->BcbSpinLock, &OldIrql);
+        for (i = 0; i < Obcb->Count; i++)
+        {
+            Obcb->Bcbs[i]->RepinCount++;
+        }
+        KeReleaseSpinLock(&SharedCacheMap->BcbSpinLock, OldIrql);
         return;
     }
 
@@ -1065,10 +1272,38 @@ CcRepinBcb (
 
     /* RefCount is always serialized by BcbSpinLock (see CcpDereferenceBcb);
      * an unlocked increment can lose an update against a concurrent
-     * dereference and free the BCB early or leak it. */
+     * dereference and free the BCB early or leak it. A repinned BCB is still
+     * pinned (for writing, if it was) until CcUnpinRepinnedBcb. */
     KeAcquireSpinLock(&SharedCacheMap->BcbSpinLock, &OldIrql);
     iBcb->RefCount++;
+    iBcb->RepinCount++;
     KeReleaseSpinLock(&SharedCacheMap->BcbSpinLock, OldIrql);
+}
+
+/* CcUnpinRepinnedBcb: one repin of the BCB goes, before the write-through
+ * flush, so that a range made dirty under the pin is marked again first */
+static
+VOID
+CcpEndRepin(
+    IN PROS_SHARED_CACHE_MAP SharedCacheMap,
+    IN PINTERNAL_BCB Bcb)
+{
+    BOOLEAN Redirty = FALSE;
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&SharedCacheMap->BcbSpinLock, &OldIrql);
+    ASSERT(Bcb->RepinCount != 0);
+    if (Bcb->RepinCount != 0)
+    {
+        Bcb->RepinCount--;
+        Redirty = CcpEndPinWrite(Bcb);
+    }
+    KeReleaseSpinLock(&SharedCacheMap->BcbSpinLock, OldIrql);
+
+    if (Redirty)
+    {
+        CcpRedirtyBcb(Bcb);
+    }
 }
 
 /*
@@ -1090,6 +1325,12 @@ CcUnpinRepinnedBcb (
     if (((PPUBLIC_BCB)Bcb)->NodeTypeCode == CC_NTC_OBCB)
     {
         PINTERNAL_OBCB Obcb = CONTAINING_RECORD(Bcb, INTERNAL_OBCB, PFCB);
+        ULONG i;
+
+        for (i = 0; i < Obcb->Count; i++)
+        {
+            CcpEndRepin(Obcb->Bcbs[0]->Vacb->SharedCacheMap, Obcb->Bcbs[i]);
+        }
 
         if (WriteThrough)
         {
@@ -1112,6 +1353,8 @@ CcUnpinRepinnedBcb (
 
     SharedCacheMap = iBcb->Vacb->SharedCacheMap;
     IoStatus->Status = STATUS_SUCCESS;
+
+    CcpEndRepin(SharedCacheMap, iBcb);
 
     if (WriteThrough)
     {
@@ -1142,6 +1385,11 @@ CcUnpinRepinnedBcb (
             ExReleaseResourceLite(&iBcb->Lock);
             iBcb->PinCount--;
             ASSERT(iBcb->PinCount == 0);
+            /* Unlinked: nothing else sees the BCB any more */
+            if (CcpEndPinWrite(iBcb))
+            {
+                CcpRedirtyBcb(iBcb);
+            }
         }
 
         /*
