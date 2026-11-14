@@ -2235,13 +2235,19 @@ RtlpFreeBlockLocked(PHEAP Heap,
     /* See if we should decommit this block */
     if (RtlpGetMode() == UserMode)
     {
-        SIZE_T Cap = RtlpHeapCommittedUnits(Heap) >> HEAP_TRIM_CAP_SHIFT;
+        /* The cap costs a walk over the segments: only a block that can be decommitted needs it, and a
+           heap whose free blocks do not even reach the minimum cap is below it whatever it has committed */
+        Decommit = FALSE;
+        if (BlockSize >= Heap->DeCommitFreeBlockThreshold &&
+            Heap->TotalFreeSize + BlockSize >= Heap->DeCommitTotalFreeThreshold)
+        {
+            SIZE_T Cap = RtlpHeapCommittedUnits(Heap) >> HEAP_TRIM_CAP_SHIFT;
 
-        if (Cap < Heap->DeCommitTotalFreeThreshold)
-            Cap = Heap->DeCommitTotalFreeThreshold;
+            if (Cap < Heap->DeCommitTotalFreeThreshold)
+                Cap = Heap->DeCommitTotalFreeThreshold;
 
-        Decommit = (BlockSize >= Heap->DeCommitFreeBlockThreshold) &&
-                   (Heap->TotalFreeSize + BlockSize >= Cap);
+            Decommit = (Heap->TotalFreeSize + BlockSize >= Cap);
+        }
     }
     else
     {
@@ -2833,9 +2839,8 @@ RtlpGrowBlockInPlace (IN PHEAP Heap,
         /* Check if it's enough */
         if (FreeSize + InUseEntry->Size < Index)
         {
-            /* Still not enough */
+            /* Still not enough. RtlpInsertFreeBlock counts the block in TotalFreeSize itself */
             RtlpInsertFreeBlock(Heap, FreeEntry, FreeSize);
-            Heap->TotalFreeSize += FreeSize;
             return FALSE;
         }
 
@@ -3493,17 +3498,103 @@ RtlReAllocateHeap(HANDLE HeapPtr,
 }
 
 
+/* Merges every free block with the free blocks next to it. A heap with HEAP_DISABLE_COALESCE_ON_FREE, or one whose
+   blocks outgrew what a free block can describe, can hold neighbours that were never merged. The heap lock is held. */
+static VOID
+RtlpHeapCoalesceAll(PHEAP Heap)
+{
+    PLIST_ENTRY ListEntry = Heap->FreeLists.Flink;
+
+    while (ListEntry != &Heap->FreeLists)
+    {
+        PHEAP_FREE_ENTRY Entry = CONTAINING_RECORD(ListEntry, HEAP_FREE_ENTRY, FreeList);
+        PLIST_ENTRY Next = ListEntry->Flink;
+        SIZE_T OldSize = Entry->Size, NewSize = OldSize;
+        PHEAP_FREE_ENTRY Merged;
+
+        /* Takes the block and its neighbours out of the lists only when it merges them */
+        Merged = RtlpCoalesceFreeBlocks(Heap, Entry, &NewSize, TRUE);
+        if (Merged != Entry || NewSize != OldSize)
+        {
+            RtlpInsertFreeBlock(Heap, Merged, NewSize);
+
+            /* The block that came next in the list may be one that was merged: look from the start */
+            if (Next != &Heap->FreeLists &&
+                (PUCHAR)Next >= (PUCHAR)Merged &&
+                (PUCHAR)Next < (PUCHAR)Merged + (NewSize << HEAP_ENTRY_SHIFT))
+            {
+                Next = Heap->FreeLists.Flink;
+            }
+        }
+
+        ListEntry = Next;
+    }
+}
+
 /***********************************************************************
  *           RtlCompactHeap
+ * Coalesces the free blocks of a heap, gives the memory it does not need back to the system and returns the
+ * size of the largest free block.
  *
- * @unimplemented
+ * PARAMS
+ *   Heap   [in] Handle of heap
+ *   Flags  [in] HEAP_NO_SERIALIZE: the caller makes sure no other thread uses the heap
+ *
+ * RETURNS
+ * The size in bytes of the largest free block the heap had after the free blocks were merged. 0 when the heap
+ * is not a heap or has no free block.
+ *
+ * NOTES
+ * The blocks the front end parked are given back first. Free pages the heap kept committed as a cache are given back
+ * down to DeCommitTotalFreeThreshold (user mode only). The size is that of the largest block before the pages were
+ * given back: allocating it needs no more than the commit of the pages that were.
+ *
+ * @implemented
  */
 ULONG NTAPI
-RtlCompactHeap(HANDLE Heap,
-		ULONG Flags)
+RtlCompactHeap(HANDLE HeapPtr,
+               ULONG Flags)
 {
-   UNIMPLEMENTED;
-   return 0;
+    PHEAP Heap = (PHEAP)HeapPtr;
+    SIZE_T Largest = 0;
+    BOOLEAN Locked = FALSE;
+
+    /* A page heap keeps no free blocks of its own */
+    if (!Heap || (Heap->ForceFlags & HEAP_FLAG_PAGE_ALLOCS))
+        return 0;
+
+    if (Heap->Signature != HEAP_SIGNATURE)
+        return 0;
+
+    Flags |= Heap->ForceFlags;
+
+    if (!(Flags & HEAP_NO_SERIALIZE))
+    {
+        RtlEnterHeapLock(Heap->LockVariable, TRUE);
+        Locked = TRUE;
+    }
+
+    /* Keeps the front end out while the blocks it parked are given back; does nothing without one */
+    RtlpHeapFeLock(Heap);
+
+    RtlpHeapCoalesceAll(Heap);
+
+    /* The list is sorted by size */
+    if (!IsListEmpty(&Heap->FreeLists))
+        Largest = CONTAINING_RECORD(Heap->FreeLists.Blink, HEAP_FREE_ENTRY, FreeList)->Size;
+
+    if (RtlpGetMode() == UserMode &&
+        Heap->TotalFreeSize > Heap->DeCommitTotalFreeThreshold)
+    {
+        RtlpHeapTrim(Heap, Heap->DeCommitTotalFreeThreshold, MAXULONG);
+    }
+
+    RtlpHeapFeUnlock(Heap);
+
+    if (Locked)
+        RtlLeaveHeapLock(Heap->LockVariable);
+
+    return (ULONG)(Largest << HEAP_ENTRY_SHIFT);
 }
 
 
