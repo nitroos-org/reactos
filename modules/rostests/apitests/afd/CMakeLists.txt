@@ -10,6 +10,7 @@ list(APPEND SOURCE
     sendcancel.c
     sendtounbound.c
     windowsize.c
+    nonpagedwindow.c
     defensive.c
     dgramstub.c
     tcpnonadmin.c

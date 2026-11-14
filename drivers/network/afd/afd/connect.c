@@ -303,12 +303,12 @@ MakeSocketIntoConnection(PAFD_FCB FCB, BOOL Receive) {
     /* Allocate the receive area and start receiving */
     if (!FCB->Recv.Window)
     {
-        FCB->Recv.NonPaged = FCB->Recv.Size <= AFD_NONPAGED_WINDOW_MAX;
-        FCB->Recv.Window = ExAllocatePoolWithTag(FCB->Recv.NonPaged ? NonPagedPool : PagedPool,
-                                                 FCB->Recv.Size,
-                                                 TAG_AFD_DATA_BUFFER);
+        FCB->Recv.Window = AfdAllocRecvWindow(FCB,
+                                              FCB->Recv.Size,
+                                              &FCB->Recv.NonPaged,
+                                              &FCB->Recv.QuotaProcess);
 
-        if( !FCB->Recv.Window ) { FCB->Recv.NonPaged = FALSE; return STATUS_NO_MEMORY; }
+        if( !FCB->Recv.Window ) return STATUS_NO_MEMORY;
     }
 
     /* The send window is allocated by the first send (AfdConnectedSocketWriteData): a 64 KB window
