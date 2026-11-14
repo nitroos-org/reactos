@@ -82,18 +82,36 @@ CheckCollision(_In_ PFLT_VOLUME Volume,
     return STATUS_SUCCESS;
 }
 
-/* Puts the instance in the list of its volume, which is ordered by altitude, highest first */
+/*
+ * Puts the instance in the list of its volume, which is ordered by altitude, highest first, and in the
+ * list of its filter, both at once. Lock order: the filter's list, then the volume's.
+ *
+ * FltUnregisterFilter marks the filter draining before it tears down the instances it finds in the
+ * filter's list. The flag is checked here under the filter's list lock: either the unregister finds
+ * the instance, or the instance isn't made. Without that an attach which had looked at the flag
+ * before the unregister started (a mount, FltStartFiltering) left an instance of a freed filter on
+ * the volume.
+ */
 static
 NTSTATUS
 InsertInstance(_In_ PFLT_VOLUME Volume,
                _In_ PFLT_INSTANCE Instance)
 {
+    PFLT_FILTER Filter = Instance->Filter;
     PLIST_ENTRY Entry;
     PFLT_INSTANCE Other;
     NTSTATUS Status;
 
     KeEnterCriticalRegion();
+    ExAcquireResourceExclusiveLite(&Filter->InstanceList.rLock, TRUE);
     ExAcquireResourceExclusiveLite(&Volume->InstanceList.rLock, TRUE);
+
+    /* A filter which is being unloaded gets no new instances */
+    if (Filter->Base.Flags & FLT_OBFL_DRAINING)
+    {
+        Status = STATUS_FLT_DELETING_OBJECT;
+        goto Quit;
+    }
 
     /* Nothing new gets attached to a volume which is going away */
     if (Volume->Dismounted || (Volume->Base.Flags & FLT_OBFL_DRAINING))
@@ -118,7 +136,10 @@ InsertInstance(_In_ PFLT_VOLUME Volume,
     }
     InsertTailList(Entry, &Instance->VolumeLink);
     Volume->InstanceList.rCount++;
-    UpdateVolumeCallbackCounts(Volume, Instance->Filter, 1);
+    UpdateVolumeCallbackCounts(Volume, Filter, 1);
+
+    InsertTailList(&Filter->InstanceList.rList, &Instance->FilterLink);
+    Filter->InstanceList.rCount++;
 
     /* The instance is live from here on */
     InterlockedAnd((PLONG)&Instance->Flags, ~INSFL_INITING);
@@ -126,6 +147,7 @@ InsertInstance(_In_ PFLT_VOLUME Volume,
 
 Quit:
     ExReleaseResourceLite(&Volume->InstanceList.rLock);
+    ExReleaseResourceLite(&Filter->InstanceList.rLock);
     KeLeaveCriticalRegion();
     return Status;
 }
@@ -226,13 +248,6 @@ FltpAttachInstance(_In_ PFLT_FILTER Filter,
         ExFreePoolWithTag(Instance, FM_TAG_INSTANCE);
         return Status;
     }
-
-    KeEnterCriticalRegion();
-    ExAcquireResourceExclusiveLite(&Filter->InstanceList.rLock, TRUE);
-    InsertTailList(&Filter->InstanceList.rList, &Instance->FilterLink);
-    Filter->InstanceList.rCount++;
-    ExReleaseResourceLite(&Filter->InstanceList.rLock);
-    KeLeaveCriticalRegion();
 
     if (RetInstance)
     {
