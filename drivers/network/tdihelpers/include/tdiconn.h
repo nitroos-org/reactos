@@ -64,6 +64,16 @@ NTSTATUS TdiReceive(
     PIO_COMPLETION_ROUTINE CompletionRoutine,
     PVOID CompletionContext);
 
+/* As TdiReceive, for a Buffer in nonpaged pool: no page locking and no mapping */
+NTSTATUS TdiReceiveNonPaged(
+    PIRP * Irp,
+    PFILE_OBJECT ConnectionObject,
+    USHORT Flags,
+    PCHAR Buffer,
+    UINT BufferLength,
+    PIO_COMPLETION_ROUTINE CompletionRoutine,
+    PVOID CompletionContext);
+
 NTSTATUS TdiSend(
     PIRP * Irp,
     PFILE_OBJECT ConnectionObject,

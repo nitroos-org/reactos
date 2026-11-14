@@ -12,6 +12,9 @@ LibTCPFreeTimeWaitReopens(VOID);
 VOID
 LibTCPInitQueueLimits(VOID);
 
+VOID
+LibMemoryTrim(VOID);
+
 void
 LibIPInsertPacket(void *ifarg,
                   const void *const data,
@@ -51,4 +54,6 @@ LibIPShutdown(void)
     sys_shutdown();
 
     LibTCPFreeTimeWaitReopens();
+
+    LibMemoryTrim();
 }

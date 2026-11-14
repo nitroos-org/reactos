@@ -2070,11 +2070,14 @@ IofCompleteRequest(IN PIRP Irp,
         return;
     }
 
-    /* Unlock MDL Pages, page 167. */
+    /* Unlock MDL Pages, page 167. Only the pages that were locked: a driver that built its MDL over
+     * nonpaged pool (MmBuildMdlForNonPagedPool) never locked it, and unlocking it drops page references
+     * it does not hold */
     Mdl = Irp->MdlAddress;
     while (Mdl)
     {
-        MmUnlockPages(Mdl);
+        if (Mdl->MdlFlags & MDL_PAGES_LOCKED)
+            MmUnlockPages(Mdl);
         Mdl = Mdl->Next;
     }
 

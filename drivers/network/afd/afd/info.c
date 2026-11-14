@@ -199,6 +199,8 @@ AfdSetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
     PCHAR NewBuffer;
+    BOOLEAN NewNonPaged;
+    PEPROCESS NewQuotaProcess;
 
     UNREFERENCED_PARAMETER(DeviceObject);
 
@@ -259,9 +261,10 @@ AfdSetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
                             break;
                         }
 
-                        NewBuffer = ExAllocatePoolWithTag(PagedPool,
-                                                          InfoReq->Information.Ulong,
-                                                          TAG_AFD_DATA_BUFFER);
+                        NewBuffer = AfdAllocRecvWindow(FCB,
+                                                       InfoReq->Information.Ulong,
+                                                       &NewNonPaged,
+                                                       &NewQuotaProcess);
 
                         if (NewBuffer)
                         {
@@ -281,11 +284,17 @@ AfdSetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
                                               FCB->Recv.Window,
                                               FCB->Recv.Content);
 
-                                ExFreePoolWithTag(FCB->Recv.Window, TAG_AFD_DATA_BUFFER);
+                                /* Frees with the size it was allocated and charged with */
+                                AfdFreeRecvWindow(FCB->Recv.Window,
+                                                  FCB->Recv.Size,
+                                                  FCB->Recv.NonPaged,
+                                                  FCB->Recv.QuotaProcess);
                             }
 
                             FCB->Recv.Size = InfoReq->Information.Ulong;
                             FCB->Recv.Window = NewBuffer;
+                            FCB->Recv.NonPaged = NewNonPaged;
+                            FCB->Recv.QuotaProcess = NewQuotaProcess;
 
                             Status = STATUS_SUCCESS;
                         }

@@ -14,6 +14,7 @@
 
 #include "afd.h"
 #include "wdm.h"
+#include <ndk/exfuncs.h>
 
 #if DBG
 
@@ -513,6 +514,13 @@ AfdCreateSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                                                                  AfdReceiveWindowSize;
     FCB->Send.Size = AfdSendWindowSize;
 
+    /* The process that pays for the socket's nonpaged receive window (a stream socket's) */
+    if (!(FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS))
+    {
+        FCB->OwnerProcess = PsGetCurrentProcess();
+        ObReferenceObject(FCB->OwnerProcess);
+    }
+
     InitializeListHead( &FCB->SendGhosts );
     KeInitializeMutex( &FCB->Mutex, 0 );
     KeInitializeEvent( &FCB->RelistenIdle, NotificationEvent, TRUE );
@@ -742,7 +750,10 @@ AfdCloseSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         ExFreePoolWithTag(FCB->Context, TAG_AFD_SOCKET_CONTEXT);
 
     if (FCB->Recv.Window)
-        ExFreePoolWithTag(FCB->Recv.Window, TAG_AFD_DATA_BUFFER);
+        AfdFreeRecvWindow(FCB->Recv.Window, FCB->Recv.Size, FCB->Recv.NonPaged, FCB->Recv.QuotaProcess);
+
+    if (FCB->OwnerProcess)
+        ObDereferenceObject(FCB->OwnerProcess);
 
     if (FCB->RecvRelaunchWorkItem)
         IoFreeWorkItem(FCB->RecvRelaunchWorkItem);
@@ -1812,7 +1823,22 @@ DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
 
     AfdInitCapture();
 
-    DeviceExt = DeviceObject->DeviceExtension;
+    /* Budget of the nonpaged receive windows: 1/128 of the RAM (32 MB of 4 GB), at least 4 MB, at most 64 MB */
+    {
+        SYSTEM_BASIC_INFORMATION Basic;
+        ULONGLONG Budget = 0x2000000;
+
+        if (NT_SUCCESS(ZwQuerySystemInformation(SystemBasicInformation, &Basic, sizeof(Basic), NULL)) &&
+            Basic.PageSize != 0)
+        {
+            Budget = ((ULONGLONG)Basic.NumberOfPhysicalPages * Basic.PageSize) / 128;
+            if (Budget < 0x400000) Budget = 0x400000;
+            if (Budget > 0x4000000) Budget = 0x4000000;
+        }
+        AfdNonPagedWindowBudget = (ULONG)Budget;
+    }
+
+    DeviceExt =DeviceObject->DeviceExtension;
     KeInitializeSpinLock( &DeviceExt->Lock );
     InitializeListHead( &DeviceExt->Polls );
 
