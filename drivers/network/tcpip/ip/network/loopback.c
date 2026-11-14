@@ -332,6 +332,9 @@ NDIS_STATUS LoopRegisterAdapter(
 
   IPAddInterfaceRoute(Loopback);
 
+  /* ::1, when IPv6 is on */
+  TCPAddLoopbackAddress6(Loopback);
+
   /* Last: the fast path needs the interface's netif */
   LoopFastPath = LoopReadFastPathSwitch();
   DbgPrint("TCPIP: loopback fast path %s\n", LoopFastPath ? "on" : "off");

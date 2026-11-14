@@ -47,8 +47,15 @@ LibTCPDumpPcb(PVOID SocketContext)
 {
     struct tcp_pcb *pcb = (struct tcp_pcb*)SocketContext;
     unsigned int addr = lwip_ntohl(ip4_addr_get_u32(ip_2_ip4(&pcb->remote_ip)));
+    char Text[IP6ADDR_STRLEN_MAX];
 
     DbgPrint("\tState: %s\n", tcp_state_str[pcb->state]);
+    if (IP_IS_V6_VAL(pcb->remote_ip))
+    {
+        DbgPrint("\tRemote: ([%s], %d)\n", ip6addr_ntoa_r(ip_2_ip6(&pcb->remote_ip), Text, sizeof(Text)),
+                 pcb->remote_port);
+        return;
+    }
     DbgPrint("\tRemote: (%d.%d.%d.%d, %d)\n",
     (addr >> 24) & 0xFF,
     (addr >> 16) & 0xFF,
@@ -1206,6 +1213,15 @@ InternalAcceptEventHandler(void *arg, PTCP_PCB newpcb, const err_t err)
     u16_t LocalPort = 0, RemotePort = 0;
     err_t Result;
 
+    /* The listeners of our endpoints are IPv4 ones (LibTCPListenCallback), so lwIP gives them no IPv6
+       connection; should one come, it is refused (lwIP resets and frees it) rather than handed to TDI, whose
+       addresses here are IPv4 */
+    if (newpcb && err == ERR_OK && !IP_IS_V4_VAL(newpcb->remote_ip))
+    {
+        ASSERT(FALSE);
+        return ERR_VAL;
+    }
+
     if (newpcb && err == ERR_OK)
     {
         ip4_addr_copy(LocalIp, *ip_2_ip4(&newpcb->local_ip));
@@ -1600,6 +1616,14 @@ LibTCPListenCallback(void *arg)
     ASSERT(msg);
 
     if (!msg->Input.Listen.Connection->SocketContext)
+    {
+        msg->Output.Listen.NewPcb = NULL;
+        goto done;
+    }
+
+    /* An endpoint listens on an IPv4 address only: TDI has no IPv6 address for it yet, and until the firewall
+       filters IPv6 an IPv6 (or dual-stack) listener must not exist */
+    if (!IP_IS_V4_VAL(((PTCP_PCB)msg->Input.Listen.Connection->SocketContext)->local_ip))
     {
         msg->Output.Listen.NewPcb = NULL;
         goto done;

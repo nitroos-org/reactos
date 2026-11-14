@@ -229,11 +229,18 @@ NTSTATUS TCPStartup(VOID)
                                     TDI_BUCKET_TAG,
                                     0);
 
+    /* Before any interface registers: they get IPv6 addresses only with it on */
+    TCPReadIpv6Switch();
+
     /* Initialize our IP library */
     LibIPInitialize();
 
     /* Register this protocol with IP layer */
     IPRegisterProtocol(IPPROTO_TCP, TCPReceive);
+
+#if DBG || defined(TCPIP_IPV6_SELFTEST)
+    TCPStartIpv6SelfTest();
+#endif
 
     TCPInitialized = TRUE;
 
