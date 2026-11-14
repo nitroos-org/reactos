@@ -806,6 +806,11 @@ Cleanup:
  * Removes from an ACL (in place) every ACE that repeats an earlier one: the same type and size, the same
  * flags but INHERITED_ACE, the same mask and SID. A key does not inherit the same ACE twice (the inherited
  * ACEs of its parent repeat the explicit ones). The ACL keeps its size; the freed bytes are zeroed.
+ *
+ * PROVISIONAL: dropping the repeats cannot change an access check (the earlier copy decides the same bits
+ * for the same SID), but whether Windows drops them at this point, or only when it reads the descriptor
+ * through GetSecurityInfo, is not measured on a raw descriptor (a key under an auto-inherited parent cannot
+ * be created with the allowed APIs). VERIFY ON ORACLE.
  */
 static VOID
 AccpDropDuplicateAces(IN OUT PACL Acl)
@@ -960,25 +965,50 @@ Cleanup:
  * The subkeys of Key: each unprotected one gets its explicit ACEs plus what the new descriptor of Key
  * (ParentSd) passes on, and its own subkeys follow if it changed. OldParentSd is what Key had before:
  * the ACEs of a subkey that match what that passed on were inherited, though not flagged yet.
- * A subkey that cannot be opened for READ_CONTROL | WRITE_DAC (or set) is skipped with its subtree.
+ * A subkey that cannot be opened for READ_CONTROL | WRITE_DAC (or set) is skipped with its subtree; the
+ * walk goes on with its siblings and the call still succeeds.
+ * VERIFY ON ORACLE: what Windows returns when part of the subtree could not be updated (the documentation
+ * of SetSecurityInfo does not say); and a handle opened with MAXIMUM_ALLOWED, which Windows documents as
+ * not propagating (the access a handle was requested with is not recorded in it, so it is not detected).
+ *
+ * The walk keeps its state in a heap array of frames (one per depth level), not on the stack: a service
+ * thread with a small stack can walk a deep tree.
  */
+typedef struct _ACCP_WALK_FRAME
+{
+    HKEY Enumerate;                         /* the key whose subkeys this level lists */
+    PSECURITY_DESCRIPTOR ParentSd;          /* what it passes on (owned by every level but the first) */
+    PSECURITY_DESCRIPTOR OldParentSd;       /* what it passed on before (the same) */
+    DWORD Index;                            /* the next subkey to list */
+} ACCP_WALK_FRAME, *PACCP_WALK_FRAME;
+
 static VOID
 AccpPropagateToSubkeys(IN HKEY Key,
-                       IN PSECURITY_DESCRIPTOR ParentSd,
-                       IN PSECURITY_DESCRIPTOR OldParentSd OPTIONAL,
-                       IN ULONG Depth)
+                       IN PSECURITY_DESCRIPTOR RootSd,
+                       IN PSECURITY_DESCRIPTOR RootOldSd OPTIONAL)
 {
-    HKEY Enumerate = NULL, Child;
+    PACCP_WALK_FRAME Stack;
+    LONG Top;
+    HKEY Child;
     WCHAR Name[256];
-    DWORD Index, Length, Revision;
+    DWORD Length, Revision, EnumRet;
 
-    if (Depth >= ACCP_MAX_KEY_DEPTH)
+    Stack = (PACCP_WALK_FRAME)LocalAlloc(LMEM_FIXED | LMEM_ZEROINIT, ACCP_MAX_KEY_DEPTH * sizeof(*Stack));
+    if (Stack == NULL)
         return;
-    if (RegOpenKeyExW(Key, L"", REG_OPTION_OPEN_LINK, KEY_ENUMERATE_SUB_KEYS, &Enumerate) != ERROR_SUCCESS)
-        return;
-
-    for (Index = 0;; Index++)
+    if (RegOpenKeyExW(Key, L"", REG_OPTION_OPEN_LINK, KEY_ENUMERATE_SUB_KEYS, &Stack[0].Enumerate) != ERROR_SUCCESS)
     {
+        LocalFree(Stack);
+        return;
+    }
+    Stack[0].ParentSd = RootSd;
+    Stack[0].OldParentSd = RootOldSd;
+    Top = 0;
+
+    while (Top >= 0)
+    {
+        PACCP_WALK_FRAME Frame = &Stack[Top];
+        PSECURITY_DESCRIPTOR ParentSd = Frame->ParentSd, OldParentSd = Frame->OldParentSd;
         PSECURITY_DESCRIPTOR OldSd = NULL, NewSd = NULL;
         SECURITY_DESCRIPTOR_CONTROL Control;
         SECURITY_DESCRIPTOR Absolute;
@@ -987,9 +1017,23 @@ AccpPropagateToSubkeys(IN HKEY Key,
         BOOL Present, Defaulted, Same;
 
         Length = RTL_NUMBER_OF(Name);
-        if (RegEnumKeyExW(Enumerate, Index, Name, &Length, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
-            break;
-        if (RegOpenKeyExW(Enumerate, Name, REG_OPTION_OPEN_LINK, READ_CONTROL | WRITE_DAC, &Child) != ERROR_SUCCESS)
+        EnumRet = RegEnumKeyExW(Frame->Enumerate, Frame->Index++, Name, &Length, NULL, NULL, NULL, NULL);
+        if (EnumRet == ERROR_MORE_DATA)
+            continue;   /* a name that does not fit: the siblings after it are still listed */
+        if (EnumRet != ERROR_SUCCESS)
+        {
+            /* the level is done (ERROR_NO_MORE_ITEMS, or the key cannot be listed): back to its parent */
+            RegCloseKey(Frame->Enumerate);
+            if (Top > 0)
+            {
+                RtlDeleteSecurityObject(&Frame->ParentSd);
+                LocalFree(Frame->OldParentSd);
+            }
+            RtlZeroMemory(Frame, sizeof(*Frame));
+            Top--;
+            continue;
+        }
+        if (RegOpenKeyExW(Frame->Enumerate, Name, REG_OPTION_OPEN_LINK, READ_CONTROL | WRITE_DAC, &Child) != ERROR_SUCCESS)
             continue;
 
         OldSd = AccpQueryKeySd(Child, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION);
@@ -1018,7 +1062,18 @@ AccpPropagateToSubkeys(IN HKEY Key,
                                                  SE_DACL_AUTO_INHERIT_REQ | SE_DACL_AUTO_INHERITED) &&
                     RegSetKeySecurity(Child, DACL_SECURITY_INFORMATION, &Absolute) == ERROR_SUCCESS)
                 {
-                    AccpPropagateToSubkeys(Child, NewSd, OldSd, Depth + 1);
+                    /* descend: the new level takes over NewSd and OldSd; the depth is capped */
+                    if (Top + 1 < ACCP_MAX_KEY_DEPTH &&
+                        RegOpenKeyExW(Child, L"", REG_OPTION_OPEN_LINK, KEY_ENUMERATE_SUB_KEYS,
+                                      &Stack[Top + 1].Enumerate) == ERROR_SUCCESS)
+                    {
+                        Stack[Top + 1].ParentSd = NewSd;
+                        Stack[Top + 1].OldParentSd = OldSd;
+                        Stack[Top + 1].Index = 0;
+                        NewSd = NULL;
+                        OldSd = NULL;
+                        Top++;
+                    }
                 }
             }
         }
@@ -1030,7 +1085,7 @@ AccpPropagateToSubkeys(IN HKEY Key,
         RegCloseKey(Child);
     }
 
-    RegCloseKey(Enumerate);
+    LocalFree(Stack);
 }
 
 /* A plain RegSetKeySecurity; an access denied is retried on a key reopened for what the change needs */
@@ -1084,8 +1139,9 @@ AccpSetKeySecurity(IN HKEY Key,
                    IN PSECURITY_DESCRIPTOR pSecurityDescriptor)
 {
     PSECURITY_DESCRIPTOR ParentSd = NULL, OldSd = NULL, MergedSd = NULL, NewSd = NULL;
-    SECURITY_DESCRIPTOR_CONTROL Control, MergedControl;
+    SECURITY_DESCRIPTOR_CONTROL Control, MergedControl, OldControl;
     SECURITY_DESCRIPTOR Final;
+    BOOLEAN Protected;
     PSID Owner = NULL, Group = NULL, OldOwner = NULL, OldGroup = NULL;
     PACL Dacl = NULL, MergedDacl = NULL, Sacl = NULL;
     BOOL Present, Defaulted, SaclPresent = FALSE;
@@ -1113,8 +1169,25 @@ AccpSetKeySecurity(IN HKEY Key,
     if (SecurityInfo & GROUP_SECURITY_INFORMATION)
         GetSecurityDescriptorGroup(pSecurityDescriptor, &Group, &Defaulted);
 
-    if (!GetSecurityDescriptorControl(pSecurityDescriptor, &Control, &Revision) ||
-        !NT_SUCCESS(AccpMergeInheritedDacl(ParentSd, Owner, Group, Dacl, (Control & SE_DACL_PROTECTED) != 0, &MergedSd)) ||
+    if (!GetSecurityDescriptorControl(pSecurityDescriptor, &Control, &Revision))
+    {
+        Ret = AccpSetKeySecurityPlain(Key, SecurityInfo, pSecurityDescriptor);
+        goto Cleanup;
+    }
+
+    /*
+     * Protected: asked for (flag or descriptor control), or - when the caller says neither protected nor
+     * unprotected - the key is protected already. A restrictive DACL set on a protected key stays
+     * restrictive: the parent's ACEs are not merged in behind the caller's back.
+     * VERIFY ON ORACLE: what Windows does for a DACL set with neither flag on a protected key (the
+     * documentation does not say); this keeps the protected bit and widens nothing.
+     */
+    Protected = (Control & SE_DACL_PROTECTED) != 0 || (SecurityInfo & PROTECTED_DACL_SECURITY_INFORMATION) != 0;
+    if (!Protected && !(SecurityInfo & UNPROTECTED_DACL_SECURITY_INFORMATION) && OldSd != NULL &&
+        GetSecurityDescriptorControl(OldSd, &OldControl, &Revision) && (OldControl & SE_DACL_PROTECTED))
+        Protected = TRUE;
+
+    if (!NT_SUCCESS(AccpMergeInheritedDacl(ParentSd, Owner, Group, Dacl, Protected, &MergedSd)) ||
         !GetSecurityDescriptorControl(MergedSd, &MergedControl, &Revision) ||
         !GetSecurityDescriptorDacl(MergedSd, &Present, &MergedDacl, &Defaulted) || !Present || MergedDacl == NULL ||
         !InitializeSecurityDescriptor(&Final, SECURITY_DESCRIPTOR_REVISION) ||
@@ -1147,7 +1220,7 @@ AccpSetKeySecurity(IN HKEY Key,
     {
         NewSd = AccpQueryKeySd(Key, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION);
         if (NewSd != NULL)
-            AccpPropagateToSubkeys(Key, NewSd, OldSd, 0);
+            AccpPropagateToSubkeys(Key, NewSd, OldSd);
     }
 
 Cleanup:

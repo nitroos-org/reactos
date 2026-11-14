@@ -202,6 +202,11 @@ Exit:
 /*
  * Removes from an ACL (in place) every ACE that repeats an earlier one: the same type and size, the same
  * flags but INHERITED_ACE, the same mask and SID. The ACL keeps its size; the freed bytes are zeroed.
+ *
+ * PROVISIONAL: dropping the repeats cannot change an access check (the earlier copy decides the same bits
+ * for the same SID), but whether Windows drops them at this point, or only when it reads the descriptor
+ * through GetSecurityInfo, is not measured on a raw descriptor (a key under an auto-inherited parent cannot
+ * be created with the allowed APIs). VERIFY ON ORACLE.
  */
 static
 VOID
