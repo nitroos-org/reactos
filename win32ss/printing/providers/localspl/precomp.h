@@ -340,6 +340,7 @@ PPRINTENV_T validate_envW(LPCWSTR env);
 extern SKIPLIST PrinterList;
 BOOL InitializePrinterList(void);
 extern CRITICAL_SECTION PrinterDeletionSection;
+HANDLE WINAPI LocalAddPrinter(PWSTR pName, DWORD Level, PBYTE pPrinter);
 BOOL WINAPI LocalDeletePrinter(HANDLE hPrinter);
 BOOL WINAPI LocalEnumPrinters(DWORD Flags, LPWSTR Name, DWORD Level, LPBYTE pPrinterEnum, DWORD cbBuf, LPDWORD pcbNeeded, LPDWORD pcReturned);
 BOOL WINAPI LocalGetPrinter(HANDLE hPrinter, DWORD Level, LPBYTE pPrinter, DWORD cbBuf, LPDWORD pcbNeeded);

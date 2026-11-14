@@ -884,6 +884,269 @@ _LocalGetPrinterLevel9(PLOCAL_PRINTER pPrinter, PPRINTER_INFO_9W* ppPrinterInfo,
     (*ppPrinterInfo)++;
 }
 
+static DWORD _LocalOpenPrinterHandle(PWSTR pwszPrinterName, PWSTR pwszJobParameter, PHANDLE phPrinter, PPRINTER_DEFAULTSW pDefault);
+
+static DWORD
+_LocalSetPrinterRegString(HKEY hKey, PCWSTR pwszName, PCWSTR pwszValue)
+{
+    return (DWORD)RegSetValueExW(hKey, pwszName, 0, REG_SZ, (const BYTE*)pwszValue, (wcslen(pwszValue) + 1) * sizeof(WCHAR));
+}
+
+/**
+ * @name LocalAddPrinter
+ *
+ * Adds a printer: a registry key below the Printers key, like the ones of the default printers in the hive,
+ * and an entry in the printer list. Only level 2 is supported. There is no driver store, so the driver
+ * name is not checked; the printer drivers that are enumerated are the ones that printers refer to.
+ * The returned handle is open for administering the printer.
+ */
+HANDLE WINAPI
+LocalAddPrinter(PWSTR pName, DWORD Level, PBYTE pPrinter)
+{
+    DWORD dwErrorCode;
+    DWORD dwAttributes;
+    DWORD dwStatus = 0;
+    HANDLE hPrinter = NULL;
+    HKEY hSubKey = NULL;
+    PCWSTR pwszDatatype;
+    PCWSTR pwszPrintProcessor;
+    PLOCAL_PORT pPort;
+    PLOCAL_PRINTER pPrinter2 = NULL;
+    PLOCAL_PRINTER pExisting;
+    PLOCAL_PRINT_PROCESSOR pPrintProcessor;
+    PPRINTER_INFO_2W pi2 = (PPRINTER_INFO_2W)pPrinter;
+    PRINTER_DEFAULTSW Defaults;
+    PWSTR pwszPort = NULL;
+    PDEVMODEW pDevMode = NULL;
+    DEVMODEW DefaultDevMode;
+    DWORD cbDevMode;
+    BOOL bKeyCreated = FALSE;
+    BOOL bInserted = FALSE;
+    SIZE_T cchName;
+
+    TRACE("LocalAddPrinter(%S, %lu, %p)\n", pName, Level, pPrinter);
+
+    if (Level != 2)
+    {
+        dwErrorCode = ERROR_INVALID_LEVEL;
+        goto Cleanup;
+    }
+
+    if (!pi2 || !pi2->pPrinterName || !pi2->pPortName || !pi2->pDriverName)
+    {
+        dwErrorCode = ERROR_INVALID_PARAMETER;
+        goto Cleanup;
+    }
+
+    // A print server name other than the local one is for another Print Provider.
+    if (pName && *pName)
+    {
+        dwErrorCode = ERROR_INVALID_NAME;
+        goto Cleanup;
+    }
+
+    // The name becomes a registry key name and the name of a printer in the printer list.
+    cchName = wcslen(pi2->pPrinterName);
+    if (cchName == 0 || cchName > MAX_PRINTER_NAME || wcschr(pi2->pPrinterName, L'\\') || wcschr(pi2->pPrinterName, L','))
+    {
+        dwErrorCode = ERROR_INVALID_PRINTER_NAME;
+        goto Cleanup;
+    }
+
+    if (!*pi2->pDriverName)
+    {
+        dwErrorCode = ERROR_UNKNOWN_PRINTER_DRIVER;
+        goto Cleanup;
+    }
+
+    // The port: a list of ports is possible in Windows, we take the first one.
+    pwszPort = AllocSplStr(pi2->pPortName);
+    if (!pwszPort)
+    {
+        dwErrorCode = ERROR_NOT_ENOUGH_MEMORY;
+        goto Cleanup;
+    }
+    if (wcschr(pwszPort, L','))
+        *wcschr(pwszPort, L',') = 0;
+
+    pPort = FindPort(pwszPort);
+    if (!pPort)
+    {
+        dwErrorCode = ERROR_UNKNOWN_PORT;
+        goto Cleanup;
+    }
+
+    pwszPrintProcessor = (pi2->pPrintProcessor && *pi2->pPrintProcessor) ? pi2->pPrintProcessor : L"winprint";
+    pPrintProcessor = FindPrintProcessor(pwszPrintProcessor);
+    if (!pPrintProcessor)
+    {
+        dwErrorCode = ERROR_UNKNOWN_PRINTPROCESSOR;
+        goto Cleanup;
+    }
+
+    pwszDatatype = (pi2->pDatatype && *pi2->pDatatype) ? pi2->pDatatype : L"RAW";
+    if (!FindDatatype(pPrintProcessor, pwszDatatype))
+    {
+        dwErrorCode = ERROR_INVALID_DATATYPE;
+        goto Cleanup;
+    }
+
+    // Use the DevMode of the caller if it is valid, otherwise an empty one (as the default printers have).
+    if (pi2->pDevMode && pi2->pDevMode->dmSize >= FIELD_OFFSET(DEVMODEW, dmFields))
+    {
+        pDevMode = DuplicateDevMode(pi2->pDevMode);
+        if (!pDevMode)
+        {
+            dwErrorCode = ERROR_NOT_ENOUGH_MEMORY;
+            goto Cleanup;
+        }
+    }
+    else
+    {
+        ZeroMemory(&DefaultDevMode, sizeof(DefaultDevMode));
+        DefaultDevMode.dmSpecVersion = DM_SPECVERSION;
+        DefaultDevMode.dmSize = sizeof(DEVMODEW);
+        wcsncpy(DefaultDevMode.dmDeviceName, pi2->pPrinterName, _countof(DefaultDevMode.dmDeviceName) - 1);
+        pDevMode = DuplicateDevMode(&DefaultDevMode);
+        if (!pDevMode)
+        {
+            dwErrorCode = ERROR_NOT_ENOUGH_MEMORY;
+            goto Cleanup;
+        }
+    }
+    cbDevMode = pDevMode->dmSize + pDevMode->dmDriverExtra;
+
+    EnterCriticalSection(&PrinterDeletionSection);
+
+    pExisting = LookupElementSkiplist(&PrinterList, &pi2->pPrinterName, NULL);
+    if (pExisting)
+    {
+        // A deleted printer stays in the list until the spooler restarts.
+        dwErrorCode = (pExisting->dwStatus & PRINTER_STATUS_PENDING_DELETION) ? ERROR_PRINTER_DELETED : ERROR_PRINTER_ALREADY_EXISTS;
+        LeaveCriticalSection(&PrinterDeletionSection);
+        goto Cleanup;
+    }
+
+    dwAttributes = pi2->Attributes | PRINTER_ATTRIBUTE_LOCAL;
+
+    // Make the printer persistent: the same values as InitializePrinterList reads.
+    dwErrorCode = (DWORD)RegCreateKeyExW(hPrintersKey, pi2->pPrinterName, 0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hSubKey, NULL);
+    if (dwErrorCode != ERROR_SUCCESS)
+    {
+        ERR("RegCreateKeyExW failed for Printer \"%S\" with status %lu!\n", pi2->pPrinterName, dwErrorCode);
+        LeaveCriticalSection(&PrinterDeletionSection);
+        goto Cleanup;
+    }
+    bKeyCreated = TRUE;
+
+    dwErrorCode = _LocalSetPrinterRegString(hSubKey, L"Datatype", pwszDatatype);
+    if (dwErrorCode == ERROR_SUCCESS)
+        dwErrorCode = _LocalSetPrinterRegString(hSubKey, L"Description", pi2->pComment ? pi2->pComment : L"");
+    if (dwErrorCode == ERROR_SUCCESS)
+        dwErrorCode = _LocalSetPrinterRegString(hSubKey, L"Location", pi2->pLocation ? pi2->pLocation : L"");
+    if (dwErrorCode == ERROR_SUCCESS)
+        dwErrorCode = _LocalSetPrinterRegString(hSubKey, L"Name", pi2->pPrinterName);
+    if (dwErrorCode == ERROR_SUCCESS)
+        dwErrorCode = _LocalSetPrinterRegString(hSubKey, L"Port", pwszPort);
+    if (dwErrorCode == ERROR_SUCCESS)
+        dwErrorCode = _LocalSetPrinterRegString(hSubKey, L"Print Processor", pwszPrintProcessor);
+    if (dwErrorCode == ERROR_SUCCESS)
+        dwErrorCode = _LocalSetPrinterRegString(hSubKey, L"Printer Driver", pi2->pDriverName);
+    if (dwErrorCode == ERROR_SUCCESS)
+        dwErrorCode = (DWORD)RegSetValueExW(hSubKey, L"Attributes", 0, REG_DWORD, (const BYTE*)&dwAttributes, sizeof(DWORD));
+    if (dwErrorCode == ERROR_SUCCESS)
+        dwErrorCode = (DWORD)RegSetValueExW(hSubKey, L"Status", 0, REG_DWORD, (const BYTE*)&dwStatus, sizeof(DWORD));
+    if (dwErrorCode == ERROR_SUCCESS)
+        dwErrorCode = (DWORD)RegSetValueExW(hSubKey, L"Default DevMode", 0, REG_BINARY, (const BYTE*)pDevMode, cbDevMode);
+    if (dwErrorCode != ERROR_SUCCESS)
+    {
+        ERR("Writing the registry values of Printer \"%S\" failed with status %lu!\n", pi2->pPrinterName, dwErrorCode);
+        LeaveCriticalSection(&PrinterDeletionSection);
+        goto Cleanup;
+    }
+
+    // Add it to the printer list.
+    pPrinter2 = DllAllocSplMem(sizeof(LOCAL_PRINTER));
+    if (!pPrinter2)
+    {
+        dwErrorCode = ERROR_NOT_ENOUGH_MEMORY;
+        LeaveCriticalSection(&PrinterDeletionSection);
+        goto Cleanup;
+    }
+
+    pPrinter2->pwszPrinterName = AllocSplStr(pi2->pPrinterName);
+    pPrinter2->pwszLocation = AllocSplStr(pi2->pLocation ? pi2->pLocation : L"");
+    pPrinter2->pwszPrinterDriver = AllocSplStr(pi2->pDriverName);
+    pPrinter2->pwszDescription = AllocSplStr(pi2->pComment ? pi2->pComment : L"");
+    pPrinter2->pwszDefaultDatatype = AllocSplStr(pwszDatatype);
+    pPrinter2->pDefaultDevMode = pDevMode;
+    pPrinter2->pPrintProcessor = pPrintProcessor;
+    pPrinter2->pPort = pPort;
+    pPrinter2->dwAttributes = dwAttributes;
+    pPrinter2->dwStatus = dwStatus;
+    InitializePrinterJobList(pPrinter2);
+    pDevMode = NULL;
+
+    if (!pPrinter2->pwszPrinterName || !pPrinter2->pwszLocation || !pPrinter2->pwszPrinterDriver ||
+        !pPrinter2->pwszDescription || !pPrinter2->pwszDefaultDatatype)
+    {
+        dwErrorCode = ERROR_NOT_ENOUGH_MEMORY;
+        LeaveCriticalSection(&PrinterDeletionSection);
+        goto Cleanup;
+    }
+
+    if (!InsertElementSkiplist(&PrinterList, pPrinter2))
+    {
+        dwErrorCode = ERROR_NOT_ENOUGH_MEMORY;
+        ERR("InsertElementSkiplist failed for Printer \"%S\"!\n", pPrinter2->pwszPrinterName);
+        LeaveCriticalSection(&PrinterDeletionSection);
+        goto Cleanup;
+    }
+    bInserted = TRUE;
+
+    LeaveCriticalSection(&PrinterDeletionSection);
+
+    // The caller may delete the printer it has added.
+    ZeroMemory(&Defaults, sizeof(Defaults));
+    Defaults.DesiredAccess = PRINTER_ALL_ACCESS;
+    dwErrorCode = _LocalOpenPrinterHandle(pi2->pPrinterName, NULL, &hPrinter, &Defaults);
+
+Cleanup:
+    if (hSubKey)
+        RegCloseKey(hSubKey);
+
+    if (dwErrorCode != ERROR_SUCCESS && bKeyCreated && !bInserted)
+        RegDeleteTreeW(hPrintersKey, pi2->pPrinterName);
+
+    if (!bInserted)
+    {
+        if (pPrinter2)
+        {
+            if (pPrinter2->pwszPrinterName)
+                DllFreeSplStr(pPrinter2->pwszPrinterName);
+            if (pPrinter2->pwszLocation)
+                DllFreeSplStr(pPrinter2->pwszLocation);
+            if (pPrinter2->pwszPrinterDriver)
+                DllFreeSplStr(pPrinter2->pwszPrinterDriver);
+            if (pPrinter2->pwszDescription)
+                DllFreeSplStr(pPrinter2->pwszDescription);
+            if (pPrinter2->pwszDefaultDatatype)
+                DllFreeSplStr(pPrinter2->pwszDefaultDatatype);
+            if (pPrinter2->pDefaultDevMode)
+                DllFreeSplMem(pPrinter2->pDefaultDevMode);
+            DllFreeSplMem(pPrinter2);
+        }
+        if (pDevMode)
+            DllFreeSplMem(pDevMode);
+    }
+
+    if (pwszPort)
+        DllFreeSplStr(pwszPort);
+
+    SetLastError(dwErrorCode);
+    return (dwErrorCode == ERROR_SUCCESS) ? hPrinter : NULL;
+}
+
 BOOL WINAPI
 LocalDeletePrinter(HANDLE hPrinter)
 {

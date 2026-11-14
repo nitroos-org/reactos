@@ -29,72 +29,85 @@ AbortPrinter(HANDLE hPrinter)
     return pHandle->pPrintProvider->PrintProvider.fpAbortPrinter(pHandle->hPrinter);
 }
 
-//
-// See [MS-RPRN] 2.2.1.11 SPLCLIENT_INFO, SPLCLIENT_INFO Level.
-//
-HANDLE WINAPI
-AddPrinterExW( PWSTR pName, DWORD Level, PBYTE pPrinter, PBYTE pClientInfo, DWORD ClientInfoLevel)
+static HANDLE
+_AddPrinterToProviders(PWSTR pName, DWORD Level, PBYTE pPrinter, PBYTE pClientInfo, DWORD ClientInfoLevel, BOOL bEx)
 {
-    BOOL bReturnValue;
     DWORD dwErrorCode = ERROR_INVALID_PRINTER_NAME;
     HANDLE hPrinter = NULL;
+    HANDLE hProviderPrinter;
     PWSTR pPrinterName = NULL;
     PLIST_ENTRY pEntry;
     PSPOOLSS_PRINTER_HANDLE pHandle;
     PSPOOLSS_PRINT_PROVIDER pPrintProvider;
 
-    if ( Level != 2 )
+    if (Level != 2)
     {
-        FIXME( "Unsupported level %d\n", Level );
-        SetLastError( ERROR_INVALID_LEVEL );
-        return hPrinter;
-    }
-    else
-    {
-        PPRINTER_INFO_2W pi2w = (PPRINTER_INFO_2W)pPrinter;
-        pPrinterName = pi2w->pPrinterName;
+        FIXME("Unsupported level %lu\n", Level);
+        SetLastError(ERROR_INVALID_LEVEL);
+        return NULL;
     }
 
-    // Loop through all Print Providers to find one able to open this Printer.
+    if (!pPrinter)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return NULL;
+    }
+
+    pPrinterName = ((PPRINTER_INFO_2W)pPrinter)->pPrinterName;
+
+    // Loop through all Print Providers to find one able to add this Printer.
     for (pEntry = PrintProviderList.Flink; pEntry != &PrintProviderList; pEntry = pEntry->Flink)
     {
         pPrintProvider = CONTAINING_RECORD(pEntry, SPOOLSS_PRINT_PROVIDER, Entry);
 
-        hPrinter = pPrintProvider->PrintProvider.fpAddPrinterEx(pName, Level, pPrinter, pClientInfo, ClientInfoLevel);
+        hProviderPrinter = NULL;
+        SetLastError(ERROR_INVALID_NAME);
 
-        bReturnValue = GetLastError();
-
-        // Fallback.... ?
-
-        if ( hPrinter == NULL && bReturnValue == ERROR_NOT_SUPPORTED )
+        // Not every Print Provider implements it.
+        if (bEx && pPrintProvider->PrintProvider.fpAddPrinterEx)
         {
-            hPrinter = pPrintProvider->PrintProvider.fpAddPrinter(pName, Level, pPrinter);
+            hProviderPrinter = pPrintProvider->PrintProvider.fpAddPrinterEx(pName, Level, pPrinter, pClientInfo, ClientInfoLevel);
+
+            // Fall back to AddPrinter if the Print Provider does not support the extended function.
+            if (!hProviderPrinter && GetLastError() == ERROR_NOT_SUPPORTED && pPrintProvider->PrintProvider.fpAddPrinter)
+                hProviderPrinter = pPrintProvider->PrintProvider.fpAddPrinter(pName, Level, pPrinter);
+        }
+        else if (pPrintProvider->PrintProvider.fpAddPrinter)
+        {
+            hProviderPrinter = pPrintProvider->PrintProvider.fpAddPrinter(pName, Level, pPrinter);
+        }
+        else
+        {
+            continue;
         }
 
-        bReturnValue = GetLastError();
+        dwErrorCode = GetLastError();
 
-        if ( bReturnValue == ROUTER_SUCCESS && hPrinter )
+        if (hProviderPrinter)
         {
-            // This Print Provider has opened this Printer.
+            // This Print Provider has added this Printer.
             // Store this information and return a handle.
             pHandle = DllAllocSplMem(sizeof(SPOOLSS_PRINTER_HANDLE));
             if (!pHandle)
             {
                 dwErrorCode = ERROR_NOT_ENOUGH_MEMORY;
                 ERR("DllAllocSplMem failed!\n");
+                pPrintProvider->PrintProvider.fpClosePrinter(hProviderPrinter);
                 goto Cleanup;
             }
 
             pHandle->pPrintProvider = pPrintProvider;
-            pHandle->hPrinter = hPrinter;
-
+            pHandle->hPrinter = hProviderPrinter;
+            hPrinter = (HANDLE)pHandle;
             dwErrorCode = ERROR_SUCCESS;
             goto Cleanup;
         }
-        else if (bReturnValue == ROUTER_STOP_ROUTING)
+
+        // ERROR_INVALID_NAME: the printer is not meant for this Print Provider, ask the next one.
+        // Any other error is the answer.
+        if (dwErrorCode != ERROR_INVALID_NAME && dwErrorCode != ERROR_NOT_SUPPORTED)
         {
-            ERR("A Print Provider returned ROUTER_STOP_ROUTING for Printer \"%S\"!\n", pPrinterName);
-            dwErrorCode = GetLastError();
+            ERR("A Print Provider failed to add Printer \"%S\" with error %lu!\n", pPrinterName, dwErrorCode);
             goto Cleanup;
         }
     }
@@ -108,75 +121,19 @@ Cleanup:
     return hPrinter;
 }
 
+//
+// See [MS-RPRN] 2.2.1.11 SPLCLIENT_INFO, SPLCLIENT_INFO Level.
+//
+HANDLE WINAPI
+AddPrinterExW(PWSTR pName, DWORD Level, PBYTE pPrinter, PBYTE pClientInfo, DWORD ClientInfoLevel)
+{
+    return _AddPrinterToProviders(pName, Level, pPrinter, pClientInfo, ClientInfoLevel, TRUE);
+}
+
 HANDLE WINAPI
 AddPrinterW(PWSTR pName, DWORD Level, PBYTE pPrinter)
 {
-    BOOL bReturnValue;
-    DWORD dwErrorCode = ERROR_INVALID_PRINTER_NAME;
-    HANDLE hPrinter = NULL;
-    PWSTR pPrinterName = NULL;
-    PLIST_ENTRY pEntry;
-    PSPOOLSS_PRINTER_HANDLE pHandle;
-    PSPOOLSS_PRINT_PROVIDER pPrintProvider;
-
-    FIXME("AddPrinterW(%S, %lu, %p)\n", pName, Level, pPrinter);
-
-    if ( Level != 2 )
-    {
-        FIXME( "Unsupported level %d\n", Level );
-        SetLastError( ERROR_INVALID_LEVEL );
-        return hPrinter;
-    }
-    else
-    {
-        PPRINTER_INFO_2W pi2w = (PPRINTER_INFO_2W)pPrinter;
-        pPrinterName = pi2w->pPrinterName;
-    }
-
-    // Xp return AddPrinterExW( pName, Level, pPrinter, NULL, 0); but,,,, W7u just Forward Direct.
-
-    // Loop through all Print Providers to find one able to open this Printer.
-    for (pEntry = PrintProviderList.Flink; pEntry != &PrintProviderList; pEntry = pEntry->Flink)
-    {
-        pPrintProvider = CONTAINING_RECORD(pEntry, SPOOLSS_PRINT_PROVIDER, Entry);
-
-        hPrinter = pPrintProvider->PrintProvider.fpAddPrinter(pName, Level, pPrinter);
-
-        bReturnValue = GetLastError();
-
-        if ( bReturnValue == ROUTER_SUCCESS && hPrinter )
-        {
-            // This Print Provider has opened this Printer.
-            // Store this information and return a handle.
-            pHandle = DllAllocSplMem(sizeof(SPOOLSS_PRINTER_HANDLE));
-            if (!pHandle)
-            {
-                dwErrorCode = ERROR_NOT_ENOUGH_MEMORY;
-                ERR("DllAllocSplMem failed!\n");
-                goto Cleanup;
-            }
-
-            pHandle->pPrintProvider = pPrintProvider;
-            pHandle->hPrinter = hPrinter;
-
-            dwErrorCode = ERROR_SUCCESS;
-            goto Cleanup;
-        }
-        else if (bReturnValue == ROUTER_STOP_ROUTING)
-        {
-            ERR("A Print Provider returned ROUTER_STOP_ROUTING for Printer \"%S\"!\n", pPrinterName);
-            dwErrorCode = GetLastError();
-            goto Cleanup;
-        }
-    }
-
-Cleanup:
-    // ERROR_INVALID_NAME by the Print Provider is translated to ERROR_INVALID_PRINTER_NAME here, but not in other APIs as far as I know.
-    if (dwErrorCode == ERROR_INVALID_NAME)
-        dwErrorCode = ERROR_INVALID_PRINTER_NAME;
-
-    SetLastError(dwErrorCode);
-    return hPrinter;
+    return _AddPrinterToProviders(pName, Level, pPrinter, NULL, 0, FALSE);
 }
 
 BOOL WINAPI
