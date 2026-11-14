@@ -4597,6 +4597,7 @@ static HRESULT STDMETHODCALLTYPE d3d11_device_CheckFeatureSupport(ID3D11Device2 
 {
     struct d3d_device *device = impl_from_ID3D11Device2(iface);
     struct wined3d_caps wined3d_caps;
+    bool stencil_ref_fl;
     HRESULT hr;
 
     TRACE("iface %p, feature %u, feature_support_data %p, feature_support_data_size %u.\n",
@@ -4743,6 +4744,10 @@ static HRESULT STDMETHODCALLTYPE d3d11_device_CheckFeatureSupport(ID3D11Device2 
 
             wined3d_mutex_lock();
             hr = wined3d_device_get_device_caps(device->wined3d_device, &wined3d_caps);
+            /* oStencilRef needs shader model 5, which a feature level below
+             * 11_0 device refuses to create (wined3d caps the shader version
+             * by feature level), even when the GL driver exports stencil. */
+            stencil_ref_fl = device->state->feature_level >= D3D_FEATURE_LEVEL_11_0;
             wined3d_mutex_unlock();
             if (FAILED(hr))
             {
@@ -4750,7 +4755,7 @@ static HRESULT STDMETHODCALLTYPE d3d11_device_CheckFeatureSupport(ID3D11Device2 
                 return hr;
             }
 
-            options->PSSpecifiedStencilRefSupported = wined3d_caps.stencil_export;
+            options->PSSpecifiedStencilRefSupported = wined3d_caps.stencil_export && stencil_ref_fl;
             options->TypedUAVLoadAdditionalFormats = FALSE;
             options->ROVsSupported = FALSE;
             options->ConservativeRasterizationTier = D3D11_CONSERVATIVE_RASTERIZATION_NOT_SUPPORTED;
