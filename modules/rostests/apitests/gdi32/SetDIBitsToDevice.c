@@ -75,9 +75,12 @@ Test_SetDIBitsToDevice_RleBounds(void)
                    "RLE%u cut %u lost decoded run: %08lx,%08lx\n",
                    format ? 4 : 8, cut, pixels[0], pixels[1]);
             }
+            else
+                ok(!pixels[0] && !pixels[1], "RLE%u cut %u decoded incomplete run\n",
+                   format ? 4 : 8, cut);
             for (pixel = 2; pixel < 6; pixel++)
             {
-                UINT required = format ? 5 + (pixel - 2) / 2 : 5 + pixel - 2;
+                UINT required = format ? 6 : 8;
                 if (cut >= required)
                     ok(pixels[pixel] == pixel * 0x000a0000,
                        "RLE%u cut %u pixel %u: %08lx\n",

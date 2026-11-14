@@ -1199,7 +1199,7 @@ GreGetDIBitsInternal(
             INT cjImage = DIB_GetDIBImageBytes(width, ScanLines, bpp);
             UINT cjCopy = (cjImage > 0) ? min(MaxBits, (UINT)cjImage) : 0;
 
-            if (cjImage <= 0)
+            if (cjImage <= 0 || MaxBits < (UINT)cjImage)
             {
                 ScanLines = 0;
                 ret = FALSE;
