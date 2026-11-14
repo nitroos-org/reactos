@@ -25,6 +25,7 @@ list(APPEND SOURCE
     src/getproto.c
     src/getxbyxx.c
     src/ioctl.c
+    src/ipv6state.c
     src/nscatalo.c
     src/nscatent.c
     src/nspinstl.c
