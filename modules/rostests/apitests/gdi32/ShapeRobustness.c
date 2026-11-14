@@ -274,6 +274,59 @@ static void test_WideRoundRectRange(void)
     ok_still_draws("WideRoundRectRange");
 }
 
+/* ArcTo in a path under a rotation, with a box that does not fit the device range: the points of the arc cannot be
+   mapped. The call fails (or draws something), but must not leave the path with the move-to alone (the region of such
+   a path has no points and was allocated with the size 0) */
+static void test_ArcToFailure(void)
+{
+    static const XFORM x30 = { 0.8660254f, 0.5f, -0.5f, 0.8660254f, 0.0f, 0.0f };
+    static const int box[][8] =
+    {
+        { 0, 0, 400000000, 400000000, 400000000, 200000000, 200000000, 0 },
+        { -400000000, -400000000, 400000000, 400000000, 0, -400000000, 400000000, 0 },
+        { 0, 0, 2147483647, 2147483647, 2147483647, 1000000000, 1000000000, 0 },
+    };
+    int i, n;
+
+    for (i = 0; i < (int)(sizeof(box) / sizeof(box[0])); i++)
+    {
+        BOOL r1, r2, r3;
+        HRGN hrgn;
+
+        ResetDC_();
+        Clear();
+        SetGraphicsMode(g_dc, GM_ADVANCED);
+        SetWorldTransform(g_dc, &x30);
+        SelectObject(g_dc, GetStockObject(DKGRAY_BRUSH));
+        MoveToEx(g_dc, 10, 10, NULL);
+        r1 = BeginPath(g_dc);
+        ok(r1, "[%d] BeginPath fails\n", i);
+        r1 = ArcTo(g_dc, box[i][0], box[i][1], box[i][2], box[i][3], box[i][4], box[i][5], box[i][6], box[i][7]);
+        r2 = EndPath(g_dc);
+        ok(r2, "[%d] EndPath fails\n", i);
+        n = GetPath(g_dc, NULL, NULL, 0);
+        ok(n != 1, "[%d] ArcTo returned %d and left a path with %d point (a lone move-to)\n", i, r1, n);
+        if (!r1)
+            ok(n <= 0 || n >= 2, "[%d] a failed ArcTo changed the path to %d points\n", i, n);
+        r3 = FillPath(g_dc);
+        trace("[%d] ArcTo %d, %d points, FillPath %d\n", i, r1, n, r3);
+
+        /* the same path as a region */
+        ResetDC_();
+        SetGraphicsMode(g_dc, GM_ADVANCED);
+        SetWorldTransform(g_dc, &x30);
+        MoveToEx(g_dc, 10, 10, NULL);
+        BeginPath(g_dc);
+        ArcTo(g_dc, box[i][0], box[i][1], box[i][2], box[i][3], box[i][4], box[i][5], box[i][6], box[i][7]);
+        EndPath(g_dc);
+        hrgn = PathToRegion(g_dc);
+        if (hrgn)
+            DeleteObject(hrgn);
+        AbortPath(g_dc);
+    }
+    ok_still_draws("ArcToFailure");
+}
+
 START_TEST(ShapeRobustness)
 {
     BITMAPINFO bi;
@@ -300,6 +353,7 @@ START_TEST(ShapeRobustness)
 
     test_RotatedCosmeticPens();
     test_WideRoundRectRange();
+    test_ArcToFailure();
 
     SelectObject(g_dc, bmpOld);
     DeleteObject(bmp);

@@ -1001,6 +1001,8 @@ PATH_Arc(
     INT     temp;
     BOOL    clockwise;
     PPATH   pPath;
+    INT     nParts = 0, numEntriesOld;
+    BOOL    bNewStrokeOld;
 
     /* FIXME: This function should check for all possible error returns */
     /* FIXME: Do we have to respect newStroke? */
@@ -1013,6 +1015,8 @@ PATH_Arc(
 
     pPath = PATH_LockPath(dc->dclevel.hPath);
     if (!pPath) return FALSE;
+    numEntriesOld = pPath->numEntriesUsed;
+    bNewStrokeOld = pPath->newStroke;
 
     if (direction)
        clockwise = ((direction == AD_CLOCKWISE) !=0 );
@@ -1127,12 +1131,23 @@ PATH_Arc(
         }
 
         /* Add the Bezier spline to the path */
-        PATH_DoArcPart(pPath,
-                       corners,
-                       angleStartQuadrant,
-                       angleEndQuadrant,
-                       start ? (lines == GdiTypeArcTo ? PT_LINETO : PT_MOVETO) : FALSE); // -1
+        if (!PATH_DoArcPart(pPath,
+                            corners,
+                            angleStartQuadrant,
+                            angleEndQuadrant,
+                            start ? (lines == GdiTypeArcTo ? PT_LINETO : PT_MOVETO) : FALSE)) // -1
+        {
+            Ret = FALSE;
+            goto ArcExit;
+        }
         start = FALSE;
+
+        /* The angles span less than 2 * pi: at most five parts */
+        if (++nParts > 6)
+        {
+            Ret = FALSE;
+            goto ArcExit;
+        }
     }
     while (!end);
 
@@ -1153,6 +1168,12 @@ PATH_Arc(
             Ret = FALSE;
     }
 ArcExit:
+    if (!Ret)
+    {
+        /* A failure leaves the path as it was (not with a lone PT_MOVETO) */
+        pPath->numEntriesUsed = numEntriesOld;
+        pPath->newStroke = bNewStrokeOld;
+    }
     PATH_UnlockPath(pPath);
     return Ret;
 }
@@ -1490,7 +1511,8 @@ PATH_PathToRegion(
     PULONG counts;
     int Ret;
 
-    if (!pPath->numEntriesUsed) return FALSE;
+    /* A lone PT_MOVETO draws nothing (and the allocation below would have no size) */
+    if (pPath->numEntriesUsed < 2) return FALSE;
 
     counts = ExAllocatePoolWithTag(PagedPool, (pPath->numEntriesUsed / 2) * sizeof(*counts), TAG_PATH);
     if (!counts)
@@ -2699,20 +2721,31 @@ PATH_ArcRot(
     double det;
     BOOL bInc, bStart, bEnd, bRet = TRUE, bFlagClockwise, bCcwDev;
     POINT pointCurPos, centre;
+    INT numEntriesOld, nParts = 0;
+    BOOL bNewStrokeOld;
+
+    /* Everything that touches floating point happens between the save and the restore of its state */
+    if (!NT_SUCCESS(KeSaveFloatingPointState(&fpsave)))
+        return FALSE;
 
     l = min(x1, x2); r = max(x1, x2);
     t = min(y1, y2); b = max(y1, y2);
 
     pPath = PATH_LockPath(dc->dclevel.hPath);
     if (!pPath)
+    {
+        KeRestoreFloatingPointState(&fpsave);
         return FALSE;
+    }
+    /* What the path holds now: a failure leaves it as it was (not with a lone PT_MOVETO) */
+    numEntriesOld = pPath->numEntriesUsed;
+    bNewStrokeOld = pPath->newStroke;
 
     if (direction)
         bFlagClockwise = (direction == AD_CLOCKWISE);
     else
         bFlagClockwise = ((dc->dclevel.flPath & DCPATH_CLOCKWISE) != 0);
 
-    KeSaveFloatingPointState(&fpsave);
     PATH_GetLPMap(dc, &map);
 
     cx = (l + r) / 2.0; cy = (t + b) / 2.0;
@@ -2829,6 +2862,13 @@ PATH_ArcRot(
             goto Exit;
         }
         bStart = FALSE;
+
+        /* The angles span less than 2 * pi: at most five parts (they are finite, but the loop must end regardless) */
+        if (++nParts > 6)
+        {
+            bRet = FALSE;
+            goto Exit;
+        }
     }
     while (!bEnd);
 
@@ -2848,6 +2888,11 @@ PATH_ArcRot(
     }
 
 Exit:
+    if (!bRet)
+    {
+        pPath->numEntriesUsed = numEntriesOld;
+        pPath->newStroke = bNewStrokeOld;
+    }
     KeRestoreFloatingPointState(&fpsave);
     PATH_UnlockPath(pPath);
     return bRet;
