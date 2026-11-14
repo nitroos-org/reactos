@@ -2,6 +2,7 @@
 #define STANDALONE
 #include <apitest.h>
 
+extern void func_AccessCheckDifferential(void);
 extern void func_AccessCheckObjectTypeList(void);
 extern void func_AddMandatoryAce(void);
 extern void func_AuditCategories(void);
@@ -134,6 +135,7 @@ extern void func_LsaLookupSids2(void);
 
 const struct test winetest_testlist[] =
 {
+    { "AccessCheckDifferential", func_AccessCheckDifferential },
     { "AccessCheckObjectTypeList", func_AccessCheckObjectTypeList },
     { "AddMandatoryAce", func_AddMandatoryAce },
     { "AuditCategories", func_AuditCategories },

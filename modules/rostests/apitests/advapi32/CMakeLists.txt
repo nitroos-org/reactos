@@ -1,5 +1,6 @@
 
 list(APPEND SOURCE
+    AccessCheckDifferential.c
     AccessCheckObjectTypeList.c
     AddMandatoryAce.c
     AuditCategories.c
