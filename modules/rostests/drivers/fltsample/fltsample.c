@@ -63,6 +63,8 @@ static OPEN_ENTRY OpenFiles[MAX_OPEN];
 static KSPIN_LOCK OpenLock;
 static volatile LONG PendingWorkers;
 static KEVENT WorkersDone;
+static volatile ULONG RvFlags;
+static ULONG RvDenyAllPort;    /* review test: the port gets a descriptor with an empty DACL */
 static WCHAR ServiceName[48];
 static BOOLEAN UseContexts = TRUE;
 static PFLT_PORT ServerPort;
@@ -475,6 +477,32 @@ PendWorker(_In_ PVOID Parameter)
         KeSetEvent(&WorkersDone, IO_NO_INCREMENT, FALSE);
 }
 
+typedef struct _RV_PARK_ITEM
+{
+    WORK_QUEUE_ITEM WorkItem;
+    PFLT_CALLBACK_DATA Data;
+
+} RV_PARK_ITEM, *PRV_PARK_ITEM;
+
+/* Review test: a post-operation which took MORE_PROCESSING_REQUIRED is finished from a worker */
+static
+VOID
+NTAPI
+RvParkWorker(_In_ PVOID Parameter)
+{
+    PRV_PARK_ITEM Item = Parameter;
+    LARGE_INTEGER Delay;
+
+    Delay.QuadPart = -10000LL * 20;
+    KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+    InterlockedIncrement((PLONG)&Stats.RvParkDone);
+    FltCompletePendedPostOperation(Item->Data);
+
+    ExFreePoolWithTag(Item, TAG_SAMPLE);
+    if (InterlockedDecrement(&PendingWorkers) == 0)
+        KeSetEvent(&WorkersDone, IO_NO_INCREMENT, FALSE);
+}
+
 static
 FLT_PREOP_CALLBACK_STATUS
 FLTAPI
@@ -503,6 +531,12 @@ PreOperation(_Inout_ PFLT_CALLBACK_DATA Data,
     /* What needs to pend, or to change the length, wants an IRP: the fast I/O attempt isn't counted */
     if (FLT_IS_FASTIO_OPERATION(Data))
     {
+        if (RvFlags & FLTSAMPLE_RV_DISALLOW_FASTIO)
+        {
+            InterlockedIncrement((PLONG)&Stats.RvFastIoDisallowed);
+            return FLT_PREOP_DISALLOW_FASTIO;
+        }
+
         ULONG FastMode = FindMode(FileObject);
 
         if (FastMode == MODE_PEND || FastMode == MODE_HALF)
@@ -662,9 +696,41 @@ PostOperation(_Inout_ PFLT_CALLBACK_DATA Data,
 
         case IRP_MJ_WRITE:
             Stats.LastWritePost = KeQueryPerformanceCounter(NULL).QuadPart;
+            if ((RvFlags & FLTSAMPLE_RV_PARK_WRITE_POST) && FLT_IS_IRP_OPERATION(Data) &&
+                !(Data->Iopb->IrpFlags & IRP_PAGING_IO))
+            {
+                PRV_PARK_ITEM Item = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Item), TAG_SAMPLE);
+
+                if (Item)
+                {
+                    Item->Data = Data;
+                    InterlockedIncrement(&PendingWorkers);
+                    KeResetEvent(&WorkersDone);
+                    InterlockedIncrement((PLONG)&Stats.RvParked);
+                    ExInitializeWorkItem(&Item->WorkItem, RvParkWorker, Item);
+                    ExQueueWorkItem(&Item->WorkItem, DelayedWorkQueue);
+                    return FLT_POSTOP_MORE_PROCESSING_REQUIRED;
+                }
+            }
             break;
 
         case IRP_MJ_READ:
+            if ((RvFlags & FLTSAMPLE_RV_PARK_READ_POST) && FLT_IS_IRP_OPERATION(Data) &&
+                !(Data->Iopb->IrpFlags & IRP_PAGING_IO) && CompletionContext == NULL)
+            {
+                PRV_PARK_ITEM Item = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Item), TAG_SAMPLE);
+
+                if (Item)
+                {
+                    Item->Data = Data;
+                    InterlockedIncrement(&PendingWorkers);
+                    KeResetEvent(&WorkersDone);
+                    InterlockedIncrement((PLONG)&Stats.RvParked);
+                    ExInitializeWorkItem(&Item->WorkItem, RvParkWorker, Item);
+                    ExQueueWorkItem(&Item->WorkItem, DelayedWorkQueue);
+                    return FLT_POSTOP_MORE_PROCESSING_REQUIRED;
+                }
+            }
             if (CompletionContext)
             {
                 /* The pre-operation asked for FLT_PREOP_SYNCHRONIZE */
@@ -981,6 +1047,11 @@ ControlDispatch(_In_ PDEVICE_OBJECT DeviceObject,
                 VetoEnabled = *(PULONG)Buffer != 0;
                 break;
 
+            case FLTSAMPLE_IOCTL_RV_FLAGS:
+                if (InLength < sizeof(ULONG)) { Status = STATUS_INVALID_PARAMETER; break; }
+                RvFlags = *(PULONG)Buffer;
+                break;
+
             case FLTSAMPLE_IOCTL_REFUSE_UNLOAD:
                 if (InLength < sizeof(ULONG)) { Status = STATUS_INVALID_PARAMETER; break; }
                 RefuseUnload = *(PULONG)Buffer != 0;
@@ -1217,6 +1288,20 @@ ReadParameters(_In_ PUNICODE_STRING RegistryPath)
 
     if (NT_SUCCESS(RtlQueryRegistryValues(RTL_REGISTRY_ABSOLUTE, Path, Table, NULL, NULL)))
         AttachMask = Mask;
+
+    {
+        ULONG Deny = 0, DefaultDeny = 0;
+
+        RtlZeroMemory(Table, sizeof(Table));
+        Table[0].Flags = RTL_QUERY_REGISTRY_DIRECT;
+        Table[0].Name = L"RvDenyAllPort";
+        Table[0].EntryContext = &Deny;
+        Table[0].DefaultType = REG_DWORD;
+        Table[0].DefaultData = &DefaultDeny;
+        Table[0].DefaultLength = sizeof(ULONG);
+        if (NT_SUCCESS(RtlQueryRegistryValues(RTL_REGISTRY_ABSOLUTE, Path, Table, NULL, NULL)))
+            RvDenyAllPort = Deny;
+    }
 }
 
 NTSTATUS
@@ -1281,6 +1366,17 @@ DriverEntry(_In_ PDRIVER_OBJECT DriverObject,
         RtlStringCbPrintfW(PortNameBuffer, sizeof(PortNameBuffer), L"\\%wsPort", ServiceName);
         RtlInitUnicodeString(&PortName, PortNameBuffer);
         InitializeObjectAttributes(&PortAttributes, &PortName, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
+        if (RvDenyAllPort)
+        {
+            /* Review test: a descriptor whose DACL is empty lets nobody connect */
+            static SECURITY_DESCRIPTOR DenyAll;
+            static ACL EmptyAcl;
+
+            RtlCreateSecurityDescriptor(&DenyAll, SECURITY_DESCRIPTOR_REVISION);
+            RtlCreateAcl(&EmptyAcl, sizeof(EmptyAcl), ACL_REVISION);
+            RtlSetDaclSecurityDescriptor(&DenyAll, TRUE, &EmptyAcl, FALSE);
+            PortAttributes.SecurityDescriptor = &DenyAll;
+        }
         Status = FltCreateCommunicationPort(SampleFilter, &ServerPort, &PortAttributes, NULL,
                                             PortConnect, PortDisconnect, PortMessage, 1);
         if (!NT_SUCCESS(Status))

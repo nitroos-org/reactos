@@ -89,6 +89,9 @@ typedef struct _FLTSAMPLE_STATS
     WCHAR LastCreate[64];           /* name of the last create the filter looked at */
     WCHAR Altitude[16];
     WCHAR InstanceName[32];
+    ULONG RvFastIoDisallowed;       /* review tests: fast I/O refused because of FLTSAMPLE_IOCTL_RV_FLAGS */
+    ULONG RvParked;                 /* review tests: read post-operations parked (MORE_PROCESSING_REQUIRED) */
+    ULONG RvParkDone;               /* ... and completed by the worker */
 
 } FLTSAMPLE_STATS, *PFLTSAMPLE_STATS;
 
@@ -138,6 +141,10 @@ typedef struct _FLTSAMPLE_ASK_RESULT
 #define FLTSAMPLE_IOCTL_REFUSE_UNLOAD   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x806, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define FLTSAMPLE_IOCTL_SET_VETO        CTL_CODE(FILE_DEVICE_UNKNOWN, 0x808, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define FLTSAMPLE_IOCTL_USE_CONTEXTS    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x807, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define FLTSAMPLE_IOCTL_RV_FLAGS        CTL_CODE(FILE_DEVICE_UNKNOWN, 0x80A, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define FLTSAMPLE_RV_DISALLOW_FASTIO    0x1 /* every fast I/O operation on a test file: FLT_PREOP_DISALLOW_FASTIO */
+#define FLTSAMPLE_RV_PARK_READ_POST     0x2 /* the post-operation of a non paging IRP read parks, a worker completes it */
+#define FLTSAMPLE_RV_PARK_WRITE_POST    0x4 /* the same for writes */
 #define FLTSAMPLE_IOCTL_CONTEXT_SELFTEST CTL_CODE(FILE_DEVICE_UNKNOWN, 0x809, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 #endif /* _FLTSAMPLE_H */
