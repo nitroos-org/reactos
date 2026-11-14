@@ -15,6 +15,9 @@ static UINT DispatchTotalSize;
 static UINT DispatchHeaderSize;
 static BOOLEAN DispatchDataOk;
 
+BOOLEAN TCPIpv6Enabled;
+static ULONG Receive6Count;
+
 /* MOCKS **********************************************************************/
 
 PVOID
@@ -115,6 +118,12 @@ IPDispatchProtocol(PIP_INTERFACE Interface, PIP_PACKET IPPacket)
         if (Data[i] != PatternByte(i))
             DispatchDataOk = FALSE;
     }
+}
+
+VOID
+TCPReceive6(PIP_INTERFACE IF, PIP_PACKET IPPacket)
+{
+    Receive6Count++;
 }
 
 BOOLEAN
@@ -274,6 +283,41 @@ TestOversize(VOID)
     ExpectNothingLeft("after drops");
 }
 
+/* An IPv6 frame goes to lwIP (TCPReceive6) only with IPv6 on, and IPReceive frees it either way */
+static VOID
+TestIPv6Switch(VOID)
+{
+    IP_INTERFACE If = { 0 };
+    IP_PACKET Packet;
+    PNDIS_PACKET Ndis;
+    BOOLEAN On;
+
+    for (On = FALSE; On <= TRUE; On++)
+    {
+        TCPIpv6Enabled = On;
+        Receive6Count = 0;
+        ResetDispatch();
+
+        Ndis = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*Ndis));
+        Ndis->Data = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 40);
+        Ndis->Length = 40;
+        Ndis->Data[0] = 0x60;
+        Ndis->Data[6] = 59;
+        InterlockedIncrement(&TestNdisPackets);
+
+        IPInitializePacket(&Packet, IP_ADDRESS_V4);
+        Packet.NdisPacket = Ndis;
+        Packet.TotalSize = 40;
+        Packet.Position = 0;
+        IPReceive(&If, &Packet);
+
+        ok(Receive6Count == (On ? 1 : 0), "switch %d: TCPReceive6 called %lu times\n", On, Receive6Count);
+        ok(DispatchCount == 0, "switch %d: an IPv6 frame reached the IPv4 dispatch\n", On);
+        ExpectNothingLeft(On ? "IPv6 on" : "IPv6 off");
+    }
+    TCPIpv6Enabled = FALSE;
+}
+
 START_TEST(Reassembly)
 {
     IPDRList.Size = sizeof(IPDATAGRAM_REASSEMBLY);
@@ -284,4 +328,5 @@ START_TEST(Reassembly)
     TestLegitimate();
     TestMaximumSize();
     TestOversize();
+    TestIPv6Switch();
 }
