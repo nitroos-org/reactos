@@ -124,6 +124,21 @@ CcpCountPinnedOverlaps(
 }
 
 /*
+ * A pin for writing begins, or the range is made dirty under a pin: it is held
+ * back from the lazy write, for at most CC_PIN_HOLD_MAX from the last such
+ * event (CcpGetPinHeldPages). Caller holds BcbSpinLock.
+ */
+static
+VOID
+CcpMarkPinWrite(
+    IN PINTERNAL_BCB Bcb,
+    IN UCHAR Flag)
+{
+    Bcb->PinWrite |= Flag;
+    Bcb->PinWriteTime = KeQueryInterruptTime();
+}
+
+/*
  * Caller holds BcbSpinLock and has just dropped one pin or repin of the BCB.
  * When that was the last, the range is no longer held back from the lazy
  * write. Returns TRUE if it was made dirty while pinned: the caller makes it
@@ -170,6 +185,9 @@ CcpRedirtyBcb(
                            Bcb->PFCB.MappedLength);
     }
 
+    /* Vacb->Dirty is read without the master lock, as CcSetDirtyPinnedData's CcRosMarkDirtyVacb does inside it:
+     * a stale FALSE is harmless (CcRosMarkDirtyVacb checks again under the lock); a stale TRUE means the view was
+     * dirty an instant ago and is being written, which is what the mark above covers (Mm's pages are dirty again) */
     if (!Vacb->Dirty)
     {
         CcRosMarkDirtyVacb(Vacb);
@@ -183,6 +201,14 @@ CcpRedirtyBcb(
  * The answer is a snapshot: a pin taken after it is not held back by the
  * write that asked (if it makes the range dirty, CcSetDirtyPinnedData marks
  * the view again and its last unpin does, see CcpRedirtyBcb).
+ * Safety valve: a BCB whose last pin-for-writing event (an exclusive pin, a
+ * CcSetDirtyPinnedData call) is older than CC_PIN_HOLD_MAX is not held back:
+ * a file system that keeps dirty metadata pinned for minutes (ext2 buffer
+ * heads) would otherwise have no lazy write of it at all, and a power cut
+ * would lose it. Its pins stay; what the file system changes later is marked
+ * dirty again by CcSetDirtyPinnedData or by the last unpin (CcpRedirtyBcb).
+ * A thread that waits for dirty pages to fall (CcCanIWrite) while it holds
+ * such a pin waits at most that long for the lazy writer.
  */
 BOOLEAN
 CcpGetPinHeldPages(
@@ -198,8 +224,17 @@ CcpGetPinHeldPages(
     BOOLEAN Any = FALSE;
     KIRQL OldIrql;
     ULONG Page, EndPage;
+    ULONGLONG Now;
 
     RtlZeroMemory(Held, ((Pages + 31) / 32) * sizeof(ULONG));
+
+    /* Every pin API fails on a map without pin access: nothing to hold back */
+    if (!SharedCacheMap->PinAccess)
+    {
+        return FALSE;
+    }
+
+    Now = KeQueryInterruptTime();
 
     KeAcquireSpinLock(&SharedCacheMap->BcbSpinLock, &OldIrql);
     for (NextEntry = SharedCacheMap->BcbList.Flink;
@@ -209,7 +244,8 @@ CcpGetPinHeldPages(
         Bcb = CONTAINING_RECORD(NextEntry, INTERNAL_BCB, BcbEntry);
 
         if (!Bcb->Pinned || Bcb->PinWrite == 0 ||
-            (Bcb->PinCount == 0 && Bcb->RepinCount == 0))
+            (Bcb->PinCount == 0 && Bcb->RepinCount == 0) ||
+            Now - Bcb->PinWriteTime > CC_PIN_HOLD_MAX)
         {
             continue;
         }
@@ -358,7 +394,7 @@ CcpGetAppropriateBcb(
             KeAcquireSpinLock(&SharedCacheMap->BcbSpinLock, &OldIrql);
             DupBcb->PinCount++;
             if (BooleanFlagOn(PinFlags, PIN_EXCLUSIVE))
-                DupBcb->PinWrite |= CC_BCB_WRITE_EXCLUSIVE;
+                CcpMarkPinWrite(DupBcb, CC_BCB_WRITE_EXCLUSIVE);
             KeReleaseSpinLock(&SharedCacheMap->BcbSpinLock, OldIrql);
         }
 
@@ -395,7 +431,7 @@ CcpGetAppropriateBcb(
 
             if (BooleanFlagOn(PinFlags, PIN_EXCLUSIVE))
             {
-                iBcb->PinWrite |= CC_BCB_WRITE_EXCLUSIVE;
+                CcpMarkPinWrite(iBcb, CC_BCB_WRITE_EXCLUSIVE);
                 Result = ExAcquireResourceExclusiveLite(&iBcb->Lock, BooleanFlagOn(PinFlags, PIN_WAIT));
             }
             else
@@ -674,7 +710,7 @@ CcpAcquireObcb(
         KeAcquireSpinLock(&SharedCacheMap->BcbSpinLock, &OldIrql);
         Bcb->PinCount++;
         if (BooleanFlagOn(Flags, PIN_EXCLUSIVE))
-            Bcb->PinWrite |= CC_BCB_WRITE_EXCLUSIVE;
+            CcpMarkPinWrite(Bcb, CC_BCB_WRITE_EXCLUSIVE);
         KeReleaseSpinLock(&SharedCacheMap->BcbSpinLock, OldIrql);
     }
 
@@ -737,7 +773,7 @@ TryAgain:
         KeAcquireSpinLock(&SharedCacheMap->BcbSpinLock, &OldIrql);
         NewBcb->PinCount++;
         if (BooleanFlagOn(Flags, PIN_EXCLUSIVE))
-            NewBcb->PinWrite |= CC_BCB_WRITE_EXCLUSIVE;
+            CcpMarkPinWrite(NewBcb, CC_BCB_WRITE_EXCLUSIVE);
         KeReleaseSpinLock(&SharedCacheMap->BcbSpinLock, OldIrql);
 
         Handle = &NewBcb->PFCB;
@@ -1077,7 +1113,7 @@ CcpSetPinWriteDirty(
     KeAcquireSpinLock(&SharedCacheMap->BcbSpinLock, &OldIrql);
     if (Bcb->Pinned && (Bcb->PinCount != 0 || Bcb->RepinCount != 0))
     {
-        Bcb->PinWrite |= CC_BCB_WRITE_DIRTY;
+        CcpMarkPinWrite(Bcb, CC_BCB_WRITE_DIRTY);
     }
     KeReleaseSpinLock(&SharedCacheMap->BcbSpinLock, OldIrql);
 }

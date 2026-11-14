@@ -210,7 +210,6 @@ CcRosRaiseValidDataLength(
  * Each is referenced for the flush (returned in Group, Max at most) and marked dirty again if the write fails.
  * Returns how many followed.
  */
-#define CC_FLUSH_CLUSTER_VACBS 8
 
 static
 ULONG
@@ -255,8 +254,9 @@ CcRosTakeDirtyFollowers(
  * until it is unpinned, so a file system may mark a pinned range dirty before it changes it (fastfat does) and no
  * lazy write takes the bytes in between.  The lazy writer never waits for a pin: it only looks at the pin state under
  * BcbSpinLock, so a file system that holds a pin while it waits for the lazy writer (CcFlushCache,
- * CcUninitializeCacheMap, CcPurgeCacheSection, a lock the lazy write takes) cannot deadlock with it.  ViewHeld[i] is
- * set for each view with held pages, *WrittenEnd is where the data written without a gap ends.
+ * CcUninitializeCacheMap, CcPurgeCacheSection, a lock the lazy write takes) cannot deadlock with it (a thread that waits
+ * for the dirty pages to fall, CcCanIWrite, while it holds such a pin does wait for the lazy writer, but only
+ * CC_PIN_HOLD_MAX: after that the range is not held back any more).  ViewHeld[i] is set for each view with held pages.
  */
 static
 NTSTATUS
@@ -265,7 +265,6 @@ CcRosFlushHoldingPinned(
     _In_ PROS_VACB Vacb,
     _In_ ULONG Views,
     _Out_ PIO_STATUS_BLOCK Iosb,
-    _Out_ PLONGLONG WrittenEnd,
     _Out_writes_(CC_FLUSH_CLUSTER_VACBS) PBOOLEAN ViewHeld,
     _Out_ PBOOLEAN HeldBack)
 {
@@ -281,7 +280,6 @@ CcRosFlushHoldingPinned(
 
     RtlZeroMemory(ViewHeld, CC_FLUSH_CLUSTER_VACBS * sizeof(BOOLEAN));
     Iosb->Information = 0;
-    *WrittenEnd = Start + (LONGLONG)Pages * PAGE_SIZE;
     *HeldBack = CcpGetPinHeldPages(SharedCacheMap, Start, Pages, Held);
 
     if (!*HeldBack)
@@ -295,12 +293,10 @@ CcRosFlushHoldingPinned(
     Page = 0;
     while (Page < Pages)
     {
-        /* A held page: its view stays dirty, and the data written is contiguous only up to the first one */
+        /* A held page: its view stays dirty (the page too, in Mm, so Mm cannot drop it and read it back stale) */
         if (Held[Page / 32] & (1UL << (Page % 32)))
         {
             ViewHeld[Page / (VACB_MAPPING_GRANULARITY / PAGE_SIZE)] = TRUE;
-            if (*WrittenEnd > Start + (LONGLONG)Page * PAGE_SIZE)
-                *WrittenEnd = Start + (LONGLONG)Page * PAGE_SIZE;
             Page++;
             continue;
         }
@@ -323,8 +319,10 @@ CcRosFlushHoldingPinned(
 }
 
 /*
- * Writes the view and the dirty views that follow it.  The lazy writer passes HeldBack: then the ranges pinned for
- * writing are left out (CcRosFlushHoldingPinned), their views are put on the dirty list again and *HeldBack is set.
+ * Writes the view and the dirty views that follow it.  The lazy writer passes HeldViews (CC_FLUSH_CLUSTER_VACBS entries)
+ * and HeldCount: then the ranges pinned for writing are left out (CcRosFlushHoldingPinned), the views that hold such
+ * pages are put on the dirty list again and returned in HeldViews (*HeldCount of them; compared as pointers only, they
+ * may be freed once the caller drops its reference).
  * Any other flush (CcFlushCache, trim, shutdown) passes NULL and writes them: a file system flushing a range it holds
  * pinned itself must not wait for its own unpin; a range made dirty under the pin is marked again at the last unpin
  * (CcpRedirtyBcb), so changes made after such a write are not lost.
@@ -333,7 +331,8 @@ NTSTATUS
 CcRosFlushVacb (
     _In_ PROS_VACB Vacb,
     _Out_opt_ PIO_STATUS_BLOCK Iosb,
-    _Out_opt_ PBOOLEAN HeldBack)
+    _Out_writes_opt_(CC_FLUSH_CLUSTER_VACBS) PROS_VACB *HeldViews,
+    _Out_opt_ PULONG HeldCount)
 {
     NTSTATUS Status;
     BOOLEAN HaveLock = FALSE;
@@ -346,8 +345,8 @@ CcRosFlushVacb (
     IO_STATUS_BLOCK LazyIosb;
     ULONG Followers = 0, i;
 
-    if (HeldBack)
-        *HeldBack = FALSE;
+    if (HeldCount)
+        *HeldCount = 0;
 
     /*
      * Remove the VACB from the dirty list before flushing. The return value
@@ -375,9 +374,9 @@ CcRosFlushVacb (
     }
 
     WrittenEnd = Vacb->FileOffset.QuadPart + VACB_MAPPING_GRANULARITY * (1 + Followers);
-    if (HeldBack)
+    if (HeldViews)
     {
-        Status = CcRosFlushHoldingPinned(SharedCacheMap, Vacb, 1 + Followers, &LazyIosb, &WrittenEnd, ViewHeld, &AnyHeld);
+        Status = CcRosFlushHoldingPinned(SharedCacheMap, Vacb, 1 + Followers, &LazyIosb, ViewHeld, &AnyHeld);
         if (Iosb)
             *Iosb = LazyIosb;
     }
@@ -397,13 +396,18 @@ CcRosFlushVacb (
     /* The views with held pages stay dirty (the pages still are, in Mm); on a failure all are marked again below */
     if (AnyHeld && NT_SUCCESS(Status))
     {
-        *HeldBack = TRUE;
         if (ViewHeld[0])
+        {
             CcRosMarkDirtyVacb(Vacb);
+            HeldViews[(*HeldCount)++] = Vacb;
+        }
         for (i = 0; i < Followers; i++)
         {
             if (ViewHeld[1 + i])
+            {
                 CcRosMarkDirtyVacb(Group[i]);
+                HeldViews[(*HeldCount)++] = Group[i];
+            }
         }
     }
 
@@ -424,6 +428,11 @@ quit:
     }
     else
     {
+        /*
+         * To the end of what was written, held pages or not: a held page is dirty and resident (Mm does not drop a
+         * dirty page unwritten), so Mm never reads it stale below this length, while the clean pages written around
+         * it are read from the disk (VDL below them would make Mm return zeros for them once they are dropped).
+         */
         CcRosRaiseValidDataLength(SharedCacheMap, WrittenEnd);
     }
 
@@ -759,8 +768,9 @@ CcRosDropFlushReference(
  * the lazy writer could not lock without waiting (below).
  */
 #define CC_FLUSH_FAILED_MAPS 16
-/* Views one lazy write call wrote around pinned pages and skips from then on; with that many the call ends */
-#define CC_FLUSH_HELD_VIEWS 16
+/* Views one lazy write call wrote around pinned pages and skips from then on; with room for fewer than one more
+ * cluster's worth (CC_FLUSH_CLUSTER_VACBS) the call ends */
+#define CC_FLUSH_HELD_VIEWS 32
 /* A full flush waits this many 10 ms in a row, with no dirty page written meanwhile, for the lazy writer to finish with a map before it gives up */
 #define CC_FLUSHALL_BUSY_WAITS 1000
 /* A closed map whose writes failed this many times in a row, over this long, is dropped */
@@ -1092,14 +1102,15 @@ CcRosFlushDirtyPages (
         }
 
         IO_STATUS_BLOCK Iosb;
-        BOOLEAN HeldBack = FALSE;
-        Status = CcRosFlushVacb(current, &Iosb, CalledFromLazy ? &HeldBack : NULL);
+        PROS_VACB NewHeld[CC_FLUSH_CLUSTER_VACBS];
+        ULONG NewHeldCount = 0;
+        Status = CcRosFlushVacb(current, &Iosb, CalledFromLazy ? NewHeld : NULL, CalledFromLazy ? &NewHeldCount : NULL);
 
         SharedCacheMap->Callbacks->ReleaseFromLazyWrite(SharedCacheMap->LazyWriteContext);
 
         /* Compared as a pointer only (the view may be gone when it is compared) */
-        if (HeldBack && HeldCount < CC_FLUSH_HELD_VIEWS)
-            HeldViews[HeldCount++] = current;
+        for (i = 0; i < NewHeldCount && HeldCount < CC_FLUSH_HELD_VIEWS; i++)
+            HeldViews[HeldCount++] = NewHeld[i];
 
         /* We release the VACB before acquiring the lock again, because
          * CcRosVacbDecRefCount might free the VACB, as CcRosFlushVacb dropped a
@@ -1195,8 +1206,8 @@ CcRosFlushDirtyPages (
             }
         }
 
-        /* Every view written around pinned pages went back on the list: with the table full, stop */
-        if (HeldBack && HeldCount >= CC_FLUSH_HELD_VIEWS)
+        /* Every view written around pinned pages went back on the list: with no room for another cluster's, stop */
+        if (CalledFromLazy && HeldCount + CC_FLUSH_CLUSTER_VACBS > CC_FLUSH_HELD_VIEWS)
             break;
 
         current_entry = DirtyVacbListHead.Flink;
@@ -2290,7 +2301,7 @@ CcFlushCache (
             if (vacb->Dirty)
             {
                 IO_STATUS_BLOCK VacbIosb = { 0 };
-                Status = CcRosFlushVacb(vacb, &VacbIosb, NULL);
+                Status = CcRosFlushVacb(vacb, &VacbIosb, NULL, NULL);
                 if (!NT_SUCCESS(Status))
                 {
                     CcRosReleaseVacb(SharedCacheMap, vacb, FALSE, FALSE);

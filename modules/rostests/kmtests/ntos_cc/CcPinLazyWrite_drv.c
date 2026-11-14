@@ -13,7 +13,10 @@
 #define IOCTL_RUN_TEST 1
 
 /* One view: page 0 is pinned by the tests, page 1 is a control page in the same view */
-#define TEST_PAGES (VACB_MAPPING_GRANULARITY / PAGE_SIZE)
+/* Two views: the pinned page is in the first, the VDL probe writes a page of the second, which can be dropped from Mm */
+#define TEST_SIZE (2 * VACB_MAPPING_GRANULARITY)
+#define TEST_PAGES (TEST_SIZE / PAGE_SIZE)
+#define FAR_PAGE (VACB_MAPPING_GRANULARITY / PAGE_SIZE + 5)
 #define HELD_PAGE 0
 #define CONTROL_PAGE 1
 
@@ -29,10 +32,13 @@ static KMT_MESSAGE_HANDLER TestMessageHandler;
 
 static PTEST_FCB TestFcb;
 static PFILE_OBJECT TestFileObject;
+/* Valid data length the next SetupFile gives the stream */
+static LONGLONG SetupVdl = TEST_SIZE;
 
 /* The "disk": the first ULONG of every page as last written, and how many times each page was written */
 static volatile ULONG DiskValue[TEST_PAGES];
 static volatile LONG WriteCount[TEST_PAGES];
+static volatile LONG ReadCount[TEST_PAGES];
 
 NTSTATUS
 TestEntry(
@@ -132,9 +138,9 @@ SetupFile(
     RtlZeroMemory(Fcb, sizeof(TEST_FCB));
     ExInitializeFastMutex(&Fcb->HeaderMutex);
     FsRtlSetupAdvancedHeader(&Fcb->Header, &Fcb->HeaderMutex);
-    Fcb->Header.AllocationSize.QuadPart = VACB_MAPPING_GRANULARITY;
-    Fcb->Header.FileSize.QuadPart = VACB_MAPPING_GRANULARITY;
-    Fcb->Header.ValidDataLength.QuadPart = VACB_MAPPING_GRANULARITY;
+    Fcb->Header.AllocationSize.QuadPart = TEST_SIZE;
+    Fcb->Header.FileSize.QuadPart = TEST_SIZE;
+    Fcb->Header.ValidDataLength.QuadPart = SetupVdl;
     FileObject->FsContext = Fcb;
     FileObject->SectionObjectPointer = &Fcb->SectionObjectPointers;
 
@@ -434,11 +440,246 @@ TestFlushFromOtherThread(VOID)
     ok_eq_hex(DiskValue[HELD_PAGE], 0x0F0F0F0FUL);
 }
 
+/* ---- deadlock probes (helper threads with a 30 s watchdog), the VDL / write-around probe, the hold limit ---- */
+
+typedef VOID (*PREVIEW_FN)(VOID);
+static PREVIEW_FN ReviewFn;
+static KEVENT ReviewDone;
+static PVOID ReviewThreadObject;
+
+static
+VOID
+NTAPI
+ReviewThread(
+    _In_ PVOID Context)
+{
+    UNREFERENCED_PARAMETER(Context);
+    FsRtlEnterFileSystem();
+    ReviewFn();
+    FsRtlExitFileSystem();
+    KeSetEvent(&ReviewDone, IO_NO_INCREMENT, FALSE);
+    PsTerminateSystemThread(STATUS_SUCCESS);
+}
+
+/* Starts Fn in a system thread; waits up to Seconds for it. TRUE if it finished. */
+static
+BOOLEAN
+RunInThread(
+    _In_ PREVIEW_FN Fn,
+    _In_ ULONG Seconds)
+{
+    LARGE_INTEGER Timeout;
+    HANDLE Thread;
+    NTSTATUS Status;
+
+    ReviewFn = Fn;
+    ReviewThreadObject = NULL;
+    KeInitializeEvent(&ReviewDone, NotificationEvent, FALSE);
+    Status = PsCreateSystemThread(&Thread, THREAD_ALL_ACCESS, NULL, NULL, NULL, ReviewThread, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return FALSE;
+    ObReferenceObjectByHandle(Thread, SYNCHRONIZE, *PsThreadType, KernelMode, &ReviewThreadObject, NULL);
+    ZwClose(Thread);
+
+    Timeout.QuadPart = -(LONGLONG)Seconds * 10000000LL;
+    return KeWaitForSingleObject(&ReviewDone, Executive, KernelMode, FALSE, &Timeout) == STATUS_SUCCESS;
+}
+
+static
+VOID
+JoinReviewThread(VOID)
+{
+    LARGE_INTEGER Timeout;
+
+    if (ReviewThreadObject)
+    {
+        Timeout.QuadPart = -60 * 10000000LL;
+        ok_eq_hex(KeWaitForSingleObject(ReviewThreadObject, Executive, KernelMode, FALSE, &Timeout), STATUS_SUCCESS);
+        ObDereferenceObject(ReviewThreadObject);
+        ReviewThreadObject = NULL;
+    }
+}
+
+static
+VOID
+ReviewWaitLazyThread(VOID)
+{
+    ok_eq_hex(CcWaitForCurrentLazyWriterActivity(), STATUS_SUCCESS);
+}
+
+/* (4a) a pin held PIN_EXCLUSIVE + dirty while another thread waits for the lazy writer's current activity */
+static
+VOID
+ReviewWaitLazyWhilePinned(VOID)
+{
+    PULONG Buffer;
+    PVOID Bcb;
+    BOOLEAN Done;
+
+    Bcb = PinPage(HELD_PAGE, PIN_WAIT | PIN_EXCLUSIVE, &Buffer);
+    if (!Bcb)
+        return;
+    CcSetDirtyPinnedData(Bcb, NULL);
+    Buffer[0] = 0x71717171;
+
+    Done = RunInThread(ReviewWaitLazyThread, 30);
+    ok(Done, "CcWaitForCurrentLazyWriterActivity did not return in 30 s with a pinned dirty range\n");
+    Buffer[0] = 0x72727272;
+    CcUnpinData(Bcb);
+    JoinReviewThread();
+    FlushFile();
+    ok_eq_hex(DiskValue[HELD_PAGE], 0x72727272UL);
+}
+
+/* (4b) a thread holds PIN_EXCLUSIVE + dirty and calls CcFlushCache (whole file), CcPurgeCacheSection, again CcFlushCache */
+static
+VOID
+ReviewSelfFlushPurgeThread(VOID)
+{
+    IO_STATUS_BLOCK Iosb;
+    PULONG Buffer;
+    PVOID Bcb;
+    BOOLEAN Purged;
+
+    Bcb = PinPage(HELD_PAGE, PIN_WAIT | PIN_EXCLUSIVE, &Buffer);
+    if (!Bcb)
+        return;
+    CcSetDirtyPinnedData(Bcb, NULL);
+    Buffer[0] = 0x81818181;
+    CcFlushCache(TestFileObject->SectionObjectPointer, NULL, 0, &Iosb);
+    ok_eq_hex(Iosb.Status, STATUS_SUCCESS);
+    Purged = CcPurgeCacheSection(TestFileObject->SectionObjectPointer, NULL, 0, FALSE);
+    trace("CcPurgeCacheSection with own exclusive pin: %d\n", Purged);
+    Buffer[0] = 0x82828282;
+    CcFlushCache(TestFileObject->SectionObjectPointer, NULL, 0, &Iosb);
+    ok_eq_hex(Iosb.Status, STATUS_SUCCESS);
+    CcUnpinData(Bcb);
+}
+
+static
+VOID
+ReviewSelfFlushPurge(VOID)
+{
+    ok(RunInThread(ReviewSelfFlushPurgeThread, 30), "flush/purge while holding PIN_EXCLUSIVE did not return in 30 s\n");
+    JoinReviewThread();
+    FlushFile();
+    ok_eq_hex(DiskValue[HELD_PAGE], 0x82828282UL);
+}
+
+/*
+ * (4c) VDL / write-around: the stream's valid data length is 0 (SetupVdl). Page 0 of the first view is pinned + dirty
+ * (held), a page of the second view is dirtied and unpinned, and the lazy writer writes it around the pin.  Valid data
+ * length must then reach the end of what was written: the page is dropped from Mm and read back, and Mm reads nothing
+ * at or past the valid data length (the data written would read as zeros).
+ */
+static
+VOID
+ReviewVdlWriteAround(VOID)
+{
+    LARGE_INTEGER Offset;
+    IO_STATUS_BLOCK Iosb;
+    ULONG Value = 0xDEADBEEF;
+    PULONG Buffer;
+    PVOID Bcb;
+    LONG Reads;
+    BOOLEAN Purged;
+
+    Bcb = PinPage(HELD_PAGE, PIN_WAIT, &Buffer);
+    if (!Bcb)
+        return;
+    Buffer[0] = 0x91919191;
+    CcSetDirtyPinnedData(Bcb, NULL);
+    DirtyPage(FAR_PAGE, 0x55555555);
+
+    ok(WaitForLazyWrite(), "No lazy write of the view within 30 s\n");
+    ok(WriteCount[FAR_PAGE] != 0, "the page of the second view was not written around the pin\n");
+    ok_eq_hex(DiskValue[FAR_PAGE], 0x55555555UL);
+
+    /* The page is clean now: drop it; the read below must then come from the disk (a read request for the page) */
+    Offset.QuadPart = (LONGLONG)FAR_PAGE * PAGE_SIZE;
+    Reads = ReadCount[FAR_PAGE];
+    Purged = CcPurgeCacheSection(TestFileObject->SectionObjectPointer, &Offset, PAGE_SIZE, FALSE);
+    trace("CcPurgeCacheSection of the page: %d\n", Purged);
+    KmtStartSeh();
+    ok(CcCopyRead(TestFileObject, &Offset, sizeof(Value), TRUE, &Value, &Iosb), "CcCopyRead failed\n");
+    KmtEndSeh(STATUS_SUCCESS);
+    ok_eq_hex(Value, 0x55555555UL);
+    ok(ReadCount[FAR_PAGE] != Reads, "the page was not read from the disk: it was not dropped (or Mm read nothing)\n");
+
+    CcUnpinData(Bcb);
+    FlushFile();
+}
+
+/*
+ * A range pinned and made dirty is held back from the lazy write for CC_PIN_HOLD_MAX (10 s) at most, so dirty
+ * metadata a file system keeps pinned for long (ext2's buffer heads) is written within a bounded time.  The pin
+ * stays; what is changed after that write still reaches the disk: the last unpin makes the range dirty again.
+ */
+#define HOLD_LIMIT_SECONDS 10
+static
+VOID
+TestHoldLimit(VOID)
+{
+    LARGE_INTEGER Interval, Start, Now;
+    PULONG Buffer;
+    PVOID Bcb;
+    ULONG i;
+
+    Bcb = PinPage(HELD_PAGE, PIN_WAIT, &Buffer);
+    if (!Bcb)
+        return;
+
+    CcSetDirtyPinnedData(Bcb, NULL);
+    Buffer[0] = 0x61616161;
+    KeQueryTickCount(&Start);
+
+    Interval.QuadPart = -100 * 10000LL;
+    for (i = 0; i < 600 && DiskValue[HELD_PAGE] != 0x61616161; i++)
+        KeDelayExecutionThread(KernelMode, FALSE, &Interval);
+    KeQueryTickCount(&Now);
+
+    ok_eq_hex(DiskValue[HELD_PAGE], 0x61616161UL);
+    Now.QuadPart = (Now.QuadPart - Start.QuadPart) * KeQueryTimeIncrement() / 10000000;
+    trace("The pinned range was written after %I64d s\n", Now.QuadPart);
+    ok(Now.QuadPart >= HOLD_LIMIT_SECONDS - 1, "The lazy writer wrote a pinned range after %I64d s\n", Now.QuadPart);
+
+    /* Still pinned: changed after the write, unpinned without another CcSetDirtyPinnedData */
+    Buffer[0] = 0x62626262;
+    CcUnpinData(Bcb);
+
+    FlushFile();
+    ok_eq_hex(DiskValue[HELD_PAGE], 0x62626262UL);
+}
+
 static
 VOID
 RunTest(
     _In_ PDEVICE_OBJECT DeviceObject)
 {
+    RtlZeroMemory((PVOID)DiskValue, sizeof(DiskValue));
+    RtlZeroMemory((PVOID)WriteCount, sizeof(WriteCount));
+
+    /* Own stream each */
+    if (SetupFile(DeviceObject))
+    {
+        ReviewWaitLazyWhilePinned();
+        FlushFile();
+        ReviewSelfFlushPurge();
+        FlushFile();
+    }
+    FreeFile();
+
+    RtlZeroMemory((PVOID)DiskValue, sizeof(DiskValue));
+    RtlZeroMemory((PVOID)WriteCount, sizeof(WriteCount));
+    SetupVdl = 0;
+    if (SetupFile(DeviceObject))
+    {
+        ReviewVdlWriteAround();
+    }
+    FreeFile();
+    SetupVdl = TEST_SIZE;
+
     RtlZeroMemory((PVOID)DiskValue, sizeof(DiskValue));
     RtlZeroMemory((PVOID)WriteCount, sizeof(WriteCount));
 
@@ -453,6 +694,8 @@ RunTest(
         TestRepinned();
         FlushFile();
         TestFlushFromOtherThread();
+        FlushFile();
+        TestHoldLimit();
         FlushFile();
     }
 
@@ -531,7 +774,10 @@ TestIrpHandler(
         for (Page = 0; Page * PAGE_SIZE < Length; Page++)
         {
             if ((ULONGLONG)(Offset / PAGE_SIZE) + Page < TEST_PAGES)
+            {
                 ((PULONG)(Buffer + Page * PAGE_SIZE))[0] = DiskValue[Offset / PAGE_SIZE + Page];
+                InterlockedIncrement(&ReadCount[Offset / PAGE_SIZE + Page]);
+            }
         }
     }
     else
