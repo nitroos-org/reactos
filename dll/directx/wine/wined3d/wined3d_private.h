@@ -3623,6 +3623,21 @@ enum wined3d_cs_queue_id
 /* How long to wait for the CS from the client thread, in µs. */
 #define WINED3D_CS_CLIENT_WAIT_TIMEOUT  0
 #define WINED3D_CS_QUEUE_MASK           (WINED3D_CS_QUEUE_SIZE - 1)
+/* How long, in µs, a client thread spins while it waits for the CS thread in
+ * wined3d_cs_mt_finish() or wined3d_resource_wait_idle(), before it blocks on an
+ * event that the CS thread signals when the work it waits for is done. The CS
+ * thread can be busy for tens of seconds in a software rasteriser's shader
+ * compile, and a spinning client would burn a core for that time; but waking a
+ * blocked thread costs far more than noticing the end of a short wait while
+ * spinning (on a virtual CPU that has halted, a lot more). So the budget adapts
+ * to the waits the client sees: it halves (down to the minimum) when a wait that
+ * had to block turns out to be much longer than the budget, and doubles (up to
+ * the maximum) when blocking was premature. */
+#define WINED3D_CS_SPIN_BUDGET_INIT     2000
+#define WINED3D_CS_SPIN_BUDGET_MIN      100
+#define WINED3D_CS_SPIN_BUDGET_MAX      10000
+/* Upper bound of one blocking wait, in ms; guards against a lost wake-up. */
+#define WINED3D_CS_FINISH_WAIT_TIMEOUT  20
 
 C_ASSERT(!(WINED3D_CS_QUEUE_SIZE & (WINED3D_CS_QUEUE_SIZE - 1)));
 
@@ -3671,9 +3686,14 @@ struct wined3d_cs
     struct list query_poll_list;
     BOOL queries_flushed;
 
-    HANDLE event, present_event;
+    HANDLE event, present_event, finish_event;
     LONG waiting_for_event;
     LONG waiting_for_present;
+    /* Client threads blocked in wined3d_cs_wait_*_blocking(), and what the
+     * last of them waits for: mode 1 = the default queue's tail passing
+     * finish_access (or reaching finish_head), mode 0 = a queue becoming empty. */
+    LONG finish_waiters, finish_mode, spin_budget;
+    ULONG finish_head, finish_access;
     LONG pending_presents;
 };
 
@@ -3692,6 +3712,15 @@ static inline void wined3d_device_context_unlock(struct wined3d_device_context *
 struct wined3d_cs *wined3d_cs_create(struct wined3d_device *device,
         const enum wined3d_feature_level *levels, unsigned int level_count);
 void wined3d_cs_destroy(struct wined3d_cs *cs);
+struct wined3d_cs_spin
+{
+    LONGLONG start;
+    BOOL blocked;
+};
+BOOL wined3d_cs_spin_expired(struct wined3d_cs *cs, unsigned int spin_count, struct wined3d_cs_spin *spin);
+void wined3d_cs_spin_done(struct wined3d_cs *cs, struct wined3d_cs_spin *spin);
+void wined3d_cs_wait_empty_blocking(struct wined3d_cs *cs, enum wined3d_cs_queue_id queue_id);
+void wined3d_cs_wait_idle_blocking(struct wined3d_cs *cs, ULONG head, ULONG access_time);
 void wined3d_cs_destroy_object(struct wined3d_cs *cs,
         void (*callback)(void *object), void *object);
 void wined3d_cs_emit_add_dirty_texture_region(struct wined3d_cs *cs,
@@ -3830,9 +3859,10 @@ C_ASSERT(WINED3D_CS_QUEUE_SIZE < UINT_MAX / 4);
 
 static inline void wined3d_resource_wait_idle(const struct wined3d_resource *resource)
 {
-    const struct wined3d_cs *cs = resource->device->cs;
+    struct wined3d_cs *cs = resource->device->cs;
     ULONG access_time, tail, head;
     unsigned int spin_count = 0;
+    struct wined3d_cs_spin spin = {0};
 
     if (!cs->thread || cs->thread_id == GetCurrentThreadId())
         return;
@@ -3871,8 +3901,17 @@ static inline void wined3d_resource_wait_idle(const struct wined3d_resource *res
         if (!wined3d_ge_wrap(access_time, tail) && access_time != tail)
             break;
 
-        wined3d_pause(&spin_count);
+        if (!cs->finish_event || !wined3d_cs_spin_expired(cs, spin_count, &spin))
+        {
+            wined3d_pause(&spin_count);
+        }
+        else
+        {
+            spin.blocked = TRUE;
+            wined3d_cs_wait_idle_blocking(cs, head, access_time);
+        }
     }
+    wined3d_cs_spin_done(cs, &spin);
 }
 
 struct wined3d_buffer

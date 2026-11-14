@@ -2922,12 +2922,20 @@ void wined3d_device_context_emit_generate_mipmaps(struct wined3d_device_context 
 static void wined3d_cs_emit_stop(struct wined3d_cs *cs)
 {
     struct wined3d_cs_stop *op;
+    unsigned int spin_count = 0;
 
     op = wined3d_device_context_require_space(&cs->c, sizeof(*op), WINED3D_CS_QUEUE_DEFAULT);
     op->opcode = WINED3D_CS_OP_STOP;
 
     wined3d_device_context_submit(&cs->c, WINED3D_CS_QUEUE_DEFAULT);
-    wined3d_cs_finish(cs, WINED3D_CS_QUEUE_DEFAULT);
+
+    /* The CS thread does not signal finish_event for the STOP packet, and the
+     * event is closed right after this returns, so spin here instead of using
+     * wined3d_cs_finish(). */
+    TRACE_(d3d_perf)("Waiting for the CS thread to stop.\n");
+    while (cs->queue[WINED3D_CS_QUEUE_DEFAULT].head
+            != *(volatile ULONG *)&cs->queue[WINED3D_CS_QUEUE_DEFAULT].tail)
+        wined3d_pause(&spin_count);
 }
 
 static void wined3d_cs_reference_resource(struct wined3d_device_context *context, struct wined3d_resource *resource)
@@ -3332,17 +3340,132 @@ static void *wined3d_cs_mt_require_space(struct wined3d_device_context *context,
     return wined3d_cs_queue_require_space(&cs->queue[queue_id], size, cs);
 }
 
+/* Whether a client thread has spun for the current budget (see
+ * WINED3D_CS_SPIN_BUDGET_INIT). The clock starts when wined3d_pause() begins to
+ * yield; the first iterations only look at the queue. */
+static LONGLONG wined3d_cs_clock_ticks(void)
+{
+    LARGE_INTEGER now;
+
+    QueryPerformanceCounter(&now);
+    return now.QuadPart;
+}
+
+/* Converts a duration in microseconds to counter ticks. The raw counter itself
+ * is never multiplied: it can be large enough to overflow. */
+static LONGLONG wined3d_cs_us_to_ticks(LONGLONG us)
+{
+    static LONGLONG freq;
+    LONGLONG f = freq;
+
+    if (!f)
+    {
+        LARGE_INTEGER li;
+
+        QueryPerformanceFrequency(&li);
+        freq = f = li.QuadPart ? li.QuadPart : 1;
+    }
+    return us * f / 1000000;
+}
+
+BOOL wined3d_cs_spin_expired(struct wined3d_cs *cs, unsigned int spin_count, struct wined3d_cs_spin *spin)
+{
+    LONG budget = *(volatile LONG *)&cs->spin_budget;
+    LONGLONG now;
+
+    if (spin_count < WINED3D_PAUSE_SPIN_COUNT)
+        return FALSE;
+    now = wined3d_cs_clock_ticks();
+    if (!spin->start)
+    {
+        spin->start = now;
+        return FALSE;
+    }
+    return now - spin->start >= wined3d_cs_us_to_ticks(budget > 0 ? budget : WINED3D_CS_SPIN_BUDGET_INIT);
+}
+
+/* Called when a wait is over. A wait that had to block adjusts the budget: much
+ * longer than the budget means that spinning was wasted, a wait that ended soon
+ * after the client blocked means that blocking was premature. */
+void wined3d_cs_spin_done(struct wined3d_cs *cs, struct wined3d_cs_spin *spin)
+{
+    LONG budget = *(volatile LONG *)&cs->spin_budget;
+    LONGLONG elapsed;
+
+    if (!spin->blocked)
+        return;
+    if (budget <= 0)
+        budget = WINED3D_CS_SPIN_BUDGET_INIT;
+    elapsed = wined3d_cs_clock_ticks() - spin->start;
+    if (elapsed > wined3d_cs_us_to_ticks(4 * (LONGLONG)budget))
+        budget = max(WINED3D_CS_SPIN_BUDGET_MIN, budget / 2);
+    else if (elapsed < wined3d_cs_us_to_ticks(2 * (LONGLONG)budget))
+        budget = min(WINED3D_CS_SPIN_BUDGET_MAX, budget * 2);
+    InterlockedExchange(&cs->spin_budget, budget);
+}
+
+/* The two functions below replace the spin of a client thread once the CS
+ * thread has kept it waiting for its spin budget (it is busy with a long
+ * command): the client blocks on an event that
+ * wined3d_cs_execute_next() signals. Each registers as a waiter first and then
+ * looks at the queue again: the CS thread publishes the new tail with an
+ * interlocked operation and reads finish_waiters afterwards, so either the
+ * client sees the finished work here or the CS thread sees the client and
+ * signals. The wait is bounded, so a lost wake-up (several waiters overwrite
+ * each other's finish_mode) costs one timeout at most. */
+void wined3d_cs_wait_empty_blocking(struct wined3d_cs *cs, enum wined3d_cs_queue_id queue_id)
+{
+    InterlockedExchange(&cs->finish_mode, 0);
+    InterlockedIncrement(&cs->finish_waiters);
+    if (cs->queue[queue_id].head != *(volatile ULONG *)&cs->queue[queue_id].tail
+            && WaitForSingleObject(cs->finish_event, WINED3D_CS_FINISH_WAIT_TIMEOUT) == WAIT_TIMEOUT
+            && cs->queue[queue_id].head == *(volatile ULONG *)&cs->queue[queue_id].tail)
+        TRACE_(d3d_perf)("Blocking wait for queue %u timed out, but the queue is empty.\n", queue_id);
+    InterlockedDecrement(&cs->finish_waiters);
+}
+
+void wined3d_cs_wait_idle_blocking(struct wined3d_cs *cs, ULONG head, ULONG access_time)
+{
+    ULONG tail;
+
+    InterlockedExchange((LONG *)&cs->finish_head, head);
+    InterlockedExchange((LONG *)&cs->finish_access, access_time);
+    InterlockedExchange(&cs->finish_mode, 1);
+    InterlockedIncrement(&cs->finish_waiters);
+    tail = *(volatile ULONG *)&cs->queue[WINED3D_CS_QUEUE_DEFAULT].tail;
+    if (head != tail && (wined3d_ge_wrap(access_time, tail) || access_time == tail)
+            && WaitForSingleObject(cs->finish_event, WINED3D_CS_FINISH_WAIT_TIMEOUT) == WAIT_TIMEOUT)
+    {
+        tail = *(volatile ULONG *)&cs->queue[WINED3D_CS_QUEUE_DEFAULT].tail;
+        if (head == tail || (!wined3d_ge_wrap(access_time, tail) && access_time != tail))
+            TRACE_(d3d_perf)("Blocking wait for the resource timed out, but it is idle.\n");
+    }
+    InterlockedDecrement(&cs->finish_waiters);
+}
+
 static void wined3d_cs_mt_finish(struct wined3d_device_context *context, enum wined3d_cs_queue_id queue_id)
 {
     struct wined3d_cs *cs = wined3d_cs_from_context(context);
     unsigned int spin_count = 0;
+    struct wined3d_cs_spin spin = {0};
 
     if (cs->thread_id == GetCurrentThreadId())
         return wined3d_cs_st_finish(context, queue_id);
 
     TRACE_(d3d_perf)("Waiting for queue %u to be empty.\n", queue_id);
     while (cs->queue[queue_id].head != *(volatile ULONG *)&cs->queue[queue_id].tail)
-        wined3d_pause(&spin_count);
+    {
+        if (!cs->finish_event || !wined3d_cs_spin_expired(cs, spin_count, &spin))
+        {
+            wined3d_pause(&spin_count);
+        }
+        else
+        {
+            spin.blocked = TRUE;
+            wined3d_cs_wait_empty_blocking(cs, queue_id);
+        }
+    }
+    wined3d_cs_spin_done(cs, &spin);
     TRACE_(d3d_perf)("Queue is now empty.\n");
 }
 
@@ -3442,6 +3565,22 @@ static inline bool wined3d_cs_execute_next(struct wined3d_cs *cs, struct wined3d
     }
 
     InterlockedExchange((LONG *)&queue->tail, tail);
+
+    /* Wake a client thread blocked in wined3d_cs_wait_*_blocking(). */
+    if (*(volatile LONG *)&cs->finish_waiters)
+    {
+        ULONG t = (ULONG)tail;
+        BOOL wake = *(volatile ULONG *)&queue->head == t;
+
+        if (!wake && queue == &cs->queue[WINED3D_CS_QUEUE_DEFAULT] && *(volatile LONG *)&cs->finish_mode)
+        {
+            ULONG access = *(volatile ULONG *)&cs->finish_access;
+
+            wake = t == *(volatile ULONG *)&cs->finish_head || (!wined3d_ge_wrap(access, t) && access != t);
+        }
+        if (wake)
+            SetEvent(cs->finish_event);
+    }
     return true;
 }
 
@@ -3620,12 +3759,16 @@ struct wined3d_cs *wined3d_cs_create(struct wined3d_device *device,
             free(cs->data);
             goto fail;
         }
+        /* Optional: without it wined3d_cs_mt_finish() keeps spinning. */
+        cs->finish_event = CreateEventW(NULL, FALSE, FALSE, NULL);
 
         if (!(GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
                 (const WCHAR *)wined3d_cs_run, &cs->wined3d_module)))
         {
             ERR("Failed to get wined3d module handle.\n");
             CloseHandle(cs->present_event);
+            if (cs->finish_event)
+                CloseHandle(cs->finish_event);
             if (cs->event)
                 CloseHandle(cs->event);
             free(cs->data);
@@ -3637,6 +3780,8 @@ struct wined3d_cs *wined3d_cs_create(struct wined3d_device *device,
             ERR("Failed to create wined3d command stream thread.\n");
             FreeLibrary(cs->wined3d_module);
             CloseHandle(cs->present_event);
+            if (cs->finish_event)
+                CloseHandle(cs->finish_event);
             if (cs->event)
                 CloseHandle(cs->event);
             free(cs->data);
@@ -3662,6 +3807,8 @@ void wined3d_cs_destroy(struct wined3d_cs *cs)
         CloseHandle(cs->thread);
         if (!CloseHandle(cs->present_event))
             ERR("Closing present event failed.\n");
+        if (cs->finish_event && !CloseHandle(cs->finish_event))
+            ERR("Closing finish event failed.\n");
         if (cs->event && !CloseHandle(cs->event))
             ERR("Closing event failed.\n");
     }
