@@ -70,6 +70,7 @@ extern void func_RegPerformanceData(void);
 extern void func_InitiateShutdown(void);
 extern void func_RegQueryInfoKey(void);
 extern void func_RegQueryValueExW(void);
+extern void func_RegQueryMultipleValues(void);
 extern void func_RegKeyNameCase(void);
 extern void func_RegRenameKey(void);
 extern void func_RegRenameKeyPersist(void);
@@ -205,6 +206,7 @@ const struct test winetest_testlist[] =
     { "RegPerformanceData", func_RegPerformanceData },
     { "InitiateShutdown", func_InitiateShutdown },
     { "RegQueryValueExW", func_RegQueryValueExW },
+    { "RegQueryMultipleValues", func_RegQueryMultipleValues },
     { "RegKeyNameCase", func_RegKeyNameCase },
     { "RegRenameKey", func_RegRenameKey },
     { "RegRenameKeyPersist", func_RegRenameKeyPersist },

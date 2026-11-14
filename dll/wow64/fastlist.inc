@@ -41,6 +41,9 @@ FAST_SERVICE(NtDeleteKey, NtDeleteKey(H(0)))
 FAST_SERVICE(NtFlushKey, NtFlushKey(H(0)))
 /* NtSetInformationKey: KEY_WRITE_TIME_INFORMATION is a LARGE_INTEGER and every other class a ULONG: the same bytes in both ABIs */
 FAST_SERVICE(NtSetInformationKey, NtSetInformationKey(H(0), A(1), P(2), A(3)))
+/* NtInitializeRegistry takes a USHORT; NtLockProductActivationKeys two optional ULONG variables (the same in both ABIs) */
+FAST_SERVICE(NtInitializeRegistry, NtInitializeRegistry((USHORT)A(0)))
+FAST_SERVICE(NtLockProductActivationKeys, NtLockProductActivationKeys(P(0), P(1)))
 FAST_SERVICE(NtAssignProcessToJobObject, NtAssignProcessToJobObject(H(0), H(1)))
 FAST_SERVICE(NtTerminateJobObject, NtTerminateJobObject(H(0), A(1)))
 FAST_SERVICE(NtSetEvent, NtSetEvent(H(0), P(1)))
