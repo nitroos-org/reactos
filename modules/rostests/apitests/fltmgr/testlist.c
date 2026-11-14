@@ -10,6 +10,11 @@ extern void func_bootcheck(void);
 extern void func_stress(void);
 extern void func_eof(void);
 extern void func_reload(void);
+extern void func_rvneg(void);
+extern void func_rvpark(void);
+extern void func_rvparkw(void);
+extern void func_rvsafe(void);
+extern void func_rvchild(void);
 
 const struct test winetest_testlist[] =
 {
@@ -22,5 +27,10 @@ const struct test winetest_testlist[] =
     { "stress", func_stress },
     { "eof", func_eof },
     { "reload", func_reload },
+    { "rvneg", func_rvneg },
+    { "rvpark", func_rvpark },
+    { "rvparkw", func_rvparkw },
+    { "rvsafe", func_rvsafe },
+    { "rvchild", func_rvchild },
     { 0, 0 }
 };

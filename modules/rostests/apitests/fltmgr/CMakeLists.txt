@@ -8,6 +8,7 @@ list(APPEND SOURCE
     context.c
     comms.c
     stress.c
+    rvneg.c
     testlist.c)
 
 add_executable(fltmgr_apitest ${SOURCE})
