@@ -2923,6 +2923,152 @@ CmpEnumerateOpenSubKeys(
     return SubKeys;
 }
 
+/* An open key that is a sub key of the root key, as the snapshot below collects them */
+typedef struct _CMP_OPEN_SUBKEY
+{
+    HANDLE ProcessId;
+    PUNICODE_STRING Name;
+} CMP_OPEN_SUBKEY, *PCMP_OPEN_SUBKEY;
+
+/* Visit the key bodies of the sub keys of RootKcb. With Out == NULL the bodies are counted; otherwise
+ * at most Max of them are recorded (process and a newly allocated full name; a body whose key is
+ * deleted, or whose name cannot be built, is left out). Returns the number counted or recorded.
+ * The registry is locked exclusively, so no key is opened or closed meanwhile. */
+static
+ULONG
+CmpWalkOpenSubKeyBodies(
+    _In_ PCM_KEY_CONTROL_BLOCK RootKcb,
+    _Out_writes_opt_(Max) PCMP_OPEN_SUBKEY Out,
+    _In_ ULONG Max)
+{
+    PCM_KEY_HASH Entry;
+    PCM_KEY_CONTROL_BLOCK Kcb, ParentKcb;
+    PCM_KEY_BODY Body;
+    PLIST_ENTRY ListEntry = NULL;
+    ULONG i, j, k, Found = 0;
+
+    CMP_ASSERT_EXCLUSIVE_REGISTRY_LOCK();
+
+    for (i = 0; i < CmpHashTableSize; i++)
+    {
+        for (Entry = CmpCacheTable[i].Entry; Entry; Entry = Entry->NextHash)
+        {
+            Kcb = CONTAINING_RECORD(Entry, CM_KEY_CONTROL_BLOCK, KeyHash);
+
+            /* Only keys below the root key; the root itself is not a sub key */
+            if (Kcb->TotalLevels <= RootKcb->TotalLevels)
+                continue;
+            ParentKcb = Kcb;
+            for (j = 0; j < Kcb->TotalLevels - RootKcb->TotalLevels; j++)
+                ParentKcb = ParentKcb->ParentKcb;
+            if (ParentKcb != RootKcb)
+                continue;
+
+            /* Deleted keys and cache entries nobody holds have no name to give */
+            if (Kcb->Delete || (Kcb->KeyCell == HCELL_NIL) || (Kcb->RefCount == 0))
+                continue;
+
+            /* The first bodies are in the array, the rest in the list */
+            for (k = 0; ; k++)
+            {
+                if (k < RTL_NUMBER_OF(Kcb->KeyBodyArray))
+                {
+                    Body = Kcb->KeyBodyArray[k];
+                    if (!Body)
+                        continue;
+                }
+                else
+                {
+                    if (k == RTL_NUMBER_OF(Kcb->KeyBodyArray))
+                        ListEntry = Kcb->KeyBodyListHead.Flink;
+                    if (ListEntry == &Kcb->KeyBodyListHead)
+                        break;
+                    Body = CONTAINING_RECORD(ListEntry, CM_KEY_BODY, KeyBodyList);
+                    ListEntry = ListEntry->Flink;
+                }
+
+                if (!Out)
+                {
+                    Found++;
+                    continue;
+                }
+                if (Found >= Max)
+                    return Found;
+                Out[Found].Name = CmpConstructName(Kcb);
+                if (!Out[Found].Name)
+                    continue;
+                Out[Found].ProcessId = Body->ProcessID;
+                Found++;
+            }
+        }
+    }
+    return Found;
+}
+
+/* Build a snapshot of the keys that are open below the hive root RootKcb, in the layout of
+ * CM_OPEN_SUBKEYS_INFO. The name pointers of the entries hold the offset of the name inside the
+ * snapshot; the caller turns them into addresses of the buffer it copies the snapshot to. The
+ * registry must be locked exclusively. The caller frees the snapshot with TAG_CM. */
+NTSTATUS
+NTAPI
+CmpSnapshotOpenSubKeys(
+    _In_ PCM_KEY_CONTROL_BLOCK RootKcb,
+    _Out_ PCM_OPEN_SUBKEYS_INFO *Snapshot,
+    _Out_ PULONG SnapshotSize)
+{
+    PCMP_OPEN_SUBKEY Open = NULL;
+    PCM_OPEN_SUBKEYS_INFO Info;
+    ULONG Count, Found, i, Offset;
+    ULONG64 Size;
+
+    *Snapshot = NULL;
+    *SnapshotSize = 0;
+
+    Count = CmpWalkOpenSubKeyBodies(RootKcb, NULL, 0);
+    if (Count)
+    {
+        Open = ExAllocatePoolWithTag(PagedPool, (SIZE_T)Count * sizeof(*Open), TAG_CM);
+        if (!Open)
+            return STATUS_INSUFFICIENT_RESOURCES;
+        RtlZeroMemory(Open, (SIZE_T)Count * sizeof(*Open));
+    }
+    Found = Count ? CmpWalkOpenSubKeyBodies(RootKcb, Open, Count) : 0;
+
+    Size = FIELD_OFFSET(CM_OPEN_SUBKEYS_INFO, KeyArray) + (ULONG64)Found * sizeof(CM_OPEN_SUBKEY_PID);
+    for (i = 0; i < Found; i++)
+        Size += Open[i].Name->Length;
+    if (Size > MAXLONG)
+        Info = NULL;
+    else
+        Info = ExAllocatePoolWithTag(PagedPool, (SIZE_T)Size, TAG_CM);
+    if (Info)
+    {
+        RtlZeroMemory(Info, (SIZE_T)Size);
+        Info->Count = Found;
+        Offset = FIELD_OFFSET(CM_OPEN_SUBKEYS_INFO, KeyArray) + Found * sizeof(CM_OPEN_SUBKEY_PID);
+        for (i = 0; i < Found; i++)
+        {
+            Info->KeyArray[i].ProcessId = Open[i].ProcessId;
+            Info->KeyArray[i].KeyName.Length = Open[i].Name->Length;
+            Info->KeyArray[i].KeyName.MaximumLength = Open[i].Name->Length;
+            Info->KeyArray[i].KeyName.Buffer = (PWSTR)(ULONG_PTR)Offset;
+            RtlCopyMemory((PUCHAR)Info + Offset, Open[i].Name->Buffer, Open[i].Name->Length);
+            Offset += Open[i].Name->Length;
+        }
+    }
+
+    for (i = 0; i < Found; i++)
+        ExFreePoolWithTag(Open[i].Name, TAG_CM);
+    if (Open)
+        ExFreePoolWithTag(Open, TAG_CM);
+    if (!Info)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    *Snapshot = Info;
+    *SnapshotSize = (ULONG)Size;
+    return STATUS_SUCCESS;
+}
+
 static
 NTSTATUS
 CmpDeepCopyKeyInternal(IN PHHIVE SourceHive,

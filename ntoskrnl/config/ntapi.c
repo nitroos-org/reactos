@@ -1504,13 +1504,59 @@ NtInitializeRegistry(IN USHORT Flag)
     return STATUS_SUCCESS;
 }
 
+/* The most keys one NtCompactKeys call takes */
+#define CMP_MAX_COMPACT_KEYS    0x10000
+
 NTSTATUS
 NTAPI
 NtCompactKeys(IN ULONG Count,
               IN PHANDLE KeyArray)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
+    PCM_KEY_BODY KeyBody;
+    HANDLE Handle;
+    NTSTATUS Status = STATUS_SUCCESS;
+    ULONG i;
+
+    PAGED_CODE();
+
+    /* Compacting a hive rewrites it: the same privilege as saving one */
+    if (!SeSinglePrivilegeCheck(SeBackupPrivilege, PreviousMode))
+        return STATUS_PRIVILEGE_NOT_HELD;
+
+    /* The array of handles is not unbounded */
+    if (Count > CMP_MAX_COMPACT_KEYS)
+        return STATUS_INVALID_PARAMETER;
+
+    /* Every handle must name a key. Each is fetched once from the caller's array. */
+    for (i = 0; i < Count; i++)
+    {
+        _SEH2_TRY
+        {
+            if (PreviousMode != KernelMode)
+                ProbeForRead(&KeyArray[i], sizeof(HANDLE), sizeof(HANDLE));
+            Handle = ((volatile HANDLE *)KeyArray)[i];
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            _SEH2_YIELD(return _SEH2_GetExceptionCode());
+        }
+        _SEH2_END;
+
+        Status = ObReferenceObjectByHandle(Handle,
+                                           0,
+                                           CmpKeyObjectType,
+                                           PreviousMode,
+                                           (PVOID*)&KeyBody,
+                                           NULL);
+        if (!NT_SUCCESS(Status))
+            return Status;
+        ObDereferenceObject(KeyBody);
+    }
+
+    /* The hives of this registry are kept as they are; compacting them is only a space
+     * optimisation that nothing can observe, so there is nothing more to do. */
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS
@@ -1610,6 +1656,16 @@ NtNotifyChangeMultipleKeys(IN HANDLE MasterKeyHandle,
                               Asynchronous);
 }
 
+/* The most values one NtQueryMultipleValueKey call takes */
+#define CMP_MAX_MULTIPLE_VALUES 0x10000
+
+typedef struct _CMP_MULTIPLE_VALUE_RESULT
+{
+    ULONG Type;
+    ULONG DataLength;
+    ULONG DataOffset;
+} CMP_MULTIPLE_VALUE_RESULT, *PCMP_MULTIPLE_VALUE_RESULT;
+
 NTSTATUS
 NTAPI
 NtQueryMultipleValueKey(IN HANDLE KeyHandle,
@@ -1619,8 +1675,214 @@ NtQueryMultipleValueKey(IN HANDLE KeyHandle,
                         IN OUT PULONG Length,
                         OUT PULONG ReturnLength)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
+    PCM_KEY_BODY KeyObject;
+    PCMP_MULTIPLE_VALUE_RESULT Results = NULL;
+    UNICODE_STRING ValueName;
+    PUNICODE_STRING UserName;
+    KEY_VALUE_PARTIAL_INFORMATION Header;
+    PKEY_VALUE_PARTIAL_INFORMATION Full;
+    ULONG BufferLength = 0, HeaderLength, FullLength, i, Offset, Required = 0;
+    ULONG64 End;
+    BOOLEAN Overflow = FALSE;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    /* The key must be open for reading its values */
+    Status = ObReferenceObjectByHandle(KeyHandle,
+                                       KEY_QUERY_VALUE,
+                                       CmpKeyObjectType,
+                                       PreviousMode,
+                                       (PVOID*)&KeyObject,
+                                       NULL);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    if (NumberOfValues > CMP_MAX_MULTIPLE_VALUES)
+    {
+        ObDereferenceObject(KeyObject);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    /* Probe, and fetch the buffer length once: every later decision uses this copy */
+    _SEH2_TRY
+    {
+        if (PreviousMode != KernelMode)
+        {
+            ProbeForWriteUlong(Length);
+            if (ReturnLength)
+                ProbeForWriteUlong(ReturnLength);
+        }
+        BufferLength = *(volatile ULONG *)Length;
+        if (PreviousMode != KernelMode)
+        {
+            ProbeForWrite(Buffer, BufferLength, 1);
+            if (NumberOfValues)
+                ProbeForWrite(ValueList, NumberOfValues * sizeof(*ValueList), sizeof(ULONG));
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        ObDereferenceObject(KeyObject);
+        _SEH2_YIELD(return _SEH2_GetExceptionCode());
+    }
+    _SEH2_END;
+
+    if (NumberOfValues)
+    {
+        Results = ExAllocatePoolWithTag(PagedPool, NumberOfValues * sizeof(*Results), TAG_CM);
+        if (!Results)
+        {
+            ObDereferenceObject(KeyObject);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+    }
+
+    HeaderLength = FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data);
+    Offset = 0;
+    for (i = 0; i < NumberOfValues; i++)
+    {
+        /* The name: fetch the pointer once, then capture the string it names */
+        _SEH2_TRY
+        {
+            UserName = ((volatile KEY_VALUE_ENTRY *)ValueList)[i].ValueName;
+            Status = STATUS_SUCCESS;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = _SEH2_GetExceptionCode();
+        }
+        _SEH2_END;
+        if (!NT_SUCCESS(Status))
+            goto Quit;
+
+        Status = ProbeAndCaptureUnicodeString(&ValueName, PreviousMode, UserName);
+        if (!NT_SUCCESS(Status))
+            goto Quit;
+
+        if (ValueName.Length & (sizeof(WCHAR) - 1))
+        {
+            Status = STATUS_INVALID_PARAMETER;
+            goto ReleaseName;
+        }
+
+        /* Ignore any null characters at the end, as NtQueryValueKey does */
+        while (ValueName.Length &&
+               !(ValueName.Buffer[ValueName.Length / sizeof(WCHAR) - 1]))
+        {
+            ValueName.Length -= sizeof(WCHAR);
+        }
+
+        /* How big the value is, and its type; a value with data is "too big" for the header alone */
+        Status = CmQueryValueKey(KeyObject->KeyControlBlock,
+                                 ValueName,
+                                 KeyValuePartialInformation,
+                                 &Header,
+                                 HeaderLength,
+                                 &FullLength);
+        if (Status != STATUS_SUCCESS && Status != STATUS_BUFFER_OVERFLOW)
+            goto ReleaseName;
+        Status = STATUS_SUCCESS;
+
+        /* The value goes at the next 4-byte boundary after the previous one */
+        Offset = ALIGN_UP_BY(Offset, sizeof(ULONG));
+        End = (ULONG64)Offset + Header.DataLength;
+        if (End > MAXLONG)
+        {
+            Status = STATUS_INVALID_PARAMETER;
+            goto ReleaseName;
+        }
+        Results[i].Type = Header.Type;
+        Results[i].DataLength = Header.DataLength;
+        Results[i].DataOffset = Offset;
+
+        if (!Overflow && (End <= BufferLength))
+        {
+            if (Header.DataLength)
+            {
+                /* Read the data into the kernel, then copy it to the caller */
+                Full = ExAllocatePoolWithTag(PagedPool, HeaderLength + Header.DataLength, TAG_CM);
+                if (!Full)
+                {
+                    Status = STATUS_INSUFFICIENT_RESOURCES;
+                    goto ReleaseName;
+                }
+                Status = CmQueryValueKey(KeyObject->KeyControlBlock,
+                                         ValueName,
+                                         KeyValuePartialInformation,
+                                         Full,
+                                         HeaderLength + Header.DataLength,
+                                         &FullLength);
+                if (NT_SUCCESS(Status))
+                {
+                    /* The value may have been replaced meanwhile by a shorter one, never a longer */
+                    Results[i].Type = Full->Type;
+                    Results[i].DataLength = Full->DataLength;
+                    _SEH2_TRY
+                    {
+                        RtlCopyMemory((PUCHAR)Buffer + Offset, Full->Data, Full->DataLength);
+                    }
+                    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                    {
+                        Status = _SEH2_GetExceptionCode();
+                    }
+                    _SEH2_END;
+                }
+                else if (Status == STATUS_BUFFER_OVERFLOW)
+                {
+                    /* Replaced by a longer one: report the buffer as too small */
+                    Overflow = TRUE;
+                    Status = STATUS_SUCCESS;
+                }
+                ExFreePoolWithTag(Full, TAG_CM);
+                if (!NT_SUCCESS(Status))
+                    goto ReleaseName;
+                End = (ULONG64)Offset + Results[i].DataLength;
+            }
+        }
+        else
+        {
+            Overflow = TRUE;
+        }
+
+        Offset = (ULONG)End;
+        if (ValueName.Buffer) ReleaseCapturedUnicodeString(&ValueName, PreviousMode);
+        continue;
+
+ReleaseName:
+        if (ValueName.Buffer) ReleaseCapturedUnicodeString(&ValueName, PreviousMode);
+        goto Quit;
+    }
+    Required = Offset;
+
+    /* Hand the results back, for a buffer that is too small as well (the sizes and offsets are the
+     * ones the data would have) */
+    _SEH2_TRY
+    {
+        for (i = 0; i < NumberOfValues; i++)
+        {
+            ((volatile KEY_VALUE_ENTRY *)ValueList)[i].DataLength = Results[i].DataLength;
+            ((volatile KEY_VALUE_ENTRY *)ValueList)[i].DataOffset = Results[i].DataOffset;
+            ((volatile KEY_VALUE_ENTRY *)ValueList)[i].Type = Results[i].Type;
+        }
+        if (ReturnLength)
+            *(volatile ULONG *)ReturnLength = Required;
+        if (!Overflow)
+            *(volatile ULONG *)Length = Required;
+        Status = Overflow ? STATUS_BUFFER_OVERFLOW : STATUS_SUCCESS;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+
+Quit:
+    if (Results)
+        ExFreePoolWithTag(Results, TAG_CM);
+    ObDereferenceObject(KeyObject);
+    return Status;
 }
 
 NTSTATUS
@@ -1735,8 +1997,102 @@ NtQueryOpenSubKeysEx(IN POBJECT_ATTRIBUTES TargetKey,
                      IN PVOID Buffer,
                      IN PULONG RequiredSize)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
+    PCM_KEY_BODY KeyBody = NULL;
+    PCM_OPEN_SUBKEYS_INFO Snapshot = NULL;
+    HANDLE KeyHandle;
+    NTSTATUS Status;
+    ULONG SnapshotSize = 0, i;
+    PUCHAR UserBuffer = Buffer;
+
+    PAGED_CODE();
+
+    /* Who holds which key open is of interest to the one who loads and restores hives */
+    if (!SeSinglePrivilegeCheck(SeRestorePrivilege, PreviousMode))
+        return STATUS_PRIVILEGE_NOT_HELD;
+
+    if (PreviousMode != KernelMode)
+    {
+        _SEH2_TRY
+        {
+            ProbeForRead(TargetKey, sizeof(OBJECT_ATTRIBUTES), sizeof(ULONG));
+            if (RequiredSize)
+                ProbeForWriteUlong(RequiredSize);
+            ProbeForWrite(Buffer, BufferLength, 1);
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            _SEH2_YIELD(return _SEH2_GetExceptionCode());
+        }
+        _SEH2_END;
+    }
+
+    /* Open the key and get its object */
+    Status = ObOpenObjectByName(TargetKey,
+                                CmpKeyObjectType,
+                                PreviousMode,
+                                NULL,
+                                KEY_READ,
+                                NULL,
+                                &KeyHandle);
+    if (NT_SUCCESS(Status))
+    {
+        Status = ObReferenceObjectByHandle(KeyHandle,
+                                           KEY_READ,
+                                           CmpKeyObjectType,
+                                           PreviousMode,
+                                           (PVOID*)&KeyBody,
+                                           NULL);
+        NtClose(KeyHandle);
+    }
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    /* Collect the open keys while no key is opened or closed, and let go of the lock before
+     * anything of the caller's is touched */
+    CmpLockRegistryExclusive();
+    if (KeyBody->KeyControlBlock->KeyCell !=
+        KeyBody->KeyControlBlock->KeyHive->BaseBlock->RootCell)
+    {
+        /* Only a hive root has the open sub keys of a hive */
+        CmpUnlockRegistry();
+        ObDereferenceObject(KeyBody);
+        return STATUS_INVALID_PARAMETER;
+    }
+    Status = CmpSnapshotOpenSubKeys(KeyBody->KeyControlBlock, &Snapshot, &SnapshotSize);
+    CmpUnlockRegistry();
+    ObDereferenceObject(KeyBody);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    /* The caller's buffer: the snapshot, with the name pointers made to point into the buffer
+     * as it was passed in. A buffer that is too small gets the size that is needed. */
+    _SEH2_TRY
+    {
+        if (RequiredSize)
+            *(volatile ULONG *)RequiredSize = SnapshotSize;
+        if (BufferLength < SnapshotSize)
+        {
+            Status = STATUS_BUFFER_TOO_SMALL;
+        }
+        else
+        {
+            for (i = 0; i < Snapshot->Count; i++)
+            {
+                Snapshot->KeyArray[i].KeyName.Buffer =
+                    (PWSTR)(UserBuffer + (ULONG_PTR)Snapshot->KeyArray[i].KeyName.Buffer);
+            }
+            RtlCopyMemory(Buffer, Snapshot, SnapshotSize);
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+
+    ExFreePoolWithTag(Snapshot, TAG_CM);
+    return Status;
 }
 
 /* The longest name a key may be renamed to (Windows: 256 characters) */
