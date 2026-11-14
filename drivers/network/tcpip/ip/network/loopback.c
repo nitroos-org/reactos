@@ -133,6 +133,10 @@ BOOLEAN LoopDataFollows(
   UINT IpLen, TcpLen, Total;
   BOOLEAN Follows = FALSE;
 
+  /* The datagrams compared below are IPv4 ones */
+  if (!IP_IS_V4_VAL(pcb->remote_ip) || !IP_IS_V4_VAL(pcb->local_ip))
+    return FALSE;
+
   KeAcquireSpinLock(&LoopQueue.Lock, &OldIrql);
   Entry = LoopQueue.List.Flink;
   if (Entry != &LoopQueue.List)
@@ -152,8 +156,8 @@ BOOLEAN LoopDataFollows(
         /* From the peer to this PCB, with data and no SYN, FIN or RST */
         Follows = Total > IpLen + TcpLen &&
                   !(Tcp[13] & 0x07) &&
-                  RtlCompareMemory(Ip + 12, &pcb->remote_ip.addr, 4) == 4 &&
-                  RtlCompareMemory(Ip + 16, &pcb->local_ip.addr, 4) == 4 &&
+                  RtlCompareMemory(Ip + 12, &ip_2_ip4(&pcb->remote_ip)->addr, 4) == 4 &&
+                  RtlCompareMemory(Ip + 16, &ip_2_ip4(&pcb->local_ip)->addr, 4) == 4 &&
                   Tcp[0] == (UCHAR)(pcb->remote_port >> 8) && Tcp[1] == (UCHAR)pcb->remote_port &&
                   Tcp[2] == (UCHAR)(pcb->local_port >> 8) && Tcp[3] == (UCHAR)pcb->local_port;
       }

@@ -309,7 +309,7 @@ NTSTATUS TCPConnect
   PVOID Context )
 {
     NTSTATUS Status;
-    ip_addr_t bindaddr, connaddr;
+    ip4_addr_t bindaddr, connaddr;
     IP_ADDRESS RemoteAddress;
     USHORT RemotePort;
     u16_t BoundPort;
@@ -692,7 +692,7 @@ NTSTATUS TCPGetSockAddress
   BOOLEAN GetRemote )
 {
     PTA_IP_ADDRESS AddressIP = (PTA_IP_ADDRESS)Address;
-    ip_addr_t ipaddr;
+    ip4_addr_t ipaddr;
     NTSTATUS Status;
 
     AddressIP->TAAddressCount = 1;

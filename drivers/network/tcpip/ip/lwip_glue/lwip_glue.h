@@ -38,7 +38,7 @@ struct lwip_callback_msg
         } FreeSocket;
         struct {
             PCONNECTION_ENDPOINT Connection;
-            ip_addr_t *IpAddress;
+            ip4_addr_t *IpAddress;
             u16_t Port;
         } Bind;
         struct {
@@ -53,7 +53,7 @@ struct lwip_callback_msg
         } Send;
         struct {
             PCONNECTION_ENDPOINT Connection;
-            ip_addr_t *IpAddress;
+            ip4_addr_t *IpAddress;
             u16_t Port;
         } Connect;
         struct {
