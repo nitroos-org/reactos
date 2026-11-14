@@ -1731,6 +1731,18 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
     switch (Number)
     {
     case W64_NtCallbackReturn: return Wow64WinCallbackReturn(P(0), a[1], a[2]);
+    case W64_NtCreateProcess:
+        /* PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, parent, BOOLEAN InheritObjectTable, section, debug port, exception port */
+        PROBE(0);
+        ATTR(2);
+        Status = NtCreateProcess(&Cleanup->Handle, a[1], OA(2), H(3), (BOOLEAN)a[4], H(5), H(6), H(7));
+        RETURN_HANDLE();
+    case W64_NtCreateProcessEx:
+        /* The same plus ULONG Flags after the parent, and a trailing ULONG JobMemberLevel */
+        PROBE(0);
+        ATTR(2);
+        Status = NtCreateProcessEx(&Cleanup->Handle, a[1], OA(2), H(3), a[4], H(5), H(6), H(7), a[8]);
+        RETURN_HANDLE();
     case W64_NtCreateThread:
     {
         CLIENT_ID Id;
@@ -1738,7 +1750,11 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         if (a[4]) ProbeOutput(a[4], 2 * sizeof(ULONG));
         ATTR(2);
         Cleanup->ThreadProcess = H(3);
-        Status = Wow64CreateThread(&Cleanup->Thread, THREAD_ALL_ACCESS, OA(2), H(3), &Id, P(5), P(6), TRUE);
+        /* The NT6 all-access mask, spelled out: THREAD_ALL_ACCESS is the NT4 mask (0x3FF) when
+         * the header selects the older DDI version, and a guest that asks for 0x1FFFFF then
+         * got a handle capped to 0x1F0FFF, unlike on native i386 and amd64. */
+        Status = Wow64CreateThread(&Cleanup->Thread, STANDARD_RIGHTS_REQUIRED | SYNCHRONIZE | 0xFFFF,
+                                   OA(2), H(3), &Id, P(5), P(6), TRUE);
         if (NT_SUCCESS(Status))
         {
             /* The thread is created with THREAD_ALL_ACCESS so this routine can set its
