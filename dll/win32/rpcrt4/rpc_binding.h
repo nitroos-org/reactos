@@ -34,16 +34,16 @@ enum secure_packet_direction
 };
 
 /* What of the token a caller acts with decides whom a server takes it for: the logon, the kind and impersonation
- * level of the token, its groups and privileges (counted), and whether it is restricted. The id of the token itself
- * is not part of it: every impersonation of one client makes a token of its own. */
+ * level of the token, and its ModifiedId. The ModifiedId is renewed by every change of the token (a group made
+ * deny-only, a privilege enabled or disabled, the integrity level, a restricting SID, a filtered token) and copied
+ * by every duplication, so the impersonation copies of one client share it. The id of the token itself is not part
+ * of it: every impersonation of one client makes a token of its own. */
 typedef struct _RpcTokenKey
 {
     LUID auth_id;
+    LUID modified_id;
     DWORD token_type;
     DWORD impersonation_level;
-    DWORD group_count;
-    DWORD privilege_count;
-    DWORD restricted;
 } RpcTokenKey;
 
 typedef struct _RpcAuthInfo

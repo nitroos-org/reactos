@@ -1198,20 +1198,15 @@ BOOL RPCRT4_GetCallerTokenKey(RpcTokenKey *key)
 {
     HANDLE effective = (HANDLE)(LONG_PTR)-6;
     TOKEN_STATISTICS stats;
-    TOKEN_GROUPS restricting;
     DWORD size;
 
     memset(key, 0, sizeof(*key));
     if (!GetTokenInformation(effective, TokenStatistics, &stats, sizeof(stats), &size))
         return FALSE;
     key->auth_id = stats.AuthenticationId;
+    key->modified_id = stats.ModifiedId;
     key->token_type = stats.TokenType;
     key->impersonation_level = stats.ImpersonationLevel;
-    key->group_count = stats.GroupCount;
-    key->privilege_count = stats.PrivilegeCount;
-    /* room for no restricting SID: it only fits a token that has none */
-    key->restricted = !GetTokenInformation(effective, TokenRestrictedSids, &restricting, sizeof(restricting), &size) ||
-                      restricting.GroupCount;
     return TRUE;
 }
 

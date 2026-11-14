@@ -627,14 +627,23 @@ void RpcAssoc_ReleaseIdleConnection(RpcAssoc *assoc, RpcConnection *Connection)
     EnterCriticalSection(&assoc->cs);
     if (!assoc->assoc_group_id) assoc->assoc_group_id = Connection->assoc_group_id;
     LIST_FOR_EACH(entry, &assoc->free_connection_pool) idle++;
-    if (idle < MAX_IDLE_CONNECTIONS)
+    /* a connection opened by a caller whose token could not be read is never handed to another one */
+    if (Connection->token_key_valid)
     {
+        RpcConnection *oldest = NULL;
+
+        /* enough are kept for this server: the one that has been idle the longest makes room for this one (the
+         * callers of the last moments are the ones to come back) */
+        if (idle >= MAX_IDLE_CONNECTIONS)
+        {
+            oldest = LIST_ENTRY(list_tail(&assoc->free_connection_pool), RpcConnection, conn_pool_entry);
+            list_remove(&oldest->conn_pool_entry);
+        }
         list_add_head(&assoc->free_connection_pool, &Connection->conn_pool_entry);
-        Connection = NULL;
+        Connection = oldest;
     }
     LeaveCriticalSection(&assoc->cs);
 
-    /* enough are kept for this server */
     if (Connection) RPCRT4_ReleaseConnection(Connection);
 }
 
