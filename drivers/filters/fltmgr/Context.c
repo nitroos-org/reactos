@@ -50,13 +50,59 @@ typedef struct _FLTP_CONTEXT
 #define USER_TO_CONTEXT(p) ((PFLTP_CONTEXT)((PUCHAR)(p) - CONTEXT_HEADER_SIZE))
 #define CONTEXT_TO_USER(c) ((PFLT_CONTEXT)((PUCHAR)(c) + CONTEXT_HEADER_SIZE))
 
+/*
+ * A stream (FsContext) with the file objects we have seen created for it. Only those count: a close
+ * of a file object whose create we didn't see (opened before the instance came, a stream file object
+ * the file system made itself) doesn't end anybody's open. A stream without a record has no stream
+ * contexts (FltSetStreamContext refuses them), since we wouldn't know when it ends and the memory
+ * of its FsContext could be another file's by then.
+ */
 typedef struct _FLTP_STREAM_OPEN
 {
     LIST_ENTRY Link;
     PVOID Key;
     LONG Opens;
+    LIST_ENTRY FileObjects;         /* FLTP_STREAM_FILE_OBJECT */
 
 } FLTP_STREAM_OPEN, *PFLTP_STREAM_OPEN;
+
+typedef struct _FLTP_STREAM_FILE_OBJECT
+{
+    LIST_ENTRY Link;
+    PFILE_OBJECT FileObject;
+
+} FLTP_STREAM_FILE_OBJECT, *PFLTP_STREAM_FILE_OBJECT;
+
+/* The record of a stream. Volume->StreamListLock held. */
+static
+PFLTP_STREAM_OPEN
+FindStreamOpen(_In_ PFLT_VOLUME Volume,
+               _In_ PVOID Key)
+{
+    PLIST_ENTRY Entry;
+
+    for (Entry = Volume->StreamList.Flink; Entry != &Volume->StreamList; Entry = Entry->Flink)
+    {
+        PFLTP_STREAM_OPEN Open = CONTAINING_RECORD(Entry, FLTP_STREAM_OPEN, Link);
+
+        if (Open->Key == Key)
+            return Open;
+    }
+    return NULL;
+}
+
+/* A stream's record goes, with whatever file objects are still listed. Volume->StreamListLock held. */
+static
+VOID
+FreeStreamOpen(_In_ PFLTP_STREAM_OPEN Open)
+{
+    while (!IsListEmpty(&Open->FileObjects))
+    {
+        ExFreePoolWithTag(CONTAINING_RECORD(RemoveHeadList(&Open->FileObjects), FLTP_STREAM_FILE_OBJECT, Link),
+                          FM_TAG_STREAMCTRL);
+    }
+    ExFreePoolWithTag(Open, FM_TAG_STREAMCTRL);
+}
 
 static
 LONG
@@ -207,6 +253,13 @@ SetContext(_In_ PFLT_VOLUME Volume,
         return STATUS_FLT_INVALID_CONTEXT_REGISTRATION;
 
     ExAcquireFastMutex(&Volume->StreamListLock);
+
+    /* A stream we don't know the opens of: we couldn't tell when its context has to go */
+    if (Type == FLT_STREAM_CONTEXT && FindStreamOpen(Volume, Key) == NULL)
+    {
+        ExReleaseFastMutex(&Volume->StreamListLock);
+        return STATUS_NOT_SUPPORTED;
+    }
 
     Old = FindContext(Volume, Type, Filter, Instance, Key);
     if (Old == New)
@@ -385,7 +438,7 @@ FltpTeardownVolumeContexts(_In_ PFLT_VOLUME Volume)
     while (!IsListEmpty(&Volume->StreamList))
     {
         Entry = RemoveHeadList(&Volume->StreamList);
-        ExFreePoolWithTag(CONTAINING_RECORD(Entry, FLTP_STREAM_OPEN, Link), FM_TAG_STREAMCTRL);
+        FreeStreamOpen(CONTAINING_RECORD(Entry, FLTP_STREAM_OPEN, Link));
     }
     ExReleaseFastMutex(&Volume->StreamListLock);
 }
@@ -412,37 +465,43 @@ FltpStreamOpened(_In_ PFLT_VOLUME Volume,
                  _In_ PFILE_OBJECT FileObject)
 {
     PFLTP_STREAM_OPEN Open;
-    PLIST_ENTRY Entry;
     PFLTP_STREAM_OPEN New = NULL;
+    PFLTP_STREAM_FILE_OBJECT Fo;
 
     if (FileObject == NULL || FileObject->FsContext == NULL)
         return;
 
+    /* Without its own record the file object doesn't count: its close then ends nothing */
+    Fo = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Fo), FM_TAG_STREAMCTRL);
+    if (Fo == NULL)
+        return;
+    Fo->FileObject = FileObject;
+
     New = ExAllocatePoolWithTag(NonPagedPool, sizeof(*New), FM_TAG_STREAMCTRL);
 
     ExAcquireFastMutex(&Volume->StreamListLock);
-    for (Entry = Volume->StreamList.Flink; Entry != &Volume->StreamList; Entry = Entry->Flink)
+    Open = FindStreamOpen(Volume, FileObject->FsContext);
+    if (Open == NULL && New)
     {
-        Open = CONTAINING_RECORD(Entry, FLTP_STREAM_OPEN, Link);
-        if (Open->Key == FileObject->FsContext)
-        {
-            Open->Opens++;
-            goto Quit;
-        }
-    }
-
-    if (New)
-    {
-        New->Key = FileObject->FsContext;
-        New->Opens = 1;
-        InsertTailList(&Volume->StreamList, &New->Link);
+        Open = New;
         New = NULL;
+        Open->Key = FileObject->FsContext;
+        Open->Opens = 0;
+        InitializeListHead(&Open->FileObjects);
+        InsertTailList(&Volume->StreamList, &Open->Link);
     }
-
-Quit:
+    if (Open)
+    {
+        InsertTailList(&Open->FileObjects, &Fo->Link);
+        Open->Opens++;
+        Fo = NULL;
+    }
     ExReleaseFastMutex(&Volume->StreamListLock);
+
     if (New)
         ExFreePoolWithTag(New, FM_TAG_STREAMCTRL);
+    if (Fo)
+        ExFreePoolWithTag(Fo, FM_TAG_STREAMCTRL);
 }
 
 /* The file object goes: its handle contexts, and the stream contexts if it was the last open of the stream */
@@ -451,6 +510,7 @@ FltpFileObjectClosed(_In_ PFLT_VOLUME Volume,
                      _In_ PFILE_OBJECT FileObject)
 {
     PFLTP_STREAM_OPEN Open;
+    PFLTP_STREAM_FILE_OBJECT Fo = NULL;
     PLIST_ENTRY Entry;
     PVOID Stream = FileObject->FsContext;
     BOOLEAN Last = FALSE;
@@ -461,21 +521,33 @@ FltpFileObjectClosed(_In_ PFLT_VOLUME Volume,
         return;
 
     ExAcquireFastMutex(&Volume->StreamListLock);
-    for (Entry = Volume->StreamList.Flink; Entry != &Volume->StreamList; Entry = Entry->Flink)
+    Open = FindStreamOpen(Volume, Stream);
+    if (Open)
     {
-        Open = CONTAINING_RECORD(Entry, FLTP_STREAM_OPEN, Link);
-        if (Open->Key == Stream)
+        /* Only a file object whose create we saw ends an open */
+        for (Entry = Open->FileObjects.Flink; Entry != &Open->FileObjects; Entry = Entry->Flink)
         {
-            if (--Open->Opens <= 0)
+            PFLTP_STREAM_FILE_OBJECT Candidate = CONTAINING_RECORD(Entry, FLTP_STREAM_FILE_OBJECT, Link);
+
+            if (Candidate->FileObject == FileObject)
             {
-                RemoveEntryList(&Open->Link);
-                ExFreePoolWithTag(Open, FM_TAG_STREAMCTRL);
-                Last = TRUE;
+                Fo = Candidate;
+                RemoveEntryList(&Fo->Link);
+                break;
             }
-            break;
+        }
+
+        if (Fo && --Open->Opens <= 0)
+        {
+            RemoveEntryList(&Open->Link);
+            FreeStreamOpen(Open);
+            Last = TRUE;
         }
     }
     ExReleaseFastMutex(&Volume->StreamListLock);
+
+    if (Fo)
+        ExFreePoolWithTag(Fo, FM_TAG_STREAMCTRL);
 
     if (Last)
         PurgeContexts(Volume, NULL, NULL, FLT_STREAM_CONTEXT, Stream, TRUE);
