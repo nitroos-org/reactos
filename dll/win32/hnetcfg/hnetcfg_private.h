@@ -30,6 +30,8 @@ enum type_id
     INetFwProfile_tid,
     INetFwRule_tid,
     INetFwRules_tid,
+    INetFwService_tid,
+    INetFwServices_tid,
     IUPnPNAT_tid,
     IStaticPortMappingCollection_tid,
     IStaticPortMapping_tid,
@@ -48,5 +50,11 @@ HRESULT NetFwAuthorizedApplications_create(IUnknown *, LPVOID *);
 HRESULT NetFwOpenPorts_create(IUnknown *, LPVOID *);
 HRESULT NetFwOpenPort_create(IUnknown *, LPVOID *);
 HRESULT NetFwServices_create(IUnknown *, LPVOID *);
+HRESULT NetFwProfile_create_type(NET_FW_PROFILE_TYPE, void **);
+HRESULT NetFwAuthorizedApplications_create_profile(LONG, void **);
+HRESULT NetFwOpenPorts_create_profile(LONG, void **);
+HRESULT NetFwServices_create_profile(LONG, void **);
+NET_FW_PROFILE_TYPE legacy_current_type(void);
+LONG legacy_profile_bits(NET_FW_PROFILE_TYPE);
 HRESULT NetFwRule_create(IUnknown *, void **);
 HRESULT IUPnPNAT_create(IUnknown *, void **);

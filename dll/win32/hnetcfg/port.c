@@ -1589,6 +1589,8 @@ static HRESULT static_port_mapping_collection_create(IStaticPortMappingCollectio
     return S_OK;
 }
 
+/* NitroOS: the legacy objects are implemented in legacy.c on top of the rule store */
+#ifndef __REACTOS__
 typedef struct fw_port
 {
     INetFwOpenPort INetFwOpenPort_iface;
@@ -2158,6 +2160,8 @@ HRESULT NetFwOpenPorts_create( IUnknown *pUnkOuter, LPVOID *ppObj )
     TRACE("returning iface %p\n", *ppObj);
     return S_OK;
 }
+
+#endif /* !__REACTOS__ */
 
 typedef struct _upnpnat
 {

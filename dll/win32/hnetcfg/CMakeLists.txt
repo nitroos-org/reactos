@@ -12,6 +12,7 @@ list(APPEND SOURCE
     port.c
     profile.c
     service.c
+    legacy.c
     precomp.h)
 
 add_library(hnetcfg MODULE
