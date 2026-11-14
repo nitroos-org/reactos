@@ -70,6 +70,11 @@
 #define IP_REASS_FREE_OLDEST 1
 #endif /* IP_REASS_FREE_OLDEST */
 
+/* NitroOS: IPv6 has its own bound, so that the IPv4 one (which the port sets to "no limit") does not apply */
+#ifndef IP6_REASS_MAX_PBUFS
+#define IP6_REASS_MAX_PBUFS IP_REASS_MAX_PBUFS
+#endif /* IP6_REASS_MAX_PBUFS */
+
 #if IPV6_FRAG_COPYHEADER
 /* The number of bytes we need to "borrow" from (i.e., overwrite in) the header
  * that precedes the fragment header for reassembly pruposes. */
@@ -257,7 +262,7 @@ ip6_reass_remove_oldest_datagram(struct ip6_reassdata *ipr, int pbufs_needed)
     if (oldest != NULL) {
       ip6_reass_free_complete_datagram(oldest);
     }
-  } while (((ip6_reass_pbufcount + pbufs_needed) > IP_REASS_MAX_PBUFS) && (reassdatagrams != NULL));
+  } while (((ip6_reass_pbufcount + pbufs_needed) > IP6_REASS_MAX_PBUFS) && (reassdatagrams != NULL));
 }
 #endif /* IP_REASS_FREE_OLDEST */
 
@@ -385,10 +390,10 @@ ip6_reass(struct pbuf *p)
   }
 
   /* Check if we are allowed to enqueue more datagrams. */
-  if ((ip6_reass_pbufcount + clen) > IP_REASS_MAX_PBUFS) {
+  if ((ip6_reass_pbufcount + clen) > IP6_REASS_MAX_PBUFS) {
 #if IP_REASS_FREE_OLDEST
     ip6_reass_remove_oldest_datagram(ipr, clen);
-    if ((ip6_reass_pbufcount + clen) <= IP_REASS_MAX_PBUFS) {
+    if ((ip6_reass_pbufcount + clen) <= IP6_REASS_MAX_PBUFS) {
       /* re-search ipr_prev since it might have been removed */
       for (ipr_prev = reassdatagrams; ipr_prev != NULL; ipr_prev = ipr_prev->next) {
         if (ipr_prev->next == ipr) {

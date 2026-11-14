@@ -60,3 +60,7 @@ VOID IPDispatchProtocol(PIP_INTERFACE Interface, PIP_PACKET IPPacket);
 BOOLEAN IPv4CorrectChecksum(PVOID Data, UINT Count);
 VOID AddrInitIPv4(PIP_ADDRESS IPAddress, IPv4_RAW_ADDRESS RawAddress);
 BOOLEAN AddrIsEqual(PIP_ADDRESS Address1, PIP_ADDRESS Address2);
+
+/* IPv6 (ip/transport/tcp/if6.c) */
+extern BOOLEAN TCPIpv6Enabled;
+VOID TCPReceive6(PIP_INTERFACE IF, PIP_PACKET IPPacket);

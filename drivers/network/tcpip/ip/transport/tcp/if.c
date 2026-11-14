@@ -14,6 +14,10 @@
 
 static LONG TCPUnresolvedSegments;
 
+/* if6.c */
+err_t
+TCPSendData6Callback(struct netif *netif, struct pbuf *p, const ip6_addr_t *Dest);
+
 /* Context is non-NULL for a segment counted in TCPUnresolvedSegments */
 static
 VOID
@@ -151,8 +155,35 @@ TCPSendDataCallback(struct netif *netif, struct pbuf *p, const ip4_addr_t *dest)
     return 0;
 }
 
+/* lwIP's interface list and the state of its interfaces belong to lwIP: they change under the core lock, as
+ * lwIP's own timers (nd6_tmr walks every interface) and the routing of each datagram read them under it. The
+ * *Locked functions are called with the lock held, which TCPInterfaceInit is (inside netif_add) */
+static
 VOID
-TCPUpdateInterfaceLinkStatus(PIP_INTERFACE IF)
+TCPUpdateInterfaceStateLocked(PIP_INTERFACE IF, BOOLEAN HasIPv4Address)
+{
+    struct netif *netif = IF->TCPContext;
+
+    if (HasIPv4Address)
+    {
+        netif_set_up(netif);
+        netif_set_default(netif);
+    }
+    else if (TCPIpv6Enabled && netif_is_link_up(netif))
+    {
+        /* IPv6 needs no IPv4 address: its link-local address is formed, checked (DAD) and used with the
+         * link alone, and lwIP does all of that only on an interface that is up */
+        netif_set_up(netif);
+    }
+    else
+    {
+        netif_set_down(netif);
+    }
+}
+
+static
+VOID
+TCPUpdateInterfaceLinkStatusLocked(PIP_INTERFACE IF)
 {
     ULONG OperationalStatus;
 
@@ -162,6 +193,49 @@ TCPUpdateInterfaceLinkStatus(PIP_INTERFACE IF)
         netif_set_link_up(IF->TCPContext);
     else
         netif_set_link_down(IF->TCPContext);
+
+    /* Without IPv6 the interface is up exactly when it has an IPv4 address, whatever its link does. With it,
+     * an interface without an IPv4 address follows its link */
+    if (TCPIpv6Enabled && ip4_addr_isany_val(*netif_ip4_addr((struct netif *)IF->TCPContext)))
+        TCPUpdateInterfaceStateLocked(IF, FALSE);
+}
+
+static
+VOID
+TCPUpdateInterfaceIPInformationLocked(PIP_INTERFACE IF)
+{
+    struct netif *netif = IF->TCPContext;
+    ip4_addr_t ipaddr;
+    ip4_addr_t netmask;
+    ip4_addr_t gw;
+
+    gw.addr = 0;
+
+    /* The netif is created before the interface knows its MTU; lwIP limits its segments and
+     * fragments its datagrams to this value, and skips both while it is 0 */
+    netif->mtu = (u16_t)min(IF->MTU, 0xFFFF);
+    /* IPv6 starts from the same MTU (a router advertisement may lower it) */
+    netif->mtu6 = netif->mtu;
+
+    GetInterfaceIPv4Address(IF,
+                            ADE_UNICAST,
+                            (PULONG)&ipaddr.addr);
+
+    GetInterfaceIPv4Address(IF,
+                            ADE_ADDRMASK,
+                            (PULONG)&netmask.addr);
+
+    netif_set_addr(netif, &ipaddr, &netmask, &gw);
+
+    TCPUpdateInterfaceStateLocked(IF, ipaddr.addr != 0);
+}
+
+VOID
+TCPUpdateInterfaceLinkStatus(PIP_INTERFACE IF)
+{
+    LOCK_TCPIP_CORE();
+    TCPUpdateInterfaceLinkStatusLocked(IF);
+    UNLOCK_TCPIP_CORE();
 }
 
 err_t
@@ -173,6 +247,7 @@ TCPInterfaceInit(struct netif *netif)
     RtlCopyMemory(netif->hwaddr, IF->Address, netif->hwaddr_len);
 
     netif->output = TCPSendDataCallback;
+    netif->output_ip6 = TCPSendData6Callback;
     netif->mtu = IF->MTU;
 
     netif->name[0] = 'e';
@@ -180,9 +255,11 @@ TCPInterfaceInit(struct netif *netif)
 
     netif->flags |= NETIF_FLAG_BROADCAST;
 
-    TCPUpdateInterfaceLinkStatus(IF);
+    TCPUpdateInterfaceLinkStatusLocked(IF);
 
-    TCPUpdateInterfaceIPInformation(IF);
+    TCPUpdateInterfaceIPInformationLocked(IF);
+
+    TCPInterfaceInit6(IF);
 
     return 0;
 }
@@ -190,14 +267,15 @@ TCPInterfaceInit(struct netif *netif)
 VOID
 TCPRegisterInterface(PIP_INTERFACE IF)
 {
-    ip_addr_t ipaddr;
-    ip_addr_t netmask;
-    ip_addr_t gw;
+    ip4_addr_t ipaddr;
+    ip4_addr_t netmask;
+    ip4_addr_t gw;
 
     gw.addr = 0;
     ipaddr.addr = 0;
     netmask.addr = 0;
 
+    LOCK_TCPIP_CORE();
     IF->TCPContext = netif_add(IF->TCPContext,
                                &ipaddr,
                                &netmask,
@@ -205,44 +283,21 @@ TCPRegisterInterface(PIP_INTERFACE IF)
                                IF,
                                TCPInterfaceInit,
                                tcpip_input);
+    UNLOCK_TCPIP_CORE();
 }
 
 VOID
 TCPUnregisterInterface(PIP_INTERFACE IF)
 {
+    LOCK_TCPIP_CORE();
     netif_remove(IF->TCPContext);
+    UNLOCK_TCPIP_CORE();
 }
 
 VOID
 TCPUpdateInterfaceIPInformation(PIP_INTERFACE IF)
 {
-    ip_addr_t ipaddr;
-    ip_addr_t netmask;
-    ip_addr_t gw;
-
-    gw.addr = 0;
-
-    /* The netif is created before the interface knows its MTU; lwIP limits its segments and
-     * fragments its datagrams to this value, and skips both while it is 0 */
-    ((struct netif *)IF->TCPContext)->mtu = (u16_t)min(IF->MTU, 0xFFFF);
-
-    GetInterfaceIPv4Address(IF,
-                            ADE_UNICAST,
-                            (PULONG)&ipaddr.addr);
-
-    GetInterfaceIPv4Address(IF,
-                            ADE_ADDRMASK,
-                            (PULONG)&netmask.addr);
-
-    netif_set_addr(IF->TCPContext, &ipaddr, &netmask, &gw);
-
-    if (ipaddr.addr != 0)
-    {
-        netif_set_up(IF->TCPContext);
-        netif_set_default(IF->TCPContext);
-    }
-    else
-    {
-        netif_set_down(IF->TCPContext);
-    }
+    LOCK_TCPIP_CORE();
+    TCPUpdateInterfaceIPInformationLocked(IF);
+    UNLOCK_TCPIP_CORE();
 }

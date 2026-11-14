@@ -46,9 +46,16 @@ void
 LibTCPDumpPcb(PVOID SocketContext)
 {
     struct tcp_pcb *pcb = (struct tcp_pcb*)SocketContext;
-    unsigned int addr = lwip_ntohl(pcb->remote_ip.addr);
+    unsigned int addr = lwip_ntohl(ip4_addr_get_u32(ip_2_ip4(&pcb->remote_ip)));
+    char Text[IP6ADDR_STRLEN_MAX];
 
     DbgPrint("\tState: %s\n", tcp_state_str[pcb->state]);
+    if (IP_IS_V6_VAL(pcb->remote_ip))
+    {
+        DbgPrint("\tRemote: ([%s], %d)\n", ip6addr_ntoa_r(ip_2_ip6(&pcb->remote_ip), Text, sizeof(Text)),
+                 pcb->remote_port);
+        return;
+    }
     DbgPrint("\tRemote: (%d.%d.%d.%d, %d)\n",
     (addr >> 24) & 0xFF,
     (addr >> 16) & 0xFF,
@@ -536,7 +543,7 @@ InternalRecvEventHandler(void *arg, PTCP_PCB pcb, struct pbuf *p, const err_t er
          * it writes more (one 8K write is five full segments and a short one) waits a tick per write: 2 MB/s
          * for a loopback loop that does 50 MB/s when the window update of every segment used to acknowledge
          * it. Where the round trip costs nothing the extra packet is free */
-        if ((ip4_addr_isloopback(&pcb->remote_ip) || ip4_addr_cmp(&pcb->remote_ip, &pcb->local_ip)) &&
+        if ((ip_addr_isloopback(&pcb->remote_ip) || ip_addr_cmp(&pcb->remote_ip, &pcb->local_ip)) &&
             !LoopDataFollows(pcb))
             tcp_ack_now(pcb);
 
@@ -1206,6 +1213,15 @@ InternalAcceptEventHandler(void *arg, PTCP_PCB newpcb, const err_t err)
     u16_t LocalPort = 0, RemotePort = 0;
     err_t Result;
 
+    /* The listeners of our endpoints are IPv4 ones (LibTCPListenCallback), so lwIP gives them no IPv6
+       connection; should one come, it is refused (lwIP resets and frees it) rather than handed to TDI, whose
+       addresses here are IPv4 */
+    if (newpcb && err == ERR_OK && !IP_IS_V4_VAL(newpcb->remote_ip))
+    {
+        ASSERT(FALSE);
+        return ERR_VAL;
+    }
+
     if (newpcb && err == ERR_OK)
     {
         ip4_addr_copy(LocalIp, *ip_2_ip4(&newpcb->local_ip));
@@ -1514,6 +1530,7 @@ LibTCPBindCallback(void *arg)
     struct lwip_callback_msg *msg = arg;
     PTCP_PCB pcb = msg->Input.Bind.Connection->SocketContext;
     UINT Port = msg->Input.Bind.Port;
+    ip_addr_t BindAddr;
 
     ASSERT(msg);
 
@@ -1538,8 +1555,9 @@ LibTCPBindCallback(void *arg)
         }
     }
 
+    ip_addr_copy_from_ip4(BindAddr, *msg->Input.Bind.IpAddress);
     msg->Output.Bind.Error = tcp_bind(pcb,
-                                      msg->Input.Bind.IpAddress,
+                                      &BindAddr,
                                       lwip_ntohs((u16_t)Port));
 
     if (!msg->Input.Bind.Port)
@@ -1598,6 +1616,14 @@ LibTCPListenCallback(void *arg)
     ASSERT(msg);
 
     if (!msg->Input.Listen.Connection->SocketContext)
+    {
+        msg->Output.Listen.NewPcb = NULL;
+        goto done;
+    }
+
+    /* An endpoint listens on an IPv4 address only: TDI has no IPv6 address for it yet, and until the firewall
+       filters IPv6 an IPv6 (or dual-stack) listener must not exist */
+    if (!IP_IS_V4_VAL(((PTCP_PCB)msg->Input.Listen.Connection->SocketContext)->local_ip))
     {
         msg->Output.Listen.NewPcb = NULL;
         goto done;
@@ -1804,6 +1830,7 @@ void
 LibTCPConnectCallback(void *arg)
 {
     struct lwip_callback_msg *msg = arg;
+    ip_addr_t ConnectAddr;
     err_t Error;
 
     ASSERT(arg);
@@ -1817,8 +1844,9 @@ LibTCPConnectCallback(void *arg)
     tcp_recv((PTCP_PCB)msg->Input.Connect.Connection->SocketContext, InternalRecvEventHandler);
     tcp_sent((PTCP_PCB)msg->Input.Connect.Connection->SocketContext, InternalSendEventHandler);
 
+    ip_addr_copy_from_ip4(ConnectAddr, *msg->Input.Connect.IpAddress);
     Error = tcp_connect((PTCP_PCB)msg->Input.Connect.Connection->SocketContext,
-                        msg->Input.Connect.IpAddress, lwip_ntohs(msg->Input.Connect.Port),
+                        &ConnectAddr, lwip_ntohs(msg->Input.Connect.Port),
                         InternalConnectEventHandler);
 
     msg->Output.Connect.Error = Error == ERR_OK ? ERR_INPROGRESS : Error;
@@ -1828,7 +1856,7 @@ done:
 }
 
 err_t
-LibTCPConnect(PCONNECTION_ENDPOINT Connection, ip_addr_t *const ipaddr, const u16_t port)
+LibTCPConnect(PCONNECTION_ENDPOINT Connection, ip4_addr_t *const ipaddr, const u16_t port)
 {
     struct lwip_callback_msg *msg;
     err_t ret;
@@ -2150,12 +2178,12 @@ LibTCPAccept(PTCP_PCB pcb, struct tcp_pcb *listen_pcb, void *arg)
 }
 
 err_t
-LibTCPGetHostName(PTCP_PCB pcb, ip_addr_t *const ipaddr, u16_t *const port)
+LibTCPGetHostName(PTCP_PCB pcb, ip4_addr_t *const ipaddr, u16_t *const port)
 {
     if (!pcb)
         return ERR_CLSD;
 
-    *ipaddr = pcb->local_ip;
+    ip4_addr_copy(*ipaddr, *ip_2_ip4(&pcb->local_ip));
     /* lwIP keeps ports in host order, our callers want network order */
     *port = lwip_htons(pcb->local_port);
 
@@ -2163,12 +2191,12 @@ LibTCPGetHostName(PTCP_PCB pcb, ip_addr_t *const ipaddr, u16_t *const port)
 }
 
 err_t
-LibTCPGetPeerName(PTCP_PCB pcb, ip_addr_t * const ipaddr, u16_t * const port)
+LibTCPGetPeerName(PTCP_PCB pcb, ip4_addr_t * const ipaddr, u16_t * const port)
 {
     if (!pcb)
         return ERR_CLSD;
 
-    *ipaddr = pcb->remote_ip;
+    ip4_addr_copy(*ipaddr, *ip_2_ip4(&pcb->remote_ip));
     *port = lwip_htons(pcb->remote_port);
 
     return ERR_OK;

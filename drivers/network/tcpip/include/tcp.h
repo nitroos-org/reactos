@@ -224,6 +224,27 @@ NTSTATUS TCPSetKeepAliveValues(PCONNECTION_ENDPOINT Connection, DWORD KeepAliveT
 VOID
 TCPUpdateInterfaceLinkStatus(PIP_INTERFACE IF);
 
+/* IPv6 (ip/transport/tcp/if6.c), behind Tcpip\Parameters\Ipv6Enable */
+extern BOOLEAN TCPIpv6Enabled;
+
+VOID
+TCPReadIpv6Switch(VOID);
+
+VOID
+TCPInterfaceInit6(PIP_INTERFACE IF);
+
+VOID
+TCPAddLoopbackAddress6(PIP_INTERFACE IF);
+
+VOID
+TCPReceive6(PIP_INTERFACE IF, PIP_PACKET IPPacket);
+
+#if DBG || defined(TCPIP_IPV6_SELFTEST)
+/* ip/transport/tcp/selftest6.c: runs with Tcpip\Parameters\Ipv6SelfTest set */
+VOID
+TCPStartIpv6SelfTest(VOID);
+#endif
+
 VOID
 TCPUpdateInterfaceIPInformation(PIP_INTERFACE IF);
 
