@@ -38,6 +38,7 @@ extern void func_CopyFile2Identity(void);
 extern void func_CopyFileStreams(void);
 extern void func_ConsoleBufferSwitch(void);
 extern void func_ConsoleCaret(void);
+extern void func_ConsoleUtf8CP(void);
 extern void func_ConsoleCreateRace(void);
 extern void func_ConsoleOrphanChild(void);
 extern void func_UnbufferedReadLimit(void);
@@ -308,6 +309,7 @@ const struct test winetest_testlist[] =
     { "CopyFileStreams",             func_CopyFileStreams },
     { "ConsoleBufferSwitch",         func_ConsoleBufferSwitch },
     { "ConsoleCaret",                func_ConsoleCaret },
+    { "ConsoleUtf8CP",               func_ConsoleUtf8CP },
     { "ConsoleCreateRace",           func_ConsoleCreateRace },
     { "ConsoleOrphanChild",          func_ConsoleOrphanChild },
     { "UnbufferedReadLimit",         func_UnbufferedReadLimit },
