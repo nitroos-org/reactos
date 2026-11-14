@@ -15,6 +15,9 @@
 #define MODULE_INVOLVED_IN_ARM3
 #include <mm/ARM3/miarm.h>
 
+/* Alignment a block taken from nonpaged pool must have to serve a cached contiguous request */
+#define MI_CONTIGUOUS_POOL_ALIGNMENT 64
+
 /* PRIVATE FUNCTIONS **********************************************************/
 
 PFN_NUMBER
@@ -413,9 +416,14 @@ MiAllocateContiguousMemory(IN SIZE_T NumberOfBytes,
         {
             //
             // Now make sure it's actually contiguous (if it came from expansion
-            // it might not be).
+            // it might not be). The pool does not honour the cache-aligned
+            // type for a small block (8-byte granules on i386): a device
+            // that needs its descriptor ring 16-byte aligned (e1000) then reads
+            // another address, so a block that is not cache-line aligned goes
+            // to the page search below, which hands out whole pages.
             //
-            if (MiCheckForContiguousMemory(BaseAddress,
+            if (!((ULONG_PTR)BaseAddress & (MI_CONTIGUOUS_POOL_ALIGNMENT - 1)) &&
+                MiCheckForContiguousMemory(BaseAddress,
                                            SizeInPages,
                                            SizeInPages,
                                            LowestAcceptablePfn,
