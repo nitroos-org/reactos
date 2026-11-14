@@ -357,7 +357,7 @@ VOID
 TCPReceive6(PIP_INTERFACE IF, PIP_PACKET IPPacket)
 {
     UCHAR Header[40];
-    UINT Available, PayloadLength, Total;
+    UINT Available, PayloadLength, Total, i;
     struct pbuf *p;
 
     if (!TCPIpv6Enabled || !IF->TCPContext || IF == Loopback)
@@ -377,6 +377,15 @@ TCPReceive6(PIP_INTERFACE IF, PIP_PACKET IPPacket)
     /* The payload length (RFC 8200 3) counts what follows the fixed header. Frame padding after it is not
        passed on; a datagram longer than the frame, or than a pbuf can hold, is dropped. A jumbogram (length
        0 with a hop-by-hop option) is not supported and is passed as the empty datagram its header says */
+    /* ::1 never comes from a link (RFC 4291 2.5.3); lwIP checks this only for datagrams to another address */
+    for (i = 8; i < 23 && Header[i] == 0; i++)
+        ;
+    if (i == 23 && Header[23] == 1)
+    {
+        InterlockedIncrement(&TCP6ReceiveDropped);
+        return;
+    }
+
     PayloadLength = ((UINT)Header[4] << 8) | Header[5];
     Total = sizeof(Header) + PayloadLength;
     if (Total > Available || Total > 0xFFFF)

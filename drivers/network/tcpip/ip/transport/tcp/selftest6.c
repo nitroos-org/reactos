@@ -736,7 +736,7 @@ static VOID
 StTestReceiveBounds(PIP_INTERFACE IF)
 {
     UCHAR Frame[64];
-    BOOLEAN Long, Short, Version;
+    BOOLEAN Long, Short, Version, Loopback6, Other;
 
     /* A header that claims 1000 bytes of payload in a 64-byte frame */
     RtlZeroMemory(Frame, sizeof(Frame));
@@ -757,6 +757,45 @@ StTestReceiveBounds(PIP_INTERFACE IF)
 
     StResult(Long && Short && Version, "receive drops a datagram longer than its frame, a runt, a wrong version",
              NULL);
+
+    /* A well-formed empty datagram from ::1 (never on a link), and the same from fe80::1 (taken: the counter
+       stays) */
+    RtlZeroMemory(Frame, sizeof(Frame));
+    Frame[0] = 0x60;
+    Frame[6] = 59;
+    Frame[7] = 64;
+    Frame[23] = 1;
+    Frame[24] = 0xFE; Frame[25] = 0x80; Frame[39] = 2;
+    Loopback6 = StReceiveFrame(IF, Frame, 40);
+    Frame[8] = 0xFE; Frame[9] = 0x80;
+    Other = !StReceiveFrame(IF, Frame, 40);
+    StResult(Loopback6 && Other, "receive drops a datagram from ::1 off the wire (control: fe80::1 taken)", NULL);
+}
+
+/* An MTU a router advertisement lowered stays when the interface's IPv4 side is refreshed (reconfiguration,
+   address change) */
+static VOID
+StTestMtu6(PIP_INTERFACE IF)
+{
+    struct netif *netif = IF->TCPContext;
+    u16_t Mtu, Before, After;
+    CHAR Detail[64];
+
+    LOCK_TCPIP_CORE();
+    Mtu = netif->mtu;
+    Before = netif->mtu6;
+    netif->mtu6 = 1280;
+    UNLOCK_TCPIP_CORE();
+
+    TCPUpdateInterfaceIPInformation(IF);
+
+    LOCK_TCPIP_CORE();
+    After = netif->mtu6;
+    netif->mtu6 = Before;
+    UNLOCK_TCPIP_CORE();
+
+    _snprintf(Detail, sizeof(Detail), "mtu %u, mtu6 %u -> 1280 -> %u after the refresh", Mtu, Before, After);
+    StResult(After == 1280 && Before == Mtu, "IPv6 MTU lowered (as by a router advertisement) survives an interface refresh", Detail);
 }
 
 /* ---- main ---- */
@@ -862,6 +901,7 @@ StThread(PVOID Context)
         StTestWireSyn(Eth, &LinkLocal, 40617);
     }
     StTestReceiveBounds(Eth);
+    StTestMtu6(Eth);
 
     /* Multicast reception: the adapter's list, then what reaches us through it */
     StPrintReceived("before the multicast checks");
