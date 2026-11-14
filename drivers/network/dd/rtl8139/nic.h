@@ -63,6 +63,7 @@ typedef struct _RTL_ADAPTER {
     struct {
         UCHAR MacAddress[IEEE_802_ADDR_LENGTH];
     } MulticastList[MAXIMUM_MULTICAST_ADDRESSES];
+    ULONG MulticastListSize;
 
     ULONG ReceiveBufferLength;
     PUCHAR ReceiveBuffer;
