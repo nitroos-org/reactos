@@ -185,6 +185,34 @@ NICUpdateLinkStatus (
     Adapter->LinkSpeedMbps = (mediaState & R_MS_SPEED_10) ? 10 : 100;
 }
 
+/* The bit of an address in the multicast address registers: the 6 high bits of the Ethernet CRC-32 of the
+   address (polynomial 0x04C11DB7, each byte least significant bit first, as the bits are sent) */
+static
+ULONG
+NICMulticastHashIndex (
+    IN const UCHAR *Address
+    )
+{
+    ULONG crc = 0xFFFFFFFF;
+    UINT i, bit;
+
+    for (i = 0; i < IEEE_802_ADDR_LENGTH; i++)
+    {
+        UCHAR b = Address[i];
+
+        for (bit = 0; bit < 8; bit++, b >>= 1)
+        {
+            ULONG top = (crc >> 31) ^ (b & 1);
+
+            crc <<= 1;
+            if (top)
+                crc ^= 0x04C11DB7;
+        }
+    }
+
+    return crc >> 26;
+}
+
 NDIS_STATUS
 NTAPI
 NICApplyPacketFilter (
@@ -192,6 +220,32 @@ NICApplyPacketFilter (
     )
 {
     ULONG filterMask;
+    UCHAR mar[8];
+    ULONG i;
+
+    /* Multicast frames pass the AM bit only if their bit in the multicast address registers is set: all of
+       them for all multicast, those of the multicast list's group addresses for multicast, none otherwise */
+    RtlZeroMemory(mar, sizeof(mar));
+    if (Adapter->PacketFilter & (NDIS_PACKET_TYPE_ALL_MULTICAST | NDIS_PACKET_TYPE_PROMISCUOUS))
+    {
+        RtlFillMemory(mar, sizeof(mar), 0xFF);
+    }
+    else if (Adapter->PacketFilter & NDIS_PACKET_TYPE_MULTICAST)
+    {
+        for (i = 0; i < Adapter->MulticastListSize && i < MAXIMUM_MULTICAST_ADDRESSES; i++)
+        {
+            ULONG index;
+
+            if (!(Adapter->MulticastList[i].MacAddress[0] & 0x01))
+                continue;
+            index = NICMulticastHashIndex(Adapter->MulticastList[i].MacAddress);
+            mar[index >> 3] |= (UCHAR)(1 << (index & 7));
+        }
+    }
+    for (i = 0; i < sizeof(mar); i++)
+    {
+        NdisRawWritePortUchar(Adapter->IoBase + R_MCAST0 + i, mar[i]);
+    }
 
     filterMask = RC_VAL;
 
@@ -200,7 +254,7 @@ NICApplyPacketFilter (
         filterMask |= B_RC_APM;
     }
 
-    if (Adapter->PacketFilter & NDIS_PACKET_TYPE_MULTICAST)
+    if (Adapter->PacketFilter & (NDIS_PACKET_TYPE_MULTICAST | NDIS_PACKET_TYPE_ALL_MULTICAST | NDIS_PACKET_TYPE_PROMISCUOUS))
     {
         filterMask |= B_RC_AM;
     }
