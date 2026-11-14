@@ -199,71 +199,6 @@ Exit:
     return Result;
 }
 
-/*
- * Removes from an ACL (in place) every ACE that repeats an earlier one: the same type and size, the same
- * flags but INHERITED_ACE, the same mask and SID. The ACL keeps its size; the freed bytes are zeroed.
- *
- * PROVISIONAL: dropping the repeats cannot change an access check (the earlier copy decides the same bits
- * for the same SID), but whether Windows drops them at this point, or only when it reads the descriptor
- * through GetSecurityInfo, is not measured on a raw descriptor (a key under an auto-inherited parent cannot
- * be created with the allowed APIs). VERIFY ON ORACLE.
- */
-static
-VOID
-CmpDropDuplicateAces(
-    _Inout_ PACL Acl)
-{
-    PUCHAR Out = (PUCHAR)(Acl + 1), In = Out, End = (PUCHAR)Acl + Acl->AclSize, Scan;
-    PACE_HEADER Ace, Kept;
-    ULONG i, Count = Acl->AceCount, Written = 0;
-
-    /* an ACL that does not parse to its end is left as it is */
-    for (i = 0; i < Count; i++)
-    {
-        if (In + sizeof(ACE_HEADER) > End)
-            return;
-        Ace = (PACE_HEADER)In;
-        if (Ace->AceSize < sizeof(ACE_HEADER) || In + Ace->AceSize > End)
-            return;
-        In += Ace->AceSize;
-    }
-    In = (PUCHAR)(Acl + 1);
-
-    for (i = 0; i < Count; i++)
-    {
-        BOOLEAN Duplicate = FALSE;
-
-        Ace = (PACE_HEADER)In;
-
-        for (Scan = (PUCHAR)(Acl + 1); Scan < Out; Scan += Kept->AceSize)
-        {
-            Kept = (PACE_HEADER)Scan;
-            if (Kept->AceType == Ace->AceType && Kept->AceSize == Ace->AceSize &&
-                (Kept->AceFlags & ~INHERITED_ACE) == (Ace->AceFlags & ~INHERITED_ACE) &&
-                RtlEqualMemory(Kept + 1, Ace + 1, Ace->AceSize - sizeof(ACE_HEADER)))
-            {
-                Duplicate = TRUE;
-                break;
-            }
-        }
-
-        if (!Duplicate)
-        {
-            if (Out != In)
-                RtlMoveMemory(Out, In, Ace->AceSize);
-            Out += Ace->AceSize;
-            Written++;
-        }
-        In += Ace->AceSize;
-    }
-
-    if (Written != Count)
-    {
-        RtlZeroMemory(Out, In - Out);
-        Acl->AceCount = (USHORT)Written;
-    }
-}
-
 NTSTATUS
 NTAPI
 CmpDoCreateChild(IN PHHIVE Hive,
@@ -350,19 +285,6 @@ CmpDoCreateChild(IN PHHIVE Hive,
           (((PISECURITY_DESCRIPTOR)AccessState->SecurityDescriptor)->Control & SE_DACL_PRESENT)))
     {
         DaclAutoInherit = TRUE;
-
-        /* the key does not get the same ACE twice (the parent's inherited ones repeat its explicit ones): oracle */
-        if (ParentSd == ParentDescriptor)
-        {
-            PACL ParentAcl = NULL;
-            BOOLEAN Present, Defaulted;
-
-            if (NT_SUCCESS(RtlGetDaclSecurityDescriptor(ParentSd, &Present, &ParentAcl, &Defaulted)) &&
-                Present && ParentAcl)
-            {
-                CmpDropDuplicateAces(ParentAcl);
-            }
-        }
     }
     Status = SeAssignSecurityEx(ParentDescriptor,
                                 AccessState->SecurityDescriptor,

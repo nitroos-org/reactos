@@ -88,24 +88,6 @@ static BOOL AllInherited(const KEY_DACL *Dacl)
     return Dacl->Count != 0;
 }
 
-/* The number of different ACEs (mask and SID) of an all-allow DACL: a key inherits each of them once */
-static ULONG UniqueAces(const KEY_DACL *Dacl)
-{
-    ULONG i, j, Unique = 0;
-
-    for (i = 0; i < Dacl->Count; i++)
-    {
-        for (j = 0; j < i; j++)
-        {
-            if (Dacl->Aces[j].Mask == Dacl->Aces[i].Mask && EqualSid(Dacl->Aces[j].Sid, Dacl->Aces[i].Sid))
-                break;
-        }
-        if (j == i)
-            Unique++;
-    }
-    return Unique;
-}
-
 static BOOL HasAce(const KEY_DACL *Dacl, PSID Sid, ACCESS_MASK Mask)
 {
     ULONG i;
@@ -515,6 +497,173 @@ Done:
     if (Users) FreeSid(Users);
 }
 
+/*
+ * A parent that holds an ACE twice (an explicit one equal to one it inherits, then more distinct ACEs
+ * after it): a key created below inherits everything, in a valid ACL, none of the ACEs is lost.
+ */
+static void TestDuplicateParent(void)
+{
+    KEY_DACL Initial, Parent, Child, Grand;
+    UCHAR AclBuffer[2048];
+    PACL Explicit = (PACL)AclBuffer, ChildDacl = NULL;
+    HKEY Key = NULL, ChildKey = NULL, GrandKey = NULL;
+    BOOL Present, Defaulted;
+    DWORD Error;
+    ULONG i;
+
+    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    Error = RegCreateKeyExW(HKEY_CURRENT_USER, ScratchPath, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &Key, NULL);
+    ok_long(Error, ERROR_SUCCESS);
+    if (Error)
+        return;
+
+    ReadDacl(Key, &Initial);
+    ok(Initial.Ok && Initial.Count >= 2, "initial: %lu ACEs\n", Initial.Count);
+    if (!Initial.Ok)
+        goto Done;
+
+    /* the explicit ACEs repeat every ACE the key inherits */
+    InitializeAcl(Explicit, sizeof(AclBuffer), ACL_REVISION);
+    for (i = 0; i < Initial.Count; i++)
+    {
+        if (Initial.Aces[i].Type == ACCESS_ALLOWED_ACE_TYPE)
+            ok(AddAccessAllowedAceEx(Explicit, ACL_REVISION, Initial.Aces[i].Flags & ~INHERITED_ACE,
+                                     Initial.Aces[i].Mask, Initial.Aces[i].Sid), "AddAccessAllowedAceEx %lu\n", i);
+    }
+    Error = SetSecurityInfo(Key, SE_REGISTRY_KEY, DACL_SECURITY_INFORMATION, NULL, NULL, Explicit, NULL);
+    ok_long(Error, ERROR_SUCCESS);
+
+    ReadDacl(Key, &Parent);
+    ok(Parent.Ok, "parent not readable\n");
+    ok(Parent.Count == Explicit->AceCount + Initial.Count, "parent: %lu ACEs, expected %lu\n",
+       Parent.Count, Explicit->AceCount + Initial.Count);
+    for (i = 0; i < Parent.Count && i < Explicit->AceCount; i++)
+        ok(!(Parent.Aces[i].Flags & INHERITED_ACE), "parent: ACE %lu is inherited, explicit ACEs come first\n", i);
+    for (i = Explicit->AceCount; i < Parent.Count; i++)
+        ok(Parent.Aces[i].Flags & INHERITED_ACE, "parent: ACE %lu is not inherited\n", i);
+
+    Error = RegCreateKeyExW(Key, L"child", 0, NULL, 0, KEY_ALL_ACCESS, NULL, &ChildKey, NULL);
+    ok_long(Error, ERROR_SUCCESS);
+    if (Error)
+        goto Done1;
+    ReadDacl(ChildKey, &Child);
+    ok(Child.Ok, "the DACL of the new key cannot be read\n");
+    ok_hex(Child.Control, AUTO_CONTROL);
+    ok(AllInherited(&Child), "child: %lu ACEs, not all inherited\n", Child.Count);
+    ok(Child.Count == Parent.Count, "child: %lu ACEs, expected %lu\n", Child.Count, Parent.Count);
+    for (i = 0; i < Parent.Count; i++)
+        ok(HasAce(&Child, Parent.Aces[i].Sid, Parent.Aces[i].Mask), "child lacks the ACE %lu of its parent\n", i);
+    ok(Child.Sd && GetSecurityDescriptorDacl(Child.Sd, &Present, &ChildDacl, &Defaulted) && Present &&
+       ChildDacl && IsValidAcl(ChildDacl), "the DACL of the new key is not a valid ACL\n");
+
+    Error = RegCreateKeyExW(ChildKey, L"grandchild", 0, NULL, 0, KEY_ALL_ACCESS, NULL, &GrandKey, NULL);
+    ok_long(Error, ERROR_SUCCESS);
+    if (!Error)
+    {
+        ReadDacl(GrandKey, &Grand);
+        ok(Grand.Ok && AllInherited(&Grand), "grandchild: %lu ACEs\n", Grand.Count);
+        ok(Grand.Count == Child.Count, "grandchild: %lu ACEs, expected %lu\n", Grand.Count, Child.Count);
+        FreeDacl(&Grand);
+        RegCloseKey(GrandKey);
+    }
+
+    FreeDacl(&Child);
+    RegCloseKey(ChildKey);
+Done1:
+    FreeDacl(&Parent);
+Done:
+    FreeDacl(&Initial);
+    RegCloseKey(Key);
+    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+}
+
+/*
+ * "Disable inheritance, keep the inherited ACEs": the DACL as read goes back with PROTECTED. The ACEs that
+ * were inherited are explicit then, none is lost. A protected DACL without them is the DACL that is set.
+ */
+static void TestProtectKeepsAces(void)
+{
+    static const WCHAR NamedGrand[] = L"CURRENT_USER\\Software\\ReactOS-apitest-SetSecurityInfoKeyInherit\\grand";
+    KEY_DACL Before, After, Only;
+    PSECURITY_DESCRIPTOR Sd = NULL;
+    PACL Dacl = NULL;
+    HKEY Key = NULL, Child = NULL, Grand = NULL;
+    DWORD Error;
+    ULONG i;
+
+    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    Error = RegCreateKeyExW(HKEY_CURRENT_USER, ScratchPath, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &Key, NULL);
+    ok_long(Error, ERROR_SUCCESS);
+    if (Error)
+        return;
+    if (!SetSddlDacl(Key, 0, L"D:(A;OICI;KA;;;BA)(A;OICI;KA;;;SY)(A;OICI;KR;;;WD)"))
+        goto Done;
+    if (!MakeKey(Key, L"child", 0, &Child) || !MakeKey(Key, L"grand", 0, &Grand))
+        goto Done;
+
+    /* by handle */
+    ReadDacl(Child, &Before);
+    ok(AllInherited(&Before), "child: %lu ACEs, not all inherited\n", Before.Count);
+    Error = GetSecurityInfo(Child, SE_REGISTRY_KEY, DACL_SECURITY_INFORMATION, NULL, NULL, &Dacl, NULL, &Sd);
+    ok_long(Error, ERROR_SUCCESS);
+    if (!Error)
+    {
+        Error = SetSecurityInfo(Child, SE_REGISTRY_KEY, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                                NULL, NULL, Dacl, NULL);
+        ok_long(Error, ERROR_SUCCESS);
+        LocalFree(Sd);
+        Sd = NULL;
+    }
+    ReadDacl(Child, &After);
+    ok_hex(After.Control & SE_DACL_PROTECTED, SE_DACL_PROTECTED);
+    ok(After.Count == Before.Count, "protected: %lu ACEs, expected %lu\n", After.Count, Before.Count);
+    for (i = 0; i < After.Count && i < Before.Count; i++)
+    {
+        ok(!(After.Aces[i].Flags & INHERITED_ACE), "protected: ACE %lu is still flagged inherited\n", i);
+        ok(After.Aces[i].Mask == Before.Aces[i].Mask && EqualSid(After.Aces[i].Sid, Before.Aces[i].Sid),
+           "protected: ACE %lu changed\n", i);
+    }
+    FreeDacl(&After);
+    FreeDacl(&Before);
+
+    /* by name, a second subkey of the same parent */
+    ReadDacl(Grand, &Before);
+    Error = GetNamedSecurityInfoW((LPWSTR)NamedGrand, SE_REGISTRY_KEY, DACL_SECURITY_INFORMATION, NULL, NULL, &Dacl, NULL, &Sd);
+    ok_long(Error, ERROR_SUCCESS);
+    if (!Error)
+    {
+        Error = SetNamedSecurityInfoW((LPWSTR)NamedGrand, SE_REGISTRY_KEY,
+                                      DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                                      NULL, NULL, Dacl, NULL);
+        ok_long(Error, ERROR_SUCCESS);
+        LocalFree(Sd);
+        Sd = NULL;
+    }
+    ReadDacl(Grand, &After);
+    ok_hex(After.Control & SE_DACL_PROTECTED, SE_DACL_PROTECTED);
+    ok(After.Count == Before.Count, "protected by name: %lu ACEs, expected %lu\n", After.Count, Before.Count);
+    for (i = 0; i < After.Count; i++)
+        ok(!(After.Aces[i].Flags & INHERITED_ACE), "protected by name: ACE %lu is flagged inherited\n", i);
+    FreeDacl(&After);
+    FreeDacl(&Before);
+
+    /* a protected DACL that does not have them is what is set */
+    if (SetSddlDacl(Grand, PROTECTED_DACL_SECURITY_INFORMATION, L"D:(A;;KA;;;BA)"))
+    {
+        ReadDacl(Grand, &Only);
+        ok_hex(Only.Control & SE_DACL_PROTECTED, SE_DACL_PROTECTED);
+        ok(Only.Count == 1, "protected, one ACE: %lu ACEs\n", Only.Count);
+        ok(Only.Count && !(Only.Aces[0].Flags & INHERITED_ACE), "the ACE is flagged inherited\n");
+        FreeDacl(&Only);
+    }
+
+Done:
+    if (Grand) RegCloseKey(Grand);
+    if (Child) RegCloseKey(Child);
+    RegCloseKey(Key);
+    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+}
+
 START_TEST(SetSecurityInfoKeyInherit)
 {
     pRegDeleteTreeW = (PVOID)GetProcAddress(GetModuleHandleW(L"advapi32.dll"), "RegDeleteTreeW");
@@ -526,6 +675,8 @@ START_TEST(SetSecurityInfoKeyInherit)
 
     TestNamedRoundTrip();
     TestExtraCases();
+    TestDuplicateParent();
+    TestProtectKeepsAces();
 
     KEY_DACL Initial, P1, C1a, C1b, P2, C2, G;
     HKEY Key = NULL, Child1 = NULL, Child2 = NULL, Grand = NULL;
@@ -576,8 +727,8 @@ START_TEST(SetSecurityInfoKeyInherit)
     ok_hex(C1a.Control, AUTO_CONTROL);
     ok(AllInherited(&C1a), "child1: %lu ACEs, not all inherited\n", C1a.Count);
     ok(HasAce(&C1a, World, KEY_READ), "child1 has no ACE for Everyone\n");
-    /* Windows: 7 ACEs on the parent, 5 on the child (an ACE that the parent has twice is inherited once) */
-    ok(C1a.Count == UniqueAces(&P1), "child1: %lu ACEs, expected %lu\n", C1a.Count, UniqueAces(&P1));
+    /* every inheritable ACE of the parent is inherited, one that it has twice too (measured raw on Windows) */
+    ok(C1a.Count == P1.Count, "child1: %lu ACEs, expected %lu\n", C1a.Count, P1.Count);
 
     /* pass 2 adds an ACE: the existing child gets it */
     if (!SetSddlDacl(Key, UNPROTECTED_DACL_SECURITY_INFORMATION,
@@ -592,7 +743,7 @@ START_TEST(SetSecurityInfoKeyInherit)
     ok_hex(C1b.Control, AUTO_CONTROL);
     ok(AllInherited(&C1b), "child1 after pass 2: %lu ACEs, not all inherited\n", C1b.Count);
     ok(C1b.Count == C1a.Count + 1, "child1 after pass 2: %lu ACEs, expected %lu\n", C1b.Count, C1a.Count + 1);
-    ok(C1b.Count == UniqueAces(&P2), "child1 after pass 2: %lu ACEs, expected %lu\n", C1b.Count, UniqueAces(&P2));
+    ok(C1b.Count == P2.Count, "child1 after pass 2: %lu ACEs, expected %lu\n", C1b.Count, P2.Count);
     ok(HasAce(&C1b, Users, KEY_READ) && !HasAce(&C1a, Users, KEY_READ), "the new ACE did not reach child1\n");
 
     /* new keys: a sibling and a grandchild */
