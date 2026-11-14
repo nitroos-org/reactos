@@ -52,6 +52,16 @@ CodePageToCharSet(
     _In_ UINT CodePage)
 {
     CHARSETINFO CharInfo;
+
+    /*
+     * UTF-8 has a code page signature but no font character set:
+     * TranslateCharsetInfo() reports the pseudo charset 254 for it, which no
+     * font carries, so a console font search for it would find nothing and
+     * SetConsoleOutputCP(CP_UTF8) would fail. Any font can show UTF-8 text.
+     */
+    if (CodePage == CP_UTF8)
+        return DEFAULT_CHARSET;
+
     if (TranslateCharsetInfo(UlongToPtr(CodePage), &CharInfo, TCI_SRCCODEPAGE))
         return (BYTE)CharInfo.ciCharset;
     else
