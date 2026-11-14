@@ -915,8 +915,15 @@ CmpAclCopyStoredSd(
     if (!Copy)
         return NULL;
 
-    /* The copy is what is checked (offsets, SIDs, ACLs and their ACEs) and used */
-    if (!RtlValidRelativeSecurityDescriptor(Copy, Length, 0))
+    /*
+     * The copy is what is checked (offsets, SIDs, ACLs and their ACEs) and used. Callers copy
+     * RtlLengthSecurityDescriptor() bytes of it, the sum of its parts: a descriptor whose parts
+     * lie beyond that sum (a gap before one of them) or add up to more than it was stored with
+     * (overlapping parts) is not sound either, so the parts must also fit the sum.
+     */
+    if (!RtlValidRelativeSecurityDescriptor(Copy, Length, 0) ||
+        RtlLengthSecurityDescriptor(Copy) > Length ||
+        !RtlValidRelativeSecurityDescriptor(Copy, RtlLengthSecurityDescriptor(Copy), 0))
     {
         if (*PoolCopy)
         {
