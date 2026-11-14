@@ -40,7 +40,9 @@ void ngos_prof(int id, unsigned long long since, unsigned long long bytes)
         case NGP_JNL_COMMIT: NgHoldTicks[NG_HT_JNL] += __rdtsc() - since; break;
     }
 #else
-    (void)id; (void)since; (void)bytes;
+    (void)since; (void)bytes;
+    if (id == NGP_RESV_RETRY)
+        NgProfile.Stage[id].Count++;     /* a rare event under CoreLock: no atomic needed */
 #endif
 }
 

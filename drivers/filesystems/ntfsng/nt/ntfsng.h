@@ -68,9 +68,8 @@ typedef struct _NG_PROFILE
     ULONGLONG TicksPerSecond;
     NG_PROF_STAT Stage[NG_PROFILE_STAGES];
 } NG_PROFILE;
-#if DBG
+/* Checked builds fill every stage; every build counts the stages that are plain counters (NGP_RESV_RETRY). */
 #define FSCTL_NG_PROFILE CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0xA42, METHOD_BUFFERED, FILE_WRITE_ACCESS)
-#endif
 extern NG_PROFILE NgProfile;
 
 #if DBG

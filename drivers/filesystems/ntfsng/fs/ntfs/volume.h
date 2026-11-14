@@ -250,10 +250,29 @@ DEFINE_NVOL_BIT_OPS(SymlinkNative)
  * them.  Only the transfers that touch these clusters are waited for; the others (other files, on other clusters) cannot be
  * affected by the free.
  */
-static inline void ntfs_drain_clusters(struct ntfs_volume *vol, s64 lcn, s64 nr)
+void kshim_resv_note(struct block_device *b, u64 lcn, u64 nr, u64 tag);
+u64 kshim_resv_skip(struct block_device *b, u64 lcn, u64 *next);
+int kshim_resv_any(struct block_device *b);
+void kshim_resv_mark(struct block_device *b, u64 first, u64 nbits, u8 *bits);
+unsigned long kshim_watch_count(atomic64_t *v);
+
+static inline void ntfs_drain_clusters_only(struct ntfs_volume *vol, s64 lcn, s64 nr)
 {
 	if (nr > 0)
 		kshim_dio_drain_range(vol->sb->s_bdev, (u64)lcn << vol->cluster_size_bits, (u64)nr << vol->cluster_size_bits);
+}
+
+/*
+ * The same call notes the free for the allocator: until the journal commit that covers it, these clusters are not handed out
+ * again (kshim_resv_note).  The tag is the number the free-cluster count's watch reaches when the caller raises the count
+ * right after (ntfs_inc_free_clusters), which is what the journal's aux_done is compared with.  The allocator's own undo of a
+ * failed allocation uses ntfs_drain_clusters_only: those clusters were free in the committed state and still are.
+ */
+static inline void ntfs_drain_clusters(struct ntfs_volume *vol, s64 lcn, s64 nr)
+{
+	ntfs_drain_clusters_only(vol, lcn, nr);
+	if (nr > 0)
+		kshim_resv_note(vol->sb->s_bdev, (u64)lcn, (u64)nr, (u64)kshim_watch_count(&vol->free_clusters) + 1);
 }
 
 static inline void ntfs_inc_free_clusters(struct ntfs_volume *vol, s64 nr)
