@@ -854,14 +854,6 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     if( !SocketAcquireStateLock( FCB ) ) return LostSocket( Irp );
 
-    /* Allocated by the first send rather than when the socket is connected */
-    if( !FCB->Send.Window )
-    {
-        FCB->Send.Window = ExAllocatePoolWithTag( PagedPool, FCB->Send.Size, TAG_AFD_DATA_BUFFER );
-        if( !FCB->Send.Window )
-            return UnlockAndMaybeComplete( FCB, STATUS_NO_MEMORY, Irp, 0 );
-    }
-
     /* A datagram socket signals FD_WRITE when it is bound or connected, not on each send */
     if( !(FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS) )
         FCB->EventSelectDisabled &= ~AFD_EVENT_SEND;
@@ -995,6 +987,18 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         AFD_DbgPrint(MID_TRACE,("Socket not connected\n"));
         UnlockBuffers( SendReq->BufferArray, SendReq->BufferCount, FALSE );
         return UnlockAndMaybeComplete( FCB, STATUS_INVALID_CONNECTION, Irp, 0 );
+    }
+
+    /* Allocated by the first send on a connected socket, not when the socket is connected and not
+     * by a send that fails because it is not (MakeSocketIntoConnection expects no send window) */
+    if( !FCB->Send.Window )
+    {
+        FCB->Send.Window = ExAllocatePoolWithTag( PagedPool, FCB->Send.Size, TAG_AFD_DATA_BUFFER );
+        if( !FCB->Send.Window )
+        {
+            UnlockBuffers( SendReq->BufferArray, SendReq->BufferCount, FALSE );
+            return UnlockAndMaybeComplete( FCB, STATUS_NO_MEMORY, Irp, 0 );
+        }
     }
 
     AFD_DbgPrint(MID_TRACE,("FCB->Send.BytesUsed = %u\n",
