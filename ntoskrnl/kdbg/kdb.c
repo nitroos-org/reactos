@@ -947,6 +947,21 @@ KdbpDisableBreakPoint(
         return TRUE;
     }
 
+    /*
+     * A breakpoint we stopped on is re-enabled by the single step that follows
+     * it. If it is disabled or deleted now, that step must not put the INT3
+     * back (it would be an INT3 nobody owns): forget it, and drop the trap
+     * flag that was set for it unless the user is stepping.
+     */
+    if (BreakPoint == KdbBreakPointToReenable)
+    {
+        KdbBreakPointToReenable = NULL;
+        if (KdbNumSingleSteps == 0)
+        {
+            KdbTrapFrame.EFlags &= ~EFLAGS_TF;
+        }
+    }
+
     if (BreakPoint->Type == KdbBreakPointSoftware ||
         BreakPoint->Type == KdbBreakPointTemporary)
     {
