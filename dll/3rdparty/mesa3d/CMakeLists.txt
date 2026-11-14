@@ -1,5 +1,18 @@
 # Mesa3D software drivers (prebuilt by build-mesa.sh); see README.md
 
+# When an LLVM pack is requested (MESA3D_AMD64_LLVM / MESA3D_WOW64_LLVM, ON by default) but cannot be staged, the
+# configure prints a loud banner and falls back to softpipe. With NITRO_REQUIRE_LLVM_PACKS=ON that is a configure
+# error instead (release / postland configs, harness golden builds). Developer builds keep the warning only.
+option(NITRO_REQUIRE_LLVM_PACKS "Fail the configure when a requested Mesa3D LLVM pack cannot be staged (no silent softpipe)" OFF)
+
+# The OpenGL driver this build directory will ship, for the golden / harness manifest: <build dir>/mesa3d-renderer.txt
+#   renderer=llvmpipe | softpipe (LLVM pack missing) | softpipe (<other reason>)
+# mesa3d_record_renderer(<arch> <renderer> <detail>)
+function(mesa3d_record_renderer ARCH_NAME RENDERER DETAIL)
+    file(WRITE ${CMAKE_BINARY_DIR}/mesa3d-renderer.txt
+        "renderer=${RENDERER}\narch=${ARCH_NAME}\ndetail=${DETAIL}\nrequire_llvm_packs=${NITRO_REQUIRE_LLVM_PACKS}\n")
+endfunction()
+
 # Runs the staging script of an llvmpipe pack on every configure (it is a no-op that needs no network when the
 # directory is already staged with the script's pinned artifact, and replaces a stale one) and sets, in the caller:
 #   <prefix>_OK      TRUE when the pack is staged, verified and complete (DLL, licence files and SHA256SUMS)
@@ -9,6 +22,7 @@ function(mesa3d_stage_llvm PREFIX ARCH_NAME SCRIPT DIRNAME ENABLED WHY_OFF)
     set(_dir ${CMAKE_CURRENT_SOURCE_DIR}/${DIRNAME})
     set(_ok FALSE)
     set(_reason "${WHY_OFF}")
+    set(_stage_detail "${WHY_OFF}")
     if(ENABLED)
         message(STATUS "Mesa3D: staging the ${ARCH_NAME} llvmpipe pack ...")
         execute_process(
@@ -21,8 +35,7 @@ function(mesa3d_stage_llvm PREFIX ARCH_NAME SCRIPT DIRNAME ENABLED WHY_OFF)
             # the script's last line is its one-line reason
             string(REGEX REPLACE "^.*\n" "" _reason "${_out}")
             string(REGEX REPLACE "^stage-[a-z0-9]+-llvm: " "" _reason "${_reason}")
-            message(WARNING "Mesa3D: could not stage the ${ARCH_NAME} llvmpipe pack (rc=${_rc}); keeping the in-tree "
-                            "softpipe OpenGL driver. Output:\n${_out}")
+            set(_stage_detail "rc=${_rc}: ${_out}")
         else()
             message(STATUS "Mesa3D: ${_out}")
             set(_ok TRUE)
@@ -39,8 +52,35 @@ function(mesa3d_stage_llvm PREFIX ARCH_NAME SCRIPT DIRNAME ENABLED WHY_OFF)
         file(STRINGS ${_dir}/.artifact-sha256 _pin LIMIT_COUNT 1)
         string(SUBSTRING "${_pin}" 0 8 _sha8)
         set(_status "Mesa3D ${ARCH_NAME}: llvmpipe (artifact ${_sha8})")
+        mesa3d_record_renderer("${ARCH_NAME}" "llvmpipe" "artifact ${_sha8}")
     else()
         set(_status "Mesa3D ${ARCH_NAME}: softpipe fallback (${_reason})")
+        if(ENABLED)
+            # an LLVM pack was asked for (the default of the configs we ship) but is not there: never silent
+            mesa3d_record_renderer("${ARCH_NAME}" "softpipe (LLVM pack missing)" "${_reason}")
+            set(_banner
+"\n"
+"**********************************************************************\n"
+"*  Mesa3D ${ARCH_NAME}: LLVM PACK MISSING -> renderer=softpipe\n"
+"*  ${_reason}\n"
+"*  The OpenGL driver will be softpipe: no WebGL, no Direct2D render\n"
+"*  target, no Vulkan (lavapipe). GPU/WebGL/D2D smoke results from this\n"
+"*  build are NOT representative of the shipped image.\n"
+"*  Fix: set LAVAPIPE_ARTIFACT (amd64) / LLVMPIPE_I386_ARTIFACT (i386)\n"
+"*  to the local pack tarball, or give this host rclone + remote 'vultr'.\n"
+"*  Details: ${_stage_detail}\n"
+"*  The fallback is recorded in ${CMAKE_BINARY_DIR}/mesa3d-renderer.txt\n"
+"**********************************************************************\n")
+            if(NITRO_REQUIRE_LLVM_PACKS)
+                message(FATAL_ERROR ${_banner}
+"*  NITRO_REQUIRE_LLVM_PACKS=ON: refusing to configure with softpipe.\n"
+"*  (-DNITRO_REQUIRE_LLVM_PACKS=OFF accepts the fallback)\n")
+            else()
+                message(WARNING ${_banner})
+            endif()
+        else()
+            mesa3d_record_renderer("${ARCH_NAME}" "softpipe (${_reason})" "")
+        endif()
     endif()
     set(${PREFIX}_OK ${_ok} PARENT_SCOPE)
     set(${PREFIX}_STATUS "${_status}" PARENT_SCOPE)
@@ -93,6 +133,7 @@ if(ARCH STREQUAL "i386" OR ARCH STREQUAL "amd64")
             mesa3d_report_status("${_mesa3d_i386_STATUS}")
         else()
             mesa3d_report_status("Mesa3D i386: softpipe fallback (native i386 image, llvmpipe is staged for the SysWOW64 guest only)")
+            mesa3d_record_renderer(i386 "softpipe (native i386 image)" "")
         endif()
     endif()
     if(ARCH STREQUAL "i386" AND SYSWOW64_GUEST AND _mesa3d_i386_OK)
