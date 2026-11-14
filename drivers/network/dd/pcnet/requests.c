@@ -445,7 +445,9 @@ MiniportSetInformation(
 
         Adapter->CurrentPacketFilter = GenericULONG;
 
-        /* FIXME: Set filter on hardware */
+        /* FIXME: Set the rest of the filter on hardware (promiscuous, broadcast) */
+        /* Multicast frames: the logical address filter */
+        MiApplyLogicalAddressFilter(Adapter);
 
         break;
       }
@@ -482,12 +484,15 @@ MiniportSetInformation(
             break;
           }
 
-        ASSERT((InformationBufferLength / 6) <= MAX_MULTICAST_ADDRESSES);
+        if ((InformationBufferLength / 6) > MAX_MULTICAST_ADDRESSES)
+          {
+            *BytesRead   = 0;
+            *BytesNeeded = MAX_MULTICAST_ADDRESSES * 6;
+            Status       = NDIS_STATUS_MULTICAST_FULL;
+            break;
+          }
 
-        /* Set new multicast address list */
-        //NdisMoveMemory(Adapter->Addresses, InformationBuffer, InformationBufferLength);
-
-        /* Update hardware */
+        /* Set new multicast address list, and update hardware */
         Status = MiSetMulticast(Adapter, InformationBuffer, InformationBufferLength / 6);
 
         break;
