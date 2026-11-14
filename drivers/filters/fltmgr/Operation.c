@@ -919,6 +919,27 @@ FltpFastIoDisallowed(_In_ PDEVICE_OBJECT DeviceObject,
 
 
 /*
+ * Fast I/O that didn't happen (a filter refused it, or the file system): the post-operations from
+ * Ctrl->PostIndex down are told so. A pre-operation's post-operation is never lost, whichever way the
+ * operation goes; the caller then sends an IRP, which the filters see as an operation of its own.
+ */
+static
+VOID
+RunFastIoPostOperations(_Inout_ PFLTP_IRPCTRL Ctrl,
+                        _In_ NTSTATUS Status)
+{
+    Ctrl->Data.IoStatus.Status = Status;
+    Ctrl->Data.IoStatus.Information = 0;
+    Ctrl->Data.Flags |= FLTFL_CALLBACK_DATA_POST_OPERATION;
+    if (!RunPostOperations(Ctrl, FALSE) && Ctrl->Parked && Ctrl->Parked->Instance)
+    {
+        /* MORE_PROCESSING_REQUIRED isn't for fast I/O (WDK): the operation is over for us anyway */
+        FltObjectDereference(Ctrl->Parked->Instance);
+        Ctrl->Parked->Instance = NULL;
+    }
+}
+
+/*
  * Fast I/O reads and writes go through the instances as well, with callback data that says so
  * (FLTFL_CALLBACK_DATA_FAST_IO_OPERATION). A filter can't pend them, but it can say
  * FLT_PREOP_DISALLOW_FASTIO, which sends the caller down the IRP path. Returns TRUE if the operation was
@@ -1051,7 +1072,12 @@ FltpFastIoReadWrite(_In_ PDEVICE_OBJECT DeviceObject,
 
         if (PreStatus == FLT_PREOP_DISALLOW_FASTIO)
         {
-            /* The IRP path then, which gives the filters another chance */
+            /*
+             * The IRP path then, which gives the filters another chance. The filters above this one
+             * which asked for their post-operation get it (WDK), told the fast I/O didn't happen.
+             */
+            Ctrl->PostIndex = i;
+            RunFastIoPostOperations(Ctrl, STATUS_FLT_DISALLOW_FAST_IO);
             goto Quit;
         }
         else if (PreStatus == FLT_PREOP_COMPLETE)
@@ -1124,6 +1150,12 @@ CallLower:
             Ctrl->Parked->Instance = NULL;
         }
         *IoStatus = Ctrl->Data.IoStatus;
+    }
+    else if (Ctrl)
+    {
+        /* The file system said no: every pre-operation still gets its post-operation, the IRP comes next */
+        Ctrl->PostIndex = Ctrl->Count;
+        RunFastIoPostOperations(Ctrl, STATUS_FLT_DISALLOW_FAST_IO);
     }
 
 Quit:
