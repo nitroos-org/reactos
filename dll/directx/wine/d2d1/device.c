@@ -2296,6 +2296,9 @@ static void STDMETHODCALLTYPE d2d_device_context_BeginDraw(ID2D1DeviceContext6 *
     if (context->target.type == D2D_TARGET_COMMAND_LIST)
         d2d_command_list_begin_draw(context->target.command_list, context);
 
+    if (context->ops && context->ops->device_context_begin_draw)
+        context->ops->device_context_begin_draw(context->outer_unknown);
+
     memset(&context->error, 0, sizeof(context->error));
 }
 
