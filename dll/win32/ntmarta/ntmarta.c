@@ -860,10 +860,15 @@ AccpInheritedAcesAreTail(IN PACL Dacl)
  * ACEs anywhere else would let the merge (explicit ACEs first, inherited ones after) move an allow ACE
  * ahead of a deny ACE. For anything else, and for a DACL with no such ACE, nothing is flagged and FALSE is
  * returned: the caller treats the key as protected.
+ *
+ * CREATOR OWNER / CREATOR GROUP in the parent's set stand for the owner and group of the key. When Sd has
+ * none (a query for the DACL only), KeyOwner and KeyGroup, if given, are used instead.
  */
 static BOOLEAN
 AccpMarkInheritedAces(IN OUT PSECURITY_DESCRIPTOR Sd,
-                      IN PSECURITY_DESCRIPTOR ParentSd)
+                      IN PSECURITY_DESCRIPTOR ParentSd,
+                      IN PSID KeyOwner OPTIONAL,
+                      IN PSID KeyGroup OPTIONAL)
 {
     SECURITY_DESCRIPTOR_CONTROL Control;
     PSECURITY_DESCRIPTOR Expected = NULL;
@@ -881,6 +886,10 @@ AccpMarkInheritedAces(IN OUT PSECURITY_DESCRIPTOR Sd,
         return FALSE;
     GetSecurityDescriptorOwner(Sd, &Owner, &Defaulted);
     GetSecurityDescriptorGroup(Sd, &Group, &Defaulted);
+    if (Owner == NULL)
+        Owner = KeyOwner;
+    if (Group == NULL)
+        Group = KeyGroup;
 
     if (!NT_SUCCESS(AccpMergeInheritedDacl(ParentSd, Owner, Group, NULL, FALSE, &Expected)))
         return FALSE;
@@ -1010,7 +1019,7 @@ AccpPropagateToSubkeys(IN HKEY Key,
             if (Control & SE_DACL_AUTO_INHERITED)
                 Inherits = AccpInheritedAcesAreTail(OldDacl);
             else
-                Inherits = OldParentSd != NULL && AccpMarkInheritedAces(OldSd, OldParentSd);
+                Inherits = OldParentSd != NULL && AccpMarkInheritedAces(OldSd, OldParentSd, NULL, NULL);
             GetSecurityDescriptorOwner(OldSd, &Owner, &Defaulted);
             GetSecurityDescriptorGroup(OldSd, &Group, &Defaulted);
 
@@ -1367,7 +1376,29 @@ AccRewriteGetHandleRights(HANDLE handle,
 
             if (ParentSd != NULL)
             {
-                AccpMarkInheritedAces(pSD, ParentSd);
+                PSECURITY_DESCRIPTOR OwnerSd = NULL;
+                PSID KeyOwner = NULL, KeyGroup = NULL;
+                DWORD OwnerSize = 0;
+
+                /* the expected set is built with the owner and group of the key, whatever was asked for */
+                if ((SecurityInfo & (OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION)) !=
+                    (OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION))
+                {
+                    RegGetKeySecurity((HKEY)handle, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION,
+                                      NULL, &OwnerSize);
+                    if (OwnerSize != 0)
+                        OwnerSd = LocalAlloc(LMEM_FIXED, OwnerSize);
+                    if (OwnerSd != NULL &&
+                        RegGetKeySecurity((HKEY)handle, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION,
+                                          OwnerSd, &OwnerSize) == ERROR_SUCCESS)
+                    {
+                        GetSecurityDescriptorOwner(OwnerSd, &KeyOwner, &Defaulted);
+                        GetSecurityDescriptorGroup(OwnerSd, &KeyGroup, &Defaulted);
+                    }
+                }
+                AccpMarkInheritedAces(pSD, ParentSd, KeyOwner, KeyGroup);
+                if (OwnerSd != NULL)
+                    LocalFree(OwnerSd);
                 LocalFree(ParentSd);
             }
         }

@@ -937,6 +937,118 @@ Done:
     if (World) FreeSid(World);
 }
 
+/*
+ * The owner of a key is not the caller's token owner. The parent passes on a CREATOR OWNER ACE, so the
+ * ACEs a key inherited depend on its owner: reading the DACL alone must judge them with the owner of the
+ * key, as reading the owner with it does, not with the owner of the caller's token.
+ */
+static ULONG CountInherited(const KEY_DACL *Dacl)
+{
+    ULONG i, Count = 0;
+
+    for (i = 0; i < Dacl->Count; i++)
+    {
+        if (Dacl->Aces[i].Flags & INHERITED_ACE)
+            Count++;
+    }
+    return Count;
+}
+
+static void TestGetUsesKeyOwner(void)
+{
+    static const WCHAR ParentSddl[] = L"D:(A;CI;KA;;;SY)(A;CI;KA;;;BA)(A;CIIO;KA;;;CO)";
+    SECURITY_ATTRIBUTES Attributes = {sizeof(Attributes), NULL, FALSE};
+    BYTE TokenBuffer[256];
+    PSECURITY_DESCRIPTOR Sd = NULL, Both = NULL;
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    PSID Owner = NULL, NewOwner, Admins = NULL;
+    PACL Dacl = NULL;
+    KEY_DACL Full, Only;
+    HKEY Key = NULL, Child = NULL;
+    HANDLE Token = NULL;
+    DWORD Error, Length;
+    ULONG i;
+
+    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(ParentSddl, SDDL_REVISION_1, &Attributes.lpSecurityDescriptor, NULL))
+    {
+        skip("cannot make the parent descriptor: %lu\n", GetLastError());
+        goto Done;
+    }
+    Error = RegCreateKeyExW(HKEY_CURRENT_USER, ScratchPath, 0, NULL, 0, KEY_ALL_ACCESS, &Attributes, &Key, NULL);
+    ok_long(Error, ERROR_SUCCESS);
+    if (Error || !MakeKey(Key, L"c", 0, &Child))
+        goto Done;
+
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &Token) ||
+        !GetTokenInformation(Token, TokenUser, TokenBuffer, sizeof(TokenBuffer), &Length))
+    {
+        skip("cannot read the token user: %lu\n", GetLastError());
+        goto Done;
+    }
+
+    /* the key got CREATOR OWNER replaced by the owner it was created with; read that owner */
+    ok_long(GetSecurityInfo(Child, SE_REGISTRY_KEY, OWNER_SECURITY_INFORMATION, &Owner, NULL, NULL, NULL, &Sd), ERROR_SUCCESS);
+    if (!Owner)
+        goto Done;
+
+    /* hand the key to another owner the caller may set: the token user, else Administrators */
+    NewOwner = ((TOKEN_USER *)TokenBuffer)->User.Sid;
+    if (EqualSid(Owner, NewOwner))
+    {
+        AllocateAndInitializeSid(&NtAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS,
+                                 0, 0, 0, 0, 0, 0, &Admins);
+        NewOwner = Admins;
+    }
+    if (!NewOwner || EqualSid(Owner, NewOwner))
+    {
+        skip("no other owner to tell apart\n");
+        goto Done;
+    }
+    Error = SetSecurityInfo(Child, SE_REGISTRY_KEY, OWNER_SECURITY_INFORMATION, NewOwner, NULL, NULL, NULL);
+    if (Error != ERROR_SUCCESS)
+    {
+        skip("cannot change the owner: %lu\n", Error);
+        goto Done;
+    }
+
+    ReadDacl(Child, &Full);
+    ok(Full.Ok, "cannot read the DACL with the owner\n");
+    ok_long(GetSecurityInfo(Child, SE_REGISTRY_KEY, DACL_SECURITY_INFORMATION, NULL, NULL, &Dacl, NULL, &Both), ERROR_SUCCESS);
+    ZeroMemory(&Only, sizeof(Only));
+    if (Both && Dacl)
+    {
+        Only.Count = min(Dacl->AceCount, ARRAYSIZE(Only.Aces));
+        for (i = 0; i < Only.Count; i++)
+        {
+            ACCESS_ALLOWED_ACE *Ace;
+
+            if (!GetAce(Dacl, i, (PVOID *)&Ace))
+                break;
+            Only.Aces[i].Flags = Ace->Header.AceFlags;
+        }
+        Only.Ok = TRUE;
+    }
+    ok(Only.Ok && Only.Count == Full.Count, "DACL only: %lu ACEs, with the owner: %lu\n", Only.Count, Full.Count);
+    ok(CountInherited(&Only) == CountInherited(&Full),
+       "DACL only reports %lu ACEs inherited, with the owner %lu\n", CountInherited(&Only), CountInherited(&Full));
+    for (i = 0; i < Only.Count && i < Full.Count; i++)
+        ok(Only.Aces[i].Flags == Full.Aces[i].Flags, "ACE %lu: flags 0x%x with the DACL only, 0x%x with the owner\n",
+           i, Only.Aces[i].Flags, Full.Aces[i].Flags);
+
+    FreeDacl(&Full);
+    if (Both) LocalFree(Both);
+
+Done:
+    if (Sd) LocalFree(Sd);
+    if (Admins) FreeSid(Admins);
+    if (Token) CloseHandle(Token);
+    if (Child) RegCloseKey(Child);
+    if (Attributes.lpSecurityDescriptor) LocalFree(Attributes.lpSecurityDescriptor);
+    if (Key) RegCloseKey(Key);
+    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+}
+
 START_TEST(SetSecurityInfoKeyInherit)
 {
     pRegDeleteTreeW = (PVOID)GetProcAddress(GetModuleHandleW(L"advapi32.dll"), "RegDeleteTreeW");
@@ -952,6 +1064,7 @@ START_TEST(SetSecurityInfoKeyInherit)
     TestProtectKeepsAces();
     TestNoWidening();
     TestExplicitBeforeTail();
+    TestGetUsesKeyOwner();
 
     KEY_DACL Initial, P1, C1a, C1b, P2, C2, G;
     HKEY Key = NULL, Child1 = NULL, Child2 = NULL, Grand = NULL;
