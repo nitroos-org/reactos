@@ -154,6 +154,7 @@ KMT_TESTFUNC Test_PsQuotaSwitchRace;
 KMT_TESTFUNC Test_SeAutoInherit;
 KMT_TESTFUNC Test_SeInheritance;
 KMT_TESTFUNC Test_SeLogonSession;
+KMT_TESTFUNC Test_SeOwnerRights;
 KMT_TESTFUNC Test_SeQueryInfoToken;
 KMT_TESTFUNC Test_SeTokenFiltering;
 KMT_TESTFUNC Test_RtlAvlTree;
@@ -334,7 +335,8 @@ const KMT_TEST TestList[] =
     { "SeAutoInherit",                      Test_SeAutoInherit },
     { "SeInheritance",                      Test_SeInheritance },
     { "SeLogonSession",                     Test_SeLogonSession },
-    { "SeQueryInfoToken",                   Test_SeQueryInfoToken },
+    { "SeOwnerRights",                      Test_SeOwnerRights },
+    { "SeQueryInfoToken",                  Test_SeQueryInfoToken },
     { "SeTokenFiltering",                   Test_SeTokenFiltering },
     { "ZwAllocateVirtualMemory",            Test_ZwAllocateVirtualMemory },
     { "ZwCreateSection",                    Test_ZwCreateSection },

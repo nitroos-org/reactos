@@ -16,6 +16,175 @@
 /* PRIVATE FUNCTIONS **********************************************************/
 
 /*
+ * OWNER RIGHTS (S-1-3-4, Windows Vista and later; Microsoft's public documentation
+ * of the well-known SIDs and of the access check):
+ * - An ACE for OWNER RIGHTS applies to the owner of the object: it is checked as an
+ *   ACE for the owner SID of the descriptor (so the owner must be in the token as
+ *   for the implicit owner rights, also in the restricting SIDs pass of a
+ *   restricted token, and a deny ACE also matches a deny-only owner group).
+ *   A descriptor without an owner has nobody for OWNER RIGHTS ACEs to apply to.
+ *   The owner is only tried when the ACE's SID itself is not in the token (tokens
+ *   do not carry S-1-3-4), which keeps the cost off the ACEs that match.
+ * - When the DACL has an OWNER RIGHTS ACE that applies to the object (not
+ *   INHERIT_ONLY), the owner does not get the implicit READ_CONTROL | WRITE_DAC:
+ *   it gets what the ACEs of the DACL grant it, the OWNER RIGHTS ACEs included.
+ * - An inherit-only OWNER RIGHTS ACE neither grants nor takes the implicit rights.
+ * Points the documentation leaves open (deny and object ACEs for OWNER RIGHTS as
+ * the trigger, OWNER RIGHTS in a SACL) are listed for an oracle check in the
+ * change's evidence; this follows the rules above for all of them.
+ */
+
+/**
+ * @brief
+ * Checks if a SID is OWNER RIGHTS (S-1-3-4).
+ *
+ * @param[in] Sid
+ * A valid SID.
+ *
+ * @return
+ * TRUE if the SID is OWNER RIGHTS, FALSE otherwise.
+ */
+FORCEINLINE
+BOOLEAN
+SepIsOwnerRightsSid(
+    _In_ PSID Sid)
+{
+    PISID IdSid = (PISID)Sid;
+
+    /*
+     * The common case (any other SID) fails on the first comparisons; the
+     * sub-authority is only read once the SID is known to have one
+     */
+    return IdSid->SubAuthorityCount == 1 &&
+           IdSid->IdentifierAuthority.Value[5] == 3 &&
+           IdSid->SubAuthority[0] == SECURITY_CREATOR_OWNER_RIGHTS_RID &&
+           IdSid->IdentifierAuthority.Value[4] == 0 &&
+           IdSid->IdentifierAuthority.Value[3] == 0 &&
+           IdSid->IdentifierAuthority.Value[2] == 0 &&
+           IdSid->IdentifierAuthority.Value[1] == 0 &&
+           IdSid->IdentifierAuthority.Value[0] == 0;
+}
+
+/* The bytes of S-1-3-4: revision, count, 6-byte authority, one RID */
+#define SEP_OWNER_RIGHTS_SID_LENGTH (FIELD_OFFSET(SID, SubAuthority) + sizeof(ULONG))
+
+/**
+ * @brief
+ * Checks if a DACL has an OWNER RIGHTS ACE that applies to the object,
+ * that is, an allow or deny ACE (plain or object) for S-1-3-4 that is
+ * not INHERIT_ONLY.
+ *
+ * @param[in] Dacl
+ * A DACL (of a captured or kernel descriptor). The walk stays inside
+ * AclSize; it stops at the first ACE that does not fit.
+ *
+ * @return
+ * TRUE if the DACL has such an ACE, FALSE otherwise.
+ *
+ * @remarks
+ * Runs on every access check by the owner that asks for READ_CONTROL,
+ * WRITE_DAC or MAXIMUM_ALLOWED, so it walks the ACEs directly instead
+ * of through RtlGetAce (which starts over from the first ACE each time).
+ */
+static
+BOOLEAN
+SepDaclHasOwnerRightsAce(
+    _In_ PACL Dacl)
+{
+    PACE_HEADER Ace;
+    PUCHAR AclEnd;
+    ULONG AceIndex;
+    ULONG SidOffset;
+
+    PAGED_CODE();
+
+    Ace = (PACE_HEADER)(Dacl + 1);
+    AclEnd = (PUCHAR)Dacl + Dacl->AclSize;
+
+    for (AceIndex = 0; AceIndex < Dacl->AceCount; AceIndex++)
+    {
+        if ((PUCHAR)Ace + sizeof(ACE_HEADER) > AclEnd ||
+            Ace->AceSize < sizeof(ACE_HEADER) ||
+            (PUCHAR)Ace + Ace->AceSize > AclEnd)
+        {
+            break;
+        }
+
+        if (!(Ace->AceFlags & INHERIT_ONLY_ACE))
+        {
+            /* The ACE types the access check evaluates */
+            switch (Ace->AceType)
+            {
+                case ACCESS_ALLOWED_ACE_TYPE:
+                case ACCESS_DENIED_ACE_TYPE:
+                    SidOffset = FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart);
+                    break;
+
+                case ACCESS_ALLOWED_OBJECT_ACE_TYPE:
+                case ACCESS_DENIED_OBJECT_ACE_TYPE:
+                    /* The flags say which GUIDs come before the SID */
+                    if (Ace->AceSize < FIELD_OFFSET(ACCESS_ALLOWED_OBJECT_ACE, ObjectType))
+                        SidOffset = 0;
+                    else
+                        SidOffset = (ULONG)((PUCHAR)SepGetSidFromAce((PACE)Ace) - (PUCHAR)Ace);
+                    break;
+
+                default:
+                    SidOffset = 0;
+                    break;
+            }
+
+            if (SidOffset != 0 &&
+                SidOffset + SEP_OWNER_RIGHTS_SID_LENGTH <= Ace->AceSize &&
+                SepIsOwnerRightsSid((PUCHAR)Ace + SidOffset))
+            {
+                return TRUE;
+            }
+        }
+
+        Ace = (PACE_HEADER)((PUCHAR)Ace + Ace->AceSize);
+    }
+
+    return FALSE;
+}
+
+/**
+ * @brief
+ * Checks if the token gets the implicit owner rights (READ_CONTROL and
+ * WRITE_DAC) on an object: it is the owner, and the DACL of the object
+ * has no OWNER RIGHTS ACE that applies to the object.
+ *
+ * @param[in] Token
+ * The token the access check is for.
+ *
+ * @param[in] SecurityDescriptor
+ * The security descriptor of the object, with an owner.
+ *
+ * @return
+ * TRUE if the token gets the implicit owner rights, FALSE otherwise.
+ */
+static
+BOOLEAN
+SepTokenGetsImplicitOwnerRights(
+    _In_ PACCESS_TOKEN Token,
+    _In_ PSECURITY_DESCRIPTOR SecurityDescriptor)
+{
+    PACL Dacl;
+
+    PAGED_CODE();
+
+    if (!SepTokenIsOwner(Token, SecurityDescriptor, FALSE))
+        return FALSE;
+
+    /* No DACL (NULL or none) grants everything anyway */
+    Dacl = SepGetDaclFromDescriptor(SecurityDescriptor);
+    if (Dacl == NULL)
+        return TRUE;
+
+    return !SepDaclHasOwnerRightsAce(Dacl);
+}
+
+/*
  * Object type lists (NtAccessCheckByType and NtAccessCheckByTypeResultList).
  *
  * The list is a tree in pre-order: the object itself (the root, level 0) and its property sets and
@@ -167,6 +336,10 @@ SepApplyAceToObjectTypeList(
  * @param[in] PrincipalSelfSid
  * The SID that replaces the principal self SID in ACEs, if any.
  *
+ * @param[in] OwnerSid
+ * The owner SID of the descriptor, which OWNER RIGHTS ACEs are checked as;
+ * NULL if it has none (OWNER RIGHTS ACEs then apply to nobody).
+ *
  * @param[in] GenericMapping
  * The generic mapping for the rights of the ACEs.
  *
@@ -183,6 +356,7 @@ SepAnalyzeAcesForObjectTypeList(
     _In_ PACCESS_TOKEN AccessToken,
     _In_ BOOLEAN IsTokenRestricted,
     _In_opt_ PSID PrincipalSelfSid,
+    _In_opt_ PSID OwnerSid,
     _In_ PGENERIC_MAPPING GenericMapping,
     _Inout_ POBJECT_TYPE_LIST_INTERNAL ObjectTypeList,
     _In_ ULONG ObjectTypeListLength)
@@ -235,8 +409,17 @@ SepAnalyzeAcesForObjectTypeList(
 
         Sid = SepGetSidFromAce(CurrentAce);
         ASSERT(Sid);
+
         if (!SepSidInTokenEx(AccessToken, PrincipalSelfSid, Sid, IsDenied, IsTokenRestricted))
-            continue;
+        {
+            /* An OWNER RIGHTS ACE is for the owner (looked at only when no SID matched) */
+            if (OwnerSid == NULL ||
+                !SepIsOwnerRightsSid(Sid) ||
+                !SepSidInTokenEx(AccessToken, NULL, OwnerSid, IsDenied, IsTokenRestricted))
+            {
+                continue;
+            }
+        }
 
         /* An ACE without an object type is for the root; one with a type not in the list is for nothing */
         if (ObjectTypeGuid == NULL)
@@ -279,6 +462,9 @@ SepAnalyzeAcesForObjectTypeList(
  * @param[in] PrincipalSelfSid
  * The SID that replaces the principal self SID in ACEs, if any.
  *
+ * @param[in] OwnerSid
+ * The owner SID of the descriptor (for OWNER RIGHTS ACEs), if any.
+ *
  * @param[in] GenericMapping
  * The generic mapping for the rights of the ACEs.
  *
@@ -298,6 +484,7 @@ SepAccessCheckObjectTypeList(
     _In_ PACL Dacl,
     _In_ PACCESS_TOKEN AccessToken,
     _In_opt_ PSID PrincipalSelfSid,
+    _In_opt_ PSID OwnerSid,
     _In_ PGENERIC_MAPPING GenericMapping,
     _Inout_ POBJECT_TYPE_LIST_INTERNAL ObjectTypeList,
     _In_ ULONG ObjectTypeListLength)
@@ -316,6 +503,7 @@ SepAccessCheckObjectTypeList(
                                     AccessToken,
                                     FALSE,
                                     PrincipalSelfSid,
+                                    OwnerSid,
                                     GenericMapping,
                                     ObjectTypeList,
                                     ObjectTypeListLength);
@@ -340,6 +528,7 @@ SepAccessCheckObjectTypeList(
                                     AccessToken,
                                     TRUE,
                                     PrincipalSelfSid,
+                                    OwnerSid,
                                     GenericMapping,
                                     ObjectTypeList,
                                     ObjectTypeListLength);
@@ -402,6 +591,10 @@ SepAccessCheckObjectTypeList(
  * A pointer to a security identifier that represents a principal. A principal
  * identifies a user object which is associated with its own security descriptor.
  *
+ * @param[in] OwnerSid
+ * The owner SID of the descriptor, which OWNER RIGHTS ACEs are checked as;
+ * NULL if it has none (OWNER RIGHTS ACEs then apply to nobody).
+ *
  * @param[in] GenericMapping
  * A pointer to a generic mapping that is associated with the object in question
  * being checked for access. If certain set of desired access rights have
@@ -428,6 +621,7 @@ SepAnalyzeAcesFromDacl(
     _In_ PACCESS_TOKEN PrimaryAccessToken,
     _In_ BOOLEAN IsTokenRestricted,
     _In_opt_ PSID PrincipalSelfSid,
+    _In_opt_ PSID OwnerSid,
     _In_ PGENERIC_MAPPING GenericMapping,
     _Inout_ PACCESS_CHECK_RIGHTS AccessCheckRights)
 {
@@ -498,7 +692,15 @@ SepAnalyzeAcesFromDacl(
         ASSERT(Sid);
 
         if (!SepSidInTokenEx(AccessToken, PrincipalSelfSid, Sid, IsDenied, IsTokenRestricted))
-            continue;
+        {
+            /* An OWNER RIGHTS ACE is for the owner (looked at only when no SID matched) */
+            if (OwnerSid == NULL ||
+                !SepIsOwnerRightsSid(Sid) ||
+                !SepSidInTokenEx(AccessToken, NULL, OwnerSid, IsDenied, IsTokenRestricted))
+            {
+                continue;
+            }
+        }
 
         /* Get this access right from the ACE and map it if it has a generic mask right */
         Access = CurrentAce->AccessMask;
@@ -647,6 +849,7 @@ SepAccessCheckWorker(
     ULONG ResultListIndex;
     ULONG ObjectTypeIndex;
     PACL Dacl;
+    PSID OwnerSid;
     BOOLEAN Present;
     BOOLEAN Defaulted;
     NTSTATUS Status;
@@ -811,6 +1014,9 @@ SepAccessCheckWorker(
         goto ReturnCommonStatus;
     }
 
+    /* OWNER RIGHTS ACEs are checked as ACEs for the owner */
+    OwnerSid = SepGetOwnerFromDescriptor(SecurityDescriptor);
+
     /*
      * With an object type list, work out the rights of every entry in the
      * list (SepAccessCheckObjectTypeList, for MAXIMUM_ALLOWED and explicit
@@ -821,6 +1027,7 @@ SepAccessCheckWorker(
         Status = SepAccessCheckObjectTypeList(Dacl,
                                               Token,
                                               PrincipalSelfSid,
+                                              OwnerSid,
                                               GenericMapping,
                                               ObjectTypeList,
                                               ObjectTypeListLength);
@@ -942,6 +1149,7 @@ SepAccessCheckWorker(
                                PrimaryAccessToken,
                                FALSE,
                                PrincipalSelfSid,
+                               OwnerSid,
                                GenericMapping,
                                &AccessCheckRights);
 
@@ -965,6 +1173,7 @@ SepAccessCheckWorker(
                                    PrimaryAccessToken,
                                    TRUE,
                                    PrincipalSelfSid,
+                                   OwnerSid,
                                    GenericMapping,
                                    &RestrictedRights);
 
@@ -1005,6 +1214,7 @@ SepAccessCheckWorker(
                            PrimaryAccessToken,
                            FALSE,
                            PrincipalSelfSid,
+                           OwnerSid,
                            GenericMapping,
                            &AccessCheckRights);
 
@@ -1030,6 +1240,7 @@ SepAccessCheckWorker(
                                PrimaryAccessToken,
                                TRUE,
                                PrincipalSelfSid,
+                               OwnerSid,
                                GenericMapping,
                                &AccessCheckRights);
 
@@ -1550,10 +1761,13 @@ SepAccessCheck(
     SepAcquireTokenLockShared(Token);
     TokenLocked = TRUE;
 
-    /* Check if the token is the owner and grant WRITE_DAC and READ_CONTROL rights */
+    /*
+     * Check if the token is the owner and grant WRITE_DAC and READ_CONTROL rights,
+     * unless the DACL has an OWNER RIGHTS ACE for the object
+     */
     if (DesiredAccess & (WRITE_DAC | READ_CONTROL | MAXIMUM_ALLOWED))
     {
-        if (SepTokenIsOwner(Token, CapturedSecurityDescriptor, FALSE))
+        if (SepTokenGetsImplicitOwnerRights(Token, CapturedSecurityDescriptor))
         {
             if (DesiredAccess & MAXIMUM_ALLOWED)
                 PreviouslyGrantedAccess |= (WRITE_DAC | READ_CONTROL);
@@ -1780,15 +1994,16 @@ SeAccessCheck(
     if (!SubjectContextLocked)
         SeLockSubjectContext(SubjectSecurityContext);
 
-    /* Check if the token is the owner and grant WRITE_DAC and READ_CONTROL rights */
+    /*
+     * Check if the token is the owner and grant WRITE_DAC and READ_CONTROL rights,
+     * unless the DACL has an OWNER RIGHTS ACE for the object
+     */
     if (DesiredAccess & (WRITE_DAC | READ_CONTROL | MAXIMUM_ALLOWED))
     {
          PACCESS_TOKEN Token = SubjectSecurityContext->ClientToken ?
              SubjectSecurityContext->ClientToken : SubjectSecurityContext->PrimaryToken;
 
-        if (SepTokenIsOwner(Token,
-                            SecurityDescriptor,
-                            FALSE))
+        if (SepTokenGetsImplicitOwnerRights(Token, SecurityDescriptor))
         {
             if (DesiredAccess & MAXIMUM_ALLOWED)
                 PreviouslyGrantedAccess |= (WRITE_DAC | READ_CONTROL);
@@ -1919,7 +2134,10 @@ SeFastTraverseCheck(
         /* If access-denied ACE */
         else if (Ace->Header.AceType == ACCESS_DENIED_ACE_TYPE)
         {
-            /* Here, only check if it denies any access wanted and deny if so */
+            /*
+             * Here, only check if it denies any access wanted and deny if so
+             * (whatever the SID, OWNER RIGHTS included: the full check decides)
+             */
             if (Ace->Mask & DesiredAccess)
                 return FALSE;
         }
