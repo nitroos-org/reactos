@@ -293,7 +293,9 @@ static VOID FwFreePolicy(PFW_POLICY Policy)
     ExFreePoolWithTag(Policy, NITROFW_TAG);
 }
 
-static PFW_POLICY FwRefPolicy(VOID)
+/* The installed policy; in a test build the test policy (NitroFwTestSetPolicy) replaces it for IPv6 packets
+   only (ForIpv6), so a test never changes what IPv4 sees. */
+static PFW_POLICY FwRefPolicy(BOOLEAN ForIpv6)
 {
     KIRQL OldIrql;
     PFW_POLICY Policy;
@@ -301,8 +303,10 @@ static PFW_POLICY FwRefPolicy(VOID)
     KeAcquireSpinLock(&FwPolicyLock, &OldIrql);
     Policy = FwPolicy;
 #ifdef FW_TESTHOOKS
-    if (FwTestPolicy)
+    if (ForIpv6 && FwTestPolicy)
         Policy = FwTestPolicy;
+#else
+    (void)ForIpv6;
 #endif
     if (Policy)
         InterlockedIncrement(&Policy->RefCount);
@@ -668,7 +672,7 @@ static NTSTATUS FwDeviceControl(PIRP Irp, PIO_STACK_LOCATION IrpSp)
             if (OutLen < NITROFW_STATUS_V1_SIZE || !Buf)
                 return STATUS_BUFFER_TOO_SMALL;
             RtlZeroMemory(St, StSize);
-            Policy = FwRefPolicy();
+            Policy = FwRefPolicy(FALSE);
             if (Policy)
             {
                 St->Generation = Policy->Generation;
@@ -1483,6 +1487,8 @@ static NTSTATUS FwGetDropLog(PVOID Buf, ULONG InLen, ULONG OutLen, PULONG_PTR In
 
     Hdr->Count = Count;
     Hdr->Flags = FwLogEnabled ? NITROFW_DROPLOG_ON : 0;
+    Hdr->RecordSize = sizeof(NITROFW_DROP_RECORD);
+    Hdr->Reserved = 0;
     *Information = sizeof(NITROFW_DROPLOG) + (ULONG_PTR)Count * sizeof(NITROFW_DROP_RECORD);
     return STATUS_SUCCESS;
 }
@@ -1667,7 +1673,7 @@ static BOOLEAN FwEvaluateInbound(PFW_PKT Pkt, ULONG Size)
     BOOLEAN Allow, AllowRule = FALSE, Decided = FALSE, LogOn;
     UCHAR DropReason = NITROFW_DROP_DEFAULT;
 
-    Policy = FwRefPolicy();
+    Policy = FwRefPolicy(Pkt->Is6);
     if (!FwPolicyEnforced(Policy))
     {
         if (Policy)
@@ -1702,7 +1708,8 @@ static BOOLEAN FwEvaluateInbound(PFW_PKT Pkt, ULONG Size)
     if (!Decided)
         Allow = AllowRule || !Policy->DefaultBlockInbound;
 
-    LogOn = FwLogEnabled || Policy->LogDropped;
+    /* the installed policy's logging switch (a test policy's own for IPv6 packets in a test build) */
+    LogOn = FwLogEnabled || (Pkt->Is6 && FwTestLog);
     FwDerefPolicy(Policy);
     if (Pkt->Owner)
         NitroFwReleaseImage(Pkt->Owner);
@@ -1821,14 +1828,16 @@ PassCounted:
  *     RFC 4861 7.1: hop limit 255, code 0, the source rules of each type; a message that fails is dropped
  *     and logged, no rule is consulted) and MLD (RFC 2710, 3810: hop limit 1, link-local or unspecified
  *     source); ICMPv6 errors that answer a TCP segment we sent (the invoking packet is ours and a TCP
- *     control block with its addresses and ports exists); echo replies (nothing in this stack sends an echo
- *     request yet, so none can be unsolicited-by-us: Windows parity needs the oracle, see the ticket); TCP
+ *     control block with its addresses and ports exists); TCP
  *     segments that are not a connection request (as IPv4: the stack answers the rest); fragments after the
  *     first (the first fragment was judged; lwIP drops overlaps, RFC 5722).
  *   Evaluated (Block rules, Allow rules, the profile default): connection requests (SYN without ACK), UDP,
- *     the other ICMPv6 types (echo request, ...), and every other protocol.
+ *     the other ICMPv6 types (echo request, ...), echo replies (none can
+ *     answer a request of ours yet: nothing sends one; they are unsolicited, as IPv4's replies with no
+ *     request), and every other protocol.
  *   Dropped before any rule: a multicast source address, ::1 from a link, a datagram whose extension
- *     headers or transport header do not fit, a first fragment too short to judge, an ICMPv6 message
+ *     headers or transport header do not fit, a Fragment header inside a Fragment header, a first fragment
+ *     too short to judge, a fragmented neighbour discovery or MLD message (RFC 6980), an ICMPv6 message
  *     shorter than its header.
  *
  * A rule's addresses apply by family: a rule with only IPv4 addresses never matches an IPv6 packet and the
@@ -1836,7 +1845,7 @@ PassCounted:
  * no IPv6 socket to own the port).
  * ---------------------------------------------------------------------------------------------- */
 
-#define FW6_MAX_EXT_HEADERS 8
+#define FW6_MAX_EXT_HEADERS 8       /* extension headers walked; the upper-layer header after them is not counted */
 #define FW6_PROTO_ICMPV6    58
 
 static BOOLEAN Fw6IsUnspecified(const UCHAR *A)
@@ -1870,13 +1879,15 @@ static BOOLEAN Fw6IsMulticast(const UCHAR *A)
 /* Walks the extension headers of the IPv6 datagram D (Len bytes, at least 40) whose first next-header value
    is Nh. TRUE: *Proto is the upper-layer protocol and *Offset where it starts; *Fragment is 0 (not
    fragmented), 1 (the first fragment, or an atomic one: the transport header starts at *Offset) or 2 (a
-   later fragment: *Offset is the fragment payload, not a transport header). FALSE: truncated, or too many. */
+   later fragment: *Offset is the fragment payload, not a transport header). FALSE: truncated, more than
+   FW6_MAX_EXT_HEADERS extension headers, or a Fragment header after a Fragment header (RFC 6980 2 / 8200 4.5:
+   one per datagram; not a form any sender needs, so it is invalid rather than something to reason about). */
 static BOOLEAN Fw6FindTransport(const UCHAR *D, ULONG Len, UCHAR Nh, PUCHAR Proto, PULONG Offset, PUCHAR Fragment)
 {
     ULONG Pos = 40, n;
 
     *Fragment = 0;
-    for (n = 0; n < FW6_MAX_EXT_HEADERS; n++)
+    for (n = 0; n <= FW6_MAX_EXT_HEADERS; n++)     /* the last pass reads the upper-layer header, not an extension */
     {
         switch (Nh)
         {
@@ -1897,7 +1908,7 @@ static BOOLEAN Fw6FindTransport(const UCHAR *D, ULONG Len, UCHAR Nh, PUCHAR Prot
             case 44:    /* fragment */
             {
                 ULONG FragOffset;
-                if (Len - Pos < 8)
+                if (n == FW6_MAX_EXT_HEADERS || *Fragment || Len - Pos < 8)
                     return FALSE;
                 FragOffset = (((ULONG)D[Pos + 2] << 8) | D[Pos + 3]) & 0xFFF8;
                 Nh = D[Pos];
@@ -2064,6 +2075,11 @@ BOOLEAN NitroFwInboundAllowed6(PIP_INTERFACE Interface, const UCHAR *D, ULONG Le
             Pkt.IcmpCode = D[Off + 1];
 
             Builtin = Fw6BuiltinIcmp(D, Avail, Off, Pkt.IcmpType, Pkt.IcmpCode);
+            /* RFC 6980: neighbour discovery is never fragmented (RFC 4861 messages fit one link MTU); the
+               same for MLD, which is link-local and hop limit 1. A first (or atomic) fragment carrying one is
+               invalid, not something to pass on the strength of the first fragment alone. */
+            if (Builtin != -1 && Fragment)
+                return Fw6DropInvalid(&Pkt, Len);
             if (Builtin == 1)
                 goto PassCounted;
             if (Builtin == 0)
@@ -2077,8 +2093,14 @@ BOOLEAN NitroFwInboundAllowed6(PIP_INTERFACE Interface, const UCHAR *D, ULONG Le
                     if (Fw6ErrorRelated(D, Len, Off))
                         goto PassCounted;
                     break;
-                case 129:   /* echo reply */
-                    goto PassCounted;
+                case 129:
+                    /* echo reply: it passes only if it answers an echo request this host sent. Nothing in
+                       this stack sends one yet (no ICMPv6 ping: lwIP's raw API is off), so none can be
+                       expected: it is unsolicited and is evaluated like a request (the rules, then the
+                       default), as IPv4 does for a reply with no request behind it. When ICMPv6 ping exists
+                       this must look the request up (FwIcmpReplyExpected for IPv4) before it is evaluated. */
+                    Pkt.IcmpUnsolicitedReply = TRUE;
+                    break;
             }
             break;
         }
