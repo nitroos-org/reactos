@@ -155,6 +155,9 @@ KMT_TESTFUNC Test_PsQuotaLimitedTrim;
 KMT_TESTFUNC Test_PsQuotaLimitedSetLimits;
 KMT_TESTFUNC Test_PsQuotaLimitedThreshold;
 KMT_TESTFUNC Test_PsQuotaSwitchRace;
+KMT_TESTFUNC Test_SeAccessCheckDifferential;
+KMT_TESTFUNC Test_SeAccessCheckDifferentialFull;
+KMT_TESTFUNC Test_SeAccessCheckDifferentialPerf;
 KMT_TESTFUNC Test_SeAutoInherit;
 KMT_TESTFUNC Test_SeInheritance;
 KMT_TESTFUNC Test_SeLogonSession;
@@ -341,6 +344,9 @@ const KMT_TEST TestList[] =
     { "RtlStackKM",                         Test_RtlStack },
     { "RtlStrSafeKM",                       Test_RtlStrSafe },
     { "RtlUnicodeStringKM",                 Test_RtlUnicodeString },
+    { "SeAccessCheckDifferential",          Test_SeAccessCheckDifferential },
+    { "-SeAccessCheckDifferentialFull",     Test_SeAccessCheckDifferentialFull },
+    { "-SeAccessCheckDifferentialPerf",     Test_SeAccessCheckDifferentialPerf },
     { "SeAutoInherit",                      Test_SeAutoInherit },
     { "SeInheritance",                      Test_SeInheritance },
     { "SeLogonSession",                     Test_SeLogonSession },
