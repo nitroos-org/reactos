@@ -1096,7 +1096,8 @@ static HRESULT WINAPI fw_policy_get_CurrentProfile(
     fw_policy *This = impl_from_INetFwPolicy( iface );
 
     TRACE("%p, %p\n", This, profile);
-    return NetFwProfile_create( NULL, (void **)profile );
+    if (!profile) return E_POINTER;
+    return NetFwProfile_create_type( NET_FW_PROFILE_CURRENT, (void **)profile );
 }
 
 static HRESULT WINAPI fw_policy_GetProfileByType(
@@ -1106,8 +1107,9 @@ static HRESULT WINAPI fw_policy_GetProfileByType(
 {
     fw_policy *This = impl_from_INetFwPolicy( iface );
 
-    FIXME("%p, %u, %p\n", This, profileType, profile);
-    return E_NOTIMPL;
+    TRACE("%p, %u, %p\n", This, profileType, profile);
+    if (!profile) return E_POINTER;
+    return NetFwProfile_create_type( profileType, (void **)profile );
 }
 
 static const struct INetFwPolicyVtbl fw_policy_vtbl =
