@@ -157,6 +157,7 @@ list(APPEND SOURCE
     NtQuerySystemProcessorPerformance.c
     NtQuerySystemProcessInformationTail.c
     NtQueryValueKey.c
+    NtRegistryServices.c
     NtQueryVirtualMemory.c
     NtQueryVirtualMemoryRegion.c
     NtQueryVolumeInformationFile.c

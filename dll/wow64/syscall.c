@@ -1536,6 +1536,157 @@ static NTSTATUS ExtendedParameters32(ULONG Address, ULONG Count, BOOLEAN Placeme
     return STATUS_SUCCESS;
 }
 
+/* NtCompactKeys: the guest array holds Count 32-bit handles, the kernel wants Count native ones. The
+ * array is read (one touch per page) before anything is allocated, so a Count the guest has no
+ * memory for is an access violation, as for the native caller, and never a huge allocation. */
+static NTSTATUS CompactKeys32(ULONG Count, ULONG Array, WOW64_CLEANUP *Cleanup)
+{
+    const ULONG *From;
+    HANDLE *To;
+    ULONG i;
+    if (!Count) return NtCompactKeys(0, NULL);
+    if (!GuestSpan(Array, (ULONG64)Count * sizeof(ULONG))) return STATUS_ACCESS_VIOLATION;
+    ProbeInput(Array, Count * sizeof(ULONG));
+    To = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, (SIZE_T)Count * sizeof(HANDLE));
+    if (!To) return STATUS_INSUFFICIENT_RESOURCES;
+    From = PTR32(Array);
+    for (i = 0; i < Count; i++) To[i] = HANDLE32(((volatile const ULONG *)From)[i]);
+    return NtCompactKeys(Count, To);
+}
+
+/* NtQueryMultipleValueKey: every KEY_VALUE_ENTRY of the guest array (16 bytes) holds a pointer to a
+ * UNICODE_STRING (itself with a 32-bit buffer pointer), the native one (24 bytes) the native
+ * pointer. The names are converted into one native block, and DataLength, DataOffset and Type are
+ * copied back to the guest array whatever the status (the kernel fills them in for the buffer
+ * overflow case as well). The value buffer holds the data only: the same bytes in both ABIs, as are
+ * the two length variables, so the kernel works on the guest's own memory. */
+typedef struct { ULONG ValueName, DataLength, DataOffset, Type; } WOW64_KEY_VALUE_ENTRY;
+C_ASSERT(sizeof(WOW64_KEY_VALUE_ENTRY) == 16);
+
+static NTSTATUS QueryMultipleValueKey32(const ULONG *a, WOW64_CLEANUP *Cleanup)
+{
+    volatile WOW64_KEY_VALUE_ENTRY *Guest = PTR32(a[1]);
+    PKEY_VALUE_ENTRY Entries = NULL;
+    UNICODE_STRING *Names;
+    NTSTATUS Status;
+    ULONG Count = a[2], i;
+    if (Count)
+    {
+        if (!GuestSpan(a[1], (ULONG64)Count * sizeof(*Guest))) return STATUS_ACCESS_VIOLATION;
+        ProbeOutput(a[1], Count * sizeof(*Guest));
+        Entries = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY,
+                                                    (SIZE_T)Count * (sizeof(*Entries) + sizeof(*Names)));
+        if (!Entries) return STATUS_INSUFFICIENT_RESOURCES;
+        Names = (UNICODE_STRING *)(Entries + Count);
+        for (i = 0; i < Count; i++)
+        {
+            ULONG Name = Guest[i].ValueName;
+            Entries[i].ValueName = Name ? String32(&Names[i], PTR32(Name)) : NULL;
+            Entries[i].DataLength = Guest[i].DataLength;
+            Entries[i].DataOffset = Guest[i].DataOffset;
+            Entries[i].Type = Guest[i].Type;
+        }
+    }
+    else
+        Entries = PTR32(a[1]);
+    Status = NtQueryMultipleValueKey(HANDLE32(a[0]), Entries, Count, PTR32(a[3]), PTR32(a[4]), PTR32(a[5]));
+    if (Count)
+    {
+        for (i = 0; i < Count; i++)
+        {
+            Guest[i].DataLength = Entries[i].DataLength;
+            Guest[i].DataOffset = Entries[i].DataOffset;
+            Guest[i].Type = Entries[i].Type;
+        }
+    }
+    return Status;
+}
+
+/* NtQueryOpenSubKeysEx fills a buffer with a ULONG count and an array of { process id, key name }
+ * entries; the names follow the array. The native array entry is a HANDLE and a UNICODE_STRING
+ * (24 bytes, array at offset 8), the guest one 12 bytes (array at offset 4) with a 32-bit name
+ * pointer. The kernel gets a buffer twice the guest's (a guest layout that fits needs less than
+ * that natively), and when it answers that it needs more it is asked again with the size it named,
+ * so the guest's required size can be worked out from the entries. The result is repacked into the
+ * guest's buffer: header, entries, then the names in order, each pointer inside the guest buffer.
+ * A guest buffer that is too small gets the kernel's status and the size the guest layout needs. */
+typedef struct { ULONG Process; WOW64_STRING KeyName; } WOW64_KEY_PID;
+typedef struct { HANDLE Process; UNICODE_STRING KeyName; } NATIVE_KEY_PID;
+C_ASSERT(sizeof(WOW64_KEY_PID) == 12);
+
+static NTSTATUS QueryOpenSubKeysEx32(const ULONG *a, WOW64_CLEANUP *Cleanup)
+{
+    OBJECT_ATTRIBUTES Attributes;
+    SECURITY_DESCRIPTOR Descriptor;
+    UNICODE_STRING Name;
+    ULONG GuestLength = a[1], NativeLength, Required = 0, Count, i, Need, Offset;
+    ULONG64 Wanted;
+    PUCHAR Native;
+    NATIVE_KEY_PID *From;
+    WOW64_KEY_PID *To;
+    NTSTATUS Status;
+    int Attempt;
+
+    Status = Attributes32(&Attributes, &Name, &Descriptor, a[0]);
+    if (!NT_SUCCESS(Status)) return Status;
+    if (a[3]) ProbeOutput(a[3], sizeof(ULONG));
+    if (GuestLength)
+    {
+        if (!GuestSpan(a[2], GuestLength)) return STATUS_ACCESS_VIOLATION;
+        ProbeOutput(a[2], GuestLength);
+    }
+    Wanted = (ULONG64)GuestLength * 2 + sizeof(NATIVE_KEY_PID);
+    if (Wanted > 0x10000000) return STATUS_INSUFFICIENT_RESOURCES;
+    NativeLength = (ULONG)Wanted;
+    for (Attempt = 0; ; Attempt++)
+    {
+        if (Cleanup->Buffer) RtlFreeHeap(RtlGetProcessHeap(), 0, Cleanup->Buffer);
+        Native = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, NativeLength);
+        if (!Native) return STATUS_INSUFFICIENT_RESOURCES;
+        Required = 0;
+        Status = NtQueryOpenSubKeysEx(a[0] ? &Attributes : NULL, NativeLength, Native, &Required);
+        if ((Status != STATUS_BUFFER_TOO_SMALL && Status != STATUS_BUFFER_OVERFLOW) ||
+            Required <= NativeLength || Required > 0x10000000 || Attempt == 2)
+            break;
+        NativeLength = Required;
+    }
+    if (!NT_SUCCESS(Status))
+    {
+        /* Nothing to convert; a size the kernel named is the native one, which the guest layout
+         * does not use, so only the status is passed on */
+        return Status;
+    }
+    /* Validate the kernel's answer before using it */
+    Count = *(ULONG *)Native;
+    if ((ULONG64)Count * sizeof(NATIVE_KEY_PID) + 8 > NativeLength) return STATUS_INFO_LENGTH_MISMATCH;
+    From = (NATIVE_KEY_PID *)(Native + 8);
+    Need = sizeof(ULONG) + Count * sizeof(WOW64_KEY_PID);
+    for (i = 0; i < Count; i++)
+    {
+        PUCHAR Text = (PUCHAR)From[i].KeyName.Buffer;
+        if (From[i].KeyName.Length & 1) return STATUS_INFO_LENGTH_MISMATCH;
+        if (From[i].KeyName.Length &&
+            (Text < Native || (ULONG64)(Text - Native) + From[i].KeyName.Length > NativeLength))
+            return STATUS_INFO_LENGTH_MISMATCH;
+        Need += From[i].KeyName.Length;
+    }
+    if (a[3]) *(volatile ULONG *)PTR32(a[3]) = Need;
+    if (Need > GuestLength) return STATUS_BUFFER_TOO_SMALL;
+    *(volatile ULONG *)PTR32(a[2]) = Count;
+    To = (WOW64_KEY_PID *)((PUCHAR)PTR32(a[2]) + sizeof(ULONG));
+    Offset = sizeof(ULONG) + Count * sizeof(WOW64_KEY_PID);
+    for (i = 0; i < Count; i++)
+    {
+        To[i].Process = HandleToUlong(From[i].Process);
+        To[i].KeyName.Length = From[i].KeyName.Length;
+        To[i].KeyName.MaximumLength = From[i].KeyName.Length;
+        To[i].KeyName.Buffer = From[i].KeyName.Length ? a[2] + Offset : 0;
+        RtlCopyMemory((PUCHAR)PTR32(a[2]) + Offset, From[i].KeyName.Buffer, From[i].KeyName.Length);
+        Offset += From[i].KeyName.Length;
+    }
+    return Status;
+}
+
 /* a is Wow64SystemService's local copy of the guest argument list: counts and pointers
  * read from it (e.g. the NtWaitForMultipleObjects and NtRaiseHardError counts) cannot
  * change between their check and their use. What they point to is still guest memory. */
@@ -2283,6 +2434,12 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         Status = NtCreateKey(&Cleanup->Handle, KeyAccess, OA(2), a[3], String32(&Class, P(4)), a[5], P(6));
         RETURN_HANDLE();
     }
+    case W64_NtCompactKeys:
+        return CompactKeys32(a[0], a[1], Cleanup);
+    case W64_NtQueryMultipleValueKey:
+        return QueryMultipleValueKey32(a, Cleanup);
+    case W64_NtQueryOpenSubKeysEx:
+        return QueryOpenSubKeysEx32(a, Cleanup);
     case W64_NtNotifyChangeKey:
     case W64_NtNotifyChangeMultipleKeys:
     {
