@@ -1069,7 +1069,7 @@ RtlNewSecurityObjectEx(IN PSECURITY_DESCRIPTOR ParentDescriptor,
                        IN HANDLE Token,
                        IN PGENERIC_MAPPING GenericMapping)
 {
-    DPRINT1("RtlNewSecurityObjectEx(%p)\n", ParentDescriptor);
+    DPRINT("RtlNewSecurityObjectEx(%p)\n", ParentDescriptor);
 
     /* Call the internal API */
     return RtlpNewSecurityObject(ParentDescriptor,
