@@ -51,6 +51,7 @@
 #include "rpcproxy.h"
 
 #include "rpc_binding.h"
+#include "rpc_assoc.h"
 #include "rpc_server.h"
 
 #include "wine/debug.h"
@@ -142,6 +143,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 
     case DLL_PROCESS_DETACH:
         if (lpvReserved) break; /* do nothing if process is shutting down */
+        RpcAssoc_FlushIdle();
         RPCRT4_destroy_all_protseqs();
         RPCRT4_ServerFreeAllRegisteredAuthInfo();
         DeleteCriticalSection(&uuid_cs);
