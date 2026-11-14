@@ -69,6 +69,15 @@ CmpInitializeCache(VOID)
         ExInitializePushLock(&CmpNameCacheTable[i].Lock);
     }
 
+    /*
+     * The delayed close size is registry-tunable but is stored in the
+     * 12-bit KCB DelayedCloseIndex field: clamp it so it never truncates.
+     */
+    if (CmpDelayedCloseSize > CM_KCB_MAX_DELAYED_CLOSE_SIZE)
+    {
+        CmpDelayedCloseSize = CM_KCB_MAX_DELAYED_CLOSE_SIZE;
+    }
+
     /* Setup the delayed close table */
     CmpInitializeDelayedCloseTable();
 }
@@ -857,12 +866,15 @@ CmpCreateKeyControlBlock(IN PHHIVE Hive,
                 Kcb->KcbLastWriteTime = Node->LastWriteTime;
                 Kcb->KcbMaxNameLen = (USHORT)Node->MaxNameLen;
                 Kcb->KcbMaxValueNameLen = (USHORT)Node->MaxValueNameLen;
-                Kcb->KcbMaxValueDataLen = (USHORT)Node->MaxValueDataLen;
+                Kcb->KcbMaxValueDataLen = Node->MaxValueDataLen;
             }
             else
             {
-                /* Dereference the KCB */
-                CmpDereferenceKeyControlBlockWithLock(Parent, FALSE);
+                /* Dereference the parent (a root key has none) */
+                if (Parent)
+                {
+                    CmpDereferenceKeyControlBlockWithLock(Parent, FALSE);
+                }
 
                 /* Remove the KCB and free it */
                 CmpRemoveKeyControlBlock(Kcb);
