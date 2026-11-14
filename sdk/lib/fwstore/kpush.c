@@ -100,6 +100,93 @@ static ULONG ParseAddr4(const FWR *raw, PCWSTR key, NITROFW_ADDR4_RANGE *arr, UL
     return n;
 }
 
+/* The IPv6 address filter (HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Ipv6Enable, REG_DWORD,
+   non-zero = tcpip has IPv6). Off, the rules' IPv6 addresses (LA6/RA6) are not sent, as before IPv6 existed. */
+static BOOL Ipv6SwitchOn(void)
+{
+    HKEY hk; DWORD v = 0, cb = sizeof(v), t = 0; BOOL on = FALSE;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters", 0, KEY_READ, &hk) == 0)
+    {
+        if (RegQueryValueExW(hk, L"Ipv6Enable", NULL, &t, (BYTE *)&v, &cb) == 0 && t == REG_DWORD && v) on = TRUE;
+        RegCloseKey(hk);
+    }
+    return on;
+}
+
+/* An IPv6 address in text (RFC 4291 2.2 forms 1 and 2: hex groups, one "::"; no embedded IPv4, no zone) up to
+   a '/', '-' or the end. */
+static BOOL ParseV6Str(PCWSTR s, PCWSTR *end, BYTE *out)
+{
+    WORD g[8]; int n = 0, gap = -1, i;
+    memset(out, 0, 16);
+    if (s[0] == L':' && s[1] == L':') { gap = 0; s += 2; }
+    else if (s[0] == L':') return FALSE;
+    while (*s && *s != L'/' && *s != L'-')
+    {
+        DWORD v = 0; int d = 0;
+        while ((*s >= L'0' && *s <= L'9') || (*s >= L'a' && *s <= L'f') || (*s >= L'A' && *s <= L'F'))
+        {
+            v = v * 16 + (*s <= L'9' ? *s - L'0' : (*s | 0x20) - L'a' + 10); s++; d++;
+            if (d > 4) return FALSE;
+        }
+        if (!d || n >= 8) return FALSE;
+        g[n++] = (WORD)v;
+        if (*s == L':')
+        {
+            s++;
+            if (*s == L':') { if (gap >= 0) return FALSE; gap = n; s++; }
+            else if (!*s || *s == L'/' || *s == L'-') return FALSE;
+        }
+        else if (*s && *s != L'/' && *s != L'-') return FALSE;
+    }
+    if (gap < 0 ? n != 8 : n > 7) return FALSE;
+    {
+        int zeros = 8 - n, o = 0;
+        for (i = 0; i < n; i++)
+        {
+            if (i == gap) o += zeros;
+            out[o * 2] = (BYTE)(g[i] >> 8); out[o * 2 + 1] = (BYTE)g[i]; o++;
+        }
+    }
+    *end = s;
+    return TRUE;
+}
+
+/* IPv6 ranges of LA6/RA6: "addr", "addr/prefixlength", "addr-addr"; entries that do not parse (keywords such as
+   LocalSubnet are not resolved for IPv6) are skipped. A list with entries of which none parses becomes one
+   range that no packet is in, so that the rule never matches instead of matching everything. */
+static ULONG ParseAddr6(const FWR *raw, PCWSTR key, NITROFW_ADDR6_RANGE *arr, ULONG max)
+{
+    ULONG i, n = 0, cnt = FwrCount(raw, key);
+    for (i = 0; i < cnt && n < max; i++)
+    {
+        PCWSTR v = FwrGet(raw, key, i), e; BYTE a[16], b[16];
+        if (!ParseV6Str(v, &e, a)) continue;
+        if (*e == L'/')
+        {
+            int len = _wtoi(e + 1), k;
+            if (len < 0 || len > 128 || e[1] < L'0' || e[1] > L'9') continue;
+            for (k = 0; k < 16; k++)
+            {
+                int bits = len - k * 8; BYTE mask = bits >= 8 ? 0xFF : (bits <= 0 ? 0 : (BYTE)(0xFF << (8 - bits)));
+                arr[n].Low[k] = a[k] & mask; arr[n].High[k] = a[k] | (BYTE)~mask;
+            }
+            n++;
+        }
+        else if (*e == L'-')
+        {
+            if (!ParseV6Str(e + 1, &e, b) || memcmp(a, b, 16) > 0) continue;
+            memcpy(arr[n].Low, a, 16); memcpy(arr[n].High, b, 16); n++;
+        }
+        else { memcpy(arr[n].Low, a, 16); memcpy(arr[n].High, a, 16); n++; }
+    }
+    if (cnt && !n)
+    {
+        memset(arr[0].Low, 0xFF, 16); memset(arr[0].High, 0xFF, 16); n = 1;
+    }
+    return n;
+}
+
 static ULONG ParsePorts(const FWR *raw, PCWSTR k1, PCWSTR k2, NITROFW_PORT_RANGE *arr, ULONG max)
 {
     ULONG pass, i, n = 0;
@@ -136,10 +223,11 @@ static PWSTR ToNtPath(PCWSTR app)
     return out;
 }
 
-static BOOL BuildRule(BUF *b, const FW_RULE *r)
+static BOOL BuildRule(BUF *b, const FW_RULE *r, BOOL v6)
 {
     NITROFW_RULE hdr; NITROFW_PORT_RANGE lp[64], rp[64]; NITROFW_ADDR4_RANGE la[64], ra[64];
-    ULONG start = (ULONG)b->len, nlp, nrp, nla, nra, i;
+    NITROFW_ADDR6_RANGE la6[64], ra6[64];
+    ULONG start = (ULONG)b->len, nlp, nrp, nla, nra, nla6 = 0, nra6 = 0, i;
     PWSTR nt = NULL; PCWSTR v; ULONG ifm = 0;
     memset(&hdr, 0, sizeof(hdr));
     hdr.Action = r->Action ? NITROFW_ACTION_ALLOW : NITROFW_ACTION_BLOCK;
@@ -151,6 +239,11 @@ static BOOL BuildRule(BUF *b, const FW_RULE *r)
     nrp = ParsePorts(&r->Raw, L"RPort2_10", L"RPort", rp, 64);
     nla = ParseAddr4(&r->Raw, L"LA4", la, 64);
     nra = ParseAddr4(&r->Raw, L"RA4", ra, 64);
+    if (v6)
+    {
+        nla6 = ParseAddr6(&r->Raw, L"LA6", la6, 64);
+        nra6 = ParseAddr6(&r->Raw, L"RA6", ra6, 64);
+    }
     for (i = 0; (v = FwrGet(&r->Raw, L"IFType", i)) != NULL; i++)
         ifm |= !_wcsicmp(v, L"Lan") ? NITROFW_IFTYPE_LAN : (!_wcsicmp(v, L"Wireless") ? NITROFW_IFTYPE_WIRELESS : (!_wcsicmp(v, L"RemoteAccess") ? NITROFW_IFTYPE_REMOTEACCESS : 0));
     hdr.IfTypes = ifm ? ifm : NITROFW_IFTYPE_ALL;
@@ -160,6 +253,8 @@ static BOOL BuildRule(BUF *b, const FW_RULE *r)
     if (nrp) { PadTo8(b); hdr.RemotePortCount = nrp; hdr.RemotePortOffset = (ULONG)b->len - start; Put(b, rp, nrp * sizeof(rp[0])); }
     if (nla) { PadTo8(b); hdr.LocalAddr4Count = nla; hdr.LocalAddr4Offset = (ULONG)b->len - start; Put(b, la, nla * sizeof(la[0])); }
     if (nra) { PadTo8(b); hdr.RemoteAddr4Count = nra; hdr.RemoteAddr4Offset = (ULONG)b->len - start; Put(b, ra, nra * sizeof(ra[0])); }
+    if (nla6) { PadTo8(b); hdr.LocalAddr6Count = nla6; hdr.LocalAddr6Offset = (ULONG)b->len - start; Put(b, la6, nla6 * sizeof(la6[0])); }
+    if (nra6) { PadTo8(b); hdr.RemoteAddr6Count = nra6; hdr.RemoteAddr6Offset = (ULONG)b->len - start; Put(b, ra6, nra6 * sizeof(ra6[0])); }
     if (r->Icmp && (r->Protocol == 1 || r->Protocol == 58))
     {
         NITROFW_ICMP_ENTRY ic[32]; ULONG n = 0;
@@ -183,7 +278,7 @@ static BOOL BuildRule(BUF *b, const FW_RULE *r)
 DWORD FwPushToKernel(ULONGLONG gen, BOOL *pPresent)
 {
     FW_RULESET rs; BUF b = { 0 }; NITROFW_POLICY pol; HANDLE h; DWORD err, ret, i;
-    ULONG cnt = 0; ULONG bit;
+    ULONG cnt = 0; ULONG bit; BOOL v6on = Ipv6SwitchOn();
     HKEY hk; DWORD enforce = 1, cb = sizeof(DWORD), t;
     if (pPresent) *pPresent = FALSE;
     h = CreateFileW(NITROFW_USER_PATH, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
@@ -211,7 +306,7 @@ DWORD FwPushToKernel(ULONGLONG gen, BOOL *pPresent)
     Put(&b, &pol, sizeof(pol));
     ((NITROFW_POLICY *)b.p)->RulesOffset = sizeof(pol);
     for (i = 0; i < rs.N && cnt < NITROFW_MAX_RULES; i++)
-        if (rs.R[i].Enabled && BuildRule(&b, &rs.R[i])) cnt++;
+        if (rs.R[i].Enabled && BuildRule(&b, &rs.R[i], v6on)) cnt++;
     ((NITROFW_POLICY *)b.p)->RuleCount = cnt;
     ((NITROFW_POLICY *)b.p)->TotalSize = (ULONG)b.len;
     FwRuleSetFree(&rs);
