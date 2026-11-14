@@ -1,0 +1,8 @@
+/*
+ * PROJECT:     ReactOS Common Controls
+ * LICENSE:     LGPL-2.1-or-later (https://spdx.org/licenses/LGPL-2.1-or-later)
+ * PURPOSE:     Resources of the v6 image of comctl32: rsrc.rc with the version of the v6 assembly
+ */
+
+#define COMCTL32_V6_IMAGE
+#include "rsrc.rc"

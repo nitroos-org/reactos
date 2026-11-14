@@ -12,7 +12,8 @@ list(APPEND SOURCE
     TreeViewCheckState.c
     testlist.c
     toolbar.c
-    tooltip.c)
+    tooltip.c
+    version.c)
 
 add_executable(comctl32_apitest
     ${SOURCE}

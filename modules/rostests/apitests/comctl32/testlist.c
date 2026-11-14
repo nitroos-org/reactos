@@ -12,6 +12,7 @@ extern void func_tabv6(void);
 extern void func_treeviewv6(void);
 extern void func_toolbarv6(void);
 extern void func_tooltipv6(void);
+extern void func_version(void);
 
 const struct test winetest_testlist[] =
 {
@@ -26,5 +27,6 @@ const struct test winetest_testlist[] =
     { "treeviewv6", func_treeviewv6 },
     { "toolbarv6", func_toolbarv6 },
     { "tooltipv6", func_tooltipv6 },
+    { "version", func_version },
     { 0, 0 }
 };
