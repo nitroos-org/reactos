@@ -180,7 +180,21 @@ typedef struct _AFD_SEND_GHOST {
 typedef struct _AFD_DATA_WINDOW {
     PCHAR Window;
     UINT BytesUsed, Size, Content;
+    /* The window is in nonpaged pool (a stream socket's receive window up to AFD_NONPAGED_WINDOW_MAX): the
+     * transport receives into it without page locking or mapping (TdiReceiveNonPaged) */
+    BOOLEAN NonPaged;
+    /* The process whose nonpaged pool quota the window is charged to (referenced); NULL when it is not */
+    PEPROCESS QuotaProcess;
 } AFD_DATA_WINDOW, *PAFD_DATA_WINDOW;
+
+/* The most nonpaged pool a socket's receive window takes: bigger ones (SO_RCVBUF) stay in paged pool */
+#define AFD_NONPAGED_WINDOW_MAX 0x10000
+
+/* The nonpaged receive windows of all sockets together may take AfdNonPagedWindowBudget bytes (RAM / 128,
+ * 4 MB to 64 MB, set at load); a window that would go over it, or over the quota of the process that owns
+ * the socket, lives in paged pool instead. AfdNonPagedWindowBytes is what they take now. */
+extern ULONG AfdNonPagedWindowBudget;
+extern volatile LONG AfdNonPagedWindowBytes;
 
 /*
  * What the transport tells AFD about a received datagram besides its source, through the Options
@@ -284,6 +298,7 @@ typedef struct _AFD_FCB {
     BOOLEAN AcceptWorkQueued;
     PIO_WORKITEM RecvRelaunchWorkItem;
     BOOLEAN RecvRelaunchQueued;
+    PEPROCESS OwnerProcess; /* stream socket: the process that created it (referenced), for the window's quota */
 } AFD_FCB, *PAFD_FCB;
 
 /* bind.c */
@@ -296,6 +311,13 @@ AfdBindSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 /* connect.c */
 
 NTSTATUS MakeSocketIntoConnection(PAFD_FCB FCB, BOOL Receive);
+/* Posts a TDI receive into the receive window at Buffer (read.c) */
+NTSTATUS AfdTdiReceiveWindow(PAFD_FCB FCB, PCHAR Buffer, UINT Length);
+/* Receive window of Size bytes: nonpaged (charged to the owner's quota and to the global budget) when
+ * the socket is a stream socket, Size is up to AFD_NONPAGED_WINDOW_MAX and both allow it, else paged. */
+PVOID AfdAllocRecvWindow(PAFD_FCB FCB, UINT Size, PBOOLEAN NonPaged, PEPROCESS *QuotaProcess);
+/* Frees a window from AfdAllocRecvWindow and returns what it was charged */
+VOID AfdFreeRecvWindow(PVOID Window, UINT Size, BOOLEAN NonPaged, PEPROCESS QuotaProcess);
 NTSTATUS WarmSocketForConnection( PAFD_FCB FCB );
 VOID AfdCloseConnectionEndpoint( PAFD_FCB FCB );
 NTSTATUS NTAPI

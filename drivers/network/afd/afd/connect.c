@@ -303,9 +303,10 @@ MakeSocketIntoConnection(PAFD_FCB FCB, BOOL Receive) {
     /* Allocate the receive area and start receiving */
     if (!FCB->Recv.Window)
     {
-        FCB->Recv.Window = ExAllocatePoolWithTag(PagedPool,
-                                                 FCB->Recv.Size,
-                                                 TAG_AFD_DATA_BUFFER);
+        FCB->Recv.Window = AfdAllocRecvWindow(FCB,
+                                              FCB->Recv.Size,
+                                              &FCB->Recv.NonPaged,
+                                              &FCB->Recv.QuotaProcess);
 
         if( !FCB->Recv.Window ) return STATUS_NO_MEMORY;
     }
@@ -321,13 +322,7 @@ MakeSocketIntoConnection(PAFD_FCB FCB, BOOL Receive) {
 
     if (Receive)
     {
-        Status = TdiReceive( &FCB->ReceiveIrp.InFlightRequest,
-                            FCB->Connection.Object,
-                            TDI_RECEIVE_NORMAL,
-                            FCB->Recv.Window,
-                            FCB->Recv.Size,
-                            ReceiveComplete,
-                            FCB );
+        Status = AfdTdiReceiveWindow( FCB, FCB->Recv.Window, FCB->Recv.Size );
 
         if( Status == STATUS_PENDING ) Status = STATUS_SUCCESS;
     }

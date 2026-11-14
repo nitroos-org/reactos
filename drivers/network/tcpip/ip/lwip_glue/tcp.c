@@ -2,6 +2,7 @@
 #include <lwip/tcpip.h>
 
 #include "lwip_glue.h"
+#include <loopback.h>
 
 /* tcp_process_refused_data hands over data held while a connection waited to be accepted */
 #include <lwip/priv/tcp_priv.h>
@@ -535,7 +536,8 @@ InternalRecvEventHandler(void *arg, PTCP_PCB pcb, struct pbuf *p, const err_t er
          * it writes more (one 8K write is five full segments and a short one) waits a tick per write: 2 MB/s
          * for a loopback loop that does 50 MB/s when the window update of every segment used to acknowledge
          * it. Where the round trip costs nothing the extra packet is free */
-        if (ip4_addr_isloopback(&pcb->remote_ip) || ip4_addr_cmp(&pcb->remote_ip, &pcb->local_ip))
+        if ((ip4_addr_isloopback(&pcb->remote_ip) || ip4_addr_cmp(&pcb->remote_ip, &pcb->local_ip)) &&
+            !LoopDataFollows(pcb))
             tcp_ack_now(pcb);
 
         /* Autotuning, as Windows does (the same default socket took 2.7 MB from a sender that did not read and

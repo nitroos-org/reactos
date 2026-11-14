@@ -9,6 +9,78 @@
  */
 
 #include "afd.h"
+#include <ndk/psfuncs.h>
+
+ULONG AfdNonPagedWindowBudget = 0x2000000;
+volatile LONG AfdNonPagedWindowBytes;
+
+PVOID AfdAllocRecvWindow( PAFD_FCB FCB, UINT Size, PBOOLEAN NonPaged, PEPROCESS *QuotaProcess )
+{
+    PVOID Window;
+    PEPROCESS Process = FCB->OwnerProcess;
+
+    *NonPaged = FALSE;
+    *QuotaProcess = NULL;
+
+    if (Size != 0 && Size <= AFD_NONPAGED_WINDOW_MAX && !(FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS) && Process)
+    {
+        /* Take the share of the budget first, then the quota; any refusal (or a failed allocation)
+         * gives back what was taken and falls through to the paged window, the connect never fails for it */
+        if (InterlockedExchangeAdd(&AfdNonPagedWindowBytes, (LONG)Size) + (LONG)Size <= (LONG)AfdNonPagedWindowBudget)
+        {
+            if (NT_SUCCESS(PsChargeProcessNonPagedPoolQuota(Process, Size)))
+            {
+                Window = ExAllocatePoolWithTag(NonPagedPool, Size, TAG_AFD_DATA_BUFFER);
+                if (Window)
+                {
+                    ObReferenceObject(Process);
+                    *NonPaged = TRUE;
+                    *QuotaProcess = Process;
+                    return Window;
+                }
+                PsReturnProcessNonPagedPoolQuota(Process, Size);
+            }
+        }
+        InterlockedExchangeAdd(&AfdNonPagedWindowBytes, -(LONG)Size);
+    }
+
+    return ExAllocatePoolWithTag(PagedPool, Size, TAG_AFD_DATA_BUFFER);
+}
+
+VOID AfdFreeRecvWindow( PVOID Window, UINT Size, BOOLEAN NonPaged, PEPROCESS QuotaProcess )
+{
+    ExFreePoolWithTag(Window, TAG_AFD_DATA_BUFFER);
+
+    if (NonPaged)
+    {
+        InterlockedExchangeAdd(&AfdNonPagedWindowBytes, -(LONG)Size);
+        if (QuotaProcess)
+        {
+            PsReturnProcessNonPagedPoolQuota(QuotaProcess, Size);
+            ObDereferenceObject(QuotaProcess);
+        }
+    }
+}
+
+NTSTATUS AfdTdiReceiveWindow( PAFD_FCB FCB, PCHAR Buffer, UINT Length )
+{
+    if (FCB->Recv.NonPaged)
+        return TdiReceiveNonPaged( &FCB->ReceiveIrp.InFlightRequest,
+                                   FCB->Connection.Object,
+                                   TDI_RECEIVE_NORMAL,
+                                   Buffer,
+                                   Length,
+                                   ReceiveComplete,
+                                   FCB );
+
+    return TdiReceive( &FCB->ReceiveIrp.InFlightRequest,
+                       FCB->Connection.Object,
+                       TDI_RECEIVE_NORMAL,
+                       Buffer,
+                       Length,
+                       ReceiveComplete,
+                       FCB );
+}
 
 /* After shutdown(SD_RECEIVE) only the receives that were pending are served: the buffer is refilled
  * for them alone (ForPending), when the data that arrived did not satisfy them all */
@@ -49,13 +121,9 @@ static VOID RefillSocketBufferEx( PAFD_FCB FCB, BOOLEAN ForPending )
 
     AFD_DbgPrint(MID_TRACE,("Replenishing buffer\n"));
 
-    TdiReceive( &FCB->ReceiveIrp.InFlightRequest,
-                FCB->Connection.Object,
-                TDI_RECEIVE_NORMAL,
-                FCB->Recv.Window + FCB->Recv.Content,
-                FCB->Recv.Size - FCB->Recv.Content,
-                ReceiveComplete,
-                FCB );
+    AfdTdiReceiveWindow( FCB,
+                         FCB->Recv.Window + FCB->Recv.Content,
+                         FCB->Recv.Size - FCB->Recv.Content );
 }
 
 static VOID RefillSocketBuffer( PAFD_FCB FCB )

@@ -157,4 +157,7 @@ void LibIPInsertPacket(void *ifarg, const void *const data, const u32_t size);
 void LibIPInitialize(void);
 void LibIPShutdown(void);
 
+/* Frees the blocks that malloc kept for reuse (memory.c) */
+void LibMemoryTrim(void);
+
 #endif
