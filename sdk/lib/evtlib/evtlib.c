@@ -394,16 +394,99 @@ ElfpInitNewFile(
     return STATUS_SUCCESS;
 }
 
+/*
+ * Raises the maximum size of a log whose records wrap (EndOffset < StartOffset)
+ * and which fills its file (the file is as large as the limit). The oldest
+ * records, from StartOffset up to the end of the file, are moved to the end of
+ * the larger file; the space freed between the newest records and the oldest
+ * ones is where the log grows. The EOF record is written again with the new
+ * StartOffset. When the file cannot be made larger nothing is changed and the
+ * limit stays the one of the file.
+ */
+static NTSTATUS
+ElfpGrowWrappedFile(
+    IN PEVTLOGFILE LogFile,
+    IN PEVENTLOGEOF EofRec,
+    IN ULONG NewMaxSize)
+{
+    NTSTATUS Status;
+    LARGE_INTEGER FileOffset;
+    SIZE_T Length, ReadLength, WrittenLength;
+    PVOID Buffer;
+    ULONG OldSize = LogFile->CurrentSize;
+    ULONG StartOffset = LogFile->Header.StartOffset;
+    ULONG EndOffset = LogFile->Header.EndOffset;
+    ULONG Delta;
+
+    if (NewMaxSize <= OldSize || LogFile->Header.MaxSize != OldSize ||
+        (OldSize & 3) != 0 || StartOffset < sizeof(EVENTLOGHEADER) ||
+        (StartOffset & 3) != 0 || StartOffset >= OldSize ||
+        EndOffset >= StartOffset || (EndOffset & 3) != 0 ||
+        StartOffset - EndOffset < sizeof(EVENTLOGEOF))
+    {
+        return STATUS_SUCCESS; /* not a log that can be grown, keep its limit */
+    }
+
+    Delta = NewMaxSize - OldSize;
+    Length = OldSize - StartOffset;
+    Buffer = LogFile->Allocate(Length, 0, TAG_ELF_BUF);
+    if (Buffer == NULL)
+        return STATUS_SUCCESS;
+
+    FileOffset.QuadPart = StartOffset;
+    Status = LogFile->FileRead(LogFile, &FileOffset, Buffer, Length, &ReadLength);
+    if (!NT_SUCCESS(Status) || ReadLength != Length)
+    {
+        EVTLTRACE1("FileRead() failed (Status 0x%08lx)\n", Status);
+        LogFile->Free(Buffer, 0, TAG_ELF_BUF);
+        return STATUS_EVENTLOG_FILE_CORRUPT;
+    }
+
+    Status = LogFile->FileSetSize(LogFile, NewMaxSize, OldSize);
+    if (!NT_SUCCESS(Status))
+    {
+        EVTLTRACE1("FileSetSize() failed (Status 0x%08lx)\n", Status);
+        LogFile->Free(Buffer, 0, TAG_ELF_BUF);
+        return STATUS_SUCCESS; /* e.g. disk full, keep the log as it is */
+    }
+    LogFile->CurrentSize = NewMaxSize;
+
+    /* The oldest records, now at the end of the larger file */
+    FileOffset.QuadPart = (ULONGLONG)StartOffset + Delta;
+    Status = LogFile->FileWrite(LogFile, &FileOffset, Buffer, Length, &WrittenLength);
+    LogFile->Free(Buffer, 0, TAG_ELF_BUF);
+    if (!NT_SUCCESS(Status) || WrittenLength != Length)
+    {
+        EVTLTRACE1("FileWrite() failed (Status 0x%08lx)\n", Status);
+        return STATUS_EVENTLOG_FILE_CORRUPT;
+    }
+
+    LogFile->Header.StartOffset = StartOffset + Delta;
+    LogFile->Header.MaxSize = NewMaxSize;
+
+    EofRec->BeginRecord = LogFile->Header.StartOffset;
+    FileOffset.QuadPart = EndOffset;
+    Status = LogFile->FileWrite(LogFile, &FileOffset, EofRec, sizeof(*EofRec), &WrittenLength);
+    if (!NT_SUCCESS(Status) || WrittenLength != sizeof(*EofRec))
+    {
+        EVTLTRACE1("FileWrite() failed (Status 0x%08lx)\n", Status);
+        return STATUS_EVENTLOG_FILE_CORRUPT;
+    }
+
+    return STATUS_SUCCESS;
+}
+
 static NTSTATUS
 ElfpInitExistingFile(
     IN PEVTLOGFILE LogFile,
     IN ULONG FileSize,
-    // IN ULONG MaxSize,
+    IN ULONG MaxSize,
     IN ULONG Retention)
 {
     NTSTATUS Status;
     LARGE_INTEGER FileOffset, NextOffset;
     SIZE_T ReadLength;
+    ULONGLONG TargetMaxSize;
     ULONG RecordNumber = 0;
     ULONG RecOffset;
     PULONG pRecSize2;
@@ -457,16 +540,23 @@ ElfpInitExistingFile(
     }
 
     LogFile->CurrentSize = FileSize;
-    // FIXME!! What to do? And what to do if the MaxSize from the registry
-    // is strictly less than the CurrentSize?? Should we "reduce" the log size
-    // by clearing it completely??
-    // --> ANSWER: Save the new MaxSize somewhere, and only when the log is
-    //     being cleared, use the new MaxSize to resize (ie. shrink) it.
-    // LogFile->FileSetSize(LogFile, LogFile->CurrentSize, 0);
 
     /* Adjust the log maximum size if needed */
     if (LogFile->CurrentSize > LogFile->Header.MaxSize)
         LogFile->Header.MaxSize = LogFile->CurrentSize;
+
+    /*
+     * The maximum size is the one of the registry, the one stored in the log
+     * file header is just what the file was created with. A log is never
+     * truncated: if the registry size is below the size of the file, the
+     * size of the file stays the limit.
+     */
+    TargetMaxSize = ((ULONGLONG)MaxSize + EVENTLOG_FILE_GRANULARITY - 1) &
+                    ~(ULONGLONG)(EVENTLOG_FILE_GRANULARITY - 1);
+    if (TargetMaxSize > ROUND_DOWN(0xFFFFFFFFUL, EVENTLOG_FILE_GRANULARITY))
+        TargetMaxSize = ROUND_DOWN(0xFFFFFFFFUL, EVENTLOG_FILE_GRANULARITY);
+    if (TargetMaxSize < LogFile->CurrentSize)
+        TargetMaxSize = LogFile->CurrentSize;
 
     /*
      * Reset the log retention value. The value stored
@@ -623,6 +713,23 @@ ElfpInitExistingFile(
         LogFile->Header.EndOffset   = EofRec.EndRecord;
         LogFile->Header.CurrentRecordNumber = EofRec.CurrentRecordNumber;
         LogFile->Header.OldestRecordNumber  = EofRec.OldestRecordNumber;
+    }
+
+    /* Apply the maximum size of the registry (a read-only log is left as it is) */
+    if (!LogFile->ReadOnly && TargetMaxSize != LogFile->Header.MaxSize)
+    {
+        if (LogFile->Header.StartOffset > LogFile->Header.EndOffset)
+        {
+            /* The records wrap and fill the file: move the oldest ones */
+            Status = ElfpGrowWrappedFile(LogFile, &EofRec, (ULONG)TargetMaxSize);
+            if (!NT_SUCCESS(Status))
+                return Status;
+        }
+        else if (LogFile->Header.EndOffset < LogFile->CurrentSize)
+        {
+            /* The log can grow (or is not allowed to grow) in place */
+            LogFile->Header.MaxSize = (ULONG)TargetMaxSize;
+        }
     }
 
     /*
@@ -951,13 +1058,6 @@ ElfCreateFile(
     LogFile->OffsetInfoSize = OFFSET_INFO_INCREMENT;
     LogFile->OffsetInfoNext = 0;
 
-    // FIXME: Always use the regitry values for MaxSize,
-    // even for existing logs!
-
-    // FIXME: On Windows, EventLog uses the MaxSize setting
-    // from the registry itself; the MaxSize from the header
-    // is just for information purposes.
-
     EVTLTRACE("Initializing log file `%wZ'\n", &LogFile->FileName);
 
     LogFile->ReadOnly = ReadOnly; // !CreateNew && ReadOnly;
@@ -965,7 +1065,7 @@ ElfCreateFile(
     if (CreateNew)
         Status = ElfpInitNewFile(LogFile, FileSize, MaxSize, Retention);
     else
-        Status = ElfpInitExistingFile(LogFile, FileSize, /* MaxSize, */ Retention);
+        Status = ElfpInitExistingFile(LogFile, FileSize, MaxSize, Retention);
 
 Quit:
     if (!NT_SUCCESS(Status))

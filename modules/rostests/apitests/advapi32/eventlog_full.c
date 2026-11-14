@@ -74,9 +74,13 @@ static VOID NTAPI mem_free(PVOID ptr, ULONG flags, ULONG tag)
     HeapFree(GetProcessHeap(), flags, ptr);
 }
 
+static ULONG file_size;
+
 static NTSTATUS NTAPI mem_set_size(PEVTLOGFILE file, ULONG size, ULONG old_size)
 {
-    return size <= LOG_FILE_SIZE ? STATUS_SUCCESS : STATUS_DISK_FULL;
+    if (size > LOG_FILE_SIZE) return STATUS_DISK_FULL;
+    file_size = size;
+    return STATUS_SUCCESS;
 }
 
 /* a NULL offset continues after the previous transfer, as with a file handle */
@@ -97,7 +101,7 @@ static NTSTATUS NTAPI mem_read(PEVTLOGFILE file, PLARGE_INTEGER offset, PVOID bu
 {
     ULONGLONG pos = offset ? offset->QuadPart : file_pos;
 
-    if (pos + length > LOG_FILE_SIZE) return STATUS_END_OF_FILE;
+    if (pos + length > file_size) return STATUS_END_OF_FILE;
     memcpy(buffer, file_buffer + pos, length);
     file_pos = pos + length;
     if (read) *read = length;
@@ -142,6 +146,7 @@ static ULONG fill_log(ULONG retention, ULONG count, NTSTATUS *status, ULONG *old
 
     memset(file_buffer, 0, LOG_FILE_SIZE);
     file_pos = 0;
+    file_size = 0;
     GetSystemTimeAsFileTime((FILETIME *)&time);
     RtlTimeToSecondsSince1970(&time, &now);
 
@@ -195,8 +200,170 @@ static void test_full_log(void)
     HeapFree(GetProcessHeap(), 0, file_buffer);
 }
 
+#define RECORD_SIZE (sizeof(EVENTLOGRECORD) + RECORD_DATA + sizeof(ULONG))
+
+/* Number of records from oldest to current - 1 that read back whole */
+static ULONG count_good_records(EVTLOGFILE *file, ULONG oldest, ULONG current)
+{
+    BYTE buffer[RECORD_SIZE + 64];
+    EVENTLOGRECORD *rec = (EVENTLOGRECORD *)buffer;
+    SIZE_T read;
+    ULONG num, good = 0;
+
+    for (num = oldest; num != current; num++)
+    {
+        memset(buffer, 0, sizeof(buffer));
+        if (ElfReadRecord(file, num, rec, sizeof(buffer), &read, NULL)) break;
+        if (rec->RecordNumber != num || rec->Length != RECORD_SIZE ||
+            buffer[sizeof(EVENTLOGRECORD)] != 0x5a || buffer[sizeof(EVENTLOGRECORD) + RECORD_DATA - 1] != 0x5a) break;
+        good++;
+    }
+    return good;
+}
+
+/* Opens the log the memory buffer holds, as the service does at its start */
+static NTSTATUS open_log(EVTLOGFILE *file, ULONG max_size, ULONG retention)
+{
+    file_pos = 0;
+    return ElfCreateFile(file, NULL, file_size, max_size, retention, FALSE, FALSE,
+                         mem_alloc, mem_free, mem_set_size, mem_write, mem_read, mem_flush);
+}
+
+/* Writes up to count records, returns how many were written */
+static ULONG append_records(EVTLOGFILE *file, ULONG count, NTSTATUS *status)
+{
+    LARGE_INTEGER time;
+    ULONG now, i;
+
+    GetSystemTimeAsFileTime((FILETIME *)&time);
+    RtlTimeToSecondsSince1970(&time, &now);
+    *status = STATUS_SUCCESS;
+    for (i = 0; i < count; i++)
+    {
+        *status = write_record(file, now);
+        if (*status) break;
+    }
+    return i;
+}
+
+/* A log file that exists is opened with the MaxSize and Retention of the registry */
+static void test_existing_log(void)
+{
+    EVTLOGFILE file;
+    NTSTATUS status, ret;
+    ULONG written, oldest, current, kept, good, size_before;
+
+    file_buffer = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, LOG_FILE_SIZE);
+    ok(file_buffer != NULL, "no memory\n");
+    if (!file_buffer) return;
+
+    /* Full 128 KB log with the 7 days of the old default, none of it can be overwritten */
+    fill_log(604800, 600, &status, &oldest, &current);
+    ok(status == STATUS_LOG_FILE_FULL, "old log: status %#lx\n", status);
+    kept = current - oldest;
+    size_before = file_size;
+    ok(size_before == LOG_MAX_SIZE, "old log: file size %#lx\n", size_before);
+
+    /* Opened with 384 KB and Retention 0: the records are there, the log has room and then overwrites */
+    ret = open_log(&file, 3 * LOG_MAX_SIZE, 0);
+    ok(ret == STATUS_SUCCESS, "reopen returned %#lx\n", ret);
+    if (!ret)
+    {
+        ok(ElfGetOldestRecord(&file) == oldest && ElfGetCurrentRecord(&file) == current,
+           "grown log: records %lu-%lu, expected %lu-%lu\n", ElfGetOldestRecord(&file), ElfGetCurrentRecord(&file), oldest, current);
+        good = count_good_records(&file, oldest, current);
+        ok(good == kept, "grown log: %lu of %lu records read back\n", good, kept);
+        written = append_records(&file, 600, &status);
+        ok(status == STATUS_SUCCESS && written == 600, "grown log: write %lu returned %#lx\n", written, status);
+        oldest = ElfGetOldestRecord(&file);
+        current = ElfGetCurrentRecord(&file);
+        ok(current - oldest > kept, "grown log: %lu records kept, was %lu in 128 KB\n", current - oldest, kept);
+        ok(current - oldest <= 3 * LOG_MAX_SIZE / RECORD_SIZE, "grown log: %lu records kept in 384 KB\n", current - oldest);
+        good = count_good_records(&file, oldest, current);
+        ok(good == current - oldest, "grown log: %lu of %lu records read back\n", good, current - oldest);
+        ok(file_size > size_before && file_size <= 3 * LOG_MAX_SIZE, "grown log: file size %#lx\n", file_size);
+        ElfCloseFile(&file);
+
+        /* and the log it left is a good one */
+        ret = open_log(&file, 3 * LOG_MAX_SIZE, 0);
+        ok(ret == STATUS_SUCCESS, "reopen of the grown log returned %#lx\n", ret);
+        if (!ret)
+        {
+            ok(ElfGetOldestRecord(&file) == oldest && ElfGetCurrentRecord(&file) == current,
+               "grown log: records %lu-%lu after reopen, expected %lu-%lu\n", ElfGetOldestRecord(&file), ElfGetCurrentRecord(&file), oldest, current);
+            good = count_good_records(&file, oldest, current);
+            ok(good == current - oldest, "grown log: %lu of %lu records read back after reopen\n", good, current - oldest);
+            ElfCloseFile(&file);
+        }
+    }
+
+    /* Retention 0 log that wrapped: the oldest records are in the last part of the file */
+    fill_log(0, 600, &status, &oldest, &current);
+    kept = current - oldest;
+    ret = open_log(&file, 3 * LOG_MAX_SIZE, 0);
+    ok(ret == STATUS_SUCCESS, "reopen of the wrapped log returned %#lx\n", ret);
+    if (!ret)
+    {
+        ok(ElfGetOldestRecord(&file) == oldest && ElfGetCurrentRecord(&file) == current,
+           "wrapped log: records %lu-%lu, expected %lu-%lu\n", ElfGetOldestRecord(&file), ElfGetCurrentRecord(&file), oldest, current);
+        good = count_good_records(&file, oldest, current);
+        ok(good == kept, "wrapped log: %lu of %lu records read back\n", good, kept);
+        written = append_records(&file, 100, &status);
+        ok(status == STATUS_SUCCESS && written == 100, "wrapped log: write %lu returned %#lx\n", written, status);
+        oldest = ElfGetOldestRecord(&file);
+        current = ElfGetCurrentRecord(&file);
+        ok(current - oldest > kept, "wrapped log: %lu records kept, was %lu in 128 KB\n", current - oldest, kept);
+        good = count_good_records(&file, oldest, current);
+        ok(good == current - oldest, "wrapped log: %lu of %lu records read back\n", good, current - oldest);
+        written = append_records(&file, 600, &status);
+        ok(status == STATUS_SUCCESS && written == 600, "wrapped log: write %lu returned %#lx\n", written, status);
+        oldest = ElfGetOldestRecord(&file);
+        current = ElfGetCurrentRecord(&file);
+        good = count_good_records(&file, oldest, current);
+        ok(good == current - oldest && current - oldest > kept, "wrapped log: %lu of %lu records read back\n", good, current - oldest);
+        ElfCloseFile(&file);
+
+        ret = open_log(&file, 3 * LOG_MAX_SIZE, 0);
+        ok(ret == STATUS_SUCCESS, "reopen of the grown wrapped log returned %#lx\n", ret);
+        if (!ret)
+        {
+            ok(ElfGetOldestRecord(&file) == oldest && ElfGetCurrentRecord(&file) == current,
+               "wrapped log: records %lu-%lu after reopen, expected %lu-%lu\n", ElfGetOldestRecord(&file), ElfGetCurrentRecord(&file), oldest, current);
+            good = count_good_records(&file, oldest, current);
+            ok(good == current - oldest, "wrapped log: %lu of %lu records read back after reopen\n", good, current - oldest);
+            ElfCloseFile(&file);
+        }
+    }
+
+    /* A MaxSize below the size of the file does not truncate it: the records stay and the file stays as it is */
+    fill_log(0, 600, &status, &oldest, &current);
+    kept = current - oldest;
+    size_before = file_size;
+    ret = open_log(&file, LOG_MAX_SIZE / 2, 0);
+    ok(ret == STATUS_SUCCESS, "reopen with a lower size returned %#lx\n", ret);
+    if (!ret)
+    {
+        ok(ElfGetOldestRecord(&file) == oldest && ElfGetCurrentRecord(&file) == current,
+           "lowered log: records %lu-%lu, expected %lu-%lu\n", ElfGetOldestRecord(&file), ElfGetCurrentRecord(&file), oldest, current);
+        good = count_good_records(&file, oldest, current);
+        ok(good == kept, "lowered log: %lu of %lu records read back\n", good, kept);
+        written = append_records(&file, 300, &status);
+        ok(status == STATUS_SUCCESS && written == 300, "lowered log: write %lu returned %#lx\n", written, status);
+        ok(file_size == size_before, "lowered log: file size %#lx, was %#lx\n", file_size, size_before);
+        oldest = ElfGetOldestRecord(&file);
+        current = ElfGetCurrentRecord(&file);
+        ok(current - oldest <= kept + 1, "lowered log: %lu records kept in the %#lx bytes of the file\n", current - oldest, size_before);
+        good = count_good_records(&file, oldest, current);
+        ok(good == current - oldest, "lowered log: %lu of %lu records read back\n", good, current - oldest);
+        ElfCloseFile(&file);
+    }
+
+    HeapFree(GetProcessHeap(), 0, file_buffer);
+}
+
 START_TEST(eventlog_full)
 {
     test_default_settings();
     test_full_log();
+    test_existing_log();
 }
