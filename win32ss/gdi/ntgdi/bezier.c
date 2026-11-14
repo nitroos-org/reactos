@@ -45,6 +45,19 @@
 /* enough for one curve */
 #define BEZIER_INITBUFSIZE    (150)
 
+/* The shifted coordinates and their differences do not fit in 32 bits when the
+ * points are near the limits of a LONG (the shift is 4 bits, the original code
+ * assumed 27-bit coordinates). Everything is computed in 64 bits, as the
+ * shifted points are stored in BPOINT; only the points that are returned are
+ * shifted down to LONG again (they lie between the input points). */
+typedef struct _BPOINT
+{
+    LONGLONG x;
+    LONGLONG y;
+} BPOINT;
+
+#define BABS(x) ((x) < 0 ? -(x) : (x))
+
 /* calculate Bezier average, in this case the middle
  * correctly rounded...
  * */
@@ -61,12 +74,12 @@
 *       level is the recursion depth
 *       returns true if the recursion can be terminated
 */
-static BOOL BezierCheck( int level, POINT *Points)
+static BOOL BezierCheck( int level, BPOINT *Points)
 {
-    INT dx, dy;
+    LONGLONG dx, dy;
     dx=Points[3].x-Points[0].x;
     dy=Points[3].y-Points[0].y;
-    if(abs(dy)<=abs(dx)){/* shallow line */
+    if(BABS(dy)<=BABS(dx)){/* shallow line */
         /* check that control points are between begin and end */
         if(Points[1].x < Points[0].x){
             if(Points[1].x < Points[3].x)
@@ -82,9 +95,9 @@ static BOOL BezierCheck( int level, POINT *Points)
                 return FALSE;
         dx=BEZIERSHIFTDOWN(dx);
         if(!dx) return TRUE;
-        if(abs(Points[1].y-Points[0].y-(dy/dx)*
+        if(BABS(Points[1].y-Points[0].y-(dy/dx)*
                 BEZIERSHIFTDOWN(Points[1].x-Points[0].x)) > BEZIERPIXEL ||
-           abs(Points[2].y-Points[0].y-(dy/dx)*
+           BABS(Points[2].y-Points[0].y-(dy/dx)*
                    BEZIERSHIFTDOWN(Points[2].x-Points[0].x)) > BEZIERPIXEL )
             return FALSE;
         else
@@ -105,9 +118,9 @@ static BOOL BezierCheck( int level, POINT *Points)
                 return FALSE;
         dy=BEZIERSHIFTDOWN(dy);
         if(!dy) return TRUE;
-        if(abs(Points[1].x-Points[0].x-(dx/dy)*
+        if(BABS(Points[1].x-Points[0].x-(dx/dy)*
                 BEZIERSHIFTDOWN(Points[1].y-Points[0].y)) > BEZIERPIXEL ||
-           abs(Points[2].x-Points[0].x-(dx/dy)*
+           BABS(Points[2].x-Points[0].x-(dx/dy)*
                    BEZIERSHIFTDOWN(Points[2].y-Points[0].y)) > BEZIERPIXEL )
             return FALSE;
         else
@@ -116,9 +129,9 @@ static BOOL BezierCheck( int level, POINT *Points)
 }
 
 /* Helper for GDI_Bezier.
- * Just handles one Bezier, so Points should point to four POINTs
+ * Just handles one Bezier, so Points should point to four BPOINTs
  */
-static void GDI_InternalBezier( POINT *Points, POINT **PtsOut, INT *dwOut,
+static void GDI_InternalBezier( BPOINT *Points, POINT **PtsOut, INT *dwOut,
 				INT *nPtsOut, INT level )
 {
     if(*nPtsOut == *dwOut) {
@@ -138,15 +151,15 @@ static void GDI_InternalBezier( POINT *Points, POINT **PtsOut, INT *dwOut,
 
     if(!level || BezierCheck(level, Points)) {
         if(*nPtsOut == 0) {
-            (*PtsOut)[0].x = BEZIERSHIFTDOWN(Points[0].x);
-            (*PtsOut)[0].y = BEZIERSHIFTDOWN(Points[0].y);
+            (*PtsOut)[0].x = (LONG)BEZIERSHIFTDOWN(Points[0].x);
+            (*PtsOut)[0].y = (LONG)BEZIERSHIFTDOWN(Points[0].y);
             *nPtsOut = 1;
         }
-	(*PtsOut)[*nPtsOut].x = BEZIERSHIFTDOWN(Points[3].x);
-        (*PtsOut)[*nPtsOut].y = BEZIERSHIFTDOWN(Points[3].y);
+	(*PtsOut)[*nPtsOut].x = (LONG)BEZIERSHIFTDOWN(Points[3].x);
+        (*PtsOut)[*nPtsOut].y = (LONG)BEZIERSHIFTDOWN(Points[3].y);
         (*nPtsOut) ++;
     } else {
-        POINT Points2[4]; /* for the second recursive call */
+        BPOINT Points2[4]; /* for the second recursive call */
         Points2[3]=Points[3];
         BEZIERMIDDLE(Points2[2], Points[2], Points[3]);
         BEZIERMIDDLE(Points2[0], Points[1], Points[2]);
@@ -205,11 +218,10 @@ POINT *GDI_Bezier( const POINT *Points, INT count, INT *nPtsOut )
     if (!out) return NULL;
 
     for(Bezier = 0; Bezier < (count-1)/3; Bezier++) {
-	POINT ptBuf[4];
-	memcpy(ptBuf, Points + Bezier * 3, sizeof(POINT) * 4);
+	BPOINT ptBuf[4];
 	for(i = 0; i < 4; i++) {
-	    ptBuf[i].x = BEZIERSHIFTUP(ptBuf[i].x);
-	    ptBuf[i].y = BEZIERSHIFTUP(ptBuf[i].y);
+	    ptBuf[i].x = BEZIERSHIFTUP((LONGLONG)Points[Bezier * 3 + i].x);
+	    ptBuf[i].y = BEZIERSHIFTUP((LONGLONG)Points[Bezier * 3 + i].y);
 	}
         GDI_InternalBezier( ptBuf, &out, &dwOut, nPtsOut, BEZIERMAXDEPTH );
     }
