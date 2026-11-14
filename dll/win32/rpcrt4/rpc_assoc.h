@@ -41,6 +41,10 @@ typedef struct _RpcAssoc
     CRITICAL_SECTION cs;
 
     /* client-only */
+    /* tick count when the last binding handle released the association and idle connections kept it alive (0: in
+     * use); protected by assoc_list_cs */
+    DWORD idle_since;
+    BOOL is_client;
     /* connections available to be used (protected by cs) */
     struct list free_connection_pool;
     LONG connection_cnt;
@@ -57,6 +61,7 @@ RPC_STATUS RpcAssoc_GetClientConnection(RpcAssoc *assoc, const RPC_SYNTAX_IDENTI
     LPCWSTR CookieAuth, RpcConnection **Connection, BOOL *from_cache);
 void RpcAssoc_ReleaseIdleConnection(RpcAssoc *assoc, RpcConnection *Connection);
 ULONG RpcAssoc_Release(RpcAssoc *assoc);
+void RpcAssoc_FlushIdle(void);
 RPC_STATUS RpcServerAssoc_GetAssociation(LPCSTR Protseq, LPCSTR NetworkAddr, LPCSTR Endpoint, LPCWSTR NetworkOptions, ULONG assoc_gid, RpcAssoc **assoc_out);
 RPC_STATUS RpcServerAssoc_AllocateContextHandle(RpcAssoc *assoc, void *CtxGuard, NDR_SCONTEXT *SContext);
 RPC_STATUS RpcServerAssoc_FindContextHandle(RpcAssoc *assoc, const UUID *uuid, void *CtxGuard, ULONG Flags, NDR_SCONTEXT *SContext);

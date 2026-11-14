@@ -82,6 +82,8 @@ static RPC_STATUS RpcAssoc_Alloc(LPCSTR Protseq, LPCSTR NetworkAddr,
     assoc->NetworkOptions = wcsdup(NetworkOptions);
     assoc->assoc_group_id = 0;
     assoc->connection_cnt = 0;
+    assoc->idle_since = 0;
+    assoc->is_client = FALSE;
     UuidCreate(&assoc->http_uuid);
     list_init(&assoc->entry);
     *assoc_out = assoc;
@@ -112,6 +114,8 @@ RPC_STATUS RPCRT4_GetAssociation(LPCSTR Protseq, LPCSTR NetworkAddr,
             !strcmp(Endpoint, assoc->Endpoint) &&
             compare_networkoptions(NetworkOptions, assoc->NetworkOptions))
         {
+            /* an association kept for its idle connections is in use again */
+            assoc->idle_since = 0;
             assoc->refs++;
             *assoc_out = assoc;
             LeaveCriticalSection(&assoc_list_cs);
@@ -126,6 +130,7 @@ RPC_STATUS RPCRT4_GetAssociation(LPCSTR Protseq, LPCSTR NetworkAddr,
         LeaveCriticalSection(&assoc_list_cs);
         return status;
     }
+    assoc->is_client = TRUE;
     list_add_head(&client_assoc_list, &assoc->entry);
     *assoc_out = assoc;
 
@@ -186,44 +191,143 @@ RPC_STATUS RpcServerAssoc_GetAssociation(LPCSTR Protseq, LPCSTR NetworkAddr,
     return RPC_S_OK;
 }
 
+static void RpcAssoc_Destroy(RpcAssoc *assoc)
+{
+    RpcConnection *Connection, *cursor2;
+    RpcContextHandle *context_handle, *context_handle_cursor;
+
+    TRACE("destroying assoc %p\n", assoc);
+
+    LIST_FOR_EACH_ENTRY_SAFE(Connection, cursor2, &assoc->free_connection_pool, RpcConnection, conn_pool_entry)
+    {
+        list_remove(&Connection->conn_pool_entry);
+        RPCRT4_ReleaseConnection(Connection);
+    }
+
+    LIST_FOR_EACH_ENTRY_SAFE(context_handle, context_handle_cursor, &assoc->context_handle_list, RpcContextHandle, entry)
+        RpcContextHandle_Destroy(context_handle);
+
+    free(assoc->NetworkOptions);
+    free(assoc->Endpoint);
+    free(assoc->NetworkAddr);
+    free(assoc->Protseq);
+
+    assoc->cs.DebugInfo->Spare[0] = 0;
+    DeleteCriticalSection(&assoc->cs);
+    assoc->group_cs.DebugInfo->Spare[0] = 0;
+    DeleteCriticalSection(&assoc->group_cs);
+
+    free(assoc);
+}
+
+/* The idle connections kept for one server (callers that do not share a connection, another identity each time, do not
+ * make the pool grow without limit). */
+#define MAX_IDLE_CONNECTIONS 8
+/* How long a client association whose last binding handle is gone keeps its idle connections for the next binding
+ * handle to the same server, and how often the ones that are due are looked for. */
+#define IDLE_ASSOC_LIFETIME_MS 30000
+#define IDLE_ASSOC_SWEEP_MS    5000
+
+static HANDLE idle_timer;       /* the sweep, while there is an association to wait for; protected by assoc_list_cs */
+static BOOL idle_flushing;      /* protected by assoc_list_cs */
+
+static BOOL assoc_has_idle_connections(RpcAssoc *assoc)
+{
+    BOOL ret;
+
+    EnterCriticalSection(&assoc->cs);
+    ret = !list_empty(&assoc->free_connection_pool);
+    LeaveCriticalSection(&assoc->cs);
+    return ret;
+}
+
+static void CALLBACK idle_sweep(void *param, BOOLEAN timed_out)
+{
+    struct list dead = LIST_INIT(dead);
+    RpcAssoc *assoc, *next;
+    BOOL again = FALSE;
+    HANDLE timer = NULL;
+    DWORD now = GetTickCount();
+
+    EnterCriticalSection(&assoc_list_cs);
+    LIST_FOR_EACH_ENTRY_SAFE(assoc, next, &client_assoc_list, RpcAssoc, entry)
+    {
+        if (assoc->refs || !assoc->idle_since) continue;
+        if (idle_flushing || now - assoc->idle_since >= IDLE_ASSOC_LIFETIME_MS)
+        {
+            list_remove(&assoc->entry);
+            list_add_tail(&dead, &assoc->entry);
+        }
+        else
+            again = TRUE;
+    }
+    /* nothing left to wait for: the sweep ends (a new one starts with the next association that is kept) */
+    if (!again)
+    {
+        timer = idle_timer;
+        idle_timer = NULL;
+    }
+    LeaveCriticalSection(&assoc_list_cs);
+
+    if (timer) DeleteTimerQueueTimer(NULL, timer, NULL);
+    LIST_FOR_EACH_ENTRY_SAFE(assoc, next, &dead, RpcAssoc, entry)
+        RpcAssoc_Destroy(assoc);
+}
+
+/* assoc_list_cs is held */
+static void arm_idle_timer(void)
+{
+    if (idle_timer || idle_flushing) return;
+    if (!CreateTimerQueueTimer(&idle_timer, NULL, idle_sweep, NULL, IDLE_ASSOC_SWEEP_MS, IDLE_ASSOC_SWEEP_MS,
+                               WT_EXECUTEDEFAULT))
+        idle_timer = NULL;
+}
+
+/* Closes every connection kept for a binding handle that is not there any more (the library is unloading). */
+void RpcAssoc_FlushIdle(void)
+{
+    HANDLE timer;
+
+    EnterCriticalSection(&assoc_list_cs);
+    idle_flushing = TRUE;
+    timer = idle_timer;
+    idle_timer = NULL;
+    LeaveCriticalSection(&assoc_list_cs);
+
+    /* waits for a sweep that is running */
+    if (timer) DeleteTimerQueueTimer(NULL, timer, INVALID_HANDLE_VALUE);
+    idle_sweep(NULL, FALSE);
+
+    EnterCriticalSection(&assoc_list_cs);
+    idle_flushing = FALSE;
+    LeaveCriticalSection(&assoc_list_cs);
+}
+
 ULONG RpcAssoc_Release(RpcAssoc *assoc)
 {
     ULONG refs;
+    BOOL kept = FALSE;
 
     EnterCriticalSection(&assoc_list_cs);
     refs = --assoc->refs;
     if (!refs)
-        list_remove(&assoc->entry);
+    {
+        /* A client association with idle connections stays for a while: the next binding handle to the same
+         * server (same endpoint, and the same identity and security, which the connections are matched on) uses
+         * them instead of opening and binding a new one. */
+        if (assoc->is_client && !idle_flushing && assoc_has_idle_connections(assoc))
+        {
+            kept = TRUE;
+            assoc->idle_since = GetTickCount() | 1;
+            arm_idle_timer();
+        }
+        else
+            list_remove(&assoc->entry);
+    }
     LeaveCriticalSection(&assoc_list_cs);
 
-    if (!refs)
-    {
-        RpcConnection *Connection, *cursor2;
-        RpcContextHandle *context_handle, *context_handle_cursor;
-
-        TRACE("destroying assoc %p\n", assoc);
-
-        LIST_FOR_EACH_ENTRY_SAFE(Connection, cursor2, &assoc->free_connection_pool, RpcConnection, conn_pool_entry)
-        {
-            list_remove(&Connection->conn_pool_entry);
-            RPCRT4_ReleaseConnection(Connection);
-        }
-
-        LIST_FOR_EACH_ENTRY_SAFE(context_handle, context_handle_cursor, &assoc->context_handle_list, RpcContextHandle, entry)
-            RpcContextHandle_Destroy(context_handle);
-
-        free(assoc->NetworkOptions);
-        free(assoc->Endpoint);
-        free(assoc->NetworkAddr);
-        free(assoc->Protseq);
-
-        assoc->cs.DebugInfo->Spare[0] = 0;
-        DeleteCriticalSection(&assoc->cs);
-        assoc->group_cs.DebugInfo->Spare[0] = 0;
-        DeleteCriticalSection(&assoc->group_cs);
-
-        free(assoc);
-    }
+    if (!refs && !kept)
+        RpcAssoc_Destroy(assoc);
 
     return refs;
 }
@@ -368,27 +472,51 @@ static RPC_STATUS RpcAssoc_BindConnection(const RpcAssoc *assoc, RpcConnection *
 static RpcConnection *RpcAssoc_GetIdleConnection(RpcAssoc *assoc,
                                                  const RPC_SYNTAX_IDENTIFIER *InterfaceId,
                                                  const RPC_SYNTAX_IDENTIFIER *TransferSyntax, const RpcAuthInfo *AuthInfo,
-                                                 const RpcQualityOfService *QOS)
+                                                 const RpcQualityOfService *QOS, LPCWSTR CookieAuth,
+                                                 BOOL token_key_valid, const RpcTokenKey *token_key)
 {
-    RpcConnection *Connection;
+    RpcConnection *Connection, *next;
+    struct list dead = LIST_INIT(dead);
+    RpcConnection *found = NULL;
+
+    /* A connection is only reused by a caller that would have got the same one: the same interface, the same
+     * security (level, service, credentials, server name, quality of service, HTTP cookie) and the same token
+     * (the identity a pipe or a security exchange gives the server), never one that opened it for another. */
+    if (!token_key_valid) return NULL;
+
     EnterCriticalSection(&assoc->cs);
-    /* try to find a compatible connection from the connection pool */
-    LIST_FOR_EACH_ENTRY(Connection, &assoc->free_connection_pool, RpcConnection, conn_pool_entry)
+    LIST_FOR_EACH_ENTRY_SAFE(Connection, next, &assoc->free_connection_pool, RpcConnection, conn_pool_entry)
     {
         if (!memcmp(&Connection->ActiveInterface, InterfaceId,
                     sizeof(RPC_SYNTAX_IDENTIFIER)) &&
             RpcAuthInfo_IsEqual(Connection->AuthInfo, AuthInfo) &&
-            RpcQualityOfService_IsEqual(Connection->QOS, QOS))
+            RpcQualityOfService_IsEqual(Connection->QOS, QOS) &&
+            !Connection->CookieAuth == !CookieAuth &&
+            (!CookieAuth || !wcscmp(Connection->CookieAuth, CookieAuth)) &&
+            Connection->token_key_valid &&
+            !memcmp(&Connection->token_key, token_key, sizeof(RpcTokenKey)))
         {
             list_remove(&Connection->conn_pool_entry);
-            LeaveCriticalSection(&assoc->cs);
+            /* the server may have closed it while it was idle */
+            if (Connection->ops->is_idle_alive && !Connection->ops->is_idle_alive(Connection))
+            {
+                TRACE("pooled connection %p was closed by the server\n", Connection);
+                list_add_tail(&dead, &Connection->conn_pool_entry);
+                continue;
+            }
+            found = Connection;
             TRACE("got connection from pool %p\n", Connection);
-            return Connection;
+            break;
         }
     }
-
     LeaveCriticalSection(&assoc->cs);
-    return NULL;
+
+    LIST_FOR_EACH_ENTRY_SAFE(Connection, next, &dead, RpcConnection, conn_pool_entry)
+    {
+        list_remove(&Connection->conn_pool_entry);
+        RPCRT4_ReleaseConnection(Connection);
+    }
+    return found;
 }
 
 RPC_STATUS RpcAssoc_GetClientConnection(RpcAssoc *assoc,
@@ -401,8 +529,11 @@ RPC_STATUS RpcAssoc_GetClientConnection(RpcAssoc *assoc,
     RPC_STATUS status;
     BOOL retried = FALSE, naming_group = FALSE;
     ULONG gid;
+    RpcTokenKey token_key;
+    BOOL token_key_valid = RPCRT4_GetCallerTokenKey(&token_key);
 
-    *Connection = RpcAssoc_GetIdleConnection(assoc, InterfaceId, TransferSyntax, AuthInfo, QOS);
+    *Connection = RpcAssoc_GetIdleConnection(assoc, InterfaceId, TransferSyntax, AuthInfo, QOS, CookieAuth,
+                                             token_key_valid, &token_key);
     if (*Connection) {
         TRACE("return idle connection %p for association %p\n", *Connection, assoc);
         if (from_cache) *from_cache = TRUE;
@@ -423,6 +554,8 @@ RPC_STATUS RpcAssoc_GetClientConnection(RpcAssoc *assoc,
          * RpcAssoc_ConnectionReleased(), so a failed connection must not leave the count
          * negative (the association group id would then never be reset). */
         NewConnection->assoc = assoc;
+        NewConnection->token_key_valid = token_key_valid;
+        if (token_key_valid) NewConnection->token_key = token_key;
         InterlockedIncrement(&assoc->connection_cnt);
         status = RPCRT4_OpenClientConnection(NewConnection);
         if (status != RPC_S_OK)
@@ -486,12 +619,23 @@ RPC_STATUS RpcAssoc_GetClientConnection(RpcAssoc *assoc,
 
 void RpcAssoc_ReleaseIdleConnection(RpcAssoc *assoc, RpcConnection *Connection)
 {
+    unsigned int idle = 0;
+    struct list *entry;
+
     assert(!Connection->server);
     Connection->async_state = NULL;
     EnterCriticalSection(&assoc->cs);
     if (!assoc->assoc_group_id) assoc->assoc_group_id = Connection->assoc_group_id;
-    list_add_head(&assoc->free_connection_pool, &Connection->conn_pool_entry);
+    LIST_FOR_EACH(entry, &assoc->free_connection_pool) idle++;
+    if (idle < MAX_IDLE_CONNECTIONS)
+    {
+        list_add_head(&assoc->free_connection_pool, &Connection->conn_pool_entry);
+        Connection = NULL;
+    }
     LeaveCriticalSection(&assoc->cs);
+
+    /* enough are kept for this server */
+    if (Connection) RPCRT4_ReleaseConnection(Connection);
 }
 
 void RpcAssoc_ConnectionReleased(RpcAssoc *assoc)

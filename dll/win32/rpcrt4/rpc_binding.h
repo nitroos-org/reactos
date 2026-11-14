@@ -33,6 +33,19 @@ enum secure_packet_direction
   SECURE_PACKET_RECEIVE
 };
 
+/* What of the token a caller acts with decides whom a server takes it for: the logon, the kind and impersonation
+ * level of the token, its groups and privileges (counted), and whether it is restricted. The id of the token itself
+ * is not part of it: every impersonation of one client makes a token of its own. */
+typedef struct _RpcTokenKey
+{
+    LUID auth_id;
+    DWORD token_type;
+    DWORD impersonation_level;
+    DWORD group_count;
+    DWORD privilege_count;
+    DWORD restricted;
+} RpcTokenKey;
+
 typedef struct _RpcAuthInfo
 {
   LONG refs;
@@ -96,6 +109,9 @@ typedef struct _RpcConnection
   ULONG assoc_group_id; /* association group returned during binding */
   RPC_ASYNC_STATE *async_state;
   struct _RpcAssoc *assoc; /* association this connection is part of */
+  /* the identity the connection was opened with (a client connection is only handed to a caller with the same one) */
+  RpcTokenKey token_key;
+  BOOL token_key_valid;
 
   /* server-only */
   /* The active interface bound to server. */
@@ -131,6 +147,8 @@ struct connection_ops {
   RPC_STATUS (*revert_to_self)(RpcConnection *conn);
   RPC_STATUS (*inquire_auth_client)(RpcConnection *, RPC_AUTHZ_HANDLE *, RPC_WSTR *, ULONG *, ULONG *, ULONG *, ULONG);
   RPC_STATUS (*inquire_client_pid)(RpcConnection *conn, ULONG *pid);
+  /* client: an idle connection is still usable (the server has not closed it); NULL means it cannot be told */
+  BOOL (*is_idle_alive)(RpcConnection *conn);
 };
 
 /* don't know what MS's structure looks like */
@@ -166,6 +184,7 @@ BOOL RpcAuthInfo_IsEqual(const RpcAuthInfo *AuthInfo1, const RpcAuthInfo *AuthIn
 ULONG RpcQualityOfService_AddRef(RpcQualityOfService *qos);
 ULONG RpcQualityOfService_Release(RpcQualityOfService *qos);
 BOOL RpcQualityOfService_IsEqual(const RpcQualityOfService *qos1, const RpcQualityOfService *qos2);
+BOOL RPCRT4_GetCallerTokenKey(RpcTokenKey *key);
 
 RPC_STATUS RPCRT4_CreateConnection(RpcConnection** Connection, BOOL server, LPCSTR Protseq,
     LPCSTR NetworkAddr, LPCSTR Endpoint, LPCWSTR NetworkOptions, RpcAuthInfo* AuthInfo,

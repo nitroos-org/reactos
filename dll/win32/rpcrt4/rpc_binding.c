@@ -1189,6 +1189,32 @@ ULONG RpcAuthInfo_Release(RpcAuthInfo *AuthInfo)
     return refs;
 }
 
+/* The identity of the token the calling thread acts with (its impersonation token, or else the token of the process): a
+ * connection carries it (the pipe peer, the logon of the NTLM exchange), so it is only handed to a caller with the
+ * same one. FALSE if the token cannot be read: such a caller gets a connection of its own.
+ * The pseudo handle for the effective token (-6) is read, not a handle opened with OpenThreadToken: opening the
+ * token of an impersonating thread copies it and makes the thread impersonate the copy. */
+BOOL RPCRT4_GetCallerTokenKey(RpcTokenKey *key)
+{
+    HANDLE effective = (HANDLE)(LONG_PTR)-6;
+    TOKEN_STATISTICS stats;
+    TOKEN_GROUPS restricting;
+    DWORD size;
+
+    memset(key, 0, sizeof(*key));
+    if (!GetTokenInformation(effective, TokenStatistics, &stats, sizeof(stats), &size))
+        return FALSE;
+    key->auth_id = stats.AuthenticationId;
+    key->token_type = stats.TokenType;
+    key->impersonation_level = stats.ImpersonationLevel;
+    key->group_count = stats.GroupCount;
+    key->privilege_count = stats.PrivilegeCount;
+    /* room for no restricting SID: it only fits a token that has none */
+    key->restricted = !GetTokenInformation(effective, TokenRestrictedSids, &restricting, sizeof(restricting), &size) ||
+                      restricting.GroupCount;
+    return TRUE;
+}
+
 BOOL RpcAuthInfo_IsEqual(const RpcAuthInfo *AuthInfo1, const RpcAuthInfo *AuthInfo2)
 {
     if (AuthInfo1 == AuthInfo2)
@@ -1199,6 +1225,11 @@ BOOL RpcAuthInfo_IsEqual(const RpcAuthInfo *AuthInfo1, const RpcAuthInfo *AuthIn
 
     if ((AuthInfo1->AuthnLevel != AuthInfo2->AuthnLevel) ||
         (AuthInfo1->AuthnSvc != AuthInfo2->AuthnSvc))
+        return FALSE;
+
+    /* the server the security context was set up for */
+    if (!AuthInfo1->server_principal_name != !AuthInfo2->server_principal_name ||
+        (AuthInfo1->server_principal_name && wcscmp(AuthInfo1->server_principal_name, AuthInfo2->server_principal_name)))
         return FALSE;
 
     if (AuthInfo1->identity == AuthInfo2->identity)
