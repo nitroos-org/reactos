@@ -2165,9 +2165,11 @@ PATH_FloatObjValue(PFLOATOBJ pef)
 /* How the DC transform changes the shape of the pen.
  *
  * A pen's width is in logical units: the world transform and then the mapping mode scale it (an anisotropic mapping
- * or world transform makes the pen an ellipse). The page scale is applied to the width in whole device pixels (at
- * least one) before the world transform scales that, as measured on Windows 10 (CreatePen width 25 under
- * MM_LOENGLISH is 24 pixels, width 7 under MM_LOENGLISH plus a world scale of 2 is 14).
+ * or world transform makes the pen an ellipse). The extent of the pen on each device axis is rounded once, to whole
+ * pixels (at least one), after both transforms, as measured on Windows 10 with odd page scales (width 7 under a page
+ * scale of 7/3 plus a world scale of 1.5 is 25 pixels, not 24; width 25 is 88, not 87; under 7/3 plus a world scale of
+ * 2: 33 and 117). One measurement does not fit: width 7 under MM_LOENGLISH (0.96) plus a world scale of 2 is 14 pixels
+ * on Windows where the product is 13.44.
  *
  * Returns PEN_XFORM_NONE (draw with the width as it is), PEN_XFORM_SCALE (a circle of *pDevWidth pixels) or
  * PEN_XFORM_FULL (an ellipse: pT is the logical-to-device matrix, x' = pT[0] x + pT[2] y, y' = pT[1] x + pT[3] y).
@@ -2188,7 +2190,7 @@ PATH_GetPenTransform(
 {
     MATRIX mxPage;
     PMATRIX pmxWorld = &dc->pdcattr->mxWorldToPage;
-    double sx, sy, wx, wy, fx, fy, a, b, c, d, n1, n2, dot, dev;
+    double sx, sy, wx, wy, fx, fy, a, b, c, d, n1, n2, dot, dev, rx, ry;
 
     if (penWidth == 0)
         return PEN_XFORM_NONE;
@@ -2203,12 +2205,25 @@ PATH_GetPenTransform(
     c = PATH_FloatObjValue(&pmxWorld->efM21);
     d = PATH_FloatObjValue(&pmxWorld->efM22);
 
-    wx = floor(penWidth * sx + 0.5);
-    wy = floor(penWidth * sy + 0.5);
+    /* The extent of the pen on the device x axis is penWidth * sx * |(a, c)|, on the y axis penWidth * sy * |(b, d)| */
+    rx = sqrt(a * a + c * c);
+    ry = sqrt(b * b + d * d);
+    /* The world transform lives in memory the application can write: NaN, infinity, zero and values that overflow
+       draw the pen as it is (the comparisons are written so that a NaN fails them) */
+    if (!(rx > 0) || !(ry > 0) || !(sx > 0) || !(sy > 0))
+        return PEN_XFORM_NONE;
+    /* the matrix holds single-precision values: 7 * 7/3 * 1.5 is 24.4999986 there, and Windows rounds it up */
+    wx = floor(penWidth * sx * rx + 0.5 + 1e-3);
+    wy = floor(penWidth * sy * ry + 0.5 + 1e-3);
+    if (!(wx <= 1e7) || !(wy <= 1e7))
+        return PEN_XFORM_NONE;
     if (wx < 1) wx = 1;
     if (wy < 1) wy = 1;
-    fx = wx / penWidth;
-    fy = wy / penWidth;
+    /* The rows of the matrix are scaled so that the extents are the rounded ones */
+    fx = wx / (penWidth * rx);
+    fy = wy / (penWidth * ry);
+    if (!(fx < 1e12) || !(fy < 1e12))
+        return PEN_XFORM_NONE;
 
     pT[0] = fx * a;
     pT[1] = fy * b;
@@ -2269,6 +2284,84 @@ PATH_IsWidePen(DC *dc, PBRUSH pbrLine)
     KeRestoreFloatingPointState(&fpsave);
 
     return bWide;
+}
+
+/* TRUE when the world transform (advanced graphics mode) reverses orientation, as a flip of one axis does. An arc keeps
+ * its direction in logical space, so on the screen it runs the other way (Windows: Arc under a world transform with
+ * eM22 = -1 draws the mirror image; a mapping mode that flips an axis, MM_LOENGLISH, does not reverse it). */
+BOOL
+FASTCALL
+PATH_IsWorldFlipped(DC *dc)
+{
+    KFLOATING_SAVE fpsave;
+    PMATRIX pmxWorld = &dc->pdcattr->mxWorldToPage;
+    double det;
+
+    if (dc->pdcattr->iGraphicsMode != GM_ADVANCED)
+        return FALSE;
+
+    KeSaveFloatingPointState(&fpsave);
+    det = PATH_FloatObjValue(&pmxWorld->efM11) * PATH_FloatObjValue(&pmxWorld->efM22) -
+          PATH_FloatObjValue(&pmxWorld->efM12) * PATH_FloatObjValue(&pmxWorld->efM21);
+    KeRestoreFloatingPointState(&fpsave);
+
+    return det < 0;
+}
+
+/* The size in device pixels of the pen of pbrLine across a horizontal line (*pcy, the pen's extent in y) and across a
+ * vertical line (*pcx, its extent in x), for the shapes the engine draws as rings (Arc, Pie, Chord, Ellipse, RoundRect)
+ * and for the bounds of a wide line. The transform changes the pen as PATH_WidenPathScaled applies it. A pen that the
+ * transform does not scale (width 0, cosmetic, a one-pixel pen of a dashed style) keeps its width. */
+VOID
+FASTCALL
+PATH_GetPenDeviceWidths(
+    DC *dc,
+    PBRUSH pbrLine,
+    LONG *pcx,
+    LONG *pcy)
+{
+    KFLOATING_SAVE fpsave;
+    double T[4], ex, ey;
+    UINT devWidth = 0;
+    LONG lWidth = pbrLine->lWidth;
+    INT iKind;
+
+    *pcx = *pcy = lWidth;
+
+    if (lWidth < 1 || (pbrLine->flAttrs & BR_IS_NULL))
+        return;
+
+    if (pbrLine->flAttrs & BR_IS_OLDSTYLEPEN)
+    {
+        if (lWidth == 1 && (pbrLine->ulPenStyle & PS_STYLE_MASK) != PS_SOLID)
+            return;
+    }
+    else if ((pbrLine->ulPenStyle & PS_TYPE_MASK) != PS_GEOMETRIC)
+    {
+        return;
+    }
+
+    if (dc->pdcattr->iMapMode == MM_TEXT && dc->pdcattr->iGraphicsMode == GM_COMPATIBLE)
+        return;
+
+    KeSaveFloatingPointState(&fpsave);
+    iKind = PATH_GetPenTransform(dc, lWidth, T, &devWidth);
+    if (iKind == PEN_XFORM_SCALE)
+    {
+        *pcx = *pcy = (LONG)devWidth;
+    }
+    else if (iKind == PEN_XFORM_FULL)
+    {
+        ex = floor(lWidth * sqrt(T[0] * T[0] + T[2] * T[2]) + 0.5);
+        ey = floor(lWidth * sqrt(T[1] * T[1] + T[3] * T[3]) + 0.5);
+        if (ex < 1) ex = 1;
+        if (ey < 1) ey = 1;
+        if (ex > 100000 || ey > 100000)
+            ex = ey = lWidth;
+        *pcx = (LONG)ex;
+        *pcy = (LONG)ey;
+    }
+    KeRestoreFloatingPointState(&fpsave);
 }
 
 /* Widens pPath (device points) with a pen of penWidth logical units under the DC transform */
