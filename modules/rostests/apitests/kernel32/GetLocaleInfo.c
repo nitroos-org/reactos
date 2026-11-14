@@ -116,8 +116,57 @@ static void Test_GetLocaleInfoEx(void)
     }
 }
 
+/* Measured on Windows 10 22H2 (19045), x64 and x86 with the same results */
+static void Test_FontSignatureAndCustomLcid(void)
+{
+    typedef int (WINAPI *PFN_LCIDToLocaleName)(LCID, LPWSTR, int, DWORD);
+    PFN_LCIDToLocaleName pLCIDToLocaleName;
+    HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
+    struct { DWORD lsUsb[4]; DWORD lsCsbDefault[2]; DWORD lsCsbSupported[2]; } Sig; /* LOCALESIGNATURE */
+    WCHAR Name[85];
+    INT Ret;
+
+    /* the invariant locale has the Latin signature of en-US: usb {3, 0, 0, 0x80000000}, default code pages 1 and
+       0x80000000, and supports only code page 1252 (the first supported word is 1) */
+    memset(&Sig, 0xcc, sizeof(Sig));
+    Ret = GetLocaleInfoW(0x7f, LOCALE_FONTSIGNATURE, (LPWSTR)&Sig, sizeof(Sig) / sizeof(WCHAR));
+    ok(Ret == sizeof(Sig) / sizeof(WCHAR), "invariant: returned %d\n", Ret);
+    ok(Sig.lsUsb[0] == 3 && Sig.lsUsb[1] == 0 && Sig.lsUsb[2] == 0 && Sig.lsUsb[3] == 0x80000000,
+       "invariant: usb %08lx %08lx %08lx %08lx\n", Sig.lsUsb[0], Sig.lsUsb[1], Sig.lsUsb[2], Sig.lsUsb[3]);
+    ok(Sig.lsCsbDefault[0] == 1 && Sig.lsCsbDefault[1] == 0x80000000,
+       "invariant: default csb %08lx %08lx\n", Sig.lsCsbDefault[0], Sig.lsCsbDefault[1]);
+    ok(Sig.lsCsbSupported[0] == 1, "invariant: supported csb %08lx\n", Sig.lsCsbSupported[0]);
+
+    /* LOCALE_CUSTOM_UNSPECIFIED names the user default locale (en-US here, which is the test default) */
+    pLCIDToLocaleName = (PFN_LCIDToLocaleName)GetProcAddress(hKernel32, "LCIDToLocaleName");
+    if (!pLCIDToLocaleName)
+    {
+        hKernel32 = LoadLibraryW(L"kernel32_vista.dll");
+        if (hKernel32)
+            pLCIDToLocaleName = (PFN_LCIDToLocaleName)GetProcAddress(hKernel32, "LCIDToLocaleName");
+    }
+    if (!pLCIDToLocaleName)
+    {
+        skip("LCIDToLocaleName not found\n");
+        return;
+    }
+    {
+        WCHAR UserName[85];
+        INT UserRet = pLCIDToLocaleName(GetUserDefaultLCID(), UserName, _countof(UserName), 0);
+
+        wcscpy(Name, L"?");
+        SetLastError(0xdeadbeef);
+        Ret = pLCIDToLocaleName(0x1000, Name, _countof(Name), 0);
+        ok(Ret == UserRet && Ret != 0, "0x1000: returned %d, user default %d (error %lu)\n", Ret, UserRet, GetLastError());
+        ok(!wcscmp(Name, UserName), "0x1000: got '%ls', user default '%ls'\n", Name, UserName);
+        Ret = pLCIDToLocaleName(0x1000, NULL, 0, 0);
+        ok(Ret == UserRet, "0x1000 size query: returned %d, expected %d\n", Ret, UserRet);
+    }
+}
+
 #undef GetLocaleInfo
 START_TEST(GetLocaleInfo)
 {
     Test_GetLocaleInfoEx();
+    Test_FontSignatureAndCustomLcid();
 }

@@ -371,9 +371,9 @@ START_TEST(TranslateCharsetInfo)
     memset(&csi, 0xcc, sizeof(csi));
     ret = TranslateCharsetInfo((DWORD *)(ULONG_PTR)0x7f, &csi, TCI_SRCLOCALE);
     ok(ret == TRUE, "invariant: ret %d\n", ret);
-    /* fsCsb[1] is 1 on Windows 10; the font signature of our invariant locale is not measured */
-    ok(csi.ciCharset == ANSI_CHARSET && csi.fs.fsCsb[0] == 1,
-       "invariant: charset %u csb0 %08lx\n", csi.ciCharset, csi.fs.fsCsb[0]);
+    /* measured on Windows 10: fsCsb[1] is 1 */
+    ok(csi.ciCharset == ANSI_CHARSET && csi.fs.fsCsb[0] == 1 && csi.fs.fsCsb[1] == 1,
+       "invariant: charset %u csb %08lx %08lx\n", csi.ciCharset, csi.fs.fsCsb[0], csi.fs.fsCsb[1]);
     memset(&csi, 0xcc, sizeof(csi));
     ret = TranslateCharsetInfo((DWORD *)(ULONG_PTR)0x0001, &csi, TCI_SRCLOCALE);
     ok(ret == TRUE, "ar: ret %d\n", ret);
