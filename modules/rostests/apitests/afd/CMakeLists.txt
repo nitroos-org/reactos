@@ -9,6 +9,7 @@ list(APPEND SOURCE
     send.c
     sendcancel.c
     sendtounbound.c
+    sendbeforeconnect.c
     windowsize.c
     nonpagedwindow.c
     defensive.c
