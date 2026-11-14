@@ -200,7 +200,7 @@ IntArc( DC *dc,
     {
         if (ret)
             ret = PATH_DrawShape(dc, PATH_SHAPE_ARC, Left, Top, Right, Bottom,
-                                 XRadialStart, YRadialStart, XRadialEnd, YRadialEnd, arctype);
+                                 XRadialStart, YRadialStart, XRadialEnd, YRadialEnd, arctype, bRot);
     }
     else if (arctype == GdiTypePie)
     {

@@ -429,7 +429,7 @@ NtGdiEllipse(
         DC_vFinishBlit(dc, NULL);
 
         if (ret && bStroke)
-            ret = PATH_DrawShape(dc, PATH_SHAPE_ELLIPSE, Left, Top, Right, Bottom, 0, 0, 0, 0, GdiTypeArc);
+            ret = PATH_DrawShape(dc, PATH_SHAPE_ELLIPSE, Left, Top, Right, Bottom, 0, 0, 0, 0, GdiTypeArc, bRot);
     }
 
     pbrush->lWidth = PenOrigWidth;
@@ -1068,7 +1068,7 @@ IntRoundRect(
 
         if (ret && bStroke)
             ret = PATH_DrawShape(dc, PATH_SHAPE_ROUNDRECT, Left, Top, Right, Bottom,
-                                 xCurveDiameter, yCurveDiameter, 0, 0, GdiTypeArc);
+                                 xCurveDiameter, yCurveDiameter, 0, 0, GdiTypeArc, bRot);
     }
 
 

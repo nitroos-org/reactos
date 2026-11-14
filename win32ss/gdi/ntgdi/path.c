@@ -2647,7 +2647,8 @@ PATH_IsWidePen(DC *dc, PBRUSH pbrLine)
     if (dc->pdcattr->iMapMode == MM_TEXT && dc->pdcattr->iGraphicsMode == GM_COMPATIBLE)
         return FALSE;
 
-    KeSaveFloatingPointState(&fpsave);
+    if (!NT_SUCCESS(KeSaveFloatingPointState(&fpsave)))
+        return FALSE;
     iKind = PATH_GetPenTransform(dc, 1, T, &devWidth);
     if (iKind == PEN_XFORM_SCALE)
         bWide = (devWidth > 1);
@@ -2672,7 +2673,8 @@ PATH_IsWorldFlipped(DC *dc)
     if (dc->pdcattr->iGraphicsMode != GM_ADVANCED)
         return FALSE;
 
-    KeSaveFloatingPointState(&fpsave);
+    if (!NT_SUCCESS(KeSaveFloatingPointState(&fpsave)))
+        return FALSE;
     det = PATH_FloatObjValue(&pmxWorld->efM11) * PATH_FloatObjValue(&pmxWorld->efM22) -
           PATH_FloatObjValue(&pmxWorld->efM12) * PATH_FloatObjValue(&pmxWorld->efM21);
     KeRestoreFloatingPointState(&fpsave);
@@ -2716,7 +2718,8 @@ PATH_GetPenDeviceWidths(
     if (dc->pdcattr->iMapMode == MM_TEXT && dc->pdcattr->iGraphicsMode == GM_COMPATIBLE)
         return;
 
-    KeSaveFloatingPointState(&fpsave);
+    if (!NT_SUCCESS(KeSaveFloatingPointState(&fpsave)))
+        return;
     iKind = PATH_GetPenTransform(dc, lWidth, T, &devWidth);
     if (iKind == PEN_XFORM_SCALE)
     {
@@ -2784,21 +2787,10 @@ BOOL
 FASTCALL
 PATH_IsWorldRotated(DC *dc)
 {
-    KFLOATING_SAVE fpsave;
-    PMATRIX pmx = DC_pmxWorldToDevice(dc);
-    double m11, m12, m21, m22;
-    BOOL bRot;
-
-    KeSaveFloatingPointState(&fpsave);
-    m11 = PATH_FloatObjValue(&pmx->efM11);
-    m12 = PATH_FloatObjValue(&pmx->efM12);
-    m21 = PATH_FloatObjValue(&pmx->efM21);
-    m22 = PATH_FloatObjValue(&pmx->efM22);
-    /* a NaN fails the comparisons */
-    bRot = (fabs(m12) > 1e-6 * (fabs(m11) + fabs(m22) + 1e-30) || fabs(m21) > 1e-6 * (fabs(m11) + fabs(m22) + 1e-30));
-    KeRestoreFloatingPointState(&fpsave);
-
-    return bRot;
+    /* The flags of the matrix (IntRectangle reads them the same way): no floating point. The matrix is recalculated on
+       demand, bring it up to date before reading the flag (it can still describe the previous transform). */
+    DC_vUpdateWorldToDevice(dc);
+    return !(dc->pdcattr->mxWorldToDevice.flAccel & XFORM_SCALE);
 }
 
 /* Adds the 4 Bezier points of one segment as entries, the first of them with the entry type startType (0: the current
@@ -2818,25 +2810,33 @@ PATH_AddBezierSegment(PPATH pPath, const POINT *pts, BYTE startType)
     return TRUE;
 }
 
+/* The 13 device points of the Bezier outline of the ellipse. All floating point work is between the save and the
+   restore of the state. *pbEmpty is set for a box without area (GM_COMPATIBLE excludes the bottom and right edges). */
 static
 BOOL
-PATH_EllipseRot(DC *dc, INT x1, INT y1, INT x2, INT y2)
+PATH_EllipseRotPoints(DC *dc, INT x1, INT y1, INT x2, INT y2, POINT *pts, PBOOL pbEmpty)
 {
     KFLOATING_SAVE fpsave;
     PATH_LPMAP map;
-    PPATH pPath;
-    POINT pts[13];
     double lp[13][2];
     double l, t, r, b, cx, cy, rx, ry, k = 0.5522847498307935;
-    BYTE *type;
     BOOL bOk = TRUE;
     INT i;
+
+    *pbEmpty = FALSE;
+    if (!NT_SUCCESS(KeSaveFloatingPointState(&fpsave)))
+        return FALSE;
 
     l = min(x1, x2); r = max(x1, x2);
     t = min(y1, y2); b = max(y1, y2);
     if (dc->pdcattr->iGraphicsMode == GM_COMPATIBLE)
     {
-        if (l == r || t == b) return TRUE;
+        if (l == r || t == b)
+        {
+            *pbEmpty = TRUE;
+            KeRestoreFloatingPointState(&fpsave);
+            return TRUE;
+        }
         r -= 1.0;
         b -= 1.0;
     }
@@ -2857,13 +2857,26 @@ PATH_EllipseRot(DC *dc, INT x1, INT y1, INT x2, INT y2)
     lp[11][0] = cx + rx;    lp[11][1] = cy + k * ry;
     lp[12][0] = cx + rx;    lp[12][1] = cy;
 
-    KeSaveFloatingPointState(&fpsave);
     PATH_GetLPMap(dc, &map);
     for (i = 0; i < 13 && bOk; i++)
         bOk = PATH_MapLP(&map, lp[i][0], lp[i][1], &pts[i]);
     KeRestoreFloatingPointState(&fpsave);
-    if (!bOk)
+    return bOk;
+}
+
+static
+BOOL
+PATH_EllipseRot(DC *dc, INT x1, INT y1, INT x2, INT y2)
+{
+    PPATH pPath;
+    POINT pts[13];
+    BYTE *type;
+    BOOL bEmpty;
+
+    if (!PATH_EllipseRotPoints(dc, x1, y1, x2, y2, pts, &bEmpty))
         return FALSE;
+    if (bEmpty)
+        return TRUE;
 
     pPath = PATH_LockPath(dc->dclevel.hPath);
     if (!pPath)
@@ -2882,25 +2895,32 @@ PATH_EllipseRot(DC *dc, INT x1, INT y1, INT x2, INT y2)
     return TRUE;
 }
 
+/* The 16 device points of the Bezier outline of the round rectangle (as PATH_EllipseRotPoints) */
 static
 BOOL
-PATH_RoundRectRot(DC *dc, INT x1, INT y1, INT x2, INT y2, INT ell_width, INT ell_height)
+PATH_RoundRectRotPoints(DC *dc, INT x1, INT y1, INT x2, INT y2, INT ell_width, INT ell_height, POINT *pts, PBOOL pbEmpty)
 {
     KFLOATING_SAVE fpsave;
     PATH_LPMAP map;
-    PPATH pPath;
-    POINT pts[16];
     double lp[16][2];
     double l, t, r, b, ew, eh, xo, yo;
-    BYTE *type;
     BOOL bOk = TRUE;
     INT i;
+
+    *pbEmpty = FALSE;
+    if (!NT_SUCCESS(KeSaveFloatingPointState(&fpsave)))
+        return FALSE;
 
     l = min(x1, x2); r = max(x1, x2);
     t = min(y1, y2); b = max(y1, y2);
     if (dc->pdcattr->iGraphicsMode == GM_COMPATIBLE)
     {
-        if (l == r || t == b) return TRUE;
+        if (l == r || t == b)
+        {
+            *pbEmpty = TRUE;
+            KeRestoreFloatingPointState(&fpsave);
+            return TRUE;
+        }
         r -= 1.0;
         b -= 1.0;
     }
@@ -2932,13 +2952,26 @@ PATH_RoundRectRot(DC *dc, INT x1, INT y1, INT x2, INT y2, INT ell_width, INT ell
     RRPT(15, r, b - eh);
 #undef RRPT
 
-    KeSaveFloatingPointState(&fpsave);
     PATH_GetLPMap(dc, &map);
     for (i = 0; i < 16 && bOk; i++)
         bOk = PATH_MapLP(&map, lp[i][0], lp[i][1], &pts[i]);
     KeRestoreFloatingPointState(&fpsave);
-    if (!bOk)
+    return bOk;
+}
+
+static
+BOOL
+PATH_RoundRectRot(DC *dc, INT x1, INT y1, INT x2, INT y2, INT ell_width, INT ell_height)
+{
+    PPATH pPath;
+    POINT pts[16];
+    BYTE *type;
+    BOOL bEmpty;
+
+    if (!PATH_RoundRectRotPoints(dc, x1, y1, x2, y2, ell_width, ell_height, pts, &bEmpty))
         return FALSE;
+    if (bEmpty)
+        return TRUE;
 
     pPath = PATH_LockPath(dc->dclevel.hPath);
     if (!pPath)
@@ -3173,7 +3206,7 @@ PATH_IsShapeStroked(DC *dc, PBRUSH pbrLine)
 /* Draws a shape as a path: fills it (only under a rotation: the box fill of the caller is right without one) and
    strokes it with the pen of the DC (nothing for a null pen). The coordinates are the logical ones of the call. For PATH_SHAPE_ROUNDRECT p1
    and p2 are the width and height of the corner ellipse; for PATH_SHAPE_ARC p1,p2 is the start and p3,p4 the end point.
-   The DC does not hold an open path. */
+   bRot is PATH_IsWorldRotated of the caller. The DC does not hold an open path. */
 BOOL
 FASTCALL
 PATH_DrawShape(
@@ -3181,16 +3214,15 @@ PATH_DrawShape(
     INT iShape,
     INT x1, INT y1, INT x2, INT y2,
     INT p1, INT p2, INT p3, INT p4,
-    ARCTYPE arctype)
+    ARCTYPE arctype,
+    BOOL bRot)
 {
     PPATH pPath;
     HPATH hOldPath = dc->dclevel.hPath;
     FLONG flOldPath = dc->dclevel.flPath;
     PBRUSH pbrFill = dc->dclevel.pbrFill;
-    BOOL bPathOk, bRot, ret = FALSE;
+    BOOL bPathOk, ret = FALSE;
     INT direction = 0;
-
-    bRot = PATH_IsWorldRotated(dc);
 
     pPath = PATH_CreatePath(32);
     if (!pPath)
@@ -3277,7 +3309,11 @@ PATH_WidenPathScaled(DC *dc, PPATH pPath, UINT penWidth, UINT penStyle)
     const INT K = 16;
     BOOL bOk;
 
-    KeSaveFloatingPointState(&fpsave);
+    if (!NT_SUCCESS(KeSaveFloatingPointState(&fpsave)))
+    {
+        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return NULL;
+    }
     iKind = PATH_GetPenTransform(dc, penWidth, T, &devWidth);
     KeRestoreFloatingPointState(&fpsave);
 
@@ -3297,8 +3333,15 @@ PATH_WidenPathScaled(DC *dc, PPATH pPath, UINT penWidth, UINT penStyle)
     if (!pTmp)
         return IntGdiWidenPath(pPath, penWidth, penStyle, dc->dclevel.laPath.eMiterLimit);
 
-    bOk = TRUE;
-    KeSaveFloatingPointState(&fpsave);
+    bOk = NT_SUCCESS(KeSaveFloatingPointState(&fpsave));
+    if (!bOk)
+    {
+        HPATH hTmp = pTmp->BaseObject.hHmgr;
+        PATH_UnlockPath(pTmp);
+        PATH_Delete(hTmp);
+        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return NULL;
+    }
     for (i = 0; i < pPath->numEntriesUsed && bOk; i++)
     {
         double qx, qy;
