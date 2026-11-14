@@ -15,6 +15,9 @@ static UINT DispatchTotalSize;
 static UINT DispatchHeaderSize;
 static BOOLEAN DispatchDataOk;
 static UCHAR FragmentProtocol = 17;
+static USHORT DispatchFlagsFragOfs;
+static USHORT DispatchIpTotalLength;
+static BOOLEAN DispatchChecksumOk;
 
 BOOLEAN TCPIpv6Enabled;
 static ULONG Receive6Count;
@@ -114,6 +117,9 @@ IPDispatchProtocol(PIP_INTERFACE Interface, PIP_PACKET IPPacket)
     DispatchTotalSize = IPPacket->TotalSize;
     DispatchHeaderSize = IPPacket->HeaderSize;
     DispatchDataOk = (IPPacket->Data == Data);
+    DispatchFlagsFragOfs = WN2H(((PIPv4_HEADER)IPPacket->Header)->FlagsFragOfs);
+    DispatchIpTotalLength = WN2H(((PIPv4_HEADER)IPPacket->Header)->TotalLength);
+    DispatchChecksumOk = (IPv4Checksum(IPPacket->Header, IPPacket->HeaderSize, 0) == 0);
     for (i = 0; DispatchDataOk && i < IPPacket->TotalSize - IPPacket->HeaderSize; i++)
     {
         if (Data[i] != PatternByte(i))
@@ -131,6 +137,24 @@ BOOLEAN
 IPv4CorrectChecksum(PVOID Data, UINT Count)
 {
     return TRUE;
+}
+
+/* The Internet checksum of Count octets (what the driver's macro computes): the complement of the
+   folded sum of the 16-bit words in memory order */
+USHORT
+IPv4Checksum(PVOID Data, UINT Count, ULONG Seed)
+{
+    PUCHAR P = Data;
+    ULONG Sum = Seed;
+    UINT i;
+
+    for (i = 0; i + 1 < Count; i += 2)
+        Sum += P[i] | ((ULONG)P[i + 1] << 8);
+    if (Count & 1)
+        Sum += P[Count - 1];
+    while (Sum >> 16)
+        Sum = (Sum & 0xFFFF) + (Sum >> 16);
+    return (USHORT)~Sum;
 }
 
 VOID
@@ -197,6 +221,9 @@ ResetDispatch(VOID)
     DispatchTotalSize = 0;
     DispatchHeaderSize = 0;
     DispatchDataOk = FALSE;
+    DispatchFlagsFragOfs = 0xFFFF;
+    DispatchIpTotalLength = 0;
+    DispatchChecksumOk = FALSE;
 }
 
 static VOID
@@ -222,6 +249,10 @@ TestLegitimate(VOID)
     ok(DispatchTotalSize == 2020, "TotalSize = %u\n", DispatchTotalSize);
     ok(DispatchHeaderSize == 20, "HeaderSize = %u\n", DispatchHeaderSize);
     ok(DispatchDataOk, "reassembled data differs\n");
+    ok((DispatchFlagsFragOfs & (IPv4_MF_MASK | IPv4_FRAGOFS_MASK)) == 0, "header still says fragment (0x%04x)\n",
+       DispatchFlagsFragOfs);
+    ok(DispatchIpTotalLength == 2020, "header length %u\n", DispatchIpTotalLength);
+    ok(DispatchChecksumOk, "header checksum does not match\n");
     ExpectNothingLeft("2 fragments");
 
     /* A first fragment with options: the datagram takes its header */
@@ -303,6 +334,11 @@ TestTcpHeaderSplit(VOID)
         ok(DispatchTotalSize == 60, "cut %u: TotalSize = %u\n", Cuts[i], DispatchTotalSize);
         ok(DispatchHeaderSize == 20, "cut %u: HeaderSize = %u\n", Cuts[i], DispatchHeaderSize);
         ok(DispatchDataOk, "cut %u: reassembled data differs\n", Cuts[i]);
+        ok((DispatchFlagsFragOfs & (IPv4_MF_MASK | IPv4_FRAGOFS_MASK)) == 0,
+           "cut %u: the datagram's header still says fragment (0x%04x)\n", Cuts[i], DispatchFlagsFragOfs);
+        ok(DispatchIpTotalLength == DispatchTotalSize, "cut %u: header length %u, datagram %u\n",
+           Cuts[i], DispatchIpTotalLength, DispatchTotalSize);
+        ok(DispatchChecksumOk, "cut %u: header checksum does not match\n", Cuts[i]);
         ExpectNothingLeft("TCP header split");
     }
     FragmentProtocol = 17;

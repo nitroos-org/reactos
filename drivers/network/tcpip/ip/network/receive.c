@@ -258,6 +258,18 @@ ReassembleDatagram(
   /* Copy the header into the buffer */
   RtlCopyMemory(IPPacket->Header, IPDR->IPv4Header, IPDR->HeaderSize);
 
+  /* The header is the first fragment's. The datagram is whole now, and lwIP (which takes TCP and UDP from
+     here) must see that: no more fragments, offset 0, the length of the whole datagram, and a checksum that
+     matches. Otherwise it takes the datagram for a fragment of its own and waits for the rest. */
+  {
+    PIPv4_HEADER Whole = (PIPv4_HEADER)IPPacket->Header;
+
+    Whole->TotalLength = WH2N((USHORT)IPPacket->TotalSize);
+    Whole->FlagsFragOfs = WH2N((USHORT)(WN2H(Whole->FlagsFragOfs) & IPv4_DF_MASK));
+    Whole->Checksum = 0;
+    Whole->Checksum = (USHORT)IPv4Checksum(Whole, IPDR->HeaderSize, 0);
+  }
+
   Data = (PVOID)((ULONG_PTR)IPPacket->Header + IPDR->HeaderSize);
   IPPacket->Data = Data;
 
