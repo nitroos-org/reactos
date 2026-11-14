@@ -201,7 +201,7 @@ MiniportQueryInformation(
         break;
 
     case OID_802_3_CURRENT_ADDRESS:
-        copySource = Adapter->MulticastList[0].MacAddress;
+        copySource = Adapter->PermanentMacAddress;
         copyLength = IEEE_802_ADDR_LENGTH;
         break;
 

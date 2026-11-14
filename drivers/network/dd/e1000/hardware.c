@@ -695,19 +695,36 @@ NTAPI
 NICUpdateMulticastList(
     IN PE1000_ADAPTER Adapter)
 {
-    UINT n;
+    UINT n, Entry;
+    BOOLEAN Multicast = (Adapter->PacketFilter & NDIS_PACKET_TYPE_MULTICAST) != 0;
     NDIS_DbgPrint(MAX_TRACE, ("Called.\n"));
 
-    // FIXME: Use 'Adapter->MulticastListSize'? Check the datasheet
-    for (n = 0; n < MAXIMUM_MULTICAST_ADDRESSES; ++n)
+    /* Receive address 0: the station address. The others: the multicast list, while the packet filter takes
+       it; a frame to any valid entry is received. Only group addresses go there: the list never widens what
+       the adapter takes to another station's frames */
+    Entry = 0;
+    for (n = 0; n < E1000_NUM_RECEIVE_ADDRESSES; ++n)
     {
-        ULONG Ral = *(ULONG *)Adapter->MulticastList[n].MacAddress;
-        ULONG Rah = *(USHORT *)&Adapter->MulticastList[n].MacAddress[4];
+        PUCHAR Address = NULL;
 
-        if (Rah || Ral)
+        if (n == 0)
         {
-            Rah |= E1000_RAH_AV;
+            Address = Adapter->PermanentMacAddress;
+        }
+        else if (Multicast)
+        {
+            while (Entry < Adapter->MulticastListSize && !(Adapter->MulticastList[Entry].MacAddress[0] & 0x01))
+                Entry++;
+            if (Entry < Adapter->MulticastListSize)
+                Address = Adapter->MulticastList[Entry++].MacAddress;
+        }
 
+        if (Address)
+        {
+            ULONG Ral = Address[0] | (Address[1] << 8) | (Address[2] << 16) | ((ULONG)Address[3] << 24);
+            ULONG Rah = Address[4] | (Address[5] << 8) | E1000_RAH_AV;
+
+            /* The address first, then its valid bit */
             E1000WriteUlong(Adapter, E1000_REG_RAL + (8*n), Ral);
             E1000WriteUlong(Adapter, E1000_REG_RAH + (8*n), Rah);
         }
@@ -717,6 +734,10 @@ NICUpdateMulticastList(
             E1000WriteUlong(Adapter, E1000_REG_RAL + (8*n), 0);
         }
     }
+
+    /* The multicast table array (a hash of addresses) is not used: its content is undefined after power-up */
+    for (n = 0; n < E1000_NUM_MTA_REGISTERS; ++n)
+        E1000WriteUlong(Adapter, E1000_REG_MTA + (4*n), 0);
 
     return NDIS_STATUS_SUCCESS;
 }
@@ -733,6 +754,9 @@ NICApplyPacketFilter(
     FilterMask &= ~E1000_RCTL_FILTER_BITS;
     FilterMask |= PacketFilterToMask(Adapter->PacketFilter);
     E1000WriteUlong(Adapter, E1000_REG_RCTL, FilterMask);
+
+    /* NDIS_PACKET_TYPE_MULTICAST is the multicast list in the receive addresses */
+    NICUpdateMulticastList(Adapter);
 
     return NDIS_STATUS_SUCCESS;
 }
