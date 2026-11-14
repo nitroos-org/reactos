@@ -164,6 +164,7 @@ list(APPEND SOURCE
     LocalDumps.c
     CrashDialog.c
     LocaleDerivedFields.c
+    LocaleEveryName.c
     LocaleNameToLCID.c
     LocaleTable.c
     LocalTimeZone.c
