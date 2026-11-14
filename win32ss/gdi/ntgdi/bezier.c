@@ -122,14 +122,18 @@ static void GDI_InternalBezier( POINT *Points, POINT **PtsOut, INT *dwOut,
 				INT *nPtsOut, INT level )
 {
     if(*nPtsOut == *dwOut) {
-        *dwOut *= 2;
-        *PtsOut = ExAllocatePoolWithTag(PagedPool, *dwOut * sizeof(POINT), TAG_BEZIER);
-        if (*PtsOut == NULL)
+        /* Grow the buffer, keeping the points flattened so far (a new buffer holds no old points: the first of the curve
+           would be whatever the pool held) */
+        POINT *pNew = ExAllocatePoolWithTag(PagedPool, *dwOut * 2 * sizeof(POINT), TAG_BEZIER);
+        if (pNew == NULL)
         {
-            /// \todo FIXME!
-            NT_ASSERT(FALSE);
+            /* The curve ends here */
             return;
         }
+        RtlCopyMemory(pNew, *PtsOut, *nPtsOut * sizeof(POINT));
+        ExFreePoolWithTag(*PtsOut, TAG_BEZIER);
+        *PtsOut = pNew;
+        *dwOut *= 2;
     }
 
     if(!level || BezierCheck(level, Points)) {
