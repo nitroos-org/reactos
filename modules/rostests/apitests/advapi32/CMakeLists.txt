@@ -12,6 +12,7 @@ list(APPEND SOURCE
     RegWow64.c
     RegWow64Review.c
     RegWow64RelativeView.c
+    OwnerRightsAccess.c
     RestrictedSidsCopy.c
     RestrictedTokenAccess.c
     CreateService.c
