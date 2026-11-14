@@ -123,6 +123,20 @@ static const struct
 };
 
 /*
+ * Locales for which only the default ANSI code page was measured on Windows 10 (the other
+ * code pages of the locale were not, so they are not asserted).
+ */
+static const struct
+{
+    PCWSTR Name;
+    PCWSTR Ansi;
+} AnsiOnly[] =
+{
+    /* Kazakh: Windows has no ANSI code page for it (0), the Cyrillic 1251 of ru-RU does not apply */
+    { L"kk-KZ", L"0" },
+};
+
+/*
  * LOCALE_FONTSIGNATURE of every locale of the table, measured on Windows 10 22H2 (build 19045) with GetLocaleInfoEx:
  * 16 WCHARs = 32 bytes = LOCALESIGNATURE (4 DWORD Unicode subset bits, 2 DWORD default code page bits, 2 DWORD
  * supported code page bits), here as the 8 DWORDs of the memory image. All locales but nl-SR: the name nl-SR (0x0c13)
@@ -476,6 +490,9 @@ START_TEST(LocaleDerivedFields)
         ExpectInfo(Name, LOCALE_SABBREVCTRYNAME, "SABBREVCTRYNAME", Expected[i].AbbrevCtry);
         ExpectInfo(Name, LOCALE_SOPENTYPELANGUAGETAG, "SOPENTYPELANGUAGETAG", Expected[i].OpenType);
     }
+
+    for (i = 0; i < ARRAYSIZE(AnsiOnly); i++)
+        ExpectInfo(AnsiOnly[i].Name, LOCALE_IDEFAULTANSICODEPAGE, "IDEFAULTANSICODEPAGE", AnsiOnly[i].Ansi);
 
     for (i = 0; i < ARRAYSIZE(FontSignatures); i++)
         ExpectFontSignature(FontSignatures[i].Name, FontSignatures[i].Signature);
