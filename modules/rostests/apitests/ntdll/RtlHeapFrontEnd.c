@@ -441,11 +441,148 @@ TestSection(void)
     RtlDeleteCriticalSection(&g_Section);
 }
 
+/* How many allocations of one size a fresh heap takes before it reports the front end (type 2), measured on
+   Windows 10 x64: 18 when nothing is freed, 33 with a free after every second allocation, 2041 when every block
+   is freed at once, about 797 for 4000 byte blocks (3.2 MB in use). Mode: 0 keep, 1 free at once, 2 two
+   allocations and one free. Returns 0 when it did not happen within Max. */
+static ULONG
+CountToFrontEnd(HANDLE Heap, SIZE_T Size, ULONG Mode, ULONG Max)
+{
+    PVOID *Held = HeapAlloc(GetProcessHeap(), 0, Max * sizeof(PVOID));
+    ULONG Held2 = 0, i, Result = 0;
+
+    for (i = 0; i < Max; i++)
+    {
+        PVOID Block = HeapAlloc(Heap, 0, Size);
+
+        if (!Block)
+            break;
+        if (Mode == 1)
+            HeapFree(Heap, 0, Block);
+        else
+        {
+            Held[Held2++] = Block;
+            if (Mode == 2 && (i & 1))
+                HeapFree(Heap, 0, Held[--Held2]);
+        }
+        if (QueryFrontEnd(Heap) == 2)
+        {
+            Result = i + 1;
+            break;
+        }
+    }
+    while (Held2)
+        HeapFree(Heap, 0, Held[--Held2]);
+    HeapFree(GetProcessHeap(), 0, Held);
+    return Result;
+}
+
+static void
+TestActivation(void)
+{
+    static const SIZE_T Sizes[] = { 8, 16, 24, 64, 100, 256, 1000, 2000 };
+    HANDLE Heap;
+    ULONG Count, i;
+
+    for (i = 0; i < RTL_NUMBER_OF(Sizes); i++)
+    {
+        Heap = HeapCreate(0, 0, 0);
+        Count = CountToFrontEnd(Heap, Sizes[i], 0, 4000);
+        ok(Count >= 17 && Count <= 18, "size %lu: front end after %lu allocations\n", (ULONG)Sizes[i], Count);
+        HeapDestroy(Heap);
+
+        Heap = HeapCreate(0, 0, 0);
+        Count = CountToFrontEnd(Heap, Sizes[i], 2, 4000);
+        ok(Count >= 31 && Count <= 35, "size %lu: front end after %lu allocations (two, one freed)\n", (ULONG)Sizes[i], Count);
+        HeapDestroy(Heap);
+    }
+
+    /* Allocate and free at once: Windows took 2041 for every size from 16 bytes */
+    Heap = HeapCreate(0, 0, 0);
+    Count = CountToFrontEnd(Heap, 64, 1, 4000);
+    ok(Count == 2041, "alloc and free: front end after %lu allocations\n", Count);
+    HeapDestroy(Heap);
+
+    /* Big blocks count by bytes in use */
+    Heap = HeapCreate(0, 0, 0);
+    Count = CountToFrontEnd(Heap, 8000, 0, 4000);
+    ok(Count >= 380 && Count <= 420, "8000 byte blocks: front end after %lu allocations\n", Count);
+    HeapDestroy(Heap);
+
+    /* Heaps that cannot have it never do */
+    Heap = HeapCreate(HEAP_NO_SERIALIZE, 0, 0);
+    Count = CountToFrontEnd(Heap, 64, 0, 3000);
+    ok(Count == 0, "HEAP_NO_SERIALIZE heap: front end after %lu allocations\n", Count);
+    HeapDestroy(Heap);
+
+    Heap = HeapCreate(0, 0x100000, 0x100000);
+    Count = CountToFrontEnd(Heap, 64, 0, 3000);
+    ok(Count == 0, "fixed size heap: front end after %lu allocations\n", Count);
+    HeapDestroy(Heap);
+
+    /* HeapSetInformation(2) on a fresh heap still works, and on one that has it already */
+    Heap = HeapCreate(0, 0, 0);
+    ok_eq_ulong(QueryFrontEnd(Heap), 0);
+    ok(SetFrontEnd(Heap, 2), "HeapSetInformation(2) failed\n");
+    ok_eq_ulong(QueryFrontEnd(Heap), 2);
+    HeapDestroy(Heap);
+}
+
+/* What the heap counts to decide on the front end follows the blocks the program has, and is not a block of the
+   program's heap (HeapWalk shows only what was allocated). Windows was not measured for the realloc and
+   HEAP_NO_SERIALIZE cases: these are our own counting rules. */
+static void
+TestCounting(void)
+{
+    HANDLE Heap = HeapCreate(0, 0, 0);
+    PVOID Block, Blocks[5];
+    ULONG i;
+
+    /* A block that moves to another class in HeapReAlloc (and is freed) leaves nothing counted behind */
+    for (i = 0; i < 100; i++)
+    {
+        Block = HeapAlloc(Heap, 0, 32);
+        Block = HeapReAlloc(Heap, 0, Block, 300);
+        HeapFree(Heap, 0, Block);
+    }
+    ok_eq_ulong(QueryFrontEnd(Heap), 0);
+
+    /* Nor does one that shrinks in place */
+    for (i = 0; i < 100; i++)
+    {
+        Block = HeapAlloc(Heap, 0, 100);
+        Block = HeapReAlloc(Heap, HEAP_REALLOC_IN_PLACE_ONLY, Block, 20);
+        HeapFree(Heap, 0, Block);
+    }
+    ok_eq_ulong(QueryFrontEnd(Heap), 0);
+
+    /* A free that passes HEAP_NO_SERIALIZE is counted like any other */
+    for (i = 0; i < 100; i++)
+    {
+        Block = HeapAlloc(Heap, 0, 48);
+        HeapFree(Heap, HEAP_NO_SERIALIZE, Block);
+    }
+    ok_eq_ulong(QueryFrontEnd(Heap), 0);
+    HeapDestroy(Heap);
+
+    /* The heap shows the blocks of the program and no other */
+    Heap = HeapCreate(0, 0, 0);
+    for (i = 0; i < _countof(Blocks); i++)
+        Blocks[i] = HeapAlloc(Heap, 0, 40);
+    ok_eq_int(CountBusy(Heap), (int)_countof(Blocks));
+    for (i = 0; i < _countof(Blocks); i++)
+        HeapFree(Heap, 0, Blocks[i]);
+    ok_eq_int(CountBusy(Heap), 0);
+    HeapDestroy(Heap);
+}
+
 START_TEST(RtlHeapFrontEnd)
 {
     HANDLE Heap;
 
     TestInformation();
+    TestActivation();
+    TestCounting();
 
     Heap = HeapCreate(0, 0, 0);
     SetFrontEnd(Heap, 2);
