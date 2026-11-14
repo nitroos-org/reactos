@@ -786,7 +786,7 @@ QSI_DEF(SystemPerformanceInformation)
                      &Spi->NonPagedPoolAllocs,
                      &Spi->NonPagedPoolFrees,
                      &Spi->NonPagedPoolLookasideHits);
-    Spi->FreeSystemPtes = 0; /* FIXME */
+    Spi->FreeSystemPtes = MiQueryFreeSystemPtes();
 
     Spi->ResidentSystemCodePage = 0; /* FIXME */
 
