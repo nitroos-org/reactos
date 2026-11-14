@@ -491,8 +491,20 @@ RunPostOperations(_Inout_ PFLTP_IRPCTRL Ctrl,
              * parked it isn't ours anymore, the IRP may be done and gone before we are back from here. So
              * what our dispatch routine needs to know has to be in the IRP by then: if the file system has
              * completed it without pending, the dispatch routine answers STATUS_PENDING and the IRP is marked.
+             *
+             * If the file system pended it, our dispatch routine has answered STATUS_PENDING already, and
+             * our stack location has to say so as well (the rule for any completion routine which returns
+             * STATUS_MORE_PROCESSING_REQUIRED): the IoCompleteRequest of FltCompletePendedPostOperation
+             * starts at our location, and without SL_PENDING_RETURNED there the I/O manager takes the
+             * IRP as completed synchronously and, for reads and writes (IRP_DEFER_IO_COMPLETION), never
+             * finishes it for the thread which waits on STATUS_PENDING. The same holds when a pre-operation
+             * pended the IRP (Ctrl->Pended): that mark must stay, whoever finishes first.
              */
-            if (InCompletionRoutine && !Ctrl->Irp->PendingReturned)
+            if (InCompletionRoutine && (Ctrl->Irp->PendingReturned || Ctrl->Pended))
+            {
+                IoMarkIrpPending(Ctrl->Irp);
+            }
+            else if (InCompletionRoutine)
             {
                 Ctrl->ParkedSync = TRUE;
                 IoMarkIrpPending(Ctrl->Irp);
