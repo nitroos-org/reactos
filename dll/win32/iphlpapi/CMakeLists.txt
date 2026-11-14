@@ -13,6 +13,7 @@ list(APPEND SOURCE
     icmp.c
     ifenum_reactos.c
     ipstats_reactos.c
+    ipv6state.c
     iphlpapi_reactos.c
     iphlpapi_main.c
     luid.c

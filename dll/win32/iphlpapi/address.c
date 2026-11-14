@@ -348,16 +348,24 @@ typedef struct _IP_ADAPTER_ADDRESSES_W7
 
 C_ASSERT(FIELD_OFFSET(IP_ADAPTER_ADDRESSES_LH, FirstPrefix) == FIELD_OFFSET(IP_ADAPTER_ADDRESSES, FirstPrefix));
 
+/*
+ * V6 is the IPv6 state of the stack: empty while IPv6 is off, and then nothing below differs from a system without
+ * IPv6. With IPv6 on, an interface that has it is flagged IP_ADAPTER_IPV6_ENABLED with Ipv6IfIndex (whatever
+ * Family asks for, Windows 10 measured), Family AF_INET6 lists only the IPv6 addresses, and AF_UNSPEC lists them
+ * before the IPv4 ones.
+ */
+static
 DWORD
-WINAPI
-DECLSPEC_HOTPATCH
-GetAdaptersAddresses(
+GetAdaptersAddressesImpl(
     _In_ ULONG Family,
     _In_ ULONG Flags,
     _In_ PVOID Reserved,
     _Inout_ PIP_ADAPTER_ADDRESSES pAdapterAddresses,
-    _Inout_ PULONG pOutBufLen)
+    _Inout_ PULONG pOutBufLen,
+    _In_ const IPV6_STATE *V6)
 {
+    BOOL V6On = (V6->Header != NULL);
+    BOOL SkipV4 = FALSE;
     NTSTATUS Status;
     HANDLE TcpFile;
     TDIEntityID* InterfacesList;
@@ -390,14 +398,24 @@ GetAdaptersAddresses(
         case AF_INET:
             break;
         case AF_INET6:
-            /* One day maybe... */
-            FIXME("IPv6 is not supported in ReactOS!\n");
-            /* We got nothing to say in this case */
-            return ERROR_NO_DATA;
+            if (!V6On)
+            {
+                /* One day maybe... */
+                FIXME("IPv6 is not supported in ReactOS!\n");
+                /* We got nothing to say in this case */
+                return ERROR_NO_DATA;
+            }
+            /* Only the IPv6 addresses: no IPv4 address, prefix, gateway or name server */
+            SkipV4 = TRUE;
+            Flags |= GAA_FLAG_SKIP_DNS_SERVER;
+            Flags &= ~GAA_FLAG_INCLUDE_GATEWAYS;
             break;
         case AF_UNSPEC:
-            WARN("IPv6 addresses ignored, IPv4 only\n");
-            Family = AF_INET;
+            if (!V6On)
+            {
+                WARN("IPv6 addresses ignored, IPv4 only\n");
+                Family = AF_INET;
+            }
             break;
         default:
             ERR("Invalid family 0x%x\n", Family);
@@ -458,6 +476,13 @@ GetAdaptersAddresses(
             Status = GetInterfaceEntry(TcpFile, InterfacesList[i], Entry);
             if (!NT_SUCCESS(Status))
                 goto Error;
+
+            /* Family IPv6 lists the adapters that have IPv6 (Windows 10 measured) */
+            if (SkipV4 && !Ipv6FindInterface(V6, Entry->if_index))
+            {
+                AdaptersCount--;
+                continue;
+            }
 
             AdapterIndexes[AdapterIndexCount++] = Entry->if_index;
 
@@ -630,6 +655,19 @@ GetAdaptersAddresses(
                 CopyMemory(CurrentAA->PhysicalAddress, Entry->if_physaddr, Entry->if_physaddrlen);
                 CurrentAA->PhysicalAddressLength = Entry->if_physaddrlen;
                 QueryFlags(&Entry->if_descr[0], Entry->if_descrlen, &CurrentAA->Flags);
+                if (V6On && Ipv6FindInterface(V6, Entry->if_index))
+                {
+                    ULONG Zone;
+
+                    /* Windows 10 (measured): the same for any Family; the zones of an interface are its own
+                       index for the interface and link scopes and 1 above them (the site, admin and
+                       organization scopes, and the global one), 0 for the unused level 14 */
+                    CurrentAA->Flags |= IP_ADAPTER_IPV6_ENABLED;
+                    CurrentAA->Ipv6IfIndex = Entry->if_index;
+                    for (Zone = 0; Zone < 16; Zone++)
+                        ((IP_ADAPTER_ADDRESSES_LH*)CurrentAA)->ZoneIndices[Zone] =
+                            (Zone < 4) ? Entry->if_index : (Zone == 14 ? 0 : 1);
+                }
                 if (Entry->if_type == IF_TYPE_SOFTWARE_LOOPBACK)
                 {
                     /* Windows 10 (measured): the loopback has no MTU limit (.NET reads -1), 1 Gbit/s */
@@ -961,7 +999,7 @@ GetAdaptersAddresses(
                 TRACE("address is 0x%08x, mask is 0x%08x\n", AddrEntries[j].iae_addr, AddrEntries[j].iae_mask);
 
                 //FIXME: For now reactos only supports unicast addresses
-                if (!(Flags & GAA_FLAG_SKIP_UNICAST))
+                if (!(Flags & GAA_FLAG_SKIP_UNICAST) && !SkipV4)
                 {
                     ULONG Size = sizeof(IP_ADAPTER_UNICAST_ADDRESS) + sizeof(SOCKADDR);
 
@@ -998,7 +1036,7 @@ GetAdaptersAddresses(
                     TotalSize += Size;
                 }
 
-                if (Flags & GAA_FLAG_INCLUDE_PREFIX)
+                if ((Flags & GAA_FLAG_INCLUDE_PREFIX) && !SkipV4)
                 {
                     ULONG Size = sizeof(IP_ADAPTER_PREFIX) + sizeof(SOCKADDR);
 
@@ -1031,6 +1069,65 @@ GetAdaptersAddresses(
             }
 
             HeapFree(GetProcessHeap(), 0, AddrEntries);
+        }
+    }
+
+    /* The IPv6 addresses: first in the list of their adapter (Windows 10 measured), in the order the stack has
+       them. This leaves the prefixes, multicast and anycast lists, gateways and name servers of IPv6 out */
+    if (V6On && Family != AF_INET && !(Flags & GAA_FLAG_SKIP_UNICAST))
+    {
+        PIP_ADAPTER_ADDRESSES CurrentAA;
+
+        for (CurrentAA = pAdapterAddresses; CurrentAA; CurrentAA = CurrentAA->Next)
+        {
+            LONG Row;
+
+            if (!CurrentAA->Length || !(CurrentAA->Flags & IP_ADAPTER_IPV6_ENABLED))
+                continue;
+
+            /* prepended, so the last row first */
+            for (Row = (LONG)V6->Header->AddressCount - 1; Row >= 0; Row--)
+            {
+                const TCP_IPV6_ADDRESS_ROW *Address = &V6->Addresses[Row];
+                ULONG Size = (sizeof(IP_ADAPTER_UNICAST_ADDRESS) + sizeof(SOCKADDR_IN6) + 7) & ~7UL;
+
+                if (Address->IfIndex != CurrentAA->IfIndex)
+                    continue;
+
+                if (Ptr && (RemainingSize >= Size))
+                {
+                    PIP_ADAPTER_UNICAST_ADDRESS UnicastAddress = (PIP_ADAPTER_UNICAST_ADDRESS)Ptr;
+                    LPSOCKADDR_IN6 Socket = (LPSOCKADDR_IN6)(UnicastAddress + 1);
+                    BOOL LinkLocal = Address->Address[0] == 0xFE && (Address->Address[1] & 0xC0) == 0x80;
+                    BOOL Loopback = (CurrentAA->IfType == IF_TYPE_SOFTWARE_LOOPBACK);
+
+                    UnicastAddress->Length = sizeof(IP_ADAPTER_UNICAST_ADDRESS);
+                    UnicastAddress->Next = CurrentAA->FirstUnicastAddress;
+                    /* DNS eligible: the address of a router advertisement, not the link-local or loopback one */
+                    UnicastAddress->Flags = (LinkLocal || Loopback) ? 0 : IP_ADAPTER_ADDRESS_DNS_ELIGIBLE;
+                    UnicastAddress->PrefixOrigin = Address->PrefixOrigin;
+                    UnicastAddress->SuffixOrigin = Address->SuffixOrigin;
+                    UnicastAddress->DadState = Address->DadState;
+                    UnicastAddress->ValidLifetime = Address->ValidLifetime;
+                    UnicastAddress->PreferredLifetime = Address->PreferredLifetime;
+                    UnicastAddress->OnLinkPrefixLength = (UINT8)Address->PrefixLength;
+
+                    UnicastAddress->Address.lpSockaddr = (LPSOCKADDR)Socket;
+                    UnicastAddress->Address.iSockaddrLength = sizeof(SOCKADDR_IN6);
+                    RtlZeroMemory(Socket, sizeof(*Socket));
+                    Socket->sin6_family = AF_INET6;
+                    RtlCopyMemory(&Socket->sin6_addr, Address->Address, 16);
+                    /* the zone of a link-local address is its interface */
+                    if (LinkLocal)
+                        Socket->sin6_scope_id = CurrentAA->IfIndex;
+
+                    CurrentAA->FirstUnicastAddress = UnicastAddress;
+                    Ptr += Size;
+                    RemainingSize -= Size;
+                }
+
+                TotalSize += Size;
+            }
         }
     }
 
@@ -1119,6 +1216,26 @@ Error:
     HeapFree(GetProcessHeap(), 0, InterfacesList);
     NtClose(TcpFile);
     return RtlNtStatusToDosError(Status);
+}
+
+DWORD
+WINAPI
+DECLSPEC_HOTPATCH
+GetAdaptersAddresses(
+    _In_ ULONG Family,
+    _In_ ULONG Flags,
+    _In_ PVOID Reserved,
+    _Inout_ PIP_ADAPTER_ADDRESSES pAdapterAddresses,
+    _Inout_ PULONG pOutBufLen)
+{
+    IPV6_STATE V6;
+    DWORD Result;
+
+    /* The stack tells whether IPv6 is on; if it is not, or does not say, nothing changes */
+    Ipv6GetState(&V6);
+    Result = GetAdaptersAddressesImpl(Family, Flags, Reserved, pAdapterAddresses, pOutBufLen, &V6);
+    Ipv6FreeState(&V6);
+    return Result;
 }
 
 

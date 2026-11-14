@@ -14,9 +14,10 @@ WINE_DEFAULT_DEBUG_CHANNEL(iphlpapi);
 
 /*
  * The tables are built from what the legacy queries give: GetIfTable for the interfaces, GetAdaptersAddresses for
- * their alias and description, GetIpAddrTable for the IPv4 addresses. The stack here has IPv4 only, so the IPv6
- * tables are empty. What the stack cannot tell is filled in like Windows 10 does for an Ethernet adapter and the
- * loopback interface; the constants below were read from a Windows 10 22H2 system.
+ * their alias and description, GetIpAddrTable for the IPv4 addresses. IPv6 is in the tables only while the stack
+ * has it on (Tcpip\Parameters\Ipv6Enable, see ipv6state.c): the IPv6 tables are empty and no interface is an IPv6
+ * interface otherwise. What the stack cannot tell is filled in like Windows 10 does for an Ethernet adapter and
+ * the loopback interface; the constants below were read from a Windows 10 22H2 system.
  */
 
 #define NDIS_MEDIUM_LOOPBACK 17
@@ -431,7 +432,8 @@ static void fill_ip_interface(const NETIO_IF *If, ADDRESS_FAMILY Family, PMIB_IP
   Out->ManagedAddressConfigurationSupported = (Family == AF_INET);
   Out->OtherStatefulConfigurationSupported = (Family == AF_INET);
   Out->RouterDiscoveryBehavior = (Family == AF_INET) ? RouterDiscoveryDhcp : RouterDiscoveryEnabled;
-  Out->LinkLocalAddressBehavior = (Family == AF_INET) ? LinkLocalDelayed : LinkLocalAlwaysOff;
+  /* Windows 10 (measured): IPv4 link-local addresses are delayed (6.5 s), IPv6 ones are always on */
+  Out->LinkLocalAddressBehavior = (Family == AF_INET) ? LinkLocalDelayed : LinkLocalAlwaysOn;
   Out->LinkLocalAddressTimeout = (Family == AF_INET) ? 6500 : 0;
   Out->BaseReachableTime = 30000;
   Out->RetransmitTime = 1000;
@@ -471,8 +473,9 @@ static void fill_ip_interface(const NETIO_IF *If, ADDRESS_FAMILY Family, PMIB_IP
 DWORD WINAPI GetIpInterfaceTable(ADDRESS_FAMILY Family, PMIB_IPINTERFACE_TABLE *Table)
 {
   NETIO_IF *List;
+  IPV6_STATE V6;
   PMIB_IPINTERFACE_TABLE Out;
-  ULONG Count = 0, i, Rows;
+  ULONG Count = 0, i, Rows4, Rows6 = 0, Next = 0;
   DWORD Result;
 
   if (!Table || (Family != AF_UNSPEC && Family != AF_INET && Family != AF_INET6))
@@ -485,19 +488,31 @@ DWORD WINAPI GetIpInterfaceTable(ADDRESS_FAMILY Family, PMIB_IPINTERFACE_TABLE *
     return Result;
   }
 
-  /* the stack here has IPv4 only: every interface is an IPv4 interface and none is an IPv6 one */
-  Rows = (Family == AF_INET6) ? 0 : Count;
-  Out = alloc_zeroed(FIELD_OFFSET(MIB_IPINTERFACE_TABLE, Table) + (SIZE_T)(Rows ? Rows : 1) * sizeof(MIB_IPINTERFACE_ROW));
+  /* every interface is an IPv4 interface; an IPv6 one only where the stack has IPv6 on */
+  Rows4 = (Family == AF_INET6) ? 0 : Count;
+  Ipv6GetState(&V6);
+  if (Family != AF_INET)
+    for (i = 0; i < Count; i++)
+      if (Ipv6FindInterface(&V6, List[i].Index))
+        Rows6++;
+
+  Out = alloc_zeroed(FIELD_OFFSET(MIB_IPINTERFACE_TABLE, Table) +
+                     (SIZE_T)((Rows4 + Rows6) ? (Rows4 + Rows6) : 1) * sizeof(MIB_IPINTERFACE_ROW));
   if (!Out)
   {
+    Ipv6FreeState(&V6);
     HeapFree(GetProcessHeap(), 0, List);
     *Table = NULL;
     return ERROR_NOT_ENOUGH_MEMORY;
   }
-  Out->NumEntries = Rows;
-  for (i = 0; i < Rows; i++)
-    fill_ip_interface(&List[i], AF_INET, &Out->Table[i]);
+  for (i = 0; i < Rows4; i++)
+    fill_ip_interface(&List[i], AF_INET, &Out->Table[Next++]);
+  for (i = 0; Rows6 && i < Count; i++)
+    if (Ipv6FindInterface(&V6, List[i].Index))
+      fill_ip_interface(&List[i], AF_INET6, &Out->Table[Next++]);
+  Out->NumEntries = Next;
 
+  Ipv6FreeState(&V6);
   HeapFree(GetProcessHeap(), 0, List);
   *Table = Out;
   return NO_ERROR;
@@ -519,9 +534,16 @@ DWORD WINAPI GetIpInterfaceEntry(PMIB_IPINTERFACE_ROW Row)
   If = find_row_interface(List, Count, Row->InterfaceLuid.Value, Row->InterfaceIndex, &Error);
   if (If && Row->Family == AF_INET6)
   {
-    /* no IPv6 on the interfaces */
-    If = NULL;
-    Error = ERROR_NOT_FOUND;
+    IPV6_STATE V6;
+
+    /* an IPv6 interface is one the stack has IPv6 on (none while it is off) */
+    Ipv6GetState(&V6);
+    if (!Ipv6FindInterface(&V6, If->Index))
+    {
+      If = NULL;
+      Error = ERROR_NOT_FOUND;
+    }
+    Ipv6FreeState(&V6);
   }
   if (If)
   {
@@ -625,11 +647,37 @@ static void fill_unicast_row(const NETIO_IF *If, const MIB_IPADDRROW *Address, P
   }
 }
 
+/* An IPv6 address of the stack. The zone of a link-local address is its interface (Windows 10 measured: the scope
+   id of the address and of the row are the interface index, 0 for ::1) */
+static void fill_unicast_row6(const NETIO_IF *If, const TCP_IPV6_ADDRESS_ROW *Address, PMIB_UNICASTIPADDRESS_ROW Out)
+{
+  BOOL LinkLocal = Address->Address[0] == 0xFE && (Address->Address[1] & 0xC0) == 0x80;
+
+  memset(Out, 0, sizeof(*Out));
+  Out->Address.Ipv6.sin6_family = AF_INET6;
+  memcpy(&Out->Address.Ipv6.sin6_addr, Address->Address, 16);
+  if (LinkLocal)
+  {
+    Out->Address.Ipv6.sin6_scope_id = If->Index;
+    Out->ScopeId.Value = If->Index;
+  }
+  Out->InterfaceLuid.Value = If->Luid;
+  Out->InterfaceIndex = If->Index;
+  Out->PrefixOrigin = Address->PrefixOrigin;
+  Out->SuffixOrigin = Address->SuffixOrigin;
+  Out->ValidLifetime = Address->ValidLifetime;
+  Out->PreferredLifetime = Address->PreferredLifetime;
+  Out->OnLinkPrefixLength = (UINT8)Address->PrefixLength;
+  Out->DadState = Address->DadState;
+  Out->CreationTimeStamp.QuadPart = boot_time_filetime();
+}
+
 DWORD WINAPI GetUnicastIpAddressTable(ADDRESS_FAMILY Family, PMIB_UNICASTIPADDRESS_TABLE *Table)
 {
   NETIO_IF *List;
   PMIB_IPADDRTABLE Addresses = NULL;
   PMIB_UNICASTIPADDRESS_TABLE Out;
+  IPV6_STATE V6 = { 0 };
   ULONG Count = 0, i, j, Rows = 0, Next = 0;
   DWORD Result;
 
@@ -650,9 +698,16 @@ DWORD WINAPI GetUnicastIpAddressTable(ADDRESS_FAMILY Family, PMIB_UNICASTIPADDRE
       if (Addresses->table[j].dwAddr && find_by_index(List, Count, Addresses->table[j].dwIndex))
         Rows++;
 
+  /* the IPv6 addresses the stack has (none while IPv6 is off), after the IPv4 ones as Windows 10 lists them */
+  if (Family != AF_INET && Ipv6GetState(&V6))
+    for (j = 0; j < V6.Header->AddressCount; j++)
+      if (find_by_index(List, Count, V6.Addresses[j].IfIndex))
+        Rows++;
+
   Out = alloc_zeroed(FIELD_OFFSET(MIB_UNICASTIPADDRESS_TABLE, Table) + (SIZE_T)(Rows ? Rows : 1) * sizeof(MIB_UNICASTIPADDRESS_ROW));
   if (!Out)
   {
+    Ipv6FreeState(&V6);
     HeapFree(GetProcessHeap(), 0, Addresses);
     HeapFree(GetProcessHeap(), 0, List);
     *Table = NULL;
@@ -664,8 +719,13 @@ DWORD WINAPI GetUnicastIpAddressTable(ADDRESS_FAMILY Family, PMIB_UNICASTIPADDRE
     for (j = 0; j < Addresses->dwNumEntries; j++)
       if (Addresses->table[j].dwAddr && Addresses->table[j].dwIndex == List[i].Index)
         fill_unicast_row(&List[i], &Addresses->table[j], &Out->Table[Next++]);
+  for (i = 0; V6.Header && i < Count; i++)
+    for (j = 0; j < V6.Header->AddressCount; j++)
+      if (V6.Addresses[j].IfIndex == List[i].Index)
+        fill_unicast_row6(&List[i], &V6.Addresses[j], &Out->Table[Next++]);
   Out->NumEntries = Next;
 
+  Ipv6FreeState(&V6);
   HeapFree(GetProcessHeap(), 0, Addresses);
   HeapFree(GetProcessHeap(), 0, List);
   *Table = Out;
@@ -732,6 +792,25 @@ DWORD WINAPI GetUnicastIpAddressEntry(PMIB_UNICASTIPADDRESS_ROW Row)
         }
       }
       HeapFree(GetProcessHeap(), 0, Addresses);
+    }
+    else if (Row->Address.si_family == AF_INET6)
+    {
+      IPV6_STATE V6;
+
+      /* an IPv6 address the stack has on this interface (none while IPv6 is off) */
+      if (Ipv6GetState(&V6))
+      {
+        for (j = 0; j < V6.Header->AddressCount && !Found; j++)
+        {
+          if (V6.Addresses[j].IfIndex == If->Index &&
+              !memcmp(V6.Addresses[j].Address, &Row->Address.Ipv6.sin6_addr, 16))
+          {
+            fill_unicast_row6(If, &V6.Addresses[j], Row);
+            Found = TRUE;
+          }
+        }
+        Ipv6FreeState(&V6);
+      }
     }
   }
   HeapFree(GetProcessHeap(), 0, List);

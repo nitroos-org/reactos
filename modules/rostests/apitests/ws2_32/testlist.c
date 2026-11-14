@@ -26,6 +26,7 @@ extern void func_connectstate(void);
 extern void func_GetAddrInfoEx(void);
 extern void func_gaiconcurrent(void);
 extern void func_getaddrinfo(void);
+extern void func_getaddrinfo6(void);
 extern void func_GetHostNameW(void);
 extern void func_addresschange(void);
 extern void func_asyncselect(void);
@@ -117,6 +118,7 @@ const struct test winetest_testlist[] =
     { "GetAddrInfoEx", func_GetAddrInfoEx },
     { "gaiconcurrent", func_gaiconcurrent },
     { "getaddrinfo", func_getaddrinfo },
+    { "getaddrinfo6", func_getaddrinfo6 },
     { "GetHostNameW", func_GetHostNameW },
     { "gethostname", func_gethostname },
     { "getnameinfo", func_getnameinfo },
