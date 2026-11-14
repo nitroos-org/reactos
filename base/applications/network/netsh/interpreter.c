@@ -163,6 +163,7 @@ InterpretCommand(
     DWORD dwError = ERROR_SUCCESS;
     BOOL bDescended = FALSE;
     BOOL bHandlerSucceeded = FALSE;
+    BOOL bPushdArgs = FALSE;
 
     /* If no args provided */
     if (dwArgCount == 0)
@@ -282,6 +283,9 @@ InterpretCommand(
                         if ((_wcsicmp(pCommand->pwszCmdToken, L"pushd") == 0) &&
                             (dwArgIndex < dwArgCount))
                         {
+                            /* the context path after pushd is taken from the root, also when it names the
+                             * current context ("netsh -c advfirewall" and a script line "pushd advfirewall firewall") */
+                            bPushdArgs = TRUE;
                             State = STATE_ANALYZE;
                             break;
                         }
@@ -357,7 +361,7 @@ InterpretCommand(
                     break;
                 }
 
-                if (pTempSubContext == pCurrentContext)
+                if (pTempSubContext == pCurrentContext && !bPushdArgs)
                 {
                     if (dwArgIndex != (dwArgCount - 1))
                         dwError = ERROR_CMD_NOT_FOUND;
