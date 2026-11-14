@@ -2308,6 +2308,46 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         return NtSetValueKey(H(0), String32(&Name, P(1)), a[2], a[3], P(4), a[5]);
     case W64_NtRenameKey: return NtRenameKey(H(0), String32(&Name, P(1)));
     case W64_NtDeleteValueKey: return NtDeleteValueKey(H(0), String32(&Name, P(1)));
+    /* Hive load, unload and replace. The key names are native registry paths (no file redirection); the
+     * hive file name is redirected like any other file open, so a 32-bit caller naming system32 gets the
+     * view it expects. */
+    case W64_NtLoadKey:
+    case W64_NtLoadKey2:
+    case W64_NtLoadKeyEx:
+    {
+        OBJECT_ATTRIBUTES KeyAttributes;
+        UNICODE_STRING KeyName;
+        SECURITY_DESCRIPTOR KeyDescriptor;
+        Status = Attributes32(&KeyAttributes, &KeyName, &KeyDescriptor, a[0]);
+        if (!NT_SUCCESS(Status)) return Status;
+        FILEATTR(1);
+        if (Number == W64_NtLoadKey)
+            return NtLoadKey(a[0] ? &KeyAttributes : NULL, OA(1));
+        if (Number == W64_NtLoadKey2)
+            return NtLoadKey2(a[0] ? &KeyAttributes : NULL, OA(1), a[2]);
+        return NtLoadKeyEx(a[0] ? &KeyAttributes : NULL, OA(1), a[2], H(3));
+    }
+    case W64_NtUnloadKey:
+        ATTR(0); return NtUnloadKey(OA(0));
+    case W64_NtUnloadKey2:
+        ATTR(0); return NtUnloadKey2(OA(0), a[1]);
+    case W64_NtUnloadKeyEx:
+        ATTR(0); return NtUnloadKeyEx(OA(0), H(1));
+    case W64_NtQueryOpenSubKeys:
+        PROBE(1); ATTR(0);
+        Status = NtQueryOpenSubKeys(OA(0), &Length);
+        if (NT_SUCCESS(Status)) U(1) = Length;
+        return Status;
+    case W64_NtReplaceKey:
+    {
+        OBJECT_ATTRIBUTES OldAttributes;
+        UNICODE_STRING OldName;
+        SECURITY_DESCRIPTOR OldDescriptor;
+        Status = Attributes32(&OldAttributes, &OldName, &OldDescriptor, a[2]);
+        if (!NT_SUCCESS(Status)) return Status;
+        FILEATTR(0);
+        return NtReplaceKey(OA(0), H(1), a[2] ? &OldAttributes : NULL);
+    }
     case W64_NtApphelpCacheControl:
         /* Lookup, Remove and Update take an APPHELP_CACHE_SERVICE_LOOKUP { UNICODE_STRING ImageName; HANDLE ImageHandle; };
          * the other services take no data. Read once; the kernel probes the name. */
