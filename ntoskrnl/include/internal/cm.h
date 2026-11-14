@@ -273,6 +273,11 @@ typedef struct _CM_NAME_CONTROL_BLOCK
 } CM_NAME_CONTROL_BLOCK, *PCM_NAME_CONTROL_BLOCK;
 
 //
+// Largest value that fits the 12-bit DelayedCloseIndex field of the KCB
+//
+#define CM_KCB_MAX_DELAYED_CLOSE_SIZE                   0xFFF
+
+//
 // Key Control Block (KCB)
 //
 typedef struct _CM_KEY_CONTROL_BLOCK
