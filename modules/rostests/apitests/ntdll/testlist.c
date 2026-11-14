@@ -41,6 +41,7 @@ extern void func_LdrFindResource_U(void);
 extern void func_LdrGetDllHandleEx(void);
 extern void func_LdrLoadDll(void);
 extern void func_KUserBuildNumber(void);
+extern void func_LdrLoadDllPendingInit(void);
 extern void func_LdrSharedReadOnlySection(void);
 extern void func_LdrShutdownThread(void);
 extern void func_load_notifications(void);
@@ -332,6 +333,7 @@ const struct test winetest_testlist[] =
     { "LdrGetDllHandleEx",             func_LdrGetDllHandleEx },
     { "LdrLoadDll",                     func_LdrLoadDll },
     { "KUserBuildNumber",              func_KUserBuildNumber },
+    { "LdrLoadDllPendingInit",          func_LdrLoadDllPendingInit },
     { "LdrSharedReadOnlySection",      func_LdrSharedReadOnlySection },
     { "LdrShutdownThread",              func_LdrShutdownThread },
     { "load_notifications",             func_load_notifications },

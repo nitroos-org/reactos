@@ -4,6 +4,7 @@ add_subdirectory(empty_dll)
 add_subdirectory(shared_ro_dll)
 add_subdirectory(crtkeydtor)
 add_subdirectory(imgplace_nonlaa)
+add_subdirectory(loadinit)
 add_subdirectory(apiset_win10)
 
 include_directories($<TARGET_FILE_DIR:load_notifications>)
@@ -73,6 +74,7 @@ list(APPEND SOURCE
     LdrGetDllHandleEx.c
     LdrLoadDll.c
     KUserBuildNumber.c
+    LdrLoadDllPendingInit.c
     LdrSharedReadOnlySection.c
     LdrShutdownThread.c
     load_notifications.c
