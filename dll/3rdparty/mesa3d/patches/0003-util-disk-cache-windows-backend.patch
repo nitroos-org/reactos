@@ -13,18 +13,35 @@ The multi file cache now works on Windows:
    LOCALAPPDATA is not set); MESA_SHADER_CACHE_DISABLE and
    MESA_SHADER_CACHE_MAX_SIZE work as on other platforms, and
    MESA_SHADER_CACHE_SHOW_STATS prints the hit and miss counts;
- - an entry is written to "<name>.tmp" under an exclusive LockFileEx() lock and
-   moved into place with MoveFileExW() (no replace), so readers never see a
-   partial entry and two processes that build the same shader do not both
-   write it; all handles are opened with FILE_SHARE_DELETE so that eviction
-   never fails because another process is reading;
+ - every directory the cache creates gets a protected DACL (no inheritance):
+   full control for the current user, SYSTEM and Administrators only, the
+   equivalent of mkdir(path, 0700), because the entries are native code that
+   llvmpipe executes. An existing cache directory that is owned by somebody
+   else (neither the user nor the owner that new objects of the process get)
+   is not used: the cache is off for the process, with one message;
+ - an entry is written to "<name>.tmp" under an exclusive LockFileEx() lock
+   and moved into place with MoveFileExW() (no replace), so readers never see
+   a partial entry and two processes that build the same shader do not both
+   write it. The lock is on one byte far beyond the data, because byte range
+   locks are mandatory on Windows and a lock on the data would make the reads
+   of an entry that was just renamed fail. All handles are opened with
+   FILE_SHARE_DELETE so that eviction never fails because another process is
+   reading;
  - the size of the cache is kept in a file mapping of the "index" file that
    all processes share, with the same layout as the mmap()ed index of other
    platforms (put_key/has_key work too); entries are evicted oldest first
    (last access or last write time) when the limit is reached, and the size is
-   recomputed when the index looks wrong;
- - an entry that cannot be read, fails its CRC or its header check is deleted,
-   so it is rebuilt instead of being a miss for ever;
+   recomputed when the index looks wrong. Rescans of several processes lose
+   each other's updates, which let the directory grow past the limit, so every
+   process also measures the directory again after it stored max_size / 8
+   bytes; leftovers of killed writers are removed by those rescans after 60 s;
+ - an entry that is too short, fails its CRC or its header check, has an
+   uncompressed size above 64 MB or one that the data does not inflate to
+   exactly, is deleted, so it is rebuilt instead of being a miss for ever
+   (util_compress_inflate() now returns false for a stream that ends early,
+   instead of an assert that release builds do not have). A read that fails
+   for another reason (lock or sharing violation, I/O error) or a failed
+   allocation is a miss and the entry is kept;
  - when the directory or the index cannot be created or opened (read-only
    volume, no permission), the cache is off for that process and nothing else
    changes.
@@ -52,8 +69,8 @@ the same code as on other platforms and moved out of the POSIX block. The
 single file (Fossilize) and database caches are POSIX only and stay so.
 
 diff -ru a/meson.build b/meson.build
---- a/meson.build	2026-11-13 20:43:54.312111756 +0000
-+++ b/meson.build	2026-11-13 20:43:54.315111831 +0000
+--- a/meson.build	2026-11-09 21:57:02.000000000 +0000
++++ b/meson.build	2026-11-14 07:41:17.961386131 +0000
 @@ -1229,9 +1229,7 @@
    add_project_link_arguments('-Wl,--gdb-index', language : ['c', 'cpp'])
  endif
@@ -65,9 +82,39 @@ diff -ru a/meson.build b/meson.build
  
  if with_shader_cache
    pre_args += '-DENABLE_SHADER_CACHE'
+diff -ru a/src/util/compress.c b/src/util/compress.c
+--- a/src/util/compress.c	2026-11-09 21:57:02.000000000 +0000
++++ b/src/util/compress.c	2026-11-14 07:41:59.890422636 +0000
+@@ -129,7 +129,7 @@
+    MESA_TRACE_FUNC();
+ #ifdef HAVE_ZSTD
+    size_t ret = ZSTD_decompress(out_data, out_data_size, in_data, in_data_size);
+-   return !ZSTD_isError(ret);
++   return !ZSTD_isError(ret) && ret == out_data_size;
+ #elif defined(HAVE_ZLIB)
+    z_stream strm;
+ 
+@@ -156,11 +156,15 @@
+       (void)inflateEnd(&strm);
+       return false;
+    }
+-   assert(strm.avail_out == 0);
++
++   /* A stream that ends early leaves the tail of the output unwritten: that
++    * is a failure (an assert is compiled out of release builds).
++    */
++   bool complete = strm.avail_out == 0 && strm.total_out == out_data_size;
+ 
+    /* clean up and return */
+    (void)inflateEnd(&strm);
+-   return true;
++   return complete;
+ #else
+    STATIC_ASSERT(false);
+ #endif
 diff -ru a/src/util/disk_cache.c b/src/util/disk_cache.c
---- a/src/util/disk_cache.c	2026-11-13 20:43:54.329112186 +0000
-+++ b/src/util/disk_cache.c	2026-11-13 20:43:54.330112211 +0000
+--- a/src/util/disk_cache.c	2026-11-09 21:57:02.000000000 +0000
++++ b/src/util/disk_cache.c	2026-11-14 07:41:17.962362475 +0000
 @@ -23,19 +23,23 @@
  
  #ifdef ENABLE_SHADER_CACHE
@@ -237,8 +284,8 @@ diff -ru a/src/util/disk_cache.c b/src/util/disk_cache.c
           char *filename = disk_cache_get_cache_filename(cache, key);
           if (filename)
 diff -ru a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
---- a/src/util/disk_cache_os.c	2026-11-13 20:43:54.343112540 +0000
-+++ b/src/util/disk_cache_os.c	2026-11-13 20:43:54.345112591 +0000
+--- a/src/util/disk_cache_os.c	2026-11-09 21:57:02.000000000 +0000
++++ b/src/util/disk_cache_os.c	2026-11-14 07:47:56.023953101 +0000
 @@ -26,6 +26,7 @@
  #include <inttypes.h>
  #include <stdbool.h>
@@ -247,7 +294,7 @@ diff -ru a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
  #include <stdlib.h>
  #include <string.h>
  #include <sys/types.h>
-@@ -81,8 +82,1126 @@
+@@ -81,8 +82,1375 @@
  
  #ifdef ENABLE_SHADER_CACHE
  
@@ -255,9 +302,13 @@ diff -ru a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
 +
 +#include "util/blob.h"
 +
++/* An entry that claims to hold more than this is damaged. */
++#define DISK_CACHE_MAX_UNCOMPRESSED_SIZE (64u << 20)
++
 +static void *
-+parse_and_validate_cache_item(struct disk_cache *cache, void *cache_item,
-+                              size_t cache_item_size, size_t *size)
++parse_and_validate_cache_item_ex(struct disk_cache *cache, void *cache_item,
++                                 size_t cache_item_size, size_t *size,
++                                 bool *out_of_memory)
 +{
 +   uint8_t *uncompressed_data = NULL;
 +
@@ -310,10 +361,20 @@ diff -ru a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
 +   if (cf_data->crc32 != util_hash_crc32(data, cache_data_size))
 +      goto fail;
 +
++   /* The size is not covered by the CRC: a damaged value must not become a
++    * huge allocation or a hit of the wrong size.
++    */
++   if (cf_data->uncompressed_size > DISK_CACHE_MAX_UNCOMPRESSED_SIZE)
++      goto fail;
++
 +   /* Uncompress the cache data */
 +   uncompressed_data = malloc(cf_data->uncompressed_size);
-+   if (!uncompressed_data)
++   if (!uncompressed_data) {
++      /* Not the fault of the entry: the caller keeps it. */
++      if (out_of_memory)
++         *out_of_memory = true;
 +      goto fail;
++   }
 +
 +   if (cache->compression_disabled) {
 +      if (cf_data->uncompressed_size != cache_data_size)
@@ -335,6 +396,14 @@ diff -ru a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
 +   free(uncompressed_data);
 +
 +   return NULL;
++}
++
++static UNUSED void *
++parse_and_validate_cache_item(struct disk_cache *cache, void *cache_item,
++                              size_t cache_item_size, size_t *size)
++{
++   return parse_and_validate_cache_item_ex(cache, cache_item, cache_item_size,
++                                           size, NULL);
 +}
 +
 +static bool
@@ -469,15 +538,22 @@ diff -ru a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
 + * Several processes (and threads) may use one directory at the same time:
 + *
 + *  - an entry is written to "<name>.tmp" under an exclusive LockFileEx() lock
-+ *    and moved to its final name with MoveFileExW() without
++ *    (on one byte far beyond the data, so that it never blocks a reader) and
++ *    moved to its final name with MoveFileExW() without
 + *    MOVEFILE_REPLACE_EXISTING, so a reader never sees a partial entry and a
 + *    second writer of the same key backs off;
++ *  - every directory is created with a protected DACL (current user, system
++ *    and administrators) and a cache directory owned by somebody else is not
++ *    used (see create_protected_directory());
 + *  - every handle is opened with FILE_SHARE_READ | FILE_SHARE_WRITE |
 + *    FILE_SHARE_DELETE, so that eviction and rename never fail because
 + *    another process is reading an entry;
-+ *  - an entry that does not validate (short read, bad checksum, bad header)
-+ *    is deleted, so that it is rebuilt instead of being returned as a miss
-+ *    for ever.
++ *  - an entry that does not validate (short file, bad checksum, bad header,
++ *    wrong size) is deleted, so that it is rebuilt instead of being returned
++ *    as a miss for ever; a read that fails for another reason (lock, sharing
++ *    violation, I/O error) or an allocation that fails is only a miss;
++ *  - the size in the index is measured again after every max_size / 8 bytes a
++ *    process stored, because concurrent rescans lose updates.
 + *
 + * Any failure to create or open the directory or the index disables the cache
 + * of this process only (the same as an unwritable directory on other
@@ -486,6 +562,7 @@ diff -ru a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
 +
 +#include <stdio.h>
 +#include <wchar.h>
++#include <aclapi.h>
 +
 +#include "util/macros.h"
 +#include "util/ralloc.h"
@@ -504,7 +581,10 @@ diff -ru a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
 +/* A cache file larger than this is not a cache file. */
 +#define DISK_CACHE_WIN_MAX_ENTRY_SIZE (1ull << 30)
 +
-+#define DISK_CACHE_STALE_TMP_AGE (60 * 60)
++/* A temporary file that nobody holds the lock of and that was not written for
++ * this long is the leftover of a killed writer.
++ */
++#define DISK_CACHE_STALE_TMP_AGE 60
 +
 +static wchar_t *
 +wide_from_utf8(const char *str)
@@ -580,6 +660,139 @@ diff -ru a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
 +   return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY);
 +}
 +
++/* The cache holds code that llvmpipe executes, so only the user it belongs to
++ * (and the system and the administrators, as in a user profile) may write in
++ * it: the equivalent of mkdir(path, 0700) on POSIX.
++ */
++static TOKEN_USER *
++get_current_token_user(void)
++{
++   HANDLE token = NULL;
++   DWORD len = 0;
++   TOKEN_USER *user = NULL;
++
++   if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
++      return NULL;
++
++   GetTokenInformation(token, TokenUser, NULL, 0, &len);
++   if (len) {
++      user = malloc(len);
++      if (user && !GetTokenInformation(token, TokenUser, user, len, &len)) {
++         free(user);
++         user = NULL;
++      }
++   }
++   CloseHandle(token);
++   return user;
++}
++
++/* The owner that new objects of this process get (the user, or the
++ * Administrators group for an elevated administrator).
++ */
++static TOKEN_OWNER *
++get_current_token_owner(void)
++{
++   HANDLE token = NULL;
++   DWORD len = 0;
++   TOKEN_OWNER *owner = NULL;
++
++   if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
++      return NULL;
++
++   GetTokenInformation(token, TokenOwner, NULL, 0, &len);
++   if (len) {
++      owner = malloc(len);
++      if (owner && !GetTokenInformation(token, TokenOwner, owner, len, &len)) {
++         free(owner);
++         owner = NULL;
++      }
++   }
++   CloseHandle(token);
++   return owner;
++}
++
++/* CreateDirectoryW() with a DACL that is protected (nothing is inherited from
++ * the parent) and grants full control to the current user, the system and the
++ * administrators only.  Sets the last error as CreateDirectoryW() does.
++ */
++static bool
++create_protected_directory(const wchar_t *wpath)
++{
++   bool ok = false;
++   DWORD error = ERROR_ACCESS_DENIED;
++   TOKEN_USER *user = get_current_token_user();
++   BYTE system_sid[SECURITY_MAX_SID_SIZE];
++   BYTE admins_sid[SECURITY_MAX_SID_SIZE];
++   DWORD system_len = sizeof(system_sid), admins_len = sizeof(admins_sid);
++   ACL *acl = NULL;
++
++   if (!user ||
++       !CreateWellKnownSid(WinLocalSystemSid, NULL, system_sid, &system_len) ||
++       !CreateWellKnownSid(WinBuiltinAdministratorsSid, NULL, admins_sid, &admins_len))
++      goto done;
++
++   DWORD acl_size = sizeof(ACL) + 3 * (sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD)) +
++                    GetLengthSid(user->User.Sid) + system_len + admins_len;
++   acl_size = (acl_size + 3) & ~3u;
++   acl = malloc(acl_size);
++   if (!acl || !InitializeAcl(acl, acl_size, ACL_REVISION))
++      goto done;
++
++   const DWORD flags = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE;
++   if (!AddAccessAllowedAceEx(acl, ACL_REVISION, flags, FILE_ALL_ACCESS, user->User.Sid) ||
++       !AddAccessAllowedAceEx(acl, ACL_REVISION, flags, FILE_ALL_ACCESS, system_sid) ||
++       !AddAccessAllowedAceEx(acl, ACL_REVISION, flags, FILE_ALL_ACCESS, admins_sid))
++      goto done;
++
++   SECURITY_DESCRIPTOR sd;
++   if (!InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION) ||
++       !SetSecurityDescriptorDacl(&sd, TRUE, acl, FALSE) ||
++       !SetSecurityDescriptorControl(&sd, SE_DACL_PROTECTED, SE_DACL_PROTECTED))
++      goto done;
++
++   SECURITY_ATTRIBUTES sa = { sizeof(sa), &sd, FALSE };
++   ok = CreateDirectoryW(wpath, &sa);
++   error = GetLastError();
++
++done:
++   free(acl);
++   free(user);
++   SetLastError(error);
++   return ok;
++}
++
++/* True when the owner of the directory is the current user, or what new
++ * objects of this process are owned by.  A volume without security (the owner
++ * cannot be asked) cannot be protected either way and is accepted, as the
++ * default profile directories on it are.
++ */
++static bool
++dir_is_owned_by_current_user(const wchar_t *wpath)
++{
++   PSID owner = NULL;
++   PSECURITY_DESCRIPTOR sd = NULL;
++   bool ok = false;
++
++   DWORD err = GetNamedSecurityInfoW(wpath, SE_FILE_OBJECT,
++                                     OWNER_SECURITY_INFORMATION, &owner, NULL,
++                                     NULL, NULL, &sd);
++   if (err == ERROR_NOT_SUPPORTED || err == ERROR_INVALID_FUNCTION ||
++       err == ERROR_CALL_NOT_IMPLEMENTED) {
++      ok = true;
++   } else if (err == ERROR_SUCCESS && owner) {
++      TOKEN_USER *user = get_current_token_user();
++      TOKEN_OWNER *token_owner = get_current_token_owner();
++      ok = (user && EqualSid(owner, user->User.Sid)) ||
++           (token_owner && EqualSid(owner, token_owner->Owner));
++      free(user);
++      free(token_owner);
++   }
++
++   if (sd)
++      LocalFree(sd);
++   return ok;
++}
++
 +/* Check if the directory exists or, if mkdir_if_needed is set, create it.
 + *
 + * Returns: 0 if path already exists as a directory or if created.
@@ -597,7 +810,7 @@ diff -ru a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
 +      ret = 0;
 +   } else if (mkdir_if_needed) {
 +      /* Another process may create it at the same time. */
-+      if (CreateDirectoryW(wpath, NULL) ||
++      if (create_protected_directory(wpath) ||
 +          (GetLastError() == ERROR_ALREADY_EXISTS && wide_path_is_dir(wpath)))
 +         ret = 0;
 +   }
@@ -712,17 +925,29 @@ diff -ru a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
 +                      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
 +}
 +
++/* Read count bytes.  When this fails, *content_bad tells whether the file is
++ * shorter than it should be (the entry is damaged) or the read itself failed
++ * (a lock or sharing violation, an I/O error: nothing is known about the
++ * entry, so it must not be deleted).
++ */
 +static bool
-+read_all(HANDLE file, void *buf, size_t count)
++read_all(HANDLE file, void *buf, size_t count, bool *content_bad)
 +{
 +   char *in = buf;
 +   size_t done = 0;
 +
++   *content_bad = false;
 +   while (done < count) {
 +      DWORD chunk = count - done > (1u << 24) ? (1u << 24) : (DWORD)(count - done);
 +      DWORD got = 0;
-+      if (!ReadFile(file, in + done, chunk, &got, NULL) || got == 0)
++      if (!ReadFile(file, in + done, chunk, &got, NULL)) {
++         *content_bad = GetLastError() == ERROR_HANDLE_EOF;
 +         return false;
++      }
++      if (got == 0) {
++         *content_bad = true;
++         return false;
++      }
 +      done += got;
 +   }
 +   return true;
@@ -744,13 +969,20 @@ diff -ru a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
 +   return true;
 +}
 +
-+/* Take the exclusive lock of a temporary file without waiting. */
++/* Take the exclusive lock of a temporary file without waiting.  Byte range
++ * locks are mandatory on Windows: the lock is on one byte far beyond the end
++ * of any entry, so that it excludes other writers (and tells the cleanup of
++ * stale files that a writer is alive) but never makes a read of the data
++ * fail, also after the file was renamed to its final name.
++ */
 +static bool
 +try_lock_file(HANDLE file)
 +{
 +   OVERLAPPED ov = { 0 };
++   ov.Offset = 0xFFFFFFFEu;
++   ov.OffsetHigh = 0xFFFFFFFFu;
 +   return LockFileEx(file, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-+                     0, MAXDWORD, MAXDWORD, &ov);
++                     0, 1, 0, &ov);
 +}
 +
 +/* Delete a file and remove its size from the accounting.  The size is that of
@@ -1067,12 +1299,21 @@ diff -ru a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
 +      goto done;
 +   }
 +
-+   if (!read_all(file, data, file_size.QuadPart))
++   bool content_bad;
++   if (!read_all(file, data, file_size.QuadPart, &content_bad)) {
++      /* A failed read (lock or sharing violation, I/O error) is a miss, not
++       * proof that the entry is bad.
++       */
++      if (!content_bad)
++         drop = false;
 +      goto done;
++   }
 +
++   bool out_of_memory = false;
 +   uncompressed_data =
-+      parse_and_validate_cache_item(cache, data, file_size.QuadPart, size);
-+   if (uncompressed_data)
++      parse_and_validate_cache_item_ex(cache, data, file_size.QuadPart, size,
++                                       &out_of_memory);
++   if (uncompressed_data || out_of_memory)
 +      drop = false;
 +
 + done:
@@ -1117,6 +1358,7 @@ diff -ru a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
 +{
 +   HANDLE file = INVALID_HANDLE_VALUE;
 +   wchar_t *wfilename_tmp = NULL;
++   uint64_t written_account = 0;
 +   struct blob cache_blob;
 +   blob_init(&cache_blob);
 +
@@ -1201,6 +1443,7 @@ diff -ru a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
 +   }
 +
 +   p_atomic_add(&dc_job->cache->size->value, account_size(cache_blob.size));
++   written_account = account_size(cache_blob.size);
 +
 + done:
 +   /* This close finally releases the lock, (now that the final file has been
@@ -1211,6 +1454,21 @@ diff -ru a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
 +   free(wfilename_tmp);
 +   free(wfilename);
 +   blob_finish(&cache_blob);
++
++   /* The shared size drifts low when a rescan of one process overwrites what
++    * the others added meanwhile, and when a process dies between the rename
++    * and the add.  A low size never triggers an eviction, so measure the
++    * directory again after every max_size / 8 bytes this process stored.
++    */
++   if (written_account) {
++      static uint32_t stored_since_rescan;
++      uint64_t limit = MIN2(MAX2(dc_job->cache->max_size / 8, (uint64_t)64 * 1024),
++                            (uint64_t)1 << 30);
++      if (p_atomic_add_return(&stored_since_rescan, (uint32_t)written_account) >= limit) {
++         p_atomic_set(&stored_since_rescan, 0);
++         disk_cache_recompute_size(dc_job->cache);
++      }
++   }
 +}
 +
 +/* Determine path for cache based on the first defined name as follows:
@@ -1225,12 +1483,9 @@ diff -ru a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
 + * If the mkdir param is set we create the directory if it doesn't already
 + * exist, if it does not exist and the param is false NULL will be returned.
 + */
-+const char *
-+disk_cache_generate_cache_dir(void *mem_ctx, const char *gpu_name,
-+                              const char *driver_id,
-+                              const char *cache_dir_name_custom,
-+                              enum disk_cache_type cache_type,
-+                              bool mkdir)
++static const char *
++generate_cache_dir(void *mem_ctx, const char *cache_dir_name_custom,
++                   enum disk_cache_type cache_type, bool mkdir)
 +{
 +   if (cache_type != DISK_CACHE_MULTI_FILE || cache_dir_name_custom)
 +      return NULL;
@@ -1258,6 +1513,47 @@ diff -ru a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
 +      return NULL;
 +
 +   return concatenate_and_mkdir(mem_ctx, path, "shader_cache", mkdir);
++}
++
++const char *
++disk_cache_generate_cache_dir(void *mem_ctx, const char *gpu_name,
++                              const char *driver_id,
++                              const char *cache_dir_name_custom,
++                              enum disk_cache_type cache_type,
++                              bool mkdir)
++{
++   const char *path = generate_cache_dir(mem_ctx, cache_dir_name_custom,
++                                         cache_type, mkdir);
++   if (!path)
++      return NULL;
++
++   /* The paths are not opened with the \\?\ prefix: with a directory so long
++    * that "\xx\<62 hex digits>.tmp" does not fit in MAX_PATH no entry could
++    * ever be stored, so do not pretend the cache works.
++    */
++   if (strlen(path) + 1 + 2 + 1 + 62 + 4 >= MAX_PATH) {
++      static uint32_t reported_long;
++      if (!p_atomic_xchg(&reported_long, true))
++         fprintf(stderr, "Cannot use %s for shader cache (path too long)"
++                         "---disabling.\n", path);
++      return NULL;
++   }
++
++   /* A cache directory that somebody else created (and so owns, and can give
++    * anybody access to) is not used: the entries are executed as code.
++    */
++   wchar_t *wpath = wide_from_utf8(path);
++   bool owned = wpath && dir_is_owned_by_current_user(wpath);
++   free(wpath);
++   if (!owned) {
++      static uint32_t reported;
++      if (!p_atomic_xchg(&reported, true))
++         fprintf(stderr, "Cannot use %s for shader cache (not owned by the "
++                         "current user)---disabling.\n", path);
++      return NULL;
++   }
++
++   return path;
 +}
 +
 +void
@@ -1375,7 +1671,7 @@ diff -ru a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
  
  #else
  
-@@ -624,88 +1743,6 @@
+@@ -624,88 +1992,6 @@
        p_atomic_add(&cache->size->value, - (uint64_t)sb.st_blocks * 512);
  }
  
@@ -1464,7 +1760,7 @@ diff -ru a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
  void *
  disk_cache_load_item(struct disk_cache *cache, char *filename, size_t *size)
  {
-@@ -769,82 +1806,6 @@
+@@ -769,82 +2055,6 @@
     return filename;
  }
  
@@ -1547,7 +1843,7 @@ diff -ru a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
  void
  disk_cache_write_item_to_disk(struct disk_cache_put_job *dc_job,
                                char *filename)
-@@ -1076,46 +2037,6 @@
+@@ -1076,46 +2286,6 @@
     return path;
  }
  
@@ -1595,8 +1891,8 @@ diff -ru a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
  disk_cache_load_item_foz(struct disk_cache *cache, const cache_key key,
                           size_t *size)
 diff -ru a/src/util/disk_cache_os.h b/src/util/disk_cache_os.h
---- a/src/util/disk_cache_os.h	2026-11-13 20:43:54.361112997 +0000
-+++ b/src/util/disk_cache_os.h	2026-11-13 20:43:54.363113047 +0000
+--- a/src/util/disk_cache_os.h	2026-11-09 21:57:02.000000000 +0000
++++ b/src/util/disk_cache_os.h	2026-11-14 07:41:17.963167005 +0000
 @@ -27,15 +27,14 @@
  #include "util/u_queue.h"
  #include "util/disk_cache.h"
@@ -1648,9 +1944,10 @@ diff -ru a/src/util/disk_cache_os.h b/src/util/disk_cache_os.h
 -#endif
 -
  #endif /* DISK_CACHE_OS_H */
+Only in b/src/util/format: __pycache__
 diff -ru a/src/util/u_queue.c b/src/util/u_queue.c
---- a/src/util/u_queue.c	2026-11-13 20:43:54.402114035 +0000
-+++ b/src/util/u_queue.c	2026-11-13 20:43:54.403114060 +0000
+--- a/src/util/u_queue.c	2026-11-09 21:57:02.000000000 +0000
++++ b/src/util/u_queue.c	2026-11-14 07:41:17.963355134 +0000
 @@ -67,6 +67,17 @@
  {
     struct util_queue *iter;
@@ -1670,8 +1967,8 @@ diff -ru a/src/util/u_queue.c b/src/util/u_queue.c
     /* Wait for all queues to assert idle. */
     LIST_FOR_EACH_ENTRY(iter, &queue_list, head) {
 diff -ru a/src/util/u_thread.c b/src/util/u_thread.c
---- a/src/util/u_thread.c	2026-11-13 20:43:54.374113325 +0000
-+++ b/src/util/u_thread.c	2026-11-13 20:43:54.375113351 +0000
+--- a/src/util/u_thread.c	2026-11-09 21:57:02.000000000 +0000
++++ b/src/util/u_thread.c	2026-11-14 07:41:17.963525812 +0000
 @@ -219,6 +219,7 @@
  {
     barrier->count = count;
@@ -1713,8 +2010,8 @@ diff -ru a/src/util/u_thread.c b/src/util/u_thread.c
  
  #endif
 diff -ru a/src/util/u_thread.h b/src/util/u_thread.h
---- a/src/util/u_thread.h	2026-11-13 20:43:54.387113655 +0000
-+++ b/src/util/u_thread.h	2026-11-13 20:43:54.389113706 +0000
+--- a/src/util/u_thread.h	2026-11-09 21:57:02.000000000 +0000
++++ b/src/util/u_thread.h	2026-11-14 07:41:17.963651701 +0000
 @@ -125,6 +125,7 @@
  typedef struct {
     unsigned count;
@@ -1723,3 +2020,6 @@ diff -ru a/src/util/u_thread.h b/src/util/u_thread.h
     uint64_t sequence;
     mtx_t mutex;
     cnd_t condvar;
+Only in b/subprojects: packagecache
+Only in b/subprojects: .wraplock
+Only in b/subprojects: zlib-1.3.1
