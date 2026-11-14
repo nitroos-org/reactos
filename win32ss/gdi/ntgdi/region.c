@@ -3410,6 +3410,19 @@ REGION_SetPolyPolygonRgn(
     for (poly = total = 0; poly < cPolygons; poly++)
         total += pcPoints[poly];
 
+    /* The edge setup (BRESINITPGON) works in 32 bits on the width and height of an edge and on terms up to twelve times
+       the largest coordinate: with points near the ends of the LONG range the differences wrap and the setup divides by
+       a wrapped height. The coordinate space of a DC is 28 bits (-2^27 to 2^27), a polygon outside it is not drawable. */
+    for (poly = 0; poly < total; poly++)
+    {
+        if (ppt[poly].x < -0x08000000 || ppt[poly].x > 0x08000000 ||
+            ppt[poly].y < -0x08000000 || ppt[poly].y > 0x08000000)
+        {
+            DPRINT1("Polygon point %lu out of range\n", poly);
+            return FALSE;
+        }
+    }
+
     pETEs = ExAllocatePoolWithTag(PagedPool,
                                   sizeof(EDGE_TABLE_ENTRY) * total,
                                   TAG_REGION);

@@ -1662,9 +1662,10 @@ PATH_StrokePath(
         }
     }
 
-    /* Save the mapping mode info */
+    /* The points of the path are device points: draw them with the identity transform, changing the mapping mode as
+       PATH_FillPathEx does (IntGdiSetMapMode marks the transforms as changed, a plain write of iMapMode does not: the
+       page to device scale of the old mode (a flipped isotropic mapping) would stay in the matrix) */
     mapMode = pdcattr->iMapMode;
-
     szViewportExt = *DC_pszlViewportExt(dc);
     ptViewportOrg = dc->pdcattr->ptlViewportOrg;
     szWindowExt = dc->pdcattr->szlWindowExt;
@@ -1673,7 +1674,7 @@ PATH_StrokePath(
     MatrixS2XForm(&xform, &dc->pdcattr->mxWorldToPage);
 
     /* Set MM_TEXT */
-    pdcattr->iMapMode = MM_TEXT;
+    IntGdiSetMapMode(dc, MM_TEXT);
     pdcattr->ptlViewportOrg.x = 0;
     pdcattr->ptlViewportOrg.y = 0;
     pdcattr->ptlWindowOrg.x = 0;
@@ -1786,19 +1787,17 @@ end:
     if (pLinePts) ExFreePoolWithTag(pLinePts, TAG_PATH);
 
     /* Restore the old mapping mode */
-    pdcattr->iMapMode =  mapMode;
-    pdcattr->szlWindowExt.cx = szWindowExt.cx;
-    pdcattr->szlWindowExt.cy = szWindowExt.cy;
-    pdcattr->ptlWindowOrg.x = ptWindowOrg.x;
-    pdcattr->ptlWindowOrg.y = ptWindowOrg.y;
+    IntGdiSetMapMode(dc, mapMode);
+    pdcattr->szlWindowExt = szWindowExt;
+    pdcattr->ptlWindowOrg = ptWindowOrg;
+    pdcattr->szlViewportExt = szViewportExt;
+    pdcattr->ptlViewportOrg = ptViewportOrg;
 
-    pdcattr->szlViewportExt.cx = szViewportExt.cx;
-    pdcattr->szlViewportExt.cy = szViewportExt.cy;
-    pdcattr->ptlViewportOrg.x = ptViewportOrg.x;
-    pdcattr->ptlViewportOrg.y = ptViewportOrg.y;
-
-    /* Restore the world transform */
-    XForm2MatrixS(&dc->pdcattr->mxWorldToPage, &xform);
+    /* Restore the world transform (in GM_ADVANCED: it marks the transforms as changed) */
+    graphicsMode = pdcattr->iGraphicsMode;
+    pdcattr->iGraphicsMode = GM_ADVANCED;
+    GreModifyWorldTransform(dc, (XFORML*)&xform, MWT_SET);
+    pdcattr->iGraphicsMode = graphicsMode;
 
     /* If we've moved the current point then get its new position
        which will be in device (MM_TEXT) co-ords, convert it to
@@ -1827,6 +1826,7 @@ IntGdiWidenPath(PPATH pPath, UINT penWidth, UINT penStyle, FLOAT eMiterLimit)
     BYTE *type;
     DWORD joint, endcap;
     KFLOATING_SAVE fpsave;
+    BOOL bFail = FALSE;
 
     endcap = (PS_ENDCAP_MASK & penStyle);
     joint = (PS_JOIN_MASK & penStyle);
@@ -1886,7 +1886,9 @@ IntGdiWidenPath(PPATH pPath, UINT penWidth, UINT penStyle, FLOAT eMiterLimit)
                 pStrokes[numStrokes - 1] = ExAllocatePoolWithTag(PagedPool, sizeof(PATH), TAG_PATH);
                 if (!pStrokes[numStrokes - 1])
                 {
-                    ASSERT(FALSE); // FIXME
+                    numStrokes--;
+                    bFail = TRUE;
+                    goto Exit;
                 }
                 PATH_InitGdiPath(pStrokes[numStrokes - 1]);
                 pStrokes[numStrokes - 1]->state = PATH_Open;
@@ -1926,7 +1928,11 @@ IntGdiWidenPath(PPATH pPath, UINT penWidth, UINT penStyle, FLOAT eMiterLimit)
         goto Exit;
     }
 
-    KeSaveFloatingPointState(&fpsave);
+    if (!NT_SUCCESS(KeSaveFloatingPointState(&fpsave)))
+    {
+        bFail = TRUE;
+        goto Exit;
+    }
 
     for (i = 0; i < numStrokes; i++)
     {
@@ -1942,9 +1948,17 @@ IntGdiWidenPath(PPATH pPath, UINT penWidth, UINT penStyle, FLOAT eMiterLimit)
             nStroke--;
 
         pUpPath = ExAllocatePoolWithTag(PagedPool, sizeof(PATH), TAG_PATH);
+        pDownPath = ExAllocatePoolWithTag(PagedPool, sizeof(PATH), TAG_PATH);
+        if (!pUpPath || !pDownPath)
+        {
+            if (pUpPath) ExFreePoolWithTag(pUpPath, TAG_PATH);
+            if (pDownPath) ExFreePoolWithTag(pDownPath, TAG_PATH);
+            KeRestoreFloatingPointState(&fpsave);
+            bFail = TRUE;
+            goto Exit;
+        }
         PATH_InitGdiPath(pUpPath);
         pUpPath->state = PATH_Open;
-        pDownPath = ExAllocatePoolWithTag(PagedPool, sizeof(PATH), TAG_PATH);
         PATH_InitGdiPath(pDownPath);
         pDownPath->state = PATH_Open;
 
@@ -2145,13 +2159,27 @@ IntGdiWidenPath(PPATH pPath, UINT penWidth, UINT penStyle, FLOAT eMiterLimit)
             }
         }
         type = add_points( pNewPath, pUpPath->pPoints, pUpPath->numEntriesUsed, PT_LINETO );
-        type[0] = PT_MOVETO;
-        reverse_points( pDownPath->pPoints, pDownPath->numEntriesUsed );
-        type = add_points( pNewPath, pDownPath->pPoints, pDownPath->numEntriesUsed, PT_LINETO );
+        if (type)
+        {
+            type[0] = PT_MOVETO;
+            reverse_points( pDownPath->pPoints, pDownPath->numEntriesUsed );
+            type = add_points( pNewPath, pDownPath->pPoints, pDownPath->numEntriesUsed, PT_LINETO );
+        }
+        if (!type)
+        {
+            PATH_DestroyGdiPath(pUpPath);
+            ExFreePoolWithTag(pUpPath, TAG_PATH);
+            PATH_DestroyGdiPath(pDownPath);
+            ExFreePoolWithTag(pDownPath, TAG_PATH);
+            KeRestoreFloatingPointState(&fpsave);
+            bFail = TRUE;
+            goto Exit;
+        }
         if (bClosedStroke) type[0] = PT_MOVETO;
 
         PATH_DestroyGdiPath(pStrokes[i]);
         ExFreePoolWithTag(pStrokes[i], TAG_PATH);
+        pStrokes[i] = NULL;
         PATH_DestroyGdiPath(pUpPath);
         ExFreePoolWithTag(pUpPath, TAG_PATH);
         PATH_DestroyGdiPath(pDownPath);
@@ -2164,6 +2192,26 @@ IntGdiWidenPath(PPATH pPath, UINT penWidth, UINT penStyle, FLOAT eMiterLimit)
     KeRestoreFloatingPointState(&fpsave);
 
 Exit:
+    if (bFail)
+    {
+        /* Out of memory: the strokes that are left and the half-made outline are dropped */
+        for (i = 0; pStrokes && i < numStrokes; i++)
+        {
+            if (pStrokes[i])
+            {
+                PATH_DestroyGdiPath(pStrokes[i]);
+                ExFreePoolWithTag(pStrokes[i], TAG_PATH);
+            }
+        }
+        if (pNewPath)
+        {
+            HPATH hNew = pNewPath->BaseObject.hHmgr;
+            PATH_UnlockPath(pNewPath);
+            PATH_Delete(hNew);
+            pNewPath = NULL;
+        }
+        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+    }
     if (pStrokes) ExFreePoolWithTag(pStrokes, TAG_PATH);
     HPATH hpathToDelete = flat_path->BaseObject.hHmgr;
     PATH_UnlockPath(flat_path);
@@ -2985,13 +3033,26 @@ PATH_WidenPathScaled(DC *dc, PPATH pPath, UINT penWidth, UINT penStyle)
     if (!pNew)
         return NULL;
 
-    KeSaveFloatingPointState(&fpsave);
+    if (!NT_SUCCESS(KeSaveFloatingPointState(&fpsave)))
+    {
+        HPATH hNew = pNew->BaseObject.hHmgr;
+        PATH_Delete(hNew);
+        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return NULL;
+    }
     for (i = 0; i < pNew->numEntriesUsed; i++)
     {
         double qx = pNew->pPoints[i].x, qy = pNew->pPoints[i].y;
+        double dx = (T[0] * qx + T[2] * qy) / K, dy = (T[1] * qx + T[3] * qy) / K;
 
-        pNew->pPoints[i].x = (LONG)floor((T[0] * qx + T[2] * qy) / K + 0.5);
-        pNew->pPoints[i].y = (LONG)floor((T[1] * qx + T[3] * qy) / K + 0.5);
+        /* The outline can lie anywhere (a huge pen, a nearly singular transform): the device space is 28 bits, and a
+           double that does not fit a LONG must not be converted (NaN fails the comparisons and becomes 0) */
+        if (!(dx > -134217728.0)) dx = (dx != dx) ? 0.0 : -134217728.0;
+        if (!(dx < 134217728.0)) dx = 134217728.0;
+        if (!(dy > -134217728.0)) dy = (dy != dy) ? 0.0 : -134217728.0;
+        if (!(dy < 134217728.0)) dy = 134217728.0;
+        pNew->pPoints[i].x = (LONG)floor(dx + 0.5);
+        pNew->pPoints[i].y = (LONG)floor(dy + 0.5);
     }
     KeRestoreFloatingPointState(&fpsave);
 

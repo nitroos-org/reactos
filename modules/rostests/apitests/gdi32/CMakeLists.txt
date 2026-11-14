@@ -104,6 +104,7 @@ list(APPEND SOURCE
     SetSysColors.c
     SetWindowExtEx.c
     SetWorldTransform.c
+    ShapeRobustness.c
     ShapeTransform.c
     StretchBlt.c
     TextTransform.c
