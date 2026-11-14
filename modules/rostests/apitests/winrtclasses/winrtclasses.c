@@ -1241,6 +1241,43 @@ static void TestApiInformationRegisteredClasses(void *statics)
     present = AiType(statics, L"Windows.nitroapitest.scratchclass", &hr);
     ok(hr == S_OK && present == 0, "case of a registered class (names are case-sensitive): 0x%08lx, %u\n", hr, present);
 
+    /* A DllPath that expands to more than MAX_PATH characters: not registered. The unexpanded text is the name
+     * of a file that exists, so a fallback to it (or a use of the unfilled buffer) would find a DLL. */
+    {
+        static const WCHAR LongVar[] = L"NITRO_APITEST_LONG";
+        WCHAR value[301], literal[MAX_PATH];
+        HANDLE file;
+        UINT i;
+
+        for (i = 0; i < ARRAYSIZE(value) - 1; i++)
+            value[i] = L'a';
+        value[i] = 0;
+        GetTempPathW(ARRAYSIZE(literal), literal);
+        wcscpy(dll, literal);
+        wcscat(dll, L"%NITRO_APITEST_LONG%");
+        wcscat(literal, L"%NITRO_APITEST_LONG%");
+        file = CreateFileW(literal, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY, NULL);
+        if (file == INVALID_HANDLE_VALUE)
+            skip("cannot create %ls (%lu)\n", literal, GetLastError());
+        else
+        {
+            CloseHandle(file);
+            SetEnvironmentVariableW(LongVar, value);
+            ok(ExpandEnvironmentStringsW(dll, value, ARRAYSIZE(value)) > MAX_PATH, "the path does not expand beyond MAX_PATH\n");
+            RegSetValueExW(key, L"DllPath", 0, REG_EXPAND_SZ, (BYTE *)dll, (wcslen(dll) + 1) * sizeof(WCHAR));
+            present = AiType(statics, Scratch, &hr);
+            ok(hr == S_OK && present == 0, "registered class with a DllPath that expands beyond MAX_PATH: 0x%08lx, %u\n", hr, present);
+
+            /* the same text as a REG_SZ is a path as it is, and is found */
+            RegSetValueExW(key, L"DllPath", 0, REG_SZ, (BYTE *)dll, (wcslen(dll) + 1) * sizeof(WCHAR));
+            present = AiType(statics, Scratch, &hr);
+            ok(hr == S_OK && present == 1, "registered class with a literal DllPath: 0x%08lx, %u\n", hr, present);
+
+            SetEnvironmentVariableW(LongVar, NULL);
+            DeleteFileW(literal);
+        }
+    }
+
     RegCloseKey(key);
     RegDeleteKeyW(HKEY_LOCAL_MACHINE, key_name);
     present = AiType(statics, Scratch, &hr);
