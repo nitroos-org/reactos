@@ -234,6 +234,7 @@ TestChurn(BOOLEAN Realloc, ULONG MaxSegs)
     {
         if (Slots[i])
             RtlFreeHeap(Heap, 0, Slots[i]);
+        Slots[i] = NULL;
     }
     ok(RtlValidateHeap(Heap, 0, NULL), "heap does not validate\n");
     RtlDestroyHeap(Heap);
@@ -277,6 +278,90 @@ TestLargeHeap(void)
     ok(RtlValidateHeap(Heap, 0, NULL), "heap does not validate\n");
     RtlDestroyHeap(Heap);
 }
+
+/* More than 4.9 GB of address space in one growable heap, with little committed. Blocks of 504 KB, each followed by a
+   small one, march through the segments; the large ones are freed and the heap compacted, which gives their pages
+   back and leaves ranges of 125 pages between the pages the small blocks keep. A request of 127 pages fits none of
+   them, so the heap keeps reserving segments (the 64-bit lift of the segment cap) while the committed bytes stay a
+   few MB per segment. */
+#define HUGE_BIG        (504 * 1024)
+#define HUGE_BATCH      64
+#define HUGE_TARGET     (5400ULL * 1024 * 1024)
+
+static void
+TestHugeReserve(void)
+{
+    static PVOID Big[HUGE_BATCH];
+    static PVOID Small[HUGE_BATCH];
+    HANDLE Heap;
+    ULONGLONG Total = 0;
+    ULONG Batches = 0, Failed = 0, i;
+    SIZE_T Committed = 0;
+
+    NumSegs = 0;
+    Heap = RtlCreateHeap(HEAP_GROWABLE, NULL, 0, 0, NULL, NULL);
+    ok(Heap != NULL, "RtlCreateHeap failed\n");
+    if (!Heap)
+        return;
+    Track(Heap);
+
+    while (Total < HUGE_TARGET && !Failed && NumSegs < 60)
+    {
+        ULONG n;
+
+        for (n = 0; n < HUGE_BATCH; n++)
+        {
+            Big[n] = RtlAllocateHeap(Heap, 0, HUGE_BIG);
+            Small[n] = RtlAllocateHeap(Heap, 0, 16);
+            if (!Big[n] || !Small[n])
+            {
+                Failed = n + 1;
+                break;
+            }
+            Track(Big[n]);
+        }
+        for (i = 0; i < HUGE_BATCH; i++)
+        {
+            if (Big[i])
+                RtlFreeHeap(Heap, 0, Big[i]);
+            Big[i] = NULL;
+        }
+        RtlCompactHeap(Heap, 0);
+        Batches++;
+
+        Total = 0;
+        for (i = 0; i < NumSegs; i++)
+            Total += Segs[i].Reserve;
+    }
+    ok(!Failed, "an allocation failed in batch %lu (%lu segments, %lu MB reserved)\n",
+       Batches, NumSegs, (ULONG)(Total >> 20));
+    ok(Total >= HUGE_TARGET, "only %lu MB reserved in %lu segments\n", (ULONG)(Total >> 20), NumSegs);
+
+    for (i = 0; i < NumSegs; i++)
+    {
+        MEMORY_BASIC_INFORMATION Info;
+        PUCHAR Address = Segs[i].Base;
+
+        while (Address < Segs[i].Base + Segs[i].Reserve &&
+               NT_SUCCESS(NtQueryVirtualMemory(NtCurrentProcess(), Address, MemoryBasicInformation, &Info, sizeof(Info), NULL)))
+        {
+            if (Info.State == MEM_COMMIT)
+                Committed += Info.RegionSize;
+            Address += Info.RegionSize;
+        }
+    }
+    trace("huge heap: %lu segments, %lu MB reserved, %lu MB committed, %lu batches\n",
+          NumSegs, (ULONG)(Total >> 20), (ULONG)(Committed >> 20), Batches);
+    ok(Committed < 512UL * 1024 * 1024, "%lu MB committed\n", (ULONG)(Committed >> 20));
+
+    for (i = 0; i < HUGE_BATCH; i++)
+    {
+        if (Small[i])
+            RtlFreeHeap(Heap, 0, Small[i]);
+    }
+    ok(RtlValidateHeap(Heap, 0, NULL), "heap does not validate\n");
+    RtlDestroyHeap(Heap);
+}
 #endif
 
 START_TEST(RtlHeapSegments)
@@ -286,5 +371,6 @@ START_TEST(RtlHeapSegments)
     TestChurn(TRUE, 24);
 #ifdef _WIN64
     TestLargeHeap();
+    TestHugeReserve();
 #endif
 }

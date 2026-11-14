@@ -1403,10 +1403,16 @@ static BOOLEAN RtlpHeapTrim(PHEAP Heap, SIZE_T Keep, ULONG MaxBlocks);
    size, not segments of hundreds of MB that a 32-bit process cannot find the address space for. */
 #define HEAP_SEGMENT_RESERVE_CAP    (16192 * 1024)
 
-/* When this few unused segment slots are left the cap is lifted, so that a heap that really needs more than
-   (HEAP_SEGMENTS - 8) segments of the cap keeps growing, with segments twice the size of the last (a 64-bit heap can
-   reach many GB; a 32-bit one falls back to what the address space still has) */
+/* When this few unused segment slots are left (the slot that the segment being reserved takes counts as unused) the
+   cap is lifted, so that a heap that really needs more segments of the cap than it has slots for keeps growing, with
+   segments twice the size of the last. A 32-bit heap falls back to what the address space still has. A 64-bit heap
+   lifts earlier: with the 16 last slots it can reserve about a TB, address space only, where lifting with 8 left
+   stopped it at 4.9 GB (the 64 slots of the old unbounded doubling reached any size) */
+#ifdef _WIN64
+#define HEAP_SEGMENT_SLOTS_LOW      16
+#else
 #define HEAP_SEGMENT_SLOTS_LOW      8
+#endif
 
 static
 SIZE_T
