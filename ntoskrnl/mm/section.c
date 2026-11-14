@@ -2722,9 +2722,25 @@ MmProtectSectionView(PMMSUPPORT AddressSpace,
             return STATUS_SECTION_PROTECTION;
         }
     }
-    else if (!MiIsProtectWithinMaximum(Protect, Segment->Protection))
+    else
     {
-        return STATUS_SECTION_PROTECTION;
+        if (!MiIsProtectWithinMaximum(Protect, Segment->Protection))
+        {
+            return STATUS_SECTION_PROTECTION;
+        }
+
+        /*
+         * A data or page file view cannot be given more access than it was mapped with, whatever the
+         * section allows (Windows 10: STATUS_SECTION_PROTECTION, as for a view of the other kind of
+         * section in MiProtectVirtualMemory). The old protection is still reported.
+         */
+        if (!MiIsViewProtectionCompatible(MemoryArea->VadNode.u.VadFlags.Protection,
+                                          MiMakeProtectionMask(Protect)))
+        {
+            if (OldProtect != NULL)
+                *OldProtect = Region->Protect;
+            return STATUS_SECTION_PROTECTION;
+        }
     }
 
     if (OldProtect != NULL)
