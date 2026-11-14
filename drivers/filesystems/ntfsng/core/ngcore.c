@@ -54,6 +54,7 @@ void kshim_icache_lock(void);
 void kshim_icache_unlock(void);
 struct inode *kshim_icache_peek(struct super_block *sb, unsigned long hashval,
 		int (*test)(struct inode *, void *), void *data);
+struct inode *kshim_icache_bucket(struct super_block *sb, unsigned long hashval, int load);
 int kshim_icache_busy(struct super_block *sb, unsigned long hashval,
 		int (*test)(struct inode *, void *), void *data);
 extern unsigned int (*kshim_icache_cost)(struct inode *i);
@@ -1601,6 +1602,26 @@ static int ngc_readdir_full_impl(ngc_vol *v, ngc_node *dirn, ngc_dirent_t fn, vo
 		na.type = AT_UNUSED;
 		na.name = NULL;
 		na.name_len = 0;
+		/*
+		 * The inodes of a directory are scattered in memory and the walk reads several lines of each: bring the
+		 * bucket of an entry ahead, and a little later the inode it holds and the lines the stat reads.
+		 */
+		if (k + 16 < n)
+			kshim_icache_bucket(dir->i_sb, MREF(r[k + 16].mref), 0);
+		if (k + 8 < n) {
+			struct inode *pi = kshim_icache_bucket(dir->i_sb, MREF(r[k + 8].mref), 1);
+
+			if (pi) {
+				const char *c = (const char *)pi, *nc = (const char *)NTFS_I(pi);
+
+				__builtin_prefetch(c);
+				__builtin_prefetch(c + 64);
+				__builtin_prefetch(c + 128);
+				__builtin_prefetch(c + 192);
+				__builtin_prefetch(nc);
+				__builtin_prefetch(nc + 64);
+			}
+		}
 		kshim_icache_lock();
 		child = kshim_icache_peek(dir->i_sb, na.mft_no, ntfs_test_inode, &na);
 		done = child ? ngc_stat_lite(child, &e.st) : ngc_stc_lookup(v, x->mref, &e.st);

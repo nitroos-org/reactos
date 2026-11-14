@@ -454,7 +454,8 @@ struct super_block {
 	const struct xattr_handler * const *s_xattr;
 	errseq_t s_wb_err;
 	struct inode *kshim_inodes;
-#define KSHIM_IHASH 1024
+/* Power of two: 10,000 or more cached inodes made chains of 10 and more (a lookup is a cache miss per link) */
+#define KSHIM_IHASH 16384
 	struct inode *kshim_ihash[KSHIM_IHASH];
 	struct inode *kshim_lru_head, *kshim_lru_tail;	/* unused inodes, oldest first */
 	unsigned long kshim_lru_count;

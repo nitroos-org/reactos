@@ -7,12 +7,54 @@
 
 #include "ntfsng.h"
 
+/*
+ * The snapshot of a directory of 10,000 entries is 2 MB in 64 KB chunks, allocated for each listing and freed with its
+ * handle: a pool allocation of fresh pages and their faults, then the release of the pages.  A few standard chunks are
+ * kept for the next listing instead (the cache holds only the pointers; the chunks stay in paged pool).
+ */
+#define NG_ARENA_CHUNK (64 * 1024 - (ULONG)FIELD_OFFSET(NG_ARENA, Data))
+#define NG_ARENA_CACHE_MAX 32
+static KSPIN_LOCK NgArenaCacheLock;
+static PNG_ARENA NgArenaCache[NG_ARENA_CACHE_MAX];
+static ULONG NgArenaCached;
+
+static PNG_ARENA NgArenaTake(VOID)
+{
+    PNG_ARENA A = NULL;
+    KIRQL Irql;
+
+    KeAcquireSpinLock(&NgArenaCacheLock, &Irql);
+    if (NgArenaCached)
+        A = NgArenaCache[--NgArenaCached];
+    KeReleaseSpinLock(&NgArenaCacheLock, Irql);
+    return A;
+}
+
+static VOID NgArenaGive(PNG_ARENA A)
+{
+    BOOLEAN Kept = FALSE;
+    KIRQL Irql;
+
+    if (A->Size == NG_ARENA_CHUNK)
+    {
+        KeAcquireSpinLock(&NgArenaCacheLock, &Irql);
+        if (NgArenaCached < NG_ARENA_CACHE_MAX)
+        {
+            NgArenaCache[NgArenaCached++] = A;
+            Kept = TRUE;
+        }
+        KeReleaseSpinLock(&NgArenaCacheLock, Irql);
+    }
+    if (!Kept)
+        ExFreePoolWithTag(A, TAG_NTFSNG);
+}
+
 VOID NgFreeDirSnapshot(PNG_CCB Ccb)
 {
     while (Ccb->Arena)
     {
         PNG_ARENA Next = Ccb->Arena->Next;
-        ExFreePoolWithTag(Ccb->Arena, TAG_NTFSNG);
+        NgArenaGive(Ccb->Arena);
         Ccb->Arena = Next;
     }
     if (Ccb->Entries)
@@ -29,8 +71,10 @@ static PVOID NgArenaAlloc(PNG_CCB Ccb, ULONG Size)
     Size = ALIGN_UP_BY(Size, sizeof(ULONGLONG));
     if (!A || A->Used + Size > A->Size)
     {
-        ULONG Chunk = max(Size, 64 * 1024 - (ULONG)FIELD_OFFSET(NG_ARENA, Data));
-        A = ExAllocatePoolWithTag(PagedPool, FIELD_OFFSET(NG_ARENA, Data) + Chunk, TAG_NTFSNG);
+        ULONG Chunk = max(Size, NG_ARENA_CHUNK);
+        A = Chunk == NG_ARENA_CHUNK ? NgArenaTake() : NULL;
+        if (!A)
+            A = ExAllocatePoolWithTag(PagedPool, FIELD_OFFSET(NG_ARENA, Data) + Chunk, TAG_NTFSNG);
         if (!A)
             return NULL;
         A->Next = Ccb->Arena;
@@ -403,7 +447,8 @@ static NTSTATUS NgQueryDirectory(PIRP Irp, PIO_STACK_LOCATION Stack, PNG_VCB Vcb
                                     E->IsDot, MatchTab);
         /* A name that is not a valid 8.3 name may have a DOS name: patterns match either. */
         Spaces = FALSE;
-        WantShort = !E->IsDot && (Class == FileBothDirectoryInformation || Class == FileIdBothDirectoryInformation ||
+        /* Without a short name of its own (a legal 8.3 name has none) the legality of the name changes nothing below. */
+        WantShort = !E->IsDot && E->ShortChars != 0 && (Class == FileBothDirectoryInformation || Class == FileIdBothDirectoryInformation ||
                     !Matched) && !(RtlIsNameLegalDOS8Dot3(&Name, NULL, &Spaces) && !Spaces);
         ShortChars = 0;
         if ((!Matched && !WantShort) || (!Matched && E->IsDot))
