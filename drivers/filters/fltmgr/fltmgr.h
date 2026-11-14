@@ -22,6 +22,15 @@
 #define FM_TAG_CONTEXT_REGISTA  'rcMF'
 #define FM_TAG_CCB              'bcMF'
 #define FM_TAG_TEMP_REGISTRY    'rtMF'
+#define FM_TAG_INSTANCE         'siMF'
+#define FM_TAG_VOLUME           'ovMF'
+#define FM_TAG_IRPCTRL          'ciMF'
+#define FM_TAG_ALTITUDE         'taMF'
+#define FM_TAG_CONTEXT          'xcMF'
+#define FM_TAG_STREAMCTRL       'tsMF'
+#define FM_TAG_WORKITEM         'iwMF'
+#define FM_TAG_MESSAGE          'gmMF'
+#define FM_TAG_SECURITY         'dsMF'
 
 #define MAX_DEVNAME_LENGTH  64
 
@@ -52,6 +61,9 @@ typedef struct _FLTMGR_DEVICE_EXTENSION
     * it's the name of the control device we're attached to */
     UNICODE_STRING DeviceName;
     WCHAR DeviceNameBuffer[MAX_DEVNAME_LENGTH];
+
+    /* Set for a file system volume device (the ones filtered), NULL for a file system control device */
+    struct _FLT_VOLUME *Volume;
 
 } FLTMGR_DEVICE_EXTENSION, *PFLTMGR_DEVICE_EXTENSION;
 

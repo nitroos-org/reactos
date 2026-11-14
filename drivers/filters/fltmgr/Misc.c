@@ -22,6 +22,11 @@
 
 /* EXPORTED FUNCTIONS ******************************************************/
 
+/*
+ * WDK: "a security descriptor whose DACL grants the given access to the system and to the administrators
+ * only". Absolute format, the ACL behind the descriptor in the same allocation, no owner or group (whoever
+ * assigns it to an object fills those in). Freed with FltFreeSecurityDescriptor.
+ */
 NTSTATUS
 FLTAPI
 FltBuildDefaultSecurityDescriptor(
@@ -29,9 +34,44 @@ FltBuildDefaultSecurityDescriptor(
     _In_ ACCESS_MASK DesiredAccess
 )
 {
-    UNREFERENCED_PARAMETER(DesiredAccess);
+    PSECURITY_DESCRIPTOR Descriptor;
+    PACL Dacl;
+    ULONG AclLength;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
     *SecurityDescriptor = NULL;
-    return 0;
+
+    AclLength = sizeof(ACL) +
+                2 * FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart) +
+                RtlLengthSid(SeExports->SeLocalSystemSid) +
+                RtlLengthSid(SeExports->SeAliasAdminsSid);
+
+    Descriptor = ExAllocatePoolWithTag(PagedPool, sizeof(SECURITY_DESCRIPTOR) + AclLength, FM_TAG_SECURITY);
+    if (Descriptor == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Dacl = (PACL)((PUCHAR)Descriptor + sizeof(SECURITY_DESCRIPTOR));
+
+    Status = RtlCreateAcl(Dacl, AclLength, ACL_REVISION);
+    if (NT_SUCCESS(Status))
+        Status = RtlAddAccessAllowedAce(Dacl, ACL_REVISION, DesiredAccess, SeExports->SeLocalSystemSid);
+    if (NT_SUCCESS(Status))
+        Status = RtlAddAccessAllowedAce(Dacl, ACL_REVISION, DesiredAccess, SeExports->SeAliasAdminsSid);
+    if (NT_SUCCESS(Status))
+        Status = RtlCreateSecurityDescriptor(Descriptor, SECURITY_DESCRIPTOR_REVISION);
+    if (NT_SUCCESS(Status))
+        Status = RtlSetDaclSecurityDescriptor(Descriptor, TRUE, Dacl, FALSE);
+
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreePoolWithTag(Descriptor, FM_TAG_SECURITY);
+        return Status;
+    }
+
+    *SecurityDescriptor = Descriptor;
+    return STATUS_SUCCESS;
 }
 
 VOID
@@ -40,19 +80,10 @@ FltFreeSecurityDescriptor(
     _In_ PSECURITY_DESCRIPTOR SecurityDescriptor
 )
 {
-    UNREFERENCED_PARAMETER(SecurityDescriptor);
-}
+    PAGED_CODE();
 
-NTSTATUS
-FLTAPI
-FltGetDiskDeviceObject(
-    _In_ PFLT_VOLUME Volume,
-    _Outptr_ PDEVICE_OBJECT *DiskDeviceObject
-)
-{
-    UNREFERENCED_PARAMETER(Volume);
-    UNREFERENCED_PARAMETER(DiskDeviceObject);
-    return 0;
+    if (SecurityDescriptor)
+        ExFreePoolWithTag(SecurityDescriptor, FM_TAG_SECURITY);
 }
 
 NTSTATUS
