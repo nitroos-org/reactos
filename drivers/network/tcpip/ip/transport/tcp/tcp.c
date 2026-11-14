@@ -229,11 +229,18 @@ NTSTATUS TCPStartup(VOID)
                                     TDI_BUCKET_TAG,
                                     0);
 
+    /* Before any interface registers: they get IPv6 addresses only with it on */
+    TCPReadIpv6Switch();
+
     /* Initialize our IP library */
     LibIPInitialize();
 
     /* Register this protocol with IP layer */
     IPRegisterProtocol(IPPROTO_TCP, TCPReceive);
+
+#if DBG || defined(TCPIP_IPV6_SELFTEST)
+    TCPStartIpv6SelfTest();
+#endif
 
     TCPInitialized = TRUE;
 
@@ -309,7 +316,7 @@ NTSTATUS TCPConnect
   PVOID Context )
 {
     NTSTATUS Status;
-    ip_addr_t bindaddr, connaddr;
+    ip4_addr_t bindaddr, connaddr;
     IP_ADDRESS RemoteAddress;
     USHORT RemotePort;
     u16_t BoundPort;
@@ -692,7 +699,7 @@ NTSTATUS TCPGetSockAddress
   BOOLEAN GetRemote )
 {
     PTA_IP_ADDRESS AddressIP = (PTA_IP_ADDRESS)Address;
-    ip_addr_t ipaddr;
+    ip4_addr_t ipaddr;
     NTSTATUS Status;
 
     AddressIP->TAAddressCount = 1;

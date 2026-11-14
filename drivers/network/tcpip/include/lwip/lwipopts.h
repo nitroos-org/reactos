@@ -43,6 +43,22 @@
 
 #define IP_SOF_BROADCAST_RECV           1
 
+/* The IPv6 core (ip_addr_t is a tagged union). It is used only with Tcpip\Parameters\Ipv6Enable on
+ * (ip/transport/tcp/if6.c); off, no interface has an IPv6 address and no IPv6 frame reaches lwIP */
+#define LWIP_IPV6                       1
+/* No MLD yet: its 100 ms timer would wake the tcpip thread of an idle machine for a protocol nobody uses */
+#define LWIP_IPV6_MLD                   0
+/* Reassembly keeps its bookkeeping (a pointer and two offsets) in place of each fragment's 8-byte fragment
+ * header; with 64-bit pointers it does not fit there, so it borrows room from the header before it instead
+ * (ip6_frag.c asserts this once a second from ip6_reass_tmr otherwise) */
+#define IPV6_FRAG_COPYHEADER            1
+/* Fragments waiting for reassembly, over all IPv6 datagrams (IP_REASS_MAX_PBUFS stays the IPv4 one): a sender
+ * that never completes its datagrams holds at most this many for IPV6_REASS_MAXAGE, and a 64K datagram in
+ * 1280-byte fragments still fits */
+#define IP6_REASS_MAX_PBUFS             128
+/* A segment to an IPv6 listener is taken only from this machine until the firewall filters IPv6 (if6.c) */
+#define LWIP_HOOK_TCP_INPACKET_PCB(pcb, hdr, optlen, opt1len, opt2, p) \
+    (((pcb)->state == LISTEN && ip_current_is_v6()) ? LibTCPListenerInput6() : ERR_OK)
 #define LWIP_ICMP                       0
 
 #define LWIP_RAW                        0

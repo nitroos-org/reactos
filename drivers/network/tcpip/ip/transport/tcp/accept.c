@@ -21,7 +21,7 @@ NTSTATUS TCPCheckPeerForAccept(PVOID Context,
     NTSTATUS Status;
     PTDI_CONNECTION_INFORMATION WhoIsConnecting;
     PTA_IP_ADDRESS RemoteAddress;
-    ip_addr_t ipaddr;
+    ip4_addr_t ipaddr;
 
     if (Request->RequestFlags & TDI_QUERY_ACCEPT)
         DbgPrint("TDI_QUERY_ACCEPT NOT SUPPORTED!!!\n");
@@ -47,7 +47,7 @@ NTSTATUS TCPCheckPeerForAccept(PVOID Context,
 NTSTATUS TCPListen(PCONNECTION_ENDPOINT Connection, UINT Backlog)
 {
     NTSTATUS Status = STATUS_SUCCESS;
-    ip_addr_t AddressToBind;
+    ip4_addr_t AddressToBind;
     u16_t BoundPort;
 
     ASSERT(Connection);

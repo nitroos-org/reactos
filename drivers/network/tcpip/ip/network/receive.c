@@ -830,7 +830,11 @@ VOID IPReceive( PIP_INTERFACE IF, PIP_PACKET IPPacket )
             break;
         case 6:
             IPPacket->Type = IP_ADDRESS_V6;
-            TI_DbgPrint(MAX_TRACE, ("Datagram of type IPv6 discarded.\n"));
+            /* lwIP's (if6.c); dropped while IPv6 is off */
+            if (TCPIpv6Enabled)
+                TCPReceive6(IF, IPPacket);
+            else
+                TI_DbgPrint(MAX_TRACE, ("Datagram of type IPv6 discarded.\n"));
             break;
         default:
             TI_DbgPrint(MIN_TRACE, ("Datagram has an unsupported IP version %d.\n", Version));
