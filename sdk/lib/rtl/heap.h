@@ -511,8 +511,14 @@ RtlpHeapFeIsCached(PHEAP_ENTRY Entry);
 ULONG NTAPI
 RtlpHeapFeFlush(PHEAP Heap);
 
+ULONG NTAPI
+RtlpHeapFeSweep(PHEAP Heap, BOOLEAN Timed);
+
 SIZE_T NTAPI
 RtlpHeapFeParked(PHEAP Heap);
+
+BOOLEAN NTAPI
+RtlpHeapFeSweepToGrow(PHEAP Heap, ULONG Flags, SIZE_T Size, PVOID *Block);
 
 ULONG NTAPI
 RtlpHeapFeLock(PHEAP Heap);

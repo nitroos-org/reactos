@@ -38,6 +38,17 @@
  *  - Parked memory is bounded (HEAP_FE_SLOT_BUDGET per slot, HEAP_FE_SHARED_CAP per class on the shared lists)
  *    and is given back when the heap needs room (RtlpHeapFeParked above HEAP_FE_FLUSH_LIMIT), by HeapLock and
  *    HeapWalk, and by the heap's once-per-second check after a second without growth (RtlpHeapTrimCheck).
+ *  - Parked blocks that nobody takes are given back earlier, by the sweep (RtlpHeapFeSweep). Every list keeps its
+ *    low-water mark: the fewest blocks (bytes, for a shared list) it held since the previous sweep. Blocks are taken
+ *    and parked at the head, so the last Low blocks of a list were not touched during the period, and the sweep
+ *    gives exactly those back. It runs whenever the heap has to grow (RtlpHeapFeSweepToGrow, before growing; the
+ *    request then looks in the heap again), and at the once-per-second check of a heap that did grow in that
+ *    second (one that did not is flushed whole, see above). So a block parked and untouched for a whole period
+ *    goes back: what a program that moved on to other sizes freed (it keeps its free neighbours from coalescing,
+ *    and the heap grows for the new sizes: a period ends at every growth), and what a service whose calls each
+ *    run on a new thread parks in slots no thread takes from again (back after one to two seconds, at the next
+ *    free). What the threads keep going through stays cached, and a heap that does not grow is not swept at all.
+ *    A sweep never waits for a slot or list in use (it is in use) and looks at it the next time.
  *  - A cached block carries a marker in the SmallTagIndex byte of its header
  *    (always zero for blocks the front end accepts), which lets HeapFree detect
  *    a double free, and HeapSize/HeapValidate treat the block as freed.
@@ -63,6 +74,11 @@
 #define HEAP_FE_BATCH           8              /* blocks moved at a time */
 #define HEAP_FE_SHARED_CAP      (128 * 1024)   /* bytes on the shared list of a class */
 #define HEAP_FE_FLUSH_SPINS     (1 << 20)      /* the flush waits this long for a slot or list that is in use */
+#define HEAP_FE_SWEEP_SHORT     1024     /* requests to a slot after which a sweep at growth gives back the lists none came to */
+#define HEAP_FE_SWEEP_LONG      16384    /* requests to a slot after which it also trims the lists in use to their low-water mark */
+
+#define HEAP_FE_TAKEN(Slot, Class)      ((Slot)->Taken[(Class) >> 3] & (1 << ((Class) & 7)))
+#define HEAP_FE_SET_TAKEN(Slot, Class)  ((Slot)->Taken[(Class) >> 3] |= (UCHAR)(1 << ((Class) & 7)))
 #define HEAP_FE_MARK            0xCE
 
 C_ASSERT(HEAP_FE_CLASSES == RTL_NUMBER_OF(((PHEAP_FE_ACT)0)->Live));
@@ -72,15 +88,19 @@ typedef struct _HEAP_FE_SLOT
 {
     volatile LONG Lock;
     ULONG Bytes;
-    ULONG AllocHit;     /* statistics, for diagnostics only */
-    ULONG AllocMiss;
+    ULONG AllocHit;     /* blocks handed out (not under the slot lock: a count, not exact); the sweep reads it */
+    ULONG AllocMiss;    /* statistics, for diagnostics only */
     ULONG FreeCached;
     ULONG FreeSlow;
-    UCHAR Pad[64 - 6 * sizeof(ULONG)];
+    ULONG MarkLong;     /* AllocHit + AllocMiss when the low-water marks were last set (RtlpHeapFeSweep) */
+    ULONG MarkShort;    /* AllocHit + AllocMiss when the Taken bits were last cleared */
+    UCHAR Taken[HEAP_FE_CLASSES / 8];   /* bit per class: a block of it was handed out since MarkShort */
+    UCHAR Pad[64 - 8 * sizeof(ULONG) - HEAP_FE_CLASSES / 8];
     PHEAP_ENTRY Heads[HEAP_FE_CLASSES];
     USHORT Counts[HEAP_FE_CLASSES];     /* blocks on each list */
     UCHAR Misses[HEAP_FE_CLASSES];      /* requests the slot could not serve since the last refill */
-    UCHAR Pad2[(64 - ((64 + sizeof(PHEAP_ENTRY) * HEAP_FE_CLASSES + sizeof(USHORT) * HEAP_FE_CLASSES + HEAP_FE_CLASSES) % 64)) % 64];
+    UCHAR Low[HEAP_FE_CLASSES];         /* fewest blocks on each list since the last sweep (at most 255) */
+    UCHAR Pad2[(64 - ((64 + sizeof(PHEAP_ENTRY) * HEAP_FE_CLASSES + sizeof(USHORT) * HEAP_FE_CLASSES + 2 * HEAP_FE_CLASSES) % 64)) % 64];
 } HEAP_FE_SLOT, *PHEAP_FE_SLOT;
 
 typedef struct _HEAP_FE_SHARED
@@ -88,7 +108,9 @@ typedef struct _HEAP_FE_SHARED
     volatile LONG Lock;
     ULONG Bytes;
     PHEAP_ENTRY Head;
-    UCHAR Pad[64 - 2 * sizeof(ULONG) - sizeof(PHEAP_ENTRY)];
+    ULONG LowBytes;                     /* fewest bytes on the list since the last sweep */
+    UCHAR Taken;                        /* a block was handed out since the slots' SharedShort */
+    UCHAR Pad[64 - 3 * sizeof(ULONG) - sizeof(PHEAP_ENTRY) - 1];
 } HEAP_FE_SHARED, *PHEAP_FE_SHARED;
 
 typedef struct _HEAP_FE
@@ -97,13 +119,25 @@ typedef struct _HEAP_FE
     volatile LONG Disabled;
     ULONG Signature;
     ULONG SlotCount;
-    UCHAR Pad[64 - sizeof(ULONG_PTR) - 3 * sizeof(ULONG)];
+    ULONG Retry;            /* a sweep at growth gave blocks back, the request looks again; with the heap lock */
+    ULONG SharedLong;       /* the slots' request count when the shared lists' low-water marks were last set */
+    ULONG SharedShort;      /* and when their Taken flags were last cleared; both with the heap lock */
+    UCHAR Pad[64 - sizeof(ULONG_PTR) - 6 * sizeof(ULONG)];
     HEAP_FE_SHARED Shared[HEAP_FE_CLASSES];
     HEAP_FE_SLOT Slots[HEAP_FE_SLOTS];
 } HEAP_FE, *PHEAP_FE;
 
 C_ASSERT((sizeof(HEAP_FE_SLOT) % 64) == 0);
 C_ASSERT(sizeof(HEAP_FE_SHARED) == 64);
+
+/* After a slot's list got shorter */
+FORCEINLINE
+VOID
+RtlpHeapFeLowMark(PHEAP_FE_SLOT Slot, ULONG Class)
+{
+    if (Slot->Counts[Class] < Slot->Low[Class])
+        Slot->Low[Class] = (UCHAR)Slot->Counts[Class];
+}
 
 /* The activation counters of the heaps: HEAP_FE_ACT_STRIDE bytes each, in pages that are never given back
    (HEAP_FE_ACT_PER_PAGE slots, the first one of a page is its header). A slot is taken and released with
@@ -371,6 +405,7 @@ RtlpHeapFeShare(PHEAP_FE Fe,
         Shared->Bytes += Bytes;
         Slot->Bytes -= Bytes;
         Slot->Counts[Class] = (Slot->Counts[Class] > Count) ? Slot->Counts[Class] - Count : 0;
+        RtlpHeapFeLowMark(Slot, Class);
     }
 
     _ReadWriteBarrier();
@@ -397,6 +432,11 @@ RtlpHeapFeTake(PHEAP_FE Fe,
     {
         Shared->Head = RtlpHeapFeNext(Fe, Entry);
         Shared->Bytes -= (ULONG)Entry->Size << HEAP_ENTRY_SHIFT;
+        if (Shared->Bytes < Shared->LowBytes)
+            Shared->LowBytes = Shared->Bytes;
+        Shared->Taken = 1;
+        if (Slot)
+            HEAP_FE_SET_TAKEN(Slot, Class);
 
         for (Count = 1; Slot && Count < HEAP_FE_BATCH && (More = Shared->Head) != NULL; Count++)
         {
@@ -404,6 +444,8 @@ RtlpHeapFeTake(PHEAP_FE Fe,
 
             Shared->Head = RtlpHeapFeNext(Fe, More);
             Shared->Bytes -= Bytes;
+            if (Shared->Bytes < Shared->LowBytes)
+                Shared->LowBytes = Shared->Bytes;
             *(PULONG_PTR)(More + 1) = (ULONG_PTR)Slot->Heads[Class] ^ Fe->Cookie;
             Slot->Heads[Class] = More;
             Slot->Counts[Class]++;
@@ -453,6 +495,8 @@ RtlpHeapFeAlloc(PHEAP Heap,
             Slot->Bytes -= (ULONG)Entry->Size << HEAP_ENTRY_SHIFT;
             if (Slot->Counts[Class])
                 Slot->Counts[Class]--;
+            RtlpHeapFeLowMark(Slot, Class);
+            HEAP_FE_SET_TAKEN(Slot, Class);
         }
 
         _ReadWriteBarrier();
@@ -773,6 +817,8 @@ RtlpHeapFeRefill(PHEAP Heap,
         Slot->Counts[Class]++;
         Slot->Bytes += (ULONG)Entry->Size << HEAP_ENTRY_SHIFT;
         Slot->FreeCached++;
+        /* asked for: a refill is not a list nobody comes to */
+        HEAP_FE_SET_TAKEN(Slot, Class);
     }
 
     _ReadWriteBarrier();
@@ -812,6 +858,7 @@ RtlpHeapFeFlush(PHEAP Heap)
             Entry = Slot->Heads[Class];
             Slot->Heads[Class] = NULL;
             Slot->Counts[Class] = 0;
+            Slot->Low[Class] = 0;
             while (Entry)
             {
                 Next = RtlpHeapFeNext(Fe, Entry);
@@ -841,6 +888,7 @@ RtlpHeapFeFlush(PHEAP Heap)
         Entry = Shared->Head;
         Shared->Head = NULL;
         Shared->Bytes = 0;
+        Shared->LowBytes = 0;
 
         _ReadWriteBarrier();
         Shared->Lock = 0;
@@ -853,6 +901,204 @@ RtlpHeapFeFlush(PHEAP Heap)
             Count++;
             Entry = Next;
         }
+    }
+
+    return Count;
+}
+
+/* Gives back a list of parked blocks (taken off its slot or shared list by the caller). The heap lock is held. */
+static
+ULONG
+RtlpHeapFeRelease(PHEAP Heap,
+                  PHEAP_FE Fe,
+                  PHEAP_ENTRY Entry)
+{
+    PHEAP_ENTRY Next;
+    ULONG Count = 0;
+
+    while (Entry)
+    {
+        Next = RtlpHeapFeNext(Fe, Entry);
+        Entry->SmallTagIndex = 0;
+        RtlpFreeBlockLocked(Heap, Entry, FALSE);
+        Count++;
+        Entry = Next;
+    }
+
+    return Count;
+}
+
+/* The sweep: gives back the parked blocks nobody reached since the previous sweep, and starts the next period.
+   Pops and pushes are at the head of a list, so a list that never got shorter than Low blocks during the period
+   did not touch its last Low blocks: those are given back (all of a class nobody takes from any more: the sizes of
+   a phase the program left behind, what a thread that is gone freed, what a slot no thread allocates from holds).
+   They are what keeps the heap from coalescing and makes it grow; what the threads go through stays. The heap lock
+   is held. No front end lock is waited for: a slot or list in use is in use, and is looked at the next time. */
+ULONG
+NTAPI
+RtlpHeapFeSweep(PHEAP Heap,
+                BOOLEAN Timed)
+{
+    PHEAP_FE Fe = Heap->FrontEndHeap;
+    PHEAP_FE_SLOT Slot;
+    PHEAP_ENTRY Entry;
+    ULONG Slots, Class, Count = 0, Requests = 0;
+    BOOLEAN Long, Short;
+
+    if (Heap->FrontEndHeapType != HEAP_FRONTEND_CACHE || Fe->Disabled)
+        return 0;
+
+    for (Slots = 0; Slots < HEAP_FE_SLOTS; Slots++)
+    {
+        ULONG i, Bytes = 0, Now;
+        PHEAP_ENTRY Cold = NULL;
+
+        Slot = &Fe->Slots[Slots];
+        Now = Slot->AllocHit + Slot->AllocMiss;
+        Requests += Now;
+        if (!Slot->Bytes)
+            continue;
+
+        /* At growth, what a period is depends on the slot's own requests. After HEAP_FE_SWEEP_SHORT of them, a
+           list none of them took a block from is not in use: it goes back whole. Only after HEAP_FE_SWEEP_LONG are
+           the lists in use trimmed to their low-water mark: over fewer requests, a list that goes up and down with
+           its thread's frees and requests has not been down yet, and a heap that keeps growing a little while its
+           threads work would lose what they are about to take. A slot no request comes to (its threads are gone)
+           waits for the timed sweep, which ends both periods of every slot. */
+        Long = Timed || (Now - Slot->MarkLong >= HEAP_FE_SWEEP_LONG);
+        Short = Long || (Now - Slot->MarkShort >= HEAP_FE_SWEEP_SHORT);
+        if (!Short)
+            continue;
+
+        if (Slot->Lock || InterlockedCompareExchange(&Slot->Lock, 1, 0))
+            continue;
+        Slot->MarkShort = Now;
+        if (Long)
+            Slot->MarkLong = Now;
+
+        for (Class = 0; Class < HEAP_FE_CLASSES; Class++)
+        {
+            ULONG Keep, Low = Slot->Low[Class], Length = Slot->Counts[Class];
+            PHEAP_ENTRY Last = NULL;
+
+            if (!Slot->Heads[Class])
+            {
+                Slot->Low[Class] = 0;
+                continue;
+            }
+
+            {
+                ULONG Release;
+
+                if (!Long)
+                {
+                    /* short period: a list nobody took a block from goes back whole */
+                    if (HEAP_FE_TAKEN(Slot, Class))
+                        continue;
+                    Release = Length;
+                }
+                else
+                {
+                    Release = Low;
+                    if (!Release)
+                    {
+                        Slot->Low[Class] = (UCHAR)min(Length, 0xFF);
+                        continue;
+                    }
+                }
+                Keep = Length - min(Length, Release);
+            }
+
+            /* Chain what goes in front of what is given back; the blocks are freed after the slot is released */
+            Entry = Slot->Heads[Class];
+            for (i = 0; i < Keep && Entry; i++)
+            {
+                Last = Entry;
+                Entry = RtlpHeapFeNext(Fe, Entry);
+            }
+            Keep = i;
+            if (Last)
+                *(PULONG_PTR)(Last + 1) = (ULONG_PTR)NULL ^ Fe->Cookie;
+            else
+                Slot->Heads[Class] = NULL;
+            Slot->Counts[Class] = (USHORT)Keep;
+            Slot->Low[Class] = (UCHAR)min(Keep, 0xFF);
+
+            while (Entry)
+            {
+                PHEAP_ENTRY Next = RtlpHeapFeNext(Fe, Entry);
+
+                Bytes += (ULONG)Entry->Size << HEAP_ENTRY_SHIFT;
+                *(PULONG_PTR)(Entry + 1) = (ULONG_PTR)Cold ^ Fe->Cookie;
+                Cold = Entry;
+                Entry = Next;
+            }
+        }
+
+        Slot->Bytes = (Slot->Bytes > Bytes) ? Slot->Bytes - Bytes : 0;
+        for (i = 0; i < RTL_NUMBER_OF(Slot->Taken); i++)
+            Slot->Taken[i] = 0;
+
+        _ReadWriteBarrier();
+        Slot->Lock = 0;
+
+        Count += RtlpHeapFeRelease(Heap, Fe, Cold);
+    }
+
+    /* The shared lists have no thread of their own: at growth their periods end after so many requests to all
+       the slots together */
+    Long = Timed || (Requests - Fe->SharedLong >= HEAP_FE_SWEEP_LONG);
+    Short = Long || (Requests - Fe->SharedShort >= HEAP_FE_SWEEP_SHORT);
+    if (!Short)
+        return Count;
+    Fe->SharedShort = Requests;
+    if (Long)
+        Fe->SharedLong = Requests;
+
+    for (Class = 0; Class < HEAP_FE_CLASSES; Class++)
+    {
+        PHEAP_FE_SHARED Shared = &Fe->Shared[Class];
+
+        if (!Shared->Head)
+            continue;
+
+        if (Shared->Lock || InterlockedCompareExchange(&Shared->Lock, 1, 0))
+            continue;
+
+        /* The same for a shared list (by bytes): all of one no slot took from, of one in use the end it never got
+           down to during the long period */
+        Entry = NULL;
+        if (!Shared->Taken || (Long && Shared->LowBytes >= Shared->Bytes))
+        {
+            Entry = Shared->Head;
+            Shared->Head = NULL;
+            Shared->Bytes = 0;
+        }
+        else if (Long && Shared->LowBytes)
+        {
+            PHEAP_ENTRY Last = NULL;
+            ULONG Ahead = 0;
+
+            /* Ahead: the bytes of the blocks before Entry; the rest from Entry on is at most LowBytes */
+            for (Entry = Shared->Head; Entry && Shared->Bytes - Ahead > Shared->LowBytes; Entry = RtlpHeapFeNext(Fe, Entry))
+            {
+                Ahead += (ULONG)Entry->Size << HEAP_ENTRY_SHIFT;
+                Last = Entry;
+            }
+            if (Last)
+                *(PULONG_PTR)(Last + 1) = (ULONG_PTR)NULL ^ Fe->Cookie;
+            else
+                Shared->Head = NULL;
+            Shared->Bytes = Ahead;
+        }
+        if (Long || !Shared->Bytes)
+            Shared->LowBytes = Shared->Bytes;
+        Shared->Taken = 0;
+
+        _ReadWriteBarrier();
+        Shared->Lock = 0;
+
+        Count += RtlpHeapFeRelease(Heap, Fe, Entry);
     }
 
     return Count;
@@ -887,6 +1133,33 @@ RtlpHeapFeLock(PHEAP Heap)
     /* The heap lock is held: stop the cache from taking part, then give it back */
     InterlockedIncrement(&Fe->Disabled);
     return RtlpHeapFeFlush(Heap);
+}
+
+/* The heap must grow to serve a request of Size bytes (the heap lock is held): sweeps first, and when that gave
+   blocks back, serves the request again from the heap (*Block, TRUE returned when it got one). Blocks parked and not touched since
+   the last sweep may be what the heap misses (they keep their free neighbours from coalescing). The request served
+   again does not sweep again (the period just started): it grows the heap if it must. */
+BOOLEAN
+NTAPI
+RtlpHeapFeSweepToGrow(PHEAP Heap,
+                      ULONG Flags,
+                      SIZE_T Size,
+                      PVOID *Block)
+{
+    PHEAP_FE Fe = Heap->FrontEndHeap;
+
+    if (Heap->FrontEndHeapType != HEAP_FRONTEND_CACHE || Fe->Disabled || Fe->Retry)
+        return FALSE;
+
+    if (!RtlpHeapFeParked(Heap) || !RtlpHeapFeSweep(Heap, FALSE))
+        return FALSE;
+
+    /* Without HEAP_GENERATE_EXCEPTIONS: a request that still fails goes on to the caller's way of growing the heap,
+       which raises the exception when that fails too */
+    Fe->Retry = TRUE;
+    *Block = RtlAllocateHeap(Heap, (Flags & ~HEAP_GENERATE_EXCEPTIONS) | HEAP_NO_SERIALIZE, Size);
+    Fe->Retry = FALSE;
+    return *Block != NULL;
 }
 
 VOID
