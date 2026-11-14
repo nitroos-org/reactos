@@ -664,6 +664,279 @@ Done:
     RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
 }
 
+/* a plain RegSetKeySecurity: what a legacy writer does, no auto-inheritance */
+static BOOL RawSetSddl(HKEY Parent, PCWSTR Name, PCWSTR Sddl)
+{
+    PSECURITY_DESCRIPTOR Sd = NULL;
+    HKEY Key;
+    DWORD Error;
+
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(Sddl, SDDL_REVISION_1, &Sd, NULL))
+    {
+        skip("%ls: error %lu\n", Sddl, GetLastError());
+        return FALSE;
+    }
+    Error = RegOpenKeyExW(Parent, Name, 0, WRITE_DAC, &Key);
+    ok_long(Error, ERROR_SUCCESS);
+    if (!Error)
+    {
+        Error = RegSetKeySecurity(Key, DACL_SECURITY_INFORMATION, Sd);
+        ok_long(Error, ERROR_SUCCESS);
+        RegCloseKey(Key);
+    }
+    LocalFree(Sd);
+    return Error == ERROR_SUCCESS;
+}
+
+/* the stored descriptor, as it is */
+static DWORD RawGet(HKEY Parent, PCWSTR Name, PVOID Buffer, DWORD Size)
+{
+    HKEY Key;
+    DWORD Length = Size;
+
+    if (RegOpenKeyExW(Parent, Name, 0, READ_CONTROL, &Key) != ERROR_SUCCESS)
+    {
+        ok(0, "cannot open %ls\n", Name);
+        return 0;
+    }
+    if (RegGetKeySecurity(Key, DACL_SECURITY_INFORMATION, Buffer, &Length) != ERROR_SUCCESS)
+        Length = 0;
+    RegCloseKey(Key);
+    return Length;
+}
+
+/* what the permission dialog does to the parent: add Everyone read (inherited by subkeys), by name */
+static void AddEveryoneRead(void)
+{
+    static const WCHAR NamedPath[] = L"CURRENT_USER\\Software\\ReactOS-apitest-SetSecurityInfoKeyInherit";
+    SID_IDENTIFIER_AUTHORITY WorldAuthority = {SECURITY_WORLD_SID_AUTHORITY};
+    PSECURITY_DESCRIPTOR Sd = NULL;
+    PACL Dacl = NULL, NewDacl = NULL;
+    EXPLICIT_ACCESSW Access;
+    PSID World = NULL;
+    DWORD Error;
+
+    AllocateAndInitializeSid(&WorldAuthority, 1, SECURITY_WORLD_RID, 0, 0, 0, 0, 0, 0, 0, &World);
+    Error = GetNamedSecurityInfoW((LPWSTR)NamedPath, SE_REGISTRY_KEY, DACL_SECURITY_INFORMATION, NULL, NULL, &Dacl, NULL, &Sd);
+    ok_long(Error, ERROR_SUCCESS);
+    if (!Error)
+    {
+        ZeroMemory(&Access, sizeof(Access));
+        Access.grfAccessPermissions = KEY_READ;
+        Access.grfAccessMode = GRANT_ACCESS;
+        Access.grfInheritance = SUB_CONTAINERS_AND_OBJECTS_INHERIT;
+        Access.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+        Access.Trustee.ptstrName = World;
+        Error = SetEntriesInAclW(1, &Access, Dacl, &NewDacl);
+        ok_long(Error, ERROR_SUCCESS);
+        if (!Error)
+        {
+            Error = SetNamedSecurityInfoW((LPWSTR)NamedPath, SE_REGISTRY_KEY, DACL_SECURITY_INFORMATION, NULL, NULL, NewDacl, NULL);
+            ok_long(Error, ERROR_SUCCESS);
+        }
+    }
+    if (NewDacl) LocalFree(NewDacl);
+    if (Sd) LocalFree(Sd);
+    if (World) FreeSid(World);
+}
+
+/* the position of the first ACE of the type for the SID in the DACL, -1 if there is none */
+static LONG FindAce(const KEY_DACL *Dacl, UCHAR Type, PSID Sid)
+{
+    ULONG i;
+
+    for (i = 0; i < Dacl->Count; i++)
+    {
+        if (Dacl->Aces[i].Type == Type && EqualSid(Dacl->Aces[i].Sid, Sid))
+            return (LONG)i;
+    }
+    return -1;
+}
+
+/*
+ * A subkey is only brought up to date if its DACL really is auto-inherited, or ends in exactly the ACEs
+ * the parent passed on, after all its explicit ACEs. Anything else is the owner's own DACL and a change of
+ * the parent must not touch it, and no round trip may put an allow ACE ahead of a deny ACE:
+ *  W1  explicit deny/allow order of a legacy writer, parent changed: the stored descriptor stays as it was
+ *  W2  the same key, read and written back by itself: the deny still comes before the allow
+ *  W3  an explicit empty DACL, parent changed: it stays empty
+ *      explicit ACE before the inherited tail: still updated, the explicit ACE stays first
+ *      a DACL that is not valid is refused, not read past its end
+ * W1-W3 are the shapes an earlier version got wrong (NETWORK got KEY_WRITE; an empty DACL got
+ * Everyone read).
+ */
+static void TestNoWidening(void)
+{
+    static const WCHAR NamedChild2[] = L"CURRENT_USER\\Software\\ReactOS-apitest-SetSecurityInfoKeyInherit\\c2";
+    static const WCHAR ParentSddl[] = L"D:(D;CI;KW;;;NU)(A;CI;KA;;;SY)(A;CI;KA;;;BA)(A;CIIO;KA;;;CO)";
+    static const WCHAR Legacy[] = L"D:(D;CI;KW;;;NU)(A;CI;KA;;;SY)(A;CI;KA;;;BA)(A;;KA;;;NU)";
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    SID_IDENTIFIER_AUTHORITY WorldAuthority = {SECURITY_WORLD_SID_AUTHORITY};
+    SECURITY_ATTRIBUTES Attributes = {sizeof(Attributes), NULL, FALSE};
+    BYTE Before[2048], After[2048];
+    KEY_DACL Dacl;
+    PSECURITY_DESCRIPTOR Sd = NULL;
+    PACL Old = NULL;
+    PSID Network = NULL, World = NULL, Users = NULL;
+    HKEY Key = NULL, Child = NULL;
+    DWORD Error, BeforeSize, AfterSize;
+    LONG Deny, Allow;
+
+    AllocateAndInitializeSid(&NtAuthority, 1, SECURITY_NETWORK_RID, 0, 0, 0, 0, 0, 0, 0, &Network);
+    AllocateAndInitializeSid(&WorldAuthority, 1, SECURITY_WORLD_RID, 0, 0, 0, 0, 0, 0, 0, &World);
+    AllocateAndInitializeSid(&NtAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_USERS, 0, 0, 0, 0, 0, 0, &Users);
+    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(ParentSddl, SDDL_REVISION_1, &Attributes.lpSecurityDescriptor, NULL))
+    {
+        skip("cannot make the parent descriptor: %lu\n", GetLastError());
+        goto Done;
+    }
+    Error = RegCreateKeyExW(HKEY_CURRENT_USER, ScratchPath, 0, NULL, 0, KEY_ALL_ACCESS, &Attributes, &Key, NULL);
+    ok_long(Error, ERROR_SUCCESS);
+    if (Error)
+        goto Done;
+
+    if (!MakeKey(Key, L"c1", 0, &Child))   /* W1 */
+        goto Done;
+    RegCloseKey(Child);
+    if (!MakeKey(Key, L"c2", 0, &Child))   /* W2 */
+        goto Done;
+    RegCloseKey(Child);
+    if (!MakeKey(Key, L"c3", 0, &Child))   /* W3 */
+        goto Done;
+    RegCloseKey(Child);
+    if (!MakeKey(Key, L"c4", 0, &Child))   /* explicit ACE first, inherited tail */
+        goto Done;
+    RegCloseKey(Child);
+    Child = NULL;
+
+    if (!RawSetSddl(Key, L"c1", Legacy) || !RawSetSddl(Key, L"c2", Legacy) || !RawSetSddl(Key, L"c3", L"D:"))
+        goto Done;
+    BeforeSize = RawGet(Key, L"c1", Before, sizeof(Before));
+    ok(BeforeSize != 0, "cannot read c1\n");
+
+    /* W2: a round trip of the key alone */
+    Error = GetNamedSecurityInfoW((LPWSTR)NamedChild2, SE_REGISTRY_KEY, DACL_SECURITY_INFORMATION, NULL, NULL, &Old, NULL, &Sd);
+    ok_long(Error, ERROR_SUCCESS);
+    if (!Error)
+    {
+        Error = SetNamedSecurityInfoW((LPWSTR)NamedChild2, SE_REGISTRY_KEY, DACL_SECURITY_INFORMATION, NULL, NULL, Old, NULL);
+        ok_long(Error, ERROR_SUCCESS);
+        LocalFree(Sd);
+    }
+    ok(OpenDacl(Key, L"c2", &Dacl), "cannot read c2\n");
+    Deny = FindAce(&Dacl, ACCESS_DENIED_ACE_TYPE, Network);
+    Allow = FindAce(&Dacl, ACCESS_ALLOWED_ACE_TYPE, Network);
+    ok(Deny >= 0 && Dacl.Aces[Deny].Mask == KEY_WRITE, "W2: the deny ACE for NETWORK is gone\n");
+    ok(Allow < 0 || Deny < Allow, "W2: the allow ACE for NETWORK (%ld) is ahead of the deny ACE (%ld)\n", Allow, Deny);
+    FreeDacl(&Dacl);
+
+    /* W1, W3 and the explicit-first key: the parent changes */
+    if (!RawSetSddl(Key, L"c4", L"D:(A;;KR;;;NU)(D;CI;KW;;;NU)(A;CI;KA;;;SY)(A;CI;KA;;;BA)(A;CIID;KA;;;BA)"))
+        goto Done;
+    AddEveryoneRead();
+
+    AfterSize = RawGet(Key, L"c1", After, sizeof(After));
+    ok(AfterSize == BeforeSize && !memcmp(Before, After, BeforeSize), "W1: the descriptor of c1 changed (%lu, %lu bytes)\n", BeforeSize, AfterSize);
+    ok(OpenDacl(Key, L"c1", &Dacl), "cannot read c1\n");
+    Deny = FindAce(&Dacl, ACCESS_DENIED_ACE_TYPE, Network);
+    Allow = FindAce(&Dacl, ACCESS_ALLOWED_ACE_TYPE, Network);
+    ok(Deny >= 0 && Allow > Deny, "W1: deny at %ld, allow at %ld\n", Deny, Allow);
+    ok(FindAce(&Dacl, ACCESS_ALLOWED_ACE_TYPE, World) < 0, "W1: c1 got an ACE for Everyone\n");
+    FreeDacl(&Dacl);
+
+    ok(OpenDacl(Key, L"c3", &Dacl), "cannot read c3\n");
+    ok(Dacl.Count == 0, "W3: the empty DACL of c3 has %lu ACEs\n", Dacl.Count);
+    ok_hex(Dacl.Control & SE_DACL_AUTO_INHERITED, 0);
+    FreeDacl(&Dacl);
+
+    /* the key is not auto-inherited and does not end in what the parent passed on either (its last ACE is not the parent's) */
+    ok(OpenDacl(Key, L"c4", &Dacl), "cannot read c4\n");
+    ok(FindAce(&Dacl, ACCESS_ALLOWED_ACE_TYPE, World) < 0, "c4 (not a tail of the parent's ACEs) got an ACE for Everyone\n");
+    FreeDacl(&Dacl);
+
+    /* a malformed ACL (more ACEs than its size holds) is refused, and read nowhere past its end */
+    {
+        union { ACL Header; BYTE Bytes[64]; } Bad;
+
+        ZeroMemory(&Bad, sizeof(Bad));
+        Bad.Header.AclRevision = ACL_REVISION;
+        Bad.Header.AclSize = sizeof(ACL);
+        Bad.Header.AceCount = 5;
+        Error = SetSecurityInfo(Key, SE_REGISTRY_KEY, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                                NULL, NULL, &Bad.Header, NULL);
+        ok(Error != ERROR_SUCCESS, "a malformed protected DACL was accepted\n");
+        Error = SetSecurityInfo(Key, SE_REGISTRY_KEY, DACL_SECURITY_INFORMATION, NULL, NULL, &Bad.Header, NULL);
+        ok(Error != ERROR_SUCCESS, "a malformed DACL was accepted\n");
+    }
+
+Done:
+    if (Attributes.lpSecurityDescriptor) LocalFree(Attributes.lpSecurityDescriptor);
+    if (Key) RegCloseKey(Key);
+    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    if (Network) FreeSid(Network);
+    if (World) FreeSid(World);
+    if (Users) FreeSid(Users);
+}
+
+/*
+ * An explicit ACE before an inherited tail: the key is updated, the explicit ACE stays first.
+ * The parent here is a plain key whose DACL was set before any subkey existed.
+ */
+static void TestExplicitBeforeTail(void)
+{
+    static const WCHAR ParentSddl[] = L"D:(A;CI;KR;;;SY)(A;CI;KA;;;BA)";
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    SID_IDENTIFIER_AUTHORITY WorldAuthority = {SECURITY_WORLD_SID_AUTHORITY};
+    SECURITY_ATTRIBUTES Attributes = {sizeof(Attributes), NULL, FALSE};
+    KEY_DACL Dacl;
+    PSID Network = NULL, World = NULL;
+    HKEY Key = NULL, Child = NULL;
+    DWORD Error;
+
+    AllocateAndInitializeSid(&NtAuthority, 1, SECURITY_NETWORK_RID, 0, 0, 0, 0, 0, 0, 0, &Network);
+    AllocateAndInitializeSid(&WorldAuthority, 1, SECURITY_WORLD_RID, 0, 0, 0, 0, 0, 0, 0, &World);
+    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(ParentSddl, SDDL_REVISION_1, &Attributes.lpSecurityDescriptor, NULL))
+    {
+        skip("cannot make the parent descriptor: %lu\n", GetLastError());
+        goto Done;
+    }
+    Error = RegCreateKeyExW(HKEY_CURRENT_USER, ScratchPath, 0, NULL, 0, KEY_ALL_ACCESS, &Attributes, &Key, NULL);
+    ok_long(Error, ERROR_SUCCESS);
+    if (Error || !MakeKey(Key, L"c", 0, &Child))
+        goto Done;
+    RegCloseKey(Child);
+    Child = NULL;
+
+    /* the key's own ACE first, then exactly the ACEs the parent passes on (a legacy writer's DACL) */
+    if (!RawSetSddl(Key, L"c", L"D:(A;;KR;;;NU)(A;CI;KR;;;SY)(A;CI;KA;;;BA)"))
+        goto Done;
+    /* reported: the tail inherited, the first ACE explicit */
+    ok(OpenDacl(Key, L"c", &Dacl), "cannot read c\n");
+    ok(Dacl.Count == 3, "c has %lu ACEs\n", Dacl.Count);
+    if (Dacl.Count == 3)
+    {
+        ok(!(Dacl.Aces[0].Flags & INHERITED_ACE), "the explicit ACE is reported inherited\n");
+        ok((Dacl.Aces[1].Flags & INHERITED_ACE) && (Dacl.Aces[2].Flags & INHERITED_ACE), "the tail is not reported inherited\n");
+    }
+    FreeDacl(&Dacl);
+
+    AddEveryoneRead();
+    ok(OpenDacl(Key, L"c", &Dacl), "cannot read c\n");
+    ok(FindAce(&Dacl, ACCESS_ALLOWED_ACE_TYPE, World) >= 0, "c did not get the new ACE\n");
+    ok(Dacl.Count && Dacl.Aces[0].Mask == KEY_READ && EqualSid(Dacl.Aces[0].Sid, Network) && !(Dacl.Aces[0].Flags & INHERITED_ACE),
+       "the explicit ACE is not first\n");
+    FreeDacl(&Dacl);
+
+Done:
+    if (Attributes.lpSecurityDescriptor) LocalFree(Attributes.lpSecurityDescriptor);
+    if (Key) RegCloseKey(Key);
+    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    if (Network) FreeSid(Network);
+    if (World) FreeSid(World);
+}
+
 START_TEST(SetSecurityInfoKeyInherit)
 {
     pRegDeleteTreeW = (PVOID)GetProcAddress(GetModuleHandleW(L"advapi32.dll"), "RegDeleteTreeW");
@@ -677,6 +950,8 @@ START_TEST(SetSecurityInfoKeyInherit)
     TestExtraCases();
     TestDuplicateParent();
     TestProtectKeepsAces();
+    TestNoWidening();
+    TestExplicitBeforeTail();
 
     KEY_DACL Initial, P1, C1a, C1b, P2, C2, G;
     HKEY Key = NULL, Child1 = NULL, Child2 = NULL, Grand = NULL;
