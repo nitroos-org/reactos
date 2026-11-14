@@ -40,6 +40,12 @@ VIS_ComputeVisibleRegionEx(
       return NULL;
    }
 
+   /* A layered window that was given no attributes and no content is not drawn (layered.c) */
+   if (UserIsLayeredUnset(Wnd))
+   {
+      return NULL;
+   }
+
    VisRgn = NULL;
 
    if (ClientArea)
@@ -77,7 +83,7 @@ VIS_ComputeVisibleRegionEx(
          return NULL;
       }
 
-      if (!(CurrentWindow->style & WS_VISIBLE))
+      if (!(CurrentWindow->style & WS_VISIBLE) || UserIsLayeredUnset(CurrentWindow))
       {
          if (VisRgn)
              REGION_Delete(VisRgn);
@@ -101,7 +107,8 @@ VIS_ComputeVisibleRegionEx(
                  CurrentSibling != PreviousWindow )
          {
             if ((CurrentSibling->style & WS_VISIBLE) &&
-                !(CurrentSibling->ExStyle & WS_EX_TRANSPARENT))
+                !(CurrentSibling->ExStyle & WS_EX_TRANSPARENT) &&
+                !UserIsLayeredUnset(CurrentSibling))
             {
                ClipRgn = IntSysCreateRectpRgnIndirect(&CurrentSibling->rcWindow);
                if (!ClipRgn)
@@ -138,7 +145,8 @@ VIS_ComputeVisibleRegionEx(
       while (CurrentWindow)
       {
          if ((CurrentWindow->style & WS_VISIBLE) &&
-             !(CurrentWindow->ExStyle & WS_EX_TRANSPARENT))
+             !(CurrentWindow->ExStyle & WS_EX_TRANSPARENT) &&
+             !UserIsLayeredUnset(CurrentWindow))
          {
             ClipRgn = IntSysCreateRectpRgnIndirect(&CurrentWindow->rcWindow);
             if (!ClipRgn)

@@ -186,9 +186,7 @@ static void Test_LayeredUnset(void)
     hWnd = CreateTop(L"LcBlue", WS_EX_LAYERED, TRUE);
     Pump();
     c = ScreenPixel(200, 175);
-    todo_ros_if(g_Level < 2)
     ok(Near(c, RGB(200, 0, 0)), "layered window not set: 0x%06lx on the screen, expected what is below (red)\n", c);
-    todo_ros_if(g_Level < 2)
     ok(g_cPaint == 0, "layered window not set: %ld WM_PAINT, expected none\n", g_cPaint);
 
     /* Set: it paints (one WM_PAINT on Windows) and shows */
@@ -200,6 +198,83 @@ static void Test_LayeredUnset(void)
 
     DestroyWindow(hWnd);
     DestroyWindow(hBack);
+}
+
+static HBITMAP MakeDib(HDC *phdc, DWORD Colour, int cx, int cy, DWORD **pBits);
+
+/*
+ * MSDN "Layered Windows": a layered window is not visible until SetLayeredWindowAttributes or UpdateLayeredWindow has
+ * been called for it. A WS_EX_LAYERED | WS_EX_TOOLWINDOW popup with a black class brush over a red window shows no
+ * pixel of its own (all levels); WS_EX_LAYERED removed makes it a normal window, set again hides it until the next call.
+ */
+static void Test_LayeredUnsetBlack(void)
+{
+    BLENDFUNCTION Blend = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+    POINT Pos = { 100, 100 }, Src = { 0, 0 };
+    SIZE Size = { 200, 150 };
+    HWND hBack = CreateBack(), hWnd, hHit;
+    POINT pt = { 200, 175 };
+    HDC hdc;
+    HBITMAP hbm = MakeDib(&hdc, 0xFF00C800, 200, 150, NULL);   /* opaque green */
+    COLORREF c;
+    LONG_PTR ExStyle;
+
+    Pump();
+    hWnd = CreateTop(L"LcBlack", WS_EX_LAYERED, TRUE);
+    UpdateWindow(hWnd);
+    Pump();
+    c = ScreenPixel(200, 175);
+    ok(Near(c, RGB(200, 0, 0)), "black layered window, nothing called: 0x%06lx, expected what is below (red)\n", c);
+    c = ScreenPixel(110, 110);
+    ok(Near(c, RGB(200, 0, 0)), "black layered window, nothing called (corner): 0x%06lx, expected red\n", c);
+    hHit = WindowFromPoint(pt);
+    ok(hHit == hWnd, "WindowFromPoint over a layered window that is not set: %p, expected %p\n", hHit, hWnd);
+
+    /* What is below it can still be painted */
+    BackToBlack(hBack);
+    Pump();
+    c = ScreenPixel(60, 60);
+    ok(Near(c, RGB(0, 0, 0)), "the window below: 0x%06lx, expected black\n", c);
+    RestoreBack(hBack);
+    InvalidateRect(hBack, NULL, TRUE);
+    UpdateWindow(hBack);
+    Pump();
+    c = ScreenPixel(200, 175);
+    ok(Near(c, RGB(200, 0, 0)), "the window below painted again: 0x%06lx, expected red (not hidden by the layered window)\n", c);
+
+    /* Removed: a normal window */
+    ExStyle = GetWindowLongPtrW(hWnd, GWL_EXSTYLE);
+    SetWindowLongPtrW(hWnd, GWL_EXSTYLE, ExStyle & ~WS_EX_LAYERED);
+    Pump();
+    c = ScreenPixel(200, 175);
+    ok(Near(c, RGB(0, 0, 0)), "WS_EX_LAYERED removed: 0x%06lx, expected the black brush\n", c);
+
+    /* Set again: not drawn until called again */
+    SetWindowLongPtrW(hWnd, GWL_EXSTYLE, ExStyle);
+    Pump();
+    c = ScreenPixel(200, 175);
+    ok(Near(c, RGB(200, 0, 0)), "WS_EX_LAYERED set again: 0x%06lx, expected red\n", c);
+
+    ok(SetLayeredWindowAttributes(hWnd, 0, 255, LWA_ALPHA), "SetLayeredWindowAttributes failed: %lu\n", GetLastError());
+    Pump();
+    c = ScreenPixel(200, 175);
+    ok(Near(c, RGB(0, 0, 0)), "after SetLayeredWindowAttributes: 0x%06lx, expected the black brush\n", c);
+
+    /* Removed and set again, now UpdateLayeredWindow gives the content */
+    SetWindowLongPtrW(hWnd, GWL_EXSTYLE, ExStyle & ~WS_EX_LAYERED);
+    SetWindowLongPtrW(hWnd, GWL_EXSTYLE, ExStyle);
+    Pump();
+    c = ScreenPixel(200, 175);
+    ok(Near(c, RGB(200, 0, 0)), "layered again, history ended: 0x%06lx, expected red\n", c);
+    ok(UpdateLayeredWindow(hWnd, NULL, &Pos, &Size, hdc, &Src, 0, &Blend, ULW_ALPHA), "UpdateLayeredWindow failed: %lu\n", GetLastError());
+    Pump();
+    c = ScreenPixel(200, 175);
+    ok(Near(c, RGB(0, 200, 0)), "after UpdateLayeredWindow: 0x%06lx, expected the content (green)\n", c);
+
+    DestroyWindow(hWnd);
+    DestroyWindow(hBack);
+    DeleteDC(hdc);
+    DeleteObject(hbm);
 }
 
 /* Windows 10 (oracle W4): SetLayeredWindowAttributes alpha and colour key apply to what the window paints */
@@ -290,8 +365,6 @@ static void Test_UlwFollows(void)
     ok(UpdateLayeredWindow(hWnd, NULL, &Pos, &Size, hdc, &Src, 0, &Blend, ULW_ALPHA), "UpdateLayeredWindow failed: %lu\n", GetLastError());
     Pump();
     c = ScreenPixel(200, 175);
-    /* Levels 0 and 1 paint the window before (no W3) and blend over that */
-    todo_ros_if(g_Level < 2)
     ok(Near(c, RGB(100, 0, 128)), "50%% blue over red: 0x%06lx, expected (100,0,128)\n", c);
 
     BackToBlack(hBack);
@@ -412,8 +485,6 @@ static void Test_PrintLayered(void)
     ok(UpdateLayeredWindow(hWnd, NULL, &Pos, &Size, hdcSrc, &Src, 0, &Blend, ULW_ALPHA), "UpdateLayeredWindow failed: %lu\n", GetLastError());
     Pump();
     c = ScreenPixel(200, 175);
-    /* Levels 0 and 1 send the shown window a WM_PAINT (no W3), which paints over the content */
-    todo_ros_if(g_Level < 2)
     ok(Near(c, RGB(0, 200, 0)), "opaque green ULW window: 0x%06lx\n", c);
     if (g_Level >= 2)
     {
@@ -693,7 +764,7 @@ static void Test_UlwBudget(void)
     DeleteObject(hbmBig);
 }
 
-/* Level 2: WS_EX_LAYERED removed and set again ends the UpdateLayeredWindow history: a layered window not set shows nothing */
+/* WS_EX_LAYERED removed and set again ends the UpdateLayeredWindow history: a layered window not set shows nothing */
 static void Test_UlwHistoryReset(void)
 {
     HWND hBack, hWnd;
@@ -701,13 +772,6 @@ static void Test_UlwHistoryReset(void)
     HBITMAP hbm = MakeDib(&hdc, 0xFF00C800, 200, 150, NULL);
     COLORREF c;
     LONG_PTR ExStyle;
-
-    if (g_Level < 2)
-    {
-        DeleteDC(hdc);
-        DeleteObject(hbm);
-        return;
-    }
 
     hBack = CreateBack();
     hWnd = CreateTop(L"LcBlue", WS_EX_LAYERED, TRUE);
@@ -774,6 +838,7 @@ START_TEST(LayeredCompose)
     RegisterColour(L"LcRed", RGB(200, 0, 0));
     RegisterColour(L"LcBlue", RGB(0, 0, 200));
     RegisterColour(L"LcGreen", RGB(0, 200, 0));
+    RegisterColour(L"LcBlack", RGB(0, 0, 0));
     /* No brush: paints nothing (the glass test draws with BitBlt only) */
     {
         WNDCLASSW wc = { 0 };
@@ -784,6 +849,7 @@ START_TEST(LayeredCompose)
     }
 
     Test_LayeredUnset();
+    Test_LayeredUnsetBlack();
     Test_AlphaAndKey();
     Test_UlwFollows();
     Test_GlassFollows();
