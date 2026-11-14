@@ -102,6 +102,11 @@ typedef struct _TCP_IPV6_TABLE_HEADER
 /* Enabled: the transport takes IPv6 addresses for TCP (address files, connections, listeners): only then are
    AF_INET6 sockets made and the IPv6 protocols listed in the Winsock catalog */
 #define TCP_IPV6_STATE_SOCKETS          0x2
+/* Enabled: the transport takes IPv6 addresses for UDP too (datagram sockets: send, receive, dual stack, the IPv6
+   options and multicast groups): only then are AF_INET6 datagram sockets made */
+#define TCP_IPV6_STATE_DATAGRAMS        0x4
+/* Enabled: the transport takes IPv6 addresses for raw IP: only then are AF_INET6 raw sockets made */
+#define TCP_IPV6_STATE_RAW              0x8
 
 /* IPv6 is usable on the interface */
 #define TCP_IPV6_IF_ENABLED             0x1
@@ -146,6 +151,19 @@ typedef struct _TCP6_ROW_OWNER_PID
     ULONG State;
     ULONG OwningPid;
 } TCP6_ROW_OWNER_PID, *PTCP6_ROW_OWNER_PID;
+
+/* Non public TOIID: the row of an IPv6 UDP socket (an AF_INET6 one, dual stack ones too), asked of its transport
+   entity (CL_TL_ENTITY); an entity of an IPv4 socket has none. The layout of MIB_UDP6ROW_OWNER_PID: a dual stack
+   socket bound to an IPv4 address as ::ffff:a.b.c.d, the port in network order */
+#define IP_UDP6_ROW_ENTRY_ID            0x114
+
+typedef struct _UDP6_ROW_OWNER_PID
+{
+    UCHAR LocalAddr[16];
+    ULONG LocalScopeId;
+    ULONG LocalPort;
+    ULONG OwningPid;
+} UDP6_ROW_OWNER_PID, *PUDP6_ROW_OWNER_PID;
 #endif
 #define MAX_PHYSADDR_SIZE               8
 

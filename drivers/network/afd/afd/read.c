@@ -619,9 +619,46 @@ StoreToLockedBuffer(
  * as it can take (a byte-wise cut for a 64-bit caller, as Windows does) and MSG_CTRUNC flags
  * the difference.
  * Without IP_PKTINFO there is no control data and nothing to truncate.
+ * An IPv6 datagram of an IPv6 socket gets an IPV6_PKTINFO message (in6_pktinfo: the destination
+ * and the interface index) and an IPV6_HOPLIMIT one (an INT) when the socket enabled them, in that
+ * order; a message after another starts at the alignment of the header (8 bytes for a 64-bit
+ * caller, 4 for a 32-bit one), as WSA_CMSG_NXTHDR finds it, and the control length counts every
+ * message with its padding (Windows 10, oracle). An IPv4 datagram of a dual stack socket gets the
+ * IP_PKTINFO message as an IPv4 socket does (oracle), none for IPV6_PKTINFO alone.
  *
  * Returns TRUE when the message is truncated (the receive then fails with WSAEMSGSIZE).
  */
+static ULONG
+AddControlMessage(
+    _Inout_updates_bytes_(Room) PUCHAR Cmsg,
+    _In_ ULONG Room,
+    _In_ ULONG Total,
+    _In_ ULONG HeaderSize,
+    _In_ INT Level,
+    _In_ INT Type,
+    _In_reads_bytes_(Length) const VOID *Data,
+    _In_ ULONG Length)
+{
+    ULONG Align = (HeaderSize == 12) ? 4 : 8;
+    ULONG Start = (Total + Align - 1) & ~(Align - 1);
+    ULONG Len = HeaderSize + Length;
+
+    if (Start + Len > Room)
+    {
+        ASSERT(FALSE);
+        return Total;
+    }
+
+    /* cmsg_len is a SIZE_T (its low ULONG is enough), followed by two INT: cmsg_level and cmsg_type */
+    RtlCopyMemory(Cmsg + Start, &Len, sizeof(Len));
+    RtlCopyMemory(Cmsg + Start + HeaderSize - 2 * sizeof(INT), &Level, sizeof(Level));
+    RtlCopyMemory(Cmsg + Start + HeaderSize - sizeof(INT), &Type, sizeof(Type));
+    RtlCopyMemory(Cmsg + Start + HeaderSize, Data, Length);
+    /* The control length counts each message with its padding (WSA_CMSG_SPACE), as Windows reports it (oracle:
+     * 40 for an IPV6_PKTINFO message alone, 64 with an IPV6_HOPLIMIT one, 64-bit) */
+    return (Start + Len + Align - 1) & ~(Align - 1);
+}
+
 static BOOLEAN
 StoreMessageControl(
     _In_ PAFD_RECV_INFO_UDP RecvReq,
@@ -631,34 +668,65 @@ StoreMessageControl(
 {
     PAFD_RECV_INFO_MSG Msg = (PAFD_RECV_INFO_MSG)RecvReq;
     PAFD_WSABUF Slots = RecvReq->BufferArray + RecvReq->BufferCount;
-    UCHAR Cmsg[16 + sizeof(ULONG) * 2];
+    UCHAR Cmsg[AFD_MAX_CONTROL_LOCK];
     ULONG HeaderSize = Msg->CmsgHdrSize;
     ULONG Total = 0, Capacity = Slots[EXTRA_LOCK_CONTROL].buf ? Slots[EXTRA_LOCK_CONTROL].len : 0;
     ULONG Flags = DatagramTruncated ? MSG_TRUNC : 0;
+    ULONG Ends[2], Count = 0, i;
+    PAFD_RECV_PKTINFO Info = &DatagramRecv->PktInfo;
 
-    if( (Msg->Options & AFD_RECV_MSG_PKTINFO) && DatagramRecv->PktInfo.Valid ) {
-        ULONG Pos = 0;
-        INT Level = IPPROTO_IP, Type = 19 /* IP_PKTINFO */;
-        ULONG Addr = DatagramRecv->PktInfo.DstAddress, Index = DatagramRecv->PktInfo.IfIndex;
+    RtlZeroMemory(Cmsg, sizeof(Cmsg));
 
-        Total = HeaderSize + sizeof(Addr) + sizeof(Index);
-        ASSERT(Total <= sizeof(Cmsg));
-        RtlZeroMemory(Cmsg, sizeof(Cmsg));
-        /* cmsg_len is a SIZE_T, followed by two INT: cmsg_level and cmsg_type */
-        RtlCopyMemory(Cmsg, &Total, sizeof(Total));
-        Pos = HeaderSize - 2 * sizeof(INT);
-        RtlCopyMemory(Cmsg + Pos, &Level, sizeof(Level));
-        RtlCopyMemory(Cmsg + Pos + sizeof(INT), &Type, sizeof(Type));
-        RtlCopyMemory(Cmsg + HeaderSize, &Addr, sizeof(Addr));
-        RtlCopyMemory(Cmsg + HeaderSize + sizeof(Addr), &Index, sizeof(Index));
+    if( (Msg->Options & AFD_RECV_MSG_PKTINFO) && (Info->Valid & AFD_PKTINFO_V4) ) {
+        ULONG Data[2];
 
+        Data[0] = Info->DstAddress;
+        Data[1] = Info->IfIndex;
+        Total = AddControlMessage(Cmsg, sizeof(Cmsg), Total, HeaderSize, IPPROTO_IP, 19 /* IP_PKTINFO */,
+                                  Data, sizeof(Data));
+        Ends[Count++] = Total;
+    }
+    else if( Info->Valid & AFD_PKTINFO_V6 ) {
+        if( Msg->Options & AFD_RECV_MSG_PKTINFO6 ) {
+            UCHAR Data[20];
+
+            RtlCopyMemory(Data, Info->DstAddress6, 16);
+            RtlCopyMemory(Data + 16, &Info->IfIndex, sizeof(ULONG));
+            Total = AddControlMessage(Cmsg, sizeof(Cmsg), Total, HeaderSize, 41 /* IPPROTO_IPV6 */,
+                                      19 /* IPV6_PKTINFO */, Data, sizeof(Data));
+            Ends[Count++] = Total;
+        }
+        if( Msg->Options & AFD_RECV_MSG_HOPLIMIT ) {
+            INT Hops = (INT)Info->HopLimit;
+
+            Total = AddControlMessage(Cmsg, sizeof(Cmsg), Total, HeaderSize, 41 /* IPPROTO_IPV6 */,
+                                      21 /* IPV6_HOPLIMIT */, &Hops, sizeof(Hops));
+            Ends[Count++] = Total;
+        }
+    }
+
+    if( Total ) {
         if( Capacity < Total )
             Flags |= MSG_CTRUNC;
 
         /* A 64-bit process gets as many bytes as fit. A 32-bit one (whose messages the
-         * 64-bit system converts) gets the header when that fits, and the data only whole. */
-        if( HeaderSize == 12 && Capacity < Total )
-            Capacity = (Capacity >= HeaderSize) ? HeaderSize : 0;
+         * 64-bit system converts) gets the whole messages that fit, then the header of
+         * the next one when that fits, and the data only whole. */
+        if( HeaderSize == 12 && Capacity < Total ) {
+            ULONG Start = 0, Keep = 0;
+
+            for( i = 0; i < Count; i++ ) {
+                if( Ends[i] <= Capacity ) {
+                    Keep = Ends[i];
+                    Start = (Ends[i] + 3) & ~3;
+                    continue;
+                }
+                if( Start + HeaderSize <= Capacity )
+                    Keep = Start + HeaderSize;
+                break;
+            }
+            Capacity = Keep;
+        }
         StoreToLockedBuffer(&Map[RecvReq->BufferCount + EXTRA_LOCK_CONTROL], Cmsg, MIN(Capacity, Total));
     }
 

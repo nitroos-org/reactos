@@ -129,6 +129,10 @@ TDI_STATUS InfoTdiQueryGetConnectionTcp6Row( PADDRESS_FILE AddrFile,
                                              PNDIS_BUFFER Buffer,
                                              PUINT BufferSize );
 
+TDI_STATUS InfoTdiQueryGetConnectionUdp6Row( PADDRESS_FILE AddrFile,
+                                             PNDIS_BUFFER Buffer,
+                                             PUINT BufferSize );
+
 TDI_STATUS InfoTdiQueryGetConnectionUdpTable( PADDRESS_FILE AddrFile,
                                               PNDIS_BUFFER Buffer,
                                               PUINT BufferSize,

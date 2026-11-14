@@ -153,11 +153,16 @@ typedef struct _AFD_RECV_INFO_UDP {
  *  - MsgFlags receives MSG_TRUNC (datagram cut off) and MSG_CTRUNC (control data cut off).
  * Options asks for the control messages: AFD_RECV_MSG_PKTINFO for an IP_PKTINFO message
  * (struct in_pktinfo: the datagram's destination address and the interface it arrived on).
+ * An IPv6 socket also asks for AFD_RECV_MSG_PKTINFO6 (an IPV6_PKTINFO message, struct in6_pktinfo)
+ * and AFD_RECV_MSG_HOPLIMIT (an IPV6_HOPLIMIT message, an INT) for the IPv6 datagrams it receives; an
+ * IPv4 datagram of a dual stack socket gets the IP_PKTINFO message when the socket asked for that.
  * CmsgHdrSize is sizeof(WSACMSGHDR) of the caller, 12 for a 32-bit process and 16 for a
  * 64-bit one, which sets the layout of the messages.
  */
 #define AFD_RECV_MSG                    0x8000L
 #define AFD_RECV_MSG_PKTINFO            0x1L
+#define AFD_RECV_MSG_PKTINFO6           0x2L
+#define AFD_RECV_MSG_HOPLIMIT           0x4L
 
 typedef struct _AFD_RECV_INFO_MSG {
     AFD_RECV_INFO_UDP			Udp;
@@ -477,6 +482,8 @@ typedef struct _SOCK_SHARED_INFO {
 		BOOLEAN					UseSAN:1;
 		BOOLEAN					IpPktInfo:1;
 		BOOLEAN					TcpNoDelay:1; /* TCP_NODELAY as set, for getsockopt (a bit of the flag word: layout unchanged) */
+		BOOLEAN					Ipv6PktInfo:1; /* IPV6_PKTINFO and IPV6_HOPLIMIT as set (the last two bits of the */
+		BOOLEAN					Ipv6HopLimit:1; /* flag word's second byte: layout unchanged) */
     }; // Flags
     DWORD						CreateFlags;
     DWORD						ServiceFlags1;

@@ -156,6 +156,12 @@ typedef struct _ADDRESS_FILE {
     PVOID FwImage;                        /* Creator image path for the inbound filter (nitrofw.c), lazy */
     BOOLEAN FwImageTried;                 /* Image resolution already attempted (nitrofw.c) */
     BOOLEAN ExplicitPort;                 /* The client asked for this port (not an ephemeral one): UDP listeners for the block prompt */
+    /* An IPv6 UDP socket (ip/transport/udp/udp6.c): the multicast hop limit, loop and interface (IPV6_MULTICAST_*)
+       and the groups it joined (allocated with the first one, under the object lock); TTL is its unicast hop limit */
+    UCHAR McastHops;
+    BOOLEAN McastLoop;
+    ULONG McastIf;
+    struct _UDP6_MEMBERSHIPS *Groups6;
 
     /* The following members are used to control event notification */
 

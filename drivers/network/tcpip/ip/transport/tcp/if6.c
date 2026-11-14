@@ -39,6 +39,9 @@
 
 #define TCP6_SWITCH_VALUE L"Ipv6Enable"
 
+/* udp6.c: the groups sockets joined on an interface, for its multicast list (core lock held) */
+VOID UDP6AddMulticastList(struct netif *netif, PUCHAR List, PUINT Count, UINT Max);
+
 BOOLEAN TCPIpv6Enabled = FALSE;
 
 /* Set while a datagram from one of our adapters, that the adapter looped back from our own send, is in
@@ -184,12 +187,23 @@ TCP6UpdateMulticast(struct netif *netif)
         Count++;
     }
 
+    /* The groups sockets joined on this interface (udp6.c) */
+    if (Count <= LL_MULTICAST_MAX)
+        UDP6AddMulticastList(netif, List, &Count, LL_MULTICAST_MAX);
+
 #if DBG || defined(TCPIP_IPV6_SELFTEST)
     if (TCP6TestMulticastOverflow)
         Count = LL_MULTICAST_MAX + 1;
 #endif
 
     IF->SetMulticast(IF->Context, List, Count);
+}
+
+/* A socket joined or left a group on netif (udp6.c, core lock held) */
+VOID
+TCP6UpdateMulticastList(struct netif *netif)
+{
+    TCP6UpdateMulticast(netif);
 }
 
 /* lwIP's interface events (core lock held): an address set, removed, or changing state */
@@ -370,6 +384,9 @@ TCPInput6(PIP_INTERFACE IF, struct pbuf *p, BOOLEAN FromOwnLink)
         pbuf_free(p);
     }
     UNLOCK_TCPIP_CORE();
+
+    /* The UDP datagrams ip6_input left for the sockets (udp6.c) */
+    UDP6DeliverDeferred();
 }
 
 /* An IPv6 frame from an adapter (IPReceive, on the adapter's receive worker, PASSIVE_LEVEL). The caller
@@ -598,9 +615,9 @@ TCPQueryIpv6Table(PVOID Out, ULONG OutSize)
         IPDereferenceInterface(Interfaces[i]);
     ExFreePoolWithTag(Interfaces, TDI_ENTITY_TAG);
 
-    /* This stack takes IPv6 addresses for TCP sockets: user mode makes AF_INET6 sockets and lists the IPv6
-       protocols only when it says so */
-    Header->Enabled = TCP_IPV6_STATE_ON | TCP_IPV6_STATE_SOCKETS;
+    /* This stack takes IPv6 addresses for TCP and UDP sockets (not raw IP yet): user mode makes AF_INET6 sockets
+       of those types and lists the IPv6 protocols only when it says so */
+    Header->Enabled = TCP_IPV6_STATE_ON | TCP_IPV6_STATE_SOCKETS | TCP_IPV6_STATE_DATAGRAMS;
     Header->InterfaceCount = Count;
     Header->AddressCount = AddrCount;
 

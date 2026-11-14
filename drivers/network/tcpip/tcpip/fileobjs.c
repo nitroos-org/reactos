@@ -118,6 +118,14 @@ BOOLEAN AddrReceiveMatch(
    PIP_ADDRESS LocalAddress,
    PIP_ADDRESS RemoteAddress)
 {
+   /* An IPv4 datagram for a dual stack IPv6 socket on :: (AddrFileTakesType), or an IPv6 one: no broadcast */
+   if (LocalAddress->Type != RemoteAddress->Type)
+       return AddrIsUnspecified(LocalAddress);
+   if (RemoteAddress->Type == IP_ADDRESS_V6)
+       return AddrIsUnspecified(LocalAddress) || AddrIsEqual(LocalAddress, RemoteAddress) ||
+              /* a group: the members decide (udp6.c), whatever address they are bound to (VERIFY ON ORACLE) */
+              ((PUCHAR)RemoteAddress->Address.IPv6Address)[0] == 0xFF;
+
    if (AddrIsEqual(LocalAddress, RemoteAddress))
    {
        /* Unicast address match */
@@ -273,6 +281,8 @@ PADDRESS_FILE AddrSearchNext(
         /* See if this address matches the search criteria */
         if ((Current->Port    == SearchContext->Port) &&
             (Current->Protocol == SearchContext->Protocol) &&
+            /* Datagrams of one IP version: an IPv6 socket takes IPv4 ones only when it is dual stack on :: */
+            AddrFileTakesType(Current, SearchContext->Address->Type) &&
             (AddrReceiveMatch(IPAddress, SearchContext->Address)) &&
             /* Skip an address file that is already being freed; referenced before
              * StartingAddrFile is dereferenced, because it may be the same one */
@@ -602,6 +612,9 @@ NTSTATUS FileOpenAddress(
   AddrFile->RefCount = 1;
   AddrFile->Free = AddrFileFree;
   AddrFile->Sharers = 1;
+  /* IPv6 multicast: hop limit 1, looped back (RFC 3493 5.2; VERIFY ON ORACLE) */
+  AddrFile->McastHops = 1;
+  AddrFile->McastLoop = TRUE;
   if (ShareAccess & (FILE_SHARE_READ | FILE_SHARE_WRITE))
       AddrFile->ShareMode = ADDR_SHARE_REUSE;
   else if (ShareAccess & FILE_SHARE_DELETE)
@@ -871,6 +884,10 @@ NTSTATUS FileCloseAddress(
   {
       TCPClose( Listener );
   }
+
+  /* The IPv6 multicast groups the socket joined are left */
+  if (AddrFile->Groups6)
+      UDP6LeaveAll(AddrFile);
 
   DereferenceObject(AddrFile);
 

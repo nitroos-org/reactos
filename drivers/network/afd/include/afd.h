@@ -107,8 +107,9 @@ typedef struct IPADDR_ENTRY {
 #define EXTRA_LOCK_CONTROL              2
 #define EXTRA_LOCK_CONTROL_LENGTH       3
 #define EXTRA_LOCK_MSG_FLAGS            4
-/* The most control data AFD writes: one IP_PKTINFO message (16 byte header + in_pktinfo) */
-#define AFD_MAX_CONTROL_LOCK            24
+/* The most control data AFD writes: an IPV6_PKTINFO message (16 byte header + in6_pktinfo, padded to 40) and an
+ * IPV6_HOPLIMIT one (16 + 4); an IPv4 datagram gets one IP_PKTINFO message (16 + in_pktinfo) */
+#define AFD_MAX_CONTROL_LOCK            64
 
 /* The referenced handle table of a select request; the caller's buffer is copied back to it */
 #define AFD_HANDLES(Irp) ((PAFD_HANDLE)(Irp)->Tail.Overlay.DriverContext[2])
@@ -201,12 +202,18 @@ extern volatile LONG AfdNonPagedWindowBytes;
  * of the connection information of the receive (tcpip: DGDeliverData). Valid is 0 until the
  * transport fills the structure in. DstAddress is the datagram's destination, as in the IP
  * header (network order); IfIndex is the index of the interface that owns it, or that the
- * datagram arrived on (the index tcpip reports for the interface).
+ * datagram arrived on (the index tcpip reports for the interface). Valid is AFD_PKTINFO_V4 for an
+ * IPv4 datagram (DstAddress), AFD_PKTINFO_V6 for an IPv6 one (DstAddress6, HopLimit). The layout is
+ * tcpip's DG_RECV_PKTINFO (datagram.c).
  */
+#define AFD_PKTINFO_V4 0x1
+#define AFD_PKTINFO_V6 0x2
 typedef struct _AFD_RECV_PKTINFO {
     ULONG Valid;
     ULONG DstAddress;
     ULONG IfIndex;
+    UCHAR DstAddress6[16];
+    ULONG HopLimit;
 } AFD_RECV_PKTINFO, *PAFD_RECV_PKTINFO;
 
 typedef struct _AFD_STORED_DATAGRAM {

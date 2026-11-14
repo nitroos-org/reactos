@@ -71,12 +71,18 @@ VOID LoopPassiveWorker(
   PLOOP_ITEM Item = CONTAINING_RECORD(Entry, LOOP_ITEM, ListEntry);
 
   /* Holds no lock: the TDI completions the segment causes run on this thread (CompleteBucket) */
+  BOOLEAN Pbuf = (Item->Pbuf != NULL);
+
   TCPEnterInlineContext();
-  if (Item->Pbuf)
+  if (Pbuf)
     LoopInputPbuf(Item);
   else
     LoopPassiveWorkItem(Item);
   TCPLeaveInlineContext();
+
+  /* An IPv6 datagram (::1) may have left UDP datagrams for the sockets (udp6.c) */
+  if (Pbuf)
+    UDP6DeliverDeferred();
 }
 
 BOOLEAN LoopTransmitPbuf(

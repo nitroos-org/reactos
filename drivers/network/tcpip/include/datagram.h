@@ -25,6 +25,25 @@ BOOLEAN DGRemoveIRP(
     PADDRESS_FILE AddrFile,
     PIRP Irp);
 
+/* What an IPv6 datagram's receive reports besides its addresses (ip/transport/udp/udp6.c): the scope id of a
+   link-local source (the interface index), the interface it arrived on and its hop limit */
+typedef struct _DG_RX_INFO6 {
+    ULONG SrcScopeId;
+    ULONG IfIndex;
+    ULONG HopLimit;
+} DG_RX_INFO6, *PDG_RX_INFO6;
+
+VOID DGDeliverDataEx(
+  PIP_INTERFACE Interface,
+  PADDRESS_FILE AddrFile,
+  PIP_ADDRESS SrcAddress,
+  PIP_ADDRESS DstAddress,
+  USHORT SrcPort,
+  USHORT DstPort,
+  PIP_PACKET IPPacket,
+  UINT DataSize,
+  PDG_RX_INFO6 Info6);
+
 VOID DGDeliverData(
   PIP_INTERFACE Interface,
   PADDRESS_FILE AddrFile,

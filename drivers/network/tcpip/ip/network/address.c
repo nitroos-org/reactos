@@ -177,6 +177,18 @@ NTSTATUS AddrGetAddress(
 		AddrInitIPv4(Address, ValidAddr->in_addr);
 		return STATUS_SUCCESS;
 	    }
+	    break;
+        case TDI_ADDRESS_TYPE_IP6:
+            /* The receive of an IPv6 UDP socket (AFD posts it with a TA_IP6_ADDRESS); the caller built it */
+            if (CurAddr->AddressLength >= TDI_ADDRESS_LENGTH_IP6) {
+                PTDI_ADDRESS_IP6 ValidAddr6 = (PTDI_ADDRESS_IP6)CurAddr->Address;
+
+                RtlCopyMemory(Port, &ValidAddr6->sin6_port, sizeof(*Port));
+                Address->Type = IP_ADDRESS_V6;
+                RtlCopyMemory(Address->Address.IPv6Address, ValidAddr6->sin6_addr, sizeof(Address->Address.IPv6Address));
+                return STATUS_SUCCESS;
+            }
+            break;
 	}
     }
 

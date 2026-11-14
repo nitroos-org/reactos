@@ -162,15 +162,15 @@ NTSTATUS TiCreateFileObject(
 
         Address = (PTA_IP_ADDRESS)(EaInfo->EaName + EaInfo->EaNameLength + 1); //0-term
 
-        /* An IPv6 address (TA_IP6_ADDRESS, the whole of it within the EA value) is taken for TCP while the
-           stack has IPv6 on; UDP and raw IP take IPv4 addresses only */
+        /* An IPv6 address (TA_IP6_ADDRESS, the whole of it within the EA value) is taken for TCP and UDP while
+           the stack has IPv6 on; raw IP takes IPv4 addresses only */
         if ((EaInfo->EaValueLength >= sizeof(TA_IP_ADDRESS)) &&
             (Address->TAAddressCount == 1) &&
             (Address->Address[0].AddressType == TDI_ADDRESS_TYPE_IP6))
         {
             if ((EaInfo->EaValueLength < sizeof(TA_IP6_ADDRESS)) ||
                 (Address->Address[0].AddressLength < TDI_ADDRESS_LENGTH_IP6) ||
-                (DeviceObject != TCPDeviceObject) ||
+                (DeviceObject != TCPDeviceObject && DeviceObject != UDPDeviceObject) ||
                 !TCPIpv6Enabled)
             {
                 TI_DbgPrint(MIN_TRACE, ("IPv6 address refused (length %u, device %p).\n",
