@@ -1076,14 +1076,27 @@ GetAdaptersAddressesImpl(
        them. This leaves the prefixes, multicast and anycast lists, gateways and name servers of IPv6 out */
     if (V6On && Family != AF_INET && !(Flags & GAA_FLAG_SKIP_UNICAST))
     {
-        PIP_ADAPTER_ADDRESSES CurrentAA;
+        ULONG AdapterNumber;
 
-        for (CurrentAA = pAdapterAddresses; CurrentAA; CurrentAA = CurrentAA->Next)
+        /* Every adapter of the answer counts, also one that did not fit into the caller's buffer: the size
+           has to cover the rows of all of them for the second call to succeed */
+        for (AdapterNumber = 0; AdapterNumber < AdapterIndexCount; AdapterNumber++)
         {
+            const TCP_IPV6_INTERFACE_ROW *Interface = Ipv6FindInterface(V6, AdapterIndexes[AdapterNumber]);
+            PIP_ADAPTER_ADDRESSES CurrentAA = NULL, Candidate;
             LONG Row;
 
-            if (!CurrentAA->Length || !(CurrentAA->Flags & IP_ADAPTER_IPV6_ENABLED))
+            if (!Interface)
                 continue;
+
+            for (Candidate = pAdapterAddresses; Candidate; Candidate = Candidate->Next)
+            {
+                if (Candidate->Length && Candidate->IfIndex == AdapterIndexes[AdapterNumber])
+                {
+                    CurrentAA = Candidate;
+                    break;
+                }
+            }
 
             /* prepended, so the last row first */
             for (Row = (LONG)V6->Header->AddressCount - 1; Row >= 0; Row--)
@@ -1091,10 +1104,10 @@ GetAdaptersAddressesImpl(
                 const TCP_IPV6_ADDRESS_ROW *Address = &V6->Addresses[Row];
                 ULONG Size = (sizeof(IP_ADAPTER_UNICAST_ADDRESS) + sizeof(SOCKADDR_IN6) + 7) & ~7UL;
 
-                if (Address->IfIndex != CurrentAA->IfIndex)
+                if (Address->IfIndex != AdapterIndexes[AdapterNumber])
                     continue;
 
-                if (Ptr && (RemainingSize >= Size))
+                if (CurrentAA && Ptr && (RemainingSize >= Size))
                 {
                     PIP_ADAPTER_UNICAST_ADDRESS UnicastAddress = (PIP_ADAPTER_UNICAST_ADDRESS)Ptr;
                     LPSOCKADDR_IN6 Socket = (LPSOCKADDR_IN6)(UnicastAddress + 1);

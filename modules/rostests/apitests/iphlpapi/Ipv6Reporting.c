@@ -275,6 +275,68 @@ static void CheckLinkLocalRow(const UNICAST_ROW *R)
        R->ValidLifetime, R->PreferredLifetime);
 }
 
+/*
+ * A caller that makes exactly two calls (size, then answer) must succeed with the size the first call returned,
+ * whatever the first buffer was. The IPv6 rows of an adapter that did not fit into the first buffer have to be
+ * in that size too. The size is at least 15 KB, so only an answer over 15 KB (many adapters) has adapters that do
+ * not fit; here the rule is checked for the buffers that are given, from the smallest to a size just under what
+ * the answer needs.
+ */
+#define COUNT_OF(a) (sizeof(a) / sizeof((a)[0]))
+
+static void TestTwoCallSize(void)
+{
+    static const ULONG FlagSets[] = { 0, GAA_FLAG_INCLUDE_PREFIX, GAA_FLAG_INCLUDE_GATEWAYS,
+                                      GAA_FLAG_INCLUDE_PREFIX | GAA_FLAG_INCLUDE_GATEWAYS };
+    static const ULONG Families[] = { AF_UNSPEC, AF_INET6 };
+    ULONG f, g;
+
+    for (f = 0; f < COUNT_OF(Families); f++)
+    {
+        for (g = 0; g < COUNT_OF(FlagSets); g++)
+        {
+            ULONG Needed = 0, Size, Step;
+            DWORD Result;
+            IP_ADAPTER_ADDRESSES *Buffer;
+
+            Result = GetAdaptersAddresses(Families[f], FlagSets[g], NULL, NULL, &Needed);
+            ok(Result == ERROR_BUFFER_OVERFLOW, "family %lu flags %lx: size query returned %lu\n", Families[f],
+               FlagSets[g], Result);
+
+            /* every first-buffer size from 15 KB (the lowest that is looked at) in steps, and the exact size */
+            for (Step = 0; Step < 8; Step++)
+            {
+                /* below 15 KB the function asks for 15 KB; above, the buffer is used and may be too small */
+                static const ULONG Firsts[7] = { 1024, 4096, 15360, 19456, 23552, 27648, 0 };
+                ULONG First = (Step == 7) ? Needed : Firsts[Step];
+
+                if (!First)
+                    continue;
+
+                Buffer = malloc(First > 15360 ? First : 15360);
+                Size = First;
+                Result = GetAdaptersAddresses(Families[f], FlagSets[g], NULL, Buffer, &Size);
+                if (Result == ERROR_BUFFER_OVERFLOW)
+                {
+                    free(Buffer);
+                    Buffer = malloc(Size);
+                    ok(Size > First, "family %lu flags %lx: overflow with %lu, size %lu\n", Families[f], FlagSets[g],
+                       First, Size);
+                    Result = GetAdaptersAddresses(Families[f], FlagSets[g], NULL, Buffer, &Size);
+                    ok(Result == NO_ERROR, "family %lu flags %lx: second call with the returned size: %lu\n",
+                       Families[f], FlagSets[g], Result);
+                }
+                else
+                {
+                    ok(Result == NO_ERROR, "family %lu flags %lx: first buffer %lu: %lu\n", Families[f], FlagSets[g],
+                       First, Result);
+                }
+                free(Buffer);
+            }
+        }
+    }
+}
+
 static void TestOn(void)
 {
     IP_ADAPTER_ADDRESSES *All, *V6, *V4, *A, *B;
@@ -284,8 +346,9 @@ static void TestOn(void)
     DWORD Error, Result;
 
     WaitForDad();
+    TestTwoCallSize();
 
-    All = GetAdapters(AF_UNSPEC, 0, &Result);
+    All =GetAdapters(AF_UNSPEC, 0, &Result);
     ok(Result == NO_ERROR && All, "GetAdaptersAddresses(AF_UNSPEC): %lu\n", Result);
     V6 = GetAdapters(AF_INET6, 0, &Result);
     ok(Result == NO_ERROR && V6, "GetAdaptersAddresses(AF_INET6): %lu\n", Result);

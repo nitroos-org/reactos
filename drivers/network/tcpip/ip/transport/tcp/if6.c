@@ -467,6 +467,11 @@ LibTCPListenerInput6(void)
 
 #define TCP6_MAX_TABLE_INTERFACES 256
 
+/* The answer is copied through a pool block that InfoTdiQueryGetIpv6Table (info.c) caps at 64 KB: the largest
+   answer has to stay below the cap, or the caller would get a size that is no answer */
+C_ASSERT(sizeof(TCP_IPV6_TABLE_HEADER) + TCP6_MAX_TABLE_INTERFACES * sizeof(TCP_IPV6_INTERFACE_ROW) +
+         TCP6_MAX_TABLE_INTERFACES * LWIP_IPV6_NUM_ADDRESSES * sizeof(TCP_IPV6_ADDRESS_ROW) < 0x10000);
+
 /* The IPv6 state of every interface as TCP_IPV6_TABLE_HEADER, interface rows, address rows (the
  * IP_IPV6_TABLE_ENTRY_ID query). Returns the size of the whole answer; what fits in Out (OutSize bytes) is
  * written, so a caller whose buffer is too small gets the size and asks again. Off: the header alone,
