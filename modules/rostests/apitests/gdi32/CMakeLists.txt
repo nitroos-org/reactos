@@ -6,6 +6,7 @@ list(APPEND SOURCE
     AddFontResource.c
     AddFontResourceEx.c
     BeginPath.c
+    BezierExtremeCoords.c
     BitBltBrushOrigin.c
     BitBltPointer.c
     ClipExtremeCoords.c
