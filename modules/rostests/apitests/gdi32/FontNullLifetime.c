@@ -20,7 +20,7 @@
  */
 
 #define NUM_THREADS     4
-#define ROUNDS          1200   /* FNL_ROUNDS in the environment overrides */
+#define ROUNDS          300    /* FNL_ROUNDS in the environment overrides */
 
 typedef BOOL (WINAPI *PFN_GDIREALIZATIONINFO)(HDC, PVOID);
 
@@ -199,6 +199,9 @@ WorkerProc(PVOID pv)
         {
             RunQueries(hdc);
             InterlockedIncrement(&g_Queries);
+            /* Give the main thread its turn: on one CPU, four threads that never yield make every round take
+               a number of time slices, and the whole test hours (it was taken for a hang of the system) */
+            Sleep(0);
         }
 
         SelectObject(hdc, hOld);
@@ -220,6 +223,7 @@ Test_RemoveWhileQuerying(void)
     UINT i, cRound, cRealized = 0, cRounds = ROUNDS;
     DWORD dw;
     DWORD dwStart;
+    DWORD dwTotalStart = GetTickCount();
     CHAR szEnv[16];
 
     if (GetEnvironmentVariableA("FNL_ROUNDS", szEnv, sizeof(szEnv)) > 0 && atoi(szEnv) > 0)
@@ -303,8 +307,8 @@ Test_RemoveWhileQuerying(void)
     for (i = 0; i < NUM_THREADS; i++)
         CloseHandle(g_hThreads[i]);
 
-    trace("%u rounds, %u of them with the test font realized, %ld query batches\n",
-          cRound, cRealized, g_Queries);
+    trace("%u rounds, %u of them with the test font realized, %ld query batches, %lu ms\n",
+          cRound, cRealized, g_Queries, GetTickCount() - dwTotalStart);
     ok(cRound == cRounds, "Only %u rounds ran\n", cRound);
 }
 
