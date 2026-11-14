@@ -66,6 +66,7 @@ list(APPEND SOURCE
     RegHiveFiles.c
     RegQueryInfoKey.c
     RegQueryValueExW.c
+    RegQueryMultipleValues.c
     RegKeyNameCase.c
     RegRenameKey.c
     RegSdTemplates.c
