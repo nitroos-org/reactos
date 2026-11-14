@@ -1795,17 +1795,29 @@ VOID GetName( PUNICODE_STRING RegistryKey,
  * (NDIS_PACKET_TYPE_ALL_MULTICAST); never all frames (promiscuous). Without IPv6 nothing asks, and the
  * adapter's filter and list stay as BindAdapter set them.
  */
-/* if6.c, Tcpip\Parameters\Ipv6SelfTestChewFail (test runs only; always 0 otherwise): the next this many
-   queueings of the worker fail as if ChewCreate had no memory */
-extern volatile LONG TCP6TestChewFail;
+/* Transient answers (see LanMulticastTransient) outside a reset that the worker retries once a second
+   (LanMulticastTick) before it treats them as a refusal (all multicast) */
+#define LAN_MCAST_TRANSIENT_MAX 30
 
-/* if6.c, Tcpip\Parameters\Ipv6SelfTestResetWindow (test runs only; always 0 otherwise): the miniports we drive
-   never reset, so the first multicast worker run pretends the adapter's reset starts (the status indication
-   NDIS sends) and LanMulticastTick ends it that many seconds later */
+#if DBG || defined(TCPIP_IPV6_SELFTEST)
+/* Test builds only: none of this is in a production tcpip.sys. The switches are read from the registry in
+   if6.c (TCPReadIpv6Switch) and are 0 otherwise.
+   Ipv6SelfTestChewFail: the next this many queueings of the worker fail as if ChewCreate had no memory.
+   Ipv6SelfTestNotAccepted: the adapter's maximum-list and list requests answer NOT_ACCEPTED.
+   Ipv6SelfTestResetWindow: the miniports we drive never reset, so the first multicast worker run pretends
+   the adapter's reset starts (the status indication NDIS sends) and LanMulticastTick ends it that many
+   seconds later */
+extern volatile LONG TCP6TestChewFail;
+extern volatile LONG TCP6TestNotAccepted;
 extern volatile LONG TCP6TestResetWindow;
-static volatile LONG LanTestResetState;     /* 0 not yet, 1 pretended reset running, 2 over */
-static PLAN_ADAPTER LanTestResetAdapter;
+#define LAN_TEST_RESET_IDLE     0
+#define LAN_TEST_RESET_RUNNING  1   /* the pretended reset runs: LanMulticastTick counts it down */
+#define LAN_TEST_RESET_OVER     2
+#define LAN_TEST_RESET_ARMING   3   /* the worker is setting the pretended reset up: the tick leaves it alone */
+static volatile LONG LanTestResetState;
+static PLAN_ADAPTER LanTestResetAdapter;    /* only compared with the adapter list, never used unchecked */
 static volatile LONG LanTestResetTicks;
+#endif
 
 /*
  * Not a refusal: the adapter is resetting (NDISCall: NOT_ACCEPTED) or closing. The request is not lost,
@@ -1820,12 +1832,16 @@ BOOLEAN LanMulticastTransient(
            Status == NDIS_STATUS_RESET_IN_PROGRESS;
 }
 
-/* Returns TRUE when the list could not be applied for a transient reason: apply it again later */
+/*
+ * Returns TRUE when the list could not be applied for a transient reason: apply it again later. With GiveUp
+ * a transient answer counts as a refusal (the adapter takes all multicast frames), so this returns FALSE.
+ */
 static
 BOOLEAN LanApplyMulticast(
     PLAN_ADAPTER Adapter,
     PUCHAR List,
-    UINT Count)
+    UINT Count,
+    BOOLEAN GiveUp)
 {
     NDIS_STATUS ListStatus = NDIS_STATUS_SUCCESS;
     NDIS_STATUS FilterStatus = NDIS_STATUS_SUCCESS;
@@ -1837,9 +1853,14 @@ BOOLEAN LanApplyMulticast(
     if (Adapter->McastMaxList == 0)
     {
         /* An adapter that does not say tries the list, and its answer decides */
+#if DBG || defined(TCPIP_IPV6_SELFTEST)
+        if (TCP6TestNotAccepted)
+            Status = NDIS_STATUS_NOT_ACCEPTED;
+        else
+#endif
         Status = NDISCall(Adapter, NdisRequestQueryInformation, OID_802_3_MAXIMUM_LIST_SIZE,
                           &MaxList, sizeof(MaxList));
-        if (LanMulticastTransient(Status))
+        if (!GiveUp && LanMulticastTransient(Status))
             return TRUE;
         if (Status != NDIS_STATUS_SUCCESS || MaxList == 0)
             MaxList = MAXULONG;
@@ -1849,9 +1870,14 @@ BOOLEAN LanApplyMulticast(
     AllMulticast = (Count > LL_MULTICAST_MAX || Count > Adapter->McastMaxList);
     if (!AllMulticast)
     {
+#if DBG || defined(TCPIP_IPV6_SELFTEST)
+        if (TCP6TestNotAccepted)
+            ListStatus = NDIS_STATUS_NOT_ACCEPTED;
+        else
+#endif
         ListStatus = NDISCall(Adapter, NdisRequestSetInformation, OID_802_3_MULTICAST_LIST,
                               List, Count * IEEE_802_ADDR_LENGTH);
-        if (LanMulticastTransient(ListStatus))
+        if (!GiveUp && LanMulticastTransient(ListStatus))
             return TRUE;
         AllMulticast = (ListStatus != NDIS_STATUS_SUCCESS);
     }
@@ -1865,7 +1891,7 @@ BOOLEAN LanApplyMulticast(
                                 &Filter, sizeof(Filter));
         if (FilterStatus == NDIS_STATUS_SUCCESS)
             Adapter->McastFilter = Filter;
-        else if (LanMulticastTransient(FilterStatus))
+        else if (!GiveUp && LanMulticastTransient(FilterStatus))
             return TRUE;
     }
 
@@ -1877,10 +1903,12 @@ BOOLEAN LanApplyMulticast(
     return FALSE;
 }
 
+#if DBG || defined(TCPIP_IPV6_SELFTEST)
 /*
- * Test runs only (TCP6TestResetWindow): once the list is applied and the adapter runs, the miniport "resets":
+ * Test builds only (TCP6TestResetWindow): once the list is applied and the adapter runs, the miniport "resets":
  * it forgets its multicast list, and the adapter takes no requests for TCP6TestResetWindow seconds. Returns
- * TRUE when that began (the caller asks for the list again meanwhile).
+ * TRUE when that began (the caller asks for the list again meanwhile). The adapter, the count and the state
+ * are set in this order: LanMulticastTick looks at the state first and must find the rest in place.
  */
 static
 BOOLEAN LanTestResetBegin(
@@ -1889,21 +1917,34 @@ BOOLEAN LanTestResetBegin(
     LARGE_INTEGER Delay;
     UINT i;
 
-    if (TCP6TestResetWindow <= 0 || InterlockedCompareExchange(&LanTestResetState, 1, 0) != 0)
+    if (TCP6TestResetWindow <= 0 ||
+        InterlockedCompareExchange(&LanTestResetState, LAN_TEST_RESET_ARMING, LAN_TEST_RESET_IDLE) != LAN_TEST_RESET_IDLE)
         return FALSE;
+
+    LanTestResetTicks = TCP6TestResetWindow;
+    InterlockedExchangePointer((PVOID volatile *)&LanTestResetAdapter, Adapter);
 
     Delay.QuadPart = -1000000;
     for (i = 0; i < 600 && Adapter->State != LAN_STATE_STARTED && !Adapter->Unbinding; i++)
         KeDelayExecutionThread(KernelMode, FALSE, &Delay);
 
+    if (Adapter->Unbinding || Adapter->State != LAN_STATE_STARTED)
+    {
+        /* The adapter goes away (or never runs): no reset to pretend */
+        InterlockedExchangePointer((PVOID volatile *)&LanTestResetAdapter, NULL);
+        InterlockedExchange(&LanTestResetState, LAN_TEST_RESET_OVER);
+        return FALSE;
+    }
+
     NDISCall(Adapter, NdisRequestSetInformation, OID_802_3_MULTICAST_LIST, Adapter->McastList, 0);
     DbgPrint("TCPIP: test: the adapter's reset starts (its multicast list is gone), ends in %ld s\n",
              TCP6TestResetWindow);
-    LanTestResetAdapter = Adapter;
-    LanTestResetTicks = TCP6TestResetWindow;
     ProtocolStatus(Adapter, NDIS_STATUS_RESET_START, NULL, 0);
+    /* Published last: from here the tick counts the reset down */
+    InterlockedExchange(&LanTestResetState, LAN_TEST_RESET_RUNNING);
     return TRUE;
 }
+#endif
 
 static
 VOID LanMulticastWorker(
@@ -1912,7 +1953,10 @@ VOID LanMulticastWorker(
     PLAN_ADAPTER Adapter = Context;
     UCHAR List[LL_MULTICAST_MAX * IEEE_802_ADDR_LENGTH];
     UINT Count;
-    BOOLEAN Retry, Pretend;
+    BOOLEAN Retry, GiveUp;
+#if DBG || defined(TCPIP_IPV6_SELFTEST)
+    BOOLEAN Pretend;
+#endif
     KIRQL OldIrql;
 
     /* Apply the latest list until none came in meanwhile; LANUnregisterAdapter waits for this */
@@ -1920,29 +1964,46 @@ VOID LanMulticastWorker(
     while (Adapter->McastChanged && !Adapter->Unbinding)
     {
         Adapter->McastChanged = FALSE;
+        /* Transient answers outside a reset that went on for LAN_MCAST_TRANSIENT_MAX runs: a refusal */
+        GiveUp = (Adapter->McastTransient >= LAN_MCAST_TRANSIENT_MAX);
         Count = Adapter->McastCount;
         if (Count <= LL_MULTICAST_MAX)
             RtlCopyMemory(List, Adapter->McastList, Count * IEEE_802_ADDR_LENGTH);
         TcpipReleaseSpinLock(&Adapter->ReconfigureLock, OldIrql);
 
-        Retry = LanApplyMulticast(Adapter, List, Count);
+        Retry = LanApplyMulticast(Adapter, List, Count, GiveUp);
+#if DBG || defined(TCPIP_IPV6_SELFTEST)
         Pretend = !Retry && LanTestResetBegin(Adapter);
+        if (GiveUp)
+            DbgPrint("TCPIP: test: the multicast list got transient answers %u times, all multicast instead\n",
+                     LAN_MCAST_TRANSIENT_MAX);
+#endif
 
         TcpipAcquireSpinLock(&Adapter->ReconfigureLock, &OldIrql);
+#if DBG || defined(TCPIP_IPV6_SELFTEST)
         if (Pretend)
         {
             /* The list is asked for again while the (pretended) reset runs */
             Adapter->McastChanged = TRUE;
         }
-        else if (Retry)
+        else
+#endif
+        if (Retry)
         {
             /* The adapter resets (or closes): not a refusal. The list stays changed; the end of the
-               reset queues the worker again, LanMulticastTick if that was missed */
+               reset queues the worker again, LanMulticastTick if that was missed. An adapter that is not
+               resetting and keeps answering so is given up on after LAN_MCAST_TRANSIENT_MAX runs (above):
+               a miniport after a surprise removal answers NOT_ACCEPTED until it is unbound */
             Adapter->McastChanged = TRUE;
-            DbgPrint("TCPIP: adapter %02x-%02x-%02x-%02x-%02x-%02x multicast list of %u deferred (adapter resetting)\n",
-                     Adapter->HWAddress[0], Adapter->HWAddress[1], Adapter->HWAddress[2],
-                     Adapter->HWAddress[3], Adapter->HWAddress[4], Adapter->HWAddress[5], Count);
+            if (Adapter->State != LAN_STATE_RESETTING && Adapter->McastTransient < LAN_MCAST_TRANSIENT_MAX)
+                Adapter->McastTransient++;
+            TI_DbgPrint(DEBUG_DATALINK, ("Multicast list of %u deferred (adapter resetting), run %u.\n",
+                                         Count, Adapter->McastTransient));
             break;
+        }
+        else if (!GiveUp)
+        {
+            Adapter->McastTransient = 0;
         }
     }
     Adapter->McastQueued = FALSE;
@@ -1968,14 +2029,16 @@ VOID LanMulticastQueue(
     KIRQL OldIrql;
     BOOLEAN Queued;
 
+#if DBG || defined(TCPIP_IPV6_SELFTEST)
     if (TCP6TestChewFail > 0 && InterlockedDecrement(&TCP6TestChewFail) >= 0)
         Queued = FALSE;
     else
+#endif
         Queued = ChewCreate(LanMulticastWorker, Adapter);
 
     if (!Queued)
     {
-        DbgPrint("TCPIP: queueing the multicast worker failed, LanMulticastTick tries again\n");
+        TI_DbgPrint(MIN_TRACE, ("Queueing the multicast worker failed, LanMulticastTick tries again.\n"));
         /* The list stays changed: LanMulticastTick queues it again (and so does the next request) */
         TcpipAcquireSpinLock(&Adapter->ReconfigureLock, &OldIrql);
         Adapter->McastQueued = FALSE;
@@ -1994,12 +2057,77 @@ VOID LanMulticastRequeue(
     TcpipAcquireSpinLock(&Adapter->ReconfigureLock, &OldIrql);
     if (Adapter->McastWanted)
         Adapter->McastChanged = TRUE;
+    Adapter->McastTransient = 0;
     Queue = LanMulticastQueueLocked(Adapter);
     TcpipReleaseSpinLock(&Adapter->ReconfigureLock, OldIrql);
 
     if (Queue)
         LanMulticastQueue(Adapter);
 }
+
+#if DBG || defined(TCPIP_IPV6_SELFTEST)
+/*
+ * Test builds only, once a second at DISPATCH_LEVEL: ends the pretended reset (LanTestResetBegin) when its
+ * time is up. The adapter is looked up in the adapter list under the list lock, and held (marked "queued",
+ * which LANUnregisterAdapter waits for) while RESET_END is delivered, so an unbind cannot free it meanwhile.
+ */
+static
+VOID LanTestResetTick(VOID)
+{
+    PLIST_ENTRY Entry;
+    PLAN_ADAPTER Adapter, Held = NULL, Test;
+    BOOLEAN Found = FALSE, Gone = FALSE;
+    KIRQL OldIrql;
+
+    if (LanTestResetState != LAN_TEST_RESET_RUNNING)
+        return;
+    Test = LanTestResetAdapter;
+    if (Test == NULL)
+        return;
+    if (LanTestResetTicks > 0 && InterlockedDecrement(&LanTestResetTicks) > 0)
+        return;
+
+    TcpipAcquireSpinLock(&AdapterListLock, &OldIrql);
+    for (Entry = AdapterListHead.Flink; Entry != &AdapterListHead; Entry = Entry->Flink)
+    {
+        Adapter = CONTAINING_RECORD(Entry, LAN_ADAPTER, ListEntry);
+        if (Adapter != Test)
+            continue;
+
+        Found = TRUE;
+        TcpipAcquireSpinLockAtDpcLevel(&Adapter->ReconfigureLock);
+        if (Adapter->Unbinding)
+            Gone = TRUE;
+        else if (!Adapter->McastQueued)
+        {
+            Adapter->McastQueued = TRUE;
+            Held = Adapter;
+        }
+        TcpipReleaseSpinLockFromDpcLevel(&Adapter->ReconfigureLock);
+        break;
+    }
+    TcpipReleaseSpinLock(&AdapterListLock, OldIrql);
+
+    if (!Found || Gone)
+    {
+        InterlockedExchangePointer((PVOID volatile *)&LanTestResetAdapter, NULL);
+        InterlockedExchange(&LanTestResetState, LAN_TEST_RESET_OVER);
+        DbgPrint("TCPIP: test: the adapter went away, its reset does not end\n");
+        return;
+    }
+    if (!Held)
+        return; /* the worker runs: the next tick */
+
+    InterlockedExchange(&LanTestResetState, LAN_TEST_RESET_OVER);
+    DbgPrint("TCPIP: test: the adapter's reset ends\n");
+    ProtocolStatus(Held, NDIS_STATUS_RESET_END, NULL, 0);
+
+    /* The requeue in RESET_END found the worker "queued" (us): the next tick queues it */
+    TcpipAcquireSpinLock(&Held->ReconfigureLock, &OldIrql);
+    Held->McastQueued = FALSE;
+    TcpipReleaseSpinLock(&Held->ReconfigureLock, OldIrql);
+}
+#endif
 
 /*
  * Once a second (IPTimeoutDpcFn, DISPATCH_LEVEL): queues the worker of an adapter whose list is still to be
@@ -2014,12 +2142,9 @@ VOID LanMulticastTick(VOID)
     UINT Found = 0, i;
     KIRQL OldIrql;
 
-    if (LanTestResetState == 1 && InterlockedDecrement(&LanTestResetTicks) <= 0)
-    {
-        LanTestResetState = 2;
-        DbgPrint("TCPIP: test: the adapter's reset ends\n");
-        ProtocolStatus(LanTestResetAdapter, NDIS_STATUS_RESET_END, NULL, 0);
-    }
+#if DBG || defined(TCPIP_IPV6_SELFTEST)
+    LanTestResetTick();
+#endif
 
     TcpipAcquireSpinLock(&AdapterListLock, &OldIrql);
     for (Entry = AdapterListHead.Flink; Entry != &AdapterListHead && Found < RTL_NUMBER_OF(Pending); Entry = Entry->Flink)
@@ -2064,6 +2189,7 @@ VOID LanSetMulticast(
         Adapter->McastCount = (UCHAR)Count;
         Adapter->McastWanted = TRUE;
         Adapter->McastChanged = TRUE;
+        Adapter->McastTransient = 0;
     }
     Queue = LanMulticastQueueLocked(Adapter);
     TcpipReleaseSpinLock(&Adapter->ReconfigureLock, OldIrql);

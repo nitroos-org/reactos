@@ -76,6 +76,7 @@ typedef struct LAN_ADAPTER {
     BOOLEAN McastReady;                     /* BindAdapter set the packet filter: a list can be applied */
     BOOLEAN McastQueued;                    /* LanMulticastWorker queued or running */
     BOOLEAN McastChanged;                   /* The list changed since the worker last took it */
+    UCHAR McastTransient;                   /* Worker runs in a row that got a transient answer outside a reset */
     UCHAR McastCount;                       /* Addresses in McastList */
     UCHAR McastList[LL_MULTICAST_MAX * IEEE_802_ADDR_LENGTH];
     /* The worker's own (one runs at a time): */

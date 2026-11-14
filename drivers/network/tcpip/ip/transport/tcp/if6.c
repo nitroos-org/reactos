@@ -57,11 +57,15 @@ volatile LONG TCP6FilterDropped;
 volatile LONG TCP6IcmpErrorsLimited;
 volatile LONG TCP6IcmpErrorsSent;
 
-/* Test runs only (Tcpip\Parameters\Ipv6SelfTestChewFail, read below in a test build; 0 otherwise): the next so
-   many queueings of the multicast worker (lan.c) fail as if ChewCreate had no memory */
+#if DBG || defined(TCPIP_IPV6_SELFTEST)
+/* Test builds only (Tcpip\Parameters\Ipv6SelfTestChewFail, read below): the next so many queueings of the
+   multicast worker (lan.c) fail as if ChewCreate had no memory */
 volatile LONG TCP6TestChewFail;
-/* Test runs only (Ipv6SelfTestResetWindow, seconds): the first multicast worker run pretends a reset (lan.c) */
+/* Ipv6SelfTestResetWindow, seconds: the first multicast worker run pretends a reset (lan.c) */
 volatile LONG TCP6TestResetWindow;
+/* Ipv6SelfTestNotAccepted (non-zero): the adapter's maximum-list and list requests answer NOT_ACCEPTED (lan.c) */
+volatile LONG TCP6TestNotAccepted;
+#endif
 
 #if DBG || defined(TCPIP_IPV6_SELFTEST)
 /* For the self-test (selftest6.c): ICMPv6 messages received, by kind (TCP6_RX_*) */
@@ -143,6 +147,14 @@ TCPReadIpv6Switch(VOID)
             Status = ZwQueryValueKey(Key, &TestName, KeyValuePartialInformation, Info, sizeof(Buffer), &Length);
             if (NT_SUCCESS(Status) && Info->Type == REG_DWORD && Info->DataLength == sizeof(ULONG))
                 TCP6TestResetWindow = (LONG)*(PULONG)Info->Data;
+            ZwClose(Key);
+        }
+        RtlInitUnicodeString(&TestName, L"Ipv6SelfTestNotAccepted");
+        if (TCPIpv6Enabled && NT_SUCCESS(ZwOpenKey(&Key, KEY_QUERY_VALUE, &Attributes)))
+        {
+            Status = ZwQueryValueKey(Key, &TestName, KeyValuePartialInformation, Info, sizeof(Buffer), &Length);
+            if (NT_SUCCESS(Status) && Info->Type == REG_DWORD && Info->DataLength == sizeof(ULONG))
+                TCP6TestNotAccepted = (LONG)*(PULONG)Info->Data;
             ZwClose(Key);
         }
     }
