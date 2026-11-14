@@ -67,6 +67,7 @@ extern void func_CreateSymbolicLink(void);
 extern void func_CreateProcess(void);
 extern void func_CreateProcessILOnly(void);
 extern void func_CreateProcessRace(void);
+extern void func_ManyProcesses(void);
 extern void func_CreateProcessStdHandles(void);
 extern void func_DefaultDllDirectories(void);
 extern void func_CreateWaitableTimerEx(void);
@@ -335,6 +336,7 @@ const struct test winetest_testlist[] =
     { "CreateProcess",               func_CreateProcess },
     { "CreateProcessILOnly",         func_CreateProcessILOnly },
     { "CreateProcessRace",           func_CreateProcessRace },
+    { "ManyProcesses",               func_ManyProcesses },
     { "CreateProcessStdHandles",     func_CreateProcessStdHandles },
     { "DefaultDllDirectories",      func_DefaultDllDirectories },
     { "CreateWaitableTimerEx",       func_CreateWaitableTimerEx },
