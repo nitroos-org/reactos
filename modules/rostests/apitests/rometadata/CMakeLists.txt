@@ -1,0 +1,4 @@
+add_executable(rometadata_apitest MetaDataGetDispenser.c testlist.c)
+set_module_type(rometadata_apitest win32cui)
+add_importlibs(rometadata_apitest msvcrt kernel32)
+add_rostests_file(TARGET rometadata_apitest)
