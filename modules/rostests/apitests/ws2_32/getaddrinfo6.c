@@ -40,6 +40,9 @@ typedef struct
     int HasNoV6Variant;
     int ErrorNoV6;
     EXPECTED NoV6[MAX_EXPECTED];
+    /* the answer of a system without IPv6 depends on the DNS server (it may or may not resolve the name): with
+       the switch off any answer is accepted */
+    int OffAnyAnswer;
 } CASE;
 
 #define V4(a)       { AF_INET, 0, a }
@@ -74,7 +77,9 @@ static const CASE Cases[] =
       0, { V6(LOOP6), V4("127.0.0.1") } },
     { "localhost.", "80", 1, AF_UNSPEC, 0, SOCK_STREAM,
       WSAHOST_NOT_FOUND, { END },
-      0, { V6(LOOP6), V4("127.0.0.1") } },
+      0, { V6(LOOP6), V4("127.0.0.1") },
+      0, 0, { END },
+      1 },
     { "localhost", "80", 1, AF_INET6, 0, SOCK_STREAM,
       0, { V6(LOOP6), END },
       0, { V6(LOOP6), END } },
@@ -303,6 +308,19 @@ static void RunCase(int Index, const CASE *C, int Wide)
         Result = Convert;
     }
 
+    if (!Ipv6On && C->OffAnyAnswer)
+    {
+        /* DNS decides: nothing to compare, only that the answer is freed correctly */
+        if (Wide ? ResultW != NULL : Result != NULL)
+        {
+            if (Wide)
+                FreeAddrInfoW(ResultW);
+            else
+                freeaddrinfo(Result);
+        }
+        return;
+    }
+
     ok(Error == ExpectedError, "%d%s: '%s' family %d flags 0x%x type %d: error %d, expected %d\n", Index,
        Wide ? "W" : "", C->Node ? C->Node : "(null)", C->Family, C->Flags, C->SockType, Error, ExpectedError);
 
@@ -365,6 +383,122 @@ static void RunCase(int Index, const CASE *C, int Wide)
         freeaddrinfo(Result);
 }
 
+/*
+ * A token that may not open \Device\Tcp (here: restricted to a SID that no ACE of the device names) cannot ask the
+ * stack whether IPv6 is on. The answer is decided once, as off, for the life of the process: the same answer the
+ * next time, also when the thread has its own token back (before, every call retried the open). It has to be the
+ * first IPv6 question of the process, so it runs in a child of this test: the exit code says what happened.
+ */
+#define CHILD_ENV           "GAI6_RESTRICTED_CHILD"
+#define CHILD_OK            0
+#define CHILD_DECIDED_AGAIN 1   /* an answer that is neither IPv4 only nor with ::1; 100 + 10 * first + second:
+                                   the entry counts of the two answers when they differ */
+#define CHILD_OPEN_ALLOWED  2   /* the restricted token could open the device: nothing to test */
+#define CHILD_SETUP_FAILED  3
+
+static int CountLocalhostEntries(void)
+{
+    ADDRINFOA Hints, *Info = NULL, *p;
+    int Count = 0;
+
+    /* no node name: the answer needs no file or registry key a restricted token may not read */
+    memset(&Hints, 0, sizeof(Hints));
+    Hints.ai_flags = AI_PASSIVE;
+    Hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(NULL, "80", &Hints, &Info) != 0)
+        return -1;
+    for (p = Info; p; p = p->ai_next)
+        Count++;
+    freeaddrinfo(Info);
+    return Count;
+}
+
+static int RestrictedChild(void)
+{
+    HANDLE Process, Restricted = NULL, Impersonation = NULL;
+    SID_AND_ATTRIBUTES Restrict;
+    SID_IDENTIFIER_AUTHORITY Authority = { { 0, 0, 0, 0, 0, 5 } };
+    PSID Sid = NULL;
+    WSADATA WsaData;
+    int Code = CHILD_SETUP_FAILED, First, Second;
+
+    if (WSAStartup(MAKEWORD(2, 2), &WsaData) != 0)
+        return CHILD_SETUP_FAILED;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY, &Process))
+        return CHILD_SETUP_FAILED;
+    /* S-1-5-21-111-222-333-4242: a domain-style SID that is in no ACL of the device */
+    if (!AllocateAndInitializeSid(&Authority, 5, 21, 111, 222, 333, 4242, 0, 0, 0, &Sid))
+        goto Done;
+    Restrict.Sid = Sid;
+    Restrict.Attributes = 0;
+    if (!CreateRestrictedToken(Process, 0, 0, NULL, 0, NULL, 1, &Restrict, &Restricted))
+        goto Done;
+    if (!DuplicateTokenEx(Restricted, TOKEN_IMPERSONATE | TOKEN_QUERY, NULL, SecurityImpersonation,
+                          TokenImpersonation, &Impersonation))
+        goto Done;
+    if (!SetThreadToken(NULL, Impersonation))
+        goto Done;
+
+    First = CountLocalhostEntries();
+    RevertToSelf();
+    Second = CountLocalhostEntries();
+
+    if (First == 2)
+        Code = CHILD_OPEN_ALLOWED;
+    else if (First == 1 && Second == 1)
+        Code = CHILD_OK;
+    else if (First >= 0 && First < 10 && Second >= 0 && Second < 10)
+        Code = 100 + First * 10 + Second;   /* the entry counts of the two answers (-1: the call failed) */
+    else
+        Code = CHILD_DECIDED_AGAIN;
+
+Done:
+    if (Impersonation) CloseHandle(Impersonation);
+    if (Restricted) CloseHandle(Restricted);
+    if (Sid) FreeSid(Sid);
+    CloseHandle(Process);
+    return Code;
+}
+
+static void TestRestrictedToken(void)
+{
+    char Path[MAX_PATH];
+    char Command[MAX_PATH + 32];
+    STARTUPINFOA Startup;
+    PROCESS_INFORMATION Child;
+    DWORD Exit = 0xdeadbeef;
+
+    if (!Ipv6On)
+        return;
+
+    if (!GetModuleFileNameA(NULL, Path, sizeof(Path)))
+        return;
+    _snprintf(Command, sizeof(Command), "\"%s\" getaddrinfo6", Path);
+    SetEnvironmentVariableA(CHILD_ENV, "1");
+    memset(&Startup, 0, sizeof(Startup));
+    Startup.cb = sizeof(Startup);
+    if (!CreateProcessA(NULL, Command, NULL, NULL, FALSE, 0, NULL, NULL, &Startup, &Child))
+    {
+        SetEnvironmentVariableA(CHILD_ENV, NULL);
+        skip("cannot start the restricted-token child: %lu\n", GetLastError());
+        return;
+    }
+    SetEnvironmentVariableA(CHILD_ENV, NULL);
+    WaitForSingleObject(Child.hProcess, 60000);
+    GetExitCodeProcess(Child.hProcess, &Exit);
+    CloseHandle(Child.hThread);
+    CloseHandle(Child.hProcess);
+
+    if (Exit == CHILD_OPEN_ALLOWED || Exit == CHILD_SETUP_FAILED)
+    {
+        skip("restricted-token child: %s (exit %lu)\n",
+             Exit == CHILD_OPEN_ALLOWED ? "the device opens for the restricted token" : "token setup failed", Exit);
+        return;
+    }
+    ok(Exit == CHILD_OK, "restricted token: the answer was decided again after the thread got its token back "
+       "(child exit %lu)\n", Exit);
+}
+
 static void TestCanonicalNames(void)
 {
     ADDRINFOA Hints, *Info = NULL;
@@ -391,6 +525,25 @@ static void TestCanonicalNames(void)
         freeaddrinfo(Info);
     }
 
+    /* AF_UNSPEC with AI_ADDRCONFIG: with a usable non-loopback IPv6 address the ::1 entry carries the name; with
+       none, no entry is prepended and the IPv4 entry has to carry it (it was NULL) */
+    Info = NULL;
+    memset(&Hints, 0, sizeof(Hints));
+    Hints.ai_flags = AI_CANONNAME | AI_ADDRCONFIG;
+    Hints.ai_socktype = SOCK_STREAM;
+    Error = getaddrinfo("localhost", "80", &Hints, &Info);
+    ok(Error == 0 && Info, "getaddrinfo(localhost, AI_CANONNAME | AI_ADDRCONFIG): %d\n", Error);
+    if (Error == 0 && Info)
+    {
+        ok(Info->ai_canonname && !_stricmp(Info->ai_canonname, Host),
+           "AI_ADDRCONFIG: canonical name '%s', computer '%s' (usable IPv6: %d, first entry family %d)\n",
+           Info->ai_canonname ? Info->ai_canonname : "(null)", Host, HasUsableV6, Info->ai_family);
+        ok(Info->ai_family == (HasUsableV6 ? AF_INET6 : AF_INET), "AI_ADDRCONFIG: first entry family %d\n",
+           Info->ai_family);
+        ok(!Info->ai_next || Info->ai_next->ai_canonname == NULL, "AI_ADDRCONFIG: the second entry has a name\n");
+        freeaddrinfo(Info);
+    }
+
     /* a numeric address with a service: "[::1]:80" (Windows 10 measured) */
     Info = NULL;
     memset(&Hints, 0, sizeof(Hints));
@@ -412,6 +565,10 @@ START_TEST(getaddrinfo6)
     unsigned i;
     int Error;
 
+    /* the child of TestRestrictedToken: its exit code is the result */
+    if (GetEnvironmentVariableA(CHILD_ENV, NULL, 0))
+        ExitProcess(RestrictedChild());
+
     Error = WSAStartup(MAKEWORD(2, 2), &WsaData);
     ok_dec(Error, 0);
 
@@ -432,6 +589,7 @@ START_TEST(getaddrinfo6)
         RunCase((int)i, &Cases[i], 1);
 
     TestCanonicalNames();
+    TestRestrictedToken();
 
     WSACleanup();
 }
