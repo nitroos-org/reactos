@@ -889,6 +889,16 @@ WsGetProcess(VOID)
     return CurrentWsProcess;
 }
 
+/* src/ipv6state.c: whether the stack has IPv6 on (Tcpip\Parameters\Ipv6Enable), and what addresses it has */
+typedef struct _WS_IPV6_INFO
+{
+    ULONG NonLoopback;
+    ULONG Global;
+} WS_IPV6_INFO, *PWS_IPV6_INFO;
+
+BOOL
+WsQueryIpv6(PWS_IPV6_INFO Info);
+
 FORCEINLINE
 DWORD
 WsQuickProlog(VOID)
