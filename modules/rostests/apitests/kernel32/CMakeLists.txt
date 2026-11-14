@@ -60,6 +60,7 @@ list(APPEND SOURCE
     CreateProcessILOnly.c
     CreateSymbolicLink.c
     CreateProcessRace.c
+    ManyProcesses.c
     CreateProcessStdHandles.c
     CreateWaitableTimerEx.c
     DefaultDllDirectories.c
@@ -289,6 +290,12 @@ set_module_type(advapi32_modules_child win32cui ENTRYPOINT mainCRTStartup)
 add_importlibs(advapi32_modules_child advapi32 kernel32)
 add_dependencies(kernel32_apitest advapi32_modules_child)
 add_rostests_file(TARGET advapi32_modules_child)
+
+add_executable(manyproc_child manyproc_child.c)
+set_module_type(manyproc_child win32cui ENTRYPOINT mainCRTStartup)
+add_importlibs(manyproc_child kernel32)
+add_dependencies(kernel32_apitest manyproc_child)
+add_rostests_file(TARGET manyproc_child)
 
 add_executable(wow64_native wow64_native.c)
 set_module_type(wow64_native win32cui ENTRYPOINT mainCRTStartup)
