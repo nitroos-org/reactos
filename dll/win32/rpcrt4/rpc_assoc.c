@@ -74,6 +74,8 @@ static RPC_STATUS RpcAssoc_Alloc(LPCSTR Protseq, LPCSTR NetworkAddr,
     list_init(&assoc->context_handle_list);
     InitializeCriticalSectionEx(&assoc->cs, 0, RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO);
     assoc->cs.DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": RpcAssoc.cs");
+    InitializeCriticalSectionEx(&assoc->group_cs, 0, RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO);
+    assoc->group_cs.DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": RpcAssoc.group_cs");
     assoc->Protseq = strdup(Protseq);
     assoc->NetworkAddr = strdup(NetworkAddr);
     assoc->Endpoint = strdup(Endpoint);
@@ -217,6 +219,8 @@ ULONG RpcAssoc_Release(RpcAssoc *assoc)
 
         assoc->cs.DebugInfo->Spare[0] = 0;
         DeleteCriticalSection(&assoc->cs);
+        assoc->group_cs.DebugInfo->Spare[0] = 0;
+        DeleteCriticalSection(&assoc->group_cs);
 
         free(assoc);
     }
@@ -395,7 +399,7 @@ RPC_STATUS RpcAssoc_GetClientConnection(RpcAssoc *assoc,
 {
     RpcConnection *NewConnection;
     RPC_STATUS status;
-    BOOL retried = FALSE;
+    BOOL retried = FALSE, naming_group = FALSE;
     ULONG gid;
 
     *Connection = RpcAssoc_GetIdleConnection(assoc, InterfaceId, TransferSyntax, AuthInfo, QOS);
@@ -427,8 +431,31 @@ RPC_STATUS RpcAssoc_GetClientConnection(RpcAssoc *assoc,
             return status;
         }
 
+        /* Connections bound without a group id each get a group of their own at the server, and a context
+         * handle of one group is unknown on a connection of another. So while the group is not known only one
+         * bind goes out (with id 0), and its answer names the group for all the others. */
         gid = assoc->assoc_group_id;
+        if (!gid)
+        {
+            EnterCriticalSection(&assoc->group_cs);
+            gid = assoc->assoc_group_id;
+            if (gid)
+                LeaveCriticalSection(&assoc->group_cs);
+            else
+                naming_group = TRUE;
+        }
         status = RpcAssoc_BindConnection(assoc, NewConnection, InterfaceId, TransferSyntax);
+        if (naming_group)
+        {
+            if (status == RPC_S_OK)
+            {
+                EnterCriticalSection(&assoc->cs);
+                if (!assoc->assoc_group_id) assoc->assoc_group_id = NewConnection->assoc_group_id;
+                LeaveCriticalSection(&assoc->cs);
+            }
+            naming_group = FALSE;
+            LeaveCriticalSection(&assoc->group_cs);
+        }
         if (status == RPC_S_OK)
             break;
 
