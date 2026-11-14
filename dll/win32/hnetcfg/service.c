@@ -32,6 +32,8 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(hnetcfg);
 
+/* NitroOS: the legacy objects are implemented in legacy.c on top of the rule store */
+#ifndef __REACTOS__
 typedef struct fw_service
 {
     INetFwService INetFwService_iface;
@@ -475,3 +477,4 @@ HRESULT NetFwServices_create( IUnknown *pUnkOuter, LPVOID *ppObj )
     TRACE("returning iface %p\n", *ppObj);
     return S_OK;
 }
+#endif /* !__REACTOS__ */

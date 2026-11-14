@@ -300,6 +300,7 @@ DWORD FwResetAll(VOID)
 {
     DWORD err;
     FwStoreDeleteAll();
+    RegDeleteKeyW(HKEY_LOCAL_MACHINE, FW_KEY_POLICY L"\\GlobalSettings");    /* netsh advfirewall set global */
     err = FwProfileReset(FWP_DOMAIN);
     if (!err) err = FwProfileReset(FWP_PRIVATE);
     if (!err) err = FwProfileReset(FWP_PUBLIC);

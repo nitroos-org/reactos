@@ -6,5 +6,7 @@
 #define REACTOS_STR_ORIGINAL_FILENAME "authfwcfg.dll"
 #include <reactos/version.rc>
 #include "resource_gen.h"
+#include "resource_ext.h"
 LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
 #include "lang/en-US_gen.rc"
+#include "lang/en-US_ext.rc"

@@ -778,8 +778,10 @@ SHOWFN(ShowPublic, FWP_PUBLIC, IDS_HLP_SHOW_PUB)
 static DWORD WINAPI ShowCurrent(LPCWSTR m, LPWSTR *argv, DWORD cur, DWORD cnt, DWORD fl, LPCVOID pv, BOOL *pDone)
 { return ShowProfile(FwCurrentProfiles(), argv, cur, cnt, IDS_HLP_SHOW_CUR); }
 
+static VOID PrintGlobalSettings(VOID);
+
 static DWORD WINAPI ShowGlobal(LPCWSTR m, LPWSTR *argv, DWORD cur, DWORD cnt, DWORD fl, LPCVOID pv, BOOL *pDone)
-{ OutRes(IDS_OUT_SHOW_GLOBAL); return ERROR_NETSH_OK; }
+{ PrintGlobalSettings(); return ERROR_NETSH_OK; }
 
 static DWORD WINAPI ShowStore(LPCWSTR m, LPWSTR *argv, DWORD cur, DWORD cnt, DWORD fl, LPCVOID pv, BOOL *pDone)
 { OutRes(IDS_OUT_SHOW_STORE); return ERROR_NETSH_OK; }
@@ -899,9 +901,448 @@ static DWORD WINAPI ResetCmd(LPCWSTR m, LPWSTR *argv, DWORD cur, DWORD cnt, DWOR
     return ERROR_NETSH_OK;   /* PROVISIONAL */
 }
 
+/* ---------------------------------------------------------------- global settings
+ * "set global" stores the IPsec / stateful FTP / main mode / category settings under
+ * FirewallPolicy\GlobalSettings (REG_SZ, the text "show global" prints); an absent value shows the default.
+ * Nothing in the packet filter reads them (there is no IPsec): they are kept and shown, as for any policy store.
+ * The value spellings of "show global" for strongcrlcheck 1/2, defaultexemptions, ipsecthroughnat and the
+ * accepted ranges are PROVISIONAL: only the default output was captured on the reference machine. */
+#define GLOBAL_KEY FW_KEY_POLICY L"\\GlobalSettings"
+
+enum { G_CRL, G_SAIDLE, G_EXEMPT, G_NAT, G_AUTHUSR, G_AUTHCOMP, G_AUTHUSRT, G_AUTHCOMPT, G_FTP, G_PPTP,
+       G_KEYLIFE, G_SECMETH, G_FORCEDH, G_CATBOOT, G_CATFW, G_CATSTEALTH, G_CATCONSEC, G_COUNT };
+
+static const struct { PCWSTR Name; PCWSTR Label; PCWSTR Default; } g_Global[G_COUNT] =
+{
+    { L"StrongCRLCheck", L"StrongCRLCheck", L"0:Disabled" },
+    { L"SAIdleTimeMin", L"SAIdleTimeMin", L"5min" },
+    { L"DefaultExemptions", L"DefaultExemptions", L"NeighborDiscovery,DHCP" },
+    { L"IPsecThroughNAT", L"IPsecThroughNAT", L"Never" },
+    { L"AuthzUserGrp", L"AuthzUserGrp", L"None" },
+    { L"AuthzComputerGrp", L"AuthzComputerGrp", L"None" },
+    { L"AuthzUserGrpTransport", L"AuthzUserGrpTransport", L"None" },
+    { L"AuthzComputerGrpTransport", L"AuthzComputerGrpTransport", L"None" },
+    { L"StatefulFTP", L"StatefulFTP", L"Enable" },
+    { L"StatefulPPTP", L"StatefulPPTP", L"Enable" },
+    { L"KeyLifetime", L"KeyLifetime", L"480min,0sess" },
+    { L"SecMethods", L"SecMethods", L"DHGroup2-AES128-SHA1,DHGroup2-3DES-SHA1" },
+    { L"ForceDH", L"ForceDH", L"No" },
+    { L"BootTimeRuleCategory", L"BootTimeRuleCategory", L"Windows Defender Firewall" },
+    { L"FirewallRuleCategory", L"FirewallRuleCategory", L"Windows Defender Firewall" },
+    { L"StealthRuleCategory", L"StealthRuleCategory", L"Windows Defender Firewall" },
+    { L"ConSecRuleCategory", L"ConSecRuleCategory", L"Windows Defender Firewall" },
+};
+
+static BOOL GlobalGet(UINT id, PWSTR buf, DWORD cch)
+{
+    HKEY hk; DWORD t, cb = cch * sizeof(WCHAR); BOOL ok = FALSE;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, GLOBAL_KEY, 0, KEY_READ, &hk)) return FALSE;
+    if (!RegQueryValueExW(hk, g_Global[id].Name, NULL, &t, (BYTE *)buf, &cb) && t == REG_SZ && cb >= sizeof(WCHAR) && cb < cch * sizeof(WCHAR))
+        ok = TRUE;
+    RegCloseKey(hk);
+    return ok;
+}
+
+/* value NULL: back to "not configured" */
+static DWORD GlobalSet(UINT id, PCWSTR value)
+{
+    HKEY hk; DWORD err, disp;
+    err = RegCreateKeyExW(HKEY_LOCAL_MACHINE, GLOBAL_KEY, 0, NULL, 0, KEY_SET_VALUE, NULL, &hk, &disp);
+    if (err) return err;
+    if (value) err = RegSetValueExW(hk, g_Global[id].Name, 0, REG_SZ, (const BYTE *)value, (DWORD)((wcslen(value) + 1) * sizeof(WCHAR)));
+    else { err = RegDeleteValueW(hk, g_Global[id].Name); if (err == ERROR_FILE_NOT_FOUND) err = 0; }
+    RegCloseKey(hk);
+    return err;
+}
+
+static VOID GlobalLine(UINT id)
+{
+    WCHAR v[600];
+    if (!GlobalGet(id, v, _countof(v))) wcscpy(v, g_Global[id].Default);
+    Line(g_Global[id].Label, v);
+}
+
+/* the "Global Settings:" block of show global and monitor show firewall */
+static VOID PrintGlobalSettings(VOID)
+{
+    UINT i;
+    Out(L"\nGlobal Settings: \n"); Out(g_Dashes); Out(L"\nIPsec:\n");
+    for (i = G_CRL; i <= G_AUTHCOMPT; i++) GlobalLine(i);
+    Out(L"\n");
+    GlobalLine(G_FTP); GlobalLine(G_PPTP);
+    Out(L"\nMain Mode:\n");
+    for (i = G_KEYLIFE; i <= G_FORCEDH; i++) GlobalLine(i);
+    Out(L"\nCategories:\n");
+    for (i = G_CATBOOT; i <= G_CATCONSEC; i++) GlobalLine(i);
+    Out(L"\n");
+}
+
+static BOOL ParseUlong(PCWSTR s, ULONG max, ULONG *out)
+{
+    ULONGLONG n = 0;
+    if (!*s) return FALSE;
+    for (; *s; s++) { if (*s < L'0' || *s > L'9') return FALSE; n = n * 10 + (*s - L'0'); if (n > max) return FALSE; }
+    *out = (ULONG)n;
+    return TRUE;
+}
+
+static BOOL IsNotConfigured(PCWSTR s) { return !_wcsicmp(s, L"notconfigured"); }
+
+/* mmsecmethods: kex:enc-integrity[,...] -> DHGroup2-AES128-SHA1,... */
+static BOOL FormatSecMethods(PCWSTR in, PWSTR out, SIZE_T cch)
+{
+    static const PCWSTR kex[] = { L"dhgroup1", L"DHGroup1", L"dhgroup2", L"DHGroup2", L"dhgroup14", L"DHGroup14", L"dhgroup24", L"DHGroup24",
+                                  L"ecdhp256", L"ECDHP256", L"ecdhp384", L"ECDHP384" };
+    static const PCWSTR enc[] = { L"3des", L"3DES", L"des", L"DES", L"aes128", L"AES128", L"aes192", L"AES192", L"aes256", L"AES256" };
+    static const PCWSTR integ[] = { L"md5", L"MD5", L"sha1", L"SHA1", L"sha256", L"SHA256", L"sha384", L"SHA384" };
+    WCHAR *copy = _wcsdup(in), *tok, *save = NULL; BOOL ok = copy != NULL; UINT n = 0;
+    out[0] = 0;
+    for (tok = ok ? wcstok(copy, L",") : NULL; tok && ok; tok = wcstok(NULL, L","))
+    {
+        WCHAR *colon = wcschr(tok, L':'), *dash; UINT i; PCWSTR k = NULL, e = NULL, g = NULL;
+        (void)save;
+        if (!colon) { ok = FALSE; break; }
+        *colon = 0; dash = wcschr(colon + 1, L'-');
+        if (!dash) { ok = FALSE; break; }
+        *dash = 0;
+        for (i = 0; i < _countof(kex); i += 2) if (!_wcsicmp(tok, kex[i])) k = kex[i + 1];
+        for (i = 0; i < _countof(enc); i += 2) if (!_wcsicmp(colon + 1, enc[i])) e = enc[i + 1];
+        for (i = 0; i < _countof(integ); i += 2) if (!_wcsicmp(dash + 1, integ[i])) g = integ[i + 1];
+        if (!k || !e || !g || wcslen(out) + wcslen(k) + wcslen(e) + wcslen(g) + 4 >= cch) { ok = FALSE; break; }
+        if (n++) wcscat(out, L",");
+        wcscat(out, k); wcscat(out, L"-"); wcscat(out, e); wcscat(out, L"-"); wcscat(out, g);
+    }
+    free(copy);
+    return ok && n;
+}
+
+/* mmkeylifetime: <n>min[,<m>sess] | <m>sess[,<n>min] */
+static BOOL FormatKeyLifetime(PCWSTR in, PWSTR out)
+{
+    WCHAR *copy = _wcsdup(in), *tok; BOOL ok = copy != NULL, haveMin = FALSE, haveSess = FALSE; ULONG mins = 480, sess = 0;
+    for (tok = ok ? wcstok(copy, L",") : NULL; tok && ok; tok = wcstok(NULL, L","))
+    {
+        SIZE_T l = wcslen(tok); WCHAR *num;
+        if (l > 3 && !_wcsicmp(tok + l - 3, L"min") && !haveMin)
+        { num = tok; tok[l - 3] = 0; ok = ParseUlong(num, 2880, &mins) && mins >= 1; haveMin = TRUE; }
+        else if (l > 4 && !_wcsicmp(tok + l - 4, L"sess") && !haveSess)
+        { num = tok; tok[l - 4] = 0; ok = ParseUlong(num, 2147483647, &sess); haveSess = TRUE; }
+        else ok = FALSE;
+    }
+    free(copy);
+    if (!ok || (!haveMin && !haveSess)) return FALSE;
+    _swprintf(out, L"%umin,%usess", mins, sess);
+    return TRUE;
+}
+
+static DWORD SetGlobalValue(UINT id, PCWSTR value, UINT helpId)
+{
+    DWORD err = GlobalSet(id, IsNotConfigured(value) ? NULL : value);
+    return err ? err : ERROR_NETSH_OK;
+}
+
+static DWORD WINAPI SetGlobal(LPCWSTR m, LPWSTR *argv, DWORD cur, DWORD cnt, DWORD fl, LPCVOID pv, BOOL *pDone)
+{
+    DWORD left = cnt - cur; PCWSTR sect, par, val; WCHAR buf[600]; ULONG n; UINT i;
+    if (left < 2) return Fail(IDS_PFX_NUMARGS, IDS_HLP_SET_GLOBAL, TRUE);
+    sect = argv[cur];
+    if (!_wcsicmp(sect, L"statefulftp") || !_wcsicmp(sect, L"statefulpptp"))
+    {
+        UINT id = !_wcsicmp(sect, L"statefulftp") ? G_FTP : G_PPTP;
+        if (left != 2) return Fail(IDS_PFX_NUMARGS, IDS_HLP_SET_GLOBAL, TRUE);
+        val = argv[cur + 1];
+        if (!_wcsicmp(val, L"enable")) return SetGlobalValue(id, L"Enable", IDS_HLP_SET_GLOBAL);
+        if (!_wcsicmp(val, L"disable")) return SetGlobalValue(id, L"Disable", IDS_HLP_SET_GLOBAL);
+        if (IsNotConfigured(val)) return SetGlobalValue(id, val, IDS_HLP_SET_GLOBAL);
+        return Fail(IDS_PFX_VALUE, IDS_HLP_SET_GLOBAL, TRUE);
+    }
+    if (!_wcsicmp(sect, L"mainmode") && left == 2 && IsNotConfigured(argv[cur + 1]))
+    {
+        DWORD err = 0;
+        for (i = G_KEYLIFE; i <= G_FORCEDH && !err; i++) err = GlobalSet(i, NULL);
+        return err ? err : ERROR_NETSH_OK;
+    }
+    if (_wcsicmp(sect, L"ipsec") && _wcsicmp(sect, L"mainmode")) return Fail(IDS_PFX_VALUE, IDS_HLP_SET_GLOBAL, TRUE);
+    if (left != 3) return Fail(IDS_PFX_NUMARGS, IDS_HLP_SET_GLOBAL, TRUE);
+    par = argv[cur + 1]; val = argv[cur + 2];
+    if (!_wcsicmp(sect, L"ipsec"))
+    {
+        if (!_wcsicmp(par, L"strongcrlcheck"))
+        {
+            if (IsNotConfigured(val)) return SetGlobalValue(G_CRL, val, IDS_HLP_SET_GLOBAL);
+            if (!ParseUlong(val, 2, &n)) return Fail(IDS_PFX_VALUE, IDS_HLP_SET_GLOBAL, TRUE);
+            return SetGlobalValue(G_CRL, n == 0 ? L"0:Disabled" : (n == 1 ? L"1:Enabled" : L"2:Enabled"), IDS_HLP_SET_GLOBAL);
+        }
+        if (!_wcsicmp(par, L"saidletimemin"))
+        {
+            if (IsNotConfigured(val)) return SetGlobalValue(G_SAIDLE, val, IDS_HLP_SET_GLOBAL);
+            if (!ParseUlong(val, 60, &n) || n < 5) return Fail(IDS_PFX_VALUE, IDS_HLP_SET_GLOBAL, TRUE);
+            _swprintf(buf, L"%umin", n);
+            return SetGlobalValue(G_SAIDLE, buf, IDS_HLP_SET_GLOBAL);
+        }
+        if (!_wcsicmp(par, L"defaultexemptions"))
+        {
+            WCHAR *copy; WCHAR *tok; BOOL nd = FALSE, icmp = FALSE, dhcp = FALSE, none = FALSE, ok = TRUE;
+            if (IsNotConfigured(val)) return SetGlobalValue(G_EXEMPT, val, IDS_HLP_SET_GLOBAL);
+            copy = _wcsdup(val);
+            for (tok = copy ? wcstok(copy, L",") : NULL; tok; tok = wcstok(NULL, L","))
+            {
+                if (!_wcsicmp(tok, L"none")) none = TRUE; else if (!_wcsicmp(tok, L"neighbordiscovery")) nd = TRUE;
+                else if (!_wcsicmp(tok, L"icmp")) icmp = TRUE; else if (!_wcsicmp(tok, L"dhcp")) dhcp = TRUE; else ok = FALSE;
+            }
+            free(copy);
+            if (!ok || (none && (nd || icmp || dhcp)) || !(none || nd || icmp || dhcp)) return Fail(IDS_PFX_VALUE, IDS_HLP_SET_GLOBAL, TRUE);
+            buf[0] = 0;
+            if (none) wcscpy(buf, L"None");
+            if (nd) wcscat(buf, L"NeighborDiscovery");
+            if (icmp) { if (*buf) wcscat(buf, L","); wcscat(buf, L"ICMP"); }
+            if (dhcp) { if (*buf) wcscat(buf, L","); wcscat(buf, L"DHCP"); }
+            return SetGlobalValue(G_EXEMPT, buf, IDS_HLP_SET_GLOBAL);
+        }
+        if (!_wcsicmp(par, L"ipsecthroughnat"))
+        {
+            if (IsNotConfigured(val)) return SetGlobalValue(G_NAT, val, IDS_HLP_SET_GLOBAL);
+            if (!_wcsicmp(val, L"never")) return SetGlobalValue(G_NAT, L"Never", IDS_HLP_SET_GLOBAL);
+            if (!_wcsicmp(val, L"serverbehindnat")) return SetGlobalValue(G_NAT, L"ServerBehindNAT", IDS_HLP_SET_GLOBAL);
+            if (!_wcsicmp(val, L"serverandclientbehindnat")) return SetGlobalValue(G_NAT, L"ServerAndClientBehindNAT", IDS_HLP_SET_GLOBAL);
+            return Fail(IDS_PFX_VALUE, IDS_HLP_SET_GLOBAL, TRUE);
+        }
+        if (!_wcsicmp(par, L"authzcomputergrp") || !_wcsicmp(par, L"authzusergrp"))
+        {
+            UINT id = !_wcsicmp(par, L"authzcomputergrp") ? G_AUTHCOMP : G_AUTHUSR;
+            if (IsNotConfigured(val)) return SetGlobalValue(id, val, IDS_HLP_SET_GLOBAL);
+            if (!_wcsicmp(val, L"none")) return SetGlobalValue(id, L"None", IDS_HLP_SET_GLOBAL);
+            {
+                PSECURITY_DESCRIPTOR sd = NULL;
+                if (wcslen(val) >= _countof(buf) || !ConvertStringSecurityDescriptorToSecurityDescriptorW(val, SDDL_REVISION_1, &sd, NULL))
+                    return Fail(IDS_PFX_VALUE, IDS_HLP_SET_GLOBAL, TRUE);
+                LocalFree(sd);
+            }
+            return SetGlobalValue(id, val, IDS_HLP_SET_GLOBAL);
+        }
+        return Fail(IDS_PFX_VALUE, IDS_HLP_SET_GLOBAL, TRUE);
+    }
+    /* mainmode */
+    if (!_wcsicmp(par, L"mmkeylifetime"))
+    {
+        if (IsNotConfigured(val)) return SetGlobalValue(G_KEYLIFE, val, IDS_HLP_SET_GLOBAL);
+        if (!FormatKeyLifetime(val, buf)) return Fail(IDS_PFX_VALUE, IDS_HLP_SET_GLOBAL, TRUE);
+        return SetGlobalValue(G_KEYLIFE, buf, IDS_HLP_SET_GLOBAL);
+    }
+    if (!_wcsicmp(par, L"mmsecmethods"))
+    {
+        if (IsNotConfigured(val) || !_wcsicmp(val, L"default")) return SetGlobalValue(G_SECMETH, L"notconfigured", IDS_HLP_SET_GLOBAL);
+        if (!FormatSecMethods(val, buf, _countof(buf))) return Fail(IDS_PFX_VALUE, IDS_HLP_SET_GLOBAL, TRUE);
+        return SetGlobalValue(G_SECMETH, buf, IDS_HLP_SET_GLOBAL);
+    }
+    if (!_wcsicmp(par, L"mmforcedh"))
+    {
+        if (!_wcsicmp(val, L"yes")) return SetGlobalValue(G_FORCEDH, L"Yes", IDS_HLP_SET_GLOBAL);
+        if (!_wcsicmp(val, L"no")) return SetGlobalValue(G_FORCEDH, L"No", IDS_HLP_SET_GLOBAL);
+        if (IsNotConfigured(val)) return SetGlobalValue(G_FORCEDH, val, IDS_HLP_SET_GLOBAL);
+        return Fail(IDS_PFX_VALUE, IDS_HLP_SET_GLOBAL, TRUE);
+    }
+    return Fail(IDS_PFX_VALUE, IDS_HLP_SET_GLOBAL, TRUE);
+}
+
+/* ---------------------------------------------------------------- export / import / dump
+ * The export file is a text file of our own ("NitroFW-Policy 1"): the three profiles, the global settings and
+ * every rule in the stored v2.x form. Windows' .wfw is a binary registry hive that only netsh reads; a file
+ * made here is not readable there, and the reverse. import replaces the whole local policy, after the file was
+ * parsed completely: a file that does not parse changes nothing. */
+#define POLICY_MAGIC L"NitroFW-Policy 1"
+
+typedef struct _PBUF { PWSTR s; SIZE_T len, cap; BOOL fail; } PBUF;
+
+static VOID PAppend(PBUF *b, PCWSTR s)
+{
+    SIZE_T n = wcslen(s);
+    if (b->fail) return;
+    if (b->len + n + 1 > b->cap)
+    {
+        SIZE_T nc = (b->cap ? b->cap * 2 : 4096) + n;
+        PWSTR p = b->s ? HeapReAlloc(GetProcessHeap(), 0, b->s, nc * sizeof(WCHAR)) : HeapAlloc(GetProcessHeap(), 0, nc * sizeof(WCHAR));
+        if (!p) { b->fail = TRUE; return; }
+        b->s = p; b->cap = nc;
+    }
+    memcpy(b->s + b->len, s, (n + 1) * sizeof(WCHAR));
+    b->len += n;
+}
+
+static VOID PAppendF(PBUF *b, PCWSTR fmt, ...)
+{
+    WCHAR t[1200]; va_list ap;
+    va_start(ap, fmt); _vsnwprintf(t, _countof(t) - 1, fmt, ap); va_end(ap);
+    t[_countof(t) - 1] = 0;
+    PAppend(b, t);
+}
+
+static DWORD WINAPI ExportCmd(LPCWSTR m, LPWSTR *argv, DWORD cur, DWORD cnt, DWORD fl, LPCVOID pv, BOOL *pDone)
+{
+    PBUF b = { 0 }; FW_RULESET rs; ULONG i, bit; DWORD err, wrote; HANDLE h; int u8; char *bytes;
+    if (cnt - cur != 1 || !*argv[cur]) return Fail(IDS_PFX_NUMARGS, IDS_HLP_EXPORT, TRUE);
+    err = FwStoreLoad(&rs);
+    if (err) return err;
+    PAppend(&b, POLICY_MAGIC L"\r\n");
+    for (bit = 1; bit <= 4; bit <<= 1)
+    {
+        FW_PROFILE p;
+        FwProfileLoad(bit, &p);
+        PAppendF(&b, L"P %u EnableFirewall=%u\r\nP %u DoNotAllowExceptions=%u\r\nP %u DisableNotifications=%u\r\n", bit, p.Enable, bit, p.DoNotAllowExceptions, bit, p.DisableNotifications);
+        PAppendF(&b, L"P %u DefaultInboundAction=%u\r\nP %u DefaultOutboundAction=%u\r\nP %u DisableUnicastResponsesToMulticastBroadcast=%u\r\n", bit, p.DefaultInbound, bit, p.DefaultOutbound, bit, p.DisableUnicastResponses);
+        PAppendF(&b, L"P %u LogFileSize=%u\r\nP %u LogDroppedPackets=%u\r\nP %u LogSuccessfulConnections=%u\r\nP %u LogFilePath=%s\r\n", bit, p.LogFileSize, bit, p.LogDropped, bit, p.LogSuccess, bit, p.LogFile);
+    }
+    for (i = 0; i < G_COUNT; i++) { WCHAR v[600]; if (GlobalGet(i, v, _countof(v))) PAppendF(&b, L"G %s=%s\r\n", g_Global[i].Name, v); }
+    for (i = 0; i < rs.N; i++)
+    {
+        FWR raw; PWSTR s;
+        if (!FwRuleToRaw(&rs.R[i], &raw)) { b.fail = TRUE; break; }
+        s = FwrFormat(&raw);
+        if (s) { PAppendF(&b, L"R %s %s\r\n", rs.R[i].Id, s); FwFree(s); } else b.fail = TRUE;
+        FwrFree(&raw);
+    }
+    FwRuleSetFree(&rs);
+    if (b.fail) { HeapFree(GetProcessHeap(), 0, b.s); return ERROR_NOT_ENOUGH_MEMORY; }
+    u8 = WideCharToMultiByte(CP_UTF8, 0, b.s, (int)b.len, NULL, 0, NULL, NULL);
+    bytes = HeapAlloc(GetProcessHeap(), 0, u8 + 1);
+    if (!bytes) { HeapFree(GetProcessHeap(), 0, b.s); return ERROR_NOT_ENOUGH_MEMORY; }
+    WideCharToMultiByte(CP_UTF8, 0, b.s, (int)b.len, bytes, u8, NULL, NULL);
+    HeapFree(GetProcessHeap(), 0, b.s);
+    h = CreateFileW(argv[cur], GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) { err = GetLastError(); HeapFree(GetProcessHeap(), 0, bytes); return err; }
+    err = (WriteFile(h, bytes, u8, &wrote, NULL) && wrote == (DWORD)u8) ? 0 : GetLastError();
+    if (!CloseHandle(h) && !err) err = GetLastError();
+    HeapFree(GetProcessHeap(), 0, bytes);
+    return err ? err : ERROR_NETSH_OK;
+}
+
+typedef struct _IMPORTP { ULONG bit; WCHAR name[64]; DWORD num; PWSTR str; BOOL log; } IMPORTP;
+
+static DWORD WINAPI ImportCmd(LPCWSTR m, LPWSTR *argv, DWORD cur, DWORD cnt, DWORD fl, LPCVOID pv, BOOL *pDone)
+{
+    HANDLE h; DWORD size, got, err = 0; char *bytes; PWSTR text, line, nl; int wl;
+    FW_RULE *rules = NULL; ULONG nrules = 0, i, ngl = 0, nlines; IMPORTP *prof = NULL; ULONG nprof = 0;
+    struct { UINT id; PWSTR v; } *gl = NULL; BOOL bad = FALSE;
+    if (cnt - cur != 1 || !*argv[cur]) return Fail(IDS_PFX_NUMARGS, IDS_HLP_IMPORT, TRUE);
+    h = CreateFileW(argv[cur], GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return GetLastError();
+    size = GetFileSize(h, NULL);
+    if (size == INVALID_FILE_SIZE || size > 8 * 1024 * 1024) { CloseHandle(h); return ERROR_INVALID_DATA; }
+    bytes = HeapAlloc(GetProcessHeap(), 0, size + 1);
+    if (!bytes) { CloseHandle(h); return ERROR_NOT_ENOUGH_MEMORY; }
+    if (!ReadFile(h, bytes, size, &got, NULL) || got != size) { err = GetLastError(); CloseHandle(h); HeapFree(GetProcessHeap(), 0, bytes); return err ? err : ERROR_READ_FAULT; }
+    CloseHandle(h);
+    wl = MultiByteToWideChar(CP_UTF8, 0, bytes, size, NULL, 0);
+    text = HeapAlloc(GetProcessHeap(), 0, (wl + 1) * sizeof(WCHAR));
+    if (!text) { HeapFree(GetProcessHeap(), 0, bytes); return ERROR_NOT_ENOUGH_MEMORY; }
+    MultiByteToWideChar(CP_UTF8, 0, bytes, size, text, wl);
+    text[wl] = 0;
+    HeapFree(GetProcessHeap(), 0, bytes);
+
+    line = text;
+    if (wcsncmp(line, POLICY_MAGIC, wcslen(POLICY_MAGIC))) bad = TRUE;
+    for (nlines = 1, nl = text; (nl = wcschr(nl, L'\n')) != NULL; nl++) nlines++;
+    rules = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, nlines * sizeof(FW_RULE));
+    prof = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, nlines * sizeof(IMPORTP));
+    gl = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, G_COUNT * sizeof(*gl));
+    if (!rules || !prof || !gl) bad = TRUE, err = ERROR_NOT_ENOUGH_MEMORY;
+    for (nl = line; !bad && nl; line = nl ? nl + 1 : NULL)
+    {
+        nl = wcschr(line, L'\n');
+        if (nl) { *nl = 0; if (nl > line && nl[-1] == L'\r') nl[-1] = 0; }
+        if (line == text || !*line) continue;
+        if (!wcsncmp(line, L"P ", 2))
+        {
+            WCHAR *eq, *sp; ULONG bit = _wtoi(line + 2);
+            sp = wcschr(line + 2, L' ');
+            eq = sp ? wcschr(sp, L'=') : NULL;
+            if (!eq || (bit != 1 && bit != 2 && bit != 4) || (SIZE_T)(eq - sp) >= _countof(prof[0].name)) { bad = TRUE; break; }
+            prof[nprof].bit = bit;
+            memcpy(prof[nprof].name, sp + 1, (eq - sp - 1) * sizeof(WCHAR));
+            prof[nprof].name[eq - sp - 1] = 0;
+            { /* only the values this helper writes itself */
+                static const PCWSTR known[] = { L"EnableFirewall", L"DoNotAllowExceptions", L"DisableNotifications", L"DefaultInboundAction",
+                    L"DefaultOutboundAction", L"DisableUnicastResponsesToMulticastBroadcast", L"LogFileSize", L"LogDroppedPackets",
+                    L"LogSuccessfulConnections", L"LogFilePath" };
+                UINT k;
+                for (k = 0; k < _countof(known); k++) if (!wcscmp(prof[nprof].name, known[k])) break;
+                if (k == _countof(known)) { bad = TRUE; break; }
+            }
+            prof[nprof].log = !_wcsnicmp(prof[nprof].name, L"Log", 3);
+            if (!wcscmp(prof[nprof].name, L"LogFilePath")) prof[nprof].str = eq + 1; else prof[nprof].num = _wtoi(eq + 1);
+            nprof++;
+        }
+        else if (!wcsncmp(line, L"G ", 2))
+        {
+            WCHAR *eq = wcschr(line + 2, L'='); UINT id;
+            if (!eq || ngl >= G_COUNT) { bad = TRUE; break; }
+            *eq = 0;
+            for (id = 0; id < G_COUNT; id++) if (!wcscmp(line + 2, g_Global[id].Name)) break;
+            if (id == G_COUNT) { bad = TRUE; break; }
+            gl[ngl].id = id; gl[ngl].v = eq + 1; ngl++;
+        }
+        else if (!wcsncmp(line, L"R ", 2))
+        {
+            WCHAR *sp = wcschr(line + 2, L' '); FWR raw; PCWSTR id = line + 2;
+            if (!sp) { bad = TRUE; break; }
+            *sp = 0;
+            FwrInit(&raw);
+            if (!FwrParse(&raw, id, sp + 1)) { FwrFree(&raw); bad = TRUE; break; }
+            FwRuleInit(&rules[nrules]);
+            if (!FwRuleFromRaw(&rules[nrules], &raw) || !FwRuleSetStr(&rules[nrules].Id, id)) { FwrFree(&raw); bad = TRUE; break; }
+            FwrFree(&raw);
+            nrules++;
+        }
+        else { bad = TRUE; break; }
+    }
+    if (bad)
+    {
+        if (!err) err = ERROR_INVALID_DATA;
+    }
+    else
+    {
+        err = FwStoreDeleteAll();
+        for (i = 0; i < nrules && !err; i++) err = FwStoreAdd(&rules[i]);
+        for (i = 0; i < nprof && !err; i++)
+        {
+            if (prof[i].str) err = FwProfileSetString(prof[i].bit, prof[i].name, prof[i].str, prof[i].log);
+            else err = FwProfileSetDword(prof[i].bit, prof[i].name, prof[i].num, prof[i].log);
+        }
+        RegDeleteKeyW(HKEY_LOCAL_MACHINE, GLOBAL_KEY);
+        for (i = 0; i < ngl && !err; i++) err = GlobalSet(gl[i].id, gl[i].v);
+    }
+    for (i = 0; i < nrules; i++) FwRuleFree(&rules[i]);
+    HeapFree(GetProcessHeap(), 0, rules); HeapFree(GetProcessHeap(), 0, prof); HeapFree(GetProcessHeap(), 0, gl);
+    HeapFree(GetProcessHeap(), 0, text);
+    return err ? err : ERROR_NETSH_OK;
+}
+
+/* "dump" is not implemented by Windows' advfirewall context either: it prints a pointer to export (captured text) */
+static DWORD WINAPI AdvDumpFn(LPCWSTR pwszRouter, LPWSTR *ppwcArguments, DWORD dwArgCount, LPCVOID pvData)
+{
+    OutRes(IDS_OUT_DUMP_NA);
+    return ERROR_SUPPRESS_OUTPUT;
+}
+
+/* ---------------------------------------------------------------- consec / mainmode rules
+ * There is no IPsec: no connection security or main mode rule can exist, so show and delete find none.
+ * (Output of "consec show rule name=all" captured on the reference machine; delete and the mainmode forms follow
+ * the same message and are PROVISIONAL.) add and set are not supported. */
+static DWORD NoRules(LPWSTR *argv, DWORD cur, DWORD cnt)
+{
+    DWORD i; BOOL name = FALSE;
+    for (i = cur; i < cnt; i++) if (!_wcsnicmp(argv[i], L"name=", 5)) name = TRUE;
+    if (!name) { OutFailRes(IDS_MSG_ESSENTIAL); return ERROR_NETSH_FAILED_OUTPUT; }
+    OutFailRes(IDS_MSG_NORULES);
+    return ERROR_NETSH_FAILED_OUTPUT;
+}
+
+static DWORD WINAPI NoRulesCmd(LPCWSTR m, LPWSTR *argv, DWORD cur, DWORD cnt, DWORD fl, LPCVOID pv, BOOL *pDone)
+{ return NoRules(argv, cur, cnt); }
+
 /* ---------------------------------------------------------------- tables and registration */
 
-static CMD_ENTRY g_FwAdd[]    = { { L"rule", AddRule,     IDS_SH_FW_ADD,    IDS_HLP_ADDRULE,  0, NULL } };
+static CMD_ENTRY g_FwAdd[]   = { { L"rule", AddRule,     IDS_SH_FW_ADD,    IDS_HLP_ADDRULE,  0, NULL } };
 static CMD_ENTRY g_FwDelete[] = { { L"rule", DeleteRule,  IDS_SH_FW_DELETE, IDS_HLP_DELRULE,  0, NULL } };
 static CMD_ENTRY g_FwSet[]    = { { L"rule", SetRule,     IDS_SH_FW_SET,    IDS_HLP_SETRULE,  0, NULL } };
 static CMD_ENTRY g_FwShow[]   = { { L"rule", ShowRuleCmd, IDS_SH_FW_SHOW,   IDS_HLP_SHOWRULE, 0, NULL } };
@@ -918,7 +1359,7 @@ static CMD_ENTRY g_AdvSet[] =
     { L"allprofiles",    SetAll,     IDS_SH_SETG_SET_ALLPROFILES,    IDS_HLP_SET_ALL,  0, NULL },
     { L"currentprofile", SetCurrent, IDS_SH_SETG_SET_CURRENTPROFILE, IDS_HLP_SET_CUR,  0, NULL },
     { L"domainprofile",  SetDomain,  IDS_SH_SETG_SET_DOMAINPROFILE,  IDS_HLP_SET_DOM,  0, NULL },
-    { L"global",         NotSupported, IDS_SH_SETG_SET_GLOBAL,      IDS_HLP_SET_GLOBAL, 0, NULL },
+    { L"global",         SetGlobal,  IDS_SH_SETG_SET_GLOBAL,      IDS_HLP_SET_GLOBAL, 0, NULL },
     { L"privateprofile", SetPrivate, IDS_SH_SETG_SET_PRIVATEPROFILE, IDS_HLP_SET_PRIV, 0, NULL },
     { L"publicprofile",  SetPublic,  IDS_SH_SETG_SET_PUBLICPROFILE,  IDS_HLP_SET_PUB,  0, NULL },
 };
@@ -934,8 +1375,8 @@ static CMD_ENTRY g_AdvShow[] =
 };
 static CMD_ENTRY g_AdvTop[] =
 {
-    { L"export", NotSupported, IDS_SH_ADV_EXPORT, IDS_HLP_EXPORT,  0, NULL },
-    { L"import", NotSupported, IDS_SH_ADV_IMPORT, IDS_HLP_IMPORT,  0, NULL },
+    { L"export", ExportCmd,    IDS_SH_ADV_EXPORT, IDS_HLP_EXPORT,  0, NULL },
+    { L"import", ImportCmd,    IDS_SH_ADV_IMPORT, IDS_HLP_IMPORT,  0, NULL },
     { L"reset",  ResetCmd,     IDS_SH_ADV_RESET,  IDS_HLP_RESET,   0, NULL },
 };
 static CMD_GROUP_ENTRY g_AdvGroups[] =
@@ -986,7 +1427,7 @@ static DWORD WINAPI MonShowFirewall(LPCWSTR m, LPWSTR *argv, DWORD cur, DWORD cn
     }
     if (!rule)
     {
-        OutRes(IDS_OUT_SHOW_GLOBAL);
+        PrintGlobalSettings();
         for (b = 1; b <= 4; b <<= 1) ShowProfileBlock(b, SEC_ALL, TRUE);
         Out(L"\n");
         return ERROR_NETSH_OK;
@@ -1045,18 +1486,18 @@ static DWORD WINAPI MonShowMainMode(LPCWSTR m, LPWSTR *argv, DWORD cur, DWORD cn
 
 /* consec / mainmode / monitor: listed and reachable, not implemented */
 static CMD_ENTRY g_ConsecAdd[]  = { { L"rule", NotSupported, IDS_SH_CONSEC_ADD,    0, 0, NULL } };
-static CMD_ENTRY g_ConsecDel[]  = { { L"rule", NotSupported, IDS_SH_CONSEC_DELETE, 0, 0, NULL } };
+static CMD_ENTRY g_ConsecDel[]  = { { L"rule", NoRulesCmd,   IDS_SH_CONSEC_DELETE, 0, 0, NULL } };
 static CMD_ENTRY g_ConsecSet[]  = { { L"rule", NotSupported, IDS_SH_CONSEC_SET,    0, 0, NULL } };
-static CMD_ENTRY g_ConsecShow[] = { { L"rule", NotSupported, IDS_SH_CONSEC_SHOW,   0, 0, NULL } };
+static CMD_ENTRY g_ConsecShow[] = { { L"rule", NoRulesCmd,   IDS_SH_CONSEC_SHOW,   0, 0, NULL } };
 static CMD_GROUP_ENTRY g_ConsecGroups[] =
 {
     { L"add", IDS_SH_CONSEC_ADD, 1, 0, g_ConsecAdd, NULL }, { L"delete", IDS_SH_CONSEC_DELETE, 1, 0, g_ConsecDel, NULL },
     { L"set", IDS_SH_CONSEC_SET, 1, 0, g_ConsecSet, NULL }, { L"show", IDS_SH_CONSEC_SHOW, 1, 0, g_ConsecShow, NULL },
 };
 static CMD_ENTRY g_MainAdd[]  = { { L"rule", NotSupported, IDS_SH_MAIN_ADD,    0, 0, NULL } };
-static CMD_ENTRY g_MainDel[]  = { { L"rule", NotSupported, IDS_SH_MAIN_DELETE, 0, 0, NULL } };
+static CMD_ENTRY g_MainDel[]  = { { L"rule", NoRulesCmd,   IDS_SH_MAIN_DELETE, 0, 0, NULL } };
 static CMD_ENTRY g_MainSet[]  = { { L"rule", NotSupported, IDS_SH_MAIN_SET,    0, 0, NULL } };
-static CMD_ENTRY g_MainShow[] = { { L"rule", NotSupported, IDS_SH_MAIN_SHOW,   0, 0, NULL } };
+static CMD_ENTRY g_MainShow[] = { { L"rule", NoRulesCmd,   IDS_SH_MAIN_SHOW,   0, 0, NULL } };
 static CMD_GROUP_ENTRY g_MainGroups[] =
 {
     { L"add", IDS_SH_MAIN_ADD, 1, 0, g_MainAdd, NULL }, { L"delete", IDS_SH_MAIN_DELETE, 1, 0, g_MainDel, NULL },
@@ -1083,12 +1524,7 @@ static DWORD WINAPI NoticeConnect(LPCWSTR pwszRouter)
     return ERROR_SUCCESS;
 }
 
-static DWORD WINAPI DumpFn(LPCWSTR pwszRouter, LPWSTR *ppwcArguments, DWORD dwArgCount, LPCVOID pvData)
-{
-    return ERROR_SUCCESS;
-}
-
-static VOID Register(PCWSTR name, const GUID *guid, CMD_ENTRY *top, ULONG ntop, CMD_GROUP_ENTRY *groups, ULONG ngroups, PNS_CONTEXT_CONNECT_FN conn)
+static VOID Register(PCWSTR name, const GUID *guid, CMD_ENTRY *top, ULONG ntop, CMD_GROUP_ENTRY *groups, ULONG ngroups, PNS_CONTEXT_CONNECT_FN conn, PNS_CONTEXT_DUMP_FN dump)
 {
     NS_CONTEXT_ATTRIBUTES ca;
     ZeroMemory(&ca, sizeof(ca));
@@ -1098,20 +1534,20 @@ static VOID Register(PCWSTR name, const GUID *guid, CMD_ENTRY *top, ULONG ntop, 
     ca.ulNumTopCmds = ntop; ca.pTopCmds = top;
     ca.ulNumGroups = ngroups; ca.pCmdGroups = groups;
     ca.pfnConnectFn = conn;
-    ca.pfnDumpFn = DumpFn;
+    ca.pfnDumpFn = dump;
     RegisterContext(&ca);
 }
 
 static DWORD WINAPI StartAdv(const GUID *parent, DWORD ver)
-{ Register(L"advfirewall", &GUID_ADVFW, g_AdvTop, _countof(g_AdvTop), g_AdvGroups, _countof(g_AdvGroups), NoticeConnect); return ERROR_SUCCESS; }
+{ Register(L"advfirewall", &GUID_ADVFW, g_AdvTop, _countof(g_AdvTop), g_AdvGroups, _countof(g_AdvGroups), NoticeConnect, AdvDumpFn); return ERROR_SUCCESS; }
 static DWORD WINAPI StartFw(const GUID *parent, DWORD ver)
-{ Register(L"firewall", &GUID_FW, NULL, 0, g_FwGroups, _countof(g_FwGroups), NULL); return ERROR_SUCCESS; }
+{ Register(L"firewall", &GUID_FW, NULL, 0, g_FwGroups, _countof(g_FwGroups), NULL, NULL); return ERROR_SUCCESS; }
 static DWORD WINAPI StartConsec(const GUID *parent, DWORD ver)
-{ Register(L"consec", &GUID_CONSEC, NULL, 0, g_ConsecGroups, _countof(g_ConsecGroups), NULL); return ERROR_SUCCESS; }
+{ Register(L"consec", &GUID_CONSEC, NULL, 0, g_ConsecGroups, _countof(g_ConsecGroups), NULL, NULL); return ERROR_SUCCESS; }
 static DWORD WINAPI StartMain(const GUID *parent, DWORD ver)
-{ Register(L"mainmode", &GUID_MAIN, NULL, 0, g_MainGroups, _countof(g_MainGroups), NULL); return ERROR_SUCCESS; }
+{ Register(L"mainmode", &GUID_MAIN, NULL, 0, g_MainGroups, _countof(g_MainGroups), NULL, NULL); return ERROR_SUCCESS; }
 static DWORD WINAPI StartMon(const GUID *parent, DWORD ver)
-{ Register(L"monitor", &GUID_MON, NULL, 0, g_MonGroups, _countof(g_MonGroups), NULL); return ERROR_SUCCESS; }
+{ Register(L"monitor", &GUID_MON, NULL, 0, g_MonGroups, _countof(g_MonGroups), NULL, NULL); return ERROR_SUCCESS; }
 
 DWORD WINAPI InitHelperDll(DWORD dwNetshVersion, PVOID pReserved)
 {

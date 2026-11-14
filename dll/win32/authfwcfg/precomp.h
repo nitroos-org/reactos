@@ -15,8 +15,10 @@
 #include <winreg.h>
 #include <winuser.h>
 #include <shlwapi.h>
+#include <sddl.h>
+#include <stdarg.h>
 #include <netsh.h>
 #include <reactos/netsh_undoc.h>
 #include <fwstore.h>
 #include "resource_gen.h"
-
+#include "resource_ext.h"
