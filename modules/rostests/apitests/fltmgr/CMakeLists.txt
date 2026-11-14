@@ -10,6 +10,7 @@ list(APPEND SOURCE
     stress.c
     rvneg.c
     portsec.c
+    portrace.c
     testlist.c)
 
 add_executable(fltmgr_apitest ${SOURCE})
