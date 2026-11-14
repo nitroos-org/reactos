@@ -320,14 +320,7 @@ static NTSTATUS SatisfySuperAccept(PAFD_FCB FCB, PIRP Irp, PAFD_TDI_OBJECT_QELT 
     else
     {
         /* Begin receive buffer */
-        Status = TdiReceive(
-            &FCB2->ReceiveIrp.InFlightRequest,
-            FCB2->Connection.Object,
-            TDI_RECEIVE_NORMAL,
-            FCB2->Recv.Window,
-            FCB2->Recv.Size,
-            ReceiveComplete,
-            FCB2);
+        Status = AfdTdiReceiveWindow(FCB2, FCB2->Recv.Window, FCB2->Recv.Size);
 
         if (Status == STATUS_PENDING)
             Status = STATUS_SUCCESS;

@@ -303,11 +303,12 @@ MakeSocketIntoConnection(PAFD_FCB FCB, BOOL Receive) {
     /* Allocate the receive area and start receiving */
     if (!FCB->Recv.Window)
     {
-        FCB->Recv.Window = ExAllocatePoolWithTag(PagedPool,
+        FCB->Recv.NonPaged = FCB->Recv.Size <= AFD_NONPAGED_WINDOW_MAX;
+        FCB->Recv.Window = ExAllocatePoolWithTag(FCB->Recv.NonPaged ? NonPagedPool : PagedPool,
                                                  FCB->Recv.Size,
                                                  TAG_AFD_DATA_BUFFER);
 
-        if( !FCB->Recv.Window ) return STATUS_NO_MEMORY;
+        if( !FCB->Recv.Window ) { FCB->Recv.NonPaged = FALSE; return STATUS_NO_MEMORY; }
     }
 
     /* The send window is allocated by the first send (AfdConnectedSocketWriteData): a 64 KB window
@@ -321,13 +322,7 @@ MakeSocketIntoConnection(PAFD_FCB FCB, BOOL Receive) {
 
     if (Receive)
     {
-        Status = TdiReceive( &FCB->ReceiveIrp.InFlightRequest,
-                            FCB->Connection.Object,
-                            TDI_RECEIVE_NORMAL,
-                            FCB->Recv.Window,
-                            FCB->Recv.Size,
-                            ReceiveComplete,
-                            FCB );
+        Status = AfdTdiReceiveWindow( FCB, FCB->Recv.Window, FCB->Recv.Size );
 
         if( Status == STATUS_PENDING ) Status = STATUS_SUCCESS;
     }

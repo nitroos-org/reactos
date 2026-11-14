@@ -199,6 +199,7 @@ AfdSetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
     PCHAR NewBuffer;
+    BOOLEAN NewNonPaged;
 
     UNREFERENCED_PARAMETER(DeviceObject);
 
@@ -259,7 +260,9 @@ AfdSetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
                             break;
                         }
 
-                        NewBuffer = ExAllocatePoolWithTag(PagedPool,
+                        NewNonPaged = InfoReq->Information.Ulong != 0 &&
+                                      InfoReq->Information.Ulong <= AFD_NONPAGED_WINDOW_MAX;
+                        NewBuffer = ExAllocatePoolWithTag(NewNonPaged ? NonPagedPool : PagedPool,
                                                           InfoReq->Information.Ulong,
                                                           TAG_AFD_DATA_BUFFER);
 
@@ -286,6 +289,7 @@ AfdSetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
                             FCB->Recv.Size = InfoReq->Information.Ulong;
                             FCB->Recv.Window = NewBuffer;
+                            FCB->Recv.NonPaged = NewNonPaged;
 
                             Status = STATUS_SUCCESS;
                         }

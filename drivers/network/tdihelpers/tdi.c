@@ -1027,14 +1027,17 @@ NTSTATUS TdiSend(
     return TdiCall(*Irp, DeviceObject, NULL, NULL);
 }
 
-NTSTATUS TdiReceive(
+/* NonPaged: Buffer is in nonpaged pool, so its MDL needs no locking, and the transport takes its system
+   address without mapping it (a locked page of paged pool is mapped a second time for every receive) */
+static NTSTATUS TdiReceiveInternal(
     PIRP *Irp,
     PFILE_OBJECT TransportObject,
     USHORT Flags,
     PCHAR Buffer,
     UINT BufferLength,
     PIO_COMPLETION_ROUTINE CompletionRoutine,
-    PVOID CompletionContext)
+    PVOID CompletionContext,
+    BOOLEAN NonPaged)
 {
     PDEVICE_OBJECT DeviceObject;
     PMDL Mdl;
@@ -1075,17 +1078,21 @@ NTSTATUS TdiReceive(
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    _SEH2_TRY {
-        DPRINT("probe and lock\n");
-        MmProbeAndLockPages(Mdl, (*Irp)->RequestorMode, IoModifyAccess);
-        DPRINT("probe and lock done\n");
-    } _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
-        DPRINT("MmProbeAndLockPages() failed.\n");
-        IoFreeMdl(Mdl);
-        IoCompleteRequest(*Irp, IO_NO_INCREMENT);
-        *Irp = NULL;
-        _SEH2_YIELD(return STATUS_INSUFFICIENT_RESOURCES);
-    } _SEH2_END;
+    if (NonPaged) {
+        MmBuildMdlForNonPagedPool(Mdl);
+    } else {
+        _SEH2_TRY {
+            DPRINT("probe and lock\n");
+            MmProbeAndLockPages(Mdl, (*Irp)->RequestorMode, IoModifyAccess);
+            DPRINT("probe and lock done\n");
+        } _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
+            DPRINT("MmProbeAndLockPages() failed.\n");
+            IoFreeMdl(Mdl);
+            IoCompleteRequest(*Irp, IO_NO_INCREMENT);
+            *Irp = NULL;
+            _SEH2_YIELD(return STATUS_INSUFFICIENT_RESOURCES);
+        } _SEH2_END;
+    }
 
     DPRINT("AFD>>> Got an MDL: %p\n", Mdl);
 
@@ -1104,6 +1111,33 @@ NTSTATUS TdiReceive(
        routine. */
 
     return STATUS_PENDING;
+}
+
+
+NTSTATUS TdiReceive(
+    PIRP *Irp,
+    PFILE_OBJECT TransportObject,
+    USHORT Flags,
+    PCHAR Buffer,
+    UINT BufferLength,
+    PIO_COMPLETION_ROUTINE CompletionRoutine,
+    PVOID CompletionContext)
+{
+    return TdiReceiveInternal(Irp, TransportObject, Flags, Buffer, BufferLength,
+                              CompletionRoutine, CompletionContext, FALSE);
+}
+
+NTSTATUS TdiReceiveNonPaged(
+    PIRP *Irp,
+    PFILE_OBJECT TransportObject,
+    USHORT Flags,
+    PCHAR Buffer,
+    UINT BufferLength,
+    PIO_COMPLETION_ROUTINE CompletionRoutine,
+    PVOID CompletionContext)
+{
+    return TdiReceiveInternal(Irp, TransportObject, Flags, Buffer, BufferLength,
+                              CompletionRoutine, CompletionContext, TRUE);
 }
 
 
