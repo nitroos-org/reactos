@@ -44,6 +44,8 @@ typedef struct _RpcAssoc
     /* connections available to be used (protected by cs) */
     struct list free_connection_pool;
     LONG connection_cnt;
+    /* one bind at a time while the server has not named the association group (assoc_group_id is 0) */
+    CRITICAL_SECTION group_cs;
 
     /* server-only */
     struct list context_handle_list; /* protected by cs */
