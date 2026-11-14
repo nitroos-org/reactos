@@ -532,8 +532,21 @@ CcRosDeleteFileCache (
         {
             IO_STATUS_BLOCK Iosb;
             NTSTATUS Status;
+            BOOLEAN HaveLock = FALSE;
+
+            /*
+             * Called by the lazy writer (no top-level IRP: no file system lock is held by this thread): lock the
+             * file for the flush like CcRosFlushVacb does.  A file system's paging write that raises the valid data
+             * length (fastfat) relies on the file being acquired by its caller; without it the write races with a
+             * truncation or an overwrite of the file and sets a valid data length above the file size.  A file
+             * system thread that closes the last handle holds what it needs itself.
+             */
+            if (IoGetTopLevelIrp() == NULL)
+                HaveLock = NT_SUCCESS(FsRtlAcquireFileForCcFlushEx(FileObject));
 
             Status = MmFlushSegment(FileObject->SectionObjectPointer, &Vacb->FileOffset, VACB_MAPPING_GRANULARITY, &Iosb);
+            if (HaveLock)
+                FsRtlReleaseFileForCcFlush(FileObject);
             if (!NT_SUCCESS(Status))
             {
                 /* Complain. There's not much we can do */
