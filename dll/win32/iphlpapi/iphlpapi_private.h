@@ -172,6 +172,21 @@ ULONG64 makeInterfaceLuid(DWORD Index, ULONG Type);
 BOOL getInterfaceLuidByIndex(DWORD Index, PULONG Type, PULONG64 Luid);
 BOOL getInterfaceIndexByLuid(ULONG64 Luid, PDWORD Index);
 
+/* The IPv6 state of the stack (ipv6state.c): what tcpip.sys reports while IPv6 is on. Off: every IPv6 answer of this
+   DLL stays what it is without an IPv6 stack. */
+typedef struct _IPV6_STATE
+{
+    PVOID Memory;
+    PTCP_IPV6_TABLE_HEADER Header;
+    PTCP_IPV6_INTERFACE_ROW Interfaces;
+    PTCP_IPV6_ADDRESS_ROW Addresses;
+} IPV6_STATE, *PIPV6_STATE;
+
+BOOL Ipv6GetState(PIPV6_STATE State);
+BOOL Ipv6GetStateFromFile(HANDLE TcpFile, PIPV6_STATE State);
+VOID Ipv6FreeState(PIPV6_STATE State);
+const TCP_IPV6_INTERFACE_ROW *Ipv6FindInterface(const IPV6_STATE *State, DWORD IfIndex);
+
 #include <w32api.h>
 /* This is here until we switch to version 2.5 of the mingw headers */
 #if (__W32API_MAJOR_VERSION < 2 || __W32API_MINOR_VERSION < 5)
