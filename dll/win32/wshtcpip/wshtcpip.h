@@ -22,6 +22,7 @@
 #include <ws2tcpip.h>
 #include <rtlfuncs.h>
 #include <mstcpip.h>
+#include <winreg.h>
 
 #define EXPORT WINAPI
 
@@ -63,6 +64,12 @@ typedef struct _SOCKET_CONTEXT {
     LONG IpMtuDiscover;
     LONG UdpSendMsgSize;
     LONG UdpRecvMaxCoalescedSize;
+    /* IPPROTO_IPV6 options of an AF_INET6 socket as set, for getsockopt (WshKeptIpv6Option) */
+    DWORD Ipv6OptionsSet;
+    LONG Ipv6V6Only;
+    LONG Ipv6UnicastHops;
+    LONG Ipv6MulticastHops;
+    LONG Ipv6MulticastLoop;
 } SOCKET_CONTEXT, *PSOCKET_CONTEXT;
 
 INT

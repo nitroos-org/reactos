@@ -126,7 +126,18 @@ BOOLEAN AddrIsUnspecified(
                     Address->Address.IPv4Address == 0xFFFFFFFF);
 
         case IP_ADDRESS_V6:
-        /* FIXME: IPv6 is not supported */
+        {
+            /* :: (only the address files of IPv6 sockets hold IPv6 addresses) */
+            ULONG i;
+
+            for (i = 0; i < RTL_NUMBER_OF(Address->Address.IPv6Address); i++)
+            {
+                if (Address->Address.IPv6Address[i] != 0)
+                    return FALSE;
+            }
+            return TRUE;
+        }
+
         default:
             return FALSE;
     }

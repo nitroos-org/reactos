@@ -308,6 +308,200 @@ NTSTATUS TCPTranslateError(const err_t err)
     return Status;
 }
 
+/* The rest of a connect, called with the connection locked (unlocked on return): binds the PCB to BindIp and the port
+ * of the address file, then connects it to ConnectIp:RemotePort (network order). ConnectAddress4 is the IPv4 address
+ * the connection leaves from (0 for IPv6) */
+static
+NTSTATUS
+TCPBindAndConnect(
+    PCONNECTION_ENDPOINT Connection,
+    const ip_addr_t *BindIp,
+    ULONG ConnectAddress4,
+    const ip_addr_t *ConnectIp,
+    USHORT RemotePort,
+    PTCP_COMPLETION_ROUTINE Complete,
+    PVOID Context)
+{
+    NTSTATUS Status;
+    u16_t BoundPort;
+    PTDI_BUCKET Bucket;
+
+    Status = TCPTranslateError(LibTCPBind(Connection,
+                                          BindIp,
+                                          Connection->AddressFile->Port,
+                                          &BoundPort));
+
+    if (!NT_SUCCESS(Status))
+    {
+        UnlockObject(Connection);
+        return Status;
+    }
+
+    /* The address file keeps its unspecified address: after a failed or
+       cancelled connect the socket is bound to it again, and a listen on it
+       must not be limited to the interface this connect chose */
+    Connection->ConnectAddress = ConnectAddress4;
+    /* Check if we had an unspecified port */
+    if (!Connection->AddressFile->Port)
+    {
+        /* LibTCPBind reserved an ephemeral port in the port bitmap */
+        Connection->AddressFile->Port = BoundPort;
+    }
+
+    Bucket = ExAllocateFromNPagedLookasideList(&TdiBucketLookasideList);
+    if (!Bucket)
+    {
+        UnlockObject(Connection);
+        return STATUS_NO_MEMORY;
+    }
+
+    Bucket->Request.RequestNotifyObject = (PVOID)Complete;
+    Bucket->Request.RequestContext = Context;
+
+    InsertTailList( &Connection->ConnectRequest, &Bucket->Entry );
+
+    UnlockObject(Connection);
+
+    Status = TCPTranslateError(LibTCPConnect(Connection,
+                                                ConnectIp,
+                                                RemotePort));
+    if (!NT_SUCCESS(Status))
+    {
+        LockObject(Connection);
+        RemoveEntryList(&Bucket->Entry);
+        UnlockObject(Connection);
+        ExFreeToNPagedLookasideList(&TdiBucketLookasideList, Bucket);
+    }
+    TI_DbgPrint(DEBUG_TCP,("[IP, TCPConnect] Leaving. Status = 0x%x\n", Status));
+
+    return Status;
+}
+
+/* The IPv6 address of an address file (IP_ADDRESS_V6) with its zone, as lwIP takes it */
+static
+VOID
+TCPAddrFileIp6(PADDRESS_FILE AddrFile, ip_addr_t *Ip)
+{
+    ip_addr_set_zero_ip6(Ip);
+    RtlCopyMemory(ip_2_ip6(Ip)->addr, AddrFile->Address.Address.IPv6Address, 16);
+    ip6_addr_set_zone(ip_2_ip6(Ip), AddrFile->Zone6);
+}
+
+/* A connect to an IPv6 address (a TA_IP6_ADDRESS from the client, AFD's copy of the caller's address): only an IPv6
+ * socket makes one. ::ffff:a.b.c.d is an IPv4 connect, for a socket that takes IPv4 (IPV6_V6ONLY off); any other
+ * address an IPv6 one, from a socket not bound to an IPv4 address. VERIFY ON ORACLE: the error of a mapped address
+ * on a socket with IPV6_V6ONLY on, and of a link-local address whose scope id names no interface (both refused here
+ * as an address that is not available) */
+static
+NTSTATUS
+TCPConnect6(
+    PCONNECTION_ENDPOINT Connection,
+    PTDI_CONNECTION_INFORMATION ConnInfo,
+    PTCP_COMPLETION_ROUTINE Complete,
+    PVOID Context)
+{
+    PTA_IP6_ADDRESS Ta = (PTA_IP6_ADDRESS)ConnInfo->RemoteAddress;
+    PADDRESS_FILE AddrFile;
+    UCHAR Bytes[16], Zone = IP6_NO_ZONE;
+    USHORT RemotePort;
+    ULONG Scope, Remote4, Local4 = 0, i;
+    ip_addr_t BindIp, ConnectIp;
+    IP_ADDRESS RemoteAddress;
+    PNEIGHBOR_CACHE_ENTRY NCE;
+    BOOLEAN Mapped;
+
+    /* The whole address, within what the client says it gave */
+    if (ConnInfo->RemoteAddressLength < sizeof(TA_IP6_ADDRESS) || Ta->TAAddressCount < 1 ||
+        Ta->Address[0].AddressLength < TDI_ADDRESS_LENGTH_IP6)
+        return STATUS_INVALID_ADDRESS;
+
+    RtlCopyMemory(&RemotePort, &Ta->Address[0].Address[0].sin6_port, sizeof(RemotePort));
+    RtlCopyMemory(Bytes, Ta->Address[0].Address[0].sin6_addr, sizeof(Bytes));
+    RtlCopyMemory(&Scope, &Ta->Address[0].Address[0].sin6_scope_id, sizeof(Scope));
+
+    for (i = 0; i < 10 && Bytes[i] == 0; i++)
+        ;
+    Mapped = (i == 10 && Bytes[10] == 0xFF && Bytes[11] == 0xFF);
+
+    LockObject(Connection);
+
+    AddrFile = Connection->AddressFile;
+    if (!AddrFile)
+    {
+        UnlockObject(Connection);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    /* An IPv4 socket has no IPv6 connect (the answer it always got) */
+    if (AddrFile->Family != TDI_ADDRESS_TYPE_IP6)
+    {
+        UnlockObject(Connection);
+        return STATUS_INVALID_ADDRESS;
+    }
+
+    if (Mapped)
+    {
+        if (!AddrFileTakesType(AddrFile, IP_ADDRESS_V4))
+        {
+            UnlockObject(Connection);
+            return STATUS_INVALID_ADDRESS;
+        }
+
+        RtlCopyMemory(&Remote4, &Bytes[12], sizeof(Remote4));
+        if (AddrFile->Address.Type == IP_ADDRESS_V4 && !AddrIsUnspecified(&AddrFile->Address))
+        {
+            Local4 = AddrFile->Address.Address.IPv4Address;
+        }
+        else
+        {
+            /* As for an IPv4 socket on the wildcard address: the interface the peer is reached through */
+            AddrInitIPv4(&RemoteAddress, Remote4);
+            if (!(NCE = RouteGetRouteToDestination(&RemoteAddress)))
+            {
+                UnlockObject(Connection);
+                return STATUS_NETWORK_UNREACHABLE;
+            }
+            Local4 = NCE->Interface->Unicast.Address.IPv4Address;
+            NBDereferenceNeighbor(NCE);
+        }
+
+        ip_addr_set_ip4_u32_val(BindIp, Local4);
+        ip_addr_set_ip4_u32_val(ConnectIp, Remote4);
+    }
+    else
+    {
+        if (AddrFile->Address.Type != IP_ADDRESS_V6)
+        {
+            UnlockObject(Connection);
+            return STATUS_INVALID_ADDRESS;
+        }
+
+        ip_addr_set_zero_ip6(&ConnectIp);
+        RtlCopyMemory(ip_2_ip6(&ConnectIp)->addr, Bytes, sizeof(Bytes));
+        if (ip6_addr_isany(ip_2_ip6(&ConnectIp)) || ip6_addr_ismulticast(ip_2_ip6(&ConnectIp)))
+        {
+            UnlockObject(Connection);
+            return STATUS_INVALID_ADDRESS;
+        }
+
+        /* A link-local peer is on the interface the scope id names; without one lwIP picks the interface */
+        if (ip6_addr_islinklocal(ip_2_ip6(&ConnectIp)) && Scope != 0)
+        {
+            Zone = TCPZoneOfInterface6(Scope);
+            if (Zone == IP6_NO_ZONE)
+            {
+                UnlockObject(Connection);
+                return STATUS_INVALID_ADDRESS;
+            }
+            ip6_addr_set_zone(ip_2_ip6(&ConnectIp), Zone);
+        }
+
+        TCPAddrFileIp6(AddrFile, &BindIp);
+    }
+
+    return TCPBindAndConnect(Connection, &BindIp, Local4, &ConnectIp, RemotePort, Complete, Context);
+}
+
 NTSTATUS TCPConnect
 ( PCONNECTION_ENDPOINT Connection,
   PTDI_CONNECTION_INFORMATION ConnInfo,
@@ -316,14 +510,17 @@ NTSTATUS TCPConnect
   PVOID Context )
 {
     NTSTATUS Status;
-    ip4_addr_t bindaddr, connaddr;
+    ip4_addr_t bindaddr;
+    ip_addr_t BindIp, ConnectIp;
     IP_ADDRESS RemoteAddress;
     USHORT RemotePort;
-    u16_t BoundPort;
-    PTDI_BUCKET Bucket;
     PNEIGHBOR_CACHE_ENTRY NCE;
 
     TI_DbgPrint(DEBUG_TCP,("[IP, TCPConnect] Called\n"));
+
+    /* An IPv6 address: only an IPv6 socket connects to one */
+    if (((PTRANSPORT_ADDRESS)ConnInfo->RemoteAddress)->Address[0].AddressType == TDI_ADDRESS_TYPE_IP6)
+        return TCPConnect6(Connection, ConnInfo, Complete, Context);
 
     Status = AddrBuildAddress
         ((PTRANSPORT_ADDRESS)ConnInfo->RemoteAddress,
@@ -350,6 +547,13 @@ NTSTATUS TCPConnect
         return STATUS_INVALID_PARAMETER;
     }
 
+    /* An IPv6 socket connects to IPv4 only through ::ffff:a.b.c.d (TCPConnect6) */
+    if (Connection->AddressFile->Family == TDI_ADDRESS_TYPE_IP6)
+    {
+        UnlockObject(Connection);
+        return STATUS_INVALID_ADDRESS;
+    }
+
     if (AddrIsUnspecified(&Connection->AddressFile->Address))
     {
         if (!(NCE = RouteGetRouteToDestination(&RemoteAddress)))
@@ -366,57 +570,10 @@ NTSTATUS TCPConnect
         bindaddr.addr = Connection->AddressFile->Address.Address.IPv4Address;
     }
 
-    Status = TCPTranslateError(LibTCPBind(Connection,
-                                          &bindaddr,
-                                          Connection->AddressFile->Port,
-                                          &BoundPort));
+    ip_addr_copy_from_ip4(BindIp, bindaddr);
+    ip_addr_set_ip4_u32_val(ConnectIp, RemoteAddress.Address.IPv4Address);
 
-    if (!NT_SUCCESS(Status))
-    {
-        UnlockObject(Connection);
-        return Status;
-    }
-
-    /* The address file keeps its unspecified address: after a failed or
-       cancelled connect the socket is bound to it again, and a listen on it
-       must not be limited to the interface this connect chose */
-    Connection->ConnectAddress = bindaddr.addr;
-    /* Check if we had an unspecified port */
-    if (!Connection->AddressFile->Port)
-    {
-        /* LibTCPBind reserved an ephemeral port in the port bitmap */
-        Connection->AddressFile->Port = BoundPort;
-    }
-
-    connaddr.addr = RemoteAddress.Address.IPv4Address;
-
-    Bucket = ExAllocateFromNPagedLookasideList(&TdiBucketLookasideList);
-    if (!Bucket)
-    {
-        UnlockObject(Connection);
-        return STATUS_NO_MEMORY;
-    }
-
-    Bucket->Request.RequestNotifyObject = (PVOID)Complete;
-    Bucket->Request.RequestContext = Context;
-
-    InsertTailList( &Connection->ConnectRequest, &Bucket->Entry );
-
-    UnlockObject(Connection);
-
-    Status = TCPTranslateError(LibTCPConnect(Connection,
-                                                &connaddr,
-                                                RemotePort));
-    if (!NT_SUCCESS(Status))
-    {
-        LockObject(Connection);
-        RemoveEntryList(&Bucket->Entry);
-        UnlockObject(Connection);
-        ExFreeToNPagedLookasideList(&TdiBucketLookasideList, Bucket);
-    }
-    TI_DbgPrint(DEBUG_TCP,("[IP, TCPConnect] Leaving. Status = 0x%x\n", Status));
-
-    return Status;
+    return TCPBindAndConnect(Connection, &BindIp, bindaddr.addr, &ConnectIp, RemotePort, Complete, Context);
 }
 
 NTSTATUS TCPDisconnect
@@ -693,18 +850,71 @@ VOID TCPFreePort(const UINT Port)
     DeallocatePort(&TCPPorts, Port);
 }
 
+/* The transport address of an lwIP address and port (network order) in Address, Length bytes of room: a
+ * TA_IP_ADDRESS for IPv4, a TA_IP6_ADDRESS for IPv6 (the scope id of a link-local address is the index of its
+ * interface) and for a dual stack PCB that has no address yet (::). CoreLocked: called with the core lock held */
+NTSTATUS
+TCPBuildTransportAddress(
+    const ip_addr_t *Ip,
+    USHORT Port,
+    PTRANSPORT_ADDRESS Address,
+    ULONG Length,
+    BOOLEAN CoreLocked)
+{
+    if (IP_IS_V4(Ip))
+    {
+        PTA_IP_ADDRESS AddressIP = (PTA_IP_ADDRESS)Address;
+
+        if (Length < sizeof(TA_IP_ADDRESS))
+            return STATUS_BUFFER_TOO_SMALL;
+
+        AddressIP->TAAddressCount = 1;
+        AddressIP->Address[0].AddressLength = TDI_ADDRESS_LENGTH_IP;
+        AddressIP->Address[0].AddressType = TDI_ADDRESS_TYPE_IP;
+        AddressIP->Address[0].Address[0].sin_port = Port;
+        AddressIP->Address[0].Address[0].in_addr = ip4_addr_get_u32(ip_2_ip4(Ip));
+        RtlZeroMemory(&AddressIP->Address[0].Address[0].sin_zero,
+                      sizeof(AddressIP->Address[0].Address[0].sin_zero));
+    }
+    else
+    {
+        PTA_IP6_ADDRESS Address6 = (PTA_IP6_ADDRESS)Address;
+        ULONG Scope = 0, Flow = 0;
+
+        if (Length < sizeof(TA_IP6_ADDRESS))
+            return STATUS_BUFFER_TOO_SMALL;
+
+        Address6->TAAddressCount = 1;
+        Address6->Address[0].AddressLength = TDI_ADDRESS_LENGTH_IP6;
+        Address6->Address[0].AddressType = TDI_ADDRESS_TYPE_IP6;
+        RtlCopyMemory(&Address6->Address[0].Address[0].sin6_port, &Port, sizeof(Port));
+        RtlCopyMemory(&Address6->Address[0].Address[0].sin6_flowinfo, &Flow, sizeof(Flow));
+        if (IP_IS_V6(Ip))
+        {
+            RtlCopyMemory(Address6->Address[0].Address[0].sin6_addr, ip_2_ip6(Ip)->addr, 16);
+            if (ip6_addr_islinklocal(ip_2_ip6(Ip)) && ip6_addr_has_zone(ip_2_ip6(Ip)))
+                Scope = TCPInterfaceOfZone6(ip6_addr_zone(ip_2_ip6(Ip)), CoreLocked);
+        }
+        else
+        {
+            /* IPADDR_TYPE_ANY: a dual stack PCB on the unspecified address */
+            RtlZeroMemory(Address6->Address[0].Address[0].sin6_addr, 16);
+        }
+        RtlCopyMemory(&Address6->Address[0].Address[0].sin6_scope_id, &Scope, sizeof(Scope));
+    }
+
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS TCPGetSockAddress
 ( PCONNECTION_ENDPOINT Connection,
   PTRANSPORT_ADDRESS Address,
+  ULONG Length,
   BOOLEAN GetRemote )
 {
-    PTA_IP_ADDRESS AddressIP = (PTA_IP_ADDRESS)Address;
-    ip4_addr_t ipaddr;
+    ip_addr_t ipaddr;
+    u16_t Port = 0;
     NTSTATUS Status;
-
-    AddressIP->TAAddressCount = 1;
-    AddressIP->Address[0].AddressLength = TDI_ADDRESS_LENGTH_IP;
-    AddressIP->Address[0].AddressType = TDI_ADDRESS_TYPE_IP;
 
     LockObject(Connection);
 
@@ -712,23 +922,63 @@ NTSTATUS TCPGetSockAddress
     {
         Status = TCPTranslateError(LibTCPGetPeerName(Connection->SocketContext,
                                     &ipaddr,
-                                    &AddressIP->Address[0].Address[0].sin_port));
+                                    &Port));
     }
     else
     {
         Status = TCPTranslateError(LibTCPGetHostName(Connection->SocketContext,
                                     &ipaddr,
-                                    &AddressIP->Address[0].Address[0].sin_port));
+                                    &Port));
     }
 
     UnlockObject(Connection);
 
-    AddressIP->Address[0].Address[0].in_addr = ipaddr.addr;
+    if (!NT_SUCCESS(Status))
+        return Status;
 
-    RtlZeroMemory(&AddressIP->Address[0].Address[0].sin_zero,
-                  sizeof(AddressIP->Address[0].Address[0].sin_zero));
+    return TCPBuildTransportAddress(&ipaddr, Port, Address, Length, FALSE);
+}
 
-    return Status;
+/* The address of an address file as a transport address (TDI_QUERY_ADDRESS_INFO): a TA_IP_ADDRESS for an IPv4
+ * address (that of a dual stack socket bound to ::ffff:a.b.c.d too), a TA_IP6_ADDRESS otherwise. Length is the
+ * room at Address. PASSIVE_LEVEL */
+NTSTATUS
+TCPAddrFileTransportAddress(
+    PADDRESS_FILE AddrFile,
+    PTRANSPORT_ADDRESS Address,
+    ULONG Length)
+{
+    ip_addr_t Ip;
+
+    if (AddrFile->Address.Type == IP_ADDRESS_V6)
+        TCPAddrFileIp6(AddrFile, &Ip);
+    else
+        ip_addr_set_ip4_u32_val(Ip, AddrFile->Address.Address.IPv4Address);
+
+    return TCPBuildTransportAddress(&Ip, AddrFile->Port, Address, Length, FALSE);
+}
+
+/* The local address of a connection of an IPv6 socket (TDI_QUERY_ADDRESS_INFO), called with the connection
+ * locked: once it is connected (or accepted) the address it has, which the stack chose for a socket bound to the
+ * unspecified address (an IPv4 one for an IPv4 peer of a dual stack socket); before that the address of its
+ * address file. AFD and the Winsock provider need no route lookup of their own for it. PASSIVE_LEVEL */
+NTSTATUS
+TCPGetLocalAddress6(
+    PCONNECTION_ENDPOINT Connection,
+    PADDRESS_FILE AddrFile,
+    PTRANSPORT_ADDRESS Address,
+    ULONG Length)
+{
+    PTCP_PCB pcb = Connection->SocketContext;
+    ip_addr_t Ip;
+
+    if (pcb && pcb->state != CLOSED && pcb->state != LISTEN)
+    {
+        ip_addr_copy(Ip, pcb->local_ip);
+        return TCPBuildTransportAddress(&Ip, lwip_htons(pcb->local_port), Address, Length, FALSE);
+    }
+
+    return TCPAddrFileTransportAddress(AddrFile, Address, Length);
 }
 
 BOOLEAN TCPRemoveIRP( PCONNECTION_ENDPOINT Endpoint, PIRP Irp )

@@ -17,3 +17,4 @@ NTSTATUS tdiGetSetOfThings( HANDLE tcpFile, DWORD toiClass, DWORD toiType,
 			    DWORD entrySize, PVOID *tdiEntitySet,
 			    PDWORD numEntries );
 VOID tdiFreeThingSet( PVOID things );
+ULONG tdiGetIpv6StackState( HANDLE tcpFile );

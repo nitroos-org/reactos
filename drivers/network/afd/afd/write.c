@@ -1252,8 +1252,17 @@ AfdPacketSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
              * pre-posts a receive datagram with FCB->AddressFrom, and tcpip
              * dereferences it (DGReceiveDatagram), so leaving it NULL here
              * bugchecks the transport from an unbound raw sendto (T134). */
+            /* One left by an earlier failed attempt describes that attempt's address (possibly of
+             * another type, which the transport refuses as a filter): it is built again from this one.
+             * Without an address file no receive uses it */
+            if( FCB->AddressFrom && !FCB->AddressFile.Object )
+            {
+                ExFreePoolWithTag(FCB->AddressFrom, TAG_AFD_TDI_CONNECTION_INFORMATION);
+                FCB->AddressFrom = NULL;
+            }
+
             if( FCB->AddressFrom )
-                Status = STATUS_SUCCESS; /* kept from an earlier failed attempt: rebuilding would leak it */
+                Status = STATUS_SUCCESS;
             else
                 Status = TdiBuildConnectionInfo( &FCB->AddressFrom,
                                                  FCB->LocalAddress );

@@ -1321,6 +1321,22 @@ WSPSendTo(SOCKET Handle,
                        lpErrno);
     }
 
+    /* An IPv6 socket sends to a whole SOCKADDR_IN6 */
+    if (Socket->SharedData->AddressFamily == AF_INET6)
+    {
+        if (!SocketAddress || SocketAddressLength < TDIADDR_SOCKADDR_IN6_LENGTH)
+        {
+            if (lpErrno) *lpErrno = WSAEFAULT;
+            return SOCKET_ERROR;
+        }
+        if (SocketAddress->sa_family != AF_INET6)
+        {
+            if (lpErrno) *lpErrno = WSAEAFNOSUPPORT;
+            return SOCKET_ERROR;
+        }
+        SocketAddressLength = TDIADDR_SOCKADDR_IN6_LENGTH;
+    }
+
     /* Bind us First */
     if (Socket->SharedData->State == SocketOpen)
     {

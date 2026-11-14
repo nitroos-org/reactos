@@ -21,13 +21,24 @@ NTSTATUS TCPCheckPeerForAccept(PVOID Context,
     NTSTATUS Status;
     PTDI_CONNECTION_INFORMATION WhoIsConnecting;
     PTA_IP_ADDRESS RemoteAddress;
-    ip4_addr_t ipaddr;
+    ip_addr_t ipaddr;
+    u16_t Port;
 
     if (Request->RequestFlags & TDI_QUERY_ACCEPT)
         DbgPrint("TDI_QUERY_ACCEPT NOT SUPPORTED!!!\n");
 
     WhoIsConnecting = (PTDI_CONNECTION_INFORMATION)Request->ReturnConnectionInformation;
     RemoteAddress = (PTA_IP_ADDRESS)WhoIsConnecting->RemoteAddress;
+
+    /* An IPv6 peer (of an IPv6 listener): a TA_IP6_ADDRESS, in the room the listener's owner gave for it */
+    if (newpcb && IP_IS_V6_VAL(newpcb->remote_ip))
+    {
+        Status = TCPTranslateError(LibTCPGetPeerName(newpcb, &ipaddr, &Port));
+        if (!NT_SUCCESS(Status))
+            return Status;
+        return TCPBuildTransportAddress(&ipaddr, Port, (PTRANSPORT_ADDRESS)RemoteAddress,
+                                        WhoIsConnecting->RemoteAddressLength, TRUE);
+    }
 
     RemoteAddress->TAAddressCount = 1;
     RemoteAddress->Address[0].AddressLength = TDI_ADDRESS_LENGTH_IP;
@@ -37,7 +48,7 @@ NTSTATUS TCPCheckPeerForAccept(PVOID Context,
                                                  &ipaddr,
                                                  &RemoteAddress->Address[0].Address[0].sin_port));
 
-    RemoteAddress->Address[0].Address[0].in_addr = ipaddr.addr;
+    RemoteAddress->Address[0].Address[0].in_addr = ip4_addr_get_u32(ip_2_ip4(&ipaddr));
 
     return Status;
 }
@@ -47,7 +58,8 @@ NTSTATUS TCPCheckPeerForAccept(PVOID Context,
 NTSTATUS TCPListen(PCONNECTION_ENDPOINT Connection, UINT Backlog)
 {
     NTSTATUS Status = STATUS_SUCCESS;
-    ip4_addr_t AddressToBind;
+    ip_addr_t AddressToBind;
+    PADDRESS_FILE AddrFile;
     u16_t BoundPort;
 
     ASSERT(Connection);
@@ -61,7 +73,23 @@ NTSTATUS TCPListen(PCONNECTION_ENDPOINT Connection, UINT Backlog)
     TI_DbgPrint(DEBUG_TCP, ("Connection->SocketContext %x\n",
         Connection->SocketContext));
 
-    AddressToBind.addr = Connection->AddressFile->Address.Address.IPv4Address;
+    AddrFile = Connection->AddressFile;
+    if (AddrFile->Address.Type == IP_ADDRESS_V6 && AddrFile->DualStack && AddrIsUnspecified(&AddrFile->Address))
+    {
+        /* A dual stack socket on the unspecified address: one listener for both versions */
+        ip_addr_copy(AddressToBind, *IP_ANY_TYPE);
+    }
+    else if (AddrFile->Address.Type == IP_ADDRESS_V6)
+    {
+        ip_addr_set_zero_ip6(&AddressToBind);
+        RtlCopyMemory(ip_2_ip6(&AddressToBind)->addr, AddrFile->Address.Address.IPv6Address, 16);
+        ip6_addr_set_zone(ip_2_ip6(&AddressToBind), AddrFile->Zone6);
+    }
+    else
+    {
+        /* IPv4, and the IPv4 address of a dual stack socket bound to ::ffff:a.b.c.d */
+        ip_addr_set_ip4_u32_val(AddressToBind, AddrFile->Address.Address.IPv4Address);
+    }
 
     Status = TCPTranslateError(LibTCPBind(Connection,
                                           &AddressToBind,

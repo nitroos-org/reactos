@@ -739,7 +739,7 @@ static
 struct tcp_pcb_listen *
 LibTCPFindListener(const ip4_addr_t *Dest, u16_t Port, struct netif *inp)
 {
-    struct tcp_pcb_listen *lpcb, *Any = NULL;
+    struct tcp_pcb_listen *lpcb, *Any = NULL, *AnyType = NULL;
 
     for (lpcb = tcp_listen_pcbs.listen_pcbs; lpcb != NULL; lpcb = lpcb->next)
     {
@@ -748,13 +748,19 @@ LibTCPFindListener(const ip4_addr_t *Dest, u16_t Port, struct netif *inp)
         {
             continue;
         }
-        if (ip_addr_isany(&lpcb->local_ip))
+        /* An IPv4 segment: tcp_input takes IPv4 listeners, then a dual stack (IPADDR_TYPE_ANY) one, never an
+           IPv6 one */
+        if (IP_IS_V6_VAL(lpcb->local_ip))
+            continue;
+        if (IP_IS_ANY_TYPE_VAL(lpcb->local_ip))
+            AnyType = lpcb;
+        else if (ip_addr_isany(&lpcb->local_ip))
             Any = lpcb;
-        else if (IP_IS_V4_VAL(lpcb->local_ip) && ip4_addr_eq(ip_2_ip4(&lpcb->local_ip), Dest))
+        else if (ip4_addr_eq(ip_2_ip4(&lpcb->local_ip), Dest))
             break;
     }
     if (!lpcb)
-        lpcb = Any;
+        lpcb = Any ? Any : AnyType;
     return lpcb;
 }
 
@@ -1213,16 +1219,16 @@ InternalAcceptEventHandler(void *arg, PTCP_PCB newpcb, const err_t err)
     u16_t LocalPort = 0, RemotePort = 0;
     err_t Result;
 
-    /* The listeners of our endpoints are IPv4 ones (LibTCPListenCallback), so lwIP gives them no IPv6
-       connection; should one come, it is refused (lwIP resets and frees it) rather than handed to TDI, whose
-       addresses here are IPv4 */
-    if (newpcb && err == ERR_OK && !IP_IS_V4_VAL(newpcb->remote_ip))
+    /* IPv6 listeners exist only while the stack has IPv6 on (LibTCPListenCallback); should an IPv6 connection
+       come otherwise, it is refused (lwIP resets and frees it) rather than handed to TDI */
+    if (newpcb && err == ERR_OK && !IP_IS_V4_VAL(newpcb->remote_ip) && !TCPIpv6Enabled)
     {
         ASSERT(FALSE);
         return ERR_VAL;
     }
 
-    if (newpcb && err == ERR_OK)
+    /* The record of an ended TIME-WAIT is kept for IPv4 connections only */
+    if (newpcb && err == ERR_OK && IP_IS_V4_VAL(newpcb->local_ip) && IP_IS_V4_VAL(newpcb->remote_ip))
     {
         ip4_addr_copy(LocalIp, *ip_2_ip4(&newpcb->local_ip));
         ip4_addr_copy(RemoteIp, *ip_2_ip4(&newpcb->remote_ip));
@@ -1555,7 +1561,9 @@ LibTCPBindCallback(void *arg)
         }
     }
 
-    ip_addr_copy_from_ip4(BindAddr, *msg->Input.Bind.IpAddress);
+    /* An IPv4 address as before; an IPv6 one (with its zone) or IP_ANY_TYPE (dual stack) makes the PCB of that
+       type: tcp_bind sets the local address whenever its type differs from the PCB's */
+    ip_addr_copy(BindAddr, *msg->Input.Bind.IpAddress);
     msg->Output.Bind.Error = tcp_bind(pcb,
                                       &BindAddr,
                                       lwip_ntohs((u16_t)Port));
@@ -1575,7 +1583,7 @@ done:
 /* Port 0 binds an ephemeral port, which stays reserved in the port bitmap;
    it is returned in *BoundPort (network order) */
 err_t
-LibTCPBind(PCONNECTION_ENDPOINT Connection, ip4_addr_t *const ipaddr, const u16_t port, u16_t *const BoundPort)
+LibTCPBind(PCONNECTION_ENDPOINT Connection, const ip_addr_t *ipaddr, const u16_t port, u16_t *const BoundPort)
 {
     struct lwip_callback_msg *msg;
     err_t ret;
@@ -1621,9 +1629,10 @@ LibTCPListenCallback(void *arg)
         goto done;
     }
 
-    /* An endpoint listens on an IPv4 address only: TDI has no IPv6 address for it yet, and until the firewall
-       filters IPv6 an IPv6 (or dual-stack) listener must not exist */
-    if (!IP_IS_V4_VAL(((PTCP_PCB)msg->Input.Listen.Connection->SocketContext)->local_ip))
+    /* An IPv6 or dual stack listener exists only while the stack has IPv6 on (only then does TDI take an IPv6
+       address). A connection request (SYN) over IPv6 reaches it only from this machine until the firewall
+       filters IPv6 (LibTCPListenerInput6); IPv4 ones of a dual stack listener pass the IPv4 firewall */
+    if (!IP_IS_V4_VAL(((PTCP_PCB)msg->Input.Listen.Connection->SocketContext)->local_ip) && !TCPIpv6Enabled)
     {
         msg->Output.Listen.NewPcb = NULL;
         goto done;
@@ -1844,7 +1853,7 @@ LibTCPConnectCallback(void *arg)
     tcp_recv((PTCP_PCB)msg->Input.Connect.Connection->SocketContext, InternalRecvEventHandler);
     tcp_sent((PTCP_PCB)msg->Input.Connect.Connection->SocketContext, InternalSendEventHandler);
 
-    ip_addr_copy_from_ip4(ConnectAddr, *msg->Input.Connect.IpAddress);
+    ip_addr_copy(ConnectAddr, *msg->Input.Connect.IpAddress);
     Error = tcp_connect((PTCP_PCB)msg->Input.Connect.Connection->SocketContext,
                         &ConnectAddr, lwip_ntohs(msg->Input.Connect.Port),
                         InternalConnectEventHandler);
@@ -1856,7 +1865,7 @@ done:
 }
 
 err_t
-LibTCPConnect(PCONNECTION_ENDPOINT Connection, ip4_addr_t *const ipaddr, const u16_t port)
+LibTCPConnect(PCONNECTION_ENDPOINT Connection, const ip_addr_t *ipaddr, const u16_t port)
 {
     struct lwip_callback_msg *msg;
     err_t ret;
@@ -2178,12 +2187,13 @@ LibTCPAccept(PTCP_PCB pcb, struct tcp_pcb *listen_pcb, void *arg)
 }
 
 err_t
-LibTCPGetHostName(PTCP_PCB pcb, ip4_addr_t *const ipaddr, u16_t *const port)
+LibTCPGetHostName(PTCP_PCB pcb, ip_addr_t *const ipaddr, u16_t *const port)
 {
     if (!pcb)
         return ERR_CLSD;
 
-    ip4_addr_copy(*ipaddr, *ip_2_ip4(&pcb->local_ip));
+    /* IPv4, IPv6 (with its zone) or, for a dual stack PCB not connected yet, IPADDR_TYPE_ANY */
+    ip_addr_copy(*ipaddr, pcb->local_ip);
     /* lwIP keeps ports in host order, our callers want network order */
     *port = lwip_htons(pcb->local_port);
 
@@ -2191,12 +2201,12 @@ LibTCPGetHostName(PTCP_PCB pcb, ip4_addr_t *const ipaddr, u16_t *const port)
 }
 
 err_t
-LibTCPGetPeerName(PTCP_PCB pcb, ip4_addr_t * const ipaddr, u16_t * const port)
+LibTCPGetPeerName(PTCP_PCB pcb, ip_addr_t * const ipaddr, u16_t * const port)
 {
     if (!pcb)
         return ERR_CLSD;
 
-    ip4_addr_copy(*ipaddr, *ip_2_ip4(&pcb->remote_ip));
+    ip_addr_copy(*ipaddr, pcb->remote_ip);
     *port = lwip_htons(pcb->remote_port);
 
     return ERR_OK;

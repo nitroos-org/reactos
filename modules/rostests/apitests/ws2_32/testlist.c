@@ -75,6 +75,9 @@ extern void func_udpburst(void);
 extern void func_udprecv(void);
 extern void func_udpzerolen(void);
 extern void func_v6only(void);
+extern void func_ipv6sock(void);
+extern void func_ipv6tcp(void);
+extern void func_v4afterv6(void);
 extern void func_udpoptions(void);
 extern void func_connectcycle(void);
 extern void func_ephport(void);
@@ -167,6 +170,9 @@ const struct test winetest_testlist[] =
     { "udprecv", func_udprecv },
     { "udpzerolen", func_udpzerolen },
     { "v6only", func_v6only },
+    { "ipv6sock", func_ipv6sock },
+    { "ipv6tcp", func_ipv6tcp },
+    { "v4afterv6", func_v4afterv6 },
     { "udpoptions", func_udpoptions },
     { "connectcycle", func_connectcycle },
     { "ephport", func_ephport },

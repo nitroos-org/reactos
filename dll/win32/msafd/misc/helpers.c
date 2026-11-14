@@ -57,24 +57,28 @@ SockGetTdiName(
             if (HelperData->WSHOpenSocket2 == NULL ) {
 
                 /* DLL Doesn't support WSHOpenSocket2, call the old one */
-                HelperData->WSHOpenSocket(AddressFamily,
-                                          SocketType,
-                                          Protocol,
-                                          TransportName,
-                                          HelperDllContext,
-                                          Events
-                                          );
+                Status = HelperData->WSHOpenSocket(AddressFamily,
+                                                   SocketType,
+                                                   Protocol,
+                                                   TransportName,
+                                                   HelperDllContext,
+                                                   Events
+                                                   );
             } else {
-                HelperData->WSHOpenSocket2(AddressFamily,
-                                           SocketType,
-                                           Protocol,
-                                           Group,
-                                           Flags,
-                                           TransportName,
-                                           HelperDllContext,
-                                           Events
-                                           );
+                Status = HelperData->WSHOpenSocket2(AddressFamily,
+                                                    SocketType,
+                                                    Protocol,
+                                                    Group,
+                                                    Flags,
+                                                    TransportName,
+                                                    HelperDllContext,
+                                                    Events
+                                                    );
             }
+
+            /* The helper refuses the socket (an IPv6 one while the stack has no IPv6): its error is the answer */
+            if (Status != NO_ERROR)
+                return Status;
 
             /* Return the Helper Pointers */
             *HelperDllData = HelperData;
@@ -93,7 +97,7 @@ SockGetTdiName(
 
     /* Loop through each transport until we find one that can satisfy us */
     for (Transport = Transports;
-         *Transports != 0;
+         *Transport != 0;
          Transport += wcslen(Transport) + 1) {
         TRACE("Transport: %S\n", Transports);
 
@@ -124,30 +128,35 @@ SockGetTdiName(
             /* Call the Helper Dll function get the Transport Name */
             if (HelperData->WSHOpenSocket2 == NULL) {
                 /* DLL Doesn't support WSHOpenSocket2, call the old one */
-                HelperData->WSHOpenSocket(AddressFamily,
-                                          SocketType,
-                                          Protocol,
-                                          TransportName,
-                                          HelperDllContext,
-                                          Events
-                                          );
+                Status = HelperData->WSHOpenSocket(AddressFamily,
+                                                   SocketType,
+                                                   Protocol,
+                                                   TransportName,
+                                                   HelperDllContext,
+                                                   Events
+                                                   );
             } else {
-                HelperData->WSHOpenSocket2(AddressFamily,
-                                           SocketType,
-                                           Protocol,
-                                           Group,
-                                           Flags,
-                                           TransportName,
-                                           HelperDllContext,
-                                           Events
-                                           );
+                Status = HelperData->WSHOpenSocket2(AddressFamily,
+                                                    SocketType,
+                                                    Protocol,
+                                                    Group,
+                                                    Flags,
+                                                    TransportName,
+                                                    HelperDllContext,
+                                                    Events
+                                                    );
             }
+
+            /* The helper data has its own copy of the transport name, so the list goes either way; the mapping
+             * stays with the loaded helper (cached, as for any other) */
+            HeapFree(GlobalHeap, 0, Transports);
+
+            /* The helper refuses the socket (an IPv6 one while the stack has no IPv6): its error is the answer */
+            if (Status != NO_ERROR)
+                return Status;
 
             /* Return the Helper Pointers */
             *HelperDllData = HelperData;
-            /* We actually cache these ... the can't be freed yet */
-            /*HeapFree(GlobalHeap, 0, Transports);*/
-            /*HeapFree(GlobalHeap, 0, Mapping);*/
             return NO_ERROR;
         }
 

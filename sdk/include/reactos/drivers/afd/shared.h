@@ -67,6 +67,11 @@ typedef struct _AFD_TCP_CONNECT_HINT {
 #include <poppack.h>
 #define AFD_TCP_CONNECT_HINT_MAGIC 0xE9F1
 
+/* The bind of an IPv6 socket with IPV6_V6ONLY off (a dual stack socket) has this in the sin6_flowinfo of its
+   address; any other value is a socket with IPV6_V6ONLY on. AFD clears the field once the address is open. Same
+   value as TCP_BIND6_DUAL_STACK in drivers/network/tcpip/include/tcp.h (no flow information has the top bits set) */
+#define AFD_TCP_BIND6_DUAL_STACK 0xF6D5A001UL
+
 typedef struct _AFD_LISTEN_DATA {
     BOOLEAN				UseSAN;
     ULONG				Backlog;

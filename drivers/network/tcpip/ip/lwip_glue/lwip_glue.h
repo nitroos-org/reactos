@@ -38,7 +38,7 @@ struct lwip_callback_msg
         } FreeSocket;
         struct {
             PCONNECTION_ENDPOINT Connection;
-            ip4_addr_t *IpAddress;
+            const ip_addr_t *IpAddress;
             u16_t Port;
         } Bind;
         struct {
@@ -53,7 +53,7 @@ struct lwip_callback_msg
         } Send;
         struct {
             PCONNECTION_ENDPOINT Connection;
-            ip4_addr_t *IpAddress;
+            const ip_addr_t *IpAddress;
             u16_t Port;
         } Connect;
         struct {
@@ -111,6 +111,13 @@ extern void TCPSendEventHandler(void *arg, const u16_t space);
 extern void TCPFinEventHandler(void *arg, const err_t err);
 extern void TCPRecvEventHandler(void *arg);
 
+/* The IPv6 switch (transport/tcp/if6.c) */
+extern BOOLEAN TCPIpv6Enabled;
+
+/* A TA_IP_ADDRESS or TA_IP6_ADDRESS of an lwIP address and port (transport/tcp/tcp.c) */
+NTSTATUS TCPBuildTransportAddress(const ip_addr_t *Ip, USHORT Port, PTRANSPORT_ADDRESS Address, ULONG Length,
+                                  BOOLEAN CoreLocked);
+
 /* Port bitmap (transport/tcp/tcp.c) */
 extern UINT TCPAllocateEphemeralPort(BOOLEAN (*InUse)(ULONG Port));
 extern VOID TCPFreePort(const UINT Port);
@@ -118,7 +125,8 @@ extern VOID TCPFreePort(const UINT Port);
 /* TCP functions */
 PTCP_PCB    LibTCPSocket(void *arg);
 VOID        LibTCPFreeSocket(PTCP_PCB pcb);
-err_t       LibTCPBind(PCONNECTION_ENDPOINT Connection, ip4_addr_t *const ipaddr, const u16_t port, u16_t *const BoundPort);
+/* ipaddr: an IPv4 or IPv6 address, or IP_ANY_TYPE for a dual stack socket on the unspecified address */
+err_t       LibTCPBind(PCONNECTION_ENDPOINT Connection, const ip_addr_t *ipaddr, const u16_t port, u16_t *const BoundPort);
 /* RemoteIp NULL: no remote endpoint known, ports with any TIME-WAIT PCB are skipped. Otherwise only the TIME-WAIT of that
    remote endpoint (RemotePort in host order) counts. Returns the port in network order, (UINT)-1 when every port is taken,
    or LIBTCP_PORT_TIME_WAIT when only that remote endpoint's TIME-WAIT keeps the free ports from it */
@@ -127,13 +135,13 @@ UINT        LibTCPAllocateEphemeralPort(const ip4_addr_t *RemoteIp, u16_t Remote
 PTCP_PCB    LibTCPListen(PCONNECTION_ENDPOINT Connection, UINT Backlog);
 VOID        LibTCPClaimPendingAccept(PCONNECTION_ENDPOINT Listener);
 err_t       LibTCPSend(PCONNECTION_ENDPOINT Connection, void *const dataptr, const u32_t len, ULONG *sent, const int safe, PTDI_BUCKET Bucket);
-err_t       LibTCPConnect(PCONNECTION_ENDPOINT Connection, ip4_addr_t *const ipaddr, const u16_t port);
+err_t       LibTCPConnect(PCONNECTION_ENDPOINT Connection, const ip_addr_t *ipaddr, const u16_t port);
 err_t       LibTCPShutdown(PCONNECTION_ENDPOINT Connection, const int shut_rx, const int shut_tx);
 err_t       LibTCPAbort(PCONNECTION_ENDPOINT Connection);
 err_t       LibTCPClose(PCONNECTION_ENDPOINT Connection, const int safe, const int callback);
 
-err_t       LibTCPGetPeerName(PTCP_PCB pcb, ip4_addr_t *const ipaddr, u16_t *const port);
-err_t       LibTCPGetHostName(PTCP_PCB pcb, ip4_addr_t *const ipaddr, u16_t *const port);
+err_t       LibTCPGetPeerName(PTCP_PCB pcb, ip_addr_t *const ipaddr, u16_t *const port);
+err_t       LibTCPGetHostName(PTCP_PCB pcb, ip_addr_t *const ipaddr, u16_t *const port);
 void        LibTCPAccept(PTCP_PCB pcb, struct tcp_pcb *listen_pcb, void *arg);
 void        LibTCPSetNoDelay(PTCP_PCB pcb, BOOLEAN Set);
 void        LibTCPSetKeepAlive(PTCP_PCB pcb, BOOLEAN Set);

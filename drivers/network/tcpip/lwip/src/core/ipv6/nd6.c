@@ -940,6 +940,11 @@ nd6_input(struct pbuf *p, struct netif *inp)
 
     /* Change the Path MTU. */
     pmtu = lwip_htonl(icmp6hdr->data);
+    /* NitroOS: no path MTU below the IPv6 minimum link MTU (RFC 8200 5, RFC 8201 4): a smaller value is
+       taken as 1280, so fragmentation and the TCP MSS never work from a size that cannot hold a header */
+    if (pmtu < IP6_MIN_MTU_LENGTH) {
+      pmtu = IP6_MIN_MTU_LENGTH;
+    }
     destination_cache[dest_idx].pmtu = (u16_t)LWIP_MIN(pmtu, 0xFFFF);
 
     break; /* ICMP6_TYPE_PTB */

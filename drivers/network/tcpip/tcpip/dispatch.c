@@ -799,6 +799,12 @@ NTSTATUS DispTdiQueryInformation(
                 return STATUS_INVALID_PARAMETER;
             }
 
+            /* An IPv6 socket: a TA_IP6_ADDRESS (or the IPv4 address of a dual stack socket), if it fits */
+            if (AddrFile->Family == TDI_ADDRESS_TYPE_IP6)
+                return TCPAddrFileTransportAddress(AddrFile, (PTRANSPORT_ADDRESS)&AddressInfo->Address,
+                                                   MmGetMdlByteCount(Irp->MdlAddress) -
+                                                   FIELD_OFFSET(TDI_ADDRESS_INFO, Address));
+
 			Address->TAAddressCount = 1;
 			Address->Address[0].AddressLength = TDI_ADDRESS_LENGTH_IP;
 			Address->Address[0].AddressType = TDI_ADDRESS_TYPE_IP;
@@ -826,6 +832,16 @@ NTSTATUS DispTdiQueryInformation(
             {
                 UnlockObject(Endpoint);
                 return STATUS_INVALID_CONNECTION;
+            }
+
+            /* An IPv6 socket: the address the connection has (the stack chose it for a wildcard binding) */
+            if (AddrFile->Family == TDI_ADDRESS_TYPE_IP6)
+            {
+                NTSTATUS Status6 = TCPGetLocalAddress6(Endpoint, AddrFile, (PTRANSPORT_ADDRESS)&AddressInfo->Address,
+                                                       MmGetMdlByteCount(Irp->MdlAddress) -
+                                                       FIELD_OFFSET(TDI_ADDRESS_INFO, Address));
+                UnlockObject(Endpoint);
+                return Status6;
             }
 
             Address->TAAddressCount = 1;

@@ -122,6 +122,11 @@ tcp_input(struct pbuf *p, struct netif *inp)
 #if SO_REUSE
   struct tcp_pcb *lpcb_prev = NULL;
   struct tcp_pcb_listen *lpcb_any = NULL;
+  /* NitroOS: a dual stack (IPADDR_TYPE_ANY) listener takes a request only when no listener of the request's
+     own IP version matches (an IPv4 socket on 0.0.0.0 gets the IPv4 connections of a port it shares with a
+     dual stack socket on ::) */
+  struct tcp_pcb *lpcb_anytype_prev = NULL;
+  struct tcp_pcb_listen *lpcb_anytype = NULL;
 #endif /* SO_REUSE */
   u8_t hdrlen_bytes;
   err_t err;
@@ -355,8 +360,8 @@ tcp_input(struct pbuf *p, struct netif *inp)
         if (IP_IS_ANY_TYPE_VAL(lpcb->local_ip)) {
           /* found an ANY TYPE (IPv4/IPv6) match */
 #if SO_REUSE
-          lpcb_any = lpcb;
-          lpcb_prev = prev;
+          lpcb_anytype = lpcb;
+          lpcb_anytype_prev = prev;
 #else /* SO_REUSE */
           break;
 #endif /* SO_REUSE */
@@ -383,6 +388,11 @@ tcp_input(struct pbuf *p, struct netif *inp)
       /* only pass to ANY if no specific local IP has been found */
       lpcb = lpcb_any;
       prev = lpcb_prev;
+    }
+    if (lpcb == NULL) {
+      /* NitroOS: the dual stack listener last */
+      lpcb = lpcb_anytype;
+      prev = lpcb_anytype_prev;
     }
 #endif /* SO_REUSE */
     if (lpcb != NULL) {

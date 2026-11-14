@@ -15,6 +15,28 @@
 
 /* DATA **********************************************************************/
 
+/* FUNCTIONS *****************************************************************/
+
+/*
+ * The AF_INET6 entries of the built-in provider (MSAFD, the AFD Winsock provider) are in the catalog of every
+ * install, for the stack's IPv6 sockets. They are listed only while the stack says it has IPv6 on and takes IPv6
+ * addresses for its sockets (WsIpv6SocketsOn, asked of tcpip.sys; no registry value is read here): otherwise the
+ * catalog is what it was before the entries were added, so nothing can see or select an IPv6 protocol, and an
+ * IPv6 socket is refused here with WSAEAFNOSUPPORT. Entries of any other provider are listed as they are.
+ * The catalog in memory is then a filtered view: anything that writes it back to the registry has to write the
+ * entries it left out as well.
+ */
+static const GUID WsMsafdProviderId =
+    { 0xe70f1aa0, 0xab8b, 0x11cf, { 0x8c, 0xa3, 0x00, 0x80, 0x5f, 0x48, 0xa1, 0x92 } };
+
+static BOOLEAN
+WsTcEntryHidden(IN PTCATALOG_ENTRY CatalogEntry)
+{
+    return CatalogEntry->ProtocolInfo.iAddressFamily == AF_INET6 &&
+           IsEqualGUID(&CatalogEntry->ProtocolInfo.ProviderId, &WsMsafdProviderId) &&
+           !WsIpv6SocketsOn();
+}
+
 #define WsTcLock()          EnterCriticalSection(&Catalog->Lock)
 #define WsTcUnlock()        LeaveCriticalSection(&Catalog->Lock)
 
@@ -354,6 +376,13 @@ WsTcRefreshFromRegistry(IN PTCATALOG Catalog,
                 /* We failed to get it, dereference the entry and leave */
                 WsTcEntryDereference(CatalogEntry);
                 break;
+            }
+
+            /* An IPv6 protocol of MSAFD exists only while the stack takes IPv6 sockets */
+            if (WsTcEntryHidden(CatalogEntry))
+            {
+                WsTcEntryDereference(CatalogEntry);
+                continue;
             }
 
             /* Insert it to our List */

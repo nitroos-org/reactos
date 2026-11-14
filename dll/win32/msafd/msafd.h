@@ -27,6 +27,7 @@
 #include <wsahelp.h>
 #include <tdi.h>
 #include <afd/shared.h>
+#include <tdiaddr.h>
 #include <mswsock.h>
 #include <ws2ipdef.h>
 

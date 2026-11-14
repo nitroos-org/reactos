@@ -24,7 +24,9 @@ list(APPEND SOURCE
     g7accept.c
     g7setip.c
     g7setinfoex.c
-    g8net.c)
+    g8net.c
+    tdiaddr6.c
+    ipv6addr.c)
 
 list(APPEND PCH_SKIP_SOURCE
     testlist.c)

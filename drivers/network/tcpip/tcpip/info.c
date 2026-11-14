@@ -268,6 +268,30 @@ QueryConnectionTableByEntity(
     return Status;
 }
 
+/* The row of an IPv6 TCP socket (IP_TCP6_ROW_ENTRY_ID), referenced as above */
+static
+TDI_STATUS
+QueryTcp6RowByEntity(
+    TDIEntityID ID,
+    PNDIS_BUFFER Buffer,
+    PUINT BufferSize)
+{
+    PADDRESS_FILE AddrFile;
+    TDI_STATUS Status;
+
+    AddrFile = ReferenceAddressFileByEntity(ID);
+    if (AddrFile == NULL)
+        return TDI_INVALID_PARAMETER;
+
+    if (AddrFile->Protocol == IPPROTO_TCP)
+        Status = InfoTdiQueryGetConnectionTcp6Row(AddrFile, Buffer, BufferSize);
+    else
+        Status = TDI_INVALID_REQUEST;
+
+    DereferenceObject(AddrFile);
+    return Status;
+}
+
 /* The connections in TIME_WAIT, as an array of TCP_TIMEWAIT_ROW. They have no address file, so
  * the per-entity queries cannot return them. As for any table, a caller whose buffer does not hold
  * the whole answer gets the size that does; the table can change between the two calls, and the
@@ -682,6 +706,13 @@ TDI_STATUS InfoTdiQueryInformationEx(
                      return TDI_INVALID_PARAMETER;
 
                  return InfoTdiQueryGetIpv6Table(Buffer, BufferSize);
+
+              case IP_TCP6_ROW_ENTRY_ID:
+                 if (ID->toi_type != INFO_TYPE_PROVIDER ||
+                     ID->toi_entity.tei_entity != CO_TL_ENTITY)
+                     return TDI_INVALID_PARAMETER;
+
+                 return QueryTcp6RowByEntity(ID->toi_entity, Buffer, BufferSize);
 
               case IP_TCP_TIMEWAIT_ENTRY_ID:
                  if (ID->toi_type != INFO_TYPE_PROVIDER ||
