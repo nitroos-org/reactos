@@ -1091,7 +1091,8 @@ WSPBind(SOCKET Handle,
                                                         IPV6_V6ONLY,
                                                         (PCHAR)&V6Only,
                                                         &V6OnlyLength) == NO_ERROR &&
-            V6OnlyLength == sizeof(V6Only) && V6Only == 0)
+            /* a stream socket's answer is a DWORD, a datagram socket's one byte (oracle) */
+            ((V6OnlyLength == sizeof(V6Only) && V6Only == 0) || (V6OnlyLength == 1 && (V6Only & 0xFF) == 0)))
         {
             Flow = AFD_TCP_BIND6_DUAL_STACK;
         }
@@ -3534,6 +3535,29 @@ WSPGetSockOpt(IN SOCKET Handle,
         return NO_ERROR;
     }
 
+    /* IPV6_PKTINFO and IPV6_HOPLIMIT of an IPv6 datagram socket: switches for WSARecvMsg, as IP_PKTINFO (off by
+     * default; a stream socket: WSAEINVAL, Windows 10 oracle) */
+    if (Level == IPPROTO_IPV6 && (OptionName == IPV6_PKTINFO || OptionName == IPV6_HOPLIMIT) &&
+        Socket->SharedData->AddressFamily == AF_INET6)
+    {
+        if (!(Socket->SharedData->ServiceFlags1 & XP1_CONNECTIONLESS))
+        {
+            /* the length reads 0 then (oracle) */
+            *OptionLength = 0;
+            if (lpErrno) *lpErrno = WSAEINVAL;
+            return SOCKET_ERROR;
+        }
+        if (*OptionLength < (INT)sizeof(DWORD))
+        {
+            if (lpErrno) *lpErrno = WSAEFAULT;
+            return SOCKET_ERROR;
+        }
+        *(DWORD *)OptionValue = ((OptionName == IPV6_PKTINFO) ? Socket->SharedData->Ipv6PktInfo :
+                                                               Socket->SharedData->Ipv6HopLimit) ? 1 : 0;
+        *OptionLength = sizeof(DWORD);
+        return NO_ERROR;
+    }
+
     /* IPV6_V6ONLY on an IPv4 socket: Windows 10 answers success and a one byte BOOLEAN TRUE (an
      * AF_INET socket is "v6 only" in the sense that it is not dual-stack; verified on 22H2 for a
      * datagram socket, bound and not). The helper refuses the option (WSAEINVAL), and Rust's
@@ -3895,6 +3919,29 @@ WSPSetSockOpt(
             return SOCKET_ERROR;
         }
         Socket->SharedData->IpPktInfo = (*(DWORD *)optval != 0) ? 1 : 0;
+        return NO_ERROR;
+    }
+
+    /* IPV6_PKTINFO and IPV6_HOPLIMIT: switches for WSARecvMsg of an IPv6 datagram socket (see WSPGetSockOpt).
+     * The size check as for IP_PKTINFO; VERIFY ON ORACLE */
+    if (level == IPPROTO_IPV6 && (optname == IPV6_PKTINFO || optname == IPV6_HOPLIMIT) &&
+        Socket->SharedData->AddressFamily == AF_INET6)
+    {
+        /* a stream socket: WSAEINVAL (oracle) */
+        if (!(Socket->SharedData->ServiceFlags1 & XP1_CONNECTIONLESS))
+        {
+            if (lpErrno) *lpErrno = WSAEINVAL;
+            return SOCKET_ERROR;
+        }
+        if (!optval || optlen < (INT)sizeof(DWORD))
+        {
+            if (lpErrno) *lpErrno = WSAEFAULT;
+            return SOCKET_ERROR;
+        }
+        if (optname == IPV6_PKTINFO)
+            Socket->SharedData->Ipv6PktInfo = (*(DWORD *)optval != 0) ? 1 : 0;
+        else
+            Socket->SharedData->Ipv6HopLimit = (*(DWORD *)optval != 0) ? 1 : 0;
         return NO_ERROR;
     }
 

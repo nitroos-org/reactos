@@ -26,6 +26,17 @@
 #ifndef IPV6_V6ONLY
 #define IPV6_V6ONLY 27
 #endif
+#ifndef IPV6_MULTICAST_IF
+#define IPV6_MULTICAST_IF 9
+#endif
+#ifndef IPV6_ADD_MEMBERSHIP
+#define IPV6_ADD_MEMBERSHIP 12
+#endif
+#ifndef IPV6_DROP_MEMBERSHIP
+#define IPV6_DROP_MEMBERSHIP 13
+#endif
+/* struct ipv6_mreq: the group (16 bytes), then the interface index */
+#define WSH_IPV6_MREQ_LENGTH 20
 
 /* The socket address of an AF_INET6 socket: SOCKADDR_IN6 with the scope id (what the stack expects) */
 #define WSH_SOCKADDR_IN6_LENGTH 28
@@ -36,6 +47,7 @@ C_ASSERT(sizeof(SOCKADDR_IN6_LH) == WSH_SOCKADDR_IN6_LENGTH);
 #define WSH_SET6_MCASTHOPS  0x04
 #define WSH_SET6_MCASTLOOP  0x08
 #define WSH_SET6_DONTFRAG   0x10
+#define WSH_SET6_MCASTIF    0x20
 
 /*
  * An AF_INET6 socket is made only while the stack says it has IPv6 on (Tcpip\Parameters\Ipv6Enable, read by
@@ -69,6 +81,39 @@ WshIpv6Enabled(VOID)
     State = ((Flags & TCP_IPV6_STATE_ON) && (Flags & TCP_IPV6_STATE_SOCKETS)) ? 1 : 2;
     InterlockedExchange(&WshIpv6State, State);
     return State == 1;
+}
+
+/*
+ * Once the stack has IPv6 sockets, the socket types other than stream need their own flag of its answer: a datagram
+ * socket TCP_IPV6_STATE_DATAGRAMS, a raw one TCP_IPV6_STATE_RAW (WSAEAFNOSUPPORT without it, as before the stack took
+ * them). Kept for the process as WshIpv6Enabled keeps its answer; asked again while the stack cannot be asked.
+ */
+static volatile LONG WshIpv6TypeFlags = -1;
+
+static
+BOOLEAN
+WshIpv6TypeEnabled(
+    _In_ INT SocketType)
+{
+    LONG Flags = WshIpv6TypeFlags;
+    HANDLE TcpFile;
+
+    if (SocketType == SOCK_STREAM)
+        return TRUE;
+
+    if (Flags == -1)
+    {
+        if (!NT_SUCCESS(openTcpFile(&TcpFile, FILE_READ_DATA)))
+            return FALSE;
+        Flags = (LONG)tdiGetIpv6StackState(TcpFile);
+        closeTcpFile(TcpFile);
+        if (Flags & TCP_IPV6_STATE_ON)
+            InterlockedExchange(&WshIpv6TypeFlags, Flags);
+    }
+
+    if (SocketType == SOCK_DGRAM)
+        return (Flags & TCP_IPV6_STATE_DATAGRAMS) != 0;
+    return (Flags & TCP_IPV6_STATE_RAW) != 0;
 }
 
 /* IPv6 addresses: the unspecified one, ::1 and the IPv4 mapped ones */
@@ -373,11 +418,11 @@ WshKeptOption(
 }
 
 /*
- * The IPPROTO_IPV6 options of an AF_INET6 socket. They are kept with the socket until the stack takes them
- * (IPV6_V6ONLY and the hop limits do not reach it yet): what was set reads back, an option that was not set
- * reads as its default. The defaults and the exact errors are to be verified on Windows (VERIFY ON ORACLE):
- * IPV6_V6ONLY 1 (the documented default on Windows), unicast hops -1 (the system default), multicast hops 1,
- * multicast loop 1, don't fragment 0 (IPV6_DONTFRAG: the stack does not act on it yet).
+ * The IPPROTO_IPV6 options of an AF_INET6 socket, kept with the socket (a datagram socket's hop limits, multicast
+ * loop and interface also go to the stack; IPV6_V6ONLY and the others do not reach it): what was set reads back, an
+ * option that was not set reads as its default. Windows 10 (oracle, datagram socket): IPV6_V6ONLY 1, unicast hops
+ * 128, multicast hops 1, multicast loop 1, multicast interface 0, don't fragment 0 (IPV6_DONTFRAG: the stack does
+ * not act on it yet).
  */
 static
 PLONG
@@ -394,10 +439,11 @@ WshKeptIpv6Option(
     switch (OptionName)
     {
         case IPV6_V6ONLY:        *Bit = WSH_SET6_V6ONLY; *Default = 1; *Boolean = TRUE; return &Context->Ipv6V6Only;
-        case IPV6_UNICAST_HOPS:  *Bit = WSH_SET6_UNIHOPS; *Default = -1; return &Context->Ipv6UnicastHops;
+        case IPV6_UNICAST_HOPS:  *Bit = WSH_SET6_UNIHOPS; *Default = 128; return &Context->Ipv6UnicastHops;
         case IPV6_MULTICAST_HOPS: *Bit = WSH_SET6_MCASTHOPS; *Default = 1; return &Context->Ipv6MulticastHops;
         case IPV6_MULTICAST_LOOP: *Bit = WSH_SET6_MCASTLOOP; *Default = 1; *Boolean = TRUE; return &Context->Ipv6MulticastLoop;
         case IPV6_DONTFRAG:      *Bit = WSH_SET6_DONTFRAG; *Boolean = TRUE; return &Context->Ipv6DontFragment;
+        case IPV6_MULTICAST_IF:  *Bit = WSH_SET6_MCASTIF; return &Context->Ipv6MulticastIf;
         default: break;
     }
     return NULL;
@@ -462,6 +508,22 @@ GetTdiTypeId(
              default:
                  break;
           }
+          break;
+
+       case IPPROTO_IPV6:
+          /* What an IPv6 datagram socket hands to the stack (WSHSetSocketInformation) */
+          *TdiType = INFO_TYPE_ADDRESS_OBJECT;
+          switch (OptionName)
+          {
+             case IPV6_UNICAST_HOPS:    *TdiId = AO_OPTION_TTL; return;
+             case IPV6_MULTICAST_HOPS:  *TdiId = AO_OPTION_MCASTTTL; return;
+             case IPV6_MULTICAST_LOOP:  *TdiId = AO_OPTION_MCASTLOOP; return;
+             case IPV6_MULTICAST_IF:    *TdiId = AO_OPTION_INDEX_MCASTIF; return;
+             case IPV6_ADD_MEMBERSHIP:  *TdiId = AO_OPTION_INDEX_ADD_MCAST; return;
+             case IPV6_DROP_MEMBERSHIP: *TdiId = AO_OPTION_INDEX_DEL_MCAST; return;
+             default: break;
+          }
+          break;
 
        default:
           break;
@@ -843,6 +905,35 @@ SendRequest(
     return NO_ERROR;
 }
 
+/* IPV6_ADD_MEMBERSHIP / IPV6_DROP_MEMBERSHIP to the stack. Its answers: a group joined twice is invalid
+ * (STATUS_INVALID_PARAMETER: WSAEINVAL); a group left that was not joined, an interface that does not exist, no
+ * room: WSAEADDRNOTAVAIL (Windows 10 oracle for the first two) */
+static
+INT
+WshSendMembershipRequest(
+    _In_ PVOID Request,
+    _In_ DWORD RequestSize)
+{
+    HANDLE TcpCC;
+    DWORD BytesReturned;
+
+    if (openTcpFile(&TcpCC, FILE_READ_DATA | FILE_WRITE_DATA) != STATUS_SUCCESS)
+        return WSAEINVAL;
+
+    if (DeviceIoControl(TcpCC, IOCTL_TCP_SET_INFORMATION_EX, Request, RequestSize, NULL, 0, &BytesReturned, NULL))
+    {
+        closeTcpFile(TcpCC);
+        return NO_ERROR;
+    }
+    if (GetLastError() == ERROR_INVALID_PARAMETER)
+    {
+        closeTcpFile(TcpCC);
+        return WSAEINVAL;
+    }
+    closeTcpFile(TcpCC);
+    return WSAEADDRNOTAVAIL;
+}
+
 INT
 EXPORT
 WSHNotify(
@@ -1001,6 +1092,8 @@ WSHOpenSocket2(
     /* An IPv6 socket exists only while the stack takes IPv6 (see WshIpv6Enabled): until then it is the
      * WSAEAFNOSUPPORT an application has always got for AF_INET6 */
     if (*AddressFamily == AF_INET6 && !WshIpv6Enabled())
+        return WSAEAFNOSUPPORT;
+    if (*AddressFamily == AF_INET6 && !WshIpv6TypeEnabled(*SocketType))
         return WSAEAFNOSUPPORT;
 
     switch (*SocketType) {
@@ -1234,6 +1327,23 @@ WSHSetSocketInformation(
                 return 0;
             }
 
+            /* Joining and leaving a group (struct ipv6_mreq: the group, then the interface index, 0 for the
+             * stack's choice): a datagram socket's, done by the stack (after the bind when the socket is not bound
+             * yet, as the other options it takes; an unbound socket's join succeeds, oracle). A short request
+             * WSAEFAULT, an address that is no group WSAEADDRNOTAVAIL (oracle); the rest is the stack's
+             * (WshSendMembershipRequest) */
+            if (OptionName == IPV6_ADD_MEMBERSHIP || OptionName == IPV6_DROP_MEMBERSHIP)
+            {
+                if (Context->SocketType != SOCK_DGRAM)
+                    return WSAEINVAL;
+                if (!OptionValue || OptionLength < (INT)WSH_IPV6_MREQ_LENGTH)
+                    return WSAEFAULT;
+                if (((PUCHAR)OptionValue)[0] != 0xFF)
+                    return WSAEADDRNOTAVAIL;
+                OptionLength = WSH_IPV6_MREQ_LENGTH;
+                break;
+            }
+
             Kept = WshKeptIpv6Option(Context, OptionName, &Bit, &Default, &Boolean);
             if (!Kept)
             {
@@ -1251,12 +1361,26 @@ WSHSetSocketInformation(
             Value = (OptionLength >= (INT)sizeof(LONG)) ? *(PLONG)OptionValue : *(PUCHAR)OptionValue;
             if (Boolean)
                 Value = (Value != 0);
-            else if (Value < -1 || Value > 255)
+            else if (OptionName != IPV6_MULTICAST_IF && (Value < -1 || Value > 255))
                 return WSAEINVAL;
+            /* -1 is the default hop limit: 128 unicast (what an unset one reads, oracle), 1 multicast (VERIFY ON
+             * ORACLE: what reads back after -1) */
+            if (Value == -1 && OptionName == IPV6_UNICAST_HOPS)
+                Value = 128;
+            else if (Value == -1 && OptionName == IPV6_MULTICAST_HOPS)
+                Value = 1;
 
             *Kept = Value;
             Context->Ipv6OptionsSet |= Bit;
-            return NO_ERROR;
+
+            /* The hop limits, the multicast loop and interface of a datagram socket reach the stack (as a LONG,
+             * -1 = the default); a stream socket keeps them only, as before, and so does IPV6_DONTFRAG (the
+             * stack does not act on it) */
+            if (OptionName == IPV6_V6ONLY || OptionName == IPV6_DONTFRAG || Context->SocketType != SOCK_DGRAM)
+                return NO_ERROR;
+            OptionValue = (PCHAR)Kept;
+            OptionLength = sizeof(LONG);
+            break;
         }
 
         case IPPROTO_UDP:
@@ -1340,7 +1464,10 @@ WSHSetSocketInformation(
         return 0;
     }
 
-    Status = SendRequest(Info, sizeof(*Info) + Info->BufferSize, IOCTL_TCP_SET_INFORMATION_EX);
+    if (Level == IPPROTO_IPV6 && (OptionName == IPV6_ADD_MEMBERSHIP || OptionName == IPV6_DROP_MEMBERSHIP))
+        Status = WshSendMembershipRequest(Info, sizeof(*Info) + Info->BufferSize);
+    else
+        Status = SendRequest(Info, sizeof(*Info) + Info->BufferSize, IOCTL_TCP_SET_INFORMATION_EX);
 
     HeapFree(GetProcessHeap(), 0, Info);
 
