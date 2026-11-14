@@ -530,7 +530,10 @@ again:
         free_buffer_head(bh);
         bh = tbh;
         get_bh(bh);
-        RemoveEntryList(&bh->b_link);
+        /* The buffer is on the free list only while nobody holds it: an empty (self-linked) entry must not be removed
+           (RemoveEntryList treats it as a corrupted list and fails fast) */
+        if (!IsListEmpty(&bh->b_link))
+            RemoveEntryList(&bh->b_link);
         InitializeListHead(&bh->b_link);
         ExReleaseResourceLite(&bdev->bd_bh_lock);
         goto errorout;
@@ -709,7 +712,9 @@ again:
         get_bh(tbh);
         free_buffer_head(bh);
         bh = tbh;
-        RemoveEntryList(&bh->b_link);
+        /* as in get_block_bh_mdl: only a buffer that sits on the free list has a linked entry */
+        if (!IsListEmpty(&bh->b_link))
+            RemoveEntryList(&bh->b_link);
         InitializeListHead(&bh->b_link);
         ExReleaseResourceLite(&bdev->bd_bh_lock);
         goto errorout;
