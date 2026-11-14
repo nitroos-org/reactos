@@ -69,6 +69,11 @@ typedef struct _FLT_CONNECTION
 
 } FLT_CONNECTION, *PFLT_CONNECTION;
 
+/*
+ * A message of FltSendMessage, on the sender's stack. Data and ReplyBuffer are non-paged copies made by
+ * FltSendMessage: they are written and read under Connection->Lock (a spin lock), the filter's own
+ * buffers may be paged.
+ */
 typedef struct _FLT_MESSAGE
 {
     LIST_ENTRY Link;
@@ -767,6 +772,7 @@ FltSendMessage(_In_ PFLT_FILTER Filter,
     PIRP Irp;
     PFLT_MESSAGE Matched;
     ULONG_PTR Information = 0;
+    ULONG ReplyCapacity;
     PUCHAR Copy = NULL;
     NTSTATUS Status, DeliverStatus = STATUS_SUCCESS;
 
@@ -775,12 +781,29 @@ FltSendMessage(_In_ PFLT_FILTER Filter,
     if ((ReplyBuffer == NULL) != (ReplyLength == NULL))
         return STATUS_INVALID_PARAMETER;
 
+    ReplyCapacity = ReplyBuffer ? *ReplyLength : 0;
+    if (ReplyCapacity > MAXULONG - SenderBufferLength)
+        return STATUS_INVALID_PARAMETER;
+
+    /*
+     * The message and the room for the answer are non-paged: the client side copies them under the
+     * connection's spin lock. The filter's buffers may well be paged, they are only touched here.
+     */
+    if (SenderBufferLength + ReplyCapacity)
+    {
+        Copy = ExAllocatePoolWithTag(NonPagedPool, SenderBufferLength + ReplyCapacity, FM_TAG_MESSAGE);
+        if (Copy == NULL)
+            return STATUS_INSUFFICIENT_RESOURCES;
+        if (SenderBufferLength)
+            RtlCopyMemory(Copy, SenderBuffer, SenderBufferLength);
+    }
+
     RtlZeroMemory(&Message, sizeof(Message));
-    Message.Data = SenderBuffer;
+    Message.Data = Copy;
     Message.Length = SenderBufferLength;
     Message.WantsReply = (ReplyBuffer != NULL);
-    Message.ReplyBuffer = ReplyBuffer;
-    Message.ReplyCapacity = ReplyBuffer ? *ReplyLength : 0;
+    Message.ReplyBuffer = Copy ? Copy + SenderBufferLength : NULL;
+    Message.ReplyCapacity = ReplyCapacity;
     KeInitializeEvent(&Message.Event, NotificationEvent, FALSE);
 
     /* The pointer is the filter's own while it holds the lock */
@@ -835,8 +858,13 @@ FltSendMessage(_In_ PFLT_FILTER Filter,
 
     FltReleasePushLock(&Filter->PortLock);
 
+    /* Nobody can write the answer any more: it goes to the filter's buffer at the filter's IRQL */
     if (ReplyLength)
+    {
+        if (Message.ReplyLength)
+            RtlCopyMemory(ReplyBuffer, Message.ReplyBuffer, Message.ReplyLength);
         *ReplyLength = Message.ReplyLength;
+    }
     if (Copy)
         ExFreePoolWithTag(Copy, FM_TAG_MESSAGE);
     return Message.Status;
