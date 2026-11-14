@@ -640,6 +640,21 @@ HRESULT d2d_geometry_group_init(struct d2d_geometry *geometry, ID2D1Factory *fac
         D2D1_FILL_MODE fill_mode, ID2D1Geometry **src_geometries, unsigned int geometry_count);
 struct d2d_geometry *unsafe_impl_from_ID2D1Geometry(ID2D1Geometry *iface);
 
+enum d2d_geometry_kind
+{
+    D2D_GEOMETRY_KIND_UNKNOWN,
+    D2D_GEOMETRY_KIND_ELLIPSE,
+    D2D_GEOMETRY_KIND_PATH,
+    D2D_GEOMETRY_KIND_RECTANGLE,
+    D2D_GEOMETRY_KIND_ROUNDED_RECTANGLE,
+    D2D_GEOMETRY_KIND_TRANSFORMED,
+    D2D_GEOMETRY_KIND_GROUP,
+};
+
+enum d2d_geometry_kind d2d_geometry_get_kind(ID2D1Geometry *iface);
+HRESULT d2d_geometry_combine(ID2D1Geometry *geometry1, ID2D1Geometry *geometry2, D2D1_COMBINE_MODE mode,
+        const D2D1_MATRIX_3X2_F *transform, float tolerance, ID2D1SimplifiedGeometrySink *sink);
+
 struct d2d_device
 {
     ID2D1Device6 ID2D1Device6_iface;
