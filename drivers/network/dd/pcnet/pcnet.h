@@ -53,6 +53,8 @@ typedef struct _ADAPTER_STATS
   ULONG RcvFramingErrors;
 } ADAPTER_STATS, *PADAPTER_STATS;
 
+#define MAX_MULTICAST_ADDRESSES 32
+
 /* adapter struct */
 typedef struct _ADAPTER
 {
@@ -105,6 +107,10 @@ typedef struct _ADAPTER
   ULONG BufferCount;
   ULONG LogBufferCount;
 
+  /* multicast list (OID_802_3_MULTICAST_LIST); the chip takes it as its logical address filter */
+  UCHAR MulticastList[MAX_MULTICAST_ADDRESSES][6];
+  ULONG MulticastListSize;
+
   ADAPTER_STATS Statistics;
 } ADAPTER, *PADAPTER;
 
@@ -136,6 +142,11 @@ MiSetMulticast(
     UCHAR *Addresses,
     UINT AddressCount);
 
+VOID
+NTAPI
+MiApplyLogicalAddressFilter(
+    PADAPTER Adapter);
+
 NDIS_MEDIA_STATE
 NTAPI
 MiGetMediaState(PADAPTER Adapter);
@@ -152,7 +163,6 @@ MiGetMediaDuplex(PADAPTER Adapter);
 #define NUMBER_OF_BUFFERS     0x20
 #define LOG_NUMBER_OF_BUFFERS 5         /* log2(NUMBER_OF_BUFFERS) */
 #define BUFFER_SIZE           0x600
-#define MAX_MULTICAST_ADDRESSES 32
 #define MEDIA_DETECTION_INTERVAL 5000
 
 /* flags */

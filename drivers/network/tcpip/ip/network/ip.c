@@ -228,6 +228,7 @@ PIP_INTERFACE IPCreateInterface(
     IF->Address       = BindInfo->Address;
     IF->AddressLength = BindInfo->AddressLength;
     IF->Transmit      = BindInfo->Transmit;
+    IF->SetMulticast  = BindInfo->SetMulticast;
 
 	IF->Unicast.Type = IP_ADDRESS_V4;
 	IF->PointToPoint.Type = IP_ADDRESS_V4;

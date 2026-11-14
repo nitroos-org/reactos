@@ -127,6 +127,14 @@ typedef VOID (*LL_TRANSMIT_ROUTINE)(
 /* Frees the link layer context when the last reference to its interface goes; at <= DISPATCH_LEVEL */
 typedef VOID (*LL_RELEASE_ROUTINE)(PVOID Context);
 
+/* Most link layer multicast addresses an interface is asked to receive (LL_SET_MULTICAST_ROUTINE) */
+#define LL_MULTICAST_MAX 8
+
+/* Sets the multicast addresses the link layer receives besides its own address and broadcast: Count
+   addresses of the interface's address length each, at Addresses (Count <= LL_MULTICAST_MAX). It only
+   records them and applies them later at PASSIVE_LEVEL; callable at <= DISPATCH_LEVEL */
+typedef VOID (*LL_SET_MULTICAST_ROUTINE)(PVOID Context, const UCHAR *Addresses, UINT Count);
+
 /* Link layer to IP binding information */
 typedef struct _LLIP_BIND_INFO {
     PVOID Context;                /* Pointer to link layer context information */
@@ -136,6 +144,7 @@ typedef struct _LLIP_BIND_INFO {
     UINT  AddressLength;          /* Length of address in bytes */
     LL_TRANSMIT_ROUTINE Transmit; /* Transmit function for this interface */
     LL_RELEASE_ROUTINE Release;   /* Frees Context with the interface (NULL: nothing to free) */
+    LL_SET_MULTICAST_ROUTINE SetMulticast; /* Multicast reception (NULL: none, as for the loopback) */
 } LLIP_BIND_INFO, *PLLIP_BIND_INFO;
 
 typedef struct _SEND_RECV_STATS {
@@ -186,6 +195,7 @@ typedef struct _IP_INTERFACE {
     UINT  AddressLength;          /* Length of address in bytes */
     UINT  Index;                  /* Index of adapter (used to add ip addr) */
     LL_TRANSMIT_ROUTINE Transmit; /* Pointer to transmit function */
+    LL_SET_MULTICAST_ROUTINE SetMulticast; /* Multicast reception, or NULL (LLIP_BIND_INFO) */
     PVOID TCPContext;             /* TCP Content for this interface */
     SEND_RECV_STATS Stats;        /* Send/Receive statistics */
 } IP_INTERFACE, *PIP_INTERFACE;

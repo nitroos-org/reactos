@@ -214,8 +214,10 @@ TCPUpdateInterfaceIPInformationLocked(PIP_INTERFACE IF)
     /* The netif is created before the interface knows its MTU; lwIP limits its segments and
      * fragments its datagrams to this value, and skips both while it is 0 */
     netif->mtu = (u16_t)min(IF->MTU, 0xFFFF);
-    /* IPv6 starts from the same MTU (a router advertisement may lower it) */
-    netif->mtu6 = netif->mtu;
+    /* IPv6 starts from the same MTU and never exceeds it; a lower one a router advertisement set stays
+     * (this runs again on every reconfiguration and IPv4 address change) */
+    if (netif->mtu6 == 0 || netif->mtu6 > netif->mtu)
+        netif->mtu6 = netif->mtu;
 
     GetInterfaceIPv4Address(IF,
                             ADE_UNICAST,

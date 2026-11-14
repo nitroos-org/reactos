@@ -309,6 +309,7 @@ NDIS_STATUS LoopRegisterAdapter(
   BindInfo.AddressLength = 0;
   BindInfo.Transmit = LoopTransmit;
   BindInfo.Release = NULL;
+  BindInfo.SetMulticast = NULL;
 
   Loopback = IPCreateInterface(&BindInfo);
   if (!Loopback) {
