@@ -769,15 +769,14 @@ IntEngBitBlt(
 
     if (psoMask && pptlMask)
     {
-        LONGLONG xMask = (LONGLONG)pptlMask->x + rclClipped.left - prclTrg->left;
-        LONGLONG yMask = (LONGLONG)pptlMask->y + rclClipped.top - prclTrg->top;
-
-        if (xMask < LONG_MIN || xMask > LONG_MAX ||
-            yMask < LONG_MIN || yMask > LONG_MAX)
+        if (!RebaseBltMaskPoint(pptlMask, prclTrg, &rclClipped, &ptlMask))
             return FALSE;
 
-        ptlMask.x = (LONG)xMask;
-        ptlMask.y = (LONG)yMask;
+        if (ptlMask.x < 0 || ptlMask.y < 0 ||
+            (LONGLONG)ptlMask.x + rclClipped.right - rclClipped.left > psoMask->sizlBitmap.cx ||
+            (LONGLONG)ptlMask.y + rclClipped.bottom - rclClipped.top > psoMask->sizlBitmap.cy)
+            return FALSE;
+
         pptlMask = &ptlMask;
     }
 
