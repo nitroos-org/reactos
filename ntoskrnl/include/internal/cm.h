@@ -1575,6 +1575,28 @@ CmpEnumerateOpenSubKeys(
     _In_ BOOLEAN DereferenceOpenedEntries
 );
 
+/* One open key of NtQueryOpenSubKeysEx's output: the process that holds it and the key's full name */
+typedef struct _CM_OPEN_SUBKEY_PID
+{
+    HANDLE ProcessId;
+    UNICODE_STRING KeyName;
+} CM_OPEN_SUBKEY_PID, *PCM_OPEN_SUBKEY_PID;
+
+/* The NtQueryOpenSubKeysEx output buffer: the entries, then the key names */
+typedef struct _CM_OPEN_SUBKEYS_INFO
+{
+    ULONG Count;
+    CM_OPEN_SUBKEY_PID KeyArray[1];
+} CM_OPEN_SUBKEYS_INFO, *PCM_OPEN_SUBKEYS_INFO;
+
+NTSTATUS
+NTAPI
+CmpSnapshotOpenSubKeys(
+    _In_ PCM_KEY_CONTROL_BLOCK RootKcb,
+    _Out_ PCM_OPEN_SUBKEYS_INFO *Snapshot,
+    _Out_ PULONG SnapshotSize
+);
+
 HCELL_INDEX
 NTAPI
 CmpCopyCell(
