@@ -878,6 +878,7 @@ RtlpDeCommitFreeBlock(PHEAP Heap,
     SIZE_T PrecedingSize, DecommitSize;
     ULONG_PTR DecommitBase, DecommitEnd;
     NTSTATUS Status;
+    BOOLEAN FollowsUcr;
 
     DPRINT("Decommitting %p %p %x\n", Heap, FreeEntry, Size);
 
@@ -896,7 +897,16 @@ RtlpDeCommitFreeBlock(PHEAP Heap,
     DecommitBase = ROUND_UP(FreeEntry, PAGE_SIZE);
     PrecedingSize = (PHEAP_ENTRY)DecommitBase - (PHEAP_ENTRY)FreeEntry;
 
-    if (PrecedingSize == 0)
+    /* A block that starts a page right behind an uncommitted range (nothing precedes it: the guard entry is in the
+       page before that range) needs no page of its own kept in front: all of it goes, and the ranges join */
+    FollowsUcr = (PrecedingSize == 0 && FreeEntry->PreviousSize == 0 &&
+                  (PHEAP_ENTRY)FreeEntry != Segment->FirstEntry);
+
+    if (FollowsUcr)
+    {
+        /* Nothing to keep in front */
+    }
+    else if (PrecedingSize == 0)
     {
         /* We need some space in order to insert our guard entry */
         DecommitBase += PAGE_SIZE;
@@ -963,6 +973,13 @@ RtlpDeCommitFreeBlock(PHEAP Heap,
     RtlpInsertUnCommittedPages(Segment, DecommitBase, DecommitSize);
     Segment->NumberOfUnCommittedPages += (ULONG)(DecommitSize / PAGE_SIZE);
 
+    if (FollowsUcr)
+    {
+        /* The guard entry in front of the range this one joined is already in place */
+        PrecedingSize = 0;
+        goto DoNext;
+    }
+
     /* Insert our guard entry before this */
     GuardEntry = (PHEAP_ENTRY)DecommitBase - 1;
     GuardEntry->Size = 1;
@@ -997,6 +1014,7 @@ RtlpDeCommitFreeBlock(PHEAP Heap,
             break;
     }
 
+DoNext:
     /* Now the next one */
     if (NextEntry)
     {
@@ -1417,6 +1435,43 @@ RtlpNextSegmentReserve(IN SIZE_T Current,
     return Base;
 }
 
+static BOOLEAN RtlpIsFreeRunBetweenUcrs(PHEAP Heap, PHEAP_ENTRY Entry, SIZE_T BlockSize);
+
+/* Gives back the committed runs that hold nothing but one free block: every one is a few pages between two
+   uncommitted ranges, too small for any request that needs a range of its own, and the ranges around it join into
+   one that is large enough. Done when a heap would otherwise reserve a new segment. The heap lock is held.
+   Returns whether a run was given back. */
+static BOOLEAN
+RtlpHeapReleaseIslands(PHEAP Heap)
+{
+    PLIST_ENTRY Current, Next;
+    BOOLEAN Done = FALSE;
+
+    for (Current = Heap->FreeLists.Flink; Current != &Heap->FreeLists; Current = Next)
+    {
+        PHEAP_FREE_ENTRY Entry = CONTAINING_RECORD(Current, HEAP_FREE_ENTRY, FreeList);
+        SIZE_T Size = Entry->Size, Before = Heap->TotalFreeSize;
+
+        Next = Current->Flink;
+
+        /* A whole run is decommitted as it is: no free block is made at its ends, so the list is not changed
+           except for this entry */
+        if (Size + 1 < Heap->DeCommitFreeBlockThreshold ||
+            !RtlpIsFreeRunBetweenUcrs(Heap, (PHEAP_ENTRY)Entry, Size))
+            continue;
+
+        RtlpRemoveFreeBlock(Heap, Entry, FALSE);
+        Heap->TotalFreeSize -= Size;
+        RtlpDeCommitFreeBlock(Heap, Entry, Size);
+
+        /* A run that could not be given back went into the lists again: stop, it would be found again */
+        if (Heap->TotalFreeSize >= Before)
+            break;
+        Done = TRUE;
+    }
+    return Done;
+}
+
 static
 PHEAP_FREE_ENTRY
 RtlpExtendHeap(PHEAP Heap,
@@ -1429,7 +1484,7 @@ RtlpExtendHeap(PHEAP Heap,
     PHEAP_SEGMENT Segment;
     PHEAP_FREE_ENTRY FreeEntry;
     NTSTATUS Status;
-    BOOLEAN Trimmed = FALSE;
+    BOOLEAN Trimmed = FALSE, Released = FALSE;
 
     DPRINT("RtlpExtendHeap(%p %x)\n", Heap, Size);
     Heap->TrimExtends++;
@@ -1495,6 +1550,14 @@ Retry:
 
         if (!Segment)
             EmptySlots++;
+    }
+
+    /* Before a new segment is reserved: runs of nothing but a free block keep the uncommitted ranges apart */
+    if (!Released && RtlpGetMode() == UserMode && !Heap->CommitRoutine &&
+        Heap->TotalFreeSize != 0 && RtlpHeapReleaseIslands(Heap))
+    {
+        Released = TRUE;
+        goto Retry;
     }
 
     /* No luck, need to grow the heap */
@@ -2255,6 +2318,35 @@ RtlpHeapTrimCheck(PHEAP Heap)
     }
 }
 
+/* Whether a free block is a whole committed run between two uncommitted ranges: it starts a
+   page right behind an uncommitted range and the guard entry of the run follows it. Decommitting it joins the ranges,
+   and with its guard entry it spans a page just when its size is one entry unit short of it. */
+static BOOLEAN
+RtlpIsFreeRunBetweenUcrs(PHEAP Heap,
+                         PHEAP_ENTRY Entry,
+                         SIZE_T BlockSize)
+{
+    PHEAP_ENTRY Next;
+    PHEAP_SEGMENT Segment;
+
+    if (Entry->PreviousSize != 0 ||
+        ((ULONG_PTR)Entry & (PAGE_SIZE - 1)) != 0 ||
+        Entry->SegmentOffset >= HEAP_SEGMENTS)
+        return FALSE;
+
+    Segment = Heap->Segments[Entry->SegmentOffset];
+    if (!Segment || Entry == Segment->FirstEntry)
+        return FALSE;
+
+    /* The end of a segment has no guard entry: the page-sized blocks decommit as they are */
+    if (Entry->Flags & HEAP_ENTRY_LAST_ENTRY)
+        return FALSE;
+
+    Next = Entry + BlockSize;
+    return (Next->Flags == (HEAP_ENTRY_BUSY | HEAP_ENTRY_LAST_ENTRY) && Next->Size == 1 &&
+            ((ULONG_PTR)(Next + 1) & (PAGE_SIZE - 1)) == 0);
+}
+
 /* Gives an in-use block back to the heap proper: coalesce, decommit or insert. The heap lock is held. */
 VOID NTAPI
 RtlpFreeBlockLocked(PHEAP Heap,
@@ -2280,7 +2372,9 @@ RtlpFreeBlockLocked(PHEAP Heap,
         /* The cap costs a walk over the segments: only a block that can be decommitted needs it, and a
            heap whose free blocks do not even reach the minimum cap is below it whatever it has committed */
         Decommit = FALSE;
-        if (BlockSize >= Heap->DeCommitFreeBlockThreshold &&
+        if ((BlockSize >= Heap->DeCommitFreeBlockThreshold ||
+             (BlockSize + 1 == Heap->DeCommitFreeBlockThreshold &&
+              RtlpIsFreeRunBetweenUcrs(Heap, HeapEntry, BlockSize))) &&
             Heap->TotalFreeSize + BlockSize >= Heap->DeCommitTotalFreeThreshold)
         {
             SIZE_T Cap = RtlpHeapCommittedUnits(Heap) >> HEAP_TRIM_CAP_SHIFT;

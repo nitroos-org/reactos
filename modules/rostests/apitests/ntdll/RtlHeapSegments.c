@@ -140,10 +140,12 @@ TestSegmentSizes(void)
     RtlDestroyHeap(Heap);
 }
 
-/* Blocks of a few bytes to 460 KB, alive and freed again and again, the live set around 50 MB, every now and then
-   everything freed: no allocation fails, and no segment reserves more than the cap and the heap does not use up its segments */
+/* Blocks of a few bytes to 460 KB, alive and freed again and again (with Realloc, one operation in eight resizes a
+   block, the growth that left hundreds of uncommitted ranges of a few pages in every segment), the live set around
+   50 MB, every now and then everything freed: no allocation fails, and no segment reserves more than the cap and the
+   heap does not use up its segments */
 static void
-TestChurn(void)
+TestChurn(BOOLEAN Realloc, ULONG MaxSegs)
 {
     static PUCHAR Slots[SLOTS];
     static SIZE_T Sizes[SLOTS];
@@ -161,7 +163,29 @@ TestChurn(void)
     for (Op = 1; Op <= CHURN_OPS; Op++)
     {
         i = Next(&Seed) % SLOTS;
-        if (Slots[i])
+        if (Slots[i] && Realloc && Next(&Seed) % 8 == 0)
+        {
+            SIZE_T Size = PickSize(&Seed);
+            PUCHAR New = RtlReAllocateHeap(Heap, 0, Slots[i], Size);
+
+            Live -= Sizes[i];
+            if (New)
+            {
+                Slots[i] = New;
+                Sizes[i] = Size;
+                Live += Size;
+                if (Live > PeakLive)
+                    PeakLive = Live;
+                Track(New);
+            }
+            else
+            {
+                /* the old block is still the heap's */
+                Live += Sizes[i];
+                Failed++;
+            }
+        }
+        else if (Slots[i])
         {
             RtlFreeHeap(Heap, 0, Slots[i]);
             Live -= Sizes[i];
@@ -204,7 +228,7 @@ TestChurn(void)
     for (i = 0; i < NumSegs; i++)
         ok(i < 5 || Segs[i].Reserve <= SEGMENT_CAP, "segment %lu reserves %lu KB\n", i, (ULONG)(Segs[i].Reserve >> 10));
     /* a bound, with room left in the 64 segments of a heap (Windows needs about 10 for this load) */
-    ok(NumSegs <= 40, "%lu segments\n", NumSegs);
+    ok(NumSegs <= MaxSegs, "%lu segments, at most %lu expected\n", NumSegs, MaxSegs);
 
     for (i = 0; i < SLOTS; i++)
     {
@@ -258,7 +282,8 @@ TestLargeHeap(void)
 START_TEST(RtlHeapSegments)
 {
     TestSegmentSizes();
-    TestChurn();
+    TestChurn(FALSE, 24);
+    TestChurn(TRUE, 24);
 #ifdef _WIN64
     TestLargeHeap();
 #endif
