@@ -2137,7 +2137,6 @@ RtlpSplitEntry(PHEAP Heap,
  * that the free pages are a cache. The cache is trimmed back to DeCommitTotalFreeThreshold when the heap went a
  * whole second without having to grow: then the cache was not needed, and an idle process does not keep memory it
  * stopped using. */
-#define HEAP_TRIM_INTERVAL_MS   1000
 #define HEAP_TRIM_CAP_SHIFT     2
 #define HEAP_TRIM_MAX_BLOCKS    512
 
@@ -2154,12 +2153,6 @@ RtlpHeapCommittedUnits(PHEAP Heap)
             Units += (SIZE_T)(Segment->NumberOfPages - Segment->NumberOfUnCommittedPages) * (PAGE_SIZE >> HEAP_ENTRY_SHIFT);
     }
     return Units;
-}
-
-static ULONG
-RtlpHeapTickMs(VOID)
-{
-    return (ULONG)((SharedUserData->TickCountQuad * SharedUserData->TickCountMultiplier) >> 24);
 }
 
 /* Gives committed free pages back, largest free block first, until Keep entry units of free blocks are left or
@@ -2193,10 +2186,38 @@ RtlpHeapTrim(PHEAP Heap, SIZE_T Keep, ULONG MaxBlocks)
     return Done;
 }
 
+/* Once per HEAP_TRIM_INTERVAL_MS, on a free: a heap that went a whole interval without growing gets back what it
+   parked in the front end, and gives its cached free pages back down to DeCommitTotalFreeThreshold. The caller
+   holds the heap lock and holds no front end lock. */
+static VOID
+RtlpHeapTrimCheck(PHEAP Heap)
+{
+    ULONG Now = RtlpHeapTickMs();
+
+    if (Now - Heap->TrimTick >= HEAP_TRIM_INTERVAL_MS)
+    {
+        BOOLEAN Quiet = (Heap->TrimTick != 0 && Heap->TrimExtends == 0);
+
+        /* Set first: giving the parked blocks back frees blocks, which come through here again */
+        Heap->TrimTick = Now ? Now : 1;
+        Heap->TrimExtends = 0;
+
+        if (Quiet)
+        {
+            if (Heap->FrontEndHeapType == HEAP_FRONTEND_CACHE)
+                RtlpHeapFeFlush(Heap);
+
+            if (Heap->TotalFreeSize > Heap->DeCommitTotalFreeThreshold)
+                RtlpHeapTrim(Heap, Heap->DeCommitTotalFreeThreshold, HEAP_TRIM_MAX_BLOCKS);
+        }
+    }
+}
+
 /* Gives an in-use block back to the heap proper: coalesce, decommit or insert. The heap lock is held. */
 VOID NTAPI
 RtlpFreeBlockLocked(PHEAP Heap,
-                    PHEAP_ENTRY HeapEntry)
+                    PHEAP_ENTRY HeapEntry,
+                    BOOLEAN CheckTrim)
 {
     SIZE_T BlockSize = HeapEntry->Size;
     BOOLEAN Decommit;
@@ -2236,25 +2257,12 @@ RtlpFreeBlockLocked(PHEAP Heap,
     {
         /* Insert into the free list */
         RtlpInsertFreeBlock(Heap, (PHEAP_FREE_ENTRY)HeapEntry, BlockSize);
-
-        if (RtlpGetMode() == UserMode)
-        {
-            ULONG Now = RtlpHeapTickMs();
-
-            if (Now - Heap->TrimTick >= HEAP_TRIM_INTERVAL_MS)
-            {
-                /* A whole interval without growing: the cached free pages were not needed */
-                if (Heap->TrimTick != 0 &&
-                    Heap->TrimExtends == 0 &&
-                    Heap->TotalFreeSize > Heap->DeCommitTotalFreeThreshold)
-                {
-                    RtlpHeapTrim(Heap, Heap->DeCommitTotalFreeThreshold, HEAP_TRIM_MAX_BLOCKS);
-                }
-                Heap->TrimTick = Now ? Now : 1;
-                Heap->TrimExtends = 0;
-            }
-        }
     }
+
+    /* The check is also made when the block was decommitted: a heap with a front end sends a free here to run
+       it only when it is due, and must not be sent again at the next free */
+    if (CheckTrim && RtlpGetMode() == UserMode)
+        RtlpHeapTrimCheck(Heap);
 }
 
 /* Takes the lock of a serialized heap. A user-mode heap that made this wait
@@ -2503,11 +2511,13 @@ RtlAllocateHeap(IN PVOID HeapPtr,
     {
         RtlpHeapEnterLock(Heap);
         HeapLocked = TRUE;
-
-        /* A heap without a front end counts what it hands out, and gets one as Windows does */
-        if (Heap->FrontEndHeapType == 0 && Heap->FeAct != HEAP_FE_ACT_OFF && EntryFlags == HEAP_ENTRY_BUSY)
-            RtlpHeapFeCountAlloc(Heap, Index);
     }
+
+    /* A heap without a front end counts what it hands out, and gets one as Windows does. A caller that passes
+       HEAP_NO_SERIALIZE to a serialized heap holds its lock (HeapLock) or has no other thread using it, as
+       it must for the allocation itself, so these are counted too (RtlReAllocateHeap's moves, per-call flags). */
+    if (Heap->FrontEndHeapType == 0 && Heap->FeAct != HEAP_FE_ACT_OFF && EntryFlags == HEAP_ENTRY_BUSY)
+        RtlpHeapFeCountAlloc(Heap, Index);
 
     /* Depending on the size, the allocation is going to be done from dedicated,
        non-dedicated lists or a virtual block of memory */
@@ -2737,11 +2747,12 @@ BOOLEAN NTAPI RtlFreeHeap(
     {
         RtlpHeapEnterLock(Heap);
         Locked = TRUE;
-
-        if (Heap->FrontEndHeapType == 0 && Heap->FeAct > HEAP_FE_ACT_OFF &&
-            !(HeapEntry->Flags & HEAP_ENTRY_VIRTUAL_ALLOC))
-            RtlpHeapFeCountFree(Heap, HeapEntry);
     }
+
+    /* Counted like the allocations, whether or not this call takes the lock */
+    if (Heap->FrontEndHeapType == 0 && Heap->FeAct > HEAP_FE_ACT_OFF &&
+        !(HeapEntry->Flags & HEAP_ENTRY_VIRTUAL_ALLOC))
+        RtlpHeapFeCountFree(Heap, HeapEntry);
 
     if (HeapEntry->Flags & HEAP_ENTRY_VIRTUAL_ALLOC)
     {
@@ -2771,7 +2782,7 @@ BOOLEAN NTAPI RtlFreeHeap(
         /* Normal allocation */
         // TODO: Tagging
 
-        RtlpFreeBlockLocked(Heap, HeapEntry);
+        RtlpFreeBlockLocked(Heap, HeapEntry, TRUE);
     }
 
     /* Release the heap lock */
@@ -3076,6 +3087,7 @@ RtlReAllocateHeap(HANDLE HeapPtr,
     PHEAP_VIRTUAL_ALLOC_ENTRY VirtualAllocBlock;
     EXCEPTION_RECORD ExceptionRecord;
     UCHAR SegmentOffset;
+    SIZE_T OldCounted;
 
     /* Return success in case of a null pointer */
     if (!Ptr)
@@ -3155,6 +3167,14 @@ RtlReAllocateHeap(HANDLE HeapPtr,
         OldIndex = InUseEntry->Size;
 
         OldSize = (OldIndex << HEAP_ENTRY_SHIFT) - InUseEntry->UnusedBytes;
+    }
+
+    /* The class the block is counted under for the front end's activation, if any */
+    OldCounted = 0;
+    if (Heap->FrontEndHeapType == 0 && Heap->FeAct > HEAP_FE_ACT_OFF &&
+        !(InUseEntry->Flags & HEAP_ENTRY_VIRTUAL_ALLOC))
+    {
+        OldCounted = RtlpHeapFeCountedIndex(Heap, InUseEntry);
     }
 
     /* Calculate new index */
@@ -3446,6 +3466,11 @@ RtlReAllocateHeap(HANDLE HeapPtr,
             }
         }
     }
+
+    /* A block resized in place changes its size class (a block that moved was counted by the allocation and
+       the free of the move) */
+    if (OldCounted && Ptr == (PVOID)(InUseEntry + 1))
+        RtlpHeapFeCountResized(Heap, OldCounted, RtlpHeapFeCountedIndex(Heap, InUseEntry));
 
     /* Did resizing fail? */
     if (!Ptr && (Flags & HEAP_GENERATE_EXCEPTIONS))

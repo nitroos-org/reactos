@@ -227,8 +227,10 @@ typedef struct _HEAP_LIST_LOOKUP
     USHORT Reserved;                        \
     LIST_ENTRY UCRSegmentList
 
-/* Counters that decide when a heap gets the front end (heapfe.c), a block of the heap itself that
-   is made at the first allocation under its lock and given back when the front end is on. The class
+/* Counters that decide when a heap gets the front end (heapfe.c). They live outside the heap's block space
+   (a block of the heap itself would show up in HeapWalk and Toolhelp as an allocation the program never made, and
+   move the first block): in a slot of a page of its own that heapfe.c shares between the heaps, made at the first
+   allocation of an eligible heap and given back when the front end is on or the heap is destroyed. The class
    tables are indexed by HEAP_FE_CLASS_FOR_ALLOC. (They are not part of the HEAP header: that one
    has to fit the first page together with the free hints, the lock and the UCR descriptors.) */
 typedef struct _HEAP_FE_ACT
@@ -419,6 +421,17 @@ RtlpEnumerateHeap(_In_opt_ PRTLP_HEAP_READ_ROUTINE Read,
 #define HEAP_FE_REFILL_MAX      15
 #define HEAP_FE_REFILL_BYTES    2048
 
+/* User mode: a heap checks its free page cache, and gives back what parked blocks and free pages it did not need,
+   once per this many milliseconds (heap.c, RtlpHeapTrimCheck) */
+#define HEAP_TRIM_INTERVAL_MS   1000
+
+FORCEINLINE
+ULONG
+RtlpHeapTickMs(VOID)
+{
+    return (ULONG)((SharedUserData->TickCountQuad * SharedUserData->TickCountMultiplier) >> 24);
+}
+
 /* Parked bytes (all slots) above which a heap that needs room gives them back before it grows */
 #define HEAP_FE_FLUSH_LIMIT     (1024 * 1024)
 /* A serialized heap that its own lock made wait this often gets the front end */
@@ -471,6 +484,14 @@ RtlpHeapFeRefill(PHEAP Heap, PHEAP_ENTRY Served);
 VOID NTAPI
 RtlpHeapFeCountFree(PHEAP Heap, PHEAP_ENTRY Entry);
 
+/* The size class a block was counted under (0: it was not counted), and its release/re-count for a block that
+   RtlReAllocateHeap resized in place */
+SIZE_T NTAPI
+RtlpHeapFeCountedIndex(PHEAP Heap, PHEAP_ENTRY Entry);
+
+VOID NTAPI
+RtlpHeapFeCountResized(PHEAP Heap, SIZE_T OldIndex, SIZE_T NewIndex);
+
 VOID NTAPI
 RtlpHeapFeDestroy(PHEAP Heap);
 
@@ -502,7 +523,8 @@ RtlpHeapFeUnlock(PHEAP Heap);
 /* heap.c: give an in-use block back to the heap proper (heap lock held) */
 VOID NTAPI
 RtlpFreeBlockLocked(PHEAP Heap,
-                    PHEAP_ENTRY HeapEntry);
+                    PHEAP_ENTRY HeapEntry,
+                    BOOLEAN CheckTrim);
 
 /* heapdbg.c */
 NTSYSAPI
