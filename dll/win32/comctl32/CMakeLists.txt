@@ -53,10 +53,6 @@ list(APPEND SOURCE
     updown.c
     version.c)
 
-# commctrl.c (ISO-8859 text, which the editing tools do not take) still holds the old DllGetVersion, hardcoded to 5.82:
-# take its name away, version.c has the one of each image
-set_source_files_properties(commctrl.c PROPERTIES COMPILE_DEFINITIONS DllGetVersion=COMCTL32_DllGetVersion_old)
-
 # the v5 flavours of the controls that differ between comctl32 5.82 and 6.0, see comctl32.h
 list(APPEND PCH_SKIP_SOURCE
     stubs.c
