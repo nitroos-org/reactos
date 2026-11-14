@@ -167,6 +167,7 @@
 #define LDC_XPS_PASS      0x08000000 // Guessing, not sure.
 #define LDC_ATENDPAGE     0x10000000
 #define LDC_COLORPAGE     0x20000000
+#define LDC_PAGEDC        0x40000000 /* ReactOS: printer DC that renders each page into a bitmap (gdi32 printdrv.c) */
 
 #define UFIHASHTABLESIZE  64
 

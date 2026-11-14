@@ -56,9 +56,8 @@ IntCreateDICW(
     // Handle Print device or something else.
     if (!Display)
     {
-        // WIP - GDI Print Commit coming in soon.
-        DPRINT1("Not a DISPLAY device! %wZ\n", &Device);
-        return NULL; // Return NULL until then.....
+        // The device is a printer of the spooler: a DC that renders its pages into a bitmap.
+        return PrnDcCreate(lpwszDriver, lpwszDevice, lpwszOutput, lpInitData, iType == 1);
     }
 
     hdc = NtGdiOpenDCW((Default ? NULL : &Device),
@@ -282,11 +281,17 @@ WINAPI
 DeleteDC(HDC hdc)
 {
     ULONG hType = GDI_HANDLE_GET_TYPE(hdc);
+    BOOL bPrinterDc, bResult;
 
     if (hType != GDILoObjType_LO_DC_TYPE)
     {
         return METADC_RosGlueDeleteDC(hdc);
     }
+
+    /* A printer DC frees its page bitmap and closes the printer */
+    bResult = PrnDcDelete(hdc, &bPrinterDc);
+    if (bPrinterDc)
+        return bResult;
 
     //if ( ghICM || pdcattr->pvLIcm )
     //    IcmDeleteLocalDC( hdc, pdcattr, NULL );
@@ -587,7 +592,11 @@ GetDeviceCaps(
             return 0;
         }
 
-        if (!(pdcattr->ulDirty_ & DC_PRIMARY_DISPLAY))
+        /* A printer DC describes its page */
+        pldc = GdiGetLDC(hdc);
+        if (pldc && (pldc->Flags & LDC_PAGEDC))
+            pDevCaps = &pldc->DevCaps;
+        else if (!(pdcattr->ulDirty_ & DC_PRIMARY_DISPLAY))
             return NtGdiGetDeviceCaps(hdc, nIndex);
     }
 
