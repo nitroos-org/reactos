@@ -876,6 +876,20 @@ FltpPerformIrp(_In_ PDEVICE_OBJECT DeviceObject,
     ExReleaseResourceLite(&Volume->InstanceList.rLock);
     KeLeaveCriticalRegion();
 
+    if (Ctrl == NULL && Count != 0 &&
+        Major != IRP_MJ_CLOSE && Major != IRP_MJ_CLEANUP && !(Irp->Flags & IRP_PAGING_IO))
+    {
+        /*
+         * Filters want to see this and we can't show it to them: the operation fails rather than pass
+         * them by (a security filter would be bypassed under low memory). A close or a cleanup can't
+         * fail, and paging I/O failing would take the system down: those go on unfiltered.
+         */
+        Irp->IoStatus.Status = STATUS_INSUFFICIENT_RESOURCES;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
     if (Ctrl == NULL)
         return PassThrough(DeviceObject, Irp);
 
@@ -1023,6 +1037,11 @@ FltpFastIoReadWrite(_In_ PDEVICE_OBJECT DeviceObject,
     {
         ExFreePoolWithTag(Ctrl, FM_TAG_IRPCTRL);
         Ctrl = NULL;
+    }
+    else if (Ctrl == NULL && Count != 0)
+    {
+        /* Filters want to see it and we can't show it to them: not as fast I/O then, the IRP path decides */
+        return FALSE;
     }
 
     if (Ctrl == NULL)
