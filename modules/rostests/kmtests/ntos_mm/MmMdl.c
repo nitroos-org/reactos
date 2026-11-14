@@ -80,7 +80,7 @@ TestMmAllocatePagesForMdl(VOID)
     MmFreePagesFromMdl(Mdl);
     ExFreePoolWithTag(Mdl, 0);
 
-    /* Now map it, and free without unmapping */
+    /* Now map it, check the mapping, unmap and free */
     Mdl = MmAllocatePagesForMdl(LowAddress,
                                 HighAddress,
                                 SkipBytes,
@@ -102,6 +102,12 @@ TestMmAllocatePagesForMdl(VOID)
     ok(MmGetMdlVirtualAddress(Mdl) == NULL, "Virtual address: %p, System VA: %p\n", MmGetMdlVirtualAddress(Mdl), SystemVa);
     ok(Mdl->MappedSystemVa == SystemVa, "MappedSystemVa: %p, System VA: %p\n", Mdl->MappedSystemVa, SystemVa);
     ok((Mdl->MdlFlags & MDL_MAPPED_TO_SYSTEM_VA), "MdlFlags: %lx\n", Mdl->MdlFlags);
+    /*
+     * MmFreePagesFromMdl does not unmap: the caller has to. Freeing the pages of a mapped MDL
+     * left the 512 system PTEs of the mapping allocated for good, once per run of this test.
+     */
+    if (SystemVa != NULL)
+        MmUnmapLockedPages(SystemVa, Mdl);
     MmFreePagesFromMdl(Mdl);
     ExFreePoolWithTag(Mdl, 0);
 
@@ -443,10 +449,31 @@ TestMmAllocatePagesForMdlZeroed(VOID)
     }
 }
 
+static
+ULONG
+FreeSystemPtes(VOID)
+{
+    SYSTEM_PERFORMANCE_INFORMATION Perf;
+
+    if (!NT_SUCCESS(ZwQuerySystemInformation(SystemPerformanceInformation, &Perf, sizeof(Perf), NULL)))
+        return 0;
+    return Perf.FreeSystemPtes;
+}
+
 START_TEST(MmMdl)
 {
+    ULONG PtesBefore, PtesAfter;
+
+    PtesBefore = FreeSystemPtes();
     TestMmProbeAndLockPagesCharge();
     TestMmAllocatePagesForMdl();
     TestMmAllocatePagesForMdlZeroed();
     TestMmBuildMdlForNonPagedPool();
+    PtesAfter = FreeSystemPtes();
+
+    /* every mapping the test made must be gone (a leaked 2 MB mapping alone is 512 PTEs) */
+    if (!skip(PtesBefore != 0, "this kernel does not report free system PTEs\n"))
+    {
+        ok(PtesAfter + 32 >= PtesBefore, "free system PTEs %lu -> %lu\n", PtesBefore, PtesAfter);
+    }
 }
