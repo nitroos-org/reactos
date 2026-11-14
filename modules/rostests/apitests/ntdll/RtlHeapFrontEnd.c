@@ -576,6 +576,157 @@ TestCounting(void)
     HeapDestroy(Heap);
 }
 
+static SIZE_T
+PrivateBytes(void)
+{
+    VM_COUNTERS Counters;
+    NTSTATUS Status;
+
+    Status = NtQueryInformationProcess(NtCurrentProcess(), ProcessVmCounters, &Counters, sizeof(Counters), NULL);
+    ok(NT_SUCCESS(Status), "NtQueryInformationProcess failed: 0x%lx\n", Status);
+    return NT_SUCCESS(Status) ? Counters.PagefileUsage : 0;
+}
+
+typedef struct _PARK_TEST
+{
+    HANDLE Heap;
+    ULONG Count;
+    SIZE_T Size;
+    ULONG Classes;      /* block i has Size + (i % Classes) * 128 bytes */
+    ULONG_PTR Low, High;
+} PARK_TEST;
+
+/* Allocates a run of blocks of a few size classes, interleaved, and frees them all, then exits: what it freed stays
+   parked in its slot (no more than 32 of a class: Count / Classes is kept at or below that), in size classes no
+   thread takes from afterwards, and only the whole run given back makes room in one piece */
+static DWORD WINAPI
+ParkThread(PVOID Param)
+{
+    PARK_TEST *Test = Param;
+    PVOID *Blocks = HeapAlloc(GetProcessHeap(), 0, Test->Count * sizeof(PVOID));
+    ULONG i;
+
+    Test->Low = ~(ULONG_PTR)0;
+    Test->High = 0;
+    if (!Blocks)
+        return 1;
+    for (i = 0; i < Test->Count; i++)
+    {
+        Blocks[i] = HeapAlloc(Test->Heap, 0, Test->Size + (i % Test->Classes) * 128);
+        if ((ULONG_PTR)Blocks[i] < Test->Low) Test->Low = (ULONG_PTR)Blocks[i];
+        if ((ULONG_PTR)Blocks[i] > Test->High) Test->High = (ULONG_PTR)Blocks[i];
+    }
+    for (i = 0; i < Test->Count; i++)
+        HeapFree(Test->Heap, 0, Blocks[i]);
+    HeapFree(GetProcessHeap(), 0, Blocks);
+    return 0;
+}
+
+static void
+Park(PARK_TEST *Test)
+{
+    HANDLE Thread = CreateThread(NULL, 0, ParkThread, Test, 0, NULL);
+
+    ok(Thread != NULL, "CreateThread failed: %lu\n", GetLastError());
+    if (!Thread)
+        return;
+    WaitForSingleObject(Thread, 30000);
+    CloseHandle(Thread);
+}
+
+/* The first free of a heap runs its once-per-interval check: done here, so that it does not fall on the frees of
+   the test (the interval starts now) */
+static void
+StartInterval(HANDLE Heap)
+{
+    HeapFree(Heap, 0, HeapAlloc(Heap, 0, 24));
+}
+
+/* Parked blocks of a size class nobody asks for any more go back to the heap before it grows */
+static void
+TestGiveBackAtGrowth(void)
+{
+    enum { BIG = 1500 };
+    PARK_TEST Test;
+    PVOID *Blocks;
+    SIZE_T Before, Grown, Live = 0;
+    ULONG i;
+
+    Test.Heap = HeapCreate(0, 0, 0);
+    Test.Count = 360;
+    Test.Size = 100;
+    Test.Classes = 12;
+    SetFrontEnd(Test.Heap, 2);
+    ok_eq_ulong(QueryFrontEnd(Test.Heap), 2);
+    StartInterval(Test.Heap);
+
+    /* This thread parks about 300 KB, 30 blocks each of 12 classes: less than what makes a growing heap flush
+       everything */
+    ParkThread(&Test);
+
+    /* and moves on to bigger blocks: after a period of its requests (none of them for the parked sizes), the heap
+       gives the parked blocks back before it grows, and the new blocks fit where those were, so the process
+       commits much less than they take (measured without locking or walking the heap, which would give the
+       parked blocks back) */
+    Blocks = HeapAlloc(GetProcessHeap(), 0, BIG * sizeof(PVOID));
+    Before = PrivateBytes();
+    for (i = 0; i < BIG; i++)
+    {
+        Blocks[i] = HeapAlloc(Test.Heap, 0, 2000);
+        ok(Blocks[i] != NULL, "HeapAlloc failed\n");
+        Live += HeapSize(Test.Heap, 0, Blocks[i]) + 16;
+    }
+    Grown = PrivateBytes() - Before;
+    ok(Grown + 128 * 1024 < Live, "The process grew by %lu KB for %lu KB of new blocks (the parked blocks were not given back)\n",
+       (ULONG)(Grown / 1024), (ULONG)(Live / 1024));
+    for (i = 0; i < BIG; i++)
+        HeapFree(Test.Heap, 0, Blocks[i]);
+    HeapFree(GetProcessHeap(), 0, Blocks);
+    HeapDestroy(Test.Heap);
+}
+
+/* A heap that keeps growing is never quiet: what nobody took from for an interval goes back all the same */
+static void
+TestGiveBackInTime(void)
+{
+    PARK_TEST Test;
+    PVOID Small, Grow, Grow2, Block;
+    ULONG_PTR Address;
+
+    Test.Heap = HeapCreate(0, 0, 0);
+    Test.Count = 90;
+    Test.Size = 300;
+    Test.Classes = 3;
+    SetFrontEnd(Test.Heap, 2);
+    Small = HeapAlloc(Test.Heap, 0, 40);
+    StartInterval(Test.Heap);
+
+    /* About 40 KB parked, 30 blocks each of 3 classes (too little for the sweep at growth), then the heap grows */
+    Park(&Test);
+    Grow = HeapAlloc(Test.Heap, 0, 300 * 1024);
+    ok(Grow != NULL, "HeapAlloc failed\n");
+
+    /* The next free after an interval runs the heap's check: the first one notes what is parked, the next one gives
+       back what nobody touched in between (the heap grows in both intervals, so it is never quiet) */
+    Sleep(1300);
+    HeapFree(Test.Heap, 0, Small);
+    Small = HeapAlloc(Test.Heap, 0, 40);
+    Grow2 = HeapAlloc(Test.Heap, 0, 300 * 1024);
+    ok(Grow2 != NULL, "HeapAlloc failed\n");
+    Sleep(1300);
+    HeapFree(Test.Heap, 0, Small);
+
+    /* A block of 32 KB fits where the parked blocks were (with the free space they merged with), and only there */
+    Block = HeapAlloc(Test.Heap, 0, 32 * 1024);
+    Address = (ULONG_PTR)Block;
+    ok(Address <= Test.High && Address + 32 * 1024 > Test.Low,
+       "Block %p not in the given back run %p-%p\n", Block, (PVOID)Test.Low, (PVOID)Test.High);
+    HeapFree(Test.Heap, 0, Block);
+    HeapFree(Test.Heap, 0, Grow);
+    HeapFree(Test.Heap, 0, Grow2);
+    HeapDestroy(Test.Heap);
+}
+
 START_TEST(RtlHeapFrontEnd)
 {
     HANDLE Heap;
@@ -601,4 +752,6 @@ START_TEST(RtlHeapFrontEnd)
     TestWalk();
     TestLock();
     TestSection();
+    TestGiveBackAtGrowth();
+    TestGiveBackInTime();
 }
