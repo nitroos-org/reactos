@@ -142,6 +142,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_mm/MmMapViewAligned.c
     ntos_mm/MmMdl.c
     ntos_mm/MmCommitKernelFail.c
+    ntos_mm/MmContiguousAlign.c
     ntos_mm/MmContiguousStandby.c
     ntos_mm/MmFaultFileHeld.c
     ntos_mm/MmOomRetry.c

@@ -108,6 +108,7 @@ KMT_TESTFUNC Test_KeDelayExecution;
 KMT_TESTFUNC Test_KernelType;
 KMT_TESTFUNC Test_MmMdl;
 KMT_TESTFUNC Test_MmCommitKernelFail;
+KMT_TESTFUNC Test_MmContiguousAlign;
 KMT_TESTFUNC Test_MmContiguousStandby;
 KMT_TESTFUNC Test_MmFaultFileHeld;
 KMT_TESTFUNC Test_MmOomRetry;
@@ -276,6 +277,7 @@ const KMT_TEST TestList[] =
     { "-KernelType",                        Test_KernelType },
     { "MmMdl",                              Test_MmMdl },
     { "-MmCommitKernelFail",                Test_MmCommitKernelFail },
+    { "MmContiguousAlign",                  Test_MmContiguousAlign },
     { "-MmContiguousStandby",               Test_MmContiguousStandby },
     { "MmFaultFileHeld",                    Test_MmFaultFileHeld },
     { "MmOomRetry",                         Test_MmOomRetry },
