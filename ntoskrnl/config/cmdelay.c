@@ -262,6 +262,34 @@ CmpDelayDerefKCBWorker(IN PVOID Context)
     CmpUnlockRegistry();
 }
 
+VOID
+NTAPI
+CmpFlushDelayDerefKCBs(VOID)
+{
+    PCM_DELAY_DEREF_KCB_ITEM Entry;
+    PAGED_CODE();
+
+    /* The caller holds the registry lock exclusively, as the worker does */
+    CMP_ASSERT_EXCLUSIVE_REGISTRY_LOCK();
+
+    /* Do now what the timer would do later: release the references that are waiting to be dropped */
+    KeAcquireGuardedMutex(&CmpDelayDerefKCBLock);
+    while (!IsListEmpty(&CmpDelayDerefKCBListHead))
+    {
+        Entry = (PVOID)RemoveHeadList(&CmpDelayDerefKCBListHead);
+        KeReleaseGuardedMutex(&CmpDelayDerefKCBLock);
+
+        Entry = CONTAINING_RECORD(Entry, CM_DELAY_DEREF_KCB_ITEM, ListEntry);
+        Entry->ListEntry.Flink = Entry->ListEntry.Blink = NULL;
+
+        CmpDereferenceKeyControlBlock(Entry->Kcb);
+        CmpFreeDelayItem(Entry);
+
+        KeAcquireGuardedMutex(&CmpDelayDerefKCBLock);
+    }
+    KeReleaseGuardedMutex(&CmpDelayDerefKCBLock);
+}
+
 CODE_SEG("INIT")
 VOID
 NTAPI
