@@ -52,6 +52,7 @@ extern SIZE_T MmProcessCommit;
 extern SIZE_T MmPagedPoolCommit;
 extern SIZE_T MmPeakCommitment;
 extern SIZE_T MmtotalCommitLimitMaximum;
+ULONG NTAPI MiQueryFreeSystemPtes(VOID); /* free system PTEs, including those waiting for their TLB flush */
 
 extern PVOID MiDebugMapping; // internal
 extern PMMPTE MmDebugPte; // internal

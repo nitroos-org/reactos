@@ -399,6 +399,28 @@ MiFlushReleasedSystemPtes(VOID)
 }
 
 /*
+ * PTEs that are free in SystemPteSpace, including those released but still waiting for
+ * their TLB flush (they are not in MmTotalFreeSystemPtes until then).
+ */
+ULONG
+NTAPI
+MiQueryFreeSystemPtes(VOID)
+{
+    KIRQL OldIrql;
+    ULONG i, Free;
+
+    OldIrql = KeAcquireQueuedSpinLock(LockQueueSystemSpaceLock);
+    Free = MmTotalFreeSystemPtes[SystemPteSpace];
+    for (i = 0; i < MiSystemPteFlushCount; i++)
+    {
+        if (MiSystemPteFlushList[i].SystemPtePoolType == SystemPteSpace)
+            Free += MiSystemPteFlushList[i].NumberOfPtes;
+    }
+    KeReleaseQueuedSpinLock(LockQueueSystemSpaceLock, OldIrql);
+    return Free;
+}
+
+/*
  * Called before a page is mapped uncached or write-combined. A page whose
  * write-back mapping was released into the pending batch can still be in
  * other processors' TLBs as write-back, and the same page must not be
