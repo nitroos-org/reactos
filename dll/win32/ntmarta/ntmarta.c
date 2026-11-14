@@ -803,69 +803,6 @@ Cleanup:
 }
 
 /*
- * Removes from an ACL (in place) every ACE that repeats an earlier one: the same type and size, the same
- * flags but INHERITED_ACE, the same mask and SID. A key does not inherit the same ACE twice (the inherited
- * ACEs of its parent repeat the explicit ones). The ACL keeps its size; the freed bytes are zeroed.
- *
- * PROVISIONAL: dropping the repeats cannot change an access check (the earlier copy decides the same bits
- * for the same SID), but whether Windows drops them at this point, or only when it reads the descriptor
- * through GetSecurityInfo, is not measured on a raw descriptor (a key under an auto-inherited parent cannot
- * be created with the allowed APIs). VERIFY ON ORACLE.
- */
-static VOID
-AccpDropDuplicateAces(IN OUT PACL Acl)
-{
-    PUCHAR Out = (PUCHAR)(Acl + 1), In = Out, End = (PUCHAR)Acl + Acl->AclSize, Scan;
-    PACE_HEADER Ace, Kept;
-    ULONG i, Count = Acl->AceCount, Written = 0;
-
-    /* an ACL that does not parse to its end is left as it is */
-    for (i = 0; i < Count; i++)
-    {
-        if (In + sizeof(ACE_HEADER) > End)
-            return;
-        Ace = (PACE_HEADER)In;
-        if (Ace->AceSize < sizeof(ACE_HEADER) || In + Ace->AceSize > End)
-            return;
-        In += Ace->AceSize;
-    }
-    In = (PUCHAR)(Acl + 1);
-
-    for (i = 0; i < Count; i++)
-    {
-        BOOLEAN Duplicate = FALSE;
-
-        Ace = (PACE_HEADER)In;
-        for (Scan = (PUCHAR)(Acl + 1); Scan < Out; Scan += Kept->AceSize)
-        {
-            Kept = (PACE_HEADER)Scan;
-            if (Kept->AceType == Ace->AceType && Kept->AceSize == Ace->AceSize &&
-                (Kept->AceFlags & ~INHERITED_ACE) == (Ace->AceFlags & ~INHERITED_ACE) &&
-                RtlEqualMemory(Kept + 1, Ace + 1, Ace->AceSize - sizeof(ACE_HEADER)))
-            {
-                Duplicate = TRUE;
-                break;
-            }
-        }
-
-        if (!Duplicate)
-        {
-            if (Out != In)
-                RtlMoveMemory(Out, In, Ace->AceSize);
-            Out += Ace->AceSize;
-            Written++;
-        }
-        In += Ace->AceSize;
-    }
-
-    if (Written != Count)
-    {
-        RtlZeroMemory(Out, In - Out);
-        Acl->AceCount = (USHORT)Written;
-    }
-}
-
-/*
  * The descriptor Key would get from its parent if the ACEs it has of its own were Explicit and everything
  * else were inherited: its explicit ACEs, then the parent's inheritable ones flagged INHERITED_ACE (ACEs of
  * Explicit that are flagged already are replaced). Without Protected, SE_DACL_AUTO_INHERITED is set.
@@ -879,12 +816,6 @@ AccpMergeInheritedDacl(IN PSECURITY_DESCRIPTOR ParentSd,
                        OUT PSECURITY_DESCRIPTOR *NewSd)
 {
     SECURITY_DESCRIPTOR Creator;
-    PACL ParentDacl = NULL;
-    BOOL Present, Defaulted;
-
-    /* the parent's descriptor is a private copy of the caller's: the repeated ACEs go from it */
-    if (GetSecurityDescriptorDacl(ParentSd, &Present, &ParentDacl, &Defaulted) && Present && ParentDacl != NULL)
-        AccpDropDuplicateAces(ParentDacl);
 
     if (!InitializeSecurityDescriptor(&Creator, SECURITY_DESCRIPTOR_REVISION))
         return STATUS_UNSUCCESSFUL;
@@ -1143,7 +1074,7 @@ AccpSetKeySecurity(IN HKEY Key,
     SECURITY_DESCRIPTOR Final;
     BOOLEAN Protected;
     PSID Owner = NULL, Group = NULL, OldOwner = NULL, OldGroup = NULL;
-    PACL Dacl = NULL, MergedDacl = NULL, Sacl = NULL;
+    PACL Dacl = NULL, MergedDacl = NULL, ProtectedDacl = NULL, Sacl = NULL;
     BOOL Present, Defaulted, SaclPresent = FALSE;
     DWORD Revision, Ret;
 
@@ -1187,15 +1118,50 @@ AccpSetKeySecurity(IN HKEY Key,
         GetSecurityDescriptorControl(OldSd, &OldControl, &Revision) && (OldControl & SE_DACL_PROTECTED))
         Protected = TRUE;
 
-    if (!NT_SUCCESS(AccpMergeInheritedDacl(ParentSd, Owner, Group, Dacl, Protected, &MergedSd)) ||
-        !GetSecurityDescriptorControl(MergedSd, &MergedControl, &Revision) ||
-        !GetSecurityDescriptorDacl(MergedSd, &Present, &MergedDacl, &Defaulted) || !Present || MergedDacl == NULL ||
-        !InitializeSecurityDescriptor(&Final, SECURITY_DESCRIPTOR_REVISION) ||
-        !SetSecurityDescriptorDacl(&Final, TRUE, MergedDacl, FALSE) ||
-        !SetSecurityDescriptorControl(&Final,
-                                      SE_DACL_PROTECTED | SE_DACL_AUTO_INHERIT_REQ | SE_DACL_AUTO_INHERITED,
-                                      (MergedControl & (SE_DACL_PROTECTED | SE_DACL_AUTO_INHERITED)) |
-                                      SE_DACL_AUTO_INHERIT_REQ))
+    if (Protected)
+    {
+        /*
+         * A protected DACL is the caller's, as given: nothing is merged in and nothing is dropped. ACEs the
+         * caller sends flagged INHERITED_ACE (a Get, then "disable inheritance, keep the inherited ACEs")
+         * become explicit ones.
+         */
+        PACE_HEADER Ace;
+        DWORD i;
+        BOOL Valid = TRUE;
+
+        ProtectedDacl = (PACL)LocalAlloc(LMEM_FIXED, Dacl->AclSize);
+        if (ProtectedDacl != NULL)
+        {
+            RtlCopyMemory(ProtectedDacl, Dacl, Dacl->AclSize);
+            for (i = 0; Valid && i < ProtectedDacl->AceCount; i++)
+            {
+                if (GetAce(ProtectedDacl, i, (PVOID *)&Ace))
+                    Ace->AceFlags &= ~INHERITED_ACE;
+                else
+                    Valid = FALSE;
+            }
+        }
+        if (ProtectedDacl == NULL || !Valid ||
+            !InitializeSecurityDescriptor(&Final, SECURITY_DESCRIPTOR_REVISION) ||
+            !SetSecurityDescriptorDacl(&Final, TRUE, ProtectedDacl, FALSE) ||
+            !SetSecurityDescriptorControl(&Final,
+                                          SE_DACL_PROTECTED | SE_DACL_AUTO_INHERIT_REQ | SE_DACL_AUTO_INHERITED,
+                                          SE_DACL_PROTECTED | SE_DACL_AUTO_INHERIT_REQ))
+        {
+            Ret = AccpSetKeySecurityPlain(Key, SecurityInfo, pSecurityDescriptor);
+            goto Cleanup;
+        }
+    }
+    else if (!NT_SUCCESS(AccpMergeInheritedDacl(ParentSd, Owner, Group, Dacl, FALSE, &MergedSd)) ||
+             !GetSecurityDescriptorControl(MergedSd, &MergedControl, &Revision) ||
+             !GetSecurityDescriptorDacl(MergedSd, &Present, &MergedDacl, &Defaulted) || !Present ||
+             MergedDacl == NULL ||
+             !InitializeSecurityDescriptor(&Final, SECURITY_DESCRIPTOR_REVISION) ||
+             !SetSecurityDescriptorDacl(&Final, TRUE, MergedDacl, FALSE) ||
+             !SetSecurityDescriptorControl(&Final,
+                                           SE_DACL_PROTECTED | SE_DACL_AUTO_INHERIT_REQ | SE_DACL_AUTO_INHERITED,
+                                           (MergedControl & (SE_DACL_PROTECTED | SE_DACL_AUTO_INHERITED)) |
+                                           SE_DACL_AUTO_INHERIT_REQ))
     {
         Ret = AccpSetKeySecurityPlain(Key, SecurityInfo, pSecurityDescriptor);
         goto Cleanup;
@@ -1228,6 +1194,8 @@ Cleanup:
         LocalFree(NewSd);
     if (MergedSd != NULL)
         RtlDeleteSecurityObject(&MergedSd);
+    if (ProtectedDacl != NULL)
+        LocalFree(ProtectedDacl);
     if (OldSd != NULL)
         LocalFree(OldSd);
     LocalFree(ParentSd);
