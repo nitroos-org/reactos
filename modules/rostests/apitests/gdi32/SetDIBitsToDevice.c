@@ -10,6 +10,110 @@
 #include <gditools.h>
 
 static void
+Test_SetDIBitsToDevice_RleBounds(void)
+{
+    const BYTE rle8[] = {2, 1, 0, 4, 2, 3, 4, 5, 0, 1};
+    const BYTE rle4[] = {2, 0x11, 0, 4, 0x23, 0x45, 0, 1};
+    const BYTE delta[] = {0, 2, 9, 0, 2, 1, 0, 1};
+    const BYTE absolute8[] = {0, 10, 1, 2, 3, 4, 5, 1, 2, 3, 4, 5, 0, 1};
+    const BYTE absolute4[] = {0, 10, 0x12, 0x34, 0x51, 0x23, 0x45, 0, 0, 1};
+    struct
+    {
+        BITMAPINFOHEADER header;
+        RGBQUAD colors[16];
+    } rleInfo;
+    BITMAPINFO outputInfo;
+    HDC dc;
+    HBITMAP bitmap;
+    HGDIOBJ old;
+    DWORD *pixels;
+    UINT format, cut, pixel;
+
+    ZeroMemory(&outputInfo, sizeof(outputInfo));
+    outputInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    outputInfo.bmiHeader.biWidth = 16;
+    outputInfo.bmiHeader.biHeight = -1;
+    outputInfo.bmiHeader.biPlanes = 1;
+    outputInfo.bmiHeader.biBitCount = 32;
+    dc = CreateCompatibleDC(NULL);
+    bitmap = CreateDIBSection(dc, &outputInfo, DIB_RGB_COLORS,
+                              (void **)&pixels, NULL, 0);
+    ok(dc && bitmap, "Could not create RLE destination\n");
+    if (!dc || !bitmap)
+    {
+        if (bitmap) DeleteObject(bitmap);
+        if (dc) DeleteDC(dc);
+        return;
+    }
+    old = SelectObject(dc, bitmap);
+
+    ZeroMemory(&rleInfo, sizeof(rleInfo));
+    rleInfo.header.biSize = sizeof(BITMAPINFOHEADER);
+    rleInfo.header.biWidth = 8;
+    rleInfo.header.biHeight = 1;
+    rleInfo.header.biPlanes = 1;
+    for (pixel = 0; pixel < 16; pixel++)
+        rleInfo.colors[pixel].rgbRed = (BYTE)(pixel * 10);
+
+    for (format = 0; format < 2; format++)
+    {
+        const BYTE *stream = format ? rle4 : rle8;
+        UINT length = format ? sizeof(rle4) : sizeof(rle8);
+        rleInfo.header.biBitCount = format ? 4 : 8;
+        rleInfo.header.biCompression = format ? BI_RLE4 : BI_RLE8;
+        rleInfo.header.biClrUsed = format ? 16 : 6;
+
+        for (cut = 0; cut <= length; cut++)
+        {
+            ZeroMemory(pixels, 16 * sizeof(*pixels));
+            rleInfo.header.biSizeImage = cut;
+            SetDIBitsToDevice(dc, 0, 0, 8, 1, 0, 0, 0, 1, stream,
+                              (BITMAPINFO *)&rleInfo, DIB_RGB_COLORS);
+            if (cut >= 2)
+            {
+                ok(pixels[0] == 0x000a0000 && pixels[1] == 0x000a0000,
+                   "RLE%u cut %u lost decoded run: %08lx,%08lx\n",
+                   format ? 4 : 8, cut, pixels[0], pixels[1]);
+            }
+            else
+                ok(!pixels[0] && !pixels[1], "RLE%u cut %u decoded incomplete run\n",
+                   format ? 4 : 8, cut);
+            for (pixel = 2; pixel < 6; pixel++)
+            {
+                UINT required = format ? 6 : 8;
+                if (cut >= required)
+                    ok(pixels[pixel] == pixel * 0x000a0000,
+                       "RLE%u cut %u pixel %u: %08lx\n",
+                       format ? 4 : 8, cut, pixel, pixels[pixel]);
+                else
+                    ok(!pixels[pixel], "RLE%u cut %u decoded past input at pixel %u: %08lx\n",
+                       format ? 4 : 8, cut, pixel, pixels[pixel]);
+            }
+            for (pixel = 8; pixel < 16; pixel++)
+                ok(!pixels[pixel], "RLE%u cut %u wrote past destination\n",
+                   format ? 4 : 8, cut);
+        }
+
+        for (cut = 0; cut < 2; cut++)
+        {
+            const BYTE *stream = cut ? (format ? absolute4 : absolute8) : delta;
+            UINT length = cut ? (format ? sizeof(absolute4) : sizeof(absolute8)) : sizeof(delta);
+            ZeroMemory(pixels, 16 * sizeof(*pixels));
+            rleInfo.header.biSizeImage = length;
+            SetDIBitsToDevice(dc, 0, 0, 8, 1, 0, 0, 0, 1, stream,
+                              (BITMAPINFO *)&rleInfo, DIB_RGB_COLORS);
+            for (pixel = 8; pixel < 16; pixel++)
+                ok(!pixels[pixel], "RLE%u %s wrote past destination\n",
+                   format ? 4 : 8, cut ? "absolute" : "delta");
+        }
+    }
+
+    SelectObject(dc, old);
+    DeleteObject(bitmap);
+    DeleteDC(dc);
+}
+
+static void
 Test_SetDIBitsToDevice_Params()
 {
     UCHAR ajBmiBuffer[sizeof(BITMAPINFO) + 4];
@@ -687,6 +791,7 @@ Test_SetDIBitsToDevice()
 
 START_TEST(SetDIBitsToDevice)
 {
+    Test_SetDIBitsToDevice_RleBounds();
     ok(GdiToolsInit(), "GdiToolsInit failed\n");
 
     Test_SetDIBitsToDevice_Params();

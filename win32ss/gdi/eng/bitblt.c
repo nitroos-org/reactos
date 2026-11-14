@@ -55,7 +55,8 @@ BltMask(SURFOBJ* psoDest,
         POINTL* pptlBrush,
         ROP4 Rop4)
 {
-    LONG x, y, cx, cy;
+    LONG x, y;
+    LONGLONG cx, cy;
     BYTE *pjMskLine, *pjMskCurrent;
     BYTE fjMaskBit0, fjMaskBit;
     /* Pattern brushes */
@@ -90,10 +91,11 @@ BltMask(SURFOBJ* psoDest,
     else
         psoPattern = NULL;
 
-    cx = prclDest->right - prclDest->left;
-    cy = prclDest->bottom - prclDest->top;
-    if ((pptlMask->x + cx > psoMask->sizlBitmap.cx) ||
-        (pptlMask->y + cy > psoMask->sizlBitmap.cy))
+    cx = (LONGLONG)prclDest->right - prclDest->left;
+    cy = (LONGLONG)prclDest->bottom - prclDest->top;
+    if (cx <= 0 || cy <= 0 || pptlMask->x < 0 || pptlMask->y < 0 ||
+        (LONGLONG)pptlMask->x + cx > psoMask->sizlBitmap.cx ||
+        (LONGLONG)pptlMask->y + cy > psoMask->sizlBitmap.cy)
     {
         return FALSE;
     }
@@ -187,6 +189,22 @@ BltMask(SURFOBJ* psoDest,
         }
     }
 
+    return TRUE;
+}
+
+static BOOL
+RebaseBltMaskPoint(const POINTL *origin, const RECTL *original,
+                   const RECTL *clipped, POINTL *result)
+{
+    LONGLONG xMask = (LONGLONG)origin->x + clipped->left - original->left;
+    LONGLONG yMask = (LONGLONG)origin->y + clipped->top - original->top;
+
+    if (xMask < LONG_MIN || xMask > LONG_MAX ||
+        yMask < LONG_MIN || yMask > LONG_MAX)
+        return FALSE;
+
+    result->x = (LONG)xMask;
+    result->y = (LONG)yMask;
     return TRUE;
 }
 
@@ -340,6 +358,7 @@ EngBitBlt(
     RECTL              ClipRect;
     ULONG              i;
     POINTL             Pt;
+    POINTL             MaskPoint, ClippedMaskPoint;
     ULONG              Direction;
     BOOL               UsesSource, UsesMask;
     POINTL             AdjustedBrushOrigin;
@@ -507,6 +526,7 @@ EngBitBlt(
     {
         BltRectFunc = BltMask;
     }
+
     else if ((rop4 & 0xFF) == R3_OPINDEX_PATCOPY)
     {
         if (pbo && pbo->iSolidColor == 0xFFFFFFFF)
@@ -517,6 +537,13 @@ EngBitBlt(
     else
     {
         BltRectFunc = CallDibBitBlt;
+    }
+
+    if (UsesMask && pptlMask)
+    {
+        if (!RebaseBltMaskPoint(pptlMask, prclTrg, &OutputRect, &MaskPoint))
+            return FALSE;
+        pptlMask = &MaskPoint;
     }
 
 
@@ -566,13 +593,16 @@ EngBitBlt(
 #endif
                 Pt.x = InputPoint.x + CombinedRect.left - OutputRect.left;
                 Pt.y = InputPoint.y + CombinedRect.top - OutputRect.top;
+                if (UsesMask && pptlMask &&
+                    !RebaseBltMaskPoint(pptlMask, &OutputRect, &CombinedRect, &ClippedMaskPoint))
+                    return FALSE;
                 Ret = (*BltRectFunc)(OutputObj,
                                      InputObj,
                                      psoMask,
                                      pxlo,
                                      &CombinedRect,
                                      &Pt,
-                                     pptlMask,
+                                     UsesMask && pptlMask ? &ClippedMaskPoint : pptlMask,
                                      pbo,
                                      &AdjustedBrushOrigin,
                                      rop4);
@@ -620,13 +650,16 @@ EngBitBlt(
 #endif
                         Pt.x = InputPoint.x + CombinedRect.left - OutputRect.left;
                         Pt.y = InputPoint.y + CombinedRect.top - OutputRect.top;
+                        if (UsesMask && pptlMask &&
+                            !RebaseBltMaskPoint(pptlMask, &OutputRect, &CombinedRect, &ClippedMaskPoint))
+                            return FALSE;
                         Ret = (*BltRectFunc)(OutputObj,
                                              InputObj,
                                              psoMask,
                                              pxlo,
                                              &CombinedRect,
                                              &Pt,
-                                             pptlMask,
+                                             UsesMask && pptlMask ? &ClippedMaskPoint : pptlMask,
                                              pbo,
                                              &AdjustedBrushOrigin,
                                              rop4) && Ret;
@@ -661,6 +694,7 @@ IntEngBitBlt(
     RECTL rclSrc;
     RECTL rclSrcClipped;
     POINTL ptlBrush;
+    POINTL ptlMask;
     PFN_DrvBitBlt pfnBitBlt;
     LONG lTmp;
     BOOLEAN bTopToBottom, bLeftToRight;
@@ -731,6 +765,19 @@ IntEngBitBlt(
     {
         psoSrc = NULL;
         psurfSrc = NULL;
+    }
+
+    if (psoMask && pptlMask)
+    {
+        if (!RebaseBltMaskPoint(pptlMask, prclTrg, &rclClipped, &ptlMask))
+            return FALSE;
+
+        if (ptlMask.x < 0 || ptlMask.y < 0 ||
+            (LONGLONG)ptlMask.x + rclClipped.right - rclClipped.left > psoMask->sizlBitmap.cx ||
+            (LONGLONG)ptlMask.y + rclClipped.bottom - rclClipped.top > psoMask->sizlBitmap.cy)
+            return FALSE;
+
+        pptlMask = &ptlMask;
     }
 
     if (pptlBrush)
