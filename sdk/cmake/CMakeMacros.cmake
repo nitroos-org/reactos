@@ -333,6 +333,13 @@ function(add_cd_file)
     endif()
 
     # get file if we need to
+    # a NAME_ON_CD that the caller gives for a target renames the file in reactos.cab as well
+    # (the cabinet list takes "<file> <directory>,<name>")
+    set(_CD_CAB_NAME "")
+    if(_CD_TARGET AND NOT _CD_FILE)
+        set(_CD_CAB_NAME "${_CD_NAME_ON_CD}")
+    endif()
+
     if(NOT _CD_FILE)
         set(_CD_FILE "$<TARGET_FILE:${_CD_TARGET}>")
         if(NOT _CD_NAME_ON_CD)
@@ -372,7 +379,11 @@ function(add_cd_file)
             dir_to_num(${_CD_DESTINATION} _num)
             foreach(item ${_CD_FILE})
                 # add it in reactos.cab
-                file(APPEND ${REACTOS_BINARY_DIR}/boot/bootdata/packages/reactos.dff.cmake "\"${item}\" ${_num}\n")
+                if(_CD_CAB_NAME)
+                    file(APPEND ${REACTOS_BINARY_DIR}/boot/bootdata/packages/reactos.dff.cmake "\"${item}\" ${_num},${_CD_CAB_NAME}\n")
+                else()
+                    file(APPEND ${REACTOS_BINARY_DIR}/boot/bootdata/packages/reactos.dff.cmake "\"${item}\" ${_num}\n")
+                endif()
 
                 # manage dependency - file level
                 set_property(GLOBAL APPEND PROPERTY REACTOS_CAB_DEPENDS ${item})
