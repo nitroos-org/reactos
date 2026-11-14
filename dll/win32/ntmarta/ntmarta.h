@@ -2,6 +2,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NTOS_MODE_USER
 #include <windows.h>
+#include <ndk/cmfuncs.h>
 #include <ndk/iofuncs.h>
 #include <ndk/obfuncs.h>
 #include <ndk/rtlfuncs.h>
