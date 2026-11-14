@@ -10,6 +10,7 @@
 
 #include "fltmgr.h"
 #include "fltmgrint.h"
+#include "fltmgrproto.h"
 
 //#define NDEBUG
 #include <debug.h>
@@ -69,253 +70,26 @@ FltpAttachDeviceObject(_In_ PDEVICE_OBJECT SourceDevice,
     PAGED_CODE();
 
     /* Before attaching, copy the flags from the device we're going to attach to */
-    if (FlagOn(SourceDevice->Flags, DO_BUFFERED_IO))
+    if (FlagOn(TargetDevice->Flags, DO_BUFFERED_IO))
     {
-        SetFlag(TargetDevice->Flags, DO_BUFFERED_IO);
+        SetFlag(SourceDevice->Flags, DO_BUFFERED_IO);
     }
-    if (FlagOn(SourceDevice->Flags, DO_DIRECT_IO))
+
+    if (FlagOn(TargetDevice->Flags, DO_DIRECT_IO))
     {
-        SetFlag(TargetDevice->Flags, DO_DIRECT_IO);
+        SetFlag(SourceDevice->Flags, DO_DIRECT_IO);
     }
-    if (FlagOn(SourceDevice->Flags, DO_SYSTEM_BOOT_PARTITION))
+
+    if (FlagOn(TargetDevice->Characteristics, FILE_DEVICE_SECURE_OPEN))
     {
-        SetFlag(TargetDevice->Characteristics, FILE_DEVICE_SECURE_OPEN);
+        SetFlag(SourceDevice->Characteristics, FILE_DEVICE_SECURE_OPEN);
     }
 
     /* Attach this device to the top of the driver stack */
     Status = IoAttachDeviceToDeviceStackSafe(SourceDevice,
                                              TargetDevice,
                                              AttachedToDeviceObject);
-
     return Status;
-}
-
-CODE_SEG("PAGE")
-static
-BOOLEAN
-FltpIsAttachedToDevice(_In_ PDEVICE_OBJECT DeviceObject,
-                       _In_opt_ PDEVICE_OBJECT *AttachedDeviceObject)
-{
-    PDEVICE_OBJECT CurrentDeviceObject;
-    PDEVICE_OBJECT NextDeviceObject;
-
-    PAGED_CODE();
-
-    /* Initialize the return pointer */
-    if (AttachedDeviceObject) *AttachedDeviceObject = NULL;
-
-    /* Start by getting the top level device in the chain */
-    CurrentDeviceObject = IoGetAttachedDeviceReference(DeviceObject);
-
-    /* Loop while there are attached devices */
-    while (CurrentDeviceObject)
-    {
-        /* Check if this device driver matches ours */
-        if (CurrentDeviceObject->DriverObject == DriverData.DriverObject)
-        {
-            FLT_ASSERT(CurrentDeviceObject->DeviceExtension != NULL);
-
-            /* We're attached, return the device object if the caller asked for it */
-            if (AttachedDeviceObject)
-            {
-                *AttachedDeviceObject = CurrentDeviceObject;
-            }
-            else
-            {
-                /* We aren't returning the reference, so decrement the count */
-                ObDereferenceObject(CurrentDeviceObject);
-            }
-
-            return TRUE;
-        }
-
-        /* Get the next device in the chain */
-        NextDeviceObject = IoGetLowerDeviceObject(CurrentDeviceObject);
-
-        /* Decrement the count on the last device before we update the pointer */
-        ObDereferenceObject(CurrentDeviceObject);
-        CurrentDeviceObject = NextDeviceObject;
-    }
-
-    return FALSE;
-}
-
-CODE_SEG("PAGE")
-static
-NTSTATUS
-FltpEnumerateFileSystemVolumes(_In_ PDEVICE_OBJECT DeviceObject)
-{
-    PFLTMGR_DEVICE_EXTENSION NewDeviceExtension;
-    PDEVICE_OBJECT BaseDeviceObject;
-    PDEVICE_OBJECT NewDeviceObject;
-    PDEVICE_OBJECT *DeviceList;
-    PDEVICE_OBJECT StorageStackDeviceObject;
-    UNICODE_STRING DeviceName;
-    ULONG NumDevices;
-    ULONG i;
-    NTSTATUS Status;
-
-    PAGED_CODE();
-
-    /* Get the base device */
-    BaseDeviceObject = IoGetDeviceAttachmentBaseRef(DeviceObject);
-
-    /* get the number of device object linked to the base file system */
-    Status = IoEnumerateDeviceObjectList(BaseDeviceObject->DriverObject,
-                                         NULL,
-                                         0,
-                                         &NumDevices);
-    if (Status != STATUS_BUFFER_TOO_SMALL) return Status;
-
-    /* Add a few more slots in case the size changed between calls and allocate some memory to hold the pointers */
-    NumDevices += 4;
-    DeviceList = ExAllocatePoolWithTag(NonPagedPool,
-                                       (NumDevices * sizeof(PDEVICE_OBJECT)),
-                                       FM_TAG_DEV_OBJ_PTRS);
-    if (DeviceList == NULL) return STATUS_INSUFFICIENT_RESOURCES;
-
-    /* Now get all the device objects that this base driver has created */
-    Status = IoEnumerateDeviceObjectList(BaseDeviceObject->DriverObject,
-                                         DeviceList,
-                                         (NumDevices * sizeof(PDEVICE_OBJECT)),
-                                         &NumDevices);
-    if (!NT_SUCCESS(Status))
-    {
-        ExFreePoolWithTag(DeviceList, FM_TAG_DEV_OBJ_PTRS);
-        return Status;
-    }
-
-    /* Loop through all the devices looking for ones to attach to */
-    for (i = 0; i < NumDevices; i++)
-    {
-        RtlInitUnicodeString(&DeviceName, NULL);
-        StorageStackDeviceObject = NULL;
-        NewDeviceObject = NULL;
-
-        /* Ignore the device we passed in, and devices of the wrong type */
-        if ((DeviceList[i] == BaseDeviceObject) ||
-            (DeviceList[i]->DeviceType != BaseDeviceObject->DeviceType))
-        {
-            goto CleanupAndNext;
-        }
-
-        /* Ignore this device if we're already attached to it */
-        if (FltpIsAttachedToDevice(DeviceList[i], NULL) == FALSE)
-        {
-            goto CleanupAndNext;
-        }
-
-
-        /*
-         * If the device has a name, it must be a control device.
-         * This handles drivers with more then one control device (like FastFat)
-         */
-        FltpGetBaseDeviceObjectName(DeviceList[i], &DeviceName);
-        if (NT_SUCCESS(Status) && DeviceName.Length > 0)
-        {
-            goto CleanupAndNext;
-        }
-
-        /*
-         * Try to get the storage stack (disk) device object associated with
-         * this file system device object. Ignore the device if we don't have one
-         */
-        Status = IoGetDiskDeviceObject(DeviceList[i],
-                                       &StorageStackDeviceObject);
-        if (!NT_SUCCESS(Status))
-        {
-            goto CleanupAndNext;
-        }
-
-
-        /*
-         * TODO: Don't attach to shadow copy volumes,
-         * ros doesn't have any so it's not an issues yet
-         */
-
-        /*
-         * We're far enough to be ready to attach, create a device
-         * object which we'll use to do so
-         */
-        Status = IoCreateDevice(DriverData.DriverObject,
-                                sizeof(FLTMGR_DEVICE_EXTENSION),
-                                NULL,
-                                DeviceList[i]->DeviceType,
-                                0,
-                                FALSE,
-                                &NewDeviceObject);
-        if (!NT_SUCCESS(Status))
-        {
-            goto CleanupAndNext;
-        }
-
-        /* Get the device extension for this new object and store our disk object there */
-        NewDeviceExtension = NewDeviceObject->DeviceExtension;
-        NewDeviceExtension->StorageStackDeviceObject = StorageStackDeviceObject;
-
-        /* Lookup and store the device name for the storage stack */
-        RtlInitEmptyUnicodeString(&NewDeviceExtension->DeviceName,
-                                  NewDeviceExtension->DeviceNameBuffer,
-                                  sizeof(NewDeviceExtension->DeviceNameBuffer));
-        FltpGetObjectName(StorageStackDeviceObject,
-                          &NewDeviceExtension->DeviceName);
-
-
-        /* Grab the attach lock before we attempt to attach */
-        ExAcquireFastMutex(&DriverData.FilterAttachLock);
-
-        /* Check again that we aren't already attached. It may have changed since our last check */
-        if (FltpIsAttachedToDevice(DeviceList[i], NULL) == FALSE)
-        {
-            FLT_ASSERT(NewDeviceObject->DriverObject == DriverData.DriverObject);
-
-            /* Finally, attach to the volume */
-            Status = FltpAttachDeviceObject(DeviceList[i],
-                                            NewDeviceObject,
-                                            &NewDeviceExtension->AttachedToDeviceObject);
-            if (NT_SUCCESS(Status))
-            {
-                /* Clean the initializing flag so other filters can attach to our device object */
-                ClearFlag(NewDeviceObject->Flags, DO_DEVICE_INITIALIZING);
-            }
-        }
-        else
-        {
-            /* We're already attached. Just cleanup */
-            Status = STATUS_DEVICE_ALREADY_ATTACHED;
-        }
-
-        ExReleaseFastMutex(&DriverData.FilterAttachLock);
-
-CleanupAndNext:
-
-        if (!NT_SUCCESS(Status))
-        {
-            if (NewDeviceObject)
-            {
-                FltpCleanupDeviceObject(NewDeviceObject);
-                IoDeleteDevice(NewDeviceObject);
-            }
-        }
-
-        if (StorageStackDeviceObject)
-        {
-            /* A ref was added for us when we attached, so we can deref ours now */
-            ObDereferenceObject(StorageStackDeviceObject);
-        }
-
-        /* Remove the ref which was added by IoEnumerateDeviceObjectList */
-        ObDereferenceObject(DeviceList[i]);
-
-        /* Free the buffer that FltpGetBaseDeviceObjectName added */
-        FltpFreeUnicodeString(&DeviceName);
-
-    }
-
-    /* Free the memory we allocated for the list */
-    ExFreePoolWithTag(DeviceList, FM_TAG_DEV_OBJ_PTRS);
-
-    return STATUS_SUCCESS;
 }
 
 CODE_SEG("PAGE")
@@ -477,8 +251,9 @@ FltpPreFsFilterOperation(_In_ PFS_FILTER_CALLBACK_DATA Data,
                          _Out_ PVOID *CompletionContext)
 {
     UNREFERENCED_PARAMETER(Data);
-    UNREFERENCED_PARAMETER(CompletionContext);
-    __debugbreak();
+
+    /* The section and cache synchronization operations just need to proceed */
+    *CompletionContext = NULL;
     return STATUS_SUCCESS;
 }
 
@@ -491,7 +266,6 @@ FltpPostFsFilterOperation(_In_ PFS_FILTER_CALLBACK_DATA Data,
     UNREFERENCED_PARAMETER(Data);
     UNREFERENCED_PARAMETER(OperationStatus);
     UNREFERENCED_PARAMETER(CompletionContext);
-    __debugbreak();
 }
 
 NTSTATUS
@@ -533,16 +307,10 @@ FltpDispatch(_In_ PDEVICE_OBJECT DeviceObject,
                DeviceExtension->AttachedToDeviceObject);
 
     StackPtr = IoGetCurrentIrpStackLocation(Irp);
-    if (StackPtr->MajorFunction == IRP_MJ_SHUTDOWN)
-    {
-        // handle shutdown request
-    }
+    UNREFERENCED_PARAMETER(StackPtr);
 
-    DPRINT1("Received %X from %wZ\n", StackPtr->MajorFunction, &DeviceExtension->DeviceName);
-
-    /* Just pass the IRP down the stack */
-    IoSkipCurrentIrpStackLocation(Irp);
-    return IoCallDriver(DeviceExtension->AttachedToDeviceObject, Irp);
+    /* A file system volume gets its operations run through the instances */
+    return FltpPerformIrp(DeviceObject, Irp);
 }
 
 CODE_SEG("PAGE")
@@ -580,11 +348,92 @@ FltpCreate(_In_ PDEVICE_OBJECT DeviceObject,
     FLT_ASSERT(DeviceExtension &&
                DeviceExtension->AttachedToDeviceObject);
 
-    DPRINT1("Received create from %wZ (%lu)\n", &DeviceExtension->DeviceName, PsGetCurrentProcessId());
+    /* A file system volume gets its operations run through the instances */
+    return FltpPerformIrp(DeviceObject, Irp);
+}
 
-    /* Just pass the IRP down the stack */
-    IoSkipCurrentIrpStackLocation(Irp);
-    return IoCallDriver(DeviceExtension->AttachedToDeviceObject, Irp);
+static
+NTSTATUS
+NTAPI
+FltpMountCompletion(_In_ PDEVICE_OBJECT DeviceObject,
+                    _In_ PIRP Irp,
+                    _In_ PVOID Context)
+{
+    UNREFERENCED_PARAMETER(DeviceObject);
+    UNREFERENCED_PARAMETER(Irp);
+
+    /* Let the thread of the mount do the work, we are at an unknown IRQL here */
+    KeSetEvent((PKEVENT)Context, IO_NO_INCREMENT, FALSE);
+    return STATUS_MORE_PROCESSING_REQUIRED;
+}
+
+/* A file system is mounting a volume: once it is done we attach to the new volume device */
+static
+NTSTATUS
+FltpMountVolume(_In_ PDEVICE_OBJECT DeviceObject,
+                _Inout_ PIRP Irp)
+{
+    PFLTMGR_DEVICE_EXTENSION DeviceExtension = DeviceObject->DeviceExtension;
+    PIO_STACK_LOCATION StackPtr = IoGetCurrentIrpStackLocation(Irp);
+    PVPB Vpb = StackPtr->Parameters.MountVolume.Vpb;
+    KEVENT Event;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    KeInitializeEvent(&Event, NotificationEvent, FALSE);
+    IoCopyCurrentIrpStackLocationToNext(Irp);
+    IoSetCompletionRoutine(Irp, FltpMountCompletion, &Event, TRUE, TRUE, TRUE);
+
+    Status = IoCallDriver(DeviceExtension->AttachedToDeviceObject, Irp);
+    if (Status == STATUS_PENDING)
+    {
+        KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+        Status = Irp->IoStatus.Status;
+    }
+
+    if (NT_SUCCESS(Status) && Vpb && Vpb->DeviceObject && Vpb->RealDevice)
+    {
+        /* The volume is ours before anybody gets to use it */
+        ObReferenceObject(Vpb->RealDevice);
+        (VOID)FltpAttachToVolumeDevice(Vpb->DeviceObject, Vpb->RealDevice, TRUE);
+    }
+
+    Status = Irp->IoStatus.Status;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return Status;
+}
+
+static
+NTSTATUS
+FltpDismountVolume(_In_ PDEVICE_OBJECT DeviceObject,
+                   _Inout_ PIRP Irp)
+{
+    PFLTMGR_DEVICE_EXTENSION DeviceExtension = DeviceObject->DeviceExtension;
+    KEVENT Event;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    KeInitializeEvent(&Event, NotificationEvent, FALSE);
+    IoCopyCurrentIrpStackLocationToNext(Irp);
+    IoSetCompletionRoutine(Irp, FltpMountCompletion, &Event, TRUE, TRUE, TRUE);
+
+    Status = IoCallDriver(DeviceExtension->AttachedToDeviceObject, Irp);
+    if (Status == STATUS_PENDING)
+    {
+        KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+        Status = Irp->IoStatus.Status;
+    }
+
+    if (NT_SUCCESS(Status))
+    {
+        FltpTeardownVolume(DeviceExtension->Volume, FLTFL_INSTANCE_TEARDOWN_VOLUME_DISMOUNT);
+    }
+
+    Status = Irp->IoStatus.Status;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return Status;
 }
 
 CODE_SEG("PAGE")
@@ -594,6 +443,7 @@ FltpFsControl(_In_ PDEVICE_OBJECT DeviceObject,
               _Inout_ PIRP Irp)
 {
     PFLTMGR_DEVICE_EXTENSION DeviceExtension;
+    PIO_STACK_LOCATION StackPtr;
 
     PAGED_CODE();
 
@@ -608,9 +458,27 @@ FltpFsControl(_In_ PDEVICE_OBJECT DeviceObject,
     }
 
     DeviceExtension = DeviceObject->DeviceExtension;
-
     FLT_ASSERT(DeviceExtension &&
                DeviceExtension->AttachedToDeviceObject);
+
+    StackPtr = IoGetCurrentIrpStackLocation(Irp);
+
+    if (DeviceExtension->Volume)
+    {
+        /* A dismount takes the instances away once the file system is done with it */
+        if (StackPtr->MinorFunction == IRP_MN_USER_FS_REQUEST &&
+            StackPtr->Parameters.FileSystemControl.FsControlCode == FSCTL_DISMOUNT_VOLUME)
+        {
+            return FltpDismountVolume(DeviceObject, Irp);
+        }
+
+        /* A file system volume gets its operations run through the instances */
+        return FltpPerformIrp(DeviceObject, Irp);
+    }
+
+    /* A file system control device: we're waiting for it to mount volumes */
+    if (StackPtr->MinorFunction == IRP_MN_MOUNT_VOLUME)
+        return FltpMountVolume(DeviceObject, Irp);
 
     /* Just pass the IRP down the stack */
     IoSkipCurrentIrpStackLocation(Irp);
@@ -639,10 +507,18 @@ FltpDeviceControl(_In_ PDEVICE_OBJECT DeviceObject,
         return Status;
     }
 
+    /* The communication device */
+    if (DeviceObject == CommsDeviceObject)
+        return FltpMsgDeviceControl(DeviceObject, Irp);
+
     DeviceExtension = DeviceObject->DeviceExtension;
 
     FLT_ASSERT(DeviceExtension &&
                DeviceExtension->AttachedToDeviceObject);
+
+    /* A file system volume gets its operations run through the instances */
+    if (DeviceExtension->Volume)
+        return FltpPerformIrp(DeviceObject, Irp);
 
     /* Just pass the IRP down the stack */
     IoSkipCurrentIrpStackLocation(Irp);
@@ -684,6 +560,7 @@ FltpFastIoCheckIfPossible(_In_ PFILE_OBJECT FileObject,
     DeviceExtension = DeviceObject->DeviceExtension;
     FLT_ASSERT(DeviceExtension->AttachedToDeviceObject);
 
+
     /* Get the device that we attached to */
     AttachedDeviceObject = DeviceExtension->AttachedToDeviceObject;
     FastIoDispatch = AttachedDeviceObject->DriverObject->FastIoDispatch;
@@ -703,7 +580,6 @@ FltpFastIoCheckIfPossible(_In_ PFILE_OBJECT FileObject,
     }
 
     /* We failed to handle the request, send it down the slow path */
-    FLT_ASSERT(FALSE);
     return FALSE;
 }
 
@@ -737,6 +613,10 @@ FltpFastIoRead(_In_ PFILE_OBJECT FileObject,
     DeviceExtension = DeviceObject->DeviceExtension;
     FLT_ASSERT(DeviceExtension->AttachedToDeviceObject);
 
+    /* A filter which wants to see reads sees this one too */
+    if (FltpFastIoDisallowed(DeviceObject, IRP_MJ_READ))
+        return FltpFastIoReadWrite(DeviceObject, FileObject, FALSE, FileOffset, Length, Wait, LockKey, Buffer, IoStatus);
+
     /* Get the device that we attached to */
     AttachedDeviceObject = DeviceExtension->AttachedToDeviceObject;
     FastIoDispatch = AttachedDeviceObject->DriverObject->FastIoDispatch;
@@ -756,7 +636,6 @@ FltpFastIoRead(_In_ PFILE_OBJECT FileObject,
     }
 
     /* We failed to handle the request, send it down the slow path */
-    FLT_ASSERT(FALSE);
     return FALSE;
 }
 
@@ -790,6 +669,10 @@ FltpFastIoWrite(_In_ PFILE_OBJECT FileObject,
     DeviceExtension = DeviceObject->DeviceExtension;
     FLT_ASSERT(DeviceExtension->AttachedToDeviceObject);
 
+    /* A filter which wants to see writes sees this one too */
+    if (FltpFastIoDisallowed(DeviceObject, IRP_MJ_WRITE))
+        return FltpFastIoReadWrite(DeviceObject, FileObject, TRUE, FileOffset, Length, Wait, LockKey, Buffer, IoStatus);
+
     /* Get the device that we attached to */
     AttachedDeviceObject = DeviceExtension->AttachedToDeviceObject;
     FastIoDispatch = AttachedDeviceObject->DriverObject->FastIoDispatch;
@@ -809,7 +692,6 @@ FltpFastIoWrite(_In_ PFILE_OBJECT FileObject,
     }
 
     /* We failed to handle the request, send it down the slow path */
-    FLT_ASSERT(FALSE);
     return FALSE;
 }
 
@@ -840,6 +722,10 @@ FltpFastIoQueryBasicInfo(_In_ PFILE_OBJECT FileObject,
     DeviceExtension = DeviceObject->DeviceExtension;
     FLT_ASSERT(DeviceExtension->AttachedToDeviceObject);
 
+    /* A filter which wants to see this operation sees it as an IRP */
+    if (FltpFastIoDisallowed(DeviceObject, IRP_MJ_QUERY_INFORMATION))
+        return FALSE;
+
     /* Get the device that we attached to */
     AttachedDeviceObject = DeviceExtension->AttachedToDeviceObject;
     FastIoDispatch = AttachedDeviceObject->DriverObject->FastIoDispatch;
@@ -856,7 +742,6 @@ FltpFastIoQueryBasicInfo(_In_ PFILE_OBJECT FileObject,
     }
 
     /* We failed to handle the request, send it down the slow path */
-    FLT_ASSERT(FALSE);
     return FALSE;
 }
 
@@ -887,6 +772,10 @@ FltpFastIoQueryStandardInfo(_In_ PFILE_OBJECT FileObject,
     DeviceExtension = DeviceObject->DeviceExtension;
     FLT_ASSERT(DeviceExtension->AttachedToDeviceObject);
 
+    /* A filter which wants to see this operation sees it as an IRP */
+    if (FltpFastIoDisallowed(DeviceObject, IRP_MJ_QUERY_INFORMATION))
+        return FALSE;
+
     /* Get the device that we attached to */
     AttachedDeviceObject = DeviceExtension->AttachedToDeviceObject;
     FastIoDispatch = AttachedDeviceObject->DriverObject->FastIoDispatch;
@@ -903,7 +792,6 @@ FltpFastIoQueryStandardInfo(_In_ PFILE_OBJECT FileObject,
     }
 
     /* We failed to handle the request, send it down the slow path */
-    FLT_ASSERT(FALSE);
     return FALSE;
 }
 
@@ -938,6 +826,10 @@ FltpFastIoLock(_In_ PFILE_OBJECT FileObject,
     DeviceExtension = DeviceObject->DeviceExtension;
     FLT_ASSERT(DeviceExtension->AttachedToDeviceObject);
 
+    /* A filter which wants to see this operation sees it as an IRP */
+    if (FltpFastIoDisallowed(DeviceObject, IRP_MJ_LOCK_CONTROL))
+        return FALSE;
+
     /* Get the device that we attached to */
     AttachedDeviceObject = DeviceExtension->AttachedToDeviceObject;
     FastIoDispatch = AttachedDeviceObject->DriverObject->FastIoDispatch;
@@ -958,7 +850,6 @@ FltpFastIoLock(_In_ PFILE_OBJECT FileObject,
     }
 
     /* We failed to handle the request, send it down the slow path */
-    FLT_ASSERT(FALSE);
     return FALSE;
 }
 
@@ -991,6 +882,10 @@ FltpFastIoUnlockSingle(_In_ PFILE_OBJECT FileObject,
     DeviceExtension = DeviceObject->DeviceExtension;
     FLT_ASSERT(DeviceExtension->AttachedToDeviceObject);
 
+    /* A filter which wants to see this operation sees it as an IRP */
+    if (FltpFastIoDisallowed(DeviceObject, IRP_MJ_LOCK_CONTROL))
+        return FALSE;
+
     /* Get the device that we attached to */
     AttachedDeviceObject = DeviceExtension->AttachedToDeviceObject;
     FastIoDispatch = AttachedDeviceObject->DriverObject->FastIoDispatch;
@@ -1009,7 +904,6 @@ FltpFastIoUnlockSingle(_In_ PFILE_OBJECT FileObject,
     }
 
     /* We failed to handle the request, send it down the slow path */
-    FLT_ASSERT(FALSE);
     return FALSE;
 }
 
@@ -1040,6 +934,10 @@ FltpFastIoUnlockAll(_In_ PFILE_OBJECT FileObject,
     DeviceExtension = DeviceObject->DeviceExtension;
     FLT_ASSERT(DeviceExtension->AttachedToDeviceObject);
 
+    /* A filter which wants to see this operation sees it as an IRP */
+    if (FltpFastIoDisallowed(DeviceObject, IRP_MJ_LOCK_CONTROL))
+        return FALSE;
+
     /* Get the device that we attached to */
     AttachedDeviceObject = DeviceExtension->AttachedToDeviceObject;
     FastIoDispatch = AttachedDeviceObject->DriverObject->FastIoDispatch;
@@ -1055,7 +953,6 @@ FltpFastIoUnlockAll(_In_ PFILE_OBJECT FileObject,
     }
 
     /* We failed to handle the request, send it down the slow path */
-    FLT_ASSERT(FALSE);
     return FALSE;
 }
 
@@ -1086,6 +983,10 @@ FltpFastIoUnlockAllByKey(_In_ PFILE_OBJECT FileObject,
     DeviceExtension = DeviceObject->DeviceExtension;
     FLT_ASSERT(DeviceExtension->AttachedToDeviceObject);
 
+    /* A filter which wants to see this operation sees it as an IRP */
+    if (FltpFastIoDisallowed(DeviceObject, IRP_MJ_LOCK_CONTROL))
+        return FALSE;
+
     /* Get the device that we attached to */
     AttachedDeviceObject = DeviceExtension->AttachedToDeviceObject;
     FastIoDispatch = AttachedDeviceObject->DriverObject->FastIoDispatch;
@@ -1102,7 +1003,6 @@ FltpFastIoUnlockAllByKey(_In_ PFILE_OBJECT FileObject,
     }
 
     /* We failed to handle the request, send it down the slow path */
-    FLT_ASSERT(FALSE);
     return FALSE;
 }
 
@@ -1135,6 +1035,10 @@ FltpFastIoDeviceControl(_In_ PFILE_OBJECT FileObject,
     DeviceExtension = DeviceObject->DeviceExtension;
     FLT_ASSERT(DeviceExtension->AttachedToDeviceObject);
 
+    /* A filter which wants to see this operation sees it as an IRP */
+    if (FltpFastIoDisallowed(DeviceObject, IRP_MJ_DEVICE_CONTROL))
+        return FALSE;
+
     /* Get the device that we attached to */
     AttachedDeviceObject = DeviceExtension->AttachedToDeviceObject;
     FastIoDispatch = AttachedDeviceObject->DriverObject->FastIoDispatch;
@@ -1155,7 +1059,6 @@ FltpFastIoDeviceControl(_In_ PFILE_OBJECT FileObject,
     }
 
     /* We failed to handle the request, send it down the slow path */
-    FLT_ASSERT(FALSE);
     return FALSE;
 }
 
@@ -1246,6 +1149,10 @@ FltpFastIoQueryNetworkOpenInfo(_In_ PFILE_OBJECT FileObject,
     DeviceExtension = DeviceObject->DeviceExtension;
     FLT_ASSERT(DeviceExtension->AttachedToDeviceObject);
 
+    /* A filter which wants to see this operation sees it as an IRP */
+    if (FltpFastIoDisallowed(DeviceObject, IRP_MJ_QUERY_INFORMATION))
+        return FALSE;
+
     /* Get the device that we attached to */
     AttachedDeviceObject = DeviceExtension->AttachedToDeviceObject;
     FastIoDispatch = AttachedDeviceObject->DriverObject->FastIoDispatch;
@@ -1262,7 +1169,6 @@ FltpFastIoQueryNetworkOpenInfo(_In_ PFILE_OBJECT FileObject,
     }
 
     /* We failed to handle the request, send it down the slow path */
-    FLT_ASSERT(FALSE);
     return FALSE;
 }
 
@@ -1295,6 +1201,10 @@ FltpFastIoMdlRead(_In_ PFILE_OBJECT FileObject,
     DeviceExtension = DeviceObject->DeviceExtension;
     FLT_ASSERT(DeviceExtension->AttachedToDeviceObject);
 
+    /* A filter which wants to see this operation sees it as an IRP */
+    if (FltpFastIoDisallowed(DeviceObject, IRP_MJ_READ))
+        return FALSE;
+
     /* Get the device that we attached to */
     AttachedDeviceObject = DeviceExtension->AttachedToDeviceObject;
     FastIoDispatch = AttachedDeviceObject->DriverObject->FastIoDispatch;
@@ -1313,7 +1223,6 @@ FltpFastIoMdlRead(_In_ PFILE_OBJECT FileObject,
     }
 
     /* We failed to handle the request, send it down the slow path */
-    FLT_ASSERT(FALSE);
     return FALSE;
 }
 
@@ -1355,7 +1264,6 @@ FltpFastIoMdlReadComplete(_In_ PFILE_OBJECT FileObject,
     }
 
     /* We failed to handle the request, send it down the slow path */
-    FLT_ASSERT(FALSE);
     return FALSE;
 }
 
@@ -1388,6 +1296,10 @@ FltpFastIoPrepareMdlWrite(_In_ PFILE_OBJECT FileObject,
     DeviceExtension = DeviceObject->DeviceExtension;
     FLT_ASSERT(DeviceExtension->AttachedToDeviceObject);
 
+    /* A filter which wants to see this operation sees it as an IRP */
+    if (FltpFastIoDisallowed(DeviceObject, IRP_MJ_WRITE))
+        return FALSE;
+
     /* Get the device that we attached to */
     AttachedDeviceObject = DeviceExtension->AttachedToDeviceObject;
     FastIoDispatch = AttachedDeviceObject->DriverObject->FastIoDispatch;
@@ -1406,7 +1318,6 @@ FltpFastIoPrepareMdlWrite(_In_ PFILE_OBJECT FileObject,
     }
 
     /* We failed to handle the request, send it down the slow path */
-    FLT_ASSERT(FALSE);
     return FALSE;
 }
 
@@ -1449,7 +1360,6 @@ FltpFastIoMdlWriteComplete(_In_ PFILE_OBJECT FileObject,
     }
 
     /* We failed to handle the request, send it down the slow path */
-    FLT_ASSERT(FALSE);
     return FALSE;
 }
 
@@ -1483,6 +1393,10 @@ FltpFastIoReadCompressed(_In_ PFILE_OBJECT FileObject,
     DeviceExtension = DeviceObject->DeviceExtension;
     FLT_ASSERT(DeviceExtension->AttachedToDeviceObject);
 
+    /* A filter which wants to see this operation sees it as an IRP */
+    if (FltpFastIoDisallowed(DeviceObject, IRP_MJ_READ))
+        return FALSE;
+
     /* Get the device that we attached to */
     AttachedDeviceObject = DeviceExtension->AttachedToDeviceObject;
     FastIoDispatch = AttachedDeviceObject->DriverObject->FastIoDispatch;
@@ -1504,7 +1418,6 @@ FltpFastIoReadCompressed(_In_ PFILE_OBJECT FileObject,
     }
 
     /* We failed to handle the request, send it down the slow path */
-    FLT_ASSERT(FALSE);
     return FALSE;
 }
 
@@ -1538,6 +1451,10 @@ FltpFastIoWriteCompressed(_In_ PFILE_OBJECT FileObject,
     DeviceExtension = DeviceObject->DeviceExtension;
     FLT_ASSERT(DeviceExtension->AttachedToDeviceObject);
 
+    /* A filter which wants to see this operation sees it as an IRP */
+    if (FltpFastIoDisallowed(DeviceObject, IRP_MJ_WRITE))
+        return FALSE;
+
     /* Get the device that we attached to */
     AttachedDeviceObject = DeviceExtension->AttachedToDeviceObject;
     FastIoDispatch = AttachedDeviceObject->DriverObject->FastIoDispatch;
@@ -1559,7 +1476,6 @@ FltpFastIoWriteCompressed(_In_ PFILE_OBJECT FileObject,
     }
 
     /* We failed to handle the request, send it down the slow path */
-    FLT_ASSERT(FALSE);
     return FALSE;
 }
 
@@ -1599,7 +1515,6 @@ FltpFastIoMdlReadCompleteCompressed(_In_ PFILE_OBJECT FileObject,
     }
 
     /* We failed to handle the request, send it down the slow path */
-    FLT_ASSERT(FALSE);
     return FALSE;
 }
 
@@ -1641,7 +1556,6 @@ FltpFastIoMdlWriteCompleteCompressed(_In_ PFILE_OBJECT FileObject,
     }
 
     /* We failed to handle the request, send it down the slow path */
-    FLT_ASSERT(FALSE);
     return FALSE;
 }
 
@@ -1668,6 +1582,10 @@ FltpFastIoQueryOpen(_Inout_ PIRP Irp,
     DeviceExtension = DeviceObject->DeviceExtension;
     FLT_ASSERT(DeviceExtension->AttachedToDeviceObject);
 
+    /* A filter which wants to see this operation sees it as an IRP */
+    if (FltpFastIoDisallowed(DeviceObject, IRP_MJ_CREATE))
+        return FALSE;
+
     /* Get the device that we attached to */
     AttachedDeviceObject = DeviceExtension->AttachedToDeviceObject;
     FastIoDispatch = AttachedDeviceObject->DriverObject->FastIoDispatch;
@@ -1691,7 +1609,6 @@ FltpFastIoQueryOpen(_Inout_ PIRP Irp,
     }
 
     /* We failed to handle the request, send it down the slow path */
-    FLT_ASSERT(FALSE);
     return FALSE;
 }
 
@@ -1838,6 +1755,8 @@ DriverEntry(_In_ PDRIVER_OBJECT DriverObject,
 
     /* Do some initialization */
     ExInitializeFastMutex(&DriverData.FilterAttachLock);
+    InitializeListHead(&FilterList);
+    ExInitializeResourceLite(&FilterListLock);
 
     /* Create the main filter manager device object */
     Status = IoCreateDevice(DriverObject,
@@ -1874,8 +1793,6 @@ DriverEntry(_In_ PDRIVER_OBJECT DriverObject,
     FLT_ASSERT(Status != STATUS_DEVICE_ALREADY_ATTACHED); // Windows checks for this, I'm not sure how it can happen. Needs investigation??
     if (!NT_SUCCESS(Status))  goto Cleanup;
 
-    InitializeListHead(&FilterList);
-    ExInitializeResourceLite(&FilterListLock);
 
     /* IoRegisterFsRegistrationChange isn't notified about the raw  file systems, so we attach to them manually */
     RtlInitUnicodeString(&ObjectName, L"\\Device\\RawDisk");

@@ -9,11 +9,13 @@ list(APPEND SOURCE
     Context.c
     Dispatch.c
     Filter.c
+    Instance.c
     Interface.c
     Lib.c
     Messaging.c
     Misc.c
     Object.c
+    Operation.c
     Registry.c
     Volume.c
     fltmgr.h)
