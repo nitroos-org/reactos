@@ -528,12 +528,61 @@ TestActivation(void)
     HeapDestroy(Heap);
 }
 
+/* What the heap counts to decide on the front end follows the blocks the program has, and is not a block of the
+   program's heap (HeapWalk shows only what was allocated). Windows was not measured for the realloc and
+   HEAP_NO_SERIALIZE cases: these are our own counting rules. */
+static void
+TestCounting(void)
+{
+    HANDLE Heap = HeapCreate(0, 0, 0);
+    PVOID Block, Blocks[5];
+    ULONG i;
+
+    /* A block that moves to another class in HeapReAlloc (and is freed) leaves nothing counted behind */
+    for (i = 0; i < 100; i++)
+    {
+        Block = HeapAlloc(Heap, 0, 32);
+        Block = HeapReAlloc(Heap, 0, Block, 300);
+        HeapFree(Heap, 0, Block);
+    }
+    ok_eq_ulong(QueryFrontEnd(Heap), 0);
+
+    /* Nor does one that shrinks in place */
+    for (i = 0; i < 100; i++)
+    {
+        Block = HeapAlloc(Heap, 0, 100);
+        Block = HeapReAlloc(Heap, HEAP_REALLOC_IN_PLACE_ONLY, Block, 20);
+        HeapFree(Heap, 0, Block);
+    }
+    ok_eq_ulong(QueryFrontEnd(Heap), 0);
+
+    /* A free that passes HEAP_NO_SERIALIZE is counted like any other */
+    for (i = 0; i < 100; i++)
+    {
+        Block = HeapAlloc(Heap, 0, 48);
+        HeapFree(Heap, HEAP_NO_SERIALIZE, Block);
+    }
+    ok_eq_ulong(QueryFrontEnd(Heap), 0);
+    HeapDestroy(Heap);
+
+    /* The heap shows the blocks of the program and no other */
+    Heap = HeapCreate(0, 0, 0);
+    for (i = 0; i < _countof(Blocks); i++)
+        Blocks[i] = HeapAlloc(Heap, 0, 40);
+    ok_eq_int(CountBusy(Heap), (int)_countof(Blocks));
+    for (i = 0; i < _countof(Blocks); i++)
+        HeapFree(Heap, 0, Blocks[i]);
+    ok_eq_int(CountBusy(Heap), 0);
+    HeapDestroy(Heap);
+}
+
 START_TEST(RtlHeapFrontEnd)
 {
     HANDLE Heap;
 
     TestInformation();
     TestActivation();
+    TestCounting();
 
     Heap = HeapCreate(0, 0, 0);
     SetFrontEnd(Heap, 2);

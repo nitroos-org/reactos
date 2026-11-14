@@ -28,6 +28,16 @@
  *    HeapWalk and friends see the same blocks as without the front end. While a
  *    heap is locked by its user the front end is bypassed, so that the holder
  *    of the lock excludes every other allocation as documented.
+ *  - The flush waits at most HEAP_FE_FLUSH_SPINS pauses (roughly 30 to 150 ms, more in a virtual machine) for a
+ *    slot or shared list that a thread is inside, and leaves the blocks of one that does not let go parked (a
+ *    thread that was suspended inside it): they come back at a later flush. So with such a thread, every flush
+ *    (HeapLock, HeapWalk, growth) is slow while it lasts, HeapLock does not exclude that slot, and HeapWalk
+ *    shows its parked blocks as allocated. None of this is unsafe for memory: the flush only takes the blocks of
+ *    a list whose lock it owns. A thread that passed the Disabled test before a flush may still park a block
+ *    after it.
+ *  - Parked memory is bounded (HEAP_FE_SLOT_BUDGET per slot, HEAP_FE_SHARED_CAP per class on the shared lists)
+ *    and is given back when the heap needs room (RtlpHeapFeParked above HEAP_FE_FLUSH_LIMIT), by HeapLock and
+ *    HeapWalk, and by the heap's once-per-second check after a second without growth (RtlpHeapTrimCheck).
  *  - A cached block carries a marker in the SmallTagIndex byte of its header
  *    (always zero for blocks the front end accepts), which lets HeapFree detect
  *    a double free, and HeapSize/HeapValidate treat the block as freed.
@@ -95,6 +105,25 @@ typedef struct _HEAP_FE
 C_ASSERT((sizeof(HEAP_FE_SLOT) % 64) == 0);
 C_ASSERT(sizeof(HEAP_FE_SHARED) == 64);
 
+/* The activation counters of the heaps: HEAP_FE_ACT_STRIDE bytes each, in pages that are never given back
+   (HEAP_FE_ACT_PER_PAGE slots, the first one of a page is its header). A slot is taken and released with
+   interlocked operations on the page's free mask, and pages are only ever added to the list, so a stale
+   counter write by a caller that raced with the activation lands in a slot that is still mapped (the counters
+   decide only when the front end starts: a wrong count is harmless). */
+#define HEAP_FE_ACT_STRIDE      256
+#define HEAP_FE_ACT_PER_PAGE    (PAGE_SIZE / HEAP_FE_ACT_STRIDE)
+
+C_ASSERT(sizeof(HEAP_FE_ACT) <= HEAP_FE_ACT_STRIDE);
+C_ASSERT(HEAP_FE_ACT_PER_PAGE <= 32);
+
+typedef struct _HEAP_FE_ACT_PAGE
+{
+    struct _HEAP_FE_ACT_PAGE *Next;
+    volatile LONG Free;     /* bit n set: slot n is free (bit 0, the header, never is) */
+} HEAP_FE_ACT_PAGE, *PHEAP_FE_ACT_PAGE;
+
+static PHEAP_FE_ACT_PAGE volatile RtlpHeapFeActPages;
+
 /* PRIVATE FUNCTIONS ********************************************************/
 
 FORCEINLINE
@@ -135,6 +164,72 @@ RtlpHeapFeLockWait(volatile LONG *Lock)
     }
 
     return FALSE;
+}
+
+static
+PHEAP_FE_ACT
+RtlpHeapFeActAlloc(VOID)
+{
+    PHEAP_FE_ACT_PAGE Page, Head;
+    PVOID Base;
+    SIZE_T Size;
+    LONG Mask;
+    ULONG Bit;
+
+    for (;;)
+    {
+        for (Page = RtlpHeapFeActPages; Page; Page = Page->Next)
+        {
+            while ((Mask = Page->Free) != 0)
+            {
+                for (Bit = 1; !(Mask & (1 << Bit)); Bit++)
+                    ;
+
+                if (InterlockedCompareExchange(&Page->Free, Mask & ~(1 << Bit), Mask) == Mask)
+                {
+                    PHEAP_FE_ACT Act = (PHEAP_FE_ACT)((PUCHAR)Page + Bit * HEAP_FE_ACT_STRIDE);
+
+                    RtlZeroMemory(Act, sizeof(*Act));
+                    return Act;
+                }
+            }
+        }
+
+        /* All taken: another page (two threads that do this at once make two, both are used) */
+        Base = NULL;
+        Size = PAGE_SIZE;
+        if (!NT_SUCCESS(ZwAllocateVirtualMemory(NtCurrentProcess(),
+                                                &Base,
+                                                0,
+                                                &Size,
+                                                MEM_COMMIT | MEM_RESERVE,
+                                                PAGE_READWRITE)))
+        {
+            return NULL;
+        }
+
+        Page = Base;
+        Page->Free = (LONG)((1UL << HEAP_FE_ACT_PER_PAGE) - 2);
+        do
+        {
+            Head = RtlpHeapFeActPages;
+            Page->Next = Head;
+        } while (InterlockedCompareExchangePointer((PVOID volatile *)&RtlpHeapFeActPages, Page, Head) != Head);
+    }
+}
+
+static
+VOID
+RtlpHeapFeActFree(PHEAP_FE_ACT Act)
+{
+    PHEAP_FE_ACT_PAGE Page = (PHEAP_FE_ACT_PAGE)((ULONG_PTR)Act & ~(ULONG_PTR)(PAGE_SIZE - 1));
+    ULONG Bit = (ULONG)(((ULONG_PTR)Act & (PAGE_SIZE - 1)) / HEAP_FE_ACT_STRIDE);
+    LONG Mask;
+
+    do
+    {
+        Mask = Page->Free;
+    } while (InterlockedCompareExchange(&Page->Free, Mask | (1 << Bit), Mask) != Mask);
 }
 
 /* PUBLIC FUNCTIONS *********************************************************/
@@ -211,7 +306,7 @@ RtlpHeapFeEnable(PHEAP Heap)
 
         Heap->FeAct = HEAP_FE_ACT_OFF;
         if (Act != HEAP_FE_ACT_OFF)
-            RtlFreeHeap(Heap, HEAP_NO_SERIALIZE, Act);
+            RtlpHeapFeActFree(Act);
     }
     return TRUE;
 }
@@ -222,6 +317,15 @@ RtlpHeapFeDestroy(PHEAP Heap)
 {
     PVOID Fe = Heap->FrontEndHeap;
     SIZE_T Size = 0;
+
+    /* Counters that were still counting go with the heap */
+    if (Heap->FeAct > HEAP_FE_ACT_OFF)
+    {
+        PHEAP_FE_ACT Act = Heap->FeAct;
+
+        Heap->FeAct = HEAP_FE_ACT_OFF;
+        RtlpHeapFeActFree(Act);
+    }
 
     if (Heap->FrontEndHeapType != HEAP_FRONTEND_CACHE || !Fe)
         return;
@@ -405,6 +509,11 @@ RtlpHeapFeFree(PHEAP Heap,
     if (Index < 2 || Index >= HEAP_FE_UNITS || Entry->SmallTagIndex != 0 || Fe->Disabled)
         return HEAP_FE_NOT_HANDLED;
 
+    /* Parked blocks never reach the heap's own once-per-interval check of its free page cache (a free
+       that gets the heap lock does): once per interval one free takes the slow path for that */
+    if (RtlpHeapTickMs() - Heap->TrimTick >= HEAP_TRIM_INTERVAL_MS)
+        return HEAP_FE_NOT_HANDLED;
+
     Class = HEAP_FE_CLASS_FOR_FREE(Index);
 
     Slot = RtlpHeapFeSlot(Fe);
@@ -475,7 +584,7 @@ RtlpHeapFeCountAlloc(PHEAP Heap,
             return;
         }
 
-        Act = RtlAllocateHeap(Heap, HEAP_NO_SERIALIZE | HEAP_ZERO_MEMORY, sizeof(*Act));
+        Act = RtlpHeapFeActAlloc();
         if (!Act)
         {
             Heap->FeAct = HEAP_FE_ACT_OFF;
@@ -500,28 +609,27 @@ RtlpHeapFeCountAlloc(PHEAP Heap,
     }
 
     /* Enabling frees the counters; a heap that refuses is not asked again */
-    if (Activate && !RtlpHeapFeEnable(Heap) && Heap->FrontEndHeapType == 0)
+    if (Activate && !RtlpHeapFeEnable(Heap) && Heap->FeAct == Act)
     {
         Heap->FeAct = HEAP_FE_ACT_OFF;
-        RtlFreeHeap(Heap, HEAP_NO_SERIALIZE, Act);
+        RtlpHeapFeActFree(Act);
     }
 }
 
-VOID
+/* The size of the class a block was counted under, in entry units, 0 when the allocation did not count it */
+SIZE_T
 NTAPI
-RtlpHeapFeCountFree(PHEAP Heap,
-                    PHEAP_ENTRY Entry)
+RtlpHeapFeCountedIndex(PHEAP Heap,
+                       PHEAP_ENTRY Entry)
 {
-    PHEAP_FE_ACT Act = Heap->FeAct;
     SIZE_T Index = Entry->Size;
-    ULONG Class;
 
-    if (Act <= HEAP_FE_ACT_OFF)
-        return;
+    if (Heap->FeAct <= HEAP_FE_ACT_OFF)
+        return 0;
 
     /* Only blocks the allocation counted (no extra data, no user flags) */
     if ((Entry->Flags & ~HEAP_ENTRY_LAST_ENTRY) != HEAP_ENTRY_BUSY)
-        return;
+        return 0;
 
     /* A block can be bigger than its request (the heap does not split off a remainder that is too
        small): count it under the class of the request, as the allocation did */
@@ -533,9 +641,23 @@ RtlpHeapFeCountFree(PHEAP Heap,
         Index = ((Payload + Heap->AlignRound) & Heap->AlignMask) >> HEAP_ENTRY_SHIFT;
     }
 
+    return Index;
+}
+
+static
+VOID
+RtlpHeapFeUncount(PHEAP Heap,
+                  SIZE_T Index)
+{
+    PHEAP_FE_ACT Act = Heap->FeAct;
+
+    if (Act <= HEAP_FE_ACT_OFF || !Index)
+        return;
+
     if ((Index << HEAP_ENTRY_SHIFT) <= HEAP_FE_ACT_SMALL_BYTES)
     {
-        Class = HEAP_FE_CLASS_FOR_ALLOC((ULONG)Index);
+        ULONG Class = HEAP_FE_CLASS_FOR_ALLOC((ULONG)Index);
+
         if (Act->Live[Class])
             Act->Live[Class]--;
     }
@@ -545,6 +667,32 @@ RtlpHeapFeCountFree(PHEAP Heap,
 
         Act->BigLive = (Act->BigLive > Bytes) ? Act->BigLive - Bytes : 0;
     }
+}
+
+VOID
+NTAPI
+RtlpHeapFeCountFree(PHEAP Heap,
+                    PHEAP_ENTRY Entry)
+{
+    if (Heap->FeAct <= HEAP_FE_ACT_OFF)
+        return;
+
+    RtlpHeapFeUncount(Heap, RtlpHeapFeCountedIndex(Heap, Entry));
+}
+
+/* A counted block that RtlReAllocateHeap resized in place: it moves from its old class to its new one */
+VOID
+NTAPI
+RtlpHeapFeCountResized(PHEAP Heap,
+                       SIZE_T OldIndex,
+                       SIZE_T NewIndex)
+{
+    if (Heap->FeAct <= HEAP_FE_ACT_OFF || OldIndex == NewIndex)
+        return;
+
+    RtlpHeapFeUncount(Heap, OldIndex);
+    if (NewIndex)
+        RtlpHeapFeCountAlloc(Heap, NewIndex);
 }
 
 VOID
@@ -601,7 +749,7 @@ RtlpHeapFeRefill(PHEAP Heap,
     {
         /* Give them back: the heap lock is ours */
         while (Got)
-            RtlpFreeBlockLocked(Heap, Block[--Got]);
+            RtlpFreeBlockLocked(Heap, Block[--Got], FALSE);
         return;
     }
 
@@ -615,7 +763,7 @@ RtlpHeapFeRefill(PHEAP Heap,
             (Entry->Flags & ~HEAP_ENTRY_LAST_ENTRY) != HEAP_ENTRY_BUSY ||
             Entry->SmallTagIndex != 0)
         {
-            RtlpFreeBlockLocked(Heap, Entry);
+            RtlpFreeBlockLocked(Heap, Entry, FALSE);
             continue;
         }
 
@@ -668,7 +816,7 @@ RtlpHeapFeFlush(PHEAP Heap)
             {
                 Next = RtlpHeapFeNext(Fe, Entry);
                 Entry->SmallTagIndex = 0;
-                RtlpFreeBlockLocked(Heap, Entry);
+                RtlpFreeBlockLocked(Heap, Entry, FALSE);
                 Count++;
                 Entry = Next;
             }
@@ -701,7 +849,7 @@ RtlpHeapFeFlush(PHEAP Heap)
         {
             Next = RtlpHeapFeNext(Fe, Entry);
             Entry->SmallTagIndex = 0;
-            RtlpFreeBlockLocked(Heap, Entry);
+            RtlpFreeBlockLocked(Heap, Entry, FALSE);
             Count++;
             Entry = Next;
         }
