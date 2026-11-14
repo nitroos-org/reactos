@@ -893,7 +893,6 @@ WsGetProcess(VOID)
 typedef struct _WS_IPV6_INFO
 {
     ULONG NonLoopback;
-    ULONG Global;
 } WS_IPV6_INFO, *PWS_IPV6_INFO;
 
 BOOL
