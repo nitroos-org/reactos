@@ -1,0 +1,6 @@
+/* texts added after the generated set (genres.py): captured from the Windows 10 22H2 reference machine
+   by hand, see the commit message of the change that added them */
+STRINGTABLE
+BEGIN
+    IDS_OUT_DUMP_NA "\nThe 'netsh advfirewall dump' command is not implemented in this version\nof Windows. Instead, use the 'netsh advfirewall export' command to write\nthe current Windows Defender Firewall with Advanced Security configuration from\nthe current policy store to a file on disk. You can then use 'netsh\nadvfirewall import' to read the file and load it into another policy\nstore, such as a Group Policy object or the current policy store on\nanother computer. To set the current policy store, use the 'netsh\nadvfirewall set store' command.\nFor more information about the commands in the netsh advfirewall context,\nsee Netsh Commands for Windows Defender Firewall with Advanced Security at\nhttps://go.microsoft.com/fwlink/?linkid=111237.\n"
+END
