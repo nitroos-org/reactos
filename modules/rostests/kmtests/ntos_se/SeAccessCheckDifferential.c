@@ -2,9 +2,11 @@
  * PROJECT:     ReactOS kernel-mode tests
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
  * PURPOSE:     Differential test of SeAccessCheck over a generated matrix of descriptors,
- *              owners and desired accesses. It checks nothing itself: it prints a hash per
- *              section (and the rows of the first descriptors in full), so that the output
- *              of two kernels can be compared byte for byte.
+ *              owners and desired accesses. SeAccessCheckDifferential runs a small sample of
+ *              the matrix and compares the hash of the results with a stored one. The hidden
+ *              test SeAccessCheckDifferentialFull runs the whole matrix and only prints the
+ *              results (a hash per section and the rows of the first descriptors), so that
+ *              the output of two kernels can be compared byte for byte.
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
@@ -15,7 +17,29 @@
  * and a fixed number of pseudo-random DACLs of one to six ACEs of the full alphabet (fixed
  * seed). Owners: the caller's user, another SID, Administrators, and none (a kernel-only
  * case). Modes: UserMode and KernelMode. The subject is the caller's own token.
+ *
+ * Default test (SeAccessCheckDifferential, quiet): a sample of the descriptors, the first
+ * AD_SAMPLE_HEAD and then every AD_SAMPLE_STRIDE-th one, with every owner, mode and desired
+ * access. The hash of the results is compared with AD_SAMPLE_GOLDEN_* by ok(); it is the same
+ * on amd64 and i386. It assumes the usual test token: an administrator (the user is a member
+ * of Administrators). A change of the access check that alters any result of the sample fails
+ * the test. If the change is meant, run the full matrix before and after, compare the output
+ * and replace the golden values with the new total of the sample.
+ *
+ * Full test (hidden, not in the default list): run it by name with the driver loaded, e.g.
+ *     kmtest.exe SeAccessCheckDifferentialFull > full.txt
+ * It checks nothing itself and prints "section <owner> <mode> <rows> <hash>" for each section,
+ * a total line and "row" lines for the first AD_VERBOSE descriptors, with the kernel before
+ * and after a change of ntoskrnl/se/accesschk.c to be compared (sections or every line).
+ * On a checked i386 build boot with /NODEBUG: the kernel prints a line and a dump for each
+ * denial, millions of them.
  */
+
+#define AD_SAMPLE_HEAD          4
+#define AD_SAMPLE_STRIDE        61
+#define AD_SAMPLE_GOLDEN_ROWS   28960UL
+#define AD_SAMPLE_GOLDEN_A      0x4b92ea48UL
+#define AD_SAMPLE_GOLDEN_B      0xa71dc73cUL
 
 #define AD_RC READ_CONTROL
 #define AD_WD WRITE_DAC
@@ -102,6 +126,7 @@ typedef struct _AD_SECTION
 
 static AD_SECTION AdSections[AD_OWNER_COUNT][2];
 static BOOLEAN AdVerbose;
+static BOOLEAN AdFull;
 
 static
 ULONG
@@ -222,7 +247,11 @@ AdRunDescriptor(
     Owners[AD_OWNER_ADMINS] = AdSids[AD_SID_ADMINS];
     Owners[AD_OWNER_NONE] = NULL;
 
-    AdVerbose = DaclIndex < AD_VERBOSE;
+    /* The sample skips the descriptors in between (the generator still advances) */
+    if (!AdFull && DaclIndex >= AD_SAMPLE_HEAD && DaclIndex % AD_SAMPLE_STRIDE != 0)
+        return;
+
+    AdVerbose = AdFull && DaclIndex < AD_VERBOSE;
 
     if (Desc->HasDacl)
     {
@@ -292,7 +321,9 @@ AdRunDescriptor(
     }
 }
 
-START_TEST(SeAccessCheckDifferential)
+static
+VOID
+AdRunMatrix(VOID)
 {
     SECURITY_SUBJECT_CONTEXT Subject;
     PTOKEN_USER UserInfo = NULL;
@@ -395,17 +426,40 @@ START_TEST(SeAccessCheckDifferential)
         {
             AD_SECTION *Section = &AdSections[Owner][Mode];
 
-            trace("section %lu %lu %lu %08lx%08lx\n", Owner, Mode, Section->Rows, Section->HashA, Section->HashB);
+            if (AdFull)
+                trace("section %lu %lu %lu %08lx%08lx\n", Owner, Mode, Section->Rows, Section->HashA, Section->HashB);
             TotalA += Section->HashA;
             TotalB += Section->HashB;
             TotalRows += Section->Rows;
         }
     }
-    trace("total descriptors %lu rows %lu hash %08lx%08lx\n", Index, TotalRows, TotalA, TotalB);
+    if (AdFull)
+    {
+        trace("total descriptors %lu rows %lu hash %08lx%08lx\n", Index, TotalRows, TotalA, TotalB);
+    }
+    else
+    {
+        ok_eq_ulong(TotalRows, AD_SAMPLE_GOLDEN_ROWS);
+        ok_eq_hex(TotalA, AD_SAMPLE_GOLDEN_A);
+        ok_eq_hex(TotalB, AD_SAMPLE_GOLDEN_B);
+    }
 
     ExFreePoolWithTag(AdSd, 'dAmK');
     ExFreePool(UserInfo);
     SeReleaseSubjectContext(&Subject);
+}
+
+START_TEST(SeAccessCheckDifferential)
+{
+    AdFull = FALSE;
+    AdRunMatrix();
+}
+
+/* Hidden: the whole matrix, prints the results (see the comment at the top) */
+START_TEST(SeAccessCheckDifferentialFull)
+{
+    AdFull = TRUE;
+    AdRunMatrix();
 }
 
 static

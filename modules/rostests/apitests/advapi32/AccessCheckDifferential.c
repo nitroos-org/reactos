@@ -3,8 +3,10 @@
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
  * PURPOSE:     Differential test of the access check: AccessCheck, AccessCheckByType and
  *              AccessCheckByTypeResultList over a generated matrix of descriptors, tokens
- *              and desired accesses. It checks nothing itself: it prints the result of every
- *              call as a hash per section (and the rows of the first descriptors in full), so
+ *              and desired accesses. By default it runs a small sample of the matrix and
+ *              compares the hash of the results with a stored one. With the environment
+ *              variable ACCESSCHECK_DIFFERENTIAL=full it runs the whole matrix and only prints
+ *              the results (a hash per section and the rows of the first descriptors), so
  *              that the output of two kernels can be compared byte for byte.
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
@@ -25,11 +27,30 @@
  * Tokens: the plain one, restricted to {user, Everyone}, to {Everyone}, to {OWNER RIGHTS},
  * and one with Administrators set to deny-only.
  *
- * Output: "section <d> <o> <t> <k> <rows> <hash>" for every (owner, token, kind), a total
- * line, and "row" lines for the first DACLS_VERBOSE descriptors. Rows: descriptor, owner,
- * token, kind, desired, then return value, error (when it failed), granted access and
- * status of every result.
+ * Default run (quiet): a sample of the descriptors, the first DACLS_SAMPLE_HEAD and then every
+ * DACLS_SAMPLE_STRIDE-th one, every owner, token, call kind and desired access of those. The
+ * total hash is compared with SAMPLE_GOLDEN_HASH by ok(); it is the same on x64, x86 (WoW64
+ * or native) and i386. It assumes the usual test token: an administrator (the user is a member
+ * of Administrators). A change of the access check that alters any result of the sample fails
+ * the test. If the change is meant, run the full matrix before and after, compare the output
+ * (below) and replace the golden values with the new total of the sample.
+ *
+ * Full run: ACCESSCHECK_DIFFERENTIAL=full (set in the shell that starts the test), e.g.
+ *     set ACCESSCHECK_DIFFERENTIAL=full
+ *     advapi32_apitest.exe AccessCheckDifferential > full.txt
+ * It checks nothing itself. Output: "section <d> <o> <t> <k> <rows> <hash>" for every (owner,
+ * token, kind), a total line, and "row" lines for the first DACLS_VERBOSE descriptors. Rows:
+ * descriptor, owner, token, kind, desired, then return value, error (when it failed), granted
+ * access and status of every result. Run it with the kernel before and after the change and
+ * compare the two outputs (the section hashes, or every line). On a checked i386 build boot
+ * with /NODEBUG: the kernel prints a line and a dump for each denial, millions of them.
  */
+
+/* Sample mode: descriptors run and the expected result */
+#define DACLS_SAMPLE_HEAD   4
+#define DACLS_SAMPLE_STRIDE 389
+#define SAMPLE_GOLDEN_ROWS  42480UL
+#define SAMPLE_GOLDEN_HASH  0xba617c3863a2ebbaULL
 
 #define RC READ_CONTROL
 #define WD WRITE_DAC
@@ -223,6 +244,7 @@ typedef struct
 
 static SECTION Sections[OWNER_COUNT][TOKEN_COUNT][CALL_COUNT];
 static ULONG Verbose;
+static BOOL Full;
 
 static void Record(SECTION *Section, ULONG Dacl, ULONG Owner, ULONG Token, ULONG Kind, ACCESS_MASK Desired,
                    BOOL Ret, DWORD Error, const DWORD *Granted, const DWORD *Status, int Entries,
@@ -274,7 +296,11 @@ static void RunDescriptor(ULONG DaclIndex, const DACL_DESC *Desc)
     List[1].Sbz = 0;
     List[1].ObjectType = &ChildGuid;
 
-    Verbose = DaclIndex < DACLS_VERBOSE;
+    /* The sample mode skips the descriptors in between (the generator still advances) */
+    if (!Full && DaclIndex >= DACLS_SAMPLE_HEAD && DaclIndex % DACLS_SAMPLE_STRIDE != 0)
+        return;
+
+    Verbose = Full && DaclIndex < DACLS_VERBOSE;
 
     if (Desc->HasDacl)
     {
@@ -311,7 +337,7 @@ static void RunDescriptor(ULONG DaclIndex, const DACL_DESC *Desc)
             {
                 ULONG DesiredCount = sizeof(DesiredList) / sizeof(DesiredList[0]);
 
-                if (!Verbose)
+                if (!(Full ? DaclIndex < DACLS_VERBOSE : DaclIndex < DACLS_SAMPLE_HEAD))
                     DesiredCount -= GENERIC_DESIRED_ROWS;
                 for (d = 0; d < DesiredCount; d++)
                 {
@@ -458,6 +484,11 @@ START_TEST(AccessCheckDifferential)
     ULONG ExhaustiveAces = EXHAUSTIVE_TYPES * EXHAUSTIVE_FLAGS * EXHAUSTIVE_SIDS * EXHAUSTIVE_MASKS;
     ACE_DESC Pool[EXHAUSTIVE_TYPES * EXHAUSTIVE_FLAGS * EXHAUSTIVE_SIDS * EXHAUSTIVE_MASKS];
 
+    char Mode[16];
+
+    Full = GetEnvironmentVariableA("ACCESSCHECK_DIFFERENTIAL", Mode, sizeof(Mode)) > 0 &&
+           !strcmp(Mode, "full");
+
     MakeTokens();
     if (!Tokens[TOKEN_PLAIN])
         return;
@@ -531,9 +562,18 @@ START_TEST(AccessCheckDifferential)
 
                 if (!Tokens[Token])
                     continue;
-                printf("section %lu %lu %lu %lu %016I64x\n", Owner, Token, Kind, Section->Rows, Section->Hash);
+                if (Full)
+                    printf("section %lu %lu %lu %lu %016I64x\n", Owner, Token, Kind, Section->Rows, Section->Hash);
                 Total += Section->Hash;
                 TotalRows += Section->Rows;
             }
-    printf("total descriptors %lu rows %lu hash %016I64x\n", Index, TotalRows, Total);
+    if (Full)
+    {
+        printf("total descriptors %lu rows %lu hash %016I64x\n", Index, TotalRows, Total);
+    }
+    else
+    {
+        ok(TotalRows == SAMPLE_GOLDEN_ROWS, "sample rows %lu, expected %lu\n", TotalRows, SAMPLE_GOLDEN_ROWS);
+        ok(Total == SAMPLE_GOLDEN_HASH, "sample hash %016I64x, expected %016I64x\n", Total, (ULONGLONG)SAMPLE_GOLDEN_HASH);
+    }
 }
