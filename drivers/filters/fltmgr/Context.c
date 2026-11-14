@@ -449,6 +449,17 @@ PurgeContexts(_In_ PFLT_VOLUME Volume,
         if (UseKey && Context->Key != Key)
             continue;
 
+        /*
+         * The release below may run the owner's cleanup callback, and this may be a thread which has
+         * nothing to do with the owner (the close of a file, a dismount). Once the context is off the
+         * list the owner's own teardown doesn't see it any more and its unregister could finish (and
+         * its image go) before the callback ran. A reference on the owner, taken while the context is
+         * still listed (so the owner is still there), keeps it until then. A filter already in its last
+         * rundown has purged its contexts, so a context of it isn't listed; should one be, it stays.
+         */
+        if (!NT_SUCCESS(FltObjectReference(Context->Filter)))
+            continue;
+
         Unlink(Context);
         InsertTailList(&Removed, &Context->Link);
     }
@@ -458,9 +469,11 @@ PurgeContexts(_In_ PFLT_VOLUME Volume,
     while (!IsListEmpty(&Removed))
     {
         PFLTP_CONTEXT Context = CONTAINING_RECORD(RemoveHeadList(&Removed), FLTP_CONTEXT, Link);
+        PFLT_FILTER Owner = Context->Filter;
 
         InitializeListHead(&Context->Link);
         ReleaseContextHeader(Context);
+        FltObjectDereference(Owner);
     }
 }
 
