@@ -15,6 +15,7 @@ extern void func_rvpark(void);
 extern void func_rvparkw(void);
 extern void func_rvsafe(void);
 extern void func_rvchild(void);
+extern void func_portsec(void);
 
 const struct test winetest_testlist[] =
 {
@@ -32,5 +33,6 @@ const struct test winetest_testlist[] =
     { "rvparkw", func_rvparkw },
     { "rvsafe", func_rvsafe },
     { "rvchild", func_rvchild },
+    { "portsec", func_portsec },
     { 0, 0 }
 };
