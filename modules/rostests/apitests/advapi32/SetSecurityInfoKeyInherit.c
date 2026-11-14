@@ -754,13 +754,11 @@ static LONG FindAce(const KEY_DACL *Dacl, UCHAR Type, PSID Sid)
 }
 
 /*
- * A subkey is only brought up to date if its DACL really is auto-inherited, or ends in exactly the ACEs
- * the parent passed on, after all its explicit ACEs. Anything else is the owner's own DACL and a change of
- * the parent must not touch it, and no round trip may put an allow ACE ahead of a deny ACE:
- *  W1  explicit deny/allow order of a legacy writer, parent changed: the stored descriptor stays as it was
+ * A subkey is only brought up to date if its DACL really is auto-inherited. Anything else is the owner's own
+ * DACL and a change of the parent must not touch its ACEs (it is only flagged protected + auto-inherited), and no round trip may put an allow ACE ahead of a deny ACE:
+ *  W1  explicit deny/allow order of a legacy writer, parent changed: the ACEs stay as they were (control 0x9404)
  *  W2  the same key, read and written back by itself: the deny still comes before the allow
  *  W3  an explicit empty DACL, parent changed: it stays empty
- *      explicit ACE before the inherited tail: still updated, the explicit ACE stays first
  *      a DACL that is not valid is refused, not read past its end
  * W1-W3 are the shapes an earlier version got wrong (NETWORK got KEY_WRITE; an empty DACL got
  * Everyone read).
@@ -837,7 +835,10 @@ static void TestNoWidening(void)
     AddEveryoneRead();
 
     AfterSize = RawGet(Key, L"c1", After, sizeof(After));
-    ok(AfterSize == BeforeSize && !memcmp(Before, After, BeforeSize), "W1: the descriptor of c1 changed (%lu, %lu bytes)\n", BeforeSize, AfterSize);
+    /* the ACEs stay as they are; the key is only flagged protected + auto-inherited (the control word, offset 2) */
+    ok(AfterSize == BeforeSize && !memcmp(Before, After, 2) && !memcmp(Before + 4, After + 4, BeforeSize - 4),
+       "W1: the descriptor of c1 changed beyond its control (%lu, %lu bytes)\n", BeforeSize, AfterSize);
+    ok_hex(*(WORD *)(After + 2) & CONTROL_MASK, SE_DACL_PRESENT | SE_DACL_AUTO_INHERITED | SE_DACL_PROTECTED | SE_SELF_RELATIVE);
     ok(OpenDacl(Key, L"c1", &Dacl), "cannot read c1\n");
     Deny = FindAce(&Dacl, ACCESS_DENIED_ACE_TYPE, Network);
     Allow = FindAce(&Dacl, ACCESS_ALLOWED_ACE_TYPE, Network);
@@ -847,7 +848,7 @@ static void TestNoWidening(void)
 
     ok(OpenDacl(Key, L"c3", &Dacl), "cannot read c3\n");
     ok(Dacl.Count == 0, "W3: the empty DACL of c3 has %lu ACEs\n", Dacl.Count);
-    ok_hex(Dacl.Control & SE_DACL_AUTO_INHERITED, 0);
+    ok_hex(Dacl.Control, SE_DACL_PRESENT | SE_DACL_AUTO_INHERITED | SE_DACL_PROTECTED | SE_SELF_RELATIVE);
     FreeDacl(&Dacl);
 
     /* the key is not auto-inherited and does not end in what the parent passed on either (its last ACE is not the parent's) */
@@ -880,7 +881,8 @@ Done:
 }
 
 /*
- * An explicit ACE before an inherited tail: the key is updated, the explicit ACE stays first.
+ * An explicit ACE before an inherited tail, set by a legacy writer: the key is not auto-inherited, so it keeps its
+ * DACL (explicit ACE first) when the parent changes and is only flagged protected + auto-inherited.
  * The parent here is a plain key whose DACL was set before any subkey existed.
  */
 static void TestExplicitBeforeTail(void)
@@ -924,7 +926,9 @@ static void TestExplicitBeforeTail(void)
 
     AddEveryoneRead();
     ok(OpenDacl(Key, L"c", &Dacl), "cannot read c\n");
-    ok(FindAce(&Dacl, ACCESS_ALLOWED_ACE_TYPE, World) >= 0, "c did not get the new ACE\n");
+    /* not auto-inherited: it keeps its DACL and is only flagged protected + auto-inherited (as on Windows) */
+    ok(FindAce(&Dacl, ACCESS_ALLOWED_ACE_TYPE, World) < 0, "c got the new ACE\n");
+    ok_hex(Dacl.Control, SE_DACL_PRESENT | SE_DACL_AUTO_INHERITED | SE_DACL_PROTECTED | SE_SELF_RELATIVE);
     ok(Dacl.Count && Dacl.Aces[0].Mask == KEY_READ && EqualSid(Dacl.Aces[0].Sid, Network) && !(Dacl.Aces[0].Flags & INHERITED_ACE),
        "the explicit ACE is not first\n");
     FreeDacl(&Dacl);
@@ -1054,6 +1058,9 @@ Done:
  * D:(D;CI;KW;;;AN)(A;CI;KA;;;SY)(A;CI;KA;;;BA)(A;CIIO;KA;;;CO), which is not auto-inherited:
  *  - a DACL set on an empty / explicit-only key merges the parent's ACEs. The inherit-only CREATOR OWNER ACE
  *    adds no owner copy that an inherited ACE covers already (Administrators), and the ACE stays inherit-only;
+ *  - when P changes, a subkey that is not auto-inherited (created below P, set by a legacy writer, empty) keeps
+ *    its DACL exactly and is only flagged protected + auto-inherited (control 0x9404); an auto-inherited one gets
+ *    the new ACE;
  *  - an inherited ACE that an earlier inherited ACE of the same SID covers is kept inherit-only (IO) if it
  *    passes on, dropped if it was the copy for the key alone.
  */
@@ -1129,7 +1136,7 @@ static void TestOracleRows(void)
     static const WCHAR *Names[] = { L"t", L"c3", L"c4", L"c5", L"s9e", L"s9s" };
     SECURITY_ATTRIBUTES Attributes = {sizeof(Attributes), NULL, FALSE};
     WCHAR Path[256];
-    KEY_DACL C4, C4b, S9e, S9s, S9sb;
+    KEY_DACL T0, T1, C3, C4, C4b, C5, S9e, S9s, S9sb;
     HKEY Key = NULL, Child = NULL;
     BOOL Covered;
     DWORD Error;
@@ -1166,6 +1173,7 @@ static void TestOracleRows(void)
     StringCchPrintfW(Path, ARRAYSIZE(Path), L"%ls\\s9s", Base);
     NamedRoundTrip(Path);
 
+    OpenDacl(Key, L"t", &T0);
     OpenDacl(Key, L"c4", &C4);
     OpenDacl(Key, L"s9e", &S9e);
     OpenDacl(Key, L"s9s", &S9s);
@@ -1189,11 +1197,25 @@ static void TestOracleRows(void)
     ok(AceIs(&S9s, 1, ACCESS_DENIED_ACE_TYPE, FLAGS_CIID, L"S-1-5-7"), "S9s: ACE 1\n");
     ok(AceIs(&S9s, Covered ? 4 : 5, ACCESS_ALLOWED_ACE_TYPE, FLAGS_CO, L"S-1-3-0") || !Covered, "S9s: the CREATOR OWNER ACE\n");
 
-    /* P changes (Everyone read, inherited by subkeys, by name) */
+    /* W6: P changes (Everyone read, inherited by subkeys, by name) */
     AddEveryoneRead();
 
+    OpenDacl(Key, L"t", &T1);
+    OpenDacl(Key, L"c3", &C3);
     OpenDacl(Key, L"c4", &C4b);
+    OpenDacl(Key, L"c5", &C5);
     OpenDacl(Key, L"s9s", &S9sb);
+
+    /* not auto-inherited: untouched except for the control (0x9404), no new ACE, nothing inherited */
+    ok_hex(T1.Control, SE_DACL_PRESENT | SE_DACL_AUTO_INHERITED | SE_DACL_PROTECTED | SE_SELF_RELATIVE);
+    ok(T1.Count == T0.Count, "W6: the plain child went from %lu to %lu ACEs\n", T0.Count, T1.Count);
+    for (i = 0; i < T1.Count && i < T0.Count; i++)
+        ok((T1.Aces[i].Flags & ~INHERITED_ACE) == (T0.Aces[i].Flags & ~INHERITED_ACE) && T1.Aces[i].Mask == T0.Aces[i].Mask &&
+           EqualSid(T1.Aces[i].Sid, T0.Aces[i].Sid), "W6: ACE %lu of the plain child changed\n", i);
+    ok_hex(C3.Control, SE_DACL_PRESENT | SE_DACL_AUTO_INHERITED | SE_DACL_PROTECTED | SE_SELF_RELATIVE);
+    ok(C3.Count == 0, "W3: the empty DACL got %lu ACEs\n", C3.Count);
+    ok_hex(C5.Control, SE_DACL_PRESENT | SE_DACL_AUTO_INHERITED | SE_DACL_PROTECTED | SE_SELF_RELATIVE);
+    ok(C5.Count == 0, "W5: the protected DACL got %lu ACEs\n", C5.Count);
 
     /* auto-inherited: updated with the new ACE, and no inherited ACE a previous one covers is left effective */
     ok_hex(C4b.Control, AUTO_CONTROL);
@@ -1218,10 +1240,14 @@ static void TestOracleRows(void)
            "s9s: ACE %lu is inherit-only but not inherited\n", i);
 
     FreeDacl(&S9sb);
+    FreeDacl(&C5);
     FreeDacl(&C4b);
+    FreeDacl(&C3);
+    FreeDacl(&T1);
     FreeDacl(&S9s);
     FreeDacl(&S9e);
     FreeDacl(&C4);
+    FreeDacl(&T0);
 
 Done:
     if (Attributes.lpSecurityDescriptor) LocalFree(Attributes.lpSecurityDescriptor);
