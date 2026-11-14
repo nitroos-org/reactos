@@ -55,7 +55,8 @@ SepIsOwnerRightsSid(
      * The common case (any other SID) fails on the first comparisons; the
      * sub-authority is only read once the SID is known to have one
      */
-    return IdSid->SubAuthorityCount == 1 &&
+    return IdSid->Revision == SID_REVISION &&
+           IdSid->SubAuthorityCount == 1 &&
            IdSid->IdentifierAuthority.Value[5] == 3 &&
            IdSid->SubAuthority[0] == SECURITY_CREATOR_OWNER_RIGHTS_RID &&
            IdSid->IdentifierAuthority.Value[4] == 0 &&
