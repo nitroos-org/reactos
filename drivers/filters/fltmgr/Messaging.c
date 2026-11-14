@@ -334,7 +334,7 @@ CreateConnection(_Inout_ PIRP Irp)
     PLIST_ENTRY Entry;
     UNICODE_STRING PortName;
     ULONG ValueLength;
-    BOOLEAN Inserted;
+    BOOLEAN Inserted, Disconnected;
     NTSTATUS Status;
 
     Status = ParseConnectRequest(Irp, &Request, &ValueLength);
@@ -436,9 +436,15 @@ CreateConnection(_Inout_ PIRP Irp)
     /*
      * An unregister that started meanwhile has looked at the list already, or will after us: it sets
      * the draining flag before it takes the lock, so either we see the flag or it sees the connection.
+     *
+     * The filter may also have closed the port already (FltCloseClientPort from another thread, between
+     * its ConnectNotify and here): that disconnect is over or under way, and it takes the connection
+     * out of the list under this lock at its end. A connection which is disconnected when we look here
+     * must not go into the list: nothing would take it out again, and it would be freed while listed.
      */
     ExAcquireFastMutex(&Filter->ConnectionList.mLock);
-    Inserted = !(Filter->Base.Flags & FLT_OBFL_DRAINING);
+    Disconnected = Connection->Disconnected;
+    Inserted = !(Filter->Base.Flags & FLT_OBFL_DRAINING) && !Disconnected;
     if (Inserted)
     {
         InsertTailList(&Filter->ConnectionList.mList, &Connection->FilterLink);
@@ -448,12 +454,15 @@ CreateConnection(_Inout_ PIRP Irp)
 
     if (!Inserted)
     {
-        /* Connected, but the filter is going: it is told, and the client gets no handle */
+        /*
+         * Connected, but the filter is going or has let go already: it is told (or a disconnect another
+         * thread does is waited for, while our reference keeps the filter), the client gets no handle
+         */
         Stack->FileObject->FsContext2 = NULL;
-        CloseClientPortReference(Connection, FALSE);
+        CloseClientPortReference(Connection, TRUE);
         ReleaseConnection(Connection);
         FltObjectDereference(Filter);
-        return STATUS_FLT_DELETING_OBJECT;
+        return Disconnected ? STATUS_PORT_DISCONNECTED : STATUS_FLT_DELETING_OBJECT;
     }
 
     FltObjectDereference(Filter);
