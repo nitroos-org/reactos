@@ -311,6 +311,48 @@ InfoTdiQueryGetTimeWaitTable(
     return Status;
 }
 
+/* The IPv6 state of the stack (IP_IPV6_TABLE_ENTRY_ID): see TCPQueryIpv6Table. The caller's buffer is a
+ * chain, so the answer is built in a pool buffer first */
+#define IPV6_TABLE_MAX_ANSWER 0x10000
+
+static
+TDI_STATUS
+InfoTdiQueryGetIpv6Table(
+    PNDIS_BUFFER Buffer,
+    PUINT BufferSize)
+{
+    PVOID Answer = NULL;
+    ULONG Size = 0, Room = 0;
+    TDI_STATUS Status;
+
+    /* The caller's buffer length is its own to choose: the whole answer (at most 256 interfaces with three
+       addresses each) is far below this, so it is all the room that is ever needed */
+    if (Buffer && *BufferSize != 0)
+    {
+        Room = min(*BufferSize, IPV6_TABLE_MAX_ANSWER);
+        Answer = ExAllocatePoolWithTag(NonPagedPool, Room, TDI_ENTITY_TAG);
+        if (!Answer)
+            return TDI_NO_RESOURCES;
+    }
+
+    Size = TCPQueryIpv6Table(Answer, Room);
+    if (Size == 0)
+    {
+        if (Answer)
+            ExFreePoolWithTag(Answer, TDI_ENTITY_TAG);
+        return TDI_NO_RESOURCES;
+    }
+
+    if (Answer && Size <= Room)
+        Status = InfoCopyOut(Answer, Size, Buffer, BufferSize);
+    else
+        Status = InfoCopyOut(NULL, Size, NULL, BufferSize);
+
+    if (Answer)
+        ExFreePoolWithTag(Answer, TDI_ENTITY_TAG);
+    return Status;
+}
+
 /* The interface of an interface entity (IF, AT, CL_NL, CO_NL), referenced for the caller
  * (IPDereferenceInterface), or NULL. IPDestroyInterface removes the entities under
  * EntityListLock before it drops the interface's own reference, so an interface found
@@ -631,6 +673,12 @@ TDI_STATUS InfoTdiQueryInformationEx(
                      return QueryConnectionTableByEntity(ID->toi_entity, FALSE, Buffer, BufferSize, TcpUdpClassOwner);
                  else
                      return TDI_INVALID_PARAMETER;
+
+              case IP_IPV6_TABLE_ENTRY_ID:
+                 if (ID->toi_type != INFO_TYPE_PROVIDER)
+                     return TDI_INVALID_PARAMETER;
+
+                 return InfoTdiQueryGetIpv6Table(Buffer, BufferSize);
 
               case IP_TCP_TIMEWAIT_ENTRY_ID:
                  if (ID->toi_type != INFO_TYPE_PROVIDER ||

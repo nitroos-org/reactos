@@ -432,3 +432,156 @@ LibTCPListenerInput6(void)
     InterlockedIncrement(&TCP6ListenerRefused);
     return ERR_ABRT;
 }
+
+/* NL_DAD_STATE, NL_PREFIX_ORIGIN, NL_SUFFIX_ORIGIN (the values user mode reports) */
+#define TCP6_DAD_INVALID        0
+#define TCP6_DAD_TENTATIVE      1
+#define TCP6_DAD_DUPLICATE      2
+#define TCP6_DAD_DEPRECATED     3
+#define TCP6_DAD_PREFERRED      4
+#define TCP6_PREFIX_WELLKNOWN   2
+#define TCP6_PREFIX_RA          4
+#define TCP6_SUFFIX_WELLKNOWN   2
+#define TCP6_SUFFIX_LINKLAYER   4
+
+#define TCP6_MAX_TABLE_INTERFACES 256
+
+/* The IPv6 state of every interface as TCP_IPV6_TABLE_HEADER, interface rows, address rows (the
+ * IP_IPV6_TABLE_ENTRY_ID query). Returns the size of the whole answer; what fits in Out (OutSize bytes) is
+ * written, so a caller whose buffer is too small gets the size and asks again. Off: the header alone,
+ * with Enabled 0. PASSIVE_LEVEL */
+ULONG
+TCPQueryIpv6Table(PVOID Out, ULONG OutSize)
+{
+    PIP_INTERFACE *Interfaces = NULL;
+    PUCHAR Buffer = NULL;
+    PTCP_IPV6_TABLE_HEADER Header;
+    PTCP_IPV6_INTERFACE_ROW IfRows;
+    PTCP_IPV6_ADDRESS_ROW AddrRows;
+    ULONG Count = 0, Max, i, AddrCount = 0, Size;
+    KIRQL OldIrql;
+    IF_LIST_ITER(CurrentIF);
+
+    if (!TCPIpv6Enabled)
+    {
+        TCP_IPV6_TABLE_HEADER Off = { 0, 0, 0 };
+
+        if (OutSize >= sizeof(Off))
+            RtlCopyMemory(Out, &Off, sizeof(Off));
+        return sizeof(Off);
+    }
+
+    Interfaces = ExAllocatePoolWithTag(NonPagedPool, TCP6_MAX_TABLE_INTERFACES * sizeof(PIP_INTERFACE), TDI_ENTITY_TAG);
+    if (!Interfaces)
+        return 0;
+
+    /* Referenced, so that they stay alive after the list lock is dropped (lwIP's lock is a mutex) */
+    TcpipAcquireSpinLock(&InterfaceListLock, &OldIrql);
+    ForEachInterface(CurrentIF) {
+        if (CurrentIF->TCPContext && Count < TCP6_MAX_TABLE_INTERFACES)
+        {
+            IPReferenceInterface(CurrentIF);
+            Interfaces[Count++] = CurrentIF;
+        }
+    } EndFor(CurrentIF);
+    TcpipReleaseSpinLock(&InterfaceListLock, OldIrql);
+
+    Max = sizeof(*Header) + Count * sizeof(*IfRows) + Count * LWIP_IPV6_NUM_ADDRESSES * sizeof(*AddrRows);
+    Buffer = ExAllocatePoolWithTag(NonPagedPool, Max, TDI_ENTITY_TAG);
+    if (!Buffer)
+    {
+        for (i = 0; i < Count; i++)
+            IPDereferenceInterface(Interfaces[i]);
+        ExFreePoolWithTag(Interfaces, TDI_ENTITY_TAG);
+        return 0;
+    }
+    RtlZeroMemory(Buffer, Max);
+
+    Header = (PTCP_IPV6_TABLE_HEADER)Buffer;
+    IfRows = (PTCP_IPV6_INTERFACE_ROW)(Header + 1);
+    AddrRows = (PTCP_IPV6_ADDRESS_ROW)(IfRows + Count);
+
+    LOCK_TCPIP_CORE();
+    for (i = 0; i < Count; i++)
+    {
+        PIP_INTERFACE IF = Interfaces[i];
+        struct netif *netif = IF->TCPContext;
+        BOOLEAN IsLoopback = (IF == Loopback);
+        s8_t a;
+
+        IfRows[i].IfIndex = IF->Index;
+        /* IPv6 is usable on the loopback interface and on an interface with an Ethernet address (the one that
+           has the link-local address, TCPInterfaceInit6) */
+        IfRows[i].Flags = (IsLoopback ? (TCP_IPV6_IF_ENABLED | TCP_IPV6_IF_LOOPBACK) :
+                           (IF->AddressLength == 6 && netif->hwaddr_len == 6) ? TCP_IPV6_IF_ENABLED : 0);
+        IfRows[i].Mtu = IsLoopback ? 0xFFFFFFFF : netif->mtu6;
+
+        for (a = 0; a < LWIP_IPV6_NUM_ADDRESSES; a++)
+        {
+            u8_t State = netif_ip6_addr_state(netif, a);
+            const ip6_addr_t *Address = netif_ip6_addr(netif, a);
+            PTCP_IPV6_ADDRESS_ROW Row;
+
+            if (ip6_addr_isinvalid(State))
+                continue;
+
+            Row = &AddrRows[AddrCount++];
+            Row->IfIndex = IF->Index;
+            RtlCopyMemory(Row->Address, Address->addr, 16);
+            if (ip6_addr_istentative(State))
+                Row->DadState = TCP6_DAD_TENTATIVE;
+            else if (ip6_addr_isduplicated(State))
+                Row->DadState = TCP6_DAD_DUPLICATE;
+            else if (ip6_addr_isdeprecated(State))
+                Row->DadState = TCP6_DAD_DEPRECATED;
+            else
+                Row->DadState = TCP6_DAD_PREFERRED;
+
+            if (ip6_addr_isloopback(Address))
+            {
+                Row->PrefixLength = 128;
+                Row->PrefixOrigin = TCP6_PREFIX_WELLKNOWN;
+                Row->SuffixOrigin = TCP6_SUFFIX_WELLKNOWN;
+            }
+            else if (ip6_addr_islinklocal(Address))
+            {
+                Row->PrefixLength = 64;
+                Row->PrefixOrigin = TCP6_PREFIX_WELLKNOWN;
+                Row->SuffixOrigin = TCP6_SUFFIX_LINKLAYER;
+            }
+            else
+            {
+                Row->PrefixLength = 64;
+                Row->PrefixOrigin = TCP6_PREFIX_RA;
+                Row->SuffixOrigin = TCP6_SUFFIX_LINKLAYER;
+            }
+
+            if (ip6_addr_life_isstatic(netif_ip6_addr_valid_life(netif, a)))
+                Row->ValidLifetime = 0xFFFFFFFF;
+            else
+                Row->ValidLifetime = netif_ip6_addr_valid_life(netif, a);
+            if (ip6_addr_life_isstatic(netif_ip6_addr_pref_life(netif, a)))
+                Row->PreferredLifetime = 0xFFFFFFFF;
+            else
+                Row->PreferredLifetime = netif_ip6_addr_pref_life(netif, a);
+        }
+    }
+    UNLOCK_TCPIP_CORE();
+
+    for (i = 0; i < Count; i++)
+        IPDereferenceInterface(Interfaces[i]);
+    ExFreePoolWithTag(Interfaces, TDI_ENTITY_TAG);
+
+    Header->Enabled = 1;
+    Header->InterfaceCount = Count;
+    Header->AddressCount = AddrCount;
+
+    /* The address rows start right after the interface rows (the room for the maximum is not sent) */
+    Size = sizeof(*Header) + Count * sizeof(*IfRows) + AddrCount * sizeof(*AddrRows);
+
+    if (OutSize >= Size)
+        RtlCopyMemory(Out, Buffer, Size);
+
+    ExFreePoolWithTag(Buffer, TDI_ENTITY_TAG);
+    return Size;
+}
