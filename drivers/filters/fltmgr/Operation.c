@@ -1166,6 +1166,18 @@ Quit:
 
 /* EXPORTED FUNCTIONS *******************************************************/
 
+static
+VOID
+NTAPI
+PendedPreWorker(_In_ PVOID Parameter)
+{
+    PFLTP_IRPCTRL Ctrl = Parameter;
+    FLTP_PRE_RESULT Result;
+
+    Result = RunPreOperations(Ctrl, TRUE);
+    (VOID)ContinueAfterPre(Ctrl, Result);
+}
+
 VOID
 FLTAPI
 FltCompletePendedPreOperation(_In_ PFLT_CALLBACK_DATA CallbackData,
@@ -1182,7 +1194,19 @@ FltCompletePendedPreOperation(_In_ PFLT_CALLBACK_DATA CallbackData,
     if (InterlockedCompareExchange(&Ctrl->PendState, 2, 0) == 0)
         return;
 
-    /* The operation is parked, we carry on with it in this thread */
+    /*
+     * The operation is parked, we carry on with it in this thread, unless the filter completes the pend
+     * above APC_LEVEL (from a DPC or a completion routine): the rest of the pre-operations, the call to
+     * the file system and the waits of FLT_PREOP_SYNCHRONIZE need IRQL <= APC_LEVEL, so a worker does it.
+     * The work item of the block is free: FltDoCompletionProcessingWhenSafe uses it after the pre-operations only.
+     */
+    if (KeGetCurrentIrql() > APC_LEVEL)
+    {
+        ExInitializeWorkItem(&Ctrl->WorkItem, PendedPreWorker, Ctrl);
+        ExQueueWorkItem(&Ctrl->WorkItem, CriticalWorkQueue);
+        return;
+    }
+
     Result = RunPreOperations(Ctrl, TRUE);
     (VOID)ContinueAfterPre(Ctrl, Result);
 }
