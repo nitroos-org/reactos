@@ -126,8 +126,9 @@ static const struct
  * LOCALE_FONTSIGNATURE of every locale of the table, measured on Windows 10 22H2 (build 19045) with GetLocaleInfoEx:
  * 16 WCHARs = 32 bytes = LOCALESIGNATURE (4 DWORD Unicode subset bits, 2 DWORD default code page bits, 2 DWORD
  * supported code page bits), here as the 8 DWORDs of the memory image. All locales but nl-SR: the name nl-SR (0x0c13)
- * is not known to the locale name table (GetLocaleInfoEx fails with ERROR_INVALID_PARAMETER), so its signature, which the
- * generator carries, cannot be queried by name.
+ * is a Wine extension that Windows 10 does not know either (it is not in MS-LCID, and GetLocaleInfoEx fails with
+ * ERROR_INVALID_PARAMETER there too), so its signature, which the generator carries, cannot be measured or queried by
+ * name. LocaleEveryName checks that it fails like that.
  */
 static const struct
 {
