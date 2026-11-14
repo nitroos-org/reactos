@@ -1410,6 +1410,9 @@ ExpInitializeExecutive(IN ULONG Cpu,
     /* Set the OS Version */
     SharedUserData->NtMajorVersion = NtMajorVersion;
     SharedUserData->NtMinorVersion = NtMinorVersion;
+    /* NtBuildNumber (0x260) exists in KUSER_SHARED_DATA only for NTDDI_WIN10 headers; the kernel builds with older ones, so use the offset.
+     * Store the plain build without the checked/free flag bits (same as PEB->OSBuildNumber). */
+    *(PULONG)(KI_USER_SHARED_DATA + 0x260) = NtBuildNumber & 0xFFFF;
 
     /* Set the machine type */
     SharedUserData->ImageNumberLow = IMAGE_FILE_MACHINE_NATIVE;

@@ -72,6 +72,7 @@ list(APPEND SOURCE
     LdrFindResource_U.c
     LdrGetDllHandleEx.c
     LdrLoadDll.c
+    KUserBuildNumber.c
     LdrSharedReadOnlySection.c
     LdrShutdownThread.c
     load_notifications.c
