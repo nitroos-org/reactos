@@ -15,6 +15,15 @@
  *
  * Optional: Ipv6SelfTestPeer (REG_SZ, an IPv6 address on the first Ethernet link) and Ipv6SelfTestPeerPort
  * (REG_DWORD) name a TCP echo server to reach through neighbour discovery.
+ *
+ * Multicast reception (the adapter's multicast list, datalink/lan.c) is checked on every run. Optional, for
+ * a test host that takes part:
+ * - Ipv6SelfTestInboundWait (REG_DWORD, seconds): wait that long, at most, for a neighbour solicitation to our
+ *   solicited-node group and an echo request (the host pings our link-local address with its neighbour cache
+ *   flushed), and say whether they came;
+ * - Ipv6SelfTestSlaacWait (REG_DWORD, seconds): wait that long, at most, for an address that stateless
+ *   autoconfiguration (RFC 4862) forms from a multicast router advertisement;
+ *   Ipv6SelfTestSlaacPeer (REG_SZ) and Ipv6SelfTestSlaacPeerPort (REG_DWORD): a TCP echo server to reach from it.
  */
 
 #include "precomp.h"
@@ -40,6 +49,8 @@ VOID TCPInput6(PIP_INTERFACE IF, struct pbuf *p, BOOLEAN FromOwnLink);
 
 #define ST_TAG 'T6pI'
 #define ST_LOG_SIZE 32768
+
+static BOOLEAN StReadValue(PCWSTR Name, ULONG Type, PVOID Data, ULONG Size);
 
 static PCHAR StLog;
 static ULONG StLogLength;
@@ -411,6 +422,186 @@ StDescribeAddresses(struct netif *netif, const char *Name)
     }
 }
 
+/* ---- multicast reception ---- */
+
+static BOOLEAN
+StListHas(const UCHAR *List, UINT Count, const UCHAR *Address)
+{
+    UINT i;
+
+    for (i = 0; i < Count; i++)
+    {
+        if (RtlCompareMemory(List + i * 6, Address, 6) == 6)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+/* The adapter's multicast list (what lan.c asked for, what the miniport says it has) and packet filter: the
+ * all-nodes group and the solicited-node group of the link-local address, or all multicast as the fallback;
+ * never promiscuous */
+static VOID
+StTestMulticastList(PIP_INTERFACE Eth, const ip_addr_t *LinkLocal)
+{
+    PLAN_ADAPTER Adapter = Eth->Context;
+    UCHAR AllNodes[6] = { 0x33, 0x33, 0x00, 0x00, 0x00, 0x01 };
+    UCHAR Solicited[6] = { 0x33, 0x33, 0xff, 0, 0, 0 };
+    UCHAR List[LL_MULTICAST_MAX * 6], Miniport[32 * 6];
+    const u8_t *Ll = (const u8_t *)ip_2_ip6(LinkLocal)->addr;
+    BOOLEAN Applied = FALSE, Ok;
+    UINT Count = 0, Asked = 0, Filter = 0, i;
+    NDIS_STATUS Status;
+    ULONG Length = 0;
+    KIRQL OldIrql;
+    CHAR Detail[200];
+
+    if (!Eth->SetMulticast || !Adapter)
+    {
+        StResult(FALSE, "adapter multicast list", "not a LAN adapter");
+        return;
+    }
+
+    Solicited[3] = Ll[13];
+    Solicited[4] = Ll[14];
+    Solicited[5] = Ll[15];
+
+    /* The list goes to the adapter on a work item */
+    for (i = 0; i < 50 && !Applied; i++)
+    {
+        TcpipAcquireSpinLock(&Adapter->ReconfigureLock, &OldIrql);
+        Applied = Adapter->McastWanted && !Adapter->McastChanged && !Adapter->McastQueued;
+        Asked = Adapter->McastCount;
+        Count = min(Asked, LL_MULTICAST_MAX);
+        RtlCopyMemory(List, Adapter->McastList, Count * 6);
+        TcpipReleaseSpinLock(&Adapter->ReconfigureLock, OldIrql);
+        if (!Applied)
+            StSleep(100);
+    }
+
+    for (i = 0; i < Count; i++)
+        StPrint("multicast list asked [%u] %02x-%02x-%02x-%02x-%02x-%02x", i, List[i * 6], List[i * 6 + 1],
+                List[i * 6 + 2], List[i * 6 + 3], List[i * 6 + 4], List[i * 6 + 5]);
+
+    Status = NDISCall(Adapter, NdisRequestQueryInformation, OID_GEN_CURRENT_PACKET_FILTER, &Filter, sizeof(Filter));
+    if (Status != NDIS_STATUS_SUCCESS)
+        Filter = Adapter->McastFilter ? Adapter->McastFilter : Adapter->PacketFilter;
+
+    RtlZeroMemory(Miniport, sizeof(Miniport));
+    if (NDISCall(Adapter, NdisRequestQueryInformation, OID_802_3_MULTICAST_LIST, Miniport, sizeof(Miniport)) ==
+        NDIS_STATUS_SUCCESS)
+    {
+        for (i = 0; i < sizeof(Miniport) / 6 && (Miniport[i * 6] | Miniport[i * 6 + 1]); i++)
+            Length++;
+        StPrint("miniport says its multicast list has %lu: all-nodes %d, solicited-node %d", Length,
+                (int)StListHas(Miniport, Length, AllNodes), (int)StListHas(Miniport, Length, Solicited));
+    }
+    else
+    {
+        StPrint("miniport does not answer OID_802_3_MULTICAST_LIST queries");
+    }
+
+    Ok = Applied && !(Filter & NDIS_PACKET_TYPE_PROMISCUOUS) &&
+         ((Filter & NDIS_PACKET_TYPE_ALL_MULTICAST) ||
+          ((Filter & NDIS_PACKET_TYPE_MULTICAST) && StListHas(List, Count, AllNodes) && StListHas(List, Count, Solicited)));
+    _snprintf(Detail, sizeof(Detail), "applied=%d entries=%u%s filter 0x%x (filter query 0x%lx, max list %lu)%s",
+              (int)Applied, Count, Asked > LL_MULTICAST_MAX ? " (more asked for)" : "", Filter, Status, Adapter->McastMaxList,
+              (Filter & NDIS_PACKET_TYPE_ALL_MULTICAST) ? " FALLBACK all multicast" : " list");
+    StResult(Ok, "adapter multicast list: all-nodes + solicited-node, not promiscuous", Detail);
+}
+
+static VOID
+StPrintReceived(const char *When)
+{
+    StPrint("%s: received NS to multicast %ld, NS unicast %ld, RA to multicast %ld, RA unicast %ld, echo requests %ld",
+            When, TCP6ReceivedIcmp[TCP6_RX_NS_MULTICAST], TCP6ReceivedIcmp[TCP6_RX_NS_UNICAST],
+            TCP6ReceivedIcmp[TCP6_RX_RA_MULTICAST], TCP6ReceivedIcmp[TCP6_RX_RA_UNICAST],
+            TCP6ReceivedIcmp[TCP6_RX_ECHO_REQUEST]);
+}
+
+/* The test host pings our link-local address with its neighbour cache flushed: its solicitation goes to our
+ * solicited-node group, and only multicast reception lets it in */
+static VOID
+StTestInbound(ULONG Seconds)
+{
+    LONG Ns0 = TCP6ReceivedIcmp[TCP6_RX_NS_MULTICAST], Echo0 = TCP6ReceivedIcmp[TCP6_RX_ECHO_REQUEST];
+    LONG Ns = 0, Echo = 0;
+    ULONG i;
+    CHAR Detail[96];
+
+    StPrint("waiting up to %lu s for the host's solicitation and echo requests", Seconds);
+    for (i = 0; i < Seconds * 10; i++)
+    {
+        Ns = TCP6ReceivedIcmp[TCP6_RX_NS_MULTICAST] - Ns0;
+        Echo = TCP6ReceivedIcmp[TCP6_RX_ECHO_REQUEST] - Echo0;
+        if (Ns >= 3 && Echo >= 3)
+            break;
+        StSleep(100);
+    }
+    StPrintReceived("after the inbound wait");
+    _snprintf(Detail, sizeof(Detail), "%ld multicast solicitations, %ld echo requests in %lu ms", Ns, Echo, i * 100);
+    /* The host sends its echo request only after our answer to its multicast solicitation */
+    StResult(Ns >= 1 && Echo >= 1, "inbound: the host's multicast solicitation (cold cache) arrived and its ping was answered", Detail);
+}
+
+/* A router advertisement to all-nodes (multicast) gives a prefix: lwIP forms an address from it */
+static BOOLEAN
+StTestSlaac(struct netif *En, ULONG Seconds, ip_addr_t *Slaac)
+{
+    BOOLEAN Found = FALSE;
+    CHAR Text[IP6ADDR_STRLEN_MAX], Detail[160];
+    ULONG i;
+    s8_t j;
+
+    for (i = 0; i < Seconds * 10 && !Found; i++)
+    {
+        LOCK_TCPIP_CORE();
+        for (j = 1; j < LWIP_IPV6_NUM_ADDRESSES && !Found; j++)
+        {
+            if (ip6_addr_ispreferred(netif_ip6_addr_state(En, j)) && !ip6_addr_islinklocal(netif_ip6_addr(En, j)))
+            {
+                ip_addr_copy_from_ip6(*Slaac, *netif_ip6_addr(En, j));
+                Found = TRUE;
+            }
+        }
+        UNLOCK_TCPIP_CORE();
+        if (!Found)
+            StSleep(100);
+    }
+
+    LOCK_TCPIP_CORE();
+    StDescribeAddresses(En, "ethernet after the router advertisement wait");
+    UNLOCK_TCPIP_CORE();
+    StPrintReceived("after the router advertisement wait");
+    if (Found)
+        ip6addr_ntoa_r(ip_2_ip6(Slaac), Text, sizeof(Text));
+    else
+        RtlCopyMemory(Text, "none", sizeof("none"));
+    _snprintf(Detail, sizeof(Detail), "%s after about %lu ms; router advertisements to multicast %ld, unicast %ld",
+              Text, i * 100, TCP6ReceivedIcmp[TCP6_RX_RA_MULTICAST], TCP6ReceivedIcmp[TCP6_RX_RA_UNICAST]);
+    StResult(Found && TCP6ReceivedIcmp[TCP6_RX_RA_MULTICAST] > 0,
+             "SLAAC: a multicast router advertisement arrived and an address was formed and passed DAD", Detail);
+    return Found;
+}
+
+static BOOLEAN
+StReadAddress(PCWSTR Name, struct netif *En, ip_addr_t *Address, CHAR *Text, ULONG TextSize)
+{
+    WCHAR W[64];
+    ULONG i;
+
+    RtlZeroMemory(W, sizeof(W));
+    if (!StReadValue(Name, REG_SZ, W, sizeof(W) - sizeof(WCHAR)))
+        return FALSE;
+    for (i = 0; i + 1 < TextSize && W[i]; i++)
+        Text[i] = (CHAR)W[i];
+    Text[i] = 0;
+    if (!ip6addr_aton(Text, ip_2_ip6(Address)))
+        return FALSE;
+    IP_SET_TYPE_VAL(*Address, IPADDR_TYPE_V6);
+    ip6_addr_assign_zone(ip_2_ip6(Address), IP6_UNICAST, En);
+    return TRUE;
+}
+
 /* ---- connection requests from the wire (no IPv6 firewall yet): crafted SYNs into the receive path ---- */
 
 static struct tcp_pcb *
@@ -604,7 +795,8 @@ StThread(PVOID Context)
     ip_addr_t Address, LinkLocal;
     WCHAR PeerW[64];
     CHAR PeerA[64];
-    ULONG PeerPort = 0, i;
+    ULONG PeerPort = 0, i, Seconds = 0;
+    ip_addr_t Slaac;
     BOOLEAN Preferred;
     CHAR Detail[96];
 
@@ -670,6 +862,23 @@ StThread(PVOID Context)
         StTestWireSyn(Eth, &LinkLocal, 40617);
     }
     StTestReceiveBounds(Eth);
+
+    /* Multicast reception: the adapter's list, then what reaches us through it */
+    StPrintReceived("before the multicast checks");
+    StTestMulticastList(Eth, &LinkLocal);
+    if (StReadValue(L"Ipv6SelfTestInboundWait", REG_DWORD, &Seconds, sizeof(Seconds)) && Seconds)
+        StTestInbound(min(Seconds, 600));
+    if (StReadValue(L"Ipv6SelfTestSlaacWait", REG_DWORD, &Seconds, sizeof(Seconds)) && Seconds &&
+        StTestSlaac(En, min(Seconds, 600), &Slaac))
+    {
+        if (StReadAddress(L"Ipv6SelfTestSlaacPeer", En, &Address, PeerA, sizeof(PeerA)) &&
+            StReadValue(L"Ipv6SelfTestSlaacPeerPort", REG_DWORD, &PeerPort, sizeof(PeerPort)) && PeerPort && PeerPort < 65536)
+        {
+            StPrint("SLAAC peer %s port %lu", PeerA, PeerPort);
+            StTransfer("tcp echo 4096 from the SLAAC address to the peer", NULL, &Address, (u16_t)PeerPort, TRUE, 4096, 10000);
+        }
+        PeerPort = 0;
+    }
 
     /* IPv4 to the interface's own address takes the same way (a frame to our own MAC): the control for the
        link-local timings above */

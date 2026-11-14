@@ -47,6 +47,34 @@ static BOOLEAN TCP6InputFromOwnLink;
 volatile LONG TCP6ReceiveDropped;
 volatile LONG TCP6ListenerRefused;
 
+#if DBG || defined(TCPIP_IPV6_SELFTEST)
+/* For the self-test (selftest6.c): ICMPv6 messages received, by kind (TCP6_RX_*) */
+volatile LONG TCP6ReceivedIcmp[TCP6_RX_KINDS];
+
+/* Tcpip\Parameters\Ipv6SelfTestMulticastOverflow (REG_DWORD, test runs only): ask for more multicast groups
+   than the link layer takes as a list, so that its all-multicast fallback runs */
+static BOOLEAN TCP6TestMulticastOverflow;
+
+static
+VOID
+TCP6CountReceived(const UCHAR *Datagram, UINT Length)
+{
+    const UCHAR *Destination = Datagram + 24;
+    UCHAR Type;
+
+    /* ICMPv6 right after the fixed header only (what neighbour discovery and echo use) */
+    if (Length < 41 || Datagram[6] != 58)
+        return;
+    Type = Datagram[40];
+    if (Type == 135)
+        InterlockedIncrement(&TCP6ReceivedIcmp[Destination[0] == 0xff ? TCP6_RX_NS_MULTICAST : TCP6_RX_NS_UNICAST]);
+    else if (Type == 134)
+        InterlockedIncrement(&TCP6ReceivedIcmp[Destination[0] == 0xff ? TCP6_RX_RA_MULTICAST : TCP6_RX_RA_UNICAST]);
+    else if (Type == 128)
+        InterlockedIncrement(&TCP6ReceivedIcmp[TCP6_RX_ECHO_REQUEST]);
+}
+#endif
+
 VOID
 TCPReadIpv6Switch(VOID)
 {
@@ -73,6 +101,20 @@ TCPReadIpv6Switch(VOID)
 
     if (TCPIpv6Enabled)
         DbgPrint("TCPIP: IPv6 on (Ipv6Enable)\n");
+
+#if DBG || defined(TCPIP_IPV6_SELFTEST)
+    {
+        UNICODE_STRING TestName = RTL_CONSTANT_STRING(L"Ipv6SelfTestMulticastOverflow");
+
+        if (TCPIpv6Enabled && NT_SUCCESS(ZwOpenKey(&Key, KEY_QUERY_VALUE, &Attributes)))
+        {
+            Status = ZwQueryValueKey(Key, &TestName, KeyValuePartialInformation, Info, sizeof(Buffer), &Length);
+            if (NT_SUCCESS(Status) && Info->Type == REG_DWORD && Info->DataLength == sizeof(ULONG))
+                TCP6TestMulticastOverflow = (*(PULONG)Info->Data != 0);
+            ZwClose(Key);
+        }
+    }
+#endif
 }
 
 /* The link layer multicast groups an Ethernet interface must receive (core lock held): the all-nodes group
@@ -131,6 +173,11 @@ TCP6UpdateMulticast(struct netif *netif)
         RtlCopyMemory(&List[Count * 6], Group, 6);
         Count++;
     }
+
+#if DBG || defined(TCPIP_IPV6_SELFTEST)
+    if (TCP6TestMulticastOverflow)
+        Count = LL_MULTICAST_MAX + 1;
+#endif
 
     IF->SetMulticast(IF->Context, List, Count);
 }
@@ -353,6 +400,10 @@ TCPReceive6(PIP_INTERFACE IF, PIP_PACKET IPPacket)
         InterlockedIncrement(&TCP6ReceiveDropped);
         return;
     }
+
+#if DBG || defined(TCPIP_IPV6_SELFTEST)
+    TCP6CountReceived(p->payload, Total);
+#endif
 
     TCPInput6(IF, p, IPPacket->FromOwnLink);
 }
