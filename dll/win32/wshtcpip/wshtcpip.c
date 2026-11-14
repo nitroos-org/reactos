@@ -502,6 +502,29 @@ WSHGetSocketInformation(
         }
 
         Value = (Context->Ipv6OptionsSet & Bit) ? *Kept : Default;
+
+        /* IPV6_V6ONLY as Windows 10 answers it (oracle probe, 32 and 64 bit): a stream socket wants a DWORD
+         * (WSAEFAULT, length 0, for less), a datagram socket gives one byte */
+        if (OptionName == IPV6_V6ONLY)
+        {
+            if (Context->SocketType == SOCK_STREAM)
+            {
+                if (*OptionLength < (INT)sizeof(LONG))
+                {
+                    *OptionLength = 0;
+                    return WSAEFAULT;
+                }
+                *(PLONG)OptionValue = Value;
+                *OptionLength = sizeof(LONG);
+            }
+            else
+            {
+                *(PUCHAR)OptionValue = (UCHAR)Value;
+                *OptionLength = sizeof(UCHAR);
+            }
+            return NO_ERROR;
+        }
+
         if (*OptionLength >= (INT)sizeof(LONG))
         {
             *(PLONG)OptionValue = Value;
@@ -1213,6 +1236,11 @@ WSHSetSocketInformation(
             }
             if (!OptionValue || OptionLength < (INT)sizeof(CHAR))
                 return WSAEFAULT;
+
+            /* IPV6_V6ONLY goes to the stack with the bind (WSPBind): once bound it cannot change. WSAEINVAL, as
+             * Windows 10 answers (oracle probe) */
+            if (OptionName == IPV6_V6ONLY && Context->SocketState != SocketStateCreated)
+                return WSAEINVAL;
 
             Value = (OptionLength >= (INT)sizeof(LONG)) ? *(PLONG)OptionValue : *(PUCHAR)OptionValue;
             if (Boolean)

@@ -195,6 +195,10 @@ TDI_STATUS InfoTdiQueryGetConnectionTcpTable(PADDRESS_FILE AddrFile,
         Size = sizeof(MIB_TCPROW);
     }
 
+    /* An IPv6 socket (a dual stack one too) is no row of the IPv4 table: skipped, as a closing one is */
+    if (AddrFile->Family == TDI_ADDRESS_TYPE_IP6)
+        return TDI_INVALID_REQUEST;
+
     TcpRow.dwOwningPid = HandleToUlong(AddrFile->ProcessId);
     TcpRow.liCreateTimestamp = AddrFile->CreationTime;
 
@@ -217,7 +221,7 @@ TDI_STATUS InfoTdiQueryGetConnectionTcpTable(PADDRESS_FILE AddrFile,
     {
         TA_IP_ADDRESS EndPoint;
 
-        Status = TCPGetSockAddress(AddrFile->Connection, (PTRANSPORT_ADDRESS)&EndPoint, FALSE);
+        Status = TCPGetSockAddress(AddrFile->Connection, (PTRANSPORT_ADDRESS)&EndPoint, sizeof(EndPoint), FALSE);
         if (NT_SUCCESS(Status))
         {
             ASSERT(EndPoint.TAAddressCount >= 1);
@@ -225,7 +229,7 @@ TDI_STATUS InfoTdiQueryGetConnectionTcpTable(PADDRESS_FILE AddrFile,
             TcpRow.dwLocalAddr = EndPoint.Address[0].Address[0].in_addr;
             TcpRow.dwLocalPort = EndPoint.Address[0].Address[0].sin_port;
 
-            Status = TCPGetSockAddress(AddrFile->Connection, (PTRANSPORT_ADDRESS)&EndPoint, TRUE);
+            Status = TCPGetSockAddress(AddrFile->Connection, (PTRANSPORT_ADDRESS)&EndPoint, sizeof(EndPoint), TRUE);
             if (NT_SUCCESS(Status))
             {
                 ASSERT(EndPoint.TAAddressCount >= 1);

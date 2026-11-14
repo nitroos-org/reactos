@@ -162,6 +162,17 @@ AfdBindSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         RtlZeroMemory(LocalIp->Address[0].Address[0].sin_zero, sizeof(LocalIp->Address[0].Address[0].sin_zero));
     }
 
+    /* The same for the dual stack mark (AFD_TCP_BIND6_DUAL_STACK) of an IPv6 address: the flow information */
+    if (FCB->LocalAddress &&
+        FCB->LocalAddress->Address[0].AddressType == TDI_ADDRESS_TYPE_IP6 &&
+        FCB->LocalAddress->Address[0].AddressLength >= TDI_ADDRESS_LENGTH_IP6)
+    {
+        PTA_IP6_ADDRESS LocalIp6 = (PTA_IP6_ADDRESS)FCB->LocalAddress;
+        ULONG Flow = 0;
+
+        RtlCopyMemory(&LocalIp6->Address[0].Address[0].sin6_flowinfo, &Flow, sizeof(Flow));
+    }
+
     if (NT_SUCCESS(Status))
     {
         Status = ObOpenObjectByPointer(FCB->AddressFile.Object,

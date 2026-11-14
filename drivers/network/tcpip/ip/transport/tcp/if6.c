@@ -598,7 +598,9 @@ TCPQueryIpv6Table(PVOID Out, ULONG OutSize)
         IPDereferenceInterface(Interfaces[i]);
     ExFreePoolWithTag(Interfaces, TDI_ENTITY_TAG);
 
-    Header->Enabled = 1;
+    /* This stack takes IPv6 addresses for TCP sockets: user mode makes AF_INET6 sockets and lists the IPv6
+       protocols only when it says so */
+    Header->Enabled = TCP_IPV6_STATE_ON | TCP_IPV6_STATE_SOCKETS;
     Header->InterfaceCount = Count;
     Header->AddressCount = AddrCount;
 
@@ -709,4 +711,105 @@ TCP6HasTcpFlow(const UCHAR *Local, USHORT LocalPort, const UCHAR *Remote, USHORT
     UNLOCK_TCPIP_CORE();
 
     return Found;
+}
+
+/* A unicast IPv6 address of this machine that a socket may bind (Address: 16 bytes, network order, from the
+ * caller's request): ::1, or a valid (preferred or deprecated; not tentative, not duplicated) address of an
+ * interface. A link-local address must be on the interface ScopeId names (IF->Index) when ScopeId is not 0, and
+ * *Zone gets the lwIP zone of the interface that has it; any other address is not tied to an interface (*Zone 0).
+ * Takes the core lock: PASSIVE_LEVEL */
+BOOLEAN
+TCPFindLocalAddress6(const UCHAR *Address, ULONG ScopeId, PUCHAR Zone)
+{
+    struct netif *netif;
+    ip6_addr_t Wanted;
+    BOOLEAN Found = FALSE, LinkLocal;
+    s8_t i;
+
+    *Zone = IP6_NO_ZONE;
+    if (!TCPIpv6Enabled)
+        return FALSE;
+
+    RtlCopyMemory(Wanted.addr, Address, sizeof(Wanted.addr));
+    ip6_addr_clear_zone(&Wanted);
+    if (ip6_addr_isany(&Wanted) || ip6_addr_ismulticast(&Wanted) || ip6_addr_isipv4mappedipv6(&Wanted))
+        return FALSE;
+    LinkLocal = ip6_addr_islinklocal(&Wanted);
+
+    LOCK_TCPIP_CORE();
+    NETIF_FOREACH(netif)
+    {
+        PIP_INTERFACE IF = netif->state;
+
+        if (!IF || !netif_is_up(netif))
+            continue;
+        if (LinkLocal && ScopeId != 0 && IF->Index != ScopeId)
+            continue;
+
+        for (i = 0; i < LWIP_IPV6_NUM_ADDRESSES; i++)
+        {
+            if (ip6_addr_isvalid(netif_ip6_addr_state(netif, i)) &&
+                ip6_addr_zoneless_eq(netif_ip6_addr(netif, i), &Wanted))
+            {
+                Found = TRUE;
+                if (LinkLocal)
+                    *Zone = (UCHAR)netif_get_index(netif);
+                break;
+            }
+        }
+        if (Found)
+            break;
+    }
+    UNLOCK_TCPIP_CORE();
+
+    return Found;
+}
+
+/* The interface index (IF->Index) of an lwIP zone (netif index), 0 when there is none. CoreLocked: the caller
+ * holds the core lock (lwIP's callbacks), which is not recursive; otherwise it is taken (PASSIVE_LEVEL) */
+ULONG
+TCPInterfaceOfZone6(UCHAR Zone, BOOLEAN CoreLocked)
+{
+    struct netif *netif;
+    ULONG IfIndex = 0;
+
+    if (!TCPIpv6Enabled || Zone == IP6_NO_ZONE)
+        return 0;
+
+    CoreLocked = CoreLocked || sys_tcpip_core_locked();
+    if (!CoreLocked)
+        LOCK_TCPIP_CORE();
+    netif = netif_get_by_index(Zone);
+    if (netif && netif->state)
+        IfIndex = ((PIP_INTERFACE)netif->state)->Index;
+    if (!CoreLocked)
+        UNLOCK_TCPIP_CORE();
+
+    return IfIndex;
+}
+
+/* The lwIP zone (netif index) of the interface with this index, 0 when there is none. PASSIVE_LEVEL */
+UCHAR
+TCPZoneOfInterface6(ULONG IfIndex)
+{
+    struct netif *netif;
+    UCHAR Zone = IP6_NO_ZONE;
+
+    if (!TCPIpv6Enabled || IfIndex == 0)
+        return IP6_NO_ZONE;
+
+    LOCK_TCPIP_CORE();
+    NETIF_FOREACH(netif)
+    {
+        PIP_INTERFACE IF = netif->state;
+
+        if (IF && IF->Index == IfIndex)
+        {
+            Zone = (UCHAR)netif_get_index(netif);
+            break;
+        }
+    }
+    UNLOCK_TCPIP_CORE();
+
+    return Zone;
 }

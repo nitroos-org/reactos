@@ -119,8 +119,12 @@ typedef struct _ADDRESS_FILE {
     LONG RefCount;                        /* Reference count */
     OBJECT_FREE_ROUTINE Free;             /* Routine to use to free resources for the object */
     ERESOURCE Resource;                   /* Resource to manipulate this structure */
-    IP_ADDRESS Address;                   /* Address of this address file */
-    USHORT Family;                        /* Address family */
+    IP_ADDRESS Address;                   /* Address of this address file. An IPv6 socket bound to ::ffff:a.b.c.d
+                                             (dual stack) has the IPv4 address a.b.c.d here */
+    USHORT Family;                        /* Address family: the TDI address type the socket was opened with
+                                             (TDI_ADDRESS_TYPE_IP, or TDI_ADDRESS_TYPE_IP6 for an IPv6 socket) */
+    BOOLEAN DualStack;                    /* An IPv6 socket that takes IPv4 as well (IPV6_V6ONLY off) */
+    UCHAR Zone6;                          /* The lwIP zone (netif index) of a link-local IPv6 address, else 0 */
     USHORT Protocol;                      /* Protocol number */
     USHORT Port;                          /* Network port (network byte order) */
     LONG Sharers;                         /* Number of file objects with this addr file */

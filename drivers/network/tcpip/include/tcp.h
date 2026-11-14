@@ -200,10 +200,23 @@ UINT TCPAllocateEphemeralPort( PPORT_IN_USE_ROUTINE InUse );
 
 VOID TCPFreePort( const UINT Port );
 
+/* The local or remote address of a connection as a TA_IP_ADDRESS, or a TA_IP6_ADDRESS for an IPv6 one; Length is
+   the room at TransportAddress (STATUS_BUFFER_TOO_SMALL when the address does not fit) */
 NTSTATUS TCPGetSockAddress
 ( PCONNECTION_ENDPOINT Connection,
   PTRANSPORT_ADDRESS TransportAddress,
+  ULONG Length,
   BOOLEAN RemoteAddress );
+
+/* What the Winsock provider puts in the sin6_flowinfo of the address it binds an IPv6 socket to when IPV6_V6ONLY is
+   off (a dual stack socket); any other value is a socket with IPV6_V6ONLY on, the default. No flow information has
+   the top bits set (RFC 8200: 8 bits of traffic class, 20 of flow label). AFD clears the field once the address is
+   open. Same value as AFD_TCP_BIND6_DUAL_STACK in <afd/shared.h> */
+#define TCP_BIND6_DUAL_STACK 0xF6D5A001UL
+
+/* Whether an address file takes connections or datagrams of this IP version (IP_ADDRESS_V4 or IP_ADDRESS_V6):
+   its own address, and IPv4 too for a dual stack socket bound to the unspecified IPv6 address */
+BOOLEAN AddrFileTakesType( PADDRESS_FILE AddrFile, UCHAR Type );
 
 NTSTATUS TCPStartup(
   VOID);
@@ -242,6 +255,27 @@ TCPReceive6(PIP_INTERFACE IF, PIP_PACKET IPPacket);
 /* The IP_IPV6_TABLE_ENTRY_ID answer; returns its size (what fits in Out is written) */
 ULONG
 TCPQueryIpv6Table(PVOID Out, ULONG OutSize);
+
+/* A unicast IPv6 address of this machine (16 bytes, network order) that a socket may bind; *Zone gets the lwIP zone
+   of a link-local one (0 otherwise) */
+BOOLEAN
+TCPFindLocalAddress6(const UCHAR *Address, ULONG ScopeId, PUCHAR Zone);
+
+/* The lwIP zone of the interface with this index (IF->Index), 0 when there is none */
+UCHAR
+TCPZoneOfInterface6(ULONG IfIndex);
+
+/* The interface index of an lwIP zone, 0 when there is none (CoreLocked: the caller holds the core lock) */
+ULONG
+TCPInterfaceOfZone6(UCHAR Zone, BOOLEAN CoreLocked);
+
+/* The address of an address file as a TA_IP_ADDRESS or TA_IP6_ADDRESS (Length: the room at Address) */
+NTSTATUS
+TCPAddrFileTransportAddress(PADDRESS_FILE AddrFile, PTRANSPORT_ADDRESS Address, ULONG Length);
+
+/* The local address of a connection of an IPv6 socket (connection locked) */
+NTSTATUS
+TCPGetLocalAddress6(PCONNECTION_ENDPOINT Connection, PADDRESS_FILE AddrFile, PTRANSPORT_ADDRESS Address, ULONG Length);
 
 #if DBG || defined(TCPIP_IPV6_SELFTEST)
 /* ip/transport/tcp/selftest6.c: runs with Tcpip\Parameters\Ipv6SelfTest set */

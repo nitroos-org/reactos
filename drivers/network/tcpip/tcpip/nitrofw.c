@@ -1098,6 +1098,10 @@ static PFW_IMAGE FwFindOwner(UINT Protocol, USHORT PortN, PIP_ADDRESS Local)
 
         if (AddrFile->Protocol != Protocol || AddrFile->Port != PortN || !AddrFile->FwImage)
             continue;
+        /* Only a socket that takes this IP version owns the endpoint (an IPv6 socket on the same port does not
+           own an IPv4 one, unless it is dual stack) */
+        if (!AddrFileTakesType(AddrFile, Local->Type))
+            continue;
         if (!AddrIsUnspecified(&AddrFile->Address) && !AddrIsEqual(&AddrFile->Address, Local))
             continue;
         IsListener = (Protocol == IPPROTO_TCP && AddrFile->Listener != NULL);

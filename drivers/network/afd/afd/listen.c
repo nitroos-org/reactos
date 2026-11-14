@@ -10,6 +10,7 @@
 
 #include "afd.h"
 #include "ntdef.h"
+#include <tdiaddr.h>
 
 /* An accept completes into a fresh stream socket only: not bound, connected,
  * listening or claimed by another accept, with no transport objects of its
@@ -184,6 +185,29 @@ static VOID AfdFreeAcceptMdl(PIRP Irp)
     Irp->Tail.Overlay.DriverContext[3] = NULL;
 }
 
+/* The SOCKADDR_IN6 of a transport address (TaLength valid bytes, from the transport) in an address area of an accept
+ * buffer (AreaLength bytes: the socket address, then a USHORT with its length). An address that has no IPv6 form, or
+ * an area too small for the USHORT, gets nothing; the socket address is cut to the area as for IPv4 */
+static VOID AfdPutAcceptSockaddr6(PUCHAR Area, LONG AreaLength, PTRANSPORT_ADDRESS Ta, ULONG TaLength)
+{
+    UCHAR Sockaddr[TDIADDR_SOCKADDR_IN6_LENGTH];
+    ULONG Length = 0, Body;
+
+    if (AreaLength < (LONG)sizeof(USHORT))
+        return;
+
+    if (TaLength >= TDIADDR_TA_HEADER_LENGTH && Ta->TAAddressCount == 1)
+    {
+        Body = min((ULONG)Ta->Address[0].AddressLength, TaLength - TDIADDR_TA_HEADER_LENGTH);
+        Length = TdiAddrToSockaddr(TDIADDR_AF_INET6, Ta->Address[0].AddressType, Body, Ta->Address[0].Address,
+                                   Sockaddr, sizeof(Sockaddr));
+    }
+
+    Length = min(Length, (ULONG)AreaLength - sizeof(USHORT));
+    RtlCopyMemory(Area, Sockaddr, Length);
+    *(USHORT *)(Area + AreaLength - sizeof(USHORT)) = (USHORT)Length;
+}
+
 static NTSTATUS SatisfySuperAccept(PAFD_FCB FCB, PIRP Irp, PAFD_TDI_OBJECT_QELT Qelt)
 {
     PFILE_OBJECT NewFileObject = (PFILE_OBJECT)Irp->Tail.Overlay.DriverContext[2];
@@ -275,6 +299,19 @@ static NTSTATUS SatisfySuperAccept(PAFD_FCB FCB, PIRP Irp, PAFD_TDI_OBJECT_QELT 
     /* Each address area holds a sockaddr (the address type and the address) and
      * ends in a USHORT with its length; an area too small for that gets nothing */
     BufferPtr += AcceptInfo->ReceiveDataLength;
+    if (FCB->LocalAddress->Address[0].AddressType == TDI_ADDRESS_TYPE_IP6)
+    {
+        /* An IPv6 listener: SOCKADDR_IN6 in both areas, an IPv4 peer of a dual stack listener (and the IPv4
+         * address it reached) as ::ffff:a.b.c.d, as getsockname and getpeername of the accepted socket say */
+        AfdPutAcceptSockaddr6(BufferPtr, AcceptInfo->LocalAddressLength, &Buffer->Address,
+                              RequestSize - FIELD_OFFSET(TDI_ADDRESS_INFO, Address));
+        ExFreePool(Buffer);
+        BufferPtr += AcceptInfo->LocalAddressLength;
+        AfdPutAcceptSockaddr6(BufferPtr, AcceptInfo->RemoteAddressLength, RemoteAddress,
+                              Qelt->ConnInfo->RemoteAddressLength);
+    }
+    else
+    {
     if (AcceptInfo->LocalAddressLength >= sizeof(USHORT))
     {
         LONG LocalAddressLength = min(AcceptInfo->LocalAddressLength - sizeof(USHORT),
@@ -292,6 +329,7 @@ static NTSTATUS SatisfySuperAccept(PAFD_FCB FCB, PIRP Irp, PAFD_TDI_OBJECT_QELT 
                                        sizeof(USHORT) + RemoteAddress->Address[0].AddressLength);
         RtlCopyMemory(BufferPtr, &RemoteAddress->Address[0].AddressType, RemoteAddressLength);
         *(USHORT *)(BufferPtr + AcceptInfo->RemoteAddressLength - sizeof(USHORT)) = RemoteAddressLength;
+    }
     }
 
     if (AcceptInfo->ReceiveDataLength)

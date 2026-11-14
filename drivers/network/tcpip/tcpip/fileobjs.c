@@ -319,51 +319,130 @@ PADDRESS_FILE AddrSearchNext(
  *   Old specific, New wildcard: allowed, unless New is exclusive (in use)
  *   two different specific addresses: never conflict
  * (all observed on Windows 10 22H2, probe in releases/2026.11/evidence/wsquirks-20261104).
+ * IPv4 and IPv6 addresses are separate: an IPv6 socket on :: does not hold the IPv4 wildcard of its port
+ * even when it is dual stack (Windows 10 lets an IPv4 socket bind 0.0.0.0 on that port, oracle probe; the
+ * IPv4 socket then gets the IPv4 connections, see tcp_input). An IPv6 socket bound to ::ffff:a.b.c.d is
+ * bound to the IPv4 address a.b.c.d and meets the IPv4 sockets there (VERIFY ON ORACLE).
  * Called with AddressFileListLock held. */
+
+BOOLEAN AddrFileTakesType(
+    PADDRESS_FILE AddrFile,
+    UCHAR Type)
+{
+    if (AddrFile->Address.Type == Type)
+        return TRUE;
+    return Type == IP_ADDRESS_V4 && AddrFile->DualStack && AddrFile->Address.Type == IP_ADDRESS_V6 &&
+           AddrIsUnspecified(&AddrFile->Address);
+}
+
+/* The rules above for two address files bound to addresses of the same IP version Type */
+static NTSTATUS AddrBindConflictOfType(
+    PADDRESS_FILE Old,
+    PADDRESS_FILE New,
+    UCHAR Type)
+{
+    BOOLEAN OldWild = AddrIsUnspecified(&Old->Address);
+    BOOLEAN NewWild = AddrIsUnspecified(&New->Address);
+
+    UNREFERENCED_PARAMETER(Type);
+
+    if (OldWild == NewWild)
+    {
+        if (!OldWild && !AddrIsEqual(&Old->Address, &New->Address))
+            return STATUS_SUCCESS;
+
+        if (Old->ShareMode == ADDR_SHARE_EXCLUSIVE || New->ShareMode == ADDR_SHARE_EXCLUSIVE)
+        {
+            if (Old->ShareMode == ADDR_SHARE_EXCLUSIVE && New->ShareMode == ADDR_SHARE_REUSE)
+                return STATUS_ACCESS_DENIED;
+            return STATUS_ADDRESS_ALREADY_EXISTS;
+        }
+        if (Old->ShareMode == ADDR_SHARE_REUSE && New->ShareMode == ADDR_SHARE_REUSE)
+            return STATUS_SUCCESS;
+        return (New->ShareMode == ADDR_SHARE_REUSE) ? STATUS_ACCESS_DENIED :
+                                                      STATUS_ADDRESS_ALREADY_EXISTS;
+    }
+    else if (OldWild)
+    {
+        if (Old->ShareMode == ADDR_SHARE_EXCLUSIVE)
+            return STATUS_ACCESS_DENIED;
+    }
+    else if (New->ShareMode == ADDR_SHARE_EXCLUSIVE)
+    {
+        return STATUS_ADDRESS_ALREADY_EXISTS;
+    }
+
+    return STATUS_SUCCESS;
+}
+
 static NTSTATUS AddrBindConflictLocked(
     PADDRESS_FILE New)
 {
+    static const UCHAR Types[] = { IP_ADDRESS_V4, IP_ADDRESS_V6 };
     PLIST_ENTRY Entry;
+    NTSTATUS Status;
+    ULONG i;
 
     for (Entry = AddressFileListHead.Flink; Entry != &AddressFileListHead; Entry = Entry->Flink)
     {
         PADDRESS_FILE Old = CONTAINING_RECORD(Entry, ADDRESS_FILE, ListEntry);
-        BOOLEAN OldWild, NewWild;
 
         if (Old == New || Old->Port != New->Port || Old->Protocol != New->Protocol ||
             Old->PortReleased || Old->Sharers == 0)
             continue;
 
-        OldWild = AddrIsUnspecified(&Old->Address);
-        NewWild = AddrIsUnspecified(&New->Address);
-
-        if (OldWild == NewWild)
+        for (i = 0; i < RTL_NUMBER_OF(Types); i++)
         {
-            if (!OldWild && !AddrIsEqual(&Old->Address, &New->Address))
+            /* Bound addresses of the same version only (not what a dual stack socket takes besides) */
+            if (Old->Address.Type != Types[i] || New->Address.Type != Types[i])
                 continue;
 
-            if (Old->ShareMode == ADDR_SHARE_EXCLUSIVE || New->ShareMode == ADDR_SHARE_EXCLUSIVE)
-            {
-                if (Old->ShareMode == ADDR_SHARE_EXCLUSIVE && New->ShareMode == ADDR_SHARE_REUSE)
-                    return STATUS_ACCESS_DENIED;
-                return STATUS_ADDRESS_ALREADY_EXISTS;
-            }
-            if (Old->ShareMode == ADDR_SHARE_REUSE && New->ShareMode == ADDR_SHARE_REUSE)
-                continue;
-            return (New->ShareMode == ADDR_SHARE_REUSE) ? STATUS_ACCESS_DENIED :
-                                                          STATUS_ADDRESS_ALREADY_EXISTS;
-        }
-        else if (OldWild)
-        {
-            if (Old->ShareMode == ADDR_SHARE_EXCLUSIVE)
-                return STATUS_ACCESS_DENIED;
-        }
-        else if (New->ShareMode == ADDR_SHARE_EXCLUSIVE)
-        {
-            return STATUS_ADDRESS_ALREADY_EXISTS;
+            Status = AddrBindConflictOfType(Old, New, Types[i]);
+            if (!NT_SUCCESS(Status))
+                return Status;
         }
     }
 
+    return STATUS_SUCCESS;
+}
+
+/* The address of an IPv6 socket (TCP), from the TA_IP6_ADDRESS it is opened with. The Winsock provider marks the
+ * address of a socket with IPV6_V6ONLY off (TCP_BIND6_DUAL_STACK in sin6_flowinfo; any other value is a socket
+ * with it on, the default). ::ffff:a.b.c.d is the IPv4 address a.b.c.d of a dual stack socket; any other address
+ * must be the unspecified one or an address of this machine. VERIFY ON ORACLE: the answer for ::ffff:a.b.c.d with
+ * IPV6_V6ONLY on (refused here, as an address that is not available). */
+static NTSTATUS AddrFileSetAddress6(
+    PADDRESS_FILE AddrFile,
+    PTA_IP6_ADDRESS Address)
+{
+    UCHAR Bytes[16];
+    ULONG Flow, Scope, V4;
+    ULONG i;
+
+    RtlCopyMemory(Bytes, Address->Address[0].Address[0].sin6_addr, sizeof(Bytes));
+    RtlCopyMemory(&Flow, &Address->Address[0].Address[0].sin6_flowinfo, sizeof(Flow));
+    RtlCopyMemory(&Scope, &Address->Address[0].Address[0].sin6_scope_id, sizeof(Scope));
+
+    AddrFile->DualStack = (Flow == TCP_BIND6_DUAL_STACK);
+
+    for (i = 0; i < 10 && Bytes[i] == 0; i++)
+        ;
+    if (i == 10 && Bytes[10] == 0xFF && Bytes[11] == 0xFF)
+    {
+        if (!AddrFile->DualStack)
+            return STATUS_INVALID_ADDRESS;
+        RtlCopyMemory(&V4, &Bytes[12], sizeof(V4));
+        AddrInitIPv4(&AddrFile->Address, V4);
+        return STATUS_SUCCESS;
+    }
+
+    AddrFile->Address.Type = IP_ADDRESS_V6;
+    RtlCopyMemory(AddrFile->Address.Address.IPv6Address, Bytes, sizeof(Bytes));
+    if (AddrIsUnspecified(&AddrFile->Address))
+        return STATUS_SUCCESS;
+
+    if (!TCPFindLocalAddress6(Bytes, Scope, &AddrFile->Zone6))
+        return STATUS_INVALID_ADDRESS;
     return STATUS_SUCCESS;
 }
 
@@ -550,12 +629,26 @@ NTSTATUS FileOpenAddress(
   KeQuerySystemTime(&AddrFile->CreationTime);
 
   /* Make sure address is a local unicast address or 0 */
-  /* FIXME: IPv4 only */
   AddrFile->Family = Address->Address[0].AddressType;
-  AddrFile->Address.Address.IPv4Address = Address->Address[0].Address[0].in_addr;
-  AddrFile->Address.Type = IP_ADDRESS_V4;
+  if (AddrFile->Family == TDI_ADDRESS_TYPE_IP6)
+  {
+      /* TCP only: the caller took a whole TA_IP6_ADDRESS (TiCreateFileObject) */
+      NTSTATUS Status6 = AddrFileSetAddress6(AddrFile, (PTA_IP6_ADDRESS)Address);
 
-  if (!AddrIsUnspecified(&AddrFile->Address)) {
+      if (!NT_SUCCESS(Status6))
+      {
+          ExFreePoolWithTag(AddrFile, ADDR_FILE_TAG);
+          return Status6;
+      }
+  }
+  else
+  {
+      AddrFile->Address.Address.IPv4Address = Address->Address[0].Address[0].in_addr;
+      AddrFile->Address.Type = IP_ADDRESS_V4;
+  }
+
+  /* An IPv6 address was checked above */
+  if (AddrFile->Address.Type == IP_ADDRESS_V4 && !AddrIsUnspecified(&AddrFile->Address)) {
       PIP_INTERFACE LocalIF = AddrLocateInterface(&AddrFile->Address);
 
       if (!LocalIF) {
@@ -585,7 +678,9 @@ NTSTATUS FileOpenAddress(
              after bind reports it for a wildcard address as well */
           PTCP_CONNECT_HINT Hint = (PTCP_CONNECT_HINT)Address->Address[0].Address[0].sin_zero;
 
-          if (Hint->Magic == TCP_CONNECT_HINT_MAGIC)
+          /* The hint is in the padding of an IPv4 address; an IPv6 one has none (the port is the first
+             field of both, read above) */
+          if (AddrFile->Family == TDI_ADDRESS_TYPE_IP && Hint->Magic == TCP_CONNECT_HINT_MAGIC)
               AllocatedPort = TCPAllocatePortForRemote(Hint->RemoteAddress, Hint->RemotePort);
           else
               AllocatedPort = TCPAllocatePort(0);
