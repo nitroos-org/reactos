@@ -36,6 +36,8 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(hnetcfg);
 
+/* NitroOS: the legacy objects are implemented in legacy.c on top of the rule store */
+#ifndef __REACTOS__
 typedef struct fw_app
 {
     INetFwAuthorizedApplication INetFwAuthorizedApplication_iface;
@@ -104,6 +106,8 @@ static HRESULT WINAPI fw_app_GetTypeInfoCount(
     return S_OK;
 }
 
+#endif /* !__REACTOS__ */
+
 /* NetFwPublicTypeLib (resource 1) and NATUPNPLib (resource 2) are two separate type libraries */
 static ITypeLib *typelib;
 static ITypeLib *nat_typelib;
@@ -121,6 +125,8 @@ static REFIID tid_id[] =
     &IID_INetFwProfile,
     &IID_INetFwRule,
     &IID_INetFwRules,
+    &IID_INetFwService,
+    &IID_INetFwServices,
     &IID_IUPnPNAT,
     &IID_IStaticPortMappingCollection,
     &IID_IStaticPortMapping,
@@ -183,6 +189,8 @@ void release_typelib(void)
         ITypeLib_Release(nat_typelib);
 }
 
+/* NitroOS: the legacy objects are implemented in legacy.c on top of the rule store */
+#ifndef __REACTOS__
 static HRESULT WINAPI fw_app_GetTypeInfo(
     INetFwAuthorizedApplication *iface,
     UINT iTInfo,
@@ -675,3 +683,4 @@ HRESULT NetFwAuthorizedApplications_create( IUnknown *pUnkOuter, LPVOID *ppObj )
     TRACE("returning iface %p\n", *ppObj);
     return S_OK;
 }
+#endif /* !__REACTOS__ */
