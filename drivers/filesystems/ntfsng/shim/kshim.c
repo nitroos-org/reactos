@@ -1836,6 +1836,21 @@ static void kshim_lru_evict(struct inode *v)
 
 void kshim_icache_lock(void) { mutex_lock(&kshim_inode_lock); }
 void kshim_icache_unlock(void) { mutex_unlock(&kshim_inode_lock); }
+/*
+ * For a loop over many inodes that wants their cache lines in time (a directory listing): without the lock and
+ * without any claim on the answer, which only names where to prefetch.  load 0: the bucket's line is fetched;
+ * load 1: the first inode of the bucket's chain, or NULL.
+ */
+struct inode *kshim_icache_bucket(struct super_block *sb, unsigned long hashval, int load)
+{
+	struct inode * volatile *b = &sb->kshim_ihash[hashval % KSHIM_IHASH];
+
+	if (!load) {
+		__builtin_prefetch((const void *)b);
+		return NULL;
+	}
+	return *b;
+}
 /* Under kshim_icache_lock: the inode in memory for @hashval, without a reference, or NULL. */
 struct inode *kshim_icache_peek(struct super_block *sb, unsigned long hashval,
 		int (*test)(struct inode *, void *), void *data)
