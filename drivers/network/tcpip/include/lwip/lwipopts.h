@@ -43,6 +43,15 @@
 
 #define IP_SOF_BROADCAST_RECV           1
 
+/* The IPv6 core is built (ip_addr_t becomes a tagged union) but nothing uses it yet: no interface gets an IPv6
+ * address, no IPv6 frame is passed to lwIP, and the hooks, ARP-less output and filters stay IPv4 */
+#define LWIP_IPV6                       1
+/* No MLD yet: its 100 ms timer would wake the tcpip thread of an idle machine for a protocol nobody uses */
+#define LWIP_IPV6_MLD                   0
+/* Reassembly keeps its bookkeeping (a pointer and two offsets) in place of each fragment's 8-byte fragment
+ * header; with 64-bit pointers it does not fit there, so it borrows room from the header before it instead
+ * (ip6_frag.c asserts this once a second from ip6_reass_tmr otherwise) */
+#define IPV6_FRAG_COPYHEADER            1
 #define LWIP_ICMP                       0
 
 #define LWIP_RAW                        0

@@ -190,9 +190,9 @@ TCPInterfaceInit(struct netif *netif)
 VOID
 TCPRegisterInterface(PIP_INTERFACE IF)
 {
-    ip_addr_t ipaddr;
-    ip_addr_t netmask;
-    ip_addr_t gw;
+    ip4_addr_t ipaddr;
+    ip4_addr_t netmask;
+    ip4_addr_t gw;
 
     gw.addr = 0;
     ipaddr.addr = 0;
@@ -216,9 +216,9 @@ TCPUnregisterInterface(PIP_INTERFACE IF)
 VOID
 TCPUpdateInterfaceIPInformation(PIP_INTERFACE IF)
 {
-    ip_addr_t ipaddr;
-    ip_addr_t netmask;
-    ip_addr_t gw;
+    ip4_addr_t ipaddr;
+    ip4_addr_t netmask;
+    ip4_addr_t gw;
 
     gw.addr = 0;
 

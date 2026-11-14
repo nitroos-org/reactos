@@ -481,7 +481,7 @@ TCPAcceptEventHandler(void *arg, PTCP_PCB newpcb)
             /* The connection is filed under the listener binding, which has no concrete
                address for a wildcard listener: the local address is the one the SYN was
                sent to (a loopback alias, or one of several addresses of an interface) */
-            Bucket->AssociatedEndpoint->ConnectAddress = newpcb->local_ip.addr;
+            Bucket->AssociatedEndpoint->ConnectAddress = ip4_addr_get_u32(ip_2_ip4(&newpcb->local_ip));
 
             UnlockObject(Bucket->AssociatedEndpoint);
 
