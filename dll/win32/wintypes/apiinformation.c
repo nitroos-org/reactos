@@ -185,13 +185,18 @@ static BOOL class_is_registered(const WCHAR *name, UINT32 len)
             (type == REG_SZ || type == REG_EXPAND_SZ))
         {
             dll[size / sizeof(WCHAR)] = 0;
-            /* The return value is the size needed: a larger one means that expanded was not filled in */
             if (type == REG_EXPAND_SZ)
             {
+                /* The return value is the size needed: 0 is a failure and a larger one means that expanded
+                 * was not filled in. Either way the class is not registered, the buffer is not used. */
                 DWORD expanded_len = ExpandEnvironmentStringsW(dll, expanded, ARRAYSIZE(expanded));
 
-                if (expanded_len && expanded_len <= ARRAYSIZE(expanded) && expanded[0])
-                    wcscpy(dll, expanded);
+                if (!expanded_len || expanded_len > ARRAYSIZE(expanded) || !expanded[0])
+                {
+                    RegCloseKey(key);
+                    break;
+                }
+                wcscpy(dll, expanded);
             }
             attrs = GetFileAttributesW(dll);
             found = attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY);
