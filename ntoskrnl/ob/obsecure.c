@@ -151,6 +151,17 @@ ObSetSecurityDescriptorInfo(IN PVOID Object,
             break;
         }
 
+        /*
+         * A token whose SACL or label is set explicitly no longer reports
+         * it as auto-inherited, as on Windows (see ObAssignSecurity).
+         */
+        if ((ObjectHeader->Type == SeTokenObjectType) &&
+            (NewDescriptor != OldDescriptor) &&
+            (*SecurityInformation & (SACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION)))
+        {
+            ((PISECURITY_DESCRIPTOR)NewDescriptor)->Control &= ~SE_SACL_AUTO_INHERITED;
+        }
+
         /* Now add this to the cache */
         Status = ObLogSecurityDescriptor(NewDescriptor,
                                          &CachedDescriptor,
@@ -603,6 +614,20 @@ ObAssignSecurity(IN PACCESS_STATE AccessState,
             SeDeassignSecurity(&NewDescriptor);
             return Status;
         }
+    }
+
+    /*
+     * The SACL of a token, and the SACL an object is created with from an
+     * explicit descriptor, is reported as auto-inherited, as on Windows
+     * (process and thread descriptors are marked when they are labelled).
+     * An object created without a SACL keeps the descriptor as it is.
+     */
+    if ((((PISECURITY_DESCRIPTOR)NewDescriptor)->Control & SE_SACL_PRESENT) &&
+        ((Type == SeTokenObjectType) ||
+         (AccessState->SecurityDescriptor != NULL &&
+          (((PISECURITY_DESCRIPTOR)AccessState->SecurityDescriptor)->Control & SE_SACL_PRESENT))))
+    {
+        ((PISECURITY_DESCRIPTOR)NewDescriptor)->Control |= SE_SACL_AUTO_INHERITED;
     }
 
     /* Call the security method */
