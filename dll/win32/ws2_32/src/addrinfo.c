@@ -865,7 +865,7 @@ GetAddrInfoW(IN PCWSTR pszNodeName,
      */
     bV6On = WsQueryIpv6((ptHints && (ptHints->ai_flags & AI_ADDRCONFIG)) ? &V6Info : NULL);
     if (!(ptHints && (ptHints->ai_flags & AI_ADDRCONFIG)))
-        V6Info.NonLoopback = V6Info.Global = 0;
+        V6Info.NonLoopback = 0;
 
     /* Check if we got hints */
     if (ptHints)
@@ -1149,7 +1149,9 @@ GetAddrInfoW(IN PCWSTR pszNodeName,
         {
             *pptResult = NewAddrInfo(iSocketType, iProtocol, wPort, htonl(INADDR_LOOPBACK));
             iError = *pptResult ? 0 : EAI_MEMORY;
-            if (!iError && (iFlags & AI_CANONNAME) && iFamily != PF_UNSPEC)
+            /* every family: for AF_UNSPEC the ::1 entry takes the name over below, but with AI_ADDRCONFIG
+               and no usable IPv6 address nothing is prepended and this entry keeps it */
+            if (!iError && (iFlags & AI_CANONNAME))
                 iError = SetComputerNameCanon(*pptResult);
         }
         else

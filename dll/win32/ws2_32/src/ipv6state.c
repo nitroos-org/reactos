@@ -66,8 +66,8 @@ WsQueryIpv6Table(PHANDLE File, PVOID Buffer, ULONG BufferLength, PULONG Informat
 /*
  * TRUE when the stack has IPv6 on. With Info, the addresses it has (the interface that carries them is not
  * needed here): Info->NonLoopback counts the addresses that can be used as a source (preferred or deprecated,
- * not tentative) on a non-loopback interface, Info->Global those of them that are not link-local. Both are 0
- * when the stack could not be asked.
+ * not tentative) on a non-loopback interface. It is 0 when the stack could not be asked. A token that is
+ * denied the device is cached as "off" for the life of the process.
  */
 BOOL
 WsQueryIpv6(PWS_IPV6_INFO Info)
@@ -95,7 +95,13 @@ WsQueryIpv6(PWS_IPV6_INFO Info)
     RtlZeroMemory(&Small, sizeof(Small));
     Status = WsQueryIpv6Table(&File, &Small, sizeof(Small), &Got);
     if (!NT_SUCCESS(Status))
+    {
+        /* A token that may not open the device (sandboxed, restricted) cannot be asked the next time either:
+           decide once, as off, instead of retrying the open on every call */
+        if (!File && Status == STATUS_ACCESS_DENIED && Known == 0)
+            InterlockedExchange(&WsIpv6Known, 1);
         goto Done;
+    }
     /* Off is the header alone, with Enabled 0: anything longer did not fit and is only a size */
     if (Got == sizeof(*Header) && Small.Enabled == 0)
     {
@@ -157,8 +163,6 @@ WsQueryIpv6(PWS_IPV6_INFO Info)
                 continue;
 
             Info->NonLoopback++;
-            if (!(Addresses[i].Address[0] == 0xFE && (Addresses[i].Address[1] & 0xC0) == 0x80))
-                Info->Global++;
         }
     }
 
