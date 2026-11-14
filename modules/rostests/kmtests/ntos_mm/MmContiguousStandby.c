@@ -34,10 +34,11 @@ START_TEST(MmContiguousStandby)
         skip(FALSE, "no basic information\n");
         return;
     }
-    /* 60 percent of the memory, at most 256 MB (64 MB of 32-bit system address space): the test must end
-       within the 30 s the user part waits for it on a checked build, and the blocks are mapped all at once */
+    /* 60 percent of the memory, at most 256 MB on every architecture: the test must end within the 30 s the
+       user part waits for it on a checked build. On 32-bit the system PTEs can run out first, and the
+       allocation must then fail (NULL), which ends the loop below like a lack of pages */
     Max = (ULONG)(((ULONGLONG)Info.NumberOfPhysicalPages * PAGE_SIZE / BLOCK_SIZE) * 6 / 10);
-    Max = min(Max, (ULONG)((sizeof(PVOID) == 4 ? 64 : 256) * 1024 * 1024 / BLOCK_SIZE));
+    Max = min(Max, (ULONG)(256 * 1024 * 1024 / BLOCK_SIZE));
     Blocks = ExAllocatePoolWithTag(NonPagedPool, Max * sizeof(PVOID), 'tSCM');
     if (!Blocks)
     {
