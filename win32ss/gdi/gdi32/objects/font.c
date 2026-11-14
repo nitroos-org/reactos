@@ -2434,6 +2434,42 @@ GdiGetCharDimensions(HDC hdc, LPTEXTMETRICW lptm, LONG *height)
  *   TRUE on success, FALSE on failure.
  *
  */
+/* Is the LCID a locale of the ntdll locale table (the table of the locales Windows has)?
+   Special and neutral LCIDs are not looked up, and an ntdll without the table
+   (DLL_EXPORT_VERSION below 0x600) leaves the decision to GetLocaleInfoW. */
+static BOOL
+IsLcidInLocaleTable(LCID lCid)
+{
+    typedef NTSTATUS (NTAPI *PFN_LCID_TO_NAME)(LCID, PUNICODE_STRING, ULONG, BOOLEAN);
+    static PFN_LCID_TO_NAME pfnLcidToName = NULL;
+    static BOOL bResolved = FALSE;
+    WCHAR Buffer[85]; /* LOCALE_NAME_MAX_LENGTH */
+    UNICODE_STRING Name;
+    LANGID LangId = LANGIDFROMLCID(lCid);
+
+    if (!bResolved)
+    {
+        HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
+        if (hNtdll)
+            pfnLcidToName = (PFN_LCID_TO_NAME)GetProcAddress(hNtdll, "RtlLcidToLocaleName");
+        bResolved = TRUE;
+    }
+    if (!pfnLcidToName)
+        return TRUE;
+
+    /* LOCALE_USER_DEFAULT, LOCALE_SYSTEM_DEFAULT, LOCALE_CUSTOM_*, neutral languages */
+    if ((lCid & 0xffff) == LANG_USER_DEFAULT || (lCid & 0xffff) == LANG_SYSTEM_DEFAULT ||
+        (lCid & 0xffff) == 0x1000 || (lCid & 0xffff) == 0x1400 || (lCid & 0xffff) == 0x0c00 ||
+        SUBLANGID(LangId) == SUBLANG_NEUTRAL)
+        return TRUE;
+
+    /* the sort order does not matter to GetLocaleInfoW either */
+    Name.Buffer = Buffer;
+    Name.Length = 0;
+    Name.MaximumLength = sizeof(Buffer);
+    return NT_SUCCESS(pfnLcidToName(MAKELCID(LangId, SORT_DEFAULT), &Name, 2 /* allow neutral */, FALSE));
+}
+
 /*
  * @implemented
  */
@@ -2466,7 +2502,17 @@ TranslateCharsetInfo(
     {
         LCID lCid = (LCID)PtrToUlong(lpSrc);
         LOCALESIGNATURE LocSig;
-        INT Ret = GetLocaleInfoW(lCid, LOCALE_FONTSIGNATURE, (LPWSTR)&LocSig, 0);
+        INT Ret;
+
+        /* Windows knows only the locales of its locale table; kernel32 also has
+           data of locales that Windows does not have (e.g. nl-SR 0x0c13) */
+        if (!IsLcidInLocaleTable(lCid))
+        {
+            GdiSetLastError(ERROR_INVALID_PARAMETER);
+            return FALSE;
+        }
+
+        Ret = GetLocaleInfoW(lCid, LOCALE_FONTSIGNATURE, (LPWSTR)&LocSig, 0);
         if ( GetLocaleInfoW(lCid, LOCALE_FONTSIGNATURE, (LPWSTR)&LocSig, Ret))
         {
            while (index < MAXTCIINDEX && !(LocSig.lsCsbDefault[0]>>index & 0x0001)) index++;
