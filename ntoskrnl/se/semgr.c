@@ -431,9 +431,23 @@ SeQuerySecurityAccessMask(
 {
     *DesiredAccess = 0;
 
+    /*
+     * The whole descriptor (BACKUP_SECURITY_INFORMATION) needs READ_CONTROL and
+     * ACCESS_SYSTEM_SECURITY: a registry key query with it fails with
+     * STATUS_ACCESS_DENIED on a READ_CONTROL handle on Windows 10 (oracle), and
+     * the same table as advapi32's QuerySecurityAccessMask (measured there) for
+     * the attribute, scope, trust label and access filter parts.
+     */
+    if (SecurityInformation & BACKUP_SECURITY_INFORMATION)
+    {
+        *DesiredAccess |= READ_CONTROL | ACCESS_SYSTEM_SECURITY;
+    }
+
     if (SecurityInformation & (OWNER_SECURITY_INFORMATION |
                                GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION |
-                               LABEL_SECURITY_INFORMATION))
+                               LABEL_SECURITY_INFORMATION | ATTRIBUTE_SECURITY_INFORMATION |
+                               SCOPE_SECURITY_INFORMATION | PROCESS_TRUST_LABEL_SECURITY_INFORMATION |
+                               ACCESS_FILTER_SECURITY_INFORMATION))
     {
         *DesiredAccess |= READ_CONTROL;
     }

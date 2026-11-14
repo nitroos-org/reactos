@@ -864,10 +864,8 @@ CmpDoOpen(IN PHHIVE Hive,
 
         /*
          * We are already holding a lock against the KCB that is assigned
-         * to this key body. This is to prevent a potential deadlock on
-         * CmpSecurityMethod as ObCheckObjectAccess will invoke the Object
-         * Manager to call that method, of which CmpSecurityMethod would
-         * attempt to acquire a lock again.
+         * to this key body. Should anything below call CmpSecurityMethod
+         * for this body (a query), it must not take that lock again.
          */
         KeyBody->KcbLocked = TRUE;
 
@@ -875,11 +873,16 @@ CmpDoOpen(IN PHHIVE Hive,
         AclDesired = AccessState->RemainingDesiredAccess;
         AclPrevious = AccessState->PreviouslyGrantedAccess;
 
-        if (!ObCheckObjectAccess(*Object,
-                                 AccessState,
-                                 FALSE,
-                                 AccessMode,
-                                 &Status))
+        /*
+         * The open decision is the configuration manager's, not a check of
+         * the descriptor the key reports (that is the real one now): see
+         * CmpCheckKeyOpenAccess. It grants what opens always got until key
+         * access is enforced (registry ACL plan R8).
+         */
+        if (!CmpCheckKeyOpenAccess(*Object,
+                                   AccessState,
+                                   AccessMode,
+                                   &Status))
         {
             /* Access check failed */
             ObDereferenceObject(*Object);

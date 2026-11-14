@@ -400,23 +400,23 @@ static void CheckHiveRoot(const char *Label, PCWSTR Path, BOOL ExpectOwnerAdmins
     ok(Present && Dacl, "%s: no DACL\n", Label);
 
     if (ExpectOwnerAdmins)
-        CHK(1, SidIs(SdOwner(Sd), WinBuiltinAdministratorsSid), "%s: owner is not Administrators\n", Label);
+        CHK(0, SidIs(SdOwner(Sd), WinBuiltinAdministratorsSid), "%s: owner is not Administrators\n", Label);
 
     /* SYSTEM and Administrators have full control, inherited by subkeys (CI) */
     Mask = 0;
     Flags = 0;
-    CHK(1, FindAce(Dacl, System, ACCESS_ALLOWED_ACE_TYPE, &Mask, &Flags) && Mask == KEY_A,
+    CHK(0, FindAce(Dacl, System, ACCESS_ALLOWED_ACE_TYPE, &Mask, &Flags) && Mask == KEY_A,
         "%s: SYSTEM ACE mask 0x%lx\n", Label, (ULONG)Mask);
     Mask = 0;
-    CHK(1, FindAce(Dacl, Admins, ACCESS_ALLOWED_ACE_TYPE, &Mask, &Flags) && Mask == KEY_A,
+    CHK(0, FindAce(Dacl, Admins, ACCESS_ALLOWED_ACE_TYPE, &Mask, &Flags) && Mask == KEY_A,
         "%s: Administrators ACE mask 0x%lx\n", Label, (ULONG)Mask);
-    CHK(1, (Flags & CONTAINER_INHERIT_ACE), "%s: Administrators ACE does not inherit to subkeys (flags 0x%x)\n", Label, Flags);
+    CHK(0, (Flags & CONTAINER_INHERIT_ACE), "%s: Administrators ACE does not inherit to subkeys (flags 0x%x)\n", Label, Flags);
     /* Users read only */
     Mask = 0;
-    CHK(1, FindAce(Dacl, Users, ACCESS_ALLOWED_ACE_TYPE, &Mask, NULL) && Mask == KEY_R,
+    CHK(0, FindAce(Dacl, Users, ACCESS_ALLOWED_ACE_TYPE, &Mask, NULL) && Mask == KEY_R,
         "%s: Users ACE mask 0x%lx, expected 0x%x\n", Label, (ULONG)Mask, KEY_R);
     /* and nobody else (Everyone in particular) is granted anything */
-    CHK(1, AllowedFor(Dacl, Everyone) == 0, "%s: Everyone is granted 0x%lx\n", Label, (ULONG)AllowedFor(Dacl, Everyone));
+    CHK(0, AllowedFor(Dacl, Everyone) == 0, "%s: Everyone is granted 0x%lx\n", Label, (ULONG)AllowedFor(Dacl, Everyone));
     LocalFree(Sd);
     RegCloseKey(Key);
 Done:
@@ -455,15 +455,15 @@ static void CheckSecret(const char *Label, PCWSTR Path)
     {
         Dacl = SdDacl(Sd, &Present);
         ok(Present && Dacl, "%s: no DACL\n", Label);
-        CHK(1, FindAce(Dacl, System, ACCESS_ALLOWED_ACE_TYPE, &Mask, NULL) && Mask == KEY_A,
+        CHK(0, FindAce(Dacl, System, ACCESS_ALLOWED_ACE_TYPE, &Mask, NULL) && Mask == KEY_A,
             "%s: SYSTEM ACE mask 0x%lx\n", Label, (ULONG)Mask);
         Mask = 0;
-        CHK(1, FindAce(Dacl, Admins, ACCESS_ALLOWED_ACE_TYPE, &Mask, NULL) &&
+        CHK(0, FindAce(Dacl, Admins, ACCESS_ALLOWED_ACE_TYPE, &Mask, NULL) &&
                Mask == (READ_CONTROL | WRITE_DAC),
             "%s: Administrators ACE mask 0x%lx, expected READ_CONTROL|WRITE_DAC\n", Label, (ULONG)Mask);
         /* holds vacuously on reactos today (the descriptor only names Everyone); a regression guard */
         ok(AllowedFor(Dacl, Users) == 0, "%s: Users are granted 0x%lx\n", Label, (ULONG)AllowedFor(Dacl, Users));
-        CHK(1, AllowedFor(Dacl, Everyone) == 0, "%s: Everyone is granted 0x%lx\n", Label, (ULONG)AllowedFor(Dacl, Everyone));
+        CHK(0, AllowedFor(Dacl, Everyone) == 0, "%s: Everyone is granted 0x%lx\n", Label, (ULONG)AllowedFor(Dacl, Everyone));
         LocalFree(Sd);
     }
     RegCloseKey(Key);
@@ -497,12 +497,12 @@ static void CheckUserRoot(const char *Label, PCWSTR Path)
     {
         Dacl = SdDacl(Sd, &Present);
         ok(Present && Dacl, "%s: no DACL\n", Label);
-        CHK(1, FindAce(Dacl, User, ACCESS_ALLOWED_ACE_TYPE, &Mask, NULL) && Mask == KEY_A,
+        CHK(0, FindAce(Dacl, User, ACCESS_ALLOWED_ACE_TYPE, &Mask, NULL) && Mask == KEY_A,
             "%s: the user's ACE mask 0x%lx\n", Label, (ULONG)Mask);
         Mask = 0;
-        CHK(1, FindAce(Dacl, System, ACCESS_ALLOWED_ACE_TYPE, &Mask, NULL) && Mask == KEY_A,
+        CHK(0, FindAce(Dacl, System, ACCESS_ALLOWED_ACE_TYPE, &Mask, NULL) && Mask == KEY_A,
             "%s: SYSTEM ACE mask 0x%lx\n", Label, (ULONG)Mask);
-        CHK(1, AllowedFor(Dacl, Everyone) == 0, "%s: Everyone is granted 0x%lx\n", Label, (ULONG)AllowedFor(Dacl, Everyone));
+        CHK(0, AllowedFor(Dacl, Everyone) == 0, "%s: Everyone is granted 0x%lx\n", Label, (ULONG)AllowedFor(Dacl, Everyone));
         LocalFree(Sd);
     }
     RegCloseKey(Key);
@@ -756,12 +756,12 @@ START_TEST(RegSecurityRoundTrip)
         ok(Control & SE_DACL_PRESENT, "no DACL present (0x%x)\n", Control);
     }
     /* the owner is the creating token's owner (Administrators for an admin, the user otherwise) */
-    CHK(1, SdOwner(Sd) && Owner && EqualSid(SdOwner(Sd), Owner), "owner of a new key is not the token owner\n");
+    CHK(0, SdOwner(Sd) && Owner && EqualSid(SdOwner(Sd), Owner), "owner of a new key is not the token owner\n");
     /* Everyone is not granted full control of a new key under HKCU */
     Dacl = SdDacl(Sd, &Present);
-    CHK(1, Present && Dacl && AllowedFor(Dacl, Everyone) == 0, "Everyone is granted 0x%lx on a new key\n",
+    CHK(0, Present && Dacl && AllowedFor(Dacl, Everyone) == 0, "Everyone is granted 0x%lx on a new key\n",
         (ULONG)AllowedFor(Dacl, Everyone));
-    CHK(1, FindAce(Dacl, System, ACCESS_ALLOWED_ACE_TYPE, &Mask, NULL), "a new key under HKCU has no SYSTEM ACE\n");
+    CHK(0, FindAce(Dacl, System, ACCESS_ALLOWED_ACE_TYPE, &Mask, NULL), "a new key under HKCU has no SYSTEM ACE\n");
     AceCountBefore = Dacl ? Dacl->AceCount : 0;
 
     /* only the requested parts come back */
@@ -808,9 +808,9 @@ START_TEST(RegSecurityRoundTrip)
     {
         Dacl = SdDacl(Sd, &Present);
         Mask = 0;
-        CHK(1, Dacl && FindAce(Dacl, Everyone, ACCESS_ALLOWED_ACE_TYPE, &Mask, NULL) && Mask == KEY_R,
+        CHK(0, Dacl && FindAce(Dacl, Everyone, ACCESS_ALLOWED_ACE_TYPE, &Mask, NULL) && Mask == KEY_R,
             "the ACE set with RegSetKeySecurity did not come back (mask 0x%lx)\n", (ULONG)Mask);
-        CHK(1, Dacl && Dacl->AceCount == AceCountBefore + 1, "ACE count %u, expected %lu\n",
+        CHK(0, Dacl && Dacl->AceCount == AceCountBefore + 1, "ACE count %u, expected %lu\n",
             Dacl ? Dacl->AceCount : 0, AceCountBefore + 1);
     }
 
@@ -842,11 +842,11 @@ START_TEST(RegSecurityRoundTrip)
             {
                 Dacl = SdDacl(Sd, &Present);
                 Mask = 0;
-                CHK(1, Dacl && Dacl->AceCount == 1 && FindAce(Dacl, Owner, ACCESS_ALLOWED_ACE_TYPE, &Mask, NULL) &&
+                CHK(0, Dacl && Dacl->AceCount == 1 && FindAce(Dacl, Owner, ACCESS_ALLOWED_ACE_TYPE, &Mask, NULL) &&
                     Mask == KEY_A, "protected DACL: %u ACEs, owner mask 0x%lx, expected 1 and 0xf003f\n",
                     Dacl ? Dacl->AceCount : 0, (ULONG)Mask);
                 GetSecurityDescriptorControl(Sd, &Control, &Revision);
-                CHK(1, Control & SE_DACL_PROTECTED, "the DACL is not protected (0x%x)\n", Control);
+                CHK(0, Control & SE_DACL_PROTECTED, "the DACL is not protected (0x%x)\n", Control);
             }
             LocalFree(Only);
         }
@@ -864,7 +864,7 @@ START_TEST(RegSecurityRoundTrip)
     if (!Error)
     {
         Dacl = SdDacl(Sd, &Present);
-        CHK(1, Present && Dacl == NULL, "NULL DACL did not round trip (present %d, dacl %p)\n", Present, Dacl);
+        CHK(0, Present && Dacl == NULL, "NULL DACL did not round trip (present %d, dacl %p)\n", Present, Dacl);
     }
 
     /* a bad owner: a SID the token may not assign (Guests) fails without SeRestorePrivilege */
@@ -873,7 +873,7 @@ START_TEST(RegSecurityRoundTrip)
         InitializeSecurityDescriptor(&Absolute, SECURITY_DESCRIPTOR_REVISION);
         SetSecurityDescriptorOwner(&Absolute, Guests, FALSE);
         Error = RegSetKeySecurity(Key, OWNER_SECURITY_INFORMATION, &Absolute);
-        CHK(1, Error == ERROR_INVALID_OWNER, "setting a foreign owner: error %ld, expected %d\n", Error, ERROR_INVALID_OWNER);
+        CHK(0, Error == ERROR_INVALID_OWNER, "setting a foreign owner: error %ld, expected %d\n", Error, ERROR_INVALID_OWNER);
         if (Error == ERROR_SUCCESS)
         {
             /* put it back so the key can be deleted whatever the kernel did */
@@ -1029,14 +1029,14 @@ START_TEST(RegSecurityCreate)
                 Dacl = SdDacl(Sd, &Present);
                 Mask = 0;
                 Flags = 0;
-                CHK(1, Dacl && FindAce(Dacl, User, ACCESS_ALLOWED_ACE_TYPE, &Mask, &Flags) && Mask == 0x2001d &&
+                CHK(0, Dacl && FindAce(Dacl, User, ACCESS_ALLOWED_ACE_TYPE, &Mask, &Flags) && Mask == 0x2001d &&
                     !(Flags & INHERITED_ACE),
                     "child: the inherited user ACE has mask 0x%lx flags 0x%x, expected 0x2001d without INHERITED_ACE\n",
                     (ULONG)Mask, Flags);
                 Mask = 0;
-                CHK(1, Dacl && FindAce(Dacl, Owner, ACCESS_ALLOWED_ACE_TYPE, &Mask, NULL) && (Mask & KEY_A) == KEY_A,
+                CHK(0, Dacl && FindAce(Dacl, Owner, ACCESS_ALLOWED_ACE_TYPE, &Mask, NULL) && (Mask & KEY_A) == KEY_A,
                     "child: the CREATOR OWNER ACE did not become an owner ACE (mask 0x%lx)\n", (ULONG)Mask);
-                CHK(1, SdOwner(Sd) && EqualSid(SdOwner(Sd), Owner), "child: owner is not the token owner\n");
+                CHK(0, SdOwner(Sd) && EqualSid(SdOwner(Sd), Owner), "child: owner is not the token owner\n");
                 LocalFree(Sd);
             }
             RegCloseKey(Child);
