@@ -9,6 +9,102 @@
 
 #include <gditools.h>
 
+typedef struct _COPY_BUFFER_CONTEXT
+{
+    HANDLE event;
+    BYTE *buffer;
+} COPY_BUFFER_CONTEXT;
+
+static DWORD WINAPI
+ReleaseCopyBuffer(void *parameter)
+{
+    COPY_BUFFER_CONTEXT *context = parameter;
+    WaitForSingleObject(context->event, INFINITE);
+    VirtualFree(context->buffer, 0, MEM_RELEASE);
+    return 0;
+}
+
+static void
+Test_GetDIBits_BoundedCopy(void)
+{
+    typedef INT (WINAPI *PFNGETDIBITSINTERNAL)(HDC, HBITMAP, UINT, UINT,
+                                                 LPBYTE, LPBITMAPINFO, UINT, UINT, UINT);
+    HMODULE hWin32u = GetModuleHandleW(L"win32u.dll");
+    PFNGETDIBITSINTERNAL pfnGetDIBits;
+    BITMAPV5HEADER header;
+    HDC hdc;
+    HBITMAP hbm;
+    BYTE bits[24];
+    INT result;
+    UINT index;
+
+    if (!hWin32u)
+        hWin32u = LoadLibraryW(L"win32u.dll");
+    pfnGetDIBits = hWin32u ? (PFNGETDIBITSINTERNAL)GetProcAddress(hWin32u,
+                                    "NtGdiGetDIBitsInternal") : NULL;
+    if (!pfnGetDIBits)
+    {
+        skip("NtGdiGetDIBitsInternal is unavailable\n");
+        return;
+    }
+
+    hdc = CreateCompatibleDC(NULL);
+    hbm = CreateBitmap(2, 2, 1, 32, NULL);
+    ok(hdc && hbm, "Could not create bitmap and DC\n");
+    if (hdc && hbm)
+    {
+        ZeroMemory(&header, sizeof(header));
+        header.bV5Size = sizeof(header);
+        header.bV5Width = 2;
+        header.bV5Height = 2;
+        header.bV5Planes = 1;
+        header.bV5BitCount = 32;
+        header.bV5Compression = BI_RGB;
+        FillMemory(bits, sizeof(bits), 0xA5);
+        result = pfnGetDIBits(hdc, hbm, 0, 2, bits, (LPBITMAPINFO)&header,
+                              DIB_RGB_COLORS, 4, sizeof(header));
+        ok(result == 0, "Expected insufficient buffer to fail, got %d\n", result);
+        for (index = 0; index < sizeof(bits); index++)
+            ok(bits[index] == 0xA5, "Byte %u changed despite insufficient cjMaxBits\n", index);
+
+        {
+            COPY_BUFFER_CONTEXT context;
+            HBITMAP largeBitmap = CreateBitmap(1024, 1024, 1, 32, NULL);
+            HANDLE thread;
+            INT copyResult;
+
+            context.buffer = VirtualAlloc(NULL, 1024 * 1024 * 4,
+                                          MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+            context.event = CreateEventW(NULL, TRUE, FALSE, NULL);
+            thread = (largeBitmap && context.buffer && context.event) ?
+                     CreateThread(NULL, 0, ReleaseCopyBuffer, &context, 0, NULL) : NULL;
+            if (thread)
+            {
+                header.bV5Width = 1024;
+                header.bV5Height = 1024;
+                SetEvent(context.event);
+                copyResult = pfnGetDIBits(hdc, largeBitmap, 0, 1024,
+                                         context.buffer, (LPBITMAPINFO)&header,
+                                         DIB_RGB_COLORS, 1024 * 1024 * 4,
+                                         sizeof(header));
+                ok(copyResult == 0 || copyResult == 1024,
+                   "Unexpected line count on concurrent buffer release: %d\n", copyResult);
+                WaitForSingleObject(thread, INFINITE);
+                CloseHandle(thread);
+            }
+            else
+            {
+                skip("Could not allocate concurrent copy resources\n");
+                if (context.buffer) VirtualFree(context.buffer, 0, MEM_RELEASE);
+            }
+            if (context.event) CloseHandle(context.event);
+            if (largeBitmap) DeleteObject(largeBitmap);
+        }
+    }
+    if (hbm) DeleteObject(hbm);
+    if (hdc) DeleteDC(hdc);
+}
+
 void
 Test_GetDIBits_xBpp(
     ULONG cBitsPixel)
@@ -493,6 +589,7 @@ void Test_GetDIBits_BI_BITFIELDS()
 
 START_TEST(GetDIBits)
 {
+    Test_GetDIBits_BoundedCopy();
     ok(GdiToolsInit(), "GdiToolsInit failed\n");
 
     Test_GetDIBits_xBpp(1);

@@ -1196,10 +1196,30 @@ GreGetDIBitsInternal(
             ScanLines = 0;
         else
         {
-            RtlCopyMemory(Bits, pDIBits, DIB_GetDIBImageBytes (width, ScanLines, bpp));
+            INT cjImage = DIB_GetDIBImageBytes(width, ScanLines, bpp);
+            UINT cjCopy = (cjImage > 0) ? min(MaxBits, (UINT)cjImage) : 0;
+
+            if (cjImage <= 0 || MaxBits < (UINT)cjImage)
+            {
+                ScanLines = 0;
+                ret = FALSE;
+            }
+            else
+            {
+                _SEH2_TRY
+                {
+                    RtlCopyMemory(Bits, pDIBits, cjCopy);
+                }
+                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    ScanLines = 0;
+                    ret = FALSE;
+                }
+                _SEH2_END;
+            }
         }
         /* Update if line count has changed */
-        if (newLines != -1)
+        if (ret && newLines != -1)
         {
             ScanLines = (UINT)newLines;
         }

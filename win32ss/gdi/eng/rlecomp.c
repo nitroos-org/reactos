@@ -24,10 +24,10 @@ VOID DecompressBitmap(SIZEL Size, BYTE *CompressedBits, BYTE *UncompressedBits,
     INT x = 0, y = Size.cy - 1;
     INT i, c, c2, length;
     INT width = Size.cx, height = y;
-    BYTE *begin = CompressedBits;
     BYTE *bits = CompressedBits;
     BYTE *temp;
     BOOL is4bpp = FALSE;
+    ULONG remaining = cjSizeImage;
 
     if ((Format == BMF_4RLE) || (Format == BMF_4BPP))
         is4bpp = TRUE;
@@ -36,12 +36,14 @@ VOID DecompressBitmap(SIZEL Size, BYTE *CompressedBits, BYTE *UncompressedBits,
 
     _SEH2_TRY
     {
-        while (y >= 0 && (bits - begin) <= cjSizeImage)
+        while (y >= 0 && remaining >= 2)
         {
             length = *bits++;
+            remaining--;
             if (length)
             {
                 c = *bits++;
+                remaining--;
                 for (i = 0; i < length; i++)
                 {
                     if (x >= width) break;
@@ -69,6 +71,7 @@ VOID DecompressBitmap(SIZEL Size, BYTE *CompressedBits, BYTE *UncompressedBits,
             else
             {
                 length = *bits++;
+                remaining--;
                 switch (length)
                 {
                 case RLE_EOL:
@@ -78,14 +81,22 @@ VOID DecompressBitmap(SIZEL Size, BYTE *CompressedBits, BYTE *UncompressedBits,
                 case RLE_END:
                     _SEH2_YIELD(return);
                 case RLE_DELTA:
-                    x += *bits++;
+                    if (remaining < 2)
+                        _SEH2_YIELD(return);
+                    x = (INT)min((LONGLONG)x + *bits++, (LONGLONG)width);
                     y -= *bits++;
+                    remaining -= 2;
                     break;
                 default:
                     for (i = 0; i < length; i++)
                     {
                         if (!(is4bpp && i & 1))
+                        {
+                            if (!remaining)
+                                _SEH2_YIELD(return);
                             c = *bits++;
+                            remaining--;
+                        }
 
                         if (x < width)
                         {
@@ -110,9 +121,12 @@ VOID DecompressBitmap(SIZEL Size, BYTE *CompressedBits, BYTE *UncompressedBits,
                             x++;
                         }
                     }
-                    if ((bits - begin) & 1)
+                    if ((is4bpp ? (length + 1) / 2 : length) & 1)
                     {
+                        if (!remaining)
+                            _SEH2_YIELD(return);
                         bits++;
+                        remaining--;
                     }
                 }
             }

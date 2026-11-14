@@ -8,6 +8,7 @@
 #include "precomp.h"
 
 #include <gditools.h>
+#include <limits.h>
 
 void Test_MaskBlt_1bpp()
 {
@@ -82,6 +83,20 @@ void Test_MaskBlt_1bpp()
     ok(ret == 1, "MaskBlt failed (%d)\n", ret);
     ok(pjBitsDst[0] == 0xCC, "pjBitsDst[0] == 0x%x\n", pjBitsDst[0]);
 
+    {
+        HRGN clip = CreateRectRgn(2, 0, 6, 1);
+        pjBitsDst[0] = 0;
+        pjBitsSrc[0] = 0xFF;
+        pjBitsMsk[0] = 0xF0;
+        SelectClipRgn(hdcDst, clip);
+        ret = MaskBlt(hdcDst, 0, 0, 8, 1, hdcSrc, 0, 0, hbmMsk,
+                      0, 0, MAKEROP4(SRCCOPY, 0xAA0000));
+        ok(ret, "Clipped MaskBlt failed\n");
+        ok(pjBitsDst[0] == 0x30, "Clipped mask origin: %02x\n", pjBitsDst[0]);
+        SelectClipRgn(hdcDst, NULL);
+        DeleteObject(clip);
+    }
+
     /* Try a ROP that needs a mask with an invalid mask bitmap handle */
     SetLastError(0xDEADBEEF);
     ret = MaskBlt(hdcDst, 0, 0, 8, 1, hdcSrc, 0, 0, (HBITMAP)0x123456, 0, 0, MAKEROP4(SRCCOPY, 0xAA0000));
@@ -131,6 +146,26 @@ void Test_MaskBlt_1bpp()
     ret = MaskBlt(hdcDst, 0, 0, 4, 1, hdcSrc, 0, 0, hbmMsk, 0, 1, MAKEROP4(SRCCOPY, 0xAA0000));
     ok_err(ERROR_INVALID_PARAMETER);
     ok(ret == 0, "MaskBlt should fail, but succeeded (%d)\n", ret);
+
+    {
+        static const INT origins[][2] = {
+            {-1, 0}, {INT_MIN, 0}, {0, -1}, {0, INT_MIN},
+            {4, 0}, {0, 1}, {INT_MAX, 0}
+        };
+        UINT index;
+
+        for (index = 0; index < sizeof(origins) / sizeof(origins[0]); index++)
+        {
+            pjBitsDst[0] = 0xAA;
+            ret = MaskBlt(hdcDst, 0, 0, 4, 1, hdcSrc, 0, 0, hbmMsk,
+                          origins[index][0], origins[index][1],
+                          MAKEROP4(SRCCOPY, 0xAA0000));
+            ok(!ret, "MaskBlt accepted mask origin (%d,%d)\n",
+               origins[index][0], origins[index][1]);
+            ok(pjBitsDst[0] == 0xAA, "MaskBlt changed destination at (%d,%d)\n",
+               origins[index][0], origins[index][1]);
+        }
+    }
 
     SetLastError(0xDEADBEEF);
     ret = MaskBlt(hdcDst, 0, 0, 4, 1, hdcSrc, 0, 0, hbmMsk, 0, 0, MAKEROP4(SRCCOPY, 0xAA0000));
