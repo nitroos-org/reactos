@@ -912,6 +912,8 @@ NtUserCallHwndParam(
             /* Only a window of the calling process: the property changes how its pixels are drawn */
             if (pWnd && pWnd->head.pti->ppi == PsGetCurrentProcessWin32Process())
             {
+                BOOL bWasGlass = UserGetProp(pWnd, gpsi->atomFrostedWindowProp, TRUE) != NULL;
+
                 if (Param)
                     ret = UserSetProp(pWnd, gpsi->atomFrostedWindowProp, (HANDLE)1, TRUE);
                 else
@@ -920,8 +922,14 @@ NtUserCallHwndParam(
                     ret = TRUE;
                 }
                 GlassBackdropDrop(hWnd);
-                /* Glass or not any more: a redirection surface does not hold what the window shows now */
-                UserRedirDetachWindow(pWnd);
+                /*
+                 * Glass or not any more: a redirection surface does not hold what the window shows now. A call
+                 * that changes nothing (DwmExtendFrameIntoClientArea is called again and again, Firefox) leaves
+                 * the surface and what the window drew into it: it was dropped and drawn again empty, and a
+                 * window that was covered at the time stayed black when it came up, nothing asks it to paint.
+                 */
+                if (bWasGlass != (Param != 0))
+                    UserRedirDetachWindow(pWnd);
             }
             UserLeave();
             return ret;
