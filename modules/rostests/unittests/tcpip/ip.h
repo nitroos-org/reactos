@@ -42,6 +42,7 @@ typedef union _IP_HEADER {
 
 #define IPv4_FRAGOFS_MASK       0x1FFF
 #define IPv4_MF_MASK            0x2000
+#define IPv4_DF_MASK            0x4000
 #define IPv4_MAX_HEADER_SIZE    60
 
 /* The test's NDIS packet: one flat buffer */

@@ -35,6 +35,7 @@ typedef struct _NPAGED_LOOKASIDE_LIST {
 #define NonPagedPool 0
 #define PACKET_BUFFER_TAG 'pbPI'
 #define WN2H(w) ((USHORT)((((w) & 0xFF) << 8) | (((w) >> 8) & 0xFF)))
+#define WH2N(w) WN2H(w)
 
 #define TcpipInitializeSpinLock(Lock)
 #define TcpipAcquireSpinLock(Lock, Irql) (*(Irql) = 0)
@@ -58,6 +59,7 @@ VOID NdisReturnPackets(PNDIS_PACKET *Packets, UINT Count);
 PIP_PACKET IPInitializePacket(PIP_PACKET IPPacket, ULONG Type);
 VOID IPDispatchProtocol(PIP_INTERFACE Interface, PIP_PACKET IPPacket);
 BOOLEAN IPv4CorrectChecksum(PVOID Data, UINT Count);
+USHORT IPv4Checksum(PVOID Data, UINT Count, ULONG Seed);
 VOID AddrInitIPv4(PIP_ADDRESS IPAddress, IPv4_RAW_ADDRESS RawAddress);
 BOOLEAN AddrIsEqual(PIP_ADDRESS Address1, PIP_ADDRESS Address2);
 
