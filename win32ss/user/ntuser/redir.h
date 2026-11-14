@@ -17,6 +17,7 @@ VOID FASTCALL UserRedirRetryCount(LONG Delta);
 VOID FASTCALL UserRedirDcRelease(PVOID pvRedir);
 VOID FASTCALL UserRedirWindowMoved(PWND Wnd);
 VOID FASTCALL UserRedirPresentPending(VOID);
+VOID FASTCALL UserRedirScrollRelease(BOOL bScroll);
 BOOL FASTCALL UserRedirHasSurface(PWND Wnd);
 VOID FASTCALL UserRedirExpose(PWND DesktopWnd, PREGION RgnScreen);
 BOOL FASTCALL UserRedirCopyToDC(PWND Wnd, HDC hdc, LONG xSrc, LONG ySrc, LONG cx, LONG cy);

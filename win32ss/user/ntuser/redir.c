@@ -67,6 +67,9 @@ typedef struct _REDIR
     SIZE_T cjBits;
     KSPIN_LOCK DirtyLock;
     REDIR_DIRTY DirtyRects; /* what DCs drew since the last present (surface coordinates), DirtyLock */
+    LONGLONG LastScroll;    /* performance counter at the last ScrollWindowEx release (USER lock) */
+    LONGLONG HoldUntil;     /* during a burst of scrolls, releases present the window once per frame, until this time (USER lock) */
+    LONGLONG LastPresent;   /* performance counter at the last present of a burst by a release (USER lock) */
     volatile LONG Dirty;    /* DirtyRects is not empty (counted in gRedirDirtyCount) */
     /* Level 2 */
     BOOLEAN bTrans;         /* layered or glass when the record was made: composed (blended), never copied as it is */
@@ -84,6 +87,8 @@ static SIZE_T gRedirBytes, gRedirBudget;
 static ATOM AtomRedir;
 static ATOM AtomUlwSeen;     /* level 2: the window has had UpdateLayeredWindow content (with or without a surface) */
 static volatile LONG gRedirTimerArmed;
+static BOOL gRedirScrollRelease;        /* the DC being released is the one of a scroll (USER lock) */
+static LONGLONG gRedirFrameQpc;         /* a frame (REDIR_FRAME_100NS) in performance counter units */
 static LONG gRedirBusyFrames;           /* frame-timer passes that found the USER lock held (raw input thread only) */
 static volatile LONG gRedirDirtyCount;   /* records with Dirty set: the timer takes the USER lock only then */
 static ULONG gRedirCreated, gRedirRefused, gRedirPresents;
@@ -212,6 +217,12 @@ UserRedirInit(VOID)
     }
     /* A synchronization timer: the wait of the raw input thread resets it (a notification timer stays signaled) */
     KeInitializeTimerEx(gRedirTimer, SynchronizationTimer);
+    {
+        LARGE_INTEGER Freq;
+
+        KeQueryPerformanceCounter(&Freq);
+        gRedirFrameQpc = Freq.QuadPart * 16 / 1000;
+    }
     DbgPrint("win32k: window redirection level %lu (NitroRedirection), surface budget %Iu MB\n",
              gRedirLevel, gRedirBudget >> 20);
 #endif
@@ -1382,15 +1393,73 @@ RedirPresentDirty(PREDIR r)
         RedirPresentRect(r, &Dirty);
 }
 
-/* A DC bound to the record is released (ReleaseDC or EndPaint): what it drew goes to the screen */
+/*
+ * ScrollWindowEx releases its DC with this set: a scroll moves the whole scrolled rectangle, so each one copied to the
+ * screen costs as much as the scroll on the screen itself, on top of the scroll in the surface.
+ */
+VOID
+FASTCALL
+UserRedirScrollRelease(BOOL bScroll)
+{
+    gRedirScrollRelease = bScroll;
+}
+
+/*
+ * A DC bound to the record is released (ReleaseDC or EndPaint): what it drew goes to the screen.
+ *
+ * Scrolls that follow each other within a frame (a list or text scrolled in a loop) are the exception: the first
+ * scroll after a pause is shown at once, and while the next ones come within a frame of the one before, the window is
+ * shown once per frame, by the release that finds the frame over, so the screen never shows the scrolled part
+ * without the exposed one (what is painted into the window after a scroll waits in the same way). The frame timer
+ * shows what is left when the releases stop presenting (two frames without one), not before, so the raw input thread
+ * does not copy the window on another processor while the scrolling thread draws into it. What is shown is the same,
+ * a few frames later at the end of a burst, and a loop of scrolls copies once per frame instead of once per scroll.
+ */
 VOID
 FASTCALL
 UserRedirReleased(PVOID pv)
 {
     PREDIR r = pv;
+    LONGLONG Now;
 
-    if (r->pwnd)
-        RedirPresentDirty(r);
+    if (!r->pwnd)
+        return;
+    if (gRedirScrollRelease)
+    {
+        BOOL bBurst;
+
+        Now = KeQueryPerformanceCounter(NULL).QuadPart;
+        bBurst = Now - r->LastScroll < gRedirFrameQpc;
+        r->LastScroll = Now;
+        if (bBurst)
+        {
+            r->HoldUntil = Now + gRedirFrameQpc;
+            if (Now - r->LastPresent < gRedirFrameQpc)
+            {
+                RedirArmTimer(REDIR_FRAME_100NS);
+                return;
+            }
+        }
+        r->LastPresent = Now;
+    }
+    else if (r->HoldUntil)
+    {
+        Now = KeQueryPerformanceCounter(NULL).QuadPart;
+        if (Now < r->HoldUntil)
+        {
+            if (Now - r->LastPresent < gRedirFrameQpc)
+            {
+                RedirArmTimer(REDIR_FRAME_100NS);
+                return;
+            }
+            r->LastPresent = Now;
+        }
+        else
+        {
+            r->HoldUntil = 0;
+        }
+    }
+    RedirPresentDirty(r);
 }
 
 /* The window moved: all of its content goes to its new place */
@@ -1503,7 +1572,12 @@ UserRedirPresentPending(VOID)
         PREDIR r = CONTAINING_RECORD(Entry, REDIR, Link);
 
         Entry = Entry->Flink;
-        if (r->Dirty && r->pwnd)
+        if (r->Dirty && r->pwnd && r->HoldUntil && KeQueryPerformanceCounter(NULL).QuadPart - r->LastPresent < 2 * gRedirFrameQpc)
+        {
+            /* In a burst of scrolls, whose releases present the window once per frame: the timer waits until they stop */
+            RedirArmTimer(REDIR_FRAME_100NS);
+        }
+        else if (r->Dirty && r->pwnd)
         {
             /* RedirPresentDirty may detach r; the next entry was taken first, and r stays alive while a DC holds it */
             InterlockedIncrement(&r->cRefs);

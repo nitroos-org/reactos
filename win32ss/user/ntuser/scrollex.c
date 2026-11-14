@@ -339,7 +339,9 @@ IntScrollWindowEx(
                           RgnUpdate,
                           prcUpdate);
 
+   UserRedirScrollRelease(TRUE);
    UserReleaseDC(Window, hDC, FALSE);
+   UserRedirScrollRelease(FALSE);
 
    /*
     * Take into account the fact that some damage may have occurred during
