@@ -109,6 +109,10 @@ CheckSid__(
     KmtOk(SidSize >= Length, FileAndLine, "SidSize %lu too small, need %lu\n", SidSize, Length);
     if (KmtSkip(SidSize >= Length, FileAndLine, "Sid too small\n"))
         return;
+    /* An expected SID the kernel does not export (SeExports field NULL) is a failure, not a fault */
+    KmtOk(ExpectedSid != NULL, FileAndLine, "Expected Sid is NULL\n");
+    if (KmtSkip(ExpectedSid != NULL, FileAndLine, "No expected Sid\n"))
+        return;
     Okay = RtlEqualSid(Sid, ExpectedSid);
     KmtOk(Okay, FileAndLine, "Sids %p and %p not equal\n", Sid, ExpectedSid);
     if (!Okay)

@@ -839,6 +839,21 @@ CmpFreeParentSecurity(
     _In_ PSECURITY_DESCRIPTOR ParentSd
 );
 
+PSECURITY_DESCRIPTOR
+NTAPI
+CmpCaptureKeySecurity(
+    _In_ PCM_KEY_CONTROL_BLOCK Kcb
+);
+
+BOOLEAN
+NTAPI
+CmpCheckKeyOpenAccess(
+    _In_ PVOID Object,
+    _Inout_ PACCESS_STATE AccessState,
+    _In_ KPROCESSOR_MODE AccessMode,
+    _Out_ PNTSTATUS AccessStatus
+);
+
 NTSTATUS
 NTAPI
 CmpCopyKeySecurityCell(
