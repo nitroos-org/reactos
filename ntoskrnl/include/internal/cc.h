@@ -295,7 +295,31 @@ typedef struct _INTERNAL_BCB
      * independent of the instantaneous PinCount (which legitimately hits 0
      * during an exclusive-pin ownership handoff). */
     BOOLEAN Pinned;
+    /* CC_BCB_WRITE_*: how the BCB has been pinned for writing since all its
+     * pins and repins last went; BcbSpinLock */
+    UCHAR PinWrite;
+    /* KeQueryInterruptTime of the last event that set PinWrite bits; BcbSpinLock */
+    ULONGLONG PinWriteTime;
+    /* CcRepinBcb calls not yet matched by CcUnpinRepinnedBcb: a repinned
+     * BCB is still pinned for the lazy writer; BcbSpinLock */
+    ULONG RepinCount;
 } INTERNAL_BCB, *PINTERNAL_BCB;
+
+/*
+ * A range pinned for writing is left out of the lazy write until it is
+ * unpinned (CcpGetPinHeldPages, CcRosFlushVacb): pinned PIN_EXCLUSIVE, or
+ * made dirty (CcSetDirtyPinnedData) while pinned or repinned. A BCB made
+ * dirty while pinned is made dirty again when its last pin or repin goes, so
+ * that a write which does not hold pinned ranges back (CcFlushCache, a trim
+ * or shutdown flush, Mm) cannot leave the changes made after it unwritten.
+ */
+#define CC_BCB_WRITE_EXCLUSIVE 0x1
+#define CC_BCB_WRITE_DIRTY     0x2
+/* Views a flush writes in one request (CcRosFlushVacb) */
+#define CC_FLUSH_CLUSTER_VACBS 8
+/* How long (100 ns units) after its last pin-for-writing event a pinned range is held back from the lazy write: ten
+ * lazy writer periods (10 s); after that it is written, its pins stay (CcpGetPinHeldPages) */
+#define CC_PIN_HOLD_MAX (10ULL * 10000000)
 
 /* Node type codes of the BCB handles Cc gives to file systems */
 #define CC_NTC_BCB  0x2FD
@@ -371,8 +395,17 @@ CcMdlWriteComplete2(
 NTSTATUS
 CcRosFlushVacb(
     _In_ PROS_VACB Vacb,
-    _Out_opt_ PIO_STATUS_BLOCK Iosb
+    _Out_opt_ PIO_STATUS_BLOCK Iosb,
+    _Out_writes_opt_(CC_FLUSH_CLUSTER_VACBS) PROS_VACB *HeldViews,
+    _Out_opt_ PULONG HeldCount
 );
+
+BOOLEAN
+CcpGetPinHeldPages(
+    _In_ PROS_SHARED_CACHE_MAP SharedCacheMap,
+    _In_ LONGLONG Start,
+    _In_ ULONG Pages,
+    _Out_writes_((Pages + 31) / 32) PULONG Held);
 
 NTSTATUS
 CcRosGetVacb(
