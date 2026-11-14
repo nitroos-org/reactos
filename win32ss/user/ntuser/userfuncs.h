@@ -166,6 +166,9 @@ PWND FASTCALL DWP_GetEnabledPopup(PWND pWnd);
 
 BOOL FASTCALL SetLayeredStatus(PWND pWnd, BYTE set);
 BOOL FASTCALL GetLayeredStatus(PWND pWnd);
+BOOL FASTCALL UserIsLayeredUnset(PWND pWnd);
+VOID FASTCALL UserLayeredShownChanged(PWND pWnd);
+VOID FASTCALL co_UserLayeredStyleChanged(PWND pWnd);
 BOOL FASTCALL IntGetLayeredAttributes(PWND pWnd, COLORREF *pcrKey, BYTE *pbAlpha, DWORD *pdwFlags);
 
 /************** INPUT CONTEXT **************/
