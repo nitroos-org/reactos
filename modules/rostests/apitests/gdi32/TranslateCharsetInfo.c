@@ -349,6 +349,24 @@ START_TEST(TranslateCharsetInfo)
     ok(ret == FALSE, "invalid lcid: ret %d\n", ret);
     ok(err == ERROR_INVALID_PARAMETER, "invalid lcid: error %lu\n", err);
 
+    /* locales that kernel32 has data for but Windows does not know: nl-SR is measured on Windows 10
+       (FALSE, ERROR_INVALID_PARAMETER); eo, wa, gv and ast are not Windows locales either (kw 0x0492
+       is not listed: that LCID is ku-Arab-IQ on Windows, a valid locale) */
+    {
+        static const LCID WineOnly[] = { 0x0c13, 0x048f, 0x0490, 0x0494, 0x04a5 };
+        UINT j;
+
+        for (j = 0; j < _countof(WineOnly); j++)
+        {
+            memset(&csi, 0xcc, sizeof(csi));
+            SetLastError(0xdeadbeef);
+            ret = TranslateCharsetInfo((DWORD *)(ULONG_PTR)WineOnly[j], &csi, TCI_SRCLOCALE);
+            err = GetLastError();
+            ok(ret == FALSE, "lcid %04lx: ret %d\n", WineOnly[j], ret);
+            ok(err == ERROR_INVALID_PARAMETER, "lcid %04lx: error %lu\n", WineOnly[j], err);
+        }
+    }
+
     /* the invariant locale and the Arabic neutral locale */
     memset(&csi, 0xcc, sizeof(csi));
     ret = TranslateCharsetInfo((DWORD *)(ULONG_PTR)0x7f, &csi, TCI_SRCLOCALE);
