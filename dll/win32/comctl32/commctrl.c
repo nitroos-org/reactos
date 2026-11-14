@@ -4,7 +4,7 @@
  * Copyright 1997 Dimitrie O. Paun
  *           1998 Juergen Schmied <j.schmied@metronet.de>
  * Copyright 1998,2000 Eric Kohl
- * Copyright 2014-2015 Michael Müller
+ * Copyright 2014-2015 Michael MÃ¼ller
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -1188,45 +1188,6 @@ CreateToolbar (HWND hwnd, DWORD style, UINT wID, INT nBitmaps,
 
 
 #if __WINE_COMCTL32_VERSION == 6
-#ifdef __REACTOS__
-#include "shlwapi.h"
-/* Wine 11 has no DllGetVersion code (it comes from the resource of its versioned DLLs) */
-/***********************************************************************
- * DllGetVersion [COMCTL32.@]
- *
- * Retrieves version information of the 'COMCTL32.DLL'
- *
- * PARAMS
- *     pdvi [O] pointer to version information structure.
- *
- * RETURNS
- *     Success: S_OK
- *     Failure: E_INVALIDARG
- *
- * NOTES
- *     Returns version of a comctl32.dll from IE4.01 SP1.
- */
-
-HRESULT WINAPI DllGetVersion (DLLVERSIONINFO *pdvi)
-{
-    if (pdvi->cbSize != sizeof(DLLVERSIONINFO)) {
-        WARN("wrong DLLVERSIONINFO size from app\n");
-	return E_INVALIDARG;
-    }
-
-    pdvi->dwMajorVersion = COMCTL32_VERSION;
-    pdvi->dwMinorVersion = COMCTL32_VERSION_MINOR;
-    pdvi->dwBuildNumber = 2919;
-    pdvi->dwPlatformID = 6304;
-
-    TRACE("%u.%u.%u.%u\n",
-	   pdvi->dwMajorVersion, pdvi->dwMinorVersion,
-	   pdvi->dwBuildNumber, pdvi->dwPlatformID);
-
-    return S_OK;
-}
-#endif /* __REACTOS__ */
-
 /***********************************************************************
  *		DllInstall (COMCTL32.@)
  *
