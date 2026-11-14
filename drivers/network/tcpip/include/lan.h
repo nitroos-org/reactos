@@ -71,6 +71,16 @@ typedef struct LAN_ADAPTER {
     CHEW_SERIAL_QUEUE ReceiveQueue;         /* Received packets, in arrival order */
     LONG HeldPackets;                       /* Miniport packets waiting in ReceiveQueue */
     volatile LONG ReceiveWorkItems;         /* Received frames queued as work items of their own */
+    /* Multicast reception (LanSetMulticast; only IPv6 asks for it). Under ReconfigureLock: */
+    BOOLEAN McastWanted;                    /* A list was asked for (McastCount/McastList hold it) */
+    BOOLEAN McastReady;                     /* BindAdapter set the packet filter: a list can be applied */
+    BOOLEAN McastQueued;                    /* LanMulticastWorker queued or running */
+    BOOLEAN McastChanged;                   /* The list changed since the worker last took it */
+    UCHAR McastCount;                       /* Addresses in McastList */
+    UCHAR McastList[LL_MULTICAST_MAX * IEEE_802_ADDR_LENGTH];
+    /* The worker's own (one runs at a time): */
+    UINT McastFilter;                       /* Packet filter it last set; 0: still BindAdapter's PacketFilter */
+    ULONG McastMaxList;                     /* OID_802_3_MAXIMUM_LIST_SIZE; 0: not asked yet */
 } LAN_ADAPTER, *PLAN_ADAPTER;
 
 /* LAN adapter state constants */

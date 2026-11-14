@@ -75,6 +75,80 @@ TCPReadIpv6Switch(VOID)
         DbgPrint("TCPIP: IPv6 on (Ipv6Enable)\n");
 }
 
+/* The link layer multicast groups an Ethernet interface must receive (core lock held): the all-nodes group
+ * (router advertisements, RFC 4861 4.2) and the solicited-node group of each of its addresses, tentative ones
+ * included (neighbour solicitations, and duplicate address detection: RFC 4861 4.3, RFC 4862 5.4), mapped to
+ * Ethernet addresses as RFC 2464 7 says (33:33 and the last 32 bits). lwIP's addresses on one interface share
+ * their interface identifier (link-local and SLAAC), so this is usually two addresses. No MLD (lwipopts.h):
+ * the groups are not reported to the link */
+static
+VOID
+TCP6UpdateMulticast(struct netif *netif)
+{
+    PIP_INTERFACE IF = netif->state;
+    UCHAR List[LL_MULTICAST_MAX * 6];
+    UINT Count = 0, i, j;
+    s8_t Index;
+
+    if (!TCPIpv6Enabled || !IF || IF == Loopback || !IF->SetMulticast || IF->AddressLength != 6)
+        return;
+
+    RtlZeroMemory(List, sizeof(List));
+
+    /* ff02::1 */
+    List[0] = 0x33; List[1] = 0x33; List[2] = 0x00; List[3] = 0x00; List[4] = 0x00; List[5] = 0x01;
+    Count = 1;
+
+    for (Index = 0; Index < LWIP_IPV6_NUM_ADDRESSES; Index++)
+    {
+        const u8_t *Address;
+        UCHAR Group[6];
+
+        if (ip6_addr_isinvalid(netif_ip6_addr_state(netif, Index)) ||
+            ip6_addr_isduplicated(netif_ip6_addr_state(netif, Index)))
+            continue;
+
+        /* ff02::1:ffXX:XXXX, XX:XXXX the last 24 bits of the address */
+        Address = (const u8_t *)netif_ip6_addr(netif, Index)->addr;
+        Group[0] = 0x33; Group[1] = 0x33; Group[2] = 0xff;
+        Group[3] = Address[13]; Group[4] = Address[14]; Group[5] = Address[15];
+
+        for (i = 0; i < Count; i++)
+        {
+            for (j = 0; j < 6 && List[i * 6 + j] == Group[j]; j++)
+                ;
+            if (j == 6)
+                break;
+        }
+        if (i < Count)
+            continue;
+        if (Count == LL_MULTICAST_MAX)
+        {
+            /* More than the link layer takes as a list: it receives all multicast instead */
+            Count = LL_MULTICAST_MAX + 1;
+            break;
+        }
+        RtlCopyMemory(&List[Count * 6], Group, 6);
+        Count++;
+    }
+
+    IF->SetMulticast(IF->Context, List, Count);
+}
+
+/* lwIP's interface events (core lock held): an address set, removed, or changing state */
+static
+void
+TCP6NetifEvent(struct netif *netif, netif_nsc_reason_t Reason, const netif_ext_callback_args_t *Args)
+{
+    UNREFERENCED_PARAMETER(Args);
+
+    if (Reason & (LWIP_NSC_IPV6_SET | LWIP_NSC_IPV6_ADDR_STATE_CHANGED))
+        TCP6UpdateMulticast(netif);
+}
+
+static netif_ext_callback_t TCP6NetifCallback;
+static BOOLEAN TCP6NetifCallbackAdded;
+
 /* Called with the core lock held, from TCPInterfaceInit: the addresses an interface starts with */
 VOID
 TCPInterfaceInit6(PIP_INTERFACE IF)
@@ -83,6 +157,14 @@ TCPInterfaceInit6(PIP_INTERFACE IF)
 
     if (!TCPIpv6Enabled)
         return;
+
+    /* Address changes from now on keep the interface's multicast reception in step (the first interface
+       registers it, under the core lock as the others) */
+    if (!TCP6NetifCallbackAdded)
+    {
+        netif_add_ext_callback(&TCP6NetifCallback, TCP6NetifEvent);
+        TCP6NetifCallbackAdded = TRUE;
+    }
 
     /* An Ethernet interface gets its link-local address from its MAC (modified EUI-64, RFC 4291 2.5.1).
        It stays tentative until lwIP's duplicate address detection (RFC 4862 5.4) passes, which runs once
