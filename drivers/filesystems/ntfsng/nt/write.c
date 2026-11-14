@@ -560,7 +560,7 @@ NTSTATUS NgSetFileSizeForWrite(PNG_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG Ne
      * metadata overlay past its threshold wants a commit: both here, between core operations, with the journal I/O
      * outside CoreLock.  The core still checks for itself (a free since: it commits synchronously).
      */
-    if (NewSize > OldSize && Vcb->Core && ngc_commit_wanted(Vcb->Core, 1))
+    if (NewSize > OldSize && Vcb->Core && ngc_commit_wanted(Vcb->Core, (long long)(NewSize - OldSize)))
     {
         Err = NgCommit(Vcb);
         if (Err)

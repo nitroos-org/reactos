@@ -147,6 +147,12 @@ int kshim_jnl_degrade(struct block_device *b);
 void kshim_jnl_patch(struct block_device *b, int to_overlay, u64 off, u8 *buf, size_t len);
 int kshim_jnl_holds(struct block_device *b, u64 off, u64 len);
 
+/* Clusters freed by a transaction that is not covered by aux_done: noted at the free, skipped by the allocator (see kshim_jnl.c). */
+void kshim_resv_note(struct block_device *b, u64 lcn, u64 nr, u64 tag);
+u64 kshim_resv_skip(struct block_device *b, u64 lcn, u64 *next);
+s64 kshim_resv_state(struct block_device *b);
+void kshim_resv_drop_upto(struct block_device *b, u64 tag);
+
 /* Positive increments of a watched counter (the core's free-cluster count) are counted. */
 int kshim_watch_add(atomic64_t *v);
 void kshim_watch_del(atomic64_t *v);

@@ -56,6 +56,7 @@
 #define KJ_BUCKETS 1024
 #define KJ_SEGS_PRE 8	/* requests of the slot writes started under the lock (kshim_jnl_slots_start) */
 #define KJ_SECT 512
+#define KJ_RESV_MAX 256	/* frees (runs) remembered until a commit covers them */
 
 struct kj_ent {
 	struct kj_ent *next;
@@ -103,6 +104,12 @@ struct kshim_jnl {
 	u16 susn_new;
 	u64 saux;			/* the caller's value at the seal (see aux_done) */
 	u64 aux_done;			/* the caller's value at the last commit that is complete (all changes before it are committed) */
+	/* Clusters freed by transactions not covered by aux_done yet (see kshim_resv_note): the allocator leaves them alone. */
+	uintptr_t resv_lock;
+	struct { u64 lcn, len, tag; } resv[KJ_RESV_MAX];
+	int nresv;
+	u64 resv_clusters;		/* sum of the lengths of the entries */
+	u64 resv_over;			/* a free did not fit the list: the newest tag among those not recorded, 0 when none */
 	struct ngos_ev idle;		/* signalled while no I/O is in flight */
 	unsigned long unlocked_commits, io_us;
 	/*
@@ -1623,6 +1630,156 @@ void kshim_jnl_report(struct block_device *b)
 #if DBG
 	printk(KERN_WARNING "journal: unlocked journal I/O about %lu ms in total\n", j->io_us / 1000);
 #endif
+}
+
+/* ------------------------------------------------------------ clusters freed, not yet committed */
+/*
+ * File data is written in place.  A cluster freed by a transaction that is not committed (not covered by aux_done) must not
+ * receive data of another file before it is: a crash would give the old owner the new data.  The core used to commit before
+ * every allocation that followed a free; instead it leaves these clusters out of the allocation (kshim_resv_skip) and waits
+ * only when the list is full or the volume has too little other room (kshim_resv_state).  An entry is dropped once aux_done
+ * has reached its tag (the free-count after the free), exactly when the old wait would have ended.
+ */
+static void kj_resv_prune(struct kshim_jnl *j)
+{
+	u64 done = j->aux_done;
+	int i = 0;
+	while (i < j->nresv) {
+		if (j->resv[i].tag <= done) {
+			j->resv_clusters -= j->resv[i].len;
+			j->resv[i] = j->resv[--j->nresv];
+		} else
+			i++;
+	}
+	if (j->resv_over && j->resv_over <= done)
+		j->resv_over = 0;
+}
+
+/* A free of @nr clusters at @lcn, counted as free number @tag (called under the volume lock, before the count is raised). */
+void kshim_resv_note(struct block_device *b, u64 lcn, u64 nr, u64 tag)
+{
+	struct kshim_jnl *j = b->jnl;
+	unsigned char irql;
+	if (!j || !nr)
+		return;
+	irql = ngos_spin_lock(&j->resv_lock);
+	kj_resv_prune(j);
+	if (j->nresv && j->resv[j->nresv - 1].tag == tag && j->resv[j->nresv - 1].lcn + j->resv[j->nresv - 1].len == lcn) {
+		j->resv[j->nresv - 1].len += nr;
+		j->resv_clusters += nr;
+	} else if (j->nresv < KJ_RESV_MAX) {
+		j->resv[j->nresv].lcn = lcn;
+		j->resv[j->nresv].len = nr;
+		j->resv[j->nresv].tag = tag;
+		j->nresv++;
+		j->resv_clusters += nr;
+	} else if (tag > j->resv_over)
+		j->resv_over = tag;
+	ngos_spin_unlock(&j->resv_lock, irql);
+}
+
+/*
+ * The end of the reserved range that holds @lcn, else @lcn.  *@next is the first cluster at or after which the answer can
+ * change (the end of that range, or the start of the next one; ~0 when none), so a caller that goes up one cluster at a
+ * time asks again only from there.  Entries are only added under the volume lock the allocator holds.
+ */
+u64 kshim_resv_skip(struct block_device *b, u64 lcn, u64 *next)
+{
+	struct kshim_jnl *j = b->jnl;
+	unsigned char irql;
+	u64 end = lcn, nxt = ~0ULL, done;
+	int i;
+	*next = ~0ULL;
+	if (!j || !j->nresv)
+		return lcn;
+	irql = ngos_spin_lock(&j->resv_lock);
+	done = j->aux_done;
+	for (i = 0; i < j->nresv; i++) {
+		u64 lo = j->resv[i].lcn, hi = lo + j->resv[i].len;
+		if (j->resv[i].tag <= done)
+			continue;
+		if (lcn >= lo && lcn < hi) {
+			if (hi > end)
+				end = hi;
+		} else if (lo > lcn && lo < nxt)
+			nxt = lo;
+	}
+	ngos_spin_unlock(&j->resv_lock, irql);
+	*next = end > lcn ? end : nxt;
+	return end;
+}
+
+/* Non-zero when some free is noted that no complete commit covers yet. */
+int kshim_resv_any(struct block_device *b)
+{
+	struct kshim_jnl *j = b->jnl;
+	unsigned char irql;
+	int any = 0, i;
+	if (!j || !j->nresv)
+		return 0;
+	irql = ngos_spin_lock(&j->resv_lock);
+	for (i = 0; i < j->nresv; i++)
+		if (j->resv[i].tag > j->aux_done) {
+			any = 1;
+			break;
+		}
+	ngos_spin_unlock(&j->resv_lock, irql);
+	return any;
+}
+
+/* Sets in @bits (bit 0 = cluster @first, @nbits bits) the bits of the clusters that are reserved now. */
+void kshim_resv_mark(struct block_device *b, u64 first, u64 nbits, u8 *bits)
+{
+	struct kshim_jnl *j = b->jnl;
+	unsigned char irql;
+	int i;
+	if (!j || !j->nresv)
+		return;
+	irql = ngos_spin_lock(&j->resv_lock);
+	for (i = 0; i < j->nresv; i++) {
+		u64 lo = j->resv[i].lcn, hi = lo + j->resv[i].len, c;
+		if (j->resv[i].tag <= j->aux_done || hi <= first || lo >= first + nbits)
+			continue;
+		for (c = lo > first ? lo : first; c < hi && c < first + nbits; c++)
+			bits[(c - first) >> 3] |= 1 << ((c - first) & 7);
+	}
+	ngos_spin_unlock(&j->resv_lock, irql);
+}
+
+/* A commit that began when the free count was @tag has been completed: every free numbered up to it is covered, whatever aux_done says. */
+void kshim_resv_drop_upto(struct block_device *b, u64 tag)
+{
+	struct kshim_jnl *j = b->jnl;
+	unsigned char irql;
+	int i = 0;
+	if (!j)
+		return;
+	irql = ngos_spin_lock(&j->resv_lock);
+	while (i < j->nresv) {
+		if (j->resv[i].tag <= tag) {
+			j->resv_clusters -= j->resv[i].len;
+			j->resv[i] = j->resv[--j->nresv];
+		} else
+			i++;
+	}
+	if (j->resv_over && j->resv_over <= tag)
+		j->resv_over = 0;
+	ngos_spin_unlock(&j->resv_lock, irql);
+}
+
+/* Clusters the allocator leaves alone now; -1 when the list is not complete (a free was not recorded): the caller must wait for a commit. */
+s64 kshim_resv_state(struct block_device *b)
+{
+	struct kshim_jnl *j = b->jnl;
+	unsigned char irql;
+	s64 n;
+	if (!j)
+		return 0;
+	irql = ngos_spin_lock(&j->resv_lock);
+	kj_resv_prune(j);
+	n = j->resv_over ? -1 : (s64)j->resv_clusters;
+	ngos_spin_unlock(&j->resv_lock, irql);
+	return n;
 }
 
 /* ------------------------------------------------------------ watched counters */

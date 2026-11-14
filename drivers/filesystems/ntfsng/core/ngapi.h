@@ -138,8 +138,9 @@ int ngc_commit_begin(ngc_vol *v, int retain);	/* retain: the caller waits for du
 int ngc_commit_io(ngc_vol *v);
 void ngc_commit_end(ngc_vol *v);
 void ngc_commit_wait(ngc_vol *v);
-/* The overlay is past its threshold, or (alloc) a free is not committed and an allocation follows. */
-int ngc_commit_wanted(ngc_vol *v, int alloc);
+/* The overlay is past its threshold, or (alloc_bytes > 0: a growth of about that many bytes) a free is not committed and an allocation follows that cannot go around the freed clusters. */
+int ngc_commit_wanted(ngc_vol *v, long long alloc_bytes);
+extern int ngc_free_reservation;	/* 0: an allocation after a free waits for the commit (registry NoFreeReservation=1) */
 int ngc_changed(ngc_vol *v);
 void ngc_icache_trim(ngc_vol *v);
 int ngc_dirty(ngc_vol *v);

@@ -33,8 +33,8 @@
  * Locking: - The volume lcn bitmap must be locked for writing on entry and is
  *	      left locked on return.
  */
-int ntfs_cluster_free_from_rl_nolock(struct ntfs_volume *vol,
-		const struct runlist_element *rl)
+static int __ntfs_cluster_free_from_rl_nolock(struct ntfs_volume *vol,
+		const struct runlist_element *rl, bool note)
 {
 	struct inode *lcnbmp_vi = vol->lcnbmp_ino;
 	int ret = 0;
@@ -54,7 +54,10 @@ int ntfs_cluster_free_from_rl_nolock(struct ntfs_volume *vol,
 			continue;
 		err = ntfs_bitmap_clear_run(lcnbmp_vi, rl->lcn, rl->length);
 		if (likely(!err)) {
-			ntfs_drain_clusters(vol, rl->lcn, rl->length);
+			if (note)
+				ntfs_drain_clusters(vol, rl->lcn, rl->length);
+			else
+				ntfs_drain_clusters_only(vol, rl->lcn, rl->length);
 			nr_freed += rl->length;
 		} else if (!ret || ret == -ENOMEM)
 			ret = err;
@@ -62,6 +65,12 @@ int ntfs_cluster_free_from_rl_nolock(struct ntfs_volume *vol,
 	ntfs_inc_free_clusters(vol, nr_freed);
 	ntfs_debug("Done.");
 	return ret;
+}
+
+int ntfs_cluster_free_from_rl_nolock(struct ntfs_volume *vol,
+		const struct runlist_element *rl)
+{
+	return __ntfs_cluster_free_from_rl_nolock(vol, rl, true);
 }
 
 static s64 max_empty_bit_range(unsigned char *buf, int size)
@@ -201,6 +210,7 @@ struct runlist_element *ntfs_cluster_alloc(struct ntfs_volume *vol, const s64 st
 	u8 pass, done_zones, search_zone, need_writeback = 0, bit;
 	unsigned int memalloc_flags;
 	u8 has_guess, used_zone_pos;
+	u64 resv_from = 1, resv_check_at = 0;	/* the answer of kshim_resv_skip holds for the clusters in [resv_from, resv_check_at) */
 	pgoff_t index;
 
 	ntfs_debug("Entering for start_vcn 0x%llx, count 0x%llx, start_lcn 0x%llx, zone %s_ZONE.",
@@ -362,7 +372,28 @@ struct runlist_element *ntfs_cluster_alloc(struct ntfs_volume *vol, const s64 st
 			ntfs_debug("bit 0x%x.", bit);
 
 			if (has_guess) {
-				if (*byte & bit) {
+				/* A cluster freed by a transaction that is not committed yet is not given out (see kshim_resv_note). */
+				u64 resv_end = 0;
+
+				if (!(*byte & bit)) {
+					u64 here = (u64)(lcn + bmp_pos);
+
+					if (here < resv_from || here >= resv_check_at) {
+						resv_end = kshim_resv_skip(vol->sb->s_bdev, here, &resv_check_at);
+						if (resv_end > here)
+							resv_check_at = 0;	/* inside a reserved range: no answer to keep */
+						else
+							resv_from = here;
+					} else
+						resv_end = 0;	/* between two reserved ranges, as asked at resv_from */
+				}
+
+				if (resv_end > (u64)(lcn + bmp_pos) && !rlpos && !(is_contig && prev_run_len > 0)) {
+					/* Nothing taken yet: go on behind the reserved clusters. */
+					lcn = (s64)resv_end - bmp_pos;
+					continue;
+				}
+				if ((*byte & bit) || resv_end > (u64)(lcn + bmp_pos)) {
 					if (is_contig == true && prev_run_len > 0)
 						goto done;
 
@@ -370,7 +401,23 @@ struct runlist_element *ntfs_cluster_alloc(struct ntfs_volume *vol, const s64 st
 					break;
 				}
 			} else {
-				lcn = max_empty_bit_range(buf, buf_size >> 3);
+				/*
+				 * The largest free range of the page, without the clusters that uncommitted frees gave back: they are
+				 * not available (kshim_resv_skip), and a reserved range that wins here would hide the usable free
+				 * clusters of the rest of the page (the allocator goes on to the next page when the range ends).
+				 */
+				u8 *scan = buf, *tmp = NULL;
+
+				if (kshim_resv_any(vol->sb->s_bdev)) {
+					tmp = kmalloc(buf_size >> 3, GFP_NOFS);
+					if (tmp) {
+						memcpy(tmp, buf, buf_size >> 3);
+						kshim_resv_mark(vol->sb->s_bdev, (u64)bmp_pos, (u64)buf_size, tmp);
+						scan = tmp;
+					}
+				}
+				lcn = max_empty_bit_range(scan, buf_size >> 3);
+				kfree(tmp);
 				if (lcn < 0)
 					break;
 				has_guess = 1;
@@ -759,7 +806,7 @@ out:
 					rl[0].lcn, count - clusters);
 		/* Deallocate all allocated clusters. */
 		ntfs_debug("Attempting rollback...");
-		err2 = ntfs_cluster_free_from_rl_nolock(vol, rl);
+		err2 = __ntfs_cluster_free_from_rl_nolock(vol, rl, false);	/* the undo of this allocation: no reservation */
 		if (err2) {
 			ntfs_error(vol->sb,
 				"Failed to rollback (error %i). Leaving inconsistent metadata! Unmount and run chkdsk.",
