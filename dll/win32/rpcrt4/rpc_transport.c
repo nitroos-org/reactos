@@ -803,6 +803,17 @@ static int rpcrt4_conn_np_wait_for_incoming_data(RpcConnection *conn)
     return rpcrt4_conn_np_read(conn, NULL, 0);
 }
 
+/* An idle client connection has nothing to read: a broken pipe, or data nobody asked for, means the server side is gone
+ * or confused, and the connection is not handed out again. */
+static BOOL rpcrt4_conn_np_is_idle_alive(RpcConnection *conn)
+{
+    RpcConnection_np *connection = (RpcConnection_np *)conn;
+    DWORD avail = 0;
+
+    if (connection->read_closed) return FALSE;
+    return PeekNamedPipe(connection->pipe, NULL, 0, NULL, &avail, NULL) && !avail;
+}
+
 static size_t rpcrt4_ncacn_np_get_top_of_tower(unsigned char *tower_data,
                                                const char *networkaddr,
                                                const char *endpoint)
@@ -1828,6 +1839,19 @@ static void rpcrt4_conn_tcp_cancel_call(RpcConnection *conn)
     TRACE("%p\n", connection);
 
     SetEvent(connection->cancel_event);
+}
+
+/* The socket is non-blocking: an idle connection has nothing to read. End of stream, an error, or data nobody asked
+ * for mean the server side is gone or confused. */
+static BOOL rpcrt4_conn_tcp_is_idle_alive(RpcConnection *conn)
+{
+    RpcConnection_tcp *connection = (RpcConnection_tcp *)conn;
+    char byte;
+    int ret;
+
+    if (connection->sock == -1) return FALSE;
+    ret = recv(connection->sock, &byte, 1, MSG_PEEK);
+    return ret == -1 && WSAGetLastError() == WSAEWOULDBLOCK;
 }
 
 static RPC_STATUS rpcrt4_conn_tcp_is_server_listening(const char *endpoint)
@@ -3500,7 +3524,8 @@ static const struct connection_ops conn_protseq_list[] = {
     rpcrt4_conn_np_impersonate_client,
     rpcrt4_conn_np_revert_to_self,
     RPCRT4_default_inquire_auth_client,
-    NULL
+    NULL,
+    rpcrt4_conn_np_is_idle_alive
   },
   { "ncalrpc",
     { EPM_PROTOCOL_NCALRPC, EPM_PROTOCOL_PIPE },
@@ -3523,7 +3548,8 @@ static const struct connection_ops conn_protseq_list[] = {
     rpcrt4_conn_np_impersonate_client,
     rpcrt4_conn_np_revert_to_self,
     rpcrt4_ncalrpc_inquire_auth_client,
-    rpcrt4_ncalrpc_inquire_client_pid
+    rpcrt4_ncalrpc_inquire_client_pid,
+    rpcrt4_conn_np_is_idle_alive
   },
   { "ncacn_ip_tcp",
     { EPM_PROTOCOL_NCACN, EPM_PROTOCOL_TCP },
@@ -3546,7 +3572,8 @@ static const struct connection_ops conn_protseq_list[] = {
     RPCRT4_default_impersonate_client,
     RPCRT4_default_revert_to_self,
     RPCRT4_default_inquire_auth_client,
-    NULL
+    NULL,
+    rpcrt4_conn_tcp_is_idle_alive
   },
   { "ncacn_http",
     { EPM_PROTOCOL_NCACN, EPM_PROTOCOL_HTTP },

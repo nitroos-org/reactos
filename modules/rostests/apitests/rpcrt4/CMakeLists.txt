@@ -7,6 +7,7 @@ add_rpc_files(client ntlm_auth.idl)
 set(IDL_FLAGS ${OLD_IDL_FLAGS})
 
 list(APPEND SOURCE
+    conn_reuse.c
     interface_access.c
     ntlm_auth.c
     ${CMAKE_CURRENT_BINARY_DIR}/interface_access_c.c
