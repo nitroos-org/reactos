@@ -53,6 +53,77 @@ static VOID TestLabel(HANDLE Object, ULONG Level)
     }
 }
 
+static ULONG QueryControl(HANDLE Object, SECURITY_INFORMATION Information)
+{
+    ULONG Buffer[128], Length;
+    SECURITY_DESCRIPTOR_RELATIVE *Sd = (PVOID)Buffer;
+    NTSTATUS Status;
+
+    Status = NtQuerySecurityObject(Object, Information, Sd, sizeof(Buffer), &Length);
+    ok_hex(Status, STATUS_SUCCESS);
+    return NT_SUCCESS(Status) ? Sd->Control : 0;
+}
+
+/* The SACL of a token and of an object created with an explicit SACL is auto-inherited */
+static VOID TestAutoInherited(VOID)
+{
+    static const SID_IDENTIFIER_AUTHORITY LabelAuthority = {SECURITY_MANDATORY_LABEL_AUTHORITY};
+    struct
+    {
+        ACL Acl;
+        SYSTEM_MANDATORY_LABEL_ACE Ace;
+        ULONG Sid[4];
+    } Sacl;
+    SECURITY_DESCRIPTOR Sd;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE Token, Event;
+    NTSTATUS Status;
+    PSID Sid;
+
+    Status = NtOpenProcessToken(NtCurrentProcess(), READ_CONTROL, &Token);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        ok_hex(QueryControl(Token, LABEL_SECURITY_INFORMATION),
+               SE_SELF_RELATIVE | SE_SACL_AUTO_INHERITED | SE_SACL_PRESENT);
+        ok_hex(QueryControl(Token, DACL_SECURITY_INFORMATION), SE_SELF_RELATIVE | SE_DACL_PRESENT);
+        NtClose(Token);
+    }
+
+    RtlZeroMemory(&Sacl, sizeof(Sacl));
+    Status = RtlCreateAcl(&Sacl.Acl, sizeof(Sacl), ACL_REVISION);
+    ok_hex(Status, STATUS_SUCCESS);
+    Sacl.Ace.Header.AceType = SYSTEM_MANDATORY_LABEL_ACE_TYPE;
+    Sacl.Ace.Header.AceSize = sizeof(SYSTEM_MANDATORY_LABEL_ACE) + sizeof(Sacl.Sid) - sizeof(ULONG);
+    Sacl.Ace.Mask = SYSTEM_MANDATORY_LABEL_NO_WRITE_UP;
+    Sid = (PSID)&Sacl.Ace.SidStart;
+    RtlInitializeSid(Sid, (PSID_IDENTIFIER_AUTHORITY)&LabelAuthority, 1);
+    *RtlSubAuthoritySid(Sid, 0) = SECURITY_MANDATORY_LOW_RID;
+    Sacl.Acl.AceCount = 1;
+    Sacl.Acl.AclSize = sizeof(Sacl.Acl) + Sacl.Ace.Header.AceSize;
+
+    RtlCreateSecurityDescriptor(&Sd, SECURITY_DESCRIPTOR_REVISION);
+    RtlSetSaclSecurityDescriptor(&Sd, TRUE, &Sacl.Acl, FALSE);
+    InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, &Sd);
+    Status = NtCreateEvent(&Event, EVENT_ALL_ACCESS, &ObjectAttributes, NotificationEvent, FALSE);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        ok_hex(QueryControl(Event, LABEL_SECURITY_INFORMATION),
+               SE_SELF_RELATIVE | SE_SACL_AUTO_INHERITED | SE_SACL_PRESENT);
+        NtClose(Event);
+    }
+
+    /* Without an explicit descriptor there is no SACL */
+    Status = NtCreateEvent(&Event, EVENT_ALL_ACCESS, NULL, NotificationEvent, FALSE);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        ok_hex(QueryControl(Event, LABEL_SECURITY_INFORMATION), SE_SELF_RELATIVE);
+        NtClose(Event);
+    }
+}
+
 START_TEST(NtQuerySecurityObject)
 {
     UCHAR Buffer[sizeof(TOKEN_MANDATORY_LABEL) + SECURITY_MAX_SID_SIZE];
@@ -71,4 +142,5 @@ START_TEST(NtQuerySecurityObject)
     Level = *RtlSubAuthoritySid(Label->Label.Sid, 0);
     TestLabel(NtCurrentProcess(), Level);
     TestLabel(NtCurrentThread(), Level);
+    TestAutoInherited();
 }
