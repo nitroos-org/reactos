@@ -61,9 +61,11 @@ typedef struct _FLT_CONNECTION
     LIST_ENTRY Waiting;             /* messages the client has, waiting for the reply */
     LIST_ENTRY GetIrps;             /* FilterGetMessage requests waiting for a message */
     ULONGLONG NextId;
-    volatile LONG Disconnected;
+    volatile LONG Disconnected;     /* set once, by whoever disconnects first; read under Lock when queuing */
     volatile LONG ClientPortClosed; /* the filter has let go of the port */
     volatile LONG RefCount;         /* the file object of the client, the filter's port */
+    PKTHREAD DisconnectThread;      /* the thread doing the disconnect */
+    KEVENT DisconnectDone;          /* set when the disconnect is over, DisconnectNotify included */
 
 } FLT_CONNECTION, *PFLT_CONNECTION;
 
@@ -77,6 +79,7 @@ typedef struct _FLT_MESSAGE
     ULONG ReplyCapacity;
     ULONG ReplyLength;
     NTSTATUS Status;
+    BOOLEAN WantsReply;
     BOOLEAN Linked;
     BOOLEAN Done;
     KEVENT Event;
@@ -98,7 +101,15 @@ static GENERIC_MAPPING FltpPortMapping =
 static
 VOID
 DisconnectConnection(
-    _In_ PFLT_CONNECTION Connection
+    _In_ PFLT_CONNECTION Connection,
+    _In_ BOOLEAN WaitForOther
+);
+
+static
+VOID
+CloseClientPortReference(
+    _In_ PFLT_CONNECTION Connection,
+    _In_ BOOLEAN WaitForOther
 );
 
 
@@ -186,7 +197,7 @@ DeliverMessage(_In_ PFLT_CONNECTION Connection,
 
     /* Out of the queue. A message which wants an answer waits for it, the others are done */
     RemoveEntryList(&Message->Link);
-    if (Message->ReplyBuffer)
+    if (Message->WantsReply)
     {
         InsertTailList(&Connection->Waiting, &Message->Link);
     }
@@ -313,10 +324,12 @@ CreateConnection(_Inout_ PIRP Irp)
     PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
     PFLT_CONNECT_REQUEST Request;
     PFLT_SERVER_PORT Server = NULL;
+    PFLT_FILTER Filter;
     PFLT_CONNECTION Connection;
     PLIST_ENTRY Entry;
     UNICODE_STRING PortName;
     ULONG ValueLength;
+    BOOLEAN Inserted;
     NTSTATUS Status;
 
     Status = ParseConnectRequest(Irp, &Request, &ValueLength);
@@ -326,7 +339,12 @@ CreateConnection(_Inout_ PIRP Irp)
     PortName.Buffer = (PWCH)(Request + 1);
     PortName.Length = PortName.MaximumLength = Request->NameLength;
 
-    /* The server port of that name, which isn't being closed */
+    /*
+     * The server port of that name, which isn't being closed, of a filter which isn't being unloaded.
+     * The filter is referenced until the connection is in its list (or refused): an unregister waits
+     * for that, so it can't miss the connection, and ConnectNotify can't run in an unloaded image.
+     * Under FltpPortsLock the port still holds its own filter reference, so the filter is there.
+     */
     ExAcquireFastMutex(&FltpPortsLock);
     for (Entry = FltpServerPorts.Flink; Entry != &FltpServerPorts; Entry = Entry->Flink)
     {
@@ -334,8 +352,12 @@ CreateConnection(_Inout_ PIRP Irp)
 
         if (!Candidate->Closed && RtlEqualUnicodeString(&Candidate->Name, &PortName, TRUE))
         {
-            Server = Candidate;
-            InterlockedIncrement(&Server->RefCount);
+            if (!(Candidate->Filter->Base.Flags & FLT_OBFL_DRAINING) &&
+                NT_SUCCESS(FltObjectReference(Candidate->Filter)))
+            {
+                Server = Candidate;
+                InterlockedIncrement(&Server->RefCount);
+            }
             break;
         }
     }
@@ -343,12 +365,14 @@ CreateConnection(_Inout_ PIRP Irp)
 
     if (Server == NULL)
         return STATUS_OBJECT_NAME_NOT_FOUND;
+    Filter = Server->Filter;
 
     /* Nobody gets to the filter's callbacks without the right to connect */
     Status = CheckConnectAccess(Server, Irp);
     if (!NT_SUCCESS(Status))
     {
         ReleaseServerPort(Server);
+        FltObjectDereference(Filter);
         return Status;
     }
 
@@ -356,6 +380,7 @@ CreateConnection(_Inout_ PIRP Irp)
     {
         InterlockedDecrement(&Server->NumberOfConnections);
         ReleaseServerPort(Server);
+        FltObjectDereference(Filter);
         return STATUS_CONNECTION_COUNT_LIMIT;
     }
 
@@ -364,6 +389,7 @@ CreateConnection(_Inout_ PIRP Irp)
     {
         InterlockedDecrement(&Server->NumberOfConnections);
         ReleaseServerPort(Server);
+        FltObjectDereference(Filter);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
@@ -378,6 +404,7 @@ CreateConnection(_Inout_ PIRP Irp)
     InitializeListHead(&Connection->GetIrps);
     KeInitializeSpinLock(&Connection->Lock);
     ExInitializeRundownProtection(&Connection->MsgNotifRundownRef);
+    KeInitializeEvent(&Connection->DisconnectDone, NotificationEvent, FALSE);
 
     /* The filter is told, and may refuse. The port is the filter's too: it closes it when the client goes. */
     InterlockedIncrement(&Connection->RefCount);
@@ -394,15 +421,37 @@ CreateConnection(_Inout_ PIRP Irp)
         InterlockedDecrement(&Server->NumberOfConnections);
         Connection->Disconnected = TRUE;
         Connection->ClientPortClosed = TRUE;
+        KeSetEvent(&Connection->DisconnectDone, IO_NO_INCREMENT, FALSE);
         ReleaseConnection(Connection);
         ReleaseConnection(Connection);
+        FltObjectDereference(Filter);
         return Status;
     }
 
-    ExAcquireFastMutex(&Server->Filter->ConnectionList.mLock);
-    InsertTailList(&Server->Filter->ConnectionList.mList, &Connection->FilterLink);
-    Server->Filter->ConnectionList.mCount++;
-    ExReleaseFastMutex(&Server->Filter->ConnectionList.mLock);
+    /*
+     * An unregister that started meanwhile has looked at the list already, or will after us: it sets
+     * the draining flag before it takes the lock, so either we see the flag or it sees the connection.
+     */
+    ExAcquireFastMutex(&Filter->ConnectionList.mLock);
+    Inserted = !(Filter->Base.Flags & FLT_OBFL_DRAINING);
+    if (Inserted)
+    {
+        InsertTailList(&Filter->ConnectionList.mList, &Connection->FilterLink);
+        Filter->ConnectionList.mCount++;
+    }
+    ExReleaseFastMutex(&Filter->ConnectionList.mLock);
+
+    if (!Inserted)
+    {
+        /* Connected, but the filter is going: it is told, and the client gets no handle */
+        Stack->FileObject->FsContext2 = NULL;
+        CloseClientPortReference(Connection, FALSE);
+        ReleaseConnection(Connection);
+        FltObjectDereference(Filter);
+        return STATUS_FLT_DELETING_OBJECT;
+    }
+
+    FltObjectDereference(Filter);
 
     Irp->IoStatus.Information = FILE_OPENED;
     return STATUS_SUCCESS;
@@ -411,10 +460,18 @@ CreateConnection(_Inout_ PIRP Irp)
 /*
  * The connection is over, from either side: the waiting ones are told, the filter is told once.
  * The connection itself stays as long as the filter has its port.
+ *
+ * When the filter is being unregistered (WaitForOther), coming second means waiting until the first
+ * one is through, DisconnectNotify included: the unregister must not free the filter while another
+ * thread (the client's cleanup) is still in its callbacks. The connection leaves the filter's list
+ * last, so FltpDisconnectFilterPorts finds, and waits for, every disconnect still under way. The
+ * other ones coming second (the client's cleanup, FltCloseClientPort, maybe from inside a callback
+ * the first one waits for) don't wait. Nor does the thread doing the disconnect for itself.
  */
 static
 VOID
-DisconnectConnection(_In_ PFLT_CONNECTION Connection)
+DisconnectConnection(_In_ PFLT_CONNECTION Connection,
+                     _In_ BOOLEAN WaitForOther)
 {
     LIST_ENTRY Irps;
     PLIST_ENTRY Entry;
@@ -422,7 +479,12 @@ DisconnectConnection(_In_ PFLT_CONNECTION Connection)
     PFLT_SERVER_PORT Server = Connection->ServerPort;
 
     if (InterlockedExchange(&Connection->Disconnected, TRUE))
+    {
+        if (WaitForOther && Connection->DisconnectThread != KeGetCurrentThread())
+            KeWaitForSingleObject(&Connection->DisconnectDone, Executive, KernelMode, FALSE, NULL);
         return;
+    }
+    Connection->DisconnectThread = KeGetCurrentThread();
 
     InitializeListHead(&Irps);
 
@@ -471,6 +533,11 @@ DisconnectConnection(_In_ PFLT_CONNECTION Connection)
     /* Callbacks for messages of the client, running at this moment */
     ExWaitForRundownProtectionRelease(&Connection->MsgNotifRundownRef);
 
+    InterlockedDecrement(&Server->NumberOfConnections);
+    if (Server->DisconnectNotify)
+        Server->DisconnectNotify(Connection->Cookie);
+
+    /* Done with the filter: an unregister waiting in FltpDisconnectFilterPorts may go on */
     ExAcquireFastMutex(&Connection->Filter->ConnectionList.mLock);
     if (!IsListEmpty(&Connection->FilterLink))
     {
@@ -480,17 +547,16 @@ DisconnectConnection(_In_ PFLT_CONNECTION Connection)
     }
     ExReleaseFastMutex(&Connection->Filter->ConnectionList.mLock);
 
-    InterlockedDecrement(&Server->NumberOfConnections);
-    if (Server->DisconnectNotify)
-        Server->DisconnectNotify(Connection->Cookie);
+    KeSetEvent(&Connection->DisconnectDone, IO_NO_INCREMENT, FALSE);
 }
 
 /* The filter lets go of its port to the client */
 static
 VOID
-CloseClientPortReference(_In_ PFLT_CONNECTION Connection)
+CloseClientPortReference(_In_ PFLT_CONNECTION Connection,
+                         _In_ BOOLEAN WaitForOther)
 {
-    DisconnectConnection(Connection);
+    DisconnectConnection(Connection, WaitForOther);
 
     if (!InterlockedExchange(&Connection->ClientPortClosed, TRUE))
         ReleaseConnection(Connection);
@@ -680,7 +746,7 @@ FltCloseClientPort(_In_ PFLT_FILTER Filter,
     FltReleasePushLock(&Filter->PortLock);
 
     if (Port)
-        CloseClientPortReference((PFLT_CONNECTION)Port);
+        CloseClientPortReference((PFLT_CONNECTION)Port, FALSE);
 }
 
 _Must_inspect_result_
@@ -701,6 +767,7 @@ FltSendMessage(_In_ PFLT_FILTER Filter,
     PIRP Irp;
     PFLT_MESSAGE Matched;
     ULONG_PTR Information = 0;
+    PUCHAR Copy = NULL;
     NTSTATUS Status, DeliverStatus = STATUS_SUCCESS;
 
     PAGED_CODE();
@@ -708,23 +775,37 @@ FltSendMessage(_In_ PFLT_FILTER Filter,
     if ((ReplyBuffer == NULL) != (ReplyLength == NULL))
         return STATUS_INVALID_PARAMETER;
 
-    /* The pointer is the filter's own while it holds the lock */
-    FltAcquirePushLockShared(&Filter->PortLock);
-    Connection = (PFLT_CONNECTION)*ClientPort;
-    if (Connection == NULL || Connection->Disconnected)
-    {
-        FltReleasePushLock(&Filter->PortLock);
-        return Connection ? STATUS_PORT_DISCONNECTED : STATUS_INVALID_PARAMETER;
-    }
-
     RtlZeroMemory(&Message, sizeof(Message));
     Message.Data = SenderBuffer;
     Message.Length = SenderBufferLength;
+    Message.WantsReply = (ReplyBuffer != NULL);
     Message.ReplyBuffer = ReplyBuffer;
     Message.ReplyCapacity = ReplyBuffer ? *ReplyLength : 0;
     KeInitializeEvent(&Message.Event, NotificationEvent, FALSE);
 
+    /* The pointer is the filter's own while it holds the lock */
+    FltAcquirePushLockShared(&Filter->PortLock);
+    Connection = (PFLT_CONNECTION)*ClientPort;
+    if (Connection == NULL)
+    {
+        FltReleasePushLock(&Filter->PortLock);
+        if (Copy) ExFreePoolWithTag(Copy, FM_TAG_MESSAGE);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    /*
+     * A disconnect sets the flag first and then wakes, under this lock, whatever is queued. So the
+     * flag is read under the lock too: a message queued after the disconnect looked would never be
+     * woken, and a sender without a timeout would wait for ever.
+     */
     KeAcquireSpinLock(&Connection->Lock, &OldIrql);
+    if (Connection->Disconnected)
+    {
+        KeReleaseSpinLock(&Connection->Lock, OldIrql);
+        FltReleasePushLock(&Filter->PortLock);
+        if (Copy) ExFreePoolWithTag(Copy, FM_TAG_MESSAGE);
+        return STATUS_PORT_DISCONNECTED;
+    }
     Message.Id = Connection->NextId++;
     InsertTailList(&Connection->Queued, &Message.Link);
     Message.Linked = TRUE;
@@ -756,6 +837,8 @@ FltSendMessage(_In_ PFLT_FILTER Filter,
 
     if (ReplyLength)
         *ReplyLength = Message.ReplyLength;
+    if (Copy)
+        ExFreePoolWithTag(Copy, FM_TAG_MESSAGE);
     return Message.Status;
 }
 
@@ -985,7 +1068,7 @@ FltpMsgDispatch(_In_ PDEVICE_OBJECT DeviceObject,
         case IRP_MJ_CLEANUP:
             /* The last handle of the client is gone */
             if (Connection)
-                DisconnectConnection(Connection);
+                DisconnectConnection(Connection, FALSE);
             break;
 
         case IRP_MJ_CLOSE:
@@ -1010,7 +1093,11 @@ FltpMsgDispatch(_In_ PDEVICE_OBJECT DeviceObject,
     return Status;
 }
 
-/* A filter goes away: whoever is still connected is disconnected */
+/*
+ * A filter goes away: whoever is still connected is disconnected. Called after the filter is marked
+ * draining, so no connection joins the list any more; a disconnect another thread has started is
+ * waited for (its DisconnectNotify included), and the connection is in the list until it is over.
+ */
 VOID
 FltpDisconnectFilterPorts(_In_ PFLT_FILTER Filter)
 {
@@ -1035,7 +1122,7 @@ FltpDisconnectFilterPorts(_In_ PFLT_FILTER Filter)
         if (Connection == NULL)
             break;
 
-        CloseClientPortReference(Connection);
+        CloseClientPortReference(Connection, TRUE);
         ReleaseConnection(Connection);
     }
 }
