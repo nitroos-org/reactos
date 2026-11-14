@@ -15,9 +15,93 @@ typedef struct _LRD_PROP
    COLORREF Key;
    BYTE     Alpha;
    BYTE     is_Layered;
-   BYTE     NoUsed[2];
+   BYTE     bUlwSeen;   /* UpdateLayeredWindow has given the window content */
+   BYTE     NoUsed[1];
    DWORD    Flags;
 } LRD_PROP, *PLRD_PROP;
+
+/*
+ * A layered window that has had neither SetLayeredWindowAttributes nor UpdateLayeredWindow is not shown (MSDN, "Layered
+ * Windows"): it has no pixels on the screen and does not hide what is below it. It still is a window (hit-testing is
+ * unchanged). Levels 0 and 1 only: level 2 has this in its compositor (redir.c).
+ */
+BOOL FASTCALL
+UserIsLayeredUnset(PWND pWnd)
+{
+   PLRD_PROP pLrdProp;
+
+   if (gRedirLevel >= 2 || !(pWnd->ExStyle & WS_EX_LAYERED))
+      return FALSE;
+   pLrdProp = UserGetProp(pWnd, AtomLayer, TRUE);
+   return !pLrdProp || (!pLrdProp->is_Layered && !pLrdProp->bUlwSeen);
+}
+
+/* The window's content or attributes are given for the first time, or WS_EX_LAYERED came or went: re-evaluate what is drawn */
+VOID FASTCALL
+UserLayeredShownChanged(PWND pWnd)
+{
+   DceResetActiveDCEs(pWnd);
+}
+
+/*
+ * window.c: WS_EX_LAYERED was set or cleared on a window. Set: a window that is shown stops being drawn
+ * until it is given attributes or content, and what was below it is drawn again. Cleared: it is a normal window and
+ * paints itself.
+ */
+VOID FASTCALL
+co_UserLayeredStyleChanged(PWND pWnd)
+{
+   USER_REFERENCE_ENTRY Ref;
+   PREGION Rgn;
+
+   DceResetActiveDCEs(pWnd);
+   if (!(pWnd->style & WS_VISIBLE))
+      return;
+
+   UserRefObjectCo(pWnd, &Ref);
+   if (gRedirLevel >= 2)
+   {
+      /* Level 2: what the screen shows follows from a compose pass (it hides or shows the window) */
+      UserRedirLayoutChanged(pWnd, &pWnd->rcWindow);
+      if (!(pWnd->ExStyle & WS_EX_LAYERED))
+         co_UserRedrawWindow(pWnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);
+   }
+   else if (UserIsLayeredUnset(pWnd))
+   {
+      Rgn = IntSysCreateRectpRgn(0, 0, pWnd->rcWindow.right - pWnd->rcWindow.left, pWnd->rcWindow.bottom - pWnd->rcWindow.top);
+      if (Rgn)
+      {
+         co_VIS_WindowLayoutChanged(pWnd, Rgn);
+         REGION_Delete(Rgn);
+      }
+   }
+   else if (!(pWnd->ExStyle & WS_EX_LAYERED))
+   {
+      co_UserRedrawWindow(pWnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);
+   }
+   UserDerefObjectCo(pWnd);
+}
+
+/* UpdateLayeredWindow gives content: the window is shown from now on */
+static BOOL
+IntLayeredMarkUlwSeen(PWND pWnd)
+{
+   PLRD_PROP pLrdProp = UserGetProp(pWnd, AtomLayer, TRUE);
+   BOOL bWasUnset = UserIsLayeredUnset(pWnd);
+
+   if (!pLrdProp)
+   {
+      pLrdProp = ExAllocatePoolWithTag(PagedPool, sizeof(LRD_PROP), USERTAG_REDIRECT);
+      if (!pLrdProp)
+         return bWasUnset;
+      RtlZeroMemory(pLrdProp, sizeof(LRD_PROP));
+      UserSetProp(pWnd, AtomLayer, (HANDLE)pLrdProp, TRUE);
+   }
+   pLrdProp->bUlwSeen = 1;
+   if (bWasUnset)
+      UserLayeredShownChanged(pWnd);
+   return bWasUnset;
+}
 
 BOOL FASTCALL
 GetLayeredStatus(PWND pWnd)
@@ -50,6 +134,8 @@ SetLayeredStatus(PWND pWnd, BYTE set)
    if (pLrdProp)
    {
       pLrdProp->is_Layered = set;
+      if (!set)
+         pLrdProp->bUlwSeen = 0;
       return TRUE;
    }
    return FALSE;
@@ -103,11 +189,15 @@ IntSetLayeredWindowAttributes(PWND pWnd,
 
       pLrdProp->is_Layered = 1;
 
+      /* Levels 0 and 1: the window was not drawn until now (it may have had UpdateLayeredWindow content: then it was) */
+      if (!was_Layered && !pLrdProp->bUlwSeen && gRedirLevel < 2)
+         UserLayeredShownChanged(pWnd);
+
       /* Level 2 (redir.c): the compositor applies the alpha and the colour key to what the window paints */
       UserRedirLayeredSet(pWnd, !was_Layered);
 
       if (!was_Layered)
-         co_UserRedrawWindow(pWnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME );
+         co_UserRedrawWindow(pWnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);
    }
    /* Levels 0 and 1: nothing applies them (no backing store); level 2 composes them */
    return TRUE;
@@ -276,6 +366,10 @@ IntUpdateLayeredWindowI( PWND pWnd,
          REGION_Delete(VisBefore);
       }
    }
+
+   /* Levels 0 and 1: from now on the window is drawn (the content below is drawn through its own DC) */
+   if (info->hdcSrc && gRedirLevel < 2)
+      IntLayeredMarkUlwSeen(pWnd);
 
    if (Redirect &&
        UserRedirUpdateLayered(pWnd, &OldWindow, info->hdcSrc, info->pptSrc, info->prcDirty, info->pblend,
