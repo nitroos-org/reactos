@@ -83,9 +83,14 @@ switches it off, `MESA_SHADER_CACHE_MAX_SIZE=<n>[K|M|G]` limits it (default 1 GB
 `MESA_SHADER_CACHE_SHOW_STATS=true` logs the hits and misses when the driver is unloaded (stderr and OutputDebugString, as Mesa's other log lines).
 
 Several processes may share the directory. A directory that cannot be written (read-only volume, no permission) switches the cache
-off for that process; nothing else changes. Entries are checked with a CRC when they are read, and one that fails is deleted. The CRC
-guards against damaged files, not against someone who can write the directory: the entries are machine code that llvmpipe loads, so
-the directory must be writable only by the user it belongs to (the default under `%LOCALAPPDATA%` is).
+off for that process; nothing else changes. Entries are checked with a CRC (and the stored size, at most 64 MB, must be what the data
+inflates to) when they are read, and one that fails is deleted; a read that fails for another reason (a lock, an I/O error) or a failed
+allocation is only a miss. The CRC guards against damaged files, not against someone who can write the directory: the entries are
+machine code that llvmpipe loads. So every directory the cache creates gets a protected DACL (no inheritance; full control for the
+current user, SYSTEM and Administrators, as in a user profile; the equivalent of `mkdir 0700`), and an existing cache directory that is
+owned by somebody else makes the cache off for the process, with one message on stderr (so does a `MESA_SHADER_CACHE_DIR` that is too
+long for the 260 character paths the cache uses). A directory that an older build or the user made earlier keeps the ACL it has: it
+must be writable only by the user it belongs to.
 
 ## How the system uses it
 
