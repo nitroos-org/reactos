@@ -18,6 +18,7 @@ list(APPEND SOURCE
     printproviders.c
     spoolfile.c
     utils.c
+    wow64.c
     ${CMAKE_CURRENT_BINARY_DIR}/winspool_c.c)
 
 list(APPEND PCH_SKIP_SOURCE
