@@ -3124,6 +3124,18 @@ LdrpLoadDll(IN BOOLEAN Redirected,
                 /* Not a DLL, just increase the load count */
                 if (LdrEntry->LoadCount != 0xFFFF) LdrEntry->LoadCount++;
             }
+
+            /* Mapped by a run of init routines that has not reached it yet (a static import of the image, pinned
+               or not): initialize it now, so that the caller gets a module that is ready to use */
+            if (LdrEntry->Flags & LDRP_IMAGE_DLL)
+            {
+                Status = LdrpInitializePendingEntry(LdrEntry);
+                if (!NT_SUCCESS(Status))
+                {
+                    LdrpDereferenceNestedLoad(LdrEntry);
+                    _SEH2_LEAVE;
+                }
+            }
         }
 
     }
