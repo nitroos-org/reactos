@@ -630,6 +630,9 @@ SysWOW64/rstrtmgr.dll
 # Microsoft 365 Apps: the Click-to-Run InspectorOfficeGadget.exe (a 32-bit AnyCPU run on WoW64) lists and removes provisioned AppX packages through the DISM API.
 SysWOW64/dismapi.dll
 
+# rometadata.dll (MetaDataGetDispenser, imported by Microsoft.WindowsAppRuntime.dll): a 32-bit WinUI 3 application needs it to load as much as a 64-bit one.
+SysWOW64/rometadata.dll
+
 # The .NET Framework resolves Windows Runtime types (32-bit InspectorOfficeGadget.exe of Microsoft 365 Apps) through RoResolveNamespace and the WinMetadata files; Windows has the files in both directories.
 SysWOW64/wintypes.dll
 SysWOW64/WinMetadata/Windows.Foundation.winmd
