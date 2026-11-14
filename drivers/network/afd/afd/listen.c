@@ -155,7 +155,9 @@ static NTSTATUS SatisfyPreAccept( PIRP Irp, PAFD_TDI_OBJECT_QELT Qelt ) {
 
     if (AfdRequestLocked(Irp)) UnlockRequest( Irp, IoGetCurrentIrpStackLocation( Irp ) );
 
-    Irp->IoStatus.Information = ((PCHAR)&IPAddr[1]) - ((PCHAR)ListenReceive);
+    /* The sequence number and the whole address: the size of a TA_IP_ADDRESS for an IPv4 one, as it always was,
+     * more for an IPv6 one (RequiredSize was checked against the buffer above) */
+    Irp->IoStatus.Information = RequiredSize;
     Irp->IoStatus.Status = STATUS_SUCCESS;
     AfdClearCancelRoutine(Irp);
     IoCompleteRequest( Irp, IO_NETWORK_INCREMENT );

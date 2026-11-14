@@ -38,6 +38,8 @@ extern void func_g8dgramcancel(void);
 extern void func_g8icmp(void);
 extern void func_g8hwquery(void);
 extern void func_g8tableinfo(void);
+extern void func_tdiaddr6(void);
+extern void func_ipv6addr(void);
 
 const struct test winetest_testlist[] =
 {
@@ -72,5 +74,7 @@ const struct test winetest_testlist[] =
     { "g8icmp", func_g8icmp },
     { "g8hwquery", func_g8hwquery },
     { "g8tableinfo", func_g8tableinfo },
+    { "tdiaddr6", func_tdiaddr6 },
+    { "ipv6addr", func_ipv6addr },
     { 0, 0 }
 };

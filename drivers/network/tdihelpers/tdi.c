@@ -188,7 +188,9 @@ NTSTATUS TdiOpenAddressFile(
     RtlCopyMemory(EaInfo->EaName,
                   TdiTransportAddress,
                   TDI_TRANSPORT_ADDRESS_LENGTH);
-    EaInfo->EaValueLength = sizeof(TA_IP_ADDRESS);
+    /* The whole address, whichever its type: an IPv6 one is longer than a TA_IP_ADDRESS */
+    EaInfo->EaValueLength = TaLengthOfTransportAddress( Name ) > sizeof(TA_IP_ADDRESS) ?
+                            TaLengthOfTransportAddress( Name ) : sizeof(TA_IP_ADDRESS);
     Address =
         (PTRANSPORT_ADDRESS)(EaInfo->EaName + TDI_TRANSPORT_ADDRESS_LENGTH + 1); /* 0-terminated */
     TaCopyTransportAddressInPlace( Address, Name );
