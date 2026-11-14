@@ -55,9 +55,22 @@ typedef struct _OPEN_ENTRY
 
 } OPEN_ENTRY;
 
+/*
+ * Work of ours on a system worker thread. It goes through an IO_WORKITEM of the control device: that keeps
+ * the device, and so the driver image, until the routine has returned. With a plain ExQueueWorkItem the
+ * worker which wakes the unload (PendingWorkers) still had its own return to run, maybe after the image was
+ * gone (seen as a bugcheck 0x50 executing in the unloaded image under the load/unload stress).
+ */
+typedef struct _SAMPLE_WORK
+{
+    WORK_QUEUE_ITEM WorkItem;       /* the routine and its parameter */
+    PIO_WORKITEM IoWorkItem;
+
+} SAMPLE_WORK, *PSAMPLE_WORK;
+
 typedef struct _PEND_ITEM
 {
-    WORK_QUEUE_ITEM WorkItem;
+    SAMPLE_WORK WorkItem;
     PFLT_CALLBACK_DATA Data;
     PEPROCESS Process;
 
@@ -471,6 +484,36 @@ ContextSelfTest(_Out_writes_(16) PULONG Result)
 static
 VOID
 NTAPI
+SampleWorkThunk(_In_ PDEVICE_OBJECT DeviceObject,
+                _In_opt_ PVOID Context)
+{
+    PSAMPLE_WORK Work = Context;
+    PIO_WORKITEM IoWorkItem = Work->IoWorkItem;
+
+    UNREFERENCED_PARAMETER(DeviceObject);
+
+    /* The routine frees the item the work is in */
+    Work->WorkItem.WorkerRoutine(Work->WorkItem.Parameter);
+    IoFreeWorkItem(IoWorkItem);
+}
+
+static
+VOID
+QueueSampleWork(_Inout_ PSAMPLE_WORK Work,
+                _In_ PWORKER_THREAD_ROUTINE Routine,
+                _In_ PVOID Parameter)
+{
+    ExInitializeWorkItem(&Work->WorkItem, Routine, Parameter);
+    Work->IoWorkItem = IoAllocateWorkItem(ControlDevice);
+    if (Work->IoWorkItem)
+        IoQueueWorkItem(Work->IoWorkItem, SampleWorkThunk, DelayedWorkQueue, Work);
+    else
+        ExQueueWorkItem(&Work->WorkItem, DelayedWorkQueue);
+}
+
+static
+VOID
+NTAPI
 PendWorker(_In_ PVOID Parameter)
 {
     PPEND_ITEM Item = Parameter;
@@ -495,7 +538,7 @@ PendWorker(_In_ PVOID Parameter)
 
 typedef struct _RV_PARK_ITEM
 {
-    WORK_QUEUE_ITEM WorkItem;
+    SAMPLE_WORK WorkItem;
     PFLT_CALLBACK_DATA Data;
 
 } RV_PARK_ITEM, *PRV_PARK_ITEM;
@@ -613,8 +656,7 @@ PreOperation(_Inout_ PFLT_CALLBACK_DATA Data,
                     InterlockedIncrement(&PendingWorkers);
                     KeResetEvent(&WorkersDone);
                     InterlockedIncrement((PLONG)&Stats.Pended);
-                    ExInitializeWorkItem(&Item->WorkItem, PendWorker, Item);
-                    ExQueueWorkItem(&Item->WorkItem, DelayedWorkQueue);
+                    QueueSampleWork(&Item->WorkItem, PendWorker, Item);
                     return FLT_PREOP_PENDING;
                 }
                 if (Item)
@@ -723,8 +765,7 @@ PostOperation(_Inout_ PFLT_CALLBACK_DATA Data,
                     InterlockedIncrement(&PendingWorkers);
                     KeResetEvent(&WorkersDone);
                     InterlockedIncrement((PLONG)&Stats.RvParked);
-                    ExInitializeWorkItem(&Item->WorkItem, RvParkWorker, Item);
-                    ExQueueWorkItem(&Item->WorkItem, DelayedWorkQueue);
+                    QueueSampleWork(&Item->WorkItem, RvParkWorker, Item);
                     return FLT_POSTOP_MORE_PROCESSING_REQUIRED;
                 }
             }
@@ -742,8 +783,7 @@ PostOperation(_Inout_ PFLT_CALLBACK_DATA Data,
                     InterlockedIncrement(&PendingWorkers);
                     KeResetEvent(&WorkersDone);
                     InterlockedIncrement((PLONG)&Stats.RvParked);
-                    ExInitializeWorkItem(&Item->WorkItem, RvParkWorker, Item);
-                    ExQueueWorkItem(&Item->WorkItem, DelayedWorkQueue);
+                    QueueSampleWork(&Item->WorkItem, RvParkWorker, Item);
                     return FLT_POSTOP_MORE_PROCESSING_REQUIRED;
                 }
             }
