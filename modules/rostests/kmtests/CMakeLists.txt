@@ -148,6 +148,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_mm/MmFaultFileHeld.c
     ntos_mm/MmOomRetry.c
     ntos_mm/MmReservedMapping.c
+    ntos_mm/MmSystemPtes.c
     ntos_mm/MmSection.c
     ntos_mm/MmSessionSpace.c
     ntos_mm/MmSessionImage.c
