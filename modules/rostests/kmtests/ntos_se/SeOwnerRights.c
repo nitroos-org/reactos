@@ -98,6 +98,7 @@ OrMakeSd(
 
     Status = RtlCreateSecurityDescriptor(&OrSd->Sd, SECURITY_DESCRIPTOR_REVISION);
     ok_eq_hex(Status, STATUS_SUCCESS);
+    /* Owner NULL builds a descriptor without an owner (and group) */
     Status = RtlSetOwnerSecurityDescriptor(&OrSd->Sd, Owner, FALSE);
     ok_eq_hex(Status, STATUS_SUCCESS);
     Status = RtlSetGroupSecurityDescriptor(&OrSd->Sd, Owner, FALSE);
@@ -233,7 +234,7 @@ START_TEST(SeOwnerRights)
     PACCESS_TOKEN Token;
     PTOKEN_USER UserInfo = NULL;
     NTSTATUS Status;
-    PSID User, World, Other, Admins, System;
+    PSID User, World, Other, Admins;
     POR_SD Sd;
     const ACCESS_MASK All = STANDARD_RIGHTS_ALL | 0x7;
 
@@ -251,7 +252,6 @@ START_TEST(SeOwnerRights)
     World = SeExports->SeWorldSid;
     Other = SeExports->SeLocalServiceSid;
     Admins = SeExports->SeAliasAdminsSid;
-    System = SeExports->SeLocalSystemSid;
     ok(!RtlEqualSid(User, Other), "test runs as LocalService\n");
 
     /* 1. No OWNER RIGHTS ACE: the owner gets READ_CONTROL and WRITE_DAC implicitly */
@@ -398,7 +398,78 @@ START_TEST(SeOwnerRights)
         }
     }
 
-    /* Hot path cost: a typical DACL without OWNER RIGHTS (SYSTEM, Administrators, user, Everyone) */
+    /* 13. A descriptor without an owner: the DACL decides, OWNER RIGHTS ACEs apply to nobody, no crash */
+    {
+        OR_ACE Aces[] = { { OR_ALLOW, 0, 0x1, &OwnerRightsSid },
+                          { OR_ALLOW, 0, OR_RC | 0x2, World } };
+        BOOLEAN Result;
+        ACCESS_MASK Granted = 0;
+        NTSTATUS AccessStatus = 0xdeadbeef;
+        PPRIVILEGE_SET Privileges = NULL;
+
+        Sd = OrMakeSd(NULL, RTL_NUMBER_OF(Aces), Aces);
+        OrCheck(&SubjectContext, Sd, OR_RC, TRUE, OR_RC);
+        OrCheck(&SubjectContext, Sd, OR_WD, FALSE, 0);
+        OrCheck(&SubjectContext, Sd, OR_RC | OR_WD, FALSE, 0);
+        OrCheck(&SubjectContext, Sd, 0x2, TRUE, 0x2);
+        OrCheck(&SubjectContext, Sd, 0x1, FALSE, 0);
+        OrCheck(&SubjectContext, Sd, MAXIMUM_ALLOWED, TRUE, OR_RC | 0x2);
+        if (Sd)
+        {
+            /* Kernel mode grants everything without looking at the descriptor */
+            Result = SeAccessCheck(&Sd->Sd, &SubjectContext, FALSE, OR_WD, 0, &Privileges,
+                                   &OrMapping, KernelMode, &Granted, &AccessStatus);
+            ok(Result == TRUE, "kernel mode result %u\n", Result);
+            ok_eq_hex(Granted, OR_WD);
+            ok_eq_hex(AccessStatus, STATUS_SUCCESS);
+            if (Privileges) SeFreePrivileges(Privileges);
+            ExFreePoolWithTag(Sd, 'rOmK');
+        }
+    }
+
+    /* 14. Without an owner and with the DACL granting everything: MAXIMUM_ALLOWED gives the DACL's rights only */
+    {
+        OR_ACE Aces[] = { { OR_ALLOW, 0, OR_RC | OR_WD | 0x1, World } };
+        Sd = OrMakeSd(NULL, RTL_NUMBER_OF(Aces), Aces);
+        OrCheck(&SubjectContext, Sd, OR_WD, TRUE, OR_WD);
+        OrCheck(&SubjectContext, Sd, OR_RC | OR_WD, TRUE, OR_RC | OR_WD);
+        OrCheck(&SubjectContext, Sd, MAXIMUM_ALLOWED, TRUE, OR_RC | OR_WD | 0x1);
+        if (Sd) ExFreePoolWithTag(Sd, 'rOmK');
+    }
+
+    ExFreePool(UserInfo);
+    SeReleaseSubjectContext(&SubjectContext);
+}
+
+/*
+ * Cost of the access check for a typical DACL without OWNER RIGHTS. Timing only,
+ * no assertion: a hidden test ("-" in the list), run by name when wanted.
+ */
+START_TEST(SeOwnerRightsPerf)
+{
+    SECURITY_SUBJECT_CONTEXT SubjectContext;
+    PACCESS_TOKEN Token;
+    PTOKEN_USER UserInfo = NULL;
+    NTSTATUS Status;
+    PSID User, World, Other, Admins, System;
+
+    SeCaptureSubjectContext(&SubjectContext);
+    Token = SeQuerySubjectContextToken(&SubjectContext);
+    Status = SeQueryInformationToken(Token, TokenUser, (PVOID*)&UserInfo);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (skip(NT_SUCCESS(Status) && UserInfo, "No token user\n"))
+    {
+        SeReleaseSubjectContext(&SubjectContext);
+        return;
+    }
+
+    User = UserInfo->User.Sid;
+    World = SeExports->SeWorldSid;
+    Other = SeExports->SeLocalServiceSid;
+    Admins = SeExports->SeAliasAdminsSid;
+    System = SeExports->SeLocalSystemSid;
+
+    /* A typical DACL without OWNER RIGHTS (SYSTEM, Administrators, user, Everyone) */
     {
         OR_ACE Aces[] = { { OR_ALLOW, 0, GENERIC_ALL, System },
                           { OR_ALLOW, 0, GENERIC_ALL, Admins },

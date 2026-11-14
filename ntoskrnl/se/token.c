@@ -522,7 +522,8 @@ SepUpdateSinglePrivilegeFlagToken(
  * the lock.
  *
  * @return
- * Returns TRUE if the token belongs to a owner, FALSE otherwise.
+ * Returns TRUE if the token belongs to a owner, FALSE otherwise
+ * (also when the descriptor has no owner).
  */
 BOOLEAN
 NTAPI
@@ -537,7 +538,10 @@ SepTokenIsOwner(
 
     /* Get the owner SID */
     Sid = SepGetOwnerFromDescriptor(SecurityDescriptor);
-    ASSERT(Sid != NULL);
+
+    /* A descriptor without an owner has no owner the token could be */
+    if (Sid == NULL)
+        return FALSE;
 
     /* Lock the token if needed */
     if (!TokenLocked) SepAcquireTokenLockShared(Token);
