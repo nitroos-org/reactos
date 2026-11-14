@@ -19,8 +19,8 @@
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 OUT=${1:-$HERE/i386-llvm}
-ARTIFACT=s3://reactos-nitro-archive/wow64-llvmpipe-i386/26.3.0/wow64-llvmpipe-i386-artifacts.tar.xz
-ARTIFACT_SHA256=ffbe26e2d376134d6380b08872a712b565597b30f4ce232da9aac85ca0d5c98b
+ARTIFACT=s3://reactos-nitro-archive/wow64-llvmpipe-i386/26.3.0-dc2/wow64-llvmpipe-i386-artifacts.tar.xz
+ARTIFACT_SHA256=43d9dc91ca9aaee671890b3363528c6e5d75ee77f80f965e279eca2e489b0f74
 FILES="libgallium_wgl.dll mesa3d-licenses.txt"
 NAME=stage-i386-llvm
 

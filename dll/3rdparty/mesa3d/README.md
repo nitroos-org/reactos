@@ -17,7 +17,7 @@ or newer.
 |---|---|
 | `i386/libgallium_wgl.dll`, `amd64/libgallium_wgl.dll` | The prebuilt driver, copied to `system32` of every image by `CMakeLists.txt` |
 | `build-mesa.sh` | Builds both DLLs from the pinned Mesa release tarball |
-| `patches/` | Changes to Mesa that the build applies (two, see below) |
+| `patches/` | Local patches to Mesa that the build applies (three, see "Local patches carried on top of Mesa 26.3") |
 | `SHA256SUMS` | Hashes of the tarball, the two DLLs and the licence file |
 | `mesa3d-licenses.txt` | The licence texts and copyright lines of every file that was compiled into the DLLs (made by `gen-licenses.py`); installed as `system32\mesa3d-licenses.txt` next to the DLL |
 | `gen-licenses.py` | Reads the compiled sources and headers of a build and writes `mesa3d-licenses.txt`, with the copyright files of the packages `mingw-w64-common` and `gcc-mingw-w64-base` of the build host appended (the statically linked runtime); `build-mesa.sh` runs it and stops when those files are missing |
@@ -44,7 +44,12 @@ what it must produce.
 * The options turn off everything that is not the Windows OpenGL driver, and set
   `min-windows-version=7`, so that the DLL uses no function that Windows 7 lacks.
 
-## Changes to Mesa
+## Local patches carried on top of Mesa 26.3
+
+`build-mesa.sh` applies every `patches/*.patch` (in name order, `patch -p1`) to the pinned tarball. We carry no Mesa fork: a
+patch is a self-contained change to one Mesa file area, written in Mesa's coding style, so that it can be offered upstream. When Mesa
+is updated (see "Updating"), each patch is re-applied, rebased, or dropped because Mesa has the change by now.
+
 
 * `0001`: softpipe allocated a texture cache for each of its 768 sampler view slots when a
   context was created, about 250 MB of memory per context. A 32-bit process has 2 GB of address
@@ -56,6 +61,36 @@ what it must produce.
   3 seconds to 50 milliseconds on the i386 test VM. The shaders are now made on the first blit,
   with the shader creation function of the driver (the blitter binds them without the wrappers
   of the Draw stages, so they must not be made through the wrappers).
+
+* `0003`: the shader disk cache (`src/util/disk_cache*.c/h`) for Windows (it was an empty `TODO` there, and meson refused
+  `-Dshader-cache=enabled`). llvmpipe compiles each new fragment or vertex shader variant with LLVM on the draw thread (about 180 ms
+  each; 298 of the 661 draws of Word's Start screen), and stored none of it between program starts. With the cache a later start
+  loads the compiled variants from disk. `build-mesa.sh` builds the cache only into the LLVM builds (llvmpipe is the one driver here
+  that stores compiled shaders in it). The softpipe-only DLLs in this directory were built before the patch (`SHA256SUMS` describes that
+  build): a rebuild with `0003` has the cache compiled out and behaves the same, but it is not byte-identical (the barrier and exit
+  handler fixes are in code every build contains), so rebuilding them gives new hashes.
+  The patch also fixes the fallback `util_barrier_wait` (it returned true to every thread, and `util_queue_finish` destroyed the
+  barrier under the other threads: a hang with three or more queue threads) that the cache's queue runs into.
+  See "Shader disk cache" below for the behaviour.
+
+## Shader disk cache (llvmpipe builds)
+
+The cache directory is `%LOCALAPPDATA%\Mesa\shader_cache` (`%USERPROFILE%\AppData\Local` when `LOCALAPPDATA` is not set), or
+`%MESA_SHADER_CACHE_DIR%\mesa_shader_cache`. One file per compiled shader, in two-hex-digit subdirectories, plus an `index` file
+that holds the size of the cache. The cache key contains the driver DLL's file time, the CPU features and the vector width, so a
+new `libgallium_wgl.dll` or another CPU does not use old entries. The environment variables are Mesa's: `MESA_SHADER_CACHE_DISABLE=true`
+switches it off, `MESA_SHADER_CACHE_MAX_SIZE=<n>[K|M|G]` limits it (default 1 GB; oldest entries go first),
+`MESA_SHADER_CACHE_SHOW_STATS=true` logs the hits and misses when the driver is unloaded (stderr and OutputDebugString, as Mesa's other log lines).
+
+Several processes may share the directory. A directory that cannot be written (read-only volume, no permission) switches the cache
+off for that process; nothing else changes. Entries are checked with a CRC (and the stored size, at most 64 MB, must be what the data
+inflates to) when they are read, and one that fails is deleted; a read that fails for another reason (a lock, an I/O error) or a failed
+allocation is only a miss. The CRC guards against damaged files, not against someone who can write the directory: the entries are
+machine code that llvmpipe loads. So every directory the cache creates gets a protected DACL (no inheritance; full control for the
+current user, SYSTEM and Administrators, as in a user profile; the equivalent of `mkdir 0700`), and an existing cache directory that is
+owned by somebody else makes the cache off for the process, with one message on stderr (so does a `MESA_SHADER_CACHE_DIR` that is too
+long for the 260 character paths the cache uses). A directory that an older build or the user made earlier keeps the ACL it has: it
+must be writable only by the user it belongs to.
 
 ## How the system uses it
 
@@ -94,7 +129,7 @@ no program of the test set depends on them.
 ## Updating (softpipe DLLs)
 
 Change `MESA_VERSION` and `MESA_SHA256` in `build-mesa.sh`, rebuild, check that the patches
-still apply, replace the two DLLs, rewrite `SHA256SUMS` and run
+still apply (`patch -p1 --dry-run` in the unpacked tarball; re-make or drop the ones that do not), replace the two DLLs, rewrite `SHA256SUMS` and run
 `opengl32_apitest icd_default` and `ddraw_apitest` on both architectures.
 
 ## llvmpipe and lavapipe (amd64 default GPU, fetched at configure, not committed)
@@ -126,13 +161,18 @@ Vulkan ICD) so the build never breaks. Set `LAVAPIPE_ARTIFACT=<local tar>` to st
   rendering list then disables GPU compositing, so they composite in software and present with GDI. No per-app
   `Wine\AppDefaults\<app>.exe\Direct3D renderer=no3d` key is needed any more.
 
+The files of a pack carry the build date of that pack as their time (dc2: 2026-11-14), not the fixed `SOURCE_DATE_EPOCH` of the DLL
+build: Mesa's shader cache on Windows identifies the driver by the last-write time of the DLL, so two packs must not have the same
+time, or an extraction that keeps times would let a new driver load the entries of an old one. Give every new pack a new date.
+
 Checksums of the artifacts of the amd64 build (Mesa 26.3.0, LLVM 19.1.7, Ubuntu 24.04 mingw-w64 GCC 13-win32):
 
 ```
-7fc352df8044a1c7dbdde79fd78be34f8a73842328d7a5ebbaf7bfb7eb63783a  amd64-llvm/libgallium_wgl.dll
-cf934392fd0b14692fd950b68b4a776dae266adb2a387c33eecf1ef07cdbcde7  amd64-llvm/vulkan_lvp.dll
+39d5f70c56fef5b13adde8147b859e9af3c5b1a265bf0ac00066b275a4778831  gfx01-lavapipe-amd64-artifacts.tar.xz
+22f5cad890d3069286882aa60bacf024afc13a7d71423409a626c6bfaf7c24dc  amd64-llvm/libgallium_wgl.dll
+48f9b4fa14fe709f64f1db9e3d687b80bc4b6b983274ee382372106d58f09a83  amd64-llvm/vulkan_lvp.dll
 feb96dd7f1e2b183b080d215d6c676ce8e3a40925a01196e38cecddd4a29ec06  amd64-llvm/lvp_icd.json
-8176f74c4065731f80ca230308c633b961203af6c60a78a06c187fa244a76fab  amd64-llvm/mesa3d-licenses.txt
+170f2e90c9f06e59efd98e17ab43f0ee894e37c3636a39b1063ff4d2c3f8dfed  amd64-llvm/mesa3d-licenses.txt
 8d85c1057d742e597985c7d4e6320b015a9139385cff4cbae06ffc0ebe89afee  amd64-llvm/llvm-licenses.txt
 ```
 
@@ -150,7 +190,7 @@ pack in a temporary directory next to the target and move it into place, so a fa
 `amd64-llvm/` or `i386-llvm/`; the pinned artifact hash is stored in `.artifact-sha256` in the staged directory, and a
 changed pin in the script stages the new pack again. CMake accepts the directory only with every DLL, both licence files
 and `SHA256SUMS`. `rclone` runs with `--contimeout 15s --timeout 60s --retries 2`. At the end of the configure there is
-one line per architecture, `Mesa3D amd64: llvmpipe (artifact beed97f8)` or
+one line per architecture, `Mesa3D amd64: llvmpipe (artifact 39d5f70c)` or
 `Mesa3D amd64: softpipe fallback (<reason>)` (and the same for i386 in the SysWOW64 guest configure), so a silent fall
 back to OpenGL 3.3 is visible.
 
@@ -176,9 +216,9 @@ i386 softpipe driver in SysWOW64. The pack is `ARCHES=i386 I386_LLVM=1 ./build-m
 rebuilt to the same DLL twice); its size is 73 MB installed, 18.6 MB compressed.
 
 ```
-ffbe26e2d376134d6380b08872a712b565597b30f4ce232da9aac85ca0d5c98b  wow64-llvmpipe-i386-artifacts.tar.xz
-05f636f3dfb6923cf75e1861022093f5b8677b67e5be96e14a01833690bacd83  i386-llvm/libgallium_wgl.dll
-e8261a3c1111986357368c0187823b5854d4cc0415d287232ef8d8566874802d  i386-llvm/mesa3d-licenses.txt
+43d9dc91ca9aaee671890b3363528c6e5d75ee77f80f965e279eca2e489b0f74  wow64-llvmpipe-i386-artifacts.tar.xz
+fde3483ca2fcbb676477dd326dced11c2f96e8ca92831134e34fceafba37dcbb  i386-llvm/libgallium_wgl.dll
+a782929580c201fea5ab255698416cbd31ebff4186981710efdcbdbc8ee8a3cd  i386-llvm/mesa3d-licenses.txt
 ```
 
 Under WoW64 (amd64 Release, 4 vCPUs) the 32-bit driver gave the gear scene 776 frames per second for 120 s and the
