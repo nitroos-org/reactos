@@ -63,9 +63,9 @@ Test_GetDIBits_BoundedCopy(void)
         FillMemory(bits, sizeof(bits), 0xA5);
         result = pfnGetDIBits(hdc, hbm, 0, 2, bits, (LPBITMAPINFO)&header,
                               DIB_RGB_COLORS, 4, sizeof(header));
-        ok(result == 2, "Expected two scan lines, got %d\n", result);
-        for (index = 4; index < sizeof(bits); index++)
-            ok(bits[index] == 0xA5, "Byte %u changed despite cjMaxBits=4\n", index);
+        ok(result == 0, "Expected insufficient buffer to fail, got %d\n", result);
+        for (index = 0; index < sizeof(bits); index++)
+            ok(bits[index] == 0xA5, "Byte %u changed despite insufficient cjMaxBits\n", index);
 
         {
             COPY_BUFFER_CONTEXT context;
