@@ -2168,6 +2168,64 @@ static BOOL ShellDefaultsId(LPCWSTR id)
     return !_wcsicmp(id, L"powershell-7") || !_wcsicmp(id, L"firefox");
 }
 
+/* An installer that exits 0 without putting the product at the expected place has usually found an existing copy and
+ * updated that one (the Mozilla MSI runs Mozilla's installer, which reuses the folder of the Firefox it finds: an ESR
+ * in C:\FF64 becomes the new release in place). Look in the Uninstall keys (both registry views) for a product whose
+ * DisplayName starts with the component's name and whose InstallLocation exists; the most recently written key wins,
+ * it is the one the installer has just touched. */
+static BOOL FindExistingInstall(LPCWSTR name, WCHAR *dir, size_t dirCch, WCHAR *ver, size_t verCch)
+{
+    static const REGSAM views[] = { KEY_WOW64_64KEY, KEY_WOW64_32KEY };
+    static const WCHAR UNINST[] = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall";
+    size_t nameLen = wcslen(name);
+    FILETIME best = { 0, 0 };
+    BOOL found = FALSE;
+    int v;
+
+    if (!nameLen) return FALSE;
+    for (v = 0; v < ARRAYSIZE(views); v++)
+    {
+        HKEY root;
+        DWORD i;
+
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, UNINST, 0, KEY_READ | views[v], &root) != ERROR_SUCCESS) continue;
+        for (i = 0; ; i++)
+        {
+            WCHAR sub[256], disp[256], loc[MAX_PATH], dver[64];
+            DWORD n = ARRAYSIZE(sub), type, cb;
+            FILETIME ft;
+            HKEY k;
+            LONG r = RegEnumKeyExW(root, i, sub, &n, NULL, NULL, NULL, &ft);
+
+            if (r == ERROR_NO_MORE_ITEMS) break;
+            if (r != ERROR_SUCCESS) continue;
+            if (RegOpenKeyExW(root, sub, 0, KEY_QUERY_VALUE | views[v], &k) != ERROR_SUCCESS) continue;
+            disp[0] = loc[0] = dver[0] = L'\0';
+            cb = sizeof(disp) - sizeof(WCHAR);
+            if (RegQueryValueExW(k, L"DisplayName", NULL, &type, (BYTE *)disp, &cb) != ERROR_SUCCESS || type != REG_SZ) disp[0] = L'\0';
+            else disp[cb / sizeof(WCHAR)] = L'\0';
+            cb = sizeof(loc) - sizeof(WCHAR);
+            if (RegQueryValueExW(k, L"InstallLocation", NULL, &type, (BYTE *)loc, &cb) != ERROR_SUCCESS || type != REG_SZ) loc[0] = L'\0';
+            else loc[cb / sizeof(WCHAR)] = L'\0';
+            cb = sizeof(dver) - sizeof(WCHAR);
+            if (RegQueryValueExW(k, L"DisplayVersion", NULL, &type, (BYTE *)dver, &cb) != ERROR_SUCCESS || type != REG_SZ) dver[0] = L'\0';
+            else dver[cb / sizeof(WCHAR)] = L'\0';
+            RegCloseKey(k);
+            n = (DWORD)wcslen(loc);
+            while (n && (loc[n - 1] == L'\\' || loc[n - 1] == L'"')) loc[--n] = L'\0';
+            if (loc[0] == L'"') MoveMemory(loc, loc + 1, (wcslen(loc)) * sizeof(WCHAR));
+            if (!loc[0] || _wcsnicmp(disp, name, nameLen)) continue;
+            if (GetFileAttributesW(loc) == INVALID_FILE_ATTRIBUTES) continue;
+            if (found && CompareFileTime(&ft, &best) <= 0) continue;
+            best = ft; found = TRUE;
+            StringCchCopyW(dir, dirCch, loc);
+            StringCchCopyW(ver, verCch, dver);
+        }
+        RegCloseKey(root);
+    }
+    return found;
+}
+
 /* Download + install (the caller holds the install lock). Returns S_OK only if the installer exited 0;
  * on success the uninstall command line is recorded in the state key. */
 static HRESULT SoftwareInstallPiece(const FM_FEATURE *f, HKEY state, FILE *log, WCHAR *uninstOut)
@@ -2292,9 +2350,28 @@ static HRESULT SoftwareInstallPiece(const FM_FEATURE *f, HKEY state, FILE *log, 
     if (FAILED(hr)) { if (pathBefore) HeapFree(GetProcessHeap(), 0, pathBefore); return hr; }
     if (missing)
     {
+        WCHAR other[MAX_PATH], otherVer[64];
+
         if (pathBefore) HeapFree(GetProcessHeap(), 0, pathBefore);
         LOGF(log, L"error: installer for '%s' reported success (exit code 0) but it is not installed: %s %s not found\n",
              f->Id, c.DetectFile[0] ? L"file" : L"registry value", c.DetectFile[0] ? c.DetectFile : c.DetectReg);
+        if (FindExistingInstall(f->Name, other, ARRAYSIZE(other), otherVer, ARRAYSIZE(otherVer)))
+        {
+            /* not a lost install: the installer found a copy of the product and worked on that one */
+            WCHAR vtxt[96];
+
+            vtxt[0] = L'\0';
+            if (otherVer[0]) StringCchPrintfW(vtxt, ARRAYSIZE(vtxt), L" (version %s)", otherVer);
+            LOGF(log, L"  note: '%s' is installed at %s%s. The installer most likely updated that copy instead of adding "
+                      L"one at the expected place (the Mozilla installer reuses the folder of the Firefox it finds, "
+                      L"for example an ESR installed by hand). Nothing was installed at %s.\n",
+                 f->Name, other, vtxt, c.DetectFile[0] ? c.DetectFile : c.DetectReg);
+            SetLastMsg(L"The installer for '%s' finished without an error, but %s is already installed at %s%s and "
+                       L"the installer updated that copy instead of installing a second one at %s. Keep or remove "
+                       L"that copy, then run the install again if you want one at the standard place.",
+                       f->Id, f->Name, other, vtxt, c.DetectFile[0] ? c.DetectFile : c.DetectReg);
+            return HRESULT_FROM_WIN32(ERROR_INSTALL_FAILURE);
+        }
         SetLastMsg(L"The installer for '%s' finished without an error but did not install it (%s not found).%s%s",
                    f->Id, c.DetectFile[0] ? c.DetectFile : c.DetectReg, g_Tail[0] ? L"\n\n" : L"", g_Tail);
         return HRESULT_FROM_WIN32(ERROR_INSTALL_FAILURE);
