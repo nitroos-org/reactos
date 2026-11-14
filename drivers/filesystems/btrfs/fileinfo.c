@@ -3479,6 +3479,12 @@ static NTSTATUS set_end_of_file_information(device_extension* Vcb, PIRP Irp, PFI
     } else if (new_end_of_file > fcb->inode_item.size) {
         TRACE("extending file to %I64x bytes\n", new_end_of_file);
 
+        Status = reserve_file_space(fcb, fileref, new_end_of_file, NULL, &rollback);
+        if (!NT_SUCCESS(Status)) {
+            ERR("error - reserve_file_space failed (%08lx)\n", Status);
+            goto end;
+        }
+
         Status = extend_file(fcb, fileref, new_end_of_file, false, NULL, &rollback);
         if (!NT_SUCCESS(Status)) {
             ERR("error - extend_file failed\n");
