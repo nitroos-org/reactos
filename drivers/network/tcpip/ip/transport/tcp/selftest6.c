@@ -40,15 +40,20 @@
 #include "lwip/inet_chksum.h"
 #include "lwip/tcpip.h"
 #include "lwip/priv/tcp_priv.h"
+#include <reactos/nitrofw.h>
+#include <nitrofwk.h>
 #include <stdio.h>
 #include <stdarg.h>
 
 extern volatile LONG TCP6ReceiveDropped;
 extern volatile LONG TCP6ListenerRefused;
+extern volatile LONG TCP6FilterDropped;
+extern volatile LONG TCP6IcmpErrorsLimited;
+extern volatile LONG TCP6IcmpErrorsSent;
 VOID TCPInput6(PIP_INTERFACE IF, struct pbuf *p, BOOLEAN FromOwnLink);
 
 #define ST_TAG 'T6pI'
-#define ST_LOG_SIZE 32768
+#define ST_LOG_SIZE 65536
 
 static BOOLEAN StReadValue(PCWSTR Name, ULONG Type, PVOID Data, ULONG Size);
 
@@ -602,7 +607,7 @@ StReadAddress(PCWSTR Name, struct netif *En, ip_addr_t *Address, CHAR *Text, ULO
     return TRUE;
 }
 
-/* ---- connection requests from the wire (no IPv6 firewall yet): crafted SYNs into the receive path ---- */
+/* ---- connection requests from the wire: crafted datagrams into the receive path, through the firewall ---- */
 
 static struct tcp_pcb *
 StFindSynReceived(u16_t Port)
@@ -651,58 +656,453 @@ StMakeSyn(const ip6_addr_t *Src, const ip6_addr_t *Dest, u16_t Port)
     return p;
 }
 
-static VOID
-StTestWireSyn(PIP_INTERFACE IF, const ip_addr_t *Local, u16_t Port)
+/* ---- the firewall (NitroFwInboundAllowed6) and the ICMPv6 error rate limit: crafted datagrams into the
+   receive path (TCPInput6), under a policy of the test's own (NitroFwTestSetPolicy) ---- */
+
+#define ST_PORT_ALLOWED_TCP  40640
+#define ST_PORT_BLOCKED_TCP  40641
+#define ST_PORT_ALLOWED_UDP  40650
+#define ST_PORT_BLOCKED_UDP  40649
+#define ST_ICMP_BURST        10
+#define ST_ICMP_RATE         10
+
+/* A datagram of Nh with Payload (Len bytes) from Src to Dest, hop limit Hop, as it arrives from the adapter */
+static struct pbuf *
+StPacket(const ip6_addr_t *Src, const ip6_addr_t *Dest, UCHAR Nh, UCHAR Hop, const UCHAR *Payload, UINT Len)
 {
-    struct tcp_pcb *Pcb, *Listener = NULL, *Half;
-    ip6_addr_t Peer;
     struct pbuf *p;
-    LONG RefusedBefore;
-    BOOLEAN WireTaken, LocalTaken;
-    CHAR Detail[128];
+    PUCHAR Ip;
+
+    p = pbuf_alloc(PBUF_RAW, (u16_t)(40 + Len), PBUF_RAM);
+    if (!p)
+        return NULL;
+    Ip = p->payload;
+    RtlZeroMemory(Ip, 40);
+    Ip[0] = 0x60;
+    Ip[4] = (UCHAR)(Len >> 8);
+    Ip[5] = (UCHAR)Len;
+    Ip[6] = Nh;
+    Ip[7] = Hop;
+    RtlCopyMemory(Ip + 8, Src->addr, 16);
+    RtlCopyMemory(Ip + 24, Dest->addr, 16);
+    if (Len)
+        RtlCopyMemory(Ip + 40, Payload, Len);
+    return p;
+}
+
+/* An ICMPv6 message of Type, Code and a zero body, Length bytes in all (the checksum is not set: what is
+   passed to lwIP is dropped there, which is all these tests need) */
+static struct pbuf *
+StIcmp(const ip6_addr_t *Src, const ip6_addr_t *Dest, UCHAR Type, UCHAR Code, UCHAR Hop, UINT Length)
+{
+    UCHAR Body[96];
+
+    RtlZeroMemory(Body, sizeof(Body));
+    Body[0] = Type;
+    Body[1] = Code;
+    return StPacket(Src, Dest, 58, Hop, Body, Length);
+}
+
+static VOID
+StTcpHeader(PUCHAR Tcp, u16_t SrcPort, u16_t DstPort, UCHAR Flags)
+{
+    RtlZeroMemory(Tcp, 20);
+    Tcp[0] = (UCHAR)(SrcPort >> 8); Tcp[1] = (UCHAR)SrcPort;
+    Tcp[2] = (UCHAR)(DstPort >> 8); Tcp[3] = (UCHAR)DstPort;
+    Tcp[4] = 0x12; Tcp[5] = 0x34; Tcp[6] = 0x56; Tcp[7] = 0x78;
+    Tcp[12] = 5 << 4;
+    Tcp[13] = Flags;
+    Tcp[14] = 0xFF; Tcp[15] = 0xFF;
+}
+
+/* A UDP datagram header (8 bytes, no payload, checksum not set) */
+static struct pbuf *
+StUdp(const ip6_addr_t *Src, const ip6_addr_t *Dest, u16_t DstPort)
+{
+    UCHAR Udp[8];
+
+    RtlZeroMemory(Udp, sizeof(Udp));
+    Udp[0] = 0xC3; Udp[1] = 0x52;
+    Udp[2] = (UCHAR)(DstPort >> 8); Udp[3] = (UCHAR)DstPort;
+    Udp[5] = 8;
+    return StPacket(Src, Dest, 17, 64, Udp, sizeof(Udp));
+}
+
+/* Hands p to the receive path as from the adapter; TRUE when the firewall dropped it */
+static BOOLEAN
+StInject(PIP_INTERFACE IF, struct pbuf *p, BOOLEAN FromOwnLink)
+{
+    LONG Before = TCP6FilterDropped;
+
+    if (!p)
+        return FALSE;
+    TCPInput6(IF, p, FromOwnLink);
+    return TCP6FilterDropped == Before + 1;
+}
+
+static VOID
+StRule(PUCHAR Rule, UCHAR Protocol, u16_t Port)
+{
+    PNITROFW_RULE R = (PNITROFW_RULE)Rule;
+    PNITROFW_PORT_RANGE Range = (PNITROFW_PORT_RANGE)(Rule + sizeof(NITROFW_RULE));
+
+    RtlZeroMemory(Rule, sizeof(NITROFW_RULE) + 8);
+    R->Size = sizeof(NITROFW_RULE) + 8;
+    R->Action = NITROFW_ACTION_ALLOW;
+    R->Direction = NITROFW_DIR_IN;
+    R->Protocol = Protocol;
+    R->ProfileMask = NITROFW_PROFILE_ALL;
+    R->IfTypes = NITROFW_IFTYPE_ALL;
+    R->LocalPortCount = 1;
+    R->LocalPortOffset = sizeof(NITROFW_RULE);
+    Range->Low = Range->High = Port;
+}
+
+/* All profiles on, default inbound Block, drops logged; Allow TCP to ST_PORT_ALLOWED_TCP and UDP to
+   ST_PORT_ALLOWED_UDP */
+static BOOLEAN
+StInstallPolicy(VOID)
+{
+    UCHAR Blob[sizeof(NITROFW_POLICY) + 2 * (sizeof(NITROFW_RULE) + 8)];
+    PNITROFW_POLICY Policy = (PNITROFW_POLICY)Blob;
+    ULONG i;
+
+    RtlZeroMemory(Blob, sizeof(Blob));
+    Policy->Magic = NITROFW_POLICY_MAGIC;
+    Policy->AbiVersion = NITROFW_ABI_VERSION;
+    Policy->TotalSize = sizeof(Blob);
+    Policy->Flags = NITROFW_POLICY_ENFORCE;
+    Policy->Generation = 1;
+    Policy->ActiveProfiles = NITROFW_PROFILE_ALL;
+    Policy->RuleCount = 2;
+    Policy->RulesOffset = sizeof(NITROFW_POLICY);
+    for (i = 0; i < NITROFW_PROFILE_COUNT; i++)
+    {
+        Policy->Profile[i].Flags = NITROFW_PROFILE_ENABLED | NITROFW_PROFILE_LOG_DROPPED;
+        Policy->Profile[i].DefaultInbound = NITROFW_ACTION_BLOCK;
+        Policy->Profile[i].DefaultOutbound = NITROFW_ACTION_ALLOW;
+    }
+    StRule(Blob + sizeof(NITROFW_POLICY), IPPROTO_TCP, ST_PORT_ALLOWED_TCP);
+    StRule(Blob + sizeof(NITROFW_POLICY) + sizeof(NITROFW_RULE) + 8, IPPROTO_UDP, ST_PORT_ALLOWED_UDP);
+    return NT_SUCCESS(NitroFwTestSetPolicy(Blob, sizeof(Blob)));
+}
+
+static UCHAR StDropLogBuffer[sizeof(NITROFW_DROPLOG) + 32 * sizeof(NITROFW_DROP_RECORD)];
+
+/* The newest drop log record, or NULL */
+static PNITROFW_DROP_RECORD
+StLastDrop(VOID)
+{
+    PNITROFW_DROPLOG Log = (PNITROFW_DROPLOG)StDropLogBuffer;
+    PNITROFW_DROP_RECORD Records = (PNITROFW_DROP_RECORD)(Log + 1);
+
+    if (!NT_SUCCESS(NitroFwTestGetDropLog(0, StDropLogBuffer, sizeof(StDropLogBuffer))) || !Log->Count)
+        return NULL;
+    /* the first 32 of the ring from the oldest: ask again from the newest sequence */
+    if (!NT_SUCCESS(NitroFwTestGetDropLog(Log->NextSequence - 1, StDropLogBuffer, sizeof(StDropLogBuffer))) ||
+        !Log->Count)
+        return NULL;
+    return &Records[Log->Count - 1];
+}
+
+static err_t
+StNopConnected(void *arg, struct tcp_pcb *pcb, err_t err)
+{
+    return ERR_OK;
+}
+
+static BOOLEAN
+StDropped(PIP_INTERFACE IF, struct pbuf *p, BOOLEAN FromOwnLink, const char *Name, BOOLEAN WantDropped)
+{
+    BOOLEAN Dropped = StInject(IF, p, FromOwnLink);
+
+    StResult(p && Dropped == WantDropped, Name, WantDropped ? "(dropped)" : "(passed)");
+    return Dropped;
+}
+
+static VOID
+StTestFirewall6(PIP_INTERFACE IF, const ip_addr_t *Local, u16_t Port)
+{
+    struct tcp_pcb *Pcb, *ListenerBlocked = NULL, *ListenerAllowed = NULL, *Half;
+    ip6_addr_t Peer, Global, Router;
+    const ip6_addr_t *Dest = ip_2_ip6(Local);
+    struct pbuf *p;
+    PNITROFW_DROP_RECORD Last;
+    LONG64 DropBefore, PassBefore, DropAfter, PassAfter;
+    BOOLEAN Dropped, Taken;
+    CHAR Detail[160];
+    UCHAR Payload[64];
+    LONG SentBefore, LimitedBefore, SentDelta, LimitedDelta;
+    LARGE_INTEGER Start;
+    ULONG Micro, i;
 
     ip6addr_aton("fe80::5eed:1", &Peer);
+    ip6addr_aton("fe80::5eed:2", &Router);
+    ip6addr_aton("2001:db8::5eed", &Global);
+
+    if (!StInstallPolicy())
+    {
+        StResult(FALSE, "firewall test policy installed", NULL);
+        return;
+    }
+    StResult(TRUE, "firewall test policy installed", "(default block, allow TCP 40640 and UDP 40650)");
 
     LOCK_TCPIP_CORE();
     Pcb = tcp_new_ip_type(IPADDR_TYPE_V6);
-    if (Pcb && tcp_bind(Pcb, Local, Port) == ERR_OK)
-        Listener = tcp_listen(Pcb);
+    if (Pcb && tcp_bind(Pcb, Local, ST_PORT_BLOCKED_TCP) == ERR_OK)
+        ListenerBlocked = tcp_listen(Pcb);
     else if (Pcb)
         tcp_close(Pcb);
-    if (Listener)
-        tcp_accept(Listener, StServerAccept);
+    if (ListenerBlocked)
+        tcp_accept(ListenerBlocked, StServerAccept);
+    Pcb = tcp_new_ip_type(IPADDR_TYPE_V6);
+    if (Pcb && tcp_bind(Pcb, Local, ST_PORT_ALLOWED_TCP) == ERR_OK)
+        ListenerAllowed = tcp_listen(Pcb);
+    else if (Pcb)
+        tcp_close(Pcb);
+    if (ListenerAllowed)
+        tcp_accept(ListenerAllowed, StServerAccept);
     UNLOCK_TCPIP_CORE();
-    if (!Listener)
+    if (!ListenerBlocked || !ListenerAllowed)
     {
-        StResult(FALSE, "wire SYN to an IPv6 listener refused", "listener setup failed");
-        return;
+        StResult(FALSE, "firewall test listeners", "listener setup failed");
+        goto cleanup;
     }
 
-    /* From the wire: dropped, no half-open connection, no answer */
-    RefusedBefore = TCP6ListenerRefused;
-    p = StMakeSyn(&Peer, ip_2_ip6(Local), Port);
-    if (p)
-        TCPInput6(IF, p, FALSE);
+    /* an unsolicited connection request to a listener no rule admits: dropped before lwIP, no half-open
+       connection, no answer, one drop log record with the IPv6 addresses */
+    NitroFwTestCounters(&DropBefore, &PassBefore);
+    p = StMakeSyn(&Peer, Dest, ST_PORT_BLOCKED_TCP);
+    Dropped = StInject(IF, p, FALSE);
     LOCK_TCPIP_CORE();
-    WireTaken = StFindSynReceived(Port) != NULL;
+    Taken = StFindSynReceived(ST_PORT_BLOCKED_TCP) != NULL;
     UNLOCK_TCPIP_CORE();
-    _snprintf(Detail, sizeof(Detail), "half-open=%d refused %ld -> %ld", (int)WireTaken, RefusedBefore,
-              TCP6ListenerRefused);
-    StResult(p && !WireTaken && TCP6ListenerRefused == RefusedBefore + 1, "wire SYN to an IPv6 listener refused",
-             Detail);
+    Last = StLastDrop();
+    _snprintf(Detail, sizeof(Detail), "dropped=%d half-open=%d log: %s proto %d dport %d reason %d", (int)Dropped, (int)Taken,
+              Last && (Last->Flags & NITROFW_DROP_F_IPV6) ? "ipv6" : "?", Last ? Last->Protocol : -1,
+              Last ? Last->DstPort : -1, Last ? Last->Reason : -1);
+    StResult(p && Dropped && !Taken && Last && (Last->Flags & NITROFW_DROP_F_IPV6) && Last->Protocol == 6 &&
+             Last->DstPort == ST_PORT_BLOCKED_TCP && Last->SrcPort == 50001 && Last->Reason == NITROFW_DROP_DEFAULT &&
+             RtlCompareMemory(Last->SrcAddr6, Peer.addr, 16) == 16 && RtlCompareMemory(Last->DstAddr6, Dest->addr, 16) == 16 &&
+             Last->SrcAddr == 0 && Last->DstAddr == 0,
+             "unsolicited SYN to an IPv6 listener without a rule dropped and logged", Detail);
 
-    /* The same request looped back from our own send is taken (the control: the check is what refused it) */
-    p = StMakeSyn(&Peer, ip_2_ip6(Local), Port);
-    if (p)
-        TCPInput6(IF, p, TRUE);
+    /* a rule admits the port: the request reaches the listener */
+    p = StMakeSyn(&Peer, Dest, ST_PORT_ALLOWED_TCP);
+    Dropped = StInject(IF, p, FALSE);
     LOCK_TCPIP_CORE();
-    Half = StFindSynReceived(Port);
-    LocalTaken = Half != NULL;
+    Half = StFindSynReceived(ST_PORT_ALLOWED_TCP);
+    Taken = Half != NULL;
     if (Half)
         tcp_abort(Half);
-    tcp_close(Listener);
     UNLOCK_TCPIP_CORE();
-    StResult(p && LocalTaken, "own-link SYN to an IPv6 listener taken (control)", NULL);
+    StResult(p && !Dropped && Taken, "SYN to a rule-allowed port passes to the listener", NULL);
+
+    /* the control: the request our own send path looped back (source one of our addresses) is taken */
+    p = StMakeSyn(Dest, Dest, ST_PORT_BLOCKED_TCP);
+    Dropped = StInject(IF, p, TRUE);
+    LOCK_TCPIP_CORE();
+    Half = StFindSynReceived(ST_PORT_BLOCKED_TCP);
+    Taken = Half != NULL;
+    if (Half)
+        tcp_abort(Half);
+    UNLOCK_TCPIP_CORE();
+    StResult(p && !Dropped && Taken, "own-link SYN to an IPv6 listener taken (control)", NULL);
+
+    /* the same SYN with our address as source but not tagged as looped back: a spoof from the wire, dropped */
+    p = StMakeSyn(Dest, Dest, ST_PORT_BLOCKED_TCP);
+    Dropped = StInject(IF, p, FALSE);
+    LOCK_TCPIP_CORE();
+    Taken = StFindSynReceived(ST_PORT_BLOCKED_TCP) != NULL;
+    UNLOCK_TCPIP_CORE();
+    StResult(p && Dropped && !Taken, "SYN from the wire with our own source address dropped", NULL);
+
+    /* ::1 never arrives on a link */
+    {
+        ip6_addr_t Loop;
+
+        ip6_addr_set_loopback(&Loop);
+        p = StMakeSyn(&Loop, Dest, ST_PORT_ALLOWED_TCP);
+        StDropped(IF, p, FALSE, "SYN from ::1 on a link dropped, even to an allowed port", TRUE);
+    }
+
+    /* a segment of an established connection (no SYN) is not a request: it passes (the stack answers it) */
+    StTcpHeader(Payload, 50001, ST_PORT_BLOCKED_TCP, 0x10);
+    p = StPacket(&Peer, Dest, 6, 64, Payload, 20);
+    StDropped(IF, p, FALSE, "TCP ACK segment passes (belongs to a connection or gets a reset)", FALSE);
+
+    /* UDP: unsolicited dropped and logged, a rule-allowed port passes */
+    p = StUdp(&Peer, Dest, ST_PORT_BLOCKED_UDP);
+    Dropped = StInject(IF, p, FALSE);
+    Last = StLastDrop();
+    StResult(p && Dropped && Last && Last->Protocol == 17 && Last->DstPort == ST_PORT_BLOCKED_UDP &&
+             Last->Reason == NITROFW_DROP_DEFAULT && (Last->Flags & NITROFW_DROP_F_IPV6),
+             "unsolicited UDP over IPv6 dropped and logged", NULL);
+
+    /* neighbour discovery with what RFC 4861 7.1 requires passes */
+    StDropped(IF, StIcmp(&Peer, Dest, 135, 0, 255, 24), FALSE, "neighbour solicitation (hop limit 255) passes", FALSE);
+    StDropped(IF, StIcmp(&Peer, Dest, 136, 0, 255, 24), FALSE, "neighbour advertisement (hop limit 255) passes", FALSE);
+    StDropped(IF, StIcmp(&Peer, Dest, 133, 0, 255, 8), FALSE, "router solicitation (hop limit 255) passes", FALSE);
+    StDropped(IF, StIcmp(&Router, Dest, 134, 0, 255, 16), FALSE, "router advertisement from a link-local source passes", FALSE);
+    StDropped(IF, StIcmp(&Router, Dest, 137, 0, 255, 40), FALSE, "redirect from a link-local source passes", FALSE);
+    {
+        ip6_addr_t Unspec;
+
+        ip6_addr_set_zero(&Unspec);
+        StDropped(IF, StIcmp(&Unspec, Dest, 135, 0, 255, 24), FALSE, "neighbour solicitation from :: (DAD) passes", FALSE);
+    }
+    StDropped(IF, StIcmp(&Router, Dest, 130, 0, 1, 24), FALSE, "MLD query (hop limit 1, link-local source) passes", FALSE);
+
+    /* and what it forbids does not */
+    StDropped(IF, StIcmp(&Peer, Dest, 135, 0, 64, 24), FALSE, "neighbour solicitation with hop limit 64 dropped", TRUE);
+    Last = StLastDrop();
+    StResult(Last && Last->Protocol == 58 && Last->IcmpType == 135 && Last->Reason == NITROFW_DROP_V6_INVALID,
+             "...and logged as invalid", NULL);
+    StDropped(IF, StIcmp(&Global, Dest, 134, 0, 255, 16), FALSE, "router advertisement from a global source dropped", TRUE);
+    StDropped(IF, StIcmp(&Router, Dest, 134, 0, 254, 16), FALSE, "router advertisement with hop limit 254 dropped", TRUE);
+    StDropped(IF, StIcmp(&Global, Dest, 137, 0, 255, 40), FALSE, "redirect from a global source dropped", TRUE);
+    StDropped(IF, StIcmp(&Global, Dest, 130, 0, 1, 24), FALSE, "MLD query from a global source dropped", TRUE);
+
+    /* ICMPv6 echo: a request is unsolicited (default block), a reply passes */
+    StDropped(IF, StIcmp(&Peer, Dest, 128, 0, 64, 8), FALSE, "ICMPv6 echo request dropped (default block)", TRUE);
+    StDropped(IF, StIcmp(&Peer, Dest, 129, 0, 64, 8), FALSE, "ICMPv6 echo reply passes", FALSE);
+
+    /* extension headers: the walk finds the transport header behind them; a first fragment is judged, later
+       fragments pass, a first fragment too short to judge does not */
+    {
+        UCHAR Chain[8 + 20];
+
+        RtlZeroMemory(Chain, sizeof(Chain));
+        Chain[0] = 6;           /* hop-by-hop: next header TCP, length 8 bytes */
+        Chain[2] = 1; Chain[3] = 4;     /* PadN of 4 */
+        StTcpHeader(Chain + 8, 50001, ST_PORT_BLOCKED_TCP, 0x02);
+        p = StPacket(&Peer, Dest, 0, 64, Chain, sizeof(Chain));
+        StDropped(IF, p, FALSE, "SYN behind a hop-by-hop header dropped", TRUE);
+    }
+    {
+        UCHAR Frag[8 + 20];
+
+        RtlZeroMemory(Frag, sizeof(Frag));
+        Frag[0] = 6;
+        Frag[3] = 0x01;         /* offset 0, more fragments */
+        Frag[7] = 1;
+        StTcpHeader(Frag + 8, 50001, ST_PORT_BLOCKED_TCP, 0x02);
+        p = StPacket(&Peer, Dest, 44, 64, Frag, sizeof(Frag));
+        StDropped(IF, p, FALSE, "first fragment holding a SYN dropped", TRUE);
+
+        Frag[2] = 0; Frag[3] = 0x09;    /* offset 8, more fragments */
+        p = StPacket(&Peer, Dest, 44, 64, Frag, sizeof(Frag));
+        StDropped(IF, p, FALSE, "later fragment passes (reassembly decides)", FALSE);
+
+        Frag[2] = 0; Frag[3] = 0x01;
+        p = StPacket(&Peer, Dest, 44, 64, Frag, 8 + 8);
+        StDropped(IF, p, FALSE, "first fragment too short to judge dropped", TRUE);
+        Last = StLastDrop();
+        StResult(Last && Last->Reason == NITROFW_DROP_V6_INVALID, "...and logged as invalid", NULL);
+    }
+    {
+        UCHAR Chain[8];
+
+        RtlZeroMemory(Chain, sizeof(Chain));
+        Chain[1] = 200;         /* a header longer than the datagram */
+        p = StPacket(&Peer, Dest, 0, 64, Chain, sizeof(Chain));
+        StDropped(IF, p, FALSE, "extension header longer than the datagram dropped", TRUE);
+    }
+
+    /* an ICMPv6 error that answers a TCP segment of ours passes, one that does not is judged by the rules */
+    LOCK_TCPIP_CORE();
+    Pcb = tcp_new_ip_type(IPADDR_TYPE_V6);
+    Taken = FALSE;
+    if (Pcb)
+    {
+        ip_addr_t Remote;
+
+        ip_addr_copy_from_ip6(Remote, Peer);
+        ip6_addr_assign_zone(ip_2_ip6(&Remote), IP6_UNICAST, (struct netif *)IF->TCPContext);
+        if (tcp_connect(Pcb, &Remote, 40690, StNopConnected) == ERR_OK)
+            Taken = TRUE;
+        else
+            tcp_abort(Pcb);
+    }
+    if (Taken)
+    {
+        UCHAR Error[8 + 40 + 20];
+        PUCHAR Inner = Error + 8;
+        struct pbuf *Q;
+
+        RtlZeroMemory(Error, sizeof(Error));
+        Error[0] = 1; Error[1] = 4;     /* destination unreachable, port unreachable */
+        Inner[0] = 0x60; Inner[5] = 20; Inner[6] = 6; Inner[7] = 64;
+        RtlCopyMemory(Inner + 8, ip_2_ip6(&Pcb->local_ip)->addr, 16);
+        RtlCopyMemory(Inner + 24, Peer.addr, 16);
+        StTcpHeader(Inner + 40, Pcb->local_port, 40690, 0x02);
+        UNLOCK_TCPIP_CORE();
+        Q = StPacket(&Peer, Dest, 58, 64, Error, sizeof(Error));
+        StDropped(IF, Q, FALSE, "ICMPv6 error for our own TCP connection passes", FALSE);
+        /* the same error for a port we have no connection on */
+        StTcpHeader(Inner + 40, (u16_t)(Pcb->local_port + 1), 40690, 0x02);
+        Q = StPacket(&Peer, Dest, 58, 64, Error, sizeof(Error));
+        StDropped(IF, Q, FALSE, "ICMPv6 error for a connection we do not have dropped", TRUE);
+        /* from a source address that is not ours */
+        Inner[8] ^= 0x01;
+        StTcpHeader(Inner + 40, Pcb->local_port, 40690, 0x02);
+        Q = StPacket(&Peer, Dest, 58, 64, Error, sizeof(Error));
+        StDropped(IF, Q, FALSE, "ICMPv6 error about a packet that was not ours dropped", TRUE);
+        LOCK_TCPIP_CORE();
+        tcp_abort(Pcb);
+    }
+    UNLOCK_TCPIP_CORE();
+    if (!Taken)
+        StResult(FALSE, "ICMPv6 error related to our TCP connection", "connect failed");
+
+    /* the rate limit (RFC 4443 2.4(f)): datagrams the firewall admits and lwIP answers with a destination
+       unreachable (UDP has no socket in lwIP); the answers are bounded by the burst plus the refill, the
+       rest are counted as limited. The bucket is refilled first */
+    StSleep(1500);
+    SentBefore = TCP6IcmpErrorsSent;
+    LimitedBefore = TCP6IcmpErrorsLimited;
+    NitroFwTestCounters(&DropBefore, &PassBefore);
+    Start = KeQueryPerformanceCounter(NULL);
+    for (i = 0; i < 200; i++)
+        StInject(IF, StUdp(&Peer, Dest, ST_PORT_ALLOWED_UDP), FALSE);
+    Micro = StMicroseconds(Start);
+    SentDelta = TCP6IcmpErrorsSent - SentBefore;
+    LimitedDelta = TCP6IcmpErrorsLimited - LimitedBefore;
+    NitroFwTestCounters(&DropAfter, &PassAfter);
+    _snprintf(Detail, sizeof(Detail), "200 datagrams in %lu us: %ld errors sent, %ld limited, firewall passed %ld",
+              Micro, SentDelta, LimitedDelta, (LONG)(PassAfter - PassBefore));
+    StResult(PassAfter - PassBefore == 200 && SentDelta >= 1 &&
+             (ULONG)SentDelta <= ST_ICMP_BURST + (ULONG)ST_ICMP_RATE * Micro / 1000000 + 1 &&
+             SentDelta + LimitedDelta >= 150,
+             "ICMPv6 error rate limit holds under a flood", Detail);
+    /* it refills: a second later errors flow again */
+    StSleep(1200);
+    SentBefore = TCP6IcmpErrorsSent;
+    StInject(IF, StUdp(&Peer, Dest, ST_PORT_ALLOWED_UDP), FALSE);
+    StResult(TCP6IcmpErrorsSent == SentBefore + 1, "ICMPv6 errors flow again after the bucket refills", NULL);
+
+cleanup:
+    LOCK_TCPIP_CORE();
+    if (ListenerBlocked)
+        tcp_close(ListenerBlocked);
+    if (ListenerAllowed)
+        tcp_close(ListenerAllowed);
+    UNLOCK_TCPIP_CORE();
+}
+
+/* Under the policy (default block, no rule for the port), TCP between our own addresses still works: those
+   frames are our own send path's looped-back ones */
+static VOID
+StTestFirewall6Own(const ip_addr_t *LinkLocal)
+{
+    StTransfer("tcp own link-local echo 4096 under the firewall policy (no rule for the port)", LinkLocal, LinkLocal,
+               40660, TRUE, 4096, 8000);
+}
+
+static VOID
+StTestFirewall6End(VOID)
+{
+    NitroFwTestSetPolicy(NULL, 0);
 }
 
 /* ---- the receive path's bounds ---- */
@@ -898,7 +1298,9 @@ StThread(PVOID Context)
         StTransfer("tcp own link-local echo 4096", &LinkLocal, &LinkLocal, 40615, TRUE, 4096, 5000);
         StTransfer("tcp own link-local echo 4096 again", &LinkLocal, &LinkLocal, 40618, TRUE, 4096, 5000);
         StTransfer("tcp own link-local stream 256 KB", &LinkLocal, &LinkLocal, 40616, FALSE, 256 * 1024, 20000);
-        StTestWireSyn(Eth, &LinkLocal, 40617);
+        StTestFirewall6(Eth, &LinkLocal, 40617);
+        StTestFirewall6Own(&LinkLocal);
+        StTestFirewall6End();
     }
     StTestReceiveBounds(Eth);
     StTestMtu6(Eth);
@@ -948,7 +1350,8 @@ StThread(PVOID Context)
         }
     }
 
-    StPrint("counters: receive dropped %ld, wire SYN refused %ld", TCP6ReceiveDropped, TCP6ListenerRefused);
+    StPrint("counters: receive dropped %ld, listener refused %ld, firewall dropped %ld, ICMPv6 errors sent %ld limited %ld",
+            TCP6ReceiveDropped, TCP6ListenerRefused, TCP6FilterDropped, TCP6IcmpErrorsSent, TCP6IcmpErrorsLimited);
     IPDereferenceInterface(Eth);
 
 done:

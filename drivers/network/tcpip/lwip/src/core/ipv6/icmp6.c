@@ -57,6 +57,10 @@
 
 #include <string.h>
 
+#ifdef LWIP_HOOK_FILENAME
+#include LWIP_HOOK_FILENAME
+#endif
+
 #if !LWIP_ICMP6_DATASIZE || (LWIP_ICMP6_DATASIZE > (IP6_MIN_MTU_LENGTH - IP6_HLEN - ICMP6_HLEN))
 #undef LWIP_ICMP6_DATASIZE
 #define LWIP_ICMP6_DATASIZE   (IP6_MIN_MTU_LENGTH - IP6_HLEN - ICMP6_HLEN)
@@ -388,6 +392,14 @@ icmp6_send_response_with_addrs_and_netif(struct pbuf *p, u8_t code, u32_t data, 
   struct pbuf *q;
   struct icmp6_hdr *icmp6hdr;
   u16_t datalen = LWIP_MIN(p->tot_len, LWIP_ICMP6_DATASIZE);
+
+#ifdef LWIP_HOOK_ICMP6_ERROR_ALLOWED
+  /* RFC 4443 2.4(f): the rate of ICMPv6 error messages is limited (the hook is a token bucket) */
+  if (!LWIP_HOOK_ICMP6_ERROR_ALLOWED()) {
+    ICMP6_STATS_INC(icmp6.drop);
+    return;
+  }
+#endif
 
   /* ICMPv6 header + datalen (as much of the offending packet as possible) */
   q = pbuf_alloc(PBUF_IP, sizeof(struct icmp6_hdr) + datalen,

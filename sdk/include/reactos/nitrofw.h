@@ -89,6 +89,15 @@
  *  8. Service-name conditions (ServiceNameOffset) are advisory: a filter that cannot resolve the
  *     owning service ignores the condition and reports NITROFW_FEATURE_SERVICE_MATCH clear. The service
  *     never relies on it for Block rules.
+ *  9. IPv6 (only while tcpip has IPv6 on, Tcpip\Parameters\Ipv6Enable; NITROFW_FEATURE_IPV6 says so): the same
+ *     rules, profiles and defaults apply to IPv6 packets. A rule's address lists are per family: a rule with
+ *     only IPv4 addresses never matches an IPv6 packet, one with only IPv6 addresses never matches an IPv4
+ *     packet, one with no addresses matches both. Protocol 58 is ICMPv6 (ICMP entries as for protocol 1).
+ *     Without rule evaluation: loopback, frames the host looped back to itself, neighbour discovery and MLD
+ *     that meet their RFCs (a violation is dropped and logged as NITROFW_DROP_V6_INVALID), ICMPv6 errors
+ *     that answer a TCP segment the host sent, echo replies, and TCP segments that are not a connection
+ *     request. Connection requests, UDP, other ICMPv6 types and other protocols are evaluated (default block).
+ *     Program-image conditions do not match IPv6 packets yet.
  *
  * ============================================================================
  *  ENCODING
@@ -287,6 +296,8 @@ typedef struct _NITROFW_STATUS
 #define NITROFW_DROP_BLOCK_RULE  2   /* a Block rule matched */
 #define NITROFW_DROP_BLOCK_ALL   3   /* the profile blocks all inbound (DoNotAllowExceptions) */
 #define NITROFW_DROP_ICMP_REPLY  4   /* an ICMP reply with no outstanding request, and no rule admitted it */
+#define NITROFW_DROP_V6_INVALID  5   /* IPv6: malformed, or a neighbour discovery / MLD message RFC 4861 / 2710 do not allow
+                                        (hop limit, source address); no rule is consulted */
 
 typedef struct _NITROFW_DROP_RECORD
 {
@@ -301,8 +312,12 @@ typedef struct _NITROFW_DROP_RECORD
     UCHAR IcmpCode;
     UCHAR Reason;               /* NITROFW_DROP_* */
     ULONG Size;                 /* IP datagram size in bytes */
-    ULONG Reserved;
-} NITROFW_DROP_RECORD, *PNITROFW_DROP_RECORD;   /* 40 bytes */
+    ULONG Flags;                /* NITROFW_DROP_F_*; 0 for IPv4 */
+    UCHAR SrcAddr6[16];         /* IPv6 (NITROFW_DROP_F_IPV6), network order; zero for IPv4 (SrcAddr/DstAddr are 0 for IPv6) */
+    UCHAR DstAddr6[16];
+} NITROFW_DROP_RECORD, *PNITROFW_DROP_RECORD;   /* 72 bytes */
+
+#define NITROFW_DROP_F_IPV6  0x00000001   /* the record is an IPv6 packet: SrcAddr6/DstAddr6 are valid, Size is the datagram length incl. the 40-byte header */
 
 #define NITROFW_DROPLOG_ON  0x00000001   /* NITROFW_DROPLOG.Flags: logging is on in the installed policy */
 

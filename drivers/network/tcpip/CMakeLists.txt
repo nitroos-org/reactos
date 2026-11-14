@@ -6,6 +6,11 @@ set(LWIP_INCLUDE_DIRS
 )
 include(${LWIP_DIR}/src/Filelists.cmake)
 add_dependencies(lwipcore xdk)
+# The IPv6 self-test (ip/transport/tcp/selftest6.c, and its hooks in tcpip/nitrofw.c) is in debug builds;
+# configure a release build with -DTCPIP_IPV6_SELFTEST=ON to have it there for a test run
+if(TCPIP_IPV6_SELFTEST)
+    add_definitions(-DTCPIP_IPV6_SELFTEST)
+endif()
 add_subdirectory(ip)
 
 add_definitions(

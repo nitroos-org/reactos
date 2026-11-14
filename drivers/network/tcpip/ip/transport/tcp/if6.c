@@ -17,13 +17,17 @@
  * IPv6 frame is dropped as before.
  *
  * There is no IPv6 socket yet (no TDI address type, no Winsock helper): nothing outside this driver can
- * create an IPv6 connection or listener. Until the firewall filters IPv6, a connection request (SYN) to an
- * IPv6 listener is taken only from this machine (the loopback queue, or a frame the adapter looped back
- * from our own send), never from the wire (LibTCPListenerInput6).
+ * create an IPv6 connection or listener. A frame from an adapter goes through the firewall first
+ * (NitroFwInboundAllowed6, in TCPInput6: the same rules and defaults as IPv4, default-deny for an
+ * unsolicited connection request or datagram). A connection request (SYN) to an IPv6 listener is taken only
+ * if it came from this machine (the loopback queue, or a frame the adapter looped back from our own send)
+ * or the firewall passed it (LibTCPListenerInput6). ICMPv6 error messages lwIP originates are rate limited
+ * (LibIcmp6ErrorAllowed, RFC 4443 2.4(f)).
  */
 
 #include "precomp.h"
 
+#include <nitrofwk.h>
 #include "lwip/pbuf.h"
 #include "lwip/ip.h"
 #include "lwip/ip6.h"
@@ -40,12 +44,18 @@ BOOLEAN TCPIpv6Enabled = FALSE;
 /* Set while a datagram from one of our adapters, that the adapter looped back from our own send, is in
    ip6_input (core lock held) */
 static BOOLEAN TCP6InputFromOwnLink;
+/* Set while a datagram from one of our adapters that the firewall passed is in ip6_input (core lock held) */
+static BOOLEAN TCP6InputFiltered;
 
 /* Received IPv6 frames that were not handed to lwIP because they were shorter than their header says,
    or could not be copied; and connection requests to an IPv6 listener refused because they came from
    the wire */
 volatile LONG TCP6ReceiveDropped;
 volatile LONG TCP6ListenerRefused;
+/* Datagrams the firewall dropped, and ICMPv6 error messages not sent because of the rate limit */
+volatile LONG TCP6FilterDropped;
+volatile LONG TCP6IcmpErrorsLimited;
+volatile LONG TCP6IcmpErrorsSent;
 
 #if DBG || defined(TCPIP_IPV6_SELFTEST)
 /* For the self-test (selftest6.c): ICMPv6 messages received, by kind (TCP6_RX_*) */
@@ -336,12 +346,23 @@ TCPInput6(PIP_INTERFACE IF, struct pbuf *p, BOOLEAN FromOwnLink)
 {
     struct netif *netif = IF->TCPContext;
 
+    /* The firewall judges the whole datagram before lwIP sees it (so lwIP sends nothing for one dropped).
+       A datagram is one contiguous buffer here (TCPReceive6 and the self-test make it so) */
+    if (IF != Loopback && (p->next || !NitroFwInboundAllowed6(IF, p->payload, p->len, FromOwnLink)))
+    {
+        InterlockedIncrement(&TCP6FilterDropped);
+        pbuf_free(p);
+        return;
+    }
+
     LOCK_TCPIP_CORE();
     /* Once its interface is removed (netif_remove takes it down) a late frame has nowhere to go */
     if (netif && netif_is_up(netif))
     {
         TCP6InputFromOwnLink = FromOwnLink;
+        TCP6InputFiltered = (IF != Loopback);
         ip_input(p, netif);
+        TCP6InputFiltered = FALSE;
         TCP6InputFromOwnLink = FALSE;
     }
     else
@@ -418,15 +439,15 @@ TCPReceive6(PIP_INTERFACE IF, PIP_PACKET IPPacket)
 }
 
 /* LWIP_HOOK_TCP_INPACKET_PCB for a segment to an IPv6 listener (core lock held, inside ip6_input): ERR_OK
- * lets lwIP take it, anything else drops it without an answer. Taken only from this machine: the loopback
- * interface (::1), or a frame that our own send looped back. A segment from the wire is dropped as the
- * firewall drops an unsolicited one, until the firewall knows IPv6 */
+ * lets lwIP take it, anything else drops it without an answer. Taken from this machine (the loopback
+ * interface (::1), or a frame that our own send looped back), or from an adapter if the firewall passed the
+ * datagram (TCPInput6). Anything else is dropped as the firewall drops an unsolicited request. */
 err_t
 LibTCPListenerInput6(void)
 {
     const struct netif *inp = ip_current_input_netif();
 
-    if ((Loopback && inp == Loopback->TCPContext) || TCP6InputFromOwnLink)
+    if ((Loopback && inp == Loopback->TCPContext) || TCP6InputFromOwnLink || TCP6InputFiltered)
         return ERR_OK;
 
     InterlockedIncrement(&TCP6ListenerRefused);
@@ -584,4 +605,103 @@ TCPQueryIpv6Table(PVOID Out, ULONG OutSize)
 
     ExFreePoolWithTag(Buffer, TDI_ENTITY_TAG);
     return Size;
+}
+
+/* LWIP_HOOK_ICMP6_ERROR_ALLOWED (core lock held): ICMPv6 error messages (destination unreachable, packet too
+ * big, time exceeded, parameter problem) are limited by a token bucket as RFC 4443 2.4(f) asks: a burst of
+ * ICMP6_ERROR_BURST, refilled at ICMP6_ERROR_RATE per second, over all interfaces. Neighbour discovery and
+ * echo replies are not errors and do not pass here. */
+#define ICMP6_ERROR_BURST   10
+#define ICMP6_ERROR_RATE    10
+
+static u32_t Icmp6Milli = ICMP6_ERROR_BURST * 1000;     /* tokens, in thousandths */
+static u32_t Icmp6Last;
+static BOOLEAN Icmp6Started;
+
+int
+LibIcmp6ErrorAllowed(void)
+{
+    u32_t Now = sys_now();
+
+    if (!Icmp6Started)
+    {
+        Icmp6Started = TRUE;
+        Icmp6Last = Now;
+    }
+    else
+    {
+        u32_t Elapsed = Now - Icmp6Last;     /* milliseconds, wraps correctly */
+
+        Icmp6Last = Now;
+        /* no overflow: Elapsed is capped to what fills the bucket */
+        if (Elapsed > ICMP6_ERROR_BURST * 1000 / ICMP6_ERROR_RATE)
+            Elapsed = ICMP6_ERROR_BURST * 1000 / ICMP6_ERROR_RATE;
+        Icmp6Milli += Elapsed * ICMP6_ERROR_RATE;
+        if (Icmp6Milli > ICMP6_ERROR_BURST * 1000)
+            Icmp6Milli = ICMP6_ERROR_BURST * 1000;
+    }
+
+    if (Icmp6Milli < 1000)
+    {
+        InterlockedIncrement(&TCP6IcmpErrorsLimited);
+        return 0;
+    }
+    Icmp6Milli -= 1000;
+    InterlockedIncrement(&TCP6IcmpErrorsSent);
+    return 1;
+}
+
+/* For the firewall (NitroFwInboundAllowed6, outside the core lock): is Address one of our valid addresses */
+BOOLEAN
+TCP6IsLocalAddress(const UCHAR *Address)
+{
+    ip6_addr_t Wanted;
+    struct netif *netif;
+    BOOLEAN Found = FALSE;
+
+    RtlZeroMemory(&Wanted, sizeof(Wanted));
+    RtlCopyMemory(Wanted.addr, Address, 16);
+
+    LOCK_TCPIP_CORE();
+    NETIF_FOREACH(netif)
+    {
+        if (TCP6IsOwnAddress(netif, &Wanted))
+        {
+            Found = TRUE;
+            break;
+        }
+    }
+    UNLOCK_TCPIP_CORE();
+
+    return Found;
+}
+
+/* For the firewall: is there a TCP control block (any state but listening) with this local and remote end */
+BOOLEAN
+TCP6HasTcpFlow(const UCHAR *Local, USHORT LocalPort, const UCHAR *Remote, USHORT RemotePort)
+{
+    ip6_addr_t L, R;
+    struct tcp_pcb *pcb;
+    BOOLEAN Found = FALSE;
+
+    RtlZeroMemory(&L, sizeof(L));
+    RtlZeroMemory(&R, sizeof(R));
+    RtlCopyMemory(L.addr, Local, 16);
+    RtlCopyMemory(R.addr, Remote, 16);
+
+    LOCK_TCPIP_CORE();
+    for (pcb = tcp_active_pcbs; pcb; pcb = pcb->next)
+    {
+        if (pcb->local_port == LocalPort && pcb->remote_port == RemotePort &&
+            IP_IS_V6_VAL(pcb->local_ip) && IP_IS_V6_VAL(pcb->remote_ip) &&
+            ip6_addr_zoneless_eq(ip_2_ip6(&pcb->local_ip), &L) &&
+            ip6_addr_zoneless_eq(ip_2_ip6(&pcb->remote_ip), &R))
+        {
+            Found = TRUE;
+            break;
+        }
+    }
+    UNLOCK_TCPIP_CORE();
+
+    return Found;
 }
