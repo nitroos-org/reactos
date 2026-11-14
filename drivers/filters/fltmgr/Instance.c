@@ -296,15 +296,6 @@ FltpTeardownInstance(_In_ PFLT_INSTANCE Instance,
         UpdateVolumeCallbackCounts(Volume, Filter, -1);
     }
     ExReleaseResourceLite(&Volume->InstanceList.rLock);
-
-    ExAcquireResourceExclusiveLite(&Filter->InstanceList.rLock, TRUE);
-    if (!IsListEmpty(&Instance->FilterLink))
-    {
-        RemoveEntryList(&Instance->FilterLink);
-        InitializeListHead(&Instance->FilterLink);
-        Filter->InstanceList.rCount--;
-    }
-    ExReleaseResourceLite(&Filter->InstanceList.rLock);
     KeLeaveCriticalRegion();
 
     InitRelatedObjects(&Objects, Instance);
@@ -320,6 +311,23 @@ FltpTeardownInstance(_In_ PFLT_INSTANCE Instance,
 
     /* Whatever the filter attached to the instance goes now */
     FltpTeardownInstanceContexts(Instance);
+
+    /*
+     * Only now, with the last callback into the filter made, the instance leaves the filter's list:
+     * FltUnregisterFilter waits for that list to be empty, so it can't free the filter while a
+     * teardown of another thread (a dismount) is still calling it. Enumerations skip the instance
+     * already (INSFL_DELETING).
+     */
+    KeEnterCriticalRegion();
+    ExAcquireResourceExclusiveLite(&Filter->InstanceList.rLock, TRUE);
+    if (!IsListEmpty(&Instance->FilterLink))
+    {
+        RemoveEntryList(&Instance->FilterLink);
+        InitializeListHead(&Instance->FilterLink);
+        Filter->InstanceList.rCount--;
+    }
+    ExReleaseResourceLite(&Filter->InstanceList.rLock);
+    KeLeaveCriticalRegion();
 
     FltpExRundownCompleted(&Instance->Base.RundownRef);
     ExFreePoolWithTag(Instance, FM_TAG_INSTANCE);
@@ -362,7 +370,10 @@ FltpTeardownFilterInstances(_In_ PFLT_FILTER Filter,
         FltpTeardownInstance(Instance, Reason);
     }
 
-    /* Another teardown (volume dismount) may still be on its way out of the list */
+    /*
+     * Another teardown (volume dismount) may still be running: its instance stays in the list until
+     * the filter's last callback for it has returned (FltpTeardownInstance)
+     */
     for (;;)
     {
         BOOLEAN Empty;
