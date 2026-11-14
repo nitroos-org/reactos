@@ -1049,6 +1049,186 @@ Done:
     RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
 }
 
+/*
+ * Registry DACL inheritance as measured on Windows 10 22H2 (the daclora probe), parent P created with
+ * D:(D;CI;KW;;;AN)(A;CI;KA;;;SY)(A;CI;KA;;;BA)(A;CIIO;KA;;;CO), which is not auto-inherited:
+ *  - a DACL set on an empty / explicit-only key merges the parent's ACEs. The inherit-only CREATOR OWNER ACE
+ *    adds no owner copy that an inherited ACE covers already (Administrators), and the ACE stays inherit-only;
+ *  - an inherited ACE that an earlier inherited ACE of the same SID covers is kept inherit-only (IO) if it
+ *    passes on, dropped if it was the copy for the key alone.
+ */
+#define FLAGS_CIID (CONTAINER_INHERIT_ACE | INHERITED_ACE)
+#define FLAGS_CO   (CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE | INHERITED_ACE)
+
+static BOOL AceIs(const KEY_DACL *Dacl, ULONG Index, UCHAR Type, UCHAR Flags, PCWSTR SidString)
+{
+    PWSTR Text = NULL;
+    BOOL Same = FALSE;
+
+    if (Index >= Dacl->Count)
+        return FALSE;
+    if (ConvertSidToStringSidW(Dacl->Aces[Index].Sid, &Text))
+    {
+        Same = Dacl->Aces[Index].Type == Type && Dacl->Aces[Index].Flags == Flags && !wcscmp(Text, SidString);
+        LocalFree(Text);
+    }
+    return Same;
+}
+
+static BOOL OwnerIsCovered(HKEY Parent, PCWSTR Name)
+{
+    HKEY Key;
+    PSECURITY_DESCRIPTOR Sd = NULL;
+    PSID Owner = NULL;
+    PWSTR Text = NULL;
+    BOOL Covered = FALSE;
+
+    if (RegOpenKeyExW(Parent, Name, 0, READ_CONTROL, &Key) != ERROR_SUCCESS)
+        return FALSE;
+    if (GetSecurityInfo(Key, SE_REGISTRY_KEY, OWNER_SECURITY_INFORMATION, &Owner, NULL, NULL, NULL, &Sd) == ERROR_SUCCESS &&
+        Owner && ConvertSidToStringSidW(Owner, &Text))
+    {
+        Covered = !wcscmp(Text, L"S-1-5-32-544") || !wcscmp(Text, L"S-1-5-18");
+        LocalFree(Text);
+    }
+    if (Sd) LocalFree(Sd);
+    RegCloseKey(Key);
+    return Covered;
+}
+
+static void SetNamedEmpty(PCWSTR Path, SECURITY_INFORMATION Info)
+{
+    BYTE Buffer[64];
+    PACL Empty = (PACL)Buffer;
+
+    InitializeAcl(Empty, sizeof(Buffer), ACL_REVISION);
+    ok_long(SetNamedSecurityInfoW((LPWSTR)Path, SE_REGISTRY_KEY, DACL_SECURITY_INFORMATION | Info, NULL, NULL, Empty, NULL),
+            ERROR_SUCCESS);
+}
+
+/* Get-Acl then Set-Acl: read DACL and owner by name, write the DACL back by name */
+static void NamedRoundTrip(PCWSTR Path)
+{
+    PSECURITY_DESCRIPTOR Sd = NULL;
+    PACL Dacl = NULL;
+
+    ok_long(GetNamedSecurityInfoW((LPWSTR)Path, SE_REGISTRY_KEY, DACL_SECURITY_INFORMATION | OWNER_SECURITY_INFORMATION,
+                                  NULL, NULL, &Dacl, NULL, &Sd), ERROR_SUCCESS);
+    if (Sd)
+    {
+        ok_long(SetNamedSecurityInfoW((LPWSTR)Path, SE_REGISTRY_KEY, DACL_SECURITY_INFORMATION, NULL, NULL, Dacl, NULL),
+                ERROR_SUCCESS);
+        LocalFree(Sd);
+    }
+}
+
+static void TestOracleRows(void)
+{
+    static const WCHAR ParentSddl[] = L"D:(D;CI;KW;;;AN)(A;CI;KA;;;SY)(A;CI;KA;;;BA)(A;CIIO;KA;;;CO)";
+    static const WCHAR Base[] = L"CURRENT_USER\\Software\\ReactOS-apitest-SetSecurityInfoKeyInherit";
+    static const WCHAR *Names[] = { L"t", L"c3", L"c4", L"c5", L"s9e", L"s9s" };
+    SECURITY_ATTRIBUTES Attributes = {sizeof(Attributes), NULL, FALSE};
+    WCHAR Path[256];
+    KEY_DACL C4, C4b, S9e, S9s, S9sb;
+    HKEY Key = NULL, Child = NULL;
+    BOOL Covered;
+    DWORD Error;
+    ULONG i;
+
+    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(ParentSddl, SDDL_REVISION_1, &Attributes.lpSecurityDescriptor, NULL))
+    {
+        skip("cannot make the parent descriptor: %lu\n", GetLastError());
+        return;
+    }
+    Error = RegCreateKeyExW(HKEY_CURRENT_USER, ScratchPath, 0, NULL, 0, KEY_ALL_ACCESS, &Attributes, &Key, NULL);
+    ok_long(Error, ERROR_SUCCESS);
+    if (Error)
+        goto Done;
+
+    for (i = 0; i < ARRAYSIZE(Names); i++)
+    {
+        if (!MakeKey(Key, Names[i], 0, &Child))
+            goto Done;
+        RegCloseKey(Child);
+    }
+    Covered = OwnerIsCovered(Key, L"c4");
+
+    /* c3: a legacy writer's empty DACL; c5: empty and protected; c4: empty, unprotected (W4); s9e / s9s: round trips */
+    if (!RawSetSddl(Key, L"c3", L"D:") || !RawSetSddl(Key, L"s9e", L"D:") || !RawSetSddl(Key, L"s9s", L"D:(A;CI;KA;;;SY)"))
+        goto Done;
+    StringCchPrintfW(Path, ARRAYSIZE(Path), L"%ls\\c4", Base);
+    SetNamedEmpty(Path, UNPROTECTED_DACL_SECURITY_INFORMATION);
+    StringCchPrintfW(Path, ARRAYSIZE(Path), L"%ls\\c5", Base);
+    SetNamedEmpty(Path, PROTECTED_DACL_SECURITY_INFORMATION);
+    StringCchPrintfW(Path, ARRAYSIZE(Path), L"%ls\\s9e", Base);
+    NamedRoundTrip(Path);
+    StringCchPrintfW(Path, ARRAYSIZE(Path), L"%ls\\s9s", Base);
+    NamedRoundTrip(Path);
+
+    OpenDacl(Key, L"c4", &C4);
+    OpenDacl(Key, L"s9e", &S9e);
+    OpenDacl(Key, L"s9s", &S9s);
+
+    /* W4 / S9e / S9s: the parent's set, no ACE for the owner that an inherited one covers */
+    if (Covered)
+    {
+        ok(C4.Count == 4, "W4: %lu ACEs, expected 4\n", C4.Count);
+        ok(S9e.Count == 4, "S9e: %lu ACEs, expected 4\n", S9e.Count);
+        ok(S9s.Count == 5, "S9s: %lu ACEs, expected 5\n", S9s.Count);
+    }
+    ok_hex(C4.Control, AUTO_CONTROL);
+    ok(AceIs(&C4, 0, ACCESS_DENIED_ACE_TYPE, FLAGS_CIID, L"S-1-5-7"), "W4: ACE 0\n");
+    ok(AceIs(&C4, 1, ACCESS_ALLOWED_ACE_TYPE, FLAGS_CIID, L"S-1-5-18"), "W4: ACE 1\n");
+    ok(AceIs(&C4, 2, ACCESS_ALLOWED_ACE_TYPE, FLAGS_CIID, L"S-1-5-32-544"), "W4: ACE 2\n");
+    ok(AceIs(&C4, Covered ? 3 : 4, ACCESS_ALLOWED_ACE_TYPE, FLAGS_CO, L"S-1-3-0"), "W4: the CREATOR OWNER ACE\n");
+    ok_hex(S9e.Control, AUTO_CONTROL);
+    ok(AceIs(&S9e, 3, ACCESS_ALLOWED_ACE_TYPE, FLAGS_CO, L"S-1-3-0") || !Covered, "S9e: the CREATOR OWNER ACE\n");
+    ok_hex(S9s.Control, AUTO_CONTROL);
+    ok(AceIs(&S9s, 0, ACCESS_ALLOWED_ACE_TYPE, CONTAINER_INHERIT_ACE, L"S-1-5-18"), "S9s: the explicit ACE first\n");
+    ok(AceIs(&S9s, 1, ACCESS_DENIED_ACE_TYPE, FLAGS_CIID, L"S-1-5-7"), "S9s: ACE 1\n");
+    ok(AceIs(&S9s, Covered ? 4 : 5, ACCESS_ALLOWED_ACE_TYPE, FLAGS_CO, L"S-1-3-0") || !Covered, "S9s: the CREATOR OWNER ACE\n");
+
+    /* P changes (Everyone read, inherited by subkeys, by name) */
+    AddEveryoneRead();
+
+    OpenDacl(Key, L"c4", &C4b);
+    OpenDacl(Key, L"s9s", &S9sb);
+
+    /* auto-inherited: updated with the new ACE, and no inherited ACE a previous one covers is left effective */
+    ok_hex(C4b.Control, AUTO_CONTROL);
+    ok(C4b.Count > C4.Count, "c4: %lu ACEs before the change, %lu after\n", C4.Count, C4b.Count);
+    for (i = 0; i < C4b.Count; i++)
+    {
+        ULONG j;
+
+        for (j = 0; j < i; j++)
+        {
+            if (!(C4b.Aces[j].Flags & INHERIT_ONLY_ACE) && C4b.Aces[j].Type == C4b.Aces[i].Type &&
+                (C4b.Aces[j].Mask & C4b.Aces[i].Mask) == C4b.Aces[i].Mask && EqualSid(C4b.Aces[j].Sid, C4b.Aces[i].Sid))
+            {
+                ok(C4b.Aces[i].Flags & INHERIT_ONLY_ACE, "c4: ACE %lu repeats ACE %lu and is not inherit-only (0x%x)\n",
+                   i, j, C4b.Aces[i].Flags);
+                break;
+            }
+        }
+    }
+    for (i = 0; i < S9sb.Count; i++)
+        ok(!(S9sb.Aces[i].Flags & INHERIT_ONLY_ACE) || S9sb.Aces[i].Flags & INHERITED_ACE,
+           "s9s: ACE %lu is inherit-only but not inherited\n", i);
+
+    FreeDacl(&S9sb);
+    FreeDacl(&C4b);
+    FreeDacl(&S9s);
+    FreeDacl(&S9e);
+    FreeDacl(&C4);
+
+Done:
+    if (Attributes.lpSecurityDescriptor) LocalFree(Attributes.lpSecurityDescriptor);
+    if (Key) RegCloseKey(Key);
+    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+}
+
 START_TEST(SetSecurityInfoKeyInherit)
 {
     pRegDeleteTreeW = (PVOID)GetProcAddress(GetModuleHandleW(L"advapi32.dll"), "RegDeleteTreeW");
@@ -1065,6 +1245,7 @@ START_TEST(SetSecurityInfoKeyInherit)
     TestNoWidening();
     TestExplicitBeforeTail();
     TestGetUsesKeyOwner();
+    TestOracleRows();
 
     KEY_DACL Initial, P1, C1a, C1b, P2, C2, G;
     HKEY Key = NULL, Child1 = NULL, Child2 = NULL, Grand = NULL;
