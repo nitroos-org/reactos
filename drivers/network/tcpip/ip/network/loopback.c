@@ -118,6 +118,52 @@ BOOLEAN LoopTransmitPbuf(
   return TRUE;
 }
 
+BOOLEAN LoopDataFollows(
+  const struct tcp_pcb *pcb)
+/*
+ * FUNCTION: Tells whether the segment that the worker takes next is data of the connection of pcb
+ * NOTES:
+ *   Looks at the head of the queue only (a fast-path item holds a contiguous copy of the datagram)
+ */
+{
+  KIRQL OldIrql;
+  PLIST_ENTRY Entry;
+  PLOOP_ITEM Item;
+  const UCHAR *Ip;
+  UINT IpLen, TcpLen, Total;
+  BOOLEAN Follows = FALSE;
+
+  KeAcquireSpinLock(&LoopQueue.Lock, &OldIrql);
+  Entry = LoopQueue.List.Flink;
+  if (Entry != &LoopQueue.List)
+  {
+    Item = CONTAINING_RECORD(Entry, LOOP_ITEM, ListEntry);
+    if (Item->Pbuf && Item->Pbuf->len == Item->Pbuf->tot_len && Item->Pbuf->len >= sizeof(IPv4_HEADER) + 20)
+    {
+      Ip = Item->Pbuf->payload;
+      IpLen = (Ip[0] & 0x0F) * 4;
+      Total = (Ip[2] << 8) | Ip[3];
+      if ((Ip[0] & 0xF0) == 0x40 && Ip[9] == IPPROTO_TCP && IpLen >= 20 && Total <= Item->Pbuf->len &&
+          Total >= IpLen + 20)
+      {
+        const UCHAR *Tcp = Ip + IpLen;
+
+        TcpLen = (Tcp[12] >> 4) * 4;
+        /* From the peer to this PCB, with data and no SYN, FIN or RST */
+        Follows = Total > IpLen + TcpLen &&
+                  !(Tcp[13] & 0x07) &&
+                  RtlCompareMemory(Ip + 12, &pcb->remote_ip.addr, 4) == 4 &&
+                  RtlCompareMemory(Ip + 16, &pcb->local_ip.addr, 4) == 4 &&
+                  Tcp[0] == (UCHAR)(pcb->remote_port >> 8) && Tcp[1] == (UCHAR)pcb->remote_port &&
+                  Tcp[2] == (UCHAR)(pcb->local_port >> 8) && Tcp[3] == (UCHAR)pcb->local_port;
+      }
+    }
+  }
+  KeReleaseSpinLock(&LoopQueue.Lock, OldIrql);
+
+  return Follows;
+}
+
 static BOOLEAN LoopReadFastPathSwitch(VOID)
 {
   UNICODE_STRING KeyName = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\Tcpip\\Parameters");

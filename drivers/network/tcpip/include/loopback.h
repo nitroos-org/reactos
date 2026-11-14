@@ -16,6 +16,12 @@ struct pbuf;
 extern BOOLEAN LoopFastPath;
 BOOLEAN LoopTransmitPbuf(struct pbuf *p);
 
+/* Whether the next segment waiting in the loopback queue is data of the connection of this lwIP PCB (a segment
+ * that came from the PCB's peer): a segment that is followed at once by another need not be acknowledged by
+ * itself */
+struct tcp_pcb;
+BOOLEAN LoopDataFollows(const struct tcp_pcb *pcb);
+
 NDIS_STATUS LoopRegisterAdapter(
     PNDIS_STRING AdapterName,
     PLAN_ADAPTER *Adapter);
