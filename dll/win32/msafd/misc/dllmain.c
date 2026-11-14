@@ -1002,6 +1002,23 @@ WSPBind(SOCKET Handle,
        if (lpErrno) *lpErrno = WSAEINVAL;
        return SOCKET_ERROR;
     }
+    /* An IPv6 socket takes a whole SOCKADDR_IN6 of its own family, whatever longer length the caller states
+     * (VERIFY ON ORACLE: the errors, and what Windows does with an IPv4 address on a dual stack socket) */
+    if (Socket->SharedData->AddressFamily == AF_INET6)
+    {
+        if (!SocketAddress || SocketAddressLength < TDIADDR_SOCKADDR_IN6_LENGTH)
+        {
+            if (lpErrno) *lpErrno = WSAEFAULT;
+            return SOCKET_ERROR;
+        }
+        if (SocketAddress->sa_family != AF_INET6)
+        {
+            if (lpErrno) *lpErrno = WSAEAFNOSUPPORT;
+            return SOCKET_ERROR;
+        }
+        SocketAddressLength = TDIADDR_SOCKADDR_IN6_LENGTH;
+    }
+
     if (!SocketAddress || SocketAddressLength < Socket->SharedData->SizeOfLocalAddress)
     {
         if (lpErrno) *lpErrno = WSAEINVAL;
@@ -1009,6 +1026,7 @@ WSPBind(SOCKET Handle,
     }
 
     /* Get Address Information */
+    RtlZeroMemory(&SocketInfo, sizeof(SocketInfo));
     Socket->HelperData->WSHGetSockaddrType ((PSOCKADDR)SocketAddress,
                                             SocketAddressLength,
                                             &SocketInfo);
@@ -1647,7 +1665,12 @@ WSPAccept(
     ULONG                       CallBack;
     SOCKET                      AcceptSocket;
     PSOCKET_INFORMATION         AcceptSocketInfo;
-    UCHAR                       ReceiveBuffer[0x1A];
+    /* The sequence number and the transport address of the peer: 0x1A bytes for an IPv4 address (a
+     * SOCKADDR_IN), 0x26 for an IPv6 one (a SOCKADDR_IN6) */
+    UCHAR                       ReceiveBuffer[0xA + TDIADDR_SOCKADDR_IN6_LENGTH];
+    ULONG                       ReceiveBufferLength;
+    BOOLEAN                     Ipv6Socket;
+    TDIADDR_SOCKADDR6           CalleeAddress6;
     HANDLE                      SockEvent;
 
     /* Get the Socket Structure associate to this Socket*/
@@ -1662,9 +1685,11 @@ WSPAccept(
        if (lpErrno) *lpErrno = WSAEINVAL;
        return INVALID_SOCKET;
     }
+    Ipv6Socket = (Socket->SharedData->AddressFamily == AF_INET6);
+    ReceiveBufferLength = 0xA + (Ipv6Socket ? TDIADDR_SOCKADDR_IN6_LENGTH : sizeof(SOCKADDR));
     if ((SocketAddress && !SocketAddressLength) ||
         (SocketAddressLength && !SocketAddress) ||
-        (SocketAddressLength && *SocketAddressLength < sizeof(SOCKADDR)))
+        (SocketAddressLength && *SocketAddressLength < (Ipv6Socket ? TDIADDR_SOCKADDR_IN6_LENGTH : sizeof(SOCKADDR))))
     {
        if (lpErrno) *lpErrno = WSAEFAULT;
        return INVALID_SOCKET;
@@ -1716,7 +1741,7 @@ WSPAccept(
                                    NULL,
                                    0,
                                    ListenReceiveData,
-                                   0xA + sizeof(*ListenReceiveData));
+                                   ReceiveBufferLength);
 
     /* Wait for return */
     if (Status == STATUS_PENDING)
@@ -1814,10 +1839,21 @@ WSPAccept(
         }
 
         /* Build Callee ID */
-        CalleeID.buf = (PVOID)Socket->LocalAddress;
-        CalleeID.len = Socket->SharedData->SizeOfLocalAddress;
+        if (Ipv6Socket)
+        {
+            /* The cached local address is a SOCKADDR (16 bytes); an IPv6 one is a SOCKADDR_IN6 */
+            RtlZeroMemory(&CalleeAddress6, sizeof(CalleeAddress6));
+            CalleeAddress6.Family = AF_INET6;
+            CalleeID.buf = (PVOID)&CalleeAddress6;
+            CalleeID.len = sizeof(CalleeAddress6);
+        }
+        else
+        {
+            CalleeID.buf = (PVOID)Socket->LocalAddress;
+            CalleeID.len = Socket->SharedData->SizeOfLocalAddress;
+        }
 
-        RemoteAddress = HeapAlloc(GlobalHeap, 0, sizeof(*RemoteAddress));
+        RemoteAddress = HeapAlloc(GlobalHeap, 0, Ipv6Socket ? TDIADDR_SOCKADDR_IN6_LENGTH : sizeof(*RemoteAddress));
         if (!RemoteAddress)
         {
             if (PendingData)
@@ -1827,13 +1863,33 @@ WSPAccept(
         }
 
         /* Set up Address in SOCKADDR Format */
-        RtlCopyMemory (RemoteAddress,
-                       &ListenReceiveData->Address.Address[0].AddressType,
-                       sizeof(*RemoteAddress));
+        if (Ipv6Socket)
+        {
+            PTA_ADDRESS Peer = &ListenReceiveData->Address.Address[0];
+
+            /* The address AFD gave is the IPv6 address, or an IPv4 one of a dual stack socket, as ::ffff:a.b.c.d */
+            if (!TdiAddrToSockaddr(AF_INET6, Peer->AddressType,
+                                   min(Peer->AddressLength, ReceiveBufferLength - FIELD_OFFSET(AFD_RECEIVED_ACCEPT_DATA, Address.Address[0].Address)),
+                                   Peer->Address, RemoteAddress, TDIADDR_SOCKADDR_IN6_LENGTH))
+            {
+                HeapFree(GlobalHeap, 0, RemoteAddress);
+                RemoteAddress = NULL;
+                if (PendingData)
+                    HeapFree(GlobalHeap, 0, PendingData);
+                NtClose(SockEvent);
+                return MsafdReturnInvalidSocket(STATUS_PROTOCOL_NOT_SUPPORTED, lpErrno);
+            }
+        }
+        else
+        {
+            RtlCopyMemory (RemoteAddress,
+                           &ListenReceiveData->Address.Address[0].AddressType,
+                           sizeof(*RemoteAddress));
+        }
 
         /* Build Caller ID */
         CallerID.buf = (PVOID)RemoteAddress;
-        CallerID.len = sizeof(*RemoteAddress);
+        CallerID.len = Ipv6Socket ? TDIADDR_SOCKADDR_IN6_LENGTH : sizeof(*RemoteAddress);
 
         /* Build Caller Data */
         CallerData.buf = PendingData;
@@ -2006,11 +2062,31 @@ WSPAccept(
     /* Return Address in SOCKADDR FORMAT */
     if( SocketAddress )
     {
-        RtlCopyMemory (SocketAddress,
-                       &ListenReceiveData->Address.Address[0].AddressType,
-                       sizeof(*RemoteAddress));
-        if( SocketAddressLength )
-            *SocketAddressLength = sizeof(*RemoteAddress);
+        if (Ipv6Socket)
+        {
+            PTA_ADDRESS Peer = &ListenReceiveData->Address.Address[0];
+            ULONG Length;
+
+            Length = TdiAddrToSockaddr(AF_INET6, Peer->AddressType,
+                                       min(Peer->AddressLength, ReceiveBufferLength - FIELD_OFFSET(AFD_RECEIVED_ACCEPT_DATA, Address.Address[0].Address)),
+                                       Peer->Address, SocketAddress, *SocketAddressLength);
+            if (!Length)
+            {
+                NtClose(SockEvent);
+                WSPCloseSocket( AcceptSocket, lpErrno );
+                return MsafdReturnInvalidSocket(STATUS_PROTOCOL_NOT_SUPPORTED, lpErrno);
+            }
+            if( SocketAddressLength )
+                *SocketAddressLength = Length;
+        }
+        else
+        {
+            RtlCopyMemory (SocketAddress,
+                           &ListenReceiveData->Address.Address[0].AddressType,
+                           sizeof(*RemoteAddress));
+            if( SocketAddressLength )
+                *SocketAddressLength = sizeof(*RemoteAddress);
+        }
     }
 
     NtClose( SockEvent );
@@ -2245,6 +2321,23 @@ WSPConnect(SOCKET Handle,
     {
         if (lpErrno) *lpErrno = WSAENOTSOCK;
         return SOCKET_ERROR;
+    }
+
+    /* An IPv6 socket connects to a whole SOCKADDR_IN6 (VERIFY ON ORACLE: the errors, and the IPv4 mapped
+     * address of a dual stack socket, which is for the stack to take) */
+    if (Socket->SharedData->AddressFamily == AF_INET6)
+    {
+        if (!SocketAddress || SocketAddressLength < TDIADDR_SOCKADDR_IN6_LENGTH)
+        {
+            if (lpErrno) *lpErrno = WSAEFAULT;
+            return SOCKET_ERROR;
+        }
+        if (SocketAddress->sa_family != AF_INET6)
+        {
+            if (lpErrno) *lpErrno = WSAEAFNOSUPPORT;
+            return SOCKET_ERROR;
+        }
+        SocketAddressLength = TDIADDR_SOCKADDR_IN6_LENGTH;
     }
 
     /* Bind us First */
@@ -2562,7 +2655,22 @@ WSPConnectEx(
         return FALSE;
     }
 
-    
+    /* An IPv6 socket connects to a whole SOCKADDR_IN6 */
+    if (Socket->SharedData->AddressFamily == AF_INET6)
+    {
+        if (!SocketAddress || SocketAddressLength < TDIADDR_SOCKADDR_IN6_LENGTH)
+        {
+            SetLastError(WSAEFAULT);
+            return FALSE;
+        }
+        if (SocketAddress->sa_family != AF_INET6)
+        {
+            SetLastError(WSAEAFNOSUPPORT);
+            return FALSE;
+        }
+        SocketAddressLength = TDIADDR_SOCKADDR_IN6_LENGTH;
+    }
+
     /* Cannot call on connectionless socket */
     if (SocketAddressLength > ARRAYSIZE(Buffer) - sizeof(AFD_CONNECT_INFO) || Socket->SharedData->ServiceFlags1 & XP1_CONNECTIONLESS)
     {
@@ -2824,7 +2932,26 @@ WSPGetSockName(IN SOCKET Handle,
 
     if (NT_SUCCESS(Status))
     {
-        if (*NameLength >= Socket->SharedData->SizeOfLocalAddress)
+        if (*NameLength >= Socket->SharedData->SizeOfLocalAddress &&
+            Socket->SharedData->AddressFamily == AF_INET6)
+        {
+            /* A SOCKADDR_IN6 of the address AFD reports; an IPv4 address of a dual stack socket is ::ffff:a.b.c.d */
+            ULONG Offset = (ULONG)((PUCHAR)SocketAddress->Address[0].Address - (PUCHAR)TdiAddress);
+            ULONG Length = (Offset < TdiAddressSize) ?
+                TdiAddrToSockaddr(AF_INET6, SocketAddress->Address[0].AddressType,
+                                  min(SocketAddress->Address[0].AddressLength, TdiAddressSize - Offset),
+                                  SocketAddress->Address[0].Address, Name, *NameLength) : 0;
+
+            HeapFree(GlobalHeap, 0, TdiAddress);
+            if (!Length)
+            {
+                if (lpErrno) *lpErrno = WSAEAFNOSUPPORT;
+                return SOCKET_ERROR;
+            }
+            *NameLength = Length;
+            return 0;
+        }
+        else if (*NameLength >= Socket->SharedData->SizeOfLocalAddress)
         {
             Name->sa_family = SocketAddress->Address[0].AddressType;
             RtlCopyMemory (Name->sa_data,
@@ -2939,7 +3066,26 @@ WSPGetPeerName(IN SOCKET s,
 
     if (NT_SUCCESS(Status))
     {
-        if (*NameLength >= Socket->SharedData->SizeOfRemoteAddress)
+        if (*NameLength >= Socket->SharedData->SizeOfRemoteAddress &&
+            Socket->SharedData->AddressFamily == AF_INET6)
+        {
+            /* As for getsockname: a SOCKADDR_IN6, IPv4 addresses mapped */
+            ULONG Offset = (ULONG)((PUCHAR)SocketAddress->Address[0].Address - (PUCHAR)SocketAddress);
+            ULONG Length = (Offset < TdiAddressSize) ?
+                TdiAddrToSockaddr(AF_INET6, SocketAddress->Address[0].AddressType,
+                                  min(SocketAddress->Address[0].AddressLength, TdiAddressSize - Offset),
+                                  SocketAddress->Address[0].Address, Name, *NameLength) : 0;
+
+            HeapFree(GlobalHeap, 0, SocketAddress);
+            if (!Length)
+            {
+                if (lpErrno) *lpErrno = WSAEAFNOSUPPORT;
+                return SOCKET_ERROR;
+            }
+            *NameLength = Length;
+            return 0;
+        }
+        else if (*NameLength >= Socket->SharedData->SizeOfRemoteAddress)
         {
             Name->sa_family = SocketAddress->Address[0].AddressType;
             RtlCopyMemory (Name->sa_data,
@@ -3518,6 +3664,14 @@ WSPGetSockOpt(IN SOCKET Handle,
         case IPPROTO_UDP:
             /* The helper keeps these options (TTL, TOS, DF, RECVTOS, ECN, UDP message sizes) */
             goto SendToHelper;
+
+        case IPPROTO_IPV6:
+            /* An IPv6 socket: the helper keeps these (IPV6_V6ONLY, the hop limits). An IPv4 socket has
+             * nothing here (IPV6_V6ONLY is answered above) */
+            if (Socket->SharedData->AddressFamily == AF_INET6)
+                goto SendToHelper;
+            if (lpErrno) *lpErrno = WSAEINVAL;
+            return SOCKET_ERROR;
 
         default:
             if (lpErrno) *lpErrno = WSAEINVAL;

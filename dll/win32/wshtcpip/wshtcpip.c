@@ -11,6 +11,110 @@
 #define NDEBUG
 #include <debug.h>
 
+#ifndef IPPROTO_IPV6
+#define IPPROTO_IPV6 41
+#endif
+#ifndef IPV6_UNICAST_HOPS
+#define IPV6_UNICAST_HOPS 4
+#endif
+#ifndef IPV6_MULTICAST_HOPS
+#define IPV6_MULTICAST_HOPS 10
+#endif
+#ifndef IPV6_MULTICAST_LOOP
+#define IPV6_MULTICAST_LOOP 11
+#endif
+#ifndef IPV6_V6ONLY
+#define IPV6_V6ONLY 27
+#endif
+
+/* The socket address of an AF_INET6 socket: SOCKADDR_IN6 with the scope id (what the stack expects) */
+#define WSH_SOCKADDR_IN6_LENGTH 28
+C_ASSERT(sizeof(SOCKADDR_IN6_LH) == WSH_SOCKADDR_IN6_LENGTH);
+
+#define WSH_SET6_V6ONLY     0x01
+#define WSH_SET6_UNIHOPS    0x02
+#define WSH_SET6_MCASTHOPS  0x04
+#define WSH_SET6_MCASTLOOP  0x08
+
+/*
+ * IPv6 is a switch of the stack: HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Ipv6Enable (REG_DWORD,
+ * read once when the stack starts, off when absent). The helper answers the same, from the same value, so that
+ * a socket of the family AF_INET6 is not made unless the stack takes IPv6 (WSAEAFNOSUPPORT, what an IPv6 socket
+ * has always got here). The value cannot change while the system runs; it is read once per process.
+ */
+static volatile LONG WshIpv6State; /* 0 not read yet, 1 on, 2 off */
+
+static
+BOOLEAN
+WshIpv6Enabled(VOID)
+{
+    LONG State = WshIpv6State;
+    HKEY Key;
+    DWORD Type, Value = 0, Size = sizeof(Value);
+
+    if (State != 0)
+        return State == 1;
+
+    State = 2;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                      L"SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters",
+                      0,
+                      KEY_QUERY_VALUE,
+                      &Key) == ERROR_SUCCESS)
+    {
+        if (RegQueryValueExW(Key, L"Ipv6Enable", NULL, &Type, (LPBYTE)&Value, &Size) == ERROR_SUCCESS &&
+            Type == REG_DWORD && Size == sizeof(Value) && Value != 0)
+            State = 1;
+        RegCloseKey(Key);
+    }
+
+    InterlockedExchange(&WshIpv6State, State);
+    return State == 1;
+}
+
+/* IPv6 addresses: the unspecified one, ::1 and the IPv4 mapped ones */
+static
+BOOLEAN
+WshIsV6Any(const UCHAR *Address)
+{
+    ULONG i;
+
+    for (i = 0; i < 16; i++)
+    {
+        if (Address[i] != 0)
+            return FALSE;
+    }
+    return TRUE;
+}
+
+static
+BOOLEAN
+WshIsV6Loopback(const UCHAR *Address)
+{
+    ULONG i;
+
+    for (i = 0; i < 15; i++)
+    {
+        if (Address[i] != 0)
+            return FALSE;
+    }
+    return Address[15] == 1;
+}
+
+static
+BOOLEAN
+WshIsV6V4Mapped(const UCHAR *Address)
+{
+    ULONG i;
+
+    for (i = 0; i < 10; i++)
+    {
+        if (Address[i] != 0)
+            return FALSE;
+    }
+    return Address[10] == 0xff && Address[11] == 0xff;
+}
+
 BOOL
 EXPORT
 DllMain(HANDLE hInstDll,
@@ -76,6 +180,11 @@ WSHGetBroadcastSockaddr(
     OUT PINT SockaddrLength)
 {
     INT Size = 2 * sizeof(UINT);
+    PSOCKET_CONTEXT Context = HelperDllSocketContext;
+
+    /* There is no broadcast address in IPv6 (VERIFY ON ORACLE: the error Windows gives) */
+    if (Context && Context->AddressFamily == AF_INET6)
+        return WSAEOPNOTSUPP;
 
     if (*SockaddrLength < Size)
     {
@@ -119,6 +228,49 @@ WSHGetSockaddrType(
     OUT PSOCKADDR_INFO SockaddrInfo)
 {
     PSOCKADDR_IN ipv4 = (PSOCKADDR_IN)Sockaddr;
+
+    /* An IPv6 socket address: it has to be a whole SOCKADDR_IN6 (the scope id is part of it) */
+    if (Sockaddr && SockaddrInfo && SockaddrLength >= sizeof(USHORT) && Sockaddr->sa_family == AF_INET6)
+    {
+        const SOCKADDR_IN6_LH *ipv6 = (const SOCKADDR_IN6_LH *)Sockaddr;
+        const UCHAR *Address = (const UCHAR *)&ipv6->sin6_addr;
+        USHORT Port = ntohs(ipv6->sin6_port);
+
+        if (SockaddrLength < WSH_SOCKADDR_IN6_LENGTH)
+        {
+            DPRINT1("Invalid IPv6 socket address length: %u\n", SockaddrLength);
+            return WSAEINVAL;
+        }
+
+        if (WshIsV6Any(Address))
+            SockaddrInfo->AddressInfo = SockaddrAddressInfoWildcard;
+        else if (WshIsV6Loopback(Address))
+            SockaddrInfo->AddressInfo = SockaddrAddressInfoLoopback;
+        else if (WshIsV6V4Mapped(Address))
+        {
+            /* An IPv4 address on an IPv6 socket: the kind of the IPv4 address (VERIFY ON ORACLE).
+             * Broadcast is not a thing there, the socket option for it is IPv4 only. */
+            ULONG V4 = ntohl(*(const UNALIGNED ULONG *)(Address + 12));
+
+            if (V4 == INADDR_ANY)
+                SockaddrInfo->AddressInfo = SockaddrAddressInfoWildcard;
+            else if ((V4 >> 24) == 127)
+                SockaddrInfo->AddressInfo = SockaddrAddressInfoLoopback;
+            else
+                SockaddrInfo->AddressInfo = SockaddrAddressInfoNormal;
+        }
+        else
+            SockaddrInfo->AddressInfo = SockaddrAddressInfoNormal;
+
+        if (Port == 0)
+            SockaddrInfo->EndpointInfo = SockaddrEndpointInfoWildcard;
+        else if (Port < IPPORT_RESERVED)
+            SockaddrInfo->EndpointInfo = SockaddrEndpointInfoReserved;
+        else
+            SockaddrInfo->EndpointInfo = SockaddrEndpointInfoNormal;
+
+        return NO_ERROR;
+    }
 
     if (!ipv4 || !SockaddrInfo || SockaddrLength < sizeof(SOCKADDR_IN) ||
         ipv4->sin_family != AF_INET)
@@ -221,6 +373,36 @@ WshKeptOption(
     return NULL;
 }
 
+/*
+ * The IPPROTO_IPV6 options of an AF_INET6 socket. They are kept with the socket until the stack takes them
+ * (IPV6_V6ONLY and the hop limits do not reach it yet): what was set reads back, an option that was not set
+ * reads as its default. The defaults and the exact errors are to be verified on Windows (VERIFY ON ORACLE):
+ * IPV6_V6ONLY 1 (the documented default on Windows), unicast hops -1 (the system default), multicast hops 1,
+ * multicast loop 1.
+ */
+static
+PLONG
+WshKeptIpv6Option(
+    _In_ PSOCKET_CONTEXT Context,
+    _In_ INT OptionName,
+    _Out_ PDWORD Bit,
+    _Out_ PLONG Default,
+    _Out_ PBOOLEAN Boolean)
+{
+    *Boolean = FALSE;
+    *Default = 0;
+
+    switch (OptionName)
+    {
+        case IPV6_V6ONLY:        *Bit = WSH_SET6_V6ONLY; *Default = 1; *Boolean = TRUE; return &Context->Ipv6V6Only;
+        case IPV6_UNICAST_HOPS:  *Bit = WSH_SET6_UNIHOPS; *Default = -1; return &Context->Ipv6UnicastHops;
+        case IPV6_MULTICAST_HOPS: *Bit = WSH_SET6_MCASTHOPS; *Default = 1; return &Context->Ipv6MulticastHops;
+        case IPV6_MULTICAST_LOOP: *Bit = WSH_SET6_MCASTLOOP; *Default = 1; *Boolean = TRUE; return &Context->Ipv6MulticastLoop;
+        default: break;
+    }
+    return NULL;
+}
+
 static
 void
 GetTdiTypeId(
@@ -308,6 +490,37 @@ WSHGetSocketInformation(
     LONG Default, Value;
     BOOLEAN Boolean;
 
+    /* IPPROTO_IPV6 on an IPv6 socket (an IPv4 socket never gets here: msafd answers for it) */
+    if (Context && Level == IPPROTO_IPV6 && Context->AddressFamily == AF_INET6)
+    {
+        Kept = WshKeptIpv6Option(Context, OptionName, &Bit, &Default, &Boolean);
+        if (!Kept)
+        {
+            DPRINT1("Get: Unknown IPPROTO_IPV6 option: %d\n", OptionName);
+            if (OptionLength) *OptionLength = 0;
+            return WSAENOPROTOOPT;
+        }
+
+        if (!OptionLength || !OptionValue || *OptionLength < (INT)sizeof(CHAR))
+        {
+            if (OptionLength) *OptionLength = sizeof(LONG);
+            return WSAEFAULT;
+        }
+
+        Value = (Context->Ipv6OptionsSet & Bit) ? *Kept : Default;
+        if (*OptionLength >= (INT)sizeof(LONG))
+        {
+            *(PLONG)OptionValue = Value;
+            *OptionLength = sizeof(LONG);
+        }
+        else
+        {
+            *(PUCHAR)OptionValue = (UCHAR)Value;
+            *OptionLength = sizeof(UCHAR);
+        }
+        return NO_ERROR;
+    }
+
     if (Context && (Level == IPPROTO_IP || Level == IPPROTO_UDP))
     {
         Kept = WshKeptOption(Context, Level, OptionName, &Bit, &Default, &Boolean);
@@ -358,6 +571,22 @@ WSHGetWildcardSockaddr(
     OUT PINT SockaddrLength)
 {
     INT Size = 2 * sizeof(UINT);
+    PSOCKET_CONTEXT Context = HelperDllSocketContext;
+
+    if (Context && Context->AddressFamily == AF_INET6)
+    {
+        /* [::]:0, a whole SOCKADDR_IN6; the length says how much there is */
+        if (*SockaddrLength < WSH_SOCKADDR_IN6_LENGTH)
+        {
+            DPRINT1("Socket address length too small: %d\n", *SockaddrLength);
+            return WSAEFAULT;
+        }
+
+        RtlZeroMemory(Sockaddr, WSH_SOCKADDR_IN6_LENGTH);
+        Sockaddr->sa_family = AF_INET6;
+        *SockaddrLength = WSH_SOCKADDR_IN6_LENGTH;
+        return NO_ERROR;
+    }
 
     if (*SockaddrLength < Size)
     {
@@ -746,6 +975,11 @@ WSHOpenSocket2(
 
     DPRINT("WSHOpenSocket2 called\n");
 
+    /* An IPv6 socket exists only while the stack takes IPv6 (see WshIpv6Enabled): until then it is the
+     * WSAEAFNOSUPPORT an application has always got for AF_INET6 */
+    if (*AddressFamily == AF_INET6 && !WshIpv6Enabled())
+        return WSAEAFNOSUPPORT;
+
     switch (*SocketType) {
     case SOCK_STREAM:
         String = TcpDeviceName;
@@ -962,6 +1196,40 @@ WSHSetSocketInformation(
                     return 0;
             }
             break;
+
+        case IPPROTO_IPV6:
+        {
+            PLONG Kept;
+            DWORD Bit;
+            LONG Default, Value;
+            BOOLEAN Boolean;
+
+            /* An IPv4 socket has never had an answer here (see msafd for IPV6_V6ONLY): unchanged */
+            if (Context->AddressFamily != AF_INET6)
+            {
+                DPRINT1("Set: Received unexpected %d option %d\n", Level, OptionName);
+                return 0;
+            }
+
+            Kept = WshKeptIpv6Option(Context, OptionName, &Bit, &Default, &Boolean);
+            if (!Kept)
+            {
+                DPRINT1("Set: Received unexpected IPPROTO_IPV6 option %d\n", OptionName);
+                return WSAENOPROTOOPT;
+            }
+            if (!OptionValue || OptionLength < (INT)sizeof(CHAR))
+                return WSAEFAULT;
+
+            Value = (OptionLength >= (INT)sizeof(LONG)) ? *(PLONG)OptionValue : *(PUCHAR)OptionValue;
+            if (Boolean)
+                Value = (Value != 0);
+            else if (Value < -1 || Value > 255)
+                return WSAEINVAL;
+
+            *Kept = Value;
+            Context->Ipv6OptionsSet |= Bit;
+            return NO_ERROR;
+        }
 
         case IPPROTO_UDP:
         {

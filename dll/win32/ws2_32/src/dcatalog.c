@@ -15,6 +15,44 @@
 
 /* DATA **********************************************************************/
 
+/* FUNCTIONS *****************************************************************/
+
+/*
+ * The AF_INET6 entries of the protocol catalog are there for the stack's IPv6 switch
+ * (HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Ipv6Enable, a REG_DWORD, off when absent): while
+ * it is off the catalog is what it was before the entries were added, so nothing can see or select an IPv6
+ * protocol, and an IPv6 socket is refused here with WSAEAFNOSUPPORT. The value does not change while the system
+ * runs; it is read once per process.
+ */
+static LONG WsIpv6State; /* 0 not read yet, 1 on, 2 off */
+
+static BOOLEAN
+WsIpv6SwitchOn(VOID)
+{
+    LONG State = WsIpv6State;
+    HKEY Key;
+    DWORD Type, Value = 0, Size = sizeof(Value);
+
+    if (State)
+        return State == 1;
+
+    State = 2;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                      L"SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters",
+                      0,
+                      KEY_QUERY_VALUE,
+                      &Key) == ERROR_SUCCESS)
+    {
+        if (RegQueryValueExW(Key, L"Ipv6Enable", NULL, &Type, (LPBYTE)&Value, &Size) == ERROR_SUCCESS &&
+            Type == REG_DWORD && Size == sizeof(Value) && Value != 0)
+            State = 1;
+        RegCloseKey(Key);
+    }
+
+    InterlockedExchange(&WsIpv6State, State);
+    return State == 1;
+}
+
 #define WsTcLock()          EnterCriticalSection(&Catalog->Lock)
 #define WsTcUnlock()        LeaveCriticalSection(&Catalog->Lock)
 
@@ -354,6 +392,13 @@ WsTcRefreshFromRegistry(IN PTCATALOG Catalog,
                 /* We failed to get it, dereference the entry and leave */
                 WsTcEntryDereference(CatalogEntry);
                 break;
+            }
+
+            /* An IPv6 protocol exists only while the stack takes IPv6 */
+            if (CatalogEntry->ProtocolInfo.iAddressFamily == AF_INET6 && !WsIpv6SwitchOn())
+            {
+                WsTcEntryDereference(CatalogEntry);
+                continue;
             }
 
             /* Insert it to our List */
