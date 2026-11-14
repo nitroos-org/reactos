@@ -622,9 +622,19 @@ StFindSynReceived(u16_t Port)
     return NULL;
 }
 
+static struct pbuf *
+StMakeSynFrom(const ip6_addr_t *Src, const ip6_addr_t *Dest, u16_t SrcPort, u16_t Port);
+
 /* A SYN from Src (an address on the link) to Dest:Port, as a datagram fresh from the adapter */
 static struct pbuf *
 StMakeSyn(const ip6_addr_t *Src, const ip6_addr_t *Dest, u16_t Port)
+{
+    return StMakeSynFrom(Src, Dest, 50001, Port);
+}
+
+/* The same from SrcPort */
+static struct pbuf *
+StMakeSynFrom(const ip6_addr_t *Src, const ip6_addr_t *Dest, u16_t SrcPort, u16_t Port)
 {
     struct pbuf *p;
     PUCHAR Ip, Tcp;
@@ -642,7 +652,7 @@ StMakeSyn(const ip6_addr_t *Src, const ip6_addr_t *Dest, u16_t Port)
     RtlCopyMemory(Ip + 8, Src->addr, 16);
     RtlCopyMemory(Ip + 24, Dest->addr, 16);
     Tcp = Ip + 40;
-    Tcp[0] = 0xC3; Tcp[1] = 0x51;               /* source port 50001 */
+    Tcp[0] = (UCHAR)(SrcPort >> 8); Tcp[1] = (UCHAR)SrcPort;
     Tcp[2] = (UCHAR)(Port >> 8); Tcp[3] = (UCHAR)Port;
     Tcp[4] = 0x12; Tcp[5] = 0x34; Tcp[6] = 0x56; Tcp[7] = 0x78;
     Tcp[12] = 5 << 4;
@@ -1078,6 +1088,98 @@ StTestFirewall6(PIP_INTERFACE IF, const ip_addr_t *Local, u16_t Port)
                 Last = StLastDrop();
                 StResult(Last && Last->Reason == NITROFW_DROP_V6_INVALID, "...and logged as invalid", NULL);
             }
+        }
+    }
+
+    /* reassembly: the protocol of the datagram is the one its offset-0 fragment states, the one the firewall
+       judged (RFC 8200 4.5). A SYN (valid checksum) in two fragments: 16 bytes at offset 0 (the flags are in
+       them, so the firewall can judge it), 4 bytes at offset 16 */
+    {
+        static const struct
+        {
+            const char *Name;
+            u16_t SrcPort, DstPort;
+            UCHAR FirstNh;
+            BOOLEAN LastFirst, WantTaken;
+            UCHAR Id;
+        } Cases[] =
+        {
+            /* the control: both say TCP, a rule admits the port: the datagram completes, the request is taken */
+            { "fragmented SYN to an allowed port reassembled and taken (control)", 50001, ST_PORT_ALLOWED_TCP, 6, TRUE, TRUE, 0x21 },
+            /* the later fragment arrives first and says TCP; the offset-0 one says UDP to the port a rule admits
+               for UDP (the ports are the first bytes of both headers), which the firewall passes: the datagram
+               must not complete as TCP to that port, which no rule admits for TCP */
+            { "fragments that disagree on the protocol do not make a SYN past the firewall", 50002, ST_PORT_ALLOWED_UDP, 17, TRUE, FALSE, 0x22 },
+            /* the same in order: the first fragment creates the entry as UDP, the TCP one is dropped */
+            { "...nor in the other order", 50002, ST_PORT_ALLOWED_UDP, 17, FALSE, FALSE, 0x23 },
+        };
+        UCHAR First[8 + 16], Second[8 + 8];
+        PUCHAR Tcp;
+        struct pbuf *Syn;
+        struct tcp_pcb *UdpPortListener = NULL;
+        ULONG c;
+
+        /* A TCP listener on the port that only UDP may reach */
+        LOCK_TCPIP_CORE();
+        Pcb = tcp_new_ip_type(IPADDR_TYPE_V6);
+        if (Pcb && tcp_bind(Pcb, Local, ST_PORT_ALLOWED_UDP) == ERR_OK)
+            UdpPortListener = tcp_listen(Pcb);
+        else if (Pcb)
+            tcp_close(Pcb);
+        if (UdpPortListener)
+            tcp_accept(UdpPortListener, StServerAccept);
+        UNLOCK_TCPIP_CORE();
+        StResult(UdpPortListener != NULL, "a TCP listener on the UDP-only port", NULL);
+
+        for (c = 0; c < RTL_NUMBER_OF(Cases); c++)
+        {
+            Syn = StMakeSynFrom(&Peer, Dest, Cases[c].SrcPort, Cases[c].DstPort);
+            if (!Syn)
+            {
+                StResult(FALSE, Cases[c].Name, "no memory");
+                continue;
+            }
+            Tcp = (PUCHAR)Syn->payload + 40;
+
+            RtlZeroMemory(First, sizeof(First));
+            First[0] = Cases[c].FirstNh;
+            First[3] = 0x01;                    /* offset 0, more fragments */
+            First[7] = Cases[c].Id;
+            RtlCopyMemory(First + 8, Tcp, 16);
+
+            RtlZeroMemory(Second, sizeof(Second));
+            Second[0] = 6;
+            Second[3] = 0x10;                   /* offset 16, the last fragment */
+            Second[7] = Cases[c].Id;
+            RtlCopyMemory(Second + 8, Tcp + 16, 4);
+            pbuf_free(Syn);
+
+            if (Cases[c].LastFirst)
+            {
+                StInject(IF, StPacket(&Peer, Dest, 44, 64, Second, 8 + 4), FALSE);
+                StInject(IF, StPacket(&Peer, Dest, 44, 64, First, sizeof(First)), FALSE);
+            }
+            else
+            {
+                StInject(IF, StPacket(&Peer, Dest, 44, 64, First, sizeof(First)), FALSE);
+                StInject(IF, StPacket(&Peer, Dest, 44, 64, Second, 8 + 4), FALSE);
+            }
+
+            LOCK_TCPIP_CORE();
+            Half = StFindSynReceived(Cases[c].DstPort);
+            Taken = Half != NULL;
+            if (Half)
+                tcp_abort(Half);
+            UNLOCK_TCPIP_CORE();
+            _snprintf(Detail, sizeof(Detail), "half-open=%d", (int)Taken);
+            StResult(Taken == Cases[c].WantTaken, Cases[c].Name, Detail);
+        }
+
+        if (UdpPortListener)
+        {
+            LOCK_TCPIP_CORE();
+            tcp_close(UdpPortListener);
+            UNLOCK_TCPIP_CORE();
         }
     }
     {

@@ -333,6 +333,15 @@ ip6_reass(struct pbuf *p)
     ipr_prev = ipr;
   }
 
+  /* NitroOS: the protocol of the reassembled datagram is the one the offset-0 fragment states (RFC 8200 4.5),
+     the one a filter that judges first fragments has judged. The entry keeps the value of whichever fragment
+     created it; a fragment that states another one is dropped, so a later fragment that arrived first can
+     never decide the protocol against the first fragment (that datagram does not complete) */
+  if ((ipr != NULL) && (ipr->nexth != frag_hdr->_nexth)) {
+    IP6_FRAG_STATS_INC(ip6_frag.proterr);
+    goto nullreturn;
+  }
+
   if (ipr == NULL) {
   /* Enqueue a new datagram into the datagram queue */
     ipr = (struct ip6_reassdata *)memp_malloc(MEMP_IP6_REASSDATA);
@@ -754,6 +763,12 @@ ip6_frag(struct pbuf *p, struct netif *netif, const ip6_addr_t *dest)
   u16_t fragment_offset = 0;
   u16_t last;
   u16_t poff = IP6_HLEN;
+
+  /* NitroOS: an MTU too small for a header and 8 bytes of data gives no fragment size (and would loop) */
+  if ((mtu < IP6_HLEN + IP6_FRAG_HLEN + 8) || (nfb == 0)) {
+    IP6_FRAG_STATS_INC(ip6_frag.err);
+    return ERR_VAL;
+  }
 
   identification++;
 
