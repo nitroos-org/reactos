@@ -100,17 +100,17 @@ static ULONG ParseAddr4(const FWR *raw, PCWSTR key, NITROFW_ADDR4_RANGE *arr, UL
     return n;
 }
 
-/* The IPv6 address filter (HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Ipv6Enable, REG_DWORD,
-   non-zero = tcpip has IPv6). Off, the rules' IPv6 addresses (LA6/RA6) are not sent, as before IPv6 existed. */
-static BOOL Ipv6SwitchOn(void)
+/* Does the running tcpip have IPv6? The kernel decides (IOCTL_NITROFW_GET_VERSION, NITROFW_FEATURE_IPV6: tcpip read
+   the Ipv6Enable registry value once, at load), not the registry value, which can change while tcpip runs: the rule
+   service must send the rules' IPv6 addresses (LA6/RA6) exactly when the kernel can see an IPv6 packet, or an Allow
+   rule whose only scope is an IPv6 address is pushed without any address condition and matches everything. An
+   older driver, or a failed query, means no IPv6: the addresses are not sent, as before IPv6 existed. */
+static BOOL KernelHasIpv6(HANDLE h)
 {
-    HKEY hk; DWORD v = 0, cb = sizeof(v), t = 0; BOOL on = FALSE;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters", 0, KEY_READ, &hk) == 0)
-    {
-        if (RegQueryValueExW(hk, L"Ipv6Enable", NULL, &t, (BYTE *)&v, &cb) == 0 && t == REG_DWORD && v) on = TRUE;
-        RegCloseKey(hk);
-    }
-    return on;
+    NITROFW_VERSION_INFO vi; DWORD ret = 0;
+    memset(&vi, 0, sizeof(vi));
+    if (!DeviceIoControl(h, IOCTL_NITROFW_GET_VERSION, NULL, 0, &vi, sizeof(vi), &ret, NULL) || ret < sizeof(vi)) return FALSE;
+    return (vi.Features & NITROFW_FEATURE_IPV6) != 0;
 }
 
 /* An IPv6 address in text (RFC 4291 2.2 forms 1 and 2: hex groups, one "::"; no embedded IPv4, no zone) up to
@@ -278,12 +278,13 @@ static BOOL BuildRule(BUF *b, const FW_RULE *r, BOOL v6)
 DWORD FwPushToKernel(ULONGLONG gen, BOOL *pPresent)
 {
     FW_RULESET rs; BUF b = { 0 }; NITROFW_POLICY pol; HANDLE h; DWORD err, ret, i;
-    ULONG cnt = 0; ULONG bit; BOOL v6on = Ipv6SwitchOn();
+    ULONG cnt = 0; ULONG bit; BOOL v6on;
     HKEY hk; DWORD enforce = 1, cb = sizeof(DWORD), t;
     if (pPresent) *pPresent = FALSE;
     h = CreateFileW(NITROFW_USER_PATH, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
     if (h == INVALID_HANDLE_VALUE) return GetLastError();
     if (pPresent) *pPresent = TRUE;
+    v6on = KernelHasIpv6(h);
     err = FwStoreLoad(&rs);
     if (err) { CloseHandle(h); return err; }
     memset(&pol, 0, sizeof(pol));

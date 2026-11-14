@@ -963,9 +963,13 @@ StTestFirewall6(PIP_INTERFACE IF, const ip_addr_t *Local, u16_t Port)
     StDropped(IF, StIcmp(&Global, Dest, 137, 0, 255, 40), FALSE, "redirect from a global source dropped", TRUE);
     StDropped(IF, StIcmp(&Global, Dest, 130, 0, 1, 24), FALSE, "MLD query from a global source dropped", TRUE);
 
-    /* ICMPv6 echo: a request is unsolicited (default block), a reply passes */
+    /* ICMPv6 echo: a request is unsolicited (default block); so is a reply, as nothing here sends a request
+       (logged as a reply with no request behind it) */
     StDropped(IF, StIcmp(&Peer, Dest, 128, 0, 64, 8), FALSE, "ICMPv6 echo request dropped (default block)", TRUE);
-    StDropped(IF, StIcmp(&Peer, Dest, 129, 0, 64, 8), FALSE, "ICMPv6 echo reply passes", FALSE);
+    StDropped(IF, StIcmp(&Peer, Dest, 129, 0, 64, 8), FALSE, "ICMPv6 echo reply with no request of ours dropped", TRUE);
+    Last = StLastDrop();
+    StResult(Last && Last->Protocol == 58 && Last->IcmpType == 129 && Last->Reason == NITROFW_DROP_ICMP_REPLY,
+             "...and logged as an unsolicited reply", NULL);
 
     /* extension headers: the walk finds the transport header behind them; a first fragment is judged, later
        fragments pass, a first fragment too short to judge does not */
@@ -999,6 +1003,82 @@ StTestFirewall6(PIP_INTERFACE IF, const ip_addr_t *Local, u16_t Port)
         StDropped(IF, p, FALSE, "first fragment too short to judge dropped", TRUE);
         Last = StLastDrop();
         StResult(Last && Last->Reason == NITROFW_DROP_V6_INVALID, "...and logged as invalid", NULL);
+    }
+    /* RFC 6980: neighbour discovery and MLD are never fragmented; a Fragment header inside a Fragment header
+       is not a form a sender needs. Both dropped and logged as invalid; the unfragmented forms pass (above).
+       The drop log records 20 a second: a new second first, so the checks of the log below see their records */
+    StSleep(1100);
+    {
+        UCHAR Frag[8 + 24];
+
+        RtlZeroMemory(Frag, sizeof(Frag));
+        Frag[0] = 58;
+        Frag[3] = 0x01;         /* offset 0, more fragments */
+        Frag[7] = 1;
+        Frag[8] = 135;          /* neighbour solicitation, hop limit 255, link-local source: valid unfragmented */
+        StDropped(IF, StPacket(&Peer, Dest, 44, 255, Frag, sizeof(Frag)), FALSE,
+                  "fragmented neighbour solicitation dropped", TRUE);
+        Last = StLastDrop();
+        StResult(Last && Last->Protocol == 58 && Last->IcmpType == 135 && Last->Reason == NITROFW_DROP_V6_INVALID,
+                 "...and logged as invalid", NULL);
+        Frag[3] = 0;            /* an atomic fragment (offset 0, no more fragments) is the same */
+        StDropped(IF, StPacket(&Peer, Dest, 44, 255, Frag, sizeof(Frag)), FALSE,
+                  "atomic-fragment neighbour advertisement dropped", TRUE);
+        Frag[3] = 0x01;
+        Frag[8] = 134;
+        StDropped(IF, StPacket(&Router, Dest, 44, 255, Frag, sizeof(Frag)), FALSE,
+                  "fragmented router advertisement dropped", TRUE);
+        Frag[8] = 130;
+        StDropped(IF, StPacket(&Router, Dest, 44, 1, Frag, sizeof(Frag)), FALSE,
+                  "fragmented MLD query dropped", TRUE);
+    }
+    {
+        UCHAR Frag[8 + 8 + 20];
+
+        RtlZeroMemory(Frag, sizeof(Frag));
+        Frag[0] = 44;           /* a Fragment header whose next header is a Fragment header */
+        Frag[7] = 1;
+        Frag[8] = 6;            /* the inner one: offset 0 */
+        Frag[8 + 7] = 2;
+        StTcpHeader(Frag + 16, 50001, ST_PORT_ALLOWED_TCP, 0x10);
+        StDropped(IF, StPacket(&Peer, Dest, 44, 64, Frag, sizeof(Frag)), FALSE,
+                  "nested Fragment headers (inner offset 0) dropped", TRUE);
+        Last = StLastDrop();
+        StResult(Last && Last->Reason == NITROFW_DROP_V6_INVALID, "...and logged as invalid", NULL);
+        Frag[8 + 3] = 0x09;     /* the inner one: offset 8 (used to pass as a later fragment) */
+        StDropped(IF, StPacket(&Peer, Dest, 44, 64, Frag, sizeof(Frag)), FALSE,
+                  "nested Fragment headers (inner offset 8) dropped", TRUE);
+        Frag[3] = 0x09;         /* the outer one at offset 8 is still a later fragment: passes */
+        Frag[8 + 3] = 0;
+        StDropped(IF, StPacket(&Peer, Dest, 44, 64, Frag, sizeof(Frag)), FALSE,
+                  "a later fragment (offset 8) still passes", FALSE);
+    }
+    /* the walk follows 8 extension headers and the transport header after them, not 9 (a non-SYN TCP segment
+       passes the filter whenever the walk succeeds; a failed walk is an invalid datagram) */
+    {
+        UCHAR Chain[9 * 8 + 20];
+        ULONG n;
+
+        for (n = 8; n <= 9; n++)
+        {
+            ULONG k;
+
+            RtlZeroMemory(Chain, sizeof(Chain));
+            for (k = 0; k < n; k++)
+            {
+                Chain[k * 8] = (UCHAR)(k + 1 < n ? 60 : 6);     /* destination options, the last one -> TCP */
+                Chain[k * 8 + 2] = 1; Chain[k * 8 + 3] = 4;     /* PadN of 4 */
+            }
+            StTcpHeader(Chain + n * 8, 50001, ST_PORT_ALLOWED_TCP, 0x10);
+            p = StPacket(&Peer, Dest, 60, 64, Chain, n * 8 + 20);
+            StDropped(IF, p, FALSE, n == 8 ? "8 extension headers then TCP ACK pass" : "9 extension headers dropped",
+                      n == 9);
+            if (n == 9)
+            {
+                Last = StLastDrop();
+                StResult(Last && Last->Reason == NITROFW_DROP_V6_INVALID, "...and logged as invalid", NULL);
+            }
+        }
     }
     {
         UCHAR Chain[8];

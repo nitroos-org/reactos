@@ -95,8 +95,10 @@
  *     packet, one with no addresses matches both. Protocol 58 is ICMPv6 (ICMP entries as for protocol 1).
  *     Without rule evaluation: loopback, frames the host looped back to itself, neighbour discovery and MLD
  *     that meet their RFCs (a violation is dropped and logged as NITROFW_DROP_V6_INVALID), ICMPv6 errors
- *     that answer a TCP segment the host sent, echo replies, and TCP segments that are not a connection
- *     request. Connection requests, UDP, other ICMPv6 types and other protocols are evaluated (default block).
+ *     that answer a TCP segment the host sent, and TCP segments that are not a connection request.
+ *     Connection requests, UDP, other ICMPv6 types (echo replies included: the host sends no echo request) and
+ *     other protocols are evaluated (default block). A fragmented neighbour discovery or MLD message, and a
+ *     Fragment header inside a Fragment header, are dropped and logged as NITROFW_DROP_V6_INVALID.
  *     Program-image conditions do not match IPv6 packets yet.
  *
  * ============================================================================
@@ -327,7 +329,9 @@ typedef struct _NITROFW_DROPLOG
     ULONGLONG Suppressed;       /* drops not recorded because of the rate limit, since load */
     ULONG Count;                /* NITROFW_DROP_RECORD entries that follow this header */
     ULONG Flags;                /* NITROFW_DROPLOG_* */
-} NITROFW_DROPLOG, *PNITROFW_DROPLOG;           /* 24 bytes; the records follow */
+    ULONG RecordSize;           /* sizeof(NITROFW_DROP_RECORD) of the driver: step through the records by this, not by the reader's own struct */
+    ULONG Reserved;             /* 0 */
+} NITROFW_DROPLOG, *PNITROFW_DROPLOG;           /* 32 bytes; the records follow */
 
 /*
  * Listener snapshot (the "NitroOS Firewall has blocked some features of this app" prompt). The kernel does not
