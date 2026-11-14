@@ -14,6 +14,7 @@ static ULONG DispatchCount;
 static UINT DispatchTotalSize;
 static UINT DispatchHeaderSize;
 static BOOLEAN DispatchDataOk;
+static UCHAR FragmentProtocol = 17;
 
 BOOLEAN TCPIpv6Enabled;
 static ULONG Receive6Count;
@@ -175,7 +176,7 @@ SendFragment(USHORT Id, UINT HeaderSize, UINT Offset, UINT PayloadSize, BOOLEAN 
     Header->Id = Id;
     Header->FlagsFragOfs = H2WN((USHORT)((Offset >> 3) | (MoreFragments ? IPv4_MF_MASK : 0)));
     Header->Ttl = 64;
-    Header->Protocol = 17;
+    Header->Protocol = FragmentProtocol;
     Header->SrcAddr = 0x0100000A;
     Header->DstAddr = 0x0200000A;
     for (i = 0; i < PayloadSize; i++)
@@ -283,6 +284,30 @@ TestOversize(VOID)
     ExpectNothingLeft("after drops");
 }
 
+/* A TCP segment whose header is cut by a fragment boundary (a fragment needs only a multiple of 8 octets)
+   reaches TCP as one contiguous datagram: the IPv4 path reassembles into a single buffer */
+static VOID
+TestTcpHeaderSplit(VOID)
+{
+    static const UINT Cuts[] = { 8, 16, 24 };
+    UINT i;
+
+    FragmentProtocol = 6;
+    for (i = 0; i < sizeof(Cuts) / sizeof(Cuts[0]); i++)
+    {
+        ResetDispatch();
+        SendFragment(8 + (USHORT)i, 20, 0, Cuts[i], TRUE);
+        ok(DispatchCount == 0, "cut %u: completed early\n", Cuts[i]);
+        SendFragment(8 + (USHORT)i, 20, Cuts[i], 40 - Cuts[i], FALSE);
+        ok(DispatchCount == 1, "cut %u: DispatchCount = %lu\n", Cuts[i], DispatchCount);
+        ok(DispatchTotalSize == 60, "cut %u: TotalSize = %u\n", Cuts[i], DispatchTotalSize);
+        ok(DispatchHeaderSize == 20, "cut %u: HeaderSize = %u\n", Cuts[i], DispatchHeaderSize);
+        ok(DispatchDataOk, "cut %u: reassembled data differs\n", Cuts[i]);
+        ExpectNothingLeft("TCP header split");
+    }
+    FragmentProtocol = 17;
+}
+
 /* An IPv6 frame goes to lwIP (TCPReceive6) only with IPv6 on, and IPReceive frees it either way */
 static VOID
 TestIPv6Switch(VOID)
@@ -387,6 +412,7 @@ START_TEST(Reassembly)
     TestLegitimate();
     TestMaximumSize();
     TestOversize();
+    TestTcpHeaderSplit();
     TestIPv6Switch();
     TestEtherTypeVersion();
 }
