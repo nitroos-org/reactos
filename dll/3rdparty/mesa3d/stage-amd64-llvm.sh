@@ -23,8 +23,8 @@
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 OUT=${1:-$HERE/amd64-llvm}
-ARTIFACT=s3://reactos-nitro-archive/gfx01-lavapipe-amd64/26.3.0/gfx01-lavapipe-amd64-artifacts.tar.xz
-ARTIFACT_SHA256=beed97f838f2f7e3767fb528497bd35f3ee6d2443ef3a9d9eb197ea308cb3c60
+ARTIFACT=s3://reactos-nitro-archive/gfx01-lavapipe-amd64/26.3.0-dc2/gfx01-lavapipe-amd64-artifacts.tar.xz
+ARTIFACT_SHA256=39d5f70c56fef5b13adde8147b859e9af3c5b1a265bf0ac00066b275a4778831
 FILES="vulkan_lvp.dll lvp_icd.json libgallium_wgl.dll llvm-licenses.txt mesa3d-licenses.txt"
 NAME=stage-amd64-llvm
 
