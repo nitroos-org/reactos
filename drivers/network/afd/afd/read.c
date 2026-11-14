@@ -10,6 +10,26 @@
 
 #include "afd.h"
 
+NTSTATUS AfdTdiReceiveWindow( PAFD_FCB FCB, PCHAR Buffer, UINT Length )
+{
+    if (FCB->Recv.NonPaged)
+        return TdiReceiveNonPaged( &FCB->ReceiveIrp.InFlightRequest,
+                                   FCB->Connection.Object,
+                                   TDI_RECEIVE_NORMAL,
+                                   Buffer,
+                                   Length,
+                                   ReceiveComplete,
+                                   FCB );
+
+    return TdiReceive( &FCB->ReceiveIrp.InFlightRequest,
+                       FCB->Connection.Object,
+                       TDI_RECEIVE_NORMAL,
+                       Buffer,
+                       Length,
+                       ReceiveComplete,
+                       FCB );
+}
+
 /* After shutdown(SD_RECEIVE) only the receives that were pending are served: the buffer is refilled
  * for them alone (ForPending), when the data that arrived did not satisfy them all */
 static VOID RefillSocketBufferEx( PAFD_FCB FCB, BOOLEAN ForPending )
@@ -49,13 +69,9 @@ static VOID RefillSocketBufferEx( PAFD_FCB FCB, BOOLEAN ForPending )
 
     AFD_DbgPrint(MID_TRACE,("Replenishing buffer\n"));
 
-    TdiReceive( &FCB->ReceiveIrp.InFlightRequest,
-                FCB->Connection.Object,
-                TDI_RECEIVE_NORMAL,
-                FCB->Recv.Window + FCB->Recv.Content,
-                FCB->Recv.Size - FCB->Recv.Content,
-                ReceiveComplete,
-                FCB );
+    AfdTdiReceiveWindow( FCB,
+                         FCB->Recv.Window + FCB->Recv.Content,
+                         FCB->Recv.Size - FCB->Recv.Content );
 }
 
 static VOID RefillSocketBuffer( PAFD_FCB FCB )
