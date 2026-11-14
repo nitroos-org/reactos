@@ -1870,7 +1870,12 @@ RPC_STATUS WINAPI I_RpcSend(PRPC_MESSAGE pMsg)
       RPCRT4_ReleaseConnection(conn);
       pMsg->ReservedForRuntime = NULL;
       status = RPCRT4_OpenBinding(bind, &conn, &cif->TransferSyntax, &cif->InterfaceId, &from_cache);
-      if (status != RPC_S_OK) break;
+      if (status != RPC_S_OK)
+      {
+          /* nothing is left for I_RpcFreeBuffer to release */
+          RPCRT4_ReleaseBinding(bind);
+          break;
+      }
       pMsg->ReservedForRuntime = conn;
   }
 
@@ -1943,6 +1948,10 @@ RPC_STATUS WINAPI I_RpcReceive(PRPC_MESSAGE pMsg)
 fail:
   free(hdr);
   RPCRT4_ReleaseConnection(conn);
+  /* I_RpcFreeBuffer releases the reference to the binding that I_RpcGetBuffer took together with the connection, and
+   * finds nothing to release from here on: without this, a call that failed would keep its binding (and the
+   * association with the idle connections of the server) for the life of the process */
+  RPCRT4_ReleaseBinding(bind);
   pMsg->ReservedForRuntime = NULL;
   return status;
 }
