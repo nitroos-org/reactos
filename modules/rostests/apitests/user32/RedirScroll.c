@@ -9,8 +9,8 @@
  * made here from the documented behaviour: the scroll rectangle moves by dx, dy within the clip rectangle, and the
  * part not covered by the moved content is invalid and painted with the pattern. The comparison reads the window
  * through its DC (at levels 1 and 2 the surface of the window) and the screen through the screen DC, once at once
- * after a single scroll and once more when the window has been idle: a burst of scrolls may reach the screen a few
- * frames after its end at levels 1 and 2 (the test allows a second), but never differ from the window.
+ * after a single scroll and once more when the window has been idle: a burst of scrolls may reach the screen up to two
+ * frames after its end at levels 1 and 2 (Test_BurstTail measures it), but never differ from the window.
  */
 
 #include "precomp.h"
@@ -429,6 +429,99 @@ static void Test_BurstThenDraw(HWND hwnd, HWND hChild)
     CheckScreenIdle(&model, "scrolls around a FillRect, screen when idle");
 }
 
+/*
+ * The last scroll of a burst reaches the screen within two frames (33 ms): the screen is sampled at pixels the last
+ * scroll changed, from the end of the last UpdateWindow until all of them show the model.
+ */
+#define TAIL_BURSTS     12
+#define TAIL_SAMPLES    32
+#define TAIL_LIMIT_MS   33.0
+
+static void Test_BurstTail(HWND hwnd, HWND hChild)
+{
+    static FRAME model, prev;
+    RECT rcChild;
+    LARGE_INTEGER Freq, t0, t1;
+    double Worst = 0, Ms[TAIL_BURSTS];
+    int burst, i;
+
+    QueryPerformanceFrequency(&Freq);
+    ShowWindow(hChild, SW_HIDE);
+    for (burst = 0; burst < TAIL_BURSTS; burst++)
+    {
+        int cSample = 0, sx[TAIL_SAMPLES], sy[TAIL_SAMPLES], nDiff = 0, k, bOk;
+        HDC hdcScr;
+
+        Reset(hwnd, &model, NULL, &rcChild);
+        FillPattern(&model);
+        for (i = 0; i < 40; i++)
+        {
+            int dy = (i & 1) ? 16 : -16;
+
+            if (i == 39)
+                prev = model;
+            ScrollWindowEx(hwnd, 0, dy, NULL, NULL, NULL, NULL, SW_INVALIDATE | SW_ERASE);
+            UpdateWindow(hwnd);
+            ModelScroll(&model, 0, dy, NULL, NULL, NULL);
+            /* Odd bursts: a scroll every 4 ms (a burst slower than a loop, still within a frame of each scroll) */
+            if ((burst & 1) && i != 39)
+            {
+                LARGE_INTEGER a, b;
+
+                QueryPerformanceCounter(&a);
+                do
+                    QueryPerformanceCounter(&b);
+                while ((b.QuadPart - a.QuadPart) * 1000 < 4 * Freq.QuadPart);
+            }
+        }
+        QueryPerformanceCounter(&t0);
+        for (i = 0; i < CX * CY; i++)
+            if (prev.a[i] != model.a[i])
+                nDiff++;
+        for (i = 0, k = 0; i < CX * CY && cSample < TAIL_SAMPLES; i++)
+        {
+            if (prev.a[i] == model.a[i])
+                continue;
+            if (k++ % (nDiff / TAIL_SAMPLES + 1) == 0)
+            {
+                sx[cSample] = i % CX;
+                sy[cSample] = i / CX;
+                cSample++;
+            }
+        }
+        hdcScr = GetDC(NULL);
+        for (;;)
+        {
+            bOk = TRUE;
+            for (i = 0; i < cSample; i++)
+            {
+                COLORREF c = GetPixel(hdcScr, WX + sx[i], WY + sy[i]);
+                DWORD got = ((c & 0xFF) << 16) | (c & 0xFF00) | ((c >> 16) & 0xFF);
+
+                if (got != model.a[sy[i] * CX + sx[i]])
+                {
+                    bOk = FALSE;
+                    break;
+                }
+            }
+            QueryPerformanceCounter(&t1);
+            if (bOk || (t1.QuadPart - t0.QuadPart) * 1000 / Freq.QuadPart >= 1000)
+                break;
+        }
+        ReleaseDC(NULL, hdcScr);
+        Ms[burst] = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)Freq.QuadPart;
+        ok(bOk, "burst %d: the screen did not show the last scroll within a second\n", burst);
+        ok(nDiff > 0 && cSample > 0, "burst %d: the last scroll changed nothing (%d pixels)\n", burst, nDiff);
+        ok(Ms[burst] <= TAIL_LIMIT_MS, "burst %d: the last scroll reached the screen %.1f ms after the scroll\n", burst, Ms[burst]);
+        if (Ms[burst] > Worst)
+            Worst = Ms[burst];
+        CheckScreenIdle(&model, "burst tail, screen when idle");
+    }
+    for (burst = 0; burst < TAIL_BURSTS; burst++)
+        trace("tail %d: %.1f ms\n", burst, Ms[burst]);
+    trace("tail worst %.1f ms\n", Worst);
+}
+
 START_TEST(RedirScroll)
 {
     WNDCLASSW wc = { 0 };
@@ -481,6 +574,7 @@ START_TEST(RedirScroll)
         Test_ScrollDC(hwnd, hChild);
         Test_Burst(hwnd, hChild);
         Test_BurstThenDraw(hwnd, hChild);
+        Test_BurstTail(hwnd, hChild);
     }
 
     DestroyWindow(hwnd);

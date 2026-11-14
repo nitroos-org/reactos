@@ -70,6 +70,7 @@ typedef struct _REDIR
     LONGLONG LastScroll;    /* performance counter at the last ScrollWindowEx release (USER lock) */
     LONGLONG HoldUntil;     /* during a burst of scrolls, releases present the window once per frame, until this time (USER lock) */
     LONGLONG LastPresent;   /* performance counter at the last present of a burst by a release (USER lock) */
+    LONGLONG LastDefer;     /* performance counter at the last release of a burst that left its copy to later (USER lock) */
     volatile LONG Dirty;    /* DirtyRects is not empty (counted in gRedirDirtyCount) */
     /* Level 2 */
     BOOLEAN bTrans;         /* layered or glass when the record was made: composed (blended), never copied as it is */
@@ -82,13 +83,17 @@ typedef struct _REDIR
 
 ULONG gRedirLevel = 0;
 PKTIMER gRedirTimer = NULL;
+PKTIMER gRedirTailTimer = NULL;
 static LIST_ENTRY gRedirList = { &gRedirList, &gRedirList };
 static SIZE_T gRedirBytes, gRedirBudget;
 static ATOM AtomRedir;
 static ATOM AtomUlwSeen;     /* level 2: the window has had UpdateLayeredWindow content (with or without a surface) */
 static volatile LONG gRedirTimerArmed;
+static volatile LONG gRedirTailArmed;
+static LONG gRedirTailBusy;             /* tail-timer passes that found the USER lock held (raw input thread only) */
 static BOOL gRedirScrollRelease;        /* the DC being released is the one of a scroll (USER lock) */
 static LONGLONG gRedirFrameQpc;         /* a frame (REDIR_FRAME_100NS) in performance counter units */
+static LONGLONG gRedirQuietQpc;         /* half a frame: no release this long ends a burst of scrolls */
 static LONG gRedirBusyFrames;           /* frame-timer passes that found the USER lock held (raw input thread only) */
 static volatile LONG gRedirDirtyCount;   /* records with Dirty set: the timer takes the USER lock only then */
 static ULONG gRedirCreated, gRedirRefused, gRedirPresents;
@@ -103,6 +108,8 @@ static KSPIN_LOCK gRedirDeferLock;
 #define REDIR_MAX_SIDE      16384
 #define REDIR_FRAME_100NS   (16 * 10000)
 #define REDIR_RETRY_100NS   (100 * 10000)
+#define REDIR_TAIL_100NS    (1 * 10000)     /* due time of the tail timer: it fires at the next clock tick */
+#define REDIR_TAIL_BUSY     4               /* tail passes that leave a held USER lock alone before one waits for it */
 #define REDIR_RETRY_BUDGET  8               /* busy DCs tried per frame-timer pass */
 #define REDIR_BUSY_FRAMES   4               /* frames the timer leaves a held USER lock alone before it waits for it */
 
@@ -115,6 +122,23 @@ RedirArmTimer(LONGLONG Due100ns)
 
         Due.QuadPart = -Due100ns;
         KeSetTimer(gRedirTimer, Due, NULL);
+    }
+}
+
+/*
+ * The tail of a burst of scrolls: a release that leaves its copy to later arms this timer (its own, not the frame timer
+ * of the other presents), and the raw input thread shows the window as soon as the releases have stopped (half a
+ * frame without one), so the last scroll reaches the screen about a clock tick after it was made.
+ */
+static VOID
+RedirArmTail(VOID)
+{
+    if (gRedirTailTimer && InterlockedExchange(&gRedirTailArmed, 1) == 0)
+    {
+        LARGE_INTEGER Due;
+
+        Due.QuadPart = -REDIR_TAIL_100NS;
+        KeSetTimer(gRedirTailTimer, Due, NULL);
     }
 }
 
@@ -217,11 +241,16 @@ UserRedirInit(VOID)
     }
     /* A synchronization timer: the wait of the raw input thread resets it (a notification timer stays signaled) */
     KeInitializeTimerEx(gRedirTimer, SynchronizationTimer);
+    /* Without the tail timer a burst of scrolls is not deferred (gRedirFrameQpc stays 0) */
+    gRedirTailTimer = ExAllocatePoolWithTag(NonPagedPool, sizeof(KTIMER), USERTAG_REDIRSURF);
+    if (gRedirTailTimer)
     {
         LARGE_INTEGER Freq;
 
+        KeInitializeTimerEx(gRedirTailTimer, SynchronizationTimer);
         KeQueryPerformanceCounter(&Freq);
         gRedirFrameQpc = Freq.QuadPart * 16 / 1000;
+        gRedirQuietQpc = Freq.QuadPart * 8 / 1000;
     }
     DbgPrint("win32k: window redirection level %lu (NitroRedirection), surface budget %Iu MB\n",
              gRedirLevel, gRedirBudget >> 20);
@@ -1436,7 +1465,8 @@ UserRedirReleased(PVOID pv)
             r->HoldUntil = Now + gRedirFrameQpc;
             if (Now - r->LastPresent < gRedirFrameQpc)
             {
-                RedirArmTimer(REDIR_FRAME_100NS);
+                r->LastDefer = Now;
+                RedirArmTail();
                 return;
             }
         }
@@ -1449,7 +1479,8 @@ UserRedirReleased(PVOID pv)
         {
             if (Now - r->LastPresent < gRedirFrameQpc)
             {
-                RedirArmTimer(REDIR_FRAME_100NS);
+                r->LastDefer = Now;
+                RedirArmTail();
                 return;
             }
             r->LastPresent = Now;
@@ -1574,8 +1605,8 @@ UserRedirPresentPending(VOID)
         Entry = Entry->Flink;
         if (r->Dirty && r->pwnd && r->HoldUntil && KeQueryPerformanceCounter(NULL).QuadPart - r->LastPresent < 2 * gRedirFrameQpc)
         {
-            /* In a burst of scrolls, whose releases present the window once per frame: the timer waits until they stop */
-            RedirArmTimer(REDIR_FRAME_100NS);
+            /* In a burst of scrolls, whose releases present the window once per frame: the tail timer shows its end */
+            RedirArmTail();
         }
         else if (r->Dirty && r->pwnd)
         {
@@ -1596,6 +1627,59 @@ UserRedirPresentPending(VOID)
         DceRedirRetryAll(&lBudget);
     if (gRedirRetries)
         RedirArmTimer(REDIR_RETRY_100NS);
+    UserLeave();
+}
+
+/*
+ * The raw input thread, when gRedirTailTimer fired: a window whose scroll releases left their copy to later and have
+ * stopped for half a frame is shown now (the last frame of the burst). One that is still scrolled is left to the
+ * releases (copying it here would run the copy on this processor while the scrolling thread draws into it), and the
+ * timer comes back at the next tick.
+ */
+VOID
+FASTCALL
+UserRedirPresentTail(VOID)
+{
+    PLIST_ENTRY Entry;
+    BOOL bAgain = FALSE;
+
+    InterlockedExchange(&gRedirTailArmed, 0);
+    if (gRedirDirtyCount == 0)
+        return;
+    if (gRedirTailBusy < REDIR_TAIL_BUSY)
+    {
+        if (!UserTryEnterExclusive())
+        {
+            gRedirTailBusy++;
+            RedirArmTail();
+            return;
+        }
+    }
+    else
+    {
+        UserEnterExclusive();
+    }
+    gRedirTailBusy = 0;
+    for (Entry = gRedirList.Flink; Entry != &gRedirList; )
+    {
+        PREDIR r = CONTAINING_RECORD(Entry, REDIR, Link);
+
+        Entry = Entry->Flink;
+        if (!r->Dirty || !r->pwnd || !r->HoldUntil || !r->LastDefer || r->LastPresent >= r->LastDefer)
+            continue;
+        if (KeQueryPerformanceCounter(NULL).QuadPart - r->LastDefer < gRedirQuietQpc)
+        {
+            bAgain = TRUE;
+            continue;
+        }
+        /* RedirPresentDirty may detach r; the next entry was taken first, and r stays alive while a DC holds it */
+        InterlockedIncrement(&r->cRefs);
+        r->LastPresent = KeQueryPerformanceCounter(NULL).QuadPart;
+        RedirPresentDirty(r);
+        RedirRelease(r);
+    }
+    if (bAgain)
+        RedirArmTail();
     UserLeave();
 }
 

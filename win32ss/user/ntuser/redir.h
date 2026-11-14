@@ -3,6 +3,7 @@
 /* Redirected window surfaces (redir.c, windc.c, gdi/ntgdi/redirgdi.c) */
 extern ULONG gRedirLevel;
 extern PKTIMER gRedirTimer;
+extern PKTIMER gRedirTailTimer;
 
 VOID NTAPI UserRedirInit(VOID);
 PWND FASTCALL UserRedirRootFor(PWND Wnd);
@@ -17,6 +18,7 @@ VOID FASTCALL UserRedirRetryCount(LONG Delta);
 VOID FASTCALL UserRedirDcRelease(PVOID pvRedir);
 VOID FASTCALL UserRedirWindowMoved(PWND Wnd);
 VOID FASTCALL UserRedirPresentPending(VOID);
+VOID FASTCALL UserRedirPresentTail(VOID);
 VOID FASTCALL UserRedirScrollRelease(BOOL bScroll);
 BOOL FASTCALL UserRedirHasSurface(PWND Wnd);
 VOID FASTCALL UserRedirExpose(PWND DesktopWnd, PREGION RgnScreen);
