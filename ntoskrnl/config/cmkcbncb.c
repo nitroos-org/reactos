@@ -235,8 +235,19 @@ CmpGetNameControlBlock(IN PUNICODE_STRING NodeName)
             /* Check if we found a name */
             if (Found)
             {
+                /*
+                 * One NCB is shared by every KCB with this name, under any
+                 * parent and in any hive, so its count is not bounded by
+                 * the 16-bit KCB reference limit. Refuse rather than wrap:
+                 * a wrapped count frees the NCB while KCBs still use it.
+                 */
+                if (Ncb->RefCount == MAXULONG)
+                {
+                    CmpReleaseNcbLockByKey(ConvKey);
+                    return NULL;
+                }
+
                 /* Reference it */
-                ASSERT(Ncb->RefCount != 0xFFFF);
                 Ncb->RefCount++;
                 break;
             }
