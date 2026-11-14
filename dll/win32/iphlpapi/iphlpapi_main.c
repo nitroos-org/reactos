@@ -916,6 +916,79 @@ static int TcpTableSorter(const void *a, const void *b)
   return ret;
 }
 
+static int __cdecl Tcp6TableSorter(const void *a, const void *b)
+{
+    const MIB_TCP6ROW_OWNER_PID *rowA = a, *rowB = b;
+    int ret = memcmp(rowA->ucLocalAddr, rowB->ucLocalAddr, sizeof(rowA->ucLocalAddr));
+
+    if (ret == 0)
+        ret = (int)rowA->dwLocalScopeId - (int)rowB->dwLocalScopeId;
+    if (ret == 0)
+        ret = (int)rowA->dwLocalPort - (int)rowB->dwLocalPort;
+    if (ret == 0)
+        ret = memcmp(rowA->ucRemoteAddr, rowB->ucRemoteAddr, sizeof(rowA->ucRemoteAddr));
+    if (ret == 0)
+        ret = (int)rowA->dwRemoteScopeId - (int)rowB->dwRemoteScopeId;
+    if (ret == 0)
+        ret = (int)rowA->dwRemotePort - (int)rowB->dwRemotePort;
+    return ret;
+}
+
+/* The IPv6 TCP table (AF_INET6): the owner-pid classes, while the stack has IPv6 on. With IPv6 off it is not
+ * there, as before (ERROR_INVALID_PARAMETER); the other classes are not implemented for IPv6 */
+static DWORD GetExtendedTcp6Table(PVOID pTcpTable, PDWORD pdwSize, BOOL bOrder, TCP_TABLE_CLASS TableClass)
+{
+    PMIB_TCP6TABLE_OWNER_PID Ours, Theirs = pTcpTable;
+    IPV6_STATE State;
+    DWORD i, Count, Size;
+
+    if (!Ipv6GetState(&State))
+    {
+        UNIMPLEMENTED;
+        return ERROR_INVALID_PARAMETER;
+    }
+    Ipv6FreeState(&State);
+
+    if (TableClass != TCP_TABLE_OWNER_PID_ALL && TableClass != TCP_TABLE_OWNER_PID_LISTENER &&
+        TableClass != TCP_TABLE_OWNER_PID_CONNECTIONS)
+    {
+        UNIMPLEMENTED;
+        return ERROR_INVALID_PARAMETER;
+    }
+
+    Ours = getTcp6Table();
+    if (!Ours)
+        return ERROR_NOT_ENOUGH_MEMORY;
+
+    /* Keep the rows of the class, in place */
+    for (i = 0, Count = 0; i < Ours->dwNumEntries; i++)
+    {
+        BOOL Listener = (Ours->table[i].dwState == MIB_TCP_STATE_LISTEN);
+
+        if (TableClass == TCP_TABLE_OWNER_PID_ALL ||
+            (TableClass == TCP_TABLE_OWNER_PID_LISTENER && Listener) ||
+            (TableClass == TCP_TABLE_OWNER_PID_CONNECTIONS && !Listener))
+        {
+            Ours->table[Count++] = Ours->table[i];
+        }
+    }
+    Ours->dwNumEntries = Count;
+
+    Size = FIELD_OFFSET(MIB_TCP6TABLE_OWNER_PID, table) + Count * sizeof(MIB_TCP6ROW_OWNER_PID);
+    if (Size > *pdwSize || !Theirs)
+    {
+        *pdwSize = Size;
+        HeapFree(GetProcessHeap(), 0, Ours);
+        return ERROR_INSUFFICIENT_BUFFER;
+    }
+
+    memcpy(Theirs, Ours, Size);
+    if (bOrder)
+        qsort(Theirs->table, Theirs->dwNumEntries, sizeof(MIB_TCP6ROW_OWNER_PID), Tcp6TableSorter);
+    HeapFree(GetProcessHeap(), 0, Ours);
+    return NO_ERROR;
+}
+
 /******************************************************************
  *    GetExtendedTcpTable (IPHLPAPI.@)
  *
@@ -942,6 +1015,9 @@ DWORD WINAPI GetExtendedTcpTable(PVOID pTcpTable, PDWORD pdwSize, BOOL bOrder, U
     {
         return ERROR_INVALID_PARAMETER;
     }
+
+    if (ulAf == AF_INET6)
+        return GetExtendedTcp6Table(pTcpTable, pdwSize, bOrder, TableClass);
 
     if (ulAf != AF_INET)
     {
@@ -1357,6 +1433,36 @@ DWORD WINAPI GetExtendedUdpTable(PVOID pUdpTable, PDWORD pdwSize, BOOL bOrder, U
     if (!pdwSize)
     {
         return ERROR_INVALID_PARAMETER;
+    }
+
+    if (ulAf == AF_INET6)
+    {
+        IPV6_STATE State;
+
+        /* The stack has no IPv6 UDP sockets (it takes IPv6 addresses for TCP only): while it has IPv6 on the
+         * IPv6 UDP table is there, and empty. Off, the answer it was */
+        if (!Ipv6GetState(&State))
+        {
+            UNIMPLEMENTED;
+            return ERROR_INVALID_PARAMETER;
+        }
+        Ipv6FreeState(&State);
+
+        switch (TableClass)
+        {
+            case UDP_TABLE_BASIC: size = FIELD_OFFSET(MIB_UDP6TABLE, table); break;
+            case UDP_TABLE_OWNER_PID: size = FIELD_OFFSET(MIB_UDP6TABLE_OWNER_PID, table); break;
+            case UDP_TABLE_OWNER_MODULE: size = FIELD_OFFSET(MIB_UDP6TABLE_OWNER_MODULE, table); break;
+            default: return ERROR_INVALID_PARAMETER;
+        }
+        if (size > *pdwSize || !pUdpTable)
+        {
+            *pdwSize = size;
+            return ERROR_INSUFFICIENT_BUFFER;
+        }
+        ZeroMemory(pUdpTable, size);
+        *pdwSize = size;
+        return NO_ERROR;
     }
 
     if (ulAf != AF_INET)

@@ -260,6 +260,86 @@ TDI_STATUS InfoTdiQueryGetConnectionTcpTable(PADDRESS_FILE AddrFile,
     return Status;
 }
 
+/* The address, scope id and port (network order) of a TA_IP6_ADDRESS, or of a TA_IP_ADDRESS as ::ffff:a.b.c.d;
+   Ta was built by this driver (TCPBuildTransportAddress), Length bytes of it valid */
+static VOID Tcp6RowAddress(PTRANSPORT_ADDRESS Ta, ULONG Length, PUCHAR Address, PULONG ScopeId, PULONG Port)
+{
+    RtlZeroMemory(Address, 16);
+    *ScopeId = 0;
+    *Port = 0;
+
+    if (Length >= sizeof(TA_IP6_ADDRESS) && Ta->Address[0].AddressType == TDI_ADDRESS_TYPE_IP6)
+    {
+        PTDI_ADDRESS_IP6 Ip6 = (PTDI_ADDRESS_IP6)Ta->Address[0].Address;
+        USHORT PortN;
+
+        RtlCopyMemory(Address, Ip6->sin6_addr, 16);
+        RtlCopyMemory(ScopeId, &Ip6->sin6_scope_id, sizeof(*ScopeId));
+        RtlCopyMemory(&PortN, &Ip6->sin6_port, sizeof(PortN));
+        *Port = PortN;
+    }
+    else if (Length >= sizeof(TA_IP_ADDRESS) && Ta->Address[0].AddressType == TDI_ADDRESS_TYPE_IP)
+    {
+        PTDI_ADDRESS_IP Ip = (PTDI_ADDRESS_IP)Ta->Address[0].Address;
+
+        Address[10] = 0xFF;
+        Address[11] = 0xFF;
+        RtlCopyMemory(&Address[12], &Ip->in_addr, sizeof(ULONG));
+        *Port = Ip->sin_port;
+    }
+}
+
+/* The row of an IPv6 TCP socket (IP_TCP6_ROW_ENTRY_ID): its listener, or its connection. An IPv4 socket has
+ * none (refused, so that the caller skips it, as a closing socket is skipped) */
+TDI_STATUS InfoTdiQueryGetConnectionTcp6Row(PADDRESS_FILE AddrFile,
+                                            PNDIS_BUFFER Buffer,
+                                            PUINT BufferSize)
+{
+    TCP6_ROW_OWNER_PID Row;
+    TA_IP6_ADDRESS EndPoint;
+    NTSTATUS Status = TDI_INVALID_REQUEST;
+
+    if (AddrFile->Family != TDI_ADDRESS_TYPE_IP6)
+        return TDI_INVALID_REQUEST;
+
+    RtlZeroMemory(&Row, sizeof(Row));
+    Row.OwningPid = HandleToUlong(AddrFile->ProcessId);
+
+    if (AddrFile->Listener != NULL)
+    {
+        Status = TCPAddrFileTransportAddress(AddrFile, (PTRANSPORT_ADDRESS)&EndPoint, sizeof(EndPoint));
+        if (NT_SUCCESS(Status))
+        {
+            Tcp6RowAddress((PTRANSPORT_ADDRESS)&EndPoint, sizeof(EndPoint), Row.LocalAddr, &Row.LocalScopeId,
+                           &Row.LocalPort);
+            Row.State = MIB_TCP_STATE_LISTEN;
+        }
+    }
+    else if (AddrFile->Connection != NULL &&
+             AddrFile->Connection->SocketContext != NULL)
+    {
+        Status = TCPGetSockAddress(AddrFile->Connection, (PTRANSPORT_ADDRESS)&EndPoint, sizeof(EndPoint), FALSE);
+        if (NT_SUCCESS(Status))
+        {
+            Tcp6RowAddress((PTRANSPORT_ADDRESS)&EndPoint, sizeof(EndPoint), Row.LocalAddr, &Row.LocalScopeId,
+                           &Row.LocalPort);
+            Status = TCPGetSockAddress(AddrFile->Connection, (PTRANSPORT_ADDRESS)&EndPoint, sizeof(EndPoint), TRUE);
+            if (NT_SUCCESS(Status))
+            {
+                Tcp6RowAddress((PTRANSPORT_ADDRESS)&EndPoint, sizeof(EndPoint), Row.RemoteAddr, &Row.RemoteScopeId,
+                               &Row.RemotePort);
+                /* Fails if the connection was closed meanwhile; the row is skipped then */
+                Status = TCPGetSocketStatus(AddrFile->Connection, &Row.State);
+            }
+        }
+    }
+
+    if (!NT_SUCCESS(Status))
+        return TDI_INVALID_REQUEST;
+
+    return InfoCopyOut((PCHAR)&Row, sizeof(Row), Buffer, BufferSize);
+}
+
 TDI_STATUS InfoTdiQueryGetConnectionUdpTable(PADDRESS_FILE AddrFile,
 				    PNDIS_BUFFER Buffer,
 				    PUINT BufferSize,
