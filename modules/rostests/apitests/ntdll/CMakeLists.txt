@@ -220,9 +220,11 @@ list(APPEND SOURCE
     RtlPlaceholderCompatibilityMode.c
     RtlHandle.c
     RtlHeapChurn.c
+    RtlHeapCompact.c
     RtlHeapDecommit.c
     RtlHeapExtendReuse.c
     RtlHeapFrontEnd.c
+    RtlHeapGrowFail.c
     RtlHeapValidate.c
     RtlHeapTailCheck.c
     RtlImageDirectoryEntryToData.c
