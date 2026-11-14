@@ -1911,6 +1911,55 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
             }
             return Status;
         }
+        if (a[1] == ObjectTypesInformation)
+        {
+            /* A ULONG count, then one OBJECT_TYPE_INFORMATION per type, each followed by
+             * its name and aligned to the pointer size (8 native, 4 guest). Narrow every
+             * string header as ObjectTypeInformation does and repack the entries. */
+            PUCHAR Native, Guest = P(2);
+            ULONG Needed = 0, GuestNeeded, Count, i, NativeOffset, GuestOffset;
+            ULONG TailOffset = FIELD_OFFSET(OBJECT_TYPE_INFORMATION, TotalNumberOfObjects);
+            ULONG TailSize = sizeof(OBJECT_TYPE_INFORMATION) - TailOffset;
+            ULONG GuestSize = sizeof(WOW64_STRING) + TailSize;
+            if (a[4]) PROBE(4);
+            Native = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, WOW64_MAX_INFO_BUFFER);
+            if (!Native) return STATUS_NO_MEMORY;
+            Status = NtQueryObject(H(0), a[1], Native, WOW64_MAX_INFO_BUFFER, &Needed);
+            if (!NT_SUCCESS(Status)) return Status;
+            Count = *(ULONG *)Native;
+            GuestNeeded = ALIGN_UP(sizeof(ULONG), ULONG);
+            NativeOffset = ALIGN_UP(sizeof(ULONG), ULONG_PTR);
+            for (i = 0; i < Count; ++i)
+            {
+                OBJECT_TYPE_INFORMATION *Entry = (OBJECT_TYPE_INFORMATION *)(Native + NativeOffset);
+                ULONG NameSize = ALIGN_UP(Entry->TypeName.MaximumLength, ULONG_PTR);
+                if (NativeOffset > Needed || sizeof(*Entry) + NameSize > Needed - NativeOffset)
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                GuestNeeded += GuestSize + ALIGN_UP(Entry->TypeName.MaximumLength, ULONG);
+                NativeOffset += sizeof(*Entry) + NameSize;
+            }
+            if (a[4]) U(4) = GuestNeeded;
+            if (a[3] < GuestNeeded) return STATUS_INFO_LENGTH_MISMATCH;
+            *(ULONG *)Guest = Count;
+            NativeOffset = ALIGN_UP(sizeof(ULONG), ULONG_PTR);
+            GuestOffset = ALIGN_UP(sizeof(ULONG), ULONG);
+            for (i = 0; i < Count; ++i)
+            {
+                OBJECT_TYPE_INFORMATION *Entry = (OBJECT_TYPE_INFORMATION *)(Native + NativeOffset);
+                WOW64_STRING *Name = (WOW64_STRING *)(Guest + GuestOffset);
+                ULONG Max = Entry->TypeName.MaximumLength;
+                RtlCopyMemory(Guest + GuestOffset + sizeof(WOW64_STRING),
+                              (PUCHAR)Entry + TailOffset, TailSize);
+                Name->Length = Entry->TypeName.Length;
+                Name->MaximumLength = Max;
+                Name->Buffer = Entry->TypeName.Buffer ? PtrToUlong(Guest + GuestOffset + GuestSize) : 0;
+                if (Entry->TypeName.Buffer)
+                    RtlCopyMemory(Guest + GuestOffset + GuestSize, Entry->TypeName.Buffer, Max);
+                GuestOffset += GuestSize + ALIGN_UP(Max, ULONG);
+                NativeOffset += sizeof(*Entry) + ALIGN_UP(Max, ULONG_PTR);
+            }
+            return STATUS_SUCCESS;
+        }
         UNSUPPORTED(CLASS, a[1]);
     case W64_NtSetInformationObject:
         if (a[1] == ObjectHandleFlagInformation)

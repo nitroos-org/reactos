@@ -14,6 +14,9 @@
  *  - ObjectTypeInformation.PoolType is 512 (the no-execute non-paged pool) for every type that lives in non-paged pool
  *    and 1 (paged pool) for the paged ones: Directory, SymbolicLink, Token, Section, Key, KeyedEvent (the table of all
  *    types, ObjectTypesInformation, agrees).
+ *  - GrantedAccess of ObjectBasicInformation (and of SystemHandleInformation) is the access the handle was opened with,
+ *    protected from close or not: Event 0x001f0003 both ways, never the internal 0x02000000 bit. A protected handle
+ *    shows HandleAttributes 1 (HANDLE_FLAG_PROTECT_FROM_CLOSE) in ObjectBasicInformation.
  */
 
 #include "precomp.h"
@@ -23,6 +26,9 @@
 typedef NTSTATUS (NTAPI *PFN_ALLOC)(PHANDLE, POBJECT_ATTRIBUTES, ULONG);
 typedef NTSTATUS (NTAPI *PFN_CREATEWAIT)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES);
 
+#define INTERNAL_PROTECT_CLOSE_BIT 0x02000000
+
+static ACCESS_MASK g_PlainAccess;
 static PFN_ALLOC pAlloc;
 static PFN_CREATEWAIT pCreateWait;
 
@@ -94,6 +100,77 @@ static void CheckFlags(HANDLE Handle, PCSTR Label, ULONG Inherit, ULONG Protect,
     Status = NtQueryObject(Handle, ObjectBasicInformation, &Basic, sizeof(Basic), &Length);
     ok(Status == STATUS_SUCCESS, "%s: basic 0x%lx\n", Label, Status);
     ok(Basic.Attributes == Attributes, "%s: Attributes 0x%lx, expected 0x%lx\n", Label, Basic.Attributes, Attributes);
+    ok(!(Basic.GrantedAccess & INTERNAL_PROTECT_CLOSE_BIT), "%s: GrantedAccess 0x%lx has the internal bit\n", Label,
+       Basic.GrantedAccess);
+    if (g_PlainAccess)
+        ok(Basic.GrantedAccess == g_PlainAccess, "%s: GrantedAccess 0x%lx, expected 0x%lx\n", Label,
+           Basic.GrantedAccess, g_PlainAccess);
+    else
+        g_PlainAccess = Basic.GrantedAccess;
+}
+
+/* Finds the handle of this process in SystemHandleInformation (class 16) and SystemExtendedHandleInformation (class 64) */
+static void CheckSystemHandle(HANDLE Handle, PCSTR Label)
+{
+    static const ULONG Classes[2] = { SystemHandleInformation, SystemExtendedHandleInformation };
+    ULONG c;
+
+    for (c = 0; c < 2; c++)
+    {
+        ULONG Size = 0x100000, Length = 0, i;
+        BYTE *Buffer;
+        NTSTATUS Status;
+        BOOLEAN Found = FALSE;
+
+        for (;;)
+        {
+            Buffer = HeapAlloc(GetProcessHeap(), 0, Size);
+            if (!Buffer) return;
+            Status = NtQuerySystemInformation(Classes[c], Buffer, Size, &Length);
+            if (Status != STATUS_INFO_LENGTH_MISMATCH) break;
+            HeapFree(GetProcessHeap(), 0, Buffer);
+            Size = Length + 0x10000;
+        }
+        if (!NT_SUCCESS(Status))
+        {
+            HeapFree(GetProcessHeap(), 0, Buffer);
+            continue;
+        }
+        if (Classes[c] == SystemHandleInformation)
+        {
+            PSYSTEM_HANDLE_INFORMATION Info = (PSYSTEM_HANDLE_INFORMATION)Buffer;
+
+            for (i = 0; i < Info->NumberOfHandles; i++)
+            {
+                PSYSTEM_HANDLE_TABLE_ENTRY_INFO Entry = &Info->Handles[i];
+
+                if (Entry->UniqueProcessId != (USHORT)(ULONG_PTR)NtCurrentTeb()->ClientId.UniqueProcess ||
+                    Entry->HandleValue != (USHORT)(ULONG_PTR)Handle)
+                    continue;
+                Found = TRUE;
+                ok(Entry->GrantedAccess == g_PlainAccess, "%s: class 16 GrantedAccess 0x%lx, expected 0x%lx\n", Label,
+                   Entry->GrantedAccess, g_PlainAccess);
+            }
+        }
+        else
+        {
+            PSYSTEM_HANDLE_INFORMATION_EX Info = (PSYSTEM_HANDLE_INFORMATION_EX)Buffer;
+
+            for (i = 0; i < Info->NumberOfHandles; i++)
+            {
+                PSYSTEM_HANDLE_TABLE_ENTRY_INFO_EX Entry = &Info->Handles[i];
+
+                if (Entry->UniqueProcessId != (ULONG_PTR)NtCurrentTeb()->ClientId.UniqueProcess ||
+                    Entry->HandleValue != (ULONG_PTR)Handle)
+                    continue;
+                Found = TRUE;
+                ok(Entry->GrantedAccess == g_PlainAccess, "%s: class 64 GrantedAccess 0x%lx, expected 0x%lx\n", Label,
+                   Entry->GrantedAccess, g_PlainAccess);
+            }
+        }
+        ok(Found, "%s: class %lu: handle %p not listed\n", Label, Classes[c], Handle);
+        HeapFree(GetProcessHeap(), 0, Buffer);
+    }
 }
 
 static void Test_Type(TYPE_INDEX Type)
@@ -109,6 +186,7 @@ static void Test_Type(TYPE_INDEX Type)
     sprintf(Label, "%ls plain", g_Types[Type].Name);
     Handle = Create(Type, FALSE);
     if (!Handle) return;
+    g_PlainAccess = 0;
 
     RtlZeroMemory(Buffer, sizeof(Buffer));
     Status = NtQueryObject(Handle, ObjectTypeInformation, Buffer, sizeof(Buffer), &Length);
@@ -133,6 +211,7 @@ static void Test_Type(TYPE_INDEX Type)
     ok(Status == STATUS_SUCCESS, "%ls: set Inherit+Protect 0x%lx\n", g_Types[Type].Name, Status);
     sprintf(Label, "%ls set Inherit+Protect", g_Types[Type].Name);
     CheckFlags(Handle, Label, 1, 1, OBJ_INHERIT | 1);
+    CheckSystemHandle(Handle, Label);
 
     Flags.Inherit = 0;
     Flags.ProtectFromClose = 0;
