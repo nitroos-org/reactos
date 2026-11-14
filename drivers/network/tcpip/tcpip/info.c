@@ -313,7 +313,7 @@ InfoTdiQueryGetTimeWaitTable(
 
 /* The IPv6 state of the stack (IP_IPV6_TABLE_ENTRY_ID): see TCPQueryIpv6Table. The caller's buffer is a
  * chain, so the answer is built in a pool buffer first */
-#define IPV6_TABLE_MAX_ANSWER 0x10000
+#define IPV6_TABLE_MAX_ANSWER 0x10000   /* if6.c asserts that the largest answer is below this */
 
 static
 TDI_STATUS
@@ -675,7 +675,10 @@ TDI_STATUS InfoTdiQueryInformationEx(
                      return TDI_INVALID_PARAMETER;
 
               case IP_IPV6_TABLE_ENTRY_ID:
-                 if (ID->toi_type != INFO_TYPE_PROVIDER)
+                 /* asked of CL_NL_ENTITY instance 0 (tcpioctl.h) */
+                 if (ID->toi_type != INFO_TYPE_PROVIDER ||
+                     ID->toi_entity.tei_entity != CL_NL_ENTITY ||
+                     ID->toi_entity.tei_instance != 0)
                      return TDI_INVALID_PARAMETER;
 
                  return InfoTdiQueryGetIpv6Table(Buffer, BufferSize);
