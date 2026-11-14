@@ -50,7 +50,12 @@ list(APPEND SOURCE
     tooltips.c
     trackbar.c
     treeview.c
-    updown.c)
+    updown.c
+    version.c)
+
+# commctrl.c (ISO-8859 text, which the editing tools do not take) still holds the old DllGetVersion, hardcoded to 5.82:
+# take its name away, version.c has the one of each image
+set_source_files_properties(commctrl.c PROPERTIES COMPILE_DEFINITIONS DllGetVersion=COMCTL32_DllGetVersion_old)
 
 # the v5 flavours of the controls that differ between comctl32 5.82 and 6.0, see comctl32.h
 list(APPEND PCH_SKIP_SOURCE
@@ -96,7 +101,33 @@ add_pch(comctl32 precomp.h "${PCH_SKIP_SOURCE}")
 add_cd_file(TARGET comctl32 DESTINATION reactos/system32 FOR all)
 
 add_cd_file(TARGET comctl32 DESTINATION reactos/winsxs/${WINARCH}_microsoft.windows.common-controls_6595b64144ccf1df_5.82.2600.2982_none_deadbeef FOR all)
-add_cd_file(TARGET comctl32 DESTINATION reactos/winsxs/${WINARCH}_microsoft.windows.common-controls_6595b64144ccf1df_6.0.2600.2982_none_deadbeef FOR all)
 add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/${WINARCH}_microsoft.windows.common-controls_6595b64144ccf1df_5.82.2600.2982_none_deadbeef.manifest DESTINATION reactos/winsxs/manifests FOR all)
 add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/${WINARCH}_microsoft.windows.common-controls_6595b64144ccf1df_6.0.2600.2982_none_deadbeef.manifest DESTINATION reactos/winsxs/manifests FOR all)
 set_wine_module_FIXME(comctl32) # CORE-5743: No ARRAY_SIZE macro
+
+# The v6 image: the same sources, reporting the version of the v6 assembly (6.16.10586, version.c and rsrc_v6.rc).
+# It is installed as comctl32.dll in the 6.0 side-by-side assembly, which a manifest with
+# Microsoft.Windows.Common-Controls 6.0.0.0 activates; the v5 image stays in system32 and the 5.82 assembly.
+add_library(comctl32_v6 MODULE
+    ${SOURCE}
+    ${PCH_SKIP_SOURCE}
+    rsrc_v6.rc
+    ${CMAKE_CURRENT_BINARY_DIR}/comctl32.def)
+
+target_compile_definitions(comctl32_v6 PRIVATE COMCTL32_V6_IMAGE)
+
+if(MSVC)
+    target_compile_options(comctl32_v6 PRIVATE /wd4146 /wd4267 /wd4477)
+endif()
+
+set_module_type(comctl32_v6 win32dll UNICODE)
+target_link_libraries(comctl32_v6 uuid wine ${PSEH_LIB} oldnames)
+add_delay_importlibs(comctl32_v6 winmm uxtheme)
+if(DLL_EXPORT_VERSION LESS 0x600)
+    add_importlibs(comctl32_v6 user32 gdi32 advapi32 usp10 imm32 msvcrt kernel32_vista kernel32 ntdll)
+else()
+    add_importlibs(comctl32_v6 user32 gdi32 advapi32 usp10 imm32 msvcrt kernel32 ntdll)
+endif()
+add_pch(comctl32_v6 precomp.h "${PCH_SKIP_SOURCE}")
+add_cd_file(TARGET comctl32_v6 DESTINATION reactos/winsxs/${WINARCH}_microsoft.windows.common-controls_6595b64144ccf1df_6.0.2600.2982_none_deadbeef NAME_ON_CD comctl32.dll FOR all)
+set_wine_module_FIXME(comctl32_v6)

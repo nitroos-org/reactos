@@ -445,3 +445,4 @@ set(baseaddress_prntvpt                        0x732b0000) # manually added
 set(baseaddress_windows.data.pdf               0x732f0000) # manually added
 set(baseaddress_pwrshsip                        0x732d0000)
 set(baseaddress_pwrshplugin                     0x732c0000)
+set(baseaddress_comctl32_v6                     0x72f00000)
