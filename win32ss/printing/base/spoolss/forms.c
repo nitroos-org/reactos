@@ -70,7 +70,7 @@ GetFormW(HANDLE hPrinter, PWSTR pFormName, DWORD Level, PBYTE pForm, DWORD cbBuf
         return FALSE;
     }
 
-    if ( cbBuf && pForm )
+    if ( cbBuf && !pForm )
     {
         SetLastError(ERROR_INVALID_USER_BUFFER);
         return FALSE;
