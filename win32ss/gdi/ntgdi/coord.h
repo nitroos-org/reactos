@@ -4,8 +4,41 @@
 #define MIN_COORD (INT_MIN / 16)
 #define MAX_COORD (INT_MAX / 16)
 
+#if !defined(_M_IX86)
 /*
- * Converts a FLOATOBJ to a LONG, truncating like FLOATOBJ_bConvertToLong, but a
+ * Converts a double to a LONG, rounding to the nearest integer (halves away
+ * from zero) like Windows and the i386 FLOATOBJ_bConvertToLong (EngMulDiv). A
+ * value outside the LONG range gives LONG_MIN or LONG_MAX; returns FALSE when
+ * it was saturated.
+ */
+static
+inline
+BOOLEAN
+INTERNAL_dToLongSat(DOUBLE d, PLONG pl)
+{
+    if (d != d)
+    {
+        /* NaN */
+        *pl = 0;
+        return FALSE;
+    }
+    if (d >= 2147483647.5)
+    {
+        *pl = LONG_MAX;
+        return FALSE;
+    }
+    if (d <= -2147483648.5)
+    {
+        *pl = LONG_MIN;
+        return FALSE;
+    }
+    *pl = (LONG)((d < 0) ? (d - 0.5) : (d + 0.5));
+    return TRUE;
+}
+#endif
+
+/*
+ * Converts a FLOATOBJ to a LONG, rounding to nearest like Windows, but a
  * value outside the LONG range gives LONG_MIN or LONG_MAX (never undefined
  * behaviour). Returns FALSE when the value had to be saturated.
  */
@@ -20,26 +53,7 @@ INTERNAL_FLOATOBJ_bToLongSat(FLOATOBJ *pf, PLONG pl)
     *pl = (((EFLOAT_S*)pf)->lMant < 0) ? LONG_MIN : LONG_MAX;
     return FALSE;
 #else
-    FLOAT f = *pf;
-
-    if (f >= 2147483648.0f)
-    {
-        *pl = LONG_MAX;
-        return FALSE;
-    }
-    if (f < -2147483648.0f)
-    {
-        *pl = LONG_MIN;
-        return FALSE;
-    }
-    if (f != f)
-    {
-        /* NaN */
-        *pl = 0;
-        return FALSE;
-    }
-    *pl = (LONG)f;
-    return TRUE;
+    return INTERNAL_dToLongSat(*pf, pl);
 #endif
 }
 
@@ -125,6 +139,7 @@ INTERNAL_APPLY_MATRIX(PMATRIX matrix, LPPOINT points, UINT count)
         }
     }
 
+#if defined(_M_IX86)
     while (count--)
     {
         FLOATOBJ x, y;
@@ -151,6 +166,22 @@ INTERNAL_APPLY_MATRIX(PMATRIX matrix, LPPOINT points, UINT count)
         if (!INTERNAL_FLOATOBJ_bToLongSat(&y, &points[count].y))
             bResult = FALSE;
     }
+#else
+    /* Accumulate in double: a FLOAT has 24 bits, so a result a hair below x.5 (7/3 * 1.5 * 59 = 206.49999) could land
+       on x.5 and round the other way than on i386, where the FLOATOBJ mantissa has 32 bits. */
+    while (count--)
+    {
+        DOUBLE x, y;
+
+        x = (DOUBLE)points[count].x * matrix->efM11 + (DOUBLE)points[count].y * matrix->efM21 + matrix->efDx;
+        y = (DOUBLE)points[count].y * matrix->efM22 + (DOUBLE)points[count].x * matrix->efM12 + matrix->efDy;
+
+        if (!INTERNAL_dToLongSat(x, &points[count].x))
+            bResult = FALSE;
+        if (!INTERNAL_dToLongSat(y, &points[count].y))
+            bResult = FALSE;
+    }
+#endif
     return bResult;
 }
 
