@@ -317,7 +317,7 @@ VOID DenyOpenAdapter(
     TcpipReleaseSpinLock(&Adapter->ReconfigureLock, OldIrql);
     for (;;) {
         TcpipAcquireSpinLock(&Adapter->ReconfigureLock, &OldIrql);
-        Queued = Adapter->ReconfigureQueued;
+        Queued = Adapter->ReconfigureQueued || Adapter->McastQueued;
         TcpipReleaseSpinLock(&Adapter->ReconfigureLock, OldIrql);
         if (!Queued)
             break;
@@ -633,7 +633,7 @@ static VOID LanReceivePacket(
             TI_DbgPrint(MID_TRACE,("Received IP Packet\n"));
             /* The receive worker hands TDI completions to other threads (see CompleteBucket) */
             TCPEnterReceiveWorker();
-            IPReceive(Adapter->Context, &IPPacket);
+            IPReceiveVersion(Adapter->Context, &IPPacket, PacketType == ETYPE_IPv6 ? 6 : 4);
             TCPLeaveReceiveWorker();
             break;
         case ETYPE_ARP:
@@ -1778,6 +1778,150 @@ VOID GetName( PUNICODE_STRING RegistryKey,
     AppendUnicodeString( OutName, &PartialRegistryKey, FALSE );
 }
 
+/*
+ * Multicast reception. BindAdapter's packet filter takes the adapter's own address, broadcast, and the
+ * multicast addresses of the adapter's multicast list, which is empty until something asks for one. Only
+ * IPv6 does (if6.c): the all-nodes group and the solicited-node group of each of its addresses (RFC 4861,
+ * RFC 2464 section 7), without which neighbour solicitations and router advertisements do not arrive.
+ * LanSetMulticast records the list, LanMulticastWorker sets it (OID_802_3_MULTICAST_LIST). An adapter whose
+ * list is too short for it, or that refuses it, takes all multicast frames instead
+ * (NDIS_PACKET_TYPE_ALL_MULTICAST); never all frames (promiscuous). Without IPv6 nothing asks, and the
+ * adapter's filter and list stay as BindAdapter set them.
+ */
+static
+VOID LanApplyMulticast(
+    PLAN_ADAPTER Adapter,
+    PUCHAR List,
+    UINT Count)
+{
+    NDIS_STATUS ListStatus = NDIS_STATUS_SUCCESS;
+    NDIS_STATUS FilterStatus = NDIS_STATUS_SUCCESS;
+    BOOLEAN AllMulticast;
+    UINT Current, Filter;
+    ULONG MaxList;
+
+    if (Adapter->McastMaxList == 0)
+    {
+        /* An adapter that does not say tries the list, and its answer decides */
+        if (NDISCall(Adapter, NdisRequestQueryInformation, OID_802_3_MAXIMUM_LIST_SIZE,
+                     &MaxList, sizeof(MaxList)) != NDIS_STATUS_SUCCESS || MaxList == 0)
+            MaxList = MAXULONG;
+        Adapter->McastMaxList = MaxList;
+    }
+
+    AllMulticast = (Count > LL_MULTICAST_MAX || Count > Adapter->McastMaxList);
+    if (!AllMulticast)
+    {
+        ListStatus = NDISCall(Adapter, NdisRequestSetInformation, OID_802_3_MULTICAST_LIST,
+                              List, Count * IEEE_802_ADDR_LENGTH);
+        AllMulticast = (ListStatus != NDIS_STATUS_SUCCESS);
+    }
+
+    /* The list first, then the filter: going back from all multicast to a list loses no frame of the list */
+    Current = Adapter->McastFilter ? Adapter->McastFilter : Adapter->PacketFilter;
+    Filter = Adapter->PacketFilter | (AllMulticast ? NDIS_PACKET_TYPE_ALL_MULTICAST : 0);
+    if (Filter != Current)
+    {
+        FilterStatus = NDISCall(Adapter, NdisRequestSetInformation, OID_GEN_CURRENT_PACKET_FILTER,
+                                &Filter, sizeof(Filter));
+        if (FilterStatus == NDIS_STATUS_SUCCESS)
+            Adapter->McastFilter = Filter;
+    }
+
+    DbgPrint("TCPIP: adapter %02x-%02x-%02x-%02x-%02x-%02x multicast list of %u (max %lu, 0x%lx), filter 0x%x (0x%lx)\n",
+             Adapter->HWAddress[0], Adapter->HWAddress[1], Adapter->HWAddress[2],
+             Adapter->HWAddress[3], Adapter->HWAddress[4], Adapter->HWAddress[5],
+             Count, Adapter->McastMaxList, ListStatus,
+             Adapter->McastFilter ? Adapter->McastFilter : Adapter->PacketFilter, FilterStatus);
+}
+
+static
+VOID LanMulticastWorker(
+    PVOID Context)
+{
+    PLAN_ADAPTER Adapter = Context;
+    UCHAR List[LL_MULTICAST_MAX * IEEE_802_ADDR_LENGTH];
+    UINT Count;
+    KIRQL OldIrql;
+
+    /* Apply the latest list until none came in meanwhile; LANUnregisterAdapter waits for this */
+    TcpipAcquireSpinLock(&Adapter->ReconfigureLock, &OldIrql);
+    while (Adapter->McastChanged && !Adapter->Unbinding)
+    {
+        Adapter->McastChanged = FALSE;
+        Count = Adapter->McastCount;
+        if (Count <= LL_MULTICAST_MAX)
+            RtlCopyMemory(List, Adapter->McastList, Count * IEEE_802_ADDR_LENGTH);
+        TcpipReleaseSpinLock(&Adapter->ReconfigureLock, OldIrql);
+
+        LanApplyMulticast(Adapter, List, Count);
+
+        TcpipAcquireSpinLock(&Adapter->ReconfigureLock, &OldIrql);
+    }
+    Adapter->McastQueued = FALSE;
+    TcpipReleaseSpinLock(&Adapter->ReconfigureLock, OldIrql);
+}
+
+/* With ReconfigureLock held: whether the caller is to queue the worker (it is marked queued then) */
+static
+BOOLEAN LanMulticastQueueLocked(
+    PLAN_ADAPTER Adapter)
+{
+    if (!Adapter->McastReady || !Adapter->McastChanged || Adapter->McastQueued || Adapter->Unbinding)
+        return FALSE;
+
+    Adapter->McastQueued = TRUE;
+    return TRUE;
+}
+
+static
+VOID LanMulticastQueue(
+    PLAN_ADAPTER Adapter)
+{
+    KIRQL OldIrql;
+
+    if (!ChewCreate(LanMulticastWorker, Adapter))
+    {
+        /* The list stays changed: the next request queues it again */
+        TcpipAcquireSpinLock(&Adapter->ReconfigureLock, &OldIrql);
+        Adapter->McastQueued = FALSE;
+        TcpipReleaseSpinLock(&Adapter->ReconfigureLock, OldIrql);
+    }
+}
+
+/* LL_SET_MULTICAST_ROUTINE of LAN interfaces (ip.h): at <= DISPATCH_LEVEL, with the lwIP core lock held */
+static
+VOID LanSetMulticast(
+    PVOID Context,
+    const UCHAR *Addresses,
+    UINT Count)
+{
+    PLAN_ADAPTER Adapter = Context;
+    UINT Stored = min(Count, LL_MULTICAST_MAX);
+    UINT Length = Stored * IEEE_802_ADDR_LENGTH;
+    BOOLEAN Queue;
+    KIRQL OldIrql;
+
+    /* More than fit here: all multicast (LanApplyMulticast) */
+    if (Count > LL_MULTICAST_MAX)
+        Count = LL_MULTICAST_MAX + 1;
+
+    TcpipAcquireSpinLock(&Adapter->ReconfigureLock, &OldIrql);
+    if (!Adapter->McastWanted || Count != Adapter->McastCount ||
+        RtlCompareMemory(Adapter->McastList, Addresses, Length) != Length)
+    {
+        RtlCopyMemory(Adapter->McastList, Addresses, Length);
+        Adapter->McastCount = (UCHAR)Count;
+        Adapter->McastWanted = TRUE;
+        Adapter->McastChanged = TRUE;
+    }
+    Queue = LanMulticastQueueLocked(Adapter);
+    TcpipReleaseSpinLock(&Adapter->ReconfigureLock, OldIrql);
+
+    if (Queue)
+        LanMulticastQueue(Adapter);
+}
+
 BOOLEAN BindAdapter(
     PLAN_ADAPTER Adapter,
     PNDIS_STRING RegistryPath)
@@ -1796,6 +1940,8 @@ BOOLEAN BindAdapter(
     ULONG Lookahead = LOOKAHEAD_SIZE;
     NTSTATUS Status;
     NDIS_MEDIA_STATE MediaState;
+    BOOLEAN Queue;
+    KIRQL OldIrql;
 
     TI_DbgPrint(DEBUG_DATALINK, ("Called.\n"));
 
@@ -1819,6 +1965,7 @@ BOOLEAN BindAdapter(
     BindInfo.AddressLength = Adapter->HWAddressLength;
     BindInfo.Transmit      = LANTransmit;
     BindInfo.Release       = LanReleaseAdapter;
+    BindInfo.SetMulticast  = LanSetMulticast;
 
     IF = IPCreateInterface(&BindInfo);
 
@@ -1888,6 +2035,14 @@ BOOLEAN BindAdapter(
            reconfiguration the media indication queued is done with it */
         return FALSE;
     }
+
+    /* A multicast list asked for meanwhile (IPv6 asks when the interface registers) goes on top of it */
+    TcpipAcquireSpinLock(&Adapter->ReconfigureLock, &OldIrql);
+    Adapter->McastReady = TRUE;
+    Queue = LanMulticastQueueLocked(Adapter);
+    TcpipReleaseSpinLock(&Adapter->ReconfigureLock, OldIrql);
+    if (Queue)
+        LanMulticastQueue(Adapter);
 
     return TRUE;
 }
@@ -2091,16 +2246,16 @@ NDIS_STATUS LANUnregisterAdapter(
     RemoveEntryList(&Adapter->ListEntry);
     TcpipReleaseSpinLock(&AdapterListLock, OldIrql);
 
-    /* No reconfiguration starts any more; the one that runs uses the binding and the
-       interface, so it ends first (its NDIS requests fail at once on an adapter that
-       NDIS is removing) */
+    /* No reconfiguration (nor multicast list) starts any more; the one that runs uses the
+       binding and the interface, so it ends first (its NDIS requests fail at once on an
+       adapter that NDIS is removing) */
     Delay.QuadPart = -100000;
     TcpipAcquireSpinLock(&Adapter->ReconfigureLock, &OldIrql);
     Adapter->Unbinding = TRUE;
     TcpipReleaseSpinLock(&Adapter->ReconfigureLock, OldIrql);
     for (;;) {
         TcpipAcquireSpinLock(&Adapter->ReconfigureLock, &OldIrql);
-        Queued = Adapter->ReconfigureQueued;
+        Queued = Adapter->ReconfigureQueued || Adapter->McastQueued;
         TcpipReleaseSpinLock(&Adapter->ReconfigureLock, OldIrql);
         if (!Queued)
             break;

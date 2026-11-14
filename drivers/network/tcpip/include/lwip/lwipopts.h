@@ -48,6 +48,9 @@
 #define LWIP_IPV6                       1
 /* No MLD yet: its 100 ms timer would wake the tcpip thread of an idle machine for a protocol nobody uses */
 #define LWIP_IPV6_MLD                   0
+/* Interface events: with IPv6 on, address changes set the adapter's multicast list (if6.c). Nothing listens
+ * with it off */
+#define LWIP_NETIF_EXT_STATUS_CALLBACK  1
 /* Reassembly keeps its bookkeeping (a pointer and two offsets) in place of each fragment's 8-byte fragment
  * header; with 64-bit pointers it does not fit there, so it borrows room from the header before it instead
  * (ip6_frag.c asserts this once a second from ip6_reass_tmr otherwise) */

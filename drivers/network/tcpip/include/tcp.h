@@ -243,6 +243,15 @@ TCPReceive6(PIP_INTERFACE IF, PIP_PACKET IPPacket);
 /* ip/transport/tcp/selftest6.c: runs with Tcpip\Parameters\Ipv6SelfTest set */
 VOID
 TCPStartIpv6SelfTest(VOID);
+
+/* ICMPv6 messages from adapters, counted by if6.c for the self-test */
+#define TCP6_RX_NS_MULTICAST  0   /* neighbour solicitations to a multicast (solicited-node) address */
+#define TCP6_RX_NS_UNICAST    1
+#define TCP6_RX_RA_MULTICAST  2   /* router advertisements to a multicast (all-nodes) address */
+#define TCP6_RX_RA_UNICAST    3
+#define TCP6_RX_ECHO_REQUEST  4
+#define TCP6_RX_KINDS         5
+extern volatile LONG TCP6ReceivedIcmp[TCP6_RX_KINDS];
 #endif
 
 VOID

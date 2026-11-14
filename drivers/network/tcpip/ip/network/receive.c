@@ -805,6 +805,21 @@ VOID IPReceive( PIP_INTERFACE IF, PIP_PACKET IPPacket )
  *     IPPacket = Pointer to IP packet
  */
 {
+    IPReceiveVersion(IF, IPPacket, 0);
+}
+
+VOID IPReceiveVersion( PIP_INTERFACE IF, PIP_PACKET IPPacket, UINT FrameVersion )
+/*
+ * FUNCTION: Receives an IP datagram (or fragment)
+ * ARGUMENTS:
+ *     IF           = Interface
+ *     IPPacket     = Pointer to IP packet
+ *     FrameVersion = IP version the frame's ethertype says (4 or 6), 0: not from a frame
+ * NOTES:
+ *     A datagram whose header says another version than its ethertype is dropped: what the
+ *     adapter labelled is what the rest of the stack (and the firewall) sees
+ */
+{
     UCHAR FirstByte;
     UINT Version, BytesCopied;
 
@@ -822,6 +837,13 @@ VOID IPReceive( PIP_INTERFACE IF, PIP_PACKET IPPacket )
 
     /* Check that IP header has a supported version */
     Version = (FirstByte >> 4);
+
+    if (FrameVersion != 0 && Version != FrameVersion)
+    {
+        TI_DbgPrint(MIN_TRACE, ("Datagram of version %u in a frame of version %u discarded.\n", Version, FrameVersion));
+        IPPacket->Free(IPPacket);
+        return;
+    }
 
     switch (Version) {
         case 4:

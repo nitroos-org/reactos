@@ -209,8 +209,7 @@ MiniportInitialize(
         goto Cleanup;
     }
 
-    RtlCopyMemory(Adapter->MulticastList[0].MacAddress, Adapter->PermanentMacAddress, IEEE_802_ADDR_LENGTH);
-
+    /* The station address, and no multicast address yet */
     NICUpdateMulticastList(Adapter);
 
     /* Update link state and speed */

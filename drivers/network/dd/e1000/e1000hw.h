@@ -20,7 +20,10 @@
 #define MAX_EEPROM_READ_ATTEMPTS    10000
 
 
-#define MAXIMUM_MULTICAST_ADDRESSES 16
+/* Receive address registers (RAL/RAH pairs): entry 0 is the station address, the others take the
+   multicast list (exact matches; the multicast table array, a hash, stays empty) */
+#define E1000_NUM_RECEIVE_ADDRESSES 16
+#define MAXIMUM_MULTICAST_ADDRESSES (E1000_NUM_RECEIVE_ADDRESSES - 1)
 
 
 /* Ethernet frame header */
@@ -143,6 +146,8 @@ C_ASSERT(sizeof(E1000_TRANSMIT_DESCRIPTOR) == 16);
 #define E1000_REG_TADV              0x382C      /* Transmit Absolute Delay Timer, R/W */
 
 
+#define E1000_REG_MTA               0x5200      /* Multicast Table Array (128 registers), R/W */
+#define E1000_NUM_MTA_REGISTERS     128
 #define E1000_REG_RAL               0x5400      /* Receive Address Low, R/W */
 #define E1000_REG_RAH               0x5404      /* Receive Address High, R/W */
 

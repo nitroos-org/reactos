@@ -373,8 +373,10 @@ MiniportSetInformation (
             }
 
             NdisMoveMemory(adapter->MulticastList, InformationBuffer, InformationBufferLength);
+            adapter->MulticastListSize = InformationBufferLength / IEEE_802_ADDR_LENGTH;
 
-            // FIXME: Write to device
+            /* The multicast address registers follow the list */
+            status = NICApplyPacketFilter(adapter);
 
             break;
 
