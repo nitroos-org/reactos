@@ -39,6 +39,13 @@ FAST_SERVICE(NtEnumerateKey, NtEnumerateKey(H(0), A(1), A(2), P(3), A(4), P(5)))
 FAST_SERVICE(NtEnumerateValueKey, NtEnumerateValueKey(H(0), A(1), A(2), P(3), A(4), P(5)))
 FAST_SERVICE(NtDeleteKey, NtDeleteKey(H(0)))
 FAST_SERVICE(NtFlushKey, NtFlushKey(H(0)))
+/* Hive save and restore take only handles; the kernel checks SeBackupPrivilege / SeRestorePrivilege */
+FAST_SERVICE(NtSaveKey, NtSaveKey(H(0), H(1)))
+FAST_SERVICE(NtSaveKeyEx, NtSaveKeyEx(H(0), H(1), A(2)))
+FAST_SERVICE(NtSaveMergedKeys, NtSaveMergedKeys(H(0), H(1), H(2)))
+FAST_SERVICE(NtRestoreKey, NtRestoreKey(H(0), H(1), A(2)))
+FAST_SERVICE(NtLockRegistryKey, NtLockRegistryKey(H(0)))
+FAST_SERVICE(NtCompressKey, NtCompressKey(H(0)))
 /* NtSetInformationKey: KEY_WRITE_TIME_INFORMATION is a LARGE_INTEGER and every other class a ULONG: the same bytes in both ABIs */
 FAST_SERVICE(NtSetInformationKey, NtSetInformationKey(H(0), A(1), P(2), A(3)))
 FAST_SERVICE(NtAssignProcessToJobObject, NtAssignProcessToJobObject(H(0), H(1)))
