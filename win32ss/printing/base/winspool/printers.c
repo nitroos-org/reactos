@@ -324,11 +324,80 @@ Cleanup:
     return ret;
 }
 
+/*
+ * The structures of the RPC interface for the levels with pDevMode and pSecurityDescriptor do not have the layout of the
+ * PRINTER_INFO_n of the caller (these members are 32 bits on the wire so that a 32-bit client and a 64-bit spooler agree);
+ * the DEVMODE and the security descriptor travel in their own containers. Build the RPC structure from the caller's.
+ */
+typedef union _RPC_PRINTER_INFO_COPY
+{
+    WINSPOOL_PRINTER_INFO_2 Info2;
+    WINSPOOL_PRINTER_INFO_3 Info3;
+    WINSPOOL_PRINTER_INFO_8 Info8;
+    WINSPOOL_PRINTER_INFO_9 Info9;
+}
+RPC_PRINTER_INFO_COPY;
+
+static void
+BuildRpcPrinterContainer(WINSPOOL_PRINTER_CONTAINER* pContainer, RPC_PRINTER_INFO_COPY* pCopy, DWORD Level, PBYTE pPrinter)
+{
+    pContainer->Level = Level;
+    pContainer->PrinterInfo.pPrinterInfo1 = (WINSPOOL_PRINTER_INFO_1*)pPrinter;
+
+    if (!pPrinter)
+        return;
+
+    ZeroMemory(pCopy, sizeof(*pCopy));
+
+    switch (Level)
+    {
+        case 2:
+        {
+            PPRINTER_INFO_2W pi2w = (PPRINTER_INFO_2W)pPrinter;
+
+            pCopy->Info2.pServerName = pi2w->pServerName;
+            pCopy->Info2.pPrinterName = pi2w->pPrinterName;
+            pCopy->Info2.pShareName = pi2w->pShareName;
+            pCopy->Info2.pPortName = pi2w->pPortName;
+            pCopy->Info2.pDriverName = pi2w->pDriverName;
+            pCopy->Info2.pComment = pi2w->pComment;
+            pCopy->Info2.pLocation = pi2w->pLocation;
+            pCopy->Info2.pSepFile = pi2w->pSepFile;
+            pCopy->Info2.pPrintProcessor = pi2w->pPrintProcessor;
+            pCopy->Info2.pDatatype = pi2w->pDatatype;
+            pCopy->Info2.pParameters = pi2w->pParameters;
+            pCopy->Info2.Attributes = pi2w->Attributes;
+            pCopy->Info2.Priority = pi2w->Priority;
+            pCopy->Info2.DefaultPriority = pi2w->DefaultPriority;
+            pCopy->Info2.StartTime = pi2w->StartTime;
+            pCopy->Info2.UntilTime = pi2w->UntilTime;
+            pCopy->Info2.Status = pi2w->Status;
+            pCopy->Info2.cJobs = pi2w->cJobs;
+            pCopy->Info2.AveragePPM = pi2w->AveragePPM;
+            pContainer->PrinterInfo.pPrinterInfo2 = &pCopy->Info2;
+            break;
+        }
+
+        case 3:
+            pContainer->PrinterInfo.pPrinterInfo3 = &pCopy->Info3;
+            break;
+
+        case 8:
+            pContainer->PrinterInfo.pPrinterInfo8 = &pCopy->Info8;
+            break;
+
+        case 9:
+            pContainer->PrinterInfo.pPrinterInfo9 = &pCopy->Info9;
+            break;
+    }
+}
+
 HANDLE WINAPI
 AddPrinterW(PWSTR pName, DWORD Level, PBYTE pPrinter)
 {
     DWORD dwErrorCode;
     WINSPOOL_PRINTER_CONTAINER PrinterContainer;
+    RPC_PRINTER_INFO_COPY InfoCopy;
     WINSPOOL_DEVMODE_CONTAINER DevModeContainer;
     WINSPOOL_SECURITY_CONTAINER SecurityContainer;
     SECURITY_DESCRIPTOR *sd = NULL;
@@ -381,8 +450,7 @@ AddPrinterW(PWSTR pName, DWORD Level, PBYTE pPrinter)
         }
     }
 
-    PrinterContainer.PrinterInfo.pPrinterInfo1 = (WINSPOOL_PRINTER_INFO_1*)pPrinter;
-    PrinterContainer.Level = Level;
+    BuildRpcPrinterContainer(&PrinterContainer, &InfoCopy, Level, pPrinter);
 
     // Do the RPC call
     RpcTryExcept
@@ -3427,6 +3495,7 @@ SetPrinterW(HANDLE hPrinter, DWORD Level, PBYTE pPrinter, DWORD Command)
 {
     DWORD dwErrorCode;
     WINSPOOL_PRINTER_CONTAINER PrinterContainer;
+    RPC_PRINTER_INFO_COPY InfoCopy;
     WINSPOOL_DEVMODE_CONTAINER DevModeContainer;
     WINSPOOL_SECURITY_CONTAINER SecurityContainer;
     SECURITY_DESCRIPTOR *sd = NULL;
@@ -3550,8 +3619,7 @@ SetPrinterW(HANDLE hPrinter, DWORD Level, PBYTE pPrinter, DWORD Command)
             return FALSE;
     }
 
-    PrinterContainer.PrinterInfo.pPrinterInfo1 = (WINSPOOL_PRINTER_INFO_1*)pPrinter;
-    PrinterContainer.Level = Level;
+    BuildRpcPrinterContainer(&PrinterContainer, &InfoCopy, Level, pPrinter);
 
     // Do the RPC call
     RpcTryExcept
