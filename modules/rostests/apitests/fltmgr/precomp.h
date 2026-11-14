@@ -41,6 +41,8 @@ typedef struct _SAMPLE
     ULONG LastFiltering;
     ULONG LastCtxAlloc;
     ULONG LastCtxCleaned;
+    ULONG LastPortConnects;
+    ULONG LastPortDisconnects;
 
 } SAMPLE, *PSAMPLE;
 

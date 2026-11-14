@@ -198,6 +198,8 @@ UnloadSample(PSAMPLE Sample, BOOL ExpectUnload)
     Sample->LastFiltering = SampleLastRun(Sample, L"LastRunWorkers");
     Sample->LastCtxAlloc = SampleLastRun(Sample, L"LastRunCtxAlloc");
     Sample->LastCtxCleaned = SampleLastRun(Sample, L"LastRunCtxCleaned");
+    Sample->LastPortConnects = SampleLastRun(Sample, L"LastRunPortConnects");
+    Sample->LastPortDisconnects = SampleLastRun(Sample, L"LastRunPortDisconnects");
 
     Manager = OpenSCManagerW(NULL, NULL, SC_MANAGER_ALL_ACCESS);
     if (Manager)

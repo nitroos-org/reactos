@@ -891,6 +891,9 @@ FilterUnload(_In_ FLT_FILTER_UNLOAD_FLAGS Flags)
     ReportRun(L"LastRunWorkers", PendingWorkers);
     ReportRun(L"LastRunCtxAlloc", Stats.Contexts[FLTSAMPLE_CTX_ALLOCATED]);
     ReportRun(L"LastRunCtxCleaned", Stats.Contexts[FLTSAMPLE_CTX_CLEANED]);
+    /* Every connection the filter accepted has had its DisconnectNotify by the end of FltUnregisterFilter */
+    ReportRun(L"LastRunPortConnects", Stats.PortConnects);
+    ReportRun(L"LastRunPortDisconnects", Stats.PortDisconnects);
 
     IoDeleteSymbolicLink(&SymLinkName);
     if (ControlDevice)
