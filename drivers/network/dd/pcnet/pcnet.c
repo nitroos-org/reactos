@@ -1244,17 +1244,119 @@ MiEthernetCrc(UCHAR *Address)
   UINT Counter, Length;
   ULONG Value = ~0;
 
+  /* Each byte least significant bit first, as the bits are sent: the reflected polynomial */
   for (Length = 0; Length < 6; Length++)
     {
       Value ^= *Address++;
       for (Counter = 0; Counter < 8; Counter++)
         {
-          Value >>= 1;
-          Value ^= (Value & 1) * 0xedb88320;
+          if (Value & 1)
+            Value = (Value >> 1) ^ 0xedb88320;
+          else
+            Value >>= 1;
         }
     }
 
   return Value;
+}
+
+static BOOLEAN
+NTAPI
+MiSyncReloadInitializationBlock(
+    IN PVOID SynchronizeContext)
+/*
+ * FUNCTION: Stop the chip and initialize it again from the initialization block
+ * ARGUMENTS:
+ *     SynchronizeContext: Adapter context
+ * NOTES:
+ *     - INIT starts both descriptor rings again at their first descriptor: the driver's ring
+ *       positions start there as well, every receive descriptor goes back to the chip, and
+ *       frames not yet taken from the rings are dropped
+ */
+{
+  PADAPTER Adapter = (PADAPTER)SynchronizeContext;
+  USHORT Data;
+  ULONG i;
+
+  NdisRawWritePortUshort(Adapter->PortOffset + RAP, CSR0);
+  NdisRawWritePortUshort(Adapter->PortOffset + RDP, CSR0_STOP);
+
+  for (i = 0; i < Adapter->BufferCount; i++)
+    {
+      PRECEIVE_DESCRIPTOR ReceiveDescriptor = Adapter->ReceiveDescriptorRingVirt + i;
+      PTRANSMIT_DESCRIPTOR TransmitDescriptor = Adapter->TransmitDescriptorRingVirt + i;
+
+      RtlZeroMemory(ReceiveDescriptor, sizeof(RECEIVE_DESCRIPTOR));
+      ReceiveDescriptor->RBADR = Adapter->ReceiveBufferPtrPhys.QuadPart + i * BUFFER_SIZE;
+      ReceiveDescriptor->BCNT = 0xf000 | -BUFFER_SIZE;
+      ReceiveDescriptor->FLAGS = RD_OWN;
+
+      TransmitDescriptor->FLAGS = TD1_STP | TD1_ENP;
+    }
+  Adapter->CurrentReceiveDescriptorIndex = 0;
+  Adapter->CurrentTransmitStartIndex = 0;
+  Adapter->CurrentTransmitEndIndex = 0;
+
+  /* stop resets some of the feature bits MiInitChip set */
+  NdisRawWritePortUshort(Adapter->PortOffset + RAP, CSR4);
+  NdisRawReadPortUshort(Adapter->PortOffset + RDP, &Data);
+  Data |= CSR4_APAD_XMT | CSR4_TXSTRTM | CSR4_DMAPLUS;
+  NdisRawWritePortUshort(Adapter->PortOffset + RDP, Data);
+
+  NdisRawWritePortUshort(Adapter->PortOffset + RAP, CSR1);
+  NdisRawWritePortUshort(Adapter->PortOffset + RDP, (USHORT)(Adapter->InitializationBlockPhys.LowPart & 0xffff));
+  NdisRawWritePortUshort(Adapter->PortOffset + RAP, CSR2);
+  NdisRawWritePortUshort(Adapter->PortOffset + RDP, (USHORT)(Adapter->InitializationBlockPhys.LowPart >> 16) & 0xffff);
+
+  NdisRawWritePortUshort(Adapter->PortOffset + RAP, CSR0);
+  NdisRawWritePortUshort(Adapter->PortOffset + RDP, CSR0_STRT|CSR0_INIT|CSR0_IENA);
+
+  return TRUE;
+}
+
+VOID
+NTAPI
+MiApplyLogicalAddressFilter(
+    PADAPTER Adapter)
+/*
+ * FUNCTION: Set the chip's logical address filter (the multicast frames it takes) from the packet
+ *           filter and the multicast list
+ * ARGUMENTS:
+ *     Adapter: pointer to the miniport's adapter struct
+ * NOTES:
+ *     - Called with the adapter lock held
+ *     - The filter is a hash: bit (CRC-32 of the address >> 26). All bits for all multicast, the
+ *       bits of the multicast list's group addresses for multicast, none otherwise
+ *     - The chip reads the filter from the initialization block only when it initializes: a changed
+ *       filter initializes it again
+ */
+{
+  UCHAR Ladr[8];
+  UINT Index;
+
+  NdisZeroMemory(Ladr, sizeof(Ladr));
+  if (Adapter->CurrentPacketFilter & (NDIS_PACKET_TYPE_ALL_MULTICAST | NDIS_PACKET_TYPE_PROMISCUOUS))
+    {
+      NdisFillMemory(Ladr, sizeof(Ladr), 0xff);
+    }
+  else if (Adapter->CurrentPacketFilter & NDIS_PACKET_TYPE_MULTICAST)
+    {
+      for (Index = 0; Index < Adapter->MulticastListSize; Index++)
+        {
+          ULONG CrcIndex;
+
+          if (!(Adapter->MulticastList[Index][0] & 0x01))
+            continue;
+          CrcIndex = MiEthernetCrc(Adapter->MulticastList[Index]) >> 26;
+          Ladr[CrcIndex >> 3] |= (UCHAR)(1 << (CrcIndex & 7));
+        }
+    }
+
+  if (RtlCompareMemory(Ladr, Adapter->InitializationBlockVirt->LADR, sizeof(Ladr)) == sizeof(Ladr))
+    return;
+
+  NdisMoveMemory(Adapter->InitializationBlockVirt->LADR, Ladr, sizeof(Ladr));
+  NdisMSynchronizeWithInterrupt(&Adapter->InterruptObject, MiSyncReloadInitializationBlock, Adapter);
 }
 
 NDIS_STATUS
@@ -1264,18 +1366,13 @@ MiSetMulticast(
     UCHAR *Addresses,
     UINT AddressCount)
 {
-  UINT Index;
-  ULONG CrcIndex;
+  if (AddressCount > MAX_MULTICAST_ADDRESSES)
+    return NDIS_STATUS_MULTICAST_FULL;
 
-  NdisZeroMemory(Adapter->InitializationBlockVirt->LADR, 8);
-  for (Index = 0; Index < AddressCount; Index++)
-    {
-      CrcIndex = MiEthernetCrc(Addresses) >> 26;
-      Adapter->InitializationBlockVirt->LADR[CrcIndex >> 3] |= 1 << (CrcIndex & 15);
-      Addresses += 6;
-    }
+  NdisMoveMemory(Adapter->MulticastList, Addresses, AddressCount * 6);
+  Adapter->MulticastListSize = AddressCount;
 
-  /* FIXME: The specification mentions we need to reload the init block here. */
+  MiApplyLogicalAddressFilter(Adapter);
 
   return NDIS_STATUS_SUCCESS;
 }
