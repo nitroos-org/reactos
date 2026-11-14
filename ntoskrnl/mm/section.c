@@ -1218,8 +1218,8 @@ FreeSegmentPage(PMM_SECTION_SEGMENT Segment, PLARGE_INTEGER Offset)
     /* This must be either a valid entry or nothing */
     ASSERT(!IS_SWAP_FROM_SSE(Entry));
 
-    /* There should be no reference anymore */
-    ASSERT(SHARE_COUNT_FROM_SSE(Entry) == 0);
+    /* There should be no reference anymore (a count that saturated never went back down) */
+    ASSERT((SHARE_COUNT_FROM_SSE(Entry) == 0) || (SHARE_COUNT_FROM_SSE(Entry) == MAX_SHARE_COUNT));
 
     Page = PFN_FROM_SSE(Entry);
     /* If there is a page, this must be because it's still dirty */
@@ -1319,15 +1319,11 @@ MmSharePageEntrySectionSegment(PMM_SECTION_SEGMENT Segment,
         DPRINT1("Entry == 0 for MmSharePageEntrySectionSegment\n");
         KeBugCheck(MEMORY_MANAGEMENT);
     }
-    if (SHARE_COUNT_FROM_SSE(Entry) == MAX_SHARE_COUNT)
-    {
-        DPRINT1("Maximum share count reached\n");
-        KeBugCheck(MEMORY_MANAGEMENT);
-    }
     if (IS_SWAP_FROM_SSE(Entry))
     {
         KeBugCheck(MEMORY_MANAGEMENT);
     }
+    /* BUMPREF_SSE leaves a count that reached MAX_SHARE_COUNT as it is */
     MmSetPageEntrySectionSegment(Segment, Offset, BUMPREF_SSE(Entry));
 }
 
@@ -6841,7 +6837,7 @@ MiFlushDirtyCluster(
     for (i = 0, Offset = *Start; i < Count; i++, Offset.QuadPart += PAGE_SIZE)
     {
         Entry = MmGetPageEntrySectionSegment(Segment, &Offset);
-        Entry = MAKE_SSE(PAGE_FROM_SSE(Entry), SHARE_COUNT_FROM_SSE(Entry) + 1);
+        Entry = MAKE_SSE(PAGE_FROM_SSE(Entry), SSE_COUNT_UP(Entry));
         MmSetPageEntrySectionSegment(Segment, &Offset, WRITE_SSE(Entry));
     }
 
@@ -6861,7 +6857,7 @@ MiFlushDirtyCluster(
         Entry = MmGetPageEntrySectionSegment(Segment, &Offset);
         ASSERT(PFN_FROM_SSE(Entry) == Pages[i]);
         DirtyAgain = !NT_SUCCESS(Status) || IS_DIRTY_SSE(Entry);
-        Entry = MAKE_SSE(Pages[i] << PAGE_SHIFT, SHARE_COUNT_FROM_SSE(Entry) - 1);
+        Entry = MAKE_SSE(Pages[i] << PAGE_SHIFT, SSE_COUNT_DOWN(Entry));
         if (DirtyAgain)
             Entry = DIRTY_SSE(Entry);
         MmSetPageEntrySectionSegment(Segment, &Offset, Entry);
@@ -7296,7 +7292,7 @@ MmCheckDirtySegmentEx(
                FlagOn(Segment->Image.Characteristics, IMAGE_SCN_MEM_SHARED));
 
         /* Insert the cleaned entry back. Mark it as write in progress, and clear the dirty bit. */
-        Entry = MAKE_SSE(PAGE_FROM_SSE(Entry), SHARE_COUNT_FROM_SSE(Entry) + 1);
+        Entry = MAKE_SSE(PAGE_FROM_SSE(Entry), SSE_COUNT_UP(Entry));
         Entry = WRITE_SSE(Entry);
         MmSetPageEntrySectionSegment(Segment, Offset, Entry);
 
@@ -7417,7 +7413,7 @@ MmCheckDirtySegmentEx(
         }
 
         /* Drop the reference we got, deleting the write altogether. */
-        Entry = MAKE_SSE(Page << PAGE_SHIFT, SHARE_COUNT_FROM_SSE(Entry) - 1);
+        Entry = MAKE_SSE(Page << PAGE_SHIFT, SSE_COUNT_DOWN(Entry));
         if (DirtyAgain)
         {
             Entry = DIRTY_SSE(Entry);

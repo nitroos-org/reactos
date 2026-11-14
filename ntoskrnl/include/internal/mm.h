@@ -2007,7 +2007,18 @@ MmFindRegion(
 
 /* section.c *****************************************************************/
 
+/*
+ * Section segment entry (SSE): bit 0 swap, bit 1 dirty, bit 2 write, then the page and the share count (the
+ * number of address spaces that map the page). A 32-bit entry keeps the count in bits 3..11 (at most 0x1FF)
+ * and the page in bits 12..31. A 64-bit entry keeps the page in bits 12..39 and the count in bits 40..63,
+ * so a page of a section (a page of ntdll.dll, say) can be mapped by up to 0xFFFFFF address spaces; with
+ * the 9 bit count the 512th process that mapped such a page bugchecked the system.
+ */
+#ifdef _WIN64
+#define PFN_FROM_SSE(E)          ((PFN_NUMBER)(((E) & 0xFFFFFFF000ULL) >> PAGE_SHIFT))
+#else
 #define PFN_FROM_SSE(E)          ((PFN_NUMBER)((E) >> PAGE_SHIFT))
+#endif
 #define IS_SWAP_FROM_SSE(E)      ((E) & 0x00000001)
 #define MM_IS_WAIT_PTE(E)        \
     (IS_SWAP_FROM_SSE(E) && SWAPENTRY_FROM_SSE(E) == MM_WAIT_ENTRY)
@@ -2024,11 +2035,25 @@ MmFindRegion(
 #else
 #define PAGE_FROM_SSE(E)         ((E) & 0xFFFFF000)
 #endif
+#ifdef _WIN64
+#define SSE_SHARE_SHIFT          40
+#define SHARE_COUNT_FROM_SSE(E)  ((ULONG_PTR)(E) >> SSE_SHARE_SHIFT)
+#define MAX_SHARE_COUNT          0xFFFFFF
+#else
+#define SSE_SHARE_SHIFT          3
 #define SHARE_COUNT_FROM_SSE(E)  (((E) & 0x00000FFC) >> 3)
 #define MAX_SHARE_COUNT          0x1FF
-#define MAKE_SSE(P, C)           ((ULONG_PTR)((P) | ((C) << 3)))
-#define BUMPREF_SSE(E)           (PAGE_FROM_SSE(E) | ((SHARE_COUNT_FROM_SSE(E) + 1) << 3) | ((E) & 0x7))
-#define DECREF_SSE(E)            (PAGE_FROM_SSE(E) | ((SHARE_COUNT_FROM_SSE(E) - 1) << 3) | ((E) & 0x7))
+#endif
+#define MAKE_SSE(P, C)           ((ULONG_PTR)((P) | ((ULONG_PTR)(C) << SSE_SHARE_SHIFT)))
+/*
+ * A count that reached MAX_SHARE_COUNT stays there (it is never an underestimate, so the page is not freed
+ * while a mapping may remain): only a 32-bit entry gets there, with 511 address spaces mapping one page,
+ * and the page then stays until the segment is deleted.
+ */
+#define SSE_COUNT_UP(E)          ((SHARE_COUNT_FROM_SSE(E) >= MAX_SHARE_COUNT) ? MAX_SHARE_COUNT : SHARE_COUNT_FROM_SSE(E) + 1)
+#define SSE_COUNT_DOWN(E)        ((SHARE_COUNT_FROM_SSE(E) >= MAX_SHARE_COUNT) ? MAX_SHARE_COUNT : SHARE_COUNT_FROM_SSE(E) - 1)
+#define BUMPREF_SSE(E)           (PAGE_FROM_SSE(E) | ((ULONG_PTR)SSE_COUNT_UP(E) << SSE_SHARE_SHIFT) | ((E) & 0x7))
+#define DECREF_SSE(E)            (PAGE_FROM_SSE(E) | ((ULONG_PTR)SSE_COUNT_DOWN(E) << SSE_SHARE_SHIFT) | ((E) & 0x7))
 
 VOID
 NTAPI
