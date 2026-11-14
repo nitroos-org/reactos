@@ -700,7 +700,8 @@ KdbpIsBreakPointOurs(
 
     if (ExceptionCode == STATUS_BREAKPOINT) /* Software interrupt */
     {
-        ULONG_PTR BpPc = KeGetContextPc(Context) - 1; /* Get EIP of INT3 instruction */
+        /* KiDispatchException has already moved the context PC back onto the INT3 */
+        ULONG_PTR BpPc = KeGetContextPc(Context);
         for (i = 0; i < KdbSwBreakPointCount; i++)
         {
             ASSERT((KdbSwBreakPoints[i]->Type == KdbBreakPointSoftware ||
@@ -1383,6 +1384,7 @@ KdbEnterDebuggerException(
     ULONG ExpNr;
     ULONGLONG ull;
     BOOLEAN Resume = FALSE;
+    BOOLEAN PcAtBreakPoint = FALSE;
     BOOLEAN EnterConditionMet = TRUE;
     ULONG OldEflags;
     KIRQL OldIrql;
@@ -1431,14 +1433,10 @@ KdbEnterDebuggerException(
                 KeBugCheck(0); // FIXME: Proper bugcode!
             }
 
-            /* Also since we are past the int3 now, decrement EIP in the
-               TrapFrame. This is only needed because KDBG insists on working
-               with the TrapFrame instead of with the Context, as it is supposed
-               to do. The context has already EIP point to the int3, since
-               KiDispatchException accounts for that. Whatever we do here with
-               the TrapFrame does not matter anyway, since KiDispatchException
-               will overwrite it with the values from the Context! */
-            KeSetContextPc(Context, KeGetContextPc(Context) - 1);
+            /* The context PC already points at the (now restored) instruction,
+               KiDispatchException moved it back onto the int3: leave it there
+               so that the original instruction runs when we resume. */
+            PcAtBreakPoint = TRUE;
         }
 
         if ((BreakPoint->Type == KdbBreakPointHardware) &&
@@ -1711,23 +1709,27 @@ EnterKdbg:;
     }
 
 continue_execution:
-    /* Clear debug status */
-    if (ExceptionCode == STATUS_BREAKPOINT) /* FIXME: Why clear DR6 on INT3? */
+    /* Set the RF flag so we don't trigger the same (hardware execute) breakpoint again. */
+    if (Resume)
     {
-        /* Set the RF flag so we don't trigger the same breakpoint again. */
-        if (Resume)
-        {
-            Context->EFlags |= EFLAGS_RF;
-        }
+        Context->EFlags |= EFLAGS_RF;
+    }
 
+    /* Clear debug status */
+    if (ExceptionCode == STATUS_BREAKPOINT || Resume) /* FIXME: Why clear DR6 on INT3? */
+    {
         /* Clear dr6 status flags. */
         Context->Dr6 &= ~0x0000e00f;
+    }
 
-        if (!(KdbEnteredOnSingleStep && KdbSingleStepOver))
-        {
-            /* Skip the current instruction */
-            KeSetContextPc(Context, KeGetContextPc(Context) + KD_BREAKPOINT_SIZE);
-        }
+    /*
+     * The context PC points at the INT3. Skip it only if it is not one of our
+     * breakpoints: for ours the original instruction has been restored and
+     * has to run.
+     */
+    if (ExceptionCode == STATUS_BREAKPOINT && !PcAtBreakPoint)
+    {
+        KeSetContextPc(Context, KeGetContextPc(Context) + KD_BREAKPOINT_SIZE);
     }
 
     return ContinueType;
