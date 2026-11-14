@@ -2818,12 +2818,17 @@ CmpEnumerateOpenSubKeys(
     PCM_KEY_CONTROL_BLOCK ParentKcb;
     ULONG ParentKeyCount;
     ULONG i, j;
-    ULONG SubKeys = 0;
+    ULONG SubKeys;
+    BOOLEAN RemovedEmpty;
 
     DPRINT("CmpEnumerateOpenSubKeys() called\n");
 
     /* Ensure the registry is locked exclusively for the calling thread */
     CMP_ASSERT_EXCLUSIVE_REGISTRY_LOCK();
+
+    /* A key whose last reference was released while the registry was not locked exclusively keeps
+     * it until a timer drops it (5 s later). Such a key is not open: drop those references now. */
+    CmpFlushDelayDerefKCBs();
 
     /* The root key is the only referenced key. There are no referenced sub keys. */
     if (RootKcb->RefCount == 1)
@@ -2831,6 +2836,10 @@ CmpEnumerateOpenSubKeys(
         DPRINT("Open sub keys: 0\n");
         return 0;
     }
+
+Rescan:
+    SubKeys = 0;
+    RemovedEmpty = FALSE;
 
     /* Enumerate all hash lists */
     for (i = 0; i < CmpHashTableSize; i++)
@@ -2904,6 +2913,7 @@ CmpEnumerateOpenSubKeys(
 
                         /* Remove the current cache entry */
                         CmpCleanUpKcbCacheWithLock(CachedKcb, TRUE);
+                        RemovedEmpty = TRUE;
 
                         /* Restart, because the hash list has changed */
                         Entry = CmpCacheTable[i].Entry;
@@ -2916,6 +2926,12 @@ CmpEnumerateOpenSubKeys(
             Entry = Entry->NextHash;
         }
     }
+
+    /* Removing a cached key without handles releases its reference on its parent. A parent that
+     * the scan counted before it reached that child (a different hash bucket) is no longer
+     * referenced then, only by its delayed close: count again until a scan removes nothing. */
+    if ((SubKeys > 0) && RemovedEmpty)
+        goto Rescan;
 
     if (SubKeys > 0)
         DPRINT1("Open sub keys: %u\n", SubKeys);
