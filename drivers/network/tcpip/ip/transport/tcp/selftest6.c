@@ -1380,6 +1380,92 @@ StTestMtu6(PIP_INTERFACE IF)
     StResult(After == 1280 && Before == Mtu, "IPv6 MTU lowered (as by a router advertisement) survives an interface refresh", Detail);
 }
 
+/* ---- Packet Too Big (RFC 8201 4): the path MTU of a destination goes down to what a router says, never up
+   and never below 1280 ---- */
+
+/* A Packet Too Big from Router to Us, advertising Mtu, quoting a SYN of our connection (Local:LocalPort to
+   Peer:PeerPort), with a valid checksum, as it arrives from the adapter */
+static struct pbuf *
+StPtb(const ip6_addr_t *Router, const ip6_addr_t *Us, const ip6_addr_t *Peer, u16_t LocalPort, u16_t PeerPort, ULONG Mtu)
+{
+    UCHAR Msg[8 + 40 + 20];
+    PUCHAR Inner = Msg + 8;
+    struct pbuf *p;
+    u16_t Sum;
+
+    RtlZeroMemory(Msg, sizeof(Msg));
+    Msg[0] = 2;     /* packet too big */
+    Msg[4] = (UCHAR)(Mtu >> 24); Msg[5] = (UCHAR)(Mtu >> 16); Msg[6] = (UCHAR)(Mtu >> 8); Msg[7] = (UCHAR)Mtu;
+    Inner[0] = 0x60; Inner[5] = 20; Inner[6] = 6; Inner[7] = 64;
+    RtlCopyMemory(Inner + 8, Us->addr, 16);
+    RtlCopyMemory(Inner + 24, Peer->addr, 16);
+    StTcpHeader(Inner + 40, LocalPort, PeerPort, 0x02);
+    p = StPacket(Router, Us, 58, 64, Msg, sizeof(Msg));
+    if (!p)
+        return NULL;
+    pbuf_remove_header(p, 40);
+    Sum = ip6_chksum_pseudo(p, IP6_NEXTH_ICMP6, sizeof(Msg), Router, Us);
+    pbuf_add_header(p, 40);
+    RtlCopyMemory((PUCHAR)p->payload + 40 + 2, &Sum, 2);
+    return p;
+}
+
+static VOID
+StTestPtb(PIP_INTERFACE IF, const ip_addr_t *LinkLocal)
+{
+    struct netif *netif = IF->TCPContext;
+    static const ULONG Steps[] = { 1400, 9000, 65535, 1000, 1400, 0 };
+    static const ULONG Want[]  = { 1400, 1400, 1400, 1280, 1280, 1280 };
+    struct tcp_pcb *Pcb;
+    ip_addr_t Remote;
+    ip6_addr_t Router, Us;
+    BOOLEAN Taken = FALSE;
+    u16_t Initial = 0, Now = 0, LocalPort = 0;
+    CHAR Detail[96];
+    ULONG i;
+
+    ip6_addr_copy(Us, *ip_2_ip6(LinkLocal));
+    ip6_addr_copy(Router, *ip_2_ip6(LinkLocal));
+    Router.addr[3] ^= 0x0A000000;       /* a neighbour with another link-local address: the sender of the messages */
+    ip_addr_copy_from_ip6(Remote, *ip_2_ip6(LinkLocal));
+    ip_2_ip6(&Remote)->addr[3] ^= 0x0B000000;   /* the destination of the connection (a peer that does not answer) */
+    ip6_addr_assign_zone(ip_2_ip6(&Remote), IP6_UNICAST, netif);
+
+    LOCK_TCPIP_CORE();
+    Pcb = tcp_new_ip_type(IPADDR_TYPE_V6);
+    if (Pcb && tcp_connect(Pcb, &Remote, 40695, StNopConnected) == ERR_OK)
+    {
+        Taken = TRUE;
+        LocalPort = Pcb->local_port;
+        Initial = nd6_get_destination_mtu(ip_2_ip6(&Remote), netif);
+    }
+    else if (Pcb)
+        tcp_abort(Pcb);
+    UNLOCK_TCPIP_CORE();
+    if (!Taken)
+    {
+        StResult(FALSE, "Packet Too Big: a connection to a silent peer", "connect failed");
+        return;
+    }
+
+    _snprintf(Detail, sizeof(Detail), "starts at %u (the link MTU %u)", Initial, netif->mtu6);
+    StResult(Initial == netif->mtu6 && Initial > 1280, "path MTU of a new destination is the link MTU", Detail);
+
+    for (i = 0; Steps[i]; i++)
+    {
+        StInject(IF, StPtb(&Router, &Us, ip_2_ip6(&Remote), LocalPort, 40695, Steps[i]), FALSE);
+        LOCK_TCPIP_CORE();
+        Now = nd6_get_destination_mtu(ip_2_ip6(&Remote), netif);
+        UNLOCK_TCPIP_CORE();
+        _snprintf(Detail, sizeof(Detail), "advertised %lu -> path MTU %u (want %lu)", Steps[i], Now, Want[i]);
+        StResult(Now == Want[i], "Packet Too Big lowers the path MTU, never raises it, never below 1280", Detail);
+    }
+
+    LOCK_TCPIP_CORE();
+    tcp_abort(Pcb);
+    UNLOCK_TCPIP_CORE();
+}
+
 /* ---- main ---- */
 
 static BOOLEAN
@@ -1483,6 +1569,7 @@ StThread(PVOID Context)
         StTestFirewall6(Eth, &LinkLocal, 40617);
         StTestFirewall6Own(&LinkLocal);
         StTestFirewall6End();
+        StTestPtb(Eth, &LinkLocal);
     }
     StTestReceiveBounds(Eth);
     StTestMtu6(Eth);

@@ -338,7 +338,9 @@ typedef struct _NITROFW_DROPLOG
  * decide whether a listener is blocked, and does not resolve anything: it reports who accepts traffic, mpssvc
  * (which owns the rules, the profile settings and the notification setting) decides, once per program and
  * profile. Reported: TCP address files that have a listener (a listen was issued on them), and UDP address
- * files bound to an explicit port (a port the application chose, not the ephemeral one an unbound send gets).
+ * files bound to an explicit port (a port the application chose, not the ephemeral one an unbound send gets). IPv4 and
+ * IPv6 address files are reported; a dual stack IPv6 socket on :: also takes the IPv4 connections the IPv4 default-deny
+ * policy judges, and carries NITROFW_LISTENER_DUAL.
  * Endpoints whose handles are all closed are not reported. At most NITROFW_MAX_LISTENERS records are returned
  * (Total says how many there were). Nothing is recorded or kept: the cost is one walk of the address file list
  * per call, and nothing at all while nobody calls.
@@ -346,6 +348,9 @@ typedef struct _NITROFW_DROPLOG
 #define NITROFW_MAX_LISTENERS  256
 
 #define NITROFW_LISTENER_TCP   0x01   /* NITROFW_LISTENER.Flags: a TCP listener (else UDP) */
+#define NITROFW_LISTENER_V6    0x02   /* an IPv6 socket (Addr is 0: the IPv6 address is not reported) */
+#define NITROFW_LISTENER_DUAL  0x04   /* an IPv6 socket on :: that takes IPv4 as well (IPV6_V6ONLY off) */
+#define NITROFW_LISTENER_LOOP  0x08   /* bound to the IPv6 loopback ::1 only: never filtered */
 
 typedef struct _NITROFW_LISTENER
 {
@@ -353,7 +358,7 @@ typedef struct _NITROFW_LISTENER
     USHORT Port;                /* host order */
     UCHAR Protocol;             /* 6 TCP, 17 UDP */
     UCHAR Flags;                /* NITROFW_LISTENER_* */
-    ULONG Addr;                 /* local IPv4, host order, 0 = any */
+    ULONG Addr;                 /* local IPv4, host order, 0 = any (always 0 for an IPv6 socket: see NITROFW_LISTENER_V6) */
     ULONG Reserved;
     LONGLONG CreationTime;      /* of the address file (KeQuerySystemTime): with ProcessId and Port it identifies the endpoint */
 } NITROFW_LISTENER, *PNITROFW_LISTENER;     /* 24 bytes */
