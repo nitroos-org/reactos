@@ -10,6 +10,8 @@ list(APPEND SOURCE
     bitmap_render_target.c
 	bitmap.c
 	brush.c
+	combine.c
+	combine_core.c
 	command_list.c
 	dc_render_target.c
 	device.c

@@ -3825,10 +3825,10 @@ static HRESULT STDMETHODCALLTYPE d2d_path_geometry_CombineWithGeometry(ID2D1Path
         ID2D1Geometry *geometry, D2D1_COMBINE_MODE combine_mode, const D2D1_MATRIX_3X2_F *transform,
         float tolerance, ID2D1SimplifiedGeometrySink *sink)
 {
-    FIXME("iface %p, geometry %p, combine_mode %#x, transform %p, tolerance %.8e, sink %p stub!\n",
+    TRACE("iface %p, geometry %p, combine_mode %#x, transform %p, tolerance %.8e, sink %p.\n",
             iface, geometry, combine_mode, transform, tolerance, sink);
 
-    return E_NOTIMPL;
+    return d2d_geometry_combine((ID2D1Geometry *)iface, geometry, combine_mode, transform, tolerance, sink);
 }
 
 static HRESULT STDMETHODCALLTYPE d2d_path_geometry_Outline(ID2D1PathGeometry1 *iface,
@@ -4101,10 +4101,10 @@ static HRESULT STDMETHODCALLTYPE d2d_ellipse_geometry_CombineWithGeometry(ID2D1E
         ID2D1Geometry *geometry, D2D1_COMBINE_MODE combine_mode, const D2D1_MATRIX_3X2_F *transform,
         float tolerance, ID2D1SimplifiedGeometrySink *sink)
 {
-    FIXME("iface %p, geometry %p, combine_mode %#x, transform %p, tolerance %.8e, sink %p stub!\n",
+    TRACE("iface %p, geometry %p, combine_mode %#x, transform %p, tolerance %.8e, sink %p.\n",
             iface, geometry, combine_mode, transform, tolerance, sink);
 
-    return E_NOTIMPL;
+    return d2d_geometry_combine((ID2D1Geometry *)iface, geometry, combine_mode, transform, tolerance, sink);
 }
 
 static HRESULT STDMETHODCALLTYPE d2d_ellipse_geometry_Outline(ID2D1EllipseGeometry *iface,
@@ -4507,10 +4507,10 @@ static HRESULT STDMETHODCALLTYPE d2d_rectangle_geometry_CombineWithGeometry(ID2D
         ID2D1Geometry *geometry, D2D1_COMBINE_MODE combine_mode, const D2D1_MATRIX_3X2_F *transform,
         float tolerance, ID2D1SimplifiedGeometrySink *sink)
 {
-    FIXME("iface %p, geometry %p, combine_mode %#x, transform %p, tolerance %.8e, sink %p stub!\n",
+    TRACE("iface %p, geometry %p, combine_mode %#x, transform %p, tolerance %.8e, sink %p.\n",
             iface, geometry, combine_mode, transform, tolerance, sink);
 
-    return E_NOTIMPL;
+    return d2d_geometry_combine((ID2D1Geometry *)iface, geometry, combine_mode, transform, tolerance, sink);
 }
 
 static HRESULT STDMETHODCALLTYPE d2d_rectangle_geometry_Outline(ID2D1RectangleGeometry *iface,
@@ -4791,10 +4791,10 @@ static HRESULT STDMETHODCALLTYPE d2d_rounded_rectangle_geometry_CombineWithGeome
         ID2D1RoundedRectangleGeometry *iface, ID2D1Geometry *geometry, D2D1_COMBINE_MODE combine_mode,
         const D2D1_MATRIX_3X2_F *transform, float tolerance, ID2D1SimplifiedGeometrySink *sink)
 {
-    FIXME("iface %p, geometry %p, combine_mode %#x, transform %p, tolerance %.8e, sink %p stub!\n",
+    TRACE("iface %p, geometry %p, combine_mode %#x, transform %p, tolerance %.8e, sink %p.\n",
             iface, geometry, combine_mode, transform, tolerance, sink);
 
-    return E_NOTIMPL;
+    return d2d_geometry_combine((ID2D1Geometry *)iface, geometry, combine_mode, transform, tolerance, sink);
 }
 
 static HRESULT STDMETHODCALLTYPE d2d_rounded_rectangle_geometry_Outline(ID2D1RoundedRectangleGeometry *iface,
@@ -5130,10 +5130,10 @@ static HRESULT STDMETHODCALLTYPE d2d_transformed_geometry_CombineWithGeometry(ID
         ID2D1Geometry *geometry, D2D1_COMBINE_MODE combine_mode, const D2D1_MATRIX_3X2_F *transform,
         float tolerance, ID2D1SimplifiedGeometrySink *sink)
 {
-    FIXME("iface %p, geometry %p, combine_mode %#x, transform %p, tolerance %.8e, sink %p stub!\n",
+    TRACE("iface %p, geometry %p, combine_mode %#x, transform %p, tolerance %.8e, sink %p.\n",
             iface, geometry, combine_mode, transform, tolerance, sink);
 
-    return E_NOTIMPL;
+    return d2d_geometry_combine((ID2D1Geometry *)iface, geometry, combine_mode, transform, tolerance, sink);
 }
 
 static HRESULT STDMETHODCALLTYPE d2d_transformed_geometry_Outline(ID2D1TransformedGeometry *iface,
@@ -5389,10 +5389,10 @@ static HRESULT STDMETHODCALLTYPE d2d_geometry_group_CombineWithGeometry(ID2D1Geo
         ID2D1Geometry *geometry, D2D1_COMBINE_MODE combine_mode, const D2D1_MATRIX_3X2_F *transform,
         float tolerance, ID2D1SimplifiedGeometrySink *sink)
 {
-    FIXME("iface %p, geometry %p, combine_mode %#x, transform %p, tolerance %.8e, sink %p stub!\n",
+    TRACE("iface %p, geometry %p, combine_mode %#x, transform %p, tolerance %.8e, sink %p.\n",
             iface, geometry, combine_mode, transform, tolerance, sink);
 
-    return E_NOTIMPL;
+    return d2d_geometry_combine((ID2D1Geometry *)iface, geometry, combine_mode, transform, tolerance, sink);
 }
 
 static HRESULT STDMETHODCALLTYPE d2d_geometry_group_Outline(ID2D1GeometryGroup *iface,
@@ -5515,6 +5515,28 @@ HRESULT d2d_geometry_group_init(struct d2d_geometry *geometry, ID2D1Factory *fac
     geometry->u.group.fill_mode = fill_mode;
 
     return S_OK;
+}
+
+enum d2d_geometry_kind d2d_geometry_get_kind(ID2D1Geometry *iface)
+{
+    const ID2D1GeometryVtbl *vtbl;
+
+    if (!iface)
+        return D2D_GEOMETRY_KIND_UNKNOWN;
+    vtbl = iface->lpVtbl;
+    if (vtbl == (const ID2D1GeometryVtbl *)&d2d_ellipse_geometry_vtbl)
+        return D2D_GEOMETRY_KIND_ELLIPSE;
+    if (vtbl == (const ID2D1GeometryVtbl *)&d2d_path_geometry_vtbl)
+        return D2D_GEOMETRY_KIND_PATH;
+    if (vtbl == (const ID2D1GeometryVtbl *)&d2d_rectangle_geometry_vtbl)
+        return D2D_GEOMETRY_KIND_RECTANGLE;
+    if (vtbl == (const ID2D1GeometryVtbl *)&d2d_rounded_rectangle_geometry_vtbl)
+        return D2D_GEOMETRY_KIND_ROUNDED_RECTANGLE;
+    if (vtbl == (const ID2D1GeometryVtbl *)&d2d_transformed_geometry_vtbl)
+        return D2D_GEOMETRY_KIND_TRANSFORMED;
+    if (vtbl == (const ID2D1GeometryVtbl *)&d2d_geometry_group_vtbl)
+        return D2D_GEOMETRY_KIND_GROUP;
+    return D2D_GEOMETRY_KIND_UNKNOWN;
 }
 
 struct d2d_geometry *unsafe_impl_from_ID2D1Geometry(ID2D1Geometry *iface)
