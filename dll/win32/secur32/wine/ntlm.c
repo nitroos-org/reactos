@@ -817,7 +817,7 @@ static SECURITY_STATUS client_local_call(PNegoHelper h, const BYTE *challenge, U
             SecureZeroMemory(resp, resp_len);
             LsaFreeReturnBuffer(resp);
         }
-        return SEC_E_NO_CREDENTIALS;
+        return status == STATUS_ROS_NTLM_LOCAL_EXPIRED ? SEC_E_CONTEXT_EXPIRED : SEC_E_NO_CREDENTIALS;
     }
     memcpy(key, resp->SessionKey, 16);
     SecureZeroMemory(resp, resp_len);
@@ -893,12 +893,18 @@ static SECURITY_STATUS client_authenticate(PNegoHelper h, const BYTE *challenge,
     if (!cred->has_identity && (flags & NTLMSSP_NEGOTIATE_LOCAL_CALL))
     {
         ULONG64 context = get32(challenge + 32) | ((ULONG64)get32(challenge + 36) << 32);
+        SECURITY_STATUS local;
 
-        if (context && client_local_call(h, challenge, challenge_len,
-                                         (flags & (h->offered_flags | NTLMSSP_NEGOTIATE_TARGET_INFO) &
-                                          ~NTLMSSP_REQUEST_TARGET) | NTLMSSP_NEGOTIATE_LOCAL_CALL,
-                                         context, m) == SEC_E_OK)
+
+        local = context ? client_local_call(h, challenge, challenge_len,
+                                            (flags & (h->offered_flags | NTLMSSP_NEGOTIATE_TARGET_INFO) &
+                                             ~NTLMSSP_REQUEST_TARGET) | NTLMSSP_NEGOTIATE_LOCAL_CALL,
+                                            context, m) : SEC_E_NO_CREDENTIALS;
+        if (local == SEC_E_OK)
             return SEC_E_OK;
+        /* the server waited too long for this client: as Windows, the exchange is over (no fallback) */
+        if (local == SEC_E_CONTEXT_EXPIRED)
+            return local;
         m->len = 0;
     }
 
@@ -1255,7 +1261,7 @@ static SECURITY_STATUS server_local_call(PNegoHelper h, ULONG flags)
             SecureZeroMemory(resp, resp_len);
             LsaFreeReturnBuffer(resp);
         }
-        return SEC_E_LOGON_DENIED;
+        return status == STATUS_ROS_NTLM_LOCAL_EXPIRED ? SEC_E_CONTEXT_EXPIRED : SEC_E_LOGON_DENIED;
     }
     h->token = (HANDLE)(ULONG_PTR)resp->TokenHandle;
     memcpy(key, resp->SessionKey, 16);

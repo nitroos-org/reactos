@@ -858,8 +858,15 @@ static void test_expired_tokens(void)
 {
     HANDLE lsass = open_lsass();
     DWORD before = 0, bound = 0, after = 0;
-    ULONG64 context;
+    ULONG64 context, first = 0;
     ULONG i, n = 0;
+    /* exchanges that wait: x1 for the client's answer to the CHALLENGE, x2 for the server's accept of the AUTHENTICATE */
+    exchange x1, x2;
+    BOOL have_x1 = FALSE, have_x2 = FALSE;
+    BYTE buf[2048];
+    ULONG len;
+    HANDLE token = NULL;
+    SECURITY_STATUS st;
 
     if (!lsass || !GetProcessHandleCount(lsass, &before))
     {
@@ -867,10 +874,27 @@ static void test_expired_tokens(void)
         if (lsass) CloseHandle(lsass);
         return;
     }
+    if (exchange_init(&x1, NULL))
+    {
+        have_x1 = first_round(&x1, ISC_REQ_CONNECTION | ISC_REQ_INTEGRITY, ASC_REQ_CONNECTION | ASC_REQ_INTEGRITY);
+        ok(have_x1 && !!(rd32(x1.chal + 20) & LOCAL_CALL), "no local call in the CHALLENGE of the first exchange\n");
+    }
+    if (exchange_init(&x2, NULL))
+    {
+        have_x2 = first_round(&x2, ISC_REQ_CONNECTION | ISC_REQ_INTEGRITY, ASC_REQ_CONNECTION | ASC_REQ_INTEGRITY);
+        if (have_x2)
+        {
+            x2.auth_len = sizeof(x2.auth);
+            st = client_step(&x2, ISC_REQ_CONNECTION | ISC_REQ_INTEGRITY, x2.chal, x2.chal_len, x2.auth, &x2.auth_len);
+            ok_eq_hex(st, SEC_E_OK);
+        }
+    }
     for (i = 0; i < 200; i++)
     {
         if (lsa_issue(helper_challenge, &context))
             break;
+        if (!first)
+            first = context;
         if (!lsa_bind(context, helper_challenge, NULL))
             n++;
     }
@@ -883,6 +907,26 @@ static void test_expired_tokens(void)
     ok(after <= before + 10, "the LSA still holds %lu handles, %lu before the contexts\n", after, before);
     trace("LSA handles: %lu before, %lu with %lu bound contexts, %lu after expiry\n", before, bound, n, after);
     CloseHandle(lsass);
+
+    /* a context that expired is answered as expired (an id nobody issued stays unknown) */
+    ok_ntstatus(lsa_bind(first, helper_challenge, NULL), STATUS_ROS_NTLM_LOCAL_EXPIRED);
+    ok_ntstatus(lsa_accept(first, &token, NULL), STATUS_ROS_NTLM_LOCAL_EXPIRED);
+    ok_ntstatus(lsa_bind(0x0123456789abcdefULL, helper_challenge, NULL), STATUS_NOT_FOUND);
+    if (have_x1)
+    {
+        /* as Windows: the client's answer to a CHALLENGE that expired is refused, not made another way */
+        len = sizeof(buf);
+        st = client_step(&x1, ISC_REQ_CONNECTION | ISC_REQ_INTEGRITY, x1.chal, x1.chal_len, buf, &len);
+        ok_eq_hex(st, SEC_E_CONTEXT_EXPIRED);
+        exchange_free(&x1);
+    }
+    if (have_x2)
+    {
+        len = sizeof(buf);
+        st = server_step(&x2, ASC_REQ_CONNECTION | ASC_REQ_INTEGRITY, x2.auth, x2.auth_len, buf, &len);
+        ok_eq_hex(st, SEC_E_CONTEXT_EXPIRED);
+        exchange_free(&x2);
+    }
 }
 
 /* The issuer of a context is a process, not a process id: a process that is given the id of an issuer that exited

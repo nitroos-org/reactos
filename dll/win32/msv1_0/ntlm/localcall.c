@@ -37,6 +37,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(ntlm);
 #define LOCAL_CALL_MAX_PROCESS  1024
 #define LOCAL_CALL_MAX_USER     2048    /* all processes of one user together: others always find room */
 #define LOCAL_CALL_SWEEP_PERIOD 30000   /* ms: a bound token leaves the LSA at most this long after its expiry */
+#define LOCAL_CALL_EXPIRED_MAX  256     /* ids of expired contexts that are remembered (the newest ones) */
 
 /* A process that issued contexts: the LSA's own handle of it keeps its process id from being reused */
 typedef struct _LOCAL_CALL_ISSUER
@@ -64,6 +65,9 @@ static LIST_ENTRY LocalCallList;
 static LIST_ENTRY LocalCallIssuers;
 static RTL_CRITICAL_SECTION LocalCallLock;
 static ULONG LocalCallCount;
+/* the ids of the contexts that expired, so that a late message is answered "expired" (as Windows does), not "unknown" */
+static ULONG64 LocalCallExpired[LOCAL_CALL_EXPIRED_MAX];
+static ULONG LocalCallExpiredNext;
 static HANDLE LocalCallTimer;
 static BOOLEAN LocalCallInitialized = FALSE;
 
@@ -181,9 +185,30 @@ SweepLocalCalls(
         PLOCAL_CALL_CONTEXT Context = CONTAINING_RECORD(Entry, LOCAL_CALL_CONTEXT, ListEntry);
 
         Entry = Entry->Flink;
-        if (Context->Expires.QuadPart <= Now->QuadPart || Context->Issuer->Exited)
+        if (Context->Expires.QuadPart <= Now->QuadPart)
+        {
+            LocalCallExpired[LocalCallExpiredNext++ % LOCAL_CALL_EXPIRED_MAX] = Context->ContextId;
+            FreeLocalCall(Context);
+        }
+        else if (Context->Issuer->Exited)
             FreeLocalCall(Context);
     }
+}
+
+/* The answer for a context that is not in the table: it expired, or it is none we know (call with the lock held) */
+static
+NTSTATUS
+LocalCallMissing(
+    _In_ ULONG64 ContextId)
+{
+    ULONG i;
+
+    for (i = 0; i < LOCAL_CALL_EXPIRED_MAX; i++)
+    {
+        if (LocalCallExpired[i] == ContextId)
+            return STATUS_ROS_NTLM_LOCAL_EXPIRED;
+    }
+    return STATUS_NOT_FOUND;
 }
 
 /* The sweep without a message: a context a client bound holds a copy of its token (and so its logon session) */
@@ -521,9 +546,10 @@ MsvpLocalCallBind(
         RtlCompareMemory(Context->ServerChallenge, Request->ServerChallenge, sizeof(Context->ServerChallenge)) !=
             sizeof(Context->ServerChallenge))
     {
+        Status = (Context == NULL) ? LocalCallMissing(Request->ContextId) : STATUS_NOT_FOUND;
         RtlLeaveCriticalSection(&LocalCallLock);
         NtClose(Copy);
-        return STATUS_NOT_FOUND;
+        return Status;
     }
     Context->ClientToken = Copy;
     RtlCopyMemory(Reply.SessionKey, Context->SessionKey, sizeof(Reply.SessionKey));
@@ -607,8 +633,9 @@ MsvpLocalCallAccept(
     Context = FindOwnLocalCall(Request->ContextId, ProcessId, &Now);
     if (Context == NULL)
     {
+        Status = LocalCallMissing(Request->ContextId);
         RtlLeaveCriticalSection(&LocalCallLock);
-        return STATUS_NOT_FOUND;
+        return Status;
     }
     if (Context->ClientToken == NULL)
     {

@@ -49,6 +49,11 @@ typedef struct _MSV1_0_ROS_NTLMV2_RESPONSE
 #define MsV1_0RosNtlmLocalAccept    0x4d530004
 #define MsV1_0RosNtlmLocalDelete    0x4d530005
 
+/* The protocol status of Bind and Accept for a context that expired (a customer status: no system status says this).
+ * secur32 answers SEC_E_CONTEXT_EXPIRED for it, as Windows does; a context the package does not know is
+ * STATUS_NOT_FOUND. */
+#define STATUS_ROS_NTLM_LOCAL_EXPIRED ((NTSTATUS)0xE0000001)
+
 /* MsV1_0RosNtlmLocalIssue: the server asks for a context for its CHALLENGE */
 typedef struct _MSV1_0_ROS_NTLM_LOCAL_ISSUE
 {
