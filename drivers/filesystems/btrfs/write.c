@@ -3499,6 +3499,25 @@ NTSTATUS truncate_file(fcb* fcb, uint64_t end, PIRP Irp, LIST_ENTRY* rollback) {
     return STATUS_SUCCESS;
 }
 
+/* Allocates the disk space for growing a regular file to END bytes before the size changes (SetEndOfFile).
+ * The file's data is otherwise allocated only when the pages are written (copy on write), long after the call that
+ * grew the file, so a full volume made a write through a mapped view fail in the paging write: the writer was never
+ * told, and the data read back as zeros. With the space allocated here as a preallocated extent the call fails with
+ * STATUS_DISK_FULL where the writer sees it, and the later paging write overwrites the extent in place (a file
+ * that is not unique, i.e. shared with a snapshot, still needs new space then).
+ * Not done for streams, sparse and compressed files (they have no extent to write into, or write new extents anyway),
+ * the paging file, and sizes the file keeps inline. */
+NTSTATUS reserve_file_space(fcb* fcb, file_ref* fileref, uint64_t end, PIRP Irp, LIST_ENTRY* rollback) {
+    if (fcb->ads || fcb->type != BTRFS_FT_REG_FILE || fcb->atts & FILE_ATTRIBUTE_SPARSE_FILE || write_fcb_compressed(fcb) ||
+        fcb->Header.Flags2 & FSRTL_FLAG2_IS_PAGING_FILE)
+        return STATUS_SUCCESS;
+
+    if (end <= fcb->Vcb->options.max_inline || end <= (uint64_t)fcb->Header.AllocationSize.QuadPart)
+        return STATUS_SUCCESS;
+
+    return extend_file(fcb, fileref, end, true, Irp, rollback);
+}
+
 __attribute__((nonnull(1,6)))
 NTSTATUS extend_file(fcb* fcb, file_ref* fileref, uint64_t end, bool prealloc, PIRP Irp, LIST_ENTRY* rollback) {
     uint64_t oldalloc, newalloc;

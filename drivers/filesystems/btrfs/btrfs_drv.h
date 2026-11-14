@@ -1351,6 +1351,7 @@ NTSTATUS write_file2(device_extension* Vcb, PIRP Irp, LARGE_INTEGER offset, void
                      bool wait, bool deferred_write, bool write_irp, LIST_ENTRY* rollback) __attribute__((nonnull(1,2,4,5,11)));
 NTSTATUS truncate_file(fcb* fcb, uint64_t end, PIRP Irp, LIST_ENTRY* rollback) __attribute__((nonnull(1,4)));
 NTSTATUS extend_file(fcb* fcb, file_ref* fileref, uint64_t end, bool prealloc, PIRP Irp, LIST_ENTRY* rollback) __attribute__((nonnull(1,6)));
+NTSTATUS reserve_file_space(fcb* fcb, file_ref* fileref, uint64_t end, PIRP Irp, LIST_ENTRY* rollback);
 NTSTATUS excise_extents(device_extension* Vcb, fcb* fcb, uint64_t start_data, uint64_t end_data, PIRP Irp, LIST_ENTRY* rollback) __attribute__((nonnull(1,2)));
 chunk* get_chunk_from_address(device_extension* Vcb, uint64_t address) __attribute__((nonnull(1)));
 NTSTATUS alloc_chunk(device_extension* Vcb, uint64_t flags, chunk** pc, bool full_size) __attribute__((nonnull(1,3)));
