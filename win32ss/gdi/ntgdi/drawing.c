@@ -121,7 +121,7 @@ rect(int x, int y, int width, int height)
 static
 int
 NTAPI
-app_draw_ellipse(DC *g, Rect r, PBRUSH pbrush)
+app_draw_ellipse(DC *g, Rect r, PBRUSH pbrush, int wy)
 {
     /* Outer ellipse: e(x,y) = b*b*x*x + a*a*y*y - a*a*b*b */
 
@@ -139,12 +139,12 @@ app_draw_ellipse(DC *g, Rect r, PBRUSH pbrush)
     int d2xt = b2+b2;
     int d2yt = a2+a2;
 
-    int w = pbrush->lWidth;
+    int w = pbrush->lWidth; /* the pen across a vertical line; wy: across a horizontal line */
 
     /* Inner ellipse: E(X,Y) = B*B*X*X + A*A*Y*Y - A*A*B*B */
 
     int A = a-w > 0 ? a-w : 0;
-    int B = b-w > 0 ? b-w : 0;
+    int B = b-wy > 0 ? b-wy : 0;
     int X = 0;
     int Y = B;
     long A2 = A*A;
@@ -267,7 +267,7 @@ app_draw_ellipse(DC *g, Rect r, PBRUSH pbrush)
                 r1.width = r2.width = r.width;
             }
 
-            if ((r1.y < r.y+w) || (r1.x+W >= r1.x+r1.width-W))
+            if ((r1.y < r.y+wy) || (r1.x+W >= r1.x+r1.width-W))
             {
                 result &= app_fill_rect(g, r1, pbrush, TRUE);
                 result &= app_fill_rect(g, r2, pbrush, TRUE);
@@ -959,7 +959,7 @@ app_fill_arc(DC *g, Rect r, int start_angle, int end_angle, PBRUSH pbrush, BOOL 
     return result;
 }
 
-int app_draw_arc(DC *g, Rect r, int start_angle, int end_angle, PBRUSH pbrushPen, BOOL Chord)
+int app_draw_arc(DC *g, Rect r, int start_angle, int end_angle, PBRUSH pbrushPen, BOOL Chord, int wy)
 {
     /* Outer ellipse: e(x,y) = b*b*x*x + a*a*y*y - a*a*b*b */
 
@@ -977,12 +977,12 @@ int app_draw_arc(DC *g, Rect r, int start_angle, int end_angle, PBRUSH pbrushPen
     int d2xt = b2+b2;
     int d2yt = a2+a2;
 
-    int w = pbrushPen->lWidth;
+    int w = pbrushPen->lWidth; /* the pen across a vertical line; wy: across a horizontal line */
 
     /* Inner ellipse: E(X,Y) = B*B*X*X + A*A*Y*Y - A*A*B*B */
 
     int A = a-w > 0 ? a-w : 0;
-    int B = b-w > 0 ? b-w : 0;
+    int B = b-wy > 0 ? b-wy : 0;
     int X = 0;
     int Y = B;
     long A2 = A*A;
@@ -1008,7 +1008,7 @@ int app_draw_arc(DC *g, Rect r, int start_angle, int end_angle, PBRUSH pbrushPen
     if ((start_angle + 360 <= end_angle) ||
             (start_angle - 360 >= end_angle))
     {
-        return app_draw_ellipse(g, r, pbrushPen);
+        return app_draw_ellipse(g, r, pbrushPen, wy);
     }
 
     /* Make start_angle >= 0 and <= 360 */
@@ -1136,7 +1136,7 @@ int app_draw_arc(DC *g, Rect r, int start_angle, int end_angle, PBRUSH pbrushPen
                 r1.width = r2.width = r.width;
             }
 
-            if ((r1.y < r.y+w) || (r1.x+W >= r1.x+r1.width-W))
+            if ((r1.y < r.y+wy) || (r1.x+W >= r1.x+r1.width-W))
             {
                 result &= app_fill_arc_rect(g, r1,
                                             p0, p1, p2,
@@ -1362,7 +1362,8 @@ IntDrawArc( PDC dc,
             double StartArc, // FIXME: don't use floating point!
             double EndArc,
             ARCTYPE arctype,
-            PBRUSH pbrush)
+            PBRUSH pbrush,
+            INT wy)
 {
     int Start = (int)ceil(StartArc);
     int End   = (int)ceil(EndArc);
@@ -1371,7 +1372,7 @@ IntDrawArc( PDC dc,
     return app_draw_arc(dc, rect( XLeft, YLeft, Width, Height),
                         (dc->dclevel.flPath & DCPATH_CLOCKWISE) ? -End : -Start,
                         (dc->dclevel.flPath & DCPATH_CLOCKWISE) ? -Start : -End,
-                        pbrush, Chord);
+                        pbrush, Chord, wy);
 }
 
 BOOL
@@ -1381,9 +1382,10 @@ IntDrawEllipse( PDC dc,
                 INT YLeft,
                 INT Width,
                 INT Height,
-                PBRUSH pbrush)
+                PBRUSH pbrush,
+                INT wy)
 {
-    return (BOOL)app_draw_ellipse(dc, rect( XLeft, YLeft, Width, Height), pbrush);
+    return (BOOL)app_draw_ellipse(dc, rect( XLeft, YLeft, Width, Height), pbrush, wy);
 }
 
 BOOL
@@ -1473,7 +1475,8 @@ IntDrawRoundRect( PDC dc,
                   INT Bottom,
                   INT Wellipse,
                   INT Hellipse,
-                  PBRUSH pbrushPen)
+                  PBRUSH pbrushPen,
+                  INT wy)
 {
     Rect r;
     int rx, ry; /* Radius in x and y directions */
@@ -1486,35 +1489,35 @@ IntDrawRoundRect( PDC dc,
     if (Wellipse > r.width)
     {
         if (Hellipse > r.height) // > W > H
-            app_draw_ellipse(dc, r, pbrushPen);
+            app_draw_ellipse(dc, r, pbrushPen, wy);
         else // > W < H
         {
             app_draw_arc(dc, rect( r.x, r.y, r.width - 1, Hellipse - 1),
-                         0, 180, pbrushPen, FALSE);
+                         0, 180, pbrushPen, FALSE, wy);
             app_draw_arc(dc, rect(r.x, Bottom - Hellipse, r.width - 1, Hellipse - 1),
-                         180, 360, pbrushPen, FALSE);
+                         180, 360, pbrushPen, FALSE, wy);
         }
     }
     else if(Hellipse > r.height) // < W > H
     {
         app_draw_arc(dc, rect(r.x, r.y, Wellipse - 1, r.height - 1),
-                     90, 270, pbrushPen, FALSE);
+                     90, 270, pbrushPen, FALSE, wy);
         app_draw_arc(dc, rect(Right - Wellipse, r.y, Wellipse - 1, r.height - 1),
-                     270, 90, pbrushPen, FALSE);
+                     270, 90, pbrushPen, FALSE, wy);
     }
     else // < W < H
     {
         app_draw_arc(dc, rect(r.x, r.y, rx+rx, ry+ry),
-                     90, 180, pbrushPen, FALSE);
+                     90, 180, pbrushPen, FALSE, wy);
 
         app_draw_arc(dc, rect(r.x,r.y+r.height-ry-ry,rx+rx,ry+ry),
-                     180, 270, pbrushPen, FALSE);
+                     180, 270, pbrushPen, FALSE, wy);
 
         app_draw_arc(dc, rect(r.x+r.width-rx-rx, r.y+r.height-ry-ry, rx+rx, ry+ry),
-                     270, 360, pbrushPen, FALSE);
+                     270, 360, pbrushPen, FALSE, wy);
 
         app_draw_arc(dc, rect(r.x+r.width-rx-rx,r.y,rx+rx,ry+ry),
-                     0, 90, pbrushPen, FALSE);
+                     0, 90, pbrushPen, FALSE, wy);
     }
     if ( Hellipse < r.height)
     {
@@ -1526,10 +1529,10 @@ IntDrawRoundRect( PDC dc,
     }
     if ( Wellipse < r.width)
     {
-        app_fill_rect(dc, rect(r.x+rx, r.y+r.height-w, r.width-rx-rx, w),
+        app_fill_rect(dc, rect(r.x+rx, r.y+r.height-wy, r.width-rx-rx, wy),
                       pbrushPen, TRUE);
 
-        app_fill_rect(dc, rect(r.x+rx, r.y, r.width-rx-rx, w), pbrushPen, TRUE);
+        app_fill_rect(dc, rect(r.x+rx, r.y, r.width-rx-rx, wy), pbrushPen, TRUE);
     }
     return TRUE;
 }
