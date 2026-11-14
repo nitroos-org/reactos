@@ -2,6 +2,7 @@
 list(APPEND SOURCE
     CreateSwapChainForComposition.c
     EnumWarpAdapter.c
+    D3D11StencilRefOption.c
     SharedResource.c
     testlist.c)
 
