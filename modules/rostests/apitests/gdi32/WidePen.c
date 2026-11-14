@@ -298,6 +298,8 @@ static void test_PenWidth(void)
  * a shape of 160 device pixels placed with DPtoLP. ---- */
 
 enum { N_TEXT, N_LOENG, N_HIENG, N_ANISO, N_WT15, N_PG73WT15, N_PG73WT2, N_PG53WT2, N_PG135WT2, N_PG125WT2, N_COUNT };
+/* a world rotation of 30 degrees: not in the table of lines (a rotated pen is as wide as it is) */
+#define N_ROT30 N_COUNT
 static const char *g_ModeNameN[N_COUNT] =
 { "MM_TEXT", "MM_LOENGLISH", "MM_HIENGLISH", "aniso 2x3", "world 1.5", "page 7/3 + world 1.5", "page 7/3 + world 2",
   "page 5/3 + world 2", "page 13/5 + world 2", "page 12/5 + world 2" };
@@ -344,6 +346,7 @@ static void SetModeN(int m)
         case N_PG53WT2: ext = 3; vext = 5; x.eM11 = 2; x.eM22 = 2; break;
         case N_PG135WT2: ext = 5; vext = 13; x.eM11 = 2; x.eM22 = 2; break;
         case N_PG125WT2: ext = 5; vext = 12; x.eM11 = 2; x.eM22 = 2; break;
+        case N_ROT30: x.eM11 = 0.8660254f; x.eM12 = 0.5f; x.eM21 = -0.5f; x.eM22 = 0.8660254f; break;
         default: return;
     }
     if (ext)
@@ -395,9 +398,10 @@ static void test_PenWidthPageScales(void)
     }
 }
 
-enum { S_ELLIPSE, S_ROUNDRECT, S_INSIDEFRAME, S_RECTANGLE, S_POLYGON, S_STROKEELL, S_STROKERECT, S_ARC, S_COUNT };
+enum { S_ELLIPSE, S_ROUNDRECT, S_INSIDEFRAME, S_RECTANGLE, S_POLYGON, S_STROKEELL, S_STROKERECT, S_ARC, S_PIE, S_CHORD, S_COUNT };
 static const char *g_ShapeName[S_COUNT] =
-{ "Ellipse", "RoundRect", "InsideFrame Ellipse", "Rectangle", "Polygon", "StrokePath(Ellipse)", "StrokePath(Rectangle)", "Arc" };
+{ "Ellipse", "RoundRect", "InsideFrame Ellipse", "Rectangle", "Polygon", "StrokePath(Ellipse)", "StrokePath(Rectangle)", "Arc",
+  "Pie", "Chord" };
 
 static const struct { int mode, pen, shape, runs[4]; } g_Shapes[] =
 {
@@ -413,7 +417,9 @@ static const struct { int mode, pen, shape, runs[4]; } g_Shapes[] =
     { N_ANISO, P_W7, S_ELLIPSE, { 14, 14, 21, 21 } },
     { N_ANISO, P_G7, S_ELLIPSE, { 14, 14, 21, 21 } },
     { N_WT15, P_W7, S_ELLIPSE, { 11, 11, 11, 11 } },
-    { N_WT15, P_G7, S_ELLIPSE, { 10, 10, 11, 11 } },
+    /* Windows draws the sides of a geometric pen of 10.5 pixels 10 pixels wide; the stroke of the outline here is 11 pixels
+       plus the pixel of the rounding of the outline at the sides */
+    { N_WT15, P_G7, S_ELLIPSE, { -1, -1, 11, 11 } },
     { N_WT15, P_W25, S_ELLIPSE, { 38, 38, 38, 38 } },
     { N_PG73WT15, P_W7, S_ELLIPSE, { 25, 25, 25, 25 } },
     { N_PG73WT15, P_G7, S_ELLIPSE, { 25, 25, 25, 25 } },
@@ -532,11 +538,14 @@ static const struct { int mode, pen, shape, runs[4]; } g_Shapes[] =
     { N_WT15, P_W7, S_STROKEELL, { 11, 11, 11, 11 } },
     { N_WT15, P_W25, S_STROKEELL, { 38, 38, 38, 38 } },
     { N_PG73WT15, P_W7, S_STROKEELL, { 25, 25, 25, 25 } },
+    { N_PG73WT15, P_G7, S_STROKEELL, { 25, 25, 25, 25 } },
     { N_PG73WT2, P_W7, S_STROKEELL, { 33, 33, 33, 33 } },
+    { N_PG73WT2, P_G7, S_STROKEELL, { 33, 33, 33, 33 } },
     { N_PG53WT2, P_W7, S_STROKEELL, { 23, 23, 23, 23 } },
     { N_PG53WT2, P_G7, S_STROKEELL, { 23, 23, 23, 23 } },
     { N_PG53WT2, P_W25, S_STROKEELL, { 83, 83, 83, 83 } },
     { N_PG135WT2, P_W7, S_STROKEELL, { 36, 36, 36, 36 } },
+    { N_PG135WT2, P_G7, S_STROKEELL, { 36, 36, 36, 36 } },
     { N_PG125WT2, P_W7, S_STROKEELL, { 34, 34, 34, 34 } },
     { N_PG125WT2, P_G7, S_STROKEELL, { 34, 34, 34, 34 } },
     { N_TEXT, P_W7, S_STROKERECT, { 7, 7, 7, 7 } },
@@ -639,6 +648,8 @@ static void DrawShape(int shape, int pen)
             BeginPath(g_dc); Rectangle(g_dc, r[0].x, r[0].y, r[1].x, r[1].y); EndPath(g_dc); StrokePath(g_dc);
             break;
         case S_ARC: Arc(g_dc, r[0].x, r[0].y, r[1].x, r[1].y, st.x, st.y, en.x, en.y); break;
+        case S_PIE: Pie(g_dc, r[0].x, r[0].y, r[1].x, r[1].y, st.x, st.y, en.x, en.y); break;
+        case S_CHORD: Chord(g_dc, r[0].x, r[0].y, r[1].x, r[1].y, st.x, st.y, en.x, en.y); break;
     }
 }
 
@@ -678,6 +689,93 @@ static void test_ShapeWidths(void)
     }
 }
 
+
+/* ---- Where the wide pen lies: it is centred on the outline (Ellipse(48, 48, 208, 208) with width 7 covers the pixels
+ * 45 to 210, with width 25 the pixels 36 to 219), the radial and chord edges of Pie and Chord are drawn with the wide pen, a
+ * rotated world transform rotates the shape. Measured on Windows 10 (build 19045): the box of the pixels and the runs
+ * (row 128 from the left and right, column 128 from the top and bottom) of a shape of 160 device pixels placed with
+ * DPtoLP, NULL brush, in the same DIB. The box of the coordinates the shape is made of is one or two pixels apart where
+ * the conversions between logical and device points round differently, hence the tolerance. ---- */
+
+static const struct { int mode, pen, shape, bbox[4], runs[4], tol; } g_Placement[] =
+{
+    { N_TEXT, P_W7, S_ELLIPSE, { 45, 45, 210, 210 }, { 7, 7, 7, 7 }, 2 },
+    { N_TEXT, P_W7, S_ROUNDRECT, { 45, 45, 210, 210 }, { 7, 7, 7, 7 }, 2 },
+    { N_TEXT, P_W7, S_PIE, { 124, 45, 210, 130 }, { 86, 86, 86, 86 }, 2 },
+    { N_TEXT, P_W7, S_CHORD, { 124, 45, 210, 130 }, { 8, 8, 9, 9 }, 2 },
+    { N_TEXT, P_W25, S_ELLIPSE, { 36, 36, 219, 219 }, { 25, 25, 25, 25 }, 2 },
+    { N_TEXT, P_W25, S_ROUNDRECT, { 36, 36, 219, 219 }, { 25, 25, 25, 25 }, 2 },
+    { N_TEXT, P_W25, S_PIE, { 115, 36, 219, 139 }, { 104, 104, 104, 104 }, 2 },
+    { N_TEXT, P_W25, S_CHORD, { 115, 36, 219, 139 }, { 30, 30, 31, 31 }, 2 },
+    { N_TEXT, P_G7, S_ELLIPSE, { 45, 45, 210, 210 }, { 7, 7, 7, 7 }, 2 },
+    { N_TEXT, P_G7, S_ROUNDRECT, { 45, 45, 210, 210 }, { 7, 7, 7, 7 }, 2 },
+    { N_TEXT, P_G7, S_PIE, { 124, 45, 210, 130 }, { 85, 85, 86, 86 }, 2 },
+    { N_TEXT, P_G7, S_CHORD, { 126, 45, 210, 129 }, { 7, 7, 9, 9 }, 2 },
+    { N_ANISO, P_W7, S_ELLIPSE, { 41, 38, 213, 216 }, { 14, 14, 21, 21 }, 2 },
+    { N_ANISO, P_W7, S_ROUNDRECT, { 41, 38, 213, 216 }, { 14, 14, 21, 21 }, 2 },
+    { N_ANISO, P_W25, S_ELLIPSE, { 23, 11, 231, 243 }, { 50, 50, 75, 75 }, 2 },
+    { N_ANISO, P_W25, S_ROUNDRECT, { 23, 11, 231, 243 }, { 50, 50, 75, 75 }, 2 },
+    { N_ANISO, P_G7, S_ELLIPSE, { 41, 38, 213, 216 }, { 14, 14, 21, 21 }, 2 },
+    { N_ANISO, P_G7, S_ROUNDRECT, { 41, 38, 213, 216 }, { 14, 14, 21, 21 }, 2 },
+    { N_WT15, P_W7, S_ELLIPSE, { 43, 43, 213, 213 }, { 11, 11, 11, 11 }, 2 },
+    { N_WT15, P_W7, S_ROUNDRECT, { 43, 43, 213, 213 }, { 11, 11, 11, 11 }, 2 },
+    { N_WT15, P_W7, S_PIE, { 122, 43, 213, 133 }, { 91, 91, 91, 91 }, 2 },
+    { N_WT15, P_W25, S_ELLIPSE, { 30, 30, 227, 227 }, { 38, 38, 38, 38 }, 2 },
+    { N_WT15, P_W25, S_ROUNDRECT, { 29, 29, 227, 227 }, { 38, 38, 38, 38 }, 2 },
+    { N_WT15, P_G7, S_ROUNDRECT, { 43, 43, 213, 213 }, { 10, 10, 11, 11 }, 2 },
+    { N_ROT30, P_W7, S_ROUNDRECT, { 24, 53, 232, 203 }, { 14, 14, 8, 8 }, 2 },
+    { N_ROT30, P_G7, S_ROUNDRECT, { 24, 53, 232, 203 }, { 14, 14, 8, 8 }, 2 },
+    { N_ROT30, P_G7, S_PIE, { 125, 93, 182, 131 }, { 57, 57, 39, 39 }, 2 },
+    /* a pen wider than half the shape fills it like Windows: a ring around the outline, not a disc; the box of the
+       logical points differs by a few pixels here (page scale 7/3 is rounded at each conversion) */
+    { N_PG73WT15, P_W25, S_ELLIPSE, { 6, 6, 250, 250 }, { 88, 88, 88, 88 }, 5 },
+    { N_PG73WT2, P_W25, S_ELLIPSE, { 0, 0, 255, 255 }, { 106, 104, 106, 104 }, 6 },
+};
+
+static const char *PlacementModeName(int m)
+{
+    return m == N_ROT30 ? "world rotation 30" : g_ModeNameN[m];
+}
+
+static void test_ShapePlacement(void)
+{
+    int i;
+
+    for (i = 0; i < (int)ARRAYSIZE(g_Placement); i++)
+    {
+        HPEN hpen = MakePen(g_Placement[i].pen), hold;
+        HBRUSH hbrOld;
+        STAT s;
+        int run[4], k, tol = g_Placement[i].tol;
+        int box[4];
+
+        Clear();
+        hold = SelectObject(g_dc, hpen);
+        hbrOld = SelectObject(g_dc, GetStockObject(NULL_BRUSH));
+        SetModeN(g_Placement[i].mode);
+        DrawShape(g_Placement[i].shape, g_Placement[i].pen);
+        s = Measure(128, 128);
+        Runs(&run[0], &run[1], &run[2], &run[3]);
+        box[0] = s.l; box[1] = s.t; box[2] = s.r; box[3] = s.b;
+        for (k = 0; k < 4; k++)
+        {
+            ok(abs(box[k] - g_Placement[i].bbox[k]) <= tol, "%s pen %s %s: pixel box %d,%d,%d,%d, expected %d,%d,%d,%d (+-%d)\n",
+               PlacementModeName(g_Placement[i].mode), g_PenName[g_Placement[i].pen], g_ShapeName[g_Placement[i].shape],
+               box[0], box[1], box[2], box[3], g_Placement[i].bbox[0], g_Placement[i].bbox[1], g_Placement[i].bbox[2],
+               g_Placement[i].bbox[3], tol);
+            /* the radial edges of a pie and the edge of a chord: the end of the line is rounded one pixel more in the 32-bit
+               build */
+            ok(abs(run[k] - g_Placement[i].runs[k]) <= (tol > 2 ? tol : (g_Placement[i].shape == S_PIE || g_Placement[i].shape == S_CHORD) ? 2 : 1), "%s pen %s %s: run %d is %d, expected %d\n",
+               PlacementModeName(g_Placement[i].mode), g_PenName[g_Placement[i].pen], g_ShapeName[g_Placement[i].shape],
+               k, run[k], g_Placement[i].runs[k]);
+        }
+        SetModeN(N_TEXT);
+        SelectObject(g_dc, hbrOld);
+        SelectObject(g_dc, hold);
+        DeleteObject(hpen);
+    }
+}
+
 START_TEST(WidePen)
 {
     BITMAPINFO bi;
@@ -702,6 +800,7 @@ START_TEST(WidePen)
     test_PenWidth();
     test_PenWidthPageScales();
     test_ShapeWidths();
+    test_ShapePlacement();
 
     SelectObject(g_dc, g_bmpOld);
     DeleteObject(g_bmp);
