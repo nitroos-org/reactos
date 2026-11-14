@@ -234,6 +234,7 @@ static const struct d2d_device_context_ops d2d_wic_render_target_ops =
 HRESULT d2d_wic_render_target_init(struct d2d_wic_render_target *render_target, ID2D1Factory1 *factory,
         ID3D10Device1 *d3d_device, IWICBitmap *bitmap, const D2D1_RENDER_TARGET_PROPERTIES *desc)
 {
+    D2D1_RENDER_TARGET_PROPERTIES target_desc = *desc;
     D3D10_TEXTURE2D_DESC texture_desc;
     ID3D10Texture2D *texture;
     IDXGIDevice *dxgi_device;
@@ -268,6 +269,10 @@ HRESULT d2d_wic_render_target_init(struct d2d_wic_render_target *render_target, 
                 || IsEqualGUID(&bitmap_format, &GUID_WICPixelFormat32bppBGR))
         {
             texture_desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+            /* On Windows the target bitmap of a premultiplied WIC bitmap is premultiplied (measured). */
+            if (target_desc.pixelFormat.alphaMode == D2D1_ALPHA_MODE_UNKNOWN
+                    && IsEqualGUID(&bitmap_format, &GUID_WICPixelFormat32bppPBGRA))
+                target_desc.pixelFormat.alphaMode = D2D1_ALPHA_MODE_PREMULTIPLIED;
         }
         else if (IsEqualGUID(&bitmap_format, &GUID_WICPixelFormat32bppPRGBA)
                 || IsEqualGUID(&bitmap_format, &GUID_WICPixelFormat32bppRGB))
@@ -345,7 +350,7 @@ HRESULT d2d_wic_render_target_init(struct d2d_wic_render_target *render_target, 
 
     hr = d2d_d3d_create_render_target(unsafe_impl_from_ID2D1Device((ID2D1Device1 *)device),
             render_target->dxgi_surface, &render_target->IUnknown_iface,
-            &d2d_wic_render_target_ops, desc, (void **)&render_target->dxgi_inner);
+            &d2d_wic_render_target_ops, &target_desc, (void **)&render_target->dxgi_inner);
     ID2D1Device_Release(device);
     if (FAILED(hr))
     {
