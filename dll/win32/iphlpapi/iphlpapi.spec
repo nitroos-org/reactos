@@ -110,6 +110,7 @@
 @ stub GetUdpStatsFromStack
 @ stub  GetUdpStatsFromStackEx
 @ stdcall GetUdpTable(ptr ptr long)
+@ stdcall -version=0x600+ GetUdp6Table(ptr ptr long)
 @ stub GetUdpTableFromStack
 @ stdcall -version=0x600+ GetUnicastIpAddressEntry(ptr)
 @ stdcall -version=0x600+ GetUnicastIpAddressTable(long ptr)

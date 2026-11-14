@@ -113,5 +113,7 @@ PVOID getTcpTable(CLASS_TABLE Class);
 
 /* The IPv6 TCP sockets of the stack; HeapFree() the returned table */
 PMIB_TCP6TABLE_OWNER_PID getTcp6Table(void);
+/* The IPv6 UDP sockets of the stack; HeapFree() the returned table */
+PMIB_UDP6TABLE_OWNER_PID getUdp6Table(void);
 
 #endif /* ndef WINE_IPSTATS_H_ */
