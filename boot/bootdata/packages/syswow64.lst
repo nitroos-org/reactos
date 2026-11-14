@@ -153,6 +153,7 @@ SysWOW64/imagehlp.dll
 SysWOW64/cryptui.dll
 SysWOW64/urlmon.dll
 SysWOW64/winspool.drv
+SysWOW64/printui.dll
 SysWOW64/ws2_32.dll
 SysWOW64/wsock32.dll
 SysWOW64/msafd.dll
