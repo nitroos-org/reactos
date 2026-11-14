@@ -30,6 +30,12 @@
  */
 #define POOL_BIG_TABLE_USE_RATE 4
 
+FORCEINLINE
+VOID
+ExpReleasePoolBlock(IN PPOOL_HEADER Entry,
+                    IN PPOOL_DESCRIPTOR PoolDesc,
+                    IN BOOLEAN CountFree);
+
 typedef struct _POOL_DPC_CONTEXT
 {
     PPOOL_TRACKER_TABLE PoolTrackTable;
@@ -1983,6 +1989,180 @@ ExReturnPoolQuota(IN PVOID P)
     }
 }
 
+/*
+ * Changes the byte count of a tag without counting an allocation or a free.
+ * Used when part of a tracked block is returned to the pool at once.
+ */
+static
+VOID
+ExpAdjustPoolTrackerBytes(IN ULONG Key,
+                          IN SSIZE_T Delta,
+                          IN POOL_TYPE PoolType)
+{
+    ULONG Hash, Index;
+    PPOOL_TRACKER_TABLE TableEntry;
+
+    Key &= ~PROTECTED_POOL;
+    Hash = ExpComputeHashForTag(Key, PoolTrackTableMask);
+    Index = Hash;
+    do
+    {
+        TableEntry = &PoolTrackTable[Hash];
+        if (TableEntry->Key == Key)
+        {
+            if ((PoolType & BASE_POOL_TYPE_MASK) == NonPagedPool)
+                InterlockedExchangeAddSizeT(&TableEntry->NonPagedBytes, Delta);
+            else
+                InterlockedExchangeAddSizeT(&TableEntry->PagedBytes, Delta);
+            return;
+        }
+        if (!TableEntry->Key) return;
+        Hash = (Hash + 1) & PoolTrackTableMask;
+    } while (Hash != Index);
+}
+
+/*
+ * Cache-aligned small allocation (NonPagedPoolCacheAligned, PagedPoolCacheAligned
+ * and the MustSucceed/quota variants).  The pool hands out blocks in units of
+ * POOL_BLOCK_SIZE, so the data of an ordinary block is only 8 (x86) or 16 (x64)
+ * byte aligned.  Allocate a block with room for the alignment, carve the block
+ * that holds the data out of it so that the DATA starts on a cache line (the
+ * pool header sits just before it), and give the leading and trailing pieces
+ * back to the pool.  The result is an ordinary pool block: ExFreePoolWithTag,
+ * the pool tracker and the quota accounting see one block of the final size.
+ */
+static
+PVOID
+ExpAllocateCacheAligned(IN ULONG OriginalType,
+                        IN SIZE_T NumberOfBytes,
+                        IN ULONG Tag)
+{
+    PPOOL_HEADER Raw, Mid, Lead, Tail, After;
+    PPOOL_DESCRIPTOR PoolDesc;
+    KLOCK_QUEUE_HANDLE LockHandle;
+    ULONG_PTR Align, Data, DataAligned;
+    ULONG InnerType, Type, PoolIndex;
+    USHORT RawBlocks, LeadBlocks, MidBlocks, TailBlocks;
+    PVOID Buffer;
+
+    //
+    // The alignment is the processor data cache line (a power of two). Fall back
+    // to 64 for anything unexpected so the arithmetic below stays bounded.
+    //
+    Align = KeGetRecommendedSharedDataAlignment();
+    if ((Align < POOL_BLOCK_SIZE) || (Align > 256) || (Align & (Align - 1)))
+        Align = 64;
+
+    if (!NumberOfBytes) NumberOfBytes = 1;
+
+    //
+    // Worst case the leading piece is Align + POOL_BLOCK_SIZE bytes (a piece of
+    // exactly one block cannot exist, as it could not hold a free list entry).
+    // If that does not fit in a pool page, use a whole page: page aligned.
+    //
+    if (NumberOfBytes + Align + POOL_BLOCK_SIZE > POOL_MAX_ALLOC)
+        return ExAllocatePoolWithTag(OriginalType, PAGE_SIZE, Tag);
+
+    InnerType = OriginalType & ~CACHE_ALIGNED_POOL_MASK;
+    Buffer = ExAllocatePoolWithTag(InnerType,
+                                   NumberOfBytes + Align + POOL_BLOCK_SIZE,
+                                   Tag);
+    if (!Buffer) return NULL;
+
+    //
+    // Special pool blocks have no pool header and cannot be carved
+    //
+    if ((ExpPoolFlags & POOL_FLAG_SPECIAL_POOL) && MmIsSpecialPoolAddress(Buffer))
+        return Buffer;
+
+    Raw = POOL_ENTRY(Buffer);
+    RawBlocks = Raw->BlockSize;
+    Type = Raw->PoolType;
+    PoolIndex = Raw->PoolIndex;
+
+    //
+    // Find the first suitably aligned data address inside the block
+    //
+    Data = (ULONG_PTR)Buffer;
+    DataAligned = (Data + Align - 1) & ~(Align - 1);
+    LeadBlocks = (USHORT)((DataAligned - Data) / POOL_BLOCK_SIZE);
+    if (LeadBlocks == 1) LeadBlocks += (USHORT)(Align / POOL_BLOCK_SIZE);
+    MidBlocks = (USHORT)((NumberOfBytes + sizeof(POOL_HEADER) + (POOL_BLOCK_SIZE - 1))
+                         / POOL_BLOCK_SIZE);
+    ASSERT(LeadBlocks + MidBlocks <= RawBlocks);
+    TailBlocks = RawBlocks - LeadBlocks - MidBlocks;
+    if (TailBlocks == 1)
+    {
+        /* Too small to be a free block of its own: keep it in the allocation */
+        MidBlocks++;
+        TailBlocks = 0;
+    }
+
+    //
+    // Nothing to give back (the block is aligned already)
+    //
+    if (!LeadBlocks && !TailBlocks)
+    {
+        Raw->PoolType = OriginalType + 1;
+        return Buffer;
+    }
+
+    if ((InnerType & BASE_POOL_TYPE_MASK) == NonPagedPool)
+        PoolDesc = ExpNonPagedPoolDescriptor[PoolIndex % ExpNumberOfNonPagedPools];
+    else
+        PoolDesc = PoolVector[PagedPool];
+
+    //
+    // Rewrite the headers of the block under the pool lock: lead, data, tail
+    //
+    ExLockPool(PoolDesc, &LockHandle);
+    After = POOL_BLOCK(Raw, RawBlocks);
+    Lead = LeadBlocks ? Raw : NULL;
+    Mid = POOL_BLOCK(Raw, LeadBlocks);
+    Tail = TailBlocks ? POOL_BLOCK(Mid, MidBlocks) : NULL;
+
+    if (Lead)
+    {
+        Lead->BlockSize = LeadBlocks;
+        Mid->Ulong1 = 0;
+        Mid->PreviousSize = LeadBlocks;
+        Mid->PoolIndex = PoolIndex;
+        Mid->PoolTag = Tag;
+    }
+    Mid->BlockSize = MidBlocks;
+    Mid->PoolType = OriginalType + 1;
+    if (Tail)
+    {
+        Tail->Ulong1 = 0;
+        Tail->PreviousSize = MidBlocks;
+        Tail->BlockSize = TailBlocks;
+        Tail->PoolIndex = PoolIndex;
+        Tail->PoolType = Type;
+        Tail->PoolTag = Tag;
+    }
+    if (PAGE_ALIGN(After) != After)
+        After->PreviousSize = Tail ? TailBlocks : MidBlocks;
+    ExUnlockPool(PoolDesc, &LockHandle);
+
+    //
+    // The pool tracker and descriptor counted the whole block as one allocation:
+    // keep the tag's count and move its bytes down to the data block
+    //
+    ExpAdjustPoolTrackerBytes(Tag,
+                              -(SSIZE_T)((RawBlocks - MidBlocks) * POOL_BLOCK_SIZE),
+                              OriginalType);
+
+    //
+    // Give the pieces back (not counted as frees: they were never allocations)
+    //
+    if (Lead) ExpReleasePoolBlock(Lead, PoolDesc, FALSE);
+    if (Tail) ExpReleasePoolBlock(Tail, PoolDesc, FALSE);
+
+    (POOL_FREE_BLOCK(Mid))->Flink = NULL;
+    (POOL_FREE_BLOCK(Mid))->Blink = NULL;
+    return POOL_FREE_BLOCK(Mid);
+}
+
 /* PUBLIC FUNCTIONS ***********************************************************/
 
 /*
@@ -2047,6 +2227,15 @@ ExAllocatePoolWithTag(IN POOL_TYPE PoolType,
                 if (Entry) return Entry;
             }
         }
+    }
+
+    //
+    // The cache-aligned types promise a data block that starts on a cache line.
+    // Allocations of a page or more are page aligned already
+    //
+    if ((PoolType & CACHE_ALIGNED_POOL_MASK) && (NumberOfBytes <= POOL_MAX_ALLOC))
+    {
+        return ExpAllocateCacheAligned(PoolType, NumberOfBytes, Tag);
     }
 
     //
@@ -2602,13 +2791,11 @@ NTAPI
 ExFreePoolWithTag(IN PVOID P,
                   IN ULONG TagToFree)
 {
-    PPOOL_HEADER Entry, NextEntry;
+    PPOOL_HEADER Entry;
     USHORT BlockSize;
-    KLOCK_QUEUE_HANDLE LockHandle;
     POOL_TYPE PoolType;
     PPOOL_DESCRIPTOR PoolDesc;
     ULONG Tag;
-    BOOLEAN Combined = FALSE;
     PFN_NUMBER PageCount, RealPageCount;
     PKPRCB Prcb = KeGetCurrentPrcb();
     PGENERAL_LOOKASIDE LookasideList, GlobalList;
@@ -2884,6 +3071,31 @@ ExFreePoolWithTag(IN PVOID P,
     }
 
     //
+    // Give the block back to its descriptor (coalescing it with free neighbours)
+    //
+    ExpReleasePoolBlock(Entry, PoolDesc, TRUE);
+}
+
+/*
+ * Returns an allocated pool block to the free lists of its descriptor,
+ * coalescing it with free neighbours and releasing the page if it ends up empty.
+ * CountFree is FALSE for the leftover pieces of a cache-aligned allocation,
+ * which were never handed out as allocations of their own.
+ */
+FORCEINLINE
+VOID
+ExpReleasePoolBlock(IN PPOOL_HEADER Entry,
+                    IN PPOOL_DESCRIPTOR PoolDesc,
+                    IN BOOLEAN CountFree)
+{
+    PPOOL_HEADER NextEntry;
+    USHORT BlockSize;
+    KLOCK_QUEUE_HANDLE LockHandle;
+    BOOLEAN Combined = FALSE;
+
+    BlockSize = Entry->BlockSize;
+
+    //
     // Get the pointer to the next entry
     //
     NextEntry = POOL_BLOCK(Entry, BlockSize);
@@ -2891,7 +3103,7 @@ ExFreePoolWithTag(IN PVOID P,
     //
     // Update performance counters
     //
-    InterlockedIncrement((PLONG)&PoolDesc->RunningDeAllocs);
+    if (CountFree) InterlockedIncrement((PLONG)&PoolDesc->RunningDeAllocs);
     InterlockedExchangeAddSizeT(&PoolDesc->TotalBytes, -BlockSize * POOL_BLOCK_SIZE);
 
     //
