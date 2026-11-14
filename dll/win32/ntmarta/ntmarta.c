@@ -769,7 +769,7 @@ AccpQueryParentKeySd(IN HKEY Key)
 
     ParentName.Buffer = Name->Name;
     ParentName.Length = ParentName.MaximumLength = (USHORT)((Last - Name->Name) * sizeof(WCHAR));
-    InitializeObjectAttributes(&Attributes, &ParentName, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    InitializeObjectAttributes(&Attributes, &ParentName, OBJ_CASE_INSENSITIVE | OBJ_OPENLINK, NULL, NULL);
     if (!NT_SUCCESS(NtOpenKey(&Parent, READ_CONTROL, &Attributes)))
         goto Cleanup;
 
@@ -831,11 +831,37 @@ AccpMergeInheritedDacl(IN PSECURITY_DESCRIPTOR ParentSd,
     return RtlNewSecurityObjectEx(ParentSd, &Creator, NewSd, NULL, TRUE, SEF_DACL_AUTO_INHERIT, NULL, &AccpKeyMapping);
 }
 
+/* TRUE if the ACEs of Dacl flagged INHERITED_ACE form its tail: no explicit ACE follows an inherited one. */
+static BOOLEAN
+AccpInheritedAcesAreTail(IN PACL Dacl)
+{
+    PACE_HEADER Ace;
+    BOOLEAN Seen = FALSE;
+    DWORD i;
+
+    for (i = 0; i < Dacl->AceCount; i++)
+    {
+        if (!GetAce(Dacl, i, (PVOID *)&Ace))
+            return FALSE;
+        if (Ace->AceFlags & INHERITED_ACE)
+            Seen = TRUE;
+        else if (Seen)
+            return FALSE;
+    }
+    return TRUE;
+}
+
 /*
  * Flags the ACEs of the DACL of Sd (in place) that the parent's inheritable ACEs account for. A DACL that is
- * auto-inherited already, or protected, says what it inherits itself and is left alone.
+ * auto-inherited already, or protected, says what it inherits itself and is left alone (FALSE).
+ *
+ * The ACEs count as inherited only if they are the whole set the parent passes on, in the order it passes
+ * them, and they form the TAIL of the DACL, after every explicit ACE (none of which is flagged). Flagging
+ * ACEs anywhere else would let the merge (explicit ACEs first, inherited ones after) move an allow ACE
+ * ahead of a deny ACE. For anything else, and for a DACL with no such ACE, nothing is flagged and FALSE is
+ * returned: the caller treats the key as protected.
  */
-static VOID
+static BOOLEAN
 AccpMarkInheritedAces(IN OUT PSECURITY_DESCRIPTOR Sd,
                       IN PSECURITY_DESCRIPTOR ParentSd)
 {
@@ -843,53 +869,55 @@ AccpMarkInheritedAces(IN OUT PSECURITY_DESCRIPTOR Sd,
     PSECURITY_DESCRIPTOR Expected = NULL;
     PACL Dacl = NULL, ExpectedDacl = NULL;
     PSID Owner = NULL, Group = NULL;
-    PBOOLEAN Used = NULL;
     PACE_HEADER Ace, Other;
     BOOL Present, Defaulted;
-    DWORD Revision, i, j;
+    DWORD Revision, i, First;
+    BOOLEAN Marked = FALSE;
 
     if (!GetSecurityDescriptorControl(Sd, &Control, &Revision) ||
         (Control & (SE_DACL_AUTO_INHERITED | SE_DACL_PROTECTED)))
-        return;
+        return FALSE;
     if (!GetSecurityDescriptorDacl(Sd, &Present, &Dacl, &Defaulted) || !Present || Dacl == NULL || Dacl->AceCount == 0)
-        return;
+        return FALSE;
     GetSecurityDescriptorOwner(Sd, &Owner, &Defaulted);
     GetSecurityDescriptorGroup(Sd, &Group, &Defaulted);
 
     if (!NT_SUCCESS(AccpMergeInheritedDacl(ParentSd, Owner, Group, NULL, FALSE, &Expected)))
-        return;
+        return FALSE;
     if (!GetSecurityDescriptorDacl(Expected, &Present, &ExpectedDacl, &Defaulted) || !Present ||
-        ExpectedDacl == NULL || ExpectedDacl->AceCount == 0)
-        goto Cleanup;
-    Used = (PBOOLEAN)LocalAlloc(LMEM_FIXED | LMEM_ZEROINIT, ExpectedDacl->AceCount * sizeof(BOOLEAN));
-    if (Used == NULL)
+        ExpectedDacl == NULL || ExpectedDacl->AceCount == 0 || ExpectedDacl->AceCount > Dacl->AceCount)
         goto Cleanup;
 
+    /* the explicit ACEs first, none of them flagged; the tail is the parent's set, ACE for ACE */
+    First = Dacl->AceCount - ExpectedDacl->AceCount;
     for (i = 0; i < Dacl->AceCount; i++)
     {
-        if (!GetAce(Dacl, i, (PVOID *)&Ace) || (Ace->AceFlags & INHERITED_ACE))
-            continue;
-        for (j = 0; j < ExpectedDacl->AceCount; j++)
+        if (!GetAce(Dacl, i, (PVOID *)&Ace))
+            goto Cleanup;
+        if (i < First)
         {
-            if (Used[j] || !GetAce(ExpectedDacl, j, (PVOID *)&Other) || !(Other->AceFlags & INHERITED_ACE))
-                continue;
-            /* the same ACE but for the flag: type, size, the other flags, mask and SID */
-            if (Other->AceType == Ace->AceType && Other->AceSize == Ace->AceSize &&
-                (Other->AceFlags & ~INHERITED_ACE) == Ace->AceFlags &&
-                RtlEqualMemory((PUCHAR)Other + sizeof(ACE_HEADER), (PUCHAR)Ace + sizeof(ACE_HEADER),
-                               Ace->AceSize - sizeof(ACE_HEADER)))
-            {
-                Used[j] = TRUE;
-                Ace->AceFlags |= INHERITED_ACE;
-                break;
-            }
+            if (Ace->AceFlags & INHERITED_ACE)
+                goto Cleanup;
+            continue;
         }
+        if (!GetAce(ExpectedDacl, i - First, (PVOID *)&Other) ||
+            Other->AceType != Ace->AceType || Other->AceSize != Ace->AceSize ||
+            (Other->AceFlags & ~INHERITED_ACE) != (Ace->AceFlags & ~INHERITED_ACE) ||
+            !RtlEqualMemory((PUCHAR)Other + sizeof(ACE_HEADER), (PUCHAR)Ace + sizeof(ACE_HEADER),
+                            Ace->AceSize - sizeof(ACE_HEADER)))
+            goto Cleanup;
     }
 
+    for (i = First; i < Dacl->AceCount; i++)
+    {
+        if (GetAce(Dacl, i, (PVOID *)&Ace))
+            Ace->AceFlags |= INHERITED_ACE;
+    }
+    Marked = TRUE;
+
 Cleanup:
-    if (Used != NULL)
-        LocalFree(Used);
     RtlDeleteSecurityObject(&Expected);
+    return Marked;
 }
 
 /*
@@ -945,7 +973,7 @@ AccpPropagateToSubkeys(IN HKEY Key,
         SECURITY_DESCRIPTOR Absolute;
         PSID Owner = NULL, Group = NULL;
         PACL OldDacl = NULL, NewDacl = NULL;
-        BOOL Present, Defaulted, Same;
+        BOOL Present, Defaulted, Same, Inherits;
 
         Length = RTL_NUMBER_OF(Name);
         EnumRet = RegEnumKeyExW(Frame->Enumerate, Frame->Index++, Name, &Length, NULL, NULL, NULL, NULL);
@@ -973,13 +1001,20 @@ AccpPropagateToSubkeys(IN HKEY Key,
             !(Control & SE_DACL_PROTECTED) &&
             GetSecurityDescriptorDacl(OldSd, &Present, &OldDacl, &Defaulted) && Present && OldDacl != NULL)
         {
-            if (OldParentSd != NULL)
-                AccpMarkInheritedAces(OldSd, OldParentSd);
+            /*
+             * Only a key that is auto-inherited (its inherited ACEs the tail of the DACL) or whose DACL ends
+             * in what the old parent passed on is updated; every other key is treated as protected and left
+             * alone with its subtree: an explicit, empty or non-canonical DACL is its owner's own.
+             */
+            GetSecurityDescriptorControl(OldSd, &Control, &Revision);
+            if (Control & SE_DACL_AUTO_INHERITED)
+                Inherits = AccpInheritedAcesAreTail(OldDacl);
+            else
+                Inherits = OldParentSd != NULL && AccpMarkInheritedAces(OldSd, OldParentSd);
             GetSecurityDescriptorOwner(OldSd, &Owner, &Defaulted);
             GetSecurityDescriptorGroup(OldSd, &Group, &Defaulted);
-            GetSecurityDescriptorControl(OldSd, &Control, &Revision);
 
-            if (NT_SUCCESS(AccpMergeInheritedDacl(ParentSd, Owner, Group, OldDacl, FALSE, &NewSd)) &&
+            if (Inherits && NT_SUCCESS(AccpMergeInheritedDacl(ParentSd, Owner, Group, OldDacl, FALSE, &NewSd)) &&
                 GetSecurityDescriptorDacl(NewSd, &Present, &NewDacl, &Defaulted) && Present && NewDacl != NULL)
             {
                 /* nothing to do, here or below, if the key has what it would get */
@@ -1079,7 +1114,8 @@ AccpSetKeySecurity(IN HKEY Key,
     DWORD Revision, Ret;
 
     if (!(SecurityInfo & DACL_SECURITY_INFORMATION) ||
-        !GetSecurityDescriptorDacl(pSecurityDescriptor, &Present, &Dacl, &Defaulted) || !Present || Dacl == NULL)
+        !GetSecurityDescriptorDacl(pSecurityDescriptor, &Present, &Dacl, &Defaulted) || !Present || Dacl == NULL ||
+        !IsValidAcl(Dacl))  /* a malformed ACL is the kernel's to reject, as on a plain set */
         return AccpSetKeySecurityPlain(Key, SecurityInfo, pSecurityDescriptor);
 
     ParentSd = AccpQueryParentKeySd(Key);
