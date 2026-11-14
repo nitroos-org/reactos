@@ -75,6 +75,7 @@ list(APPEND SOURCE
     ipv6sock.c
     ipv6stack.c
     ipv6tcp.c
+    ipv6udp.c
     v4afterv6.c
     udpoptions.c
     connectcycle.c

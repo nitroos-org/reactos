@@ -271,11 +271,11 @@ static void TestSocketOptions(SOCKET s)
     Result = setsockopt(s, IPPROTO_IPV6, IPV6_UNICAST_HOPS, (char *)&Value, sizeof(Value));
     ok(Result == 0, "setsockopt(IPV6_UNICAST_HOPS -1): %d\n", WSAGetLastError());
 
-    /* An IPv6 option the stack has no part for yet */
+    /* IPV6_PKTINFO is a datagram option: a stream socket answers WSAEINVAL (Windows 10 oracle) */
     Value = 0;
     Length = sizeof(Value);
     Result = getsockopt(s, IPPROTO_IPV6, IPV6_PKTINFO, (char *)&Value, &Length);
-    ok(Result == SOCKET_ERROR && WSAGetLastError() == WSAENOPROTOOPT, "getsockopt(IPV6_PKTINFO): %d %d\n", Result, WSAGetLastError());
+    ok(Result == SOCKET_ERROR && WSAGetLastError() == WSAEINVAL, "getsockopt(IPV6_PKTINFO): %d %d\n", Result, WSAGetLastError());
 
     /* IPV6_DONTFRAG (14): a boolean, off until set, any non-zero value reads back as 1 */
     Value = 0xdead;
