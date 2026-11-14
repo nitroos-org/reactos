@@ -1778,7 +1778,8 @@ NtQueryObject(IN HANDLE ObjectHandle,
                 {
                     BasicInfo->Attributes |= OBJ_PROTECT_CLOSE;
                 }
-                BasicInfo->GrantedAccess = HandleInfo.GrantedAccess;
+                /* Report the granted access only, not the internal protect-close bit */
+                BasicInfo->GrantedAccess = HandleInfo.GrantedAccess & ~ObpAccessProtectCloseBit;
                 BasicInfo->HandleCount = ObjectHeader->HandleCount;
                 BasicInfo->PointerCount = ObjectHeader->PointerCount;
 

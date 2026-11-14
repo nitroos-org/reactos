@@ -1554,8 +1554,9 @@ QSI_DEF(SystemHandleInformation)
 
                         HandleInformation->Handles[Index].Object = &ObjectHeader->Body;
 
+                        /* Report the granted access only, not the internal bit */
                         HandleInformation->Handles[Index].GrantedAccess =
-                            HandleTableEntry->GrantedAccess;
+                            HandleTableEntry->GrantedAccess & ~ObpAccessProtectCloseBit;
 
                         ++Index;
                     }
@@ -2981,8 +2982,9 @@ QSI_DEF(SystemExtendedHandleInformation)
 
                         HandleInformation->Handles[Index].Object = &ObjectHeader->Body;
 
+                        /* Report the granted access only, not the internal bit */
                         HandleInformation->Handles[Index].GrantedAccess =
-                            HandleTableEntry->GrantedAccess;
+                            HandleTableEntry->GrantedAccess & ~ObpAccessProtectCloseBit;
 
                         HandleInformation->Handles[Index].Reserved = 0;
 

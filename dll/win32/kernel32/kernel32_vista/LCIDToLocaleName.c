@@ -27,6 +27,11 @@ LCIDToLocaleName(
         return 0;
     }
 
+    /* LOCALE_CUSTOM_UNSPECIFIED stands for a locale the caller did not name; Windows
+       resolves it to the user default locale (measured: "en-US" on an en-US system) */
+    if (Locale == LOCALE_CUSTOM_UNSPECIFIED)
+        Locale = GetUserDefaultLCID();
+
     if (dwFlags & LOCALE_ALLOW_NEUTRAL_NAMES)
     {
         RtlFlags |= RTL_LOCALE_ALLOW_NEUTRAL_NAMES;
