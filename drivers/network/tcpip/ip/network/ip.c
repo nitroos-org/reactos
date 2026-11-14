@@ -137,6 +137,9 @@ VOID NTAPI IPTimeoutDpcFn(PKDPC Dpc,
 
     /* Clean possible outdated cached neighbor addresses */
     NBTimeout();
+
+    /* A multicast list that could not be applied (queueing failed, the adapter was resetting) */
+    LanMulticastTick();
 }
 
 

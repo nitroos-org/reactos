@@ -117,6 +117,9 @@ NTSTATUS LANRegisterProtocol(
 VOID NTAPI
 LANUnregisterProtocol(VOID);
 
+/* Once a second (IPTimeoutDpcFn): queues the multicast worker of an adapter whose list is still to be applied */
+VOID LanMulticastTick(VOID);
+
 VOID LANStartup(VOID);
 VOID LANShutdown(VOID);
 
