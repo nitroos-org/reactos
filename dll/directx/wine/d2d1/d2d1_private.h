@@ -158,6 +158,8 @@ struct d2d_device_context_ops
     /* The render target is presented or read back only at EndDraw: draws of
      * plain fills may be held back and issued together. */
     BOOL batch_fills;
+    /* Optional: called by BeginDraw, before anything is drawn. */
+    void (*device_context_begin_draw)(IUnknown *outer_unknown);
 };
 
 enum d2d_device_context_sampler_limits
@@ -279,6 +281,11 @@ struct d2d_wic_render_target
     unsigned int width;
     unsigned int height;
     unsigned int bpp;
+
+    /* The bitmap's pixels as the target texture holds them: what the last
+     * read-back wrote, or the last upload from the bitmap (width * bpp bytes
+     * per row, no padding). */
+    BYTE *contents;
 };
 
 HRESULT d2d_wic_render_target_init(struct d2d_wic_render_target *render_target, ID2D1Factory1 *factory,

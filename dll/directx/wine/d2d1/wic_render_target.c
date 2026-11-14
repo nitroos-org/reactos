@@ -88,6 +88,9 @@ static HRESULT d2d_wic_render_target_present(IUnknown *outer_unknown)
     for (i = 0; i < render_target->height; ++i)
     {
         memcpy(dst, src, render_target->bpp * render_target->width);
+        if (render_target->contents)
+            memcpy(&render_target->contents[i * render_target->bpp * render_target->width], src,
+                    render_target->bpp * render_target->width);
         src += mapped_texture.RowPitch;
         dst += dst_pitch;
     }
@@ -97,6 +100,82 @@ static HRESULT d2d_wic_render_target_present(IUnknown *outer_unknown)
 
 end:
     return S_OK;
+}
+
+/* The texture is only a scratch copy of the bitmap: a draw that covers a part
+ * of the target must leave the rest of the bitmap as it is, so the texture
+ * starts every draw with the bitmap's pixels. Unchanged pixels are not
+ * uploaded again (the read-back at EndDraw keeps "contents" current). */
+static void d2d_wic_render_target_begin_draw(IUnknown *outer_unknown)
+{
+    struct d2d_wic_render_target *render_target = impl_from_IUnknown(outer_unknown);
+    unsigned int i, row_size = render_target->bpp * render_target->width;
+    ID3D10Resource *dst_resource;
+    IWICBitmapLock *bitmap_lock;
+    BOOL first = FALSE, changed = FALSE;
+    UINT size, pitch;
+    ID3D10Device *device;
+    WICRect rect;
+    BYTE *src;
+    HRESULT hr;
+
+    if (!row_size || !render_target->height)
+        return;
+
+    if (!render_target->contents)
+    {
+        if (!(render_target->contents = malloc((size_t)row_size * render_target->height)))
+            return;
+        first = TRUE;
+    }
+
+    rect.X = 0;
+    rect.Y = 0;
+    rect.Width = render_target->width;
+    rect.Height = render_target->height;
+    if (FAILED(hr = IWICBitmap_Lock(render_target->bitmap, &rect, WICBitmapLockRead, &bitmap_lock)))
+    {
+        WARN("Failed to lock the bitmap, hr %#lx.\n", hr);
+        return;
+    }
+
+    if (FAILED(hr = IWICBitmapLock_GetDataPointer(bitmap_lock, &size, &src))
+            || FAILED(hr = IWICBitmapLock_GetStride(bitmap_lock, &pitch)))
+    {
+        WARN("Failed to get the bitmap pixels, hr %#lx.\n", hr);
+        IWICBitmapLock_Release(bitmap_lock);
+        return;
+    }
+
+    for (i = 0; i < render_target->height; ++i)
+    {
+        BYTE *row = &render_target->contents[(size_t)i * row_size];
+
+        if (first || memcmp(row, src + (size_t)i * pitch, row_size))
+        {
+            memcpy(row, src + (size_t)i * pitch, row_size);
+            changed = TRUE;
+        }
+    }
+    IWICBitmapLock_Release(bitmap_lock);
+
+    if (!changed)
+        return;
+
+    TRACE("Uploading the bitmap of render target %p (%ux%u) to its texture.\n",
+            render_target, render_target->width, render_target->height);
+
+    if (FAILED(hr = IDXGISurface_QueryInterface(render_target->dxgi_surface,
+            &IID_ID3D10Resource, (void **)&dst_resource)))
+    {
+        ERR("Failed to get the target resource interface, hr %#lx.\n", hr);
+        return;
+    }
+
+    ID3D10Texture2D_GetDevice(render_target->readback_texture, &device);
+    ID3D10Device_UpdateSubresource(device, dst_resource, 0, NULL, render_target->contents, row_size, 0);
+    ID3D10Device_Release(device);
+    ID3D10Resource_Release(dst_resource);
 }
 
 static HRESULT STDMETHODCALLTYPE d2d_wic_render_target_QueryInterface(IUnknown *iface, REFIID iid, void **out)
@@ -128,6 +207,7 @@ static ULONG STDMETHODCALLTYPE d2d_wic_render_target_Release(IUnknown *iface)
     if (!refcount)
     {
         IWICBitmap_Release(render_target->bitmap);
+        free(render_target->contents);
         ID3D10Texture2D_Release(render_target->readback_texture);
         IUnknown_Release(render_target->dxgi_inner);
         IDXGISurface_Release(render_target->dxgi_surface);
@@ -148,11 +228,13 @@ static const struct d2d_device_context_ops d2d_wic_render_target_ops =
 {
     d2d_wic_render_target_present,
     TRUE,
+    d2d_wic_render_target_begin_draw,
 };
 
 HRESULT d2d_wic_render_target_init(struct d2d_wic_render_target *render_target, ID2D1Factory1 *factory,
         ID3D10Device1 *d3d_device, IWICBitmap *bitmap, const D2D1_RENDER_TARGET_PROPERTIES *desc)
 {
+    D2D1_RENDER_TARGET_PROPERTIES target_desc = *desc;
     D3D10_TEXTURE2D_DESC texture_desc;
     ID3D10Texture2D *texture;
     IDXGIDevice *dxgi_device;
@@ -187,6 +269,10 @@ HRESULT d2d_wic_render_target_init(struct d2d_wic_render_target *render_target, 
                 || IsEqualGUID(&bitmap_format, &GUID_WICPixelFormat32bppBGR))
         {
             texture_desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+            /* On Windows the target bitmap of a premultiplied WIC bitmap is premultiplied (measured). */
+            if (target_desc.pixelFormat.alphaMode == D2D1_ALPHA_MODE_UNKNOWN
+                    && IsEqualGUID(&bitmap_format, &GUID_WICPixelFormat32bppPBGRA))
+                target_desc.pixelFormat.alphaMode = D2D1_ALPHA_MODE_PREMULTIPLIED;
         }
         else if (IsEqualGUID(&bitmap_format, &GUID_WICPixelFormat32bppPRGBA)
                 || IsEqualGUID(&bitmap_format, &GUID_WICPixelFormat32bppRGB))
@@ -264,7 +350,7 @@ HRESULT d2d_wic_render_target_init(struct d2d_wic_render_target *render_target, 
 
     hr = d2d_d3d_create_render_target(unsafe_impl_from_ID2D1Device((ID2D1Device1 *)device),
             render_target->dxgi_surface, &render_target->IUnknown_iface,
-            &d2d_wic_render_target_ops, desc, (void **)&render_target->dxgi_inner);
+            &d2d_wic_render_target_ops, &target_desc, (void **)&render_target->dxgi_inner);
     ID2D1Device_Release(device);
     if (FAILED(hr))
     {
