@@ -898,6 +898,9 @@ typedef struct _WS_IPV6_INFO
 BOOL
 WsQueryIpv6(PWS_IPV6_INFO Info);
 
+BOOL
+WsIpv6SocketsOn(VOID);
+
 FORCEINLINE
 DWORD
 WsQuickProlog(VOID)

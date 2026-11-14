@@ -426,8 +426,11 @@ START_TEST(ipv6sock)
 
     ok(WSAStartup(MAKEWORD(2, 2), &wsaData) == 0, "WSAStartup failed\n");
 
-    SwitchOn = ReadSwitch();
-    trace("IPv6 switch (Tcpip\\Parameters\\Ipv6Enable): %s\n", SwitchOn ? "on" : "off");
+    /* IPv6 sockets exist when the stack says IPv6 is on and it takes IPv6 sockets (the value alone, with a stack
+       that has no IPv6 sockets, gives the answers of a system without IPv6) */
+    SwitchOn = Ipv6SocketsOn();
+    trace("IPv6 switch (Tcpip\\Parameters\\Ipv6Enable): %s; stack state 0x%lx: IPv6 sockets %s\n",
+          ReadSwitch() ? "on" : "off", Ipv6StackFlags(), SwitchOn ? "on" : "off");
 
     TestHelper();
     TestSockets();

@@ -73,6 +73,8 @@ list(APPEND SOURCE
     udpzerolen.c
     v6only.c
     ipv6sock.c
+    ipv6stack.c
+    v4afterv6.c
     udpoptions.c
     connectcycle.c
     ephport.c

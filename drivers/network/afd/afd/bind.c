@@ -134,6 +134,15 @@ AfdBindSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                   IrpSp->Parameters.DeviceIoControl.InputBufferLength - FIELD_OFFSET(AFD_BIND_DATA, Address))
             : NULL;
 
+    /* The receive filter of a datagram socket is built from the address of this bind. One that an earlier bind
+     * left behind (its address file could not be opened, so no receive uses it) describes that earlier address,
+     * possibly of a type the transport refuses as a filter: it goes, and the new one is built */
+    if (FCB->AddressFrom && !FCB->AddressFile.Object)
+    {
+        ExFreePoolWithTag(FCB->AddressFrom, TAG_AFD_TDI_CONNECTION_INFORMATION);
+        FCB->AddressFrom = NULL;
+    }
+
     if( FCB->LocalAddress && !FCB->AddressFrom )
         Status = TdiBuildConnectionInfo( &FCB->AddressFrom,
                                          FCB->LocalAddress );

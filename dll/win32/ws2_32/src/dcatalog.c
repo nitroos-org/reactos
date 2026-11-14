@@ -18,39 +18,23 @@
 /* FUNCTIONS *****************************************************************/
 
 /*
- * The AF_INET6 entries of the protocol catalog are there for the stack's IPv6 switch
- * (HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Ipv6Enable, a REG_DWORD, off when absent): while
- * it is off the catalog is what it was before the entries were added, so nothing can see or select an IPv6
- * protocol, and an IPv6 socket is refused here with WSAEAFNOSUPPORT. The value does not change while the system
- * runs; it is read once per process.
+ * The AF_INET6 entries of the built-in provider (MSAFD, the AFD Winsock provider) are in the catalog of every
+ * install, for the stack's IPv6 sockets. They are listed only while the stack says it has IPv6 on and takes IPv6
+ * addresses for its sockets (WsIpv6SocketsOn, asked of tcpip.sys; no registry value is read here): otherwise the
+ * catalog is what it was before the entries were added, so nothing can see or select an IPv6 protocol, and an
+ * IPv6 socket is refused here with WSAEAFNOSUPPORT. Entries of any other provider are listed as they are.
+ * The catalog in memory is then a filtered view: anything that writes it back to the registry has to write the
+ * entries it left out as well.
  */
-static LONG WsIpv6State; /* 0 not read yet, 1 on, 2 off */
+static const GUID WsMsafdProviderId =
+    { 0xe70f1aa0, 0xab8b, 0x11cf, { 0x8c, 0xa3, 0x00, 0x80, 0x5f, 0x48, 0xa1, 0x92 } };
 
 static BOOLEAN
-WsIpv6SwitchOn(VOID)
+WsTcEntryHidden(IN PTCATALOG_ENTRY CatalogEntry)
 {
-    LONG State = WsIpv6State;
-    HKEY Key;
-    DWORD Type, Value = 0, Size = sizeof(Value);
-
-    if (State)
-        return State == 1;
-
-    State = 2;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
-                      L"SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters",
-                      0,
-                      KEY_QUERY_VALUE,
-                      &Key) == ERROR_SUCCESS)
-    {
-        if (RegQueryValueExW(Key, L"Ipv6Enable", NULL, &Type, (LPBYTE)&Value, &Size) == ERROR_SUCCESS &&
-            Type == REG_DWORD && Size == sizeof(Value) && Value != 0)
-            State = 1;
-        RegCloseKey(Key);
-    }
-
-    InterlockedExchange(&WsIpv6State, State);
-    return State == 1;
+    return CatalogEntry->ProtocolInfo.iAddressFamily == AF_INET6 &&
+           IsEqualGUID(&CatalogEntry->ProtocolInfo.ProviderId, &WsMsafdProviderId) &&
+           !WsIpv6SocketsOn();
 }
 
 #define WsTcLock()          EnterCriticalSection(&Catalog->Lock)
@@ -394,8 +378,8 @@ WsTcRefreshFromRegistry(IN PTCATALOG Catalog,
                 break;
             }
 
-            /* An IPv6 protocol exists only while the stack takes IPv6 */
-            if (CatalogEntry->ProtocolInfo.iAddressFamily == AF_INET6 && !WsIpv6SwitchOn())
+            /* An IPv6 protocol of MSAFD exists only while the stack takes IPv6 sockets */
+            if (WsTcEntryHidden(CatalogEntry))
             {
                 WsTcEntryDereference(CatalogEntry);
                 continue;

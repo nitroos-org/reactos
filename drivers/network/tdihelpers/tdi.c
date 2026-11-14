@@ -188,9 +188,23 @@ NTSTATUS TdiOpenAddressFile(
     RtlCopyMemory(EaInfo->EaName,
                   TdiTransportAddress,
                   TDI_TRANSPORT_ADDRESS_LENGTH);
-    /* The whole address, whichever its type: an IPv6 one is longer than a TA_IP_ADDRESS */
-    EaInfo->EaValueLength = TaLengthOfTransportAddress( Name ) > sizeof(TA_IP_ADDRESS) ?
-                            TaLengthOfTransportAddress( Name ) : sizeof(TA_IP_ADDRESS);
+    /* An IPv4 address states the size of a TA_IP_ADDRESS, as it always did (that is all the transport reads of
+     * it, whatever AddressLength says). Any other type states its whole length, which an IPv6 address needs:
+     * one that a USHORT cannot state is refused rather than cut short */
+    if (Name->Address[0].AddressType == TDI_ADDRESS_TYPE_IP)
+    {
+        EaInfo->EaValueLength = sizeof(TA_IP_ADDRESS);
+    }
+    else if (TaLengthOfTransportAddress( Name ) > MAXUSHORT)
+    {
+        ExFreePoolWithTag(EaInfo, TAG_AFD_EA_INFO);
+        return STATUS_INVALID_PARAMETER;
+    }
+    else
+    {
+        EaInfo->EaValueLength = (USHORT)(TaLengthOfTransportAddress( Name ) > sizeof(TA_IP_ADDRESS) ?
+                                          TaLengthOfTransportAddress( Name ) : sizeof(TA_IP_ADDRESS));
+    }
     Address =
         (PTRANSPORT_ADDRESS)(EaInfo->EaName + TDI_TRANSPORT_ADDRESS_LENGTH + 1); /* 0-terminated */
     TaCopyTransportAddressInPlace( Address, Name );

@@ -119,6 +119,26 @@ VOID tdiFreeThingSet( PVOID things ) {
     HeapFree( GetProcessHeap(), 0, things );
 }
 
+/* The TCP_IPV6_STATE_ flags of the stack (the header of its IP_IPV6_TABLE_ENTRY_ID answer): 0 while IPv6 is off,
+ * and when the stack does not know the request or cannot be asked */
+ULONG tdiGetIpv6StackState( HANDLE tcpFile ) {
+    PTCP_IPV6_TABLE_HEADER header = NULL;
+    DWORD size = 0;
+    ULONG state = 0;
+    NTSTATUS status;
+
+    status = tdiGetSetOfThings( tcpFile, INFO_CLASS_PROTOCOL, INFO_TYPE_PROVIDER, IP_IPV6_TABLE_ENTRY_ID,
+                                CL_NL_ENTITY, 0, 0, 1, (PVOID *)&header, &size );
+    if( !NT_SUCCESS(status) || !header )
+        return 0;
+
+    if( size >= sizeof(*header) && (header->Enabled & TCP_IPV6_STATE_ON) )
+        state = header->Enabled;
+
+    tdiFreeThingSet( header );
+    return state;
+}
+
 NTSTATUS tdiGetEntityIDSet( HANDLE tcpFile,
                             TDIEntityID **entitySet,
                             PDWORD numEntities ) {

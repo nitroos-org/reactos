@@ -37,37 +37,31 @@ C_ASSERT(sizeof(SOCKADDR_IN6_LH) == WSH_SOCKADDR_IN6_LENGTH);
 #define WSH_SET6_MCASTLOOP  0x08
 
 /*
- * IPv6 is a switch of the stack: HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Ipv6Enable (REG_DWORD,
- * read once when the stack starts, off when absent). The helper answers the same, from the same value, so that
- * a socket of the family AF_INET6 is not made unless the stack takes IPv6 (WSAEAFNOSUPPORT, what an IPv6 socket
- * has always got here). The value cannot change while the system runs; it is read once per process.
+ * An AF_INET6 socket is made only while the stack says it has IPv6 on (Tcpip\Parameters\Ipv6Enable, read by
+ * tcpip.sys when it starts) and takes IPv6 addresses for its sockets (TCP_IPV6_STATE_SOCKETS of its
+ * IP_IPV6_TABLE_ENTRY_ID answer): otherwise WSAEAFNOSUPPORT, what an IPv6 socket has always got here. The stack
+ * is the only source: no registry value is read here. Its answer cannot change while the system runs, so a
+ * definite one is kept for the process; a stack that cannot be asked counts as "no IPv6" and is asked again.
  */
-static volatile LONG WshIpv6State; /* 0 not read yet, 1 on, 2 off */
+static volatile LONG WshIpv6State; /* 0 not known yet, 1 on, 2 off */
 
 static
 BOOLEAN
 WshIpv6Enabled(VOID)
 {
     LONG State = WshIpv6State;
-    HKEY Key;
-    DWORD Type, Value = 0, Size = sizeof(Value);
+    HANDLE TcpFile;
+    ULONG Flags;
 
     if (State != 0)
         return State == 1;
 
-    State = 2;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
-                      L"SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters",
-                      0,
-                      KEY_QUERY_VALUE,
-                      &Key) == ERROR_SUCCESS)
-    {
-        if (RegQueryValueExW(Key, L"Ipv6Enable", NULL, &Type, (LPBYTE)&Value, &Size) == ERROR_SUCCESS &&
-            Type == REG_DWORD && Size == sizeof(Value) && Value != 0)
-            State = 1;
-        RegCloseKey(Key);
-    }
+    if (!NT_SUCCESS(openTcpFile(&TcpFile, FILE_READ_DATA)))
+        return FALSE;
+    Flags = tdiGetIpv6StackState(TcpFile);
+    closeTcpFile(TcpFile);
 
+    State = ((Flags & TCP_IPV6_STATE_ON) && (Flags & TCP_IPV6_STATE_SOCKETS)) ? 1 : 2;
     InterlockedExchange(&WshIpv6State, State);
     return State == 1;
 }

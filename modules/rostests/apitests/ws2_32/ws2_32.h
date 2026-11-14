@@ -41,4 +41,10 @@ int GetRequestAndWait(SOCKET sck);
 /* ws2_32.c */
 extern HANDLE g_hHeap;
 
+/* ipv6stack.c: the IPv6 state of the stack (TCP_IPV6_STATE_ flags of tcpioctl.h) */
+#define TEST_IPV6_STATE_ON      0x1
+#define TEST_IPV6_STATE_SOCKETS 0x2
+ULONG Ipv6StackFlags(void);
+BOOL Ipv6SocketsOn(void);
+
 #endif /* !_WS2_32_APITESTS_H */

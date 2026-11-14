@@ -147,16 +147,16 @@ SockGetTdiName(
                                                     );
             }
 
-            /* The helper refuses the socket (an IPv6 one while the stack has no IPv6): its error is the answer.
-             * The helper stays loaded and its mapping cached, as for any other */
+            /* The helper data has its own copy of the transport name, so the list goes either way; the mapping
+             * stays with the loaded helper (cached, as for any other) */
+            HeapFree(GlobalHeap, 0, Transports);
+
+            /* The helper refuses the socket (an IPv6 one while the stack has no IPv6): its error is the answer */
             if (Status != NO_ERROR)
                 return Status;
 
             /* Return the Helper Pointers */
             *HelperDllData = HelperData;
-            /* We actually cache these ... the can't be freed yet */
-            /*HeapFree(GlobalHeap, 0, Transports);*/
-            /*HeapFree(GlobalHeap, 0, Mapping);*/
             return NO_ERROR;
         }
 

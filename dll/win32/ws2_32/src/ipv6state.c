@@ -21,6 +21,8 @@
 /* 0 = not asked yet, 1 = off, 2 = on. The switch is read once by the stack when it starts, so a definite answer
    holds for the life of the process */
 static volatile LONG WsIpv6Known;
+/* The TCP_IPV6_STATE_ flags of that answer (set before WsIpv6Known says "on") */
+static volatile LONG WsIpv6Flags;
 
 static
 NTSTATUS
@@ -139,6 +141,7 @@ WsQueryIpv6(PWS_IPV6_INFO Info)
         goto Done;
     }
 
+    InterlockedExchange(&WsIpv6Flags, (LONG)Header->Enabled);
     InterlockedExchange(&WsIpv6Known, 2);
     Result = TRUE;
 
@@ -172,4 +175,18 @@ Done:
     if (File)
         NtClose(File);
     return Result;
+}
+
+/*
+ * TRUE when the stack has IPv6 on and takes IPv6 addresses for its sockets (TCP_IPV6_STATE_SOCKETS): only then
+ * does the protocol catalog list the IPv6 protocols. A stack with IPv6 on that has no IPv6 sockets yet, or one
+ * that cannot be asked, gets the catalog of a system without IPv6, so that nothing (.NET's OSSupportsIPv6, for
+ * one) chooses IPv6 sockets the stack would refuse.
+ */
+BOOL
+WsIpv6SocketsOn(VOID)
+{
+    if (!WsQueryIpv6(NULL))
+        return FALSE;
+    return (WsIpv6Flags & TCP_IPV6_STATE_SOCKETS) != 0;
 }

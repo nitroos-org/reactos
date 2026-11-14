@@ -92,10 +92,16 @@ typedef struct _TCP_TIMEWAIT_ROW
 
 typedef struct _TCP_IPV6_TABLE_HEADER
 {
-    ULONG Enabled;
+    ULONG Enabled;          /* 0, or TCP_IPV6_STATE_ON with the other TCP_IPV6_STATE_ flags */
     ULONG InterfaceCount;
     ULONG AddressCount;
 } TCP_IPV6_TABLE_HEADER, *PTCP_IPV6_TABLE_HEADER;
+
+/* Enabled: IPv6 is on */
+#define TCP_IPV6_STATE_ON               0x1
+/* Enabled: the transport takes IPv6 addresses for TCP (address files, connections, listeners): only then are
+   AF_INET6 sockets made and the IPv6 protocols listed in the Winsock catalog */
+#define TCP_IPV6_STATE_SOCKETS          0x2
 
 /* IPv6 is usable on the interface */
 #define TCP_IPV6_IF_ENABLED             0x1
