@@ -70,6 +70,7 @@ typedef struct _SOCKET_CONTEXT {
     LONG Ipv6UnicastHops;
     LONG Ipv6MulticastHops;
     LONG Ipv6MulticastLoop;
+    LONG Ipv6DontFragment;
 } SOCKET_CONTEXT, *PSOCKET_CONTEXT;
 
 INT

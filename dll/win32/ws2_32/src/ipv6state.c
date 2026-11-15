@@ -9,6 +9,7 @@
 
 #include <ndk/iofuncs.h>
 #include <ndk/obfuncs.h>
+#include <ndk/psfuncs.h>
 #include <tdiinfo.h>
 #include <tcpioctl.h>
 
@@ -23,6 +24,29 @@
 static volatile LONG WsIpv6Known;
 /* The TCP_IPV6_STATE_ flags of that answer (set before WsIpv6Known says "on") */
 static volatile LONG WsIpv6Flags;
+
+/*
+ * TRUE when the calling thread has a token of its own (it impersonates someone). What an impersonated token may
+ * open says nothing about the process: a server that impersonates a restricted client first must not pin the
+ * whole process to "no IPv6". Any answer but "no token" (including a failure to ask) counts as impersonating.
+ */
+static
+BOOLEAN
+WsThreadImpersonates(VOID)
+{
+    HANDLE Token = NULL;
+    NTSTATUS Status;
+
+    /* OpenAsSelf: the check of opening the thread token uses the process token, so a restricted impersonation
+       token cannot make this question fail with ACCESS_DENIED */
+    Status = NtOpenThreadToken(NtCurrentThread(), TOKEN_QUERY, TRUE, &Token);
+    if (NT_SUCCESS(Status))
+    {
+        NtClose(Token);
+        return TRUE;
+    }
+    return Status != STATUS_NO_TOKEN;
+}
 
 static
 NTSTATUS
@@ -68,8 +92,9 @@ WsQueryIpv6Table(PHANDLE File, PVOID Buffer, ULONG BufferLength, PULONG Informat
 /*
  * TRUE when the stack has IPv6 on. With Info, the addresses it has (the interface that carries them is not
  * needed here): Info->NonLoopback counts the addresses that can be used as a source (preferred or deprecated,
- * not tentative) on a non-loopback interface. It is 0 when the stack could not be asked. A token that is
- * denied the device is cached as "off" for the life of the process.
+ * not tentative) on a non-loopback interface. It is 0 when the stack could not be asked. A process token that is
+ * denied the device is cached as "off" for the life of the process; an impersonating thread that is denied
+ * is answered "off" for that call only.
  */
 BOOL
 WsQueryIpv6(PWS_IPV6_INFO Info)
@@ -98,9 +123,10 @@ WsQueryIpv6(PWS_IPV6_INFO Info)
     Status = WsQueryIpv6Table(&File, &Small, sizeof(Small), &Got);
     if (!NT_SUCCESS(Status))
     {
-        /* A token that may not open the device (sandboxed, restricted) cannot be asked the next time either:
-           decide once, as off, instead of retrying the open on every call */
-        if (!File && Status == STATUS_ACCESS_DENIED && Known == 0)
+        /* A process whose own token may not open the device (sandboxed, restricted) cannot ask the next time
+           either: decide once, as off, instead of retrying the open on every call. A thread that impersonates
+           gets "off" for this call only: its token says nothing about the process */
+        if (!File && Status == STATUS_ACCESS_DENIED && Known == 0 && !WsThreadImpersonates())
             InterlockedExchange(&WsIpv6Known, 1);
         goto Done;
     }
