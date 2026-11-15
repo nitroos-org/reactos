@@ -71,7 +71,8 @@ mswBufferAppendBlob_Hostent(
   _Inout_ LPWSAQUERYSETW lpRes,
     _In_ char** hostAliasesA,
     _In_ char* hostnameA,
-  _In_ DWORD ip4addr);
+  _In_reads_(addrCount) const DWORD* ip4addrs,
+  _In_ DWORD addrCount);
 
 BOOL
 mswBufferAppendBlob_Servent(
@@ -86,7 +87,8 @@ BOOL
 mswBufferAppendAddr_AddrInfoW(
   _Inout_ PMSW_BUFFER mswBuf,
   _Inout_ LPWSAQUERYSETW lpRes,
-  _In_ DWORD ip4addr);
+  _In_reads_(addrCount) const DWORD* ip4addrs,
+  _In_ DWORD addrCount);
 
 WCHAR*
 StrA2WHeapAlloc(

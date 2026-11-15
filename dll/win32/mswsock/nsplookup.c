@@ -57,9 +57,14 @@
 
 //#define NSP_REDIRECT
 
+/* the biggest result of one lookup that is sized by building it (a DNS answer is at most 64 KB) */
+#define MSW_MAX_RESULT (4 * 1024 * 1024)
+
 typedef struct {
   WCHAR* hostnameW;
-  DWORD addr4;
+  DWORD addr4; /* the first address (or the only one) */
+  DWORD* addrs4; /* every IPv4 address of a name lookup (heap, addrCount entries), NULL: just addr4 */
+  DWORD addrCount;
   WCHAR* servnameW;
   WCHAR* servprotoW;
   CHAR** servaliasesA; /* array */
@@ -851,23 +856,47 @@ NSP_GetHostByNameHeapAllocW(_In_ PWSHANDLEINTERN data,
 
     //ASSERT(dp->wType == DNS_TYPE_A);
     //ASSERT(dp->wDataLength == sizeof(DNS_A_DATA));
-    curr = dp;
-    while ((curr->pNext != NULL) || (curr->wType != DNS_TYPE_A))
+
+    /* The answer: CNAMEs (the aliases) and every A record, in the order of the answer */
     {
-        if (curr->wType == DNS_TYPE_CNAME)
+        DWORD Count = 0;
+
+        for (curr = dp; curr != NULL; curr = curr->pNext)
         {
-            Aliases[AliasIndex++] = curr->Data.Cname.pNameHost;
+            if (curr->wType == DNS_TYPE_A)
+                Count++;
         }
-        curr = curr->pNext;
+
+        if (Count == 0)
+        {
+            result = WSASERVICE_NOT_FOUND;
+            goto cleanup;
+        }
+
+        hostinfo->addrs4 = HeapAlloc(hHeap, 0, Count * sizeof(DWORD));
+        if (hostinfo->addrs4 == NULL)
+        {
+            result = WSA_NOT_ENOUGH_MEMORY;
+            goto cleanup;
+        }
+
+        for (curr = dp; curr != NULL; curr = curr->pNext)
+        {
+            if (curr->wType == DNS_TYPE_CNAME)
+            {
+                if (AliasIndex < WS2_INTERNAL_MAX_ALIAS - 1)
+                    Aliases[AliasIndex++] = curr->Data.Cname.pNameHost;
+            }
+            else if (curr->wType == DNS_TYPE_A)
+            {
+                if (hostinfo->addrCount == 0)
+                    hostinfo->hostnameW = StrCpyHeapAllocW(hHeap, curr->pName);
+                hostinfo->addrs4[hostinfo->addrCount++] = curr->Data.A.IpAddress;
+            }
+        }
     }
 
-    if (curr->wType != DNS_TYPE_A)
-    {
-        result = WSASERVICE_NOT_FOUND;
-        goto cleanup;
-    }
-    hostinfo->hostnameW = StrCpyHeapAllocW(hHeap, curr->pName);
-    hostinfo->addr4 = curr->Data.A.IpAddress;
+    hostinfo->addr4 = hostinfo->addrs4[0];
     if (AliasIndex)
     {
         hostinfo->servaliasesA = StrAryCpyHeapAllocWToA(hHeap, (WCHAR**)&Aliases);
@@ -1357,11 +1386,14 @@ NSP_BuildNLAResultW(_In_ PWSHANDLEINTERN data,
     return ERROR_SUCCESS;
 }
 
+/* One attempt to build the result in the buffer given. *Overflow tells that the buffer was too small. */
+static
 INT
-NSP_LookupServiceNextW(_In_ PWSHANDLEINTERN data,
-                       _In_ DWORD dwControlFlags,
-                       _Inout_ LPWSAQUERYSETW lpRes,
-                       _Inout_ LPDWORD lpResLen)
+NSP_LookupServiceNextOnce(_In_ PWSHANDLEINTERN data,
+                          _In_ DWORD dwControlFlags,
+                          _Inout_ LPWSAQUERYSETW lpRes,
+                          _Inout_ LPDWORD lpResLen,
+                          _Out_ PBOOL Overflow)
 {
     MSW_BUFFER buf;
     WSHOSTINFOINTERN hostinfo;
@@ -1373,6 +1405,7 @@ NSP_LookupServiceNextW(_In_ PWSHANDLEINTERN data,
     CHAR* ServiceProtocolNameA = NULL;
 
     RtlZeroMemory(&hostinfo, sizeof(hostinfo));
+    *Overflow = FALSE;
 
     /* init and build result-buffer */
     mswBufferInit(&buf, (BYTE*)lpRes, *lpResLen);
@@ -1503,7 +1536,10 @@ NSP_LookupServiceNextW(_In_ PWSHANDLEINTERN data,
 
     if ((LUP_RETURN_ADDR & data->dwControlFlags) != 0)
     {
-        if (!mswBufferAppendAddr_AddrInfoW(&buf, lpRes, hostinfo.addr4))
+        if (!mswBufferAppendAddr_AddrInfoW(&buf,
+                                           lpRes,
+                                           hostinfo.addrs4 ? hostinfo.addrs4 : &hostinfo.addr4,
+                                           hostinfo.addrs4 ? hostinfo.addrCount : 1))
         {
             *lpResLen = buf.bytesUsed;
             result = WSAEFAULT;
@@ -1520,7 +1556,8 @@ NSP_LookupServiceNextW(_In_ PWSHANDLEINTERN data,
                                              lpRes,
                                              (LUP_RETURN_ALIASES & data->dwControlFlags) != 0 ? hostinfo.servaliasesA : NULL,
                                              ServiceInstanceNameA,
-                                             hostinfo.addr4))
+                                             hostinfo.addrs4 ? hostinfo.addrs4 : &hostinfo.addr4,
+                                             hostinfo.addrs4 ? hostinfo.addrCount : 1))
             {
                 *lpResLen = buf.bytesUsed;
                 result = WSAEFAULT;
@@ -1567,6 +1604,8 @@ NSP_LookupServiceNextW(_In_ PWSHANDLEINTERN data,
 
     result = ERROR_SUCCESS;
 End:
+    *Overflow = !buf.bufok;
+
     /* cleanup */
     if (ServiceInstanceNameA != NULL)
         HeapFree(hHeap, 0, ServiceInstanceNameA);
@@ -1577,6 +1616,9 @@ End:
     if (hostinfo.hostnameW != NULL)
         HeapFree(hHeap, 0, hostinfo.hostnameW);
 
+    if (hostinfo.addrs4 != NULL)
+        HeapFree(hHeap, 0, hostinfo.addrs4);
+
     if (hostinfo.servnameW != NULL)
         HeapFree(hHeap, 0, hostinfo.servnameW);
 
@@ -1584,6 +1626,52 @@ End:
         HeapFree(hHeap, 0, hostinfo.servprotoW);
 
     return result;
+}
+
+/* A result that did not fit the buffer is reported with the size it needs (and does not count as the one
+   result of the lookup: the caller asks again with a bigger buffer). The size is found by building the result
+   in scratch buffers of growing size. */
+INT
+NSP_LookupServiceNextW(_In_ PWSHANDLEINTERN data,
+                       _In_ DWORD dwControlFlags,
+                       _Inout_ LPWSAQUERYSETW lpRes,
+                       _Inout_ LPDWORD lpResLen)
+{
+    DWORD Saved = data->CallIDCounter;
+    DWORD Size, Used;
+    BOOL Overflow;
+    INT result;
+
+    result = NSP_LookupServiceNextOnce(data, dwControlFlags, lpRes, lpResLen, &Overflow);
+    if (result != WSAEFAULT || !Overflow)
+        return result;
+
+    data->CallIDCounter = Saved;
+    Size = *lpResLen < 1024 ? 1024 : *lpResLen * 2;
+    while (Size <= MSW_MAX_RESULT)
+    {
+        LPWSAQUERYSETW Scratch = HeapAlloc(GetProcessHeap(), 0, Size);
+        INT Again;
+
+        if (Scratch == NULL)
+            break;
+
+        Used = Size;
+        Again = NSP_LookupServiceNextOnce(data, dwControlFlags, Scratch, &Used, &Overflow);
+        HeapFree(GetProcessHeap(), 0, Scratch);
+        data->CallIDCounter = Saved;
+
+        if (Again == ERROR_SUCCESS)
+        {
+            *lpResLen = Used;
+            return WSAEFAULT;
+        }
+        if (Again != WSAEFAULT || !Overflow)
+            break;
+        Size *= 2;
+    }
+
+    return WSAEFAULT;
 }
 
 /* Implementations - Exports */

@@ -139,7 +139,8 @@ mswBufferAppendLst(_Inout_ PMSW_BUFFER mswBuf,
         if (!mswBufferAppendPtr(mswBuf, (void*)lstDataPos))
             return FALSE;
 
-        lstDataPos += sizeof(UINT_PTR);
+        /* the items are stored one after the other, itemByteLength each */
+        lstDataPos += itemByteLength;
     }
 
     /* end of list */
@@ -228,11 +229,12 @@ mswBufferAppendBlob_Hostent(_Inout_ PMSW_BUFFER mswBuf,
                             _Inout_ LPWSAQUERYSETW lpRes,
                             _In_ char** hostAliasesA,
                             _In_ char* hostnameA,
-                            _In_ DWORD ip4addr)
+                            _In_reads_(addrCount) const DWORD* ip4addrs,
+                            _In_ DWORD addrCount)
 {
     PHOSTENT phe;
-    void* lst[2];
     BYTE* bytesOfs;
+    DWORD i;
 
     /* blob */
     lpRes->lpBlob = (LPBLOB)mswBufferEndPtr(mswBuf);
@@ -270,15 +272,30 @@ mswBufferAppendBlob_Hostent(_Inout_ PMSW_BUFFER mswBuf,
             return FALSE;
     }
 
-    /* addr_list */
-    RtlZeroMemory(lst, sizeof(lst));
-
-    lst[0] = (void*)&ip4addr;
-
+    /* addr_list: the pointers (relative to the start of the hostent), a NULL, then the addresses */
     phe->h_addr_list = (char**)(mswBufferEndPtr(mswBuf) - bytesOfs);
 
-    if (!mswBufferAppendLst(mswBuf, lst, 4, -(LONG_PTR)bytesOfs))
+    if (addrCount > (MAXDWORD - 2 * sizeof(DWORD_PTR)) / (sizeof(DWORD_PTR) + sizeof(DWORD)) ||
+        !mswBufferCheck(mswBuf, (addrCount + 1) * (DWORD)sizeof(DWORD_PTR) + addrCount * (DWORD)sizeof(DWORD)))
         return FALSE;
+
+    for (i = 0; i < addrCount; i++)
+    {
+        DWORD_PTR Rel = (mswBufferEndPtr(mswBuf) - bytesOfs) +
+                        (addrCount + 1 - i) * sizeof(DWORD_PTR) + i * sizeof(DWORD);
+
+        if (!mswBufferAppendPtr(mswBuf, (void*)Rel))
+            return FALSE;
+    }
+
+    if (!mswBufferAppendPtr(mswBuf, NULL))
+        return FALSE;
+
+    for (i = 0; i < addrCount; i++)
+    {
+        if (!mswBufferAppend(mswBuf, (void*)&ip4addrs[i], sizeof(DWORD)))
+            return FALSE;
+    }
 
     /* name */
     phe->h_name = (char*)(mswBufferEndPtr(mswBuf) - bytesOfs);
@@ -351,45 +368,54 @@ mswBufferAppendBlob_Servent(_Inout_ PMSW_BUFFER mswBuf,
 BOOL
 mswBufferAppendAddr_AddrInfoW(_Inout_ PMSW_BUFFER mswBuf,
                               _Inout_ LPWSAQUERYSETW lpRes,
-                              _In_ DWORD ip4addr)
+                              _In_reads_(addrCount) const DWORD* ip4addrs,
+                              _In_ DWORD addrCount)
 {
     LPCSADDR_INFO paddrinfo;
     LPSOCKADDR_IN psa;
+    DWORD i;
 
-    lpRes->dwNumberOfCsAddrs = 1;
+    /* One CSADDR_INFO per address, the array first, then the two socket addresses of each entry */
+    if (addrCount > MAXDWORD / (sizeof(*paddrinfo) + 2 * sizeof(SOCKADDR_IN)))
+        return FALSE;
+
+    lpRes->dwNumberOfCsAddrs = addrCount;
     lpRes->lpcsaBuffer = (LPCSADDR_INFO)mswBufferEndPtr(mswBuf);
 
     paddrinfo = lpRes->lpcsaBuffer;
 
-    if (!mswBufferIncUsed(mswBuf, sizeof(*paddrinfo)))
+    if (!mswBufferIncUsed(mswBuf, addrCount * sizeof(*paddrinfo)))
         return FALSE;
 
-    paddrinfo->LocalAddr.lpSockaddr = (LPSOCKADDR)mswBufferEndPtr(mswBuf);
+    for (i = 0; i < addrCount; i++)
+    {
+        paddrinfo[i].LocalAddr.lpSockaddr = (LPSOCKADDR)mswBufferEndPtr(mswBuf);
 
-    if (!mswBufferIncUsed(mswBuf, sizeof(*paddrinfo->LocalAddr.lpSockaddr)))
-        return FALSE;
+        if (!mswBufferIncUsed(mswBuf, sizeof(*paddrinfo[i].LocalAddr.lpSockaddr)))
+            return FALSE;
 
-    paddrinfo->RemoteAddr.lpSockaddr = (LPSOCKADDR)mswBufferEndPtr(mswBuf);
+        paddrinfo[i].RemoteAddr.lpSockaddr = (LPSOCKADDR)mswBufferEndPtr(mswBuf);
 
-    if (!mswBufferIncUsed(mswBuf, sizeof(*paddrinfo->RemoteAddr.lpSockaddr)))
-        return FALSE;
+        if (!mswBufferIncUsed(mswBuf, sizeof(*paddrinfo[i].RemoteAddr.lpSockaddr)))
+            return FALSE;
 
-    paddrinfo->iSocketType = SOCK_DGRAM;
-    paddrinfo->iProtocol = IPPROTO_UDP;
+        paddrinfo[i].iSocketType = SOCK_DGRAM;
+        paddrinfo[i].iProtocol = IPPROTO_UDP;
 
-    psa = (LPSOCKADDR_IN)paddrinfo->LocalAddr.lpSockaddr;
-    paddrinfo->LocalAddr.iSockaddrLength = sizeof(*psa);
-    psa->sin_family = AF_INET;
-    psa->sin_port = 0;
-    psa->sin_addr.s_addr = 0;
-    RtlZeroMemory(psa->sin_zero, sizeof(psa->sin_zero));
+        psa = (LPSOCKADDR_IN)paddrinfo[i].LocalAddr.lpSockaddr;
+        paddrinfo[i].LocalAddr.iSockaddrLength = sizeof(*psa);
+        psa->sin_family = AF_INET;
+        psa->sin_port = 0;
+        psa->sin_addr.s_addr = 0;
+        RtlZeroMemory(psa->sin_zero, sizeof(psa->sin_zero));
 
-    psa = (LPSOCKADDR_IN)paddrinfo->RemoteAddr.lpSockaddr;
-    paddrinfo->RemoteAddr.iSockaddrLength = sizeof(*psa);
-    psa->sin_family = AF_INET;
-    psa->sin_port = 0;
-    psa->sin_addr.s_addr = ip4addr;
-    RtlZeroMemory(psa->sin_zero, sizeof(psa->sin_zero));
+        psa = (LPSOCKADDR_IN)paddrinfo[i].RemoteAddr.lpSockaddr;
+        paddrinfo[i].RemoteAddr.iSockaddrLength = sizeof(*psa);
+        psa->sin_family = AF_INET;
+        psa->sin_port = 0;
+        psa->sin_addr.s_addr = ip4addrs[i];
+        RtlZeroMemory(psa->sin_zero, sizeof(psa->sin_zero));
+    }
 
     return TRUE;
 }
