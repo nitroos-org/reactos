@@ -9,8 +9,8 @@
  *              are the MAC's EUI-64 again. Windows 10 22H2 reports a random link-local identifier with the origins
  *              WellKnown / Link (Get-NetIPAddress), and "Randomize Identifiers: enabled" by default.
  *              A secret made during setup is marked (FromSetup) and replaced at the first normal boot: the mark
- *              is gone when this test runs. Without an Ethernet link-local address (no network adapter, DAD
- *              not finished within 20 s) the address checks are skipped.
+ *              is gone when this test runs. Without an Ethernet adapter that is up (no network adapter, no
+ *              link) the address checks are skipped; one that is up without a link-local address after 20 s fails.
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
@@ -304,6 +304,19 @@ static BOOL HasEthernetLinkLocal(IP_ADAPTER_ADDRESSES *List)
     return FALSE;
 }
 
+/* An Ethernet adapter whose interface is up: with IPv6 on it must have a link-local address */
+static BOOL HasEthernetUp(IP_ADAPTER_ADDRESSES *List)
+{
+    IP_ADAPTER_ADDRESSES *A;
+
+    for (A = List; A; A = A->Next)
+    {
+        if (A->IfType == IF_TYPE_ETHERNET_CSMACD && A->PhysicalAddressLength == 6 && A->OperStatus == IfOperStatusUp)
+            return TRUE;
+    }
+    return FALSE;
+}
+
 /* The address list, waiting up to 20 s for an Ethernet adapter's link-local address (DAD takes about a second
    after the link comes up). *Any: the list has any address at all (not even ::1 with IPv6 off). */
 static IP_ADAPTER_ADDRESSES *GetList(BOOL *Any, BOOL *LinkLocalFound)
@@ -377,7 +390,12 @@ START_TEST(Ipv6StableId)
 
     if (!LinkLocalFound)
     {
-        skip("no Ethernet adapter with an IPv6 link-local address within 20 s (no network adapter or link)\n");
+        /* No adapter or no link: nothing to check. An adapter that is up without a link-local address after
+           20 s is a failure of the stack, not a reason to skip */
+        if (HasEthernetUp(List))
+            ok(0, "an Ethernet adapter is up but has no IPv6 link-local address after 20 s\n");
+        else
+            skip("no Ethernet adapter with an IPv6 link-local address within 20 s (no network adapter or link)\n");
         HeapFree(GetProcessHeap(), 0, List);
         WSACleanup();
         return;
