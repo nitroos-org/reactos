@@ -260,6 +260,11 @@ nd6_process_autoconfig_prefix(struct netif *netif,
        * Deprecation is left to the timer code where it is handled anyway. */
       if (pref_life > 0 && addr_state == IP6_ADDR_DEPRECATED) {
         netif_ip6_addr_set_state(netif, i, IP6_ADDR_PREFERRED);
+      } else if (pref_life == 0 && addr_state == IP6_ADDR_PREFERRED) {
+        /* NitroOS: an advertised preferred lifetime of 0 deprecates the address now (RFC 4862 5.5.3 e, 5.5.4), not
+           when the next timer tick finds the lifetime used up: users of the address table and source address
+           selection see it at once */
+        netif_ip6_addr_set_state(netif, i, IP6_ADDR_DEPRECATED);
       }
       netif_ip6_addr_set_pref_life(netif, i, pref_life);
       return; /* there should be at most one matching address */

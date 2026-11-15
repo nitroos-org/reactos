@@ -730,7 +730,7 @@ IsAdapterConnected(
 
 /*
  * The IPv6 addresses of an adapter, as Windows 10 lists them before the IPv4 ones: IPv6 Address, Temporary IPv6
- * Address, then Link-local IPv6 Address with its zone (%interface index); /all adds "(Preferred) ". Without IPv6
+ * Address, then Link-local IPv6 Address with its zone (%interface index); /all adds the state, "(Preferred) ". Without IPv6
  * GetAdaptersAddresses(AF_INET6) has none and nothing is printed (VERIFY ON ORACLE: the exact order and the
  * deprecated/tentative suffixes).
  */
@@ -785,7 +785,19 @@ ShowIpv6Addresses(
                 else
                     StringCchCopyA(Line, _countof(Line), Text);
                 if (bAll)
-                    StringCchCatA(Line, _countof(Line), "(Preferred) ");
+                {
+                    /* the state of the address (NL_DAD_STATE): what Windows prints between the brackets */
+                    PCSTR State = "(Preferred) ";
+
+                    switch (U->DadState)
+                    {
+                        case IpDadStateTentative: State = "(Tentative) "; break;
+                        case IpDadStateDuplicate: State = "(Duplicate) "; break;
+                        case IpDadStateDeprecated: State = "(Deprecated) "; break;
+                        default: break;
+                    }
+                    StringCchCatA(Line, _countof(Line), State);
+                }
 
                 ConResPrintf(StdOut, (Kind == 2) ? IDS_LINKLOCALV6 : (Kind == 1) ? IDS_TEMPIPV6 : IDS_IPV6ADDRESS, Line);
             }
