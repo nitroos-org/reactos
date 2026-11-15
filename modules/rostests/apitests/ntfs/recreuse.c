@@ -451,3 +451,189 @@ START_TEST(NtfsCreateDeletePool)
     ok(Grew <= 2, "cNTN grew by more than 256 KB in %lu of 16 rounds of 25 create/delete cycles\n", Grew);
     NtCleanup();
 }
+
+#define LRACE_LINKERS   1
+#define LRACE_RENAMERS  2
+
+static WCHAR LinkNames[RACE_SHARED][MAX_PATH];
+
+/* The same shared files under a second name: a file that loses one name keeps its record. */
+static DWORD WINAPI LinkOpener(PVOID Param)
+{
+    RACE *R = Param;
+    static const CHAR Data[4096];
+    DWORD Done;
+    ULONG i;
+
+    for (i = R->Index; !RaceStop; i++)
+    {
+        WCHAR Path[MAX_PATH];
+        HANDLE H;
+
+        /* Some opens are of a named stream of the file (its FCB is found and listed separately). */
+        _snwprintf(Path, MAX_PATH - 1, (i & 8) ? L"%ls:s" : L"%ls", i & 4 ? LinkNames[i % RACE_SHARED] : RaceShared[i % RACE_SHARED]);
+        H = CreateFileW(Path, GENERIC_READ | GENERIC_WRITE, SHARE_ALL, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (H == INVALID_HANDLE_VALUE)
+            continue;
+        WriteFile(H, Data, sizeof(Data), &Done, NULL);
+        CloseHandle(H);
+        R->Ops++;
+    }
+    return 0;
+}
+
+/* Both names, one after the other: the file is gone with the second. */
+static DWORD WINAPI LinkDeleter(PVOID Param)
+{
+    RACE *R = Param;
+    ULONG i;
+
+    for (i = R->Index; !RaceStop; i++)
+    {
+        BOOL A = DeleteFileW(RaceShared[i % RACE_SHARED]);
+        BOOL B = DeleteFileW(LinkNames[i % RACE_SHARED]);
+        if (A || B)
+            R->Ops++;
+    }
+    return 0;
+}
+
+static DWORD WINAPI LinkMaker(PVOID Param)
+{
+    RACE *R = Param;
+    ULONG i;
+
+    for (i = R->Index; !RaceStop; i++)
+    {
+        if (CreateHardLinkW(LinkNames[i % RACE_SHARED], RaceShared[i % RACE_SHARED], NULL))
+            R->Ops++;
+    }
+    return 0;
+}
+
+/* A new file replaces a shared name: the file that had the name loses it (and its record, with the last name). */
+static DWORD WINAPI LinkRenamer(PVOID Param)
+{
+    RACE *R = Param;
+    WCHAR Name[32], Path[MAX_PATH];
+    ULONG i;
+
+    for (i = R->Index; !RaceStop; i++)
+    {
+        HANDLE H;
+        _snwprintf(Name, 31, L"mv-%lu.tmp", R->Index);
+        NtPath(Path, Name);
+        H = CreateFileW(Path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (H == INVALID_HANDLE_VALUE)
+            continue;
+        CloseHandle(H);
+        if (MoveFileExW(Path, RaceShared[i % RACE_SHARED], MOVEFILE_REPLACE_EXISTING))
+            R->Ops++;
+        else
+            DeleteFileW(Path);
+    }
+    return 0;
+}
+
+/*
+ * NtfsOpenDeleteRace with a second name for every shared file (hard links), deletes of one name and then the other,
+ * and replacing renames: every way a file can lose its last name while an open of it is between its lookup and its FCB.
+ * The threads that create new files check every step, as there.
+ */
+static VOID RunLinkRace(PCSTR TestName, BOOLEAN Racers)
+{
+    static RACE Openers[RACE_OPENERS], Deleters[RACE_DELETERS], Makers[LRACE_LINKERS], Renamers[LRACE_RENAMERS],
+                Creators[RACE_CREATORS];
+    HANDLE Threads[RACE_OPENERS + RACE_DELETERS + LRACE_LINKERS + LRACE_RENAMERS + RACE_CREATORS];
+    ULONG t, n = 0, i, Created = 0, Opened = 0, Deleted = 0, Left = 0;
+    WCHAR Name[32], Path[MAX_PATH];
+    LONGLONG PoolBefore, PoolAfter;
+
+    if (!NtInit(TestName))
+        return;
+    for (i = 0; i < RACE_SHARED; i++)
+    {
+        _snwprintf(Name, 31, L"shared%lu.tmp", i);
+        NtPath(RaceShared[i], Name);
+        _snwprintf(Name, 31, L"link%lu.tmp", i);
+        NtPath(LinkNames[i], Name);
+    }
+    PoolBefore = NonPagedOfTag('GNTN');
+    RaceStop = 0;
+    for (t = 0; Racers && t < RACE_OPENERS; t++)
+    {
+        Openers[t].Index = t;
+        Threads[n++] = CreateThread(NULL, 0, LinkOpener, &Openers[t], 0, NULL);
+    }
+    for (t = 0; Racers && t < RACE_DELETERS; t++)
+    {
+        Deleters[t].Index = t;
+        Threads[n++] = CreateThread(NULL, 0, LinkDeleter, &Deleters[t], 0, NULL);
+    }
+    for (t = 0; Racers && t < LRACE_LINKERS; t++)
+    {
+        Makers[t].Index = t;
+        Threads[n++] = CreateThread(NULL, 0, LinkMaker, &Makers[t], 0, NULL);
+    }
+    for (t = 0; Racers && t < LRACE_RENAMERS; t++)
+    {
+        Renamers[t].Index = t;
+        Threads[n++] = CreateThread(NULL, 0, LinkRenamer, &Renamers[t], 0, NULL);
+    }
+    for (t = 0; t < RACE_CREATORS; t++)
+    {
+        Creators[t].Index = t;
+        Threads[n++] = CreateThread(NULL, 0, RaceCreator, &Creators[t], 0, NULL);
+    }
+    for (t = 0; t < n; t++)
+        ok(Threads[t] != NULL, "CreateThread failed: %lu\n", GetLastError());
+    Sleep(RACE_SECONDS * 1000);
+    RaceStop = 1;
+    for (t = 0; t < n; t++)
+    {
+        if (!Threads[t])
+            continue;
+        WaitForSingleObject(Threads[t], INFINITE);
+        CloseHandle(Threads[t]);
+    }
+    for (t = 0; t < RACE_OPENERS; t++)
+        Opened += Openers[t].Ops;
+    for (t = 0; t < RACE_DELETERS; t++)
+        Deleted += Deleters[t].Ops;
+    for (t = 0; t < RACE_CREATORS; t++)
+    {
+        Created += Creators[t].Ops;
+        ok(Creators[t].Failed == 0, "%lu steps on new files failed, first: %s of %ls, error %lu\n",
+           Creators[t].Failed, Creators[t].FirstStep, Creators[t].FirstName, Creators[t].FirstError);
+        for (i = 0; i < RACE_RING; i++)
+        {
+            _snwprintf(Name, 31, L"new-%lu-%lu.tmp", t, i);
+            NtPath(Path, Name);
+            DeleteFileW(Path);
+            if (GetFileAttributesW(Path) != INVALID_FILE_ATTRIBUTES)
+                Left++;
+        }
+    }
+    PoolAfter = NonPagedOfTag('GNTN');
+    trace("%lu opens, %lu deletes, %lu new files in %d s; GNTN nonpaged %I64d -> %I64d bytes\n",
+          Opened, Deleted, Created, RACE_SECONDS, PoolBefore, PoolAfter);
+    ok(Created > 0 && (!Racers || (Opened > 0 && Deleted > 0)), "The threads did not run (%lu, %lu, %lu)\n", Created, Opened, Deleted);
+    ok(Left == 0, "%lu new files cannot be deleted\n", Left);
+    for (i = 0; i < RACE_SHARED; i++)
+    {
+        DeleteFileW(RaceShared[i]);
+        DeleteFileW(LinkNames[i]);
+    }
+    NtCleanup();
+}
+
+START_TEST(NtfsOpenDeleteLinkRace)
+{
+    RunLinkRace("NtfsOpenDeleteLinkRace", TRUE);
+}
+
+/* The same threads that create new files, alone: the pool of the driver without the races (a baseline for the run above). */
+START_TEST(NtfsCreateOnlyPool)
+{
+    RunLinkRace("NtfsCreateOnlyPool", FALSE);
+}

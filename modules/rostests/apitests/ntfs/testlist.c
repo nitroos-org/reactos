@@ -22,6 +22,8 @@ extern void func_NtfsInherit(void);
 extern void func_NtfsNotifyRename(void);
 extern void func_NtfsNotifyScale(void);
 extern void func_NtfsOpenById(void);
+extern void func_NtfsCreateOnlyPool(void);
+extern void func_NtfsOpenDeleteLinkRace(void);
 extern void func_NtfsOpenDeleteRace(void);
 extern void func_NtfsPagingFile(void);
 extern void func_NtfsPagingWrite(void);
@@ -59,6 +61,8 @@ const struct test winetest_testlist[] =
     { "NtfsNotifyRename", func_NtfsNotifyRename },
     { "NtfsNotifyScale", func_NtfsNotifyScale },
     { "NtfsOpenById", func_NtfsOpenById },
+    { "NtfsCreateOnlyPool", func_NtfsCreateOnlyPool },
+    { "NtfsOpenDeleteLinkRace", func_NtfsOpenDeleteLinkRace },
     { "NtfsOpenDeleteRace", func_NtfsOpenDeleteRace },
     { "NtfsPagingFile", func_NtfsPagingFile },
     { "NtfsPagingWrite", func_NtfsPagingWrite },
