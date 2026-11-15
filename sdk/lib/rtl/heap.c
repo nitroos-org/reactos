@@ -2321,6 +2321,12 @@ RtlpHeapTrimCheck(PHEAP Heap)
             if (Heap->TotalFreeSize > Heap->DeCommitTotalFreeThreshold)
                 RtlpHeapTrim(Heap, Heap->DeCommitTotalFreeThreshold, HEAP_TRIM_MAX_BLOCKS);
         }
+        else if (Heap->FrontEndHeapType == HEAP_FRONTEND_CACHE)
+        {
+            /* A heap that keeps growing a little (a service whose calls each run on a new thread) is never
+               quiet: the parked blocks nobody touched during the last interval go back (RtlpHeapFeSweep) */
+            RtlpHeapFeSweep(Heap, TRUE);
+        }
     }
 }
 
@@ -2448,6 +2454,22 @@ RtlpAllocateNonDedicated(PHEAP Heap,
     /* The entries in the list must be too small for us */
     ASSERT(IsListEmpty(&Heap->FreeLists) ||
            (CONTAINING_RECORD(Heap->FreeLists.Blink, HEAP_FREE_ENTRY, FreeList)->Size < Index));
+
+    /* Parked blocks that nobody took since the last sweep stay busy and keep their neighbours from
+       coalescing, which is what makes a heap whose program moved on to other sizes grow: before growing
+       for a small block, they go back and the request looks again. What the threads go through stays
+       cached. A big block grows the heap as before: placed at the end, it has room to grow in place
+       (a hole that a sweep made in the middle would not leave it any). */
+    if (Heap->FrontEndHeapType == HEAP_FRONTEND_CACHE && Index < HEAP_FE_UNITS)
+    {
+        PVOID Block;
+
+        if (RtlpHeapFeSweepToGrow(Heap, Flags, Size, &Block))
+        {
+            if (HeapLocked) RtlLeaveHeapLock(Heap->LockVariable);
+            return Block;
+        }
+    }
 
     /* Blocks parked in the front end may make room: give them back and try the heap again.
        Only when a lot is parked (they are bounded per slot, so growing first keeps the size
