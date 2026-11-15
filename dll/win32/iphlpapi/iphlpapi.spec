@@ -33,6 +33,7 @@
 @ stdcall CreateIpNetEntry(ptr)
 @ stdcall -version=0x600+ CreateUnicastIpAddressEntry(ptr)
 @ stdcall CreateProxyArpEntry(long long long)
+@ stdcall -version=0x600+ CreateSortedAddressPairs(ptr long ptr long long ptr ptr)
 @ stdcall DeleteIPAddress(long)
 @ stdcall DeleteIpForwardEntry(ptr)
 @ stdcall -version=0x600+ DeleteIpForwardEntry2(ptr)

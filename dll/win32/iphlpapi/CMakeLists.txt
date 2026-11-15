@@ -14,6 +14,7 @@ list(APPEND SOURCE
     icmp.c
     ifenum_reactos.c
     ipstats_reactos.c
+    addrsort.c
     ipv6net.c
     ipv6state.c
     ipv6dns.c
@@ -28,6 +29,7 @@ list(APPEND SOURCE
     resinfo_reactos.c
     route_reactos.c
     route2.c
+    sortpairs.c
     iphlpapi_private.h
     ${CMAKE_CURRENT_BINARY_DIR}/iphlpapi_stubs.c)
 
