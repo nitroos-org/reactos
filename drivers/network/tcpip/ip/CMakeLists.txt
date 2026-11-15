@@ -37,6 +37,7 @@ list(APPEND SOURCE
     transport/tcp/iid6.c
     transport/tcp/nd6info.c
     transport/tcp/rdnss6.c
+    transport/tcp/route6.c
     transport/tcp/selftest6.c
     transport/tcp/tcp.c
     transport/udp/udp.c

@@ -22,6 +22,7 @@ list(APPEND SOURCE
     Ipv6Statistics.c
     Ipv6Dns.c
     Ipv6Reporting.c
+    Ipv6RouteConfig.c
     Ipv6StableId.c
     NeighborEntry2.c
     NetstatOutput.c

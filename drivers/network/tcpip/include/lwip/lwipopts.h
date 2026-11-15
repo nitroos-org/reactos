@@ -60,6 +60,11 @@
 #define LWIP_HOOK_IP6_INPUT(p, inp)     LibIp6CountInput(p, inp)
 /* A router or on-link prefix that came or went is a route change for user mode (NotifyRouteChange2) */
 #define LWIP_HOOK_ND6_ROUTES_CHANGED()  LibTCPRoutes6Changed()
+/* The IPv6 route table (route6.c): the configured routes choose the interface and the next hop where they are the
+ * best match; the ND timer ends their lifetimes (NitroOS hook in nd6.c) */
+#define LWIP_HOOK_IP6_ROUTE(src, dest)  LibIp6Route(src, dest)
+#define LWIP_HOOK_ND6_GET_GW(netif, dest) LibNd6GetGw(netif, dest)
+#define LWIP_HOOK_ND6_TMR()             LibNd6Timer()
 /* Interface events: with IPv6 on, address changes set the adapter's multicast list (if6.c). Nothing listens
  * with it off */
 #define LWIP_NETIF_EXT_STATUS_CALLBACK  1

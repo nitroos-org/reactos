@@ -1209,6 +1209,10 @@ nd6_tmr(void)
   }
 #endif /* LWIP_IPV6_SEND_ROUTER_SOLICIT */
 
+#ifdef LWIP_HOOK_ND6_TMR
+  /* NitroOS: the lifetimes of the configured routes (route6.c) */
+  LWIP_HOOK_ND6_TMR();
+#endif /* LWIP_HOOK_ND6_TMR */
 }
 
 /** Send a neighbor solicitation message for a specific neighbor cache entry
