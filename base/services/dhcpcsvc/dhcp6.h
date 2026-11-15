@@ -24,6 +24,20 @@
 #define DHCP6_VALUE_OPTIONS         "Dhcpv6Options"                 /* REG_BINARY, the options of the last Reply */
 #define DHCP6_VALUE_REPLIES         "Dhcpv6ReplyCount"              /* REG_DWORD, incremented with every accepted Reply */
 
+/* The stateful client (the router's M flag: addresses through IA_NA) adds, per interface key: */
+#define DHCP6_VALUE_STATEFUL        "Dhcpv6Stateful"                /* REG_DWORD 1 while the client asks for addresses on it */
+#define DHCP6_VALUE_ADDRESSES       "Dhcpv6Address"                 /* REG_SZ, the leased addresses, blank separated */
+#define DHCP6_VALUE_T1              "Dhcpv6T1"                      /* REG_DWORD seconds (0xFFFFFFFF never), renew time of the lease */
+#define DHCP6_VALUE_T2              "Dhcpv6T2"                      /* REG_DWORD seconds (0xFFFFFFFF never), rebind time of the lease */
+/* ipconfig /renew6 and /release6 (administrators only: the key and the event): the command goes into Dhcpv6Command,
+   the event wakes the client; the client deletes Dhcpv6Command when it is done and leaves the outcome (a Win32 error,
+   0 = success) in Dhcpv6CommandResult */
+#define DHCP6_VALUE_COMMAND         "Dhcpv6Command"                 /* REG_DWORD, DHCP6_COMMAND_ */
+#define DHCP6_VALUE_COMMAND_RESULT  "Dhcpv6CommandResult"           /* REG_DWORD */
+#define DHCP6_COMMAND_RENEW         1
+#define DHCP6_COMMAND_RELEASE       2
+#define DHCP6_COMMAND_EVENT_NAME    L"Global\\NitroDhcpv6Command"
+
 #define DHCP6_PARAMETERS_KEY        "SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters"
 #define DHCP6_INTERFACES_KEY        DHCP6_PARAMETERS_KEY "\\Interfaces"
 
