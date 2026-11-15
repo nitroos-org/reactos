@@ -139,7 +139,7 @@ IntArc( DC *dc,
     LONG PenWidth, PenOrigWidth, PenWidthY;
     double AngleStart, AngleEnd;
     LONG CenterX, CenterY;
-    BOOL bStroke, bRot;
+    BOOL bStroke, bRot, bWrapped, bEmptyWrapped;
 
     if (Right < Left)
     {
@@ -191,6 +191,22 @@ IntArc( DC *dc,
     IntLPtoDP(dc, (LPPOINT)&RectBounds, 2);
     IntLPtoDP(dc, (LPPOINT)&RectSEpts, 2);
 
+    /* Device coordinates beyond +-2^27 wrap around to 28 bits, as on Windows (see IntWrapShapeCoord). The result also
+       keeps the ring rasterisers and the rectangles derived from the box inside the int range */
+    bWrapped = FALSE;
+    {
+        LONG *pc = (LONG *)&RectBounds;
+        LONG *ps = (LONG *)&RectSEpts;
+        INT i;
+        for (i = 0; i < 4; i++)
+        {
+            LONG w = IntWrapShapeCoord(pc[i]);
+            if (w != pc[i]) bWrapped = TRUE;
+            pc[i] = w;
+            ps[i] = IntWrapShapeCoord(ps[i]);
+        }
+    }
+
     /* A mapping mode or a world transform that flips an axis turns the box around: the arc is computed on the device
        box (the radial points are device points as well, so the arc runs the same way on the screen) */
     if (RectBounds.left > RectBounds.right)
@@ -202,12 +218,10 @@ IntArc( DC *dc,
         INT tmp = RectBounds.bottom; RectBounds.bottom = RectBounds.top; RectBounds.top = tmp;
     }
 
-    /* The ring rasterisers and the rectangles derived from the box keep inside the int range for boxes within these limits
-       (the part of a larger shape that reaches a surface is far from the clamped edge) */
-    RectBounds.left = IntClampShapeCoord(RectBounds.left);
-    RectBounds.right = IntClampShapeCoord(RectBounds.right);
-    RectBounds.top = IntClampShapeCoord(RectBounds.top);
-    RectBounds.bottom = IntClampShapeCoord(RectBounds.bottom);
+    /* A box the wrap left no wider or higher than one pixel draws nothing (oracle: 1 pixel wide boxes of the wrap,
+       VERIFY ON ORACLE for such boxes that were not wrapped) */
+    bEmptyWrapped = bWrapped && (((LONGLONG)RectBounds.right - RectBounds.left <= 1) ||
+                                 ((LONGLONG)RectBounds.bottom - RectBounds.top <= 1));
 
     /* The pen of a PS_INSIDEFRAME pen lies inside the box, in device pixels */
     if (pbrPen->ulPenStyle == PS_INSIDEFRAME)
@@ -228,6 +242,11 @@ IntArc( DC *dc,
        as it is on the device */
     bRot = PATH_IsWorldRotated(dc);
     bStroke = bRot || PATH_IsShapeStroked(dc, pbrPen);
+    if (bEmptyWrapped && !bStroke)
+    {
+        PEN_ShareUnlockPen(pbrPen);
+        return TRUE;
+    }
     if (!bStroke)
         pbrPen->lWidth = PenWidth;
 
