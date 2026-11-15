@@ -1126,6 +1126,8 @@ BOOLEAN ReconfigureAdapter(PRECONFIGURE_CONTEXT Context)
     {
         /* Read the IP configuration */
         ReadIpConfiguration(Interface);
+        /* and the persistent IPv6 addresses and routes of the adapter (persist6.c) */
+        TCP6ApplyPersistent(Interface);
 
         /* Compute the broadcast address */
         Interface->Broadcast.Type = IP_ADDRESS_V4;

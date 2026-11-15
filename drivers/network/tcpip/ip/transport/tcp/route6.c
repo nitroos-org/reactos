@@ -25,7 +25,8 @@
  *
  * All of it is under lwIP's core lock, as the hooks run with it held. Lifetimes run on the interrupt time; a
  * configured route whose valid lifetime ends is removed by the ND timer (LWIP_HOOK_ND6_TMR, once a second). The
- * routes of an interface go with it (TCP6RemoveRoutesOfNetif).
+ * routes of an interface go with it (TCP6RemoveRoutesOfNetif). A route configured with TCP_IPV6_STORE_PERSISTENT
+ * is written to the persistent store too (persist6.c) and comes back whenever the adapter starts.
  */
 
 #include "precomp.h"
@@ -648,8 +649,8 @@ Route6CheckRequest(const TCP_IPV6_ROUTE_REQUEST *Request, ip6_addr_t *Prefix, ip
 {
     if (Request->Operation < TCP_IPV6_CONFIG_CREATE || Request->Operation > TCP_IPV6_CONFIG_DELETE)
         return STATUS_INVALID_PARAMETER;
-    if (Request->Store != TCP_IPV6_STORE_ACTIVE)
-        return STATUS_NOT_SUPPORTED;
+    if (Request->Store != TCP_IPV6_STORE_ACTIVE && Request->Store != TCP_IPV6_STORE_PERSISTENT)
+        return STATUS_INVALID_PARAMETER;
     if (Request->PrefixLength > 128)
         return STATUS_INVALID_PARAMETER;
 
@@ -673,18 +674,105 @@ Route6CheckRequest(const TCP_IPV6_ROUTE_REQUEST *Request, ip6_addr_t *Prefix, ip
     return STATUS_SUCCESS;
 }
 
+/* Creates, changes or removes a route over netif (core lock held). Persistent: the route is in the persistent store
+   too (a change keeps that); *WasPersistent: it was before */
+static
+NTSTATUS
+Route6ConfigureLocked(struct netif *netif, ULONG IfIndex, const TCP_IPV6_ROUTE_REQUEST *Request,
+                      const ip6_addr_t *Prefix, const ip6_addr_t *Hop, BOOLEAN OnLink, BOOLEAN Persistent,
+                      PBOOLEAN WasPersistent)
+{
+    ip6_addr_t NextHop = *Hop;
+    PROUTE6_ENTRY Entry;
+    NTSTATUS Status;
+    ULONG i;
+
+    if (!OnLink && ip6_addr_islinklocal(&NextHop))
+        ip6_addr_assign_zone(&NextHop, IP6_UNICAST, netif);
+
+    Entry = Route6Lookup(netif, Prefix, (UCHAR)Request->PrefixLength, OnLink, &NextHop);
+    *WasPersistent = Entry && (Entry->Flags & TCP_IPV6_ROUTE_PERSISTENT);
+    Persistent = Persistent || *WasPersistent;
+
+    switch (Request->Operation)
+    {
+        case TCP_IPV6_CONFIG_CREATE:
+            if (Entry)
+                return STATUS_OBJECT_NAME_COLLISION;
+            for (i = 0; i < ROUTE6_MAX && Route6Table[i].Netif; i++)
+                ;
+            if (i == ROUTE6_MAX)
+                return STATUS_INSUFFICIENT_RESOURCES;
+            Entry = &Route6Table[i];
+            RtlZeroMemory(Entry, sizeof(*Entry));
+            Entry->Netif = netif;
+            Entry->IfIndex = IfIndex;
+            Entry->Prefix = *Prefix;
+            Entry->PrefixLength = (UCHAR)Request->PrefixLength;
+            Entry->OnLink = OnLink;
+            if (!OnLink)
+                Entry->NextHop = NextHop;
+            Route6Count++;
+            /* the rest as for a change */
+            /* fall through */
+        case TCP_IPV6_CONFIG_SET:
+            if (!Entry)
+                return STATUS_NOT_FOUND;
+            Entry->Metric = Request->Metric;
+            Entry->Origin = Request->Origin;
+            Entry->Protocol = Request->Protocol;
+            Entry->Flags = (Request->Flags & (TCP_IPV6_ROUTE_PUBLISH | TCP_IPV6_ROUTE_IMMORTAL)) |
+                           (Persistent ? TCP_IPV6_ROUTE_PERSISTENT : 0);
+            Entry->ValidLifetime = Request->ValidLifetime;
+            Entry->PreferredLifetime = Request->PreferredLifetime;
+            Entry->Created = Route6Seconds();
+            Status = STATUS_SUCCESS;
+            break;
+
+        case TCP_IPV6_CONFIG_DELETE:
+            if (!Entry)
+                return STATUS_NOT_FOUND;
+            RtlZeroMemory(Entry, sizeof(*Entry));
+            Route6Count--;
+            Status = STATUS_SUCCESS;
+            break;
+
+        default:
+            return STATUS_INVALID_PARAMETER;
+    }
+
+    Route6Changed();
+    return Status;
+}
+
+/* A persistent record (persist6.c), with the adapter's start (core lock held): the route is added unless it is
+   there. STATUS_SUCCESS: added */
+NTSTATUS
+TCP6ApplyRouteLocked(PIP_INTERFACE IF, struct netif *netif, const TCP_IPV6_ROUTE_REQUEST *Record)
+{
+    TCP_IPV6_ROUTE_REQUEST Request = *Record;
+    ip6_addr_t Prefix, NextHop;
+    BOOLEAN OnLink, WasPersistent;
+    NTSTATUS Status;
+
+    Request.Operation = TCP_IPV6_CONFIG_CREATE;
+    Request.Store = TCP_IPV6_STORE_PERSISTENT;
+    Status = Route6CheckRequest(&Request, &Prefix, &NextHop, &OnLink);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    return Route6ConfigureLocked(netif, IF->Index, &Request, &Prefix, &NextHop, OnLink, TRUE, &WasPersistent);
+}
+
 /* IOCTL_IP6_ROUTE_CONFIG (the caller is an administrator: TiDispatch checked) */
 NTSTATUS
 DispRouteConfig6(PIRP Irp, PIO_STACK_LOCATION IrpSp)
 {
-    TCP_IPV6_ROUTE_REQUEST Request;
+    TCP_IPV6_ROUTE_REQUEST Request, Undo;
     PIP_INTERFACE IF;
     struct netif *netif;
     ip6_addr_t Prefix, NextHop;
-    BOOLEAN OnLink;
-    PROUTE6_ENTRY Entry;
-    NTSTATUS Status;
-    ULONG i;
+    BOOLEAN OnLink, Persistent, WasPersistent = FALSE, Found;
+    NTSTATUS Status, StoreStatus;
 
     if (IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(Request) || !Irp->AssociatedIrp.SystemBuffer)
         return STATUS_INVALID_PARAMETER;
@@ -696,6 +784,9 @@ DispRouteConfig6(PIRP Irp, PIO_STACK_LOCATION IrpSp)
     Status = Route6CheckRequest(&Request, &Prefix, &NextHop, &OnLink);
     if (!NT_SUCCESS(Status))
         return Status;
+    Persistent = (Request.Store == TCP_IPV6_STORE_PERSISTENT);
+    /* the record of the persistent store names the route as the table does: the prefix without its host bits */
+    RtlCopyMemory(Request.Prefix, Prefix.addr, 16);
 
     IF = TCP6ReferenceInterface(Request.IfIndex);
     if (!IF)
@@ -703,74 +794,40 @@ DispRouteConfig6(PIRP Irp, PIO_STACK_LOCATION IrpSp)
     netif = IF->TCPContext;
 
     LOCK_TCPIP_CORE();
-    if (!TCP6NetifRegistered(netif))
-    {
+    if (TCP6NetifRegistered(netif))
+        Status = Route6ConfigureLocked(netif, IF->Index, &Request, &Prefix, &NextHop, OnLink, Persistent,
+                                       &WasPersistent);
+    else
         Status = STATUS_NOT_FOUND;
-        goto Done;
-    }
-    if (!OnLink && ip6_addr_islinklocal(&NextHop))
-        ip6_addr_assign_zone(&NextHop, IP6_UNICAST, netif);
-
-    Entry = Route6Lookup(netif, &Prefix, (UCHAR)Request.PrefixLength, OnLink, &NextHop);
-    switch (Request.Operation)
-    {
-        case TCP_IPV6_CONFIG_CREATE:
-            if (Entry)
-            {
-                Status = STATUS_OBJECT_NAME_COLLISION;
-                break;
-            }
-            for (i = 0; i < ROUTE6_MAX && Route6Table[i].Netif; i++)
-                ;
-            if (i == ROUTE6_MAX)
-            {
-                Status = STATUS_INSUFFICIENT_RESOURCES;
-                break;
-            }
-            Entry = &Route6Table[i];
-            RtlZeroMemory(Entry, sizeof(*Entry));
-            Entry->Netif = netif;
-            Entry->IfIndex = IF->Index;
-            Entry->Prefix = Prefix;
-            Entry->PrefixLength = (UCHAR)Request.PrefixLength;
-            Entry->OnLink = OnLink;
-            if (!OnLink)
-                Entry->NextHop = NextHop;
-            Route6Count++;
-            /* the rest as for a change */
-            /* fall through */
-        case TCP_IPV6_CONFIG_SET:
-            if (!Entry)
-            {
-                Status = STATUS_NOT_FOUND;
-                break;
-            }
-            Entry->Metric = Request.Metric;
-            Entry->Origin = Request.Origin;
-            Entry->Protocol = Request.Protocol;
-            Entry->Flags = Request.Flags & (TCP_IPV6_ROUTE_PUBLISH | TCP_IPV6_ROUTE_IMMORTAL);
-            Entry->ValidLifetime = Request.ValidLifetime;
-            Entry->PreferredLifetime = Request.PreferredLifetime;
-            Entry->Created = Route6Seconds();
-            Status = STATUS_SUCCESS;
-            break;
-
-        case TCP_IPV6_CONFIG_DELETE:
-            if (!Entry)
-            {
-                Status = STATUS_NOT_FOUND;
-                break;
-            }
-            RtlZeroMemory(Entry, sizeof(*Entry));
-            Route6Count--;
-            Status = STATUS_SUCCESS;
-            break;
-    }
-    if (NT_SUCCESS(Status))
-        Route6Changed();
-
-Done:
     UNLOCK_TCPIP_CORE();
+
+    /* the persistent store: a removal takes the route out of both stores, a creation or change of a persistent
+       route writes it */
+    if (Request.Operation == TCP_IPV6_CONFIG_DELETE)
+    {
+        StoreStatus = TCP6PersistRoute(IF, &Request, TRUE, &Found);
+        if (Status == STATUS_NOT_FOUND && NT_SUCCESS(StoreStatus) && Found)
+            Status = STATUS_SUCCESS;
+        else if (NT_SUCCESS(Status) && !NT_SUCCESS(StoreStatus))
+            Status = StoreStatus;
+    }
+    else if (NT_SUCCESS(Status) && (Persistent || WasPersistent))
+    {
+        StoreStatus = TCP6PersistRoute(IF, &Request, FALSE, &Found);
+        if (!NT_SUCCESS(StoreStatus))
+        {
+            if (Request.Operation == TCP_IPV6_CONFIG_CREATE)
+            {
+                Undo = Request;
+                Undo.Operation = TCP_IPV6_CONFIG_DELETE;
+                LOCK_TCPIP_CORE();
+                if (TCP6NetifRegistered(netif))
+                    Route6ConfigureLocked(netif, IF->Index, &Undo, &Prefix, &NextHop, OnLink, FALSE, &WasPersistent);
+                UNLOCK_TCPIP_CORE();
+            }
+            Status = StoreStatus;
+        }
+    }
     IPDereferenceInterface(IF);
 
     if (NT_SUCCESS(Status))

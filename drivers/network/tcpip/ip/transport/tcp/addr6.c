@@ -19,7 +19,8 @@
  * with the address: an entry counts only while the slot still holds that address, so an address lwIP removed (its
  * valid lifetime ended) leaves nothing behind that could apply to another one. The address change goes to user mode
  * through lwIP's interface events (if6.c: NotifyUnicastIpAddressChange, NotifyIpInterfaceChange and
- * NotifyRouteChange2). Everything here is under lwIP's core lock.
+ * NotifyRouteChange2). Everything here is under lwIP's core lock, but the persistent store (persist6.c): an address
+ * configured with TCP_IPV6_STORE_PERSISTENT is written there and comes back whenever the adapter starts.
  */
 
 #include "precomp.h"
@@ -159,8 +160,8 @@ Addr6CheckRequest(const TCP_IPV6_ADDRESS_REQUEST *Request, ip6_addr_t *Address)
 {
     if (Request->Operation < TCP_IPV6_CONFIG_CREATE || Request->Operation > TCP_IPV6_CONFIG_DELETE)
         return STATUS_INVALID_PARAMETER;
-    if (Request->Store != TCP_IPV6_STORE_ACTIVE)
-        return STATUS_NOT_SUPPORTED;
+    if (Request->Store != TCP_IPV6_STORE_ACTIVE && Request->Store != TCP_IPV6_STORE_PERSISTENT)
+        return STATUS_INVALID_PARAMETER;
 
     RtlCopyMemory(Address->addr, Request->Address, 16);
     ip6_addr_clear_zone(Address);
@@ -178,12 +179,12 @@ Addr6CheckRequest(const TCP_IPV6_ADDRESS_REQUEST *Request, ip6_addr_t *Address)
     return STATUS_SUCCESS;
 }
 
-/* Creates, changes or removes an address of netif (core lock held). Persistent: the request came from the
-   persistent store (the entry says so) */
+/* Creates, changes or removes an address of netif (core lock held). Persistent: the entry is in the persistent
+   store too (a change keeps that); *WasPersistent: it was before */
 static
 NTSTATUS
 Addr6ConfigureLocked(struct netif *netif, const TCP_IPV6_ADDRESS_REQUEST *Request, const ip6_addr_t *Wanted,
-                           BOOLEAN Persistent)
+                     BOOLEAN Persistent, PBOOLEAN WasPersistent)
 {
     ip6_addr_t Address = *Wanted;
     PADDR6_ENTRY Entry = NULL;
@@ -196,6 +197,8 @@ Addr6ConfigureLocked(struct netif *netif, const TCP_IPV6_ADDRESS_REQUEST *Reques
     Slot = Addr6SlotOf(netif, &Address);
     if (Slot >= 0)
         Entry = Addr6Find(netif, Slot);
+    *WasPersistent = Entry && (Entry->Info.Flags & TCP_IPV6_ADDRESS_PERSISTENT);
+    Persistent = Persistent || *WasPersistent;
 
     switch (Request->Operation)
     {
@@ -308,15 +311,34 @@ Addr6ConfigureLocked(struct netif *netif, const TCP_IPV6_ADDRESS_REQUEST *Reques
     return STATUS_SUCCESS;
 }
 
+/* A persistent record (persist6.c), with the adapter's start (core lock held): the address is added unless it is
+   there. STATUS_SUCCESS: added */
+NTSTATUS
+TCP6ApplyAddressLocked(struct netif *netif, const TCP_IPV6_ADDRESS_REQUEST *Record)
+{
+    TCP_IPV6_ADDRESS_REQUEST Request = *Record;
+    ip6_addr_t Address;
+    BOOLEAN WasPersistent;
+    NTSTATUS Status;
+
+    Request.Operation = TCP_IPV6_CONFIG_CREATE;
+    Request.Store = TCP_IPV6_STORE_PERSISTENT;
+    Status = Addr6CheckRequest(&Request, &Address);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    return Addr6ConfigureLocked(netif, &Request, &Address, TRUE, &WasPersistent);
+}
+
 /* IOCTL_IP6_ADDRESS_CONFIG (the caller is an administrator: TiDispatch checked) */
 NTSTATUS
 DispAddressConfig6(PIRP Irp, PIO_STACK_LOCATION IrpSp)
 {
-    TCP_IPV6_ADDRESS_REQUEST Request;
+    TCP_IPV6_ADDRESS_REQUEST Request, Undo;
     PIP_INTERFACE IF;
     struct netif *netif;
     ip6_addr_t Address;
-    NTSTATUS Status;
+    BOOLEAN Persistent, WasPersistent = FALSE, Found;
+    NTSTATUS Status, StoreStatus;
 
     if (IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(Request) || !Irp->AssociatedIrp.SystemBuffer)
         return STATUS_INVALID_PARAMETER;
@@ -328,6 +350,7 @@ DispAddressConfig6(PIRP Irp, PIO_STACK_LOCATION IrpSp)
     Status = Addr6CheckRequest(&Request, &Address);
     if (!NT_SUCCESS(Status))
         return Status;
+    Persistent = (Request.Store == TCP_IPV6_STORE_PERSISTENT);
 
     IF = TCP6ReferenceInterface(Request.IfIndex);
     if (!IF)
@@ -336,10 +359,39 @@ DispAddressConfig6(PIRP Irp, PIO_STACK_LOCATION IrpSp)
 
     LOCK_TCPIP_CORE();
     if (TCP6NetifRegistered(netif))
-        Status = Addr6ConfigureLocked(netif, &Request, &Address, FALSE);
+        Status = Addr6ConfigureLocked(netif, &Request, &Address, Persistent, &WasPersistent);
     else
         Status = STATUS_NOT_FOUND;
     UNLOCK_TCPIP_CORE();
+
+    /* the persistent store: a removal takes the address out of both stores (also one the active store no longer
+       has), a creation or change of a persistent address writes it */
+    if (Request.Operation == TCP_IPV6_CONFIG_DELETE)
+    {
+        StoreStatus = TCP6PersistAddress(IF, &Request, TRUE, &Found);
+        if (Status == STATUS_NOT_FOUND && NT_SUCCESS(StoreStatus) && Found)
+            Status = STATUS_SUCCESS;
+        else if (NT_SUCCESS(Status) && !NT_SUCCESS(StoreStatus))
+            Status = StoreStatus;
+    }
+    else if (NT_SUCCESS(Status) && (Persistent || WasPersistent))
+    {
+        StoreStatus = TCP6PersistAddress(IF, &Request, FALSE, &Found);
+        if (!NT_SUCCESS(StoreStatus))
+        {
+            /* a creation the store did not take is undone */
+            if (Request.Operation == TCP_IPV6_CONFIG_CREATE)
+            {
+                Undo = Request;
+                Undo.Operation = TCP_IPV6_CONFIG_DELETE;
+                LOCK_TCPIP_CORE();
+                if (TCP6NetifRegistered(netif))
+                    Addr6ConfigureLocked(netif, &Undo, &Address, FALSE, &WasPersistent);
+                UNLOCK_TCPIP_CORE();
+            }
+            Status = StoreStatus;
+        }
+    }
     IPDereferenceInterface(IF);
 
     /* a change without a state change made no interface event: the prefix length, origins or lifetimes are new */
