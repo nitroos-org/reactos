@@ -11,7 +11,7 @@ BEGIN
     IDS_USAGE1 "\n\
 Manipulates the network routing tables.\n\n\
 ROUTE [-f] [-p] [-4|-6] command [destination]\n\
-                [MASK netmask] [gateway] [METRIC metric]\n\n\
+                [MASK netmask] [gateway] [METRIC metric] [IF interface]\n\n\
   -f           Cleans the routing table of all gateway entries prior to\n\
                executing the command. Can be used with the ADD and\n\
                DELETE command.\n\n\
@@ -24,7 +24,9 @@ ROUTE [-f] [-p] [-4|-6] command [destination]\n\
                  PRINT   Prints the routes.\n\
                  ADD     Add a new route.\n\
                  DELETE  Deletes a route.\n\
-  destination  Specifies the Host.\n\
+                 CHANGE  Modifies an existing IPv6 route.\n\
+  destination  Specifies the Host. An IPv6 destination is a prefix with its\n\
+               length (3ffe::/32).\n\
   netmask      Specifies a network mask value for the route entry.\n\
                If not specified, it defaults to 255.255.255.255.\n\
   gateway      Specifies the Gateway.\n\
@@ -67,6 +69,8 @@ Examples:\n\
     IDS_IPV6_ROUTES_HEADER " If Metric Network Destination      Gateway\n"
     IDS_ROUTE_ADD_ERROR_EX "The route addition failed: %s"
     IDS_ROUTE_DEL_ERROR_EX "The route deletion failed: %s"
+    IDS_ROUTE_CHANGE_ERROR_EX "The route change failed: %s"
+    IDS_ROUTE_OK " OK!\n"
     IDS_PERSISTENT_HEADER "Network Destination        Netmask          Gateway    Metric\n"
     IDS_NONE "  None\n"
 END
