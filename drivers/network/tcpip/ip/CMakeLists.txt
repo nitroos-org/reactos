@@ -17,6 +17,7 @@ list(APPEND SOURCE
     network/address.c
     network/arp.c
     network/checksum.c
+    network/echo6.c
     network/icmp.c
     network/interface.c
     network/ip.c

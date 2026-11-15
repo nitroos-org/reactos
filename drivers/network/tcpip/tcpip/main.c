@@ -648,7 +648,11 @@ TiDispatch(
 
             case IOCTL_ICMP_ECHO_REQUEST:
                 TI_DbgPrint(MIN_TRACE, ("ICMP_ECHO_REQUEST\n"));
-                Status = DispEchoRequest(DeviceObject, Irp, IrpSp);
+                /* \Device\Ip6: an ICMPv6 echo (Icmp6SendEcho2) */
+                if (Ip6DeviceObject && DeviceObject == Ip6DeviceObject)
+                    Status = DispEchoRequest6(Irp, IrpSp);
+                else
+                    Status = DispEchoRequest(DeviceObject, Irp, IrpSp);
                 break;
 
             default:
@@ -898,6 +902,18 @@ NTSTATUS TiSecurityStartup(
         return Status;
     }
 
+    /* \Device\Ip6 as \Device\Ip: Icmp6CreateFile() opens it with GENERIC_EXECUTE (VERIFY ON ORACLE: its ACL) */
+    if (Ip6DeviceObject)
+    {
+        Status = TiSetupTcpDeviceSD(Ip6DeviceObject,
+                                    FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE);
+        if (!NT_SUCCESS(Status))
+        {
+            TI_DbgPrint(MIN_TRACE, ("Failed to set security data for IPv6 device object\n"));
+            return Status;
+        }
+    }
+
     return STATUS_SUCCESS;
 }
 
@@ -965,6 +981,9 @@ VOID NTAPI TiUnload(
 
     if (RawIPDeviceObject)
         IoDeleteDevice(RawIPDeviceObject);
+
+    if (Ip6DeviceObject)
+        IoDeleteDevice(Ip6DeviceObject);
 
     if (IPDeviceObject) {
         ChewShutdown();
@@ -1131,6 +1150,17 @@ DriverEntry(
     if( !NT_SUCCESS(Status) ) {
         TiUnload(DriverObject);
         return Status;
+    }
+
+    /* The ICMPv6 echo device (\Device\Ip6, Icmp6CreateFile) exists only with IPv6 on (TCPStartup read the switch);
+       without it Icmp6CreateFile fails as before. Not having it is no reason to fail the driver */
+    if (TCPIpv6Enabled)
+    {
+        UNICODE_STRING strIp6DeviceName = RTL_CONSTANT_STRING(L"\\Device\\Ip6");
+
+        if (!NT_SUCCESS(IoCreateDevice(DriverObject, 0, &strIp6DeviceName, FILE_DEVICE_NETWORK, 0, FALSE,
+                                       &Ip6DeviceObject)))
+            Ip6DeviceObject = NULL;
     }
 
     /* Initialize security */

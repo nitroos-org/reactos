@@ -48,7 +48,12 @@ NTAPI
 PsIsSystemThread(
     _In_ PETHREAD Thread);
 
-#define UDP6_TAG               'U6pT'
+/* echo6.c */
+int Echo6Input(struct pbuf *p, struct netif *inp);
+VOID Echo6CompleteDone(VOID);
+VOID Echo6Startup(VOID);
+
+#define UDP6_TAG                'U6pT'
 #define UDP6_SOCKET_GROUPS      20      /* IP_MAX_MEMBERSHIPS */
 #define UDP6_MACHINE_GROUPS     128
 /* Table entries one process can take: a group joined by sockets of other processes costs a joiner nothing (it
@@ -104,8 +109,7 @@ static LONG Udp6DeferredBytes;
 volatile LONG UDP6ReceiveDropped;
 volatile LONG UDP6PortUnreachable;
 
-/* The interface of an interface index (IF->Index), or NULL (core lock held) */
-static
+/* The interface of an interface index (IF->Index), or NULL (core lock held; echo6.c too) */
 struct netif *
 Udp6NetifOfIndex(ULONG IfIndex)
 {
@@ -135,10 +139,22 @@ Udp6NetifHasAddress(struct netif *netif)
     return FALSE;
 }
 
+/* lwIP's route to Dest (core lock held; echo6.c too). lwIP falls back to its default interface when it has no route,
+ * which is the loopback interface on a machine without an IPv6 adapter: that is no route, except for ::1 (Windows
+ * answers no route: WSAENETUNREACH / ERROR_NETWORK_UNREACHABLE, oracle for the echo) */
+struct netif *
+Udp6Route(const ip6_addr_t *Src, const ip6_addr_t *Dest)
+{
+    struct netif *netif = ip6_route(Src, Dest);
+
+    if (netif && Loopback && netif == Loopback->TCPContext && !ip6_addr_isloopback(Dest))
+        return NULL;
+    return netif;
+}
+
 /* The interface of a multicast datagram or group without an interface index: lwIP's default one when it is up
  * with an IPv6 address, else the first adapter that is, else the loopback interface (core lock held). VERIFY ON
- * ORACLE: Windows takes the interface of the route to the group */
-static
+ * ORACLE: Windows takes the interface of the route to the group. echo6.c too */
 struct netif *
 Udp6DefaultMulticastNetif(VOID)
 {
@@ -244,7 +260,12 @@ LibIp6NexthInput(struct pbuf *p, struct netif *inp, u8_t nexth)
     const ip6_addr_t *Src, *Dst;
     PIP_INTERFACE IF = inp ? inp->state : NULL;
 
-    if (nexth != IP6_NEXTH_UDP || !TCPIpv6Enabled)
+    if (!TCPIpv6Enabled)
+        return 0;
+    /* ICMPv6: the answers to our echo requests (echo6.c) */
+    if (nexth == IP6_NEXTH_ICMP6)
+        return Echo6Input(p, inp);
+    if (nexth != IP6_NEXTH_UDP)
         return 0;
 
     Src = ip6_current_src_addr();
@@ -391,6 +412,9 @@ UDP6DeliverDeferred(VOID)
     PLIST_ENTRY Entry;
     PUDP6_DEFERRED D;
     KIRQL OldIrql;
+
+    /* The echo requests the input answered (echo6.c) */
+    Echo6CompleteDone();
 
     /* Cheap when there is nothing: every IPv6 input calls this */
     if (IsListEmpty(&Udp6Deferred))
@@ -588,12 +612,12 @@ UDPSendDatagram6(
         if (Zone != IP6_NO_ZONE)
             ip6_addr_set_zone(&Source, Zone);
         if (!netif)
-            netif = ip6_route(&Source, &Dest);
+            netif = Udp6Route(&Source, &Dest);
     }
     else
     {
         if (!netif && !(ip6_addr_islinklocal(&Dest) || ip6_addr_ismulticast(&Dest)))
-            netif = ip6_route(IP6_ADDR_ANY6, &Dest);
+            netif = Udp6Route(IP6_ADDR_ANY6, &Dest);
         Selected = netif ? ip6_select_source_address(netif, &Dest) : NULL;
         if (!Selected)
         {
@@ -912,4 +936,5 @@ VOID
 UDP6Startup(VOID)
 {
     KeInitializeSpinLock(&Udp6DeferredLock);
+    Echo6Startup();
 }

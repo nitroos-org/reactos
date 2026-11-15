@@ -90,6 +90,7 @@ Icmp6SendEcho2(
 {
     HANDLE hEvent;
     PIO_STATUS_BLOCK IoStatusBlock;
+    IO_STATUS_BLOCK SyncIoStatusBlock;
     PVOID InputBuffer;
     ULONG InputBufferLength;
     //ULONG OutputBufferLength;
@@ -98,16 +99,36 @@ Icmp6SendEcho2(
 
     InputBufferLength = sizeof(ICMPV6_ECHO_REQUEST) + RequestSize;
 
-    if (ReplySize < sizeof(ICMPV6_ECHO_REPLY) + sizeof(IO_STATUS_BLOCK))
+    /* The reply and the echoed data must fit: otherwise IP_GENERAL_FAILURE, also in the reply when it has room
+     * for one (Windows 10, oracle: 36 + 32 bytes take a 32-byte echo, 36 + 8 do not) */
+    if (ReplySize < sizeof(ICMPV6_ECHO_REPLY) + RequestSize)
     {
-        SetLastError(IP_BUF_TOO_SMALL);
+        if (ReplyBuffer && ReplySize >= sizeof(ICMPV6_ECHO_REPLY))
+        {
+            ZeroMemory(ReplyBuffer, sizeof(ICMPV6_ECHO_REPLY));
+            ((PICMPV6_ECHO_REPLY)ReplyBuffer)->Status = IP_GENERAL_FAILURE;
+        }
+        SetLastError(IP_GENERAL_FAILURE);
         return 0;
     }
 
-    // IO_STATUS_BLOCK will be stored inside ReplyBuffer (in the end)
-    // that's because the function may return before device request ends
-    IoStatusBlock = (PIO_STATUS_BLOCK)((PUCHAR)ReplyBuffer + ReplySize - sizeof(IO_STATUS_BLOCK));
-    ReplySize -= sizeof(IO_STATUS_BLOCK);
+    if (Event == NULL && ApcRoutine == NULL)
+    {
+        /* Synchronous: the whole buffer is the caller's */
+        IoStatusBlock = &SyncIoStatusBlock;
+    }
+    else
+    {
+        // IO_STATUS_BLOCK will be stored inside ReplyBuffer (in the end)
+        // that's because the function may return before device request ends
+        if (ReplySize < sizeof(ICMPV6_ECHO_REPLY) + sizeof(IO_STATUS_BLOCK))
+        {
+            SetLastError(IP_BUF_TOO_SMALL);
+            return 0;
+        }
+        IoStatusBlock = (PIO_STATUS_BLOCK)((PUCHAR)ReplyBuffer + ReplySize - sizeof(IO_STATUS_BLOCK));
+        ReplySize -= sizeof(IO_STATUS_BLOCK);
+    }
 
     InputBuffer = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, InputBufferLength);
     if (InputBuffer == NULL)
@@ -132,8 +153,9 @@ Icmp6SendEcho2(
     Request->Unknown1 = 0x72;
 
     Request->Timeout = Timeout;
-    Request->Ttl = RequestOptions->Ttl;
-    Request->Flags = RequestOptions->Flags;
+    /* The options are optional: no options, the default hop limit */
+    Request->Ttl = RequestOptions ? RequestOptions->Ttl : 0;
+    Request->Flags = RequestOptions ? RequestOptions->Flags : 0;
 
     if (RequestSize > 0)
     {

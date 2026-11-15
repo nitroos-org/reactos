@@ -82,4 +82,11 @@ VOID UDP6Startup(VOID);
 /* The row of an IPv6 UDP socket (IP_UDP6_ROW_ENTRY_ID) */
 VOID UDP6BuildRow(PADDRESS_FILE AddrFile, PUDP6_ROW_OWNER_PID Row);
 
+/* ICMPv6 echo (ip/network/echo6.c): \Device\Ip6, made only with IPv6 on */
+extern PDEVICE_OBJECT Ip6DeviceObject;
+NTSTATUS DispEchoRequest6(PIRP Irp, PIO_STACK_LOCATION IrpSp);
+/* The firewall: an echo reply or an ICMPv6 error that answers one of our outstanding echo requests */
+BOOLEAN Echo6ReplyExpected(const UCHAR *Src, const UCHAR *Icmp, ULONG Avail);
+BOOLEAN Echo6ErrorRelated(const UCHAR *Icmp, ULONG Avail);
+
 /* EOF */
