@@ -6,6 +6,7 @@
 #include "lwip/ip.h"
 #include "lwip/api.h"
 #include "lwip/tcpip.h"
+#include "lwip/nd6.h"
 #include <ipifcons.h>
 
 /* TCP segments that may wait for an unresolved neighbour: on one, and in all */
@@ -208,7 +209,7 @@ TCPUpdateInterfaceIPInformationLocked(PIP_INTERFACE IF)
     ip4_addr_t ipaddr;
     ip4_addr_t netmask;
     ip4_addr_t gw;
-    u16_t OldMtu, LinkMtu;
+    u16_t OldMtu, LinkMtu, OldMtu6;
 
     gw.addr = 0;
 
@@ -222,11 +223,15 @@ TCPUpdateInterfaceIPInformationLocked(PIP_INTERFACE IF)
      * link MTU cannot be told apart from that; the next advertisement sets it again.) */
     /* IPv4 and IPv6 each have an MTU that can be set by hand below the link MTU (ifcfg.c); IPv6 starts from the
      * link MTU, not from the IPv4 one */
+    OldMtu6 = netif->mtu6;
     LinkMtu = (u16_t)min(IF->LinkMtu ? IF->LinkMtu : IF->MTU, 0xFFFF);
     if (IF->Ip6MtuConfig)
         netif->mtu6 = (u16_t)min(IF->Ip6MtuConfig, LinkMtu);
     else if (netif->mtu6 == 0 || netif->mtu6 > LinkMtu || netif->mtu6 == OldMtu)
         netif->mtu6 = LinkMtu;
+    /* the path MTUs lwIP keeps for destinations started from the old MTU: they start again from the new one */
+    if (netif->mtu6 != OldMtu6)
+        nd6_clear_destination_cache();
 
     GetInterfaceIPv4Address(IF,
                             ADE_UNICAST,
