@@ -1,5 +1,7 @@
 
 list(APPEND SOURCE
+    AddrSortEngine.c
+    CreateSortedAddressPairs.c
     GetAdaptersAddresses.c
     GetBestInterfaceEx.c
     GetBestRoute2.c

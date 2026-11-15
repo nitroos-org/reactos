@@ -68,6 +68,7 @@ extern void func_shutdownrecv(void);
 extern void func_sotimeout(void);
 extern void func_socketscale(void);
 extern void func_stringtoaddress(void);
+extern void func_addrlistsort(void);
 extern void func_udpbindretry(void);
 extern void func_udpcancel(void);
 extern void func_udpconnectname(void);
@@ -165,6 +166,7 @@ const struct test winetest_testlist[] =
     { "sotimeout", func_sotimeout },
     { "socketscale", func_socketscale },
     { "stringtoaddress", func_stringtoaddress },
+    { "addrlistsort", func_addrlistsort },
     { "udpbindretry", func_udpbindretry },
     { "udpcancel", func_udpcancel },
     { "udpconnectname", func_udpconnectname },
