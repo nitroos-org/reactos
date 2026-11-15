@@ -23,6 +23,10 @@ BOOL SendRequest( PCHAR pInBuffer,
     SOCKADDR_STORAGE SendAddr;
     int SendAddrLen = sizeof(SendAddr);
     BOOL bIPv6 = (strchr( State.DefaultServerAddress, ':' ) != NULL);
+    PSOCKADDR pDest;
+    int DestLen, Attempt = 0;
+    fd_set Fds;
+    struct timeval Tv;
 
     RtlZeroMemory( &RecAddr, sizeof(SOCKADDR_IN) );
     RtlZeroMemory( &RecAddr2, sizeof(SOCKADDR_IN) );
@@ -67,12 +71,14 @@ BOOL SendRequest( PCHAR pInBuffer,
         bind( s, (SOCKADDR*)&RecAddr26, sizeof(RecAddr26) );
 
         /* Send the datagram to the DNS server. */
+        pDest = (SOCKADDR*)&RecAddr6;
+        DestLen = sizeof(RecAddr6);
         j = sendto( s,
                     pInBuffer,
                     InBufferLength,
                     0,
-                    (SOCKADDR*)&RecAddr6,
-                    sizeof(RecAddr6) );
+                    pDest,
+                    DestLen );
     }
     else
     {
@@ -90,12 +96,14 @@ BOOL SendRequest( PCHAR pInBuffer,
         bind( s, (SOCKADDR*)&RecAddr2, sizeof(RecAddr2) );
 
         /* Send the datagram to the DNS server. */
+        pDest = (SOCKADDR*)&RecAddr;
+        DestLen = sizeof(RecAddr);
         j = sendto( s,
                     pInBuffer,
                     InBufferLength,
                     0,
-                    (SOCKADDR*)&RecAddr,
-                    sizeof(RecAddr) );
+                    pDest,
+                    DestLen );
     }
     if( j == SOCKET_ERROR )
     {
@@ -182,7 +190,28 @@ BOOL SendRequest( PCHAR pInBuffer,
 
     while( bWait )
     {
-        /* Wait for the DNS reply. */
+        /* Wait for the DNS reply for the time-out (it doubles with every retry); an unreachable server must
+           not hang the program. After the last retry the request has timed out. */
+        FD_ZERO( &Fds );
+        FD_SET( s, &Fds );
+        Tv.tv_sec = (State.timeout ? State.timeout : 1) << (Attempt < 8 ? Attempt : 8);
+        Tv.tv_usec = 0;
+        if( select( 0, &Fds, NULL, NULL, &Tv ) == 0 )
+        {
+            if( (DWORD)Attempt < State.retry )
+            {
+                Attempt += 1;
+                sendto( s, pInBuffer, InBufferLength, 0, pDest, DestLen );
+                continue;
+            }
+
+            _tprintf( _T("DNS request timed out.\n    timeout was %d seconds.\n"), (int)State.timeout );
+            _tprintf( _T("*** Request to %s timed-out\n"), State.DefaultServer );
+            closesocket( s );
+            return FALSE;
+        }
+
+        /* Receive the DNS reply. */
         j = recvfrom( s,
                       pOutBuffer,
                       *pOutBufferLength,
@@ -848,6 +877,9 @@ PCHAR TypeIDtoTypeName( USHORT TypeID )
     case TYPE_A:
         return TypeA;
 
+    case TYPE_AAAA:
+        return TypeAAAA;
+
     case TYPE_NS:
         return TypeNS;
 
@@ -876,6 +908,7 @@ PCHAR TypeIDtoTypeName( USHORT TypeID )
 
 USHORT TypeNametoTypeID( PCHAR TypeName )
 {
+    if( !strncmp( TypeName, TypeAAAA, strlen( TypeAAAA ) ) ) return TYPE_AAAA;
     if( !strncmp( TypeName, TypeA, strlen( TypeA ) ) ) return TYPE_A;
     if( !strncmp( TypeName, TypeNS, strlen( TypeNS ) ) ) return TYPE_NS;
     if( !strncmp( TypeName, TypeCNAME, strlen( TypeCNAME ) ) ) return TYPE_CNAME;

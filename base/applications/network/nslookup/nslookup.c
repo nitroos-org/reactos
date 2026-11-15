@@ -317,6 +317,88 @@ cleanup:
     return bOk;
 }
 
+/* An IPv6 address as text, the longest run of zero groups (two or more) written as :: (RFC 5952) */
+static void FormatIpv6( const UCHAR *Address, PCHAR Out )
+{
+    USHORT Group[8];
+    int i, BestStart = -1, BestLen = 0, Start = -1, Len = 0, n = 0;
+
+    for( i = 0; i < 8; i += 1 ) Group[i] = (USHORT)((Address[2 * i] << 8) | Address[2 * i + 1]);
+
+    for( i = 0; i <= 8; i += 1 )
+    {
+        if( i < 8 && Group[i] == 0 )
+        {
+            if( Start < 0 ) Start = i;
+            Len += 1;
+        }
+        else
+        {
+            if( Len > BestLen ) { BestLen = Len; BestStart = Start; }
+            Start = -1;
+            Len = 0;
+        }
+    }
+    if( BestLen < 2 ) BestStart = -1;
+
+    for( i = 0; i < 8; i += 1 )
+    {
+        if( i == BestStart )
+        {
+            n += sprintf( &Out[n], "::" );
+            i += BestLen - 1;
+            continue;
+        }
+        if( n > 0 && Out[n - 1] != ':' ) Out[n++] = ':';
+        n += sprintf( &Out[n], "%x", Group[i] );
+    }
+    Out[n] = '\0';
+}
+
+/* The AAAA records of the answer section (k is the offset of its first record) */
+static void PrintAaaaAnswers( PCHAR Rec, ULONG RecLen, int k, USHORT NumAnswers, USHORT NumAuthority, PCHAR pName )
+{
+    CHAR Addresses[16][48];
+    CHAR Skip[256];
+    int n = 0, a;
+    USHORT Type, DataLength;
+
+    for( a = 0; a < NumAnswers && n < 16; a += 1 )
+    {
+        if( (ULONG)k >= RecLen ) break;
+        k += ExtractName( Rec, Skip, k, 0 );
+        if( (ULONG)k + 10 > RecLen ) break;
+        Type = ntohs( ((PUSHORT)&Rec[k])[0] );
+        k += 8;
+        DataLength = ntohs( ((PUSHORT)&Rec[k])[0] );
+        k += 2;
+        if( (ULONG)k + DataLength > RecLen ) break;
+        if( TYPE_AAAA == Type && DataLength == 16 )
+        {
+            FormatIpv6( (const UCHAR *)&Rec[k], Addresses[n] );
+            n += 1;
+        }
+        k += DataLength;
+    }
+
+    if( n == 0 ) return;
+
+    if( 0 == NumAuthority )
+        _tprintf( _T("Non-authoritative answer:\n") );
+
+    _tprintf( _T("Name:    %s\n"), pName );
+    if( n == 1 )
+    {
+        _tprintf( _T("Address:  %s\n\n"), Addresses[0] );
+    }
+    else
+    {
+        _tprintf( _T("Addresses:  %s\n"), Addresses[0] );
+        for( a = 1; a < n; a += 1 ) _tprintf( _T("          %s\n"), Addresses[a] );
+        _tprintf( _T("\n") );
+    }
+}
+
 void PerformLookup( PCHAR pAddr )
 {
     /* Needed to issue DNS packets and parse them. */
@@ -332,7 +414,7 @@ void PerformLookup( PCHAR pAddr )
     USHORT NumQuestions;
     USHORT NumAnswers;
     USHORT NumAuthority;
-    USHORT Type;
+    USHORT Type, QueryType;
 
     if( (strlen( pAddr ) + 1) > 255 ) return;
 
@@ -344,10 +426,12 @@ void PerformLookup( PCHAR pAddr )
         || !strcmp( TypeBoth, State.type ) )
     {
         Type = TYPE_A;
+        if( !strcmp( TypeAAAA, State.type ) ) Type = TYPE_AAAA;
         if( IsValidIP( pAddr ) ) Type = TYPE_PTR;
     }
     else
         Type = TypeNametoTypeID( State.type );
+    QueryType = Type;
 
     /* If it's a PTR lookup then append the ARPA sig to the end. */
     if( (Type == TYPE_PTR) && IsValidIP( pAddr ) )
@@ -484,6 +568,13 @@ void PerformLookup( PCHAR pAddr )
         }
     }
 
+    /* AAAA: every address of the answer */
+    if( TYPE_AAAA == QueryType )
+    {
+        PrintAaaaAnswers( RecBuffer, RecBufferLength, k, NumAnswers, NumAuthority, pAddr );
+        goto cleanup;
+    }
+
     if( NumAnswers )
     {
         /* Skip the name. */
@@ -606,7 +697,7 @@ BOOL ParseCommandLine( int argc, char* argv[] )
                 }
                 else if( !strncmp( "-type=", argv[i], 6 ) )
                 {
-                    if( !strncmp( TypeA, &argv[i][6], strlen( TypeA ) ) )
+                    if( !strncmp( TypeA, &argv[i][6], strlen( TypeA ) ) && strncmp( TypeAAAA, &argv[i][6], strlen( TypeAAAA ) ) )
                     {
                         State.type = TypeA;
                     }
@@ -678,7 +769,7 @@ BOOL ParseCommandLine( int argc, char* argv[] )
                 }
                 else if( !strncmp( "-querytype=", argv[i], 11 ) )
                 {
-                    if( !strncmp( TypeA, &argv[i][11], strlen( TypeA ) ) )
+                    if( !strncmp( TypeA, &argv[i][11], strlen( TypeA ) ) && strncmp( TypeAAAA, &argv[i][11], strlen( TypeAAAA ) ) )
                     {
                         State.type = TypeA;
                     }
@@ -991,7 +1082,7 @@ void InteractiveMode()
                     }
                     else if (!_strnicmp(args_vector[1], "type=", strlen("type=")))
                     {
-                        if (!strncmp(TypeA, &args_vector[1][6], strlen(TypeA)))
+                        if (!strncmp(TypeA, &args_vector[1][6], strlen(TypeA)) && strncmp(TypeAAAA, &args_vector[1][6], strlen(TypeAAAA)))
                         {
                             State.type = TypeA;
                         }
@@ -1038,7 +1129,7 @@ void InteractiveMode()
                     }
                     else if (!_strnicmp(args_vector[1], "querytype=", strlen("querytype=")))
                     {
-                        if (!strncmp(TypeA, &args_vector[1][11], strlen(TypeA)))
+                        if (!strncmp(TypeA, &args_vector[1][11], strlen(TypeA)) && strncmp(TypeAAAA, &args_vector[1][11], strlen(TypeAAAA)))
                         {
                             State.type = TypeA;
                         }

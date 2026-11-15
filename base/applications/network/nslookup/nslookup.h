@@ -25,6 +25,7 @@
 #define TypeSRV     "SRV"
 
 #define TYPE_A      0x01
+#define TYPE_AAAA   0x1C
 #define TYPE_NS     0x02
 #define TYPE_CNAME  0x05
 #define TYPE_SOA    0x06
