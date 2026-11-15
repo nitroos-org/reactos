@@ -243,6 +243,7 @@ NdisCloseConfiguration(
     }
 
     ZwClose(ConfigurationContext->Handle);
+    ExFreePoolWithTag(ConfigurationContext, TAG_CONFIG);
 }
 
 
