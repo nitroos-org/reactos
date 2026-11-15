@@ -4535,8 +4535,10 @@ INetCfgComponentControl_fnApplyPnpChanges(
             {
                 /* Static IP --> DHCP */
 
-                /* Delete this adapter's current IP address */
-                DeleteIPAddress(pAdapter->OldIp->NTEContext);
+                /* Delete this adapter's current IP address: its first address, whose NTE context is the index
+                   of the interface (OldIp comes from the registry and has no context; an AddIPAddress on an
+                   interface that still has its address adds a second address instead of replacing it) */
+                DeleteIPAddress(pAdapter->Index);
             }
             else
             {
@@ -4561,8 +4563,9 @@ INetCfgComponentControl_fnApplyPnpChanges(
             {
                 /* Static IP --> Static IP */
 
-                /* Delete this adapter's current static IP address */
-                DeleteIPAddress(pAdapter->OldIp->NTEContext);
+                /* Delete this adapter's current static IP address (the first address of the interface, NTE
+                   context = interface index), so that the new one replaces it instead of being added beside it */
+                DeleteIPAddress(pAdapter->Index);
 
                 /* Add the static IP address via the standard IPHLPAPI function */
                 AddIPAddress(htonl(pAdapter->NewIp->IpAddress),

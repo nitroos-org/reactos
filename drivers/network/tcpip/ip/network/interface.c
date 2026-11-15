@@ -242,8 +242,20 @@ NTSTATUS IFAddNte(PIP_INTERFACE Interface, IPv4_RAW_ADDRESS Address, IPv4_RAW_AD
     NTSTATUS Status = STATUS_INSUFFICIENT_RESOURCES;
     USHORT Candidate = 0;
     UINT Tries;
+    PLIST_ENTRY CurrentEntry;
 
     TcpipAcquireSpinLock(&InterfaceListLock, &OldIrql);
+
+    /* The caller checked for a duplicate without the lock; two adds of one address at the same time must not both
+     * get in */
+    for (CurrentEntry = InterfaceListHead.Flink; CurrentEntry != &InterfaceListHead; CurrentEntry = CurrentEntry->Flink)
+    {
+        if (IFIsOwnIPv4Address(CONTAINING_RECORD(CurrentEntry, IP_INTERFACE, ListEntry), Address))
+        {
+            TcpipReleaseSpinLock(&InterfaceListLock, OldIrql);
+            return STATUS_DUPLICATE_OBJECTID;
+        }
+    }
 
     /* The contexts are 15 bits, all of the system's additional addresses are far fewer */
     for (Tries = 0; Tries < 0x8000; Tries++)

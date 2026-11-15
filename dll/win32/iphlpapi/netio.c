@@ -829,16 +829,21 @@ VOID WINAPI InitializeUnicastIpAddressEntry(PMIB_UNICASTIPADDRESS_ROW Row)
   Row->PreferredLifetime = 0xffffffff;
 }
 
-/* The IPv4 address of the interface the row names, or the error to return. The stack keeps one IPv4 address
-   per interface, and its NTE context (DeleteIPAddress) is the index of the interface. */
-static DWORD unicast_row_interface(const MIB_UNICASTIPADDRESS_ROW *Row, DWORD *Index, DWORD *Current)
+/* The interface the row names (or the error to return), and whether the row's IPv4 address is one of its
+   addresses: then *Context is what DeleteIPAddress takes for it. The first address of an interface has the index of
+   the interface as its NTE context, an additional one (AddIPAddress beside the first) a context of its own. */
+static DWORD unicast_row_interface(const MIB_UNICASTIPADDRESS_ROW *Row, DWORD *Index, BOOL *Exists, ULONG *Context)
 {
   NETIO_IF *List, *If;
-  PMIB_IPADDRTABLE Addresses;
-  ULONG Count, j;
+  IPAddrEntry *Addrs = NULL;
+  DWORD NumAddrs = 0, k;
+  ULONG Count;
   DWORD Result, Error;
+  HANDLE TcpFile;
+  TDIEntityID Entity;
 
-  *Current = 0;
+  *Exists = FALSE;
+  *Context = 0;
   Result = collect_interfaces(&List, &Count);
   if (Result != NO_ERROR)
     return Result;
@@ -847,12 +852,23 @@ static DWORD unicast_row_interface(const MIB_UNICASTIPADDRESS_ROW *Row, DWORD *I
   if (If)
   {
     *Index = If->Index;
-    if (get_address_table(&Addresses))
+    if (Row->Address.Ipv4.sin_addr.s_addr && NT_SUCCESS(openTcpFile(&TcpFile, FILE_READ_DATA)))
     {
-      for (j = 0; j < Addresses->dwNumEntries; j++)
-        if (Addresses->table[j].dwIndex == If->Index && Addresses->table[j].dwAddr)
-          *Current = Addresses->table[j].dwAddr;
-      HeapFree(GetProcessHeap(), 0, Addresses);
+      /* the stack lists the first address of the interface first, then the additional ones */
+      if (NT_SUCCESS(getIpEntityByIfIndex(TcpFile, If->Index, &Entity)) &&
+          NT_SUCCESS(tdiGetIpAddrsForIpEntity(TcpFile, &Entity, &Addrs, &NumAddrs)))
+      {
+        for (k = 0; k < NumAddrs && !*Exists; k++)
+        {
+          if (Addrs[k].iae_addr == Row->Address.Ipv4.sin_addr.s_addr)
+          {
+            *Exists = TRUE;
+            *Context = k ? Addrs[k].iae_context : If->Index;
+          }
+        }
+        tdiFreeThingSet(Addrs);
+      }
+      closeTcpFile(TcpFile);
     }
   }
   HeapFree(GetProcessHeap(), 0, List);
@@ -861,8 +877,9 @@ static DWORD unicast_row_interface(const MIB_UNICASTIPADDRESS_ROW *Row, DWORD *I
 
 DWORD WINAPI CreateUnicastIpAddressEntry(const MIB_UNICASTIPADDRESS_ROW *Row)
 {
-  DWORD Index = 0, Current, Error, Context, Instance;
-  ULONG Mask;
+  DWORD Index = 0, Error, Context, Instance;
+  ULONG Mask, Existing;
+  BOOL Exists;
 
   if (!Row || (Row->Address.si_family != AF_INET && Row->Address.si_family != AF_INET6))
     return ERROR_INVALID_PARAMETER;
@@ -871,35 +888,36 @@ DWORD WINAPI CreateUnicastIpAddressEntry(const MIB_UNICASTIPADDRESS_ROW *Row)
   if (!Row->Address.Ipv4.sin_addr.s_addr || Row->OnLinkPrefixLength > 32)
     return ERROR_INVALID_PARAMETER;
 
-  Error = unicast_row_interface(Row, &Index, &Current);
+  Error = unicast_row_interface(Row, &Index, &Exists, &Existing);
   if (Error != NO_ERROR)
     return Error;
-  if (Current == Row->Address.Ipv4.sin_addr.s_addr)
+  if (Exists)
     return ERROR_OBJECT_ALREADY_EXISTS;
-  /* a second address on an interface would replace the first in this stack */
-  if (Current)
-    return ERROR_NOT_SUPPORTED;
 
+  /* the stack adds a second address beside the first one (AddIPAddress) */
   ConvertLengthToIpv4Mask(Row->OnLinkPrefixLength, &Mask);
   return AddIPAddress(Row->Address.Ipv4.sin_addr.s_addr, Mask, Index, &Context, &Instance);
 }
 
 DWORD WINAPI DeleteUnicastIpAddressEntry(const MIB_UNICASTIPADDRESS_ROW *Row)
 {
-  DWORD Index = 0, Current, Error;
+  DWORD Index = 0, Error;
+  ULONG Context;
+  BOOL Exists;
 
   if (!Row || (Row->Address.si_family != AF_INET && Row->Address.si_family != AF_INET6))
     return ERROR_INVALID_PARAMETER;
   if (Row->Address.si_family == AF_INET6)
     return ERROR_NOT_FOUND;
 
-  Error = unicast_row_interface(Row, &Index, &Current);
+  Error = unicast_row_interface(Row, &Index, &Exists, &Context);
   if (Error != NO_ERROR)
     return Error;
-  if (!Row->Address.Ipv4.sin_addr.s_addr || Current != Row->Address.Ipv4.sin_addr.s_addr)
+  if (!Exists)
     return ERROR_NOT_FOUND;
 
-  return DeleteIPAddress(Index);
+  /* only the address of the row goes, not the first address of the interface with it */
+  return DeleteIPAddress(Context);
 }
 
 /* ---- interface names and luids ---- */
