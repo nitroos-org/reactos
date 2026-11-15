@@ -192,6 +192,19 @@ WsQueryIpv6(PWS_IPV6_INFO Info)
                 continue;
 
             Info->NonLoopback++;
+            if (Addresses[i].Address[0] == 0xfe && (Addresses[i].Address[1] & 0xc0) == 0x80)
+            {
+                if (Info->LinkLocalCount < WS_IPV6_MAX_LINKLOCAL)
+                {
+                    RtlCopyMemory(Info->LinkLocal[Info->LinkLocalCount].Address, Addresses[i].Address, 16);
+                    Info->LinkLocal[Info->LinkLocalCount].IfIndex = Addresses[i].IfIndex;
+                    Info->LinkLocalCount++;
+                }
+            }
+            else
+            {
+                Info->NonLinkLocal++;
+            }
         }
     }
 

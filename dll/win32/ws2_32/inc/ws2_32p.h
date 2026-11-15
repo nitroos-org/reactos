@@ -890,9 +890,20 @@ WsGetProcess(VOID)
 }
 
 /* src/ipv6state.c: whether the stack has IPv6 on (Tcpip\Parameters\Ipv6Enable), and what addresses it has */
+#define WS_IPV6_MAX_LINKLOCAL 8
 typedef struct _WS_IPV6_INFO
 {
+    /* usable addresses (preferred or deprecated) on non-loopback interfaces */
     ULONG NonLoopback;
+    /* ... of those, the ones that are not link-local (fe80::/10) */
+    ULONG NonLinkLocal;
+    /* the link-local ones with their interface (the scope of such an address), the first WS_IPV6_MAX_LINKLOCAL */
+    ULONG LinkLocalCount;
+    struct
+    {
+        UCHAR Address[16];
+        ULONG IfIndex;
+    } LinkLocal[WS_IPV6_MAX_LINKLOCAL];
 } WS_IPV6_INFO, *PWS_IPV6_INFO;
 
 BOOL
