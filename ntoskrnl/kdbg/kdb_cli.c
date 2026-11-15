@@ -1280,15 +1280,6 @@ typedef struct _KDBP_UNWIND_REGS
     ULONG64 Rip;
 } KDBP_UNWIND_REGS;
 
-static
-BOOLEAN
-KdbpReadQword(
-    _In_ ULONG64 Address,
-    _Out_ PULONG64 Value)
-{
-    return NT_SUCCESS(KdbpSafeReadMemory(Value, (PVOID)(ULONG_PTR)Address, sizeof(*Value)));
-}
-
 /* Whether the walk may print or follow this address: canonical, and not the
    small values at the bottom of a stack */
 static
@@ -1297,6 +1288,22 @@ KdbpIsCanonical(
     _In_ ULONG64 Address)
 {
     return ((Address >> 47) == 0) || ((Address >> 47) == 0x1FFFF);
+}
+
+/* Reads a stack slot. The address comes from the frame being unwound (a frame
+   register, a stack pointer moved by the unwind codes) and can be anything.
+   KdbpSafeReadMemory only checks that the page tables map it, and the page
+   table index ignores the upper address bits: a non-canonical address passes
+   that check and the read then raises a general protection fault. */
+static
+BOOLEAN
+KdbpReadQword(
+    _In_ ULONG64 Address,
+    _Out_ PULONG64 Value)
+{
+    if (!KdbpIsCanonical(Address) || !KdbpIsCanonical(Address + sizeof(*Value) - 1))
+        return FALSE;
+    return NT_SUCCESS(KdbpSafeReadMemory(Value, (PVOID)(ULONG_PTR)Address, sizeof(*Value)));
 }
 
 /* Reads up to 8 code bytes, fewer when the end of a mapped page is near.
