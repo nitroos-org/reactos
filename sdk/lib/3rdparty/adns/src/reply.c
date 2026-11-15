@@ -351,6 +351,11 @@ void adns__procdgram(adns_state ads, const byte *dgram, int dglen,
     return;
   }
   qu->flags |= adns_qf_usevc;
+  /* Retry over TCP at the server that sent the truncated answer, unless a
+   * connection (or attempt) to a server is already under way. */
+  if (!viatcp && serv >= 0 && serv < ads->nservers &&
+      ads->tcpstate == server_disconnected && !ads->tcpw.head)
+    ads->tcpserver= serv;
 
  x_restartquery:
   if (qu->cname_dgram) {
