@@ -58,6 +58,7 @@ extern void func_nonblocking(void);
 extern void func_nostartup(void);
 extern void func_OwnHostname(void);
 extern void func_ReverseLookup(void);
+extern void func_ReverseLookup6(void);
 extern void func_open_osfhandle(void);
 extern void func_rcvbuf(void);
 extern void func_rcvwindow(void);
@@ -156,6 +157,7 @@ const struct test winetest_testlist[] =
     { "open_osfhandle", func_open_osfhandle },
     { "OwnHostname", func_OwnHostname },
     { "ReverseLookup", func_ReverseLookup },
+    { "ReverseLookup6", func_ReverseLookup6 },
     { "rcvbuf", func_rcvbuf },
     { "rcvwindow", func_rcvwindow },
     { "recv", func_recv },
