@@ -2168,6 +2168,14 @@ IopGetSetSecurityObject(IN PVOID ObjectBody,
                 }
             }
 
+            /*
+             * The cache keeps its own copy. The descriptor ObAssignSecurity
+             * built is ours to free, as it is when the default method
+             * assigns it (ObAssignObjectSecurityDescriptor).
+             */
+            if (NT_SUCCESS(Status))
+                ExFreePoolWithTag(SecurityDescriptor, TAG_SD);
+
             /* Return status */
             return Status;
         }
