@@ -422,6 +422,22 @@ typedef struct
  * a record of the API holds the array inside itself. Each such record is replaced by one that does. On failure
  * the whole list is freed.
  */
+/* The number of strings of a wire text record that its array (allocated by the stub) really holds */
+static
+DWORD
+WireStringCount(const TEXT_WIRE_DATA *Wire)
+{
+    SIZE_T Slots;
+
+    if (Wire->pStringArray == NULL || Wire->dwStringCount == 0)
+        return 0;
+    Slots = RtlSizeHeap(RtlGetProcessHeap(), 0, Wire->pStringArray);
+    if (Slots == (SIZE_T)-1)
+        return 0;
+    Slots /= sizeof(PWSTR);
+    return (Wire->dwStringCount < Slots) ? Wire->dwStringCount : (DWORD)Slots;
+}
+
 static
 DNS_STATUS
 TextFromWire(PDNS_RECORDW *List)
@@ -431,6 +447,7 @@ TextFromWire(PDNS_RECORDW *List)
     PWSTR *Strings;
     DWORD Count, i, DataLength;
     SIZE_T Size;
+    DNS_STATUS Status;
 
     for (Link = List; (Record = *Link) != NULL; Link = &(*Link)->pNext)
     {
@@ -438,16 +455,25 @@ TextFromWire(PDNS_RECORDW *List)
             continue;
 
         Wire = (TEXT_WIRE_DATA *)&Record->Data;
-        Count = Wire->dwStringCount;
         Strings = Wire->pStringArray;
-        if (Strings == NULL)
-            Count = 0;
+        Count = WireStringCount(Wire);
 
-        DataLength = FIELD_OFFSET(DNS_TXT_DATAW, pStringArray) + Count * sizeof(PWSTR);
-        Size = FIELD_OFFSET(DNS_RECORDW, Data) + DataLength;
-        if (Size < sizeof(DNS_RECORDW))
-            Size = sizeof(DNS_RECORDW);
-        New = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, Size);
+        /*
+         * The count must describe the array that arrived (the stub does not check it against the array's size) and
+         * fit the WORD data length (the resolver makes no larger record); else the reply is not used
+         */
+        New = NULL;
+        Status = DNS_ERROR_BAD_PACKET;
+        if (Count == Wire->dwStringCount &&
+            Count <= (MAXWORD - FIELD_OFFSET(DNS_TXT_DATAW, pStringArray)) / sizeof(PWSTR))
+        {
+            DataLength = FIELD_OFFSET(DNS_TXT_DATAW, pStringArray) + Count * sizeof(PWSTR);
+            Size = FIELD_OFFSET(DNS_RECORDW, Data) + DataLength;
+            if (Size < sizeof(DNS_RECORDW))
+                Size = sizeof(DNS_RECORDW);
+            New = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, Size);
+            Status = ERROR_OUTOFMEMORY;
+        }
         if (New == NULL)
         {
             /*
@@ -460,15 +486,17 @@ TextFromWire(PDNS_RECORDW *List)
                     continue;
                 Wire = (TEXT_WIRE_DATA *)&New->Data;
                 Strings = Wire->pStringArray;
-                for (i = 0; Strings && i < Wire->dwStringCount; i++)
+                Count = WireStringCount(Wire);
+                for (i = 0; i < Count; i++)
                     RtlFreeHeap(RtlGetProcessHeap(), 0, Strings[i]);
                 if (Strings)
                     RtlFreeHeap(RtlGetProcessHeap(), 0, Strings);
+                Wire->pStringArray = NULL;
                 Wire->dwStringCount = 0;
             }
             DnsIntFreeRecordList((PDNS_RECORD)*List);
             *List = NULL;
-            return ERROR_OUTOFMEMORY;
+            return Status;
         }
 
         RtlCopyMemory(New, Record, FIELD_OFFSET(DNS_RECORDW, Data));
@@ -1440,6 +1468,16 @@ BuildTypedRecords(
 
             while (Strings[Count].i >= 0)
                 Count++;
+
+            /*
+             * The data length is a WORD and DnsRecordCopyEx sizes its copy by it: a record of more strings than
+             * that can describe (one byte each in a reply of up to 64 KB over TCP) is not a record of the API
+             */
+            if (Count > (MAXWORD - FIELD_OFFSET(DNS_TXT_DATAW, pStringArray)) / sizeof(PWSTR))
+            {
+                Status = DNS_ERROR_BAD_PACKET;
+                break;
+            }
 
             Record = AppendTypedRecord(Name,
                                        Type,
