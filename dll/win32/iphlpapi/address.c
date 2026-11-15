@@ -715,6 +715,8 @@ GetAdaptersAddressesImpl(
                 CopyMemory(Ptr, &Entry->if_descr[0], Entry->if_descrlen);
                 CurrentAA->AdapterName = (PCHAR)Ptr;
                 CurrentAA->AdapterName[Entry->if_descrlen] = '\0';
+                if (V6On && Ipv6FindInterface(V6, Entry->if_index))
+                    Ipv6FillDhcpIdentity((PIP_ADAPTER_ADDRESSES_LH)CurrentAA, CurrentAA->AdapterName);
                 /* Next items */
                 Ptr = (BYTE*)(CurrentAA->AdapterName + Entry->if_descrlen + 1);
 
@@ -1338,7 +1340,7 @@ Gateways:
                 IPV6_ADAPTER_SUFFIX Suffixes[IPV6_ADAPTER_MAX_SUFFIXES];
 
                 /* the DNS search domains router advertisements gave the adapter (DNSSL) */
-                Count = Ipv6CollectSuffixes(&Ra6, IfIndex, Suffixes, IPV6_ADAPTER_MAX_SUFFIXES);
+                Count = Ipv6CollectSuffixes(&Ra6, IfIndex, AdapterNames[AdapterNumber], Suffixes, IPV6_ADAPTER_MAX_SUFFIXES);
                 for (k = 0; k < Count; k++)
                 {
                     ULONG Size = (sizeof(IP_ADAPTER_DNS_SUFFIX) + 7) & ~7UL;

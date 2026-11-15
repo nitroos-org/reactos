@@ -1,0 +1,5 @@
+#define REACTOS_VERSION_DLL
+#define REACTOS_STR_FILE_DESCRIPTION  "DHCPv6 Client"
+#define REACTOS_STR_INTERNAL_NAME     "dhcpcsvc6"
+#define REACTOS_STR_ORIGINAL_FILENAME "dhcpcsvc6.dll"
+#include <reactos/version.rc>

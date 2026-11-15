@@ -87,10 +87,17 @@ ULONG Ipv6CollectDnsServers(const IPV6_DNS_STATE *State, DWORD IfIndex, PCSTR Ad
              "SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters\\Interfaces\\%s", AdapterName);
     if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, KeyName, 0, KEY_READ, &Key) == ERROR_SUCCESS)
     {
-      WCHAR Value[256];
+      /* the configured servers first, then the ones the DHCPv6 client of the DHCP service learned (the value is
+         written there and removed with the data), then (below) the ones of router advertisements */
+      static const WCHAR *const ValueNames[] = { L"NameServer", L"Dhcpv6NameServer" };
+      ULONG Source;
+
+      for (Source = 0; Source < ARRAYSIZE(ValueNames); Source++)
+      {
+      WCHAR Value[512];
       DWORD Type, Size = sizeof(Value) - sizeof(WCHAR);
 
-      if (RegQueryValueExW(Key, L"NameServer", NULL, &Type, (LPBYTE)Value, &Size) == ERROR_SUCCESS &&
+      if (RegQueryValueExW(Key, ValueNames[Source], NULL, &Type, (LPBYTE)Value, &Size) == ERROR_SUCCESS &&
           Type == REG_SZ)
       {
         PWCHAR Cursor = Value, Token;
@@ -132,6 +139,7 @@ ULONG Ipv6CollectDnsServers(const IPV6_DNS_STATE *State, DWORD IfIndex, PCSTR Ad
           }
           *Cursor = Saved;
         }
+      }
       }
       RegCloseKey(Key);
     }
@@ -217,9 +225,62 @@ VOID Ipv6FreeRa(PIPV6_RA_STATE State)
 
 /* Up to Max search domains of the interface into List (each once, a name the stack could not have made is
    skipped); returns how many */
-ULONG Ipv6CollectSuffixes(const IPV6_RA_STATE *State, DWORD IfIndex, PIPV6_ADAPTER_SUFFIX List, ULONG Max)
+ULONG Ipv6CollectSuffixes(const IPV6_RA_STATE *State, DWORD IfIndex, PCSTR AdapterName, PIPV6_ADAPTER_SUFFIX List,
+                          ULONG Max)
 {
   ULONG Count = 0, i, k;
+
+  /* the domains the DHCPv6 client of the DHCP service learned come first (option 24, blank separated), then the
+     ones of router advertisements */
+  if (AdapterName && AdapterName[0])
+  {
+    /* the service writes up to 16 names of up to 253 characters, blank separated (dhcp6.c): 4064 bytes */
+    CHAR KeyName[256], Value[4096];
+    HKEY Key;
+
+    snprintf(KeyName, sizeof(KeyName),
+             "SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters\\Interfaces\\%s", AdapterName);
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, KeyName, 0, KEY_READ, &Key) == ERROR_SUCCESS)
+    {
+      DWORD Type, Size = sizeof(Value) - 1;
+
+      if (RegQueryValueExA(Key, "Dhcpv6DomainSearchList", NULL, &Type, (LPBYTE)Value, &Size) == ERROR_SUCCESS &&
+          Type == REG_SZ)
+      {
+        PSTR Cursor = Value;
+
+        Value[Size] = '\0';
+        while (Count < Max)
+        {
+          PSTR Token;
+          BOOL Seen = FALSE;
+
+          while (*Cursor == ' ')
+            Cursor++;
+          if (!*Cursor)
+            break;
+          Token = Cursor;
+          while (*Cursor && *Cursor != ' ')
+            Cursor++;
+          if (*Cursor)
+            *Cursor++ = '\0';
+          if (strlen(Token) >= sizeof(List[0].Name))
+            continue;
+          for (k = 0; k < Count; k++)
+          {
+            if (!_stricmp(List[k].Name, Token))
+              Seen = TRUE;
+          }
+          if (!Seen)
+          {
+            strcpy(List[Count].Name, Token);
+            Count++;
+          }
+        }
+      }
+      RegCloseKey(Key);
+    }
+  }
 
   for (i = 0; State && State->Header && i < State->Header->Count && Count < Max; i++)
   {
@@ -240,4 +301,39 @@ ULONG Ipv6CollectSuffixes(const IPV6_RA_STATE *State, DWORD IfIndex, PIPV6_ADAPT
   }
 
   return Count;
+}
+
+/* The DHCPv6 identity of an IPv6 adapter (Dhcpv6Iaid, Dhcpv6ClientDuid and its length of the LH structure) from what
+   the DHCP service keeps (base/services/dhcpcsvc/dhcp6.h): the machine's DUID under Tcpip6\Parameters, the IAID
+   under the interface's key. Nothing is set while the service has not made them (the members stay zero). */
+VOID Ipv6FillDhcpIdentity(PIP_ADAPTER_ADDRESSES_LH Out, PCSTR AdapterName)
+{
+  CHAR KeyName[256];
+  HKEY Key;
+  DWORD Type, Size;
+
+  if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters", 0, KEY_READ, &Key) ==
+      ERROR_SUCCESS)
+  {
+    Size = sizeof(Out->Dhcpv6ClientDuid);
+    if (RegQueryValueExA(Key, "Dhcpv6DUID", NULL, &Type, Out->Dhcpv6ClientDuid, &Size) == ERROR_SUCCESS &&
+        Type == REG_BINARY && Size >= 4)
+      Out->Dhcpv6ClientDuidLength = Size;
+    RegCloseKey(Key);
+  }
+
+  if (AdapterName && AdapterName[0])
+  {
+    snprintf(KeyName, sizeof(KeyName),
+             "SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters\\Interfaces\\%s", AdapterName);
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, KeyName, 0, KEY_READ, &Key) == ERROR_SUCCESS)
+    {
+      DWORD Iaid = 0;
+
+      Size = sizeof(Iaid);
+      if (RegQueryValueExA(Key, "Dhcpv6Iaid", NULL, &Type, (LPBYTE)&Iaid, &Size) == ERROR_SUCCESS && Type == REG_DWORD)
+        Out->Dhcpv6Iaid = Iaid;
+      RegCloseKey(Key);
+    }
+  }
 }

@@ -227,9 +227,11 @@ typedef struct _IPV6_ADAPTER_SUFFIX
 
 #define IPV6_ADAPTER_MAX_SUFFIXES 16
 
+VOID Ipv6FillDhcpIdentity(PIP_ADAPTER_ADDRESSES_LH Out, PCSTR AdapterName);
 BOOL Ipv6GetRaFromFile(HANDLE TcpFile, PIPV6_RA_STATE State);
 VOID Ipv6FreeRa(PIPV6_RA_STATE State);
-ULONG Ipv6CollectSuffixes(const IPV6_RA_STATE *State, DWORD IfIndex, PIPV6_ADAPTER_SUFFIX List, ULONG Max);
+ULONG Ipv6CollectSuffixes(const IPV6_RA_STATE *State, DWORD IfIndex, PCSTR AdapterName, PIPV6_ADAPTER_SUFFIX List,
+                          ULONG Max);
 
 #include <w32api.h>
 /* This is here until we switch to version 2.5 of the mingw headers */

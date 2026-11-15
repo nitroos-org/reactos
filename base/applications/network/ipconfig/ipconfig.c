@@ -687,6 +687,58 @@ ShowConnectionSearchList(
     HeapFree(ProcessHeap, 0, Addresses);
 }
 
+/*
+ * The DHCPv6 IAID and the client DUID of an IPv6 adapter, as Windows 10 prints them after the DHCP server line
+ * (measured on the oracle: "DHCPv6 IAID . . . : 100836446", "DHCPv6 Client DUID. . . : 00-01-00-01-32-73-C9-50-02-A4-5E-B1-E2-59"),
+ * from IP_ADAPTER_ADDRESSES_LH. Nothing is printed for an adapter without IPv6 or before the DHCP service made them.
+ */
+static
+VOID
+ShowDhcpv6Identity(
+    _In_ DWORD IfIndex)
+{
+    PIP_ADAPTER_ADDRESSES Addresses = NULL, A;
+    ULONG Size = 16 * 1024, Pass;
+    DWORD Error = ERROR_BUFFER_OVERFLOW;
+
+    for (Pass = 0; Pass < 3 && Error == ERROR_BUFFER_OVERFLOW; Pass++)
+    {
+        if (Addresses)
+            HeapFree(ProcessHeap, 0, Addresses);
+        Addresses = HeapAlloc(ProcessHeap, 0, Size);
+        if (!Addresses)
+            return;
+        Error = GetAdaptersAddresses(AF_INET6,
+                                     GAA_FLAG_SKIP_UNICAST | GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                                     GAA_FLAG_SKIP_DNS_SERVER,
+                                     NULL, Addresses, &Size);
+    }
+
+    for (A = (Error == NO_ERROR) ? Addresses : NULL; A; A = A->Next)
+    {
+        PIP_ADAPTER_ADDRESSES_LH Lh = (PIP_ADAPTER_ADDRESSES_LH)A;
+
+        if (A->IfIndex != IfIndex && A->Ipv6IfIndex != IfIndex)
+            continue;
+        if (Lh->Dhcpv6Iaid != 0 && Lh->Dhcpv6ClientDuidLength != 0 && Lh->Dhcpv6ClientDuidLength <= MAX_DHCPV6_DUID_LENGTH)
+        {
+            CHAR Text[MAX_DHCPV6_DUID_LENGTH * 3 + 1];
+            ULONG i, Pos = 0;
+
+            for (i = 0; i < Lh->Dhcpv6ClientDuidLength; i++)
+            {
+                StringCchPrintfA(Text + Pos, _countof(Text) - Pos, i ? "-%02X" : "%02X", Lh->Dhcpv6ClientDuid[i]);
+                Pos += i ? 3 : 2;
+            }
+            ConResPrintf(StdOut, IDS_DHCPV6IAID, (ULONG)Lh->Dhcpv6Iaid);
+            ConResPrintf(StdOut, IDS_DHCPV6DUID, Text);
+        }
+        break;
+    }
+
+    HeapFree(ProcessHeap, 0, Addresses);
+}
+
 /* Split a comma/space separated search list and print it as label + continuation lines. */
 static
 VOID
@@ -1024,6 +1076,8 @@ ShowInfo(
                     strcmp(pAdapter->DhcpServer.IpAddress.String, "255.255.255.255") &&
                     strcmp(pAdapter->DhcpServer.IpAddress.String, "0.0.0.0"))
                     ConResPrintf(StdOut, IDS_DHCPSERVER, pAdapter->DhcpServer.IpAddress.String);
+
+                ShowDhcpv6Identity(pAdapter->Index);
 
                 bV6Dns = ShowIpv6Servers(pAdapter->Index, FALSE, IDS_DNSSERVERS);
                 if (pPerAdapterInfo != NULL && pPerAdapterInfo->DnsServerList.IpAddress.String[0] != ANSI_NULL &&

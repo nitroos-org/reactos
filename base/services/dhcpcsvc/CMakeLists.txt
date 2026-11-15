@@ -21,6 +21,7 @@ list(APPEND SOURCE
     dhcpcsvc.c)
 
 list(APPEND PCH_SKIP_SOURCE
+    dhcp6.c
     ${CMAKE_CURRENT_BINARY_DIR}/dhcpcsvc_c.c
     ${CMAKE_CURRENT_BINARY_DIR}/dhcpcsvc_s.c
     ${CMAKE_CURRENT_BINARY_DIR}/dhcpcsvc_stubs.c)
