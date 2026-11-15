@@ -1361,7 +1361,14 @@ WSHSetSocketInformation(
             Value = (OptionLength >= (INT)sizeof(LONG)) ? *(PLONG)OptionValue : *(PUCHAR)OptionValue;
             if (Boolean)
                 Value = (Value != 0);
-            else if (OptionName != IPV6_MULTICAST_IF && (Value < -1 || Value > 255))
+            else if (OptionName == IPV6_MULTICAST_IF)
+            {
+                /* An interface index: the stack takes it as unsigned, a negative one is no index (VERIFY ON
+                 * ORACLE: the exact error) */
+                if (Value < 0)
+                    return WSAEINVAL;
+            }
+            else if (Value < -1 || Value > 255)
                 return WSAEINVAL;
             /* -1 is the default hop limit: 128 unicast (what an unset one reads, oracle), 1 multicast (VERIFY ON
              * ORACLE: what reads back after -1) */

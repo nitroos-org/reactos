@@ -448,6 +448,15 @@ static void TestMulticast(void)
         }
     }
 
+    /* A negative interface index is refused at the option, and does not change the one set */
+    Value = (DWORD)-1;
+    ok(setsockopt(s, IPPROTO_IPV6, IPV6_MULTICAST_IF, (char *)&Value, sizeof(Value)) == SOCKET_ERROR &&
+       WSAGetLastError() == WSAEINVAL, "negative IPV6_MULTICAST_IF: %d\n", WSAGetLastError());
+    Value = 0xcc;
+    Length = sizeof(Value);
+    ok(getsockopt(s, IPPROTO_IPV6, IPV6_MULTICAST_IF, (char *)&Value, &Length) == 0 && Value == 0,
+       "IPV6_MULTICAST_IF after the refusal: %d %lu\n", WSAGetLastError(), Value);
+
     /* Hop limit and loop options read back */
     Value = 5;
     ok(setsockopt(s, IPPROTO_IPV6, IPV6_MULTICAST_HOPS, (char *)&Value, sizeof(Value)) == 0,
