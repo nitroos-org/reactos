@@ -646,6 +646,36 @@ Done:
     }
 }
 
+/* SIO_ADDRESS_LIST_QUERY of an IPv6 socket: IPv6 addresses only, never ::1; the size asked first (VERIFY ON ORACLE:
+   whether Windows lists link-local addresses, and their order) */
+static void TestAddressList(void)
+{
+    union { SOCKET_ADDRESS_LIST List; BYTE Raw[4096]; } Out;
+    DWORD Bytes = 0;
+    INT i, Result;
+    SOCKET s = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+
+    ok(s != INVALID_SOCKET, "socket: %d\n", WSAGetLastError());
+    if (s == INVALID_SOCKET)
+        return;
+
+    Result = WSAIoctl(s, SIO_ADDRESS_LIST_QUERY, NULL, 0, &Out, sizeof(INT), &Bytes, NULL, NULL);
+    ok(Result == 0 || WSAGetLastError() == WSAEFAULT, "SIO_ADDRESS_LIST_QUERY small: %d %d\n", Result,
+       WSAGetLastError());
+    Result = WSAIoctl(s, SIO_ADDRESS_LIST_QUERY, NULL, 0, &Out, sizeof(Out), &Bytes, NULL, NULL);
+    ok(Result == 0, "SIO_ADDRESS_LIST_QUERY: %d\n", WSAGetLastError());
+    for (i = 0; Result == 0 && i < Out.List.iAddressCount; i++)
+    {
+        PSOCKADDR_IN6 Sa = (PSOCKADDR_IN6)Out.List.Address[i].lpSockaddr;
+
+        ok(Out.List.Address[i].iSockaddrLength == sizeof(SOCKADDR_IN6) && Sa->sin6_family == AF_INET6,
+           "entry %d: length %d family %u\n", i, Out.List.Address[i].iSockaddrLength, Sa->sin6_family);
+        ok(memcmp(&Sa->sin6_addr, Loopback6, 16) != 0, "entry %d is ::1\n", i);
+    }
+    trace("SIO_ADDRESS_LIST_QUERY: %d IPv6 addresses\n", Result == 0 ? Out.List.iAddressCount : -1);
+    closesocket(s);
+}
+
 static void TestTables(void)
 {
     USHORT PortN;
@@ -733,6 +763,7 @@ START_TEST(ipv6udp)
     TestMulticastBurst();
     TestMulticastGroupLimit();
     TestTables();
+    TestAddressList();
 
     WSACleanup();
 }
