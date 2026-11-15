@@ -1916,6 +1916,16 @@ MiniShutdownAdapter(
     /* The sends, requests, transfers and resets have been completed or failed: the protocols' unbind drains at once */
     ProUnbindAdapter(Adapter);
 
+    /* The DMA adapter NdisMInitializeScatterGatherDma (or a map register or DMA channel
+       call the miniport did not undo) got from the HAL; the miniport is halted */
+    if (Adapter->NdisMiniportBlock.SystemAdapterObject)
+    {
+        PDMA_ADAPTER DmaAdapter = Adapter->NdisMiniportBlock.SystemAdapterObject;
+
+        Adapter->NdisMiniportBlock.SystemAdapterObject = NULL;
+        DmaAdapter->DmaOperations->PutDmaAdapter(DmaAdapter);
+    }
+
     if (Adapter->NdisMiniportBlock.EthDB)
     {
         EthDeleteFilter(Adapter->NdisMiniportBlock.EthDB);
