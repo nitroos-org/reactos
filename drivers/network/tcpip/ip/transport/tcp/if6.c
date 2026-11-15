@@ -49,6 +49,10 @@ BOOLEAN TCPIpv6Enabled = FALSE;
 static BOOLEAN TCP6InputFromOwnLink;
 /* Set while a datagram from one of our adapters that the firewall passed is in ip6_input (core lock held) */
 static BOOLEAN TCP6InputFiltered;
+/* Set by the transmit callback when neighbour discovery had no room to keep a datagram for a neighbour that has not
+   answered yet (lwIP's queue holds 20 datagrams for all of them): the datagram is lost, as on a wire; the caller of
+   ip6_output_if (core lock held) tells that apart from running out of memory */
+BOOLEAN TCP6SendNdDropped;
 
 /* Received IPv6 frames that were not handed to lwIP because they were shorter than their header says,
    or could not be copied; and connection requests to an IPv6 listener refused because they came from
@@ -363,7 +367,11 @@ TCPSendData6Callback(struct netif *netif, struct pbuf *p, const ip6_addr_t *Dest
            this callback again once the neighbour answers */
         Result = nd6_get_next_hop_addr_or_queue(netif, p, Dest, &Hw);
         if (Result != ERR_OK)
+        {
+            if (Result == ERR_MEM)
+                TCP6SendNdDropped = TRUE;
             return Result;
+        }
         if (!Hw)
             return ERR_OK;
         RtlCopyMemory(Mac, Hw, 6);

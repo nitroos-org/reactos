@@ -84,6 +84,9 @@ static volatile LONG Echo6Counter;
 
 PDEVICE_OBJECT Ip6DeviceObject = NULL;
 
+/* if6.c */
+extern BOOLEAN TCP6SendNdDropped;
+
 /* udp6.c */
 struct netif *Udp6NetifOfIndex(ULONG IfIndex);
 struct netif *Udp6DefaultMulticastNetif(VOID);
@@ -627,8 +630,14 @@ DispEchoRequest6(PIRP Irp, PIO_STACK_LOCATION IrpSp)
             RtlCopyMemory(Icmp + 4, &E->Ident, sizeof(E->Ident));
             RtlCopyMemory(Icmp + 6, &E->Seq, sizeof(E->Seq));
             *(u16_t *)(Icmp + 2) = ip6_chksum_pseudo(p, IP6_NEXTH_ICMP6, p->tot_len, &Source, &Dest);
+            TCP6SendNdDropped = FALSE;
             Result = ip6_output_if(p, &Source, &Dest, Req.Ttl ? (u8_t)min(Req.Ttl, 255) : 128, 0,
                                    IP6_NEXTH_ICMP6, netif);
+            /* Neighbour discovery had no room for the request (a neighbour that does not answer holds the queue):
+               it is lost like a packet on the wire, and the request waits for its timeout (IP_REQ_TIMED_OUT) rather
+               than failing for want of resources, which would be a lie while memory is fine */
+            if (Result == ERR_MEM && TCP6SendNdDropped)
+                Result = ERR_INPROGRESS;
         }
     }
     else
