@@ -245,7 +245,9 @@ static VOID WINAPI ServiceMainImpl(DWORD argc, LPWSTR *argv)
     /* a boot-time base keeps generations increasing across service restarts (the device outlives us) */
     GetSystemTimeAsFileTime(&ft);
     g_Generation = (((ULONGLONG)ft.dwHighDateTime << 32) | ft.dwLowDateTime) / 10000000ULL;
-    if (!g_hStop || !hChange || FwWatchOpen(&hKey)) goto done;
+    if (!g_hStop || !hChange) goto done;
+    FwUpgradeDefaults();   /* before the key watch is armed, so the write does not cause a second push */
+    if (FwWatchOpen(&hKey)) goto done;
     RegNotifyChangeKeyValue(hKey, TRUE, REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_CHANGE_LAST_SET, hChange, TRUE);
     SetState(SERVICE_RUNNING);
     g_hAddr = CreateEventW(NULL, TRUE, FALSE, NULL);

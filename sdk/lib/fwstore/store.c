@@ -280,20 +280,79 @@ static const struct { PCWSTR Id, Rule; } g_Defaults[] = {
       L"v2.30|Action=Allow|Active=FALSE|Dir=In|Protocol=17|Profile=Domain|Profile=Private|Profile=Public|LPort=3389|Name=Remote Desktop - User Mode (UDP-In)|Desc=Allows inbound Remote Desktop traffic (UDP 3389). Disabled by default.|EmbedCtxt=Remote Desktop|" },
 };
 
+/* Default rules added after the first default set (level 1). A new install gets them from hivesys.inf, which also
+   writes DefaultsLevel; an install that predates them gets them once from FwUpgradeDefaults. Keep identical to
+   hivesys.inf. */
+#define FW_DEFAULTS_LEVEL  2
+static const struct { PCWSTR Id, Rule; } g_DefaultsL2[] = {
+    { L"CoreNet-Diag-ICMP6-EchoRequest-In",
+      L"v2.30|Action=Allow|Active=FALSE|Dir=In|Protocol=58|Profile=Private|Profile=Public|ICMP6=128:*|RA6=LocalSubnet|Name=Core Networking Diagnostics - ICMP Echo Request (ICMPv6-In)|Desc=Allows inbound ICMPv6 echo requests (ping) from the local subnet. Disabled by default.|EmbedCtxt=Core Networking Diagnostics|" },
+    { L"CoreNet-Diag-ICMP6-EchoRequest-In-NoScope",
+      L"v2.30|Action=Allow|Active=FALSE|Dir=In|Protocol=58|Profile=Domain|ICMP6=128:*|Name=Core Networking Diagnostics - ICMP Echo Request (ICMPv6-In)|Desc=Allows inbound ICMPv6 echo requests (ping) from any address, Domain profile. Disabled by default.|EmbedCtxt=Core Networking Diagnostics|" },
+    { L"FPS-ICMP6-ERQ-In",
+      L"v2.30|Action=Allow|Active=FALSE|Dir=In|Protocol=58|Profile=Private|Profile=Public|ICMP6=128:*|RA6=LocalSubnet|Name=File and Printer Sharing (Echo Request - ICMPv6-In)|Desc=Allows inbound ICMPv6 echo requests (ping) from the local subnet. Disabled by default.|EmbedCtxt=File and Printer Sharing|" },
+    { L"FPS-ICMP6-ERQ-In-NoScope",
+      L"v2.30|Action=Allow|Active=FALSE|Dir=In|Protocol=58|Profile=Domain|ICMP6=128:*|Name=File and Printer Sharing (Echo Request - ICMPv6-In)|Desc=Allows inbound ICMPv6 echo requests (ping) from any address, Domain profile. Disabled by default.|EmbedCtxt=File and Printer Sharing|" },
+};
+
+static DWORD AddDefault(PCWSTR Id, PCWSTR Rule)
+{
+    FW_RULE r; FWR raw; DWORD err;
+    if (!FwrParse(&raw, Id, Rule)) { FwrFree(&raw); return ERROR_OUTOFMEMORY; }
+    FwRuleInit(&r);
+    if (!FwRuleFromRaw(&r, &raw)) { FwRuleFree(&r); FwrFree(&raw); return ERROR_OUTOFMEMORY; }
+    FwrFree(&raw);
+    err = FwStoreAdd(&r);
+    FwRuleFree(&r);
+    return err;
+}
+
+static DWORD SetDefaultsLevel(DWORD level)
+{
+    HKEY hk; DWORD err = RegCreateKeyExW(HKEY_LOCAL_MACHINE, FW_KEY_POLICY, 0, NULL, 0, KEY_SET_VALUE, NULL, &hk, NULL);
+    if (err) return err;
+    err = RegSetValueExW(hk, L"DefaultsLevel", 0, REG_DWORD, (const BYTE *)&level, sizeof(level));
+    RegCloseKey(hk);
+    return err;
+}
+
 static DWORD WriteDefaultRules(VOID)
 {
     ULONG i; DWORD err = 0;
     for (i = 0; i < _countof(g_Defaults) && !err; i++)
-    {
-        FW_RULE r; FWR raw;
-        if (!FwrParse(&raw, g_Defaults[i].Id, g_Defaults[i].Rule)) { FwrFree(&raw); return ERROR_OUTOFMEMORY; }
-        FwRuleInit(&r);
-        if (!FwRuleFromRaw(&r, &raw)) { FwRuleFree(&r); FwrFree(&raw); return ERROR_OUTOFMEMORY; }
-        FwrFree(&raw);
-        err = FwStoreAdd(&r);
-        FwRuleFree(&r);
-    }
+        err = AddDefault(g_Defaults[i].Id, g_Defaults[i].Rule);
+    for (i = 0; i < _countof(g_DefaultsL2) && !err; i++)
+        err = AddDefault(g_DefaultsL2[i].Id, g_DefaultsL2[i].Rule);
+    if (!err) err = SetDefaultsLevel(FW_DEFAULTS_LEVEL);
     return err;
+}
+
+/* Carry default rules added since an install was made: once, when DefaultsLevel is below FW_DEFAULTS_LEVEL (absent =
+   an install of the first set). A rule the user already has under the same id is left alone, and a rule the user
+   deletes afterwards is not brought back, because the level is then current. */
+DWORD FwUpgradeDefaults(VOID)
+{
+    HKEY hk; DWORD err, level = 1, cb = sizeof(level), t;
+    ULONG i;
+    err = RegOpenKeyExW(HKEY_LOCAL_MACHINE, FW_KEY_POLICY, 0, KEY_READ, &hk);
+    if (err == ERROR_FILE_NOT_FOUND) return 0;   /* no policy store: nothing installed to carry to */
+    if (err) return err;
+    if (RegQueryValueExW(hk, L"DefaultsLevel", NULL, &t, (BYTE *)&level, &cb) != 0 || t != REG_DWORD) level = 1;
+    RegCloseKey(hk);
+    if (level >= FW_DEFAULTS_LEVEL) return 0;
+    for (i = 0; i < _countof(g_DefaultsL2); i++)
+    {
+        HKEY hr; BOOL have = FALSE;
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, FW_KEY_RULES, 0, KEY_QUERY_VALUE, &hr) == 0)
+        {
+            have = RegQueryValueExW(hr, g_DefaultsL2[i].Id, NULL, NULL, NULL, NULL) == 0;
+            RegCloseKey(hr);
+        }
+        if (have) continue;
+        err = AddDefault(g_DefaultsL2[i].Id, g_DefaultsL2[i].Rule);
+        if (err) return err;     /* level not raised: tried again at the next start */
+    }
+    return SetDefaultsLevel(FW_DEFAULTS_LEVEL);
 }
 
 DWORD FwResetAll(VOID)
