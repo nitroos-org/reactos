@@ -270,6 +270,17 @@ TCPInterfaceInit(struct netif *netif)
     return 0;
 }
 
+/* Called by lwIP's IPv4 input (NitroOS change in ip4_input_accept): is the address one of the additional addresses
+ * (AddIPAddress beside the primary one) of the interface of the netif? */
+int
+NitroNetifHasAdditionalAddress(struct netif *netif, u32_t addr)
+{
+    if (netif->output != TCPSendDataCallback || netif->state == NULL)
+        return 0;
+
+    return IFIsNteIPv4Address((PIP_INTERFACE)netif->state, addr);
+}
+
 VOID
 TCPRegisterInterface(PIP_INTERFACE IF)
 {

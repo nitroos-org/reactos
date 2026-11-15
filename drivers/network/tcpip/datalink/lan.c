@@ -1139,7 +1139,8 @@ BOOLEAN ReconfigureAdapter(PRECONFIGURE_CONTEXT Context)
         Interface->Netmask = DefaultMask;
         Interface->Broadcast = DefaultMask;
 
-        /* Remove all interface routes */
+        /* Remove all interface routes, and forget the additional addresses (their neighbors go with the others) */
+        IFClearNtes(Interface);
         RouterRemoveRoutesForInterface(Interface);
 
         /* Destroy all cached neighbors */

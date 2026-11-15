@@ -88,6 +88,243 @@ NTSTATUS GetInterfaceName( PIP_INTERFACE Interface,
 
 BOOLEAN HasLoopbackPrefix(PIP_ADDRESS Address, PIP_ADDRESS Prefix);
 
+/* Additional addresses of an interface (IP_NTE, ip.h). NteLock is a leaf lock; the interface list lock, when it is
+ * needed too, is taken first */
+
+/* Is Address one of the additional addresses of the interface? */
+BOOLEAN IFIsNteIPv4Address(PIP_INTERFACE Interface, IPv4_RAW_ADDRESS Address)
+{
+    KIRQL OldIrql;
+    BOOLEAN Found = FALSE;
+    UINT i;
+
+    if (Address == 0)
+        return FALSE;
+
+    TcpipAcquireSpinLock(&Interface->NteLock, &OldIrql);
+    for (i = 0; i < Interface->NteCount; i++)
+    {
+        if (Interface->Nte[i].Address == Address)
+        {
+            Found = TRUE;
+            break;
+        }
+    }
+    TcpipReleaseSpinLock(&Interface->NteLock, OldIrql);
+
+    return Found;
+}
+
+/* Is Address the primary or an additional address of the interface? */
+BOOLEAN IFIsOwnIPv4Address(PIP_INTERFACE Interface, IPv4_RAW_ADDRESS Address)
+{
+    if (Address == 0)
+        return FALSE;
+    if (Interface->Unicast.Type == IP_ADDRESS_V4 && Interface->Unicast.Address.IPv4Address == Address)
+        return TRUE;
+    return IFIsNteIPv4Address(Interface, Address);
+}
+
+/* Is Address in the subnet of one of the additional addresses of the interface? */
+BOOLEAN IFIsNteSubnet(PIP_INTERFACE Interface, IPv4_RAW_ADDRESS Address)
+{
+    KIRQL OldIrql;
+    BOOLEAN Found = FALSE;
+    UINT i;
+
+    TcpipAcquireSpinLock(&Interface->NteLock, &OldIrql);
+    for (i = 0; i < Interface->NteCount; i++)
+    {
+        if (Interface->Nte[i].Netmask != 0 &&
+            (Address & Interface->Nte[i].Netmask) == (Interface->Nte[i].Address & Interface->Nte[i].Netmask))
+        {
+            Found = TRUE;
+            break;
+        }
+    }
+    TcpipReleaseSpinLock(&Interface->NteLock, OldIrql);
+
+    return Found;
+}
+
+/* The local address to send to Destination from over the interface: the primary address, unless Destination is in the
+ * subnet of an additional address and not in that of the primary one (then the address of that subnet), and the
+ * first additional address when the interface has no primary one */
+IPv4_RAW_ADDRESS IFSelectSourceAddress(PIP_INTERFACE Interface, IPv4_RAW_ADDRESS Destination)
+{
+    KIRQL OldIrql;
+    IPv4_RAW_ADDRESS Primary = Interface->Unicast.Address.IPv4Address;
+    IPv4_RAW_ADDRESS Mask = Interface->Netmask.Address.IPv4Address;
+    IPv4_RAW_ADDRESS Selected = Primary;
+    UINT i;
+
+    if (Interface->Unicast.Type != IP_ADDRESS_V4)
+        return Primary;
+    if (Primary != 0 && Mask != 0 && (Destination & Mask) == (Primary & Mask))
+        return Primary;
+
+    TcpipAcquireSpinLock(&Interface->NteLock, &OldIrql);
+    if (Primary == 0 && Interface->NteCount != 0)
+        Selected = Interface->Nte[0].Address;
+    for (i = 0; i < Interface->NteCount; i++)
+    {
+        if (Interface->Nte[i].Netmask != 0 &&
+            (Destination & Interface->Nte[i].Netmask) == (Interface->Nte[i].Address & Interface->Nte[i].Netmask))
+        {
+            Selected = Interface->Nte[i].Address;
+            break;
+        }
+    }
+    TcpipReleaseSpinLock(&Interface->NteLock, OldIrql);
+
+    return Selected;
+}
+
+UINT IFCountNtes(PIP_INTERFACE Interface)
+{
+    KIRQL OldIrql;
+    UINT Count;
+
+    TcpipAcquireSpinLock(&Interface->NteLock, &OldIrql);
+    Count = Interface->NteCount;
+    TcpipReleaseSpinLock(&Interface->NteLock, OldIrql);
+
+    return Count;
+}
+
+/* Copies at most Capacity additional addresses; returns how many */
+UINT IFCopyNtes(PIP_INTERFACE Interface, PIP_NTE Entries, UINT Capacity)
+{
+    KIRQL OldIrql;
+    UINT Count;
+
+    TcpipAcquireSpinLock(&Interface->NteLock, &OldIrql);
+    Count = min(Interface->NteCount, Capacity);
+    RtlCopyMemory(Entries, Interface->Nte, Count * sizeof(IP_NTE));
+    TcpipReleaseSpinLock(&Interface->NteLock, OldIrql);
+
+    return Count;
+}
+
+static BOOLEAN IFNteContextInUse(USHORT Context)
+{
+    PIP_INTERFACE CurrentIF;
+    PLIST_ENTRY CurrentEntry;
+    BOOLEAN InUse = FALSE;
+    KIRQL OldIrql;
+    UINT i;
+
+    /* The caller holds the interface list lock */
+    for (CurrentEntry = InterfaceListHead.Flink; CurrentEntry != &InterfaceListHead && !InUse; CurrentEntry = CurrentEntry->Flink)
+    {
+        CurrentIF = CONTAINING_RECORD(CurrentEntry, IP_INTERFACE, ListEntry);
+        TcpipAcquireSpinLock(&CurrentIF->NteLock, &OldIrql);
+        for (i = 0; i < CurrentIF->NteCount; i++)
+        {
+            if (CurrentIF->Nte[i].Context == Context)
+            {
+                InUse = TRUE;
+                break;
+            }
+        }
+        TcpipReleaseSpinLock(&CurrentIF->NteLock, OldIrql);
+    }
+
+    return InUse;
+}
+
+/* Adds an additional address; the context that DeleteIPAddress takes for it comes back in *Context. The interface is
+ * one the caller holds a reference to */
+NTSTATUS IFAddNte(PIP_INTERFACE Interface, IPv4_RAW_ADDRESS Address, IPv4_RAW_ADDRESS Netmask, PUSHORT Context)
+{
+    static volatile LONG NextContext = 0;
+    KIRQL OldIrql, OldIrql2;
+    NTSTATUS Status = STATUS_INSUFFICIENT_RESOURCES;
+    USHORT Candidate = 0;
+    UINT Tries;
+
+    TcpipAcquireSpinLock(&InterfaceListLock, &OldIrql);
+
+    /* The contexts are 15 bits, all of the system's additional addresses are far fewer */
+    for (Tries = 0; Tries < 0x8000; Tries++)
+    {
+        Candidate = (USHORT)(IP_NTE_CONTEXT_BASE | (InterlockedIncrement(&NextContext) & (IP_NTE_CONTEXT_BASE - 1)));
+        if (!IFNteContextInUse(Candidate))
+            break;
+    }
+
+    if (Tries < 0x8000)
+    {
+        TcpipAcquireSpinLock(&Interface->NteLock, &OldIrql2);
+        if (Interface->NteCount < IP_MAX_NTE)
+        {
+            Interface->Nte[Interface->NteCount].Address = Address;
+            Interface->Nte[Interface->NteCount].Netmask = Netmask;
+            Interface->Nte[Interface->NteCount].Context = Candidate;
+            Interface->NteCount++;
+            *Context = Candidate;
+            Status = STATUS_SUCCESS;
+        }
+        TcpipReleaseSpinLock(&Interface->NteLock, OldIrql2);
+    }
+
+    TcpipReleaseSpinLock(&InterfaceListLock, OldIrql);
+
+    return Status;
+}
+
+/* Removes the additional address with that context from whichever interface has it; the interface comes back
+ * referenced in *Owner (IPDereferenceInterface) */
+BOOLEAN IFRemoveNteByContext(USHORT Context, PIP_NTE Removed, PIP_INTERFACE *Owner)
+{
+    PIP_INTERFACE CurrentIF;
+    PLIST_ENTRY CurrentEntry;
+    BOOLEAN Found = FALSE;
+    KIRQL OldIrql, OldIrql2;
+    UINT i;
+
+    TcpipAcquireSpinLock(&InterfaceListLock, &OldIrql);
+
+    for (CurrentEntry = InterfaceListHead.Flink; CurrentEntry != &InterfaceListHead && !Found; CurrentEntry = CurrentEntry->Flink)
+    {
+        CurrentIF = CONTAINING_RECORD(CurrentEntry, IP_INTERFACE, ListEntry);
+        TcpipAcquireSpinLock(&CurrentIF->NteLock, &OldIrql2);
+        for (i = 0; i < CurrentIF->NteCount; i++)
+        {
+            if (CurrentIF->Nte[i].Context == Context)
+            {
+                *Removed = CurrentIF->Nte[i];
+                CurrentIF->NteCount--;
+                for (; i < CurrentIF->NteCount; i++)
+                    CurrentIF->Nte[i] = CurrentIF->Nte[i + 1];
+                Found = TRUE;
+                break;
+            }
+        }
+        TcpipReleaseSpinLock(&CurrentIF->NteLock, OldIrql2);
+        if (Found)
+        {
+            IPReferenceInterface(CurrentIF);
+            *Owner = CurrentIF;
+        }
+    }
+
+    TcpipReleaseSpinLock(&InterfaceListLock, OldIrql);
+
+    return Found;
+}
+
+/* Forgets all additional addresses (the adapter went down; its neighbors and routes are destroyed with it) */
+VOID IFClearNtes(PIP_INTERFACE Interface)
+{
+    KIRQL OldIrql;
+
+    TcpipAcquireSpinLock(&Interface->NteLock, &OldIrql);
+    Interface->NteCount = 0;
+    TcpipReleaseSpinLock(&Interface->NteLock, OldIrql);
+}
+
+
 /* The interface with that unicast or broadcast address, referenced for the caller (IPDereferenceInterface) */
 PIP_INTERFACE AddrLocateInterface(
     PIP_ADDRESS MatchAddress)
@@ -102,6 +339,8 @@ PIP_INTERFACE AddrLocateInterface(
 	/* The loopback interface owns the whole 127.0.0.0/8, as on Windows */
 	if( AddrIsEqual( &CurrentIF->Unicast, MatchAddress ) ||
             AddrIsEqual( &CurrentIF->Broadcast, MatchAddress ) ||
+            (MatchAddress->Type == IP_ADDRESS_V4 &&
+             IFIsNteIPv4Address( CurrentIF, MatchAddress->Address.IPv4Address )) ||
             HasLoopbackPrefix( MatchAddress, &CurrentIF->Unicast ) ) {
             RetIF = CurrentIF;
             IPReferenceInterface(RetIF);
@@ -275,7 +514,8 @@ PIP_INTERFACE FindOnLinkInterface(PIP_ADDRESS Address)
 
     ForEachInterface(CurrentIF) {
         if (HasLoopbackPrefix(Address, &CurrentIF->Unicast) ||
-            HasPrefix(Address, &CurrentIF->Unicast, AddrCountPrefixBits(&CurrentIF->Netmask)))
+            HasPrefix(Address, &CurrentIF->Unicast, AddrCountPrefixBits(&CurrentIF->Netmask)) ||
+            (Address->Type == IP_ADDRESS_V4 && IFIsNteSubnet(CurrentIF, Address->Address.IPv4Address)))
         {
             IPReferenceInterface(CurrentIF);
             TcpipReleaseSpinLock(&InterfaceListLock, OldIrql);

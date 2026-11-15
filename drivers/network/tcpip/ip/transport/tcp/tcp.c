@@ -461,7 +461,7 @@ TCPConnect6(
                 UnlockObject(Connection);
                 return STATUS_NETWORK_UNREACHABLE;
             }
-            Local4 = NCE->Interface->Unicast.Address.IPv4Address;
+            Local4 = IFSelectSourceAddress(NCE->Interface, Remote4);
             NBDereferenceNeighbor(NCE);
         }
 
@@ -562,7 +562,7 @@ NTSTATUS TCPConnect
             return STATUS_NETWORK_UNREACHABLE;
         }
 
-        bindaddr.addr = NCE->Interface->Unicast.Address.IPv4Address;
+        bindaddr.addr = IFSelectSourceAddress(NCE->Interface, RemoteAddress.Address.IPv4Address);
         NBDereferenceNeighbor(NCE);
     }
     else

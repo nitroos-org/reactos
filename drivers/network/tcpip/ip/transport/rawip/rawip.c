@@ -228,6 +228,7 @@ NTSTATUS RawIPSendDatagram(
         }
 
         LocalAddress = NCE->Interface->Unicast;
+        LocalAddress.Address.IPv4Address = IFSelectSourceAddress(NCE->Interface, RemoteAddress.Address.IPv4Address);
     }
     else
     {

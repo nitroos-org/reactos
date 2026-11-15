@@ -501,6 +501,44 @@ NTSTATUS getIPAddrEntryForIf(HANDLE tcpFile,
     return status;
 }
 
+/* The addresses of the interface after its first one (AddIPAddress on an interface that has an address adds one): a
+   heap array, which the caller frees with HeapFree; NULL and 0 when there are none */
+DWORD getInterfaceAdditionalAddresses(DWORD index, IPAddrEntry **Entries, PDWORD Count)
+{
+    HANDLE tcpFile;
+    TDIEntityID ipEnt;
+    IPAddrEntry *addrs = NULL;
+    DWORD numAddrs = 0;
+    NTSTATUS status;
+
+    *Entries = NULL;
+    *Count = 0;
+
+    status = openTcpFile( &tcpFile, FILE_READ_DATA );
+    if( !NT_SUCCESS(status) )
+        return status;
+
+    status = getIpEntityByIfIndex( tcpFile, index, &ipEnt );
+    if( NT_SUCCESS(status) )
+        status = tdiGetIpAddrsForIpEntity( tcpFile, &ipEnt, &addrs, &numAddrs );
+    closeTcpFile( tcpFile );
+
+    if( !NT_SUCCESS(status) )
+        return status;
+
+    if( numAddrs > 1 ) {
+        *Entries = HeapAlloc( GetProcessHeap(), 0, (numAddrs - 1) * sizeof(IPAddrEntry) );
+        if( *Entries ) {
+            memcpy( *Entries, &addrs[1], (numAddrs - 1) * sizeof(IPAddrEntry) );
+            *Count = numAddrs - 1;
+        } else
+            status = STATUS_INSUFFICIENT_RESOURCES;
+    }
+    tdiFreeThingSet( addrs );
+
+    return status;
+}
+
 DWORD getAddrByIndexOrName( char *name, DWORD index, IPHLPAddrType addrType ) {
     IFInfo ifInfo;
     HANDLE tcpFile;
@@ -699,8 +737,10 @@ NTSTATUS addIPAddress( IPAddr Address, IPMask Mask, DWORD IfIndex,
 
   if( NT_SUCCESS(status) ) {
       /* The driver answers in the buffer (the interface and its context), as many bytes as it filled */
-      *NteContext = Iosb.Information >= FIELD_OFFSET(IP_SET_DATA, NewAddress) ? Data.NteContext : IfIndex;
-      *NteInstance = Iosb.Information >= sizeof(Data.NteContext) + sizeof(Data.NewAddress) ? Data.NewAddress : IfIndex;
+      /* The context is what DeleteIPAddress takes: the interface index for the first address of the interface, a
+         number of its own for the others */
+      *NteContext = Iosb.Information >= sizeof(Data.NteContext) + sizeof(Data.NewAddress) ? Data.NewAddress : IfIndex;
+      *NteInstance = Iosb.Information >= FIELD_OFFSET(IP_SET_DATA, NewAddress) ? Data.NteContext : IfIndex;
   }
 
   if (!NT_SUCCESS(status)) {

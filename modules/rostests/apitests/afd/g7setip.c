@@ -88,10 +88,81 @@ G7ParseIp(_In_ PCSTR Text, _Out_ PULONG Address)
     return TRUE;
 }
 
+/* Is the address in the address list of the adapter (FirstOnly: is it the first one)? */
+static
+BOOLEAN
+G7AddressListHas(
+    _In_ ULONG (WINAPI *GetAdaptersInfoFn)(PIP_ADAPTER_INFO, PULONG),
+    _In_ ULONG Index,
+    _In_ ULONG Address,
+    _In_ BOOLEAN FirstOnly)
+{
+    PIP_ADAPTER_INFO Adapters, Adapter;
+    PIP_ADDR_STRING Entry;
+    ULONG Size = 0, Found;
+    BOOLEAN Has = FALSE;
+
+    if (GetAdaptersInfoFn(NULL, &Size) != ERROR_BUFFER_OVERFLOW)
+        return FALSE;
+    Adapters = HeapAlloc(GetProcessHeap(), 0, Size);
+    if (!Adapters || GetAdaptersInfoFn(Adapters, &Size) != ERROR_SUCCESS)
+    {
+        HeapFree(GetProcessHeap(), 0, Adapters);
+        return FALSE;
+    }
+    for (Adapter = Adapters; Adapter; Adapter = Adapter->Next)
+    {
+        if (Adapter->Index != Index)
+            continue;
+        for (Entry = &Adapter->IpAddressList; Entry; Entry = FirstOnly ? NULL : Entry->Next)
+        {
+            if (G7ParseIp(Entry->IpAddress.String, &Found) && Found == Address)
+                Has = TRUE;
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, Adapters);
+    return Has;
+}
+
+/* The context of the address in the address list of the adapter (0: it is not there) */
+static
+USHORT
+G7ContextOf(
+    _In_ ULONG (WINAPI *GetAdaptersInfoFn)(PIP_ADAPTER_INFO, PULONG),
+    _In_ ULONG Index,
+    _In_ ULONG Address)
+{
+    PIP_ADAPTER_INFO Adapters, Adapter;
+    PIP_ADDR_STRING Entry;
+    ULONG Size = 0, Found;
+    USHORT Context = 0;
+
+    if (GetAdaptersInfoFn(NULL, &Size) != ERROR_BUFFER_OVERFLOW)
+        return 0;
+    Adapters = HeapAlloc(GetProcessHeap(), 0, Size);
+    if (!Adapters || GetAdaptersInfoFn(Adapters, &Size) != ERROR_SUCCESS)
+    {
+        HeapFree(GetProcessHeap(), 0, Adapters);
+        return 0;
+    }
+    for (Adapter = Adapters; Adapter; Adapter = Adapter->Next)
+    {
+        if (Adapter->Index != Index)
+            continue;
+        for (Entry = &Adapter->IpAddressList; Entry; Entry = Entry->Next)
+        {
+            if (G7ParseIp(Entry->IpAddress.String, &Found) && Found == Address)
+                Context = (USHORT)Entry->Context;
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, Adapters);
+    return Context;
+}
+
 /*
  * A request that succeeds returns the bytes of the answer: IoStatus.Information is a byte count, not the
  * interface index (the I/O manager copies that many bytes back, and a count may not exceed the output buffer).
- * Changes the address of the first adapter that has one, and puts it back.
+ * Adds an address to the first adapter that has one, and deletes it again.
  */
 static
 void
@@ -101,7 +172,7 @@ G7TestSetAddressSucceeds(_In_ HANDLE Ip)
     PGETADAPTERSINFO pGetAdaptersInfo;
     PIP_ADAPTER_INFO Adapters, Adapter;
     HMODULE Iphlpapi = LoadLibraryW(L"iphlpapi.dll");
-    ULONG Size = 0, Index = 0, Old, Mask, New;
+    ULONG Size = 0, Index = 0, Old, Mask, New, Context = 0;
     NTSTATUS Status;
     ULONG_PTR Info;
     ULONG Set[3], Out[3];
@@ -143,6 +214,7 @@ G7TestSetAddressSucceeds(_In_ HANDLE Ip)
         return;
     }
 
+    /* The adapter has an address: the new one is an additional address beside it, with a context of its own */
     Set[0] = Index;
     Set[1] = New;
     Set[2] = Mask;
@@ -154,17 +226,54 @@ G7TestSetAddressSucceeds(_In_ HANDLE Ip)
     {
         ok(Info == sizeof(Out), "SET_IP_ADDRESS returned %Iu bytes, not the %Iu of the answer\n", Info, sizeof(Out));
         ok(Out[0] == Index, "the answer names interface %lu, not %lu\n", Out[0], Index);
-        ok(Out[1] == Index, "the context in the answer is %lu, not %lu\n", Out[1], Index);
+        ok(Out[1] >= 0x8000 && Out[1] <= 0xffff, "the context in the answer is %lu, not one of an additional address\n", Out[1]);
+        Context = Out[1];
+        ok(G7AddressListHas(pGetAdaptersInfo, Index, Old, TRUE), "the first address is not %lx any more\n", Old);
+        ok(G7AddressListHas(pGetAdaptersInfo, Index, New, FALSE), "the added address %lx is not in the list\n", New);
     }
 
-    /* Put the old address back; a smaller output buffer gets at most its length */
+    /* The address is there once */
+    Status = G7Ioctl(Ip, IOCTL_SET_IP_ADDRESS, Set, sizeof(Set), NULL, 0, NULL);
+    ok(Status == STATUS_DUPLICATE_OBJECTID, "SET_IP_ADDRESS of an address that is in use gave 0x%lx\n", Status);
     Set[1] = Old;
+    Status = G7Ioctl(Ip, IOCTL_SET_IP_ADDRESS, Set, sizeof(Set), NULL, 0, NULL);
+    ok(Status == STATUS_DUPLICATE_OBJECTID, "SET_IP_ADDRESS of the first address again gave 0x%lx\n", Status);
+    Set[1] = 0;
+    Status = G7Ioctl(Ip, IOCTL_SET_IP_ADDRESS, Set, sizeof(Set), NULL, 0, NULL);
+    ok(Status == STATUS_INVALID_PARAMETER, "SET_IP_ADDRESS of 0.0.0.0 gave 0x%lx\n", Status);
+
+    /* DeleteIPAddress removes the added address only */
+    if (Context)
+    {
+        USHORT Nte = (USHORT)Context;
+
+        Status = G7Ioctl(Ip, IOCTL_DELETE_IP_ADDRESS, &Nte, sizeof(Nte), NULL, 0, NULL);
+        ok(Status == STATUS_SUCCESS, "DELETE_IP_ADDRESS of the context %lu gave 0x%lx\n", Context, Status);
+        ok(!G7AddressListHas(pGetAdaptersInfo, Index, New, FALSE), "the deleted address %lx is still in the list\n", New);
+        ok(G7AddressListHas(pGetAdaptersInfo, Index, Old, TRUE), "the first address is gone with it\n");
+        Status = G7Ioctl(Ip, IOCTL_DELETE_IP_ADDRESS, &Nte, sizeof(Nte), NULL, 0, NULL);
+        ok(Status != STATUS_SUCCESS, "DELETE_IP_ADDRESS of the context %lu again gave 0x%lx\n", Context, Status);
+    }
+
+    /* A smaller output buffer gets at most its length */
+    Set[1] = New;
     memset(Out, 0x77, sizeof(Out));
     Info = 0xdeadbeef;
     Status = G7Ioctl(Ip, IOCTL_SET_IP_ADDRESS, Set, sizeof(Set), Out, 4, &Info);
-    ok(Status == STATUS_SUCCESS, "SET_IP_ADDRESS back to the old address gave 0x%lx\n", Status);
+    ok(Status == STATUS_SUCCESS, "SET_IP_ADDRESS again gave 0x%lx\n", Status);
     ok(Info <= 4, "SET_IP_ADDRESS returned %Iu bytes for an output buffer of 4\n", Info);
     ok(Out[1] == 0x77777777 && Out[2] == 0x77777777, "SET_IP_ADDRESS wrote past an output buffer of 4: %lx %lx\n", Out[1], Out[2]);
+    if (Status == STATUS_SUCCESS)
+    {
+        /* Its context is in the address list */
+        USHORT Nte = G7ContextOf(pGetAdaptersInfo, Index, New);
+
+        ok(Nte >= 0x8000, "the context of the added address is %u\n", Nte);
+        Status = G7Ioctl(Ip, IOCTL_DELETE_IP_ADDRESS, &Nte, sizeof(Nte), NULL, 0, NULL);
+        ok(Status == STATUS_SUCCESS, "DELETE_IP_ADDRESS of the context %u gave 0x%lx\n", Nte, Status);
+    }
+    ok(!G7AddressListHas(pGetAdaptersInfo, Index, New, FALSE), "the address %lx is still there\n", New);
+    ok(G7AddressListHas(pGetAdaptersInfo, Index, Old, TRUE), "the first address %lx is not there\n", Old);
 }
 
 START_TEST(g7setip)
