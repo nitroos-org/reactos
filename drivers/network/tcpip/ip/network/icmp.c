@@ -111,6 +111,7 @@ VOID ICMPReply(
     IP_PACKET NewPacket;
     ADDRESS_FILE FakeAddrFile;
     PNEIGHBOR_CACHE_ENTRY NCE;
+    IP_ADDRESS ReplySource;
 
     TI_DbgPrint(DEBUG_ICMP, ("Called. Type (%d)  Code (%d).\n", Type, Code));
 
@@ -127,8 +128,14 @@ VOID ICMPReply(
     FakeAddrFile.Protocol = IPPROTO_ICMP;
     FakeAddrFile.TTL = 128;
 
+    /* An additional address of the interface answers from itself, not from the primary address */
+    ReplySource = Interface->Unicast;
+    if (IPPacket->DstAddr.Type == IP_ADDRESS_V4 &&
+        IFIsNteIPv4Address(Interface, IPPacket->DstAddr.Address.IPv4Address))
+        ReplySource = IPPacket->DstAddr;
+
     if (!NT_SUCCESS(BuildRawIpPacket(
-        &FakeAddrFile, &NewPacket, &IPPacket->SrcAddr, 0, &Interface->Unicast, 0, IPPacket->Data, DataSize)))
+        &FakeAddrFile, &NewPacket, &IPPacket->SrcAddr, 0, &ReplySource, 0, IPPacket->Data, DataSize)))
     {
         NBDereferenceNeighbor(NCE);
         return;

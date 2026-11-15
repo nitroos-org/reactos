@@ -96,7 +96,9 @@ TDI_STATUS InfoTdiQueryGetAddrTable(TDIEntityID ID,
     KIRQL OldIrql;
     PIPADDR_ENTRY IPEntry;
     PIP_INTERFACE CurrentIF;
-    UINT i;
+    PIP_NTE Ntes;
+    UINT i, NteCount, Count;
+    TDI_STATUS Status;
 
     TI_DbgPrint(DEBUG_INFO, ("Called.\n"));
 
@@ -116,34 +118,50 @@ TDI_STATUS InfoTdiQueryGetAddrTable(TDIEntityID ID,
         return TDI_INVALID_PARAMETER;
     }
 
-    IPEntry = ExAllocatePoolWithTag(NonPagedPool, sizeof(IPADDR_ENTRY), IP_ADDRESS_TAG);
+    /* The primary address, then the additional ones (AddIPAddress beside it) */
+    IPEntry = ExAllocatePoolWithTag(NonPagedPool,
+                                    sizeof(IPADDR_ENTRY) * (1 + IP_MAX_NTE) + sizeof(IP_NTE) * IP_MAX_NTE,
+                                    IP_ADDRESS_TAG);
     if (!IPEntry)
     {
         TcpipReleaseSpinLock(&EntityListLock, OldIrql);
         return TDI_NO_RESOURCES;
     }
+    Ntes = (PIP_NTE)&IPEntry[1 + IP_MAX_NTE];
 
     CurrentIF = EntityList[i].context;
 
-    IPEntry->Index = CurrentIF->Index;
+    RtlZeroMemory(IPEntry, sizeof(IPADDR_ENTRY) * (1 + IP_MAX_NTE));
+    IPEntry[0].Index = CurrentIF->Index;
+    IPEntry[0].Context = (USHORT)CurrentIF->Index;
     GetInterfaceIPv4Address(CurrentIF,
 			    ADE_UNICAST,
-			    &IPEntry->Addr);
+			    &IPEntry[0].Addr);
     GetInterfaceIPv4Address(CurrentIF,
 			    ADE_ADDRMASK,
-			    &IPEntry->Mask);
+			    &IPEntry[0].Mask);
     GetInterfaceIPv4Address(CurrentIF,
 			    ADE_BROADCAST,
-			    &IPEntry->BcastAddr);
+			    &IPEntry[0].BcastAddr);
+
+    NteCount = IFCopyNtes(CurrentIF, Ntes, IP_MAX_NTE);
+    for (Count = 0; Count < NteCount; Count++)
+    {
+        IPEntry[1 + Count] = IPEntry[0];
+        IPEntry[1 + Count].Addr = Ntes[Count].Address;
+        IPEntry[1 + Count].Mask = Ntes[Count].Netmask;
+        IPEntry[1 + Count].BcastAddr = Ntes[Count].Address | ~Ntes[Count].Netmask;
+        IPEntry[1 + Count].Context = Ntes[Count].Context;
+    }
 
     TcpipReleaseSpinLock(&EntityListLock, OldIrql);
 
-    InfoCopyOut((PCHAR)IPEntry, sizeof(IPADDR_ENTRY),
-		Buffer, BufferSize);
+    Status = InfoCopyOut((PCHAR)IPEntry, sizeof(IPADDR_ENTRY) * (1 + NteCount),
+                         Buffer, BufferSize);
 
     ExFreePoolWithTag(IPEntry, IP_ADDRESS_TAG);
 
-    return TDI_SUCCESS;
+    return Status;
 }
 
 TDI_STATUS InfoTdiQueryGetIPSnmpInfo( TDIEntityID ID,
@@ -160,7 +178,7 @@ TDI_STATUS InfoTdiQueryGetIPSnmpInfo( TDIEntityID ID,
     RtlZeroMemory(&SnmpInfo, sizeof(SnmpInfo));
 
     SnmpInfo.ipsi_numif = IfCount;
-    SnmpInfo.ipsi_numaddr = 1;
+    SnmpInfo.ipsi_numaddr = 1 + IFCountNtes(IF);
     SnmpInfo.ipsi_numroutes = RouteCount;
 
     Status = InfoCopyOut( (PCHAR)&SnmpInfo, sizeof(SnmpInfo),

@@ -711,28 +711,50 @@ DWORD WINAPI GetAdaptersInfo(PIP_ADAPTER_INFO pAdapterInfo, PULONG pOutBufLen)
     DWORD numNonLoopbackInterfaces = getNumNonLoopbackInterfaces();
 
     if (numNonLoopbackInterfaces > 0) {
-      /* this calculation assumes only one address in the IP_ADDR_STRING lists.
-         that's okay, because:
-         - we don't get multiple addresses per adapter anyway
-         - we don't know about per-adapter gateways
-         - DHCP and WINS servers can have max one entry per list */
+      /* this calculation assumes only one address in the IP_ADDR_STRING lists of the gateway, DHCP and WINS servers
+         (they can have max one entry per list). The address list of an adapter has the additional addresses
+         (AddIPAddress beside its first one) after the adapters, as IP_ADDR_STRING entries */
+      InterfaceIndexTable *table = getNonLoopbackInterfaceIndexTable();
+      IPAddrEntry **extra = NULL;
+      DWORD *extraCount = NULL, totalExtra = 0, extraNdx;
       ULONG size = sizeof(IP_ADAPTER_INFO) * numNonLoopbackInterfaces;
+
+      if (table) {
+        extra = calloc(table->numIndexes ? table->numIndexes : 1, sizeof(*extra));
+        extraCount = calloc(table->numIndexes ? table->numIndexes : 1, sizeof(*extraCount));
+        if (extra && extraCount) {
+          for (extraNdx = 0; extraNdx < table->numIndexes; extraNdx++) {
+            getInterfaceAdditionalAddresses(table->indexes[extraNdx], &extra[extraNdx], &extraCount[extraNdx]);
+            totalExtra += extraCount[extraNdx];
+          }
+        }
+        size = sizeof(IP_ADAPTER_INFO) * table->numIndexes + sizeof(IP_ADDR_STRING) * totalExtra;
+      }
 
       if (!pAdapterInfo || *pOutBufLen < size) {
         *pOutBufLen = size;
         ret = ERROR_BUFFER_OVERFLOW;
+        if (table) {
+          if (extra) {
+            for (extraNdx = 0; extraNdx < table->numIndexes; extraNdx++)
+              HeapFree(GetProcessHeap(), 0, extra[extraNdx]);
+          }
+          free(extra);
+          free(extraCount);
+          free(table);
+        }
       }
       else {
-        InterfaceIndexTable *table = getNonLoopbackInterfaceIndexTable();
-
         if (table) {
-          size = sizeof(IP_ADAPTER_INFO) * table->numIndexes;
-          if (*pOutBufLen < size) {
-            *pOutBufLen = size;
-            ret = ERROR_INSUFFICIENT_BUFFER;
+          if (!extra || !extraCount) {
+            ret = ERROR_OUTOFMEMORY;
+            free(extra);
+            free(extraCount);
+            free(table);
           }
           else {
             DWORD ndx;
+            PIP_ADDR_STRING extraStrings = (PIP_ADDR_STRING)(pAdapterInfo + table->numIndexes);
             HKEY hKey;
             BOOL winsEnabled = FALSE;
             IP_ADDRESS_STRING primaryWINS, secondaryWINS;
@@ -784,6 +806,21 @@ DWORD WINAPI GetAdaptersInfo(PIP_ADAPTER_INFO pAdapterInfo, PULONG pOutBufLen)
               toIPAddressString(getInterfaceMaskByIndex(table->indexes[ndx]),
                ptr->IpAddressList.IpMask.String);
               ptr->IpAddressList.Context = ptr->Index;
+              if (extraCount[ndx]) {
+                PIP_ADDR_STRING prev = &ptr->IpAddressList;
+                DWORD k;
+
+                for (k = 0; k < extraCount[ndx]; k++) {
+                  PIP_ADDR_STRING cur = extraStrings++;
+
+                  toIPAddressString(extra[ndx][k].iae_addr, cur->IpAddress.String);
+                  toIPAddressString(extra[ndx][k].iae_mask, cur->IpMask.String);
+                  cur->Context = extra[ndx][k].iae_context;
+                  cur->Next = NULL;
+                  prev->Next = cur;
+                  prev = cur;
+                }
+              }
               toIPAddressString(getInterfaceGatewayByIndex(table->indexes[ndx]),
                ptr->GatewayList.IpAddress.String);
               getDhcpInfoForAdapter(table->indexes[ndx], ptr);
@@ -800,8 +837,12 @@ DWORD WINAPI GetAdaptersInfo(PIP_ADAPTER_INFO pAdapterInfo, PULONG pOutBufLen)
                 ptr->Next = NULL;
             }
             ret = NO_ERROR;
+            for (ndx = 0; ndx < table->numIndexes; ndx++)
+              HeapFree(GetProcessHeap(), 0, extra[ndx]);
+            free(extra);
+            free(extraCount);
+            free(table);
           }
-          free(table);
         }
         else
           ret = ERROR_OUTOFMEMORY;
@@ -1879,57 +1920,78 @@ DWORD WINAPI GetIpAddrTable(PMIB_IPADDRTABLE pIpAddrTable, PULONG pdwSize, BOOL 
   if (!pdwSize)
     ret = ERROR_INVALID_PARAMETER;
   else {
-    DWORD numInterfaces = getNumInterfaces();
-    ULONG size = sizeof(MIB_IPADDRTABLE) + (numInterfaces - 1) *
-     sizeof(MIB_IPADDRROW);
+    InterfaceIndexTable *table = getInterfaceIndexTable();
 
-    if (!pIpAddrTable || *pdwSize < size) {
-      *pdwSize = size;
-      ret = ERROR_INSUFFICIENT_BUFFER;
-    }
-    else {
-      InterfaceIndexTable *table = getInterfaceIndexTable();
+    if (table) {
+      /* The additional addresses of an interface (AddIPAddress beside its first one) are rows of their own */
+      IPAddrEntry **extra = calloc(table->numIndexes ? table->numIndexes : 1, sizeof(*extra));
+      DWORD *extraCount = calloc(table->numIndexes ? table->numIndexes : 1, sizeof(*extraCount));
 
-      if (table) {
-        size = sizeof(MIB_IPADDRTABLE) + (table->numIndexes - 1) *
-         sizeof(MIB_IPADDRROW);
-        if (*pdwSize < size) {
+      if (extra && extraCount) {
+        DWORD ndx, total = table->numIndexes;
+        ULONG size;
+
+        for (ndx = 0; ndx < table->numIndexes; ndx++) {
+          getInterfaceAdditionalAddresses(table->indexes[ndx], &extra[ndx], &extraCount[ndx]);
+          total += extraCount[ndx];
+        }
+        size = sizeof(MIB_IPADDRTABLE) + ((total ? total : 1) - 1) * sizeof(MIB_IPADDRROW);
+        if (!pIpAddrTable || *pdwSize < size) {
           *pdwSize = size;
           ret = ERROR_INSUFFICIENT_BUFFER;
         }
         else {
-          DWORD ndx, bcast;
+          DWORD bcast, row = 0, k;
 
           pIpAddrTable->dwNumEntries = 0;
           for (ndx = 0; ndx < table->numIndexes; ndx++) {
-            pIpAddrTable->table[ndx].dwIndex = table->indexes[ndx];
-            pIpAddrTable->table[ndx].dwAddr =
+            pIpAddrTable->table[row].dwIndex = table->indexes[ndx];
+            pIpAddrTable->table[row].dwAddr =
              getInterfaceIPAddrByIndex(table->indexes[ndx]);
-            pIpAddrTable->table[ndx].dwMask =
+            pIpAddrTable->table[row].dwMask =
              getInterfaceMaskByIndex(table->indexes[ndx]);
             /* the dwBCastAddr member isn't the broadcast address, it indicates
              * whether the interface uses the 1's broadcast address (1) or the
              * 0's broadcast address (0).
              */
             bcast = getInterfaceBCastAddrByIndex(table->indexes[ndx]);
-            pIpAddrTable->table[ndx].dwBCastAddr =
-             (bcast & pIpAddrTable->table[ndx].dwMask) ? 1 : 0;
+            pIpAddrTable->table[row].dwBCastAddr =
+             (bcast & pIpAddrTable->table[row].dwMask) ? 1 : 0;
             /* FIXME: hardcoded reasm size, not sure where to get it */
-            pIpAddrTable->table[ndx].dwReasmSize = 65535;
-            pIpAddrTable->table[ndx].unused1 = 0;
-            pIpAddrTable->table[ndx].wType = 0; /* aka unused2 */
+            pIpAddrTable->table[row].dwReasmSize = 65535;
+            pIpAddrTable->table[row].unused1 = 0;
+            pIpAddrTable->table[row].wType = 0; /* aka unused2 */
             pIpAddrTable->dwNumEntries++;
+            row++;
+            for (k = 0; k < extraCount[ndx] && row < total; k++) {
+              pIpAddrTable->table[row].dwIndex = table->indexes[ndx];
+              pIpAddrTable->table[row].dwAddr = extra[ndx][k].iae_addr;
+              pIpAddrTable->table[row].dwMask = extra[ndx][k].iae_mask;
+              pIpAddrTable->table[row].dwBCastAddr =
+               (extra[ndx][k].iae_bcastaddr & extra[ndx][k].iae_mask) ? 1 : 0;
+              pIpAddrTable->table[row].dwReasmSize = 65535;
+              pIpAddrTable->table[row].unused1 = 0;
+              pIpAddrTable->table[row].wType = 0;
+              pIpAddrTable->dwNumEntries++;
+              row++;
+            }
           }
           if (bOrder)
             qsort(pIpAddrTable->table, pIpAddrTable->dwNumEntries,
              sizeof(MIB_IPADDRROW), IpAddrTableSorter);
           ret = NO_ERROR;
         }
-        free(table);
+        for (ndx = 0; ndx < table->numIndexes; ndx++)
+          HeapFree(GetProcessHeap(), 0, extra[ndx]);
       }
       else
         ret = ERROR_OUTOFMEMORY;
+      free(extra);
+      free(extraCount);
+      free(table);
     }
+    else
+      ret = ERROR_OUTOFMEMORY;
   }
   TRACE("returning %ld\n", ret);
   return ret;

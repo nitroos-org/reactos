@@ -1139,7 +1139,8 @@ BOOLEAN ReconfigureAdapter(PRECONFIGURE_CONTEXT Context)
         Interface->Netmask = DefaultMask;
         Interface->Broadcast = DefaultMask;
 
-        /* Remove all interface routes */
+        /* Remove all interface routes, and forget the additional addresses (their neighbors go with the others) */
+        IFClearNtes(Interface);
         RouterRemoveRoutesForInterface(Interface);
 
         /* Destroy all cached neighbors */
@@ -1853,9 +1854,11 @@ BOOLEAN LanFindProbeTarget(
         PNEIGHBOR_CACHE_ENTRY Router = Fibs[i].Router;
 
         /* The "router" of an on-link route (IPAddInterfaceRoute) is the adapter's own address, of any address
-           (DHCP, static or 169.254/16): nobody answers an ARP request for it, so it is no probe target */
+           (DHCP, static or 169.254/16), or an additional address of the adapter (IPAddNteRoute): nobody answers an
+           ARP request for it, so it is no probe target */
         if (!Found && Router->Address.Type == IP_ADDRESS_V4 && Router->Address.Address.IPv4Address != 0 &&
             !AddrIsEqual(&Router->Address, &IF->Unicast) &&
+            !IFIsNteIPv4Address(IF, Router->Address.Address.IPv4Address) &&
             !LanIsLinkLocalOrLoopback(Router->Address.Address.IPv4Address))
         {
             *Target = Router->Address;

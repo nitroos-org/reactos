@@ -403,6 +403,9 @@ return_noroute:
 }
 #endif /* IP_FORWARD */
 
+/* NitroOS: tcpip.sys says whether the address is one of the additional addresses of the interface of the netif */
+extern int NitroNetifHasAdditionalAddress(struct netif *netif, u32_t addr);
+
 /** Return true if the current input packet should be accepted on this netif */
 static int
 ip4_input_accept(struct netif *netif)
@@ -425,6 +428,8 @@ ip4_input_accept(struct netif *netif)
         /* NitroOS: the loopback interface answers for the whole 127.0.0.0/8, as on Windows */
         || (ip4_addr_isloopback(ip4_current_dest_addr()) &&
             ip4_addr_isloopback(netif_ip4_addr(netif)))
+        /* NitroOS: an additional address of the interface (AddIPAddress) */
+        || (NitroNetifHasAdditionalAddress(netif, ip4_addr_get_u32(ip4_current_dest_addr())) != 0)
        ) {
       LWIP_DEBUGF(IP_DEBUG, ("ip4_input: packet accepted on interface %c%c\n",
                              netif->name[0], netif->name[1]));

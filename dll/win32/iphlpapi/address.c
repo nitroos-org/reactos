@@ -985,7 +985,9 @@ GetAdaptersAddressesImpl(
                 goto Error;
             }
 
-            for (j = 0; j < SnmpInfo.ipsi_numaddr; j++)
+            /* Each address goes in front of the list: the last one first, so the list keeps the order of the stack
+               (the address of the adapter, then its additional ones) */
+            for (j = SnmpInfo.ipsi_numaddr; j-- > 0;)
             {
                 /* Find the adapters struct for this address. */
                 if (pAdapterAddresses)

@@ -127,6 +127,7 @@ BOOLEAN ARPTransmit(PIP_ADDRESS Address, PVOID LinkAddress,
     PNDIS_PACKET NdisPacket;
     UCHAR ProtoAddrLen;
     USHORT ProtoType;
+    IP_ADDRESS SenderAddress;
 
     TI_DbgPrint(DEBUG_ARP, ("Called.\n"));
 
@@ -134,6 +135,12 @@ BOOLEAN ARPTransmit(PIP_ADDRESS Address, PVOID LinkAddress,
      * gratuitous ARP packet sent */
     if (!Address)
         Address = &Interface->Unicast;
+
+    /* The sender is the address of the interface in the subnet of the target (an additional address of the
+     * interface can be the one) */
+    SenderAddress = Interface->Unicast;
+    if (Address->Type == IP_ADDRESS_V4)
+        SenderAddress.Address.IPv4Address = IFSelectSourceAddress(Interface, Address->Address.IPv4Address);
 
     switch (Address->Type) {
         case IP_ADDRESS_V4:
@@ -158,7 +165,7 @@ BOOLEAN ARPTransmit(PIP_ADDRESS Address, PVOID LinkAddress,
         (UCHAR)Interface->AddressLength, /* Hardware address length */
         (UCHAR)ProtoAddrLen,             /* Protocol address length */
         Interface->Address,              /* Sender's (local) hardware address */
-        &Interface->Unicast.Address.IPv4Address,/* Sender's (local) protocol address */
+        &SenderAddress.Address.IPv4Address, /* Sender's (local) protocol address */
         LinkAddress,                     /* Target's (remote) hardware address */
         &Address->Address.IPv4Address,   /* Target's (remote) protocol address */
         ARP_OPCODE_REQUEST);             /* ARP request */
@@ -173,6 +180,35 @@ BOOLEAN ARPTransmit(PIP_ADDRESS Address, PVOID LinkAddress,
 
     (*Interface->Transmit)(Interface->Context, NdisPacket,
         0, NULL, LAN_PROTO_ARP);
+
+    return TRUE;
+}
+
+
+BOOLEAN ARPTransmitGratuitous(PIP_INTERFACE Interface, IPv4_RAW_ADDRESS Address)
+/*
+ * FUNCTION: Announces an address of the interface: a request for the address, from it
+ */
+{
+    PNDIS_PACKET NdisPacket;
+
+    NdisPacket = PrepareARPPacket(
+        Interface,
+        WN2H(0x0001),                    /* FIXME: Ethernet only */
+        (USHORT)ETYPE_IPv4,              /* Protocol type */
+        (UCHAR)Interface->AddressLength, /* Hardware address length */
+        4,                               /* Protocol address length */
+        Interface->Address,              /* Sender's (local) hardware address */
+        &Address,                        /* Sender's (local) protocol address */
+        NULL,                            /* Target's (remote) hardware address */
+        &Address,                        /* Target's (remote) protocol address */
+        ARP_OPCODE_REQUEST);
+
+    if (!NdisPacket)
+        return FALSE;
+
+    PC(NdisPacket)->DLComplete = ARPTransmitComplete;
+    (*Interface->Transmit)(Interface->Context, NdisPacket, 0, NULL, LAN_PROTO_ARP);
 
     return TRUE;
 }
@@ -277,7 +313,8 @@ VOID ARPReceive(
     TargetProtoAddress = (PVOID)(SenderProtoAddress + Header->ProtoAddrLen + Header->HWAddrLen);
 
     AddrInitIPv4(&DstAddress, *((PULONG)TargetProtoAddress));
-    if (!AddrIsEqual(&DstAddress, &Interface->Unicast))
+    if (!AddrIsEqual(&DstAddress, &Interface->Unicast) &&
+        !IFIsNteIPv4Address(Interface, DstAddress.Address.IPv4Address))
     {
         ExFreePool(DataBuffer);
         Packet->Free(Packet);
@@ -318,7 +355,7 @@ VOID ARPReceive(
         (UCHAR)Interface->AddressLength, /* Hardware address length */
         (UCHAR)Header->ProtoAddrLen,     /* Protocol address length (validated == 4) */
         Interface->Address,              /* Sender's (local) hardware address */
-        &Interface->Unicast.Address.IPv4Address,/* Sender's (local) protocol address */
+        &DstAddress.Address.IPv4Address, /* Sender's (local) protocol address: the one asked for */
         SenderHWAddress,                 /* Target's (remote) hardware address */
         SenderProtoAddress,              /* Target's (remote) protocol address */
         ARP_OPCODE_REPLY);               /* ARP reply */

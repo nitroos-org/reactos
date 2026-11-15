@@ -239,6 +239,7 @@ PIP_INTERFACE IPCreateInterface(
 	IF->Broadcast.Type = IP_ADDRESS_V4;
 
     TcpipInitializeSpinLock(&IF->Lock);
+    TcpipInitializeSpinLock(&IF->NteLock);
 
     IF->TCPContext = ExAllocatePool
 	( NonPagedPool, sizeof(struct netif));
@@ -343,6 +344,54 @@ VOID IPAddInterfaceRoute( PIP_INTERFACE IF ) {
        ARPTransmit(NULL, NULL, IF);
 
     TCPUpdateInterfaceIPInformation(IF);
+}
+
+/* The neighbor entry (the stack answers for the address: ARP, the local sender) and the on-link route of an additional
+ * address of the interface */
+VOID IPAddNteRoute(PIP_INTERFACE IF, IPv4_RAW_ADDRESS Address, IPv4_RAW_ADDRESS Netmask)
+{
+    PNEIGHBOR_CACHE_ENTRY NCE;
+    IP_ADDRESS Unicast, Mask, NetworkAddress;
+
+    AddrInitIPv4(&Unicast, Address);
+    AddrInitIPv4(&Mask, Netmask);
+
+    NCE = NBAddNeighbor(IF, &Unicast, IF->Address, IF->AddressLength, NUD_PERMANENT, 0);
+    if (!NCE) {
+        TI_DbgPrint(MIN_TRACE, ("Could not create NCE.\n"));
+        return;
+    }
+
+    AddrWidenAddress(&NetworkAddress, &Unicast, &Mask);
+
+    if (!RouterAddRoute(&NetworkAddress, &Mask, NCE, 1)) {
+        TI_DbgPrint(MIN_TRACE, ("Could not add route due to insufficient resources.\n"));
+    }
+
+    NBDereferenceNeighbor(NCE);
+
+    /* Tell the other hosts of the link that the address is here */
+    if (IF != Loopback)
+        ARPTransmitGratuitous(IF, Address);
+}
+
+VOID IPRemoveNteRoute(PIP_INTERFACE IF, IPv4_RAW_ADDRESS Address, IPv4_RAW_ADDRESS Netmask)
+{
+    PNEIGHBOR_CACHE_ENTRY NCE;
+    IP_ADDRESS Unicast, Mask, GeneralRoute;
+
+    AddrInitIPv4(&Unicast, Address);
+    AddrInitIPv4(&Mask, Netmask);
+
+    NCE = NBLocateNeighbor(&Unicast, IF);
+    if (NCE)
+    {
+        AddrWidenAddress(&GeneralRoute, &Unicast, &Mask);
+        RouterRemoveRoute(&GeneralRoute, &Unicast);
+
+        NBRemoveNeighbor(NCE);
+        NBDereferenceNeighbor(NCE);
+    }
 }
 
 BOOLEAN IPRegisterInterface(

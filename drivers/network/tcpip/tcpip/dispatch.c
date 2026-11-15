@@ -757,7 +757,7 @@ NTSTATUS DispTdiQueryInformation(
         Interface = FindOnLinkInterface(&Destination);
         if (Interface)
         {
-          Ta->Address[0].Address[0].in_addr = Interface->Unicast.Address.IPv4Address;
+          Ta->Address[0].Address[0].in_addr = IFSelectSourceAddress(Interface, Destination.Address.IPv4Address);
           IPDereferenceInterface(Interface);
           return STATUS_SUCCESS;
         }
@@ -766,7 +766,7 @@ NTSTATUS DispTdiQueryInformation(
         if (!NCE)
           return STATUS_NETWORK_UNREACHABLE;
 
-        Ta->Address[0].Address[0].in_addr = NCE->Interface->Unicast.Address.IPv4Address;
+        Ta->Address[0].Address[0].in_addr = IFSelectSourceAddress(NCE->Interface, Destination.Address.IPv4Address);
         NBDereferenceNeighbor(NCE);
         return STATUS_SUCCESS;
       }
@@ -1705,17 +1705,19 @@ NTSTATUS DispTdiSetInformationEx(
     return Status;
 }
 
-/* TODO: Support multiple addresses per interface.
- * For now just set the nte context to the interface index.
- *
- * Later on, create an NTE context and NTE instance
- */
+/* AddIPAddress. An interface without an address takes it as its address (the NTE context is the interface index, as
+ * the DHCP client and DeleteIPAddress have always had it); with an address, the new one is an additional address
+ * beside it (IP_NTE, ip.h): the stack answers for it (ARP, ICMP echo, TCP), and DeleteIPAddress takes the context that
+ * comes back and removes only that one. The answer is in the buffer: NteIndex is the interface, Address the NTE
+ * context. */
 
 NTSTATUS DispTdiSetIPAddress( PIRP Irp, PIO_STACK_LOCATION IrpSp ) {
     NTSTATUS Status = STATUS_DEVICE_DOES_NOT_EXIST;
     PIP_SET_ADDRESS IpAddrChange =
         (PIP_SET_ADDRESS)Irp->AssociatedIrp.SystemBuffer;
     PIP_INTERFACE Target = NULL;
+    BOOLEAN Duplicate = FALSE;
+    USHORT Context = 0;
     KIRQL OldIrql;
     IF_LIST_ITER(IF);
 
@@ -1735,50 +1737,73 @@ NTSTATUS DispTdiSetIPAddress( PIRP Irp, PIO_STACK_LOCATION IrpSp ) {
     ForEachInterface(IF) {
 	TI_DbgPrint(MID_TRACE,("Looking at adapter %d\n", IF->Index));
 
-        if( IF->Unicast.Address.IPv4Address == IpAddrChange->Address ) {
-            Status = STATUS_DUPLICATE_OBJECTID;
+        if( IpAddrChange->Address != 0 && IFIsOwnIPv4Address(IF, IpAddrChange->Address) ) {
+            Duplicate = TRUE;
             break;
         }
         if( IF->Index == IpAddrChange->NteIndex ) {
             Target = IF;
             IPReferenceInterface(Target);
-            break;
         }
     } EndFor(IF);
     TcpipReleaseSpinLock(&InterfaceListLock, OldIrql);
 
+    if (Duplicate) {
+        if (Target)
+            IPDereferenceInterface(Target);
+        Irp->IoStatus.Status = STATUS_DUPLICATE_OBJECTID;
+        return STATUS_DUPLICATE_OBJECTID;
+    }
+
+    if (Target && IpAddrChange->Address == 0) {
+        IPDereferenceInterface(Target);
+        Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
+        return STATUS_INVALID_PARAMETER;
+    }
+
     if (Target) {
         IF = Target;
 
-        IPRemoveInterfaceRoute( IF );
+        if (AddrIsUnspecified(&IF->Unicast)) {
+            /* The first address of the interface */
+            IPRemoveInterfaceRoute( IF );
 
-        IF->Unicast.Type = IP_ADDRESS_V4;
-        IF->Unicast.Address.IPv4Address = IpAddrChange->Address;
+            IF->Unicast.Type = IP_ADDRESS_V4;
+            IF->Unicast.Address.IPv4Address = IpAddrChange->Address;
 
-        IF->Netmask.Type = IP_ADDRESS_V4;
-        IF->Netmask.Address.IPv4Address = IpAddrChange->Netmask;
+            IF->Netmask.Type = IP_ADDRESS_V4;
+            IF->Netmask.Address.IPv4Address = IpAddrChange->Netmask;
 
-        IF->Broadcast.Type = IP_ADDRESS_V4;
-        IF->Broadcast.Address.IPv4Address =
-            IF->Unicast.Address.IPv4Address |
-            ~IF->Netmask.Address.IPv4Address;
+            IF->Broadcast.Type = IP_ADDRESS_V4;
+            IF->Broadcast.Address.IPv4Address =
+                IF->Unicast.Address.IPv4Address |
+                ~IF->Netmask.Address.IPv4Address;
 
-        TI_DbgPrint(MID_TRACE,("New Unicast Address: %x\n",
-                               IF->Unicast.Address.IPv4Address));
-        TI_DbgPrint(MID_TRACE,("New Netmask        : %x\n",
-                               IF->Netmask.Address.IPv4Address));
+            TI_DbgPrint(MID_TRACE,("New Unicast Address: %x\n",
+                                   IF->Unicast.Address.IPv4Address));
+            TI_DbgPrint(MID_TRACE,("New Netmask        : %x\n",
+                                   IF->Netmask.Address.IPv4Address));
 
-        IPAddInterfaceRoute( IF );
+            IPAddInterfaceRoute( IF );
+            Context = (USHORT)IF->Index;
+            Status = STATUS_SUCCESS;
+        } else {
+            /* An additional address */
+            Status = IFAddNte(IF, IpAddrChange->Address, IpAddrChange->Netmask, &Context);
+            if (NT_SUCCESS(Status))
+                IPAddNteRoute(IF, IpAddrChange->Address, IpAddrChange->Netmask);
+        }
 
-        /* The answer is the buffer: NteIndex is the interface and Address its context (the index again).
-           Information is the number of bytes of the buffer that are valid, never a value: the I/O manager
-           copies that many bytes back to the caller's output buffer */
-        IpAddrChange->NteIndex = IF->Index;
-        IpAddrChange->Address = IF->Index;
-        Status = STATUS_SUCCESS;
-        Irp->IoStatus.Information = min(sizeof(IP_SET_ADDRESS),
-                                        IrpSp->Parameters.DeviceIoControl.OutputBufferLength);
-        AddrChangeNotify();
+        if (NT_SUCCESS(Status)) {
+            /* The answer is the buffer: NteIndex is the interface and Address the NTE context (the interface index
+               again for the first address). Information is the number of bytes of the buffer that are valid, never
+               a value: the I/O manager copies that many bytes back to the caller's output buffer */
+            IpAddrChange->NteIndex = IF->Index;
+            IpAddrChange->Address = Context;
+            Irp->IoStatus.Information = min(sizeof(IP_SET_ADDRESS),
+                                            IrpSp->Parameters.DeviceIoControl.OutputBufferLength);
+            AddrChangeNotify();
+        }
 
         IPDereferenceInterface(Target);
     }
@@ -1791,6 +1816,7 @@ NTSTATUS DispTdiDeleteIPAddress( PIRP Irp, PIO_STACK_LOCATION IrpSp ) {
     NTSTATUS Status = STATUS_UNSUCCESSFUL;
     PUSHORT NteIndex = Irp->AssociatedIrp.SystemBuffer;
     PIP_INTERFACE Target = NULL;
+    IP_NTE Removed;
     KIRQL OldIrql;
     IF_LIST_ITER(IF);
 
@@ -1799,6 +1825,18 @@ NTSTATUS DispTdiDeleteIPAddress( PIRP Irp, PIO_STACK_LOCATION IrpSp ) {
         NteIndex == NULL) {
         Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
         return STATUS_INVALID_PARAMETER;
+    }
+
+    /* The context of an additional address: only that address goes */
+    if (*NteIndex >= IP_NTE_CONTEXT_BASE) {
+        if (IFRemoveNteByContext(*NteIndex, &Removed, &Target)) {
+            IPRemoveNteRoute(Target, Removed.Address, Removed.Netmask);
+            AddrChangeNotify();
+            IPDereferenceInterface(Target);
+            Status = STATUS_SUCCESS;
+        }
+        Irp->IoStatus.Status = Status;
+        return Status;
     }
 
     /* As DispTdiSetIPAddress: the indexes are unique */

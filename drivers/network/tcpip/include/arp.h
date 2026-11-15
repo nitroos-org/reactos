@@ -44,6 +44,7 @@ static __inline BOOLEAN ARPValidateAddressLengths(
 }
 
 BOOLEAN ARPTransmit(PIP_ADDRESS Address, PVOID LinkAddress, PIP_INTERFACE Interface);
+BOOLEAN ARPTransmitGratuitous(PIP_INTERFACE Interface, IPv4_RAW_ADDRESS Address);
 
 VOID ARPReceive(
     PVOID Context,

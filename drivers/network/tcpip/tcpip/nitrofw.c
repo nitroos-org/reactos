@@ -1434,7 +1434,8 @@ static BOOLEAN FwIsOwnUnicast(PIP_ADDRESS Address)
         return FALSE;
     TcpipAcquireSpinLock(&InterfaceListLock, &OldIrql);
     ForEachInterface(CurrentIF) {
-        if (AddrIsEqual(&CurrentIF->Unicast, Address))
+        if (AddrIsEqual(&CurrentIF->Unicast, Address) ||
+            IFIsNteIPv4Address(CurrentIF, Address->Address.IPv4Address))
         {
             Own = TRUE;
             break;

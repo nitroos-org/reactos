@@ -146,6 +146,7 @@ NTSTATUS getNthIpEntity( HANDLE tcpFile, DWORD index, TDIEntityID *ent );
 NTSTATUS getIpEntityByIfIndex( HANDLE tcpFile, DWORD ifIndex, TDIEntityID *ent );
 NTSTATUS tdiGetIpAddrsForIpEntity( HANDLE tcpFile, TDIEntityID *ent,
 				   IPAddrEntry **addrs, PDWORD numAddrs );
+DWORD getInterfaceAdditionalAddresses( DWORD index, IPAddrEntry **Entries, PDWORD Count );
 int GetLongestChildKeyName( HANDLE RegHandle );
 LONG OpenChildKeyRead( HANDLE RegHandle,
 		       PWCHAR ChildKeyName,

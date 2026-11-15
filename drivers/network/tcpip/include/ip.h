@@ -161,6 +161,18 @@ typedef struct _SEND_RECV_STATS {
     UINT OutErrors;
 } SEND_RECV_STATS, *PSEND_RECV_STATS;
 
+/* Additional IPv4 addresses of an interface (AddIPAddress on an interface that has an address): Unicast and Netmask
+ * of the interface stay the primary address, these are the others. Context is what DeleteIPAddress takes: it is
+ * at least IP_NTE_CONTEXT_BASE, so it is never the index of an interface (the primary address is deleted with that) */
+#define IP_MAX_NTE 32
+#define IP_NTE_CONTEXT_BASE 0x8000
+
+typedef struct _IP_NTE {
+    IPv4_RAW_ADDRESS Address;     /* Network byte order */
+    IPv4_RAW_ADDRESS Netmask;
+    USHORT Context;
+} IP_NTE, *PIP_NTE;
+
 /*
  * Information about an IP interface
  *
@@ -198,6 +210,9 @@ typedef struct _IP_INTERFACE {
     LL_SET_MULTICAST_ROUTINE SetMulticast; /* Multicast reception, or NULL (LLIP_BIND_INFO) */
     PVOID TCPContext;             /* TCP Content for this interface */
     SEND_RECV_STATS Stats;        /* Send/Receive statistics */
+    KSPIN_LOCK NteLock;           /* Protects Nte and NteCount; nothing is called while it is held */
+    UINT NteCount;                /* Additional addresses in use */
+    IP_NTE Nte[IP_MAX_NTE];       /* The additional addresses */
 } IP_INTERFACE, *PIP_INTERFACE;
 
 typedef struct _IP_SET_ADDRESS {
@@ -250,6 +265,16 @@ VOID IPAddInterfaceRoute(
 
 VOID IPRemoveInterfaceRoute(
     PIP_INTERFACE IF);
+
+VOID IPAddNteRoute(
+    PIP_INTERFACE IF,
+    IPv4_RAW_ADDRESS Address,
+    IPv4_RAW_ADDRESS Netmask);
+
+VOID IPRemoveNteRoute(
+    PIP_INTERFACE IF,
+    IPv4_RAW_ADDRESS Address,
+    IPv4_RAW_ADDRESS Netmask);
 
 VOID IPDestroyInterface(
     PIP_INTERFACE IF);
