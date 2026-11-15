@@ -261,7 +261,12 @@ static VOID WINAPI ServiceMainImpl(DWORD argc, LPWSTR *argv)
         wait = WaitForMultipleObjects(nWait, hs, FALSE, POLL_MS);
         if (wait == WAIT_OBJECT_0) break;
         if (wait == WAIT_OBJECT_0 + 2) { ArmAddrNotify(); AddrCheck(); }
-        else if (wait == WAIT_TIMEOUT && ++addrTicks >= ADDR_POLL_TICKS) { addrTicks = 0; AddrCheck(); }
+        else if (wait == WAIT_TIMEOUT && ++addrTicks >= ADDR_POLL_TICKS)
+        {
+            addrTicks = 0;
+            if (g_AddrStuck) ArmAddrNotify();    /* the request of an earlier run may have completed since: notify again */
+            AddrCheck();
+        }
         AddrPushIfDue();
         if (wait == WAIT_OBJECT_0 + 1)
         {
@@ -288,7 +293,14 @@ static VOID WINAPI ServiceMainImpl(DWORD argc, LPWSTR *argv)
            OVERLAPPED can be reused by a restarted service */
         CancelIPChangeNotify(&g_AddrOv);
         WaitForSingleObject(g_hAddr, 2000);
-        if (!HasOverlappedIoCompleted(&g_AddrOv)) g_AddrStuck = TRUE;
+        if (!HasOverlappedIoCompleted(&g_AddrOv))
+        {
+            /* svchost unloads this DLL on stop (ServiceDllUnloadOnStop): the request would complete into unmapped or
+               reused memory and the flag would be lost. Keep the DLL loaded for the life of the process. */
+            HMODULE self;
+            g_AddrStuck = TRUE;
+            GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN, (LPCWSTR)&g_AddrOv, &self);
+        }
         g_AddrArmed = FALSE;
     }
 done:
