@@ -147,10 +147,12 @@ static const struct
     { DNS_TYPE_A,     "t-a.dnscp.test",     "A" },
     { DNS_TYPE_AAAA,  "t-aaaa.dnscp.test",  "AAAA" },
     { DNS_TYPE_CNAME, "t-cname.dnscp.test", "CNAME" },
+    { DNS_TYPE_NS,    "t-ns.dnscp.test",    "NS" },
     { DNS_TYPE_PTR,   "10.2.0.192.in-addr.arpa", "PTR" },
     { DNS_TYPE_MX,    "t-mx.dnscp.test",    "MX" },
     { DNS_TYPE_TEXT,  "t-txt.dnscp.test",   "TXT" },
     { DNS_TYPE_SRV,   "t-srv.dnscp.test",   "SRV" },
+    { DNS_TYPE_SRV,   "_sip._tcp.dnscp.test", "SRV service name" },
     { DNS_TYPE_SOA,   "t-soa.dnscp.test",   "SOA" },
     { DNS_TYPE_MINFO, "t-minfo.dnscp.test", "MINFO" },
     { DNS_TYPE_NULL,  "t-null.dnscp.test",  "NULL" },
@@ -185,10 +187,11 @@ CheckQuery(unsigned Index, int Variant /* 0 = DnsQuery_A, 1 = DnsQuery_UTF8, 2 =
     {
         /* A failure returns no record */
         ok(Record == NULL || Record == (PDNS_RECORD)(ULONG_PTR)0x1, "%s: record %p with status %lu\n", Label, Record, Status);
-        if (Type == DNS_TYPE_A || Type == DNS_TYPE_AAAA || Type == DNS_TYPE_PTR)
-            ok(0, "%s: status %lu\n", Label, Status);
+        /* MINFO and NULL records are the only types that the resolver does not answer (its DNS client has no parser for them) */
+        if (Type == DNS_TYPE_MINFO || Type == DNS_TYPE_NULL)
+            skip("%s: the resolver does not answer this type (status %lu)\n", Label, Status);
         else
-            skip("%s: the resolver does not answer this type here (status %lu)\n", Label, Status);
+            ok(0, "%s: status %lu\n", Label, Status);
         return;
     }
 
@@ -222,19 +225,20 @@ HeapBusyBytes(void)
 }
 
 /*
- * Heap growth of 2000 queries by name. DnsQuery_W is the control (its caller frees everything it returns, so whatever
- * it still grows by comes from the RPC layer below); DnsQuery_A, which converts the wide result, must not grow
- * more: it used to leak the whole wide result of every call.
+ * Heap growth of 2000 queries by name. The caller frees everything a query returns, so what the heap still grows by
+ * comes from the layers below (the RPC to the resolver service, the resolver): there is none. DnsQuery_A, which
+ * converts the wide result, must not grow more than DnsQuery_W (it used to leak the whole wide result of every call).
  */
 static
 SIZE_T
-QueryGrowth(BOOL Wide)
+QueryGrowth(BOOL Wide, WORD Type, const char *Name)
 {
-    static const WCHAR NameW[] = L"t-a.dnscp.test";
+    WCHAR NameW[128];
     PDNS_RECORD Record;
-    SIZE_T Before;
+    SIZE_T Before = 0;
     int i;
 
+    MultiByteToWideChar(CP_ACP, 0, Name, -1, NameW, ARRAYSIZE(NameW));
     for (i = 0; i < 2100; i++)
     {
         Record = NULL;
@@ -242,12 +246,12 @@ QueryGrowth(BOOL Wide)
             Before = HeapBusyBytes();
         if (Wide)
         {
-            if (DnsQuery_W(NameW, DNS_TYPE_A, DNS_QUERY_STANDARD, NULL, &Record, NULL) == ERROR_SUCCESS)
+            if (DnsQuery_W(NameW, Type, DNS_QUERY_STANDARD, NULL, &Record, NULL) == ERROR_SUCCESS)
                 DnsRecordListFree(Record, DnsFreeRecordList);
         }
         else
         {
-            if (DnsQuery_A("t-a.dnscp.test", DNS_TYPE_A, DNS_QUERY_STANDARD, NULL, &Record, NULL) == ERROR_SUCCESS)
+            if (DnsQuery_A(Name, Type, DNS_QUERY_STANDARD, NULL, &Record, NULL) == ERROR_SUCCESS)
                 DnsRecordListFree(Record, DnsFreeRecordList);
         }
     }
@@ -258,12 +262,177 @@ static
 void
 CheckNoLeak(void)
 {
-    SIZE_T GrowthW = QueryGrowth(TRUE);
-    SIZE_T GrowthA = QueryGrowth(FALSE);
+    unsigned i;
+    SIZE_T GrowthW, GrowthA;
 
-    trace("heap growth in 2000 queries: DnsQuery_W %lu, DnsQuery_A %lu bytes\n", (ULONG)GrowthW, (ULONG)GrowthA);
-    ok(GrowthA <= GrowthW + 16 * 1024, "DnsQuery_A grew the heap by %lu bytes, DnsQuery_W by %lu\n",
-       (ULONG)GrowthA, (ULONG)GrowthW);
+    for (i = 0; i < ARRAYSIZE(g_Types); i++)
+    {
+        if (g_Types[i].Type == DNS_TYPE_MINFO || g_Types[i].Type == DNS_TYPE_NULL)
+            continue;
+        GrowthW = QueryGrowth(TRUE, g_Types[i].Type, g_Types[i].Name);
+        GrowthA = QueryGrowth(FALSE, g_Types[i].Type, g_Types[i].Name);
+        trace("%s: heap growth in 2000 queries: DnsQuery_W %lu, DnsQuery_A %lu bytes\n",
+              g_Types[i].Tag, (ULONG)GrowthW, (ULONG)GrowthA);
+        ok(GrowthW <= 16 * 1024, "%s: DnsQuery_W grew the heap by %lu bytes in 2000 queries\n",
+           g_Types[i].Tag, (ULONG)GrowthW);
+        ok(GrowthA <= 16 * 1024, "%s: DnsQuery_A grew the heap by %lu bytes in 2000 queries\n",
+           g_Types[i].Tag, (ULONG)GrowthA);
+    }
+}
+
+/*
+ * Several records of a type, an alias, a name that does not exist and one that has no record of the type (test
+ * server names multi-1, alias-1, nxd-1 and plain-1).
+ */
+static
+void
+CheckMulti(DNS_CHARSET CharSet)
+{
+    PDNS_RECORD List, R;
+    DNS_STATUS Status;
+    unsigned n;
+    char Label[48];
+    static const char *const MxHosts[] = { "mail1.dnscp.test", "mail2.dnscp.test", "mail3.dnscp.test" };
+    static const char *const NsHosts[] = { "ns1.dnscp.test", "ns2.dnscp.test", "ns3.dnscp.test" };
+    static const char *const SrvHosts[] = { "srv1.dnscp.test", "srv2.dnscp.test" };
+    const char *const Prefix = CharSet == DnsCharSetUnicode ? "W" : CharSet == DnsCharSetAnsi ? "A" : "UTF8";
+    WCHAR WideName[64];
+
+#define QUERY(name, type) \
+    do { \
+        if (CharSet == DnsCharSetUnicode) \
+        { \
+            MultiByteToWideChar(CP_ACP, 0, name, -1, WideName, ARRAYSIZE(WideName)); \
+            Status = DnsQuery_W(WideName, type, DNS_QUERY_STANDARD, NULL, &List, NULL); \
+        } \
+        else if (CharSet == DnsCharSetAnsi) \
+            Status = DnsQuery_A(name, type, DNS_QUERY_STANDARD, NULL, &List, NULL); \
+        else \
+            Status = DnsQuery_UTF8(name, type, DNS_QUERY_STANDARD, NULL, &List, NULL); \
+    } while (0)
+
+    /* MX: three records, in the order of the answer */
+    sprintf(Label, "%s multi MX", Prefix);
+    List = NULL;
+    QUERY("multi-1.dnscp.test", DNS_TYPE_MX);
+    ok(Status == ERROR_SUCCESS, "%s: status %lu\n", Label, Status);
+    for (n = 0, R = Status == ERROR_SUCCESS ? List : NULL; R; R = R->pNext, n++)
+    {
+        ok(R->wType == DNS_TYPE_MX, "%s: type %u\n", Label, R->wType);
+        if (n < 3)
+        {
+            ok(R->Data.MX.wPreference == 10 * (n + 1), "%s: preference %u\n", Label, R->Data.MX.wPreference);
+            STR_IS(CharSet, R->Data.MX.pNameExchange, MxHosts[n], "exchange");
+            STR_IS(CharSet, R->pName, "multi-1.dnscp.test", "owner");
+        }
+    }
+    ok(n == 3, "%s: %u records\n", Label, n);
+    if (List && Status == ERROR_SUCCESS)
+        DnsRecordListFree(List, DnsFreeRecordList);
+
+    /* NS */
+    sprintf(Label, "%s multi NS", Prefix);
+    List = NULL;
+    QUERY("multi-1.dnscp.test", DNS_TYPE_NS);
+    ok(Status == ERROR_SUCCESS, "%s: status %lu\n", Label, Status);
+    for (n = 0, R = Status == ERROR_SUCCESS ? List : NULL; R; R = R->pNext, n++)
+        if (n < 3)
+            STR_IS(CharSet, R->Data.NS.pNameHost, NsHosts[n], "name server");
+    ok(n == 3, "%s: %u records\n", Label, n);
+    if (List && Status == ERROR_SUCCESS)
+        DnsRecordListFree(List, DnsFreeRecordList);
+
+    /* SRV */
+    sprintf(Label, "%s multi SRV", Prefix);
+    List = NULL;
+    QUERY("multi-1.dnscp.test", DNS_TYPE_SRV);
+    ok(Status == ERROR_SUCCESS, "%s: status %lu\n", Label, Status);
+    for (n = 0, R = Status == ERROR_SUCCESS ? List : NULL; R; R = R->pNext, n++)
+    {
+        if (n < 2)
+        {
+            ok(R->Data.SRV.wPriority == 1 + 3 * n, "%s: priority %u\n", Label, R->Data.SRV.wPriority);
+            ok(R->Data.SRV.wWeight == 2 + 3 * n, "%s: weight %u\n", Label, R->Data.SRV.wWeight);
+            ok(R->Data.SRV.wPort == 3 + 3 * n, "%s: port %u\n", Label, R->Data.SRV.wPort);
+            STR_IS(CharSet, R->Data.SRV.pNameTarget, SrvHosts[n], "target");
+        }
+    }
+    ok(n == 2, "%s: %u records\n", Label, n);
+    if (List && Status == ERROR_SUCCESS)
+        DnsRecordListFree(List, DnsFreeRecordList);
+
+    /* TXT: four records, the strings of each */
+    sprintf(Label, "%s multi TXT", Prefix);
+    List = NULL;
+    QUERY("multi-1.dnscp.test", DNS_TYPE_TEXT);
+    ok(Status == ERROR_SUCCESS, "%s: status %lu\n", Label, Status);
+    for (n = 0, R = Status == ERROR_SUCCESS ? List : NULL; R; R = R->pNext, n++)
+    {
+        ok(R->wType == DNS_TYPE_TEXT, "%s: type %u\n", Label, R->wType);
+        if (n == 0)
+        {
+            ok(R->Data.TXT.dwStringCount == 2, "%s: record 0 has %lu strings\n", Label, R->Data.TXT.dwStringCount);
+            if (R->Data.TXT.dwStringCount == 2)
+            {
+                STR_IS(CharSet, R->Data.TXT.pStringArray[0], "one", "string 0");
+                STR_IS(CharSet, R->Data.TXT.pStringArray[1], "two", "string 1");
+            }
+        }
+        else if (n == 1)
+        {
+            ok(R->Data.TXT.dwStringCount == 1, "%s: record 1 has %lu strings\n", Label, R->Data.TXT.dwStringCount);
+            if (R->Data.TXT.dwStringCount == 1)
+                STR_IS(CharSet, R->Data.TXT.pStringArray[0], "", "empty string");
+        }
+        else if (n == 2)
+        {
+            ok(R->Data.TXT.dwStringCount == 1, "%s: record 2 has %lu strings\n", Label, R->Data.TXT.dwStringCount);
+            if (R->Data.TXT.dwStringCount == 1)
+            {
+                char Expected[201];
+
+                memset(Expected, 'x', 200);
+                Expected[200] = 0;
+                STR_IS(CharSet, R->Data.TXT.pStringArray[0], Expected, "long string");
+            }
+        }
+        else if (n == 3)
+        {
+            ok(R->Data.TXT.dwStringCount == 1, "%s: record 3 has %lu strings\n", Label, R->Data.TXT.dwStringCount);
+            if (R->Data.TXT.dwStringCount == 1)
+                STR_IS(CharSet, R->Data.TXT.pStringArray[0], "a\"b\\c", "quoted string");
+        }
+    }
+    ok(n == 4, "%s: %u records\n", Label, n);
+    if (List && Status == ERROR_SUCCESS)
+        DnsRecordListFree(List, DnsFreeRecordList);
+
+    /* An alias: the records of the type at its target, under the name that was asked */
+    sprintf(Label, "%s alias MX", Prefix);
+    List = NULL;
+    QUERY("alias-1.dnscp.test", DNS_TYPE_MX);
+    ok(Status == ERROR_SUCCESS, "%s: status %lu\n", Label, Status);
+    if (Status == ERROR_SUCCESS && List)
+    {
+        ok(List->wType == DNS_TYPE_MX, "%s: type %u\n", Label, List->wType);
+        STR_IS(CharSet, List->Data.MX.pNameExchange, "mail.dnscp.test", "exchange");
+        STR_IS(CharSet, List->pName, "alias-1.dnscp.test", "owner");
+        DnsRecordListFree(List, DnsFreeRecordList);
+    }
+
+    /* A name that does not exist, and a name without a record of the type */
+    sprintf(Label, "%s NXDOMAIN MX", Prefix);
+    List = NULL;
+    QUERY("nxd-1.dnscp.test", DNS_TYPE_MX);
+    ok(Status == DNS_ERROR_RCODE_NAME_ERROR, "%s: status %lu\n", Label, Status);
+    ok(List == NULL, "%s: record %p\n", Label, List);
+
+    sprintf(Label, "%s no data MX", Prefix);
+    List = NULL;
+    QUERY("plain-1.dnscp.test", DNS_TYPE_MX);
+    ok(Status == DNS_INFO_NO_RECORDS, "%s: status %lu\n", Label, Status);
+    ok(List == NULL, "%s: record %p\n", Label, List);
+#undef QUERY
 }
 
 static
@@ -289,6 +458,10 @@ QueryPart(void)
     for (i = 0; i < ARRAYSIZE(g_Types); i++)
         for (v = 0; v < 3; v++)
             CheckQuery(i, v);
+
+    CheckMulti(DnsCharSetUnicode);
+    CheckMulti(DnsCharSetAnsi);
+    CheckMulti(DnsCharSetUtf8);
 
     CheckNoLeak();
 }
