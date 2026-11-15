@@ -9,7 +9,8 @@
  *              are the MAC's EUI-64 again. Windows 10 22H2 reports a random link-local identifier with the origins
  *              WellKnown / Link (Get-NetIPAddress), and "Randomize Identifiers: enabled" by default.
  *              A secret made during setup is marked (FromSetup) and replaced at the first normal boot: the mark
- *              is gone when this test runs.
+ *              is gone when this test runs. Without an Ethernet link-local address (no network adapter, DAD
+ *              not finished within 20 s) the address checks are skipped.
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
@@ -282,29 +283,80 @@ static void TestSetupMarkGone(void)
        "FromSetup still set after setup: error %ld type %lu value %lu\n", Error, Type, Value);
 }
 
+static BOOL HasEthernetLinkLocal(IP_ADAPTER_ADDRESSES *List)
+{
+    IP_ADAPTER_ADDRESSES *A;
+    IP_ADAPTER_UNICAST_ADDRESS *U;
+
+    for (A = List; A; A = A->Next)
+    {
+        if (A->IfType != IF_TYPE_ETHERNET_CSMACD || A->PhysicalAddressLength != 6)
+            continue;
+        for (U = A->FirstUnicastAddress; U; U = U->Next)
+        {
+            const SOCKADDR_IN6 *S = (const SOCKADDR_IN6 *)U->Address.lpSockaddr;
+
+            if (S->sin6_family == AF_INET6 && S->sin6_addr.s6_addr[0] == 0xfe &&
+                (S->sin6_addr.s6_addr[1] & 0xc0) == 0x80)
+                return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+/* The address list, waiting up to 20 s for an Ethernet adapter's link-local address (DAD takes about a second
+   after the link comes up). *Any: the list has any address at all (not even ::1 with IPv6 off). */
+static IP_ADAPTER_ADDRESSES *GetList(BOOL *Any, BOOL *LinkLocalFound)
+{
+    IP_ADAPTER_ADDRESSES *List = NULL, *A;
+    IP_ADAPTER_UNICAST_ADDRESS *U;
+    ULONG Size, Error = ERROR_SUCCESS;
+    int Try;
+
+    *Any = FALSE;
+    *LinkLocalFound = FALSE;
+    for (Try = 0; Try < 21; Try++)
+    {
+        HeapFree(GetProcessHeap(), 0, List);
+        Size = 64 * 1024;
+        List = HeapAlloc(GetProcessHeap(), 0, Size);
+        Error = GetAdaptersAddresses(AF_INET6, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                                     GAA_FLAG_SKIP_DNS_SERVER, NULL, List, &Size);
+        ok(Error == ERROR_SUCCESS || Error == ERROR_NO_DATA, "GetAdaptersAddresses error %lu\n", Error);
+        *Any = FALSE;
+        for (A = (Error == ERROR_SUCCESS) ? List : NULL; A; A = A->Next)
+        {
+            for (U = A->FirstUnicastAddress; U; U = U->Next)
+                *Any = TRUE;
+        }
+        if (!*Any)
+            break;      /* IPv6 off: waiting does not help */
+        if (Error == ERROR_SUCCESS && HasEthernetLinkLocal(List))
+        {
+            *LinkLocalFound = TRUE;
+            break;
+        }
+        if (Try < 20)
+            Sleep(1000);
+    }
+    if (Error != ERROR_SUCCESS)
+        *Any = FALSE;
+    return List;
+}
+
 START_TEST(Ipv6StableId)
 {
     IP_ADAPTER_ADDRESSES *List, *A;
     IP_ADAPTER_UNICAST_ADDRESS *U;
-    ULONG Size = 64 * 1024, Error;
-    BOOL Randomize = ReadRandomize(), HaveSecret = FALSE;
+    BOOL Randomize = ReadRandomize(), HaveSecret = FALSE, Any, LinkLocalFound;
     BYTE Secret[16];
-    ULONG Checked = 0, LinkLocal = 0;
+    ULONG Checked = 0;
     WCHAR Text[64];
     DWORD TextLength;
     WSADATA Wsa;
-    ULONG Any = 0;
 
     WSAStartup(MAKEWORD(2, 2), &Wsa);
-    List = HeapAlloc(GetProcessHeap(), 0, Size);
-    Error = GetAdaptersAddresses(AF_INET6, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER,
-                                 NULL, List, &Size);
-    ok(Error == ERROR_SUCCESS || Error == ERROR_NO_DATA, "GetAdaptersAddresses error %lu\n", Error);
-    for (A = (Error == ERROR_SUCCESS) ? List : NULL; A; A = A->Next)
-    {
-        for (U = A->FirstUnicastAddress; U; U = U->Next)
-            Any++;
-    }
+    List = GetList(&Any, &LinkLocalFound);
     if (!Any)
     {
         /* With IPv6 off the stack has no address, not even ::1 */
@@ -321,6 +373,14 @@ START_TEST(Ipv6StableId)
         TestSecretDacl();
         TestSetupMarkGone();
         TestSecretDeniedToUser();
+    }
+
+    if (!LinkLocalFound)
+    {
+        skip("no Ethernet adapter with an IPv6 link-local address within 20 s (no network adapter or link)\n");
+        HeapFree(GetProcessHeap(), 0, List);
+        WSACleanup();
+        return;
     }
 
     for (A = List; A; A = A->Next)
@@ -342,7 +402,6 @@ START_TEST(Ipv6StableId)
             Checked++;
             if (IsLinkLocal)
             {
-                LinkLocal++;
                 ok(U->PrefixOrigin == IpPrefixOriginWellKnown && U->SuffixOrigin == IpSuffixOriginLinkLayerAddress,
                    "%ls: origins %d/%d, Windows: WellKnown/Link\n", Text, U->PrefixOrigin, U->SuffixOrigin);
             }
@@ -369,7 +428,7 @@ START_TEST(Ipv6StableId)
             }
         }
     }
-    ok(LinkLocal > 0, "no Ethernet adapter with an IPv6 link-local address (%lu addresses)\n", Checked);
+    trace("%lu Ethernet addresses checked\n", Checked);
 
     HeapFree(GetProcessHeap(), 0, List);
     WSACleanup();
