@@ -225,12 +225,14 @@ mswBufferAppendStrLstA(_Inout_ PMSW_BUFFER mswBuf,
 }
 
 BOOL
-mswBufferAppendBlob_Hostent(_Inout_ PMSW_BUFFER mswBuf,
-                            _Inout_ LPWSAQUERYSETW lpRes,
-                            _In_ char** hostAliasesA,
-                            _In_ char* hostnameA,
-                            _In_reads_(addrCount) const DWORD* ip4addrs,
-                            _In_ DWORD addrCount)
+mswBufferAppendBlob_HostentEx(_Inout_ PMSW_BUFFER mswBuf,
+                              _Inout_ LPWSAQUERYSETW lpRes,
+                              _In_ char** hostAliasesA,
+                              _In_ char* hostnameA,
+                              _In_ SHORT addrType,
+                              _In_ SHORT addrLen,
+                              _In_reads_bytes_(addrCount * addrLen) const BYTE* addrs,
+                              _In_ DWORD addrCount)
 {
     PHOSTENT phe;
     BYTE* bytesOfs;
@@ -253,8 +255,8 @@ mswBufferAppendBlob_Hostent(_Inout_ PMSW_BUFFER mswBuf,
     if (!mswBufferIncUsed(mswBuf, sizeof(*phe)))
         return FALSE;
 
-    phe->h_addrtype = AF_INET;
-    phe->h_length = 4; /* 4 Byte (IPv4) */
+    phe->h_addrtype = addrType;
+    phe->h_length = addrLen; /* 4 Byte (IPv4) or 16 Byte (IPv6) */
 
     /* aliases */
     phe->h_aliases = (char**)(mswBufferEndPtr(mswBuf) - bytesOfs);
@@ -275,14 +277,14 @@ mswBufferAppendBlob_Hostent(_Inout_ PMSW_BUFFER mswBuf,
     /* addr_list: the pointers (relative to the start of the hostent), a NULL, then the addresses */
     phe->h_addr_list = (char**)(mswBufferEndPtr(mswBuf) - bytesOfs);
 
-    if (addrCount > (MAXDWORD - 2 * sizeof(DWORD_PTR)) / (sizeof(DWORD_PTR) + sizeof(DWORD)) ||
-        !mswBufferCheck(mswBuf, (addrCount + 1) * (DWORD)sizeof(DWORD_PTR) + addrCount * (DWORD)sizeof(DWORD)))
+    if (addrCount > (MAXDWORD - 2 * sizeof(DWORD_PTR)) / (sizeof(DWORD_PTR) + addrLen) ||
+        !mswBufferCheck(mswBuf, (addrCount + 1) * (DWORD)sizeof(DWORD_PTR) + addrCount * (DWORD)addrLen))
         return FALSE;
 
     for (i = 0; i < addrCount; i++)
     {
         DWORD_PTR Rel = (mswBufferEndPtr(mswBuf) - bytesOfs) +
-                        (addrCount + 1 - i) * sizeof(DWORD_PTR) + i * sizeof(DWORD);
+                        (addrCount + 1 - i) * sizeof(DWORD_PTR) + i * addrLen;
 
         if (!mswBufferAppendPtr(mswBuf, (void*)Rel))
             return FALSE;
@@ -293,7 +295,7 @@ mswBufferAppendBlob_Hostent(_Inout_ PMSW_BUFFER mswBuf,
 
     for (i = 0; i < addrCount; i++)
     {
-        if (!mswBufferAppend(mswBuf, (void*)&ip4addrs[i], sizeof(DWORD)))
+        if (!mswBufferAppend(mswBuf, (void*)&addrs[i * addrLen], addrLen))
             return FALSE;
     }
 
@@ -305,6 +307,18 @@ mswBufferAppendBlob_Hostent(_Inout_ PMSW_BUFFER mswBuf,
 
     lpRes->lpBlob->cbSize = (DWORD)(mswBufferEndPtr(mswBuf) - bytesOfs);
     return mswBuf->bufok;
+}
+
+BOOL
+mswBufferAppendBlob_Hostent(_Inout_ PMSW_BUFFER mswBuf,
+                            _Inout_ LPWSAQUERYSETW lpRes,
+                            _In_ char** hostAliasesA,
+                            _In_ char* hostnameA,
+                            _In_reads_(addrCount) const DWORD* ip4addrs,
+                            _In_ DWORD addrCount)
+{
+    return mswBufferAppendBlob_HostentEx(mswBuf, lpRes, hostAliasesA, hostnameA,
+                                         AF_INET, sizeof(DWORD), (const BYTE*)ip4addrs, addrCount);
 }
 
 BOOL

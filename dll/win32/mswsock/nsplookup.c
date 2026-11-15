@@ -2,6 +2,7 @@
 
 #include <stdlib.h>
 #include <ws2spi.h>
+#include <ws2tcpip.h>
 #include <nspapi.h>
 #include <winuser.h>
 #include <windns.h>
@@ -69,6 +70,8 @@ typedef struct {
   WCHAR* servprotoW;
   CHAR** servaliasesA; /* array */
   WORD servport;
+  BOOLEAN isV6; /* gethostbyaddr of an IPv6 address: addr6 is the address the name was asked for */
+  BYTE addr6[16];
 } WSHOSTINFOINTERN, *PWSHOSTINFOINTERN;
 
 typedef struct {
@@ -948,6 +951,28 @@ NSP_ParseIp4W(_In_ PCWSTR Text,
     return TRUE;
 }
 
+/* Parse an IPv6 address in text form (a scope id is accepted and dropped); fails for an address no name is asked
+   for: unspecified, link-local, multicast (a link-local address is only meaningful with its scope) */
+static
+BOOLEAN
+NSP_ParseIp6W(_In_ PCWSTR Text,
+              _Out_writes_bytes_(16) PBYTE Addr)
+{
+    SOCKADDR_IN6 Sa;
+    INT Length = sizeof(Sa);
+    static const BYTE Unspecified[16] = {0};
+
+    RtlZeroMemory(&Sa, sizeof(Sa));
+    if (WSAStringToAddressW((LPWSTR)Text, AF_INET6, NULL, (LPSOCKADDR)&Sa, &Length) != 0)
+        return FALSE;
+    RtlCopyMemory(Addr, &Sa.sin6_addr, 16);
+    if (RtlEqualMemory(Addr, Unspecified, 16) ||
+        (Addr[0] == 0xFE && (Addr[1] & 0xC0) == 0x80) ||
+        Addr[0] == 0xFF)
+        return FALSE;
+    return TRUE;
+}
+
 /*
  * Look up the PTR record of a reverse name (e.g. "8.8.8.8.in-addr.arpa") and return the
  * name it points to in hostinfo->hostnameW. The query is recursive: the name servers a client is configured
@@ -1469,17 +1494,36 @@ NSP_LookupServiceNextOnce(_In_ PWSHANDLEINTERN data,
     }
     else if (data->CallID == NSP_CALLID_HOSTBYADDR)
     {
-        WCHAR ReverseName[32];
+        WCHAR ReverseName[80];
 
-        /* The address in text form, as gethostbyaddr passes it; only IPv4 can be named */
-        if (!NSP_ParseIp4W(data->hostnameW, &hostinfo.addr4))
+        /* The address in text form, as gethostbyaddr passes it */
+        if (NSP_ParseIp4W(data->hostnameW, &hostinfo.addr4))
+        {
+            StringCchPrintfW(ReverseName, ARRAYSIZE(ReverseName), L"%u.%u.%u.%u.in-addr.arpa",
+                             ((PBYTE)&hostinfo.addr4)[3], ((PBYTE)&hostinfo.addr4)[2],
+                             ((PBYTE)&hostinfo.addr4)[1], ((PBYTE)&hostinfo.addr4)[0]);
+        }
+        else if (NSP_ParseIp6W(data->hostnameW, hostinfo.addr6))
+        {
+            /* nibbles, least significant first, under ip6.arpa */
+            PWCHAR Out = ReverseName;
+            INT n;
+
+            hostinfo.isV6 = TRUE;
+            for (n = 15; n >= 0; n--)
+            {
+                *Out++ = L"0123456789abcdef"[hostinfo.addr6[n] & 0xF];
+                *Out++ = L'.';
+                *Out++ = L"0123456789abcdef"[hostinfo.addr6[n] >> 4];
+                *Out++ = L'.';
+            }
+            wcscpy(Out, L"ip6.arpa");
+        }
+        else
         {
             result = WSANO_DATA;
             goto End;
         }
-        StringCchPrintfW(ReverseName, ARRAYSIZE(ReverseName), L"%u.%u.%u.%u.in-addr.arpa",
-                         ((PBYTE)&hostinfo.addr4)[3], ((PBYTE)&hostinfo.addr4)[2],
-                         ((PBYTE)&hostinfo.addr4)[1], ((PBYTE)&hostinfo.addr4)[0]);
         result = NSP_GetHostByPtrHeapAllocW(ReverseName, &hostinfo);
         if (result != ERROR_SUCCESS)
         {
@@ -1552,7 +1596,16 @@ NSP_LookupServiceNextOnce(_In_ PWSHANDLEINTERN data,
         if (data->CallID == NSP_CALLID_HOSTBYNAME || data->CallID == NSP_CALLID_HOSTBYADDR)
         {
             /* Write data for PBLOB (hostent) */
-            if (!mswBufferAppendBlob_Hostent(&buf,
+            if (hostinfo.isV6 ?
+                !mswBufferAppendBlob_HostentEx(&buf,
+                                               lpRes,
+                                               NULL,
+                                               ServiceInstanceNameA,
+                                               AF_INET6,
+                                               sizeof(hostinfo.addr6),
+                                               hostinfo.addr6,
+                                               1) :
+                !mswBufferAppendBlob_Hostent(&buf,
                                              lpRes,
                                              (LUP_RETURN_ALIASES & data->dwControlFlags) != 0 ? hostinfo.servaliasesA : NULL,
                                              ServiceInstanceNameA,

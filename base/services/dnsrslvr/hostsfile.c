@@ -96,7 +96,8 @@ static
 VOID
 AddIpv4HostEntries(
     PWSTR pszHostName,
-    PIN_ADDR pAddress)
+    PIN_ADDR pAddress,
+    BOOL bAddPtr)
 {
     DNS_RECORDW ARecord, PtrRecord;
     WCHAR szReverseName[32];
@@ -133,7 +134,8 @@ AddIpv4HostEntries(
     PtrRecord.Data.PTR.pNameHost = pszHostName;
 
     DnsIntCacheAddEntry(&ARecord, TRUE);
-    DnsIntCacheAddEntry(&PtrRecord, TRUE);
+    if (bAddPtr)
+        DnsIntCacheAddEntry(&PtrRecord, TRUE);
 }
 
 
@@ -141,7 +143,8 @@ static
 VOID
 AddIpv6HostEntries(
     PWSTR pszHostName,
-    PIN6_ADDR pAddress)
+    PIN6_ADDR pAddress,
+    BOOL bAddPtr)
 {
     DNS_RECORDW AAAARecord, PtrRecord;
     WCHAR szReverseName[80];
@@ -187,7 +190,8 @@ AddIpv6HostEntries(
     PtrRecord.Data.PTR.pNameHost = pszHostName;
 
     DnsIntCacheAddEntry(&AAAARecord, TRUE);
-    DnsIntCacheAddEntry(&PtrRecord, TRUE);
+    if (bAddPtr)
+        DnsIntCacheAddEntry(&PtrRecord, TRUE);
 }
 
 /*
@@ -287,7 +291,7 @@ ParseHostsLine(
     PSTR Ptr = Line, AddressStart, Token;
     struct in_addr Ipv4Address;
     struct in6_addr Ipv6Address;
-    BOOL bIpv4;
+    BOOL bIpv4, bFirstName = TRUE;
     PWSTR pszHostName;
 
     for (Ptr = Line; *Ptr != 0; Ptr++)
@@ -338,12 +342,14 @@ ParseHostsLine(
         pszHostName = AnsiToUnicode(Token);
         if (pszHostName != NULL)
         {
+            /* the address of the line has one PTR row: the first name of the line */
             if (bIpv4)
-                AddIpv4HostEntries(pszHostName, &Ipv4Address);
+                AddIpv4HostEntries(pszHostName, &Ipv4Address, bFirstName);
             else
-                AddIpv6HostEntries(pszHostName, &Ipv6Address);
+                AddIpv6HostEntries(pszHostName, &Ipv6Address, bFirstName);
             HeapFree(GetProcessHeap(), 0, pszHostName);
         }
+        bFirstName = FALSE;
     }
 }
 

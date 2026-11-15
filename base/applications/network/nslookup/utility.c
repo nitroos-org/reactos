@@ -381,6 +381,32 @@ void ReverseIP( PCHAR pIP, PCHAR pReturn )
     pReturn[k] = '\0';
 }
 
+/* The reverse name of an IPv6 address: its 32 nibbles, least significant first, then ip6.arpa (RFC 3596).
+   FALSE for text that is no IPv6 address and for the addresses that have no name in DNS: unspecified,
+   link-local (only meaningful with its zone, the zone suffix is ignored) and multicast. pReturn needs 74 bytes. */
+BOOL ReverseIPv6( PCHAR pIP, PCHAR pReturn )
+{
+    SOCKADDR_IN6 Addr;
+    INT AddrLen = sizeof(Addr);
+    const UCHAR *B;
+    int i, n = 0;
+
+    if( !strchr( pIP, ':' ) ) return FALSE;
+
+    RtlZeroMemory( &Addr, sizeof(Addr) );
+    if( WSAStringToAddressA( pIP, AF_INET6, NULL, (SOCKADDR*)&Addr, &AddrLen ) != 0 ) return FALSE;
+
+    B = Addr.sin6_addr.u.Byte;
+    if( IN6_IS_ADDR_UNSPECIFIED( &Addr.sin6_addr ) ||
+        IN6_IS_ADDR_LINKLOCAL( &Addr.sin6_addr ) ||
+        IN6_IS_ADDR_MULTICAST( &Addr.sin6_addr ) ) return FALSE;
+
+    for( i = 15; i >= 0; i -= 1 )
+        n += sprintf( &pReturn[n], "%x.%x.", B[i] & 0xF, B[i] >> 4 );
+    strcpy( &pReturn[n], "ip6.arpa" );
+    return TRUE;
+}
+
 /* An IPv6 address in text form (the zone suffix %n is accepted) */
 BOOL IsValidIPv6( PCHAR pInput )
 {

@@ -89,12 +89,13 @@ Local_Ip6AddresstoString(IN PCHAR AddressBuffer,
                          IN PCHAR Address)
 {
     DWORD i;
+    PCHAR Out = AddressBuffer;
 
-    /* Convert the address into IPv6 format */
+    /* Convert the address into IPv6 format: eight groups of hex digits, not abbreviated */
     for (i = 0; i < 8; i++)
     {
-        sprintf(AddressBuffer, "%x:",
-                ((unsigned)Address[0] & 0xff));
+        Out += sprintf(Out, i ? ":%x" : "%x",
+                       (((unsigned)Address[2 * i] & 0xff) << 8) | ((unsigned)Address[2 * i + 1] & 0xff));
     }
 }
 

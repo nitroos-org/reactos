@@ -757,8 +757,26 @@ LookupNodeByAddr(IN LPWSTR pNodeBuffer,
     }
     else
     {
-        /* FIXME: reverse names of other IPv6 addresses (ip6.arpa) are not implemented */
-        return WSAHOST_NOT_FOUND;
+        PIN6_ADDR Ip6Addr = Addr;
+        PWCHAR Out = ReverseBuffer;
+        INT n;
+
+        /* Unspecified, link-local (only meaningful with its scope) and multicast addresses have no name in DNS:
+         * no query is made (VERIFY ON ORACLE: Windows' answer for these) */
+        if (IN6_IS_ADDR_UNSPECIFIED(Ip6Addr) ||
+            IN6_IS_ADDR_LINKLOCAL(Ip6Addr) ||
+            IN6_IS_ADDR_MULTICAST(Ip6Addr))
+            return WSAHOST_NOT_FOUND;
+
+        /* The nibbles of the address, least significant first, under ip6.arpa (RFC 3596) */
+        for (n = 15; n >= 0; n--)
+        {
+            *Out++ = L"0123456789abcdef"[Ip6Addr->u.Byte[n] & 0xF];
+            *Out++ = L'.';
+            *Out++ = L"0123456789abcdef"[Ip6Addr->u.Byte[n] >> 4];
+            *Out++ = L'.';
+        }
+        wcscpy(Out, L"ip6.arpa.");
     }
 
     /* By this point we have the Reverse Name, so prepare for lookup */

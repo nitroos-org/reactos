@@ -75,6 +75,17 @@ mswBufferAppendBlob_Hostent(
   _In_ DWORD addrCount);
 
 BOOL
+mswBufferAppendBlob_HostentEx(
+  _Inout_ PMSW_BUFFER mswBuf,
+  _Inout_ LPWSAQUERYSETW lpRes,
+  _In_ char** hostAliasesA,
+  _In_ char* hostnameA,
+  _In_ SHORT addrType,
+  _In_ SHORT addrLen,
+  _In_reads_bytes_(addrCount * addrLen) const BYTE* addrs,
+  _In_ DWORD addrCount);
+
+BOOL
 mswBufferAppendBlob_Servent(
   _Inout_ PMSW_BUFFER mswBuf,
   _Inout_ LPWSAQUERYSETW lpRes,
