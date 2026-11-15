@@ -12,9 +12,9 @@
  * found, or for ::1 through the loopback queue. The behaviour follows RFC 8200, 4861 and 4862 as lwIP
  * implements them.
  *
- * Off by default: HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Ipv6Enable (REG_DWORD, read once
- * at startup, non-zero = on). Off, no interface has an IPv6 address, nothing IPv6 is sent, and a received
- * IPv6 frame is dropped as before.
+ * On by default: HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Ipv6Enable (REG_DWORD, read once
+ * at startup; 0 = off, any other value, or no value, = on). Off, no interface has an IPv6 address, nothing IPv6
+ * is sent, and a received IPv6 frame is dropped as before.
  *
  * There is no IPv6 socket yet (no TDI address type, no Winsock helper): nothing outside this driver can
  * create an IPv6 connection or listener. A frame from an adapter goes through the firewall first
@@ -42,7 +42,7 @@
 /* udp6.c: the groups sockets joined on an interface, for its multicast list (core lock held) */
 VOID UDP6AddMulticastList(struct netif *netif, PUCHAR List, PUINT Count, UINT Max);
 
-BOOLEAN TCPIpv6Enabled = FALSE;
+BOOLEAN TCPIpv6Enabled = TRUE;
 
 /* Set while a datagram from one of our adapters, that the adapter looped back from our own send, is in
    ip6_input (core lock held) */
@@ -114,7 +114,8 @@ TCPReadIpv6Switch(VOID)
     ULONG Length;
     NTSTATUS Status;
 
-    TCPIpv6Enabled = FALSE;
+    /* the default is on: only a REG_DWORD of 0 turns IPv6 off */
+    TCPIpv6Enabled = TRUE;
 
     InitializeObjectAttributes(&Attributes, &KeyName, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
     if (!NT_SUCCESS(ZwOpenKey(&Key, KEY_QUERY_VALUE, &Attributes)))

@@ -91,12 +91,13 @@ static BOOL
 SwitchIsOn(VOID)
 {
     HKEY hKey;
-    DWORD Value = 0, Size = sizeof(Value), Type;
+    DWORD Value = 1, Size = sizeof(Value), Type;
 
+    /* the stack's default is on: only a DWORD of 0 is off */
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, SERVICES L"\\Tcpip\\Parameters", 0, KEY_QUERY_VALUE, &hKey) != ERROR_SUCCESS)
-        return FALSE;
+        return TRUE;
     if (RegQueryValueExW(hKey, L"Ipv6Enable", NULL, &Type, (LPBYTE)&Value, &Size) != ERROR_SUCCESS || Type != REG_DWORD)
-        Value = 0;
+        Value = 1;
     RegCloseKey(hKey);
     return Value != 0;
 }
