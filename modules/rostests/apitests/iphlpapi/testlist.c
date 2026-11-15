@@ -2,7 +2,9 @@
 #define STANDALONE
 #include <apitest.h>
 
+extern void func_AddrSortEngine(void);
 extern void func_ArpNeighbor(void);
+extern void func_CreateSortedAddressPairs(void);
 extern void func_GetAdaptersAddresses(void);
 extern void func_GetBestInterfaceEx(void);
 extern void func_GetBestRoute2(void);
@@ -46,7 +48,9 @@ extern void func_Win6Exports(void);
 
 const struct test winetest_testlist[] =
 {
+    { "AddrSortEngine",             func_AddrSortEngine },
     { "ArpNeighbor",                func_ArpNeighbor },
+    { "CreateSortedAddressPairs",   func_CreateSortedAddressPairs },
     { "GetAdaptersAddresses",       func_GetAdaptersAddresses },
     { "GetBestInterfaceEx",         func_GetBestInterfaceEx },
     { "GetBestRoute2",             func_GetBestRoute2 },

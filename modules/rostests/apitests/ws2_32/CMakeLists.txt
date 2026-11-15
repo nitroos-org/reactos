@@ -1,6 +1,7 @@
 
 list(APPEND SOURCE
     abortiveclose.c
+    addrlistsort.c
     accept.c
     acceptclose.c
     acceptlag.c

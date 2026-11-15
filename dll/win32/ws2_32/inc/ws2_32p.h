@@ -912,6 +912,16 @@ WsQueryIpv6(PWS_IPV6_INFO Info);
 BOOL
 WsIpv6SocketsOn(VOID);
 
+/* src/addrsort.c: the destination ordering (RFC 6724; CreateSortedAddressPairs of iphlpapi does it) */
+BOOL
+WsSortAddresses(const SOCKADDR *const *Addresses, const ULONG *Lengths, ULONG Count, ULONG *Order);
+
+PADDRINFOW
+WsSortAddrInfo(PADDRINFOW List);
+
+INT
+WsAddressListSort(LPVOID InBuffer, DWORD InSize, LPVOID OutBuffer, DWORD OutSize, LPDWORD BytesReturned);
+
 FORCEINLINE
 DWORD
 WsQuickProlog(VOID)

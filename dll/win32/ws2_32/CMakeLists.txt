@@ -9,6 +9,7 @@ include_directories(
 
 list(APPEND SOURCE
     src/addrconv.c
+    src/addrsort.c
     src/addrinfo.c
     src/async.c
     src/bhook.c
