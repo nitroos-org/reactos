@@ -195,8 +195,9 @@ DC_vUpdateWorldToDevice(PDC pdc)
     XFORMOBJ_vInit(&xoWorldToDevice, &pdc->pdcattr->mxWorldToDevice);
     XFORMOBJ_iCombine(&xoWorldToDevice, &xoWorldToPage, &xoPageToDevice);
 
-    /* Reset the flags */
-    pdc->pdcattr->flXform &= ~WORLD_XFORM_CHANGED;
+    /* Reset the flags: the matrix is up to date (DC_pmxWorldToDevice is the only reader of the page flags),
+       it is not rebuilt on every call until the next change */
+    pdc->pdcattr->flXform &= ~(WORLD_XFORM_CHANGED | PAGE_XLATE_CHANGED | PAGE_EXTENTS_CHANGED);
 }
 
 VOID
