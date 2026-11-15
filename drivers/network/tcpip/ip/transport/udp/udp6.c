@@ -135,6 +135,19 @@ Udp6NetifHasAddress(struct netif *netif)
     return FALSE;
 }
 
+/* lwIP's route to Dest (core lock held; echo6.c too). lwIP falls back to its default interface when it has no route,
+ * which is the loopback interface on a machine without an IPv6 adapter: that is no route, except for ::1 (Windows
+ * answers no route: WSAENETUNREACH / ERROR_NETWORK_UNREACHABLE, oracle for the echo) */
+struct netif *
+Udp6Route(const ip6_addr_t *Src, const ip6_addr_t *Dest)
+{
+    struct netif *netif = ip6_route(Src, Dest);
+
+    if (netif && Loopback && netif == Loopback->TCPContext && !ip6_addr_isloopback(Dest))
+        return NULL;
+    return netif;
+}
+
 /* The interface of a multicast datagram or group without an interface index: lwIP's default one when it is up
  * with an IPv6 address, else the first adapter that is, else the loopback interface (core lock held). VERIFY ON
  * ORACLE: Windows takes the interface of the route to the group */
@@ -588,12 +601,12 @@ UDPSendDatagram6(
         if (Zone != IP6_NO_ZONE)
             ip6_addr_set_zone(&Source, Zone);
         if (!netif)
-            netif = ip6_route(&Source, &Dest);
+            netif = Udp6Route(&Source, &Dest);
     }
     else
     {
         if (!netif && !(ip6_addr_islinklocal(&Dest) || ip6_addr_ismulticast(&Dest)))
-            netif = ip6_route(IP6_ADDR_ANY6, &Dest);
+            netif = Udp6Route(IP6_ADDR_ANY6, &Dest);
         Selected = netif ? ip6_select_source_address(netif, &Dest) : NULL;
         if (!Selected)
         {
