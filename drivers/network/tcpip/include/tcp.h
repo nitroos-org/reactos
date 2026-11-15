@@ -259,6 +259,17 @@ struct netif;
 BOOLEAN
 TCP6SetStableLinkLocal(struct netif *netif);
 
+/* Addresses DAD found in use that were replaced by a new identifier, kept to be reported as duplicates (iid6.c, core
+   lock held): at most TCP6_DUP_MAX over all interfaces */
+struct ip6_addr;
+#define TCP6_DUP_MAX 16
+BOOLEAN
+TCP6DuplicateGet(struct netif *netif, ULONG Number, struct ip6_addr *Address, PULONG Valid, PULONG Preferred);
+ULONG
+TCP6DuplicateClear(struct netif *netif);
+BOOLEAN
+TCP6DuplicateRemove(struct netif *netif, const struct ip6_addr *Address);
+
 VOID
 TCPReceive6(PIP_INTERFACE IF, PIP_PACKET IPPacket);
 
