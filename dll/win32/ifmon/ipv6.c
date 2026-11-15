@@ -1858,6 +1858,7 @@ Ipv6DeleteRoute(
 /* add and delete dnsservers ************************************************/
 
 #define MAX_DNS_SERVERS  16
+#define NAMESERVER_MAX_CHARS  510
 
 typedef struct _DNS_LIST
 {
@@ -1903,6 +1904,9 @@ ReadServerList(
         return ERROR_SUCCESS;       /* nothing configured: the key is made by the first server */
     Error = RegQueryValueExW(hKey, L"NameServer", NULL, &Type, (LPBYTE)Value, &Bytes);
     RegCloseKey(hKey);
+    /* a list too long to read is not taken as no list: writing it back would drop the servers it has */
+    if (Error == ERROR_MORE_DATA)
+        return Error;
     if (Error != ERROR_SUCCESS || Type != REG_SZ)
         return ERROR_SUCCESS;
     Value[Bytes / sizeof(WCHAR)] = UNICODE_NULL;
@@ -1928,6 +1932,19 @@ WriteServerList(
 
     if (!AdapterKeyPath(IfIndex, Path, ARRAYSIZE(Path)))
         return ERROR_INVALID_PARAMETER;
+
+    /* iphlpapi reads the value into 512 characters (ipv6dns.c): a longer list would lose every server */
+    Value[0] = UNICODE_NULL;
+    for (i = 0; i < List->Count; i++)
+    {
+        if ((i != 0 && FAILED(StringCchCatW(Value, ARRAYSIZE(Value), L","))) ||
+            FAILED(StringCchCatW(Value, ARRAYSIZE(Value), List->Server[i])) ||
+            wcslen(Value) > NAMESERVER_MAX_CHARS)
+        {
+            return ERROR_INVALID_PARAMETER;
+        }
+    }
+
     Error = RegCreateKeyExW(HKEY_LOCAL_MACHINE, Path, 0, NULL, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, NULL,
                             &hKey, NULL);
     if (Error != ERROR_SUCCESS)
@@ -1941,13 +1958,6 @@ WriteServerList(
     }
     else
     {
-        Value[0] = UNICODE_NULL;
-        for (i = 0; i < List->Count; i++)
-        {
-            if (i != 0)
-                StringCchCatW(Value, ARRAYSIZE(Value), L",");
-            StringCchCatW(Value, ARRAYSIZE(Value), List->Server[i]);
-        }
         Error = RegSetValueExW(hKey, L"NameServer", 0, REG_SZ, (const BYTE *)Value,
                                (DWORD)((wcslen(Value) + 1) * sizeof(WCHAR)));
     }
@@ -2030,7 +2040,8 @@ Ipv6AddDnsServers(
         Index = List.Count + 1;
     for (i = List.Count; i >= Index; i--)
         wcscpy(List.Server[i], List.Server[i - 1]);
-    StringCchCopyW(List.Server[Index - 1], ARRAYSIZE(List.Server[0]), Values[1]);
+    /* the address as the stack writes one, not as typed ("[2001:db8::1]", leading zeros) */
+    RtlIpv6AddressToStringW(&Address, List.Server[Index - 1]);
     List.Count++;
 
     return Finish(WriteServerList(IfIndex, &List));

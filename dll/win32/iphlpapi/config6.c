@@ -464,14 +464,18 @@ static BOOL adapter_key_path(DWORD IfIndex, WCHAR *Path, SIZE_T Count)
   return TRUE;
 }
 
-/* The records of a value of a key (a HeapAlloc block, the caller frees it), *Count of them; none: NULL and 0 */
-static PUCHAR read_records(const WCHAR *Path, const WCHAR *Value, ULONG Size, PULONG Count)
+/* The records of a value of a key (a HeapAlloc block, the caller frees it), *Count of them; none: NULL and 0.
+   *Unread (optional): a value of the right form is there but could not be read (no memory, or it grew between the
+   two queries because the stack wrote it): NULL and 0 then do not mean "no record" */
+static PUCHAR read_records(const WCHAR *Path, const WCHAR *Value, ULONG Size, PULONG Count, PBOOL Unread)
 {
   HKEY Key;
   DWORD Type, Bytes = 0;
   PUCHAR Data = NULL;
 
   *Count = 0;
+  if (Unread)
+    *Unread = FALSE;
   if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, Path, 0, KEY_QUERY_VALUE, &Key) != ERROR_SUCCESS)
     return NULL;
 
@@ -488,6 +492,8 @@ static PUCHAR read_records(const WCHAR *Path, const WCHAR *Value, ULONG Size, PU
     {
       HeapFree(GetProcessHeap(), 0, Data);
       Data = NULL;
+      if (Unread)
+        *Unread = TRUE;
     }
   }
   RegCloseKey(Key);
@@ -507,57 +513,70 @@ static PUCHAR find_record(PUCHAR Records, ULONG Count, ULONG Size, const UCHAR *
   return NULL;
 }
 
-/* The persistent record with the key of Key, copied to Out (Size bytes): TRUE if there is one */
-static BOOL saved_record(DWORD IfIndex, const WCHAR *Value, ULONG Size, const UCHAR *Key, ULONG From, ULONG To,
-                         UCHAR *Out)
+/* The persistent record with the key of Key, copied to Out (Size bytes): *Found if there is one. An error: the
+   store could not be read, so it is not known whether there is one */
+static DWORD saved_record(DWORD IfIndex, const WCHAR *Value, ULONG Size, const UCHAR *Key, ULONG From, ULONG To,
+                          UCHAR *Out, PBOOL Found)
 {
   WCHAR Path[160];
   ULONG Count;
-  PUCHAR Records, Found;
-  BOOL Result = FALSE;
+  PUCHAR Records, Record;
+  BOOL Unread;
 
+  *Found = FALSE;
   if (!adapter_key_path(IfIndex, Path, ARRAYSIZE(Path)))
-    return FALSE;
-  Records = read_records(Path, Value, Size, &Count);
-  Found = find_record(Records, Count, Size, Key, From, To);
-  if (Found)
+    return NO_ERROR;
+  Records = read_records(Path, Value, Size, &Count, &Unread);
+  if (Unread)
+    return ERROR_NOT_ENOUGH_MEMORY;
+  Record = find_record(Records, Count, Size, Key, From, To);
+  if (Record)
   {
-    memcpy(Out, Found, Size);
-    Result = TRUE;
+    memcpy(Out, Record, Size);
+    *Found = TRUE;
   }
   HeapFree(GetProcessHeap(), 0, Records);
-  return Result;
+  return NO_ERROR;
 }
 
-/* Puts Record back into the value of the adapter of IfIndex (the stack removed it with the active entry) */
-static void put_record(DWORD IfIndex, const WCHAR *Value, ULONG Size, const UCHAR *Record, ULONG From, ULONG To)
+/* Puts Record back into the value of the adapter of IfIndex (the stack removed it with the active entry). An error:
+   the record is not back (the value is left as it was rather than written without the records it could not read) */
+static DWORD put_record(DWORD IfIndex, const WCHAR *Value, ULONG Size, const UCHAR *Record, ULONG From, ULONG To)
 {
   WCHAR Path[160];
   ULONG Count, i, Kept = 0;
   PUCHAR Records, All;
   HKEY Key;
+  BOOL Unread;
+  DWORD Error;
 
   if (!adapter_key_path(IfIndex, Path, ARRAYSIZE(Path)))
-    return;
-  Records = read_records(Path, Value, Size, &Count);
+    return ERROR_NOT_FOUND;
+  Records = read_records(Path, Value, Size, &Count, &Unread);
+  if (Unread)
+    return ERROR_NOT_ENOUGH_MEMORY;
   All = HeapAlloc(GetProcessHeap(), 0, (Count + 1) * Size);
-  if (All)
+  if (!All)
   {
-    for (i = 0; i < Count; i++)
-    {
-      if (memcmp(Records + i * Size + From, Record + From, To - From))
-        memcpy(All + Kept++ * Size, Records + i * Size, Size);
-    }
-    memcpy(All + Kept++ * Size, Record, Size);
-    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, Path, 0, NULL, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, NULL, &Key,
-                        NULL) == ERROR_SUCCESS)
-    {
-      RegSetValueExW(Key, Value, 0, REG_BINARY, All, Kept * Size);
-      RegCloseKey(Key);
-    }
-    HeapFree(GetProcessHeap(), 0, All);
+    HeapFree(GetProcessHeap(), 0, Records);
+    return ERROR_NOT_ENOUGH_MEMORY;
   }
+  for (i = 0; i < Count; i++)
+  {
+    if (memcmp(Records + i * Size + From, Record + From, To - From))
+      memcpy(All + Kept++ * Size, Records + i * Size, Size);
+  }
+  memcpy(All + Kept++ * Size, Record, Size);
+  Error = RegCreateKeyExW(HKEY_LOCAL_MACHINE, Path, 0, NULL, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, NULL, &Key,
+                          NULL);
+  if (Error == ERROR_SUCCESS)
+  {
+    Error = RegSetValueExW(Key, Value, 0, REG_BINARY, All, Kept * Size);
+    RegCloseKey(Key);
+  }
+  HeapFree(GetProcessHeap(), 0, All);
   HeapFree(GetProcessHeap(), 0, Records);
+  return Error;
 }
 
 /* The bits after the prefix length name nothing: the stack clears them before it keeps a route */
@@ -614,11 +633,14 @@ DWORD WINAPI NitroConfigureIpv6Route(ULONG Operation, BOOL Persistent, const MIB
   if (Persistent)
     return route_request6(Operation, Store, Row, IfIndex);
   route_key(Row, &Key);
-  Kept = saved_record(IfIndex, PERSIST_ROUTES, sizeof(Saved), (const UCHAR *)&Key, ROUTE_KEY_FROM, ROUTE_KEY_TO,
-                      (UCHAR *)&Saved);
+  /* a store that cannot be read stops the removal: going on would lose the record */
+  Error = saved_record(IfIndex, PERSIST_ROUTES, sizeof(Saved), (const UCHAR *)&Key, ROUTE_KEY_FROM, ROUTE_KEY_TO,
+                       (UCHAR *)&Saved, &Kept);
+  if (Error != NO_ERROR)
+    return Error;
   Error = route_request6(Operation, Store, Row, IfIndex);
   if (Kept && Error == NO_ERROR)
-    put_record(IfIndex, PERSIST_ROUTES, sizeof(Saved), (const UCHAR *)&Saved, ROUTE_KEY_FROM, ROUTE_KEY_TO);
+    Error = put_record(IfIndex, PERSIST_ROUTES, sizeof(Saved), (const UCHAR *)&Saved, ROUTE_KEY_FROM, ROUTE_KEY_TO);
   return Error;
 }
 
@@ -648,11 +670,14 @@ DWORD WINAPI NitroConfigureIpv6Address(ULONG Operation, BOOL Persistent, const M
     return Error;
   memset(&Key, 0, sizeof(Key));
   memcpy(Key.Address, &Row->Address.Ipv6.sin6_addr, 16);
-  Kept = saved_record(IfIndex, PERSIST_ADDRESSES, sizeof(Saved), (const UCHAR *)&Key, ADDRESS_KEY_FROM,
-                      ADDRESS_KEY_TO, (UCHAR *)&Saved);
+  Error = saved_record(IfIndex, PERSIST_ADDRESSES, sizeof(Saved), (const UCHAR *)&Key, ADDRESS_KEY_FROM,
+                       ADDRESS_KEY_TO, (UCHAR *)&Saved, &Kept);
+  if (Error != NO_ERROR)
+    return Error;
   Error = unicast_request(Operation, Store, Row, 0, 0, 0);
   if (Kept && Error == NO_ERROR)
-    put_record(IfIndex, PERSIST_ADDRESSES, sizeof(Saved), (const UCHAR *)&Saved, ADDRESS_KEY_FROM, ADDRESS_KEY_TO);
+    Error = put_record(IfIndex, PERSIST_ADDRESSES, sizeof(Saved), (const UCHAR *)&Saved, ADDRESS_KEY_FROM,
+                       ADDRESS_KEY_TO);
   return Error;
 }
 
@@ -708,7 +733,7 @@ DWORD WINAPI NitroGetPersistentIpv6Routes(PMIB_IPFORWARD_TABLE2 *Table)
       continue;
     getInterfaceLuidByIndex(IfIndex, NULL, &Luid);
 
-    Records = (PTCP_IPV6_ROUTE_REQUEST)read_records(Path, PERSIST_ROUTES, sizeof(*Records), &Count);
+    Records = (PTCP_IPV6_ROUTE_REQUEST)read_records(Path, PERSIST_ROUTES, sizeof(*Records), &Count, NULL);
     for (i = 0; Records && i < Count; i++)
     {
       PMIB_IPFORWARD_ROW2 Row;
