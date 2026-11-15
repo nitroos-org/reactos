@@ -1732,8 +1732,13 @@ static BOOL HTTP_DomainMatches(LPCWSTR server, substr_t domain)
     const WCHAR *dot, *ptr;
     int len;
 
-    if(domain.len == ARRAY_SIZE(L"<local>")-1 && !wcsnicmp(domain.str, L"<local>", domain.len) && !wcschr(server, '.' ))
-        return TRUE;
+    if(domain.len == ARRAY_SIZE(L"<local>")-1 && !wcsnicmp(domain.str, L"<local>", domain.len) && !wcschr(server, '.' )) {
+        BOOL loopback;
+
+        /* an IPv6 address has no dot, but only ::1 is local for Windows (oracle: a global address and a mapped
+         * IPv4 address go through the proxy) */
+        return !is_ipv6_literal_host(server, &loopback) || loopback;
+    }
 
     if(domain.len && *domain.str != '*')
         return domain.len == lstrlenW(server) && !wcsnicmp(server, domain.str, domain.len);

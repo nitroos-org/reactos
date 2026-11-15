@@ -450,7 +450,13 @@ static BOOL domain_matches(LPCWSTR server, LPCWSTR domain)
     BOOL ret = FALSE;
 
     if (!wcsicmp( domain, L"<local>" ) && !wcschr( server, '.' ))
-        ret = TRUE;
+    {
+        BOOL loopback;
+
+        /* an IPv6 address has no dot, but only ::1 is local for Windows (oracle: a global address and a mapped
+         * IPv4 address go through the proxy) */
+        ret = !is_ipv6_literal_host( server, &loopback ) || loopback;
+    }
     else if (*domain == '*')
     {
         if (domain[1] == '.')
