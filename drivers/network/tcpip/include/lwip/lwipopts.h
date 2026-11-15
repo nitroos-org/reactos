@@ -89,6 +89,17 @@
  * one marked skip-as-source is not chosen as a source (NitroOS hooks in nd6.c and ip6.c) */
 #define LWIP_HOOK_ND6_ADDR_CONFIGURED(netif, i) LibNd6AddrConfigured(netif, i)
 #define LWIP_HOOK_IP6_SKIP_SOURCE(netif, i) LibIp6SkipSource(netif, i)
+/* Neighbour discovery tables (lwIP's defaults are 10 neighbours, 10 destinations, 5 prefixes, 3 routers). A host with
+ * a few dozen peers on the link (a server, a lab network, several addresses per peer) cycled the 10 neighbour entries and
+ * asked again for each one; the destination cache keeps the next hop and path MTU of each destination it talks to.
+ * The tables are static data of tcpip.sys, about 7 KB all together (a neighbour entry about 56 bytes on 64 bit, a
+ * destination 48, a prefix 32, a router 16), walked once a second by the neighbour discovery timer (nd6info.c and
+ * route6.c answer from them; their answers stay far below the 64 KB cap). Routers: a home or office link has two or
+ * three, a lab with several routers more. Prefixes: GUA, ULA and several advertised from one or more routers */
+#define LWIP_ND6_NUM_NEIGHBORS          64
+#define LWIP_ND6_NUM_DESTINATIONS       64
+#define LWIP_ND6_NUM_PREFIXES           16
+#define LWIP_ND6_NUM_ROUTERS            8
 /* Address slots per interface: the link-local address, SLAAC addresses of the advertised prefixes, and configured
  * ones (lwIP's default is 3). A slot costs about 30 bytes per interface (address with zone, state, two lifetimes);
  * the loops over the slots are per datagram for the source and route choice (ip6.c), per interface */
