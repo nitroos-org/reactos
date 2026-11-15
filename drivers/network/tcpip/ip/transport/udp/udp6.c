@@ -50,7 +50,11 @@ PsIsSystemThread(
 
 #define UDP6_TAG               'U6pT'
 #define UDP6_SOCKET_GROUPS      20      /* IP_MAX_MEMBERSHIPS */
-#define UDP6_MACHINE_GROUPS     64
+#define UDP6_MACHINE_GROUPS     128
+/* Table entries one process can take: a group joined by sockets of other processes costs a joiner nothing (it
+   shares the entry), a new one is charged to the process that joined it first, so no process can fill the table
+   for everybody (Windows limits a socket, not the machine) */
+#define UDP6_PROCESS_GROUPS     32
 /* Datagrams waiting for UDP6DeliverDeferred: beyond these the newest are dropped */
 #define UDP6_DEFERRED_MAX       4096
 #define UDP6_DEFERRED_MAX_BYTES (16 * 1024 * 1024)
@@ -73,6 +77,7 @@ typedef struct _UDP6_MEMBERSHIPS {
 typedef struct _UDP6_MACHINE_GROUP {
     UDP6_GROUP Group;
     ULONG Sockets;
+    HANDLE Owner;               /* the process that took the entry (it stays charged until the entry is free) */
 } UDP6_MACHINE_GROUP;
 
 static UDP6_MACHINE_GROUP Udp6Groups[UDP6_MACHINE_GROUPS];
@@ -727,12 +732,13 @@ UDP6AddMulticastList(struct netif *netif, PUCHAR List, PUINT Count, UINT Max)
 /* if6.c: sets the adapter's multicast list again (core lock held) */
 VOID TCP6UpdateMulticastList(struct netif *netif);
 
-/* One socket more or less in Group on its interface (core lock held). FALSE: no room for another group */
+/* One socket more or less in Group on its interface (core lock held). FALSE: no room for another group, in the
+ * table or in Process's share of it */
 static
 BOOLEAN
-Udp6CountMember(const UDP6_GROUP *Group, BOOLEAN Join)
+Udp6CountMember(const UDP6_GROUP *Group, BOOLEAN Join, HANDLE Process)
 {
-    ULONG i, Free = UDP6_MACHINE_GROUPS;
+    ULONG i, Free = UDP6_MACHINE_GROUPS, Taken = 0;
     struct netif *netif;
 
     for (i = 0; i < UDP6_MACHINE_GROUPS; i++)
@@ -743,6 +749,8 @@ Udp6CountMember(const UDP6_GROUP *Group, BOOLEAN Join)
                 Free = i;
             continue;
         }
+        if (Join && Udp6Groups[i].Owner == Process)
+            Taken++;
         if (Udp6Groups[i].Group.Zone == Group->Zone &&
             RtlCompareMemory(Udp6Groups[i].Group.Group, Group->Group, 16) == 16)
             break;
@@ -762,10 +770,11 @@ Udp6CountMember(const UDP6_GROUP *Group, BOOLEAN Join)
     {
         if (!Join)
             return TRUE;
-        if (Free == UDP6_MACHINE_GROUPS)
+        if (Free == UDP6_MACHINE_GROUPS || Taken >= UDP6_PROCESS_GROUPS)
             return FALSE;
         Udp6Groups[Free].Group = *Group;
         Udp6Groups[Free].Sockets = 1;
+        Udp6Groups[Free].Owner = Process;
     }
 
     /* The first socket in the group, or the last one gone: the adapter's list changes */
@@ -829,7 +838,7 @@ UDP6SetMembership(PADDRESS_FILE AddrFile, BOOLEAN Join, const VOID *Request, UIN
         /* A second join: WSAEINVAL through the helper (oracle); one past the limit: VERIFY ON ORACLE */
         if (i < M->Count)
             Status = STATUS_INVALID_PARAMETER;
-        else if (M->Count == UDP6_SOCKET_GROUPS || !Udp6CountMember(&Group, TRUE))
+        else if (M->Count == UDP6_SOCKET_GROUPS || !Udp6CountMember(&Group, TRUE, AddrFile->ProcessId))
             Status = STATUS_INSUFFICIENT_RESOURCES;
         else
             M->Groups[M->Count++] = Group;
@@ -843,7 +852,7 @@ UDP6SetMembership(PADDRESS_FILE AddrFile, BOOLEAN Join, const VOID *Request, UIN
         else
         {
             M->Groups[i] = M->Groups[--M->Count];
-            Udp6CountMember(&Group, FALSE);
+            Udp6CountMember(&Group, FALSE, NULL);
         }
     }
 
@@ -869,7 +878,7 @@ UDP6LeaveAll(PADDRESS_FILE AddrFile)
     {
         LOCK_TCPIP_CORE();
         for (i = 0; i < M->Count; i++)
-            Udp6CountMember(&M->Groups[i], FALSE);
+            Udp6CountMember(&M->Groups[i], FALSE, NULL);
         UNLOCK_TCPIP_CORE();
     }
     UnlockObject(AddrFile);

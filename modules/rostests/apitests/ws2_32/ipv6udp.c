@@ -558,6 +558,72 @@ Done:
         closesocket(l);
 }
 
+/* The groups a process can take from the machine's table are limited (a socket holds 20 at most): the joins beyond
+   it fail with WSAEADDRNOTAVAIL for this process only, and the room is back when the sockets are closed */
+static void TestMulticastGroupLimit(void)
+{
+    SOCKET Sockets[4];
+    USHORT Port;
+    IPV6_MREQ Mreq;
+    int i, Joined = 0, Failed = 0, Error = 0, Limit = 32;
+    SOCKET s;
+
+    for (i = 0; i < 4; i++)
+        Sockets[i] = INVALID_SOCKET;
+    for (i = 0; i < 4; i++)
+    {
+        Sockets[i] = Udp6(TRUE, Any6, &Port);
+        if (Sockets[i] == INVALID_SOCKET)
+            goto Done;
+    }
+
+    memset(&Mreq, 0, sizeof(Mreq));
+    memcpy(&Mreq.ipv6mr_multiaddr, Group6, 16);
+    for (i = 0; i < 48; i++)
+    {
+        Mreq.ipv6mr_multiaddr.u.Byte[14] = 0x43;
+        Mreq.ipv6mr_multiaddr.u.Byte[15] = (UCHAR)i;
+        if (setsockopt(Sockets[i / 16], IPPROTO_IPV6, IPV6_ADD_MEMBERSHIP, (char *)&Mreq, sizeof(Mreq)) == 0)
+        {
+            Joined++;
+        }
+        else
+        {
+            Failed++;
+            Error = WSAGetLastError();
+        }
+    }
+    if (Joined == 0)
+    {
+        skip("no multicast interface\n");
+        goto Done;
+    }
+    ok(Joined == Limit && Failed == 48 - Limit, "joined %d groups, %d refused, expected %d and %d\n", Joined, Failed,
+       Limit, 48 - Limit);
+    ok(Error == WSAEADDRNOTAVAIL, "the refused join: %d\n", Error);
+
+    /* Closing gives the room back */
+    for (i = 0; i < 4; i++)
+    {
+        closesocket(Sockets[i]);
+        Sockets[i] = INVALID_SOCKET;
+    }
+    s = Udp6(TRUE, Any6, &Port);
+    if (s != INVALID_SOCKET)
+    {
+        ok(setsockopt(s, IPPROTO_IPV6, IPV6_ADD_MEMBERSHIP, (char *)&Mreq, sizeof(Mreq)) == 0,
+           "join after the sockets were closed: %d\n", WSAGetLastError());
+        closesocket(s);
+    }
+
+Done:
+    for (i = 0; i < 4; i++)
+    {
+        if (Sockets[i] != INVALID_SOCKET)
+            closesocket(Sockets[i]);
+    }
+}
+
 static void TestTables(void)
 {
     USHORT PortN;
@@ -643,6 +709,7 @@ START_TEST(ipv6udp)
     TestRecvMsg();
     TestMulticast();
     TestMulticastBurst();
+    TestMulticastGroupLimit();
     TestTables();
 
     WSACleanup();
