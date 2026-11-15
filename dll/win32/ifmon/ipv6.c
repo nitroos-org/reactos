@@ -8,8 +8,10 @@
 #include "precomp.h"
 
 #include <ws2tcpip.h>
+#include <wctype.h>
 #include <wine/netioapi.h>
 #include <guiddef.h>
+#include <iphlpapi_nitro.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -18,11 +20,16 @@
 #include "resource.h"
 
 /*
- * Only the show commands exist here. The add, set and delete commands need the configuration API of the stack
- * (CreateUnicastIpAddressEntry, CreateIpForwardEntry2 for IPv6): they get their own CMD_GROUP_ENTRY next to
- * Ipv6ShowCommands when that API is there, and nothing in this file has to change for them. The show commands
- * take the optional "interface=<name or index>" (and accept "level=" and "store=", which change nothing
- * about what the stack can tell).
+ * The show commands take the optional "interface=<name or index>" (and accept "level=" and "store=", which change
+ * nothing about what the stack can tell).
+ *
+ * The add, set and delete commands configure what the stack has an API for: addresses and routes through its IPv6
+ * configuration requests (iphlpapi's NitroConfigureIpv6Address and NitroConfigureIpv6Route, the requests behind
+ * CreateUnicastIpAddressEntry and CreateIpForwardEntry2, with the persistent store of New-NetIPAddress and
+ * New-NetRoute -PolicyStore PersistentStore), the static DNS servers (the NameServer value of the interface in
+ * Tcpip6, where iphlpapi and Set-DnsClientServerAddress look) and the one global parameter the stack reads,
+ * RandomizeIdentifiers. What has no backing in the stack (interface parameters such as mtu, metric and
+ * routerdiscovery, privacy, prefix policies, anycast addresses) has no command.
  */
 
 #define IPV6_PARAMETERS_KEY  L"SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters"
@@ -39,6 +46,40 @@ static FN_HANDLE_CMD Ipv6ShowDestinationCache;
 static FN_HANDLE_CMD Ipv6ShowGlobal;
 static FN_HANDLE_CMD Ipv6ShowPrivacy;
 static FN_HANDLE_CMD Ipv6ShowPrefixPolicies;
+static FN_HANDLE_CMD Ipv6AddAddress;
+static FN_HANDLE_CMD Ipv6AddDnsServers;
+static FN_HANDLE_CMD Ipv6AddRoute;
+static FN_HANDLE_CMD Ipv6DeleteAddress;
+static FN_HANDLE_CMD Ipv6DeleteDnsServers;
+static FN_HANDLE_CMD Ipv6DeleteRoute;
+static FN_HANDLE_CMD Ipv6SetAddress;
+static FN_HANDLE_CMD Ipv6SetGlobal;
+
+static
+CMD_ENTRY
+Ipv6AddCommands[] =
+{
+    {L"address", Ipv6AddAddress, IDS_HLP_IPV6_ADD_ADDRESS, IDS_HLP_IPV6_ADD_ADDRESS_EX, 0},
+    {L"dnsservers", Ipv6AddDnsServers, IDS_HLP_IPV6_ADD_DNSSERVERS, IDS_HLP_IPV6_ADD_DNSSERVERS_EX, 0},
+    {L"route", Ipv6AddRoute, IDS_HLP_IPV6_ADD_ROUTE, IDS_HLP_IPV6_ADD_ROUTE_EX, 0},
+};
+
+static
+CMD_ENTRY
+Ipv6DeleteCommands[] =
+{
+    {L"address", Ipv6DeleteAddress, IDS_HLP_IPV6_DELETE_ADDRESS, IDS_HLP_IPV6_DELETE_ADDRESS_EX, 0},
+    {L"dnsservers", Ipv6DeleteDnsServers, IDS_HLP_IPV6_DELETE_DNSSERVERS, IDS_HLP_IPV6_DELETE_DNSSERVERS_EX, 0},
+    {L"route", Ipv6DeleteRoute, IDS_HLP_IPV6_DELETE_ROUTE, IDS_HLP_IPV6_DELETE_ROUTE_EX, 0},
+};
+
+static
+CMD_ENTRY
+Ipv6SetCommands[] =
+{
+    {L"address", Ipv6SetAddress, IDS_HLP_IPV6_SET_ADDRESS, IDS_HLP_IPV6_SET_ADDRESS_EX, 0},
+    {L"global", Ipv6SetGlobal, IDS_HLP_IPV6_SET_GLOBAL, IDS_HLP_IPV6_SET_GLOBAL_EX, 0},
+};
 
 static
 CMD_ENTRY
@@ -60,6 +101,9 @@ static
 CMD_GROUP_ENTRY
 Ipv6Groups[] =
 {
+    {L"add", IDS_HLP_IPV6_ADD, sizeof(Ipv6AddCommands) / sizeof(CMD_ENTRY), 0, Ipv6AddCommands, NULL},
+    {L"delete", IDS_HLP_IPV6_DELETE, sizeof(Ipv6DeleteCommands) / sizeof(CMD_ENTRY), 0, Ipv6DeleteCommands, NULL},
+    {L"set", IDS_HLP_IPV6_SET, sizeof(Ipv6SetCommands) / sizeof(CMD_ENTRY), 0, Ipv6SetCommands, NULL},
     {L"show", IDS_HLP_IPV6_SHOW, sizeof(Ipv6ShowCommands) / sizeof(CMD_ENTRY), 0, Ipv6ShowCommands, NULL},
 };
 
@@ -1185,6 +1229,952 @@ Ipv6ShowPrefixPolicies(
     PrintMessage(L"\n");
 
     return ERROR_SUCCESS;
+}
+
+
+/* add, set and delete: arguments *******************************************/
+
+/* The values of the tags of a command (NULL for a tag not given or given empty); a missing required tag is a syntax
+   error (the usage is printed) */
+static
+DWORD
+ParseTags(
+    _In_ LPWSTR *argv,
+    _In_ DWORD dwCurrentIndex,
+    _In_ DWORD dwArgCount,
+    _Inout_ TAG_TYPE *Tags,
+    _In_ DWORD TagCount,
+    _Out_writes_(TagCount) PWSTR *Values)
+{
+    PDWORD Types;
+    DWORD i, Error = ERROR_SUCCESS;
+
+    for (i = 0; i < TagCount; i++)
+        Values[i] = NULL;
+
+    if (dwArgCount > dwCurrentIndex)
+    {
+        Types = HeapAlloc(GetProcessHeap(), 0, (dwArgCount - dwCurrentIndex) * sizeof(DWORD));
+        if (Types == NULL)
+            return ERROR_NOT_ENOUGH_MEMORY;
+
+        Error = MatchTagsInCmdLine(hDllInstance, argv, dwCurrentIndex, dwArgCount, Tags, TagCount, Types);
+        for (i = 0; Error == ERROR_SUCCESS && i < dwArgCount - dwCurrentIndex; i++)
+        {
+            /* more values than tags */
+            if (Types[i] >= TagCount)
+                Error = ERROR_INVALID_SYNTAX;
+            else
+                Values[Types[i]] = argv[dwCurrentIndex + i];
+        }
+        HeapFree(GetProcessHeap(), 0, Types);
+        if (Error != ERROR_SUCCESS)
+            return Error;
+    }
+
+    for (i = 0; i < TagCount; i++)
+    {
+        if (Values[i] != NULL && Values[i][0] == UNICODE_NULL)
+            Values[i] = NULL;
+        if ((Tags[i].dwRequired & NS_REQ_PRESENT) && Values[i] == NULL)
+            return ERROR_INVALID_SYNTAX;
+    }
+    return ERROR_SUCCESS;
+}
+
+static
+DWORD
+BadValue(
+    _In_ PCWSTR Value,
+    _In_ PCWSTR Tag)
+{
+    PrintMessageFromModule(hDllInstance, IDS_ERROR_BAD_VALUE, Value, Tag);
+    return ERROR_SUPPRESS_OUTPUT;
+}
+
+/* A word of a list of values, as netsh takes it: any start of it ("per" for persistent) */
+static
+BOOL
+IsWord(
+    _In_ PCWSTR Text,
+    _In_ PCWSTR Word)
+{
+    return Text[0] != UNICODE_NULL && _wcsnicmp(Text, Word, wcslen(Text)) == 0;
+}
+
+/* store=active|persistent: persistent (both stores) when not given */
+static
+DWORD
+ParseStore(
+    _In_opt_ PCWSTR Value,
+    _Out_ PBOOL Persistent)
+{
+    *Persistent = TRUE;
+    if (Value == NULL)
+        return ERROR_SUCCESS;
+    if (IsWord(Value, L"persistent"))
+        return ERROR_SUCCESS;
+    if (IsWord(Value, L"active"))
+    {
+        *Persistent = FALSE;
+        return ERROR_SUCCESS;
+    }
+    return BadValue(Value, L"store");
+}
+
+/* A decimal number of seconds, a time such as 1d2h3m4s, or "infinite" */
+static
+BOOL
+ParseLifetime(
+    _In_ PCWSTR Text,
+    _Out_ PULONG Seconds)
+{
+    ULONGLONG Total = 0;
+    PCWSTR p = Text;
+
+    if (_wcsicmp(Text, L"infinite") == 0)
+    {
+        *Seconds = INFINITE_LIFETIME;
+        return TRUE;
+    }
+
+    while (*p != UNICODE_NULL)
+    {
+        ULONGLONG Number = 0;
+
+        if (!iswdigit(*p))
+            return FALSE;
+        while (iswdigit(*p))
+        {
+            Number = Number * 10 + (*p - L'0');
+            if (Number > 0xffffffffULL)
+                return FALSE;
+            p++;
+        }
+        switch (towlower(*p))
+        {
+            case L'd': Number *= 86400; p++; break;
+            case L'h': Number *= 3600; p++; break;
+            case L'm': Number *= 60; p++; break;
+            case L's': p++; break;
+            case UNICODE_NULL: break;   /* a bare number of seconds */
+            default: return FALSE;
+        }
+        Total += Number;
+        if (Total >= INFINITE_LIFETIME)
+            return FALSE;
+    }
+    *Seconds = (ULONG)Total;
+    return Text[0] != UNICODE_NULL;
+}
+
+/* A lifetime tag, or its default when it is not given */
+static
+DWORD
+LifetimeValue(
+    _In_opt_ PCWSTR Value,
+    _In_ PCWSTR Tag,
+    _Out_ PULONG Seconds)
+{
+    *Seconds = INFINITE_LIFETIME;
+    if (Value == NULL)
+        return ERROR_SUCCESS;
+    if (!ParseLifetime(Value, Seconds))
+        return BadValue(Value, Tag);
+    return ERROR_SUCCESS;
+}
+
+/* "<IPv6 address>[/<length>]" (no scope: the interface names it); Length is DefaultLength when the text has none */
+static
+BOOL
+ParseAddress(
+    _In_ PCWSTR Text,
+    _In_ BOOL AllowLength,
+    _In_ ULONG DefaultLength,
+    _Out_ PIN6_ADDR Address,
+    _Out_opt_ PULONG Length)
+{
+    WCHAR Copy[80];
+    PCWSTR Slash = wcschr(Text, L'/');
+    SIZE_T Count = Slash ? (SIZE_T)(Slash - Text) : wcslen(Text);
+    ULONG ScopeId = 0, Value = DefaultLength;
+    USHORT Port = 0;
+    PWSTR End;
+
+    if (Count == 0 || Count >= ARRAYSIZE(Copy) || (Slash && !AllowLength))
+        return FALSE;
+    StringCchCopyNW(Copy, ARRAYSIZE(Copy), Text, Count);
+    if (RtlIpv6StringToAddressExW(Copy, Address, &ScopeId, &Port) != 0 || Port != 0 || ScopeId != 0)
+        return FALSE;
+    if (Slash)
+    {
+        if (!iswdigit(Slash[1]))
+            return FALSE;
+        Value = wcstoul(Slash + 1, &End, 10);
+        if (*End != UNICODE_NULL || Value > 128)
+            return FALSE;
+    }
+    if (Length)
+        *Length = Value;
+    return TRUE;
+}
+
+/* The IPv6 interface of a name or index. A system without IPv6 has none: the request is not supported. */
+static
+DWORD
+ResolveInterface(
+    _In_ PCWSTR Text,
+    _Out_ PULONG IfIndex)
+{
+    PIPV6_IF List = NULL;
+    ULONG Count, i;
+    DWORD Error = ERROR_INVALID_PARAMETER;
+
+    *IfIndex = 0;
+    Error = LoadInterfaces(&List, &Count);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+    if (Count == 0)
+    {
+        FreeInterfaces(List);
+        return ERROR_NOT_SUPPORTED;
+    }
+
+    Error = ERROR_INVALID_PARAMETER;
+    for (i = 0; i < Count; i++)
+    {
+        if (MatchesFilter(&List[i], Text))
+        {
+            *IfIndex = List[i].Index;
+            Error = ERROR_SUCCESS;
+            break;
+        }
+    }
+    FreeInterfaces(List);
+    return Error;
+}
+
+/* netsh answers "Ok." for a change that worked */
+static
+DWORD
+Finish(
+    _In_ DWORD Error)
+{
+    return (Error == ERROR_SUCCESS) ? ERROR_NETSH_OK : Error;
+}
+
+
+/* add, set and delete address **********************************************/
+
+static
+VOID
+InitAddressRow(
+    _Out_ PMIB_UNICASTIPADDRESS_ROW Row,
+    _In_ ULONG IfIndex,
+    _In_ const IN6_ADDR *Address,
+    _In_ ULONG Length)
+{
+    InitializeUnicastIpAddressEntry(Row);
+    Row->Address.si_family = AF_INET6;
+    Row->Address.Ipv6.sin6_addr = *Address;
+    Row->InterfaceIndex = IfIndex;
+    Row->OnLinkPrefixLength = (UINT8)Length;
+    Row->ValidLifetime = INFINITE_LIFETIME;
+    Row->PreferredLifetime = INFINITE_LIFETIME;
+}
+
+static
+DWORD
+WINAPI
+Ipv6AddAddress(
+    LPCWSTR pwszMachine,
+    LPWSTR *argv,
+    DWORD dwCurrentIndex,
+    DWORD dwArgCount,
+    DWORD dwFlags,
+    LPCVOID pvData,
+    BOOL *pbDone)
+{
+    TAG_TYPE Tags[] = {{L"interface", NS_REQ_PRESENT, FALSE},
+                       {L"address", NS_REQ_PRESENT, FALSE},
+                       {L"type", NS_REQ_ZERO, FALSE},
+                       {L"validlifetime", NS_REQ_ZERO, FALSE},
+                       {L"preferredlifetime", NS_REQ_ZERO, FALSE},
+                       {L"store", NS_REQ_ZERO, FALSE},
+                       {L"skipassource", NS_REQ_ZERO, FALSE}};
+    PWSTR Values[ARRAYSIZE(Tags)];
+    MIB_UNICASTIPADDRESS_ROW Row;
+    IN6_ADDR Address;
+    ULONG IfIndex, Length, Valid, Preferred;
+    BOOL Persistent, Skip = FALSE;
+    DWORD Error;
+
+    Error = ParseTags(argv, dwCurrentIndex, dwArgCount, Tags, ARRAYSIZE(Tags), Values);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+
+    if (!ParseAddress(Values[1], TRUE, 64, &Address, &Length))
+        return BadValue(Values[1], L"address");
+    if (Values[2] != NULL)
+    {
+        if (IsWord(Values[2], L"anycast"))
+            return ERROR_NOT_SUPPORTED;
+        if (!IsWord(Values[2], L"unicast"))
+            return BadValue(Values[2], L"type");
+    }
+    Error = LifetimeValue(Values[3], L"validlifetime", &Valid);
+    if (Error == ERROR_SUCCESS)
+        Error = LifetimeValue(Values[4], L"preferredlifetime", &Preferred);
+    if (Error == ERROR_SUCCESS)
+        Error = ParseStore(Values[5], &Persistent);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+    if (Values[6] != NULL)
+    {
+        if (IsWord(Values[6], L"true"))
+            Skip = TRUE;
+        else if (!IsWord(Values[6], L"false"))
+            return BadValue(Values[6], L"skipassource");
+    }
+
+    Error = ResolveInterface(Values[0], &IfIndex);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+
+    InitAddressRow(&Row, IfIndex, &Address, Length);
+    Row.ValidLifetime = Valid;
+    Row.PreferredLifetime = Preferred;
+    Row.PrefixOrigin = IpPrefixOriginManual;
+    Row.SuffixOrigin = IpSuffixOriginManual;
+    Row.SkipAsSource = Skip;
+    return Finish(NitroConfigureIpv6Address(NITRO_IPV6_CREATE, Persistent, &Row));
+}
+
+static
+DWORD
+WINAPI
+Ipv6SetAddress(
+    LPCWSTR pwszMachine,
+    LPWSTR *argv,
+    DWORD dwCurrentIndex,
+    DWORD dwArgCount,
+    DWORD dwFlags,
+    LPCVOID pvData,
+    BOOL *pbDone)
+{
+    TAG_TYPE Tags[] = {{L"interface", NS_REQ_PRESENT, FALSE},
+                       {L"address", NS_REQ_PRESENT, FALSE},
+                       {L"type", NS_REQ_ZERO, FALSE},
+                       {L"validlifetime", NS_REQ_ZERO, FALSE},
+                       {L"preferredlifetime", NS_REQ_ZERO, FALSE},
+                       {L"store", NS_REQ_ZERO, FALSE}};
+    PWSTR Values[ARRAYSIZE(Tags)];
+    MIB_UNICASTIPADDRESS_ROW Row;
+    IN6_ADDR Address;
+    ULONG IfIndex, Valid, Preferred;
+    BOOL Persistent;
+    DWORD Error;
+
+    Error = ParseTags(argv, dwCurrentIndex, dwArgCount, Tags, ARRAYSIZE(Tags), Values);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+
+    if (!ParseAddress(Values[1], FALSE, 0, &Address, NULL))
+        return BadValue(Values[1], L"address");
+    if (Values[2] != NULL)
+    {
+        if (IsWord(Values[2], L"anycast"))
+            return ERROR_NOT_SUPPORTED;
+        if (!IsWord(Values[2], L"unicast"))
+            return BadValue(Values[2], L"type");
+    }
+    Error = LifetimeValue(Values[3], L"validlifetime", &Valid);
+    if (Error == ERROR_SUCCESS)
+        Error = LifetimeValue(Values[4], L"preferredlifetime", &Preferred);
+    if (Error == ERROR_SUCCESS)
+        Error = ParseStore(Values[5], &Persistent);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+
+    Error = ResolveInterface(Values[0], &IfIndex);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+
+    /* the address as it is (its length, origins and skip-as-source stay), with the new lifetimes */
+    InitAddressRow(&Row, IfIndex, &Address, 255);
+    Error = GetUnicastIpAddressEntry(&Row);
+    if (Error != NO_ERROR)
+        return Error;
+    Row.ValidLifetime = Valid;
+    Row.PreferredLifetime = Preferred;
+    return Finish(NitroConfigureIpv6Address(NITRO_IPV6_SET, Persistent, &Row));
+}
+
+static
+DWORD
+WINAPI
+Ipv6DeleteAddress(
+    LPCWSTR pwszMachine,
+    LPWSTR *argv,
+    DWORD dwCurrentIndex,
+    DWORD dwArgCount,
+    DWORD dwFlags,
+    LPCVOID pvData,
+    BOOL *pbDone)
+{
+    TAG_TYPE Tags[] = {{L"interface", NS_REQ_PRESENT, FALSE},
+                       {L"address", NS_REQ_PRESENT, FALSE},
+                       {L"store", NS_REQ_ZERO, FALSE}};
+    PWSTR Values[ARRAYSIZE(Tags)];
+    MIB_UNICASTIPADDRESS_ROW Row;
+    IN6_ADDR Address;
+    ULONG IfIndex;
+    BOOL Persistent;
+    DWORD Error;
+
+    Error = ParseTags(argv, dwCurrentIndex, dwArgCount, Tags, ARRAYSIZE(Tags), Values);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+
+    if (!ParseAddress(Values[1], FALSE, 0, &Address, NULL))
+        return BadValue(Values[1], L"address");
+    Error = ParseStore(Values[2], &Persistent);
+    if (Error == ERROR_SUCCESS)
+        Error = ResolveInterface(Values[0], &IfIndex);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+
+    InitAddressRow(&Row, IfIndex, &Address, 255);
+    return Finish(NitroConfigureIpv6Address(NITRO_IPV6_DELETE, Persistent, &Row));
+}
+
+
+/* add and delete route *****************************************************/
+
+/* The bits after the prefix length name nothing */
+static
+VOID
+MaskPrefix(
+    _Inout_ PIN6_ADDR Address,
+    _In_ ULONG Length)
+{
+    ULONG i;
+
+    for (i = 0; i < 16; i++)
+    {
+        LONG Bits = (LONG)Length - (LONG)i * 8;
+
+        if (Bits < 8)
+            Address->u.Byte[i] = Bits <= 0 ? 0 : (UCHAR)(Address->u.Byte[i] & (0xff << (8 - Bits)));
+    }
+}
+
+static
+VOID
+InitRouteRow(
+    _Out_ PMIB_IPFORWARD_ROW2 Row,
+    _In_ ULONG IfIndex,
+    _In_ const IN6_ADDR *Prefix,
+    _In_ ULONG Length,
+    _In_opt_ const IN6_ADDR *NextHop)
+{
+    InitializeIpForwardEntry(Row);
+    Row->InterfaceIndex = IfIndex;
+    Row->DestinationPrefix.Prefix.si_family = AF_INET6;
+    Row->DestinationPrefix.Prefix.Ipv6.sin6_addr = *Prefix;
+    Row->DestinationPrefix.PrefixLength = (UINT8)Length;
+    Row->NextHop.si_family = AF_INET6;
+    if (NextHop)
+        Row->NextHop.Ipv6.sin6_addr = *NextHop;
+}
+
+static
+DWORD
+WINAPI
+Ipv6AddRoute(
+    LPCWSTR pwszMachine,
+    LPWSTR *argv,
+    DWORD dwCurrentIndex,
+    DWORD dwArgCount,
+    DWORD dwFlags,
+    LPCVOID pvData,
+    BOOL *pbDone)
+{
+    TAG_TYPE Tags[] = {{L"prefix", NS_REQ_PRESENT, FALSE},
+                       {L"interface", NS_REQ_PRESENT, FALSE},
+                       {L"nexthop", NS_REQ_ZERO, FALSE},
+                       {L"siteprefixlength", NS_REQ_ZERO, FALSE},
+                       {L"metric", NS_REQ_ZERO, FALSE},
+                       {L"publish", NS_REQ_ZERO, FALSE},
+                       {L"validlifetime", NS_REQ_ZERO, FALSE},
+                       {L"preferredlifetime", NS_REQ_ZERO, FALSE},
+                       {L"store", NS_REQ_ZERO, FALSE}};
+    PWSTR Values[ARRAYSIZE(Tags)];
+    MIB_IPFORWARD_ROW2 Row;
+    IN6_ADDR Prefix, NextHop;
+    ULONG IfIndex, Length, Metric = 256, SiteLength = 0, Valid, Preferred;
+    BOOL Persistent, Publish = FALSE, Immortal = FALSE;
+    PWSTR End;
+    DWORD Error;
+
+    Error = ParseTags(argv, dwCurrentIndex, dwArgCount, Tags, ARRAYSIZE(Tags), Values);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+
+    if (!ParseAddress(Values[0], TRUE, 128, &Prefix, &Length))
+        return BadValue(Values[0], L"prefix");
+    ZeroMemory(&NextHop, sizeof(NextHop));
+    if (Values[2] != NULL && !ParseAddress(Values[2], FALSE, 0, &NextHop, NULL))
+        return BadValue(Values[2], L"nexthop");
+    if (Values[3] != NULL)
+    {
+        SiteLength = iswdigit(Values[3][0]) ? wcstoul(Values[3], &End, 10) : 0xffff;
+        if (SiteLength > 128 || *End != UNICODE_NULL)
+            return BadValue(Values[3], L"siteprefixlength");
+    }
+    if (Values[4] != NULL)
+    {
+        Metric = iswdigit(Values[4][0]) ? wcstoul(Values[4], &End, 10) : 0xffffffff;
+        if (Metric > 0xffff || *End != UNICODE_NULL)
+            return BadValue(Values[4], L"metric");
+    }
+    if (Values[5] != NULL)
+    {
+        if (IsWord(Values[5], L"yes"))
+            Publish = Immortal = TRUE;
+        else if (IsWord(Values[5], L"age"))
+            Publish = TRUE;
+        else if (!IsWord(Values[5], L"no"))
+            return BadValue(Values[5], L"publish");
+    }
+    Error = LifetimeValue(Values[6], L"validlifetime", &Valid);
+    if (Error == ERROR_SUCCESS)
+        Error = LifetimeValue(Values[7], L"preferredlifetime", &Preferred);
+    if (Error == ERROR_SUCCESS)
+        Error = ParseStore(Values[8], &Persistent);
+    if (Error == ERROR_SUCCESS)
+        Error = ResolveInterface(Values[1], &IfIndex);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+
+    InitRouteRow(&Row, IfIndex, &Prefix, Length, &NextHop);
+    if (Values[3] != NULL)
+        Row.SitePrefixLength = (UINT8)SiteLength;
+    Row.Metric = Metric;
+    Row.ValidLifetime = Valid;
+    Row.PreferredLifetime = Preferred;
+    Row.Publish = Publish;
+    Row.Immortal = Immortal;
+    return Finish(NitroConfigureIpv6Route(NITRO_IPV6_CREATE, Persistent, &Row));
+}
+
+static
+BOOL
+RouteMatches(
+    _In_ const MIB_IPFORWARD_ROW2 *Row,
+    _In_ ULONG IfIndex,
+    _In_ const IN6_ADDR *Prefix,
+    _In_ ULONG Length)
+{
+    return Row->InterfaceIndex == IfIndex &&
+           Row->DestinationPrefix.Prefix.si_family == AF_INET6 &&
+           Row->DestinationPrefix.PrefixLength == Length &&
+           memcmp(&Row->DestinationPrefix.Prefix.Ipv6.sin6_addr, Prefix, sizeof(*Prefix)) == 0;
+}
+
+static
+DWORD
+WINAPI
+Ipv6DeleteRoute(
+    LPCWSTR pwszMachine,
+    LPWSTR *argv,
+    DWORD dwCurrentIndex,
+    DWORD dwArgCount,
+    DWORD dwFlags,
+    LPCVOID pvData,
+    BOOL *pbDone)
+{
+    TAG_TYPE Tags[] = {{L"prefix", NS_REQ_PRESENT, FALSE},
+                       {L"interface", NS_REQ_PRESENT, FALSE},
+                       {L"nexthop", NS_REQ_ZERO, FALSE},
+                       {L"store", NS_REQ_ZERO, FALSE}};
+    PWSTR Values[ARRAYSIZE(Tags)];
+    MIB_IPFORWARD_ROW2 Row;
+    PMIB_IPFORWARD_TABLE2 Tables[2] = {NULL, NULL};
+    IN6_ADDR Prefix, NextHop;
+    ULONG IfIndex, Length, t, i;
+    BOOL Persistent, Found = FALSE, Deleted = FALSE;
+    DWORD Error, Failed = ERROR_NOT_FOUND;
+
+    Error = ParseTags(argv, dwCurrentIndex, dwArgCount, Tags, ARRAYSIZE(Tags), Values);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+
+    if (!ParseAddress(Values[0], TRUE, 128, &Prefix, &Length))
+        return BadValue(Values[0], L"prefix");
+    MaskPrefix(&Prefix, Length);
+    ZeroMemory(&NextHop, sizeof(NextHop));
+    if (Values[2] != NULL && !ParseAddress(Values[2], FALSE, 0, &NextHop, NULL))
+        return BadValue(Values[2], L"nexthop");
+    Error = ParseStore(Values[3], &Persistent);
+    if (Error == ERROR_SUCCESS)
+        Error = ResolveInterface(Values[1], &IfIndex);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+
+    /* a next hop names the route; without one the routes of the prefix over the interface go */
+    if (Values[2] != NULL)
+    {
+        InitRouteRow(&Row, IfIndex, &Prefix, Length, &NextHop);
+        return Finish(NitroConfigureIpv6Route(NITRO_IPV6_DELETE, Persistent, &Row));
+    }
+
+    GetIpForwardTable2(AF_INET6, &Tables[0]);
+    if (Persistent)
+        NitroGetPersistentIpv6Routes(&Tables[1]);
+    for (t = 0; t < 2; t++)
+    {
+        for (i = 0; Tables[t] != NULL && i < Tables[t]->NumEntries; i++)
+        {
+            if (!RouteMatches(&Tables[t]->Table[i], IfIndex, &Prefix, Length))
+                continue;
+            Found = TRUE;
+            Error = NitroConfigureIpv6Route(NITRO_IPV6_DELETE, Persistent, &Tables[t]->Table[i]);
+            if (Error == ERROR_SUCCESS)
+                Deleted = TRUE;
+            else if (Error != ERROR_NOT_FOUND)     /* a route of both tables is deleted by the first */
+                Failed = Error;
+        }
+        if (Tables[t] != NULL)
+            FreeMibTable(Tables[t]);
+    }
+
+    if (Deleted)
+        return ERROR_NETSH_OK;
+    return Found ? Failed : ERROR_NOT_FOUND;
+}
+
+
+/* add and delete dnsservers ************************************************/
+
+#define MAX_DNS_SERVERS  16
+
+typedef struct _DNS_LIST
+{
+    ULONG Count;
+    WCHAR Server[MAX_DNS_SERVERS][64];
+} DNS_LIST, *PDNS_LIST;
+
+/* Tcpip6\Parameters\Interfaces\{adapter GUID} of an interface */
+static
+BOOL
+AdapterKeyPath(
+    _In_ ULONG IfIndex,
+    _Out_writes_(Count) PWSTR Path,
+    _In_ SIZE_T Count)
+{
+    NET_LUID Luid;
+    GUID Guid;
+    WCHAR GuidText[64];
+
+    if (ConvertInterfaceIndexToLuid(IfIndex, &Luid) != NO_ERROR ||
+        ConvertInterfaceLuidToGuid(&Luid, &Guid) != NO_ERROR ||
+        StringFromGUID2(&Guid, GuidText, ARRAYSIZE(GuidText)) == 0)
+        return FALSE;
+    return SUCCEEDED(StringCchPrintfW(Path, Count, L"%s%s", IPV6_INTERFACES_KEY, GuidText));
+}
+
+/* The statically configured servers of the interface, in order (the NameServer value, separated by commas) */
+static
+DWORD
+ReadServerList(
+    _In_ ULONG IfIndex,
+    _Out_ PDNS_LIST List)
+{
+    WCHAR Path[256], Value[1024], *Token, *Context = NULL;
+    HKEY hKey;
+    DWORD Type, Bytes = sizeof(Value) - sizeof(WCHAR), Error;
+
+    List->Count = 0;
+    if (!AdapterKeyPath(IfIndex, Path, ARRAYSIZE(Path)))
+        return ERROR_INVALID_PARAMETER;
+    Error = RegOpenKeyExW(HKEY_LOCAL_MACHINE, Path, 0, KEY_QUERY_VALUE, &hKey);
+    if (Error != ERROR_SUCCESS)
+        return ERROR_SUCCESS;       /* nothing configured: the key is made by the first server */
+    Error = RegQueryValueExW(hKey, L"NameServer", NULL, &Type, (LPBYTE)Value, &Bytes);
+    RegCloseKey(hKey);
+    if (Error != ERROR_SUCCESS || Type != REG_SZ)
+        return ERROR_SUCCESS;
+    Value[Bytes / sizeof(WCHAR)] = UNICODE_NULL;
+
+    for (Token = wcstok_s(Value, L",; ", &Context); Token && List->Count < MAX_DNS_SERVERS;
+         Token = wcstok_s(NULL, L",; ", &Context))
+    {
+        StringCchCopyW(List->Server[List->Count++], ARRAYSIZE(List->Server[0]), Token);
+    }
+    return ERROR_SUCCESS;
+}
+
+static
+DWORD
+WriteServerList(
+    _In_ ULONG IfIndex,
+    _In_ const DNS_LIST *List)
+{
+    WCHAR Path[256], Value[1024];
+    HKEY hKey;
+    ULONG i;
+    DWORD Error;
+
+    if (!AdapterKeyPath(IfIndex, Path, ARRAYSIZE(Path)))
+        return ERROR_INVALID_PARAMETER;
+    Error = RegCreateKeyExW(HKEY_LOCAL_MACHINE, Path, 0, NULL, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, NULL,
+                            &hKey, NULL);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+
+    if (List->Count == 0)
+    {
+        Error = RegDeleteValueW(hKey, L"NameServer");
+        if (Error == ERROR_FILE_NOT_FOUND)
+            Error = ERROR_SUCCESS;
+    }
+    else
+    {
+        Value[0] = UNICODE_NULL;
+        for (i = 0; i < List->Count; i++)
+        {
+            if (i != 0)
+                StringCchCatW(Value, ARRAYSIZE(Value), L",");
+            StringCchCatW(Value, ARRAYSIZE(Value), List->Server[i]);
+        }
+        Error = RegSetValueExW(hKey, L"NameServer", 0, REG_SZ, (const BYTE *)Value,
+                               (DWORD)((wcslen(Value) + 1) * sizeof(WCHAR)));
+    }
+    RegCloseKey(hKey);
+    return Error;
+}
+
+static
+BOOL
+SameServer(
+    _In_ PCWSTR Text,
+    _In_ const IN6_ADDR *Address)
+{
+    WCHAR Copy[64];
+    PWCHAR Percent;
+    IN6_ADDR Parsed;
+    PCWSTR End;
+
+    StringCchCopyW(Copy, ARRAYSIZE(Copy), Text);
+    Percent = wcschr(Copy, L'%');
+    if (Percent)
+        *Percent = UNICODE_NULL;
+    return RtlIpv6StringToAddressW(Copy, &End, &Parsed) == 0 && memcmp(&Parsed, Address, sizeof(Parsed)) == 0;
+}
+
+static
+DWORD
+WINAPI
+Ipv6AddDnsServers(
+    LPCWSTR pwszMachine,
+    LPWSTR *argv,
+    DWORD dwCurrentIndex,
+    DWORD dwArgCount,
+    DWORD dwFlags,
+    LPCVOID pvData,
+    BOOL *pbDone)
+{
+    TAG_TYPE Tags[] = {{L"name", NS_REQ_PRESENT, FALSE},
+                       {L"address", NS_REQ_PRESENT, FALSE},
+                       {L"index", NS_REQ_ZERO, FALSE},
+                       {L"validate", NS_REQ_ZERO, FALSE}};
+    PWSTR Values[ARRAYSIZE(Tags)];
+    DNS_LIST List;
+    IN6_ADDR Address;
+    ULONG IfIndex, Index = 0, i;
+    PWSTR End;
+    DWORD Error;
+
+    Error = ParseTags(argv, dwCurrentIndex, dwArgCount, Tags, ARRAYSIZE(Tags), Values);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+
+    if (!ParseAddress(Values[1], FALSE, 0, &Address, NULL))
+        return BadValue(Values[1], L"address");
+    if (Values[2] != NULL)
+    {
+        Index = iswdigit(Values[2][0]) ? wcstoul(Values[2], &End, 10) : 0;
+        if (Index == 0 || *End != UNICODE_NULL)
+            return BadValue(Values[2], L"index");
+    }
+    if (Values[3] != NULL && !IsWord(Values[3], L"yes") && !IsWord(Values[3], L"no"))
+        return BadValue(Values[3], L"validate");
+
+    Error = ResolveInterface(Values[0], &IfIndex);
+    if (Error == ERROR_SUCCESS)
+        Error = ReadServerList(IfIndex, &List);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+
+    for (i = 0; i < List.Count; i++)
+    {
+        if (SameServer(List.Server[i], &Address))
+            return ERROR_OBJECT_ALREADY_EXISTS;
+    }
+    if (List.Count >= MAX_DNS_SERVERS || (Index != 0 && Index > List.Count + 1))
+        return ERROR_INVALID_PARAMETER;
+
+    /* the server goes to the end, or to the place of the index with the others moved down */
+    if (Index == 0)
+        Index = List.Count + 1;
+    for (i = List.Count; i >= Index; i--)
+        wcscpy(List.Server[i], List.Server[i - 1]);
+    StringCchCopyW(List.Server[Index - 1], ARRAYSIZE(List.Server[0]), Values[1]);
+    List.Count++;
+
+    return Finish(WriteServerList(IfIndex, &List));
+}
+
+static
+DWORD
+WINAPI
+Ipv6DeleteDnsServers(
+    LPCWSTR pwszMachine,
+    LPWSTR *argv,
+    DWORD dwCurrentIndex,
+    DWORD dwArgCount,
+    DWORD dwFlags,
+    LPCVOID pvData,
+    BOOL *pbDone)
+{
+    TAG_TYPE Tags[] = {{L"name", NS_REQ_PRESENT, FALSE},
+                       {L"address", NS_REQ_ZERO, FALSE},
+                       {L"validate", NS_REQ_ZERO, FALSE}};
+    PWSTR Values[ARRAYSIZE(Tags)];
+    DNS_LIST List;
+    IN6_ADDR Address;
+    ULONG IfIndex, i;
+    BOOL All;
+    DWORD Error;
+
+    Error = ParseTags(argv, dwCurrentIndex, dwArgCount, Tags, ARRAYSIZE(Tags), Values);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+
+    All = (Values[1] == NULL || _wcsicmp(Values[1], L"all") == 0);
+    if (!All && !ParseAddress(Values[1], FALSE, 0, &Address, NULL))
+        return BadValue(Values[1], L"address");
+    if (Values[2] != NULL && !IsWord(Values[2], L"yes") && !IsWord(Values[2], L"no"))
+        return BadValue(Values[2], L"validate");
+
+    Error = ResolveInterface(Values[0], &IfIndex);
+    if (Error == ERROR_SUCCESS)
+        Error = ReadServerList(IfIndex, &List);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+
+    if (All)
+    {
+        List.Count = 0;
+    }
+    else
+    {
+        for (i = 0; i < List.Count; i++)
+        {
+            if (SameServer(List.Server[i], &Address))
+                break;
+        }
+        if (i == List.Count)
+            return ERROR_NOT_FOUND;
+        for (; i + 1 < List.Count; i++)
+            wcscpy(List.Server[i], List.Server[i + 1]);
+        List.Count--;
+    }
+    return Finish(WriteServerList(IfIndex, &List));
+}
+
+
+/* set global ***************************************************************/
+
+static
+DWORD
+WINAPI
+Ipv6SetGlobal(
+    LPCWSTR pwszMachine,
+    LPWSTR *argv,
+    DWORD dwCurrentIndex,
+    DWORD dwArgCount,
+    DWORD dwFlags,
+    LPCVOID pvData,
+    BOOL *pbDone)
+{
+    /* the order of the Windows command; only randomizeidentifiers and store mean anything to the stack */
+    TAG_TYPE Tags[] = {{L"defaultcurhoplimit", NS_REQ_ZERO, FALSE},
+                       {L"neighborcachelimit", NS_REQ_ZERO, FALSE},
+                       {L"routecachelimit", NS_REQ_ZERO, FALSE},
+                       {L"reassemblylimit", NS_REQ_ZERO, FALSE},
+                       {L"icmpredirects", NS_REQ_ZERO, FALSE},
+                       {L"sourceroutingbehavior", NS_REQ_ZERO, FALSE},
+                       {L"taskoffload", NS_REQ_ZERO, FALSE},
+                       {L"dhcpmediasense", NS_REQ_ZERO, FALSE},
+                       {L"mediasenseeventlog", NS_REQ_ZERO, FALSE},
+                       {L"mldlevel", NS_REQ_ZERO, FALSE},
+                       {L"mldversion", NS_REQ_ZERO, FALSE},
+                       {L"multicastforwarding", NS_REQ_ZERO, FALSE},
+                       {L"groupforwardedfragments", NS_REQ_ZERO, FALSE},
+                       {L"randomizeidentifiers", NS_REQ_ZERO, FALSE},
+                       {L"store", NS_REQ_ZERO, FALSE},
+                       {L"addressmaskreply", NS_REQ_ZERO, FALSE},
+                       {L"minmtu", NS_REQ_ZERO, FALSE},
+                       {L"flowlabel", NS_REQ_ZERO, FALSE},
+                       {L"loopbacklargemtu", NS_REQ_ZERO, FALSE},
+                       {L"loopbackworkercount", NS_REQ_ZERO, FALSE},
+                       {L"loopbackexecutionmode", NS_REQ_ZERO, FALSE},
+                       {L"sourcebasedecmp", NS_REQ_ZERO, FALSE},
+                       {L"reassemblyoutoforderlimit", NS_REQ_ZERO, FALSE}};
+    enum { RANDOMIZE = 13, STORE = 14 };
+    PWSTR Values[ARRAYSIZE(Tags)];
+    DWORD Randomize = 0, Error, i;
+    HKEY hKey;
+    BOOL Persistent;
+
+    Error = ParseTags(argv, dwCurrentIndex, dwArgCount, Tags, ARRAYSIZE(Tags), Values);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+
+    Error = ParseStore(Values[STORE], &Persistent);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+    if (Values[RANDOMIZE] != NULL)
+    {
+        if (IsWord(Values[RANDOMIZE], L"enabled"))
+            Randomize = 1;
+        else if (!IsWord(Values[RANDOMIZE], L"disabled"))
+            return BadValue(Values[RANDOMIZE], L"randomizeidentifiers");
+    }
+
+    /* what the stack has no setting for is refused, not taken and ignored */
+    for (i = 0; i < ARRAYSIZE(Tags); i++)
+    {
+        if (i != RANDOMIZE && i != STORE && Values[i] != NULL)
+            return ERROR_NOT_SUPPORTED;
+    }
+    /* the stack reads the value when an interface starts: it cannot be applied to the running stack alone */
+    if (Values[RANDOMIZE] == NULL)
+        return ERROR_NETSH_OK;
+    if (!Persistent)
+        return ERROR_NOT_SUPPORTED;
+
+    Error = RegCreateKeyExW(HKEY_LOCAL_MACHINE, IPV6_PARAMETERS_KEY, 0, NULL, REG_OPTION_NON_VOLATILE,
+                            KEY_SET_VALUE, NULL, &hKey, NULL);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+    Error = RegSetValueExW(hKey, L"RandomizeIdentifiers", 0, REG_DWORD, (const BYTE *)&Randomize, sizeof(Randomize));
+    RegCloseKey(hKey);
+    if (Error == ERROR_SUCCESS)
+        PrintMessage(L"The change takes effect when the computer restarts.\n");
+    return Finish(Error);
 }
 
 
