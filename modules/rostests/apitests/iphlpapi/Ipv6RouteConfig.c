@@ -249,6 +249,37 @@ static void TestInvalid(ULONG IfIndex)
     ok(Status == STATUS_INVALID_PARAMETER, "no request: %lx\n", Status);
 }
 
+/* Whether IfIndex has a preferred address that is not link-local: a datagram to a global destination has no source
+   (WSAENETUNREACH) before the address of the router advertisement has passed duplicate address detection, which
+   can still be going on when the test runs right after the start. Waits for it (20 s at most; an interface without
+   router advertisements goes on without) */
+static void WaitGlobalSource(ULONG IfIndex)
+{
+    int i;
+
+    for (i = 0; i < 40; i++)
+    {
+        UNICAST_TABLE6 *Table = NULL;
+        ULONG j;
+        BOOL Found = FALSE;
+
+        if (pGetUnicastIpAddressTable(AF_INET6, (PVOID *)&Table) == NO_ERROR && Table)
+        {
+            for (j = 0; j < Table->NumEntries; j++)
+            {
+                if (Table->Table[j].InterfaceIndex == IfIndex &&
+                    !Ipv6IsLinkLocal(Table->Table[j].Address.Ipv6.sin6_addr.u.Byte) &&
+                    Table->Table[j].DadState == 4 /* IpDadStatePreferred */)
+                    Found = TRUE;
+            }
+            pFreeMibTable(Table);
+        }
+        if (Found)
+            return;
+        Sleep(500);
+    }
+}
+
 static void TestRoute(ULONG IfIndex)
 {
     ROUTE_ROW6 Row, Best;
@@ -256,6 +287,8 @@ static void TestRoute(ULONG IfIndex)
     HANDLE Handle = NULL;
     NTSTATUS Status;
     DWORD Error;
+
+    WaitGlobalSource(IfIndex);
 
     Error = pNotifyRouteChange2(AF_INET6, RouteCallback, NULL, FALSE, &Handle);
     ok(Error == NO_ERROR, "NotifyRouteChange2: %lu\n", Error);
