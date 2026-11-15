@@ -3,6 +3,7 @@ list(APPEND SOURCE
     DnscacheHandles.c
     DnsQuery.c
     DnsQueryAaaa.c
+    DnsQueryMany.c
     DnsQueryTypes.c
     testlist.c)
 
