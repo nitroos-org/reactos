@@ -28,6 +28,7 @@ list(APPEND SOURCE
     NotifyAddrChange.c
     NotifyChanges.c
     NotifyIpInterfaceChange.c
+    NotifyIpv6.c
     NotifyRouteChange2.c
     NotifyStableUnicastIpAddressTable.c
     SendARP.c

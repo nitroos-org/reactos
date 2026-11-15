@@ -256,6 +256,11 @@ TCP6NetifEvent(struct netif *netif, netif_nsc_reason_t Reason, const netif_ext_c
     {
         TCP6UpdateMulticast(netif);
 
+        /* An address came, went or changed its state: users of NotifyUnicastIpAddressChange and
+           NotifyIpInterfaceChange look again (their snapshots tell what changed), and so do those of
+           NotifyRouteChange2, as the host routes and the link-local prefix route follow the addresses */
+        AddrChangeNotify();
+        RouteChangeNotify();
     }
 }
 

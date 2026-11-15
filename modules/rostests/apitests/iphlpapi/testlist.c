@@ -30,6 +30,7 @@ extern void func_NetstatOutput(void);
 extern void func_NotifyAddrChange(void);
 extern void func_NotifyChanges(void);
 extern void func_NotifyIpInterfaceChange(void);
+extern void func_NotifyIpv6(void);
 extern void func_NotifyRouteChange2(void);
 extern void func_NotifyStableUnicastIpAddressTable(void);
 extern void func_SendARP(void);
@@ -68,6 +69,7 @@ const struct test winetest_testlist[] =
     { "NotifyAddrChange",          func_NotifyAddrChange },
     { "NotifyChanges",              func_NotifyChanges },
     { "NotifyIpInterfaceChange",    func_NotifyIpInterfaceChange },
+    { "NotifyIpv6",                 func_NotifyIpv6 },
     { "NotifyRouteChange2",         func_NotifyRouteChange2 },
     { "NotifyStableUnicastIpAddressTable", func_NotifyStableUnicastIpAddressTable },
     { "SendARP",                    func_SendARP },

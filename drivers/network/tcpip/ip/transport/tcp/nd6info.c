@@ -282,3 +282,10 @@ TCPQueryIpv6Stats(PVOID Out, ULONG OutSize)
 }
 
 
+/* LWIP_HOOK_ND6_ROUTES_CHANGED (core lock held): a default router or an on-link prefix appeared or went; the
+   routes users of NotifyRouteChange2 see changed with it */
+void
+LibTCPRoutes6Changed(void)
+{
+    RouteChangeNotify();
+}

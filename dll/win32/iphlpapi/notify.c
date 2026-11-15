@@ -8,12 +8,14 @@
 
 #include "iphlpapi_private.h"
 #include <wine/netioapi.h>
+#include "ipv6net.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(iphlpapi);
 
 /*
- * Each registration has a worker thread. tcpip.sys completes a pending request when the IPv4 address table
- * (also an interface or a link coming or going) or the route table changes; the worker then takes a new
+ * Each registration has a worker thread. tcpip.sys completes a pending request when the IPv4 or IPv6 address table
+ * (also an interface or a link coming or going) or the route table (IPv4 routes, IPv6 default routers and
+ * on-link prefixes) changes; the worker then takes a new
  * snapshot of the table, compares it with the last one and calls back for each row that was added, deleted
  * or changed. The request is queued again before the snapshot is taken, so a change in between is not lost.
  *
@@ -40,6 +42,7 @@ typedef struct _MIB_NOTIFY
   DWORD ThreadId;
   HMODULE Module;               /* this DLL, held for the worker */
   BOOL Detached;                /* a callback cancelled its own registration: the worker frees it */
+  ADDRESS_FAMILY Family;        /* AF_UNSPEC, AF_INET or AF_INET6 */
   PVOID Rows;                   /* the last snapshot */
   ULONG Count;
 } MIB_NOTIFY;
@@ -62,16 +65,16 @@ void NotifyRegistrationFree(void)
 typedef struct _KIND_OPS
 {
   SIZE_T RowSize;
-  DWORD (*Snapshot)(PVOID *Rows, ULONG *Count);
+  DWORD (*Snapshot)(ADDRESS_FAMILY Family, PVOID *Rows, ULONG *Count);
   BOOL (*SameKey)(const void *A, const void *B);
   BOOL (*SameData)(const void *A, const void *B);
   ULONG IoControl;
 } KIND_OPS;
 
-static DWORD snapshot_interfaces(PVOID *Rows, ULONG *Count)
+static DWORD snapshot_interfaces(ADDRESS_FAMILY Family, PVOID *Rows, ULONG *Count)
 {
   PMIB_IPINTERFACE_TABLE Table;
-  DWORD Result = GetIpInterfaceTable(AF_INET, &Table);
+  DWORD Result = GetIpInterfaceTable(Family, &Table);
 
   if (Result != NO_ERROR)
     return Result;
@@ -94,10 +97,10 @@ static BOOL same_interface_data(const void *A, const void *B)
   return !memcmp(A, B, sizeof(MIB_IPINTERFACE_ROW));
 }
 
-static DWORD snapshot_unicast(PVOID *Rows, ULONG *Count)
+static DWORD snapshot_unicast(ADDRESS_FAMILY Family, PVOID *Rows, ULONG *Count)
 {
   PMIB_UNICASTIPADDRESS_TABLE Table;
-  DWORD Result = GetUnicastIpAddressTable(AF_INET, &Table);
+  DWORD Result = GetUnicastIpAddressTable(Family, &Table);
 
   if (Result != NO_ERROR)
     return Result;
@@ -109,11 +112,20 @@ static DWORD snapshot_unicast(PVOID *Rows, ULONG *Count)
   return *Rows ? NO_ERROR : ERROR_NOT_ENOUGH_MEMORY;
 }
 
+/* The same IPv4 or IPv6 address (the scope id of an IPv6 one follows the interface, which is in the key) */
+static BOOL same_address(const SOCKADDR_INET *A, const SOCKADDR_INET *B)
+{
+  if (A->si_family != B->si_family)
+    return FALSE;
+  if (A->si_family == AF_INET6)
+    return !memcmp(&A->Ipv6.sin6_addr, &B->Ipv6.sin6_addr, sizeof(A->Ipv6.sin6_addr));
+  return A->Ipv4.sin_addr.s_addr == B->Ipv4.sin_addr.s_addr;
+}
+
 static BOOL same_unicast_key(const void *A, const void *B)
 {
   const MIB_UNICASTIPADDRESS_ROW *X = A, *Y = B;
-  return X->InterfaceLuid.Value == Y->InterfaceLuid.Value &&
-         X->Address.Ipv4.sin_addr.s_addr == Y->Address.Ipv4.sin_addr.s_addr;
+  return X->InterfaceLuid.Value == Y->InterfaceLuid.Value && same_address(&X->Address, &Y->Address);
 }
 
 /* The lifetimes of a lease and the time stamp are not compared: they change with the clock. */
@@ -125,81 +137,41 @@ static BOOL same_unicast_data(const void *A, const void *B)
          X->DadState == Y->DadState && X->InterfaceIndex == Y->InterfaceIndex;
 }
 
-static UINT8 mask_length(DWORD Mask)
+static DWORD snapshot_routes(ADDRESS_FAMILY Family, PVOID *Rows, ULONG *Count)
 {
-  DWORD Host = ntohl(Mask);
-  UINT8 Length = 0;
+  PMIB_IPFORWARD_ROW2 Rows4 = NULL, Rows6 = NULL, Out;
+  ULONG Count4 = 0, Count6 = 0;
+  DWORD Result;
 
-  for (; Host & 0x80000000UL; Host <<= 1)
-    Length++;
-  return Length;
-}
-
-static DWORD snapshot_routes(PVOID *Rows, ULONG *Count)
-{
-  PMIB_IPFORWARDTABLE Table = NULL;
-  PMIB_IPFORWARD_ROW2 Out;
-  ULONG Size = 0, Tries, i;
-  DWORD Result = ERROR_INSUFFICIENT_BUFFER;
-  DWORD LastIndex = 0xffffffff;
-  ULONG64 LastLuid = 0;
-
-  for (Tries = 0; Tries < 3 && Result == ERROR_INSUFFICIENT_BUFFER; Tries++)
+  if (Family != AF_INET6)
   {
-    HeapFree(GetProcessHeap(), 0, Table);
-    Table = Size ? HeapAlloc(GetProcessHeap(), 0, Size) : NULL;
-    if (Size && !Table)
-      return ERROR_NOT_ENOUGH_MEMORY;
-    Result = GetIpForwardTable(Table, &Size, FALSE);
+    Result = Ipv4GetRouteRows(&Rows4, &Count4);
+    if (Result != NO_ERROR)
+      return Result;
   }
-  if (Result == ERROR_NO_DATA)
+  if (Family != AF_INET)
   {
-    /* no routes at all */
-    HeapFree(GetProcessHeap(), 0, Table);
-    *Count = 0;
-    *Rows = HeapAlloc(GetProcessHeap(), 0, sizeof(*Out));
-    return *Rows ? NO_ERROR : ERROR_NOT_ENOUGH_MEMORY;
-  }
-  if (Result != NO_ERROR)
-  {
-    HeapFree(GetProcessHeap(), 0, Table);
-    return Result;
-  }
-
-  Out = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)(Table->dwNumEntries + 1) * sizeof(*Out));
-  if (!Out)
-  {
-    HeapFree(GetProcessHeap(), 0, Table);
-    return ERROR_NOT_ENOUGH_MEMORY;
-  }
-  for (i = 0; i < Table->dwNumEntries; i++)
-  {
-    const MIB_IPFORWARDROW *Row = &Table->table[i];
-    PMIB_IPFORWARD_ROW2 New = &Out[i];
-
-    if (Row->dwForwardIfIndex != LastIndex)
+    Result = Ipv6GetRouteRows(&Rows6, &Count6);
+    if (Result != NO_ERROR)
     {
-      LastIndex = Row->dwForwardIfIndex;
-      if (!getInterfaceLuidByIndex(LastIndex, NULL, &LastLuid))
-        LastLuid = 0;
+      HeapFree(GetProcessHeap(), 0, Rows4);
+      return Result;
     }
-    New->InterfaceLuid.Value = LastLuid;
-    New->InterfaceIndex = Row->dwForwardIfIndex;
-    New->DestinationPrefix.Prefix.Ipv4.sin_family = AF_INET;
-    New->DestinationPrefix.Prefix.Ipv4.sin_addr.s_addr = Row->dwForwardDest;
-    New->DestinationPrefix.PrefixLength = mask_length(Row->dwForwardMask);
-    New->NextHop.Ipv4.sin_family = AF_INET;
-    New->NextHop.Ipv4.sin_addr.s_addr = Row->dwForwardNextHop;
-    New->ValidLifetime = 0xffffffff;
-    New->PreferredLifetime = 0xffffffff;
-    New->Metric = Row->dwForwardMetric1;
-    New->Protocol = Row->dwForwardProto;
-    New->Age = Row->dwForwardAge;
   }
-  *Count = Table->dwNumEntries;
-  *Rows = Out;
-  HeapFree(GetProcessHeap(), 0, Table);
-  return NO_ERROR;
+
+  Out = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)(Count4 + Count6 + 1) * sizeof(*Out));
+  if (Out)
+  {
+    if (Count4)
+      memcpy(Out, Rows4, (SIZE_T)Count4 * sizeof(*Out));
+    if (Count6)
+      memcpy(Out + Count4, Rows6, (SIZE_T)Count6 * sizeof(*Out));
+    *Rows = Out;
+    *Count = Count4 + Count6;
+  }
+  HeapFree(GetProcessHeap(), 0, Rows4);
+  HeapFree(GetProcessHeap(), 0, Rows6);
+  return Out ? NO_ERROR : ERROR_NOT_ENOUGH_MEMORY;
 }
 
 static BOOL same_route_key(const void *A, const void *B)
@@ -207,8 +179,8 @@ static BOOL same_route_key(const void *A, const void *B)
   const MIB_IPFORWARD_ROW2 *X = A, *Y = B;
   return X->InterfaceIndex == Y->InterfaceIndex &&
          X->DestinationPrefix.PrefixLength == Y->DestinationPrefix.PrefixLength &&
-         X->DestinationPrefix.Prefix.Ipv4.sin_addr.s_addr == Y->DestinationPrefix.Prefix.Ipv4.sin_addr.s_addr &&
-         X->NextHop.Ipv4.sin_addr.s_addr == Y->NextHop.Ipv4.sin_addr.s_addr &&
+         same_address(&X->DestinationPrefix.Prefix, &Y->DestinationPrefix.Prefix) &&
+         same_address(&X->NextHop, &Y->NextHop) &&
          X->Metric == Y->Metric;
 }
 
@@ -241,7 +213,7 @@ static void report_changes(MIB_NOTIFY *Notify)
   ULONG NewCount = 0, i, j;
   BYTE *Old, *New;
 
-  if (Ops->Snapshot(&NewRows, &NewCount) != NO_ERROR)
+  if (Ops->Snapshot(Notify->Family, &NewRows, &NewCount) != NO_ERROR)
     return;
 
   Old = Notify->Rows;
@@ -376,9 +348,8 @@ static DWORD register_notify(int Kind, ADDRESS_FAMILY Family, PVOID Callback, PV
   /* Windows accepts no callback and faults on the first change; this never calls one */
   Notify->Callback = Callback ? Callback : no_callback;
   Notify->Context = Context;
+  Notify->Family = Family;
 
-  /* only IPv4 exists: an IPv6 registration never sees a change */
-  if (Family != AF_INET6)
   {
     Notify->Stop = CreateEventW(NULL, TRUE, FALSE, NULL);
     Notify->IoEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
@@ -394,7 +365,7 @@ static DWORD register_notify(int Kind, ADDRESS_FAMILY Family, PVOID Callback, PV
       free_notify(Notify);
       return Result;
     }
-    Result = Kinds[Kind].Snapshot(&Notify->Rows, &Notify->Count);
+    Result = Kinds[Kind].Snapshot(Family, &Notify->Rows, &Notify->Count);
     if (Result != NO_ERROR)
     {
       free_notify(Notify);
@@ -402,9 +373,25 @@ static DWORD register_notify(int Kind, ADDRESS_FAMILY Family, PVOID Callback, PV
     }
   }
 
-  /* the initial notification comes from this thread, before the call returns */
+  /* the initial notification comes from this thread, before the call returns: one per address family, so
+     two for AF_UNSPEC while the stack has IPv6 (Windows 10, oracle probe) */
   if (InitialNotification)
-    Notify->Callback(Context, NULL, MibInitialNotification);
+  {
+    ULONG Initial = 1;
+
+    if (Family == AF_UNSPEC)
+    {
+      IPV6_STATE V6;
+
+      if (Ipv6GetState(&V6))
+      {
+        Initial = 2;
+        Ipv6FreeState(&V6);
+      }
+    }
+    while (Initial--)
+      Notify->Callback(Context, NULL, MibInitialNotification);
+  }
 
   if (Notify->File)
   {

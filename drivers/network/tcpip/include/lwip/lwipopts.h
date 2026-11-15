@@ -58,6 +58,8 @@
 #define LWIP_HOOK_ND6_DAD_FAILED(netif, index) LibNd6DadFailed(netif, index)
 /* The IPv6 counters (nd6info.c): every datagram that enters ip6_input */
 #define LWIP_HOOK_IP6_INPUT(p, inp)     LibIp6CountInput(p, inp)
+/* A router or on-link prefix that came or went is a route change for user mode (NotifyRouteChange2) */
+#define LWIP_HOOK_ND6_ROUTES_CHANGED()  LibTCPRoutes6Changed()
 /* Interface events: with IPv6 on, address changes set the adapter's multicast list (if6.c). Nothing listens
  * with it off */
 #define LWIP_NETIF_EXT_STATUS_CALLBACK  1
