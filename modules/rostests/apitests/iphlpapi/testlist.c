@@ -37,6 +37,7 @@ extern void func_NotifyIpInterfaceChange(void);
 extern void func_NotifyIpv6(void);
 extern void func_NotifyRouteChange2(void);
 extern void func_NotifyStableUnicastIpAddressTable(void);
+extern void func_PortProxy(void);
 extern void func_SendARP(void);
 extern void func_Tcp6Table2(void);
 extern void func_TcpTimeWait(void);
@@ -79,6 +80,7 @@ const struct test winetest_testlist[] =
     { "NotifyIpInterfaceChange",    func_NotifyIpInterfaceChange },
     { "NotifyIpv6",                 func_NotifyIpv6 },
     { "NotifyRouteChange2",         func_NotifyRouteChange2 },
+    { "PortProxy",                  func_PortProxy },
     { "NotifyStableUnicastIpAddressTable", func_NotifyStableUnicastIpAddressTable },
     { "SendARP",                    func_SendARP },
     { "Tcp6Table2",                 func_Tcp6Table2 },

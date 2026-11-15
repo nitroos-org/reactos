@@ -34,6 +34,7 @@ list(APPEND SOURCE
     NotifyIpInterfaceChange.c
     NotifyIpv6.c
     NotifyRouteChange2.c
+    PortProxy.c
     NotifyStableUnicastIpAddressTable.c
     SendARP.c
     Tcp6Table2.c

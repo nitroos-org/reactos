@@ -1,7 +1,7 @@
 /*
  * PROJECT:     ReactOS IP Helper Service
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
- * PURPOSE:     Service header: port proxy (v4tov4 TCP relay)
+ * PURPOSE:     Service header: port proxy (v4tov4, v4tov6, v6tov4 and v6tov6 TCP relay)
  */
 
 #ifndef _IPHLPSVC_PRECOMP_H
@@ -20,6 +20,9 @@
 
 #define PORTPROXY_KEY_ROOT   L"SYSTEM\\CurrentControlSet\\Services\\PortProxy"
 #define PORTPROXY_KEY_V4TOV4 L"SYSTEM\\CurrentControlSet\\Services\\PortProxy\\v4tov4\\tcp"
+#define PORTPROXY_KEY_V4TOV6 L"SYSTEM\\CurrentControlSet\\Services\\PortProxy\\v4tov6\\tcp"
+#define PORTPROXY_KEY_V6TOV4 L"SYSTEM\\CurrentControlSet\\Services\\PortProxy\\v6tov4\\tcp"
+#define PORTPROXY_KEY_V6TOV6 L"SYSTEM\\CurrentControlSet\\Services\\PortProxy\\v6tov6\\tcp"
 
 DWORD PortProxyStart(VOID);
 VOID PortProxyStop(VOID);
