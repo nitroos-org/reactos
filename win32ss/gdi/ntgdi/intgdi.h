@@ -138,11 +138,15 @@ PPOINT GDI_Bezier (const POINT *Points, INT count, PINT nPtsOut);
 /* Device coordinates of the box of an ellipse, arc or rounded rectangle are limited to this (2^27, as the range of the
    coordinates of a surface): the rasterisers compute with sums and differences of them in 32 bits */
 #define SHAPE_COORD_LIMIT 0x08000000L
+/* Windows keeps these coordinates as 28.4 fixed point numbers: a value beyond +-2^27 wraps around to 28 bits (sign
+   extended from the low 28 bits), +-2^27 itself is kept. The result is always within +-2^27. */
 FORCEINLINE
 LONG
-IntClampShapeCoord(LONG v)
+IntWrapShapeCoord(LONG v)
 {
-    return (v > SHAPE_COORD_LIMIT) ? SHAPE_COORD_LIMIT : ((v < -SHAPE_COORD_LIMIT) ? -SHAPE_COORD_LIMIT : v);
+    if (v >= -SHAPE_COORD_LIMIT && v <= SHAPE_COORD_LIMIT)
+        return v;
+    return (LONG)(((ULONG)v ^ 0x08000000UL) & 0x0FFFFFFFUL) - SHAPE_COORD_LIMIT;
 }
 
 BOOL FASTCALL IntFillArc( PDC dc, INT XLeft, INT YLeft, INT Width, INT Height, double StartArc, double EndArc, ARCTYPE arctype);
