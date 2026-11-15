@@ -104,6 +104,7 @@ extern void func_RawInput(void);
 extern void func_RealGetWindowClass(void);
 extern void func_RedirGlassKeep(void);
 extern void func_RedirPresent(void);
+extern void func_RedirScroll(void);
 extern void func_RedrawWindow(void);
 extern void func_RegisterHotKey(void);
 extern void func_RegisterClassEx(void);
@@ -268,6 +269,7 @@ const struct test winetest_testlist[] =
     { "RealGetWindowClass", func_RealGetWindowClass },
     { "RedirGlassKeep", func_RedirGlassKeep },
     { "RedirPresent", func_RedirPresent },
+    { "RedirScroll", func_RedirScroll },
     { "RedrawWindow", func_RedrawWindow },
     { "RegisterHotKey", func_RegisterHotKey },
     { "RegisterClassEx", func_RegisterClassEx },

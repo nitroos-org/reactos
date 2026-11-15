@@ -105,6 +105,7 @@ list(APPEND SOURCE
     RealGetWindowClass.c
     RedirGlassKeep.c
     RedirPresent.c
+    RedirScroll.c
     RedrawWindow.c
     RegisterClassEx.c
     RegisterHotKey.c

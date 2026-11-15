@@ -445,7 +445,7 @@ RawInputThreadMain(VOID)
     PINPUT_DEVICE_INFO DeviceInfo;
     NTSTATUS Status;
     //LARGE_INTEGER WaitTimeout;
-    PVOID WaitObjects[4], pSignaledObject = NULL;
+    PVOID WaitObjects[5], pSignaledObject = NULL;
     ULONG cWaitObjects;
     KWAIT_BLOCK WaitBlockArray[RTL_NUMBER_OF(WaitObjects)];
     PVOID ShutdownEvent;
@@ -515,6 +515,12 @@ RawInputThreadMain(VOID)
         /* Redirected windows (redir.c): presents of DCs that stay in use */
         WaitObjects[3] = gRedirTimer;
         cWaitObjects = gRedirTimer ? 4 : 3;
+        /* The tail of a burst of scrolls (redir.c) */
+        if (gRedirTimer && gRedirTailTimer)
+        {
+            WaitObjects[4] = gRedirTailTimer;
+            cWaitObjects = 5;
+        }
 
         Status = KeWaitForMultipleObjects(cWaitObjects,
                                           WaitObjects,
@@ -555,6 +561,10 @@ RawInputThreadMain(VOID)
             else if (gRedirTimer && pSignaledObject == gRedirTimer)
             {
                 UserRedirPresentPending();
+            }
+            else if (gRedirTailTimer && pSignaledObject == gRedirTailTimer)
+            {
+                UserRedirPresentTail();
             }
             else if (pSignaledObject == ShutdownEvent)
             {
