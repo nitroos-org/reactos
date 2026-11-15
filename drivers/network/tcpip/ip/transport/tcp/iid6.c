@@ -423,7 +423,8 @@ Iid6Rdrand(PULONG Value)
    tick count; the registry has no saved seed: SEC-system-rng-not-cryptographic), so a new secret is made from what
    this code can gather itself, and says truthfully what it used:
    - RDRAND (x86), eight 32-bit words, each retried up to ten times (Intel's rule). Only words the instruction
-     delivered are mixed in (a failed try leaves the destination at zero, which is not entropy). All eight
+     delivered are mixed in (a failed try leaves the destination at zero, which is not entropy; a word of 0 or
+     all ones counts as a failed try: what a broken RDRAND returns with success every time). All eight
      delivered = hardware source; fewer or no instruction = timing only, and the log says so;
    - timing: IID6_TIMING_SAMPLES intervals around a short processor stall (the jitter), in cycles where there is a
      cycle counter, else in performance counter ticks, each with the raw counters; the number of distinct
@@ -457,7 +458,9 @@ Iid6NewSecret(UCHAR Secret[IID6_SECRET_SIZE])
 
             for (Try = 0; Try < 10; Try++)
             {
-                if (Iid6Rdrand(&Value))
+                /* 0 and all ones count as failed: processors with broken RDRAND report success with
+                   one of them every time (a real word is either with chance 2^-31, and is tried again) */
+                if (Iid6Rdrand(&Value) && Value != 0 && Value != 0xFFFFFFFF)
                 {
                     Pool[j++] = Value;
                     RdrandWords++;
