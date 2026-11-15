@@ -328,6 +328,44 @@ CheckGaiEx(const WCHAR *Name, int Count4, int Count6, const char *Addr4, const c
     pFreeAddrInfoExW(List);
 }
 
+/* the PTR answer of a hosts row: the first name of the line, whatever the other names are */
+static
+void
+CheckReverse(int Family, const char *Addr, const char *Expected)
+{
+    struct sockaddr_in Sa4;
+    struct sockaddr_in6 Sa6;
+    char Host[NI_MAXHOST];
+    int Ret;
+
+    Host[0] = 0;
+    if (Family == AF_INET)
+    {
+        memset(&Sa4, 0, sizeof(Sa4));
+        Sa4.sin_family = AF_INET;
+        Sa4.sin_addr.s_addr = inet_addr(Addr);
+        Ret = getnameinfo((struct sockaddr *)&Sa4, sizeof(Sa4), Host, sizeof(Host), NULL, 0, NI_NAMEREQD);
+    }
+    else
+    {
+        ADDRINFO Hints, *List = NULL;
+
+        memset(&Hints, 0, sizeof(Hints));
+        Hints.ai_family = AF_INET6;
+        Hints.ai_flags = AI_NUMERICHOST;
+        if (getaddrinfo(Addr, NULL, &Hints, &List) != 0 || !List)
+        {
+            ok(0, "getaddrinfo(%s) numeric failed\n", Addr);
+            return;
+        }
+        memcpy(&Sa6, List->ai_addr, sizeof(Sa6));
+        freeaddrinfo(List);
+        Ret = getnameinfo((struct sockaddr *)&Sa6, sizeof(Sa6), Host, sizeof(Host), NULL, 0, NI_NAMEREQD);
+    }
+    ok(Ret == 0, "getnameinfo(%s): %d (%d)\n", Addr, Ret, WSAGetLastError());
+    ok(_stricmp(Host, Expected) == 0, "getnameinfo(%s): \"%s\", expected \"%s\"\n", Addr, Host, Expected);
+}
+
 /* every row of the table, against the file written by the caller */
 static
 void
@@ -372,6 +410,16 @@ CheckRows(const char *Label)
     CheckHostent("hx-multi", 2, "10.77.5.3", "10.77.5.4");
     CheckHostent("hx-dual", 1, "10.77.5.9", NULL);
     CheckHostent(g_ComputerName, 1, "10.77.5.12", NULL);
+
+    /* reverse: the first name of the line answers for the address (A and PTR rows of a line are separate) */
+    CheckReverse(AF_INET, "10.77.5.1", "hx-one");
+    CheckReverse(AF_INET, "10.77.5.2", "hx-two.example.test");
+    CheckReverse(AF_INET, "10.77.5.3", "hx-multi");
+    if (g_V6)
+    {
+        CheckReverse(AF_INET6, "2001:db8:77::1", "hx-six");
+        CheckReverse(AF_INET6, "fd00:77::5", "hx-v6multi");
+    }
 
     /* getaddrinfo, AF_INET */
     CheckGai("hx-one", AF_INET, 1, 0, "10.77.5.1", NULL);
