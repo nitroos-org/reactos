@@ -142,6 +142,8 @@ typedef enum {
 
   adns_r_aaaa=              28,
 
+  adns_r_srv_raw=           33, /* ReactOS addition */
+
   adns_r_addr=                  adns_r_a|adns__qtf_deref
 
 } adns_rrtype;
@@ -309,6 +311,12 @@ typedef struct {
   unsigned long serial, refresh, retry, expire, minimum;
 } adns_rr_soa;
 
+/* ReactOS addition: SRV (RFC 2782) */
+typedef struct {
+  int priority, weight, port;
+  char *host;
+} adns_rr_srv;
+
 typedef struct {
   adns_status status;
   char *cname; /* always NULL if query was for CNAME records */
@@ -330,6 +338,7 @@ typedef struct {
     adns_rr_inthostaddr *inthostaddr; /* mx */
     adns_rr_intstr *intstr;           /* mx_raw */
     adns_rr_soa *soa;                 /* soa, soa_raw */
+    adns_rr_srv *srv;                 /* srv_raw */
   } rrs;
 } adns_answer;
 

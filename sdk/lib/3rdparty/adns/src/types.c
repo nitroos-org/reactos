@@ -1003,6 +1003,43 @@ static adns_status cs_soa(vbuf *vb, const void *datap) {
 }
 
 /*
+ * _srv_raw   (pa,mf,cs): ReactOS addition, RFC 2782: priority, weight, port, target
+ */
+
+static adns_status pa_srv_raw(const parseinfo *pai, int cbyte, int max, void *datap) {
+  const byte *dgram= pai->dgram;
+  adns_rr_srv *rrp= datap;
+  adns_status st;
+  int v;
+
+  if (cbyte+6 > max) return adns_s_invaliddata;
+  GET_W(cbyte,v);  rrp->priority= v;
+  GET_W(cbyte,v);  rrp->weight= v;
+  GET_W(cbyte,v);  rrp->port= v;
+  st= pap_domain(pai, &cbyte, max, &rrp->host,
+		 pai->qu->flags & adns_qf_quoteok_anshost ? pdf_quoteok : 0);
+  if (st) return st;
+
+  if (cbyte != max) return adns_s_invaliddata;
+  return adns_s_ok;
+}
+
+static void mf_srv(adns_query qu, void *datap) {
+  adns_rr_srv *rrp= datap;
+
+  adns__makefinal_str(qu,&rrp->host);
+}
+
+static adns_status cs_srv(vbuf *vb, const void *datap) {
+  const adns_rr_srv *rrp= datap;
+  char buf[40];
+
+  sprintf(buf,"%d %d %d ",rrp->priority,rrp->weight,rrp->port);
+  CSP_ADDSTR(buf);
+  return csp_domain(vb,rrp->host);
+}
+
+/*
  * _flat   (mf)
  */
 
@@ -1037,6 +1074,7 @@ DEEP_TYPE(txt,    "TXT",   0,     manyistr,   pa_txt,     0,          cs_txt    
 DEEP_TYPE(rp_raw, "RP",   "raw",  strpair,    pa_rp,      0,          cs_rp         ),
 
 FLAT_TYPE(aaaa,   "AAAA",  0,     in6addr,    pa_in6addr, 0,          cs_in6addr    ),
+DEEP_TYPE(srv_raw,"SRV",  "raw",  srv,        pa_srv_raw, 0,          cs_srv        ),
 
 FLAT_TYPE(addr,   "A",  "addr",   addr,       pa_addr,    di_addr,    cs_addr       ),
 DEEP_TYPE(ns,     "NS", "+addr",  hostaddr,   pa_hostaddr,di_hostaddr,cs_hostaddr   ),
