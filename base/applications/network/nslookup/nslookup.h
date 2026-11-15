@@ -112,6 +112,32 @@ int     ExtractName( PCHAR pBuffer,
                      USHORT Offset,
                      UCHAR Limit );
 
+/* The fixed part of a resource record after its name: type, class, TTL and data
+   length, read at *pOffset. TRUE only when that part and the record data both lie
+   inside the packet; *pOffset is then moved to the first byte of the data. */
+BOOL    ReadRecordHeader( PCHAR pBuffer,
+                          ULONG BufferLength,
+                          int *pOffset,
+                          USHORT *pType,
+                          USHORT *pClass,
+                          ULONG *pTtl,
+                          USHORT *pDataLength );
+
+/* The offset just after the (possibly compressed) name at Offset; -1 when the name runs past the packet.
+   Independent of the length ExtractName writes: the wire length of the name. */
+int     SkipName( PCHAR pBuffer, ULONG BufferLength, int Offset );
+
+/* Skips the question section of a reply; FALSE when it runs past the packet. */
+BOOL    SkipQuestions( PCHAR pBuffer,
+                       ULONG BufferLength,
+                       USHORT NumQuestions,
+                       int *pOffset );
+
+/* The reply is complete enough to read its header (12 bytes). */
+#define DNS_HEADER_LENGTH 12
+/* Truncation (TC) bit, in the third byte of the header. */
+#define DNS_FLAG_TC 0x02
+
 void    ReverseIP( PCHAR pIP, PCHAR pReturn );
 BOOL    IsValidIP( PCHAR pInput );
 BOOL    IsValidIPv6( PCHAR pInput );
