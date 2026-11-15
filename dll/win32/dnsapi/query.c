@@ -364,15 +364,15 @@ DnsQuery_CodePage(UINT CodePage,
         case DNS_TYPE_MF:
         case DNS_TYPE_MG:
         case DNS_TYPE_MR:
-            ConvertedRecord = RtlAllocateHeap(RtlGetProcessHeap(), 0, sizeof(DNS_RECORD));
+            ConvertedRecord = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DNS_RECORD));
             break;
 
         case DNS_TYPE_MINFO:
-            ConvertedRecord = RtlAllocateHeap(RtlGetProcessHeap(), 0, sizeof(DNS_TXT_DATA) + QueryResultWide->Data.TXT.dwStringCount);
+            ConvertedRecord = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DNS_TXT_DATA) + QueryResultWide->Data.TXT.dwStringCount);
             break;
 
         case DNS_TYPE_NULL:
-            ConvertedRecord = RtlAllocateHeap(RtlGetProcessHeap(), 0, sizeof(DNS_NULL_DATA) + QueryResultWide->Data.Null.dwByteCount);
+            ConvertedRecord = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DNS_NULL_DATA) + QueryResultWide->Data.Null.dwByteCount);
             break;
         }
         if (ConvertedRecord == NULL)
@@ -397,6 +397,10 @@ DnsQuery_CodePage(UINT CodePage,
         }
 
         ConvertedRecord->wType = QueryResultWide->wType;
+        ConvertedRecord->Flags.S.Section = QueryResultWide->Flags.S.Section;
+        ConvertedRecord->dwTtl = QueryResultWide->dwTtl;
+        ConvertedRecord->dwReserved = 0;
+        ConvertedRecord->pNext = NULL;
 
         switch (QueryResultWide->wType)
         {
