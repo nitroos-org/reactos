@@ -135,6 +135,31 @@ typedef struct _TCP_IPV6_ADDRESS_ROW
     ULONG PreferredLifetime;
 } TCP_IPV6_ADDRESS_ROW, *PTCP_IPV6_ADDRESS_ROW;
 
+/* Non public TOIID: the IPv6 DNS servers that router advertisements gave (RFC 8106) and the default routers
+   (router advertisements with a lifetime), for iphlpapi. Asked as IP_IPV6_TABLE_ENTRY_ID is (CL_NL_ENTITY, instance
+   0); the answer is a TCP_IPV6_DNS_HEADER, then Count TCP_IPV6_DNS_ROW, DNS servers first. Enabled is 0 (and Count 0)
+   while the IPv6 switch is off. Sizes as for the other tables: a caller whose buffer is too small gets the size that
+   does and asks again */
+#define IP_IPV6_DNS_ENTRY_ID            0x116
+
+typedef struct _TCP_IPV6_DNS_HEADER
+{
+    ULONG Enabled;
+    ULONG Count;
+} TCP_IPV6_DNS_HEADER, *PTCP_IPV6_DNS_HEADER;
+
+#define TCP_IPV6_DNS_SERVER             1
+#define TCP_IPV6_DNS_ROUTER             2
+
+/* Address: a router's is its link-local address, the scope is IfIndex; Lifetime: seconds left, 0xffffffff infinite */
+typedef struct _TCP_IPV6_DNS_ROW
+{
+    ULONG IfIndex;
+    ULONG Kind;
+    UCHAR Address[16];
+    ULONG Lifetime;
+} TCP_IPV6_DNS_ROW, *PTCP_IPV6_DNS_ROW;
+
 /* Non public TOIID: the row of an IPv6 TCP socket (an AF_INET6 one, dual stack ones too), asked of its transport
    entity (CO_TL_ENTITY) as the IPv4 rows are; an entity of an IPv4 socket has none. The layout of
    MIB_TCP6ROW_OWNER_PID: the IPv4 side of a dual stack socket as ::ffff:a.b.c.d, ports in network order */

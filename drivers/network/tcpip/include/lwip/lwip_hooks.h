@@ -16,6 +16,8 @@ struct pbuf;
 struct netif;
 
 int LibTCPReopenTimeWait(struct pbuf *p, struct netif *inp);
+/* ip/transport/tcp/rdnss6.c */
+void LibTCPRdnss6Input(struct netif *netif, const ip6_addr_t *addr, u32_t lifetime);
 /* ip/transport/tcp/if6.c */
 err_t LibTCPListenerInput6(void);
 int LibIcmp6ErrorAllowed(void);

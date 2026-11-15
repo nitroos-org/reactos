@@ -256,6 +256,10 @@ TCPReceive6(PIP_INTERFACE IF, PIP_PACKET IPPacket);
 ULONG
 TCPQueryIpv6Table(PVOID Out, ULONG OutSize);
 
+/* The IP_IPV6_DNS_ENTRY_ID answer (rdnss6.c); same convention */
+ULONG
+TCPQueryIpv6Dns(PVOID Out, ULONG OutSize);
+
 /* A unicast IPv6 address of this machine (16 bytes, network order) that a socket may bind; *Zone gets the lwIP zone
    of a link-local one (0 otherwise) */
 BOOLEAN
