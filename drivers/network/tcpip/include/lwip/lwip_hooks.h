@@ -37,6 +37,7 @@ void LibTCPRoutes6Changed(void);
 struct netif *LibIp6Route(const ip6_addr_t *src, const ip6_addr_t *dest);
 const ip6_addr_t *LibNd6GetGw(struct netif *netif, const ip6_addr_t *dest);
 void LibNd6Timer(void);
+void LibNd6RouteInfo(struct netif *netif, const ip6_addr_t *router, const u8_t *prefix, u8_t length, u8_t preference, u32_t lifetime);
 /* ip/transport/tcp/addr6.c */
 int LibNd6AddrConfigured(struct netif *netif, s8_t Slot);
 int LibIp6SkipSource(struct netif *netif, s8_t Slot);

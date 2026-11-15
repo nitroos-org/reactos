@@ -64,6 +64,10 @@
 #define LWIP_HOOK_ND6_RDNSS(netif, addr, lifetime) LibTCPRdnss6Input(netif, addr, lifetime)
 /* Router advertisement DNS search lists (RFC 8106 5.2) go to the stack's list too (ra6.c) */
 #define LWIP_HOOK_ND6_DNSSL(netif, p, offset, length) LibTCPDnssl6Input(netif, p, offset, length)
+/* Route information options (RFC 4191 2.3) become routes of the route table (route6.c): through the router that sent
+ * the advertisement, with the metric of their preference, until their lifetime ends */
+#define LWIP_HOOK_ND6_ROUTE_INFO(netif, router, prefix, length, preference, lifetime) \
+    LibNd6RouteInfo(netif, router, prefix, length, preference, lifetime)
 /* Stable random interface identifiers (RFC 7217, iid6.c): the SLAAC address of a prefix, and a new identifier
  * when DAD finds one in use (NitroOS hooks in nd6.c) */
 #define LWIP_HOOK_ND6_SLAAC_ADDRESS(netif, prefix, addr) LibNd6SlaacAddress(netif, prefix, addr)

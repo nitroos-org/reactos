@@ -126,6 +126,7 @@ static s16_t nd6_find_destination_cache_entry(const ip6_addr_t *ip6addr);
 static s16_t nd6_new_destination_cache_entry(void);
 static int nd6_is_prefix_in_netif(const ip6_addr_t *ip6addr, struct netif *netif);
 static s8_t nd6_select_router(const ip6_addr_t *ip6addr, struct netif *netif);
+static u8_t nd6_router_rank(u8_t flags);
 static s8_t nd6_get_router(const ip6_addr_t *router_addr, struct netif *netif);
 static s8_t nd6_new_router(const ip6_addr_t *router_addr, struct netif *netif);
 static s8_t nd6_get_onlink_prefix(const ip6_addr_t *prefix, struct netif *netif);
@@ -668,7 +669,11 @@ nd6_input(struct pbuf *p, struct netif *inp)
     /* @todo set default hop limit... */
     /* ra_hdr->current_hop_limit;*/
 
-    /* Update flags in local entry (incl. preference). */
+    /* Update flags in local entry (incl. preference). NitroOS: a changed preference changes which router the
+       destinations use, so the next hops lwIP kept are found again */
+    if (nd6_router_rank(default_router_list[i].flags) != nd6_router_rank(ra_hdr->flags)) {
+      nd6_clear_destination_cache();
+    }
     default_router_list[i].flags = ra_hdr->flags;
 
 #if LWIP_IPV6_DHCP6
@@ -801,10 +806,34 @@ nd6_input(struct pbuf *p, struct netif *inp)
         break;
       }
       case ND6_OPTION_TYPE_ROUTE_INFO:
-        /* @todo implement preferred routes.
-        struct route_option * route_opt;
-        route_opt = (struct route_option *)buffer;*/
+#ifdef LWIP_HOOK_ND6_ROUTE_INFO
+      {
+        /* NitroOS: a route information option (RFC 4191 2.3) becomes a route of the stack's route table, through
+           this router. The option is 1 to 3 units of 8 bytes: the prefix is the first 0, 8 or 16 bytes of the last
+           16. Ignored: a longer option, a prefix longer than the option holds, the reserved preference value. */
+        struct route_option *route_opt = (struct route_option *)buffer;
+        u8_t plen, prf;
+        u8_t prefix_bytes[16];
+        u8_t have;
 
+        if (option_len8 > 3 || option_len < sizeof(struct route_option) - sizeof(ip6_addr_p_t) ||
+            option_len < ((u16_t)option_len8 << 3)) {
+          break;
+        }
+        plen = route_opt->prefix_length;
+        prf = (u8_t)((route_opt->preference >> 3) & 3);
+        if (plen > 128 || (plen > 64 && option_len8 < 3) || (plen > 0 && option_len8 < 2) || prf == 2) {
+          break;
+        }
+        have = (u8_t)(((u8_t)option_len8 - 1) << 3);
+        memset(prefix_bytes, 0, sizeof(prefix_bytes));
+        if (have > 0) {
+          MEMCPY(prefix_bytes, buffer + 8, have);
+        }
+        LWIP_HOOK_ND6_ROUTE_INFO(inp, ip6_current_src_addr(), prefix_bytes, plen, prf,
+                                 lwip_htonl(route_opt->route_lifetime));
+      }
+#endif /* LWIP_HOOK_ND6_ROUTE_INFO */
         break;
 #if LWIP_ND6_RDNSS_MAX_DNS_SERVERS
       case ND6_OPTION_TYPE_RDNSS:
@@ -1747,6 +1776,21 @@ nd6_is_prefix_in_netif(const ip6_addr_t *ip6addr, struct netif *netif)
   return 0;
 }
 
+/* The rank of a default router's preference (RFC 4191 2.1: the two bits of the flags of its router advertisement,
+ * 01 high, 00 medium, 11 low, 10 reserved and treated as medium): 2, 1, 0 */
+static u8_t
+nd6_router_rank(u8_t flags)
+{
+  switch (flags & ND6_RA_PREFERENCE_MASK) {
+  case ND6_RA_PREFERENCE_HIGH:
+    return 2;
+  case ND6_RA_PREFERENCE_LOW:
+    return 0;
+  default:
+    return 1;
+  }
+}
+
 /**
  * Select a default router for a destination.
  *
@@ -1765,14 +1809,17 @@ nd6_select_router(const ip6_addr_t *ip6addr, struct netif *netif)
 {
   struct netif *router_netif;
   s8_t i, j, valid_router;
+  u8_t best_rank, best_reachable;
   static s8_t last_router;
 
-  LWIP_UNUSED_ARG(ip6addr); /* @todo match preferred routes!! (must implement ND6_OPTION_TYPE_ROUTE_INFO) */
+  LWIP_UNUSED_ARG(ip6addr); /* routes of route information options are the stack's route table's (route6.c) */
 
-  /* @todo: implement default router preference */
-
-  /* Look for valid routers. A reachable router is preferred. */
+  /* Look for valid routers. NitroOS: among those that are reachable or probably reachable the one with the highest
+   * default router preference wins (RFC 4191 3.2: high, medium, low; the reserved value counts as medium), and of
+   * equal preference one known to be reachable is preferred. */
   valid_router = -1;
+  best_rank = 0;
+  best_reachable = 0;
   for (i = 0; i < LWIP_ND6_NUM_ROUTERS; i++) {
     /* Is the router netif both set and appropriate? */
     if (default_router_list[i].neighbor_entry != NULL) {
@@ -1783,11 +1830,12 @@ nd6_select_router(const ip6_addr_t *ip6addr, struct netif *netif)
          * RFC 4861 Sec. 6.3.6? Note that we will never return a router that
          * has no neighbor cache entry, due to the netif association tests. */
         if (default_router_list[i].neighbor_entry->state != ND6_INCOMPLETE) {
-          /* Is the router known to be reachable? */
-          if (default_router_list[i].neighbor_entry->state == ND6_REACHABLE) {
-            return i; /* valid and reachable - done! */
-          } else if (valid_router < 0) {
-            valid_router = i; /* valid but not known to be reachable */
+          u8_t rank = nd6_router_rank(default_router_list[i].flags);
+          u8_t reachable = (default_router_list[i].neighbor_entry->state == ND6_REACHABLE);
+          if (valid_router < 0 || rank > best_rank || (rank == best_rank && reachable && !best_reachable)) {
+            valid_router = i;
+            best_rank = rank;
+            best_reachable = reachable;
           }
         }
       }

@@ -477,8 +477,14 @@ static DWORD build_routes(const IPV6_ALL *All, PMIB_IPFORWARD_ROW2 *Rows, ULONG 
       continue;
     Row = add_route(&List, Route->IfIndex, Route->Prefix, Route->PrefixLength,
                     is_any(Route->NextHop) ? NULL : Route->NextHop, Route->Origin, FALSE, Route->ValidLifetime);
-    if (!Row || (Route->Flags & TCP_IPV6_ROUTE_FROM_RA))
+    if (!Row)
       continue;
+    /* the metric of a route of an advertisement is the one of its preference (medium: the usual 256) */
+    if (Route->Flags & TCP_IPV6_ROUTE_FROM_RA)
+    {
+      Row->Metric = Route->Metric;
+      continue;
+    }
     /* a configured route: what was asked for it */
     Row->PreferredLifetime = Route->PreferredLifetime;
     Row->Metric = Route->Metric;

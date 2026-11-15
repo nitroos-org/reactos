@@ -43,8 +43,14 @@
 
 /* Configured routes, over all interfaces */
 #define ROUTE6_MAX              256
-/* The metric of the routes router advertisements give, as iphlpapi reports them */
+/* The metric of the routes router advertisements give, as iphlpapi reports them (medium preference; high and low
+   preference add the offsets below: a lower metric wins) */
 #define ROUTE6_RA_METRIC        256
+#define ROUTE6_RA_METRIC_HIGH   128
+#define ROUTE6_RA_METRIC_LOW    512
+/* Routes of route information options (RFC 4191) kept at most: a router that sends them all the time replaces its
+   own, and the oldest goes first, so an advertisement cannot fill the table the configured routes live in */
+#define ROUTE6_RA_MAX           32
 /* NL_ROUTE_ORIGIN and NL_ROUTE_PROTOCOL values of router advertisement routes, and of the on-link prefix of a
    configured address (a route of the stack, as the host routes are) */
 #define ROUTE6_ORIGIN_MANUAL    0
@@ -88,6 +94,23 @@ typedef struct _ROUTE6_MATCH
     struct netif *Netif;
     const ip6_addr_t *NextHop;  /* NULL: on-link */
 } ROUTE6_MATCH, *PROUTE6_MATCH;
+
+/* The metric of a route of an advertisement with this preference (RFC 4191 2.1: the two bits 01 high, 00 medium, 11
+   low, 10 reserved and treated as medium). The values are our own choice: only their order is fixed by the RFC */
+static
+ULONG
+Route6PreferenceMetric(UCHAR Preference)
+{
+    switch (Preference & 3)
+    {
+        case 1:
+            return ROUTE6_RA_METRIC_HIGH;
+        case 3:
+            return ROUTE6_RA_METRIC_LOW;
+        default:
+            return ROUTE6_RA_METRIC;
+    }
+}
 
 static
 ULONGLONG
@@ -289,7 +312,8 @@ Route6Find(const ip6_addr_t *Dest, struct netif *Only, PROUTE6_MATCH Best)
             continue;
         if ((Only && Neighbor->netif != Only) || !Route6NetifUsable(Neighbor->netif))
             continue;
-        Route6Consider(Best, Neighbor->netif, 0, ROUTE6_RA_METRIC, &Neighbor->next_hop_address, TRUE);
+        Route6Consider(Best, Neighbor->netif, 0, Route6PreferenceMetric((UCHAR)(default_router_list[i].flags >> 3)),
+                       &Neighbor->next_hop_address, TRUE);
     }
 
     return Best->Found;
@@ -386,6 +410,106 @@ LibNd6Timer(void)
         Route6Count--;
         Changed = TRUE;
     }
+
+    if (Changed)
+    {
+        Route6Changed();
+        RouteChangeNotify();
+    }
+}
+
+static PROUTE6_ENTRY Route6Lookup(struct netif *netif, const ip6_addr_t *Prefix, UCHAR Length, BOOLEAN OnLink,
+                                  const ip6_addr_t *NextHop);
+
+/* LWIP_HOOK_ND6_ROUTE_INFO (core lock held): a route information option (RFC 4191 2.3) of a router advertisement
+   that passed lwIP's checks: Prefix (16 bytes, the bits after Length are ignored) is reachable through Router, with
+   the metric of Preference (the 2-bit field), for Lifetime seconds (0xFFFFFFFF: infinite; 0 removes the route). The
+   route is an entry of the table like a configured one (the stack routes by it) with the origin router advertisement.
+   A route a program configured for the same prefix and router stays as it is. At most ROUTE6_RA_MAX such routes: a new
+   one replaces the oldest when they are all there. A refresh with the same preference only moves the lifetime. */
+void
+LibNd6RouteInfo(struct netif *netif, const ip6_addr_t *Router, const u8_t *PrefixBytes, u8_t Length, u8_t Preference,
+                u32_t Lifetime)
+{
+    ip6_addr_t Prefix, NextHop;
+    PROUTE6_ENTRY Entry;
+    ULONG IfIndex = Route6IfIndex(netif), i, RaCount = 0, Oldest = ROUTE6_MAX;
+    ULONG Metric = Route6PreferenceMetric(Preference);
+    BOOLEAN Changed = FALSE;
+
+    if (!IfIndex || Length > 128 || ip6_addr_isany(Router) || !ip6_addr_islinklocal(Router))
+        return;
+
+    RtlZeroMemory(&Prefix, sizeof(Prefix));
+    RtlCopyMemory(Prefix.addr, PrefixBytes, 16);
+    Route6Mask(&Prefix, Length);
+    /* a destination that is no global or unique local unicast prefix: link-local and multicast are not routed by
+       an advertisement */
+    if (ip6_addr_islinklocal(&Prefix) || ip6_addr_ismulticast(&Prefix) || ip6_addr_isloopback(&Prefix))
+        return;
+
+    NextHop = *Router;
+    ip6_addr_assign_zone(&NextHop, IP6_UNICAST, netif);
+
+    Entry = Route6Lookup(netif, &Prefix, Length, FALSE, &NextHop);
+    if (Entry && !(Entry->Flags & TCP_IPV6_ROUTE_FROM_RA))
+        return;                         /* configured: left as it is */
+
+    if (Lifetime == 0)
+    {
+        if (Entry)
+        {
+            RtlZeroMemory(Entry, sizeof(*Entry));
+            Route6Count--;
+            Route6Changed();
+            RouteChangeNotify();
+        }
+        return;
+    }
+
+    if (!Entry)
+    {
+        for (i = 0; i < ROUTE6_MAX; i++)
+        {
+            PROUTE6_ENTRY Other = &Route6Table[i];
+
+            if (Other->Netif && (Other->Flags & TCP_IPV6_ROUTE_FROM_RA))
+            {
+                RaCount++;
+                if (Oldest == ROUTE6_MAX || Other->Created < Route6Table[Oldest].Created)
+                    Oldest = i;
+            }
+        }
+        if (RaCount >= ROUTE6_RA_MAX && Oldest < ROUTE6_MAX)
+        {
+            RtlZeroMemory(&Route6Table[Oldest], sizeof(Route6Table[Oldest]));
+            Route6Count--;
+        }
+        for (i = 0; i < ROUTE6_MAX && Route6Table[i].Netif; i++)
+            ;
+        if (i == ROUTE6_MAX)
+            return;                     /* the table is full of configured routes */
+        Entry = &Route6Table[i];
+        RtlZeroMemory(Entry, sizeof(*Entry));
+        Entry->Netif = netif;
+        Entry->IfIndex = IfIndex;
+        Entry->Prefix = Prefix;
+        Entry->PrefixLength = Length;
+        Entry->OnLink = FALSE;
+        Entry->NextHop = NextHop;
+        Route6Count++;
+        Changed = TRUE;
+    }
+    else if (Entry->Metric != Metric)
+        Changed = TRUE;
+
+    Entry->Metric = Metric;
+    Entry->Origin = ROUTE6_ORIGIN_RA;
+    Entry->Protocol = ROUTE6_PROTOCOL_NETMGMT;
+    Entry->Flags = TCP_IPV6_ROUTE_FROM_RA;
+    Entry->ValidLifetime = Lifetime;
+    Entry->PreferredLifetime = Lifetime;
+    Entry->Created = Route6Seconds();
 
     if (Changed)
     {
@@ -564,7 +688,7 @@ TCPQueryIpv6Routes(PVOID Out, ULONG OutSize)
         Row->IfIndex = IfIndex;
         Row->PrefixLength = 0;
         RtlCopyMemory(Row->NextHop, Neighbor->next_hop_address.addr, 16);
-        Row->Metric = ROUTE6_RA_METRIC;
+        Row->Metric = Route6PreferenceMetric((UCHAR)(default_router_list[i].flags >> 3));
         Row->ValidLifetime = Row->PreferredLifetime = default_router_list[i].invalidation_timer;
         Row->Origin = ROUTE6_ORIGIN_RA;
         Row->Protocol = ROUTE6_PROTOCOL_NETMGMT;
