@@ -121,6 +121,108 @@ TestCreateThreadNotify(VOID)
     /* TODO: register more than the maximum number of notifications */
 }
 
+/*
+ * A thread-create notify routine runs before the new thread has been inserted
+ * into the object manager; the new thread must still be found by its id.
+ * (Opening a handle to such a thread by id is refused: see the ntdll apitest
+ * NtOpenCreateRace.)
+ */
+static volatile LONG LookupCalls;
+static volatile LONG LookupFailures;
+static volatile LONG LookupBadThread;
+
+static
+VOID
+NTAPI
+LookupThreadNotifyRoutine(
+    IN HANDLE ProcessId,
+    IN HANDLE ThreadId,
+    IN BOOLEAN Create)
+{
+    PETHREAD Thread;
+    NTSTATUS Status;
+
+    if (!Create)
+        return;
+
+    InterlockedIncrement(&LookupCalls);
+    Status = PsLookupThreadByThreadId(ThreadId, &Thread);
+    if (!NT_SUCCESS(Status))
+    {
+        InterlockedIncrement(&LookupFailures);
+        return;
+    }
+    if (PsGetThreadId(Thread) != ThreadId ||
+        PsGetThreadProcessId(Thread) != ProcessId)
+    {
+        InterlockedIncrement(&LookupBadThread);
+    }
+    ObDereferenceObject(Thread);
+}
+
+static
+VOID
+NTAPI
+LookupThreadStart(
+    IN PVOID Context)
+{
+    UNREFERENCED_PARAMETER(Context);
+    PsTerminateSystemThread(STATUS_SUCCESS);
+}
+
+static
+VOID
+TestLookupInCreateThreadNotify(VOID)
+{
+    NTSTATUS Status;
+    HANDLE ThreadHandle;
+    PETHREAD Thread;
+    ULONG i;
+
+    LookupCalls = 0;
+    LookupFailures = 0;
+    LookupBadThread = 0;
+
+    Status = PsSetCreateThreadNotifyRoutine(LookupThreadNotifyRoutine);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+
+    for (i = 0; i < 16; i++)
+    {
+        Status = PsCreateSystemThread(&ThreadHandle,
+                                      THREAD_ALL_ACCESS,
+                                      NULL,
+                                      NULL,
+                                      NULL,
+                                      LookupThreadStart,
+                                      NULL);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (!NT_SUCCESS(Status))
+            continue;
+        Status = ObReferenceObjectByHandle(ThreadHandle,
+                                           SYNCHRONIZE,
+                                           *PsThreadType,
+                                           KernelMode,
+                                           (PVOID *)&Thread,
+                                           NULL);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        ZwClose(ThreadHandle);
+        if (NT_SUCCESS(Status))
+        {
+            KeWaitForSingleObject(Thread, Executive, KernelMode, FALSE, NULL);
+            ObDereferenceObject(Thread);
+        }
+    }
+
+    Status = PsRemoveCreateThreadNotifyRoutine(LookupThreadNotifyRoutine);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+
+    ok(LookupCalls >= 16, "Notify routine called %ld times\n", LookupCalls);
+    ok_eq_long(LookupFailures, 0);
+    ok_eq_long(LookupBadThread, 0);
+}
+
 static
 VOID
 NTAPI
@@ -173,5 +275,6 @@ START_TEST(PsNotify)
 {
     TestCreateProcessNotify();
     TestCreateThreadNotify();
+    TestLookupInCreateThreadNotify();
     TestLoadImageNotify();
 }

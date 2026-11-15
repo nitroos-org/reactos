@@ -2063,6 +2063,15 @@ NtOpenProcess(OUT PHANDLE ProcessHandle,
             return Status;
         }
 
+        /* The id is not valid yet if the creator has not inserted the process */
+        if (!PspIsObjectInserted(Process))
+        {
+            SeDeleteAccessState(&AccessState);
+            if (Thread) ObDereferenceObject(Thread);
+            ObDereferenceObject(Process);
+            return STATUS_INVALID_CID;
+        }
+
         /* A protected process gives a caller outside the protection only the limited rights */
         if (PreviousMode != KernelMode &&
             PspProtectedOpenDenied(Process,
@@ -2230,6 +2239,12 @@ NtGetNextProcess(
     /* Get the next process (this will dereference the previous process) */
     NextProcess = PsGetNextProcessEx(Process, Reverse);
 
+    /* Skip a process that its creator has not inserted yet */
+    while (NextProcess != NULL && !PspIsObjectInserted(NextProcess))
+    {
+        NextProcess = PsGetNextProcessEx(NextProcess, Reverse);
+    }
+
     /* Fail, if no process was found */
     if (NextProcess == NULL)
     {
@@ -2377,6 +2392,13 @@ NtGetNextThread(
         {
             ObDereferenceObject(Process);
             return STATUS_NO_MORE_ENTRIES;
+        }
+
+        /* Skip a thread that its creator has not inserted yet */
+        if (!PspIsObjectInserted(NextThread))
+        {
+            Thread = NextThread;
+            continue;
         }
 
         /* Open the Thread Object */
