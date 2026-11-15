@@ -6,10 +6,14 @@
  *              device is not an error: the rules stay stored and are pushed when the device appears.
  */
 #include <stdio.h>
+#include <wchar.h>
 #include <windef.h>
 #include <winbase.h>
 #include <winreg.h>
 #include <winsvc.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <iphlpapi.h>
 #include <winioctl.h>
 #include <reactos/nitrofw.h>
 #include <fwstore.h>
@@ -56,11 +60,151 @@ static VOID Report(DWORD err, BOOL present)
     RegCloseKey(hk);
 }
 
+/* Rules the push could not carry (or not fully): HKLM\SOFTWARE\ReactOS\Nitro\Firewall LastPushRejectedRules (all),
+   LastPushRejectedBlockRules (the Block rules among them: NOT enforced), LastPushPartialBlockRules, LastPushRejectedNames,
+   and one Application event per change of that state (not per push). */
+static VOID ReportRules(VOID)
+{
+    static ULONG lastRej, lastRejBlock, lastPar; static WCHAR lastNames[1024];
+    ULONG rej, rejBlock, par; WCHAR names[1024]; HKEY hk; DWORD disp;
+    FwPushGetReport(&rej, &rejBlock, &par, names, 1024);
+    if (!RegCreateKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\ReactOS\\Nitro\\Firewall", 0, NULL, 0, KEY_SET_VALUE, NULL, &hk, &disp))
+    {
+        RegSetValueExW(hk, L"LastPushRejectedRules", 0, REG_DWORD, (BYTE *)&rej, 4);
+        RegSetValueExW(hk, L"LastPushRejectedBlockRules", 0, REG_DWORD, (BYTE *)&rejBlock, 4);
+        RegSetValueExW(hk, L"LastPushPartialBlockRules", 0, REG_DWORD, (BYTE *)&par, 4);
+        RegSetValueExW(hk, L"LastPushRejectedNames", 0, REG_SZ, (BYTE *)names, (DWORD)((wcslen(names) + 1) * sizeof(WCHAR)));
+        RegCloseKey(hk);
+    }
+    if ((rej || par) && (rej != lastRej || rejBlock != lastRejBlock || par != lastPar || wcscmp(names, lastNames)))
+    {
+        HANDLE hes = RegisterEventSourceW(NULL, g_Name);
+        if (hes)
+        {
+            WCHAR msg[1280]; PCWSTR str[1];
+            _snwprintf(msg, 1279, L"NitroOS Firewall: %lu rule(s) were not pushed to the filter (%lu of them Block rule(s): not enforced) and %lu Block rule(s) are not fully enforced: %ls",
+                       rej, rejBlock, par, names);
+            msg[1279] = 0; str[0] = msg;
+            ReportEventW(hes, EVENTLOG_ERROR_TYPE, 0, 1, NULL, 1, 0, str, NULL);
+            DeregisterEventSource(hes);
+        }
+        OutputDebugStringW(L"mpssvc: firewall rules not pushed or not fully enforced\n");
+    }
+    lastRej = rej; lastRejBlock = rejBlock; lastPar = par; wcscpy(lastNames, names);
+}
+
+/* ---- address changes ----
+   The address keywords of a rule (LocalSubnet, DefaultGateway, DHCP, WINS; LocalSubnet for IPv6 too) are resolved
+   when the policy is pushed. A push before the address is up, or an address that changes later (DHCP, SLAAC), would
+   leave an Allow LocalSubnet rule allowing the old subnet (broader than written) and a Block LocalSubnet rule missing
+   the new one. So the policy is pushed again when what the keywords resolve from changes. NotifyAddrChange wakes the
+   service for IPv4 changes; the signature below (the same fields the resolution reads) is also checked every
+   ADDR_POLL_TICKS poll ticks, which covers IPv6 (no notification there) and a failed notification request, and a
+   push happens only when the signature differs from the one of the last push. A change must stay quiet for
+   ADDR_QUIET_MS before it is pushed (debounce: DHCP and SLAAC set several addresses). */
+
+#define ADDR_POLL_TICKS    5
+#define ADDR_QUIET_MS      1500
+
+static ULONG g_LastSig, g_PendingSig;
+static BOOL g_SigDirty;
+static DWORD g_SigDue;
+static HANDLE g_hAddr;
+static OVERLAPPED g_AddrOv;
+static HANDLE g_AddrFile;
+static BOOL g_AddrArmed;
+
+static ULONG SigAdd(ULONG h, const void *p, SIZE_T n)
+{
+    const BYTE *b = p;
+    while (n--) { h ^= *b++; h *= 16777619u; }
+    return h;
+}
+
+static ULONG AddrSignature(VOID)
+{
+    ULONG h = 2166136261u, len = 0, tries; DWORD rc = ERROR_BUFFER_OVERFLOW;
+    IP_ADAPTER_INFO *ai = NULL, *a; IP_ADAPTER_ADDRESSES *aa = NULL, *w;
+    for (tries = 0; tries < 3 && rc == ERROR_BUFFER_OVERFLOW; tries++)
+    {
+        if (ai) HeapFree(GetProcessHeap(), 0, ai);
+        ai = len ? HeapAlloc(GetProcessHeap(), 0, len) : NULL;
+        rc = GetAdaptersInfo(ai, &len);
+    }
+    if (rc == NO_ERROR && ai)
+    {
+        for (a = ai; a; a = a->Next)
+        {
+            IP_ADDR_STRING *s;
+            h = SigAdd(h, &a->Index, sizeof(a->Index));
+            for (s = &a->IpAddressList; s; s = s->Next)
+            { h = SigAdd(h, s->IpAddress.String, sizeof(s->IpAddress.String)); h = SigAdd(h, s->IpMask.String, sizeof(s->IpMask.String)); }
+            for (s = &a->GatewayList; s; s = s->Next) h = SigAdd(h, s->IpAddress.String, sizeof(s->IpAddress.String));
+            for (s = &a->DhcpServer; s; s = s->Next) h = SigAdd(h, s->IpAddress.String, sizeof(s->IpAddress.String));
+            for (s = &a->PrimaryWinsServer; s; s = s->Next) h = SigAdd(h, s->IpAddress.String, sizeof(s->IpAddress.String));
+        }
+    }
+    if (ai) HeapFree(GetProcessHeap(), 0, ai);
+    len = 16384; rc = ERROR_BUFFER_OVERFLOW;
+    for (tries = 0; tries < 3 && rc == ERROR_BUFFER_OVERFLOW; tries++)
+    {
+        if (aa) HeapFree(GetProcessHeap(), 0, aa);
+        aa = HeapAlloc(GetProcessHeap(), 0, len);
+        if (!aa) break;
+        rc = GetAdaptersAddresses(AF_INET6, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER, NULL, aa, &len);
+    }
+    if (aa && rc == NO_ERROR)
+    {
+        for (w = aa; w; w = w->Next)
+        {
+            IP_ADAPTER_UNICAST_ADDRESS *u;
+            for (u = w->FirstUnicastAddress; u; u = u->Next)
+            {
+                const SOCKADDR_IN6 *sa = (const SOCKADDR_IN6 *)u->Address.lpSockaddr;
+                if (!sa || u->Address.iSockaddrLength < (INT)sizeof(*sa) || sa->sin6_family != AF_INET6) continue;
+                h = SigAdd(h, &sa->sin6_addr, sizeof(sa->sin6_addr));
+                h = SigAdd(h, &u->OnLinkPrefixLength, sizeof(u->OnLinkPrefixLength));
+            }
+        }
+    }
+    if (aa) HeapFree(GetProcessHeap(), 0, aa);
+    return h;
+}
+
+/* queue the next NotifyAddrChange request; without one the signature poll still runs */
+static VOID ArmAddrNotify(VOID)
+{
+    g_AddrArmed = FALSE;
+    if (!g_hAddr) return;
+    ResetEvent(g_hAddr);
+    memset(&g_AddrOv, 0, sizeof(g_AddrOv));
+    g_AddrOv.hEvent = g_hAddr;
+    g_AddrFile = NULL;
+    if (NotifyAddrChange(&g_AddrFile, &g_AddrOv) == ERROR_IO_PENDING) g_AddrArmed = TRUE;
+}
+
+/* the signature differs from the last push's: (re)start the quiet period */
+static VOID AddrCheck(VOID)
+{
+    ULONG sig = AddrSignature();
+    if (sig == g_LastSig && !g_SigDirty) return;
+    if (sig == g_LastSig) { g_SigDirty = FALSE; return; }      /* changed and changed back before the push */
+    if (!g_SigDirty || sig != g_PendingSig) { g_SigDirty = TRUE; g_PendingSig = sig; g_SigDue = GetTickCount() + ADDR_QUIET_MS; }
+}
+
 static VOID Push(VOID)
 {
     BOOL present; DWORD err;
+    g_LastSig = AddrSignature();    /* taken before the push reads the addresses: a later change is seen as a difference */
+    g_SigDirty = FALSE;
     err = FwPushToKernel(++g_Generation, &present);
     Report(err, present);
+    if (present) ReportRules();
+}
+
+static VOID AddrPushIfDue(VOID)
+{
+    if (g_SigDirty && (LONG)(GetTickCount() - g_SigDue) >= 0) Push();
 }
 
 /* prompt.c: the "NitroOS Firewall has blocked some features of this app" prompt */
@@ -73,7 +217,7 @@ VOID PromptRulesChanged(VOID);
 
 static VOID WINAPI ServiceMainImpl(DWORD argc, LPWSTR *argv)
 {
-    HKEY hKey = NULL; HANDLE hChange = NULL, hs[2]; DWORD wait; ULONG retryTicks = 0;
+    HKEY hKey = NULL; HANDLE hChange = NULL, hs[3]; DWORD wait, nWait; ULONG retryTicks = 0, addrTicks = 0;
     FILETIME ft;
 
     g_hStatus = RegisterServiceCtrlHandlerExW(g_Name, CtrlHandler, NULL);
@@ -87,15 +231,21 @@ static VOID WINAPI ServiceMainImpl(DWORD argc, LPWSTR *argv)
     if (!g_hStop || !hChange || FwWatchOpen(&hKey)) goto done;
     RegNotifyChangeKeyValue(hKey, TRUE, REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_CHANGE_LAST_SET, hChange, TRUE);
     SetState(SERVICE_RUNNING);
+    g_hAddr = CreateEventW(NULL, TRUE, FALSE, NULL);
+    ArmAddrNotify();
     Push();
-    hs[0] = g_hStop; hs[1] = hChange;
+    hs[0] = g_hStop; hs[1] = hChange; hs[2] = g_hAddr;
     PromptInit(g_hStop);
     for (;;)
     {
         /* wake every POLL_MS for the block prompt; when the device is absent retry every NITROFW_RETRY_SECONDS;
            netsh/COM changes arrive through the key notification */
-        wait = WaitForMultipleObjects(2, hs, FALSE, POLL_MS);
+        nWait = g_AddrArmed ? 3 : 2;
+        wait = WaitForMultipleObjects(nWait, hs, FALSE, POLL_MS);
         if (wait == WAIT_OBJECT_0) break;
+        if (wait == WAIT_OBJECT_0 + 2) { ArmAddrNotify(); AddrCheck(); }
+        else if (wait == WAIT_TIMEOUT && ++addrTicks >= ADDR_POLL_TICKS) { addrTicks = 0; AddrCheck(); }
+        AddrPushIfDue();
         if (wait == WAIT_OBJECT_0 + 1)
         {
             Sleep(200);   /* coalesce bursts (netsh writes several values) */
@@ -115,7 +265,9 @@ static VOID WINAPI ServiceMainImpl(DWORD argc, LPWSTR *argv)
         }
     }
     PromptStop();
+    if (g_AddrArmed) CancelIPChangeNotify(&g_AddrOv);
 done:
+    if (g_hAddr) CloseHandle(g_hAddr);
     if (hKey) RegCloseKey(hKey);
     if (hChange) CloseHandle(hChange);
     if (g_hStop) CloseHandle(g_hStop);

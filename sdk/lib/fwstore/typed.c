@@ -165,6 +165,14 @@ static DWORD NormAddr(PCWSTR item, WCHAR *out, SIZE_T cch, BOOL *pV6, ULONG *pKe
         const WCHAR *p;
         for (p = item; *p; p++) if (!((*p >= L'0' && *p <= L'9') || (*p >= L'a' && *p <= L'f') || (*p >= L'A' && *p <= L'F') || *p == L':' || *p == L'/' || *p == L'-' || *p == L'.')) return ERROR_INVALID_PARAMETER;
         if (wcslen(item) >= cch) return ERROR_INVALID_PARAMETER;
+        p = wcschr(item, L'/');
+        if (p)
+        {
+            /* prefix length: 1 to 3 decimal digits to the end of the item, 0..128 (_wtoi would read "6a" as 6 and wrap) */
+            ULONG len = 0; int d = 0;
+            for (p++; *p >= L'0' && *p <= L'9'; p++) { len = len * 10 + (*p - L'0'); if (++d > 3) return ERROR_INVALID_PARAMETER; }
+            if (!d || *p || len > 128) return ERROR_INVALID_PARAMETER;
+        }
         wcscpy(out, item); *pV6 = TRUE; return 0;
     }
     if (!ParseV4(item, &e, &a)) return ERROR_INVALID_PARAMETER;
@@ -175,8 +183,10 @@ static DWORD NormAddr(PCWSTR item, WCHAR *out, SIZE_T cch, BOOL *pV6, ULONG *pKe
         e++;
         if (*e >= L'0' && *e <= L'9' && !wcschr(e, L'.'))
         {
-            ULONG p = (ULONG)_wtoi(e), m;
+            ULONG p, m;
             PCWSTR q = e; while (*q) { if (*q < L'0' || *q > L'9') return ERROR_INVALID_PARAMETER; q++; }
+            if (q - e > 2) return ERROR_INVALID_PARAMETER;      /* _wtoi wraps on a long digit string */
+            p = (ULONG)_wtoi(e);
             if (p > 32) return ERROR_INVALID_PARAMETER;
             m = MaskFromPrefix(p);
             a &= m; *pKey = a;
@@ -185,6 +195,7 @@ static DWORD NormAddr(PCWSTR item, WCHAR *out, SIZE_T cch, BOOL *pV6, ULONG *pKe
             return 0;
         }
         if (!ParseV4(e, &e, &b) || *e) return ERROR_INVALID_PARAMETER;
+        if ((~b & (~b + 1)) != 0) return ERROR_INVALID_PARAMETER;   /* a mask with holes is not a subnet */
         _swprintf(out, L"%u.%u.%u.%u/%u.%u.%u.%u", a >> 24, (a >> 16) & 255, (a >> 8) & 255, a & 255,
                   b >> 24, (b >> 16) & 255, (b >> 8) & 255, b & 255);
         return 0;

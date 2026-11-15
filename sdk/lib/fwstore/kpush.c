@@ -4,6 +4,8 @@
  * PURPOSE:     Build the NITROFW_POLICY blob from the store and send it to the kernel filter
  */
 #include "precomp.h"
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <iphlpapi.h>
 
 typedef struct { BYTE *p; SIZE_T len, cap; } BUF;
@@ -26,6 +28,49 @@ static BOOL Put(BUF *b, const void *d, SIZE_T n)
 
 static BOOL PadTo8(BUF *b) { SIZE_T pad = (8 - (b->len & 7)) & 7; return !pad || Put(b, NULL, pad); }
 
+/* ---- growable lists of parsed entries ----
+   A list is never cut at a fixed size: a rule with more entries than one kernel rule carries is split into several
+   kernel rules of the same action (see EmitRule), because dropping entries of a Block rule makes it match less
+   (fail open) and dropping entries of an Allow rule is only safe by accident. */
+
+typedef struct { BYTE *p; ULONG n, cap, esz; } DL;
+
+/* one dimension of a rule (local ports, remote IPv4 addresses, ...) as parsed from its tokens */
+typedef struct
+{
+    DL    l;       /* the entries that resolved */
+    ULONG cnt;     /* tokens in the rule */
+    ULONG bad;     /* tokens that gave no entry (keyword that is not resolvable here, bad number, empty keyword) */
+    BOOL  wild;    /* a "*" token: any */
+    BOOL  oom;
+} DIM;
+
+static VOID DimInit(DIM *d, ULONG esz) { memset(d, 0, sizeof(*d)); d->l.esz = esz; }
+static VOID DimFree(DIM *d) { if (d->l.p) HeapFree(GetProcessHeap(), 0, d->l.p); memset(d, 0, sizeof(*d)); }
+
+static BOOL DlAdd(DL *l, const void *e)
+{
+    if (l->n == l->cap)
+    {
+        ULONG nc = l->cap ? l->cap * 2 : 16; BYTE *np;
+        if (nc > 0x100000) return FALSE;
+        np = HeapAlloc(GetProcessHeap(), 0, (SIZE_T)nc * l->esz);
+        if (!np) return FALSE;
+        if (l->p) { memcpy(np, l->p, (SIZE_T)l->n * l->esz); HeapFree(GetProcessHeap(), 0, l->p); }
+        l->p = np; l->cap = nc;
+    }
+    memcpy(l->p + (SIZE_T)l->n * l->esz, e, l->esz);
+    l->n++;
+    return TRUE;
+}
+
+static VOID DimAdd(DIM *d, const void *e) { if (!DlAdd(&d->l, e)) d->oom = TRUE; }
+
+/* the dimension restricts the rule: it has tokens and no wildcard among them */
+static BOOL DimScoped(const DIM *d) { return d->cnt && !d->wild; }
+/* ... and at least one token resolved to something the kernel can match */
+static BOOL DimAlive(const DIM *d) { return d->l.n != 0; }
+
 static BOOL ParseV4Str(PCWSTR s, PCWSTR *end, ULONG *out)
 {
     ULONG v = 0; int parts = 0;
@@ -43,61 +88,109 @@ static BOOL ParseV4Str(PCWSTR s, PCWSTR *end, ULONG *out)
     return TRUE;
 }
 
+static BOOL MaskContiguous(ULONG m);
+
 /* resolve an address keyword to IPv4 ranges at push time */
-static BOOL AddKeyword(NITROFW_ADDR4_RANGE *arr, ULONG *n, ULONG max, PCWSTR kw)
+static VOID AddKeyword(DIM *d, PCWSTR kw)
 {
-    IP_ADAPTER_INFO *ai = NULL; ULONG len = 0; BOOL ok = TRUE;
+    IP_ADAPTER_INFO *ai = NULL; ULONG len = 0;
     IP_ADAPTER_INFO *a;
-    if (GetAdaptersInfo(NULL, &len) != ERROR_BUFFER_OVERFLOW) return TRUE;
+    if (GetAdaptersInfo(NULL, &len) != ERROR_BUFFER_OVERFLOW) return;
     ai = HeapAlloc(GetProcessHeap(), 0, len);
-    if (!ai) return FALSE;
+    if (!ai) { d->oom = TRUE; return; }
     if (GetAdaptersInfo(ai, &len) == 0)
     {
-        for (a = ai; a && *n < max; a = a->Next)
+        for (a = ai; a; a = a->Next)
         {
-            IP_ADDR_STRING *s; PCWSTR e; ULONG ip, mask; WCHAR w[32];
+            IP_ADDR_STRING *s; PCWSTR e; ULONG ip, mask; WCHAR w[32]; NITROFW_ADDR4_RANGE r;
             if (!_wcsicmp(kw, L"LocalSubnet"))
             {
-                for (s = &a->IpAddressList; s && *n < max; s = s->Next)
+                for (s = &a->IpAddressList; s; s = s->Next)
                 {
                     MultiByteToWideChar(CP_ACP, 0, s->IpAddress.String, -1, w, 32);
                     if (!ParseV4Str(w, &e, &ip)) continue;
                     MultiByteToWideChar(CP_ACP, 0, s->IpMask.String, -1, w, 32);
-                    if (!ParseV4Str(w, &e, &mask) || !ip) continue;
-                    arr[*n].Low = ip & mask; arr[*n].High = ip | ~mask; (*n)++;
+                    if (!ParseV4Str(w, &e, &mask) || !ip || !mask || !MaskContiguous(mask)) continue;
+                    r.Low = ip & mask; r.High = ip | ~mask; DimAdd(d, &r);
                 }
             }
             else if (!_wcsicmp(kw, L"DefaultGateway") || !_wcsicmp(kw, L"DHCP") || !_wcsicmp(kw, L"WINS"))
             {
                 s = !_wcsicmp(kw, L"DefaultGateway") ? &a->GatewayList : (!_wcsicmp(kw, L"DHCP") ? &a->DhcpServer : &a->PrimaryWinsServer);
-                for (; s && *n < max; s = s->Next)
+                for (; s; s = s->Next)
                 {
                     MultiByteToWideChar(CP_ACP, 0, s->IpAddress.String, -1, w, 32);
-                    if (ParseV4Str(w, &e, &ip) && ip) { arr[*n].Low = arr[*n].High = ip; (*n)++; }
+                    if (ParseV4Str(w, &e, &ip) && ip) { r.Low = r.High = ip; DimAdd(d, &r); }
                 }
             }
         }
     }
     HeapFree(GetProcessHeap(), 0, ai);
-    return ok;
 }
 
-static ULONG ParseAddr4(const FWR *raw, PCWSTR key, NITROFW_ADDR4_RANGE *arr, ULONG max)
+/* a netmask is contiguous: ones then zeros (a mask with a hole would make [a & m, a | ~m] a superset of the masked set) */
+static BOOL MaskContiguous(ULONG m) { ULONG inv = ~m; return (inv & (inv + 1)) == 0; }
+
+/* a prefix length: 1 to 3 decimal digits and nothing else up to the end of the string, value <= max */
+static BOOL ParsePrefix(PCWSTR s, ULONG max, ULONG *out)
 {
-    ULONG i, n = 0, cnt = FwrCount(raw, key);
-    for (i = 0; i < cnt && n < max; i++)
+    ULONG v = 0; int d = 0;
+    while (*s >= L'0' && *s <= L'9') { v = v * 10 + (*s - L'0'); s++; d++; if (d > 3 || v > max) return FALSE; }
+    if (!d || *s) return FALSE;
+    *out = v;
+    return TRUE;
+}
+
+/* One LA4/RA4/RA42 token: "addr", "addr/mask", "addr/prefixlength", "addr-addr", keywords. Anything that does not
+   parse to the end of the token (trailing characters, a mask with holes, a prefix above 32) gives no entry. */
+static VOID ParseAddr4Token(DIM *d, PCWSTR v)
+{
+    PCWSTR e; ULONG a, b; NITROFW_ADDR4_RANGE r;
+    if (!ParseV4Str(v, &e, &a))
     {
-        PCWSTR v = FwrGet(raw, key, i), e; ULONG a, b;
-        if (!ParseV4Str(v, &e, &a))
-        {
-            if (!wcschr(v, L':') && wcscmp(v, L"*")) AddKeyword(arr, &n, max, v);
-            continue;
-        }
-        if (*e == L'/') { if (ParseV4Str(e + 1, &e, &b)) { arr[n].Low = a & b; arr[n].High = a | ~b; n++; } }
-        else if (*e == L'-') { if (ParseV4Str(e + 1, &e, &b)) { arr[n].Low = a; arr[n].High = b; n++; } }
-        else { arr[n].Low = arr[n].High = a; n++; }
+        if (!wcschr(v, L':')) AddKeyword(d, v);
     }
-    return n;
+    else if (*e == L'/')
+    {
+        e++;
+        if (wcschr(e, L'.'))
+        {
+            PCWSTR e2;
+            if (ParseV4Str(e, &e2, &b) && !*e2 && MaskContiguous(b)) { r.Low = a & b; r.High = a | ~b; DimAdd(d, &r); }
+        }
+        else if (ParsePrefix(e, 32, &b))
+        {
+            ULONG m = b ? 0xFFFFFFFFu << (32 - b) : 0;
+            r.Low = a & m; r.High = a | ~m; DimAdd(d, &r);
+        }
+    }
+    else if (*e == L'-')
+    {
+        PCWSTR e2;
+        if (ParseV4Str(e + 1, &e2, &b) && !*e2 && a <= b) { r.Low = a; r.High = b; DimAdd(d, &r); }
+    }
+    else if (!*e) { r.Low = r.High = a; DimAdd(d, &r); }
+}
+
+/* LA4 / RA4 + RA42 (Windows' key for the keyword scopes of the remote side, same dimension): "*" = any; a token that
+   gives nothing is counted in d->bad. key2 may be NULL. */
+static VOID ParseAddr4(const FWR *raw, PCWSTR key, PCWSTR key2, DIM *d)
+{
+    ULONG pass, i; PCWSTR keys[2];
+    keys[0] = key; keys[1] = key2;
+    DimInit(d, sizeof(NITROFW_ADDR4_RANGE));
+    for (pass = 0; pass < 2; pass++)
+    {
+        ULONG cnt = keys[pass] ? FwrCount(raw, keys[pass]) : 0;
+        d->cnt += cnt;
+        for (i = 0; i < cnt; i++)
+        {
+            PCWSTR v = FwrGet(raw, keys[pass], i); ULONG before = d->l.n;
+            if (!wcscmp(v, L"*")) { d->wild = TRUE; continue; }
+            ParseAddr4Token(d, v);
+            if (d->l.n == before) d->bad++;
+        }
+    }
 }
 
 /* Does the running tcpip have IPv6? The kernel decides (IOCTL_NITROFW_GET_VERSION, NITROFW_FEATURE_IPV6: tcpip read
@@ -152,70 +245,171 @@ static BOOL ParseV6Str(PCWSTR s, PCWSTR *end, BYTE *out)
     return TRUE;
 }
 
-/* IPv6 ranges of LA6/RA6: "addr", "addr/prefixlength", "addr-addr"; entries that do not parse (keywords such as
-   LocalSubnet are not resolved for IPv6) are skipped. A list with entries of which none parses becomes one
-   range that no packet is in, so that the rule never matches instead of matching everything. */
-static ULONG ParseAddr6(const FWR *raw, PCWSTR key, NITROFW_ADDR6_RANGE *arr, ULONG max)
+#ifndef GAA_FLAG_SKIP_ANYCAST
+#define GAA_FLAG_SKIP_ANYCAST 0x0002
+#define GAA_FLAG_SKIP_MULTICAST 0x0004
+#define GAA_FLAG_SKIP_DNS_SERVER 0x0008
+#endif
+
+static VOID V6Range(DIM *d, const BYTE *a, int len)
 {
-    ULONG i, n = 0, cnt = FwrCount(raw, key);
-    for (i = 0; i < cnt && n < max; i++)
+    NITROFW_ADDR6_RANGE r; int k;
+    for (k = 0; k < 16; k++)
     {
-        PCWSTR v = FwrGet(raw, key, i), e; BYTE a[16], b[16];
-        if (!ParseV6Str(v, &e, a)) continue;
-        if (*e == L'/')
-        {
-            int len = _wtoi(e + 1), k;
-            if (len < 0 || len > 128 || e[1] < L'0' || e[1] > L'9') continue;
-            for (k = 0; k < 16; k++)
-            {
-                int bits = len - k * 8; BYTE mask = bits >= 8 ? 0xFF : (bits <= 0 ? 0 : (BYTE)(0xFF << (8 - bits)));
-                arr[n].Low[k] = a[k] & mask; arr[n].High[k] = a[k] | (BYTE)~mask;
-            }
-            n++;
-        }
-        else if (*e == L'-')
-        {
-            if (!ParseV6Str(e + 1, &e, b) || memcmp(a, b, 16) > 0) continue;
-            memcpy(arr[n].Low, a, 16); memcpy(arr[n].High, b, 16); n++;
-        }
-        else { memcpy(arr[n].Low, a, 16); memcpy(arr[n].High, a, 16); n++; }
+        int bits = len - k * 8; BYTE mask = bits >= 8 ? 0xFF : (bits <= 0 ? 0 : (BYTE)(0xFF << (8 - bits)));
+        r.Low[k] = a[k] & mask; r.High[k] = a[k] | (BYTE)~mask;
     }
-    if (cnt && !n)
-    {
-        memset(arr[0].Low, 0xFF, 16); memset(arr[0].High, 0xFF, 16); n = 1;
-    }
-    return n;
+    DimAdd(d, &r);
 }
 
-static ULONG ParsePorts(const FWR *raw, PCWSTR k1, PCWSTR k2, NITROFW_PORT_RANGE *arr, ULONG max)
+/* The one IPv6 keyword resolved here: LocalSubnet = the on-link prefix of every unicast address of the host (a link-local
+   address gives fe80::/64). The others (DefaultGateway, DNS, DHCP, WINS, Internet, ...) are not resolved for IPv6: the
+   token stays unresolved and the caller treats the IPv6 half of the rule accordingly (never as "matches nothing"). */
+static VOID AddKeyword6(DIM *d, PCWSTR kw)
 {
-    ULONG pass, i, n = 0;
-    PCWSTR keys[2]; keys[0] = k1; keys[1] = k2;
+    IP_ADAPTER_ADDRESSES *aa = NULL, *a; ULONG len = 16384, rc = ERROR_BUFFER_OVERFLOW, tries;
+    if (_wcsicmp(kw, L"LocalSubnet")) return;
+    for (tries = 0; tries < 3 && rc == ERROR_BUFFER_OVERFLOW; tries++)
+    {
+        aa = HeapAlloc(GetProcessHeap(), 0, len);
+        if (!aa) { d->oom = TRUE; return; }
+        rc = GetAdaptersAddresses(AF_INET6, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER, NULL, aa, &len);
+        if (rc != NO_ERROR) { HeapFree(GetProcessHeap(), 0, aa); aa = NULL; }
+    }
+    if (!aa) return;
+    for (a = aa; a; a = a->Next)
+    {
+        IP_ADAPTER_UNICAST_ADDRESS *u;
+        for (u = a->FirstUnicastAddress; u; u = u->Next)
+        {
+            const SOCKADDR_IN6 *sa = (const SOCKADDR_IN6 *)u->Address.lpSockaddr;
+            const BYTE *ad;
+            if (!sa || u->Address.iSockaddrLength < (INT)sizeof(*sa) || sa->sin6_family != AF_INET6) continue;
+            ad = (const BYTE *)&sa->sin6_addr;
+            if (ad[0] == 0xFE && (ad[1] & 0xC0) == 0x80) V6Range(d, ad, 64);
+            else if (u->OnLinkPrefixLength >= 1 && u->OnLinkPrefixLength <= 128) V6Range(d, ad, u->OnLinkPrefixLength);
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, aa);
+}
+
+/* IPv6 ranges of LA6 / RA6 + RA62: "addr", "addr/prefixlength" (decimal, 0..128, nothing after it), "addr-addr",
+   LocalSubnet. A token that gives nothing is counted in d->bad. A list of which no token resolves is NOT turned into
+   a range that never matches: the caller sees DimScoped && !DimAlive and leaves the IPv6 half of the rule out
+   (and says so loudly for a Block rule). key2 may be NULL. */
+static VOID ParseAddr6(const FWR *raw, PCWSTR key, PCWSTR key2, DIM *d)
+{
+    ULONG pass, i; PCWSTR keys[2];
+    keys[0] = key; keys[1] = key2;
+    DimInit(d, sizeof(NITROFW_ADDR6_RANGE));
     for (pass = 0; pass < 2; pass++)
     {
-        ULONG cnt = FwrCount(raw, keys[pass]);
-        for (i = 0; i < cnt && n < max; i++)
+        ULONG cnt = keys[pass] ? FwrCount(raw, keys[pass]) : 0;
+        d->cnt += cnt;
+        for (i = 0; i < cnt; i++)
         {
-            PCWSTR v = FwrGet(raw, keys[pass], i); ULONG lo, hi;
-            if (!_wcsicmp(v, L"RPC")) { arr[n].Low = 49152; arr[n].High = 65535; n++; continue; }
-            if (!_wcsicmp(v, L"RPC-EPMap")) { arr[n].Low = arr[n].High = 135; n++; continue; }
-            if (*v < L'0' || *v > L'9') continue;   /* other keywords: not resolvable here */
-            lo = hi = (ULONG)_wtoi(v);
-            if (wcschr(v, L'-')) hi = (ULONG)_wtoi(wcschr(v, L'-') + 1);
-            arr[n].Low = (USHORT)lo; arr[n].High = (USHORT)hi; n++;
+            PCWSTR v = FwrGet(raw, keys[pass], i), e; BYTE a[16], b[16]; ULONG before = d->l.n;
+            if (!wcscmp(v, L"*")) { d->wild = TRUE; continue; }
+            if (!ParseV6Str(v, &e, a)) AddKeyword6(d, v);
+            else if (*e == L'/')
+            {
+                ULONG len;
+                if (ParsePrefix(e + 1, 128, &len)) V6Range(d, a, (int)len);
+            }
+            else if (*e == L'-')
+            {
+                NITROFW_ADDR6_RANGE r; PCWSTR e2;
+                if (ParseV6Str(e + 1, &e2, b) && !*e2 && memcmp(a, b, 16) <= 0) { memcpy(r.Low, a, 16); memcpy(r.High, b, 16); DimAdd(d, &r); }
+            }
+            else if (!*e) { NITROFW_ADDR6_RANGE r; memcpy(r.Low, a, 16); memcpy(r.High, a, 16); DimAdd(d, &r); }
+            if (d->l.n == before) d->bad++;
         }
     }
-    return n;
 }
 
+static BOOL ParseUShort(PCWSTR *ps, ULONG *out)
+{
+    PCWSTR s = *ps; ULONG v = 0; int d = 0;
+    while (*s >= L'0' && *s <= L'9') { v = v * 10 + (*s - L'0'); s++; d++; if (v > 65535) return FALSE; }
+    if (!d) return FALSE;
+    *out = v; *ps = s;
+    return TRUE;
+}
+
+/* ports of the keys (single ports and ranges; LPort2_10 / LPort2_20 / LPort are one dimension: Windows keeps its keyword
+   scopes in the 2_xx keys); a token that gives nothing (keyword that is not resolved here, number above 65535, range
+   with Low > High: the kernel would reject the whole policy for it) is counted in d->bad, never read as "any" */
+static VOID ParsePorts(const FWR *raw, PCWSTR k1, PCWSTR k2, PCWSTR k3, DIM *d)
+{
+    ULONG pass, i; PCWSTR keys[3];
+    keys[0] = k1; keys[1] = k2; keys[2] = k3;
+    DimInit(d, sizeof(NITROFW_PORT_RANGE));
+    for (pass = 0; pass < 3; pass++)
+    {
+        ULONG cnt = FwrCount(raw, keys[pass]);
+        d->cnt += cnt;
+        for (i = 0; i < cnt; i++)
+        {
+            PCWSTR v = FwrGet(raw, keys[pass], i); ULONG lo, hi; NITROFW_PORT_RANGE r; BOOL ok = FALSE;
+            if (!wcscmp(v, L"*")) { d->wild = TRUE; continue; }
+            if (!_wcsicmp(v, L"RPC")) { r.Low = 49152; r.High = 65535; ok = TRUE; }
+            else if (!_wcsicmp(v, L"RPC-EPMap")) { r.Low = r.High = 135; ok = TRUE; }
+            else if (ParseUShort(&v, &lo))
+            {
+                hi = lo;
+                if (*v == L'-') { v++; ok = ParseUShort(&v, &hi) && !*v && lo <= hi; }
+                else ok = !*v;
+                r.Low = (USHORT)lo; r.High = (USHORT)hi;
+            }
+            if (ok) DimAdd(d, &r); else d->bad++;
+        }
+    }
+}
+
+/* 1 to 3 decimal digits, value <= 254 (255 is the "any" marker of the kernel entry, never a number) */
+static BOOL ParseIcmpNum(PCWSTR *ps, ULONG *out)
+{
+    PCWSTR s = *ps; ULONG v = 0; int d = 0;
+    while (*s >= L'0' && *s <= L'9') { v = v * 10 + (*s - L'0'); s++; d++; if (d > 3 || v > 254) return FALSE; }
+    if (!d) return FALSE;
+    *out = v; *ps = s;
+    return TRUE;
+}
+
+/* ICMP "type" or "type:code" entries (type and code a number 0..254 or "*" = any); anything else, trailing characters
+   included, gives no entry */
+static VOID ParseIcmp(const FWR *raw, PCWSTR key, DIM *d)
+{
+    ULONG i;
+    DimInit(d, sizeof(NITROFW_ICMP_ENTRY));
+    d->cnt = FwrCount(raw, key);
+    for (i = 0; i < d->cnt; i++)
+    {
+        PCWSTR e = FwrGet(raw, key, i); NITROFW_ICMP_ENTRY ic; ULONG t = NITROFW_ICMP_ANY, cd = NITROFW_ICMP_ANY; BOOL ok = TRUE;
+        if (*e == L'*') e++; else ok = ParseIcmpNum(&e, &t);
+        if (ok && *e == L':')
+        {
+            e++;
+            if (*e == L'*') e++; else ok = ParseIcmpNum(&e, &cd);
+        }
+        if (!ok || *e) { d->bad++; continue; }
+        ic.Type = (UCHAR)t; ic.Code = (UCHAR)cd;
+        DimAdd(d, &ic);
+    }
+}
+
+/* NT path of the App value; NULL when it cannot be resolved (the caller must not drop the program condition then:
+   a rule for one program would match every program) */
 static PWSTR ToNtPath(PCWSTR app)
 {
     WCHAR exp[MAX_PATH], dev[MAX_PATH], drv[3];
     PWSTR out;
-    DWORD n = ExpandEnvironmentStringsW(app, exp, MAX_PATH);
+    DWORD n;
+    if (!app || !*app) return NULL;
+    n = ExpandEnvironmentStringsW(app, exp, MAX_PATH);
     if (!n || n > MAX_PATH) return NULL;
     if (!_wcsicmp(exp, L"System")) { out = HeapAlloc(GetProcessHeap(), 0, 14); if (out) wcscpy(out, L"System"); return out; }
-    if (exp[1] != L':') return NULL;
+    if (!exp[0] || exp[1] != L':') return NULL;     /* exp[1] is only read after exp[0] proved the string is not empty */
     drv[0] = exp[0]; drv[1] = L':'; drv[2] = 0;
     if (!QueryDosDeviceW(drv, dev, MAX_PATH)) return NULL;
     out = HeapAlloc(GetProcessHeap(), 0, (wcslen(dev) + wcslen(exp) + 1) * sizeof(WCHAR));
@@ -223,63 +417,208 @@ static PWSTR ToNtPath(PCWSTR app)
     return out;
 }
 
-static BOOL BuildRule(BUF *b, const FW_RULE *r, BOOL v6)
+/* ---- rules that were not (or not fully) pushed: the rule service reports them (FwPushGetReport) ---- */
+
+#define REPORT_CHARS 1024
+static ULONG g_Rejected, g_RejectedBlock, g_Partial;
+static BOOL g_NamesCut;
+static WCHAR g_RejNames[REPORT_CHARS];
+
+/* A rejected Allow rule is narrower than written (harmless); a rejected Block rule leaves its traffic to the Allow rules
+   and the profile default (fail open), so the two are counted and tagged apart. The names list ends with "..." once,
+   and nothing is appended after that. */
+static VOID Note(PCWSTR tag, const FW_RULE *r)
 {
-    NITROFW_RULE hdr; NITROFW_PORT_RANGE lp[64], rp[64]; NITROFW_ADDR4_RANGE la[64], ra[64];
-    NITROFW_ADDR6_RANGE la6[64], ra6[64];
-    ULONG start = (ULONG)b->len, nlp, nrp, nla, nra, nla6 = 0, nra6 = 0, i;
-    PWSTR nt = NULL; PCWSTR v; ULONG ifm = 0;
+    SIZE_T have = wcslen(g_RejNames);
+    PCWSTR name = r->Name && *r->Name ? r->Name : L"(unnamed)";
+    if (g_NamesCut) return;
+    if (have + wcslen(tag) + wcslen(name) + 6 >= REPORT_CHARS)
+    {
+        g_NamesCut = TRUE;
+        if (have + 4 < REPORT_CHARS) wcscat(g_RejNames, L"...");
+        return;
+    }
+    if (have) wcscat(g_RejNames, L"; ");
+    wcscat(g_RejNames, tag); wcscat(g_RejNames, L": "); wcscat(g_RejNames, name);
+}
+
+/* ---- one source rule -> one or more kernel rules ----
+   The kernel carries at most NITROFW_MAX_LIST entries per list, and the lists of a rule are ANDed with each other
+   (OR inside a list). A list longer than LIST_CHUNK is therefore cut into chunks and a kernel rule with the same
+   action is emitted for every combination of chunks: the union of those rules is exactly the source rule. Nothing
+   is ever left out of a list. */
+
+#define LIST_CHUNK 64
+C_ASSERT(LIST_CHUNK <= NITROFW_MAX_LIST);
+
+static ULONG Chunks(const DL *l) { return (!l || !l->n) ? 1 : (l->n + LIST_CHUNK - 1) / LIST_CHUNK; }
+
+static BOOL PutChunk(BUF *b, ULONG start, const DL *l, ULONG ci, ULONG *cnt, ULONG *off)
+{
+    ULONG n;
+    if (!l || !l->n) return TRUE;
+    n = l->n - ci * LIST_CHUNK;
+    if (n > LIST_CHUNK) n = LIST_CHUNK;
+    if (!PadTo8(b)) return FALSE;
+    *cnt = n; *off = (ULONG)b->len - start;
+    return Put(b, l->p + (SIZE_T)ci * LIST_CHUNK * l->esz, (SIZE_T)n * l->esz);
+}
+
+/* the lists are NULL when the rule does not restrict that dimension; fam 4 or 6 says what la/ra hold */
+static BOOL EmitHalf(BUF *b, const NITROFW_RULE *tmpl, int fam, const DL *lp, const DL *rp, const DL *la, const DL *ra,
+                     const DL *ic, PCWSTR nt, PCWSTR svc, ULONG *pieces, ULONG maxPieces)
+{
+    ULONG nc[5], total = 1, idx[5] = { 0 }, k;
+    nc[0] = Chunks(lp); nc[1] = Chunks(rp); nc[2] = Chunks(la); nc[3] = Chunks(ra); nc[4] = Chunks(ic);
+    for (k = 0; k < 5; k++)
+    {
+        if (nc[k] > maxPieces || total > maxPieces / nc[k]) return FALSE;     /* too many kernel rules: caller rejects */
+        total *= nc[k];
+    }
+    if (total > maxPieces - *pieces) return FALSE;
+    for (;;)
+    {
+        NITROFW_RULE hdr = *tmpl; ULONG start = (ULONG)b->len;
+        if (!Put(b, &hdr, sizeof(hdr))) return FALSE;
+        if (!PutChunk(b, start, lp, idx[0], &hdr.LocalPortCount, &hdr.LocalPortOffset) ||
+            !PutChunk(b, start, rp, idx[1], &hdr.RemotePortCount, &hdr.RemotePortOffset)) return FALSE;
+        if (fam == 4)
+        {
+            if (!PutChunk(b, start, la, idx[2], &hdr.LocalAddr4Count, &hdr.LocalAddr4Offset) ||
+                !PutChunk(b, start, ra, idx[3], &hdr.RemoteAddr4Count, &hdr.RemoteAddr4Offset)) return FALSE;
+        }
+        else if (fam == 6)
+        {
+            if (!PutChunk(b, start, la, idx[2], &hdr.LocalAddr6Count, &hdr.LocalAddr6Offset) ||
+                !PutChunk(b, start, ra, idx[3], &hdr.RemoteAddr6Count, &hdr.RemoteAddr6Offset)) return FALSE;
+        }
+        if (!PutChunk(b, start, ic, idx[4], &hdr.IcmpCount, &hdr.IcmpOffset)) return FALSE;
+        if (nt) { if (!PadTo8(b)) return FALSE; hdr.AppPathOffset = (ULONG)b->len - start; if (!Put(b, nt, (wcslen(nt) + 1) * sizeof(WCHAR))) return FALSE; }
+        if (svc) { if (!PadTo8(b)) return FALSE; hdr.ServiceNameOffset = (ULONG)b->len - start; if (!Put(b, svc, (wcslen(svc) + 1) * sizeof(WCHAR))) return FALSE; }
+        if (!PadTo8(b)) return FALSE;
+        hdr.Size = (ULONG)b->len - start;
+        memcpy(b->p + start, &hdr, sizeof(hdr));
+        (*pieces)++;
+        for (k = 0; k < 5; k++) { if (++idx[k] < nc[k]) break; idx[k] = 0; }
+        if (k == 5) break;
+    }
+    return TRUE;
+}
+
+typedef enum { BR_OK, BR_SKIPPED, BR_REJECTED } BR_RESULT;
+
+/* Turns one stored rule into kernel rules. BR_SKIPPED: the rule can never match anything in this configuration
+   (it is scoped to IPv6 addresses only and the kernel has no IPv6), nothing is pushed and that is exact.
+   BR_REJECTED: the rule cannot be represented without becoming broader or narrower than it is (a list of which no
+   token resolves, a program path that does not resolve, too many kernel rules, out of memory): nothing is pushed
+   for it, b is as before. The caller counts and reports it. *pPartial is set when a Block rule is pushed but a
+   part of it is not enforced (an IPv6 half whose keywords do not resolve, or tokens that gave nothing). */
+static BR_RESULT BuildRule(BUF *b, const FW_RULE *r, BOOL v6, ULONG *pieces, ULONG maxPieces, BOOL *pPartial)
+{
+    NITROFW_RULE hdr; DIM lp, rp, la4, ra4, la6, ra6, ic;
+    ULONG start = (ULONG)b->len, i, ifm = 0, first = *pieces;
+    PWSTR nt = NULL; PCWSTR v, svc = NULL, icKey; BR_RESULT res = BR_REJECTED;
+    BOOL block, lScoped, rScoped, do4, do6, ok = TRUE;
+    ULONG bad = 0, bad4, bad6;
+
+    *pPartial = FALSE;
     memset(&hdr, 0, sizeof(hdr));
     hdr.Action = r->Action ? NITROFW_ACTION_ALLOW : NITROFW_ACTION_BLOCK;
+    block = !r->Action;
     hdr.Direction = (UCHAR)(r->Dir == 2 ? NITROFW_DIR_OUT : NITROFW_DIR_IN);
     hdr.Protocol = (USHORT)r->Protocol;
     hdr.ProfileMask = (r->Profiles == FWP_ANY_COM) ? FWP_ALL : (r->Profiles & FWP_ALL);
     if (!hdr.ProfileMask) hdr.ProfileMask = FWP_ALL;
-    nlp = ParsePorts(&r->Raw, L"LPort2_10", L"LPort", lp, 64);
-    nrp = ParsePorts(&r->Raw, L"RPort2_10", L"RPort", rp, 64);
-    nla = ParseAddr4(&r->Raw, L"LA4", la, 64);
-    nra = ParseAddr4(&r->Raw, L"RA4", ra, 64);
-    if (v6)
-    {
-        nla6 = ParseAddr6(&r->Raw, L"LA6", la6, 64);
-        nra6 = ParseAddr6(&r->Raw, L"RA6", ra6, 64);
-    }
     for (i = 0; (v = FwrGet(&r->Raw, L"IFType", i)) != NULL; i++)
         ifm |= !_wcsicmp(v, L"Lan") ? NITROFW_IFTYPE_LAN : (!_wcsicmp(v, L"Wireless") ? NITROFW_IFTYPE_WIRELESS : (!_wcsicmp(v, L"RemoteAccess") ? NITROFW_IFTYPE_REMOTEACCESS : 0));
     hdr.IfTypes = ifm ? ifm : NITROFW_IFTYPE_ALL;
-    if (r->App) nt = ToNtPath(r->App);
-    if (!Put(b, &hdr, sizeof(hdr))) return FALSE;
-    if (nlp) { PadTo8(b); hdr.LocalPortCount = nlp; hdr.LocalPortOffset = (ULONG)b->len - start; Put(b, lp, nlp * sizeof(lp[0])); }
-    if (nrp) { PadTo8(b); hdr.RemotePortCount = nrp; hdr.RemotePortOffset = (ULONG)b->len - start; Put(b, rp, nrp * sizeof(rp[0])); }
-    if (nla) { PadTo8(b); hdr.LocalAddr4Count = nla; hdr.LocalAddr4Offset = (ULONG)b->len - start; Put(b, la, nla * sizeof(la[0])); }
-    if (nra) { PadTo8(b); hdr.RemoteAddr4Count = nra; hdr.RemoteAddr4Offset = (ULONG)b->len - start; Put(b, ra, nra * sizeof(ra[0])); }
-    if (nla6) { PadTo8(b); hdr.LocalAddr6Count = nla6; hdr.LocalAddr6Offset = (ULONG)b->len - start; Put(b, la6, nla6 * sizeof(la6[0])); }
-    if (nra6) { PadTo8(b); hdr.RemoteAddr6Count = nra6; hdr.RemoteAddr6Offset = (ULONG)b->len - start; Put(b, ra6, nra6 * sizeof(ra6[0])); }
-    if (r->Icmp && (r->Protocol == 1 || r->Protocol == 58))
+
+    ParsePorts(&r->Raw, L"LPort2_10", L"LPort2_20", L"LPort", &lp);
+    ParsePorts(&r->Raw, L"RPort2_10", L"RPort2_20", L"RPort", &rp);
+    ParseAddr4(&r->Raw, L"LA4", NULL, &la4);
+    ParseAddr4(&r->Raw, L"RA4", L"RA42", &ra4);
+    /* parsed also without kernel IPv6: an IPv6 token still scopes its side (LocalAddresses/RemoteAddresses are one
+       condition each over both families) */
+    ParseAddr6(&r->Raw, L"LA6", NULL, &la6);
+    ParseAddr6(&r->Raw, L"RA6", L"RA62", &ra6);
+    icKey = r->Protocol == 1 ? L"ICMP4" : L"ICMP6";
+    if (r->Icmp && (r->Protocol == 1 || r->Protocol == 58)) ParseIcmp(&r->Raw, icKey, &ic);
+    else DimInit(&ic, sizeof(NITROFW_ICMP_ENTRY));
+    if (r->Svc && *r->Svc && wcscmp(r->Svc, L"*")) svc = r->Svc;     /* an empty name would make the kernel reject the policy */
+    /* values the kernel would reject the whole policy for (or silently turn into another protocol through the USHORT
+       cast): the rule is rejected on its own */
+    if (r->Protocol < 0 || r->Protocol > NITROFW_PROTO_ANY) ok = FALSE;
+    if (svc && wcslen(svc) > 32767) ok = FALSE;
+    if (r->App && *r->App)
     {
-        NITROFW_ICMP_ENTRY ic[32]; ULONG n = 0;
-        for (i = 0; i < FwrCount(&r->Raw, r->Protocol == 1 ? L"ICMP4" : L"ICMP6") && n < 32; i++)
-        {
-            PCWSTR e = FwrGet(&r->Raw, r->Protocol == 1 ? L"ICMP4" : L"ICMP6", i), c = wcschr(e, L':');
-            ic[n].Type = (*e == L'*') ? NITROFW_ICMP_ANY : (UCHAR)_wtoi(e);
-            ic[n].Code = (!c || c[1] == L'*') ? NITROFW_ICMP_ANY : (UCHAR)_wtoi(c + 1);
-            n++;
-        }
-        if (n) { PadTo8(b); hdr.IcmpCount = n; hdr.IcmpOffset = (ULONG)b->len - start; Put(b, ic, n * sizeof(ic[0])); }
+        nt = ToNtPath(r->App);
+        if (!nt) ok = FALSE;       /* dropping the program condition would widen the rule to every program */
     }
-    if (nt) { PadTo8(b); hdr.AppPathOffset = (ULONG)b->len - start; Put(b, nt, (wcslen(nt) + 1) * sizeof(WCHAR)); HeapFree(GetProcessHeap(), 0, nt); }
-    if (r->Svc && wcscmp(r->Svc, L"*")) { PadTo8(b); hdr.ServiceNameOffset = (ULONG)b->len - start; Put(b, r->Svc, (wcslen(r->Svc) + 1) * sizeof(WCHAR)); }
-    PadTo8(b);
-    hdr.Size = (ULONG)b->len - start;
-    memcpy(b->p + start, &hdr, sizeof(hdr));
-    return TRUE;
+    if (lp.oom || rp.oom || la4.oom || ra4.oom || la6.oom || ra6.oom || ic.oom) ok = FALSE;
+    /* a scoped dimension of which no token resolved is never "any": the rule cannot be represented */
+    if ((DimScoped(&lp) && !DimAlive(&lp)) || (DimScoped(&rp) && !DimAlive(&rp)) || (DimScoped(&ic) && !DimAlive(&ic))) ok = FALSE;
+    if (!ok) goto done;
+
+    bad = (DimScoped(&lp) ? lp.bad : 0) + (DimScoped(&rp) ? rp.bad : 0) + (DimScoped(&ic) ? ic.bad : 0);
+    /* A side (local, remote) is ONE condition over both families: scoped when it has a token and no "*" in either
+       family. The IPv4 half carries the IPv4 entries of every scoped side and exists only when every scoped side has
+       an IPv4 entry (a side scoped to IPv6 addresses only matches no IPv4 packet); the same for the IPv6 half (which
+       also needs a kernel with IPv6). Deciding "scoped" per family would leave a side that only has entries of the
+       other family without any condition = broader than the rule. */
+    lScoped = (la4.cnt || la6.cnt) && !la4.wild && !la6.wild;
+    rScoped = (ra4.cnt || ra6.cnt) && !ra4.wild && !ra6.wild;
+    if (!lScoped && !rScoped)
+    {
+        /* no address condition: one kernel rule (more if a list is long) for both families */
+        if (!EmitHalf(b, &hdr, 0, DimScoped(&lp) ? &lp.l : NULL, DimScoped(&rp) ? &rp.l : NULL, NULL, NULL,
+                      DimScoped(&ic) ? &ic.l : NULL, nt, svc, pieces, maxPieces)) goto fail;
+        if (block && bad) *pPartial = TRUE;
+        res = BR_OK;
+        goto done;
+    }
+    bad4 = (lScoped ? la4.bad : 0) + (rScoped ? ra4.bad : 0);
+    bad6 = v6 ? (lScoped ? la6.bad : 0) + (rScoped ? ra6.bad : 0) : 0;
+    do4 = (!lScoped || DimAlive(&la4)) && (!rScoped || DimAlive(&ra4));
+    do6 = v6 && (!lScoped || DimAlive(&la6)) && (!rScoped || DimAlive(&ra6));
+    if (!do4 && !do6)
+    {
+        /* nothing representable: exact when no token failed (the rule matches no packet this kernel sees), else the
+           rule is rejected (never a match-all or never-matching stand-in) */
+        res = (bad4 || bad6) ? BR_REJECTED : BR_SKIPPED;
+        goto done;
+    }
+    if (do4 && !EmitHalf(b, &hdr, 4, DimScoped(&lp) ? &lp.l : NULL, DimScoped(&rp) ? &rp.l : NULL,
+                         lScoped ? &la4.l : NULL, rScoped ? &ra4.l : NULL,
+                         DimScoped(&ic) ? &ic.l : NULL, nt, svc, pieces, maxPieces)) goto fail;
+    if (do6 && !EmitHalf(b, &hdr, 6, DimScoped(&lp) ? &lp.l : NULL, DimScoped(&rp) ? &rp.l : NULL,
+                         lScoped ? &la6.l : NULL, rScoped ? &ra6.l : NULL,
+                         DimScoped(&ic) ? &ic.l : NULL, nt, svc, pieces, maxPieces)) goto fail;
+    if (block && (bad || bad4 || bad6)) *pPartial = TRUE;
+    res = BR_OK;
+    goto done;
+fail:
+    res = BR_REJECTED;
+done:
+    if (res != BR_OK) { b->len = start; *pieces = first; }
+    if (nt) HeapFree(GetProcessHeap(), 0, nt);
+    DimFree(&lp); DimFree(&rp); DimFree(&la4); DimFree(&ra4); DimFree(&la6); DimFree(&ra6); DimFree(&ic);
+    return res;
+}
+
+VOID FwPushGetReport(ULONG *pRejected, ULONG *pRejectedBlock, ULONG *pPartial, PWSTR Names, ULONG Chars)
+{
+    if (pRejected) *pRejected = g_Rejected;
+    if (pRejectedBlock) *pRejectedBlock = g_RejectedBlock;
+    if (pPartial) *pPartial = g_Partial;
+    if (Names && Chars) { wcsncpy(Names, g_RejNames, Chars - 1); Names[Chars - 1] = 0; }
 }
 
 DWORD FwPushToKernel(ULONGLONG gen, BOOL *pPresent)
 {
     FW_RULESET rs; BUF b = { 0 }; NITROFW_POLICY pol; HANDLE h; DWORD err, ret, i;
-    ULONG cnt = 0; ULONG bit; BOOL v6on;
+    ULONG cnt = 0; ULONG bit, pass; BOOL v6on;
     HKEY hk; DWORD enforce = 1, cb = sizeof(DWORD), t;
+    g_Rejected = 0; g_RejectedBlock = 0; g_Partial = 0; g_RejNames[0] = 0; g_NamesCut = FALSE;
     if (pPresent) *pPresent = FALSE;
     h = CreateFileW(NITROFW_USER_PATH, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
     if (h == INVALID_HANDLE_VALUE) return GetLastError();
@@ -304,10 +643,32 @@ DWORD FwPushToKernel(ULONGLONG gen, BOOL *pPresent)
         pol.Profile[i].DefaultInbound = (UCHAR)(p.DefaultInbound ? NITROFW_ACTION_BLOCK : NITROFW_ACTION_ALLOW);
         pol.Profile[i].DefaultOutbound = (UCHAR)(p.DefaultOutbound ? NITROFW_ACTION_BLOCK : NITROFW_ACTION_ALLOW);
     }
-    Put(&b, &pol, sizeof(pol));
+    if (!Put(&b, &pol, sizeof(pol))) { FwRuleSetFree(&rs); CloseHandle(h); return ERROR_NOT_ENOUGH_MEMORY; }
     ((NITROFW_POLICY *)b.p)->RulesOffset = sizeof(pol);
-    for (i = 0; i < rs.N && cnt < NITROFW_MAX_RULES; i++)
-        if (rs.R[i].Enabled && BuildRule(&b, &rs.R[i], v6on)) cnt++;
+    /* Block rules first (pass 0), then Allow rules: when the rule-count or the size limit runs out, only Allow rules are
+       rejected (narrower than written), never a Block rule. The kernel lets a Block rule win over any Allow rule
+       whatever their order, so the order inside the policy carries no meaning. */
+    for (pass = 0; pass < 2; pass++)
+    for (i = 0; i < rs.N; i++)
+    {
+        ULONG before = cnt, savedLen = (ULONG)b.len; BOOL partial = FALSE, isBlock = !rs.R[i].Action; BR_RESULT br;
+        if (!rs.R[i].Enabled || (pass == 0) != isBlock) continue;
+        br = BuildRule(&b, &rs.R[i], v6on, &cnt, NITROFW_MAX_RULES, &partial);
+        /* a rule that would take the policy past its size limit is rejected on its own: the final size check below
+           would fail the whole push and leave the previous policy in force */
+        if (br == BR_OK && b.len > NITROFW_MAX_POLICY_SIZE) { b.len = savedLen; cnt = before; br = BR_REJECTED; }
+        if (br == BR_REJECTED)
+        {
+            g_Rejected++;
+            if (isBlock) g_RejectedBlock++;
+            Note(isBlock ? L"rejected Block rule (not enforced)" : L"rejected Allow rule", &rs.R[i]);
+        }
+        else if (br == BR_OK && partial)
+        {
+            g_Partial++;
+            Note(L"Block rule not fully enforced", &rs.R[i]);
+        }
+    }
     ((NITROFW_POLICY *)b.p)->RuleCount = cnt;
     ((NITROFW_POLICY *)b.p)->TotalSize = (ULONG)b.len;
     FwRuleSetFree(&rs);
