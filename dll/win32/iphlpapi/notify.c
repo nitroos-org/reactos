@@ -437,13 +437,26 @@ DWORD WINAPI NotifyUnicastIpAddressChange(ADDRESS_FAMILY Family, PVOID Callback,
 
 typedef VOID (WINAPI *STABLE_CALLBACK)(PVOID Context, PMIB_UNICASTIPADDRESS_TABLE Table);
 
+/* An address whose duplicate address detection is under way. The probes are only sent while the interface has its
+   link: an address of an interface without one (cable out) stays tentative until the link comes, so it does not
+   make the table unstable, or a caller would wait for as long as the cable is out */
 static BOOL has_tentative(const MIB_UNICASTIPADDRESS_TABLE *Table)
 {
   ULONG i;
 
   for (i = 0; i < Table->NumEntries; i++)
-    if (Table->Table[i].DadState == IpDadStateTentative)
-      return TRUE;
+  {
+    MIB_IPINTERFACE_ROW Interface;
+
+    if (Table->Table[i].DadState != IpDadStateTentative)
+      continue;
+    memset(&Interface, 0, sizeof(Interface));
+    Interface.Family = Table->Table[i].Address.si_family;
+    Interface.InterfaceLuid = Table->Table[i].InterfaceLuid;
+    if (GetIpInterfaceEntry(&Interface) == NO_ERROR && !Interface.Connected)
+      continue;
+    return TRUE;
+  }
   return FALSE;
 }
 
