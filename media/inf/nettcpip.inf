@@ -21,7 +21,7 @@ DriverVer  = 04/12/2006,1.00
 
 [MS_TCPIP.PrimaryInstall]
 Characteristics = 0xA0
-AddReg = TCPIP_AddReg_Global.NT
+AddReg = TCPIP_AddReg_Global.NT, TCPIP_AddReg_Ipv6.NT
 
 [TCPIP_AddReg_Global.NT]
 HKR,"Ndi","ClsId",0x00000000,"{A907657F-6FDF-11D0-8EFB-00C04FD912B2}"
@@ -41,14 +41,7 @@ HKLM,"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\WinSock","MaxSockAddrLe
 HKLM,"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\WinSock","MinSockAddrLength",0x00010001,0x00000010
 HKLM,"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\WinSock","HelperDllName",0x00000000,"%SystemRoot%\System32\wshtcpip.dll"
 HKLM,"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\WinSock","Mapping",0x00000001,0e,00,00,00,03,00,00,00,02,00,00,00,01,00,00,00,06,00,00,00,02,00,00,00,01,00,00,00,00,00,00,00,02,00,00,00,00,00,00,00,06,00,00,00,00,00,00,00,00,00,00,00,06,00,00,00,00,00,00,00,01,00,00,00,06,00,00,00,02,00,00,00,02,00,00,00,11,00,00,00,02,00,00,00,02,00,00,00,00,00,00,00,02,00,00,00,00,00,00,00,11,00,00,00,00,00,00,00,00,00,00,00,11,00,00,00,00,00,00,00,02,00,00,00,11,00,00,00,02,00,00,00,03,00,00,00,00,00,00,00,02,00,00,00,03,00,00,00,01,00,00,00,02,00,00,00,03,00,00,00,ff,00,00,00,02,00,00,00,03,00,00,00,06,00,00,00
-; The IPv6 transport: msafd finds the helper of an AF_INET6 socket through it (the same helper DLL; it makes the socket only while
-; Tcpip\Parameters\Ipv6Enable is set, so IPv6 sockets still fail with WSAEAFNOSUPPORT until then)
-HKLM,"SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\WinSock","UseDelayedAcceptance",0x00010001,0x00000000
-HKLM,"SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\WinSock","MaxSockAddrLength",0x00010001,0x0000001c
-HKLM,"SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\WinSock","MinSockAddrLength",0x00010001,0x0000001c
-HKLM,"SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\WinSock","HelperDllName",0x00000000,"%SystemRoot%\System32\wshtcpip.dll"
-HKLM,"SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\WinSock","Mapping",0x00000001,0a,00,00,00,03,00,00,00,17,00,00,00,01,00,00,00,06,00,00,00,17,00,00,00,01,00,00,00,00,00,00,00,17,00,00,00,00,00,00,00,06,00,00,00,17,00,00,00,02,00,00,00,11,00,00,00,17,00,00,00,02,00,00,00,00,00,00,00,17,00,00,00,00,00,00,00,11,00,00,00,17,00,00,00,03,00,00,00,00,00,00,00,17,00,00,00,03,00,00,00,3a,00,00,00,17,00,00,00,03,00,00,00,ff,00,00,00,17,00,00,00,03,00,00,00,06,00,00,00
-HKLM,"SYSTEM\CurrentControlSet\Services\Winsock\Parameters","Transports",0x00010000,"Tcpip","Tcpip6"
+HKLM,"SYSTEM\CurrentControlSet\Services\Winsock\Parameters","Transports",0x00010000,"Tcpip"
 HKLM,"SYSTEM\CurrentControlSet\Services\Winsock2\Parameters","AutodialDLL",0x00000000,"rasadhlp.dll"
 HKLM,"SYSTEM\CurrentControlSet\Services\Winsock2\Parameters","Current_NameSpace_Catalog",0x00000000,"NameSpace_Catalog5"
 HKLM,"SYSTEM\CurrentControlSet\Services\Winsock2\Parameters","Current_Protocol_Catalog",0x00000000,"Protocol_Catalog9"
@@ -76,8 +69,8 @@ HKLM,"SYSTEM\CurrentControlSet\Services\Winsock2\Parameters\NameSpace_Catalog5\C
 HKLM,"SYSTEM\CurrentControlSet\Services\Winsock2\Parameters\NameSpace_Catalog5\Catalog_Entries\000000000002","ProviderId",0x00000001,3A,24,42,66,A8,3B,A6,4A,BA,A5,2E,0B,D7,1F,DD,83
 HKLM,"SYSTEM\CurrentControlSet\Services\Winsock2\Parameters\NameSpace_Catalog5\Catalog_Entries\000000000002","LibraryPath",0x00000000,"%SystemRoot%\system32\mswsock.dll"
 HKLM,"SYSTEM\CurrentControlSet\Services\Winsock2\Parameters\NameSpace_Catalog5\Catalog_Entries\000000000002","DisplayString",0x00000000,"Network Location Awareness Legacy (NLAv1) Namespace"
-HKLM,"SYSTEM\CurrentControlSet\Services\Winsock2\Parameters\Protocol_Catalog9","Num_Catalog_Entries",0x00010001,0x00000006
-HKLM,"SYSTEM\CurrentControlSet\Services\Winsock2\Parameters\Protocol_Catalog9","Next_Catalog_Entry_ID",0x00010001,0x000003f0
+HKLM,"SYSTEM\CurrentControlSet\Services\Winsock2\Parameters\Protocol_Catalog9","Num_Catalog_Entries",0x00010001,0x00000003
+HKLM,"SYSTEM\CurrentControlSet\Services\Winsock2\Parameters\Protocol_Catalog9","Next_Catalog_Entry_ID",0x00010001,0x000003e9
 HKLM,"SYSTEM\CurrentControlSet\Services\Winsock2\Parameters\Protocol_Catalog9","Serial_Access_Num",0x00010001,0x00000001
 HKLM,"SYSTEM\CurrentControlSet\Services\Winsock2\Parameters\Protocol_Catalog9\Catalog_Entries\000000000001","ProtocolName",0x00000000,"msafd"
 HKLM,"SYSTEM\CurrentControlSet\Services\Winsock2\Parameters\Protocol_Catalog9\Catalog_Entries\000000000001","PackedCatalogItem",0x00000001,\
@@ -253,6 +246,25 @@ HKLM,"SYSTEM\CurrentControlSet\Services\Winsock2\Parameters\Protocol_Catalog9\Ca
 00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,\
 00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,\
 00,00,00,00,00,00,00,00
+
+; The IPv6 transport and the AF_INET6 entries of the Winsock protocol catalog (MSAFD, TCP, UDP and raw). A new install gets them
+; with the rest (PrimaryInstall); an install that predates them gets this section from winlogon (userenv, netupgrade.c:
+; UpgradeNetworkCatalog, run once in the SYSTEM context through MS_TCPIP.Ipv6Upgrade) when the stack has IPv6 on. It reads the
+; entries (their PackedCatalogItem provider ids) and the next entry id from this section, so an entry added here is picked up with
+; no code change. It is idempotent and must stay so: Transports is appended to, and the catalog count and next id come last.
+; The next id must stay above every entry of the section, and the entry keys of the section must not be reused.
+[MS_TCPIP.Ipv6Upgrade]
+AddReg = TCPIP_AddReg_Ipv6.NT
+
+[TCPIP_AddReg_Ipv6.NT]
+; The IPv6 transport: msafd finds the helper of an AF_INET6 socket through it (the same helper DLL; it makes the socket only while
+; the stack says it has IPv6 sockets on (Tcpip\Parameters\Ipv6Enable), so IPv6 sockets still fail with WSAEAFNOSUPPORT until then)
+HKLM,"SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\WinSock","UseDelayedAcceptance",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\WinSock","MaxSockAddrLength",0x00010001,0x0000001c
+HKLM,"SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\WinSock","MinSockAddrLength",0x00010001,0x0000001c
+HKLM,"SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\WinSock","HelperDllName",0x00000000,"%SystemRoot%\System32\wshtcpip.dll"
+HKLM,"SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\WinSock","Mapping",0x00000001,0a,00,00,00,03,00,00,00,17,00,00,00,01,00,00,00,06,00,00,00,17,00,00,00,01,00,00,00,00,00,00,00,17,00,00,00,00,00,00,00,06,00,00,00,17,00,00,00,02,00,00,00,11,00,00,00,17,00,00,00,02,00,00,00,00,00,00,00,17,00,00,00,00,00,00,00,11,00,00,00,17,00,00,00,03,00,00,00,00,00,00,00,17,00,00,00,03,00,00,00,3a,00,00,00,17,00,00,00,03,00,00,00,ff,00,00,00,17,00,00,00,03,00,00,00,06,00,00,00
+HKLM,"SYSTEM\CurrentControlSet\Services\Winsock\Parameters","Transports",0x00010008,"Tcpip6"
 HKLM,"SYSTEM\CurrentControlSet\Services\Winsock2\Parameters\Protocol_Catalog9\Catalog_Entries\000000000004","ProtocolName",0x00000000,"msafd"
 HKLM,"SYSTEM\CurrentControlSet\Services\Winsock2\Parameters\Protocol_Catalog9\Catalog_Entries\000000000004","PackedCatalogItem",0x00000001,\
 25,53,79,73,74,65,6D,52,6F,6F,74,25,5C,73,79,73,\
@@ -427,6 +439,9 @@ HKLM,"SYSTEM\CurrentControlSet\Services\Winsock2\Parameters\Protocol_Catalog9\Ca
 00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,\
 00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,\
 00,00,00,00,00,00,00,00
+HKLM,"SYSTEM\CurrentControlSet\Services\Winsock2\Parameters\Protocol_Catalog9","Num_Catalog_Entries",0x00010001,0x00000006
+HKLM,"SYSTEM\CurrentControlSet\Services\Winsock2\Parameters\Protocol_Catalog9","Next_Catalog_Entry_ID",0x00010001,0x000003f0
+HKLM,"SYSTEM\CurrentControlSet\Services\Winsock2\Parameters\Protocol_Catalog9","Serial_Access_Num",0x00010001,0x00000002
 
 [MS_TCPIP.PrimaryInstall.Services]
 AddService = Tcpip, , tcpip_Service_Inst

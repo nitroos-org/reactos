@@ -8,6 +8,7 @@ list(APPEND SOURCE
     environment.c
     gpolicy.c
     misc.c
+    netupgrade.c
     profacl.c
     profile.c
     registry.c
