@@ -102,6 +102,7 @@ extern void func_PrivateExtractIcons(void);
 extern void func_ProcessConnectTerminate(void);
 extern void func_RawInput(void);
 extern void func_RealGetWindowClass(void);
+extern void func_RedirGlassKeep(void);
 extern void func_RedirPresent(void);
 extern void func_RedrawWindow(void);
 extern void func_RegisterHotKey(void);
@@ -265,6 +266,7 @@ const struct test winetest_testlist[] =
     { "ProcessConnectTerminate", func_ProcessConnectTerminate },
     { "RawInput", func_RawInput },
     { "RealGetWindowClass", func_RealGetWindowClass },
+    { "RedirGlassKeep", func_RedirGlassKeep },
     { "RedirPresent", func_RedirPresent },
     { "RedrawWindow", func_RedrawWindow },
     { "RegisterHotKey", func_RegisterHotKey },

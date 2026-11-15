@@ -103,6 +103,7 @@ list(APPEND SOURCE
     ProcessConnectTerminate.c
     RawInput.c
     RealGetWindowClass.c
+    RedirGlassKeep.c
     RedirPresent.c
     RedrawWindow.c
     RegisterClassEx.c
