@@ -41,7 +41,14 @@
 #include "lwip/netif.h"
 #include "lwip/tcpip.h"
 
-#define UDP6_TAG                'U6pT'
+/* ntifs.h has it; this driver includes ntddk.h only (an implicit declaration would return an int, not a BOOLEAN) */
+NTKERNELAPI
+BOOLEAN
+NTAPI
+PsIsSystemThread(
+    _In_ PETHREAD Thread);
+
+#define UDP6_TAG               'U6pT'
 #define UDP6_SOCKET_GROUPS      20      /* IP_MAX_MEMBERSHIPS */
 #define UDP6_MACHINE_GROUPS     64
 /* Datagrams waiting for UDP6DeliverDeferred: beyond these the newest are dropped */
@@ -406,6 +413,54 @@ UDP6DeliverDeferred(VOID)
     }
 }
 
+/* The sender's thread is an application thread. AFD re-posts a datagram socket's receive inline only on a system
+ * thread; from an application thread it hands the re-post to a work item, and a datagram delivered to the socket
+ * before that ran finds no receive posted and is lost (a multicast sender that is also a member: the next send's
+ * looped copy). So what an application thread leaves in the queue is delivered from a work item, which is a
+ * system thread. One work item at a time; the item takes a reference on the device object while it is queued */
+static volatile LONG Udp6WorkQueued;
+
+static
+VOID
+NTAPI
+Udp6DeliveryWorker(PDEVICE_OBJECT DeviceObject, PVOID Context)
+{
+    UNREFERENCED_PARAMETER(DeviceObject);
+
+    /* Cleared first: a datagram queued after this point queues the next item */
+    InterlockedExchange(&Udp6WorkQueued, 0);
+    UDP6DeliverDeferred();
+    IoFreeWorkItem((PIO_WORKITEM)Context);
+}
+
+/* Delivers the queue from a system thread: now when this is one, else from a work item (inline when there is
+   no memory for one: the datagram may then be lost as before, never more than that) */
+static
+VOID
+Udp6DeliverFromSystemThread(VOID)
+{
+    PIO_WORKITEM Item;
+
+    if (IsListEmpty(&Udp6Deferred))
+        return;
+    if (PsIsSystemThread(PsGetCurrentThread()))
+    {
+        UDP6DeliverDeferred();
+        return;
+    }
+    if (InterlockedCompareExchange(&Udp6WorkQueued, 1, 0) != 0)
+        return;     /* an item is queued or running: it drains the queue and a later datagram queues the next */
+
+    Item = TCPDeviceObject ? IoAllocateWorkItem(TCPDeviceObject) : NULL;
+    if (!Item)
+    {
+        InterlockedExchange(&Udp6WorkQueued, 0);
+        UDP6DeliverDeferred();
+        return;
+    }
+    IoQueueWorkItem(Item, Udp6DeliveryWorker, CriticalWorkQueue, Item);
+}
+
 /* ------------------------------------------------------------------------------------------------
  * Send
  * ---------------------------------------------------------------------------------------------- */
@@ -601,7 +656,7 @@ UDPSendDatagram6(
         Status = (Result == ERR_MEM || Result == ERR_BUF) ? STATUS_INSUFFICIENT_RESOURCES : STATUS_NETWORK_UNREACHABLE;
 
     /* The looped copy, and anything the send put on the queue meanwhile */
-    UDP6DeliverDeferred();
+    Udp6DeliverFromSystemThread();
 
     if (NT_SUCCESS(Status))
         *DataUsed = DataSize;

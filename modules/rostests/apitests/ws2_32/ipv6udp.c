@@ -481,6 +481,83 @@ Done:
         closesocket(other);
 }
 
+/* Datagrams to a group sent back to back, the member reading each one before the next send: none is lost, whatever
+   the sender is bound to and also when it is the member itself (its looped copies must reach it one by one) */
+#define BURST_COUNT 100
+
+static int MulticastBurst(const char *What, SOCKET Member, SOCKET Sender, USHORT MemberPort)
+{
+    SOCKADDR_IN6_LH To;
+    int i, Lost = 0, Sent = 0;
+    ULONG Out, In;
+
+    Init6(&To, Group6, MemberPort);
+    for (i = 0; i < BURST_COUNT; i++)
+    {
+        Out = 0x4d430000 + i;
+        if (sendto(Sender, (char *)&Out, sizeof(Out), 0, (struct sockaddr *)&To, sizeof(To)) != sizeof(Out))
+        {
+            ok(0, "%s: sendto %d: %d\n", What, i, WSAGetLastError());
+            return -1;
+        }
+        Sent++;
+        if (Readable(Member, 1000))
+        {
+            In = 0;
+            if (recv(Member, (char *)&In, sizeof(In), 0) != sizeof(In) || In != Out)
+                ok(0, "%s: datagram %d reads %08lx\n", What, i, In);
+        }
+        else
+        {
+            Lost++;
+        }
+    }
+    ok(Lost == 0, "%s: %d of %d group datagrams lost\n", What, Lost, Sent);
+    return Lost;
+}
+
+static void TestMulticastBurst(void)
+{
+    IPV6_MREQ Mreq;
+    USHORT PortR, PortS;
+    SOCKET r, s, l;
+    SOCKADDR_IN6_LH To;
+    char Scratch[4];
+
+    r = Udp6(TRUE, Any6, &PortR);
+    s = Udp6(TRUE, Any6, &PortS);
+    l = Udp6(TRUE, Loopback6, &PortS);
+    if (r == INVALID_SOCKET || s == INVALID_SOCKET || l == INVALID_SOCKET)
+        goto Done;
+
+    memset(&Mreq, 0, sizeof(Mreq));
+    memcpy(&Mreq.ipv6mr_multiaddr, Group6, 16);
+    ok(setsockopt(r, IPPROTO_IPV6, IPV6_ADD_MEMBERSHIP, (char *)&Mreq, sizeof(Mreq)) == 0,
+       "IPV6_ADD_MEMBERSHIP: %d\n", WSAGetLastError());
+
+    /* No interface to send multicast on: nothing to test */
+    Init6(&To, Group6, PortR);
+    if (sendto(s, "x", 1, 0, (struct sockaddr *)&To, sizeof(To)) != 1)
+    {
+        skip("no multicast interface: %d\n", WSAGetLastError());
+        goto Done;
+    }
+    if (Readable(r, 1000))
+        recv(r, Scratch, sizeof(Scratch), 0);
+
+    MulticastBurst("sender bound to ::", r, s, PortR);
+    MulticastBurst("sender bound to ::1", r, l, PortR);
+    MulticastBurst("the member as the sender", r, r, PortR);
+
+Done:
+    if (r != INVALID_SOCKET)
+        closesocket(r);
+    if (s != INVALID_SOCKET)
+        closesocket(s);
+    if (l != INVALID_SOCKET)
+        closesocket(l);
+}
+
 static void TestTables(void)
 {
     USHORT PortN;
@@ -565,6 +642,7 @@ START_TEST(ipv6udp)
     TestDualStack();
     TestRecvMsg();
     TestMulticast();
+    TestMulticastBurst();
     TestTables();
 
     WSACleanup();
