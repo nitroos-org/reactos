@@ -95,6 +95,16 @@ WSAIoctl(IN SOCKET s,
                 }
             }
 
+            /* The destination ordering is a function of this DLL, not of the provider */
+            if (dwIoControlCode == SIO_ADDRESS_LIST_SORT && !lpOverlapped && !lpCompletionRoutine)
+            {
+                ErrorCode = WsAddressListSort(lpvInBuffer, cbInBuffer, lpvOutBuffer, cbOutBuffer, lpcbBytesReturned);
+                WsSockDereference(Socket);
+                if (ErrorCode == ERROR_SUCCESS) return ERROR_SUCCESS;
+                SetLastError(ErrorCode);
+                return SOCKET_ERROR;
+            }
+
             /* Make the call */
             Status = Socket->Provider->Service.lpWSPIoctl(s,
                                                   dwIoControlCode,

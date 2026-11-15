@@ -611,9 +611,10 @@ QueryAAAA(IN PCWSTR NodeName,
 
 /*
  * Join the IPv6 and IPv4 answers (both chains may be empty) in the order of the destination selection rules
- * (RFC 6724, simplified): IPv6 destinations that can be reached from here come first (their prefix policy is
- * higher than the one of IPv4), then IPv4, then the IPv6 ones that cannot be reached (no source address of their
- * scope). Inside each group the order of the answers is kept.
+ * (RFC 6724, with the prefix policy table; WsSortAddrInfo). The chain handed to that is the simple order:
+ * IPv6 destinations that can be reached from here, then IPv4, then the IPv6 ones that cannot be reached (no source
+ * address of their scope), the order of the answers kept inside each group. It is the result when no sorter
+ * is available.
  */
 static
 PADDRINFOW
@@ -643,7 +644,9 @@ JoinAddrInfo(IN PADDRINFOW List6,
         Tail = &(*Tail)->ai_next;
     *Tail = Unusable;
 
-    return Head;
+    /* The destination selection proper: precedence, scope and label of each answer against the source it would
+       use (the order above is what is left when that cannot be asked) */
+    return WsSortAddrInfo(Head);
 }
 
 /*
