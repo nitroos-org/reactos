@@ -385,16 +385,21 @@ static void RunCase(int Index, const CASE *C, int Wide)
 
 /*
  * A token that may not open \Device\Tcp (here: restricted to a SID that no ACE of the device names) cannot ask the
- * stack whether IPv6 is on. The answer is decided once, as off, for the life of the process: the same answer the
- * next time, also when the thread has its own token back (before, every call retried the open). It has to be the
- * first IPv6 question of the process, so it runs in a child of this test: the exit code says what happened.
+ * stack whether IPv6 is on. A thread that impersonates such a token gets "off" for that call only: a server that
+ * impersonates a restricted client first must not pin the whole process to "no IPv6". So the answer of the same
+ * thread is "off" again while it impersonates, and the answer of the process (the thread with its own token
+ * back, and another thread that never impersonated) is the real one: IPv6 on. It has to be the first IPv6
+ * question of the process, so it runs in a child of this test: the exit code says what happened.
+ * (A process whose own primary token is denied is answered "off" and that is kept for the process, as before.)
  */
 #define CHILD_ENV           "GAI6_RESTRICTED_CHILD"
 #define CHILD_OK            0
-#define CHILD_DECIDED_AGAIN 1   /* an answer that is neither IPv4 only nor with ::1; 100 + 10 * first + second:
-                                   the entry counts of the two answers when they differ */
+#define CHILD_DECIDED_AGAIN 1   /* an unexpected answer; 100 + 10 * first + second: the entry counts of the
+                                   impersonating answer and of the process answer (-1: the call failed) */
 #define CHILD_OPEN_ALLOWED  2   /* the restricted token could open the device: nothing to test */
-#define CHILD_SETUP_FAILED  3
+#define CHILD_SETUP_FAILED  3   /* the token could not be made or used; 4: Winsock does not start under it (the
+                                   registry of Winsock is denied to it too) */
+#define CHILD_STARTUP_DENIED 4
 
 static int CountLocalhostEntries(void)
 {
@@ -413,25 +418,91 @@ static int CountLocalhostEntries(void)
     return Count;
 }
 
+typedef struct _OTHER_THREAD { int Count; } OTHER_THREAD;
+
+static DWORD WINAPI OtherThreadProc(PVOID Parameter)
+{
+    ((OTHER_THREAD *)Parameter)->Count = CountLocalhostEntries();
+    return 0;
+}
+
+/* A copy of the token with the user and every group disabled (deny only) and the privileges removed */
+static BOOL MakeDenyOnlyToken(HANDLE Process, PHANDLE Result)
+{
+    PTOKEN_USER User = NULL;
+    PTOKEN_GROUPS Groups = NULL;
+    PSID_AND_ATTRIBUTES Disable = NULL;
+    DWORD Length, Count, i;
+    BOOL Ok = FALSE;
+
+    GetTokenInformation(Process, TokenUser, NULL, 0, &Length);
+    User = HeapAlloc(GetProcessHeap(), 0, Length);
+    if (!User || !GetTokenInformation(Process, TokenUser, User, Length, &Length))
+        goto Done;
+    GetTokenInformation(Process, TokenGroups, NULL, 0, &Length);
+    Groups = HeapAlloc(GetProcessHeap(), 0, Length);
+    if (!Groups || !GetTokenInformation(Process, TokenGroups, Groups, Length, &Length))
+        goto Done;
+
+    Count = Groups->GroupCount + 1;
+    Disable = HeapAlloc(GetProcessHeap(), 0, Count * sizeof(*Disable));
+    if (!Disable)
+        goto Done;
+    Disable[0] = User->User;
+    for (i = 0; i < Groups->GroupCount; i++)
+        Disable[i + 1] = Groups->Groups[i];
+
+    Ok = CreateRestrictedToken(Process, DISABLE_MAX_PRIVILEGE, Count, Disable, 0, NULL, 0, NULL, Result);
+
+Done:
+    if (Disable) HeapFree(GetProcessHeap(), 0, Disable);
+    if (Groups) HeapFree(GetProcessHeap(), 0, Groups);
+    if (User) HeapFree(GetProcessHeap(), 0, User);
+    return Ok;
+}
+
+/* TRUE when the calling thread (impersonating) is refused \Device\Tcp */
+static BOOL DeviceDenied(void)
+{
+    typedef struct { USHORT Length, MaximumLength; PWSTR Buffer; } USTR;
+    typedef struct { ULONG Length; HANDLE Root; USTR *Name; ULONG Attributes; PVOID Sd, Sqos; } OA;
+    typedef struct { LONG_PTR Status; ULONG_PTR Information; } IOSB;
+    LONG (NTAPI *OpenFile)(PHANDLE, ACCESS_MASK, OA *, IOSB *, ULONG, ULONG);
+    static WCHAR Path[] = L"\\Device\\Tcp";
+    USTR Name = { sizeof(Path) - sizeof(WCHAR), sizeof(Path), Path };
+    OA Attributes = { sizeof(OA), NULL, &Name, 0x40 /* OBJ_CASE_INSENSITIVE */, NULL, NULL };
+    IOSB Iosb;
+    HANDLE File;
+    LONG Status;
+
+    OpenFile = (PVOID)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtOpenFile");
+    if (!OpenFile)
+        return FALSE;
+    Status = OpenFile(&File, 0x80000000 /* GENERIC_READ */ | 0x00100000 /* SYNCHRONIZE */, &Attributes, &Iosb, 3, 0x20);
+    if (Status >= 0)
+    {
+        CloseHandle(File);
+        return FALSE;
+    }
+    return TRUE;
+}
+
 static int RestrictedChild(void)
 {
     HANDLE Process, Restricted = NULL, Impersonation = NULL;
-    SID_AND_ATTRIBUTES Restrict;
-    SID_IDENTIFIER_AUTHORITY Authority = { { 0, 0, 0, 0, 0, 5 } };
-    PSID Sid = NULL;
     WSADATA WsaData;
-    int Code = CHILD_SETUP_FAILED, First, Second;
+    int Code = CHILD_SETUP_FAILED, First, Again, Second, Third;
+    OTHER_THREAD Other = { -2 };
+    HANDLE Thread;
 
     if (WSAStartup(MAKEWORD(2, 2), &WsaData) != 0)
         return CHILD_SETUP_FAILED;
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY, &Process))
         return CHILD_SETUP_FAILED;
-    /* S-1-5-21-111-222-333-4242: a domain-style SID that is in no ACL of the device */
-    if (!AllocateAndInitializeSid(&Authority, 5, 21, 111, 222, 333, 4242, 0, 0, 0, &Sid))
-        goto Done;
-    Restrict.Sid = Sid;
-    Restrict.Attributes = 0;
-    if (!CreateRestrictedToken(Process, 0, 0, NULL, 0, NULL, 1, &Restrict, &Restricted))
+
+    /* The token to impersonate: every SID of the user's token disabled (deny only), so that no ACE of the stack
+       device grants it anything */
+    if (!MakeDenyOnlyToken(Process, &Restricted))
         goto Done;
     if (!DuplicateTokenEx(Restricted, TOKEN_IMPERSONATE | TOKEN_QUERY, NULL, SecurityImpersonation,
                           TokenImpersonation, &Impersonation))
@@ -439,23 +510,37 @@ static int RestrictedChild(void)
     if (!SetThreadToken(NULL, Impersonation))
         goto Done;
 
-    First = CountLocalhostEntries();
+    if (!DeviceDenied())
+    {
+        Code = CHILD_OPEN_ALLOWED;      /* the stack device opens for this token: nothing to test */
+        goto Done;
+    }
+
+    First = CountLocalhostEntries();            /* impersonating: denied, "off" for this call */
+    Again = CountLocalhostEntries();            /* still impersonating: denied again, "off" again */
     RevertToSelf();
-    Second = CountLocalhostEntries();
+    Second = CountLocalhostEntries();           /* the process token: allowed, "on" */
+    /* a thread that never impersonated, in the same process */
+    Thread = CreateThread(NULL, 0, OtherThreadProc, &Other, 0, NULL);
+    if (Thread)
+    {
+        WaitForSingleObject(Thread, 30000);
+        CloseHandle(Thread);
+    }
+    Third = Other.Count;
 
     if (First == 2)
         Code = CHILD_OPEN_ALLOWED;
-    else if (First == 1 && Second == 1)
+    else if (First == 1 && Again == 1 && Second == 2 && Third == 2)
         Code = CHILD_OK;
     else if (First >= 0 && First < 10 && Second >= 0 && Second < 10)
-        Code = 100 + First * 10 + Second;   /* the entry counts of the two answers (-1: the call failed) */
+        Code = 100 + First * 10 + Second;   /* the entry counts of the first and third answers (-1: the call failed) */
     else
         Code = CHILD_DECIDED_AGAIN;
 
 Done:
     if (Impersonation) CloseHandle(Impersonation);
     if (Restricted) CloseHandle(Restricted);
-    if (Sid) FreeSid(Sid);
     CloseHandle(Process);
     return Code;
 }
@@ -489,14 +574,15 @@ static void TestRestrictedToken(void)
     CloseHandle(Child.hThread);
     CloseHandle(Child.hProcess);
 
-    if (Exit == CHILD_OPEN_ALLOWED || Exit == CHILD_SETUP_FAILED)
+    if (Exit == CHILD_OPEN_ALLOWED || Exit == CHILD_SETUP_FAILED || Exit == CHILD_STARTUP_DENIED)
     {
         skip("restricted-token child: %s (exit %lu)\n",
-             Exit == CHILD_OPEN_ALLOWED ? "the device opens for the restricted token" : "token setup failed", Exit);
+             Exit == CHILD_OPEN_ALLOWED ? "the device opens for the restricted token" :
+             Exit == CHILD_STARTUP_DENIED ? "Winsock does not start under the token" : "token setup failed", Exit);
         return;
     }
-    ok(Exit == CHILD_OK, "restricted token: the answer was decided again after the thread got its token back "
-       "(child exit %lu)\n", Exit);
+    ok(Exit == CHILD_OK, "restricted token: an impersonating thread is answered off for that call only, the "
+       "process (own token, another thread) keeps the real answer (child exit %lu)\n", Exit);
 }
 
 static void TestCanonicalNames(void)
