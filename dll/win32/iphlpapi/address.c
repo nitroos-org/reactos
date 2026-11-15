@@ -378,6 +378,9 @@ GetAdaptersAddressesImpl(
     BYTE* Ptr = (BYTE*)pAdapterAddresses;
     DWORD MIN_SIZE = 15 * 1024;
     PIP_ADAPTER_ADDRESSES PreviousAA = NULL;
+    /* The IPv6 name servers and gateways follow the flags the caller gave, whatever the family does to the IPv4 ones */
+    BOOL WantDns6 = !(Flags & GAA_FLAG_SKIP_DNS_SERVER), WantGw6 = !!(Flags & GAA_FLAG_INCLUDE_GATEWAYS);
+    CHAR (*AdapterNames)[MAX_ADAPTER_NAME_LENGTH + 4] = NULL;
 
     TRACE("Family %u, Flags 0x%08x, Reserved %p, pAdapterAddress %p, pOutBufLen %p\n",
           Family, Flags, Reserved, pAdapterAddresses, pOutBufLen);
@@ -446,7 +449,9 @@ GetAdaptersAddressesImpl(
 
     /* The indexes of the adapters, to tell which gateways belong to one */
     AdapterIndexes = HeapAlloc(GetProcessHeap(), 0, (InterfacesCount + 1) * sizeof(ULONG));
-    if (!AdapterIndexes)
+    if (V6On)
+        AdapterNames = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (InterfacesCount + 1) * sizeof(*AdapterNames));
+    if (!AdapterIndexes || (V6On && !AdapterNames))
     {
         Status = STATUS_NO_MEMORY;
         goto Error;
@@ -484,6 +489,8 @@ GetAdaptersAddressesImpl(
                 continue;
             }
 
+            if (AdapterNames && Entry->if_descrlen < sizeof(AdapterNames[0]))
+                memcpy(AdapterNames[AdapterIndexCount], &Entry->if_descr[0], Entry->if_descrlen);
             AdapterIndexes[AdapterIndexCount++] = Entry->if_index;
 
             TRACE("Got entity %*s, index %u.\n",
@@ -931,6 +938,7 @@ GetAdaptersAddressesImpl(
         ERR("No Adapters found!\n");
         *pOutBufLen = 0;
         HeapFree(GetProcessHeap(), 0, AdapterIndexes);
+        HeapFree(GetProcessHeap(), 0, AdapterNames);
         HeapFree(GetProcessHeap(), 0, InterfacesList);
         NtClose(TcpFile);
         return ERROR_NO_DATA;
@@ -1212,8 +1220,105 @@ Gateways:
             HeapFree(GetProcessHeap(), 0, Routes);
     }
 
+    /* The IPv6 name servers (configured, then those of router advertisements) and the default routers of the
+       adapters that have IPv6, after the IPv4 ones of their lists. Nothing here with IPv6 off */
+    if (V6On && Family != AF_INET && (WantDns6 || WantGw6))
+    {
+        IPV6_DNS_STATE Dns6;
+        ULONG AdapterNumber;
+
+        Ipv6GetDnsFromFile(TcpFile, &Dns6);
+
+        for (AdapterNumber = 0; AdapterNumber < AdapterIndexCount; AdapterNumber++)
+        {
+            DWORD IfIndex = AdapterIndexes[AdapterNumber];
+            PIP_ADAPTER_ADDRESSES CurrentAA = NULL, Candidate;
+            IPV6_ADAPTER_SERVER List[IPV6_ADAPTER_MAX_SERVERS];
+            ULONG Count, k;
+
+            if (!Ipv6FindInterface(V6, IfIndex))
+                continue;
+
+            for (Candidate = pAdapterAddresses; Candidate; Candidate = Candidate->Next)
+            {
+                if (Candidate->Length && Candidate->IfIndex == IfIndex)
+                {
+                    CurrentAA = Candidate;
+                    break;
+                }
+            }
+
+            if (WantDns6)
+            {
+                Count = Ipv6CollectDnsServers(&Dns6, IfIndex, AdapterNames[AdapterNumber], List,
+                                              IPV6_ADAPTER_MAX_SERVERS);
+                for (k = 0; k < Count; k++)
+                {
+                    ULONG Size = (sizeof(IP_ADAPTER_DNS_SERVER_ADDRESS) + sizeof(SOCKADDR_IN6) + 7) & ~7UL;
+
+                    if (CurrentAA && Ptr && (RemainingSize >= Size))
+                    {
+                        PIP_ADAPTER_DNS_SERVER_ADDRESS Server = (PIP_ADAPTER_DNS_SERVER_ADDRESS)Ptr, *Link;
+                        LPSOCKADDR_IN6 Socket = (LPSOCKADDR_IN6)(Server + 1);
+
+                        Server->Length = sizeof(IP_ADAPTER_DNS_SERVER_ADDRESS);
+                        Server->Next = NULL;
+                        Server->Address.lpSockaddr = (LPSOCKADDR)Socket;
+                        Server->Address.iSockaddrLength = sizeof(SOCKADDR_IN6);
+                        Socket->sin6_family = AF_INET6;
+                        Socket->sin6_port = 0;
+                        RtlCopyMemory(&Socket->sin6_addr, List[k].Address, 16);
+                        Socket->sin6_scope_id = List[k].Scope;
+
+                        for (Link = &CurrentAA->FirstDnsServerAddress; *Link; Link = &(*Link)->Next)
+                            ;
+                        *Link = Server;
+                        Ptr += Size;
+                        RemainingSize -= Size;
+                    }
+                    TotalSize += Size;
+                }
+            }
+
+            if (WantGw6)
+            {
+                Count = Ipv6CollectGateways(&Dns6, IfIndex, List, IPV6_ADAPTER_MAX_SERVERS);
+                for (k = 0; k < Count; k++)
+                {
+                    ULONG Size = (sizeof(IP_ADAPTER_GATEWAY_ADDRESS_LH) + sizeof(SOCKADDR_IN6) + 7) & ~7UL;
+
+                    if (CurrentAA && Ptr && (RemainingSize >= Size))
+                    {
+                        PIP_ADAPTER_GATEWAY_ADDRESS_LH Gateway = (PIP_ADAPTER_GATEWAY_ADDRESS_LH)Ptr, *Link;
+                        LPSOCKADDR_IN6 Socket = (LPSOCKADDR_IN6)(Gateway + 1);
+
+                        Gateway->Length = sizeof(IP_ADAPTER_GATEWAY_ADDRESS_LH);
+                        Gateway->Next = NULL;
+                        Gateway->Address.lpSockaddr = (LPSOCKADDR)Socket;
+                        Gateway->Address.iSockaddrLength = sizeof(SOCKADDR_IN6);
+                        Socket->sin6_family = AF_INET6;
+                        Socket->sin6_port = 0;
+                        RtlCopyMemory(&Socket->sin6_addr, List[k].Address, 16);
+                        Socket->sin6_scope_id = List[k].Scope;
+
+                        for (Link = &((PIP_ADAPTER_ADDRESSES_LH)CurrentAA)->FirstGatewayAddress; *Link;
+                             Link = &(*Link)->Next)
+                            ;
+                        *Link = Gateway;
+                        Ptr += Size;
+                        RemainingSize -= Size;
+                    }
+                    TotalSize += Size;
+                }
+            }
+        }
+
+        Ipv6FreeDns(&Dns6);
+    }
+
     /* We're done */
     HeapFree(GetProcessHeap(), 0, AdapterIndexes);
+    HeapFree(GetProcessHeap(), 0, AdapterNames);
     HeapFree(GetProcessHeap(), 0, InterfacesList);
     NtClose(TcpFile);
     *pOutBufLen = TotalSize;
@@ -1226,6 +1331,7 @@ Error:
     ERR("Failed! Status 0x%08x\n", Status);
     *pOutBufLen = 0;
     HeapFree(GetProcessHeap(), 0, AdapterIndexes);
+    HeapFree(GetProcessHeap(), 0, AdapterNames);
     HeapFree(GetProcessHeap(), 0, InterfacesList);
     NtClose(TcpFile);
     return RtlNtStatusToDosError(Status);

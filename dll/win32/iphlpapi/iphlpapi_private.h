@@ -187,6 +187,29 @@ BOOL Ipv6GetStateFromFile(HANDLE TcpFile, PIPV6_STATE State);
 VOID Ipv6FreeState(PIPV6_STATE State);
 const TCP_IPV6_INTERFACE_ROW *Ipv6FindInterface(const IPV6_STATE *State, DWORD IfIndex);
 
+/* The IPv6 name servers and default routers (ipv6dns.c): what the stack learnt from router advertisements
+   (IP_IPV6_DNS_ENTRY_ID), and the name servers configured for an interface. Off: empty, nothing listed */
+typedef struct _IPV6_DNS_STATE
+{
+    PVOID Memory;
+    PTCP_IPV6_DNS_HEADER Header;
+    PTCP_IPV6_DNS_ROW Rows;
+} IPV6_DNS_STATE, *PIPV6_DNS_STATE;
+
+typedef struct _IPV6_ADAPTER_SERVER
+{
+    UCHAR Address[16];
+    ULONG Scope;            /* the interface index for a link-local address, else 0 */
+} IPV6_ADAPTER_SERVER, *PIPV6_ADAPTER_SERVER;
+
+#define IPV6_ADAPTER_MAX_SERVERS 8
+
+BOOL Ipv6GetDnsFromFile(HANDLE TcpFile, PIPV6_DNS_STATE State);
+VOID Ipv6FreeDns(PIPV6_DNS_STATE State);
+ULONG Ipv6CollectDnsServers(const IPV6_DNS_STATE *State, DWORD IfIndex, PCSTR AdapterName,
+                            PIPV6_ADAPTER_SERVER List, ULONG Max);
+ULONG Ipv6CollectGateways(const IPV6_DNS_STATE *State, DWORD IfIndex, PIPV6_ADAPTER_SERVER List, ULONG Max);
+
 #include <w32api.h>
 /* This is here until we switch to version 2.5 of the mingw headers */
 #if (__W32API_MAJOR_VERSION < 2 || __W32API_MINOR_VERSION < 5)
