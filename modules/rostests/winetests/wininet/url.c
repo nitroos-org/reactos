@@ -1289,6 +1289,71 @@ static void InternetCanonicalizeUrl_test(void)
     ok(strcmp(dst, "http://www.winehq.org/%27/%20/./%3E/#>") == 0, "Got \"%s\"\n", dst);
 }
 
+static void test_crack_url_ipv6(void)
+{
+    static const struct
+    {
+        const WCHAR *url;
+        DWORD error;        /* 0 = success */
+        const WCHAR *host;
+        INTERNET_PORT port;
+        const WCHAR *path;
+    } tests[] =
+    {
+        { L"http://[::1]/",                     0, L"[::1]", 80, L"/" },
+        { L"http://[::1]:8080/p?q=1",           0, L"[::1]", 8080, L"/p" },
+        { L"http://[::1]",                      0, L"[::1]", 80, L"" },
+        { L"http://[::1]:81",                   0, L"[::1]", 81, L"" },
+        { L"http://[::1]:/",                    0, L"[::1]", 80, L"/" },
+        { L"https://[::1]/",                    0, L"[::1]", 443, L"/" },
+        { L"http://[fe80::1%252]:81/x",         0, L"[fe80::1%2]", 81, L"/x" },
+        { L"http://[2001:db8::1]:8080/a/b?c#d", 0, L"[2001:db8::1]", 8080, L"/a/b" },
+        { L"http://user:pw@[::1]:80/",          0, L"[::1]", 80, L"/" },
+        { L"http://[::ffff:1.2.3.4]/",          0, L"[::ffff:1.2.3.4]", 80, L"/" },
+        { L"http://[]/",                        0, L"[]", 80, L"/" },
+        /* a zone id must be percent-encoded in a URL */
+        { L"http://[fe80::1%2]/",               ERROR_INTERNET_INVALID_URL },
+        { L"http://[fe80::1%eth0]/",            ERROR_INTERNET_INVALID_URL },
+        { L"http://[::1/",                      ERROR_INTERNET_INVALID_URL },
+        { L"http://[::1]x/",                    ERROR_INTERNET_INVALID_URL },
+        { L"http://::1/",                       ERROR_INTERNET_INVALID_URL },
+    };
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(tests); i++)
+    {
+        WCHAR host[64], path[64], extra[64];
+        URL_COMPONENTSW uc;
+        DWORD err;
+        BOOL ret;
+
+        memset(&uc, 0, sizeof(uc));
+        uc.dwStructSize     = sizeof(uc);
+        uc.lpszHostName     = host;
+        uc.dwHostNameLength = ARRAY_SIZE(host);
+        uc.lpszUrlPath      = path;
+        uc.dwUrlPathLength  = ARRAY_SIZE(path);
+        uc.lpszExtraInfo     = extra;
+        uc.dwExtraInfoLength = ARRAY_SIZE(extra);
+        SetLastError(0xdeadbeef);
+        ret = InternetCrackUrlW(tests[i].url, 0, 0, &uc);
+        err = GetLastError();
+        if (tests[i].error)
+        {
+            ok(!ret, "%u: InternetCrackUrlW succeeded\n", i);
+            ok(err == tests[i].error, "%u: got %lu\n", i, err);
+            continue;
+        }
+        ok(ret, "%u: got %lu\n", i, err);
+        if (!ret) continue;
+        ok(uc.dwHostNameLength == lstrlenW(tests[i].host) && !wcsncmp(uc.lpszHostName, tests[i].host, uc.dwHostNameLength),
+           "%u: unexpected host %s\n", i, wine_dbgstr_wn(uc.lpszHostName, uc.dwHostNameLength));
+        ok(uc.nPort == tests[i].port, "%u: got port %u\n", i, uc.nPort);
+        ok(uc.dwUrlPathLength == lstrlenW(tests[i].path) && !wcsncmp(uc.lpszUrlPath, tests[i].path, uc.dwUrlPathLength),
+           "%u: unexpected path %s\n", i, wine_dbgstr_wn(uc.lpszUrlPath, uc.dwUrlPathLength));
+    }
+}
+
 START_TEST(url)
 {
     int i;
@@ -1302,6 +1367,7 @@ START_TEST(url)
         test_crack_url(crack_url_tests+i);
 
     test_long_url();
+    test_crack_url_ipv6();
 
     InternetCrackUrl_test();
     InternetCrackUrlW_test();

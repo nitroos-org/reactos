@@ -549,21 +549,49 @@ BOOL WINAPI WinHttpAddRequestHeaders( HINTERNET hrequest, const WCHAR *headers, 
     return !ret;
 }
 
+/* The host as it is written in a Host header or URL: an IPv6 literal keeps (or gets) its brackets, and the
+ * zone id (meaningful only on this machine) is not sent. Returns a new string. */
+static WCHAR *host_for_header( const WCHAR *hostname )
+{
+    WCHAR *ret, *p;
+    int len = lstrlenW( hostname );
+    BOOL bracketed = len >= 2 && hostname[0] == '[' && hostname[len - 1] == ']';
+
+    if (!(ret = malloc( (len + 3) * sizeof(WCHAR) ))) return NULL;
+    if (bracketed || !wcschr( hostname, ':' ))
+    {
+        lstrcpyW( ret, hostname );
+        if (!bracketed) return ret;
+        if ((p = wcschr( ret, '%' )))
+        {
+            *p = ']';
+            p[1] = 0;
+        }
+        return ret;
+    }
+    ret[0] = '[';
+    lstrcpyW( ret + 1, hostname );
+    if ((p = wcschr( ret, '%' ))) *p = 0;
+    lstrcatW( ret, L"]" );
+    return ret;
+}
+
 static WCHAR *build_absolute_request_path( struct request *request, const WCHAR **path )
 {
     const WCHAR *scheme;
-    WCHAR *ret;
+    WCHAR *ret, *hostname;
     int len, offset;
 
     scheme = (request->netconn ? request->netconn->secure : (request->hdr.flags & WINHTTP_FLAG_SECURE)) ? L"https" : L"http";
 
-    len = lstrlenW( scheme ) + lstrlenW( request->connect->hostname ) + 4; /* '://' + nul */
+    if (!(hostname = host_for_header( request->connect->hostname ))) return NULL;
+    len = lstrlenW( scheme ) + lstrlenW( hostname ) + 4; /* '://' + nul */
     if (request->connect->hostport) len += 6; /* ':' between host and port, up to 5 for port */
 
     len += lstrlenW( request->path );
     if ((ret = malloc( len * sizeof(WCHAR) )))
     {
-        offset = swprintf( ret, len, L"%s://%s", scheme, request->connect->hostname );
+        offset = swprintf( ret, len, L"%s://%s", scheme, hostname );
         if (request->connect->hostport)
         {
             offset += swprintf( ret + offset, len - offset, L":%u", request->connect->hostport );
@@ -572,6 +600,7 @@ static WCHAR *build_absolute_request_path( struct request *request, const WCHAR 
         if (path) *path = ret + offset;
     }
 
+    free( hostname );
     return ret;
 }
 
@@ -1350,12 +1379,15 @@ static BOOL do_authorization( struct request *request, DWORD target, DWORD schem
 
 static WCHAR *build_proxy_connect_string( struct request *request )
 {
-    WCHAR *ret, *host;
+    WCHAR *ret, *host, *name;
     unsigned int i;
-    int len = lstrlenW( request->connect->hostname ) + 7;
+    int len;
 
-    if (!(host = malloc( len * sizeof(WCHAR) ))) return NULL;
-    len = swprintf( host, len, L"%s:%u", request->connect->hostname, request->connect->hostport );
+    if (!(name = host_for_header( request->connect->hostname ))) return NULL;
+    len = lstrlenW( name ) + 7;
+    if (!(host = malloc( len * sizeof(WCHAR) ))) { free( name ); return NULL; }
+    len = swprintf( host, len, L"%s:%u", name, request->connect->hostport );
+    free( name );
 
     len += ARRAY_SIZE(L"CONNECT");
     len += ARRAY_SIZE(L"HTTP/1.1");
@@ -1433,6 +1465,74 @@ static WCHAR *addr_to_str( struct sockaddr_storage *addr )
     }
     if (!inet_ntop( addr->ss_family, src, buf, sizeof(buf) )) return NULL;
     return strdupAW( buf );
+}
+
+/* The address list of a connect object is shared by the requests made on it, which may connect from several threads
+ * at once: it is read and written only under this lock (never held during a connection attempt). */
+static CRITICAL_SECTION connect_addrs_cs;
+static CRITICAL_SECTION_DEBUG connect_addrs_debug =
+{
+    0, 0, &connect_addrs_cs,
+    { &connect_addrs_debug.ProcessLocksList, &connect_addrs_debug.ProcessLocksList },
+      0, 0, { (DWORD_PTR)(__FILE__ ": connect_addrs_cs") }
+};
+static CRITICAL_SECTION connect_addrs_cs = { &connect_addrs_debug, -1, 0, 0, 0, 0 };
+
+static void set_connect_addrs( struct connect *connect, const struct addr_list *addrs )
+{
+    EnterCriticalSection( &connect_addrs_cs );
+    connect->addrs = *addrs;
+    connect->sockaddr = addrs->addr[0];
+    LeaveCriticalSection( &connect_addrs_cs );
+}
+
+/* Try the resolved addresses in order until one connects; the one that worked moves to the front so that later
+ * connections of the same server start with it. *addressW is updated to the address in use. */
+static DWORD netconn_create_any( struct request *request, struct hostdata *host, struct netconn **ret_conn,
+                                 WCHAR **addressW )
+{
+    struct connect *connect = request->connect;
+    struct addr_list addrs;
+    unsigned int i, j;
+    DWORD ret = ERROR_WINHTTP_CANNOT_CONNECT;
+
+    EnterCriticalSection( &connect_addrs_cs );
+    addrs = connect->addrs;
+    LeaveCriticalSection( &connect_addrs_cs );
+
+    for (i = 0; i < addrs.count; i++)
+    {
+        struct sockaddr_storage sa = addrs.addr[i];
+
+        if (i)
+        {
+            WCHAR *str = addr_to_str( &sa );
+            if (!str) continue;
+            TRACE( "falling back to %s\n", debugstr_w(str) );
+            free( *addressW );
+            *addressW = str;
+            send_callback( &request->hdr, WINHTTP_CALLBACK_STATUS_CONNECTING_TO_SERVER, str, lstrlenW(str) + 1 );
+        }
+        ret = netconn_create( host, &sa, request->connect_timeout, ret_conn );
+        if (!ret)
+        {
+            EnterCriticalSection( &connect_addrs_cs );
+            /* the list may have been replaced meanwhile (another request resolved again): move the address only
+             * if it is still in it */
+            for (j = 1; j < connect->addrs.count; j++)
+            {
+                if (memcmp( &connect->addrs.addr[j], &sa, sizeof(sa) )) continue;
+                memmove( &connect->addrs.addr[1], &connect->addrs.addr[0], j * sizeof(sa) );
+                connect->addrs.addr[0] = sa;
+                break;
+            }
+            connect->sockaddr = sa;
+            LeaveCriticalSection( &connect_addrs_cs );
+            return ERROR_SUCCESS;
+        }
+        if (ret == ERROR_OUTOFMEMORY) break;
+    }
+    return ret;
 }
 
 static CRITICAL_SECTION connection_pool_cs;
@@ -1634,23 +1734,30 @@ static DWORD open_connection( struct request *request )
 
     if (!connect->resolved && netconn)
     {
-        connect->sockaddr = netconn->sockaddr;
+        struct addr_list addrs;
+
+        addrs.count = 1;
+        addrs.addr[0] = netconn->sockaddr;
+        set_connect_addrs( connect, &addrs );
         connect->resolved = TRUE;
     }
 
     if (!connect->resolved)
     {
+        struct addr_list addrs;
+
         len = lstrlenW( host->hostname ) + 1;
         send_callback( &request->hdr, WINHTTP_CALLBACK_STATUS_RESOLVING_NAME, host->hostname, len );
 
-        if ((ret = netconn_resolve( host->hostname, port, &connect->sockaddr, request->resolve_timeout )))
+        if ((ret = netconn_resolve( host->hostname, port, &addrs, request->resolve_timeout )))
         {
             release_host( host );
             return ret;
         }
+        set_connect_addrs( connect, &addrs );
         connect->resolved = TRUE;
 
-        if (!(addressW = addr_to_str( &connect->sockaddr )))
+        if (!(addressW = addr_to_str( &addrs.addr[0] )))
         {
             release_host( host );
             return ERROR_OUTOFMEMORY;
@@ -1661,7 +1768,12 @@ static DWORD open_connection( struct request *request )
 
     if (!netconn)
     {
-        if (!addressW && !(addressW = addr_to_str( &connect->sockaddr )))
+        struct sockaddr_storage first;
+
+        EnterCriticalSection( &connect_addrs_cs );
+        first = connect->addrs.addr[0];
+        LeaveCriticalSection( &connect_addrs_cs );
+        if (!addressW && !(addressW = addr_to_str( &first )))
         {
             release_host( host );
             return ERROR_OUTOFMEMORY;
@@ -1672,7 +1784,7 @@ static DWORD open_connection( struct request *request )
         len = lstrlenW( addressW ) + 1;
         send_callback( &request->hdr, WINHTTP_CALLBACK_STATUS_CONNECTING_TO_SERVER, addressW, len );
 
-        if ((ret = netconn_create( host, &connect->sockaddr, request->connect_timeout, &netconn )))
+        if ((ret = netconn_create_any( request, host, &netconn, &addressW )))
         {
             free( addressW );
             release_host( host );
@@ -1752,17 +1864,23 @@ static DWORD add_host_header( struct request *request, DWORD modifier )
     struct connect *connect = request->connect;
     INTERNET_PORT port;
 
+    WCHAR *name;
+
     port = connect->hostport ? connect->hostport : (request->hdr.flags & WINHTTP_FLAG_SECURE ? 443 : 80);
 
+    if (!(name = host_for_header( connect->hostname ))) return ERROR_OUTOFMEMORY;
     if (port == INTERNET_DEFAULT_HTTP_PORT || port == INTERNET_DEFAULT_HTTPS_PORT)
     {
-        return process_header( request, L"Host", connect->hostname, modifier, TRUE );
+        ret = process_header( request, L"Host", name, modifier, TRUE );
+        free( name );
+        return ret;
     }
-    len = lstrlenW( connect->hostname ) + 7; /* sizeof(":65335") */
-    if (!(host = malloc( len * sizeof(WCHAR) ))) return ERROR_OUTOFMEMORY;
-    swprintf( host, len, L"%s:%u", connect->hostname, port );
+    len = lstrlenW( name ) + 7; /* sizeof(":65335") */
+    if (!(host = malloc( len * sizeof(WCHAR) ))) { free( name ); return ERROR_OUTOFMEMORY; }
+    swprintf( host, len, L"%s:%u", name, port );
     ret = process_header( request, L"Host", host, modifier, TRUE );
     free( host );
+    free( name );
     return ret;
 }
 

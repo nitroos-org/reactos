@@ -44,56 +44,95 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(wininet);
 
-BOOL GetAddress(const WCHAR *name, INTERNET_PORT port, struct sockaddr *psa, int *sa_len, char *addr_str)
+/* A bracketed IPv6 literal ("[::1]", "[fe80::1%2]", "[fe80::1%252]" with a percent-encoded zone id, RFC 6874) is
+ * not a host name for getaddrinfo: take the brackets off and decode the "%25". Other names are used as is. */
+static const WCHAR *literal_host(const WCHAR *name, WCHAR *buf, size_t size)
 {
-    ADDRINFOW *res, hints;
-    void *addr = NULL;
-    int ret;
+    size_t len = lstrlenW(name), i, j;
+
+    if (len < 2 || name[0] != '[' || name[len - 1] != ']' || len - 1 > size)
+        return name;
+    for (i = 1, j = 0; i < len - 1; i++)
+    {
+        buf[j++] = name[i];
+        if (name[i] == '%' && name[i + 1] == '2' && name[i + 2] == '5' && i + 2 < len - 1) i += 2;
+    }
+    buf[j] = 0;
+    return buf;
+}
+
+/* All addresses of name in getaddrinfo order (at most max_addrs), each with the port set. Returns the count. */
+int GetAddressList(const WCHAR *name, INTERNET_PORT port, struct sockaddr_storage *addrs, int *lens, int max_addrs)
+{
+    ADDRINFOW *res, *ai, hints;
+    WCHAR literal[260];
+    int count = 0;
 
     TRACE("%s\n", debugstr_w(name));
 
     memset( &hints, 0, sizeof(hints) );
-    /* Prefer IPv4 to IPv6 addresses, since some servers do not listen on
-     * their IPv6 addresses even though they have IPv6 addresses in the DNS.
-     */
-    hints.ai_family = AF_INET;
+    /* Every address, in the order getaddrinfo returns them: the caller falls back to the next one when a
+     * connection attempt fails (a name may have IPv6 addresses on which no server listens). */
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
 
-    ret = GetAddrInfoW(name, NULL, &hints, &res);
-    if (ret != 0)
+    if (name[0] == '[')
     {
-        TRACE("failed to get IPv4 address of %s, retrying with IPv6\n", debugstr_w(name));
+        /* brackets hold an IPv6 address (RFC 3986 IP-literal), never a name to look up in DNS or an IPv4 address:
+         * "[host.example]" must not reach host.example (a URL filter sees the host "[host.example]") */
+        if (literal_host(name, literal, ARRAY_SIZE(literal)) != literal || !wcschr(literal, ':'))
+            return 0;
+        name = literal;
         hints.ai_family = AF_INET6;
-        ret = GetAddrInfoW(name, NULL, &hints, &res);
+        hints.ai_flags = AI_NUMERICHOST;
     }
-    if (ret != 0)
+    if (GetAddrInfoW(name, NULL, &hints, &res) != 0)
     {
         TRACE("failed to get address of %s\n", debugstr_w(name));
-        return FALSE;
+        return 0;
     }
-    if (*sa_len < res->ai_addrlen)
+    for (ai = res; ai && count < max_addrs; ai = ai->ai_next)
+    {
+        if ((ai->ai_family != AF_INET && ai->ai_family != AF_INET6) || ai->ai_addrlen > sizeof(*addrs))
+            continue;
+        if (hints.ai_family == AF_INET6 && ai->ai_family != AF_INET6)
+            continue;
+        memset(&addrs[count], 0, sizeof(addrs[count]));
+        memcpy(&addrs[count], ai->ai_addr, ai->ai_addrlen);
+        if (ai->ai_family == AF_INET)
+            ((struct sockaddr_in *)&addrs[count])->sin_port = htons(port);
+        else
+            ((struct sockaddr_in6 *)&addrs[count])->sin6_port = htons(port);
+        lens[count++] = ai->ai_addrlen;
+    }
+    FreeAddrInfoW(res);
+    return count;
+}
+
+void address_to_string(const struct sockaddr_storage *addr, char *str)
+{
+    const void *src = addr->ss_family == AF_INET6 ? (const void *)&((const struct sockaddr_in6 *)addr)->sin6_addr
+                                                  : (const void *)&((const struct sockaddr_in *)addr)->sin_addr;
+    str[0] = 0;
+    inet_ntop(addr->ss_family, (void *)src, str, INET6_ADDRSTRLEN);
+}
+
+BOOL GetAddress(const WCHAR *name, INTERNET_PORT port, struct sockaddr *psa, int *sa_len, char *addr_str)
+{
+    struct sockaddr_storage addrs[1];
+    int lens[1];
+
+    if (GetAddressList(name, port, addrs, lens, 1) < 1)
+        return FALSE;
+    if (*sa_len < lens[0])
     {
         WARN("address too small\n");
-        FreeAddrInfoW(res);
         return FALSE;
     }
-    *sa_len = res->ai_addrlen;
-    memcpy( psa, res->ai_addr, res->ai_addrlen );
-    /* Copy port */
-    switch (res->ai_family)
-    {
-    case AF_INET:
-        addr = &((struct sockaddr_in *)psa)->sin_addr;
-        ((struct sockaddr_in *)psa)->sin_port = htons(port);
-        break;
-    case AF_INET6:
-        addr = &((struct sockaddr_in6 *)psa)->sin6_addr;
-        ((struct sockaddr_in6 *)psa)->sin6_port = htons(port);
-        break;
-    }
-
-    if(addr_str)
-        inet_ntop(res->ai_family, addr, addr_str, INET6_ADDRSTRLEN);
-    FreeAddrInfoW(res);
+    *sa_len = lens[0];
+    memcpy(psa, &addrs[0], lens[0]);
+    if (addr_str)
+        address_to_string(&addrs[0], addr_str);
     return TRUE;
 }
 

@@ -162,7 +162,39 @@ void server_release(server_t *server)
         CertFreeCertificateChain(server->cert_chain);
     free(server->name);
     free(server->scheme_host_port);
+    free(server->header_name);
     free(server);
+}
+
+/* The host as it is written in a Host header or URL: an IPv6 literal keeps (or gets) its brackets, and the zone id
+ * (meaningful only on this machine) is not sent. Returns a new string. */
+static WCHAR *host_for_header(const WCHAR *name)
+{
+    size_t len = lstrlenW(name);
+    BOOL bracketed = len >= 2 && name[0] == '[' && name[len - 1] == ']';
+    WCHAR *ret, *p;
+
+    ret = malloc((len + 3) * sizeof(WCHAR));
+    if(!ret)
+        return NULL;
+    if(!bracketed && !wcschr(name, ':')) {
+        lstrcpyW(ret, name);
+        return ret;
+    }
+    if(bracketed) {
+        lstrcpyW(ret, name);
+        if((p = wcschr(ret, '%'))) {
+            *p = ']';
+            p[1] = 0;
+        }
+        return ret;
+    }
+    ret[0] = '[';
+    lstrcpyW(ret + 1, name);
+    if((p = wcschr(ret, '%')))
+        *p = 0;
+    lstrcatW(ret, L"]");
+    return ret;
 }
 
 static BOOL process_host_port(server_t *server)
@@ -171,13 +203,20 @@ static BOOL process_host_port(server_t *server)
     size_t name_len, len;
     WCHAR *buf;
 
-    name_len = lstrlenW(server->name);
-    len = name_len + 10 /* strlen("://:<port>") */ + ARRAY_SIZE(L"https");
-    buf = malloc(len * sizeof(WCHAR));
-    if(!buf)
+    server->header_name = host_for_header(server->name);
+    if(!server->header_name)
         return FALSE;
 
-    swprintf(buf, len, L"%s://%s:%u", server->is_https ? L"https" : L"http", server->name, server->port);
+    name_len = lstrlenW(server->header_name);
+    len = name_len + 10 /* strlen("://:<port>") */ + ARRAY_SIZE(L"https");
+    buf = malloc(len * sizeof(WCHAR));
+    if(!buf) {
+        free(server->header_name);
+        server->header_name = NULL;
+        return FALSE;
+    }
+
+    swprintf(buf, len, L"%s://%s:%u", server->is_https ? L"https" : L"http", server->header_name, server->port);
     server->scheme_host_port = buf;
 
     server->host_port = server->scheme_host_port + 7 /* strlen("http://") */;
@@ -185,7 +224,7 @@ static BOOL process_host_port(server_t *server)
         server->host_port++;
 
     default_port = server->port == (server->is_https ? INTERNET_DEFAULT_HTTPS_PORT : INTERNET_DEFAULT_HTTP_PORT);
-    server->canon_host_port = default_port ? server->name : server->host_port;
+    server->canon_host_port = default_port ? server->header_name : server->host_port;
     return TRUE;
 }
 
@@ -1800,7 +1839,9 @@ static BOOL HTTP_DealWithProxy(appinfo_t *hIC, http_session_t *session, http_req
 static DWORD HTTP_ResolveName(http_request_t *request)
 {
     server_t *server = request->proxy ? request->proxy : request->server;
-    int addr_len;
+    struct sockaddr_storage addrs[MAX_SERVER_ADDRS];
+    int lens[MAX_SERVER_ADDRS], count;
+    char addr_str[INET6_ADDRSTRLEN];
 
     if(server->addr_len)
         return ERROR_SUCCESS;
@@ -1810,16 +1851,18 @@ static DWORD HTTP_ResolveName(http_request_t *request)
                           server->name,
                           (lstrlenW(server->name)+1) * sizeof(WCHAR));
 
-    addr_len = sizeof(server->addr);
-    if (!GetAddress(server->name, server->port, (SOCKADDR*)&server->addr, &addr_len, server->addr_str))
+    count = GetAddressList(server->name, server->port, addrs, lens, MAX_SERVER_ADDRS);
+    if (count < 1)
         return ERROR_INTERNET_NAME_NOT_RESOLVED;
 
-    server->addr_len = addr_len;
+    /* the server is shared by the whole process: its addresses are written under a lock */
+    set_server_addresses(server, addrs, lens, count);
+    address_to_string(&addrs[0], addr_str);
     INTERNET_SendCallback(&request->hdr, request->hdr.dwContext,
                           INTERNET_STATUS_NAME_RESOLVED,
-                          server->addr_str, strlen(server->addr_str)+1);
+                          addr_str, strlen(addr_str)+1);
 
-    TRACE("resolved %s to %s\n", debugstr_w(server->name), server->addr_str);
+    TRACE("resolved %s to %s\n", debugstr_w(server->name), addr_str);
     return ERROR_SUCCESS;
 }
 

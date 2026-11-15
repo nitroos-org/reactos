@@ -96,6 +96,14 @@ struct session
     unsigned int websocket_send_buffer_size;
 };
 
+#define MAX_RESOLVED_ADDRS 8
+
+struct addr_list
+{
+    unsigned int count;
+    struct sockaddr_storage addr[MAX_RESOLVED_ADDRS];
+};
+
 struct connect
 {
     struct object_header hdr;
@@ -106,7 +114,8 @@ struct connect
     WCHAR *password;
     INTERNET_PORT hostport;
     INTERNET_PORT serverport;
-    struct sockaddr_storage sockaddr;
+    struct sockaddr_storage sockaddr; /* the address of the connection in use */
+    struct addr_list addrs;           /* all addresses of the server in getaddrinfo order */
     BOOL resolved;
 };
 
@@ -420,7 +429,7 @@ DWORD netconn_create( struct hostdata *, const struct sockaddr_storage *, int, s
 void netconn_unload( void );
 ULONG netconn_query_data_available( struct netconn * );
 DWORD netconn_recv( struct netconn *, void *, size_t, int, int * );
-DWORD netconn_resolve( WCHAR *, INTERNET_PORT, struct sockaddr_storage *, int );
+DWORD netconn_resolve( WCHAR *, INTERNET_PORT, struct addr_list *, int );
 DWORD netconn_secure_connect( struct netconn *, WCHAR *, DWORD, CredHandle *, BOOL );
 DWORD netconn_send( struct netconn *, const void *, size_t, int *, WSAOVERLAPPED * );
 BOOL netconn_wait_overlapped_result( struct netconn *conn, WSAOVERLAPPED *ovr, DWORD *len );

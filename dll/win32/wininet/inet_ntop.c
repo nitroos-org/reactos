@@ -16,6 +16,11 @@
  * SOFTWARE.
  */
 
+/* IPv6 addresses are formatted here too (without it inet_ntop failed for every AF_INET6 address) */
+#ifndef INET6
+#define INET6 1
+#endif
+
 #ifndef IN6ADDRSZ
 #define	IN6ADDRSZ	16
 #endif

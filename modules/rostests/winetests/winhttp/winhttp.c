@@ -6297,6 +6297,149 @@ static void test_connection_cache(int port)
     WinHttpCloseHandle(ses);
 }
 
+struct ipv6_server
+{
+    SOCKET listener;
+    int port;
+    char request[1024];
+};
+
+static DWORD CALLBACK ipv6_server_thread(void *param)
+{
+    static const char response[] = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello";
+    struct ipv6_server *srv = param;
+    SOCKET c = accept(srv->listener, NULL, NULL);
+    int i, r;
+
+    if (c == INVALID_SOCKET) return 1;
+    for (i = 0; i < sizeof(srv->request) - 1; i++)
+    {
+        r = recv(c, &srv->request[i], 1, 0);
+        if (r != 1) break;
+        if (i >= 3 && !memcmp(&srv->request[i - 3], "\r\n\r\n", 4)) break;
+    }
+    send(c, response, sizeof(response) - 1, 0);
+    closesocket(c);
+    return 0;
+}
+
+/* a listener on the IPv6 loopback only; returns FALSE when the machine has no IPv6 loopback */
+static BOOL start_ipv6_server(struct ipv6_server *srv, HANDLE *thread)
+{
+    struct sockaddr_in6 sa;
+    int len = sizeof(sa);
+
+    memset(srv, 0, sizeof(*srv));
+    srv->listener = socket(AF_INET6, SOCK_STREAM, 0);
+    if (srv->listener == INVALID_SOCKET) return FALSE;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin6_family = AF_INET6;
+    sa.sin6_addr.s6_addr[15] = 1;
+    if (bind(srv->listener, (struct sockaddr *)&sa, sizeof(sa)) || getsockname(srv->listener, (struct sockaddr *)&sa, &len)
+        || listen(srv->listener, 1))
+    {
+        closesocket(srv->listener);
+        return FALSE;
+    }
+    srv->port = ntohs(sa.sin6_port);
+    *thread = CreateThread(NULL, 0, ipv6_server_thread, srv, 0, NULL);
+    return TRUE;
+}
+
+static void ipv6_get(const WCHAR *host, int port, BOOL expect_ok, struct ipv6_server *srv, const char *host_header)
+{
+    HINTERNET ses, con, req;
+    char buf[16] = {0};
+    DWORD size, status = 0, err;
+    BOOL ret;
+
+    ses = WinHttpOpen(L"winetest", WINHTTP_ACCESS_TYPE_NO_PROXY, NULL, NULL, 0);
+    ok(ses != NULL, "WinHttpOpen failed %lu\n", GetLastError());
+    con = WinHttpConnect(ses, host, port, 0);
+    ok(con != NULL, "WinHttpConnect(%s) failed %lu\n", wine_dbgstr_w(host), GetLastError());
+    req = WinHttpOpenRequest(con, NULL, L"/", NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+    ok(req != NULL, "WinHttpOpenRequest failed %lu\n", GetLastError());
+    SetLastError(0xdeadbeef);
+    ret = WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+    err = GetLastError();
+    ok(ret == expect_ok, "%s: WinHttpSendRequest returned %d, error %lu\n", wine_dbgstr_w(host), ret, err);
+    if (ret)
+    {
+        ret = WinHttpReceiveResponse(req, NULL);
+        ok(ret, "WinHttpReceiveResponse failed %lu\n", GetLastError());
+        size = sizeof(status);
+        ret = WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, NULL, &status, &size, NULL);
+        ok(ret && status == 200, "status %lu\n", status);
+        {
+            /* the connection info of an IPv6 connection: both ends are IPv6 addresses */
+            WINHTTP_CONNECTION_INFO info;
+            const struct sockaddr_in6 *remote = (const struct sockaddr_in6 *)&info.RemoteAddress;
+            const struct sockaddr_in6 *local = (const struct sockaddr_in6 *)&info.LocalAddress;
+
+            size = sizeof(info);
+            memset(&info, 0, sizeof(info));
+            ret = WinHttpQueryOption(req, WINHTTP_OPTION_CONNECTION_INFO, &info, &size);
+            ok(ret, "%s: WINHTTP_OPTION_CONNECTION_INFO failed %lu\n", wine_dbgstr_w(host), GetLastError());
+            if (ret)
+            {
+                ok(remote->sin6_family == AF_INET6 && ntohs(remote->sin6_port) == port,
+                   "remote family %u port %u\n", remote->sin6_family, ntohs(remote->sin6_port));
+                ok(local->sin6_family == AF_INET6, "local family %u\n", local->sin6_family);
+            }
+        }
+        ret = WinHttpReadData(req, buf, sizeof(buf) - 1, &size);
+        ok(ret && size == 5 && !memcmp(buf, "hello", 5), "got %lu bytes\n", size);
+        if (srv && host_header)
+            ok(strstr(srv->request, host_header) != NULL, "Host header %s not in request:\n%s\n", host_header, srv->request);
+    }
+    else
+        ok(err == ERROR_WINHTTP_CANNOT_CONNECT, "got %lu\n", err);
+    WinHttpCloseHandle(req);
+    WinHttpCloseHandle(con);
+    WinHttpCloseHandle(ses);
+}
+
+static void test_ipv6_literals(void)
+{
+    static const WCHAR *hosts[] = { L"[::1]", L"localhost" };
+    struct addrinfo hints, *res;
+    WSADATA wsa;
+    unsigned int i;
+    char hdr[64];
+
+    WSAStartup(MAKEWORD(2, 2), &wsa);
+    for (i = 0; i < ARRAY_SIZE(hosts); i++)
+    {
+        struct ipv6_server srv;
+        HANDLE thread;
+
+        if (i)
+        {
+            /* the name must resolve to the IPv6 loopback as well, then the failed IPv4 attempt falls back to it */
+            memset(&hints, 0, sizeof(hints));
+            hints.ai_family = AF_INET6;
+            if (getaddrinfo("localhost", NULL, &hints, &res)) { skip("localhost has no IPv6 address\n"); continue; }
+            freeaddrinfo(res);
+        }
+        if (!start_ipv6_server(&srv, &thread)) { skip("no IPv6 loopback\n"); break; }
+        sprintf(hdr, i ? "Host: localhost:%d\r\n" : "Host: [::1]:%d\r\n", srv.port);
+        ipv6_get(hosts[i], srv.port, TRUE, &srv, hdr);
+        WaitForSingleObject(thread, 5000);
+        CloseHandle(thread);
+        closesocket(srv.listener);
+    }
+
+    /* an unbracketed IPv6 address is not a valid host for WinHttpConnect */
+    {
+        HINTERNET ses = WinHttpOpen(L"winetest", WINHTTP_ACCESS_TYPE_NO_PROXY, NULL, NULL, 0), con;
+        SetLastError(0xdeadbeef);
+        con = WinHttpConnect(ses, L"::1", 80, 0);
+        ok(!con, "WinHttpConnect succeeded\n");
+        ok(GetLastError() == ERROR_WINHTTP_INVALID_URL, "got %lu\n", GetLastError());
+        WinHttpCloseHandle(ses);
+    }
+}
+
 START_TEST (winhttp)
 {
     struct server_info si;
@@ -6311,6 +6454,7 @@ START_TEST (winhttp)
     pWinHttpWebSocketShutdown = (void *)GetProcAddress(mod, "WinHttpWebSocketShutdown");
     pWinHttpWebSocketReceive = (void *)GetProcAddress(mod, "WinHttpWebSocketReceive");
 
+    test_ipv6_literals();
     test_WinHttpOpenRequest();
     test_WinHttpSendRequest();
     test_connect_error();
