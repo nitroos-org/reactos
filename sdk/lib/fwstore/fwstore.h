@@ -118,3 +118,7 @@ PCWSTR FwProfileKey(ULONG ProfileBit);
 
 DWORD FwWatchOpen(HKEY *phKey);                          /* handle for RegNotifyChangeKeyValue on the policy subtree */
 DWORD FwPushToKernel(ULONGLONG Generation, BOOL *pDevicePresent);
+/* what the last FwPushToKernel did not push: rules rejected (not representable: a list of which no entry resolves, a
+   program path that does not resolve, more kernel rules than the policy holds), Block rules pushed but not fully
+   enforced, and the names (tag: name; ...) as far as Chars allows */
+VOID  FwPushGetReport(ULONG *pRejected, ULONG *pPartial, PWSTR Names, ULONG Chars);

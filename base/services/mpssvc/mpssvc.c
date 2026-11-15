@@ -6,6 +6,7 @@
  *              device is not an error: the rules stay stored and are pushed when the device appears.
  */
 #include <stdio.h>
+#include <wchar.h>
 #include <windef.h>
 #include <winbase.h>
 #include <winreg.h>
@@ -56,11 +57,43 @@ static VOID Report(DWORD err, BOOL present)
     RegCloseKey(hk);
 }
 
+/* Rules the push could not carry (or not fully): HKLM\SOFTWARE\ReactOS\Nitro\Firewall LastPushRejectedRules,
+   LastPushPartialBlockRules, LastPushRejectedNames, and one Application event per change of that state (not per push). */
+static VOID ReportRules(VOID)
+{
+    static ULONG lastRej, lastPar; static WCHAR lastNames[1024];
+    ULONG rej, par; WCHAR names[1024]; HKEY hk; DWORD disp;
+    FwPushGetReport(&rej, &par, names, 1024);
+    if (!RegCreateKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\ReactOS\\Nitro\\Firewall", 0, NULL, 0, KEY_SET_VALUE, NULL, &hk, &disp))
+    {
+        RegSetValueExW(hk, L"LastPushRejectedRules", 0, REG_DWORD, (BYTE *)&rej, 4);
+        RegSetValueExW(hk, L"LastPushPartialBlockRules", 0, REG_DWORD, (BYTE *)&par, 4);
+        RegSetValueExW(hk, L"LastPushRejectedNames", 0, REG_SZ, (BYTE *)names, (DWORD)((wcslen(names) + 1) * sizeof(WCHAR)));
+        RegCloseKey(hk);
+    }
+    if ((rej || par) && (rej != lastRej || par != lastPar || wcscmp(names, lastNames)))
+    {
+        HANDLE hes = RegisterEventSourceW(NULL, g_Name);
+        if (hes)
+        {
+            WCHAR msg[1280]; PCWSTR str[1];
+            _snwprintf(msg, 1279, L"NitroOS Firewall: %lu rule(s) were not pushed to the filter and %lu Block rule(s) are not fully enforced: %ls",
+                       rej, par, names);
+            msg[1279] = 0; str[0] = msg;
+            ReportEventW(hes, EVENTLOG_ERROR_TYPE, 0, 1, NULL, 1, 0, str, NULL);
+            DeregisterEventSource(hes);
+        }
+        OutputDebugStringW(L"mpssvc: firewall rules not pushed or not fully enforced\n");
+    }
+    lastRej = rej; lastPar = par; wcscpy(lastNames, names);
+}
+
 static VOID Push(VOID)
 {
     BOOL present; DWORD err;
     err = FwPushToKernel(++g_Generation, &present);
     Report(err, present);
+    if (present) ReportRules();
 }
 
 /* prompt.c: the "NitroOS Firewall has blocked some features of this app" prompt */
