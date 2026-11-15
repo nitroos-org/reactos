@@ -538,6 +538,37 @@ static int MulticastBurst(const char *What, SOCKET Member, SOCKET Sender, USHORT
     return Lost;
 }
 
+/* Pairs of datagrams to the group sent with no read between them: both of every pair arrive, in order */
+static void MulticastPairs(const char *What, SOCKET Member, SOCKET Sender, USHORT MemberPort)
+{
+    SOCKADDR_IN6_LH To;
+    int i, k, Lost = 0;
+    ULONG Out, In;
+
+    Init6(&To, Group6, MemberPort);
+    for (i = 0; i < 50; i++)
+    {
+        for (k = 0; k < 2; k++)
+        {
+            Out = 0x50410000 + i * 2 + k;
+            if (sendto(Sender, (char *)&Out, sizeof(Out), 0, (struct sockaddr *)&To, sizeof(To)) != sizeof(Out))
+            {
+                ok(0, "%s: sendto %d: %d\n", What, i, WSAGetLastError());
+                return;
+            }
+        }
+        for (k = 0; k < 2; k++)
+        {
+            In = 0;
+            if (!Readable(Member, 1000))
+                Lost++;
+            else if (recv(Member, (char *)&In, sizeof(In), 0) != sizeof(In) || In != 0x50410000 + i * 2 + k)
+                ok(0, "%s: pair %d datagram %d reads %08lx\n", What, i, k, In);
+        }
+    }
+    ok(Lost == 0, "%s: %d of 100 datagrams of back-to-back pairs lost\n", What, Lost);
+}
+
 static void TestMulticastBurst(void)
 {
     IPV6_MREQ Mreq;
@@ -570,6 +601,8 @@ static void TestMulticastBurst(void)
     MulticastBurst("sender bound to ::", r, s, PortR);
     MulticastBurst("sender bound to ::1", r, l, PortR);
     MulticastBurst("the member as the sender", r, r, PortR);
+    MulticastPairs("sender bound to ::", r, s, PortR);
+    MulticastPairs("the member as the sender", r, r, PortR);
 
 Done:
     if (r != INVALID_SOCKET)

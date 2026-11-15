@@ -539,6 +539,13 @@ VOID AddrFileFree(
     ExFreePoolWithTag(ReceiveRequest, DATAGRAM_RECV_TAG);
   }
 
+  /* Datagrams that nobody received */
+  while (!IsListEmpty(&AddrFile->PendingDatagrams))
+  {
+    CurrentEntry = RemoveHeadList(&AddrFile->PendingDatagrams);
+    ExFreePoolWithTag(CurrentEntry, DATAGRAM_PEND_TAG);
+  }
+
   TI_DbgPrint(DEBUG_ADDRFILE, ("Aborting send requests on address file at (0x%X).\n", AddrFile));
 
 #if 0 /* Biggest WTF. All of this was taken care of above as DATAGRAM_RECEIVE_REQUEST. */
@@ -774,6 +781,7 @@ NTSTATUS FileOpenAddress(
 
   /* Initialize receive and transmit queues */
   InitializeListHead(&AddrFile->ReceiveQueue);
+  InitializeListHead(&AddrFile->PendingDatagrams);
   InitializeListHead(&AddrFile->TransmitQueue);
 
   /* Initialize spin lock that protects the address file object */

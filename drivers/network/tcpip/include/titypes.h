@@ -139,7 +139,14 @@ typedef struct _ADDRESS_FILE {
     PVOID Context;                        /* Delete request context */
     DATAGRAM_SEND_ROUTINE Send;           /* Routine to send a datagram */
     LIST_ENTRY ReceiveQueue;              /* List of outstanding receive requests */
-    LIST_ENTRY TransmitQueue;             /* List of outstanding transmit requests */
+    LONG Completing;                      /* Receives being completed: the owner posts the next one when the
+                                             completion returns (datagram.c) */
+    LIST_ENTRY PendingDatagrams;          /* UDP datagrams that came during such a completion, for the receive it
+                                             posts, in order. Bounded, under the object lock (datagram.c) */
+    ULONG PendingCount;
+    ULONG PendingBytes;
+    BOOLEAN PendingBusy;                  /* A thread is handing the pending datagrams to receives */
+    LIST_ENTRY TransmitQueue;            /* List of outstanding transmit requests */
     struct _CONNECTION_ENDPOINT *Connection;
     /* Associated connection or NULL if no associated connection exist */
     struct _CONNECTION_ENDPOINT *Listener;

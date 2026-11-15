@@ -119,8 +119,10 @@ DGDeliverData(
     DGDeliverDataEx(Interface, AddrFile, SrcAddress, DstAddress, SrcPort, DstPort, IPPacket, DataSize, NULL);
 }
 
-VOID
-DGDeliverDataEx(
+/* TRUE: a receive took the datagram or the receive handler saw it; FALSE: nothing took it */
+static
+BOOLEAN
+DGDeliverNow(
     PIP_INTERFACE Interface,
     PADDRESS_FILE AddrFile,
     PIP_ADDRESS SrcAddress,
@@ -150,6 +152,7 @@ DGDeliverDataEx(
     ULONG BytesTaken;
     NTSTATUS Status;
     PVOID DataBuffer;
+    BOOLEAN Delivered = FALSE;
 
     TI_DbgPrint(MIN_TRACE, ("Called.\n"));
 
@@ -176,6 +179,9 @@ DGDeliverDataEx(
         PTA_IP_ADDRESS RTAIPAddress;
         PIP_INTERFACE OwnerIF = NULL;
 
+        /* A receive is posted: the datagram is its (or, when none takes it, dropped) */
+        Delivered = TRUE;
+
         TI_DbgPrint(MAX_TRACE, ("There is a receive request.\n"));
 
         /* Search receive request list to find a match */
@@ -195,6 +201,7 @@ DGDeliverDataEx(
 
                 /* Remove the request from the queue */
                 RemoveEntryList(&Current->ListEntry);
+                InterlockedIncrement(&AddrFile->Completing);
 
                 TI_DbgPrint(MAX_TRACE, ("Suitable receive request found.\n"));
 
@@ -288,11 +295,13 @@ DGDeliverDataEx(
                     Current->Complete(Current->Context, STATUS_SUCCESS, DataSize);
 
                 LockObject(AddrFile);
+                InterlockedDecrement(&AddrFile->Completing);
                 DereferenceObject(AddrFile);
 
                 /* A datagram is delivered to one receive. The lock was dropped for the
                    completion: the entry saved before it may have been cancelled and freed
                    since, so the walk does not continue */
+                Delivered = TRUE;
                 break;
             }
         }
@@ -349,14 +358,185 @@ DGDeliverDataEx(
 
         InterlockedDecrement(&AddrFile->ReceiveHandlersActive);
         DereferenceObject(AddrFile);
+        Delivered = TRUE;
     }
     else
     {
         UnlockObject(AddrFile);
-        TI_DbgPrint(MAX_TRACE, ("Discarding datagram.\n"));
+        TI_DbgPrint(MAX_TRACE, ("No receive for the datagram.\n"));
     }
 
     TI_DbgPrint(MAX_TRACE, ("Leaving.\n"));
+    return Delivered;
+}
+
+/* A UDP datagram nobody could take at that moment. A datagram socket has one receive posted at a time: its owner
+   (AFD) posts the next from inside the completion of the last one. Frames of an adapter are handled by one work
+   item each, so a datagram that comes while another is being completed found no receive and was dropped (two
+   group datagrams a few microseconds apart: 120-141 of 145 received on amd64). Such a datagram waits, while a
+   completion is in progress on the socket, and the thread that completes it hands it on when the completion
+   returns: to the receive posted by then, or it is dropped as before (no receive is posted when the owner's
+   window is full, which keeps a full window dropping exactly what it did). */
+#define DG_PENDING_MAX          128
+#define DG_PENDING_MAX_BYTES    (256 * 1024)
+
+typedef struct _DG_PENDING {
+    LIST_ENTRY ListEntry;       /* first: the list is freed as pool blocks */
+    IP_ADDRESS Src, Dst;
+    USHORT SrcPort, DstPort;
+    BOOLEAN HasInfo6;
+    DG_RX_INFO6 Info6;
+    UINT Size;
+    UCHAR Data[1];
+} DG_PENDING, *PDG_PENDING;
+
+/* Hands the waiting datagrams to the receives posted, in order (the object lock is not held by the caller). Only
+   one thread does it per socket at a time: a receive posted from a completion that runs here is served by the
+   loop. With no receive posted and no completion in progress the waiting datagrams are dropped; while one is in
+   progress, its thread comes back here */
+static
+VOID
+DGFlushPending(PADDRESS_FILE AddrFile)
+{
+    PDG_PENDING P;
+    IP_PACKET Packet;
+
+    LockObject(AddrFile);
+    if (AddrFile->PendingBusy)
+    {
+        UnlockObject(AddrFile);
+        return;
+    }
+    AddrFile->PendingBusy = TRUE;
+
+    while (!IsListEmpty(&AddrFile->PendingDatagrams))
+    {
+        if (IsListEmpty(&AddrFile->ReceiveQueue))
+        {
+            if (AddrFile->Completing == 0)
+            {
+                while (!IsListEmpty(&AddrFile->PendingDatagrams))
+                    ExFreePoolWithTag(RemoveHeadList(&AddrFile->PendingDatagrams), DATAGRAM_PEND_TAG);
+                AddrFile->PendingCount = 0;
+                AddrFile->PendingBytes = 0;
+            }
+            break;
+        }
+        P = CONTAINING_RECORD(AddrFile->PendingDatagrams.Flink, DG_PENDING, ListEntry);
+        RemoveEntryList(&P->ListEntry);
+        AddrFile->PendingCount--;
+        AddrFile->PendingBytes -= P->Size;
+        UnlockObject(AddrFile);
+
+        RtlZeroMemory(&Packet, sizeof(Packet));
+        Packet.Type = P->Src.Type;
+        Packet.Header = P->Data;
+        Packet.Data = P->Data;
+        Packet.TotalSize = P->Size;
+        Packet.SrcAddr = P->Src;
+        Packet.DstAddr = P->Dst;
+
+        /* (a receive cancelled meanwhile drops it) */
+        DGDeliverNow(NULL, AddrFile, &P->Src, &P->Dst, P->SrcPort, P->DstPort, &Packet, P->Size,
+                     P->HasInfo6 ? &P->Info6 : NULL);
+        ExFreePoolWithTag(P, DATAGRAM_PEND_TAG);
+        LockObject(AddrFile);
+    }
+
+    AddrFile->PendingBusy = FALSE;
+    UnlockObject(AddrFile);
+}
+
+/* Keeps a datagram until the completion in progress returns. FALSE: none is in progress (the caller drops it, or
+   looks for a receive again); TRUE: it is kept, or dropped for want of room */
+static
+BOOLEAN
+DGKeepPending(
+    PADDRESS_FILE AddrFile,
+    PIP_ADDRESS SrcAddress,
+    PIP_ADDRESS DstAddress,
+    USHORT SrcPort,
+    USHORT DstPort,
+    PIP_PACKET IPPacket,
+    UINT DataSize,
+    PDG_RX_INFO6 Info6)
+{
+    PDG_PENDING P;
+
+    /* Cheap when no completion is in progress: a socket whose window is full drops every datagram here */
+    if (AddrFile->Completing == 0)
+        return FALSE;
+
+    P = ExAllocatePoolWithTag(NonPagedPool, FIELD_OFFSET(DG_PENDING, Data) + DataSize, DATAGRAM_PEND_TAG);
+    if (!P)
+        return TRUE;
+    P->Src = *SrcAddress;
+    P->Dst = *DstAddress;
+    P->SrcPort = SrcPort;
+    P->DstPort = DstPort;
+    P->HasInfo6 = Info6 != NULL;
+    if (Info6)
+        P->Info6 = *Info6;
+    P->Size = DataSize;
+    RtlCopyMemory(P->Data, IPPacket->Data, DataSize);
+
+    /* Under the lock the completion takes to end: it sees this datagram, or this sees it ended */
+    LockObject(AddrFile);
+    if (AddrFile->Completing == 0)
+    {
+        UnlockObject(AddrFile);
+        ExFreePoolWithTag(P, DATAGRAM_PEND_TAG);
+        return FALSE;
+    }
+    if (AddrFile->PendingCount >= DG_PENDING_MAX || AddrFile->PendingBytes + DataSize > DG_PENDING_MAX_BYTES)
+    {
+        UnlockObject(AddrFile);
+        ExFreePoolWithTag(P, DATAGRAM_PEND_TAG);
+        return TRUE;
+    }
+    InsertTailList(&AddrFile->PendingDatagrams, &P->ListEntry);
+    AddrFile->PendingCount++;
+    AddrFile->PendingBytes += DataSize;
+    UnlockObject(AddrFile);
+    return TRUE;
+}
+
+VOID
+DGDeliverDataEx(
+    PIP_INTERFACE Interface,
+    PADDRESS_FILE AddrFile,
+    PIP_ADDRESS SrcAddress,
+    PIP_ADDRESS DstAddress,
+    USHORT SrcPort,
+    USHORT DstPort,
+    PIP_PACKET IPPacket,
+    UINT DataSize,
+    PDG_RX_INFO6 Info6)
+{
+    if (AddrFile->Protocol != IPPROTO_UDP)
+    {
+        DGDeliverNow(Interface, AddrFile, SrcAddress, DstAddress, SrcPort, DstPort, IPPacket, DataSize, Info6);
+        return;
+    }
+
+    /* The datagrams that wait come first */
+    if (!IsListEmpty(&AddrFile->PendingDatagrams))
+        DGFlushPending(AddrFile);
+
+    if (!DGDeliverNow(Interface, AddrFile, SrcAddress, DstAddress, SrcPort, DstPort, IPPacket, DataSize, Info6))
+    {
+        if (!DGKeepPending(AddrFile, SrcAddress, DstAddress, SrcPort, DstPort, IPPacket, DataSize, Info6))
+        {
+            /* No completion in progress: the receive may have been posted since the look above */
+            if (!DGDeliverNow(Interface, AddrFile, SrcAddress, DstAddress, SrcPort, DstPort, IPPacket, DataSize,
+                              Info6))
+                TI_DbgPrint(MAX_TRACE, ("Discarding datagram.\n"));
+        }
+    }
+
+    /* The completion that ended is the one that hands on what came during it */
+    if (!IsListEmpty(&AddrFile->PendingDatagrams))
+        DGFlushPending(AddrFile);
 }
 
 VOID DGReceiveComplete(PVOID Context, NTSTATUS Status, ULONG Count) {
