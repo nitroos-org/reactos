@@ -4210,6 +4210,16 @@ int ngc_links(ngc_node *n)
 	return links ? links : 1;
 }
 
+/* The unlink keeps the base inode's count at 0 exactly when the record lost its last name (ngc_unlink_impl). */
+int ngc_unlinked(ngc_node *n)
+{
+	struct inode *vi = (struct inode *)n;
+	struct ntfs_inode *ni = NTFS_I(vi);
+	if (NInoAttr(ni))
+		vi = VFS_I(ni->ext.base_ntfs_ino);
+	return vi->i_nlink == 0;
+}
+
 /* A name of @n (not a DOS-only one) and its directory's MFT number: for paths from a file ID. */
 int ngc_parent_name(ngc_node *n, unsigned long long *parent, unsigned short *out, unsigned int *len)
 {

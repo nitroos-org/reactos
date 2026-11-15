@@ -364,11 +364,18 @@ int NgEnsureNode(PNG_FCB Fcb)
     return 0;
 }
 
-/* Only under an exclusive hold: a shared holder may be using the node. */
+/*
+ * Only under an exclusive hold: a shared holder may be using the node.  The node may belong to a file that lost
+ * its last name while this FCB held it (an open whose walk found the file listed its FCB after a delete through
+ * another FCB had unlinked it): this put frees the record, whose number a new file can then get, so the FCB is
+ * deleted and leaves the lookup list here, before a create of that new file could find it by the number.
+ */
 VOID NgParkNode(PNG_FCB Fcb)
 {
     if (Fcb->Node && !Fcb->IsRoot)
     {
+        if (!Fcb->Deleted && NgNodeGone(Fcb->Node))
+            NgUnlistFcb(Fcb);
         ngc_put(Fcb->Node);
         Fcb->Node = NULL;
     }
@@ -377,9 +384,7 @@ VOID NgParkNode(PNG_FCB Fcb)
 /* After an unlink (CoreLock held): TRUE when the node's record lost its last name and is free. */
 BOOLEAN NgNodeGone(ngc_node *Node)
 {
-    struct ngc_stat St;
-    ngc_stat(Node, &St);
-    return St.nlink == 0;
+    return ngc_unlinked(Node) != 0;
 }
 
 /* Fills Fcb->Stat and the Cc file sizes from the core inode. */
