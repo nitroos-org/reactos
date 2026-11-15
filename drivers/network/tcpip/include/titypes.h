@@ -289,8 +289,9 @@ typedef struct _CONNECTION_ENDPOINT {
     LIST_ENTRY PendingAccepts;
     ULONG PendingAcceptCount;
 
-    /* Connections the owner of a listener (AFD) has room for, stated by a listen request;
-       the lwIP thread takes it and then admits no more than that (0: none stated) */
+    /* Connections the owner of a listener (AFD) has room for, stated by a listen request, plus one
+       (0: none stated); the lwIP thread takes it and then admits no more than that. A connection handed
+       over before the lwIP thread takes it is taken off it (LibTCPAccept) */
     volatile LONG ListenRoom;
     BOOLEAN RoomManaged;
 

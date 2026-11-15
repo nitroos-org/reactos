@@ -174,6 +174,12 @@ NTSTATUS TCPAccept ( PTDI_REQUEST Request,
         Bucket->Request.RequestContext = Context;
         InsertTailList( &Listener->ListenRequest, &Bucket->Entry );
         Status = STATUS_PENDING;
+
+        /* The owner states how many more connections it has room for. Stated with the request, under
+           the lock that hands connections to it: one handed over to this request is then counted
+           against the room (LibTCPAccept), not lost when the lwIP thread applies the room */
+        if (Room)
+            InterlockedExchange(&Listener->ListenRoom, (LONG)Room + 1);
     }
     else
         Status = STATUS_NO_MEMORY;
@@ -182,12 +188,7 @@ NTSTATUS TCPAccept ( PTDI_REQUEST Request,
 
     /* A connection may have been established while no listen request was queued */
     if (Status == STATUS_PENDING)
-    {
-        /* The owner states how many more connections it has room for */
-        if (Room)
-            InterlockedExchange(&Listener->ListenRoom, (LONG)Room);
         LibTCPClaimPendingAccept(Listener);
-    }
 
     return Status;
 }

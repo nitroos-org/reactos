@@ -1008,7 +1008,10 @@ START_TEST(backlog)
         return;
 
     TestBacklog(1, 16);
-    TestBacklog(2, 32);
+    /* The first connections come while the listener is still stating its room to the transport (a
+     * race that let one connection too many in): repeat the case on fresh listeners */
+    for (i = 0; i < 4; i++)
+        TestBacklog(2, 32);
     TestBacklog(5, 48);
     TestBacklog(SOMAXCONN, 40);
     TestBacklog(SOMAXCONN, 300);

@@ -734,6 +734,26 @@ LibTCPSegmentChecksum(const ip4_addr_t *Src, const ip4_addr_t *Dest, const void 
     return (u16_t)~Sum;
 }
 
+/* The room the owner of a listener (AFD) states with a listen request takes effect here, under the core lock, before a
+   SYN is looked at: the claim that also applies it is posted to the lwIP thread, while a connect and the received
+   packets run on the thread that has them. Connections the listener admits until then would not count against it */
+void
+LibTCPApplyListenRoom(struct tcp_pcb_listen *lpcb)
+{
+    PCONNECTION_ENDPOINT Listener = lpcb->callback_arg;
+    LONG Room;
+
+    if (!Listener || !Listener->ListenRoom)
+        return;
+
+    Room = InterlockedExchange(&Listener->ListenRoom, 0);
+    if (Room)
+    {
+        Listener->RoomManaged = TRUE;
+        lpcb->backlog = (u8_t)min(Room - 1, 0xFF);
+    }
+}
+
 /* Whether the listener that tcp_input would choose can take a new connection */
 static
 struct tcp_pcb_listen *
@@ -761,6 +781,8 @@ LibTCPFindListener(const ip4_addr_t *Dest, u16_t Port, struct netif *inp)
     }
     if (!lpcb)
         lpcb = Any ? Any : AnyType;
+    if (lpcb)
+        LibTCPApplyListenRoom(lpcb);
     return lpcb;
 }
 
@@ -1256,15 +1278,10 @@ LibTCPClaimPendingAcceptCallback(void *arg)
     PPENDING_ACCEPT Pending;
     PTCP_PCB pcb;
     BOOLEAN PeerClosed;
-    LONG Room;
 
     /* The owner of the listener states what it has room for; the SYNs lwIP takes from now on fit it */
-    Room = InterlockedExchange(&Listener->ListenRoom, 0);
-    if (Room && Listener->SocketContext)
-    {
-        Listener->RoomManaged = TRUE;
-        ((struct tcp_pcb_listen *)Listener->SocketContext)->backlog = (u8_t)min(Room, 0xFF);
-    }
+    if (Listener->SocketContext)
+        LibTCPApplyListenRoom((struct tcp_pcb_listen *)Listener->SocketContext);
 
     /* A closed listener has already aborted its pending connections */
     while (Listener->SocketContext && !IsListEmpty(&Listener->PendingAccepts))
@@ -2181,11 +2198,18 @@ LibTCPAccept(PTCP_PCB pcb, struct tcp_pcb *listen_pcb, void *arg)
         TCP6CountPassiveOpen();
 
     /* The room the owner stated shrinks with each connection handed over; its next listen request
-       states what is left */
-    if (listen_pcb && listen_pcb->callback_arg && ((PCONNECTION_ENDPOINT)listen_pcb->callback_arg)->RoomManaged &&
-        ((struct tcp_pcb_listen *)listen_pcb)->backlog)
+       states what is left. A room stated with a listen request that the lwIP thread has not applied
+       yet shrinks too, else applying it would give back this connection's place and let one
+       connection too many in. The backlog in force shrinks in any case: the SYNs that come before
+       the stated room is applied must not see this connection's place free */
+    if (listen_pcb && listen_pcb->callback_arg)
     {
-        ((struct tcp_pcb_listen *)listen_pcb)->backlog--;
+        PCONNECTION_ENDPOINT Listener = listen_pcb->callback_arg;
+
+        if (Listener->ListenRoom > 1)
+            InterlockedDecrement(&Listener->ListenRoom);
+        if (Listener->RoomManaged && ((struct tcp_pcb_listen *)listen_pcb)->backlog)
+            ((struct tcp_pcb_listen *)listen_pcb)->backlog--;
     }
 
     tcp_accepted(listen_pcb);

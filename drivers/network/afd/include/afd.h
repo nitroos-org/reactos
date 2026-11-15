@@ -237,6 +237,7 @@ typedef struct _AFD_FCB {
     PAFD_DEVICE_EXTENSION DeviceExt;
     BOOLEAN DelayedAccept;
     BOOLEAN AbortingReceives; /* the cleanup of a stream socket is cancelling its receives */
+    BOOLEAN CleanedUp; /* the last handle is closed: a request that still arrives is cancelled, nobody would end it */
     BOOLEAN ReceiveShutdown; /* shutdown(SD_RECEIVE) left receives pending: they wait for data, the end or a reset */
     BOOLEAN ShutdownBoth; /* ... and it shut the send direction down too (SD_BOTH) */
     BOOLEAN LocalReceiveShutdown; /* TdiReceiveClosed comes from shutdown(SD_RECEIVE), not from the peer */
@@ -448,6 +449,19 @@ PVOID GetLockedData( PIRP Irp, PIO_STACK_LOCATION IrpSp );
 BOOLEAN AfdRequestLengthValid( PIRP Irp, PIO_STACK_LOCATION IrpSp, ULONG MinLength );
 NTSTATUS LeaveIrpUntilLater( PAFD_FCB FCB, PIRP Irp, UINT Function );
 NTSTATUS QueueUserModeIrp(PAFD_FCB FCB, PIRP Irp, UINT Function);
+
+/* Whether the cleanup of the socket aborts its pending requests of this function with
+   STATUS_CONNECTION_ABORTED: the receives of a stream socket, unless shutdown(SD_BOTH) left them pending */
+#define AfdAbortsReceivesOnCleanup(FCB, Function) \
+    ((Function) == FUNCTION_RECV && !((FCB)->Flags & AFD_ENDPOINT_CONNECTIONLESS) && !(FCB)->ShutdownBoth)
+
+/* Called with the cancel spin lock held, before a request is parked: after the cleanup of the socket
+   nobody would end it, so it is cancelled as the cleanup cancels the ones it finds. TRUE when it
+   marked the request; AbortingReceives is then set for the cancel routine, which the caller runs
+   and then ends with AfdEndCancelAfterCleanup */
+BOOLEAN AfdCancelAfterCleanup(PAFD_FCB FCB, PIRP Irp, UINT Function);
+#define AfdEndCancelAfterCleanup(FCB, Marked) \
+    do { if (Marked) (FCB)->AbortingReceives = FALSE; } while (0)
 NTSTATUS AfdCopyToUserOutput(PIRP Irp, PIO_STACK_LOCATION IrpSp,
                              const VOID *Data, ULONG Length);
 

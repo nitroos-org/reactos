@@ -28,6 +28,8 @@
 /* A SYN can reopen a connection in TIME-WAIT (ip/lwip_glue/tcp.c) */
 #define LWIP_HOOK_FILENAME              "lwip_hooks.h"
 #define LWIP_HOOK_IP4_INPUT(p, inp)     LibTCPReopenTimeWait(p, inp)
+/* The room a listener's owner stated takes effect before the next SYN is looked at */
+#define LWIP_HOOK_TCP_LISTEN_SYN(lpcb)  LibTCPApplyListenRoom(lpcb)
 #define LWIP_HOOK_TCP_ISN(local_ip, local_port, remote_ip, remote_port) \
     LibTCPNextIss(local_ip, local_port, remote_ip, remote_port)
 

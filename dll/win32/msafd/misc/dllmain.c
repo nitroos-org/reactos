@@ -642,6 +642,10 @@ TranslateNtStatusError(NTSTATUS Status)
        case STATUS_ACCESS_DENIED:
           return WSAEACCES;
 
+       case STATUS_INVALID_HANDLE:
+          /* The socket was closed under the request */
+          return WSAENOTSOCK;
+
        case STATUS_NOT_IMPLEMENTED:
           return WSAEOPNOTSUPP;
 
@@ -1783,6 +1787,15 @@ WSPAccept(
     {
         MsafdWaitForAlert(SockEvent);
         Status = IOSB.Status;
+    }
+
+    if (Status == STATUS_CANCELLED)
+    {
+        /* The listening socket was closed under the wait (its cleanup cancels the request): a blocked
+         * accept() is interrupted, as on Windows, rather than aborted */
+        NtClose( SockEvent );
+        if (lpErrno) *lpErrno = WSAEINTR;
+        return INVALID_SOCKET;
     }
 
     if (!NT_SUCCESS(Status))

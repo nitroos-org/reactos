@@ -689,6 +689,10 @@ tcp_listen_input(struct tcp_pcb_listen *pcb)
   } else if (flags & TCP_SYN) {
     LWIP_DEBUGF(TCP_DEBUG, ("TCP connection request %"U16_F" -> %"U16_F".\n", tcphdr->src, tcphdr->dest));
 #if TCP_LISTEN_BACKLOG
+    /* NitroOS: the owner's stated room becomes the backlog before the check (lwipopts.h, ip/lwip_glue/tcp.c) */
+#ifdef LWIP_HOOK_TCP_LISTEN_SYN
+    LWIP_HOOK_TCP_LISTEN_SYN(pcb);
+#endif
     if (pcb->accepts_pending >= pcb->backlog) {
       LWIP_DEBUGF(TCP_DEBUG, ("tcp_listen_input: listen backlog exceeded for port %"U16_F"\n", tcphdr->dest));
       return;

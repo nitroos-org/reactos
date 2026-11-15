@@ -605,14 +605,17 @@ AfdCleanupSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     if( !SocketAcquireStateLock( FCB ) ) return LostSocket(Irp);
 
+    /* A request that a thread issued before the handle closed can still reach the driver after
+       this cleanup; it finds the flag and is cancelled, else it would wait for ever (the file
+       object stays referenced by it, so the socket is never closed) */
+    FCB->CleanedUp = TRUE;
+
     for (Function = 0; Function < MAX_FUNCTIONS; Function++)
     {
         /* Closing a stream socket aborts its pending receives (STATUS_CONNECTION_ABORTED,
            as Windows does); every other request, and any receive of a datagram socket, is cancelled,
            and so is a receive that shutdown(SD_BOTH) left pending */
-        FCB->AbortingReceives = (Function == FUNCTION_RECV) &&
-                                !(FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS) &&
-                                !FCB->ShutdownBoth;
+        FCB->AbortingReceives = AfdAbortsReceivesOnCleanup(FCB, Function);
 
         CurrentEntry = FCB->PendingIrpList[Function].Flink;
         while (CurrentEntry != &FCB->PendingIrpList[Function])

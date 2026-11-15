@@ -700,9 +700,21 @@ NTSTATUS AfdCopyToUserOutput(PIRP Irp, PIO_STACK_LOCATION IrpSp,
     return Status;
 }
 
+BOOLEAN AfdCancelAfterCleanup(PAFD_FCB FCB, PIRP Irp, UINT Function)
+{
+    if (!FCB->CleanedUp || Irp->Cancel)
+        return FALSE;
+
+    /* As the cleanup cancels the requests it finds */
+    Irp->Cancel = TRUE;
+    FCB->AbortingReceives = AfdAbortsReceivesOnCleanup(FCB, Function);
+    return TRUE;
+}
+
 NTSTATUS QueueUserModeIrp(PAFD_FCB FCB, PIRP Irp, UINT Function)
 {
     NTSTATUS Status;
+    BOOLEAN Marked;
 
     /* Add the IRP to the queue in all cases (so AfdCancelHandler will work properly) */
     InsertTailList( &FCB->PendingIrpList[Function],
@@ -710,6 +722,7 @@ NTSTATUS QueueUserModeIrp(PAFD_FCB FCB, PIRP Irp, UINT Function)
 
     /* Acquire the cancel spin lock and check the cancel bit */
     IoAcquireCancelSpinLock(&Irp->CancelIrql);
+    Marked = AfdCancelAfterCleanup(FCB, Irp, Function);
     if (!Irp->Cancel)
     {
         /* We are not cancelled; we're good to go so
@@ -727,10 +740,13 @@ NTSTATUS QueueUserModeIrp(PAFD_FCB FCB, PIRP Irp, UINT Function)
         /* We were already cancelled before we were able to register our cancel routine
          * so we are to call the cancel routine ourselves right here to cancel the IRP
          * (which handles all the stuff we do above) and return STATUS_CANCELLED to the caller
+         * (the status the cancel handler completes it with: a receive of a stream socket that
+         * reaches it after its cleanup is aborted)
          */
+        Status = (Function == FUNCTION_RECV && FCB->AbortingReceives) ? STATUS_CONNECTION_ABORTED : STATUS_CANCELLED;
         AfdCancelHandler(IoGetCurrentIrpStackLocation(Irp)->DeviceObject,
                          Irp);
-        Status = STATUS_CANCELLED;
+        AfdEndCancelAfterCleanup(FCB, Marked);
     }
 
     return Status;
