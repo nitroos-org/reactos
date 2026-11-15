@@ -1,6 +1,8 @@
 # NetTCPIP for ReactOS-Nitro: a clean-room PowerShell 7 script module (read side and the write cmdlets New-/Remove-NetIPAddress, Set-NetIPInterface -Dhcp/-InterfaceMetric/-AutomaticMetric). Same module, cmdlet and parameter names
 # and the same object shapes as the Windows module (see NetAdapter.psm1). The data comes from iphlpapi through
-# Nitro.Net.Native (NitroNetNative.cs); the IPv4 forwarding table is the only route source this system offers.
+# Nitro.Net.Native (NitroNetNative.cs); the route rows are the IPv4 forwarding table and GetIpForwardTable2 for IPv6. IPv6 addresses and
+# routes are configured with New-/Remove-NetIPAddress and New-/Remove-NetRoute (the IP Helper for the ActiveStore, the stack's persistent
+# IPv6 store for the PersistentStore).
 
 Set-StrictMode -Version 2.0
 
@@ -178,7 +180,8 @@ function Get-NetRoute {
         }
         Invoke-NetQuery $PSCmdlet 'MSFT_NetRoute' ([Nitro.Net.Native]::Routes()) $PSBoundParameters `
             @('DestinationPrefix', 'InterfaceIndex', 'InterfaceAlias', 'NextHop', 'AddressFamily', 'Publish', 'RouteMetric', 'Protocol',
-              'CompartmentId', 'ValidLifetime', 'PreferredLifetime', 'State', 'InterfaceMetric') -Extra $extra
+              'CompartmentId', 'ValidLifetime', 'PreferredLifetime', 'State', 'InterfaceMetric') -Extra $extra `
+            -PersistentRows { , [Nitro.Net.Config]::PersistentRoutes6() }
     }
 }
 
@@ -349,12 +352,22 @@ function Test-NetConnection {
         # routing: the source address and interface Windows would pick
         $dest = $r.RemoteAddress
         $srcText = $null
-        try {
-            $s = [System.Net.Sockets.Socket]::new($dest.AddressFamily, [System.Net.Sockets.SocketType]::Dgram, [System.Net.Sockets.ProtocolType]::Udp)
-            try { $s.Connect($dest, 9); $srcText = $s.LocalEndPoint.Address.ToString() } finally { $s.Dispose() }
-        } catch { }
         $src = $null
-        if ($srcText) { $src = Get-NetIPAddress -IPAddress $srcText -ErrorAction SilentlyContinue | Select-Object -First 1 }
+        if ($dest.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6) {
+            # the local address of a connected UDP/IPv6 socket stays unspecified here: the stack's own route and source selection answers
+            $bix = [uint32]0
+            $bs = [Nitro.Net.Native]::BestSource6($dest, [ref]$bix)
+            if ($bs) {
+                $srcText = $bs.ToString()
+                $src = @(Get-NetIPAddress -AddressFamily IPv6 -ErrorAction SilentlyContinue | Where-Object { ($_.IPAddress -replace '%.*$', '') -eq $srcText -and ($bix -eq 0 -or $_.InterfaceIndex -eq $bix) }) | Select-Object -First 1
+            }
+        } else {
+            try {
+                $s = [System.Net.Sockets.Socket]::new($dest.AddressFamily, [System.Net.Sockets.SocketType]::Dgram, [System.Net.Sockets.ProtocolType]::Udp)
+                try { $s.Connect($dest, 9); $srcText = $s.LocalEndPoint.Address.ToString() } finally { $s.Dispose() }
+            } catch { }
+            if ($srcText) { $src = Get-NetIPAddress -IPAddress $srcText -ErrorAction SilentlyContinue | Select-Object -First 1 }
+        }
         if ($src) {
             $r.SourceAddress = $src
             $r.InterfaceAlias = $src.InterfaceAlias
@@ -403,7 +416,7 @@ function Test-NetConnection {
                     $rep = $p.Send($dest, 2000, [byte[]]::new(32), $opt)
                     if ($rep.Status -eq 'Success') { $hopsFound.Add($rep.Address.ToString()); break }
                     elseif ($rep.Status -eq 'TtlExpired') { $hopsFound.Add($rep.Address.ToString()) }
-                    else { $hopsFound.Add('0.0.0.0') }
+                    else { $hopsFound.Add($(if ($dest.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6) { '::' } else { '0.0.0.0' })) }
                 }
             } finally { $p.Dispose() }
             $r.TraceRoute = $hopsFound.ToArray()
@@ -417,7 +430,9 @@ function Test-NetConnection {
 # New-/Remove-NetIPAddress and Set-NetIPInterface act through iphlpapi (AddIPAddress/DeleteIPAddress, IpRenew/IpReleaseAddress,
 # the IPv4 route table) for the ActiveStore and through the Tcpip\Parameters\Interfaces\{guid} registry values (IPAddress,
 # SubnetMask, DefaultGateway, EnableDHCP) for the PersistentStore, which the stack and the DHCP client read at bind time.
-# The stack holds one IPv4 address per interface and has no IPv6: what it cannot do is refused with an error, never faked.
+# The stack holds one IPv4 address per interface: what it cannot do is refused with an error, never faked. IPv6 addresses and routes
+# (any number) go through the IP Helper for the ActiveStore and tcpip.sys's persistent IPv6 store for the PersistentStore; both
+# stores (no -PolicyStore) is one request to the stack, which applies the entry now and again whenever the adapter starts.
 
 $script:StoreText = @{ ActiveStore = 'Active'; PersistentStore = 'Persistent' }
 
@@ -490,6 +505,8 @@ function Get-NetPersistentIPAddressRows {
             }
         } finally { $k.Dispose() }
     }
+    # the IPv6 ones are the records of the stack's persistent IPv6 store
+    foreach ($d in [Nitro.Net.Config]::PersistentAddresses6()) { $rows.Add($d) }
     ,$rows
 }
 
@@ -543,8 +560,91 @@ function New-NetIPAddress {
         $stores = Get-NetStores $PSCmdlet $PSBoundParameters $class
         if ($null -eq $stores) { return }
         $v6 = $ip.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6
-        if ($v6 -or ($PSBoundParameters.ContainsKey('AddressFamily') -and [int]$AddressFamily -eq 23)) {
-            Write-NetWin32Error $PSCmdlet 50 "The request is not supported. This network stack has no IPv6.`n" $class 'NotImplemented'; return
+        if ($PSBoundParameters.ContainsKey('AddressFamily') -and (([int]$AddressFamily -eq 23) -ne $v6)) {
+            $want = if ([int]$AddressFamily -eq 23) { 'IPv6Address' } else { 'IPv4Address' }
+            Write-NetWin32Error $PSCmdlet 87 "Invalid parameter $want $IPAddress`n" $class; return
+        }
+        if ($v6) {
+            $ipText = $ip.ToString()
+            $plen6 = if ($PSBoundParameters.ContainsKey('PrefixLength')) { [int]$PrefixLength } else { 64 }
+            $gw6 = $null
+            if ($PSBoundParameters.ContainsKey('DefaultGateway') -and $DefaultGateway) {
+                $g = $null
+                if (-not [System.Net.IPAddress]::TryParse($DefaultGateway, [ref]$g) -or $g.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetworkV6) {
+                    Write-NetWin32Error $PSCmdlet 87 "Invalid parameter NextHop $DefaultGateway`n" 'MSFT_NetRoute'; return
+                }
+                $gw6 = $g.ToString()
+            }
+            $targets6 = foreach ($st in $stores) {
+                "NetIPAddress -IPv6Address $ipText -InterfaceIndex $ifx -Store $st"
+                if ($gw6) { "NetRoute -DestinationPrefix ::/0 -InterfaceIndex $ifx -NextHop $gw6 -Store $st" }
+            }
+            $go6 = @{}
+            foreach ($t in $targets6) {
+                $text = "Performing operation `"New`" on Target `"$t`""
+                $go6[$t] = $PSCmdlet.ShouldProcess($text, $text, 'Confirm')
+            }
+            $doActive = ('Active' -in $stores) -and $go6["NetIPAddress -IPv6Address $ipText -InterfaceIndex $ifx -Store Active"]
+            $doPersist = ('Persistent' -in $stores) -and $go6["NetIPAddress -IPv6Address $ipText -InterfaceIndex $ifx -Store Persistent"]
+            if (-not $doActive -and -not $doPersist) { return }
+
+            # what the method itself rejects
+            $b6 = $ip.GetAddressBytes()
+            $isAny = -not ($b6 | Where-Object { $_ -ne 0 })
+            if ($plen6 -gt 128 -or $isAny -or $b6[0] -eq 0xFF -or $ip -eq [System.Net.IPAddress]::IPv6Loopback -or $ip.IsIPv4MappedToIPv6) {
+                $prop = if ($plen6 -gt 128) { "PrefixLength $plen6" } else { "IPv6Address $IPAddress" }
+                Write-NetWin32Error $PSCmdlet 87 "Invalid parameter $prop`n" $class; return
+            }
+            if ($PSBoundParameters.ContainsKey('Type') -and [int]$Type -ne 1) {
+                Write-NetWin32Error $PSCmdlet 50 "The request is not supported. This network stack only configures unicast addresses.`n" $class 'NotImplemented'; return
+            }
+            $valid6 = [Nitro.Net.Config]::Infinite; $pref6 = [Nitro.Net.Config]::Infinite
+            if ($PSBoundParameters.ContainsKey('ValidLifetime') -and $ValidLifetime -ne [timespan]::MaxValue) {
+                if ($ValidLifetime.TotalSeconds -lt 1 -or $ValidLifetime.TotalSeconds -ge [uint32]::MaxValue) { Write-NetWin32Error $PSCmdlet 87 "Invalid parameter ValidLifetime $ValidLifetime`n" $class; return }
+                $valid6 = [uint32]$ValidLifetime.TotalSeconds
+            }
+            if ($PSBoundParameters.ContainsKey('PreferredLifetime') -and $PreferredLifetime -ne [timespan]::MaxValue) {
+                if ($PreferredLifetime.TotalSeconds -lt 0 -or $PreferredLifetime.TotalSeconds -ge [uint32]::MaxValue) { Write-NetWin32Error $PSCmdlet 87 "Invalid parameter PreferredLifetime $PreferredLifetime`n" $class; return }
+                $pref6 = [uint32]$PreferredLifetime.TotalSeconds
+            }
+            if (-not $PSBoundParameters.ContainsKey('PreferredLifetime') -and $pref6 -gt $valid6) { $pref6 = $valid6 }   # only a valid lifetime given: preferred ends with it
+            if ($pref6 -gt $valid6) { Write-NetWin32Error $PSCmdlet 87 "Invalid parameter PreferredLifetime $PreferredLifetime`n" $class; return }
+            if (-not [Nitro.Net.Native]::HasIpv6($ifx)) {
+                Write-NetWin32Error $PSCmdlet 50 "The request is not supported. IPv6 is turned off on this system (Tcpip\Parameters\Ipv6Enable = 0).`n" $class 'NotImplemented'; return
+            }
+            $bare = $ipText -replace '%.*$', ''
+            if ($doActive) {
+                foreach ($a in [Nitro.Net.Native]::IPAddresses()) {
+                    if ([int]$a['AddressFamily'] -eq 23 -and ([string]$a['IPAddress'] -replace '%.*$', '') -eq $bare) {
+                        Write-NetWin32Error $PSCmdlet 5010 "Instance MSFT_NetIPAddress already exists`n" $class 'ResourceExists'; return
+                    }
+                }
+            }
+            $store6 = if ($doActive -and $doPersist) { 1 } elseif ($doActive) { 0 } else { 2 }
+            $skip6 = $PSBoundParameters.ContainsKey('SkipAsSource') -and $SkipAsSource
+            $rc = [Nitro.Net.Config]::AddIPv6($ifx, $ipText, $plen6, $valid6, $pref6, $skip6, $store6)
+            if ($rc -eq 5010) { Write-NetWin32Error $PSCmdlet 5010 "Instance MSFT_NetIPAddress already exists`n" $class 'ResourceExists'; return }
+            if ($rc -ne 0) { Write-NetWin32Error $PSCmdlet ([int]$rc) ([System.ComponentModel.Win32Exception]::new([int]$rc).Message + "`n") $class; return }
+            if ($gw6) {
+                $rc = [Nitro.Net.Config]::AddRoute6($ifx, '::', 0, $gw6, 256, 3, [Nitro.Net.Config]::Infinite, [Nitro.Net.Config]::Infinite, $false, $store6)
+                if ($rc -ne 0 -and $rc -ne 5010) { Write-NetWin32Error $PSCmdlet ([int]$rc) ([System.ComponentModel.Win32Exception]::new([int]$rc).Message + "`n") 'MSFT_NetRoute' }
+            }
+
+            # the new address as the stores report it
+            $row = $null
+            foreach ($a in [Nitro.Net.Native]::IPAddresses()) {
+                if ([int]$a['AddressFamily'] -eq 23 -and ([string]$a['IPAddress'] -replace '%.*$', '') -eq $bare -and [uint32]$a['InterfaceIndex'] -eq $ifx) { $row = $a }
+            }
+            if ($null -eq $row) {
+                foreach ($a in [Nitro.Net.Config]::PersistentAddresses6()) { if (([string]$a['IPAddress'] -replace '%.*$', '') -eq $bare -and [uint32]$a['InterfaceIndex'] -eq $ifx) { $row = $a } }
+            }
+            if ($doActive -and $null -ne $row) { $r1 = [System.Collections.Generic.Dictionary[string, object]]::new($row); $r1['Store'] = 1; [Nitro.Net.CimBuilder]::Create($class, $r1) }
+            if ($doPersist -and $null -ne $row) {
+                $p = [System.Collections.Generic.Dictionary[string, object]]::new($row)
+                $p['Store'] = 0; $p['AddressState'] = 0
+                [Nitro.Net.CimBuilder]::Create($class, $p)
+            }
+            return
         }
         $plen = if ($PSBoundParameters.ContainsKey('PrefixLength')) { [int]$PrefixLength } else { 32 }
         $gw = $null
@@ -679,6 +779,12 @@ function Remove-NetIPAddress {
                     }
                 } finally { $k.Dispose() }
             }
+            foreach ($d in [Nitro.Net.Config]::PersistentAddresses6()) {
+                if ($PSBoundParameters.ContainsKey('InterfaceIndex') -and [uint32]$d['InterfaceIndex'] -notin $InterfaceIndex) { continue }
+                if ($PSBoundParameters.ContainsKey('InterfaceAlias') -and [string]$d['InterfaceAlias'] -notin $InterfaceAlias) { continue }
+                if ($PSBoundParameters.ContainsKey('IPAddress') -and [string]$d['IPAddress'] -notin $IPAddress) { continue }
+                $rows += [pscustomobject]@{ IPAddress = [string]$d['IPAddress']; InterfaceIndex = [uint32]$d['InterfaceIndex']; AddressFamily = 23; InterfaceAlias = $d['InterfaceAlias'] }
+            }
             if ($rows.Count -eq 0) {
                 if ($PSBoundParameters.ContainsKey('IPAddress')) {
                     foreach ($a in $IPAddress) {
@@ -694,6 +800,32 @@ function Remove-NetIPAddress {
         foreach ($row in $rows) {
             $ifx = [uint32]$row.InterfaceIndex
             $addr = [string]$row.IPAddress
+            if ("$($row.AddressFamily)" -in 'IPv6', '23') {
+                # IPv6: any number of addresses; the stores as for New-NetIPAddress (both = one request to the stack)
+                $bare = $addr -replace '%.*$', ''
+                $st6 = @('Active')
+                if ($persistOnly) { $st6 = @('Persistent') }
+                elseif (-not $PSBoundParameters.ContainsKey('PolicyStore') -and [Nitro.Net.Config]::HasPersistentAddress($ifx, $bare)) { $st6 += 'Persistent' }
+                $ok6 = @{}
+                foreach ($st in $st6) {
+                    $text = "Performing operation `"Remove`" on Target `"NetIPAddress -IPv6Address $addr -InterfaceIndex $ifx -Store $st`""
+                    $ok6[$st] = $PSCmdlet.ShouldProcess($text, $text, 'Confirm')
+                }
+                $a6 = [bool]$ok6['Active']; $p6 = [bool]$ok6['Persistent']
+                $store6 = if ($a6 -and $p6) { 1 } elseif ($a6) { 0 } elseif ($p6) { 2 } else { -1 }
+                if ($store6 -lt 0) { continue }
+                $rc = [Nitro.Net.Config]::DeleteIPv6($ifx, $bare, $store6)
+                if ($rc -eq 1168) { Write-NetWin32Error $PSCmdlet 1168 "Element not found.`n" $class 'ObjectNotFound'; continue }
+                if ($rc -ne 0) { Write-NetWin32Error $PSCmdlet ([int]$rc) ([System.ComponentModel.Win32Exception]::new([int]$rc).Message + "`n") $class; continue }
+                if ($PSBoundParameters.ContainsKey('DefaultGateway') -and $DefaultGateway) {
+                    $g = $null
+                    if ([System.Net.IPAddress]::TryParse($DefaultGateway, [ref]$g) -and $g.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6) {
+                        $null = [Nitro.Net.Config]::DeleteRoute6($ifx, '::', 0, $g.ToString(), $store6)
+                    }
+                }
+                if ($PassThru) { $row }
+                continue
+            }
             if ($persistOnly) { $stores = @('Persistent') } else { $stores = @('Active') }
             $key = [Nitro.Net.Config]::InterfaceKey($ifx, $true)
             $inReg = $false
@@ -704,7 +836,6 @@ function Remove-NetIPAddress {
                 $ok[$st] = $PSCmdlet.ShouldProcess($text, $text, 'Confirm')
             }
             try {
-                if ($row.AddressFamily -ne 2 -and "$($row.AddressFamily)" -ne 'IPv4') { Write-NetWin32Error $PSCmdlet 50 "The request is not supported. This network stack has no IPv6.`n" $class 'NotImplemented'; continue }
                 if ($ok['Active']) {
                     $have = Get-NetActiveIPv4 $ifx
                     if ($null -eq $have -or $have['IPAddress'] -ne $addr) { Write-NetWin32Error $PSCmdlet 1168 "Element not found.`n" $class 'ObjectNotFound'; continue }
@@ -804,7 +935,14 @@ function Set-NetIPInterface {
                 Write-NetWin32Error $PSCmdlet 50 "The request is not supported. This network stack cannot set: $($unsupported -join ', ').`n" $class 'NotImplemented'
                 continue
             }
-            if ($asked.Count -gt 0) {
+            # A request without -AddressFamily names both rows of an interface. This stack has one interface metric and one DHCP switch per
+            # interface, shared by both families, and the IPv4 row of the same request writes them: the IPv6 row has nothing more to do.
+            $viaV4 = $false
+            if ($famName -eq 'IPv6' -and -not $PSBoundParameters.ContainsKey('AddressFamily') -and $asked.Count -gt 0) {
+                $viaV4 = @($rows | Where-Object { [uint32]$_.InterfaceIndex -eq $ifx -and "$($_.AddressFamily)" -in '2', 'IPv4' }).Count -gt 0
+                if (-not $viaV4) { $famName = 'IPv4' }   # no IPv4 row to carry it: the shared values are written through this one
+            }
+            if ($asked.Count -gt 0 -and -not $viaV4) {
                 # what the call itself rejects, before anything is written
                 if ($PSBoundParameters.ContainsKey('InterfaceMetric') -and ($InterfaceMetric -lt 1 -or $InterfaceMetric -gt 9999)) {
                     Write-NetWin32Error $PSCmdlet 87 "Invalid parameter InterfaceMetric $InterfaceMetric`n" $class; continue
@@ -815,7 +953,11 @@ function Set-NetIPInterface {
                 if (($PSBoundParameters.ContainsKey('InterfaceMetric') -or $PSBoundParameters.ContainsKey('AutomaticMetric')) -and -not $ok['Persistent']) {
                     Write-NetWin32Error $PSCmdlet 50 "The request is not supported. This network stack keeps the interface metric in the persistent configuration only (it is read at bind time).`n" $class 'NotImplemented'; continue
                 }
-                if ($famName -ne 'IPv4') { Write-NetWin32Error $PSCmdlet 50 "The request is not supported. This network stack has no IPv6.`n" $class 'NotImplemented'; continue }
+                # the stack has no per-interface IPv6 settings (no SetIpInterfaceEntry), and the one interface metric it reads is shared by
+                # both families: setting it for the IPv6 row would change the IPv4 interface too
+                if ($famName -ne 'IPv4') {
+                    Write-NetWin32Error $PSCmdlet 50 "The request is not supported. This network stack keeps no separate IPv6 interface settings (the interface metric is one value for IPv4 and IPv6: use -AddressFamily IPv4).`n" $class 'NotImplemented'; continue
+                }
                 $key = [Nitro.Net.Config]::InterfaceKey($ifx, $true)
                 if ($null -eq $key) { Write-NetWin32Error $PSCmdlet 87 "Invalid parameter InterfaceIndex $ifx`n" $class; continue }
                 try {
@@ -858,6 +1000,180 @@ function Set-NetIPInterface {
                 } finally { $key.Dispose() }
             }
             if ($PassThru) { Invoke-NetQuery $PSCmdlet $class ([Nitro.Net.Native]::IPInterfaces()) @{ InterfaceIndex = @($ifx); AddressFamily = @($row.AddressFamily) } @('InterfaceIndex', 'AddressFamily') }
+        }
+    }
+}
+
+# New-/Remove-NetRoute configure IPv6 routes: the IP Helper (CreateIpForwardEntry2 / DeleteIpForwardEntry2) for the ActiveStore, tcpip.sys's
+# persistent IPv6 store for the PersistentStore (both when no -PolicyStore is given, as on Windows). The IPv4 route table of this stack
+# takes the default gateway of an interface (New-NetIPAddress -DefaultGateway); any other IPv4 route is refused with an error.
+$script:NoV4Route = "The request is not supported. This network stack configures IPv6 routes here; the default gateway of an IPv4 interface is set with New-NetIPAddress -DefaultGateway.`n"
+
+function Get-NetRouteStore {
+    param([int]$DoActive, [int]$DoPersist)
+    if ($DoActive -and $DoPersist) { 1 } elseif ($DoActive) { 0 } else { 2 }
+}
+
+function New-NetRoute {
+    [CmdletBinding(DefaultParameterSetName = 'ByInterfaceAlias', SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
+    [OutputType('Microsoft.Management.Infrastructure.CimInstance#ROOT/StandardCimv2/MSFT_NetRoute')]
+    param(
+        [Parameter(ParameterSetName = 'ByInterfaceIndex', Mandatory = $true, Position = 0, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(ParameterSetName = 'ByInterfaceAlias', Mandatory = $true, Position = 0, ValueFromPipelineByPropertyName = $true)]
+        [string]$DestinationPrefix,
+        [Parameter(ParameterSetName = 'ByInterfaceAlias', Mandatory = $true, ValueFromPipelineByPropertyName = $true)][Alias('ifAlias')][string]$InterfaceAlias,
+        [Parameter(ParameterSetName = 'ByInterfaceIndex', Mandatory = $true, ValueFromPipelineByPropertyName = $true)][Alias('ifIndex')][uint32]$InterfaceIndex,
+        [Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetRoute.AddressFamily]$AddressFamily,
+        [string]$NextHop,
+        [Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetRoute.Publish]$Publish,
+        [uint16]$RouteMetric,
+        [Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetRoute.Protocol]$Protocol,
+        [timespan]$ValidLifetime,
+        [timespan]$PreferredLifetime,
+        [uint32]$CompartmentId,
+        [string]$PolicyStore,
+        [Alias('Session')][object[]]$CimSession,
+        [int]$ThrottleLimit,
+        [switch]$AsJob
+    )
+    process {
+        $class = 'MSFT_NetRoute'
+        if ($AsJob) { Write-NetWin32Error $PSCmdlet 50 "The -AsJob parameter is not supported by this implementation.`n" $class 'NotImplemented'; return }
+        $byAlias = $PSCmdlet.ParameterSetName -eq 'ByInterfaceAlias'
+        $ifx = Resolve-NetInterfaceIndex $PSCmdlet $InterfaceAlias $InterfaceIndex $byAlias
+        if ($null -eq $ifx) { return }
+        $parts = $DestinationPrefix -split '/'
+        $dest = $null; $plen = 0
+        if ($parts.Count -ne 2 -or -not [System.Net.IPAddress]::TryParse($parts[0], [ref]$dest) -or -not [int]::TryParse($parts[1], [ref]$plen) -or $plen -lt 0) {
+            Write-NetWin32Error $PSCmdlet 87 "Invalid parameter DestinationPrefix $DestinationPrefix`n" $class; return
+        }
+        $v6 = $dest.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6
+        if ($PSBoundParameters.ContainsKey('AddressFamily') -and (([int]$AddressFamily -eq 23) -ne $v6)) {
+            Write-NetWin32Error $PSCmdlet 87 "Invalid parameter DestinationPrefix $DestinationPrefix`n" $class; return
+        }
+        $stores = Get-NetStores $PSCmdlet $PSBoundParameters $class
+        if ($null -eq $stores) { return }
+        if (-not $v6) { Write-NetWin32Error $PSCmdlet 50 $script:NoV4Route $class 'NotImplemented'; return }
+        $hop = '::'
+        if ($PSBoundParameters.ContainsKey('NextHop') -and $NextHop) {
+            $h = $null
+            if (-not [System.Net.IPAddress]::TryParse($NextHop, [ref]$h) -or $h.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetworkV6) {
+                Write-NetWin32Error $PSCmdlet 87 "Invalid parameter NextHop $NextHop`n" $class; return
+            }
+            $hop = $h.ToString()
+        }
+        $prefixText = $dest.ToString() -replace '%.*$', ''
+        $go = @{}
+        foreach ($st in $stores) {
+            $t = "NetRoute -DestinationPrefix $prefixText/$plen -InterfaceIndex $ifx -NextHop $hop -Store $st"
+            $text = "Performing operation `"New`" on Target `"$t`""
+            $go[$st] = $PSCmdlet.ShouldProcess($text, $text, 'Confirm')
+        }
+        $doActive = ('Active' -in $stores) -and $go['Active']
+        $doPersist = ('Persistent' -in $stores) -and $go['Persistent']
+        if (-not $doActive -and -not $doPersist) { return }
+
+        # what the method itself rejects
+        if ($plen -gt 128) { Write-NetWin32Error $PSCmdlet 87 "Invalid parameter DestinationPrefix $DestinationPrefix`n" $class; return }
+        $valid = [Nitro.Net.Config]::Infinite; $pref = [Nitro.Net.Config]::Infinite
+        if ($PSBoundParameters.ContainsKey('ValidLifetime') -and $ValidLifetime -ne [timespan]::MaxValue) {
+            if ($ValidLifetime.TotalSeconds -lt 1 -or $ValidLifetime.TotalSeconds -ge [uint32]::MaxValue) { Write-NetWin32Error $PSCmdlet 87 "Invalid parameter ValidLifetime $ValidLifetime`n" $class; return }
+            $valid = [uint32]$ValidLifetime.TotalSeconds
+        }
+        if ($PSBoundParameters.ContainsKey('PreferredLifetime') -and $PreferredLifetime -ne [timespan]::MaxValue) {
+            if ($PreferredLifetime.TotalSeconds -lt 0 -or $PreferredLifetime.TotalSeconds -ge [uint32]::MaxValue) { Write-NetWin32Error $PSCmdlet 87 "Invalid parameter PreferredLifetime $PreferredLifetime`n" $class; return }
+            $pref = [uint32]$PreferredLifetime.TotalSeconds
+        }
+        if (-not $PSBoundParameters.ContainsKey('PreferredLifetime') -and $pref -gt $valid) { $pref = $valid }   # only a valid lifetime given: preferred ends with it
+        if ($pref -gt $valid) { Write-NetWin32Error $PSCmdlet 87 "Invalid parameter PreferredLifetime $PreferredLifetime`n" $class; return }
+        $metric = if ($PSBoundParameters.ContainsKey('RouteMetric')) { [uint32]$RouteMetric } else { 256 }
+        $proto = if ($PSBoundParameters.ContainsKey('Protocol')) { [uint32][int]$Protocol } else { 3 }   # NetMgmt, as for a route made by hand
+        $pub = $PSBoundParameters.ContainsKey('Publish') -and [int]$Publish -eq 1
+        if (-not [Nitro.Net.Native]::HasIpv6($ifx)) {
+            Write-NetWin32Error $PSCmdlet 50 "The request is not supported. IPv6 is turned off on this system (Tcpip\Parameters\Ipv6Enable = 0).`n" $class 'NotImplemented'; return
+        }
+        if ($doActive) {
+            foreach ($r in [Nitro.Net.Native]::Routes()) {
+                if ([int]$r['AddressFamily'] -eq 23 -and [uint32]$r['InterfaceIndex'] -eq $ifx -and $r['DestinationPrefix'] -eq "$prefixText/$plen" -and $r['NextHop'] -eq ($hop -replace '%.*$', '')) {
+                    Write-NetWin32Error $PSCmdlet 5010 "Instance MSFT_NetRoute already exists`n" $class 'ResourceExists'; return
+                }
+            }
+        }
+        $rc = [Nitro.Net.Config]::AddRoute6($ifx, $prefixText, $plen, $hop, $metric, $proto, $valid, $pref, $pub, (Get-NetRouteStore ([int]$doActive) ([int]$doPersist)))
+        if ($rc -eq 5010) { Write-NetWin32Error $PSCmdlet 5010 "Instance MSFT_NetRoute already exists`n" $class 'ResourceExists'; return }
+        if ($rc -ne 0) { Write-NetWin32Error $PSCmdlet ([int]$rc) ([System.ComponentModel.Win32Exception]::new([int]$rc).Message + "`n") $class; return }
+
+        # the new route as the stores report it
+        $want = "$prefixText/$plen"; $wantHop = $hop -replace '%.*$', ''
+        if ($doActive) {
+            foreach ($r in [Nitro.Net.Native]::Routes()) {
+                if ([int]$r['AddressFamily'] -eq 23 -and [uint32]$r['InterfaceIndex'] -eq $ifx -and $r['DestinationPrefix'] -eq $want -and $r['NextHop'] -eq $wantHop) { [Nitro.Net.CimBuilder]::Create($class, $r) }
+            }
+        }
+        if ($doPersist) {
+            foreach ($r in [Nitro.Net.Config]::PersistentRoutes6()) {
+                if ([uint32]$r['InterfaceIndex'] -eq $ifx -and $r['DestinationPrefix'] -eq $want -and $r['NextHop'] -eq $wantHop) { [Nitro.Net.CimBuilder]::Create($class, $r) }
+            }
+        }
+    }
+}
+
+function Remove-NetRoute {
+    [CmdletBinding(DefaultParameterSetName = 'Query (cdxml)', SupportsShouldProcess = $true, ConfirmImpact = 'High')]
+    param(
+        [Parameter(ParameterSetName = 'Query (cdxml)', Position = 0, ValueFromPipelineByPropertyName = $true)][ValidateNotNull()][string[]]$DestinationPrefix,
+        [Parameter(ParameterSetName = 'Query (cdxml)', ValueFromPipelineByPropertyName = $true)][ValidateNotNull()][Alias('ifIndex')][uint32[]]$InterfaceIndex,
+        [Parameter(ParameterSetName = 'Query (cdxml)', ValueFromPipelineByPropertyName = $true)][ValidateNotNull()][Alias('ifAlias')][string[]]$InterfaceAlias,
+        [Parameter(ParameterSetName = 'Query (cdxml)')][ValidateNotNull()][string[]]$NextHop,
+        [Parameter(ParameterSetName = 'Query (cdxml)')][ValidateNotNull()][Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetRoute.AddressFamily[]]$AddressFamily,
+        [Parameter(ParameterSetName = 'Query (cdxml)')][ValidateNotNull()][Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetRoute.Publish[]]$Publish,
+        [Parameter(ParameterSetName = 'Query (cdxml)')][ValidateNotNull()][uint16[]]$RouteMetric,
+        [Parameter(ParameterSetName = 'Query (cdxml)')][ValidateNotNull()][Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetRoute.Protocol[]]$Protocol,
+        [Parameter(ParameterSetName = 'Query (cdxml)')][ValidateNotNull()][uint32[]]$CompartmentId,
+        [Parameter(ParameterSetName = 'Query (cdxml)')][ValidateNotNull()][timespan[]]$ValidLifetime,
+        [Parameter(ParameterSetName = 'Query (cdxml)')][ValidateNotNull()][timespan[]]$PreferredLifetime,
+        [Parameter(ParameterSetName = 'Query (cdxml)')][ValidateNotNull()][Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetRoute.State[]]$State,
+        [Parameter(ParameterSetName = 'Query (cdxml)')][ValidateNotNull()][uint32[]]$InterfaceMetric,
+        [Parameter(ParameterSetName = 'Query (cdxml)')][string]$PolicyStore,
+        [Parameter(ParameterSetName = 'Query (cdxml)')][switch]$IncludeAllCompartments,
+        [Parameter(ParameterSetName = 'InputObject (cdxml)', Mandatory = $true, ValueFromPipeline = $true)]
+        [PSTypeName('Microsoft.Management.Infrastructure.CimInstance#MSFT_NetRoute')][ValidateNotNull()][object[]]$InputObject,
+        [Alias('Session')][object[]]$CimSession,
+        [int]$ThrottleLimit,
+        [switch]$AsJob,
+        [switch]$PassThru
+    )
+    process {
+        $class = 'MSFT_NetRoute'
+        if ($AsJob) { Write-NetWin32Error $PSCmdlet 50 "The -AsJob parameter is not supported by this implementation.`n" $class 'NotImplemented'; return }
+        $persistOnly = $PSBoundParameters.ContainsKey('PolicyStore') -and $PolicyStore -eq 'PersistentStore'
+        $rows = @()
+        if ($PSCmdlet.ParameterSetName -eq 'InputObject (cdxml)') { $rows = @($InputObject) }
+        else {
+            $filters = @('DestinationPrefix', 'InterfaceIndex', 'InterfaceAlias', 'NextHop', 'AddressFamily', 'Publish', 'RouteMetric', 'Protocol', 'CompartmentId', 'ValidLifetime', 'PreferredLifetime', 'State', 'InterfaceMetric')
+            $rows = @(Invoke-NetQuery $PSCmdlet $class ([Nitro.Net.Native]::Routes()) $PSBoundParameters $filters -PersistentRows { , [Nitro.Net.Config]::PersistentRoutes6() })
+        }
+        foreach ($row in $rows) {
+            $ifx = [uint32]$row.InterfaceIndex
+            $dest = [string]$row.DestinationPrefix
+            $hop = [string]$row.NextHop
+            $isV6 = "$($row.AddressFamily)" -in 'IPv6', '23'
+            $st = @('Active'); if ($persistOnly) { $st = @('Persistent') }
+            $parts = $dest -split '/'
+            if ($isV6 -and -not $persistOnly -and -not $PSBoundParameters.ContainsKey('PolicyStore') -and $parts.Count -eq 2 -and
+                [Nitro.Net.Config]::HasPersistentRoute($ifx, $parts[0], [int]$parts[1], $hop)) { $st += 'Persistent' }
+            $ok = @{}
+            foreach ($s in $st) {
+                $text = "Performing operation `"Remove`" on Target `"NetRoute -DestinationPrefix $dest -InterfaceIndex $ifx -NextHop $hop -Store $s`""
+                $ok[$s] = $PSCmdlet.ShouldProcess($text, $text, 'Confirm')
+            }
+            $a = [bool]$ok['Active']; $p = [bool]$ok['Persistent']
+            if (-not $a -and -not $p) { continue }
+            if (-not $isV6) { Write-NetWin32Error $PSCmdlet 50 $script:NoV4Route $class 'NotImplemented'; continue }
+            $rc = [Nitro.Net.Config]::DeleteRoute6($ifx, $parts[0], [int]$parts[1], $hop, (Get-NetRouteStore ([int]$a) ([int]$p)))
+            if ($rc -eq 1168) { Write-NetWin32Error $PSCmdlet 1168 "Element not found.`n" $class 'ObjectNotFound'; continue }
+            if ($rc -ne 0) { Write-NetWin32Error $PSCmdlet ([int]$rc) ([System.ComponentModel.Win32Exception]::new([int]$rc).Message + "`n") $class; continue }
+            if ($PassThru) { $row }
         }
     }
 }

@@ -192,6 +192,7 @@ namespace Nitro.Net
         [DllImport("iphlpapi.dll")] static extern uint GetUnicastIpAddressTable(ushort family, out IntPtr table);
         [DllImport("iphlpapi.dll")] static extern void FreeMibTable(IntPtr table);
         [DllImport("iphlpapi.dll")] static extern uint GetIpForwardTable(IntPtr table, ref uint size, bool order);
+        [DllImport("iphlpapi.dll")] static extern uint GetIpForwardTable2(ushort family, out IntPtr table);
         [DllImport("iphlpapi.dll")] static extern uint GetExtendedTcpTable(IntPtr table, ref uint size, bool order, uint family, int cls, uint reserved);
         [DllImport("iphlpapi.dll")] static extern uint GetExtendedUdpTable(IntPtr table, ref uint size, bool order, uint family, int cls, uint reserved);
 
@@ -707,7 +708,7 @@ namespace Nitro.Net
             return res;
         }
 
-        // ---- NetRoute (the IPv4 forwarding table: GetIpForwardTable2 is not available on this system)
+        // ---- NetRoute (the IPv4 forwarding table through GetIpForwardTable, the IPv6 one through GetIpForwardTable2)
         public static List<Dictionary<string, object>> Routes()
         {
             List<Dictionary<string, object>> res = new List<Dictionary<string, object>>();
@@ -754,23 +755,105 @@ namespace Nitro.Net
             }
             catch (Exception) { }
             finally { if (buf != IntPtr.Zero) Marshal.FreeHGlobal(buf); }
+            res.AddRange(Routes6(ads, ifRows));
             return res;
+        }
+
+        // The IPv6 rows of the route table (GetIpForwardTable2: MIB_IPFORWARD_ROW2, 104 bytes, rows from offset 8). The prefix and the
+        // next hop are shown without a zone, as MSFT_NetRoute does; an on-link route has the next hop ::.
+        static List<Dictionary<string, object>> Routes6(List<Aa> ads, List<IpInterfaceRow> ifRows)
+        {
+            List<Dictionary<string, object>> res = new List<Dictionary<string, object>>();
+            IntPtr t = IntPtr.Zero;
+            try
+            {
+                if (GetIpForwardTable2(AF_INET6, out t) != 0 || t == IntPtr.Zero) return res;
+                uint n = (uint)Marshal.ReadInt32(t);
+                for (uint i = 0; i < n; i++)
+                {
+                    IntPtr row = t + 8 + (int)(i * 104);
+                    uint idx = (uint)Marshal.ReadInt32(row, 8);
+                    if (Marshal.ReadInt16(row, 12) != AF_INET6) continue;
+                    int plen = Marshal.ReadInt32(row, 40);
+                    string prefix = Ipv6Plain(row + 12 + 8) + "/" + plen.ToString(CultureInfo.InvariantCulture);
+                    string next = Marshal.ReadInt16(row, 44) == AF_INET6 ? Ipv6Plain(row + 44 + 8) : "::";
+                    uint valid = (uint)Marshal.ReadInt32(row, 76), pref = (uint)Marshal.ReadInt32(row, 80), metric = (uint)Marshal.ReadInt32(row, 84);
+                    uint proto = (uint)Marshal.ReadInt32(row, 88); byte publish = Marshal.ReadByte(row, 94);
+                    Aa a = null; foreach (Aa x in ads) if (x.H.Ipv6IfIndex == idx || IndexOf(x) == idx || x.H.IfIndex == idx) { a = x; break; }
+                    uint shown = a != null ? IndexOf(a) : idx;
+                    uint ifMetric = a != null ? a.H.Ipv6Metric : 0;
+                    foreach (IpInterfaceRow ir in ifRows) if (ir.Family == AF_INET6 && ir.Index == idx) { ifMetric = ir.Metric; break; }
+                    Dictionary<string, object> d = new Dictionary<string, object>();
+                    d["InstanceID"] = prefix + "++" + next + "++" + shown.ToString(CultureInfo.InvariantCulture);
+                    d["RouteMetric"] = metric > 65535 ? 65535 : metric;
+                    d["TypeOfRoute"] = 3u;   // CIM_NextHopRoute "Actual": the oracle reports 3 for every IPv6 row
+                    d["AddressFamily"] = AF_INET6; d["CompartmentId"] = 1u; d["DestinationPrefix"] = prefix;
+                    d["InterfaceAlias"] = a != null ? a.Friendly : null; d["InterfaceIndex"] = shown; d["InterfaceMetric"] = ifMetric;
+                    d["NextHop"] = next;
+                    d["PreferredLifetime"] = Lifetime(pref); d["ValidLifetime"] = Lifetime(valid);
+                    d["Protocol"] = proto == 0 ? 1u : proto; d["Publish"] = publish == 1 ? 1 : 0; d["State"] = 0; d["Store"] = 1;
+                    res.Add(d);
+                }
+            }
+            catch (Exception) { }
+            finally { if (t != IntPtr.Zero) FreeMibTable(t); }
+            return res;
+        }
+
+        static string Ipv6Plain(IntPtr p) { byte[] b = new byte[16]; Marshal.Copy(p, b, 0, 16); return new IPAddress(b).ToString(); }
+
+        // True when the IP interface table has an IPv6 row for the adapter of this index (the stack's IPv6 switch is on)
+        public static bool HasIpv6(uint ifIndex)
+        {
+            foreach (Dictionary<string, object> r in IPInterfaces())
+                if ((int)r["AddressFamily"] == AF_INET6 && (uint)r["InterfaceIndex"] == ifIndex) return true;
+            return false;
+        }
+
+        [DllImport("iphlpapi.dll")] static extern uint GetBestRoute2(IntPtr luid, uint ifIndex, IntPtr source, IntPtr dest, uint options, IntPtr bestRoute, IntPtr bestSource);
+
+        // The interface and the source address the stack picks for an IPv6 destination (GetBestRoute2: route lookup and RFC 6724
+        // source selection). A socket cannot tell for UDP/IPv6: its local address after a connect stays unspecified. Null: no route.
+        public static IPAddress BestSource6(IPAddress dest, out uint ifIndex)
+        {
+            ifIndex = 0;
+            IntPtr d = Marshal.AllocHGlobal(28), r = Marshal.AllocHGlobal(104), s = Marshal.AllocHGlobal(28);
+            try
+            {
+                for (int i = 0; i < 28; i += 4) { Marshal.WriteInt32(d, i, 0); Marshal.WriteInt32(s, i, 0); }
+                for (int i = 0; i < 104; i += 8) Marshal.WriteInt64(r, i, 0);
+                Marshal.WriteInt16(d, 0, AF_INET6); Marshal.Copy(dest.GetAddressBytes(), 0, d + 8, 16); Marshal.WriteInt32(d, 24, (int)dest.ScopeId);
+                if (GetBestRoute2(IntPtr.Zero, 0, IntPtr.Zero, d, 0, r, s) != 0) return null;
+                ifIndex = (uint)Marshal.ReadInt32(r, 8);
+                byte[] b = new byte[16]; Marshal.Copy(s + 8, b, 0, 16);
+                return new IPAddress(b);
+            }
+            catch (Exception) { return null; }
+            finally { Marshal.FreeHGlobal(d); Marshal.FreeHGlobal(r); Marshal.FreeHGlobal(s); }
         }
 
         // The route Windows would use for a destination: longest prefix, then lowest total metric. ifIndex 0 = any.
         public static Dictionary<string, object> FindRoute(IPAddress dest, uint ifIndex)
         {
             Dictionary<string, object> best = null; int bestLen = -1; long bestMetric = long.MaxValue;
-            if (dest.AddressFamily != AddressFamily.InterNetwork) return null;
-            uint dv = BitConverter.ToUInt32(dest.GetAddressBytes(), 0);
+            bool v4 = dest.AddressFamily == AddressFamily.InterNetwork;
+            if (!v4 && dest.AddressFamily != AddressFamily.InterNetworkV6) return null;
+            byte[] db = dest.GetAddressBytes();
             foreach (Dictionary<string, object> r in Routes())
             {
                 if (ifIndex != 0 && (uint)r["InterfaceIndex"] != ifIndex) continue;
+                if ((int)r["AddressFamily"] != (v4 ? AF_INET : AF_INET6)) continue;
                 string[] p = ((string)r["DestinationPrefix"]).Split('/');
                 int len = int.Parse(p[1], CultureInfo.InvariantCulture);
-                uint pv = BitConverter.ToUInt32(IPAddress.Parse(p[0]).GetAddressBytes(), 0);
-                uint mask = len == 0 ? 0u : (uint)IPAddress.HostToNetworkOrder((int)(0xFFFFFFFFu << (32 - len)));
-                if ((dv & mask) != (pv & mask)) continue;
+                byte[] pb = IPAddress.Parse(p[0]).GetAddressBytes();
+                bool same = true;
+                for (int k = 0; k < db.Length && same; k++)
+                {
+                    int bits = len - k * 8; if (bits <= 0) break;
+                    int mask = bits >= 8 ? 0xFF : (0xFF << (8 - bits)) & 0xFF;
+                    if ((db[k] & mask) != (pb[k] & mask)) same = false;
+                }
+                if (!same) continue;
                 long metric = Convert.ToInt64(r["RouteMetric"]) + Convert.ToInt64(r["InterfaceMetric"]);
                 if (len > bestLen || (len == bestLen && metric < bestMetric)) { best = r; bestLen = len; bestMetric = metric; }
             }
@@ -1001,8 +1084,350 @@ namespace Nitro.Net
             return Registry.LocalMachine.OpenSubKey("SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\" + g, write);
         }
 
+        // HKLM\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\Interfaces\{guid}: the IPv6 side of the interface (its NameServer
+        // value is what iphlpapi reads for the IPv6 DNS servers). A write opens it and makes it when it is not there.
+        public static RegistryKey InterfaceKey6(uint ifIndex, bool write)
+        {
+            string g = Native.AdapterGuid(ifIndex);
+            if (g == null) return null;
+            return write ? Registry.LocalMachine.CreateSubKey(Tcp6Interfaces + g) : Registry.LocalMachine.OpenSubKey(Tcp6Interfaces + g, false);
+        }
+
         // 32 -> 255.255.255.255, 24 -> 255.255.255.0
         public static string MaskText(int prefix) { return new IPAddress(BitConverter.GetBytes(MaskOf(prefix))).ToString(); }
+
+        // ---- IPv6 addresses and routes
+        // The active store is the IP Helper (CreateUnicastIpAddressEntry, CreateIpForwardEntry2 and their Delete calls). The persistent
+        // store is the stack's own: its private requests (IOCTL_IP6_ADDRESS_CONFIG and IOCTL_IP6_ROUTE_CONFIG with Store = PERSISTENT:
+        // active now, and applied again whenever the adapter starts) and the PersistentAddresses / PersistentRoutes values of
+        // HKLM\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\Interfaces\{adapter guid}, REG_BINARY arrays of the request records
+        // (Operation, Store, IfIndex, then the fields; the layout is the same for 32-bit and 64-bit code). A configuration of the
+        // persistent store alone only writes the records: they come into force when the adapter starts.
+        [DllImport("iphlpapi.dll")] static extern void InitializeUnicastIpAddressEntry(IntPtr row);
+        [DllImport("iphlpapi.dll")] static extern uint CreateUnicastIpAddressEntry(IntPtr row);
+        [DllImport("iphlpapi.dll")] static extern uint DeleteUnicastIpAddressEntry(IntPtr row);
+        [DllImport("iphlpapi.dll")] static extern void InitializeIpForwardEntry(IntPtr row);
+        [DllImport("iphlpapi.dll")] static extern uint CreateIpForwardEntry2(IntPtr row);
+        [DllImport("iphlpapi.dll")] static extern uint DeleteIpForwardEntry2(IntPtr row);
+
+        [StructLayout(LayoutKind.Sequential)] struct UnicodeStr { public ushort Length, MaximumLength; public IntPtr Buffer; }
+        [StructLayout(LayoutKind.Sequential)] struct ObjAttr { public int Length; public IntPtr Root, ObjectName; public uint Attributes; public IntPtr Sd, Sqos; }
+        [StructLayout(LayoutKind.Sequential)] struct IoStatus { public IntPtr Status, Information; }
+        [DllImport("ntdll.dll")] static extern int NtCreateFile(out IntPtr h, uint access, ref ObjAttr oa, out IoStatus iosb, IntPtr alloc, uint attr, uint share, uint disp, uint opts, IntPtr ea, uint eaLen);
+        [DllImport("ntdll.dll")] static extern int NtDeviceIoControlFile(IntPtr h, IntPtr ev, IntPtr apc, IntPtr ctx, out IoStatus iosb, uint code, byte[] inBuf, uint inLen, IntPtr outBuf, uint outLen);
+        [DllImport("ntdll.dll")] static extern int NtClose(IntPtr h);
+        [DllImport("ntdll.dll")] static extern uint RtlNtStatusToDosError(int status);
+
+        const uint IOCTL_IP6_ADDRESS_CONFIG = 0x00128068, IOCTL_IP6_ROUTE_CONFIG = 0x0012806C;   // CTL_CODE(FILE_DEVICE_NETWORK, 0x1A / 0x1B, METHOD_BUFFERED, FILE_WRITE_ACCESS)
+        const uint OpCreate = 1, OpDelete = 3, StoreActive = 0, StorePersistent = 1;
+        const string Tcp6Interfaces = "SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters\\Interfaces\\";
+        const string PersistAddr = "PersistentAddresses", PersistRoute = "PersistentRoutes";
+        const int AddrRecord = 52, RouteRecord = 72;
+        public const uint Infinite = 0xFFFFFFFFu;
+
+        static int TcpIoctl(uint code, byte[] request)
+        {
+            IntPtr name = Marshal.StringToHGlobalUni("\\Device\\Tcp");
+            IntPtr us = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(UnicodeStr)));
+            try
+            {
+                UnicodeStr u = new UnicodeStr(); u.Length = 22; u.MaximumLength = 24; u.Buffer = name;
+                Marshal.StructureToPtr(u, us, false);
+                ObjAttr oa = new ObjAttr(); oa.Length = Marshal.SizeOf(typeof(ObjAttr)); oa.ObjectName = us; oa.Attributes = 0x40;   // OBJ_CASE_INSENSITIVE
+                IntPtr h; IoStatus io;
+                int st = NtCreateFile(out h, 0xC0100000u, ref oa, out io, IntPtr.Zero, 0x80, 3, 3, 0x20, IntPtr.Zero, 0);
+                if (st < 0) return st;
+                st = NtDeviceIoControlFile(h, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, out io, code, request, (uint)request.Length, IntPtr.Zero, 0);
+                NtClose(h);
+                return st;
+            }
+            finally { Marshal.FreeHGlobal(us); Marshal.FreeHGlobal(name); }
+        }
+
+        // the Win32 error of an NTSTATUS the stack's requests answer (what the IP Helper functions return for the same cases)
+        static uint Win32Of(int status)
+        {
+            if (status >= 0) return 0;
+            switch ((uint)status)
+            {
+                case 0xC0000035u: return 5010;   // STATUS_OBJECT_NAME_COLLISION: the entry exists
+                case 0xC0000225u: return 1168;   // STATUS_NOT_FOUND
+                case 0xC00000BBu: return 50;     // STATUS_NOT_SUPPORTED (IPv6 is off)
+                case 0xC000000Du: return 87;     // STATUS_INVALID_PARAMETER
+                case 0xC000009Au: return 1450;   // STATUS_INSUFFICIENT_RESOURCES
+                case 0xC0000022u: return 5;      // STATUS_ACCESS_DENIED
+                default: return RtlNtStatusToDosError(status);
+            }
+        }
+
+        public static byte[] Addr6(string text)
+        {
+            IPAddress ip;
+            if (!IPAddress.TryParse(text, out ip) || ip.AddressFamily != AddressFamily.InterNetworkV6) throw new ArgumentException(text);
+            return ip.GetAddressBytes();
+        }
+
+        static void Put(byte[] b, int off, uint v) { Array.Copy(BitConverter.GetBytes(v), 0, b, off, 4); }
+        static uint Get(byte[] b, int off) { return BitConverter.ToUInt32(b, off); }
+
+        static byte[] AddressRequest(uint op, uint store, uint ifIndex, byte[] addr, int prefix, uint valid, uint pref, bool skip)
+        {
+            byte[] b = new byte[AddrRecord];
+            Put(b, 0, op); Put(b, 4, store); Put(b, 8, ifIndex); Array.Copy(addr, 0, b, 12, 16);
+            Put(b, 28, (uint)prefix); Put(b, 32, valid); Put(b, 36, pref); Put(b, 40, 1); Put(b, 44, 1);   // prefix and suffix origin Manual
+            Put(b, 48, skip ? 1u : 0u);
+            return b;
+        }
+
+        // the bits after the prefix length name nothing: they are cleared, as the stack does before it keeps a route
+        static byte[] MaskPrefix(byte[] a, int len)
+        {
+            byte[] r = (byte[])a.Clone();
+            for (int i = 0; i < 16; i++)
+            {
+                int bits = len - i * 8;
+                if (bits >= 8) continue;
+                r[i] = bits <= 0 ? (byte)0 : (byte)(r[i] & (0xFF << (8 - bits)));
+            }
+            return r;
+        }
+
+        static byte[] RouteRequest(uint op, uint store, uint ifIndex, byte[] prefix, int plen, byte[] next, uint metric, uint valid, uint pref, uint protocol, bool publish)
+        {
+            byte[] b = new byte[RouteRecord];
+            Put(b, 0, op); Put(b, 4, store); Put(b, 8, ifIndex); Array.Copy(MaskPrefix(prefix, plen), 0, b, 12, 16);
+            Put(b, 28, (uint)plen); Array.Copy(next, 0, b, 32, 16);
+            Put(b, 48, metric); Put(b, 52, valid); Put(b, 56, pref); Put(b, 60, 0); Put(b, 64, protocol);   // origin Manual
+            Put(b, 68, publish ? 1u : 0u);
+            return b;
+        }
+
+        // ---- the records of the persistent store
+        public static List<byte[]> PersistentRecords(string guid, string value, int size)
+        {
+            List<byte[]> l = new List<byte[]>();
+            if (guid == null) return l;
+            using (RegistryKey k = Registry.LocalMachine.OpenSubKey(Tcp6Interfaces + guid, false))
+            {
+                if (k == null) return l;
+                byte[] v = k.GetValue(value, null) as byte[];
+                if (v == null || v.Length % size != 0) return l;
+                for (int i = 0; i < v.Length; i += size) { byte[] r = new byte[size]; Array.Copy(v, i, r, 0, size); l.Add(r); }
+            }
+            return l;
+        }
+
+        static bool SameKey(byte[] a, byte[] b, int from, int to)
+        {
+            for (int i = from; i < to; i++) if (a[i] != b[i]) return false;
+            return true;
+        }
+
+        // Puts the record in place of the one with the same key bytes [from, to), or (remove) takes that one out. True: there was one.
+        static bool PersistentUpdate(string guid, string value, int size, byte[] rec, int from, int to, bool remove)
+        {
+            List<byte[]> old = PersistentRecords(guid, value, size);
+            List<byte[]> keep = new List<byte[]>(); bool found = false;
+            foreach (byte[] r in old) { if (SameKey(r, rec, from, to)) found = true; else keep.Add(r); }
+            if (remove && !found) return false;
+            if (!remove) keep.Add(rec);
+            if (keep.Count == 0)
+            {
+                using (RegistryKey k = Registry.LocalMachine.OpenSubKey(Tcp6Interfaces + guid, true)) { if (k != null && k.GetValue(value, null) != null) k.DeleteValue(value); }
+                return found;
+            }
+            byte[] all = new byte[keep.Count * size];
+            for (int i = 0; i < keep.Count; i++) Array.Copy(keep[i], 0, all, i * size, size);
+            using (RegistryKey k = Registry.LocalMachine.CreateSubKey(Tcp6Interfaces + guid)) { k.SetValue(value, all, RegistryValueKind.Binary); }
+            return found;
+        }
+
+        static byte[] FindRecord(string guid, string value, int size, byte[] key, int from, int to)
+        {
+            foreach (byte[] r in PersistentRecords(guid, value, size)) if (SameKey(r, key, from, to)) return r;
+            return null;
+        }
+
+        // ---- addresses. store: 0 active only, 1 both, 2 persistent only. Returns a Win32 error (0 = done).
+        public static uint AddIPv6(uint ifIndex, string ip, int prefix, uint valid, uint pref, bool skip, int store)
+        {
+            byte[] addr = Addr6(ip);
+            if (store == 1) return Win32Of(TcpIoctl(IOCTL_IP6_ADDRESS_CONFIG, AddressRequest(OpCreate, StorePersistent, ifIndex, addr, prefix, valid, pref, skip)));
+            if (store == 2)
+            {
+                string guid = Native.AdapterGuid(ifIndex); if (guid == null) return 87;
+                byte[] rec = AddressRequest(OpCreate, StorePersistent, 0, addr, prefix, valid, pref, skip);
+                if (FindRecord(guid, PersistAddr, AddrRecord, rec, 12, 28) != null) return 5010;
+                PersistentUpdate(guid, PersistAddr, AddrRecord, rec, 12, 28, false);
+                return 0;
+            }
+            IntPtr row = Marshal.AllocHGlobal(80);
+            try
+            {
+                for (int i = 0; i < 80; i += 8) Marshal.WriteInt64(row, i, 0);
+                InitializeUnicastIpAddressEntry(row);
+                Marshal.WriteInt16(row, 0, 23); Marshal.Copy(addr, 0, row + 8, 16);
+                Marshal.WriteInt32(row, 40, (int)ifIndex);
+                Marshal.WriteInt32(row, 44, 1); Marshal.WriteInt32(row, 48, 1);
+                Marshal.WriteInt32(row, 52, (int)valid); Marshal.WriteInt32(row, 56, (int)pref);
+                Marshal.WriteByte(row, 60, (byte)prefix); Marshal.WriteByte(row, 61, skip ? (byte)1 : (byte)0);
+                return CreateUnicastIpAddressEntry(row);
+            }
+            finally { Marshal.FreeHGlobal(row); }
+        }
+
+        public static uint DeleteIPv6(uint ifIndex, string ip, int store)
+        {
+            byte[] addr = Addr6(ip);
+            string guid = Native.AdapterGuid(ifIndex);
+            byte[] key = AddressRequest(OpDelete, StorePersistent, 0, addr, 0, 0, 0, false);
+            if (store == 2)
+            {
+                if (guid == null || !PersistentUpdate(guid, PersistAddr, AddrRecord, key, 12, 28, true)) return 1168;
+                return 0;
+            }
+            // the stack's removal takes the address out of both stores: a removal of the active one alone puts the record back
+            byte[] saved = store == 0 && guid != null ? FindRecord(guid, PersistAddr, AddrRecord, key, 12, 28) : null;
+            if (store == 0 && saved == null)
+            {
+                IntPtr row = Marshal.AllocHGlobal(80);
+                try
+                {
+                    for (int i = 0; i < 80; i += 8) Marshal.WriteInt64(row, i, 0);
+                    Marshal.WriteInt16(row, 0, 23); Marshal.Copy(addr, 0, row + 8, 16); Marshal.WriteInt32(row, 40, (int)ifIndex);
+                    return DeleteUnicastIpAddressEntry(row);
+                }
+                finally { Marshal.FreeHGlobal(row); }
+            }
+            uint rc = Win32Of(TcpIoctl(IOCTL_IP6_ADDRESS_CONFIG, AddressRequest(OpDelete, store == 1 ? StorePersistent : StoreActive, ifIndex, addr, 0, 0, 0, false)));
+            if (saved != null) PersistentUpdate(guid, PersistAddr, AddrRecord, saved, 12, 28, false);
+            return rc;
+        }
+
+        // ---- routes (the destination prefix and the next hop name a route; next hop :: = on-link)
+        public static uint AddRoute6(uint ifIndex, string prefix, int plen, string next, uint metric, uint protocol, uint valid, uint pref, bool publish, int store)
+        {
+            byte[] p = Addr6(prefix), n = Addr6(next);
+            if (store == 1) return Win32Of(TcpIoctl(IOCTL_IP6_ROUTE_CONFIG, RouteRequest(OpCreate, StorePersistent, ifIndex, p, plen, n, metric, valid, pref, protocol, publish)));
+            if (store == 2)
+            {
+                string guid = Native.AdapterGuid(ifIndex); if (guid == null) return 87;
+                byte[] rec = RouteRequest(OpCreate, StorePersistent, 0, p, plen, n, metric, valid, pref, protocol, publish);
+                if (FindRecord(guid, PersistRoute, RouteRecord, rec, 12, 48) != null) return 5010;
+                PersistentUpdate(guid, PersistRoute, RouteRecord, rec, 12, 48, false);
+                return 0;
+            }
+            IntPtr row = Marshal.AllocHGlobal(104);
+            try
+            {
+                for (int i = 0; i < 104; i += 8) Marshal.WriteInt64(row, i, 0);
+                InitializeIpForwardEntry(row);
+                Marshal.WriteInt32(row, 8, (int)ifIndex);
+                Marshal.WriteInt16(row, 12, 23); Marshal.Copy(MaskPrefix(p, plen), 0, row + 20, 16); Marshal.WriteInt32(row, 40, plen);
+                Marshal.WriteInt16(row, 44, 23); Marshal.Copy(n, 0, row + 52, 16);
+                Marshal.WriteInt32(row, 76, (int)valid); Marshal.WriteInt32(row, 80, (int)pref);
+                Marshal.WriteInt32(row, 84, (int)metric); Marshal.WriteInt32(row, 88, (int)protocol);
+                Marshal.WriteByte(row, 94, publish ? (byte)1 : (byte)0);
+                return CreateIpForwardEntry2(row);
+            }
+            finally { Marshal.FreeHGlobal(row); }
+        }
+
+        public static uint DeleteRoute6(uint ifIndex, string prefix, int plen, string next, int store)
+        {
+            byte[] p = Addr6(prefix), n = Addr6(next);
+            string guid = Native.AdapterGuid(ifIndex);
+            byte[] key = RouteRequest(OpDelete, StorePersistent, 0, p, plen, n, 0, 0, 0, 0, false);
+            if (store == 2)
+            {
+                if (guid == null || !PersistentUpdate(guid, PersistRoute, RouteRecord, key, 12, 48, true)) return 1168;
+                return 0;
+            }
+            byte[] saved = store == 0 && guid != null ? FindRecord(guid, PersistRoute, RouteRecord, key, 12, 48) : null;
+            if (store == 0 && saved == null)
+            {
+                IntPtr row = Marshal.AllocHGlobal(104);
+                try
+                {
+                    for (int i = 0; i < 104; i += 8) Marshal.WriteInt64(row, i, 0);
+                    Marshal.WriteInt32(row, 8, (int)ifIndex);
+                    Marshal.WriteInt16(row, 12, 23); Marshal.Copy(MaskPrefix(p, plen), 0, row + 20, 16); Marshal.WriteInt32(row, 40, plen);
+                    Marshal.WriteInt16(row, 44, 23); Marshal.Copy(n, 0, row + 52, 16);
+                    return DeleteIpForwardEntry2(row);
+                }
+                finally { Marshal.FreeHGlobal(row); }
+            }
+            uint rc = Win32Of(TcpIoctl(IOCTL_IP6_ROUTE_CONFIG, RouteRequest(OpDelete, store == 1 ? StorePersistent : StoreActive, ifIndex, p, plen, n, 0, 0, 0, 0, false)));
+            if (saved != null) PersistentUpdate(guid, PersistRoute, RouteRecord, saved, 12, 48, false);
+            return rc;
+        }
+
+        // is there a persistent record for this address / route (the PersistentStore rows and the removal choose by it)
+        public static bool HasPersistentAddress(uint ifIndex, string ip)
+        {
+            try { return FindRecord(Native.AdapterGuid(ifIndex), PersistAddr, AddrRecord, AddressRequest(OpDelete, 0, 0, Addr6(ip), 0, 0, 0, false), 12, 28) != null; }
+            catch (Exception) { return false; }
+        }
+
+        public static bool HasPersistentRoute(uint ifIndex, string prefix, int plen, string next)
+        {
+            try { return FindRecord(Native.AdapterGuid(ifIndex), PersistRoute, RouteRecord, RouteRequest(OpDelete, 0, 0, Addr6(prefix), plen, Addr6(next), 0, 0, 0, 0, false), 12, 48) != null; }
+            catch (Exception) { return false; }
+        }
+
+        static string Plain6(byte[] b, int off) { byte[] a = new byte[16]; Array.Copy(b, off, a, 0, 16); return new IPAddress(a).ToString(); }
+
+        // The rows of the persistent store, shaped like the active ones (Store = PersistentStore, no address state: the stack does not
+        // track them as such). One adapter key per IPv6 interface.
+        public static List<Dictionary<string, object>> PersistentAddresses6()
+        {
+            List<Dictionary<string, object>> res = new List<Dictionary<string, object>>();
+            foreach (Dictionary<string, object> r in Native.IPInterfaces())
+            {
+                if ((int)r["AddressFamily"] != 23) continue;
+                uint ix = (uint)r["InterfaceIndex"]; string guid = Native.AdapterGuid(ix);
+                foreach (byte[] rec in PersistentRecords(guid, PersistAddr, AddrRecord))
+                {
+                    string ip = Plain6(rec, 12);
+                    Dictionary<string, object> d = new Dictionary<string, object>();
+                    d["InstanceID"] = ip + "++" + ix.ToString(CultureInfo.InvariantCulture); d["Name"] = guid + ":" + ip;
+                    d["CreationClassName"] = ""; d["SystemCreationClassName"] = ""; d["SystemName"] = "";
+                    d["EnabledDefault"] = 2; d["RequestedState"] = 12; d["TransitioningToState"] = 12; d["ProtocolIFType"] = 4096; d["AddressOrigin"] = 0;
+                    d["IPv6Address"] = ip; d["PrefixLength"] = (byte)Get(rec, 28); d["AddressFamily"] = 23; d["AddressState"] = 0;
+                    d["InterfaceAlias"] = r["InterfaceAlias"]; d["InterfaceIndex"] = ix; d["IPAddress"] = ip;
+                    d["PreferredLifetime"] = Get(rec, 36) == Infinite ? TimeSpan.MaxValue : TimeSpan.FromSeconds(Get(rec, 36));
+                    d["ValidLifetime"] = Get(rec, 32) == Infinite ? TimeSpan.MaxValue : TimeSpan.FromSeconds(Get(rec, 32));
+                    d["PrefixOrigin"] = Get(rec, 40); d["SuffixOrigin"] = Get(rec, 44); d["SkipAsSource"] = (Get(rec, 48) & 1) != 0; d["Store"] = 0; d["Type"] = 1;
+                    res.Add(d);
+                }
+            }
+            return res;
+        }
+
+        public static List<Dictionary<string, object>> PersistentRoutes6()
+        {
+            List<Dictionary<string, object>> res = new List<Dictionary<string, object>>();
+            foreach (Dictionary<string, object> r in Native.IPInterfaces())
+            {
+                if ((int)r["AddressFamily"] != 23) continue;
+                uint ix = (uint)r["InterfaceIndex"]; string guid = Native.AdapterGuid(ix);
+                foreach (byte[] rec in PersistentRecords(guid, PersistRoute, RouteRecord))
+                {
+                    string prefix = Plain6(rec, 12) + "/" + Get(rec, 28).ToString(CultureInfo.InvariantCulture), next = Plain6(rec, 32);
+                    Dictionary<string, object> d = new Dictionary<string, object>();
+                    d["InstanceID"] = prefix + "++" + next + "++" + ix.ToString(CultureInfo.InvariantCulture);
+                    d["RouteMetric"] = Math.Min(Get(rec, 48), 65535u); d["TypeOfRoute"] = 3u;
+                    d["AddressFamily"] = 23; d["CompartmentId"] = 1u; d["DestinationPrefix"] = prefix;
+                    d["InterfaceAlias"] = r["InterfaceAlias"]; d["InterfaceIndex"] = ix; d["InterfaceMetric"] = r["InterfaceMetric"];
+                    d["NextHop"] = next;
+                    d["PreferredLifetime"] = Get(rec, 56) == Infinite ? TimeSpan.MaxValue : TimeSpan.FromSeconds(Get(rec, 56));
+                    d["ValidLifetime"] = Get(rec, 52) == Infinite ? TimeSpan.MaxValue : TimeSpan.FromSeconds(Get(rec, 52));
+                    d["Protocol"] = Get(rec, 64); d["Publish"] = (Get(rec, 68) & 1) != 0 ? 1 : 0; d["State"] = 0; d["Store"] = 0;
+                    res.Add(d);
+                }
+            }
+            return res;
+        }
     }
 
     // ------------------------------------------------------------------------------------------------ queries
@@ -1146,13 +1571,73 @@ namespace Nitro.Net
             return Cimx("Windows System Error " + code.ToString(CultureInfo.InvariantCulture), message, target, cat);
         }
 
+        // The MI result the category stands for (the cmdlets derive the category from it): measured on the oracle for an invalid
+        // parameter (StatusCode 4, NativeErrorCode InvalidParameter); the others are the results the same categories come from.
+        static uint StatusOf(ErrorCategory cat)
+        {
+            switch (cat)
+            {
+                case ErrorCategory.InvalidArgument: return 4;
+                case ErrorCategory.ObjectNotFound: return 6;
+                case ErrorCategory.NotImplemented: return 7;
+                case ErrorCategory.ResourceExists: return 11;
+                case ErrorCategory.PermissionDenied: return 2;
+                default: return 1;
+            }
+        }
+
+        // A CimException the way the CIM cmdlets raise one: built from an MSFT_WmiError instance, so that MessageId, StatusCode,
+        // NativeErrorCode and ErrorData read as on Windows (oracle: MessageId "Windows System Error 87", StatusCode 4, ErrorData
+        // MSFT_WmiError, ErrorType 0, no ErrorSource). The CIM assembly is reached by reflection; null when that fails.
+        static Exception CimError(string message, string id, uint status)
+        {
+            try
+            {
+                Type tEx = Type.GetType("Microsoft.Management.Infrastructure.CimException, Microsoft.Management.Infrastructure");
+                Assembly asm = tEx.Assembly;
+                Type tInst = asm.GetType("Microsoft.Management.Infrastructure.CimInstance");
+                Type tProp = asm.GetType("Microsoft.Management.Infrastructure.CimProperty");
+                Type tType = asm.GetType("Microsoft.Management.Infrastructure.CimType");
+                Type tFlags = asm.GetType("Microsoft.Management.Infrastructure.CimFlags");
+                object inst = Activator.CreateInstance(tInst, "MSFT_WmiError");
+                object props = tInst.GetProperty("CimInstanceProperties").GetValue(inst, null);
+                MethodInfo create = tProp.GetMethod("Create", new Type[] { typeof(string), typeof(object), tType, tFlags });
+                MethodInfo add = props.GetType().GetMethod("Add", new Type[] { tProp });
+                object none = Enum.ToObject(tFlags, 0);
+                object[][] list = new object[][] {
+                    new object[] { "CIMStatusCode", status, "UInt32" }, new object[] { "Message", message, "String" },
+                    new object[] { "MessageID", id, "String" }, new object[] { "ErrorType", (ushort)0, "UInt16" } };
+                foreach (object[] p in list)
+                    add.Invoke(props, new object[] { create.Invoke(null, new object[] { p[0], p[1], Enum.Parse(tType, (string)p[2]), none }) });
+                Exception ex = (Exception)Activator.CreateInstance(tEx, inst);
+                // NativeErrorCode is the MI result (InvalidParameter, NotFound, AlreadyExists ...: the same numbers as StatusCode)
+                try { PropertyInfo nec = tEx.GetProperty("NativeErrorCode"); nec.SetValue(ex, Enum.ToObject(nec.PropertyType, status), null); } catch (Exception) { }
+                return ex;
+            }
+            catch (Exception) { return null; }
+        }
+
+        // Windows reports the class path as the target type of these records (the target object itself is the class name)
+        static void ShapeTarget(ErrorRecord r, object target)
+        {
+            string cls = target as string;
+            if (cls == null || !cls.StartsWith("MSFT_", StringComparison.Ordinal) || cls.IndexOf(' ') >= 0) return;
+            try { typeof(ErrorRecord).GetField("_targetTypeOverride", BindingFlags.NonPublic | BindingFlags.Instance).SetValue(r, "ROOT/StandardCimv2/" + cls); }
+            catch (Exception) { }
+        }
+
         // an error with a given id (for example "MI RESULT 4") carried by a CimException
         public static ErrorRecord Cimx(string id, string message, object target, ErrorCategory cat)
         {
-            Exception e;
-            try { e = (Exception)Activator.CreateInstance(Type.GetType("Microsoft.Management.Infrastructure.CimException, Microsoft.Management.Infrastructure"), message); }
-            catch (Exception) { e = new InvalidOperationException(message); }
-            return new ErrorRecord(e, id, cat, target);
+            Exception e = id == "MI RESULT 4" ? CimError(message, id, 4) : CimError(message, id, StatusOf(cat));
+            if (e == null)
+            {
+                try { e = (Exception)Activator.CreateInstance(Type.GetType("Microsoft.Management.Infrastructure.CimException, Microsoft.Management.Infrastructure"), message); }
+                catch (Exception) { e = new InvalidOperationException(message); }
+            }
+            ErrorRecord r = new ErrorRecord(e, id, cat, target);
+            ShapeTarget(r, target);
+            return r;
         }
 
         public static ErrorRecord InvalidStore(string value)

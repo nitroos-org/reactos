@@ -815,7 +815,7 @@ Describe 'write cmdlets: round trip on the guest (state read back with the Get- 
         @($reg.SubnetMask) | Should -Be @('255.255.255.0')
         @($reg.DefaultGateway) | Should -Be @('10.0.2.2')
     }
-    It 'New-NetIPAddress refuses a duplicate, a second IPv4 address, IPv6 and a DHCP interface with Windows errors' -Skip:$script:SkipRt {
+    It 'New-NetIPAddress refuses a duplicate, a second IPv4 address, an IPv6 prefix length above 128 and a bad IPv4 prefix with Windows errors' -Skip:$script:SkipRt {
         $e = @(Err { New-NetIPAddress -IPAddress 10.0.2.99 -PrefixLength 24 -InterfaceIndex $script:ix })
         $e[0].FullyQualifiedErrorId | Should -Be 'Windows System Error 5010,New-NetIPAddress'
         $e[0].Exception.Message | Should -Match '^Instance MSFT_NetIPAddress already exists'
@@ -823,8 +823,9 @@ Describe 'write cmdlets: round trip on the guest (state read back with the Get- 
         $e = @(Err { New-NetIPAddress -IPAddress 10.0.2.98 -PrefixLength 24 -InterfaceIndex $script:ix })
         $e[0].FullyQualifiedErrorId | Should -Be 'Windows System Error 5010,New-NetIPAddress'
         (Get-NetIPAddress -InterfaceIndex $script:ix -AddressFamily IPv4).IPAddress | Should -Be '10.0.2.99'
-        $e = @(Err { New-NetIPAddress -IPAddress 2001:db8::5 -PrefixLength 64 -InterfaceIndex $script:ix })
-        $e[0].FullyQualifiedErrorId | Should -Be 'Windows System Error 50,New-NetIPAddress'
+        $e = @(Err { New-NetIPAddress -IPAddress 2001:db8::5 -PrefixLength 129 -InterfaceIndex $script:ix })
+        $e[0].FullyQualifiedErrorId | Should -Be 'Windows System Error 87,New-NetIPAddress'
+        $e[0].Exception.Message.Trim() | Should -Be 'Invalid parameter PrefixLength 129'
         $e = @(Err { New-NetIPAddress -IPAddress 10.0.2.97 -PrefixLength 40 -InterfaceIndex $script:ix })
         $e[0].FullyQualifiedErrorId | Should -Be 'Windows System Error 87,New-NetIPAddress'
         $e[0].Exception.Message.Trim() | Should -Be 'Invalid parameter PrefixLength 40'
@@ -844,7 +845,7 @@ Describe 'write cmdlets: round trip on the guest (state read back with the Get- 
         Set-DnsClientServerAddress -InterfaceAlias $g.InterfaceAlias -ServerAddresses 192.0.2.55
         @((Get-DnsClientServerAddress -InterfaceIndex $script:ix -AddressFamily IPv4).ServerAddresses) | Should -Be @('192.0.2.55')
     }
-    It 'Set-DnsClientServerAddress -ResetServerAddresses removes the static list; a bad address and IPv6 are refused' -Skip:$script:SkipRt {
+    It 'Set-DnsClientServerAddress -ResetServerAddresses removes the static list; a bad address is refused' -Skip:$script:SkipRt {
         $e = @(Err { Set-DnsClientServerAddress -InterfaceIndex $script:ix -ServerAddresses notanip })
         $e[0].FullyQualifiedErrorId | Should -Be 'Windows System Error 87,Set-DnsClientServerAddress'
         @((Get-DnsClientServerAddress -InterfaceIndex $script:ix -AddressFamily IPv4).ServerAddresses) | Should -Be @('192.0.2.55')
@@ -853,12 +854,15 @@ Describe 'write cmdlets: round trip on the guest (state read back with the Get- 
         (Get-ItemProperty $script:regPath).PSObject.Properties.Name | Should -Not -Contain 'NameServer'
         (& $script:ipcfg) | Should -Not -Match '192\.0\.2\.5'
     }
-    It 'Set-DnsClientServerAddress writes the IPv4 servers and reports the IPv6 one it cannot set' -Skip:$script:SkipRt {
+    It 'Set-DnsClientServerAddress writes the IPv4 servers to the IPv4 row and the IPv6 ones to the IPv6 row (Tcpip6 NameServer)' -Skip:$script:SkipRt {
         $e = @(Err { Set-DnsClientServerAddress -InterfaceIndex $script:ix -ServerAddresses 192.0.2.60, 2001:db8::53 })
-        $e.Count | Should -Be 1
-        $e[0].FullyQualifiedErrorId | Should -Be 'Windows System Error 50,Set-DnsClientServerAddress'
+        $e.Count | Should -Be 0
         @((Get-DnsClientServerAddress -InterfaceIndex $script:ix -AddressFamily IPv4).ServerAddresses) | Should -Be @('192.0.2.60')
+        @((Get-DnsClientServerAddress -InterfaceIndex $script:ix -AddressFamily IPv6).ServerAddresses)[0] | Should -Be '2001:db8::53'
+        $guid = (Get-NetAdapter -InterfaceIndex $script:ix).InterfaceGuid
+        (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\Interfaces\$guid").NameServer | Should -Be '2001:db8::53'
         Set-DnsClientServerAddress -InterfaceIndex $script:ix -ResetServerAddresses
+        @((Get-DnsClientServerAddress -InterfaceIndex $script:ix -AddressFamily IPv6).ServerAddresses) | Should -Not -Contain '2001:db8::53'
     }
     It 'Remove-NetIPAddress -PassThru removes the address and its default route; Get-, ipconfig, route print and the registry agree' -Skip:$script:SkipRt {
         $r = @(Remove-NetIPAddress -IPAddress 10.0.2.99 -Confirm:$false -PassThru)
