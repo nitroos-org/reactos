@@ -245,7 +245,7 @@ HRGN    hrgnDefault = NULL;
  *  we traverse an entire pixel.
  */
 #define BRESINITPGON(dy, x1, x2, xStart, d, m, m1, incr1, incr2) { \
-    int dx;      /* Local storage */ \
+    LONGLONG dx; /* Local storage: 64 bits, the ends of an edge can be 2^32 - 1 apart */ \
 \
     /* \
      *  If the edge is horizontal, then it is ignored \
@@ -253,7 +253,7 @@ HRGN    hrgnDefault = NULL;
      */ \
     if ((dy) != 0) { \
         xStart = (x1); \
-        dx = (x2) - xStart; \
+        dx = (LONGLONG)(x2) - xStart; \
         if (dx < 0) { \
             m = dx / (dy); \
             m1 = m - 1; \
@@ -301,10 +301,10 @@ HRGN    hrgnDefault = NULL;
  */
 typedef struct
 {
-    INT minor_axis;   /* Minor axis        */
-    INT d;            /* Decision variable */
-    INT m, m1;        /* Slope and slope+1 */
-    INT incr1, incr2; /* Error increments */
+    INT minor_axis;        /* Minor axis (always between the x of the two ends of the edge) */
+    LONGLONG d;            /* Decision variable */
+    LONGLONG m, m1;        /* Slope and slope+1 */
+    LONGLONG incr1, incr2; /* Error increments (64 bits: up to 2^34 for a wide edge) */
 } BRESINFO;
 
 #define BRESINITPGONSTRUCT(dmaj, min1, min2, bres) \
@@ -3282,7 +3282,7 @@ REGION_CreateETandAET(
     const POINT *PrevPt, *CurrPt, *EndPt;
     INT poly, count;
     INT iSLLBlock = 0;
-    INT dy;
+    LONGLONG dy;
 
     /* Initialize the Active Edge Table */
     AET->next = (EDGE_TABLE_ENTRY *)NULL;
@@ -3332,7 +3332,7 @@ REGION_CreateETandAET(
                 pETEs->ymax = bottom->y - 1;
 
                 /*  Initialize integer edge algorithm */
-                dy = bottom->y - top->y;
+                dy = (LONGLONG)bottom->y - top->y;
                 BRESINITPGONSTRUCT(dy, top->x, bottom->x, pETEs->bres);
 
                 REGION_InsertEdgeInET(ET,

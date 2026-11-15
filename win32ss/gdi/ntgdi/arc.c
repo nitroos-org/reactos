@@ -44,6 +44,7 @@ IntArc( DC *dc,
     LONG PenWidth, PenOrigWidth, PenWidthY;
     double AngleStart, AngleEnd;
     LONG CenterX, CenterY;
+    BOOL bStroke, bRot;
 
     if (Right < Left)
     {
@@ -119,7 +120,14 @@ IntArc( DC *dc,
 
     if (!PenWidth) PenWidth = 1;
     if (!PenWidthY) PenWidthY = 1;
-    pbrPen->lWidth = PenWidth;
+
+    /* A wide pen is centred on the outline: the outline is a stroked path. So is the outline under a rotation of the world
+       transform, which turns the shape (and its fill) as well. The ring rasteriser draws the other pens, with the pen as wide
+       as it is on the device */
+    bRot = PATH_IsWorldRotated(dc);
+    bStroke = bRot || PATH_IsShapeStroked(dc, pbrPen);
+    if (!bStroke)
+        pbrPen->lWidth = PenWidth;
 
     /* From here the shape is computed in the coordinates of the DC without its origin, so that a window DC and a memory
        DC get the same pixels: the centre and the radial points are rounded (and the engine rasteriser steps) the same
@@ -151,7 +159,7 @@ IntArc( DC *dc,
 
     dc->ptlDrawShift = dc->ptlDCOrig;
 
-    if ((arctype == GdiTypePie) || (arctype == GdiTypeChord))
+    if (((arctype == GdiTypePie) || (arctype == GdiTypeChord)) && !bRot)
     {
         ret = IntFillArc( dc,
               RectBounds.left,
@@ -163,7 +171,7 @@ IntArc( DC *dc,
               arctype);
     }
 
-    if(ret)
+    if (ret && !bStroke)
     {
         ret = IntDrawArc( dc,
                   RectBounds.left,
@@ -188,14 +196,20 @@ IntArc( DC *dc,
         return FALSE;
     }
 
-    if (arctype == GdiTypePie)
+    if (bStroke)
+    {
+        if (ret)
+            ret = PATH_DrawShape(dc, PATH_SHAPE_ARC, Left, Top, Right, Bottom,
+                                 XRadialStart, YRadialStart, XRadialEnd, YRadialEnd, arctype, bRot);
+    }
+    else if (arctype == GdiTypePie)
     {
         PUTLINE(CenterX + dc->ptlDCOrig.x, CenterY + dc->ptlDCOrig.y,
                 RectSEpts.left + dc->ptlDCOrig.x, RectSEpts.top + dc->ptlDCOrig.y, dc->eboLine);
         PUTLINE(RectSEpts.right + dc->ptlDCOrig.x, RectSEpts.bottom + dc->ptlDCOrig.y,
                 CenterX + dc->ptlDCOrig.x, CenterY + dc->ptlDCOrig.y, dc->eboLine);
     }
-    if (arctype == GdiTypeChord)
+    if (!bStroke && arctype == GdiTypeChord)
         PUTLINE(RectSEpts.right + dc->ptlDCOrig.x, RectSEpts.bottom + dc->ptlDCOrig.y,
                 RectSEpts.left + dc->ptlDCOrig.x, RectSEpts.top + dc->ptlDCOrig.y, dc->eboLine);
 

@@ -273,6 +273,7 @@ NtGdiEllipse(
     LONG RadiusX, RadiusY, CenterX, CenterY;
     PBRUSH pFillBrushObj;
     BRUSH tmpFillBrushObj;
+    BOOL bStroke, bRot;
 
     dc = DC_LockDc(hDC);
     if (dc == NULL)
@@ -361,7 +362,14 @@ NtGdiEllipse(
 
     if (!PenWidth) PenWidth = 1;
     if (!PenWidthY) PenWidthY = 1;
-    pbrush->lWidth = PenWidth;
+
+    /* A wide pen is centred on the outline: the outline is a stroked path. So is the outline under a rotation of the world
+       transform, which turns the shape (and its fill) as well. The ring rasteriser draws the other pens, with the pen as wide
+       as it is on the device */
+    bRot = PATH_IsWorldRotated(dc);
+    bStroke = bRot || PATH_IsShapeStroked(dc, pbrush);
+    if (!bStroke)
+        pbrush->lWidth = PenWidth;
 
     // Setup for dynamic width and height. The centre is rounded before the DC origin is added: the division
     // truncates towards zero, so with the origin first a window DC and a memory DC would round negative sums
@@ -399,7 +407,7 @@ NtGdiEllipse(
 
         DC_vPrepareDCsForBlit(dc, &RectBounds, NULL, NULL);
 
-        ret = IntFillEllipse( dc,
+        ret = bRot ? TRUE : IntFillEllipse( dc,
                               CenterX - RadiusX,
                               CenterY - RadiusY,
                               RadiusX*2, // Width
@@ -407,7 +415,7 @@ NtGdiEllipse(
                               &tmpFillBrushObj);
         BRUSH_ShareUnlockBrush(pFillBrushObj);
 
-        if (ret)
+        if (ret && !bStroke)
         {
            ret = IntDrawEllipse( dc,
                                  CenterX - RadiusX,
@@ -419,6 +427,9 @@ NtGdiEllipse(
         }
 
         DC_vFinishBlit(dc, NULL);
+
+        if (ret && bStroke)
+            ret = PATH_DrawShape(dc, PATH_SHAPE_ELLIPSE, Left, Top, Right, Bottom, 0, 0, 0, 0, GdiTypeArc, bRot);
     }
 
     pbrush->lWidth = PenOrigWidth;
@@ -925,6 +936,7 @@ IntRoundRect(
     RECTL RectBounds;
     LONG PenWidth, PenOrigWidth, PenWidthY;
     BOOL ret = TRUE; // Default to success
+    BOOL bStroke, bRot;
     BRUSH brushTemp;
 
     ASSERT ( dc ); // Caller's responsibility to set this up
@@ -1000,7 +1012,14 @@ IntRoundRect(
 
     if (!PenWidth) PenWidth = 1;
     if (!PenWidthY) PenWidthY = 1;
-    pbrLine->lWidth = PenWidth;
+
+    /* A wide pen is centred on the outline: the outline is a stroked path. So is the outline under a rotation of the world
+       transform, which turns the shape (and its fill) as well. The ring rasteriser draws the other pens, with the pen as wide
+       as it is on the device */
+    bRot = PATH_IsWorldRotated(dc);
+    bStroke = bRot || PATH_IsShapeStroked(dc, pbrLine);
+    if (!bStroke)
+        pbrLine->lWidth = PenWidth;
 
     RectBounds.left   += dc->ptlDCOrig.x;
     RectBounds.top    += dc->ptlDCOrig.y;
@@ -1022,7 +1041,7 @@ IntRoundRect(
         RtlCopyMemory(&brushTemp, pbrFill, sizeof(brushTemp));
         brushTemp.ptOrigin.x += RectBounds.left - Left;
         brushTemp.ptOrigin.y += RectBounds.top - Top;
-        ret = IntFillRoundRect( dc,
+        ret = bRot ? TRUE : IntFillRoundRect( dc,
                                 RectBounds.left,
                                 RectBounds.top,
                                 RectBounds.right,
@@ -1032,7 +1051,7 @@ IntRoundRect(
                                 &brushTemp);
         BRUSH_ShareUnlockBrush(pbrFill);
 
-        if (ret)
+        if (ret && !bStroke)
         {
            ret = IntDrawRoundRect( dc,
                       RectBounds.left,
@@ -1046,6 +1065,10 @@ IntRoundRect(
         }
 
         DC_vFinishBlit(dc, NULL);
+
+        if (ret && bStroke)
+            ret = PATH_DrawShape(dc, PATH_SHAPE_ROUNDRECT, Left, Top, Right, Bottom,
+                                 xCurveDiameter, yCurveDiameter, 0, 0, GdiTypeArc, bRot);
     }
 
 

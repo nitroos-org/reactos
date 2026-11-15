@@ -96,6 +96,12 @@ PPATH FASTCALL PATH_FlattenPath (PPATH pPath);
 PPATH FASTCALL PATH_WidenPathEx(DC *dc, PPATH pPath);
 BOOL FASTCALL PATH_IsWidePen(DC *dc, PBRUSH pbrLine);
 BOOL FASTCALL PATH_IsWorldFlipped(DC *dc);
+BOOL FASTCALL PATH_IsWorldRotated(DC *dc);
+BOOL FASTCALL PATH_IsShapeStroked(DC *dc, PBRUSH pbrLine);
+#define PATH_SHAPE_ELLIPSE   0
+#define PATH_SHAPE_ROUNDRECT 1
+#define PATH_SHAPE_ARC       2
+BOOL FASTCALL PATH_DrawShape(PDC dc, INT iShape, INT x1, INT y1, INT x2, INT y2, INT p1, INT p2, INT p3, INT p4, ARCTYPE arctype, BOOL bRot);
 VOID FASTCALL PATH_GetPenDeviceWidths(DC *dc, PBRUSH pbrLine, LONG *pcx, LONG *pcy);
 
 BOOL FASTCALL PATH_ReserveEntries (PPATH pPath, INT numEntries);

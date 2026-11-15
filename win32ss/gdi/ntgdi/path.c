@@ -18,6 +18,10 @@ DBG_DEFAULT_CHANNEL(GdiPath);
 #pragma warning(disable:4244)
 #endif
 
+static BOOL PATH_EllipseRot(DC *dc, INT x1, INT y1, INT x2, INT y2);
+static BOOL PATH_RoundRectRot(DC *dc, INT x1, INT y1, INT x2, INT y2, INT ell_width, INT ell_height);
+static BOOL PATH_ArcRot(DC *dc, INT x1, INT y1, INT x2, INT y2, INT xStart, INT yStart, INT xEnd, INT yEnd, INT direction, INT lines);
+
 #define NUM_ENTRIES_INITIAL 16  /* Initial size of points / flags arrays  */
 
 #define GROW_FACTOR_NUMER    2  /* Numerator of grow factor for the array */
@@ -696,8 +700,13 @@ PATH_RoundRect(
     POINT points[16];
     BYTE *type;
     INT xOffset, yOffset;
+    INT ell_width_l, ell_width_r, ell_height_t, ell_height_b;
 
     if (!ell_width || !ell_height) return PATH_Rectangle( dc, x1, y1, x2, y2 );
+
+    /* Under a rotation the corners do not describe the shape */
+    if (PATH_IsWorldRotated(dc))
+        return PATH_RoundRectRot(dc, x1, y1, x2, y2, ell_width, ell_height);
 
     pPath = PATH_LockPath(dc->dclevel.hPath);
     if (!pPath) return FALSE;
@@ -727,21 +736,25 @@ PATH_RoundRect(
      * Get half width & height.
      * Do not use integer division, we need the rounding made by EngMulDiv.
      */
-    ell_width = EngMulDiv(ell_width, 1, 2);
-    ell_height = EngMulDiv(ell_height, 1, 2);
+    /* The left and top halves are the rounded ones and the right and bottom ones the rest: when the corner ellipse is as
+       wide as the box (odd sizes) the line between the corners has no length instead of running backwards by a pixel. */
+    ell_width_l = EngMulDiv(ell_width, 1, 2);
+    ell_width_r = ell_width - ell_width_l;
+    ell_height_t = EngMulDiv(ell_height, 1, 2);
+    ell_height_b = ell_height - ell_height_t;
 
     /* starting point */
     points[0].x  = rect.right;
-    points[0].y  = rect.top + ell_height;
+    points[0].y  = rect.top + ell_height_t;
     /* first curve */
     points[1].x = rect.right;
     points[1].y = rect.top + yOffset;
     points[2].x = rect.right - xOffset;
     points[2].y = rect.top;
-    points[3].x  = rect.right - ell_width;
+    points[3].x  = rect.right - ell_width_r;
     points[3].y  = rect.top;
     /* horizontal line */
-    points[4].x  = rect.left + ell_width;
+    points[4].x  = rect.left + ell_width_l;
     points[4].y  = rect.top;
     /* second curve */
     points[5].x  = rect.left + xOffset;
@@ -749,19 +762,19 @@ PATH_RoundRect(
     points[6].x  = rect.left;
     points[6].y  = rect.top + yOffset;
     points[7].x  = rect.left;
-    points[7].y  = rect.top + ell_height;
+    points[7].y  = rect.top + ell_height_t;
     /* vertical line */
     points[8].x  = rect.left;
-    points[8].y  = rect.bottom - ell_height;
+    points[8].y  = rect.bottom - ell_height_b;
     /* third curve */
     points[9].x  = rect.left;
     points[9].y  = rect.bottom - yOffset;
     points[10].x = rect.left + xOffset;
     points[10].y = rect.bottom;
-    points[11].x = rect.left + ell_width;
+    points[11].x = rect.left + ell_width_l;
     points[11].y = rect.bottom;
     /* horizontal line */
-    points[12].x = rect.right - ell_width;
+    points[12].x = rect.right - ell_width_r;
     points[12].y = rect.bottom;
     /* fourth curve */
     points[13].x = rect.right - xOffset;
@@ -769,7 +782,7 @@ PATH_RoundRect(
     points[14].x = rect.right;
     points[14].y = rect.bottom - yOffset;
     points[15].x = rect.right;
-    points[15].y = rect.bottom - ell_height;
+    points[15].y = rect.bottom - ell_height_b;
 
     if (dc->dclevel.flPath & DCPATH_CLOCKWISE) reverse_points( points, 16 );
     if (!(type = add_points( pPath, points, 16, PT_BEZIERTO )))
@@ -805,6 +818,10 @@ PATH_Ellipse(
 
     TRACE("PATH_Ellipse: %p -> (%d, %d) - (%d, %d)\n",
             dc, x1, y1, x2, y2);
+
+    /* Under a rotation the corners do not describe the shape */
+    if (PATH_IsWorldRotated(dc))
+        return PATH_EllipseRot(dc, x1, y1, x2, y2);
 
     if (!PATH_CheckRect(dc, &rect, x1, y1, x2, y2))
     {
@@ -984,14 +1001,22 @@ PATH_Arc(
     INT     temp;
     BOOL    clockwise;
     PPATH   pPath;
+    INT     nParts = 0, numEntriesOld;
+    BOOL    bNewStrokeOld;
 
     /* FIXME: This function should check for all possible error returns */
     /* FIXME: Do we have to respect newStroke? */
 
     ASSERT(dc);
 
+    /* Under a rotation the corners do not describe the shape */
+    if (x1 != x2 && y1 != y2 && PATH_IsWorldRotated(dc))
+        return PATH_ArcRot(dc, x1, y1, x2, y2, xStart, yStart, xEnd, yEnd, direction, lines);
+
     pPath = PATH_LockPath(dc->dclevel.hPath);
     if (!pPath) return FALSE;
+    numEntriesOld = pPath->numEntriesUsed;
+    bNewStrokeOld = pPath->newStroke;
 
     if (direction)
        clockwise = ((direction == AD_CLOCKWISE) !=0 );
@@ -1028,11 +1053,24 @@ PATH_Arc(
         corners[1].y = temp;
     }
 
+    /* A mapping that squashes an axis (a zero extent) leaves the arc without area: nothing to draw (the normalized
+       points below would divide by the zero radius, the angles become NaN and the quadrant loop never ends) */
+    if (corners[0].x == corners[1].x || corners[0].y == corners[1].y)
+    {
+        Ret = TRUE;
+        goto ArcExit;
+    }
+
     /* Compute start and end angle */
     PATH_NormalizePoint(corners, &pointStart, &x, &y);
     angleStart = atan2(*(FLOAT*)&y, *(FLOAT*)&x);
     PATH_NormalizePoint(corners, &pointEnd, &x, &y);
     angleEnd = atan2(*(FLOAT*)&y, *(FLOAT*)&x);
+    if (!(fabs(angleStart) <= M_PI + 1e-6) || !(fabs(angleEnd) <= M_PI + 1e-6))
+    {
+        Ret = FALSE;
+        goto ArcExit;
+    }
 
     /* Make sure the end angle is "on the right side" of the start angle */
     if (clockwise)
@@ -1106,12 +1144,23 @@ PATH_Arc(
         }
 
         /* Add the Bezier spline to the path */
-        PATH_DoArcPart(pPath,
-                       corners,
-                       angleStartQuadrant,
-                       angleEndQuadrant,
-                       start ? (lines == GdiTypeArcTo ? PT_LINETO : PT_MOVETO) : FALSE); // -1
+        if (!PATH_DoArcPart(pPath,
+                            corners,
+                            angleStartQuadrant,
+                            angleEndQuadrant,
+                            start ? (lines == GdiTypeArcTo ? PT_LINETO : PT_MOVETO) : FALSE)) // -1
+        {
+            Ret = FALSE;
+            goto ArcExit;
+        }
         start = FALSE;
+
+        /* The angles span less than 2 * pi: at most five parts */
+        if (++nParts > 6)
+        {
+            Ret = FALSE;
+            goto ArcExit;
+        }
     }
     while (!end);
 
@@ -1132,6 +1181,12 @@ PATH_Arc(
             Ret = FALSE;
     }
 ArcExit:
+    if (!Ret)
+    {
+        /* A failure leaves the path as it was (not with a lone PT_MOVETO) */
+        pPath->numEntriesUsed = numEntriesOld;
+        pPath->newStroke = bNewStrokeOld;
+    }
     PATH_UnlockPath(pPath);
     return Ret;
 }
@@ -1453,6 +1508,245 @@ PATH_FlattenPath(PPATH pPath)
     return newPath;
 }
 
+/* How far past the clip box a polygon may reach before it is cut to the box (plus this margin) */
+#define PATH_CLIP_MARGIN 16384
+
+enum { PATH_CLIP_UNKNOWN, PATH_CLIP_OUTSIDE, PATH_CLIP_INSIDE, PATH_CLIP_REACHES_FAR };
+
+/* Where the bounds of the path (device points of the DC) lie to the clip box of the DC: entirely outside (painting it
+ * changes nothing), reaching far past the box (the region of such an outline has a scanline for every row it spans: a
+ * pen of 2^28 pixels or a box of 2^30 stalls the call for seconds), or neither. *prcClip is the clip box widened by
+ * PATH_CLIP_MARGIN, in the coordinates of the path. */
+static
+INT
+PATH_GetClipState(PDC dc, PPATH pPath, RECTL *prcClip)
+{
+    LONG l, t, r, b;
+    LONGLONG cl, ct, cr, cb;
+    PREGION prgn;
+    INT i;
+
+    if (pPath->numEntriesUsed < 1)
+        return PATH_CLIP_UNKNOWN;
+
+    if (dc->fs & DC_DIRTY_RAO)
+        CLIPPING_UpdateGCRegion(dc);
+
+    prgn = dc->prgnRao;
+    if (!prgn)
+        return PATH_CLIP_UNKNOWN;
+
+    l = r = pPath->pPoints[0].x;
+    t = b = pPath->pPoints[0].y;
+    for (i = 1; i < pPath->numEntriesUsed; i++)
+    {
+        if (pPath->pPoints[i].x < l) l = pPath->pPoints[i].x;
+        if (pPath->pPoints[i].x > r) r = pPath->pPoints[i].x;
+        if (pPath->pPoints[i].y < t) t = pPath->pPoints[i].y;
+        if (pPath->pPoints[i].y > b) b = pPath->pPoints[i].y;
+    }
+
+    /* The region of the clip box (prgnRao) is kept in the coordinates of the DC, like the path: CLIPPING_UpdateGCRegion
+       adds the DC origin only for the clip object and takes it off again. One pixel of margin keeps the rounding of
+       the region scan conversion out of the decision. */
+    cl = (LONGLONG)prgn->rdh.rcBound.left - 1;
+    ct = (LONGLONG)prgn->rdh.rcBound.top - 1;
+    cr = (LONGLONG)prgn->rdh.rcBound.right + 1;
+    cb = (LONGLONG)prgn->rdh.rcBound.bottom + 1;
+
+    if ((r < cl) || (l > cr) || (b < ct) || (t > cb))
+        return PATH_CLIP_OUTSIDE;
+
+    /* The box of the clip region is a surface rectangle (28 bit coordinates): the widened rectangle fits a LONG */
+    prcClip->left = (LONG)(cl + 1 - PATH_CLIP_MARGIN);
+    prcClip->top = (LONG)(ct + 1 - PATH_CLIP_MARGIN);
+    prcClip->right = (LONG)(cr - 1 + PATH_CLIP_MARGIN);
+    prcClip->bottom = (LONG)(cb - 1 + PATH_CLIP_MARGIN);
+
+    if (l < prcClip->left || r > prcClip->right || t < prcClip->top || b > prcClip->bottom)
+        return PATH_CLIP_REACHES_FAR;
+    return PATH_CLIP_INSIDE;
+}
+
+/* a * b / c without overflow, for |a|, |b|, |c| < 2^32, c != 0 and |b| <= |c| (the cut of an edge: b is the part of the
+ * edge that lies on this side of the limit). The quotient and remainder of a / c keep both products inside 64 bits. */
+static
+LONGLONG
+PATH_MulDivCut(LONGLONG a, LONGLONG b, LONGLONG c)
+{
+    LONGLONG q = a / c, r = a % c;
+    ULONGLONG mag = (ULONGLONG)(r < 0 ? -r : r) * (ULONGLONG)(b < 0 ? -b : b) / (ULONGLONG)(c < 0 ? -c : c);
+    BOOL bNeg = (r < 0) ^ (b < 0) ^ (c < 0);
+
+    return q * b + (bNeg ? -(LONGLONG)mag : (LONGLONG)mag);
+}
+
+/* One pass of the Sutherland-Hodgman clip of a polygon: the points on the inner side of one edge of the rectangle
+ * (iSide 0: x >= lim, 1: x <= lim, 2: y >= lim, 3: y <= lim) are kept, an edge that crosses it is cut at it. pOut holds
+ * 2 * n points. Integer arithmetic only (the products are formed by PATH_MulDivCut, which cannot overflow). */
+static
+ULONG
+PATH_ClipPolygonPass(const POINT *pIn, ULONG n, POINT *pOut, INT iSide, LONG lim)
+{
+    ULONG i, m = 0;
+    POINT prev = pIn[n - 1];
+    BOOL bPrevIn;
+
+#define PATH_CLIP_IN(p) ((iSide == 0) ? ((p).x >= lim) : (iSide == 1) ? ((p).x <= lim) : \
+                         (iSide == 2) ? ((p).y >= lim) : ((p).y <= lim))
+    bPrevIn = PATH_CLIP_IN(prev);
+    for (i = 0; i < n; i++)
+    {
+        POINT cur = pIn[i], cut;
+        BOOL bIn = PATH_CLIP_IN(cur);
+
+        if (bIn != bPrevIn)
+        {
+            if (iSide < 2)
+            {
+                cut.x = lim;
+                cut.y = prev.y + (LONG)PATH_MulDivCut((LONGLONG)cur.y - prev.y, (LONGLONG)lim - prev.x, (LONGLONG)cur.x - prev.x);
+            }
+            else
+            {
+                cut.y = lim;
+                cut.x = prev.x + (LONG)PATH_MulDivCut((LONGLONG)cur.x - prev.x, (LONGLONG)lim - prev.y, (LONGLONG)cur.y - prev.y);
+            }
+            pOut[m++] = cut;
+        }
+        if (bIn)
+            pOut[m++] = cur;
+        prev = cur;
+        bPrevIn = bIn;
+    }
+#undef PATH_CLIP_IN
+    return m;
+}
+
+/* Fills Rgn like PATH_PathToRegion, from the polygons of the path cut to the rectangle prc (what lies outside the
+ * rectangle is not painted: the region would only be cut to the clip box later). The cut edges run outside the box,
+ * the rounding of their end points (half a pixel at the rectangle) is far from it. Returns FALSE when it fails,
+ * *pbEmpty is set when nothing is left. */
+static
+BOOL
+PATH_PathToRegionClipped(PPATH pPath, INT Mode, PREGION Rgn, const RECTL *prc, PBOOL pbEmpty)
+{
+    POINT *pAll = NULL, *pA = NULL, *pB = NULL, *pTmp;
+    PULONG pCounts = NULL;
+    ULONG nAll = 0, nPoly = 0, nAllocAll = 0, nAllocBuf = 0, nBuf;
+    LONG start = 0, i;
+    BOOL ret = FALSE;
+    *pbEmpty = FALSE;
+
+    pCounts = ExAllocatePoolWithTag(PagedPool, (pPath->numEntriesUsed / 2 + 1) * sizeof(*pCounts), TAG_PATH);
+    if (!pCounts)
+        goto NoMem;
+
+    for (i = 1; i <= pPath->numEntriesUsed; i++)
+    {
+        ULONG n, k;
+
+        /* the polygon start..i-1 ends at the next PT_MOVETO or the end of the path */
+        if (i < pPath->numEntriesUsed && pPath->pFlags[i] != PT_MOVETO)
+            continue;
+        n = i - start;
+
+        if (n >= 3)
+        {
+            /* a polygon is cut in four passes, each at most doubles it */
+            ULONG need = n * 2;
+
+            if (need + 8 > nAllocBuf)
+            {
+                nAllocBuf = need + 8;
+                if (pA) ExFreePoolWithTag(pA, TAG_PATH);
+                if (pB) ExFreePoolWithTag(pB, TAG_PATH);
+                pA = ExAllocatePoolWithTag(PagedPool, nAllocBuf * sizeof(POINT), TAG_PATH);
+                pB = ExAllocatePoolWithTag(PagedPool, nAllocBuf * sizeof(POINT), TAG_PATH);
+                if (!pA || !pB)
+                {
+                    nAllocBuf = 0;
+                    goto NoMem;
+                }
+            }
+            nBuf = n;
+            RtlCopyMemory(pA, &pPath->pPoints[start], n * sizeof(POINT));
+            for (k = 0; k < 4 && nBuf >= 3; k++)
+            {
+                LONG lim = (k == 0) ? prc->left : (k == 1) ? prc->right : (k == 2) ? prc->top : prc->bottom;
+                ULONG m;
+
+                /* each pass can double the points; the buffers hold 2 * n + 8, so the polygon is cut into the second
+                   buffer and, if it grew, the cut stops at what fits (a simple polygon grows by a few points) */
+                if (nBuf * 2 > nAllocBuf)
+                {
+                    ULONG newAlloc = nBuf * 2 + 8;
+                    POINT *pNewA = ExAllocatePoolWithTag(PagedPool, newAlloc * sizeof(POINT), TAG_PATH);
+                    POINT *pNewB = ExAllocatePoolWithTag(PagedPool, newAlloc * sizeof(POINT), TAG_PATH);
+
+                    if (!pNewA || !pNewB)
+                    {
+                        if (pNewA) ExFreePoolWithTag(pNewA, TAG_PATH);
+                        if (pNewB) ExFreePoolWithTag(pNewB, TAG_PATH);
+                        goto NoMem;
+                    }
+                    RtlCopyMemory(pNewA, pA, nBuf * sizeof(POINT));
+                    ExFreePoolWithTag(pA, TAG_PATH);
+                    ExFreePoolWithTag(pB, TAG_PATH);
+                    pA = pNewA;
+                    pB = pNewB;
+                    nAllocBuf = newAlloc;
+                }
+                m = PATH_ClipPolygonPass(pA, nBuf, pB, (INT)k, lim);
+                pTmp = pA; pA = pB; pB = pTmp;
+                nBuf = m;
+            }
+
+            if (nBuf >= 3)
+            {
+                if (nAll + nBuf > nAllocAll)
+                {
+                    ULONG newAlloc = (nAll + nBuf) * 2;
+                    POINT *pNew = ExAllocatePoolWithTag(PagedPool, newAlloc * sizeof(POINT), TAG_PATH);
+
+                    if (!pNew)
+                        goto NoMem;
+                    if (pAll)
+                    {
+                        RtlCopyMemory(pNew, pAll, nAll * sizeof(POINT));
+                        ExFreePoolWithTag(pAll, TAG_PATH);
+                    }
+                    pAll = pNew;
+                    nAllocAll = newAlloc;
+                }
+                RtlCopyMemory(&pAll[nAll], pA, nBuf * sizeof(POINT));
+                nAll += nBuf;
+                pCounts[nPoly++] = nBuf;
+            }
+        }
+        start = i;
+    }
+
+    if (!nPoly)
+    {
+        *pbEmpty = TRUE;
+        ret = TRUE;
+        goto Fail;
+    }
+    ret = REGION_SetPolyPolygonRgn(Rgn, pAll, pCounts, nPoly, Mode);
+    goto Fail;
+
+NoMem:
+    EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+
+Fail:
+    if (pA) ExFreePoolWithTag(pA, TAG_PATH);
+    if (pB) ExFreePoolWithTag(pB, TAG_PATH);
+    if (pAll) ExFreePoolWithTag(pAll, TAG_PATH);
+    if (pCounts) ExFreePoolWithTag(pCounts, TAG_PATH);
+    return ret;
+}
+
 /* PATH_PathToRegion
  *
  * Fills Rgn from the specified path using the specified polygon
@@ -1469,7 +1763,8 @@ PATH_PathToRegion(
     PULONG counts;
     int Ret;
 
-    if (!pPath->numEntriesUsed) return FALSE;
+    /* A lone PT_MOVETO draws nothing (and the allocation below would have no size) */
+    if (pPath->numEntriesUsed < 2) return FALSE;
 
     counts = ExAllocatePoolWithTag(PagedPool, (pPath->numEntriesUsed / 2) * sizeof(*counts), TAG_PATH);
     if (!counts)
@@ -1508,6 +1803,20 @@ PATH_PathToRegion(
     return Ret;
 }
 
+/* Puts back the world transform a path function took off for its drawing (the DC is in GM_ADVANCED). The transform of
+ * the DC went through the matrix -> XFORM conversion, which GreModifyWorldTransform may refuse to take back (a matrix it
+ * calls singular): the matrix is then set directly, like the code before the wide pens did. */
+static
+VOID
+PATH_RestoreWorldTransform(PDC dc, const XFORML *pxform)
+{
+    if (!GreModifyWorldTransform(dc, pxform, MWT_SET))
+    {
+        XForm2MatrixS(&dc->pdcattr->mxWorldToPage, pxform);
+        dc->pdcattr->flXform |= WORLD_XFORM_CHANGED | DEVICE_TO_WORLD_INVALID;
+    }
+}
+
 /* PATH_FillPath
  *
  * You can play with this as long as you like, but if you break Area.exe the purge will Begain on Path!!!
@@ -1535,6 +1844,15 @@ PATH_FillPathEx(
     XFORML xform;
     PREGION  Rgn;
     PDC_ATTR pdcattr = dc->pdcattr;
+    RECTL rcClip;
+    INT iClip;
+    BOOL bEmpty = FALSE, bOk;
+
+    /* Nothing of the path is inside the clip box: there is nothing to paint (the region of a huge outline has a
+       scanline for every row it spans) */
+    iClip = PATH_GetClipState(dc, pPath, &rcClip);
+    if (iClip == PATH_CLIP_OUTSIDE)
+        return TRUE;
 
     /* Allocate a temporary region */
     Rgn = IntSysCreateRectpRgn(0, 0, 0, 0);
@@ -1544,12 +1862,22 @@ PATH_FillPathEx(
         return FALSE;
     }
 
-    if (!PATH_PathToRegion(pPath, pdcattr->jFillMode, Rgn))
+    /* An outline that reaches far past the clip box is cut to the box (and a margin) first */
+    if (iClip == PATH_CLIP_REACHES_FAR)
+        bOk = PATH_PathToRegionClipped(pPath, pdcattr->jFillMode, Rgn, &rcClip, &bEmpty);
+    else
+        bOk = PATH_PathToRegion(pPath, pdcattr->jFillMode, Rgn);
+    if (!bOk)
     {
         TRACE("PFP : Fail P2R\n");
         /* EngSetLastError ? */
         REGION_Delete(Rgn);
         return FALSE;
+    }
+    if (bEmpty)
+    {
+        REGION_Delete(Rgn);
+        return TRUE;
     }
 
     /* Since PaintRgn interprets the region as being in logical coordinates
@@ -1600,7 +1928,7 @@ PATH_FillPathEx(
     /* Go to GM_ADVANCED temporarily to restore the world transform */
     graphicsMode = pdcattr->iGraphicsMode;
     pdcattr->iGraphicsMode = GM_ADVANCED;
-    GreModifyWorldTransform(dc, &xform, MWT_SET);
+    PATH_RestoreWorldTransform(dc, &xform);
     pdcattr->iGraphicsMode = graphicsMode;
     return TRUE;
 }
@@ -1641,9 +1969,10 @@ PATH_StrokePath(
         }
     }
 
-    /* Save the mapping mode info */
+    /* The points of the path are device points: draw them with the identity transform, changing the mapping mode as
+       PATH_FillPathEx does (IntGdiSetMapMode marks the transforms as changed, a plain write of iMapMode does not: the
+       page to device scale of the old mode (a flipped isotropic mapping) would stay in the matrix) */
     mapMode = pdcattr->iMapMode;
-
     szViewportExt = *DC_pszlViewportExt(dc);
     ptViewportOrg = dc->pdcattr->ptlViewportOrg;
     szWindowExt = dc->pdcattr->szlWindowExt;
@@ -1652,7 +1981,7 @@ PATH_StrokePath(
     MatrixS2XForm(&xform, &dc->pdcattr->mxWorldToPage);
 
     /* Set MM_TEXT */
-    pdcattr->iMapMode = MM_TEXT;
+    IntGdiSetMapMode(dc, MM_TEXT);
     pdcattr->ptlViewportOrg.x = 0;
     pdcattr->ptlViewportOrg.y = 0;
     pdcattr->ptlWindowOrg.x = 0;
@@ -1765,19 +2094,17 @@ end:
     if (pLinePts) ExFreePoolWithTag(pLinePts, TAG_PATH);
 
     /* Restore the old mapping mode */
-    pdcattr->iMapMode =  mapMode;
-    pdcattr->szlWindowExt.cx = szWindowExt.cx;
-    pdcattr->szlWindowExt.cy = szWindowExt.cy;
-    pdcattr->ptlWindowOrg.x = ptWindowOrg.x;
-    pdcattr->ptlWindowOrg.y = ptWindowOrg.y;
+    IntGdiSetMapMode(dc, mapMode);
+    pdcattr->szlWindowExt = szWindowExt;
+    pdcattr->ptlWindowOrg = ptWindowOrg;
+    pdcattr->szlViewportExt = szViewportExt;
+    pdcattr->ptlViewportOrg = ptViewportOrg;
 
-    pdcattr->szlViewportExt.cx = szViewportExt.cx;
-    pdcattr->szlViewportExt.cy = szViewportExt.cy;
-    pdcattr->ptlViewportOrg.x = ptViewportOrg.x;
-    pdcattr->ptlViewportOrg.y = ptViewportOrg.y;
-
-    /* Restore the world transform */
-    XForm2MatrixS(&dc->pdcattr->mxWorldToPage, &xform);
+    /* Restore the world transform (in GM_ADVANCED: it marks the transforms as changed) */
+    graphicsMode = pdcattr->iGraphicsMode;
+    pdcattr->iGraphicsMode = GM_ADVANCED;
+    PATH_RestoreWorldTransform(dc, (XFORML*)&xform);
+    pdcattr->iGraphicsMode = graphicsMode;
 
     /* If we've moved the current point then get its new position
        which will be in device (MM_TEXT) co-ords, convert it to
@@ -1806,6 +2133,7 @@ IntGdiWidenPath(PPATH pPath, UINT penWidth, UINT penStyle, FLOAT eMiterLimit)
     BYTE *type;
     DWORD joint, endcap;
     KFLOATING_SAVE fpsave;
+    BOOL bFail = FALSE;
 
     endcap = (PS_ENDCAP_MASK & penStyle);
     joint = (PS_JOIN_MASK & penStyle);
@@ -1865,7 +2193,9 @@ IntGdiWidenPath(PPATH pPath, UINT penWidth, UINT penStyle, FLOAT eMiterLimit)
                 pStrokes[numStrokes - 1] = ExAllocatePoolWithTag(PagedPool, sizeof(PATH), TAG_PATH);
                 if (!pStrokes[numStrokes - 1])
                 {
-                    ASSERT(FALSE); // FIXME
+                    numStrokes--;
+                    bFail = TRUE;
+                    goto Exit;
                 }
                 PATH_InitGdiPath(pStrokes[numStrokes - 1]);
                 pStrokes[numStrokes - 1]->state = PATH_Open;
@@ -1873,6 +2203,19 @@ IntGdiWidenPath(PPATH pPath, UINT penWidth, UINT penStyle, FLOAT eMiterLimit)
             case (PT_LINETO | PT_CLOSEFIGURE):
                 point.x = flat_path->pPoints[i].x;
                 point.y = flat_path->pPoints[i].y;
+                /* A point on the previous one (the corner ellipse of a round rectangle as wide as the box leaves a
+                   zero-length line) has no segment: its join would be taken from a direction that does not exist
+                   and notch the stroke */
+                {
+                    PPATH pCur = pStrokes[numStrokes - 1];
+                    INT nCur = pCur->numEntriesUsed;
+
+                    if (nCur >= 2 && pCur->pPoints[nCur - 1].x == point.x && pCur->pPoints[nCur - 1].y == point.y)
+                    {
+                        pCur->pFlags[nCur - 1] |= (flat_path->pFlags[i] & PT_CLOSEFIGURE);
+                        break;
+                    }
+                }
                 PATH_AddEntry(pStrokes[numStrokes - 1], &point, flat_path->pFlags[i]);
                 break;
             case PT_BEZIERTO:
@@ -1892,21 +2235,44 @@ IntGdiWidenPath(PPATH pPath, UINT penWidth, UINT penStyle, FLOAT eMiterLimit)
         goto Exit;
     }
 
-    KeSaveFloatingPointState(&fpsave);
+    if (!NT_SUCCESS(KeSaveFloatingPointState(&fpsave)))
+    {
+        bFail = TRUE;
+        goto Exit;
+    }
 
     for (i = 0; i < numStrokes; i++)
     {
+        INT nStroke = pStrokes[i]->numEntriesUsed;
+        BOOL bClosedStroke = (pStrokes[i]->pFlags[nStroke - 1] & PT_CLOSEFIGURE) != 0;
+
+        /* A closed figure that ends on its first point (an ellipse, a rectangle or a polygon built that way): the
+           repeated point has no segment of its own. Counted, it makes the join at the start a zero-length one and the
+           stroke of a geometric pen has a seam there. */
+        if (bClosedStroke && nStroke > 2 &&
+            pStrokes[i]->pPoints[nStroke - 1].x == pStrokes[i]->pPoints[0].x &&
+            pStrokes[i]->pPoints[nStroke - 1].y == pStrokes[i]->pPoints[0].y)
+            nStroke--;
+
         pUpPath = ExAllocatePoolWithTag(PagedPool, sizeof(PATH), TAG_PATH);
+        pDownPath = ExAllocatePoolWithTag(PagedPool, sizeof(PATH), TAG_PATH);
+        if (!pUpPath || !pDownPath)
+        {
+            if (pUpPath) ExFreePoolWithTag(pUpPath, TAG_PATH);
+            if (pDownPath) ExFreePoolWithTag(pDownPath, TAG_PATH);
+            KeRestoreFloatingPointState(&fpsave);
+            bFail = TRUE;
+            goto Exit;
+        }
         PATH_InitGdiPath(pUpPath);
         pUpPath->state = PATH_Open;
-        pDownPath = ExAllocatePoolWithTag(PagedPool, sizeof(PATH), TAG_PATH);
         PATH_InitGdiPath(pDownPath);
         pDownPath->state = PATH_Open;
 
-        for (j = 0; j < pStrokes[i]->numEntriesUsed; j++)
+        for (j = 0; j < nStroke; j++)
         {
             /* Beginning or end of the path if not closed */
-            if ((!(pStrokes[i]->pFlags[pStrokes[i]->numEntriesUsed - 1] & PT_CLOSEFIGURE)) && (j == 0 || j == pStrokes[i]->numEntriesUsed - 1))
+            if (!bClosedStroke && (j == 0 || j == nStroke - 1))
             {
                 /* Compute segment angle */
                 INT xo, yo, xa, ya;
@@ -1969,14 +2335,14 @@ IntGdiWidenPath(PPATH pPath, UINT penWidth, UINT penStyle, FLOAT eMiterLimit)
                 DWORD _joint = joint;
                 POINT pt;
                 PPATH pInsidePath, pOutsidePath;
-                if (j > 0 && j < pStrokes[i]->numEntriesUsed - 1)
+                if (j > 0 && j < nStroke - 1)
                 {
                     previous = j - 1;
                     next = j + 1;
                 }
                 else if (j == 0)
                 {
-                    previous = pStrokes[i]->numEntriesUsed - 1;
+                    previous = nStroke - 1;
                     next = j + 1;
                 }
                 else
@@ -2100,13 +2466,27 @@ IntGdiWidenPath(PPATH pPath, UINT penWidth, UINT penStyle, FLOAT eMiterLimit)
             }
         }
         type = add_points( pNewPath, pUpPath->pPoints, pUpPath->numEntriesUsed, PT_LINETO );
-        type[0] = PT_MOVETO;
-        reverse_points( pDownPath->pPoints, pDownPath->numEntriesUsed );
-        type = add_points( pNewPath, pDownPath->pPoints, pDownPath->numEntriesUsed, PT_LINETO );
-        if (pStrokes[i]->pFlags[pStrokes[i]->numEntriesUsed - 1] & PT_CLOSEFIGURE) type[0] = PT_MOVETO;
+        if (type)
+        {
+            type[0] = PT_MOVETO;
+            reverse_points( pDownPath->pPoints, pDownPath->numEntriesUsed );
+            type = add_points( pNewPath, pDownPath->pPoints, pDownPath->numEntriesUsed, PT_LINETO );
+        }
+        if (!type)
+        {
+            PATH_DestroyGdiPath(pUpPath);
+            ExFreePoolWithTag(pUpPath, TAG_PATH);
+            PATH_DestroyGdiPath(pDownPath);
+            ExFreePoolWithTag(pDownPath, TAG_PATH);
+            KeRestoreFloatingPointState(&fpsave);
+            bFail = TRUE;
+            goto Exit;
+        }
+        if (bClosedStroke) type[0] = PT_MOVETO;
 
         PATH_DestroyGdiPath(pStrokes[i]);
         ExFreePoolWithTag(pStrokes[i], TAG_PATH);
+        pStrokes[i] = NULL;
         PATH_DestroyGdiPath(pUpPath);
         ExFreePoolWithTag(pUpPath, TAG_PATH);
         PATH_DestroyGdiPath(pDownPath);
@@ -2119,6 +2499,26 @@ IntGdiWidenPath(PPATH pPath, UINT penWidth, UINT penStyle, FLOAT eMiterLimit)
     KeRestoreFloatingPointState(&fpsave);
 
 Exit:
+    if (bFail)
+    {
+        /* Out of memory: the strokes that are left and the half-made outline are dropped */
+        for (i = 0; pStrokes && i < numStrokes; i++)
+        {
+            if (pStrokes[i])
+            {
+                PATH_DestroyGdiPath(pStrokes[i]);
+                ExFreePoolWithTag(pStrokes[i], TAG_PATH);
+            }
+        }
+        if (pNewPath)
+        {
+            HPATH hNew = pNewPath->BaseObject.hHmgr;
+            PATH_UnlockPath(pNewPath);
+            PATH_Delete(hNew);
+            pNewPath = NULL;
+        }
+        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+    }
     if (pStrokes) ExFreePoolWithTag(pStrokes, TAG_PATH);
     HPATH hpathToDelete = flat_path->BaseObject.hHmgr;
     PATH_UnlockPath(flat_path);
@@ -2275,7 +2675,8 @@ PATH_IsWidePen(DC *dc, PBRUSH pbrLine)
     if (dc->pdcattr->iMapMode == MM_TEXT && dc->pdcattr->iGraphicsMode == GM_COMPATIBLE)
         return FALSE;
 
-    KeSaveFloatingPointState(&fpsave);
+    if (!NT_SUCCESS(KeSaveFloatingPointState(&fpsave)))
+        return FALSE;
     iKind = PATH_GetPenTransform(dc, 1, T, &devWidth);
     if (iKind == PEN_XFORM_SCALE)
         bWide = (devWidth > 1);
@@ -2300,7 +2701,8 @@ PATH_IsWorldFlipped(DC *dc)
     if (dc->pdcattr->iGraphicsMode != GM_ADVANCED)
         return FALSE;
 
-    KeSaveFloatingPointState(&fpsave);
+    if (!NT_SUCCESS(KeSaveFloatingPointState(&fpsave)))
+        return FALSE;
     det = PATH_FloatObjValue(&pmxWorld->efM11) * PATH_FloatObjValue(&pmxWorld->efM22) -
           PATH_FloatObjValue(&pmxWorld->efM12) * PATH_FloatObjValue(&pmxWorld->efM21);
     KeRestoreFloatingPointState(&fpsave);
@@ -2344,7 +2746,8 @@ PATH_GetPenDeviceWidths(
     if (dc->pdcattr->iMapMode == MM_TEXT && dc->pdcattr->iGraphicsMode == GM_COMPATIBLE)
         return;
 
-    KeSaveFloatingPointState(&fpsave);
+    if (!NT_SUCCESS(KeSaveFloatingPointState(&fpsave)))
+        return;
     iKind = PATH_GetPenTransform(dc, lWidth, T, &devWidth);
     if (iKind == PEN_XFORM_SCALE)
     {
@@ -2364,6 +2767,562 @@ PATH_GetPenDeviceWidths(
     KeRestoreFloatingPointState(&fpsave);
 }
 
+/* ---- Ellipse, RoundRect, Arc, Pie and Chord with a wide pen, and under a rotation ----
+ *
+ * A wide pen is centred on the outline of the shape (Windows 10: width 7 around Ellipse(48, 48, 208, 208) covers the
+ * pixels 45 to 210), so the shape is built as a path and stroked like Rectangle and Polygon are; the rasterisers of the
+ * rings stay for cosmetic pens. Under a rotation of the world transform the shape is rotated too (the Bezier points of
+ * the path are transformed one by one instead of the corners of the box).
+ */
+
+typedef struct _PATH_LPMAP
+{
+    double m11, m12, m21, m22, dx, dy;
+} PATH_LPMAP;
+
+/* The logical to device transform in double precision. The caller saves the floating point state. */
+static
+VOID
+PATH_GetLPMap(DC *dc, PATH_LPMAP *pmap)
+{
+    PMATRIX pmx = DC_pmxWorldToDevice(dc);
+
+    pmap->m11 = PATH_FloatObjValue(&pmx->efM11);
+    pmap->m12 = PATH_FloatObjValue(&pmx->efM12);
+    pmap->m21 = PATH_FloatObjValue(&pmx->efM21);
+    pmap->m22 = PATH_FloatObjValue(&pmx->efM22);
+    pmap->dx = PATH_FloatObjValue(&pmx->efDx);
+    pmap->dy = PATH_FloatObjValue(&pmx->efDy);
+}
+
+/* A logical point to the nearest device point; FALSE when it does not fit 27 bits (or is not a number) */
+static
+BOOL
+PATH_MapLP(const PATH_LPMAP *pmap, double x, double y, POINT *ppt)
+{
+    double dx = pmap->m11 * x + pmap->m21 * y + pmap->dx;
+    double dy = pmap->m12 * x + pmap->m22 * y + pmap->dy;
+
+    if (!(fabs(dx) < 134217728.0) || !(fabs(dy) < 134217728.0))
+        return FALSE;
+    ppt->x = (LONG)floor(dx + 0.5);
+    ppt->y = (LONG)floor(dy + 0.5);
+    return TRUE;
+}
+
+/* TRUE when the logical to device transform turns the axes (a rotation or a shear of the world transform) */
+BOOL
+FASTCALL
+PATH_IsWorldRotated(DC *dc)
+{
+    /* The flags of the matrix (IntRectangle reads them the same way): no floating point. The matrix is recalculated on
+       demand, bring it up to date before reading the flag (it can still describe the previous transform). */
+    DC_vUpdateWorldToDevice(dc);
+    return !(dc->pdcattr->mxWorldToDevice.flAccel & XFORM_SCALE);
+}
+
+/* Adds the 4 Bezier points of one segment as entries, the first of them with the entry type startType (0: the current
+   point is the first point and is not added again). */
+static
+BOOL
+PATH_AddBezierSegment(PPATH pPath, const POINT *pts, BYTE startType)
+{
+    INT start = startType ? 0 : 1;
+    BYTE *type;
+
+    type = add_points(pPath, pts + start, 4 - start, PT_BEZIERTO);
+    if (!type)
+        return FALSE;
+    if (startType)
+        type[0] = startType;
+    return TRUE;
+}
+
+/* The 13 device points of the Bezier outline of the ellipse. All floating point work is between the save and the
+   restore of the state. *pbEmpty is set for a box without area (GM_COMPATIBLE excludes the bottom and right edges). */
+static
+BOOL
+PATH_EllipseRotPoints(DC *dc, INT x1, INT y1, INT x2, INT y2, POINT *pts, PBOOL pbEmpty)
+{
+    KFLOATING_SAVE fpsave;
+    PATH_LPMAP map;
+    double lp[13][2];
+    double l, t, r, b, cx, cy, rx, ry, k = 0.5522847498307935;
+    BOOL bOk = TRUE;
+    INT i;
+
+    *pbEmpty = FALSE;
+    if (!NT_SUCCESS(KeSaveFloatingPointState(&fpsave)))
+        return FALSE;
+
+    l = min(x1, x2); r = max(x1, x2);
+    t = min(y1, y2); b = max(y1, y2);
+    if (dc->pdcattr->iGraphicsMode == GM_COMPATIBLE)
+    {
+        if (l == r || t == b)
+        {
+            *pbEmpty = TRUE;
+            KeRestoreFloatingPointState(&fpsave);
+            return TRUE;
+        }
+        r -= 1.0;
+        b -= 1.0;
+    }
+    cx = (l + r) / 2.0; cy = (t + b) / 2.0;
+    rx = (r - l) / 2.0; ry = (b - t) / 2.0;
+
+    lp[0][0] = cx + rx;     lp[0][1] = cy;
+    lp[1][0] = cx + rx;     lp[1][1] = cy - k * ry;
+    lp[2][0] = cx + k * rx; lp[2][1] = cy - ry;
+    lp[3][0] = cx;          lp[3][1] = cy - ry;
+    lp[4][0] = cx - k * rx; lp[4][1] = cy - ry;
+    lp[5][0] = cx - rx;     lp[5][1] = cy - k * ry;
+    lp[6][0] = cx - rx;     lp[6][1] = cy;
+    lp[7][0] = cx - rx;     lp[7][1] = cy + k * ry;
+    lp[8][0] = cx - k * rx; lp[8][1] = cy + ry;
+    lp[9][0] = cx;          lp[9][1] = cy + ry;
+    lp[10][0] = cx + k * rx; lp[10][1] = cy + ry;
+    lp[11][0] = cx + rx;    lp[11][1] = cy + k * ry;
+    lp[12][0] = cx + rx;    lp[12][1] = cy;
+
+    PATH_GetLPMap(dc, &map);
+    for (i = 0; i < 13 && bOk; i++)
+        bOk = PATH_MapLP(&map, lp[i][0], lp[i][1], &pts[i]);
+    KeRestoreFloatingPointState(&fpsave);
+    return bOk;
+}
+
+static
+BOOL
+PATH_EllipseRot(DC *dc, INT x1, INT y1, INT x2, INT y2)
+{
+    PPATH pPath;
+    POINT pts[13];
+    BYTE *type;
+    BOOL bEmpty;
+
+    if (!PATH_EllipseRotPoints(dc, x1, y1, x2, y2, pts, &bEmpty))
+        return FALSE;
+    if (bEmpty)
+        return TRUE;
+
+    pPath = PATH_LockPath(dc->dclevel.hPath);
+    if (!pPath)
+        return FALSE;
+
+    if (dc->dclevel.flPath & DCPATH_CLOCKWISE) reverse_points(pts, 13);
+    if (!(type = add_points(pPath, pts, 13, PT_BEZIERTO)))
+    {
+        PATH_UnlockPath(pPath);
+        return FALSE;
+    }
+    type[0] = PT_MOVETO;
+
+    IntGdiCloseFigure(pPath);
+    PATH_UnlockPath(pPath);
+    return TRUE;
+}
+
+/* The 16 device points of the Bezier outline of the round rectangle (as PATH_EllipseRotPoints) */
+static
+BOOL
+PATH_RoundRectRotPoints(DC *dc, INT x1, INT y1, INT x2, INT y2, INT ell_width, INT ell_height, POINT *pts, PBOOL pbEmpty)
+{
+    KFLOATING_SAVE fpsave;
+    PATH_LPMAP map;
+    double lp[16][2];
+    double l, t, r, b, ew, eh, xo, yo;
+    BOOL bOk = TRUE;
+    INT i;
+
+    *pbEmpty = FALSE;
+    if (!NT_SUCCESS(KeSaveFloatingPointState(&fpsave)))
+        return FALSE;
+
+    l = min(x1, x2); r = max(x1, x2);
+    t = min(y1, y2); b = max(y1, y2);
+    if (dc->pdcattr->iGraphicsMode == GM_COMPATIBLE)
+    {
+        if (l == r || t == b)
+        {
+            *pbEmpty = TRUE;
+            KeRestoreFloatingPointState(&fpsave);
+            return TRUE;
+        }
+        r -= 1.0;
+        b -= 1.0;
+    }
+    ew = fabs((double)ell_width);
+    eh = fabs((double)ell_height);
+    if (ew > r - l) ew = r - l;
+    if (eh > b - t) eh = b - t;
+    xo = ew * 0.22385762508460333;   /* w * (1 - 0.5522847) / 2 */
+    yo = eh * 0.22385762508460333;
+    ew /= 2.0;
+    eh /= 2.0;
+
+#define RRPT(n, px, py) do { lp[n][0] = (px); lp[n][1] = (py); } while (0)
+    RRPT(0, r, t + eh);
+    RRPT(1, r, t + yo);
+    RRPT(2, r - xo, t);
+    RRPT(3, r - ew, t);
+    RRPT(4, l + ew, t);
+    RRPT(5, l + xo, t);
+    RRPT(6, l, t + yo);
+    RRPT(7, l, t + eh);
+    RRPT(8, l, b - eh);
+    RRPT(9, l, b - yo);
+    RRPT(10, l + xo, b);
+    RRPT(11, l + ew, b);
+    RRPT(12, r - ew, b);
+    RRPT(13, r - xo, b);
+    RRPT(14, r, b - yo);
+    RRPT(15, r, b - eh);
+#undef RRPT
+
+    PATH_GetLPMap(dc, &map);
+    for (i = 0; i < 16 && bOk; i++)
+        bOk = PATH_MapLP(&map, lp[i][0], lp[i][1], &pts[i]);
+    KeRestoreFloatingPointState(&fpsave);
+    return bOk;
+}
+
+static
+BOOL
+PATH_RoundRectRot(DC *dc, INT x1, INT y1, INT x2, INT y2, INT ell_width, INT ell_height)
+{
+    PPATH pPath;
+    POINT pts[16];
+    BYTE *type;
+    BOOL bEmpty;
+
+    if (!PATH_RoundRectRotPoints(dc, x1, y1, x2, y2, ell_width, ell_height, pts, &bEmpty))
+        return FALSE;
+    if (bEmpty)
+        return TRUE;
+
+    pPath = PATH_LockPath(dc->dclevel.hPath);
+    if (!pPath)
+        return FALSE;
+
+    if (dc->dclevel.flPath & DCPATH_CLOCKWISE) reverse_points(pts, 16);
+    if (!(type = add_points(pPath, pts, 16, PT_BEZIERTO)))
+    {
+        PATH_UnlockPath(pPath);
+        return FALSE;
+    }
+    type[0] = PT_MOVETO;
+    type[4] = type[8] = type[12] = PT_LINETO;
+
+    IntGdiCloseFigure(pPath);
+    PATH_UnlockPath(pPath);
+    return TRUE;
+}
+
+/* Arc, Chord, Pie and ArcTo under a rotation: the arc is computed on the ellipse in logical space (the angle of a radial
+ * point is the one of its normalized position) and its Bezier points are transformed one by one. As on the screen
+ * without a rotation, the arc runs counterclockwise unless the world transform flips an axis (then it is the mirror
+ * image); a mapping mode that flips an axis does not reverse it. */
+static
+BOOL
+PATH_ArcRot(
+    DC *dc,
+    INT x1, INT y1, INT x2, INT y2,
+    INT xStart, INT yStart, INT xEnd, INT yEnd,
+    INT direction,
+    INT lines)
+{
+    KFLOATING_SAVE fpsave;
+    PATH_LPMAP map;
+    PPATH pPath;
+    double l, t, r, b, cx, cy, rx, ry, angleStart, angleEnd, angleStartQuadrant, angleEndQuadrant = 0.0;
+    double det;
+    BOOL bInc, bStart, bEnd, bRet = TRUE, bFlagClockwise, bCcwDev;
+    POINT pointCurPos, centre;
+    INT numEntriesOld, nParts = 0;
+    BOOL bNewStrokeOld;
+
+    /* Everything that touches floating point happens between the save and the restore of its state */
+    if (!NT_SUCCESS(KeSaveFloatingPointState(&fpsave)))
+        return FALSE;
+
+    l = min(x1, x2); r = max(x1, x2);
+    t = min(y1, y2); b = max(y1, y2);
+
+    pPath = PATH_LockPath(dc->dclevel.hPath);
+    if (!pPath)
+    {
+        KeRestoreFloatingPointState(&fpsave);
+        return FALSE;
+    }
+    /* What the path holds now: a failure leaves it as it was (not with a lone PT_MOVETO) */
+    numEntriesOld = pPath->numEntriesUsed;
+    bNewStrokeOld = pPath->newStroke;
+
+    if (direction)
+        bFlagClockwise = (direction == AD_CLOCKWISE);
+    else
+        bFlagClockwise = ((dc->dclevel.flPath & DCPATH_CLOCKWISE) != 0);
+
+    PATH_GetLPMap(dc, &map);
+
+    cx = (l + r) / 2.0; cy = (t + b) / 2.0;
+    rx = (r - l) / 2.0; ry = (b - t) / 2.0;
+    angleStart = atan2(((double)yStart - cy) / ry, ((double)xStart - cx) / rx);
+    angleEnd = atan2(((double)yEnd - cy) / ry, ((double)xEnd - cx) / rx);
+
+    /* The direction on the screen: counterclockwise, reversed by a world transform that flips an axis. Increasing angle
+       runs clockwise on the screen when the logical to device transform keeps the orientation. */
+    det = map.m11 * map.m22 - map.m12 * map.m21;
+    bCcwDev = (!bFlagClockwise) != (PATH_IsWorldFlipped(dc) != FALSE);
+    bInc = !(bCcwDev == (det > 0));
+
+    /* Make sure the end angle is "on the right side" of the start angle */
+    if (bInc)
+    {
+        if (angleEnd <= angleStart)
+            angleEnd += 2 * M_PI;
+    }
+    else
+    {
+        if (angleEnd >= angleStart)
+            angleEnd -= 2 * M_PI;
+    }
+
+    /* In GM_COMPATIBLE, don't include bottom and right edges */
+    if (dc->pdcattr->iGraphicsMode == GM_COMPATIBLE)
+    {
+        r -= 1.0;
+        b -= 1.0;
+        cx = (l + r) / 2.0; cy = (t + b) / 2.0;
+        rx = (r - l) / 2.0; ry = (b - t) / 2.0;
+    }
+
+    /* arcto: Add a PT_MOVETO only if this is the first entry in a stroke */
+    if (lines == GdiTypeArcTo && pPath->newStroke)
+    {
+        pPath->newStroke = FALSE;
+        IntGetCurrentPositionEx(dc, &pointCurPos);
+        CoordLPtoDP(dc, &pointCurPos);
+        if (!PATH_AddEntry(pPath, &pointCurPos, PT_MOVETO))
+        {
+            bRet = FALSE;
+            goto Exit;
+        }
+    }
+
+    bStart = TRUE;
+    bEnd = FALSE;
+    do
+    {
+        double halfAngle, a, xn[4], yn[4];
+        POINT pts[4];
+        INT i;
+
+        if (bStart)
+        {
+            angleStartQuadrant = angleStart;
+            if (bInc)
+                angleEndQuadrant = (floor(angleStart / M_PI_2) + 1.0) * M_PI_2;
+            else
+                angleEndQuadrant = (ceil(angleStart / M_PI_2) - 1.0) * M_PI_2;
+        }
+        else
+        {
+            angleStartQuadrant = angleEndQuadrant;
+            if (bInc)
+                angleEndQuadrant += M_PI_2;
+            else
+                angleEndQuadrant -= M_PI_2;
+        }
+
+        /* Have we reached the last part of the arc? */
+        if ((bInc && angleEnd < angleEndQuadrant) || (!bInc && angleEnd > angleEndQuadrant))
+        {
+            angleEndQuadrant = angleEnd;
+            bEnd = TRUE;
+        }
+
+        /* Control points of the Bezier spline of this part, on the unit circle */
+        halfAngle = (angleEndQuadrant - angleStartQuadrant) / 2.0;
+        if (fabs(halfAngle) > 1e-8)
+        {
+            a = 4.0 / 3.0 * (1 - cos(halfAngle)) / sin(halfAngle);
+            xn[0] = cos(angleStartQuadrant);
+            yn[0] = sin(angleStartQuadrant);
+            xn[1] = xn[0] - a * yn[0];
+            yn[1] = yn[0] + a * xn[0];
+            xn[3] = cos(angleEndQuadrant);
+            yn[3] = sin(angleEndQuadrant);
+            xn[2] = xn[3] + a * yn[3];
+            yn[2] = yn[3] - a * xn[3];
+        }
+        else
+        {
+            for (i = 0; i < 4; i++)
+            {
+                xn[i] = cos(angleStartQuadrant);
+                yn[i] = sin(angleStartQuadrant);
+            }
+        }
+
+        for (i = 0; i < 4; i++)
+        {
+            if (!PATH_MapLP(&map, cx + rx * xn[i], cy + ry * yn[i], &pts[i]))
+            {
+                bRet = FALSE;
+                goto Exit;
+            }
+        }
+        if (!PATH_AddBezierSegment(pPath, pts, bStart ? (lines == GdiTypeArcTo ? PT_LINETO : PT_MOVETO) : 0))
+        {
+            bRet = FALSE;
+            goto Exit;
+        }
+        bStart = FALSE;
+
+        /* The angles span less than 2 * pi: at most five parts (they are finite, but the loop must end regardless) */
+        if (++nParts > 6)
+        {
+            bRet = FALSE;
+            goto Exit;
+        }
+    }
+    while (!bEnd);
+
+    if (lines == GdiTypeArcTo)
+    {
+        update_current_pos(pPath);
+    }
+    else if (lines == GdiTypeChord)
+    {
+        IntGdiCloseFigure(pPath);
+    }
+    else if (lines == GdiTypePie)
+    {
+        if (!PATH_MapLP(&map, cx, cy, &centre) ||
+            !PATH_AddEntry(pPath, &centre, PT_LINETO | PT_CLOSEFIGURE))
+            bRet = FALSE;
+    }
+
+Exit:
+    if (!bRet)
+    {
+        pPath->numEntriesUsed = numEntriesOld;
+        pPath->newStroke = bNewStrokeOld;
+    }
+    KeRestoreFloatingPointState(&fpsave);
+    PATH_UnlockPath(pPath);
+    return bRet;
+}
+
+/* TRUE when Ellipse, RoundRect, Arc, Pie and Chord draw their outline as a stroked path: a wide pen (not the inside
+   frame one, which lies inside the box like the rings do) */
+BOOL
+FASTCALL
+PATH_IsShapeStroked(DC *dc, PBRUSH pbrLine)
+{
+    if (!pbrLine || pbrLine != dc->dclevel.pbrLine)
+        return FALSE;
+    if ((pbrLine->flAttrs & BR_IS_NULL) || (pbrLine->ulPenStyle & PS_STYLE_MASK) == PS_NULL)
+        return FALSE;
+    if ((pbrLine->ulPenStyle & PS_STYLE_MASK) == PS_INSIDEFRAME)
+        return FALSE;
+    return PATH_IsWidePen(dc, pbrLine);
+}
+
+/* Draws a shape as a path: fills it (only under a rotation: the box fill of the caller is right without one) and
+   strokes it with the pen of the DC (nothing for a null pen). The coordinates are the logical ones of the call. For PATH_SHAPE_ROUNDRECT p1
+   and p2 are the width and height of the corner ellipse; for PATH_SHAPE_ARC p1,p2 is the start and p3,p4 the end point.
+   bRot is PATH_IsWorldRotated of the caller. The DC does not hold an open path. */
+BOOL
+FASTCALL
+PATH_DrawShape(
+    PDC dc,
+    INT iShape,
+    INT x1, INT y1, INT x2, INT y2,
+    INT p1, INT p2, INT p3, INT p4,
+    ARCTYPE arctype,
+    BOOL bRot)
+{
+    PPATH pPath;
+    HPATH hOldPath = dc->dclevel.hPath;
+    FLONG flOldPath = dc->dclevel.flPath;
+    PBRUSH pbrFill = dc->dclevel.pbrFill;
+    BOOL bPathOk, ret = FALSE;
+    INT direction = 0;
+
+    pPath = PATH_CreatePath(32);
+    if (!pPath)
+        return FALSE;
+    dc->dclevel.hPath = pPath->BaseObject.hHmgr;
+    dc->dclevel.flPath &= ~DCPATH_ACTIVE;
+
+    switch (iShape)
+    {
+        case PATH_SHAPE_ELLIPSE:
+            bPathOk = PATH_Ellipse(dc, x1, y1, x2, y2);
+            break;
+        case PATH_SHAPE_ROUNDRECT:
+            bPathOk = PATH_RoundRect(dc, x1, y1, x2, y2, p1, p2);
+            break;
+        default:
+            /* The arc keeps its direction in logical space, so a world transform that flips an axis makes it run the
+               other way on the screen; the rotated one does that itself */
+            if (!bRot && PATH_IsWorldFlipped(dc))
+            {
+                BOOL bClockwise = (dc->dclevel.flPath & DCPATH_CLOCKWISE) != 0;
+                direction = bClockwise ? AD_COUNTERCLOCKWISE : AD_CLOCKWISE;
+            }
+            bPathOk = PATH_Arc(dc, x1, y1, x2, y2, p1, p2, p3, p4, direction,
+                               (arctype == GdiTypeArcTo) ? GdiTypeArc : arctype);
+            break;
+    }
+
+    pPath->state = PATH_Closed;
+
+    if (!bPathOk)
+    {
+        ret = FALSE;
+    }
+    else if (pPath->numEntriesUsed == 0)
+    {
+        ret = TRUE;
+    }
+    else
+    {
+        PBRUSH pbrLine = dc->dclevel.pbrLine;
+
+        ret = TRUE;
+        /* The fill of a rotated shape is the path (the box fill of the callers is axis-aligned) */
+        if (bRot && pbrFill && !(pbrFill->flAttrs & BR_IS_NULL) &&
+            (iShape != PATH_SHAPE_ARC || arctype == GdiTypeChord || arctype == GdiTypePie))
+        {
+            /* The region is made of lines */
+            PPATH pFlat = PATH_FlattenPath(pPath);
+
+            if (pFlat)
+            {
+                HPATH hFlat = pFlat->BaseObject.hHmgr;
+
+                ret = PATH_FillPathEx(dc, pFlat, pbrFill);
+                PATH_UnlockPath(pFlat);
+                PATH_Delete(hFlat);
+            }
+            else
+                ret = FALSE;
+        }
+        if (ret && pbrLine && !(pbrLine->flAttrs & BR_IS_NULL) && (pbrLine->ulPenStyle & PS_STYLE_MASK) != PS_NULL)
+            ret = PATH_StrokePath(dc, pPath);
+    }
+
+    PATH_UnlockPath(pPath);
+    PATH_Delete(dc->dclevel.hPath);
+    dc->dclevel.hPath = hOldPath;
+    dc->dclevel.flPath = flOldPath;
+    return ret;
+}
+
 /* Widens pPath (device points) with a pen of penWidth logical units under the DC transform */
 static
 PPATH
@@ -2378,7 +3337,11 @@ PATH_WidenPathScaled(DC *dc, PPATH pPath, UINT penWidth, UINT penStyle)
     const INT K = 16;
     BOOL bOk;
 
-    KeSaveFloatingPointState(&fpsave);
+    if (!NT_SUCCESS(KeSaveFloatingPointState(&fpsave)))
+    {
+        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return NULL;
+    }
     iKind = PATH_GetPenTransform(dc, penWidth, T, &devWidth);
     KeRestoreFloatingPointState(&fpsave);
 
@@ -2398,8 +3361,15 @@ PATH_WidenPathScaled(DC *dc, PPATH pPath, UINT penWidth, UINT penStyle)
     if (!pTmp)
         return IntGdiWidenPath(pPath, penWidth, penStyle, dc->dclevel.laPath.eMiterLimit);
 
-    bOk = TRUE;
-    KeSaveFloatingPointState(&fpsave);
+    bOk = NT_SUCCESS(KeSaveFloatingPointState(&fpsave));
+    if (!bOk)
+    {
+        HPATH hTmp = pTmp->BaseObject.hHmgr;
+        PATH_UnlockPath(pTmp);
+        PATH_Delete(hTmp);
+        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return NULL;
+    }
     for (i = 0; i < pPath->numEntriesUsed && bOk; i++)
     {
         double qx, qy;
@@ -2436,13 +3406,26 @@ PATH_WidenPathScaled(DC *dc, PPATH pPath, UINT penWidth, UINT penStyle)
     if (!pNew)
         return NULL;
 
-    KeSaveFloatingPointState(&fpsave);
+    if (!NT_SUCCESS(KeSaveFloatingPointState(&fpsave)))
+    {
+        HPATH hNew = pNew->BaseObject.hHmgr;
+        PATH_Delete(hNew);
+        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return NULL;
+    }
     for (i = 0; i < pNew->numEntriesUsed; i++)
     {
         double qx = pNew->pPoints[i].x, qy = pNew->pPoints[i].y;
+        double dx = (T[0] * qx + T[2] * qy) / K, dy = (T[1] * qx + T[3] * qy) / K;
 
-        pNew->pPoints[i].x = (LONG)floor((T[0] * qx + T[2] * qy) / K + 0.5);
-        pNew->pPoints[i].y = (LONG)floor((T[1] * qx + T[3] * qy) / K + 0.5);
+        /* The outline can lie anywhere (a huge pen, a nearly singular transform): the device space is 28 bits, and a
+           double that does not fit a LONG must not be converted (NaN fails the comparisons and becomes 0) */
+        if (!(dx > -134217728.0)) dx = (dx != dx) ? 0.0 : -134217728.0;
+        if (!(dx < 134217728.0)) dx = 134217728.0;
+        if (!(dy > -134217728.0)) dy = (dy != dy) ? 0.0 : -134217728.0;
+        if (!(dy < 134217728.0)) dy = 134217728.0;
+        pNew->pPoints[i].x = (LONG)floor(dx + 0.5);
+        pNew->pPoints[i].y = (LONG)floor(dy + 0.5);
     }
     KeRestoreFloatingPointState(&fpsave);
 
