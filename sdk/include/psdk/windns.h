@@ -278,8 +278,14 @@ typedef struct {
 } DNS_MINFO_DATAA, *PDNS_MINFO_DATAA;
 
 typedef struct {
+#if defined(__midl) || defined(__WIDL__)
+  /* names are strings, not pointers to one character, when marshalled (dnsrslvr RPC) */
+  [string] LPWSTR pNameMailbox;
+  [string] LPWSTR pNameErrorsMailbox;
+#else
   LPWSTR pNameMailbox;
   LPWSTR pNameErrorsMailbox;
+#endif
 } DNS_MINFO_DATAW, *PDNS_MINFO_DATAW;
 
 typedef struct {
@@ -289,7 +295,11 @@ typedef struct {
 } DNS_MX_DATAA, *PDNS_MX_DATAA;
 
 typedef struct {
+#if defined(__midl) || defined(__WIDL__)
+  [string] LPWSTR pNameExchange;
+#else
   LPWSTR pNameExchange;
+#endif
   WORD wPreference;
   WORD Pad;
 } DNS_MX_DATAW, *PDNS_MX_DATAW;
@@ -361,8 +371,13 @@ typedef struct {
 } DNS_SOA_DATAA, *PDNS_SOA_DATAA;
 
 typedef struct {
+#if defined(__midl) || defined(__WIDL__)
+  [string] LPWSTR pNamePrimaryServer;
+  [string] LPWSTR pNameAdministrator;
+#else
   LPWSTR pNamePrimaryServer;
   LPWSTR pNameAdministrator;
+#endif
   DWORD dwSerialNo;
   DWORD dwRefresh;
   DWORD dwRetry;
@@ -379,7 +394,11 @@ typedef struct {
 } DNS_SRV_DATAA, *PDNS_SRV_DATAA;
 
 typedef struct {
+#if defined(__midl) || defined(__WIDL__)
+  [string] LPWSTR pNameTarget;
+#else
   LPWSTR pNameTarget;
+#endif
   WORD wPriority;
   WORD wWeight;
   WORD wPort;
@@ -395,6 +414,20 @@ typedef struct {
   DWORD dwStringCount;
   LPWSTR pStringArray[1];
 } DNS_TXT_DATAW, *PDNS_TXT_DATAW;
+
+#if defined(__midl) || defined(__WIDL__)
+/*
+ * How the strings of a text record travel in the dnsrslvr RPC (the MIDL view only): in the record the pointers
+ * are an array inside the record (sized by the string count), which a union arm cannot describe, so on the wire
+ * the first slot of that array holds a pointer to a separate array of strings (see DnsIntTextToWire and
+ * DnsIntTextFromWire of dnsapi). dnsrslvr and dnsapi convert; no other code sees this layout.
+ */
+typedef [string] wchar_t *DNS_TXT_STRINGW;
+typedef struct {
+  DWORD dwStringCount;
+  [size_is(dwStringCount)] DNS_TXT_STRINGW *pStringArray;
+} DNS_TXT_WIRE_DATAW;
+#endif
 
 typedef struct {
   LPSTR pNameAlgorithm;
@@ -542,6 +575,7 @@ typedef [switch_type(unsigned short )] union DNS_DATAW {
   [case(9)] DNS_PTR_DATAW MR;
   [case(14)] DNS_MINFO_DATAW MINFO;
   [case(17)] DNS_MINFO_DATAW RP;
+  [case(16)] DNS_TXT_WIRE_DATAW TXT;
   [case(15)] DNS_MX_DATAW MX;
   [case(18)] DNS_MX_DATAW AFSDB;
   [case(21)] DNS_MX_DATAW RT;
