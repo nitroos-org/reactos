@@ -386,7 +386,12 @@ app_line_x(LONG x0, LONGLONG dy, LONGLONG run, LONGLONG rise)
     }
     else
     {
+        /* the quotient can come near 2^63: limit it before x0 is added, as above */
         q = dy * run / rise;
+        if (q > 0x100000000LL)
+            q = 0x100000000LL;
+        else if (q < -0x100000000LL)
+            q = -0x100000000LL;
     }
 
     q += x0;
@@ -1294,7 +1299,9 @@ app_draw_arc_small(DC *g, Rect r, int start_angle, int end_angle, PBRUSH pbrushP
  *  double precision, so the work is proportional to the visible rows (the clip bounds), whatever the box.
  */
 #define APP_RING_MAX_DIM    8192
-#define APP_RING_MAX_CUBE   0x19000000LL    /* a*a*b < 4.2e8: no intermediate value of the stepping reaches 2^31 */
+#define APP_RING_MAX_CUBE   0x28000000LL    /* a*a*b <= 6.7e8: no intermediate value of the stepping reaches 2^31 (the first
+                                               overflow is above 7.1e8), so every box the stepping computed right before
+                                               (a 1920 x 1080 ellipse: 5.0e8) keeps its pixels */
 #define APP_RING_MAX_COORD  0x40000000LL
 
 static
