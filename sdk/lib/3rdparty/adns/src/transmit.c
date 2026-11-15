@@ -210,7 +210,8 @@ void adns__querysend_tcp(adns_query qu, struct timeval now) {
   }
 
   if (wr<2) {
-    r= adns__vbuf_append(&ads->tcpsend,length,2-wr); assert(r);
+    /* Partial send of the length prefix: queue only the unsent part */
+    r= adns__vbuf_append(&ads->tcpsend,length+wr,2-wr); assert(r);
     wr= 0;
   } else {
     wr-= 2;
