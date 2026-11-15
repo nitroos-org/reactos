@@ -225,11 +225,55 @@ NTSTATUS UDPSendDatagram(
 
     switch( RemoteAddressTa->Address[0].AddressType ) {
     case TDI_ADDRESS_TYPE_IP:
+		/* An IPv6 socket sends to IPv4 only through ::ffff:a.b.c.d */
+		if (AddrFile->Family == TDI_ADDRESS_TYPE_IP6)
+		{
+			UnlockObject(AddrFile);
+			return STATUS_INVALID_ADDRESS;
+		}
 		RemoteAddress.Type = IP_ADDRESS_V4;
 		RemoteAddress.Address.IPv4Address =
 			RemoteAddressTa->Address[0].Address[0].in_addr;
 		RemotePort = RemoteAddressTa->Address[0].Address[0].sin_port;
 		break;
+
+    case TDI_ADDRESS_TYPE_IP6:
+    {
+		/* An IPv6 socket's datagram (the whole TA_IP6_ADDRESS within what the client gave): an IPv6
+		   destination goes to lwIP's IPv6 (udp6.c); ::ffff:a.b.c.d of a dual stack socket that is not bound
+		   to an IPv6 address is an IPv4 datagram (VERIFY ON ORACLE: the error of a V6ONLY socket) */
+		PTA_IP6_ADDRESS Remote6 = (PTA_IP6_ADDRESS)RemoteAddressTa;
+		UCHAR Bytes[16];
+		ULONG i;
+
+		if (AddrFile->Family != TDI_ADDRESS_TYPE_IP6 ||
+		    ConnInfo->RemoteAddressLength < sizeof(TA_IP6_ADDRESS) ||
+		    Remote6->Address[0].AddressLength < TDI_ADDRESS_LENGTH_IP6)
+		{
+			UnlockObject(AddrFile);
+			return (AddrFile->Family == TDI_ADDRESS_TYPE_IP6) ? STATUS_INVALID_ADDRESS : STATUS_UNSUCCESSFUL;
+		}
+
+		RtlCopyMemory(Bytes, Remote6->Address[0].Address[0].sin6_addr, sizeof(Bytes));
+		for (i = 0; i < 10 && Bytes[i] == 0; i++)
+			;
+		if (i < 10 || Bytes[10] != 0xFF || Bytes[11] != 0xFF)
+		{
+			UnlockObject(AddrFile);
+			return UDPSendDatagram6(AddrFile, Remote6, BufferData, DataSize, DataUsed);
+		}
+
+		if (!AddrFile->DualStack ||
+		    (AddrFile->Address.Type == IP_ADDRESS_V6 && !AddrIsUnspecified(&AddrFile->Address)))
+		{
+			UnlockObject(AddrFile);
+			return STATUS_INVALID_ADDRESS;
+		}
+		RemoteAddress.Type = IP_ADDRESS_V4;
+		RtlCopyMemory(&RemoteAddress.Address.IPv4Address, &Bytes[12], sizeof(ULONG));
+		RtlCopyMemory(&RemotePort, &Remote6->Address[0].Address[0].sin6_port, sizeof(RemotePort));
+		break;
+    }
 
     default:
 		UnlockObject(AddrFile);
@@ -490,6 +534,8 @@ NTSTATUS UDPStartup(
 
   /* Register this protocol with IP layer */
   IPRegisterProtocol(IPPROTO_UDP, UDPReceive);
+
+  UDP6Startup();
 
   UDPInitialized = TRUE;
 

@@ -730,11 +730,28 @@ static struct pbuf *
 StUdp(const ip6_addr_t *Src, const ip6_addr_t *Dest, u16_t DstPort)
 {
     UCHAR Udp[8];
+    const UCHAR *S = (const UCHAR *)Src->addr, *D = (const UCHAR *)Dest->addr;
+    ULONG Sum, i;
 
     RtlZeroMemory(Udp, sizeof(Udp));
     Udp[0] = 0xC3; Udp[1] = 0x52;
     Udp[2] = (UCHAR)(DstPort >> 8); Udp[3] = (UCHAR)DstPort;
     Udp[5] = 8;
+
+    /* The checksum is mandatory over IPv6 (RFC 8200 8.1; udp6.c drops a datagram without one): the pseudo header
+       (both addresses, the length, the next header) and the header itself */
+    Sum = 8 + 17;
+    for (i = 0; i < 16; i += 2)
+        Sum += ((ULONG)S[i] << 8 | S[i + 1]) + ((ULONG)D[i] << 8 | D[i + 1]);
+    for (i = 0; i < sizeof(Udp); i += 2)
+        Sum += (ULONG)Udp[i] << 8 | Udp[i + 1];
+    while (Sum >> 16)
+        Sum = (Sum & 0xFFFF) + (Sum >> 16);
+    Sum = ~Sum & 0xFFFF;
+    if (Sum == 0)
+        Sum = 0xFFFF;
+    Udp[6] = (UCHAR)(Sum >> 8);
+    Udp[7] = (UCHAR)Sum;
     return StPacket(Src, Dest, 17, 64, Udp, sizeof(Udp));
 }
 
@@ -1238,7 +1255,7 @@ StTestFirewall6(PIP_INTERFACE IF, const ip_addr_t *Local, u16_t Port)
         StResult(FALSE, "ICMPv6 error related to our TCP connection", "connect failed");
 
     /* the rate limit (RFC 4443 2.4(f)): datagrams the firewall admits and lwIP answers with a destination
-       unreachable (UDP has no socket in lwIP); the answers are bounded by the burst plus the refill, the
+       unreachable (no socket has the port: udp6.c answers port unreachable); the answers are bounded by the burst plus the refill, the
        rest are counted as limited. The bucket is refilled first */
     StSleep(1500);
     SentBefore = TCP6IcmpErrorsSent;

@@ -35,7 +35,8 @@ list(APPEND SOURCE
     transport/tcp/if6.c
     transport/tcp/selftest6.c
     transport/tcp/tcp.c
-    transport/udp/udp.c)
+    transport/udp/udp.c
+    transport/udp/udp6.c)
 
 add_library(ip OBJECT ${SOURCE} ${ip_asm})
 

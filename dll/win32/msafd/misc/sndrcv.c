@@ -701,6 +701,16 @@ MsafdRecvFrom(SOCKET Handle,
                        lpErrno);
     }
 
+    /* The source of an IPv6 socket's datagram is a whole SOCKADDR_IN6: a smaller address buffer is
+     * WSAEFAULT, before anything is received (VERIFY ON ORACLE) */
+    if (Socket->SharedData->AddressFamily == AF_INET6 && SocketAddress && SocketAddressLength &&
+        *SocketAddressLength < (int)sizeof(SOCKADDR_IN6))
+    {
+        if (lpErrno)
+            *lpErrno = WSAEFAULT;
+        return SOCKET_ERROR;
+    }
+
     /* Bind us First */
     if (Socket->SharedData->State == SocketOpen)
     {
@@ -752,6 +762,13 @@ MsafdRecvFrom(SOCKET Handle,
         RecvInfo.ControlLength = &Msg->Control.len;
         RecvInfo.MsgFlags = &Msg->dwFlags;
         RecvInfo.Options = Socket->SharedData->IpPktInfo ? AFD_RECV_MSG_PKTINFO : 0;
+        if (Socket->SharedData->AddressFamily == AF_INET6)
+        {
+            if (Socket->SharedData->Ipv6PktInfo)
+                RecvInfo.Options |= AFD_RECV_MSG_PKTINFO6;
+            if (Socket->SharedData->Ipv6HopLimit)
+                RecvInfo.Options |= AFD_RECV_MSG_HOPLIMIT;
+        }
         RecvInfo.CmsgHdrSize = sizeof(WSACMSGHDR);
     }
 

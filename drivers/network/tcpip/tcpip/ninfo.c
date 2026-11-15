@@ -289,6 +289,21 @@ static VOID Tcp6RowAddress(PTRANSPORT_ADDRESS Ta, ULONG Length, PUCHAR Address, 
     }
 }
 
+/* The row of an IPv6 UDP socket (IP_UDP6_ROW_ENTRY_ID); an IPv4 socket has none (refused, so that the caller skips
+ * it) */
+TDI_STATUS InfoTdiQueryGetConnectionUdp6Row(PADDRESS_FILE AddrFile,
+                                            PNDIS_BUFFER Buffer,
+                                            PUINT BufferSize)
+{
+    UDP6_ROW_OWNER_PID Row;
+
+    if (AddrFile->Family != TDI_ADDRESS_TYPE_IP6 || AddrFile->Protocol != IPPROTO_UDP || AddrFile->PortReleased)
+        return TDI_INVALID_REQUEST;
+
+    UDP6BuildRow(AddrFile, &Row);
+    return InfoCopyOut((PCHAR)&Row, sizeof(Row), Buffer, BufferSize);
+}
+
 /* The row of an IPv6 TCP socket (IP_TCP6_ROW_ENTRY_ID): its listener, or its connection. An IPv4 socket has
  * none (refused, so that the caller skips it, as a closing socket is skipped) */
 TDI_STATUS InfoTdiQueryGetConnectionTcp6Row(PADDRESS_FILE AddrFile,
@@ -363,6 +378,10 @@ TDI_STATUS InfoTdiQueryGetConnectionUdpTable(PADDRESS_FILE AddrFile,
     {
         Size = sizeof(MIB_UDPROW);
     }
+
+    /* An IPv6 socket (a dual stack one too) is a row of the IPv6 table (IP_UDP6_ROW_ENTRY_ID), not of this one */
+    if (AddrFile->Family == TDI_ADDRESS_TYPE_IP6)
+        return TDI_INVALID_REQUEST;
 
     UdpRow.dwLocalAddr = AddrFile->Address.Address.IPv4Address;
     UdpRow.dwLocalPort = AddrFile->Port;

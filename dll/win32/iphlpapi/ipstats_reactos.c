@@ -1083,3 +1083,59 @@ PMIB_TCP6TABLE_OWNER_PID getTcp6Table(void)
         Table->dwNumEntries = Count;
     return Table;
 }
+
+/* The IPv6 UDP sockets (AF_INET6 ones, dual stack ones too) as a MIB_UDP6TABLE_OWNER_PID: one row per transport
+ * entity that has one (IP_UDP6_ROW_ENTRY_ID). HeapFree() the table; NULL without memory or a stack */
+PMIB_UDP6TABLE_OWNER_PID getUdp6Table(void)
+{
+    DWORD numEntities = 0, returnSize, i, Count = 0, Max = 0;
+    TDIEntityID *entitySet = NULL;
+    PUDP6_ROW_OWNER_PID Row;
+    PMIB_UDP6TABLE_OWNER_PID Table = NULL, Bigger;
+    HANDLE tcpFile;
+    NTSTATUS status;
+
+    C_ASSERT(sizeof(UDP6_ROW_OWNER_PID) == sizeof(MIB_UDP6ROW_OWNER_PID));
+
+    if (!NT_SUCCESS(openTcpFile(&tcpFile, FILE_READ_DATA)))
+        return NULL;
+
+    status = tdiGetEntityIDSet(tcpFile, &entitySet, &numEntities);
+    if (!NT_SUCCESS(status))
+        numEntities = 0;
+
+    Table = HeapAlloc(GetProcessHeap(), 0, FIELD_OFFSET(MIB_UDP6TABLE_OWNER_PID, table));
+    for (i = 0; Table && i < numEntities; i++)
+    {
+        if (entitySet[i].tei_entity != CL_TL_ENTITY ||
+            !isTransportEntity(tcpFile, &entitySet[i], CL_TL_UDP))
+            continue;
+
+        Row = NULL;
+        status = tdiGetSetOfThings(tcpFile, INFO_CLASS_PROTOCOL, INFO_TYPE_PROVIDER, IP_UDP6_ROW_ENTRY_ID,
+                                   CL_TL_ENTITY, entitySet[i].tei_instance, 0, sizeof(*Row), (PVOID *)&Row,
+                                   &returnSize);
+        if (NT_SUCCESS(status) && Row && returnSize == 1)
+        {
+            if (Count == Max)
+            {
+                Max = Max ? Max * 2 : 16;
+                Bigger = HeapReAlloc(GetProcessHeap(), 0, Table,
+                                     FIELD_OFFSET(MIB_UDP6TABLE_OWNER_PID, table) + Max * sizeof(MIB_UDP6ROW_OWNER_PID));
+                if (!Bigger)
+                    HeapFree(GetProcessHeap(), 0, Table);
+                Table = Bigger;
+            }
+            if (Table)
+                CopyMemory(&Table->table[Count++], Row, sizeof(*Row));
+        }
+        if (Row)
+            tdiFreeThingSet(Row);
+    }
+
+    closeTcpFile(tcpFile);
+    if (entitySet) tdiFreeThingSet(entitySet);
+    if (Table)
+        Table->dwNumEntries = Count;
+    return Table;
+}

@@ -54,11 +54,56 @@ BOOLEAN DGRemoveIRP(
  * AFD_RECV_PKTINFO in drivers/network/afd/include/afd.h): the datagram's destination
  * address and the index of the interface that owns it, for IP_PKTINFO.
  */
+#define DG_PKTINFO_V4 0x1   /* DstAddress: an IPv4 datagram */
+#define DG_PKTINFO_V6 0x2   /* DstAddress6 and HopLimit: an IPv6 datagram (IPV6_PKTINFO, IPV6_HOPLIMIT) */
 typedef struct _DG_RECV_PKTINFO {
     ULONG Valid;
     ULONG DstAddress;
     ULONG IfIndex;
+    UCHAR DstAddress6[16];
+    ULONG HopLimit;
 } DG_RECV_PKTINFO, *PDG_RECV_PKTINFO;
+
+/* The source of a datagram as the receive of an IPv6 socket reports it: a TA_IP6_ADDRESS, an IPv4 source (a dual
+ * stack socket) as ::ffff:a.b.c.d. Ta has Length bytes (the receive's own buffer); nothing is written to a smaller
+ * one */
+static
+VOID
+DGBuildSource6(
+    PTRANSPORT_ADDRESS Ta,
+    ULONG Length,
+    PIP_ADDRESS SrcAddress,
+    USHORT SrcPort,
+    ULONG ScopeId)
+{
+    PTA_IP6_ADDRESS Ta6 = (PTA_IP6_ADDRESS)Ta;
+    UCHAR Bytes[16];
+    ULONG Zero = 0;
+
+    if (Length < sizeof(TA_IP6_ADDRESS))
+        return;
+
+    RtlZeroMemory(Bytes, sizeof(Bytes));
+    if (SrcAddress->Type == IP_ADDRESS_V6)
+    {
+        RtlCopyMemory(Bytes, SrcAddress->Address.IPv6Address, sizeof(Bytes));
+    }
+    else
+    {
+        Bytes[10] = 0xFF;
+        Bytes[11] = 0xFF;
+        RtlCopyMemory(&Bytes[12], &SrcAddress->Address.IPv4Address, sizeof(ULONG));
+        ScopeId = 0;
+    }
+
+    Ta6->TAAddressCount = 1;
+    Ta6->Address[0].AddressType = TDI_ADDRESS_TYPE_IP6;
+    Ta6->Address[0].AddressLength = TDI_ADDRESS_LENGTH_IP6;
+    RtlCopyMemory(&Ta6->Address[0].Address[0].sin6_port, &SrcPort, sizeof(SrcPort));
+    RtlCopyMemory(&Ta6->Address[0].Address[0].sin6_flowinfo, &Zero, sizeof(Zero));
+    RtlCopyMemory(Ta6->Address[0].Address[0].sin6_addr, Bytes, sizeof(Bytes));
+    RtlCopyMemory(&Ta6->Address[0].Address[0].sin6_scope_id, &ScopeId, sizeof(ScopeId));
+}
 
 VOID
 DGDeliverData(
@@ -70,6 +115,21 @@ DGDeliverData(
     USHORT DstPort,
     PIP_PACKET IPPacket,
     UINT DataSize)
+{
+    DGDeliverDataEx(Interface, AddrFile, SrcAddress, DstAddress, SrcPort, DstPort, IPPacket, DataSize, NULL);
+}
+
+VOID
+DGDeliverDataEx(
+    PIP_INTERFACE Interface,
+    PADDRESS_FILE AddrFile,
+    PIP_ADDRESS SrcAddress,
+    PIP_ADDRESS DstAddress,
+    USHORT SrcPort,
+    USHORT DstPort,
+    PIP_PACKET IPPacket,
+    UINT DataSize,
+    PDG_RX_INFO6 Info6)
 /*
  * FUNCTION: Delivers datagram data to a user
  * ARGUMENTS:
@@ -124,9 +184,12 @@ DGDeliverData(
         {
             Current = CONTAINING_RECORD(CurrentEntry, DATAGRAM_RECEIVE_REQUEST, ListEntry);
             CurrentEntry = CurrentEntry->Flink;
+            /* (the wildcard test first: an IPv4 datagram of a dual stack socket has another address type; an
+               IPv6 group's datagram reaches the members whatever they are bound to, udp6.c decided that) */
             if (DstPort == AddrFile->Port &&
-               (AddrIsEqual(DstAddress, &AddrFile->Address) ||
-                AddrIsUnspecified(&AddrFile->Address) ||
+               (AddrIsUnspecified(&AddrFile->Address) ||
+                (DstAddress->Type == IP_ADDRESS_V6 && ((PUCHAR)DstAddress->Address.IPv6Address)[0] == 0xFF) ||
+                AddrIsEqual(DstAddress, &AddrFile->Address) ||
                 AddrIsUnspecified(DstAddress)))
             {
 
@@ -150,7 +213,13 @@ DGDeliverData(
                 if (Current->ReturnInfo && Current->ReturnInfo->RemoteAddress)
                     RTAIPAddress = (PTA_IP_ADDRESS)Current->ReturnInfo->RemoteAddress;
 
-                if (RTAIPAddress)
+                if (RTAIPAddress && AddrFile->Family == TDI_ADDRESS_TYPE_IP6)
+                {
+                    /* An IPv6 socket: AFD sized the buffer from its local address, a TA_IP6_ADDRESS */
+                    DGBuildSource6((PTRANSPORT_ADDRESS)RTAIPAddress, Current->ReturnInfo->RemoteAddressLength,
+                                   SrcAddress, SrcPort, Info6 ? Info6->SrcScopeId : 0);
+                }
+                else if (RTAIPAddress)
                 {
                     RTAIPAddress->TAAddressCount = 1;
                     RTAIPAddress->Address->AddressType = TDI_ADDRESS_TYPE_IP;
@@ -181,7 +250,21 @@ DGDeliverData(
                         PktInfo->IfIndex = 0;
 
                     PktInfo->DstAddress = DstAddress->Address.IPv4Address;
-                    PktInfo->Valid = TRUE;
+                    PktInfo->Valid = DG_PKTINFO_V4;
+                }
+                else if (Current->ReturnInfo &&
+                         Current->ReturnInfo->Options &&
+                         Current->ReturnInfo->OptionsLength == sizeof(DG_RECV_PKTINFO) &&
+                         DstAddress->Type == IP_ADDRESS_V6 && Info6)
+                {
+                    PDG_RECV_PKTINFO PktInfo = Current->ReturnInfo->Options;
+
+                    /* The interface the datagram arrived on (udp6.c) and its hop limit */
+                    RtlCopyMemory(PktInfo->DstAddress6, DstAddress->Address.IPv6Address, sizeof(PktInfo->DstAddress6));
+                    PktInfo->IfIndex = Info6->IfIndex;
+                    PktInfo->HopLimit = Info6->HopLimit;
+                    PktInfo->DstAddress = 0;
+                    PktInfo->Valid = DG_PKTINFO_V6;
                 }
 
                 TI_DbgPrint(MAX_TRACE, ("(A: %08x) Addr %08x Port %04x\n",

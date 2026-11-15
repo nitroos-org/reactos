@@ -1408,6 +1408,98 @@ static int UdpTableSorter(const void *a, const void *b)
   return ret;
 }
 
+/* IPv6 rows of every class start with the address (16 bytes), the scope id and the port */
+static int Udp6TableSorter(const void *a, const void *b)
+{
+    const MIB_UDP6ROW_OWNER_PID *rowA = a, *rowB = b;
+    int ret = memcmp(rowA->ucLocalAddr, rowB->ucLocalAddr, sizeof(rowA->ucLocalAddr));
+
+    if (ret == 0)
+        ret = (int)rowA->dwLocalScopeId - (int)rowB->dwLocalScopeId;
+    if (ret == 0)
+        ret = (int)ntohs((USHORT)rowA->dwLocalPort) - (int)ntohs((USHORT)rowB->dwLocalPort);
+    return ret;
+}
+
+/* The IPv6 UDP table (AF_INET6): every class, while the stack has IPv6 on. With IPv6 off it is not there, as
+ * before (ERROR_INVALID_PARAMETER) */
+static DWORD GetExtendedUdp6Table(PVOID pUdpTable, PDWORD pdwSize, BOOL bOrder, UDP_TABLE_CLASS TableClass)
+{
+    PMIB_UDP6TABLE_OWNER_PID Ours;
+    IPV6_STATE State;
+    DWORD i, RowSize, Size;
+    PBYTE Out;
+
+    if (!Ipv6GetState(&State))
+    {
+        UNIMPLEMENTED;
+        return ERROR_INVALID_PARAMETER;
+    }
+    Ipv6FreeState(&State);
+
+    switch (TableClass)
+    {
+        case UDP_TABLE_BASIC: RowSize = sizeof(MIB_UDP6ROW); break;
+        case UDP_TABLE_OWNER_PID: RowSize = sizeof(MIB_UDP6ROW_OWNER_PID); break;
+        case UDP_TABLE_OWNER_MODULE: RowSize = sizeof(MIB_UDP6ROW_OWNER_MODULE); break;
+        default: return ERROR_INVALID_PARAMETER;
+    }
+    C_ASSERT(FIELD_OFFSET(MIB_UDP6TABLE, table) == FIELD_OFFSET(MIB_UDP6TABLE_OWNER_PID, table));
+    C_ASSERT(FIELD_OFFSET(MIB_UDP6TABLE_OWNER_MODULE, table) == 8);
+
+    Ours = getUdp6Table();
+    if (!Ours)
+        return ERROR_NOT_ENOUGH_MEMORY;
+
+    /* The module table's rows are 8-byte aligned (its timestamp) */
+    Size = ((TableClass == UDP_TABLE_OWNER_MODULE) ? FIELD_OFFSET(MIB_UDP6TABLE_OWNER_MODULE, table) :
+                                                      FIELD_OFFSET(MIB_UDP6TABLE_OWNER_PID, table)) +
+           Ours->dwNumEntries * RowSize;
+    if (Size > *pdwSize || !pUdpTable)
+    {
+        *pdwSize = Size;
+        HeapFree(GetProcessHeap(), 0, Ours);
+        return ERROR_INSUFFICIENT_BUFFER;
+    }
+
+    if (bOrder)
+        qsort(Ours->table, Ours->dwNumEntries, sizeof(MIB_UDP6ROW_OWNER_PID), Udp6TableSorter);
+
+    ZeroMemory(pUdpTable, Size);
+    *(PDWORD)pUdpTable = Ours->dwNumEntries;
+    Out = (PBYTE)pUdpTable + Size - Ours->dwNumEntries * RowSize;
+    for (i = 0; i < Ours->dwNumEntries; i++, Out += RowSize)
+    {
+        PMIB_UDP6ROW_OWNER_PID Row = &Ours->table[i];
+
+        if (TableClass == UDP_TABLE_BASIC)
+        {
+            PMIB_UDP6ROW Basic = (PMIB_UDP6ROW)Out;
+
+            memcpy(&Basic->dwLocalAddr, Row->ucLocalAddr, sizeof(Row->ucLocalAddr));
+            Basic->dwLocalScopeId = Row->dwLocalScopeId;
+            Basic->dwLocalPort = Row->dwLocalPort;
+        }
+        else if (TableClass == UDP_TABLE_OWNER_PID)
+        {
+            memcpy(Out, Row, sizeof(*Row));
+        }
+        else
+        {
+            PMIB_UDP6ROW_OWNER_MODULE Module = (PMIB_UDP6ROW_OWNER_MODULE)Out;
+
+            memcpy(Module->ucLocalAddr, Row->ucLocalAddr, sizeof(Row->ucLocalAddr));
+            Module->dwLocalScopeId = Row->dwLocalScopeId;
+            Module->dwLocalPort = Row->dwLocalPort;
+            Module->dwOwningPid = Row->dwOwningPid;
+        }
+    }
+
+    *pdwSize = Size;
+    HeapFree(GetProcessHeap(), 0, Ours);
+    return NO_ERROR;
+}
+
 /******************************************************************
  *    GetExtendedUdpTable (IPHLPAPI.@)
  *
@@ -1436,34 +1528,7 @@ DWORD WINAPI GetExtendedUdpTable(PVOID pUdpTable, PDWORD pdwSize, BOOL bOrder, U
     }
 
     if (ulAf == AF_INET6)
-    {
-        IPV6_STATE State;
-
-        /* The stack has no IPv6 UDP sockets (it takes IPv6 addresses for TCP only): while it has IPv6 on the
-         * IPv6 UDP table is there, and empty. Off, the answer it was */
-        if (!Ipv6GetState(&State))
-        {
-            UNIMPLEMENTED;
-            return ERROR_INVALID_PARAMETER;
-        }
-        Ipv6FreeState(&State);
-
-        switch (TableClass)
-        {
-            case UDP_TABLE_BASIC: size = FIELD_OFFSET(MIB_UDP6TABLE, table); break;
-            case UDP_TABLE_OWNER_PID: size = FIELD_OFFSET(MIB_UDP6TABLE_OWNER_PID, table); break;
-            case UDP_TABLE_OWNER_MODULE: size = FIELD_OFFSET(MIB_UDP6TABLE_OWNER_MODULE, table); break;
-            default: return ERROR_INVALID_PARAMETER;
-        }
-        if (size > *pdwSize || !pUdpTable)
-        {
-            *pdwSize = size;
-            return ERROR_INSUFFICIENT_BUFFER;
-        }
-        ZeroMemory(pUdpTable, size);
-        *pdwSize = size;
-        return NO_ERROR;
-    }
+        return GetExtendedUdp6Table(pUdpTable, pdwSize, bOrder, TableClass);
 
     if (ulAf != AF_INET)
     {
@@ -2764,6 +2829,22 @@ DWORD WINAPI GetTcpTable2(PMIB_TCPTABLE2 pTcpTable, PULONG pdwSize, BOOL bOrder)
     return NO_ERROR;
 }
 
+
+/******************************************************************
+ *    GetUdp6Table (IPHLPAPI.@)
+ *
+ * The IPv6 UDP listeners (MIB_UDP6TABLE): the basic class of GetExtendedUdpTable(AF_INET6). With IPv6 off
+ * ERROR_NOT_SUPPORTED (VERIFY ON ORACLE: Windows with IPv6 disabled)
+ */
+DWORD WINAPI GetUdp6Table(PMIB_UDP6TABLE Udp6Table, PULONG SizePointer, BOOL Order)
+{
+    DWORD Ret;
+
+    if (!SizePointer)
+        return ERROR_INVALID_PARAMETER;
+    Ret = GetExtendedUdpTable(Udp6Table, SizePointer, Order, AF_INET6, UDP_TABLE_BASIC, 0);
+    return (Ret == ERROR_INVALID_PARAMETER) ? ERROR_NOT_SUPPORTED : Ret;
+}
 
 /******************************************************************
  *    GetTcp6Table2 (IPHLPAPI.@)

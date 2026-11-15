@@ -1210,11 +1210,65 @@ static BOOLEAN FwFlowLookup(USHORT LocalPort, ULONG RemoteAddr, USHORT RemotePor
     return FALSE;
 }
 
+/*
+ * An IPv6 peer in the UDP flow table, which is keyed by a 32-bit address: a hash of its 128 bits with a key chosen
+ * at the first use, never 0 (the wildcard). A sender cannot pick an address that lands on another peer's flow without
+ * knowing the key; by chance it takes about 2^32 tries per flow (the entries time out after FW_UDP_TIMEOUT).
+ */
+static ULONG FwFlow6Key[5];
+static LONG FwFlow6KeyState;    /* 0 none, 1 being set, 2 set */
+
+static ULONG Fw6FlowKey(const UCHAR *Address)
+{
+    ULONG Words[4], h, i;
+
+    if (FwFlow6KeyState != 2)
+    {
+        if (InterlockedCompareExchange(&FwFlow6KeyState, 1, 0) == 0)
+        {
+            LARGE_INTEGER Counter = KeQueryPerformanceCounter(NULL);
+            ULONG Seed = Counter.LowPart ^ (ULONG)KeQueryInterruptTime() ^ (ULONG)(ULONG_PTR)&Counter;
+
+            for (i = 0; i < RTL_NUMBER_OF(FwFlow6Key); i++)
+                FwFlow6Key[i] = RtlRandomEx(&Seed) | ((i == 4) ? 1 : 0);
+            InterlockedExchange(&FwFlow6KeyState, 2);
+        }
+        else
+        {
+            while (FwFlow6KeyState != 2)
+                YieldProcessor();
+        }
+    }
+
+    RtlCopyMemory(Words, Address, sizeof(Words));
+    h = FwFlow6Key[4];
+    for (i = 0; i < 4; i++)
+    {
+        h ^= Words[i] + FwFlow6Key[i];
+        h *= 0x9E3779B1u;
+        h ^= h >> 15;
+    }
+    return h ? h : 1;
+}
+
 VOID NitroFwNoteUdpSend(USHORT LocalPort, PIP_ADDRESS Remote, USHORT RemotePort, BOOLEAN NonUnicast)
 {
     ULONG Ra;
 
-    if (!Remote || Remote->Type != IP_ADDRESS_V4)
+    if (!Remote)
+        return;
+    if (Remote->Type == IP_ADDRESS_V6)
+    {
+        /* An IPv6 socket's datagram (udp6.c): a group (ff00::/8) is a multicast send */
+        const UCHAR *Bytes = (const UCHAR *)Remote->Address.IPv6Address;
+
+        if (NonUnicast || Bytes[0] == 0xFF)
+            FwFlowInsert(LocalPort, 0, 0, FW_BCAST_TIMEOUT);
+        else
+            FwFlowInsert(LocalPort, Fw6FlowKey(Bytes), RemotePort, FW_UDP_TIMEOUT);
+        return;
+    }
+    if (Remote->Type != IP_ADDRESS_V4)
         return;
     Ra = Remote->Address.IPv4Address;
     if ((FwNtohl(Ra) >> 28) == 0xE)
@@ -2134,6 +2188,12 @@ BOOLEAN NitroFwInboundAllowed6(PIP_INTERFACE Interface, const UCHAR *D, ULONG Le
         Pkt.RemotePort = (USHORT)((D[Off] << 8) | D[Off + 1]);
         Pkt.LocalPort = (USHORT)((D[Off + 2] << 8) | D[Off + 3]);
         Pkt.LocalPortN = *(USHORT UNALIGNED *)(D + Off + 2);
+
+        /* A reply to a datagram an IPv6 socket of this host sent to that peer and port (or to a group), as
+           for IPv4 (udp6.c notes the sends) */
+        if (Proto == IPPROTO_UDP &&
+            FwFlowLookup(Pkt.LocalPortN, Fw6FlowKey(Src), *(USHORT UNALIGNED *)(D + Off)))
+            goto PassCounted;
     }
 
     return FwEvaluateInbound(&Pkt, Len);

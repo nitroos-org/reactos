@@ -283,8 +283,10 @@ QueryTcp6RowByEntity(
     if (AddrFile == NULL)
         return TDI_INVALID_PARAMETER;
 
-    if (AddrFile->Protocol == IPPROTO_TCP)
+    if (AddrFile->Protocol == IPPROTO_TCP && ID.tei_entity == CO_TL_ENTITY)
         Status = InfoTdiQueryGetConnectionTcp6Row(AddrFile, Buffer, BufferSize);
+    else if (AddrFile->Protocol == IPPROTO_UDP && ID.tei_entity == CL_TL_ENTITY)
+        Status = InfoTdiQueryGetConnectionUdp6Row(AddrFile, Buffer, BufferSize);
     else
         Status = TDI_INVALID_REQUEST;
 
@@ -710,6 +712,13 @@ TDI_STATUS InfoTdiQueryInformationEx(
               case IP_TCP6_ROW_ENTRY_ID:
                  if (ID->toi_type != INFO_TYPE_PROVIDER ||
                      ID->toi_entity.tei_entity != CO_TL_ENTITY)
+                     return TDI_INVALID_PARAMETER;
+
+                 return QueryTcp6RowByEntity(ID->toi_entity, Buffer, BufferSize);
+
+              case IP_UDP6_ROW_ENTRY_ID:
+                 if (ID->toi_type != INFO_TYPE_PROVIDER ||
+                     ID->toi_entity.tei_entity != CL_TL_ENTITY)
                      return TDI_INVALID_PARAMETER;
 
                  return QueryTcp6RowByEntity(ID->toi_entity, Buffer, BufferSize);

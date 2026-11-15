@@ -619,6 +619,12 @@ ip6_input(struct pbuf *p, struct netif *inp)
         }
       }
     }
+#ifdef LWIP_HOOK_IP6_MCAST_ACCEPT
+    /* NitroOS: without MLD, a group a socket joined on this interface (the hook says which) */
+    else if (LWIP_HOOK_IP6_MCAST_ACCEPT(inp, ip6_current_dest_addr())) {
+      netif = inp;
+    }
+#endif /* LWIP_HOOK_IP6_MCAST_ACCEPT */
 #endif /* LWIP_IPV6_MLD */
     else {
       netif = NULL;
@@ -1061,6 +1067,12 @@ options_done:
 #else /* LWIP_RAW */
   {
 #endif /* LWIP_RAW */
+#ifdef LWIP_HOOK_IP6_NEXTH_INPUT
+    /* NitroOS: the payload (p at the transport header) to a transport outside lwIP; non-zero = taken and freed */
+    if (LWIP_HOOK_IP6_NEXTH_INPUT(p, inp, *nexth)) {
+      /* nothing more for lwIP */
+    } else
+#endif /* LWIP_HOOK_IP6_NEXTH_INPUT */
     switch (*nexth) {
     case IP6_NEXTH_NONE:
       pbuf_free(p);

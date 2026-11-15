@@ -63,4 +63,23 @@ UINT UDPAllocatePort( UINT HintPort );
 BOOLEAN UDPReservePort( UINT Port );
 VOID UDPFreePort( UINT Port );
 
+/* UDP over IPv6 (ip/transport/udp/udp6.c), with Tcpip\Parameters\Ipv6Enable on */
+NTSTATUS UDPSendDatagram6(
+    PADDRESS_FILE AddrFile,
+    PTA_IP6_ADDRESS Remote,
+    PCHAR BufferData,
+    ULONG DataSize,
+    PULONG DataUsed);
+
+/* Hands the datagrams that IPv6 input or a looped multicast send left for the sockets to them. Called with no lock
+   held (PASSIVE_LEVEL) after lwIP's core lock was released */
+VOID UDP6DeliverDeferred(VOID);
+
+/* IPV6_ADD_MEMBERSHIP / IPV6_DROP_MEMBERSHIP (Request: struct ipv6_mreq) and the end of a socket's groups */
+NTSTATUS UDP6SetMembership(PADDRESS_FILE AddrFile, BOOLEAN Join, const VOID *Request, UINT Length);
+VOID UDP6LeaveAll(PADDRESS_FILE AddrFile);
+VOID UDP6Startup(VOID);
+/* The row of an IPv6 UDP socket (IP_UDP6_ROW_ENTRY_ID) */
+VOID UDP6BuildRow(PADDRESS_FILE AddrFile, PUDP6_ROW_OWNER_PID Row);
+
 /* EOF */
