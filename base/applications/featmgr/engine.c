@@ -3100,6 +3100,62 @@ HRESULT FmEnable(LPCWSTR id, FILE *log)
     return result;
 }
 
+/* Downgrade guard for a hosted pack that replaces a driver DLL the image can carry in a newer build
+ * ([Source] keys; all three are needed, a pack without them is never guarded):
+ *   PackFileTime=YYYY-MM-DDTHH:MM:SSZ   last-write time of the pack's files. The Mesa DLLs have no version resource
+ *                                       (and the same PE timestamp in every build); a pack is identified by this time
+ *                                       (dll/3rdparty/mesa3d/README.md: every pack gets a new one).
+ *   GuardFiles=a.dll,b.dll              the DLLs to look at, in System32 and SysWOW64
+ *   GuardMinSize=<bytes>                a file smaller than this is not a pack DLL (the in-tree softpipe-only
+ *                                       libgallium_wgl.dll has an arbitrary checkout time and must not block the pack)
+ * Returns TRUE, with a description of the first file found, when an installed DLL is at least as new as the pack. */
+static BOOL InstalledNewerThanPack(const FM_FEATURE *f, LPWSTR found, DWORD cch)
+{
+    static const LPCWSTR dirs[] = { L"%SystemRoot%\\System32", L"%SystemRoot%\\SysWOW64" };
+    WCHAR tm[40], list[MAX_PATH], minsz[32], *ctx, *name;
+    SYSTEMTIME st = { 0 };
+    FILETIME packFt;
+    ULONGLONG min;
+    WORD v[6];
+    int i;
+
+    GetPrivateProfileStringW(L"Source", L"PackFileTime", L"", tm, ARRAYSIZE(tm), f->ManifestPath);
+    GetPrivateProfileStringW(L"Source", L"GuardFiles", L"", list, ARRAYSIZE(list), f->ManifestPath);
+    GetPrivateProfileStringW(L"Source", L"GuardMinSize", L"", minsz, ARRAYSIZE(minsz), f->ManifestPath);
+    if (!tm[0] || !list[0] || !minsz[0]) return FALSE;
+    if (swscanf(tm, L"%hu-%hu-%huT%hu:%hu:%huZ", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) != 6) return FALSE;
+    st.wYear = v[0]; st.wMonth = v[1]; st.wDay = v[2]; st.wHour = v[3]; st.wMinute = v[4]; st.wSecond = v[5];
+    if (!SystemTimeToFileTime(&st, &packFt)) return FALSE;
+    min = _wcstoui64(minsz, NULL, 10);
+
+    for (i = 0; i < (int)ARRAYSIZE(dirs); i++)
+    {
+        WCHAR l2[MAX_PATH];
+        StringCchCopyW(l2, ARRAYSIZE(l2), list);
+        ctx = NULL;
+        for (name = wcstok_s(l2, L",; ", &ctx); name; name = wcstok_s(NULL, L",; ", &ctx))
+        {
+            WCHAR dir[MAX_PATH], path[MAX_PATH];
+            WIN32_FILE_ATTRIBUTE_DATA fad;
+            ULONGLONG size;
+            if (!ExpandEnvironmentStringsW(dirs[i], dir, ARRAYSIZE(dir))) continue;
+            StringCchPrintfW(path, ARRAYSIZE(path), L"%s\\%s", dir, name);
+            if (!GetFileAttributesExW(path, GetFileExInfoStandard, &fad)) continue;
+            size = ((ULONGLONG)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
+            if (size < min) continue;
+            if (CompareFileTime(&fad.ftLastWriteTime, &packFt) >= 0)
+            {
+                SYSTEMTIME w;
+                FileTimeToSystemTime(&fad.ftLastWriteTime, &w);
+                StringCchPrintfW(found, cch, L"%s (%04u-%02u-%02u %02u:%02u UTC, pack %s)",
+                                 path, w.wYear, w.wMonth, w.wDay, w.wHour, w.wMinute, tm);
+                return TRUE;
+            }
+        }
+    }
+    return FALSE;
+}
+
 static HRESULT FmEnableInner(LPCWSTR id, FILE *log)
 {
     FM_FEATURE f;
@@ -3149,6 +3205,17 @@ static HRESULT FmEnableInner(LPCWSTR id, FILE *log)
         {
             LOGF(log, L"error: '%s' was disabled but is still being removed; reboot, then enable again\n", id);
             return HRESULT_FROM_WIN32(ERROR_SUCCESS_REBOOT_REQUIRED);
+        }
+    }
+
+    if (f.Tier == FM_TIER_OS)
+    {
+        WCHAR newer[MAX_PATH + 64];
+        if (InstalledNewerThanPack(&f, newer, ARRAYSIZE(newer)))
+        {
+            LOGF(log, L"'%s': already newer, skipped: the installed %s is not older than this pack; nothing was changed\n", id, newer);
+            SetLastMsg(L"%s: already newer, skipped. This system already has a newer or equal graphics driver (%s); installing the pack would replace it with an older one.", f.Name, newer);
+            return S_FALSE;
         }
     }
 
