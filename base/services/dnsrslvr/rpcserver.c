@@ -87,6 +87,66 @@ R_ResolverFlushCacheEntry(
 }
 
 
+/* The arm of a text record in the union of the RPC (DNS_TXT_WIRE_DATAW of windns.h in the MIDL view) */
+typedef struct
+{
+    DWORD dwStringCount;
+    PWSTR *pStringArray;
+} TEXT_WIRE_DATA;
+
+/*
+ * A text record holds the pointers to its strings in an array inside the record (sized by the string count); a union
+ * arm of the RPC cannot describe that, so the wire layout has a pointer to a separate array in the first slot. Every
+ * text record of the list is switched to it, just before the stub marshals the list (and frees it, the array and the
+ * strings with it). Returns ERROR_OUTOFMEMORY, with the list as it was, when an array cannot be allocated.
+ */
+static
+DWORD
+TextRecordsToWire(
+    _In_ PDNS_RECORDW List)
+{
+    PDNS_RECORDW Record, Undo;
+    TEXT_WIRE_DATA *Wire;
+    PWSTR *Array;
+    DWORD Count;
+
+    for (Record = List; Record; Record = Record->pNext)
+    {
+        if (Record->wType != DNS_TYPE_TEXT)
+            continue;
+
+        Count = Record->Data.TXT.dwStringCount;
+        Array = NULL;
+        if (Count != 0)
+        {
+            Array = midl_user_allocate(Count * sizeof(PWSTR));
+            if (Array == NULL)
+            {
+                /* switch the records back */
+                for (Undo = List; Undo != Record; Undo = Undo->pNext)
+                {
+                    if (Undo->wType != DNS_TYPE_TEXT)
+                        continue;
+                    Wire = (TEXT_WIRE_DATA *)&Undo->Data;
+                    Array = Wire->pStringArray;
+                    if (Array)
+                    {
+                        Undo->Data.TXT.pStringArray[0] = Array[0];
+                        midl_user_free(Array);
+                    }
+                }
+                return ERROR_OUTOFMEMORY;
+            }
+            CopyMemory(Array, Record->Data.TXT.pStringArray, Count * sizeof(PWSTR));
+        }
+
+        Wire = (TEXT_WIRE_DATA *)&Record->Data;
+        Wire->pStringArray = Array;
+    }
+
+    return ERROR_SUCCESS;
+}
+
 /* Function: 0x07 */
 DWORD
 __stdcall
@@ -189,7 +249,20 @@ R_ResolverQuery(
         }
     }
 
-    DPRINT("R_ResolverQuery result %ld %ld\n", Status, *dwRecords);
+    /* The text records go over the RPC in their wire layout (the caller of this function has the API layout) */
+    if (Status == ERROR_SUCCESS && *ppResultRecords != NULL)
+    {
+        Status = TextRecordsToWire(*ppResultRecords);
+        if (Status != ERROR_SUCCESS)
+        {
+            DnsRecordListFree(*ppResultRecords, DnsFreeRecordList);
+            *ppResultRecords = NULL;
+            if (dwRecords)
+                *dwRecords = 0;
+        }
+    }
+
+    DPRINT("R_ResolverQuery result %ld %ld\n", Status, dwRecords ? *dwRecords : 0);
 
     return Status;
 }

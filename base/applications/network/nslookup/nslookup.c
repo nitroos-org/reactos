@@ -417,6 +417,163 @@ static void PrintAddressAnswers( PCHAR Rec, ULONG RecLen, int k, USHORT NumAnswe
     _tprintf( _T("\n") );
 }
 
+/* A time in seconds as nslookup writes it after the number: " (1 hour 5 mins)" */
+static void PrintInterval( ULONG Seconds )
+{
+    ULONG Days = Seconds / 86400, Hours = (Seconds / 3600) % 24, Mins = (Seconds / 60) % 60, Secs = Seconds % 60;
+    BOOL Any = FALSE;
+
+    _tprintf( _T(" (") );
+    if( Days ) { _tprintf( Days == 1 ? _T("%lu day") : _T("%lu days"), Days ); Any = TRUE; }
+    if( Hours ) { _tprintf( Hours == 1 ? _T("%s%lu hour") : _T("%s%lu hours"), Any ? " " : "", Hours ); Any = TRUE; }
+    if( Mins ) { _tprintf( Mins == 1 ? _T("%s%lu min") : _T("%s%lu mins"), Any ? " " : "", Mins ); Any = TRUE; }
+    if( Secs || !Any ) _tprintf( Secs == 1 ? _T("%s%lu sec") : _T("%s%lu secs"), Any ? " " : "", Secs );
+    _tprintf( _T(")\n") );
+}
+
+/* One record of the answer section that is of a type that PrintTypedAnswers writes: Rec[Data..End) is its data.
+   Returns FALSE when the data is not what the type says. */
+static BOOL PrintTypedRecord( PCHAR Rec, ULONG RecLen, PCHAR Owner, USHORT Type, int Data, int End )
+{
+    CHAR Name1[256], Name2[256];
+    int k, k2;
+    ULONG Serial, Refresh, Retry, Expire, Minimum;
+    const UCHAR *p = (const UCHAR *)Rec;
+
+    switch( Type )
+    {
+    case TYPE_CNAME:
+    case TYPE_NS:
+        k = SkipName( Rec, RecLen, Data );
+        if( k < 0 || k != End ) return FALSE;
+        ExtractName( Rec, RecLen, Name1, (USHORT)Data, 0 );
+        _tprintf( TYPE_NS == Type ? _T("%s\tnameserver = %s\n") : _T("%s\tcanonical name = %s\n"), Owner, Name1 );
+        return TRUE;
+
+    case TYPE_MX:
+        if( End - Data < 3 ) return FALSE;
+        k = SkipName( Rec, RecLen, Data + 2 );
+        if( k < 0 || k != End ) return FALSE;
+        ExtractName( Rec, RecLen, Name1, (USHORT)(Data + 2), 0 );
+        _tprintf( _T("%s\tMX preference = %u, mail exchanger = %s\n"), Owner, (p[Data] << 8) | p[Data + 1], Name1 );
+        return TRUE;
+
+    case TYPE_SRV:
+        if( End - Data < 7 ) return FALSE;
+        k = SkipName( Rec, RecLen, Data + 6 );
+        if( k < 0 || k != End ) return FALSE;
+        ExtractName( Rec, RecLen, Name1, (USHORT)(Data + 6), 0 );
+        _tprintf( _T("%s\tSRV service location:\n"), Owner );
+        _tprintf( _T("          priority       = %u\n"), (p[Data] << 8) | p[Data + 1] );
+        _tprintf( _T("          weight         = %u\n"), (p[Data + 2] << 8) | p[Data + 3] );
+        _tprintf( _T("          port           = %u\n"), (p[Data + 4] << 8) | p[Data + 5] );
+        _tprintf( _T("          svr hostname   = %s\n"), Name1 );
+        return TRUE;
+
+    case TYPE_SOA:
+        k = SkipName( Rec, RecLen, Data );
+        if( k < 0 || k > End ) return FALSE;
+        k2 = SkipName( Rec, RecLen, k );
+        if( k2 < 0 || End - k2 != 20 ) return FALSE;
+        ExtractName( Rec, RecLen, Name1, (USHORT)Data, 0 );
+        ExtractName( Rec, RecLen, Name2, (USHORT)k, 0 );
+        Serial = ((ULONG)p[k2] << 24) | ((ULONG)p[k2 + 1] << 16) | ((ULONG)p[k2 + 2] << 8) | p[k2 + 3];
+        Refresh = ((ULONG)p[k2 + 4] << 24) | ((ULONG)p[k2 + 5] << 16) | ((ULONG)p[k2 + 6] << 8) | p[k2 + 7];
+        Retry = ((ULONG)p[k2 + 8] << 24) | ((ULONG)p[k2 + 9] << 16) | ((ULONG)p[k2 + 10] << 8) | p[k2 + 11];
+        Expire = ((ULONG)p[k2 + 12] << 24) | ((ULONG)p[k2 + 13] << 16) | ((ULONG)p[k2 + 14] << 8) | p[k2 + 15];
+        Minimum = ((ULONG)p[k2 + 16] << 24) | ((ULONG)p[k2 + 17] << 16) | ((ULONG)p[k2 + 18] << 8) | p[k2 + 19];
+        _tprintf( _T("%s\n"), Owner );
+        _tprintf( _T("\tprimary name server = %s\n"), Name1 );
+        _tprintf( _T("\tresponsible mail addr = %s\n"), Name2 );
+        _tprintf( _T("\tserial  = %lu\n"), Serial );
+        _tprintf( _T("\trefresh = %lu"), Refresh ); PrintInterval( Refresh );
+        _tprintf( _T("\tretry   = %lu"), Retry ); PrintInterval( Retry );
+        _tprintf( _T("\texpire  = %lu"), Expire ); PrintInterval( Expire );
+        _tprintf( _T("\tdefault TTL = %lu"), Minimum ); PrintInterval( Minimum );
+        return TRUE;
+
+    case TYPE_TXT:
+        /* the character-strings, each one a length and its bytes */
+        for( k = Data; k < End; )
+        {
+            int Len = p[k];
+            if( End - k - 1 < Len ) return FALSE;
+            k += 1 + Len;
+        }
+        _tprintf( _T("%s\ttext =\n\n\t"), Owner );
+        for( k = Data; k < End; )
+        {
+            int Len = p[k++], j;
+
+            _tprintf( _T("\"") );
+            for( j = 0; j < Len; j += 1 )
+            {
+                UCHAR c = p[k + j];
+                if( '"' == c || '\\' == c ) _tprintf( _T("\\%c"), c );
+                else if( c < 32 || c > 126 ) _tprintf( _T("\\%03u"), c );
+                else _tprintf( _T("%c"), c );
+            }
+            _tprintf( _T("\"") );
+            k += Len;
+            if( k < End ) _tprintf( _T(" ") );
+        }
+        _tprintf( _T("\n") );
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+/*
+ * The answer of a CNAME, NS, SOA, MX, TXT or SRV query: the records of the answer section of those types, then the
+ * addresses of the additional section (the hosts that a name server, a mail exchanger or a service names).
+ * Everything read stays inside the packet. Returns FALSE when a record is malformed.
+ */
+static BOOL PrintTypedAnswers( PCHAR Rec, ULONG RecLen, int k, USHORT NumAnswers, USHORT NumAuthority,
+                               USHORT NumAdditional, UCHAR Header1, USHORT WantType )
+{
+    CHAR Owner[256], Text[48];
+    USHORT Type, Class, DataLength;
+    ULONG Ttl, n, Total = (ULONG)NumAnswers + NumAuthority + NumAdditional;
+    int End, Printed = 0, Extra = 0;
+
+    if( !( Header1 & 0x04 ) && NumAnswers ) _tprintf( _T("Non-authoritative answer:\n") );
+
+    for( n = 0; n < Total; n += 1 )
+    {
+        if( (ULONG)k >= RecLen ) return FALSE;
+        ExtractName( Rec, RecLen, Owner, (USHORT)k, 0 );
+        k = SkipName( Rec, RecLen, k );
+        if( k < 0 ) return FALSE;
+        if( !ReadRecordHeader( Rec, RecLen, &k, &Type, &Class, &Ttl, &DataLength ) ) return FALSE;
+        End = k + DataLength;
+
+        if( n < NumAnswers )
+        {
+            if( TYPE_CNAME == Type || WantType == Type )
+            {
+                if( !PrintTypedRecord( Rec, RecLen, Owner, Type, k, End ) ) return FALSE;
+                Printed += 1;
+            }
+        }
+        else if( n >= (ULONG)NumAnswers + NumAuthority && Printed &&
+                 ( ( TYPE_A == Type && 4 == DataLength ) || ( TYPE_AAAA == Type && 16 == DataLength ) ) )
+        {
+            if( 0 == Extra ) _tprintf( _T("\n") );
+            Extra += 1;
+            if( TYPE_A == Type )
+                sprintf( Text, "%u.%u.%u.%u", (UCHAR)Rec[k], (UCHAR)Rec[k + 1], (UCHAR)Rec[k + 2], (UCHAR)Rec[k + 3] );
+            else
+                FormatIpv6( (const UCHAR *)&Rec[k], Text );
+            _tprintf( TYPE_A == Type ? _T("%s\tinternet address = %s\n") : _T("%s\tAAAA IPv6 address = %s\n"), Owner, Text );
+        }
+
+        k = End;
+    }
+
+    return TRUE;
+}
+
 void PerformLookup( PCHAR pAddr )
 {
     /* Needed to issue DNS packets and parse them. */
@@ -432,6 +589,7 @@ void PerformLookup( PCHAR pAddr )
     USHORT NumQuestions;
     USHORT NumAnswers;
     USHORT NumAuthority;
+    USHORT NumAdditional;
     USHORT Type, QueryType, Class, DataLength;
     ULONG Ttl;
 
@@ -568,6 +726,7 @@ void PerformLookup( PCHAR pAddr )
     NumQuestions = ntohs( ((PSHORT)&RecBuffer[4])[0] );
     NumAnswers = ntohs( ((PSHORT)&RecBuffer[6])[0] );
     NumAuthority = ntohs( ((PUSHORT)&RecBuffer[8])[0] );
+    NumAdditional = ntohs( ((PUSHORT)&RecBuffer[10])[0] );
     Type = 0;
 
     /* The server cut the answer short (UDP size limit); this program does not retry over TCP. */
@@ -607,6 +766,15 @@ void PerformLookup( PCHAR pAddr )
     if( TYPE_AAAA == QueryType )
     {
         PrintAddressAnswers( RecBuffer, RecBufferLength, k, NumAnswers, NumAuthority, pAddr, TYPE_AAAA );
+        goto cleanup;
+    }
+
+    /* CNAME, NS, SOA, MX, TXT, SRV: the records of the answer */
+    if( TYPE_CNAME == QueryType || TYPE_NS == QueryType || TYPE_SOA == QueryType || TYPE_MX == QueryType ||
+        TYPE_TXT == QueryType || TYPE_SRV == QueryType )
+    {
+        if( !PrintTypedAnswers( RecBuffer, RecBufferLength, k, NumAnswers, NumAuthority, NumAdditional, Header1, QueryType ) )
+            goto malformed;
         goto cleanup;
     }
 
@@ -785,6 +953,10 @@ BOOL ParseCommandLine( int argc, char* argv[] )
                     {
                         State.type = TypeSRV;
                     }
+                    else if( !strncmp( TypeTXT, &argv[i][6], strlen( TypeTXT ) ) )
+                    {
+                        State.type = TypeTXT;
+                    }
                     else
                     {
                         _tprintf( _T("unknown query type: %s"), &argv[i][6] );
@@ -856,6 +1028,10 @@ BOOL ParseCommandLine( int argc, char* argv[] )
                     else if( !strncmp( TypeSRV, &argv[i][11], strlen( TypeSRV ) ) )
                     {
                         State.type = TypeSRV;
+                    }
+                    else if( !strncmp( TypeTXT, &argv[i][11], strlen( TypeTXT ) ) )
+                    {
+                        State.type = TypeTXT;
                     }
                     else
                     {
@@ -1170,6 +1346,10 @@ void InteractiveMode()
                         {
                             State.type = TypeSRV;
                         }
+                        else if( !strncmp( TypeTXT, &args_vector[1][6], strlen( TypeTXT ) ) )
+                        {
+                            State.type = TypeTXT;
+                        }
                         else
                         {
                             _tprintf(_T("unknown query type: %s"), &args_vector[1][6]);
@@ -1216,6 +1396,10 @@ void InteractiveMode()
                         else if (!strncmp(TypeSRV, &args_vector[1][11], strlen(TypeSRV)))
                         {
                             State.type = TypeSRV;
+                        }
+                        else if( !strncmp( TypeTXT, &args_vector[1][11], strlen( TypeTXT ) ) )
+                        {
+                            State.type = TypeTXT;
                         }
                         else
                         {

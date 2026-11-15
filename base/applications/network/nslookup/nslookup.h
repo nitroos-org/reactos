@@ -23,6 +23,7 @@
 #define TypePTR     "PTR"
 #define TypeSOA     "SOA"
 #define TypeSRV     "SRV"
+#define TypeTXT     "TXT"
 
 #define TYPE_A      0x01
 #define TYPE_AAAA   0x1C
@@ -32,6 +33,8 @@
 #define TYPE_WKS    0x0B
 #define TYPE_PTR    0x0C
 #define TYPE_MX     0x0F
+#define TYPE_TXT    0x10
+#define TYPE_SRV    0x21
 #define TYPE_ANY    0xFF
 
 #define ClassIN     "IN"

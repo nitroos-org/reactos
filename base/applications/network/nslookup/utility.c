@@ -1050,7 +1050,10 @@ PCHAR TypeIDtoTypeName( USHORT TypeID )
     case TYPE_SOA:
         return TypeSOA;
 
-    case TYPE_WKS:
+    case TYPE_TXT:
+        return TypeTXT;
+
+    case TYPE_SRV:
         return TypeSRV;
 
     case TYPE_PTR:
@@ -1069,15 +1072,17 @@ PCHAR TypeIDtoTypeName( USHORT TypeID )
 
 USHORT TypeNametoTypeID( PCHAR TypeName )
 {
-    if( !strncmp( TypeName, TypeAAAA, strlen( TypeAAAA ) ) ) return TYPE_AAAA;
-    if( !strncmp( TypeName, TypeA, strlen( TypeA ) ) ) return TYPE_A;
-    if( !strncmp( TypeName, TypeNS, strlen( TypeNS ) ) ) return TYPE_NS;
-    if( !strncmp( TypeName, TypeCNAME, strlen( TypeCNAME ) ) ) return TYPE_CNAME;
-    if( !strncmp( TypeName, TypeSOA, strlen( TypeSOA ) ) ) return TYPE_SOA;
-    if( !strncmp( TypeName, TypeSRV, strlen( TypeSRV ) ) ) return TYPE_WKS;
-    if( !strncmp( TypeName, TypePTR, strlen( TypePTR ) ) ) return TYPE_PTR;
-    if( !strncmp( TypeName, TypeMX, strlen( TypeMX ) ) ) return TYPE_MX;
-    if( !strncmp( TypeName, TypeAny, strlen( TypeAny ) ) ) return TYPE_ANY;
+    /* The whole name: "ANY" is not "A" */
+    if( !strcmp( TypeName, TypeAAAA ) ) return TYPE_AAAA;
+    if( !strcmp( TypeName, TypeA ) ) return TYPE_A;
+    if( !strcmp( TypeName, TypeNS ) ) return TYPE_NS;
+    if( !strcmp( TypeName, TypeCNAME ) ) return TYPE_CNAME;
+    if( !strcmp( TypeName, TypeSOA ) ) return TYPE_SOA;
+    if( !strcmp( TypeName, TypeSRV ) ) return TYPE_SRV;
+    if( !strcmp( TypeName, TypeTXT ) ) return TYPE_TXT;
+    if( !strcmp( TypeName, TypePTR ) ) return TYPE_PTR;
+    if( !strcmp( TypeName, TypeMX ) ) return TYPE_MX;
+    if( !strcmp( TypeName, TypeAny ) ) return TYPE_ANY;
 
     return 0;
 }
