@@ -917,6 +917,11 @@ MiniportInitialize(
 
   Adapter->MiniportAdapterHandle = MiniportAdapterHandle;
 
+  /* The interrupt DPC takes this lock as soon as the chip raises its first
+   * interrupt (MiInitChip), on another processor: initialise it before the
+   * interrupt is registered, never while a DPC may hold it */
+  NdisAllocateSpinLock(&Adapter->Lock);
+
   /* register our adapter structwith ndis */
   NdisMSetAttributesEx(Adapter->MiniportAdapterHandle, Adapter, 0, NDIS_ATTRIBUTE_BUS_MASTER, NdisInterfacePci);
 
@@ -998,8 +1003,6 @@ MiniportInitialize(
       /* Initialize and start the chip */
       MiInitChip(Adapter);
 
-      NdisAllocateSpinLock(&Adapter->Lock);
-
       Status = NDIS_STATUS_SUCCESS;
     }
   while(0);
@@ -1018,6 +1021,8 @@ MiniportInitialize(
 
       if(InterruptRegistered)
         NdisMDeregisterInterrupt(&Adapter->InterruptObject);
+
+      NdisFreeSpinLock(&Adapter->Lock);
 
       NdisFreeMemory(Adapter, 0, 0);
     }
