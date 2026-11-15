@@ -719,3 +719,133 @@ DWORD Ipv6BestRoute(const NET_LUID *InterfaceLuid, NET_IFINDEX InterfaceIndex, c
   return Result;
 }
 
+static BOOL get_stats_from_file(HANDLE TcpFile, PTCP_IPV6_STATS Stats)
+{
+  PVOID Blob = NULL;
+  DWORD Size = 0;
+  BOOL Result = FALSE;
+  NTSTATUS Status;
+
+  Status = tdiGetSetOfThings(TcpFile, INFO_CLASS_PROTOCOL, INFO_TYPE_PROVIDER, IP_IPV6_STATS_ENTRY_ID,
+                             CL_NL_ENTITY, 0, 0, 1, &Blob, &Size);
+  if (!NT_SUCCESS(Status) || !Blob)
+    return FALSE;
+
+  if (Size >= sizeof(*Stats) && ((PTCP_IPV6_STATS)Blob)->Enabled)
+  {
+    memcpy(Stats, Blob, sizeof(*Stats));
+    Result = TRUE;
+  }
+  tdiFreeThingSet(Blob);
+  return Result;
+}
+
+/* ---- statistics ---- */
+
+BOOL Ipv6GetIpStatistics(PMIB_IPSTATS Stats)
+{
+  HANDLE TcpFile;
+  TCP_IPV6_STATS Counters;
+  IPV6_ALL All;
+  PMIB_IPFORWARD_ROW2 Routes = NULL;
+  ULONG Routed = 0, i;
+  BOOL Result;
+
+  if (!NT_SUCCESS(openTcpFile(&TcpFile, FILE_READ_DATA)))
+    return FALSE;
+  Result = get_stats_from_file(TcpFile, &Counters);
+  closeTcpFile(TcpFile);
+  if (!Result || !get_all(&All))
+    return FALSE;
+
+  memset(Stats, 0, sizeof(*Stats));
+  /* not forwarding (2), the hop limit of the stack, the reassembly timeout of lwIP's IPv6 layer (seconds) */
+  Stats->dwForwarding = MIB_IP_NOT_FORWARDING;
+  Stats->dwDefaultTTL = 128;
+  Stats->dwReasmTimeout = 60;
+  Stats->dwInReceives = Counters.IpInReceives;
+  Stats->dwInDelivers = Counters.IpInDelivers;
+  Stats->dwOutRequests = Counters.IpOutRequests;
+  for (i = 0; i < All.State.Header->InterfaceCount; i++)
+    if (All.State.Interfaces[i].Flags & TCP_IPV6_IF_ENABLED)
+      Stats->dwNumIf++;
+  Stats->dwNumAddr = All.State.Header->AddressCount;
+  if (build_routes(&All, &Routes, &Routed) == NO_ERROR)
+    Stats->dwNumRoutes = Routed;
+  HeapFree(GetProcessHeap(), 0, Routes);
+  free_all(&All);
+  return TRUE;
+}
+
+BOOL Ipv6GetTcpStatistics(PMIB_TCPSTATS Stats)
+{
+  HANDLE TcpFile;
+  TCP_IPV6_STATS Counters;
+  PMIB_TCP6TABLE_OWNER_PID Table;
+  ULONG i;
+  BOOL Result;
+
+  if (!NT_SUCCESS(openTcpFile(&TcpFile, FILE_READ_DATA)))
+    return FALSE;
+  Result = get_stats_from_file(TcpFile, &Counters);
+  if (Result)
+  {
+    /* the retransmission timer parameters are the stack's, whichever address family */
+    memset(Stats, 0, sizeof(*Stats));
+    if (getTCPStats(TcpFile, Stats) != NO_ERROR)
+      memset(Stats, 0, sizeof(*Stats));
+  }
+  closeTcpFile(TcpFile);
+  if (!Result)
+    return FALSE;
+
+  Stats->dwActiveOpens = Counters.TcpActiveOpens;
+  Stats->dwPassiveOpens = Counters.TcpPassiveOpens;
+  Stats->dwAttemptFails = 0;
+  Stats->dwEstabResets = 0;
+  Stats->dwCurrEstab = 0;
+  Stats->dwInSegs = Counters.TcpInSegs;
+  Stats->dwOutSegs = Counters.TcpOutSegs;
+  Stats->dwRetransSegs = 0;
+  Stats->dwInErrs = 0;
+  Stats->dwOutRsts = 0;
+  Stats->dwNumConns = 0;
+
+  Table = getTcp6Table();
+  if (Table)
+  {
+    for (i = 0; i < Table->dwNumEntries; i++)
+    {
+      Stats->dwNumConns++;
+      if (Table->table[i].dwState == MIB_TCP_STATE_ESTAB || Table->table[i].dwState == MIB_TCP_STATE_CLOSE_WAIT)
+        Stats->dwCurrEstab++;
+    }
+    HeapFree(GetProcessHeap(), 0, Table);
+  }
+  return TRUE;
+}
+
+BOOL Ipv6GetIcmpStatistics(PMIB_ICMP_EX Stats)
+{
+  HANDLE TcpFile;
+  TCP_IPV6_STATS Counters;
+  BOOL Result;
+  ULONG i;
+
+  if (!NT_SUCCESS(openTcpFile(&TcpFile, FILE_READ_DATA)))
+    return FALSE;
+  Result = get_stats_from_file(TcpFile, &Counters);
+  closeTcpFile(TcpFile);
+  if (!Result)
+    return FALSE;
+
+  memset(Stats, 0, sizeof(*Stats));
+  Stats->icmpInStats.dwMsgs = Counters.IcmpInMsgs;
+  Stats->icmpOutStats.dwMsgs = Counters.IcmpOutMsgs;
+  for (i = 0; i < 256; i++)
+  {
+    Stats->icmpInStats.rgdwTypeCount[i] = Counters.IcmpIn[i];
+    Stats->icmpOutStats.rgdwTypeCount[i] = Counters.IcmpOut[i];
+  }
+  return TRUE;
+}

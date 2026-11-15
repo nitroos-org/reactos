@@ -1854,6 +1854,8 @@ LibTCPConnectCallback(void *arg)
     tcp_sent((PTCP_PCB)msg->Input.Connect.Connection->SocketContext, InternalSendEventHandler);
 
     ip_addr_copy(ConnectAddr, *msg->Input.Connect.IpAddress);
+    if (IP_IS_V6(&ConnectAddr))
+        TCP6CountActiveOpen();
     Error = tcp_connect((PTCP_PCB)msg->Input.Connect.Connection->SocketContext,
                         &ConnectAddr, lwip_ntohs(msg->Input.Connect.Port),
                         InternalConnectEventHandler);
@@ -2174,6 +2176,9 @@ LibTCPAccept(PTCP_PCB pcb, struct tcp_pcb *listen_pcb, void *arg)
     tcp_sent(pcb, InternalSendEventHandler);
     tcp_err(pcb, InternalErrorEventHandler);
     tcp_arg(pcb, arg);
+
+    if (IP_IS_V6(&pcb->remote_ip))
+        TCP6CountPassiveOpen();
 
     /* The room the owner stated shrinks with each connection handed over; its next listen request
        states what is left */

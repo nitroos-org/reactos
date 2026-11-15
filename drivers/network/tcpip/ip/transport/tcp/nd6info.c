@@ -8,6 +8,12 @@
 /*
  * IP_IPV6_ND_ENTRY_ID hands out lwIP's neighbour cache and its on-link prefix list (tcpioctl.h).
  */
+/*
+ * IP_IPV6_STATS_ENTRY_ID hands out the counters kept here. They are bumped from the places every IPv6 datagram
+ * passes: the start of ip6_input (LWIP_HOOK_IP6_INPUT), the upper layer dispatch of ip6_input
+ * (LWIP_HOOK_IP6_NEXTH_INPUT) and the output callback of the IPv6 interface (TCPSendData6Callback). All of them run
+ * with the lwIP core lock held and use interlocked operations, as the query does not take that lock for the counters.
+ */
 
 #include "precomp.h"
 
@@ -141,6 +147,138 @@ TCPQueryIpv6Nd(PVOID Out, ULONG OutSize)
 
     Size = PrefixBase + PrefixCount * sizeof(TCP_IPV6_PREFIX_ROW);
     return Size;
+}
+
+static volatile LONG Ip6InReceives;
+static volatile LONG Ip6InDelivers;
+static volatile LONG Ip6OutRequests;
+static volatile LONG Tcp6InSegs;
+static volatile LONG Tcp6OutSegs;
+static volatile LONG Tcp6ActiveOpens;
+static volatile LONG Tcp6PassiveOpens;
+static volatile LONG Icmp6InMsgs;
+static volatile LONG Icmp6OutMsgs;
+static volatile LONG Icmp6In[256];
+static volatile LONG Icmp6Out[256];
+
+/* The next header of the datagram and, for ICMPv6 that follows the fixed header directly, its type (-1: none) */
+static
+VOID
+Nd6InfoClassify(const struct pbuf *p, UCHAR *NextHeader, int *IcmpType)
+{
+    UCHAR Type;
+
+    *NextHeader = 0;
+    *IcmpType = -1;
+    if (!p)
+        return;
+    if (p->len >= 41)
+    {
+        /* the usual case: the header and the first bytes behind it are in the first buffer */
+        const UCHAR *Datagram = p->payload;
+
+        *NextHeader = Datagram[6];
+        if (*NextHeader == IP6_NEXTH_ICMP6)
+            *IcmpType = Datagram[40];
+        return;
+    }
+    if (pbuf_copy_partial(p, NextHeader, 1, 6) != 1)
+        return;
+    if (*NextHeader == IP6_NEXTH_ICMP6 && pbuf_copy_partial(p, &Type, 1, 40) == 1)
+        *IcmpType = Type;
+}
+
+/* LWIP_HOOK_IP6_INPUT: a datagram enters the IPv6 layer. Never takes it */
+int
+LibIp6CountInput(struct pbuf *p, struct netif *inp)
+{
+    UCHAR NextHeader;
+    int Type;
+
+    UNREFERENCED_PARAMETER(inp);
+
+    InterlockedIncrement(&Ip6InReceives);
+    Nd6InfoClassify(p, &NextHeader, &Type);
+    if (Type >= 0)
+    {
+        InterlockedIncrement(&Icmp6InMsgs);
+        InterlockedIncrement(&Icmp6In[Type]);
+    }
+    return 0;
+}
+
+/* LWIP_HOOK_IP6_NEXTH_INPUT, before the transports: a datagram reached its upper layer protocol */
+void
+LibIp6CountDelivered(struct pbuf *p, struct netif *inp, u8_t nexth)
+{
+    UNREFERENCED_PARAMETER(p);
+    UNREFERENCED_PARAMETER(inp);
+
+    InterlockedIncrement(&Ip6InDelivers);
+    if (nexth == IP6_NEXTH_TCP)
+        InterlockedIncrement(&Tcp6InSegs);
+}
+
+/* A datagram goes out through the IPv6 interface's output callback (if6.c) */
+VOID
+TCP6CountOutput(const struct pbuf *p)
+{
+    UCHAR NextHeader;
+    int Type;
+
+    InterlockedIncrement(&Ip6OutRequests);
+    Nd6InfoClassify(p, &NextHeader, &Type);
+    if (NextHeader == IP6_NEXTH_TCP)
+        InterlockedIncrement(&Tcp6OutSegs);
+    if (Type >= 0)
+    {
+        InterlockedIncrement(&Icmp6OutMsgs);
+        InterlockedIncrement(&Icmp6Out[Type]);
+    }
+}
+
+VOID
+TCP6CountActiveOpen(VOID)
+{
+    InterlockedIncrement(&Tcp6ActiveOpens);
+}
+
+VOID
+TCP6CountPassiveOpen(VOID)
+{
+    InterlockedIncrement(&Tcp6PassiveOpens);
+}
+
+/* The IP_IPV6_STATS_ENTRY_ID answer: one TCP_IPV6_STATS. Returns its size; it is written when OutSize holds it */
+ULONG
+TCPQueryIpv6Stats(PVOID Out, ULONG OutSize)
+{
+    PTCP_IPV6_STATS Stats = Out;
+    ULONG i;
+
+    if (Out == NULL || OutSize < sizeof(*Stats))
+        return sizeof(*Stats);
+
+    RtlZeroMemory(Stats, sizeof(*Stats));
+    if (!TCPIpv6Enabled)
+        return sizeof(*Stats);
+
+    Stats->Enabled = 1;
+    Stats->IpInReceives = (ULONG)Ip6InReceives;
+    Stats->IpInDelivers = (ULONG)Ip6InDelivers;
+    Stats->IpOutRequests = (ULONG)Ip6OutRequests;
+    Stats->TcpInSegs = (ULONG)Tcp6InSegs;
+    Stats->TcpOutSegs = (ULONG)Tcp6OutSegs;
+    Stats->TcpActiveOpens = (ULONG)Tcp6ActiveOpens;
+    Stats->TcpPassiveOpens = (ULONG)Tcp6PassiveOpens;
+    Stats->IcmpInMsgs = (ULONG)Icmp6InMsgs;
+    Stats->IcmpOutMsgs = (ULONG)Icmp6OutMsgs;
+    for (i = 0; i < 256; i++)
+    {
+        Stats->IcmpIn[i] = (ULONG)Icmp6In[i];
+        Stats->IcmpOut[i] = (ULONG)Icmp6Out[i];
+    }
+    return sizeof(*Stats);
 }
 
 

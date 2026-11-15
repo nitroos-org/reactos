@@ -56,6 +56,8 @@
  * when DAD finds one in use (NitroOS hooks in nd6.c) */
 #define LWIP_HOOK_ND6_SLAAC_ADDRESS(netif, prefix, addr) LibNd6SlaacAddress(netif, prefix, addr)
 #define LWIP_HOOK_ND6_DAD_FAILED(netif, index) LibNd6DadFailed(netif, index)
+/* The IPv6 counters (nd6info.c): every datagram that enters ip6_input */
+#define LWIP_HOOK_IP6_INPUT(p, inp)     LibIp6CountInput(p, inp)
 /* Interface events: with IPv6 on, address changes set the adapter's multicast list (if6.c). Nothing listens
  * with it off */
 #define LWIP_NETIF_EXT_STATUS_CALLBACK  1
@@ -74,7 +76,7 @@
 #define LWIP_HOOK_ICMP6_ERROR_ALLOWED() LibIcmp6ErrorAllowed()
 /* NitroOS hooks in ip6_input (ip/transport/udp/udp6.c): UDP datagrams go to our datagram sockets (lwIP's UDP is
    off), and the multicast groups sockets joined are taken (MLD is off) */
-#define LWIP_HOOK_IP6_NEXTH_INPUT(p, inp, nexth) LibIp6NexthInput(p, inp, nexth)
+#define LWIP_HOOK_IP6_NEXTH_INPUT(p, inp, nexth) (LibIp6CountDelivered(p, inp, nexth), LibIp6NexthInput(p, inp, nexth))
 #define LWIP_HOOK_IP6_MCAST_ACCEPT(inp, dest) LibIp6McastAccept(inp, dest)
 #define LWIP_ICMP                       0
 

@@ -197,6 +197,29 @@ typedef struct _TCP_IPV6_PREFIX_ROW
     ULONG Lifetime;
 } TCP_IPV6_PREFIX_ROW, *PTCP_IPV6_PREFIX_ROW;
 
+/* Non public TOIID: the counters of the IPv6 path (what GetIpStatisticsEx, GetTcpStatisticsEx and
+   GetIcmpStatisticsEx report for AF_INET6), as one TCP_IPV6_STATS asked as IP_IPV6_TABLE_ENTRY_ID is. They count
+   what crossed lwIP's IPv6 layer since the stack started; Enabled is 0 (and every counter 0) while the IPv6 switch
+   is off. IcmpIn and IcmpOut are indexed by the ICMPv6 type; only a type that follows the fixed header directly is
+   counted. The counters the stack does not keep (errors, resets, retransmissions) are not in it */
+#define IP_IPV6_STATS_ENTRY_ID          0x118
+
+typedef struct _TCP_IPV6_STATS
+{
+    ULONG Enabled;
+    ULONG IpInReceives;     /* datagrams handed to the IPv6 layer */
+    ULONG IpInDelivers;     /* ... that reached an upper layer protocol */
+    ULONG IpOutRequests;    /* datagrams the IPv6 layer sent */
+    ULONG TcpInSegs;
+    ULONG TcpOutSegs;
+    ULONG TcpActiveOpens;
+    ULONG TcpPassiveOpens;
+    ULONG IcmpInMsgs;
+    ULONG IcmpOutMsgs;
+    ULONG IcmpIn[256];
+    ULONG IcmpOut[256];
+} TCP_IPV6_STATS, *PTCP_IPV6_STATS;
+
 /* Non public TOIID: the row of an IPv6 TCP socket (an AF_INET6 one, dual stack ones too), asked of its transport
    entity (CO_TL_ENTITY) as the IPv4 rows are; an entity of an IPv4 socket has none. The layout of
    MIB_TCP6ROW_OWNER_PID: the IPv4 side of a dual stack socket as ::ffff:a.b.c.d, ports in network order */

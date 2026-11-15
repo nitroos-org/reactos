@@ -348,7 +348,12 @@ TCPSendData6Callback(struct netif *netif, struct pbuf *p, const ip6_addr_t *Dest
 
     /* ::1: the loopback queue gives a copy back to lwIP on its worker (LoopInputPbuf) */
     if (IF == Loopback)
-        return LoopTransmitPbuf(p) ? ERR_OK : ERR_MEM;
+    {
+        if (!LoopTransmitPbuf(p))
+            return ERR_MEM;
+        TCP6CountOutput(p);
+        return ERR_OK;
+    }
 
     if (IF->AddressLength != 6 || !IF->Transmit || p->tot_len > IF->MTU)
         return ERR_IF;
@@ -381,6 +386,8 @@ TCPSendData6Callback(struct netif *netif, struct pbuf *p, const ip6_addr_t *Dest
             return ERR_OK;
         RtlCopyMemory(Mac, Hw, 6);
     }
+
+    TCP6CountOutput(p);
 
     if (AllocatePacketWithBuffer(&NdisPacket, NULL, p->tot_len) != NDIS_STATUS_SUCCESS)
         return ERR_MEM;

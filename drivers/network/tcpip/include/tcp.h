@@ -274,6 +274,15 @@ TCPQueryIpv6Dns(PVOID Out, ULONG OutSize);
 ULONG
 TCPQueryIpv6Nd(PVOID Out, ULONG OutSize);
 
+ULONG
+TCPQueryIpv6Stats(PVOID Out, ULONG OutSize);
+
+/* The counters of the IPv6 path (nd6info.c): a datagram leaves through the IPv6 output callback (the opens of TCP
+   connections are counted from lwip_glue/tcp.c, see lwip_glue.h) */
+struct pbuf;
+
+VOID
+TCP6CountOutput(const struct pbuf *p);
 
 
 /* A unicast IPv6 address of this machine (16 bytes, network order) that a socket may bind; *Zone gets the lwIP zone

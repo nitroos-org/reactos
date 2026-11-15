@@ -143,6 +143,10 @@ err_t       LibTCPClose(PCONNECTION_ENDPOINT Connection, const int safe, const i
 err_t       LibTCPGetPeerName(PTCP_PCB pcb, ip_addr_t *const ipaddr, u16_t *const port);
 err_t       LibTCPGetHostName(PTCP_PCB pcb, ip_addr_t *const ipaddr, u16_t *const port);
 void        LibTCPAccept(PTCP_PCB pcb, struct tcp_pcb *listen_pcb, void *arg);
+
+/* The counters of the IPv6 path (ip/transport/tcp/nd6info.c) */
+VOID        TCP6CountActiveOpen(VOID);
+VOID        TCP6CountPassiveOpen(VOID);
 void        LibTCPSetNoDelay(PTCP_PCB pcb, BOOLEAN Set);
 void        LibTCPSetKeepAlive(PTCP_PCB pcb, BOOLEAN Set);
 void        LibTcpSetKeepAliveValues(PTCP_PCB pcb, u32_t KeepAliveTime, u32_t KeepAliveInterval);

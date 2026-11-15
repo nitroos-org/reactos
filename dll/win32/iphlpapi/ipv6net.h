@@ -41,5 +41,9 @@ DWORD Ipv6BestRoute(const NET_LUID *InterfaceLuid, NET_IFINDEX InterfaceIndex, c
                     const SOCKADDR_INET *DestinationAddress, PMIB_IPFORWARD_ROW2 BestRoute,
                     SOCKADDR_INET *BestSourceAddress);
 
+/* The statistics of the IPv6 path, filled in from the stack's counters. FALSE: IPv6 is off, nothing was written */
+BOOL Ipv6GetIpStatistics(PMIB_IPSTATS Stats);
+BOOL Ipv6GetTcpStatistics(PMIB_TCPSTATS Stats);
+BOOL Ipv6GetIcmpStatistics(PMIB_ICMP_EX Stats);
 
 #endif

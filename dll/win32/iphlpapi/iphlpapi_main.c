@@ -2245,6 +2245,10 @@ DWORD WINAPI GetIpStatisticsEx(PMIB_IPSTATS pStats, DWORD dwFamily)
     if (dwFamily != AF_INET && dwFamily != AF_INET6)
         return ERROR_INVALID_PARAMETER;
 
+    /* IPv6 has counters of its own while the stack has IPv6 on; off it is answered as before */
+    if (dwFamily == AF_INET6 && Ipv6GetIpStatistics(pStats))
+        return NO_ERROR;
+
     if (!NT_SUCCESS(openTcpFile(&tcpFile, FILE_READ_DATA)))
         return ERROR_NOT_SUPPORTED;
 
@@ -2807,6 +2811,10 @@ DWORD WINAPI GetTcpStatisticsEx(PMIB_TCPSTATS pStats, DWORD dwFamily)
 
     if (dwFamily != AF_INET && dwFamily != AF_INET6)
         return ERROR_INVALID_PARAMETER;
+
+    /* IPv6 has counters of its own while the stack has IPv6 on; off it is answered as before */
+    if (dwFamily == AF_INET6 && Ipv6GetTcpStatistics(pStats))
+        return NO_ERROR;
 
     if (!NT_SUCCESS(openTcpFile(&tcpFile, FILE_READ_DATA)))
         return ERROR_NOT_SUPPORTED;
@@ -3908,15 +3916,19 @@ DWORD WINAPI NhpAllocateAndGetInterfaceInfoFromStack(IP_INTERFACE_NAME_INFO **pp
  */
 DWORD WINAPI GetIcmpStatisticsEx(PMIB_ICMP_EX pStats,DWORD dwFamily)
 {
-    FIXME(":stub\n");
-
     if (!pStats)
         return ERROR_INVALID_PARAMETER;
 
     if (dwFamily != AF_INET && dwFamily != AF_INET6)
         return ERROR_INVALID_PARAMETER;
 
-    return 0L;
+    /* ICMPv6 counts what the stack kept (Ipv6GetIcmpStatistics); the IPv4 stack keeps no ICMP counters (as
+       GetIcmpStatistics, no counter is reported), and with IPv6 off neither does the IPv6 side */
+    if (dwFamily == AF_INET6 && Ipv6GetIcmpStatistics(pStats))
+        return NO_ERROR;
+
+    memset(pStats, 0, sizeof(*pStats));
+    return NO_ERROR;
 }
 
 DWORD WINAPI
