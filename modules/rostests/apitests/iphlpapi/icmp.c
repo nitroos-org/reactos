@@ -682,6 +682,71 @@ test_IcmpSendEcho2Ex(void)
     IcmpCloseHandle(hIcmp);
 }
 
+/* An asynchronous echo keeps its IO_STATUS_BLOCK in the end of the reply buffer: whatever the alignment of the
+ * buffer's start and end (a 32-bit process on the 64-bit system included) the call starts the request and the
+ * event is signalled, none of them fails with ERROR_NOACCESS */
+static
+void
+test_IcmpSendEcho2Alignment(void)
+{
+    HANDLE hIcmp, hEvent;
+    UCHAR Data[ECHO2_DATA_SIZE];
+    static UCHAR Buffer[ECHO2_REPLY_SIZE + 64];
+    IPAddr Loopback = htonl(INADDR_LOOPBACK);
+    DWORD Ret, Error, Wait, Start, Extra, Failures = 0, Calls = 0, Bad = 0;
+
+    if (!pIcmpSendEcho2 || !pIcmpParseReplies)
+    {
+        skip("IcmpSendEcho2 or IcmpParseReplies is not available\n");
+        return;
+    }
+
+    hIcmp = IcmpCreateFile();
+    hEvent = CreateEventW(NULL, FALSE, FALSE, NULL);
+    if (hIcmp == INVALID_HANDLE_VALUE || !hEvent)
+    {
+        skip("IcmpCreateFile failed unexpectedly: %lu\n", GetLastError());
+        goto quit;
+    }
+    FillEchoData(Data, sizeof(Data));
+
+    /* Every offset of the start (0..7) and every size from the documented minimum up by 0..15 bytes */
+    for (Start = 0; Start < 8; Start++)
+    {
+        for (Extra = 0; Extra < 16; Extra++)
+        {
+            Calls++;
+            memset(Buffer, 0xCC, sizeof(Buffer));
+            SetLastError(0xDEADBEEF);
+            Ret = pIcmpSendEcho2(hIcmp, hEvent, NULL, NULL, Loopback, Data, sizeof(Data), NULL,
+                                 Buffer + Start, ECHO2_REPLY_SIZE + Extra, 3000);
+            Error = GetLastError();
+            if (Ret != 0 || Error != ERROR_IO_PENDING)
+            {
+                if (Failures++ < 5)
+                    ok(0, "start +%lu, size +%lu: returned %lu, error %lu\n", Start, Extra, Ret, Error);
+                continue;
+            }
+            Wait = WaitForSingleObject(hEvent, 5000);
+            if (Wait != WAIT_OBJECT_0)
+            {
+                ok(0, "start +%lu, size +%lu: the event was not signalled: %lu\n", Start, Extra, Wait);
+                Bad++;
+                break;
+            }
+        }
+        if (Bad)
+            break;
+    }
+    ok(Failures == 0, "%lu of %lu asynchronous echoes failed to start\n", Failures, Calls);
+
+quit:
+    if (hEvent)
+        CloseHandle(hEvent);
+    if (hIcmp != INVALID_HANDLE_VALUE)
+        IcmpCloseHandle(hIcmp);
+}
+
 START_TEST(icmp)
 {
     HMODULE hIphlpapi = GetModuleHandleW(L"iphlpapi.dll");
@@ -700,4 +765,5 @@ START_TEST(icmp)
     test_IcmpSendEchoConcurrent();
     test_IcmpSendEcho2();
     test_IcmpSendEcho2Ex();
+    test_IcmpSendEcho2Alignment();
 }

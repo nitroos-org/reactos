@@ -1025,7 +1025,8 @@ PVOID getTcpTable(CLASS_TABLE Class)
 }
 
 /* The IPv6 TCP sockets (listeners and connections of AF_INET6 sockets, dual stack ones too) as a
- * MIB_TCP6TABLE_OWNER_PID: one row per transport entity that has one (IP_TCP6_ROW_ENTRY_ID). Connections in
+ * MIB_TCP6TABLE_OWNER_PID: the rows of each transport entity (IP_TCP6_ROW_ENTRY_ID): its listener and the connections
+ * of its address file, accepted ones included. Connections in
  * TIME_WAIT have no socket and are not listed. HeapFree() the table; NULL without memory or a stack */
 PMIB_TCP6TABLE_OWNER_PID getTcp6Table(void)
 {
@@ -1056,22 +1057,26 @@ PMIB_TCP6TABLE_OWNER_PID getTcp6Table(void)
         status = tdiGetSetOfThings(tcpFile, INFO_CLASS_PROTOCOL, INFO_TYPE_PROVIDER, IP_TCP6_ROW_ENTRY_ID,
                                    CO_TL_ENTITY, entitySet[i].tei_instance, 0, sizeof(*Row), (PVOID *)&Row,
                                    &returnSize);
-        if (NT_SUCCESS(status) && Row && returnSize == 1)
+        /* An entity may have several rows: its listener and each connection it accepted */
+        if (NT_SUCCESS(status) && Row)
         {
-            if (Count == Max)
+            DWORD r;
+
+            for (r = 0; Table && r < returnSize; r++)
             {
-                Max = Max ? Max * 2 : 16;
-                Bigger = HeapReAlloc(GetProcessHeap(), 0, Table,
-                                     FIELD_OFFSET(MIB_TCP6TABLE_OWNER_PID, table) + Max * sizeof(MIB_TCP6ROW_OWNER_PID));
-                if (!Bigger)
+                if (Count == Max)
                 {
-                    HeapFree(GetProcessHeap(), 0, Table);
-                    Table = NULL;
+                    Max = Max ? Max * 2 : 16;
+                    Bigger = HeapReAlloc(GetProcessHeap(), 0, Table,
+                                         FIELD_OFFSET(MIB_TCP6TABLE_OWNER_PID, table) + Max * sizeof(MIB_TCP6ROW_OWNER_PID));
+                    if (!Bigger)
+                        HeapFree(GetProcessHeap(), 0, Table);
+                    Table = Bigger;
+                    if (!Table)
+                        break;
                 }
-                Table = Bigger;
+                CopyMemory(&Table->table[Count++], &Row[r], sizeof(*Row));
             }
-            if (Table)
-                CopyMemory(&Table->table[Count++], Row, sizeof(*Row));
         }
         if (Row)
             tdiFreeThingSet(Row);
