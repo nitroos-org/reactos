@@ -296,6 +296,17 @@ ErrorHasReply(
     return FALSE;
 }
 
+static
+VOID
+FillRequestData(
+    _Out_writes_(PACKET_SIZE) BYTE *Data)
+{
+    ULONG i;
+
+    for (i = 0; i < PACKET_SIZE; i++)
+        Data[i] = (BYTE)('a' + i % 23);
+}
+
 /* One echo request with the given TTL. Answered: the status of the reply (even an error one) and its sender. */
 static
 BOOL
@@ -307,10 +318,8 @@ Probe(
     BYTE Data[PACKET_SIZE];
     IP_OPTION_INFORMATION Info;
     DWORD Count;
-    ULONG i;
 
-    for (i = 0; i < sizeof(Data); i++)
-        Data[i] = (BYTE)('a' + i % 23);
+    FillRequestData(Data);
     ZeroMemory(&Info, sizeof(Info));
     Info.Ttl = (UCHAR)Ttl;
     ZeroMemory(Answer, sizeof(*Answer));
@@ -345,6 +354,103 @@ Probe(
                               (WORD)sizeof(Data), &Info, Prober->Reply, Prober->ReplySize, Options.Timeout);
         if (Count == 0 && !ErrorHasReply(GetLastError(), Answer))
             return TRUE;
+        Answer->Status = Reply->Status;
+        Answer->Rtt = Reply->RoundTripTime;
+        Answer->From.si_family = AF_INET;
+        Answer->From.Ipv4.sin_addr.s_addr = Reply->Address;
+    }
+    return TRUE;
+}
+
+/*
+ * The statistics phase keeps one request of every hop in flight: a hop that does not answer then costs its
+ * time out once, at the end, and not once per hop and query, and the requests leave every -p milliseconds as
+ * the announced time says. A slot is the request of one hop: its own reply buffer (the status block of the
+ * request is kept in the end of it) and the event the stack sets when the reply, an ICMP error or the time
+ * out is there.
+ */
+#define SIZEOF_ASYNC_STATUS     (2 * sizeof(PVOID) + 8)
+
+typedef struct _SLOT
+{
+    HANDLE Event;
+    PVOID Reply;
+    DWORD ReplySize;
+    BOOL Pending;
+} SLOT;
+
+static
+VOID
+StartProbe(
+    _Inout_ PROBER *Prober,
+    _In_ ULONG Ttl,
+    _Inout_ SLOT *Slot)
+{
+    BYTE Data[PACKET_SIZE];
+    IP_OPTION_INFORMATION Info;
+    DWORD Error;
+
+    FillRequestData(Data);
+    ZeroMemory(&Info, sizeof(Info));
+    Info.Ttl = (UCHAR)Ttl;
+    ZeroMemory(Slot->Reply, Slot->ReplySize);
+    ResetEvent(Slot->Event);
+
+    SetLastError(ERROR_SUCCESS);
+    if (Prober->Family == AF_INET6)
+    {
+        struct sockaddr_in6 Source, Destination;
+
+        ((PICMPV6_ECHO_REPLY)Slot->Reply)->Status = IP_REQ_TIMED_OUT;
+        ZeroMemory(&Source, sizeof(Source));
+        Source.sin6_family = AF_INET6;
+        memcpy(&Destination, &Prober->Target.Ipv6, sizeof(Destination));
+        Icmp6SendEcho2(Prober->Icmp, Slot->Event, NULL, NULL, &Source, &Destination, Data, (WORD)sizeof(Data),
+                       &Info, Slot->Reply, Slot->ReplySize, Options.Timeout);
+    }
+    else
+    {
+        ((ECHO_REPLY4 *)Slot->Reply)->Status = IP_REQ_TIMED_OUT;
+        IcmpSendEcho2(Prober->Icmp, Slot->Event, NULL, NULL, Prober->Target.Ipv4.sin_addr.s_addr, Data,
+                      (WORD)sizeof(Data), &Info, Slot->Reply, Slot->ReplySize, Options.Timeout);
+    }
+    Error = GetLastError();
+
+    /* in flight, or done already (the event is set then as well); any other error: the request never left */
+    Slot->Pending = (Error == ERROR_IO_PENDING || Error == ERROR_SUCCESS);
+}
+
+/* Waits for the request of the slot (the stack ends each by its time out at the latest) and reads its answer */
+static
+BOOL
+FinishProbe(
+    _Inout_ PROBER *Prober,
+    _Inout_ SLOT *Slot,
+    _Out_ ANSWER *Answer)
+{
+    ZeroMemory(Answer, sizeof(*Answer));
+    Answer->Status = IP_REQ_TIMED_OUT;
+
+    if (!Slot->Pending)
+        return FALSE;
+    WaitForSingleObject(Slot->Event, INFINITE);
+    Slot->Pending = FALSE;
+
+    if (Prober->Family == AF_INET6)
+    {
+        PICMPV6_ECHO_REPLY Reply = Slot->Reply;
+
+        Answer->Status = Reply->Status;
+        Answer->Rtt = Reply->RoundTripTime;
+        Answer->From.si_family = AF_INET6;
+        memcpy(&Answer->From.Ipv6.sin6_addr, Reply->Address.sin6_addr, sizeof(IN6_ADDR));
+        if (IN6_IS_ADDR_LINKLOCAL(&Answer->From.Ipv6.sin6_addr))
+            Answer->From.Ipv6.sin6_scope_id = Reply->Address.sin6_scope_id;
+    }
+    else
+    {
+        ECHO_REPLY4 *Reply = Slot->Reply;
+
         Answer->Status = Reply->Status;
         Answer->Rtt = Reply->RoundTripTime;
         Answer->From.si_family = AF_INET;
@@ -475,6 +581,7 @@ RunPathPing(VOID)
     PROBER Prober;
     SOCKADDR_INET Target, Source;
     HOP *Hops = NULL;
+    SLOT *Slots = NULL;
     BOOL Literal, Reached = FALSE, HaveSource;
     WCHAR Text[NI_MAXHOST + 80], Numeric[64];
     ULONG Hop, Count = 0, Round, Seconds;
@@ -531,7 +638,8 @@ RunPathPing(VOID)
         if (!Probe(&Prober, Hop, &Answer))
             break;
 
-        if (Answer.Status == IP_REQ_TIMED_OUT)
+        /* no answer, or a request that never left (an error of the call has no sender) */
+        if (Answer.Status == IP_REQ_TIMED_OUT || IsUnspecifiedAddress(&Answer.From))
         {
             ConPrintf(StdOut, L"%3lu     *\n", Hop);
             continue;
@@ -557,19 +665,30 @@ RunPathPing(VOID)
     ConPuts(StdOut, L"            Source to Here   This Node/Link\n");
     ConPuts(StdOut, L"Hop  RTT    Lost/Sent = Pct  Lost/Sent = Pct  Address\n");
 
+    Slots = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (Count + 1) * sizeof(SLOT));
+    if (Slots == NULL)
+        goto Done;
+    for (Hop = 1; Hop <= Count; Hop++)
+    {
+        Slots[Hop].ReplySize = ReplySize + SIZEOF_ASYNC_STATUS;
+        Slots[Hop].Reply = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, Slots[Hop].ReplySize);
+        Slots[Hop].Event = CreateEventW(NULL, TRUE, FALSE, NULL);
+        if (Slots[Hop].Reply == NULL || Slots[Hop].Event == NULL)
+            goto Done;
+    }
+
     Start = GetTickCount();
-    for (Round = 0; Round < Options.Queries; Round++)
+    for (Round = 0; Round <= Options.Queries; Round++)
     {
         for (Hop = 1; Hop <= Count; Hop++, Index++)
         {
             ANSWER Answer;
             ULONG64 Due = Index * Options.Period, Now = (DWORD)(GetTickCount() - Start);
 
-            if (Due > Now)
-                Sleep((DWORD)(Due - Now));
-            if (!Probe(&Prober, Hop, &Answer))
-                continue;
-            if (Answer.Status == IP_SUCCESS || Answer.Status == IP_TTL_EXPIRED_TRANSIT)
+            /* the request of this hop from the round before; the last round only collects */
+            if (FinishProbe(&Prober, &Slots[Hop], &Answer) &&
+                (Answer.Status == IP_SUCCESS || Answer.Status == IP_TTL_EXPIRED_TRANSIT) &&
+                !IsUnspecifiedAddress(&Answer.From))
             {
                 Hops[Hop].Replies++;
                 Hops[Hop].RttTotal += Answer.Rtt;
@@ -579,6 +698,12 @@ RunPathPing(VOID)
                     Hops[Hop].Address = Answer.From;
                 }
             }
+            if (Round == Options.Queries)
+                continue;
+
+            if (Due > Now)
+                Sleep((DWORD)(Due - Now));
+            StartProbe(&Prober, Hop, &Slots[Hop]);
         }
     }
 
@@ -640,6 +765,20 @@ RunPathPing(VOID)
     Result = 0;
 
 Done:
+    if (Slots)
+    {
+        /* a buffer is the stack's until its request is over */
+        for (Hop = 1; Hop <= Count; Hop++)
+        {
+            if (Slots[Hop].Pending)
+                WaitForSingleObject(Slots[Hop].Event, INFINITE);
+            if (Slots[Hop].Event)
+                CloseHandle(Slots[Hop].Event);
+            if (Slots[Hop].Reply)
+                HeapFree(GetProcessHeap(), 0, Slots[Hop].Reply);
+        }
+        HeapFree(GetProcessHeap(), 0, Slots);
+    }
     if (Prober.Icmp != NULL && Prober.Icmp != INVALID_HANDLE_VALUE)
         IcmpCloseHandle(Prober.Icmp);
     if (Prober.Reply)
