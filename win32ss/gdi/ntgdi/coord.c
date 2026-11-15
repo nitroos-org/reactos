@@ -153,7 +153,7 @@ DC_vGetPageToDevice(PDC pdc, MATRIX *pmx)
     if (szlWindowExt.cx != 0)
     {
         FLOATOBJ_SetLong(&pmx->efM11, pszlViewPortExt->cx);
-        FLOATOBJ_DivLong(&pmx->efM11, szlWindowExt.cx);
+        FLOATOBJ_TruncDivLong(&pmx->efM11, szlWindowExt.cx);
     }
     else
         FLOATOBJ_SetLong(&pmx->efM11, 1);
@@ -161,20 +161,20 @@ DC_vGetPageToDevice(PDC pdc, MATRIX *pmx)
     if (szlWindowExt.cy != 0)
     {
         FLOATOBJ_SetLong(&pmx->efM22, pszlViewPortExt->cy);
-        FLOATOBJ_DivLong(&pmx->efM22, szlWindowExt.cy);
+        FLOATOBJ_TruncDivLong(&pmx->efM22, szlWindowExt.cy);
     }
     else
         FLOATOBJ_SetLong(&pmx->efM22, 1);
 
     /* Calculate x offset */
     FLOATOBJ_SetLong(&pmx->efDx, -pdcattr->ptlWindowOrg.x);
-    FLOATOBJ_Mul(&pmx->efDx, &pmx->efM11);
-    FLOATOBJ_AddLong(&pmx->efDx, pdcattr->ptlViewportOrg.x);
+    FLOATOBJ_TruncMul(&pmx->efDx, &pmx->efM11);
+    FLOATOBJ_TruncAddLong(&pmx->efDx, pdcattr->ptlViewportOrg.x);
 
     /* Calculate y offset */
     FLOATOBJ_SetLong(&pmx->efDy, -pdcattr->ptlWindowOrg.y);
-    FLOATOBJ_Mul(&pmx->efDy, &pmx->efM22);
-    FLOATOBJ_AddLong(&pmx->efDy, pdcattr->ptlViewportOrg.y);
+    FLOATOBJ_TruncMul(&pmx->efDy, &pmx->efM22);
+    FLOATOBJ_TruncAddLong(&pmx->efDy, pdcattr->ptlViewportOrg.y);
 }
 
 VOID

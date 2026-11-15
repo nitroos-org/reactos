@@ -97,6 +97,15 @@ extern const FLOATOBJ gef16;
 #define FLOATOBJ_Set0(fo) do { (fo)->ul1 = 0; (fo)->ul2 = 0; } while (0)
 #define FLOATOBJ_Set1(fo) do { (fo)->ul1 = 0x40000000; (fo)->ul2 = 2; } while (0)
 
+/* The i386 FLOATOBJ operations already truncate their results */
+#define FLOATOBJ_TruncAdd FLOATOBJ_Add
+#define FLOATOBJ_TruncSub FLOATOBJ_Sub
+#define FLOATOBJ_TruncMul FLOATOBJ_Mul
+#define FLOATOBJ_TruncDiv FLOATOBJ_Div
+#define FLOATOBJ_TruncAddLong FLOATOBJ_AddLong
+#define FLOATOBJ_TruncMulLong FLOATOBJ_MulLong
+#define FLOATOBJ_TruncDivLong FLOATOBJ_DivLong
+
 #else
 
 #define FLOATOBJ_bConvertToLong(pf, pl) (*pl = (LONG)*pf, TRUE)
@@ -117,5 +126,38 @@ static const FLOATOBJ gef16 = 16.;
 
 #define FLOATOBJ_Set0(fo) *(fo) = 0;
 #define FLOATOBJ_Set1(fo) *(fo) = 1;
+
+/*
+ * Arithmetic for the transform matrices that rounds toward zero, like the
+ * i386 FLOATOBJ emulation (which truncates its 32 bit mantissa) and Windows.
+ * The plain FLOATOBJ_Mul etc. of amd64 round to nearest, which turns a value
+ * a hair below a tie (7/3 * 1.5 = 3.4999999) into exactly 3.5 and makes
+ * LPtoDP round the other way than on i386 (206.5 instead of 206.49999).
+ * The operation is done in double (exact for the product of two floats) and
+ * the result is truncated to a FLOAT.
+ */
+static
+inline
+FLOAT
+_FLOATOBJ_TruncToFloat(DOUBLE d)
+{
+    union { FLOAT f; ULONG ul; } u;
+    DOUBLE df;
+
+    u.f = (FLOAT)d;
+    df = u.f;
+
+    /* Branch free: if (FLOAT)d rounded away from zero, step back by one unit (a NaN never does) */
+    u.ul -= (d < 0) ? (df < d) : (df > d);
+    return u.f;
+}
+
+#define FLOATOBJ_TruncAdd(pf, pf1)      {*(pf) = _FLOATOBJ_TruncToFloat((DOUBLE)*(pf) + *(pf1));}
+#define FLOATOBJ_TruncSub(pf, pf1)      {*(pf) = _FLOATOBJ_TruncToFloat((DOUBLE)*(pf) - *(pf1));}
+#define FLOATOBJ_TruncMul(pf, pf1)      {*(pf) = _FLOATOBJ_TruncToFloat((DOUBLE)*(pf) * *(pf1));}
+#define FLOATOBJ_TruncDiv(pf, pf1)      {*(pf) = _FLOATOBJ_TruncToFloat((DOUBLE)*(pf) / *(pf1));}
+#define FLOATOBJ_TruncAddLong(pf, l)    {*(pf) = _FLOATOBJ_TruncToFloat((DOUBLE)*(pf) + (l));}
+#define FLOATOBJ_TruncMulLong(pf, l)    {*(pf) = _FLOATOBJ_TruncToFloat((DOUBLE)*(pf) * (l));}
+#define FLOATOBJ_TruncDivLong(pf, l)    {*(pf) = _FLOATOBJ_TruncToFloat((DOUBLE)*(pf) / (l));}
 
 #endif
