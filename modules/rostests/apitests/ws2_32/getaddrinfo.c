@@ -361,20 +361,35 @@ TestLocalhostInet6(VOID)
         }
     }
 
-    /* AF_UNSPEC is deliberately IPv4 only here: every result is IPv4 */
-    ZeroMemory(&Hints, sizeof(Hints));
-    Hints.ai_socktype = SOCK_STREAM;
-    AddrInfo = InvalidPointer;
-    Error = getaddrinfo("localhost", "80", &Hints, &AddrInfo);
-    ok(Error == 0, "AF_UNSPEC localhost returned %d\n", Error);
-    if (Error == 0 && AddrInfo && AddrInfo != InvalidPointer)
+    /* AF_UNSPEC: a system without IPv6 sockets answers IPv4 only. With them (Windows 10, measured: the answer for
+     * "localhost" is [ ::1, 127.0.0.1 ], IPv6 first) both families come, ::1 first, and nothing else */
     {
-        PADDRINFOA Cur;
+        SOCKET Probe = socket(AF_INET6, SOCK_STREAM, 0);
+        BOOL HasIpv6 = (Probe != INVALID_SOCKET);
 
-        ok_dec(AddrInfo->ai_family, AF_INET);
-        for (Cur = AddrInfo; Cur; Cur = Cur->ai_next)
-            ok(Cur->ai_family == AF_INET, "AF_UNSPEC localhost returned family %d\n", Cur->ai_family);
-        freeaddrinfo(AddrInfo);
+        if (HasIpv6)
+            closesocket(Probe);
+
+        ZeroMemory(&Hints, sizeof(Hints));
+        Hints.ai_socktype = SOCK_STREAM;
+        AddrInfo = InvalidPointer;
+        Error = getaddrinfo("localhost", "80", &Hints, &AddrInfo);
+        ok(Error == 0, "AF_UNSPEC localhost returned %d\n", Error);
+        if (Error == 0 && AddrInfo && AddrInfo != InvalidPointer)
+        {
+            PADDRINFOA Cur;
+            INT Count = 0;
+
+            ok_dec(AddrInfo->ai_family, HasIpv6 ? AF_INET6 : AF_INET);
+            for (Cur = AddrInfo; Cur; Cur = Cur->ai_next, Count++)
+            {
+                ok(Cur->ai_family == (HasIpv6 && Count == 0 ? AF_INET6 : AF_INET),
+                   "AF_UNSPEC localhost: entry %d has family %d (IPv6 sockets %s)\n",
+                   Count, Cur->ai_family, HasIpv6 ? "on" : "off");
+            }
+            ok(Count >= (HasIpv6 ? 2 : 1), "AF_UNSPEC localhost returned %d entries\n", Count);
+            freeaddrinfo(AddrInfo);
+        }
     }
 
     /* A name is not a numeric host */
