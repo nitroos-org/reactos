@@ -21,6 +21,7 @@ extern void func_IpInterface(void);
 extern void func_IpTables2(void);
 extern void func_Ipv6Dns(void);
 extern void func_Ipv6Reporting(void);
+extern void func_Ipv6StableId(void);
 extern void func_NeighborEntry2(void);
 extern void func_NetstatOutput(void);
 extern void func_NotifyAddrChange(void);
@@ -54,6 +55,7 @@ const struct test winetest_testlist[] =
     { "IpTables2",                  func_IpTables2 },
     { "Ipv6Dns",                    func_Ipv6Dns },
     { "Ipv6Reporting",              func_Ipv6Reporting },
+    { "Ipv6StableId",               func_Ipv6StableId },
     { "NeighborEntry2",             func_NeighborEntry2 },
     { "NetstatOutput",              func_NetstatOutput },
     { "NotifyAddrChange",          func_NotifyAddrChange },

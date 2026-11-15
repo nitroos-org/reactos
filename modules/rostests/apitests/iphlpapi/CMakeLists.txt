@@ -19,6 +19,7 @@ list(APPEND SOURCE
     IpTables2.c
     Ipv6Dns.c
     Ipv6Reporting.c
+    Ipv6StableId.c
     NeighborEntry2.c
     NetstatOutput.c
     NotifyAddrChange.c
