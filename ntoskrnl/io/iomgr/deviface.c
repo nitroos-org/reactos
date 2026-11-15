@@ -1446,15 +1446,15 @@ cleanup:
  *          system thread
  *
  *--*/
+static
 NTSTATUS
-NTAPI
-IoRegisterDeviceInterface(IN PDEVICE_OBJECT PhysicalDeviceObject,
-                          IN CONST GUID *InterfaceClassGuid,
-                          IN PUNICODE_STRING ReferenceString OPTIONAL,
-                          OUT PUNICODE_STRING SymbolicLinkName)
+IopRegisterDeviceInterface(IN PDEVICE_OBJECT PhysicalDeviceObject,
+                           IN PCUNICODE_STRING InterfaceClassGuidString,
+                           IN PUNICODE_STRING ReferenceString OPTIONAL,
+                           OUT PUNICODE_STRING SymbolicLinkName)
 {
     PUNICODE_STRING InstancePath;
-    UNICODE_STRING GuidString;
+    UNICODE_STRING GuidString = *InterfaceClassGuidString;
     UNICODE_STRING SubKeyName;
     UNICODE_STRING InterfaceKeyName;
     UNICODE_STRING BaseKeyName;
@@ -1503,13 +1503,6 @@ IoRegisterDeviceInterface(IN PDEVICE_OBJECT PhysicalDeviceObject,
                 (ReferenceString->Buffer[i] == '/'))
                 return STATUS_INVALID_DEVICE_REQUEST;
         }
-    }
-
-    Status = RtlStringFromGUID(InterfaceClassGuid, &GuidString);
-    if (!NT_SUCCESS(Status))
-    {
-        DPRINT("RtlStringFromGUID() failed with status 0x%08lx\n", Status);
-        return Status;
     }
 
     /* Create Pdo name: \Device\xxxxxxxx (unnamed device) */
@@ -1780,6 +1773,32 @@ IoRegisterDeviceInterface(IN PDEVICE_OBJECT PhysicalDeviceObject,
     ExFreePool(BaseKeyName.Buffer);
 
     return NT_SUCCESS(Status) ? SymLinkStatus : Status;
+}
+
+NTSTATUS
+NTAPI
+IoRegisterDeviceInterface(IN PDEVICE_OBJECT PhysicalDeviceObject,
+                          IN CONST GUID *InterfaceClassGuid,
+                          IN PUNICODE_STRING ReferenceString OPTIONAL,
+                          OUT PUNICODE_STRING SymbolicLinkName)
+{
+    UNICODE_STRING GuidString;
+    NTSTATUS Status;
+
+    Status = RtlStringFromGUID(InterfaceClassGuid, &GuidString);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT("RtlStringFromGUID() failed with status 0x%08lx\n", Status);
+        return Status;
+    }
+
+    /* The string is only needed while the names are built: free it on every exit */
+    Status = IopRegisterDeviceInterface(PhysicalDeviceObject,
+                                        &GuidString,
+                                        ReferenceString,
+                                        SymbolicLinkName);
+    RtlFreeUnicodeString(&GuidString);
+    return Status;
 }
 
 /*++

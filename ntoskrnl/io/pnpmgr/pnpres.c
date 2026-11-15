@@ -1717,7 +1717,15 @@ IopDetectResourceConflict(
                   ExFreePoolWithTag(HalTranslated, TAG_IO);
               ExFreePoolWithTag(KeyValueInformation, TAG_IO);
           }
+
+          /* Done with this level 3 key: the next iteration opens another one */
+          ObCloseHandle(ChildKey3, KernelMode);
+          ChildKey3 = NULL;
       }
+
+      /* Same for the level 2 key */
+      ObCloseHandle(ChildKey2, KernelMode);
+      ChildKey2 = NULL;
    }
 
 cleanup:
