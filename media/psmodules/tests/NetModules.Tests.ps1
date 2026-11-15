@@ -925,9 +925,12 @@ Describe 'write cmdlets: round trip on the guest (state read back with the Get- 
         }
         $e = @(Err { Set-NetIPInterface -InterfaceIndex $script:ix -AddressFamily IPv4 -InterfaceMetric 5 -AutomaticMetric Enabled -Confirm:$false })
         $e[0].FullyQualifiedErrorId | Should -Be 'Windows System Error 87,Set-NetIPInterface'
-        $e = @(Err { Set-NetIPInterface -InterfaceIndex $script:ix -AddressFamily IPv4 -InterfaceMetric 5 -PolicyStore ActiveStore -Confirm:$false })
-        $e[0].FullyQualifiedErrorId | Should -Be 'Windows System Error 50,Set-NetIPInterface'
+        # the ActiveStore alone is in force at once and writes nothing; the PersistentStore alone writes and changes nothing in force
+        $null = Set-NetIPInterface -InterfaceIndex $script:ix -AddressFamily IPv4 -InterfaceMetric 5 -PolicyStore ActiveStore -Confirm:$false
+        (Get-NetIPInterface -InterfaceIndex $script:ix -AddressFamily IPv4).InterfaceMetric | Should -Be 5
         (Get-ItemProperty $script:regPath).InterfaceMetric | Should -Be 55
+        $null = Set-NetIPInterface -InterfaceIndex $script:ix -AddressFamily IPv4 -InterfaceMetric 55 -PolicyStore ActiveStore -Confirm:$false
+        (Get-NetIPInterface -InterfaceIndex $script:ix -AddressFamily IPv4).InterfaceMetric | Should -Be 55
         # the framework's view of the same interface list still enumerates
         { [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() | ForEach-Object { $_.GetIPProperties().GetIPv4Properties() | Out-Null } } | Should -Not -Throw
         $r = Set-NetIPInterface -InterfaceIndex $script:ix -AddressFamily IPv4 -AutomaticMetric Enabled -PassThru
