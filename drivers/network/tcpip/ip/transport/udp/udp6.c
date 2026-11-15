@@ -625,9 +625,11 @@ UDPSendDatagram6(
 
     Result = ip6_output_if(p, &Source, &Dest, Multicast ? McastHops : Hops, 0, IP6_NEXTH_UDP, netif);
 
+    /* Only a datagram that was sent (or is kept for neighbour discovery, which counts as sent) reaches the members
+       here: nobody sees one whose sendto fails */
     if (Copy)
     {
-        if (netif != LoopNetif)
+        if (netif != LoopNetif && (Result == ERR_OK || Result == ERR_INPROGRESS))
         {
             PIP_INTERFACE IF = netif->state;
 
