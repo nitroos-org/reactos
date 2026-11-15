@@ -30,6 +30,14 @@
 
 //#define EXPERIMENTAL_MOUSE_CURSOR_SUPPORT
 
+#define FB_MAX_DIRTY 8
+/* Drawing this long (ms) after the last copy to the frame buffer is copied at once */
+#define FB_FLUSH_MS 8
+
+/* Exported by win32k, not declared in winddi.h: milliseconds since boot */
+ULONGLONG APIENTRY
+EngGetTickCount(VOID);
+
 typedef struct _PDEV
 {
    HANDLE hDriver;
@@ -49,6 +57,10 @@ typedef struct _PDEV
    HSURF hShadow;         /* System memory copy of the screen GDI draws on */
    SURFOBJ *psoShadow;
    BOOL bScreenEnabled;   /* Drawing reaches the frame buffer (DrvAssertMode) */
+   /* Parts of the shadow not copied to the frame buffer yet (shadow.c) */
+   ULONG cDirty;
+   RECTL arclDirty[FB_MAX_DIRTY];
+   ULONG ulFlushTick;     /* EngGetTickCount of the last copy */
    HPALETTE DefaultPalette;
    PALETTEENTRY *PaletteEntries;
 

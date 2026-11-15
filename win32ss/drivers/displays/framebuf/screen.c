@@ -311,7 +311,8 @@ IntInitScreenInfo(
    pDevInfo->cxDither = 0;
    pDevInfo->cyDither = 0;
    pDevInfo->hpalDefault = 0;
-   pDevInfo->flGraphicsCaps2 = 0;
+   /* Copies to the frame buffer are batched until DrvSynchronizeSurface (shadow.c) */
+   pDevInfo->flGraphicsCaps2 = GCAPS2_SYNCTIMER;
 
    if (ppdev->BitsPerPixel == 8)
    {

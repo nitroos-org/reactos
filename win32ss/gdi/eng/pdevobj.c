@@ -25,6 +25,14 @@ MultiEnableDriver(
 extern DRVFN gPanDispDrvFn[];
 extern ULONG gPanDispDrvCount;
 
+/* Display drivers with GCAPS2_SYNCTIMER (the frame buffer driver copies its shadow to the screen in batches): the raw
+ * input thread calls DrvSynchronizeSurface when this timer fires, about a clock tick after drawing on the screen */
+PKTIMER gDisplaySyncTimer = NULL;
+static volatile LONG glDisplaySyncArmed;
+
+#define DISPLAY_SYNC_100NS  (1 * 10000)     /* due time: the timer fires at the next clock tick */
+#define DISPLAY_SYNC_MAX    8
+
 CODE_SEG("INIT")
 NTSTATUS
 NTAPI
@@ -32,7 +40,115 @@ InitPDEVImpl(VOID)
 {
     ghsemPDEV = EngCreateSemaphore();
     if (!ghsemPDEV) return STATUS_INSUFFICIENT_RESOURCES;
+
+    /* Without it, such a driver copies only when drawing goes on (see PDEVOBJ_vArmDisplaySync) */
+    gDisplaySyncTimer = ExAllocatePoolWithTag(NonPagedPool, sizeof(KTIMER), GDITAG_PDEV);
+    if (gDisplaySyncTimer)
+        KeInitializeTimerEx(gDisplaySyncTimer, SynchronizationTimer);
+
     return STATUS_SUCCESS;
+}
+
+static
+BOOL
+PDEVOBJ_bHasDisplaySync(
+    _In_ PPDEVOBJ ppdev)
+{
+    return (ppdev->flFlags & PDEV_DISPLAY) &&
+           (ppdev->devinfo.flGraphicsCaps2 & GCAPS2_SYNCTIMER) &&
+           ppdev->DriverFunctions.SynchronizeSurface != NULL;
+}
+
+/*
+ * After drawing on a device: a driver with GCAPS2_SYNCTIMER may have kept part of it from the screen, so make sure it
+ * is called back (PDEVOBJ_vDisplaySyncTimer). Cheap when the timer is already armed.
+ */
+VOID
+NTAPI
+PDEVOBJ_vArmDisplaySync(
+    _In_ PPDEVOBJ ppdev)
+{
+    LARGE_INTEGER Due;
+
+    if (!gDisplaySyncTimer)
+        return;
+
+    /* The meta device of several displays draws on drivers that may batch */
+    if (!PDEVOBJ_bHasDisplaySync(ppdev) && !(gpmdev && gpmdev->cDev > 1 && ppdev == gpmdev->ppdevGlobal))
+        return;
+
+    if (InterlockedExchange(&glDisplaySyncArmed, 1) == 0)
+    {
+        Due.QuadPart = -DISPLAY_SYNC_100NS;
+        KeSetTimer(gDisplaySyncTimer, Due, NULL);
+    }
+}
+
+/* With the device lock of ppdev held: let its driver show what it kept from the screen (fl: DSS_*_EVENT) */
+VOID
+NTAPI
+PDEVOBJ_vSyncDisplayNow(
+    _In_ PPDEVOBJ ppdev,
+    _In_ FLONG fl)
+{
+    if (PDEVOBJ_bHasDisplaySync(ppdev) && ppdev->pSurface)
+        ppdev->DriverFunctions.SynchronizeSurface(&ppdev->pSurface->SurfObj, NULL, fl);
+}
+
+/*
+ * The raw input thread, when gDisplaySyncTimer fired: call DrvSynchronizeSurface of every display whose driver asked
+ * for it, under the device lock that drawing on it takes (with several displays, the one of the meta device as well,
+ * which is taken first, as drawing through the meta device does).
+ */
+VOID
+NTAPI
+PDEVOBJ_vDisplaySyncTimer(VOID)
+{
+    PPDEVOBJ appdev[DISPLAY_SYNC_MAX], ppdevGlobal = NULL;
+    ULONG c = 0, i;
+
+    /* Drawing from now on arms the timer again */
+    InterlockedExchange(&glDisplaySyncArmed, 0);
+
+    EngAcquireSemaphoreShared(ghsemPDEV);
+    if (gpmdev && gpmdev->ppdevGlobal && gpmdev->ppdevGlobal->cPdevRefs > 0)
+    {
+        for (i = 0; i < gpmdev->cDev && c < DISPLAY_SYNC_MAX; i++)
+        {
+            if (gpmdev->dev[i].ppdev && gpmdev->dev[i].ppdev->cPdevRefs > 0 &&
+                PDEVOBJ_bHasDisplaySync(gpmdev->dev[i].ppdev))
+            {
+                PDEVOBJ_vReference(gpmdev->dev[i].ppdev);
+                appdev[c++] = gpmdev->dev[i].ppdev;
+            }
+        }
+
+        if (c != 0 && gpmdev->cDev > 1 && gpmdev->ppdevGlobal != gpmdev->dev[0].ppdev)
+        {
+            ppdevGlobal = gpmdev->ppdevGlobal;
+            PDEVOBJ_vReference(ppdevGlobal);
+        }
+    }
+    EngReleaseSemaphore(ghsemPDEV);
+
+    if (ppdevGlobal)
+        EngAcquireSemaphore(ppdevGlobal->hsemDevLock);
+
+    for (i = 0; i < c; i++)
+    {
+        EngAcquireSemaphore(appdev[i]->hsemDevLock);
+        PDEVOBJ_vSyncDisplayNow(appdev[i], DSS_TIMER_EVENT);
+        EngReleaseSemaphore(appdev[i]->hsemDevLock);
+    }
+
+    if (ppdevGlobal)
+    {
+        EngReleaseSemaphore(ppdevGlobal->hsemDevLock);
+        PDEVOBJ_vRelease(ppdevGlobal);
+    }
+
+    for (i = 0; i < c; i++)
+        PDEVOBJ_vRelease(appdev[i]);
 }
 
 #if DBG

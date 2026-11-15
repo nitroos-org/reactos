@@ -1428,6 +1428,7 @@ GreRemakePointerAfterModeSwitch(
         }
     }
     EngReleaseSemaphore(ppdev->hsemDevLock);
+    PDEVOBJ_vArmDisplaySync(ppdev);
 }
 
 ULONG
@@ -1480,7 +1481,10 @@ GreSetPointerShape(
     if (psurfMask)
         SURFACE_ShareUnlockSurface(psurfMask);
 
+    /* A driver that batches its copies to the screen shows the new pointer now */
+    PDEVOBJ_vSyncDisplayNow(pdc->ppdev, DSS_FLUSH_EVENT);
     EngReleaseSemaphore(pdc->ppdev->hsemDevLock);
+    PDEVOBJ_vArmDisplaySync(pdc->ppdev);
 
     /* Unlock the DC */
     DC_UnlockDc(pdc);
@@ -1529,10 +1533,14 @@ GreMovePointer(
          * (driver may already have been called if it also supports hardware pointers) */
         if (pdc->ppdev->devinfo.flGraphicsCaps & GCAPS_PANNING && y >= 0)
             pdc->ppdev->pfnMovePointer(pso, x, y - pso->sizlBitmap.cy, NULL);
+
+        /* A driver that batches its copies to the screen shows the pointer where it is now */
+        PDEVOBJ_vSyncDisplayNow(pdc->ppdev, DSS_FLUSH_EVENT);
     }
 
     /* Release PDEV lock */
     EngReleaseSemaphore(pdc->ppdev->hsemDevLock);
+    PDEVOBJ_vArmDisplaySync(pdc->ppdev);
 
     /* Unlock the DC */
     DC_UnlockDc(pdc);

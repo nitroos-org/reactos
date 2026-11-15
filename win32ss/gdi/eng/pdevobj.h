@@ -204,6 +204,24 @@ NTSTATUS
 NTAPI
 InitPDEVImpl(VOID);
 
+extern PKTIMER gDisplaySyncTimer;
+
+VOID
+NTAPI
+PDEVOBJ_vArmDisplaySync(
+    _In_ PPDEVOBJ ppdev);
+
+_Requires_lock_held_(*ppdev->hsemDevLock)
+VOID
+NTAPI
+PDEVOBJ_vSyncDisplayNow(
+    _In_ PPDEVOBJ ppdev,
+    _In_ FLONG fl);
+
+VOID
+NTAPI
+PDEVOBJ_vDisplaySyncTimer(VOID);
+
 PSIZEL
 FASTCALL
 PDEVOBJ_sizl(

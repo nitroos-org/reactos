@@ -756,6 +756,8 @@ DC_vFinishBlit(PDC pdc1, PDC pdc2)
     {
         MouseSafetyOnDrawEnd(pdc1->ppdev);
         EngReleaseSemaphore(pdc1->ppdev->hsemDevLock);
+        /* The driver may show what was drawn later (GCAPS2_SYNCTIMER) */
+        PDEVOBJ_vArmDisplaySync(pdc1->ppdev);
     }
 #if DBG
     pdc1->fs &= ~DC_PREPARED;
