@@ -10,18 +10,23 @@
  * connection of the Slovak eID client dies with an access violation after the TCP connection is up, and its
  * update check and the download of the Disig Web Signer never finish.
  *
- * The manager reports the network of the first IPv4 adapter that has an address: one network and one
- * connection, with Internet connectivity when the adapter has a default gateway and local network
- * connectivity otherwise. Without such an adapter it reports none and DISCONNECTED. The connectivity
+ * The manager reports the network of the first adapter that has a usable IPv4 or IPv6 address (loopback
+ * excluded): one network and one connection, built from GetAdaptersAddresses for both families. Per family,
+ * Internet connectivity when the adapter has an address and a default gateway (no active probe), local
+ * network connectivity otherwise, IPV6_NOTRAFFIC for a link-local IPv6 address only. Without such an adapter
+ * it reports none and DISCONNECTED. The connectivity
  * events are accepted and never raised, names and categories cannot be changed, and the automation
  * (IDispatch) side has no type information.
  */
 
 #include <stdarg.h>
+#include <string.h>
 
 #define COBJMACROS
 
 #define WIN32_NO_STATUS
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windef.h>
 #include <winbase.h>
 #include <winerror.h>
@@ -59,51 +64,119 @@ typedef struct
     FILETIME created;
 } NET_STATE;
 
-/* a.b.c.d to the address in network byte order, 0 for anything else */
-static ULONG ParseIPv4(const char *Text)
+/* The connectivity of one adapter, from the addresses and the default gateways GetAdaptersAddresses gives.
+   There is no active probe for either family: a usable address and a default gateway count as the Internet.
+   IPv4: an address (not the automatic private range) is local network, with a gateway it is Internet.
+   IPv6: a global address is Internet with a default router and local network without one; a unique local
+   address (fc00::/7) never reaches the Internet, so it is local network; an adapter with only a link-local address
+   has IPV6_NOTRAFFIC (Windows 10 measured: IPv4 with a gateway and a link-local IPv6 address gave 0x42). The
+   adapter has a network only when it has a usable IPv4 address or a non-link-local IPv6 one. */
+static NLM_CONNECTIVITY AdapterConnectivity(const IP_ADAPTER_ADDRESSES_LH *Adapter, BOOL *Usable)
 {
-    ULONG Value = 0;
-    int Part, Digits, i;
+    const IP_ADAPTER_UNICAST_ADDRESS_LH *Unicast;
+    const IP_ADAPTER_GATEWAY_ADDRESS_LH *Gateway;
+    BOOL Have4 = FALSE, Gateway4 = FALSE, Link6 = FALSE, Global6 = FALSE, Unique6 = FALSE, Gateway6 = FALSE;
+    NLM_CONNECTIVITY Result = NLM_CONNECTIVITY_DISCONNECTED;
 
-    for (i = 0; i < 4; i++)
+    *Usable = FALSE;
+    for (Unicast = Adapter->FirstUnicastAddress; Unicast; Unicast = Unicast->Next)
     {
-        Part = 0;
-        Digits = 0;
-        while (*Text >= '0' && *Text <= '9')
+        const SOCKADDR *Sock = Unicast->Address.lpSockaddr;
+
+        if (!Sock)
+            continue;
+        if (Sock->sa_family == AF_INET)
         {
-            Part = Part * 10 + (*Text++ - '0');
-            if (++Digits > 3 || Part > 255)
-                return 0;
+            ULONG Address = ((const SOCKADDR_IN *)Sock)->sin_addr.S_un.S_addr;
+
+            /* No address yet, or one of the automatic private range: no connectivity */
+            if (Address && Address != 0xFFFFFFFF && (Address & 0xFFFF) != 0xFEA9)
+                Have4 = TRUE;
         }
-        if (!Digits || (i < 3 && *Text++ != '.'))
-            return 0;
-        Value |= (ULONG)Part << (8 * i);
+        else if (Sock->sa_family == AF_INET6)
+        {
+            const UCHAR *Bytes = ((const SOCKADDR_IN6 *)Sock)->sin6_addr.u.Byte;
+            static const UCHAR Zero[16];
+
+            /* a tentative or duplicate address cannot be used */
+            if (Unicast->DadState != IpDadStatePreferred && Unicast->DadState != IpDadStateDeprecated)
+                continue;
+            if (!memcmp(Bytes, Zero, 15) && (Bytes[15] == 0 || Bytes[15] == 1))
+                continue;                               /* :: and ::1 */
+            if (Bytes[0] == 0xFF)
+                continue;
+            if (Bytes[0] == 0xFE && (Bytes[1] & 0xC0) == 0x80)
+                Link6 = TRUE;
+            else if ((Bytes[0] & 0xFE) == 0xFC)
+                Unique6 = TRUE;
+            else
+                Global6 = TRUE;
+        }
     }
-    return *Text ? 0 : Value;
+
+    for (Gateway = Adapter->FirstGatewayAddress; Gateway; Gateway = Gateway->Next)
+    {
+        const SOCKADDR *Sock = Gateway->Address.lpSockaddr;
+
+        if (!Sock)
+            continue;
+        if (Sock->sa_family == AF_INET)
+        {
+            ULONG Address = ((const SOCKADDR_IN *)Sock)->sin_addr.S_un.S_addr;
+
+            if (Address && Address != 0xFFFFFFFF)
+                Gateway4 = TRUE;
+        }
+        else if (Sock->sa_family == AF_INET6)
+            Gateway6 = TRUE;
+    }
+
+    if (Have4)
+        Result |= Gateway4 ? NLM_CONNECTIVITY_IPV4_INTERNET : NLM_CONNECTIVITY_IPV4_LOCALNETWORK;
+    if (Global6)
+        Result |= Gateway6 ? NLM_CONNECTIVITY_IPV6_INTERNET : NLM_CONNECTIVITY_IPV6_LOCALNETWORK;
+    else if (Unique6)
+        Result |= NLM_CONNECTIVITY_IPV6_LOCALNETWORK;
+    else if (Link6)
+        Result |= NLM_CONNECTIVITY_IPV6_NOTRAFFIC;
+
+    *Usable = Have4 || Global6 || Unique6;
+    return Result;
 }
 
 static BOOL GetNetState(NET_STATE *State)
 {
-    IP_ADAPTER_INFO *Info, *Adapter;
-    ULONG Size = 0;
+    IP_ADAPTER_ADDRESSES_LH *Info, *Adapter;
+    ULONG Size = 0, Flags = GAA_FLAG_INCLUDE_GATEWAYS | GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                            GAA_FLAG_SKIP_DNS_SERVER;
+    ULONG Result;
     BOOL Found = FALSE;
+    int Try;
 
     ZeroMemory(State, sizeof(*State));
-    if (GetAdaptersInfo(NULL, &Size) != ERROR_BUFFER_OVERFLOW)
-        return FALSE;
-    Info = HeapAlloc(GetProcessHeap(), 0, Size);
-    if (!Info)
-        return FALSE;
-    if (GetAdaptersInfo(Info, &Size) == ERROR_SUCCESS)
+    Info = NULL;
+    for (Try = 0; Try < 3; Try++)
+    {
+        Result = GetAdaptersAddresses(AF_UNSPEC, Flags, NULL, (PIP_ADAPTER_ADDRESSES)Info, &Size);
+        if (Result != ERROR_BUFFER_OVERFLOW)
+            break;
+        HeapFree(GetProcessHeap(), 0, Info);
+        Info = HeapAlloc(GetProcessHeap(), 0, Size);
+        if (!Info)
+            return FALSE;
+    }
+    if (Result == ERROR_SUCCESS && Info)
     {
         for (Adapter = Info; Adapter && !Found; Adapter = Adapter->Next)
         {
-            ULONG Address = ParseIPv4(Adapter->IpAddressList.IpAddress.String);
-            ULONG Gateway = ParseIPv4(Adapter->GatewayList.IpAddress.String);
+            BOOL Usable;
+            NLM_CONNECTIVITY Connectivity;
             WCHAR Name[64];
 
-            /* No address yet, or one of the automatic private range: no connectivity */
-            if (!Address || Address == 0xFFFFFFFF || (Address & 0xFFFF) == 0xFEA9)
+            if (Adapter->IfType == IF_TYPE_SOFTWARE_LOOPBACK)
+                continue;
+            Connectivity = AdapterConnectivity(Adapter, &Usable);
+            if (!Usable)
                 continue;
 
             MultiByteToWideChar(CP_ACP, 0, Adapter->AdapterName, -1, Name, ARRAY_SIZE(Name));
@@ -114,8 +187,7 @@ static BOOL GetNetState(NET_STATE *State)
             State->connection.Data1 ^= 0x1;
             State->network = State->adapter;
             State->network.Data1 ^= 0x2;
-            State->connectivity = (Gateway && Gateway != 0xFFFFFFFF) ? NLM_CONNECTIVITY_IPV4_INTERNET
-                                                                       : NLM_CONNECTIVITY_IPV4_LOCALNETWORK;
+            State->connectivity = Connectivity;
             GetSystemTimeAsFileTime(&State->created);
             Found = TRUE;
         }

@@ -11,6 +11,9 @@
 #include "com_apitest.h"
 #include <oleauto.h>
 #include <netlistmgr.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <iphlpapi.h>
 
 #ifndef CONNECT_E_NOCONNECTION
 #define CONNECT_E_NOCONNECTION    ((HRESULT)0x80040200L)
@@ -51,6 +54,75 @@ static INetworkListManagerEventsVtbl SinkVtbl =
 {
     Sink_QueryInterface, Sink_AddRef, Sink_Release, Sink_ConnectivityChanged
 };
+
+/* The IPv6 part of the expected connectivity of the only adapter with an address (GetAdaptersAddresses, both
+   families): global address + default router = Internet, global without router or a unique local address = local
+   network, link-local only = no traffic. Returns FALSE when there is not exactly one such adapter. */
+static BOOL ExpectedIPv6(NLM_CONNECTIVITY *Expected)
+{
+    ULONG Size = 0, Count = 0;
+    IP_ADAPTER_ADDRESSES_LH *Info, *Adapter;
+    ULONG Flags = GAA_FLAG_INCLUDE_GATEWAYS | GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+    BOOL Ok = FALSE;
+
+    *Expected = 0;
+    if (GetAdaptersAddresses(AF_UNSPEC, Flags, NULL, NULL, &Size) != ERROR_BUFFER_OVERFLOW)
+        return FALSE;
+    Info = HeapAlloc(GetProcessHeap(), 0, Size);
+    if (!Info || GetAdaptersAddresses(AF_UNSPEC, Flags, NULL, (PIP_ADAPTER_ADDRESSES)Info, &Size) != ERROR_SUCCESS)
+    {
+        HeapFree(GetProcessHeap(), 0, Info);
+        return FALSE;
+    }
+    for (Adapter = Info; Adapter; Adapter = Adapter->Next)
+    {
+        IP_ADAPTER_UNICAST_ADDRESS_LH *U;
+        IP_ADAPTER_GATEWAY_ADDRESS_LH *G;
+        BOOL Any = FALSE, Global = FALSE, Unique = FALSE, Link = FALSE, Router = FALSE;
+
+        if (Adapter->IfType == IF_TYPE_SOFTWARE_LOOPBACK)
+            continue;
+        for (U = Adapter->FirstUnicastAddress; U; U = U->Next)
+        {
+            const UCHAR *B;
+
+            if (U->Address.lpSockaddr->sa_family == AF_INET)
+            {
+                ULONG A = ((SOCKADDR_IN *)U->Address.lpSockaddr)->sin_addr.S_un.S_addr;
+                if (A && A != 0xFFFFFFFF && (A & 0xFFFF) != 0xFEA9)
+                    Any = TRUE;
+                continue;
+            }
+            if (U->Address.lpSockaddr->sa_family != AF_INET6 ||
+                (U->DadState != IpDadStatePreferred && U->DadState != IpDadStateDeprecated))
+                continue;
+            B = ((SOCKADDR_IN6 *)U->Address.lpSockaddr)->sin6_addr.u.Byte;
+            if (B[0] == 0xFE && (B[1] & 0xC0) == 0x80)
+                Link = TRUE;
+            else if ((B[0] & 0xFE) == 0xFC)
+                Unique = Any = TRUE;
+            else if (B[0] != 0xFF)
+                Global = Any = TRUE;
+        }
+        for (G = Adapter->FirstGatewayAddress; G; G = G->Next)
+            if (G->Address.lpSockaddr->sa_family == AF_INET6)
+                Router = TRUE;
+        if (!Any)
+            continue;
+        Count++;
+        if (Global)
+            *Expected = Router ? NLM_CONNECTIVITY_IPV6_INTERNET : NLM_CONNECTIVITY_IPV6_LOCALNETWORK;
+        else if (Unique)
+            *Expected = NLM_CONNECTIVITY_IPV6_LOCALNETWORK;
+        else if (Link)
+            *Expected = NLM_CONNECTIVITY_IPV6_NOTRAFFIC;
+        else
+            *Expected = 0;
+    }
+    Ok = (Count == 1);
+    HeapFree(GetProcessHeap(), 0, Info);
+    return Ok;
+}
 
 START_TEST(netprofm)
 {
@@ -132,6 +204,16 @@ START_TEST(netprofm)
     ok((Internet == VARIANT_TRUE) == !!(Connectivity & (NLM_CONNECTIVITY_IPV4_INTERNET | NLM_CONNECTIVITY_IPV6_INTERNET)),
        "IsConnectedToInternet %d, connectivity %lx\n", Internet, (ULONG)Connectivity);
     HaveNetwork = Connectivity != NLM_CONNECTIVITY_DISCONNECTED;
+
+    /* the IPv6 bits follow the addresses and default routers of the adapter */
+    if (ExpectedIPv6(&Other))
+    {
+        NLM_CONNECTIVITY V6Mask = NLM_CONNECTIVITY_IPV6_NOTRAFFIC | NLM_CONNECTIVITY_IPV6_SUBNET |
+                                  NLM_CONNECTIVITY_IPV6_LOCALNETWORK | NLM_CONNECTIVITY_IPV6_INTERNET;
+
+        ok((Connectivity & V6Mask) == Other, "IPv6 connectivity %lx, expected %lx (connectivity %lx)\n",
+           (ULONG)(Connectivity & V6Mask), (ULONG)Other, (ULONG)Connectivity);
+    }
 
     /* The enumerators: one connection and one network when connected, none otherwise */
     hr = INetworkListManager_GetNetworkConnections(Manager, &Connections);
