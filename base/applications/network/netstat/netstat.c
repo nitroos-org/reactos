@@ -17,6 +17,7 @@
 #include <windef.h>
 #include <winbase.h>
 #include <winsock2.h>
+#include <ws2tcpip.h>
 #include <iphlpapi.h>
 
 #include <conutils.h>
@@ -24,7 +25,10 @@
 #include "netstat.h"
 #include "resource.h"
 
-enum ProtoType {IP, TCP, UDP, ICMP} Protocol;
+enum ProtoType {IP, TCP, UDP, ICMP, TCPv6, UDPv6} Protocol;
+
+BOOL ShowTcp6Table(VOID);
+BOOL ShowUdp6Table(VOID);
 DWORD Interval; /* time to pause between printing output */
 
 /* TCP endpoint states */
@@ -124,6 +128,10 @@ BOOL ParseCmdline(int argc, wchar_t* argv[])
                             Protocol = TCP;
                         else if (!_wcsicmp(L"UDP", Proto))
                             Protocol = UDP;
+                        else if (!_wcsicmp(L"TCPv6", Proto))
+                            Protocol = TCPv6;
+                        else if (!_wcsicmp(L"UDPv6", Proto))
+                            Protocol = UDPv6;
                         else
                             goto StopParsingAndShowUsageHelp;
                         break;
@@ -207,6 +215,13 @@ BOOL DisplayOutput(VOID)
                     ShowUdpStatistics();
                 DisplayTableHeader();
                 return (bDoShowAllCons ? ShowUdpTable() : TRUE);
+            /* VERIFY ON ORACLE: -s with -p TCPv6/UDPv6 (the IPv6 statistics are not shown here) */
+            case TCPv6:
+                DisplayTableHeader();
+                return ShowTcp6Table();
+            case UDPv6:
+                DisplayTableHeader();
+                return (bDoShowAllCons ? ShowUdp6Table() : TRUE);
             default:
                 break;
         }
@@ -221,9 +236,18 @@ BOOL DisplayOutput(VOID)
     }
     else
     {
+        /* As Windows lists them: TCP, TCP over IPv6, then (-a) UDP, UDP over IPv6. Without IPv6 the IPv6 tables are
+           not there and add nothing */
         DisplayTableHeader();
-        if (ShowTcpTable() && bDoShowAllCons)
-            ShowUdpTable();
+        if (ShowTcpTable())
+        {
+            ShowTcp6Table();
+            if (bDoShowAllCons)
+            {
+                ShowUdpTable();
+                ShowUdp6Table();
+            }
+        }
     }
 
     return TRUE;
@@ -520,6 +544,123 @@ BOOL ShowUdpTable(VOID)
     }
 
     HeapFree(GetProcessHeap(), 0, udpTable);
+    return TRUE;
+}
+
+/* An IPv6 endpoint as Windows prints it: [address%scope]:port, the address always numeric (VERIFY ON ORACLE: the
+   host name netstat prints without -n for a bound IPv6 address) */
+static VOID
+FormatIp6Endpoint(const UCHAR *Address, ULONG ScopeId, ULONG Port, PCSTR Proto, CHAR Out[], INT OutLen)
+{
+    SOCKADDR_IN6 Sa;
+    CHAR Text[INET6_ADDRSTRLEN + 16], PortName[PORTNAMELEN];
+    DWORD TextLen = sizeof(Text);
+
+    ZeroMemory(&Sa, sizeof(Sa));
+    Sa.sin6_family = AF_INET6;
+    CopyMemory(&Sa.sin6_addr, Address, 16);
+    Sa.sin6_scope_id = ScopeId;
+    if (WSAAddressToStringA((LPSOCKADDR)&Sa, sizeof(Sa), NULL, Text, &TextLen) != 0)
+        strcpy(Text, "?");
+    GetPortName(Port, Proto, PortName, sizeof(PortName));
+    _snprintf(Out, OutLen, "[%s]:%s", Text, PortName);
+    Out[OutLen - 1] = 0;
+}
+
+/* The IPv6 TCP endpoints (GetExtendedTcpTable(AF_INET6)); nothing while the system has no IPv6 */
+BOOL ShowTcp6Table(VOID)
+{
+    PMIB_TCP6TABLE_OWNER_PID Table = NULL;
+    DWORD Error, Size = 0, i;
+    CHAR Host[ADDRESSLEN + 16], Remote[ADDRESSLEN + 16], PID[64];
+
+    do
+    {
+        if (Table)
+            HeapFree(GetProcessHeap(), 0, Table);
+        Table = Size ? HeapAlloc(GetProcessHeap(), 0, Size) : NULL;
+        Error = GetExtendedTcpTable(Table, &Size, TRUE, AF_INET6, TCP_TABLE_OWNER_PID_ALL, 0);
+    }
+    while (Error == ERROR_INSUFFICIENT_BUFFER && Size);
+
+    if (Error != NO_ERROR || !Table)
+    {
+        if (Table)
+            HeapFree(GetProcessHeap(), 0, Table);
+        return TRUE;
+    }
+
+    for (i = 0; i < Table->dwNumEntries; i++)
+    {
+        PMIB_TCP6ROW_OWNER_PID Row = &Table->table[i];
+
+        if (!(bDoShowAllCons || Row->dwState == MIB_TCP_STATE_ESTAB || Row->dwState == MIB_TCP_STATE_CLOSE_WAIT ||
+              Row->dwState == MIB_TCP_STATE_TIME_WAIT))
+            continue;
+
+        FormatIp6Endpoint(Row->ucLocalAddr, Row->dwLocalScopeId, Row->dwLocalPort, "tcp", Host, sizeof(Host));
+        if (Row->dwState == MIB_TCP_STATE_LISTEN)
+        {
+            /* Windows: [::]:0 for a listener */
+            strcpy(Remote, "[::]:0");
+        }
+        else
+        {
+            FormatIp6Endpoint(Row->ucRemoteAddr, Row->dwRemoteScopeId, Row->dwRemotePort, "tcp", Remote, sizeof(Remote));
+        }
+
+        if (bDoShowProcessId)
+        {
+            sprintf(PID, "%ld", Row->dwOwningPid);
+            ConPrintf(StdOut, L"  %-6s %-22S %-22S %-15s %S\n", L"TCP", Host, Remote, TcpState[Row->dwState], PID);
+        }
+        else
+        {
+            ConPrintf(StdOut, L"  %-6s %-22S %-22S %s\n", L"TCP", Host, Remote, TcpState[Row->dwState]);
+        }
+    }
+
+    HeapFree(GetProcessHeap(), 0, Table);
+    return TRUE;
+}
+
+/* The IPv6 UDP endpoints (GetExtendedUdpTable(AF_INET6)); nothing while the system has no IPv6 */
+BOOL ShowUdp6Table(VOID)
+{
+    PMIB_UDP6TABLE_OWNER_PID Table;
+    DWORD Error, Size = 0, i;
+    CHAR Host[ADDRESSLEN + 16], PID[64];
+
+    Error = GetExtendedUdpTable(NULL, &Size, TRUE, AF_INET6, UDP_TABLE_OWNER_PID, 0);
+    if (Error != ERROR_INSUFFICIENT_BUFFER || !Size)
+        return TRUE;
+    Size += 16 * sizeof(MIB_UDP6ROW_OWNER_PID);
+    Table = HeapAlloc(GetProcessHeap(), 0, Size);
+    if (!Table)
+        return TRUE;
+    if (GetExtendedUdpTable(Table, &Size, TRUE, AF_INET6, UDP_TABLE_OWNER_PID, 0) != NO_ERROR)
+    {
+        HeapFree(GetProcessHeap(), 0, Table);
+        return TRUE;
+    }
+
+    for (i = 0; i < Table->dwNumEntries; i++)
+    {
+        PMIB_UDP6ROW_OWNER_PID Row = &Table->table[i];
+
+        FormatIp6Endpoint(Row->ucLocalAddr, Row->dwLocalScopeId, Row->dwLocalPort, "udp", Host, sizeof(Host));
+        if (bDoShowProcessId)
+        {
+            sprintf(PID, "%ld", Row->dwOwningPid);
+            ConPrintf(StdOut, L"  %-6s %-22S %-38s %S\n", L"UDP", Host, L"*:*", PID);
+        }
+        else
+        {
+            ConPrintf(StdOut, L"  %-6s %-22S %-23s\n", L"UDP", Host, L"*:*");
+        }
+    }
+
+    HeapFree(GetProcessHeap(), 0, Table);
     return TRUE;
 }
 
