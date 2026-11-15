@@ -742,42 +742,59 @@ BOOL netconn_is_alive( struct netconn *netconn )
     return len == 1 || (len == -1 && err == WSAEWOULDBLOCK);
 }
 
-static DWORD resolve_hostname( const WCHAR *name, INTERNET_PORT port, struct sockaddr_storage *sa )
+/* A bracketed IPv6 literal ("[::1]", "[fe80::1%2]", "[fe80::1%252]" with a percent-encoded zone id, RFC 6874)
+ * is not a host name for getaddrinfo: take the brackets off and decode the "%25". Other names are copied as is. */
+static BOOL literal_host( const WCHAR *name, WCHAR *buf, size_t size )
 {
-    ADDRINFOW *res, hints;
+    size_t len = lstrlenW( name ), i, j;
+
+    if (len >= 2 && name[0] == '[' && name[len - 1] == ']')
+    {
+        if (len - 1 > size) return FALSE;
+        for (i = 1, j = 0; i < len - 1; i++)
+        {
+            buf[j++] = name[i];
+            if (name[i] == '%' && name[i + 1] == '2' && name[i + 2] == '5' && i + 2 < len - 1) i += 2;
+        }
+        buf[j] = 0;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static DWORD resolve_hostname( const WCHAR *name, INTERNET_PORT port, struct addr_list *list )
+{
+    ADDRINFOW *res, *ai, hints;
+    WCHAR literal[260];
     int ret;
 
     memset( &hints, 0, sizeof(hints) );
-    /* Prefer IPv4 to IPv6 addresses, since some web servers do not listen on
-     * their IPv6 addresses even though they have IPv6 addresses in the DNS.
-     */
-    hints.ai_family = AF_INET;
+    /* Use every address in the order getaddrinfo returns them; the caller falls back to the next one
+     * when a connection attempt fails (a name may have IPv6 addresses on which no server listens). */
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
 
+    if (literal_host( name, literal, ARRAY_SIZE(literal) )) name = literal;
     ret = GetAddrInfoW( name, NULL, &hints, &res );
     if (ret != 0)
     {
-        TRACE("failed to get IPv4 address of %s, retrying with IPv6\n", debugstr_w(name));
-        hints.ai_family = AF_INET6;
-        ret = GetAddrInfoW( name, NULL, &hints, &res );
-        if (ret != 0)
-        {
-            TRACE("failed to get address of %s\n", debugstr_w(name));
-            return ERROR_WINHTTP_NAME_NOT_RESOLVED;
-        }
+        TRACE("failed to get address of %s\n", debugstr_w(name));
+        return ERROR_WINHTTP_NAME_NOT_RESOLVED;
     }
-    memcpy( sa, res->ai_addr, res->ai_addrlen );
-    switch (res->ai_family)
+    list->count = 0;
+    for (ai = res; ai && list->count < MAX_RESOLVED_ADDRS; ai = ai->ai_next)
     {
-    case AF_INET:
-        ((struct sockaddr_in *)sa)->sin_port = htons( port );
-        break;
-    case AF_INET6:
-        ((struct sockaddr_in6 *)sa)->sin6_port = htons( port );
-        break;
-    }
+        struct sockaddr_storage *sa = &list->addr[list->count];
 
+        if ((ai->ai_family != AF_INET && ai->ai_family != AF_INET6) || ai->ai_addrlen > sizeof(*sa)) continue;
+        memset( sa, 0, sizeof(*sa) );
+        memcpy( sa, ai->ai_addr, ai->ai_addrlen );
+        if (ai->ai_family == AF_INET) ((struct sockaddr_in *)sa)->sin_port = htons( port );
+        else ((struct sockaddr_in6 *)sa)->sin6_port = htons( port );
+        list->count++;
+    }
     FreeAddrInfoW( res );
-    return ERROR_SUCCESS;
+    return list->count ? ERROR_SUCCESS : ERROR_WINHTTP_NAME_NOT_RESOLVED;
 }
 
 struct async_resolve
@@ -785,7 +802,7 @@ struct async_resolve
     LONG                     ref;
     WCHAR                   *hostname;
     INTERNET_PORT            port;
-    struct sockaddr_storage  addr;
+    struct addr_list         addrs;
     DWORD                    result;
     HANDLE                   done;
 };
@@ -824,16 +841,16 @@ static void CALLBACK resolve_proc( TP_CALLBACK_INSTANCE *instance, void *ctx )
 {
     struct async_resolve *async = ctx;
 
-    async->result = resolve_hostname( async->hostname, async->port, &async->addr );
+    async->result = resolve_hostname( async->hostname, async->port, &async->addrs );
     SetEvent( async->done );
     async_resolve_release( async );
 }
 
-DWORD netconn_resolve( WCHAR *hostname, INTERNET_PORT port, struct sockaddr_storage *addr, int timeout )
+DWORD netconn_resolve( WCHAR *hostname, INTERNET_PORT port, struct addr_list *addrs, int timeout )
 {
     DWORD ret;
 
-    if (!timeout) ret = resolve_hostname( hostname, port, addr );
+    if (!timeout) ret = resolve_hostname( hostname, port, addrs );
     else
     {
         struct async_resolve *async;
@@ -851,7 +868,7 @@ DWORD netconn_resolve( WCHAR *hostname, INTERNET_PORT port, struct sockaddr_stor
         if (WaitForSingleObject( async->done, timeout ) != WAIT_OBJECT_0) ret = ERROR_WINHTTP_TIMEOUT;
         else
         {
-            *addr = async->addr;
+            *addrs = async->addrs;
             ret = async->result;
         }
         async_resolve_release( async );

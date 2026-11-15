@@ -830,8 +830,75 @@ static void WinHttpCrackUrl_test( void )
     ok( uc.dwUrlPathLength == 50, "unexpected length %lu\n", uc.dwUrlPathLength );
 }
 
+static void WinHttpCrackUrl_ipv6_test(void)
+{
+    static const struct
+    {
+        const WCHAR *url;
+        DWORD flags;
+        DWORD error;        /* 0 = success */
+        const WCHAR *host;
+        INTERNET_PORT port;
+        const WCHAR *path;
+    } tests[] =
+    {
+        { L"http://[::1]/",                      0, 0, L"[::1]", 80, L"/" },
+        { L"http://[::1]:8080/p?q=1",            0, 0, L"[::1]", 8080, L"/p" },
+        { L"http://[::1]",                       0, 0, L"[::1]", 80, L"" },
+        { L"http://[::1]:81",                    0, 0, L"[::1]", 81, L"" },
+        { L"http://[::1]:/",                     0, 0, L"[::1]", 80, L"/" },
+        { L"https://[::1]/",                     0, 0, L"[::1]", 443, L"/" },
+        { L"http://[fe80::1%2]/",                0, 0, L"[fe80::1%2]", 80, L"/" },
+        { L"http://[fe80::1%252]:81/x",          0, 0, L"[fe80::1%252]", 81, L"/x" },
+        { L"http://[fe80::1%252]:81/x", ICU_DECODE, 0, L"[fe80::1%2]", 81, L"/x" },
+        { L"http://[fe80::1%eth0]/",             0, 0, L"[fe80::1%eth0]", 80, L"/" },
+        { L"http://[2001:db8::1]:8080/a/b?c#d",  0, 0, L"[2001:db8::1]", 8080, L"/a/b" },
+        { L"http://user:pw@[::1]:80/",           0, 0, L"[::1]", 80, L"/" },
+        { L"http://[::ffff:1.2.3.4]/",           0, 0, L"[::ffff:1.2.3.4]", 80, L"/" },
+        { L"http://[]/",                         0, 0, L"[]", 80, L"/" },
+        { L"http://[::1/",                       0, ERROR_WINHTTP_INVALID_URL },
+        { L"http://[::1]x/",                     0, ERROR_WINHTTP_INVALID_URL },
+        { L"http://::1/",                        0, ERROR_WINHTTP_INVALID_URL },
+    };
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(tests); i++)
+    {
+        WCHAR host[64], path[64], extra[64];
+        URL_COMPONENTSW uc;
+        DWORD err;
+        BOOL ret;
+
+        memset( &uc, 0, sizeof(uc) );
+        uc.dwStructSize     = sizeof(uc);
+        uc.lpszHostName     = host;
+        uc.dwHostNameLength = ARRAY_SIZE(host);
+        uc.lpszUrlPath      = path;
+        uc.dwUrlPathLength  = ARRAY_SIZE(path);
+        uc.lpszExtraInfo     = extra;
+        uc.dwExtraInfoLength = ARRAY_SIZE(extra);
+        SetLastError( 0xdeadbeef );
+        ret = WinHttpCrackUrl( tests[i].url, 0, tests[i].flags, &uc );
+        err = GetLastError();
+        if (tests[i].error)
+        {
+            ok( !ret, "%u: WinHttpCrackUrl succeeded\n", i );
+            ok( err == tests[i].error, "%u: got %lu\n", i, err );
+            continue;
+        }
+        ok( ret, "%u: got %lu\n", i, err );
+        if (!ret) continue;
+        ok( uc.dwHostNameLength == lstrlenW( tests[i].host ) && !wcsncmp( uc.lpszHostName, tests[i].host, uc.dwHostNameLength ),
+            "%u: unexpected host %s\n", i, wine_dbgstr_wn( uc.lpszHostName, uc.dwHostNameLength ) );
+        ok( uc.nPort == tests[i].port, "%u: got port %u\n", i, uc.nPort );
+        ok( uc.dwUrlPathLength == lstrlenW( tests[i].path ) && !wcsncmp( uc.lpszUrlPath, tests[i].path, uc.dwUrlPathLength ),
+            "%u: unexpected path %s\n", i, wine_dbgstr_wn( uc.lpszUrlPath, uc.dwUrlPathLength ) );
+    }
+}
+
 START_TEST(url)
 {
     WinHttpCreateUrl_test();
     WinHttpCrackUrl_test();
+    WinHttpCrackUrl_ipv6_test();
 }

@@ -31,14 +31,20 @@
 
 extern HMODULE WININET_hModule;
 
+#define MAX_SERVER_ADDRS 8
+
 typedef struct {
     WCHAR *name;
     INTERNET_PORT port;
     BOOL is_https;
-    struct sockaddr_storage addr;
+    struct sockaddr_storage addr; /* the address in use: the first resolved, or the last that connected */
     int addr_len;
     char addr_str[INET6_ADDRSTRLEN];
+    struct sockaddr_storage addrs[MAX_SERVER_ADDRS]; /* all addresses in getaddrinfo order */
+    int addr_lens[MAX_SERVER_ADDRS];
+    int addr_count;
 
+    WCHAR *header_name; /* name as written in a Host header: IPv6 literals bracketed, no zone id */
     WCHAR *scheme_host_port;
     const WCHAR *host_port;
     const WCHAR *canon_host_port;
@@ -384,6 +390,8 @@ DWORD HTTP_Connect(appinfo_t*,LPCWSTR,
         DWORD dwInternalFlags, HINTERNET*);
 
 BOOL GetAddress(const WCHAR*,INTERNET_PORT,SOCKADDR*,int*,char*);
+int GetAddressList(const WCHAR*,INTERNET_PORT,struct sockaddr_storage*,int*,int);
+void address_to_string(const struct sockaddr_storage*,char*);
 
 DWORD get_cookie_header(const WCHAR*,const WCHAR*,WCHAR**);
 DWORD set_cookie(substr_t,substr_t,substr_t,substr_t,DWORD);

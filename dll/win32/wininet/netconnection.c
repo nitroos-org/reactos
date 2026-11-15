@@ -294,19 +294,16 @@ static void set_socket_blocking(netconn_t *conn, BOOL is_blocking)
     conn->is_blocking = is_blocking;
 }
 
-static DWORD create_netconn_socket(server_t *server, netconn_t *netconn, DWORD timeout)
+static DWORD connect_netconn_socket(netconn_t *netconn, const struct sockaddr_storage *addr, int addr_len, DWORD timeout)
 {
     int result;
     ULONG flag;
     DWORD res;
 
-    init_winsock();
-
-    assert(server->addr_len);
-    result = netconn->socket = socket(server->addr.ss_family, SOCK_STREAM, 0);
+    result = netconn->socket = socket(addr->ss_family, SOCK_STREAM, 0);
     if(result != -1) {
         set_socket_blocking(netconn, FALSE);
-        result = connect(netconn->socket, (struct sockaddr*)&server->addr, server->addr_len);
+        result = connect(netconn->socket, (const struct sockaddr*)addr, addr_len);
         if(result == -1)
         {
             res = WSAGetLastError();
@@ -343,6 +340,53 @@ static DWORD create_netconn_socket(server_t *server, netconn_t *netconn, DWORD t
         WARN("setsockopt(TCP_NODELAY) failed\n");
 
     return ERROR_SUCCESS;
+}
+
+/* Connect to the first address of the server that accepts the connection; the one that worked becomes the
+ * address in use (and the first to try next time). */
+static DWORD create_netconn_socket(server_t *server, netconn_t *netconn, DWORD timeout)
+{
+    struct sockaddr_storage addrs[MAX_SERVER_ADDRS];
+    int lens[MAX_SERVER_ADDRS], i, count;
+    DWORD res = ERROR_INTERNET_CANNOT_CONNECT;
+
+    init_winsock();
+
+    assert(server->addr_len);
+    count = server->addr_count;
+    if(count < 1 || count > MAX_SERVER_ADDRS) {
+        addrs[0] = server->addr;
+        lens[0] = server->addr_len;
+        count = 1;
+    }else {
+        memcpy(addrs, server->addrs, count * sizeof(addrs[0]));
+        memcpy(lens, server->addr_lens, count * sizeof(lens[0]));
+    }
+
+    for(i = 0; i < count; i++) {
+        res = connect_netconn_socket(netconn, &addrs[i], lens[i], timeout);
+        if(res == ERROR_SUCCESS) {
+            if(i && server->addr_count == count) {
+                char str[INET6_ADDRSTRLEN];
+                int j;
+
+                TRACE("fell back to address %d\n", i);
+                address_to_string(&addrs[i], str);
+                for(j = 0; j < count; j++) {
+                    int k = (j == 0) ? i : (j <= i ? j - 1 : j);
+                    server->addrs[j] = addrs[k];
+                    server->addr_lens[j] = lens[k];
+                }
+                server->addr = addrs[i];
+                server->addr_len = lens[i];
+                strcpy(server->addr_str, str);
+            }
+            return ERROR_SUCCESS;
+        }
+        if(res == ERROR_OUTOFMEMORY)
+            break;
+    }
+    return res;
 }
 
 DWORD create_netconn(server_t *server, DWORD security_flags, BOOL mask_errors, DWORD timeout, netconn_t **ret)

@@ -30,6 +30,7 @@
 #include "wininet.h"
 #include "winineti.h"
 #include "winsock2.h"
+#include "ws2tcpip.h"
 
 #include "wine/test.h"
 
@@ -8534,6 +8535,101 @@ static void test_cert_string(void)
     InternetCloseHandle( ses );
 }
 
+struct ipv6_server
+{
+    SOCKET listener;
+    char request[1024];
+};
+
+static DWORD CALLBACK ipv6_server_thread(void *param)
+{
+    static const char response[] = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello";
+    struct ipv6_server *srv = param;
+    SOCKET c = accept(srv->listener, NULL, NULL);
+    int i, r;
+
+    if (c == INVALID_SOCKET) return 1;
+    for (i = 0; i < sizeof(srv->request) - 1; i++)
+    {
+        r = recv(c, &srv->request[i], 1, 0);
+        if (r != 1) break;
+        if (i >= 3 && !memcmp(&srv->request[i - 3], "\r\n\r\n", 4)) break;
+    }
+    send(c, response, sizeof(response) - 1, 0);
+    closesocket(c);
+    return 0;
+}
+
+static void test_ipv6_literals(void)
+{
+    static const WCHAR *hosts[] = { L"[::1]", L"::1", L"localhost" };
+    struct addrinfo hints, *res;
+    WSADATA wsa;
+    unsigned int i;
+
+    WSAStartup(MAKEWORD(2, 2), &wsa);
+    for (i = 0; i < ARRAY_SIZE(hosts); i++)
+    {
+        struct ipv6_server srv;
+        struct sockaddr_in6 sa;
+        HINTERNET ses, con, req;
+        char buf[16] = {0}, hdr[64];
+        DWORD size, status = 0;
+        HANDLE thread;
+        int len = sizeof(sa);
+        BOOL ret;
+
+        if (i == 2)
+        {
+            memset(&hints, 0, sizeof(hints));
+            hints.ai_family = AF_INET6;
+            if (getaddrinfo("localhost", NULL, &hints, &res)) { skip("localhost has no IPv6 address\n"); continue; }
+            freeaddrinfo(res);
+        }
+        memset(&srv, 0, sizeof(srv));
+        srv.listener = socket(AF_INET6, SOCK_STREAM, 0);
+        if (srv.listener == INVALID_SOCKET) { skip("no IPv6 sockets\n"); break; }
+        memset(&sa, 0, sizeof(sa));
+        sa.sin6_family = AF_INET6;
+        sa.sin6_addr.s6_addr[15] = 1;
+        if (bind(srv.listener, (struct sockaddr *)&sa, sizeof(sa)) || getsockname(srv.listener, (struct sockaddr *)&sa, &len)
+            || listen(srv.listener, 1))
+        {
+            closesocket(srv.listener);
+            skip("no IPv6 loopback\n");
+            break;
+        }
+        thread = CreateThread(NULL, 0, ipv6_server_thread, &srv, 0, NULL);
+
+        ses = InternetOpenW(L"winetest", INTERNET_OPEN_TYPE_DIRECT, NULL, NULL, 0);
+        ok(ses != NULL, "InternetOpen failed %lu\n", GetLastError());
+        con = InternetConnectW(ses, hosts[i], ntohs(sa.sin6_port), NULL, NULL, INTERNET_SERVICE_HTTP, 0, 0);
+        ok(con != NULL, "%s: InternetConnect failed %lu\n", wine_dbgstr_w(hosts[i]), GetLastError());
+        req = HttpOpenRequestW(con, L"GET", L"/", NULL, NULL, NULL, INTERNET_FLAG_NO_CACHE_WRITE | INTERNET_FLAG_RELOAD, 0);
+        ok(req != NULL, "HttpOpenRequest failed %lu\n", GetLastError());
+        ret = HttpSendRequestW(req, NULL, 0, NULL, 0);
+        ok(ret, "%s: HttpSendRequest failed %lu\n", wine_dbgstr_w(hosts[i]), GetLastError());
+        if (ret)
+        {
+            size = sizeof(status);
+            ret = HttpQueryInfoW(req, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER, &status, &size, NULL);
+            ok(ret && status == 200, "status %lu\n", status);
+            ret = InternetReadFile(req, buf, sizeof(buf) - 1, &size);
+            ok(ret && size == 5 && !memcmp(buf, "hello", 5), "got %lu bytes\n", size);
+            WaitForSingleObject(thread, 5000);
+            /* the Host header of an IPv6 address has its brackets, also when the caller gave none */
+            sprintf(hdr, i == 2 ? "Host: localhost:%u\r\n" : "Host: [::1]:%u\r\n", ntohs(sa.sin6_port));
+            ok(strstr(srv.request, hdr) != NULL, "%s: Host header %s not in request:\n%s\n", wine_dbgstr_w(hosts[i]), hdr, srv.request);
+        }
+        InternetCloseHandle(req);
+        InternetCloseHandle(con);
+        InternetCloseHandle(ses);
+        closesocket(srv.listener);
+        WaitForSingleObject(thread, 5000);
+        CloseHandle(thread);
+    }
+}
+
 START_TEST(http)
 {
     HMODULE hdll;
@@ -8555,6 +8651,7 @@ START_TEST(http)
 
     init_events();
     init_status_tests();
+    test_ipv6_literals();
     test_InternetCloseHandle();
     InternetReadFile_test(INTERNET_FLAG_ASYNC, &test_data[0]);
     InternetReadFile_test(INTERNET_FLAG_ASYNC, &test_data[1]);

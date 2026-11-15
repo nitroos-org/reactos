@@ -167,6 +167,29 @@ static DWORD parse_port( const WCHAR *str, DWORD len, INTERNET_PORT *ret )
     return ERROR_SUCCESS;
 }
 
+/* Finds the ':' that starts the port in the host part [p, p + len). *colon is NULL when there is no port. The host
+ * may be an IPv6 literal in brackets, whose ':' are not a port. Fails (as Windows does) for an unterminated bracket,
+ * text after the closing bracket other than a port, and an unbracketed host with several ':'. */
+static BOOL find_port_colon( WCHAR *p, DWORD len, WCHAR **colon )
+{
+    WCHAR *r;
+
+    *colon = NULL;
+    if (len && p[0] == '[')
+    {
+        WCHAR *end = wmemchr( p, ']', len );
+        if (!end) return FALSE;
+        if (end + 1 == p + len) return TRUE;
+        if (end[1] != ':') return FALSE;
+        *colon = end + 1;
+        return TRUE;
+    }
+    if (!(r = wmemchr( p, ':', len ))) return TRUE;
+    if (wmemchr( r + 1, ':', len - (r + 1 - p) )) return FALSE;
+    *colon = r;
+    return TRUE;
+}
+
 /***********************************************************************
  *          WinHttpCrackUrl (winhttp.@)
  */
@@ -276,7 +299,12 @@ BOOL WINAPI WinHttpCrackUrl( const WCHAR *url, DWORD len, DWORD flags, URL_COMPO
 
     if ((q = wmemchr( p, '/', len - (p - url) )))
     {
-        if ((r = wmemchr( p, ':', q - p )))
+        if (!find_port_colon( p, q - p, &r ))
+        {
+            err = ERROR_WINHTTP_INVALID_URL;
+            goto exit;
+        }
+        if (r)
         {
             if ((err = set_component( &hostname, p, r - p, flags, &overflow ))) goto exit;
             r++;
@@ -311,7 +339,12 @@ BOOL WINAPI WinHttpCrackUrl( const WCHAR *url, DWORD len, DWORD flags, URL_COMPO
     }
     else
     {
-        if ((r = wmemchr( p, ':', len - (p - url) )))
+        if (!find_port_colon( p, len - (p - url), &r ))
+        {
+            err = ERROR_WINHTTP_INVALID_URL;
+            goto exit;
+        }
+        if (r)
         {
             if ((err = set_component( &hostname, p, r - p, flags, &overflow ))) goto exit;
             r++;

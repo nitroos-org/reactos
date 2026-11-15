@@ -2045,6 +2045,49 @@ static INTERNET_SCHEME GetInternetSchemeW(LPCWSTR lpszScheme, DWORD nMaxCmp)
     return INTERNET_SCHEME_UNKNOWN;
 }
 
+/* Finds the ':' that starts the port in the host part [host, end). The host may be an IPv6 literal in brackets,
+ * whose ':' (and percent-encoded zone id, "%25" + zone) are not a port. *port is set to the ':' or to end when there is no
+ * port. Returns FALSE for what Windows rejects as an invalid URL: an unterminated bracket, text after the closing
+ * bracket other than a port, a '%' in the brackets that is not a valid escape, or an unbracketed host with several ':'. */
+static BOOL find_host_port_colon(const WCHAR *host, const WCHAR *end, BOOL strict, BOOL decoded, const WCHAR **port)
+{
+    const WCHAR *p, *colon = NULL;
+    int count = 0;
+
+    *port = end;
+    if (host < end && *host == '[')
+    {
+        const WCHAR *close = wmemchr(host, ']', end - host);
+
+        if (!close)
+            return FALSE;
+        for (p = host + 1; p < close; p++)
+        {
+            if (!decoded && *p == '%' && !(p + 2 < close && iswxdigit(p[1]) && iswxdigit(p[2])))
+                return FALSE;
+        }
+        if (close + 1 < end)
+        {
+            if (close[1] != ':')
+                return FALSE;
+            *port = close + 1;
+        }
+        return TRUE;
+    }
+    for (p = host; p < end; p++)
+    {
+        if (*p != ':')
+            continue;
+        colon = p;
+        count++;
+    }
+    if (strict && count > 1)
+        return FALSE;
+    if (colon)
+        *port = colon;
+    return TRUE;
+}
+
 /***********************************************************************
  *           InternetCrackUrlW   (WININET.@)
  *
@@ -2054,7 +2097,7 @@ static INTERNET_SCHEME GetInternetSchemeW(LPCWSTR lpszScheme, DWORD nMaxCmp)
  *    TRUE on success
  *    FALSE on failure
  */
-BOOL WINAPI InternetCrackUrlW(const WCHAR *lpszUrl, DWORD dwUrlLength, DWORD dwFlags, URL_COMPONENTSW *lpUC)
+static BOOL crack_url(const WCHAR *lpszUrl, DWORD dwUrlLength, DWORD dwFlags, URL_COMPONENTSW *lpUC, BOOL decoded)
 {
   /*
    * RFC 1808
@@ -2109,7 +2152,7 @@ BOOL WINAPI InternetCrackUrlW(const WCHAR *lpszUrl, DWORD dwUrlLength, DWORD dwF
             ret = InternetCanonicalizeUrlW(url_tmp, buffer, &len, ICU_DECODE | ICU_NO_ENCODE);
         }
         if (ret)
-            ret = InternetCrackUrlW(buffer, len, dwFlags & ~ICU_DECODE, lpUC);
+            ret = crack_url(buffer, len, dwFlags & ~ICU_DECODE, lpUC, TRUE);
 
         if (buffer != url_tmp) free(buffer);
         free(url_tmp);
@@ -2236,13 +2279,12 @@ BOOL WINAPI InternetCrackUrlW(const WCHAR *lpszUrl, DWORD dwUrlLength, DWORD dwF
             }
             else
             {
-                while (lpszcp < lpszNetLoc)
+                if (!find_host_port_colon(lpszHost, lpszNetLoc, lpUC->nScheme == INTERNET_SCHEME_HTTP || lpUC->nScheme == INTERNET_SCHEME_HTTPS, decoded, &lpszPort))
                 {
-                    if (*lpszcp == ':')
-                        lpszPort = lpszcp;
-
-                    lpszcp++;
+                    SetLastError(ERROR_INTERNET_INVALID_URL);
+                    return FALSE;
                 }
+                lpszcp = lpszNetLoc;
 
                 /* If the scheme is "file" and the host is just one letter, it's not a host */
                 if(lpUC->nScheme==INTERNET_SCHEME_FILE && lpszPort <= lpszHost+1)
@@ -2252,9 +2294,26 @@ BOOL WINAPI InternetCrackUrlW(const WCHAR *lpszUrl, DWORD dwUrlLength, DWORD dwF
                 }
                 else
                 {
+                    BOOL copy = lpUC->lpszHostName && lpUC->dwHostNameLength;
+
                     if(!set_url_component(&lpUC->lpszHostName, &lpUC->dwHostNameLength, lpszHost, lpszPort - lpszHost))
                         return FALSE;
-                    if (lpszPort != lpszNetLoc)
+                    if (copy && lpUC->dwHostNameLength && lpUC->lpszHostName[0] == '[')
+                    {
+                        /* the zone id of an IPv6 literal is percent-encoded ("%25"): Windows hands it out decoded */
+                        WCHAR *src = lpUC->lpszHostName, *dst = src;
+                        DWORD i;
+
+                        for (i = 0; i < lpUC->dwHostNameLength; i++)
+                        {
+                            *dst++ = src[i];
+                            if (src[i] == '%' && i + 2 < lpUC->dwHostNameLength && src[i + 1] == '2' && src[i + 2] == '5')
+                                i += 2;
+                        }
+                        *dst = 0;
+                        lpUC->dwHostNameLength = dst - src;
+                    }
+                    if (lpszPort != lpszNetLoc && lpszPort + 1 != lpszNetLoc)
                         lpUC->nPort = wcstol(++lpszPort, NULL, 10);
                     else switch (lpUC->nScheme)
                     {
@@ -2358,6 +2417,11 @@ BOOL WINAPI InternetCrackUrlW(const WCHAR *lpszUrl, DWORD dwUrlLength, DWORD dwF
              debugstr_wn(lpUC->lpszExtraInfo,lpUC->dwExtraInfoLength));
 
     return TRUE;
+}
+
+BOOL WINAPI InternetCrackUrlW(const WCHAR *lpszUrl, DWORD dwUrlLength, DWORD dwFlags, URL_COMPONENTSW *lpUC)
+{
+    return crack_url(lpszUrl, dwUrlLength, dwFlags, lpUC, FALSE);
 }
 
 /***********************************************************************

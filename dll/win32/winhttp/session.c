@@ -596,12 +596,19 @@ HINTERNET WINAPI WinHttpConnect( HINTERNET hsession, const WCHAR *server, INTERN
     struct connect *connect;
     struct session *session;
     HINTERNET hconnect = NULL;
+    const WCHAR *colon;
 
     TRACE( "%p, %s, %u, %#lx\n", hsession, debugstr_w(server), port, reserved );
 
     if (!server)
     {
         SetLastError( ERROR_INVALID_PARAMETER );
+        return NULL;
+    }
+    /* an IPv6 address needs its brackets here: Windows fails "::1" with ERROR_WINHTTP_INVALID_URL */
+    if (server[0] != '[' && (colon = wcschr( server, ':' )) && wcschr( colon + 1, ':' ))
+    {
+        SetLastError( ERROR_WINHTTP_INVALID_URL );
         return NULL;
     }
     if (!(session = (struct session *)grab_object( hsession )))
