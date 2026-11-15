@@ -101,18 +101,21 @@ static VOID ReportRules(VOID)
    service for IPv4 changes; the signature below (the same fields the resolution reads) is also checked every
    ADDR_POLL_TICKS poll ticks, which covers IPv6 (no notification there) and a failed notification request, and a
    push happens only when the signature differs from the one of the last push. A change must stay quiet for
-   ADDR_QUIET_MS before it is pushed (debounce: DHCP and SLAAC set several addresses). */
+   ADDR_QUIET_MS before it is pushed (debounce: DHCP and SLAAC set several addresses), but never longer than
+   ADDR_MAX_MS after the first change (an interface that keeps flapping must not postpone the push for ever). */
 
 #define ADDR_POLL_TICKS    5
 #define ADDR_QUIET_MS      1500
+#define ADDR_MAX_MS        10000
 
 static ULONG g_LastSig, g_PendingSig;
 static BOOL g_SigDirty;
-static DWORD g_SigDue;
+static DWORD g_SigDue, g_SigFirst;
 static HANDLE g_hAddr;
 static OVERLAPPED g_AddrOv;
 static HANDLE g_AddrFile;
 static BOOL g_AddrArmed;
+static BOOL g_AddrStuck;    /* the last request could not be confirmed cancelled: g_AddrOv stays untouched until it is */
 
 static ULONG SigAdd(ULONG h, const void *p, SIZE_T n)
 {
@@ -176,6 +179,13 @@ static VOID ArmAddrNotify(VOID)
 {
     g_AddrArmed = FALSE;
     if (!g_hAddr) return;
+    if (g_AddrStuck)
+    {
+        /* a request from before a service restart that was not confirmed cancelled: the static OVERLAPPED is only
+           reused once it has completed; until then only the signature poll runs */
+        if (!HasOverlappedIoCompleted(&g_AddrOv)) return;
+        g_AddrStuck = FALSE;
+    }
     ResetEvent(g_hAddr);
     memset(&g_AddrOv, 0, sizeof(g_AddrOv));
     g_AddrOv.hEvent = g_hAddr;
@@ -189,7 +199,14 @@ static VOID AddrCheck(VOID)
     ULONG sig = AddrSignature();
     if (sig == g_LastSig && !g_SigDirty) return;
     if (sig == g_LastSig) { g_SigDirty = FALSE; return; }      /* changed and changed back before the push */
-    if (!g_SigDirty || sig != g_PendingSig) { g_SigDirty = TRUE; g_PendingSig = sig; g_SigDue = GetTickCount() + ADDR_QUIET_MS; }
+    if (!g_SigDirty || sig != g_PendingSig)
+    {
+        DWORD now = GetTickCount();
+        if (!g_SigDirty) g_SigFirst = now;
+        g_SigDirty = TRUE; g_PendingSig = sig;
+        g_SigDue = now + ADDR_QUIET_MS;
+        if ((LONG)(g_SigDue - (g_SigFirst + ADDR_MAX_MS)) > 0) g_SigDue = g_SigFirst + ADDR_MAX_MS;   /* upper bound */
+    }
 }
 
 static VOID Push(VOID)
@@ -244,7 +261,12 @@ static VOID WINAPI ServiceMainImpl(DWORD argc, LPWSTR *argv)
         wait = WaitForMultipleObjects(nWait, hs, FALSE, POLL_MS);
         if (wait == WAIT_OBJECT_0) break;
         if (wait == WAIT_OBJECT_0 + 2) { ArmAddrNotify(); AddrCheck(); }
-        else if (wait == WAIT_TIMEOUT && ++addrTicks >= ADDR_POLL_TICKS) { addrTicks = 0; AddrCheck(); }
+        else if (wait == WAIT_TIMEOUT && ++addrTicks >= ADDR_POLL_TICKS)
+        {
+            addrTicks = 0;
+            if (g_AddrStuck) ArmAddrNotify();    /* the request of an earlier run may have completed since: notify again */
+            AddrCheck();
+        }
         AddrPushIfDue();
         if (wait == WAIT_OBJECT_0 + 1)
         {
@@ -265,7 +287,22 @@ static VOID WINAPI ServiceMainImpl(DWORD argc, LPWSTR *argv)
         }
     }
     PromptStop();
-    if (g_AddrArmed) CancelIPChangeNotify(&g_AddrOv);
+    if (g_AddrArmed)
+    {
+        /* the request completes (aborted) once cancelled; confirm that before the event is closed and the static
+           OVERLAPPED can be reused by a restarted service */
+        CancelIPChangeNotify(&g_AddrOv);
+        WaitForSingleObject(g_hAddr, 2000);
+        if (!HasOverlappedIoCompleted(&g_AddrOv))
+        {
+            /* svchost unloads this DLL on stop (ServiceDllUnloadOnStop): the request would complete into unmapped or
+               reused memory and the flag would be lost. Keep the DLL loaded for the life of the process. */
+            HMODULE self;
+            g_AddrStuck = TRUE;
+            GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN, (LPCWSTR)&g_AddrOv, &self);
+        }
+        g_AddrArmed = FALSE;
+    }
 done:
     if (g_hAddr) CloseHandle(g_hAddr);
     if (hKey) RegCloseKey(hKey);

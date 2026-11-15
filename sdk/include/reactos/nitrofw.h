@@ -88,7 +88,11 @@
  *     rules with Direction == NITROFW_DIR_OUT and reports NITROFW_FEATURE_OUTBOUND clear in GET_VERSION.
  *  8. Service-name conditions (ServiceNameOffset) are advisory: a filter that cannot resolve the
  *     owning service ignores the condition and reports NITROFW_FEATURE_SERVICE_MATCH clear. The service
- *     never relies on it for Block rules.
+ *     therefore never sends an Allow rule that has a service condition (a service name, or "*" = services only;
+ *     the rule would match every program): the rule
+ *     is rejected and reported. A Block rule with one is sent with the name, which is ignored (it blocks more
+ *     than written). The same holds for every other condition the filter cannot match (connection security,
+ *     authorised machines or users, local user owner, package, interfaces).
  *  9. IPv6 (only while tcpip has IPv6 on, Tcpip\Parameters\Ipv6Enable; NITROFW_FEATURE_IPV6 says so): the same
  *     rules, profiles and defaults apply to IPv6 packets. A rule's address lists are per family: a rule with
  *     only IPv4 addresses never matches an IPv6 packet, one with only IPv6 addresses never matches an IPv4

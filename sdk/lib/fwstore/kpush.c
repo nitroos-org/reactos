@@ -442,6 +442,60 @@ static VOID Note(PCWSTR tag, const FW_RULE *r)
     wcscat(g_RejNames, tag); wcscat(g_RejNames, L": "); wcscat(g_RejNames, name);
 }
 
+/* Every stored key a rule can carry is one of: read by BuildRule, known not to restrict which packets match, a
+   condition known to only narrow the rule that this kernel cannot match, or unknown. An Allow rule with either of the
+   last two is not pushed (fail closed, so a key added later or imported from another machine never leaves an Allow
+   rule broader than written). A Block rule is pushed without them; that blocks more than written only for the known
+   narrowing conditions: an unknown key may as well add to a list of the rule (more ports or addresses), so a Block
+   rule with one is reported as not fully enforced.
+     read:        Action Active Dir Protocol Profile ICMP4 ICMP6 LPort LPort2_10 LPort2_20 RPort RPort2_10 RPort2_20
+                  LA4 LA6 RA4 RA42 RA6 RA62 IFType App
+     service:     Svc (the kernel cannot resolve the owning service; "*" limits the rule to services, which the kernel
+                  cannot tell apart either; handled by the caller)
+     no packet condition: Name Desc EmbedCtxt Edge Defer (edge traversal widens, it never narrows) Platform Platform2
+                  (OS applicability of the rule, not a packet property; semantics VERIFY ON ORACLE)
+     Security with the value NotRequired is the absence of the condition.
+     narrowing, not matchable: Security (any other value), RMauth, RUAuth, LUAuth, LUOwn, LOwner, AppPkgId, IF, TTK,
+                  TTK2_*
+     unknown:     LSM (loose source mapping widens what a rule matches) and any key not listed above. */
+#define COND_NONE       0
+#define COND_NARROWING  1   /* only conditions that narrow the rule: a Block rule without them blocks more */
+#define COND_UNKNOWN    2   /* a key that may widen the rule: a Block rule without it may block less */
+
+static BOOL KeyIsHandled(PCWSTR k)
+{
+    static const PCWSTR handled[] = {
+        L"Action", L"Active", L"Dir", L"Protocol", L"Profile", L"ICMP4", L"ICMP6", L"LPort", L"LPort2_10", L"LPort2_20",
+        L"RPort", L"RPort2_10", L"RPort2_20", L"LA4", L"LA6", L"RA4", L"RA42", L"RA6", L"RA62", L"IFType", L"App", L"Svc",
+        L"Name", L"Desc", L"EmbedCtxt", L"Edge", L"Defer", L"Platform", L"Platform2" };
+    ULONG i;
+    for (i = 0; i < _countof(handled); i++) if (!_wcsicmp(k, handled[i])) return TRUE;
+    return FALSE;
+}
+
+static BOOL KeyIsNarrowing(PCWSTR k)
+{
+    static const PCWSTR narrowing[] = {
+        L"Security", L"RMauth", L"RUAuth", L"LUAuth", L"LUOwn", L"LOwner", L"AppPkgId", L"IF", L"TTK" };
+    ULONG i;
+    for (i = 0; i < _countof(narrowing); i++) if (!_wcsicmp(k, narrowing[i])) return TRUE;
+    return !_wcsnicmp(k, L"TTK2_", 5);
+}
+
+static ULONG UnmatchableCondition(const FW_RULE *r, BOOL svcCondition)
+{
+    ULONG i, cond = svcCondition ? COND_NARROWING : COND_NONE;
+    for (i = 0; i < r->Raw.N; i++)
+    {
+        PCWSTR k = r->Raw.T[i].Key, v = r->Raw.T[i].Val;
+        if (KeyIsHandled(k)) continue;
+        if (!_wcsicmp(k, L"Security") && v && !_wcsicmp(v, L"NotRequired")) continue;
+        if (!KeyIsNarrowing(k)) return COND_UNKNOWN;
+        cond = COND_NARROWING;
+    }
+    return cond;
+}
+
 /* ---- one source rule -> one or more kernel rules ----
    The kernel carries at most NITROFW_MAX_LIST entries per list, and the lists of a rule are ANDed with each other
    (OR inside a list). A list longer than LIST_CHUNK is therefore cut into chunks and a kernel rule with the same
@@ -512,16 +566,17 @@ typedef enum { BR_OK, BR_SKIPPED, BR_REJECTED } BR_RESULT;
    BR_REJECTED: the rule cannot be represented without becoming broader or narrower than it is (a list of which no
    token resolves, a program path that does not resolve, too many kernel rules, out of memory): nothing is pushed
    for it, b is as before. The caller counts and reports it. *pPartial is set when a Block rule is pushed but a
-   part of it is not enforced (an IPv6 half whose keywords do not resolve, or tokens that gave nothing). */
-static BR_RESULT BuildRule(BUF *b, const FW_RULE *r, BOOL v6, ULONG *pieces, ULONG maxPieces, BOOL *pPartial)
+   part of it is not enforced (an IPv6 half whose keywords do not resolve, tokens that gave nothing, or a key that
+   is not known). *pDropped is set when a Block rule is pushed without a narrowing condition (it blocks more). */
+static BR_RESULT BuildRule(BUF *b, const FW_RULE *r, BOOL v6, ULONG *pieces, ULONG maxPieces, BOOL *pPartial, BOOL *pDropped)
 {
     NITROFW_RULE hdr; DIM lp, rp, la4, ra4, la6, ra6, ic;
-    ULONG start = (ULONG)b->len, i, ifm = 0, first = *pieces;
+    ULONG start = (ULONG)b->len, i, ifm = 0, first = *pieces, cond;
     PWSTR nt = NULL; PCWSTR v, svc = NULL, icKey; BR_RESULT res = BR_REJECTED;
     BOOL block, lScoped, rScoped, do4, do6, ok = TRUE;
     ULONG bad = 0, bad4, bad6;
 
-    *pPartial = FALSE;
+    *pPartial = FALSE; *pDropped = FALSE;
     memset(&hdr, 0, sizeof(hdr));
     hdr.Action = r->Action ? NITROFW_ACTION_ALLOW : NITROFW_ACTION_BLOCK;
     block = !r->Action;
@@ -549,6 +604,13 @@ static BR_RESULT BuildRule(BUF *b, const FW_RULE *r, BOOL v6, ULONG *pieces, ULO
        cast): the rule is rejected on its own */
     if (r->Protocol < 0 || r->Protocol > NITROFW_PROTO_ANY) ok = FALSE;
     if (svc && wcslen(svc) > 32767) ok = FALSE;
+    /* A condition the kernel cannot match (connection security, authorised remote machines/users, local user owner or
+       authorised users, package, specific interfaces, trust tuples, the service: NITROFW_FEATURE_SERVICE_MATCH is
+       clear; Svc=* = services only) is not carried. An Allow rule without it would let in traffic the rule does not
+       allow, so the Allow rule is rejected (reported). A Block rule is pushed without it: it blocks more than written
+       (a key that is not known: reported as not fully enforced, it may add to the rule). */
+    cond = UnmatchableCondition(r, svc != NULL || (r->Svc && !wcscmp(r->Svc, L"*")));
+    if (cond != COND_NONE && !block) ok = FALSE;
     if (r->App && *r->App)
     {
         nt = ToNtPath(r->App);
@@ -600,6 +662,8 @@ fail:
     res = BR_REJECTED;
 done:
     if (res != BR_OK) { b->len = start; *pieces = first; }
+    else if (block && cond == COND_UNKNOWN) *pPartial = TRUE;
+    else if (block && cond == COND_NARROWING) *pDropped = TRUE;
     if (nt) HeapFree(GetProcessHeap(), 0, nt);
     DimFree(&lp); DimFree(&rp); DimFree(&la4); DimFree(&ra4); DimFree(&la6); DimFree(&ra6); DimFree(&ic);
     return res;
@@ -651,9 +715,9 @@ DWORD FwPushToKernel(ULONGLONG gen, BOOL *pPresent)
     for (pass = 0; pass < 2; pass++)
     for (i = 0; i < rs.N; i++)
     {
-        ULONG before = cnt, savedLen = (ULONG)b.len; BOOL partial = FALSE, isBlock = !rs.R[i].Action; BR_RESULT br;
+        ULONG before = cnt, savedLen = (ULONG)b.len; BOOL partial = FALSE, dropped = FALSE, isBlock = !rs.R[i].Action; BR_RESULT br;
         if (!rs.R[i].Enabled || (pass == 0) != isBlock) continue;
-        br = BuildRule(&b, &rs.R[i], v6on, &cnt, NITROFW_MAX_RULES, &partial);
+        br = BuildRule(&b, &rs.R[i], v6on, &cnt, NITROFW_MAX_RULES, &partial, &dropped);
         /* a rule that would take the policy past its size limit is rejected on its own: the final size check below
            would fail the whole push and leave the previous policy in force */
         if (br == BR_OK && b.len > NITROFW_MAX_POLICY_SIZE) { b.len = savedLen; cnt = before; br = BR_REJECTED; }
@@ -668,6 +732,7 @@ DWORD FwPushToKernel(ULONGLONG gen, BOOL *pPresent)
             g_Partial++;
             Note(L"Block rule not fully enforced", &rs.R[i]);
         }
+        else if (br == BR_OK && dropped) Note(L"Block rule pushed without a condition the kernel cannot match (blocks more)", &rs.R[i]);
     }
     ((NITROFW_POLICY *)b.p)->RuleCount = cnt;
     ((NITROFW_POLICY *)b.p)->TotalSize = (ULONG)b.len;
