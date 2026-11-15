@@ -182,6 +182,9 @@ VOID
 Route6Consider(PROUTE6_MATCH Best, struct netif *netif, UCHAR Length, ULONG Metric, const ip6_addr_t *NextHop,
                BOOLEAN FromRa)
 {
+    /* the route metric and the interface metric (set by hand or automatic) are added, as on Windows */
+    Metric += TCP6InterfaceMetric(netif);
+
     if (Best->Found)
     {
         if (Length < Best->Length)

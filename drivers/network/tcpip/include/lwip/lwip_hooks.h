@@ -24,6 +24,9 @@ void LibTCPRdnss6Input(struct netif *netif, const ip6_addr_t *addr, u32_t lifeti
 void LibTCPDnssl6Input(struct netif *netif, struct pbuf *p, u16_t offset, u16_t length);
 void LibNd6RaHeader(struct netif *netif, u8_t hop_limit, u8_t flags);
 u8_t LibIp6HopLimit(struct netif *netif, u8_t hl);
+/* ip/transport/tcp/ifcfg.c */
+int LibNd6RaAccept(struct netif *netif);
+u8_t LibNd6DadAttempts(struct netif *netif);
 /* ip/transport/tcp/iid6.c */
 int LibNd6SlaacAddress(struct netif *netif, const ip6_addr_t *prefix, ip6_addr_t *addr);
 int LibNd6DadFailed(struct netif *netif, s8_t index);

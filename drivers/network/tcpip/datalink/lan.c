@@ -959,6 +959,7 @@ BOOLEAN ReadIpConfiguration(PIP_INTERFACE Interface)
     UNICODE_STRING Gateway = RTL_CONSTANT_STRING(L"DefaultGateway");
     UNICODE_STRING EnableDhcp = RTL_CONSTANT_STRING(L"EnableDHCP");
     UNICODE_STRING InterfaceMetric = RTL_CONSTANT_STRING(L"InterfaceMetric");
+    UNICODE_STRING MtuValue = RTL_CONSTANT_STRING(L"MTU");
     UNICODE_STRING Prefix = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\");
     UNICODE_STRING TcpipRegistryPath;
     UNICODE_STRING RegistryDataU;
@@ -1016,6 +1017,20 @@ BOOLEAN ReadIpConfiguration(PIP_INTERFACE Interface)
             if (Interface->Metric > 9999)
                 Interface->Metric = 9999;
         }
+        Interface->Ip4MetricConfig = Interface->Metric;
+
+        /* The IPv4 MTU set by hand (SetIpInterfaceEntry, ifcfg.c): 576 up to the link MTU, which is applied when the
+           adapter's MTU is known; anything else is not used */
+        Interface->Ip4MtuConfig = 0;
+        Status = ZwQueryValueKey(ParameterHandle,
+                                 &MtuValue,
+                                 KeyValuePartialInformation,
+                                 KeyValueInfo,
+                                 KeyValueInfoLength,
+                                 &Unused);
+        if (NT_SUCCESS(Status) && KeyValueInfo->Type == REG_DWORD && KeyValueInfo->DataLength == sizeof(ULONG) &&
+            *(PULONG)KeyValueInfo->Data >= 576 && *(PULONG)KeyValueInfo->Data <= 0xFFFF)
+            Interface->Ip4MtuConfig = *(PULONG)KeyValueInfo->Data;
 
         /* Read the EnableDHCP entry */
         Status = ZwQueryValueKey(ParameterHandle,
@@ -1126,7 +1141,7 @@ BOOLEAN ReconfigureAdapter(PRECONFIGURE_CONTEXT Context)
     {
         /* Read the IP configuration */
         ReadIpConfiguration(Interface);
-        /* and the persistent IPv6 addresses and routes of the adapter (persist6.c) */
+        /* and the persistent IPv6 addresses, routes and interface parameters of the adapter (persist6.c) */
         TCP6ApplyPersistent(Interface);
 
         /* Compute the broadcast address */
@@ -1174,7 +1189,9 @@ BOOLEAN ReconfigureAdapter(PRECONFIGURE_CONTEXT Context)
         if (NdisStatus != NDIS_STATUS_SUCCESS)
             return FALSE;
 
-        Interface->MTU = Adapter->MTU;
+        /* what IPv4 uses is the link MTU, or the lower one set by hand (ifcfg.c) */
+        Interface->LinkMtu = Adapter->MTU;
+        Interface->MTU = IFEffectiveIp4Mtu(Interface);
 
         /* Get maximum packet size */
         NdisStatus = NDISCall(Adapter,

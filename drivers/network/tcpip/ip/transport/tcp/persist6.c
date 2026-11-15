@@ -234,6 +234,139 @@ TCP6PersistRoute(PIP_INTERFACE IF, const TCP_IPV6_ROUTE_REQUEST *Request, BOOLEA
     return Persist6Update(IF, PERSIST6_ROUTES, sizeof(Record), &Record, Remove, Persist6SameRoute, Found);
 }
 
+/*
+ * The interface parameters (SetIpInterfaceEntry, ifcfg.c), values of the adapter's key:
+ *
+ *     Tcpip6\Parameters\Interfaces\<GUID>   NlMtu, InterfaceMetric, RouterDiscovery, DadTransmits   REG_DWORD (IPv6)
+ *     Tcpip\Parameters\Interfaces\<GUID>    MTU, InterfaceMetric                                    REG_DWORD (IPv4)
+ *
+ * (the IPv4 values are the ones the stack and the IP configuration tools already know). A metric of 0 (automatic)
+ * deletes InterfaceMetric. The IPv6 values are read by TCP6ApplyInterfaceParams when the adapter starts.
+ */
+#define PERSIST4_INTERFACES     L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces"
+
+static
+NTSTATUS
+Persist6SetDword(HANDLE Key, PCWSTR Name, ULONG Value)
+{
+    UNICODE_STRING ValueName;
+
+    RtlInitUnicodeString(&ValueName, Name);
+    return ZwSetValueKey(Key, &ValueName, 0, REG_DWORD, &Value, sizeof(Value));
+}
+
+static
+NTSTATUS
+Persist6SetMetric(HANDLE Key, ULONG Metric)
+{
+    UNICODE_STRING ValueName = RTL_CONSTANT_STRING(L"InterfaceMetric");
+    NTSTATUS Status;
+
+    if (Metric)
+        return Persist6SetDword(Key, L"InterfaceMetric", Metric);
+    Status = ZwDeleteValueKey(Key, &ValueName);
+    return (Status == STATUS_OBJECT_NAME_NOT_FOUND) ? STATUS_SUCCESS : Status;
+}
+
+/* Writes what a request of the persistent store changed (PASSIVE_LEVEL, no lock held) */
+NTSTATUS
+TCP6PersistInterface(PIP_INTERFACE IF, const TCP_IP_INTERFACE_REQUEST *Request)
+{
+    HANDLE Key;
+    NTSTATUS Status;
+
+    ExAcquireFastMutex(&Persist6Lock);
+    if (Request->Family == TCP_IPIF_IPV6)
+    {
+        Status = Persist6OpenKey(IF, TRUE, &Key);
+        if (NT_SUCCESS(Status))
+        {
+            if (Request->Fields & TCP_IPIF_SET_MTU)
+                Status = Persist6SetDword(Key, L"NlMtu", Request->Mtu);
+            if (NT_SUCCESS(Status) && (Request->Fields & TCP_IPIF_SET_METRIC))
+                Status = Persist6SetMetric(Key, Request->Metric);
+            if (NT_SUCCESS(Status) && (Request->Fields & TCP_IPIF_SET_ROUTER_DISCOVERY))
+                Status = Persist6SetDword(Key, L"RouterDiscovery", Request->RouterDiscovery);
+            if (NT_SUCCESS(Status) && (Request->Fields & TCP_IPIF_SET_DAD_TRANSMITS))
+                Status = Persist6SetDword(Key, L"DadTransmits", Request->DadTransmits);
+            ZwClose(Key);
+        }
+    }
+    else
+    {
+        UNICODE_STRING Root = RTL_CONSTANT_STRING(PERSIST4_INTERFACES);
+        OBJECT_ATTRIBUTES Attributes;
+
+        if (!IF->Name.Buffer || IF->Name.Length == 0)
+            Status = STATUS_OBJECT_NAME_INVALID;
+        else
+        {
+            WCHAR Path[160];
+            UNICODE_STRING Full;
+
+            Full.Buffer = Path;
+            Full.Length = 0;
+            Full.MaximumLength = sizeof(Path);
+            Status = RtlAppendUnicodeStringToString(&Full, &Root);
+            if (NT_SUCCESS(Status))
+                Status = RtlAppendUnicodeToString(&Full, L"\\");
+            if (NT_SUCCESS(Status))
+                Status = RtlAppendUnicodeStringToString(&Full, &IF->Name);
+            if (NT_SUCCESS(Status))
+            {
+                InitializeObjectAttributes(&Attributes, &Full, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+                Status = ZwCreateKey(&Key, KEY_SET_VALUE, &Attributes, 0, NULL, REG_OPTION_NON_VOLATILE, NULL);
+            }
+            if (NT_SUCCESS(Status))
+            {
+                if (Request->Fields & TCP_IPIF_SET_MTU)
+                    Status = Persist6SetDword(Key, L"MTU", Request->Mtu);
+                if (NT_SUCCESS(Status) && (Request->Fields & TCP_IPIF_SET_METRIC))
+                    Status = Persist6SetMetric(Key, Request->Metric);
+                ZwClose(Key);
+            }
+        }
+    }
+    ExReleaseFastMutex(&Persist6Lock);
+    return Status;
+}
+
+static
+BOOLEAN
+Persist6GetDword(HANDLE Key, PCWSTR Name, PULONG Value)
+{
+    UNICODE_STRING ValueName;
+    UCHAR Buffer[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)];
+    PKEY_VALUE_PARTIAL_INFORMATION Info = (PKEY_VALUE_PARTIAL_INFORMATION)Buffer;
+    ULONG Length;
+
+    RtlInitUnicodeString(&ValueName, Name);
+    if (!NT_SUCCESS(ZwQueryValueKey(Key, &ValueName, KeyValuePartialInformation, Info, sizeof(Buffer), &Length)))
+        return FALSE;
+    if (Info->Type != REG_DWORD || Info->DataLength != sizeof(ULONG))
+        return FALSE;
+    *Value = *(PULONG)Info->Data;
+    return TRUE;
+}
+
+/* The IPv6 parameters stored for the adapter; a value that is not there stays at what it was given (PASSIVE_LEVEL) */
+VOID
+TCP6ReadInterfaceParams(PIP_INTERFACE IF, PULONG Mtu, PULONG Metric, PULONG RouterDiscovery, PULONG DadTransmits)
+{
+    HANDLE Key;
+
+    ExAcquireFastMutex(&Persist6Lock);
+    if (NT_SUCCESS(Persist6OpenKey(IF, FALSE, &Key)))
+    {
+        Persist6GetDword(Key, L"NlMtu", Mtu);
+        Persist6GetDword(Key, L"InterfaceMetric", Metric);
+        Persist6GetDword(Key, L"RouterDiscovery", RouterDiscovery);
+        Persist6GetDword(Key, L"DadTransmits", DadTransmits);
+        ZwClose(Key);
+    }
+    ExReleaseFastMutex(&Persist6Lock);
+}
+
 /* The adapter of IF started (ReconfigureAdapter, PASSIVE_LEVEL): its persistent addresses and routes that are not
    there are added (addresses first: a route may need the prefix of one) */
 VOID
@@ -247,6 +380,9 @@ TCP6ApplyPersistent(PIP_INTERFACE IF)
 
     if (!TCPIpv6Links || IF == Loopback || !netif || IF->AddressLength != 6)
         return;
+
+    /* the interface parameters first: duplicate address detection and router discovery follow them */
+    TCP6ApplyInterfaceParams(IF);
 
     ExAcquireFastMutex(&Persist6Lock);
     if (NT_SUCCESS(Persist6OpenKey(IF, FALSE, &Key)))

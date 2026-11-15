@@ -529,7 +529,8 @@ TDI_STATUS InfoTdiSetRoute(PIP_INTERFACE IF, PVOID Buffer, UINT BufferSize)
 
     if( Route->Type == IP_ROUTE_TYPE_ADD ) { /* Add the route */
         TI_DbgPrint(DEBUG_INFO,("Adding route (%s)\n", A2S(&Address)));
-        IF->Metric = Route->Metric1;
+        /* an interface metric set by hand (SetIpInterfaceEntry, the registry) stays; otherwise the route's is used */
+        IF->Metric = IF->Ip4MetricConfig ? IF->Ip4MetricConfig : Route->Metric1;
 	if (!RouterCreateRoute(&Address, &Netmask, &Router, IF))
 	    return TDI_NO_RESOURCES;
 

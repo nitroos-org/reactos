@@ -208,7 +208,7 @@ TCPUpdateInterfaceIPInformationLocked(PIP_INTERFACE IF)
     ip4_addr_t ipaddr;
     ip4_addr_t netmask;
     ip4_addr_t gw;
-    u16_t OldMtu;
+    u16_t OldMtu, LinkMtu;
 
     gw.addr = 0;
 
@@ -220,8 +220,13 @@ TCPUpdateInterfaceIPInformationLocked(PIP_INTERFACE IF)
      * (this runs again on every reconfiguration and IPv4 address change). An mtu6 that equals the link MTU
      * from before was not lowered, so it follows a link MTU that grows. (An advertisement of exactly the old
      * link MTU cannot be told apart from that; the next advertisement sets it again.) */
-    if (netif->mtu6 == 0 || netif->mtu6 > netif->mtu || netif->mtu6 == OldMtu)
-        netif->mtu6 = netif->mtu;
+    /* IPv4 and IPv6 each have an MTU that can be set by hand below the link MTU (ifcfg.c); IPv6 starts from the
+     * link MTU, not from the IPv4 one */
+    LinkMtu = (u16_t)min(IF->LinkMtu ? IF->LinkMtu : IF->MTU, 0xFFFF);
+    if (IF->Ip6MtuConfig)
+        netif->mtu6 = (u16_t)min(IF->Ip6MtuConfig, LinkMtu);
+    else if (netif->mtu6 == 0 || netif->mtu6 > LinkMtu || netif->mtu6 == OldMtu)
+        netif->mtu6 = LinkMtu;
 
     GetInterfaceIPv4Address(IF,
                             ADE_UNICAST,
