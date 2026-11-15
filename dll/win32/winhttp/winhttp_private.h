@@ -430,6 +430,8 @@ void netconn_unload( void );
 ULONG netconn_query_data_available( struct netconn * );
 DWORD netconn_recv( struct netconn *, void *, size_t, int, int * );
 DWORD netconn_resolve( WCHAR *, INTERNET_PORT, struct addr_list *, int );
+BOOL is_ipv6_literal_host( const WCHAR *, BOOL * );
+BOOL is_bad_bracketed_host( const WCHAR * );
 DWORD netconn_secure_connect( struct netconn *, WCHAR *, DWORD, CredHandle *, BOOL );
 DWORD netconn_send( struct netconn *, const void *, size_t, int *, WSAOVERLAPPED * );
 BOOL netconn_wait_overlapped_result( struct netconn *conn, WSAOVERLAPPED *ovr, DWORD *len );

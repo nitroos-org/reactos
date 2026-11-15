@@ -177,7 +177,8 @@ static WCHAR *host_for_header(const WCHAR *name)
     ret = malloc((len + 3) * sizeof(WCHAR));
     if(!ret)
         return NULL;
-    if(!bracketed && !wcschr(name, ':')) {
+    /* only an IPv6 address (two colons at least) is bracketed: "host:8080" is a name with a port */
+    if(!bracketed && (!(p = wcschr(name, ':')) || !wcschr(p + 1, ':'))) {
         lstrcpyW(ret, name);
         return ret;
     }
@@ -1732,8 +1733,13 @@ static BOOL HTTP_DomainMatches(LPCWSTR server, substr_t domain)
     const WCHAR *dot, *ptr;
     int len;
 
-    if(domain.len == ARRAY_SIZE(L"<local>")-1 && !wcsnicmp(domain.str, L"<local>", domain.len) && !wcschr(server, '.' ))
-        return TRUE;
+    if(domain.len == ARRAY_SIZE(L"<local>")-1 && !wcsnicmp(domain.str, L"<local>", domain.len) && !wcschr(server, '.' )) {
+        BOOL loopback;
+
+        /* an IPv6 address has no dot, but only ::1 is local for Windows (oracle: a global address and a mapped
+         * IPv4 address go through the proxy) */
+        return !is_ipv6_literal_host(server, &loopback) || loopback;
+    }
 
     if(domain.len && *domain.str != '*')
         return domain.len == lstrlenW(server) && !wcsnicmp(server, domain.str, domain.len);
@@ -1836,6 +1842,15 @@ static BOOL HTTP_DealWithProxy(appinfo_t *hIC, http_session_t *session, http_req
     return TRUE;
 }
 
+/* The address string of a status callback: Windows writes an IPv6 address in brackets ("[::1]"). Copies to out. */
+static const char *callback_address(const char *str, char out[INET6_ADDRSTRLEN + 3])
+{
+    if(!strchr(str, ':'))
+        return str;
+    snprintf(out, INET6_ADDRSTRLEN + 3, "[%s]", str);
+    return out;
+}
+
 static DWORD HTTP_ResolveName(http_request_t *request)
 {
     server_t *server = request->proxy ? request->proxy : request->server;
@@ -1858,9 +1873,13 @@ static DWORD HTTP_ResolveName(http_request_t *request)
     /* the server is shared by the whole process: its addresses are written under a lock */
     set_server_addresses(server, addrs, lens, count);
     address_to_string(&addrs[0], addr_str);
-    INTERNET_SendCallback(&request->hdr, request->hdr.dwContext,
-                          INTERNET_STATUS_NAME_RESOLVED,
-                          addr_str, strlen(addr_str)+1);
+    {
+        char cb_str[INET6_ADDRSTRLEN + 3];
+        const char *cb = callback_address(addr_str, cb_str);
+
+        INTERNET_SendCallback(&request->hdr, request->hdr.dwContext,
+                              INTERNET_STATUS_NAME_RESOLVED, (void *)cb, strlen(cb)+1);
+    }
 
     TRACE("resolved %s to %s\n", debugstr_w(server->name), addr_str);
     return ERROR_SUCCESS;
@@ -5019,10 +5038,13 @@ static DWORD open_http_connection(http_request_t *request, BOOL *reusing)
     TRACE("connecting to %s, proxy %s\n", debugstr_w(request->server->name),
           request->proxy ? debugstr_w(request->proxy->name) : "(null)");
 
-    INTERNET_SendCallback(&request->hdr, request->hdr.dwContext,
-                          INTERNET_STATUS_CONNECTING_TO_SERVER,
-                          request->server->addr_str,
-                          strlen(request->server->addr_str)+1);
+    {
+        char cb_str[INET6_ADDRSTRLEN + 3];
+        const char *cb = callback_address(request->server->addr_str, cb_str);
+
+        INTERNET_SendCallback(&request->hdr, request->hdr.dwContext,
+                              INTERNET_STATUS_CONNECTING_TO_SERVER, (void *)cb, strlen(cb)+1);
+    }
 
     res = create_netconn(request->proxy ? request->proxy : request->server, request->security_flags,
                          (request->hdr.ErrorMask & INTERNET_ERROR_MASK_COMBINED_SEC_CERT) != 0,
@@ -5034,9 +5056,13 @@ static DWORD open_http_connection(http_request_t *request, BOOL *reusing)
 
     request->netconn = netconn;
 
-    INTERNET_SendCallback(&request->hdr, request->hdr.dwContext,
-            INTERNET_STATUS_CONNECTED_TO_SERVER,
-            request->server->addr_str, strlen(request->server->addr_str)+1);
+    {
+        char cb_str[INET6_ADDRSTRLEN + 3];
+        const char *cb = callback_address(request->server->addr_str, cb_str);
+
+        INTERNET_SendCallback(&request->hdr, request->hdr.dwContext,
+                              INTERNET_STATUS_CONNECTED_TO_SERVER, (void *)cb, strlen(cb)+1);
+    }
 
     *reusing = FALSE;
     TRACE("Created connection to %s: %p\n", debugstr_w(request->server->name), netconn);
@@ -5989,6 +6015,10 @@ DWORD HTTP_Connect(appinfo_t *hIC, LPCWSTR lpszServerName,
 
     if (!lpszServerName || !lpszServerName[0])
         return ERROR_INVALID_PARAMETER;
+
+    /* brackets hold an IPv6 address only: Windows fails "[localhost]" and "[127.0.0.1]" with ERROR_INTERNET_INVALID_URL */
+    if (is_bad_bracketed_host(lpszServerName))
+        return ERROR_INTERNET_INVALID_URL;
 
     assert( hIC->hdr.htype == WH_HINIT );
 

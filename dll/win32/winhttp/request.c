@@ -558,7 +558,8 @@ static WCHAR *host_for_header( const WCHAR *hostname )
     BOOL bracketed = len >= 2 && hostname[0] == '[' && hostname[len - 1] == ']';
 
     if (!(ret = malloc( (len + 3) * sizeof(WCHAR) ))) return NULL;
-    if (bracketed || !wcschr( hostname, ':' ))
+    /* only an IPv6 address (two colons at least) is bracketed: "host:8080" is a name with a port */
+    if (bracketed || !(p = wcschr( hostname, ':' )) || !wcschr( p + 1, ':' ))
     {
         lstrcpyW( ret, hostname );
         if (!bracketed) return ret;
@@ -1448,7 +1449,7 @@ static DWORD secure_proxy_connect( struct request *request )
 
 static WCHAR *addr_to_str( struct sockaddr_storage *addr )
 {
-    char buf[INET6_ADDRSTRLEN];
+    char buf[INET6_ADDRSTRLEN + 2];
     void *src;
 
     switch (addr->ss_family)
@@ -1463,8 +1464,15 @@ static WCHAR *addr_to_str( struct sockaddr_storage *addr )
         WARN("unsupported address family %d\n", addr->ss_family);
         return NULL;
     }
-    if (!inet_ntop( addr->ss_family, src, buf, sizeof(buf) )) return NULL;
-    return strdupAW( buf );
+    if (!inet_ntop( addr->ss_family, src, buf + 1, sizeof(buf) - 2 )) return NULL;
+    /* Windows writes an IPv6 address in brackets ("[::1]") in the status callbacks */
+    if (addr->ss_family == AF_INET6)
+    {
+        buf[0] = '[';
+        strcat( buf, "]" );
+        return strdupAW( buf );
+    }
+    return strdupAW( buf + 1 );
 }
 
 /* The address list of a connect object is shared by the requests made on it, which may connect from several threads

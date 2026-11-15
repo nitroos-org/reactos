@@ -391,6 +391,8 @@ DWORD HTTP_Connect(appinfo_t*,LPCWSTR,
 
 BOOL GetAddress(const WCHAR*,INTERNET_PORT,SOCKADDR*,int*,char*);
 int GetAddressList(const WCHAR*,INTERNET_PORT,struct sockaddr_storage*,int*,int);
+BOOL is_ipv6_literal_host(const WCHAR*,BOOL*);
+BOOL is_bad_bracketed_host(const WCHAR*);
 void address_to_string(const struct sockaddr_storage*,char*);
 void set_server_addresses(server_t*,const struct sockaddr_storage*,const int*,int);
 

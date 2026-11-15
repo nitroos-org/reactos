@@ -8628,6 +8628,22 @@ static void test_ipv6_literals(void)
         WaitForSingleObject(thread, 5000);
         CloseHandle(thread);
     }
+
+    /* brackets hold an IPv6 address only: Windows fails the URL with ERROR_INTERNET_INVALID_URL, no lookup is made */
+    {
+        static const WCHAR *bad[] = { L"http://[localhost]:45999/", L"http://[127.0.0.1]:45999/", L"http://[not-an-address]:45999/" };
+        HINTERNET ses = InternetOpenW(L"winetest", INTERNET_OPEN_TYPE_DIRECT, NULL, NULL, 0), url;
+
+        for (i = 0; i < ARRAY_SIZE(bad); i++)
+        {
+            SetLastError(0xdeadbeef);
+            url = InternetOpenUrlW(ses, bad[i], NULL, 0, INTERNET_FLAG_NO_CACHE_WRITE | INTERNET_FLAG_RELOAD, 0);
+            ok(!url, "%s: InternetOpenUrl succeeded\n", wine_dbgstr_w(bad[i]));
+            ok(GetLastError() == ERROR_INTERNET_INVALID_URL, "%s: got %lu\n", wine_dbgstr_w(bad[i]), GetLastError());
+            if (url) InternetCloseHandle(url);
+        }
+        InternetCloseHandle(ses);
+    }
 }
 
 START_TEST(http)
