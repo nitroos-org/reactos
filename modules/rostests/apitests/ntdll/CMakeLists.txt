@@ -151,6 +151,7 @@ list(APPEND SOURCE
     NtQueryObject.c
     NtQueryOpenSubKeys.c
     NtOpenSubKeysRace.c
+    NtOpenCreateRace.c
     NtQuerySecurityObject.c
     NtQuerySection.c
     NtQuerySystemEnvironmentValue.c

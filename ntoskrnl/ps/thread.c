@@ -1238,6 +1238,14 @@ NtOpenThread(OUT PHANDLE ThreadHandle,
             return Status;
         }
 
+        /* The id is not valid yet if the creator has not inserted the thread */
+        if (!PspIsObjectInserted(Thread))
+        {
+            SeDeleteAccessState(&AccessState);
+            ObDereferenceObject(Thread);
+            return STATUS_INVALID_CID;
+        }
+
         /* The threads of a protected process give a caller outside the protection only the limited rights */
         if (PreviousMode != KernelMode &&
             PspProtectedOpenDenied(Thread->ThreadsProcess,

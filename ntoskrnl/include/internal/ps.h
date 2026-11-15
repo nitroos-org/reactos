@@ -678,6 +678,24 @@ extern KGUARDED_MUTEX PspActiveProcessMutex;
 extern LARGE_INTEGER ShortPsLockDelay;
 extern EPROCESS_QUOTA_BLOCK PspDefaultQuotaBlock;
 extern PHANDLE_TABLE PspCidTable;
+
+/*
+ * A process or thread is published (CID table, active process list, process
+ * thread list) before its creator runs ObInsertObject on it, and
+ * ObInsertObject only accepts an object that nobody has opened a handle to yet
+ * (OB_FLAG_CREATE_INFO still set). Kernel code must keep finding such an
+ * object (thread-create notify routines run before the insert), but the paths
+ * that make a HANDLE to an object found by id or by walking the lists must
+ * refuse it, or the creator's ObInsertObject fails.
+ *
+ * The flag is cleared only by ObInsertObject itself, after its own check, or
+ * by a handle open; those paths never open a not-yet-inserted object. A reader
+ * that sees the flag set may refuse an object whose insert is just completing
+ * (harmless: the id was not visible a moment ago); a reader that sees it clear
+ * knows the creator's check has passed, so opening a handle cannot disturb it.
+ */
+#define PspIsObjectInserted(Object) \
+    (!(((volatile OBJECT_HEADER*)OBJECT_TO_OBJECT_HEADER(Object))->Flags & OB_FLAG_CREATE_INFO))
 extern EX_CALLBACK PspThreadNotifyRoutine[PSP_MAX_CREATE_THREAD_NOTIFY];
 extern EX_CALLBACK PspProcessNotifyRoutine[PSP_MAX_CREATE_PROCESS_NOTIFY];
 extern EX_CALLBACK PspLoadImageNotifyRoutine[PSP_MAX_LOAD_IMAGE_NOTIFY];
