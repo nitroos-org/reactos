@@ -127,8 +127,11 @@ DC_vFixIsotropicMapping(PDC pdc)
         pdcattr->szlViewportExt.cy = (LONG)(fy * s / szlWindowExt.cx);
     }
 
-    /* Reset the flag */
+    /* Reset the flag (the fix-up must run only once per change). The world-to-device matrix still has to be rebuilt
+       with the new extents: called by GetViewportExtEx (NtGdiGetDCPoint) no rebuild follows, and PAGE_EXTENTS_CHANGED
+       may have been the only flag asking for one (gdi32's SetViewportExtEx/SetWindowExtEx set no other) */
     pdc->pdcattr->flXform &= ~PAGE_EXTENTS_CHANGED;
+    pdc->pdcattr->flXform |= PAGE_XLATE_CHANGED;
 }
 
 VOID
@@ -195,8 +198,9 @@ DC_vUpdateWorldToDevice(PDC pdc)
     XFORMOBJ_vInit(&xoWorldToDevice, &pdc->pdcattr->mxWorldToDevice);
     XFORMOBJ_iCombine(&xoWorldToDevice, &xoWorldToPage, &xoPageToDevice);
 
-    /* Reset the flags: the matrix is up to date (DC_pmxWorldToDevice is the only reader of the page flags),
-       it is not rebuilt on every call until the next change */
+    /* Reset the flags: the matrix is up to date and is not rebuilt on every call until the next change. Every change
+       of the mapping sets one of them again; the isotropic fix-up above has already run (DC_pszlViewportExt), so the
+       PAGE_EXTENTS_CHANGED test of DC_pszlViewportExt and of gdi32's GetViewportExtEx has nothing left to do */
     pdc->pdcattr->flXform &= ~(WORLD_XFORM_CHANGED | PAGE_XLATE_CHANGED | PAGE_EXTENTS_CHANGED);
 }
 
