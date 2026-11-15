@@ -759,14 +759,18 @@ static NTSTATUS NTAPI PacketSocketSendComplete
 /* Queue a datagram send request and hand its datagram to the transport,
  * recording which request the datagram completes. Returns FALSE, with the
  * request untouched, when the record cannot be allocated. Otherwise the
- * request is pending (or already completed) and the caller returns
- * STATUS_PENDING. The socket state lock is held. */
+ * caller returns *Result: STATUS_PENDING when the request was queued (it
+ * may have completed since), else the status of a request that was cancelled
+ * before it could be queued and is completed already (it was not marked
+ * pending). The socket state lock is held. */
 static BOOLEAN AfdQueueDatagramSend
 ( PAFD_FCB FCB, PIRP Irp, PAFD_SEND_INFO_UDP SendReq,
-  PTDI_CONNECTION_INFORMATION TargetAddress ) {
+  PTDI_CONNECTION_INFORMATION TargetAddress, PNTSTATUS Result ) {
     NTSTATUS Status;
     PIRP SavedInFlight;
     PAFD_DGRAM_SEND_CONTEXT Ctx;
+
+    *Result = STATUS_PENDING;
 
     Ctx = ExAllocatePoolWithTag( NonPagedPool, sizeof(*Ctx), TAG_AFD_DGRAM_SEND );
     if( !Ctx )
@@ -783,6 +787,7 @@ static BOOLEAN AfdQueueDatagramSend
     {
         /* Cancelled before it could be queued: completed by the cancel handler */
         ExFreePoolWithTag( Ctx, TAG_AFD_DGRAM_SEND );
+        *Result = Status;
         return TRUE;
     }
 
@@ -902,7 +907,7 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         Status = TdiBuildConnectionInfo( &TargetAddress, FCB->RemoteAddress );
 
         if( NT_SUCCESS(Status) ) {
-            if (!AfdQueueDatagramSend(FCB, Irp, SendReq, TargetAddress)) {
+            if (!AfdQueueDatagramSend(FCB, Irp, SendReq, TargetAddress, &Status)) {
                 ExFreePoolWithTag(TargetAddress, TAG_AFD_TDI_CONNECTION_INFORMATION);
                 UnlockBuffers(SendReq->BufferArray, SendReq->BufferCount, FALSE);
                 return UnlockAndMaybeComplete( FCB, STATUS_NO_MEMORY, Irp, 0 );
@@ -912,7 +917,7 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
             SocketStateUnlock(FCB);
 
-            return STATUS_PENDING;
+            return Status;
         }
         else
         {
@@ -1180,7 +1185,9 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     SocketStateUnlock(FCB);
 
-    return STATUS_PENDING;
+    /* A request cancelled before it could be queued is completed already and was not marked pending: its
+       status, not STATUS_PENDING, else a WriteFile (deferred completion) is never completed for its caller */
+    return Status;
 }
 
 NTSTATUS NTAPI
@@ -1298,7 +1305,7 @@ AfdPacketSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     /* Check the size of the Address given ... */
 
     if( NT_SUCCESS(Status) ) {
-        if (!AfdQueueDatagramSend(FCB, Irp, SendReq, TargetAddress)) {
+        if (!AfdQueueDatagramSend(FCB, Irp, SendReq, TargetAddress, &Status)) {
             ExFreePoolWithTag(TargetAddress, TAG_AFD_TDI_CONNECTION_INFORMATION);
             UnlockBuffers(SendReq->BufferArray, SendReq->BufferCount, FALSE);
             return UnlockAndMaybeComplete( FCB, STATUS_NO_MEMORY, Irp, 0 );
@@ -1308,7 +1315,7 @@ AfdPacketSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
         SocketStateUnlock(FCB);
 
-        return STATUS_PENDING;
+        return Status;
     }
     else
     {

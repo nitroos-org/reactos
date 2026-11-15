@@ -740,11 +740,13 @@ NTSTATUS QueueUserModeIrp(PAFD_FCB FCB, PIRP Irp, UINT Function)
         /* We were already cancelled before we were able to register our cancel routine
          * so we are to call the cancel routine ourselves right here to cancel the IRP
          * (which handles all the stuff we do above) and return STATUS_CANCELLED to the caller
+         * (the status the cancel handler completes it with: a receive of a stream socket that
+         * reaches it after its cleanup is aborted)
          */
+        Status = (Function == FUNCTION_RECV && FCB->AbortingReceives) ? STATUS_CONNECTION_ABORTED : STATUS_CANCELLED;
         AfdCancelHandler(IoGetCurrentIrpStackLocation(Irp)->DeviceObject,
                          Irp);
         AfdEndCancelAfterCleanup(FCB, Marked);
-        Status = STATUS_CANCELLED;
     }
 
     return Status;
