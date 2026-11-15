@@ -666,8 +666,6 @@ nd6_input(struct pbuf *p, struct netif *inp)
     }
 #endif /* LWIP_ND6_ALLOW_RA_UPDATES */
 
-    /* @todo set default hop limit... */
-    /* ra_hdr->current_hop_limit;*/
 
     /* Update flags in local entry (incl. preference). NitroOS: a changed preference changes which router the
        destinations use, so the next hops lwIP kept are found again */
@@ -675,6 +673,12 @@ nd6_input(struct pbuf *p, struct netif *inp)
       nd6_clear_destination_cache();
     }
     default_router_list[i].flags = ra_hdr->flags;
+
+    /* NitroOS: the current hop limit and the M and O flags go to the stack (ra6.c), after this router's entry has its
+       flags; 0 for the hop limit is "unspecified" (RFC 4861 4.2) */
+#ifdef LWIP_HOOK_ND6_RA_HEADER
+    LWIP_HOOK_ND6_RA_HEADER(inp, ra_hdr->current_hop_limit, ra_hdr->flags);
+#endif
 
 #if LWIP_IPV6_DHCP6
     /* Trigger DHCPv6 if enabled */

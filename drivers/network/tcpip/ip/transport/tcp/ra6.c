@@ -2,7 +2,7 @@
  * PROJECT:     NitroOS TCP/IP driver
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
  * PURPOSE:     What router advertisements tell besides prefixes, DNS servers and routers: DNS search lists
- *              (RFC 8106), for user mode
+ *              (RFC 8106), the current hop limit (RFC 4861 4.2)
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
@@ -15,6 +15,9 @@
  *   first); IP_IPV6_RA_ENTRY_ID hands them to iphlpapi (GetAdaptersAddresses FirstDnsSuffix, the resolver's
  *   search list, ipconfig /all). The option comes from the network: every length is checked here, and a name is
  *   kept only when it is made of letters, digits, '-' and '_' (what a host name or a punycode label has).
+ * - LibNd6RaHeader keeps the current hop limit of an interface (RFC 4861 4.2), in its IP_INTERFACE, and exports it
+ *   in the rows of the IPv6 table (TCP_IPV6_INTERFACE_ROW). A hop limit of 0 (unspecified) leaves the one before.
+ *   LibIp6HopLimit gives it to datagrams whose sender did not choose one.
  */
 
 #include "precomp.h"
@@ -209,6 +212,38 @@ LibTCPDnssl6Input(struct netif *netif, struct pbuf *p, u16_t Offset, u16_t Lengt
     /* type, length, 2 reserved, then the lifetime (network order) */
     Lifetime = ((ULONG)Ra6Option[4] << 24) | ((ULONG)Ra6Option[5] << 16) | ((ULONG)Ra6Option[6] << 8) | Ra6Option[7];
     Ra6ParseNames(IfIndex, Ra6Option + SIZEOF_DNSSL_OPTION_BASE, Length - SIZEOF_DNSSL_OPTION_BASE, Lifetime);
+}
+
+/* LWIP_HOOK_ND6_RA_HEADER: the header of a router advertisement that passed the checks; core lock held */
+void
+LibNd6RaHeader(struct netif *netif, u8_t CurHopLimit, u8_t Flags)
+{
+    PIP_INTERFACE IF;
+
+    UNREFERENCED_PARAMETER(Flags);
+
+    if (!netif || !netif->state)
+        return;
+    IF = netif->state;
+
+    /* 0: unspecified by this router, what was before stays */
+    if (CurHopLimit)
+        IF->Ra6HopLimit = CurHopLimit;
+}
+
+/* LWIP_HOOK_IP6_HOP_LIMIT (ip6_output_if_src, core lock held): the hop limit a datagram goes out with.
+   IP_DEFAULT_TTL is what the stack gives a socket whose owner did not set IP_TTL / IPV6_UNICAST_HOPS: it becomes the
+   router's current hop limit of the interface when there is one (a socket that set exactly the default cannot be told
+   apart; the loss is the same value). Anything else, and everything that is not IPv6 data, stays */
+u8_t
+LibIp6HopLimit(struct netif *netif, u8_t Hl)
+{
+    PIP_INTERFACE IF;
+
+    if (Hl != IP_DEFAULT_TTL || !netif || !netif->state)
+        return Hl;
+    IF = netif->state;
+    return IF->Ra6HopLimit ? IF->Ra6HopLimit : Hl;
 }
 
 /* The interface goes (core lock held, before netif_remove): its search domains go with it */

@@ -632,6 +632,8 @@ TCPQueryIpv6Table(PVOID Out, ULONG OutSize)
         IfRows[i].Flags = (IsLoopback ? (TCP_IPV6_IF_ENABLED | TCP_IPV6_IF_LOOPBACK) :
                            (IF->AddressLength == 6 && netif->hwaddr_len == 6) ? TCP_IPV6_IF_ENABLED : 0);
         IfRows[i].Mtu = IsLoopback ? 0xFFFFFFFF : netif->mtu6;
+        /* what its router advertisements said (ra6.c) */
+        IfRows[i].CurHopLimit = IF->Ra6HopLimit;
 
         for (a = 0; a < LWIP_IPV6_NUM_ADDRESSES; a++)
         {

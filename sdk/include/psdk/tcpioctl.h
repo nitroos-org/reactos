@@ -126,7 +126,8 @@ typedef struct _TCP_IPV6_INTERFACE_ROW
     ULONG IfIndex;
     ULONG Flags;
     ULONG Mtu;
-    ULONG Reserved;
+    ULONG CurHopLimit;      /* the current hop limit the routers on the link advertise (0: none): datagrams whose sender
+                               chose no hop limit leave with it */
 } TCP_IPV6_INTERFACE_ROW, *PTCP_IPV6_INTERFACE_ROW;
 
 /* DadState, PrefixOrigin and SuffixOrigin use the values of NL_DAD_STATE, NL_PREFIX_ORIGIN and

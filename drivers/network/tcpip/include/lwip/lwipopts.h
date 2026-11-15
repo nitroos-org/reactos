@@ -64,6 +64,10 @@
 #define LWIP_HOOK_ND6_RDNSS(netif, addr, lifetime) LibTCPRdnss6Input(netif, addr, lifetime)
 /* Router advertisement DNS search lists (RFC 8106 5.2) go to the stack's list too (ra6.c) */
 #define LWIP_HOOK_ND6_DNSSL(netif, p, offset, length) LibTCPDnssl6Input(netif, p, offset, length)
+/* The current hop limit and the M and O flags of router advertisements (ra6.c): the hop limit replaces the default of
+ * datagrams whose sender chose none (ip6_output_if_src), the flags go to user mode with the interface */
+#define LWIP_HOOK_ND6_RA_HEADER(netif, hop_limit, flags) LibNd6RaHeader(netif, hop_limit, flags)
+#define LWIP_HOOK_IP6_HOP_LIMIT(netif, hl) LibIp6HopLimit(netif, hl)
 /* Route information options (RFC 4191 2.3) become routes of the route table (route6.c): through the router that sent
  * the advertisement, with the metric of their preference, until their lifetime ends */
 #define LWIP_HOOK_ND6_ROUTE_INFO(netif, router, prefix, length, preference, lifetime) \
