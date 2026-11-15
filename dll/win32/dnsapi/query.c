@@ -197,37 +197,6 @@ AddIpv6Servers(adns_state astate)
  * Reserved             -- Response as it appears on the wire.  Optional.
  */
 
-static PCHAR
-DnsWToC(const WCHAR *WideString)
-{
-    PCHAR AnsiString;
-    int AnsiLen = WideCharToMultiByte(CP_ACP,
-                                      0,
-                                      WideString,
-                                      -1,
-                                      NULL,
-                                      0,
-                                      NULL,
-                                      0);
-    if (AnsiLen == 0)
-        return NULL;
-    AnsiString = RtlAllocateHeap(RtlGetProcessHeap(), 0, AnsiLen);
-    if (AnsiString == NULL)
-    {
-        return NULL;
-    }
-    WideCharToMultiByte(CP_ACP,
-                        0,
-                        WideString,
-                        -1,
-                        AnsiString,
-                        AnsiLen,
-                        NULL,
-                        0);
-
-    return AnsiString;
-}
-
 static PWCHAR
 DnsCToW(const CHAR *NarrowString)
 {
@@ -253,37 +222,6 @@ DnsCToW(const CHAR *NarrowString)
                         WideLen);
 
     return WideString;
-}
-
-static PCHAR
-DnsWToUTF8(const WCHAR *WideString)
-{
-    PCHAR AnsiString;
-    int AnsiLen = WideCharToMultiByte(CP_UTF8,
-                                      0,
-                                      WideString,
-                                      -1,
-                                      NULL,
-                                      0,
-                                      NULL,
-                                      0);
-    if (AnsiLen == 0)
-        return NULL;
-    AnsiString = RtlAllocateHeap(RtlGetProcessHeap(), 0, AnsiLen);
-    if (AnsiString == NULL)
-    {
-        return NULL;
-    }
-    WideCharToMultiByte(CP_UTF8,
-                        0,
-                        WideString,
-                        -1,
-                        AnsiString,
-                        AnsiLen,
-                        NULL,
-                        0);
-
-    return AnsiString;
 }
 
 static PWCHAR
@@ -322,11 +260,11 @@ DnsQuery_CodePage(UINT CodePage,
            PDNS_RECORD *QueryResultSet,
            PVOID *Reserved)
 {
-    UINT i;
     PWCHAR Buffer;
     DNS_STATUS Status;
-    PDNS_RECORD QueryResultWide;
-    PDNS_RECORD ConvertedRecord = 0, LastRecord = 0;
+    DNS_CHARSET OutCharSet;
+    PDNS_RECORD QueryResultWide = NULL, WideRecord;
+    PDNS_RECORD ConvertedRecord, FirstRecord = NULL, LastRecord = NULL;
 
     if (Name == NULL)
         return ERROR_INVALID_PARAMETER;
@@ -337,160 +275,67 @@ DnsQuery_CodePage(UINT CodePage,
     {
     case CP_ACP:
         Buffer = DnsCToW(Name);
+        OutCharSet = DnsCharSetAnsi;
         break;
 
     case CP_UTF8:
         Buffer = DnsUTF8ToW(Name);
+        OutCharSet = DnsCharSetUtf8;
         break;
 
     default:
         return ERROR_INVALID_PARAMETER;
     }
 
+    *QueryResultSet = NULL;
+
     Status = DnsQuery_W(Buffer, Type, Options, Extra, &QueryResultWide, Reserved);
 
-    while (Status == ERROR_SUCCESS && QueryResultWide)
+    /* The name */
+    if (Buffer)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Buffer);
+
+    if (Status != ERROR_SUCCESS)
+        return Status;
+
+    /*
+     * Every record of the wide result is deep-copied into the requested
+     * character set, whatever its type (DnsRecordCopyEx knows the layout of
+     * every record type that holds strings).
+     */
+    for (WideRecord = QueryResultWide; WideRecord; WideRecord = WideRecord->pNext)
     {
-        switch (QueryResultWide->wType)
-        {
-        case DNS_TYPE_A:
-        case DNS_TYPE_AAAA:
-        case DNS_TYPE_WKS:
-        case DNS_TYPE_CNAME:
-        case DNS_TYPE_PTR:
-        case DNS_TYPE_NS:
-        case DNS_TYPE_MB:
-        case DNS_TYPE_MD:
-        case DNS_TYPE_MF:
-        case DNS_TYPE_MG:
-        case DNS_TYPE_MR:
-            ConvertedRecord = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DNS_RECORD));
-            break;
-
-        case DNS_TYPE_MINFO:
-            ConvertedRecord = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DNS_RECORD) + QueryResultWide->Data.TXT.dwStringCount * sizeof(PSTR));
-            break;
-
-        case DNS_TYPE_NULL:
-            ConvertedRecord = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DNS_RECORD) + QueryResultWide->Data.Null.dwByteCount);
-            break;
-        }
+        ConvertedRecord = DnsRecordCopyEx(WideRecord, DnsCharSetUnicode, OutCharSet);
         if (ConvertedRecord == NULL)
         {
-            /* The name */
-            RtlFreeHeap(RtlGetProcessHeap(), 0, Buffer);
-            /* The result*/
-            DnsIntFreeRecordList(QueryResultWide);
-            QueryResultSet = NULL;
-            return ERROR_OUTOFMEMORY;
+            Status = ERROR_OUTOFMEMORY;
+            break;
         }
 
-        if (CodePage == CP_ACP)
-        {
-            ConvertedRecord->pName = DnsWToC((PWCHAR)QueryResultWide->pName);
-            ConvertedRecord->Flags.S.CharSet = DnsCharSetAnsi;
-        }
-        else
-        {
-            ConvertedRecord->pName = DnsWToUTF8((PWCHAR)QueryResultWide->pName);
-            ConvertedRecord->Flags.S.CharSet = DnsCharSetUtf8;
-        }
-
-        ConvertedRecord->wType = QueryResultWide->wType;
-        ConvertedRecord->Flags.S.Section = QueryResultWide->Flags.S.Section;
-        ConvertedRecord->dwTtl = QueryResultWide->dwTtl;
-        ConvertedRecord->dwReserved = 0;
         ConvertedRecord->pNext = NULL;
-
-        switch (QueryResultWide->wType)
-        {
-        case DNS_TYPE_A:
-        case DNS_TYPE_AAAA:
-        case DNS_TYPE_WKS:
-            ConvertedRecord->wDataLength = QueryResultWide->wDataLength;
-            memcpy(&ConvertedRecord->Data, &QueryResultWide->Data, QueryResultWide->wDataLength);
-            break;
-
-        case DNS_TYPE_CNAME:
-        case DNS_TYPE_PTR:
-        case DNS_TYPE_NS:
-        case DNS_TYPE_MB:
-        case DNS_TYPE_MD:
-        case DNS_TYPE_MF:
-        case DNS_TYPE_MG:
-        case DNS_TYPE_MR:
-            ConvertedRecord->wDataLength = sizeof(DNS_PTR_DATA);
-            if (CodePage == CP_ACP)
-                ConvertedRecord->Data.PTR.pNameHost = DnsWToC((PWCHAR)QueryResultWide->Data.PTR.pNameHost);
-            else
-                ConvertedRecord->Data.PTR.pNameHost = DnsWToUTF8((PWCHAR)QueryResultWide->Data.PTR.pNameHost);
-            break;
-
-        case DNS_TYPE_MINFO:
-            ConvertedRecord->wDataLength = sizeof(DNS_MINFO_DATA);
-            if (CodePage == CP_ACP)
-            {
-                ConvertedRecord->Data.MINFO.pNameMailbox = DnsWToC((PWCHAR)QueryResultWide->Data.MINFO.pNameMailbox);
-                ConvertedRecord->Data.MINFO.pNameErrorsMailbox = DnsWToC((PWCHAR)QueryResultWide->Data.MINFO.pNameErrorsMailbox);
-            }
-            else
-            {
-                ConvertedRecord->Data.MINFO.pNameMailbox = DnsWToUTF8((PWCHAR)QueryResultWide->Data.MINFO.pNameMailbox);
-                ConvertedRecord->Data.MINFO.pNameErrorsMailbox = DnsWToUTF8((PWCHAR)QueryResultWide->Data.MINFO.pNameErrorsMailbox);
-            }
-            break;
-
-        case DNS_TYPE_MX:
-            ConvertedRecord->wDataLength = sizeof(DNS_MX_DATA);
-            if (CodePage == CP_ACP)
-                ConvertedRecord->Data.MX.pNameExchange = DnsWToC((PWCHAR)QueryResultWide->Data.MX.pNameExchange);
-            else
-                ConvertedRecord->Data.MX.pNameExchange = DnsWToUTF8((PWCHAR)QueryResultWide->Data.MX.pNameExchange);
-            ConvertedRecord->Data.MX.wPreference = QueryResultWide->Data.MX.wPreference;
-            break;
-
-        case DNS_TYPE_HINFO:
-            ConvertedRecord->wDataLength = sizeof(DNS_TXT_DATA) + (sizeof(PCHAR) * QueryResultWide->Data.TXT.dwStringCount);
-            ConvertedRecord->Data.TXT.dwStringCount = QueryResultWide->Data.TXT.dwStringCount;
-
-            if (CodePage == CP_ACP)
-                for (i = 0; i < ConvertedRecord->Data.TXT.dwStringCount; i++)
-                    ConvertedRecord->Data.TXT.pStringArray[i] = DnsWToC((PWCHAR)QueryResultWide->Data.TXT.pStringArray[i]);
-            else
-                for (i = 0; i < ConvertedRecord->Data.TXT.dwStringCount; i++)
-                    ConvertedRecord->Data.TXT.pStringArray[i] = DnsWToUTF8((PWCHAR)QueryResultWide->Data.TXT.pStringArray[i]);
-
-            break;
-
-        case DNS_TYPE_NULL:
-            ConvertedRecord->wDataLength = sizeof(DNS_NULL_DATA) + QueryResultWide->Data.Null.dwByteCount;
-            ConvertedRecord->Data.Null.dwByteCount = QueryResultWide->Data.Null.dwByteCount;
-            memcpy(&ConvertedRecord->Data.Null.Data, &QueryResultWide->Data.Null.Data, QueryResultWide->Data.Null.dwByteCount);
-            break;
-        }
+        ConvertedRecord->dwReserved = 0;
 
         if (LastRecord)
-        {
             LastRecord->pNext = ConvertedRecord;
-            LastRecord = LastRecord->pNext;
-        }
         else
-        {
-            LastRecord = *QueryResultSet = ConvertedRecord;
-        }
-
-        QueryResultWide = QueryResultWide->pNext;
+            FirstRecord = ConvertedRecord;
+        LastRecord = ConvertedRecord;
     }
 
-    if (LastRecord)
-        LastRecord->pNext = 0;
+    /* The wide result: all of it, from its first record */
+    if (QueryResultWide)
+        DnsRecordListFree(QueryResultWide, DnsFreeRecordList);
 
-    /* The name */
-    RtlFreeHeap(RtlGetProcessHeap(), 0, Buffer);
-    /* The result*/
-    if (QueryResultWide) DnsIntFreeRecordList(QueryResultWide);
+    if (Status != ERROR_SUCCESS)
+    {
+        /* Nothing is returned on failure */
+        if (FirstRecord)
+            DnsRecordListFree(FirstRecord, DnsFreeRecordList);
+        return Status;
+    }
 
-    return Status;
+    *QueryResultSet = FirstRecord;
+    return ERROR_SUCCESS;
 }
 
 DNS_STATUS WINAPI
@@ -513,6 +358,47 @@ DnsQuery_UTF8(LPCSTR Name,
               PVOID *Reserved)
 {
     return DnsQuery_CodePage(CP_UTF8, Name, Type, Options, Extra, QueryResultSet, Reserved);
+}
+
+static
+VOID
+SetLocalDataLengths(PDNS_RECORD Record)
+{
+    for (; Record; Record = Record->pNext)
+    {
+        switch (Record->wType)
+        {
+        case DNS_TYPE_CNAME:
+        case DNS_TYPE_PTR:
+        case DNS_TYPE_NS:
+        case DNS_TYPE_MB:
+        case DNS_TYPE_MD:
+        case DNS_TYPE_MF:
+        case DNS_TYPE_MG:
+        case DNS_TYPE_MR:
+            Record->wDataLength = sizeof(DNS_PTR_DATAW);
+            break;
+
+        case DNS_TYPE_MX:
+        case DNS_TYPE_AFSDB:
+        case DNS_TYPE_RT:
+            Record->wDataLength = sizeof(DNS_MX_DATAW);
+            break;
+
+        case DNS_TYPE_MINFO:
+        case DNS_TYPE_RP:
+            Record->wDataLength = sizeof(DNS_MINFO_DATAW);
+            break;
+
+        case DNS_TYPE_SOA:
+            Record->wDataLength = sizeof(DNS_SOA_DATAW);
+            break;
+
+        case DNS_TYPE_SRV:
+            Record->wDataLength = sizeof(DNS_SRV_DATAW);
+            break;
+        }
+    }
 }
 
 DNS_STATUS
@@ -587,6 +473,11 @@ DnsQuery_W(LPCWSTR Name,
         DPRINT("Exception returned %lu\n", Status);
     }
     RpcEndExcept;
+
+    /* The resolver service may be a 64-bit process answering a 32-bit client: the data lengths of the
+       records that hold pointers are those of the service's structures, not of this process's */
+    if (Status == ERROR_SUCCESS)
+        SetLocalDataLengths(*QueryResultSet);
 
     return Status;
 }
@@ -1398,44 +1289,8 @@ Query_Main(LPCWSTR Name,
 void
 DnsIntFreeRecordList(PDNS_RECORD ToDelete)
 {
-    UINT i;
-    PDNS_RECORD next = 0;
-
-    while(ToDelete)
-    {
-        if(ToDelete->pName)
-            RtlFreeHeap(RtlGetProcessHeap(), 0, ToDelete->pName);
-
-        switch(ToDelete->wType)
-        {
-            case DNS_TYPE_CNAME:
-            case DNS_TYPE_PTR:
-            case DNS_TYPE_NS:
-            case DNS_TYPE_MB:
-            case DNS_TYPE_MD:
-            case DNS_TYPE_MF:
-            case DNS_TYPE_MG:
-            case DNS_TYPE_MR:
-                RtlFreeHeap(RtlGetProcessHeap(), 0, ToDelete->Data.PTR.pNameHost);
-                break;
-
-            case DNS_TYPE_MINFO:
-            case DNS_TYPE_MX:
-                RtlFreeHeap(RtlGetProcessHeap(), 0, ToDelete->Data.MX.pNameExchange);
-                break;
-
-            case DNS_TYPE_HINFO:
-                for(i = 0; i < ToDelete->Data.TXT.dwStringCount; i++)
-                    RtlFreeHeap(RtlGetProcessHeap(), 0, ToDelete->Data.TXT.pStringArray[i]);
-
-                RtlFreeHeap(RtlGetProcessHeap(), 0, ToDelete->Data.TXT.pStringArray);
-                break;
-        }
-
-        next = ToDelete->pNext;
-        RtlFreeHeap(RtlGetProcessHeap(), 0, ToDelete);
-        ToDelete = next;
-    }
+    /* One implementation for every record type (the string arrays of the text types are part of the record) */
+    DnsRecordListFree(ToDelete, DnsFreeRecordList);
 }
 
 BOOL

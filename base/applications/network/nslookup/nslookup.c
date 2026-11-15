@@ -159,12 +159,14 @@ BOOL PerformInternalLookup( PCHAR pAddr, PCHAR pResult )
     PCHAR Buffer = NULL, RecBuffer = NULL;
     CHAR pResolve[256];
     ULONG BufferLength = 0, RecBufferLength = 512;
-    int i = 0, j = 0, k = 0, d = 0;
+    int i = 0, j = 0, k = 0;
     BOOL bOk = FALSE;
 
     /* Makes things easier when parsing the response packet. */
     USHORT NumQuestions;
-    USHORT Type;
+    USHORT Type, Class;
+    ULONG Ttl;
+    USHORT d;
 
     if( (strlen( pAddr ) + 1) > 255 ) return FALSE;
 
@@ -273,39 +275,38 @@ BOOL PerformInternalLookup( PCHAR pAddr, PCHAR pResult )
                        &RecBufferLength );
     if( !bOk ) goto cleanup;
 
-    /* Start parsing the received packet. */
+    /* Start parsing the received packet: every read stays inside it. A reply that is too short or
+       whose records run past its end gives no name. */
+    if( RecBufferLength < DNS_HEADER_LENGTH ) goto malformed;
+
     NumQuestions = ntohs( ((PSHORT)&RecBuffer[4])[0] );
 
     k = 12;
 
     /* We don't care about the questions section, blow through it. */
-    if( NumQuestions )
-    {
-        for( i = 0; i < NumQuestions; i += 1 )
-        {
-            /* Quick way to skip the domain name section. */
-            k += ExtractName( RecBuffer, RecBufferLength, pResult, k, 0 );
-            k += 4;
-        }
-    }
+    if( !SkipQuestions( RecBuffer, RecBufferLength, NumQuestions, &k ) ) goto malformed;
 
     /* Skip the answer name. */
-    k += ExtractName( RecBuffer, RecBufferLength, pResult, k, 0 );
+    if( (ULONG)k >= RecBufferLength ) goto malformed;
+    ExtractName( RecBuffer, RecBufferLength, pResult, k, 0 );
+    k = SkipName( RecBuffer, RecBufferLength, k );
+    if( k < 0 ) goto malformed;
 
-    Type = ntohs( ((PUSHORT)&RecBuffer[k])[0] );
-    k += 8;
-
-    d = ntohs( ((PUSHORT)&RecBuffer[k])[0] );
-    k += 2;
+    if( !ReadRecordHeader( RecBuffer, RecBufferLength, &k, &Type, &Class, &Ttl, &d ) ) goto malformed;
 
     if( TYPE_PTR == Type )
     {
-        k += ExtractName( RecBuffer, RecBufferLength, pResult, k, d );
+        ExtractName( RecBuffer, RecBufferLength, pResult, k, (UCHAR)(d > 255 ? 255 : d) );
     }
-    else if( TYPE_A == Type )
+    else if( TYPE_A == Type && d >= 4 )
     {
-        k += ExtractIP( RecBuffer, pResult, k );
+        ExtractIP( RecBuffer, pResult, k );
     }
+
+    goto cleanup;
+
+malformed:
+    strcpy( pResult, "UnKnown" );
 
 cleanup:
     /* Free memory. */
@@ -359,15 +360,14 @@ static void FormatIpv6( const UCHAR *Address, PCHAR Out )
 static void PrintAaaaAnswers( PCHAR Rec, ULONG RecLen, int k, USHORT NumAnswers, USHORT NumAuthority, PCHAR pName )
 {
     CHAR Addresses[16][48];
-    CHAR Skip[256];
     int n = 0, a;
     USHORT Type, DataLength;
 
     for( a = 0; a < NumAnswers && n < 16; a += 1 )
     {
         if( (ULONG)k >= RecLen ) break;
-        k += ExtractName( Rec, RecLen, Skip, k, 0 );
-        if( (ULONG)k + 10 > RecLen ) break;
+        k = SkipName( Rec, RecLen, k );
+        if( k < 0 || (ULONG)k + 10 > RecLen ) break;
         Type = ntohs( ((PUSHORT)&Rec[k])[0] );
         k += 8;
         DataLength = ntohs( ((PUSHORT)&Rec[k])[0] );
@@ -410,11 +410,12 @@ void PerformLookup( PCHAR pAddr )
     BOOL bOk = FALSE;
 
     /* Makes things easier when parsing the response packet. */
-    UCHAR Header2;
+    UCHAR Header1, Header2;
     USHORT NumQuestions;
     USHORT NumAnswers;
     USHORT NumAuthority;
-    USHORT Type, QueryType;
+    USHORT Type, QueryType, Class, DataLength;
+    ULONG Ttl;
 
     if( (strlen( pAddr ) + 1) > 255 ) return;
 
@@ -528,12 +529,26 @@ void PerformLookup( PCHAR pAddr )
                        &RecBufferLength );
     if( !bOk ) goto cleanup;
 
-    /* Start parsing the received packet. */
+    /* Start parsing the received packet: every read stays inside it. */
+    if( RecBufferLength < DNS_HEADER_LENGTH )
+    {
+        _tprintf( _T("*** Invalid reply from %s: too short\n"), State.DefaultServer );
+        goto cleanup;
+    }
+
+    Header1 = RecBuffer[2];
     Header2 = RecBuffer[3];
     NumQuestions = ntohs( ((PSHORT)&RecBuffer[4])[0] );
     NumAnswers = ntohs( ((PSHORT)&RecBuffer[6])[0] );
     NumAuthority = ntohs( ((PUSHORT)&RecBuffer[8])[0] );
     Type = 0;
+
+    /* The server cut the answer short (UDP size limit); this program does not retry over TCP. */
+    if( Header1 & DNS_FLAG_TC )
+    {
+        _tprintf( _T("*** Reply from %s is truncated (TC bit set): the answer is incomplete\n"), State.DefaultServer );
+        if( NumAnswers == 0 ) goto cleanup;
+    }
 
     /* Check the RCODE for failure. */
     d = Header2 & 0x0F;
@@ -558,15 +573,8 @@ void PerformLookup( PCHAR pAddr )
 
     k = 12;
 
-    if( NumQuestions )
-    {
-        /* Blow through the questions section since we don't care about it. */
-        for( i = 0; i < NumQuestions; i += 1 )
-        {
-            k += ExtractName( RecBuffer, RecBufferLength, pResult, k, 0 );
-            k += 4;
-        }
-    }
+    /* Blow through the questions section since we don't care about it. */
+    if( !SkipQuestions( RecBuffer, RecBufferLength, NumQuestions, &k ) ) goto malformed;
 
     /* AAAA: every address of the answer */
     if( TYPE_AAAA == QueryType )
@@ -578,21 +586,21 @@ void PerformLookup( PCHAR pAddr )
     if( NumAnswers )
     {
         /* Skip the name. */
-        k += ExtractName( RecBuffer, RecBufferLength, pResult, k, 0 );
+        if( (ULONG)k >= RecBufferLength ) goto malformed;
+        ExtractName( RecBuffer, RecBufferLength, pResult, k, 0 );
+        k = SkipName( RecBuffer, RecBufferLength, k );
+        if( k < 0 ) goto malformed;
 
-        Type = ntohs( ((PUSHORT)&RecBuffer[k])[0] );
-        k += 8;
-
-        d = ntohs( ((PUSHORT)&RecBuffer[k])[0] );
-        k += 2;
+        if( !ReadRecordHeader( RecBuffer, RecBufferLength, &k, &Type, &Class, &Ttl, &DataLength ) ) goto malformed;
 
         if( TYPE_PTR == Type )
         {
-            k += ExtractName( RecBuffer, RecBufferLength, pResult, k, d );
+            ExtractName( RecBuffer, RecBufferLength, pResult, k, (UCHAR)(DataLength > 255 ? 255 : DataLength) );
         }
         else if( TYPE_A == Type )
         {
-            k += ExtractIP( RecBuffer, pResult, k );
+            if( DataLength < 4 ) goto malformed;
+            ExtractIP( RecBuffer, pResult, k );
         }
     }
 
@@ -625,6 +633,11 @@ void PerformLookup( PCHAR pAddr )
             _tprintf( _T("Address:  %s\n\n"), pAddr );
         }
     }
+
+    goto cleanup;
+
+malformed:
+    _tprintf( _T("*** Invalid reply from %s: a record is malformed or runs past the end of the packet\n"), State.DefaultServer );
 
 cleanup:
     /* Free memory. */

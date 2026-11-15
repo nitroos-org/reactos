@@ -299,6 +299,9 @@ BOOL SendRequest( PCHAR pInBuffer,
             return FALSE;
         }
 
+        /* A datagram too short for a DNS header is not an answer: keep waiting. */
+        if( j < DNS_HEADER_LENGTH ) continue;
+
         ResponseID = ntohs( ((PSHORT)&pOutBuffer[0])[0] );
 
         if( ResponseID == RequestID ) bWait = FALSE;
@@ -512,6 +515,88 @@ int ExtractName( PCHAR pBuffer, ULONG BufferLength, PCHAR pOutput, USHORT Offset
     return c;
 }
 
+BOOL ReadRecordHeader( PCHAR pBuffer, ULONG BufferLength, int *pOffset,
+                       USHORT *pType, USHORT *pClass, ULONG *pTtl, USHORT *pDataLength )
+{
+    const UCHAR *p;
+    ULONG k;
+
+    if( *pOffset < 0 ) return FALSE;
+    k = (ULONG)*pOffset;
+
+    /* Type (2), class (2), TTL (4) and data length (2). */
+    if( k > BufferLength || BufferLength - k < 10 ) return FALSE;
+
+    p = (const UCHAR *)&pBuffer[k];
+    *pType = (USHORT)((p[0] << 8) | p[1]);
+    *pClass = (USHORT)((p[2] << 8) | p[3]);
+    *pTtl = ((ULONG)p[4] << 24) | ((ULONG)p[5] << 16) | ((ULONG)p[6] << 8) | p[7];
+    *pDataLength = (USHORT)((p[8] << 8) | p[9]);
+    k += 10;
+
+    /* The data are inside the packet. */
+    if( BufferLength - k < *pDataLength ) return FALSE;
+
+    *pOffset = (int)k;
+    return TRUE;
+}
+
+int SkipName( PCHAR pBuffer, ULONG BufferLength, int Offset )
+{
+    ULONG i;
+    UCHAR l;
+
+    if( Offset < 0 ) return -1;
+    i = (ULONG)Offset;
+
+    for( ;; )
+    {
+        if( i >= BufferLength ) return -1;
+
+        l = (UCHAR)pBuffer[i];
+        i += 1;
+
+        /* The end of the name. */
+        if( 0 == l ) break;
+
+        /* A compression pointer ends the name too (it is 2 bytes). */
+        if( 0xC0 == (l & 0xC0) )
+        {
+            if( i >= BufferLength ) return -1;
+            i += 1;
+            break;
+        }
+
+        /* Reserved label type. */
+        if( l & 0xC0 ) return -1;
+
+        /* A label: its text must be inside the packet. */
+        if( BufferLength - i < l ) return -1;
+        i += l;
+    }
+
+    return (int)i;
+}
+
+BOOL SkipQuestions( PCHAR pBuffer, ULONG BufferLength, USHORT NumQuestions, int *pOffset )
+{
+    int k = *pOffset;
+    USHORT i;
+
+    for( i = 0; i < NumQuestions; i += 1 )
+    {
+        k = SkipName( pBuffer, BufferLength, k );
+        if( k < 0 ) return FALSE;
+
+        /* QTYPE and QCLASS. */
+        if( BufferLength - (ULONG)k < 4 ) return FALSE;
+        k += 4;
+    }
+
+    *pOffset = k;
+    return TRUE;
+}
+
 int ExtractIP( PCHAR pBuffer, PCHAR pOutput, USHORT Offset )
 {
     int c = 0, l = 0, i = 0, v = 0;
@@ -630,10 +715,17 @@ void PrintDebug( PCHAR pBuffer, DWORD BufferLength )
     USHORT ResponseID;
     UCHAR Header1, Header2;
     USHORT NumQuestions, NumAnswers, NumAuthority, NumAdditional;
-    USHORT Type, Class;
+    USHORT Type, Class, d;
     ULONG TTL;
-    CHAR pName[255];
-    int d = 0, i = 0, k = 0;
+    CHAR pName[EXTRACT_NAME_OUT_MAX];
+    int i = 0, k = 0, End;
+
+    /* No header, nothing to print. */
+    if( BufferLength < DNS_HEADER_LENGTH )
+    {
+        _tprintf( _T("------------\nGot answer (%d bytes): too short\n------------\n"), (int)BufferLength );
+        return;
+    }
 
     ResponseID = ntohs( ((PUSHORT)&pBuffer[i])[0] );
     i += 2;
@@ -666,6 +758,7 @@ void PrintDebug( PCHAR pBuffer, DWORD BufferLength )
 
     _tprintf( _T("        header flags:  response") );
     if( Header1 & 0x01 ) _tprintf( _T(", want recursion") );
+    if( Header1 & DNS_FLAG_TC ) _tprintf( _T(", truncated") );
     if( Header2 & 0x80 ) _tprintf( _T(", recursion avail.") );
     _tprintf( _T("\n") );
 
@@ -682,14 +775,21 @@ void PrintDebug( PCHAR pBuffer, DWORD BufferLength )
 
         for( k = 0; k < NumQuestions; k += 1 )
         {
-            i += ExtractName( pBuffer, BufferLength, pName, i, 0 );
+            if( (ULONG)i >= BufferLength ) goto Truncated;
+
+            ExtractName( pBuffer, BufferLength, pName, (USHORT)i, 0 );
+            i = SkipName( pBuffer, BufferLength, i );
+            if( i < 0 ) goto Truncated;
 
             _tprintf( _T("        %s"), pName );
 
-            Type = ntohs( ((PUSHORT)&pBuffer[i])[0] );
+            /* QTYPE and QCLASS. */
+            if( i < 0 || (ULONG)i + 4 > BufferLength ) goto Truncated;
+
+            Type = (USHORT)(((UCHAR)pBuffer[i] << 8) | (UCHAR)pBuffer[i + 1]);
             i += 2;
 
-            Class = ntohs( ((PUSHORT)&pBuffer[i])[0] );
+            Class = (USHORT)(((UCHAR)pBuffer[i] << 8) | (UCHAR)pBuffer[i + 1]);
             i += 2;
 
             _tprintf( _T(", type = %s, class = %s\n"),
@@ -704,44 +804,42 @@ void PrintDebug( PCHAR pBuffer, DWORD BufferLength )
 
         for( k = 0; k < NumAnswers; k += 1 )
         {
+            if( (ULONG)i >= BufferLength ) goto Truncated;
+
             _tprintf( _T("    ->  ") );
 
             /* Print out the name. */
-            i += ExtractName( pBuffer, BufferLength, pName, i, 0 );
+            ExtractName( pBuffer, BufferLength, pName, (USHORT)i, 0 );
+            i = SkipName( pBuffer, BufferLength, i );
+            if( i < 0 ) goto Truncated;
 
             _tprintf( _T("%s\n"), pName );
 
             /* Print out the type, class and data length. */
-            Type = ntohs( ((PUSHORT)&pBuffer[i])[0] );
-            i += 2;
-
-            Class = ntohs( ((PUSHORT)&pBuffer[i])[0] );
-            i += 2;
-
-            TTL = ntohl( ((PULONG)&pBuffer[i])[0] );
-            i += 4;
-
-            d = ntohs( ((PUSHORT)&pBuffer[i])[0] );
-            i += 2;
+            if( !ReadRecordHeader( pBuffer, BufferLength, &i, &Type, &Class, &TTL, &d ) ) goto Truncated;
+            End = i + d;
 
             _tprintf( _T("        type = %s, class = %s, dlen = %d\n"),
                       TypeIDtoTypeName( Type ),
                       ClassIDtoClassName( Class ),
-                      d );
+                      (int)d );
 
             /* Print out the answer. */
-            if( TYPE_A == Type )
+            if( TYPE_A == Type && d >= 4 )
             {
-                i += ExtractIP( pBuffer, pName, i );
+                ExtractIP( pBuffer, pName, (USHORT)i );
 
                 _tprintf( _T("        internet address = %s\n"), pName );
             }
-            else
+            else if( TYPE_A != Type )
             {
-                i += ExtractName( pBuffer, BufferLength, pName, i, d );
+                ExtractName( pBuffer, BufferLength, pName, (USHORT)i, (UCHAR)(d > 255 ? 255 : d) );
 
                 _tprintf( _T("        name = %s\n"), pName );
             }
+
+            /* The record data are skipped by their length. */
+            i = End;
 
             _tprintf( _T("        ttl = %d ()\n"), (int)TTL );
         }
@@ -753,34 +851,29 @@ void PrintDebug( PCHAR pBuffer, DWORD BufferLength )
 
         for( k = 0; k < NumAuthority; k += 1 )
         {
+            if( (ULONG)i >= BufferLength ) goto Truncated;
+
             /* Print out the zone name. */
-            i += ExtractName( pBuffer, BufferLength, pName, i, 0 );
+            ExtractName( pBuffer, BufferLength, pName, (USHORT)i, 0 );
+            i = SkipName( pBuffer, BufferLength, i );
+            if( i < 0 ) goto Truncated;
 
             _tprintf( _T("    ->  %s\n"), pName );
 
             /* Print out the type, class, data length and TTL. */
-            Type = ntohs( ((PUSHORT)&pBuffer[i])[0] );
-            i += 2;
-
-            Class = ntohs( ((PUSHORT)&pBuffer[i])[0] );
-            i += 2;
-
-            TTL = ntohl( ((PULONG)&pBuffer[i])[0] );
-            i += 4;
-
-            d = ntohs( ((PUSHORT)&pBuffer[i])[0] );
-            i += 2;
+            if( !ReadRecordHeader( pBuffer, BufferLength, &i, &Type, &Class, &TTL, &d ) ) goto Truncated;
+            End = i + d;
 
             _tprintf( _T("        type = %s, class = %s, dlen = %d\n"),
                       TypeIDtoTypeName( Type ),
                       ClassIDtoClassName( Class ),
-                      d );
+                      (int)d );
 
             /* TODO: There might be more types? */
             if( TYPE_NS == Type )
             {
                 /* Print out the NS. */
-                i += ExtractName( pBuffer, BufferLength, pName, i, d );
+                ExtractName( pBuffer, BufferLength, pName, (USHORT)i, (UCHAR)(d > 255 ? 255 : d) );
 
                 _tprintf( _T("        nameserver = %s\n"), pName );
 
@@ -788,15 +881,21 @@ void PrintDebug( PCHAR pBuffer, DWORD BufferLength )
             }
             else if( TYPE_SOA == Type )
             {
+                int s = i;
+
                 _tprintf( _T("        ttl = %d ()\n"), (int)TTL );
 
                 /* Print out the primary NS. */
-                i += ExtractName( pBuffer, BufferLength, pName, i, 0 );
+                ExtractName( pBuffer, BufferLength, pName, (USHORT)s, 0 );
+                s = SkipName( pBuffer, BufferLength, s );
 
                 _tprintf( _T("        primary name server = %s\n"), pName );
 
                 /* Print out the responsible mailbox. */
-                i += ExtractName( pBuffer, BufferLength, pName, i, 0 );
+                if( s >= 0 && (ULONG)s < BufferLength )
+                    ExtractName( pBuffer, BufferLength, pName, (USHORT)s, 0 );
+                else
+                    pName[0] = '\0';
 
                 _tprintf( _T("        responsible mail addr = %s\n"), pName );
 
@@ -806,8 +905,10 @@ void PrintDebug( PCHAR pBuffer, DWORD BufferLength )
                 _tprintf( _T("        retry = ()\n") );
                 _tprintf( _T("        expire = ()\n") );
                 _tprintf( _T("        default TTL = ()\n") );
-                i += 20;
             }
+
+            /* The record data are skipped by their length. */
+            i = End;
         }
     }
 
@@ -817,42 +918,45 @@ void PrintDebug( PCHAR pBuffer, DWORD BufferLength )
 
         for( k = 0; k < NumAdditional; k += 1 )
         {
+            if( (ULONG)i >= BufferLength ) goto Truncated;
+
             /* Print the name. */
-            i += ExtractName( pBuffer, BufferLength, pName, i, 0 );
+            ExtractName( pBuffer, BufferLength, pName, (USHORT)i, 0 );
+            i = SkipName( pBuffer, BufferLength, i );
+            if( i < 0 ) goto Truncated;
 
             _tprintf( _T("    ->  %s\n"), pName );
 
             /* Print out the type, class, data length and TTL. */
-            Type = ntohs( ((PUSHORT)&pBuffer[i])[0] );
-            i += 2;
-
-            Class = ntohs( ((PUSHORT)&pBuffer[i])[0] );
-            i += 2;
-
-            TTL = ntohl( ((PULONG)&pBuffer[i])[0] );
-            i += 4;
-
-            d = ntohs( ((PUSHORT)&pBuffer[i])[0] );
-            i += 2;
+            if( !ReadRecordHeader( pBuffer, BufferLength, &i, &Type, &Class, &TTL, &d ) ) goto Truncated;
+            End = i + d;
 
             _tprintf( _T("        type = %s, class = %s, dlen = %d\n"),
                       TypeIDtoTypeName( Type ),
                       ClassIDtoClassName( Class ),
-                      d );
+                      (int)d );
 
             /* TODO: There might be more types? */
-            if( TYPE_A == Type )
+            if( TYPE_A == Type && d >= 4 )
             {
                 /* Print out the NS. */
-                i += ExtractIP( pBuffer, pName, i );
+                ExtractIP( pBuffer, pName, (USHORT)i );
 
                 _tprintf( _T("        internet address = %s\n"), pName );
 
                 _tprintf( _T("        ttl = %d ()\n"), (int)TTL );
             }
+
+            /* The record data are skipped by their length. */
+            i = End;
         }
     }
 
+    _tprintf( _T("\n------------\n") );
+    return;
+
+Truncated:
+    _tprintf( _T("    *** the packet ends inside a record\n") );
     _tprintf( _T("\n------------\n") );
 }
 
