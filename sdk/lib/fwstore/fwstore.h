@@ -111,7 +111,8 @@ DWORD FwProfileSetDword(ULONG ProfileBit, PCWSTR Name, DWORD Value, BOOL Logging
 DWORD FwProfileSetString(ULONG ProfileBit, PCWSTR Name, PCWSTR Value, BOOL Logging);
 DWORD FwProfileReset(ULONG ProfileBit);                  /* write the default values */
 DWORD FwResetAll(VOID);                                  /* default profiles and the NitroOS default rules */
-ULONG FwCurrentProfiles(VOID);                           /* profile bit(s) in force */
+DWORD FwUpgradeDefaults(VOID);                           /* default rules added since the install, once (DefaultsLevel) */
+ULONG FwCurrentProfiles(VOID);                         /* profile bit(s) in force */
 PCWSTR FwProfileKey(ULONG ProfileBit);
 
 /* ---- change notification and kernel push (mpssvc) ---- */
