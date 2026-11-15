@@ -215,7 +215,9 @@ TCP6UpdateMulticast(struct netif *netif)
     UINT Count = 0, i, j;
     s8_t Index;
 
-    if (!TCPIpv6Enabled || !IF || IF == Loopback || !IF->SetMulticast || IF->AddressLength != 6)
+    /* With IPv6 on the loopback interface only (DisabledComponents) the adapter list stays as it is without IPv6:
+       a group a socket joins on an adapter asks for no frames that would only be dropped (TCPReceive6) */
+    if (!TCPIpv6Links || !IF || IF == Loopback || !IF->SetMulticast || IF->AddressLength != 6)
         return;
 
     RtlZeroMemory(List, sizeof(List));
