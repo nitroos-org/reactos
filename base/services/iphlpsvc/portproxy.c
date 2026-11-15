@@ -1,9 +1,11 @@
 /*
  * PROJECT:     ReactOS IP Helper Service
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
- * PURPOSE:     Port proxy: relays IPv4 TCP connections as configured under
- *              HKLM\SYSTEM\CurrentControlSet\Services\PortProxy\v4tov4\tcp
+ * PURPOSE:     Port proxy: relays TCP connections as configured under
+ *              HKLM\SYSTEM\CurrentControlSet\Services\PortProxy\{v4tov4,v4tov6,v6tov4,v6tov6}\tcp
  *              (value name "listenaddress/listenport", data "connectaddress/connectport").
+ *              The first half of the kind names the family of the listener, the second half the
+ *              family of the connection to the target. An IPv6 listener is IPv6 only (IPV6_V6ONLY).
  *              Accepts on one thread per listener, connects on a pool thread, then relays both
  *              directions with overlapped WSARecv/WSASend completed through one I/O completion port.
  */
@@ -46,11 +48,27 @@ typedef struct _LISTENER
     WCHAR Data[MAX_VALUE_CHARS];
     WCHAR ConnHost[MAX_VALUE_CHARS];
     USHORT ConnPort;
+    DWORD Kind;             /* index into g_Kinds */
     SOCKET Sock;
     HANDLE Thread;
     LONG Closing;
     BOOL Seen;
 } LISTENER;
+
+typedef struct _PP_KIND
+{
+    PCWSTR Key;
+    BOOL ListenV6;
+    BOOL ConnectV6;
+} PP_KIND;
+
+static const PP_KIND g_Kinds[4] =
+{
+    {PORTPROXY_KEY_V4TOV4, FALSE, FALSE},
+    {PORTPROXY_KEY_V4TOV6, FALSE, TRUE},
+    {PORTPROXY_KEY_V6TOV4, TRUE,  FALSE},
+    {PORTPROXY_KEY_V6TOV6, TRUE,  TRUE},
+};
 
 static CRITICAL_SECTION g_Lock;
 static LIST_ENTRY g_Listeners;
@@ -232,7 +250,85 @@ typedef struct _CONNREQ
     SOCKET Client;
     WCHAR Host[MAX_VALUE_CHARS];
     USHORT Port;
+    BOOL ConnectV6;
 } CONNREQ;
+
+static BOOL ResolveHost(PCWSTR pszHost, ULONG *pAddr);
+
+/* The IPv6 addresses of a host (numeric or a name looked up for AAAA), at most nMax. */
+static
+int
+ResolveHostV6(PCWSTR pszHost, SOCKADDR_IN6 *pAddrs, int nMax)
+{
+    CHAR szHost[MAX_VALUE_CHARS];
+    struct addrinfo hints, *res = NULL, *ai;
+    int n = 0;
+
+    if (!WideCharToMultiByte(CP_ACP, 0, pszHost, -1, szHost, sizeof(szHost), NULL, NULL))
+        return 0;
+
+    ZeroMemory(&hints, sizeof(hints));
+    hints.ai_family = AF_INET6;
+    hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(szHost, NULL, &hints, &res) != 0)
+        return 0;
+
+    for (ai = res; ai && n < nMax; ai = ai->ai_next)
+    {
+        if (ai->ai_family != AF_INET6 || ai->ai_addrlen < sizeof(SOCKADDR_IN6))
+            continue;
+        memcpy(&pAddrs[n++], ai->ai_addr, sizeof(SOCKADDR_IN6));
+    }
+    freeaddrinfo(res);
+    return n;
+}
+
+/* A connected overlapped socket to host/port in the given family, or INVALID_SOCKET */
+static
+SOCKET
+ConnectTarget(PCWSTR pszHost, USHORT port, BOOL bV6)
+{
+    SOCKET out;
+
+    if (bV6)
+    {
+        SOCKADDR_IN6 addrs[8];
+        int i, n = ResolveHostV6(pszHost, addrs, _countof(addrs));
+
+        for (i = 0; i < n; i++)
+        {
+            out = WSASocketW(AF_INET6, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
+            if (out == INVALID_SOCKET)
+                return INVALID_SOCKET;
+            addrs[i].sin6_port = htons(port);
+            if (connect(out, (struct sockaddr *)&addrs[i], sizeof(addrs[i])) != SOCKET_ERROR)
+                return out;
+            closesocket(out);
+        }
+        return INVALID_SOCKET;
+    }
+    else
+    {
+        struct sockaddr_in sa;
+        ULONG addr;
+
+        if (!ResolveHost(pszHost, &addr))
+            return INVALID_SOCKET;
+        out = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
+        if (out == INVALID_SOCKET)
+            return INVALID_SOCKET;
+        ZeroMemory(&sa, sizeof(sa));
+        sa.sin_family = AF_INET;
+        sa.sin_port = htons(port);
+        sa.sin_addr.s_addr = addr;
+        if (connect(out, (struct sockaddr *)&sa, sizeof(sa)) == SOCKET_ERROR)
+        {
+            closesocket(out);
+            return INVALID_SOCKET;
+        }
+        return out;
+    }
+}
 
 static
 BOOL
@@ -265,24 +361,12 @@ WINAPI
 ConnectWork(LPVOID lpParam)
 {
     CONNREQ *req = lpParam;
-    struct sockaddr_in sa;
-    SOCKET out = INVALID_SOCKET;
+    SOCKET out;
     CONN *c = NULL;
-    ULONG addr;
     int i;
 
-    if (!ResolveHost(req->Host, &addr))
-        goto fail;
-
-    out = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
+    out = ConnectTarget(req->Host, req->Port, req->ConnectV6);
     if (out == INVALID_SOCKET)
-        goto fail;
-
-    ZeroMemory(&sa, sizeof(sa));
-    sa.sin_family = AF_INET;
-    sa.sin_port = htons(req->Port);
-    sa.sin_addr.s_addr = addr;
-    if (connect(out, (struct sockaddr *)&sa, sizeof(sa)) == SOCKET_ERROR)
         goto fail;
 
     c = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*c));
@@ -358,6 +442,7 @@ AcceptThread(LPVOID lpParam)
         wcscpy(req->Host, l->ConnHost);
         req->Port = l->ConnPort;
         LeaveCriticalSection(&g_Lock);
+        req->ConnectV6 = g_Kinds[l->Kind].ConnectV6;
 
         if (!QueueUserWorkItem(ConnectWork, req, WT_EXECUTELONGFUNCTION))
         {
@@ -440,41 +525,68 @@ SetListenerTarget(LISTENER *l, PCWSTR pszData)
 
 static
 LISTENER *
-StartListener(PCWSTR pszName, PCWSTR pszData)
+StartListener(DWORD Kind, PCWSTR pszName, PCWSTR pszData)
 {
     WCHAR host[MAX_VALUE_CHARS];
     USHORT port;
-    ULONG addr;
+    ULONG addr = INADDR_ANY;
     struct sockaddr_in sa;
+    SOCKADDR_IN6 sa6;
     LISTENER *l;
     BOOL one = TRUE;
+    BOOL bV6 = g_Kinds[Kind].ListenV6;
 
     if (!SplitEntry(pszName, host, &port))
         return NULL;
+
+    ZeroMemory(&sa6, sizeof(sa6));
+    sa6.sin6_family = AF_INET6;
     if (wcscmp(host, L"*") == 0)
-        addr = INADDR_ANY;
+    {
+        /* any address: INADDR_ANY or in6addr_any (zeroed) */
+    }
+    else if (bV6)
+    {
+        if (ResolveHostV6(host, &sa6, 1) < 1)
+            return NULL;
+    }
     else if (!ResolveHost(host, &addr))
         return NULL;
 
     l = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*l));
     if (!l)
         return NULL;
+    l->Kind = Kind;
     wcscpy(l->Name, pszName);
     SetListenerTarget(l, pszData);
 
-    l->Sock = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
+    l->Sock = WSASocketW(bV6 ? AF_INET6 : AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
     if (l->Sock == INVALID_SOCKET)
         goto fail;
 
     setsockopt(l->Sock, SOL_SOCKET, SO_REUSEADDR, (const char *)&one, sizeof(one));
 
-    ZeroMemory(&sa, sizeof(sa));
-    sa.sin_family = AF_INET;
-    sa.sin_port = htons(port);
-    sa.sin_addr.s_addr = addr;
-    if (bind(l->Sock, (struct sockaddr *)&sa, sizeof(sa)) == SOCKET_ERROR ||
-        listen(l->Sock, SOMAXCONN) == SOCKET_ERROR)
-        goto fail;
+    if (bV6)
+    {
+        /* IPv6 only: the v4 kinds own the IPv4 side (VERIFY ON ORACLE whether Windows takes IPv4 on ::) */
+        DWORD v6only = 1;
+        setsockopt(l->Sock, IPPROTO_IPV6, IPV6_V6ONLY, (const char *)&v6only, sizeof(v6only));
+
+        sa6.sin6_port = htons(port);
+        if (bind(l->Sock, (struct sockaddr *)&sa6, sizeof(sa6)) == SOCKET_ERROR ||
+            listen(l->Sock, SOMAXCONN) == SOCKET_ERROR)
+            goto fail;
+    }
+    else
+    {
+        ZeroMemory(&sa, sizeof(sa));
+        sa.sin_family = AF_INET;
+        sa.sin_port = htons(port);
+        sa.sin_addr.s_addr = addr;
+        if (bind(l->Sock, (struct sockaddr *)&sa, sizeof(sa)) == SOCKET_ERROR ||
+            listen(l->Sock, SOMAXCONN) == SOCKET_ERROR)
+            goto fail;
+    }
 
     l->Thread = CreateThread(NULL, 0, AcceptThread, l, 0, NULL);
     if (!l->Thread)
@@ -501,13 +613,13 @@ StopListener(LISTENER *l)
 
 static
 LISTENER *
-FindListener(PCWSTR pszName)
+FindListener(DWORD Kind, PCWSTR pszName)
 {
     PLIST_ENTRY e;
     for (e = g_Listeners.Flink; e != &g_Listeners; e = e->Flink)
     {
         LISTENER *l = CONTAINING_RECORD(e, LISTENER, Entry);
-        if (_wcsicmp(l->Name, pszName) == 0)
+        if (l->Kind == Kind && _wcsicmp(l->Name, pszName) == 0)
             return l;
     }
     return NULL;
@@ -515,21 +627,14 @@ FindListener(PCWSTR pszName)
 
 static
 VOID
-ReloadConfig(VOID)
+ReloadKind(DWORD Kind)
 {
     HKEY hKey;
     DWORD i, cchName, cbData, dwType;
     WCHAR name[MAX_VALUE_CHARS], data[MAX_VALUE_CHARS];
-    PLIST_ENTRY e, next;
     LISTENER *l;
-    LIST_ENTRY dead;
 
-    InitializeListHead(&dead);
-
-    for (e = g_Listeners.Flink; e != &g_Listeners; e = e->Flink)
-        CONTAINING_RECORD(e, LISTENER, Entry)->Seen = FALSE;
-
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, PORTPROXY_KEY_V4TOV4, 0, KEY_READ, &hKey) == ERROR_SUCCESS)
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, g_Kinds[Kind].Key, 0, KEY_READ, &hKey) == ERROR_SUCCESS)
     {
         for (i = 0;; i++)
         {
@@ -542,7 +647,7 @@ ReloadConfig(VOID)
             name[cchName] = 0;
             data[cbData / sizeof(WCHAR)] = 0;
 
-            l = FindListener(name);
+            l = FindListener(Kind, name);
             if (l)
             {
                 if (wcscmp(l->Data, data) != 0)
@@ -551,7 +656,7 @@ ReloadConfig(VOID)
             }
             else
             {
-                l = StartListener(name, data);
+                l = StartListener(Kind, name, data);
                 if (l)
                 {
                     l->Seen = TRUE;
@@ -561,6 +666,21 @@ ReloadConfig(VOID)
         }
         RegCloseKey(hKey);
     }
+}
+
+static
+VOID
+ReloadConfig(VOID)
+{
+    DWORD k;
+    PLIST_ENTRY e, next;
+    LISTENER *l;
+
+    for (e = g_Listeners.Flink; e != &g_Listeners; e = e->Flink)
+        CONTAINING_RECORD(e, LISTENER, Entry)->Seen = FALSE;
+
+    for (k = 0; k < _countof(g_Kinds); k++)
+        ReloadKind(k);
 
     for (e = g_Listeners.Flink; e != &g_Listeners; e = next)
     {
@@ -583,17 +703,19 @@ ConfigThread(LPVOID lpParam)
     HANDLE hEvent = CreateEventW(NULL, FALSE, FALSE, NULL);
     HANDLE h[2];
     BOOL bArmed = FALSE;
-    DWORD dwWait;
+    DWORD dwWait, k;
 
     h[0] = g_hStop;
     h[1] = hEvent;
 
-    RegCreateKeyExW(HKEY_LOCAL_MACHINE, PORTPROXY_KEY_V4TOV4, 0, NULL, 0,
-                    KEY_READ | KEY_NOTIFY, NULL, &hKey, NULL);
-    /* watch the whole PortProxy tree */
-    if (hKey)
+    /* make sure the PortProxy tree exists, then watch all of it */
+    for (k = 0; k < _countof(g_Kinds); k++)
     {
-        RegCloseKey(hKey);
+        if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, g_Kinds[k].Key, 0, NULL, 0,
+                            KEY_READ | KEY_NOTIFY, NULL, &hKey, NULL) == ERROR_SUCCESS)
+        {
+            RegCloseKey(hKey);
+        }
         hKey = NULL;
     }
     RegOpenKeyExW(HKEY_LOCAL_MACHINE, PORTPROXY_KEY_ROOT, 0, KEY_READ | KEY_NOTIFY, &hKey);
