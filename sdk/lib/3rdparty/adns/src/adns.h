@@ -140,6 +140,8 @@ typedef enum {
   adns_r_rp_raw=            17,
   adns_r_rp=                    adns_r_rp_raw|adns__qtf_mail822,
 
+  adns_r_aaaa=              28,
+
   adns_r_addr=                  adns_r_a|adns__qtf_deref
 
 } adns_rrtype;
@@ -321,6 +323,7 @@ typedef struct {
     adns_rr_intstr *(*manyistr);      /* txt (list of strings ends with i=-1, str=0) */
     adns_rr_addr *addr;               /* addr */
     struct in_addr *inaddr;           /* a */
+    struct in6_addr *in6addr;         /* aaaa */
     adns_rr_hostaddr *hostaddr;       /* ns */
     adns_rr_intstrpair *intstrpair;   /* hinfo */
     adns_rr_strpair *strpair;         /* rp, rp_raw */
@@ -368,6 +371,9 @@ ADNS_API int adns_init(adns_state *newstate_r, adns_initflags flags,
 
 /* ReactOS addition */
 ADNS_API void adns_addserver(adns_state state, struct in_addr server);
+/* ReactOS: a name server with an IPv6 address (scope_id for a link-local one); 0 when it cannot be used (no IPv6
+ * datagram socket) */
+ADNS_API int adns_addserver6(adns_state state, const struct in6_addr *server, unsigned long scope_id);
 ADNS_API void adns_ccf_search(adns_state state,
                               const char *fn,
                               int lno,
@@ -774,7 +780,8 @@ ADNS_API int adns_beforepoll(adns_state ads, struct pollfd *fds, int *nfds_io, i
  * In any case this call won't block.
  */
 
-#define ADNS_POLLFDS_RECOMMENDED 2
+/* ReactOS: the IPv6 datagram socket is the third */
+#define ADNS_POLLFDS_RECOMMENDED 3
 /* If you allocate an fds buf with at least RECOMMENDED entries then
  * you are unlikely to need to enlarge it.  You are recommended to do
  * so if it's convenient.  However, you must be prepared for adns to

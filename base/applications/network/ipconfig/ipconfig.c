@@ -532,15 +532,16 @@ PrintHeader(VOID)
     ConResPrintf(StdOut, IDS_HEADER);
 }
 
-/* Print the list entries: the first with the label string, the rest as continuation lines. */
+/* Print the list entries: the first with the label string (or, with bFirst FALSE because an IPv6 entry already
+ * carried it, as a continuation line too), the rest as continuation lines. */
 static
 VOID
-PrintAddrList(
+PrintAddrListEx(
     _In_ UINT LabelId,
     _In_ PIP_ADDR_STRING pList,
-    _In_ BOOL bSkipZero)
+    _In_ BOOL bSkipZero,
+    _In_ BOOL bFirst)
 {
-    BOOL bFirst = TRUE;
 
     for (; pList != NULL; pList = pList->Next)
     {
@@ -551,6 +552,77 @@ PrintAddrList(
         ConResPrintf(StdOut, bFirst ? LabelId : IDS_EMPTYLINE, pList->IpAddress.String);
         bFirst = FALSE;
     }
+}
+
+/*
+ * The IPv6 default gateways (bGateways) or name servers of an adapter, printed before the IPv4 ones of the same
+ * label: the first with the label, the rest as continuation lines (a link-local address with its zone, %index).
+ * Returns whether anything was printed, so that the IPv4 entries carry on as continuation lines. Without IPv6
+ * GetAdaptersAddresses(AF_INET6) has nothing and nothing is printed (VERIFY ON ORACLE: the order of the IPv6 and
+ * IPv4 entries).
+ */
+static
+BOOL
+ShowIpv6Servers(
+    _In_ DWORD IfIndex,
+    _In_ BOOL bGateways,
+    _In_ UINT LabelId)
+{
+    PIP_ADAPTER_ADDRESSES Addresses = NULL, A;
+    ULONG Size = 16 * 1024, Pass;
+    DWORD Error = ERROR_BUFFER_OVERFLOW;
+    BOOL bFirst = TRUE;
+
+    for (Pass = 0; Pass < 3 && Error == ERROR_BUFFER_OVERFLOW; Pass++)
+    {
+        if (Addresses)
+            HeapFree(ProcessHeap, 0, Addresses);
+        Addresses = HeapAlloc(ProcessHeap, 0, Size);
+        if (!Addresses)
+            return FALSE;
+        Error = GetAdaptersAddresses(AF_INET6,
+                                     GAA_FLAG_SKIP_UNICAST | GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                                     (bGateways ? GAA_FLAG_INCLUDE_GATEWAYS : 0),
+                                     NULL, Addresses, &Size);
+    }
+
+    for (A = (Error == NO_ERROR) ? Addresses : NULL; A; A = A->Next)
+    {
+        PIP_ADAPTER_DNS_SERVER_ADDRESS S = bGateways ? NULL : A->FirstDnsServerAddress;
+        PIP_ADAPTER_GATEWAY_ADDRESS_LH G = bGateways ? ((PIP_ADAPTER_ADDRESSES_LH)A)->FirstGatewayAddress : NULL;
+
+        if (A->IfIndex != IfIndex && A->Ipv6IfIndex != IfIndex)
+            continue;
+
+        while (bGateways ? (G != NULL) : (S != NULL))
+        {
+            SOCKET_ADDRESS *Address = bGateways ? &G->Address : &S->Address;
+            PSOCKADDR_IN6 Sa = (PSOCKADDR_IN6)Address->lpSockaddr;
+
+            if (Sa && Sa->sin6_family == AF_INET6)
+            {
+                CHAR Text[64], Line[96];
+
+                RtlIpv6AddressToStringA(&Sa->sin6_addr, Text);
+                if (Sa->sin6_scope_id != 0)
+                    StringCchPrintfA(Line, _countof(Line), "%s%%%lu", Text, (ULONG)Sa->sin6_scope_id);
+                else
+                    StringCchCopyA(Line, _countof(Line), Text);
+
+                ConResPrintf(StdOut, bFirst ? LabelId : IDS_EMPTYLINE, Line);
+                bFirst = FALSE;
+            }
+
+            if (bGateways)
+                G = G->Next;
+            else
+                S = S->Next;
+        }
+        break;
+    }
+
+    HeapFree(ProcessHeap, 0, Addresses);
+    return !bFirst;
 }
 
 /* Split a comma/space separated search list and print it as label + continuation lines. */
@@ -791,6 +863,7 @@ ShowInfo(
         PIP_ADDR_STRING pIPAddr;
         CHAR szSuffix[256];
         CHAR szDescription[256];
+        BOOL bV6Gateway, bV6Dns;
 
         PrintAdapterTypeAndName(pAdapter);
 
@@ -862,10 +935,11 @@ ShowInfo(
                     HeapFree(ProcessHeap, 0, DateTimeString);
             }
 
+            bV6Gateway = ShowIpv6Servers(pAdapter->Index, TRUE, IDS_DEFAULTGATEWAY);
             if (strcmp(pAdapter->GatewayList.IpAddress.String, "0.0.0.0") &&
                 pAdapter->GatewayList.IpAddress.String[0] != ANSI_NULL)
-                PrintAddrList(IDS_DEFAULTGATEWAY, &pAdapter->GatewayList, TRUE);
-            else
+                PrintAddrListEx(IDS_DEFAULTGATEWAY, &pAdapter->GatewayList, TRUE, !bV6Gateway);
+            else if (!bV6Gateway)
                 ConResPrintf(StdOut, IDS_DEFAULTGATEWAY, "");
 
             if (bAll)
@@ -875,11 +949,12 @@ ShowInfo(
                     strcmp(pAdapter->DhcpServer.IpAddress.String, "0.0.0.0"))
                     ConResPrintf(StdOut, IDS_DHCPSERVER, pAdapter->DhcpServer.IpAddress.String);
 
+                bV6Dns = ShowIpv6Servers(pAdapter->Index, FALSE, IDS_DNSSERVERS);
                 if (pPerAdapterInfo != NULL && pPerAdapterInfo->DnsServerList.IpAddress.String[0] != ANSI_NULL &&
                     strcmp(pPerAdapterInfo->DnsServerList.IpAddress.String, "0.0.0.0"))
-                    PrintAddrList(IDS_DNSSERVERS, &pPerAdapterInfo->DnsServerList, TRUE);
+                    PrintAddrListEx(IDS_DNSSERVERS, &pPerAdapterInfo->DnsServerList, TRUE, !bV6Dns);
                 else
-                    PrintAddrList(IDS_DNSSERVERS, &pFixedInfo->DnsServerList, TRUE);
+                    PrintAddrListEx(IDS_DNSSERVERS, &pFixedInfo->DnsServerList, TRUE, !bV6Dns);
 
                 if (pAdapter->HaveWins)
                 {

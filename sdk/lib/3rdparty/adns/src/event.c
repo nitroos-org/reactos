@@ -91,7 +91,9 @@ void adns__tcp_tryconnect(adns_state ads, struct timeval now) {
   int r, tries;
   ADNS_SOCKET fd;
   struct sockaddr_in addr;
+  struct sockaddr_in6 addr6;
   struct protoent *proto;
+  int v6;
 
   for (tries=0; tries<ads->nservers; tries++) {
     switch (ads->tcpstate) {
@@ -112,7 +114,8 @@ void adns__tcp_tryconnect(adns_state ads, struct timeval now) {
     proto= getprotobyname("tcp");
     if (!proto) { adns__diag(ads,-1,0,"unable to find protocol no. for TCP !"); return; }
 	ADNS_CLEAR_ERRNO
-    fd= socket(AF_INET,SOCK_STREAM,proto->p_proto);
+    v6= ads->servers[ads->tcpserver].v6;
+    fd= socket(v6 ? AF_INET6 : AF_INET,SOCK_STREAM,proto->p_proto);
 	ADNS_CAPTURE_ERRNO;
     if (fd<0) {
       adns__diag(ads,-1,0,"cannot create TCP socket: %s",strerror(errno));
@@ -129,7 +132,16 @@ void adns__tcp_tryconnect(adns_state ads, struct timeval now) {
     addr.sin_port= htons(DNS_PORT);
     addr.sin_addr= ads->servers[ads->tcpserver].addr;
     ADNS_CLEAR_ERRNO;
-    r= connect(fd,(const struct sockaddr*)&addr,sizeof(addr));
+    if (v6) {
+      memset(&addr6,0,sizeof(addr6));
+      addr6.sin6_family= AF_INET6;
+      addr6.sin6_port= htons(DNS_PORT);
+      addr6.sin6_addr= ads->servers[ads->tcpserver].addr6;
+      addr6.sin6_scope_id= ads->servers[ads->tcpserver].scope6;
+      r= connect(fd,(const struct sockaddr*)&addr6,sizeof(addr6));
+    } else {
+      r= connect(fd,(const struct sockaddr*)&addr,sizeof(addr));
+    }
     ADNS_CAPTURE_ERRNO;
     ads->tcpsocket= fd;
     ads->tcpstate= server_connecting;
@@ -312,33 +324,46 @@ void adns_processtimeouts(adns_state ads, const struct timeval *now) {
 int adns__pollfds(adns_state ads, struct pollfd pollfds_buf[MAX_POLLFDS]) {
   /* Returns the number of entries filled in.  Always zeroes revents. */
 
-  assert(MAX_POLLFDS==2);
+  int n= 1, tcpi;
+
+  assert(MAX_POLLFDS==3);
 
   pollfds_buf[0].fd= ads->udpsocket;
   pollfds_buf[0].events= POLLIN;
   pollfds_buf[0].revents= 0;
 
+  if (ads->udpsocket6 != (ADNS_SOCKET)-1) {
+    pollfds_buf[1].fd= ads->udpsocket6;
+    pollfds_buf[1].events= POLLIN;
+    pollfds_buf[1].revents= 0;
+    n= 2;
+  }
+  tcpi= n;
+
   switch (ads->tcpstate) {
   case server_disconnected:
   case server_broken:
-    return 1;
+    return n;
   case server_connecting:
-    pollfds_buf[1].events= POLLOUT;
+    pollfds_buf[tcpi].events= POLLOUT;
     break;
   case server_ok:
-    pollfds_buf[1].events= ads->tcpsend.used ? POLLIN|POLLOUT|POLLPRI : POLLIN|POLLPRI;
+    pollfds_buf[tcpi].events= ads->tcpsend.used ? POLLIN|POLLOUT|POLLPRI : POLLIN|POLLPRI;
     break;
   default:
     abort();
   }
-  pollfds_buf[1].fd= ads->tcpsocket;
-  return 2;
+  pollfds_buf[tcpi].fd= ads->tcpsocket;
+  pollfds_buf[tcpi].revents= 0;
+  return n+1;
 }
 
 int adns_processreadable(adns_state ads, ADNS_SOCKET fd, const struct timeval *now) {
   int want, dgramlen, r, udpaddrlen, serv, old_skip;
   byte udpbuf[DNS_MAXUDP];
   struct sockaddr_in udpaddr;
+  struct sockaddr_in6 udpaddr6;
+  int isv6;
 
   adns__consistency(ads,0,cc_entex);
 
@@ -392,6 +417,42 @@ int adns_processreadable(adns_state ads, ADNS_SOCKET fd, const struct timeval *n
   default:
     abort();
   }
+  isv6= (ads->udpsocket6 != (ADNS_SOCKET)-1 && fd == ads->udpsocket6);
+  if (isv6) {
+    for (;;) {
+      udpaddrlen= sizeof(udpaddr6);
+      ADNS_CLEAR_ERRNO;
+      r= recvfrom(ads->udpsocket6,(char*)udpbuf,sizeof(udpbuf),0,
+		  (struct sockaddr*)&udpaddr6,&udpaddrlen);
+      ADNS_CAPTURE_ERRNO;
+      if (r<0) {
+	if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ECONNRESET) { r= 0; goto xit; }
+	if (errno == EINTR) continue;
+	if (errno_resources(errno)) { r= errno; goto xit; }
+	adns__warn(ads,-1,0,"datagram receive error: %s (%d)",strerror(errno), errno);
+	r= 0; goto xit;
+      }
+      if (udpaddrlen != sizeof(udpaddr6) || udpaddr6.sin6_family != AF_INET6) {
+	adns__diag(ads,-1,0,"IPv6 datagram received with wrong address length or family");
+	continue;
+      }
+      if (ntohs(udpaddr6.sin6_port) != DNS_PORT) {
+	adns__diag(ads,-1,0,"datagram received from wrong port %u (expected %u)",
+		   ntohs(udpaddr6.sin6_port),DNS_PORT);
+	continue;
+      }
+      for (serv= 0;
+	   serv < ads->nservers &&
+	     !(ads->servers[serv].v6 &&
+	       !memcmp(&ads->servers[serv].addr6,&udpaddr6.sin6_addr,sizeof(udpaddr6.sin6_addr)));
+	   serv++);
+      if (serv >= ads->nservers) {
+	adns__warn(ads,-1,0,"datagram received from unknown IPv6 nameserver");
+	continue;
+      }
+      adns__procdgram(ads,udpbuf,r,serv,0,*now);
+    }
+  }
   if (fd == ads->udpsocket) {
     for (;;) {
       udpaddrlen= sizeof(udpaddr);
@@ -424,7 +485,8 @@ int adns_processreadable(adns_state ads, ADNS_SOCKET fd, const struct timeval *n
       }
       for (serv= 0;
 	   serv < ads->nservers &&
-	     ads->servers[serv].addr.s_addr != udpaddr.sin_addr.s_addr;
+	     (ads->servers[serv].v6 ||
+	      ads->servers[serv].addr.s_addr != udpaddr.sin_addr.s_addr);
 	   serv++);
       if (serv >= ads->nservers) {
 	adns__warn(ads,-1,0,"datagram received from unknown nameserver %s",

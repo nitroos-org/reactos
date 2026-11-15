@@ -781,7 +781,7 @@ nd6_input(struct pbuf *p, struct netif *inp)
 
         rdnss_opt = (struct rdnss_option *)buffer;
         num = (rdnss_opt->length - 1) / 2;
-        for (n = 0; (rdnss_server_idx < DNS_MAX_SERVERS) && (n < num); n++, copy_offset += sizeof(ip6_addr_p_t)) {
+        for (n = 0; (rdnss_server_idx < LWIP_ND6_RDNSS_MAX_DNS_SERVERS) && (n < num); n++, copy_offset += sizeof(ip6_addr_p_t)) {
           ip_addr_t rdnss_address;
 
           /* Copy directly from pbuf to get an aligned, zoned copy of the prefix. */
@@ -789,19 +789,10 @@ nd6_input(struct pbuf *p, struct netif *inp)
             IP_SET_TYPE_VAL(rdnss_address, IPADDR_TYPE_V6);
             ip6_addr_assign_zone(ip_2_ip6(&rdnss_address), IP6_UNKNOWN, inp);
 
-            if (htonl(rdnss_opt->lifetime) > 0) {
-              /* TODO implement Lifetime > 0 */
-              dns_setserver(rdnss_server_idx++, &rdnss_address);
-            } else {
-              /* TODO implement DNS removal in dns.c */
-              u8_t s;
-              for (s = 0; s < DNS_MAX_SERVERS; s++) {
-                const ip_addr_t *addr = dns_getserver(s);
-                if(ip_addr_eq(addr, &rdnss_address)) {
-                  dns_setserver(s, NULL);
-                }
-              }
-            }
+            /* This tree has no lwIP DNS client (the resolver is in user mode): the servers go to the
+               stack's own list (LWIP_HOOK_ND6_RDNSS in lwipopts.h), a lifetime of 0 removes one (RFC 8106 5.1) */
+            LWIP_HOOK_ND6_RDNSS(inp, ip_2_ip6(&rdnss_address), lwip_htonl(rdnss_opt->lifetime));
+            rdnss_server_idx++;
           }
         }
         break;

@@ -76,7 +76,7 @@ void adns__vdiag(adns_state ads, const char *pfx, adns_initflags prevent,
   }
 
   if (serv>=0) {
-    fprintf(ads->diagfile,"%sNS=%s",bef,inet_ntoa(ads->servers[serv].addr));
+    fprintf(ads->diagfile,"%sNS=%s",bef,ads->servers[serv].v6 ? "(IPv6)" : inet_ntoa(ads->servers[serv].addr));
     bef=", "; aft=")\n";
   }
 

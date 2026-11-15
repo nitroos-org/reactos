@@ -125,6 +125,21 @@ R_ResolverQuery(
                                            wType,
                                            dwFlags,
                                            ppResultRecords);
+        /* The names that need no server (localhost, this machine) have an IPv6 answer that is not in the cache */
+        if (Status == DNS_INFO_NO_RECORDS && wType == DNS_TYPE_AAAA)
+        {
+            if (Query_Main(pszName,
+                           wType,
+                           dwFlags,
+                           ppResultRecords) != ERROR_SUCCESS)
+            {
+                *ppResultRecords = NULL;
+            }
+            else
+            {
+                Status = ERROR_SUCCESS;
+            }
+        }
     }
     else
     {

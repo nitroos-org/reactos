@@ -17,6 +17,7 @@ list(APPEND SOURCE
     IfStatistics.c
     IpInterface.c
     IpTables2.c
+    Ipv6Dns.c
     Ipv6Reporting.c
     NeighborEntry2.c
     NetstatOutput.c

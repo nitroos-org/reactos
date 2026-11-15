@@ -11,6 +11,7 @@
 #include <ws2_32.h>
 
 #include <ws2tcpip.h>
+#include <windns.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -487,6 +488,164 @@ QueryDNS(IN LPCSTR NodeName,
     }
 }
 
+
+/*
+ * AAAA lookup. ws2_32 does not import dnsapi (dnsapi imports ws2_32): it is loaded by the first AAAA query, which
+ * only a stack with IPv6 on makes.
+ */
+typedef DNS_STATUS (WINAPI *PFN_DNSQUERY_W)(PCWSTR, WORD, DWORD, PVOID, PDNS_RECORDW *, PVOID *);
+typedef VOID (WINAPI *PFN_DNSRECORDLISTFREE)(PVOID, DNS_FREE_TYPE);
+
+static PFN_DNSQUERY_W WsDnsQueryW;
+static PFN_DNSRECORDLISTFREE WsDnsRecordListFree;
+static volatile LONG WsDnsLoaded;
+
+static
+BOOL
+WsLoadDnsapi(VOID)
+{
+    HMODULE Module;
+
+    if (WsDnsLoaded)
+        return WsDnsLoaded == 2;
+
+    Module = LoadLibraryW(L"dnsapi.dll");
+    if (Module)
+    {
+        WsDnsQueryW = (PFN_DNSQUERY_W)GetProcAddress(Module, "DnsQuery_W");
+        WsDnsRecordListFree = (PFN_DNSRECORDLISTFREE)GetProcAddress(Module, "DnsRecordListFree");
+    }
+    InterlockedExchange(&WsDnsLoaded, (WsDnsQueryW && WsDnsRecordListFree) ? 2 : 1);
+    return WsDnsLoaded == 2;
+}
+
+/* Can an IPv6 destination be reached from this machine: a destination needs a source of its scope */
+static
+BOOL
+IsIpv6Usable(IN const IN6_ADDR *Address,
+             IN const WS_IPV6_INFO *V6Info)
+{
+    if (IN6_IS_ADDR_LOOPBACK(Address))
+        return TRUE;
+    if (Address->u.Byte[0] == 0xfe && (Address->u.Byte[1] & 0xc0) == 0x80)
+        return V6Info->NonLoopback != 0;
+    return V6Info->NonLinkLocal != 0;
+}
+
+/*
+ * The IPv6 addresses of NodeName (DNS_TYPE_AAAA, which also answers this machine's own name and "localhost"
+ * locally) as a chain of addrinfo structures in *pptResult; *pCanonical gets the name of the first record
+ * (allocated here, NULL when there is none). Returns 0 or an EAI_ code: EAI_NONAME when the name has no AAAA record.
+ */
+static
+INT
+QueryAAAA(IN PCWSTR NodeName,
+          IN INT SocketType,
+          IN INT Protocol,
+          IN WORD Port,
+          IN const WS_IPV6_INFO *V6Info,
+          OUT PADDRINFOW *pptResult,
+          OUT PWSTR *pCanonical)
+{
+    PDNS_RECORDW Records = NULL, Record;
+    PADDRINFOW *Next = pptResult;
+    DNS_STATUS Status;
+    ULONG Scope, k;
+    SIZE_T Length;
+
+    *pptResult = NULL;
+    *pCanonical = NULL;
+
+    if (!WsLoadDnsapi())
+        return EAI_NONAME;
+
+    /* the flags of the A lookup (gethostbyname): no search list */
+    Status = WsDnsQueryW(NodeName, DNS_TYPE_AAAA, DNS_QUERY_STANDARD | DNS_QUERY_NO_RECURSION, NULL, &Records, NULL);
+    if (Status != ERROR_SUCCESS || !Records)
+        return (Status == ERROR_TIMEOUT) ? EAI_AGAIN : EAI_NONAME;
+
+    for (Record = Records; Record; Record = Record->pNext)
+    {
+        const IN6_ADDR *Address;
+
+        if (Record->wType != DNS_TYPE_AAAA)
+            continue;
+        Address = (const IN6_ADDR *)&Record->Data.AAAA.Ip6Address;
+
+        /* The scope of a link-local address of this machine is its interface */
+        Scope = 0;
+        if (Address->u.Byte[0] == 0xfe && (Address->u.Byte[1] & 0xc0) == 0x80)
+        {
+            for (k = 0; k < V6Info->LinkLocalCount; k++)
+            {
+                if (RtlEqualMemory(V6Info->LinkLocal[k].Address, Address, sizeof(IN6_ADDR)))
+                {
+                    Scope = V6Info->LinkLocal[k].IfIndex;
+                    break;
+                }
+            }
+        }
+
+        *Next = NewAddrInfo6(SocketType, Protocol, Port, Address, Scope);
+        if (!*Next)
+        {
+            FreeAddrInfoW(*pptResult);
+            *pptResult = NULL;
+            WsDnsRecordListFree(Records, DnsFreeRecordList);
+            return EAI_MEMORY;
+        }
+        Next = &((*Next)->ai_next);
+
+        if (!*pCanonical && Record->pName)
+        {
+            Length = wcslen(Record->pName) + 1;
+            *pCanonical = HeapAlloc(WsSockHeap, 0, Length * sizeof(WCHAR));
+            if (*pCanonical)
+                RtlCopyMemory(*pCanonical, Record->pName, Length * sizeof(WCHAR));
+        }
+    }
+
+    WsDnsRecordListFree(Records, DnsFreeRecordList);
+    return *pptResult ? 0 : EAI_NONAME;
+}
+
+/*
+ * Join the IPv6 and IPv4 answers (both chains may be empty) in the order of the destination selection rules
+ * (RFC 6724, simplified): IPv6 destinations that can be reached from here come first (their prefix policy is
+ * higher than the one of IPv4), then IPv4, then the IPv6 ones that cannot be reached (no source address of their
+ * scope). Inside each group the order of the answers is kept.
+ */
+static
+PADDRINFOW
+JoinAddrInfo(IN PADDRINFOW List6,
+             IN PADDRINFOW List4,
+             IN const WS_IPV6_INFO *V6Info)
+{
+    PADDRINFOW Head = NULL, *Tail = &Head, Entry, Following, Unusable = NULL, *UnusableTail = &Unusable;
+
+    for (Entry = List6; Entry; Entry = Following)
+    {
+        Following = Entry->ai_next;
+        Entry->ai_next = NULL;
+        if (IsIpv6Usable(&((PSOCKADDR_IN6)Entry->ai_addr)->sin6_addr, V6Info))
+        {
+            *Tail = Entry;
+            Tail = &Entry->ai_next;
+        }
+        else
+        {
+            *UnusableTail = Entry;
+            UnusableTail = &Entry->ai_next;
+        }
+    }
+    *Tail = List4;
+    while (*Tail)
+        Tail = &(*Tail)->ai_next;
+    *Tail = Unusable;
+
+    return Head;
+}
+
 /*
  * Reverse lookup of an address that belongs to this machine (loopback, or one of its own addresses):
  * Windows answers with the machine's name without asking DNS. Returns TRUE and fills the name if so.
@@ -861,7 +1020,8 @@ GetAddrInfoW(IN PCWSTR pszNodeName,
      * the one of a system without IPv6. On, the names that mean this machine (no node, "localhost") answer
      * IPv6 before IPv4 as Windows 10 does, AI_ADDRCONFIG leaves the IPv6 answers out while no non-loopback IPv6
      * address is usable, and the IPv6 family is a family: it finds no IPv4 address (WSAHOST_NOT_FOUND) instead
-     * of failing (WSAEAFNOSUPPORT). Host names are still resolved to IPv4 addresses only (no AAAA queries).
+     * of failing (WSAEAFNOSUPPORT). Host names are resolved to their AAAA records as well (see the DNS lookup below);
+     * with the switch off only the A records are asked for.
      */
     bV6On = WsQueryIpv6((ptHints && (ptHints->ai_flags & AI_ADDRCONFIG)) ? &V6Info : NULL);
     if (!(ptHints && (ptHints->ai_flags & AI_ADDRCONFIG)))
@@ -1049,8 +1209,14 @@ GetAddrInfoW(IN PCWSTR pszNodeName,
             if (!bNoNode6)
                 (*pptResult)->ai_flags |= AI_NUMERICHOST;
 
+            /* The name "localhost" asked for the IPv6 family: its canonical name is the name of this computer
+               (Windows 10 measured, as for the other families) */
+            if ((iFlags & AI_CANONNAME) && bNoNode6 && pszNodeName && bV6On)
+            {
+                iError = SetComputerNameCanon(*pptResult);
+            }
             /* The canonical name of an address is its numeric form, as for an IPv4 address */
-            if (iFlags & AI_CANONNAME)
+            else if (iFlags & AI_CANONNAME)
             {
                 ULONG CanonicalLength = RTL_NUMBER_OF(CanonicalName);
 
@@ -1154,7 +1320,7 @@ GetAddrInfoW(IN PCWSTR pszNodeName,
             if (!iError && (iFlags & AI_CANONNAME))
                 iError = SetComputerNameCanon(*pptResult);
         }
-        else
+        else if (!bV6On || iFamily == PF_INET)
         {
             iError = LookupAddressForName(AnsiNodeName,
                                           iSocketType,
@@ -1162,6 +1328,84 @@ GetAddrInfoW(IN PCWSTR pszNodeName,
                                           wPort,
                                           (iFlags & AI_CANONNAME),
                                           pptResult);
+        }
+        else
+        {
+            /*
+             * IPv6 on and the caller allows IPv6 addresses: the AAAA records are asked for as well (the IPv6
+             * family asks nothing else), and the answers are joined in the order of the destination selection.
+             * AI_ADDRCONFIG leaves out what the machine has no address for.
+             */
+            WS_IPV6_INFO V6Dns;
+            PADDRINFOW List6 = NULL, List4 = NULL;
+            PWSTR Canon6 = NULL, Canon = NULL;
+            INT Error6 = EAI_NONAME, Error4 = EAI_NONAME;
+
+            WsQueryIpv6(&V6Dns);
+
+            if (iFamily == PF_INET6 && (iFlags & AI_ADDRCONFIG) && !V6Dns.NonLoopback)
+            {
+                iError = EAI_NONAME;
+            }
+            else
+            {
+                if (!(iFlags & AI_ADDRCONFIG) || V6Dns.NonLoopback)
+                    Error6 = QueryAAAA(pszNodeName, iSocketType, iProtocol, wPort, &V6Dns, &List6, &Canon6);
+
+                if (iFamily != PF_INET6)
+                {
+                    Error4 = LookupAddressForName(AnsiNodeName,
+                                                  iSocketType,
+                                                  iProtocol,
+                                                  wPort,
+                                                  (iFlags & AI_CANONNAME),
+                                                  &List4);
+                    if (Error4 != 0 && List4)
+                    {
+                        FreeAddrInfoW(List4);
+                        List4 = NULL;
+                    }
+                }
+
+                if (Error6 == EAI_MEMORY || Error4 == EAI_MEMORY)
+                {
+                    iError = EAI_MEMORY;
+                    if (List4)
+                        FreeAddrInfoW(List4);
+                    if (List6)
+                        FreeAddrInfoW(List6);
+                }
+                else if (!List6 && !List4)
+                {
+                    iError = (iFamily == PF_INET6 || Error4 == 0) ? Error6 : Error4;
+                    if (!iError)
+                        iError = EAI_NONAME;
+                }
+                else
+                {
+                    /* The canonical name goes with the first entry: the one the IPv4 lookup found, else the AAAA one */
+                    if (iFlags & AI_CANONNAME)
+                    {
+                        if (List4 && List4->ai_canonname)
+                        {
+                            Canon = List4->ai_canonname;
+                            List4->ai_canonname = NULL;
+                        }
+                        else
+                        {
+                            Canon = Canon6;
+                            Canon6 = NULL;
+                        }
+                    }
+                    *pptResult = JoinAddrInfo(List6, List4, &V6Dns);
+                    if (Canon)
+                        (*pptResult)->ai_canonname = Canon;
+                    iError = 0;
+                }
+            }
+
+            if (Canon6)
+                HeapFree(WsSockHeap, 0, Canon6);
         }
     }
 

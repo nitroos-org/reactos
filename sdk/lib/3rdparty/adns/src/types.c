@@ -282,6 +282,29 @@ static adns_status cs_inaddr(vbuf *vb, const void *datap) {
 }
 
 /*
+ * _in6addr   (pa,cs)
+ */
+
+static adns_status pa_in6addr(const parseinfo *pai, int cbyte, int max, void *datap) {
+  struct in6_addr *storeto= datap;
+
+  if (max-cbyte != 16) return adns_s_invaliddata;
+  memcpy(storeto, pai->dgram + cbyte, 16);
+  return adns_s_ok;
+}
+
+static adns_status cs_in6addr(vbuf *vb, const void *datap) {
+  const unsigned char *b= datap;
+  char buf[48];
+  int i, n= 0;
+
+  for (i=0; i<8; i++)
+    n+= sprintf(buf+n, "%s%x", i ? ":" : "", (b[2*i]<<8) | b[2*i+1]);
+  CSP_ADDSTR(buf);
+  return adns_s_ok;
+}
+
+/*
  * _addr   (pa,di,csp,cs)
  */
 
@@ -1012,6 +1035,8 @@ DEEP_TYPE(hinfo,  "HINFO", 0,     intstrpair, pa_hinfo,   0,          cs_hinfo  
 DEEP_TYPE(mx_raw, "MX",   "raw",  intstr,     pa_mx_raw,  di_mx_raw,  cs_inthost    ),
 DEEP_TYPE(txt,    "TXT",   0,     manyistr,   pa_txt,     0,          cs_txt        ),
 DEEP_TYPE(rp_raw, "RP",   "raw",  strpair,    pa_rp,      0,          cs_rp         ),
+
+FLAT_TYPE(aaaa,   "AAAA",  0,     in6addr,    pa_in6addr, 0,          cs_in6addr    ),
 
 FLAT_TYPE(addr,   "A",  "addr",   addr,       pa_addr,    di_addr,    cs_addr       ),
 DEEP_TYPE(ns,     "NS", "+addr",  hostaddr,   pa_hostaddr,di_hostaddr,cs_hostaddr   ),

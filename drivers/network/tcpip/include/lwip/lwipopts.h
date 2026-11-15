@@ -48,6 +48,10 @@
 #define LWIP_IPV6                       1
 /* No MLD yet: its 100 ms timer would wake the tcpip thread of an idle machine for a protocol nobody uses */
 #define LWIP_IPV6_MLD                   0
+/* Router advertisement DNS servers (RFC 8106, up to 3 per advertisement) go to the stack's list for the resolver
+ * (rdnss6.c); lwIP's own DNS client is not part of this tree */
+#define LWIP_ND6_RDNSS_MAX_DNS_SERVERS  3
+#define LWIP_HOOK_ND6_RDNSS(netif, addr, lifetime) LibTCPRdnss6Input(netif, addr, lifetime)
 /* Interface events: with IPv6 on, address changes set the adapter's multicast list (if6.c). Nothing listens
  * with it off */
 #define LWIP_NETIF_EXT_STATUS_CALLBACK  1

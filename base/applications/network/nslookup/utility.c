@@ -18,12 +18,21 @@ BOOL SendRequest( PCHAR pInBuffer,
     USHORT RequestID, ResponseID;
     BOOL bWait;
     SOCKET s;
-    SOCKADDR_IN RecAddr, RecAddr2, SendAddr;
+    SOCKADDR_IN RecAddr, RecAddr2;
+    SOCKADDR_IN6 RecAddr6, RecAddr26;
+    SOCKADDR_STORAGE SendAddr;
     int SendAddrLen = sizeof(SendAddr);
+    BOOL bIPv6 = (strchr( State.DefaultServerAddress, ':' ) != NULL);
+    PSOCKADDR pDest;
+    int DestLen, Attempt = 0;
+    fd_set Fds;
+    struct timeval Tv;
 
     RtlZeroMemory( &RecAddr, sizeof(SOCKADDR_IN) );
     RtlZeroMemory( &RecAddr2, sizeof(SOCKADDR_IN) );
-    RtlZeroMemory( &SendAddr, sizeof(SOCKADDR_IN) );
+    RtlZeroMemory( &RecAddr6, sizeof(SOCKADDR_IN6) );
+    RtlZeroMemory( &RecAddr26, sizeof(SOCKADDR_IN6) );
+    RtlZeroMemory( &SendAddr, sizeof(SendAddr) );
 
     /* Pull the request ID from the buffer. */
     RequestID = ntohs( ((PSHORT)&pInBuffer[0])[0] );
@@ -32,31 +41,70 @@ BOOL SendRequest( PCHAR pInBuffer,
     if( State.d2 ) PrintD2( pInBuffer, InBufferLength );
 
     /* Create the sockets for both send and receive. */
-    s = socket( AF_INET, SOCK_DGRAM, IPPROTO_UDP );
+    s = socket( bIPv6 ? AF_INET6 : AF_INET, SOCK_DGRAM, IPPROTO_UDP );
 
     if (s == INVALID_SOCKET)
         return FALSE;
 
-    /* Set up the structure to tell it where we are going. */
-    RecAddr.sin_family = AF_INET;
-    RecAddr.sin_port = htons( State.port );
-    RecAddr.sin_addr.s_addr = inet_addr( State.DefaultServerAddress );
+    if( bIPv6 )
+    {
+        INT AddrLen = sizeof(RecAddr6);
 
-    /* Set up the structure to tell it what port to listen on. */
-    RecAddr2.sin_family = AF_INET;
-    RecAddr2.sin_port = htons( State.port );
-    RecAddr2.sin_addr.s_addr = htonl( INADDR_ANY );
+        /* Set up the structure to tell it where we are going. */
+        if( WSAStringToAddressA( State.DefaultServerAddress,
+                                 AF_INET6,
+                                 NULL,
+                                 (SOCKADDR*)&RecAddr6,
+                                 &AddrLen ) != 0 )
+        {
+            closesocket( s );
+            return FALSE;
+        }
+        RecAddr6.sin6_family = AF_INET6;
+        RecAddr6.sin6_port = htons( State.port );
 
-    /* Bind the receive socket. */
-    bind( s, (SOCKADDR*)&RecAddr2, sizeof(RecAddr2) );
+        /* Set up the structure to tell it what port to listen on. */
+        RecAddr26.sin6_family = AF_INET6;
+        RecAddr26.sin6_port = htons( State.port );
 
-    /* Send the datagram to the DNS server. */
-    j = sendto( s,
-                pInBuffer,
-                InBufferLength,
-                0,
-                (SOCKADDR*)&RecAddr,
-                sizeof(RecAddr) );
+        /* Bind the receive socket. */
+        bind( s, (SOCKADDR*)&RecAddr26, sizeof(RecAddr26) );
+
+        /* Send the datagram to the DNS server. */
+        pDest = (SOCKADDR*)&RecAddr6;
+        DestLen = sizeof(RecAddr6);
+        j = sendto( s,
+                    pInBuffer,
+                    InBufferLength,
+                    0,
+                    pDest,
+                    DestLen );
+    }
+    else
+    {
+        /* Set up the structure to tell it where we are going. */
+        RecAddr.sin_family = AF_INET;
+        RecAddr.sin_port = htons( State.port );
+        RecAddr.sin_addr.s_addr = inet_addr( State.DefaultServerAddress );
+
+        /* Set up the structure to tell it what port to listen on. */
+        RecAddr2.sin_family = AF_INET;
+        RecAddr2.sin_port = htons( State.port );
+        RecAddr2.sin_addr.s_addr = htonl( INADDR_ANY );
+
+        /* Bind the receive socket. */
+        bind( s, (SOCKADDR*)&RecAddr2, sizeof(RecAddr2) );
+
+        /* Send the datagram to the DNS server. */
+        pDest = (SOCKADDR*)&RecAddr;
+        DestLen = sizeof(RecAddr);
+        j = sendto( s,
+                    pInBuffer,
+                    InBufferLength,
+                    0,
+                    pDest,
+                    DestLen );
+    }
     if( j == SOCKET_ERROR )
     {
         switch( WSAGetLastError() )
@@ -142,7 +190,28 @@ BOOL SendRequest( PCHAR pInBuffer,
 
     while( bWait )
     {
-        /* Wait for the DNS reply. */
+        /* Wait for the DNS reply for the time-out (it doubles with every retry); an unreachable server must
+           not hang the program. After the last retry the request has timed out. */
+        FD_ZERO( &Fds );
+        FD_SET( s, &Fds );
+        Tv.tv_sec = (State.timeout ? State.timeout : 1) << (Attempt < 8 ? Attempt : 8);
+        Tv.tv_usec = 0;
+        if( select( 0, &Fds, NULL, NULL, &Tv ) == 0 )
+        {
+            if( (DWORD)Attempt < State.retry )
+            {
+                Attempt += 1;
+                sendto( s, pInBuffer, InBufferLength, 0, pDest, DestLen );
+                continue;
+            }
+
+            _tprintf( _T("DNS request timed out.\n    timeout was %d seconds.\n"), (int)State.timeout );
+            _tprintf( _T("*** Request to %s timed-out\n"), State.DefaultServer );
+            closesocket( s );
+            return FALSE;
+        }
+
+        /* Receive the DNS reply. */
         j = recvfrom( s,
                       pOutBuffer,
                       *pOutBufferLength,
@@ -307,6 +376,18 @@ void ReverseIP( PCHAR pIP, PCHAR pReturn )
     k += (j - i) + 1;
 
     pReturn[k] = '\0';
+}
+
+/* An IPv6 address in text form (the zone suffix %n is accepted) */
+BOOL IsValidIPv6( PCHAR pInput )
+{
+    SOCKADDR_IN6 Addr;
+    INT AddrLen = sizeof(Addr);
+
+    if( !strchr( pInput, ':' ) ) return FALSE;
+
+    RtlZeroMemory( &Addr, sizeof(Addr) );
+    return WSAStringToAddressA( pInput, AF_INET6, NULL, (SOCKADDR*)&Addr, &AddrLen ) == 0;
 }
 
 BOOL IsValidIP( PCHAR pInput )
@@ -796,6 +877,9 @@ PCHAR TypeIDtoTypeName( USHORT TypeID )
     case TYPE_A:
         return TypeA;
 
+    case TYPE_AAAA:
+        return TypeAAAA;
+
     case TYPE_NS:
         return TypeNS;
 
@@ -824,6 +908,7 @@ PCHAR TypeIDtoTypeName( USHORT TypeID )
 
 USHORT TypeNametoTypeID( PCHAR TypeName )
 {
+    if( !strncmp( TypeName, TypeAAAA, strlen( TypeAAAA ) ) ) return TYPE_AAAA;
     if( !strncmp( TypeName, TypeA, strlen( TypeA ) ) ) return TYPE_A;
     if( !strncmp( TypeName, TypeNS, strlen( TypeNS ) ) ) return TYPE_NS;
     if( !strncmp( TypeName, TypeCNAME, strlen( TypeCNAME ) ) ) return TYPE_CNAME;

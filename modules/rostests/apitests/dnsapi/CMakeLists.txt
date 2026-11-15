@@ -2,6 +2,7 @@
 list(APPEND SOURCE
     DnscacheHandles.c
     DnsQuery.c
+    DnsQueryAaaa.c
     testlist.c)
 
 add_executable(dnsapi_apitest ${SOURCE})
