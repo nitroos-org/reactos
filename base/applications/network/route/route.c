@@ -22,6 +22,7 @@
 #include <winsock2.h>
 #include <iphlpapi.h>
 #include <ws2tcpip.h>
+#include <wine/netioapi.h>
 #include <ip2string.h>
 
 #include <conutils.h>
@@ -33,6 +34,8 @@
 
 #define DELETE_FLAG       0x1
 #define PERSISTENT_FLAG   0x2
+#define IPV4_FLAG         0x4
+#define IPV6_FLAG         0x8
 
 static
 BOOL
@@ -213,7 +216,7 @@ PrintMacAddress(
     _In_ PBYTE Mac,
     _In_ PWSTR Buffer)
 {
-    swprintf(Buffer, L"%02X %02X %02X %02X %02X %02X ",
+    swprintf(Buffer, L"%02x %02x %02x %02x %02x %02x ",
         Mac[0], Mac[1], Mac[2], Mac[3], Mac[4],  Mac[5]);
 }
 
@@ -341,148 +344,311 @@ CompareAdapters(
     _In_ const void *elem1,
     _In_ const void *elem2)
 {
-    return ((PIP_ADAPTER_ADDRESSES)elem2)->IfIndex - ((PIP_ADAPTER_ADDRESSES)elem1)->IfIndex;
+    PIP_ADAPTER_ADDRESSES a1 = *(PIP_ADAPTER_ADDRESSES *)elem1;
+    PIP_ADAPTER_ADDRESSES a2 = *(PIP_ADAPTER_ADDRESSES *)elem2;
+
+    /* highest index first, as the Interface List of Windows */
+    if (a1->IfIndex == a2->IfIndex)
+        return 0;
+    return (a1->IfIndex < a2->IfIndex) ? 1 : -1;
+}
+
+/* The adapters of both families, highest index first. The caller frees *ppAdapters and *ppSorted. */
+static
+DWORD
+GetSortedAdapters(
+    _Out_ PIP_ADAPTER_ADDRESSES *ppAdapters,
+    _Out_ PIP_ADAPTER_ADDRESSES **ppSorted,
+    _Out_ unsigned int *pCount)
+{
+    PIP_ADAPTER_ADDRESSES pAdapterAddresses = NULL, Ptr, *pSorted;
+    ULONG Size = 15000;
+    ULONG Flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+    unsigned int Count = 0, i;
+    DWORD Error;
+    int Tries;
+
+    *ppAdapters = NULL;
+    *ppSorted = NULL;
+    *pCount = 0;
+
+    for (Tries = 0; Tries < 4; Tries++)
+    {
+        pAdapterAddresses = (PIP_ADAPTER_ADDRESSES)malloc(Size);
+        if (pAdapterAddresses == NULL)
+            return ERROR_NOT_ENOUGH_MEMORY;
+
+        Error = GetAdaptersAddresses(AF_UNSPEC, Flags, NULL, pAdapterAddresses, &Size);
+        if (Error != ERROR_BUFFER_OVERFLOW)
+            break;
+
+        free(pAdapterAddresses);
+        pAdapterAddresses = NULL;
+    }
+
+    if (Error != NO_ERROR)
+    {
+        free(pAdapterAddresses);
+        return Error;
+    }
+
+    for (Ptr = pAdapterAddresses; Ptr; Ptr = Ptr->Next)
+        Count++;
+
+    pSorted = (PIP_ADAPTER_ADDRESSES *)malloc((Count + 1) * sizeof(PVOID));
+    if (pSorted == NULL)
+    {
+        free(pAdapterAddresses);
+        return ERROR_NOT_ENOUGH_MEMORY;
+    }
+
+    for (Ptr = pAdapterAddresses, i = 0; Ptr; Ptr = Ptr->Next)
+        pSorted[i++] = Ptr;
+    qsort(pSorted, Count, sizeof(PVOID), CompareAdapters);
+
+    *ppAdapters = pAdapterAddresses;
+    *ppSorted = pSorted;
+    *pCount = Count;
+    return ERROR_SUCCESS;
+}
+
+static
+VOID
+PrintInterfaceList(
+    _In_ PIP_ADAPTER_ADDRESSES *pSorted,
+    _In_ unsigned int Count)
+{
+    unsigned int i;
+    PIP_ADAPTER_ADDRESSES Ptr;
+
+    ConResPrintf(StdOut, IDS_SEPARATOR);
+    ConResPrintf(StdOut, IDS_INTERFACE_LIST);
+
+    for (i = 0; i < Count; i++)
+    {
+        Ptr = pSorted[i];
+        if (Ptr->IfType == IF_TYPE_ETHERNET_CSMACD && Ptr->PhysicalAddressLength == 6)
+        {
+            WCHAR PhysicalAddress[20];
+            PrintMacAddress(Ptr->PhysicalAddress, PhysicalAddress);
+            ConResPrintf(StdOut, IDS_ETHERNET_ENTRY, Ptr->IfIndex, PhysicalAddress, Ptr->Description);
+        }
+        else
+        {
+            ConResPrintf(StdOut, IDS_INTERFACE_ENTRY, Ptr->IfIndex, Ptr->Description);
+        }
+    }
+    ConResPrintf(StdOut, IDS_SEPARATOR);
+}
+
+static
+DWORD
+PrintIPv4Routes(
+    _In_ PWSTR DestinationPattern,
+    _In_ PIP_ADAPTER_ADDRESSES pAdapterAddresses)
+{
+    PMIB_IPFORWARDTABLE IpForwardTable = NULL;
+    ULONG Size = 0;
+    DWORD Error = ERROR_SUCCESS;
+    WCHAR Destination[IPBUF], Gateway[IPBUF], Netmask[IPBUF], Interface[IPBUF];
+    unsigned int i;
+    BOOL EntriesFound = FALSE;
+
+    if ((GetIpForwardTable(NULL, &Size, TRUE)) == ERROR_INSUFFICIENT_BUFFER)
+    {
+        if (!(IpForwardTable = malloc(Size)))
+            return ERROR_NOT_ENOUGH_MEMORY;
+    }
+    else
+    {
+        return ERROR_NOT_ENOUGH_MEMORY;
+    }
+
+    Error = GetIpForwardTable(IpForwardTable, &Size, TRUE);
+    if (Error != NO_ERROR)
+    {
+        free(IpForwardTable);
+        return Error;
+    }
+
+    ConResPrintf(StdOut, IDS_IPV4_ROUTE_TABLE);
+    ConResPrintf(StdOut, IDS_SEPARATOR);
+    ConResPrintf(StdOut, IDS_ACTIVE_ROUTES);
+
+    for (i = 0; i < IpForwardTable->dwNumEntries; i++)
+    {
+        PMIB_IPFORWARDROW Row = &IpForwardTable->table[i];
+        BOOL OnLink;
+        mbstowcs(Destination, inet_ntoa(IN_ADDR_OF(Row->dwForwardDest)), IPBUF);
+        mbstowcs(Netmask, inet_ntoa(IN_ADDR_OF(Row->dwForwardMask)), IPBUF);
+        mbstowcs(Gateway, inet_ntoa(IN_ADDR_OF(Row->dwForwardNextHop)), IPBUF);
+        GetFirstIPv4AddressFromIndex(Interface, pAdapterAddresses, Row->dwForwardIfIndex);
+        /* The stack reports every route as direct, so a route is on-link when its next hop is nothing or the
+           interface's own address, and goes through a gateway otherwise */
+        OnLink = (Row->dwForwardNextHop == 0) || (wcscmp(Gateway, Interface) == 0);
+
+        if (MatchWildcard(Destination, DestinationPattern))
+        {
+            if (EntriesFound == FALSE)
+                ConResPrintf(StdOut, IDS_ROUTES_HEADER);
+            /* Windows writes "On-link" one column to the left of an address */
+            if (OnLink)
+                ConPrintf(StdOut, L"%17s%17s%16s %17s%7lu\n", Destination, Netmask, L"On-link", Interface, Row->dwForwardMetric1);
+            else
+                ConPrintf(StdOut, L"%17s%17s%17s%17s%7lu\n", Destination, Netmask, Gateway, Interface, Row->dwForwardMetric1);
+            EntriesFound = TRUE;
+        }
+    }
+
+    free(IpForwardTable);
+    return ERROR_SUCCESS;
+}
+
+static
+int
+CompareIPv6Routes(
+    _In_ const void *elem1,
+    _In_ const void *elem2)
+{
+    const MIB_IPFORWARD_ROW2 *r1 = *(const MIB_IPFORWARD_ROW2 **)elem1;
+    const MIB_IPFORWARD_ROW2 *r2 = *(const MIB_IPFORWARD_ROW2 **)elem2;
+    int Cmp;
+
+    Cmp = memcmp(&r1->DestinationPrefix.Prefix.Ipv6.sin6_addr,
+                 &r2->DestinationPrefix.Prefix.Ipv6.sin6_addr,
+                 sizeof(IN6_ADDR));
+    if (Cmp != 0)
+        return Cmp;
+    if (r1->DestinationPrefix.PrefixLength != r2->DestinationPrefix.PrefixLength)
+        return (r1->DestinationPrefix.PrefixLength < r2->DestinationPrefix.PrefixLength) ? -1 : 1;
+    if (r1->InterfaceIndex != r2->InterfaceIndex)
+        return (r1->InterfaceIndex < r2->InterfaceIndex) ? -1 : 1;
+    return 0;
+}
+
+/* An IPv6 stack that is off (Ipv6Enable=0) has no table: the section stays empty, as for a failed query */
+static
+DWORD
+PrintIPv6Routes(
+    _In_ PWSTR DestinationPattern)
+{
+    PMIB_IPFORWARD_TABLE2 Table = NULL;
+    const MIB_IPFORWARD_ROW2 **Rows = NULL;
+    ULONG i, Count = 0;
+    BOOL EntriesFound = FALSE;
+
+    ConResPrintf(StdOut, IDS_IPV6_ROUTE_TABLE);
+    ConResPrintf(StdOut, IDS_SEPARATOR);
+    ConResPrintf(StdOut, IDS_ACTIVE_ROUTES);
+
+    if (GetIpForwardTable2(AF_INET6, &Table) != NO_ERROR || Table == NULL)
+        return ERROR_SUCCESS;
+
+    if (Table->NumEntries != 0)
+        Rows = (const MIB_IPFORWARD_ROW2 **)malloc(Table->NumEntries * sizeof(PVOID));
+    if (Rows == NULL)
+    {
+        FreeMibTable(Table);
+        return ERROR_SUCCESS;
+    }
+
+    for (i = 0; i < Table->NumEntries; i++)
+    {
+        if (Table->Table[i].DestinationPrefix.Prefix.si_family == AF_INET6)
+            Rows[Count++] = &Table->Table[i];
+    }
+    qsort(Rows, Count, sizeof(PVOID), CompareIPv6Routes);
+
+    for (i = 0; i < Count; i++)
+    {
+        const MIB_IPFORWARD_ROW2 *Row = Rows[i];
+        MIB_IPINTERFACE_ROW IfRow;
+        WCHAR Address[64], Prefix[80], Gateway[64];
+        ULONG Metric = Row->Metric;
+        static const IN6_ADDR Unspecified = {{{0}}};
+
+        RtlIpv6AddressToStringW(&Row->DestinationPrefix.Prefix.Ipv6.sin6_addr, Address);
+        if (!MatchWildcard(Address, DestinationPattern))
+            continue;
+        swprintf(Prefix, L"%s/%u", Address, (unsigned int)Row->DestinationPrefix.PrefixLength);
+
+        /* the metric shown is the route's plus the interface's, as Windows does */
+        memset(&IfRow, 0, sizeof(IfRow));
+        IfRow.Family = AF_INET6;
+        IfRow.InterfaceIndex = Row->InterfaceIndex;
+        if (GetIpInterfaceEntry(&IfRow) == NO_ERROR)
+            Metric += IfRow.Metric;
+
+        if (Row->NextHop.si_family != AF_INET6 ||
+            memcmp(&Row->NextHop.Ipv6.sin6_addr, &Unspecified, sizeof(Unspecified)) == 0)
+            wcscpy(Gateway, L"On-link");
+        else
+            RtlIpv6AddressToStringW(&Row->NextHop.Ipv6.sin6_addr, Gateway);
+
+        if (EntriesFound == FALSE)
+            ConResPrintf(StdOut, IDS_IPV6_ROUTES_HEADER);
+        EntriesFound = TRUE;
+
+        ConPrintf(StdOut, L"%3lu %6lu ", Row->InterfaceIndex, Metric);
+        /* a prefix that does not fit the column puts the gateway on the next line */
+        if (wcslen(Prefix) < 25)
+            ConPrintf(StdOut, L"%-25s%s\n", Prefix, Gateway);
+        else
+            ConPrintf(StdOut, L"%s\n%36s%s\n", Prefix, L"", Gateway);
+    }
+
+    free(Rows);
+    FreeMibTable(Table);
+    return ERROR_SUCCESS;
+}
+
+static
+DWORD
+PrintIPv6PersistentRoutes(VOID)
+{
+    /* IPv6 persistent routes need the route configuration API: none can exist yet */
+    ConResPrintf(StdOut, IDS_SEPARATOR);
+    ConResPrintf(StdOut, IDS_PERSISTENT_ROUTES);
+    ConResPrintf(StdOut, IDS_NONE);
+    return ERROR_SUCCESS;
 }
 
 static
 DWORD
 PrintActiveRoutes(
-    _In_ PWSTR DestinationPattern)
+    _In_ PWSTR DestinationPattern,
+    _In_ int flags)
 {
-    PMIB_IPFORWARDTABLE IpForwardTable = NULL;
-    PIP_ADAPTER_ADDRESSES pAdapterAddresses = NULL, Ptr, *pAdapterSortArray = NULL;
-    ULONG Size = 0;
-    DWORD Error = ERROR_SUCCESS;
-    ULONG adaptOutBufLen = 15000;
-    WCHAR Destination[IPBUF], Gateway[IPBUF], Netmask[IPBUF], Interface[IPBUF];
-    unsigned int i, AdapterCount, AdapterIndex;
-    BOOL EntriesFound;
-    ULONG Flags = /*GAA_FLAG_SKIP_UNICAST |*/ GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
-                  GAA_FLAG_SKIP_DNS_SERVER;
+    PIP_ADAPTER_ADDRESSES pAdapterAddresses = NULL, *pSorted = NULL;
+    unsigned int Count = 0;
+    DWORD Error;
+    BOOL Both = !!(flags & IPV4_FLAG) == !!(flags & IPV6_FLAG);
 
-    /* set required buffer size */
-    pAdapterAddresses = (PIP_ADAPTER_ADDRESSES)malloc(adaptOutBufLen);
-    if (pAdapterAddresses == NULL)
+    Error = GetSortedAdapters(&pAdapterAddresses, &pSorted, &Count);
+    if (Error != ERROR_SUCCESS)
     {
-        Error = ERROR_NOT_ENOUGH_MEMORY;
-        goto Error;
+        ConResPrintf(StdErr, IDS_ROUTE_ENUM_ERROR);
+        return Error;
     }
 
-    if (GetAdaptersAddresses(AF_INET, Flags, NULL, pAdapterAddresses, &adaptOutBufLen) == ERROR_BUFFER_OVERFLOW)
+    PrintInterfaceList(pSorted, Count);
+
+    if (Both || (flags & IPV4_FLAG))
     {
-       free(pAdapterAddresses);
-       pAdapterAddresses = (PIP_ADAPTER_ADDRESSES)malloc(adaptOutBufLen);
-       if (pAdapterAddresses == NULL)
-       {
-           Error = ERROR_NOT_ENOUGH_MEMORY;
-           goto Error;
-       }
+        Error = PrintIPv4Routes(DestinationPattern, pAdapterAddresses);
+        if (Error == ERROR_SUCCESS)
+            Error = PrintPersistentRoutes(DestinationPattern);
     }
 
-    if ((GetIpForwardTable(NULL, &Size, TRUE)) == ERROR_INSUFFICIENT_BUFFER)
+    if (Error == ERROR_SUCCESS && (Both || (flags & IPV6_FLAG)))
     {
-        if (!(IpForwardTable = malloc(Size)))
-        {
-            Error = ERROR_NOT_ENOUGH_MEMORY;
-            goto Error;
-        }
+        Error = PrintIPv6Routes(DestinationPattern);
+        if (Error == ERROR_SUCCESS)
+            Error = PrintIPv6PersistentRoutes();
     }
 
-    if (((Error = GetAdaptersAddresses(AF_INET, Flags, NULL, pAdapterAddresses, &adaptOutBufLen)) == NO_ERROR) &&
-        ((Error = GetIpForwardTable(IpForwardTable, &Size, TRUE)) == NO_ERROR))
-    {
-        ConResPrintf(StdOut, IDS_SEPARATOR);
-        ConResPrintf(StdOut, IDS_INTERFACE_LIST);
-
-        AdapterCount = 0;
-        Ptr = pAdapterAddresses;
-        while (Ptr)
-        {
-            AdapterCount++;
-            Ptr = Ptr->Next;
-        }
-
-        pAdapterSortArray = (PIP_ADAPTER_ADDRESSES*)malloc(AdapterCount * sizeof(PVOID));
-        if (pAdapterSortArray == NULL)
-        {
-            Error = ERROR_NOT_ENOUGH_MEMORY;
-            goto Error;
-        }
-
-        AdapterIndex = 0;
-        Ptr = pAdapterAddresses;
-        while (Ptr)
-        {
-            pAdapterSortArray[AdapterIndex] = Ptr;
-            AdapterIndex++;
-            Ptr = Ptr->Next;
-        }
-
-        qsort(pAdapterSortArray, AdapterCount, sizeof(PVOID), CompareAdapters);
-
-        for (AdapterIndex = 0; AdapterIndex < AdapterCount; AdapterIndex++)
-        {
-            Ptr = pAdapterSortArray[AdapterIndex];
-            if (Ptr->IfType == IF_TYPE_ETHERNET_CSMACD)
-            {
-                WCHAR PhysicalAddress[20];
-                PrintMacAddress(Ptr->PhysicalAddress, PhysicalAddress);
-                ConResPrintf(StdOut, IDS_ETHERNET_ENTRY, Ptr->IfIndex, PhysicalAddress, Ptr->Description);
-            }
-            else
-            {
-                ConResPrintf(StdOut, IDS_INTERFACE_ENTRY, Ptr->IfIndex, Ptr->Description);
-            }
-        }
-        ConResPrintf(StdOut, IDS_SEPARATOR);
-
-        ConResPrintf(StdOut, IDS_IPV4_ROUTE_TABLE);
-        ConResPrintf(StdOut, IDS_SEPARATOR);
-        ConResPrintf(StdOut, IDS_ACTIVE_ROUTES);
-        EntriesFound = FALSE;
-        for (i = 0; i < IpForwardTable->dwNumEntries; i++)
-        {
-            mbstowcs(Destination, inet_ntoa(IN_ADDR_OF(IpForwardTable->table[i].dwForwardDest)), IPBUF);
-            mbstowcs(Netmask, inet_ntoa(IN_ADDR_OF(IpForwardTable->table[i].dwForwardMask)), IPBUF);
-            mbstowcs(Gateway, inet_ntoa(IN_ADDR_OF(IpForwardTable->table[i].dwForwardNextHop)), IPBUF);
-            GetFirstIPv4AddressFromIndex(Interface, pAdapterAddresses, IpForwardTable->table[i].dwForwardIfIndex);
-
-            if (MatchWildcard(Destination, DestinationPattern))
-            {
-                if (EntriesFound == FALSE)
-                    ConResPrintf(StdOut, IDS_ROUTES_HEADER);
-                ConResPrintf(StdOut, IDS_ROUTES_ENTRY,
-                             Destination,
-                             Netmask,
-                             Gateway,
-                             Interface,
-                             IpForwardTable->table[i].dwForwardMetric1);
-                EntriesFound = TRUE;
-            }
-        }
-
-        if (DestinationPattern == NULL)
-        {
-            for (i = 0; i < IpForwardTable->dwNumEntries; i++)
-            {
-                if (IpForwardTable->table[i].dwForwardDest == 0)
-                {
-                    mbstowcs(Gateway, inet_ntoa(IN_ADDR_OF(IpForwardTable->table[i].dwForwardNextHop)), IPBUF);
-                    ConResPrintf(StdOut, IDS_DEFAULT_GATEWAY, Gateway);
-                }
-            }
-        }
-        else if (EntriesFound == FALSE)
-            ConResPrintf(StdOut, IDS_NONE);
-    }
-
-Error:
-    if (pAdapterSortArray)
-        free(pAdapterSortArray);
-    if (pAdapterAddresses)
-        free(pAdapterAddresses);
-    if (IpForwardTable)
-        free(IpForwardTable);
+    free(pSorted);
+    free(pAdapterAddresses);
 
     if (Error != ERROR_SUCCESS)
         ConResPrintf(StdErr, IDS_ROUTE_ENUM_ERROR);
@@ -501,13 +667,18 @@ PrintRoutes(
     PWSTR DestinationPattern = NULL;
     DWORD Error;
 
+    /* "route print -4" and "route print -6" work as well as "route -4 print" (Windows 10) */
+    while (argc > start && (!wcscmp(argv[start], L"-4") || !wcscmp(argv[start], L"-6")))
+    {
+        flags |= (argv[start][1] == L'4') ? IPV4_FLAG : IPV6_FLAG;
+        start++;
+    }
+
     if (argc > start)
         ParseCmdLine(argc, argv, start, 
                      &DestinationPattern, NULL, NULL, NULL);
 
-    Error = PrintActiveRoutes(DestinationPattern);
-    if (Error == ERROR_SUCCESS)
-        Error = PrintPersistentRoutes(DestinationPattern);
+    Error = PrintActiveRoutes(DestinationPattern, flags);
 
     return (Error == ERROR_SUCCESS) ? 0 : 2;
 }
@@ -651,6 +822,21 @@ done:
 
 static
 int
+ReportV6Unsupported(
+    _In_ UINT ResourceId)
+{
+    PWSTR Text = NULL;
+
+    FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                   NULL, ERROR_NOT_SUPPORTED, 0, (PWSTR)&Text, 0, NULL);
+    ConResPrintf(StdErr, ResourceId, Text ? Text : L"");
+    if (Text)
+        LocalFree(Text);
+    return 2;
+}
+
+static
+int
 AddRoute(
     _In_ int argc,
     _In_ WCHAR **argv,
@@ -660,7 +846,15 @@ AddRoute(
     MIB_IPFORWARDROW RowToAdd = { 0 };
     DWORD Error;
 
-    if ((argc <= start) || !ConvertAddCmdLine(&RowToAdd, argc, argv, start))
+    if (argc <= start)
+        return 1;
+
+    /* IPv6 routes need the route configuration API of the stack (CreateIpForwardEntry2): until it exists the
+       request fails the way Windows words a failed addition, instead of being read as an IPv4 address */
+    if ((flags & IPV6_FLAG) || wcschr(argv[start], L':'))
+        return ReportV6Unsupported(IDS_ROUTE_ADD_ERROR_EX);
+
+    if (!ConvertAddCmdLine(&RowToAdd, argc, argv, start))
         return 1;
 
     /* The route leaves through the interface that reaches its gateway: the row needs the interface
@@ -804,6 +998,9 @@ DeleteRoutes(
                       &DestinationPattern, NULL, NULL, NULL))
         return 1;
 
+    if ((flags & IPV6_FLAG) || wcschr(DestinationPattern, L':'))
+        return ReportV6Unsupported(IDS_ROUTE_DEL_ERROR_EX);
+
     if (flags & DELETE_FLAG)
         DeleteCustomRoutes();
 
@@ -841,6 +1038,14 @@ wmain(
             else if (!_wcsicmp(&argv[i][1], L"p"))
             {
                 flags |= PERSISTENT_FLAG;
+            }
+            else if (!wcscmp(&argv[i][1], L"4"))
+            {
+                flags |= IPV4_FLAG;
+            }
+            else if (!wcscmp(&argv[i][1], L"6"))
+            {
+                flags |= IPV6_FLAG;
             }
             else
             {

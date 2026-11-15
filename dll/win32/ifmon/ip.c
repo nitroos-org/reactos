@@ -2130,6 +2130,53 @@ IsUsableAddress(
 }
 
 
+/* "Subnet Prefix: 10.0.2.0/24 (mask 255.255.255.0)", as Windows shows an address and its mask */
+static
+VOID
+PrintSubnetPrefix(
+    _In_ PCWSTR pszAddress,
+    _In_ PCWSTR pszMask)
+{
+    IN_ADDR Address, Mask, Network;
+    PCWSTR pszEnd;
+    WCHAR szNetwork[16], szPrefix[32];
+    ULONG ulMask, ulBits = 0;
+
+    if (RtlIpv4StringToAddressW(pszAddress, TRUE, &pszEnd, &Address) != 0 ||
+        RtlIpv4StringToAddressW(pszMask, TRUE, &pszEnd, &Mask) != 0)
+    {
+        PrintMessageFromModule(hDllInstance, IDS_SUBNETMASK, pszMask);
+        return;
+    }
+
+    ulMask = ((ULONG)Mask.S_un.S_un_b.s_b1 << 24) | ((ULONG)Mask.S_un.S_un_b.s_b2 << 16) |
+             ((ULONG)Mask.S_un.S_un_b.s_b3 << 8) | (ULONG)Mask.S_un.S_un_b.s_b4;
+    for (; ulMask & 0x80000000; ulMask <<= 1)
+        ulBits++;
+
+    Network.S_un.S_addr = Address.S_un.S_addr & Mask.S_un.S_addr;
+    RtlIpv4AddressToStringW(&Network, szNetwork);
+    StringCchPrintfW(szPrefix, _countof(szPrefix), L"%s/%lu", szNetwork, ulBits);
+    PrintMessageFromModule(hDllInstance, IDS_SUBNETPREFIX, szPrefix, pszMask);
+}
+
+static
+VOID
+PrintAnsiAddressAndMask(
+    _In_ PCSTR pszAddress,
+    _In_ PCSTR pszMask)
+{
+    WCHAR szAddress[16], szMask[16];
+
+    MultiByteToWideChar(CP_ACP, 0, pszAddress, -1, szAddress, _countof(szAddress));
+    szAddress[_countof(szAddress) - 1] = UNICODE_NULL;
+    MultiByteToWideChar(CP_ACP, 0, pszMask, -1, szMask, _countof(szMask));
+    szMask[_countof(szMask) - 1] = UNICODE_NULL;
+    PrintMessageFromModule(hDllInstance, IDS_IPADDRESS, szAddress);
+    PrintSubnetPrefix(szAddress, szMask);
+}
+
+
 static
 VOID
 PrintAnsiMessage(
@@ -2162,8 +2209,7 @@ PrintDhcpAddresses(
             if (!IsUsableAddress(pAddress->IpAddress.String))
                 continue;
 
-            PrintAnsiMessage(IDS_IPADDRESS, pAddress->IpAddress.String);
-            PrintAnsiMessage(IDS_SUBNETMASK, pAddress->IpMask.String);
+            PrintAnsiAddressAndMask(pAddress->IpAddress.String, pAddress->IpMask.String);
             bAddress = TRUE;
         }
     }
@@ -2352,7 +2398,7 @@ IpShowAdapters(
                         }
                         else
                         {
-                            PrintMessageFromModule(hDllInstance, IDS_SUBNETMASK, pProperties->pszSubnetMask);
+                            PrintSubnetPrefix(pProperties->pszIpAddress, pProperties->pszSubnetMask);
                         }
 
                         pBuffer = ExtractParameterValue(pProperties->pszParameters, L"DefGw");
@@ -2620,19 +2666,16 @@ IpDumpFn(
 
 static
 DWORD
-WINAPI
-IpStart(
-    _In_ const GUID *pguidParent,
-    _In_ DWORD dwVersion)
+IpRegisterContext(
+    _In_ LPWSTR pwszContext,
+    _In_ const GUID *pguidHelper)
 {
     NS_CONTEXT_ATTRIBUTES ContextAttributes;
 
-    DPRINT1("IpStart()\n");
-
     ZeroMemory(&ContextAttributes, sizeof(ContextAttributes));
     ContextAttributes.dwVersion = 1;
-    ContextAttributes.pwszContext = L"ip";
-    ContextAttributes.guidHelper = GUID_IFMON_IP;
+    ContextAttributes.pwszContext = pwszContext;
+    ContextAttributes.guidHelper = *pguidHelper;
 
     ContextAttributes.ulNumTopCmds = sizeof(IpTopCommands) / sizeof(CMD_ENTRY);
     ContextAttributes.pTopCmds = IpTopCommands;
@@ -2643,6 +2686,49 @@ IpStart(
     ContextAttributes.pfnDumpFn = IpDumpFn;
 
     RegisterContext(&ContextAttributes);
+
+    return ERROR_SUCCESS;
+}
+
+
+static
+DWORD
+WINAPI
+IpStart(
+    _In_ const GUID *pguidParent,
+    _In_ DWORD dwVersion)
+{
+    DPRINT1("IpStart()\n");
+
+    return IpRegisterContext(L"ip", &GUID_IFMON_IP);
+}
+
+
+/* "interface ipv4" is the same context as "interface ip" (Windows 10 answers both) */
+static
+DWORD
+WINAPI
+Ipv4Start(
+    _In_ const GUID *pguidParent,
+    _In_ DWORD dwVersion)
+{
+    return IpRegisterContext(L"ipv4", &GUID_IFMON_IPV4);
+}
+
+
+DWORD
+WINAPI
+RegisterIpv4Helper(VOID)
+{
+    NS_HELPER_ATTRIBUTES HelperAttributes;
+    GUID guidParent = GUID_IFMON_INTERFACE;
+
+    ZeroMemory(&HelperAttributes, sizeof(HelperAttributes));
+    HelperAttributes.dwVersion  = 1;
+    HelperAttributes.guidHelper = GUID_IFMON_IPV4;
+    HelperAttributes.pfnStart = Ipv4Start;
+    HelperAttributes.pfnStop = NULL;
+    RegisterHelper(&guidParent, &HelperAttributes);
 
     return ERROR_SUCCESS;
 }

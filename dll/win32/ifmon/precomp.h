@@ -40,6 +40,14 @@ RegisterIpHelper(VOID);
 
 DWORD
 WINAPI
+RegisterIpv4Helper(VOID);
+
+DWORD
+WINAPI
+RegisterIpv6Helper(VOID);
+
+DWORD
+WINAPI
 RegisterWinsockHelper(VOID);
 
 #endif /* PRECOMP_H */
