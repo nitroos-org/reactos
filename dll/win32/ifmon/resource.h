@@ -57,6 +57,7 @@
 #define IDS_DHCPNAMESERVER   313
 #define IDS_NOSTATICNAMESERVER 314
 #define IDS_NODHCPNAMESERVER 315
+#define IDS_SUBNETPREFIX     316
 
 #define IDS_EMPTYLINE        400
 
@@ -72,3 +73,25 @@
 #define IDS_ERROR_GET_PROPERTIES            2003
 #define IDS_ERROR_ADD_DHCP_ADDRESS          2004
 #define IDS_ERROR_DELETE_DHCP_ADDRESS       2005
+
+#define IDS_HLP_IPV6_SHOW                           1000
+#define IDS_HLP_IPV6_SHOW_ADDRESSES                 1001
+#define IDS_HLP_IPV6_SHOW_ADDRESSES_EX              1002
+#define IDS_HLP_IPV6_SHOW_DESTINATIONCACHE          1003
+#define IDS_HLP_IPV6_SHOW_DESTINATIONCACHE_EX       1004
+#define IDS_HLP_IPV6_SHOW_DNSSERVERS                1005
+#define IDS_HLP_IPV6_SHOW_DNSSERVERS_EX             1006
+#define IDS_HLP_IPV6_SHOW_GLOBAL                    1007
+#define IDS_HLP_IPV6_SHOW_GLOBAL_EX                 1008
+#define IDS_HLP_IPV6_SHOW_INTERFACES                1009
+#define IDS_HLP_IPV6_SHOW_INTERFACES_EX             1010
+#define IDS_HLP_IPV6_SHOW_JOINS                     1011
+#define IDS_HLP_IPV6_SHOW_JOINS_EX                  1012
+#define IDS_HLP_IPV6_SHOW_NEIGHBORS                 1013
+#define IDS_HLP_IPV6_SHOW_NEIGHBORS_EX              1014
+#define IDS_HLP_IPV6_SHOW_PREFIXPOLICIES            1015
+#define IDS_HLP_IPV6_SHOW_PREFIXPOLICIES_EX         1016
+#define IDS_HLP_IPV6_SHOW_PRIVACY                   1017
+#define IDS_HLP_IPV6_SHOW_PRIVACY_EX                1018
+#define IDS_HLP_IPV6_SHOW_ROUTE                     1019
+#define IDS_HLP_IPV6_SHOW_ROUTE_EX                  1020

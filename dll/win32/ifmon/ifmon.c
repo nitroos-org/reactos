@@ -27,6 +27,10 @@ InitHelperDll(
     if (dwError == ERROR_SUCCESS)
         dwError = RegisterIpHelper();
     if (dwError == ERROR_SUCCESS)
+        dwError = RegisterIpv4Helper();
+    if (dwError == ERROR_SUCCESS)
+        dwError = RegisterIpv6Helper();
+    if (dwError == ERROR_SUCCESS)
         dwError = RegisterWinsockHelper();
 
     return dwError;

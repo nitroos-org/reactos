@@ -369,6 +369,7 @@ SysWOW64/net.exe
 SysWOW64/netsh.exe
 SysWOW64/netstat.exe
 SysWOW64/nslookup.exe
+SysWOW64/pathping.exe
 SysWOW64/ping.exe
 SysWOW64/replace.exe
 SysWOW64/route.exe

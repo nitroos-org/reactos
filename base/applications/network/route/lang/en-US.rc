@@ -10,7 +10,7 @@ STRINGTABLE
 BEGIN
     IDS_USAGE1 "\n\
 Manipulates the network routing tables.\n\n\
-ROUTE [-f] [-p] command [destination]\n\
+ROUTE [-f] [-p] [-4|-6] command [destination]\n\
                 [MASK netmask] [gateway] [METRIC metric]\n\n\
   -f           Cleans the routing table of all gateway entries prior to\n\
                executing the command. Can be used with the ADD and\n\
@@ -18,6 +18,8 @@ ROUTE [-f] [-p] command [destination]\n\
   -p           Makes a route persistent between boots of the system. By\n\
                default, routes are not persistent when the system is\n\
                restarted. Can be used with the ADD command.\n\n\
+  -4           Force using IPv4.\n\n\
+  -6           Force using IPv6.\n\n\
   command      One of the following options:\n\
                  PRINT   Prints the routes.\n\
                  ADD     Add a new route.\n\
@@ -52,15 +54,19 @@ Examples:\n\
     IDS_ROUTE_ENUM_ERROR "Route enumeration failed\n"
     IDS_SEPARATOR "===========================================================================\n"
     IDS_INTERFACE_LIST "Interface List\n"
-    IDS_INTERFACE_ENTRY "0x%-2lx ........................... %s\n"
-    IDS_ETHERNET_ENTRY "0x%-2lx ...%s...... %s\n"
+    IDS_INTERFACE_ENTRY "%3lu...........................%s\n"
+    IDS_ETHERNET_ENTRY "%3lu...%s......%s\n"
     IDS_IPV4_ROUTE_TABLE "\nIPv4 Route Table\n"
     IDS_ACTIVE_ROUTES "Active Routes:\n"
     IDS_ROUTES_ENTRY "  %15s  %15s  %15s  %15s  %6ld\n"
     IDS_PERSISTENT_ROUTES "Persistent Routes:\n"
     IDS_PERSISTENT_ENTRY "  %15s  %15s  %15s  %8s\n"
     IDS_DEFAULT_GATEWAY "Default Gateway:%18s\n"
-    IDS_ROUTES_HEADER "Network Destination        Netmask          Gateway        Interface  Metric\n"
+    IDS_ROUTES_HEADER "Network Destination        Netmask          Gateway       Interface  Metric\n"
+    IDS_IPV6_ROUTE_TABLE "\nIPv6 Route Table\n"
+    IDS_IPV6_ROUTES_HEADER " If Metric Network Destination      Gateway\n"
+    IDS_ROUTE_ADD_ERROR_EX "The route addition failed: %s"
+    IDS_ROUTE_DEL_ERROR_EX "The route deletion failed: %s"
     IDS_PERSISTENT_HEADER "Network Destination        Netmask          Gateway    Metric\n"
     IDS_NONE "  None\n"
 END
