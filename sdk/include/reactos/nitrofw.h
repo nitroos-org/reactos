@@ -88,7 +88,8 @@
  *     rules with Direction == NITROFW_DIR_OUT and reports NITROFW_FEATURE_OUTBOUND clear in GET_VERSION.
  *  8. Service-name conditions (ServiceNameOffset) are advisory: a filter that cannot resolve the
  *     owning service ignores the condition and reports NITROFW_FEATURE_SERVICE_MATCH clear. The service
- *     therefore never sends an Allow rule that has a service condition (it would match every service): the rule
+ *     therefore never sends an Allow rule that has a service condition (a service name, or "*" = services only;
+ *     the rule would match every program): the rule
  *     is rejected and reported. A Block rule with one is sent with the name, which is ignored (it blocks more
  *     than written). The same holds for every other condition the filter cannot match (connection security,
  *     authorised machines or users, local user owner, package, interfaces).
