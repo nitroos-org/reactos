@@ -717,7 +717,7 @@ DWORD NETCON_secure_connect(netconn_t *connection, server_t *server)
     if (res == ERROR_INTERNET_SECURITY_CHANNEL_ERROR && have_compat_cred_handle)
     {
         closesocket(connection->socket);
-        /* the connect timeout applies now: 500 ms was never enforced and would cut off a slow link */
+        /* 500 ms (enforced here: is_blocking is already TRUE on this path) cut off slow links; use the 60 s default */
         res = create_netconn_socket(connection->server, connection, 60000);
         if (res != ERROR_SUCCESS)
             return res;
