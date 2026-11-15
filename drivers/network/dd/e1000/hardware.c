@@ -724,6 +724,11 @@ NICUpdateMulticastList(
             ULONG Ral = Address[0] | (Address[1] << 8) | (Address[2] << 16) | ((ULONG)Address[3] << 24);
             ULONG Rah = Address[4] | (Address[5] << 8) | E1000_RAH_AV;
 
+            /* An entry that is replaced: invalid while its two halves change, so that no frame matches a
+               mix of the old and the new address. Entry 0 never changes, it stays valid. */
+            if (n != 0)
+                E1000WriteUlong(Adapter, E1000_REG_RAH + (8*n), 0);
+
             /* The address first, then its valid bit */
             E1000WriteUlong(Adapter, E1000_REG_RAL + (8*n), Ral);
             E1000WriteUlong(Adapter, E1000_REG_RAH + (8*n), Rah);

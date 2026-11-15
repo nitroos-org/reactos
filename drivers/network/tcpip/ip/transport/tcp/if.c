@@ -208,15 +208,19 @@ TCPUpdateInterfaceIPInformationLocked(PIP_INTERFACE IF)
     ip4_addr_t ipaddr;
     ip4_addr_t netmask;
     ip4_addr_t gw;
+    u16_t OldMtu;
 
     gw.addr = 0;
 
     /* The netif is created before the interface knows its MTU; lwIP limits its segments and
      * fragments its datagrams to this value, and skips both while it is 0 */
+    OldMtu = netif->mtu;
     netif->mtu = (u16_t)min(IF->MTU, 0xFFFF);
     /* IPv6 starts from the same MTU and never exceeds it; a lower one a router advertisement set stays
-     * (this runs again on every reconfiguration and IPv4 address change) */
-    if (netif->mtu6 == 0 || netif->mtu6 > netif->mtu)
+     * (this runs again on every reconfiguration and IPv4 address change). An mtu6 that equals the link MTU
+     * from before was not lowered, so it follows a link MTU that grows. (An advertisement of exactly the old
+     * link MTU cannot be told apart from that; the next advertisement sets it again.) */
+    if (netif->mtu6 == 0 || netif->mtu6 > netif->mtu || netif->mtu6 == OldMtu)
         netif->mtu6 = netif->mtu;
 
     GetInterfaceIPv4Address(IF,
