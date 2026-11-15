@@ -1605,7 +1605,16 @@ UserRedirPresentPending(VOID)
         Entry = Entry->Flink;
         if (r->Dirty && r->pwnd && r->HoldUntil && KeQueryPerformanceCounter(NULL).QuadPart - r->LastPresent < 2 * gRedirFrameQpc)
         {
-            /* In a burst of scrolls, whose releases present the window once per frame: the tail timer shows its end */
+            /*
+             * In a burst of scrolls, whose releases present the window once per frame: the tail timer shows its end.
+             * What is dirty here may not come from a release (a DC still in use drew after the last present of the
+             * burst): without a deferred release since that present it counts as one, or the tail timer passes it
+             * over and, as Dirty is already set, nothing arms the frame timer for it again. A deferred release
+             * that is there already is left as it is (its present takes all that is dirty), so the tail is not
+             * delayed.
+             */
+            if (r->LastDefer <= r->LastPresent)
+                r->LastDefer = KeQueryPerformanceCounter(NULL).QuadPart;
             RedirArmTail();
         }
         else if (r->Dirty && r->pwnd)

@@ -522,6 +522,74 @@ static void Test_BurstTail(HWND hwnd, HWND hChild)
     trace("tail worst %.1f ms\n", Worst);
 }
 
+/*
+ * A burst of scrolls ends with a scroll whose release presents the window (a frame after the last present), then the
+ * window is drawn through a DC that stays in use (no release): that drawing still reaches the screen.
+ */
+#define HELD_ROUNDS     6
+#define HELD_LIMIT_MS   500.0
+
+static void Test_BurstHeldDC(HWND hwnd, HWND hChild)
+{
+    FRAME model;
+    RECT rcChild, rc = { 20, 20, 60, 50 };
+    HBRUSH hbr = CreateSolidBrush(RGB(255, 0, 0));
+    LARGE_INTEGER Freq, tFirst, tScroll, t0, t1;
+    int round, i;
+
+    QueryPerformanceFrequency(&Freq);
+    ShowWindow(hChild, SW_HIDE);
+    for (round = 0; round < HELD_ROUNDS; round++)
+    {
+        HDC hdc, hdcScr;
+        BOOL bOk;
+        double Ms;
+
+        Reset(hwnd, &model, NULL, &rcChild);
+        Pump(100);
+        /* Scrolls 4 ms apart (no paint in between): the first one and the first one 17 ms after it are presented */
+        QueryPerformanceCounter(&tFirst);
+        tScroll = tFirst;
+        for (i = 0; ; i++)
+        {
+            if (i)
+            {
+                do
+                    QueryPerformanceCounter(&t1);
+                while ((t1.QuadPart - tScroll.QuadPart) * 1000 < 4 * Freq.QuadPart);
+                tScroll = t1;
+            }
+            ScrollWindowEx(hwnd, 0, (i & 1) ? 16 : -16, NULL, NULL, NULL, NULL, SW_INVALIDATE | SW_ERASE);
+            if (i && (tScroll.QuadPart - tFirst.QuadPart) * 1000 >= 17 * Freq.QuadPart)
+                break;
+        }
+        hdc = GetDC(hwnd);
+        FillRect(hdc, &rc, hbr);
+        GdiFlush();
+        QueryPerformanceCounter(&t0);
+        hdcScr = GetDC(NULL);
+        for (;;)
+        {
+            bOk = GetPixel(hdcScr, WX + rc.left, WY + rc.top) == RGB(255, 0, 0) &&
+                  GetPixel(hdcScr, WX + rc.right - 1, WY + rc.bottom - 1) == RGB(255, 0, 0);
+            QueryPerformanceCounter(&t1);
+            Ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)Freq.QuadPart;
+            if (bOk || Ms >= HELD_LIMIT_MS)
+                break;
+            Sleep(1);
+        }
+        ReleaseDC(NULL, hdcScr);
+        ReleaseDC(hwnd, hdc);
+        ok(bOk, "round %d: what a DC in use drew after a burst of %d scrolls was not on the screen after %.1f ms\n",
+           round, i + 1, Ms);
+        if (bOk)
+            trace("held DC %d: on the screen after %.1f ms (%d scrolls)\n", round, Ms, i + 1);
+    }
+    DeleteObject(hbr);
+    Reset(hwnd, &model, NULL, &rcChild);
+    Pump(100);
+}
+
 START_TEST(RedirScroll)
 {
     WNDCLASSW wc = { 0 };
@@ -575,6 +643,7 @@ START_TEST(RedirScroll)
         Test_Burst(hwnd, hChild);
         Test_BurstThenDraw(hwnd, hChild);
         Test_BurstTail(hwnd, hChild);
+        Test_BurstHeldDC(hwnd, hChild);
     }
 
     DestroyWindow(hwnd);
