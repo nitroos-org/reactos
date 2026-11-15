@@ -5,6 +5,7 @@
 extern void func_AddFontMemResourceEx(void);
 extern void func_AddFontResource(void);
 extern void func_AddFontResourceEx(void);
+extern void func_ArcHugeBox(void);
 extern void func_BeginPath(void);
 extern void func_BezierExtremeCoords(void);
 extern void func_BitBltBrushOrigin(void);
@@ -119,6 +120,7 @@ const struct test winetest_testlist[] =
     { "AddFontMemResourceEx", func_AddFontMemResourceEx },
     { "AddFontResource", func_AddFontResource },
     { "AddFontResourceEx", func_AddFontResourceEx },
+    { "ArcHugeBox", func_ArcHugeBox },
     { "BeginPath", func_BeginPath },
     { "BezierExtremeCoords", func_BezierExtremeCoords },
     { "BitBltBrushOrigin", func_BitBltBrushOrigin },

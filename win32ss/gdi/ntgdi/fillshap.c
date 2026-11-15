@@ -349,11 +349,18 @@ NtGdiEllipse(
         INT tmp = RectBounds.bottom; RectBounds.bottom = RectBounds.top; RectBounds.top = tmp;
     }
 
+    /* The ring rasterisers and the rectangles derived from the box keep inside the int range for boxes within these limits
+       (the part of a larger shape that reaches a surface is far from the clamped edge) */
+    RectBounds.left = IntClampShapeCoord(RectBounds.left);
+    RectBounds.right = IntClampShapeCoord(RectBounds.right);
+    RectBounds.top = IntClampShapeCoord(RectBounds.top);
+    RectBounds.bottom = IntClampShapeCoord(RectBounds.bottom);
+
     /* The pen of a PS_INSIDEFRAME pen lies inside the box, in device pixels */
     if (pbrush->ulPenStyle == PS_INSIDEFRAME)
     {
-       if (2*PenWidth > (RectBounds.right - RectBounds.left)) PenWidth = (RectBounds.right - RectBounds.left + 1)/2;
-       if (2*PenWidthY > (RectBounds.bottom - RectBounds.top)) PenWidthY = (RectBounds.bottom - RectBounds.top + 1)/2;
+       if (2*(LONGLONG)PenWidth > (LONGLONG)RectBounds.right - RectBounds.left) PenWidth = (RectBounds.right - RectBounds.left + 1)/2;
+       if (2*(LONGLONG)PenWidthY > (LONGLONG)RectBounds.bottom - RectBounds.top) PenWidthY = (RectBounds.bottom - RectBounds.top + 1)/2;
        RectBounds.left   += PenWidth / 2;
        RectBounds.right  -= (PenWidth - 1) / 2;
        RectBounds.top    += PenWidthY / 2;
@@ -999,11 +1006,18 @@ IntRoundRect(
         INT tmp = RectBounds.bottom; RectBounds.bottom = RectBounds.top; RectBounds.top = tmp;
     }
 
+    /* The ring rasterisers and the rectangles derived from the box keep inside the int range for boxes within these limits
+       (the part of a larger shape that reaches a surface is far from the clamped edge) */
+    RectBounds.left = IntClampShapeCoord(RectBounds.left);
+    RectBounds.right = IntClampShapeCoord(RectBounds.right);
+    RectBounds.top = IntClampShapeCoord(RectBounds.top);
+    RectBounds.bottom = IntClampShapeCoord(RectBounds.bottom);
+
     /* The pen of a PS_INSIDEFRAME pen lies inside the box, in device pixels */
     if (pbrLine->ulPenStyle == PS_INSIDEFRAME)
     {
-       if (2*PenWidth > (RectBounds.right - RectBounds.left)) PenWidth = (RectBounds.right - RectBounds.left + 1)/2;
-       if (2*PenWidthY > (RectBounds.bottom - RectBounds.top)) PenWidthY = (RectBounds.bottom - RectBounds.top + 1)/2;
+       if (2*(LONGLONG)PenWidth > (LONGLONG)RectBounds.right - RectBounds.left) PenWidth = (RectBounds.right - RectBounds.left + 1)/2;
+       if (2*(LONGLONG)PenWidthY > (LONGLONG)RectBounds.bottom - RectBounds.top) PenWidthY = (RectBounds.bottom - RectBounds.top + 1)/2;
        RectBounds.left   += PenWidth / 2;
        RectBounds.right  -= (PenWidth - 1) / 2;
        RectBounds.top    += PenWidthY / 2;

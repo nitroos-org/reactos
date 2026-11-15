@@ -22,6 +22,101 @@
        &RectBounds,                              \
        ROP2_TO_MIX(pdcattr->jROP2));
 
+/* A line of a Pie (the two radial lines) or a Chord (the chord) between points that may lie anywhere in the range of the
+ * coordinates. The line rasteriser steps along the whole line, also where it leaves the surface (a point at the end of
+ * the range takes seconds, and the sums of its coordinates overflow); a line that is long or has such a point is cut to
+ * the part on the surface (and the clip bounds) first. Short lines are drawn as they are. FPU state: the caller's. */
+static
+BOOL
+FASTCALL
+IntArcLine(PDC dc,
+           SURFACE *psurf,
+           PDC_ATTR pdcattr,
+           RECTL *pRectBounds,
+           LONGLONG x1, LONGLONG y1, LONGLONG x2, LONGLONG y2)
+{
+    const LONGLONG lim = 0x40000000LL;
+    LONGLONG adx = x2 > x1 ? x2 - x1 : x1 - x2;
+    LONGLONG ady = y2 > y1 ? y2 - y1 : y1 - y2;
+
+    if (adx > 0x100000LL || ady > 0x100000LL ||
+        x1 > lim || x1 < -lim || y1 > lim || y1 < -lim ||
+        x2 > lim || x2 < -lim || y2 > lim || y2 < -lim)
+    {
+        RECTL rc;
+        double xmin, xmax, ymin, ymax, t0 = 0.0, t1 = 1.0, dx, dy, p[4], q[4];
+        int i;
+
+        /* what IntEngLineTo lets through: the whole surface for a trivial clip, else the bounds of the clip object */
+        if (dc->co.iDComplexity == DC_TRIVIAL)
+        {
+            rc.left = rc.top = 0;
+            rc.right = psurf->SurfObj.sizlBitmap.cx;
+            rc.bottom = psurf->SurfObj.sizlBitmap.cy;
+        }
+        else
+        {
+            rc = dc->co.rclBounds;
+        }
+        xmin = (double)(rc.left > 0 ? rc.left : 0) - 1.0;
+        ymin = (double)(rc.top > 0 ? rc.top : 0) - 1.0;
+        xmax = (double)(rc.right < psurf->SurfObj.sizlBitmap.cx ? rc.right : psurf->SurfObj.sizlBitmap.cx);
+        ymax = (double)(rc.bottom < psurf->SurfObj.sizlBitmap.cy ? rc.bottom : psurf->SurfObj.sizlBitmap.cy);
+        dx = (double)x2 - (double)x1;
+        dy = (double)y2 - (double)y1;
+        p[0] = -dx; q[0] = (double)x1 - xmin;
+        p[1] = dx;  q[1] = xmax - (double)x1;
+        p[2] = -dy; q[2] = (double)y1 - ymin;
+        p[3] = dy;  q[3] = ymax - (double)y1;
+
+        for (i = 0; i < 4; i++)
+        {
+            if (p[i] == 0.0)
+            {
+                if (q[i] < 0.0)
+                    return TRUE; /* parallel to the edge and outside: nothing of it on the surface */
+            }
+            else
+            {
+                double r = q[i] / p[i];
+
+                if (p[i] < 0.0)
+                {
+                    if (r > t1)
+                        return TRUE;
+                    if (r > t0)
+                        t0 = r;
+                }
+                else
+                {
+                    if (r < t0)
+                        return TRUE;
+                    if (r < t1)
+                        t1 = r;
+                }
+            }
+        }
+
+        if (t0 > 0.0)
+        {
+            x1 = (LONGLONG)floor((double)x1 + t0 * dx + 0.5);
+            y1 = (LONGLONG)floor((double)y1 + t0 * dy + 0.5);
+        }
+        if (t1 < 1.0)
+        {
+            x2 = (LONGLONG)floor((double)x2 - (1.0 - t1) * dx + 0.5);
+            y2 = (LONGLONG)floor((double)y2 - (1.0 - t1) * dy + 0.5);
+        }
+    }
+
+    return IntEngLineTo(&psurf->SurfObj,
+                        (CLIPOBJ *)&dc->co,
+                        &dc->eboLine.BrushObject,
+                        (LONG)x1, (LONG)y1, (LONG)x2, (LONG)y2,
+                        pRectBounds,
+                        ROP2_TO_MIX(pdcattr->jROP2));
+}
+
 static
 BOOL
 FASTCALL
@@ -61,7 +156,7 @@ IntArc( DC *dc,
     // FIXME: this needs to be verified
     if ((arctype == GdiTypeChord ) || (arctype == GdiTypePie))
     {
-        if ((Right - Left == 1) || (Bottom - Top == 1))
+        if (((LONGLONG)Right - Left == 1) || ((LONGLONG)Bottom - Top == 1))
            return TRUE;
     }
 
@@ -107,11 +202,18 @@ IntArc( DC *dc,
         INT tmp = RectBounds.bottom; RectBounds.bottom = RectBounds.top; RectBounds.top = tmp;
     }
 
+    /* The ring rasterisers and the rectangles derived from the box keep inside the int range for boxes within these limits
+       (the part of a larger shape that reaches a surface is far from the clamped edge) */
+    RectBounds.left = IntClampShapeCoord(RectBounds.left);
+    RectBounds.right = IntClampShapeCoord(RectBounds.right);
+    RectBounds.top = IntClampShapeCoord(RectBounds.top);
+    RectBounds.bottom = IntClampShapeCoord(RectBounds.bottom);
+
     /* The pen of a PS_INSIDEFRAME pen lies inside the box, in device pixels */
     if (pbrPen->ulPenStyle == PS_INSIDEFRAME)
     {
-       if (2*PenWidth > (RectBounds.right - RectBounds.left)) PenWidth = (RectBounds.right - RectBounds.left + 1)/2;
-       if (2*PenWidthY > (RectBounds.bottom - RectBounds.top)) PenWidthY = (RectBounds.bottom - RectBounds.top + 1)/2;
+       if (2*(LONGLONG)PenWidth > (LONGLONG)RectBounds.right - RectBounds.left) PenWidth = (RectBounds.right - RectBounds.left + 1)/2;
+       if (2*(LONGLONG)PenWidthY > (LONGLONG)RectBounds.bottom - RectBounds.top) PenWidthY = (RectBounds.bottom - RectBounds.top + 1)/2;
        RectBounds.left   += PenWidth / 2;
        RectBounds.right  -= (PenWidth - 1) / 2;
        RectBounds.top    += PenWidthY / 2;
@@ -141,8 +243,8 @@ IntArc( DC *dc,
 
     CenterX = (RectBounds.right + RectBounds.left) / 2;
     CenterY = (RectBounds.bottom + RectBounds.top) / 2;
-    AngleEnd   = atan2((RectSEpts.bottom - CenterY), RectSEpts.right - CenterX)*(360.0/(M_PI*2));
-    AngleStart = atan2((RectSEpts.top - CenterY), RectSEpts.left - CenterX)*(360.0/(M_PI*2));
+    AngleEnd   = atan2((double)RectSEpts.bottom - CenterY, (double)RectSEpts.right - CenterX)*(360.0/(M_PI*2));
+    AngleStart = atan2((double)RectSEpts.top - CenterY, (double)RectSEpts.left - CenterX)*(360.0/(M_PI*2));
 
     /* The arc keeps its direction in logical space: a world transform that flips an axis makes it run the other way
        on the screen */
@@ -204,14 +306,17 @@ IntArc( DC *dc,
     }
     else if (arctype == GdiTypePie)
     {
-        PUTLINE(CenterX + dc->ptlDCOrig.x, CenterY + dc->ptlDCOrig.y,
-                RectSEpts.left + dc->ptlDCOrig.x, RectSEpts.top + dc->ptlDCOrig.y, dc->eboLine);
-        PUTLINE(RectSEpts.right + dc->ptlDCOrig.x, RectSEpts.bottom + dc->ptlDCOrig.y,
-                CenterX + dc->ptlDCOrig.x, CenterY + dc->ptlDCOrig.y, dc->eboLine);
+        ret = ret && IntArcLine(dc, psurf, pdcattr, &RectBounds,
+                                (LONGLONG)CenterX + dc->ptlDCOrig.x, (LONGLONG)CenterY + dc->ptlDCOrig.y,
+                                (LONGLONG)RectSEpts.left + dc->ptlDCOrig.x, (LONGLONG)RectSEpts.top + dc->ptlDCOrig.y);
+        ret = ret && IntArcLine(dc, psurf, pdcattr, &RectBounds,
+                                (LONGLONG)RectSEpts.right + dc->ptlDCOrig.x, (LONGLONG)RectSEpts.bottom + dc->ptlDCOrig.y,
+                                (LONGLONG)CenterX + dc->ptlDCOrig.x, (LONGLONG)CenterY + dc->ptlDCOrig.y);
     }
     if (!bStroke && arctype == GdiTypeChord)
-        PUTLINE(RectSEpts.right + dc->ptlDCOrig.x, RectSEpts.bottom + dc->ptlDCOrig.y,
-                RectSEpts.left + dc->ptlDCOrig.x, RectSEpts.top + dc->ptlDCOrig.y, dc->eboLine);
+        ret = ret && IntArcLine(dc, psurf, pdcattr, &RectBounds,
+                                (LONGLONG)RectSEpts.right + dc->ptlDCOrig.x, (LONGLONG)RectSEpts.bottom + dc->ptlDCOrig.y,
+                                (LONGLONG)RectSEpts.left + dc->ptlDCOrig.x, (LONGLONG)RectSEpts.top + dc->ptlDCOrig.y);
 
     pbrPen->lWidth = PenOrigWidth;
     PEN_ShareUnlockPen(pbrPen);

@@ -135,6 +135,16 @@ VOID  FASTCALL CreateSysColorObjects (VOID);
 
 PPOINT GDI_Bezier (const POINT *Points, INT count, PINT nPtsOut);
 
+/* Device coordinates of the box of an ellipse, arc or rounded rectangle are limited to this (2^27, as the range of the
+   coordinates of a surface): the rasterisers compute with sums and differences of them in 32 bits */
+#define SHAPE_COORD_LIMIT 0x08000000L
+FORCEINLINE
+LONG
+IntClampShapeCoord(LONG v)
+{
+    return (v > SHAPE_COORD_LIMIT) ? SHAPE_COORD_LIMIT : ((v < -SHAPE_COORD_LIMIT) ? -SHAPE_COORD_LIMIT : v);
+}
+
 BOOL FASTCALL IntFillArc( PDC dc, INT XLeft, INT YLeft, INT Width, INT Height, double StartArc, double EndArc, ARCTYPE arctype);
 BOOL FASTCALL IntDrawArc( PDC dc, INT XLeft, INT YLeft, INT Width, INT Height, double StartArc, double EndArc, ARCTYPE arctype, PBRUSH pbrush, INT wy);
 
