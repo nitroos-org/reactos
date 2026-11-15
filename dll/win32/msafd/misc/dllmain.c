@@ -1464,7 +1464,8 @@ WSPSelect(IN int nfds,
                 if (PollInfo->Handles[j].Handle == exceptfds->fd_array[i])
                     break;
             }
-            if (j > HandleCount)
+            /* As for the other sets: a socket that did not fit into selectfds has no slot */
+            if (j >= HandleCount)
             {
                 ERR("Error while counting exceptfds %ld > %ld\n", j, HandleCount);
                 if (lpErrno) *lpErrno = WSAEFAULT;
