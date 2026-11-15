@@ -82,10 +82,10 @@ NuSwitchOn(VOID)
 {
     HKEY hKey;
     DWORD Value = 0, Size = sizeof(Value), Type;
-    BOOL On = FALSE;
+    BOOL On = TRUE; /* the stack's default: on unless the value is a DWORD of 0 */
 
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, NU_TCPIP_KEY, 0, KEY_QUERY_VALUE, &hKey) != ERROR_SUCCESS)
-        return FALSE;
+        return TRUE;
     if (RegQueryValueExW(hKey, L"Ipv6Enable", NULL, &Type, (LPBYTE)&Value, &Size) == ERROR_SUCCESS &&
         Type == REG_DWORD)
         On = (Value != 0);
