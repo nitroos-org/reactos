@@ -41,6 +41,7 @@ TestNodeName(VOID)
         PCSTR NodeName;
         PCSTR ExpectedAddress;
         INT Flags;
+        BOOL NeedsInternetDns;
     } Tests[] =
     {
         { "",                               LocalAddress },
@@ -59,7 +60,7 @@ TestNodeName(VOID)
         { "1.2.3.0x4",                      "1.2.3.4",          AI_NUMERICHOST },
         { "1.2.3.010",                      "1.2.3.8",          AI_NUMERICHOST },
         /* let's just assume this one doesn't change any time soon ;) */
-        { "google-public-dns-a.google.com", "8.8.8.8" },
+        { "google-public-dns-a.google.com", "8.8.8.8", 0, TRUE },
     };
     const INT TestCount = sizeof(Tests) / sizeof(Tests[0]);
     INT i;
@@ -75,7 +76,12 @@ TestNodeName(VOID)
         StartSeh()
             AddrInfo = InvalidPointer;
             Error = getaddrinfo(Tests[i].NodeName, NULL, &Hints, &AddrInfo);
-            if (Tests[i].ExpectedAddress)
+            if (Tests[i].NeedsInternetDns && Error == WSAHOST_NOT_FOUND)
+            {
+                /* no network adapter, or no name server that reaches the Internet (QEMU without NIC, an isolated test network) */
+                skip("'%s' needs an Internet name server and the name is not found\n", Tests[i].NodeName);
+            }
+            else if (Tests[i].ExpectedAddress)
             {
                 ok_dec(Error, 0);
                 ok_dec(WSAGetLastError(), 0);
