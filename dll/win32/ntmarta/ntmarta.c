@@ -1006,9 +1006,9 @@ Cleanup:
 }
 
 /*
- * The subkeys of Key: each unprotected one gets its explicit ACEs plus what the new descriptor of Key
- * (ParentSd) passes on, and its own subkeys follow if it changed. OldParentSd is what Key had before:
- * the ACEs of a subkey that match what that passed on were inherited, though not flagged yet.
+ * The subkeys of Key: each auto-inherited, unprotected one gets its explicit ACEs plus what the new descriptor of
+ * Key (ParentSd) passes on, and its own subkeys follow if it changed. Any other unprotected one keeps its DACL and
+ * is only flagged protected and auto-inherited (as on Windows); its subtree is left alone.
  * A subkey that cannot be opened for READ_CONTROL | WRITE_DAC (or set) is skipped with its subtree; the
  * walk goes on with its siblings and the call still succeeds.
  * VERIFY ON ORACLE: what Windows returns when part of the subtree could not be updated (the documentation
@@ -1052,7 +1052,7 @@ AccpPropagateToSubkeys(IN HKEY Key,
     while (Top >= 0)
     {
         PACCP_WALK_FRAME Frame = &Stack[Top];
-        PSECURITY_DESCRIPTOR ParentSd = Frame->ParentSd, OldParentSd = Frame->OldParentSd;
+        PSECURITY_DESCRIPTOR ParentSd = Frame->ParentSd;
         PSECURITY_DESCRIPTOR OldSd = NULL, NewSd = NULL;
         SECURITY_DESCRIPTOR_CONTROL Control;
         SECURITY_DESCRIPTOR Absolute;
@@ -1093,9 +1093,24 @@ AccpPropagateToSubkeys(IN HKEY Key,
              */
             GetSecurityDescriptorControl(OldSd, &Control, &Revision);
             if (Control & SE_DACL_AUTO_INHERITED)
+            {
                 Inherits = AccpInheritedAcesAreTail(OldDacl);
+            }
             else
-                Inherits = OldParentSd != NULL && AccpMarkInheritedAces(OldSd, OldParentSd, NULL, NULL);
+            {
+                /*
+                 * Not auto-inherited (created below a parent that was not, set by a legacy writer, empty): as
+                 * on Windows (measured) the DACL stays exactly as it is and the key is only flagged protected
+                 * and auto-inherited (control 0x9404); its subtree is not touched.
+                 */
+                if (InitializeSecurityDescriptor(&Absolute, SECURITY_DESCRIPTOR_REVISION) &&
+                    SetSecurityDescriptorDacl(&Absolute, TRUE, OldDacl, FALSE) &&
+                    SetSecurityDescriptorControl(&Absolute,
+                                                 SE_DACL_PROTECTED | SE_DACL_AUTO_INHERIT_REQ | SE_DACL_AUTO_INHERITED,
+                                                 SE_DACL_PROTECTED | SE_DACL_AUTO_INHERIT_REQ | SE_DACL_AUTO_INHERITED))
+                    RegSetKeySecurity(Child, DACL_SECURITY_INFORMATION, &Absolute);
+                Inherits = FALSE;
+            }
             GetSecurityDescriptorOwner(OldSd, &Owner, &Defaulted);
             GetSecurityDescriptorGroup(OldSd, &Group, &Defaulted);
 
