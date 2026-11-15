@@ -2,7 +2,7 @@
  * PROJECT:     NitroOS TCP/IP driver
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
  * PURPOSE:     What router advertisements tell besides prefixes, DNS servers and routers: DNS search lists
- *              (RFC 8106), the current hop limit (RFC 4861 4.2)
+ *              (RFC 8106), the M and O flags, the current hop limit (RFC 4861 4.2)
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
@@ -15,9 +15,10 @@
  *   first); IP_IPV6_RA_ENTRY_ID hands them to iphlpapi (GetAdaptersAddresses FirstDnsSuffix, the resolver's
  *   search list, ipconfig /all). The option comes from the network: every length is checked here, and a name is
  *   kept only when it is made of letters, digits, '-' and '_' (what a host name or a punycode label has).
- * - LibNd6RaHeader keeps the current hop limit of an interface (RFC 4861 4.2), in its IP_INTERFACE, and exports it
- *   in the rows of the IPv6 table (TCP_IPV6_INTERFACE_ROW). A hop limit of 0 (unspecified) leaves the one before.
- *   LibIp6HopLimit gives it to datagrams whose sender did not choose one.
+ * - LibNd6RaHeader keeps the M and O flags and the current hop limit of an interface, in its IP_INTERFACE. The
+ *   flags are exported in the rows of the IPv6 table (TCP_IPV6_INTERFACE_ROW; GetIpInterfaceEntry), a change of
+ *   them completes the interface change requests. A hop limit of 0 (unspecified, RFC 4861 4.2) leaves the one
+ *   before. LibIp6HopLimit gives it to datagrams whose sender did not choose one.
  */
 
 #include "precomp.h"
@@ -28,6 +29,7 @@
 #include "lwip/ip6_addr.h"
 #include "lwip/nd6.h"
 #include "lwip/prot/nd6.h"
+#include "lwip/priv/nd6_priv.h"
 #include "lwip/netif.h"
 #include "lwip/tcpip.h"
 #include <lwip_hooks.h>
@@ -214,21 +216,46 @@ LibTCPDnssl6Input(struct netif *netif, struct pbuf *p, u16_t Offset, u16_t Lengt
     Ra6ParseNames(IfIndex, Ra6Option + SIZEOF_DNSSL_OPTION_BASE, Length - SIZEOF_DNSSL_OPTION_BASE, Lifetime);
 }
 
-/* LWIP_HOOK_ND6_RA_HEADER: the header of a router advertisement that passed the checks; core lock held */
+/* LWIP_HOOK_ND6_RA_HEADER: the header of a router advertisement that passed the checks; core lock held. The flags of
+   an interface are those of this advertisement and of every default router of the interface that is still valid (their
+   last advertisement): with two routers that disagree the flags stay set, and do not follow whichever advertisement
+   came last. The current hop limit is the last non-zero one (RFC 4861 6.3.4) */
 void
 LibNd6RaHeader(struct netif *netif, u8_t CurHopLimit, u8_t Flags)
 {
     PIP_INTERFACE IF;
-
-    UNREFERENCED_PARAMETER(Flags);
+    UCHAR RaFlags = 0;
+    ULONG i;
+    u8_t All = Flags;
 
     if (!netif || !netif->state)
         return;
     IF = netif->state;
 
+    for (i = 0; i < LWIP_ND6_NUM_ROUTERS; i++)
+    {
+        struct nd6_neighbor_cache_entry *Neighbor = default_router_list[i].neighbor_entry;
+
+        if (Neighbor && Neighbor->netif == netif && default_router_list[i].invalidation_timer > 0)
+            All |= default_router_list[i].flags;
+    }
+
+    if (All & ND6_RA_FLAG_MANAGED_ADDR_CONFIG)
+        RaFlags |= TCP_IPV6_IF_RA_MANAGED;
+    if (All & ND6_RA_FLAG_OTHER_CONFIG)
+        RaFlags |= TCP_IPV6_IF_RA_OTHER;
+
     /* 0: unspecified by this router, what was before stays */
     if (CurHopLimit)
         IF->Ra6HopLimit = CurHopLimit;
+
+    if (IF->Ra6Flags != RaFlags)
+    {
+        IF->Ra6Flags = RaFlags;
+        /* the interface's M and O flags are part of what NotifyIpInterfaceChange compares; a DHCPv6 client
+           watches them */
+        AddrChangeNotify();
+    }
 }
 
 /* LWIP_HOOK_IP6_HOP_LIMIT (ip6_output_if_src, core lock held): the hop limit a datagram goes out with.

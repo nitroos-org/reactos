@@ -339,6 +339,8 @@ CountPrefixBits(
     return BitCount;
 }
 
+/* IP_ADAPTER_IPV6_MANAGED_ADDRESS_CONFIGURATION_SUPPORTED of Windows 7: not in the headers of this tree */
+#define IP_ADAPTER_IPV6_MANAGED_ADDRESS_CONFIGURATION_SUPPORTED_NITRO 0x0200
 /* GAA_FLAG_SKIP_DNS_INFO of Windows Vista SP1 and later: no DNS servers and no DNS suffix list */
 #define GAA_FLAG_SKIP_DNS_INFO_NITRO 0x0800
 
@@ -670,6 +672,13 @@ GetAdaptersAddressesImpl(
                 if (V6On && Ipv6FindInterface(V6, Entry->if_index))
                 {
                     ULONG Zone;
+                    const TCP_IPV6_INTERFACE_ROW *V6If = Ipv6FindInterface(V6, Entry->if_index);
+
+                    /* what the routers on the link said (the M and O flags of their advertisements) */
+                    if (V6If->Flags & TCP_IPV6_IF_RA_OTHER)
+                        CurrentAA->Flags |= IP_ADAPTER_IPV6_OTHER_STATEFUL_CONFIG;
+                    if (V6If->Flags & TCP_IPV6_IF_RA_MANAGED)
+                        CurrentAA->Flags |= IP_ADAPTER_IPV6_MANAGED_ADDRESS_CONFIGURATION_SUPPORTED_NITRO;
 
                     /* Windows 10 (measured): the same for any Family; the zones of an interface are its own
                        index for the interface and link scopes and 1 above them (the site, admin and

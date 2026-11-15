@@ -120,6 +120,10 @@ typedef struct _TCP_IPV6_TABLE_HEADER
 #define TCP_IPV6_IF_ENABLED             0x1
 /* the loopback interface */
 #define TCP_IPV6_IF_LOOPBACK            0x2
+/* the last router advertisement on the interface had the managed address configuration flag (M) / the other
+   configuration flag (O) set (RFC 4861 4.2): the DHCPv6 client starts by them */
+#define TCP_IPV6_IF_RA_MANAGED          0x4
+#define TCP_IPV6_IF_RA_OTHER            0x8
 
 typedef struct _TCP_IPV6_INTERFACE_ROW
 {
