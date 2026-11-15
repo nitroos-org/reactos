@@ -558,7 +558,8 @@ static WCHAR *host_for_header( const WCHAR *hostname )
     BOOL bracketed = len >= 2 && hostname[0] == '[' && hostname[len - 1] == ']';
 
     if (!(ret = malloc( (len + 3) * sizeof(WCHAR) ))) return NULL;
-    if (bracketed || !wcschr( hostname, ':' ))
+    /* only an IPv6 address (two colons at least) is bracketed: "host:8080" is a name with a port */
+    if (bracketed || !(p = wcschr( hostname, ':' )) || !wcschr( p + 1, ':' ))
     {
         lstrcpyW( ret, hostname );
         if (!bracketed) return ret;
