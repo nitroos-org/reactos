@@ -76,7 +76,17 @@ int GetAddressList(const WCHAR *name, INTERNET_PORT port, struct sockaddr_storag
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
 
-    if (GetAddrInfoW(literal_host(name, literal, ARRAY_SIZE(literal)), NULL, &hints, &res) != 0)
+    if (name[0] == '[')
+    {
+        /* brackets hold an IPv6 address (RFC 3986 IP-literal), never a name to look up in DNS or an IPv4 address:
+         * "[host.example]" must not reach host.example (a URL filter sees the host "[host.example]") */
+        if (literal_host(name, literal, ARRAY_SIZE(literal)) != literal || !wcschr(literal, ':'))
+            return 0;
+        name = literal;
+        hints.ai_family = AF_INET6;
+        hints.ai_flags = AI_NUMERICHOST;
+    }
+    if (GetAddrInfoW(name, NULL, &hints, &res) != 0)
     {
         TRACE("failed to get address of %s\n", debugstr_w(name));
         return 0;
@@ -84,6 +94,8 @@ int GetAddressList(const WCHAR *name, INTERNET_PORT port, struct sockaddr_storag
     for (ai = res; ai && count < max_addrs; ai = ai->ai_next)
     {
         if ((ai->ai_family != AF_INET && ai->ai_family != AF_INET6) || ai->ai_addrlen > sizeof(*addrs))
+            continue;
+        if (hints.ai_family == AF_INET6 && ai->ai_family != AF_INET6)
             continue;
         memset(&addrs[count], 0, sizeof(addrs[count]));
         memcpy(&addrs[count], ai->ai_addr, ai->ai_addrlen);

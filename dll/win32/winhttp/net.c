@@ -774,7 +774,16 @@ static DWORD resolve_hostname( const WCHAR *name, INTERNET_PORT port, struct add
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
 
-    if (literal_host( name, literal, ARRAY_SIZE(literal) )) name = literal;
+    if (name[0] == '[')
+    {
+        /* brackets hold an IPv6 address (RFC 3986 IP-literal), never a name to look up in DNS or an IPv4 address:
+         * "[host.example]" must not reach host.example (a URL filter sees the host "[host.example]") */
+        if (!literal_host( name, literal, ARRAY_SIZE(literal) ) || !wcschr( literal, ':' ))
+            return ERROR_WINHTTP_NAME_NOT_RESOLVED;
+        name = literal;
+        hints.ai_family = AF_INET6;
+        hints.ai_flags = AI_NUMERICHOST;
+    }
     ret = GetAddrInfoW( name, NULL, &hints, &res );
     if (ret != 0)
     {
@@ -787,6 +796,7 @@ static DWORD resolve_hostname( const WCHAR *name, INTERNET_PORT port, struct add
         struct sockaddr_storage *sa = &list->addr[list->count];
 
         if ((ai->ai_family != AF_INET && ai->ai_family != AF_INET6) || ai->ai_addrlen > sizeof(*sa)) continue;
+        if (hints.ai_family == AF_INET6 && ai->ai_family != AF_INET6) continue;
         memset( sa, 0, sizeof(*sa) );
         memcpy( sa, ai->ai_addr, ai->ai_addrlen );
         if (ai->ai_family == AF_INET) ((struct sockaddr_in *)sa)->sin_port = htons( port );
