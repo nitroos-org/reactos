@@ -14,9 +14,10 @@
 
 /* One allocation in a new heap whose only uncommitted range is Pages pages. Returns 0 when all is well,
    else what went wrong: 1 a fault inside the heap, 2 a block that is too short, 3 an invalid heap,
-   4 a neighbour damaged. */
+   4 a neighbour damaged, 5 a heap that can grow refused the request, 6 the memory of a request that was
+   refused cannot be used for a smaller block. */
 static ULONG
-TryHeap(ULONG ReservePages, SIZE_T Size, ULONG *UncommittedPages)
+TryHeap(ULONG HeapFlags, ULONG ReservePages, SIZE_T Size, ULONG *UncommittedPages)
 {
     RTL_HEAP_WALK_ENTRY Entry;
     HANDLE Heap;
@@ -24,7 +25,7 @@ TryHeap(ULONG ReservePages, SIZE_T Size, ULONG *UncommittedPages)
     ULONG Result = 0, i;
     SIZE_T Uncommitted = 0;
 
-    Heap = RtlCreateHeap(HEAP_GROWABLE, NULL, (SIZE_T)ReservePages * PAGE_SIZE, PAGE_SIZE, NULL, NULL);
+    Heap = RtlCreateHeap(HeapFlags, NULL, (SIZE_T)ReservePages * PAGE_SIZE, PAGE_SIZE, NULL, NULL);
     if (!Heap)
         return 0;
 
@@ -53,6 +54,20 @@ TryHeap(ULONG ReservePages, SIZE_T Size, ULONG *UncommittedPages)
                 Result = 2;
             else
                 memset(Block, 0xA5, Size);
+        }
+        else if (HeapFlags & HEAP_GROWABLE)
+        {
+            Result = 5;
+        }
+        else if (*UncommittedPages >= MAX_BLOCK_BYTES / PAGE_SIZE)
+        {
+            /* A heap of a fixed size may refuse it; what it committed for it stays free and holds a block of a
+               page less */
+            Block = RtlAllocateHeap(Heap, 0, Size - PAGE_SIZE);
+            if (!Block)
+                Result = 6;
+            else
+                memset(Block, 0x5A, Size - PAGE_SIZE);
         }
         if (!Result && !RtlValidateHeap(Heap, 0, NULL))
             Result = 3;
@@ -88,24 +103,33 @@ START_TEST(RtlHeapMaxBlock)
        here) and one of 15 units less (the fifth) are the ones that damaged the heap. */
     static const SIZE_T Below[] = { 2 * sizeof(PVOID), 4 * sizeof(PVOID), 16 * sizeof(PVOID), 30 * sizeof(PVOID),
                                     32 * sizeof(PVOID), 80 * sizeof(PVOID) };
-    ULONG Pages, i, Result, Uncommitted, ExactSeen = 0;
+    /* a heap that grows, one of a fixed size (no other segment to go to) and one without its lock */
+    static const ULONG Flags[] = { HEAP_GROWABLE, 0, HEAP_GROWABLE | HEAP_NO_SERIALIZE };
+    ULONG Pages, i, f, Result, Uncommitted, ExactSeen;
 
-    for (i = 0; i < _countof(Below); i++)
+    for (f = 0; f < _countof(Flags); f++)
     {
-        /* reserves around the size of the block: with one of them the range left after the heap's own pages
-           is exactly the 127 pages the request needs */
-        for (Pages = 127; Pages <= 136; Pages++)
+        ExactSeen = 0;
+        for (i = 0; i < _countof(Below); i++)
         {
-            Uncommitted = 0;
-            Result = TryHeap(Pages, MAX_BLOCK_BYTES - Below[i], &Uncommitted);
-            if (Uncommitted == MAX_BLOCK_BYTES / PAGE_SIZE)
-                ExactSeen++;
-            ok(Result == 0, "request of 0x7F000 - %lu bytes, reserve %lu pages (uncommitted %lu): %s\n",
-               (ULONG)Below[i], Pages, Uncommitted,
-               Result == 1 ? "fault inside the heap" :
-               Result == 2 ? "block shorter than the request" :
-               Result == 3 ? "heap does not validate" : "a neighbour block was overwritten");
+            /* reserves around the size of the block: with one of them the range left after the heap's own pages
+               is exactly the 127 pages the request needs */
+            for (Pages = 127; Pages <= 136; Pages++)
+            {
+                Uncommitted = 0;
+                Result = TryHeap(Flags[f], Pages, MAX_BLOCK_BYTES - Below[i], &Uncommitted);
+                if (Uncommitted == MAX_BLOCK_BYTES / PAGE_SIZE)
+                    ExactSeen++;
+                ok(Result == 0, "heap flags 0x%lx, request of 0x7F000 - %lu bytes, reserve %lu pages (uncommitted %lu): %s\n",
+                   Flags[f], (ULONG)Below[i], Pages, Uncommitted,
+                   Result == 1 ? "fault inside the heap" :
+                   Result == 2 ? "block shorter than the request" :
+                   Result == 3 ? "heap does not validate" :
+                   Result == 4 ? "a neighbour block was overwritten" :
+                   Result == 5 ? "refused by a heap that can grow" : "the committed memory cannot be used");
+            }
         }
+        ok(ExactSeen != 0, "heap flags 0x%lx: no heap had an uncommitted range of exactly 127 pages: the test did not reach its case\n",
+           Flags[f]);
     }
-    ok(ExactSeen != 0, "no heap had an uncommitted range of exactly 127 pages: the test did not reach its case\n");
 }
