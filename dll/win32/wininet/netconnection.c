@@ -294,34 +294,44 @@ static void set_socket_blocking(netconn_t *conn, BOOL is_blocking)
     conn->is_blocking = is_blocking;
 }
 
+/* The connect timeout (milliseconds, 0 = none) applies to each address on its own, like WinHTTP (oracle: a black-holed
+ * address fails with ERROR_INTERNET_TIMEOUT after the connect timeout). The socket is made non-blocking by hand here:
+ * a new netconn says "not blocking" without having asked the socket, so set_socket_blocking() would skip the call and
+ * connect() would block for the TCP stack's own retry time. Afterwards the socket is blocking again and netconn->
+ * is_blocking keeps its old value (FALSE), so the code that follows sees exactly what it saw before. */
 static DWORD connect_netconn_socket(netconn_t *netconn, const struct sockaddr_storage *addr, int addr_len, DWORD timeout)
 {
     int result;
     ULONG flag;
-    DWORD res;
+    DWORD res = ERROR_INTERNET_CANNOT_CONNECT;
 
     result = netconn->socket = socket(addr->ss_family, SOCK_STREAM, 0);
     if(result != -1) {
-        set_socket_blocking(netconn, FALSE);
+        flag = 1;
+        ioctlsocket(netconn->socket, FIONBIO, &flag);
         result = connect(netconn->socket, (const struct sockaddr*)addr, addr_len);
         if(result == -1)
         {
-            res = WSAGetLastError();
-            if (res == WSAEINPROGRESS || res == WSAEWOULDBLOCK) {
-                FD_SET set;
-                int res;
-                socklen_t len = sizeof(res);
-                TIMEVAL timeout_timeval = {0, timeout*1000};
+            int werr = WSAGetLastError();
+            if (werr == WSAEINPROGRESS || werr == WSAEWOULDBLOCK) {
+                FD_SET wset, eset;
+                int sel, soerr = 0;
+                socklen_t len = sizeof(soerr);
+                TIMEVAL timeout_timeval;
 
-                FD_ZERO(&set);
-                FD_SET(netconn->socket, &set);
-                res = select(netconn->socket+1, NULL, &set, NULL, &timeout_timeval);
-                if(!res || res == SOCKET_ERROR) {
+                timeout_timeval.tv_sec = timeout / 1000;
+                timeout_timeval.tv_usec = (timeout % 1000) * 1000;
+                FD_ZERO(&wset);
+                FD_SET(netconn->socket, &wset);
+                FD_ZERO(&eset);
+                FD_SET(netconn->socket, &eset);
+                sel = select(netconn->socket+1, NULL, &wset, &eset, timeout ? &timeout_timeval : NULL);
+                if(!sel || sel == SOCKET_ERROR) {
                     closesocket(netconn->socket);
                     netconn->socket = -1;
-                    return ERROR_INTERNET_CANNOT_CONNECT;
+                    return sel ? ERROR_INTERNET_CANNOT_CONNECT : ERROR_INTERNET_TIMEOUT;
                 }
-                if (!getsockopt(netconn->socket, SOL_SOCKET, SO_ERROR, (void *)&res, &len) && !res)
+                if (!FD_ISSET(netconn->socket, &eset) && !getsockopt(netconn->socket, SOL_SOCKET, SO_ERROR, (void *)&soerr, &len) && !soerr)
                     result = 0;
             }
         }
@@ -330,9 +340,14 @@ static DWORD connect_netconn_socket(netconn_t *netconn, const struct sockaddr_st
             closesocket(netconn->socket);
             netconn->socket = -1;
         }
+        else
+        {
+            flag = 0;
+            ioctlsocket(netconn->socket, FIONBIO, &flag);
+        }
     }
     if(result == -1)
-        return ERROR_INTERNET_CANNOT_CONNECT;
+        return res;
 
     flag = 1;
     result = setsockopt(netconn->socket, IPPROTO_TCP, TCP_NODELAY, (void*)&flag, sizeof(flag));
@@ -702,7 +717,8 @@ DWORD NETCON_secure_connect(netconn_t *connection, server_t *server)
     if (res == ERROR_INTERNET_SECURITY_CHANNEL_ERROR && have_compat_cred_handle)
     {
         closesocket(connection->socket);
-        res = create_netconn_socket(connection->server, connection, 500);
+        /* the connect timeout applies now: 500 ms was never enforced and would cut off a slow link */
+        res = create_netconn_socket(connection->server, connection, 60000);
         if (res != ERROR_SUCCESS)
             return res;
         res = netcon_secure_connect_setup(connection, TRUE);
