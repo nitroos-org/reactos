@@ -33,10 +33,10 @@ MulAdd(
     FLOATOBJ foTmp;
 
     *pfoDest = *pfo1;
-    FLOATOBJ_Mul(pfoDest, pfo2);
+    FLOATOBJ_TruncMul(pfoDest, pfo2);
     foTmp = *pfo3;
-    FLOATOBJ_Mul(&foTmp, pfo4);
-    FLOATOBJ_Add(pfoDest, &foTmp);
+    FLOATOBJ_TruncMul(&foTmp, pfo4);
+    FLOATOBJ_TruncAdd(pfoDest, &foTmp);
 }
 
 /*
@@ -54,10 +54,10 @@ MulAddLong(
     FLOATOBJ foTmp;
 
     *pfoDest = *pfo1;
-    FLOATOBJ_MulLong(pfoDest, l2);
+    FLOATOBJ_TruncMulLong(pfoDest, l2);
     foTmp = *pfo3;
-    FLOATOBJ_MulLong(&foTmp, l4);
-    FLOATOBJ_Add(pfoDest, &foTmp);
+    FLOATOBJ_TruncMulLong(&foTmp, l4);
+    FLOATOBJ_TruncAdd(pfoDest, &foTmp);
 }
 
 /*
@@ -66,6 +66,30 @@ MulAddLong(
 FORCEINLINE
 VOID
 MulSub(
+    PFLOATOBJ pfoDest,
+    PFLOATOBJ pfo1,
+    PFLOATOBJ pfo2,
+    PFLOATOBJ pfo3,
+    PFLOATOBJ pfo4)
+{
+    FLOATOBJ foTmp;
+
+    *pfoDest = *pfo1;
+    FLOATOBJ_TruncMul(pfoDest, pfo2);
+    foTmp = *pfo3;
+    FLOATOBJ_TruncMul(&foTmp, pfo4);
+    FLOATOBJ_TruncSub(pfoDest, &foTmp);
+}
+
+/*
+ * Inline helper to calculate the determinant pfo1 * pfo2 - pfo3 * pfo4. Unlike
+ * the matrix elements this keeps the plain FLOATOBJ arithmetic: whether a
+ * matrix is singular "due to rounding" (SetWorldTransform apitest) has to stay
+ * as it was.
+ */
+FORCEINLINE
+VOID
+MulSubDet(
     PFLOATOBJ pfoDest,
     PFLOATOBJ pfo1,
     PFLOATOBJ pfo2,
@@ -220,15 +244,25 @@ XFORMOBJ_iCombine(
     pmx1 = XFORMOBJ_pmx(pxo1);
     pmx2 = XFORMOBJ_pmx(pxo2);
 
-    /* Do a 3 x 3 matrix multiplication with mx as destinantion */
-    MulAdd(&mx.efM11, &pmx1->efM11, &pmx2->efM11, &pmx1->efM12, &pmx2->efM21);
-    MulAdd(&mx.efM12, &pmx1->efM11, &pmx2->efM12, &pmx1->efM12, &pmx2->efM22);
-    MulAdd(&mx.efM21, &pmx1->efM21, &pmx2->efM11, &pmx1->efM22, &pmx2->efM21);
-    MulAdd(&mx.efM22, &pmx1->efM21, &pmx2->efM12, &pmx1->efM22, &pmx2->efM22);
-    MulAdd(&mx.efDx, &pmx1->efDx, &pmx2->efM11, &pmx1->efDy, &pmx2->efM21);
-    FLOATOBJ_Add(&mx.efDx, &pmx2->efDx);
-    MulAdd(&mx.efDy, &pmx1->efDx, &pmx2->efM12, &pmx1->efDy, &pmx2->efM22);
-    FLOATOBJ_Add(&mx.efDy, &pmx2->efDy);
+    /* An identity first matrix (the usual world transform) leaves pmx2 as it is, exactly */
+    if (FLOATOBJ_Equal1(&pmx1->efM11) && FLOATOBJ_Equal1(&pmx1->efM22) &&
+        FLOATOBJ_Equal0(&pmx1->efM12) && FLOATOBJ_Equal0(&pmx1->efM21) &&
+        FLOATOBJ_Equal0(&pmx1->efDx) && FLOATOBJ_Equal0(&pmx1->efDy))
+    {
+        mx = *pmx2;
+    }
+    else
+    {
+        /* Do a 3 x 3 matrix multiplication with mx as destinantion */
+        MulAdd(&mx.efM11, &pmx1->efM11, &pmx2->efM11, &pmx1->efM12, &pmx2->efM21);
+        MulAdd(&mx.efM12, &pmx1->efM11, &pmx2->efM12, &pmx1->efM12, &pmx2->efM22);
+        MulAdd(&mx.efM21, &pmx1->efM21, &pmx2->efM11, &pmx1->efM22, &pmx2->efM21);
+        MulAdd(&mx.efM22, &pmx1->efM21, &pmx2->efM12, &pmx1->efM22, &pmx2->efM22);
+        MulAdd(&mx.efDx, &pmx1->efDx, &pmx2->efM11, &pmx1->efDy, &pmx2->efM21);
+        FLOATOBJ_TruncAdd(&mx.efDx, &pmx2->efDx);
+        MulAdd(&mx.efDy, &pmx1->efDx, &pmx2->efM12, &pmx1->efDy, &pmx2->efM22);
+        FLOATOBJ_TruncAdd(&mx.efDy, &pmx2->efDy);
+    }
 
     /* Copy back */
     pmx = XFORMOBJ_pmx(pxo);
@@ -267,7 +301,7 @@ BOOL FASTCALL
 MX_IsInvertible(IN PMATRIX pmx)
 {
     FLOATOBJ foDet;
-    MulSub(&foDet, &pmx->efM11, &pmx->efM22, &pmx->efM12, &pmx->efM21);
+    MulSubDet(&foDet, &pmx->efM11, &pmx->efM22, &pmx->efM12, &pmx->efM21);
     return !FLOATOBJ_Equal0(&foDet);
 }
 
@@ -302,7 +336,7 @@ XFORMOBJ_iInverse(
     XFORMOBJ_iGetXform(pxoSrc, (XFORML*)&xformSrc);
 
     /* det = M11 * M22 - M12 * M21 */
-    MulSub(&foDet, &pmxSrc->efM11, &pmxSrc->efM22, &pmxSrc->efM12, &pmxSrc->efM21);
+    MulSubDet(&foDet, &pmxSrc->efM11, &pmxSrc->efM22, &pmxSrc->efM12, &pmxSrc->efM21);
 
     if (FLOATOBJ_Equal0(&foDet))
     {
@@ -312,16 +346,16 @@ XFORMOBJ_iInverse(
 
     /* Calculate adj(A) / det(A) */
     pmxDst->efM11 = pmxSrc->efM22;
-    FLOATOBJ_Div(&pmxDst->efM11, &foDet);
+    FLOATOBJ_TruncDiv(&pmxDst->efM11, &foDet);
     pmxDst->efM22 = pmxSrc->efM11;
-    FLOATOBJ_Div(&pmxDst->efM22, &foDet);
+    FLOATOBJ_TruncDiv(&pmxDst->efM22, &foDet);
 
     /* The other 2 are negative, negate foDet for that */
     FLOATOBJ_Neg(&foDet);
     pmxDst->efM12 = pmxSrc->efM12;
-    FLOATOBJ_Div(&pmxDst->efM12, &foDet);
+    FLOATOBJ_TruncDiv(&pmxDst->efM12, &foDet);
     pmxDst->efM21 = pmxSrc->efM21;
-    FLOATOBJ_Div(&pmxDst->efM21, &foDet);
+    FLOATOBJ_TruncDiv(&pmxDst->efM21, &foDet);
 
     /* Calculate the inverted x shift: Dx' = -Dx * M11' - Dy * M21' */
     pmxDst->efDx = pmxSrc->efDx;

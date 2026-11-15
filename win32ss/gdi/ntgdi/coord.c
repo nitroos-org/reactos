@@ -127,8 +127,11 @@ DC_vFixIsotropicMapping(PDC pdc)
         pdcattr->szlViewportExt.cy = (LONG)(fy * s / szlWindowExt.cx);
     }
 
-    /* Reset the flag */
+    /* Reset the flag (the fix-up must run only once per change). The world-to-device matrix still has to be rebuilt
+       with the new extents: called by GetViewportExtEx (NtGdiGetDCPoint) no rebuild follows, and PAGE_EXTENTS_CHANGED
+       may have been the only flag asking for one (gdi32's SetViewportExtEx/SetWindowExtEx set no other) */
     pdc->pdcattr->flXform &= ~PAGE_EXTENTS_CHANGED;
+    pdc->pdcattr->flXform |= PAGE_XLATE_CHANGED;
 }
 
 VOID
@@ -153,7 +156,7 @@ DC_vGetPageToDevice(PDC pdc, MATRIX *pmx)
     if (szlWindowExt.cx != 0)
     {
         FLOATOBJ_SetLong(&pmx->efM11, pszlViewPortExt->cx);
-        FLOATOBJ_DivLong(&pmx->efM11, szlWindowExt.cx);
+        FLOATOBJ_TruncDivLong(&pmx->efM11, szlWindowExt.cx);
     }
     else
         FLOATOBJ_SetLong(&pmx->efM11, 1);
@@ -161,20 +164,26 @@ DC_vGetPageToDevice(PDC pdc, MATRIX *pmx)
     if (szlWindowExt.cy != 0)
     {
         FLOATOBJ_SetLong(&pmx->efM22, pszlViewPortExt->cy);
-        FLOATOBJ_DivLong(&pmx->efM22, szlWindowExt.cy);
+        FLOATOBJ_TruncDivLong(&pmx->efM22, szlWindowExt.cy);
     }
     else
         FLOATOBJ_SetLong(&pmx->efM22, 1);
 
+    /* An isotropic fix-up that left no viewport width (the window is far wider than tall in viewport units) maps
+       the y axis to 0 too on Windows, although GetViewportExtEx still reports the height; a zero height keeps the
+       x scale (oracle probe, LPtoDP apitest MM_ISOTROPIC PRESET5) */
+    if (pdcattr->iMapMode == MM_ISOTROPIC && pszlViewPortExt->cx == 0)
+        FLOATOBJ_SetLong(&pmx->efM22, 0);
+
     /* Calculate x offset */
     FLOATOBJ_SetLong(&pmx->efDx, -pdcattr->ptlWindowOrg.x);
-    FLOATOBJ_Mul(&pmx->efDx, &pmx->efM11);
-    FLOATOBJ_AddLong(&pmx->efDx, pdcattr->ptlViewportOrg.x);
+    FLOATOBJ_TruncMul(&pmx->efDx, &pmx->efM11);
+    FLOATOBJ_TruncAddLong(&pmx->efDx, pdcattr->ptlViewportOrg.x);
 
     /* Calculate y offset */
     FLOATOBJ_SetLong(&pmx->efDy, -pdcattr->ptlWindowOrg.y);
-    FLOATOBJ_Mul(&pmx->efDy, &pmx->efM22);
-    FLOATOBJ_AddLong(&pmx->efDy, pdcattr->ptlViewportOrg.y);
+    FLOATOBJ_TruncMul(&pmx->efDy, &pmx->efM22);
+    FLOATOBJ_TruncAddLong(&pmx->efDy, pdcattr->ptlViewportOrg.y);
 }
 
 VOID
@@ -195,8 +204,10 @@ DC_vUpdateWorldToDevice(PDC pdc)
     XFORMOBJ_vInit(&xoWorldToDevice, &pdc->pdcattr->mxWorldToDevice);
     XFORMOBJ_iCombine(&xoWorldToDevice, &xoWorldToPage, &xoPageToDevice);
 
-    /* Reset the flags */
-    pdc->pdcattr->flXform &= ~WORLD_XFORM_CHANGED;
+    /* Reset the flags: the matrix is up to date and is not rebuilt on every call until the next change. Every change
+       of the mapping sets one of them again; the isotropic fix-up above has already run (DC_pszlViewportExt), so the
+       PAGE_EXTENTS_CHANGED test of DC_pszlViewportExt and of gdi32's GetViewportExtEx has nothing left to do */
+    pdc->pdcattr->flXform &= ~(WORLD_XFORM_CHANGED | PAGE_XLATE_CHANGED | PAGE_EXTENTS_CHANGED);
 }
 
 VOID
