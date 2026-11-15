@@ -106,9 +106,10 @@ const struct lwip_cyclic_timer lwip_cyclic_timers[] = {
 #if LWIP_IPV6_REASS
   {IP6_REASS_TMR_INTERVAL, HANDLER(ip6_reass_tmr)},
 #endif /* LWIP_IPV6_REASS */
-#if LWIP_IPV6_MLD
+#if LWIP_IPV6_MLD && !MLD6_TMR_ON_DEMAND
+  /* NitroOS: with MLD6_TMR_ON_DEMAND mld6.c arms its own timeout only while a report is pending */
   {MLD6_TMR_INTERVAL, HANDLER(mld6_tmr)},
-#endif /* LWIP_IPV6_MLD */
+#endif /* LWIP_IPV6_MLD && !MLD6_TMR_ON_DEMAND */
 #if LWIP_IPV6_DHCP6
   {DHCP6_TIMER_MSECS, HANDLER(dhcp6_tmr)},
 #endif /* LWIP_IPV6_DHCP6 */

@@ -46,8 +46,16 @@
 /* The IPv6 core (ip_addr_t is a tagged union). It is used only with Tcpip\Parameters\Ipv6Enable on
  * (ip/transport/tcp/if6.c); off, no interface has an IPv6 address and no IPv6 frame reaches lwIP */
 #define LWIP_IPV6                       1
-/* No MLD yet: its 100 ms timer would wake the tcpip thread of an idle machine for a protocol nobody uses */
-#define LWIP_IPV6_MLD                   0
+/* MLD (MLDv1, RFC 2710): the solicited-node groups of the addresses and the groups sockets joined (udp6.c) are
+ * reported, queries answered, a done message sent on the last leave, so switches that snoop MLD forward them to us.
+ * Ethernet interfaces only (NETIF_FLAG_MLD6, if6.c). The adapter's multicast list stays ours (if6.c, no
+ * mld_mac_filter). No cyclic 100 ms timer: one timeout while a report is pending, none on an idle machine (mld6.c).
+ * The random report delay comes from udp6.c, so lwIP's LWIP_RAND users (port numbers) do not change. With MLD,
+ * ip6_input takes the groups MLD has (udp6.c joins a socket's group there): LWIP_HOOK_IP6_MCAST_ACCEPT below is
+ * used only with LWIP_IPV6_MLD 0 */
+#define LWIP_IPV6_MLD                   1
+#define MLD6_TMR_ON_DEMAND              1
+#define MLD6_RAND()                     LibMld6Random()
 /* Router advertisement DNS servers (RFC 8106, up to 3 per advertisement) go to the stack's list for the resolver
  * (rdnss6.c); lwIP's own DNS client is not part of this tree */
 #define LWIP_ND6_RDNSS_MAX_DNS_SERVERS  3
@@ -77,7 +85,7 @@
 /* ICMPv6 error messages (destination unreachable, parameter problem...) are rate limited (if6.c) */
 #define LWIP_HOOK_ICMP6_ERROR_ALLOWED() LibIcmp6ErrorAllowed()
 /* NitroOS hooks in ip6_input (ip/transport/udp/udp6.c): UDP datagrams go to our datagram sockets (lwIP's UDP is
-   off), and the multicast groups sockets joined are taken (MLD is off) */
+   off), and the multicast groups sockets joined are taken (only with LWIP_IPV6_MLD 0: MLD holds them otherwise) */
 #define LWIP_HOOK_IP6_NEXTH_INPUT(p, inp, nexth) (LibIp6CountDelivered(p, inp, nexth), LibIp6NexthInput(p, inp, nexth))
 #define LWIP_HOOK_IP6_MCAST_ACCEPT(inp, dest) LibIp6McastAccept(inp, dest)
 #define LWIP_ICMP                       0

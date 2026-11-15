@@ -174,8 +174,8 @@ TCPReadIpv6Switch(VOID)
  * included (neighbour solicitations, and duplicate address detection: RFC 4861 4.3, RFC 4862 5.4), mapped to
  * Ethernet addresses as RFC 2464 7 says (33:33 and the last 32 bits). With the MAC-derived identifier the
  * addresses on one interface share it (link-local and SLAAC), so this is usually two addresses; with stable random
- * identifiers (iid6.c) each address has its own group. No MLD (lwipopts.h):
- * the groups are not reported to the link */
+ * identifiers (iid6.c) each address has its own group. The adapter list is ours; the groups are reported to the
+ * link by lwIP's MLD (lwipopts.h, udp6.c) */
 static
 VOID
 TCP6UpdateMulticast(struct netif *netif)
@@ -268,6 +268,11 @@ TCP6NetifEvent(struct netif *netif, netif_nsc_reason_t Reason, const netif_ext_c
 static netif_ext_callback_t TCP6NetifCallback;
 static BOOLEAN TCP6NetifCallbackAdded;
 
+#if LWIP_IPV6_MLD
+/* udp6.c: MLD's interface events, registered once (core lock held) */
+VOID UDP6MldStart(VOID);
+#endif
+
 /* Called with the core lock held, from TCPInterfaceInit: the addresses an interface starts with */
 VOID
 TCPInterfaceInit6(PIP_INTERFACE IF)
@@ -276,6 +281,14 @@ TCPInterfaceInit6(PIP_INTERFACE IF)
 
     if (!TCPIpv6Enabled)
         return;
+
+#if LWIP_IPV6_MLD
+    /* An Ethernet interface does MLD: the solicited-node groups of its addresses are joined (nd6.c) and reported
+       with the groups sockets join (mld6.c, udp6.c). The loopback interface keeps its groups unreported */
+    if (IF->AddressLength == 6 && netif->hwaddr_len == 6)
+        netif->flags |= NETIF_FLAG_MLD6;
+    UDP6MldStart();
+#endif
 
     /* Address changes from now on keep the interface's multicast reception in step (the first interface
        registers it, under the core lock as the others) */
