@@ -2,6 +2,7 @@
 list(APPEND SOURCE
     abortiveclose.c
     accept.c
+    acceptclose.c
     acceptlag.c
     acceptname.c
     loopbackalias.c

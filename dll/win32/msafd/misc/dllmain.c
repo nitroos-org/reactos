@@ -642,6 +642,10 @@ TranslateNtStatusError(NTSTATUS Status)
        case STATUS_ACCESS_DENIED:
           return WSAEACCES;
 
+       case STATUS_INVALID_HANDLE:
+          /* The socket was closed under the request */
+          return WSAENOTSOCK;
+
        case STATUS_NOT_IMPLEMENTED:
           return WSAEOPNOTSUPP;
 

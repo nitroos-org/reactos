@@ -700,9 +700,21 @@ NTSTATUS AfdCopyToUserOutput(PIRP Irp, PIO_STACK_LOCATION IrpSp,
     return Status;
 }
 
+BOOLEAN AfdCancelAfterCleanup(PAFD_FCB FCB, PIRP Irp, UINT Function)
+{
+    if (!FCB->CleanedUp || Irp->Cancel)
+        return FALSE;
+
+    /* As the cleanup cancels the requests it finds */
+    Irp->Cancel = TRUE;
+    FCB->AbortingReceives = AfdAbortsReceivesOnCleanup(FCB, Function);
+    return TRUE;
+}
+
 NTSTATUS QueueUserModeIrp(PAFD_FCB FCB, PIRP Irp, UINT Function)
 {
     NTSTATUS Status;
+    BOOLEAN Marked;
 
     /* Add the IRP to the queue in all cases (so AfdCancelHandler will work properly) */
     InsertTailList( &FCB->PendingIrpList[Function],
@@ -710,6 +722,7 @@ NTSTATUS QueueUserModeIrp(PAFD_FCB FCB, PIRP Irp, UINT Function)
 
     /* Acquire the cancel spin lock and check the cancel bit */
     IoAcquireCancelSpinLock(&Irp->CancelIrql);
+    Marked = AfdCancelAfterCleanup(FCB, Irp, Function);
     if (!Irp->Cancel)
     {
         /* We are not cancelled; we're good to go so
@@ -730,6 +743,7 @@ NTSTATUS QueueUserModeIrp(PAFD_FCB FCB, PIRP Irp, UINT Function)
          */
         AfdCancelHandler(IoGetCurrentIrpStackLocation(Irp)->DeviceObject,
                          Irp);
+        AfdEndCancelAfterCleanup(FCB, Marked);
         Status = STATUS_CANCELLED;
     }
 

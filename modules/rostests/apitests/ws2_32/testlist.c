@@ -6,6 +6,7 @@ extern void func_abortiveclose(void);
 extern void func_accept(void);
 extern void func_acceptname(void);
 extern void func_loopbackalias(void);
+extern void func_acceptclose(void);
 extern void func_acceptlag(void);
 extern void func_backlog(void);
 extern void func_basehandle(void);
@@ -102,6 +103,7 @@ const struct test winetest_testlist[] =
     { "accept", func_accept },
     { "acceptname", func_acceptname },
     { "loopbackalias", func_loopbackalias },
+    { "acceptclose", func_acceptclose },
     { "acceptlag", func_acceptlag },
     { "backlog", func_backlog },
     { "basehandle", func_basehandle },

@@ -855,6 +855,7 @@ AfdConnectedSocketReadData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     PAFD_STORED_DATAGRAM DatagramRecv;
     PLIST_ENTRY ListEntry;
     KPROCESSOR_MODE LockMode;
+    BOOLEAN Marked;
 
     UNREFERENCED_PARAMETER(DeviceObject);
     UNREFERENCED_PARAMETER(Short);
@@ -966,6 +967,7 @@ AfdConnectedSocketReadData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         IoMarkIrpPending( Irp );
         /* A cancel that came before the routine was set found nothing to call */
         IoAcquireCancelSpinLock(&Irp->CancelIrql);
+        Marked = AfdCancelAfterCleanup(FCB, Irp, FUNCTION_RECV);
         if (!Irp->Cancel)
         {
             (void)IoSetCancelRoutine(Irp, AfdCancelHandler);
@@ -974,6 +976,7 @@ AfdConnectedSocketReadData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         else
         {
             AfdCancelHandler(IoGetCurrentIrpStackLocation(Irp)->DeviceObject, Irp);
+            AfdEndCancelAfterCleanup(FCB, Marked);
         }
     } else {
         AFD_DbgPrint(MID_TRACE,("Completed with status %x\n", Status));
