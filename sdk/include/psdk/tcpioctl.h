@@ -56,6 +56,14 @@
 /* Pends until the IPv4 route table changes (no input, no output); the cancel request above cancels it too */
 #define IOCTL_IP_ROUTECHANGE_NOTIFY_REQUEST \
     _TCP_CTL_CODE(0x19, METHOD_BUFFERED, FILE_ANY_ACCESS)
+/* Adds, changes or removes a unicast IPv6 address of an interface: input one TCP_IPV6_ADDRESS_REQUEST, no output.
+   Administrators only, as IOCTL_SET_IP_ADDRESS */
+#define IOCTL_IP6_ADDRESS_CONFIG \
+    _TCP_CTL_CODE(0x1A, METHOD_BUFFERED, FILE_WRITE_ACCESS)
+/* Adds, changes or removes a route of the IPv6 route table: input one TCP_IPV6_ROUTE_REQUEST, no output.
+   Administrators only, as IOCTL_SET_IP_ADDRESS */
+#define IOCTL_IP6_ROUTE_CONFIG \
+    _TCP_CTL_CODE(0x1B, METHOD_BUFFERED, FILE_WRITE_ACCESS)
 #endif
 
 #define IOCTL_ICMP_ECHO_REQUEST \
@@ -133,7 +141,101 @@ typedef struct _TCP_IPV6_ADDRESS_ROW
     ULONG SuffixOrigin;
     ULONG ValidLifetime;
     ULONG PreferredLifetime;
+    ULONG Flags;            /* TCP_IPV6_ADDRESS_ flags */
 } TCP_IPV6_ADDRESS_ROW, *PTCP_IPV6_ADDRESS_ROW;
+
+/* Flags of an address (row and request): it is not chosen as the source of a datagram (SkipAsSource) */
+#define TCP_IPV6_ADDRESS_SKIP_AS_SOURCE 0x1
+/* row: the address was configured (IOCTL_IP6_ADDRESS_CONFIG), not formed by the stack */
+#define TCP_IPV6_ADDRESS_CONFIGURED     0x2
+/* row: the address is kept in the persistent store too */
+#define TCP_IPV6_ADDRESS_PERSISTENT     0x4
+
+/* Operation of a configuration request: CREATE fails if the entry exists, SET if it does not, DELETE removes it */
+#define TCP_IPV6_CONFIG_CREATE          1
+#define TCP_IPV6_CONFIG_SET             2
+#define TCP_IPV6_CONFIG_DELETE          3
+
+/* Store of a configuration request: the active store only (gone at the next start, or when the interface goes), or
+   the persistent store as well (the stack applies it again whenever the interface starts) */
+#define TCP_IPV6_STORE_ACTIVE           0
+#define TCP_IPV6_STORE_PERSISTENT       1
+
+/* IOCTL_IP6_ADDRESS_CONFIG. The address names the entry (with IfIndex); the other fields are what it becomes
+   (CREATE, SET; DELETE only takes Store). Lifetimes in seconds, 0xffffffff infinite; PrefixOrigin and
+   SuffixOrigin are NL_PREFIX_ORIGIN and NL_SUFFIX_ORIGIN values. A created address is tentative until duplicate
+   address detection passes */
+typedef struct _TCP_IPV6_ADDRESS_REQUEST
+{
+    ULONG Operation;        /* TCP_IPV6_CONFIG_ */
+    ULONG Store;            /* TCP_IPV6_STORE_ */
+    ULONG IfIndex;
+    UCHAR Address[16];
+    ULONG PrefixLength;
+    ULONG ValidLifetime;
+    ULONG PreferredLifetime;
+    ULONG PrefixOrigin;
+    ULONG SuffixOrigin;
+    ULONG Flags;            /* TCP_IPV6_ADDRESS_SKIP_AS_SOURCE */
+} TCP_IPV6_ADDRESS_REQUEST, *PTCP_IPV6_ADDRESS_REQUEST;
+
+/* Flags of a route (row and request); Publish and Immortal are kept and reported, they change nothing else */
+#define TCP_IPV6_ROUTE_PUBLISH          0x1
+#define TCP_IPV6_ROUTE_IMMORTAL         0x2
+/* row: the route is kept in the persistent store too */
+#define TCP_IPV6_ROUTE_PERSISTENT       0x4
+/* row: the on-link prefix of a configured address (it comes and goes with the address) */
+#define TCP_IPV6_ROUTE_FROM_ADDRESS     0x8
+/* row: a router advertisement gave it (an on-link prefix or a default router) */
+#define TCP_IPV6_ROUTE_FROM_RA          0x10
+
+/* IOCTL_IP6_ROUTE_CONFIG. Prefix, PrefixLength, NextHop (all zero: on-link) and IfIndex name the entry; the other
+   fields are what it becomes. Origin is an NL_ROUTE_ORIGIN value, Protocol an NL_ROUTE_PROTOCOL one */
+typedef struct _TCP_IPV6_ROUTE_REQUEST
+{
+    ULONG Operation;        /* TCP_IPV6_CONFIG_ */
+    ULONG Store;            /* TCP_IPV6_STORE_ */
+    ULONG IfIndex;
+    UCHAR Prefix[16];
+    ULONG PrefixLength;
+    UCHAR NextHop[16];
+    ULONG Metric;
+    ULONG ValidLifetime;
+    ULONG PreferredLifetime;
+    ULONG Origin;
+    ULONG Protocol;
+    ULONG Flags;            /* TCP_IPV6_ROUTE_PUBLISH, TCP_IPV6_ROUTE_IMMORTAL */
+} TCP_IPV6_ROUTE_REQUEST, *PTCP_IPV6_ROUTE_REQUEST;
+
+/* Non public TOIID: the IPv6 route table of the stack (route6.c), apart from the routes every address and interface
+   has (the host routes, fe80::/64, ff00::/8: user mode adds those): the configured routes, the on-link prefixes of
+   configured addresses, and what router advertisements gave (on-link prefixes, default routers). It is the table the stack routes by. Asked as IP_IPV6_TABLE_ENTRY_ID is (CL_NL_ENTITY, instance 0); the answer is a
+   TCP_IPV6_ROUTE_HEADER, then Count TCP_IPV6_ROUTE_ROW. Enabled is 0 (and Count 0) while the IPv6 switch is off.
+   Sizes as for the other tables */
+#define IP_IPV6_ROUTE_ENTRY_ID          0x119
+
+typedef struct _TCP_IPV6_ROUTE_HEADER
+{
+    ULONG Enabled;
+    ULONG Count;
+} TCP_IPV6_ROUTE_HEADER, *PTCP_IPV6_ROUTE_HEADER;
+
+/* NextHop all zero: on-link (a router's is its link-local address, the scope is IfIndex). Lifetimes: seconds left,
+   0xffffffff infinite. Age: seconds since the route came (0 when the stack does not know) */
+typedef struct _TCP_IPV6_ROUTE_ROW
+{
+    ULONG IfIndex;
+    UCHAR Prefix[16];
+    ULONG PrefixLength;
+    UCHAR NextHop[16];
+    ULONG Metric;
+    ULONG ValidLifetime;
+    ULONG PreferredLifetime;
+    ULONG Origin;
+    ULONG Protocol;
+    ULONG Flags;            /* TCP_IPV6_ROUTE_ */
+    ULONG Age;
+} TCP_IPV6_ROUTE_ROW, *PTCP_IPV6_ROUTE_ROW;
 
 /* Non public TOIID: the IPv6 DNS servers that router advertisements gave (RFC 8106) and the default routers
    (router advertisements with a lifetime), for iphlpapi. Asked as IP_IPV6_TABLE_ENTRY_ID is (CL_NL_ENTITY, instance

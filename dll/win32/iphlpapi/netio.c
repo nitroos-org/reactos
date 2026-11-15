@@ -9,6 +9,7 @@
 #include "iphlpapi_private.h"
 #include <strsafe.h>
 #include <wine/netioapi.h>
+#include "ipv6net.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(iphlpapi);
 
@@ -668,6 +669,7 @@ static void fill_unicast_row6(const NETIO_IF *If, const TCP_IPV6_ADDRESS_ROW *Ad
   Out->ValidLifetime = Address->ValidLifetime;
   Out->PreferredLifetime = Address->PreferredLifetime;
   Out->OnLinkPrefixLength = (UINT8)Address->PrefixLength;
+  Out->SkipAsSource = (Address->Flags & TCP_IPV6_ADDRESS_SKIP_AS_SOURCE) != 0;
   Out->DadState = Address->DadState;
   Out->CreationTimeStamp.QuadPart = boot_time_filetime();
 }
@@ -822,8 +824,11 @@ VOID WINAPI InitializeUnicastIpAddressEntry(PMIB_UNICASTIPADDRESS_ROW Row)
   if (!Row)
     return;
 
-  /* UNVERIFIED against Windows: the oracle probe of the oraxe2 lane returned no output */
+  /* Windows 10 22H2 (probe): everything 0 but the origins (Unchanged), the lifetimes (infinite) and the prefix
+     length (255: the stack's choice) */
   memset(Row, 0, sizeof(*Row));
+  Row->PrefixOrigin = IpPrefixOriginUnchanged;
+  Row->SuffixOrigin = IpSuffixOriginUnchanged;
   Row->OnLinkPrefixLength = 255;
   Row->ValidLifetime = 0xffffffff;
   Row->PreferredLifetime = 0xffffffff;
@@ -883,8 +888,9 @@ DWORD WINAPI CreateUnicastIpAddressEntry(const MIB_UNICASTIPADDRESS_ROW *Row)
 
   if (!Row || (Row->Address.si_family != AF_INET && Row->Address.si_family != AF_INET6))
     return ERROR_INVALID_PARAMETER;
+  /* an IPv6 address goes to the stack's IPv6 configuration (config6.c) */
   if (Row->Address.si_family == AF_INET6)
-    return ERROR_NOT_SUPPORTED;
+    return Ipv6CreateUnicastAddress(Row);
   if (!Row->Address.Ipv4.sin_addr.s_addr || Row->OnLinkPrefixLength > 32)
     return ERROR_INVALID_PARAMETER;
 
@@ -908,7 +914,7 @@ DWORD WINAPI DeleteUnicastIpAddressEntry(const MIB_UNICASTIPADDRESS_ROW *Row)
   if (!Row || (Row->Address.si_family != AF_INET && Row->Address.si_family != AF_INET6))
     return ERROR_INVALID_PARAMETER;
   if (Row->Address.si_family == AF_INET6)
-    return ERROR_NOT_FOUND;
+    return Ipv6DeleteUnicastAddress(Row);
 
   Error = unicast_row_interface(Row, &Index, &Exists, &Context);
   if (Error != NO_ERROR)
@@ -918,6 +924,19 @@ DWORD WINAPI DeleteUnicastIpAddressEntry(const MIB_UNICASTIPADDRESS_ROW *Row)
 
   /* only the address of the row goes, not the first address of the interface with it */
   return DeleteIPAddress(Context);
+}
+
+/*
+ * The prefix length, lifetimes, origins and skip-as-source of an IPv6 address change (config6.c). The IPv4 stack
+ * keeps none of these for an address (its addresses have no lifetime): an IPv4 row is not supported.
+ */
+DWORD WINAPI SetUnicastIpAddressEntry(const MIB_UNICASTIPADDRESS_ROW *Row)
+{
+  if (!Row || (Row->Address.si_family != AF_INET && Row->Address.si_family != AF_INET6))
+    return ERROR_INVALID_PARAMETER;
+  if (Row->Address.si_family == AF_INET)
+    return ERROR_NOT_SUPPORTED;
+  return Ipv6SetUnicastAddress(Row);
 }
 
 /* ---- interface names and luids ---- */

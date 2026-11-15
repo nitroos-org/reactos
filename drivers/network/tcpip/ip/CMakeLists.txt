@@ -31,12 +31,15 @@ list(APPEND SOURCE
     transport/datagram/datagram.c
     transport/rawip/rawip.c
     transport/tcp/accept.c
+    transport/tcp/addr6.c
     transport/tcp/event.c
     transport/tcp/if.c
     transport/tcp/if6.c
     transport/tcp/iid6.c
     transport/tcp/nd6info.c
+    transport/tcp/persist6.c
     transport/tcp/rdnss6.c
+    transport/tcp/route6.c
     transport/tcp/selftest6.c
     transport/tcp/tcp.c
     transport/udp/udp.c

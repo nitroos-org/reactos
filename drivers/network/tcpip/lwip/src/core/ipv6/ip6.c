@@ -314,6 +314,12 @@ ip6_select_source_address(struct netif *netif, const ip6_addr_t *dest)
     if (!ip6_addr_isvalid(netif_ip6_addr_state(netif, i))) {
       continue;
     }
+#ifdef LWIP_HOOK_IP6_SKIP_SOURCE
+    /* NitroOS: an address configured with skip-as-source is never chosen */
+    if (LWIP_HOOK_IP6_SKIP_SOURCE(netif, i)) {
+      continue;
+    }
+#endif /* LWIP_HOOK_IP6_SKIP_SOURCE */
     /* Determine the scope of this candidate address. Same ordering idea. */
     cand_addr = netif_ip6_addr(netif, i);
     if (ip6_addr_isglobal(cand_addr)) {

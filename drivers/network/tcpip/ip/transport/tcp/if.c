@@ -307,6 +307,8 @@ VOID
 TCPUnregisterInterface(PIP_INTERFACE IF)
 {
     LOCK_TCPIP_CORE();
+    /* the configured IPv6 routes over it go first (route6.c) */
+    TCP6RemoveRoutesOfNetif(IF->TCPContext);
     netif_remove(IF->TCPContext);
     UNLOCK_TCPIP_CORE();
 }

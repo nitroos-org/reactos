@@ -234,6 +234,8 @@ NTSTATUS TCPStartup(VOID)
     TCPReadIpv6Switch();
     if (TCPIpv6Enabled)
         TCP6ReadIdentifierSettings();
+    /* the lock of the persistent IPv6 configuration, which interfaces read when they start */
+    TCP6PersistInit();
 
     /* Initialize our IP library */
     LibIPInitialize();

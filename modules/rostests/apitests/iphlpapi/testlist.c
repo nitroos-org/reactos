@@ -19,11 +19,15 @@ extern void func_Icmp6Echo(void);
 extern void func_IfStatistics(void);
 extern void func_IpInterface(void);
 extern void func_IpTables2(void);
+extern void func_Ipv6AddressConfig(void);
+extern void func_Ipv6ConfigApi(void);
 extern void func_Ipv6Statistics(void);
 extern void func_IpNetTable6(void);
 extern void func_IpForwardTable6(void);
 extern void func_Ipv6Dns(void);
+extern void func_Ipv6Persist(void);
 extern void func_Ipv6Reporting(void);
+extern void func_Ipv6RouteConfig(void);
 extern void func_Ipv6StableId(void);
 extern void func_NeighborEntry2(void);
 extern void func_NetstatOutput(void);
@@ -58,11 +62,15 @@ const struct test winetest_testlist[] =
     { "IfStatistics",               func_IfStatistics },
     { "IpInterface",               func_IpInterface },
     { "IpTables2",                  func_IpTables2 },
+    { "Ipv6AddressConfig",          func_Ipv6AddressConfig },
+    { "Ipv6ConfigApi",              func_Ipv6ConfigApi },
     { "Ipv6Statistics",             func_Ipv6Statistics },
     { "IpNetTable6",                func_IpNetTable6 },
     { "IpForwardTable6",            func_IpForwardTable6 },
     { "Ipv6Dns",                    func_Ipv6Dns },
+    { "Ipv6Persist",                func_Ipv6Persist },
     { "Ipv6Reporting",              func_Ipv6Reporting },
+    { "Ipv6RouteConfig",            func_Ipv6RouteConfig },
     { "Ipv6StableId",               func_Ipv6StableId },
     { "NeighborEntry2",             func_NeighborEntry2 },
     { "NetstatOutput",              func_NetstatOutput },

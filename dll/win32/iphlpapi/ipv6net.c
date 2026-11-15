@@ -83,12 +83,47 @@ VOID Ipv6FreeNd(PIPV6_ND_STATE State)
   RtlZeroMemory(State, sizeof(*State));
 }
 
+/* The route table of the stack (IP_IPV6_ROUTE_ENTRY_ID): the configured routes and those router advertisements gave */
+typedef struct _IPV6_ROUTE_STATE
+{
+  PVOID Memory;
+  PTCP_IPV6_ROUTE_HEADER Header;
+  PTCP_IPV6_ROUTE_ROW Rows;
+} IPV6_ROUTE_STATE;
+
+static BOOL get_routes_from_file(HANDLE TcpFile, IPV6_ROUTE_STATE *State)
+{
+  PVOID Blob = NULL;
+  DWORD Size = 0;
+  PTCP_IPV6_ROUTE_HEADER Header;
+  NTSTATUS Status;
+
+  memset(State, 0, sizeof(*State));
+  Status = tdiGetSetOfThings(TcpFile, INFO_CLASS_PROTOCOL, INFO_TYPE_PROVIDER, IP_IPV6_ROUTE_ENTRY_ID,
+                             CL_NL_ENTITY, 0, 0, 1, &Blob, &Size);
+  if (!NT_SUCCESS(Status) || !Blob)
+    return FALSE;
+
+  Header = Blob;
+  if (Size < sizeof(*Header) || !Header->Enabled || Header->Count > 0xFFFF ||
+      (SIZE_T)sizeof(*Header) + (SIZE_T)Header->Count * sizeof(TCP_IPV6_ROUTE_ROW) > Size)
+  {
+    tdiFreeThingSet(Blob);
+    return FALSE;
+  }
+  State->Memory = Blob;
+  State->Header = Header;
+  State->Rows = (PTCP_IPV6_ROUTE_ROW)(Header + 1);
+  return TRUE;
+}
+
 /* Everything the tables below are built from, taken together. FALSE: IPv6 is off (nothing to free) */
 typedef struct _IPV6_ALL
 {
   IPV6_STATE State;
   IPV6_ND_STATE Nd;
   IPV6_DNS_STATE Dns;
+  IPV6_ROUTE_STATE Routes;
 } IPV6_ALL;
 
 static BOOL get_all(IPV6_ALL *All)
@@ -106,6 +141,7 @@ static BOOL get_all(IPV6_ALL *All)
     /* a stack without these queries has neither neighbours nor prefixes nor routers to show */
     Ipv6GetNdFromFile(TcpFile, &All->Nd);
     Ipv6GetDnsFromFile(TcpFile, &All->Dns);
+    get_routes_from_file(TcpFile, &All->Routes);
   }
   closeTcpFile(TcpFile);
   return On;
@@ -116,6 +152,9 @@ static void free_all(IPV6_ALL *All)
   Ipv6FreeState(&All->State);
   Ipv6FreeNd(&All->Nd);
   Ipv6FreeDns(&All->Dns);
+  if (All->Routes.Memory)
+    tdiFreeThingSet(All->Routes.Memory);
+  memset(&All->Routes, 0, sizeof(All->Routes));
 }
 
 static BOOL is_link_local(const UCHAR *Address)
@@ -339,14 +378,14 @@ typedef struct _ROUTE_LIST
   BOOL Failed;
 } ROUTE_LIST;
 
-static void add_route(ROUTE_LIST *List, DWORD IfIndex, const UCHAR *Prefix, ULONG Length, const UCHAR *Gateway,
-                      ULONG Origin, BOOLEAN Loopback, ULONG Lifetime)
+static PMIB_IPFORWARD_ROW2 add_route(ROUTE_LIST *List, DWORD IfIndex, const UCHAR *Prefix, ULONG Length,
+                                     const UCHAR *Gateway, ULONG Origin, BOOLEAN Loopback, ULONG Lifetime)
 {
   PMIB_IPFORWARD_ROW2 Row;
   NET_LUID Luid;
 
   if (List->Failed || !if_luid(IfIndex, &Luid))
-    return;
+    return NULL;
   if (List->Count == List->Max)
   {
     ULONG Max = List->Max ? List->Max * 2 : 16;
@@ -356,7 +395,7 @@ static void add_route(ROUTE_LIST *List, DWORD IfIndex, const UCHAR *Prefix, ULON
     if (!New)
     {
       List->Failed = TRUE;
-      return;
+      return NULL;
     }
     List->Rows = New;
     List->Max = Max;
@@ -376,6 +415,7 @@ static void add_route(ROUTE_LIST *List, DWORD IfIndex, const UCHAR *Prefix, ULON
   Row->Loopback = Loopback;
   Row->AutoconfigureAddress = TRUE;
   Row->Origin = Origin;
+  return Row;
 }
 
 static int __cdecl compare_routes(const void *A, const void *B)
@@ -425,7 +465,30 @@ static DWORD build_routes(const IPV6_ALL *All, PMIB_IPFORWARD_ROW2 *Rows, ULONG 
     add_route(&List, If->IfIndex, MulticastPrefix, 8, NULL, ORIGIN_WELLKNOWN, FALSE, 0xffffffff);
   }
 
-  for (i = 0; All->Nd.Header && i < All->Nd.Header->PrefixCount; i++)
+  /* the stack's route table: the configured routes, and the on-link prefixes and default routers router
+     advertisements gave (the same rows as from the neighbour discovery and DNS tables below, which a stack without
+     the route table query still answers) */
+  for (i = 0; All->Routes.Header && i < All->Routes.Header->Count; i++)
+  {
+    const TCP_IPV6_ROUTE_ROW *Route = &All->Routes.Rows[i];
+    PMIB_IPFORWARD_ROW2 Row;
+
+    if (!Ipv6FindInterface(&All->State, Route->IfIndex))
+      continue;
+    Row = add_route(&List, Route->IfIndex, Route->Prefix, Route->PrefixLength,
+                    is_any(Route->NextHop) ? NULL : Route->NextHop, Route->Origin, FALSE, Route->ValidLifetime);
+    if (!Row || (Route->Flags & TCP_IPV6_ROUTE_FROM_RA))
+      continue;
+    /* a configured route: what was asked for it */
+    Row->PreferredLifetime = Route->PreferredLifetime;
+    Row->Metric = Route->Metric;
+    Row->Protocol = Route->Protocol;
+    Row->Publish = (Route->Flags & TCP_IPV6_ROUTE_PUBLISH) != 0;
+    Row->Immortal = (Route->Flags & TCP_IPV6_ROUTE_IMMORTAL) != 0;
+    Row->Age = Route->Age;
+  }
+
+  for (i = 0; !All->Routes.Header && All->Nd.Header && i < All->Nd.Header->PrefixCount; i++)
   {
     const TCP_IPV6_PREFIX_ROW *Prefix = &All->Nd.Prefixes[i];
 
@@ -433,7 +496,7 @@ static DWORD build_routes(const IPV6_ALL *All, PMIB_IPFORWARD_ROW2 *Rows, ULONG 
       add_route(&List, Prefix->IfIndex, Prefix->Prefix, Prefix->PrefixLength, NULL, ORIGIN_ROUTERADV, FALSE,
                 Prefix->Lifetime);
   }
-  for (i = 0; All->Dns.Header && i < All->Dns.Header->Count; i++)
+  for (i = 0; !All->Routes.Header && All->Dns.Header && i < All->Dns.Header->Count; i++)
   {
     const TCP_IPV6_DNS_ROW *Router = &All->Dns.Rows[i];
 
@@ -469,6 +532,21 @@ DWORD Ipv6GetRouteRows(PMIB_IPFORWARD_ROW2 *Rows, ULONG *Count)
 
 /* ---- the best route ---- */
 
+/* The number of leading bits two addresses share */
+static ULONG common_bits(const UCHAR *A, const UCHAR *B)
+{
+  ULONG Bits = 0, i;
+  UCHAR Diff;
+
+  for (i = 0; i < 16 && A[i] == B[i]; i++)
+    Bits += 8;
+  if (i == 16)
+    return Bits;
+  for (Diff = A[i] ^ B[i]; !(Diff & 0x80); Diff <<= 1)
+    Bits++;
+  return Bits;
+}
+
 /* The address a packet to Dest leaves with over interface IfIndex */
 static void pick_source(const IPV6_ALL *All, DWORD IfIndex, const UCHAR *Dest, SOCKADDR_INET *Source)
 {
@@ -484,6 +562,9 @@ static void pick_source(const IPV6_ALL *All, DWORD IfIndex, const UCHAR *Dest, S
       continue;
     if (!memcmp(Row->Address, Dest, 16))
       Own = Row;
+    /* an address configured with skip-as-source is not chosen (only bound to) */
+    if (Row->Flags & TCP_IPV6_ADDRESS_SKIP_AS_SOURCE)
+      continue;
     if (is_loopback_address(Row->Address))
       Loopback = Row;
     else if (is_link_local(Row->Address))
@@ -491,7 +572,11 @@ static void pick_source(const IPV6_ALL *All, DWORD IfIndex, const UCHAR *Dest, S
       if (!LinkLocal)
         LinkLocal = Row;
     }
-    else if (!Global || (Global->DadState != DAD_PREFERRED && Row->DadState == DAD_PREFERRED))
+    /* a preferred address before a deprecated one, then the longest prefix in common with the destination
+       (RFC 6724 rules 3 and 8) */
+    else if (!Global || (Global->DadState != DAD_PREFERRED && Row->DadState == DAD_PREFERRED) ||
+             (Global->DadState == Row->DadState &&
+              common_bits(Row->Address, Dest) > common_bits(Global->Address, Dest)))
       Global = Row;
   }
 

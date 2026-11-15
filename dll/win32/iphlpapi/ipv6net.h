@@ -46,4 +46,9 @@ BOOL Ipv6GetIpStatistics(PMIB_IPSTATS Stats);
 BOOL Ipv6GetTcpStatistics(PMIB_TCPSTATS Stats);
 BOOL Ipv6GetIcmpStatistics(PMIB_ICMP_EX Stats);
 
+/* IPv6 address configuration (config6.c), for Create/Delete/SetUnicastIpAddressEntry */
+DWORD Ipv6CreateUnicastAddress(const MIB_UNICASTIPADDRESS_ROW *Row);
+DWORD Ipv6DeleteUnicastAddress(const MIB_UNICASTIPADDRESS_ROW *Row);
+DWORD Ipv6SetUnicastAddress(const MIB_UNICASTIPADDRESS_ROW *Row);
+
 #endif

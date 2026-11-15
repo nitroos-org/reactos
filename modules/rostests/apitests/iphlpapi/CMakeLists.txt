@@ -19,9 +19,13 @@ list(APPEND SOURCE
     IpForwardTable6.c
     IpNetTable6.c
     IpTables2.c
+    Ipv6AddressConfig.c
+    Ipv6ConfigApi.c
     Ipv6Statistics.c
     Ipv6Dns.c
+    Ipv6Persist.c
     Ipv6Reporting.c
+    Ipv6RouteConfig.c
     Ipv6StableId.c
     NeighborEntry2.c
     NetstatOutput.c
