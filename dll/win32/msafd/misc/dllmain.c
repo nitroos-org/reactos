@@ -1789,6 +1789,15 @@ WSPAccept(
         Status = IOSB.Status;
     }
 
+    if (Status == STATUS_CANCELLED)
+    {
+        /* The listening socket was closed under the wait (its cleanup cancels the request): a blocked
+         * accept() is interrupted, as on Windows, rather than aborted */
+        NtClose( SockEvent );
+        if (lpErrno) *lpErrno = WSAEINTR;
+        return INVALID_SOCKET;
+    }
+
     if (!NT_SUCCESS(Status))
     {
         NtClose( SockEvent );

@@ -30,6 +30,55 @@ AcceptLoop(PVOID Param)
     }
 }
 
+static DWORD WINAPI
+AcceptOnce(PVOID Param)
+{
+    SOCKET Listener = (SOCKET)(ULONG_PTR)Param, Accepted;
+
+    Accepted = accept(Listener, NULL, NULL);
+    if (Accepted == INVALID_SOCKET)
+        return WSAGetLastError();
+    closesocket(Accepted);
+    return 0;
+}
+
+/* A thread blocked in accept() when another thread closes the listener: Windows returns WSAEINTR */
+static void
+BlockedAccept(int Run)
+{
+    struct sockaddr_in Addr;
+    SOCKET Listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    HANDLE Thread;
+    DWORD ExitCode = 0;
+
+    ZeroMemory(&Addr, sizeof(Addr));
+    Addr.sin_family = AF_INET;
+    Addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (Listener == INVALID_SOCKET ||
+        bind(Listener, (struct sockaddr *)&Addr, sizeof(Addr)) != 0 ||
+        listen(Listener, 8) != 0)
+    {
+        ok(0, "blocked %d: listener failed: %d\n", Run, WSAGetLastError());
+        return;
+    }
+    Thread = CreateThread(NULL, 0, AcceptOnce, (PVOID)(ULONG_PTR)Listener, 0, NULL);
+    ok(Thread != NULL, "CreateThread failed: %lu\n", GetLastError());
+    if (!Thread)
+    {
+        closesocket(Listener);
+        return;
+    }
+
+    /* Let the thread block in accept() */
+    Sleep(300);
+    closesocket(Listener);
+    ok(WaitForSingleObject(Thread, END_WAIT) == WAIT_OBJECT_0,
+       "blocked %d: the thread in accept() did not end within %d ms of closesocket()\n", Run, END_WAIT);
+    GetExitCodeThread(Thread, &ExitCode);
+    ok(ExitCode == WSAEINTR, "blocked %d: accept ended with error %lu, expected WSAEINTR\n", Run, ExitCode);
+    CloseHandle(Thread);
+}
+
 /* The accepting thread is on its way back into accept() when the listener closes: its request can
  * reach the driver after the socket's last handle is closed, and must not wait for ever */
 START_TEST(acceptclose)
@@ -42,6 +91,9 @@ START_TEST(acceptclose)
         skip("WSAStartup failed\n");
         return;
     }
+
+    for (i = 0; i < 5; i++)
+        BlockedAccept(i);
 
     for (Round = 0; Round < ROUNDS; Round++)
     {
@@ -96,8 +148,9 @@ START_TEST(acceptclose)
         else
         {
             GetExitCodeThread(Thread, &ExitCode);
-            ok(ExitCode == WSAEINTR || ExitCode == WSAENOTSOCK || ExitCode == WSAECONNABORTED ||
-               ExitCode == ERROR_OPERATION_ABORTED,
+            /* Windows: WSAEINTR when the request was waiting (or reached the socket after its cleanup),
+               WSAENOTSOCK when the handle was already closed */
+            ok(ExitCode == WSAEINTR || ExitCode == WSAENOTSOCK,
                "round %d: accept ended with error %lu\n", Round, ExitCode);
         }
         CloseHandle(Thread);
