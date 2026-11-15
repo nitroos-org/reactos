@@ -679,9 +679,15 @@ static VOID AcceptReply(D6IF *If, const D6REPLY *R, const UCHAR *Msg, ULONG Len,
            If->HasDue ? "armed" : "never");
 }
 
+/* Datagrams read per interface and wake: a flood on the link cannot hold the thread here (FD_READ is recorded again
+   while datagrams are queued, and the thread comes back at least every scan interval) */
+#define D6_READ_BUDGET      64
+
 static VOID ReadSocket(D6IF *If, ULONGLONG Now)
 {
-    for (;;)
+    ULONG Budget;
+
+    for (Budget = D6_READ_BUDGET; Budget; Budget--)
     {
         UCHAR Packet[D6_MAX_PACKET];
         SOCKADDR_IN6 From;
@@ -690,10 +696,18 @@ static VOID ReadSocket(D6IF *If, ULONGLONG Now)
 
         Len = recvfrom(If->Sock, (char *)Packet, sizeof(Packet), 0, (PSOCKADDR)&From, &FromLen);
         if (Len == SOCKET_ERROR)
+        {
+            /* a datagram larger than the buffer is dropped by recvfrom; the ones queued behind it are still read */
+            if (WSAGetLastError() == WSAEMSGSIZE)
+                continue;
             break;
+        }
         if (Len < 4 || From.sin6_family != AF_INET6 || ntohs(From.sin6_port) != D6_PORT_SERVER)
             continue;
-        if (If->State != D6S_INFORM && If->State != D6S_BOUND)
+        /* Only a Reply to the Information-Request that is out: once one was accepted (BOUND) the exchange is over and
+           its transaction id is no longer outstanding (RFC 8415 16, 18.2.10), so a late or repeated Reply with it
+           neither replaces the data nor moves the refresh time */
+        if (If->State != D6S_INFORM)
             continue;
         if (!ParseReply(If, Packet, (ULONG)Len, &Reply))
             continue;
