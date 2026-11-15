@@ -2057,6 +2057,7 @@ VOID UnbindAdapter(
  */
 {
     PIP_INTERFACE IF = Adapter->Context;
+    UNICODE_STRING Name = { 0, 0, NULL }, Description = { 0, 0, NULL };
 
     TI_DbgPrint(DEBUG_DATALINK, ("Called.\n"));
 
@@ -2066,6 +2067,11 @@ VOID UnbindAdapter(
        still holding a neighbour of the interface reaches a valid adapter (LANTransmit fails
        on the closed binding) */
     if (IF) {
+        /* The strings BindAdapter read from the registry belong to the interface: take them
+           before it can go, free them once its TDI entities (which report them) are gone */
+        Name = IF->Name;
+        Description = IF->Description;
+
         /* Off the interface list, and no neighbour or route is added to it any more */
         IPUnregisterInterface(IF);
 
@@ -2076,6 +2082,10 @@ VOID UnbindAdapter(
         /* Drops the reference of the binding: interface and adapter go when the last
            neighbour or caller still using them lets go */
         IPDestroyInterface(IF);
+
+        /* PASSIVE_LEVEL here, which the paged name needs */
+        RtlFreeUnicodeString(&Name);
+        RtlFreeUnicodeString(&Description);
     }
 }
 
