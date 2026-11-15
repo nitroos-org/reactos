@@ -497,10 +497,14 @@ VOID NgDeleteStreams(PNG_VCB Vcb, ULONGLONG MftNo, PNG_FCB Self)
     } while (Count == RTL_NUMBER_OF(Found));
 }
 
-/* Takes a deleted FCB out of the lookup list: its MFT record number may be reused. */
+/*
+ * Marks an FCB deleted and takes it out of the lookup list: its MFT record number may be reused.  Both happen in one
+ * FcbListLock hold, as in NgDeleteStreams: a create that finds the FCB listed (NgInsertOrFindFcb) must not see it deleted.
+ */
 VOID NgUnlistFcb(PNG_FCB Fcb)
 {
     KeAcquireGuardedMutex(&Fcb->Vcb->FcbListLock);
+    Fcb->Deleted = TRUE;
     NgFcbRemoveLocked(Fcb);
     KeReleaseGuardedMutex(&Fcb->Vcb->FcbListLock);
 }
@@ -2163,8 +2167,9 @@ NTSTATUS NgDeleteNow(PNG_FCB Fcb, BOOLEAN KeepOpen)
                 NgTunnelAdd(Vcb, Fcb->DelParentMftNo, Fcb->DelName, Fcb->DelNameLength, Fcb->Stat.crtime);
             if (Gone)
             {
-                Fcb->Deleted = TRUE;
-                if (!KeepOpen)
+                if (KeepOpen)
+                    Fcb->Deleted = TRUE;
+                else
                     NgUnlistFcb(Fcb);
             }
             else

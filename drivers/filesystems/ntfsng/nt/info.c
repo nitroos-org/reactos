@@ -1046,7 +1046,6 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
         if (TargetFcb)
         {
             NgParkNode(TargetFcb);
-            TargetFcb->Deleted = TRUE;
             NgUnlistFcb(TargetFcb);
         }
         NgDeleteStreams(Vcb, TSt.mft_ref & 0xffffffffffffULL, NULL);

@@ -375,10 +375,7 @@ VOID NgParkNode(PNG_FCB Fcb)
     if (Fcb->Node && !Fcb->IsRoot)
     {
         if (!Fcb->Deleted && NgNodeGone(Fcb->Node))
-        {
-            Fcb->Deleted = TRUE;
             NgUnlistFcb(Fcb);
-        }
         ngc_put(Fcb->Node);
         Fcb->Node = NULL;
     }
