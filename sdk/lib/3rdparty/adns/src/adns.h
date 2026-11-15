@@ -140,6 +140,8 @@ typedef enum {
   adns_r_rp_raw=            17,
   adns_r_rp=                    adns_r_rp_raw|adns__qtf_mail822,
 
+  adns_r_aaaa=              28,
+
   adns_r_addr=                  adns_r_a|adns__qtf_deref
 
 } adns_rrtype;
@@ -321,6 +323,7 @@ typedef struct {
     adns_rr_intstr *(*manyistr);      /* txt (list of strings ends with i=-1, str=0) */
     adns_rr_addr *addr;               /* addr */
     struct in_addr *inaddr;           /* a */
+    struct in6_addr *in6addr;         /* aaaa */
     adns_rr_hostaddr *hostaddr;       /* ns */
     adns_rr_intstrpair *intstrpair;   /* hinfo */
     adns_rr_strpair *strpair;         /* rp, rp_raw */

@@ -354,6 +354,7 @@ DnsQuery_CodePage(UINT CodePage,
         switch (QueryResultWide->wType)
         {
         case DNS_TYPE_A:
+        case DNS_TYPE_AAAA:
         case DNS_TYPE_WKS:
         case DNS_TYPE_CNAME:
         case DNS_TYPE_PTR:
@@ -400,6 +401,7 @@ DnsQuery_CodePage(UINT CodePage,
         switch (QueryResultWide->wType)
         {
         case DNS_TYPE_A:
+        case DNS_TYPE_AAAA:
         case DNS_TYPE_WKS:
             ConvertedRecord->wDataLength = QueryResultWide->wDataLength;
             memcpy(&ConvertedRecord->Data, &QueryResultWide->Data, QueryResultWide->wDataLength);
@@ -628,20 +630,17 @@ CHAR
  * addresses the machine has, or with the loopback address when it has none (no adapter up, DHCP not
  * answered yet). Returns the address (network order) or 0 when Name is not the machine's name.
  */
-IP4_ADDRESS
-CheckForCurrentHostname(CONST CHAR * Name, PFIXED_INFO network_info)
+static
+BOOL
+IsCurrentHostname(CONST CHAR * Name, PFIXED_INFO network_info)
 {
     CHAR LocalName[sizeof(network_info->HostName) + sizeof(network_info->DomainName) + 2];
     CHAR Query[sizeof(LocalName)];
-    DWORD AdapterAddressesSize = 0;
-    IP4_ADDRESS ret = 0, Address;
-    PIP_ADAPTER_ADDRESSES Addresses = NULL, pip;
-    PIP_ADAPTER_UNICAST_ADDRESS pua;
     size_t Len;
 
     /* The name without the trailing dot */
     if (FAILED(StringCchCopyA(Query, sizeof(Query), Name)))
-        return 0;
+        return FALSE;
     Len = strlen(Query);
     if (Len > 1 && Query[Len - 1] == '.')
         Query[Len - 1] = '\0';
@@ -650,13 +649,27 @@ CheckForCurrentHostname(CONST CHAR * Name, PFIXED_INFO network_info)
     if (_stricmp(Query, network_info->HostName) != 0)
     {
         if (!network_info->DomainName[0])
-            return 0;
+            return FALSE;
         StringCchCopyA(LocalName, sizeof(LocalName), network_info->HostName);
         StringCchCatA(LocalName, sizeof(LocalName), ".");
         StringCchCatA(LocalName, sizeof(LocalName), network_info->DomainName);
         if (_stricmp(Query, LocalName) != 0)
-            return 0;
+            return FALSE;
     }
+
+    return TRUE;
+}
+
+IP4_ADDRESS
+CheckForCurrentHostname(CONST CHAR * Name, PFIXED_INFO network_info)
+{
+    DWORD AdapterAddressesSize = 0;
+    IP4_ADDRESS ret = 0, Address;
+    PIP_ADAPTER_ADDRESSES Addresses = NULL, pip;
+    PIP_ADAPTER_UNICAST_ADDRESS pua;
+
+    if (!IsCurrentHostname(Name, network_info))
+        return 0;
 
     /* Take the first address of the first adapter that has a usable one */
     GetAdaptersAddresses(AF_INET,
@@ -814,6 +827,323 @@ QueryPtr(LPCWSTR Name,
         *QueryResultSet = NULL;
     }
 
+    return Status;
+}
+
+
+static
+PDNS_RECORDW
+CreateAaaaRecord(
+    _In_ PCWSTR Name,
+    _In_ const VOID *Address)
+{
+    PDNS_RECORDW Record;
+
+    Record = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DNS_RECORDW));
+    if (Record == NULL)
+        return NULL;
+
+    Record->pName = xstrsave(Name);
+    if (Record->pName == NULL)
+    {
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Record);
+        return NULL;
+    }
+
+    Record->wType = DNS_TYPE_AAAA;
+    Record->wDataLength = sizeof(DNS_AAAA_DATA);
+    Record->Flags.S.Section = DnsSectionAnswer;
+    Record->Flags.S.CharSet = DnsCharSetUnicode;
+    CopyMemory(&Record->Data.AAAA.Ip6Address, Address, sizeof(IN6_ADDR));
+    return Record;
+}
+
+/* Appends a record for Address to the list (First, Last); FALSE when out of memory */
+static
+BOOL
+AppendAaaaRecord(
+    _In_ PCWSTR Name,
+    _In_ const VOID *Address,
+    _Inout_ PDNS_RECORDW *First,
+    _Inout_ PDNS_RECORDW *Last)
+{
+    PDNS_RECORDW Record = CreateAaaaRecord(Name, Address);
+
+    if (Record == NULL)
+        return FALSE;
+    if (*Last)
+        (*Last)->pNext = Record;
+    else
+        *First = Record;
+    *Last = Record;
+    return TRUE;
+}
+
+/*
+ * The AAAA records of this machine's own name: the IPv6 addresses its adapters have (not the loopback one),
+ * as Windows answers it without asking a server (measured: the link-local address of the adapter, without its
+ * scope). Without any (no IPv6, or none usable yet) there is no record.
+ */
+static
+DNS_STATUS
+QueryOwnIpv6(
+    _In_ PCWSTR RecordName,
+    _Out_ PDNS_RECORD *QueryResultSet)
+{
+    PIP_ADAPTER_ADDRESSES Addresses = NULL, Adapter;
+    PIP_ADAPTER_UNICAST_ADDRESS Unicast;
+    PDNS_RECORDW First = NULL, Last = NULL;
+    ULONG Size = 16 * 1024, Pass;
+    DWORD Error = ERROR_BUFFER_OVERFLOW;
+    DNS_STATUS Status = ERROR_SUCCESS;
+
+    *QueryResultSet = NULL;
+
+    for (Pass = 0; Pass < 3 && Error == ERROR_BUFFER_OVERFLOW; Pass++)
+    {
+        if (Addresses)
+            RtlFreeHeap(RtlGetProcessHeap(), 0, Addresses);
+        Addresses = RtlAllocateHeap(RtlGetProcessHeap(), 0, Size);
+        if (!Addresses)
+            return ERROR_OUTOFMEMORY;
+        Error = GetAdaptersAddresses(AF_INET6,
+                                     GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                                     GAA_FLAG_SKIP_DNS_SERVER | GAA_FLAG_SKIP_FRIENDLY_NAME,
+                                     NULL, Addresses, &Size);
+    }
+
+    for (Adapter = (Error == ERROR_SUCCESS) ? Addresses : NULL; Adapter && Status == ERROR_SUCCESS;
+         Adapter = Adapter->Next)
+    {
+        if (Adapter->IfType == IF_TYPE_SOFTWARE_LOOPBACK || Adapter->OperStatus != IfOperStatusUp)
+            continue;
+
+        for (Unicast = Adapter->FirstUnicastAddress; Unicast; Unicast = Unicast->Next)
+        {
+            const SOCKADDR_IN6 *Sa = (const SOCKADDR_IN6 *)Unicast->Address.lpSockaddr;
+
+            /* usable as a source: preferred or deprecated */
+            if (!Sa || Sa->sin6_family != AF_INET6 ||
+                (Unicast->DadState != IpDadStatePreferred && Unicast->DadState != IpDadStateDeprecated))
+                continue;
+            if (!AppendAaaaRecord(RecordName, &Sa->sin6_addr, &First, &Last))
+            {
+                Status = ERROR_OUTOFMEMORY;
+                break;
+            }
+        }
+    }
+
+    if (Addresses)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Addresses);
+
+    if (Status != ERROR_SUCCESS)
+    {
+        if (First)
+            DnsIntFreeRecordList((PDNS_RECORD)First);
+        return Status;
+    }
+    if (First == NULL)
+        return DNS_INFO_NO_RECORDS;
+
+    *QueryResultSet = (PDNS_RECORD)First;
+    return ERROR_SUCCESS;
+}
+
+/*
+ * AAAA query. The name of this machine and "localhost" are answered locally (as for A); anything else is asked
+ * of the name servers, every AAAA record of the answer is returned (CNAME chains are followed here, as for A).
+ * No record of the type is DNS_INFO_NO_RECORDS, a name that does not exist DNS_ERROR_RCODE_NAME_ERROR.
+ */
+static
+DNS_STATUS
+QueryAaaa(LPCWSTR Name,
+          DWORD Options,
+          PDNS_RECORD *QueryResultSet)
+{
+    adns_state astate;
+    adns_answer *answer;
+    int quflags = (Options & DNS_QUERY_NO_RECURSION) == 0 ? adns_qf_search : 0;
+    int adns_error, i;
+    unsigned CNameLoop;
+    PFIXED_INFO network_info;
+    ULONG network_info_blen = 0;
+    PIP_ADDR_STRING pip;
+    struct in_addr addr;
+    PCHAR AnsiName, CurrentName, NextName;
+    PDNS_RECORDW First, Last;
+    DNS_STATUS Status;
+    size_t NameLen;
+    BOOL IsOwn;
+
+    *QueryResultSet = NULL;
+
+    NameLen = WideCharToMultiByte(CP_ACP, 0, Name, -1, NULL, 0, NULL, NULL);
+    if (NameLen == 0)
+        return ERROR_INVALID_NAME;
+    AnsiName = RtlAllocateHeap(RtlGetProcessHeap(), 0, NameLen);
+    if (AnsiName == NULL)
+        return ERROR_OUTOFMEMORY;
+    WideCharToMultiByte(CP_ACP, 0, Name, -1, AnsiName, NameLen, NULL, NULL);
+    NameLen--;
+
+    /* "localhost", with or without the root label's dot: the IPv6 loopback address */
+    if (_stricmp(AnsiName, "localhost") == 0 || _stricmp(AnsiName, "localhost.") == 0)
+    {
+        static const IN6_ADDR Loopback = {{{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}}};
+
+        RtlFreeHeap(RtlGetProcessHeap(), 0, AnsiName);
+        First = Last = NULL;
+        if (!AppendAaaaRecord(Name, &Loopback, &First, &Last))
+            return ERROR_OUTOFMEMORY;
+        *QueryResultSet = (PDNS_RECORD)First;
+        return ERROR_SUCCESS;
+    }
+
+    GetNetworkParams(NULL, &network_info_blen);
+    network_info = (PFIXED_INFO)RtlAllocateHeap(RtlGetProcessHeap(), 0, network_info_blen);
+    if (network_info == NULL)
+    {
+        RtlFreeHeap(RtlGetProcessHeap(), 0, AnsiName);
+        return ERROR_OUTOFMEMORY;
+    }
+    Status = GetNetworkParams(network_info, &network_info_blen);
+    if (Status != ERROR_SUCCESS)
+    {
+        RtlFreeHeap(RtlGetProcessHeap(), 0, network_info);
+        RtlFreeHeap(RtlGetProcessHeap(), 0, AnsiName);
+        return Status;
+    }
+
+    /* The name of this machine (the empty name is it too, as for A) */
+    IsOwn = IsCurrentHostname(NameLen != 0 ? AnsiName : network_info->HostName, network_info);
+    if (IsOwn)
+    {
+        PCHAR HostWithDomainName;
+        PWCHAR RecordName;
+        size_t TempLen = 2, StringLength = 0;
+
+        StringCchLengthA(network_info->HostName, sizeof(network_info->HostName), &StringLength);
+        TempLen += StringLength;
+        StringCchLengthA(network_info->DomainName, sizeof(network_info->DomainName), &StringLength);
+        TempLen += StringLength;
+        HostWithDomainName = (PCHAR)RtlAllocateHeap(RtlGetProcessHeap(), 0, TempLen);
+        RecordName = NULL;
+        if (HostWithDomainName)
+        {
+            StringCchCopyA(HostWithDomainName, TempLen, network_info->HostName);
+            if (network_info->DomainName[0])
+            {
+                StringCchCatA(HostWithDomainName, TempLen, ".");
+                StringCchCatA(HostWithDomainName, TempLen, network_info->DomainName);
+            }
+            RecordName = DnsCToW(HostWithDomainName);
+            RtlFreeHeap(RtlGetProcessHeap(), 0, HostWithDomainName);
+        }
+        RtlFreeHeap(RtlGetProcessHeap(), 0, network_info);
+        RtlFreeHeap(RtlGetProcessHeap(), 0, AnsiName);
+        if (RecordName == NULL)
+            return ERROR_OUTOFMEMORY;
+        Status = QueryOwnIpv6(RecordName, QueryResultSet);
+        RtlFreeHeap(RtlGetProcessHeap(), 0, RecordName);
+        return Status;
+    }
+
+    if ((Options & DNS_QUERY_NO_WIRE_QUERY) != 0)
+    {
+        RtlFreeHeap(RtlGetProcessHeap(), 0, AnsiName);
+        RtlFreeHeap(RtlGetProcessHeap(), 0, network_info);
+        return ERROR_FILE_NOT_FOUND;
+    }
+
+    adns_error = adns_init(&astate, adns_if_noenv | adns_if_noerrprint | adns_if_noserverwarn, 0);
+    if (adns_error != adns_s_ok)
+    {
+        RtlFreeHeap(RtlGetProcessHeap(), 0, AnsiName);
+        RtlFreeHeap(RtlGetProcessHeap(), 0, network_info);
+        return DnsIntTranslateAdnsToDNS_STATUS(adns_error);
+    }
+    for (pip = &(network_info->DnsServerList); pip; pip = pip->Next)
+    {
+        addr.s_addr = inet_addr(pip->IpAddress.String);
+        if ((addr.s_addr != INADDR_ANY) && (addr.s_addr != INADDR_NONE))
+            adns_addserver(astate, addr);
+    }
+    AddIpv6Servers(astate);
+    if (network_info->DomainName[0])
+        adns_ccf_search(astate, "LOCALDOMAIN", -1, network_info->DomainName);
+    RtlFreeHeap(RtlGetProcessHeap(), 0, network_info);
+
+    if (!adns_numservers(astate))
+    {
+        adns_finish(astate);
+        RtlFreeHeap(RtlGetProcessHeap(), 0, AnsiName);
+        return ERROR_FILE_NOT_FOUND;
+    }
+
+    CurrentName = AnsiName;
+    Status = ERROR_FILE_NOT_FOUND;
+    for (CNameLoop = 0; CNameLoop < 16; CNameLoop++)
+    {
+        adns_error = adns_synchronous(astate, CurrentName, adns_r_aaaa, quflags, &answer);
+        if (adns_error != adns_s_ok || answer == NULL)
+        {
+            Status = adns_error != adns_s_ok ? DnsIntTranslateAdnsToDNS_STATUS(adns_error) : ERROR_OUTOFMEMORY;
+            break;
+        }
+
+        if (answer->status == adns_s_ok && answer->nrrs > 0)
+        {
+            First = Last = NULL;
+            Status = ERROR_SUCCESS;
+            for (i = 0; i < answer->nrrs; i++)
+            {
+                if (!AppendAaaaRecord(Name, &answer->rrs.in6addr[i], &First, &Last))
+                {
+                    Status = ERROR_OUTOFMEMORY;
+                    break;
+                }
+            }
+            if (Status == ERROR_SUCCESS)
+                *QueryResultSet = (PDNS_RECORD)First;
+            else if (First)
+                DnsIntFreeRecordList((PDNS_RECORD)First);
+            free(answer);
+            break;
+        }
+
+        if (answer->status == adns_s_prohibitedcname && answer->cname)
+        {
+            NextName = (PCHAR)xstrsaveA(answer->cname);
+            free(answer);
+            if (CurrentName != AnsiName)
+                RtlFreeHeap(RtlGetProcessHeap(), 0, CurrentName);
+            if (!NextName)
+            {
+                CurrentName = AnsiName;
+                Status = ERROR_OUTOFMEMORY;
+                break;
+            }
+            CurrentName = NextName;
+            continue;
+        }
+
+        if (answer->status == adns_s_nxdomain)
+            Status = DNS_ERROR_RCODE_NAME_ERROR;
+        else if (answer->status == adns_s_nodata)
+            Status = DNS_INFO_NO_RECORDS;
+        else if (answer->status < adns_s_max_tempfail)
+            Status = ERROR_TIMEOUT;
+        else
+            Status = DNS_ERROR_RCODE_SERVER_FAILURE;
+        free(answer);
+        break;
+    }
+
+    adns_finish(astate);
+    if (CurrentName != AnsiName)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, CurrentName);
+    RtlFreeHeap(RtlGetProcessHeap(), 0, AnsiName);
     return Status;
 }
 
@@ -1052,6 +1382,9 @@ Query_Main(LPCWSTR Name,
 
     case DNS_TYPE_PTR:
         return QueryPtr(Name, Options, QueryResultSet);
+
+    case DNS_TYPE_AAAA:
+        return QueryAaaa(Name, Options, QueryResultSet);
 
     default:
         return ERROR_OUTOFMEMORY; /* XXX arty: find a better error code. */
