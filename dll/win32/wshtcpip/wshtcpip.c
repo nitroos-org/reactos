@@ -35,6 +35,7 @@ C_ASSERT(sizeof(SOCKADDR_IN6_LH) == WSH_SOCKADDR_IN6_LENGTH);
 #define WSH_SET6_UNIHOPS    0x02
 #define WSH_SET6_MCASTHOPS  0x04
 #define WSH_SET6_MCASTLOOP  0x08
+#define WSH_SET6_DONTFRAG   0x10
 
 /*
  * An AF_INET6 socket is made only while the stack says it has IPv6 on (Tcpip\Parameters\Ipv6Enable, read by
@@ -376,7 +377,7 @@ WshKeptOption(
  * (IPV6_V6ONLY and the hop limits do not reach it yet): what was set reads back, an option that was not set
  * reads as its default. The defaults and the exact errors are to be verified on Windows (VERIFY ON ORACLE):
  * IPV6_V6ONLY 1 (the documented default on Windows), unicast hops -1 (the system default), multicast hops 1,
- * multicast loop 1.
+ * multicast loop 1, don't fragment 0 (IPV6_DONTFRAG: the stack does not act on it yet).
  */
 static
 PLONG
@@ -396,6 +397,7 @@ WshKeptIpv6Option(
         case IPV6_UNICAST_HOPS:  *Bit = WSH_SET6_UNIHOPS; *Default = -1; return &Context->Ipv6UnicastHops;
         case IPV6_MULTICAST_HOPS: *Bit = WSH_SET6_MCASTHOPS; *Default = 1; return &Context->Ipv6MulticastHops;
         case IPV6_MULTICAST_LOOP: *Bit = WSH_SET6_MCASTLOOP; *Default = 1; *Boolean = TRUE; return &Context->Ipv6MulticastLoop;
+        case IPV6_DONTFRAG:      *Bit = WSH_SET6_DONTFRAG; *Boolean = TRUE; return &Context->Ipv6DontFragment;
         default: break;
     }
     return NULL;

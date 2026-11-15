@@ -535,6 +535,7 @@ WsTcGetEntryFromTriplet(IN PTCATALOG Catalog,
                         IN PTCATALOG_ENTRY *CatalogEntry)
 {
     INT ErrorCode = WSAEINVAL;
+    INT Refusal = 0;    /* The strongest refusal of an entry so far: 1 family, 2 socket type, 3 protocol */
     PLIST_ENTRY NextEntry;
     PTCATALOG_ENTRY Entry;
     DPRINT("WsTcGetEntryFromTriplet: %lx, %lx, %lx, %lx\n", af, type, protocol, StartId);
@@ -597,18 +598,21 @@ WsTcGetEntryFromTriplet(IN PTCATALOG Catalog,
                     ErrorCode = ERROR_SUCCESS;
                     break;
                 }
-                else
+                else if (Refusal < 3)
                 {
+                    Refusal = 3;
                     ErrorCode = WSAEPROTONOSUPPORT;
                 }
             }
-            else
+            else if (Refusal < 2)
             {
+                Refusal = 2;
                 ErrorCode = WSAESOCKTNOSUPPORT;
             }
         }
-        else
+        else if (Refusal < 1)
         {
+            Refusal = 1;
             ErrorCode = WSAEAFNOSUPPORT;
         }
     }

@@ -276,6 +276,53 @@ static void TestSocketOptions(SOCKET s)
     Length = sizeof(Value);
     Result = getsockopt(s, IPPROTO_IPV6, IPV6_PKTINFO, (char *)&Value, &Length);
     ok(Result == SOCKET_ERROR && WSAGetLastError() == WSAENOPROTOOPT, "getsockopt(IPV6_PKTINFO): %d %d\n", Result, WSAGetLastError());
+
+    /* IPV6_DONTFRAG (14): a boolean, off until set, any non-zero value reads back as 1 */
+    Value = 0xdead;
+    Length = sizeof(Value);
+    Result = getsockopt(s, IPPROTO_IPV6, 14, (char *)&Value, &Length);
+    ok(Result == 0 && Value == 0, "IPV6_DONTFRAG default: %d %lu (%d)\n", Result, Value, WSAGetLastError());
+    Value = 1;
+    Result = setsockopt(s, IPPROTO_IPV6, 14, (char *)&Value, sizeof(Value));
+    ok(Result == 0, "setsockopt(IPV6_DONTFRAG 1): %d\n", WSAGetLastError());
+    Value = 0;
+    Result = getsockopt(s, IPPROTO_IPV6, 14, (char *)&Value, &Length);
+    ok(Result == 0 && Value == 1, "IPV6_DONTFRAG after 1: %d %lu\n", Result, Value);
+    Value = 0xdead;
+    Result = setsockopt(s, IPPROTO_IPV6, 14, (char *)&Value, sizeof(Value));
+    ok(Result == 0, "setsockopt(IPV6_DONTFRAG 0xdead): %d\n", WSAGetLastError());
+    Value = 0;
+    Result = getsockopt(s, IPPROTO_IPV6, 14, (char *)&Value, &Length);
+    ok(Result == 0 && Value == 1, "IPV6_DONTFRAG after 0xdead: %d %lu\n", Result, Value);
+}
+
+/* The error of a socket() that no catalog entry serves is the strongest refusal of the entries of the family,
+   whatever order the catalog is in (the entries of another family, IPv6 ones last, must not decide it) */
+static void TestCatalogErrors(void)
+{
+    static const struct { int af, type, protocol, error; } Cases[] = {
+        { AF_INET, -1, 0, WSAESOCKTNOSUPPORT },
+        { AF_INET, 0, -1, WSAEPROTONOSUPPORT },
+        { AF_INET, 0xdead, 0, WSAESOCKTNOSUPPORT },
+        { AF_INET, SOCK_STREAM, IPPROTO_UDP, WSAEPROTONOSUPPORT },
+        { AF_INET, SOCK_DGRAM, IPPROTO_TCP, WSAEPROTONOSUPPORT },
+        { 0, -1, IPPROTO_UDP, WSAESOCKTNOSUPPORT },
+        { 0, -1, -1, WSAESOCKTNOSUPPORT },
+        { 0, 0, 0xdead, WSAEPROTONOSUPPORT },
+        { -1, SOCK_STREAM, IPPROTO_UDP, WSAEAFNOSUPPORT },
+    };
+    SOCKET s;
+    int i;
+
+    for (i = 0; i < (int)(sizeof(Cases) / sizeof(Cases[0])); i++)
+    {
+        WSASetLastError(0xdeadbeef);
+        s = WSASocketA(Cases[i].af, Cases[i].type, Cases[i].protocol, NULL, 0, 0);
+        ok(s == INVALID_SOCKET && WSAGetLastError() == Cases[i].error, "WSASocket(%d, %d, %d): %p error %d, expected %d\n",
+           Cases[i].af, Cases[i].type, Cases[i].protocol, (void *)s, WSAGetLastError(), Cases[i].error);
+        if (s != INVALID_SOCKET)
+            closesocket(s);
+    }
 }
 
 static void TestSocketAddresses(SOCKET s, BOOL Stream)
@@ -433,6 +480,7 @@ START_TEST(ipv6sock)
           ReadSwitch() ? "on" : "off", Ipv6StackFlags(), SwitchOn ? "on" : "off");
 
     TestHelper();
+    TestCatalogErrors();
     TestSockets();
 
     WSACleanup();
