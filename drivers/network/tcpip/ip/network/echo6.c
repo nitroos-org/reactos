@@ -171,6 +171,11 @@ Echo6Cancel(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     KIRQL OldIrql;
 
     UNREFERENCED_PARAMETER(DeviceObject);
+
+    /* A reference first, while the cancel spin lock is held: the request's own reference is dropped only by
+       Echo6Complete, which takes the cancel spin lock before it can get that far. Once the lock is released a
+       completion on another processor may run to the end and free the record under this routine */
+    InterlockedIncrement(&E->Refs);
     IoReleaseCancelSpinLock(Irp->CancelIrql);
 
     KeAcquireSpinLock(&Echo6Lock, &OldIrql);
@@ -184,6 +189,7 @@ Echo6Cancel(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 
     if (Won)
         Echo6Complete(E);
+    Echo6Release(E);
 }
 
 /* The outstanding request with this identifier and sequence (as in the packet) to Peer (Echo6Lock held) */
@@ -391,6 +397,7 @@ DispEchoRequest6(PIRP Irp, PIO_STACK_LOCATION IrpSp)
     struct pbuf *p = NULL, *Data = NULL;
     PUCHAR Icmp;
     PECHO6 E;
+    PUCHAR Payload = NULL;
     LARGE_INTEGER Due;
     KIRQL OldIrql;
     err_t Result = ERR_RTE;
@@ -417,11 +424,27 @@ DispEchoRequest6(PIRP Irp, PIO_STACK_LOCATION IrpSp)
         HasSource = TRUE;
     }
 
+    /* The echo data is taken from the caller's system buffer now: once the request is outstanding it can be
+       completed at any moment (a timer of a millisecond, a cancel) and the buffer is then the I/O manager's */
+    if (DataSize)
+    {
+        Payload = ExAllocatePoolWithTag(NonPagedPool, DataSize, ECHO6_TAG);
+        if (!Payload)
+            return STATUS_INSUFFICIENT_RESOURCES;
+        RtlCopyMemory(Payload, In + 1, DataSize);
+    }
+
     E = ExAllocatePoolWithTag(NonPagedPool, FIELD_OFFSET(ECHO6, Data[Room ? Room : 1]), ECHO6_TAG);
     if (!E)
+    {
+        if (Payload)
+            ExFreePoolWithTag(Payload, ECHO6_TAG);
         return STATUS_INSUFFICIENT_RESOURCES;
+    }
     RtlZeroMemory(E, FIELD_OFFSET(ECHO6, Data));
-    E->Refs = 2;    /* the request and the timer */
+    /* The request, the timer, and this routine until it returns: the request may be completed (timer, cancel,
+       answer) and the record freed while this routine still reads and updates it */
+    E->Refs = 3;
     E->State = ECHO6_PENDING;
     E->Irp = Irp;
     E->Room = Room;
@@ -463,6 +486,9 @@ DispEchoRequest6(PIRP Irp, PIO_STACK_LOCATION IrpSp)
         {
             KeReleaseSpinLock(&Echo6Lock, OldIrql);
         }
+        if (Payload)
+            ExFreePoolWithTag(Payload, ECHO6_TAG);
+        Echo6Release(E);
         return STATUS_PENDING;
     }
     IoReleaseCancelSpinLock(OldIrql);
@@ -471,7 +497,7 @@ DispEchoRequest6(PIRP Irp, PIO_STACK_LOCATION IrpSp)
 
     p = pbuf_alloc(PBUF_IP, 8, PBUF_RAM);
     Data = DataSize ? pbuf_alloc(PBUF_RAW, (u16_t)DataSize, PBUF_RAM) : NULL;
-    if (p && (!DataSize || (Data && pbuf_take(Data, In + 1, (u16_t)DataSize) == ERR_OK)))
+    if (p && (!DataSize || (Data && pbuf_take(Data, Payload, (u16_t)DataSize) == ERR_OK)))
     {
         if (Data)
         {
@@ -555,6 +581,9 @@ DispEchoRequest6(PIRP Irp, PIO_STACK_LOCATION IrpSp)
 
     /* Anything the send answered at once (loopback answers come later, from the loopback worker) */
     Echo6CompleteDone();
+    if (Payload)
+        ExFreePoolWithTag(Payload, ECHO6_TAG);
+    Echo6Release(E);
     return STATUS_PENDING;
 }
 
