@@ -20,7 +20,8 @@
  * reboot, another address on every other prefix, and two machines cloned from one disk still differ (their
  * adapters' addresses do). An identifier RFC 5453 reserves is skipped like a duplicate.
  *
- * The secret is made at the first start with IPv6 on and kept in
+ * The secret is made at the first start with IPv6 on, from RDRAND (when it works) and timing (Iid6NewSecret says
+ * which sources it used), and kept in
  * HKLM\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\StableIdentifiers, value SecretKey (REG_BINARY,
  * 16 bytes). The key is created with a protected DACL: SYSTEM and Administrators only, so a standard user
  * cannot read it (Tcpip6\Parameters itself is readable by everybody) once the configuration manager enforces
@@ -406,17 +407,29 @@ Iid6Rdrand(PULONG Value)
 }
 #endif
 
-/* 16 bytes for a new secret. The processor's random number generator when it has one (RDRAND), always mixed
-   with timing: the cycle counter around the interrupt and performance counters, read many times */
+/* The kernel keeps no random seed a driver can use (ksecdd's KsecGenRandom runs RtlRandomEx from a constant and the
+   tick count; the registry has no saved seed: SEC-system-rng-not-cryptographic), so a new secret is made from what
+   this code can gather itself, and says truthfully what it used:
+   - RDRAND (x86), eight 32-bit words, each retried up to ten times (Intel's rule). Only words the instruction
+     delivered are mixed in (a failed try leaves the destination at zero, which is not entropy). All eight
+     delivered = hardware source; fewer or no instruction = timing only, and the log says so;
+   - timing: IID6_TIMING_SAMPLES intervals around a short processor stall (the jitter), in cycles where there is a
+     cycle counter, else in performance counter ticks, each with the raw counters; the number of distinct
+     intervals is logged, so a clock that does not move (a few distinct values) shows;
+   - system time, interrupt time, tick count, an address (all low entropy, they only separate machines and boots).
+   The pool is compressed with SipHash under two fixed keys into the 16 bytes. */
+#define IID6_TIMING_SAMPLES 64
+
 static
 VOID
 Iid6NewSecret(UCHAR Secret[IID6_SECRET_SIZE])
 {
-    ULONGLONG Pool[48];
+    ULONGLONG Pool[8 + 4 + 2 * IID6_TIMING_SAMPLES];
+    ULONGLONG Deltas[IID6_TIMING_SAMPLES];
     UCHAR Key[16];
     ULONGLONG Half;
-    ULONG i, j = 0, Value;
-    LARGE_INTEGER Time;
+    ULONG i, j = 0, k, Distinct = 0, RdrandWords = 0;
+    LARGE_INTEGER Time, Before, After;
     BOOLEAN HaveRdrand = FALSE;
 
     RtlZeroMemory(Pool, sizeof(Pool));
@@ -426,14 +439,19 @@ Iid6NewSecret(UCHAR Secret[IID6_SECRET_SIZE])
     HaveRdrand = ExIsProcessorFeaturePresent(PF_RDRAND_INSTRUCTION_AVAILABLE);
     if (HaveRdrand)
     {
-        /* 8 x 32 bits; the instruction may fail transiently (Intel: retry up to 10 times) */
         for (i = 0; i < 8; i++)
         {
-            ULONG Try;
+            ULONG Try, Value = 0;
 
-            for (Try = 0; Try < 10 && !Iid6Rdrand(&Value); Try++)
-                ;
-            Pool[j++] = Value;
+            for (Try = 0; Try < 10; Try++)
+            {
+                if (Iid6Rdrand(&Value))
+                {
+                    Pool[j++] = Value;
+                    RdrandWords++;
+                    break;
+                }
+            }
         }
     }
 #endif
@@ -441,16 +459,36 @@ Iid6NewSecret(UCHAR Secret[IID6_SECRET_SIZE])
     KeQuerySystemTime(&Time);
     Pool[j++] = (ULONGLONG)Time.QuadPart;
     Pool[j++] = KeQueryInterruptTime();
-    for (i = 0; j < RTL_NUMBER_OF(Pool); i++)
+    KeQueryTickCount(&Time);
+    Pool[j++] = (ULONGLONG)Time.QuadPart;
+    Pool[j++] = (ULONG_PTR)&Pool;
+
+    for (i = 0; i < IID6_TIMING_SAMPLES; i++)
     {
-        Time = KeQueryPerformanceCounter(NULL);
+        ULONGLONG Tsc0 = 0, Tsc1 = 0;
+
+        Before = KeQueryPerformanceCounter(NULL);
 #if defined(_M_IX86) || defined(_M_AMD64)
-        Pool[j++] = (ULONGLONG)Time.QuadPart ^ (__rdtsc() << 17) ^ i;
-#else
-        Pool[j++] = (ULONGLONG)Time.QuadPart ^ i;
+        Tsc0 = __rdtsc();
 #endif
+        KeStallExecutionProcessor(1);
+#if defined(_M_IX86) || defined(_M_AMD64)
+        Tsc1 = __rdtsc();
+#endif
+        After = KeQueryPerformanceCounter(NULL);
+        /* the interval in cycles where there is a cycle counter (the performance counter ticks too coarsely: in a
+           virtual machine it showed two distinct intervals in 64), else in performance counter ticks */
+        Deltas[i] = Tsc1 ? Tsc1 - Tsc0 : (ULONGLONG)(After.QuadPart - Before.QuadPart);
+        Pool[j++] = Deltas[i] ^ (ULONGLONG)Before.QuadPart;
+        Pool[j++] = (ULONGLONG)After.QuadPart ^ (Tsc1 << 17) ^ i;
     }
-    Pool[0] ^= (ULONG_PTR)&Pool;
+    for (i = 0; i < IID6_TIMING_SAMPLES; i++)
+    {
+        for (k = 0; k < i && Deltas[k] != Deltas[i]; k++)
+            ;
+        if (k == i)
+            Distinct++;
+    }
 
     /* Two halves of the pool's hash under two fixed keys */
     Half = Iid6SipHash(Key, (const UCHAR *)Pool, sizeof(Pool));
@@ -460,7 +498,11 @@ Iid6NewSecret(UCHAR Secret[IID6_SECRET_SIZE])
     RtlCopyMemory(Secret + 8, &Half, 8);
 
     RtlSecureZeroMemory(Pool, sizeof(Pool));
-    DbgPrint("TCPIP: new IPv6 identifier secret (%s)\n", HaveRdrand ? "RDRAND and timing" : "timing only");
+
+    DbgPrint("TCPIP: new IPv6 identifier secret from: RDRAND %s (%lu of 8 words), timing (%u samples, %lu distinct "
+             "intervals), system/interrupt/tick time; no kernel boot seed exists; strength: %s\n",
+             HaveRdrand ? "present" : "absent", RdrandWords, (UINT)IID6_TIMING_SAMPLES, Distinct,
+             RdrandWords == 8 ? "hardware random source plus timing" : "timing only, weak");
 }
 
 /* The DACL of the secret's key: SYSTEM and Administrators, full access, nobody else; not inherited from the
