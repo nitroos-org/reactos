@@ -6438,6 +6438,22 @@ static void test_ipv6_literals(void)
         ok(GetLastError() == ERROR_WINHTTP_INVALID_URL, "got %lu\n", GetLastError());
         WinHttpCloseHandle(ses);
     }
+
+    /* brackets hold an IPv6 address only: Windows fails the connect with ERROR_WINHTTP_INVALID_URL, no lookup is made */
+    {
+        static const WCHAR *bad[] = { L"[localhost]", L"[127.0.0.1]", L"[not-an-address]" };
+        HINTERNET ses = WinHttpOpen(L"winetest", WINHTTP_ACCESS_TYPE_NO_PROXY, NULL, NULL, 0), con;
+
+        for (i = 0; i < ARRAY_SIZE(bad); i++)
+        {
+            SetLastError(0xdeadbeef);
+            con = WinHttpConnect(ses, bad[i], 45999, 0);
+            ok(!con, "%s: WinHttpConnect succeeded\n", wine_dbgstr_w(bad[i]));
+            ok(GetLastError() == ERROR_WINHTTP_INVALID_URL, "%s: got %lu\n", wine_dbgstr_w(bad[i]), GetLastError());
+            if (con) WinHttpCloseHandle(con);
+        }
+        WinHttpCloseHandle(ses);
+    }
 }
 
 START_TEST (winhttp)

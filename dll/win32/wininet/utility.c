@@ -61,6 +61,32 @@ static const WCHAR *literal_host(const WCHAR *name, WCHAR *buf, size_t size)
     return buf;
 }
 
+/* TRUE if name is an IPv6 address, bracketed ("[::1]", "[fe80::1%2]") or not; *loopback is set for ::1.
+ * Purely syntactic (no resolver call, no Winsock start-up needed). */
+BOOL is_ipv6_literal_host(const WCHAR *name, BOOL *loopback)
+{
+    WCHAR buf[64];
+    IN6_ADDR addr;
+    size_t len = lstrlenW(name), i;
+
+    if (loopback) *loopback = FALSE;
+    if (len >= 2 && name[0] == '[' && name[len - 1] == ']') { name++; len -= 2; }
+    for (i = 0; i < len && name[i] != '%'; i++) if (i >= ARRAY_SIZE(buf) - 1) return FALSE;
+    memcpy(buf, name, i * sizeof(WCHAR));
+    buf[i] = 0;
+    if (!wcschr(buf, ':')) return FALSE;
+    if (InetPtonW(AF_INET6, buf, &addr) != 1) return FALSE;
+    if (loopback) *loopback = IN6_IS_ADDR_LOOPBACK(&addr);
+    return TRUE;
+}
+
+/* A bracketed host that is not an IPv6 address ("[localhost]", "[127.0.0.1]"): Windows rejects it as an invalid URL. */
+BOOL is_bad_bracketed_host(const WCHAR *name)
+{
+    size_t len = lstrlenW(name);
+    return len >= 2 && name[0] == '[' && name[len - 1] == ']' && !is_ipv6_literal_host(name, NULL);
+}
+
 /* All addresses of name in getaddrinfo order (at most max_addrs), each with the port set. Returns the count. */
 int GetAddressList(const WCHAR *name, INTERNET_PORT port, struct sockaddr_storage *addrs, int *lens, int max_addrs)
 {

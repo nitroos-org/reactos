@@ -611,6 +611,12 @@ HINTERNET WINAPI WinHttpConnect( HINTERNET hsession, const WCHAR *server, INTERN
         SetLastError( ERROR_WINHTTP_INVALID_URL );
         return NULL;
     }
+    /* brackets hold an IPv6 address only: Windows fails "[localhost]" and "[127.0.0.1]" with ERROR_WINHTTP_INVALID_URL */
+    if (is_bad_bracketed_host( server ))
+    {
+        SetLastError( ERROR_WINHTTP_INVALID_URL );
+        return NULL;
+    }
     if (!(session = (struct session *)grab_object( hsession )))
     {
         SetLastError( ERROR_INVALID_HANDLE );

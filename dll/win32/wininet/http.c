@@ -5990,6 +5990,10 @@ DWORD HTTP_Connect(appinfo_t *hIC, LPCWSTR lpszServerName,
     if (!lpszServerName || !lpszServerName[0])
         return ERROR_INVALID_PARAMETER;
 
+    /* brackets hold an IPv6 address only: Windows fails "[localhost]" and "[127.0.0.1]" with ERROR_INTERNET_INVALID_URL */
+    if (is_bad_bracketed_host(lpszServerName))
+        return ERROR_INTERNET_INVALID_URL;
+
     assert( hIC->hdr.htype == WH_HINIT );
 
     session = alloc_object(&hIC->hdr, &HTTPSESSIONVtbl, sizeof(http_session_t));
