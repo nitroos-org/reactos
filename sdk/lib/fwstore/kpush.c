@@ -441,8 +441,8 @@ static BR_RESULT BuildRule(BUF *b, const FW_RULE *r, BOOL v6, ULONG *pieces, ULO
     NITROFW_RULE hdr; DIM lp, rp, la4, ra4, la6, ra6, ic;
     ULONG start = (ULONG)b->len, i, ifm = 0, first = *pieces;
     PWSTR nt = NULL; PCWSTR v, svc = NULL, icKey; BR_RESULT res = BR_REJECTED;
-    BOOL block, v4Scoped, v6Tok, v6Scoped, do4, do6, dead4, dead6, v4Alive, v6Alive, ok = TRUE;
-    ULONG bad = 0;
+    BOOL block, lScoped, rScoped, do4, do6, ok = TRUE;
+    ULONG bad = 0, bad4, bad6;
 
     *pPartial = FALSE;
     memset(&hdr, 0, sizeof(hdr));
@@ -460,13 +460,10 @@ static BR_RESULT BuildRule(BUF *b, const FW_RULE *r, BOOL v6, ULONG *pieces, ULO
     ParsePorts(&r->Raw, L"RPort2_10", L"RPort", &rp);
     ParseAddr4(&r->Raw, L"LA4", &la4);
     ParseAddr4(&r->Raw, L"RA4", &ra4);
-    DimInit(&la6, sizeof(NITROFW_ADDR6_RANGE)); DimInit(&ra6, sizeof(NITROFW_ADDR6_RANGE));
-    if (v6)
-    {
-        DimFree(&la6); DimFree(&ra6);
-        ParseAddr6(&r->Raw, L"LA6", &la6);
-        ParseAddr6(&r->Raw, L"RA6", &ra6);
-    }
+    /* parsed also without kernel IPv6: an IPv6 token still scopes its side (LocalAddresses/RemoteAddresses are one
+       condition each over both families) */
+    ParseAddr6(&r->Raw, L"LA6", &la6);
+    ParseAddr6(&r->Raw, L"RA6", &ra6);
     icKey = r->Protocol == 1 ? L"ICMP4" : L"ICMP6";
     if (r->Icmp && (r->Protocol == 1 || r->Protocol == 58)) ParseIcmp(&r->Raw, icKey, &ic);
     else DimInit(&ic, sizeof(NITROFW_ICMP_ENTRY));
@@ -482,21 +479,13 @@ static BR_RESULT BuildRule(BUF *b, const FW_RULE *r, BOOL v6, ULONG *pieces, ULO
     if (!ok) goto done;
 
     bad = (DimScoped(&lp) ? lp.bad : 0) + (DimScoped(&rp) ? rp.bad : 0) + (DimScoped(&ic) ? ic.bad : 0);
-    v4Scoped = DimScoped(&la4) || DimScoped(&ra4);
-    v4Alive = (!DimScoped(&la4) || DimAlive(&la4)) && (!DimScoped(&ra4) || DimAlive(&ra4));
-    v6Tok = FwrCount(&r->Raw, L"LA6") || FwrCount(&r->Raw, L"RA6");     /* the rule has IPv6 address tokens */
-    v6Scoped = v6 && (DimScoped(&la6) || DimScoped(&ra6));
-    v6Alive = (!DimScoped(&la6) || DimAlive(&la6)) && (!DimScoped(&ra6) || DimAlive(&ra6));
-    if (v4Scoped) bad += (DimScoped(&la4) ? la4.bad : 0) + (DimScoped(&ra4) ? ra4.bad : 0);
-    if (v6Scoped) bad += (DimScoped(&la6) ? la6.bad : 0) + (DimScoped(&ra6) ? ra6.bad : 0);
-
-    if (!v4Scoped && v6Tok && !v6)
-    {
-        /* scoped to IPv6 addresses only, and the kernel has no IPv6: no packet it sees can match */
-        res = BR_SKIPPED;
-        goto done;
-    }
-    if (!v4Scoped && !v6Scoped)
+    /* A side (local, remote) is one condition over both families: scoped when it has a token and no "*" in
+       either family. The IPv4 half carries the IPv4 entries of every scoped side and exists only when every
+       scoped side has an IPv4 entry (a side scoped to IPv6 addresses only matches no IPv4 packet); the same for
+       IPv6 (and only when the kernel has IPv6). */
+    lScoped = (la4.cnt || la6.cnt) && !la4.wild && !la6.wild;
+    rScoped = (ra4.cnt || ra6.cnt) && !ra4.wild && !ra6.wild;
+    if (!lScoped && !rScoped)
     {
         /* no address condition: one kernel rule (more if a list is long) for both families */
         if (!EmitHalf(b, &hdr, 0, DimScoped(&lp) ? &lp.l : NULL, DimScoped(&rp) ? &rp.l : NULL, NULL, NULL,
@@ -505,16 +494,24 @@ static BR_RESULT BuildRule(BUF *b, const FW_RULE *r, BOOL v6, ULONG *pieces, ULO
         res = BR_OK;
         goto done;
     }
-    do4 = v4Scoped && v4Alive; do6 = v6Scoped && v6Alive;
-    dead4 = v4Scoped && !v4Alive; dead6 = v6Scoped && !v6Alive;
-    if (!do4 && !do6) goto fail;          /* every address half is unresolvable: reject, never a never-matching rule */
+    bad4 = (lScoped ? la4.bad : 0) + (rScoped ? ra4.bad : 0);
+    bad6 = v6 ? (lScoped ? la6.bad : 0) + (rScoped ? ra6.bad : 0) : 0;
+    do4 = (!lScoped || DimAlive(&la4)) && (!rScoped || DimAlive(&ra4));
+    do6 = v6 && (!lScoped || DimAlive(&la6)) && (!rScoped || DimAlive(&ra6));
+    if (!do4 && !do6)
+    {
+        /* nothing representable: exact when no token failed (the rule matches no packet this kernel sees), else the
+           rule is rejected (never a match-all or never-matching stand-in) */
+        res = (bad4 || bad6) ? BR_REJECTED : BR_SKIPPED;
+        goto done;
+    }
     if (do4 && !EmitHalf(b, &hdr, 4, DimScoped(&lp) ? &lp.l : NULL, DimScoped(&rp) ? &rp.l : NULL,
-                         DimScoped(&la4) ? &la4.l : NULL, DimScoped(&ra4) ? &ra4.l : NULL,
+                         lScoped ? &la4.l : NULL, rScoped ? &ra4.l : NULL,
                          DimScoped(&ic) ? &ic.l : NULL, nt, svc, pieces, maxPieces)) goto fail;
     if (do6 && !EmitHalf(b, &hdr, 6, DimScoped(&lp) ? &lp.l : NULL, DimScoped(&rp) ? &rp.l : NULL,
-                         DimScoped(&la6) ? &la6.l : NULL, DimScoped(&ra6) ? &ra6.l : NULL,
+                         lScoped ? &la6.l : NULL, rScoped ? &ra6.l : NULL,
                          DimScoped(&ic) ? &ic.l : NULL, nt, svc, pieces, maxPieces)) goto fail;
-    if (block && (bad || dead4 || dead6)) *pPartial = TRUE;
+    if (block && (bad || bad4 || bad6)) *pPartial = TRUE;
     res = BR_OK;
     goto done;
 fail:
