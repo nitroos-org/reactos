@@ -701,6 +701,45 @@ MmFreeMemoryArea(
     PVOID FreePageContext
 );
 
+/* Removes an area of system space whose PTEs were all cleared and flushed already.  Kernel address space lock held. */
+VOID
+NTAPI
+MmFreeUnmappedSystemMemoryArea(
+    _In_ PMEMORY_AREA MemoryArea);
+
+/*
+ * Views in system space unmapped with their TB flush batched (section.c, MI_LAZY_VIEW): a view keeps its pages,
+ * segment reference and address range until a KeFlushEntireTb that came after its PTEs were cleared.
+ */
+NTSTATUS
+NTAPI
+MmUnmapViewInSystemSpaceLazy(
+    _In_ PVOID MappedBase);
+
+BOOLEAN
+NTAPI
+MmLazyViewsPending(VOID);
+
+VOID
+NTAPI
+MmFlushLazyMemoryAreas(
+    _In_opt_ PMM_SECTION_SEGMENT Segment);
+
+VOID
+NTAPI
+MmFlushLazyMemoryAreasForTrim(VOID);
+
+BOOLEAN
+NTAPI
+MmReleaseLazyViewRanges(VOID);
+
+#if DBG
+BOOLEAN
+NTAPI
+MiIsPageOnUnflushedLazyView(
+    _In_ PFN_NUMBER Page);
+#endif
+
 VOID
 NTAPI
 MiRosCleanupMemoryArea(

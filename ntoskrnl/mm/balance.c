@@ -101,6 +101,9 @@ MmReleasePageMemoryConsumer(ULONG Consumer, PFN_NUMBER Page)
 
     MmDereferencePage(Page);
 
+    /* No page goes to the free list while a view unmapped lazily may still have a translation of it (section.c) */
+    ASSERT((MiGetPfnEntry(Page)->u3.e2.ReferenceCount != 0) || !MiIsPageOnUnflushedLazyView(Page));
+
     MiReleasePfnLock(OldIrql);
 
     return(STATUS_SUCCESS);
@@ -523,6 +526,10 @@ MiBalancerThread(PVOID Unused)
             /* NitroPager: what this pass freed (cache + pager) and the usable pages before it */
             ULONG PagerPassFreed = 0;
             PFN_NUMBER PagerUsableBefore = MiGetUsablePageCount();
+
+            /* Short of pages: the pages of views unmapped lazily can be trimmed once their TB flush is done */
+            if (MmAvailablePages < MiLowWaterPages)
+                MmFlushLazyMemoryAreasForTrim();
 
             do
             {

@@ -315,6 +315,9 @@ MiShutdownSystem(VOID)
     /* NitroPager: the modified page writer stops before the paging files are closed and the file systems shut down */
     MiPagerShutdownWriter();
 
+    /* Views unmapped lazily give their pages and segments back (their TB flush first) */
+    MmFlushLazyMemoryAreas(NULL);
+
     /* Loop through all the paging files */
     for (i = 0; i < MmNumberOfPagingFiles; i++)
     {
