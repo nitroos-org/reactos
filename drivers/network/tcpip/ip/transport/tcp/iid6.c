@@ -20,17 +20,29 @@
  * reboot, another address on every other prefix, and two machines cloned from one disk still differ (their
  * adapters' addresses do). An identifier RFC 5453 reserves is skipped like a duplicate.
  *
- * The secret is made at the first start with IPv6 on and kept in
+ * The secret is made at the first start with IPv6 on, from RDRAND (when it works) and timing (Iid6NewSecret says
+ * which sources it used), and kept in
  * HKLM\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\StableIdentifiers, value SecretKey (REG_BINARY,
  * 16 bytes). The key is created with a protected DACL: SYSTEM and Administrators only, so a standard user
  * cannot read it (Tcpip6\Parameters itself is readable by everybody) once the configuration manager enforces
  * key descriptors on open (it stores and reports them already). Without the key (no Tcpip6 service
- * key, a registry failure) a secret made for this start is used: the addresses are random, only not stable.
+ * key, a registry failure, a key whose protected DACL cannot be stored) a secret made for this start is used and
+ * nothing is stored: the addresses are random, only not stable.
+ *
+ * A secret made while the system is being installed (SYSTEM\Setup\SystemSetupInProgress != 0) is marked with
+ * the REG_DWORD value FromSetup = 1 next to it, because the installed disk may be copied to other machines. The
+ * first start after setup replaces it with a new secret and removes the mark (the identifiers change once);
+ * after that the secret lives as long as the installation. An image installed by a build without the mark has a
+ * secret that cannot be told from a later one: it is kept.
  *
  * Duplicate address detection (RFC 7217 section 6): when DAD finds a tentative address of ours in use, the
  * next counter value makes a new identifier, at most IDGEN_RETRIES (3) times, then the address stays
  * duplicated as lwIP leaves it. lwIP calls LibNd6DadFailed (LWIP_HOOK_ND6_DAD_FAILED) and LibNd6SlaacAddress
  * (LWIP_HOOK_ND6_SLAAC_ADDRESS) from nd6.c, with the core lock held.
+ *
+ * The DAD counter is not persisted (RFC 7217 section 6 does not require it): a conflict that outlives a restart
+ * is found again, 1 s after the start, and the same next-counter address results; when the other host is gone
+ * the counter-0 address returns. Stable while the conflict lasts.
  *
  * Tcpip6\Parameters\RandomizeIdentifiers (REG_DWORD): 0 returns to the MAC-derived identifiers (what
  * `netsh interface ipv6 set global randomizeidentifiers=disabled` selects on Windows); absent or anything
@@ -60,6 +72,7 @@
 #define IID6_IDGEN_RETRIES  3
 
 #define IID6_PARAMETERS     L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\Tcpip6\\Parameters"
+#define IID6_SETUP_MARK     L"FromSetup"
 #define IID6_SECRET_KEY     L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\Tcpip6\\Parameters\\StableIdentifiers"
 
 BOOLEAN TCP6RandomizeIdentifiers;
@@ -406,17 +419,30 @@ Iid6Rdrand(PULONG Value)
 }
 #endif
 
-/* 16 bytes for a new secret. The processor's random number generator when it has one (RDRAND), always mixed
-   with timing: the cycle counter around the interrupt and performance counters, read many times */
+/* The kernel keeps no random seed a driver can use (ksecdd's KsecGenRandom runs RtlRandomEx from a constant and the
+   tick count; the registry has no saved seed: SEC-system-rng-not-cryptographic), so a new secret is made from what
+   this code can gather itself, and says truthfully what it used:
+   - RDRAND (x86), eight 32-bit words, each retried up to ten times (Intel's rule). Only words the instruction
+     delivered are mixed in (a failed try leaves the destination at zero, which is not entropy; a word of 0 or
+     all ones counts as a failed try: what a broken RDRAND returns with success every time). All eight
+     delivered = hardware source; fewer or no instruction = timing only, and the log says so;
+   - timing: IID6_TIMING_SAMPLES intervals around a short processor stall (the jitter), in cycles where there is a
+     cycle counter, else in performance counter ticks, each with the raw counters; the number of distinct
+     intervals is logged, so a clock that does not move (a few distinct values) shows;
+   - system time, interrupt time, tick count, an address (all low entropy, they only separate machines and boots).
+   The pool is compressed with SipHash under two fixed keys into the 16 bytes. */
+#define IID6_TIMING_SAMPLES 64
+
 static
 VOID
 Iid6NewSecret(UCHAR Secret[IID6_SECRET_SIZE])
 {
-    ULONGLONG Pool[48];
+    ULONGLONG Pool[8 + 4 + 2 * IID6_TIMING_SAMPLES];
+    ULONGLONG Deltas[IID6_TIMING_SAMPLES];
     UCHAR Key[16];
     ULONGLONG Half;
-    ULONG i, j = 0, Value;
-    LARGE_INTEGER Time;
+    ULONG i, j = 0, k, Distinct = 0, RdrandWords = 0;
+    LARGE_INTEGER Time, Before, After;
     BOOLEAN HaveRdrand = FALSE;
 
     RtlZeroMemory(Pool, sizeof(Pool));
@@ -426,14 +452,21 @@ Iid6NewSecret(UCHAR Secret[IID6_SECRET_SIZE])
     HaveRdrand = ExIsProcessorFeaturePresent(PF_RDRAND_INSTRUCTION_AVAILABLE);
     if (HaveRdrand)
     {
-        /* 8 x 32 bits; the instruction may fail transiently (Intel: retry up to 10 times) */
         for (i = 0; i < 8; i++)
         {
-            ULONG Try;
+            ULONG Try, Value = 0;
 
-            for (Try = 0; Try < 10 && !Iid6Rdrand(&Value); Try++)
-                ;
-            Pool[j++] = Value;
+            for (Try = 0; Try < 10; Try++)
+            {
+                /* 0 and all ones count as failed: processors with broken RDRAND report success with
+                   one of them every time (a real word is either with chance 2^-31, and is tried again) */
+                if (Iid6Rdrand(&Value) && Value != 0 && Value != 0xFFFFFFFF)
+                {
+                    Pool[j++] = Value;
+                    RdrandWords++;
+                    break;
+                }
+            }
         }
     }
 #endif
@@ -441,16 +474,36 @@ Iid6NewSecret(UCHAR Secret[IID6_SECRET_SIZE])
     KeQuerySystemTime(&Time);
     Pool[j++] = (ULONGLONG)Time.QuadPart;
     Pool[j++] = KeQueryInterruptTime();
-    for (i = 0; j < RTL_NUMBER_OF(Pool); i++)
+    KeQueryTickCount(&Time);
+    Pool[j++] = (ULONGLONG)Time.QuadPart;
+    Pool[j++] = (ULONG_PTR)&Pool;
+
+    for (i = 0; i < IID6_TIMING_SAMPLES; i++)
     {
-        Time = KeQueryPerformanceCounter(NULL);
+        ULONGLONG Tsc0 = 0, Tsc1 = 0;
+
+        Before = KeQueryPerformanceCounter(NULL);
 #if defined(_M_IX86) || defined(_M_AMD64)
-        Pool[j++] = (ULONGLONG)Time.QuadPart ^ (__rdtsc() << 17) ^ i;
-#else
-        Pool[j++] = (ULONGLONG)Time.QuadPart ^ i;
+        Tsc0 = __rdtsc();
 #endif
+        KeStallExecutionProcessor(1);
+#if defined(_M_IX86) || defined(_M_AMD64)
+        Tsc1 = __rdtsc();
+#endif
+        After = KeQueryPerformanceCounter(NULL);
+        /* the interval in cycles where there is a cycle counter (the performance counter ticks too coarsely: in a
+           virtual machine it showed two distinct intervals in 64), else in performance counter ticks */
+        Deltas[i] = Tsc1 ? Tsc1 - Tsc0 : (ULONGLONG)(After.QuadPart - Before.QuadPart);
+        Pool[j++] = Deltas[i] ^ (ULONGLONG)Before.QuadPart;
+        Pool[j++] = (ULONGLONG)After.QuadPart ^ (Tsc1 << 17) ^ i;
     }
-    Pool[0] ^= (ULONG_PTR)&Pool;
+    for (i = 0; i < IID6_TIMING_SAMPLES; i++)
+    {
+        for (k = 0; k < i && Deltas[k] != Deltas[i]; k++)
+            ;
+        if (k == i)
+            Distinct++;
+    }
 
     /* Two halves of the pool's hash under two fixed keys */
     Half = Iid6SipHash(Key, (const UCHAR *)Pool, sizeof(Pool));
@@ -460,7 +513,11 @@ Iid6NewSecret(UCHAR Secret[IID6_SECRET_SIZE])
     RtlCopyMemory(Secret + 8, &Half, 8);
 
     RtlSecureZeroMemory(Pool, sizeof(Pool));
-    DbgPrint("TCPIP: new IPv6 identifier secret (%s)\n", HaveRdrand ? "RDRAND and timing" : "timing only");
+
+    DbgPrint("TCPIP: new IPv6 identifier secret from: RDRAND %s (%lu of 8 words), timing (%u samples, %lu distinct "
+             "intervals), system/interrupt/tick time; no kernel boot seed exists; strength: %s\n",
+             HaveRdrand ? "present" : "absent", RdrandWords, (UINT)IID6_TIMING_SAMPLES, Distinct,
+             RdrandWords == 8 ? "hardware random source plus timing" : "timing only, weak");
 }
 
 /* The DACL of the secret's key: SYSTEM and Administrators, full access, nobody else; not inherited from the
@@ -500,7 +557,9 @@ Iid6MakeSecurity(PSECURITY_DESCRIPTOR Sd, PACL *Dacl)
     return STATUS_SUCCESS;
 }
 
-/* Whether the key's DACL is the one Iid6MakeSecurity makes: protected, two ACEs, SYSTEM and Administrators */
+/* Whether the key's DACL is exactly the one Iid6MakeSecurity makes: protected, two ACEs, one access allowed ACE
+   for SYSTEM and one for Administrators (in either order, each once), each KEY_ALL_ACCESS with only
+   CONTAINER_INHERIT_ACE, and no bytes behind them */
 static
 BOOLEAN
 Iid6KeySecurityIsOurs(HANDLE Key)
@@ -509,7 +568,7 @@ Iid6KeySecurityIsOurs(HANDLE Key)
     BOOLEAN Present = FALSE, Defaulted = FALSE, Ours = FALSE;
     PACL Acl = NULL;
     PACCESS_ALLOWED_ACE Ace;
-    ULONG Needed = 0, i;
+    ULONG Needed = 0, i, Seen = 0, Expected;
 
     if (ZwQuerySecurityObject(Key, DACL_SECURITY_INFORMATION, NULL, 0, &Needed) != STATUS_BUFFER_TOO_SMALL || !Needed)
         return FALSE;
@@ -521,33 +580,92 @@ Iid6KeySecurityIsOurs(HANDLE Key)
         NT_SUCCESS(RtlGetDaclSecurityDescriptor(Sd, &Present, &Acl, &Defaulted)) && Present && Acl &&
         Acl->AceCount == 2)
     {
-        Ours = TRUE;
+        Expected = sizeof(ACL) + 2 * (sizeof(ACCESS_ALLOWED_ACE) - sizeof(ULONG)) +
+                   RtlLengthSid(SeExports->SeLocalSystemSid) + RtlLengthSid(SeExports->SeAliasAdminsSid);
+        Ours = Acl->AclSize >= Expected;
         for (i = 0; i < 2 && Ours; i++)
         {
-            Ours = NT_SUCCESS(RtlGetAce(Acl, i, (PVOID *)&Ace)) && Ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE &&
-                   (RtlEqualSid(&Ace->SidStart, SeExports->SeLocalSystemSid) ||
-                    RtlEqualSid(&Ace->SidStart, SeExports->SeAliasAdminsSid));
+            Ours = NT_SUCCESS(RtlGetAce(Acl, i, (PVOID *)&Ace)) &&
+                   Ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE &&
+                   Ace->Header.AceFlags == CONTAINER_INHERIT_ACE &&
+                   Ace->Mask == KEY_ALL_ACCESS;
+            if (!Ours)
+                break;
+            if (RtlEqualSid(&Ace->SidStart, SeExports->SeLocalSystemSid) && !(Seen & 1))
+            {
+                Seen |= 1;
+                Ours = Ace->Header.AceSize == FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart) +
+                                              RtlLengthSid(SeExports->SeLocalSystemSid);
+            }
+            else if (RtlEqualSid(&Ace->SidStart, SeExports->SeAliasAdminsSid) && !(Seen & 2))
+            {
+                Seen |= 2;
+                Ours = Ace->Header.AceSize == FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart) +
+                                              RtlLengthSid(SeExports->SeAliasAdminsSid);
+            }
+            else
+            {
+                Ours = FALSE;
+            }
         }
+        Ours = Ours && Seen == 3;
     }
     ExFreePoolWithTag(Sd, TAG_IID6);
     return Ours;
 }
 
-/* Reads the secret, or makes and stores one; Iid6Secret holds a secret afterwards in any case */
+/* SYSTEM\Setup\SystemSetupInProgress (REG_DWORD) is not zero: the system is being installed (second-stage
+   setup; the same value the configuration manager looks at). The key is absent on a Windows install and its
+   value 0 after setup finished here */
+static
+BOOLEAN
+Iid6SetupInProgress(VOID)
+{
+    UNICODE_STRING KeyName = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\Setup");
+    UNICODE_STRING ValueName = RTL_CONSTANT_STRING(L"SystemSetupInProgress");
+    OBJECT_ATTRIBUTES Attributes;
+    UCHAR Buffer[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)];
+    PKEY_VALUE_PARTIAL_INFORMATION Info = (PKEY_VALUE_PARTIAL_INFORMATION)Buffer;
+    HANDLE Key;
+    ULONG Length;
+    BOOLEAN InProgress = FALSE;
+
+    InitializeObjectAttributes(&Attributes, &KeyName, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+    if (!NT_SUCCESS(ZwOpenKey(&Key, KEY_QUERY_VALUE, &Attributes)))
+        return FALSE;
+    if (NT_SUCCESS(ZwQueryValueKey(Key, &ValueName, KeyValuePartialInformation, Info, sizeof(Buffer), &Length)) &&
+        Info->Type == REG_DWORD && Info->DataLength == sizeof(ULONG))
+    {
+        InProgress = (*(PULONG)Info->Data != 0);
+    }
+    ZwClose(Key);
+    return InProgress;
+}
+
+/* Reads the secret, or makes and stores one; Iid6Secret holds a secret afterwards in any case.
+   A secret made while the system is being installed is marked (value FromSetup = 1 in the secret's key): the
+   installed disk may be copied to other machines, so the first start after setup (the first normal boot) makes
+   a new one, stores it, and removes the mark. From then on the secret stays for the life of the installation.
+   Whenever the key cannot be given the protected DACL nothing is read from or written to it: a secret for this
+   start only (random, not stable), logged. */
 static
 VOID
 Iid6LoadSecret(VOID)
 {
     UNICODE_STRING KeyName = RTL_CONSTANT_STRING(IID6_SECRET_KEY);
     UNICODE_STRING ValueName = RTL_CONSTANT_STRING(L"SecretKey");
+    UNICODE_STRING MarkName = RTL_CONSTANT_STRING(IID6_SETUP_MARK);
     OBJECT_ATTRIBUTES Attributes;
     SECURITY_DESCRIPTOR Sd;
     PACL Dacl = NULL;
     UCHAR Buffer[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + IID6_SECRET_SIZE];
     PKEY_VALUE_PARTIAL_INFORMATION Info = (PKEY_VALUE_PARTIAL_INFORMATION)Buffer;
     HANDLE Key;
-    ULONG Length, Disposition;
+    ULONG Length, Disposition, Mark = 1;
+    BOOLEAN Setup, HaveSecret, Marked = FALSE;
     NTSTATUS Status;
+
+    Setup = Iid6SetupInProgress();
 
     if (!NT_SUCCESS(Iid6MakeSecurity(&Sd, &Dacl)))
     {
@@ -569,27 +687,73 @@ Iid6LoadSecret(VOID)
     }
 
     /* A key made while setup runs (the configuration manager stores no descriptor then: it inherits) or
-       changed since gets the DACL again, at the first start where it can be stored */
+       changed since gets the DACL again, at the first start where it can be stored. If that fails the key may
+       be readable by others: no secret is stored in it, and a stored one is not trusted */
     if (!Iid6KeySecurityIsOurs(Key))
     {
         Status = ZwSetSecurityObject(Key, DACL_SECURITY_INFORMATION, &Sd);
         DbgPrint("TCPIP: IPv6 identifier secret key DACL set again: 0x%lx\n", Status);
+        if (!NT_SUCCESS(Status))
+        {
+            ExFreePoolWithTag(Dacl, TAG_IID6);
+            ZwClose(Key);
+            Iid6NewSecret(Iid6Secret);
+            DbgPrint("TCPIP: IPv6 identifier secret not kept (key DACL: 0x%lx), a secret for this start only\n",
+                     Status);
+            return;
+        }
     }
     ExFreePoolWithTag(Dacl, TAG_IID6);
 
+    Status = ZwQueryValueKey(Key, &MarkName, KeyValuePartialInformation, Info, sizeof(Buffer), &Length);
+    Marked = NT_SUCCESS(Status) && Info->Type == REG_DWORD && Info->DataLength == sizeof(ULONG) &&
+             *(PULONG)Info->Data != 0;
+
     Status = ZwQueryValueKey(Key, &ValueName, KeyValuePartialInformation, Info, sizeof(Buffer), &Length);
-    if (NT_SUCCESS(Status) && Info->Type == REG_BINARY && Info->DataLength == IID6_SECRET_SIZE)
+    HaveSecret = NT_SUCCESS(Status) && Info->Type == REG_BINARY && Info->DataLength == IID6_SECRET_SIZE;
+
+    if (HaveSecret && !(Marked && !Setup))
     {
         RtlCopyMemory(Iid6Secret, Info->Data, IID6_SECRET_SIZE);
+        if (Marked)
+            DbgPrint("TCPIP: IPv6 identifier secret made during setup, replaced at the first start after it\n");
     }
     else
     {
+        if (HaveSecret)
+            DbgPrint("TCPIP: IPv6 identifier secret was made during setup: replacing it (first normal start)\n");
         Iid6NewSecret(Iid6Secret);
-        Status = ZwSetValueKey(Key, &ValueName, 0, REG_BINARY, Iid6Secret, IID6_SECRET_SIZE);
+        Status = STATUS_SUCCESS;
+        if (Setup)
+        {
+            /* the mark goes first: a secret without it would be taken for the installation's own */
+            Status = ZwSetValueKey(Key, &MarkName, 0, REG_DWORD, &Mark, sizeof(Mark));
+            if (!NT_SUCCESS(Status))
+                DbgPrint("TCPIP: IPv6 identifier secret not kept (setup mark: 0x%lx)\n", Status);
+        }
         if (NT_SUCCESS(Status))
-            ZwFlushKey(Key);
-        else
-            DbgPrint("TCPIP: IPv6 identifier secret not kept (value: 0x%lx)\n", Status);
+        {
+            Status = ZwSetValueKey(Key, &ValueName, 0, REG_BINARY, Iid6Secret, IID6_SECRET_SIZE);
+            if (NT_SUCCESS(Status))
+            {
+                if (!Setup && Marked)
+                {
+                    Status = ZwDeleteValueKey(Key, &MarkName);
+                    if (!NT_SUCCESS(Status))
+                    {
+                        /* a mark that stays set would replace the secret at every start: clear it instead */
+                        Mark = 0;
+                        Status = ZwSetValueKey(Key, &MarkName, 0, REG_DWORD, &Mark, sizeof(Mark));
+                        DbgPrint("TCPIP: IPv6 identifier setup mark not removed, cleared: 0x%lx\n", Status);
+                    }
+                }
+                ZwFlushKey(Key);
+            }
+            else
+            {
+                DbgPrint("TCPIP: IPv6 identifier secret not kept (value: 0x%lx)\n", Status);
+            }
+        }
     }
     RtlSecureZeroMemory(Buffer, sizeof(Buffer));
     ZwClose(Key);
