@@ -457,6 +457,19 @@ static void TestMulticast(void)
     ok(getsockopt(s, IPPROTO_IPV6, IPV6_MULTICAST_IF, (char *)&Value, &Length) == 0 && Value == 0,
        "IPV6_MULTICAST_IF after the refusal: %d %lu\n", WSAGetLastError(), Value);
 
+    /* IPV6_DONTFRAG (14) is kept with the socket: it reads back, a non-zero value as 1, and the socket still sends */
+    Value = 0xcc;
+    Length = sizeof(Value);
+    ok(getsockopt(s, IPPROTO_IPV6, 14, (char *)&Value, &Length) == 0 && Value == 0,
+       "IPV6_DONTFRAG default on a datagram socket: %d %lu\n", WSAGetLastError(), Value);
+    Value = 7;
+    ok(setsockopt(s, IPPROTO_IPV6, 14, (char *)&Value, sizeof(Value)) == 0, "setsockopt(IPV6_DONTFRAG): %d\n",
+       WSAGetLastError());
+    Value = 0;
+    Length = sizeof(Value);
+    ok(getsockopt(s, IPPROTO_IPV6, 14, (char *)&Value, &Length) == 0 && Value == 1,
+       "IPV6_DONTFRAG on a datagram socket after 7: %d %lu\n", WSAGetLastError(), Value);
+
     /* Hop limit and loop options read back */
     Value = 5;
     ok(setsockopt(s, IPPROTO_IPV6, IPV6_MULTICAST_HOPS, (char *)&Value, sizeof(Value)) == 0,
