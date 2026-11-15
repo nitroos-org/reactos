@@ -343,14 +343,26 @@ gethostbyaddr(IN const char FAR * addr,
         return NULL;
     }
 
-    /* Check which type it is */
+    /* Check which type it is; the address must be as long as its family needs (else WSAEFAULT, as documented) */
     if (type == AF_INET)
     {
+        if (len < (int)sizeof(IN_ADDR))
+        {
+            SetLastError(WSAEFAULT);
+            return NULL;
+        }
+
         /* Use IPV4 Address to String */
         Local_Ip4AddresstoString(AddressBuffer, (PCHAR)addr);
     }
     else if (type == AF_INET6)
     {
+        if (len < (int)sizeof(IN6_ADDR))
+        {
+            SetLastError(WSAEFAULT);
+            return NULL;
+        }
+
         /* Use IPV6 Address to String */
         Local_Ip6AddresstoString(AddressBuffer, (PCHAR)addr);
     }

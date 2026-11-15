@@ -51,6 +51,20 @@ START_TEST(ReverseLookup)
     Error = WSAStartup(MAKEWORD(2, 2), &WsaData);
     ok_dec(Error, 0);
 
+    /* an address shorter than its family needs is not read: WSAEFAULT (no name server needed) */
+    {
+        static const BYTE Short[16] = { 0x20, 0x01, 0x0d, 0xb8 };
+
+        WSASetLastError(0xdeadbeef);
+        Host = gethostbyaddr((const char *)Short, 4, AF_INET6);
+        ok(Host == NULL, "gethostbyaddr(AF_INET6, len 4) returned '%s'\n", Host ? Host->h_name : "");
+        ok_dec(WSAGetLastError(), WSAEFAULT);
+        WSASetLastError(0xdeadbeef);
+        Host = gethostbyaddr((const char *)Short, 2, AF_INET);
+        ok(Host == NULL, "gethostbyaddr(AF_INET, len 2) returned '%s'\n", Host ? Host->h_name : "");
+        ok_dec(WSAGetLastError(), WSAEFAULT);
+    }
+
     /* no name server, no test */
     Host = gethostbyname(KNOWN_NAME);
     if (!Host)
