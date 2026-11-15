@@ -65,6 +65,8 @@ typedef struct _Rect
 
 int FASTCALL IntFillRect(DC *dc, INT XLeft, INT YLeft, INT Width, INT Height, PBRUSH pbrush, BOOL Pen);
 //int FASTCALL app_fill_rect(DC *dc, Rect r, PBRUSH pbrush, BOOL Pen);
+static int NTAPI app_draw_ellipse(DC *g, Rect r, PBRUSH pbrush, int wy);
+static int FASTCALL app_fill_ellipse(DC *g, Rect r, PBRUSH pbrush);
 
 static
 POINT
@@ -121,7 +123,7 @@ rect(int x, int y, int width, int height)
 static
 int
 NTAPI
-app_draw_ellipse(DC *g, Rect r, PBRUSH pbrush, int wy)
+app_draw_ellipse_small(DC *g, Rect r, PBRUSH pbrush, int wy)
 {
     /* Outer ellipse: e(x,y) = b*b*x*x + a*a*y*y - a*a*b*b */
 
@@ -356,6 +358,45 @@ app_draw_ellipse(DC *g, Rect r, PBRUSH pbrush, int wy)
  *  the left of the end_angle.
  */
 
+/* x0 + dy * run / rise, rise != 0, in 64 bits and saturated to a LONG: the 32 bit product of two coordinate
+   differences overflows for boxes near the limits of the coordinate range (and INT_MIN / -1 is a divide error) */
+static
+LONG
+FASTCALL
+app_line_x(LONG x0, LONGLONG dy, LONGLONG run, LONGLONG rise)
+{
+    LONGLONG q;
+    LONGLONG ady = dy < 0 ? -dy : dy;
+    LONGLONG arun = run < 0 ? -run : run;
+    LONGLONG arise = rise < 0 ? -rise : rise;
+
+    /* the usual case, a box of a few thousand pixels: the 32 bit arithmetic, as it was */
+    if (ady < 0x8000 && arun < 0x8000 && arise < 0x8000)
+        return x0 + (LONG)dy * (LONG)run / (LONG)rise;
+
+    if (ady != 0 && arun > 0x7FFFFFFFFFFFFFFFLL / ady)
+    {
+        double d = (double)dy * (double)run / (double)rise;
+
+        if (d > 4294967296.0)
+            d = 4294967296.0;
+        else if (d < -4294967296.0)
+            d = -4294967296.0;
+        q = (LONGLONG)d;
+    }
+    else
+    {
+        q = dy * run / rise;
+    }
+
+    q += x0;
+    if (q > 0x7FFFFFFFLL)
+        q = 0x7FFFFFFFLL;
+    else if (q < -0x7FFFFFFFLL - 1)
+        q = -0x7FFFFFFFLL - 1;
+    return (LONG)q;
+}
+
 /*
  *  Fill a rectangle within an arc, given the centre point p0,
  *  and the two end points of the lines corresponding to the
@@ -379,12 +420,12 @@ app_fill_arc_rect(DC *g,
 {
     int x1, x2;
     int start_above, end_above;
-    long rise1, run1, rise2, run2;
+    LONGLONG rise1, run1, rise2, run2;
 
-    rise1 = p1.y - p0.y;
-    run1  = p1.x - p0.x;
-    rise2 = p2.y - p0.y;
-    run2  = p2.x - p0.x;
+    rise1 = (LONGLONG)p1.y - p0.y;
+    run1  = (LONGLONG)p1.x - p0.x;
+    rise2 = (LONGLONG)p2.y - p0.y;
+    run2  = (LONGLONG)p2.x - p0.x;
 
     if (r.y <= p0.y) //
     {
@@ -397,7 +438,7 @@ app_fill_arc_rect(DC *g,
             if (rise1 == 0)
                 x1 = p1.x;
             else
-                x1 = p0.x + (r.y-p0.y)*run1/rise1;
+                x1 = app_line_x(p0.x, (LONGLONG)r.y - p0.y, run1, rise1);
             start_above = 1;
         }
         else if ((start_angle >= 0) && (start_angle <= 180))
@@ -424,7 +465,7 @@ app_fill_arc_rect(DC *g,
             if (rise2 == 0)
                 x2 = p2.x;
             else
-                x2 = p0.x + (r.y-p0.y)*run2/rise2;
+                x2 = app_line_x(p0.x, (LONGLONG)r.y - p0.y, run2, rise2);
             end_above = 1;
         }
         else if ((end_angle >= 0) && (end_angle <= 180))
@@ -495,7 +536,7 @@ app_fill_arc_rect(DC *g,
             if (rise1 == 0)
                 x1 = p1.x;
             else
-                x1 = p0.x + (r.y-p0.y)*run1/rise1;
+                x1 = app_line_x(p0.x, (LONGLONG)r.y - p0.y, run1, rise1);
             start_above = 0;
         }
         else if ((start_angle >= 180) && (start_angle <= 360))
@@ -522,7 +563,7 @@ app_fill_arc_rect(DC *g,
             if (rise2 == 0)
                 x2 = p2.x;
             else
-                x2 = p0.x + (r.y-p0.y)*run2/rise2;
+                x2 = app_line_x(p0.x, (LONGLONG)r.y - p0.y, run2, rise2);
             end_above = 0;
         }
         else if ((end_angle >= 180) && (end_angle <= 360))
@@ -614,7 +655,7 @@ app_fill_arc_rect(DC *g,
 static
 int
 FASTCALL
-app_fill_ellipse(DC *g, Rect r, PBRUSH pbrush)
+app_fill_ellipse_small(DC *g, Rect r, PBRUSH pbrush)
 {
     /* e(x,y) = b*b*x*x + a*a*y*y - a*a*b*b */
 
@@ -735,6 +776,19 @@ app_fill_ellipse(DC *g, Rect r, PBRUSH pbrush)
     return result;
 }
 
+/* A double as an int, saturated (the cast of an out of range double is undefined) */
+static
+int
+FASTCALL
+app_sat_int(double d)
+{
+    if (!(d > -2147483648.0))
+        return (-0x7FFFFFFF - 1);
+    if (d > 2147483647.0)
+        return 0x7FFFFFFF;
+    return (int)d;
+}
+
 static
 POINT
 FASTCALL
@@ -771,18 +825,19 @@ app_boundary_point(Rect r, int angle)
     tangent = tan(DEGREES_TO_RADIANS(angle));
 
     if ((angle > 45) && (angle < 135))
-        return pt((int)(cx+r.height/tangent/2), r.y);
+        return pt(app_sat_int(cx+r.height/tangent/2), r.y);
     else if ((angle > 225) && (angle < 315))
-        return pt((int)(cx-r.height/tangent/2), r.y+r.height);
+        return pt(app_sat_int(cx-r.height/tangent/2), r.y+r.height);
     else if ((angle > 135) && (angle < 225))
-        return pt(r.x, (int)(cy+r.width*tangent/2));
+        return pt(r.x, app_sat_int(cy+r.width*tangent/2));
     else
-        return pt(r.x+r.width, (int)(cy-r.width*tangent/2));
+        return pt(r.x+r.width, app_sat_int(cy-r.width*tangent/2));
 }
 
+static
 int
 FASTCALL
-app_fill_arc(DC *g, Rect r, int start_angle, int end_angle, PBRUSH pbrush, BOOL Chord)
+app_fill_arc_small(DC *g, Rect r, int start_angle, int end_angle, PBRUSH pbrush, BOOL Chord)
 {
     /* e(x,y) = b*b*x*x + a*a*y*y - a*a*b*b */
 
@@ -959,7 +1014,9 @@ app_fill_arc(DC *g, Rect r, int start_angle, int end_angle, PBRUSH pbrush, BOOL 
     return result;
 }
 
-int app_draw_arc(DC *g, Rect r, int start_angle, int end_angle, PBRUSH pbrushPen, BOOL Chord, int wy)
+static
+int
+app_draw_arc_small(DC *g, Rect r, int start_angle, int end_angle, PBRUSH pbrushPen, BOOL Chord, int wy)
 {
     /* Outer ellipse: e(x,y) = b*b*x*x + a*a*y*y - a*a*b*b */
 
@@ -1225,6 +1282,328 @@ int app_draw_arc(DC *g, Rect r, int start_angle, int end_angle, PBRUSH pbrushPen
     }
 
     return result;
+}
+
+
+/*
+ *  The ring routines above step along the outline of the whole box with 32 bit integers: their intermediate values
+ *  (a*a*b and so on) overflow for boxes of about 1800 pixels and more (the shapes come out wrong), and they take time
+ *  and fill calls in proportion to the size of the box, not to what is visible (a box of 2^27 pixels stalls the call for
+ *  minutes). Boxes where the 32 bit arithmetic holds (and that are not larger than a few screens) go to those routines,
+ *  unchanged. Bigger boxes are drawn by app_ring_big: one span per visible row, from the equation of the ellipse in
+ *  double precision, so the work is proportional to the visible rows (the clip bounds), whatever the box.
+ */
+#define APP_RING_MAX_DIM    8192
+#define APP_RING_MAX_CUBE   0x19000000LL    /* a*a*b < 4.2e8: no intermediate value of the stepping reaches 2^31 */
+#define APP_RING_MAX_COORD  0x40000000LL
+
+static
+BOOL
+FASTCALL
+app_ring_is_small(Rect r)
+{
+    LONGLONG w = r.width, h = r.height;
+    LONGLONG a, b, m1, m2;
+
+    if (w < 0) w = -w;
+    if (h < 0) h = -h;
+    if (w > APP_RING_MAX_DIM || h > APP_RING_MAX_DIM)
+        return FALSE;
+
+    a = w / 2;
+    b = h / 2;
+    m1 = a * a * b;
+    m2 = b * b * a;
+    if (m1 > APP_RING_MAX_CUBE || m2 > APP_RING_MAX_CUBE)
+        return FALSE;
+
+    /* The box and the rectangles derived from it keep away from the end of the int range */
+    if (r.x > APP_RING_MAX_COORD || r.x < -APP_RING_MAX_COORD ||
+        r.y > APP_RING_MAX_COORD || r.y < -APP_RING_MAX_COORD ||
+        (LONGLONG)r.x + r.width > APP_RING_MAX_COORD || (LONGLONG)r.x + r.width < -APP_RING_MAX_COORD ||
+        (LONGLONG)r.y + r.height > APP_RING_MAX_COORD || (LONGLONG)r.y + r.height < -APP_RING_MAX_COORD)
+        return FALSE;
+
+    return TRUE;
+}
+
+/* What a draw through the clip object of the DC can reach, in the coordinates the shapes are computed in (the DC origin
+   is added by IntFillRect). FALSE when there is no surface. */
+static
+BOOL
+FASTCALL
+app_visible_window(DC *g, LONGLONG *pl, LONGLONG *pt, LONGLONG *pr, LONGLONG *pb)
+{
+    RECTL rcl;
+    SURFACE *psurf = g->dclevel.pSurface;
+    LONGLONG l, t, r, b;
+
+    if (psurf == NULL)
+        return FALSE;
+
+    DC_vGetClipLimit(g, CLIPLIM_BITBLT, &rcl);
+    l = rcl.left;
+    t = rcl.top;
+    r = rcl.right;
+    b = rcl.bottom;
+
+    /* the surface */
+    if (l < 0) l = 0;
+    if (t < 0) t = 0;
+    if (r > psurf->SurfObj.sizlBitmap.cx) r = psurf->SurfObj.sizlBitmap.cx;
+    if (b > psurf->SurfObj.sizlBitmap.cy) b = psurf->SurfObj.sizlBitmap.cy;
+
+    *pl = l - g->ptlDrawShift.x;
+    *pt = t - g->ptlDrawShift.y;
+    *pr = r - g->ptlDrawShift.x;
+    *pb = b - g->ptlDrawShift.y;
+    return TRUE;
+}
+
+static
+int
+FASTCALL
+app_ring_span(DC *g,
+              LONGLONG wl, LONGLONG wr,
+              LONGLONG y, LONGLONG x0, LONGLONG x1,   /* pixels x0..x1 inclusive of row y */
+              BOOL bArc, POINT p0, POINT p1, POINT p2, int start_angle, int end_angle,
+              PBRUSH pbrush, BOOL Pen)
+{
+    if (x0 < wl) x0 = wl;
+    if (x1 > wr - 1) x1 = wr - 1;
+    if (x0 > x1)
+        return 1;
+
+    if (bArc)
+        return app_fill_arc_rect(g, rect((int)x0, (int)y, (int)(x1 - x0 + 1), 1),
+                                 p0, p1, p2, start_angle, end_angle, pbrush, Pen);
+    return app_fill_rect(g, rect((int)x0, (int)y, (int)(x1 - x0 + 1), 1), pbrush, Pen);
+}
+
+/* The span of the pixels whose centres lie inside the ellipse of the semi axes a, b around (cx, cy), on the row of the
+   pixels y (centre y + 0.5); FALSE when the row has none */
+static
+BOOL
+FASTCALL
+app_ring_extent(double cx, double cy, double a, double b, LONGLONG y, LONGLONG *px0, LONGLONG *px1)
+{
+    double dy, k, xe, d0, d1;
+
+    if (!(a > 0.0) || !(b > 0.0))
+        return FALSE;
+
+    dy = ((double)y + 0.5 - cy) / b;
+    k = 1.0 - dy * dy;
+    if (k < 0.0)
+        return FALSE;
+    xe = a * sqrt(k);
+    d0 = ceil(cx - xe - 0.5);
+    d1 = floor(cx + xe - 0.5);
+    if (d0 > d1)
+        return FALSE;
+    if (d0 < -4611686018427387904.0 || d1 > 4611686018427387904.0)
+        return FALSE;
+    *px0 = (LONGLONG)d0;
+    *px1 = (LONGLONG)d1;
+    return TRUE;
+}
+
+/* The ring (bDraw: the outline of the pen widths w, wy) or the disc of the ellipse in the box r; for an arc (bArc) the part
+   between the radial lines at start_angle and end_angle (the angles as the stepping routines get them). One span per visible
+   row. The floating point work is inside a saved FPU state: the ellipse callers hold none. */
+static BOOL FASTCALL app_arc_angles(int *pstart, int *pend, BOOL *pbEllipse);
+static BOOL FASTCALL app_arc_points(Rect r, int start_angle, int end_angle, BOOL Chord, POINT *pp0, POINT *pp1, POINT *pp2);
+static int FASTCALL app_ring_rows(DC *g, Rect r, PBRUSH pbrush, int w, int wy, BOOL bDraw, BOOL bArc,
+                                  POINT p0, POINT p1, POINT p2, int start_angle, int end_angle);
+
+static
+int
+FASTCALL
+app_ring_big(DC *g, Rect r, PBRUSH pbrush, int w, int wy, BOOL bDraw, BOOL bArc, BOOL Chord,
+             int start_angle, int end_angle)
+{
+    KFLOATING_SAVE fpsave;
+    POINT p0 = {0, 0}, p1 = {0, 0}, p2 = {0, 0};
+    BOOL bEllipse = FALSE;
+    int result;
+
+    if (!NT_SUCCESS(KeSaveFloatingPointState(&fpsave)))
+    {
+        EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return 0;
+    }
+
+    if (bArc)
+    {
+        if (!app_arc_angles(&start_angle, &end_angle, &bEllipse))
+        {
+            KeRestoreFloatingPointState(&fpsave);
+            return 1;
+        }
+        if (!bEllipse)
+            app_arc_points(r, start_angle, end_angle, Chord, &p0, &p1, &p2);
+        else
+            bArc = FALSE;
+    }
+
+    result = app_ring_rows(g, r, pbrush, w, wy, bDraw, bArc, p0, p1, p2, start_angle, end_angle);
+    KeRestoreFloatingPointState(&fpsave);
+    return result;
+}
+
+/* The angles of the arc routines as the stepping routines take them: both in 0..359; FALSE when they coincide (nothing to
+   draw) and TRUE with *pbEllipse when the arc is the whole ellipse */
+static
+BOOL
+FASTCALL
+app_arc_angles(int *pstart, int *pend, BOOL *pbEllipse)
+{
+    int start_angle = *pstart, end_angle = *pend;
+
+    *pbEllipse = FALSE;
+    if ((start_angle + 360 <= end_angle) || (start_angle - 360 >= end_angle))
+    {
+        *pbEllipse = TRUE;
+        return TRUE;
+    }
+
+    while (start_angle < 0)
+        start_angle += 360;
+    start_angle %= 360;
+    while (end_angle < 0)
+        end_angle += 360;
+    end_angle %= 360;
+
+    *pstart = start_angle;
+    *pend = end_angle;
+    return start_angle != end_angle;
+}
+
+static
+BOOL
+FASTCALL
+app_arc_points(Rect r, int start_angle, int end_angle, BOOL Chord, POINT *pp0, POINT *pp1, POINT *pp2)
+{
+    *pp1 = app_boundary_point(r, start_angle);
+    *pp2 = app_boundary_point(r, end_angle);
+    if (Chord)
+        *pp0 = pt((int)(((LONGLONG)pp1->x + pp2->x) / 2), (int)(((LONGLONG)pp1->y + pp2->y) / 2));
+    else
+        *pp0 = pt((int)((LONGLONG)r.x + r.width / 2), (int)((LONGLONG)r.y + r.height / 2));
+    return TRUE;
+}
+
+static
+int
+FASTCALL
+app_ring_rows(DC *g, Rect r, PBRUSH pbrush, int w, int wy, BOOL bDraw, BOOL bArc,
+              POINT p0, POINT p1, POINT p2, int start_angle, int end_angle)
+{
+    LONGLONG wl, wt, wr, wb, y, y0, y1;
+    LONGLONG ox0, ox1, ix0, ix1;
+    double cx, cy, a, b, ia, ib;
+    int result = 1;
+
+    if (r.width <= 0 || r.height <= 0)
+        return 1;
+
+    if (!app_visible_window(g, &wl, &wt, &wr, &wb))
+    {
+        EngSetLastError(ERROR_INVALID_HANDLE);
+        return 0;
+    }
+
+    if ((r.width <= 2) || (r.height <= 2))
+    {
+        if (!bArc)
+        {
+            LONGLONG x0 = r.x, x1 = (LONGLONG)r.x + r.width - 1;
+
+            y0 = r.y;
+            y1 = (LONGLONG)r.y + r.height - 1;
+            if (y0 < wt) y0 = wt;
+            if (y1 > wb - 1) y1 = wb - 1;
+            for (y = y0; y <= y1; y++)
+                result &= app_ring_span(g, wl, wr, y, x0, x1, FALSE, p0, p1, p2, 0, 0, pbrush, bDraw);
+            return result;
+        }
+    }
+
+    a = r.width / 2.0;
+    b = r.height / 2.0;
+    cx = (double)r.x + a;
+    cy = (double)r.y + b;
+    ia = a - (double)w;
+    ib = b - (double)wy;
+    if (ia < 0.0) ia = 0.0;
+    if (ib < 0.0) ib = 0.0;
+
+    y0 = r.y;
+    y1 = (LONGLONG)r.y + r.height - 1;
+    if (y0 < wt) y0 = wt;
+    if (y1 > wb - 1) y1 = wb - 1;
+
+    for (y = y0; y <= y1; y++)
+    {
+        if (!app_ring_extent(cx, cy, a, b, y, &ox0, &ox1))
+            continue;
+
+        if (bDraw && app_ring_extent(cx, cy, ia, ib, y, &ix0, &ix1))
+        {
+            /* The two parts of the ring on either side of the inner ellipse */
+            if (ix0 > ox0)
+                result &= app_ring_span(g, wl, wr, y, ox0, ix0 - 1, bArc, p0, p1, p2, start_angle, end_angle, pbrush, TRUE);
+            if (ix1 < ox1)
+                result &= app_ring_span(g, wl, wr, y, ix1 + 1, ox1, bArc, p0, p1, p2, start_angle, end_angle, pbrush, TRUE);
+        }
+        else
+        {
+            result &= app_ring_span(g, wl, wr, y, ox0, ox1, bArc, p0, p1, p2, start_angle, end_angle, pbrush, bDraw);
+        }
+    }
+
+    return result;
+}
+
+static
+int
+NTAPI
+app_draw_ellipse(DC *g, Rect r, PBRUSH pbrush, int wy)
+{
+    if (app_ring_is_small(r))
+        return app_draw_ellipse_small(g, r, pbrush, wy);
+
+    return app_ring_big(g, r, pbrush, pbrush->lWidth, wy, TRUE, FALSE, FALSE, 0, 0);
+}
+
+static
+int
+FASTCALL
+app_fill_ellipse(DC *g, Rect r, PBRUSH pbrush)
+{
+    if (app_ring_is_small(r))
+        return app_fill_ellipse_small(g, r, pbrush);
+
+    return app_ring_big(g, r, pbrush, 0, 0, FALSE, FALSE, FALSE, 0, 0);
+}
+
+int
+FASTCALL
+app_fill_arc(DC *g, Rect r, int start_angle, int end_angle, PBRUSH pbrush, BOOL Chord)
+{
+    if (app_ring_is_small(r))
+        return app_fill_arc_small(g, r, start_angle, end_angle, pbrush, Chord);
+
+    return app_ring_big(g, r, pbrush, 0, 0, FALSE, TRUE, Chord, start_angle, end_angle);
+}
+
+int
+app_draw_arc(DC *g, Rect r, int start_angle, int end_angle, PBRUSH pbrushPen, BOOL Chord, int wy)
+{
+    if (app_ring_is_small(r))
+        return app_draw_arc_small(g, r, start_angle, end_angle, pbrushPen, Chord, wy);
+
+    return app_ring_big(g, r, pbrushPen, pbrushPen->lWidth, wy, TRUE, TRUE, Chord, start_angle, end_angle);
 }
 
 /* ReactOS Interface *********************************************************/

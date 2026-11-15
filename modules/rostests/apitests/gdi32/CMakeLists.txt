@@ -5,6 +5,7 @@ list(APPEND SOURCE
     AddFontMemResourceEx.c
     AddFontResource.c
     AddFontResourceEx.c
+    ArcHugeBox.c
     BeginPath.c
     BezierExtremeCoords.c
     BitBltBrushOrigin.c
