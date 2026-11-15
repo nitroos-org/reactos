@@ -542,7 +542,8 @@ LibTCPListenerInput6(void)
 #define TCP6_SUFFIX_WELLKNOWN   2
 #define TCP6_SUFFIX_LINKLAYER   4
 
-#define TCP6_MAX_TABLE_INTERFACES 256
+/* (with LWIP_IPV6_NUM_ADDRESSES 8 the answer for 256 interfaces would pass the cap below) */
+#define TCP6_MAX_TABLE_INTERFACES 128
 
 /* The answer is copied through a pool block that InfoTdiQueryGetIpv6Table (info.c) caps at 64 KB: the largest
    answer has to stay below the cap, or the caller would get a size that is no answer */
@@ -624,6 +625,7 @@ TCPQueryIpv6Table(PVOID Out, ULONG OutSize)
             u8_t State = netif_ip6_addr_state(netif, a);
             const ip6_addr_t *Address = netif_ip6_addr(netif, a);
             PTCP_IPV6_ADDRESS_ROW Row;
+            TCP6_ADDRESS_INFO Info;
 
             if (ip6_addr_isinvalid(State))
                 continue;
@@ -640,7 +642,15 @@ TCPQueryIpv6Table(PVOID Out, ULONG OutSize)
             else
                 Row->DadState = TCP6_DAD_PREFERRED;
 
-            if (ip6_addr_isloopback(Address))
+            if (TCP6AddressInfo(netif, a, &Info))
+            {
+                /* configured (addr6.c): what was asked for it */
+                Row->PrefixLength = Info.PrefixLength;
+                Row->PrefixOrigin = Info.PrefixOrigin;
+                Row->SuffixOrigin = Info.SuffixOrigin;
+                Row->Flags = Info.Flags;
+            }
+            else if (ip6_addr_isloopback(Address))
             {
                 Row->PrefixLength = 128;
                 Row->PrefixOrigin = TCP6_PREFIX_WELLKNOWN;

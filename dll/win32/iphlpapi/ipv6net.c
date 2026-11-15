@@ -532,6 +532,21 @@ DWORD Ipv6GetRouteRows(PMIB_IPFORWARD_ROW2 *Rows, ULONG *Count)
 
 /* ---- the best route ---- */
 
+/* The number of leading bits two addresses share */
+static ULONG common_bits(const UCHAR *A, const UCHAR *B)
+{
+  ULONG Bits = 0, i;
+  UCHAR Diff;
+
+  for (i = 0; i < 16 && A[i] == B[i]; i++)
+    Bits += 8;
+  if (i == 16)
+    return Bits;
+  for (Diff = A[i] ^ B[i]; !(Diff & 0x80); Diff <<= 1)
+    Bits++;
+  return Bits;
+}
+
 /* The address a packet to Dest leaves with over interface IfIndex */
 static void pick_source(const IPV6_ALL *All, DWORD IfIndex, const UCHAR *Dest, SOCKADDR_INET *Source)
 {
@@ -547,6 +562,9 @@ static void pick_source(const IPV6_ALL *All, DWORD IfIndex, const UCHAR *Dest, S
       continue;
     if (!memcmp(Row->Address, Dest, 16))
       Own = Row;
+    /* an address configured with skip-as-source is not chosen (only bound to) */
+    if (Row->Flags & TCP_IPV6_ADDRESS_SKIP_AS_SOURCE)
+      continue;
     if (is_loopback_address(Row->Address))
       Loopback = Row;
     else if (is_link_local(Row->Address))
@@ -554,7 +572,11 @@ static void pick_source(const IPV6_ALL *All, DWORD IfIndex, const UCHAR *Dest, S
       if (!LinkLocal)
         LinkLocal = Row;
     }
-    else if (!Global || (Global->DadState != DAD_PREFERRED && Row->DadState == DAD_PREFERRED))
+    /* a preferred address before a deprecated one, then the longest prefix in common with the destination
+       (RFC 6724 rules 3 and 8) */
+    else if (!Global || (Global->DadState != DAD_PREFERRED && Row->DadState == DAD_PREFERRED) ||
+             (Global->DadState == Row->DadState &&
+              common_bits(Row->Address, Dest) > common_bits(Global->Address, Dest)))
       Global = Row;
   }
 

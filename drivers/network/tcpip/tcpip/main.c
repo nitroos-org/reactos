@@ -628,6 +628,12 @@ TiDispatch(
                     Status = DispTdiDeleteIPAddress(Irp, IrpSp);
                 break;
 
+            case IOCTL_IP6_ADDRESS_CONFIG:
+                Status = TiCheckControlAccess(Irp);
+                if (NT_SUCCESS(Status))
+                    Status = DispAddressConfig6(Irp, IrpSp);
+                break;
+
             case IOCTL_IP6_ROUTE_CONFIG:
                 Status = TiCheckControlAccess(Irp);
                 if (NT_SUCCESS(Status))

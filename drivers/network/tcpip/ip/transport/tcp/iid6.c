@@ -48,6 +48,7 @@
 #include "lwip/nd6.h"
 #include "lwip/netif.h"
 #include "lwip/tcpip.h"
+#include <lwip_hooks.h>
 
 #if defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_AMD64))
 #include <immintrin.h>
@@ -243,6 +244,9 @@ LibNd6DadFailed(struct netif *netif, s8_t Index)
     UCHAR Counter;
 
     if (!Iid6Applies(netif) || !ip6_addr_istentative(netif_ip6_addr_state(netif, Index)))
+        return 0;
+    /* a configured address (addr6.c) stays what it is: duplicated */
+    if (LibNd6AddrConfigured(netif, Index))
         return 0;
 
     IP6_ADDR(&Prefix, Current->addr[0], Current->addr[1], 0, 0);

@@ -296,6 +296,27 @@ TCP6ReferenceInterface(ULONG IfIndex);
 BOOLEAN
 TCP6NetifRegistered(struct netif *netif);
 
+/* Configured IPv6 addresses (addr6.c): IOCTL_IP6_ADDRESS_CONFIG; what was configured for the address in an lwIP
+   address slot (FALSE: the stack formed it); the entries of an interface that goes; all of them under the core lock */
+typedef struct _TCP6_ADDRESS_INFO
+{
+    UCHAR PrefixLength;
+    UCHAR PrefixOrigin;     /* NL_PREFIX_ORIGIN */
+    UCHAR SuffixOrigin;     /* NL_SUFFIX_ORIGIN */
+    ULONG Flags;            /* TCP_IPV6_ADDRESS_ */
+} TCP6_ADDRESS_INFO, *PTCP6_ADDRESS_INFO;
+
+extern ULONG Addr6Count;
+
+NTSTATUS
+DispAddressConfig6(PIRP Irp, PIO_STACK_LOCATION IrpSp);
+
+BOOLEAN
+TCP6AddressInfo(struct netif *netif, signed char Slot, PTCP6_ADDRESS_INFO Info);
+
+VOID
+TCP6RemoveAddressesOfNetif(struct netif *netif);
+
 /* The counters of the IPv6 path (nd6info.c): a datagram leaves through the IPv6 output callback (the opens of TCP
    connections are counted from lwip_glue/tcp.c, see lwip_glue.h) */
 struct pbuf;

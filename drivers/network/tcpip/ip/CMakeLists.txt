@@ -31,6 +31,7 @@ list(APPEND SOURCE
     transport/datagram/datagram.c
     transport/rawip/rawip.c
     transport/tcp/accept.c
+    transport/tcp/addr6.c
     transport/tcp/event.c
     transport/tcp/if.c
     transport/tcp/if6.c

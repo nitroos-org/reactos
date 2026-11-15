@@ -65,6 +65,14 @@
 #define LWIP_HOOK_IP6_ROUTE(src, dest)  LibIp6Route(src, dest)
 #define LWIP_HOOK_ND6_GET_GW(netif, dest) LibNd6GetGw(netif, dest)
 #define LWIP_HOOK_ND6_TMR()             LibNd6Timer()
+/* Configured addresses (addr6.c): router advertisements and the DAD of the link-local address leave them alone, and
+ * one marked skip-as-source is not chosen as a source (NitroOS hooks in nd6.c and ip6.c) */
+#define LWIP_HOOK_ND6_ADDR_CONFIGURED(netif, i) LibNd6AddrConfigured(netif, i)
+#define LWIP_HOOK_IP6_SKIP_SOURCE(netif, i) LibIp6SkipSource(netif, i)
+/* Address slots per interface: the link-local address, SLAAC addresses of the advertised prefixes, and configured
+ * ones (lwIP's default is 3). A slot costs about 30 bytes per interface (address with zone, state, two lifetimes);
+ * the loops over the slots are per datagram for the source and route choice (ip6.c), per interface */
+#define LWIP_IPV6_NUM_ADDRESSES         8
 /* Interface events: with IPv6 on, address changes set the adapter's multicast list (if6.c). Nothing listens
  * with it off */
 #define LWIP_NETIF_EXT_STATUS_CALLBACK  1

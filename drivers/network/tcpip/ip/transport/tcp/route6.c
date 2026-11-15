@@ -9,7 +9,8 @@
  * lwIP routes IPv6 by its neighbour discovery state alone: the on-link prefixes and default routers router
  * advertisements gave (nd6.c), and the /64 of a static address. This file adds the routes an administrator
  * configures (IOCTL_IP6_ROUTE_CONFIG: prefix and length, next hop or on-link, interface, metric, lifetimes, origin,
- * protocol) and makes one table of them and the router advertisement routes:
+ * protocol) and makes one table of them, the on-link prefixes of configured addresses (addr6.c) and the router
+ * advertisement routes:
  *
  * - the stack routes by it: lwIP asks LibIp6Route (LWIP_HOOK_IP6_ROUTE) for the interface of a destination that has
  *   no zone, and LibNd6GetGw (LWIP_HOOK_ND6_GET_GW) for the next hop of a destination that is not on-link by lwIP's
@@ -36,14 +37,18 @@
 #include "lwip/nd6.h"
 #include "lwip/netif.h"
 #include "lwip/tcpip.h"
+#include <lwip_hooks.h>
 #include "lwip/priv/nd6_priv.h"
 
 /* Configured routes, over all interfaces */
 #define ROUTE6_MAX              256
 /* The metric of the routes router advertisements give, as iphlpapi reports them */
 #define ROUTE6_RA_METRIC        256
-/* NL_ROUTE_ORIGIN and NL_ROUTE_PROTOCOL values of router advertisement routes */
+/* NL_ROUTE_ORIGIN and NL_ROUTE_PROTOCOL values of router advertisement routes, and of the on-link prefix of a
+   configured address (a route of the stack, as the host routes are) */
+#define ROUTE6_ORIGIN_MANUAL    0
 #define ROUTE6_ORIGIN_RA        3
+#define ROUTE6_PROTOCOL_LOCAL   2
 #define ROUTE6_PROTOCOL_NETMGMT 3
 #define ROUTE6_INFINITE         0xFFFFFFFF
 
@@ -176,6 +181,46 @@ Route6Consider(PROUTE6_MATCH Best, struct netif *netif, UCHAR Length, ULONG Metr
     Best->NextHop = NextHop;
 }
 
+/* The on-link prefix the configured address in a slot gives: FALSE for none (the address was formed by the
+   stack, is duplicated, is link-local: fe80::/64 is on-link anyway, or has a /128) (core lock held) */
+static
+BOOLEAN
+Route6AddressPrefix(struct netif *netif, s8_t Slot, ip6_addr_t *Prefix, PUCHAR Length)
+{
+    TCP6_ADDRESS_INFO Info;
+    const ip6_addr_t *Address;
+
+    if (!TCP6AddressInfo(netif, Slot, &Info) || ip6_addr_isduplicated(netif_ip6_addr_state(netif, Slot)))
+        return FALSE;
+    Address = netif_ip6_addr(netif, Slot);
+    if (ip6_addr_islinklocal(Address) || Info.PrefixLength >= 128)
+        return FALSE;
+
+    ip6_addr_set(Prefix, Address);
+    ip6_addr_clear_zone(Prefix);
+    Route6Mask(Prefix, Info.PrefixLength);
+    *Length = Info.PrefixLength;
+    return TRUE;
+}
+
+/* Whether an earlier slot of netif gives the same on-link prefix (core lock held) */
+static
+BOOLEAN
+Route6AddressPrefixSeen(struct netif *netif, s8_t Slot, const ip6_addr_t *Prefix, UCHAR Length)
+{
+    ip6_addr_t Other;
+    UCHAR OtherLength;
+    s8_t i;
+
+    for (i = 0; i < Slot; i++)
+    {
+        if (Route6AddressPrefix(netif, i, &Other, &OtherLength) && OtherLength == Length &&
+            ip6_addr_zoneless_eq(&Other, Prefix))
+            return TRUE;
+    }
+    return FALSE;
+}
+
 /* The best route to Dest (no zone), over any interface or only over Only (core lock held) */
 static
 BOOLEAN
@@ -201,6 +246,26 @@ Route6Find(const ip6_addr_t *Dest, struct netif *Only, PROUTE6_MATCH Best)
             continue;
         Route6Consider(Best, Entry->Netif, Entry->PrefixLength, Entry->Metric,
                        Entry->OnLink ? NULL : &Entry->NextHop, FALSE);
+    }
+
+    /* the on-link prefixes of configured addresses */
+    if (Addr6Count)
+    {
+        struct netif *netif;
+        ip6_addr_t Prefix;
+        UCHAR Length;
+        s8_t Slot;
+
+        NETIF_FOREACH(netif)
+        {
+            if ((Only && netif != Only) || !Route6NetifUsable(netif))
+                continue;
+            for (Slot = 0; Slot < LWIP_IPV6_NUM_ADDRESSES; Slot++)
+            {
+                if (Route6AddressPrefix(netif, Slot, &Prefix, &Length) && Route6Covers(&Prefix, Length, Dest))
+                    Route6Consider(Best, netif, Length, ROUTE6_RA_METRIC, NULL, FALSE);
+            }
+        }
     }
 
     /* lwIP's on-link prefixes are /64 (nd6.c) */
@@ -254,7 +319,7 @@ static
 BOOLEAN
 Route6Active(VOID)
 {
-    return Route6Count != 0;
+    return Route6Count != 0 || Addr6Count != 0;
 }
 
 /* LWIP_HOOK_IP6_ROUTE (core lock held): the interface for a destination without a zone, when a configured route is
@@ -328,12 +393,15 @@ LibNd6Timer(void)
     }
 }
 
-/* The interface goes (core lock held, before netif_remove): its configured routes go with it */
+/* The interface goes (core lock held, before netif_remove): its configured routes go with it, and what was kept for
+   its configured addresses */
 VOID
 TCP6RemoveRoutesOfNetif(struct netif *netif)
 {
     BOOLEAN Changed = FALSE;
     ULONG i;
+
+    TCP6RemoveAddressesOfNetif(netif);
 
     for (i = 0; i < ROUTE6_MAX && Route6Count; i++)
     {
@@ -415,6 +483,44 @@ TCPQueryIpv6Routes(PVOID Out, ULONG OutSize)
         Row->Protocol = Entry->Protocol;
         Row->Flags = Entry->Flags;
         Row->Age = (ULONG)min(Now - Entry->Created, 0xFFFFFFFFULL);
+    }
+
+    /* The on-link prefixes of configured addresses (one row for a prefix two of them share) */
+    if (Addr6Count)
+    {
+        struct netif *netif;
+        ip6_addr_t Prefix;
+        UCHAR Length;
+        s8_t Slot;
+
+        NETIF_FOREACH(netif)
+        {
+            ULONG IfIndex = Route6IfIndex(netif);
+
+            if (!IfIndex)
+                continue;
+            for (Slot = 0; Slot < LWIP_IPV6_NUM_ADDRESSES; Slot++)
+            {
+                u32_t Valid, Preferred;
+
+                if (!Route6AddressPrefix(netif, Slot, &Prefix, &Length) ||
+                    Route6AddressPrefixSeen(netif, Slot, &Prefix, Length))
+                    continue;
+                Valid = netif_ip6_addr_valid_life(netif, Slot);
+                Preferred = netif_ip6_addr_pref_life(netif, Slot);
+
+                Row = Route6NextRow(Rows, Fits, OutSize, &Count, &Scratch);
+                Row->IfIndex = IfIndex;
+                RtlCopyMemory(Row->Prefix, Prefix.addr, 16);
+                Row->PrefixLength = Length;
+                Row->Metric = ROUTE6_RA_METRIC;
+                Row->ValidLifetime = ip6_addr_life_isinfinite(Valid) ? ROUTE6_INFINITE : Valid;
+                Row->PreferredLifetime = ip6_addr_life_isinfinite(Preferred) ? ROUTE6_INFINITE : Preferred;
+                Row->Origin = ROUTE6_ORIGIN_MANUAL;
+                Row->Protocol = ROUTE6_PROTOCOL_LOCAL;
+                Row->Flags = TCP_IPV6_ROUTE_FROM_ADDRESS;
+            }
+        }
     }
 
     /* What router advertisements gave, as the neighbour discovery and DNS tables hand it out (nd6info.c,

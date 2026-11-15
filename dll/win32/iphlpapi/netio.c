@@ -668,6 +668,7 @@ static void fill_unicast_row6(const NETIO_IF *If, const TCP_IPV6_ADDRESS_ROW *Ad
   Out->ValidLifetime = Address->ValidLifetime;
   Out->PreferredLifetime = Address->PreferredLifetime;
   Out->OnLinkPrefixLength = (UINT8)Address->PrefixLength;
+  Out->SkipAsSource = (Address->Flags & TCP_IPV6_ADDRESS_SKIP_AS_SOURCE) != 0;
   Out->DadState = Address->DadState;
   Out->CreationTimeStamp.QuadPart = boot_time_filetime();
 }
