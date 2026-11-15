@@ -434,9 +434,13 @@ static const WCHAR g_Dashes[] = L"----------------------------------------------
 
 static VOID Line(PCWSTR label, PCWSTR value)
 {
-    WCHAR b[1400];
+    /* sized to the value: a rule with hundreds of addresses must be shown whole, not cut */
+    SIZE_T n = wcslen(label) + wcslen(value) + 64;
+    WCHAR *b = malloc(n * sizeof(WCHAR));
+    if (!b) return;
     _swprintf(b, L"%-37s %s\n", label, value);
     Out(b);
+    free(b);
 }
 
 static VOID ShowRuleEx(const FW_RULE *r, BOOL verbose, BOOL lead)
@@ -462,14 +466,17 @@ static VOID ShowRuleEx(const FW_RULE *r, BOOL verbose, BOOL lead)
         int side;
         for (side = 0; side < 2; side++)
         {
-            FWR raw; WCHAR list[1024]; ULONG i; PCWSTR k4 = side ? L"RA4" : L"LA4", k6 = side ? L"RA6" : L"LA6";
-            list[0] = 0;
+            FWR raw; PWSTR list; SIZE_T cap = 64; ULONG i; PCWSTR k4 = side ? L"RA4" : L"LA4", k6 = side ? L"RA6" : L"LA6";
             FwRuleToRaw(r, &raw);
+            for (i = 0; i < FwrCount(&raw, k4); i++) cap += wcslen(FwrGet(&raw, k4, i)) + 16;
+            for (i = 0; i < FwrCount(&raw, k6); i++) cap += wcslen(FwrGet(&raw, k6, i)) * 2 + 16;
+            list = malloc(cap * sizeof(WCHAR));
+            if (!list) { FwrFree(&raw); continue; }
+            list[0] = 0;
             for (i = 0; i < FwrCount(&raw, k4); i++)
             {
                 PCWSTR v = FwrGet(&raw, k4, i); WCHAR one[96];
                 ULONG a, b, c, d, m1, m2, m3, m4;
-                if (wcslen(list) > 900) break;
                 if (swscanf(v, L"%u.%u.%u.%u/%u.%u.%u.%u", &a, &b, &c, &d, &m1, &m2, &m3, &m4) == 8)
                 {
                     ULONG m = (m1 << 24) | (m2 << 16) | (m3 << 8) | m4, pl = 0;
@@ -484,7 +491,6 @@ static VOID ShowRuleEx(const FW_RULE *r, BOOL verbose, BOOL lead)
             for (i = 0; i < FwrCount(&raw, k6); i++)
             {
                 PCWSTR v = FwrGet(&raw, k6, i);
-                if (wcslen(list) > 900) break;
                 /* keywords were already listed for IPv4 */
                 if (!wcschr(v, L':') && !wcschr(v, L'.')) continue;
                 if (list[0]) wcscat(list, L",");
@@ -497,6 +503,7 @@ static VOID ShowRuleEx(const FW_RULE *r, BOOL verbose, BOOL lead)
             }
             FwrFree(&raw);
             Line(side ? L"RemoteIP:" : L"LocalIP:", list[0] ? list : L"Any");
+            free(list);
         }
     }
     switch (r->Protocol)
