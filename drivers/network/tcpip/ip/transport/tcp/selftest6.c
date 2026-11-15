@@ -35,6 +35,7 @@
 #include "lwip/ip6.h"
 #include "lwip/ip6_addr.h"
 #include "lwip/nd6.h"
+#include "lwip/mld6.h"
 #include "lwip/netif.h"
 #include "lwip/tcp.h"
 #include "lwip/inet_chksum.h"
@@ -1567,6 +1568,10 @@ StTestStableIds(PIP_INTERFACE Eth)
     BOOLEAN LinkLocalOk = FALSE, Ok;
     s8_t i, Free = -1;
     u8_t State = 0;
+#if LWIP_IPV6_MLD
+    ip6_addr_t OldGroup, NewGroup;
+    BOOLEAN GroupJoined = FALSE, GroupsOk = FALSE;
+#endif
 
     LOCK_TCPIP_CORE();
     RtlCopyMemory(Mac, En->hwaddr, 6);
@@ -1619,7 +1624,17 @@ StTestStableIds(PIP_INTERFACE Eth)
     netif_ip6_addr_set(En, Free, &Want);
     netif_ip6_addr_set_valid_life(En, Free, 600);
     netif_ip6_addr_set_pref_life(En, Free, 600);
+#if LWIP_IPV6_MLD
+    /* One probe sent (TENTATIVE_1), as when the DAD of a real address is under way: with MLD the address's
+       solicited-node group is joined from here on, and the conflict below must leave that group (the address
+       of the slot then) and not join the next address's group before its own probe */
+    netif_ip6_addr_set_state(En, Free, IP6_ADDR_TENTATIVE_1);
+    ip6_addr_set_solicitednode(&OldGroup, Want.addr[3]);
+    ip6_addr_assign_zone(&OldGroup, IP6_MULTICAST, En);
+    GroupJoined = (En->flags & NETIF_FLAG_MLD6) && mld6_lookfor_group(En, &OldGroup) != NULL;
+#else
     netif_ip6_addr_set_state(En, Free, IP6_ADDR_TENTATIVE);
+#endif
     UNLOCK_TCPIP_CORE();
 
     for (Round = 1; Round <= 4; Round++)
@@ -1630,6 +1645,15 @@ StTestStableIds(PIP_INTERFACE Eth)
         LOCK_TCPIP_CORE();
         ip6_addr_copy(Now, *netif_ip6_addr(En, Free));
         State = netif_ip6_addr_state(En, Free);
+#if LWIP_IPV6_MLD
+        if (Round == 1)
+        {
+            ip6_addr_set_solicitednode(&NewGroup, Now.addr[3]);
+            ip6_addr_assign_zone(&NewGroup, IP6_MULTICAST, En);
+            GroupsOk = GroupJoined && mld6_lookfor_group(En, &OldGroup) == NULL &&
+                       mld6_lookfor_group(En, &NewGroup) == NULL;
+        }
+#endif
         if (TCP6RandomizeIdentifiers && Round <= 3)
             Ok = TCP6StableAddress(En, &Prefix, (UCHAR)Round, &Want) && ip6_addr_zoneless_eq(&Now, &Want) &&
                  ip6_addr_istentative(State);
@@ -1645,6 +1669,14 @@ StTestStableIds(PIP_INTERFACE Eth)
         if (!TCP6RandomizeIdentifiers || Round > 3 || !Ok)
             break;
     }
+
+#if LWIP_IPV6_MLD
+    if (En->flags & NETIF_FLAG_MLD6)
+        StResult(GroupsOk, "MLD: a DAD conflict after the first probe leaves the old address's solicited-node group "
+                           "and does not join the next one's before its probe",
+                 GroupJoined ? (GroupsOk ? "left, none joined" : "old group still joined or new group joined early")
+                             : "the group was not joined at TENTATIVE_1");
+#endif
 
     LOCK_TCPIP_CORE();
     netif_ip6_addr_set_state(En, Free, IP6_ADDR_INVALID);
