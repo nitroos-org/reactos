@@ -1320,9 +1320,13 @@ WSHSetSocketInformation(
             LONG Default, Value;
             BOOLEAN Boolean;
 
-            /* An IPv4 socket has never had an answer here (see msafd for IPV6_V6ONLY): unchanged */
+            /* An IPv4 socket has never had an answer here (see msafd for IPV6_V6ONLY): unchanged. Only
+             * IPV6_V6ONLY is checked: Windows 10 (oracle) takes a DWORD of 0 or 1 on an AF_INET socket and
+             * ignores it, and fails a request that is too short (one byte) with WSAEFAULT */
             if (Context->AddressFamily != AF_INET6)
             {
+                if (OptionName == IPV6_V6ONLY)
+                    return (!OptionValue || OptionLength < (INT)sizeof(DWORD)) ? WSAEFAULT : 0;
                 DPRINT1("Set: Received unexpected %d option %d\n", Level, OptionName);
                 return 0;
             }
