@@ -37,6 +37,13 @@ WSPEventSelect(
         return SOCKET_ERROR;
     }
 
+    /* Events to report need an event to set: WSAEINVAL on Windows 10. Checked before anything of the socket changes */
+    if (!hEventObject && lNetworkEvents)
+    {
+        if (lpErrno) *lpErrno = WSAEINVAL;
+        return SOCKET_ERROR;
+    }
+
     Status = NtCreateEvent(&SockEvent, EVENT_ALL_ACCESS,
                            NULL, SynchronizationEvent, FALSE);
 

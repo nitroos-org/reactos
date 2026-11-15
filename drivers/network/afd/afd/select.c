@@ -323,6 +323,24 @@ AfdSelect( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     KeAcquireSpinLock( &DeviceExt->Lock, &OldIrql );
 
+    /* A socket whose handle was closed after LockHandles referenced it: its cleanup set CleanedUp
+     * and then looked for polls to cancel under this lock, and found none of ours. A poll queued
+     * now would never be cancelled, and its references keep the socket from closing.
+     * Cancel it as the cleanup does. The flag is set before the cleanup takes this lock, so
+     * either the cleanup saw our poll or we see the flag */
+    for( i = 0; i < PollReq->HandleCount; i++ ) {
+        FileObject = (PFILE_OBJECT)LockedHandles[i].Handle;
+        FCB = FileObject->FsContext;
+
+        if( FCB->CleanedUp ) {
+            ZeroEvents( PollReq->Handles, PollReq->HandleCount );
+            Status = STATUS_CANCELLED;
+            SignalSocket( NULL, Irp, PollReq, Status );
+            KeReleaseSpinLock( &DeviceExt->Lock, OldIrql );
+            return Status;
+        }
+    }
+
     for( i = 0; i < PollReq->HandleCount; i++ ) {
         FileObject = (PFILE_OBJECT)LockedHandles[i].Handle;
         FCB = FileObject->FsContext;

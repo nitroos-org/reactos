@@ -644,6 +644,9 @@ TranslateNtStatusError(NTSTATUS Status)
 
        case STATUS_INVALID_HANDLE:
           /* The socket was closed under the request */
+       case STATUS_OBJECT_TYPE_MISMATCH:
+          /* A handle that is not a socket, or an event handle that is not an event (WSAEventSelect,
+             WSAEnumNetworkEvents: measured on Windows 10) */
           return WSAENOTSOCK;
 
        case STATUS_NOT_IMPLEMENTED:
@@ -1250,6 +1253,11 @@ WSPListen(SOCKET Handle,
 }
 
 
+/* The sets of a select() that hold a socket */
+#define SELECT_IN_READ      0x01
+#define SELECT_IN_WRITE     0x02
+#define SELECT_IN_EXCEPT    0x04
+
 int
 WSPAPI
 WSPSelect(IN int nfds,
@@ -1272,6 +1280,8 @@ WSPSelect(IN int nfds,
     SOCKET              Handle;
     ULONG               Events;
     fd_set              selectfds;
+    PUCHAR              InSets;
+    BOOLEAN             Cancelled;
 
     /* Find out how many sockets we have, and how large the buffer needs
      * to be */
@@ -1352,8 +1362,8 @@ WSPSelect(IN int nfds,
         return SOCKET_ERROR;
     }
 
-    /* Allocate */
-    PollBuffer = HeapAlloc(GlobalHeap, 0, PollBufferSize);
+    /* Allocate, with one byte per handle after the request that says which sets hold it */
+    PollBuffer = HeapAlloc(GlobalHeap, 0, PollBufferSize + HandleCount);
 
     if (!PollBuffer)
     {
@@ -1364,8 +1374,10 @@ WSPSelect(IN int nfds,
     }
 
     PollInfo = (PAFD_POLL_INFO)PollBuffer;
+    InSets = (PUCHAR)PollBuffer + PollBufferSize;
 
     RtlZeroMemory( PollInfo, PollBufferSize );
+    RtlZeroMemory( InSets, HandleCount );
 
     /* Number of handles for AFD to Check */
     PollInfo->Exclusive = FALSE;
@@ -1400,6 +1412,7 @@ WSPSelect(IN int nfds,
                 NtClose(SockEvent);
                 return SOCKET_ERROR;
             }
+            InSets[j] |= SELECT_IN_READ;
             PollInfo->Handles[j].Events |= AFD_EVENT_RECEIVE |
                                            AFD_EVENT_DISCONNECT |
                                            AFD_EVENT_ABORT |
@@ -1435,6 +1448,7 @@ WSPSelect(IN int nfds,
                 NtClose(SockEvent);
                 return SOCKET_ERROR;
             }
+            InSets[j] |= SELECT_IN_WRITE;
             PollInfo->Handles[j].Handle = writefds->fd_array[i];
             PollInfo->Handles[j].Events |= AFD_EVENT_SEND;
             if (Socket->SharedData->NonBlocking != 0)
@@ -1467,6 +1481,7 @@ WSPSelect(IN int nfds,
                 NtClose(SockEvent);
                 return SOCKET_ERROR;
             }
+            InSets[j] |= SELECT_IN_EXCEPT;
             PollInfo->Handles[j].Handle = exceptfds->fd_array[i];
             if (Socket->SharedData->OobInline == 0)
                 PollInfo->Handles[j].Events |= AFD_EVENT_OOB_RECEIVE;
@@ -1499,6 +1514,9 @@ WSPSelect(IN int nfds,
         Status = IOSB.Status;
     }
 
+    /* AFD cancels the poll when a socket of the set is closed */
+    Cancelled = (Status == STATUS_CANCELLED);
+
     /* Clear the Structures */
     if( readfds )
         FD_ZERO(readfds);
@@ -1515,6 +1533,25 @@ WSPSelect(IN int nfds,
     {
         Events = PollInfo->Handles[i].Events;
         Handle = PollInfo->Handles[i].Handle;
+
+        /* Like Windows, a socket that was closed under a select() that waits for it (the poll was
+         * cancelled, and a cancelled request returns no events) is reported in the sets that read it
+         * or check its errors; a socket that only waits to write it is an error, which is what the
+         * next lines return for a socket that is gone */
+        if (Cancelled && (InSets[i] & (SELECT_IN_READ | SELECT_IN_EXCEPT)) &&
+            !GetSocketStructure(Handle))
+        {
+            if (readfds && (InSets[i] & SELECT_IN_READ))
+                FD_SET(Handle, readfds);
+            if (exceptfds && (InSets[i] & SELECT_IN_EXCEPT))
+                FD_SET(Handle, exceptfds);
+            continue;
+        }
+
+        /* A cancelled request returns nothing: the events are what select() asked for, not what happened */
+        if (Cancelled)
+            Events = 0;
+
         for(x = 1; x; x<<=1)
         {
             Socket = GetSocketStructure(Handle);
