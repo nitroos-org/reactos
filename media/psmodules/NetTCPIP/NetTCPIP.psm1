@@ -920,7 +920,7 @@ function Set-NetIPInterface {
             'WeakHostSend', 'WeakHostReceive', 'IgnoreDefaultRoutes', 'AdvertisedRouterLifetime', 'AdvertiseDefaultRoute', 'CurrentHopLimit',
             'ForceArpNdWolPattern', 'DirectedMacWolPattern', 'EcnMarking', 'Dhcp', 'AutomaticMetric'
         $asked = @($settable | Where-Object { $PSBoundParameters.ContainsKey($_) })
-        $unsupported = @($asked | Where-Object { $_ -notin 'Dhcp', 'InterfaceMetric', 'AutomaticMetric' })
+        $unsupported = @($asked | Where-Object { $_ -notin 'Dhcp', 'InterfaceMetric', 'AutomaticMetric', 'NlMtuBytes', 'RouterDiscovery', 'DadTransmits', 'Forwarding' })
         foreach ($row in $rows) {
             $ifx = [uint32]$row.InterfaceIndex
             $fam = "$($row.AddressFamily)"
@@ -935,29 +935,55 @@ function Set-NetIPInterface {
                 Write-NetWin32Error $PSCmdlet 50 "The request is not supported. This network stack cannot set: $($unsupported -join ', ').`n" $class 'NotImplemented'
                 continue
             }
-            # A request without -AddressFamily names both rows of an interface. This stack has one interface metric and one DHCP switch per
-            # interface, shared by both families, and the IPv4 row of the same request writes them: the IPv6 row has nothing more to do.
-            $viaV4 = $false
-            if ($famName -eq 'IPv6' -and -not $PSBoundParameters.ContainsKey('AddressFamily') -and $asked.Count -gt 0) {
-                $viaV4 = @($rows | Where-Object { [uint32]$_.InterfaceIndex -eq $ifx -and "$($_.AddressFamily)" -in '2', 'IPv4' }).Count -gt 0
-                if (-not $viaV4) { $famName = 'IPv4' }   # no IPv4 row to carry it: the shared values are written through this one
+            # -Dhcp is one switch per interface for both families (the EnableDHCP value of the IPv4 key). With an explicit
+            # -AddressFamily IPv6 there is nothing it could mean; without one the IPv4 row of the same request writes it.
+            $dhcpHere = $PSBoundParameters.ContainsKey('Dhcp')
+            if ($dhcpHere -and $famName -ne 'IPv4') {
+                if ($PSBoundParameters.ContainsKey('AddressFamily')) {
+                    Write-NetWin32Error $PSCmdlet 50 "The request is not supported. This network stack has the DHCP switch for IPv4 only (use -AddressFamily IPv4).`n" $class 'NotImplemented'; continue
+                }
+                if (@($rows | Where-Object { [uint32]$_.InterfaceIndex -eq $ifx -and "$($_.AddressFamily)" -in '2', 'IPv4' }).Count -gt 0) { $dhcpHere = $false }
             }
-            if ($asked.Count -gt 0 -and -not $viaV4) {
-                # what the call itself rejects, before anything is written
-                if ($PSBoundParameters.ContainsKey('InterfaceMetric') -and ($InterfaceMetric -lt 1 -or $InterfaceMetric -gt 9999)) {
-                    Write-NetWin32Error $PSCmdlet 87 "Invalid parameter InterfaceMetric $InterfaceMetric`n" $class; continue
+            # what the call itself rejects, before anything is written
+            if ($PSBoundParameters.ContainsKey('InterfaceMetric') -and ($InterfaceMetric -lt 1 -or $InterfaceMetric -gt 9999)) {
+                Write-NetWin32Error $PSCmdlet 87 "Invalid parameter InterfaceMetric $InterfaceMetric`n" $class; continue
+            }
+            if ($PSBoundParameters.ContainsKey('InterfaceMetric') -and $PSBoundParameters.ContainsKey('AutomaticMetric') -and [int]$AutomaticMetric -eq 1) {
+                Write-NetWin32Error $PSCmdlet 87 "Inconsistent parameters InterfaceMetric and AutomaticMetric Enabled`n" $class; continue
+            }
+            if ($PSBoundParameters.ContainsKey('Forwarding') -and [int]$Forwarding -eq 1) {
+                Write-NetWin32Error $PSCmdlet 50 "The request is not supported. This network stack does not forward packets (-Forwarding Enabled).`n" $class 'NotImplemented'; continue
+            }
+            # The per-interface parameters of the stack (SetIpInterfaceEntry's request): mtu 1 | metric 2 | router discovery 4 | DAD 8 | forwarding 16.
+            # Both stores: active now and written for the adapter's next start (one request); ActiveStore alone: in force until the adapter
+            # starts again; PersistentStore alone: written, read when the adapter starts.
+            $ipFamily = if ($famName -eq 'IPv4') { 4 } else { 6 }
+            $kf = 0; $kMtu = 0; $kMetric = 0; $kRd = 0; $kDad = 0; $kFwd = 0
+            if ($PSBoundParameters.ContainsKey('NlMtuBytes')) { $kf = $kf -bor 1; $kMtu = [uint32]$NlMtuBytes }
+            if ($PSBoundParameters.ContainsKey('InterfaceMetric')) { $kf = $kf -bor 2; $kMetric = [uint32]$InterfaceMetric }
+            elseif ($PSBoundParameters.ContainsKey('AutomaticMetric')) {
+                $kf = $kf -bor 2
+                # automatic off: the metric in force becomes the fixed one
+                if ([int]$AutomaticMetric -ne 1) { $kMetric = [uint32]$row.InterfaceMetric }
+            }
+            if ($PSBoundParameters.ContainsKey('RouterDiscovery')) {
+                $kf = $kf -bor 4
+                $kRd = [uint32][int]$RouterDiscovery; if ($kRd -gt 2) { $kRd = 1 }   # Default = enabled
+            }
+            if ($PSBoundParameters.ContainsKey('DadTransmits')) { $kf = $kf -bor 8; $kDad = [uint32]$DadTransmits }
+            if ($PSBoundParameters.ContainsKey('Forwarding')) { $kf = $kf -bor 16; $kFwd = 0 }
+            if ($kf -ne 0) {
+                $rc = 0
+                if ($ok['Persistent'] -and $ok['Active']) { $rc = [Nitro.Net.Config]::SetInterface($ifx, $ipFamily, $true, [uint32]$kf, $kMtu, $kMetric, $kRd, $kDad, $kFwd) }
+                elseif ($ok['Active']) { $rc = [Nitro.Net.Config]::SetInterface($ifx, $ipFamily, $false, [uint32]$kf, $kMtu, $kMetric, $kRd, $kDad, $kFwd) }
+                else { $rc = [Nitro.Net.Config]::StoreInterface($ifx, $ipFamily, [uint32]$kf, $kMtu, $kMetric, $kRd, $kDad) }
+                if ($rc -ne 0) {
+                    $msg = switch ($rc) { 87 { "Invalid parameter`n" } 50 { "The request is not supported. This network stack has no such setting for $famName.`n" } 1168 { "No MSFT_NetIPInterface objects found with property 'InterfaceIndex' equal to '$ifx'.`n" } default { "The request failed ($rc).`n" } }
+                    Write-NetWin32Error $PSCmdlet ([int]$rc) $msg $class $(if ($rc -eq 50) { 'NotImplemented' } else { 'InvalidArgument' })
+                    continue
                 }
-                if ($PSBoundParameters.ContainsKey('InterfaceMetric') -and $PSBoundParameters.ContainsKey('AutomaticMetric') -and [int]$AutomaticMetric -eq 1) {
-                    Write-NetWin32Error $PSCmdlet 87 "Inconsistent parameters InterfaceMetric and AutomaticMetric Enabled`n" $class; continue
-                }
-                if (($PSBoundParameters.ContainsKey('InterfaceMetric') -or $PSBoundParameters.ContainsKey('AutomaticMetric')) -and -not $ok['Persistent']) {
-                    Write-NetWin32Error $PSCmdlet 50 "The request is not supported. This network stack keeps the interface metric in the persistent configuration only (it is read at bind time).`n" $class 'NotImplemented'; continue
-                }
-                # the stack has no per-interface IPv6 settings (no SetIpInterfaceEntry), and the one interface metric it reads is shared by
-                # both families: setting it for the IPv6 row would change the IPv4 interface too
-                if ($famName -ne 'IPv4') {
-                    Write-NetWin32Error $PSCmdlet 50 "The request is not supported. This network stack keeps no separate IPv6 interface settings (the interface metric is one value for IPv4 and IPv6: use -AddressFamily IPv4).`n" $class 'NotImplemented'; continue
-                }
+            }
+            if ($dhcpHere) {
                 $key = [Nitro.Net.Config]::InterfaceKey($ifx, $true)
                 if ($null -eq $key) { Write-NetWin32Error $PSCmdlet 87 "Invalid parameter InterfaceIndex $ifx`n" $class; continue }
                 try {
@@ -982,19 +1008,6 @@ function Set-NetIPInterface {
                                 $null = [Nitro.Net.Config]::DeleteIPv4($ifx)
                             }
                             if ($null -ne $key.GetValue('DhcpNameServer', $null)) { $key.DeleteValue('DhcpNameServer') }
-                        }
-                    }
-                    # the interface metric: a value of Tcpip\Parameters\Interfaces\{guid} (none = automatic) that the stack reads when the
-                    # adapter binds and the IP interface rows report at once
-                    if ($PSBoundParameters.ContainsKey('InterfaceMetric')) {
-                        $key.SetValue('InterfaceMetric', [int]$InterfaceMetric, [Microsoft.Win32.RegistryValueKind]::DWord)
-                    } elseif ($PSBoundParameters.ContainsKey('AutomaticMetric')) {
-                        if ([int]$AutomaticMetric -eq 1) {
-                            if ($null -ne $key.GetValue('InterfaceMetric', $null)) { $key.DeleteValue('InterfaceMetric') }
-                        } elseif ([int]$key.GetValue('InterfaceMetric', 0) -eq 0) {
-                            # automatic off: the metric in force becomes the fixed one
-                            $cur = @([Nitro.Net.Native]::IPInterfaces() | Where-Object { [uint32]$_['InterfaceIndex'] -eq $ifx -and [int]$_['AddressFamily'] -eq 2 })
-                            if ($cur.Count -gt 0) { $key.SetValue('InterfaceMetric', [int][uint32]$cur[0]['InterfaceMetric'], [Microsoft.Win32.RegistryValueKind]::DWord) }
                         }
                     }
                 } finally { $key.Dispose() }

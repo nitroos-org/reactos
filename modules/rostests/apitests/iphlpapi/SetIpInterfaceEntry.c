@@ -416,11 +416,11 @@ static void TestStores(USHORT Family, ULONG Index)
     ok(!StoredValue(Family, "InterfaceMetric", &Value), "the active store wrote InterfaceMetric\n");
 
     /* a persistent request: the stack's values and the adapter's key */
-    Status = Request(Fam, TCP_IPV6_STORE_PERSISTENT, Index, TCP_IPIF_SET_MTU | TCP_IPIF_SET_METRIC, Link - 300, 55, 0, 0, 0);
+    Status = Request(Fam, TCP_IPV6_STORE_PERSISTENT, Index, TCP_IPIF_SET_MTU | TCP_IPIF_SET_METRIC, Link - 210, 55, 0, 0, 0);
     ok(Status == STATUS_SUCCESS, "persistent request: %lx\n", Status);
-    ok(StoredValue(Family, MtuName, &Value) && Value == Link - 300, "stored %s %lu\n", MtuName, Value);
+    ok(StoredValue(Family, MtuName, &Value) && Value == Link - 210, "stored %s %lu\n", MtuName, Value);
     ok(StoredValue(Family, "InterfaceMetric", &Value) && Value == 55, "stored InterfaceMetric %lu\n", Value);
-    ok(GetRow(Family, Index, &Back) && Back.NlMtu == Link - 300 && Back.Metric == 55, "in force: %lu %lu\n", Back.NlMtu,
+    ok(GetRow(Family, Index, &Back) && Back.NlMtu == Link - 210 && Back.Metric == 55, "in force: %lu %lu\n", Back.NlMtu,
        Back.Metric);
     if (Family == AF_INET6)
     {
@@ -433,7 +433,7 @@ static void TestStores(USHORT Family, ULONG Index)
     /* a refused persistent request writes nothing */
     Status = Request(Fam, TCP_IPV6_STORE_PERSISTENT, Index, TCP_IPIF_SET_MTU, 100, 0, 0, 0, 0);
     ok(Status == STATUS_INVALID_PARAMETER, "persistent request with MTU 100: %lx\n", Status);
-    ok(StoredValue(Family, MtuName, &Value) && Value == Link - 300, "stored %s unchanged %lu\n", MtuName, Value);
+    ok(StoredValue(Family, MtuName, &Value) && Value == Link - 210, "stored %s unchanged %lu\n", MtuName, Value);
     /* metric 0 (automatic) takes the value out */
     Status = Request(Fam, TCP_IPV6_STORE_PERSISTENT, Index, TCP_IPIF_SET_METRIC, 0, 0, 0, 0, 0);
     ok(Status == STATUS_SUCCESS, "persistent automatic metric: %lx\n", Status);
