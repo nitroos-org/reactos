@@ -24,6 +24,7 @@
  */
 
 #include <msafd.h>
+#include <tdiinfo.h>
 #include <tcpioctl.h>
 
 #ifndef IS_INTRESOURCE
@@ -474,8 +475,88 @@ MsafdAddrChangeTakePending(
 }
 
 /*
+ * The IPv6 addresses of the host for SIO_ADDRESS_LIST_QUERY of an IPv6 socket: the preferred ones of the stack's
+ * IPv6 table (IP_IPV6_TABLE_ENTRY_ID, the private query iphlpapi uses), other than ::1, link-local ones with their
+ * interface as scope id (VERIFY ON ORACLE: Windows' order and whether it lists link-local addresses). None while
+ * the stack has no IPv6.
+ */
+#define MSAFD_MAX_IPV6_ADDRESSES 64
+
+static
+DWORD
+MsafdQueryIpv6Addresses(
+    _Out_writes_(Max) PSOCKADDR_IN6 Out,
+    _In_ DWORD Max)
+{
+    UNICODE_STRING Name = RTL_CONSTANT_STRING(L"\\Device\\Tcp");
+    OBJECT_ATTRIBUTES Attributes;
+    IO_STATUS_BLOCK Iosb;
+    TCP_REQUEST_QUERY_INFORMATION_EX Request;
+    PTCP_IPV6_TABLE_HEADER Header;
+    PTCP_IPV6_ADDRESS_ROW Rows;
+    HANDLE File;
+    NTSTATUS Status;
+    DWORD Count = 0, i, Size = 0x10000;
+
+    Header = HeapAlloc(GlobalHeap, 0, Size);
+    if (!Header)
+        return 0;
+
+    InitializeObjectAttributes(&Attributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = NtOpenFile(&File, FILE_READ_DATA | SYNCHRONIZE, &Attributes, &Iosb, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                        FILE_SYNCHRONOUS_IO_NONALERT);
+    if (NT_SUCCESS(Status))
+    {
+        RtlZeroMemory(&Request, sizeof(Request));
+        Request.ID.toi_class = INFO_CLASS_PROTOCOL;
+        Request.ID.toi_type = INFO_TYPE_PROVIDER;
+        Request.ID.toi_id = IP_IPV6_TABLE_ENTRY_ID;
+        Request.ID.toi_entity.tei_entity = CL_NL_ENTITY;
+        Request.ID.toi_entity.tei_instance = 0;
+        Iosb.Information = 0;
+        Status = NtDeviceIoControlFile(File, NULL, NULL, NULL, &Iosb, IOCTL_TCP_QUERY_INFORMATION_EX,
+                                       &Request, sizeof(Request), Header, Size);
+        if (Status == STATUS_PENDING)
+        {
+            NtWaitForSingleObject(File, FALSE, NULL);
+            Status = Iosb.Status;
+        }
+        NtClose(File);
+
+        if (NT_SUCCESS(Status) && Iosb.Information >= sizeof(*Header) && Header->Enabled &&
+            Header->InterfaceCount <= Size / sizeof(TCP_IPV6_INTERFACE_ROW) &&
+            Header->AddressCount <= Size / sizeof(TCP_IPV6_ADDRESS_ROW) &&
+            sizeof(*Header) + Header->InterfaceCount * sizeof(TCP_IPV6_INTERFACE_ROW) +
+                Header->AddressCount * sizeof(TCP_IPV6_ADDRESS_ROW) <= Iosb.Information)
+        {
+            Rows = (PTCP_IPV6_ADDRESS_ROW)((PUCHAR)(Header + 1) +
+                                           Header->InterfaceCount * sizeof(TCP_IPV6_INTERFACE_ROW));
+            for (i = 0; i < Header->AddressCount && Count < Max; i++)
+            {
+                static const UCHAR Loopback[16] = { 0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,1 };
+                PUCHAR A = Rows[i].Address;
+
+                /* 4: NL_DAD_STATE IpDadStatePreferred */
+                if (Rows[i].DadState != 4 || !memcmp(A, Loopback, 16))
+                    continue;
+                RtlZeroMemory(&Out[Count], sizeof(Out[Count]));
+                Out[Count].sin6_family = AF_INET6;
+                RtlCopyMemory(&Out[Count].sin6_addr, A, 16);
+                if (A[0] == 0xFE && (A[1] & 0xC0) == 0x80)
+                    Out[Count].sin6_scope_id = Rows[i].IfIndex;
+                Count++;
+            }
+        }
+    }
+
+    HeapFree(GlobalHeap, 0, Header);
+    return Count;
+}
+
+/*
  * SIO_ADDRESS_LIST_QUERY: the IPv4 addresses of the host, other than the loopback, as a
- * SOCKET_ADDRESS_LIST. The SOCKADDRs follow the array of SOCKET_ADDRESS in the same buffer.
+ * SOCKET_ADDRESS_LIST (an IPv6 socket: the IPv6 ones, MsafdQueryIpv6Addresses). The SOCKADDRs
+ * follow the array of SOCKET_ADDRESS in the same buffer.
  */
 INT
 MsafdQueryAddressList(
@@ -530,6 +611,37 @@ MsafdQueryAddressList(
             if (Address != 0 && (Address & 0xFF) != 127)
                 Count++;
         }
+    }
+
+    if (Socket->SharedData->AddressFamily == AF_INET6)
+    {
+        SOCKADDR_IN6 Six[MSAFD_MAX_IPV6_ADDRESSES];
+        PSOCKADDR_IN6 Out6;
+
+        Count = MsafdQueryIpv6Addresses(Six, RTL_NUMBER_OF(Six));
+        Needed = FIELD_OFFSET(SOCKET_ADDRESS_LIST, Address) + Count * (sizeof(SOCKET_ADDRESS) + sizeof(SOCKADDR_IN6));
+        *pcbRet = Needed;
+        if (IS_INTRESOURCE(lpvOutBuffer))
+            return WSAEFAULT;
+        if (cbOutBuffer < sizeof(INT))
+        {
+            *pcbRet = 0;
+            return WSAEINVAL;
+        }
+        if (cbOutBuffer < Needed)
+            return WSAEFAULT;
+
+        List = lpvOutBuffer;
+        Out6 = (PSOCKADDR_IN6)((PUCHAR)List + FIELD_OFFSET(SOCKET_ADDRESS_LIST, Address) +
+                               Count * sizeof(SOCKET_ADDRESS));
+        List->iAddressCount = Count;
+        for (i = 0; i < Count; i++)
+        {
+            Out6[i] = Six[i];
+            List->Address[i].lpSockaddr = (LPSOCKADDR)&Out6[i];
+            List->Address[i].iSockaddrLength = sizeof(SOCKADDR_IN6);
+        }
+        return NO_ERROR;
     }
 
     Needed = FIELD_OFFSET(SOCKET_ADDRESS_LIST, Address) +
