@@ -239,6 +239,9 @@ TCPUpdateInterfaceLinkStatus(PIP_INTERFACE IF);
 
 /* IPv6 (ip/transport/tcp/if6.c), behind Tcpip\Parameters\Ipv6Enable */
 extern BOOLEAN TCPIpv6Enabled;
+/* IPv6 is on the non-loopback interfaces too: Ipv6Enable on and Tcpip6\Parameters\DisabledComponents without the
+   0x10 bit (0xFF has it). FALSE leaves IPv6 on the loopback interface only (::1) */
+extern BOOLEAN TCPIpv6Links;
 
 VOID
 TCPReadIpv6Switch(VOID);

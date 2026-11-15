@@ -229,3 +229,15 @@ WsIpv6SocketsOn(VOID)
         return FALSE;
     return (WsIpv6Flags & TCP_IPV6_STATE_SOCKETS) != 0;
 }
+
+/*
+ * TRUE when the stack has IPv6 on the non-loopback interfaces (TCP_IPV6_STATE_LINKS). With IPv6 on but this off
+ * (Tcpip6\Parameters\DisabledComponents 0x10 or 0xFF), only ::1 works, and getaddrinfo asks DNS for no AAAA records.
+ */
+BOOL
+WsIpv6LinksOn(VOID)
+{
+    if (!WsQueryIpv6(NULL))
+        return FALSE;
+    return (WsIpv6Flags & TCP_IPV6_STATE_LINKS) != 0;
+}

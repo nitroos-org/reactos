@@ -169,7 +169,7 @@ TCPUpdateInterfaceStateLocked(PIP_INTERFACE IF, BOOLEAN HasIPv4Address)
         netif_set_up(netif);
         netif_set_default(netif);
     }
-    else if (TCPIpv6Enabled && netif_is_link_up(netif))
+    else if (TCPIpv6Links && netif_is_link_up(netif))
     {
         /* IPv6 needs no IPv4 address: its link-local address is formed, checked (DAD) and used with the
          * link alone, and lwIP does all of that only on an interface that is up */
@@ -196,7 +196,7 @@ TCPUpdateInterfaceLinkStatusLocked(PIP_INTERFACE IF)
 
     /* Without IPv6 the interface is up exactly when it has an IPv4 address, whatever its link does. With it,
      * an interface without an IPv4 address follows its link */
-    if (TCPIpv6Enabled && ip4_addr_isany_val(*netif_ip4_addr((struct netif *)IF->TCPContext)))
+    if (TCPIpv6Links && ip4_addr_isany_val(*netif_ip4_addr((struct netif *)IF->TCPContext)))
         TCPUpdateInterfaceStateLocked(IF, FALSE);
 }
 

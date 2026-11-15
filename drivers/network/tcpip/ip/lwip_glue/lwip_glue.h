@@ -113,6 +113,7 @@ extern void TCPRecvEventHandler(void *arg);
 
 /* The IPv6 switch (transport/tcp/if6.c) */
 extern BOOLEAN TCPIpv6Enabled;
+extern BOOLEAN TCPIpv6Links;
 
 /* A TA_IP_ADDRESS or TA_IP6_ADDRESS of an lwIP address and port (transport/tcp/tcp.c) */
 NTSTATUS TCPBuildTransportAddress(const ip_addr_t *Ip, USHORT Port, PTRANSPORT_ADDRESS Address, ULONG Length,

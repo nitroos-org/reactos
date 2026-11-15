@@ -367,6 +367,13 @@ DispAddressConfig6(PIRP Irp, PIO_STACK_LOCATION IrpSp)
         return STATUS_NOT_FOUND;
     netif = IF->TCPContext;
 
+    /* DisabledComponents: only the loopback interface has IPv6 */
+    if (!TCPIpv6Links && IF != Loopback)
+    {
+        IPDereferenceInterface(IF);
+        return STATUS_NOT_SUPPORTED;
+    }
+
     LOCK_TCPIP_CORE();
     if (TCP6NetifRegistered(netif))
         Status = Addr6ConfigureLocked(netif, &Request, &Address, Persistent, &WasPersistent);
