@@ -182,6 +182,15 @@ Udp6DefaultMulticastNetif(VOID)
             return netif;
     }
 
+    /* An adapter that is up but whose link-local address has not passed duplicate address detection yet is still
+       the interface of a group (a join made in the first second after the adapter came up would otherwise land
+       on the loopback interface, where a later leave without an interface does not find it) */
+    NETIF_FOREACH(netif)
+    {
+        if (netif != LoopNetif && netif->state && netif_is_up(netif) && (netif->flags & NETIF_FLAG_LINK_UP))
+            return netif;
+    }
+
     return (LoopNetif && netif_is_up(LoopNetif)) ? LoopNetif : NULL;
 }
 
@@ -910,6 +919,7 @@ UDP6SetMembership(PADDRESS_FILE AddrFile, BOOLEAN Join, const VOID *Request, UIN
     UDP6_GROUP Group;
     ULONG IfIndex, i;
     struct netif *netif;
+    BOOLEAN Resolved = FALSE;
     PUDP6_MEMBERSHIPS M, New = NULL;
     NTSTATUS Status = STATUS_SUCCESS;
 
@@ -933,12 +943,39 @@ UDP6SetMembership(PADDRESS_FILE AddrFile, BOOLEAN Join, const VOID *Request, UIN
     LOCK_TCPIP_CORE();
 
     netif = IfIndex ? Udp6NetifOfIndex(IfIndex) : Udp6DefaultMulticastNetif();
-    if (!netif)
+    if (netif)
+    {
+        Group.Zone = (UCHAR)netif_get_index(netif);
+        Resolved = TRUE;
+    }
+    if (!Join && !IfIndex && AddrFile->Groups6)
+    {
+        /* A leave without an interface ends the socket's join of the group, on whichever interface the join
+           landed: the default one may have changed since (an adapter that got its address, or went away) */
+        BOOLEAN Found = FALSE;
+        UCHAR Zone = 0;
+
+        M = AddrFile->Groups6;
+        for (i = 0; i < M->Count; i++)
+        {
+            if (RtlCompareMemory(M->Groups[i].Group, Group.Group, 16) == 16 &&
+                (!Found || (Resolved && M->Groups[i].Zone == Group.Zone)))
+            {
+                Found = TRUE;
+                Zone = M->Groups[i].Zone;
+            }
+        }
+        if (Found)
+        {
+            Group.Zone = Zone;
+            Resolved = TRUE;
+        }
+    }
+    if (!Resolved)
     {
         Status = STATUS_INVALID_ADDRESS;
         goto Done;
     }
-    Group.Zone = (UCHAR)netif_get_index(netif);
 
     if (!AddrFile->Groups6 && Join)
     {
