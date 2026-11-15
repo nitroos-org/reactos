@@ -662,6 +662,279 @@ Exit:
     return TlsStatus;
 }
 
+/*
+ * The entries that a run of LdrpRunInitializeRoutines still has to initialize (a run that a routine of an outer
+ * run starts by loading a module is the innermost). Guarded by the loader lock.
+ */
+typedef struct _LDRP_INIT_QUEUE
+{
+    PLDR_DATA_TABLE_ENTRY *Entries; /* NULL: initialized or running; LDRP_INIT_FAILED(Entry): failed early */
+    ULONG Count;
+    PCONTEXT Context;
+    struct _LDRP_INIT_QUEUE *Prev;
+} LDRP_INIT_QUEUE;
+
+/* An entry whose init routine (or the init routine of a module it imports) failed when it was run early: the run
+   fails when it reaches it, as it does when its own call of that routine fails (Windows fails the outer load too),
+   and reaching it again early fails */
+#define LDRP_INIT_FAILED(Entry) ((PLDR_DATA_TABLE_ENTRY)((ULONG_PTR)(Entry) | 1))
+#define LDRP_INIT_HAS_FAILED(Entry) ((ULONG_PTR)(Entry) & 1)
+
+static LDRP_INIT_QUEUE *LdrpInitQueue;
+
+/*
+ * Runs the init routine of one entry: its TLS callbacks and DLL_PROCESS_ATTACH, under its activation context.
+ * STATUS_DLL_INIT_FAILED when the routine returned FALSE (or raised).
+ */
+static
+NTSTATUS
+LdrpInitializeEntry(IN PLDR_DATA_TABLE_ENTRY LdrEntry,
+                    IN PCONTEXT Context OPTIONAL)
+{
+    PVOID EntryPoint;
+    PLDR_DATA_TABLE_ENTRY OldInitializer;
+    RTL_CALLER_ALLOCATED_ACTIVATION_CONTEXT_STACK_FRAME_EXTENDED ActCtx;
+    ULONG BreakOnDllLoad;
+    BOOLEAN DllStatus;
+    NTSTATUS Status;
+    PPEB Peb = NtCurrentPeb();
+
+    /* Get its entrypoint */
+    EntryPoint = LdrEntry->EntryPoint;
+
+    /* Are we being debugged? */
+    BreakOnDllLoad = 0;
+    if (Peb->BeingDebugged || Peb->ReadImageFileExecOptions)
+    {
+        /* Check if we should break on load */
+        Status = LdrQueryImageFileExecutionOptions(&LdrEntry->BaseDllName,
+                                                   L"BreakOnDllLoad",
+                                                   REG_DWORD,
+                                                   &BreakOnDllLoad,
+                                                   sizeof(ULONG),
+                                                   NULL);
+        if (!NT_SUCCESS(Status)) BreakOnDllLoad = 0;
+
+        /* Reset status back to STATUS_SUCCESS */
+        Status = STATUS_SUCCESS;
+    }
+
+    /* Break if aksed */
+    if (BreakOnDllLoad)
+    {
+        /* Check if we should show a message */
+        if (ShowSnaps)
+        {
+            DPRINT1("LDR: %wZ loaded.", &LdrEntry->BaseDllName);
+            DPRINT1(" - About to call init routine at %p\n", EntryPoint);
+        }
+
+        /* Break in debugger */
+        DbgBreakPoint();
+    }
+
+    /* Make sure we have an entrypoint */
+    if (EntryPoint)
+    {
+        /* Save the old Dll Initializer and write the current one */
+        OldInitializer = LdrpCurrentDllInitializer;
+        LdrpCurrentDllInitializer = LdrEntry;
+
+        /* Set up the Act Ctx */
+        ActCtx.Size = sizeof(ActCtx);
+        ActCtx.Format = 1;
+        RtlZeroMemory(&ActCtx.Frame, sizeof(RTL_ACTIVATION_CONTEXT_STACK_FRAME));
+
+        /* Activate the ActCtx */
+        RtlActivateActivationContextUnsafeFast(&ActCtx,
+                                               LdrEntry->EntryPointActivationContext);
+
+        _SEH2_TRY
+        {
+            /* Check if it has TLS */
+            if (LdrEntry->TlsIndex)
+            {
+                /* Call TLS */
+                LdrpCallTlsInitializers(LdrEntry, DLL_PROCESS_ATTACH);
+            }
+
+            /* Call the Entrypoint */
+            if (ShowSnaps)
+            {
+                DPRINT1("%wZ - Calling entry point at %p for DLL_PROCESS_ATTACH\n",
+                        &LdrEntry->BaseDllName, EntryPoint);
+            }
+            DllStatus = LdrpCallInitRoutine(EntryPoint,
+                                            LdrEntry->DllBase,
+                                            DLL_PROCESS_ATTACH,
+                                            Context);
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            DllStatus = FALSE;
+            DPRINT1("WARNING: Exception 0x%x during LdrpCallInitRoutine(DLL_PROCESS_ATTACH) for %wZ\n",
+                    _SEH2_GetExceptionCode(), &LdrEntry->BaseDllName);
+        }
+        _SEH2_END;
+
+        /* Deactivate the ActCtx */
+        RtlDeactivateActivationContextUnsafeFast(&ActCtx);
+
+        /* Save the Current DLL Initializer */
+        LdrpCurrentDllInitializer = OldInitializer;
+
+        /* Mark the entry as processed. NT6+ does not send DLL_PROCESS_DETACH
+           to a module whose DLL_PROCESS_ATTACH failed (VERBUMP B5) */
+        if (DllStatus || (SharedUserData->NtMajorVersion < 6))
+            LdrEntry->Flags |= LDRP_PROCESS_ATTACH_CALLED;
+
+        /* Fail if DLL init failed */
+        if (!DllStatus)
+        {
+            DPRINT1("LDR: DLL_PROCESS_ATTACH for dll \"%wZ\" (InitRoutine: %p) failed\n",
+                &LdrEntry->BaseDllName, EntryPoint);
+
+            return STATUS_DLL_INIT_FAILED;
+        }
+    }
+
+    return STATUS_SUCCESS;
+}
+
+/*
+ * The loaded entry that a static import of Importer names, or NULL. As an import snap finds it: the name gets the
+ * default extension and the activation context of the importer redirects it (API sets, side-by-side files).
+ */
+static
+PLDR_DATA_TABLE_ENTRY
+LdrpFindLoadedImport(IN PLDR_DATA_TABLE_ENTRY Importer,
+                     IN LPSTR ImportName)
+{
+    RTL_CALLER_ALLOCATED_ACTIVATION_CONTEXT_STACK_FRAME_EXTENDED ActCtx;
+    WCHAR NameBuffer[MAX_PATH];
+    UNICODE_STRING Name, Redirected, *NewName;
+    ANSI_STRING AnsiName;
+    PLDR_DATA_TABLE_ENTRY Found = NULL;
+    BOOLEAN RedirectedDll = FALSE;
+    const WCHAR *p;
+    NTSTATUS Status;
+
+    RtlInitEmptyUnicodeString(&Name, NameBuffer, sizeof(NameBuffer));
+    RtlInitAnsiString(&AnsiName, ImportName);
+    if (!NT_SUCCESS(RtlAnsiStringToUnicodeString(&Name, &AnsiName, FALSE))) return NULL;
+
+    /* No extension: the default one, if it fits */
+    for (p = Name.Buffer + Name.Length / sizeof(WCHAR); p > Name.Buffer && p[-1] != L'.' && p[-1] != L'\\'; p--);
+    if (p == Name.Buffer || p[-1] != L'.')
+    {
+        if (Name.Length + LdrApiDefaultExtension.Length + sizeof(UNICODE_NULL) > sizeof(NameBuffer)) return NULL;
+        RtlAppendUnicodeStringToString(&Name, &LdrApiDefaultExtension);
+    }
+
+    RtlInitEmptyUnicodeString(&Redirected, NULL, 0);
+    NewName = &Name;
+
+    RtlZeroMemory(&ActCtx, sizeof(ActCtx));
+    ActCtx.Size = sizeof(ActCtx);
+    ActCtx.Format = RTL_CALLER_ALLOCATED_ACTIVATION_CONTEXT_STACK_FRAME_FORMAT_WHISTLER;
+    RtlActivateActivationContextUnsafeFast(&ActCtx, Importer->EntryPointActivationContext);
+
+    Status = LdrpApplyFileNameRedirection(&Name, &LdrApiDefaultExtension, NULL, &Redirected, &NewName, &RedirectedDll);
+    if (NT_SUCCESS(Status) &&
+        !LdrpCheckForLoadedDll(NULL, NewName, TRUE, RedirectedDll, &Found))
+    {
+        Found = NULL;
+    }
+
+    RtlDeactivateActivationContextUnsafeFast(&ActCtx);
+    RtlFreeUnicodeString(&Redirected);
+    return Found;
+}
+
+static
+NTSTATUS
+LdrpInitializePendingImports(IN PLDR_DATA_TABLE_ENTRY Importer,
+                             IN LDRP_INIT_QUEUE *SkipQueue OPTIONAL);
+
+/*
+ * A module that is mapped but not yet initialized, because the run of init routines that has it queued has not
+ * reached it, and that a routine of that run reaches (LoadLibrary or GetProcAddress of it, or the load of a new
+ * module that imports it): initialize it now, after the modules it imports that are pending too, as Windows does,
+ * so that it is ready to use. Modules that import it and come before it in the queue stay in their place. Not
+ * queued or already running (a cycle) is a success that does nothing. A failure is kept in its place in the queue,
+ * so that its run fails there too.
+ */
+static
+NTSTATUS
+LdrpInitializePendingEntryEx(IN PLDR_DATA_TABLE_ENTRY Target,
+                             IN LDRP_INIT_QUEUE *SkipQueue OPTIONAL)
+{
+    LDRP_INIT_QUEUE *Queue;
+    NTSTATUS Status;
+    ULONG i;
+
+    /* Is it waiting in a queue? */
+    for (Queue = LdrpInitQueue; Queue; Queue = Queue->Prev)
+    {
+        if (Queue == SkipQueue) continue;
+        for (i = 0; i < Queue->Count; i++)
+        {
+            if (Queue->Entries[i] == Target) goto Found;
+            if (Queue->Entries[i] == LDRP_INIT_FAILED(Target)) return STATUS_DLL_INIT_FAILED;
+        }
+    }
+    return STATUS_SUCCESS;
+
+Found:
+    /* Claim it, as the run does, and run what it imports first */
+    Queue->Entries[i] = NULL;
+
+    Status = LdrpInitializePendingImports(Target, NULL);
+    if (NT_SUCCESS(Status)) Status = LdrpInitializeEntry(Target, Queue->Context);
+    if (!NT_SUCCESS(Status)) Queue->Entries[i] = LDRP_INIT_FAILED(Target);
+    return Status;
+}
+
+NTSTATUS
+NTAPI
+LdrpInitializePendingEntry(IN PLDR_DATA_TABLE_ENTRY Target)
+{
+    return LdrpInitializePendingEntryEx(Target, NULL);
+}
+
+/*
+ * Initializes the pending modules that Importer imports (and theirs first), except the ones of SkipQueue: a run
+ * of init routines reaches those in its own order.
+ */
+static
+NTSTATUS
+LdrpInitializePendingImports(IN PLDR_DATA_TABLE_ENTRY Importer,
+                             IN LDRP_INIT_QUEUE *SkipQueue OPTIONAL)
+{
+    PIMAGE_IMPORT_DESCRIPTOR Import;
+    PLDR_DATA_TABLE_ENTRY Dependency;
+    NTSTATUS Status = STATUS_SUCCESS;
+    ULONG Size;
+
+    _SEH2_TRY
+    {
+        Import = RtlImageDirectoryEntryToData(Importer->DllBase, TRUE, IMAGE_DIRECTORY_ENTRY_IMPORT, &Size);
+        for (; Import && NT_SUCCESS(Status) && Import->Name && Import->FirstThunk; Import++)
+        {
+            Dependency = LdrpFindLoadedImport(Importer, (LPSTR)((ULONG_PTR)Importer->DllBase + Import->Name));
+            if (Dependency) Status = LdrpInitializePendingEntryEx(Dependency, SkipQueue);
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        /* A damaged import table was reported when the image was loaded; go on with what was found */
+        Status = STATUS_SUCCESS;
+    }
+    _SEH2_END;
+
+    return Status;
+}
+
 NTSTATUS
 NTAPI
 LdrpRunInitializeRoutines(IN PCONTEXT Context OPTIONAL)
@@ -669,16 +942,14 @@ LdrpRunInitializeRoutines(IN PCONTEXT Context OPTIONAL)
     PLDR_DATA_TABLE_ENTRY LocalArray[16];
     PLIST_ENTRY ListHead;
     PLIST_ENTRY NextEntry;
-    PLDR_DATA_TABLE_ENTRY LdrEntry, *LdrRootEntry, OldInitializer;
-    PVOID EntryPoint;
+    PLDR_DATA_TABLE_ENTRY LdrEntry, *LdrRootEntry;
     ULONG Count, i;
     //ULONG BreakOnInit;
     NTSTATUS Status = STATUS_SUCCESS;
     PPEB Peb = NtCurrentPeb();
     RTL_CALLER_ALLOCATED_ACTIVATION_CONTEXT_STACK_FRAME_EXTENDED ActCtx;
-    ULONG BreakOnDllLoad;
     PTEB OldTldTeb;
-    BOOLEAN DllStatus;
+    LDRP_INIT_QUEUE InitQueue;
 
     DPRINT("LdrpRunInitializeRoutines() called for %wZ (%p/%p)\n",
         &LdrpImageEntry->BaseDllName,
@@ -811,117 +1082,41 @@ LdrpRunInitializeRoutines(IN PCONTEXT Context OPTIONAL)
     OldTldTeb = LdrpTopLevelDllBeingLoadedTeb;
     LdrpTopLevelDllBeingLoadedTeb = NtCurrentTeb();
 
+    /* Publish the entries still to run, for a load made by one of the routines (LdrpInitializePendingEntry) */
+    InitQueue.Entries = LdrRootEntry;
+    InitQueue.Count = Count;
+    InitQueue.Context = Context;
+    InitQueue.Prev = LdrpInitQueue;
+    LdrpInitQueue = &InitQueue;
+
     /* Loop */
     i = 0;
     while (i < Count)
     {
-        /* Get an entry */
+        /* Get an entry; one that a nested load already initialized (LdrpInitializePendingEntry) is gone */
         LdrEntry = LdrRootEntry[i];
-
-        /* FIXME: Verify NX Compat */
 
         /* Move to next entry */
         i++;
+        if (!LdrEntry) continue;
 
-        /* Get its entrypoint */
-        EntryPoint = LdrEntry->EntryPoint;
-
-        /* Are we being debugged? */
-        BreakOnDllLoad = 0;
-        if (Peb->BeingDebugged || Peb->ReadImageFileExecOptions)
+        /* A nested load ran it early, and it (or a module it imports) failed */
+        if (LDRP_INIT_HAS_FAILED(LdrEntry))
         {
-            /* Check if we should break on load */
-            Status = LdrQueryImageFileExecutionOptions(&LdrEntry->BaseDllName,
-                                                       L"BreakOnDllLoad",
-                                                       REG_DWORD,
-                                                       &BreakOnDllLoad,
-                                                       sizeof(ULONG),
-                                                       NULL);
-            if (!NT_SUCCESS(Status)) BreakOnDllLoad = 0;
-
-            /* Reset status back to STATUS_SUCCESS */
-            Status = STATUS_SUCCESS;
+            Status = STATUS_DLL_INIT_FAILED;
+            goto Quickie;
         }
 
-        /* Break if aksed */
-        if (BreakOnDllLoad)
-        {
-            /* Check if we should show a message */
-            if (ShowSnaps)
-            {
-                DPRINT1("LDR: %wZ loaded.", &LdrEntry->BaseDllName);
-                DPRINT1(" - About to call init routine at %p\n", EntryPoint);
-            }
+        /* Claim it before its routine runs, so that a load made from there does not run it again */
+        LdrRootEntry[i - 1] = NULL;
 
-            /* Break in debugger */
-            DbgBreakPoint();
-        }
+        /* FIXME: Verify NX Compat */
 
-        /* Make sure we have an entrypoint */
-        if (EntryPoint)
-        {
-            /* Save the old Dll Initializer and write the current one */
-            OldInitializer = LdrpCurrentDllInitializer;
-            LdrpCurrentDllInitializer = LdrEntry;
-
-            /* Set up the Act Ctx */
-            ActCtx.Size = sizeof(ActCtx);
-            ActCtx.Format = 1;
-            RtlZeroMemory(&ActCtx.Frame, sizeof(RTL_ACTIVATION_CONTEXT_STACK_FRAME));
-
-            /* Activate the ActCtx */
-            RtlActivateActivationContextUnsafeFast(&ActCtx,
-                                                   LdrEntry->EntryPointActivationContext);
-
-            _SEH2_TRY
-            {
-                /* Check if it has TLS */
-                if (LdrEntry->TlsIndex)
-                {
-                    /* Call TLS */
-                    LdrpCallTlsInitializers(LdrEntry, DLL_PROCESS_ATTACH);
-                }
-
-                /* Call the Entrypoint */
-                if (ShowSnaps)
-                {
-                    DPRINT1("%wZ - Calling entry point at %p for DLL_PROCESS_ATTACH\n",
-                            &LdrEntry->BaseDllName, EntryPoint);
-                }
-                DllStatus = LdrpCallInitRoutine(EntryPoint,
-                                                LdrEntry->DllBase,
-                                                DLL_PROCESS_ATTACH,
-                                                Context);
-            }
-            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
-            {
-                DllStatus = FALSE;
-                DPRINT1("WARNING: Exception 0x%x during LdrpCallInitRoutine(DLL_PROCESS_ATTACH) for %wZ\n",
-                        _SEH2_GetExceptionCode(), &LdrEntry->BaseDllName);
-            }
-            _SEH2_END;
-
-            /* Deactivate the ActCtx */
-            RtlDeactivateActivationContextUnsafeFast(&ActCtx);
-
-            /* Save the Current DLL Initializer */
-            LdrpCurrentDllInitializer = OldInitializer;
-
-            /* Mark the entry as processed. NT6+ does not send DLL_PROCESS_DETACH
-               to a module whose DLL_PROCESS_ATTACH failed (VERBUMP B5) */
-            if (DllStatus || (SharedUserData->NtMajorVersion < 6))
-                LdrEntry->Flags |= LDRP_PROCESS_ATTACH_CALLED;
-
-            /* Fail if DLL init failed */
-            if (!DllStatus)
-            {
-                DPRINT1("LDR: DLL_PROCESS_ATTACH for dll \"%wZ\" (InitRoutine: %p) failed\n",
-                    &LdrEntry->BaseDllName, EntryPoint);
-
-                Status = STATUS_DLL_INIT_FAILED;
-                goto Quickie;
-            }
-        }
+        /* A module that a routine of an outer run loads can import modules that run has not reached yet:
+           those first (only a nested run can have such imports) */
+        Status = InitQueue.Prev ? LdrpInitializePendingImports(LdrEntry, &InitQueue) : STATUS_SUCCESS;
+        if (NT_SUCCESS(Status)) Status = LdrpInitializeEntry(LdrEntry, Context);
+        if (!NT_SUCCESS(Status)) goto Quickie;
     }
 
     /* Loop in order */
@@ -969,6 +1164,9 @@ LdrpRunInitializeRoutines(IN PCONTEXT Context OPTIONAL)
 Quickie:
     /* Restore old TEB */
     LdrpTopLevelDllBeingLoadedTeb = OldTldTeb;
+
+    /* The queue ends with this run */
+    if (LdrpInitQueue == &InitQueue) LdrpInitQueue = InitQueue.Prev;
 
     /* Check if the array is in the heap */
     if (LdrRootEntry != LocalArray)
