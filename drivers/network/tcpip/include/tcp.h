@@ -330,4 +330,9 @@ void
 LibTCPDumpPcb(PVOID SocketContext);
 
 NTSTATUS TCPGetSocketStatus(PCONNECTION_ENDPOINT Connection, PULONG State);
+/* The local and remote address (TA_IP_ADDRESS, or TA_IP6_ADDRESS for an IPv6 one; Length is the room at each) and
+   the state (MIB_TCP_STATE_xxx) of a connection that has a socket, read together under its lock. An error when it has
+   none (not connected yet, or closed meanwhile). PASSIVE_LEVEL */
+NTSTATUS TCPGetConnectionEnds(PCONNECTION_ENDPOINT Connection, PTRANSPORT_ADDRESS Local, PTRANSPORT_ADDRESS Remote,
+                              ULONG Length, PULONG State);
 ULONG TCPEnumTimeWait(PTCP_TIMEWAIT_ROW Rows, ULONG MaxRows);

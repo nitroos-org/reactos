@@ -9,6 +9,7 @@
 
 #define WIN32_NO_STATUS
 #include <winsock2.h>
+#include <ws2tcpip.h>
 #include <iphlpapi.h>
 
 typedef struct _ROW
@@ -331,7 +332,6 @@ static void TestTcp(DWORD Loopback, USHORT AnyPort, USHORT LoopPort, USHORT Clie
         CheckOwner(Row, Owner, Name);
 
         Row = FindTcp(&Rows, MIB_TCP_STATE_ESTAB, Loopback, AnyPort, Loopback, ClientPort);
-        todo_if(is_reactos() && WantConn)
         ok(!!Row == WantConn, "%s: accepted end %s\n", Name, Row ? "listed" : "missing");
         CheckOwner(Row, Owner, Name);
 
@@ -364,7 +364,135 @@ static void TestGetTcpTable(DWORD Loopback, USHORT AnyPort, USHORT LoopPort, USH
        "GetTcpTable: loopback listener missing\n");
     ok(FindTcp(&Rows, MIB_TCP_STATE_ESTAB, Loopback, ClientPort, Loopback, AnyPort) != NULL,
        "GetTcpTable: client end missing\n");
+    ok(FindTcp(&Rows, MIB_TCP_STATE_ESTAB, Loopback, AnyPort, Loopback, ClientPort) != NULL,
+       "GetTcpTable: accepted end missing\n");
     FreeRows(&Rows);
+}
+
+/* The rows of AF_INET6 TCP sockets: both ends of a loopback connection, and the listener. Needs the IPv6 switch
+   (Ipv6Enable); skipped without */
+static const UCHAR Loopback6[16] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
+
+static BOOL Has6Row(const MIB_TCP6TABLE_OWNER_PID *T, DWORD State, USHORT LocalPort, USHORT RemotePort, DWORD *Count)
+{
+    DWORD i;
+    BOOL Found = FALSE;
+
+    *Count = 0;
+    for (i = 0; i < T->dwNumEntries; i++)
+    {
+        const MIB_TCP6ROW_OWNER_PID *Row = &T->table[i];
+
+        if (Row->dwState == State && ntohs((USHORT)Row->dwLocalPort) == LocalPort &&
+            memcmp(Row->ucLocalAddr, Loopback6, 16) == 0 &&
+            (State == MIB_TCP_STATE_LISTEN ||
+             (ntohs((USHORT)Row->dwRemotePort) == RemotePort && memcmp(Row->ucRemoteAddr, Loopback6, 16) == 0)))
+        {
+            ok(Row->dwOwningPid == g_Pid, "IPv6 row: owner %lu, expected %lu\n", Row->dwOwningPid, g_Pid);
+            (*Count)++;
+            Found = TRUE;
+        }
+    }
+    return Found;
+}
+
+static void TestTcp6(void)
+{
+    SOCKET Listen, Client = INVALID_SOCKET, Accepted = INVALID_SOCKET, Second = INVALID_SOCKET, SecondAccepted = INVALID_SOCKET;
+    SOCKADDR_IN6 sa;
+    int len = sizeof(sa);
+    USHORT ListenPort, ClientPort, SecondPort;
+    PMIB_TCP6TABLE_OWNER_PID Table = NULL;
+    DWORD Size = 0, ret, Count, Try;
+
+    Listen = socket(AF_INET6, SOCK_STREAM, 0);
+    if (Listen == INVALID_SOCKET)
+    {
+        skip("No IPv6 sockets\n");
+        return;
+    }
+
+    ZeroMemory(&sa, sizeof(sa));
+    sa.sin6_family = AF_INET6;
+    memcpy(&sa.sin6_addr, Loopback6, 16);
+    if (bind(Listen, (SOCKADDR *)&sa, sizeof(sa)) == SOCKET_ERROR || listen(Listen, SOMAXCONN) == SOCKET_ERROR ||
+        getsockname(Listen, (SOCKADDR *)&sa, &len) == SOCKET_ERROR)
+    {
+        skip("Cannot listen on ::1\n");
+        goto quit;
+    }
+    ListenPort = ntohs(sa.sin6_port);
+
+    Client = socket(AF_INET6, SOCK_STREAM, 0);
+    Second = socket(AF_INET6, SOCK_STREAM, 0);
+    if (Client == INVALID_SOCKET || Second == INVALID_SOCKET ||
+        connect(Client, (SOCKADDR *)&sa, sizeof(sa)) == SOCKET_ERROR ||
+        connect(Second, (SOCKADDR *)&sa, sizeof(sa)) == SOCKET_ERROR)
+    {
+        skip("Cannot connect over ::1\n");
+        goto quit;
+    }
+    len = sizeof(sa);
+    getsockname(Client, (SOCKADDR *)&sa, &len);
+    ClientPort = ntohs(sa.sin6_port);
+    len = sizeof(sa);
+    getsockname(Second, (SOCKADDR *)&sa, &len);
+    SecondPort = ntohs(sa.sin6_port);
+    Accepted = accept(Listen, NULL, NULL);
+    SecondAccepted = accept(Listen, NULL, NULL);
+    if (Accepted == INVALID_SOCKET || SecondAccepted == INVALID_SOCKET)
+    {
+        skip("Cannot accept the connections\n");
+        goto quit;
+    }
+
+    for (Try = 0, ret = ERROR_INSUFFICIENT_BUFFER; Try < 10 && ret == ERROR_INSUFFICIENT_BUFFER; Try++)
+    {
+        ret = GetExtendedTcpTable(Table, &Size, TRUE, AF_INET6, TCP_TABLE_OWNER_PID_ALL, 0);
+        if (ret != ERROR_INSUFFICIENT_BUFFER)
+            break;
+        HeapFree(GetProcessHeap(), 0, Table);
+        Size += 512;
+        Table = HeapAlloc(GetProcessHeap(), 0, Size);
+        if (!Table)
+            goto quit;
+    }
+    ok(ret == NO_ERROR, "GetExtendedTcpTable(AF_INET6): error %lu\n", ret);
+    if (ret != NO_ERROR)
+        goto quit;
+
+    {
+        DWORD i;
+
+        for (i = 0; i < Table->dwNumEntries; i++)
+        {
+            const MIB_TCP6ROW_OWNER_PID *Row = &Table->table[i];
+
+            if (memcmp(Row->ucLocalAddr, Loopback6, 16) == 0)
+                trace("IPv6 row %lu: state %lu local port %u remote port %u pid %lu\n", i, Row->dwState,
+                      ntohs((USHORT)Row->dwLocalPort), ntohs((USHORT)Row->dwRemotePort), Row->dwOwningPid);
+        }
+        trace("listen %u, client %u, second %u\n", ListenPort, ClientPort, SecondPort);
+    }
+
+    Has6Row(Table, MIB_TCP_STATE_LISTEN, ListenPort, 0, &Count);
+    ok(Count == 1, "IPv6 listener: %lu rows\n", Count);
+    Has6Row(Table, MIB_TCP_STATE_ESTAB, ClientPort, ListenPort, &Count);
+    ok(Count == 1, "IPv6 client end: %lu rows\n", Count);
+    Has6Row(Table, MIB_TCP_STATE_ESTAB, ListenPort, ClientPort, &Count);
+    ok(Count == 1, "IPv6 accepted end: %lu rows\n", Count);
+    Has6Row(Table, MIB_TCP_STATE_ESTAB, SecondPort, ListenPort, &Count);
+    ok(Count == 1, "IPv6 second client end: %lu rows\n", Count);
+    Has6Row(Table, MIB_TCP_STATE_ESTAB, ListenPort, SecondPort, &Count);
+    ok(Count == 1, "IPv6 second accepted end (two on one listener): %lu rows\n", Count);
+
+quit:
+    HeapFree(GetProcessHeap(), 0, Table);
+    closesocket(SecondAccepted);
+    closesocket(Second);
+    closesocket(Accepted);
+    closesocket(Client);
+    closesocket(Listen);
 }
 
 static void TestUdp(DWORD Loopback, USHORT AnyPort, USHORT LoopPort, BOOL HaveRaw)
@@ -487,6 +615,7 @@ START_TEST(TcpUdpTableRows)
 
     TestTcp(Loopback, AnyPort, LoopPort, ClientPort);
     TestGetTcpTable(Loopback, AnyPort, LoopPort, ClientPort);
+    TestTcp6();
     TestUdp(Loopback, UdpAnyPort, UdpLoopPort, Raw != INVALID_SOCKET);
 
 quit:

@@ -1114,6 +1114,41 @@ TCPGetSocketStatus(
     return STATUS_SUCCESS;
 }
 
+NTSTATUS
+TCPGetConnectionEnds(
+    PCONNECTION_ENDPOINT Connection,
+    PTRANSPORT_ADDRESS Local,
+    PTRANSPORT_ADDRESS Remote,
+    ULONG Length,
+    PULONG State)
+{
+    ip_addr_t LocalIp, RemoteIp;
+    u16_t LocalPort = 0, RemotePort = 0;
+    NTSTATUS Status;
+
+    LockObject(Connection);
+    if (Connection->SocketContext == NULL)
+    {
+        UnlockObject(Connection);
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    Status = TCPTranslateError(LibTCPGetHostName(Connection->SocketContext, &LocalIp, &LocalPort));
+    if (NT_SUCCESS(Status))
+        Status = TCPTranslateError(LibTCPGetPeerName(Connection->SocketContext, &RemoteIp, &RemotePort));
+    if (NT_SUCCESS(Status))
+        LibTCPGetSocketStatus(Connection->SocketContext, State);
+    UnlockObject(Connection);
+
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = TCPBuildTransportAddress(&LocalIp, LocalPort, Local, Length, FALSE);
+    if (NT_SUCCESS(Status))
+        Status = TCPBuildTransportAddress(&RemoteIp, RemotePort, Remote, Length, FALSE);
+    return Status;
+}
+
 ULONG
 TCPEnumTimeWait(
     PTCP_TIMEWAIT_ROW Rows,

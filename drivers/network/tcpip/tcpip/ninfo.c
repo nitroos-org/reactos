@@ -171,6 +171,61 @@ TDI_STATUS InfoTdiQueryGetIPSnmpInfo( TDIEntityID ID,
     return Status;
 }
 
+/* The connection endpoints of an address file (the listener's accepted connections hang on its address file, as
+ * do the connection of a client socket), each referenced: *Count of them in the returned array. The caller
+ * dereferences each and frees the array with ExFreePoolWithTag(TDI_ENTITY_TAG). NULL, *Count 0 when there is none
+ * (or no memory: *NoMemory) */
+#define TCP_ROW_MAX_CONNECTIONS 65536
+
+static
+PCONNECTION_ENDPOINT *
+InfoReferenceConnections(PADDRESS_FILE AddrFile, PULONG Count, PBOOLEAN NoMemory)
+{
+    PCONNECTION_ENDPOINT Connection, *Array = NULL;
+    ULONG Total = 0, Taken = 0;
+
+    *Count = 0;
+    *NoMemory = FALSE;
+
+    LockObject(AddrFile);
+    for (Connection = AddrFile->Connection; Connection && Total < TCP_ROW_MAX_CONNECTIONS; Connection = Connection->Next)
+        Total++;
+
+    if (Total)
+    {
+        Array = ExAllocatePoolWithTag(NonPagedPool, Total * sizeof(*Array), TDI_ENTITY_TAG);
+        if (Array)
+        {
+            /* The chain cannot change while the address file is locked: Taken equals Total */
+            for (Connection = AddrFile->Connection; Connection && Taken < Total; Connection = Connection->Next)
+            {
+                ReferenceObject(Connection);
+                Array[Taken++] = Connection;
+            }
+        }
+        else
+        {
+            *NoMemory = TRUE;
+        }
+    }
+    UnlockObject(AddrFile);
+
+    *Count = Taken;
+    return Array;
+}
+
+static
+VOID
+InfoDereferenceConnections(PCONNECTION_ENDPOINT *Array, ULONG Count)
+{
+    ULONG i;
+
+    for (i = 0; i < Count; i++)
+        DereferenceObject(Array[i]);
+    if (Array)
+        ExFreePoolWithTag(Array, TDI_ENTITY_TAG);
+}
+
 TDI_STATUS InfoTdiQueryGetConnectionTcpTable(PADDRESS_FILE AddrFile,
 				    PNDIS_BUFFER Buffer,
 				    PUINT BufferSize,
@@ -178,7 +233,11 @@ TDI_STATUS InfoTdiQueryGetConnectionTcpTable(PADDRESS_FILE AddrFile,
 {
     SIZE_T Size;
     MIB_TCPROW_OWNER_MODULE TcpRow;
-    TDI_STATUS Status = TDI_INVALID_REQUEST;
+    PCONNECTION_ENDPOINT *Connections;
+    ULONG ConnectionCount, Count = 0, i;
+    BOOLEAN NoMemory;
+    PUCHAR Rows;
+    TDI_STATUS Status;
 
     TI_DbgPrint(DEBUG_INFO, ("Called.\n"));
 
@@ -199,61 +258,69 @@ TDI_STATUS InfoTdiQueryGetConnectionTcpTable(PADDRESS_FILE AddrFile,
     if (AddrFile->Family == TDI_ADDRESS_TYPE_IP6)
         return TDI_INVALID_REQUEST;
 
-    TcpRow.dwOwningPid = HandleToUlong(AddrFile->ProcessId);
-    TcpRow.liCreateTimestamp = AddrFile->CreationTime;
+    /* One row for the listener (if the address file listens) and one for each connection of the address file
+       that has a socket: the accepted ends of a listener are among them */
+    Connections = InfoReferenceConnections(AddrFile, &ConnectionCount, &NoMemory);
+    if (NoMemory)
+        return TDI_NO_RESOURCES;
+
+    Rows = ExAllocatePoolWithTag(NonPagedPool, (ConnectionCount + 1) * Size, TDI_ENTITY_TAG);
+    if (!Rows)
+    {
+        InfoDereferenceConnections(Connections, ConnectionCount);
+        return TDI_NO_RESOURCES;
+    }
 
     if (AddrFile->Listener != NULL)
     {
-        PADDRESS_FILE EndPoint;
-
-        EndPoint = AddrFile->Listener->AddressFile;
-
+        /* The listener's own address file is this one (a listener is made on the address file it listens on) */
+        RtlZeroMemory(&TcpRow, sizeof(TcpRow));
+        TcpRow.dwOwningPid = HandleToUlong(AddrFile->ProcessId);
+        TcpRow.liCreateTimestamp = AddrFile->CreationTime;
         TcpRow.dwState = MIB_TCP_STATE_LISTEN;
         TcpRow.dwLocalAddr = AddrFile->Address.Address.IPv4Address;
         TcpRow.dwLocalPort = AddrFile->Port;
-        TcpRow.dwRemoteAddr = EndPoint->Address.Address.IPv4Address;
-        TcpRow.dwRemotePort = EndPoint->Port;
-
-        Status = TDI_SUCCESS;
-    }
-    else if (AddrFile->Connection != NULL &&
-             AddrFile->Connection->SocketContext != NULL)
-    {
-        TA_IP_ADDRESS EndPoint;
-
-        Status = TCPGetSockAddress(AddrFile->Connection, (PTRANSPORT_ADDRESS)&EndPoint, sizeof(EndPoint), FALSE);
-        if (NT_SUCCESS(Status))
-        {
-            ASSERT(EndPoint.TAAddressCount >= 1);
-            ASSERT(EndPoint.Address[0].AddressLength == TDI_ADDRESS_LENGTH_IP);
-            TcpRow.dwLocalAddr = EndPoint.Address[0].Address[0].in_addr;
-            TcpRow.dwLocalPort = EndPoint.Address[0].Address[0].sin_port;
-
-            Status = TCPGetSockAddress(AddrFile->Connection, (PTRANSPORT_ADDRESS)&EndPoint, sizeof(EndPoint), TRUE);
-            if (NT_SUCCESS(Status))
-            {
-                ASSERT(EndPoint.TAAddressCount >= 1);
-                ASSERT(EndPoint.Address[0].AddressLength == TDI_ADDRESS_LENGTH_IP);
-                TcpRow.dwRemoteAddr = EndPoint.Address[0].Address[0].in_addr;
-                TcpRow.dwRemotePort = EndPoint.Address[0].Address[0].sin_port;
-
-                /* Fails if the connection was closed meanwhile; the row is skipped then */
-                Status = TCPGetSocketStatus(AddrFile->Connection, &TcpRow.dwState);
-            }
-        }
-    }
-
-    if (NT_SUCCESS(Status))
-    {
+        TcpRow.dwRemoteAddr = AddrFile->Address.Address.IPv4Address;
+        TcpRow.dwRemotePort = AddrFile->Port;
         if (Class == TcpUdpClassOwner)
-        {
-            RtlZeroMemory(&TcpRow.OwningModuleInfo[0], sizeof(TcpRow.OwningModuleInfo));
             TcpRow.OwningModuleInfo[0] = (ULONG_PTR)AddrFile->SubProcessTag;
-        }
-
-        Status = InfoCopyOut( (PCHAR)&TcpRow, Size,
-                              Buffer, BufferSize );
+        RtlCopyMemory(Rows + Count * Size, &TcpRow, Size);
+        Count++;
     }
+
+    for (i = 0; i < ConnectionCount; i++)
+    {
+        TA_IP_ADDRESS Local, Remote;
+        ULONG State;
+
+        /* Fails if the connection has no socket (yet) or was closed meanwhile; no row then */
+        if (!NT_SUCCESS(TCPGetConnectionEnds(Connections[i], (PTRANSPORT_ADDRESS)&Local,
+                                             (PTRANSPORT_ADDRESS)&Remote, sizeof(Local), &State)))
+            continue;
+
+        ASSERT(Local.TAAddressCount >= 1);
+        ASSERT(Local.Address[0].AddressLength == TDI_ADDRESS_LENGTH_IP);
+        RtlZeroMemory(&TcpRow, sizeof(TcpRow));
+        TcpRow.dwOwningPid = HandleToUlong(AddrFile->ProcessId);
+        TcpRow.liCreateTimestamp = AddrFile->CreationTime;
+        TcpRow.dwState = State;
+        TcpRow.dwLocalAddr = Local.Address[0].Address[0].in_addr;
+        TcpRow.dwLocalPort = Local.Address[0].Address[0].sin_port;
+        TcpRow.dwRemoteAddr = Remote.Address[0].Address[0].in_addr;
+        TcpRow.dwRemotePort = Remote.Address[0].Address[0].sin_port;
+        if (Class == TcpUdpClassOwner)
+            TcpRow.OwningModuleInfo[0] = (ULONG_PTR)AddrFile->SubProcessTag;
+        RtlCopyMemory(Rows + Count * Size, &TcpRow, Size);
+        Count++;
+    }
+
+    InfoDereferenceConnections(Connections, ConnectionCount);
+
+    if (Count == 0)
+        Status = TDI_INVALID_REQUEST;
+    else
+        Status = InfoCopyOut((PCHAR)Rows, Count * Size, Buffer, BufferSize);
+    ExFreePoolWithTag(Rows, TDI_ENTITY_TAG);
 
     TI_DbgPrint(DEBUG_INFO, ("Returning %08x\n", Status));
 
@@ -304,55 +371,77 @@ TDI_STATUS InfoTdiQueryGetConnectionUdp6Row(PADDRESS_FILE AddrFile,
     return InfoCopyOut((PCHAR)&Row, sizeof(Row), Buffer, BufferSize);
 }
 
-/* The row of an IPv6 TCP socket (IP_TCP6_ROW_ENTRY_ID): its listener, or its connection. An IPv4 socket has
- * none (refused, so that the caller skips it, as a closing socket is skipped) */
+/* The rows of an IPv6 TCP socket's address file (IP_TCP6_ROW_ENTRY_ID): its listener, and each of its connections
+ * (the accepted ends of a listener hang on its address file). An IPv4 socket has none (refused, so that the
+ * caller skips it, as a closing socket is skipped). The answer is one row after the other; its size is the number
+ * of rows asked for, and a caller that wants them all asks for the size first */
 TDI_STATUS InfoTdiQueryGetConnectionTcp6Row(PADDRESS_FILE AddrFile,
                                             PNDIS_BUFFER Buffer,
                                             PUINT BufferSize)
 {
-    TCP6_ROW_OWNER_PID Row;
-    TA_IP6_ADDRESS EndPoint;
-    NTSTATUS Status = TDI_INVALID_REQUEST;
+    PTCP6_ROW_OWNER_PID Rows;
+    PCONNECTION_ENDPOINT *Connections;
+    ULONG ConnectionCount, Count = 0, i;
+    BOOLEAN NoMemory;
+    TDI_STATUS Status;
 
     if (AddrFile->Family != TDI_ADDRESS_TYPE_IP6)
         return TDI_INVALID_REQUEST;
 
-    RtlZeroMemory(&Row, sizeof(Row));
-    Row.OwningPid = HandleToUlong(AddrFile->ProcessId);
+    Connections = InfoReferenceConnections(AddrFile, &ConnectionCount, &NoMemory);
+    if (NoMemory)
+        return TDI_NO_RESOURCES;
+
+    Rows = ExAllocatePoolWithTag(NonPagedPool, (ConnectionCount + 1) * sizeof(*Rows), TDI_ENTITY_TAG);
+    if (!Rows)
+    {
+        InfoDereferenceConnections(Connections, ConnectionCount);
+        return TDI_NO_RESOURCES;
+    }
 
     if (AddrFile->Listener != NULL)
     {
-        Status = TCPAddrFileTransportAddress(AddrFile, (PTRANSPORT_ADDRESS)&EndPoint, sizeof(EndPoint));
-        if (NT_SUCCESS(Status))
+        TA_IP6_ADDRESS EndPoint;
+
+        if (NT_SUCCESS(TCPAddrFileTransportAddress(AddrFile, (PTRANSPORT_ADDRESS)&EndPoint, sizeof(EndPoint))))
         {
-            Tcp6RowAddress((PTRANSPORT_ADDRESS)&EndPoint, sizeof(EndPoint), Row.LocalAddr, &Row.LocalScopeId,
-                           &Row.LocalPort);
-            Row.State = MIB_TCP_STATE_LISTEN;
+            RtlZeroMemory(&Rows[Count], sizeof(*Rows));
+            Rows[Count].OwningPid = HandleToUlong(AddrFile->ProcessId);
+            Tcp6RowAddress((PTRANSPORT_ADDRESS)&EndPoint, sizeof(EndPoint), Rows[Count].LocalAddr,
+                           &Rows[Count].LocalScopeId, &Rows[Count].LocalPort);
+            Rows[Count].State = MIB_TCP_STATE_LISTEN;
+            Count++;
         }
     }
-    else if (AddrFile->Connection != NULL &&
-             AddrFile->Connection->SocketContext != NULL)
+
+    for (i = 0; i < ConnectionCount; i++)
     {
-        Status = TCPGetSockAddress(AddrFile->Connection, (PTRANSPORT_ADDRESS)&EndPoint, sizeof(EndPoint), FALSE);
-        if (NT_SUCCESS(Status))
-        {
-            Tcp6RowAddress((PTRANSPORT_ADDRESS)&EndPoint, sizeof(EndPoint), Row.LocalAddr, &Row.LocalScopeId,
-                           &Row.LocalPort);
-            Status = TCPGetSockAddress(AddrFile->Connection, (PTRANSPORT_ADDRESS)&EndPoint, sizeof(EndPoint), TRUE);
-            if (NT_SUCCESS(Status))
-            {
-                Tcp6RowAddress((PTRANSPORT_ADDRESS)&EndPoint, sizeof(EndPoint), Row.RemoteAddr, &Row.RemoteScopeId,
-                               &Row.RemotePort);
-                /* Fails if the connection was closed meanwhile; the row is skipped then */
-                Status = TCPGetSocketStatus(AddrFile->Connection, &Row.State);
-            }
-        }
+        TA_IP6_ADDRESS Local, Remote;
+        PTCP6_ROW_OWNER_PID Row = &Rows[Count];
+        ULONG State;
+
+        /* Fails if the connection has no socket (yet) or was closed meanwhile; no row then */
+        if (!NT_SUCCESS(TCPGetConnectionEnds(Connections[i], (PTRANSPORT_ADDRESS)&Local,
+                                             (PTRANSPORT_ADDRESS)&Remote, sizeof(Local), &State)))
+            continue;
+
+        RtlZeroMemory(Row, sizeof(*Row));
+        Row->OwningPid = HandleToUlong(AddrFile->ProcessId);
+        Tcp6RowAddress((PTRANSPORT_ADDRESS)&Local, sizeof(Local), Row->LocalAddr, &Row->LocalScopeId, &Row->LocalPort);
+        Tcp6RowAddress((PTRANSPORT_ADDRESS)&Remote, sizeof(Remote), Row->RemoteAddr, &Row->RemoteScopeId,
+                       &Row->RemotePort);
+        Row->State = State;
+        Count++;
     }
 
-    if (!NT_SUCCESS(Status))
-        return TDI_INVALID_REQUEST;
+    InfoDereferenceConnections(Connections, ConnectionCount);
 
-    return InfoCopyOut((PCHAR)&Row, sizeof(Row), Buffer, BufferSize);
+    if (Count == 0)
+        Status = TDI_INVALID_REQUEST;
+    else
+        Status = InfoCopyOut((PCHAR)Rows, Count * sizeof(*Rows), Buffer, BufferSize);
+    ExFreePoolWithTag(Rows, TDI_ENTITY_TAG);
+    return Status;
 }
 
 TDI_STATUS InfoTdiQueryGetConnectionUdpTable(PADDRESS_FILE AddrFile,
