@@ -109,6 +109,50 @@ void PrintHelp(void)
     _tprintf(_T("\n"));
 }
 
+/* The first IPv6 name server of an adapter that is up (configured or from a router advertisement), as text;
+   Out stays empty when there is none (and always without IPv6: the IPv6 family lists nothing then) */
+static void GetDefaultIpv6Server( PCHAR Out, DWORD OutSize )
+{
+    PIP_ADAPTER_ADDRESSES Addresses = NULL, A;
+    ULONG Size = 16 * 1024, Pass;
+    DWORD Error = ERROR_BUFFER_OVERFLOW;
+
+    for( Pass = 0; Pass < 3 && Error == ERROR_BUFFER_OVERFLOW; Pass += 1 )
+    {
+        if( Addresses ) HeapFree( ProcessHeap, 0, Addresses );
+        Addresses = HeapAlloc( ProcessHeap, 0, Size );
+        if( !Addresses ) return;
+        Error = GetAdaptersAddresses( AF_INET6,
+                                      GAA_FLAG_SKIP_UNICAST | GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST,
+                                      NULL, Addresses, &Size );
+    }
+
+    for( A = (Error == NO_ERROR) ? Addresses : NULL; A; A = A->Next )
+    {
+        PIP_ADAPTER_DNS_SERVER_ADDRESS S;
+
+        if( A->IfType == IF_TYPE_SOFTWARE_LOOPBACK || A->OperStatus != IfOperStatusUp ) continue;
+
+        for( S = A->FirstDnsServerAddress; S; S = S->Next )
+        {
+            DWORD Length = OutSize;
+
+            if( S->Address.lpSockaddr && S->Address.lpSockaddr->sa_family == AF_INET6 &&
+                WSAAddressToStringA( S->Address.lpSockaddr,
+                                     S->Address.iSockaddrLength,
+                                     NULL,
+                                     Out,
+                                     &Length ) == 0 )
+            {
+                HeapFree( ProcessHeap, 0, Addresses );
+                return;
+            }
+        }
+    }
+
+    HeapFree( ProcessHeap, 0, Addresses );
+}
+
 BOOL PerformInternalLookup( PCHAR pAddr, PCHAR pResult )
 {
     /* Needed to issue DNS packets and parse them. */
@@ -123,6 +167,13 @@ BOOL PerformInternalLookup( PCHAR pAddr, PCHAR pResult )
     USHORT Type;
 
     if( (strlen( pAddr ) + 1) > 255 ) return FALSE;
+
+    /* The name of an IPv6 server is not looked up (no ip6.arpa support): it stays unknown */
+    if( IsValidIPv6( pAddr ) )
+    {
+        strcpy( pResult, "UnKnown" );
+        return FALSE;
+    }
 
     Type = TYPE_A;
     if( IsValidIP( pAddr ) ) Type = TYPE_PTR;
@@ -526,9 +577,9 @@ BOOL ParseCommandLine( int argc, char* argv[] )
 
                 /* Determine which one to resolve. This is based on whether the
                    DNS server provided was an IP or an FQDN. */
-                if( IsValidIP( Server ) )
+                if( IsValidIP( Server ) || IsValidIPv6( Server ) )
                 {
-                    strncpy( State.DefaultServerAddress, Server, 16 );
+                    strncpy( State.DefaultServerAddress, Server, sizeof(State.DefaultServerAddress) - 1 );
 
                     PerformInternalLookup( State.DefaultServerAddress,
                                            State.DefaultServer );
@@ -1089,16 +1140,16 @@ void InteractiveMode()
                 }
                 else if (dwArgCount == 2)
                 {
-                    CHAR BackupServerAddress[16];
+                    CHAR BackupServerAddress[sizeof(State.DefaultServerAddress)];
                     CHAR BackupServer[256];
 
                     CopyMemory(BackupServerAddress, State.DefaultServerAddress, sizeof(BackupServerAddress));
                     CopyMemory(BackupServer, State.DefaultServer, sizeof(BackupServer));
 
-                    if (IsValidIP(args_vector[1]))
+                    if (IsValidIP(args_vector[1]) || IsValidIPv6(args_vector[1]))
                     {
-                        strncpy(State.DefaultServerAddress, args_vector[1], min(16, strlen(args_vector[1])));
-                        State.DefaultServerAddress[min(16, strlen(args_vector[1]))] = '\0';
+                        strncpy(State.DefaultServerAddress, args_vector[1], min(sizeof(State.DefaultServerAddress) - 1, strlen(args_vector[1])));
+                        State.DefaultServerAddress[min(sizeof(State.DefaultServerAddress) - 1, strlen(args_vector[1]))] = '\0';
 
                         PerformInternalLookup(State.DefaultServerAddress,
                                               State.DefaultServer);
@@ -1165,7 +1216,7 @@ int main( int argc, char* argv[] )
     RtlZeroMemory( State.domain, 256 );
     for( i = 0; i < 6; i += 1 ) RtlZeroMemory( State.srchlist[i], 256 );
     RtlZeroMemory( State.DefaultServer, 256 );
-    RtlZeroMemory( State.DefaultServerAddress, 16 );
+    RtlZeroMemory( State.DefaultServerAddress, sizeof(State.DefaultServerAddress) );
 
     memcpy( State.root, DEFAULT_ROOT, sizeof(DEFAULT_ROOT) );
 
@@ -1213,6 +1264,10 @@ int main( int argc, char* argv[] )
         _tprintf( _T("Winsock initialization failed: %d\n"), ret );
         return ret;
     }
+
+    /* No IPv4 name server (an IPv6-only network): the first IPv6 one (needs Winsock for the address text) */
+    if( State.DefaultServerAddress[0] == '\0' || !strcmp( State.DefaultServerAddress, "0.0.0.0" ) )
+        GetDefaultIpv6Server( State.DefaultServerAddress, sizeof(State.DefaultServerAddress) );
 
     switch( ParseCommandLine( argc, argv ) )
     {

@@ -5,8 +5,10 @@
 
 #define WIN32_NO_STATUS
 #include <windef.h>
+#include <winbase.h>
 #define _INC_WINDOWS
 #include <winsock2.h>
+#include <ws2tcpip.h>
 #include <tchar.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -84,7 +86,7 @@ typedef struct _STATE
     PCHAR Class;
     USHORT port;
     CHAR DefaultServer[256];
-    CHAR DefaultServerAddress[16];
+    CHAR DefaultServerAddress[64]; /* IPv4 or IPv6 text (an IPv6 one may carry %scope) */
 } STATE, *PSTATE;
 
 /* nslookup.c */
@@ -106,6 +108,7 @@ int     ExtractName( PCHAR pBuffer,
 
 void    ReverseIP( PCHAR pIP, PCHAR pReturn );
 BOOL    IsValidIP( PCHAR pInput );
+BOOL    IsValidIPv6( PCHAR pInput );
 int     ExtractIP( PCHAR pBuffer, PCHAR pOutput, USHORT Offset );
 void    PrintD2( PCHAR pBuffer, DWORD BufferLength );
 void    PrintDebug( PCHAR pBuffer, DWORD BufferLength );

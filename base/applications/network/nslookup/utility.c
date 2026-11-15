@@ -18,12 +18,17 @@ BOOL SendRequest( PCHAR pInBuffer,
     USHORT RequestID, ResponseID;
     BOOL bWait;
     SOCKET s;
-    SOCKADDR_IN RecAddr, RecAddr2, SendAddr;
+    SOCKADDR_IN RecAddr, RecAddr2;
+    SOCKADDR_IN6 RecAddr6, RecAddr26;
+    SOCKADDR_STORAGE SendAddr;
     int SendAddrLen = sizeof(SendAddr);
+    BOOL bIPv6 = (strchr( State.DefaultServerAddress, ':' ) != NULL);
 
     RtlZeroMemory( &RecAddr, sizeof(SOCKADDR_IN) );
     RtlZeroMemory( &RecAddr2, sizeof(SOCKADDR_IN) );
-    RtlZeroMemory( &SendAddr, sizeof(SOCKADDR_IN) );
+    RtlZeroMemory( &RecAddr6, sizeof(SOCKADDR_IN6) );
+    RtlZeroMemory( &RecAddr26, sizeof(SOCKADDR_IN6) );
+    RtlZeroMemory( &SendAddr, sizeof(SendAddr) );
 
     /* Pull the request ID from the buffer. */
     RequestID = ntohs( ((PSHORT)&pInBuffer[0])[0] );
@@ -32,31 +37,66 @@ BOOL SendRequest( PCHAR pInBuffer,
     if( State.d2 ) PrintD2( pInBuffer, InBufferLength );
 
     /* Create the sockets for both send and receive. */
-    s = socket( AF_INET, SOCK_DGRAM, IPPROTO_UDP );
+    s = socket( bIPv6 ? AF_INET6 : AF_INET, SOCK_DGRAM, IPPROTO_UDP );
 
     if (s == INVALID_SOCKET)
         return FALSE;
 
-    /* Set up the structure to tell it where we are going. */
-    RecAddr.sin_family = AF_INET;
-    RecAddr.sin_port = htons( State.port );
-    RecAddr.sin_addr.s_addr = inet_addr( State.DefaultServerAddress );
+    if( bIPv6 )
+    {
+        INT AddrLen = sizeof(RecAddr6);
 
-    /* Set up the structure to tell it what port to listen on. */
-    RecAddr2.sin_family = AF_INET;
-    RecAddr2.sin_port = htons( State.port );
-    RecAddr2.sin_addr.s_addr = htonl( INADDR_ANY );
+        /* Set up the structure to tell it where we are going. */
+        if( WSAStringToAddressA( State.DefaultServerAddress,
+                                 AF_INET6,
+                                 NULL,
+                                 (SOCKADDR*)&RecAddr6,
+                                 &AddrLen ) != 0 )
+        {
+            closesocket( s );
+            return FALSE;
+        }
+        RecAddr6.sin6_family = AF_INET6;
+        RecAddr6.sin6_port = htons( State.port );
 
-    /* Bind the receive socket. */
-    bind( s, (SOCKADDR*)&RecAddr2, sizeof(RecAddr2) );
+        /* Set up the structure to tell it what port to listen on. */
+        RecAddr26.sin6_family = AF_INET6;
+        RecAddr26.sin6_port = htons( State.port );
 
-    /* Send the datagram to the DNS server. */
-    j = sendto( s,
-                pInBuffer,
-                InBufferLength,
-                0,
-                (SOCKADDR*)&RecAddr,
-                sizeof(RecAddr) );
+        /* Bind the receive socket. */
+        bind( s, (SOCKADDR*)&RecAddr26, sizeof(RecAddr26) );
+
+        /* Send the datagram to the DNS server. */
+        j = sendto( s,
+                    pInBuffer,
+                    InBufferLength,
+                    0,
+                    (SOCKADDR*)&RecAddr6,
+                    sizeof(RecAddr6) );
+    }
+    else
+    {
+        /* Set up the structure to tell it where we are going. */
+        RecAddr.sin_family = AF_INET;
+        RecAddr.sin_port = htons( State.port );
+        RecAddr.sin_addr.s_addr = inet_addr( State.DefaultServerAddress );
+
+        /* Set up the structure to tell it what port to listen on. */
+        RecAddr2.sin_family = AF_INET;
+        RecAddr2.sin_port = htons( State.port );
+        RecAddr2.sin_addr.s_addr = htonl( INADDR_ANY );
+
+        /* Bind the receive socket. */
+        bind( s, (SOCKADDR*)&RecAddr2, sizeof(RecAddr2) );
+
+        /* Send the datagram to the DNS server. */
+        j = sendto( s,
+                    pInBuffer,
+                    InBufferLength,
+                    0,
+                    (SOCKADDR*)&RecAddr,
+                    sizeof(RecAddr) );
+    }
     if( j == SOCKET_ERROR )
     {
         switch( WSAGetLastError() )
@@ -307,6 +347,18 @@ void ReverseIP( PCHAR pIP, PCHAR pReturn )
     k += (j - i) + 1;
 
     pReturn[k] = '\0';
+}
+
+/* An IPv6 address in text form (the zone suffix %n is accepted) */
+BOOL IsValidIPv6( PCHAR pInput )
+{
+    SOCKADDR_IN6 Addr;
+    INT AddrLen = sizeof(Addr);
+
+    if( !strchr( pInput, ':' ) ) return FALSE;
+
+    RtlZeroMemory( &Addr, sizeof(Addr) );
+    return WSAStringToAddressA( pInput, AF_INET6, NULL, (SOCKADDR*)&Addr, &AddrLen ) == 0;
 }
 
 BOOL IsValidIP( PCHAR pInput )
