@@ -571,17 +571,23 @@ FormatIp6Endpoint(const UCHAR *Address, ULONG ScopeId, ULONG Port, PCSTR Proto, 
 BOOL ShowTcp6Table(VOID)
 {
     PMIB_TCP6TABLE_OWNER_PID Table = NULL;
-    DWORD Error, Size = 0, i;
+    DWORD Error, Size = 0, i, Tries;
     CHAR Host[ADDRESSLEN + 16], Remote[ADDRESSLEN + 16], PID[64];
 
-    do
+    /* The table can grow between the call that asks for its size and the one that reads it: ask again, a few
+       times, with room for rows that came meanwhile. Without memory there is nothing to show */
+    for (Tries = 0; Tries < 8; Tries++)
     {
+        Error = GetExtendedTcpTable(Table, &Size, TRUE, AF_INET6, TCP_TABLE_OWNER_PID_ALL, 0);
+        if (Error != ERROR_INSUFFICIENT_BUFFER)
+            break;
         if (Table)
             HeapFree(GetProcessHeap(), 0, Table);
-        Table = Size ? HeapAlloc(GetProcessHeap(), 0, Size) : NULL;
-        Error = GetExtendedTcpTable(Table, &Size, TRUE, AF_INET6, TCP_TABLE_OWNER_PID_ALL, 0);
+        Size += 16 * sizeof(MIB_TCP6ROW_OWNER_PID);
+        Table = HeapAlloc(GetProcessHeap(), 0, Size);
+        if (!Table)
+            return TRUE;
     }
-    while (Error == ERROR_INSUFFICIENT_BUFFER && Size);
 
     if (Error != NO_ERROR || !Table)
     {
@@ -627,20 +633,28 @@ BOOL ShowTcp6Table(VOID)
 /* The IPv6 UDP endpoints (GetExtendedUdpTable(AF_INET6)); nothing while the system has no IPv6 */
 BOOL ShowUdp6Table(VOID)
 {
-    PMIB_UDP6TABLE_OWNER_PID Table;
-    DWORD Error, Size = 0, i;
+    PMIB_UDP6TABLE_OWNER_PID Table = NULL;
+    DWORD Error, Size = 0, i, Tries;
     CHAR Host[ADDRESSLEN + 16], PID[64];
 
-    Error = GetExtendedUdpTable(NULL, &Size, TRUE, AF_INET6, UDP_TABLE_OWNER_PID, 0);
-    if (Error != ERROR_INSUFFICIENT_BUFFER || !Size)
-        return TRUE;
-    Size += 16 * sizeof(MIB_UDP6ROW_OWNER_PID);
-    Table = HeapAlloc(GetProcessHeap(), 0, Size);
-    if (!Table)
-        return TRUE;
-    if (GetExtendedUdpTable(Table, &Size, TRUE, AF_INET6, UDP_TABLE_OWNER_PID, 0) != NO_ERROR)
+    /* As for the TCP table: ask again when it grew between the two calls, a few times */
+    for (Tries = 0; Tries < 8; Tries++)
     {
-        HeapFree(GetProcessHeap(), 0, Table);
+        Error = GetExtendedUdpTable(Table, &Size, TRUE, AF_INET6, UDP_TABLE_OWNER_PID, 0);
+        if (Error != ERROR_INSUFFICIENT_BUFFER)
+            break;
+        if (Table)
+            HeapFree(GetProcessHeap(), 0, Table);
+        Size += 16 * sizeof(MIB_UDP6ROW_OWNER_PID);
+        Table = HeapAlloc(GetProcessHeap(), 0, Size);
+        if (!Table)
+            return TRUE;
+    }
+
+    if (Error != NO_ERROR || !Table)
+    {
+        if (Table)
+            HeapFree(GetProcessHeap(), 0, Table);
         return TRUE;
     }
 
