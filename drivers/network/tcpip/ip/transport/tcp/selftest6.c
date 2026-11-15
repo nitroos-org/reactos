@@ -2066,6 +2066,21 @@ StTestRaExtras(PIP_INTERFACE Eth)
         _snprintf(Detail, sizeof(Detail), "metrics: r1 %lu, r2 %lu", Metric1, Metric2);
         StResult(Metric1 == 128 && Metric2 == 512, "router preference: the route table shows the metrics of the preferences", Detail);
 
+        /* r1 medium; r2 says high with router lifetime 0, a preference the receiver ignores (RFC 4191 2.2): r2 is not
+           the next hop for as long as its entry is there (a medium router of the link, r1 or QEMU's, is) */
+        n = StOptSlla(Opts, Mac1);
+        StInject(Eth, StRa(&R1, 0, 0x00, 1800, Opts, n), FALSE);
+        n = StOptSlla(Opts, Mac2);
+        StInject(Eth, StRa(&R2, 0, 0x08, 0, Opts, n), FALSE);
+        Hw = NULL;
+        LOCK_TCPIP_CORE();
+        Err = nd6_get_next_hop_addr_or_queue(En, NULL, &Dest, &Hw);
+        Ok = Err == ERR_OK && Hw && !StSame(Hw, Mac2, 6);
+        UNLOCK_TCPIP_CORE();
+        StResult(Ok, "router preference: a high preference with router lifetime 0 is ignored",
+                 Err == ERR_OK ? (Hw && StSame(Hw, Mac2, 6) ? "r2" : Hw && StSame(Hw, Mac1, 6) ? "r1" : "another router") :
+                 "no next hop");
+
         /* the routers go (lifetime 0) */
         n = StOptSlla(Opts, Mac1);
         StInject(Eth, StRa(&R1, 0, 0x08, 0, Opts, n), FALSE);

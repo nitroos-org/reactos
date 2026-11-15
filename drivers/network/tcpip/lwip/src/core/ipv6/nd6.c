@@ -1839,7 +1839,10 @@ nd6_select_router(const ip6_addr_t *ip6addr, struct netif *netif)
          * RFC 4861 Sec. 6.3.6? Note that we will never return a router that
          * has no neighbor cache entry, due to the netif association tests. */
         if (default_router_list[i].neighbor_entry->state != ND6_INCOMPLETE) {
-          u8_t rank = nd6_router_rank(default_router_list[i].flags);
+          /* NitroOS: the preference of an advertisement with router lifetime 0 MUST be ignored (RFC 4191 2.2): such a
+             router (its entry goes on the next tick) ranks below every default router */
+          u8_t rank = default_router_list[i].invalidation_timer > 0 ?
+                      (u8_t)(nd6_router_rank(default_router_list[i].flags) + 1) : 0;
           u8_t reachable = (default_router_list[i].neighbor_entry->state == ND6_REACHABLE);
           if (valid_router < 0 || rank > best_rank || (rank == best_rank && reachable && !best_reachable)) {
             valid_router = i;
