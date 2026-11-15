@@ -1,3 +1,4 @@
+include_directories(${REACTOS_SOURCE_DIR}/base/services/dhcpcsvc)
 
 add_executable(ipconfig ipconfig.c ipconfig.rc)
 set_module_type(ipconfig win32cui UNICODE)

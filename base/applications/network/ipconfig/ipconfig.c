@@ -26,6 +26,7 @@
 #include <strsafe.h>
 #include <conutils.h>
 
+#include <dhcp6.h>
 #include "resource.h"
 
 typedef struct _RECORDTYPE
@@ -1292,15 +1293,148 @@ DhcpOperation(
     return Result;
 }
 
-/* /release6 and /renew6: there are no DHCPv6 adapters. */
+/* Is the DHCPv6 client of the DHCP service asking for addresses on this adapter (the M flag of its router)? */
+static
+BOOL
+IsDhcpv6Adapter(
+    _In_ PCSTR pszAdapterName)
+{
+    CHAR KeyName[256];
+    HKEY hKey;
+    DWORD dwType, dwSize = sizeof(DWORD), dwValue = 0;
+    BOOL bResult = FALSE;
+
+    StringCchPrintfA(KeyName, _countof(KeyName), DHCP6_INTERFACES_KEY "\\%s", pszAdapterName);
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, KeyName, 0, KEY_READ, &hKey) != ERROR_SUCCESS)
+        return FALSE;
+    if (RegQueryValueExA(hKey, DHCP6_VALUE_STATEFUL, NULL, &dwType, (LPBYTE)&dwValue, &dwSize) == ERROR_SUCCESS &&
+        dwType == REG_DWORD && dwValue == 1)
+        bResult = TRUE;
+    RegCloseKey(hKey);
+    return bResult;
+}
+
+/* Hands a renew or release to the DHCPv6 client: the command goes into the interface's key (administrators only)
+   and the client is woken through its named event; the client removes the command when it is done and leaves the
+   outcome next to it. A Win32 error code. */
+static
+DWORD
+SendDhcpv6Command(
+    _In_ PCSTR pszAdapterName,
+    _In_ DWORD dwCommand)
+{
+    CHAR KeyName[256];
+    HKEY hKey;
+    HANDLE hEvent;
+    DWORD dwError, dwType, dwSize, dwValue, dwWaited;
+
+    StringCchPrintfA(KeyName, _countof(KeyName), DHCP6_INTERFACES_KEY "\\%s", pszAdapterName);
+    dwError = RegOpenKeyExA(HKEY_LOCAL_MACHINE, KeyName, 0, KEY_READ | KEY_WRITE, &hKey);
+    if (dwError != ERROR_SUCCESS)
+        return dwError;
+
+    hEvent = OpenEventW(EVENT_MODIFY_STATE, FALSE, DHCP6_COMMAND_EVENT_NAME);
+    if (hEvent == NULL)
+    {
+        dwError = GetLastError();
+        RegCloseKey(hKey);
+        return (dwError == ERROR_FILE_NOT_FOUND) ? ERROR_SERVICE_NOT_ACTIVE : dwError;
+    }
+
+    RegDeleteValueA(hKey, DHCP6_VALUE_COMMAND_RESULT);
+    dwError = RegSetValueExA(hKey, DHCP6_VALUE_COMMAND, 0, REG_DWORD, (const BYTE *)&dwCommand, sizeof(dwCommand));
+    if (dwError == ERROR_SUCCESS)
+    {
+        SetEvent(hEvent);
+
+        /* a bit longer than the client's own limit for the command */
+        for (dwWaited = 0; dwWaited < 20000; dwWaited += 100)
+        {
+            dwSize = sizeof(dwValue);
+            if (RegQueryValueExA(hKey, DHCP6_VALUE_COMMAND, NULL, &dwType, (LPBYTE)&dwValue, &dwSize) != ERROR_SUCCESS)
+                break;
+            Sleep(100);
+        }
+        if (dwWaited >= 20000)
+        {
+            RegDeleteValueA(hKey, DHCP6_VALUE_COMMAND);
+            dwError = ERROR_TIMEOUT;
+        }
+        else
+        {
+            dwValue = 0;
+            dwSize = sizeof(dwValue);
+            if (RegQueryValueExA(hKey, DHCP6_VALUE_COMMAND_RESULT, NULL, &dwType, (LPBYTE)&dwValue, &dwSize) ==
+                ERROR_SUCCESS && dwType == REG_DWORD)
+                dwError = dwValue;
+            else
+                dwError = ERROR_SUCCESS;
+        }
+    }
+    CloseHandle(hEvent);
+    RegCloseKey(hKey);
+    return dwError;
+}
+
+/* /release6 and /renew6 [adapter] */
 static
 INT
 Dhcp6Operation(
-    PWSTR pszAdapterName)
+    PWSTR pszAdapterName,
+    BOOL bRelease)
 {
+    PIP_ADAPTER_ADDRESSES pAddresses = NULL, pAdapter;
+    ULONG ulSize = 16 * 1024, ulPass;
+    DWORD dwError = ERROR_BUFFER_OVERFLOW, dwResult;
+    BOOL bFoundAdapter = FALSE;
+    INT Result = 0;
+
     PrintHeader();
-    ConResPrintf(StdOut, IDS_DHCPNOADAPTER);
-    return 0;
+
+    for (ulPass = 0; ulPass < 3 && dwError == ERROR_BUFFER_OVERFLOW; ulPass++)
+    {
+        if (pAddresses)
+            HeapFree(ProcessHeap, 0, pAddresses);
+        pAddresses = HeapAlloc(ProcessHeap, 0, ulSize);
+        if (!pAddresses)
+            return 1;
+        dwError = GetAdaptersAddresses(AF_INET6,
+                                       GAA_FLAG_SKIP_UNICAST | GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                                       GAA_FLAG_SKIP_DNS_SERVER,
+                                       NULL, pAddresses, &ulSize);
+    }
+
+    for (pAdapter = (dwError == NO_ERROR) ? pAddresses : NULL; pAdapter; pAdapter = pAdapter->Next)
+    {
+        if (!MatchWildcard(pszAdapterName, pAdapter->FriendlyName))
+            continue;
+        if (pAdapter->AdapterName == NULL || !IsDhcpv6Adapter(pAdapter->AdapterName))
+            continue;
+
+        bFoundAdapter = TRUE;
+        if (pAdapter->OperStatus != IfOperStatusUp)
+        {
+            ConResPrintf(StdOut, IDS_DHCPNOTCONNECTED, pAdapter->FriendlyName);
+            continue;
+        }
+
+        dwResult = SendDhcpv6Command(pAdapter->AdapterName, bRelease ? DHCP6_COMMAND_RELEASE : DHCP6_COMMAND_RENEW);
+        if (dwResult != ERROR_SUCCESS)
+        {
+            ConResPrintf(StdOut, bRelease ? IDS_DHCPRELEASEERROR : IDS_DHCPRENEWERROR, pAdapter->FriendlyName);
+            DoFormatMessage(dwResult);
+            Result = 1;
+        }
+    }
+
+    if (pAddresses)
+        HeapFree(ProcessHeap, 0, pAddresses);
+
+    if (!bFoundAdapter)
+        ConResPrintf(StdOut, IDS_DHCPNOADAPTER);
+    else if (ShowInfo(FALSE) != 0)
+        Result = 1;
+    return Result;
 }
 
 static
@@ -1768,7 +1902,7 @@ int wmain(int argc, wchar_t *argv[])
     {
         if (nArgs > 2)
             return Usage(TRUE);
-        return Dhcp6Operation(nArgs == 2 ? argv[i + 1] : NULL);
+        return Dhcp6Operation(nArgs == 2 ? argv[i + 1] : NULL, IsSwitch(pszVerb, L"release6"));
     }
 
     if (IsSwitch(pszVerb, L"flushdns"))
