@@ -8,6 +8,8 @@
  *              are enforced). With RandomizeIdentifiers = 0 the identifiers
  *              are the MAC's EUI-64 again. Windows 10 22H2 reports a random link-local identifier with the origins
  *              WellKnown / Link (Get-NetIPAddress), and "Randomize Identifiers: enabled" by default.
+ *              A secret made during setup is marked (FromSetup) and replaced at the first normal boot: the mark
+ *              is gone when this test runs.
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
@@ -265,6 +267,21 @@ static void TestSecretDeniedToUser(void)
     CloseHandle(Token);
 }
 
+/* A secret made during setup carries FromSetup = 1 until the first normal boot replaces it: gone by now */
+static void TestSetupMarkGone(void)
+{
+    HKEY Key;
+    DWORD Value = 0, Size = sizeof(Value), Type = 0;
+    LONG Error;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, SECRET_KEY, 0, KEY_QUERY_VALUE, &Key) != ERROR_SUCCESS)
+        return;
+    Error = RegQueryValueExW(Key, L"FromSetup", NULL, &Type, (BYTE *)&Value, &Size);
+    RegCloseKey(Key);
+    ok(Error == ERROR_FILE_NOT_FOUND || (Error == ERROR_SUCCESS && Type == REG_DWORD && Value == 0),
+       "FromSetup still set after setup: error %ld type %lu value %lu\n", Error, Type, Value);
+}
+
 START_TEST(Ipv6StableId)
 {
     IP_ADAPTER_ADDRESSES *List, *A;
@@ -302,6 +319,7 @@ START_TEST(Ipv6StableId)
     {
         HaveSecret = ReadSecret(Secret);
         TestSecretDacl();
+        TestSetupMarkGone();
         TestSecretDeniedToUser();
     }
 

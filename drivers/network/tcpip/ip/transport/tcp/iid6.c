@@ -29,10 +29,20 @@
  * key, a registry failure, a key whose protected DACL cannot be stored) a secret made for this start is used and
  * nothing is stored: the addresses are random, only not stable.
  *
+ * A secret made while the system is being installed (SYSTEM\Setup\SystemSetupInProgress != 0) is marked with
+ * the REG_DWORD value FromSetup = 1 next to it, because the installed disk may be copied to other machines. The
+ * first start after setup replaces it with a new secret and removes the mark (the identifiers change once);
+ * after that the secret lives as long as the installation. An image installed by a build without the mark has a
+ * secret that cannot be told from a later one: it is kept.
+ *
  * Duplicate address detection (RFC 7217 section 6): when DAD finds a tentative address of ours in use, the
  * next counter value makes a new identifier, at most IDGEN_RETRIES (3) times, then the address stays
  * duplicated as lwIP leaves it. lwIP calls LibNd6DadFailed (LWIP_HOOK_ND6_DAD_FAILED) and LibNd6SlaacAddress
  * (LWIP_HOOK_ND6_SLAAC_ADDRESS) from nd6.c, with the core lock held.
+ *
+ * The DAD counter is not persisted (RFC 7217 section 6 does not require it): a conflict that outlives a restart
+ * is found again, 1 s after the start, and the same next-counter address results; when the other host is gone
+ * the counter-0 address returns. Stable while the conflict lasts.
  *
  * Tcpip6\Parameters\RandomizeIdentifiers (REG_DWORD): 0 returns to the MAC-derived identifiers (what
  * `netsh interface ipv6 set global randomizeidentifiers=disabled` selects on Windows); absent or anything
@@ -62,6 +72,7 @@
 #define IID6_IDGEN_RETRIES  3
 
 #define IID6_PARAMETERS     L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\Tcpip6\\Parameters"
+#define IID6_SETUP_MARK     L"FromSetup"
 #define IID6_SECRET_KEY     L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\Tcpip6\\Parameters\\StableIdentifiers"
 
 BOOLEAN TCP6RandomizeIdentifiers;
@@ -600,21 +611,58 @@ Iid6KeySecurityIsOurs(HANDLE Key)
     return Ours;
 }
 
-/* Reads the secret, or makes and stores one; Iid6Secret holds a secret afterwards in any case */
+/* SYSTEM\Setup\SystemSetupInProgress (REG_DWORD) is not zero: the system is being installed (second-stage
+   setup; the same value the configuration manager looks at). The key is absent on a Windows install and its
+   value 0 after setup finished here */
+static
+BOOLEAN
+Iid6SetupInProgress(VOID)
+{
+    UNICODE_STRING KeyName = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\Setup");
+    UNICODE_STRING ValueName = RTL_CONSTANT_STRING(L"SystemSetupInProgress");
+    OBJECT_ATTRIBUTES Attributes;
+    UCHAR Buffer[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)];
+    PKEY_VALUE_PARTIAL_INFORMATION Info = (PKEY_VALUE_PARTIAL_INFORMATION)Buffer;
+    HANDLE Key;
+    ULONG Length;
+    BOOLEAN InProgress = FALSE;
+
+    InitializeObjectAttributes(&Attributes, &KeyName, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+    if (!NT_SUCCESS(ZwOpenKey(&Key, KEY_QUERY_VALUE, &Attributes)))
+        return FALSE;
+    if (NT_SUCCESS(ZwQueryValueKey(Key, &ValueName, KeyValuePartialInformation, Info, sizeof(Buffer), &Length)) &&
+        Info->Type == REG_DWORD && Info->DataLength == sizeof(ULONG))
+    {
+        InProgress = (*(PULONG)Info->Data != 0);
+    }
+    ZwClose(Key);
+    return InProgress;
+}
+
+/* Reads the secret, or makes and stores one; Iid6Secret holds a secret afterwards in any case.
+   A secret made while the system is being installed is marked (value FromSetup = 1 in the secret's key): the
+   installed disk may be copied to other machines, so the first start after setup (the first normal boot) makes
+   a new one, stores it, and removes the mark. From then on the secret stays for the life of the installation.
+   Whenever the key cannot be given the protected DACL nothing is read from or written to it: a secret for this
+   start only (random, not stable), logged. */
 static
 VOID
 Iid6LoadSecret(VOID)
 {
     UNICODE_STRING KeyName = RTL_CONSTANT_STRING(IID6_SECRET_KEY);
     UNICODE_STRING ValueName = RTL_CONSTANT_STRING(L"SecretKey");
+    UNICODE_STRING MarkName = RTL_CONSTANT_STRING(IID6_SETUP_MARK);
     OBJECT_ATTRIBUTES Attributes;
     SECURITY_DESCRIPTOR Sd;
     PACL Dacl = NULL;
     UCHAR Buffer[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + IID6_SECRET_SIZE];
     PKEY_VALUE_PARTIAL_INFORMATION Info = (PKEY_VALUE_PARTIAL_INFORMATION)Buffer;
     HANDLE Key;
-    ULONG Length, Disposition;
+    ULONG Length, Disposition, Mark = 1;
+    BOOLEAN Setup, HaveSecret, Marked = FALSE;
     NTSTATUS Status;
+
+    Setup = Iid6SetupInProgress();
 
     if (!NT_SUCCESS(Iid6MakeSecurity(&Sd, &Dacl)))
     {
@@ -636,14 +684,14 @@ Iid6LoadSecret(VOID)
     }
 
     /* A key made while setup runs (the configuration manager stores no descriptor then: it inherits) or
-       changed since gets the DACL again, at the first start where it can be stored */
+       changed since gets the DACL again, at the first start where it can be stored. If that fails the key may
+       be readable by others: no secret is stored in it, and a stored one is not trusted */
     if (!Iid6KeySecurityIsOurs(Key))
     {
         Status = ZwSetSecurityObject(Key, DACL_SECURITY_INFORMATION, &Sd);
         DbgPrint("TCPIP: IPv6 identifier secret key DACL set again: 0x%lx\n", Status);
         if (!NT_SUCCESS(Status))
         {
-            /* the key may be readable by others: nothing is stored in it and a stored secret is not trusted */
             ExFreePoolWithTag(Dacl, TAG_IID6);
             ZwClose(Key);
             Iid6NewSecret(Iid6Secret);
@@ -654,19 +702,55 @@ Iid6LoadSecret(VOID)
     }
     ExFreePoolWithTag(Dacl, TAG_IID6);
 
+    Status = ZwQueryValueKey(Key, &MarkName, KeyValuePartialInformation, Info, sizeof(Buffer), &Length);
+    Marked = NT_SUCCESS(Status) && Info->Type == REG_DWORD && Info->DataLength == sizeof(ULONG) &&
+             *(PULONG)Info->Data != 0;
+
     Status = ZwQueryValueKey(Key, &ValueName, KeyValuePartialInformation, Info, sizeof(Buffer), &Length);
-    if (NT_SUCCESS(Status) && Info->Type == REG_BINARY && Info->DataLength == IID6_SECRET_SIZE)
+    HaveSecret = NT_SUCCESS(Status) && Info->Type == REG_BINARY && Info->DataLength == IID6_SECRET_SIZE;
+
+    if (HaveSecret && !(Marked && !Setup))
     {
         RtlCopyMemory(Iid6Secret, Info->Data, IID6_SECRET_SIZE);
+        if (Marked)
+            DbgPrint("TCPIP: IPv6 identifier secret made during setup, replaced at the first start after it\n");
     }
     else
     {
+        if (HaveSecret)
+            DbgPrint("TCPIP: IPv6 identifier secret was made during setup: replacing it (first normal start)\n");
         Iid6NewSecret(Iid6Secret);
-        Status = ZwSetValueKey(Key, &ValueName, 0, REG_BINARY, Iid6Secret, IID6_SECRET_SIZE);
+        Status = STATUS_SUCCESS;
+        if (Setup)
+        {
+            /* the mark goes first: a secret without it would be taken for the installation's own */
+            Status = ZwSetValueKey(Key, &MarkName, 0, REG_DWORD, &Mark, sizeof(Mark));
+            if (!NT_SUCCESS(Status))
+                DbgPrint("TCPIP: IPv6 identifier secret not kept (setup mark: 0x%lx)\n", Status);
+        }
         if (NT_SUCCESS(Status))
-            ZwFlushKey(Key);
-        else
-            DbgPrint("TCPIP: IPv6 identifier secret not kept (value: 0x%lx)\n", Status);
+        {
+            Status = ZwSetValueKey(Key, &ValueName, 0, REG_BINARY, Iid6Secret, IID6_SECRET_SIZE);
+            if (NT_SUCCESS(Status))
+            {
+                if (!Setup && Marked)
+                {
+                    Status = ZwDeleteValueKey(Key, &MarkName);
+                    if (!NT_SUCCESS(Status))
+                    {
+                        /* a mark that stays set would replace the secret at every start: clear it instead */
+                        Mark = 0;
+                        Status = ZwSetValueKey(Key, &MarkName, 0, REG_DWORD, &Mark, sizeof(Mark));
+                        DbgPrint("TCPIP: IPv6 identifier setup mark not removed, cleared: 0x%lx\n", Status);
+                    }
+                }
+                ZwFlushKey(Key);
+            }
+            else
+            {
+                DbgPrint("TCPIP: IPv6 identifier secret not kept (value: 0x%lx)\n", Status);
+            }
+        }
     }
     RtlSecureZeroMemory(Buffer, sizeof(Buffer));
     ZwClose(Key);
