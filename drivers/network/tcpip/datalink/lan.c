@@ -1852,9 +1852,10 @@ BOOLEAN LanFindProbeTarget(
     {
         PNEIGHBOR_CACHE_ENTRY Router = Fibs[i].Router;
 
-        /* The "router" of a link-local (169.254/16) autoconfigured address is the adapter's own address: that is
-           no router (no verdict on a network that has none) */
+        /* The "router" of an on-link route (IPAddInterfaceRoute) is the adapter's own address, of any address
+           (DHCP, static or 169.254/16): nobody answers an ARP request for it, so it is no probe target */
         if (!Found && Router->Address.Type == IP_ADDRESS_V4 && Router->Address.Address.IPv4Address != 0 &&
+            !AddrIsEqual(&Router->Address, &IF->Unicast) &&
             !LanIsLinkLocalOrLoopback(Router->Address.Address.IPv4Address))
         {
             *Target = Router->Address;
@@ -1992,9 +1993,10 @@ VOID LanVerifyStep(
     Adapter->McastChanged = TRUE;
     Queue = LanMulticastQueueLocked(Adapter);
     TcpipReleaseSpinLock(&Adapter->ReconfigureLock, OldIrql);
+    /* End this check before the worker can start the second one (its LanVerifyStart needs the check free) */
+    LanVerifyEnd(Adapter);
     if (Queue)
         LanMulticastQueue(Adapter);
-    LanVerifyEnd(Adapter);
 }
 
 /* Starts the check (one at a time); the first poll comes after the timer */
