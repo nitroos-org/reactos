@@ -1468,6 +1468,9 @@ ndisBindMiniportsToProtocol(OUT PNDIS_STATUS Status, IN PPROTOCOL_BINDING Protoc
                 NDIS_DbgPrint(MID_TRACE, ("No protocol bind handler specified\n"));
         }
 
+        /* The handler has returned: nothing keeps the registry path */
+        ExFreePool(RegistryPathStr);
+
     next:
         if (KeyInformation)
         {
