@@ -632,6 +632,9 @@ TCPQueryIpv6Table(PVOID Out, ULONG OutSize)
         IfRows[i].Flags = (IsLoopback ? (TCP_IPV6_IF_ENABLED | TCP_IPV6_IF_LOOPBACK) :
                            (IF->AddressLength == 6 && netif->hwaddr_len == 6) ? TCP_IPV6_IF_ENABLED : 0);
         IfRows[i].Mtu = IsLoopback ? 0xFFFFFFFF : netif->mtu6;
+        /* what its router advertisements said (ra6.c) */
+        IfRows[i].Flags |= IF->Ra6Flags;
+        IfRows[i].CurHopLimit = IF->Ra6HopLimit;
 
         for (a = 0; a < LWIP_IPV6_NUM_ADDRESSES; a++)
         {
@@ -683,13 +686,17 @@ TCPQueryIpv6Table(PVOID Out, ULONG OutSize)
             }
 
             if (ip6_addr_life_isstatic(netif_ip6_addr_valid_life(netif, a)))
+            {
                 Row->ValidLifetime = 0xFFFFFFFF;
-            else
-                Row->ValidLifetime = netif_ip6_addr_valid_life(netif, a);
-            if (ip6_addr_life_isstatic(netif_ip6_addr_pref_life(netif, a)))
                 Row->PreferredLifetime = 0xFFFFFFFF;
+            }
             else
+            {
+                Row->ValidLifetime = netif_ip6_addr_valid_life(netif, a);
+                /* the address has a valid lifetime that runs: a preferred lifetime of 0 is a preferred lifetime that
+                   ran out (a router advertisement, or the timer), not "infinite" (lwIP's 0 for a static address) */
                 Row->PreferredLifetime = netif_ip6_addr_pref_life(netif, a);
+            }
         }
     }
     UNLOCK_TCPIP_CORE();

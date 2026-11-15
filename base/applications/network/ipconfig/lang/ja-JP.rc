@@ -25,6 +25,7 @@ BEGIN
     IDS_EMPTYLINE           "\t                                    %hs\n"
     IDS_MEDIADISCONNECTED   "\tメディアの状態. . . . . . . . . . : 未接続\n"
     IDS_CONNECTIONDNSSUFFIX "\t接続専用の DNS サフィックス . . . : %hs\n"
+    IDS_CONNSEARCHLIST "\tConnection-specific DNS Suffix Search List :\n"
     IDS_DESCRIPTION         "\t詳しい説明  . . . . . . . . . . . : "
     IDS_PHYSICALADDRESS     "\t物理アドレス. . . . . . . . . . . : %hs\n"
     IDS_DHCPNO              "\tDHCP 有効 . . . . . . . . . . . . : いいえ\n"

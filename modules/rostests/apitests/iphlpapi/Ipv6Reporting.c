@@ -582,8 +582,22 @@ static void TestOn(void)
                One.InterfaceIndex, One.LinkLocalAddressBehavior);
             ok(One.LinkLocalAddressTimeout == 0, "%lu: LinkLocalAddressTimeout %lu\n", One.InterfaceIndex,
                One.LinkLocalAddressTimeout);
-            ok(!One.ManagedAddressConfigurationSupported && !One.OtherStatefulConfigurationSupported,
-               "%lu: stateful configuration\n", One.InterfaceIndex);
+            /* the M and O flags of the router advertisements on the link (none on a link without a router: Windows 10
+               measured both off): the interface row and the adapter flags say the same */
+            {
+                BOOLEAN OtherFlag = FALSE, ManagedFlag = FALSE;
+
+                for (A = All; A; A = A->Next)
+                    if (A->IfIndex == One.InterfaceIndex)
+                    {
+                        OtherFlag = (A->Flags & 0x0020) != 0;       /* IP_ADAPTER_IPV6_OTHER_STATEFUL_CONFIG */
+                        ManagedFlag = (A->Flags & 0x0200) != 0;     /* ...MANAGED_ADDRESS_CONFIGURATION_SUPPORTED */
+                    }
+                ok(One.ManagedAddressConfigurationSupported == ManagedFlag &&
+                   One.OtherStatefulConfigurationSupported == OtherFlag,
+                   "%lu: stateful configuration %d/%d, adapter flags %d/%d\n", One.InterfaceIndex,
+                   One.ManagedAddressConfigurationSupported, One.OtherStatefulConfigurationSupported, ManagedFlag, OtherFlag);
+            }
             ok(One.UseAutomaticMetric, "%lu: UseAutomaticMetric\n", One.InterfaceIndex);
             ok(One.BaseReachableTime == 30000 && One.RetransmitTime == 1000, "%lu: reachable times %lu/%lu\n",
                One.InterfaceIndex, One.BaseReachableTime, One.RetransmitTime);

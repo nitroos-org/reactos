@@ -26,6 +26,7 @@ BEGIN
     IDS_EMPTYLINE           "\t                                    %hs\n"
     IDS_MEDIADISCONNECTED   "\tStarea mediului . . . . . . . . . : Mediu deconectat\n"
     IDS_CONNECTIONDNSSUFFIX "\tSufixul DNS specific conexiunii . : %hs\n"
+    IDS_CONNSEARCHLIST "\tConnection-specific DNS Suffix Search List :\n"
     IDS_DESCRIPTION         "\tDescriere . . . . . . . . . . . . : "
     IDS_PHYSICALADDRESS     "\tAdresă fizică . . . . . . . . . . : %hs\n"
     IDS_DHCPNO              "\tDHCP activat. . . . . . . . . . . : Nu\n"

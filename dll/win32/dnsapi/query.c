@@ -134,6 +134,32 @@ CreateRecordForIpAddress(
 }
 
 
+/* The domains of a space separated search list, as GetAdaptersAddresses gives them for an adapter */
+typedef struct _DNSAPI_ADAPTER_ADDRESSES_W7
+{
+    IP_ADAPTER_ADDRESSES_LH Lh;
+    PIP_ADAPTER_DNS_SUFFIX FirstDnsSuffix;
+} DNSAPI_ADAPTER_ADDRESSES_W7;
+
+static
+BOOL
+DomainInList(PCSTR List, PCSTR Domain)
+{
+    SIZE_T Length = strlen(Domain);
+
+    while (*List)
+    {
+        SIZE_T Part = strcspn(List, " ");
+
+        if (Part == Length && _strnicmp(List, Domain, Length) == 0)
+            return TRUE;
+        List += Part;
+        while (*List == ' ')
+            List++;
+    }
+    return FALSE;
+}
+
 /*
  * The IPv6 name servers of the adapters (configured ones and those of router advertisements: iphlpapi's
  * GetAdaptersAddresses lists them with the IPv6 family), after the IPv4 servers that GetNetworkParams gave, so
@@ -142,7 +168,7 @@ CreateRecordForIpAddress(
  */
 static
 VOID
-AddIpv6Servers(adns_state astate)
+AddIpv6Servers(adns_state astate, PCHAR Search, SIZE_T SearchSize)
 {
     PIP_ADAPTER_ADDRESSES Addresses = NULL, Adapter;
     PIP_ADAPTER_DNS_SERVER_ADDRESS Server;
@@ -172,6 +198,29 @@ AddIpv6Servers(adns_state astate)
 
             if (Sa && Sa->sin6_family == AF_INET6)
                 adns_addserver6(astate, &Sa->sin6_addr, Sa->sin6_scope_id);
+        }
+
+        /* the DNS search domains its router advertisements gave (DNSSL): FirstDnsSuffix follows the last member
+           of IP_ADAPTER_ADDRESSES_LH, which the headers of this tree stop before */
+        if (Search && Adapter->Length >= sizeof(DNSAPI_ADAPTER_ADDRESSES_W7))
+        {
+            PIP_ADAPTER_DNS_SUFFIX Suffix;
+
+            for (Suffix = ((DNSAPI_ADAPTER_ADDRESSES_W7 *)Adapter)->FirstDnsSuffix; Suffix; Suffix = Suffix->Next)
+            {
+                CHAR Text[MAX_DNS_SUFFIX_STRING_LENGTH];
+                SIZE_T Length;
+
+                if (!WideCharToMultiByte(CP_ACP, 0, Suffix->String, -1, Text, sizeof(Text), NULL, NULL) || !Text[0])
+                    continue;
+                Length = strlen(Search);
+                /* each domain once (the list is searched in order), and only while it fits */
+                if (DomainInList(Search, Text) || Length + (Length ? 1 : 0) + strlen(Text) + 1 > SearchSize)
+                    continue;
+                if (Length)
+                    Search[Length++] = ' ';
+                strcpy(Search + Length, Text);
+            }
         }
     }
 
@@ -663,7 +712,7 @@ QueryPtr(LPCWSTR Name,
         if ((addr.s_addr != INADDR_ANY) && (addr.s_addr != INADDR_NONE))
             adns_addserver(astate, addr);
     }
-    AddIpv6Servers(astate);
+    AddIpv6Servers(astate, NULL, 0);
     RtlFreeHeap(RtlGetProcessHeap(), 0, network_info);
 
     if (!adns_numservers(astate))
@@ -894,9 +943,10 @@ QueryAaaa(LPCWSTR Name,
 {
     adns_state astate;
     adns_answer *answer;
-    int quflags = (Options & DNS_QUERY_NO_RECURSION) == 0 ? adns_qf_search : 0;
+    int quflags = (Options & (DNS_QUERY_NO_RECURSION | DNS_QUERY_TREAT_AS_FQDN)) == 0 ? adns_qf_search : 0;
     int adns_error, i;
     unsigned CNameLoop;
+    CHAR Search[512];
     PFIXED_INFO network_info;
     ULONG network_info_blen = 0;
     PIP_ADDR_STRING pip;
@@ -1000,9 +1050,18 @@ QueryAaaa(LPCWSTR Name,
         if ((addr.s_addr != INADDR_ANY) && (addr.s_addr != INADDR_NONE))
             adns_addserver(astate, addr);
     }
-    AddIpv6Servers(astate);
-    if (network_info->DomainName[0])
-        adns_ccf_search(astate, "LOCALDOMAIN", -1, network_info->DomainName);
+    StringCchCopyA(Search, sizeof(Search), network_info->DomainName);
+    AddIpv6Servers(astate, Search, sizeof(Search));
+    if (Search[0])
+    {
+        adns_ccf_search(astate, "LOCALDOMAIN", -1, Search);
+        /* a name of one label is looked up in the search domains even where the caller asked for no recursion:
+           that flag has meant no search list for the other names (the callers of this tree set it for what they
+           cannot search), but a short name is what a search list is for. DNS_QUERY_TREAT_AS_FQDN is the flag that
+           asks for no suffix (Windows SDK: "prevents ... attaching suffixes to the submitted name") */
+        if (strchr(AnsiName, '.') == NULL && !(Options & DNS_QUERY_TREAT_AS_FQDN))
+            quflags |= adns_qf_search;
+    }
     RtlFreeHeap(RtlGetProcessHeap(), 0, network_info);
 
     if (!adns_numservers(astate))
@@ -1087,8 +1146,9 @@ Query_Main(LPCWSTR Name,
            PDNS_RECORD *QueryResultSet)
 {
     adns_state astate;
-    int quflags = (Options & DNS_QUERY_NO_RECURSION) == 0 ? adns_qf_search : 0;
+    int quflags = (Options & (DNS_QUERY_NO_RECURSION | DNS_QUERY_TREAT_AS_FQDN)) == 0 ? adns_qf_search : 0;
     int adns_error;
+    CHAR Search[512];
     adns_answer *answer;
     LPSTR CurrentName;
     unsigned CNameLoop;
@@ -1207,10 +1267,14 @@ Query_Main(LPCWSTR Name,
             if ((addr.s_addr != INADDR_ANY) && (addr.s_addr != INADDR_NONE))
                 adns_addserver(astate, addr);
         }
-        AddIpv6Servers(astate);
-        if (network_info->DomainName[0])
+        StringCchCopyA(Search, sizeof(Search), network_info->DomainName);
+        AddIpv6Servers(astate, Search, sizeof(Search));
+        if (Search[0])
         {
-            adns_ccf_search(astate, "LOCALDOMAIN", -1, network_info->DomainName);
+            adns_ccf_search(astate, "LOCALDOMAIN", -1, Search);
+            /* see QueryAaaa: a name of one label is searched unless the caller said it is fully qualified */
+            if (strchr(AnsiName, '.') == NULL && !(Options & DNS_QUERY_TREAT_AS_FQDN))
+                quflags |= adns_qf_search;
         }
         RtlFreeHeap(RtlGetProcessHeap(), 0, network_info);
 

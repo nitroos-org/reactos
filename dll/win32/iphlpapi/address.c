@@ -339,6 +339,11 @@ CountPrefixBits(
     return BitCount;
 }
 
+/* IP_ADAPTER_IPV6_MANAGED_ADDRESS_CONFIGURATION_SUPPORTED of Windows 7: not in the headers of this tree */
+#define IP_ADAPTER_IPV6_MANAGED_ADDRESS_CONFIGURATION_SUPPORTED_NITRO 0x0200
+/* GAA_FLAG_SKIP_DNS_INFO of Windows Vista SP1 and later: no DNS servers and no DNS suffix list */
+#define GAA_FLAG_SKIP_DNS_INFO_NITRO 0x0800
+
 /* The layout Windows 7 returns; the headers of this tree stop before FirstDnsSuffix. */
 typedef struct _IP_ADAPTER_ADDRESSES_W7
 {
@@ -380,6 +385,8 @@ GetAdaptersAddressesImpl(
     PIP_ADAPTER_ADDRESSES PreviousAA = NULL;
     /* The IPv6 name servers and gateways follow the flags the caller gave, whatever the family does to the IPv4 ones */
     BOOL WantDns6 = !(Flags & GAA_FLAG_SKIP_DNS_SERVER), WantGw6 = !!(Flags & GAA_FLAG_INCLUDE_GATEWAYS);
+    /* the DNS suffix list (FirstDnsSuffix) comes with the DNS information unless the caller skips all of it */
+    BOOL WantSuffix6 = !(Flags & GAA_FLAG_SKIP_DNS_INFO_NITRO);
     CHAR (*AdapterNames)[MAX_ADAPTER_NAME_LENGTH + 4] = NULL;
 
     TRACE("Family %u, Flags 0x%08x, Reserved %p, pAdapterAddress %p, pOutBufLen %p\n",
@@ -665,6 +672,13 @@ GetAdaptersAddressesImpl(
                 if (V6On && Ipv6FindInterface(V6, Entry->if_index))
                 {
                     ULONG Zone;
+                    const TCP_IPV6_INTERFACE_ROW *V6If = Ipv6FindInterface(V6, Entry->if_index);
+
+                    /* what the routers on the link said (the M and O flags of their advertisements) */
+                    if (V6If->Flags & TCP_IPV6_IF_RA_OTHER)
+                        CurrentAA->Flags |= IP_ADAPTER_IPV6_OTHER_STATEFUL_CONFIG;
+                    if (V6If->Flags & TCP_IPV6_IF_RA_MANAGED)
+                        CurrentAA->Flags |= IP_ADAPTER_IPV6_MANAGED_ADDRESS_CONFIGURATION_SUPPORTED_NITRO;
 
                     /* Windows 10 (measured): the same for any Family; the zones of an interface are its own
                        index for the interface and link scopes and 1 above them (the site, admin and
@@ -1224,12 +1238,17 @@ Gateways:
 
     /* The IPv6 name servers (configured, then those of router advertisements) and the default routers of the
        adapters that have IPv6, after the IPv4 ones of their lists. Nothing here with IPv6 off */
-    if (V6On && Family != AF_INET && (WantDns6 || WantGw6))
+    if (V6On && Family != AF_INET && (WantDns6 || WantGw6 || WantSuffix6))
     {
         IPV6_DNS_STATE Dns6;
+        IPV6_RA_STATE Ra6;
         ULONG AdapterNumber;
 
         Ipv6GetDnsFromFile(TcpFile, &Dns6);
+        if (WantSuffix6)
+            Ipv6GetRaFromFile(TcpFile, &Ra6);
+        else
+            RtlZeroMemory(&Ra6, sizeof(Ra6));
 
         for (AdapterNumber = 0; AdapterNumber < AdapterIndexCount; AdapterNumber++)
         {
@@ -1313,8 +1332,39 @@ Gateways:
                     TotalSize += Size;
                 }
             }
+
+            if (WantSuffix6)
+            {
+                IPV6_ADAPTER_SUFFIX Suffixes[IPV6_ADAPTER_MAX_SUFFIXES];
+
+                /* the DNS search domains router advertisements gave the adapter (DNSSL) */
+                Count = Ipv6CollectSuffixes(&Ra6, IfIndex, Suffixes, IPV6_ADAPTER_MAX_SUFFIXES);
+                for (k = 0; k < Count; k++)
+                {
+                    ULONG Size = (sizeof(IP_ADAPTER_DNS_SUFFIX) + 7) & ~7UL;
+
+                    if (CurrentAA && Ptr && (RemainingSize >= Size))
+                    {
+                        PIP_ADAPTER_DNS_SUFFIX Suffix = (PIP_ADAPTER_DNS_SUFFIX)Ptr, *Link;
+
+                        Suffix->Next = NULL;
+                        if (!MultiByteToWideChar(CP_ACP, 0, Suffixes[k].Name, -1, Suffix->String,
+                                                 MAX_DNS_SUFFIX_STRING_LENGTH))
+                            Suffix->String[0] = L'\0';
+
+                        for (Link = (PIP_ADAPTER_DNS_SUFFIX *)&((IP_ADAPTER_ADDRESSES_W7 *)CurrentAA)->FirstDnsSuffix;
+                             *Link; Link = &(*Link)->Next)
+                            ;
+                        *Link = Suffix;
+                        Ptr += Size;
+                        RemainingSize -= Size;
+                    }
+                    TotalSize += Size;
+                }
+            }
         }
 
+        Ipv6FreeRa(&Ra6);
         Ipv6FreeDns(&Dns6);
     }
 

@@ -213,6 +213,8 @@ typedef struct _IP_INTERFACE {
     KSPIN_LOCK NteLock;           /* Protects Nte and NteCount; nothing is called while it is held */
     UINT NteCount;                /* Additional addresses in use */
     IP_NTE Nte[IP_MAX_NTE];       /* The additional addresses */
+    UCHAR Ra6Flags;               /* IPv6: the M and O flags of the last router advertisement (TCP_IPV6_IF_RA_), ra6.c */
+    UCHAR Ra6HopLimit;            /* IPv6: its current hop limit, 0 for none (ra6.c) */
 } IP_INTERFACE, *PIP_INTERFACE;
 
 typedef struct _IP_SET_ADDRESS {

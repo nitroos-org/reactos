@@ -211,6 +211,26 @@ ULONG Ipv6CollectDnsServers(const IPV6_DNS_STATE *State, DWORD IfIndex, PCSTR Ad
                             PIPV6_ADAPTER_SERVER List, ULONG Max);
 ULONG Ipv6CollectGateways(const IPV6_DNS_STATE *State, DWORD IfIndex, PIPV6_ADAPTER_SERVER List, ULONG Max);
 
+/* The DNS search domains of router advertisements (ipv6dns.c, IP_IPV6_RA_ENTRY_ID): FirstDnsSuffix of
+   GetAdaptersAddresses, the resolver's search list. Off: empty */
+typedef struct _IPV6_RA_STATE
+{
+    PVOID Memory;
+    PTCP_IPV6_RA_HEADER Header;
+    PTCP_IPV6_RA_ROW Rows;
+} IPV6_RA_STATE, *PIPV6_RA_STATE;
+
+typedef struct _IPV6_ADAPTER_SUFFIX
+{
+    CHAR Name[256];
+} IPV6_ADAPTER_SUFFIX, *PIPV6_ADAPTER_SUFFIX;
+
+#define IPV6_ADAPTER_MAX_SUFFIXES 16
+
+BOOL Ipv6GetRaFromFile(HANDLE TcpFile, PIPV6_RA_STATE State);
+VOID Ipv6FreeRa(PIPV6_RA_STATE State);
+ULONG Ipv6CollectSuffixes(const IPV6_RA_STATE *State, DWORD IfIndex, PIPV6_ADAPTER_SUFFIX List, ULONG Max);
+
 #include <w32api.h>
 /* This is here until we switch to version 2.5 of the mingw headers */
 #if (__W32API_MAJOR_VERSION < 2 || __W32API_MINOR_VERSION < 5)

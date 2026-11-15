@@ -779,6 +779,14 @@ TDI_STATUS InfoTdiQueryInformationEx(
 
                  return InfoTdiQueryGetIpv6Dns(Buffer, BufferSize);
 
+              case IP_IPV6_RA_ENTRY_ID:
+                 if (ID->toi_type != INFO_TYPE_PROVIDER ||
+                     ID->toi_entity.tei_entity != CL_NL_ENTITY ||
+                     ID->toi_entity.tei_instance != 0)
+                     return TDI_INVALID_PARAMETER;
+
+                 return InfoTdiQueryGetIpv6Pool(TCPQueryIpv6Ra, Buffer, BufferSize);
+
               case IP_IPV6_ND_ENTRY_ID:
                  if (ID->toi_type != INFO_TYPE_PROVIDER ||
                      ID->toi_entity.tei_entity != CL_NL_ENTITY ||

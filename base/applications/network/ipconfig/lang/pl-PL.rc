@@ -28,6 +28,7 @@ BEGIN
     IDS_EMPTYLINE           "\t                                    %hs\n"
     IDS_MEDIADISCONNECTED   "\tStan nośnika. . . . . . . . . . . : Nośnik odłączony\n"
     IDS_CONNECTIONDNSSUFFIX "\tSufiks DNS konkretnego połączenia : %hs\n"
+    IDS_CONNSEARCHLIST "\tConnection-specific DNS Suffix Search List :\n"
     IDS_DESCRIPTION         "\tOpis. . . . . . . . . . . . . . . : "
     IDS_PHYSICALADDRESS     "\tAdres fizyczny. . . . . . . . . . : %hs\n"
     IDS_DHCPNO              "\tDHCP włączone . . . . . . . . . . : Nie\n"

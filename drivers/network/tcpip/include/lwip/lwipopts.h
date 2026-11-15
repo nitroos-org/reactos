@@ -62,6 +62,16 @@
  * (rdnss6.c); lwIP's own DNS client is not part of this tree */
 #define LWIP_ND6_RDNSS_MAX_DNS_SERVERS  3
 #define LWIP_HOOK_ND6_RDNSS(netif, addr, lifetime) LibTCPRdnss6Input(netif, addr, lifetime)
+/* Router advertisement DNS search lists (RFC 8106 5.2) go to the stack's list too (ra6.c) */
+#define LWIP_HOOK_ND6_DNSSL(netif, p, offset, length) LibTCPDnssl6Input(netif, p, offset, length)
+/* The current hop limit and the M and O flags of router advertisements (ra6.c): the hop limit replaces the default of
+ * datagrams whose sender chose none (ip6_output_if_src), the flags go to user mode with the interface */
+#define LWIP_HOOK_ND6_RA_HEADER(netif, hop_limit, flags) LibNd6RaHeader(netif, hop_limit, flags)
+#define LWIP_HOOK_IP6_HOP_LIMIT(netif, hl) LibIp6HopLimit(netif, hl)
+/* Route information options (RFC 4191 2.3) become routes of the route table (route6.c): through the router that sent
+ * the advertisement, with the metric of their preference, until their lifetime ends */
+#define LWIP_HOOK_ND6_ROUTE_INFO(netif, router, prefix, length, preference, lifetime) \
+    LibNd6RouteInfo(netif, router, prefix, length, preference, lifetime)
 /* Stable random interface identifiers (RFC 7217, iid6.c): the SLAAC address of a prefix, and a new identifier
  * when DAD finds one in use (NitroOS hooks in nd6.c) */
 #define LWIP_HOOK_ND6_SLAAC_ADDRESS(netif, prefix, addr) LibNd6SlaacAddress(netif, prefix, addr)
@@ -79,6 +89,17 @@
  * one marked skip-as-source is not chosen as a source (NitroOS hooks in nd6.c and ip6.c) */
 #define LWIP_HOOK_ND6_ADDR_CONFIGURED(netif, i) LibNd6AddrConfigured(netif, i)
 #define LWIP_HOOK_IP6_SKIP_SOURCE(netif, i) LibIp6SkipSource(netif, i)
+/* Neighbour discovery tables (lwIP's defaults are 10 neighbours, 10 destinations, 5 prefixes, 3 routers). A host with
+ * a few dozen peers on the link (a server, a lab network, several addresses per peer) cycled the 10 neighbour entries and
+ * asked again for each one; the destination cache keeps the next hop and path MTU of each destination it talks to.
+ * The tables are static data of tcpip.sys, about 7 KB all together (a neighbour entry about 56 bytes on 64 bit, a
+ * destination 48, a prefix 32, a router 16), walked once a second by the neighbour discovery timer (nd6info.c and
+ * route6.c answer from them; their answers stay far below the 64 KB cap). Routers: a home or office link has two or
+ * three, a lab with several routers more. Prefixes: GUA, ULA and several advertised from one or more routers */
+#define LWIP_ND6_NUM_NEIGHBORS          64
+#define LWIP_ND6_NUM_DESTINATIONS       64
+#define LWIP_ND6_NUM_PREFIXES           16
+#define LWIP_ND6_NUM_ROUTERS            8
 /* Address slots per interface: the link-local address, SLAAC addresses of the advertised prefixes, and configured
  * ones (lwIP's default is 3). A slot costs about 30 bytes per interface (address with zone, state, two lifetimes);
  * the loops over the slots are per datagram for the source and route choice (ip6.c), per interface */

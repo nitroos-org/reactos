@@ -41,6 +41,7 @@
 #include "lwip/inet_chksum.h"
 #include "lwip/tcpip.h"
 #include "lwip/priv/tcp_priv.h"
+#include "lwip/priv/nd6_priv.h"
 #include <reactos/nitrofw.h>
 #include <nitrofwk.h>
 #include <stdio.h>
@@ -54,6 +55,8 @@ extern volatile LONG TCP6IcmpErrorsSent;
 VOID TCPInput6(PIP_INTERFACE IF, struct pbuf *p, BOOLEAN FromOwnLink);
 
 #define ST_TAG 'T6pI'
+/* RtlEqualMemory is memcmp, which a driver does not link */
+#define StSame(a, b, n) (RtlCompareMemory((a), (b), (n)) == (n))
 #define ST_LOG_SIZE 65536
 
 static BOOLEAN StReadValue(PCWSTR Name, ULONG Type, PVOID Data, ULONG Size);
@@ -1685,6 +1688,539 @@ StTestStableIds(PIP_INTERFACE Eth)
     UNLOCK_TCPIP_CORE();
 }
 
+
+/* ---- what router advertisements carry (ra6.c, route6.c, nd6.c): DNSSL, route information, router preference, current
+   hop limit, M and O flags, a preferred lifetime of 0 ---- */
+
+#include <lwip_hooks.h>
+
+/* The ICMPv6 checksum of Msg (Len bytes, checksum field zero) from Src to Dest */
+static USHORT
+StIcmpSum(const ip6_addr_t *Src, const ip6_addr_t *Dest, const UCHAR *Msg, UINT Len)
+{
+    const UCHAR *S = (const UCHAR *)Src->addr, *D = (const UCHAR *)Dest->addr;
+    ULONG Sum = Len + 58, i;
+
+    for (i = 0; i < 16; i += 2)
+        Sum += ((ULONG)S[i] << 8 | S[i + 1]) + ((ULONG)D[i] << 8 | D[i + 1]);
+    for (i = 0; i + 1 < Len; i += 2)
+        Sum += (ULONG)Msg[i] << 8 | Msg[i + 1];
+    if (Len & 1)
+        Sum += (ULONG)Msg[Len - 1] << 8;
+    while (Sum >> 16)
+        Sum = (Sum & 0xFFFF) + (Sum >> 16);
+    return (USHORT)(~Sum & 0xFFFF);
+}
+
+/* A router advertisement from Router (link-local): header with CurHopLimit, Flags (M 0x80, O 0x40, preference 0x18) and
+   router Lifetime, then the options (OptLen bytes), hop limit 255, to all nodes, checksummed. NULL: no memory */
+static struct pbuf *
+StRa(const ip6_addr_t *Router, UCHAR CurHop, UCHAR Flags, USHORT Lifetime, const UCHAR *Opts, UINT OptLen)
+{
+    ip6_addr_t AllNodes;
+    UCHAR Msg[16 + 1024];
+    USHORT Sum;
+
+    if (OptLen > 1024)
+        return NULL;
+    ip6_addr_set_allnodes_linklocal(&AllNodes);
+    RtlZeroMemory(Msg, 16);
+    Msg[0] = 134;
+    Msg[4] = CurHop;
+    Msg[5] = Flags;
+    Msg[6] = (UCHAR)(Lifetime >> 8);
+    Msg[7] = (UCHAR)Lifetime;
+    if (OptLen)
+        RtlCopyMemory(Msg + 16, Opts, OptLen);
+    Sum = StIcmpSum(Router, &AllNodes, Msg, 16 + OptLen);
+    Msg[2] = (UCHAR)(Sum >> 8);
+    Msg[3] = (UCHAR)Sum;
+    return StPacket(Router, &AllNodes, 58, 255, Msg, 16 + OptLen);
+}
+
+static UINT
+StOptSlla(PUCHAR Out, const UCHAR *Mac)
+{
+    Out[0] = 1; Out[1] = 1;
+    RtlCopyMemory(Out + 2, Mac, 6);
+    return 8;
+}
+
+/* A DNSSL option with the names in Names (Len bytes of label encoding), padded to 8 */
+static UINT
+StOptDnssl(PUCHAR Out, ULONG Lifetime, const UCHAR *Names, UINT Len)
+{
+    UINT Total = (8 + Len + 7) & ~7U;
+
+    RtlZeroMemory(Out, Total);
+    Out[0] = 31; Out[1] = (UCHAR)(Total / 8);
+    Out[4] = (UCHAR)(Lifetime >> 24); Out[5] = (UCHAR)(Lifetime >> 16); Out[6] = (UCHAR)(Lifetime >> 8); Out[7] = (UCHAR)Lifetime;
+    RtlCopyMemory(Out + 8, Names, Len);
+    return Total;
+}
+
+/* A route information option for Prefix (16 bytes) / Plen, preference Prf (the 2-bit field), Lifetime, Units 8-byte units
+   long (1 to 3) */
+static UINT
+StOptRio(PUCHAR Out, UCHAR Units, UCHAR Plen, UCHAR Prf, ULONG Lifetime, const UCHAR *Prefix)
+{
+    RtlZeroMemory(Out, Units * 8);
+    Out[0] = 24; Out[1] = Units; Out[2] = Plen; Out[3] = (UCHAR)(Prf << 3);
+    Out[4] = (UCHAR)(Lifetime >> 24); Out[5] = (UCHAR)(Lifetime >> 16); Out[6] = (UCHAR)(Lifetime >> 8); Out[7] = (UCHAR)Lifetime;
+    if (Units > 1)
+        RtlCopyMemory(Out + 8, Prefix, (Units - 1) * 8);
+    return Units * 8;
+}
+
+/* A prefix information option: on-link and autonomous, a /64 */
+static UINT
+StOptPrefix(PUCHAR Out, ULONG Valid, ULONG Preferred, const UCHAR *Prefix)
+{
+    RtlZeroMemory(Out, 32);
+    Out[0] = 3; Out[1] = 4; Out[2] = 64; Out[3] = 0xC0;
+    Out[4] = (UCHAR)(Valid >> 24); Out[5] = (UCHAR)(Valid >> 16); Out[6] = (UCHAR)(Valid >> 8); Out[7] = (UCHAR)Valid;
+    Out[8] = (UCHAR)(Preferred >> 24); Out[9] = (UCHAR)(Preferred >> 16); Out[10] = (UCHAR)(Preferred >> 8); Out[11] = (UCHAR)Preferred;
+    RtlCopyMemory(Out + 16, Prefix, 16);
+    return 32;
+}
+
+/* The rows of IP_IPV6_ROUTE_ENTRY_ID: allocated, ST_TAG, caller frees; NULL on failure */
+static PTCP_IPV6_ROUTE_HEADER
+StRoutes(PULONG Count)
+{
+    ULONG Size = 24 * 1024, Need;
+    PTCP_IPV6_ROUTE_HEADER Header = ExAllocatePoolWithTag(NonPagedPool, Size, ST_TAG);
+
+    if (!Header)
+        return NULL;
+    Need = TCPQueryIpv6Routes(Header, Size);
+    if (Need > Size)
+    {
+        ExFreePoolWithTag(Header, ST_TAG);
+        return NULL;
+    }
+    *Count = Header->Count;
+    return Header;
+}
+
+static const TCP_IPV6_ROUTE_ROW *
+StFindRoute(PTCP_IPV6_ROUTE_HEADER Header, const UCHAR *Prefix, ULONG Length, const UCHAR *NextHop)
+{
+    const TCP_IPV6_ROUTE_ROW *Rows = (const TCP_IPV6_ROUTE_ROW *)(Header + 1);
+    ULONG i;
+
+    for (i = 0; i < Header->Count; i++)
+    {
+        if (Rows[i].PrefixLength == Length && (!Prefix || StSame(Rows[i].Prefix, Prefix, 16)) &&
+            (!NextHop || StSame(Rows[i].NextHop, NextHop, 16)))
+            return &Rows[i];
+    }
+    return NULL;
+}
+
+/* How many search domains of that name the stack has (Name NULL: how many it has at all) */
+static ULONG
+StRaSuffixCount(const char *Name, ULONG *Lifetime)
+{
+    ULONG Size = 8 * 1024, Count = 0, i;
+    PTCP_IPV6_RA_HEADER Header = ExAllocatePoolWithTag(NonPagedPool, Size, ST_TAG);
+    PTCP_IPV6_RA_ROW Rows;
+
+    if (!Header)
+        return 0xFFFFFFFF;
+    if (TCPQueryIpv6Ra(Header, Size) > Size)
+    {
+        ExFreePoolWithTag(Header, ST_TAG);
+        return 0xFFFFFFFF;
+    }
+    Rows = (PTCP_IPV6_RA_ROW)(Header + 1);
+    for (i = 0; i < Header->Count; i++)
+    {
+        if (!Name || !_stricmp(Rows[i].Name, Name))
+        {
+            Count++;
+            if (Lifetime)
+                *Lifetime = Rows[i].Lifetime;
+        }
+    }
+    ExFreePoolWithTag(Header, ST_TAG);
+    return Count;
+}
+
+static VOID
+StTestRaExtras(PIP_INTERFACE Eth)
+{
+    struct netif *En = Eth->TCPContext;
+    ip6_addr_t R1, R2, Dest;
+    UCHAR Opts[640], Prefix[16], Mac1[6] = {0x02, 0x00, 0x00, 0x7a, 0x00, 0x01}, Mac2[6] = {0x02, 0x00, 0x00, 0x7a, 0x00, 0x02};
+    UINT n;
+    ULONG Life = 0, Count, i, k, Metric1, Metric2;
+    CHAR Detail[200];
+    BOOLEAN Ok;
+    PTCP_IPV6_ROUTE_HEADER Routes;
+    const TCP_IPV6_ROUTE_ROW *Row;
+    UCHAR OldFlags, OldHop;
+    static const UCHAR GoodNames[] = { 2, 's', 't', 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 0, 1, 'a', 3, 'b', 'c', 'd', 0 };
+    /* label of 64, label with a space, compression pointer, no terminating zero length, a name of 254 characters */
+    static const UCHAR BadNames[] = { 64, 'a' };
+
+    ip6addr_aton("fe80::7a:1", &R1);
+    ip6addr_aton("fe80::7a:2", &R2);
+    ip6addr_aton("2001:db8:7000::1", &Dest);
+
+    /* --- DNSSL --- */
+    n = StOptDnssl(Opts, 100, GoodNames, sizeof(GoodNames));
+    StInject(Eth, StRa(&R1, 0, 0, 0, Opts, n), FALSE);
+    Ok = StRaSuffixCount("st.example", &Life) == 1 && Life > 90 && Life <= 100 && StRaSuffixCount("a.bcd", NULL) == 1;
+    _snprintf(Detail, sizeof(Detail), "st.example lifetime %lu", Life);
+    StResult(Ok, "RA DNSSL: two names of one option are kept with their lifetime", Detail);
+
+    n = StOptDnssl(Opts, 0, GoodNames, 12);       /* only st.example, lifetime 0 */
+    StInject(Eth, StRa(&R1, 0, 0, 0, Opts, n), FALSE);
+    StResult(StRaSuffixCount("st.example", NULL) == 0 && StRaSuffixCount("a.bcd", NULL) == 1,
+             "RA DNSSL: lifetime 0 removes the name", NULL);
+
+    n = StOptDnssl(Opts, 50, GoodNames, 12);
+    StInject(Eth, StRa(&R1, 0, 0, 0, Opts, n), FALSE);
+    StResult(StRaSuffixCount("st.example", NULL) == 1, "RA DNSSL: a name comes back", NULL);
+
+    {
+        /* names the stack must not keep, each in an option of its own (lifetime 60) */
+        static const UCHAR Space[] = { 3, 'a', ' ', 'b', 0 };
+        static const UCHAR Compressed[] = { 0xC0, 0x0C };
+        /* a name with no zero length after it, up to the end of an option that has no padding (a shorter one is ended by the
+           zero padding and is a good name) */
+        static const UCHAR Unterminated[] = { 7, 'a', 'b', 'c', 'd', 'e', 'f', 'g' };
+        static const UCHAR Escape[] = { 4, 'e', '.', 'x', 'y', 0 };
+        static const UCHAR NonAscii[] = { 2, 0xC3, 0xA9, 0 };
+        UCHAR Long[300];
+        UINT Total = 0, Used = 0, Label;
+        ULONG Before = StRaSuffixCount(NULL, NULL), After;
+
+        Total += StOptDnssl(Opts + Total, 60, Space, sizeof(Space));
+        Total += StOptDnssl(Opts + Total, 60, Compressed, sizeof(Compressed));
+        Total += StOptDnssl(Opts + Total, 60, Unterminated, sizeof(Unterminated));
+        Total += StOptDnssl(Opts + Total, 60, Escape, sizeof(Escape));
+        Total += StOptDnssl(Opts + Total, 60, NonAscii, sizeof(NonAscii));
+        Total += StOptDnssl(Opts + Total, 60, BadNames, sizeof(BadNames));
+        StInject(Eth, StRa(&R1, 0, 0, 0, Opts, Total), FALSE);
+        After = StRaSuffixCount(NULL, NULL);
+        _snprintf(Detail, sizeof(Detail), "%lu names before, %lu after", Before, After);
+        StResult(Before == 2 && After == Before, "RA DNSSL: names with a space, a compression pointer, a dot inside a label, no end, "
+                 "a non-ASCII character or a label of 64 are not kept", Detail);
+
+        /* a name of 254 characters (five labels of 50) */
+        for (Label = 0; Label < 5; Label++)
+        {
+            Long[Used++] = 50;
+            RtlFillMemory(Long + Used, 50, (UCHAR)('a' + Label));
+            Used += 50;
+        }
+        Long[Used++] = 0;
+        Total = StOptDnssl(Opts, 60, Long, Used);
+        StInject(Eth, StRa(&R1, 0, 0, 0, Opts, Total), FALSE);
+        After = StRaSuffixCount(NULL, NULL);
+        StResult(After == Before, "RA DNSSL: a name over 253 characters is not kept", NULL);
+    }
+    /* remove what the test added */
+    n = StOptDnssl(Opts, 0, GoodNames, sizeof(GoodNames));
+    StInject(Eth, StRa(&R1, 0, 0, 0, Opts, n), FALSE);
+    StResult(StRaSuffixCount("st.example", NULL) == 0 && StRaSuffixCount("a.bcd", NULL) == 0,
+             "RA DNSSL: both names removed again", NULL);
+
+    /* --- route information --- */
+    {
+        ip6_addr_t Pfx;
+
+        ip6addr_aton("2001:db8:7000::", &Pfx);
+        RtlCopyMemory(Prefix, Pfx.addr, 16);
+    }
+    n = StOptSlla(Opts, Mac1);
+    n += StOptRio(Opts + n, 2, 48, 1, 300, Prefix);                /* high preference */
+    StInject(Eth, StRa(&R1, 0, 0, 0, Opts, n), FALSE);
+    Routes = StRoutes(&Count);
+    Row = Routes ? StFindRoute(Routes, Prefix, 48, (const UCHAR *)R1.addr) : NULL;
+    Ok = Row && Row->Origin == 3 && (Row->Flags & TCP_IPV6_ROUTE_FROM_RA) && Row->Metric == 128 && Row->ValidLifetime > 290 &&
+         Row->ValidLifetime <= 300 && Row->IfIndex == Eth->Index;
+    _snprintf(Detail, sizeof(Detail), "%s, metric %lu origin %lu valid %lu", Row ? "row found" : "no row",
+              Row ? Row->Metric : 0, Row ? Row->Origin : 0, Row ? Row->ValidLifetime : 0);
+    StResult(Ok, "RA route information: a /48 through the advertising router, origin router advertisement, high preference", Detail);
+    if (Routes)
+        ExFreePoolWithTag(Routes, ST_TAG);
+
+    LOCK_TCPIP_CORE();
+    Ok = LibIp6Route(NULL, &Dest) == En;
+    {
+        const ip6_addr_t *Gw;
+
+        Gw = LibNd6GetGw(En, &Dest);
+        Ok = Ok && Gw && ip6_addr_zoneless_eq(Gw, &R1);
+    }
+    UNLOCK_TCPIP_CORE();
+    StResult(Ok, "RA route information: the stack routes by it (interface and next hop of a destination in the prefix)", NULL);
+
+    /* a refresh with another preference moves the metric, not the number of routes */
+    n = StOptSlla(Opts, Mac1);
+    n += StOptRio(Opts + n, 2, 48, 3, 300, Prefix);                /* low */
+    StInject(Eth, StRa(&R1, 0, 0, 0, Opts, n), FALSE);
+    Routes = StRoutes(&Count);
+    Row = Routes ? StFindRoute(Routes, Prefix, 48, (const UCHAR *)R1.addr) : NULL;
+    Ok = Row && Row->Metric == 512;
+    if (Routes)
+        ExFreePoolWithTag(Routes, ST_TAG);
+    StResult(Ok, "RA route information: a refresh with low preference changes the metric", NULL);
+
+    /* ignored: reserved preference, a /100 in an option of 2 units, a /8 prefix longer option of 4 units (not built) */
+    n = StOptRio(Opts, 2, 100, 0, 300, Prefix);
+    Prefix[8] = 0x11;
+    n += StOptRio(Opts + n, 2, 48, 2, 300, Prefix);                /* preference 10 = reserved */
+    Prefix[8] = 0;
+    {
+        UCHAR Other[16] = { 0x20, 0x01, 0x0d, 0xb8, 0x77, 0x01 };
+
+        n += StOptRio(Opts + n, 2, 48, 2, 300, Other);
+        StInject(Eth, StRa(&R1, 0, 0, 0, Opts, n), FALSE);
+        Routes = StRoutes(&Count);
+        Ok = Routes && !StFindRoute(Routes, Other, 48, NULL) && !StFindRoute(Routes, NULL, 100, NULL);
+        if (Routes)
+            ExFreePoolWithTag(Routes, ST_TAG);
+        StResult(Ok, "RA route information: the reserved preference value and a prefix longer than the option holds are ignored", NULL);
+    }
+
+    /* lifetime 0 removes it */
+    n = StOptRio(Opts, 2, 48, 3, 0, Prefix);
+    StInject(Eth, StRa(&R1, 0, 0, 0, Opts, n), FALSE);
+    Routes = StRoutes(&Count);
+    Ok = Routes && !StFindRoute(Routes, Prefix, 48, NULL);
+    if (Routes)
+        ExFreePoolWithTag(Routes, ST_TAG);
+    StResult(Ok, "RA route information: lifetime 0 removes the route", NULL);
+
+    /* at most 32: 40 different prefixes, the table keeps 32 of this router's */
+    for (k = 0; k < 40; k++)
+    {
+        UCHAR P[16] = { 0x20, 0x01, 0x0d, 0xb8, 0x7e, 0x00 };
+
+        P[5] = (UCHAR)k;
+        n = StOptRio(Opts, 2, 48, 0, 600, P);
+        StInject(Eth, StRa(&R1, 0, 0, 0, Opts, n), FALSE);
+    }
+    Routes = StRoutes(&Count);
+    for (i = 0, k = 0; Routes && i < Routes->Count; i++)
+    {
+        const TCP_IPV6_ROUTE_ROW *Rows = (const TCP_IPV6_ROUTE_ROW *)(Routes + 1);
+
+        if ((Rows[i].Flags & TCP_IPV6_ROUTE_FROM_RA) && Rows[i].PrefixLength == 48 && Rows[i].Prefix[4] == 0x7e)
+            k++;
+    }
+    _snprintf(Detail, sizeof(Detail), "%lu route information routes kept of 40 sent", k);
+    StResult(Routes && k == 32, "RA route information: no more than 32 are kept", Detail);
+    /* remove them again */
+    for (i = 0; i < 40; i++)
+    {
+        UCHAR P[16] = { 0x20, 0x01, 0x0d, 0xb8, 0x7e, 0x00 };
+
+        P[5] = (UCHAR)i;
+        n = StOptRio(Opts, 2, 48, 0, 0, P);
+        StInject(Eth, StRa(&R1, 0, 0, 0, Opts, n), FALSE);
+    }
+    if (Routes)
+        ExFreePoolWithTag(Routes, ST_TAG);
+
+    /* --- default router preference: two routers with a source link-layer address are reachable at once --- */
+    ip6addr_aton("2001:db8:7100::7", &Dest);
+    {
+        const u8_t *Hw = NULL;
+        err_t Err;
+
+        n = StOptSlla(Opts, Mac1);
+        StInject(Eth, StRa(&R1, 0, 0x18, 1800, Opts, n), FALSE);       /* r1: low */
+        n = StOptSlla(Opts, Mac2);
+        StInject(Eth, StRa(&R2, 0, 0x08, 1800, Opts, n), FALSE);       /* r2: high */
+        LOCK_TCPIP_CORE();
+        Err = nd6_get_next_hop_addr_or_queue(En, NULL, &Dest, &Hw);
+        Ok = Err == ERR_OK && Hw && StSame(Hw, Mac2, 6);
+        UNLOCK_TCPIP_CORE();
+        StResult(Ok, "router preference: the high preference router is the next hop of a destination off the link",
+                 Err == ERR_OK ? (Hw && StSame(Hw, Mac2, 6) ? "r2" : "another router") : "no next hop");
+
+        /* r1 becomes high, r2 low: the next hops lwIP kept are found again */
+        n = StOptSlla(Opts, Mac1);
+        StInject(Eth, StRa(&R1, 0, 0x08, 1800, Opts, n), FALSE);
+        n = StOptSlla(Opts, Mac2);
+        StInject(Eth, StRa(&R2, 0, 0x18, 1800, Opts, n), FALSE);
+        Hw = NULL;
+        LOCK_TCPIP_CORE();
+        Err = nd6_get_next_hop_addr_or_queue(En, NULL, &Dest, &Hw);
+        Ok = Err == ERR_OK && Hw && StSame(Hw, Mac1, 6);
+        UNLOCK_TCPIP_CORE();
+        StResult(Ok, "router preference: a changed preference moves the destination to the other router", NULL);
+
+        Routes = StRoutes(&Count);
+        Row = Routes ? StFindRoute(Routes, NULL, 0, (const UCHAR *)R1.addr) : NULL;
+        Metric1 = Row ? Row->Metric : 0;
+        Row = Routes ? StFindRoute(Routes, NULL, 0, (const UCHAR *)R2.addr) : NULL;
+        Metric2 = Row ? Row->Metric : 0;
+        if (Routes)
+            ExFreePoolWithTag(Routes, ST_TAG);
+        _snprintf(Detail, sizeof(Detail), "metrics: r1 %lu, r2 %lu", Metric1, Metric2);
+        StResult(Metric1 == 128 && Metric2 == 512, "router preference: the route table shows the metrics of the preferences", Detail);
+
+        /* r1 medium; r2 says high with router lifetime 0, a preference the receiver ignores (RFC 4191 2.2): r2 is not
+           the next hop for as long as its entry is there (a medium router of the link, r1 or QEMU's, is) */
+        n = StOptSlla(Opts, Mac1);
+        StInject(Eth, StRa(&R1, 0, 0x00, 1800, Opts, n), FALSE);
+        n = StOptSlla(Opts, Mac2);
+        StInject(Eth, StRa(&R2, 0, 0x08, 0, Opts, n), FALSE);
+        Hw = NULL;
+        LOCK_TCPIP_CORE();
+        Err = nd6_get_next_hop_addr_or_queue(En, NULL, &Dest, &Hw);
+        Ok = Err == ERR_OK && Hw && !StSame(Hw, Mac2, 6);
+        UNLOCK_TCPIP_CORE();
+        StResult(Ok, "router preference: a high preference with router lifetime 0 is ignored",
+                 Err == ERR_OK ? (Hw && StSame(Hw, Mac2, 6) ? "r2" : Hw && StSame(Hw, Mac1, 6) ? "r1" : "another router") :
+                 "no next hop");
+
+        /* the routers go (lifetime 0) */
+        n = StOptSlla(Opts, Mac1);
+        StInject(Eth, StRa(&R1, 0, 0x08, 0, Opts, n), FALSE);
+        n = StOptSlla(Opts, Mac2);
+        StInject(Eth, StRa(&R2, 0, 0x18, 0, Opts, n), FALSE);
+        StSleep(2500);
+    }
+
+    /* --- current hop limit, M and O flags --- */
+    OldFlags = Eth->Ra6Flags;
+    OldHop = Eth->Ra6HopLimit;
+    n = StOptSlla(Opts, Mac1);
+    StInject(Eth, StRa(&R1, 33, 0xC0, 0, Opts, n), FALSE);
+    LOCK_TCPIP_CORE();
+    Ok = Eth->Ra6HopLimit == 33 && LibIp6HopLimit(En, IP_DEFAULT_TTL) == 33 && LibIp6HopLimit(En, 64) == 64 &&
+         LibIp6HopLimit(En, 255) == 255;
+    UNLOCK_TCPIP_CORE();
+    StResult(Ok, "RA current hop limit: 33 replaces the default 128 and nothing else", NULL);
+    n = StOptSlla(Opts, Mac1);
+    StInject(Eth, StRa(&R1, 0, 0xC0, 0, Opts, n), FALSE);
+    StResult(Eth->Ra6HopLimit == 33, "RA current hop limit: 0 (unspecified) leaves it", NULL);
+
+    {
+        ULONG Size = 16 * 1024;
+        PTCP_IPV6_TABLE_HEADER Table = ExAllocatePoolWithTag(NonPagedPool, Size, ST_TAG);
+        PTCP_IPV6_INTERFACE_ROW Rows;
+        ULONG Flags = 0, Hop = 0;
+
+        if (Table && TCPQueryIpv6Table(Table, Size) <= Size)
+        {
+            Rows = (PTCP_IPV6_INTERFACE_ROW)(Table + 1);
+            for (i = 0; i < Table->InterfaceCount; i++)
+            {
+                if (Rows[i].IfIndex == Eth->Index)
+                {
+                    Flags = Rows[i].Flags;
+                    Hop = Rows[i].CurHopLimit;
+                }
+            }
+        }
+        if (Table)
+            ExFreePoolWithTag(Table, ST_TAG);
+        _snprintf(Detail, sizeof(Detail), "flags 0x%lx hop limit %lu", Flags, Hop);
+        StResult((Flags & (TCP_IPV6_IF_RA_MANAGED | TCP_IPV6_IF_RA_OTHER)) == (TCP_IPV6_IF_RA_MANAGED | TCP_IPV6_IF_RA_OTHER) &&
+                 Hop == 33, "RA M and O flags and the hop limit are in the interface row of the IPv6 table", Detail);
+    }
+    n = StOptSlla(Opts, Mac1);
+    StInject(Eth, StRa(&R1, 0, 0x40, 0, Opts, n), FALSE);
+    StResult(Eth->Ra6Flags == TCP_IPV6_IF_RA_OTHER, "RA M and O flags: the next advertisement replaces them (O only)", NULL);
+    n = StOptSlla(Opts, Mac1);
+    StInject(Eth, StRa(&R1, 0, 0x00, 0, Opts, n), FALSE);
+    StResult(Eth->Ra6Flags == 0, "RA M and O flags: both off again", NULL);
+    LOCK_TCPIP_CORE();
+    Eth->Ra6Flags = OldFlags;
+    Eth->Ra6HopLimit = OldHop;
+    UNLOCK_TCPIP_CORE();
+
+    /* --- a prefix advertised again with preferred lifetime 0 --- */
+    {
+        UCHAR P[16] = { 0x20, 0x01, 0x0d, 0xb8, 0x70, 0x02 };
+        u8_t State = 0;
+        ULONG Pref = 0xDEAD, Size = 16 * 1024;
+        s8_t Found = -1;
+        PTCP_IPV6_TABLE_HEADER Table;
+        PTCP_IPV6_ADDRESS_ROW Addr;
+
+        n = StOptSlla(Opts, Mac1);
+        n += StOptPrefix(Opts + n, 3600, 1800, P);
+        StInject(Eth, StRa(&R1, 0, 0, 0, Opts, n), FALSE);
+        for (i = 0; i < 100; i++)
+        {
+            LOCK_TCPIP_CORE();
+            for (k = 1; k < LWIP_IPV6_NUM_ADDRESSES; k++)
+            {
+                if (!ip6_addr_isinvalid(netif_ip6_addr_state(En, (s8_t)k)) && StSame(netif_ip6_addr(En, (s8_t)k)->addr, P, 8))
+                {
+                    Found = (s8_t)k;
+                    State = netif_ip6_addr_state(En, Found);
+                }
+            }
+            UNLOCK_TCPIP_CORE();
+            if (Found >= 0 && ip6_addr_ispreferred(State))
+                break;
+            StSleep(100);
+        }
+        StResult(Found >= 0 && ip6_addr_ispreferred(State), "prefix change: the address of an advertised prefix becomes preferred", NULL);
+
+        if (Found >= 0)
+        {
+            n = StOptSlla(Opts, Mac1);
+            n += StOptPrefix(Opts + n, 0, 0, P);                /* valid 0, preferred 0 (the valid lifetime stays: RFC 4862 5.5.3 e) */
+            StInject(Eth, StRa(&R1, 0, 0, 0, Opts, n), FALSE);
+            LOCK_TCPIP_CORE();
+            State = netif_ip6_addr_state(En, Found);
+            Pref = netif_ip6_addr_pref_life(En, Found);
+            Ok = ip6_addr_isdeprecated(State) && Pref == 0 && netif_ip6_addr_valid_life(En, Found) > 3000;
+            UNLOCK_TCPIP_CORE();
+            _snprintf(Detail, sizeof(Detail), "state 0x%x preferred lifetime %lu", (UINT)State, Pref);
+            StResult(Ok, "prefix change: preferred lifetime 0 deprecates the address at once and keeps its valid lifetime", Detail);
+
+            Table = ExAllocatePoolWithTag(NonPagedPool, Size, ST_TAG);
+            Pref = 0xDEAD;
+            State = 0;
+            if (Table && TCPQueryIpv6Table(Table, Size) <= Size)
+            {
+                Addr = (PTCP_IPV6_ADDRESS_ROW)((PTCP_IPV6_INTERFACE_ROW)(Table + 1) + Table->InterfaceCount);
+                for (i = 0; i < Table->AddressCount; i++)
+                {
+                    if (StSame(Addr[i].Address, P, 8))
+                    {
+                        Pref = Addr[i].PreferredLifetime;
+                        State = (u8_t)Addr[i].DadState;
+                    }
+                }
+            }
+            if (Table)
+                ExFreePoolWithTag(Table, ST_TAG);
+            _snprintf(Detail, sizeof(Detail), "dad state %u preferred lifetime %lu", (UINT)State, Pref);
+            StResult(State == 3 && Pref == 0, "prefix change: the address table reports Deprecated and a preferred lifetime of 0", Detail);
+        }
+
+        /* take the test address and the on-link prefix away */
+        n = StOptPrefix(Opts, 0, 0, P);
+        StInject(Eth, StRa(&R1, 0, 0, 0, Opts, n), FALSE);
+        LOCK_TCPIP_CORE();
+        if (Found >= 0)
+        {
+            netif_ip6_addr_set_state(En, Found, IP6_ADDR_INVALID);
+            netif_ip6_addr_set_valid_life(En, Found, 0);
+            netif_ip6_addr_set_pref_life(En, Found, 0);
+        }
+        UNLOCK_TCPIP_CORE();
+    }
+
+    StPrint("tables: neighbours %d, destinations %d, prefixes %d, routers %d; entry sizes %u, %u, %u, %u bytes",
+            LWIP_ND6_NUM_NEIGHBORS, LWIP_ND6_NUM_DESTINATIONS, LWIP_ND6_NUM_PREFIXES, LWIP_ND6_NUM_ROUTERS,
+            (UINT)sizeof(struct nd6_neighbor_cache_entry), (UINT)sizeof(struct nd6_destination_cache_entry),
+            (UINT)sizeof(struct nd6_prefix_list_entry), (UINT)sizeof(struct nd6_router_list_entry));
+}
+
 static VOID NTAPI
 StThread(PVOID Context)
 {
@@ -1782,6 +2318,7 @@ StThread(PVOID Context)
         PeerPort = 0;
     }
     StTestStableIds(Eth);
+    StTestRaExtras(Eth);
 
     /* IPv4 to the interface's own address takes the same way (a frame to our own MAC): the control for the
        link-local timings above */

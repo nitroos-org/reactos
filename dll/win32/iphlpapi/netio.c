@@ -421,7 +421,9 @@ VOID WINAPI InitializeIpInterfaceEntry(PMIB_IPINTERFACE_ROW Row)
   Row->NlMtu = 0;
 }
 
-static void fill_ip_interface(const NETIO_IF *If, ADDRESS_FAMILY Family, PMIB_IPINTERFACE_ROW Out)
+/* V6If: the stack's IPv6 row of the interface (the M and O flags of its router advertisements), for the IPv6 family */
+static void fill_ip_interface(const NETIO_IF *If, ADDRESS_FAMILY Family, const TCP_IPV6_INTERFACE_ROW *V6If,
+                              PMIB_IPINTERFACE_ROW Out)
 {
   ULONG i;
 
@@ -430,8 +432,10 @@ static void fill_ip_interface(const NETIO_IF *If, ADDRESS_FAMILY Family, PMIB_IP
   Out->InterfaceLuid.Value = If->Luid;
   Out->InterfaceIndex = If->Index;
   Out->UseAutomaticMetric = TRUE;
-  Out->ManagedAddressConfigurationSupported = (Family == AF_INET);
-  Out->OtherStatefulConfigurationSupported = (Family == AF_INET);
+  /* IPv4: DHCP is always there (the DHCP client); IPv6: what the router advertisements say (Windows 10 measured
+     Disabled without one) */
+  Out->ManagedAddressConfigurationSupported = (Family == AF_INET) || (V6If && (V6If->Flags & TCP_IPV6_IF_RA_MANAGED));
+  Out->OtherStatefulConfigurationSupported = (Family == AF_INET) || (V6If && (V6If->Flags & TCP_IPV6_IF_RA_OTHER));
   Out->RouterDiscoveryBehavior = (Family == AF_INET) ? RouterDiscoveryDhcp : RouterDiscoveryEnabled;
   /* Windows 10 (measured): IPv4 link-local addresses are delayed (6.5 s), IPv6 ones are always on */
   Out->LinkLocalAddressBehavior = (Family == AF_INET) ? LinkLocalDelayed : LinkLocalAlwaysOn;
@@ -507,10 +511,10 @@ DWORD WINAPI GetIpInterfaceTable(ADDRESS_FAMILY Family, PMIB_IPINTERFACE_TABLE *
     return ERROR_NOT_ENOUGH_MEMORY;
   }
   for (i = 0; i < Rows4; i++)
-    fill_ip_interface(&List[i], AF_INET, &Out->Table[Next++]);
+    fill_ip_interface(&List[i], AF_INET, NULL, &Out->Table[Next++]);
   for (i = 0; Rows6 && i < Count; i++)
     if (Ipv6FindInterface(&V6, List[i].Index))
-      fill_ip_interface(&List[i], AF_INET6, &Out->Table[Next++]);
+      fill_ip_interface(&List[i], AF_INET6, Ipv6FindInterface(&V6, List[i].Index), &Out->Table[Next++]);
   Out->NumEntries = Next;
 
   Ipv6FreeState(&V6);
@@ -524,6 +528,8 @@ DWORD WINAPI GetIpInterfaceEntry(PMIB_IPINTERFACE_ROW Row)
   NETIO_IF *List, *If;
   ULONG Count;
   DWORD Result, Error;
+  TCP_IPV6_INTERFACE_ROW V6Row;
+  BOOL HaveV6Row = FALSE;
 
   if (!Row || (Row->Family != AF_INET && Row->Family != AF_INET6))
     return ERROR_INVALID_PARAMETER;
@@ -536,21 +542,26 @@ DWORD WINAPI GetIpInterfaceEntry(PMIB_IPINTERFACE_ROW Row)
   if (If && Row->Family == AF_INET6)
   {
     IPV6_STATE V6;
+    const TCP_IPV6_INTERFACE_ROW *Found;
 
     /* an IPv6 interface is one the stack has IPv6 on (none while it is off) */
     Ipv6GetState(&V6);
-    if (!Ipv6FindInterface(&V6, If->Index))
+    Found = Ipv6FindInterface(&V6, If->Index);
+    if (!Found)
     {
       If = NULL;
       Error = ERROR_NOT_FOUND;
     }
+    else
+      V6Row = *Found;
+    HaveV6Row = (Found != NULL);
     Ipv6FreeState(&V6);
   }
   if (If)
   {
     ADDRESS_FAMILY Family = Row->Family;
 
-    fill_ip_interface(If, Family, Row);
+    fill_ip_interface(If, Family, HaveV6Row ? &V6Row : NULL, Row);
   }
   HeapFree(GetProcessHeap(), 0, List);
   return If ? NO_ERROR : Error;

@@ -33,6 +33,10 @@
 #define ND6INFO_STALE       4
 #define ND6INFO_REACHABLE   5
 
+/* The answer goes through a pool block that info.c caps at 64 KB: the largest one stays below */
+C_ASSERT(sizeof(TCP_IPV6_ND_HEADER) + LWIP_ND6_NUM_NEIGHBORS * sizeof(TCP_IPV6_NEIGHBOR_ROW) +
+         LWIP_ND6_NUM_PREFIXES * sizeof(TCP_IPV6_PREFIX_ROW) < 0x10000);
+
 static
 ULONG
 Nd6InfoInterfaceIndex(const struct netif *netif)

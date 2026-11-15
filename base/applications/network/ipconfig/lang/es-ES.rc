@@ -27,6 +27,7 @@ BEGIN
     IDS_EMPTYLINE           "\t                                    %hs\n"
     IDS_MEDIADISCONNECTED   "\tMedia State . . . . . . . . . . . : Media disconnected\n"
     IDS_CONNECTIONDNSSUFFIX "\tConnection-specific DNS Suffix. . : %hs\n"
+    IDS_CONNSEARCHLIST "\tConnection-specific DNS Suffix Search List :\n"
     IDS_DESCRIPTION         "\tDescription . . . . . . . . . . . : "
     IDS_DHCPNO              "\tDHCP Enabled. . . . . . . . . . . : No\n"
     IDS_DHCPYES             "\tDHCP Enabled. . . . . . . . . . . : Yes\n"

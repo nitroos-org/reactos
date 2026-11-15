@@ -120,13 +120,18 @@ typedef struct _TCP_IPV6_TABLE_HEADER
 #define TCP_IPV6_IF_ENABLED             0x1
 /* the loopback interface */
 #define TCP_IPV6_IF_LOOPBACK            0x2
+/* the last router advertisement on the interface had the managed address configuration flag (M) / the other
+   configuration flag (O) set (RFC 4861 4.2): the DHCPv6 client starts by them */
+#define TCP_IPV6_IF_RA_MANAGED          0x4
+#define TCP_IPV6_IF_RA_OTHER            0x8
 
 typedef struct _TCP_IPV6_INTERFACE_ROW
 {
     ULONG IfIndex;
     ULONG Flags;
     ULONG Mtu;
-    ULONG Reserved;
+    ULONG CurHopLimit;      /* the current hop limit the routers on the link advertise (0: none): datagrams whose sender
+                               chose no hop limit leave with it */
 } TCP_IPV6_INTERFACE_ROW, *PTCP_IPV6_INTERFACE_ROW;
 
 /* DadState, PrefixOrigin and SuffixOrigin use the values of NL_DAD_STATE, NL_PREFIX_ORIGIN and
@@ -261,6 +266,27 @@ typedef struct _TCP_IPV6_DNS_ROW
     UCHAR Address[16];
     ULONG Lifetime;
 } TCP_IPV6_DNS_ROW, *PTCP_IPV6_DNS_ROW;
+
+/* Non public TOIID: what router advertisements carry besides DNS servers and routers (ra6.c), for iphlpapi: the DNS
+   search domains of the DNSSL option (RFC 8106). Asked as IP_IPV6_TABLE_ENTRY_ID is (CL_NL_ENTITY, instance 0); the
+   answer is a TCP_IPV6_RA_HEADER, then Count TCP_IPV6_RA_ROW. Enabled is 0 (and Count 0) while the IPv6 switch is off.
+   Sizes as for the other tables: a caller whose buffer is too small gets the size that does and asks again */
+#define IP_IPV6_RA_ENTRY_ID             0x11A
+
+typedef struct _TCP_IPV6_RA_HEADER
+{
+    ULONG Enabled;
+    ULONG Count;
+} TCP_IPV6_RA_HEADER, *PTCP_IPV6_RA_HEADER;
+
+/* A search domain: the name in the dotted form without a final dot (ASCII letters, digits, '-' and '_' only, at most
+   253 characters), Lifetime in seconds left, 0xffffffff infinite */
+typedef struct _TCP_IPV6_RA_ROW
+{
+    ULONG IfIndex;
+    ULONG Lifetime;
+    CHAR Name[256];
+} TCP_IPV6_RA_ROW, *PTCP_IPV6_RA_ROW;
 
 /* Non public TOIID: the neighbour cache and the on-link prefixes of neighbour discovery, for iphlpapi. Asked as
    IP_IPV6_TABLE_ENTRY_ID is (CL_NL_ENTITY, instance 0); the answer is a TCP_IPV6_ND_HEADER, then NeighborCount

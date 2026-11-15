@@ -1226,6 +1226,10 @@ ip6_output_if_src(struct pbuf *p, const ip6_addr_t *src, const ip6_addr_t *dest,
     LWIP_ASSERT("check that first pbuf can hold struct ip6_hdr",
                (p->len >= sizeof(struct ip6_hdr)));
 
+#ifdef LWIP_HOOK_IP6_HOP_LIMIT
+    /* NitroOS: the router's current hop limit replaces the default one (ip/transport/tcp/ra6.c) */
+    hl = LWIP_HOOK_IP6_HOP_LIMIT(netif, hl);
+#endif
     IP6H_HOPLIM_SET(ip6hdr, hl);
     IP6H_NEXTH_SET(ip6hdr, nexth);
 

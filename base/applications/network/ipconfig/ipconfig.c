@@ -625,6 +625,68 @@ ShowIpv6Servers(
     return !bFirst;
 }
 
+/*
+ * The connection-specific DNS suffix search list of an adapter: the DNS search domains its router advertisements
+ * carry (DNSSL, FirstDnsSuffix of GetAdaptersAddresses), as the label and continuation lines, after the
+ * connection-specific suffix. Nothing is printed when there are none (the layout is the one Windows 10 prints for an
+ * adapter that has a list; the oracle has none to show). The headers of this tree do not declare the member, it
+ * follows the last member of IP_ADAPTER_ADDRESSES_LH.
+ */
+typedef struct _IPCONFIG_ADAPTER_ADDRESSES_W7
+{
+    IP_ADAPTER_ADDRESSES_LH Lh;
+    PIP_ADAPTER_DNS_SUFFIX FirstDnsSuffix;
+} IPCONFIG_ADAPTER_ADDRESSES_W7;
+
+static
+VOID
+ShowConnectionSearchList(
+    _In_ DWORD IfIndex)
+{
+    PIP_ADAPTER_ADDRESSES Addresses = NULL, A;
+    ULONG Size = 16 * 1024, Pass;
+    DWORD Error = ERROR_BUFFER_OVERFLOW;
+    BOOL bFirst = TRUE;
+
+    for (Pass = 0; Pass < 3 && Error == ERROR_BUFFER_OVERFLOW; Pass++)
+    {
+        if (Addresses)
+            HeapFree(ProcessHeap, 0, Addresses);
+        Addresses = HeapAlloc(ProcessHeap, 0, Size);
+        if (!Addresses)
+            return;
+        Error = GetAdaptersAddresses(AF_INET6,
+                                     GAA_FLAG_SKIP_UNICAST | GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                                     GAA_FLAG_SKIP_DNS_SERVER,
+                                     NULL, Addresses, &Size);
+    }
+
+    for (A = (Error == NO_ERROR) ? Addresses : NULL; A; A = A->Next)
+    {
+        PIP_ADAPTER_DNS_SUFFIX Suffix;
+
+        if (A->IfIndex != IfIndex && A->Ipv6IfIndex != IfIndex)
+            continue;
+        if (A->Length < sizeof(IPCONFIG_ADAPTER_ADDRESSES_W7))
+            break;
+
+        for (Suffix = ((IPCONFIG_ADAPTER_ADDRESSES_W7 *)A)->FirstDnsSuffix; Suffix; Suffix = Suffix->Next)
+        {
+            CHAR Text[MAX_DNS_SUFFIX_STRING_LENGTH];
+
+            if (!WideCharToMultiByte(CP_ACP, 0, Suffix->String, -1, Text, _countof(Text), NULL, NULL) || !Text[0])
+                continue;
+            if (bFirst)
+                ConResPrintf(StdOut, IDS_CONNSEARCHLIST);
+            ConResPrintf(StdOut, IDS_EMPTYLINE, Text);
+            bFirst = FALSE;
+        }
+        break;
+    }
+
+    HeapFree(ProcessHeap, 0, Addresses);
+}
+
 /* Split a comma/space separated search list and print it as label + continuation lines. */
 static
 VOID
@@ -668,7 +730,7 @@ IsAdapterConnected(
 
 /*
  * The IPv6 addresses of an adapter, as Windows 10 lists them before the IPv4 ones: IPv6 Address, Temporary IPv6
- * Address, then Link-local IPv6 Address with its zone (%interface index); /all adds "(Preferred) ". Without IPv6
+ * Address, then Link-local IPv6 Address with its zone (%interface index); /all adds the state, "(Preferred) ". Without IPv6
  * GetAdaptersAddresses(AF_INET6) has none and nothing is printed (VERIFY ON ORACLE: the exact order and the
  * deprecated/tentative suffixes).
  */
@@ -723,7 +785,19 @@ ShowIpv6Addresses(
                 else
                     StringCchCopyA(Line, _countof(Line), Text);
                 if (bAll)
-                    StringCchCatA(Line, _countof(Line), "(Preferred) ");
+                {
+                    /* the state of the address (NL_DAD_STATE): what Windows prints between the brackets */
+                    PCSTR State = "(Preferred) ";
+
+                    switch (U->DadState)
+                    {
+                        case IpDadStateTentative: State = "(Tentative) "; break;
+                        case IpDadStateDuplicate: State = "(Duplicate) "; break;
+                        case IpDadStateDeprecated: State = "(Deprecated) "; break;
+                        default: break;
+                    }
+                    StringCchCatA(Line, _countof(Line), State);
+                }
 
                 ConResPrintf(StdOut, (Kind == 2) ? IDS_LINKLOCALV6 : (Kind == 1) ? IDS_TEMPIPV6 : IDS_IPV6ADDRESS, Line);
             }
@@ -885,6 +959,8 @@ ShowInfo(
         if (!bConnected)
             ConResPrintf(StdOut, IDS_MEDIADISCONNECTED);
         ConResPrintf(StdOut, IDS_CONNECTIONDNSSUFFIX, szSuffix);
+        if (bAll && bConnected)
+            ShowConnectionSearchList(pAdapter->Index);
 
         if (bAll)
         {

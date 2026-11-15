@@ -20,6 +20,10 @@ int LibTCPReopenTimeWait(struct pbuf *p, struct netif *inp);
 void LibTCPApplyListenRoom(struct tcp_pcb_listen *lpcb);
 /* ip/transport/tcp/rdnss6.c */
 void LibTCPRdnss6Input(struct netif *netif, const ip6_addr_t *addr, u32_t lifetime);
+/* ip/transport/tcp/ra6.c */
+void LibTCPDnssl6Input(struct netif *netif, struct pbuf *p, u16_t offset, u16_t length);
+void LibNd6RaHeader(struct netif *netif, u8_t hop_limit, u8_t flags);
+u8_t LibIp6HopLimit(struct netif *netif, u8_t hl);
 /* ip/transport/tcp/iid6.c */
 int LibNd6SlaacAddress(struct netif *netif, const ip6_addr_t *prefix, ip6_addr_t *addr);
 int LibNd6DadFailed(struct netif *netif, s8_t index);
@@ -35,6 +39,7 @@ void LibTCPRoutes6Changed(void);
 struct netif *LibIp6Route(const ip6_addr_t *src, const ip6_addr_t *dest);
 const ip6_addr_t *LibNd6GetGw(struct netif *netif, const ip6_addr_t *dest);
 void LibNd6Timer(void);
+void LibNd6RouteInfo(struct netif *netif, const ip6_addr_t *router, const u8_t *prefix, u8_t length, u8_t preference, u32_t lifetime);
 /* ip/transport/tcp/addr6.c */
 int LibNd6AddrConfigured(struct netif *netif, s8_t Slot);
 int LibIp6SkipSource(struct netif *netif, s8_t Slot);

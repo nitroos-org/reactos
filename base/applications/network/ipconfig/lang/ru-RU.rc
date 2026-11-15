@@ -26,6 +26,7 @@ BEGIN
     IDS_EMPTYLINE           "\t                                    %hs\n"
     IDS_MEDIADISCONNECTED   "\tСостояние сети. . . . . . . . . . : сеть отключена\n"
     IDS_CONNECTIONDNSSUFFIX "\tDNS-суффикс этого подключения . . : %hs\n"
+    IDS_CONNSEARCHLIST "\tConnection-specific DNS Suffix Search List :\n"
     IDS_DESCRIPTION         "\tОписание. . . . . . . . . . . . . : "
     IDS_PHYSICALADDRESS     "\tФизический адрес. . . . . . . . . : %hs\n"
     IDS_DHCPNO              "\tDHCP включён. . . . . . . . . . . : нет\n"
