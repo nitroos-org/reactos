@@ -540,6 +540,7 @@ typedef struct {
   const byte *dgram;
   int dglen, max, cbyte, namelen;
   int *dmend_r;
+  int jumps; /* ReactOS: compression pointers followed, bounds a pointer cycle */
 } findlabel_state;
 
 void adns__findlabel_start(findlabel_state *fls, adns_state ads,

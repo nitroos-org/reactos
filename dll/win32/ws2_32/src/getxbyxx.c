@@ -89,12 +89,13 @@ Local_Ip6AddresstoString(IN PCHAR AddressBuffer,
                          IN PCHAR Address)
 {
     DWORD i;
+    PCHAR Out = AddressBuffer;
 
-    /* Convert the address into IPv6 format */
+    /* Convert the address into IPv6 format: eight groups of hex digits, not abbreviated */
     for (i = 0; i < 8; i++)
     {
-        sprintf(AddressBuffer, "%x:",
-                ((unsigned)Address[0] & 0xff));
+        Out += sprintf(Out, i ? ":%x" : "%x",
+                       (((unsigned)Address[2 * i] & 0xff) << 8) | ((unsigned)Address[2 * i + 1] & 0xff));
     }
 }
 
@@ -342,14 +343,26 @@ gethostbyaddr(IN const char FAR * addr,
         return NULL;
     }
 
-    /* Check which type it is */
+    /* Check which type it is; the address must be as long as its family needs (else WSAEFAULT, as documented) */
     if (type == AF_INET)
     {
+        if (len < (int)sizeof(IN_ADDR))
+        {
+            SetLastError(WSAEFAULT);
+            return NULL;
+        }
+
         /* Use IPV4 Address to String */
         Local_Ip4AddresstoString(AddressBuffer, (PCHAR)addr);
     }
     else if (type == AF_INET6)
     {
+        if (len < (int)sizeof(IN6_ADDR))
+        {
+            SetLastError(WSAEFAULT);
+            return NULL;
+        }
+
         /* Use IPV6 Address to String */
         Local_Ip6AddresstoString(AddressBuffer, (PCHAR)addr);
     }

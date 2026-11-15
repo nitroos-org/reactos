@@ -350,6 +350,14 @@ void adns__procdgram(adns_state ads, const byte *dgram, int dglen,
     adns__query_fail(qu,adns_s_invalidresponse);
     return;
   }
+  /* ReactOS: an answer over TCP is never truncated (there is no larger
+   * transport to retry on): asking again would loop for as long as the
+   * server keeps setting the flag. */
+  if (viatcp) {
+    adns__diag(ads,serv,qu,"server sent a truncated answer over TCP");
+    adns__query_fail(qu,adns_s_invalidresponse);
+    return;
+  }
   qu->flags |= adns_qf_usevc;
   /* Retry over TCP at the server that sent the truncated answer, unless a
    * connection (or attempt) to a server is already under way. */

@@ -189,6 +189,33 @@ DnsIntCacheHasHostsName(
     return Ret;
 }
 
+/*
+ * The names of the PTR records made from the hosts file end with the root label's dot, the names a reverse query
+ * is made with may or may not: the one dot is not part of the comparison for the reverse names.
+ */
+static
+BOOL
+NamesMatch(
+    PDNS_RECORDW Record,
+    LPCWSTR Name)
+{
+    size_t Len1, Len2;
+
+    if (_wcsicmp(Record->pName, Name) == 0)
+        return TRUE;
+    if (Record->wType != DNS_TYPE_PTR)
+        return FALSE;
+
+    Len1 = wcslen(Record->pName);
+    Len2 = wcslen(Name);
+    if (Len1 > 1 && Record->pName[Len1 - 1] == L'.')
+        Len1--;
+    if (Len2 > 1 && Name[Len2 - 1] == L'.')
+        Len2--;
+    return Len1 == Len2 && _wcsnicmp(Record->pName, Name, Len1) == 0;
+}
+
+
 DNS_STATUS
 DnsIntCacheGetEntryByName(
     LPCWSTR Name,
@@ -222,7 +249,7 @@ DnsIntCacheGetEntryByName(
         CacheEntry = CONTAINING_RECORD(NextEntry, RESOLVER_CACHE_ENTRY, CacheLink);
 
         if (CacheEntry->bHostsFileEntry &&
-            _wcsicmp(CacheEntry->Record->pName, Name) == 0 &&
+            NamesMatch(CacheEntry->Record, Name) &&
             (wType == DNS_TYPE_ANY || CacheEntry->Record->wType == wType))
         {
             Copy = DnsRecordSetCopyEx(CacheEntry->Record, DnsCharSetUnicode, DnsCharSetUnicode);
@@ -255,7 +282,7 @@ DnsIntCacheGetEntryByName(
         CacheEntry = CONTAINING_RECORD(NextEntry, RESOLVER_CACHE_ENTRY, CacheLink);
 
         /* Check if this is the Catalog Entry ID we want */
-        if (_wcsicmp(CacheEntry->Record->pName, Name) == 0 &&
+        if (NamesMatch(CacheEntry->Record, Name) &&
             (wType == DNS_TYPE_ANY || CacheEntry->Record->wType == wType))
         {
             /* Copy the entry and return it */

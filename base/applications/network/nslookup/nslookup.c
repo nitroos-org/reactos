@@ -170,18 +170,20 @@ BOOL PerformInternalLookup( PCHAR pAddr, PCHAR pResult )
 
     if( (strlen( pAddr ) + 1) > 255 ) return FALSE;
 
-    /* The name of an IPv6 server is not looked up (no ip6.arpa support): it stays unknown */
-    if( IsValidIPv6( pAddr ) )
-    {
-        strcpy( pResult, "UnKnown" );
-        return FALSE;
-    }
-
     Type = TYPE_A;
-    if( IsValidIP( pAddr ) ) Type = TYPE_PTR;
+    if( IsValidIP( pAddr ) || IsValidIPv6( pAddr ) ) Type = TYPE_PTR;
 
     /* If it's a PTR lookup then append the ARPA sig to the end. */
-    if( Type == TYPE_PTR )
+    if( Type == TYPE_PTR && IsValidIPv6( pAddr ) )
+    {
+        /* A link-local, unspecified or multicast address has no name: no query is made */
+        if( !ReverseIPv6( pAddr, pResolve ) )
+        {
+            strcpy( pResult, "UnKnown" );
+            return FALSE;
+        }
+    }
+    else if( Type == TYPE_PTR )
     {
         ReverseIP( pAddr, pResolve );
         strcat( pResolve, ARPA_SIG );
@@ -444,14 +446,23 @@ void PerformLookup( PCHAR pAddr )
     {
         Type = TYPE_A;
         if( !strcmp( TypeAAAA, State.type ) ) Type = TYPE_AAAA;
-        if( IsValidIP( pAddr ) ) Type = TYPE_PTR;
+        if( IsValidIP( pAddr ) || IsValidIPv6( pAddr ) ) Type = TYPE_PTR;
     }
     else
         Type = TypeNametoTypeID( State.type );
     QueryType = Type;
 
     /* If it's a PTR lookup then append the ARPA sig to the end. */
-    if( (Type == TYPE_PTR) && IsValidIP( pAddr ) )
+    if( (Type == TYPE_PTR) && IsValidIPv6( pAddr ) )
+    {
+        /* No name is asked for a link-local, unspecified or multicast address */
+        if( !ReverseIPv6( pAddr, pResolve ) )
+        {
+            _tprintf( _T("*** %s can't find %s: Non-existent domain\n"), State.DefaultServer, pAddr );
+            return;
+        }
+    }
+    else if( (Type == TYPE_PTR) && IsValidIP( pAddr ) )
     {
         ReverseIP( pAddr, pResolve );
         strcat( pResolve, ARPA_SIG );

@@ -141,6 +141,7 @@ BOOL    SkipQuestions( PCHAR pBuffer,
 void    ReverseIP( PCHAR pIP, PCHAR pReturn );
 BOOL    IsValidIP( PCHAR pInput );
 BOOL    IsValidIPv6( PCHAR pInput );
+BOOL    ReverseIPv6( PCHAR pIP, PCHAR pReturn );
 int     ExtractIP( PCHAR pBuffer, PCHAR pOutput, USHORT Offset );
 void    PrintD2( PCHAR pBuffer, DWORD BufferLength );
 void    PrintDebug( PCHAR pBuffer, DWORD BufferLength );
