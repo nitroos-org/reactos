@@ -1222,59 +1222,768 @@ KdbpContextFromPrevTss(
 
 #ifdef _M_AMD64
 
+/*
+ * The unwinder below runs in the debugger, at HIGH_LEVEL on the NMI stack,
+ * where a page fault ends in a triple fault instead of reaching a handler.
+ * RtlVirtualUnwind dereferences the image's function table and unwind data,
+ * the code around RIP (epilog scan) and the stack without checking any of
+ * them, and the data of a driver whose pages are gone (or a garbage return
+ * address) is enough to fault. So the walk does not call it: every byte it
+ * looks at goes through KdbpSafeReadMemory, and it fails cleanly instead.
+ */
+
+#define KDBP_UWOP_PUSH_NONVOL       0
+#define KDBP_UWOP_ALLOC_LARGE       1
+#define KDBP_UWOP_ALLOC_SMALL       2
+#define KDBP_UWOP_SET_FPREG         3
+#define KDBP_UWOP_SAVE_NONVOL       4
+#define KDBP_UWOP_SAVE_NONVOL_FAR   5
+#define KDBP_UWOP_EPILOG            6
+#define KDBP_UWOP_SPARE_CODE        7
+#define KDBP_UWOP_SAVE_XMM128       8
+#define KDBP_UWOP_SAVE_XMM128_FAR   9
+#define KDBP_UWOP_PUSH_MACHFRAME    10
+
+/* Limits that keep a corrupt module list or unwind data from looping */
+#define KDBP_MAX_MODULES        2048
+#define KDBP_MAX_UNWIND_LINKS   32
+#define KDBP_MAX_EPILOG_INSNS   64
+/* A frame that is larger than this, without a stack switch, is not a frame */
+#define KDBP_MAX_STACK_STEP     0x100000
+#define KDBP_MAX_FRAMES         256
+
+typedef union _KDBP_UNWIND_CODE
+{
+    struct
+    {
+        UCHAR CodeOffset;
+        UCHAR UnwindOp:4;
+        UCHAR OpInfo:4;
+    };
+    USHORT FrameOffset;
+} KDBP_UNWIND_CODE;
+
+typedef struct _KDBP_UNWIND_INFO
+{
+    UCHAR Version:3;
+    UCHAR Flags:5;
+    UCHAR SizeOfProlog;
+    UCHAR CountOfCodes;
+    UCHAR FrameRegister:4;
+    UCHAR FrameOffset:4;
+} KDBP_UNWIND_INFO;
+
+/* The registers the unwind codes touch, indexed like the hardware numbers them */
+typedef struct _KDBP_UNWIND_REGS
+{
+    ULONG64 R[16];
+    ULONG64 Rip;
+} KDBP_UNWIND_REGS;
+
+/* Whether the walk may print or follow this address: canonical, and not the
+   small values at the bottom of a stack */
 static
 BOOLEAN
-GetNextFrame(
-    _Inout_ PCONTEXT Context)
+KdbpIsCanonical(
+    _In_ ULONG64 Address)
 {
-    PRUNTIME_FUNCTION FunctionEntry;
-    ULONG64 ImageBase, EstablisherFrame;
-    PVOID HandlerData;
-    UCHAR Code[16];
-    DWORD64 ReturnAddress;
+    return ((Address >> 47) == 0) || ((Address >> 47) == 0x1FFFF);
+}
 
-    /*
-     * RtlVirtualUnwind scans the code at RIP for an epilogue. A garbage return
-     * address (the bottom of an idle thread stack points into the discarded
-     * boot code) is not mapped, and a page fault here, at HIGH_LEVEL on the
-     * NMI stack, ends in a triple fault instead of reaching the handler below.
-     * So only unwind through memory that can be read without faulting.
-     */
-    if (!NT_SUCCESS(KdbpSafeReadMemory(Code, (PVOID)Context->Rip, sizeof(Code))))
+/* Reads a stack slot. The address comes from the frame being unwound (a frame
+   register, a stack pointer moved by the unwind codes) and can be anything.
+   KdbpSafeReadMemory only checks that the page tables map it, and the page
+   table index ignores the upper address bits: a non-canonical address passes
+   that check and the read then raises a general protection fault. */
+static
+BOOLEAN
+KdbpReadQword(
+    _In_ ULONG64 Address,
+    _Out_ PULONG64 Value)
+{
+    if (!KdbpIsCanonical(Address) || !KdbpIsCanonical(Address + sizeof(*Value) - 1))
+        return FALSE;
+    return NT_SUCCESS(KdbpSafeReadMemory(Value, (PVOID)(ULONG_PTR)Address, sizeof(*Value)));
+}
+
+/* Reads up to 8 code bytes, fewer when the end of a mapped page is near.
+   The missing bytes are zero; FALSE when not even the first byte is readable. */
+static
+BOOLEAN
+KdbpFetchCode(
+    _In_ ULONG64 Address,
+    _Out_writes_(8) PUCHAR Bytes)
+{
+    static const ULONG Sizes[] = { 8, 4, 2, 1 };
+    ULONG i;
+
+    RtlZeroMemory(Bytes, 8);
+    for (i = 0; i < RTL_NUMBER_OF(Sizes); i++)
+    {
+        if (NT_SUCCESS(KdbpSafeReadMemory(Bytes, (PVOID)(ULONG_PTR)Address, Sizes[i])))
+            return TRUE;
+    }
+    return FALSE;
+}
+
+/* Finds the loaded image that holds Pc */
+static
+BOOLEAN
+KdbpUnwindFindImage(
+    _In_ ULONG64 Pc,
+    _Out_ PULONG64 ImageBase,
+    _Out_ PULONG ImageSize)
+{
+    PLIST_ENTRY Entry;
+    LDR_DATA_TABLE_ENTRY Ldr;
+    ULONG Count;
+
+    if (!NT_SUCCESS(KdbpSafeReadMemory(&Entry, &PsLoadedModuleList.Flink, sizeof(Entry))))
         return FALSE;
 
-    _SEH2_TRY
+    for (Count = 0; (Entry != &PsLoadedModuleList) && (Count < KDBP_MAX_MODULES); Count++)
     {
-        /* Lookup the FunctionEntry for the current RIP */
-        FunctionEntry = RtlLookupFunctionEntry(Context->Rip, &ImageBase, NULL);
-        if (FunctionEntry == NULL)
+        if (!NT_SUCCESS(KdbpSafeReadMemory(&Ldr,
+                                           CONTAINING_RECORD(Entry, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks),
+                                           sizeof(Ldr))))
         {
-            /* No function entry, so this must be a leaf function. Pop the return address from the stack.
-            Note: this can happen after the first frame as the result of an exception */
-            if (!NT_SUCCESS(KdbpSafeReadMemory(&ReturnAddress, (PVOID)Context->Rsp, sizeof(ReturnAddress))))
-                return FALSE;
-            Context->Rip = ReturnAddress;
-            Context->Rsp += sizeof(DWORD64);
+            return FALSE;
+        }
+
+        if ((Pc >= (ULONG64)(ULONG_PTR)Ldr.DllBase) &&
+            ((Pc - (ULONG64)(ULONG_PTR)Ldr.DllBase) < Ldr.SizeOfImage))
+        {
+            *ImageBase = (ULONG64)(ULONG_PTR)Ldr.DllBase;
+            *ImageSize = Ldr.SizeOfImage;
             return TRUE;
+        }
+
+        Entry = Ldr.InLoadOrderLinks.Flink;
+    }
+
+    return FALSE;
+}
+
+typedef enum _KDBP_LOOKUP
+{
+    KdbpLookupFailed,   /* something unreadable or inconsistent: stop the walk */
+    KdbpLookupNone,     /* no function entry covers the address: a leaf */
+    KdbpLookupFound
+} KDBP_LOOKUP;
+
+/*
+ * Finds the function entry for Pc, with safe reads of the image headers and of
+ * every table entry the binary search looks at. CodeEntry is the entry whose
+ * range holds Pc; FunctionEntry is the entry that owns the unwind data, which
+ * differs for a part of a function with an indirect entry (cold code).
+ */
+static
+KDBP_LOOKUP
+KdbpUnwindLookup(
+    _In_ ULONG64 Pc,
+    _Out_ PULONG64 ImageBase,
+    _Out_ PULONG ImageSize,
+    _Out_ PRUNTIME_FUNCTION CodeEntry,
+    _Out_ PRUNTIME_FUNCTION FunctionEntry)
+{
+    IMAGE_DOS_HEADER Dos;
+    IMAGE_NT_HEADERS64 Nt;
+    IMAGE_DATA_DIRECTORY Dir;
+    ULONG TableCount, IndexLo, IndexHi, IndexMid, Pcrva, Links, Rva;
+    RUNTIME_FUNCTION Entry;
+
+    if (!KdbpUnwindFindImage(Pc, ImageBase, ImageSize))
+        return KdbpLookupNone;
+
+    if (!NT_SUCCESS(KdbpSafeReadMemory(&Dos, (PVOID)(ULONG_PTR)*ImageBase, sizeof(Dos))) ||
+        (Dos.e_magic != IMAGE_DOS_SIGNATURE) ||
+        (Dos.e_lfanew <= 0) ||
+        ((ULONG)Dos.e_lfanew > (*ImageSize - sizeof(Nt))) ||
+        !NT_SUCCESS(KdbpSafeReadMemory(&Nt, (PVOID)(ULONG_PTR)(*ImageBase + Dos.e_lfanew), sizeof(Nt))) ||
+        (Nt.Signature != IMAGE_NT_SIGNATURE) ||
+        (Nt.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) ||
+        (Nt.OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_EXCEPTION))
+    {
+        return KdbpLookupFailed;
+    }
+
+    Dir = Nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
+    if ((Dir.VirtualAddress == 0) || (Dir.Size < sizeof(RUNTIME_FUNCTION)))
+        return KdbpLookupNone;
+    if ((Dir.VirtualAddress >= *ImageSize) || (Dir.Size > (*ImageSize - Dir.VirtualAddress)))
+        return KdbpLookupFailed;
+
+    TableCount = Dir.Size / sizeof(RUNTIME_FUNCTION);
+    Pcrva = (ULONG)(Pc - *ImageBase);
+
+    /* Binary search, like RtlLookupFunctionEntry */
+    IndexLo = 0;
+    IndexHi = TableCount;
+    for (;;)
+    {
+        if (IndexHi <= IndexLo)
+            return KdbpLookupNone;
+
+        IndexMid = (IndexLo + IndexHi) / 2;
+        if (!NT_SUCCESS(KdbpSafeReadMemory(&Entry,
+                                           (PVOID)(ULONG_PTR)(*ImageBase + Dir.VirtualAddress +
+                                                              (ULONG64)IndexMid * sizeof(RUNTIME_FUNCTION)),
+                                           sizeof(Entry))))
+        {
+            return KdbpLookupFailed;
+        }
+
+        if (Pcrva < Entry.BeginAddress)
+            IndexHi = IndexMid;
+        else if (Pcrva >= Entry.EndAddress)
+            IndexLo = IndexMid + 1;
+        else
+            break;
+    }
+
+    *CodeEntry = Entry;
+
+    /* An indirect entry stands for the entry it points to */
+    for (Links = 0; Entry.UnwindData & RUNTIME_FUNCTION_INDIRECT; Links++)
+    {
+        Rva = Entry.UnwindData & ~RUNTIME_FUNCTION_INDIRECT;
+        if ((Links >= 8) ||
+            (Rva & (sizeof(ULONG) - 1)) ||
+            (Rva > (*ImageSize - sizeof(RUNTIME_FUNCTION))) ||
+            !NT_SUCCESS(KdbpSafeReadMemory(&Entry, (PVOID)(ULONG_PTR)(*ImageBase + Rva), sizeof(Entry))))
+        {
+            return KdbpLookupFailed;
+        }
+    }
+
+    *FunctionEntry = Entry;
+    return KdbpLookupFound;
+}
+
+/*
+ * Reads the unwind info at the RVA, with its unwind codes (at most 255, which
+ * is what the format allows). Reports where a chained entry follows.
+ */
+static
+BOOLEAN
+KdbpUnwindLoadInfo(
+    _In_ ULONG64 ImageBase,
+    _In_ ULONG ImageSize,
+    _In_ ULONG Rva,
+    _Out_ KDBP_UNWIND_INFO *Info,
+    _Out_writes_(256) KDBP_UNWIND_CODE *Codes,
+    _Out_ PRUNTIME_FUNCTION Chained)
+{
+    ULONG CodesSize, ChainedRva;
+
+    if ((Rva & (sizeof(ULONG) - 1)) || (Rva > (ImageSize - sizeof(*Info))))
+        return FALSE;
+    if (!NT_SUCCESS(KdbpSafeReadMemory(Info, (PVOID)(ULONG_PTR)(ImageBase + Rva), sizeof(*Info))))
+        return FALSE;
+
+    CodesSize = Info->CountOfCodes * sizeof(KDBP_UNWIND_CODE);
+    if (CodesSize > (ImageSize - Rva - sizeof(*Info)))
+        return FALSE;
+    if ((CodesSize != 0) &&
+        !NT_SUCCESS(KdbpSafeReadMemory(Codes, (PVOID)(ULONG_PTR)(ImageBase + Rva + sizeof(*Info)), CodesSize)))
+    {
+        return FALSE;
+    }
+
+    if (Info->Flags & UNW_FLAG_CHAININFO)
+    {
+        /* The chained entry follows the codes, padded to an even count */
+        ChainedRva = Rva + sizeof(*Info) + ((Info->CountOfCodes + 1) & ~1) * sizeof(KDBP_UNWIND_CODE);
+        if ((ChainedRva > (ImageSize - sizeof(RUNTIME_FUNCTION))) ||
+            !NT_SUCCESS(KdbpSafeReadMemory(Chained, (PVOID)(ULONG_PTR)(ImageBase + ChainedRva), sizeof(*Chained))))
+        {
+            return FALSE;
+        }
+    }
+
+    return TRUE;
+}
+
+/* Number of slots a code takes, 0 for a code the walk cannot step over */
+static
+ULONG
+KdbpUnwindCodeSlots(
+    _In_ KDBP_UNWIND_CODE Code)
+{
+    switch (Code.UnwindOp)
+    {
+        case KDBP_UWOP_PUSH_NONVOL:
+        case KDBP_UWOP_ALLOC_SMALL:
+        case KDBP_UWOP_SET_FPREG:
+        case KDBP_UWOP_PUSH_MACHFRAME:
+            return 1;
+        case KDBP_UWOP_ALLOC_LARGE:
+            return Code.OpInfo ? 3 : 2;
+        case KDBP_UWOP_SAVE_NONVOL:
+        case KDBP_UWOP_EPILOG:
+        case KDBP_UWOP_SAVE_XMM128:
+            return 2;
+        case KDBP_UWOP_SAVE_NONVOL_FAR:
+        case KDBP_UWOP_SPARE_CODE:
+        case KDBP_UWOP_SAVE_XMM128_FAR:
+            return 3;
+        default:
+            return 0;
+    }
+}
+
+/* Whether the instruction that ends at Pc is a call, so that Pc is a return
+   address. The common encodings only, like the one in the runtime. */
+static
+BOOLEAN
+KdbpFollowsCall(
+    _In_ ULONG64 Pc,
+    _In_ ULONG64 FunctionStart)
+{
+    UCHAR Before[8], *End = Before + sizeof(Before);
+    ULONG64 Room = Pc - FunctionStart;
+    ULONG Length, Need, Max;
+    UCHAR ModRm, Mod, Rm;
+
+    Max = (Room < sizeof(Before)) ? (ULONG)Room : sizeof(Before);
+    if ((Max == 0) || !NT_SUCCESS(KdbpSafeReadMemory(End - Max, (PVOID)(ULONG_PTR)(Pc - Max), Max)))
+        return FALSE;
+
+    /* call rel32 */
+    if ((Max >= 5) && (End[-5] == 0xE8))
+        return TRUE;
+
+    /* call r/m64 (FF /2), also with a REX prefix: try each instruction length
+       and check that the ModRM byte implies it */
+    for (Length = 2; (Length <= 7) && (Length <= Max); Length++)
+    {
+        if (End[-(LONG)Length] != 0xFF)
+            continue;
+        ModRm = End[-(LONG)Length + 1];
+        if (((ModRm >> 3) & 7) != 2)
+            continue;
+        Mod = ModRm >> 6;
+        Rm = ModRm & 7;
+        if (Mod == 3)
+        {
+            if (Length == 2) return TRUE;
+            continue;
+        }
+
+        /* Opcode, ModRM, a SIB byte for rm 4, then the displacement */
+        Need = 2 + (Rm == 4);
+        if (Mod == 1)
+            Need += 1;
+        else if ((Mod == 2) || ((Mod == 0) && (Rm == 5)))
+            Need += 4;
+        else if ((Mod == 0) && (Rm == 4) && (Length > 2) && ((End[-(LONG)Length + 2] & 7) == 5))
+            Need += 4;
+        if (Need == Length)
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
+/*
+ * Unwinds an epilog that Pc is in the middle of (add rsp / lea rsp, pops, then
+ * ret or a jump out of the function), by reading the instructions.
+ * Returns TRUE and updates Regs when Pc is in an epilog.
+ */
+static
+BOOLEAN
+KdbpUnwindEpilog(
+    _Inout_ KDBP_UNWIND_REGS *Regs,
+    _In_ ULONG64 Pc,
+    _In_ ULONG64 ImageBase,
+    _In_ ULONG ImageSize,
+    _In_ PRUNTIME_FUNCTION FunctionEntry,
+    _In_ PRUNTIME_FUNCTION CodeEntry)
+{
+    KDBP_UNWIND_REGS Local = *Regs;
+    KDBP_UNWIND_INFO Info;
+    KDBP_UNWIND_CODE Codes[256];
+    RUNTIME_FUNCTION Chained;
+    ULONG64 InstrPtr = Pc, EndAddress, Value;
+    ULONG Rva, i, Links, Insns, Reg, Mod, Sib, Length;
+    ULONG PushCount = 0, PopCount = 0;
+    BOOLEAN HasAllocation = FALSE, StackAdjusted = FALSE;
+    UCHAR B[8];
+    LONG Disp;
+
+    /* Count the prolog's pushes and allocations along the chained unwind info */
+    Rva = FunctionEntry->UnwindData;
+    for (Links = 0; ; Links++)
+    {
+        if (!KdbpUnwindLoadInfo(ImageBase, ImageSize, Rva, &Info, Codes, &Chained))
+            return FALSE;
+
+        for (i = 0; i < Info.CountOfCodes; i += KdbpUnwindCodeSlots(Codes[i]))
+        {
+            if (KdbpUnwindCodeSlots(Codes[i]) == 0)
+                return FALSE;
+            switch (Codes[i].UnwindOp)
+            {
+                case KDBP_UWOP_PUSH_NONVOL:
+                    PushCount++;
+                    break;
+                case KDBP_UWOP_ALLOC_LARGE:
+                case KDBP_UWOP_ALLOC_SMALL:
+                case KDBP_UWOP_SET_FPREG:
+                    HasAllocation = TRUE;
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        if (!(Info.Flags & UNW_FLAG_CHAININFO))
+            break;
+        if (Links >= KDBP_MAX_UNWIND_LINKS)
+            return FALSE;
+        Rva = Chained.UnwindData;
+    }
+
+    if (!KdbpFetchCode(InstrPtr, B))
+        return FALSE;
+
+    if (((*(ULONG UNALIGNED*)B) & 0x00fffdff) == 0x00c48148)
+    {
+        /* "add rsp, imm8" or "add rsp, imm32" */
+        if (B[1] == 0x83)
+        {
+            Local.R[4] += B[3];
+            InstrPtr += 4;
         }
         else
         {
-            RtlVirtualUnwind(UNW_FLAG_NHANDLER,
-                             ImageBase,
-                             Context->Rip,
-                             FunctionEntry,
-                             Context,
-                             &HandlerData,
-                             &EstablisherFrame,
-                             NULL);
+            if (!NT_SUCCESS(KdbpSafeReadMemory(&Disp, (PVOID)(ULONG_PTR)(InstrPtr + 3), sizeof(Disp))))
+                return FALSE;
+            Local.R[4] += (ULONG)Disp;
+            InstrPtr += 7;
         }
+        StackAdjusted = TRUE;
     }
-    _SEH2_EXCEPT(1)
+    else if (((*(ULONG UNALIGNED*)B) & 0x38fffe) == 0x208d48)
+    {
+        /* "lea rsp, [reg + disp]"; REX.B extends the register */
+        Reg = ((B[2] & 7)) + (B[0] & 1) * 8;
+        Mod = B[2] >> 6;
+        Length = 3;
+
+        /* A base of rsp or r12 needs a SIB byte, which must not have an index */
+        if ((Reg & 7) == 4)
+        {
+            Sib = B[3];
+            if (((Sib >> 3) & 7) != 4)
+                return FALSE;
+            Reg = (Sib & 7) + (B[0] & 1) * 8;
+            Length = 4;
+        }
+
+        /* Without displacement, a base of rbp or r13 means rip-relative or no base */
+        if ((Mod == 3) || ((Mod == 0) && ((Reg & 7) == 5)))
+            return FALSE;
+
+        Local.R[4] = Local.R[Reg];
+        if (Mod == 1)
+        {
+            Local.R[4] += (LONG64)(CHAR)B[Length];
+            Length += 1;
+        }
+        else if (Mod == 2)
+        {
+            Local.R[4] += (LONG64)*(LONG UNALIGNED*)&B[Length];
+            Length += 4;
+        }
+
+        /* B holds 8 bytes, enough for the longest form here (REX, 8D, ModRM, SIB, disp32) */
+        InstrPtr += Length;
+        StackAdjusted = TRUE;
+    }
+
+    /* Loop the pops up to the ret or jmp; code can follow an epilog */
+    EndAddress = ImageBase + CodeEntry->EndAddress;
+    for (Insns = 0; (InstrPtr < EndAddress) && (Insns < KDBP_MAX_EPILOG_INSNS); Insns++)
+    {
+        if (!KdbpFetchCode(InstrPtr, B))
+            return FALSE;
+
+        /* "ret" or "rep ret" */
+        if ((B[0] == 0xC3) || ((B[0] == 0xF3) && (B[1] == 0xC3)))
+            goto Finished;
+
+        /* A simple pop, or REX + pop of r8..r15 */
+        if ((B[0] & 0xF8) == 0x58)
+        {
+            Reg = B[0] & 7;
+            Length = 1;
+        }
+        else if (((B[0] & 0xFB) == 0x41) && ((B[1] & 0xF8) == 0x58))
+        {
+            Reg = (B[1] & 7) + 8;
+            Length = 2;
+        }
+        else if ((B[0] == 0xE9) || (B[0] == 0xEB) ||
+                 (B[0] == 0xFF) || (((B[0] & 0xF0) == 0x40) && (B[1] == 0xFF)))
+        {
+            /* A tail call: a direct jmp out of the function, or a jmp through
+               [rip + disp32] (an import). A jump within the function, or one
+               before anything was torn down, is part of the body. */
+            if (B[0] == 0xE9)
+                Value = InstrPtr + 5 + (LONG64)*(LONG UNALIGNED*)&B[1];
+            else if (B[0] == 0xEB)
+                Value = InstrPtr + 2 + (LONG64)(CHAR)B[1];
+            else
+            {
+                UCHAR Prefix = ((B[0] & 0xF0) == 0x40) ? 1 : 0;
+                if ((B[Prefix] != 0xFF) || (B[Prefix + 1] != 0x25))
+                    return FALSE;
+                Value = 0;
+            }
+
+            if ((B[0] == 0xE9) || (B[0] == 0xEB))
+            {
+                ULONG TargetRva = (ULONG)(Value - ImageBase);
+                if (((Value - ImageBase) < ImageSize) &&
+                    (((TargetRva >= FunctionEntry->BeginAddress) && (TargetRva < FunctionEntry->EndAddress)) ||
+                     ((TargetRva >= CodeEntry->BeginAddress) && (TargetRva < CodeEntry->EndAddress))))
+                {
+                    return FALSE;
+                }
+            }
+
+            if (!StackAdjusted && (PopCount == 0))
+                return FALSE;
+            goto Finished;
+        }
+        else
+        {
+            /* Opcode not allowed for an epilog */
+            return FALSE;
+        }
+
+        if (!KdbpReadQword(Local.R[4], &Value))
+            return FALSE;
+        Local.R[Reg] = Value;
+        Local.R[4] += sizeof(ULONG64);
+        InstrPtr += Length;
+        PopCount++;
+    }
+
+    /* Ran past the end of the function, or the epilog is implausibly long */
+    return FALSE;
+
+Finished:
+    /* A call right before the epilog makes Pc a return address in the caller's
+       body, not a position inside the epilog */
+    if (!(HasAllocation && !StackAdjusted) && (PopCount >= PushCount) &&
+        KdbpFollowsCall(Pc, ImageBase + CodeEntry->BeginAddress))
     {
         return FALSE;
     }
-    _SEH2_END
 
+    /* Unwind is finished, pop the new Rip */
+    if (!KdbpReadQword(Local.R[4], &Value))
+        return FALSE;
+    Local.Rip = Value;
+    Local.R[4] += sizeof(ULONG64);
+    *Regs = Local;
+    return TRUE;
+}
+
+/*
+ * Unwinds one frame. Returns FALSE when it could not: unreadable or
+ * inconsistent unwind data, code or stack. Context is only changed on success.
+ * *MachFrame is set when the frame was an interrupt or exception frame, where
+ * the stack pointer comes from the frame and need not be near the old one.
+ */
+static
+BOOLEAN
+GetNextFrame(
+    _Inout_ PCONTEXT Context,
+    _Out_ PBOOLEAN MachFrame)
+{
+    ULONG64 ImageBase, FrameBase, Value;
+    ULONG ImageSize, i, Rva, Links, Offset, Slots;
+    ULONG_PTR CodeOffset;
+    RUNTIME_FUNCTION CodeEntry, FunctionEntry, Chained;
+    KDBP_UNWIND_INFO Info, FirstInfo;
+    KDBP_UNWIND_CODE Codes[256];
+    KDBP_UNWIND_REGS Regs;
+    PULONG64 ContextRegs = &Context->Rax;
+    BOOLEAN SetFp;
+    UCHAR Code[1];
+
+    *MachFrame = FALSE;
+
+    /* The code at RIP must be readable, otherwise this is not a frame */
+    if (!NT_SUCCESS(KdbpSafeReadMemory(Code, (PVOID)(ULONG_PTR)Context->Rip, sizeof(Code))))
+        return FALSE;
+
+    for (i = 0; i < 16; i++)
+        Regs.R[i] = ContextRegs[i];
+    Regs.Rip = Context->Rip;
+
+    switch (KdbpUnwindLookup(Context->Rip, &ImageBase, &ImageSize, &CodeEntry, &FunctionEntry))
+    {
+        case KdbpLookupFailed:
+            return FALSE;
+
+        case KdbpLookupNone:
+            /* No function entry, so this must be a leaf function. Pop the return address from the stack.
+               Note: this can happen after the first frame as the result of an exception */
+            if (!KdbpReadQword(Regs.R[4], &Value))
+                return FALSE;
+            Regs.Rip = Value;
+            Regs.R[4] += sizeof(ULONG64);
+            goto Commit;
+
+        default:
+            break;
+    }
+
+    /* The offset of the code in its function: code that lies outside of the
+       range that owns the unwind data (a cold part) counts as past the prolog */
+    if ((CodeEntry.BeginAddress == FunctionEntry.BeginAddress) &&
+        (CodeEntry.EndAddress == FunctionEntry.EndAddress))
+        CodeOffset = (ULONG)(Context->Rip - ImageBase) - FunctionEntry.BeginAddress;
+    else
+        CodeOffset = MAXULONG_PTR;
+
+    if (!KdbpUnwindLoadInfo(ImageBase, ImageSize, FunctionEntry.UnwindData, &FirstInfo, Codes, &Chained))
+        return FALSE;
+    Info = FirstInfo;
+
+    /* The establisher frame: the frame register, once it is set up */
+    FrameBase = Regs.R[4];
+    if (FirstInfo.FrameRegister != 0)
+    {
+        SetFp = (CodeOffset >= FirstInfo.SizeOfProlog) || (FirstInfo.Flags & UNW_FLAG_CHAININFO);
+        for (i = 0; !SetFp && (i < FirstInfo.CountOfCodes); i += Slots)
+        {
+            Slots = KdbpUnwindCodeSlots(Codes[i]);
+            if (Slots == 0)
+                return FALSE;
+            if ((Codes[i].CodeOffset <= CodeOffset) && (Codes[i].UnwindOp == KDBP_UWOP_SET_FPREG))
+                SetFp = TRUE;
+        }
+        if (SetFp)
+            FrameBase = Regs.R[FirstInfo.FrameRegister] - FirstInfo.FrameOffset * 16;
+    }
+
+    /* Check if we are in the function epilog and try to finish it */
+    if (((CodeOffset >= FirstInfo.SizeOfProlog) && (FirstInfo.CountOfCodes > 0)) ||
+        ((CodeOffset >= FirstInfo.SizeOfProlog) && (FirstInfo.Flags & UNW_FLAG_CHAININFO)))
+    {
+        if (KdbpUnwindEpilog(&Regs, Context->Rip, ImageBase, ImageSize, &FunctionEntry, &CodeEntry))
+            goto Commit;
+    }
+
+    /* Skip all ops with an offset greater than the current offset */
+    i = 0;
+    while (i < Info.CountOfCodes)
+    {
+        Slots = KdbpUnwindCodeSlots(Codes[i]);
+        if (Slots == 0)
+            return FALSE;
+        if (Codes[i].CodeOffset <= CodeOffset)
+            break;
+        i += Slots;
+    }
+
+    /* Process the remaining unwind ops, then those of the chained infos */
+    for (Links = 0; ; Links++)
+    {
+        while (i < Info.CountOfCodes)
+        {
+            Slots = KdbpUnwindCodeSlots(Codes[i]);
+            if ((Slots == 0) || ((i + Slots) > Info.CountOfCodes))
+                return FALSE;
+
+            switch (Codes[i].UnwindOp)
+            {
+                case KDBP_UWOP_PUSH_NONVOL:
+                    if (!KdbpReadQword(Regs.R[4], &Value))
+                        return FALSE;
+                    Regs.R[Codes[i].OpInfo] = Value;
+                    Regs.R[4] += sizeof(ULONG64);
+                    break;
+
+                case KDBP_UWOP_ALLOC_LARGE:
+                    if (Codes[i].OpInfo)
+                        Regs.R[4] += Codes[i + 1].FrameOffset | ((ULONG)Codes[i + 2].FrameOffset << 16);
+                    else
+                        Regs.R[4] += (ULONG)Codes[i + 1].FrameOffset * 8;
+                    break;
+
+                case KDBP_UWOP_ALLOC_SMALL:
+                    Regs.R[4] += (Codes[i].OpInfo + 1) * 8;
+                    break;
+
+                case KDBP_UWOP_SET_FPREG:
+                    Regs.R[4] = Regs.R[Info.FrameRegister] - Info.FrameOffset * 16;
+                    break;
+
+                case KDBP_UWOP_SAVE_NONVOL:
+                    if (!KdbpReadQword(FrameBase + (ULONG64)Codes[i + 1].FrameOffset * 8, &Value))
+                        return FALSE;
+                    Regs.R[Codes[i].OpInfo] = Value;
+                    break;
+
+                case KDBP_UWOP_SAVE_NONVOL_FAR:
+                    Offset = Codes[i + 1].FrameOffset | ((ULONG)Codes[i + 2].FrameOffset << 16);
+                    if (!KdbpReadQword(FrameBase + Offset, &Value))
+                        return FALSE;
+                    Regs.R[Codes[i].OpInfo] = Value;
+                    break;
+
+                case KDBP_UWOP_PUSH_MACHFRAME:
+                    /* OpInfo is 1, when an error code was pushed, otherwise 0.
+                       Pop the machine frame (RIP and RSP only) */
+                    Regs.R[4] += Codes[i].OpInfo * sizeof(ULONG64);
+                    if (!KdbpReadQword(Regs.R[4] + 0x00, &Regs.Rip) ||
+                        !KdbpReadQword(Regs.R[4] + 0x18, &Regs.R[4]))
+                    {
+                        return FALSE;
+                    }
+                    *MachFrame = TRUE;
+                    goto Commit;
+
+                default:
+                    /* Epilog and XMM saves (and the unused code) do not
+                       change the registers the walk follows */
+                    break;
+            }
+
+            i += Slots;
+        }
+
+        if (!(Info.Flags & UNW_FLAG_CHAININFO))
+            break;
+
+        /* Chained unwind info: the entry that follows the codes */
+        if (Links >= KDBP_MAX_UNWIND_LINKS)
+            return FALSE;
+        Rva = Chained.UnwindData;
+        if (!KdbpUnwindLoadInfo(ImageBase, ImageSize, Rva, &Info, Codes, &Chained))
+            return FALSE;
+        i = 0;
+    }
+
+    /* Unwind is finished, pop the new Rip from the stack */
+    if (Regs.R[4] != 0)
+    {
+        if (!KdbpReadQword(Regs.R[4], &Value))
+            return FALSE;
+        Regs.Rip = Value;
+        Regs.R[4] += sizeof(ULONG64);
+    }
+
+Commit:
+    for (i = 0; i < 16; i++)
+        ContextRegs[i] = Regs.R[i];
+    Context->Rip = Regs.Rip;
     return TRUE;
 }
 
@@ -1285,18 +1994,34 @@ KdbpCmdBackTrace(
 {
     CONTEXT Context = *KdbCurrentTrapFrame;
     ULONG64 PreviousRsp;
+    ULONG Depth = 0;
 
     /* Walk through the frames */
     KdbpPrint("Frames:\n");
     do
     {
-        BOOLEAN GotNextFrame;
+        BOOLEAN GotNextFrame, MachFrame;
 
         PreviousRsp = Context.Rsp;
 
         /* The bottom of a thread's stack leaves a small value as return address */
         if (Context.Rip < 0x10000)
             break;
+
+        /* A return address that is not an address at all ends the walk with
+           what was printed so far */
+        if (!KdbpIsCanonical(Context.Rip) || !KdbpIsCanonical(Context.Rsp))
+        {
+            KdbpPrint("Stack walk stopped, implausible frame: rip=%p rsp=%p\n",
+                      (PVOID)Context.Rip, (PVOID)Context.Rsp);
+            break;
+        }
+
+        if (Depth++ >= KDBP_MAX_FRAMES)
+        {
+            KdbpPrint("Stack walk stopped after %d frames\n", KDBP_MAX_FRAMES);
+            break;
+        }
 
         KdbpPrint("[%p] ", (PVOID)Context.Rsp);
 
@@ -1308,10 +2033,19 @@ KdbpCmdBackTrace(
         if (KdbOutputAborted)
             break;
 
-        GotNextFrame = GetNextFrame(&Context);
+        GotNextFrame = GetNextFrame(&Context, &MachFrame);
         if (!GotNextFrame)
         {
             KdbpPrint("Couldn't get next frame\n");
+            break;
+        }
+
+        /* A frame is not larger than the stack, and the stack pointer is
+           aligned; an interrupt frame can come from another stack altogether */
+        if (!MachFrame && (Context.Rsp > PreviousRsp) &&
+            (((Context.Rsp - PreviousRsp) > KDBP_MAX_STACK_STEP) || (Context.Rsp & (sizeof(ULONG64) - 1))))
+        {
+            KdbpPrint("Stack walk stopped, implausible stack pointer %p\n", (PVOID)Context.Rsp);
             break;
         }
 
