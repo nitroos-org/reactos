@@ -52,14 +52,18 @@ WshIpv6Enabled(VOID)
     LONG State = WshIpv6State;
     HANDLE TcpFile;
     ULONG Flags;
+    NTSTATUS Status;
 
     if (State != 0)
         return State == 1;
 
     if (!NT_SUCCESS(openTcpFile(&TcpFile, FILE_READ_DATA)))
         return FALSE;
-    Flags = tdiGetIpv6StackState(TcpFile);
+    Status = tdiQueryIpv6StackState(TcpFile, &Flags);
     closeTcpFile(TcpFile);
+    /* a query that failed is not an answer: nothing is kept, the next socket asks again */
+    if (!NT_SUCCESS(Status))
+        return FALSE;
 
     State = ((Flags & TCP_IPV6_STATE_ON) && (Flags & TCP_IPV6_STATE_SOCKETS)) ? 1 : 2;
     InterlockedExchange(&WshIpv6State, State);

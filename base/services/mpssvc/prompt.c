@@ -513,7 +513,7 @@ VOID PromptPoll(VOID)
     {
         WCHAR path[MAX_PATH]; DWORD sess = 0; ULONG need = 0; REQ *rq;
         if (HandledHas(&l[i])) continue;
-        if ((l[i].Addr >> 24) == 127) { HandledAdd(&l[i]); continue; }      /* loopback only: never filtered */
+        if ((l[i].Flags & NITROFW_LISTENER_LOOP) || (l[i].Addr >> 24) == 127) { HandledAdd(&l[i]); continue; }   /* loopback only: never filtered */
         if (!ProcessPath(l[i].ProcessId, path, MAX_PATH) || !ProcessIdToSessionId(l[i].ProcessId, &sess))
         { HandledAdd(&l[i]); continue; }                                     /* gone, or not ours to look at */
         if (IsServiceProcess(l[i].ProcessId, path)) { HandledAdd(&l[i]); continue; }

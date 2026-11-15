@@ -119,23 +119,37 @@ VOID tdiFreeThingSet( PVOID things ) {
     HeapFree( GetProcessHeap(), 0, things );
 }
 
-/* The TCP_IPV6_STATE_ flags of the stack (the header of its IP_IPV6_TABLE_ENTRY_ID answer): 0 while IPv6 is off,
- * and when the stack does not know the request or cannot be asked */
-ULONG tdiGetIpv6StackState( HANDLE tcpFile ) {
+/* The TCP_IPV6_STATE_ flags of the stack (the header of its IP_IPV6_TABLE_ENTRY_ID answer) in *state: 0 while
+ * IPv6 is off. The status says whether the stack answered: when it did not (or the answer is too short to
+ * be one) *state is 0 and the status is a failure, which is not the same as "IPv6 is off" */
+NTSTATUS tdiQueryIpv6StackState( HANDLE tcpFile, PULONG state ) {
     PTCP_IPV6_TABLE_HEADER header = NULL;
     DWORD size = 0;
-    ULONG state = 0;
     NTSTATUS status;
 
+    *state = 0;
     status = tdiGetSetOfThings( tcpFile, INFO_CLASS_PROTOCOL, INFO_TYPE_PROVIDER, IP_IPV6_TABLE_ENTRY_ID,
                                 CL_NL_ENTITY, 0, 0, 1, (PVOID *)&header, &size );
-    if( !NT_SUCCESS(status) || !header )
-        return 0;
+    if( !NT_SUCCESS(status) )
+        return status;
+    if( !header )
+        return STATUS_UNSUCCESSFUL;
 
-    if( size >= sizeof(*header) && (header->Enabled & TCP_IPV6_STATE_ON) )
-        state = header->Enabled;
+    if( size < sizeof(*header) )
+        status = STATUS_UNSUCCESSFUL;
+    else if( header->Enabled & TCP_IPV6_STATE_ON )
+        *state = header->Enabled;
 
     tdiFreeThingSet( header );
+    return status;
+}
+
+/* The same as a plain answer: 0 while IPv6 is off, and when the stack cannot be asked */
+ULONG tdiGetIpv6StackState( HANDLE tcpFile ) {
+    ULONG state;
+
+    if( !NT_SUCCESS(tdiQueryIpv6StackState( tcpFile, &state )) )
+        return 0;
     return state;
 }
 

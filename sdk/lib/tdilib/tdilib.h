@@ -18,3 +18,4 @@ NTSTATUS tdiGetSetOfThings( HANDLE tcpFile, DWORD toiClass, DWORD toiType,
 			    PDWORD numEntries );
 VOID tdiFreeThingSet( PVOID things );
 ULONG tdiGetIpv6StackState( HANDLE tcpFile );
+NTSTATUS tdiQueryIpv6StackState( HANDLE tcpFile, PULONG state );

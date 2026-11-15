@@ -1523,13 +1523,32 @@ static NTSTATUS FwGetListeners(PVOID Buf, ULONG OutLen, PULONG_PTR Information)
         PADDRESS_FILE A = CONTAINING_RECORD(Entry, ADDRESS_FILE, ListEntry);
         UCHAR Flags;
 
-        if (A->PortReleased || A->Sharers == 0 || A->Port == 0 || A->Address.Type != IP_ADDRESS_V4)
+        if (A->PortReleased || A->Sharers == 0 || A->Port == 0)
             continue;
         if (A->Protocol == IPPROTO_TCP && A->Listener != NULL)
             Flags = NITROFW_LISTENER_TCP;
         else if (A->Protocol == IPPROTO_UDP && A->ExplicitPort)
             Flags = 0;
         else
+            continue;
+        /* An IPv6 address file: an IPv6-only socket, or a dual stack one (which also takes the IPv4 connections the
+         * IPv4 default-deny policy judges). A dual stack socket bound to ::ffff:a.b.c.d holds the IPv4 address. */
+        if (A->Address.Type == IP_ADDRESS_V6)
+        {
+            const UCHAR *B = (const UCHAR *)A->Address.Address.IPv6Address;
+            ULONG k;
+            BOOLEAN Loop = TRUE;
+
+            Flags |= NITROFW_LISTENER_V6;
+            if (A->DualStack && AddrIsUnspecified(&A->Address))
+                Flags |= NITROFW_LISTENER_DUAL;
+            for (k = 0; k < 15; k++)
+                if (B[k] != 0)
+                    Loop = FALSE;
+            if (Loop && B[15] == 1)
+                Flags |= NITROFW_LISTENER_LOOP;
+        }
+        else if (A->Address.Type != IP_ADDRESS_V4)
             continue;
         Total++;
         if (Count >= Fit)
@@ -1539,7 +1558,7 @@ static NTSTATUS FwGetListeners(PVOID Buf, ULONG OutLen, PULONG_PTR Information)
         Out[Count].Port = RtlUshortByteSwap(A->Port);
         Out[Count].Protocol = (UCHAR)A->Protocol;
         Out[Count].Flags = Flags;
-        Out[Count].Addr = FwNtohl(A->Address.Address.IPv4Address);
+        Out[Count].Addr = (Flags & NITROFW_LISTENER_V6) ? 0 : FwNtohl(A->Address.Address.IPv4Address);
         Out[Count].CreationTime = A->CreationTime.QuadPart;
         Count++;
     }

@@ -945,6 +945,21 @@ nd6_input(struct pbuf *p, struct netif *inp)
     if (pmtu < IP6_MIN_MTU_LENGTH) {
       pmtu = IP6_MIN_MTU_LENGTH;
     }
+    /* NitroOS: a Packet Too Big never raises the path MTU (RFC 8201 4: a node must not increase its estimate
+       in response to one): at most the current estimate, which starts at the link MTU of the outgoing
+       interface (an entry with no estimate yet is limited by the link MTU of the interface the message came on) */
+    {
+      u32_t limit = destination_cache[dest_idx].pmtu;
+      if (limit == 0) {
+        limit = netif_mtu6(inp);
+      }
+      if (pmtu > limit) {
+        pmtu = limit;
+      }
+      if (pmtu < IP6_MIN_MTU_LENGTH) {
+        pmtu = IP6_MIN_MTU_LENGTH;
+      }
+    }
     destination_cache[dest_idx].pmtu = (u16_t)LWIP_MIN(pmtu, 0xFFFF);
 
     break; /* ICMP6_TYPE_PTB */
