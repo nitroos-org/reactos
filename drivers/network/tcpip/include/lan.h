@@ -82,6 +82,18 @@ typedef struct LAN_ADAPTER {
     /* The worker's own (one runs at a time): */
     UINT McastFilter;                       /* Packet filter it last set; 0: still BindAdapter's PacketFilter */
     ULONG McastMaxList;                     /* OID_802_3_MAXIMUM_LIST_SIZE; 0: not asked yet */
+    BOOLEAN McastVerified;                  /* Unicast was seen after the first list: not checked again */
+    BOOLEAN McastNoList;                    /* No unicast after the list: the adapter gets all multicast, no list */
+    BOOLEAN McastDropped;                   /* The empty list was set after McastNoList */
+    /* The unicast check (LanVerifyStep; one at a time, driven by a timer, never sleeps): */
+    KTIMER VerifyTimer;
+    KDPC VerifyDpc;
+    volatile LONG VerifyBusy;               /* Timer armed or step queued/running; unbinding waits for it */
+    UCHAR VerifyState;                      /* LAN_VERIFY_WAIT / LAN_VERIFY_PROBE */
+    BOOLEAN VerifyAfterDrop;                /* The second check, after the list was dropped (informational) */
+    UINT VerifyBase;                        /* The interface's unicast count when the check started */
+    UINT VerifyPoll;
+    UINT VerifyRound;
 } LAN_ADAPTER, *PLAN_ADAPTER;
 
 /* LAN adapter state constants */

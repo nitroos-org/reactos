@@ -23,6 +23,9 @@ BOOL WINAPI SecureSystemDirectories(VOID);
 
 /* userenv private export (ordinal 301): the control flags of the system hive keys of an older install (as Windows 10 has them) */
 BOOL WINAPI SecureRegistryKeys(VOID);
+
+/* userenv private export (ordinal 302): the IPv6 transport and Winsock catalog entries of an install that predates them */
+BOOL WINAPI UpgradeNetworkCatalog(VOID);
 PWLSESSION WLSession = NULL;
 
 /* FUNCTIONS *****************************************************************/
@@ -466,6 +469,9 @@ WinMain(
     /* Installs from before the well-known folders had the DACLs of Windows get them now (nothing happens once they have) */
     SecureSystemDirectories();
     SecureRegistryKeys();
+
+    /* An install from before the IPv6 transport and catalog entries gets them now when the stack's IPv6 switch is on (once) */
+    UpgradeNetworkCatalog();
 
     /* Update the cached TCP/IP Information in the registry */
     UpdateTcpIpInformation();

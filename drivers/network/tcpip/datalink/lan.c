@@ -292,6 +292,10 @@ static VOID LanReleaseAdapter(
 VOID UnbindAdapter(
     PLAN_ADAPTER Adapter);
 
+static
+VOID LanVerifyCancel(
+    PLAN_ADAPTER Adapter);
+
 /*
  * FUNCTION: Gives up an adapter whose NdisOpenAdapter succeeded but which is not registered after all
  * NOTES:
@@ -317,9 +321,10 @@ VOID DenyOpenAdapter(
     TcpipAcquireSpinLock(&Adapter->ReconfigureLock, &OldIrql);
     Adapter->Unbinding = TRUE;
     TcpipReleaseSpinLock(&Adapter->ReconfigureLock, OldIrql);
+    LanVerifyCancel(Adapter);
     for (;;) {
         TcpipAcquireSpinLock(&Adapter->ReconfigureLock, &OldIrql);
-        Queued = Adapter->ReconfigureQueued || Adapter->McastQueued;
+        Queued = Adapter->ReconfigureQueued || Adapter->McastQueued || Adapter->VerifyBusy;
         TcpipReleaseSpinLock(&Adapter->ReconfigureLock, OldIrql);
         if (!Queued)
             break;
@@ -1794,7 +1799,235 @@ VOID GetName( PUNICODE_STRING RegistryKey,
  * list is too short for it, or that refuses it, takes all multicast frames instead
  * (NDIS_PACKET_TYPE_ALL_MULTICAST); never all frames (promiscuous). Without IPv6 nothing asks, and the
  * adapter's filter and list stay as BindAdapter set them.
+ *
+ * A miniport that takes the list can still break unicast reception: some drivers keep the multicast list in
+ * the receive address registers that also hold the station address, and the list overwrites it (the adapter
+ * then hears only broadcast and multicast; our own e1000 had it). After the first list that was set
+ * successfully, a check runs that a unicast frame for the adapter still arrives (an ARP request for the
+ * interface's IPv4 router elicits one) and, if none does, drops the list: the adapter gets all multicast
+ * instead (the filter bit is the same for every driver) and nothing sets a list on it again.
+ *
+ * The check never sleeps and never holds a system worker thread: it is a state machine driven by a timer.
+ * The timer's DPC queues a short work item (LanVerifyStep) that looks at the unicast count, sends the next
+ * ARP request or arms the timer again, and ends. LANUnregisterAdapter / DenyOpenAdapter cancel the timer and
+ * wait for VerifyBusy. A network with no IPv4 router gives no verdict (the router is waited for 30 s, the check
+ * is started again after the next list); the three ARP rounds of one second each decide otherwise.
  */
+#define LAN_UNICAST_ROUNDS      3       /* ARP requests sent while waiting for a unicast frame */
+#define LAN_UNICAST_POLLS       10      /* 100 ms polls after each */
+#define LAN_UNICAST_WAIT_POLLS  120     /* 250 ms polls for an IPv4 router to appear (30 s: DHCP is slower than IPv6) */
+
+#define LAN_VERIFY_WAIT         1       /* waiting for an IPv4 router of the interface */
+#define LAN_VERIFY_PROBE        2       /* ARP requests are sent, the unicast count is watched */
+
+static VOID LanVerifyStep(PVOID Context);
+static VOID LanMulticastQueue(PLAN_ADAPTER Adapter);
+static BOOLEAN LanMulticastQueueLocked(PLAN_ADAPTER Adapter);
+
+#define LAN_ADDR_ARGS(a) (a)->HWAddress[0], (a)->HWAddress[1], (a)->HWAddress[2], \
+                         (a)->HWAddress[3], (a)->HWAddress[4], (a)->HWAddress[5]
+
+/* 169.254/16 (autoconfiguration when there is no DHCP server) or 127/8; the address is in network order */
+static
+BOOLEAN LanIsLinkLocalOrLoopback(
+    ULONG Address)
+{
+    PUCHAR Bytes = (PUCHAR)&Address;
+
+    return (Bytes[0] == 169 && Bytes[1] == 254) || Bytes[0] == 127;
+}
+
+/* An IPv4 router of the interface, to send an ARP request to (a reply is a unicast frame for us) */
+static
+BOOLEAN LanFindProbeTarget(
+    PIP_INTERFACE IF,
+    PIP_ADDRESS Target)
+{
+    FIB_ENTRY Fibs[4];
+    UINT Count, i;
+    BOOLEAN Found = FALSE;
+
+    Count = CopyFIBs(IF, Fibs, RTL_NUMBER_OF(Fibs));
+    for (i = 0; i < Count; i++)
+    {
+        PNEIGHBOR_CACHE_ENTRY Router = Fibs[i].Router;
+
+        /* The "router" of an on-link route (IPAddInterfaceRoute) is the adapter's own address, of any address
+           (DHCP, static or 169.254/16): nobody answers an ARP request for it, so it is no probe target */
+        if (!Found && Router->Address.Type == IP_ADDRESS_V4 && Router->Address.Address.IPv4Address != 0 &&
+            !AddrIsEqual(&Router->Address, &IF->Unicast) &&
+            !LanIsLinkLocalOrLoopback(Router->Address.Address.IPv4Address))
+        {
+            *Target = Router->Address;
+            Found = TRUE;
+        }
+        NBDereferenceNeighbor(Router);
+    }
+    return Found;
+}
+
+static
+VOID LanVerifyArm(
+    PLAN_ADAPTER Adapter,
+    LONG Milliseconds)
+{
+    LARGE_INTEGER Due;
+
+    Due.QuadPart = -10000LL * Milliseconds;
+    KeSetTimer(&Adapter->VerifyTimer, Due, &Adapter->VerifyDpc);
+}
+
+/* The verdict is in (or there is none): the check is over */
+static
+VOID LanVerifyEnd(
+    PLAN_ADAPTER Adapter)
+{
+    InterlockedExchange(&Adapter->VerifyBusy, 0);
+}
+
+/* The timer's DPC: a short work item does the step (the ARP request and the NDIS requests need PASSIVE_LEVEL) */
+static
+VOID NTAPI LanVerifyDpc(
+    PKDPC Dpc,
+    PVOID Context,
+    PVOID Arg1,
+    PVOID Arg2)
+{
+    PLAN_ADAPTER Adapter = Context;
+
+    if (Adapter->Unbinding || !ChewCreate(LanVerifyStep, Adapter))
+        LanVerifyEnd(Adapter);
+}
+
+static
+VOID LanVerifyStep(
+    PVOID Context)
+{
+    PLAN_ADAPTER Adapter = Context;
+    PIP_INTERFACE IF = Adapter->Context;
+    IP_ADDRESS Target;
+    KIRQL OldIrql;
+    BOOLEAN Queue;
+
+    if (Adapter->Unbinding)
+    {
+        LanVerifyEnd(Adapter);
+        return;
+    }
+
+    if (IF->Stats.InUnicast != Adapter->VerifyBase)
+    {
+        /* Unicast arrives */
+        if (Adapter->VerifyAfterDrop)
+            DbgPrint("TCPIP: adapter %02x-%02x-%02x-%02x-%02x-%02x unicast after dropping the list: received\n",
+                     LAN_ADDR_ARGS(Adapter));
+        else
+        {
+            Adapter->McastVerified = TRUE;
+            DbgPrint("TCPIP: adapter %02x-%02x-%02x-%02x-%02x-%02x receives unicast frames with its multicast list set\n",
+                     LAN_ADDR_ARGS(Adapter));
+        }
+        LanVerifyEnd(Adapter);
+        return;
+    }
+
+    if (Adapter->VerifyState == LAN_VERIFY_WAIT)
+    {
+        /* The router may not be known yet (the IPv4 address comes by DHCP, later than the IPv6 link-local one) */
+        if (!LanFindProbeTarget(IF, &Target))
+        {
+            if (++Adapter->VerifyPoll >= LAN_UNICAST_WAIT_POLLS)
+            {
+                /* No IPv4 router: no verdict, asked again after the next list */
+                LanVerifyEnd(Adapter);
+                return;
+            }
+            LanVerifyArm(Adapter, 250);
+            return;
+        }
+        Adapter->VerifyState = LAN_VERIFY_PROBE;
+        Adapter->VerifyPoll = 0;
+        Adapter->VerifyRound = 0;
+        DbgPrint("TCPIP: adapter %02x-%02x-%02x-%02x-%02x-%02x probes unicast reception with ARP requests to %u.%u.%u.%u\n",
+                 LAN_ADDR_ARGS(Adapter),
+                 ((PUCHAR)&Target.Address.IPv4Address)[0], ((PUCHAR)&Target.Address.IPv4Address)[1],
+                 ((PUCHAR)&Target.Address.IPv4Address)[2], ((PUCHAR)&Target.Address.IPv4Address)[3]);
+        ARPTransmit(&Target, NULL, IF);
+        LanVerifyArm(Adapter, 100);
+        return;
+    }
+
+    /* Probing: LAN_UNICAST_POLLS polls after each of LAN_UNICAST_ROUNDS requests */
+    if (++Adapter->VerifyPoll < LAN_UNICAST_POLLS)
+    {
+        LanVerifyArm(Adapter, 100);
+        return;
+    }
+    Adapter->VerifyPoll = 0;
+    if (++Adapter->VerifyRound < LAN_UNICAST_ROUNDS)
+    {
+        if (LanFindProbeTarget(IF, &Target))
+            ARPTransmit(&Target, NULL, IF);
+        LanVerifyArm(Adapter, 100);
+        return;
+    }
+
+    /* No unicast frame after the requests */
+    if (Adapter->VerifyAfterDrop)
+    {
+        DbgPrint("TCPIP: adapter %02x-%02x-%02x-%02x-%02x-%02x unicast after dropping the list: still none "
+                 "(the miniport cannot be repaired from here)\n", LAN_ADDR_ARGS(Adapter));
+        LanVerifyEnd(Adapter);
+        return;
+    }
+
+    Adapter->McastVerified = TRUE;
+    DbgPrint("TCPIP: adapter %02x-%02x-%02x-%02x-%02x-%02x gets no unicast frame since its multicast list was set "
+             "(the miniport may keep the list over the station address): list dropped, all multicast received instead\n",
+             LAN_ADDR_ARGS(Adapter));
+
+    /* The multicast worker drops the list and sets all multicast (it is the one that talks to the miniport), and
+       sets no list on this adapter again; it starts the second check */
+    TcpipAcquireSpinLock(&Adapter->ReconfigureLock, &OldIrql);
+    Adapter->McastNoList = TRUE;
+    Adapter->McastChanged = TRUE;
+    Queue = LanMulticastQueueLocked(Adapter);
+    TcpipReleaseSpinLock(&Adapter->ReconfigureLock, OldIrql);
+    /* End this check before the worker can start the second one (its LanVerifyStart needs the check free) */
+    LanVerifyEnd(Adapter);
+    if (Queue)
+        LanMulticastQueue(Adapter);
+}
+
+/* Starts the check (one at a time); the first poll comes after the timer */
+static
+VOID LanVerifyStart(
+    PLAN_ADAPTER Adapter,
+    BOOLEAN AfterDrop)
+{
+    PIP_INTERFACE IF = Adapter->Context;
+
+    if (Adapter->Unbinding || InterlockedCompareExchange(&Adapter->VerifyBusy, 1, 0) != 0)
+        return;
+
+    Adapter->VerifyBase = IF->Stats.InUnicast;
+    Adapter->VerifyState = AfterDrop ? LAN_VERIFY_PROBE : LAN_VERIFY_WAIT;
+    Adapter->VerifyPoll = 0;
+    Adapter->VerifyRound = 0;
+    Adapter->VerifyAfterDrop = AfterDrop;
+    LanVerifyArm(Adapter, AfterDrop ? 100 : 250);
+}
+
+/* With Unbinding set: no step starts or is armed again (a timer that was armed meanwhile ends the check when it fires) */
+static
+VOID LanVerifyCancel(
+    PLAN_ADAPTER Adapter)
+{
+    if (KeCancelTimer(&Adapter->VerifyTimer))
+        InterlockedExchange(&Adapter->VerifyBusy, 0);
+}
+
+
 /* Transient answers (see LanMulticastTransient) outside a reset that the worker retries once a second
    (LanMulticastTick) before it treats them as a refusal (all multicast) */
 #define LAN_MCAST_TRANSIENT_MAX 30
@@ -1846,7 +2079,7 @@ BOOLEAN LanApplyMulticast(
     NDIS_STATUS ListStatus = NDIS_STATUS_SUCCESS;
     NDIS_STATUS FilterStatus = NDIS_STATUS_SUCCESS;
     NDIS_STATUS Status;
-    BOOLEAN AllMulticast;
+    BOOLEAN AllMulticast, JustDropped = FALSE;
     UINT Current, Filter;
     ULONG MaxList;
 
@@ -1867,7 +2100,18 @@ BOOLEAN LanApplyMulticast(
         Adapter->McastMaxList = MaxList;
     }
 
-    AllMulticast = (Count > LL_MULTICAST_MAX || Count > Adapter->McastMaxList);
+    AllMulticast = (Count > LL_MULTICAST_MAX || Count > Adapter->McastMaxList || Adapter->McastNoList);
+    if (Adapter->McastNoList && !Adapter->McastDropped)
+    {
+        /* No unicast frame came with the list: an empty list first, then the filter below */
+        UCHAR None[IEEE_802_ADDR_LENGTH] = { 0 };
+
+        Status = NDISCall(Adapter, NdisRequestSetInformation, OID_802_3_MULTICAST_LIST, None, 0);
+        if (!GiveUp && LanMulticastTransient(Status))
+            return TRUE;
+        Adapter->McastDropped = TRUE;
+        JustDropped = TRUE;
+    }
     if (!AllMulticast)
     {
 #if DBG || defined(TCPIP_IPV6_SELFTEST)
@@ -1900,6 +2144,13 @@ BOOLEAN LanApplyMulticast(
              Adapter->HWAddress[3], Adapter->HWAddress[4], Adapter->HWAddress[5],
              Count, Adapter->McastMaxList, ListStatus,
              Adapter->McastFilter ? Adapter->McastFilter : Adapter->PacketFilter, FilterStatus);
+    /* The list went in and the filter takes it: does unicast still arrive? (the first time only; the
+       check runs on a timer and returns at once) */
+    if (!AllMulticast && ListStatus == NDIS_STATUS_SUCCESS && FilterStatus == NDIS_STATUS_SUCCESS &&
+        !Adapter->McastVerified)
+        LanVerifyStart(Adapter, FALSE);
+    else if (JustDropped)
+        LanVerifyStart(Adapter, TRUE);
     return FALSE;
 }
 
@@ -2406,6 +2657,8 @@ NDIS_STATUS LANRegisterAdapter(
     /* Initialize protecting spin lock */
     KeInitializeSpinLock(&IF->Lock);
     KeInitializeSpinLock(&IF->ReconfigureLock);
+    KeInitializeTimer(&IF->VerifyTimer);
+    KeInitializeDpc(&IF->VerifyDpc, LanVerifyDpc, IF);
 
     KeInitializeEvent(&IF->Event, SynchronizationEvent, FALSE);
 
@@ -2539,9 +2792,10 @@ NDIS_STATUS LANUnregisterAdapter(
     TcpipAcquireSpinLock(&Adapter->ReconfigureLock, &OldIrql);
     Adapter->Unbinding = TRUE;
     TcpipReleaseSpinLock(&Adapter->ReconfigureLock, OldIrql);
+    LanVerifyCancel(Adapter);
     for (;;) {
         TcpipAcquireSpinLock(&Adapter->ReconfigureLock, &OldIrql);
-        Queued = Adapter->ReconfigureQueued || Adapter->McastQueued;
+        Queued = Adapter->ReconfigureQueued || Adapter->McastQueued || Adapter->VerifyBusy;
         TcpipReleaseSpinLock(&Adapter->ReconfigureLock, OldIrql);
         if (!Queued)
             break;

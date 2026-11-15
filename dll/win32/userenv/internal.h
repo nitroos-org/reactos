@@ -76,6 +76,10 @@ BOOL
 WINAPI
 SecureRegistryKeys(VOID);
 
+BOOL
+WINAPI
+UpgradeNetworkCatalog(VOID);
+
 VOID
 SecureExistingProfileDirectory(
     _In_ PCWSTR pszPath,
