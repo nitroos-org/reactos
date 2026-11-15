@@ -95,7 +95,9 @@ typedef struct _REGSD_TEMPLATE
 #define REGSD_T_EVENTLOG    8   /* ...\Services\EventLog */
 #define REGSD_T_POLICIES    9   /* HKLM\SOFTWARE\Policies */
 #define REGSD_T_TCPIPPARAMS 10  /* ...\Services\Tcpip\Parameters */
-#define REGSD_T_COUNT       11
+#define REGSD_T_INHPLAIN    11  /* keys Windows 10 holds with their own, not auto-inherited, copy of the hive's DACL (control 0x8004) */
+#define REGSD_T_INHPAI      12  /* keys Windows 10 holds with their own, protected and auto-inherited, copy of it (control 0x9404) */
+#define REGSD_T_COUNT       13
 
 static const REGSD_TEMPLATE RegSdTemplates[REGSD_T_COUNT] =
 {
@@ -174,6 +176,25 @@ static const REGSD_TEMPLATE RegSdTemplates[REGSD_T_COUNT] =
         { REGSD_CI, REGSD_SID_AC, REGSD_KR }, { REGSD_CI, REGSD_SID_CAP1, REGSD_KR },
         { REGSD_CI, REGSD_SID_CAP2, REGSD_KR }, { REGSD_CI, REGSD_SID_CAP3, REGSD_KR },
         { REGSD_CI, REGSD_SID_CAP4, REGSD_KR } } },
+
+    /*
+     * What the keys below a hive root carry in this tree: the root's ACEs as the key inherits them
+     * (the owner's own ACE added for CREATOR OWNER), kept as the key's own. The ACE sets are not Windows'
+     * for every one of these keys (see the lane notes); only the control flags are.
+     * O:BAG:SYD:(A;CI;KR;;;BU)(A;CI;KA;;;BA)(A;CI;KA;;;SY)(A;;KA;;;BA)(A;CIIO;KA;;;CO)(A;CI;KR;;;AC)(A;CI;KR;;;LPAC)
+     */
+    { "inherited copy", REGSD_DACL_PRESENT, REGSD_SID_BA, REGSD_SID_SY, 7,
+      { { REGSD_CI, REGSD_SID_BU, REGSD_KR }, { REGSD_CI, REGSD_SID_BA, REGSD_KA },
+        { REGSD_CI, REGSD_SID_SY, REGSD_KA }, { 0, REGSD_SID_BA, REGSD_KA },
+        { REGSD_CI | REGSD_IO, REGSD_SID_CO, REGSD_KA },
+        { REGSD_CI, REGSD_SID_AC, REGSD_KR }, { REGSD_CI, REGSD_SID_LPAC, REGSD_KR } } },
+
+    /* the same, PAI */
+    { "inherited copy, protected", REGSD_DACL_PRESENT | REGSD_DACL_PROTECTED | REGSD_DACL_AUTOINH, REGSD_SID_BA, REGSD_SID_SY, 7,
+      { { REGSD_CI, REGSD_SID_BU, REGSD_KR }, { REGSD_CI, REGSD_SID_BA, REGSD_KA },
+        { REGSD_CI, REGSD_SID_SY, REGSD_KA }, { 0, REGSD_SID_BA, REGSD_KA },
+        { REGSD_CI | REGSD_IO, REGSD_SID_CO, REGSD_KA },
+        { REGSD_CI, REGSD_SID_AC, REGSD_KR }, { REGSD_CI, REGSD_SID_LPAC, REGSD_KR } } },
 };
 
 /* A SID as authority (last byte of the 48-bit value) and sub-authorities */

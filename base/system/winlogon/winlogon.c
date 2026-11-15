@@ -20,6 +20,9 @@ HINSTANCE hAppInstance;
 
 /* userenv private export (ordinal 300): gives the well-known folders of an older install the DACLs of Windows */
 BOOL WINAPI SecureSystemDirectories(VOID);
+
+/* userenv private export (ordinal 301): the control flags of the system hive keys of an older install (as Windows 10 has them) */
+BOOL WINAPI SecureRegistryKeys(VOID);
 PWLSESSION WLSession = NULL;
 
 /* FUNCTIONS *****************************************************************/
@@ -462,6 +465,7 @@ WinMain(
 
     /* Installs from before the well-known folders had the DACLs of Windows get them now (nothing happens once they have) */
     SecureSystemDirectories();
+    SecureRegistryKeys();
 
     /* Update the cached TCP/IP Information in the registry */
     UpdateTcpIpInformation();

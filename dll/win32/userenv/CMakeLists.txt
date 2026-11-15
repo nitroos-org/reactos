@@ -11,6 +11,7 @@ list(APPEND SOURCE
     profacl.c
     profile.c
     registry.c
+    regsd.c
     setup.c
     sid.c
     userenv.c)

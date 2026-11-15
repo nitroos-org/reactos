@@ -72,6 +72,7 @@ list(APPEND SOURCE
     RegQueryMultipleValues.c
     RegKeyNameCase.c
     RegRenameKey.c
+    RegHiveKeyControl.c
     RegSdTemplates.c
     RegSecurity.c
     RegSecurityQuerySet.c

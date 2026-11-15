@@ -72,6 +72,10 @@ BOOL
 WINAPI
 SecureSystemDirectories(VOID);
 
+BOOL
+WINAPI
+SecureRegistryKeys(VOID);
+
 VOID
 SecureExistingProfileDirectory(
     _In_ PCWSTR pszPath,
