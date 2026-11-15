@@ -268,6 +268,12 @@ PACK_STRUCT_END
 
 #define SIZEOF_RDNSS_OPTION_BASE 8 /* size without addresses */
 
+/** DNS Search List Option (RFC 8106 5.2): type, length (units of 8 bytes), 2 reserved bytes, a 32 bit lifetime, then
+ * domain names in the DNS label encoding, zero padded to the option length. NitroOS: parsed by the stack's
+ * LWIP_HOOK_ND6_DNSSL, lwIP itself has no use for it. */
+#define ND6_OPTION_TYPE_DNSSL (31)
+#define SIZEOF_DNSSL_OPTION_BASE 8 /* size without the names */
+
 #ifdef __cplusplus
 }
 #endif

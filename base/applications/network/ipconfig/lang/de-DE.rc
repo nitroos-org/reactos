@@ -27,6 +27,7 @@ BEGIN
     IDS_EMPTYLINE           "\t                                    %hs\n"
     IDS_MEDIADISCONNECTED   "\tMedienstatus. . . . . . . . . . . : Es besteht keine Verbindung\n"
     IDS_CONNECTIONDNSSUFFIX "\tVerbindungsspezifisches DNS-Suffix: %hs\n"
+    IDS_CONNSEARCHLIST "\tConnection-specific DNS Suffix Search List :\n"
     IDS_DESCRIPTION         "\tBeschreibung. . . . . . . . . . . : "
     IDS_PHYSICALADDRESS     "\tPhysikalische Adresse . . . . . . : %hs\n"
     IDS_DHCPNO              "\tDHCP aktiviert. . . . . . . . . . : Nein\n"

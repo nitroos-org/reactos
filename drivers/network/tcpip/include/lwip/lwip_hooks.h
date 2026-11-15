@@ -20,6 +20,8 @@ int LibTCPReopenTimeWait(struct pbuf *p, struct netif *inp);
 void LibTCPApplyListenRoom(struct tcp_pcb_listen *lpcb);
 /* ip/transport/tcp/rdnss6.c */
 void LibTCPRdnss6Input(struct netif *netif, const ip6_addr_t *addr, u32_t lifetime);
+/* ip/transport/tcp/ra6.c */
+void LibTCPDnssl6Input(struct netif *netif, struct pbuf *p, u16_t offset, u16_t length);
 /* ip/transport/tcp/iid6.c */
 int LibNd6SlaacAddress(struct netif *netif, const ip6_addr_t *prefix, ip6_addr_t *addr);
 int LibNd6DadFailed(struct netif *netif, s8_t index);

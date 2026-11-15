@@ -395,7 +395,7 @@ LibNd6Timer(void)
 }
 
 /* The interface goes (core lock held, before netif_remove): its configured routes go with it, and what was kept for
-   its configured addresses */
+   its configured addresses and what its router advertisements told (ra6.c) */
 VOID
 TCP6RemoveRoutesOfNetif(struct netif *netif)
 {
@@ -403,6 +403,7 @@ TCP6RemoveRoutesOfNetif(struct netif *netif)
     ULONG i;
 
     TCP6RemoveAddressesOfNetif(netif);
+    TCP6RemoveRaOfNetif(netif);
 
     for (i = 0; i < ROUTE6_MAX && Route6Count; i++)
     {

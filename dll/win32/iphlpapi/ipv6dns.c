@@ -177,3 +177,67 @@ ULONG Ipv6CollectGateways(const IPV6_DNS_STATE *State, DWORD IfIndex, PIPV6_ADAP
 
   return Count;
 }
+
+/* The search domains of router advertisements, from an open handle to the stack. FALSE: IPv6 is off, or the stack
+   does not know the query; State is empty then. Release with Ipv6FreeRa */
+BOOL Ipv6GetRaFromFile(HANDLE TcpFile, PIPV6_RA_STATE State)
+{
+  PVOID Blob = NULL;
+  DWORD Size = 0;
+  PTCP_IPV6_RA_HEADER Header;
+  NTSTATUS Status;
+
+  RtlZeroMemory(State, sizeof(*State));
+
+  Status = tdiGetSetOfThings(TcpFile, INFO_CLASS_PROTOCOL, INFO_TYPE_PROVIDER, IP_IPV6_RA_ENTRY_ID,
+                             CL_NL_ENTITY, 0, 0, 1, &Blob, &Size);
+  if (!NT_SUCCESS(Status) || !Blob)
+    return FALSE;
+
+  Header = Blob;
+  if (Size < sizeof(*Header) || !Header->Enabled || Header->Count > 0xFFFF ||
+      (SIZE_T)sizeof(*Header) + (SIZE_T)Header->Count * sizeof(TCP_IPV6_RA_ROW) > Size)
+  {
+    tdiFreeThingSet(Blob);
+    return FALSE;
+  }
+
+  State->Memory = Blob;
+  State->Header = Header;
+  State->Rows = (PTCP_IPV6_RA_ROW)(Header + 1);
+  return TRUE;
+}
+
+VOID Ipv6FreeRa(PIPV6_RA_STATE State)
+{
+  if (State->Memory)
+    tdiFreeThingSet(State->Memory);
+  RtlZeroMemory(State, sizeof(*State));
+}
+
+/* Up to Max search domains of the interface into List (each once, a name the stack could not have made is
+   skipped); returns how many */
+ULONG Ipv6CollectSuffixes(const IPV6_RA_STATE *State, DWORD IfIndex, PIPV6_ADAPTER_SUFFIX List, ULONG Max)
+{
+  ULONG Count = 0, i, k;
+
+  for (i = 0; State && State->Header && i < State->Header->Count && Count < Max; i++)
+  {
+    const TCP_IPV6_RA_ROW *Row = &State->Rows[i];
+    BOOL Seen = FALSE;
+
+    if (Row->IfIndex != IfIndex || Row->Name[0] == '\0' || memchr(Row->Name, '\0', sizeof(Row->Name)) == NULL)
+      continue;
+    for (k = 0; k < Count; k++)
+    {
+      if (!_stricmp(List[k].Name, Row->Name))
+        Seen = TRUE;
+    }
+    if (Seen)
+      continue;
+    strcpy(List[Count].Name, Row->Name);
+    Count++;
+  }
+
+  return Count;
+}

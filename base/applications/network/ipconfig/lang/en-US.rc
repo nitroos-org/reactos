@@ -29,6 +29,7 @@ BEGIN
     IDS_EMPTYLINE            "                                       %hs\n"
     IDS_MEDIADISCONNECTED    "   Media State . . . . . . . . . . . : Media disconnected\n"
     IDS_CONNECTIONDNSSUFFIX  "   Connection-specific DNS Suffix  . : %hs\n"
+    IDS_CONNSEARCHLIST       "   Connection-specific DNS Suffix Search List :\n"
     IDS_DESCRIPTION          "   Description . . . . . . . . . . . : "
     IDS_PHYSICALADDRESS      "   Physical Address. . . . . . . . . : %hs\n"
     IDS_DHCPNO               "   DHCP Enabled. . . . . . . . . . . : No\n"

@@ -270,6 +270,17 @@ TCPQueryIpv6Table(PVOID Out, ULONG OutSize);
 ULONG
 TCPQueryIpv6Dns(PVOID Out, ULONG OutSize);
 
+/* The IP_IPV6_RA_ENTRY_ID answer (ra6.c); same convention. Ra6ParseNames: the names of a DNSSL option body, for the
+   interface with this index (the self test feeds it); TCP6RemoveRaOfNetif: an interface that goes (core lock held) */
+ULONG
+TCPQueryIpv6Ra(PVOID Out, ULONG OutSize);
+
+ULONG
+Ra6ParseNames(ULONG IfIndex, const UCHAR *Data, ULONG Length, ULONG Lifetime);
+
+VOID
+TCP6RemoveRaOfNetif(struct netif *netif);
+
 /* The IP_IPV6_ND_ENTRY_ID and IP_IPV6_STATS_ENTRY_ID answers (nd6info.c); same convention */
 ULONG
 TCPQueryIpv6Nd(PVOID Out, ULONG OutSize);

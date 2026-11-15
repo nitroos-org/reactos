@@ -62,6 +62,8 @@
  * (rdnss6.c); lwIP's own DNS client is not part of this tree */
 #define LWIP_ND6_RDNSS_MAX_DNS_SERVERS  3
 #define LWIP_HOOK_ND6_RDNSS(netif, addr, lifetime) LibTCPRdnss6Input(netif, addr, lifetime)
+/* Router advertisement DNS search lists (RFC 8106 5.2) go to the stack's list too (ra6.c) */
+#define LWIP_HOOK_ND6_DNSSL(netif, p, offset, length) LibTCPDnssl6Input(netif, p, offset, length)
 /* Stable random interface identifiers (RFC 7217, iid6.c): the SLAAC address of a prefix, and a new identifier
  * when DAD finds one in use (NitroOS hooks in nd6.c) */
 #define LWIP_HOOK_ND6_SLAAC_ADDRESS(netif, prefix, addr) LibNd6SlaacAddress(netif, prefix, addr)

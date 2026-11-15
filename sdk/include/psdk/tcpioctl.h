@@ -262,6 +262,27 @@ typedef struct _TCP_IPV6_DNS_ROW
     ULONG Lifetime;
 } TCP_IPV6_DNS_ROW, *PTCP_IPV6_DNS_ROW;
 
+/* Non public TOIID: what router advertisements carry besides DNS servers and routers (ra6.c), for iphlpapi: the DNS
+   search domains of the DNSSL option (RFC 8106). Asked as IP_IPV6_TABLE_ENTRY_ID is (CL_NL_ENTITY, instance 0); the
+   answer is a TCP_IPV6_RA_HEADER, then Count TCP_IPV6_RA_ROW. Enabled is 0 (and Count 0) while the IPv6 switch is off.
+   Sizes as for the other tables: a caller whose buffer is too small gets the size that does and asks again */
+#define IP_IPV6_RA_ENTRY_ID             0x11A
+
+typedef struct _TCP_IPV6_RA_HEADER
+{
+    ULONG Enabled;
+    ULONG Count;
+} TCP_IPV6_RA_HEADER, *PTCP_IPV6_RA_HEADER;
+
+/* A search domain: the name in the dotted form without a final dot (ASCII letters, digits, '-' and '_' only, at most
+   253 characters), Lifetime in seconds left, 0xffffffff infinite */
+typedef struct _TCP_IPV6_RA_ROW
+{
+    ULONG IfIndex;
+    ULONG Lifetime;
+    CHAR Name[256];
+} TCP_IPV6_RA_ROW, *PTCP_IPV6_RA_ROW;
+
 /* Non public TOIID: the neighbour cache and the on-link prefixes of neighbour discovery, for iphlpapi. Asked as
    IP_IPV6_TABLE_ENTRY_ID is (CL_NL_ENTITY, instance 0); the answer is a TCP_IPV6_ND_HEADER, then NeighborCount
    TCP_IPV6_NEIGHBOR_ROW, then PrefixCount TCP_IPV6_PREFIX_ROW. Enabled is 0 (and both counts 0) while the IPv6

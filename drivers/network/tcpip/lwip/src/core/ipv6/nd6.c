@@ -702,10 +702,15 @@ nd6_input(struct pbuf *p, struct netif *inp)
         if (option_len > sizeof(nd6_ra_buffer)) {
           option_type = pbuf_get_at(p, offset);
           /* invalid option length */
-          if (option_type != ND6_OPTION_TYPE_RDNSS) {
+          if (option_type != ND6_OPTION_TYPE_RDNSS
+#ifdef LWIP_HOOK_ND6_DNSSL
+              && option_type != ND6_OPTION_TYPE_DNSSL
+#endif
+              ) {
             goto lenerr_drop_free_return;
           }
-          /* we allow RDNSS option to be longer - we'll just drop some servers */
+          /* we allow RDNSS option to be longer - we'll just drop some servers (a DNSSL option is read from the
+             pbuf by its hook, not from this buffer) */
           option_len = sizeof(nd6_ra_buffer);
         }
         buffer = (u8_t*)&nd6_ra_buffer;
@@ -830,6 +835,15 @@ nd6_input(struct pbuf *p, struct netif *inp)
         break;
       }
 #endif /* LWIP_ND6_RDNSS_MAX_DNS_SERVERS */
+#ifdef LWIP_HOOK_ND6_DNSSL
+      case ND6_OPTION_TYPE_DNSSL:
+        /* NitroOS: the search domains (RFC 8106 5.2) go to the stack's list for the resolver. The option is read from
+           the pbuf (offset and length in bytes of the whole option); the hook checks everything it reads. */
+        if (option_len8 >= 2) {
+          LWIP_HOOK_ND6_DNSSL(inp, p, offset, (u16_t)(option_len8 << 3));
+        }
+        break;
+#endif /* LWIP_HOOK_ND6_DNSSL */
       default:
         /* Unrecognized option, abort. */
         ND6_STATS_INC(nd6.proterr);
