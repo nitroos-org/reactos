@@ -15,9 +15,9 @@
 /* One allocation in a new heap whose only uncommitted range is Pages pages. Returns 0 when all is well,
    else what went wrong: 1 a fault inside the heap, 2 a block that is too short, 3 an invalid heap,
    4 a neighbour damaged, 5 a heap that can grow refused the request, 6 the memory of a request that was
-   refused cannot be used for a smaller block. */
+   refused cannot be used for a smaller block. *Refused tells whether the request was refused. */
 static ULONG
-TryHeap(ULONG HeapFlags, ULONG ReservePages, SIZE_T Size, ULONG *UncommittedPages)
+TryHeap(ULONG HeapFlags, ULONG ReservePages, SIZE_T Size, ULONG *UncommittedPages, BOOLEAN *Refused)
 {
     RTL_HEAP_WALK_ENTRY Entry;
     HANDLE Heap;
@@ -45,9 +45,11 @@ TryHeap(ULONG HeapFlags, ULONG ReservePages, SIZE_T Size, ULONG *UncommittedPage
             memset(Small[i], 0x11 + i, 64);
     }
 
+    *Refused = FALSE;
     _SEH2_TRY
     {
         Block = RtlAllocateHeap(Heap, 0, Size);
+        *Refused = (Block == NULL);
         if (Block)
         {
             if (RtlSizeHeap(Heap, 0, Block) < Size)
@@ -98,18 +100,31 @@ TryHeap(ULONG HeapFlags, ULONG ReservePages, SIZE_T Size, ULONG *UncommittedPage
 START_TEST(RtlHeapMaxBlock)
 {
     /* Requests whose block is within the last 16 entry units below the largest size, and one further down.
-       A free block one unit over the largest size is kept as two blocks, of the largest size less 16 units and of
-       17 units. The first is too short for these requests: a block of exactly the largest size (the first entry
-       here) and one of 15 units less (the fifth) are the ones that damaged the heap. */
+       A free block one unit over the largest size is kept as two blocks. When they were of the largest size less
+       16 units and of 17 units, a block of exactly the largest size (the first entry here) and one of 15 units
+       less (the fifth) damaged the heap; now they are of the largest size less one unit and of two units, and
+       only the first request does not fit. */
     static const SIZE_T Below[] = { 2 * sizeof(PVOID), 4 * sizeof(PVOID), 16 * sizeof(PVOID), 30 * sizeof(PVOID),
                                     32 * sizeof(PVOID), 80 * sizeof(PVOID) };
     /* a heap that grows, one of a fixed size (no other segment to go to) and one without its lock */
     static const ULONG Flags[] = { HEAP_GROWABLE, 0, HEAP_GROWABLE | HEAP_NO_SERIALIZE };
     ULONG Pages, i, f, Result, Uncommitted, ExactSeen;
+    BOOLEAN Refused, RefRefused[136 - 127 + 1];
 
     for (f = 0; f < _countof(Flags); f++)
     {
         ExactSeen = 0;
+
+        /* The request furthest below the largest size, in each heap: a heap of a fixed size that serves it has
+           the room for the others too (on ReactOS only a block of exactly the largest size, the first request,
+           may then be refused: the free block that the commit makes is one unit short of it) */
+        for (Pages = 127; Pages <= 136; Pages++)
+        {
+            RefRefused[Pages - 127] = TRUE;
+            TryHeap(Flags[f], Pages, MAX_BLOCK_BYTES - Below[_countof(Below) - 1], &Uncommitted,
+                    &RefRefused[Pages - 127]);
+        }
+
         for (i = 0; i < _countof(Below); i++)
         {
             /* reserves around the size of the block: with one of them the range left after the heap's own pages
@@ -117,7 +132,8 @@ START_TEST(RtlHeapMaxBlock)
             for (Pages = 127; Pages <= 136; Pages++)
             {
                 Uncommitted = 0;
-                Result = TryHeap(Flags[f], Pages, MAX_BLOCK_BYTES - Below[i], &Uncommitted);
+                Refused = FALSE;
+                Result = TryHeap(Flags[f], Pages, MAX_BLOCK_BYTES - Below[i], &Uncommitted, &Refused);
                 if (Uncommitted == MAX_BLOCK_BYTES / PAGE_SIZE)
                     ExactSeen++;
                 ok(Result == 0, "heap flags 0x%lx, request of 0x7F000 - %lu bytes, reserve %lu pages (uncommitted %lu): %s\n",
@@ -127,6 +143,12 @@ START_TEST(RtlHeapMaxBlock)
                    Result == 3 ? "heap does not validate" :
                    Result == 4 ? "a neighbour block was overwritten" :
                    Result == 5 ? "refused by a heap that can grow" : "the committed memory cannot be used");
+                if (is_reactos() && i != 0 && !RefRefused[Pages - 127])
+                {
+                    ok(!Refused, "heap flags 0x%lx, request of 0x7F000 - %lu bytes, reserve %lu pages (uncommitted %lu): "
+                       "refused, the same heap serves 0x7F000 - %lu bytes\n", Flags[f], (ULONG)Below[i], Pages,
+                       Uncommitted, (ULONG)Below[_countof(Below) - 1]);
+                }
             }
         }
         ok(ExactSeen != 0, "heap flags 0x%lx: no heap had an uncommitted range of exactly 127 pages: the test did not reach its case\n",
