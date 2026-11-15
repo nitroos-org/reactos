@@ -6370,6 +6370,23 @@ static void ipv6_get(const WCHAR *host, int port, BOOL expect_ok, struct ipv6_se
         size = sizeof(status);
         ret = WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, NULL, &status, &size, NULL);
         ok(ret && status == 200, "status %lu\n", status);
+        {
+            /* the connection info of an IPv6 connection: both ends are IPv6 addresses */
+            WINHTTP_CONNECTION_INFO info;
+            const struct sockaddr_in6 *remote = (const struct sockaddr_in6 *)&info.RemoteAddress;
+            const struct sockaddr_in6 *local = (const struct sockaddr_in6 *)&info.LocalAddress;
+
+            size = sizeof(info);
+            memset(&info, 0, sizeof(info));
+            ret = WinHttpQueryOption(req, WINHTTP_OPTION_CONNECTION_INFO, &info, &size);
+            ok(ret, "%s: WINHTTP_OPTION_CONNECTION_INFO failed %lu\n", wine_dbgstr_w(host), GetLastError());
+            if (ret)
+            {
+                ok(remote->sin6_family == AF_INET6 && ntohs(remote->sin6_port) == port,
+                   "remote family %u port %u\n", remote->sin6_family, ntohs(remote->sin6_port));
+                ok(local->sin6_family == AF_INET6, "local family %u\n", local->sin6_family);
+            }
+        }
         ret = WinHttpReadData(req, buf, sizeof(buf) - 1, &size);
         ok(ret && size == 5 && !memcmp(buf, "hello", 5), "got %lu bytes\n", size);
         if (srv && host_header)

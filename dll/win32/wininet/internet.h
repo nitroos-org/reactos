@@ -392,6 +392,7 @@ DWORD HTTP_Connect(appinfo_t*,LPCWSTR,
 BOOL GetAddress(const WCHAR*,INTERNET_PORT,SOCKADDR*,int*,char*);
 int GetAddressList(const WCHAR*,INTERNET_PORT,struct sockaddr_storage*,int*,int);
 void address_to_string(const struct sockaddr_storage*,char*);
+void set_server_addresses(server_t*,const struct sockaddr_storage*,const int*,int);
 
 DWORD get_cookie_header(const WCHAR*,const WCHAR*,WCHAR**);
 DWORD set_cookie(substr_t,substr_t,substr_t,substr_t,DWORD);

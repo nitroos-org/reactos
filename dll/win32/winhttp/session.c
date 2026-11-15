@@ -865,9 +865,10 @@ static BOOL request_query_option( struct object_header *hdr, DWORD option, void 
     case WINHTTP_OPTION_CONNECTION_INFO:
     {
         WINHTTP_CONNECTION_INFO *info = buffer;
-        struct sockaddr local;
+        /* sockaddr_storage: an IPv6 address does not fit in a struct sockaddr (getsockname would fail) */
+        struct sockaddr_storage local;
         socklen_t len = sizeof(local);
-        const struct sockaddr *remote = (const struct sockaddr *)&request->connect->sockaddr;
+        const struct sockaddr *remote;
 
         if (!validate_buffer( buffer, buflen, sizeof(*info) )) return FALSE;
 
@@ -876,8 +877,10 @@ static BOOL request_query_option( struct object_header *hdr, DWORD option, void 
             SetLastError( ERROR_WINHTTP_INCORRECT_HANDLE_STATE );
             return FALSE;
         }
-        if (getsockname( request->netconn->socket, &local, &len )) return FALSE;
-        if (!copy_sockaddr( &local, &info->LocalAddress )) return FALSE;
+        /* the address of this request's connection: the connect object's may be another one of the server's */
+        remote = (const struct sockaddr *)&request->netconn->sockaddr;
+        if (getsockname( request->netconn->socket, (struct sockaddr *)&local, &len )) return FALSE;
+        if (!copy_sockaddr( (const struct sockaddr *)&local, &info->LocalAddress )) return FALSE;
         if (!copy_sockaddr( remote, &info->RemoteAddress )) return FALSE;
         info->cbSize = sizeof(*info);
         return TRUE;

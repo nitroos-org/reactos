@@ -342,6 +342,31 @@ static DWORD connect_netconn_socket(netconn_t *netconn, const struct sockaddr_st
     return ERROR_SUCCESS;
 }
 
+/* A server_t is shared by every handle of the process that talks to that host and port (the connection pool), and
+ * requests connect from several threads at once: its address list is read and written only under this lock (never
+ * held during a connection attempt). */
+static CRITICAL_SECTION server_addrs_cs;
+static CRITICAL_SECTION_DEBUG server_addrs_debug =
+{
+    0, 0, &server_addrs_cs,
+    { &server_addrs_debug.ProcessLocksList, &server_addrs_debug.ProcessLocksList },
+      0, 0, { (DWORD_PTR)(__FILE__ ": server_addrs_cs") }
+};
+static CRITICAL_SECTION server_addrs_cs = { &server_addrs_debug, -1, 0, 0, 0, 0 };
+
+/* Stores the resolved addresses of the server (count >= 1); addr_len is written last, it marks the server resolved. */
+void set_server_addresses(server_t *server, const struct sockaddr_storage *addrs, const int *lens, int count)
+{
+    EnterCriticalSection(&server_addrs_cs);
+    memcpy(server->addrs, addrs, count * sizeof(addrs[0]));
+    memcpy(server->addr_lens, lens, count * sizeof(lens[0]));
+    server->addr_count = count;
+    server->addr = addrs[0];
+    address_to_string(&addrs[0], server->addr_str);
+    server->addr_len = lens[0];
+    LeaveCriticalSection(&server_addrs_cs);
+}
+
 /* Connect to the first address of the server that accepts the connection; the one that worked becomes the
  * address in use (and the first to try next time). */
 static DWORD create_netconn_socket(server_t *server, netconn_t *netconn, DWORD timeout)
@@ -352,6 +377,7 @@ static DWORD create_netconn_socket(server_t *server, netconn_t *netconn, DWORD t
 
     init_winsock();
 
+    EnterCriticalSection(&server_addrs_cs);
     assert(server->addr_len);
     count = server->addr_count;
     if(count < 1 || count > MAX_SERVER_ADDRS) {
@@ -362,24 +388,30 @@ static DWORD create_netconn_socket(server_t *server, netconn_t *netconn, DWORD t
         memcpy(addrs, server->addrs, count * sizeof(addrs[0]));
         memcpy(lens, server->addr_lens, count * sizeof(lens[0]));
     }
+    LeaveCriticalSection(&server_addrs_cs);
 
     for(i = 0; i < count; i++) {
         res = connect_netconn_socket(netconn, &addrs[i], lens[i], timeout);
         if(res == ERROR_SUCCESS) {
-            if(i && server->addr_count == count) {
-                char str[INET6_ADDRSTRLEN];
+            if(i) {
                 int j;
 
                 TRACE("fell back to address %d\n", i);
-                address_to_string(&addrs[i], str);
-                for(j = 0; j < count; j++) {
-                    int k = (j == 0) ? i : (j <= i ? j - 1 : j);
-                    server->addrs[j] = addrs[k];
-                    server->addr_lens[j] = lens[k];
+                EnterCriticalSection(&server_addrs_cs);
+                /* the list may have been replaced meanwhile: move the address only if it is still in it */
+                for(j = 1; j < server->addr_count && j < MAX_SERVER_ADDRS; j++) {
+                    if(server->addr_lens[j] != lens[i] || memcmp(&server->addrs[j], &addrs[i], sizeof(addrs[i])))
+                        continue;
+                    memmove(&server->addrs[1], &server->addrs[0], j * sizeof(server->addrs[0]));
+                    memmove(&server->addr_lens[1], &server->addr_lens[0], j * sizeof(server->addr_lens[0]));
+                    server->addrs[0] = addrs[i];
+                    server->addr_lens[0] = lens[i];
+                    server->addr = addrs[i];
+                    server->addr_len = lens[i];
+                    address_to_string(&addrs[i], server->addr_str);
+                    break;
                 }
-                server->addr = addrs[i];
-                server->addr_len = lens[i];
-                strcpy(server->addr_str, str);
+                LeaveCriticalSection(&server_addrs_cs);
             }
             return ERROR_SUCCESS;
         }

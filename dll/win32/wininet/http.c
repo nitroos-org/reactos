@@ -1839,6 +1839,9 @@ static BOOL HTTP_DealWithProxy(appinfo_t *hIC, http_session_t *session, http_req
 static DWORD HTTP_ResolveName(http_request_t *request)
 {
     server_t *server = request->proxy ? request->proxy : request->server;
+    struct sockaddr_storage addrs[MAX_SERVER_ADDRS];
+    int lens[MAX_SERVER_ADDRS], count;
+    char addr_str[INET6_ADDRSTRLEN];
 
     if(server->addr_len)
         return ERROR_SUCCESS;
@@ -1848,18 +1851,18 @@ static DWORD HTTP_ResolveName(http_request_t *request)
                           server->name,
                           (lstrlenW(server->name)+1) * sizeof(WCHAR));
 
-    server->addr_count = GetAddressList(server->name, server->port, server->addrs, server->addr_lens, MAX_SERVER_ADDRS);
-    if (server->addr_count < 1)
+    count = GetAddressList(server->name, server->port, addrs, lens, MAX_SERVER_ADDRS);
+    if (count < 1)
         return ERROR_INTERNET_NAME_NOT_RESOLVED;
 
-    server->addr = server->addrs[0];
-    address_to_string(&server->addr, server->addr_str);
-    server->addr_len = server->addr_lens[0];
+    /* the server is shared by the whole process: its addresses are written under a lock */
+    set_server_addresses(server, addrs, lens, count);
+    address_to_string(&addrs[0], addr_str);
     INTERNET_SendCallback(&request->hdr, request->hdr.dwContext,
                           INTERNET_STATUS_NAME_RESOLVED,
-                          server->addr_str, strlen(server->addr_str)+1);
+                          addr_str, strlen(addr_str)+1);
 
-    TRACE("resolved %s to %s\n", debugstr_w(server->name), server->addr_str);
+    TRACE("resolved %s to %s\n", debugstr_w(server->name), addr_str);
     return ERROR_SUCCESS;
 }
 

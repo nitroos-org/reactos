@@ -1467,18 +1467,42 @@ static WCHAR *addr_to_str( struct sockaddr_storage *addr )
     return strdupAW( buf );
 }
 
+/* The address list of a connect object is shared by the requests made on it, which may connect from several threads
+ * at once: it is read and written only under this lock (never held during a connection attempt). */
+static CRITICAL_SECTION connect_addrs_cs;
+static CRITICAL_SECTION_DEBUG connect_addrs_debug =
+{
+    0, 0, &connect_addrs_cs,
+    { &connect_addrs_debug.ProcessLocksList, &connect_addrs_debug.ProcessLocksList },
+      0, 0, { (DWORD_PTR)(__FILE__ ": connect_addrs_cs") }
+};
+static CRITICAL_SECTION connect_addrs_cs = { &connect_addrs_debug, -1, 0, 0, 0, 0 };
+
+static void set_connect_addrs( struct connect *connect, const struct addr_list *addrs )
+{
+    EnterCriticalSection( &connect_addrs_cs );
+    connect->addrs = *addrs;
+    connect->sockaddr = addrs->addr[0];
+    LeaveCriticalSection( &connect_addrs_cs );
+}
+
 /* Try the resolved addresses in order until one connects; the one that worked moves to the front so that later
  * connections of the same server start with it. *addressW is updated to the address in use. */
 static DWORD netconn_create_any( struct request *request, struct hostdata *host, struct netconn **ret_conn,
                                  WCHAR **addressW )
 {
     struct connect *connect = request->connect;
-    unsigned int i, count = connect->addrs.count;
+    struct addr_list addrs;
+    unsigned int i, j;
     DWORD ret = ERROR_WINHTTP_CANNOT_CONNECT;
 
-    for (i = 0; i < count; i++)
+    EnterCriticalSection( &connect_addrs_cs );
+    addrs = connect->addrs;
+    LeaveCriticalSection( &connect_addrs_cs );
+
+    for (i = 0; i < addrs.count; i++)
     {
-        struct sockaddr_storage sa = connect->addrs.addr[i];
+        struct sockaddr_storage sa = addrs.addr[i];
 
         if (i)
         {
@@ -1492,12 +1516,18 @@ static DWORD netconn_create_any( struct request *request, struct hostdata *host,
         ret = netconn_create( host, &sa, request->connect_timeout, ret_conn );
         if (!ret)
         {
-            if (i)
+            EnterCriticalSection( &connect_addrs_cs );
+            /* the list may have been replaced meanwhile (another request resolved again): move the address only
+             * if it is still in it */
+            for (j = 1; j < connect->addrs.count; j++)
             {
-                memmove( &connect->addrs.addr[1], &connect->addrs.addr[0], i * sizeof(sa) );
+                if (memcmp( &connect->addrs.addr[j], &sa, sizeof(sa) )) continue;
+                memmove( &connect->addrs.addr[1], &connect->addrs.addr[0], j * sizeof(sa) );
                 connect->addrs.addr[0] = sa;
+                break;
             }
             connect->sockaddr = sa;
+            LeaveCriticalSection( &connect_addrs_cs );
             return ERROR_SUCCESS;
         }
         if (ret == ERROR_OUTOFMEMORY) break;
@@ -1704,26 +1734,30 @@ static DWORD open_connection( struct request *request )
 
     if (!connect->resolved && netconn)
     {
-        connect->sockaddr = netconn->sockaddr;
-        connect->addrs.addr[0] = netconn->sockaddr;
-        connect->addrs.count = 1;
+        struct addr_list addrs;
+
+        addrs.count = 1;
+        addrs.addr[0] = netconn->sockaddr;
+        set_connect_addrs( connect, &addrs );
         connect->resolved = TRUE;
     }
 
     if (!connect->resolved)
     {
+        struct addr_list addrs;
+
         len = lstrlenW( host->hostname ) + 1;
         send_callback( &request->hdr, WINHTTP_CALLBACK_STATUS_RESOLVING_NAME, host->hostname, len );
 
-        if ((ret = netconn_resolve( host->hostname, port, &connect->addrs, request->resolve_timeout )))
+        if ((ret = netconn_resolve( host->hostname, port, &addrs, request->resolve_timeout )))
         {
             release_host( host );
             return ret;
         }
-        connect->sockaddr = connect->addrs.addr[0];
+        set_connect_addrs( connect, &addrs );
         connect->resolved = TRUE;
 
-        if (!(addressW = addr_to_str( &connect->sockaddr )))
+        if (!(addressW = addr_to_str( &addrs.addr[0] )))
         {
             release_host( host );
             return ERROR_OUTOFMEMORY;
@@ -1734,7 +1768,12 @@ static DWORD open_connection( struct request *request )
 
     if (!netconn)
     {
-        if (!addressW && !(addressW = addr_to_str( &connect->sockaddr )))
+        struct sockaddr_storage first;
+
+        EnterCriticalSection( &connect_addrs_cs );
+        first = connect->addrs.addr[0];
+        LeaveCriticalSection( &connect_addrs_cs );
+        if (!addressW && !(addressW = addr_to_str( &first )))
         {
             release_host( host );
             return ERROR_OUTOFMEMORY;
