@@ -1544,7 +1544,18 @@ Retry:
                 FreeSize = FreeSize >> HEAP_ENTRY_SHIFT;
                 FreeEntry = RtlpCoalesceFreeBlocks(Heap, FreeEntry, &FreeSize, FALSE);
                 RtlpInsertFreeBlock(Heap, FreeEntry, FreeSize);
-                return FreeEntry;
+
+                /* The commit takes the guard entry of a range it uses up (and the second one of a double guard),
+                   so a request of 127 pages can come out one entry unit over the largest block. Such a block is
+                   kept as two, the first 16 units below the largest size: too short for a request within those
+                   16 units. The caller takes the entry as it is (a short one made it write a block header into
+                   the free list links of the second block, or leave a free block of one unit), so the two blocks
+                   stay free and the request is served elsewhere. */
+                if (((SIZE_T)FreeEntry->Size << HEAP_ENTRY_SHIFT) >= Size)
+                    return FreeEntry;
+
+                FreeSize = Pages * PAGE_SIZE;
+                continue;
             }
         }
         else if (!Segment)
