@@ -2432,12 +2432,23 @@ CcRosUnparkViews(
     _In_ ULONG Count)
 {
     ULONG i;
+    KIRQL OldIrql;
+
+    if (Count == 0)
+        return;
 
     for (i = 0; i < Count; i++)
     {
-        MmUnmapViewInSystemSpace(BaseAddresses[i]);
+        /* Nobody uses the view any more: its TB flush is batched, and its pages stay held until then */
+        MmUnmapViewInSystemSpaceLazy(BaseAddresses[i]);
         CcRosVacbDecRefCount(Vacbs[i]);
     }
+
+    /* The lazy writer's scan flushes the batch (CcLazyWriteScan) */
+    OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
+    if (!LazyWriter.ScanActive)
+        CcScheduleLazyWriteScan(FALSE);
+    KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
 }
 
 /*

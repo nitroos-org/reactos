@@ -246,6 +246,9 @@ CcLazyWriteScan(VOID)
     LIST_ENTRY ToPost;
     PWORK_QUEUE_ENTRY WorkItem;
 
+    /* Views unmapped lazily wait at most until this scan for their TB flush and the release of their pages */
+    MmFlushLazyMemoryAreas(NULL);
+
     /* Do we have entries to queue after we're done? */
     InitializeListHead(&ToPost);
     OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
@@ -315,12 +318,13 @@ CcLazyWriteScan(VOID)
     else
     {
         OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
-        if (CcTotalDirtyPages != 0 && CcRosHasLazyWritableDataLocked())
+        if ((CcTotalDirtyPages != 0 && CcRosHasLazyWritableDataLocked()) || MmLazyViewsPending())
         {
             /*
              * Dirty data is left (a run writes an eighth of it): scan again in a second, as long as
              * there is any the lazy writer writes.  Closed files leave their data to the lazy writer,
              * which must get it to the disk without waiting for more writes to come and schedule it.
+             * Views unmapped lazily that wait for their TB flush are flushed by the next scan too.
              */
             CcScheduleLazyWriteScan(FALSE);
         }

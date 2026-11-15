@@ -474,6 +474,30 @@ MmFreeMemoryArea(
     return STATUS_SUCCESS;
 }
 
+/*
+ * Removes an area of system space whose PTEs were all cleared and whose TB flush is done (a view unmapped lazily,
+ * MmUnmapViewInSystemSpaceLazy): MmFreeMemoryArea would only flush the TB again.  Kernel address space lock held.
+ */
+VOID
+NTAPI
+MmFreeUnmappedSystemMemoryArea(
+    _In_ PMEMORY_AREA MemoryArea)
+{
+    ASSERT(CONTAINING_RECORD(MmGetKernelAddressSpace(), EPROCESS, Vm)->AddressCreationLock.Owner == KeGetCurrentThread());
+    ASSERT(MemoryArea->Magic == 'erAM');
+    ASSERT(MemoryArea->Type == MEMORY_AREA_SECTION_VIEW);
+    ASSERT(MA_GetStartingAddress(MemoryArea) >= (ULONG_PTR)MmSystemRangeStart);
+
+    MiLockWorkingSet(PsGetCurrentThread(), &MmSystemCacheWs);
+    MiRemoveNode((PMMADDRESS_NODE)&MemoryArea->VadNode, &MiRosKernelVadRoot);
+    MiUnlockWorkingSet(PsGetCurrentThread(), &MmSystemCacheWs);
+
+#if DBG
+    MemoryArea->Magic = 'daeD';
+#endif
+    ExFreePoolWithTag(MemoryArea, TAG_MAREA);
+}
+
 /**
  * @name MmCreateMemoryArea
  *
@@ -561,6 +585,14 @@ MmCreateMemoryArea(PMMSUPPORT AddressSpace,
                                  tmpLength,
                                  Granularity,
                                  (AllocationFlags & MEM_TOP_DOWN) == MEM_TOP_DOWN);
+        /* The ranges of views unmapped lazily are free once their TB flush is done (MmReleaseLazyViewRanges) */
+        if (((*BaseAddress) == 0) && (AddressSpace == MmGetKernelAddressSpace()) && MmReleaseLazyViewRanges())
+        {
+            *BaseAddress = MmFindGap(AddressSpace,
+                                     tmpLength,
+                                     Granularity,
+                                     (AllocationFlags & MEM_TOP_DOWN) == MEM_TOP_DOWN);
+        }
         if ((*BaseAddress) == 0)
         {
             DPRINT("No suitable gap\n");
@@ -610,7 +642,9 @@ MmCreateMemoryArea(PMMSUPPORT AddressSpace,
         /* No need to check ARM3 owned memory areas, the range MUST be free */
         if (MemoryArea->Type != MEMORY_AREA_OWNED_BY_ARM3)
         {
-            if (!MmIsAddressRangeFree(AddressSpace, *BaseAddress, tmpLength))
+            if (!MmIsAddressRangeFree(AddressSpace, *BaseAddress, tmpLength) &&
+                !((AddressSpace == MmGetKernelAddressSpace()) && MmReleaseLazyViewRanges() &&
+                  MmIsAddressRangeFree(AddressSpace, *BaseAddress, tmpLength)))
             {
                 DPRINT("Memory area already occupied\n");
                 if (!(Type & MEMORY_AREA_STATIC)) ExFreePoolWithTag(MemoryArea, TAG_MAREA);

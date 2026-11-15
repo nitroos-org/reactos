@@ -5742,9 +5742,387 @@ NTSTATUS
 NTAPI
 MiRosUnmapViewInSystemSpace(IN PVOID MappedBase)
 {
+    PMEMORY_AREA MemoryArea;
+
     DPRINT("MmUnmapViewInSystemSpace() called\n");
 
+    /* A view unmapped already that waits for its TB flush (MmUnmapViewInSystemSpaceLazy) */
+    MemoryArea = MmLocateMemoryAreaByAddress(MmGetKernelAddressSpace(), MappedBase);
+    if ((MemoryArea != NULL) && MemoryArea->DeleteInProgress)
+        return STATUS_UNSUCCESSFUL;
+
     return MmUnmapViewOfSegment(MmGetKernelAddressSpace(), MappedBase);
+}
+
+/*
+ * Views of data files in system space unmapped without a TB flush of their own (MmUnmapViewInSystemSpaceLazy).
+ *
+ * Invariant: nothing of such a view is released before a KeFlushEntireTb that came after its PTEs were cleared.
+ * Until that flush the view keeps all it held: the share count of each page it mapped (the segment keeps the page:
+ * no purge, trim or segment deletion can free it), its segment reference (and with it the file object), its commit
+ * charge, and its memory area, which stays in the kernel's tree marked DeleteInProgress (the address range is not
+ * reused; a fault in it is an access violation, as for an unmapped range).  One flush of every processor's TB covers
+ * all the views queued before it; only then are their shares, areas and references released.
+ *
+ * The list is changed with the kernel address space lock and the PFN lock both held (the checked-build test in
+ * MmReleasePageMemoryConsumer reads it under the PFN lock).  The flush comes when MI_LAZY_VIEWS_MAX views wait, from
+ * the lazy writer's scan (a few seconds at most), when a purge needs the file's pages (MmPurgeSegment), when the
+ * balancer is short of pages, when the kernel's address space has no room for a new area, and at shutdown.
+ */
+#ifdef _WIN64
+#define MI_LAZY_VIEWS_MAX 64
+#else
+#define MI_LAZY_VIEWS_MAX 8
+#endif
+#define MI_LAZY_VIEW_MAX_PAGES (VACB_MAPPING_GRANULARITY / PAGE_SIZE)
+#define TAG_MM_LAZY_VIEW 'VLmM'
+
+typedef struct _MI_LAZY_VIEW
+{
+    LIST_ENTRY ListEntry;
+    PMEMORY_AREA MemoryArea;        /* NULL once the address range was given back (after the flush) */
+    PMM_SECTION_SEGMENT Segment;    /* referenced until the view is completed (MiCompleteLazyViews) */
+    LONGLONG ViewOffset;
+    SIZE_T CommitCharge;
+    BOOLEAN Flushed;                /* a KeFlushEntireTb came after the PTEs were cleared */
+    ULONG PageCount;                /* 0 once the shares were released */
+    PFN_NUMBER Pages[MI_LAZY_VIEW_MAX_PAGES]; /* the page that was mapped at each page of the view, or 0 */
+} MI_LAZY_VIEW, *PMI_LAZY_VIEW;
+
+static LIST_ENTRY MiLazyViewList = { &MiLazyViewList, &MiLazyViewList };
+static volatile LONG MiLazyViewCount;   /* views on the list */
+static ULONG MiLazyViewsUnflushed;      /* of which queued after the last flush */
+
+BOOLEAN
+NTAPI
+MmLazyViewsPending(VOID)
+{
+    return MiLazyViewCount != 0;
+}
+
+#if DBG
+/* Whether a page is held by a view whose TB flush did not happen yet.  PFN lock held. */
+BOOLEAN
+NTAPI
+MiIsPageOnUnflushedLazyView(
+    _In_ PFN_NUMBER Page)
+{
+    PLIST_ENTRY Entry;
+    ULONG i;
+
+    MI_ASSERT_PFN_LOCK_HELD();
+    for (Entry = MiLazyViewList.Flink; Entry != &MiLazyViewList; Entry = Entry->Flink)
+    {
+        PMI_LAZY_VIEW View = CONTAINING_RECORD(Entry, MI_LAZY_VIEW, ListEntry);
+
+        if (View->Flushed)
+            continue;
+        for (i = 0; i < View->PageCount; i++)
+        {
+            if (View->Pages[i] == Page)
+                return TRUE;
+        }
+    }
+    return FALSE;
+}
+#endif
+
+/* Drops a reference on the segment unless it is the last one (whose release deletes the segment) */
+static
+BOOLEAN
+MiDereferenceSegmentIfNotLast(
+    _In_ PMM_SECTION_SEGMENT Segment)
+{
+    LONG64 Count = *Segment->ReferenceCount;
+
+    while (Count > 1)
+    {
+        LONG64 Old = InterlockedCompareExchange64(Segment->ReferenceCount, Count - 1, Count);
+
+        if (Old == Count)
+            return TRUE;
+        Count = Old;
+    }
+    return FALSE;
+}
+
+/*
+ * If a selected view (those of Segment, all if NULL) was not flushed yet, flushes the TB of every processor once: the
+ * flush covers every view on the list.  Then gives back the address ranges of all flushed views and, with
+ * ReleasePages, releases the page shares of the selected ones.  Their segment references: with Done, the views go
+ * there for the caller to drop them after it released the address space lock; without, a reference that is not the
+ * last is dropped here and the others are left for a later MmFlushLazyMemoryAreas (deleting a segment writes its
+ * dirty pages and closes its file, which the callers without Done, holding file system locks or being the balancer,
+ * must not do).  Kernel address space lock held; with ReleasePages, no segment lock held.
+ */
+static
+VOID
+MiFlushLazyViews(
+    _In_opt_ PMM_SECTION_SEGMENT Segment,
+    _In_ BOOLEAN ReleasePages,
+    _Inout_opt_ PLIST_ENTRY Done)
+{
+    PLIST_ENTRY Entry, Next;
+    BOOLEAN NeedFlush = FALSE;
+    KIRQL OldIrql;
+    ULONG i;
+
+    ASSERT(CONTAINING_RECORD(MmGetKernelAddressSpace(), EPROCESS, Vm)->AddressCreationLock.Owner == KeGetCurrentThread());
+
+    for (Entry = MiLazyViewList.Flink; Entry != &MiLazyViewList; Entry = Entry->Flink)
+    {
+        PMI_LAZY_VIEW View = CONTAINING_RECORD(Entry, MI_LAZY_VIEW, ListEntry);
+
+        if (!View->Flushed && ((Segment == NULL) || (View->Segment == Segment)))
+        {
+            NeedFlush = TRUE;
+            break;
+        }
+    }
+
+    if (NeedFlush)
+    {
+        /* Every processor drops its translations of every queued view before anything of them is released */
+        KeFlushEntireTb(TRUE, TRUE);
+        OldIrql = MiAcquirePfnLock();
+        for (Entry = MiLazyViewList.Flink; Entry != &MiLazyViewList; Entry = Entry->Flink)
+            CONTAINING_RECORD(Entry, MI_LAZY_VIEW, ListEntry)->Flushed = TRUE;
+        MiLazyViewsUnflushed = 0;
+        MiReleasePfnLock(OldIrql);
+    }
+
+    for (Entry = MiLazyViewList.Flink; Entry != &MiLazyViewList; Entry = Next)
+    {
+        PMI_LAZY_VIEW View = CONTAINING_RECORD(Entry, MI_LAZY_VIEW, ListEntry);
+
+        Next = Entry->Flink;
+        if (!View->Flushed)
+            continue;
+
+        if (View->MemoryArea != NULL)
+        {
+            MmFreeUnmappedSystemMemoryArea(View->MemoryArea);
+            View->MemoryArea = NULL;
+        }
+
+        if (!ReleasePages || ((Segment != NULL) && (View->Segment != Segment)))
+            continue;
+
+        if (View->PageCount != 0)
+        {
+            MmLockSectionSegment(View->Segment);
+            for (i = 0; i < View->PageCount; i++)
+            {
+                LARGE_INTEGER Offset;
+                ULONG_PTR SegEntry;
+
+                if (View->Pages[i] == 0)
+                    continue;
+                Offset.QuadPart = View->ViewOffset + ((LONGLONG)i << PAGE_SHIFT);
+                SegEntry = MmGetPageEntrySectionSegment(View->Segment, &Offset);
+                /* The view's share kept the page in the segment */
+                if (IS_SWAP_FROM_SSE(SegEntry) || (PFN_FROM_SSE(SegEntry) != View->Pages[i]))
+                {
+                    DPRINT1("Lazy view page %Ix is not in segment %p at %I64x (entry %Ix)\n",
+                            View->Pages[i], View->Segment, Offset.QuadPart, SegEntry);
+                    ASSERT(FALSE);
+                    continue;
+                }
+                /* We don't dirtify for System Space Maps. We let Cc manage that */
+                MmUnsharePageEntrySectionSegment(NULL, View->Segment, &Offset, FALSE, FALSE, &SegEntry);
+            }
+            MmUnlockSectionSegment(View->Segment);
+            View->PageCount = 0;
+        }
+
+        if ((Done == NULL) && !MiDereferenceSegmentIfNotLast(View->Segment))
+            continue;
+
+        OldIrql = MiAcquirePfnLock();
+        RemoveEntryList(&View->ListEntry);
+        MiReleasePfnLock(OldIrql);
+        InterlockedDecrement(&MiLazyViewCount);
+        if (Done != NULL)
+        {
+            InsertTailList(Done, &View->ListEntry);
+        }
+        else
+        {
+            MiReturnPageableCommit(View->CommitCharge);
+            ExFreePoolWithTag(View, TAG_MM_LAZY_VIEW);
+        }
+    }
+}
+
+/* Drops what the views on Done still hold: their segment references and commit.  No address space lock held. */
+static
+VOID
+MiCompleteLazyViews(
+    _Inout_ PLIST_ENTRY Done)
+{
+    while (!IsListEmpty(Done))
+    {
+        PMI_LAZY_VIEW View = CONTAINING_RECORD(RemoveHeadList(Done), MI_LAZY_VIEW, ListEntry);
+
+        ASSERT(View->Flushed && (View->MemoryArea == NULL) && (View->PageCount == 0));
+        MmDereferenceSegment(View->Segment);
+        MiReturnPageableCommit(View->CommitCharge);
+        ExFreePoolWithTag(View, TAG_MM_LAZY_VIEW);
+    }
+}
+
+/*
+ * Flushes the TB for the views unmapped lazily (those of Segment, all if NULL) and releases all they hold: the lazy
+ * writer's scan and shutdown, or a caller that holds a reference on Segment.  No address space or segment lock held.
+ */
+VOID
+NTAPI
+MmFlushLazyMemoryAreas(
+    _In_opt_ PMM_SECTION_SEGMENT Segment)
+{
+    PMMSUPPORT AddressSpace = MmGetKernelAddressSpace();
+    LIST_ENTRY Done;
+
+    if (MiLazyViewCount == 0)
+        return;
+
+    InitializeListHead(&Done);
+    MmLockAddressSpace(AddressSpace);
+    MiFlushLazyViews(Segment, TRUE, &Done);
+    MmUnlockAddressSpace(AddressSpace);
+    MiCompleteLazyViews(&Done);
+}
+
+/*
+ * Flushes the TB for every view unmapped lazily and releases the shares of their pages (the balancer: the trimmer can
+ * take them; a full batch).  A view whose segment reference is the last keeps it for the next MmFlushLazyMemoryAreas
+ * (the lazy writer's scan).  No address space or segment lock held.
+ */
+VOID
+NTAPI
+MmFlushLazyMemoryAreasForTrim(VOID)
+{
+    PMMSUPPORT AddressSpace = MmGetKernelAddressSpace();
+
+    if (MiLazyViewCount == 0)
+        return;
+
+    MmLockAddressSpace(AddressSpace);
+    MiFlushLazyViews(NULL, TRUE, NULL);
+    MmUnlockAddressSpace(AddressSpace);
+}
+
+/*
+ * MmCreateMemoryArea found no room in the kernel's address space: flushes the TB for the views unmapped lazily and
+ * gives their address ranges back; their pages are released later (the caller may hold a segment lock).  Returns
+ * whether there was a range to give back.  Kernel address space lock held.
+ */
+BOOLEAN
+NTAPI
+MmReleaseLazyViewRanges(VOID)
+{
+    PLIST_ENTRY Entry;
+
+    for (Entry = MiLazyViewList.Flink; Entry != &MiLazyViewList; Entry = Entry->Flink)
+    {
+        if (CONTAINING_RECORD(Entry, MI_LAZY_VIEW, ListEntry)->MemoryArea != NULL)
+        {
+            MiFlushLazyViews(NULL, FALSE, NULL);
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+/*
+ * MmUnmapViewInSystemSpace for a view of a data file (a view Cc maps) that nobody uses any more: its PTEs are cleared
+ * at once, but the TB flush of every processor is left to one KeFlushEntireTb for a batch of such views, and the view
+ * keeps its pages, segment reference and address range until that flush (see MI_LAZY_VIEW).  Other views are unmapped
+ * as MmUnmapViewInSystemSpace does.
+ */
+NTSTATUS
+NTAPI
+MmUnmapViewInSystemSpaceLazy(
+    _In_ PVOID MappedBase)
+{
+    PMMSUPPORT AddressSpace = MmGetKernelAddressSpace();
+    PMEMORY_AREA MemoryArea;
+    PMM_SECTION_SEGMENT Segment;
+    PMI_LAZY_VIEW View = NULL;
+    MI_DEFERRED_RELEASE Deferred;
+    ULONG_PTR Start, PageCount, i;
+    BOOLEAN Flush;
+    KIRQL OldIrql;
+
+    PAGED_CODE();
+
+    MmLockAddressSpace(AddressSpace);
+    MemoryArea = MmLocateMemoryAreaByAddress(AddressSpace, MappedBase);
+    if ((MemoryArea == NULL) || (MemoryArea->Type != MEMORY_AREA_SECTION_VIEW) || MemoryArea->DeleteInProgress)
+    {
+        MmUnlockAddressSpace(AddressSpace);
+        return MmUnmapViewInSystemSpace(MappedBase);
+    }
+
+    Segment = MemoryArea->SectionData.Segment;
+    Start = MA_GetStartingAddress(MemoryArea);
+    PageCount = (MA_GetEndingAddress(MemoryArea) - Start + PAGE_SIZE - 1) >> PAGE_SHIFT;
+    if (((*Segment->Flags) & MM_DATAFILE_SEGMENT) && (PageCount <= MI_LAZY_VIEW_MAX_PAGES))
+        View = ExAllocatePoolWithTag(NonPagedPool, sizeof(*View), TAG_MM_LAZY_VIEW);
+    if (View == NULL)
+    {
+        NTSTATUS Status = MiRosUnmapViewInSystemSpace(MappedBase);
+        MmUnlockAddressSpace(AddressSpace);
+        return Status;
+    }
+
+    /* From now on a fault in the range is an access violation, and the view is not unmapped again */
+    MemoryArea->DeleteInProgress = TRUE;
+
+    View->MemoryArea = MemoryArea;
+    View->Segment = Segment;
+    View->ViewOffset = MemoryArea->SectionData.ViewOffset;
+    View->CommitCharge = MemoryArea->SectionData.CommitCharge;
+    View->Flushed = FALSE;
+    View->PageCount = (ULONG)PageCount;
+
+    MmLockSectionSegment(Segment);
+    while (!IsListEmpty(&MemoryArea->SectionData.RegionListHead))
+    {
+        PMM_REGION Region = CONTAINING_RECORD(RemoveHeadList(&MemoryArea->SectionData.RegionListHead),
+                                              MM_REGION, RegionListEntry);
+        ExFreePoolWithTag(Region, TAG_MM_REGION);
+    }
+    MmUnlockSectionSegment(Segment);
+
+    /* Clear the PTEs and note the pages: their shares are released after the flush (MiFlushLazyViews) */
+    MiInitializeDeferredRelease(&Deferred, TRUE, 0);
+    for (i = 0; i < PageCount; i++)
+    {
+        PFN_NUMBER Page = 0;
+
+        if (!MmDeleteVirtualMappingDeferFlush(NULL, (PVOID)(Start + (i << PAGE_SHIFT)), NULL, &Page, FALSE, &Deferred))
+            Page = 0;
+        View->Pages[i] = Page;
+    }
+    /* System space: only the addresses were deferred, and the batch's KeFlushEntireTb covers them */
+    ASSERT(Deferred.Count == 0);
+    MmInitializeTbFlushList(&Deferred.FlushList, TRUE);
+    MiCleanupDeferredRelease(&Deferred);
+
+    OldIrql = MiAcquirePfnLock();
+    InsertTailList(&MiLazyViewList, &View->ListEntry);
+    Flush = (++MiLazyViewsUnflushed >= MI_LAZY_VIEWS_MAX);
+    MiReleasePfnLock(OldIrql);
+    InterlockedIncrement(&MiLazyViewCount);
+
+    MmUnlockAddressSpace(AddressSpace);
+
+    /* The caller (a file system's cleanup) may hold file system locks: no segment is deleted here */
+    if (Flush)
+        MmFlushLazyMemoryAreasForTrim();
+
+    return STATUS_SUCCESS;
 }
 
 /**********************************************************************
@@ -6433,6 +6811,9 @@ MmPurgeSegment(
         /* Nothing to purge */
         return TRUE;
     }
+
+    /* Views of the file unmapped lazily still hold their pages until their TB flush: flush and release them */
+    MmFlushLazyMemoryAreas(Segment);
 
     MmLockSectionSegment(Segment);
 
