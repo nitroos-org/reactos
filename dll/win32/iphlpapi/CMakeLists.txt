@@ -9,6 +9,7 @@ add_definitions(
 
 list(APPEND SOURCE
     address.c
+    config6.c
     dhcp_reactos.c
     icmp.c
     ifenum_reactos.c

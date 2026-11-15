@@ -20,6 +20,7 @@ list(APPEND SOURCE
     IpNetTable6.c
     IpTables2.c
     Ipv6AddressConfig.c
+    Ipv6ConfigApi.c
     Ipv6Statistics.c
     Ipv6Dns.c
     Ipv6Reporting.c

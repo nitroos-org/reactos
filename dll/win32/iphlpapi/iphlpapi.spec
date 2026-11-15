@@ -29,11 +29,13 @@
 @ stdcall -version=0x600+ ConvertLengthToIpv4Mask(long ptr)
 @ stdcall -stub -version=0x600+ ConvertStringToGuidW(wstr ptr)
 @ stdcall CreateIpForwardEntry(ptr)
+@ stdcall -version=0x600+ CreateIpForwardEntry2(ptr)
 @ stdcall CreateIpNetEntry(ptr)
 @ stdcall -version=0x600+ CreateUnicastIpAddressEntry(ptr)
 @ stdcall CreateProxyArpEntry(long long long)
 @ stdcall DeleteIPAddress(long)
 @ stdcall DeleteIpForwardEntry(ptr)
+@ stdcall -version=0x600+ DeleteIpForwardEntry2(ptr)
 @ stdcall DeleteIpNetEntry(ptr)
 @ stdcall -version=0x600+ DeleteUnicastIpAddressEntry(ptr)
 @ stdcall DeleteProxyArpEntry(long long long)
@@ -74,6 +76,7 @@
 @ stdcall GetIpAddrTable(ptr ptr long)
 @ stub GetIpAddrTableFromStack
 @ stdcall GetIpErrorString(long ptr ptr)
+@ stdcall -version=0x600+ GetIpForwardEntry2(ptr)
 @ stdcall GetIpForwardTable(ptr ptr long)
 @ stdcall -version=0x600+ GetIpForwardTable2(long ptr)
 @ stub GetIpForwardTableFromStack
@@ -127,6 +130,7 @@
 @ stdcall IcmpSendEcho(ptr long ptr long ptr ptr long long)
 @ stdcall -version=0x600+ if_indextoname(long ptr)
 @ stdcall -version=0x600+ if_nametoindex(str)
+@ stdcall -version=0x600+ InitializeIpForwardEntry(ptr)
 @ stdcall -version=0x600+ InitializeIpInterfaceEntry(ptr)
 @ stdcall -version=0x600+ InitializeUnicastIpAddressEntry(ptr)
 @ stub InternalCreateIpForwardEntry
@@ -187,6 +191,7 @@
 @ stdcall SetIfEntry(ptr)
 @ stub SetIfEntryToStack
 @ stdcall SetIpForwardEntry(ptr)
+@ stdcall -version=0x600+ SetIpForwardEntry2(ptr)
 @ stdcall SetIpForwardEntryToStack(ptr)
 @ stub SetIpMultihopRouteEntryToStack
 @ stdcall SetIpNetEntry(ptr)
@@ -198,6 +203,7 @@
 @ stub SetProxyArpEntryToStack
 @ stub SetRouteWithRef
 @ stdcall SetTcpEntry(ptr)
+@ stdcall -version=0x600+ SetUnicastIpAddressEntry(ptr)
 @ stub SetTcpEntryToStack
 @ stdcall UnenableRouter(ptr ptr)
 @ stub do_echo_rep

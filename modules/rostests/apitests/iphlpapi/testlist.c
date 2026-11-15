@@ -20,6 +20,7 @@ extern void func_IfStatistics(void);
 extern void func_IpInterface(void);
 extern void func_IpTables2(void);
 extern void func_Ipv6AddressConfig(void);
+extern void func_Ipv6ConfigApi(void);
 extern void func_Ipv6Statistics(void);
 extern void func_IpNetTable6(void);
 extern void func_IpForwardTable6(void);
@@ -61,6 +62,7 @@ const struct test winetest_testlist[] =
     { "IpInterface",               func_IpInterface },
     { "IpTables2",                  func_IpTables2 },
     { "Ipv6AddressConfig",          func_Ipv6AddressConfig },
+    { "Ipv6ConfigApi",              func_Ipv6ConfigApi },
     { "Ipv6Statistics",             func_Ipv6Statistics },
     { "IpNetTable6",                func_IpNetTable6 },
     { "IpForwardTable6",            func_IpForwardTable6 },
