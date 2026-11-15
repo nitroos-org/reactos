@@ -234,7 +234,8 @@ ULONG Ipv6CollectSuffixes(const IPV6_RA_STATE *State, DWORD IfIndex, PCSTR Adapt
      ones of router advertisements */
   if (AdapterName && AdapterName[0])
   {
-    CHAR KeyName[256], Value[1024];
+    /* the service writes up to 16 names of up to 253 characters, blank separated (dhcp6.c): 4064 bytes */
+    CHAR KeyName[256], Value[4096];
     HKEY Key;
 
     snprintf(KeyName, sizeof(KeyName),
