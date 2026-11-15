@@ -442,6 +442,42 @@ static VOID Note(PCWSTR tag, const FW_RULE *r)
     wcscat(g_RejNames, tag); wcscat(g_RejNames, L": "); wcscat(g_RejNames, name);
 }
 
+/* Every stored key a rule can carry is one of: read by BuildRule, known not to restrict which packets match, or a
+   condition this kernel cannot match. A key that is none of the first two is treated as the third (fail closed, so
+   a key added later or imported from another machine never leaves an Allow rule broader than written).
+     read:        Action Active Dir Protocol Profile ICMP4 ICMP6 LPort LPort2_10 LPort2_20 RPort RPort2_10 RPort2_20
+                  LA4 LA6 RA4 RA42 RA6 RA62 IFType App
+     service:     Svc (the kernel cannot resolve the owning service; handled by the caller)
+     no packet condition: Name Desc EmbedCtxt Edge Defer (edge traversal widens, it never narrows) Platform Platform2
+                  (OS applicability of the rule, not a packet property; semantics VERIFY ON ORACLE)
+     Security with the value NotRequired is the absence of the condition.
+     not matchable: Security (any other value), RMauth, RUAuth, LUAuth, LUOwn, LOwner, AppPkgId, IF, TTK, TTK2_*, LSM
+                  and any key not listed above. */
+static BOOL KeyIsHandled(PCWSTR k)
+{
+    static const PCWSTR handled[] = {
+        L"Action", L"Active", L"Dir", L"Protocol", L"Profile", L"ICMP4", L"ICMP6", L"LPort", L"LPort2_10", L"LPort2_20",
+        L"RPort", L"RPort2_10", L"RPort2_20", L"LA4", L"LA6", L"RA4", L"RA42", L"RA6", L"RA62", L"IFType", L"App", L"Svc",
+        L"Name", L"Desc", L"EmbedCtxt", L"Edge", L"Defer", L"Platform", L"Platform2" };
+    ULONG i;
+    for (i = 0; i < _countof(handled); i++) if (!_wcsicmp(k, handled[i])) return TRUE;
+    return FALSE;
+}
+
+static BOOL HasUnmatchableCondition(const FW_RULE *r, BOOL svcCondition)
+{
+    ULONG i;
+    if (svcCondition) return TRUE;
+    for (i = 0; i < r->Raw.N; i++)
+    {
+        PCWSTR k = r->Raw.T[i].Key, v = r->Raw.T[i].Val;
+        if (KeyIsHandled(k)) continue;
+        if (!_wcsicmp(k, L"Security") && v && !_wcsicmp(v, L"NotRequired")) continue;
+        return TRUE;
+    }
+    return FALSE;
+}
+
 /* ---- one source rule -> one or more kernel rules ----
    The kernel carries at most NITROFW_MAX_LIST entries per list, and the lists of a rule are ANDed with each other
    (OR inside a list). A list longer than LIST_CHUNK is therefore cut into chunks and a kernel rule with the same
@@ -518,7 +554,7 @@ static BR_RESULT BuildRule(BUF *b, const FW_RULE *r, BOOL v6, ULONG *pieces, ULO
     NITROFW_RULE hdr; DIM lp, rp, la4, ra4, la6, ra6, ic;
     ULONG start = (ULONG)b->len, i, ifm = 0, first = *pieces;
     PWSTR nt = NULL; PCWSTR v, svc = NULL, icKey; BR_RESULT res = BR_REJECTED;
-    BOOL block, lScoped, rScoped, do4, do6, ok = TRUE;
+    BOOL block, lScoped, rScoped, do4, do6, ok = TRUE, unmatched;
     ULONG bad = 0, bad4, bad6;
 
     *pPartial = FALSE;
@@ -549,6 +585,12 @@ static BR_RESULT BuildRule(BUF *b, const FW_RULE *r, BOOL v6, ULONG *pieces, ULO
        cast): the rule is rejected on its own */
     if (r->Protocol < 0 || r->Protocol > NITROFW_PROTO_ANY) ok = FALSE;
     if (svc && wcslen(svc) > 32767) ok = FALSE;
+    /* A condition the kernel cannot match (connection security, authorised remote machines/users, local user owner or
+       authorised users, package, specific interfaces, trust tuples, the service: NITROFW_FEATURE_SERVICE_MATCH is
+       clear) is not carried. An Allow rule without it would let in traffic the rule does not allow, so the Allow rule
+       is rejected (reported). A Block rule is pushed without it: it blocks more than written, never less. */
+    unmatched = HasUnmatchableCondition(r, svc != NULL);
+    if (unmatched && !block) ok = FALSE;
     if (r->App && *r->App)
     {
         nt = ToNtPath(r->App);
@@ -600,6 +642,7 @@ fail:
     res = BR_REJECTED;
 done:
     if (res != BR_OK) { b->len = start; *pieces = first; }
+    else if (unmatched && block) Note(L"Block rule pushed without a condition the kernel cannot match (blocks more)", r);
     if (nt) HeapFree(GetProcessHeap(), 0, nt);
     DimFree(&lp); DimFree(&rp); DimFree(&la4); DimFree(&ra4); DimFree(&la6); DimFree(&ra6); DimFree(&ic);
     return res;
