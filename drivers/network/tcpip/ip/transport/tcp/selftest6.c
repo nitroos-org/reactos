@@ -1673,6 +1673,37 @@ StTestStableIds(PIP_INTERFACE Eth)
             break;
     }
 
+    /* What the address table says now: every address DAD found in use is listed as a duplicate (the replaced ones
+       from the list iid6.c keeps, the last one from its slot), the one that took over is not */
+    {
+        ULONG Size = TCPQueryIpv6Table(NULL, 0), Dups = 0, Others = 0, Want_ = TCP6RandomizeIdentifiers ? 4 : 1;
+        PUCHAR Buffer = Size ? ExAllocatePoolWithTag(NonPagedPool, Size + 4096, ST_TAG) : NULL;
+
+        if (Buffer)
+        {
+            PTCP_IPV6_TABLE_HEADER Header;
+            PTCP_IPV6_ADDRESS_ROW Rows;
+            ULONG k;
+
+            Size = TCPQueryIpv6Table(Buffer, Size + 4096);
+            Header = (PTCP_IPV6_TABLE_HEADER)Buffer;
+            Rows = (PTCP_IPV6_ADDRESS_ROW)((PUCHAR)(Header + 1) + Header->InterfaceCount * sizeof(TCP_IPV6_INTERFACE_ROW));
+            for (k = 0; k < Header->AddressCount; k++)
+            {
+                if (!StSame(Rows[k].Address, Prefix.addr, 8))
+                    continue;
+                if (Rows[k].DadState == 2)
+                    Dups++;
+                else
+                    Others++;
+            }
+            ExFreePoolWithTag(Buffer, ST_TAG);
+        }
+        _snprintf(Detail, sizeof(Detail), "%lu duplicate rows (want %lu), %lu other rows of the test prefix", Dups, Want_, Others);
+        StResult(Buffer && Dups == Want_ && Others == 0,
+                 "DAD: addresses found in use are listed as Duplicate in the address table", Detail);
+    }
+
 #if LWIP_IPV6_MLD
     if (En->flags & NETIF_FLAG_MLD6)
         StResult(GroupsOk, "MLD: a DAD conflict after the first probe leaves the old address's solicited-node group "
@@ -1685,6 +1716,7 @@ StTestStableIds(PIP_INTERFACE Eth)
     netif_ip6_addr_set_state(En, Free, IP6_ADDR_INVALID);
     netif_ip6_addr_set_valid_life(En, Free, 0);
     netif_ip6_addr_set_pref_life(En, Free, 0);
+    TCP6DuplicateClear(En);     /* the replaced addresses of the test */
     UNLOCK_TCPIP_CORE();
 }
 

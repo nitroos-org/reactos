@@ -16,8 +16,42 @@ typedef DWORD (WINAPI *PNOTIFY_STABLE)(ADDRESS_FAMILY, PVOID *, STABLE_CALLBACK,
 typedef DWORD (WINAPI *PGET_UNICAST)(ADDRESS_FAMILY, PVOID *);
 typedef VOID (WINAPI *PFREE_MIB_TABLE)(PVOID);
 
+static HANDLE StableEvent;
+static PVOID StableTable;
+
 static VOID WINAPI Callback(PVOID Context, PVOID Table)
 {
+    /* the table of a registration that was pending (an address was tentative) */
+    StableTable = Table;
+    if (StableEvent)
+        SetEvent(StableEvent);
+}
+
+typedef DWORD (WINAPI *PCANCEL)(HANDLE);
+
+/* The call returned ERROR_IO_PENDING (DAD of an address under way): the callback gets a table that has no
+   tentative address; returns that table or NULL */
+static PVOID wait_stable(HANDLE Handle, ADDRESS_FAMILY Family)
+{
+    PCANCEL pCancel = (PCANCEL)GetProcAddress(GetModuleHandleW(L"iphlpapi.dll"), "CancelMibChangeNotify2");
+    PVOID Table = NULL;
+    DWORD Error;
+
+    ok(Handle != NULL && Handle != SENTINEL, "[%u] No handle for a pending table: %p\n", Family, Handle);
+    Error = WaitForSingleObject(StableEvent, 30000);
+    ok(Error == WAIT_OBJECT_0, "[%u] No stable table within 30 s\n", Family);
+    if (Error == WAIT_OBJECT_0 && StableTable)
+    {
+        Table = StableTable;
+        trace("[%u] stable table with %lu rows\n", Family, *(PULONG)Table);
+    }
+    StableTable = NULL;
+    if (pCancel && Handle && Handle != SENTINEL)
+    {
+        Error = pCancel(Handle);
+        ok(Error == NO_ERROR, "[%u] CancelMibChangeNotify2 returned %lu\n", Family, Error);
+    }
+    return Table;
 }
 
 static void test_family(PNOTIFY_STABLE pNotify, PGET_UNICAST pGet, PFREE_MIB_TABLE pFree, ADDRESS_FAMILY Family)
@@ -27,7 +61,20 @@ static void test_family(PNOTIFY_STABLE pNotify, PGET_UNICAST pGet, PFREE_MIB_TAB
     DWORD Error, Count;
     BOOL Loopback = FALSE;
 
+    StableEvent = CreateEventW(NULL, FALSE, FALSE, NULL);
     Error = pNotify(Family, &Table, Callback, (PVOID)(ULONG_PTR)0x77, &Handle);
+    if (Error == ERROR_IO_PENDING)
+    {
+        /* DAD of an IPv6 address was under way: no table yet, the callback gets it once it is stable */
+        Table = wait_stable(Handle, Family);
+        CloseHandle(StableEvent);
+        StableEvent = NULL;
+        if (Table)
+            pFree(Table);
+        return;
+    }
+    CloseHandle(StableEvent);
+    StableEvent = NULL;
     ok(Error == NO_ERROR, "[%u] NotifyStableUnicastIpAddressTable returned %lu\n", Family, Error);
     if (Error != NO_ERROR)
         return;
@@ -91,9 +138,16 @@ START_TEST(NotifyStableUnicastIpAddressTable)
     Table = SENTINEL;
     Handle = SENTINEL;
     Error = pNotify(AF_UNSPEC, &Table, NULL, NULL, &Handle);
-    ok(Error == NO_ERROR, "No callback: %lu\n", Error);
+    ok(Error == NO_ERROR || Error == ERROR_IO_PENDING, "No callback: %lu\n", Error);
     if (Error == NO_ERROR && Table && Table != SENTINEL)
         pFree(Table);
+    else if (Error == ERROR_IO_PENDING && Handle && Handle != SENTINEL)
+    {
+        PCANCEL pCancel = (PCANCEL)GetProcAddress(hIphlpapi, "CancelMibChangeNotify2");
+
+        if (pCancel)
+            pCancel(Handle);
+    }
 
     test_family(pNotify, pGet, pFree, AF_UNSPEC);
     test_family(pNotify, pGet, pFree, AF_INET);

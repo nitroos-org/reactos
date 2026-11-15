@@ -251,7 +251,10 @@ static
 void
 TCP6NetifEvent(struct netif *netif, netif_nsc_reason_t Reason, const netif_ext_callback_args_t *Args)
 {
-    UNREFERENCED_PARAMETER(Args);
+    /* A link that goes down resets the interface: the addresses DAD found in use are forgotten (DAD runs again
+       for the addresses it has) */
+    if ((Reason & LWIP_NSC_LINK_CHANGED) && !Args->link_changed.state && TCP6DuplicateClear(netif))
+        AddrChangeNotify();
 
     if (Reason & (LWIP_NSC_IPV6_SET | LWIP_NSC_IPV6_ADDR_STATE_CHANGED))
     {
@@ -561,7 +564,7 @@ LibTCPListenerInput6(void)
 /* The answer is copied through a pool block that InfoTdiQueryGetIpv6Table (info.c) caps at 64 KB: the largest
    answer has to stay below the cap, or the caller would get a size that is no answer */
 C_ASSERT(sizeof(TCP_IPV6_TABLE_HEADER) + TCP6_MAX_TABLE_INTERFACES * sizeof(TCP_IPV6_INTERFACE_ROW) +
-         TCP6_MAX_TABLE_INTERFACES * LWIP_IPV6_NUM_ADDRESSES * sizeof(TCP_IPV6_ADDRESS_ROW) < 0x10000);
+         (TCP6_MAX_TABLE_INTERFACES * LWIP_IPV6_NUM_ADDRESSES + TCP6_DUP_MAX) * sizeof(TCP_IPV6_ADDRESS_ROW) < 0x10000);
 
 /* The IPv6 state of every interface as TCP_IPV6_TABLE_HEADER, interface rows, address rows (the
  * IP_IPV6_TABLE_ENTRY_ID query). Returns the size of the whole answer; what fits in Out (OutSize bytes) is
@@ -603,7 +606,7 @@ TCPQueryIpv6Table(PVOID Out, ULONG OutSize)
     } EndFor(CurrentIF);
     TcpipReleaseSpinLock(&InterfaceListLock, OldIrql);
 
-    Max = sizeof(*Header) + Count * sizeof(*IfRows) + Count * LWIP_IPV6_NUM_ADDRESSES * sizeof(*AddrRows);
+    Max = sizeof(*Header) + Count * sizeof(*IfRows) + (Count * LWIP_IPV6_NUM_ADDRESSES + TCP6_DUP_MAX) * sizeof(*AddrRows);
     Buffer = ExAllocatePoolWithTag(NonPagedPool, Max, TDI_ENTITY_TAG);
     if (!Buffer)
     {
@@ -697,6 +700,27 @@ TCPQueryIpv6Table(PVOID Out, ULONG OutSize)
                    ran out (a router advertisement, or the timer), not "infinite" (lwIP's 0 for a static address) */
                 Row->PreferredLifetime = netif_ip6_addr_pref_life(netif, a);
             }
+        }
+
+        /* the addresses DAD found in use that got a new identifier (iid6.c): no slot holds them any more, they are
+           listed as what they are, duplicates (the cap of the answer counts them) */
+        for (a = 0; a < TCP6_DUP_MAX; a++)
+        {
+            ip6_addr_t Duplicate;
+            ULONG Valid, Preferred;
+            PTCP_IPV6_ADDRESS_ROW Row;
+
+            if (!TCP6DuplicateGet(netif, a, &Duplicate, &Valid, &Preferred))
+                break;
+            Row = &AddrRows[AddrCount++];
+            Row->IfIndex = IF->Index;
+            RtlCopyMemory(Row->Address, Duplicate.addr, 16);
+            Row->DadState = TCP6_DAD_DUPLICATE;
+            Row->PrefixLength = 64;
+            Row->PrefixOrigin = ip6_addr_islinklocal(&Duplicate) ? TCP6_PREFIX_WELLKNOWN : TCP6_PREFIX_RA;
+            Row->SuffixOrigin = TCP6_SUFFIX_LINKLAYER;
+            Row->ValidLifetime = Valid;
+            Row->PreferredLifetime = Preferred;
         }
     }
     UNLOCK_TCPIP_CORE();

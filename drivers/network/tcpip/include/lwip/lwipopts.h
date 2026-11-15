@@ -104,6 +104,9 @@
  * ones (lwIP's default is 3). A slot costs about 30 bytes per interface (address with zone, state, two lifetimes);
  * the loops over the slots are per datagram for the source and route choice (ip6.c), per interface */
 #define LWIP_IPV6_NUM_ADDRESSES         8
+/* Duplicate address detection probes per address: 1, as Windows 10 (Get-NetIPInterface DadTransmits of an Ethernet
+ * interface on the oracle; lwIP's default is the same, stated here because the interfaces report it) */
+#define LWIP_IPV6_DUP_DETECT_ATTEMPTS   1
 /* Interface events: with IPv6 on, address changes set the adapter's multicast list (if6.c). Nothing listens
  * with it off */
 #define LWIP_NETIF_EXT_STATUS_CALLBACK  1

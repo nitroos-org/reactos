@@ -471,6 +471,10 @@ static void fill_ip_interface(const NETIO_IF *If, ADDRESS_FAMILY Family, const T
     Out->UseNeighborUnreachabilityDetection = TRUE;
     Out->SupportsNeighborDiscovery = TRUE;
     Out->SupportsRouterDiscovery = TRUE;
+    /* IPv6: 1, what Windows 10 22H2 reports for an Ethernet interface (Get-NetIPInterface, netsh "DAD Transmits"; 0 on
+       the loopback interface, DadRetransmitTime 1000 ms). The driver sends that many probes for every address
+       (LWIP_IPV6_DUP_DETECT_ATTEMPTS, one value for all interfaces). TODO: a per-interface value settable through
+       netsh / Set-NetIPInterface, and the same in the driver */
     Out->DadTransmits = (Family == AF_INET) ? 3 : 1;
   }
 }

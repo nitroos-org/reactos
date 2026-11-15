@@ -232,6 +232,107 @@ LibNd6SlaacAddress(struct netif *netif, const ip6_addr_t *Prefix, ip6_addr_t *Ad
     return Iid6MakeFrom(netif, Prefix, 0, Address) ? 1 : 0;
 }
 
+/* ---- duplicated addresses that were replaced ----
+ *
+ * A tentative address of ours that DAD found in use gets the next identifier in its slot (below). The
+ * address it had is still what DAD found: a duplicate, unusable, and the unicast address table, GetAdaptersAddresses
+ * and ipconfig say so (Windows lists such an address as Duplicate) next to the new one. lwIP has no slot for it any
+ * more, so the stack keeps the few it has replaced here, over all interfaces; the oldest gives way. They go
+ * with the interface, with a link that goes down (an interface reset: DAD runs again for what is configured),
+ * or when the address is deleted. Core lock held for everything here.
+ */
+typedef struct _DUP6_ENTRY
+{
+    struct netif *Netif;        /* NULL: a free entry */
+    ip6_addr_t Address;
+    ULONG ValidLifetime;
+    ULONG PreferredLifetime;
+} DUP6_ENTRY;
+
+static DUP6_ENTRY Dup6Table[TCP6_DUP_MAX];
+static ULONG Dup6Next;
+
+static
+VOID
+Dup6Remember(struct netif *netif, s8_t Index)
+{
+    const ip6_addr_t *Address = netif_ip6_addr(netif, Index);
+    u32_t Valid = netif_ip6_addr_valid_life(netif, Index), Preferred = netif_ip6_addr_pref_life(netif, Index);
+    DUP6_ENTRY *Entry = NULL;
+    ULONG i;
+
+    for (i = 0; i < TCP6_DUP_MAX; i++)
+    {
+        if (Dup6Table[i].Netif == netif && ip6_addr_zoneless_eq(&Dup6Table[i].Address, Address))
+            return;
+        if (!Entry && !Dup6Table[i].Netif)
+            Entry = &Dup6Table[i];
+    }
+    if (!Entry)
+        Entry = &Dup6Table[Dup6Next++ % TCP6_DUP_MAX];
+    Entry->Netif = netif;
+    ip6_addr_copy(Entry->Address, *Address);
+    if (ip6_addr_life_isstatic(Valid))
+        Entry->ValidLifetime = Entry->PreferredLifetime = 0xFFFFFFFF;
+    else
+    {
+        Entry->ValidLifetime = Valid;
+        Entry->PreferredLifetime = Preferred;
+    }
+}
+
+/* The Number-th (from 0) duplicated address replaced on netif; FALSE when there is none */
+BOOLEAN
+TCP6DuplicateGet(struct netif *netif, ULONG Number, ip6_addr_t *Address, PULONG Valid, PULONG Preferred)
+{
+    ULONG i;
+
+    for (i = 0; i < TCP6_DUP_MAX; i++)
+    {
+        if (Dup6Table[i].Netif != netif)
+            continue;
+        if (Number--)
+            continue;
+        ip6_addr_copy(*Address, Dup6Table[i].Address);
+        *Valid = Dup6Table[i].ValidLifetime;
+        *Preferred = Dup6Table[i].PreferredLifetime;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+/* All of netif's (its link went down, or it goes); how many there were */
+ULONG
+TCP6DuplicateClear(struct netif *netif)
+{
+    ULONG i, Count = 0;
+
+    for (i = 0; i < TCP6_DUP_MAX; i++)
+    {
+        if (Dup6Table[i].Netif != netif)
+            continue;
+        RtlZeroMemory(&Dup6Table[i], sizeof(Dup6Table[i]));
+        Count++;
+    }
+    return Count;
+}
+
+/* One address of netif (it is deleted by request); FALSE when it is not one of them */
+BOOLEAN
+TCP6DuplicateRemove(struct netif *netif, const ip6_addr_t *Address)
+{
+    ULONG i;
+
+    for (i = 0; i < TCP6_DUP_MAX; i++)
+    {
+        if (Dup6Table[i].Netif != netif || !ip6_addr_zoneless_eq(&Dup6Table[i].Address, Address))
+            continue;
+        RtlZeroMemory(&Dup6Table[i], sizeof(Dup6Table[i]));
+        return TRUE;
+    }
+    return FALSE;
+}
+
 /* LWIP_HOOK_ND6_DAD_FAILED (nd6.c, core lock held): DAD found the address in slot Index in use. A tentative
    address of ours gets the identifier of the next DAD counter and starts DAD again; 1 = done, lwIP leaves the
    slot alone. 0 = lwIP marks it duplicated (not one of ours, no counter left, or the address was already in
@@ -270,6 +371,7 @@ LibNd6DadFailed(struct netif *netif, s8_t Index)
     /* Restart DAD: from the next count on. The state goes first: with MLD, lwIP leaves the solicited-node group
        of the address the slot holds when the state drops to TENTATIVE, so the slot must still hold the old address
        then (the group of the new one is joined by the first probe) */
+    Dup6Remember(netif, Index);
     netif_ip6_addr_set_state(netif, Index, IP6_ADDR_TENTATIVE);
     netif_ip6_addr_set(netif, Index, &Candidate);
     return 1;

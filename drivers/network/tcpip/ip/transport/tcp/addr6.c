@@ -122,6 +122,7 @@ TCP6RemoveAddressesOfNetif(struct netif *netif)
 {
     ULONG i;
 
+    TCP6DuplicateClear(netif);
     for (i = 0; i < ADDR6_MAX && Addr6Count; i++)
     {
         if (Addr6Table[i].Netif == netif)
@@ -293,7 +294,16 @@ Addr6ConfigureLocked(struct netif *netif, const TCP_IPV6_ADDRESS_REQUEST *Reques
 
         case TCP_IPV6_CONFIG_DELETE:
             if (Slot < 0)
+            {
+                /* an address DAD found in use that was replaced by a new identifier (iid6.c) is still listed as a
+                   duplicate: deleting it takes it off the list */
+                if (TCP6DuplicateRemove(netif, &Address))
+                {
+                    AddrChangeNotify();
+                    return STATUS_SUCCESS;
+                }
                 return STATUS_NOT_FOUND;
+            }
             if (Entry)
                 Addr6Free(Entry);
             netif_ip6_addr_set_valid_life(netif, Slot, 0);

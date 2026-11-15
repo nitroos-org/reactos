@@ -25,7 +25,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(iphlpapi);
  * callback returns.
  */
 
-enum { KIND_INTERFACE, KIND_UNICAST, KIND_ROUTE };
+enum { KIND_INTERFACE, KIND_UNICAST, KIND_ROUTE, KIND_STABLE };
 
 typedef VOID (WINAPI *MIB_CALLBACK)(PVOID Context, PVOID Row, MIB_NOTIFICATION_TYPE Type);
 
@@ -435,19 +435,129 @@ DWORD WINAPI NotifyUnicastIpAddressChange(ADDRESS_FAMILY Family, PVOID Callback,
   return register_notify(KIND_UNICAST, Family, Callback, CallerContext, InitialNotification, NotificationHandle);
 }
 
+typedef VOID (WINAPI *STABLE_CALLBACK)(PVOID Context, PMIB_UNICASTIPADDRESS_TABLE Table);
+
+/* An address whose duplicate address detection is under way. The probes are only sent while the interface has its
+   link: an address of an interface without one (cable out) stays tentative until the link comes, so it does not
+   make the table unstable, or a caller would wait for as long as the cable is out */
+static BOOL has_tentative(const MIB_UNICASTIPADDRESS_TABLE *Table)
+{
+  ULONG i;
+
+  for (i = 0; i < Table->NumEntries; i++)
+  {
+    MIB_IPINTERFACE_ROW Interface;
+
+    if (Table->Table[i].DadState != IpDadStateTentative)
+      continue;
+    memset(&Interface, 0, sizeof(Interface));
+    Interface.Family = Table->Table[i].Address.si_family;
+    Interface.InterfaceLuid = Table->Table[i].InterfaceLuid;
+    if (GetIpInterfaceEntry(&Interface) == NO_ERROR && !Interface.Connected)
+      continue;
+    return TRUE;
+  }
+  return FALSE;
+}
+
 /*
- * Returns the unicast address table once it is stable, or ERROR_IO_PENDING and the table to the callback
- * when it is not (an address still being configured). Addresses here have no tentative state: the table is
- * always stable, so it is returned at once, with no notification handle and no callback.
+ * The worker of a registration for a table that was not stable: looks again every quarter of a second (an address
+ * leaves the tentative state after the probes of duplicate address detection, about a second), gives the first stable
+ * table to the callback and is done. The registration stays until CancelMibChangeNotify2, as with the others.
+ */
+static void stable_worker_main(MIB_NOTIFY *Notify)
+{
+  BOOL Detached;
+
+  while (WaitForSingleObject(Notify->Stop, 250) == WAIT_TIMEOUT)
+  {
+    PMIB_UNICASTIPADDRESS_TABLE Table;
+
+    if (GetUnicastIpAddressTable(Notify->Family, &Table) != NO_ERROR)
+      continue;
+    if (has_tentative(Table))
+    {
+      FreeMibTable(Table);
+      continue;
+    }
+    if (!is_stopping(Notify) && Notify->Callback != no_callback)
+      ((STABLE_CALLBACK)Notify->Callback)(Notify->Context, Table);
+    else
+      FreeMibTable(Table);
+    break;
+  }
+
+  EnterCriticalSection(&RegistrationLock);
+  Detached = Notify->Detached;
+  LeaveCriticalSection(&RegistrationLock);
+  if (Detached)
+    free_notify(Notify);
+}
+
+static DWORD WINAPI stable_worker(PVOID Parameter)
+{
+  HMODULE Module = ((MIB_NOTIFY *)Parameter)->Module;
+
+  stable_worker_main(Parameter);
+  FreeLibraryAndExitThread(Module, 0);
+  return 0;
+}
+
+/*
+ * Returns the unicast address table at once when it is stable (no address is tentative: duplicate address
+ * detection of an IPv6 address is still under way), with no notification handle. Otherwise ERROR_IO_PENDING, no
+ * table, and a handle: the callback gets the table, once it is stable (the caller frees it with FreeMibTable),
+ * and the handle is cancelled with CancelMibChangeNotify2.
  */
 DWORD WINAPI NotifyStableUnicastIpAddressTable(ADDRESS_FAMILY Family, PMIB_UNICASTIPADDRESS_TABLE *Table,
                                                PVOID Callback, PVOID CallerContext, HANDLE *NotificationHandle)
 {
+  MIB_NOTIFY *Notify;
+  DWORD Result;
+
   if (!Table || !NotificationHandle)
     return ERROR_INVALID_PARAMETER;
 
   *NotificationHandle = NULL;
-  return GetUnicastIpAddressTable(Family, Table);
+  Result = GetUnicastIpAddressTable(Family, Table);
+  if (Result != NO_ERROR || !has_tentative(*Table))
+    return Result;
+
+  /* not stable */
+  FreeMibTable(*Table);
+  *Table = NULL;
+
+  Notify = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*Notify));
+  if (!Notify)
+    return ERROR_NOT_ENOUGH_MEMORY;
+  Notify->Kind = KIND_STABLE;
+  Notify->Callback = Callback ? Callback : no_callback;
+  Notify->Context = CallerContext;
+  Notify->Family = Family;
+  Notify->Stop = CreateEventW(NULL, TRUE, FALSE, NULL);
+  if (!Notify->Stop || !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (LPCWSTR)stable_worker, &Notify->Module))
+  {
+    Result = Notify->Stop ? GetLastError() : ERROR_NOT_ENOUGH_MEMORY;
+    free_notify(Notify);
+    return Result;
+  }
+  Notify->Thread = CreateThread(NULL, 0, stable_worker, Notify, CREATE_SUSPENDED, &Notify->ThreadId);
+  if (!Notify->Thread)
+  {
+    Result = GetLastError();
+    FreeLibrary(Notify->Module);
+    free_notify(Notify);
+    return Result;
+  }
+
+  EnterCriticalSection(&RegistrationLock);
+  Notify->Next = NotifyHead;
+  NotifyHead = Notify;
+  LeaveCriticalSection(&RegistrationLock);
+
+  ResumeThread(Notify->Thread);
+  *NotificationHandle = Notify;
+  return ERROR_IO_PENDING;
 }
 
 DWORD WINAPI NotifyRouteChange2(ADDRESS_FAMILY Family, PVOID Callback, PVOID CallerContext,
