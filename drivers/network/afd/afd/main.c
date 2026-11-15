@@ -735,6 +735,18 @@ AfdCloseSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     SocketAcquireStateLock(FCB);
     WaitForInFlightRequests(FCB, InFlightRequest);
     FreeListenConnectionInfo(FCB);
+
+    /* Datagrams that arrived and were never read. A socket whose queue is full has no
+       receive in flight, so nothing else would free them */
+    while (!IsListEmpty(&FCB->DatagramList))
+    {
+        PAFD_STORED_DATAGRAM DatagramRecv =
+            CONTAINING_RECORD(RemoveHeadList(&FCB->DatagramList), AFD_STORED_DATAGRAM, ListEntry);
+
+        if (DatagramRecv->Address)
+            ExFreePoolWithTag(DatagramRecv->Address, TAG_AFD_TRANSPORT_ADDRESS);
+        ExFreePoolWithTag(DatagramRecv, TAG_AFD_STORED_DATAGRAM);
+    }
     SocketStateUnlock(FCB);
 
     if (FCB->RelistenWorkItem)
