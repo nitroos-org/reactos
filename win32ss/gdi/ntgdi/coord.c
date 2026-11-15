@@ -169,6 +169,12 @@ DC_vGetPageToDevice(PDC pdc, MATRIX *pmx)
     else
         FLOATOBJ_SetLong(&pmx->efM22, 1);
 
+    /* An isotropic fix-up that left no viewport width (the window is far wider than tall in viewport units) maps
+       the y axis to 0 too on Windows, although GetViewportExtEx still reports the height; a zero height keeps the
+       x scale (oracle probe, LPtoDP apitest MM_ISOTROPIC PRESET5) */
+    if (pdcattr->iMapMode == MM_ISOTROPIC && pszlViewPortExt->cx == 0)
+        FLOATOBJ_SetLong(&pmx->efM22, 0);
+
     /* Calculate x offset */
     FLOATOBJ_SetLong(&pmx->efDx, -pdcattr->ptlWindowOrg.x);
     FLOATOBJ_TruncMul(&pmx->efDx, &pmx->efM11);
