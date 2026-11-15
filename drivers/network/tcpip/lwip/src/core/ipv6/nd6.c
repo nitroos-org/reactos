@@ -161,6 +161,13 @@ static void nd6_send_q(s8_t i);
 static void
 nd6_duplicate_addr_detected(struct netif *netif, s8_t addr_idx)
 {
+#ifdef LWIP_HOOK_ND6_DAD_FAILED
+  /* NitroOS: a stable random identifier (RFC 7217 section 6) is replaced by
+   * the next one and DAD starts again; nothing else to do here then. */
+  if (LWIP_HOOK_ND6_DAD_FAILED(netif, addr_idx)) {
+    return;
+  }
+#endif /* LWIP_HOOK_ND6_DAD_FAILED */
 
   /* Mark the address as duplicate, but leave its lifetimes alone. If this was
    * a manually assigned address, it will remain in existence as duplicate, and
@@ -266,8 +273,14 @@ nd6_process_autoconfig_prefix(struct netif *netif,
    * all. As a side effect, find a free slot. Note that we cannot use
    * netif_add_ip6_address() here, as it would return ERR_OK if the address
    * already did exist, resulting in that address being given lifetimes. */
+#ifdef LWIP_HOOK_ND6_SLAAC_ADDRESS
+  /* NitroOS: a stable random identifier per prefix (RFC 7217) */
+  if (!LWIP_HOOK_ND6_SLAAC_ADDRESS(netif, prefix_addr, &ip6addr))
+#endif /* LWIP_HOOK_ND6_SLAAC_ADDRESS */
+  {
   IP6_ADDR(&ip6addr, prefix_addr->addr[0], prefix_addr->addr[1],
     netif_ip6_addr(netif, 0)->addr[2], netif_ip6_addr(netif, 0)->addr[3]);
+  }
   ip6_addr_assign_zone(&ip6addr, IP6_UNICAST, netif);
 
   free_idx = 0;

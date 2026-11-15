@@ -249,6 +249,16 @@ TCPInterfaceInit6(PIP_INTERFACE IF);
 VOID
 TCPAddLoopbackAddress6(PIP_INTERFACE IF);
 
+/* Stable random interface identifiers (ip/transport/tcp/iid6.c), behind Tcpip6\Parameters\RandomizeIdentifiers */
+extern BOOLEAN TCP6RandomizeIdentifiers;
+
+VOID
+TCP6ReadIdentifierSettings(VOID);
+
+struct netif;
+BOOLEAN
+TCP6SetStableLinkLocal(struct netif *netif);
+
 VOID
 TCPReceive6(PIP_INTERFACE IF, PIP_PACKET IPPacket);
 
