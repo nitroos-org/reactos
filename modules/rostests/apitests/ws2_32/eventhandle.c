@@ -59,6 +59,12 @@ START_TEST(eventhandle)
     CheckHandle(Socket, "INVALID_HANDLE_VALUE", INVALID_HANDLE_VALUE, WSAENOTSOCK);
     CheckHandle(Socket, "NULL", NULL, WSAEINVAL);
 
+    /* An event handle that was closed (its value is free, and the next handle made may take it) */
+    Event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    ok(Event != NULL, "CreateEvent failed: %lu\n", GetLastError());
+    CloseHandle(Event);
+    CheckHandle(Socket, "closed event", Event, WSAENOTSOCK);
+
     /* A NULL event with no events to report switches the selection off */
     Result = WSAEventSelect(Socket, NULL, 0);
     ok(Result == 0, "WSAEventSelect(NULL, 0) returned %d, error %d\n", Result, WSAGetLastError());

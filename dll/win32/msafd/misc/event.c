@@ -49,6 +49,15 @@ WSPEventSelect(
 
     if (!NT_SUCCESS(Status)) return SOCKET_ERROR;
 
+    /* The caller's handle was not open: its value went to our own event, which AFD would take for it.
+     * A handle that names nothing gives WSAENOTSOCK (Windows 10) */
+    if (hEventObject && hEventObject == SockEvent)
+    {
+        NtClose(SockEvent);
+        if (lpErrno) *lpErrno = WSAENOTSOCK;
+        return SOCKET_ERROR;
+    }
+
     /* Set Socket to Non-Blocking */
     BlockMode = TRUE;
     SetSocketInformation(Socket, AFD_INFO_BLOCKING_MODE, &BlockMode, NULL, NULL, NULL, NULL);
@@ -173,6 +182,14 @@ WSPEnumNetworkEvents(
 
     if( !NT_SUCCESS(Status) ) {
         ERR("Could not make an event %x\n", Status);
+        return SOCKET_ERROR;
+    }
+
+    /* As in WSPEventSelect: a caller's handle that was not open now names our own event */
+    if (hEventObject && hEventObject == SockEvent)
+    {
+        NtClose(SockEvent);
+        if (lpErrno) *lpErrno = WSAENOTSOCK;
         return SOCKET_ERROR;
     }
 
