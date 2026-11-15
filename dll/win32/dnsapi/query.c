@@ -943,7 +943,7 @@ QueryAaaa(LPCWSTR Name,
 {
     adns_state astate;
     adns_answer *answer;
-    int quflags = (Options & DNS_QUERY_NO_RECURSION) == 0 ? adns_qf_search : 0;
+    int quflags = (Options & (DNS_QUERY_NO_RECURSION | DNS_QUERY_TREAT_AS_FQDN)) == 0 ? adns_qf_search : 0;
     int adns_error, i;
     unsigned CNameLoop;
     CHAR Search[512];
@@ -1057,8 +1057,9 @@ QueryAaaa(LPCWSTR Name,
         adns_ccf_search(astate, "LOCALDOMAIN", -1, Search);
         /* a name of one label is looked up in the search domains even where the caller asked for no recursion:
            that flag has meant no search list for the other names (the callers of this tree set it for what they
-           cannot search), but a short name is what a search list is for */
-        if (strchr(AnsiName, '.') == NULL)
+           cannot search), but a short name is what a search list is for. DNS_QUERY_TREAT_AS_FQDN is the flag that
+           asks for no suffix (Windows SDK: "prevents ... attaching suffixes to the submitted name") */
+        if (strchr(AnsiName, '.') == NULL && !(Options & DNS_QUERY_TREAT_AS_FQDN))
             quflags |= adns_qf_search;
     }
     RtlFreeHeap(RtlGetProcessHeap(), 0, network_info);
@@ -1145,7 +1146,7 @@ Query_Main(LPCWSTR Name,
            PDNS_RECORD *QueryResultSet)
 {
     adns_state astate;
-    int quflags = (Options & DNS_QUERY_NO_RECURSION) == 0 ? adns_qf_search : 0;
+    int quflags = (Options & (DNS_QUERY_NO_RECURSION | DNS_QUERY_TREAT_AS_FQDN)) == 0 ? adns_qf_search : 0;
     int adns_error;
     CHAR Search[512];
     adns_answer *answer;
@@ -1271,8 +1272,8 @@ Query_Main(LPCWSTR Name,
         if (Search[0])
         {
             adns_ccf_search(astate, "LOCALDOMAIN", -1, Search);
-            /* see QueryAaaa: a name of one label is searched whatever the caller said */
-            if (strchr(AnsiName, '.') == NULL)
+            /* see QueryAaaa: a name of one label is searched unless the caller said it is fully qualified */
+            if (strchr(AnsiName, '.') == NULL && !(Options & DNS_QUERY_TREAT_AS_FQDN))
                 quflags |= adns_qf_search;
         }
         RtlFreeHeap(RtlGetProcessHeap(), 0, network_info);
