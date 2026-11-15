@@ -420,14 +420,24 @@ static PWSTR ToNtPath(PCWSTR app)
 /* ---- rules that were not (or not fully) pushed: the rule service reports them (FwPushGetReport) ---- */
 
 #define REPORT_CHARS 1024
-static ULONG g_Rejected, g_Partial;
+static ULONG g_Rejected, g_RejectedBlock, g_Partial;
+static BOOL g_NamesCut;
 static WCHAR g_RejNames[REPORT_CHARS];
 
+/* A rejected Allow rule is narrower than written (harmless); a rejected Block rule leaves its traffic to the Allow rules
+   and the profile default (fail open), so the two are counted and tagged apart. The names list ends with "..." once,
+   and nothing is appended after that. */
 static VOID Note(PCWSTR tag, const FW_RULE *r)
 {
     SIZE_T have = wcslen(g_RejNames);
     PCWSTR name = r->Name && *r->Name ? r->Name : L"(unnamed)";
-    if (have + wcslen(tag) + wcslen(name) + 6 >= REPORT_CHARS) { if (have + 4 < REPORT_CHARS) wcscat(g_RejNames, L"..."); return; }
+    if (g_NamesCut) return;
+    if (have + wcslen(tag) + wcslen(name) + 6 >= REPORT_CHARS)
+    {
+        g_NamesCut = TRUE;
+        if (have + 4 < REPORT_CHARS) wcscat(g_RejNames, L"...");
+        return;
+    }
     if (have) wcscat(g_RejNames, L"; ");
     wcscat(g_RejNames, tag); wcscat(g_RejNames, L": "); wcscat(g_RejNames, name);
 }
@@ -595,9 +605,10 @@ done:
     return res;
 }
 
-VOID FwPushGetReport(ULONG *pRejected, ULONG *pPartial, PWSTR Names, ULONG Chars)
+VOID FwPushGetReport(ULONG *pRejected, ULONG *pRejectedBlock, ULONG *pPartial, PWSTR Names, ULONG Chars)
 {
     if (pRejected) *pRejected = g_Rejected;
+    if (pRejectedBlock) *pRejectedBlock = g_RejectedBlock;
     if (pPartial) *pPartial = g_Partial;
     if (Names && Chars) { wcsncpy(Names, g_RejNames, Chars - 1); Names[Chars - 1] = 0; }
 }
@@ -605,9 +616,9 @@ VOID FwPushGetReport(ULONG *pRejected, ULONG *pPartial, PWSTR Names, ULONG Chars
 DWORD FwPushToKernel(ULONGLONG gen, BOOL *pPresent)
 {
     FW_RULESET rs; BUF b = { 0 }; NITROFW_POLICY pol; HANDLE h; DWORD err, ret, i;
-    ULONG cnt = 0; ULONG bit; BOOL v6on;
+    ULONG cnt = 0; ULONG bit, pass; BOOL v6on;
     HKEY hk; DWORD enforce = 1, cb = sizeof(DWORD), t;
-    g_Rejected = 0; g_Partial = 0; g_RejNames[0] = 0;
+    g_Rejected = 0; g_RejectedBlock = 0; g_Partial = 0; g_RejNames[0] = 0; g_NamesCut = FALSE;
     if (pPresent) *pPresent = FALSE;
     h = CreateFileW(NITROFW_USER_PATH, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
     if (h == INVALID_HANDLE_VALUE) return GetLastError();
@@ -634,10 +645,14 @@ DWORD FwPushToKernel(ULONGLONG gen, BOOL *pPresent)
     }
     if (!Put(&b, &pol, sizeof(pol))) { FwRuleSetFree(&rs); CloseHandle(h); return ERROR_NOT_ENOUGH_MEMORY; }
     ((NITROFW_POLICY *)b.p)->RulesOffset = sizeof(pol);
+    /* Block rules first (pass 0), then Allow rules: when the rule-count or the size limit runs out, only Allow rules are
+       rejected (narrower than written), never a Block rule. The kernel lets a Block rule win over any Allow rule
+       whatever their order, so the order inside the policy carries no meaning. */
+    for (pass = 0; pass < 2; pass++)
     for (i = 0; i < rs.N; i++)
     {
-        ULONG before = cnt, savedLen = (ULONG)b.len; BOOL partial = FALSE; BR_RESULT br;
-        if (!rs.R[i].Enabled) continue;
+        ULONG before = cnt, savedLen = (ULONG)b.len; BOOL partial = FALSE, isBlock = !rs.R[i].Action; BR_RESULT br;
+        if (!rs.R[i].Enabled || (pass == 0) != isBlock) continue;
         br = BuildRule(&b, &rs.R[i], v6on, &cnt, NITROFW_MAX_RULES, &partial);
         /* a rule that would take the policy past its size limit is rejected on its own: the final size check below
            would fail the whole push and leave the previous policy in force */
@@ -645,7 +660,8 @@ DWORD FwPushToKernel(ULONGLONG gen, BOOL *pPresent)
         if (br == BR_REJECTED)
         {
             g_Rejected++;
-            Note(L"rejected", &rs.R[i]);
+            if (isBlock) g_RejectedBlock++;
+            Note(isBlock ? L"rejected Block rule (not enforced)" : L"rejected Allow rule", &rs.R[i]);
         }
         else if (br == BR_OK && partial)
         {
