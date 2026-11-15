@@ -1546,12 +1546,13 @@ PATH_GetClipState(PDC dc, PPATH pPath, RECTL *prcClip)
         if (pPath->pPoints[i].y > b) b = pPath->pPoints[i].y;
     }
 
-    /* The clip regions are in surface coordinates: the path is in the coordinates of the DC. One pixel of margin keeps
-       the rounding of the region scan conversion out of the decision. */
-    cl = (LONGLONG)prgn->rdh.rcBound.left - dc->ptlDCOrig.x - 1;
-    ct = (LONGLONG)prgn->rdh.rcBound.top - dc->ptlDCOrig.y - 1;
-    cr = (LONGLONG)prgn->rdh.rcBound.right - dc->ptlDCOrig.x + 1;
-    cb = (LONGLONG)prgn->rdh.rcBound.bottom - dc->ptlDCOrig.y + 1;
+    /* The region of the clip box (prgnRao) is kept in the coordinates of the DC, like the path: CLIPPING_UpdateGCRegion
+       adds the DC origin only for the clip object and takes it off again. One pixel of margin keeps the rounding of
+       the region scan conversion out of the decision. */
+    cl = (LONGLONG)prgn->rdh.rcBound.left - 1;
+    ct = (LONGLONG)prgn->rdh.rcBound.top - 1;
+    cr = (LONGLONG)prgn->rdh.rcBound.right + 1;
+    cb = (LONGLONG)prgn->rdh.rcBound.bottom + 1;
 
     if ((r < cl) || (l > cr) || (b < ct) || (t > cb))
         return PATH_CLIP_OUTSIDE;
@@ -1567,9 +1568,22 @@ PATH_GetClipState(PDC dc, PPATH pPath, RECTL *prcClip)
     return PATH_CLIP_INSIDE;
 }
 
+/* a * b / c without overflow, for |a|, |b|, |c| < 2^32, c != 0 and |b| <= |c| (the cut of an edge: b is the part of the
+ * edge that lies on this side of the limit). The quotient and remainder of a / c keep both products inside 64 bits. */
+static
+LONGLONG
+PATH_MulDivCut(LONGLONG a, LONGLONG b, LONGLONG c)
+{
+    LONGLONG q = a / c, r = a % c;
+    ULONGLONG mag = (ULONGLONG)(r < 0 ? -r : r) * (ULONGLONG)(b < 0 ? -b : b) / (ULONGLONG)(c < 0 ? -c : c);
+    BOOL bNeg = (r < 0) ^ (b < 0) ^ (c < 0);
+
+    return q * b + (bNeg ? -(LONGLONG)mag : (LONGLONG)mag);
+}
+
 /* One pass of the Sutherland-Hodgman clip of a polygon: the points on the inner side of one edge of the rectangle
  * (iSide 0: x >= lim, 1: x <= lim, 2: y >= lim, 3: y <= lim) are kept, an edge that crosses it is cut at it. pOut holds
- * 2 * n points. Integer arithmetic only (the products fit 64 bits). */
+ * 2 * n points. Integer arithmetic only (the products are formed by PATH_MulDivCut, which cannot overflow). */
 static
 ULONG
 PATH_ClipPolygonPass(const POINT *pIn, ULONG n, POINT *pOut, INT iSide, LONG lim)
@@ -1591,12 +1605,12 @@ PATH_ClipPolygonPass(const POINT *pIn, ULONG n, POINT *pOut, INT iSide, LONG lim
             if (iSide < 2)
             {
                 cut.x = lim;
-                cut.y = prev.y + (LONG)(((LONGLONG)cur.y - prev.y) * ((LONGLONG)lim - prev.x) / ((LONGLONG)cur.x - prev.x));
+                cut.y = prev.y + (LONG)PATH_MulDivCut((LONGLONG)cur.y - prev.y, (LONGLONG)lim - prev.x, (LONGLONG)cur.x - prev.x);
             }
             else
             {
                 cut.y = lim;
-                cut.x = prev.x + (LONG)(((LONGLONG)cur.x - prev.x) * ((LONGLONG)lim - prev.y) / ((LONGLONG)cur.y - prev.y));
+                cut.x = prev.x + (LONG)PATH_MulDivCut((LONGLONG)cur.x - prev.x, (LONGLONG)lim - prev.y, (LONGLONG)cur.y - prev.y);
             }
             pOut[m++] = cut;
         }
@@ -1789,6 +1803,20 @@ PATH_PathToRegion(
     return Ret;
 }
 
+/* Puts back the world transform a path function took off for its drawing (the DC is in GM_ADVANCED). The transform of
+ * the DC went through the matrix -> XFORM conversion, which GreModifyWorldTransform may refuse to take back (a matrix it
+ * calls singular): the matrix is then set directly, like the code before the wide pens did. */
+static
+VOID
+PATH_RestoreWorldTransform(PDC dc, const XFORML *pxform)
+{
+    if (!GreModifyWorldTransform(dc, pxform, MWT_SET))
+    {
+        XForm2MatrixS(&dc->pdcattr->mxWorldToPage, pxform);
+        dc->pdcattr->flXform |= WORLD_XFORM_CHANGED | DEVICE_TO_WORLD_INVALID;
+    }
+}
+
 /* PATH_FillPath
  *
  * You can play with this as long as you like, but if you break Area.exe the purge will Begain on Path!!!
@@ -1900,7 +1928,7 @@ PATH_FillPathEx(
     /* Go to GM_ADVANCED temporarily to restore the world transform */
     graphicsMode = pdcattr->iGraphicsMode;
     pdcattr->iGraphicsMode = GM_ADVANCED;
-    GreModifyWorldTransform(dc, &xform, MWT_SET);
+    PATH_RestoreWorldTransform(dc, &xform);
     pdcattr->iGraphicsMode = graphicsMode;
     return TRUE;
 }
@@ -2075,7 +2103,7 @@ end:
     /* Restore the world transform (in GM_ADVANCED: it marks the transforms as changed) */
     graphicsMode = pdcattr->iGraphicsMode;
     pdcattr->iGraphicsMode = GM_ADVANCED;
-    GreModifyWorldTransform(dc, (XFORML*)&xform, MWT_SET);
+    PATH_RestoreWorldTransform(dc, (XFORML*)&xform);
     pdcattr->iGraphicsMode = graphicsMode;
 
     /* If we've moved the current point then get its new position
