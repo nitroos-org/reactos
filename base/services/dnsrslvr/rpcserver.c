@@ -110,6 +110,9 @@ R_ResolverQuery(
     if ((dwFlags & DNS_QUERY_WIRE_ONLY) != 0 && (dwFlags & DNS_QUERY_NO_WIRE_QUERY) != 0)
         return ERROR_INVALID_PARAMETER;
 
+    /* The hosts file may have been edited since the last query */
+    HostsFileReloadIfChanged();
+
     if (dwFlags & DNS_QUERY_WIRE_ONLY)
     {
         DPRINT("DNS query!\n");
@@ -148,7 +151,14 @@ R_ResolverQuery(
                                            wType,
                                            dwFlags,
                                            ppResultRecords);
-        if (Status == DNS_INFO_NO_RECORDS)
+        /*
+         * A name of the hosts file is answered from it alone: a DNS server is not asked for another type
+         * of it (the machine's own answer for the AAAA of "localhost" is the exception, see Query_Main).
+         */
+        if (Status == DNS_INFO_NO_RECORDS &&
+            (_wcsicmp(pszName, L"localhost") == 0 ||
+             _wcsicmp(pszName, L"localhost.") == 0 ||
+             !DnsIntCacheHasHostsName(pszName)))
         {
             DPRINT("DNS query!\n");
             Status = Query_Main(pszName,

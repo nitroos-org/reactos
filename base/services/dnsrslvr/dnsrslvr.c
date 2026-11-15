@@ -105,7 +105,7 @@ ServiceMain(
 
     DnsIntCacheInitialize();
 
-    ReadHostsFile();
+    HostsFileInitialize();
 
     hThread = CreateThread(NULL,
                            0,

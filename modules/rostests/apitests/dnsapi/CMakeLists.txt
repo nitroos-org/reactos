@@ -5,6 +5,7 @@ list(APPEND SOURCE
     DnsQueryAaaa.c
     DnsQueryMany.c
     DnsQueryTypes.c
+    HostsFile.c
     testlist.c)
 
 add_executable(dnsapi_apitest ${SOURCE})

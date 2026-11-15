@@ -146,6 +146,49 @@ DnsIntFlushCacheEntry(
 }
 
 
+VOID
+DnsIntCacheLock(VOID)
+{
+    DnsCacheLock();
+}
+
+VOID
+DnsIntCacheUnlock(VOID)
+{
+    DnsCacheUnlock();
+}
+
+/* Does the hosts file have a row for this name (any type)? */
+BOOL
+DnsIntCacheHasHostsName(
+    _In_ LPCWSTR Name)
+{
+    BOOL Ret = FALSE;
+    PRESOLVER_CACHE_ENTRY CacheEntry;
+    PLIST_ENTRY NextEntry;
+
+    DnsCacheLock();
+
+    for (NextEntry = DnsCache.RecordList.Flink;
+         NextEntry != &DnsCache.RecordList;
+         NextEntry = NextEntry->Flink)
+    {
+        CacheEntry = CONTAINING_RECORD(NextEntry, RESOLVER_CACHE_ENTRY, CacheLink);
+
+        if (CacheEntry->bHostsFileEntry &&
+            CacheEntry->Record->wType != DNS_TYPE_PTR &&
+            _wcsicmp(CacheEntry->Record->pName, Name) == 0)
+        {
+            Ret = TRUE;
+            break;
+        }
+    }
+
+    DnsCacheUnlock();
+
+    return Ret;
+}
+
 DNS_STATUS
 DnsIntCacheGetEntryByName(
     LPCWSTR Name,
@@ -156,6 +199,7 @@ DnsIntCacheGetEntryByName(
     DNS_STATUS Status = DNS_INFO_NO_RECORDS;
     PRESOLVER_CACHE_ENTRY CacheEntry;
     PLIST_ENTRY NextEntry;
+    PDNS_RECORDW *Tail, Copy;
 
     DPRINT("DnsIntCacheGetEntryByName(%S %hu 0x%lx %p)\n",
            Name, wType, dwFlags, Record);
@@ -165,6 +209,43 @@ DnsIntCacheGetEntryByName(
 
     /* Lock the cache */
     DnsCacheLock();
+
+    /*
+     * The rows of the hosts file come first (they shadow a DNS name) and every row of the name and type
+     * is returned, in the order of the file.
+     */
+    Tail = Record;
+    for (NextEntry = DnsCache.RecordList.Flink;
+         NextEntry != &DnsCache.RecordList;
+         NextEntry = NextEntry->Flink)
+    {
+        CacheEntry = CONTAINING_RECORD(NextEntry, RESOLVER_CACHE_ENTRY, CacheLink);
+
+        if (CacheEntry->bHostsFileEntry &&
+            _wcsicmp(CacheEntry->Record->pName, Name) == 0 &&
+            (wType == DNS_TYPE_ANY || CacheEntry->Record->wType == wType))
+        {
+            Copy = DnsRecordSetCopyEx(CacheEntry->Record, DnsCharSetUnicode, DnsCharSetUnicode);
+            if (Copy == NULL)
+                continue;
+
+            *Tail = Copy;
+            while (Copy->pNext != NULL)
+                Copy = Copy->pNext;
+            Tail = &Copy->pNext;
+            Status = ERROR_SUCCESS;
+
+            /* a reverse name gets its first row only, as before */
+            if (CacheEntry->Record->wType == DNS_TYPE_PTR)
+                break;
+        }
+    }
+
+    if (Status == ERROR_SUCCESS)
+    {
+        DnsCacheUnlock();
+        return Status;
+    }
 
     /* Match the Id with all the entries in the List */
     NextEntry = DnsCache.RecordList.Flink;

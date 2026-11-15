@@ -6,6 +6,7 @@ extern void func_DnsQuery(void);
 extern void func_DnsQueryAaaa(void);
 extern void func_DnsQueryMany(void);
 extern void func_DnsQueryTypes(void);
+extern void func_HostsFile(void);
 
 const struct test winetest_testlist[] =
 {
@@ -14,5 +15,6 @@ const struct test winetest_testlist[] =
     { "DnsQueryAaaa", func_DnsQueryAaaa },
     { "DnsQueryMany", func_DnsQueryMany },
     { "DnsQueryTypes", func_DnsQueryTypes },
+    { "HostsFile", func_HostsFile },
     { 0, 0 }
 };
