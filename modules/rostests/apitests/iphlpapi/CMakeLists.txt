@@ -18,6 +18,7 @@ list(APPEND SOURCE
     Icmp6Echo.c
     IfStatistics.c
     IpInterface.c
+    SetIpInterfaceEntry.c
     IpForwardTable6.c
     IpNetTable6.c
     IpTables2.c

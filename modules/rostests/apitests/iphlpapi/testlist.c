@@ -20,6 +20,7 @@ extern void func_icmp(void);
 extern void func_Icmp6Echo(void);
 extern void func_IfStatistics(void);
 extern void func_IpInterface(void);
+extern void func_SetIpInterfaceEntry(void);
 extern void func_IpTables2(void);
 extern void func_Ipv6AddressConfig(void);
 extern void func_Ipv6ConfigApi(void);
@@ -67,6 +68,7 @@ const struct test winetest_testlist[] =
     { "Icmp6Echo",                  func_Icmp6Echo },
     { "IfStatistics",               func_IfStatistics },
     { "IpInterface",               func_IpInterface },
+    { "SetIpInterfaceEntry",       func_SetIpInterfaceEntry },
     { "IpTables2",                  func_IpTables2 },
     { "Ipv6AddressConfig",          func_Ipv6AddressConfig },
     { "Ipv6ConfigApi",              func_Ipv6ConfigApi },
