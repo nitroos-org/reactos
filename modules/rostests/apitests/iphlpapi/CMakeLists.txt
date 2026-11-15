@@ -30,6 +30,7 @@ list(APPEND SOURCE
     NotifyRouteChange2.c
     NotifyStableUnicastIpAddressTable.c
     SendARP.c
+    Tcp6Table2.c
     TcpTimeWait.c
     TcpUdpTableRows.c
     Win6Exports.c

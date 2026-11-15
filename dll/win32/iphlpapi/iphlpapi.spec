@@ -102,6 +102,7 @@
 @ stub GetTcpStatsFromStackEx
 @ stdcall GetTcpTable(ptr ptr long)
 @ stdcall -version=0x600+ GetTcpTable2(ptr ptr long)
+@ stdcall -version=0x600+ GetTcp6Table(ptr ptr long)
 @ stdcall -version=0x600+ GetTcp6Table2(ptr ptr long)
 @ stub GetTcpTableFromStack
 @ stub GetUdpExTable2FromStack

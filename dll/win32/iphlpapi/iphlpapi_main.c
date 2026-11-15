@@ -976,6 +976,42 @@ static int __cdecl Tcp6TableSorter(const void *a, const void *b)
     return ret;
 }
 
+static int __cdecl Tcp6Table2Sorter(const void *a, const void *b)
+{
+    const MIB_TCP6ROW2 *rowA = a, *rowB = b;
+    int ret = memcmp(&rowA->LocalAddr, &rowB->LocalAddr, sizeof(rowA->LocalAddr));
+
+    if (ret == 0)
+        ret = (int)rowA->dwLocalScopeId - (int)rowB->dwLocalScopeId;
+    if (ret == 0)
+        ret = (int)rowA->dwLocalPort - (int)rowB->dwLocalPort;
+    if (ret == 0)
+        ret = memcmp(&rowA->RemoteAddr, &rowB->RemoteAddr, sizeof(rowA->RemoteAddr));
+    if (ret == 0)
+        ret = (int)rowA->dwRemoteScopeId - (int)rowB->dwRemoteScopeId;
+    if (ret == 0)
+        ret = (int)rowA->dwRemotePort - (int)rowB->dwRemotePort;
+    return ret;
+}
+
+static int __cdecl Tcp6TableSorter2(const void *a, const void *b)
+{
+    const MIB_TCP6ROW *rowA = a, *rowB = b;
+    int ret = memcmp(&rowA->LocalAddr, &rowB->LocalAddr, sizeof(rowA->LocalAddr));
+
+    if (ret == 0)
+        ret = (int)rowA->dwLocalScopeId - (int)rowB->dwLocalScopeId;
+    if (ret == 0)
+        ret = (int)rowA->dwLocalPort - (int)rowB->dwLocalPort;
+    if (ret == 0)
+        ret = memcmp(&rowA->RemoteAddr, &rowB->RemoteAddr, sizeof(rowA->RemoteAddr));
+    if (ret == 0)
+        ret = (int)rowA->dwRemoteScopeId - (int)rowB->dwRemoteScopeId;
+    if (ret == 0)
+        ret = (int)rowA->dwRemotePort - (int)rowB->dwRemotePort;
+    return ret;
+}
+
 /* The IPv6 TCP table (AF_INET6): the owner-pid classes, while the stack has IPv6 on. With IPv6 off it is not
  * there, as before (ERROR_INVALID_PARAMETER); the other classes are not implemented for IPv6 */
 static DWORD GetExtendedTcp6Table(PVOID pTcpTable, PDWORD pdwSize, BOOL bOrder, TCP_TABLE_CLASS TableClass)
@@ -2909,33 +2945,120 @@ DWORD WINAPI GetUdp6Table(PMIB_UDP6TABLE Udp6Table, PULONG SizePointer, BOOL Ord
     return (Ret == ERROR_INVALID_PARAMETER) ? ERROR_NOT_SUPPORTED : Ret;
 }
 
+/*
+ * The rows of the IPv6 TCP table of GetExtendedTcpTable (the owner pid class), or NULL: IPv6 is off, and the
+ * table is empty as before (the caller makes it so), or there was no memory.
+ */
+static PMIB_TCP6TABLE_OWNER_PID GetTcp6Rows(PBOOL Off)
+{
+    IPV6_STATE State;
+    *Off = !Ipv6GetState(&State);
+    if (*Off)
+        return NULL;
+    Ipv6FreeState(&State);
+    return getTcp6Table();
+}
+
 /******************************************************************
  *    GetTcp6Table2 (IPHLPAPI.@)
  *
- * Get the table of IPv6 TCP connections.
- *
- * NOTES
- *  The stack does not enumerate IPv6 connections (GetExtendedTcpTable rejects AF_INET6 too), so the
- *  table is empty.
+ * Get the table of IPv6 TCP connections and listeners, the rows GetExtendedTcpTable(AF_INET6) lists. While the stack
+ * has IPv6 off there is none and the table is empty.
  */
 DWORD WINAPI GetTcp6Table2(PMIB_TCP6TABLE2 pTcpTable, PULONG pdwSize, BOOL bOrder)
 {
-    DWORD size = FIELD_OFFSET(MIB_TCP6TABLE2, table);
+    PMIB_TCP6TABLE_OWNER_PID Ours;
+    BOOL Off;
+    DWORD i, Count, size;
 
     if (!pdwSize)
         return ERROR_INVALID_PARAMETER;
 
+    Ours = GetTcp6Rows(&Off);
+    if (!Off && !Ours)
+        return ERROR_NOT_ENOUGH_MEMORY;
+    Count = Ours ? Ours->dwNumEntries : 0;
+
+    size = FIELD_OFFSET(MIB_TCP6TABLE2, table) + Count * sizeof(MIB_TCP6ROW2);
     if (size > *pdwSize || !pTcpTable)
     {
         *pdwSize = size;
+        HeapFree(GetProcessHeap(), 0, Ours);
         return ERROR_INSUFFICIENT_BUFFER;
     }
 
-    pTcpTable->dwNumEntries = 0;
+    pTcpTable->dwNumEntries = Count;
+    for (i = 0; i < Count; i++)
+    {
+        const MIB_TCP6ROW_OWNER_PID *Row = &Ours->table[i];
+        PMIB_TCP6ROW2 New = &pTcpTable->table[i];
+
+        memset(New, 0, sizeof(*New));
+        memcpy(&New->LocalAddr, Row->ucLocalAddr, sizeof(New->LocalAddr));
+        New->dwLocalScopeId = Row->dwLocalScopeId;
+        New->dwLocalPort = Row->dwLocalPort;
+        memcpy(&New->RemoteAddr, Row->ucRemoteAddr, sizeof(New->RemoteAddr));
+        New->dwRemoteScopeId = Row->dwRemoteScopeId;
+        New->dwRemotePort = Row->dwRemotePort;
+        New->State = Row->dwState;
+        New->dwOwningPid = Row->dwOwningPid;
+        New->dwOffloadState = TcpConnectionOffloadStateInHost;
+    }
+    if (bOrder && Count > 1)
+        qsort(pTcpTable->table, Count, sizeof(MIB_TCP6ROW2), Tcp6Table2Sorter);
     *pdwSize = size;
+    HeapFree(GetProcessHeap(), 0, Ours);
     return NO_ERROR;
 }
 
+/******************************************************************
+ *    GetTcp6Table (IPHLPAPI.@)
+ *
+ * The same table as GetTcp6Table2, in the layout without the owner and the offload state.
+ */
+DWORD WINAPI GetTcp6Table(PMIB_TCP6TABLE pTcpTable, PULONG pdwSize, BOOL bOrder)
+{
+    PMIB_TCP6TABLE_OWNER_PID Ours;
+    BOOL Off;
+    DWORD i, Count, size;
+
+    if (!pdwSize)
+        return ERROR_INVALID_PARAMETER;
+
+    Ours = GetTcp6Rows(&Off);
+    if (!Off && !Ours)
+        return ERROR_NOT_ENOUGH_MEMORY;
+    Count = Ours ? Ours->dwNumEntries : 0;
+
+    size = FIELD_OFFSET(MIB_TCP6TABLE, table) + Count * sizeof(MIB_TCP6ROW);
+    if (size > *pdwSize || !pTcpTable)
+    {
+        *pdwSize = size;
+        HeapFree(GetProcessHeap(), 0, Ours);
+        return ERROR_INSUFFICIENT_BUFFER;
+    }
+
+    pTcpTable->dwNumEntries = Count;
+    for (i = 0; i < Count; i++)
+    {
+        const MIB_TCP6ROW_OWNER_PID *Row = &Ours->table[i];
+        PMIB_TCP6ROW New = &pTcpTable->table[i];
+
+        memset(New, 0, sizeof(*New));
+        New->State = Row->dwState;
+        memcpy(&New->LocalAddr, Row->ucLocalAddr, sizeof(New->LocalAddr));
+        New->dwLocalScopeId = Row->dwLocalScopeId;
+        New->dwLocalPort = Row->dwLocalPort;
+        memcpy(&New->RemoteAddr, Row->ucRemoteAddr, sizeof(New->RemoteAddr));
+        New->dwRemoteScopeId = Row->dwRemoteScopeId;
+        New->dwRemotePort = Row->dwRemotePort;
+    }
+    if (bOrder && Count > 1)
+        qsort(pTcpTable->table, Count, sizeof(MIB_TCP6ROW), Tcp6TableSorter2);
+    *pdwSize = size;
+    HeapFree(GetProcessHeap(), 0, Ours);
+    return NO_ERROR;
+}
 
 /******************************************************************
  *    GetUdpStatisticsEx (IPHLPAPI.@)
