@@ -14,8 +14,10 @@
 
 struct pbuf;
 struct netif;
+struct tcp_pcb_listen;
 
 int LibTCPReopenTimeWait(struct pbuf *p, struct netif *inp);
+void LibTCPApplyListenRoom(struct tcp_pcb_listen *lpcb);
 /* ip/transport/tcp/rdnss6.c */
 void LibTCPRdnss6Input(struct netif *netif, const ip6_addr_t *addr, u32_t lifetime);
 /* ip/transport/tcp/iid6.c */
