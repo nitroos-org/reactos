@@ -26,7 +26,8 @@
  * 16 bytes). The key is created with a protected DACL: SYSTEM and Administrators only, so a standard user
  * cannot read it (Tcpip6\Parameters itself is readable by everybody) once the configuration manager enforces
  * key descriptors on open (it stores and reports them already). Without the key (no Tcpip6 service
- * key, a registry failure) a secret made for this start is used: the addresses are random, only not stable.
+ * key, a registry failure, a key whose protected DACL cannot be stored) a secret made for this start is used and
+ * nothing is stored: the addresses are random, only not stable.
  *
  * Duplicate address detection (RFC 7217 section 6): when DAD finds a tentative address of ours in use, the
  * next counter value makes a new identifier, at most IDGEN_RETRIES (3) times, then the address stays
@@ -542,7 +543,9 @@ Iid6MakeSecurity(PSECURITY_DESCRIPTOR Sd, PACL *Dacl)
     return STATUS_SUCCESS;
 }
 
-/* Whether the key's DACL is the one Iid6MakeSecurity makes: protected, two ACEs, SYSTEM and Administrators */
+/* Whether the key's DACL is exactly the one Iid6MakeSecurity makes: protected, two ACEs, one access allowed ACE
+   for SYSTEM and one for Administrators (in either order, each once), each KEY_ALL_ACCESS with only
+   CONTAINER_INHERIT_ACE, and no bytes behind them */
 static
 BOOLEAN
 Iid6KeySecurityIsOurs(HANDLE Key)
@@ -551,7 +554,7 @@ Iid6KeySecurityIsOurs(HANDLE Key)
     BOOLEAN Present = FALSE, Defaulted = FALSE, Ours = FALSE;
     PACL Acl = NULL;
     PACCESS_ALLOWED_ACE Ace;
-    ULONG Needed = 0, i;
+    ULONG Needed = 0, i, Seen = 0, Expected;
 
     if (ZwQuerySecurityObject(Key, DACL_SECURITY_INFORMATION, NULL, 0, &Needed) != STATUS_BUFFER_TOO_SMALL || !Needed)
         return FALSE;
@@ -563,13 +566,35 @@ Iid6KeySecurityIsOurs(HANDLE Key)
         NT_SUCCESS(RtlGetDaclSecurityDescriptor(Sd, &Present, &Acl, &Defaulted)) && Present && Acl &&
         Acl->AceCount == 2)
     {
-        Ours = TRUE;
+        Expected = sizeof(ACL) + 2 * (sizeof(ACCESS_ALLOWED_ACE) - sizeof(ULONG)) +
+                   RtlLengthSid(SeExports->SeLocalSystemSid) + RtlLengthSid(SeExports->SeAliasAdminsSid);
+        Ours = Acl->AclSize >= Expected;
         for (i = 0; i < 2 && Ours; i++)
         {
-            Ours = NT_SUCCESS(RtlGetAce(Acl, i, (PVOID *)&Ace)) && Ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE &&
-                   (RtlEqualSid(&Ace->SidStart, SeExports->SeLocalSystemSid) ||
-                    RtlEqualSid(&Ace->SidStart, SeExports->SeAliasAdminsSid));
+            Ours = NT_SUCCESS(RtlGetAce(Acl, i, (PVOID *)&Ace)) &&
+                   Ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE &&
+                   Ace->Header.AceFlags == CONTAINER_INHERIT_ACE &&
+                   Ace->Mask == KEY_ALL_ACCESS;
+            if (!Ours)
+                break;
+            if (RtlEqualSid(&Ace->SidStart, SeExports->SeLocalSystemSid) && !(Seen & 1))
+            {
+                Seen |= 1;
+                Ours = Ace->Header.AceSize == FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart) +
+                                              RtlLengthSid(SeExports->SeLocalSystemSid);
+            }
+            else if (RtlEqualSid(&Ace->SidStart, SeExports->SeAliasAdminsSid) && !(Seen & 2))
+            {
+                Seen |= 2;
+                Ours = Ace->Header.AceSize == FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart) +
+                                              RtlLengthSid(SeExports->SeAliasAdminsSid);
+            }
+            else
+            {
+                Ours = FALSE;
+            }
         }
+        Ours = Ours && Seen == 3;
     }
     ExFreePoolWithTag(Sd, TAG_IID6);
     return Ours;
@@ -616,6 +641,16 @@ Iid6LoadSecret(VOID)
     {
         Status = ZwSetSecurityObject(Key, DACL_SECURITY_INFORMATION, &Sd);
         DbgPrint("TCPIP: IPv6 identifier secret key DACL set again: 0x%lx\n", Status);
+        if (!NT_SUCCESS(Status))
+        {
+            /* the key may be readable by others: nothing is stored in it and a stored secret is not trusted */
+            ExFreePoolWithTag(Dacl, TAG_IID6);
+            ZwClose(Key);
+            Iid6NewSecret(Iid6Secret);
+            DbgPrint("TCPIP: IPv6 identifier secret not kept (key DACL: 0x%lx), a secret for this start only\n",
+                     Status);
+            return;
+        }
     }
     ExFreePoolWithTag(Dacl, TAG_IID6);
 

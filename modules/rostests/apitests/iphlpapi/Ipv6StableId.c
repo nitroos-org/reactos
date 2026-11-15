@@ -153,16 +153,28 @@ static void TestSecretDacl(void)
     CreateWellKnownSid(WinLocalSystemSid, NULL, SystemSid, &SidSize);
     SidSize = sizeof(AdminsSid);
     CreateWellKnownSid(WinBuiltinAdministratorsSid, NULL, AdminsSid, &SidSize);
+    ok(Present && Dacl && Dacl->AceCount == 2, "%u ACEs, want exactly 2\n", Dacl ? Dacl->AceCount : 0);
     for (i = 0; Present && Dacl && i < Dacl->AceCount; i++)
     {
         ACCESS_ALLOWED_ACE *Ace;
 
         if (!GetAce(Dacl, i, (void **)&Ace))
             continue;
+        ok(Ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE, "ACE %lu type %u\n", i, Ace->Header.AceType);
         if (Ace->Header.AceType != ACCESS_ALLOWED_ACE_TYPE)
             continue;
         ok(EqualSid(&Ace->SidStart, SystemSid) || EqualSid(&Ace->SidStart, AdminsSid),
            "ACE %lu allows access to another account\n", i);
+        ok(Ace->Mask == KEY_ALL_ACCESS, "ACE %lu mask 0x%lx\n", i, Ace->Mask);
+        ok(Ace->Header.AceFlags == CONTAINER_INHERIT_ACE, "ACE %lu flags 0x%x\n", i, Ace->Header.AceFlags);
+        if (i == 1 && Dacl->AceCount == 2)
+        {
+            ACCESS_ALLOWED_ACE *First;
+
+            if (GetAce(Dacl, 0, (void **)&First))
+                ok(EqualSid(&First->SidStart, SystemSid) != EqualSid(&Ace->SidStart, SystemSid),
+                   "SYSTEM is not in exactly one of the two ACEs\n");
+        }
     }
     HeapFree(GetProcessHeap(), 0, Sd);
 }
