@@ -23,6 +23,7 @@
 
 #include <config.h>
 #include "iphlpapi_private.h"
+#include "ipv6net.h"
 #include <strsafe.h>
 #include <psapi.h>
 
@@ -3228,12 +3229,9 @@ DWORD WINAPI NotifyRouteChange(PHANDLE Handle, LPOVERLAPPED overlapped)
  *    The Vista IP Helper table functions (IPHLPAPI.@)
  *
  * NOTES
- *  The interface and unicast address tables are in netio.c. This IP helper
- *  cannot build the neighbour and forward NETIO tables yet. Failing with
- *  ERROR_NOT_SUPPORTED, and an empty table pointer, lets callers take their
- *  error path. The earlier generated stubs returned NO_ERROR and left the
- *  output pointer alone, so callers read an uninitialised table.
- *  The checks of the arguments follow Windows: a missing output pointer and
+ *  The interface and unicast address tables are in netio.c and the neighbour table (GetIpNetTable2) in neighbor2.c.
+ *  This IP helper cannot build the forward NETIO table yet. Failing with ERROR_NOT_SUPPORTED, and an empty table
+ *  pointer, lets callers take their error path. The checks of the arguments follow Windows: a missing output pointer and
  *  an unknown address family give ERROR_INVALID_PARAMETER.
  */
 static BOOL is_valid_family(USHORT Family)
@@ -3250,16 +3248,10 @@ static DWORD no_table(USHORT Family, PVOID *Table)
   return ERROR_NOT_SUPPORTED;
 }
 
-DWORD WINAPI GetIpNetTable2(USHORT Family, PVOID *Table)
+DWORD WINAPI GetIpForwardTable2(ADDRESS_FAMILY Family, PMIB_IPFORWARD_TABLE2 *Table)
 {
   FIXME("(%u, %p): not supported\n", Family, Table);
-  return no_table(Family, Table);
-}
-
-DWORD WINAPI GetIpForwardTable2(USHORT Family, PVOID *Table)
-{
-  FIXME("(%u, %p): not supported\n", Family, Table);
-  return no_table(Family, Table);
+  return no_table(Family, (PVOID *)Table);
 }
 
 DWORD WINAPI ConvertLengthToIpv4Mask(ULONG MaskLength, PULONG Mask)

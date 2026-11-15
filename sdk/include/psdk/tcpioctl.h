@@ -160,6 +160,43 @@ typedef struct _TCP_IPV6_DNS_ROW
     ULONG Lifetime;
 } TCP_IPV6_DNS_ROW, *PTCP_IPV6_DNS_ROW;
 
+/* Non public TOIID: the neighbour cache and the on-link prefixes of neighbour discovery, for iphlpapi. Asked as
+   IP_IPV6_TABLE_ENTRY_ID is (CL_NL_ENTITY, instance 0); the answer is a TCP_IPV6_ND_HEADER, then NeighborCount
+   TCP_IPV6_NEIGHBOR_ROW, then PrefixCount TCP_IPV6_PREFIX_ROW. Enabled is 0 (and both counts 0) while the IPv6
+   switch is off. Sizes as for the other tables: a caller whose buffer is too small gets the size that does and
+   asks again */
+#define IP_IPV6_ND_ENTRY_ID             0x117
+
+typedef struct _TCP_IPV6_ND_HEADER
+{
+    ULONG Enabled;
+    ULONG NeighborCount;
+    ULONG PrefixCount;
+} TCP_IPV6_ND_HEADER, *PTCP_IPV6_ND_HEADER;
+
+/* Flags of a neighbour */
+#define TCP_IPV6_NEIGHBOR_ROUTER        0x1
+
+/* State: the values of NL_NEIGHBOR_STATE (Incomplete 1, Probe 2, Delay 3, Stale 4, Reachable 5) */
+typedef struct _TCP_IPV6_NEIGHBOR_ROW
+{
+    ULONG IfIndex;
+    UCHAR Address[16];
+    ULONG State;
+    ULONG Flags;            /* TCP_IPV6_NEIGHBOR_ROUTER */
+    ULONG LinkLength;       /* 0 while the neighbour has not answered */
+    UCHAR LinkAddress[8];
+} TCP_IPV6_NEIGHBOR_ROW, *PTCP_IPV6_NEIGHBOR_ROW;
+
+/* An on-link prefix a router advertisement gave; Lifetime: seconds left of its valid lifetime */
+typedef struct _TCP_IPV6_PREFIX_ROW
+{
+    ULONG IfIndex;
+    UCHAR Prefix[16];
+    ULONG PrefixLength;
+    ULONG Lifetime;
+} TCP_IPV6_PREFIX_ROW, *PTCP_IPV6_PREFIX_ROW;
+
 /* Non public TOIID: the row of an IPv6 TCP socket (an AF_INET6 one, dual stack ones too), asked of its transport
    entity (CO_TL_ENTITY) as the IPv4 rows are; an entity of an IPv4 socket has none. The layout of
    MIB_TCP6ROW_OWNER_PID: the IPv4 side of a dual stack socket as ::ffff:a.b.c.d, ports in network order */

@@ -270,6 +270,12 @@ TCPQueryIpv6Table(PVOID Out, ULONG OutSize);
 ULONG
 TCPQueryIpv6Dns(PVOID Out, ULONG OutSize);
 
+/* The IP_IPV6_ND_ENTRY_ID and IP_IPV6_STATS_ENTRY_ID answers (nd6info.c); same convention */
+ULONG
+TCPQueryIpv6Nd(PVOID Out, ULONG OutSize);
+
+
+
 /* A unicast IPv6 address of this machine (16 bytes, network order) that a socket may bind; *Zone gets the lwIP zone
    of a link-local one (0 otherwise) */
 BOOLEAN

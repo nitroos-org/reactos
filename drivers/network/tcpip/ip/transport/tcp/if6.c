@@ -253,7 +253,10 @@ TCP6NetifEvent(struct netif *netif, netif_nsc_reason_t Reason, const netif_ext_c
     UNREFERENCED_PARAMETER(Args);
 
     if (Reason & (LWIP_NSC_IPV6_SET | LWIP_NSC_IPV6_ADDR_STATE_CHANGED))
+    {
         TCP6UpdateMulticast(netif);
+
+    }
 }
 
 static netif_ext_callback_t TCP6NetifCallback;
