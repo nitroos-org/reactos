@@ -136,20 +136,29 @@ static const FLOATOBJ gef16 = 16.;
  * The operation is done in double (exact for the product of two floats) and
  * the result is truncated to a FLOAT.
  */
+#if defined(_M_AMD64)
+#include <emmintrin.h>
+#endif
+
 static
 inline
 FLOAT
 _FLOATOBJ_TruncToFloat(DOUBLE d)
 {
-    union { FLOAT f; ULONG ul; } u;
-    DOUBLE df;
+    /* Drop the 29 low bits of the 52 bit fraction: what is left is d truncated to the 24 bit FLOAT
+       mantissa, so the conversion is exact (for the normal FLOAT range the matrices live in; a value
+       beyond it is converted as before, a FLOAT denormal rounds to nearest) */
+#if defined(_M_AMD64)
+    /* In the SSE register: a trip through a general register and the stack costs more than the rest */
+    __m128d v = _mm_and_pd(_mm_set_sd(d), _mm_castsi128_pd(_mm_set1_epi64x(~0x1FFFFFFFLL)));
+    return _mm_cvtss_f32(_mm_cvtsd_ss(_mm_setzero_ps(), v));
+#else
+    union { DOUBLE d; ULONGLONG ull; } u;
 
-    u.f = (FLOAT)d;
-    df = u.f;
-
-    /* Branch free: if (FLOAT)d rounded away from zero, step back by one unit (a NaN never does) */
-    u.ul -= (d < 0) ? (df < d) : (df > d);
-    return u.f;
+    u.d = d;
+    u.ull &= ~0x1FFFFFFFULL;
+    return (FLOAT)u.d;
+#endif
 }
 
 #define FLOATOBJ_TruncAdd(pf, pf1)      {*(pf) = _FLOATOBJ_TruncToFloat((DOUBLE)*(pf) + *(pf1));}
