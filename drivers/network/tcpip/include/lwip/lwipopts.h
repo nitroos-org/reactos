@@ -81,7 +81,7 @@
 /* ICMPv6 error messages (destination unreachable, parameter problem...) are rate limited (if6.c) */
 #define LWIP_HOOK_ICMP6_ERROR_ALLOWED() LibIcmp6ErrorAllowed()
 /* NitroOS hooks in ip6_input (ip/transport/udp/udp6.c): UDP datagrams go to our datagram sockets (lwIP's UDP is
-   off), and the multicast groups sockets joined are taken (MLD is off) */
+   off), and the multicast groups sockets joined are taken (only with LWIP_IPV6_MLD 0: MLD holds them otherwise) */
 #define LWIP_HOOK_IP6_NEXTH_INPUT(p, inp, nexth) LibIp6NexthInput(p, inp, nexth)
 #define LWIP_HOOK_IP6_MCAST_ACCEPT(inp, dest) LibIp6McastAccept(inp, dest)
 #define LWIP_ICMP                       0

@@ -263,9 +263,11 @@ LibNd6DadFailed(struct netif *netif, s8_t Index)
 
     DbgPrint("TCPIP: IPv6 address %d of interface %u is a duplicate, new identifier (DAD counter %u)\n",
              (int)Index, (UINT)netif->num, (UINT)Counter + 1);
-    netif_ip6_addr_set(netif, Index, &Candidate);
-    /* Restart DAD: from the next count on (the state changes even when it was TENTATIVE with no probe sent) */
+    /* Restart DAD: from the next count on. The state goes first: with MLD, lwIP leaves the solicited-node group
+       of the address the slot holds when the state drops to TENTATIVE, so the slot must still hold the old address
+       then (the group of the new one is joined by the first probe) */
     netif_ip6_addr_set_state(netif, Index, IP6_ADDR_TENTATIVE);
+    netif_ip6_addr_set(netif, Index, &Candidate);
     return 1;
 }
 

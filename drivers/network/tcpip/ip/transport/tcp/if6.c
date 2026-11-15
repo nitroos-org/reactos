@@ -173,8 +173,8 @@ TCPReadIpv6Switch(VOID)
  * included (neighbour solicitations, and duplicate address detection: RFC 4861 4.3, RFC 4862 5.4), mapped to
  * Ethernet addresses as RFC 2464 7 says (33:33 and the last 32 bits). With the MAC-derived identifier the
  * addresses on one interface share it (link-local and SLAAC), so this is usually two addresses; with stable random
- * identifiers (iid6.c) each address has its own group. No MLD (lwipopts.h):
- * the groups are not reported to the link */
+ * identifiers (iid6.c) each address has its own group. The adapter list is ours; the groups are reported to the
+ * link by lwIP's MLD (lwipopts.h, udp6.c) */
 static
 VOID
 TCP6UpdateMulticast(struct netif *netif)
