@@ -368,11 +368,11 @@ DnsQuery_CodePage(UINT CodePage,
             break;
 
         case DNS_TYPE_MINFO:
-            ConvertedRecord = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DNS_TXT_DATA) + QueryResultWide->Data.TXT.dwStringCount);
+            ConvertedRecord = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DNS_RECORD) + QueryResultWide->Data.TXT.dwStringCount * sizeof(PSTR));
             break;
 
         case DNS_TYPE_NULL:
-            ConvertedRecord = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DNS_NULL_DATA) + QueryResultWide->Data.Null.dwByteCount);
+            ConvertedRecord = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DNS_RECORD) + QueryResultWide->Data.Null.dwByteCount);
             break;
         }
         if (ConvertedRecord == NULL)
