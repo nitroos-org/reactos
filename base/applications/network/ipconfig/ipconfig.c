@@ -14,6 +14,8 @@
 #include <winbase.h>
 #include <winnls.h>
 #include <winreg.h>
+#include <winsock2.h>
+#include <ws2ipdef.h>
 #include <iphlpapi.h>
 #include <ndk/rtlfuncs.h>
 #include <inaddr.h>
@@ -592,6 +594,74 @@ IsAdapterConnected(
             mibEntry.dwOperStatus == MIB_IF_OPER_STATUS_OPERATIONAL);
 }
 
+/*
+ * The IPv6 addresses of an adapter, as Windows 10 lists them before the IPv4 ones: IPv6 Address, Temporary IPv6
+ * Address, then Link-local IPv6 Address with its zone (%interface index); /all adds "(Preferred) ". Without IPv6
+ * GetAdaptersAddresses(AF_INET6) has none and nothing is printed (VERIFY ON ORACLE: the exact order and the
+ * deprecated/tentative suffixes).
+ */
+static
+VOID
+ShowIpv6Addresses(
+    _In_ DWORD IfIndex,
+    _In_ BOOL bAll)
+{
+    PIP_ADAPTER_ADDRESSES Addresses = NULL, A;
+    PIP_ADAPTER_UNICAST_ADDRESS U;
+    ULONG Size = 16 * 1024, Pass;
+    DWORD Error = ERROR_BUFFER_OVERFLOW;
+
+    for (Pass = 0; Pass < 3 && Error == ERROR_BUFFER_OVERFLOW; Pass++)
+    {
+        if (Addresses)
+            HeapFree(ProcessHeap, 0, Addresses);
+        Addresses = HeapAlloc(ProcessHeap, 0, Size);
+        if (!Addresses)
+            return;
+        Error = GetAdaptersAddresses(AF_INET6, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                                     GAA_FLAG_SKIP_DNS_SERVER, NULL, Addresses, &Size);
+    }
+
+    for (A = (Error == NO_ERROR) ? Addresses : NULL; A; A = A->Next)
+    {
+        INT Kind;
+
+        if (A->IfIndex != IfIndex && A->Ipv6IfIndex != IfIndex)
+            continue;
+
+        /* 0: global and other addresses, 1: temporary, 2: link-local */
+        for (Kind = 0; Kind < 3; Kind++)
+        {
+            for (U = A->FirstUnicastAddress; U; U = U->Next)
+            {
+                PSOCKADDR_IN6 Sa = (PSOCKADDR_IN6)U->Address.lpSockaddr;
+                CHAR Text[64], Line[96];
+                BOOL LinkLocal, Temporary;
+
+                if (!Sa || Sa->sin6_family != AF_INET6)
+                    continue;
+                LinkLocal = (Sa->sin6_addr.u.Byte[0] == 0xFE && (Sa->sin6_addr.u.Byte[1] & 0xC0) == 0x80);
+                Temporary = (!LinkLocal && U->SuffixOrigin == IpSuffixOriginRandom);
+                if ((Kind == 2) != LinkLocal || (Kind == 1) != Temporary)
+                    continue;
+
+                RtlIpv6AddressToStringA(&Sa->sin6_addr, Text);
+                if (LinkLocal)
+                    StringCchPrintfA(Line, _countof(Line), "%s%%%lu", Text, (ULONG)Sa->sin6_scope_id);
+                else
+                    StringCchCopyA(Line, _countof(Line), Text);
+                if (bAll)
+                    StringCchCatA(Line, _countof(Line), "(Preferred) ");
+
+                ConResPrintf(StdOut, (Kind == 2) ? IDS_LINKLOCALV6 : (Kind == 1) ? IDS_TEMPIPV6 : IDS_IPV6ADDRESS, Line);
+            }
+        }
+        break;
+    }
+
+    HeapFree(ProcessHeap, 0, Addresses);
+}
+
 static
 INT
 ShowInfo(
@@ -758,6 +828,8 @@ ShowInfo(
 
         if (bConnected)
         {
+            ShowIpv6Addresses(pAdapter->Index, bAll);
+
             /* IPv4 address and mask pairs */
             for (pIPAddr = &pAdapter->IpAddressList; pIPAddr != NULL; pIPAddr = pIPAddr->Next)
             {
