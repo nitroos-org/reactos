@@ -72,16 +72,48 @@ VOID NgFcbRemoveLocked(PNG_FCB Fcb)
 }
 
 /*
+ * TRUE when Fcb, listed under the record number of file reference Ref, is the FCB of an older file of that record:
+ * the record was freed and given to a new file (its sequence number changed) while Mm or Cc kept the old FCB.  A
+ * sequence number of 0 (a record another implementation wrote) compares as unknown.
+ */
+static __inline BOOLEAN NgFcbStale(PNG_FCB Fcb, ULONGLONG Ref)
+{
+    USHORT Seq = (USHORT)(Ref >> 48), Old = (USHORT)(Fcb->Stat.mft_ref >> 48);
+    return Seq && Old && Seq != Old;
+}
+
+/*
+ * A stale FCB (NgFcbStale) found by a create (FcbListLock held): its file is gone, so it is deleted and leaves the lookup
+ * list (its own users keep it until they let go), and the create goes on as if it had not been there.  It has no node
+ * (a node it held would have kept the old record in use); one that has is left alone and only skipped.
+ */
+static VOID NgRetireStaleFcbLocked(PNG_FCB Fcb)
+{
+    DPRINT1("ntfsng: FCB %p of record %I64x outlived its file (sequence %u)\n", Fcb, Fcb->MftNo,
+            (ULONG)(Fcb->Stat.mft_ref >> 48));
+    if (Fcb->Node)
+        return;
+    Fcb->Deleted = TRUE;
+    NgFcbRemoveLocked(Fcb);
+}
+
+/*
  * Finds the FCB for (MFT record, stream) or inserts Candidate; returns the FCB to use, counted in
  * Opening until the create counts its handle or fails, so a delete of the file's last name sees it.
  */
 static PNG_FCB NgInsertOrFindFcb(PNG_VCB Vcb, PNG_FCB Candidate)
 {
-    PLIST_ENTRY Entry, Head = NgFcbBucket(Vcb, Candidate->MftNo);
+    PLIST_ENTRY Entry, Next, Head = NgFcbBucket(Vcb, Candidate->MftNo);
     KeAcquireGuardedMutex(&Vcb->FcbListLock);
-    for (Entry = Head->Flink; Entry != Head; Entry = Entry->Flink)
+    for (Entry = Head->Flink; Entry != Head; Entry = Next)
     {
         PNG_FCB Fcb = CONTAINING_RECORD(Entry, NG_FCB, HashLinks);
+        Next = Entry->Flink;
+        if (Fcb->MftNo == Candidate->MftNo && NgFcbStale(Fcb, Candidate->Stat.mft_ref))
+        {
+            NgRetireStaleFcbLocked(Fcb);
+            continue;
+        }
         if (Fcb->MftNo == Candidate->MftNo &&
             RtlEqualUnicodeString(&Fcb->Stream, &Candidate->Stream, TRUE))
         {
@@ -108,18 +140,25 @@ static PNG_FCB NgInsertOrFindFcb(PNG_VCB Vcb, PNG_FCB Candidate)
 }
 
 /*
- * The FCB of (MFT record, unnamed stream) for an open of an existing file, counted as NgInsertOrFindFcb counts a found one
- * (RefCount and Opening), or NULL.  The caller holds CoreLock: FcbListLock is taken inside it, the order a last cleanup
- * uses (NgCleanupGated); no path takes CoreLock with FcbListLock held.
+ * The FCB of (MFT record, unnamed stream) of file reference Ref for an open of an existing file, counted as
+ * NgInsertOrFindFcb counts a found one (RefCount and Opening), or NULL.  The caller holds CoreLock: FcbListLock is
+ * taken inside it, the order a last cleanup uses (NgCleanupGated); no path takes CoreLock with FcbListLock held.
  */
-static PNG_FCB NgFindFcbForOpen(PNG_VCB Vcb, ULONGLONG MftNo)
+static PNG_FCB NgFindFcbForOpen(PNG_VCB Vcb, ULONGLONG Ref)
 {
-    PLIST_ENTRY Entry, Head = NgFcbBucket(Vcb, MftNo);
+    ULONGLONG MftNo = Ref & 0xffffffffffffULL;
+    PLIST_ENTRY Entry, Next, Head = NgFcbBucket(Vcb, MftNo);
     PNG_FCB Found = NULL;
     KeAcquireGuardedMutex(&Vcb->FcbListLock);
-    for (Entry = Head->Flink; Entry != Head; Entry = Entry->Flink)
+    for (Entry = Head->Flink; Entry != Head; Entry = Next)
     {
         PNG_FCB Fcb = CONTAINING_RECORD(Entry, NG_FCB, HashLinks);
+        Next = Entry->Flink;
+        if (Fcb->MftNo == MftNo && NgFcbStale(Fcb, Ref))
+        {
+            NgRetireStaleFcbLocked(Fcb);
+            continue;
+        }
         if (Fcb->MftNo == MftNo && Fcb->Stream.Length == 0)
         {
             InterlockedIncrement(&Fcb->RefCount);
@@ -1403,7 +1442,7 @@ walked:
      */
     else if (NT_SUCCESS(Status) && !Created && !Stream.Length && !OpenTarget && Node)
     {
-        Fcb = NgFindFcbForOpen(Vcb, St.mft_ref & 0xffffffffffffULL);
+        Fcb = NgFindFcbForOpen(Vcb, St.mft_ref);
         if (Fcb)
         {
             Opening = TRUE;
