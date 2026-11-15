@@ -776,6 +776,112 @@ static void test_ShapePlacement(void)
     }
 }
 
+/* Whether the pixels written to a window of the test can be read back (a window of its own: the DC of the test below has
+   to meet its first drawing call fresh, the clip box is computed by it) */
+static BOOL WindowReadable(void)
+{
+    HWND hwnd;
+    HDC hdc;
+    HPEN hpen, hpenOld;
+    BOOL ret;
+
+    hwnd = CreateWindowExW(0, L"STATIC", NULL, WS_POPUP | WS_VISIBLE, 96, 96, 200, 200, NULL, NULL, NULL, NULL);
+    if (!hwnd)
+        return FALSE;
+    hdc = GetDC(hwnd);
+    if (!hdc)
+    {
+        DestroyWindow(hwnd);
+        return FALSE;
+    }
+    PatBlt(hdc, 0, 0, 200, 200, WHITENESS);
+    hpen = CreatePen(PS_SOLID, 1, RGB(0, 0, 0));
+    hpenOld = SelectObject(hdc, hpen);
+    MoveToEx(hdc, 120, 150, NULL);
+    LineTo(hdc, 190, 150);
+    ret = GetPixel(hdc, 150, 150) == RGB(0, 0, 0);
+    SelectObject(hdc, hpenOld);
+    DeleteObject(hpen);
+    ReleaseDC(hwnd, hdc);
+    DestroyWindow(hwnd);
+    return ret;
+}
+
+/* The shape is drawn in a window DC whose origin is not the origin of the screen, at the right and bottom of the client
+   area. The clip box of such a DC is the client area in DC coordinates: the stroked outline must be tested against that,
+   not against the box moved by the origin (the shapes of the strip beyond it were not drawn). */
+static void test_WindowDC(void)
+{
+    static const struct { int shape; const char *name; } sh[] = { { 0, "Ellipse" }, { 1, "RoundRect" }, { 2, "Rectangle" } };
+    LOGBRUSH lb = { BS_SOLID, RGB(0, 0, 0), 0 };
+    int i;
+
+    if (!WindowReadable())
+    {
+        skip("window pixels cannot be read back\n");
+        return;
+    }
+
+    for (i = 0; i < 5; i++)
+    {
+        HWND hwnd;
+        HDC hdc;
+        HPEN hpen, hpenOld;
+
+        /* a new window and DC for every shape: the first call that draws decides */
+        hwnd = CreateWindowExW(0, L"STATIC", NULL, WS_POPUP | WS_VISIBLE, 96, 96, 200, 200, NULL, NULL, NULL, NULL);
+        hdc = hwnd ? GetDC(hwnd) : NULL;
+        if (!hdc)
+        {
+            skip("no window DC\n");
+            if (hwnd)
+                DestroyWindow(hwnd);
+            return;
+        }
+        PatBlt(hdc, 0, 0, 200, 200, WHITENESS);
+        hpen = ExtCreatePen(PS_GEOMETRIC | PS_SOLID | PS_ENDCAP_FLAT | PS_JOIN_MITER, 7, &lb, 0, NULL);
+        hpenOld = SelectObject(hdc, hpen);
+        SelectObject(hdc, GetStockObject(NULL_BRUSH));
+        if (i < 3)
+        {
+            /* the left edge of the shape lies at x = 110 (the DC origin is 96: the strip is beyond x = 104) */
+            switch (sh[i].shape)
+            {
+                case 0: Ellipse(hdc, 110, 110, 190, 190); break;
+                case 1: RoundRect(hdc, 110, 110, 190, 190, 20, 20); break;
+                default: Rectangle(hdc, 110, 110, 190, 190); break;
+            }
+            ok(GetPixel(hdc, 110, 150) == RGB(0, 0, 0), "%s with a wide pen: the left edge is not drawn in a window DC\n", sh[i].name);
+            ok(GetPixel(hdc, 150, 190) == RGB(0, 0, 0), "%s with a wide pen: the bottom edge is not drawn in a window DC\n", sh[i].name);
+        }
+        else if (i == 3)
+        {
+            BeginPath(hdc);
+            MoveToEx(hdc, 110, 110, NULL);
+            LineTo(hdc, 190, 110);
+            LineTo(hdc, 190, 190);
+            LineTo(hdc, 110, 190);
+            CloseFigure(hdc);
+            EndPath(hdc);
+            StrokePath(hdc);
+            ok(GetPixel(hdc, 190, 150) == RGB(0, 0, 0), "StrokePath with a wide pen: the right edge is not drawn in a window DC\n");
+        }
+        else
+        {
+            SelectObject(hdc, GetStockObject(BLACK_BRUSH));
+            BeginPath(hdc);
+            Rectangle(hdc, 110, 110, 190, 190);
+            EndPath(hdc);
+            FillPath(hdc);
+            ok(GetPixel(hdc, 150, 150) == RGB(0, 0, 0), "FillPath is not drawn in the strip of a window DC\n");
+        }
+        SelectObject(hdc, hpenOld);
+        DeleteObject(hpen);
+        ReleaseDC(hwnd, hdc);
+        DestroyWindow(hwnd);
+    }
+}
+
 START_TEST(WidePen)
 {
     BITMAPINFO bi;
@@ -801,6 +907,7 @@ START_TEST(WidePen)
     test_PenWidthPageScales();
     test_ShapeWidths();
     test_ShapePlacement();
+    test_WindowDC();
 
     SelectObject(g_dc, g_bmpOld);
     DeleteObject(g_bmp);

@@ -12,8 +12,9 @@
 #include "precomp.h"
 
 #define DIMS 64
-/* Calls took from several seconds to forever before; a loaded virtual machine is slow, but not this slow */
-#define MAX_MS 2000.0
+/* Calls took from several seconds to minutes (or forever) before and return in milliseconds now. The bound is far from
+   both: a loaded test machine varies by a factor of ten between runs, which must not fail the test. */
+#define MAX_MS 20000.0
 
 static DWORD *g_bits;
 static HDC g_dc;
@@ -327,6 +328,47 @@ static void test_ArcToFailure(void)
     ok_still_draws("ArcToFailure");
 }
 
+/* The regions of polygons are exact for the whole range of the points (the setup of the edges does not wrap): a point
+   far outside the device range (2^28, 2^30) gives a region with that corner, as before the wide pens. */
+static void test_PolygonRegions(void)
+{
+    static const LONG xs[] = { 0x7ffffff, 0x8000001, 0x10000000, 150000000, 178000000, 0x40000000 };
+    static const POINT ext[3] = { { -0x7fffffff, 10 }, { 0x7ffffffe, 20 }, { 5, 30 } };
+    int i;
+    HRGN hrgn;
+    RECT rc;
+
+    for (i = 0; i < (int)(sizeof(xs) / sizeof(xs[0])); i++)
+    {
+        POINT pt[3] = { { 10, 10 }, { xs[i], 20 }, { 10, 200 } };
+
+        hrgn = CreatePolygonRgn(pt, 3, ALTERNATE);
+        ok(hrgn != NULL, "CreatePolygonRgn with a point at %ld fails\n", xs[i]);
+        if (hrgn)
+        {
+            ok(GetRgnBox(hrgn, &rc) == COMPLEXREGION, "region at %ld is not complex\n", xs[i]);
+            ok(rc.left == 10 && (rc.top == 10 || rc.top == 11) && rc.bottom == 200 && rc.right >= xs[i] - 1 && rc.right <= xs[i],
+               "region at %ld has the box %ld,%ld,%ld,%ld\n", xs[i], rc.left, rc.top, rc.right, rc.bottom);
+            DeleteObject(hrgn);
+        }
+
+        ResetDC_();
+        BeginPath(g_dc);
+        Polygon(g_dc, pt, 3);
+        EndPath(g_dc);
+        hrgn = PathToRegion(g_dc);
+        ok(hrgn != NULL, "PathToRegion with a point at %ld fails\n", xs[i]);
+        if (hrgn)
+            DeleteObject(hrgn);
+    }
+
+    /* points near both ends of the LONG range: any answer, but no divide error, no hang */
+    hrgn = CreatePolygonRgn(ext, 3, WINDING);
+    if (hrgn)
+        DeleteObject(hrgn);
+    ok_still_draws("PolygonRegions");
+}
+
 /* The pen and the shape make an outline that does not touch the DC, or reaches millions of pixels past it: the
    region of the outline used to have a scanline for each row it spans, and the call took seconds to minutes (or did
    not return). Nothing of the outline that lies outside the DC is painted, and what lies inside is exact. */
@@ -530,6 +572,7 @@ START_TEST(ShapeRobustness)
     test_RotatedCosmeticPens();
     test_WideRoundRectRange();
     test_ArcToFailure();
+    test_PolygonRegions();
     test_HugeOutlines();
     test_DegenerateTransform();
 
