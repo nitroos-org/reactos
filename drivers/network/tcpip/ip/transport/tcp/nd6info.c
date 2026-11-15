@@ -101,7 +101,10 @@ TCPQueryIpv6Nd(PVOID Out, ULONG OutSize)
             Row->Flags = Entry->isrouter ? TCP_IPV6_NEIGHBOR_ROUTER : 0;
             if (Entry->state != ND6_INCOMPLETE)
             {
+                /* the entry keeps at most NETIF_MAX_HWADDR_LEN bytes, whatever the interface says */
                 Length = Entry->netif->hwaddr_len;
+                if (Length > sizeof(Entry->lladdr))
+                    Length = sizeof(Entry->lladdr);
                 if (Length > sizeof(Row->LinkAddress))
                     Length = sizeof(Row->LinkAddress);
                 Row->LinkLength = Length;
