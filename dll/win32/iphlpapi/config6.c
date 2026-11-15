@@ -22,6 +22,7 @@
 #include "iphlpapi_private.h"
 #include <wine/netioapi.h>
 #include "ipv6net.h"
+#include <iphlpapi_nitro.h>
 
 WINE_DEFAULT_DEBUG_CHANNEL(iphlpapi);
 
@@ -77,7 +78,7 @@ static DWORD row_interface(const NET_LUID *Luid, NET_IFINDEX Index, PDWORD IfInd
 
 /* ---- unicast addresses (netio.c calls these for AF_INET6) ---- */
 
-static DWORD unicast_request(ULONG Operation, const MIB_UNICASTIPADDRESS_ROW *Row, ULONG PrefixLength,
+static DWORD unicast_request(ULONG Operation, ULONG Store, const MIB_UNICASTIPADDRESS_ROW *Row, ULONG PrefixLength,
                              ULONG PrefixOrigin, ULONG SuffixOrigin)
 {
   TCP_IPV6_ADDRESS_REQUEST Request;
@@ -89,7 +90,7 @@ static DWORD unicast_request(ULONG Operation, const MIB_UNICASTIPADDRESS_ROW *Ro
 
   memset(&Request, 0, sizeof(Request));
   Request.Operation = Operation;
-  Request.Store = TCP_IPV6_STORE_ACTIVE;
+  Request.Store = Store;
   Request.IfIndex = IfIndex;
   memcpy(Request.Address, &Row->Address.Ipv6.sin6_addr, 16);
   Request.PrefixLength = PrefixLength;
@@ -107,7 +108,7 @@ static ULONG origin_or(ULONG Origin, ULONG Default)
   return (Origin == IpPrefixOriginOther || Origin == IpPrefixOriginUnchanged) ? Default : Origin;
 }
 
-DWORD Ipv6CreateUnicastAddress(const MIB_UNICASTIPADDRESS_ROW *Row)
+static DWORD create_address(const MIB_UNICASTIPADDRESS_ROW *Row, ULONG Store)
 {
   ULONG Length = Row->OnLinkPrefixLength;
   DWORD IfIndex, Error;
@@ -124,16 +125,11 @@ DWORD Ipv6CreateUnicastAddress(const MIB_UNICASTIPADDRESS_ROW *Row)
   if (Row->ValidLifetime == 0 || Row->PreferredLifetime > Row->ValidLifetime)
     return ERROR_INVALID_PARAMETER;
 
-  return unicast_request(TCP_IPV6_CONFIG_CREATE, Row, Length, origin_or(Row->PrefixOrigin, IpPrefixOriginManual),
+  return unicast_request(TCP_IPV6_CONFIG_CREATE, Store, Row, Length, origin_or(Row->PrefixOrigin, IpPrefixOriginManual),
                          origin_or(Row->SuffixOrigin, IpSuffixOriginManual));
 }
 
-DWORD Ipv6DeleteUnicastAddress(const MIB_UNICASTIPADDRESS_ROW *Row)
-{
-  return unicast_request(TCP_IPV6_CONFIG_DELETE, Row, 0, 0, 0);
-}
-
-DWORD Ipv6SetUnicastAddress(const MIB_UNICASTIPADDRESS_ROW *Row)
+static DWORD set_address(const MIB_UNICASTIPADDRESS_ROW *Row, ULONG Store)
 {
   MIB_UNICASTIPADDRESS_ROW Current;
   ULONG Length = Row->OnLinkPrefixLength;
@@ -151,9 +147,24 @@ DWORD Ipv6SetUnicastAddress(const MIB_UNICASTIPADDRESS_ROW *Row)
   if (Row->ValidLifetime == 0 || Row->PreferredLifetime > Row->ValidLifetime)
     return ERROR_INVALID_PARAMETER;
 
-  return unicast_request(TCP_IPV6_CONFIG_SET, Row, Length,
+  return unicast_request(TCP_IPV6_CONFIG_SET, Store, Row, Length,
                          Row->PrefixOrigin == IpPrefixOriginUnchanged ? Current.PrefixOrigin : Row->PrefixOrigin,
                          Row->SuffixOrigin == IpSuffixOriginUnchanged ? Current.SuffixOrigin : Row->SuffixOrigin);
+}
+
+DWORD Ipv6CreateUnicastAddress(const MIB_UNICASTIPADDRESS_ROW *Row)
+{
+  return create_address(Row, TCP_IPV6_STORE_ACTIVE);
+}
+
+DWORD Ipv6DeleteUnicastAddress(const MIB_UNICASTIPADDRESS_ROW *Row)
+{
+  return unicast_request(TCP_IPV6_CONFIG_DELETE, TCP_IPV6_STORE_ACTIVE, Row, 0, 0, 0);
+}
+
+DWORD Ipv6SetUnicastAddress(const MIB_UNICASTIPADDRESS_ROW *Row)
+{
+  return set_address(Row, TCP_IPV6_STORE_ACTIVE);
 }
 
 /* ---- routes ---- */
@@ -229,13 +240,13 @@ static BOOLEAN route_flag(BOOLEAN Flag, BOOLEAN Default)
   return Flag == 255 ? Default : (Flag != FALSE);
 }
 
-static DWORD route_request6(ULONG Operation, const MIB_IPFORWARD_ROW2 *Row, DWORD IfIndex)
+static DWORD route_request6(ULONG Operation, ULONG Store, const MIB_IPFORWARD_ROW2 *Row, DWORD IfIndex)
 {
   TCP_IPV6_ROUTE_REQUEST Request;
 
   memset(&Request, 0, sizeof(Request));
   Request.Operation = Operation;
-  Request.Store = TCP_IPV6_STORE_ACTIVE;
+  Request.Store = Store;
   Request.IfIndex = IfIndex;
   memcpy(Request.Prefix, &Row->DestinationPrefix.Prefix.Ipv6.sin6_addr, 16);
   Request.PrefixLength = Row->DestinationPrefix.PrefixLength;
@@ -291,10 +302,30 @@ DWORD WINAPI CreateIpForwardEntry2(const MIB_IPFORWARD_ROW2 *Row)
     return Error;
 
   if (Family == AF_INET6)
-    return route_request6(TCP_IPV6_CONFIG_CREATE, Row, IfIndex);
+    return route_request6(TCP_IPV6_CONFIG_CREATE, TCP_IPV6_STORE_ACTIVE, Row, IfIndex);
 
   legacy_row(Row, IfIndex, &Legacy);
   return CreateIpForwardEntry(&Legacy);
+}
+
+/* A change of an IPv6 route: what the row does not give stays what the route has */
+static DWORD set_route6(const MIB_IPFORWARD_ROW2 *Row, DWORD IfIndex, ULONG Store)
+{
+  MIB_IPFORWARD_ROW2 Change = *Row, Current = *Row;
+  DWORD Error;
+
+  Error = GetIpForwardEntry2(&Current);
+  if (Error != NO_ERROR)
+    return Error;
+  if (Change.Metric == (ULONG)-1)
+    Change.Metric = Current.Metric;
+  if (Change.Protocol == (NL_ROUTE_PROTOCOL)-1)
+    Change.Protocol = Current.Protocol;
+  if (Change.Publish == 255)
+    Change.Publish = Current.Publish;
+  if (Change.Immortal == 255)
+    Change.Immortal = Current.Immortal;
+  return route_request6(TCP_IPV6_CONFIG_SET, Store, &Change, IfIndex);
 }
 
 DWORD WINAPI SetIpForwardEntry2(const MIB_IPFORWARD_ROW2 *Row)
@@ -312,23 +343,7 @@ DWORD WINAPI SetIpForwardEntry2(const MIB_IPFORWARD_ROW2 *Row)
     return Error;
 
   if (Family == AF_INET6)
-  {
-    MIB_IPFORWARD_ROW2 Change = *Row, Current = *Row;
-
-    /* what the row does not give stays what the route has */
-    Error = GetIpForwardEntry2(&Current);
-    if (Error != NO_ERROR)
-      return Error;
-    if (Change.Metric == (ULONG)-1)
-      Change.Metric = Current.Metric;
-    if (Change.Protocol == (NL_ROUTE_PROTOCOL)-1)
-      Change.Protocol = Current.Protocol;
-    if (Change.Publish == 255)
-      Change.Publish = Current.Publish;
-    if (Change.Immortal == 255)
-      Change.Immortal = Current.Immortal;
-    return route_request6(TCP_IPV6_CONFIG_SET, &Change, IfIndex);
-  }
+    return set_route6(Row, IfIndex, TCP_IPV6_STORE_ACTIVE);
 
   legacy_row(Row, IfIndex, &Legacy);
   return SetIpForwardEntry(&Legacy);
@@ -347,7 +362,7 @@ DWORD WINAPI DeleteIpForwardEntry2(const MIB_IPFORWARD_ROW2 *Row)
     return Error;
 
   if (Family == AF_INET6)
-    return route_request6(TCP_IPV6_CONFIG_DELETE, Row, IfIndex);
+    return route_request6(TCP_IPV6_CONFIG_DELETE, TCP_IPV6_STORE_ACTIVE, Row, IfIndex);
 
   legacy_row(Row, IfIndex, &Legacy);
   return DeleteIpForwardEntry(&Legacy);
@@ -406,4 +421,342 @@ DWORD WINAPI GetIpForwardEntry2(PMIB_IPFORWARD_ROW2 Row)
   }
   HeapFree(GetProcessHeap(), 0, Rows);
   return Error;
+}
+
+/* ---- the persistent store: what route.exe and netsh configure (NitroConfigureIpv6*) ----
+ *
+ * The stack writes the persistent store itself when a request names it (persist6.c): the records are the request
+ * layout in the PersistentAddresses and PersistentRoutes values of Tcpip6\Parameters\Interfaces\<adapter GUID>
+ * (the same place and format New-NetRoute and New-NetIPAddress with -PolicyStore PersistentStore use). User mode
+ * only reads them, and puts one back after the removal from the active store alone, which the stack takes out of
+ * both stores.
+ */
+
+#define PERSIST_ADDRESSES   L"PersistentAddresses"
+#define PERSIST_ROUTES      L"PersistentRoutes"
+#define PERSIST_MAX_VALUE   0x10000
+#define ADDRESS_KEY_FROM    12      /* the address of a TCP_IPV6_ADDRESS_REQUEST */
+#define ADDRESS_KEY_TO      28
+#define ROUTE_KEY_FROM      12      /* the prefix, its length and the next hop of a TCP_IPV6_ROUTE_REQUEST */
+#define ROUTE_KEY_TO        48
+
+static const WCHAR Interfaces6Key[] = L"SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters\\Interfaces\\";
+
+/* The registry path of the adapter of an interface: the name the stack gives an interface is its GUID text */
+static BOOL adapter_key_path(DWORD IfIndex, WCHAR *Path, SIZE_T Count)
+{
+  const char *Name = getInterfaceNameByIndex(IfIndex);
+  SIZE_T Prefix = wcslen(Interfaces6Key), Length, i;
+
+  if (!Name)
+    return FALSE;
+  Length = strlen(Name);
+  if (Length == 0 || Prefix + Length + 1 > Count)
+  {
+    consumeInterfaceName(Name);
+    return FALSE;
+  }
+  wcscpy(Path, Interfaces6Key);
+  for (i = 0; i < Length; i++)
+    Path[Prefix + i] = (UCHAR)Name[i];
+  Path[Prefix + Length] = 0;
+  consumeInterfaceName(Name);
+  return TRUE;
+}
+
+/* The records of a value of a key (a HeapAlloc block, the caller frees it), *Count of them; none: NULL and 0 */
+static PUCHAR read_records(const WCHAR *Path, const WCHAR *Value, ULONG Size, PULONG Count)
+{
+  HKEY Key;
+  DWORD Type, Bytes = 0;
+  PUCHAR Data = NULL;
+
+  *Count = 0;
+  if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, Path, 0, KEY_QUERY_VALUE, &Key) != ERROR_SUCCESS)
+    return NULL;
+
+  if (RegQueryValueExW(Key, Value, NULL, &Type, NULL, &Bytes) == ERROR_SUCCESS && Type == REG_BINARY &&
+      Bytes != 0 && Bytes <= PERSIST_MAX_VALUE && Bytes % Size == 0)
+  {
+    Data = HeapAlloc(GetProcessHeap(), 0, Bytes);
+    if (Data && RegQueryValueExW(Key, Value, NULL, &Type, Data, &Bytes) == ERROR_SUCCESS && Type == REG_BINARY &&
+        Bytes != 0 && Bytes % Size == 0)
+    {
+      *Count = Bytes / Size;
+    }
+    else
+    {
+      HeapFree(GetProcessHeap(), 0, Data);
+      Data = NULL;
+    }
+  }
+  RegCloseKey(Key);
+  return Data;
+}
+
+/* The record of the value that has the key bytes [From, To) of Key, or NULL (points into Records) */
+static PUCHAR find_record(PUCHAR Records, ULONG Count, ULONG Size, const UCHAR *Key, ULONG From, ULONG To)
+{
+  ULONG i;
+
+  for (i = 0; Records && i < Count; i++)
+  {
+    if (!memcmp(Records + i * Size + From, Key + From, To - From))
+      return Records + i * Size;
+  }
+  return NULL;
+}
+
+/* The persistent record with the key of Key, copied to Out (Size bytes): TRUE if there is one */
+static BOOL saved_record(DWORD IfIndex, const WCHAR *Value, ULONG Size, const UCHAR *Key, ULONG From, ULONG To,
+                         UCHAR *Out)
+{
+  WCHAR Path[160];
+  ULONG Count;
+  PUCHAR Records, Found;
+  BOOL Result = FALSE;
+
+  if (!adapter_key_path(IfIndex, Path, ARRAYSIZE(Path)))
+    return FALSE;
+  Records = read_records(Path, Value, Size, &Count);
+  Found = find_record(Records, Count, Size, Key, From, To);
+  if (Found)
+  {
+    memcpy(Out, Found, Size);
+    Result = TRUE;
+  }
+  HeapFree(GetProcessHeap(), 0, Records);
+  return Result;
+}
+
+/* Puts Record back into the value of the adapter of IfIndex (the stack removed it with the active entry) */
+static void put_record(DWORD IfIndex, const WCHAR *Value, ULONG Size, const UCHAR *Record, ULONG From, ULONG To)
+{
+  WCHAR Path[160];
+  ULONG Count, i, Kept = 0;
+  PUCHAR Records, All;
+  HKEY Key;
+
+  if (!adapter_key_path(IfIndex, Path, ARRAYSIZE(Path)))
+    return;
+  Records = read_records(Path, Value, Size, &Count);
+  All = HeapAlloc(GetProcessHeap(), 0, (Count + 1) * Size);
+  if (All)
+  {
+    for (i = 0; i < Count; i++)
+    {
+      if (memcmp(Records + i * Size + From, Record + From, To - From))
+        memcpy(All + Kept++ * Size, Records + i * Size, Size);
+    }
+    memcpy(All + Kept++ * Size, Record, Size);
+    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, Path, 0, NULL, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, NULL, &Key,
+                        NULL) == ERROR_SUCCESS)
+    {
+      RegSetValueExW(Key, Value, 0, REG_BINARY, All, Kept * Size);
+      RegCloseKey(Key);
+    }
+    HeapFree(GetProcessHeap(), 0, All);
+  }
+  HeapFree(GetProcessHeap(), 0, Records);
+}
+
+/* The bits after the prefix length name nothing: the stack clears them before it keeps a route */
+static void mask_prefix(UCHAR *Address, ULONG Length)
+{
+  ULONG i;
+
+  for (i = 0; i < 16; i++)
+  {
+    LONG Bits = (LONG)Length - (LONG)i * 8;
+
+    if (Bits >= 8)
+      continue;
+    Address[i] = Bits <= 0 ? 0 : (UCHAR)(Address[i] & (0xff << (8 - Bits)));
+  }
+}
+
+static void route_key(const MIB_IPFORWARD_ROW2 *Row, TCP_IPV6_ROUTE_REQUEST *Key)
+{
+  memset(Key, 0, sizeof(*Key));
+  memcpy(Key->Prefix, &Row->DestinationPrefix.Prefix.Ipv6.sin6_addr, 16);
+  mask_prefix(Key->Prefix, Row->DestinationPrefix.PrefixLength);
+  Key->PrefixLength = Row->DestinationPrefix.PrefixLength;
+  if (Row->NextHop.si_family == AF_INET6)
+    memcpy(Key->NextHop, &Row->NextHop.Ipv6.sin6_addr, 16);
+}
+
+DWORD WINAPI NitroConfigureIpv6Route(ULONG Operation, BOOL Persistent, const MIB_IPFORWARD_ROW2 *Row)
+{
+  ADDRESS_FAMILY Family;
+  ULONG Store = Persistent ? TCP_IPV6_STORE_PERSISTENT : TCP_IPV6_STORE_ACTIVE;
+  TCP_IPV6_ROUTE_REQUEST Key, Saved;
+  BOOL Kept;
+  DWORD IfIndex = 0, Error;
+
+  TRACE("(%lu, %d, %p)\n", Operation, Persistent, Row);
+
+  if (Operation < TCP_IPV6_CONFIG_CREATE || Operation > TCP_IPV6_CONFIG_DELETE)
+    return ERROR_INVALID_PARAMETER;
+  Error = check_route_row(Row, &Family, &IfIndex);
+  if (Error == NO_ERROR && Operation != TCP_IPV6_CONFIG_DELETE)
+    Error = route_lifetimes_ok(Row);
+  if (Error != NO_ERROR)
+    return Error;
+  if (Family != AF_INET6)
+    return ERROR_INVALID_PARAMETER;
+
+  if (Operation == TCP_IPV6_CONFIG_CREATE)
+    return route_request6(Operation, Store, Row, IfIndex);
+  if (Operation == TCP_IPV6_CONFIG_SET)
+    return set_route6(Row, IfIndex, Store);
+
+  /* the stack's removal takes the route out of both stores: one of the active store alone keeps the record */
+  if (Persistent)
+    return route_request6(Operation, Store, Row, IfIndex);
+  route_key(Row, &Key);
+  Kept = saved_record(IfIndex, PERSIST_ROUTES, sizeof(Saved), (const UCHAR *)&Key, ROUTE_KEY_FROM, ROUTE_KEY_TO,
+                      (UCHAR *)&Saved);
+  Error = route_request6(Operation, Store, Row, IfIndex);
+  if (Kept && Error == NO_ERROR)
+    put_record(IfIndex, PERSIST_ROUTES, sizeof(Saved), (const UCHAR *)&Saved, ROUTE_KEY_FROM, ROUTE_KEY_TO);
+  return Error;
+}
+
+DWORD WINAPI NitroConfigureIpv6Address(ULONG Operation, BOOL Persistent, const MIB_UNICASTIPADDRESS_ROW *Row)
+{
+  ULONG Store = Persistent ? TCP_IPV6_STORE_PERSISTENT : TCP_IPV6_STORE_ACTIVE;
+  TCP_IPV6_ADDRESS_REQUEST Key, Saved;
+  BOOL Kept;
+  DWORD IfIndex = 0, Error;
+
+  TRACE("(%lu, %d, %p)\n", Operation, Persistent, Row);
+
+  if (!Row || Row->Address.si_family != AF_INET6)
+    return ERROR_INVALID_PARAMETER;
+  if (Operation == TCP_IPV6_CONFIG_CREATE)
+    return create_address(Row, Store);
+  if (Operation == TCP_IPV6_CONFIG_SET)
+    return set_address(Row, Store);
+  if (Operation != TCP_IPV6_CONFIG_DELETE)
+    return ERROR_INVALID_PARAMETER;
+
+  if (Persistent)
+    return unicast_request(Operation, Store, Row, 0, 0, 0);
+
+  Error = row_interface(&Row->InterfaceLuid, Row->InterfaceIndex, &IfIndex);
+  if (Error != NO_ERROR)
+    return Error;
+  memset(&Key, 0, sizeof(Key));
+  memcpy(Key.Address, &Row->Address.Ipv6.sin6_addr, 16);
+  Kept = saved_record(IfIndex, PERSIST_ADDRESSES, sizeof(Saved), (const UCHAR *)&Key, ADDRESS_KEY_FROM,
+                      ADDRESS_KEY_TO, (UCHAR *)&Saved);
+  Error = unicast_request(Operation, Store, Row, 0, 0, 0);
+  if (Kept && Error == NO_ERROR)
+    put_record(IfIndex, PERSIST_ADDRESSES, sizeof(Saved), (const UCHAR *)&Saved, ADDRESS_KEY_FROM, ADDRESS_KEY_TO);
+  return Error;
+}
+
+DWORD WINAPI NitroGetPersistentIpv6Routes(PMIB_IPFORWARD_TABLE2 *Table)
+{
+  HKEY Root;
+  PMIB_IPFORWARD_TABLE2 Result = NULL;
+  ULONG Capacity = 0, Used = 0, Index = 0;
+  WCHAR Name[80], Path[160];
+  DWORD NameLength, Error = NO_ERROR;
+  const SIZE_T Header = FIELD_OFFSET(MIB_IPFORWARD_TABLE2, Table);
+
+  TRACE("(%p)\n", Table);
+
+  if (!Table)
+    return ERROR_INVALID_PARAMETER;
+  *Table = NULL;
+
+  Result = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, Header + sizeof(MIB_IPFORWARD_ROW2));
+  if (!Result)
+    return ERROR_NOT_ENOUGH_MEMORY;
+  Capacity = 1;
+
+  /* the key of the interfaces is not there until something is configured: no persistent route */
+  if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, Interfaces6Key, 0, KEY_ENUMERATE_SUB_KEYS, &Root) != ERROR_SUCCESS)
+  {
+    *Table = Result;
+    return NO_ERROR;
+  }
+
+  for (;; Index++)
+  {
+    PTCP_IPV6_ROUTE_REQUEST Records;
+    ULONG Count, i;
+    char Narrow[80];
+    DWORD IfIndex;
+    ULONG64 Luid = 0;
+    SIZE_T Length, j;
+
+    NameLength = ARRAYSIZE(Name);
+    if (RegEnumKeyExW(Root, Index, Name, &NameLength, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
+      break;
+    Length = wcslen(Interfaces6Key);
+    if (NameLength == 0 || NameLength >= ARRAYSIZE(Narrow) || Length + NameLength + 1 > ARRAYSIZE(Path))
+      continue;
+    wcscpy(Path, Interfaces6Key);
+    wcscpy(Path + Length, Name);
+    for (j = 0; j <= NameLength; j++)
+      Narrow[j] = Name[j] > 0x7f ? '?' : (char)Name[j];
+
+    /* the adapter of the key: gone (removed) adapters have no interface, their routes are not shown */
+    if (getInterfaceIndexByName(Narrow, &IfIndex) != NO_ERROR)
+      continue;
+    getInterfaceLuidByIndex(IfIndex, NULL, &Luid);
+
+    Records = (PTCP_IPV6_ROUTE_REQUEST)read_records(Path, PERSIST_ROUTES, sizeof(*Records), &Count);
+    for (i = 0; Records && i < Count; i++)
+    {
+      PMIB_IPFORWARD_ROW2 Row;
+
+      if (Used == Capacity)
+      {
+        PMIB_IPFORWARD_TABLE2 Bigger = HeapReAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, Result,
+                                                   Header + (Capacity * 2) * sizeof(MIB_IPFORWARD_ROW2));
+        if (!Bigger)
+        {
+          Error = ERROR_NOT_ENOUGH_MEMORY;
+          break;
+        }
+        Result = Bigger;
+        Capacity *= 2;
+      }
+
+      Row = &Result->Table[Used++];
+      InitializeIpForwardEntry(Row);
+      Row->InterfaceLuid.Value = Luid;
+      Row->InterfaceIndex = IfIndex;
+      Row->DestinationPrefix.Prefix.si_family = AF_INET6;
+      memcpy(&Row->DestinationPrefix.Prefix.Ipv6.sin6_addr, Records[i].Prefix, 16);
+      Row->DestinationPrefix.PrefixLength = (UINT8)Records[i].PrefixLength;
+      Row->NextHop.si_family = AF_INET6;
+      memcpy(&Row->NextHop.Ipv6.sin6_addr, Records[i].NextHop, 16);
+      Row->Metric = Records[i].Metric;
+      Row->ValidLifetime = Records[i].ValidLifetime;
+      Row->PreferredLifetime = Records[i].PreferredLifetime;
+      Row->Origin = Records[i].Origin;
+      Row->Protocol = Records[i].Protocol;
+      Row->Publish = (Records[i].Flags & TCP_IPV6_ROUTE_PUBLISH) != 0;
+      Row->Immortal = (Records[i].Flags & TCP_IPV6_ROUTE_IMMORTAL) != 0;
+      Row->Loopback = FALSE;
+      Row->AutoconfigureAddress = FALSE;
+    }
+    HeapFree(GetProcessHeap(), 0, Records);
+    if (Error != NO_ERROR)
+      break;
+  }
+  RegCloseKey(Root);
+
+  if (Error != NO_ERROR)
+  {
+    HeapFree(GetProcessHeap(), 0, Result);
+    return Error;
+  }
+  Result->NumEntries = Used;
+  *Table = Result;
+  return NO_ERROR;
 }
