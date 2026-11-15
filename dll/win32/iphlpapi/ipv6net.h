@@ -31,6 +31,15 @@ DWORD Ipv4GetNeighborRows(PMIB_IPNET_ROW2 *Rows, ULONG *Count);
 /* The interface that owns this IPv6 address of this computer. FALSE too when IPv6 is off */
 BOOL Ipv6FindOwner(const UCHAR *Address, DWORD Scope, PDWORD IfIndex);
 
+/* The IPv6 route rows, sorted by prefix, length and interface; same convention */
+DWORD Ipv6GetRouteRows(PMIB_IPFORWARD_ROW2 *Rows, ULONG *Count);
+/* The IPv4 routes in the same layout (route2.c) */
+DWORD Ipv4GetRouteRows(PMIB_IPFORWARD_ROW2 *Rows, ULONG *Count);
+
+/* GetBestRoute2 for an IPv6 destination */
+DWORD Ipv6BestRoute(const NET_LUID *InterfaceLuid, NET_IFINDEX InterfaceIndex, const SOCKADDR_INET *SourceAddress,
+                    const SOCKADDR_INET *DestinationAddress, PMIB_IPFORWARD_ROW2 BestRoute,
+                    SOCKADDR_INET *BestSourceAddress);
 
 
 #endif

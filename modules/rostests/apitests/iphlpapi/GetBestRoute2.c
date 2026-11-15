@@ -447,9 +447,15 @@ static void TestIpv6(void)
 
     if (is_reactos())
     {
+        /* ::1 has a route over the loopback interface while the stack has IPv6 (IpForwardTable6 tests it in detail) */
+        SOCKET Probe = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+        BOOL HaveV6 = Probe != INVALID_SOCKET;
+
+        if (HaveV6)
+            closesocket(Probe);
         MakeV6(&Dest, 0, 1);
         Error = pGetBestRoute2(NULL, 0, NULL, &Dest, 0, &Row, &Source);
-        ok(Error == ERROR_NETWORK_UNREACHABLE, "::1: %lu\n", Error);
+        ok(Error == (HaveV6 ? NO_ERROR : ERROR_NETWORK_UNREACHABLE), "::1: %lu\n", Error);
     }
 
     MakeV6(&Dest, 0x2001, 1);

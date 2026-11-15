@@ -23,6 +23,12 @@ WINE_DEFAULT_DEBUG_CHANNEL(iphlpapi);
  * entries with their Ethernet address, as Windows lists them.
  */
 
+#define ROUTE_METRIC            256
+#define PROTOCOL_LOCAL          2
+#define PROTOCOL_NETMGMT        3
+#define ORIGIN_MANUAL           0
+#define ORIGIN_WELLKNOWN        1
+#define ORIGIN_ROUTERADV        3
 
 #define DAD_TENTATIVE           1
 #define DAD_DUPLICATE           2
@@ -298,4 +304,418 @@ BOOL Ipv6FindOwner(const UCHAR *Address, DWORD Scope, PDWORD IfIndex)
   return Found;
 }
 
+static BOOL is_any(const UCHAR *Address)
+{
+  static const UCHAR Zero[16];
+
+  return !memcmp(Address, Zero, 16);
+}
+
+static BOOL is_loopback_address(const UCHAR *Address)
+{
+  static const UCHAR Loopback[16] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
+
+  return !memcmp(Address, Loopback, 16);
+}
+
+static BOOL is_v4_mapped(const UCHAR *Address)
+{
+  static const UCHAR Prefix[12] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff };
+
+  return !memcmp(Address, Prefix, 12);
+}
+
+static BOOL usable_state(ULONG DadState)
+{
+  return DadState == DAD_PREFERRED || DadState == DAD_DEPRECATED;
+}
+
+/* ---- routes ---- */
+
+typedef struct _ROUTE_LIST
+{
+  PMIB_IPFORWARD_ROW2 Rows;
+  ULONG Count, Max;
+  BOOL Failed;
+} ROUTE_LIST;
+
+static void add_route(ROUTE_LIST *List, DWORD IfIndex, const UCHAR *Prefix, ULONG Length, const UCHAR *Gateway,
+                      ULONG Origin, BOOLEAN Loopback, ULONG Lifetime)
+{
+  PMIB_IPFORWARD_ROW2 Row;
+  NET_LUID Luid;
+
+  if (List->Failed || !if_luid(IfIndex, &Luid))
+    return;
+  if (List->Count == List->Max)
+  {
+    ULONG Max = List->Max ? List->Max * 2 : 16;
+    PMIB_IPFORWARD_ROW2 New = List->Rows ? HeapReAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, List->Rows, Max * sizeof(*New))
+                                         : HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, Max * sizeof(*New));
+
+    if (!New)
+    {
+      List->Failed = TRUE;
+      return;
+    }
+    List->Rows = New;
+    List->Max = Max;
+  }
+
+  Row = &List->Rows[List->Count++];
+  memset(Row, 0, sizeof(*Row));
+  Row->InterfaceLuid = Luid;
+  Row->InterfaceIndex = IfIndex;
+  set_v6(&Row->DestinationPrefix.Prefix, Prefix, 0);
+  Row->DestinationPrefix.PrefixLength = Length;
+  set_v6(&Row->NextHop, Gateway, (Gateway && is_link_local(Gateway)) ? IfIndex : 0);
+  /* the stack keeps the lifetime of the route it learnt, a route of its own lasts */
+  Row->ValidLifetime = Row->PreferredLifetime = Lifetime;
+  Row->Metric = ROUTE_METRIC;
+  Row->Protocol = (Origin == ORIGIN_ROUTERADV) ? PROTOCOL_NETMGMT : PROTOCOL_LOCAL;
+  Row->Loopback = Loopback;
+  Row->AutoconfigureAddress = TRUE;
+  Row->Origin = Origin;
+}
+
+static int __cdecl compare_routes(const void *A, const void *B)
+{
+  const MIB_IPFORWARD_ROW2 *X = A, *Y = B;
+  int Order = memcmp(&X->DestinationPrefix.Prefix.Ipv6.sin6_addr, &Y->DestinationPrefix.Prefix.Ipv6.sin6_addr, 16);
+
+  if (Order)
+    return Order;
+  if (X->DestinationPrefix.PrefixLength != Y->DestinationPrefix.PrefixLength)
+    return X->DestinationPrefix.PrefixLength < Y->DestinationPrefix.PrefixLength ? -1 : 1;
+  if (X->InterfaceIndex != Y->InterfaceIndex)
+    return X->InterfaceIndex < Y->InterfaceIndex ? -1 : 1;
+  return 0;
+}
+
+static DWORD build_routes(const IPV6_ALL *All, PMIB_IPFORWARD_ROW2 *Rows, ULONG *Count)
+{
+  static const UCHAR LinkLocalPrefix[16] = { 0xfe, 0x80 };
+  static const UCHAR MulticastPrefix[16] = { 0xff };
+  static const UCHAR Any[16];
+  ROUTE_LIST List = { NULL, 0, 0, FALSE };
+  ULONG i, j;
+
+  for (i = 0; i < All->State.Header->InterfaceCount; i++)
+  {
+    const TCP_IPV6_INTERFACE_ROW *If = &All->State.Interfaces[i];
+    BOOL Loopback = (If->Flags & TCP_IPV6_IF_LOOPBACK) != 0, HaveLinkLocal = FALSE;
+
+    if (!(If->Flags & TCP_IPV6_IF_ENABLED))
+      continue;
+
+    for (j = 0; j < All->State.Header->AddressCount; j++)
+    {
+      const TCP_IPV6_ADDRESS_ROW *Address = &All->State.Addresses[j];
+
+      if (Address->IfIndex != If->IfIndex || Address->DadState == DAD_DUPLICATE)
+        continue;
+      if (is_link_local(Address->Address))
+        HaveLinkLocal = TRUE;
+      /* a host route for each address that works; the loopback interface has ::1 */
+      if (usable_state(Address->DadState) && (!Loopback || is_loopback_address(Address->Address)))
+        add_route(&List, If->IfIndex, Address->Address, 128, NULL, ORIGIN_MANUAL, TRUE, 0xffffffff);
+    }
+    if (!Loopback && HaveLinkLocal)
+      add_route(&List, If->IfIndex, LinkLocalPrefix, 64, NULL, ORIGIN_MANUAL, FALSE, 0xffffffff);
+    add_route(&List, If->IfIndex, MulticastPrefix, 8, NULL, ORIGIN_WELLKNOWN, FALSE, 0xffffffff);
+  }
+
+  for (i = 0; All->Nd.Header && i < All->Nd.Header->PrefixCount; i++)
+  {
+    const TCP_IPV6_PREFIX_ROW *Prefix = &All->Nd.Prefixes[i];
+
+    if (Ipv6FindInterface(&All->State, Prefix->IfIndex))
+      add_route(&List, Prefix->IfIndex, Prefix->Prefix, Prefix->PrefixLength, NULL, ORIGIN_ROUTERADV, FALSE,
+                Prefix->Lifetime);
+  }
+  for (i = 0; All->Dns.Header && i < All->Dns.Header->Count; i++)
+  {
+    const TCP_IPV6_DNS_ROW *Router = &All->Dns.Rows[i];
+
+    if (Router->Kind == TCP_IPV6_DNS_ROUTER && Ipv6FindInterface(&All->State, Router->IfIndex))
+      add_route(&List, Router->IfIndex, Any, 0, Router->Address, ORIGIN_ROUTERADV, FALSE, Router->Lifetime);
+  }
+
+  if (List.Failed)
+  {
+    HeapFree(GetProcessHeap(), 0, List.Rows);
+    return ERROR_NOT_ENOUGH_MEMORY;
+  }
+  if (List.Count > 1)
+    qsort(List.Rows, List.Count, sizeof(*List.Rows), compare_routes);
+  *Rows = List.Rows;
+  *Count = List.Count;
+  return NO_ERROR;
+}
+
+DWORD Ipv6GetRouteRows(PMIB_IPFORWARD_ROW2 *Rows, ULONG *Count)
+{
+  IPV6_ALL All;
+  DWORD Result;
+
+  *Rows = NULL;
+  *Count = 0;
+  if (!get_all(&All))
+    return NO_ERROR;
+  Result = build_routes(&All, Rows, Count);
+  free_all(&All);
+  return Result;
+}
+
+/* ---- the best route ---- */
+
+/* The address a packet to Dest leaves with over interface IfIndex */
+static void pick_source(const IPV6_ALL *All, DWORD IfIndex, const UCHAR *Dest, SOCKADDR_INET *Source)
+{
+  const TCP_IPV6_ADDRESS_ROW *LinkLocal = NULL, *Global = NULL, *Loopback = NULL, *Own = NULL;
+  const TCP_IPV6_ADDRESS_ROW *Chosen;
+  ULONG i;
+
+  for (i = 0; i < All->State.Header->AddressCount; i++)
+  {
+    const TCP_IPV6_ADDRESS_ROW *Row = &All->State.Addresses[i];
+
+    if (Row->IfIndex != IfIndex || !usable_state(Row->DadState))
+      continue;
+    if (!memcmp(Row->Address, Dest, 16))
+      Own = Row;
+    if (is_loopback_address(Row->Address))
+      Loopback = Row;
+    else if (is_link_local(Row->Address))
+    {
+      if (!LinkLocal)
+        LinkLocal = Row;
+    }
+    else if (!Global || (Global->DadState != DAD_PREFERRED && Row->DadState == DAD_PREFERRED))
+      Global = Row;
+  }
+
+  if (Own)
+    Chosen = Own;
+  else if (Loopback)
+    Chosen = Loopback;
+  else if (Dest[0] == 0xff || is_link_local(Dest))
+    Chosen = LinkLocal ? LinkLocal : Global;
+  else
+    Chosen = Global ? Global : LinkLocal;
+
+  if (!Chosen)
+  {
+    set_v6(Source, NULL, 0);
+    return;
+  }
+  set_v6(Source, Chosen->Address, is_link_local(Chosen->Address) ? IfIndex : 0);
+}
+
+static void empty_route(PMIB_IPFORWARD_ROW2 Route)
+{
+  memset(Route, 0, sizeof(*Route));
+  set_v6(&Route->DestinationPrefix.Prefix, NULL, 0);
+  set_v6(&Route->NextHop, NULL, 0);
+}
+
+static BOOL prefix_covers(const UCHAR *Prefix, ULONG Length, const UCHAR *Address)
+{
+  ULONG Bytes = Length / 8, Bits = Length % 8;
+
+  if (Bytes && memcmp(Prefix, Address, Bytes))
+    return FALSE;
+  if (Bits && ((Prefix[Bytes] ^ Address[Bytes]) & (0xff << (8 - Bits)) & 0xff))
+    return FALSE;
+  return TRUE;
+}
+
+/* A v4-mapped destination is routed as the IPv4 address, the answer is in v4-mapped form */
+static void map_v4(SOCKADDR_INET *Out, const SOCKADDR_INET *In)
+{
+  UCHAR Mapped[16] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff };
+
+  memcpy(Mapped + 12, &In->Ipv4.sin_addr, 4);
+  set_v6(Out, Mapped, 0);
+}
+
+static DWORD best_route_v4_mapped(const NET_LUID *Luid, NET_IFINDEX IfIndex, const SOCKADDR_INET *Source,
+                                  const SOCKADDR_INET *Dest, PMIB_IPFORWARD_ROW2 Route, SOCKADDR_INET *BestSource)
+{
+  SOCKADDR_INET Dest4, Source4, Best4;
+  MIB_IPFORWARD_ROW2 Route4;
+  DWORD Result;
+
+  memset(&Dest4, 0, sizeof(Dest4));
+  Dest4.Ipv4.sin_family = AF_INET;
+  memcpy(&Dest4.Ipv4.sin_addr, Dest->Ipv6.sin6_addr.u.Byte + 12, 4);
+  if (Source && Source->si_family == AF_INET6 && !is_any(Source->Ipv6.sin6_addr.u.Byte))
+  {
+    if (!is_v4_mapped(Source->Ipv6.sin6_addr.u.Byte))
+      return ERROR_NOT_FOUND;
+    memset(&Source4, 0, sizeof(Source4));
+    Source4.Ipv4.sin_family = AF_INET;
+    memcpy(&Source4.Ipv4.sin_addr, Source->Ipv6.sin6_addr.u.Byte + 12, 4);
+    Source = &Source4;
+  }
+  else
+    Source = NULL;
+
+  Result = GetBestRoute2((NET_LUID *)Luid, IfIndex, Source, &Dest4, 0, &Route4, &Best4);
+  if (Result != NO_ERROR)
+    return Result;
+
+  *Route = Route4;
+  map_v4(&Route->DestinationPrefix.Prefix, &Route4.DestinationPrefix.Prefix);
+  Route->DestinationPrefix.PrefixLength = Route4.DestinationPrefix.PrefixLength + 96;
+  map_v4(&Route->NextHop, &Route4.NextHop);
+  map_v4(BestSource, &Best4);
+  return NO_ERROR;
+}
+
+DWORD Ipv6BestRoute(const NET_LUID *InterfaceLuid, NET_IFINDEX InterfaceIndex, const SOCKADDR_INET *SourceAddress,
+                    const SOCKADDR_INET *DestinationAddress, PMIB_IPFORWARD_ROW2 BestRoute,
+                    SOCKADDR_INET *BestSourceAddress)
+{
+  const UCHAR *Dest = DestinationAddress->Ipv6.sin6_addr.u.Byte;
+  IPV6_ALL All;
+  DWORD Index = 0, Owner, Result;
+  BOOL Constrained = FALSE, ScopedByDest = FALSE, Found = FALSE;
+  ULONG i, Best = 0;
+  PMIB_IPFORWARD_ROW2 Rows = NULL;
+  ULONG Count = 0;
+  NET_LUID Luid;
+
+  /* the unspecified address has no route, with or without IPv6 */
+  if (is_any(Dest))
+    return ERROR_NOT_FOUND;
+
+  if (!get_all(&All))
+  {
+    /* IPv6 is off: no IPv6 destination can be reached */
+    return ERROR_NETWORK_UNREACHABLE;
+  }
+
+  if (is_v4_mapped(Dest))
+  {
+    free_all(&All);
+    return best_route_v4_mapped(InterfaceLuid, InterfaceIndex, SourceAddress, DestinationAddress, BestRoute,
+                                BestSourceAddress);
+  }
+
+  if (InterfaceLuid && InterfaceLuid->Value)
+  {
+    if (!getInterfaceIndexByLuid(InterfaceLuid->Value, &Index))
+    {
+      free_all(&All);
+      return ERROR_NOT_FOUND;
+    }
+    Constrained = TRUE;
+  }
+  else if (InterfaceIndex)
+  {
+    if (!if_luid(InterfaceIndex, &Luid))
+    {
+      free_all(&All);
+      return ERROR_FILE_NOT_FOUND;
+    }
+    Index = InterfaceIndex;
+    Constrained = TRUE;
+  }
+
+  if (SourceAddress && SourceAddress->si_family == AF_INET6 && !is_any(SourceAddress->Ipv6.sin6_addr.u.Byte))
+  {
+    if (!Ipv6FindOwner(SourceAddress->Ipv6.sin6_addr.u.Byte, SourceAddress->Ipv6.sin6_scope_id, &Owner))
+    {
+      free_all(&All);
+      return ERROR_NOT_FOUND;
+    }
+    if (Constrained && Owner != Index)
+    {
+      free_all(&All);
+      return ERROR_NETWORK_UNREACHABLE;
+    }
+    Index = Owner;
+    Constrained = TRUE;
+  }
+
+  /* a link-local destination names its link in the scope id */
+  if (!Constrained && DestinationAddress->Ipv6.sin6_scope_id && (is_link_local(Dest) || (Dest[0] == 0xff && (Dest[1] & 0x0f) == 2)))
+  {
+    Index = DestinationAddress->Ipv6.sin6_scope_id;
+    Constrained = TRUE;
+    ScopedByDest = TRUE;
+  }
+
+  /* A multicast destination without an interface has no route of its own: the row is empty and the source is
+     the link-local address of the interface a packet would leave over (measured) */
+  if (!Constrained && Dest[0] == 0xff)
+  {
+    BOOL Have = FALSE;
+
+    empty_route(BestRoute);
+    for (i = 0; i < All.State.Header->InterfaceCount && !Have; i++)
+    {
+      const TCP_IPV6_INTERFACE_ROW *If = &All.State.Interfaces[i];
+
+      if ((If->Flags & TCP_IPV6_IF_ENABLED) && !(If->Flags & TCP_IPV6_IF_LOOPBACK))
+      {
+        pick_source(&All, If->IfIndex, Dest, BestSourceAddress);
+        Have = !is_any(BestSourceAddress->Ipv6.sin6_addr.u.Byte);
+      }
+    }
+    free_all(&All);
+    if (!Have)
+      return ERROR_NETWORK_UNREACHABLE;
+    return NO_ERROR;
+  }
+
+  Result = build_routes(&All, &Rows, &Count);
+  if (Result != NO_ERROR)
+  {
+    free_all(&All);
+    return Result;
+  }
+
+  /* the longest matching prefix wins, then the lowest metric, then the lowest interface */
+  for (i = 0; i < Count; i++)
+  {
+    const MIB_IPFORWARD_ROW2 *Route = &Rows[i];
+    ULONG Length = Route->DestinationPrefix.PrefixLength;
+
+    if (!prefix_covers(Route->DestinationPrefix.Prefix.Ipv6.sin6_addr.u.Byte, Length, Dest))
+      continue;
+    if (Constrained && Route->InterfaceIndex != Index)
+      continue;
+    if (!Found || Length > Rows[Best].DestinationPrefix.PrefixLength ||
+        (Length == Rows[Best].DestinationPrefix.PrefixLength && Route->Metric < Rows[Best].Metric))
+    {
+      Found = TRUE;
+      Best = i;
+    }
+  }
+
+  if (Found)
+  {
+    *BestRoute = Rows[Best];
+    pick_source(&All, Rows[Best].InterfaceIndex, Dest, BestSourceAddress);
+    Result = NO_ERROR;
+  }
+  else if (ScopedByDest || !Constrained)
+    Result = ERROR_NETWORK_UNREACHABLE;
+  else if (is_link_local(Dest) || Dest[0] == 0xff)
+  {
+    /* a link-local or multicast destination over an interface without a route for it: an empty row and the
+       address of that interface (measured over the loopback interface) */
+    empty_route(BestRoute);
+    pick_source(&All, Index, Dest, BestSourceAddress);
+    Result = NO_ERROR;
+  }
+  else
+    Result = ERROR_INVALID_NETNAME;
+
+  HeapFree(GetProcessHeap(), 0, Rows);
+  free_all(&All);
+  return Result;
+}
 

@@ -263,7 +263,7 @@ static void TestIpv6(void)
 
     /*
      * Without an IPv6 stack, and on Windows with IPv6 and no IPv6 default or global route (also with IPv6
-     * disabled), the unspecified address is not found and a global one has no route. ReactOS has no IPv6.
+     * disabled), the unspecified address is not found and a global one has no route.
      */
     memset(&Dest, 0, sizeof(Dest));
     Dest.sin6_family = AF_INET6;
@@ -275,7 +275,8 @@ static void TestIpv6(void)
     Dest.sin6_addr.u.Word[0] = htons(0x2001);
     Dest.sin6_addr.u.Word[7] = htons(1);
     Error = pGetBestInterfaceEx((struct sockaddr *)&Dest, &Index);
-    ok(Error == ERROR_NETWORK_UNREACHABLE || (!is_reactos() && Error == NO_ERROR), "2001::1: error %lu\n", Error);
+    /* a router advertisement can give the stack an IPv6 default route (IpForwardTable6 tests the routes) */
+    ok(Error == ERROR_NETWORK_UNREACHABLE || Error == NO_ERROR, "2001::1: error %lu\n", Error);
     ok(Error == NO_ERROR || Index == UNSET, "2001::1: interface written as %lu\n", Index);
 }
 
