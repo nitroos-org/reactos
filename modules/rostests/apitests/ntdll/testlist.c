@@ -206,6 +206,8 @@ extern void func_RtlHeapExtendReuse(void);
 extern void func_RtlHeapFrontEnd(void);
 extern void func_RtlHeapGrowFail(void);
 extern void func_RtlHeapSegments(void);
+extern void func_RtlHeapMaxBlock(void);
+extern void func_RtlHeapSweep(void);
 extern void func_RtlHeapTailCheck(void);
 extern void func_RtlHeapValidate(void);
 extern void func_RtlImageDirectoryEntryToData(void);
@@ -498,6 +500,8 @@ const struct test winetest_testlist[] =
     { "RtlHeapFrontEnd",                func_RtlHeapFrontEnd },
     { "RtlHeapGrowFail",                func_RtlHeapGrowFail },
     { "RtlHeapSegments",                func_RtlHeapSegments },
+    { "RtlHeapMaxBlock",                func_RtlHeapMaxBlock },
+    { "RtlHeapSweep",                   func_RtlHeapSweep },
     { "RtlHeapTailCheck",               func_RtlHeapTailCheck },
     { "RtlHeapValidate",                func_RtlHeapValidate },
     { "RtlImageDirectoryEntryToData",   func_RtlImageDirectoryEntryToData },

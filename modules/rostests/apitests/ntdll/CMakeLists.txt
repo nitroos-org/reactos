@@ -229,6 +229,8 @@ list(APPEND SOURCE
     RtlHeapFrontEnd.c
     RtlHeapGrowFail.c
     RtlHeapSegments.c
+    RtlHeapMaxBlock.c
+    RtlHeapSweep.c
     RtlHeapValidate.c
     RtlHeapTailCheck.c
     RtlImageDirectoryEntryToData.c
