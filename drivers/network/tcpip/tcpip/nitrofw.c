@@ -2166,16 +2166,17 @@ BOOLEAN NitroFwInboundAllowed6(PIP_INTERFACE Interface, const UCHAR *D, ULONG Le
             {
                 case 1: case 2: case 3: case 4:
                     /* destination unreachable, packet too big, time exceeded, parameter problem: those
-                       that answer our own TCP segment pass; the others are judged by the rules */
-                    if (Fw6ErrorRelated(D, Len, Off))
+                       that answer our own TCP segment or our own outstanding echo request (echo6.c) pass; the
+                       others are judged by the rules */
+                    if (Fw6ErrorRelated(D, Len, Off) || Echo6ErrorRelated(D + Off, Avail))
                         goto PassCounted;
                     break;
                 case 129:
-                    /* echo reply: it passes only if it answers an echo request this host sent. Nothing in
-                       this stack sends one yet (no ICMPv6 ping: lwIP's raw API is off), so none can be
-                       expected: it is unsolicited and is evaluated like a request (the rules, then the
-                       default), as IPv4 does for a reply with no request behind it. When ICMPv6 ping exists
-                       this must look the request up (FwIcmpReplyExpected for IPv4) before it is evaluated. */
+                    /* echo reply: it passes if it answers an echo request this host sent and still waits for
+                       (Icmp6SendEcho2, echo6.c), as IPv4's FwIcmpReplyExpected; otherwise it is unsolicited and
+                       is evaluated like a request (the rules, then the default) */
+                    if (Echo6ReplyExpected(Src, D + Off, Avail))
+                        goto PassCounted;
                     Pkt.IcmpUnsolicitedReply = TRUE;
                     break;
             }

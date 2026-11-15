@@ -48,7 +48,12 @@ NTAPI
 PsIsSystemThread(
     _In_ PETHREAD Thread);
 
-#define UDP6_TAG               'U6pT'
+/* echo6.c */
+int Echo6Input(struct pbuf *p, struct netif *inp);
+VOID Echo6CompleteDone(VOID);
+VOID Echo6Startup(VOID);
+
+#define UDP6_TAG                'U6pT'
 #define UDP6_SOCKET_GROUPS      20      /* IP_MAX_MEMBERSHIPS */
 #define UDP6_MACHINE_GROUPS     128
 /* Table entries one process can take: a group joined by sockets of other processes costs a joiner nothing (it
@@ -104,8 +109,7 @@ static LONG Udp6DeferredBytes;
 volatile LONG UDP6ReceiveDropped;
 volatile LONG UDP6PortUnreachable;
 
-/* The interface of an interface index (IF->Index), or NULL (core lock held) */
-static
+/* The interface of an interface index (IF->Index), or NULL (core lock held; echo6.c too) */
 struct netif *
 Udp6NetifOfIndex(ULONG IfIndex)
 {
@@ -150,8 +154,7 @@ Udp6Route(const ip6_addr_t *Src, const ip6_addr_t *Dest)
 
 /* The interface of a multicast datagram or group without an interface index: lwIP's default one when it is up
  * with an IPv6 address, else the first adapter that is, else the loopback interface (core lock held). VERIFY ON
- * ORACLE: Windows takes the interface of the route to the group */
-static
+ * ORACLE: Windows takes the interface of the route to the group. echo6.c too */
 struct netif *
 Udp6DefaultMulticastNetif(VOID)
 {
@@ -257,7 +260,12 @@ LibIp6NexthInput(struct pbuf *p, struct netif *inp, u8_t nexth)
     const ip6_addr_t *Src, *Dst;
     PIP_INTERFACE IF = inp ? inp->state : NULL;
 
-    if (nexth != IP6_NEXTH_UDP || !TCPIpv6Enabled)
+    if (!TCPIpv6Enabled)
+        return 0;
+    /* ICMPv6: the answers to our echo requests (echo6.c) */
+    if (nexth == IP6_NEXTH_ICMP6)
+        return Echo6Input(p, inp);
+    if (nexth != IP6_NEXTH_UDP)
         return 0;
 
     Src = ip6_current_src_addr();
@@ -404,6 +412,9 @@ UDP6DeliverDeferred(VOID)
     PLIST_ENTRY Entry;
     PUDP6_DEFERRED D;
     KIRQL OldIrql;
+
+    /* The echo requests the input answered (echo6.c) */
+    Echo6CompleteDone();
 
     /* Cheap when there is nothing: every IPv6 input calls this */
     if (IsListEmpty(&Udp6Deferred))
@@ -925,4 +936,5 @@ VOID
 UDP6Startup(VOID)
 {
     KeInitializeSpinLock(&Udp6DeferredLock);
+    Echo6Startup();
 }
