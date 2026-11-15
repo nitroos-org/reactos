@@ -69,6 +69,7 @@ void adns__findlabel_start(findlabel_state *fls, adns_state ads,
   fls->cbyte= dmbegin;
   fls->namelen= 0;
   fls->dmend_r= dmend_rlater;
+  fls->jumps= 0;
 }
 
 adns_status adns__findlabel_next(findlabel_state *fls,
@@ -87,6 +88,9 @@ adns_status adns__findlabel_next(findlabel_state *fls,
     if (fls->cbyte >= fls->max) goto x_badresponse;
     GET_B(fls->cbyte,jumpto);
     jumpto |= (lablen&0x3f)<<8;
+    /* ReactOS: a name that does not loop visits each 2 byte pointer of the datagram at most once; more jumps
+       than that is a pointer cycle, which would never end (no label is added, so namelen does not grow) */
+    if (++fls->jumps > fls->dglen / 2) goto x_badresponse;
     if (fls->dmend_r) *(fls->dmend_r)= fls->cbyte;
     fls->cbyte= jumpto;
     fls->dmend_r= 0; fls->max= fls->dglen+1;
