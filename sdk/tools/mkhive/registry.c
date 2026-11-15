@@ -115,6 +115,10 @@ typedef struct _SD_OVERRIDE
 static const SD_OVERRIDE SdOverrides[] =
 {
     { "SAM",      L"Registry\\Machine\\SAM\\SAM", REGSD_T_SAMSAM, TRUE },
+    /* ControlSet001 holds a plain copy and the keys below it that Windows 10 holds as auto-inherited their own AI copy (see setuplib) */
+    { "SYSTEM",   L"Registry\\Machine\\SYSTEM\\ControlSet001", REGSD_T_INHPLAIN, FALSE },
+    { "SYSTEM",   L"Registry\\Machine\\SYSTEM\\ControlSet001\\Services", REGSD_T_INHAI, FALSE },
+    { "SYSTEM",   L"Registry\\Machine\\SYSTEM\\ControlSet001\\Hardware Profiles", REGSD_T_INHAI, FALSE },
     { "SYSTEM",   L"Registry\\Machine\\SYSTEM\\ControlSet001\\Services\\EventLog", REGSD_T_EVENTLOG, FALSE },
     { "SYSTEM",   L"Registry\\Machine\\SYSTEM\\ControlSet001\\Services\\Tcpip\\Parameters", REGSD_T_TCPIPPARAMS, FALSE },
     { "SOFTWARE", L"Registry\\Machine\\SOFTWARE\\Policies", REGSD_T_POLICIES, FALSE },
@@ -135,6 +139,10 @@ static const SD_OVERRIDE SdOverrides[] =
     { "SYSTEM",   L"Registry\\Machine\\SYSTEM\\ControlSet001\\Control\\Session Manager", REGSD_T_INHPLAIN, FALSE },
     { "SYSTEM",   L"Registry\\Machine\\SYSTEM\\ControlSet001\\Enum", REGSD_T_INHPLAIN, FALSE },
     { "SYSTEM",   L"Registry\\Machine\\SYSTEM\\ControlSet001\\Services\\Tcpip", REGSD_T_INHPAI, FALSE },
+    /* The 32-bit view (Wow6432Node of an amd64 hive), as Windows 10 */
+    { "SOFTWARE", L"Registry\\Machine\\SOFTWARE\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion", REGSD_T_INHPAI, FALSE },
+    { "SOFTWARE", L"Registry\\Machine\\SOFTWARE\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall", REGSD_T_INHPAI, FALSE },
+    { "SOFTWARE", L"Registry\\Machine\\SOFTWARE\\Wow6432Node\\Microsoft\\Windows NT\\CurrentVersion", REGSD_T_INHPAI, FALSE },
 };
 
 /* FUNCTIONS ****************************************************************/
