@@ -314,6 +314,9 @@ Echo6Input(struct pbuf *p, struct netif *inp)
     {
         if (!Echo6Invoking(Head, Have, &Ident, &Seq))
             return 0;
+        /* The same for an error: it completes the request before lwIP looks at it */
+        if (ip6_chksum_pseudo(p, IP6_NEXTH_ICMP6, p->tot_len, Src, ip6_current_dest_addr()) != 0)
+            return 0;
         Reply = FALSE;
     }
     else
