@@ -356,47 +356,63 @@ static void FormatIpv6( const UCHAR *Address, PCHAR Out )
     Out[n] = '\0';
 }
 
-/* The AAAA records of the answer section (k is the offset of its first record) */
-static void PrintAaaaAnswers( PCHAR Rec, ULONG RecLen, int k, USHORT NumAnswers, USHORT NumAuthority, PCHAR pName )
+/* The A (WantType TYPE_A) or AAAA (TYPE_AAAA) records of the answer section, all of those that are in the packet
+   (k is the offset of its first record) */
+static void PrintAddressAnswers( PCHAR Rec, ULONG RecLen, int k, USHORT NumAnswers, USHORT NumAuthority, PCHAR pName,
+                                 USHORT WantType )
 {
-    CHAR Addresses[16][48];
-    int n = 0, a;
+    CHAR Text[48];
+    int Pass, n = 0, Printed = 0, a, Start = k;
     USHORT Type, DataLength;
 
-    for( a = 0; a < NumAnswers && n < 16; a += 1 )
+    /* pass 0 counts the addresses, pass 1 prints them */
+    for( Pass = 0; Pass < 2; Pass += 1 )
     {
-        if( (ULONG)k >= RecLen ) break;
-        k = SkipName( Rec, RecLen, k );
-        if( k < 0 || (ULONG)k + 10 > RecLen ) break;
-        Type = ntohs( ((PUSHORT)&Rec[k])[0] );
-        k += 8;
-        DataLength = ntohs( ((PUSHORT)&Rec[k])[0] );
-        k += 2;
-        if( (ULONG)k + DataLength > RecLen ) break;
-        if( TYPE_AAAA == Type && DataLength == 16 )
+        k = Start;
+        for( a = 0; a < NumAnswers; a += 1 )
         {
-            FormatIpv6( (const UCHAR *)&Rec[k], Addresses[n] );
-            n += 1;
+            if( (ULONG)k >= RecLen ) break;
+            k = SkipName( Rec, RecLen, k );
+            if( k < 0 || (ULONG)k + 10 > RecLen ) break;
+            Type = ntohs( ((PUSHORT)&Rec[k])[0] );
+            k += 8;
+            DataLength = ntohs( ((PUSHORT)&Rec[k])[0] );
+            k += 2;
+            if( (ULONG)k + DataLength > RecLen ) break;
+            if( WantType == Type && DataLength == (TYPE_AAAA == Type ? 16 : 4) )
+            {
+                if( Pass == 0 )
+                {
+                    n += 1;
+                }
+                else
+                {
+                    if( TYPE_AAAA == Type )
+                        FormatIpv6( (const UCHAR *)&Rec[k], Text );
+                    else
+                        sprintf( Text, "%u.%u.%u.%u", (UCHAR)Rec[k], (UCHAR)Rec[k + 1], (UCHAR)Rec[k + 2], (UCHAR)Rec[k + 3] );
+
+                    if( Printed == 0 )
+                        _tprintf( n == 1 ? _T("Address:  %s\n") : _T("Addresses:  %s\n"), Text );
+                    else
+                        _tprintf( _T("          %s\n"), Text );
+                    Printed += 1;
+                }
+            }
+            k += DataLength;
         }
-        k += DataLength;
-    }
 
-    if( n == 0 ) return;
+        if( Pass == 0 )
+        {
+            if( n == 0 ) return;
 
-    if( 0 == NumAuthority )
-        _tprintf( _T("Non-authoritative answer:\n") );
+            if( 0 == NumAuthority )
+                _tprintf( _T("Non-authoritative answer:\n") );
 
-    _tprintf( _T("Name:    %s\n"), pName );
-    if( n == 1 )
-    {
-        _tprintf( _T("Address:  %s\n\n"), Addresses[0] );
+            _tprintf( _T("Name:    %s\n"), pName );
+        }
     }
-    else
-    {
-        _tprintf( _T("Addresses:  %s\n"), Addresses[0] );
-        for( a = 1; a < n; a += 1 ) _tprintf( _T("          %s\n"), Addresses[a] );
-        _tprintf( _T("\n") );
-    }
+    _tprintf( _T("\n") );
 }
 
 void PerformLookup( PCHAR pAddr )
@@ -579,7 +595,15 @@ void PerformLookup( PCHAR pAddr )
     /* AAAA: every address of the answer */
     if( TYPE_AAAA == QueryType )
     {
-        PrintAaaaAnswers( RecBuffer, RecBufferLength, k, NumAnswers, NumAuthority, pAddr );
+        PrintAddressAnswers( RecBuffer, RecBufferLength, k, NumAnswers, NumAuthority, pAddr, TYPE_AAAA );
+        goto cleanup;
+    }
+
+    /* A (not a reverse lookup): every address of the answer that is in the packet */
+    if( TYPE_A == QueryType && !IsValidIP( pAddr ) &&
+        ( !strcmp( State.type, TypeA ) || !strcmp( State.type, TypeBoth ) ) )
+    {
+        PrintAddressAnswers( RecBuffer, RecBufferLength, k, NumAnswers, NumAuthority, pAddr, TYPE_A );
         goto cleanup;
     }
 

@@ -108,7 +108,8 @@ getxyDataEnt(IN OUT PCHAR *Results,
 {
     PWSAQUERYSETA WsaQuery = (PWSAQUERYSETA)*Results;
     INT ErrorCode;
-    DWORD NewLength = Length;
+    DWORD NewLength = Length, CurrentLength = Length;
+    PVOID FirstResults = *Results;
     HANDLE RnRHandle;
     LPBLOB Blob = NULL;
     PVOID NewResults = NULL;
@@ -174,13 +175,18 @@ getxyDataEnt(IN OUT PCHAR *Results,
                 /* WSALookupServiceEnd will set its own error, so save ours */
                 ErrorCode = GetLastError();
 
-                /* Check if we failed because of missing buffer space */
-                if ((ErrorCode == WSAEFAULT) && (Length > RNR_BUFFER_SIZE))
+                /* Check if we failed because of missing buffer space: NewLength is what the lookup needs */
+                if ((ErrorCode == WSAEFAULT) && (NewLength > CurrentLength))
                 {
                     /* Allocate a new buffer */
-                    NewResults = HeapAlloc(WsSockHeap, 0, Length);
+                    NewResults = HeapAlloc(WsSockHeap, 0, NewLength);
                     if (NewResults)
                     {
+                        /* The earlier bigger buffer (not the caller's own) is not needed any more */
+                        if (*Results != FirstResults)
+                            HeapFree(WsSockHeap, 0, *Results);
+                        CurrentLength = NewLength;
+
                         /* Tell the caller his new buffer */
                         *Results = NewResults;
 

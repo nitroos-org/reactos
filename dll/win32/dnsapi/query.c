@@ -774,6 +774,42 @@ AppendAaaaRecord(
     return TRUE;
 }
 
+/* The A record of an address (network order) appended to the list (First, Last); FALSE when out of memory */
+static
+BOOL
+AppendARecord(
+    _In_ PCWSTR Name,
+    _In_ DWORD Address,
+    _Inout_ PDNS_RECORDW *First,
+    _Inout_ PDNS_RECORDW *Last)
+{
+    PDNS_RECORDW Record;
+
+    Record = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DNS_RECORDW));
+    if (Record == NULL)
+        return FALSE;
+
+    Record->pName = xstrsave(Name);
+    if (Record->pName == NULL)
+    {
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Record);
+        return FALSE;
+    }
+
+    Record->wType = DNS_TYPE_A;
+    Record->wDataLength = sizeof(DNS_A_DATA);
+    Record->Flags.S.Section = DnsSectionAnswer;
+    Record->Flags.S.CharSet = DnsCharSetUnicode;
+    Record->Data.A.IpAddress = Address;
+
+    if (*Last)
+        (*Last)->pNext = Record;
+    else
+        *First = Record;
+    *Last = Record;
+    return TRUE;
+}
+
 /*
  * The AAAA records of this machine's own name: the IPv6 addresses its adapters have (not the loopback one),
  * as Windows answers it without asking a server (measured: the link-local address of the adapter, without its
@@ -1218,32 +1254,39 @@ Query_Main(LPCWSTR Name,
                 return DnsIntTranslateAdnsToDNS_STATUS(adns_error);
             }
 
-            if (answer && answer->rrs.addr)
+            if (answer && answer->rrs.addr && answer->nrrs > 0)
             {
+                PDNS_RECORDW First = NULL, Last = NULL;
+                DNS_STATUS Result = ERROR_SUCCESS;
+                int n;
+
                 if (CurrentName != AnsiName)
                     RtlFreeHeap(RtlGetProcessHeap(), 0, CurrentName);
 
                 RtlFreeHeap(RtlGetProcessHeap(), 0, AnsiName);
-                *QueryResultSet = (PDNS_RECORD)RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DNS_RECORD));
 
-                if (NULL == *QueryResultSet)
+                /* one record for every address of the answer, in the order of the answer */
+                for (n = 0; n < answer->nrrs; n++)
                 {
-                    adns_finish(astate);
-                    return ERROR_OUTOFMEMORY;
+                    if (!AppendARecord(Name, answer->rrs.addr[n].addr.inet.sin_addr.s_addr, &First, &Last))
+                    {
+                        Result = ERROR_OUTOFMEMORY;
+                        break;
+                    }
                 }
 
-                (*QueryResultSet)->pNext = NULL;
-                (*QueryResultSet)->wType = Type;
-                (*QueryResultSet)->wDataLength = sizeof(DNS_A_DATA);
-                (*QueryResultSet)->Flags.S.Section = DnsSectionAnswer;
-                (*QueryResultSet)->Flags.S.CharSet = DnsCharSetUnicode;
-                (*QueryResultSet)->Data.A.IpAddress = answer->rrs.addr->addr.inet.sin_addr.s_addr;
-
+                free(answer);
                 adns_finish(astate);
 
-                (*QueryResultSet)->pName = (LPSTR)xstrsave(Name);
+                if (Result != ERROR_SUCCESS)
+                {
+                    if (First)
+                        DnsIntFreeRecordList((PDNS_RECORD)First);
+                    return Result;
+                }
 
-                return (*QueryResultSet)->pName ? ERROR_SUCCESS : ERROR_OUTOFMEMORY;
+                *QueryResultSet = (PDNS_RECORD)First;
+                return ERROR_SUCCESS;
             }
 
             if (NULL == answer || adns_s_prohibitedcname != answer->status || NULL == answer->cname)
