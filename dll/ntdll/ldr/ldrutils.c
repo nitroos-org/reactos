@@ -2827,6 +2827,13 @@ LdrpGetProcedureAddress(
                                FALSE,
                                NULL);
 
+        /* A module that a running pass of init routines has not reached yet is initialized first, as by
+           LoadLibrary (Windows does so for GetProcAddress too) */
+        if ((NT_SUCCESS(Status)) && (ExecuteInit) && (LdrEntry->Flags & LDRP_IMAGE_DLL))
+        {
+            Status = LdrpInitializePendingEntry(LdrEntry);
+        }
+
         /* Finally, see if we're supposed to run the init routines */
         if ((NT_SUCCESS(Status)) && (ExecuteInit))
         {

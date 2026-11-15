@@ -668,11 +668,17 @@ Exit:
  */
 typedef struct _LDRP_INIT_QUEUE
 {
-    PLDR_DATA_TABLE_ENTRY *Entries; /* NULL: initialized or running */
+    PLDR_DATA_TABLE_ENTRY *Entries; /* NULL: initialized or running; LDRP_INIT_FAILED(Entry): failed early */
     ULONG Count;
     PCONTEXT Context;
     struct _LDRP_INIT_QUEUE *Prev;
 } LDRP_INIT_QUEUE;
+
+/* An entry whose init routine (or the init routine of a module it imports) failed when it was run early: the run
+   fails when it reaches it, as it does when its own call of that routine fails (Windows fails the outer load too),
+   and reaching it again early fails */
+#define LDRP_INIT_FAILED(Entry) ((PLDR_DATA_TABLE_ENTRY)((ULONG_PTR)(Entry) | 1))
+#define LDRP_INIT_HAS_FAILED(Entry) ((ULONG_PTR)(Entry) & 1)
 
 static LDRP_INIT_QUEUE *LdrpInitQueue;
 
@@ -845,29 +851,36 @@ LdrpFindLoadedImport(IN PLDR_DATA_TABLE_ENTRY Importer,
     return Found;
 }
 
+static
+NTSTATUS
+LdrpInitializePendingImports(IN PLDR_DATA_TABLE_ENTRY Importer,
+                             IN LDRP_INIT_QUEUE *SkipQueue OPTIONAL);
+
 /*
  * A module that is mapped but not yet initialized, because the run of init routines that has it queued has not
- * reached it, and that a routine of that run loads (LoadLibrary of an import another module has, say): initialize
- * it now, after the modules it imports that are pending too, as Windows does, so that what LoadLibrary returns
- * is ready to use. Modules that import it and come before it in the queue stay in their place. Not queued or
- * already running (a cycle) is a success that does nothing.
+ * reached it, and that a routine of that run reaches (LoadLibrary or GetProcAddress of it, or the load of a new
+ * module that imports it): initialize it now, after the modules it imports that are pending too, as Windows does,
+ * so that it is ready to use. Modules that import it and come before it in the queue stay in their place. Not
+ * queued or already running (a cycle) is a success that does nothing. A failure is kept in its place in the queue,
+ * so that its run fails there too.
  */
+static
 NTSTATUS
-NTAPI
-LdrpInitializePendingEntry(IN PLDR_DATA_TABLE_ENTRY Target)
+LdrpInitializePendingEntryEx(IN PLDR_DATA_TABLE_ENTRY Target,
+                             IN LDRP_INIT_QUEUE *SkipQueue OPTIONAL)
 {
     LDRP_INIT_QUEUE *Queue;
-    PIMAGE_IMPORT_DESCRIPTOR Import;
-    PLDR_DATA_TABLE_ENTRY Dependency;
-    NTSTATUS Status = STATUS_SUCCESS;
-    ULONG i, Size;
+    NTSTATUS Status;
+    ULONG i;
 
     /* Is it waiting in a queue? */
     for (Queue = LdrpInitQueue; Queue; Queue = Queue->Prev)
     {
+        if (Queue == SkipQueue) continue;
         for (i = 0; i < Queue->Count; i++)
         {
             if (Queue->Entries[i] == Target) goto Found;
+            if (Queue->Entries[i] == LDRP_INIT_FAILED(Target)) return STATUS_DLL_INIT_FAILED;
         }
     }
     return STATUS_SUCCESS;
@@ -876,13 +889,40 @@ Found:
     /* Claim it, as the run does, and run what it imports first */
     Queue->Entries[i] = NULL;
 
+    Status = LdrpInitializePendingImports(Target, NULL);
+    if (NT_SUCCESS(Status)) Status = LdrpInitializeEntry(Target, Queue->Context);
+    if (!NT_SUCCESS(Status)) Queue->Entries[i] = LDRP_INIT_FAILED(Target);
+    return Status;
+}
+
+NTSTATUS
+NTAPI
+LdrpInitializePendingEntry(IN PLDR_DATA_TABLE_ENTRY Target)
+{
+    return LdrpInitializePendingEntryEx(Target, NULL);
+}
+
+/*
+ * Initializes the pending modules that Importer imports (and theirs first), except the ones of SkipQueue: a run
+ * of init routines reaches those in its own order.
+ */
+static
+NTSTATUS
+LdrpInitializePendingImports(IN PLDR_DATA_TABLE_ENTRY Importer,
+                             IN LDRP_INIT_QUEUE *SkipQueue OPTIONAL)
+{
+    PIMAGE_IMPORT_DESCRIPTOR Import;
+    PLDR_DATA_TABLE_ENTRY Dependency;
+    NTSTATUS Status = STATUS_SUCCESS;
+    ULONG Size;
+
     _SEH2_TRY
     {
-        Import = RtlImageDirectoryEntryToData(Target->DllBase, TRUE, IMAGE_DIRECTORY_ENTRY_IMPORT, &Size);
+        Import = RtlImageDirectoryEntryToData(Importer->DllBase, TRUE, IMAGE_DIRECTORY_ENTRY_IMPORT, &Size);
         for (; Import && NT_SUCCESS(Status) && Import->Name && Import->FirstThunk; Import++)
         {
-            Dependency = LdrpFindLoadedImport(Target, (LPSTR)((ULONG_PTR)Target->DllBase + Import->Name));
-            if (Dependency) Status = LdrpInitializePendingEntry(Dependency);
+            Dependency = LdrpFindLoadedImport(Importer, (LPSTR)((ULONG_PTR)Importer->DllBase + Import->Name));
+            if (Dependency) Status = LdrpInitializePendingEntryEx(Dependency, SkipQueue);
         }
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
@@ -892,8 +932,7 @@ Found:
     }
     _SEH2_END;
 
-    if (!NT_SUCCESS(Status)) return Status;
-    return LdrpInitializeEntry(Target, Queue->Context);
+    return Status;
 }
 
 NTSTATUS
@@ -1061,12 +1100,22 @@ LdrpRunInitializeRoutines(IN PCONTEXT Context OPTIONAL)
         i++;
         if (!LdrEntry) continue;
 
+        /* A nested load ran it early, and it (or a module it imports) failed */
+        if (LDRP_INIT_HAS_FAILED(LdrEntry))
+        {
+            Status = STATUS_DLL_INIT_FAILED;
+            goto Quickie;
+        }
+
         /* Claim it before its routine runs, so that a load made from there does not run it again */
         LdrRootEntry[i - 1] = NULL;
 
         /* FIXME: Verify NX Compat */
 
-        Status = LdrpInitializeEntry(LdrEntry, Context);
+        /* A module that a routine of an outer run loads can import modules that run has not reached yet:
+           those first (only a nested run can have such imports) */
+        Status = InitQueue.Prev ? LdrpInitializePendingImports(LdrEntry, &InitQueue) : STATUS_SUCCESS;
+        if (NT_SUCCESS(Status)) Status = LdrpInitializeEntry(LdrEntry, Context);
         if (!NT_SUCCESS(Status)) goto Quickie;
     }
 

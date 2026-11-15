@@ -5,7 +5,7 @@
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
-#include <windows.h>
+#include "loadinit.h"
 
 __declspec(dllimport) LONG WINAPI LoadInitAState(VOID);
 __declspec(dllimport) LONG WINAPI LoadInitBInitialized(VOID);
@@ -21,6 +21,7 @@ DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
     {
         DisableThreadLibraryCalls(hinstDLL);
         g_Sum = LoadInitAState() + LoadInitBInitialized();
+        LoadInitLog("P+");
     }
     return TRUE;
 }
