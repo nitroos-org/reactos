@@ -199,6 +199,87 @@ START_TEST(addrlistsort)
            WSAGetLastError());
     }
 
+    /* malformed lists are rejected without touching the output: pointers past the end of the input, lengths that
+       are negative, too short or longer than a SOCKADDR_STORAGE, a negative count, another family */
+    {
+        static const struct { const char *Name; int Kind; } Bad[] =
+        {
+            { "pointer just past the input", 0 }, { "pointer far past the input", 1 }, { "length -1", 2 },
+            { "length 0x7fffffff", 3 }, { "length 129", 4 }, { "length 8", 5 }, { "count -1", 6 },
+            { "count 0x80000000", 7 }, { "family AF_UNSPEC", 8 }, { "AF_INET6 entry of 16 bytes", 9 },
+            { "count larger than the input", 10 },
+        };
+        SOCKET_ADDRESS_LIST *List = (SOCKET_ADDRESS_LIST *)In;
+
+        memset(&B, 0, sizeof(B));
+        AddV4(&B, 2);
+        AddLoopback6(&B);
+        for (i = 0; i < sizeof(Bad) / sizeof(Bad[0]); i++)
+        {
+            Size = Serialize(&B, In);
+            switch (Bad[i].Kind)
+            {
+                case 0: List->Address[0].lpSockaddr = (LPSOCKADDR)(In + Size); break;
+                case 1:
+                    /* a well-formed address, but outside the input: only the bounds check can reject it */
+                    memcpy(In + Size + 64, List->Address[1].lpSockaddr, sizeof(SOCKADDR_IN6));
+                    List->Address[1].lpSockaddr = (LPSOCKADDR)(In + Size + 64);
+                    break;
+                case 2: List->Address[0].iSockaddrLength = -1; break;
+                case 3: List->Address[1].iSockaddrLength = 0x7fffffff; break;
+                case 4: List->Address[0].iSockaddrLength = 129; break;
+                case 5: List->Address[0].iSockaddrLength = 8; break;
+                case 6: List->iAddressCount = -1; break;
+                case 7: List->iAddressCount = (INT)0x80000000; break;
+                case 8: List->Address[0].lpSockaddr->sa_family = AF_UNSPEC; break;
+                case 9: List->Address[1].iSockaddrLength = sizeof(SOCKADDR_IN); break;
+                case 10: List->iAddressCount = 3; Size = FIELD_OFFSET(SOCKET_ADDRESS_LIST, Address[2]); break;
+            }
+            memset(Out, 0xcc, sizeof(Out));
+            Bytes = 0x5555;
+            Result = WSAIoctl(S, SIO_ADDRESS_LIST_SORT, In, Size, Out, sizeof(Out), &Bytes, NULL, NULL);
+            Error = WSAGetLastError();
+            ok(Result == SOCKET_ERROR && Error == WSAEINVAL, "%s: result %d error %d\n", Bad[i].Name, Result, Error);
+            ok(Out[0] == 0xcc && Out[sizeof(Out) - 1] == 0xcc, "%s: the output buffer was written\n", Bad[i].Name);
+        }
+    }
+
+    /* sorting in place (the output buffer is the input buffer), as the SDK's callers do */
+    memset(&B, 0, sizeof(B));
+    AddV4(&B, 2);
+    AddV4(&B, 1);
+    AddLoopback6(&B);
+    Size = Serialize(&B, In);
+    Bytes = 0;
+    Result = WSAIoctl(S, SIO_ADDRESS_LIST_SORT, In, Size, In, Size, &Bytes, NULL, NULL);
+    ok(Result == 0, "in place: failed, error %d\n", WSAGetLastError());
+    ok(Bytes == Size, "in place: returned %lu bytes, expected %lu\n", Bytes, Size);
+    if (Result == 0)
+    {
+        SOCKET_ADDRESS_LIST *List = (SOCKET_ADDRESS_LIST *)In;
+
+        ok(List->iAddressCount == 3, "in place: count %d\n", List->iAddressCount);
+        Describe(List, Text, sizeof(Text));
+        ok(!strcmp(Text, V6 ? "6:1 4:1 4:2 " : "4:1 4:2 6:1 "), "in place: order is %s\n", Text);
+    }
+    /* in place with the list given in sorted order already: nothing may be lost while it is rewritten */
+    Result = WSAIoctl(S, SIO_ADDRESS_LIST_SORT, In, Size, In, Size, &Bytes, NULL, NULL);
+    ok(Result == 0, "in place again: failed, error %d\n", WSAGetLastError());
+    if (Result == 0)
+    {
+        Describe((SOCKET_ADDRESS_LIST *)In, Text, sizeof(Text));
+        ok(!strcmp(Text, V6 ? "6:1 4:1 4:2 " : "4:1 4:2 6:1 "), "in place again: order is %s\n", Text);
+    }
+    /* the output overlapping the input at another offset */
+    Size = Serialize(&B, In + 64);
+    Result = WSAIoctl(S, SIO_ADDRESS_LIST_SORT, In + 64, Size, In, sizeof(In), &Bytes, NULL, NULL);
+    ok(Result == 0, "overlapping: failed, error %d\n", WSAGetLastError());
+    if (Result == 0)
+    {
+        Describe((SOCKET_ADDRESS_LIST *)In, Text, sizeof(Text));
+        ok(!strcmp(Text, V6 ? "6:1 4:1 4:2 " : "4:1 4:2 6:1 "), "overlapping: order is %s\n", Text);
+    }
+
     closesocket(S);
 
     /* getaddrinfo for this machine: ::1 first when there is IPv6 (the destination ordering must keep that) */

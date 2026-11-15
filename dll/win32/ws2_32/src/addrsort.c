@@ -172,15 +172,18 @@ WsSortAddrInfo(PADDRINFOW List)
  * SIO_ADDRESS_LIST_SORT: the SOCKET_ADDRESS_LIST in the input buffer (its pointers point into the buffer) comes
  * back in the output buffer, in the order of the destination selection, with the unreachable ones last; the
  * answer is laid out the same way. WSAEFAULT and the size needed when the output buffer is too small.
+ * The output buffer may be the input buffer (sorting in place is the usual way to call it): the addresses are
+ * copied out of the question before the answer is written.
  */
 INT
 WsAddressListSort(LPVOID InBuffer, DWORD InSize, LPVOID OutBuffer, DWORD OutSize, LPDWORD BytesReturned)
 {
     SOCKET_ADDRESS_LIST *In = InBuffer, *Out = OutBuffer;
     const SOCKADDR *Addresses[WS_SORT_MAX];
-    ULONG Lengths[WS_SORT_MAX], Order[WS_SORT_MAX], Count, i;
-    SIZE_T Needed;
-    PUCHAR Data, Start = InBuffer, End = Start + InSize;
+    ULONG Lengths[WS_SORT_MAX], Offsets[WS_SORT_MAX], Order[WS_SORT_MAX], Count, i;
+    SIZE_T Needed, Copied;
+    PUCHAR Data, Copy, Start = InBuffer;
+    ULONG_PTR End;
 
     if (!InBuffer || InSize < FIELD_OFFSET(SOCKET_ADDRESS_LIST, Address) || !BytesReturned)
         return WSAEINVAL;
@@ -190,33 +193,44 @@ WsAddressListSort(LPVOID InBuffer, DWORD InSize, LPVOID OutBuffer, DWORD OutSize
     if (FIELD_OFFSET(SOCKET_ADDRESS_LIST, Address) + (SIZE_T)Count * sizeof(SOCKET_ADDRESS) > InSize)
         return WSAEINVAL;
 
+    /* every address lies inside the input buffer and is no longer than a SOCKADDR_STORAGE, so the sum below
+       stays small (WS_SORT_MAX of them) */
+    End = (ULONG_PTR)Start + InSize;
     Needed = FIELD_OFFSET(SOCKET_ADDRESS_LIST, Address) + (SIZE_T)Count * sizeof(SOCKET_ADDRESS);
+    Copied = 0;
     for (i = 0; i < Count; i++)
     {
-        PUCHAR Sa = (PUCHAR)In->Address[i].lpSockaddr;
+        ULONG_PTR Sa = (ULONG_PTR)In->Address[i].lpSockaddr;
+        INT Length = In->Address[i].iSockaddrLength;
 
-        if (!Sa || Sa < Start || In->Address[i].iSockaddrLength < (INT)sizeof(SOCKADDR_IN) ||
-            (SIZE_T)(End - Sa) < (SIZE_T)In->Address[i].iSockaddrLength)
+        if (Length < (INT)sizeof(SOCKADDR_IN) || Length > (INT)sizeof(SOCKADDR_STORAGE))
+            return WSAEINVAL;
+        if (!Sa || Sa < (ULONG_PTR)Start || Sa > End || End - Sa < (ULONG_PTR)Length)
             return WSAEINVAL;
         if (((const SOCKADDR *)Sa)->sa_family != AF_INET && ((const SOCKADDR *)Sa)->sa_family != AF_INET6)
             return WSAEINVAL;
-        if (((const SOCKADDR *)Sa)->sa_family == AF_INET6 &&
-            In->Address[i].iSockaddrLength < (INT)sizeof(SOCKADDR_IN6))
+        if (((const SOCKADDR *)Sa)->sa_family == AF_INET6 && Length < (INT)sizeof(SOCKADDR_IN6))
             return WSAEINVAL;
-        Addresses[i] = (const SOCKADDR *)Sa;
-        Lengths[i] = In->Address[i].iSockaddrLength;
-        Needed += Lengths[i];
+        Lengths[i] = (ULONG)Length;
+        Offsets[i] = (ULONG)Copied;
+        Copied += Lengths[i];
     }
-
-    /* separate buffers: the answer is written while the question is still read */
-    if (OutBuffer && OutSize &&
-        (PUCHAR)OutBuffer < End && (PUCHAR)OutBuffer + OutSize > Start)
-        return WSAEINVAL;
+    Needed += Copied;
 
     if (!OutBuffer || OutSize < Needed)
     {
         *BytesReturned = (DWORD)Needed;
         return WSAEFAULT;
+    }
+
+    /* the question, taken out of the input buffer: the answer may be written over it */
+    Copy = HeapAlloc(WsSockHeap, 0, Copied ? Copied : 1);
+    if (!Copy)
+        return WSAENOBUFS;
+    for (i = 0; i < Count; i++)
+    {
+        RtlCopyMemory(Copy + Offsets[i], In->Address[i].lpSockaddr, Lengths[i]);
+        Addresses[i] = (const SOCKADDR *)(Copy + Offsets[i]);
     }
 
     /* no sorter (or a single address): the order as it was given */
@@ -235,6 +249,7 @@ WsAddressListSort(LPVOID InBuffer, DWORD InSize, LPVOID OutBuffer, DWORD OutSize
         Out->Address[i].iSockaddrLength = Lengths[From];
         Data += Lengths[From];
     }
+    HeapFree(WsSockHeap, 0, Copy);
     *BytesReturned = (DWORD)Needed;
     return ERROR_SUCCESS;
 }

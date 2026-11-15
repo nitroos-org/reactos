@@ -13,7 +13,8 @@ WINE_DEFAULT_DEBUG_CHANNEL(iphlpapi);
 
 #define TCP6_PARAMETERS_KEY     L"SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters"
 #define PREFIX_POLICIES_VALUE   L"PrefixPolicies"
-#define MAX_SORT_ADDRESSES      0x10000
+/* the documented limit: more destinations are rejected with ERROR_INVALID_PARAMETER */
+#define MAX_SORT_ADDRESSES      500
 
 /*
  * The prefix policy table is the Windows default one. HKLM\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters,

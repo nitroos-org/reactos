@@ -88,6 +88,34 @@ static void TestParameters(void)
     Dest[1] = Dest[0];
     Dest[1].sin6_family = AF_INET;
     ok(pCreate(NULL, 0, Dest, 2, 0, &Pairs, &Count) == ERROR_INVALID_PARAMETER, "AF_INET entry\n");
+
+    /* the documented limit is 500 destinations: 500 are sorted, 501 and absurd counts are rejected before the list
+       is read (the outputs stay as they were) */
+    {
+        SOCKADDR_IN6 *Many = HeapAlloc(GetProcessHeap(), 0, 501 * sizeof(*Many));
+        ULONG i;
+
+        ok(Many != NULL, "no memory\n");
+        if (Many)
+        {
+            for (i = 0; i < 501; i++)
+                Mapped(&Many[i], 127, 0, (UCHAR)(i >> 8), (UCHAR)(i + 1));
+            Pairs = NULL;
+            Count = 0;
+            Error = pCreate(NULL, 0, Many, 500, 0, &Pairs, &Count);
+            ok(Error == NO_ERROR, "500 destinations: %lu\n", Error);
+            ok(Count >= 1 && Count <= 500 && Pairs != NULL, "500 destinations: count %lu pairs %p\n", Count, Pairs);
+            if (Error == NO_ERROR && Pairs)
+                pFree(Pairs);
+            Pairs = (PSOCKADDR_IN6_PAIR)0x1234;
+            Count = 77;
+            ok(pCreate(NULL, 0, Many, 501, 0, &Pairs, &Count) == ERROR_INVALID_PARAMETER, "501 destinations\n");
+            ok(pCreate(NULL, 0, Many, 0x7fffffff, 0, &Pairs, &Count) == ERROR_INVALID_PARAMETER, "count 0x7fffffff\n");
+            ok(pCreate(NULL, 0, Many, 0xffffffff, 0, &Pairs, &Count) == ERROR_INVALID_PARAMETER, "count 0xffffffff\n");
+            ok(Pairs == (PSOCKADDR_IN6_PAIR)0x1234 && Count == 77, "outputs after a rejected count: %p %lu\n", Pairs, Count);
+            HeapFree(GetProcessHeap(), 0, Many);
+        }
+    }
 }
 
 /* the first Wanted pairs must be these destinations, each with this source */
