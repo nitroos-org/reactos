@@ -296,6 +296,7 @@ struct adns__state {
   adns_query forallnext;
   int nextid;
   ADNS_SOCKET udpsocket, tcpsocket;
+  ADNS_SOCKET udpsocket6; /* ReactOS: made with the first IPv6 server, else -1 */
   vbuf tcpsend, tcprecv;
   int nservers, nsortlist, nsearchlist, searchndots, tcpserver, tcprecv_skip;
   enum adns__tcpstate {
@@ -315,6 +316,9 @@ struct adns__state {
   struct pollfd pollfds_buf[MAX_POLLFDS];
   struct server {
     struct in_addr addr;
+    int v6;                  /* ReactOS: an IPv6 server: addr6 and scope6 are the address */
+    struct in6_addr addr6;
+    unsigned long scope6;
   } servers[MAXSERVERS];
   struct sortlist {
     struct in_addr base, mask;

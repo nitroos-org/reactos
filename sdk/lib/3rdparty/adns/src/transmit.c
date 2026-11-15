@@ -231,6 +231,7 @@ static void query_usetcp(adns_query qu, struct timeval now) {
 
 void adns__query_send(adns_query qu, struct timeval now) {
   struct sockaddr_in servaddr;
+  struct sockaddr_in6 servaddr6;
   int serv, r;
   adns_state ads;
 
@@ -254,8 +255,18 @@ void adns__query_send(adns_query qu, struct timeval now) {
   servaddr.sin_port= htons(DNS_PORT);
 
   ADNS_CLEAR_ERRNO;
-  r= sendto(ads->udpsocket,(char*)qu->query_dgram,qu->query_dglen,0,
-	    (const struct sockaddr*)&servaddr,sizeof(servaddr));
+  if (ads->servers[serv].v6) {
+    memset(&servaddr6,0,sizeof(servaddr6));
+    servaddr6.sin6_family= AF_INET6;
+    servaddr6.sin6_addr= ads->servers[serv].addr6;
+    servaddr6.sin6_scope_id= ads->servers[serv].scope6;
+    servaddr6.sin6_port= htons(DNS_PORT);
+    r= sendto(ads->udpsocket6,(char*)qu->query_dgram,qu->query_dglen,0,
+	      (const struct sockaddr*)&servaddr6,sizeof(servaddr6));
+  } else {
+    r= sendto(ads->udpsocket,(char*)qu->query_dgram,qu->query_dglen,0,
+	      (const struct sockaddr*)&servaddr,sizeof(servaddr));
+  }
   ADNS_CAPTURE_ERRNO;
   if (r<0 && errno == EMSGSIZE) { qu->retries= 0; query_usetcp(qu,now); return; }
   if (r<0 && ((errno != EAGAIN) && (errno != EWOULDBLOCK))) adns__warn(ads,serv,0,"sendto failed: %s (%d)",strerror(errno), errno);

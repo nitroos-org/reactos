@@ -134,6 +134,51 @@ CreateRecordForIpAddress(
 }
 
 
+/*
+ * The IPv6 name servers of the adapters (configured ones and those of router advertisements: iphlpapi's
+ * GetAdaptersAddresses lists them with the IPv6 family), after the IPv4 servers that GetNetworkParams gave, so
+ * that they are asked first and the IPv6 ones only when there is no IPv4 server or it does not answer. Without
+ * IPv6 (the switch off) GetAdaptersAddresses has nothing for the IPv6 family and nothing is added.
+ */
+static
+VOID
+AddIpv6Servers(adns_state astate)
+{
+    PIP_ADAPTER_ADDRESSES Addresses = NULL, Adapter;
+    PIP_ADAPTER_DNS_SERVER_ADDRESS Server;
+    ULONG Size = 16 * 1024, Pass;
+    DWORD Error = ERROR_BUFFER_OVERFLOW;
+
+    for (Pass = 0; Pass < 3 && Error == ERROR_BUFFER_OVERFLOW; Pass++)
+    {
+        if (Addresses)
+            RtlFreeHeap(RtlGetProcessHeap(), 0, Addresses);
+        Addresses = RtlAllocateHeap(RtlGetProcessHeap(), 0, Size);
+        if (!Addresses)
+            return;
+        Error = GetAdaptersAddresses(AF_INET6,
+                                     GAA_FLAG_SKIP_UNICAST | GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST,
+                                     NULL, Addresses, &Size);
+    }
+
+    for (Adapter = (Error == ERROR_SUCCESS) ? Addresses : NULL; Adapter; Adapter = Adapter->Next)
+    {
+        if (Adapter->IfType == IF_TYPE_SOFTWARE_LOOPBACK || Adapter->OperStatus != IfOperStatusUp)
+            continue;
+
+        for (Server = Adapter->FirstDnsServerAddress; Server; Server = Server->Next)
+        {
+            const SOCKADDR_IN6 *Sa = (const SOCKADDR_IN6 *)Server->Address.lpSockaddr;
+
+            if (Sa && Sa->sin6_family == AF_INET6)
+                adns_addserver6(astate, &Sa->sin6_addr, Sa->sin6_scope_id);
+        }
+    }
+
+    if (Addresses)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Addresses);
+}
+
 /* DnsQuery ****************************
  * Begin a DNS query, and allow the result to be placed in the application
  * supplied result pointer.  The result can be manipulated with the record
@@ -710,6 +755,7 @@ QueryPtr(LPCWSTR Name,
         if ((addr.s_addr != INADDR_ANY) && (addr.s_addr != INADDR_NONE))
             adns_addserver(astate, addr);
     }
+    AddIpv6Servers(astate);
     RtlFreeHeap(RtlGetProcessHeap(), 0, network_info);
 
     if (!adns_numservers(astate))
@@ -900,6 +946,7 @@ Query_Main(LPCWSTR Name,
             if ((addr.s_addr != INADDR_ANY) && (addr.s_addr != INADDR_NONE))
                 adns_addserver(astate, addr);
         }
+        AddIpv6Servers(astate);
         if (network_info->DomainName[0])
         {
             adns_ccf_search(astate, "LOCALDOMAIN", -1, network_info->DomainName);

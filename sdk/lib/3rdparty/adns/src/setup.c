@@ -50,7 +50,7 @@ static void addserver(adns_state ads, struct in_addr addr) {
   struct server *ss;
 
   for (i=0; i<ads->nservers; i++) {
-    if (ads->servers[i].addr.s_addr == addr.s_addr) {
+    if (!ads->servers[i].v6 && ads->servers[i].addr.s_addr == addr.s_addr) {
       adns__debug(ads,-1,0,"duplicate nameserver %s ignored",inet_ntoa(addr));
       return;
     }
@@ -63,6 +63,7 @@ static void addserver(adns_state ads, struct in_addr addr) {
 
   ss= ads->servers+ads->nservers;
   ss->addr= addr;
+  ss->v6= 0;
   ads->nservers++;
 }
 
@@ -488,7 +489,7 @@ static int init_begin(adns_state *ads_r, adns_initflags flags, FILE *diagfile) {
   LIST_INIT(ads->output);
   ads->forallnext= 0;
   ads->nextid= 0x311f;
-  ads->udpsocket= ads->tcpsocket= -1;
+  ads->udpsocket= ads->tcpsocket= ads->udpsocket6= -1;
   adns__vbuf_init(&ads->tcpsend);
   adns__vbuf_init(&ads->tcprecv);
   ads->tcprecv_skip= 0;
@@ -657,6 +658,7 @@ void adns_finish(adns_state ads) {
     else break;
   }
   adns_socket_close(ads->udpsocket);
+  if (ads->udpsocket6 != (ADNS_SOCKET)-1) adns_socket_close(ads->udpsocket6);
   if (ads->tcpsocket != -1) adns_socket_close(ads->tcpsocket);
   adns__vbuf_free(&ads->tcpsend);
   adns__vbuf_free(&ads->tcprecv);
@@ -711,6 +713,39 @@ adns_query adns_forallqueries_next(adns_state ads, void **context_r) {
 /* ReactOS addition */
 void adns_addserver(adns_state ads, struct in_addr addr) {
     addserver(ads, addr);
+}
+int adns_addserver6(adns_state ads, const struct in6_addr *addr, unsigned long scope_id) {
+  int i;
+  struct server *ss;
+  struct protoent *proto;
+
+  for (i=0; i<ads->nservers; i++) {
+    if (ads->servers[i].v6 && ads->servers[i].scope6 == scope_id &&
+        !memcmp(&ads->servers[i].addr6,addr,sizeof(*addr))) return 1;
+  }
+  if (ads->nservers>=MAXSERVERS) return 0;
+
+  if (ads->udpsocket6 == (ADNS_SOCKET)-1) {
+    /* No IPv6 on this system (the socket cannot be made): the server is not one */
+    proto= getprotobyname("udp"); if (!proto) return 0;
+    ADNS_CLEAR_ERRNO;
+    ads->udpsocket6= socket(AF_INET6,SOCK_DGRAM,proto->p_proto);
+    ADNS_CAPTURE_ERRNO;
+    if (ads->udpsocket6 == (ADNS_SOCKET)-1) return 0;
+    if (adns__setnonblock(ads,ads->udpsocket6)) {
+      adns_socket_close(ads->udpsocket6);
+      ads->udpsocket6= -1;
+      return 0;
+    }
+  }
+
+  ss= ads->servers+ads->nservers;
+  memset(ss,0,sizeof(*ss));
+  ss->v6= 1;
+  ss->addr6= *addr;
+  ss->scope6= scope_id;
+  ads->nservers++;
+  return 1;
 }
 void adns_ccf_search(adns_state ads, const char *fn, int lno, const char *buf) {
     ccf_search(ads, fn, lno, buf);

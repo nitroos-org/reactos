@@ -82,6 +82,7 @@ extern "C"
 #include <winbase.h>
 #include <objbase.h>
 #include <winsock2.h>
+#include <ws2tcpip.h>
 //#include <windows.h>
 #include <sys/types.h>
 #include <time.h>
