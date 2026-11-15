@@ -722,9 +722,22 @@ static void TestTcpTables(void)
     closesocket(l);
 }
 
+/* The test has blocking accept and connect calls: a catalog without AF_INET6 entries (an install the upgrade left alone)
+   made socket(AF_INET6) fail and then a call on the invalid socket wait for ever. Nothing here takes minutes. */
+#define WATCHDOG_MS (3 * 60 * 1000)
+
+static DWORD WINAPI Watchdog(PVOID Context)
+{
+    Sleep(WATCHDOG_MS);
+    ok(0, "ipv6tcp did not finish in %u seconds, stopped\n", WATCHDOG_MS / 1000);
+    ExitProcess(1);
+    return 0;
+}
+
 START_TEST(ipv6tcp)
 {
     WSADATA wsaData;
+    HANDLE hWatchdog;
 
     ok(WSAStartup(MAKEWORD(2, 2), &wsaData) == 0, "WSAStartup failed\n");
 
@@ -742,6 +755,22 @@ START_TEST(ipv6tcp)
         return;
     }
 
+    /* IPv6 sockets are on in the stack: the catalog must have AF_INET6 entries too */
+    {
+        SOCKET s = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
+
+        ok(s != INVALID_SOCKET, "IPv6 sockets are on but socket(AF_INET6) fails: %d (no AF_INET6 catalog entries?)\n",
+           WSAGetLastError());
+        if (s == INVALID_SOCKET)
+        {
+            WSACleanup();
+            return;
+        }
+        closesocket(s);
+    }
+
+    hWatchdog = CreateThread(NULL, 0, Watchdog, NULL, 0, NULL);
+
     TestLoopback();
     TestV6Only();
     TestDualStackListener();
@@ -752,5 +781,10 @@ START_TEST(ipv6tcp)
     TestTcpTables();
     TestOracleAnswers();
 
+    if (hWatchdog)
+    {
+        TerminateThread(hWatchdog, 0);
+        CloseHandle(hWatchdog);
+    }
     WSACleanup();
 }

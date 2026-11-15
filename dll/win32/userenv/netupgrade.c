@@ -15,9 +15,10 @@
  * when the catalog holds every entry of the INF section TCPIP_AddReg_Ipv6.NT or was left alone on purpose. So the
  * one-shot is per version of the INF: a later INF with more entries is looked at once.
  *
- * What the section holds is read from the INF itself (table-driven): the provider id inside each
- * PackedCatalogItem it defines is looked for in the catalog, by entry key and by id. When an entry is missing
- * and no entry the INF defines has another provider id, and the catalog's next id does not exceed the INF's
+ * What the section holds is read from the INF itself (table-driven): the provider id, address family and
+ * protocol inside each PackedCatalogItem it defines are looked for in the catalog, by entry key (the six MSAFD
+ * entries share one provider id, so the family and protocol tell them apart). When an entry is missing
+ * and no entry the INF defines holds something else, and the catalog's next id does not exceed the INF's
  * (no provider that is not ours was added since), the section MS_TCPIP.Ipv6Upgrade (the same AddReg lines a
  * new install runs; idempotent) is installed and the catalog serial number is raised, which makes the
  * processes that cached the catalog read it again. Setupapi is loaded only then, and only here.
@@ -42,10 +43,13 @@
 #define NU_ENTRY_MARK       L"\\Catalog_Entries\\"
 
 /* A PackedCatalogItem is the library path (CHAR[MAX_PATH]) and a WSAPROTOCOL_INFOW, whose provider id is
-   after four service flags and the provider flags */
+   after four service flags and the provider flags; the address family follows the provider id, the catalog
+   entry id, the protocol chain (a count and seven ids) and the version; the protocol is three ints after that */
 #define NU_PACKED_PATH_SIZE     MAX_PATH
 #define NU_PROVIDER_ID_OFFSET   (NU_PACKED_PATH_SIZE + 5 * sizeof(DWORD))
-#define NU_PACKED_MIN_SIZE      (NU_PROVIDER_ID_OFFSET + sizeof(GUID))
+#define NU_FAMILY_OFFSET        (NU_PROVIDER_ID_OFFSET + sizeof(GUID) + sizeof(DWORD) + 8 * sizeof(DWORD) + sizeof(INT))
+#define NU_PROTOCOL_OFFSET      (NU_FAMILY_OFFSET + 4 * sizeof(INT))
+#define NU_PACKED_MIN_SIZE      (NU_PROTOCOL_OFFSET + sizeof(INT))
 #define NU_PACKED_MAX_SIZE      1024
 #define NU_MAX_ENTRIES          32
 
@@ -53,6 +57,8 @@ typedef struct _NU_ENTRY
 {
     WCHAR Name[16];     /* key name under Catalog_Entries (000000000004) */
     GUID Provider;
+    INT Family;         /* iAddressFamily and iProtocol: all six MSAFD entries share the provider id */
+    INT Protocol;
 } NU_ENTRY;
 
 typedef struct _NU_STAMP
@@ -143,7 +149,17 @@ NuEntryName(PCWSTR pszPath)
     return (*p && !wcschr(p, L'\\')) ? p : NULL;
 }
 
-/* The entries (key name, provider id) of the AddReg section, and the next entry id it sets */
+/* The provider id, address family and protocol of a packed catalog item of at least NU_PACKED_MIN_SIZE bytes */
+static
+VOID
+NuUnpackEntry(NU_ENTRY *Entry, const BYTE *Blob)
+{
+    RtlCopyMemory(&Entry->Provider, Blob + NU_PROVIDER_ID_OFFSET, sizeof(GUID));
+    RtlCopyMemory(&Entry->Family, Blob + NU_FAMILY_OFFSET, sizeof(INT));
+    RtlCopyMemory(&Entry->Protocol, Blob + NU_PROTOCOL_OFFSET, sizeof(INT));
+}
+
+/* The entries (key name, provider id, family, protocol) of the AddReg section, and the next entry id it sets */
 static
 BOOL
 NuReadInf(
@@ -207,39 +223,41 @@ NuReadInf(
             break;
         }
         wcscpy(Entries[*pCount].Name, pszEntry);
-        RtlCopyMemory(&Entries[*pCount].Provider, Blob + NU_PROVIDER_ID_OFFSET, sizeof(GUID));
+        NuUnpackEntry(&Entries[*pCount], Blob);
         (*pCount)++;
     }
     CloseInf(Inf);
     return Ok && *pCount != 0 && *pNextId != 0;
 }
 
-/* Reads the provider id of a catalog entry; FALSE when there is no such entry */
+/* Reads the provider id, family and protocol of a catalog entry; FALSE when there is no such entry */
 static
 BOOL
-NuReadCatalogEntry(HKEY hEntries, PCWSTR pszName, GUID *Provider)
+NuReadCatalogEntry(HKEY hEntries, PCWSTR pszName, NU_ENTRY *Found)
 {
     HKEY hKey;
     BYTE Blob[NU_PACKED_MAX_SIZE];
     DWORD Size = sizeof(Blob), Type;
-    BOOL Found = FALSE;
+    BOOL Exists = FALSE;
 
     if (RegOpenKeyExW(hEntries, pszName, 0, KEY_QUERY_VALUE, &hKey) != ERROR_SUCCESS)
         return FALSE;
     if (RegQueryValueExW(hKey, L"PackedCatalogItem", NULL, &Type, Blob, &Size) == ERROR_SUCCESS &&
         Type == REG_BINARY && Size >= NU_PACKED_MIN_SIZE)
     {
-        RtlCopyMemory(Provider, Blob + NU_PROVIDER_ID_OFFSET, sizeof(GUID));
-        Found = TRUE;
+        NuUnpackEntry(Found, Blob);
+        Exists = TRUE;
     }
     else
     {
         /* An entry key we cannot make sense of counts as a different provider */
-        RtlZeroMemory(Provider, sizeof(GUID));
-        Found = TRUE;
+        RtlZeroMemory(&Found->Provider, sizeof(GUID));
+        Found->Family = 0;
+        Found->Protocol = 0;
+        Exists = TRUE;
     }
     RegCloseKey(hKey);
-    return Found;
+    return Exists;
 }
 
 typedef enum _NU_VERDICT
@@ -274,13 +292,14 @@ NuJudge(const NU_ENTRY *Entries, DWORD Count, DWORD InfNextId)
     Verdict = NuComplete;
     for (i = 0; i < Count; i++)
     {
-        GUID Found;
+        NU_ENTRY Found;
 
         if (!NuReadCatalogEntry(hEntries, Entries[i].Name, &Found))
         {
             Missing = TRUE;
         }
-        else if (!IsEqualGUID(&Found, &Entries[i].Provider))
+        else if (!IsEqualGUID(&Found.Provider, &Entries[i].Provider) ||
+                 Found.Family != Entries[i].Family || Found.Protocol != Entries[i].Protocol)
         {
             Verdict = NuLeaveAlone;
             break;
