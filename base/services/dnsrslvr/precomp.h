@@ -57,6 +57,16 @@ DnsIntFlushCacheEntry(
     _In_ LPCWSTR pszName,
     _In_ WORD wType);
 
+VOID
+DnsIntCacheLock(VOID);
+
+VOID
+DnsIntCacheUnlock(VOID);
+
+BOOL
+DnsIntCacheHasHostsName(
+    _In_ LPCWSTR Name);
+
 DNS_STATUS
 DnsIntCacheGetEntryByName(
     LPCWSTR Name,
@@ -82,5 +92,11 @@ DnsIntCacheGetEntries(
 
 BOOL
 ReadHostsFile(VOID);
+
+VOID
+HostsFileInitialize(VOID);
+
+VOID
+HostsFileReloadIfChanged(VOID);
 
 #endif /* _DNSRSLVR_PCH_ */
