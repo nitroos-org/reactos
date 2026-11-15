@@ -81,9 +81,11 @@ function Resolve-DnsName {
     }
 }
 
-# Set-DnsClientServerAddress: the DNS servers of an interface live in the NameServer value of its
-# Tcpip\Parameters\Interfaces\{guid} registry key (what the network control panel also writes and what iphlpapi reads back);
-# -ResetServerAddresses removes the value, which hands the interface back to the servers its DHCP lease carries.
+# Set-DnsClientServerAddress: the IPv4 DNS servers of an interface live in the NameServer value of its
+# Tcpip\Parameters\Interfaces\{guid} registry key (what the network control panel also writes and what iphlpapi reads back), the
+# IPv6 ones in the NameServer value of Tcpip6\Parameters\Interfaces\{guid} (the IPv6 row; iphlpapi lists them before the servers a
+# router advertisement carries). -ResetServerAddresses removes the values, which hands the interface back to the servers its DHCP
+# lease or its router advertisements carry.
 function Set-DnsClientServerAddress {
     [CmdletBinding(DefaultParameterSetName = 'ByAlias', SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
     [OutputType('Microsoft.Management.Infrastructure.CimInstance#ROOT/StandardCimv2/MSFT_DNSClientServerAddress')]
@@ -115,12 +117,15 @@ function Set-DnsClientServerAddress {
             foreach ($e in $errors) { $PSCmdlet.WriteError($e) }
         }
         $addresses = @()
-        $bad = $null
+        $badReported = $false; $badText = $null
         if ($PSBoundParameters.ContainsKey('ServerAddresses')) {
-            foreach ($a in $ServerAddresses) {
-                $ip = $null
-                if (-not [System.Net.IPAddress]::TryParse($a, [ref]$ip)) { $bad = $a }
-                $addresses += $a
+            foreach ($a in $ServerAddresses) { $addresses += $a }
+        }
+        # IPv6 servers for an interface that has no IPv6 row (the stack's IPv6 switch is off) cannot be kept: refused, never dropped silently
+        if (-not $ResetServerAddresses -and $PSCmdlet.ParameterSetName -ne 'InputObject (cdxml)' -and @($rows | Where-Object { [int]$_.AddressFamily -eq 23 }).Count -eq 0) {
+            $off = @($addresses | Where-Object { $ip = $null; [System.Net.IPAddress]::TryParse($_, [ref]$ip) -and $ip.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6 })
+            if ($off.Count -gt 0) {
+                $PSCmdlet.WriteError([Nitro.Net.Errors]::Win32(50, "The request is not supported. IPv6 is turned off on this system (Tcpip\Parameters\Ipv6Enable = 0): $($off -join ', ') was not set.`n", $class, 'NotImplemented'))
             }
         }
         foreach ($row in $rows) {
@@ -134,28 +139,30 @@ function Set-DnsClientServerAddress {
             if (-not $ResetServerAddresses -and -not $PSBoundParameters.ContainsKey('ServerAddresses')) { continue }
             $text = "Microsoft DNS Client settings will be changed as requested.`nThis will affect name resolutions on the adapter `"$($row.InterfaceAlias)`".`n"
             if (-not $PSCmdlet.ShouldProcess($text, $text, 'Confirm')) { continue }
-            if ($fam -ne 2) {
-                $PSCmdlet.WriteError([Nitro.Net.Errors]::Win32(50, "The request is not supported. This network stack has no IPv6.`n", $class, 'NotImplemented'))
-                continue
+            # the servers of each family belong to the row of that family: IPv4 ones to the NameServer value of
+            # Tcpip\Parameters\Interfaces\{guid}, IPv6 ones to that of Tcpip6\Parameters\Interfaces\{guid} (where Windows keeps them too)
+            $v4 = @(); $v6 = @()
+            if (-not $ResetServerAddresses) {
+                foreach ($a in $addresses) {
+                    $ip = $null
+                    if (-not [System.Net.IPAddress]::TryParse($a, [ref]$ip)) { $v4 = $null; $badText = $a; break }
+                    if ($ip.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) { $v4 += $ip.ToString() } else { $v6 += $ip.ToString() }
+                }
+                if ($null -eq $v4) {
+                    if (-not $badReported) { $badReported = $true; $PSCmdlet.WriteError([Nitro.Net.Errors]::Win32(87, "Invalid parameter ServerAddresses $badText`n", $class, 'InvalidArgument')) }
+                    continue
+                }
             }
-            $key = [Nitro.Net.Config]::InterfaceKey($ifx, $true)
+            $isV6 = $fam -eq 23
+            $mine = @(if ($isV6) { $v6 } else { $v4 })
+            # a list without any server of this row's family leaves the row as it is; an empty list clears it
+            if (-not $ResetServerAddresses -and $addresses.Count -gt 0 -and $mine.Count -eq 0) { continue }
+            $key = if ($isV6) { [Nitro.Net.Config]::InterfaceKey6($ifx, $true) } else { [Nitro.Net.Config]::InterfaceKey($ifx, $true) }
             if ($null -eq $key) { $PSCmdlet.WriteError([Nitro.Net.Errors]::Win32(87, "Invalid parameter InterfaceIndex $ifx`n", $class, 'InvalidArgument')); continue }
             try {
-                if ($ResetServerAddresses) {
+                if ($ResetServerAddresses -or $mine.Count -eq 0) {
                     if ($null -ne $key.GetValue('NameServer', $null)) { $key.DeleteValue('NameServer') }
-                } else {
-                    $v4 = @(); $v6 = @()
-                    foreach ($a in $addresses) {
-                        $ip = $null
-                        if (-not [System.Net.IPAddress]::TryParse($a, [ref]$ip)) { $PSCmdlet.WriteError([Nitro.Net.Errors]::Win32(87, "Invalid parameter ServerAddresses $a`n", $class, 'InvalidArgument')); $v4 = $null; break }
-                        if ($ip.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) { $v4 += $ip.ToString() } else { $v6 += $a }
-                    }
-                    if ($null -eq $v4) { continue }
-                    # the IPv6 servers belong to the IPv6 row, which this network stack does not have
-                    if ($v6.Count -gt 0) { $PSCmdlet.WriteError([Nitro.Net.Errors]::Win32(50, "The request is not supported. This network stack has no IPv6: $($v6 -join ', ') was not set.`n", $class, 'NotImplemented')) }
-                    if ($v4.Count -eq 0) { if ($null -ne $key.GetValue('NameServer', $null)) { $key.DeleteValue('NameServer') } }
-                    else { $key.SetValue('NameServer', ($v4 -join ','), [Microsoft.Win32.RegistryValueKind]::String) }
-                }
+                } else { $key.SetValue('NameServer', ($mine -join ','), [Microsoft.Win32.RegistryValueKind]::String) }
             } finally { $key.Dispose() }
             [Nitro.Net.Config]::FlushDnsCache()
             if ($PassThru) {
