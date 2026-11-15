@@ -20,6 +20,7 @@ PORT_SET TCPPorts;
 #include "lwip/ip.h"
 #include "lwip/init.h"
 #include "lwip/arch.h"
+#include "lwip/tcpip.h"
 
 #include <lwip_glue/lwip_glue.h>
 
@@ -1112,6 +1113,48 @@ TCPGetSocketStatus(
     LibTCPGetSocketStatus(Connection->SocketContext, State);
     UnlockObject(Connection);
     return STATUS_SUCCESS;
+}
+
+NTSTATUS
+TCPGetConnectionEnds(
+    PCONNECTION_ENDPOINT Connection,
+    PTRANSPORT_ADDRESS Local,
+    PTRANSPORT_ADDRESS Remote,
+    ULONG Length,
+    PULONG State)
+{
+    ip_addr_t LocalIp, RemoteIp;
+    u16_t LocalPort = 0, RemotePort = 0;
+    NTSTATUS Status;
+    PTCP_PCB Pcb;
+
+    /* The PCB is read under the core lock, not the connection lock: lwIP frees a PCB it aborts (tcp_abandon, the
+       slow timer) before its error callback clears SocketContext, and only the core lock is held across both. A
+       reader holding the connection lock alone could find SocketContext still set and read a freed PCB. The core
+       lock is never taken here with the connection lock held (the lwIP thread takes the connection lock under the
+       core lock) */
+    LOCK_TCPIP_CORE();
+    Pcb = Connection->SocketContext;
+    if (Pcb == NULL)
+    {
+        UNLOCK_TCPIP_CORE();
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    Status = TCPTranslateError(LibTCPGetHostName(Pcb, &LocalIp, &LocalPort));
+    if (NT_SUCCESS(Status))
+        Status = TCPTranslateError(LibTCPGetPeerName(Pcb, &RemoteIp, &RemotePort));
+    if (NT_SUCCESS(Status))
+        LibTCPGetSocketStatus(Pcb, State);
+    UNLOCK_TCPIP_CORE();
+
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = TCPBuildTransportAddress(&LocalIp, LocalPort, Local, Length, FALSE);
+    if (NT_SUCCESS(Status))
+        Status = TCPBuildTransportAddress(&RemoteIp, RemotePort, Remote, Length, FALSE);
+    return Status;
 }
 
 ULONG

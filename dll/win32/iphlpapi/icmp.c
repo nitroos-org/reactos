@@ -72,6 +72,33 @@ Icmp6ParseReplies(
     return 0;
 }
 
+/* The IO_STATUS_BLOCK of an asynchronous echo lives in the end of the caller's reply buffer, as the buffer
+ * is the only memory that outlives the call. It is placed 8-byte aligned: the system call of a 32-bit process on
+ * the 64-bit system refuses an unaligned status block (ERROR_NOACCESS), and the end of a caller's buffer is
+ * anywhere. On return *Size is what is left of the buffer for the reply (up to the status block). NULL when
+ * the reply, then the status block do not fit */
+static
+PIO_STATUS_BLOCK
+PlaceIoStatusBlock(
+    _In_ PVOID ReplyBuffer,
+    _Inout_ PDWORD ReplySize,
+    _In_ DWORD MinReply)
+{
+    ULONG_PTR Start = (ULONG_PTR)ReplyBuffer;
+    ULONG_PTR End = Start + *ReplySize;
+    ULONG_PTR Iosb;
+
+    if (*ReplySize < MinReply + sizeof(IO_STATUS_BLOCK))
+        return NULL;
+
+    Iosb = (End - sizeof(IO_STATUS_BLOCK)) & ~(ULONG_PTR)7;
+    if (Iosb < Start + MinReply)
+        return NULL;
+
+    *ReplySize = (DWORD)(Iosb - Start);
+    return (PIO_STATUS_BLOCK)Iosb;
+}
+
 DWORD
 WINAPI
 Icmp6SendEcho2(
@@ -121,13 +148,12 @@ Icmp6SendEcho2(
     {
         // IO_STATUS_BLOCK will be stored inside ReplyBuffer (in the end)
         // that's because the function may return before device request ends
-        if (ReplySize < sizeof(ICMPV6_ECHO_REPLY) + sizeof(IO_STATUS_BLOCK))
+        IoStatusBlock = PlaceIoStatusBlock(ReplyBuffer, &ReplySize, sizeof(ICMPV6_ECHO_REPLY));
+        if (IoStatusBlock == NULL)
         {
             SetLastError(IP_BUF_TOO_SMALL);
             return 0;
         }
-        IoStatusBlock = (PIO_STATUS_BLOCK)((PUCHAR)ReplyBuffer + ReplySize - sizeof(IO_STATUS_BLOCK));
-        ReplySize -= sizeof(IO_STATUS_BLOCK);
     }
 
     InputBuffer = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, InputBufferLength);
@@ -363,14 +389,12 @@ IcmpSendEcho2Common(
     {
         // The call may return before the request ends, so the IO_STATUS_BLOCK
         // lives inside ReplyBuffer (in the end).
-        if (ReplySize < sizeof(ICMP_ECHO_REPLY) + sizeof(IO_STATUS_BLOCK))
+        IoStatusBlock = PlaceIoStatusBlock(ReplyBuffer, &ReplySize, sizeof(ICMP_ECHO_REPLY));
+        if (IoStatusBlock == NULL)
         {
             SetLastError(ERROR_INSUFFICIENT_BUFFER);
             return 0;
         }
-
-        IoStatusBlock = (PIO_STATUS_BLOCK)((PUCHAR)ReplyBuffer + ReplySize - sizeof(IO_STATUS_BLOCK));
-        ReplySize -= sizeof(IO_STATUS_BLOCK);
     }
     else
     {

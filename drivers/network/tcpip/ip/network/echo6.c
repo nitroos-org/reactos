@@ -37,11 +37,24 @@
 #define ECHO6_ANSWERED          1
 #define ECHO6_TIMED_OUT         2
 #define ECHO6_CANCELLED         3
+/* Listed (so that it counts against the caps) but the IRP is not yet pending and the timer not set: nothing
+   answers it, finishes it or finds it yet */
+#define ECHO6_NEW               4
 /* Status of a request that could not be sent for want of a route */
 #define ECHO6_NO_ROUTE          0xFFFFFFFF
 /* The largest echo data lwIP sends in one datagram (its 16-bit length holds the IPv6 and ICMPv6 headers too) */
 #define ECHO6_MAX_DATA          (0xFFFF - 40 - 8)
 #define ECHO6_MAX_ROOM          0x10000
+/* Outstanding requests: the record of each pins up to ECHO6_MAX_ROOM bytes of reply room and lives until the
+   answer, the timeout or the cancel. A process gets 512 at once, the system 4096 (the most one user can pin is
+   then 512 records, and all together at most 4096 * 64 KB when every request asks for 64 KB of data; an
+   ordinary caller has a handful). The one that goes over gets STATUS_INSUFFICIENT_RESOURCES, as for want of
+   memory. Windows' limits are not known (VERIFY ON ORACLE if it ever matters) */
+#define ECHO6_MAX_PER_PROCESS   512
+#define ECHO6_MAX_SYSTEM        4096
+/* The requests wait in hash buckets of their sequence number, which counts up: an inbound ICMPv6 packet looks at
+   one bucket (a handful of records at the caps), not at every outstanding request */
+#define ECHO6_BUCKETS           64
 
 typedef struct _ECHO6 {
     LIST_ENTRY Entry;           /* Echo6Pending, then Echo6Done */
@@ -52,6 +65,7 @@ typedef struct _ECHO6 {
     USHORT Seq;
     UCHAR Dst[16];
     ULONGLONG Start;
+    PEPROCESS Process;          /* the requestor: only compared, never dereferenced */
     KTIMER Timer;
     KDPC Dpc;
     ULONG Status;               /* IP_xxx */
@@ -62,17 +76,63 @@ typedef struct _ECHO6 {
     UCHAR Data[ANYSIZE_ARRAY];
 } ECHO6, *PECHO6;
 
-static LIST_ENTRY Echo6Pending = { &Echo6Pending, &Echo6Pending };
+static LIST_ENTRY Echo6Pending[ECHO6_BUCKETS];
+static volatile LONG Echo6Count;        /* the requests on Echo6Pending, changed under Echo6Lock */
 static LIST_ENTRY Echo6Done = { &Echo6Done, &Echo6Done };
 static KSPIN_LOCK Echo6Lock;
 static volatile LONG Echo6Counter;
 
 PDEVICE_OBJECT Ip6DeviceObject = NULL;
 
+/* if6.c */
+extern BOOLEAN TCP6SendNdDropped;
+
 /* udp6.c */
 struct netif *Udp6NetifOfIndex(ULONG IfIndex);
 struct netif *Udp6DefaultMulticastNetif(VOID);
 struct netif *Udp6Route(const ip6_addr_t *Src, const ip6_addr_t *Dest);
+
+#define ECHO6_BUCKET(Seq)       (&Echo6Pending[(USHORT)(Seq) % ECHO6_BUCKETS])
+
+/* Takes a request off the pending buckets (Echo6Lock held; it is on them) */
+static
+VOID
+Echo6Unlink(PECHO6 E)
+{
+    RemoveEntryList(&E->Entry);
+    InterlockedDecrement(&Echo6Count);
+}
+
+/* Puts a new request on the pending buckets unless the system or its process has too many (Echo6Lock held) */
+static
+BOOLEAN
+Echo6Insert(PECHO6 E)
+{
+    if (Echo6Count >= ECHO6_MAX_SYSTEM)
+        return FALSE;
+
+    /* The count of a process is looked for only when it could be over the cap */
+    if (Echo6Count >= ECHO6_MAX_PER_PROCESS)
+    {
+        ULONG Mine = 0, i;
+        PLIST_ENTRY Entry;
+
+        for (i = 0; i < ECHO6_BUCKETS; i++)
+        {
+            for (Entry = Echo6Pending[i].Flink; Entry != &Echo6Pending[i]; Entry = Entry->Flink)
+            {
+                if (CONTAINING_RECORD(Entry, ECHO6, Entry)->Process == E->Process)
+                    Mine++;
+            }
+        }
+        if (Mine >= ECHO6_MAX_PER_PROCESS)
+            return FALSE;
+    }
+
+    InsertTailList(ECHO6_BUCKET(E->Seq), &E->Entry);
+    InterlockedIncrement(&Echo6Count);
+    return TRUE;
+}
 
 static
 VOID
@@ -148,7 +208,7 @@ Echo6Timeout(PKDPC Dpc, PVOID Context, PVOID Arg1, PVOID Arg2)
     if (E->State == ECHO6_PENDING)
     {
         E->State = ECHO6_TIMED_OUT;
-        RemoveEntryList(&E->Entry);
+        Echo6Unlink(E);
         Won = TRUE;
     }
     KeReleaseSpinLockFromDpcLevel(&Echo6Lock);
@@ -182,7 +242,7 @@ Echo6Cancel(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     if (E->State == ECHO6_PENDING)
     {
         E->State = ECHO6_CANCELLED;
-        RemoveEntryList(&E->Entry);
+        Echo6Unlink(E);
         Won = TRUE;
     }
     KeReleaseSpinLock(&Echo6Lock, OldIrql);
@@ -197,13 +257,13 @@ static
 PECHO6
 Echo6Find(const UCHAR *Peer, USHORT Ident, USHORT Seq)
 {
-    PLIST_ENTRY Entry;
+    PLIST_ENTRY Head = ECHO6_BUCKET(Seq), Entry;
 
-    for (Entry = Echo6Pending.Flink; Entry != &Echo6Pending; Entry = Entry->Flink)
+    for (Entry = Head->Flink; Entry != Head; Entry = Entry->Flink)
     {
         PECHO6 E = CONTAINING_RECORD(Entry, ECHO6, Entry);
 
-        if (E->Ident == Ident && E->Seq == Seq &&
+        if (E->State == ECHO6_PENDING && E->Ident == Ident && E->Seq == Seq &&
             (!Peer || E->Dst[0] == 0xFF || RtlCompareMemory(E->Dst, Peer, 16) == 16))
             return E;
     }
@@ -219,7 +279,7 @@ Echo6ReplyExpected(const UCHAR *Src, const UCHAR *Icmp, ULONG Avail)
     KIRQL OldIrql;
     USHORT Ident, Seq;
 
-    if (Avail < 8 || IsListEmpty(&Echo6Pending))
+    if (Avail < 8 || Echo6Count == 0)
         return FALSE;
     RtlCopyMemory(&Ident, Icmp + 4, sizeof(Ident));
     RtlCopyMemory(&Seq, Icmp + 6, sizeof(Seq));
@@ -250,7 +310,7 @@ Echo6ErrorRelated(const UCHAR *Icmp, ULONG Avail)
     KIRQL OldIrql;
     USHORT Ident, Seq;
 
-    if (IsListEmpty(&Echo6Pending) || !Echo6Invoking(Icmp, Avail, &Ident, &Seq))
+    if (Echo6Count == 0 || !Echo6Invoking(Icmp, Avail, &Ident, &Seq))
         return FALSE;
 
     KeAcquireSpinLock(&Echo6Lock, &OldIrql);
@@ -294,7 +354,7 @@ Echo6Input(struct pbuf *p, struct netif *inp)
     UINT Have;
     BOOLEAN Reply;
 
-    if (IsListEmpty(&Echo6Pending) || p->tot_len < 8)
+    if (Echo6Count == 0 || p->tot_len < 8)
         return 0;
 
     Have = pbuf_copy_partial(p, Head, (u16_t)min(p->tot_len, sizeof(Head)), 0);
@@ -332,7 +392,7 @@ Echo6Input(struct pbuf *p, struct netif *inp)
         if (E)
         {
             E->State = ECHO6_ANSWERED;
-            RemoveEntryList(&E->Entry);
+            Echo6Unlink(E);
             RtlCopyMemory(E->From, Src->addr, 16);
             E->FromScope = (ip6_addr_islinklocal(Src) && IF) ? IF->Index : 0;
             if (Reply)
@@ -393,7 +453,7 @@ DispEchoRequest6(PIRP Irp, PIO_STACK_LOCATION IrpSp)
     ICMPV6_ECHO_REQUEST Req;
     ULONG DataSize, Room, Counter, Timeout;
     UCHAR Src6[16], Zone = IP6_NO_ZONE;
-    BOOLEAN HasSource = FALSE;
+    BOOLEAN HasSource = FALSE, Inserted;
     ip6_addr_t Dest, Source;
     const ip_addr_t *Selected;
     struct netif *netif = NULL;
@@ -414,7 +474,9 @@ DispEchoRequest6(PIRP Irp, PIO_STACK_LOCATION IrpSp)
     DataSize = InLen - sizeof(Req);
     if (DataSize > ECHO6_MAX_DATA)
         return STATUS_INVALID_PARAMETER;
-    Room = min(OutLen - sizeof(ICMPV6_ECHO_REPLY), ECHO6_MAX_ROOM);
+    /* A reply carries the data of its request back: no more room is kept than that (a request with no data
+       keeps none; an error answer has none either) */
+    Room = min(min(OutLen - sizeof(ICMPV6_ECHO_REPLY), ECHO6_MAX_ROOM), DataSize);
 
     /* A source the caller names must be one of our addresses */
     RtlCopyMemory(Src6, Req.SourceAddress.sin6_addr, sizeof(Src6));
@@ -448,8 +510,9 @@ DispEchoRequest6(PIRP Irp, PIO_STACK_LOCATION IrpSp)
     /* The request, the timer, and this routine until it returns: the request may be completed (timer, cancel,
        answer) and the record freed while this routine still reads and updates it */
     E->Refs = 3;
-    E->State = ECHO6_PENDING;
+    E->State = ECHO6_NEW;
     E->Irp = Irp;
+    E->Process = IoGetCurrentProcess();
     E->Room = Room;
     Counter = (ULONG)InterlockedIncrement(&Echo6Counter);
     E->Ident = (USHORT)(0x4E36 ^ (Counter >> 16));
@@ -459,6 +522,18 @@ DispEchoRequest6(PIRP Irp, PIO_STACK_LOCATION IrpSp)
     KeInitializeDpc(&E->Dpc, Echo6Timeout, E);
     Irp->Tail.Overlay.DriverContext[0] = E;
 
+    /* Too many outstanding (this process, or all together): refused before anything is published */
+    KeAcquireSpinLock(&Echo6Lock, &OldIrql);
+    Inserted = Echo6Insert(E);
+    KeReleaseSpinLock(&Echo6Lock, OldIrql);
+    if (!Inserted)
+    {
+        if (Payload)
+            ExFreePoolWithTag(Payload, ECHO6_TAG);
+        ExFreePoolWithTag(E, ECHO6_TAG);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
     /* Outstanding from here on: the timer, the cancel routine and the list may each finish it */
     IoMarkIrpPending(Irp);
     Timeout = Req.Timeout ? Req.Timeout : 1;
@@ -466,11 +541,12 @@ DispEchoRequest6(PIRP Irp, PIO_STACK_LOCATION IrpSp)
         Timeout = 0x7FFFFFFF / 10000;
     Due.QuadPart = -(LONGLONG)Timeout * 10000;
     E->Start = KeQueryInterruptTime();
-    KeSetTimer(&E->Timer, Due, &E->Dpc);
 
+    /* Findable and finishable from here; the timer last, so that its DPC finds the request PENDING */
     KeAcquireSpinLock(&Echo6Lock, &OldIrql);
-    InsertTailList(&Echo6Pending, &E->Entry);
+    E->State = ECHO6_PENDING;
     KeReleaseSpinLock(&Echo6Lock, OldIrql);
+    KeSetTimer(&E->Timer, Due, &E->Dpc);
 
     IoAcquireCancelSpinLock(&OldIrql);
     IoSetCancelRoutine(Irp, Echo6Cancel);
@@ -481,7 +557,7 @@ DispEchoRequest6(PIRP Irp, PIO_STACK_LOCATION IrpSp)
         if (E->State == ECHO6_PENDING)
         {
             E->State = ECHO6_CANCELLED;
-            RemoveEntryList(&E->Entry);
+            Echo6Unlink(E);
             KeReleaseSpinLock(&Echo6Lock, OldIrql);
             Echo6Complete(E);
         }
@@ -554,8 +630,14 @@ DispEchoRequest6(PIRP Irp, PIO_STACK_LOCATION IrpSp)
             RtlCopyMemory(Icmp + 4, &E->Ident, sizeof(E->Ident));
             RtlCopyMemory(Icmp + 6, &E->Seq, sizeof(E->Seq));
             *(u16_t *)(Icmp + 2) = ip6_chksum_pseudo(p, IP6_NEXTH_ICMP6, p->tot_len, &Source, &Dest);
+            TCP6SendNdDropped = FALSE;
             Result = ip6_output_if(p, &Source, &Dest, Req.Ttl ? (u8_t)min(Req.Ttl, 255) : 128, 0,
                                    IP6_NEXTH_ICMP6, netif);
+            /* Neighbour discovery had no room for the request (a neighbour that does not answer holds the queue):
+               it is lost like a packet on the wire, and the request waits for its timeout (IP_REQ_TIMED_OUT) rather
+               than failing for want of resources, which would be a lie while memory is fine */
+            if (Result == ERR_MEM && TCP6SendNdDropped)
+                Result = ERR_INPROGRESS;
         }
     }
     else
@@ -576,7 +658,7 @@ DispEchoRequest6(PIRP Irp, PIO_STACK_LOCATION IrpSp)
         {
             E->State = ECHO6_ANSWERED;
             E->Status = (Result == ERR_MEM || Result == ERR_BUF) ? IP_NO_RESOURCES : ECHO6_NO_ROUTE;
-            RemoveEntryList(&E->Entry);
+            Echo6Unlink(E);
             InsertTailList(&Echo6Done, &E->Entry);
         }
         KeReleaseSpinLock(&Echo6Lock, OldIrql);
@@ -593,5 +675,9 @@ DispEchoRequest6(PIRP Irp, PIO_STACK_LOCATION IrpSp)
 VOID
 Echo6Startup(VOID)
 {
+    ULONG i;
+
+    for (i = 0; i < ECHO6_BUCKETS; i++)
+        InitializeListHead(&Echo6Pending[i]);
     KeInitializeSpinLock(&Echo6Lock);
 }
