@@ -17,6 +17,16 @@
  * scrolling a window), blend and XOR, so it reads the cached copy instead,
  * and the frame buffer is only ever written, line by line.
  *
+ * The rectangles an operation changed are copied to the frame buffer at once
+ * only by the first operation of a clock tick. Later ones are noted and
+ * copied by the next first operation of a tick, or when win32k calls
+ * DrvSynchronizeSurface (GCAPS2_SYNCTIMER: about a tick after drawing on the
+ * screen, and when the pointer moves). A program that draws many times a
+ * frame (200 blits of 640x480 take about 7 ms) then costs one copy to the
+ * frame buffer per tick instead of one per operation, and nothing that reads
+ * the screen through GDI sees a difference: it reads the shadow. All of this
+ * runs under the device lock, as every call GDI makes to the driver.
+ *
  * StretchBlt is not hooked: win32k gives DrvStretchBltROP the target
  * rectangle well-ordered, without the mirroring, which only its own
  * EngStretchBltROP fallback applies. Through DrvCopyBits it is right.
@@ -127,11 +137,96 @@ FbCopyRect(
     }
 }
 
+static
+LONGLONG
+FbArea(
+    _In_ const RECTL *prcl)
+{
+    return (LONGLONG)(prcl->right - prcl->left) * (prcl->bottom - prcl->top);
+}
+
+static
+VOID
+FbUnion(
+    _Inout_ RECTL *prclDst,
+    _In_ const RECTL *prcl)
+{
+    prclDst->left = min(prclDst->left, prcl->left);
+    prclDst->top = min(prclDst->top, prcl->top);
+    prclDst->right = max(prclDst->right, prcl->right);
+    prclDst->bottom = max(prclDst->bottom, prcl->bottom);
+}
+
 /*
- * Copy the part of the shadow that an operation may have changed to the
- * frame buffer: prcl (any orientation, NULL for the whole screen) within the
- * clip region. Called whatever the engine returned, as it may have drawn part
- * of an operation before failing.
+ * Note a rectangle of the screen (well ordered, not empty, on the screen) to
+ * copy to the frame buffer later. It joins a noted rectangle that it overlaps
+ * or touches; when all are in use, the one that grows least. A rectangle may
+ * then cover pixels that did not change: copying them again is harmless, the
+ * shadow holds what the screen shows.
+ */
+static
+VOID
+FbAddDirty(
+    _Inout_ PPDEV ppdev,
+    _In_ const RECTL *prcl)
+{
+    RECTL rcl;
+    LONGLONG llGrowth, llBest = 0;
+    ULONG i, iBest = 0;
+
+    for (i = 0; i < ppdev->cDirty; i++)
+    {
+        if (prcl->left <= ppdev->arclDirty[i].right &&
+            prcl->right >= ppdev->arclDirty[i].left &&
+            prcl->top <= ppdev->arclDirty[i].bottom &&
+            prcl->bottom >= ppdev->arclDirty[i].top)
+        {
+            FbUnion(&ppdev->arclDirty[i], prcl);
+            return;
+        }
+    }
+
+    if (ppdev->cDirty < FB_MAX_DIRTY)
+    {
+        ppdev->arclDirty[ppdev->cDirty++] = *prcl;
+        return;
+    }
+
+    for (i = 0; i < FB_MAX_DIRTY; i++)
+    {
+        rcl = ppdev->arclDirty[i];
+        FbUnion(&rcl, prcl);
+        llGrowth = FbArea(&rcl) - FbArea(&ppdev->arclDirty[i]);
+        if (i == 0 || llGrowth < llBest)
+        {
+            llBest = llGrowth;
+            iBest = i;
+        }
+    }
+    FbUnion(&ppdev->arclDirty[iBest], prcl);
+}
+
+/* Copy the noted rectangles to the frame buffer */
+static
+VOID
+FbFlushDirty(
+    _Inout_ PPDEV ppdev)
+{
+    ULONG i;
+
+    for (i = 0; i < ppdev->cDirty; i++)
+        FbCopyRect(ppdev, &ppdev->arclDirty[i]);
+
+    ppdev->cDirty = 0;
+    ppdev->ulFlushTick = (ULONG)EngGetTickCount();
+}
+
+/*
+ * Note the part of the shadow that an operation may have changed: prcl (any
+ * orientation, NULL for the whole screen) within the clip region, and copy
+ * what is noted to the frame buffer if nothing was copied for a while.
+ * Called whatever the engine returned, as it may have drawn part of an
+ * operation before failing.
  */
 static
 VOID
@@ -182,26 +277,32 @@ FbUpdateScreen(
 
     if (pco == NULL || pco->iDComplexity != DC_COMPLEX)
     {
-        FbCopyRect(ppdev, &rclBounds);
-        return;
+        FbAddDirty(ppdev, &rclBounds);
+    }
+    else
+    {
+        /* Only note the visible parts, a window partly covered by others has
+         * a clip region much smaller than its bounds */
+        CLIPOBJ_cEnumStart(pco, FALSE, CT_RECTANGLES, CD_ANY, 0);
+        do
+        {
+            bMore = CLIPOBJ_bEnum(pco, sizeof(EnumRects), (PULONG)&EnumRects);
+            for (i = 0; i < EnumRects.c; i++)
+            {
+                rcl.left = max(rclBounds.left, EnumRects.arcl[i].left);
+                rcl.top = max(rclBounds.top, EnumRects.arcl[i].top);
+                rcl.right = min(rclBounds.right, EnumRects.arcl[i].right);
+                rcl.bottom = min(rclBounds.bottom, EnumRects.arcl[i].bottom);
+                if (rcl.left < rcl.right && rcl.top < rcl.bottom)
+                    FbAddDirty(ppdev, &rcl);
+            }
+        } while (bMore);
     }
 
-    /* Only copy the visible parts, a window partly covered by others has a
-     * clip region much smaller than its bounds */
-    CLIPOBJ_cEnumStart(pco, FALSE, CT_RECTANGLES, CD_ANY, 0);
-    do
-    {
-        bMore = CLIPOBJ_bEnum(pco, sizeof(EnumRects), (PULONG)&EnumRects);
-        for (i = 0; i < EnumRects.c; i++)
-        {
-            rcl.left = max(rclBounds.left, EnumRects.arcl[i].left);
-            rcl.top = max(rclBounds.top, EnumRects.arcl[i].top);
-            rcl.right = min(rclBounds.right, EnumRects.arcl[i].right);
-            rcl.bottom = min(rclBounds.bottom, EnumRects.arcl[i].bottom);
-            if (rcl.left < rcl.right && rcl.top < rcl.bottom)
-                FbCopyRect(ppdev, &rcl);
-        }
-    } while (bMore);
+    /* The first drawing after a quiet time is shown at once; drawing that
+     * follows it closely waits for the next copy */
+    if (ppdev->cDirty != 0 && (ULONG)EngGetTickCount() - ppdev->ulFlushTick >= FB_FLUSH_MS)
+        FbFlushDirty(ppdev);
 }
 
 /* Copy the whole shadow to the frame buffer */
@@ -216,6 +317,35 @@ FbUpdateWholeScreen(
     rcl.right = ppdev->ScreenWidth;
     rcl.bottom = ppdev->ScreenHeight;
     FbCopyRect(ppdev, &rcl);
+    ppdev->cDirty = 0;
+    ppdev->ulFlushTick = (ULONG)EngGetTickCount();
+}
+
+/*
+ * win32k calls this about a clock tick after drawing on the screen
+ * (DSS_TIMER_EVENT) and when the pointer moved (DSS_FLUSH_EVENT), with the
+ * device lock held: copy what is still only on the shadow.
+ */
+VOID
+APIENTRY
+DrvSynchronizeSurface(
+    _In_ SURFOBJ *pso,
+    _In_opt_ RECTL *prcl,
+    _In_ FLONG fl)
+{
+    PPDEV ppdev;
+
+    UNREFERENCED_PARAMETER(prcl);
+    UNREFERENCED_PARAMETER(fl);
+
+    if (!FbIsScreen(pso))
+        return;
+
+    ppdev = (PPDEV)pso->dhsurf;
+
+    /* While the display is disabled, the shadow is copied when it comes back */
+    if (ppdev->bScreenEnabled && ppdev->cDirty != 0)
+        FbFlushDirty(ppdev);
 }
 
 /* A rectangle from bounds computed without overflow, clamped to LONG */

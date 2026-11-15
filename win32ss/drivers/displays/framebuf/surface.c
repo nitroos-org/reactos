@@ -194,6 +194,7 @@ DrvDisableSurface(
    FbUnregisterScreen(ppdev);
    EngDeleteSurface(ppdev->hSurfEng);
    ppdev->hSurfEng = NULL;
+   ppdev->cDirty = 0;
 
 #ifdef EXPERIMENTAL_MOUSE_CURSOR_SUPPORT
    /* Clear all mouse pointer surfaces. */

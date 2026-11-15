@@ -40,6 +40,7 @@ static DRVFN DrvFunctionTable[] =
    {INDEX_DrvAlphaBlend, (PFN)DrvAlphaBlend},
    {INDEX_DrvTransparentBlt, (PFN)DrvTransparentBlt},
    {INDEX_DrvGradientFill, (PFN)DrvGradientFill},
+   {INDEX_DrvSynchronizeSurface, (PFN)DrvSynchronizeSurface},
 };
 
 /*

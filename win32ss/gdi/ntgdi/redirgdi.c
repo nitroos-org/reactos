@@ -193,6 +193,8 @@ RedirScreenCopy(
         }
     }
     EngReleaseSemaphore(ppdev->hsemDevLock);
+    /* The driver may show what was drawn later (GCAPS2_SYNCTIMER) */
+    PDEVOBJ_vArmDisplaySync(ppdev);
     return bRet;
 }
 

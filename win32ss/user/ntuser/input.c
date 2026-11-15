@@ -445,7 +445,7 @@ RawInputThreadMain(VOID)
     PINPUT_DEVICE_INFO DeviceInfo;
     NTSTATUS Status;
     //LARGE_INTEGER WaitTimeout;
-    PVOID WaitObjects[5], pSignaledObject = NULL;
+    PVOID WaitObjects[6], pSignaledObject = NULL;
     ULONG cWaitObjects;
     KWAIT_BLOCK WaitBlockArray[RTL_NUMBER_OF(WaitObjects)];
     PVOID ShutdownEvent;
@@ -521,6 +521,9 @@ RawInputThreadMain(VOID)
             WaitObjects[4] = gRedirTailTimer;
             cWaitObjects = 5;
         }
+        /* Display drivers that batch their copies to the screen (pdevobj.c) */
+        if (gDisplaySyncTimer)
+            WaitObjects[cWaitObjects++] = gDisplaySyncTimer;
 
         Status = KeWaitForMultipleObjects(cWaitObjects,
                                           WaitObjects,
@@ -565,6 +568,10 @@ RawInputThreadMain(VOID)
             else if (gRedirTailTimer && pSignaledObject == gRedirTailTimer)
             {
                 UserRedirPresentTail();
+            }
+            else if (gDisplaySyncTimer && pSignaledObject == gDisplaySyncTimer)
+            {
+                PDEVOBJ_vDisplaySyncTimer();
             }
             else if (pSignaledObject == ShutdownEvent)
             {
