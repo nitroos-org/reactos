@@ -254,7 +254,15 @@ TCP6NetifEvent(struct netif *netif, netif_nsc_reason_t Reason, const netif_ext_c
     UNREFERENCED_PARAMETER(Args);
 
     if (Reason & (LWIP_NSC_IPV6_SET | LWIP_NSC_IPV6_ADDR_STATE_CHANGED))
+    {
         TCP6UpdateMulticast(netif);
+
+        /* An address came, went or changed its state: users of NotifyUnicastIpAddressChange and
+           NotifyIpInterfaceChange look again (their snapshots tell what changed), and so do those of
+           NotifyRouteChange2, as the host routes and the link-local prefix route follow the addresses */
+        AddrChangeNotify();
+        RouteChangeNotify();
+    }
 }
 
 static netif_ext_callback_t TCP6NetifCallback;
@@ -346,7 +354,12 @@ TCPSendData6Callback(struct netif *netif, struct pbuf *p, const ip6_addr_t *Dest
 
     /* ::1: the loopback queue gives a copy back to lwIP on its worker (LoopInputPbuf) */
     if (IF == Loopback)
-        return LoopTransmitPbuf(p) ? ERR_OK : ERR_MEM;
+    {
+        if (!LoopTransmitPbuf(p))
+            return ERR_MEM;
+        TCP6CountOutput(p);
+        return ERR_OK;
+    }
 
     if (IF->AddressLength != 6 || !IF->Transmit || p->tot_len > IF->MTU)
         return ERR_IF;
@@ -379,6 +392,8 @@ TCPSendData6Callback(struct netif *netif, struct pbuf *p, const ip6_addr_t *Dest
             return ERR_OK;
         RtlCopyMemory(Mac, Hw, 6);
     }
+
+    TCP6CountOutput(p);
 
     if (AllocatePacketWithBuffer(&NdisPacket, NULL, p->tot_len) != NDIS_STATUS_SUCCESS)
         return ERR_MEM;

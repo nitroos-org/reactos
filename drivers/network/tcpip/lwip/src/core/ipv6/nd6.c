@@ -627,6 +627,10 @@ nd6_input(struct pbuf *p, struct netif *inp)
     if (i < 0) {
       /* Create a new router entry. */
       i = nd6_new_router(ip6_current_src_addr(), inp);
+      /* NitroOS: user mode learns of a new default router */
+#ifdef LWIP_HOOK_ND6_ROUTES_CHANGED
+      LWIP_HOOK_ND6_ROUTES_CHANGED();
+#endif
     }
 
     if (i < 0) {
@@ -761,6 +765,9 @@ nd6_input(struct pbuf *p, struct netif *inp)
             if (prefix < 0 && valid_life > 0) {
               /* Create a new cache entry. */
               prefix = nd6_new_onlink_prefix(&prefix_addr, inp);
+#ifdef LWIP_HOOK_ND6_ROUTES_CHANGED
+              LWIP_HOOK_ND6_ROUTES_CHANGED();
+#endif
             }
             if (prefix >= 0) {
               prefix_list[prefix].invalidation_timer = valid_life;
@@ -1080,6 +1087,9 @@ nd6_tmr(void)
         default_router_list[i].neighbor_entry = NULL;
         default_router_list[i].invalidation_timer = 0;
         default_router_list[i].flags = 0;
+#ifdef LWIP_HOOK_ND6_ROUTES_CHANGED
+        LWIP_HOOK_ND6_ROUTES_CHANGED();
+#endif
       } else {
         default_router_list[i].invalidation_timer -= ND6_TMR_INTERVAL / 1000;
       }
@@ -1093,6 +1103,9 @@ nd6_tmr(void)
         /* Entry timed out, remove it */
         prefix_list[i].invalidation_timer = 0;
         prefix_list[i].netif = NULL;
+#ifdef LWIP_HOOK_ND6_ROUTES_CHANGED
+        LWIP_HOOK_ND6_ROUTES_CHANGED();
+#endif
       } else {
         prefix_list[i].invalidation_timer -= ND6_TMR_INTERVAL / 1000;
       }
@@ -2430,6 +2443,9 @@ nd6_cleanup_netif(struct netif *netif)
   for (i = 0; i < LWIP_ND6_NUM_PREFIXES; i++) {
     if (prefix_list[i].netif == netif) {
       prefix_list[i].netif = NULL;
+#ifdef LWIP_HOOK_ND6_ROUTES_CHANGED
+      LWIP_HOOK_ND6_ROUTES_CHANGED();
+#endif
     }
   }
   for (i = 0; i < LWIP_ND6_NUM_NEIGHBORS; i++) {

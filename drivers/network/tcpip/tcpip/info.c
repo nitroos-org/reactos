@@ -409,6 +409,38 @@ InfoTdiQueryGetIpv6Dns(
     return Status;
 }
 
+/* IP_IPV6_ND_ENTRY_ID and IP_IPV6_STATS_ENTRY_ID: see TCPQueryIpv6Nd and TCPQueryIpv6Stats; the same chain-buffer
+   handling as the IPv6 table */
+static
+TDI_STATUS
+InfoTdiQueryGetIpv6Pool(
+    ULONG (*Query)(PVOID, ULONG),
+    PNDIS_BUFFER Buffer,
+    PUINT BufferSize)
+{
+    PVOID Answer = NULL;
+    ULONG Size = 0, Room = 0;
+    TDI_STATUS Status;
+
+    if (Buffer && *BufferSize != 0)
+    {
+        Room = min(*BufferSize, IPV6_TABLE_MAX_ANSWER);
+        Answer = ExAllocatePoolWithTag(NonPagedPool, Room, TDI_ENTITY_TAG);
+        if (!Answer)
+            return TDI_NO_RESOURCES;
+    }
+
+    Size = Query(Answer, Room);
+    if (Answer && Size <= Room)
+        Status = InfoCopyOut(Answer, Size, Buffer, BufferSize);
+    else
+        Status = InfoCopyOut(NULL, Size, NULL, BufferSize);
+
+    if (Answer)
+        ExFreePoolWithTag(Answer, TDI_ENTITY_TAG);
+    return Status;
+}
+
 /* The interface of an interface entity (IF, AT, CL_NL, CO_NL), referenced for the caller
  * (IPDereferenceInterface), or NULL. IPDestroyInterface removes the entities under
  * EntityListLock before it drops the interface's own reference, so an interface found
@@ -746,6 +778,22 @@ TDI_STATUS InfoTdiQueryInformationEx(
                      return TDI_INVALID_PARAMETER;
 
                  return InfoTdiQueryGetIpv6Dns(Buffer, BufferSize);
+
+              case IP_IPV6_ND_ENTRY_ID:
+                 if (ID->toi_type != INFO_TYPE_PROVIDER ||
+                     ID->toi_entity.tei_entity != CL_NL_ENTITY ||
+                     ID->toi_entity.tei_instance != 0)
+                     return TDI_INVALID_PARAMETER;
+
+                 return InfoTdiQueryGetIpv6Pool(TCPQueryIpv6Nd, Buffer, BufferSize);
+
+              case IP_IPV6_STATS_ENTRY_ID:
+                 if (ID->toi_type != INFO_TYPE_PROVIDER ||
+                     ID->toi_entity.tei_entity != CL_NL_ENTITY ||
+                     ID->toi_entity.tei_instance != 0)
+                     return TDI_INVALID_PARAMETER;
+
+                 return InfoTdiQueryGetIpv6Pool(TCPQueryIpv6Stats, Buffer, BufferSize);
 
               case IP_TCP6_ROW_ENTRY_ID:
                  if (ID->toi_type != INFO_TYPE_PROVIDER ||

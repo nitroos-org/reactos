@@ -7,6 +7,7 @@
 
 #include "iphlpapi_private.h"
 #include <wine/netioapi.h>
+#include "ipv6net.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(iphlpapi);
 
@@ -139,7 +140,8 @@ static BOOL fill_best_route(PMIB_IPFORWARD_ROW2 Row, SOCKADDR_INET *BestSource, 
  * Find the route a packet to a destination takes, and the source address it carries.
  *
  * NOTES
- *  Only IPv4 is routed, as there is no IPv6 stack: every IPv6 destination has no route.
+ *  IPv6 destinations are routed from the routes Ipv6GetRouteRows builds (ipv6net.c); while the stack has
+ *  IPv6 off every IPv6 destination has no route.
  *  The measured Windows behaviour is followed. A luid wins over an index, a zero luid
  *  or index is not a constraint, and a source address confines the route to the
  *  interface that owns it. A destination that is an address of this computer, or the
@@ -168,12 +170,8 @@ DWORD WINAPI GetBestRoute2(NET_LUID *InterfaceLuid, NET_IFINDEX InterfaceIndex,
     return ERROR_INVALID_PARAMETER;
 
   if (DestinationAddress->si_family == AF_INET6)
-  {
-    static const IN6_ADDR any = { { { 0 } } };
-
-    return memcmp(&DestinationAddress->Ipv6.sin6_addr, &any, sizeof(any)) ? ERROR_NETWORK_UNREACHABLE
-                                                                           : ERROR_NOT_FOUND;
-  }
+    return Ipv6BestRoute(InterfaceLuid, InterfaceIndex, SourceAddress, DestinationAddress, BestRoute,
+                         BestSourceAddress);
 
   if (InterfaceLuid && InterfaceLuid->Value)
   {
@@ -285,7 +283,7 @@ DWORD WINAPI GetBestRoute2(NET_LUID *InterfaceLuid, NET_IFINDEX InterfaceIndex,
  *  gives interface 0 to the other groups this computer joined too; the stack here lists none.
  *  The limited broadcast takes the interface GetBestRoute2 gives it; Windows takes the lowest
  *  metric of its 255.255.255.255 routes, which the stack here does not have.
- *  Only IPv4 is routed: IPv6 destinations have no route, as without an IPv6 stack.
+ *  IPv6 destinations take the interface of their GetBestRoute2 route.
  */
 DWORD WINAPI GetBestInterfaceEx(struct sockaddr *pDestAddr, PDWORD pdwBestIfIndex)
 {
@@ -333,4 +331,134 @@ DWORD WINAPI GetBestInterfaceEx(struct sockaddr *pDestAddr, PDWORD pdwBestIfInde
 
   *pdwBestIfIndex = Row.InterfaceIndex;
   return NO_ERROR;
+}
+
+static UINT8 mask_length_of(DWORD Mask)
+{
+  DWORD Host = ntohl(Mask);
+  UINT8 Length = 0;
+
+  for (; Host & 0x80000000UL; Host <<= 1)
+    Length++;
+  return Length;
+}
+
+/* The IPv4 routing table as MIB_IPFORWARD_ROW2 rows (an empty one is NO_ERROR and no row) */
+DWORD Ipv4GetRouteRows(PMIB_IPFORWARD_ROW2 *Rows, ULONG *Count)
+{
+  PMIB_IPFORWARDTABLE Table = NULL;
+  PMIB_IPFORWARD_ROW2 Out;
+  ULONG Size = 0, Tries, i;
+  DWORD Result = ERROR_INSUFFICIENT_BUFFER;
+  DWORD LastIndex = 0xffffffff;
+  ULONG64 LastLuid = 0;
+
+  *Rows = NULL;
+  *Count = 0;
+  for (Tries = 0; Tries < 3 && Result == ERROR_INSUFFICIENT_BUFFER; Tries++)
+  {
+    HeapFree(GetProcessHeap(), 0, Table);
+    Table = Size ? HeapAlloc(GetProcessHeap(), 0, Size) : NULL;
+    if (Size && !Table)
+      return ERROR_NOT_ENOUGH_MEMORY;
+    Result = GetIpForwardTable(Table, &Size, FALSE);
+  }
+  if (Result == ERROR_NO_DATA)
+  {
+    /* no routes at all */
+    HeapFree(GetProcessHeap(), 0, Table);
+    *Rows = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*Out));
+    return *Rows ? NO_ERROR : ERROR_NOT_ENOUGH_MEMORY;
+  }
+  if (Result != NO_ERROR)
+  {
+    HeapFree(GetProcessHeap(), 0, Table);
+    return Result;
+  }
+
+  Out = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)(Table->dwNumEntries + 1) * sizeof(*Out));
+  if (!Out)
+  {
+    HeapFree(GetProcessHeap(), 0, Table);
+    return ERROR_NOT_ENOUGH_MEMORY;
+  }
+  for (i = 0; i < Table->dwNumEntries; i++)
+  {
+    const MIB_IPFORWARDROW *Row = &Table->table[i];
+    PMIB_IPFORWARD_ROW2 New = &Out[i];
+
+    if (Row->dwForwardIfIndex != LastIndex)
+    {
+      LastIndex = Row->dwForwardIfIndex;
+      if (!getInterfaceLuidByIndex(LastIndex, NULL, &LastLuid))
+        LastLuid = 0;
+    }
+    New->InterfaceLuid.Value = LastLuid;
+    New->InterfaceIndex = Row->dwForwardIfIndex;
+    New->DestinationPrefix.Prefix.Ipv4.sin_family = AF_INET;
+    New->DestinationPrefix.Prefix.Ipv4.sin_addr.s_addr = Row->dwForwardDest;
+    New->DestinationPrefix.PrefixLength = mask_length_of(Row->dwForwardMask);
+    New->NextHop.Ipv4.sin_family = AF_INET;
+    New->NextHop.Ipv4.sin_addr.s_addr = Row->dwForwardNextHop;
+    New->ValidLifetime = 0xffffffff;
+    New->PreferredLifetime = 0xffffffff;
+    New->Metric = Row->dwForwardMetric1;
+    New->Protocol = Row->dwForwardProto;
+    New->Age = Row->dwForwardAge;
+  }
+  *Count = Table->dwNumEntries;
+  *Rows = Out;
+  HeapFree(GetProcessHeap(), 0, Table);
+  return NO_ERROR;
+}
+
+/******************************************************************
+ *    GetIpForwardTable2 (IPHLPAPI.@)
+ *
+ * The routes of the stack: the IPv4 routing table, then the IPv6 routes (Ipv6GetRouteRows). The rows of an
+ * address family that is not asked for are left out. FreeMibTable frees the table.
+ */
+DWORD WINAPI GetIpForwardTable2(ADDRESS_FAMILY Family, PMIB_IPFORWARD_TABLE2 *Table)
+{
+  PMIB_IPFORWARD_ROW2 Rows4 = NULL, Rows6 = NULL;
+  ULONG Count4 = 0, Count6 = 0;
+  PMIB_IPFORWARD_TABLE2 Out;
+  DWORD Result;
+
+  TRACE("(%u, %p)\n", Family, Table);
+
+  if (!Table || (Family != AF_UNSPEC && Family != AF_INET && Family != AF_INET6))
+    return ERROR_INVALID_PARAMETER;
+  *Table = NULL;
+
+  if (Family != AF_INET6)
+  {
+    Result = Ipv4GetRouteRows(&Rows4, &Count4);
+    if (Result != NO_ERROR)
+      return Result;
+  }
+  if (Family != AF_INET)
+  {
+    Result = Ipv6GetRouteRows(&Rows6, &Count6);
+    if (Result != NO_ERROR)
+    {
+      HeapFree(GetProcessHeap(), 0, Rows4);
+      return Result;
+    }
+  }
+
+  Out = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
+                  FIELD_OFFSET(MIB_IPFORWARD_TABLE2, Table) + (SIZE_T)(Count4 + Count6 + 1) * sizeof(MIB_IPFORWARD_ROW2));
+  if (Out)
+  {
+    if (Count4)
+      memcpy(Out->Table, Rows4, (SIZE_T)Count4 * sizeof(MIB_IPFORWARD_ROW2));
+    if (Count6)
+      memcpy(Out->Table + Count4, Rows6, (SIZE_T)Count6 * sizeof(MIB_IPFORWARD_ROW2));
+    Out->NumEntries = Count4 + Count6;
+    *Table = Out;
+  }
+  HeapFree(GetProcessHeap(), 0, Rows4);
+  HeapFree(GetProcessHeap(), 0, Rows6);
+  return Out ? NO_ERROR : ERROR_NOT_ENOUGH_MEMORY;
 }

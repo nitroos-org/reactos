@@ -25,6 +25,10 @@ int LibNd6DadFailed(struct netif *netif, s8_t index);
 err_t LibTCPListenerInput6(void);
 int LibIcmp6ErrorAllowed(void);
 u32_t LibTCPNextIss(const ip_addr_t *LocalIp, u16_t LocalPort, const ip_addr_t *RemoteIp, u16_t RemotePort);
+/* ip/transport/tcp/nd6info.c */
+int LibIp6CountInput(struct pbuf *p, struct netif *inp);
+void LibIp6CountDelivered(struct pbuf *p, struct netif *inp, u8_t nexth);
+void LibTCPRoutes6Changed(void);
 /* ip/transport/udp/udp6.c */
 int LibIp6NexthInput(struct pbuf *p, struct netif *inp, u8_t nexth);
 int LibIp6McastAccept(struct netif *inp, const ip6_addr_t *dest);

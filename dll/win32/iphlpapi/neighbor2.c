@@ -7,6 +7,7 @@
 
 #include "iphlpapi_private.h"
 #include <wine/netioapi.h>
+#include "ipv6net.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(iphlpapi);
 
@@ -101,8 +102,9 @@ static BOOL is_v6_loopback(const MIB_IPNET_ROW2 *Row)
  * Look up one neighbor in the cache.
  *
  * NOTES
- *  Only IPv4 neighbors exist, as there is no IPv6 stack: an IPv6 address is not found. The cache is the ARP
- *  table; a dynamic entry is reported Reachable and a static one Permanent. The Windows entries that need no
+ *  An IPv4 neighbor comes from the ARP table; a dynamic entry is reported Reachable and a static one Permanent.
+ *  An IPv6 neighbor is one of the neighbour cache of the stack (Ipv6GetNeighborRows), found by address and, when the
+ *  row names one, by interface. The Windows entries that need no
  *  ARP exchange (the limited broadcast, Permanent with the all-ones address) are not reported. The row is
  *  left alone when nothing is found; without an interface in it, the interface of the entry is filled in.
  */
@@ -122,8 +124,36 @@ DWORD WINAPI GetIpNetEntry2(PMIB_IPNET_ROW2 Row)
   if (Error != NO_ERROR)
     return Error;
 
-  if (Row->Address.si_family != AF_INET)
-    return ERROR_NOT_FOUND;
+  if (Row->Address.si_family == AF_INET6)
+  {
+    PMIB_IPNET_ROW2 Rows;
+    ULONG Count, k;
+
+    Error = Ipv6GetNeighborRows(&Rows, &Count);
+    if (Error != NO_ERROR)
+      return Error;
+    Error = ERROR_NOT_FOUND;
+    for (k = 0; k < Count; k++)
+    {
+      const MIB_IPNET_ROW2 *Entry = &Rows[k];
+
+      if (memcmp(&Entry->Address.Ipv6.sin6_addr, &Row->Address.Ipv6.sin6_addr, 16))
+        continue;
+      if (Constrained && Entry->InterfaceIndex != Index)
+        continue;
+      Row->InterfaceIndex = Entry->InterfaceIndex;
+      Row->InterfaceLuid = Entry->InterfaceLuid;
+      memcpy(Row->PhysicalAddress, Entry->PhysicalAddress, sizeof(Row->PhysicalAddress));
+      Row->PhysicalAddressLength = Entry->PhysicalAddressLength;
+      Row->State = Entry->State;
+      Row->Flags = Entry->Flags;
+      Row->ReachabilityTime = Entry->ReachabilityTime;
+      Error = NO_ERROR;
+      break;
+    }
+    HeapFree(GetProcessHeap(), 0, Rows);
+    return Error;
+  }
 
   Error = ERROR_INSUFFICIENT_BUFFER;
   for (Tries = 0; Tries < 5 && Error == ERROR_INSUFFICIENT_BUFFER; Tries++)
@@ -184,6 +214,140 @@ static BOOL find_owner(IPAddr Address, PDWORD Index)
   return Found;
 }
 
+/* The first neighbour of the cache with this address (on the interface, when there is one) that has a link address */
+static BOOL find_cached_v6(const UCHAR *Address, DWORD Index, BOOL Constrained, PMIB_IPNET_ROW2 Found)
+{
+  PMIB_IPNET_ROW2 Rows;
+  ULONG Count, k;
+  BOOL Result = FALSE;
+
+  if (Ipv6GetNeighborRows(&Rows, &Count) != NO_ERROR)
+    return FALSE;
+  for (k = 0; k < Count && !Result; k++)
+  {
+    if (memcmp(&Rows[k].Address.Ipv6.sin6_addr, Address, 16))
+      continue;
+    if (Constrained && Rows[k].InterfaceIndex != Index)
+      continue;
+    if (Rows[k].State <= NlnsIncomplete)
+      continue;
+    *Found = Rows[k];
+    Result = TRUE;
+  }
+  HeapFree(GetProcessHeap(), 0, Rows);
+  return Result;
+}
+
+/* A datagram to the discard port makes the stack's neighbour discovery ask for the address */
+static void trigger_resolution_v6(const UCHAR *Address, DWORD Scope)
+{
+  WSADATA Wsa;
+  SOCKET Socket;
+  SOCKADDR_IN6 To;
+
+  if (WSAStartup(MAKEWORD(2, 2), &Wsa))
+    return;
+  Socket = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+  if (Socket != INVALID_SOCKET)
+  {
+    memset(&To, 0, sizeof(To));
+    To.sin6_family = AF_INET6;
+    memcpy(&To.sin6_addr, Address, 16);
+    To.sin6_port = htons(9);
+    To.sin6_scope_id = Scope;
+    sendto(Socket, "", 1, 0, (const struct sockaddr *)&To, sizeof(To));
+    closesocket(Socket);
+  }
+  WSACleanup();
+}
+
+/*
+ * ResolveIpNetEntry2 for an IPv6 address: ::1 resolves on the loopback interface, Permanent and without a link
+ * address; an address of this computer to the link address of its interface, Permanent; a neighbour in the cache to
+ * its entry. Any other on-link address is asked for by neighbour discovery (up to three seconds, the stack asks
+ * three times); everything else, an address the routes do not show on a link included, is ERROR_BAD_NET_NAME as before
+ * there was an IPv6 stack. The unspecified address is ERROR_INVALID_PARAMETER.
+ */
+static DWORD resolve_v6(PMIB_IPNET_ROW2 Row, DWORD Index, BOOL Constrained)
+{
+  const UCHAR *Address = Row->Address.Ipv6.sin6_addr.u.Byte;
+  static const UCHAR Zero[16];
+  DWORD Own, Mode, Tries;
+  BOOL Have;
+  MIB_IPNET_ROW2 Found;
+  ULONG Length;
+  BYTE Link[MAX_INTERFACE_PHYSADDR];
+  SOCKADDR_INET Best, BestSource;
+  MIB_IPFORWARD_ROW2 Route;
+  IPV6_STATE State;
+
+
+  /* without IPv6 only ::1 resolves, to the loopback interface; everything else is ERROR_BAD_NET_NAME */
+  if (!Ipv6GetState(&State))
+  {
+    if (!is_v6_loopback(Row) || !getInterfaceIndexByLuid(LOOPBACK_LUID, &Index) || !set_interface(Row, Index))
+      return ERROR_BAD_NET_NAME;
+    set_neighbor(Row, NlnsPermanent, NULL, 0);
+    return NO_ERROR;
+  }
+  Ipv6FreeState(&State);
+
+  if (!memcmp(Address, Zero, 16))
+    return ERROR_INVALID_PARAMETER;
+
+  if (is_v6_loopback(Row))
+  {
+    if (!getInterfaceIndexByLuid(LOOPBACK_LUID, &Index) || !set_interface(Row, Index))
+      return ERROR_BAD_NET_NAME;
+    set_neighbor(Row, NlnsPermanent, NULL, 0);
+    return NO_ERROR;
+  }
+
+  if (Ipv6FindOwner(Address, Row->Address.Ipv6.sin6_scope_id, &Own) && (!Constrained || Own == Index))
+  {
+    Length = sizeof(Link);
+    if (getInterfacePhysicalByIndex(Own, &Length, Link, &Mode) == NO_ERROR && set_interface(Row, Own))
+    {
+      set_neighbor(Row, NlnsPermanent, Link, Length);
+      return NO_ERROR;
+    }
+  }
+
+  if (!Constrained)
+  {
+    memset(&Best, 0, sizeof(Best));
+    Best.Ipv6 = Row->Address.Ipv6;
+    if (GetBestRoute2(NULL, 0, NULL, &Best, 0, &Route, &BestSource) != NO_ERROR)
+      return ERROR_BAD_NET_NAME;
+    /* only a destination the route shows on a link is a neighbour (a gateway is not what is asked for) */
+    if (!Route.InterfaceIndex || Route.DestinationPrefix.PrefixLength == 0 || Address[0] == 0xff)
+      return ERROR_BAD_NET_NAME;
+    Index = Route.InterfaceIndex;
+  }
+
+  Have = find_cached_v6(Address, Index, TRUE, &Found);
+  if (!Have)
+  {
+    trigger_resolution_v6(Address, Row->Address.Ipv6.sin6_scope_id ? Row->Address.Ipv6.sin6_scope_id : Index);
+    for (Tries = 0; Tries < 30 && !Have; Tries++)
+    {
+      Sleep(100);
+      Have = find_cached_v6(Address, Index, TRUE, &Found);
+    }
+  }
+  if (!Have)
+    return ERROR_BAD_NET_NAME;
+
+  Row->InterfaceIndex = Found.InterfaceIndex;
+  Row->InterfaceLuid = Found.InterfaceLuid;
+  memcpy(Row->PhysicalAddress, Found.PhysicalAddress, sizeof(Row->PhysicalAddress));
+  Row->PhysicalAddressLength = Found.PhysicalAddressLength;
+  Row->State = Found.State;
+  Row->Flags = Found.Flags;
+  Row->ReachabilityTime = Found.ReachabilityTime;
+  return NO_ERROR;
+}
+
 /******************************************************************
  *    ResolveIpNetEntry2 (IPHLPAPI.@)
  *
@@ -216,12 +380,7 @@ DWORD WINAPI ResolveIpNetEntry2(PMIB_IPNET_ROW2 Row, const SOCKADDR_INET *Source
     return Error;
 
   if (Row->Address.si_family == AF_INET6)
-  {
-    if (!is_v6_loopback(Row) || !getInterfaceIndexByLuid(LOOPBACK_LUID, &Index) || !set_interface(Row, Index))
-      return ERROR_BAD_NET_NAME;
-    set_neighbor(Row, NlnsPermanent, NULL, 0);
-    return NO_ERROR;
-  }
+    return resolve_v6(Row, Index, Constrained);
 
   Dest = Row->Address.Ipv4.sin_addr.s_addr;
   if (!Dest)
@@ -276,4 +435,114 @@ DWORD WINAPI ResolveIpNetEntry2(PMIB_IPNET_ROW2 Row, const SOCKADDR_INET *Source
 
   set_neighbor(Row, NlnsReachable, (const BYTE *)Hw, HwLen);
   return NO_ERROR;
+}
+
+/* The IPv4 neighbours (the ARP table: dynamic entries are Reachable, static ones Permanent) as MIB_IPNET_ROW2 rows */
+DWORD Ipv4GetNeighborRows(PMIB_IPNET_ROW2 *Rows, ULONG *Count)
+{
+  PMIB_IPNETTABLE Table = NULL;
+  PMIB_IPNET_ROW2 Out;
+  ULONG Size = 0, Tries, i, Used = 0;
+  DWORD Error = ERROR_INSUFFICIENT_BUFFER;
+
+  *Rows = NULL;
+  *Count = 0;
+  for (Tries = 0; Tries < 5 && Error == ERROR_INSUFFICIENT_BUFFER; Tries++)
+  {
+    HeapFree(GetProcessHeap(), 0, Table);
+    Table = Size ? HeapAlloc(GetProcessHeap(), 0, Size) : NULL;
+    if (Size && !Table)
+      return ERROR_OUTOFMEMORY;
+    Error = GetIpNetTable(Table, &Size, FALSE);
+  }
+  if (Error == ERROR_NO_DATA)
+  {
+    /* an empty cache */
+    HeapFree(GetProcessHeap(), 0, Table);
+    Table = NULL;
+    Error = NO_ERROR;
+  }
+  if (Error != NO_ERROR)
+  {
+    HeapFree(GetProcessHeap(), 0, Table);
+    return Error;
+  }
+
+  Out = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)((Table ? Table->dwNumEntries : 0) + 1) * sizeof(*Out));
+  if (!Out)
+  {
+    HeapFree(GetProcessHeap(), 0, Table);
+    return ERROR_OUTOFMEMORY;
+  }
+  for (i = 0; Table && i < Table->dwNumEntries; i++)
+  {
+    PMIB_IPNETROW Entry = &Table->table[i];
+    PMIB_IPNET_ROW2 Row = &Out[Used];
+
+    if (Entry->dwType != MIB_IPNET_TYPE_DYNAMIC && Entry->dwType != MIB_IPNET_TYPE_STATIC)
+      continue;
+    if (!set_interface(Row, Entry->dwIndex))
+      continue;
+    Row->Address.Ipv4.sin_family = AF_INET;
+    Row->Address.Ipv4.sin_addr.s_addr = Entry->dwAddr;
+    set_neighbor(Row, Entry->dwType == MIB_IPNET_TYPE_STATIC ? NlnsPermanent : NlnsReachable, Entry->bPhysAddr,
+                 Entry->dwPhysAddrLen);
+    Used++;
+  }
+  HeapFree(GetProcessHeap(), 0, Table);
+  *Rows = Out;
+  *Count = Used;
+  return NO_ERROR;
+}
+
+/******************************************************************
+ *    GetIpNetTable2 (IPHLPAPI.@)
+ *
+ * The neighbours of the stack: the IPv4 ones (the ARP table), then the IPv6 ones (the neighbour cache and the
+ * multicast groups it receives, Ipv6GetNeighborRows). The rows of an address family that is not asked for are left
+ * out. FreeMibTable frees the table.
+ */
+DWORD WINAPI GetIpNetTable2(ADDRESS_FAMILY Family, PMIB_IPNET_TABLE2 *Table)
+{
+  PMIB_IPNET_ROW2 Rows4 = NULL, Rows6 = NULL;
+  ULONG Count4 = 0, Count6 = 0;
+  PMIB_IPNET_TABLE2 Out;
+  DWORD Error;
+
+  TRACE("(%u, %p)\n", Family, Table);
+
+  if (!Table || (Family != AF_UNSPEC && Family != AF_INET && Family != AF_INET6))
+    return ERROR_INVALID_PARAMETER;
+  *Table = NULL;
+
+  if (Family != AF_INET6)
+  {
+    Error = Ipv4GetNeighborRows(&Rows4, &Count4);
+    if (Error != NO_ERROR)
+      return Error;
+  }
+  if (Family != AF_INET)
+  {
+    Error = Ipv6GetNeighborRows(&Rows6, &Count6);
+    if (Error != NO_ERROR)
+    {
+      HeapFree(GetProcessHeap(), 0, Rows4);
+      return Error;
+    }
+  }
+
+  Out = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
+                  FIELD_OFFSET(MIB_IPNET_TABLE2, Table) + (SIZE_T)(Count4 + Count6 + 1) * sizeof(MIB_IPNET_ROW2));
+  if (Out)
+  {
+    if (Count4)
+      memcpy(Out->Table, Rows4, (SIZE_T)Count4 * sizeof(MIB_IPNET_ROW2));
+    if (Count6)
+      memcpy(Out->Table + Count4, Rows6, (SIZE_T)Count6 * sizeof(MIB_IPNET_ROW2));
+    Out->NumEntries = Count4 + Count6;
+    *Table = Out;
+  }
+  HeapFree(GetProcessHeap(), 0, Rows4);
+  HeapFree(GetProcessHeap(), 0, Rows6);
+  return Out ? NO_ERROR : ERROR_OUTOFMEMORY;
 }

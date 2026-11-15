@@ -16,7 +16,10 @@ list(APPEND SOURCE
     Icmp6Echo.c
     IfStatistics.c
     IpInterface.c
+    IpForwardTable6.c
+    IpNetTable6.c
     IpTables2.c
+    Ipv6Statistics.c
     Ipv6Dns.c
     Ipv6Reporting.c
     Ipv6StableId.c
@@ -25,9 +28,11 @@ list(APPEND SOURCE
     NotifyAddrChange.c
     NotifyChanges.c
     NotifyIpInterfaceChange.c
+    NotifyIpv6.c
     NotifyRouteChange2.c
     NotifyStableUnicastIpAddressTable.c
     SendARP.c
+    Tcp6Table2.c
     TcpTimeWait.c
     TcpUdpTableRows.c
     Win6Exports.c

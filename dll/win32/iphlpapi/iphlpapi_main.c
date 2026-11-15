@@ -23,6 +23,7 @@
 
 #include <config.h>
 #include "iphlpapi_private.h"
+#include "ipv6net.h"
 #include <strsafe.h>
 #include <psapi.h>
 
@@ -968,6 +969,42 @@ static int __cdecl Tcp6TableSorter(const void *a, const void *b)
         ret = (int)rowA->dwLocalPort - (int)rowB->dwLocalPort;
     if (ret == 0)
         ret = memcmp(rowA->ucRemoteAddr, rowB->ucRemoteAddr, sizeof(rowA->ucRemoteAddr));
+    if (ret == 0)
+        ret = (int)rowA->dwRemoteScopeId - (int)rowB->dwRemoteScopeId;
+    if (ret == 0)
+        ret = (int)rowA->dwRemotePort - (int)rowB->dwRemotePort;
+    return ret;
+}
+
+static int __cdecl Tcp6Table2Sorter(const void *a, const void *b)
+{
+    const MIB_TCP6ROW2 *rowA = a, *rowB = b;
+    int ret = memcmp(&rowA->LocalAddr, &rowB->LocalAddr, sizeof(rowA->LocalAddr));
+
+    if (ret == 0)
+        ret = (int)rowA->dwLocalScopeId - (int)rowB->dwLocalScopeId;
+    if (ret == 0)
+        ret = (int)rowA->dwLocalPort - (int)rowB->dwLocalPort;
+    if (ret == 0)
+        ret = memcmp(&rowA->RemoteAddr, &rowB->RemoteAddr, sizeof(rowA->RemoteAddr));
+    if (ret == 0)
+        ret = (int)rowA->dwRemoteScopeId - (int)rowB->dwRemoteScopeId;
+    if (ret == 0)
+        ret = (int)rowA->dwRemotePort - (int)rowB->dwRemotePort;
+    return ret;
+}
+
+static int __cdecl Tcp6TableSorter2(const void *a, const void *b)
+{
+    const MIB_TCP6ROW *rowA = a, *rowB = b;
+    int ret = memcmp(&rowA->LocalAddr, &rowB->LocalAddr, sizeof(rowA->LocalAddr));
+
+    if (ret == 0)
+        ret = (int)rowA->dwLocalScopeId - (int)rowB->dwLocalScopeId;
+    if (ret == 0)
+        ret = (int)rowA->dwLocalPort - (int)rowB->dwLocalPort;
+    if (ret == 0)
+        ret = memcmp(&rowA->RemoteAddr, &rowB->RemoteAddr, sizeof(rowA->RemoteAddr));
     if (ret == 0)
         ret = (int)rowA->dwRemoteScopeId - (int)rowB->dwRemoteScopeId;
     if (ret == 0)
@@ -2208,6 +2245,10 @@ DWORD WINAPI GetIpStatisticsEx(PMIB_IPSTATS pStats, DWORD dwFamily)
     if (dwFamily != AF_INET && dwFamily != AF_INET6)
         return ERROR_INVALID_PARAMETER;
 
+    /* IPv6 has counters of its own while the stack has IPv6 on; off it is answered as before */
+    if (dwFamily == AF_INET6 && Ipv6GetIpStatistics(pStats))
+        return NO_ERROR;
+
     if (!NT_SUCCESS(openTcpFile(&tcpFile, FILE_READ_DATA)))
         return ERROR_NOT_SUPPORTED;
 
@@ -2771,6 +2812,10 @@ DWORD WINAPI GetTcpStatisticsEx(PMIB_TCPSTATS pStats, DWORD dwFamily)
     if (dwFamily != AF_INET && dwFamily != AF_INET6)
         return ERROR_INVALID_PARAMETER;
 
+    /* IPv6 has counters of its own while the stack has IPv6 on; off it is answered as before */
+    if (dwFamily == AF_INET6 && Ipv6GetTcpStatistics(pStats))
+        return NO_ERROR;
+
     if (!NT_SUCCESS(openTcpFile(&tcpFile, FILE_READ_DATA)))
         return ERROR_NOT_SUPPORTED;
 
@@ -2908,33 +2953,120 @@ DWORD WINAPI GetUdp6Table(PMIB_UDP6TABLE Udp6Table, PULONG SizePointer, BOOL Ord
     return (Ret == ERROR_INVALID_PARAMETER) ? ERROR_NOT_SUPPORTED : Ret;
 }
 
+/*
+ * The rows of the IPv6 TCP table of GetExtendedTcpTable (the owner pid class), or NULL: IPv6 is off, and the
+ * table is empty as before (the caller makes it so), or there was no memory.
+ */
+static PMIB_TCP6TABLE_OWNER_PID GetTcp6Rows(PBOOL Off)
+{
+    IPV6_STATE State;
+    *Off = !Ipv6GetState(&State);
+    if (*Off)
+        return NULL;
+    Ipv6FreeState(&State);
+    return getTcp6Table();
+}
+
 /******************************************************************
  *    GetTcp6Table2 (IPHLPAPI.@)
  *
- * Get the table of IPv6 TCP connections.
- *
- * NOTES
- *  The stack does not enumerate IPv6 connections (GetExtendedTcpTable rejects AF_INET6 too), so the
- *  table is empty.
+ * Get the table of IPv6 TCP connections and listeners, the rows GetExtendedTcpTable(AF_INET6) lists. While the stack
+ * has IPv6 off there is none and the table is empty.
  */
 DWORD WINAPI GetTcp6Table2(PMIB_TCP6TABLE2 pTcpTable, PULONG pdwSize, BOOL bOrder)
 {
-    DWORD size = FIELD_OFFSET(MIB_TCP6TABLE2, table);
+    PMIB_TCP6TABLE_OWNER_PID Ours;
+    BOOL Off;
+    DWORD i, Count, size;
 
     if (!pdwSize)
         return ERROR_INVALID_PARAMETER;
 
+    Ours = GetTcp6Rows(&Off);
+    if (!Off && !Ours)
+        return ERROR_NOT_ENOUGH_MEMORY;
+    Count = Ours ? Ours->dwNumEntries : 0;
+
+    size = FIELD_OFFSET(MIB_TCP6TABLE2, table) + Count * sizeof(MIB_TCP6ROW2);
     if (size > *pdwSize || !pTcpTable)
     {
         *pdwSize = size;
+        HeapFree(GetProcessHeap(), 0, Ours);
         return ERROR_INSUFFICIENT_BUFFER;
     }
 
-    pTcpTable->dwNumEntries = 0;
+    pTcpTable->dwNumEntries = Count;
+    for (i = 0; i < Count; i++)
+    {
+        const MIB_TCP6ROW_OWNER_PID *Row = &Ours->table[i];
+        PMIB_TCP6ROW2 New = &pTcpTable->table[i];
+
+        memset(New, 0, sizeof(*New));
+        memcpy(&New->LocalAddr, Row->ucLocalAddr, sizeof(New->LocalAddr));
+        New->dwLocalScopeId = Row->dwLocalScopeId;
+        New->dwLocalPort = Row->dwLocalPort;
+        memcpy(&New->RemoteAddr, Row->ucRemoteAddr, sizeof(New->RemoteAddr));
+        New->dwRemoteScopeId = Row->dwRemoteScopeId;
+        New->dwRemotePort = Row->dwRemotePort;
+        New->State = Row->dwState;
+        New->dwOwningPid = Row->dwOwningPid;
+        New->dwOffloadState = TcpConnectionOffloadStateInHost;
+    }
+    if (bOrder && Count > 1)
+        qsort(pTcpTable->table, Count, sizeof(MIB_TCP6ROW2), Tcp6Table2Sorter);
     *pdwSize = size;
+    HeapFree(GetProcessHeap(), 0, Ours);
     return NO_ERROR;
 }
 
+/******************************************************************
+ *    GetTcp6Table (IPHLPAPI.@)
+ *
+ * The same table as GetTcp6Table2, in the layout without the owner and the offload state.
+ */
+DWORD WINAPI GetTcp6Table(PMIB_TCP6TABLE pTcpTable, PULONG pdwSize, BOOL bOrder)
+{
+    PMIB_TCP6TABLE_OWNER_PID Ours;
+    BOOL Off;
+    DWORD i, Count, size;
+
+    if (!pdwSize)
+        return ERROR_INVALID_PARAMETER;
+
+    Ours = GetTcp6Rows(&Off);
+    if (!Off && !Ours)
+        return ERROR_NOT_ENOUGH_MEMORY;
+    Count = Ours ? Ours->dwNumEntries : 0;
+
+    size = FIELD_OFFSET(MIB_TCP6TABLE, table) + Count * sizeof(MIB_TCP6ROW);
+    if (size > *pdwSize || !pTcpTable)
+    {
+        *pdwSize = size;
+        HeapFree(GetProcessHeap(), 0, Ours);
+        return ERROR_INSUFFICIENT_BUFFER;
+    }
+
+    pTcpTable->dwNumEntries = Count;
+    for (i = 0; i < Count; i++)
+    {
+        const MIB_TCP6ROW_OWNER_PID *Row = &Ours->table[i];
+        PMIB_TCP6ROW New = &pTcpTable->table[i];
+
+        memset(New, 0, sizeof(*New));
+        New->State = Row->dwState;
+        memcpy(&New->LocalAddr, Row->ucLocalAddr, sizeof(New->LocalAddr));
+        New->dwLocalScopeId = Row->dwLocalScopeId;
+        New->dwLocalPort = Row->dwLocalPort;
+        memcpy(&New->RemoteAddr, Row->ucRemoteAddr, sizeof(New->RemoteAddr));
+        New->dwRemoteScopeId = Row->dwRemoteScopeId;
+        New->dwRemotePort = Row->dwRemotePort;
+    }
+    if (bOrder && Count > 1)
+        qsort(pTcpTable->table, Count, sizeof(MIB_TCP6ROW), Tcp6TableSorter2);
+    *pdwSize = size;
+    HeapFree(GetProcessHeap(), 0, Ours);
+    return NO_ERROR;
+}
 
 /******************************************************************
  *    GetUdpStatisticsEx (IPHLPAPI.@)
@@ -3228,39 +3360,9 @@ DWORD WINAPI NotifyRouteChange(PHANDLE Handle, LPOVERLAPPED overlapped)
  *    The Vista IP Helper table functions (IPHLPAPI.@)
  *
  * NOTES
- *  The interface and unicast address tables are in netio.c. This IP helper
- *  cannot build the neighbour and forward NETIO tables yet. Failing with
- *  ERROR_NOT_SUPPORTED, and an empty table pointer, lets callers take their
- *  error path. The earlier generated stubs returned NO_ERROR and left the
- *  output pointer alone, so callers read an uninitialised table.
- *  The checks of the arguments follow Windows: a missing output pointer and
- *  an unknown address family give ERROR_INVALID_PARAMETER.
+ *  The interface and unicast address tables are in netio.c, the neighbour table (GetIpNetTable2) in neighbor2.c
+ *  and the forward table (GetIpForwardTable2) in route2.c.
  */
-static BOOL is_valid_family(USHORT Family)
-{
-  return Family == AF_UNSPEC || Family == AF_INET || Family == AF_INET6;
-}
-
-static DWORD no_table(USHORT Family, PVOID *Table)
-{
-  if (!Table || !is_valid_family(Family))
-    return ERROR_INVALID_PARAMETER;
-
-  *Table = NULL;
-  return ERROR_NOT_SUPPORTED;
-}
-
-DWORD WINAPI GetIpNetTable2(USHORT Family, PVOID *Table)
-{
-  FIXME("(%u, %p): not supported\n", Family, Table);
-  return no_table(Family, Table);
-}
-
-DWORD WINAPI GetIpForwardTable2(USHORT Family, PVOID *Table)
-{
-  FIXME("(%u, %p): not supported\n", Family, Table);
-  return no_table(Family, Table);
-}
 
 DWORD WINAPI ConvertLengthToIpv4Mask(ULONG MaskLength, PULONG Mask)
 {
@@ -3814,15 +3916,19 @@ DWORD WINAPI NhpAllocateAndGetInterfaceInfoFromStack(IP_INTERFACE_NAME_INFO **pp
  */
 DWORD WINAPI GetIcmpStatisticsEx(PMIB_ICMP_EX pStats,DWORD dwFamily)
 {
-    FIXME(":stub\n");
-
     if (!pStats)
         return ERROR_INVALID_PARAMETER;
 
     if (dwFamily != AF_INET && dwFamily != AF_INET6)
         return ERROR_INVALID_PARAMETER;
 
-    return 0L;
+    /* ICMPv6 counts what the stack kept (Ipv6GetIcmpStatistics); the IPv4 stack keeps no ICMP counters (as
+       GetIcmpStatistics, no counter is reported), and with IPv6 off neither does the IPv6 side */
+    if (dwFamily == AF_INET6 && Ipv6GetIcmpStatistics(pStats))
+        return NO_ERROR;
+
+    memset(pStats, 0, sizeof(*pStats));
+    return NO_ERROR;
 }
 
 DWORD WINAPI
