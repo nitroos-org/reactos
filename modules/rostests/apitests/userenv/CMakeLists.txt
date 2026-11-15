@@ -7,6 +7,7 @@ list(APPEND SOURCE
     GetProfileDirs.c
     LegacyProfileJunctions.c
     LoadUserProfile.c
+    NetworkCatalogUpgrade.c
     ProfileSecurity.c
     ProgramDataSecurity.c
     testlist.c)
