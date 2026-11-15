@@ -1865,6 +1865,8 @@ MiniUnlinkAdapter(
     KeReleaseSpinLock(&AdapterListLock, OldIrql);
 }
 
+static VOID MiniFreeShutdownRegistration(PLOGICAL_ADAPTER Adapter);
+
 /*
  * The remove / surprise-remove teardown, run once: the adapter leaves the adapter lists, its sends and
  * requests start failing, the miniport is halted, and only then are the protocols unbound. Halting first
@@ -1915,6 +1917,9 @@ MiniShutdownAdapter(
 
     /* The sends, requests, transfers and resets have been completed or failed: the protocols' unbind drains at once */
     ProUnbindAdapter(Adapter);
+
+    /* A shutdown handler the miniport registered and did not deregister */
+    MiniFreeShutdownRegistration(Adapter);
 
     /* The DMA adapter NdisMInitializeScatterGatherDma (or a map register or DMA channel
        call the miniport did not undo) got from the HAL; the miniport is halted */
@@ -2652,10 +2657,30 @@ NdisMDeregisterAdapterShutdownHandler(
 
   NDIS_DbgPrint(DEBUG_MINIPORT, ("Called.\n"));
 
-  if(Adapter->BugcheckContext->ShutdownHandler) {
-    KeDeregisterBugCheckCallback(Adapter->BugcheckContext->CallbackRecord);
+  MiniFreeShutdownRegistration(Adapter);
+}
+
+/* Takes the shutdown handler registration back and frees what NdisMRegisterAdapterShutdownHandler
+   allocated for it (the context and the bugcheck callback record); does nothing if there is none */
+static
+VOID
+MiniFreeShutdownRegistration(
+  PLOGICAL_ADAPTER Adapter)
+{
+  PMINIPORT_BUGCHECK_CONTEXT Context = Adapter->BugcheckContext;
+
+  if (!Context)
+    return;
+
+  Adapter->BugcheckContext = NULL;
+
+  if (Context->ShutdownHandler) {
+    KeDeregisterBugCheckCallback(Context->CallbackRecord);
     IoUnregisterShutdownNotification(Adapter->NdisMiniportBlock.DeviceObject);
   }
+
+  ExFreePool(Context->CallbackRecord);
+  ExFreePool(Context);
 }
 
 /*
