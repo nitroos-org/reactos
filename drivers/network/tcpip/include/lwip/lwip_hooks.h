@@ -28,3 +28,4 @@ u32_t LibTCPNextIss(const ip_addr_t *LocalIp, u16_t LocalPort, const ip_addr_t *
 /* ip/transport/udp/udp6.c */
 int LibIp6NexthInput(struct pbuf *p, struct netif *inp, u8_t nexth);
 int LibIp6McastAccept(struct netif *inp, const ip6_addr_t *dest);
+u32_t LibMld6Random(void);

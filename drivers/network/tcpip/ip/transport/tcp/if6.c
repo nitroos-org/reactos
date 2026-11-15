@@ -259,6 +259,11 @@ TCP6NetifEvent(struct netif *netif, netif_nsc_reason_t Reason, const netif_ext_c
 static netif_ext_callback_t TCP6NetifCallback;
 static BOOLEAN TCP6NetifCallbackAdded;
 
+#if LWIP_IPV6_MLD
+/* udp6.c: MLD's interface events, registered once (core lock held) */
+VOID UDP6MldStart(VOID);
+#endif
+
 /* Called with the core lock held, from TCPInterfaceInit: the addresses an interface starts with */
 VOID
 TCPInterfaceInit6(PIP_INTERFACE IF)
@@ -267,6 +272,14 @@ TCPInterfaceInit6(PIP_INTERFACE IF)
 
     if (!TCPIpv6Enabled)
         return;
+
+#if LWIP_IPV6_MLD
+    /* An Ethernet interface does MLD: the solicited-node groups of its addresses are joined (nd6.c) and reported
+       with the groups sockets join (mld6.c, udp6.c). The loopback interface keeps its groups unreported */
+    if (IF->AddressLength == 6 && netif->hwaddr_len == 6)
+        netif->flags |= NETIF_FLAG_MLD6;
+    UDP6MldStart();
+#endif
 
     /* Address changes from now on keep the interface's multicast reception in step (the first interface
        registers it, under the core lock as the others) */

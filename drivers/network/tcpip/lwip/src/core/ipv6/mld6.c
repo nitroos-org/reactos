@@ -66,8 +66,19 @@
 #include "lwip/netif.h"
 #include "lwip/memp.h"
 #include "lwip/stats.h"
+#include "lwip/timeouts.h"
 
 #include <string.h>
+
+#ifdef LWIP_HOOK_FILENAME
+#include LWIP_HOOK_FILENAME
+#endif
+
+/* NitroOS: the random delay of a report (RFC 2710 4) may come from a source of its own (MLD6_RAND), so a port
+ * gets it without defining LWIP_RAND for the whole stack */
+#if !defined(MLD6_RAND) && defined(LWIP_RAND)
+#define MLD6_RAND() LWIP_RAND()
+#endif
 
 
 /*
@@ -85,6 +96,105 @@ static struct mld_group *mld6_new_group(struct netif *ifp, const ip6_addr_t *add
 static err_t mld6_remove_group(struct netif *netif, struct mld_group *group);
 static void mld6_delayed_report(struct mld_group *group, u16_t maxresp);
 static void mld6_send(struct netif *netif, struct mld_group *group, u8_t type);
+static void mld6_tmr_ticks(u32_t ticks);
+
+/* NitroOS: RFC 2710 5: no report or done for the link-scope all-nodes group, nor for a group of the reserved
+ * or the interface-local scope */
+static int
+mld6_reportable(const ip6_addr_t *addr)
+{
+  return !ip6_addr_isallnodes_linklocal(addr) &&
+         ip6_addr_multicast_scope(addr) > IP6_MULTICAST_SCOPE_INTERFACE_LOCAL;
+}
+
+#if MLD6_TMR_ON_DEMAND
+/* NitroOS: no cyclic timer (timeouts.c). The group timers still count MLD6_TMR_INTERVAL ticks, but one lwIP
+ * timeout is armed for the earliest of them, and none while no report is pending: an idle machine gets no
+ * wake-up from MLD, a machine on a network with a querier one or two per query. While the timeout is armed,
+ * mld6_tmr_base is the time from which whole ticks are counted; a timer set meanwhile first has the elapsed
+ * ticks taken off the others (mld6_tmr_settle), so every timer counts from the time it was set. */
+static u8_t mld6_tmr_armed;
+static u32_t mld6_tmr_base;
+
+static void mld6_tmr_arm(void);
+
+/* The timeout: what is due is sent, then the next timeout is armed if a report is still pending */
+static void
+mld6_tmr_fire(void *arg)
+{
+  u32_t ticks = (u32_t)(sys_now() - mld6_tmr_base) / MLD6_TMR_INTERVAL;
+
+  LWIP_UNUSED_ARG(arg);
+
+  mld6_tmr_armed = 0;
+  mld6_tmr_ticks(ticks);
+  mld6_tmr_arm();
+}
+
+/* Takes the whole ticks elapsed since mld6_tmr_base off every running timer. A timer that is due stays at 1:
+ * mld6_tmr_arm then arms the timeout less than a tick away and mld6_tmr_fire sends the report */
+static void
+mld6_tmr_settle(void)
+{
+  struct netif *netif;
+  u32_t ticks;
+
+  if (!mld6_tmr_armed) {
+    return;
+  }
+  ticks = (u32_t)(sys_now() - mld6_tmr_base) / MLD6_TMR_INTERVAL;
+  if (ticks == 0) {
+    return;
+  }
+  mld6_tmr_base += ticks * MLD6_TMR_INTERVAL;
+
+  NETIF_FOREACH(netif) {
+    struct mld_group *group;
+
+    for (group = netif_mld6_data(netif); group != NULL; group = group->next) {
+      if (group->timer > 0) {
+        group->timer = (group->timer > ticks) ? (u16_t)(group->timer - ticks) : 1;
+      }
+    }
+  }
+}
+
+/* Arms the timeout for the earliest running timer, or removes it when none runs. Called after mld6_tmr_settle
+ * (or with no timeout armed), so less than a tick has passed since mld6_tmr_base */
+static void
+mld6_tmr_arm(void)
+{
+  struct netif *netif;
+  u16_t next = 0;
+  u32_t elapsed, delay;
+
+  NETIF_FOREACH(netif) {
+    struct mld_group *group;
+
+    for (group = netif_mld6_data(netif); group != NULL; group = group->next) {
+      if (group->timer > 0 && (next == 0 || group->timer < next)) {
+        next = group->timer;
+      }
+    }
+  }
+
+  if (mld6_tmr_armed) {
+    sys_untimeout(mld6_tmr_fire, NULL);
+    mld6_tmr_armed = 0;
+  } else {
+    mld6_tmr_base = sys_now();
+  }
+  if (next == 0) {
+    return;
+  }
+
+  elapsed = (u32_t)(sys_now() - mld6_tmr_base);
+  delay = (u32_t)next * MLD6_TMR_INTERVAL;
+  delay = (delay > elapsed) ? delay - elapsed : 1;
+  sys_timeout(delay, mld6_tmr_fire, NULL);
+  mld6_tmr_armed = 1;
+}
+#endif /* MLD6_TMR_ON_DEMAND */
 
 
 /**
@@ -244,6 +354,12 @@ mld6_input(struct pbuf *p, struct netif *inp)
 
   switch (mld_hdr->type) {
   case ICMP6_TYPE_MLQ: /* Multicast listener query. */
+    /* NitroOS: a query comes from a link-local address with hop limit 1 (RFC 2710 3, RFC 3810 5.1.14);
+     * any other is ignored, so no sender off the link can have reports sent */
+    if (!ip6_addr_islinklocal(ip6_current_src_addr()) || IP6H_HOPLIM(ip6_current_header()) != MLD6_HL) {
+      MLD6_STATS_INC(mld6.drop);
+      break;
+    }
     /* Is it a general query? */
     if (ip6_addr_isallnodes_linklocal(ip6_current_dest_addr()) &&
         ip6_addr_isany(&(mld_hdr->multicast_address))) {
@@ -495,14 +611,25 @@ mld6_leavegroup_netif(struct netif *netif, const ip6_addr_t *groupaddr)
 void
 mld6_tmr(void)
 {
+  mld6_tmr_ticks(1);
+}
+
+/* Counts ticks off every running timer; a report is sent for each one that runs out */
+static void
+mld6_tmr_ticks(u32_t ticks)
+{
   struct netif *netif;
+
+  if (ticks == 0) {
+    return;
+  }
 
   NETIF_FOREACH(netif) {
     struct mld_group *group = netif_mld6_data(netif);
 
     while (group != NULL) {
       if (group->timer > 0) {
-        group->timer--;
+        group->timer = (group->timer > ticks) ? (u16_t)(group->timer - ticks) : 0;
         if (group->timer == 0) {
           /* If the state is MLD6_GROUP_DELAYING_MEMBER then we send a report for this group */
           if (group->group_state == MLD6_GROUP_DELAYING_MEMBER) {
@@ -529,17 +656,27 @@ mld6_delayed_report(struct mld_group *group, u16_t maxresp_in)
 {
   /* Convert maxresp from milliseconds to tmr ticks */
   u16_t maxresp = maxresp_in / MLD6_TMR_INTERVAL;
+
+  /* NitroOS: a group that is never reported needs no timer */
+  if (!mld6_reportable(&group->group_address)) {
+    return;
+  }
   if (maxresp == 0) {
     maxresp = 1;
   }
 
-#ifdef LWIP_RAND
-  /* Randomize maxresp. (if LWIP_RAND is supported) */
-  maxresp = (u16_t)(LWIP_RAND() % maxresp);
+#ifdef MLD6_RAND
+  /* Randomize maxresp. (if MLD6_RAND or LWIP_RAND is supported) */
+  maxresp = (u16_t)(MLD6_RAND() % maxresp);
   if (maxresp == 0) {
     maxresp = 1;
   }
-#endif /* LWIP_RAND */
+#endif /* MLD6_RAND */
+
+#if MLD6_TMR_ON_DEMAND
+  /* The running timers count from now before this one is compared with them */
+  mld6_tmr_settle();
+#endif /* MLD6_TMR_ON_DEMAND */
 
   /* Apply timer value if no report has been scheduled already. */
   if ((group->group_state == MLD6_GROUP_IDLE_MEMBER) ||
@@ -548,6 +685,10 @@ mld6_delayed_report(struct mld_group *group, u16_t maxresp_in)
     group->timer = maxresp;
     group->group_state = MLD6_GROUP_DELAYING_MEMBER;
   }
+
+#if MLD6_TMR_ON_DEMAND
+  mld6_tmr_arm();
+#endif /* MLD6_TMR_ON_DEMAND */
 }
 
 /**
@@ -565,6 +706,21 @@ mld6_send(struct netif *netif, struct mld_group *group, u8_t type)
   struct mld_header *mld_hdr;
   struct pbuf *p;
   const ip6_addr_t *src_addr;
+  ip6_addr_t dest_addr;
+
+  /* NitroOS: no message for a group that is never reported (mld6_reportable), and none on an interface that
+   * does not do MLD (NETIF_FLAG_MLD6 unset: the loopback interface, which still keeps groups to accept them) */
+  if (!mld6_reportable(&group->group_address) || !(netif->flags & NETIF_FLAG_MLD6)) {
+    return;
+  }
+
+  /* NitroOS: a report goes to the group, a done message to the link-scope all-routers group (RFC 2710 3) */
+  if (type == ICMP6_TYPE_MLD) {
+    ip6_addr_set_allrouters_linklocal(&dest_addr);
+    ip6_addr_assign_zone(&dest_addr, IP6_MULTICAST, netif);
+  } else {
+    ip6_addr_copy(dest_addr, group->group_address);
+  }
 
   /* Allocate a packet. Size is MLD header + IPv6 Hop-by-hop options header. */
   p = pbuf_alloc(PBUF_IP, sizeof(struct mld_header) + MLD6_HBH_HLEN, PBUF_RAM);
@@ -604,7 +760,7 @@ mld6_send(struct netif *netif, struct mld_group *group, u8_t type)
 #if CHECKSUM_GEN_ICMP6
   IF__NETIF_CHECKSUM_ENABLED(netif, NETIF_CHECKSUM_GEN_ICMP6) {
     mld_hdr->chksum = ip6_chksum_pseudo(p, IP6_NEXTH_ICMP6, p->len,
-      src_addr, &(group->group_address));
+      src_addr, &dest_addr);
   }
 #endif /* CHECKSUM_GEN_ICMP6 */
 
@@ -618,7 +774,7 @@ mld6_send(struct netif *netif, struct mld_group *group, u8_t type)
 
   /* Send the packet out. */
   MLD6_STATS_INC(mld6.xmit);
-  ip6_output_if(p, (ip6_addr_isany(src_addr)) ? NULL : src_addr, &(group->group_address),
+  ip6_output_if(p, (ip6_addr_isany(src_addr)) ? NULL : src_addr, &dest_addr,
       MLD6_HL, 0, IP6_NEXTH_HOPBYHOP, netif);
   pbuf_free(p);
 }

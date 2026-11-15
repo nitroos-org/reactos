@@ -72,6 +72,12 @@ struct mld_group {
 
 #define MLD6_TMR_INTERVAL              100 /* Milliseconds */
 
+/* NitroOS: MLD6_TMR_ON_DEMAND 1 = no cyclic mld6_tmr (timeouts.c); mld6.c arms one timeout for the earliest
+ * pending report and none while nothing is pending, so an idle machine is not woken every MLD6_TMR_INTERVAL */
+#ifndef MLD6_TMR_ON_DEMAND
+#define MLD6_TMR_ON_DEMAND             0
+#endif
+
 err_t  mld6_stop(struct netif *netif);
 void   mld6_report_groups(struct netif *netif);
 void   mld6_tmr(void);

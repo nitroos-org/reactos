@@ -23,10 +23,13 @@
  * multicast group.
  *
  * Multicast groups (IPV6_ADD_MEMBERSHIP): per socket (up to UDP6_SOCKET_GROUPS), and per interface a count of
- * the sockets that joined, which makes ip6_input take the group (LibIp6McastAccept) and puts it in the adapter's
- * multicast list (if6.c, TCP6UpdateMulticast). A socket receives a group's datagram only if it joined the group on
- * the interface the datagram arrived on (VERIFY ON ORACLE). MLD (RFC 3810) is not done: lwIP's MLD is off
- * (lwipopts.h), so no report announces the groups to the link (a switch that snoops MLD would not forward them).
+ * the sockets that joined. The first socket in a group joins it in lwIP's MLD on that interface (mld6.c, MLDv1,
+ * RFC 2710): ip6_input then takes the group, and MLD reports it to the link (at once, again within half a second,
+ * and in answer to each query), so a switch that snoops MLD forwards it; the last socket leaving sends the done
+ * message. The group also goes in the adapter's multicast list (if6.c, TCP6UpdateMulticast). A socket receives a
+ * group's datagram only if it joined the group on the interface the datagram arrived on (VERIFY ON ORACLE).
+ * Windows reports with MLDv2 (RFC 3810, VERIFY on a capture); MLDv1 is what lwIP has, and an MLDv2 router or
+ * snooping switch falls back to it for the link (RFC 3810 8).
  */
 
 #include "precomp.h"
@@ -40,6 +43,7 @@
 #include "lwip/inet_chksum.h"
 #include "lwip/netif.h"
 #include "lwip/tcpip.h"
+#include "lwip/mld6.h"
 
 /* ntifs.h has it; this driver includes ntddk.h only (an implicit declaration would return an int, not a BOOLEAN) */
 NTKERNELAPI
@@ -47,6 +51,13 @@ BOOLEAN
 NTAPI
 PsIsSystemThread(
     _In_ PETHREAD Thread);
+
+/* ntifs.h has it too */
+NTSYSAPI
+ULONG
+NTAPI
+RtlRandomEx(
+    _Inout_ PULONG Seed);
 
 /* echo6.c */
 int Echo6Input(struct pbuf *p, struct netif *inp);
@@ -698,8 +709,9 @@ UDPSendDatagram6(
  * Multicast groups
  * ---------------------------------------------------------------------------------------------- */
 
-/* NitroOS hook LWIP_HOOK_IP6_MCAST_ACCEPT (lwipopts.h): ip6_input takes a datagram to Dest on inp, a group that
- * is neither all-nodes nor solicited-node, when a socket joined it there (core lock held) */
+/* NitroOS hook LWIP_HOOK_IP6_MCAST_ACCEPT (lwipopts.h, used only with LWIP_IPV6_MLD 0): ip6_input takes a
+ * datagram to Dest on inp, a group that is neither all-nodes nor solicited-node, when a socket joined it there
+ * (core lock held) */
 int
 LibIp6McastAccept(struct netif *inp, const ip6_addr_t *Dest)
 {
@@ -756,6 +768,77 @@ UDP6AddMulticastList(struct netif *netif, PUCHAR List, PUINT Count, UINT Max)
 /* if6.c: sets the adapter's multicast list again (core lock held) */
 VOID TCP6UpdateMulticastList(struct netif *netif);
 
+#if LWIP_IPV6_MLD
+/* LWIP_HOOK MLD6_RAND (lwipopts.h): the random part of an MLD report delay (core lock held) */
+u32_t
+LibMld6Random(VOID)
+{
+    static ULONG Seed;
+
+    if (!Seed)
+        Seed = (ULONG)KeQueryPerformanceCounter(NULL).QuadPart | 1;
+    return RtlRandomEx(&Seed);
+}
+
+/* Group in lwIP's MLD on netif: joined for the first socket, left after the last (core lock held) */
+static
+err_t
+Udp6Mld(struct netif *netif, const UDP6_GROUP *Group, BOOLEAN Join)
+{
+    ip6_addr_t Address;
+
+    RtlCopyMemory(Address.addr, Group->Group, 16);
+    ip6_addr_clear_zone(&Address);
+    return Join ? mld6_joingroup_netif(netif, &Address) : mld6_leavegroup_netif(netif, &Address);
+}
+
+/* lwIP's interface events for MLD (core lock held) */
+static
+void
+Udp6MldNetifEvent(struct netif *netif, netif_nsc_reason_t Reason, const netif_ext_callback_args_t *Args)
+{
+    ULONG i;
+
+    /* An interface was added, with its final index: the groups sockets hold for that index are joined in MLD
+       there, as the accept hook took them without MLD */
+    if (Reason & LWIP_NSC_NETIF_ADDED)
+    {
+        UCHAR Zone = (UCHAR)netif_get_index(netif);
+
+        for (i = 0; i < UDP6_MACHINE_GROUPS; i++)
+        {
+            if (Udp6Groups[i].Sockets && Udp6Groups[i].Group.Zone == Zone)
+                Udp6Mld(netif, &Udp6Groups[i].Group, TRUE);
+        }
+    }
+
+    /* The link-local address passed duplicate address detection: the reports sent so far had no source address
+       (::, RFC 3590 4), which a snooping switch may ignore; every group is reported again from the link-local
+       address (within half a second) */
+    if ((Reason & LWIP_NSC_IPV6_ADDR_STATE_CHANGED) && Args && (netif->flags & NETIF_FLAG_MLD6) &&
+        Args->ipv6_addr_state_changed.addr_index == 0 &&
+        !ip6_addr_isvalid(Args->ipv6_addr_state_changed.old_state) &&
+        ip6_addr_isvalid(netif_ip6_addr_state(netif, 0)))
+    {
+        mld6_report_groups(netif);
+    }
+}
+
+static netif_ext_callback_t Udp6MldCallback;
+static BOOLEAN Udp6MldCallbackAdded;
+
+/* if6.c, with IPv6 on, as each interface is set up (core lock held): MLD's interface events from now on */
+VOID
+UDP6MldStart(VOID)
+{
+    if (!Udp6MldCallbackAdded)
+    {
+        netif_add_ext_callback(&Udp6MldCallback, Udp6MldNetifEvent);
+        Udp6MldCallbackAdded = TRUE;
+    }
+}
+#endif /* LWIP_IPV6_MLD */
+
 /* One socket more or less in Group on its interface (core lock held). FALSE: no room for another group, in the
  * table or in Process's share of it */
 static
@@ -796,15 +879,28 @@ Udp6CountMember(const UDP6_GROUP *Group, BOOLEAN Join, HANDLE Process)
             return TRUE;
         if (Free == UDP6_MACHINE_GROUPS || Taken >= UDP6_PROCESS_GROUPS)
             return FALSE;
+#if LWIP_IPV6_MLD
+        /* MLD takes the group first: without it ip6_input would not take the group's datagrams */
+        netif = netif_get_by_index(Group->Zone);
+        if (netif && Udp6Mld(netif, Group, TRUE) != ERR_OK)
+            return FALSE;
+#endif
         Udp6Groups[Free].Group = *Group;
         Udp6Groups[Free].Sockets = 1;
         Udp6Groups[Free].Owner = Process;
     }
 
-    /* The first socket in the group, or the last one gone: the adapter's list changes */
+    /* The first socket in the group, or the last one gone: the adapter's list changes (and MLD leaves the group
+       after the last one) */
     netif = netif_get_by_index(Group->Zone);
     if (netif)
+    {
+#if LWIP_IPV6_MLD
+        if (!Join)
+            Udp6Mld(netif, Group, FALSE);
+#endif
         TCP6UpdateMulticastList(netif);
+    }
     return TRUE;
 }
 
