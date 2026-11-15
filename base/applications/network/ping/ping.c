@@ -160,7 +160,8 @@ wmain(int argc, WCHAR *argv[])
     FreeAddrInfoW(Target);
     WSACleanup();
 
-    return 0;
+    /* As Windows: 1 when nothing answered, 0 when something did (a "destination unreachable" answer counts) */
+    return EchosReceived ? 0 : 1;
 }
 
 static
