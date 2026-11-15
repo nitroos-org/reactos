@@ -52,6 +52,10 @@
  * (rdnss6.c); lwIP's own DNS client is not part of this tree */
 #define LWIP_ND6_RDNSS_MAX_DNS_SERVERS  3
 #define LWIP_HOOK_ND6_RDNSS(netif, addr, lifetime) LibTCPRdnss6Input(netif, addr, lifetime)
+/* Stable random interface identifiers (RFC 7217, iid6.c): the SLAAC address of a prefix, and a new identifier
+ * when DAD finds one in use (NitroOS hooks in nd6.c) */
+#define LWIP_HOOK_ND6_SLAAC_ADDRESS(netif, prefix, addr) LibNd6SlaacAddress(netif, prefix, addr)
+#define LWIP_HOOK_ND6_DAD_FAILED(netif, index) LibNd6DadFailed(netif, index)
 /* Interface events: with IPv6 on, address changes set the adapter's multicast list (if6.c). Nothing listens
  * with it off */
 #define LWIP_NETIF_EXT_STATUS_CALLBACK  1

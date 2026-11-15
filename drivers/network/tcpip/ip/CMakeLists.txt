@@ -34,6 +34,7 @@ list(APPEND SOURCE
     transport/tcp/event.c
     transport/tcp/if.c
     transport/tcp/if6.c
+    transport/tcp/iid6.c
     transport/tcp/rdnss6.c
     transport/tcp/selftest6.c
     transport/tcp/tcp.c

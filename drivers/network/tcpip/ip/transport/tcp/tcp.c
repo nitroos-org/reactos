@@ -232,6 +232,8 @@ NTSTATUS TCPStartup(VOID)
 
     /* Before any interface registers: they get IPv6 addresses only with it on */
     TCPReadIpv6Switch();
+    if (TCPIpv6Enabled)
+        TCP6ReadIdentifierSettings();
 
     /* Initialize our IP library */
     LibIPInitialize();

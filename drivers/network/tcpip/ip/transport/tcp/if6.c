@@ -171,8 +171,9 @@ TCPReadIpv6Switch(VOID)
 /* The link layer multicast groups an Ethernet interface must receive (core lock held): the all-nodes group
  * (router advertisements, RFC 4861 4.2) and the solicited-node group of each of its addresses, tentative ones
  * included (neighbour solicitations, and duplicate address detection: RFC 4861 4.3, RFC 4862 5.4), mapped to
- * Ethernet addresses as RFC 2464 7 says (33:33 and the last 32 bits). lwIP's addresses on one interface share
- * their interface identifier (link-local and SLAAC), so this is usually two addresses. No MLD (lwipopts.h):
+ * Ethernet addresses as RFC 2464 7 says (33:33 and the last 32 bits). With the MAC-derived identifier the
+ * addresses on one interface share it (link-local and SLAAC), so this is usually two addresses; with stable random
+ * identifiers (iid6.c) each address has its own group. No MLD (lwipopts.h):
  * the groups are not reported to the link */
 static
 VOID
@@ -275,10 +276,11 @@ TCPInterfaceInit6(PIP_INTERFACE IF)
         TCP6NetifCallbackAdded = TRUE;
     }
 
-    /* An Ethernet interface gets its link-local address from its MAC (modified EUI-64, RFC 4291 2.5.1).
+    /* An Ethernet interface gets a link-local address with a stable random identifier (RFC 7217, iid6.c),
+       or with Tcpip6\Parameters\RandomizeIdentifiers = 0 one from its MAC (modified EUI-64, RFC 4291 2.5.1).
        It stays tentative until lwIP's duplicate address detection (RFC 4862 5.4) passes, which runs once
        the interface is up with its link */
-    if (IF->AddressLength == 6 && netif->hwaddr_len == 6)
+    if (IF->AddressLength == 6 && netif->hwaddr_len == 6 && !TCP6SetStableLinkLocal(netif))
         netif_create_ip6_linklocal_address(netif, 1);
 }
 

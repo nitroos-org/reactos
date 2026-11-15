@@ -1511,6 +1511,148 @@ StReadValue(PCWSTR Name, ULONG Type, PVOID Data, ULONG Size)
     return Found;
 }
 
+/* ---- stable random identifiers (iid6.c) ---- */
+
+BOOLEAN TCP6StableAddress(struct netif *netif, const ip6_addr_t *Prefix, UCHAR Counter, ip6_addr_t *Address);
+
+/* An unsolicited neighbour advertisement (override flag, to all nodes, hop limit 255) for Target from Src,
+   with its checksum: what another node that has the address sends during our DAD */
+static struct pbuf *
+StNa(const ip6_addr_t *Src, const ip6_addr_t *Target)
+{
+    ip6_addr_t AllNodes;
+    UCHAR Na[24];
+    const UCHAR *S, *D;
+    ULONG Sum, i;
+
+    ip6_addr_set_allnodes_linklocal(&AllNodes);
+    RtlZeroMemory(Na, sizeof(Na));
+    Na[0] = 136;
+    Na[4] = 0x20;       /* O */
+    RtlCopyMemory(Na + 8, Target->addr, 16);
+
+    S = (const UCHAR *)Src->addr;
+    D = (const UCHAR *)AllNodes.addr;
+    Sum = sizeof(Na) + 58;
+    for (i = 0; i < 16; i += 2)
+        Sum += ((ULONG)S[i] << 8 | S[i + 1]) + ((ULONG)D[i] << 8 | D[i + 1]);
+    for (i = 0; i < sizeof(Na); i += 2)
+        Sum += (ULONG)Na[i] << 8 | Na[i + 1];
+    while (Sum >> 16)
+        Sum = (Sum & 0xFFFF) + (Sum >> 16);
+    Sum = ~Sum & 0xFFFF;
+    Na[2] = (UCHAR)(Sum >> 8);
+    Na[3] = (UCHAR)Sum;
+    return StPacket(Src, &AllNodes, 58, 255, Na, sizeof(Na));
+}
+
+/* Whether the identifier of Address is the modified EUI-64 of the 6-byte Mac */
+static BOOLEAN
+StIsEui64(const ip6_addr_t *Address, const UCHAR *Mac)
+{
+    const UCHAR *Iid = (const UCHAR *)Address->addr + 8;
+
+    return Iid[0] == (Mac[0] ^ 0x02) && Iid[1] == Mac[1] && Iid[2] == Mac[2] && Iid[3] == 0xff &&
+           Iid[4] == 0xfe && Iid[5] == Mac[3] && Iid[6] == Mac[4] && Iid[7] == Mac[5];
+}
+
+static VOID
+StTestStableIds(PIP_INTERFACE Eth)
+{
+    struct netif *En = Eth->TCPContext;
+    ip6_addr_t Prefix, Want, Now, Peer;
+    CHAR Text[IP6ADDR_STRLEN_MAX], Detail[160];
+    UCHAR Mac[6];
+    ULONG Eui = 0, Other = 0, Round;
+    BOOLEAN LinkLocalOk = FALSE, Ok;
+    s8_t i, Free = -1;
+    u8_t State = 0;
+
+    LOCK_TCPIP_CORE();
+    RtlCopyMemory(Mac, En->hwaddr, 6);
+    for (i = 0; i < LWIP_IPV6_NUM_ADDRESSES; i++)
+    {
+        if (ip6_addr_isinvalid(netif_ip6_addr_state(En, i)))
+        {
+            if (Free < 0)
+                Free = i;
+            continue;
+        }
+        if (StIsEui64(netif_ip6_addr(En, i), Mac))
+            Eui++;
+        else
+            Other++;
+    }
+    /* The link-local address is the generator's, counter 0 (QEMU's network answers no DAD) */
+    IP6_ADDR(&Prefix, PP_HTONL(0xfe800000UL), 0, 0, 0);
+    if (TCP6RandomizeIdentifiers)
+        LinkLocalOk = TCP6StableAddress(En, &Prefix, 0, &Want) && ip6_addr_zoneless_eq(&Want, netif_ip6_addr(En, 0));
+    else
+        LinkLocalOk = StIsEui64(netif_ip6_addr(En, 0), Mac);
+    ip6addr_ntoa_r(netif_ip6_addr(En, 0), Text, sizeof(Text));
+    UNLOCK_TCPIP_CORE();
+
+    _snprintf(Detail, sizeof(Detail), "randomize=%d; addresses with the MAC's EUI-64 identifier %lu, others %lu; link-local %s",
+              (int)TCP6RandomizeIdentifiers, Eui, Other, Text);
+    if (TCP6RandomizeIdentifiers)
+        StResult(Eui == 0 && Other > 0 && LinkLocalOk, "identifiers: no address carries the MAC, link-local = F(fe80::/64, counter 0)", Detail);
+    else
+        StResult(Eui > 0 && Other == 0 && LinkLocalOk, "identifiers: RandomizeIdentifiers=0 gives the MAC's EUI-64", Detail);
+
+    /* DAD conflict on a tentative address of ours (RFC 7217 section 6): a free slot gets the address of a test
+       prefix, tentative; another node's advertisement for it makes the next counter's address, three times,
+       then the address stays duplicated */
+    if (Free < 0)
+    {
+        StPrint("identifiers: no free address slot, DAD regeneration not tested");
+        return;
+    }
+    IP6_ADDR(&Prefix, PP_HTONL(0x20010db8UL), PP_HTONL(0x00060007UL), 0, 0);
+    ip6_addr_copy(Peer, *netif_ip6_addr(En, 0));
+    Peer.addr[3] ^= 0x0C000000;     /* another node on the link */
+
+    LOCK_TCPIP_CORE();
+    if (TCP6RandomizeIdentifiers)
+        TCP6StableAddress(En, &Prefix, 0, &Want);
+    else
+        IP6_ADDR(&Want, Prefix.addr[0], Prefix.addr[1], netif_ip6_addr(En, 0)->addr[2], netif_ip6_addr(En, 0)->addr[3]);
+    netif_ip6_addr_set(En, Free, &Want);
+    netif_ip6_addr_set_valid_life(En, Free, 600);
+    netif_ip6_addr_set_pref_life(En, Free, 600);
+    netif_ip6_addr_set_state(En, Free, IP6_ADDR_TENTATIVE);
+    UNLOCK_TCPIP_CORE();
+
+    for (Round = 1; Round <= 4; Round++)
+    {
+        ip6_addr_t Target = Want;
+
+        StInject(Eth, StNa(&Peer, &Target), FALSE);
+        LOCK_TCPIP_CORE();
+        ip6_addr_copy(Now, *netif_ip6_addr(En, Free));
+        State = netif_ip6_addr_state(En, Free);
+        if (TCP6RandomizeIdentifiers && Round <= 3)
+            Ok = TCP6StableAddress(En, &Prefix, (UCHAR)Round, &Want) && ip6_addr_zoneless_eq(&Now, &Want) &&
+                 ip6_addr_istentative(State);
+        else
+            Ok = ip6_addr_zoneless_eq(&Now, &Target) && ip6_addr_isduplicated(State);
+        UNLOCK_TCPIP_CORE();
+        ip6addr_ntoa_r(&Now, Text, sizeof(Text));
+        _snprintf(Detail, sizeof(Detail), "round %lu: %s state 0x%x", Round, Text, (UINT)State);
+        StResult(Ok, TCP6RandomizeIdentifiers ?
+                     (Round <= 3 ? "identifiers: DAD conflict on a tentative address gives the next counter's address" :
+                                   "identifiers: after 3 new identifiers the address stays duplicated") :
+                     "identifiers: RandomizeIdentifiers=0, a DAD conflict marks the address duplicated", Detail);
+        if (!TCP6RandomizeIdentifiers || Round > 3 || !Ok)
+            break;
+    }
+
+    LOCK_TCPIP_CORE();
+    netif_ip6_addr_set_state(En, Free, IP6_ADDR_INVALID);
+    netif_ip6_addr_set_valid_life(En, Free, 0);
+    netif_ip6_addr_set_pref_life(En, Free, 0);
+    UNLOCK_TCPIP_CORE();
+}
+
 static VOID NTAPI
 StThread(PVOID Context)
 {
@@ -1607,6 +1749,7 @@ StThread(PVOID Context)
         }
         PeerPort = 0;
     }
+    StTestStableIds(Eth);
 
     /* IPv4 to the interface's own address takes the same way (a frame to our own MAC): the control for the
        link-local timings above */
