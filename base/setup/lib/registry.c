@@ -696,6 +696,12 @@ typedef struct _SD_OVERRIDE
 
 static const SD_OVERRIDE SdOverrides[] =
 {
+    /*
+     * ControlSet001, Services and Hardware Profiles get their descriptors last, set on the keys (SdFinal): the two
+     * are created first here, with nothing to name, so that the keys below them exist under them.
+     */
+    { L"SYSTEM\\ControlSet001\\Services", REGSD_T_COUNT },
+    { L"SYSTEM\\ControlSet001\\Hardware Profiles", REGSD_T_COUNT },
     { L"SYSTEM\\ControlSet001\\Services\\EventLog", REGSD_T_EVENTLOG },
     /*
      * Keys Windows 10 does not hold as an auto-inherited copy of their hive root's DACL (parents first,
@@ -714,9 +720,28 @@ static const SD_OVERRIDE SdOverrides[] =
     { L"SYSTEM\\ControlSet001\\Control\\Session Manager", REGSD_T_INHPLAIN },
     { L"SYSTEM\\ControlSet001\\Enum", REGSD_T_INHPLAIN },
     { L"SYSTEM\\ControlSet001\\Services\\Tcpip", REGSD_T_INHPAI },
+#ifdef _M_AMD64
+    /* The 32-bit view (Wow6432Node): the same keys as in the 64-bit one, with the same flags (Windows 10) */
+    { L"SOFTWARE\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion", REGSD_T_INHPAI },
+    { L"SOFTWARE\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall", REGSD_T_INHPAI },
+    { L"SOFTWARE\\Wow6432Node\\Microsoft\\Windows NT\\CurrentVersion", REGSD_T_INHPAI },
+#endif
     /* below the keys above, which it would otherwise create without their descriptor on the way */
     { L"SOFTWARE\\Policies", REGSD_T_POLICIES },
     { L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Schedule\\TaskCache", REGSD_T_TASKCACHE },
+};
+
+/* Descriptors set on keys that exist by then (see the end of CreateOverrideKeys) */
+static const struct
+{
+    PCWSTR Path;
+    ULONG Template;
+    BOOLEAN AutoInherit;
+} SdFinal[] =
+{
+    { L"SYSTEM\\ControlSet001\\Services", REGSD_T_INHAI, TRUE },
+    { L"SYSTEM\\ControlSet001\\Hardware Profiles", REGSD_T_INHAI, TRUE },
+    { L"SYSTEM\\ControlSet001", REGSD_T_INHPLAIN, FALSE },
 };
 
 static VOID
@@ -734,8 +759,9 @@ CreateOverrideKeys(VOID)
 
     for (i = 0; i < ARRAYSIZE(SdOverrides); ++i)
     {
+        /* REGSD_T_COUNT: the key is only created, with what it inherits */
         Length = RegSdBuild(SdOverrides[i].Template, NULL, Sd, sizeof(Sd));
-        if (!Length || wcslen(SdOverrides[i].Path) >= ARRAYSIZE(Path))
+        if ((!Length && SdOverrides[i].Template != REGSD_T_COUNT) || wcslen(SdOverrides[i].Path) >= ARRAYSIZE(Path))
             continue;
         wcscpy(Path, SdOverrides[i].Path);
 
@@ -752,7 +778,7 @@ CreateOverrideKeys(VOID)
                                        OBJ_CASE_INSENSITIVE,
                                        Parent,
                                        /* the descriptor goes on the last key only */
-                                       Next ? NULL : (PSECURITY_DESCRIPTOR)Sd);
+                                       (Next || !Length) ? NULL : (PSECURITY_DESCRIPTOR)Sd);
             Key = NULL;
             Status = NtCreateKey(&Key,
                                  KEY_ALL_ACCESS,
@@ -773,6 +799,39 @@ CreateOverrideKeys(VOID)
         }
         if (Parent && Parent != RootKeys[GetPredefKeyIndex(HKEY_LOCAL_MACHINE)].Handle)
             NtClose(Parent);
+    }
+
+    /*
+     * ControlSet001 (and CurrentControlSet, its link) holds a plain copy of the hive root's DACL on Windows 10
+     * (control 0x8004), while Services and Hardware Profiles are auto-inherited and hold their own copy (0x8404).
+     * They are stored as a descriptor set on the key (a create does not store what a key inherits): Services and
+     * Hardware Profiles first, so that the keys below them never take the plain flags. Only the DACL is written,
+     * and its ACEs are those the key had.
+     */
+    for (i = 0; i < ARRAYSIZE(SdFinal); ++i)
+    {
+        Length = RegSdBuild(SdFinal[i].Template, NULL, Sd, sizeof(Sd));
+        if (!Length)
+            continue;
+        if (SdFinal[i].AutoInherit)
+            Sd[3] |= 0x01; /* SE_DACL_AUTO_INHERIT_REQ (0x0100): the control word stays auto-inherited */
+
+        RtlInitUnicodeString(&KeyName, SdFinal[i].Path);
+        InitializeObjectAttributes(&ObjectAttributes,
+                                   &KeyName,
+                                   OBJ_CASE_INSENSITIVE,
+                                   RootKeys[GetPredefKeyIndex(HKEY_LOCAL_MACHINE)].Handle,
+                                   NULL);
+        Status = NtOpenKey(&Key, READ_CONTROL | WRITE_DAC, &ObjectAttributes);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("NtOpenKey(%S) failed (Status 0x%08lx)\n", SdFinal[i].Path, Status);
+            continue;
+        }
+        Status = NtSetSecurityObject(Key, DACL_SECURITY_INFORMATION, (PSECURITY_DESCRIPTOR)Sd);
+        if (!NT_SUCCESS(Status))
+            DPRINT1("NtSetSecurityObject(%S) failed (Status 0x%08lx)\n", SdFinal[i].Path, Status);
+        NtClose(Key);
     }
 }
 

@@ -43,6 +43,7 @@
 #define REGSD_OI  0x01
 #define REGSD_CI  0x02
 #define REGSD_IO  0x08
+#define REGSD_ID  0x10   /* INHERITED_ACE */
 
 /* Access masks (the SDDL names are the Windows 10 spelling) */
 #define REGSD_KA    0x000F003FUL    /* KEY_ALL_ACCESS */
@@ -97,7 +98,8 @@ typedef struct _REGSD_TEMPLATE
 #define REGSD_T_TCPIPPARAMS 10  /* ...\Services\Tcpip\Parameters */
 #define REGSD_T_INHPLAIN    11  /* keys Windows 10 holds with their own, not auto-inherited, copy of the hive's DACL (control 0x8004) */
 #define REGSD_T_INHPAI      12  /* keys Windows 10 holds with their own, protected and auto-inherited, copy of it (control 0x9404) */
-#define REGSD_T_COUNT       13
+#define REGSD_T_INHAI       13  /* keys Windows 10 holds with their own, auto-inherited but not protected, copy (control 0x8404, ACEs marked inherited) */
+#define REGSD_T_COUNT       14
 
 static const REGSD_TEMPLATE RegSdTemplates[REGSD_T_COUNT] =
 {
@@ -195,6 +197,16 @@ static const REGSD_TEMPLATE RegSdTemplates[REGSD_T_COUNT] =
         { REGSD_CI, REGSD_SID_SY, REGSD_KA }, { 0, REGSD_SID_BA, REGSD_KA },
         { REGSD_CI | REGSD_IO, REGSD_SID_CO, REGSD_KA },
         { REGSD_CI, REGSD_SID_AC, REGSD_KR }, { REGSD_CI, REGSD_SID_LPAC, REGSD_KR } } },
+    /*
+     * What a key below a hive root reports when it inherits from the root: its own copy of it, flagged as inherited
+     * (the key holds it, so that a stored non-AI parent above it does not turn it into a plain key).
+     * O:BAG:SYD:AI(A;CIID;KR;;;BU)(A;CIID;KA;;;BA)(A;CIID;KA;;;SY)(A;ID;KA;;;BA)(A;CIIOID;KA;;;CO)(A;CIID;KR;;;AC)(A;CIID;KR;;;LPAC)
+     */
+    { "inherited copy, auto-inherited", REGSD_DACL_PRESENT | REGSD_DACL_AUTOINH, REGSD_SID_BA, REGSD_SID_SY, 7,
+      { { REGSD_CI | REGSD_ID, REGSD_SID_BU, REGSD_KR }, { REGSD_CI | REGSD_ID, REGSD_SID_BA, REGSD_KA },
+        { REGSD_CI | REGSD_ID, REGSD_SID_SY, REGSD_KA }, { REGSD_ID, REGSD_SID_BA, REGSD_KA },
+        { REGSD_CI | REGSD_IO | REGSD_ID, REGSD_SID_CO, REGSD_KA },
+        { REGSD_CI | REGSD_ID, REGSD_SID_AC, REGSD_KR }, { REGSD_CI | REGSD_ID, REGSD_SID_LPAC, REGSD_KR } } },
 };
 
 /* A SID as authority (last byte of the 48-bit value) and sub-authorities */
