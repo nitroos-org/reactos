@@ -101,11 +101,14 @@ START_TEST(Ipv6Dns)
             ok(CountFamily(A->FirstDnsServerAddress, AF_INET6) == 0, "adapter %lu: IPv6 DNS server without IPv6\n", A->IfIndex);
             ok(CountGatewayFamily(A->FirstGatewayAddress, AF_INET6) == 0, "adapter %lu: IPv6 gateway without IPv6\n", A->IfIndex);
         }
+        /* The IPv6 loopback pseudo interface is an IPv6 adapter of its own: a machine with IPv6 on but no network
+         * adapter (a VM started without a NIC) lists it. Only an adapter that is not the loopback is a defect here. */
         Result = GetAdapters(AF_INET6, 0);
-        ok(Result == NULL, "GetAdaptersAddresses(AF_INET6) without IPv6 lists adapters\n");
+        for (A = Result; A; A = A->Next)
+            ok(A->IfType == IF_TYPE_SOFTWARE_LOOPBACK, "GetAdaptersAddresses(AF_INET6) without IPv6 lists adapter %lu\n", A->IfIndex);
         free(Result);
         free(All);
-        skip("IPv6 is off: the IPv6 name server and gateway lists are empty, nothing more to check\n");
+        skip("no adapter with IPv6 (no network adapter, or IPv6 is off): the IPv6 name server and gateway lists are empty, nothing more to check\n");
         return;
     }
 
