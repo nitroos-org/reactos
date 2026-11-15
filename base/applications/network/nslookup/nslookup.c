@@ -284,13 +284,13 @@ BOOL PerformInternalLookup( PCHAR pAddr, PCHAR pResult )
         for( i = 0; i < NumQuestions; i += 1 )
         {
             /* Quick way to skip the domain name section. */
-            k += ExtractName( RecBuffer, pResult, k, 0 );
+            k += ExtractName( RecBuffer, RecBufferLength, pResult, k, 0 );
             k += 4;
         }
     }
 
     /* Skip the answer name. */
-    k += ExtractName( RecBuffer, pResult, k, 0 );
+    k += ExtractName( RecBuffer, RecBufferLength, pResult, k, 0 );
 
     Type = ntohs( ((PUSHORT)&RecBuffer[k])[0] );
     k += 8;
@@ -300,7 +300,7 @@ BOOL PerformInternalLookup( PCHAR pAddr, PCHAR pResult )
 
     if( TYPE_PTR == Type )
     {
-        k += ExtractName( RecBuffer, pResult, k, d );
+        k += ExtractName( RecBuffer, RecBufferLength, pResult, k, d );
     }
     else if( TYPE_A == Type )
     {
@@ -366,7 +366,7 @@ static void PrintAaaaAnswers( PCHAR Rec, ULONG RecLen, int k, USHORT NumAnswers,
     for( a = 0; a < NumAnswers && n < 16; a += 1 )
     {
         if( (ULONG)k >= RecLen ) break;
-        k += ExtractName( Rec, Skip, k, 0 );
+        k += ExtractName( Rec, RecLen, Skip, k, 0 );
         if( (ULONG)k + 10 > RecLen ) break;
         Type = ntohs( ((PUSHORT)&Rec[k])[0] );
         k += 8;
@@ -563,7 +563,7 @@ void PerformLookup( PCHAR pAddr )
         /* Blow through the questions section since we don't care about it. */
         for( i = 0; i < NumQuestions; i += 1 )
         {
-            k += ExtractName( RecBuffer, pResult, k, 0 );
+            k += ExtractName( RecBuffer, RecBufferLength, pResult, k, 0 );
             k += 4;
         }
     }
@@ -578,7 +578,7 @@ void PerformLookup( PCHAR pAddr )
     if( NumAnswers )
     {
         /* Skip the name. */
-        k += ExtractName( RecBuffer, pResult, k, 0 );
+        k += ExtractName( RecBuffer, RecBufferLength, pResult, k, 0 );
 
         Type = ntohs( ((PUSHORT)&RecBuffer[k])[0] );
         k += 8;
@@ -588,7 +588,7 @@ void PerformLookup( PCHAR pAddr )
 
         if( TYPE_PTR == Type )
         {
-            k += ExtractName( RecBuffer, pResult, k, d );
+            k += ExtractName( RecBuffer, RecBufferLength, pResult, k, d );
         }
         else if( TYPE_A == Type )
         {

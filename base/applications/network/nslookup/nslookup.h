@@ -102,7 +102,12 @@ BOOL SendRequest( PCHAR pInBuffer,
                   PCHAR pOutBuffer,
                   PULONG pOutBufferLength );
 
+/* Largest name ExtractName writes, including the terminating NUL: every
+   caller's output buffer is at least this big. */
+#define EXTRACT_NAME_OUT_MAX 255
+
 int     ExtractName( PCHAR pBuffer,
+                     ULONG BufferLength,
                      PCHAR pOutput,
                      USHORT Offset,
                      UCHAR Limit );

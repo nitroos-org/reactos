@@ -27,9 +27,8 @@
 /* All interfaces together: a few servers per advertisement, and a neighbour that sends them all the time
    replaces its own entries first */
 #define RDNSS6_MAX_SERVERS      16
-/* sys_now() is in milliseconds and wraps: lifetimes are held to what a signed difference can carry (24 days);
-   0xFFFFFFFF stays infinite */
-#define RDNSS6_MAX_LIFETIME     2000000UL
+/* Expiry runs on the interrupt time (monotonic: not moved by a clock change, no 32-bit millisecond wrap) in
+   64-bit milliseconds; a lifetime of 0xFFFFFFFF seconds is infinite */
 
 typedef struct _RDNSS6_ENTRY
 {
@@ -37,7 +36,7 @@ typedef struct _RDNSS6_ENTRY
     BOOLEAN Infinite;
     ULONG IfIndex;
     UCHAR Address[16];
-    u32_t Expire;           /* sys_now() */
+    ULONGLONG Expire;       /* Rdnss6Now() */
 } RDNSS6_ENTRY;
 
 /* Guarded by the lwIP core lock */
@@ -51,17 +50,25 @@ Rdnss6InterfaceIndex(const struct netif *netif)
     return (netif && netif->state) ? ((PIP_INTERFACE)netif->state)->Index : 0;
 }
 
+/* Monotonic milliseconds since boot */
+static
+ULONGLONG
+Rdnss6Now(VOID)
+{
+    return KeQueryInterruptTime() / 10000;
+}
+
 /* Seconds left of an entry, 0 when it ran out; 0xFFFFFFFF for an infinite one */
 static
 ULONG
-Rdnss6Remaining(const RDNSS6_ENTRY *Entry, u32_t Now)
+Rdnss6Remaining(const RDNSS6_ENTRY *Entry, ULONGLONG Now)
 {
-    LONG Left;
-
     if (Entry->Infinite)
         return 0xFFFFFFFF;
-    Left = (LONG)(Entry->Expire - Now);
-    return Left > 0 ? (ULONG)((Left + 999) / 1000) : 0;
+    if (Entry->Expire <= Now)
+        return 0;
+    /* at most 0xFFFFFFFE seconds: never reads as infinite */
+    return (ULONG)min((Entry->Expire - Now + 999) / 1000, 0xFFFFFFFEUL);
 }
 
 /* LWIP_HOOK_ND6_RDNSS: one address of a router advertisement's RDNSS option; core lock held. Lifetime 0
@@ -70,7 +77,7 @@ void
 LibTCPRdnss6Input(struct netif *netif, const ip6_addr_t *addr, u32_t lifetime)
 {
     ULONG IfIndex = Rdnss6InterfaceIndex(netif), i, Slot = RDNSS6_MAX_SERVERS;
-    u32_t Now = sys_now();
+    ULONGLONG Now = Rdnss6Now();
     UCHAR Raw[16];
 
     if (!IfIndex || ip6_addr_isany(addr) || ip6_addr_ismulticast(addr) || ip6_addr_isloopback(addr))
@@ -102,7 +109,7 @@ LibTCPRdnss6Input(struct netif *netif, const ip6_addr_t *addr, u32_t lifetime)
 
     if (Slot == RDNSS6_MAX_SERVERS)
     {
-        /* full of live servers: the oldest slot in turn */
+        /* full of live servers: replace the slots in round-robin turn (not necessarily the oldest entry) */
         Slot = Rdnss6Next++ % RDNSS6_MAX_SERVERS;
     }
 
@@ -111,7 +118,7 @@ LibTCPRdnss6Input(struct netif *netif, const ip6_addr_t *addr, u32_t lifetime)
     RtlCopyMemory(Rdnss6Table[Slot].Address, Raw, sizeof(Raw));
     Rdnss6Table[Slot].Infinite = (lifetime == 0xFFFFFFFF);
     if (!Rdnss6Table[Slot].Infinite)
-        Rdnss6Table[Slot].Expire = Now + min(lifetime, RDNSS6_MAX_LIFETIME) * 1000;
+        Rdnss6Table[Slot].Expire = Now + (ULONGLONG)lifetime * 1000;
 }
 
 /* True when an interface with this index is still there; core lock held */
@@ -139,7 +146,7 @@ TCPQueryIpv6Dns(PVOID Out, ULONG OutSize)
     PTCP_IPV6_DNS_HEADER Header = Out;
     PTCP_IPV6_DNS_ROW Rows = (PTCP_IPV6_DNS_ROW)(Header + 1);
     ULONG Count = 0, i;
-    u32_t Now;
+    ULONGLONG Now;
     BOOLEAN Fits = (Out != NULL && OutSize >= sizeof(*Header));
 
     if (!TCPIpv6Enabled)
@@ -162,7 +169,7 @@ TCPQueryIpv6Dns(PVOID Out, ULONG OutSize)
     } while (0)
 
     LOCK_TCPIP_CORE();
-    Now = sys_now();
+    Now = Rdnss6Now();
 
     for (i = 0; i < RDNSS6_MAX_SERVERS; i++)
     {

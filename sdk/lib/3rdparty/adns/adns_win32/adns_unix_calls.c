@@ -41,14 +41,16 @@ int adns_writev(int FileDescriptor, const struct iovec * iov, int iovCount)
 
 	p = buf = (char *)_alloca(total_len);
 
-	for(; i < iovCount; i++)
+	/* The length loop above left i == iovCount: restart for the copy, or
+	   send() would transmit uninitialised stack bytes instead of the data. */
+	for(i = 0; i < iovCount; i++)
 	{
 		memcpy(p, iov[i].iov_base, iov[i].iov_len);
 		p += iov[i].iov_len;
 	}
 
 	ADNS_CLEAR_ERRNO
-	r = send(FileDescriptor, buf, total_len, 0);
+	r = send((ADNS_SOCKET)FileDescriptor, buf, (int)total_len, 0);
 	ADNS_CAPTURE_ERRNO;
 	return r;
 }

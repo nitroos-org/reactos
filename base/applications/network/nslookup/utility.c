@@ -427,9 +427,13 @@ BOOL IsValidIP( PCHAR pInput )
     return TRUE;
 }
 
-int ExtractName( PCHAR pBuffer, PCHAR pOutput, USHORT Offset, UCHAR Limit )
+int ExtractName( PCHAR pBuffer, ULONG BufferLength, PCHAR pOutput, USHORT Offset, UCHAR Limit )
 {
-    int c = 0, d = 0, i = 0, j = 0, k = 0, l = 0, m = 0;
+    int c = 0, d = 0, i = 0, j = 0, k = 0, l = 0, m = 0, h = 0, t = 0;
+
+    pOutput[0] = '\0';
+
+    if( Offset >= BufferLength ) return 0;
 
     i = Offset;
 
@@ -439,21 +443,46 @@ int ExtractName( PCHAR pBuffer, PCHAR pOutput, USHORT Offset, UCHAR Limit )
 
     while( d > 0 )
     {
+        /* The name runs off the end of the packet. */
+        if( (ULONG)i >= BufferLength ) break;
+
         l = pBuffer[i] & 0xFF;
         i += 1;
         if( !m ) c += 1;
 
-        if( 0xC0 == l )
+        if( 0xC0 == (l & 0xC0) )
         {
+            /* Compression pointer: 14-bit offset into the packet. */
+            if( (ULONG)i >= BufferLength ) break;
+
+            t = ((l & 0x3F) << 8) | (pBuffer[i] & 0xFF);
+
             if( !m ) c += 1;
             m = 1;
+
+            /* Bound the number of pointers followed (loops) and the target. */
+            h += 1;
+            if( h > 16 || (ULONG)t >= BufferLength ) break;
+
             d += (255 - Limit);
-            i = pBuffer[i];
+            i = t;
+        }
+        else if( l & 0xC0 )
+        {
+            /* Reserved label type. */
+            break;
         }
         else
         {
             for( j = 0; j < l; j += 1 )
             {
+                /* Bound the output (room for a '.' and the NUL) and the input. */
+                if( k >= EXTRACT_NAME_OUT_MAX - 2 || (ULONG)i >= BufferLength )
+                {
+                    pOutput[k] = '\0';
+                    return c;
+                }
+
                 pOutput[k] = pBuffer[i];
 
                 i += 1;
@@ -464,7 +493,9 @@ int ExtractName( PCHAR pBuffer, PCHAR pOutput, USHORT Offset, UCHAR Limit )
 
             d -= 1;
 
-            if( !pBuffer[i] || (d < 1) ) break;
+            if( (ULONG)i >= BufferLength || !pBuffer[i] || (d < 1) ) break;
+
+            if( k >= EXTRACT_NAME_OUT_MAX - 2 ) break;
 
             pOutput[k] = '.';
             k += 1;
@@ -575,7 +606,7 @@ void PrintD2( PCHAR pBuffer, DWORD BufferLength )
 
         for( k = 0; k < NumQuestions; k += 1 )
         {
-            i += ExtractName( pBuffer, pName, i, 0 );
+            i += ExtractName( pBuffer, BufferLength, pName, i, 0 );
 
             _tprintf( _T("        %s"), pName );
 
@@ -651,7 +682,7 @@ void PrintDebug( PCHAR pBuffer, DWORD BufferLength )
 
         for( k = 0; k < NumQuestions; k += 1 )
         {
-            i += ExtractName( pBuffer, pName, i, 0 );
+            i += ExtractName( pBuffer, BufferLength, pName, i, 0 );
 
             _tprintf( _T("        %s"), pName );
 
@@ -676,7 +707,7 @@ void PrintDebug( PCHAR pBuffer, DWORD BufferLength )
             _tprintf( _T("    ->  ") );
 
             /* Print out the name. */
-            i += ExtractName( pBuffer, pName, i, 0 );
+            i += ExtractName( pBuffer, BufferLength, pName, i, 0 );
 
             _tprintf( _T("%s\n"), pName );
 
@@ -707,7 +738,7 @@ void PrintDebug( PCHAR pBuffer, DWORD BufferLength )
             }
             else
             {
-                i += ExtractName( pBuffer, pName, i, d );
+                i += ExtractName( pBuffer, BufferLength, pName, i, d );
 
                 _tprintf( _T("        name = %s\n"), pName );
             }
@@ -723,7 +754,7 @@ void PrintDebug( PCHAR pBuffer, DWORD BufferLength )
         for( k = 0; k < NumAuthority; k += 1 )
         {
             /* Print out the zone name. */
-            i += ExtractName( pBuffer, pName, i, 0 );
+            i += ExtractName( pBuffer, BufferLength, pName, i, 0 );
 
             _tprintf( _T("    ->  %s\n"), pName );
 
@@ -749,7 +780,7 @@ void PrintDebug( PCHAR pBuffer, DWORD BufferLength )
             if( TYPE_NS == Type )
             {
                 /* Print out the NS. */
-                i += ExtractName( pBuffer, pName, i, d );
+                i += ExtractName( pBuffer, BufferLength, pName, i, d );
 
                 _tprintf( _T("        nameserver = %s\n"), pName );
 
@@ -760,12 +791,12 @@ void PrintDebug( PCHAR pBuffer, DWORD BufferLength )
                 _tprintf( _T("        ttl = %d ()\n"), (int)TTL );
 
                 /* Print out the primary NS. */
-                i += ExtractName( pBuffer, pName, i, 0 );
+                i += ExtractName( pBuffer, BufferLength, pName, i, 0 );
 
                 _tprintf( _T("        primary name server = %s\n"), pName );
 
                 /* Print out the responsible mailbox. */
-                i += ExtractName( pBuffer, pName, i, 0 );
+                i += ExtractName( pBuffer, BufferLength, pName, i, 0 );
 
                 _tprintf( _T("        responsible mail addr = %s\n"), pName );
 
@@ -787,7 +818,7 @@ void PrintDebug( PCHAR pBuffer, DWORD BufferLength )
         for( k = 0; k < NumAdditional; k += 1 )
         {
             /* Print the name. */
-            i += ExtractName( pBuffer, pName, i, 0 );
+            i += ExtractName( pBuffer, BufferLength, pName, i, 0 );
 
             _tprintf( _T("    ->  %s\n"), pName );
 

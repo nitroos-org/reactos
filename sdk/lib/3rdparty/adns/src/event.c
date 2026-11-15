@@ -117,15 +117,18 @@ void adns__tcp_tryconnect(adns_state ads, struct timeval now) {
     v6= ads->servers[ads->tcpserver].v6;
     fd= socket(v6 ? AF_INET6 : AF_INET,SOCK_STREAM,proto->p_proto);
 	ADNS_CAPTURE_ERRNO;
-    if (fd<0) {
+    if (fd == (ADNS_SOCKET)-1) {
+      /* e.g. no IPv6 TCP on this system: try the next server */
       adns__diag(ads,-1,0,"cannot create TCP socket: %s",strerror(errno));
-      return;
+      ads->tcpserver= (ads->tcpserver+1)%ads->nservers;
+      continue;
     }
     r= adns__setnonblock(ads,fd);
     if (r) {
       adns__diag(ads,-1,0,"cannot make TCP socket nonblocking: %s",strerror(r));
       adns_socket_close(fd);
-      return;
+      ads->tcpserver= (ads->tcpserver+1)%ads->nservers;
+      continue;
     }
     memset(&addr,0,sizeof(addr));
     addr.sin_family= AF_INET;
@@ -444,7 +447,10 @@ int adns_processreadable(adns_state ads, ADNS_SOCKET fd, const struct timeval *n
       for (serv= 0;
 	   serv < ads->nservers &&
 	     !(ads->servers[serv].v6 &&
-	       !memcmp(&ads->servers[serv].addr6,&udpaddr6.sin6_addr,sizeof(udpaddr6.sin6_addr)));
+	       !memcmp(&ads->servers[serv].addr6,&udpaddr6.sin6_addr,sizeof(udpaddr6.sin6_addr)) &&
+	       /* a link-local address is only unique together with its scope */
+	       (!IN6_IS_ADDR_LINKLOCAL(&udpaddr6.sin6_addr) ||
+	        ads->servers[serv].scope6 == udpaddr6.sin6_scope_id));
 	   serv++);
       if (serv >= ads->nservers) {
 	adns__warn(ads,-1,0,"datagram received from unknown IPv6 nameserver");
