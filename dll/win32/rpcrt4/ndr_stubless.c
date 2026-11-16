@@ -1309,7 +1309,6 @@ LONG WINAPI NdrStubCall2(
     LONG_PTR *retval_ptr = NULL;
     /* correlation cache */
     ULONG_PTR NdrCorrCache[256];
-    unsigned short BindingHandleOffset = (USHORT)-1;
 
     TRACE("pThis %p, pChannel %p, pRpcMsg %p, pdwStubPhase %p\n", pThis, pChannel, pRpcMsg, pdwStubPhase);
 
@@ -1367,21 +1366,25 @@ LONG WINAPI NdrStubCall2(
         {
         case FC_BIND_PRIMITIVE: /* explicit primitive */
             {
-                BindingHandleOffset = ((NDR_EHD_PRIMITIVE*)pFormat)->offset;
+                /* The handle_t argument is not in the parameter list: the server routine gets the binding of
+                 * the call (RpcImpersonateClient, RpcBindingInqAuthClient... with it). Passed by pointer, it
+                 * points to the handle of the message (the argument stack starts zeroed). */
                 const NDR_EHD_PRIMITIVE *pDesc = (const NDR_EHD_PRIMITIVE *)pFormat;
                 if (pDesc->flag)
-                    **(handle_t **)ARG_FROM_OFFSET(stubMsg.StackTop, pDesc->offset) = pRpcMsg->Handle;
+                    *(handle_t **)ARG_FROM_OFFSET(stubMsg.StackTop, pDesc->offset) = &pRpcMsg->Handle;
                 else
                     *(handle_t *)ARG_FROM_OFFSET(stubMsg.StackTop, pDesc->offset) = pRpcMsg->Handle;
                 pFormat += sizeof(NDR_EHD_PRIMITIVE);
                 break;
             }
+        /* An explicit generic or context handle is an ordinary parameter of the server routine (the object
+         * the client's bind routine or context handle stood for), unmarshalled below into an argument slot that
+         * starts zeroed: the binding of the call must not be put there, an [in] string or structure would then
+         * be unmarshalled into the binding object itself. */
         case FC_BIND_GENERIC: /* explicit generic */
-            BindingHandleOffset = ((NDR_EHD_GENERIC*)pFormat)->offset;
             pFormat += sizeof(NDR_EHD_GENERIC);
             break;
         case FC_BIND_CONTEXT: /* explicit context */
-            BindingHandleOffset = ((NDR_EHD_CONTEXT*)pFormat)->offset;
             pFormat += sizeof(NDR_EHD_CONTEXT);
             break;
         default:
@@ -1403,10 +1406,6 @@ LONG WINAPI NdrStubCall2(
      * are calling an object method */
     if (pThis)
         *(void **)args = ((CStdStubBuffer *)pThis)->pvServerObject;
-
-    /* add the binding handle to the stack if we are using explicit binding handles */
-    if (BindingHandleOffset != (USHORT)-1)
-        *(RPC_BINDING_HANDLE*)&(args[BindingHandleOffset]) = pRpcMsg->Handle;
 
     if (is_oicf_stubdesc(pStubDesc))
     {
