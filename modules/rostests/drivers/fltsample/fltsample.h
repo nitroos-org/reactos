@@ -39,6 +39,8 @@
  *   .safe  the post-operation of reads goes through FltDoCompletionProcessingWhenSafe
  *   .nodel the file can't be deleted or renamed (set information is refused)
  *   .nosec no section can be created for the file (IRP_MJ_ACQUIRE_FOR_SECTION_SYNCHRONIZATION is refused)
+ *   .sctx  a read tries FltSetStreamContext, even on a file object the filter didn't see created
+ *          (SctxReads, LastSctxStatus)
  * Anything else is counted and let through.
  */
 
@@ -103,6 +105,8 @@ typedef struct _FLTSAMPLE_STATS
     ULONG SectionSyncPost;
     ULONG SectionSyncDenied;        /* ... refused (.nosec files, a section for them is created) */
     ULONG SectionSyncBadData;       /* ... whose callback data didn't say FLTFL_CALLBACK_DATA_FS_FILTER_OPERATION */
+    ULONG SctxReads;                /* reads of .sctx files, opened with or without the filter seeing it */
+    LONG LastSctxStatus;            /* ... what FltSetStreamContext (keep if exists) said for the last one */
 
 } FLTSAMPLE_STATS, *PFLTSAMPLE_STATS;
 

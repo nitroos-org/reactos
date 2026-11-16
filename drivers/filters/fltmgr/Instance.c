@@ -339,6 +339,10 @@ FltpTeardownInstance(_In_ PFLT_INSTANCE Instance,
     /* Whatever the filter attached to the instance goes now */
     FltpTeardownInstanceContexts(Instance);
 
+    /* The last instance which followed the opens of the streams: their records go too */
+    if (Volume->ContextTracking == 0)
+        FltpDropStreamRecords(Volume);
+
     /*
      * Only now, with the last callback into the filter made, the instance leaves the filter's list:
      * FltUnregisterFilter waits for that list to be empty, so it can't free the filter while a

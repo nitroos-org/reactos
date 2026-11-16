@@ -170,4 +170,9 @@ FltpTeardownVolumeContexts(
     _In_ PFLT_VOLUME Volume
 );
 
+VOID
+FltpDropStreamRecords(
+    _In_ PFLT_VOLUME Volume
+);
+
 #endif /* _FLTMGR_PROTO_H */

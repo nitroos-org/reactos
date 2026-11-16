@@ -657,6 +657,112 @@ START_TEST(p3refuse)
     test_TeardownAfterRefusedAttach();
 }
 
+#ifndef STATUS_NOT_SUPPORTED
+#define STATUS_NOT_SUPPORTED ((NTSTATUS)0xC00000BBL)
+#endif
+#ifndef STATUS_FLT_CONTEXT_ALREADY_DEFINED
+#define STATUS_FLT_CONTEXT_ALREADY_DEFINED ((NTSTATUS)0xC01C0016L)
+#endif
+
+static
+HANDLE
+OpenUncached(PCWSTR Path)
+{
+    return CreateFileW(Path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+                       FILE_FLAG_NO_BUFFERING, NULL);
+}
+
+/* A read of a .sctx file: the sample tries FltSetStreamContext, the status of that comes back */
+static
+LONG
+SctxRead(PSAMPLE Sample, HANDLE File, PUCHAR Buffer)
+{
+    FLTSAMPLE_STATS S0, S;
+    DWORD Read;
+
+    SampleStats(Sample, &S0);
+    SetFilePointer(File, 0, NULL, FILE_BEGIN);
+    ok(ReadFile(File, Buffer, 4096, &Read, NULL), "Read failed: %lu\n", GetLastError());
+    SampleStats(Sample, &S);
+    ok(S.SctxReads == S0.SctxReads + 1, "The filter saw %lu reads\n", S.SctxReads - S0.SctxReads);
+    return S.LastSctxStatus;
+}
+
+/*
+ * Stream contexts only for streams whose opens the filter manager followed (it has to know when the
+ * stream's last file object is closed). A file opened before the filter came has none, and its late
+ * close ends nothing. When no instance follows the opens any more (the last one is detached), what
+ * was recorded goes: a file opened and one closed meanwhile must not leave the stream looking known.
+ */
+static
+void
+test_StreamContextRecords(void)
+{
+    SAMPLE P = { { 0 } };
+    WCHAR Path[MAX_PATH];
+    HANDLE Early, Late, Before, During;
+    PUCHAR Buffer;
+    ATTACH_RESULT Result;
+    LONG Status;
+
+    MakeTestFile(L"p3stream.sctx", Path, RTL_NUMBER_OF(Path));
+    ok(WriteUncached(Path, 65536), "Can't write %ls\n", Path);
+    Buffer = VirtualAlloc(NULL, 65536, MEM_COMMIT, PAGE_READWRITE);
+
+    /* Opened before the filter */
+    Early = OpenUncached(Path);
+    ok(Early != INVALID_HANDLE_VALUE, "Open failed: %lu\n", GetLastError());
+    if (!LoadSample(&P, L"FltSampleP", L"383000.5", 0xFFFF))
+    {
+        skip("Can't load the sample filter\n");
+        CloseHandle(Early);
+        return;
+    }
+
+    Status = SctxRead(&P, Early, Buffer);
+    ok(Status == STATUS_NOT_SUPPORTED, "Stream context on a stream opened before the filter: 0x%lx\n", Status);
+
+    /* A file object whose create was seen: its stream has the context the sample set at the create */
+    Late = OpenUncached(Path);
+    ok(Late != INVALID_HANDLE_VALUE, "Open failed: %lu\n", GetLastError());
+    Status = SctxRead(&P, Late, Buffer);
+    ok(Status == STATUS_FLT_CONTEXT_ALREADY_DEFINED, "Stream context of a followed stream: 0x%lx\n", Status);
+
+    /* The close of the early file object, whose create wasn't seen, doesn't end the stream */
+    CloseHandle(Early);
+    Status = SctxRead(&P, Late, Buffer);
+    ok(Status == STATUS_FLT_CONTEXT_ALREADY_DEFINED, "After the close of the unseen file object: 0x%lx\n", Status);
+
+    /* Nobody follows the opens: Before stays open, During is opened, Late is closed, all unseen */
+    Before = OpenUncached(Path);
+    ok(SampleIoctl(&P, FLTSAMPLE_IOCTL_DETACH_ALL, NULL, 0, &Result, sizeof(Result)), "Detach failed\n");
+    During = OpenUncached(Path);
+    CloseHandle(Late);
+    CloseHandle(Before);
+    ok(SampleIoctl(&P, FLTSAMPLE_IOCTL_ATTACH_ALL, NULL, 0, &Result, sizeof(Result)), "Attach failed\n");
+
+    /* Followed again: During's create wasn't seen, so its stream isn't one we know */
+    Status = SctxRead(&P, During, Buffer);
+    ok(Status == STATUS_NOT_SUPPORTED, "Stream context on a stream opened while nobody followed: 0x%lx\n", Status);
+    CloseHandle(During);
+
+    UnloadSample(&P, TRUE);
+    VirtualFree(Buffer, 0, MEM_RELEASE);
+    DeleteFileW(Path);
+}
+
+START_TEST(p3stream)
+{
+    EnsureTestDirectory();
+    if (!StartFilterManager())
+    {
+        skip("No filter manager\n");
+        return;
+    }
+
+    test_StreamContextRecords();
+}
+
 START_TEST(p3create)
 {
     EnsureTestDirectory();

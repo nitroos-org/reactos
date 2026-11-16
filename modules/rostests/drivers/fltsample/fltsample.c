@@ -49,6 +49,7 @@ C_ASSERT(FIELD_OFFSET(FLT_PARAMETERS, SetFileInformation.ReplaceIfExists) ==
 #define MODE_NODEL      7
 #define MODE_MSG        8
 #define MODE_NOSEC      9
+#define MODE_SCTX       10
 
 #define MAX_OPEN        256
 
@@ -130,7 +131,7 @@ ModeFromName(_In_ PCUNICODE_STRING Name)
     {
         { L".blk", MODE_BLK }, { L".nowr", MODE_NOWR }, { L".half", MODE_HALF }, { L".pend", MODE_PEND },
         { L".sync", MODE_SYNC }, { L".safe", MODE_SAFE }, { L".nodel", MODE_NODEL }, { L".msg", MODE_MSG },
-        { L".nosec", MODE_NOSEC },
+        { L".nosec", MODE_NOSEC }, { L".sctx", MODE_SCTX },
     };
     ULONG i, Length;
 
@@ -581,6 +582,26 @@ PreOperation(_Inout_ PFLT_CALLBACK_DATA Data,
     ULONG Mode;
 
     *CompletionContext = NULL;
+
+    /*
+     * .sctx: a stream context for the file, whether we saw its create or not. The filter manager
+     * only allows stream contexts for streams whose opens it followed.
+     */
+    if (Major == IRP_MJ_READ && !Paging && FileObject && ModeFromName(&FileObject->FileName) == MODE_SCTX)
+    {
+        PSAMPLE_CONTEXT Sample = NewContext(FLT_STREAM_CONTEXT, MODE_SCTX);
+        PFLT_CONTEXT Old = NULL;
+
+        if (Sample)
+        {
+            Stats.LastSctxStatus = FltSetStreamContext(FltObjects->Instance, FileObject,
+                                                       FLT_SET_CONTEXT_KEEP_IF_EXISTS, Sample, &Old);
+            InterlockedIncrement((PLONG)&Stats.SctxReads);
+            if (Old)
+                FltReleaseContext(Old);
+            FltReleaseContext(Sample);
+        }
+    }
 
     /* Nothing but the test files counts */
     if (Major == IRP_MJ_CREATE)
