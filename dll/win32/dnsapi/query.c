@@ -13,6 +13,10 @@
 #include <iphlpapi.h>
 #include <strsafe.h>
 #include <time.h>
+#include <winioctl.h>
+#include <ndk/iofuncs.h>
+#include <ndk/obfuncs.h>
+#include <tcpioctl.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -184,8 +188,8 @@ static V6CONFIG g_V6Cache;
 static BOOL g_V6CacheValid;
 static DWORD g_V6CacheTick;
 static HANDLE g_V6ChangeEvent;      /* signalled by the address change notification */
-static HANDLE g_V6ChangeHandle;
-static OVERLAPPED g_V6ChangeOv;
+static HANDLE g_V6ChangeFile;       /* \Device\Tcp, which the notification is asked of */
+static IO_STATUS_BLOCK g_V6ChangeIosb;
 static BOOL g_V6ChangeArmed;
 
 VOID DnsapiV6CacheInit(VOID);
@@ -208,8 +212,18 @@ DnsapiV6CacheCleanup(VOID)
 
     if (g_V6ChangeArmed)
     {
-        CancelIPChangeNotify(&g_V6ChangeOv);
+        IO_STATUS_BLOCK Iosb;
+
+        /* the request completes with STATUS_CANCELLED and signals the event */
+        if (NT_SUCCESS(NtDeviceIoControlFile(g_V6ChangeFile, NULL, NULL, NULL, &Iosb, IOCTL_IP_ADDCHANGE_CANCEL_REQUEST,
+                                             NULL, 0, NULL, 0)) && g_V6ChangeEvent)
+            WaitForSingleObject(g_V6ChangeEvent, 1000);
         g_V6ChangeArmed = FALSE;
+    }
+    if (g_V6ChangeFile)
+    {
+        NtClose(g_V6ChangeFile);
+        g_V6ChangeFile = NULL;
     }
     if (g_V6ChangeEvent)
     {
@@ -294,6 +308,39 @@ CollectIpv6Config(PV6CONFIG Config)
 }
 
 /*
+ * Lock held. Ask the stack to signal g_V6ChangeEvent at the next change of the IPv4 or the IPv6 address table.
+ * NotifyAddrChange waits for IPv4 changes alone (as on Windows), so the request is made here with both families:
+ * the IPv6 name servers come and go with the IPv6 configuration of the adapters. FALSE: no request is pending.
+ */
+static
+BOOL
+ArmV6Change(VOID)
+{
+    UNICODE_STRING Name = RTL_CONSTANT_STRING(DD_TCP_DEVICE_NAME);
+    OBJECT_ATTRIBUTES Attributes;
+    IO_STATUS_BLOCK Iosb;
+    ULONG Families = TCP_CHANGE_FAMILY_IPV4 | TCP_CHANGE_FAMILY_IPV6;
+    NTSTATUS Status;
+
+    if (!g_V6ChangeFile)
+    {
+        /* an asynchronous handle: the request stays pending in the driver */
+        InitializeObjectAttributes(&Attributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+        Status = NtOpenFile(&g_V6ChangeFile, FILE_READ_DATA | SYNCHRONIZE, &Attributes, &Iosb,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE, 0);
+        if (!NT_SUCCESS(Status))
+        {
+            g_V6ChangeFile = NULL;
+            return FALSE;
+        }
+    }
+
+    Status = NtDeviceIoControlFile(g_V6ChangeFile, g_V6ChangeEvent, NULL, NULL, &g_V6ChangeIosb,
+                                   IOCTL_IP_ADDCHANGE_NOTIFY_REQUEST, &Families, sizeof(Families), NULL, 0);
+    return Status == STATUS_PENDING;
+}
+
+/*
  * Copy the IPv6 configuration into Config: from the cache while no address change was signalled and it is
  * young, else collected again (the notification is armed before the collection so that no change in between
  * is lost). Where the notification cannot be had every call collects, as before the cache.
@@ -328,10 +375,7 @@ GetIpv6Config(PV6CONFIG Config)
     if (g_V6ChangeEvent && (!g_V6ChangeArmed || Changed))
     {
         ResetEvent(g_V6ChangeEvent);
-        RtlZeroMemory(&g_V6ChangeOv, sizeof(g_V6ChangeOv));
-        g_V6ChangeOv.hEvent = g_V6ChangeEvent;
-        g_V6ChangeHandle = NULL;
-        g_V6ChangeArmed = (NotifyAddrChange(&g_V6ChangeHandle, &g_V6ChangeOv) == ERROR_IO_PENDING);
+        g_V6ChangeArmed = ArmV6Change();
     }
 
     CollectIpv6Config(&g_V6Cache);

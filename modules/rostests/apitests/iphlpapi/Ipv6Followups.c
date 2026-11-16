@@ -634,10 +634,57 @@ static WAITERS W;
 static OVERLAPPED OAddr, ORoute, OSock4, OSock6;
 static SOCKET S4, S6;
 
+/* The request of dnsapi's IPv6 name server cache: both families on an asynchronous handle of its own, which is told
+ * the family that changed */
+static HANDLE BothFile, BothEvent;
+static IO_STATUS_BLOCK BothIosb;
+static ULONG BothChanged;
+
+static void ArmBoth(void)
+{
+    UNICODE_STRING Name = RTL_CONSTANT_STRING(L"\\Device\\Tcp");
+    OBJECT_ATTRIBUTES Attributes;
+    IO_STATUS_BLOCK Iosb;
+    ULONG Families = TCP_CHANGE_FAMILY_IPV4 | TCP_CHANGE_FAMILY_IPV6;
+    NTSTATUS Status;
+
+    if (!BothFile)
+    {
+        InitializeObjectAttributes(&Attributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+        Status = NtOpenFile(&BothFile, FILE_READ_DATA | SYNCHRONIZE, &Attributes, &Iosb,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE, 0);
+        ok(NT_SUCCESS(Status), "\\Device\\Tcp: 0x%lx\n", Status);
+        if (!NT_SUCCESS(Status))
+        {
+            BothFile = NULL;
+            return;
+        }
+    }
+    ResetEvent(BothEvent);
+    BothChanged = 0;
+    BothIosb.Status = STATUS_PENDING;
+    Status = NtDeviceIoControlFile(BothFile, BothEvent, NULL, NULL, &BothIosb, IOCTL_IP_ADDCHANGE_NOTIFY_REQUEST,
+                                   &Families, sizeof(Families), &BothChanged, sizeof(BothChanged));
+    ok(Status == STATUS_PENDING, "a request for both families: 0x%lx\n", Status);
+}
+
+/* The request for both families woke for Family alone and said so */
+static void CheckBoth(ULONG Family, const char *What)
+{
+    BOOL Woke = BothFile && WaitForSingleObject(BothEvent, 0) == WAIT_OBJECT_0;
+
+    ok(Woke, "a request for both families does not wake for %s\n", What);
+    if (Woke)
+        ok(BothIosb.Status == STATUS_SUCCESS && BothIosb.Information == sizeof(ULONG) && BothChanged == Family,
+           "%s: status 0x%lx, %lu bytes, families %lu\n", What, BothIosb.Status, (ULONG)BothIosb.Information,
+           BothChanged);
+}
+
 static void Arm(void)
 {
     DWORD Bytes;
 
+    ArmBoth();
     ResetEvent(OAddr.hEvent);
     ResetEvent(ORoute.hEvent);
     ResetEvent(OSock4.hEvent);
@@ -651,6 +698,10 @@ static void Arm(void)
 
 static void Disarm(void)
 {
+    IO_STATUS_BLOCK Iosb;
+
+    if (BothFile)
+        NtDeviceIoControlFile(BothFile, NULL, NULL, NULL, &Iosb, IOCTL_IP_ADDCHANGE_CANCEL_REQUEST, NULL, 0, NULL, 0);
     CancelIPChangeNotify(&OAddr);
     CancelIPChangeNotify(&ORoute);
     CancelIo((HANDLE)S4);
@@ -685,6 +736,7 @@ static void TestNotifyFamilies(ULONG Index)
     ORoute.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
     OSock4.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
     OSock6.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    BothEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
 
     Arm();
     Sleep(300);
@@ -701,6 +753,7 @@ static void TestNotifyFamilies(ULONG Index)
         ok(!Signalled(&OSock4), "an AF_INET socket wakes for an IPv6 address\n");
         ok(!Signalled(&OAddr), "NotifyAddrChange wakes for an IPv6 address\n");
         ok(!Signalled(&ORoute), "NotifyRouteChange wakes for an IPv6 address\n");
+        CheckBoth(TCP_CHANGE_FAMILY_IPV6, "an IPv6 address");
         AddressRequest(TCP_IPV6_CONFIG_DELETE, Index, "fd00:6c0b:2::77", 64);
         Sleep(500);
     }
@@ -732,6 +785,7 @@ static void TestNotifyFamilies(ULONG Index)
         ok(Signalled(&OSock4), "an AF_INET socket does not wake for an IPv4 address\n");
         ok(Signalled(&ORoute), "NotifyRouteChange does not wake for the route of an IPv4 address\n");
         ok(!Signalled(&OSock6), "an AF_INET6 socket wakes for an IPv4 address\n");
+        CheckBoth(TCP_CHANGE_FAMILY_IPV4, "an IPv4 address");
         DeleteIPAddress(Context);
         Sleep(500);
     }
@@ -740,6 +794,10 @@ static void TestNotifyFamilies(ULONG Index)
     CloseHandle(ORoute.hEvent);
     CloseHandle(OSock4.hEvent);
     CloseHandle(OSock6.hEvent);
+    if (BothFile)
+        NtClose(BothFile);
+    BothFile = NULL;
+    CloseHandle(BothEvent);
     closesocket(S4);
     closesocket(S6);
 }
