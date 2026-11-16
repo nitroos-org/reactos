@@ -25,7 +25,15 @@ NpCancelListeningQueueIrp(IN PDEVICE_OBJECT DeviceObject,
     FsRtlEnterFileSystem();
     NpAcquireExclusiveVcb();
 
-    RemoveEntryList(&Irp->Tail.Overlay.ListEntry);
+    /*
+     * A connect, disconnect or close that took the IRP off the queue after
+     * IoCancelIrp had claimed the cancel routine left it linked to itself
+     * (they hold the VCB, which we waited for above): it is ours to
+     * complete, but not on any list. RemoveEntryList fails fast on such
+     * an entry, so only unlink an IRP that is still queued.
+     */
+    if (!IsListEmpty(&Irp->Tail.Overlay.ListEntry))
+        RemoveEntryList(&Irp->Tail.Overlay.ListEntry);
 
     NpReleaseVcb();
     FsRtlExitFileSystem();
