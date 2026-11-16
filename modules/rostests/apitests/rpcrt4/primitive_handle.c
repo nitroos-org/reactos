@@ -160,6 +160,12 @@ static int __cdecl srv_prim_ptr(handle_t *ph, int a, int b)
     return a + b;
 }
 
+/* for the autolisten test: an interface that is there to be registered */
+RPC_IF_HANDLE prim_handle_server_ifspec(void)
+{
+    return (RPC_IF_HANDLE)&g_server_if;
+}
+
 static DWORD call_val(handle_t binding, int a, int b, int *result)
 {
     DWORD code = 0;

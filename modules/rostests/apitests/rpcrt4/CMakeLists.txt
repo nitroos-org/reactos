@@ -12,6 +12,7 @@ add_rpc_files(server generic_handle.idl)
 set(IDL_FLAGS ${OLD_IDL_FLAGS})
 
 list(APPEND SOURCE
+    autolisten.c
     conn_reuse.c
     generic_handle.c
     generic_handle_srv.c
