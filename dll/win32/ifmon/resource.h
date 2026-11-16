@@ -95,3 +95,23 @@
 #define IDS_HLP_IPV6_SHOW_PRIVACY_EX                1018
 #define IDS_HLP_IPV6_SHOW_ROUTE                     1019
 #define IDS_HLP_IPV6_SHOW_ROUTE_EX                  1020
+
+#define IDS_HLP_IPV6_ADD                            1100
+#define IDS_HLP_IPV6_ADD_ADDRESS                    1101
+#define IDS_HLP_IPV6_ADD_ADDRESS_EX                 1102
+#define IDS_HLP_IPV6_ADD_DNSSERVERS                 1103
+#define IDS_HLP_IPV6_ADD_DNSSERVERS_EX              1104
+#define IDS_HLP_IPV6_ADD_ROUTE                      1105
+#define IDS_HLP_IPV6_ADD_ROUTE_EX                   1106
+#define IDS_HLP_IPV6_DELETE                         1110
+#define IDS_HLP_IPV6_DELETE_ADDRESS                 1111
+#define IDS_HLP_IPV6_DELETE_ADDRESS_EX              1112
+#define IDS_HLP_IPV6_DELETE_DNSSERVERS              1113
+#define IDS_HLP_IPV6_DELETE_DNSSERVERS_EX           1114
+#define IDS_HLP_IPV6_DELETE_ROUTE                   1115
+#define IDS_HLP_IPV6_DELETE_ROUTE_EX                1116
+#define IDS_HLP_IPV6_SET                            1120
+#define IDS_HLP_IPV6_SET_ADDRESS                    1121
+#define IDS_HLP_IPV6_SET_ADDRESS_EX                 1122
+#define IDS_HLP_IPV6_SET_GLOBAL                     1123
+#define IDS_HLP_IPV6_SET_GLOBAL_EX                  1124
