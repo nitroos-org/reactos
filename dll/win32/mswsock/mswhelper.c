@@ -9,7 +9,9 @@
 #include "mswhelper.h"
 
 #define MSW_BUFSIZE 512
-#define MAX_ARRAY_SIZE 5
+/* the string lists (aliases of a host or a service) hold up to 15 names and the NULL, as the lookups fill them
+   (WS2_INTERNAL_MAX_ALIAS of nsplookup.c); with 5, a CNAME chain of more than 5 links lost all of its aliases */
+#define MAX_ARRAY_SIZE 16
 
 void
 mswBufferInit(_Inout_ PMSW_BUFFER mswBuf,
@@ -124,7 +126,8 @@ mswBufferAppendLst(_Inout_ PMSW_BUFFER mswBuf,
     lstByteSize = ((lstItemCount + 1) * sizeof(UINT_PTR)) + /* item-pointer + null-ptr (for end) */
                   (lstItemCount * itemByteLength); /* item-data */
 
-    if (mswBuf->bytesUsed + lstByteSize > mswBuf->bytesMax)
+    /* too small: marked as an overflow, so that the lookup is made again with a buffer that is large enough */
+    if (!mswBufferCheck(mswBuf, lstByteSize))
         return FALSE;
 
     /* calculate position for the data of the first item */
@@ -190,7 +193,8 @@ mswBufferAppendStrLstA(_Inout_ PMSW_BUFFER mswBuf,
     lstByteSize = ((lstItemCount + 1) * sizeof(UINT_PTR)) + /* item-pointer + null-ptr (for end) */
                   lstDataSize; /* item-data */
 
-    if (mswBuf->bytesUsed + lstByteSize > mswBuf->bytesMax)
+    /* too small: marked as an overflow, so that the lookup is made again with a buffer that is large enough */
+    if (!mswBufferCheck(mswBuf, lstByteSize))
         return FALSE;
 
     /* calculate position for the data of the first item */
