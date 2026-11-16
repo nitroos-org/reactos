@@ -566,10 +566,13 @@ EngLineTo(
         x = x1;
         y = y1;
 
+        /* The end point itself is not drawn, but along the axis of the smaller delta the line reaches the row or
+           column of the end point before its last step: the rectangle includes it (IntEngEnter may draw into a
+           bitmap of just this size) */
         if (x1 < x2)
         {
             DestRect.left = x1;
-            DestRect.right = x2;
+            DestRect.right = x2 + 1;
         }
         else
         {
@@ -579,7 +582,7 @@ EngLineTo(
         if (y1 < y2)
         {
             DestRect.top = y1;
-            DestRect.bottom = y2;
+            DestRect.bottom = y2 + 1;
         }
         else
         {
