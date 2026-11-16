@@ -1206,6 +1206,63 @@ send_discover(void *ipp)
 }
 
 /*
+ * Look for an automatic private address (169.254.x.y) the stack already holds on the adapter, left by an earlier run of
+ * this service (a stop leaves the address in place, as it does on Windows). Returns TRUE with the address (network
+ * order) and its context (what DeleteIPAddress takes) when there is one.
+ */
+static BOOL
+FindExistingAutoAddress(DWORD IfIndex, IPAddr *Address, ULONG *Context)
+{
+    PIP_ADAPTER_INFO Info = NULL, Cur;
+    PIP_ADDR_STRING Entry;
+    ULONG Size = 0, Err = ERROR_BUFFER_OVERFLOW;
+    BOOL Found = FALSE;
+    int Try;
+
+    for (Try = 0; Try < 4 && Err == ERROR_BUFFER_OVERFLOW; Try++)
+    {
+        Err = GetAdaptersInfo(Info, &Size);
+        if (Err == ERROR_BUFFER_OVERFLOW)
+        {
+            PIP_ADAPTER_INFO New = realloc(Info, Size);
+
+            if (New == NULL)
+            {
+                free(Info);
+                return FALSE;
+            }
+            Info = New;
+        }
+    }
+    if (Err != NO_ERROR || Info == NULL)
+    {
+        free(Info);
+        return FALSE;
+    }
+
+    for (Cur = Info; Cur != NULL && !Found; Cur = Cur->Next)
+    {
+        if (Cur->Index != IfIndex)
+            continue;
+        for (Entry = &Cur->IpAddressList; Entry != NULL; Entry = Entry->Next)
+        {
+            IPAddr Addr = inet_addr(Entry->IpAddress.String);
+
+            if (Addr != INADDR_NONE && (ntohl(Addr) & 0xFFFF0000) == 0xA9FE0000)
+            {
+                *Address = Addr;
+                *Context = Entry->Context;
+                Found = TRUE;
+                break;
+            }
+        }
+    }
+
+    free(Info);
+    return Found;
+}
+
+/*
  * state_panic gets called if we haven't received any offers in a preset
  * amount of time.   When this happens, we try to use existing leases
  * that haven't yet expired, and failing that, we call the client script
@@ -1232,16 +1289,21 @@ state_panic(void *ipp)
     time_t cur_time, never_time = 0x7FFFFFFF;
     struct in_addr addr;
     DWORD dwAddressType = 0;
+    ULONG NteContext;
+    BOOL Adopted = FALSE;
 
     note("No DHCPOFFERS received.");
 
     time(&cur_time);
 
+    if (Adapter == NULL)
+        return;
+
     strcat(szKeyNameBuffer, Adapter->DhclientInfo.name);
     if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, szKeyNameBuffer, 0, KEY_WRITE, &hKey) != ERROR_SUCCESS)
         hKey = NULL;
 
-    if (Adapter && !Adapter->NteContext)
+    if (!Adapter->NteContext)
     {
         DH_DbgPrint(MID_TRACE,("DHCPCSVC: Failed to receive a response from a DHCP server\n"));
         if ((Adapter->AlternateConfiguration != NULL) &&
@@ -1337,26 +1399,39 @@ state_panic(void *ipp)
             /* Generate an automatic private address */
             DH_DbgPrint(MID_TRACE,("DHCPCSVC: An automatic private address will be assigned.\n"));
 
+            /* An address of an earlier run of this service is still on the adapter: keep it (it is not a conflict
+               with itself) instead of probing for and adding another one, as Windows keeps its one address */
+            if (FindExistingAutoAddress(Adapter->IfMib.dwIndex, &IpAddress, &NteContext))
+            {
+                DH_DbgPrint(MID_TRACE,("DHCPCSVC: Adopting the automatic private address already on the adapter\n"));
+                Adapter->NteContext = NteContext;
+                Adapter->NteInstance = 0;
+                Adopted = TRUE;
+            }
+
             /* FIXME: The address generation code sucks */
             srand(0);
 
             for (;;)
             {
-                address_low = rand();
-                for (i = 0; i < ip->hw_address.hlen; i++)
-                    address_low += ip->hw_address.haddr[i];
-
-                IpAddress = htonl(0xA9FE0000 | address_low);  // 169.254.X.X
-
-                /* Send an ARP request to check if the IP address is already in use */
-                BufferSize = sizeof(Buffer);
-                ret = SendARP(IpAddress,
-                              IpAddress,
-                              Buffer,
-                              &BufferSize);
-                DH_DbgPrint(MID_TRACE,("DHCPCSVC: SendARP returned %lu\n", ret));
-                if (ret != 0)
+                if (!Adopted)
                 {
+                    address_low = rand();
+                    for (i = 0; i < ip->hw_address.hlen; i++)
+                        address_low += ip->hw_address.haddr[i];
+
+                    IpAddress = htonl(0xA9FE0000 | address_low);  // 169.254.X.X
+
+                    /* Send an ARP request to check if the IP address is already in use */
+                    BufferSize = sizeof(Buffer);
+                    ret = SendARP(IpAddress,
+                                  IpAddress,
+                                  Buffer,
+                                  &BufferSize);
+                    DH_DbgPrint(MID_TRACE,("DHCPCSVC: SendARP returned %lu\n", ret));
+                    if (ret == 0)
+                        continue; /* In use (by this machine's other adapter or by another host): try the next one */
+
                     /* The IP address is not in use */
                     DH_DbgPrint(MID_TRACE,("DHCPCSVC: Using automatic private address\n"));
                     Status = AddIPAddress(IpAddress,
@@ -1366,32 +1441,32 @@ state_panic(void *ipp)
                                           &Adapter->NteInstance);
                     if (!NT_SUCCESS(Status))
                         DH_DbgPrint(MID_TRACE,("AddIPAddress: %lx\n", Status));
-
-                    if (hKey)
-                    {
-                        addr.S_un.S_addr = IpAddress;
-                        RtlIpv4AddressToStringA(&addr, AddressBuffer);
-                        RegSetValueExA(hKey, "DhcpIPAddress", 0, REG_SZ, (LPBYTE)AddressBuffer, strlen(AddressBuffer) + 1);
-                        RegSetValueExA(hKey, "DhcpSubnetMask", 0, REG_SZ, (LPBYTE)SubnetMask, strlen(SubnetMask) + 1);
-                        RegSetValueExA(hKey, "DhcpServer", 0, REG_SZ, (LPBYTE)Server, strlen(Server) + 1);
-                        RegDeleteValueA(hKey, "DhcpDefaultGateway");
-                        RegDeleteValueA(hKey, "DhcpDomain");
-                        RegDeleteValueA(hKey, "DhcpNameServer");
-
-                        RegSetValueExA(hKey, "IPAutoconfigurationAddress", 0, REG_SZ, (LPBYTE)AddressBuffer, strlen(AddressBuffer) + 1);
-                        RegSetValueExA(hKey, "IPAutoconfigurationMask", 0, REG_SZ, (LPBYTE)SubnetMask, strlen(SubnetMask) + 1);
-
-                        RegSetValueExA(hKey, "Lease", 0, REG_DWORD, (LPBYTE)&lease, sizeof(DWORD));
-                        RegSetValueExA(hKey, "LeaseObtainedTime", 0, REG_DWORD, (LPBYTE)&cur_time, sizeof(DWORD));
-                        RegSetValueExA(hKey, "LeaseTerminatesTime", 0, REG_DWORD, (LPBYTE)&never_time, sizeof(DWORD));
-                        RegSetValueExA(hKey, "T1", 0, REG_DWORD, (LPBYTE)&cur_time, sizeof(DWORD));
-                        RegSetValueExA(hKey, "T2", 0, REG_DWORD, (LPBYTE)&cur_time, sizeof(DWORD));
-                        dwAddressType = 1;
-                        RegSetValueExA(hKey, "AddressType", 0, REG_DWORD, (LPBYTE)&dwAddressType, sizeof(DWORD));
-                    }
-
-                    goto done;
                 }
+
+                if (hKey)
+                {
+                    addr.S_un.S_addr = IpAddress;
+                    RtlIpv4AddressToStringA(&addr, AddressBuffer);
+                    RegSetValueExA(hKey, "DhcpIPAddress", 0, REG_SZ, (LPBYTE)AddressBuffer, strlen(AddressBuffer) + 1);
+                    RegSetValueExA(hKey, "DhcpSubnetMask", 0, REG_SZ, (LPBYTE)SubnetMask, strlen(SubnetMask) + 1);
+                    RegSetValueExA(hKey, "DhcpServer", 0, REG_SZ, (LPBYTE)Server, strlen(Server) + 1);
+                    RegDeleteValueA(hKey, "DhcpDefaultGateway");
+                    RegDeleteValueA(hKey, "DhcpDomain");
+                    RegDeleteValueA(hKey, "DhcpNameServer");
+
+                    RegSetValueExA(hKey, "IPAutoconfigurationAddress", 0, REG_SZ, (LPBYTE)AddressBuffer, strlen(AddressBuffer) + 1);
+                    RegSetValueExA(hKey, "IPAutoconfigurationMask", 0, REG_SZ, (LPBYTE)SubnetMask, strlen(SubnetMask) + 1);
+
+                    RegSetValueExA(hKey, "Lease", 0, REG_DWORD, (LPBYTE)&lease, sizeof(DWORD));
+                    RegSetValueExA(hKey, "LeaseObtainedTime", 0, REG_DWORD, (LPBYTE)&cur_time, sizeof(DWORD));
+                    RegSetValueExA(hKey, "LeaseTerminatesTime", 0, REG_DWORD, (LPBYTE)&never_time, sizeof(DWORD));
+                    RegSetValueExA(hKey, "T1", 0, REG_DWORD, (LPBYTE)&cur_time, sizeof(DWORD));
+                    RegSetValueExA(hKey, "T2", 0, REG_DWORD, (LPBYTE)&cur_time, sizeof(DWORD));
+                    dwAddressType = 1;
+                    RegSetValueExA(hKey, "AddressType", 0, REG_DWORD, (LPBYTE)&dwAddressType, sizeof(DWORD));
+                }
+
+                goto done;
             }
         }
     }
