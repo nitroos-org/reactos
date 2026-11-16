@@ -636,7 +636,8 @@ AddEntry(
 
         /*
          * One entry per name and type: a newer answer replaces the older one; a positive answer of a name also
-         * ends its negative ones (and a name that does not exist ends the answers of the name).
+         * ends the entries saying that the name does not exist (and such an entry ends the answers of the name).
+         * "No record of the type" stays for the other types: an A answer says nothing about AAAA.
          */
         for (Next = Bucket->Flink; Next != Bucket; Next = Following)
         {
@@ -646,7 +647,7 @@ AddEntry(
             if (Old->bHostsFileEntry || !NamesMatch(Old, Entry->Name))
                 continue;
             if (Old->Type == Entry->Type ||
-                (Record && !Old->Record) ||
+                (Record && !Old->Record && Old->NegStatus == DNS_ERROR_RCODE_NAME_ERROR) ||
                 (!Record && NegStatus == DNS_ERROR_RCODE_NAME_ERROR && Old->Record))
                 DnsIntCacheRemoveEntryItem(Old);
         }
@@ -800,7 +801,7 @@ DnsIntCacheGetEntries(
     PLIST_ENTRY NextEntry, Chain, Other;
     PDNS_CACHE_ENTRY pLastEntry = NULL;
     DNS_STATUS Status = ERROR_SUCCESS;
-    ULONG Count = 0, Pass;
+    ULONG Count = 0, Pass, Skip;
 
     /* Lock the cache */
     DnsCacheLock();
@@ -809,6 +810,9 @@ DnsIntCacheGetEntries(
 
     /* The entries that are over their time are not listed (they go now) */
     SweepExpired(CacheNow());
+
+    /* When the list is cut, the newest answers are the ones listed (the name just asked for is there) */
+    Skip = (DnsCache.EntryCount > CACHE_LIST_MAX) ? DnsCache.EntryCount - CACHE_LIST_MAX : 0;
 
     /* The answers of the DNS servers first, then the rows of the hosts file */
     for (Pass = 0; Pass < 2 && Status == ERROR_SUCCESS; Pass++)
@@ -822,6 +826,11 @@ DnsIntCacheGetEntries(
 
             if (CacheEntry->bHostsFileEntry != (Pass == 1))
                 continue;
+            if (Pass == 0 && Skip > 0)
+            {
+                Skip--;
+                continue;
+            }
 
             DPRINT("1 %S %lu\n", CacheEntry->Name, CacheEntry->Type);
 

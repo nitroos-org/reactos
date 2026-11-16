@@ -265,6 +265,25 @@ CacheEntryCount(void)
     return Count;
 }
 
+/* Is the name in the list of DnsGetCacheDataTable? */
+static
+BOOL
+IsListed(const char *Name)
+{
+    PDNS_CACHE_ENTRY Table = NULL, Entry;
+    WCHAR NameW[300];
+
+    MultiByteToWideChar(CP_ACP, 0, Name, -1, NameW, ARRAYSIZE(NameW));
+    if (!DnsGetCacheDataTable(&Table))
+        return FALSE;
+    for (Entry = Table; Entry; Entry = Entry->pNext)
+    {
+        if (Entry->pszName && _wcsicmp(Entry->pszName, NameW) == 0)
+            return TRUE;
+    }
+    return FALSE;
+}
+
 static
 void
 TestTtl(void)
@@ -448,6 +467,46 @@ TestFlush(void)
     ok(R.Status == DNS_INFO_NO_RECORDS, "reverse entry after a flush of the name with the dot: %lu\n", R.Status);
 }
 
+/*
+ * chain30-*: the name is a CNAME (TTL 30) of l2-<name>, a CNAME (TTL 600) of l3-<name>, which has the addresses
+ * (TTL 600). The answer is good for as long as its shortest link. v4only-*: an A record, no AAAA record.
+ */
+static
+void
+TestChain(void)
+{
+    const char *N;
+    QRESULT R;
+
+    SetParam("MaxCacheTtl", -1);
+    SetParam("MaxNegativeCacheTtl", -1);
+
+    N = MakeName("chain30", "a");
+    R = Query(N, DNS_TYPE_A, DNS_QUERY_STANDARD);
+    ok(R.Status == ERROR_SUCCESS && R.Last == 10, "A through a chain of CNAME records: %lu, address .%d\n", R.Status, R.Last);
+    ok(R.Ttl >= 1 && R.Ttl <= 30, "TTL of an A answer through a chain of CNAME records: %lu, expected 30 at most\n", R.Ttl);
+    R = Query(N, DNS_TYPE_A, DNS_QUERY_NO_WIRE_QUERY);
+    ok(R.Status == ERROR_SUCCESS, "cache-only query of the chain: %lu\n", R.Status);
+    ok(R.Ttl <= 30, "time left of the cached answer of the chain: %lu, expected 30 at most\n", R.Ttl);
+
+    N = MakeName("chain30", "aaaa");
+    R = Query(N, DNS_TYPE_AAAA, DNS_QUERY_STANDARD);
+    ok(R.Status == ERROR_SUCCESS && R.Last == 0x10, "AAAA through a chain of CNAME records: %lu, address ::%x\n", R.Status, R.Last);
+    ok(R.Ttl >= 1 && R.Ttl <= 30, "TTL of an AAAA answer through a chain of CNAME records: %lu, expected 30 at most\n", R.Ttl);
+
+    /* "no AAAA record" is kept when the A answer of the name comes after it (as getaddrinfo asks) */
+    N = MakeName("v4only", "a");
+    R = Query(N, DNS_TYPE_AAAA, DNS_QUERY_STANDARD);
+    ok(R.Status == DNS_INFO_NO_RECORDS, "AAAA of a name with an A record only: %lu\n", R.Status);
+    R = Query(N, DNS_TYPE_A, DNS_QUERY_STANDARD);
+    ok(R.Status == ERROR_SUCCESS, "A of a name with an A record only: %lu\n", R.Status);
+    R = Query(N, DNS_TYPE_AAAA, DNS_QUERY_STANDARD);
+    ok(R.Status == DNS_INFO_NO_RECORDS, "AAAA again: %lu\n", R.Status);
+    R = Query(N, DNS_TYPE_A, DNS_QUERY_STANDARD);
+    ok(R.Status == ERROR_SUCCESS, "A again: %lu\n", R.Status);
+    ok(ServerCount(N) == 2, "name with an A record only: the server was asked %d times, expected 2\n", ServerCount(N));
+}
+
 /* The average time of Iterations lookups of the name (microseconds) */
 static
 double
@@ -539,6 +598,8 @@ TestSize(int Names)
     k = CacheEntryCount();
     trace("entries listed by DnsGetCacheDataTable (ipconfig /displaydns): %d\n", k);
     ok(k > 1000 && k <= 3000, "DnsGetCacheDataTable listed %d entries with a full cache, expected a list of some thousand at most\n", k);
+    _snprintf(Buffer, sizeof(Buffer), "big-%s-%d.cache.test", Uniq, Names - 1);
+    ok(IsListed(Buffer), "the newest name is not in the list of DnsGetCacheDataTable\n");
 
     /* the name in use stays (the least recently used goes first) */
     ok(Query(Hot, DNS_TYPE_A, DNS_QUERY_NO_WIRE_QUERY).Status == ERROR_SUCCESS, "the name in use is not in the cache\n");
@@ -592,6 +653,7 @@ START_TEST(DnsCache)
     TestMaxCacheTtl();
     TestNegative();
     TestFlush();
+    TestChain();
     TestSize(Names);
 
     SetParam("MaxCacheTtl", -1);

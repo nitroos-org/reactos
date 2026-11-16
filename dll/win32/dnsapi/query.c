@@ -788,6 +788,32 @@ AnswerTtl(
     return 0;
 }
 
+/*
+ * A chain of CNAME records (alias -> alias -> name) is asked one link at a time (adns follows one CNAME itself):
+ * the answer of the last link is only good for as long as every link before it. Chain is the earliest end of the
+ * links asked so far (0 before the first one); Answer is the answer of the current link.
+ */
+static
+VOID
+KeepChainExpiry(
+    _Inout_ time_t *Chain,
+    _In_ const adns_answer *Answer)
+{
+    if (*Chain == 0 || Answer->expires < *Chain)
+        *Chain = Answer->expires;
+}
+
+/* The final answer of a chain ends no later than the links before it */
+static
+VOID
+ApplyChainExpiry(
+    _Inout_ adns_answer *Answer,
+    _In_ time_t Chain)
+{
+    if (Chain != 0 && Chain < Answer->expires)
+        Answer->expires = Chain;
+}
+
 /* Sets the TTL of every record of the list */
 static
 VOID
@@ -1092,6 +1118,7 @@ QueryAaaa(LPCWSTR Name,
     int quflags = (Options & (DNS_QUERY_NO_RECURSION | DNS_QUERY_TREAT_AS_FQDN)) == 0 ? adns_qf_search : 0;
     int adns_error, i;
     unsigned CNameLoop;
+    time_t ChainExpires = 0;
     CHAR Search[512];
     PFIXED_INFO network_info;
     ULONG network_info_blen = 0;
@@ -1242,6 +1269,7 @@ QueryAaaa(LPCWSTR Name,
             }
             if (Status == ERROR_SUCCESS)
             {
+                ApplyChainExpiry(answer, ChainExpires);
                 SetListTtl(First, AnswerTtl(answer));
                 *QueryResultSet = (PDNS_RECORD)First;
             }
@@ -1253,6 +1281,7 @@ QueryAaaa(LPCWSTR Name,
 
         if (answer->status == adns_s_prohibitedcname && answer->cname)
         {
+            KeepChainExpiry(&ChainExpires, answer);
             NextName = (PCHAR)xstrsaveA(answer->cname);
             free(answer);
             if (CurrentName != AnsiName)
@@ -1564,6 +1593,7 @@ QueryTyped(LPCWSTR Name,
     int quflags = adns_qf_quoteok_query | adns_qf_quoteok_anshost;
     int adns_error, Len;
     unsigned CNameLoop;
+    time_t ChainExpires = 0;
     PCHAR AnsiName, CurrentName, NextName;
     PDNS_RECORDW Records;
     DNS_STATUS Status;
@@ -1621,6 +1651,7 @@ QueryTyped(LPCWSTR Name,
         if (answer->status == adns_s_ok && answer->nrrs > 0)
         {
             Records = NULL;
+            ApplyChainExpiry(answer, ChainExpires);
             Status = BuildTypedRecords(Name, Type, answer, &Records);
             if (Status == ERROR_SUCCESS)
                 *QueryResultSet = (PDNS_RECORD)Records;
@@ -1630,6 +1661,7 @@ QueryTyped(LPCWSTR Name,
 
         if (answer->status == adns_s_prohibitedcname && answer->cname)
         {
+            KeepChainExpiry(&ChainExpires, answer);
             NextName = (PCHAR)xstrsaveA(answer->cname);
             free(answer);
             if (CurrentName != AnsiName)
@@ -1678,6 +1710,7 @@ Query_Main(LPCWSTR Name,
     adns_answer *answer;
     LPSTR CurrentName;
     unsigned CNameLoop;
+    time_t ChainExpires = 0;
     PFIXED_INFO network_info;
     ULONG network_info_blen = 0;
     DWORD network_info_result;
@@ -1865,6 +1898,7 @@ Query_Main(LPCWSTR Name,
                     }
                 }
 
+                ApplyChainExpiry(answer, ChainExpires);
                 SetListTtl(First, AnswerTtl(answer));
                 free(answer);
                 adns_finish(astate);
@@ -1904,6 +1938,7 @@ Query_Main(LPCWSTR Name,
             if (CurrentName != AnsiName)
                 RtlFreeHeap(RtlGetProcessHeap(), 0, CurrentName);
 
+            KeepChainExpiry(&ChainExpires, answer);
             CurrentName = (LPSTR)xstrsaveA(answer->cname);
             free(answer);
 
