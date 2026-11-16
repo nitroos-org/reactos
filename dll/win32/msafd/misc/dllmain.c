@@ -2700,11 +2700,12 @@ Leave:
 
     NtClose(SockEvent);
 
-    /* Re-enable Async Event */
-    SockReenableAsyncSelectEvent(Socket, FD_WRITE);
-
-    /* FIXME: THIS IS NOT RIGHT!!! HACK HACK HACK! */
-    SockReenableAsyncSelectEvent(Socket, FD_CONNECT);
+    /*
+     * Re-enable FD_CONNECT and FD_WRITE together. Apart, the first re-enabling starts a poll for FD_WRITE
+     * alone, which a connect that is over already answers before the second one is made: FD_WRITE was
+     * then posted before FD_CONNECT. In one poll the events are posted in the order FD_CONNECT, FD_WRITE.
+     */
+    SockReenableAsyncSelectEvent(Socket, FD_CONNECT | FD_WRITE);
 
     if (Status == STATUS_SUCCESS && (Socket->HelperEvents & WSH_NOTIFY_CONNECT))
     {
@@ -3909,11 +3910,8 @@ MsafdUpdateConnectionContext(
         if (!WasConnected)
             Socket->SharedData->ConnectTime = GetCurrentTimeInSeconds();
 
-        /* Re-enable Async Event */
-        SockReenableAsyncSelectEvent(Socket, FD_WRITE);
-
-        /* FIXME: THIS IS NOT RIGHT!!! HACK HACK HACK! */
-        SockReenableAsyncSelectEvent(Socket, FD_CONNECT);
+        /* Re-enable Async Events, both in one poll so that FD_CONNECT precedes FD_WRITE (see WSPConnect) */
+        SockReenableAsyncSelectEvent(Socket, FD_CONNECT | FD_WRITE);
 
         Socket->HelperData->WSHNotify(Socket->HelperContext,
                                       Socket->Handle,
