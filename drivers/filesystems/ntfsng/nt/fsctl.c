@@ -384,6 +384,8 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         ngc_set_dio_drain(Vcb->Core, NgDrainDataIoCallback, Vcb);
         ngc_set_dio_drain_range(Vcb->Core, NgDrainDataIoRangeCallback, Vcb);
         ngc_set_fua(Vcb->Core, ngos_dev_fua(Target));
+        /* A disk that honours FUA keeps the write-through data of each call durable at its return (FUA writes, no flush): no group commit there. */
+        Vcb->GroupCommit = NgGlobal.GroupCommitMB != 0 && !ngos_dev_fua(Target);
         ngc_set_commit_kick(Vcb->Core, NgCommitKickCallback, Vcb);
         if (!Vcb->Info.read_only)
         {

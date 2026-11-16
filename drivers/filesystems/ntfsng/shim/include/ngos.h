@@ -86,6 +86,9 @@ enum {
 	NGP_SKIP_RACED,		/* ... verifying scan found dirt but a dirtier announced itself meanwhile: inconclusive (count) */
 	NGP_RESV_RETRY,		/* a growth that failed with ENOSPC while frees were uncommitted committed and tried again (count; every build) */
 	NGP_IRP = 32,		/* + the IRP major function */
+	NGP_GROUP_WRITE = 60,	/* extending write-through writes whose commit was left to a group commit (count, bytes; every build) */
+	NGP_GROUP_COMMIT = 61,	/* group commits for a full batch (count; every build) */
+	NGP_GROUP_CLEANUP = 62,	/* group commits at a cleanup (count; every build) */
 	NGP_STAGES = 64
 };
 unsigned long long ngos_ticks(void);

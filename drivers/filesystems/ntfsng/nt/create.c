@@ -2346,6 +2346,9 @@ static NTSTATUS NgCleanupGated(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             NgNotifyFcb(Vcb, &Ccb->Path, FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_ACTION_MODIFIED,
                         Fcb, Ccb->ParentMftNo);
     }
+    /* Extending write-through writes to the file whose commit a batch still holds (write.c NgGroupWritten) are committed when a handle goes. */
+    if (!Delete)
+        NgGroupCleanup(Vcb, Fcb);
     /*
      * Mm may keep this FCB alive long after the last handle: park the core inode (see NgEnsureNode).  An FCB that holds
      * no node and has no allocation to give back (a parked one that was only queried: NgFillStat reads through a node of

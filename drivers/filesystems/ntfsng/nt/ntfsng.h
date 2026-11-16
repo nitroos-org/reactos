@@ -171,6 +171,18 @@ typedef struct _NG_VCB
     LIST_ENTRY DirNotifyList;
     KEVENT FlusherStop;
     KEVENT CommitKick;              /* the core asks the flusher to commit now (overlay past its threshold); auto-reset */
+    /*
+     * Group commit (write.c NgGroupWritten): a non-cached write-through write that extends its file, on a disk whose volatile
+     * cache does not honour FUA, returns once its data is on the device and its sizes are in the overlay; the journal commit
+     * that makes them durable runs once per batch (GroupLimit bytes), at FlushFileBuffers, at a cleanup of the file, at the
+     * flusher's next pass (NG_GROUP_PERIOD_MS) and with any other commit.  The data is on the device before the commit's first
+     * flush, so the on-disk size never covers data that did not reach the medium.  All under CoreLock.
+     */
+    BOOLEAN GroupCommit;            /* set at mount: the volume batches those commits */
+    ULONGLONG GroupBytes;           /* bytes of such writes since the last commit that covers them began */
+    LONGLONG GroupSince;            /* interrupt time when GroupBytes last left 0: the flusher commits NG_GROUP_PERIOD_MS later */
+    ULONG GroupSeq;                 /* bumped by each such write */
+    ULONG GroupDone;                /* GroupSeq when the last complete commit sealed its transaction */
     ULONG Syncs;
     ULONG NonCachedViaCache;            /* non-cached writes sent through Cc: a view could not be purged */
     LONG PagingFileReads, PagingFileWrites;
@@ -188,6 +200,10 @@ typedef struct _NG_VCB
 } NG_VCB, *PNG_VCB;
 
 #define NG_FLUSH_PERIOD_MS 2000
+/* The flusher's period while writes of a group commit are not committed (the longest such a write stays not durable when no batch, flush or cleanup comes). */
+#define NG_GROUP_PERIOD_MS 1000
+/* Bytes of extending write-through writes per group commit (registry "GroupCommitMB"; "NoGroupCommit"=1 commits every write as before). */
+#define NG_GROUP_DEFAULT_MB 32
 /* Over the System process base (8): 13, the critical work queue (EX_CRITICAL_QUEUE_PRIORITY_INCREMENT). */
 #define NG_FLUSHER_PRIORITY_INCREMENT 5
 
@@ -241,6 +257,7 @@ typedef struct _NG_FCB
     BOOLEAN IsRoot;
     BOOLEAN Modified;               /* data changed since the last time update (cleanup/flush) */
     BOOLEAN Grown;                  /* the size grew since the core node was loaded: the last close trims the allocation ahead of it */
+    ULONG GroupSeq;                 /* Vcb->GroupSeq after this stream's last write of a group commit (CoreLock); 0: none */
     BOOLEAN UserSetWriteTime;       /* LastWriteTime set through FileBasicInformation: keep it */
     BOOLEAN DeletePending;          /* unlink at the last cleanup */
     BOOLEAN Deleted;                /* unlinked: paging writes are dropped */
@@ -340,6 +357,7 @@ typedef struct _NG_GLOBAL
     ULONG PermissiveOpen;           /* diagnostic: grant write access at open, refuse the modification itself */
     ULONG FuaAliasMB;               /* test only: "FuaAliasMB" DWORD, see NgDevSetFua */
     ULONG NoFua;                    /* "NoFua" DWORD in the service key: never use Force Unit Access, keep the flushes of the journal */
+    ULONG GroupCommitMB;            /* batch of a group commit in MB ("GroupCommitMB", default NG_GROUP_DEFAULT_MB); 0 = off ("NoGroupCommit"=1) */
     ULONG ForceReadOnly;            /* "ReadOnly" DWORD in the service key: mount every volume read-only */
     ULONG Verbose;                  /* "Verbose" DWORD: request log (NGDIAG) and periodic core dumps on the debug port */
     BOOLEAN Disable8dot3;           /* NtfsDisable8dot3NameCreation == 1: no short names for new names */
@@ -455,6 +473,7 @@ VOID NgDrainDataIoRangeCallback(PVOID Context, ULONGLONG Off, ULONGLONG Len);
 VOID NgWaitDataIoIdle(PNG_VCB Vcb);
 int NgCommit(PNG_VCB Vcb);
 int NgCommitEx(PNG_VCB Vcb, BOOLEAN Retain);
+VOID NgGroupCleanup(PNG_VCB Vcb, PNG_FCB Fcb);
 VOID NgCommitKickCallback(PVOID Context);
 VOID NgDataIoBegin(PNG_VCB Vcb, const struct ngc_dio *Dio, PNG_DIO_REG Reg);
 VOID NgDataIoUnregister(PNG_VCB Vcb, PNG_DIO_REG Reg);
