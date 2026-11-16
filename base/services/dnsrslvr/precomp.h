@@ -118,6 +118,14 @@ DnsIntCacheGetEntries(
     _Out_ DNS_CACHE_ENTRY **ppCacheEntries);
 
 
+/* netchange.c */
+
+VOID
+DnsIntNetChangeStart(VOID);
+
+VOID
+DnsIntNetChangeStop(VOID);
+
 /* hostsfile.c */
 
 BOOL

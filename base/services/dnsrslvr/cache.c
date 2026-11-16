@@ -229,6 +229,9 @@ DnsIntCacheInitialize(VOID)
     LastSweep = CacheNow();
     DnsIntCacheReadParameters();
     DnsCacheInitialized = TRUE;
+
+    /* the cache goes when the network configuration changes (netchange.c) */
+    DnsIntNetChangeStart();
 }
 
 VOID
@@ -239,6 +242,9 @@ DnsIntCacheFree(VOID)
     /* Check if we're initialized */
     if (!DnsCacheInitialized)
         return;
+
+    /* the thread that flushes the cache must be gone before the lock is */
+    DnsIntNetChangeStop();
 
     if (!DnsCache.RecordList.Flink)
         return;

@@ -661,6 +661,158 @@ TestSize(int Names)
     trace("lookup of an unknown name: %.1f us per query (cache only, 2000 queries)\n", Us);
 }
 
+/*
+ * The cache goes when the first IPv4 address of an adapter goes, and not when another address comes or goes (the
+ * behaviour of Windows 10 and Server 2022: ipconfig /displaydns before and after each step). The first address is
+ * taken away by releasing the lease of the adapter and given back by renewing it; both steps need an adapter with a
+ * DHCP lease and an administrator, otherwise only the first part runs.
+ */
+#define NC_ADDRESS  "10.254.77.1"
+#define NC_MASK     "255.255.255.0"
+
+static
+BOOL
+FindAdapter(DWORD *Index, BOOL *Dhcp, WCHAR *Name, int NameSize)
+{
+    PIP_ADAPTER_INFO Info, Adapter;
+    ULONG Size = 0;
+    BOOL Found = FALSE;
+
+    GetAdaptersInfo(NULL, &Size);
+    Info = Size ? malloc(Size) : NULL;
+    if (!Info)
+        return FALSE;
+    if (GetAdaptersInfo(Info, &Size) == NO_ERROR)
+    {
+        for (Adapter = Info; Adapter; Adapter = Adapter->Next)
+        {
+            const char *Ip = Adapter->IpAddressList.IpAddress.String;
+
+            if (strcmp(Ip, "0.0.0.0") != 0 && strncmp(Ip, "127.", 4) != 0)
+            {
+                *Index = Adapter->Index;
+                *Dhcp = Adapter->DhcpEnabled != 0;
+                MultiByteToWideChar(CP_ACP, 0, Adapter->AdapterName, -1, Name, NameSize);
+                Found = TRUE;
+                break;
+            }
+        }
+    }
+    free(Info);
+    return Found;
+}
+
+/* Does the adapter have an IPv4 address (Present) or none (!Present) within Ms milliseconds? */
+static
+BOOL
+WaitForAddress(DWORD Index, BOOL Present, DWORD Ms)
+{
+    DWORD Start = GetTickCount();
+
+    do
+    {
+        PIP_ADAPTER_INFO Info, Adapter;
+        ULONG Size = 0;
+        BOOL Has = FALSE;
+
+        GetAdaptersInfo(NULL, &Size);
+        Info = Size ? malloc(Size) : NULL;
+        if (Info && GetAdaptersInfo(Info, &Size) == NO_ERROR)
+        {
+            for (Adapter = Info; Adapter; Adapter = Adapter->Next)
+            {
+                if (Adapter->Index == Index && strcmp(Adapter->IpAddressList.IpAddress.String, "0.0.0.0") != 0)
+                    Has = TRUE;
+            }
+        }
+        free(Info);
+        if (Has == Present)
+            return TRUE;
+        Sleep(500);
+    } while (GetTickCount() - Start < Ms);
+    return FALSE;
+}
+
+static
+void
+TestNetChange(void)
+{
+    typedef DWORD (WINAPI *PFN_INIT)(PDWORD);
+    typedef DWORD (WINAPI *PFN_ADAPTER)(LPWSTR);
+    typedef VOID (WINAPI *PFN_CLEANUP)(VOID);
+    const char *N;
+    DWORD Index, Context, Instance, Error, Version;
+    BOOL Dhcp;
+    WCHAR Adapter[MAX_ADAPTER_NAME_LENGTH + 4];
+    HMODULE Dhcpcsvc;
+    PFN_INIT Init;
+    PFN_ADAPTER Release, Acquire;
+    PFN_CLEANUP Cleanup;
+
+    if (!FindAdapter(&Index, &Dhcp, Adapter, ARRAYSIZE(Adapter)))
+    {
+        skip("no adapter with an IPv4 address\n");
+        return;
+    }
+
+    N = MakeName("ttl300", "netchg");
+    ok(Query(N, DNS_TYPE_A, DNS_QUERY_STANDARD).Status == ERROR_SUCCESS, "query\n");
+    ok(Query(N, DNS_TYPE_A, DNS_QUERY_NO_WIRE_QUERY).Status == ERROR_SUCCESS, "cached before the change\n");
+
+    /* another address comes: the cache stays (Windows measured) */
+    Error = AddIPAddress(inet_addr(NC_ADDRESS), inet_addr(NC_MASK), Index, &Context, &Instance);
+    if (Error != NO_ERROR)
+    {
+        skip("AddIPAddress failed (%lu): no address change to test\n", Error);
+        return;
+    }
+    Sleep(6000);
+    ok(Query(N, DNS_TYPE_A, DNS_QUERY_NO_WIRE_QUERY).Status == ERROR_SUCCESS, "the cache was flushed when a second address came\n");
+
+    /* and goes again: the cache stays */
+    Error = DeleteIPAddress(Context);
+    ok(Error == NO_ERROR, "DeleteIPAddress: %lu\n", Error);
+    Sleep(4000);
+    ok(Query(N, DNS_TYPE_A, DNS_QUERY_NO_WIRE_QUERY).Status == ERROR_SUCCESS, "the cache was flushed when the second address went\n");
+
+    if (!Dhcp)
+    {
+        skip("the adapter has no DHCP lease: the first address cannot be taken away and given back\n");
+        return;
+    }
+
+    /* the first address goes (the lease is released, as ipconfig /release does): the cache goes */
+    Dhcpcsvc = LoadLibraryW(L"dhcpcsvc.dll");
+    Init = Dhcpcsvc ? (PFN_INIT)GetProcAddress(Dhcpcsvc, "DhcpCApiInitialize") : NULL;
+    Release = Dhcpcsvc ? (PFN_ADAPTER)GetProcAddress(Dhcpcsvc, "DhcpReleaseParameters") : NULL;
+    Acquire = Dhcpcsvc ? (PFN_ADAPTER)GetProcAddress(Dhcpcsvc, "DhcpAcquireParameters") : NULL;
+    Cleanup = Dhcpcsvc ? (PFN_CLEANUP)GetProcAddress(Dhcpcsvc, "DhcpCApiCleanup") : NULL;
+    if (!Init || !Release || !Acquire || !Cleanup || Init(&Version) != ERROR_SUCCESS)
+    {
+        skip("no DHCP client API\n");
+        return;
+    }
+
+    Error = Release(Adapter);
+    if (Error != NO_ERROR)
+    {
+        skip("DhcpReleaseParameters failed (%lu)\n", Error);
+        Cleanup();
+        return;
+    }
+    ok(WaitForAddress(Index, FALSE, 15000), "the address is still there after the release\n");
+    Sleep(3000);
+    ok(Query(N, DNS_TYPE_A, DNS_QUERY_NO_WIRE_QUERY).Status == DNS_ERROR_RECORD_DOES_NOT_EXIST,
+       "the cache was not flushed when the first address went\n");
+
+    /* the address comes back */
+    Error = Acquire(Adapter);
+    ok(Error == NO_ERROR, "DhcpAcquireParameters: %lu\n", Error);
+    ok(WaitForAddress(Index, TRUE, 40000), "no address after the renewal\n");
+    Sleep(3000);
+    Cleanup();
+}
+
 START_TEST(DnsCache)
 {
     WSADATA Wsa;
@@ -703,6 +855,7 @@ START_TEST(DnsCache)
     TestChain();
     TestLongName();
     TestSize(Names);
+    TestNetChange();
 
     SetParam("MaxCacheTtl", -1);
     SetParam("MaxNegativeCacheTtl", -1);
