@@ -1010,3 +1010,82 @@ Describe 'System.Net.NetworkInformation enumeration smoke' {
         @($g.GetActiveTcpListeners() | Where-Object Port -eq $script:Port).Count | Should -BeGreaterThan 0
     }
 }
+
+# Disable-NetAdapter / Enable-NetAdapter / Restart-NetAdapter: the surface and error texts are the Windows Server 2022 ones (a measured
+# read of the real cmdlets); the round trip runs only on the guest. The adapter is disabled through its device (PnP), so its interface goes
+# and comes back: the addresses and routes of the adapter are gone while it is disabled and the same ones are made again after enable.
+Describe 'Disable-/Enable-/Restart-NetAdapter' {
+    It 'is exported by NetAdapter: <Name>' -TestCases @(@{ Name = 'Disable-NetAdapter' }, @{ Name = 'Enable-NetAdapter' }, @{ Name = 'Restart-NetAdapter' }) {
+        param($Name)
+        (Get-Command $Name).Source | Should -Be 'NetAdapter'
+    }
+    It 'has the parameters of Windows: <Name>' -TestCases @(@{ Name = 'Disable-NetAdapter' }, @{ Name = 'Enable-NetAdapter' }, @{ Name = 'Restart-NetAdapter' }) {
+        param($Name)
+        $own = 'Name', 'InterfaceDescription', 'IncludeHidden', 'InputObject', 'PassThru', 'CimSession', 'ThrottleLimit', 'AsJob', 'WhatIf', 'Confirm'
+        $keys = @((Get-Command $Name).Parameters.Keys)
+        foreach ($p in $own) { $keys | Should -Contain $p }
+        (PSetInfo $Name Name ByName).Position | Should -Be 0
+        (Get-Command $Name).Parameters['Name'].ParameterType.FullName | Should -Be 'System.String[]'
+    }
+    It '<Name> -WhatIf is accepted, writes no error and changes nothing (the text "What if: <Name> ''<adapter>''" goes to the host)' -TestCases @(@{ Name = 'Disable-NetAdapter' }, @{ Name = 'Enable-NetAdapter' }, @{ Name = 'Restart-NetAdapter' }) {
+        param($Name)
+        $a = $script:Adapter.Name
+        @(Err { & $Name -Name $a -WhatIf }).Count | Should -Be 0
+        (Get-NetAdapter -Name $a).Status | Should -Not -Be 'Disabled'
+    }
+    It '<Name> -Name nosuch is CmdletizationQuery_NotFound_Name with the Windows text' -TestCases @(@{ Name = 'Disable-NetAdapter' }, @{ Name = 'Enable-NetAdapter' }, @{ Name = 'Restart-NetAdapter' }) {
+        param($Name)
+        $e = @(Err { & $Name -Name nosuch -Confirm:$false })
+        $e.Count | Should -Be 1
+        $e[0].FullyQualifiedErrorId | Should -Be "CmdletizationQuery_NotFound_Name,$Name"
+        $e[0].CategoryInfo.Category | Should -Be 'ObjectNotFound'
+        $e[0].Exception.Message | Should -Match "^No MSFT_NetAdapter objects found with property 'Name' equal to 'nosuch'\.  Verify the value of the property and retry\.$"
+        $e[0].TargetObject | Should -Be 'nosuch'
+    }
+    It 'Disable-NetAdapter then Enable-NetAdapter: Status Disabled / Up, the addresses and routes come back (guest only)' -Skip:$script:SkipRt {
+        $name = $script:Adapter.Name
+        $guid = $script:Adapter.InterfaceGuid
+        $before = @(Get-NetIPAddress -InterfaceAlias $name -ErrorAction SilentlyContinue | Where-Object { $_.AddressFamily -eq 'IPv6' -and $_.IPAddress -like 'fe80*' } | ForEach-Object { $_.IPAddress -replace '%.*$', '' })
+        $before.Count | Should -BeGreaterThan 0
+        $routes0 = @(Get-NetRoute -InterfaceAlias $name -ErrorAction SilentlyContinue).Count
+        try {
+            Disable-NetAdapter -Name $name -Confirm:$false
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            while ($sw.Elapsed.TotalSeconds -lt 20 -and (Get-NetAdapter -Name $name -ErrorAction SilentlyContinue).Status -ne 'Disabled') { Start-Sleep -Milliseconds 500 }
+            $d = Get-NetAdapter -Name $name
+            $d.Status | Should -Be 'Disabled'
+            [string]$d.AdminStatus | Should -Be 'Down'
+            $d.InterfaceGuid | Should -Be $guid
+            @(Get-NetIPAddress -InterfaceAlias $name -ErrorAction SilentlyContinue).Count | Should -Be 0
+            @(Get-NetRoute -InterfaceAlias $name -ErrorAction SilentlyContinue).Count | Should -Be 0
+            # disabling again is not an error (Windows)
+            { Disable-NetAdapter -Name $name -Confirm:$false -ErrorAction Stop } | Should -Not -Throw
+        }
+        finally {
+            Enable-NetAdapter -Name $name -Confirm:$false
+        }
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        while ($sw.Elapsed.TotalSeconds -lt 60 -and (Get-NetAdapter -Name $name -ErrorAction SilentlyContinue).Status -ne 'Up') { Start-Sleep -Milliseconds 500 }
+        (Get-NetAdapter -Name $name).Status | Should -Be 'Up'
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $after = @()
+        while ($sw.Elapsed.TotalSeconds -lt 60) {
+            $after = @(Get-NetIPAddress -InterfaceAlias $name -ErrorAction SilentlyContinue | Where-Object { $_.AddressFamily -eq 'IPv6' -and $_.IPAddress -like 'fe80*' -and [string]$_.AddressState -eq 'Preferred' } | ForEach-Object { $_.IPAddress -replace '%.*$', '' })
+            if ($after.Count -ge $before.Count) { break }
+            Start-Sleep -Milliseconds 500
+        }
+        $after | Should -Be $before
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        while ($sw.Elapsed.TotalSeconds -lt 60 -and @(Get-NetRoute -InterfaceAlias $name -ErrorAction SilentlyContinue).Count -lt $routes0) { Start-Sleep -Milliseconds 500 }
+        @(Get-NetRoute -InterfaceAlias $name -ErrorAction SilentlyContinue).Count | Should -BeGreaterOrEqual $routes0
+    }
+    It 'Restart-NetAdapter -PassThru returns the adapter, Up again (guest only)' -Skip:$script:SkipRt {
+        $name = $script:Adapter.Name
+        $r = @(Restart-NetAdapter -Name $name -Confirm:$false -PassThru)
+        $r.Count | Should -Be 1
+        $r[0].Name | Should -Be $name
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        while ($sw.Elapsed.TotalSeconds -lt 60 -and (Get-NetAdapter -Name $name -ErrorAction SilentlyContinue).Status -ne 'Up') { Start-Sleep -Milliseconds 500 }
+        (Get-NetAdapter -Name $name).Status | Should -Be 'Up'
+    }
+}

@@ -460,6 +460,7 @@ namespace Nitro.Net
         {
             List<Dictionary<string, object>> res = new List<Dictionary<string, object>>();
             Dictionary<uint, IfRow2> rows = ReadIfRows();
+            HashSet<string> live = new HashSet<string>();
             foreach (Aa a in ReadAdapters())
             {
                 uint idx = IndexOf(a);
@@ -546,8 +547,111 @@ namespace Nitro.Net
                 d["DriverInformation"] = info;
                 d["_ifIndex"] = idx; d["_ifType"] = ifType;
                 res.Add(d);
+                live.Add(guid);
             }
+            res.AddRange(DisabledAdapters(live));
             return res;
+        }
+
+        // ---- administrative state of an adapter: the state of its device (what Device Manager does)
+        [StructLayout(LayoutKind.Sequential)]
+        struct SpDevinfoData { public uint Size; public Guid ClassGuid; public uint DevInst; public IntPtr Reserved; }
+        [StructLayout(LayoutKind.Sequential)]
+        struct SpPropchangeParams { public uint HeaderSize, InstallFunction, StateChange, Scope, HwProfile; }
+        [DllImport("setupapi.dll", SetLastError = true)] static extern IntPtr SetupDiCreateDeviceInfoList(ref Guid classGuid, IntPtr hwnd);
+        [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Unicode)] static extern bool SetupDiOpenDeviceInfoW(IntPtr set, string id, IntPtr hwnd, uint flags, ref SpDevinfoData data);
+        [DllImport("setupapi.dll", SetLastError = true)] static extern bool SetupDiSetClassInstallParamsW(IntPtr set, ref SpDevinfoData data, ref SpPropchangeParams p, uint size);
+        [DllImport("setupapi.dll", SetLastError = true)] static extern bool SetupDiCallClassInstaller(uint function, IntPtr set, ref SpDevinfoData data);
+        [DllImport("setupapi.dll", SetLastError = true)] static extern bool SetupDiDestroyDeviceInfoList(IntPtr set);
+        [DllImport("setupapi.dll", CharSet = CharSet.Unicode)] static extern uint CM_Locate_DevNodeW(out uint dev, string id, uint flags);
+        [DllImport("setupapi.dll")] static extern uint CM_Get_DevNode_Status(out uint status, out uint problem, uint dev, uint flags);
+
+        static bool DeviceDisabled(string pnpId)
+        {
+            uint dev, status, problem;
+            if (string.IsNullOrEmpty(pnpId) || CM_Locate_DevNodeW(out dev, pnpId, 0) != 0) return false;
+            return CM_Get_DevNode_Status(out status, out problem, dev, 0) == 0 && (status & 0x00000400) != 0 && problem == 22;
+        }
+
+        // The adapters that are administratively disabled have no interface in the stack, so iphlpapi does not list them;
+        // the registry still knows them (Control\Network\{4D36E972-...}\{guid}\Connection). Windows lists them with
+        // Status Disabled, AdminStatus Down, MediaConnectionState Unknown. The interface index of a disabled adapter
+        // is not kept (0).
+        static List<Dictionary<string, object>> DisabledAdapters(HashSet<string> live)
+        {
+            List<Dictionary<string, object>> res = new List<Dictionary<string, object>>();
+            try
+            {
+                using (RegistryKey root = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\Network\{4D36E972-E325-11CE-BFC1-08002BE10318}"))
+                {
+                    if (root == null) return res;
+                    foreach (string guid0 in root.GetSubKeyNames())
+                    {
+                        string guid = guid0.ToUpperInvariant();
+                        if (guid.Length == 0 || guid[0] != '{' || live.Contains(guid)) continue;
+                        string name = null, pnp = null;
+                        using (RegistryKey conn = root.OpenSubKey(guid0 + @"\Connection"))
+                            if (conn != null) { name = conn.GetValue("Name") as string; pnp = conn.GetValue("PnpInstanceID") as string; }
+                        if (name == null || !DeviceDisabled(pnp)) continue;
+                        DriverInfo di = ReadDriver(guid);
+                        Dictionary<string, object> d = new Dictionary<string, object>();
+                        d["Name"] = name; d["InterfaceDescription"] = di.Desc;
+                        d["InstanceID"] = guid; d["DeviceID"] = guid; d["InterfaceGuid"] = guid;
+                        d["CreationClassName"] = "MSFT_NetAdapter"; d["SystemCreationClassName"] = "CIM_NetworkPort"; d["SystemName"] = MachineName;
+                        d["EnabledDefault"] = 2; d["EnabledState"] = 3; d["RequestedState"] = 12; d["TransitioningToState"] = 12;
+                        d["Speed"] = 0UL; d["ActiveMaximumTransmissionUnit"] = 0UL; d["PortNumber"] = 0;
+                        d["AdminLocked"] = false; d["ConnectorPresent"] = true;
+                        d["DeviceName"] = @"\Device\" + guid; d["DeviceWakeUpEnable"] = false;
+                        d["DriverDescription"] = di.Desc; d["DriverProvider"] = di.Provider; d["DriverVersionString"] = di.Version;
+                        d["ComponentID"] = di.Component; d["PnPDeviceID"] = di.PnpId;
+                        d["EndPointInterface"] = false; d["HardwareInterface"] = true; d["Hidden"] = false; d["IMFilter"] = false;
+                        d["InterfaceAdminStatus"] = 2u; d["InterfaceIndex"] = 0u;
+                        d["InterfaceOperationalStatus"] = 2u; d["InterfaceType"] = 6u; d["iSCSIInterface"] = false;
+                        d["MediaConnectState"] = 0u; d["MediaDuplexState"] = 0u; d["MtuSize"] = 0u;
+                        d["NdisMedium"] = 0u; d["NdisPhysicalMedium"] = 0u;
+                        d["NotUserRemovable"] = false; d["PromiscuousMode"] = false; d["ReceiveLinkSpeed"] = 0UL; d["TransmitLinkSpeed"] = 0UL;
+                        d["Virtual"] = false; d["VlanID"] = (ushort)0; d["WdmInterface"] = false;
+                        d["Status"] = "Disabled"; d["LinkSpeed"] = "0 bps"; d["MediaType"] = MediaTypeName(0u); d["PhysicalMediaType"] = PhysicalMediaName(0u);
+                        d["AdminStatus"] = 2u; d["MediaConnectionState"] = 0u; d["ifOperStatus"] = 2u;
+                        d["_ifIndex"] = 0u; d["_ifType"] = 6u;
+                        res.Add(d);
+                    }
+                }
+            }
+            catch (Exception) { }
+            return res;
+        }
+
+        // mode 0 = disable, 1 = enable, 2 = restart (stop and start again). Returns a Win32 error, 0 = done.
+        // A device already in the wanted state is left alone (success, as on Windows).
+        public static uint SetAdapterState(string pnpId, int mode)
+        {
+            if (string.IsNullOrEmpty(pnpId)) return 87;
+            bool disabled = DeviceDisabled(pnpId);
+            if (mode == 0 && disabled) return 0;
+            if (mode == 1 && disabled == false) return 0;
+            if (mode == 2 && disabled) return 0;
+            Guid net = new Guid("4d36e972-e325-11ce-bfc1-08002be10318");
+            IntPtr set = SetupDiCreateDeviceInfoList(ref net, IntPtr.Zero);
+            if (set == new IntPtr(-1)) return (uint)Marshal.GetLastWin32Error();
+            try
+            {
+                SpDevinfoData data = new SpDevinfoData();
+                data.Size = (uint)Marshal.SizeOf(typeof(SpDevinfoData));
+                if (!SetupDiOpenDeviceInfoW(set, pnpId, IntPtr.Zero, 0, ref data)) return (uint)Marshal.GetLastWin32Error();
+                SpPropchangeParams p = new SpPropchangeParams();
+                p.HeaderSize = 8; p.InstallFunction = 0x12;                  // DIF_PROPERTYCHANGE
+                p.StateChange = mode == 0 ? 2u : mode == 1 ? 1u : 3u;        // DICS_DISABLE, DICS_ENABLE, DICS_PROPCHANGE
+                p.Scope = 1; p.HwProfile = 0;                                // DICS_FLAG_GLOBAL
+                if (!SetupDiSetClassInstallParamsW(set, ref data, ref p, (uint)Marshal.SizeOf(typeof(SpPropchangeParams)))) return (uint)Marshal.GetLastWin32Error();
+                if (!SetupDiCallClassInstaller(0x12, set, ref data))
+                {
+                    uint e = (uint)Marshal.GetLastWin32Error();
+                    return e != 0 ? e : 31;
+                }
+                return 0;
+            }
+            finally { SetupDiDestroyDeviceInfoList(set); }
         }
 
         // ---- NetAdapterStatistics

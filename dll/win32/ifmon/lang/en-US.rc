@@ -5,7 +5,13 @@ BEGIN
     IDS_INTERFACE_BANNER "In future versions of Windows, Microsoft might remove the Netsh functionality\nfor TCP/IP.\n\nMicrosoft recommends that you transition to Windows PowerShell if you currently\nuse netsh to configure and manage TCP/IP.\n\nType Get-Command -Module NetTCPIP at the Windows PowerShell prompt to view\na list of commands to manage TCP/IP.\n\nVisit https://go.microsoft.com/fwlink/?LinkId=217627 for additional information\nabout PowerShell commands for TCP/IP.\n"
     IDS_HLP_INTERFACE_SHOW "Displays information.\n"
     IDS_HLP_INTERFACE_SHOW_INTERFACE "Displays interfaces.\n"
-    IDS_HLP_INTERFACE_SHOW_INTERFACE_EX "\nUsage:\n"
+    IDS_HLP_INTERFACE_SHOW_INTERFACE_EX "\nUsage: show interface [[name=]<string>]\n\nParameters:\n\n      Tag             Value\n      name            - The name of a specific interface.\n\nRemarks: Displays the administrative state, the connection state and the type\n         of the interfaces, or of the one named.\n"
+    IDS_HLP_INTERFACE_SET "Sets configuration information.\n"
+    IDS_HLP_INTERFACE_SET_INTERFACE "Sets interface parameters.\n"
+    IDS_HLP_INTERFACE_SET_INTERFACE_EX "\nUsage set interface [name = ] IfName\n            [ [admin = ] ENABLED|DISABLED\n              [connect = ] CONNECTED|DISCONNECTED\n              [newname = ] NewName ]\n\n      Sets interface parameters.\n\n      IfName  - the name of the interface\n      admin   - whether the interface should be enabled\n      connect - whether to connect the interface (non-LAN only).\n      newname - new name for the interface (LAN only).\n\n      Notes:\n      - At least one option other than the name must be specified.\n      - If connect = CONNECTED is specified, then the interface\n        is automatically enabled even if the admin = DISABLED\n        option is specified.\n\nExamples:\n\n      set interface name=""Wired Ethernet Connection"" admin=DISABLED\n      set interface name=""Wired Ethernet Connection"" newname=""Connection 1""\n"
+    IDS_INTERFACE_SHOW_HEADER "\nAdmin State    State          Type             Interface Name\n-------------------------------------------------------------------------\n"
+    IDS_INTERFACE_SHOW_ROW "%1!-15s!%2!-15s!%3!-17s!%4!s!\n"
+    IDS_INTERFACE_SHOW_ONE "\n%1!-48s!\n   Type:                 %2!-22s!\n   Administrative state: %3!-22s!\n   Connect state:        %4!s!\n"
 
     IDS_HLP_IP_ADD "Adds a configuration entry to a table.\n"
     IDS_HLP_IP_ADD_ADDRESS     "Adds an IP address to the specified interface.\n"
@@ -276,6 +282,8 @@ Parameters:\n\n\
     IDS_DUMP_IP_FOOTER    "# End of Interface IP Configuration\n"
 
     IDS_ERROR_INVALID_INTERFACE  "\nInvalid interface %1!s! specified.\n"
+    IDS_ERROR_MISSING_PARAMETERS "One or more essential parameters not specified\n"
+    IDS_ERROR_NO_SUCH_INTERFACE "An interface with this name is not registered with the router.\n"
     IDS_ERROR_BAD_VALUE "\n%1!s! is not an acceptable value for %2!s!.\n"
     IDS_ERROR_ALREADY_DHCP "\nDhcp is already enabled on this interface.\n"
     IDS_ERROR_GET_PROPERTIES "\nError obtaining configuration for interface %1!s!.\n"
