@@ -69,6 +69,7 @@ list(APPEND SOURCE
     InitiateShutdown.c
     RegMaxValueDataLen.c
     RegHiveFiles.c
+    RegRestoreKey.c
     RegQueryInfoKey.c
     RegQueryValueExW.c
     RegQueryMultipleValues.c

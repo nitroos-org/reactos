@@ -75,6 +75,7 @@ extern void func_RegPerformanceData(void);
 extern void func_InitiateShutdown(void);
 extern void func_RegMaxValueDataLen(void);
 extern void func_RegHiveFiles(void);
+extern void func_RegRestoreKey(void);
 extern void func_RegQueryInfoKey(void);
 extern void func_RegQueryValueExW(void);
 extern void func_RegQueryMultipleValues(void);
@@ -222,6 +223,7 @@ const struct test winetest_testlist[] =
     { "RegLoadKeyZeroCell", func_RegLoadKeyZeroCell },
     { "RegMaxValueDataLen", func_RegMaxValueDataLen },
     { "RegHiveFiles", func_RegHiveFiles },
+    { "RegRestoreKey", func_RegRestoreKey },
     { "RegQueryInfoKey", func_RegQueryInfoKey },
     { "RegOpenKeyExW", func_RegOpenKeyExW },
     { "PerfProvider", func_PerfProvider },
