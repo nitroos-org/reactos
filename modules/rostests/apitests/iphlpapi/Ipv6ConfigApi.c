@@ -344,7 +344,8 @@ static void TestAddress(ULONG IfIndex)
     InitAddress(&Got, IfIndex, "2001:db8:9b::7");
     Error = pGetUnicastIpAddressEntry(&Got);
     ok(Error == NO_ERROR, "get: %lu\n", Error);
-    ok(Got.OnLinkPrefixLength == 64, "prefix length %u\n", Got.OnLinkPrefixLength);
+    /* InitializeUnicastIpAddressEntry leaves the length at 255: Windows makes a /128 of it */
+    ok(Got.OnLinkPrefixLength == 128, "prefix length %u\n", Got.OnLinkPrefixLength);
     ok(Got.PrefixOrigin == ORIGIN_MANUAL && Got.SuffixOrigin == ORIGIN_MANUAL, "origins %lu %lu\n",
        Got.PrefixOrigin, Got.SuffixOrigin);
     ok(Got.ValidLifetime == 0xffffffff, "valid lifetime %lx\n", Got.ValidLifetime);
@@ -359,7 +360,7 @@ static void TestAddress(ULONG IfIndex)
     InitAddress(&Got, IfIndex, "2001:db8:9b::7");
     Error = pGetUnicastIpAddressEntry(&Got);
     ok(Error == NO_ERROR && Got.SkipAsSource, "get after the change: %lu skip %u\n", Error, Got.SkipAsSource);
-    ok(Got.OnLinkPrefixLength == 64 && Got.PrefixOrigin == ORIGIN_MANUAL, "length %u origin %lu\n",
+    ok(Got.OnLinkPrefixLength == 128 && Got.PrefixOrigin == ORIGIN_MANUAL, "length %u origin %lu\n",
        Got.OnLinkPrefixLength, Got.PrefixOrigin);
 
     Error = pDeleteUnicastIpAddressEntry(&Row);
@@ -368,6 +369,338 @@ static void TestAddress(ULONG IfIndex)
     ok(Error == ERROR_NOT_FOUND, "delete again: %lu\n", Error);
     Error = pGetUnicastIpAddressEntry(&Got);
     ok(Error == ERROR_NOT_FOUND, "get after the delete: %lu\n", Error);
+}
+
+/*
+ * The checks of the fields of an address row and a route row. The answers were measured on Windows Server 2022
+ * (a throwaway VM; the rows were added and removed again): an origin is a 4-bit value (16, Unchanged, for both
+ * origins or none) and a change never changes the origins; SkipAsSource 255 is "not given"; a length of 255 is a
+ * /128 on a creation; a metric has 31 bits; Publish and Immortal are true for 1 only; Origin and Loopback are
+ * ignored; the site prefix length is 0 or 255; a prefix with bits after its length is refused; a preferred lifetime
+ * over the valid one is refused.
+ */
+#define E_INVALID   ERROR_INVALID_PARAMETER
+
+/* What an origin reads back as: 8..15 sit in a signed 4-bit field */
+static ULONG StoredOrigin(ULONG Origin)
+{
+    return (Origin >= 8 && Origin <= 15) ? (Origin | 0xfffffff0) : Origin;
+}
+
+static void TestAddressFields(ULONG IfIndex)
+{
+    static const struct { ULONG Prefix, Suffix; DWORD Error; } Pairs[] =
+    {
+        { 16, 16, NO_ERROR }, { 1, 16, E_INVALID }, { 16, 1, E_INVALID }, { 0, 16, E_INVALID }, { 0xffffffff, 16, E_INVALID },
+        { 17, 17, E_INVALID }, { 100, 1, E_INVALID }, { 1, 100, E_INVALID }, { 17, 1, E_INVALID }, { 1, 17, E_INVALID },
+        { 4, 5, E_INVALID }, { 1, 5, NO_ERROR }, { 0, 0, NO_ERROR }, { 3, 3, NO_ERROR }, { 4, 4, NO_ERROR },
+        { 5, 5, NO_ERROR }, { 15, 1, NO_ERROR }, { 1, 15, NO_ERROR }, { 8, 9, NO_ERROR }, { 0xffffffff, 1, NO_ERROR },
+        { 1, 0xffffffff, NO_ERROR }, { 7, 6, NO_ERROR },
+    };
+    UNICAST_ROW6 Row, Got;
+    DWORD Error;
+    ULONG i;
+    int k;
+
+    for (i = 0; i < sizeof(Pairs) / sizeof(Pairs[0]); i++)
+    {
+        InitAddress(&Row, IfIndex, "2001:db8:9b::20");
+        Row.PrefixOrigin = Pairs[i].Prefix;
+        Row.SuffixOrigin = Pairs[i].Suffix;
+        Error = pCreateUnicastIpAddressEntry(&Row);
+        ok(Error == Pairs[i].Error, "create, origins %lu/%lu: %lu\n", Pairs[i].Prefix, Pairs[i].Suffix, Error);
+        if (Error != NO_ERROR)
+            continue;
+        InitAddress(&Got, IfIndex, "2001:db8:9b::20");
+        Error = pGetUnicastIpAddressEntry(&Got);
+        ok(Error == NO_ERROR, "get: %lu\n", Error);
+        if (Pairs[i].Prefix == 16)
+            ok(Got.PrefixOrigin == ORIGIN_MANUAL && Got.SuffixOrigin == ORIGIN_MANUAL, "unchanged origins read %lu/%lu\n",
+               Got.PrefixOrigin, Got.SuffixOrigin);
+        else
+            /* a suffix origin of -1 makes the prefix origin read -1 too (measured on Windows) */
+            ok(Got.PrefixOrigin == (Pairs[i].Suffix == 0xffffffff ? 0xffffffff : StoredOrigin(Pairs[i].Prefix)) &&
+               Got.SuffixOrigin == StoredOrigin(Pairs[i].Suffix),
+               "origins %lu/%lu read %lx/%lx\n", Pairs[i].Prefix, Pairs[i].Suffix, Got.PrefixOrigin, Got.SuffixOrigin);
+        Error = pDeleteUnicastIpAddressEntry(&Row);
+        ok(Error == NO_ERROR, "delete: %lu\n", Error);
+    }
+
+    /* a change is checked like a creation, and changes no origin */
+    InitAddress(&Row, IfIndex, "2001:db8:9b::21");
+    Error = pCreateUnicastIpAddressEntry(&Row);
+    ok(Error == NO_ERROR, "create: %lu\n", Error);
+    if (Error == NO_ERROR)
+    {
+        for (i = 0; i < sizeof(Pairs) / sizeof(Pairs[0]); i++)
+        {
+            InitAddress(&Row, IfIndex, "2001:db8:9b::21");
+            Row.PrefixOrigin = Pairs[i].Prefix;
+            Row.SuffixOrigin = Pairs[i].Suffix;
+            Error = pSetUnicastIpAddressEntry(&Row);
+            ok(Error == Pairs[i].Error, "set, origins %lu/%lu: %lu\n", Pairs[i].Prefix, Pairs[i].Suffix, Error);
+        }
+        InitAddress(&Got, IfIndex, "2001:db8:9b::21");
+        Error = pGetUnicastIpAddressEntry(&Got);
+        ok(Error == NO_ERROR && Got.PrefixOrigin == ORIGIN_MANUAL && Got.SuffixOrigin == ORIGIN_MANUAL,
+           "origins after the changes: %lu %lu/%lu\n", Error, Got.PrefixOrigin, Got.SuffixOrigin);
+        pDeleteUnicastIpAddressEntry(&Row);
+    }
+
+    /* SkipAsSource: 255 is not given (false when creating, unchanged when changing), the others are true */
+    for (k = 0; k < 2; k++)
+    {
+        static const UCHAR Skip[] = { 255, 2 };
+
+        InitAddress(&Row, IfIndex, "2001:db8:9b::22");
+        Row.SkipAsSource = Skip[k];
+        Error = pCreateUnicastIpAddressEntry(&Row);
+        ok(Error == NO_ERROR, "create, skip %u: %lu\n", Skip[k], Error);
+        InitAddress(&Got, IfIndex, "2001:db8:9b::22");
+        Error = pGetUnicastIpAddressEntry(&Got);
+        ok(Error == NO_ERROR && Got.SkipAsSource == (k == 1), "skip %u created as %u\n", Skip[k], Got.SkipAsSource);
+        if (k == 1)
+        {
+            Row.SkipAsSource = 255;
+            Error = pSetUnicastIpAddressEntry(&Row);
+            InitAddress(&Got, IfIndex, "2001:db8:9b::22");
+            ok(Error == NO_ERROR && pGetUnicastIpAddressEntry(&Got) == NO_ERROR && Got.SkipAsSource,
+               "skip 255 on a change: %lu\n", Error);
+            Row.SkipAsSource = 0;
+            Error = pSetUnicastIpAddressEntry(&Row);
+            InitAddress(&Got, IfIndex, "2001:db8:9b::22");
+            ok(Error == NO_ERROR && pGetUnicastIpAddressEntry(&Got) == NO_ERROR && !Got.SkipAsSource,
+               "skip 0 on a change: %lu\n", Error);
+            Row.SkipAsSource = 2;
+            Error = pSetUnicastIpAddressEntry(&Row);
+            InitAddress(&Got, IfIndex, "2001:db8:9b::22");
+            ok(Error == NO_ERROR && pGetUnicastIpAddressEntry(&Got) == NO_ERROR && Got.SkipAsSource == TRUE,
+               "skip 2 on a change: %lu\n", Error);
+        }
+        pDeleteUnicastIpAddressEntry(&Row);
+    }
+
+    /* the prefix length: 255 on a change is the length the address has */
+    InitAddress(&Row, IfIndex, "2001:db8:9b::23");
+    Row.OnLinkPrefixLength = 100;
+    Error = pCreateUnicastIpAddressEntry(&Row);
+    ok(Error == NO_ERROR, "create /100: %lu\n", Error);
+    Row.OnLinkPrefixLength = 255;
+    Error = pSetUnicastIpAddressEntry(&Row);
+    InitAddress(&Got, IfIndex, "2001:db8:9b::23");
+    ok(Error == NO_ERROR && pGetUnicastIpAddressEntry(&Got) == NO_ERROR && Got.OnLinkPrefixLength == 100,
+       "length 255 on a change: %lu /%u\n", Error, Got.OnLinkPrefixLength);
+    Row.OnLinkPrefixLength = 129;
+    Error = pSetUnicastIpAddressEntry(&Row);
+    ok(Error == E_INVALID, "length 129 on a change: %lu\n", Error);
+    pDeleteUnicastIpAddressEntry(&Row);
+
+    /* lifetimes */
+    InitAddress(&Row, IfIndex, "2001:db8:9b::24");
+    Row.ValidLifetime = 100;
+    Row.PreferredLifetime = 101;
+    Error = pCreateUnicastIpAddressEntry(&Row);
+    ok(Error == E_INVALID, "preferred over valid: %lu\n", Error);
+    Row.ValidLifetime = 0;
+    Row.PreferredLifetime = 1;
+    Error = pCreateUnicastIpAddressEntry(&Row);
+    ok(Error == E_INVALID, "valid 0, preferred 1: %lu\n", Error);
+    Row.ValidLifetime = 100;
+    Row.PreferredLifetime = 100;
+    Error = pCreateUnicastIpAddressEntry(&Row);
+    ok(Error == NO_ERROR, "valid 100, preferred 100: %lu\n", Error);
+    pDeleteUnicastIpAddressEntry(&Row);
+
+    /* a valid lifetime of 0 (with a preferred one of 0) is taken, and the address is gone a moment later */
+    Row.ValidLifetime = 0;
+    Row.PreferredLifetime = 0;
+    Error = pCreateUnicastIpAddressEntry(&Row);
+    ok(Error == NO_ERROR, "valid 0, preferred 0: %lu\n", Error);
+    if (Error == NO_ERROR)
+    {
+        for (k = 0; k < 12; k++)
+        {
+            Sleep(500);
+            InitAddress(&Got, IfIndex, "2001:db8:9b::24");
+            if (pGetUnicastIpAddressEntry(&Got) == ERROR_NOT_FOUND)
+                break;
+        }
+        ok(k < 12, "an address with a valid lifetime of 0 is still there after 6 s\n");
+        pDeleteUnicastIpAddressEntry(&Row);
+    }
+}
+
+static void InitFieldRoute(ROUTE_ROW6 *Route, ULONG IfIndex)
+{
+    InitRoute(Route, IfIndex, "2001:db8:9e::", 48, NULL);
+}
+
+static void TestRouteFields(ULONG IfIndex)
+{
+    static const struct { ULONG Metric; DWORD Error; ULONG Read; } Metrics[] =
+    {
+        { 0, NO_ERROR, 0 }, { 1, NO_ERROR, 1 }, { 9999, NO_ERROR, 9999 }, { 10000, NO_ERROR, 10000 },
+        { 0x7fffffff, NO_ERROR, 0x7fffffff }, { 0x80000000, E_INVALID, 0 }, { 0xfffffffe, E_INVALID, 0 },
+        { 0xffffffff, NO_ERROR, 256 },
+    };
+    static const struct { ULONG Protocol, Read; } Protocols[] =
+    {
+        { 0, 0 }, { 1, 1 }, { 2, 2 }, { 3, 3 }, { 14, 14 }, { 100, 100 }, { 10002, 10002 }, { 0x7fffffff, 0x7fffffff },
+        { 0xffffffff, 3 },
+    };
+    static const UCHAR Flags[] = { 0, 1, 2, 255 };
+    static const UCHAR Sites[] = { 1, 64, 128, 129, 254 };
+    ROUTE_ROW6 Route, Got;
+    DWORD Error;
+    ULONG i;
+    int k;
+
+    for (i = 0; i < sizeof(Metrics) / sizeof(Metrics[0]); i++)
+    {
+        InitFieldRoute(&Route, IfIndex);
+        Route.Metric = Metrics[i].Metric;
+        Error = pCreateIpForwardEntry2(&Route);
+        ok(Error == Metrics[i].Error, "metric %lx: %lu\n", Metrics[i].Metric, Error);
+        if (Error == NO_ERROR)
+        {
+            InitFieldRoute(&Got, IfIndex);
+            ok(pGetIpForwardEntry2(&Got) == NO_ERROR && Got.Metric == Metrics[i].Read, "metric %lx read %lu\n",
+               Metrics[i].Metric, Got.Metric);
+            pDeleteIpForwardEntry2(&Route);
+        }
+    }
+    /* a change: the same limit */
+    InitFieldRoute(&Route, IfIndex);
+    Error = pCreateIpForwardEntry2(&Route);
+    ok(Error == NO_ERROR, "create: %lu\n", Error);
+    Route.Metric = 0x80000000;
+    Error = pSetIpForwardEntry2(&Route);
+    ok(Error == E_INVALID, "change to metric 0x80000000: %lu\n", Error);
+    Route.Metric = 0x7fffffff;
+    Error = pSetIpForwardEntry2(&Route);
+    ok(Error == NO_ERROR, "change to metric 0x7fffffff: %lu\n", Error);
+    pDeleteIpForwardEntry2(&Route);
+
+    for (i = 0; i < sizeof(Protocols) / sizeof(Protocols[0]); i++)
+    {
+        InitFieldRoute(&Route, IfIndex);
+        Route.Protocol = Protocols[i].Protocol;
+        Error = pCreateIpForwardEntry2(&Route);
+        ok(Error == NO_ERROR, "protocol %lx: %lu\n", Protocols[i].Protocol, Error);
+        InitFieldRoute(&Got, IfIndex);
+        ok(pGetIpForwardEntry2(&Got) == NO_ERROR && Got.Protocol == Protocols[i].Read, "protocol %lx read %lu\n",
+           Protocols[i].Protocol, Got.Protocol);
+        pDeleteIpForwardEntry2(&Route);
+    }
+
+    /* origin and loopback are ignored (read back as 0); the flags: Publish and Immortal are true for 1 only,
+       AutoconfigureAddress is true for 1 and 255 (not given) */
+    for (k = 0; k < 4; k++)
+    {
+        InitFieldRoute(&Route, IfIndex);
+        Route.Origin = k == 3 ? 100 : k;
+        Route.Loopback = Flags[k];
+        Route.Publish = Flags[k];
+        Route.Immortal = Flags[k];
+        Route.AutoconfigureAddress = Flags[k];
+        Error = pCreateIpForwardEntry2(&Route);
+        ok(Error == NO_ERROR, "flags %u: %lu\n", Flags[k], Error);
+        InitFieldRoute(&Got, IfIndex);
+        ok(pGetIpForwardEntry2(&Got) == NO_ERROR, "get\n");
+        ok(Got.Origin == 0 && Got.Loopback == 0, "origin %lu loopback %u\n", Got.Origin, Got.Loopback);
+        ok(Got.Publish == (Flags[k] == 1) && Got.Immortal == (Flags[k] == 1), "flags %u read publish %u immortal %u\n",
+           Flags[k], Got.Publish, Got.Immortal);
+        ok(Got.AutoconfigureAddress == (Flags[k] == 1 || Flags[k] == 255), "flags %u read autoconfigure %u\n",
+           Flags[k], Got.AutoconfigureAddress);
+        pDeleteIpForwardEntry2(&Route);
+    }
+
+    /* the site prefix length is 0 or 255 */
+    for (i = 0; i < sizeof(Sites) / sizeof(Sites[0]); i++)
+    {
+        InitFieldRoute(&Route, IfIndex);
+        Route.SitePrefixLength = Sites[i];
+        Error = pCreateIpForwardEntry2(&Route);
+        ok(Error == E_INVALID, "site prefix length %u: %lu\n", Sites[i], Error);
+        if (Error == NO_ERROR)
+            pDeleteIpForwardEntry2(&Route);
+    }
+    InitFieldRoute(&Route, IfIndex);
+    Route.SitePrefixLength = 0;
+    Error = pCreateIpForwardEntry2(&Route);
+    ok(Error == NO_ERROR, "site prefix length 0: %lu\n", Error);
+    Route.SitePrefixLength = 64;
+    Error = pSetIpForwardEntry2(&Route);
+    ok(Error == E_INVALID, "change to site prefix length 64: %lu\n", Error);
+    pDeleteIpForwardEntry2(&Route);
+
+    /* lifetimes: a valid lifetime of 0 is taken (the route lasts) */
+    InitFieldRoute(&Route, IfIndex);
+    Route.ValidLifetime = 100;
+    Route.PreferredLifetime = 101;
+    Error = pCreateIpForwardEntry2(&Route);
+    ok(Error == E_INVALID, "preferred over valid: %lu\n", Error);
+    Route.ValidLifetime = 0;
+    Route.PreferredLifetime = 1;
+    Error = pCreateIpForwardEntry2(&Route);
+    ok(Error == E_INVALID, "valid 0, preferred 1: %lu\n", Error);
+    Route.PreferredLifetime = 0;
+    Error = pCreateIpForwardEntry2(&Route);
+    ok(Error == NO_ERROR, "valid 0, preferred 0: %lu\n", Error);
+    Sleep(2500);
+    InitFieldRoute(&Got, IfIndex);
+    Error = pGetIpForwardEntry2(&Got);
+    ok(Error == NO_ERROR, "a route with a valid lifetime of 0 is gone: %lu\n", Error);
+    pDeleteIpForwardEntry2(&Route);
+
+    /* bits after the prefix length: creation, change and removal refuse them, a lookup finds nothing */
+    InitRoute(&Route, IfIndex, "2001:db8:9e::1", 48, NULL);
+    Error = pCreateIpForwardEntry2(&Route);
+    ok(Error == E_INVALID, "create with host bits: %lu\n", Error);
+    Error = pSetIpForwardEntry2(&Route);
+    ok(Error == E_INVALID, "change with host bits: %lu\n", Error);
+    Error = pDeleteIpForwardEntry2(&Route);
+    ok(Error == E_INVALID, "removal with host bits: %lu\n", Error);
+    Error = pGetIpForwardEntry2(&Route);
+    ok(Error == ERROR_NOT_FOUND, "lookup with host bits: %lu\n", Error);
+    InitFieldRoute(&Got, IfIndex);
+    Error = pCreateIpForwardEntry2(&Got);
+    ok(Error == NO_ERROR, "create: %lu\n", Error);
+    InitRoute(&Route, IfIndex, "2001:db8:9e::1", 48, NULL);
+    Error = pGetIpForwardEntry2(&Route);
+    ok(Error == ERROR_NOT_FOUND, "lookup of the route with host bits: %lu\n", Error);
+    Error = pSetIpForwardEntry2(&Route);
+    ok(Error == E_INVALID, "change of the route with host bits: %lu\n", Error);
+    Error = pDeleteIpForwardEntry2(&Route);
+    ok(Error == E_INVALID, "removal of the route with host bits: %lu\n", Error);
+    Error = pDeleteIpForwardEntry2(&Got);
+    ok(Error == NO_ERROR, "delete: %lu\n", Error);
+
+    /* the same checks for an IPv4 row (all of them come before the stack is asked) */
+    InitFieldRoute(&Route, IfIndex);
+    Route.DestinationPrefix.Prefix.si_family = AF_INET;
+    Route.DestinationPrefix.Prefix.Ipv4.sin_addr.s_addr = inet_addr("198.51.100.1");
+    Route.DestinationPrefix.PrefixLength = 24;
+    Route.NextHop.si_family = AF_UNSPEC;
+    Error = pCreateIpForwardEntry2(&Route);
+    ok(Error == E_INVALID, "IPv4 create with host bits: %lu\n", Error);
+    Error = pSetIpForwardEntry2(&Route);
+    ok(Error == E_INVALID, "IPv4 change with host bits: %lu\n", Error);
+    Error = pDeleteIpForwardEntry2(&Route);
+    ok(Error == E_INVALID, "IPv4 removal with host bits: %lu\n", Error);
+    Route.DestinationPrefix.Prefix.Ipv4.sin_addr.s_addr = inet_addr("198.51.100.0");
+    Route.Metric = 0x80000000;
+    Error = pCreateIpForwardEntry2(&Route);
+    ok(Error == E_INVALID, "IPv4 metric 0x80000000: %lu\n", Error);
+    Route.Metric = 0xffffffff;
+    Route.SitePrefixLength = 64;
+    Error = pCreateIpForwardEntry2(&Route);
+    ok(Error == E_INVALID, "IPv4 site prefix length 64: %lu\n", Error);
+    Route.SitePrefixLength = 255;
+    Route.ValidLifetime = 100;
+    Route.PreferredLifetime = 101;
+    Error = pCreateIpForwardEntry2(&Route);
+    ok(Error == E_INVALID, "IPv4 preferred over valid: %lu\n", Error);
 }
 
 START_TEST(Ipv6ConfigApi)
@@ -436,5 +769,7 @@ START_TEST(Ipv6ConfigApi)
     TestRoute(IfIndex);
     TestAddressInvalid(IfIndex);
     TestAddress(IfIndex);
+    TestAddressFields(IfIndex);
+    TestRouteFields(IfIndex);
     WSACleanup();
 }
