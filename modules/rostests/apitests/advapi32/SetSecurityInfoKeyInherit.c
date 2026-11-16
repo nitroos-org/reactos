@@ -1255,6 +1255,357 @@ Done:
     RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
 }
 
+/*
+ * Propagation at the edges of the tree (measured on Windows Server 2022, scratch keys, the caller an administrator):
+ *  - a hive root passes its DACL on to its subkeys, and takes the inheritable ACEs of the root of its class;
+ *  - a key whose parent cannot be read still becomes auto-inherited and passes its DACL on, but inherits nothing;
+ *  - a subkey closed to the caller is skipped with its subtree, the call succeeds and the siblings are updated.
+ * The last two need a key the caller cannot open, which a system that does not enforce key security cannot make:
+ * they skip there.
+ */
+static BOOL EnableRestorePrivileges(BOOL Enable)
+{
+    static const PCWSTR Names[] = {L"SeBackupPrivilege", L"SeRestorePrivilege", L"SeTakeOwnershipPrivilege"};
+    HANDLE Token;
+    TOKEN_PRIVILEGES Privileges;
+    BOOL Ok = TRUE;
+    ULONG i;
+
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &Token))
+        return FALSE;
+    for (i = 0; i < ARRAYSIZE(Names); i++)
+    {
+        Privileges.PrivilegeCount = 1;
+        Privileges.Privileges[0].Attributes = Enable ? SE_PRIVILEGE_ENABLED : 0;
+        if (!LookupPrivilegeValueW(NULL, Names[i], &Privileges.Privileges[0].Luid))
+        {
+            Ok = FALSE;
+            continue;
+        }
+        SetLastError(ERROR_SUCCESS);
+        AdjustTokenPrivileges(Token, FALSE, &Privileges, 0, NULL, NULL);
+        if (GetLastError() != ERROR_SUCCESS)
+            Ok = FALSE;
+    }
+    CloseHandle(Token);
+    return Ok;
+}
+
+/* The owner and DACL of a key by SDDL with backup/restore semantics (the key may be closed to the caller) */
+static BOOL RestoreSddl(HKEY Root, PCWSTR Path, SECURITY_INFORMATION Info, PCWSTR Sddl)
+{
+    PSECURITY_DESCRIPTOR Sd = NULL;
+    HKEY Key;
+    DWORD Error;
+
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(Sddl, SDDL_REVISION_1, &Sd, NULL))
+        return FALSE;
+    EnableRestorePrivileges(TRUE);
+    Error = RegOpenKeyExW(Root, Path, REG_OPTION_BACKUP_RESTORE, WRITE_DAC | WRITE_OWNER | READ_CONTROL, &Key);
+    if (Error == ERROR_SUCCESS)
+    {
+        Error = RegSetKeySecurity(Key, Info, Sd);
+        RegCloseKey(Key);
+    }
+    EnableRestorePrivileges(FALSE);
+    LocalFree(Sd);
+    return Error == ERROR_SUCCESS;
+}
+
+/* Hand the keys back to Administrators so that they can be deleted */
+static void RestoreKeys(HKEY Root, PCWSTR Base, const PCWSTR *Names, ULONG Count)
+{
+    WCHAR Path[300];
+    ULONG i;
+
+    for (i = 0; i < Count; i++)
+    {
+        wsprintfW(Path, L"%ls\\%ls", Base, Names[i]);
+        RestoreSddl(Root, Path, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, L"O:BAD:P(A;;KA;;;BA)(A;;KA;;;SY)");
+    }
+}
+
+static BOOL KeyOpens(HKEY Root, PCWSTR Path, REGSAM Access)
+{
+    HKEY Key;
+
+    if (RegOpenKeyExW(Root, Path, 0, Access, &Key) != ERROR_SUCCESS)
+        return FALSE;
+    RegCloseKey(Key);
+    return TRUE;
+}
+
+static BOOL OpenSubkey(PCWSTR Name, HKEY Parent, HKEY *Key)
+{
+    return RegOpenKeyExW(Parent, Name, 0, KEY_ALL_ACCESS, Key) == ERROR_SUCCESS;
+}
+
+static void TestHiveRoot(void)
+{
+    static const WCHAR HiveName[] = L"ReactOSApitestHiveMt";
+    static const WCHAR Source[] = L"Software\\ReactOS-apitest-SetSecurityInfoKeyInherit\\src";
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    PSID Auth = NULL;
+    WCHAR File[MAX_PATH];
+    HKEY Src = NULL, SrcKid = NULL, Hive = NULL, H1 = NULL, G = NULL, H2 = NULL;
+    KEY_DACL Before, Root, K1, K1g, K2;
+    BOOL Loaded = FALSE;
+    DWORD Error;
+    ULONG i;
+
+    AllocateAndInitializeSid(&NtAuthority, 1, SECURITY_AUTHENTICATED_USER_RID, 0, 0, 0, 0, 0, 0, 0, &Auth);
+    GetTempPathW(ARRAYSIZE(File), File);
+    lstrcatW(File, L"ros-apitest-hive-mt.hiv");
+    DeleteFileW(File);
+    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+
+    Error = RegCreateKeyExW(HKEY_CURRENT_USER, Source, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &Src, NULL);
+    ok_long(Error, ERROR_SUCCESS);
+    if (Error || !Auth || !MakeKey(Src, L"h1", 0, &SrcKid))
+        goto Done;
+    RegCloseKey(SrcKid);
+    if (!MakeKey(Src, L"h1\\g", 0, &SrcKid))
+        goto Done;
+    RegCloseKey(SrcKid);
+    if (!MakeKey(Src, L"h2", 0, &SrcKid))
+        goto Done;
+    RegCloseKey(SrcKid);
+
+    EnableRestorePrivileges(TRUE);
+    Error = RegSaveKeyW(Src, File, NULL);
+    if (Error == ERROR_SUCCESS)
+    {
+        RegUnLoadKeyW(HKEY_LOCAL_MACHINE, HiveName);
+        Error = RegLoadKeyW(HKEY_LOCAL_MACHINE, HiveName, File);
+        Loaded = Error == ERROR_SUCCESS;
+    }
+    EnableRestorePrivileges(FALSE);
+    if (!Loaded)
+    {
+        skip("cannot save and load a scratch hive: %lu\n", Error);
+        goto Done;
+    }
+
+    Error = RegOpenKeyExW(HKEY_LOCAL_MACHINE, HiveName, 0, KEY_ALL_ACCESS, &Hive);
+    ok_long(Error, ERROR_SUCCESS);
+    if (Error)
+        goto Done;
+    if (!OpenSubkey(L"h1", Hive, &H1) || !OpenSubkey(L"h1\\g", Hive, &G) || !OpenSubkey(L"h2", Hive, &H2))
+    {
+        skip("the loaded hive has not got its keys\n");
+        goto Done;
+    }
+
+    /* the subkeys are auto-inherited, as an application leaves them */
+    ok(SetSddlDacl(H1, UNPROTECTED_DACL_SECURITY_INFORMATION, L"D:"), "h1\n");
+    ok(SetSddlDacl(G, UNPROTECTED_DACL_SECURITY_INFORMATION, L"D:"), "g\n");
+    ok(SetSddlDacl(H2, UNPROTECTED_DACL_SECURITY_INFORMATION, L"D:"), "h2\n");
+    ReadDacl(H1, &Before);
+    ok(!HasAce(&Before, Auth, KEY_READ), "h1 has the ACE already\n");
+
+    /* the root of the hive: its own ACEs, then what the root of HKLM passes on; the subkeys follow */
+    if (!SetSddlDacl(Hive, UNPROTECTED_DACL_SECURITY_INFORMATION, L"D:(A;CI;KA;;;BA)(A;CI;KA;;;SY)(A;CI;KR;;;AU)"))
+        goto Done;
+    ReadDacl(Hive, &Root);
+    ok_hex(Root.Control, AUTO_CONTROL);
+    ok(Root.Count > 3, "hive root: %lu ACEs, the explicit three only\n", Root.Count);
+    for (i = 3; i < Root.Count; i++)
+        ok(Root.Aces[i].Flags & INHERITED_ACE, "hive root: ACE %lu has flags 0x%x\n", i, Root.Aces[i].Flags);
+    ReadDacl(H1, &K1);
+    ReadDacl(G, &K1g);
+    ReadDacl(H2, &K2);
+    ok_hex(K1.Control, AUTO_CONTROL);
+    ok(HasAce(&K1, Auth, KEY_READ), "the ACE did not reach h1\n");
+    ok(HasAce(&K1g, Auth, KEY_READ), "the ACE did not reach h1\\g\n");
+    ok(HasAce(&K2, Auth, KEY_READ), "the ACE did not reach h2\n");
+    ok(AllInherited(&K1) && AllInherited(&K1g) && AllInherited(&K2), "a subkey has an ACE that is not inherited\n");
+    FreeDacl(&K2);
+    FreeDacl(&K1g);
+    FreeDacl(&K1);
+    FreeDacl(&Root);
+    FreeDacl(&Before);
+
+Done:
+    if (H2) RegCloseKey(H2);
+    if (G) RegCloseKey(G);
+    if (H1) RegCloseKey(H1);
+    if (Hive) RegCloseKey(Hive);
+    if (Loaded)
+    {
+        EnableRestorePrivileges(TRUE);
+        RegUnLoadKeyW(HKEY_LOCAL_MACHINE, HiveName);
+        EnableRestorePrivileges(FALSE);
+    }
+    if (Src) RegCloseKey(Src);
+    DeleteFileW(File);
+    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    if (Auth) FreeSid(Auth);
+}
+
+static void TestUnreadableParent(void)
+{
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    PSID Auth = NULL;
+    WCHAR Parent[300];
+    HKEY Scratch = NULL, Up = NULL, K = NULL, G = NULL, H = NULL;
+    KEY_DACL Dk, Dg, Dh;
+    DWORD Error;
+
+    AllocateAndInitializeSid(&NtAuthority, 1, SECURITY_AUTHENTICATED_USER_RID, 0, 0, 0, 0, 0, 0, 0, &Auth);
+    wsprintfW(Parent, L"%ls\\U", ScratchPath);
+    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    Error = RegCreateKeyExW(HKEY_CURRENT_USER, ScratchPath, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &Scratch, NULL);
+    ok_long(Error, ERROR_SUCCESS);
+    if (Error || !Auth || !MakeKey(Scratch, L"U", 0, &Up))
+        goto Done;
+    ok(SetSddlDacl(Up, UNPROTECTED_DACL_SECURITY_INFORMATION, L"D:(A;CI;KA;;;SY)(A;CI;KA;;;BA)(A;CI;KR;;;WD)"), "U\n");
+    if (!MakeKey(Up, L"K", 0, &K) || !MakeKey(K, L"g", 0, &G) || !MakeKey(G, L"h", 0, &H))
+        goto Done;
+    ok(SetSddlDacl(K, UNPROTECTED_DACL_SECURITY_INFORMATION, L"D:"), "K\n");
+    ok(SetSddlDacl(G, UNPROTECTED_DACL_SECURITY_INFORMATION, L"D:"), "g\n");
+    ok(SetSddlDacl(H, UNPROTECTED_DACL_SECURITY_INFORMATION, L"D:"), "h\n");
+
+    /* U now belongs to LOCAL SERVICE and lets only it and SYSTEM in */
+    RegCloseKey(Up);
+    Up = NULL;
+    if (!RestoreSddl(HKEY_CURRENT_USER, Parent, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                     L"O:LSD:P(A;CI;KA;;;SY)(A;CI;KA;;;LS)(A;;KA;;;LS)(A;;KA;;;SY)") ||
+        KeyOpens(HKEY_CURRENT_USER, Parent, READ_CONTROL))
+    {
+        skip("a key cannot be shut away from the caller on this system (key security is not enforced)\n");
+        goto Done;
+    }
+
+    /* the parent cannot be read: the key keeps its own ACEs, is auto-inherited, and its subkeys follow */
+    ok(SetSddlDacl(K, UNPROTECTED_DACL_SECURITY_INFORMATION, L"D:(A;CI;KA;;;SY)(A;CI;KA;;;BA)(A;CI;KR;;;AU)"), "set K\n");
+    ReadDacl(K, &Dk);
+    ReadDacl(G, &Dg);
+    ReadDacl(H, &Dh);
+    ok_hex(Dk.Control, AUTO_CONTROL);
+    ok(Dk.Count == 3, "K: %lu ACEs, expected its three explicit ones\n", Dk.Count);
+    ok_hex(Dg.Control, AUTO_CONTROL);
+    ok(Dg.Count == 3 && AllInherited(&Dg) && HasAce(&Dg, Auth, KEY_READ), "g: %lu ACEs\n", Dg.Count);
+    ok(Dh.Count == 3 && AllInherited(&Dh) && HasAce(&Dh, Auth, KEY_READ), "h: %lu ACEs\n", Dh.Count);
+    FreeDacl(&Dh);
+    FreeDacl(&Dg);
+    FreeDacl(&Dk);
+
+    /* protected: the key says it is protected and auto-inherited, the subkeys still follow */
+    ok(SetSddlDacl(K, PROTECTED_DACL_SECURITY_INFORMATION, L"D:(A;CI;KA;;;SY)(A;CI;KA;;;BA)(A;CI;KR;;;WD)"), "protect K\n");
+    ReadDacl(K, &Dk);
+    ReadDacl(G, &Dg);
+    ok_hex(Dk.Control, AUTO_CONTROL | SE_DACL_PROTECTED);
+    ok(Dg.Count == 3 && AllInherited(&Dg) && !HasAce(&Dg, Auth, KEY_READ), "g after protect: %lu ACEs\n", Dg.Count);
+    FreeDacl(&Dg);
+    FreeDacl(&Dk);
+
+Done:
+    {
+        WCHAR Base[300];
+
+        wsprintfW(Base, L"%ls\\U", ScratchPath);
+        RestoreSddl(HKEY_CURRENT_USER, Base, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, L"O:BAD:P(A;;KA;;;BA)(A;;KA;;;SY)");
+    }
+    if (H) RegCloseKey(H);
+    if (G) RegCloseKey(G);
+    if (K) RegCloseKey(K);
+    if (Up) RegCloseKey(Up);
+    if (Scratch) RegCloseKey(Scratch);
+    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    if (Auth) FreeSid(Auth);
+}
+
+static void TestClosedSubkey(void)
+{
+    static const PCWSTR Kids[] = {L"a1", L"a1\\g", L"b1", L"b1\\g", L"b2", L"b2\\g", L"c1", L"c1\\g"};
+    static const PCWSTR Locked[] = {L"T\\b1"};
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    PSID Auth = NULL;
+    WCHAR Path[320];
+    HKEY Scratch = NULL, T = NULL, Key = NULL, B1 = NULL, B2 = NULL;
+    KEY_DACL D;
+    DWORD Error;
+    ULONG i;
+    BOOL Reads[8];
+
+    AllocateAndInitializeSid(&NtAuthority, 1, SECURITY_AUTHENTICATED_USER_RID, 0, 0, 0, 0, 0, 0, 0, &Auth);
+    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    Error = RegCreateKeyExW(HKEY_CURRENT_USER, ScratchPath, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &Scratch, NULL);
+    ok_long(Error, ERROR_SUCCESS);
+    if (Error || !Auth || !MakeKey(Scratch, L"T", 0, &T))
+        goto Done;
+    ok(SetSddlDacl(T, UNPROTECTED_DACL_SECURITY_INFORMATION, L"D:(A;CI;KA;;;SY)(A;CI;KA;;;BA)(A;CI;KR;;;WD)"), "T\n");
+    for (i = 0; i < ARRAYSIZE(Kids); i++)
+    {
+        if (!MakeKey(T, Kids[i], 0, &Key))
+            goto Done;
+        RegCloseKey(Key);
+    }
+    /* T passes on SYSTEM and Everyone read only: nobody of the caller's has WRITE_DAC below it once it is not theirs */
+    ok(SetSddlDacl(T, PROTECTED_DACL_SECURITY_INFORMATION, L"D:P(A;;KA;;;BA)(A;;KA;;;SY)(A;CI;KA;;;SY)(A;CI;KR;;;WD)"), "restrict T\n");
+
+    /* b1: auto-inherited and owned by LOCAL SERVICE; b2: denies the caller KEY_ENUMERATE_SUB_KEYS */
+    if (!OpenSubkey(L"b1", T, &B1) || !OpenSubkey(L"b2", T, &B2))
+        goto Done;
+    EnableRestorePrivileges(TRUE);
+    {
+        PSECURITY_DESCRIPTOR Sd = NULL;
+        PSID Owner = NULL;
+        ACL Empty;
+        BOOL Defaulted;
+
+        InitializeAcl(&Empty, sizeof(Empty), ACL_REVISION);
+        if (ConvertStringSecurityDescriptorToSecurityDescriptorW(L"O:LS", SDDL_REVISION_1, &Sd, NULL) &&
+            GetSecurityDescriptorOwner(Sd, &Owner, &Defaulted))
+            Error = SetSecurityInfo(B1, SE_REGISTRY_KEY, OWNER_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                                    Owner, NULL, &Empty, NULL);
+        else
+            Error = ERROR_INVALID_DATA;
+        if (Sd) LocalFree(Sd);
+    }
+    EnableRestorePrivileges(FALSE);
+    wsprintfW(Path, L"%ls\\T\\b1", ScratchPath);
+    if (Error != ERROR_SUCCESS || KeyOpens(HKEY_CURRENT_USER, Path, READ_CONTROL | WRITE_DAC))
+    {
+        skip("a key cannot be shut away from the caller on this system (key security is not enforced)\n");
+        goto Done;
+    }
+    ok(SetSddlDacl(B2, UNPROTECTED_DACL_SECURITY_INFORMATION, L"D:(D;;CC;;;BA)"), "b2\n");
+
+    /* T gets one more inheritable ACE: the call succeeds, b1 and its subtree stay, the others follow */
+    ok(SetSddlDacl(T, PROTECTED_DACL_SECURITY_INFORMATION, L"D:P(A;;KA;;;BA)(A;;KA;;;SY)(A;CI;KA;;;SY)(A;CI;KR;;;WD)(A;CI;KR;;;AU)"),
+       "set T\n");
+    for (i = 0; i < ARRAYSIZE(Kids); i++)
+    {
+        wsprintfW(Path, L"%ls\\T\\%ls", ScratchPath, Kids[i]);
+        Reads[i] = FALSE;
+        EnableRestorePrivileges(TRUE);
+        Error = RegOpenKeyExW(HKEY_CURRENT_USER, Path, REG_OPTION_BACKUP_RESTORE, READ_CONTROL, &Key);
+        EnableRestorePrivileges(FALSE);
+        if (Error == ERROR_SUCCESS)
+        {
+            ReadDacl(Key, &D);
+            Reads[i] = HasAce(&D, Auth, KEY_READ);
+            FreeDacl(&D);
+            RegCloseKey(Key);
+        }
+    }
+    ok(Reads[0] && Reads[1], "a1 and a1\\g were not updated\n");
+    ok(!Reads[2] && !Reads[3], "b1 (closed to the caller) or its subkey was updated\n");
+    ok(Reads[4], "b2 (denies enumeration) was not updated\n");
+    ok(!Reads[5], "the subkey of b2 (denies enumeration) was updated\n");
+    ok(Reads[6] && Reads[7], "c1 and c1\\g (siblings after the closed key) were not updated\n");
+
+Done:
+    RestoreKeys(HKEY_CURRENT_USER, ScratchPath, Locked, ARRAYSIZE(Locked));
+    if (B2) RegCloseKey(B2);
+    if (B1) RegCloseKey(B1);
+    if (T) RegCloseKey(T);
+    if (Scratch) RegCloseKey(Scratch);
+    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    if (Auth) FreeSid(Auth);
+}
+
 START_TEST(SetSecurityInfoKeyInherit)
 {
     pRegDeleteTreeW = (PVOID)GetProcAddress(GetModuleHandleW(L"advapi32.dll"), "RegDeleteTreeW");
@@ -1272,6 +1623,9 @@ START_TEST(SetSecurityInfoKeyInherit)
     TestExplicitBeforeTail();
     TestGetUsesKeyOwner();
     TestOracleRows();
+    TestHiveRoot();
+    TestUnreadableParent();
+    TestClosedSubkey();
 
     KEY_DACL Initial, P1, C1a, C1b, P2, C2, G;
     HKEY Key = NULL, Child1 = NULL, Child2 = NULL, Grand = NULL;
