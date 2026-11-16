@@ -626,6 +626,8 @@ PreOperation(_Inout_ PFLT_CALLBACK_DATA Data,
             if (VetoEnabled && Mode == MODE_NODEL && (Data->Iopb->Parameters.Create.Options & FILE_DELETE_ON_CLOSE))
                 return Veto(Data);
             AddOpen(FileObject, Mode);
+            /* The post-create must come in this thread (WDK) */
+            *CompletionContext = PsGetCurrentThread();
             break;
 
         case IRP_MJ_CLOSE:
@@ -749,6 +751,15 @@ PostOperation(_Inout_ PFLT_CALLBACK_DATA Data,
     {
         case IRP_MJ_CREATE:
             Stats.LastCreatePost = KeQueryPerformanceCounter(NULL).QuadPart;
+            /* Post-create callbacks run at PASSIVE_LEVEL in the thread which sent the create (WDK) */
+            InterlockedIncrement((PLONG)&Stats.CreatePosts);
+            if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+            {
+                InterlockedIncrement((PLONG)&Stats.CreatePostNotPassive);
+                break;
+            }
+            if (CompletionContext && CompletionContext != PsGetCurrentThread())
+                InterlockedIncrement((PLONG)&Stats.CreatePostOtherThread);
             if (!NT_SUCCESS(Data->IoStatus.Status))
                 RemoveOpen(FileObject);
             else if (UseContexts)

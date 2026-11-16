@@ -61,6 +61,7 @@ typedef struct _FLTP_IRPCTRL
     PVOID SafeContext;
     FLT_POST_OPERATION_FLAGS SafeFlags;
     PFLTP_NODE SafeNode;
+    BOOLEAN CreateWaiter;           /* a create: the dispatch thread waits out a pended pre-operation */
     FLTP_NODE Nodes[1];
 
 } FLTP_IRPCTRL, *PFLTP_IRPCTRL;
@@ -568,13 +569,12 @@ IrpCompletion(_In_ PDEVICE_OBJECT DeviceObject,
     Ctrl->Data.IoStatus = Irp->IoStatus;
     Ctrl->Data.Flags |= FLTFL_CALLBACK_DATA_POST_OPERATION;
 
-    /* The contexts of the stream live as long as it is open, so before the filters see the new file */
-    if (Ctrl->MajorFunction == IRP_MJ_CREATE && Ctrl->Volume->ContextTracking && NT_SUCCESS(Irp->IoStatus.Status))
-        FltpStreamOpened(Ctrl->Volume, Ctrl->Iopb.TargetFileObject);
-
     if (Ctrl->Synchronize)
     {
-        /* The post-operations run in the thread of the dispatch routine, which is waiting */
+        /*
+         * The post-operations run in the thread of the dispatch routine, which is waiting. That is
+         * always the case for a create (see SendDown): this may well be DISPATCH_LEVEL.
+         */
         KeSetEvent(&Ctrl->SyncEvent, IO_NO_INCREMENT, FALSE);
         return STATUS_MORE_PROCESSING_REQUIRED;
     }
@@ -690,6 +690,15 @@ SendDown(_In_ PFLTP_IRPCTRL Ctrl)
         return Pended ? STATUS_PENDING : Status;
     }
 
+    /*
+     * A create is finished in this thread, whenever and wherever the file system completes it: the
+     * post-create callbacks are called at PASSIVE_LEVEL in the thread which sent the create (WDK,
+     * "Writing postoperation callback routines"), and the open of the stream is recorded there too
+     * (Volume->StreamListLock is a fast mutex). The I/O manager waits for a create anyway.
+     */
+    if (Stack->MajorFunction == IRP_MJ_CREATE)
+        Synchronize = Ctrl->Synchronize = TRUE;
+
     Ctrl->PostIndex = Ctrl->Count;
     if (Synchronize)
         KeInitializeEvent(&Ctrl->SyncEvent, NotificationEvent, FALSE);
@@ -715,6 +724,14 @@ SendDown(_In_ PFLTP_IRPCTRL Ctrl)
     /* FLT_PREOP_SYNCHRONIZE: we are still in the thread which sent the IRP, and it stays so */
     KeWaitForSingleObject(&Ctrl->SyncEvent, Executive, KernelMode, FALSE, NULL);
     Ctrl->SyncOwner = TRUE;
+
+    /* The contexts of the stream live as long as it is open, so before the filters see the new file */
+    if (Ctrl->MajorFunction == IRP_MJ_CREATE && Ctrl->Volume->ContextTracking &&
+        NT_SUCCESS(Ctrl->Data.IoStatus.Status))
+    {
+        FltpStreamOpened(Ctrl->Volume, Ctrl->Iopb.TargetFileObject);
+    }
+
     for (;;)
     {
         KeClearEvent(&Ctrl->SyncEvent);
@@ -757,7 +774,7 @@ ContinueAfterPre(_In_ PFLTP_IRPCTRL Ctrl,
     return Pended ? STATUS_PENDING : Status;
 }
 
-/* A file object which has been created: the stream gets one more open */
+/* The file system is done with a create: the thread which sent it goes on with it */
 static
 NTSTATUS
 NTAPI
@@ -765,17 +782,12 @@ TrackCreateCompletion(_In_ PDEVICE_OBJECT DeviceObject,
                       _In_ PIRP Irp,
                       _In_ PVOID Context)
 {
-    PFLT_VOLUME Volume = Context;
-
     UNREFERENCED_PARAMETER(DeviceObject);
+    UNREFERENCED_PARAMETER(Irp);
 
-    if (NT_SUCCESS(Irp->IoStatus.Status))
-        FltpStreamOpened(Volume, IoGetCurrentIrpStackLocation(Irp)->FileObject);
-
-    if (Irp->PendingReturned)
-        IoMarkIrpPending(Irp);
-
-    return STATUS_SUCCESS;
+    /* Maybe at DISPATCH_LEVEL: nothing but the wake-up here */
+    KeSetEvent((PKEVENT)Context, IO_NO_INCREMENT, FALSE);
+    return STATUS_MORE_PROCESSING_REQUIRED;
 }
 
 /* Hands the IRP to the volume's file system as if we weren't here, but for the contexts of the streams */
@@ -796,9 +808,26 @@ PassThrough(_In_ PDEVICE_OBJECT DeviceObject,
         }
         else if (Stack->MajorFunction == IRP_MJ_CREATE)
         {
+            KEVENT Event;
+            NTSTATUS Status;
+
+            /*
+             * The stream gets one more open, recorded in this thread (PASSIVE_LEVEL, as every create
+             * is sent): the file system may complete the create at DISPATCH_LEVEL, where the fast
+             * mutex of the stream list can't be taken.
+             */
+            KeInitializeEvent(&Event, NotificationEvent, FALSE);
             IoCopyCurrentIrpStackLocationToNext(Irp);
-            IoSetCompletionRoutine(Irp, TrackCreateCompletion, Volume, TRUE, TRUE, TRUE);
-            return IoCallDriver(DeviceExtension->AttachedToDeviceObject, Irp);
+            IoSetCompletionRoutine(Irp, TrackCreateCompletion, &Event, TRUE, TRUE, TRUE);
+            if (IoCallDriver(DeviceExtension->AttachedToDeviceObject, Irp) == STATUS_PENDING)
+                KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+
+            Status = Irp->IoStatus.Status;
+            if (NT_SUCCESS(Status))
+                FltpStreamOpened(Volume, Stack->FileObject);
+
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            return Status;
         }
     }
 
@@ -913,7 +942,24 @@ FltpPerformIrp(_In_ PDEVICE_OBJECT DeviceObject,
     if (Irp->AssociatedIrp.SystemBuffer && (Irp->Flags & IRP_BUFFERED_IO))
         Ctrl->Data.Flags |= FLTFL_CALLBACK_DATA_SYSTEM_BUFFER;
 
+    /*
+     * A create stays in this thread from the first pre-operation to the last post-operation: a
+     * pre-create which pends is waited for here, FltCompletePendedPreOperation just wakes us.
+     */
+    if (Major == IRP_MJ_CREATE)
+    {
+        KeInitializeEvent(&Ctrl->SyncEvent, NotificationEvent, FALSE);
+        Ctrl->CreateWaiter = TRUE;
+    }
+
     Result = RunPreOperations(Ctrl, FALSE);
+    while (Result == PreParked && Ctrl->CreateWaiter)
+    {
+        KeWaitForSingleObject(&Ctrl->SyncEvent, Executive, KernelMode, FALSE, NULL);
+        KeClearEvent(&Ctrl->SyncEvent);
+        Result = RunPreOperations(Ctrl, TRUE);
+    }
+
     return ContinueAfterPre(Ctrl, Result);
 }
 
@@ -1212,6 +1258,13 @@ FltCompletePendedPreOperation(_In_ PFLT_CALLBACK_DATA CallbackData,
     /* If the callback is still on its way out, the dispatch routine picks the verdict up */
     if (InterlockedCompareExchange(&Ctrl->PendState, 2, 0) == 0)
         return;
+
+    /* A create: the thread which sent it is waiting to go on with it (FltpPerformIrp) */
+    if (Ctrl->CreateWaiter)
+    {
+        KeSetEvent(&Ctrl->SyncEvent, IO_NO_INCREMENT, FALSE);
+        return;
+    }
 
     /*
      * The operation is parked, we carry on with it in this thread, unless the filter completes the pend

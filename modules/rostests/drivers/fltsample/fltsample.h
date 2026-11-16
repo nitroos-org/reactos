@@ -92,6 +92,9 @@ typedef struct _FLTSAMPLE_STATS
     ULONG RvFastIoDisallowed;       /* review tests: fast I/O refused because of FLTSAMPLE_IOCTL_RV_FLAGS */
     ULONG RvParked;                 /* review tests: read post-operations parked (MORE_PROCESSING_REQUIRED) */
     ULONG RvParkDone;               /* ... and completed by the worker */
+    ULONG CreatePosts;              /* post-creates of test files */
+    ULONG CreatePostNotPassive;     /* ... not at PASSIVE_LEVEL */
+    ULONG CreatePostOtherThread;    /* ... not in the thread of the pre-create */
 
 } FLTSAMPLE_STATS, *PFLTSAMPLE_STATS;
 
