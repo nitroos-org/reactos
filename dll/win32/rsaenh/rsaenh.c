@@ -1800,8 +1800,17 @@ static BOOL pad_data_pkcs1(const BYTE *abData, DWORD dwDataLen, BYTE *abBuffer, 
 
     abBuffer[0] = 0x00;
     abBuffer[1] = RSAENH_PKC_BLOCKTYPE; 
-    for (i=2; i < dwBufferLen - dwDataLen - 1; i++) 
-        do RtlGenRandom(&abBuffer[i], 1); while (!abBuffer[i]);
+    for (i=2; i < dwBufferLen - dwDataLen - 1; i++)
+    {
+        do
+        {
+            if (!RtlGenRandom(&abBuffer[i], 1))
+            {
+                SetLastError(NTE_FAIL);
+                return FALSE;
+            }
+        } while (!abBuffer[i]);
+    }
     if (dwFlags & CRYPT_SSL2_FALLBACK) 
         for (i-=8; i < dwBufferLen - dwDataLen - 1; i++) 
             abBuffer[i] = 0x03;
@@ -1948,7 +1957,11 @@ static BOOL pad_data_oaep(HCRYPTPROV hProv, const BYTE *abData, DWORD dwDataLen,
     memcpy(pbDb + dwDbLen - dwDataLen, abData, dwDataLen);
 
     /* Get seed */
-    RtlGenRandom(pbSeed, dwHashLen);
+    if (!RtlGenRandom(pbSeed, dwHashLen))
+    {
+        SetLastError(NTE_FAIL);
+        goto done;
+    }
     /* Get masked DB */
     result = pkcs1_mgf1(hProv, pbSeed, dwHashLen, dwDbLen, &blobDbMask);
     if (!result) goto done;
@@ -3617,7 +3630,13 @@ BOOL WINAPI RSAENH_CPGenKey(HCRYPTPROV hProv, ALG_ID Algid, DWORD dwFlags, HCRYP
         case CALG_TLS1_MASTER:
             *phKey = new_key(hProv, Algid, dwFlags, &pCryptKey);
             if (pCryptKey) {
-                RtlGenRandom(pCryptKey->abKeyValue, RSAENH_MAX_KEY_SIZE);
+                if (!RtlGenRandom(pCryptKey->abKeyValue, RSAENH_MAX_KEY_SIZE))
+                {
+                    RSAENH_CPDestroyKey(hProv, *phKey);
+                    *phKey = (HCRYPTKEY)INVALID_HANDLE_VALUE;
+                    SetLastError(NTE_FAIL);
+                    return FALSE;
+                }
                 switch (Algid) {
                     case CALG_SSL3_MASTER:
                         pCryptKey->abKeyValue[0] = RSAENH_SSL3_VERSION_MAJOR;
@@ -3671,7 +3690,12 @@ BOOL WINAPI RSAENH_CPGenRandom(HCRYPTPROV hProv, DWORD dwLen, BYTE *pbBuffer)
         return FALSE;
     }
 
-    return RtlGenRandom(pbBuffer, dwLen);
+    if (!RtlGenRandom(pbBuffer, dwLen))
+    {
+        SetLastError(NTE_FAIL);
+        return FALSE;
+    }
+    return TRUE;
 }
 
 /******************************************************************************
