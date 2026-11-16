@@ -7,6 +7,7 @@
  */
 
 #include "precomp.h"
+#include <iphlpapi.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -147,6 +148,50 @@ TextRecordsToWire(
     return ERROR_SUCCESS;
 }
 
+/*
+ * Does the name belong to this machine (localhost, the host name, the host name with the DNS domain, with or
+ * without the dot of the root label)? Dnsapi answers such a name itself, and what it answers changes with the
+ * network (an address that comes, an adapter that goes): it is not kept as a negative answer.
+ */
+static
+BOOL
+IsOwnName(
+    _In_ LPCWSTR Name)
+{
+    CHAR Ansi[512], Local[sizeof(((PFIXED_INFO)0)->HostName) + sizeof(((PFIXED_INFO)0)->DomainName) + 2];
+    PFIXED_INFO Info;
+    ULONG Size = 0;
+    size_t Len;
+    BOOL Ret = FALSE;
+
+    if (WideCharToMultiByte(CP_ACP, 0, Name, -1, Ansi, sizeof(Ansi), NULL, NULL) == 0)
+        return FALSE;
+    Len = strlen(Ansi);
+    if (Len > 1 && Ansi[Len - 1] == '.')
+        Ansi[Len - 1] = '\0';
+    if (Ansi[0] == '\0' || _stricmp(Ansi, "localhost") == 0)
+        return TRUE;
+
+    GetNetworkParams(NULL, &Size);
+    Info = HeapAlloc(GetProcessHeap(), 0, Size);
+    if (Info == NULL)
+        return TRUE; /* out of memory: keep nothing */
+    if (GetNetworkParams(Info, &Size) == ERROR_SUCCESS)
+    {
+        if (_stricmp(Ansi, Info->HostName) == 0)
+        {
+            Ret = TRUE;
+        }
+        else if (Info->DomainName[0])
+        {
+            StringCchPrintfA(Local, sizeof(Local), "%s.%s", Info->HostName, Info->DomainName);
+            Ret = _stricmp(Ansi, Local) == 0;
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, Info);
+    return Ret;
+}
+
 /* Function: 0x07 */
 DWORD
 __stdcall
@@ -188,19 +233,24 @@ R_ResolverQuery(
                                            wType,
                                            dwFlags,
                                            ppResultRecords);
-        /* The names that need no server (localhost, this machine) have an IPv6 answer that is not in the cache */
-        if (Status == DNS_INFO_NO_RECORDS && wType == DNS_TYPE_AAAA)
+        if (Status == DNSRSLVR_CACHE_MISS)
         {
-            if (Query_Main(pszName,
-                           wType,
-                           dwFlags,
-                           ppResultRecords) != ERROR_SUCCESS)
+            Status = DNS_INFO_NO_RECORDS;
+
+            /* The names that need no server (localhost, this machine) have an IPv6 answer that is not in the cache */
+            if (wType == DNS_TYPE_AAAA)
             {
-                *ppResultRecords = NULL;
-            }
-            else
-            {
-                Status = ERROR_SUCCESS;
+                if (Query_Main(pszName,
+                               wType,
+                               dwFlags,
+                               ppResultRecords) != ERROR_SUCCESS)
+                {
+                    *ppResultRecords = NULL;
+                }
+                else
+                {
+                    Status = ERROR_SUCCESS;
+                }
             }
         }
     }
@@ -211,24 +261,40 @@ R_ResolverQuery(
                                            wType,
                                            dwFlags,
                                            ppResultRecords);
-        /*
-         * A name of the hosts file is answered from it alone: a DNS server is not asked for another type
-         * of it (the machine's own answer for the AAAA of "localhost" is the exception, see Query_Main).
-         */
-        if (Status == DNS_INFO_NO_RECORDS &&
-            (_wcsicmp(pszName, L"localhost") == 0 ||
-             _wcsicmp(pszName, L"localhost.") == 0 ||
-             !DnsIntCacheHasHostsName(pszName)))
+        if (Status == DNSRSLVR_CACHE_MISS)
         {
-            DPRINT("DNS query!\n");
-            Status = Query_Main(pszName,
-                                wType,
-                                dwFlags,
-                                ppResultRecords);
-            if (Status == ERROR_SUCCESS)
+            /*
+             * A name of the hosts file is answered from it alone: a DNS server is not asked for another type
+             * of it (the machine's own answer for the AAAA of "localhost" is the exception, see Query_Main).
+             */
+            if (_wcsicmp(pszName, L"localhost") == 0 ||
+                _wcsicmp(pszName, L"localhost.") == 0 ||
+                !DnsIntCacheHasHostsName(pszName))
             {
-                DPRINT("DNS query successful!\n");
-                DnsIntCacheAddEntry(*ppResultRecords, FALSE);
+                DPRINT("DNS query!\n");
+                Status = Query_Main(pszName,
+                                    wType,
+                                    dwFlags,
+                                    ppResultRecords);
+                if (Status == ERROR_SUCCESS)
+                {
+                    DPRINT("DNS query successful!\n");
+                    /* kept for the time its records say (not at all with a TTL of 0) */
+                    DnsIntCacheAddResult(*ppResultRecords);
+                }
+                else if (!IsOwnName(pszName))
+                {
+                    /* a name that is not there (or has no record of the type) is kept for a while, other
+                       failures (no server, no answer) are asked again */
+                    DnsIntCacheAddNegative(pszName,
+                                           wType,
+                                           Status,
+                                           (dwFlags & (DNS_QUERY_NO_RECURSION | DNS_QUERY_TREAT_AS_FQDN)) != 0);
+                }
+            }
+            else
+            {
+                Status = DNS_INFO_NO_RECORDS;
             }
         }
     }
