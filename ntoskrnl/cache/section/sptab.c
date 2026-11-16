@@ -271,6 +271,10 @@ _MmSetPageEntrySectionSegment(PMM_SECTION_SEGMENT Segment,
         PageTable->PageEntries[PageIndex] = Entry;
     }
 
+    /* The read, page operation or write that kept the page busy is over (or changed): let its waiters check again */
+    if ((Entry != OldEntry) && MM_IS_BUSY_SSE(OldEntry))
+        MiWakePageWaiters(Segment, MI_SEGMENT_WAIT_PAGE(Offset));
+
     return STATUS_SUCCESS;
 }
 
@@ -350,6 +354,10 @@ MmFreePageTablesSectionSegment(PMM_SECTION_SEGMENT Segment,
         DPRINT("Remove memory\n");
         RtlDeleteElementGenericTable(&Segment->PageTable, Element);
     }
+
+    /* No entry of the segment is busy any more */
+    if (*(volatile LONG *)&MiPageWaitActive != 0)
+        MiWakePageWaitersSlow(Segment, 0, TRUE);
     DPRINT("Done\n");
 }
 

@@ -92,6 +92,174 @@ MiIsTransientInPageError(NTSTATUS Status)
 /* Serializes NtExtendSection's size decisions with its file growth; taken before any file-system lock */
 static ERESOURCE MmpExtendSectionLock;
 
+/*
+ * Waiting for a busy page entry: a segment page entry with a wait entry (a read or page operation in flight) or the
+ * write bit (a write in flight), or a process PTE with MM_WAIT_ENTRY (a private page being written to a paging
+ * file).  Waiters used to poll with a one-tick sleep, i.e. every wait cost a whole clock tick even when the I/O
+ * completed a few microseconds later.
+ *
+ * Protocol (no lost wake-up, no pool):
+ *  1. The waiter sees the busy entry while it holds the lock that protects that entry (the segment lock for a
+ *     segment entry, the address space lock for a PTE) and registers in a small fixed table of slots keyed by the
+ *     owner (segment or address space) and the page, still under that lock (MiRegisterPageWait).
+ *  2. It drops its locks and waits on the slot's notification event (MiWaitForPageWait), then relocks and checks
+ *     the entry again, exactly as after the old sleep.
+ *  3. The thread that changes a busy entry holds the same lock, so it runs after the registration became visible;
+ *     it sets the event of every matching slot (MiWakePageWaiters, called by MmSetPageEntrySectionSegment and by the
+ *     paging file writers).  The event stays set until the slot's last waiter has left, so a wake that comes before
+ *     the waiter reaches its wait is not lost.  A slot whose event is already set is never joined: a new waiter (or
+ *     one that found the page busy again) takes a fresh slot, so nobody spins on an old wake.
+ * A full table, or a change that does not go through these paths (the segment's page table being freed), only
+ * costs a bounded wait (MI_PAGE_WAIT_TIMEOUT) after which the caller checks again, as it did before.
+ * MiPageWaitLock is a leaf: nothing is acquired under it but the dispatcher lock (KeSetEvent).
+ */
+#define MI_PAGE_WAIT_SLOTS 64
+#define MI_PAGE_WAIT_TIMEOUT (-50LL * 10000) /* 50 ms */
+
+typedef struct _MI_PAGE_WAIT_SLOT
+{
+    PVOID Owner;
+    ULONG_PTR Page;
+    LONG Waiters;
+    KEVENT Event;
+} MI_PAGE_WAIT_SLOT;
+
+static MI_PAGE_WAIT_SLOT MiPageWaitSlots[MI_PAGE_WAIT_SLOTS];
+static KSPIN_LOCK MiPageWaitLock;
+static BOOLEAN MiPageWaitInitialized;
+/* Slots with waiters: the wake path is a single read while it is zero */
+volatile LONG MiPageWaitActive;
+/* Statistics: waits, waits woken by the change, waits that timed out, waits without a slot (tick sleep) */
+static volatile LONG MiPageWaitCounts[4];
+
+static
+VOID
+MiInitializePageWait(VOID)
+{
+    ULONG i;
+
+    KeInitializeSpinLock(&MiPageWaitLock);
+    for (i = 0; i < MI_PAGE_WAIT_SLOTS; i++)
+        KeInitializeEvent(&MiPageWaitSlots[i].Event, NotificationEvent, FALSE);
+    MiPageWaitInitialized = TRUE;
+}
+
+/* The caller holds the lock that protects the busy entry of Owner's Page; NULL: no slot, fall back to a tick */
+PMI_PAGE_WAIT_SLOT
+NTAPI
+MiRegisterPageWait(
+    _In_ PVOID Owner,
+    _In_ ULONG_PTR Page)
+{
+    PMI_PAGE_WAIT_SLOT Slot, Free = NULL;
+    KIRQL OldIrql;
+    ULONG i, Start;
+
+    if (!MiPageWaitInitialized)
+        return NULL;
+
+    Start = (ULONG)((((ULONG_PTR)Owner >> 6) ^ Page) % MI_PAGE_WAIT_SLOTS);
+
+    KeAcquireSpinLock(&MiPageWaitLock, &OldIrql);
+    for (i = 0; i < MI_PAGE_WAIT_SLOTS; i++)
+    {
+        Slot = &MiPageWaitSlots[(Start + i) % MI_PAGE_WAIT_SLOTS];
+        if (Slot->Waiters == 0)
+        {
+            if (!Free)
+                Free = Slot;
+            continue;
+        }
+        /* Join a pending wait for the same page, not one that has already been woken */
+        if ((Slot->Owner == Owner) && (Slot->Page == Page) && (KeReadStateEvent(&Slot->Event) == 0))
+        {
+            Slot->Waiters++;
+            KeReleaseSpinLock(&MiPageWaitLock, OldIrql);
+            return Slot;
+        }
+    }
+
+    if (Free)
+    {
+        Free->Owner = Owner;
+        Free->Page = Page;
+        Free->Waiters = 1;
+        KeClearEvent(&Free->Event);
+        InterlockedIncrement(&MiPageWaitActive);
+    }
+    KeReleaseSpinLock(&MiPageWaitLock, OldIrql);
+
+    return Free;
+}
+
+/* After the caller dropped its locks: wait for the change (or the bounded fallback), then leave the slot */
+VOID
+NTAPI
+MiWaitForPageWait(
+    _In_opt_ PMI_PAGE_WAIT_SLOT Slot)
+{
+    LARGE_INTEGER Timeout;
+    NTSTATUS Status;
+    KIRQL OldIrql;
+
+    InterlockedIncrement(&MiPageWaitCounts[0]);
+
+    if (!Slot)
+    {
+        InterlockedIncrement(&MiPageWaitCounts[3]);
+        KeDelayExecutionThread(KernelMode, FALSE, &TinyTime);
+        return;
+    }
+
+    Timeout.QuadPart = MI_PAGE_WAIT_TIMEOUT;
+    Status = KeWaitForSingleObject(&Slot->Event, WrPageIn, KernelMode, FALSE, &Timeout);
+    if (Status == STATUS_TIMEOUT)
+    {
+        LONG Count = InterlockedIncrement(&MiPageWaitCounts[2]);
+        if ((Count <= 16) || ((Count % 1024) == 0))
+            DPRINT1("Page wait %p:%Ix timed out (%ld timeouts of %ld waits)\n",
+                    Slot->Owner, Slot->Page, Count, MiPageWaitCounts[0]);
+    }
+    else
+    {
+        InterlockedIncrement(&MiPageWaitCounts[1]);
+    }
+
+    KeAcquireSpinLock(&MiPageWaitLock, &OldIrql);
+    ASSERT(Slot->Waiters > 0);
+    if (--Slot->Waiters == 0)
+    {
+        Slot->Owner = NULL;
+        InterlockedDecrement(&MiPageWaitActive);
+    }
+    KeReleaseSpinLock(&MiPageWaitLock, OldIrql);
+}
+
+/* A busy entry of Owner's Page (every page of Owner: AllPages) changed: wake its waiters */
+VOID
+NTAPI
+MiWakePageWaitersSlow(
+    _In_ PVOID Owner,
+    _In_ ULONG_PTR Page,
+    _In_ BOOLEAN AllPages)
+{
+    PMI_PAGE_WAIT_SLOT Slot;
+    KIRQL OldIrql;
+    ULONG i;
+
+    if (!MiPageWaitInitialized)
+        return;
+
+    KeAcquireSpinLock(&MiPageWaitLock, &OldIrql);
+    for (i = 0; i < MI_PAGE_WAIT_SLOTS; i++)
+    {
+        Slot = &MiPageWaitSlots[i];
+        if ((Slot->Waiters != 0) && (Slot->Owner == Owner) && (AllPages || (Slot->Page == Page)))
+            KeSetEvent(&Slot->Event, IO_NO_INCREMENT, FALSE);
+    }
+    KeReleaseSpinLock(&MiPageWaitLock, OldIrql);
+}
+
 #ifndef NEWCC
 KEVENT MmWaitPageEvent;
 
@@ -1805,14 +1973,17 @@ MmAlterViewAttributes(PMMSUPPORT AddressSpace,
             /* Wait for a wait entry to disappear */
             do
             {
+                PMI_PAGE_WAIT_SLOT WaitSlot;
+
                 MmGetPageFileMapping(Process, Address, &SwapEntry);
                 if (SwapEntry != MM_WAIT_ENTRY)
                     break;
                 /* A copy-on-write fault may run while the locks are dropped */
                 MmFlushTbList(&FlushList);
+                WaitSlot = MiRegisterPageWait(AddressSpace, MI_VA_WAIT_PAGE(Address));
                 MmUnlockSectionSegment(Segment);
                 MmUnlockAddressSpace(AddressSpace);
-                KeDelayExecutionThread(KernelMode, FALSE, &TinyTime);
+                MiWaitForPageWait(WaitSlot);
                 MmLockAddressSpace(AddressSpace);
                 MmLockSectionSegment(Segment);
             }
@@ -2045,8 +2216,10 @@ MiNotPresentFaultSectionView(PMMSUPPORT AddressSpace,
         MmGetPageFileMapping(Process, Address, &SwapEntry);
         if (SwapEntry == MM_WAIT_ENTRY)
         {
+            PMI_PAGE_WAIT_SLOT WaitSlot = MiRegisterPageWait(AddressSpace, MI_VA_WAIT_PAGE(Address));
+
             MmUnlockAddressSpace(AddressSpace);
-            KeDelayExecutionThread(KernelMode, FALSE, &TinyTime);
+            MiWaitForPageWait(WaitSlot);
             MmLockAddressSpace(AddressSpace);
             return STATUS_MM_RESTART_OPERATION;
         }
@@ -2090,6 +2263,8 @@ MiNotPresentFaultSectionView(PMMSUPPORT AddressSpace,
                                         PAddress,
                                         Region->Protect,
                                         Page);
+        /* The wait entry is gone: a waiter for this PTE checks again once it has the address space lock */
+        MiWakePageWaiters(AddressSpace, MI_VA_WAIT_PAGE(PAddress));
         if (!NT_SUCCESS(Status))
         {
             DPRINT("MmCreateVirtualMapping failed, not out of memory\n");
@@ -2243,9 +2418,11 @@ MiNotPresentFaultSectionView(PMMSUPPORT AddressSpace,
         /* See if a page op is running on this segment. */
         if (SwapEntry == MM_WAIT_ENTRY)
         {
+            PMI_PAGE_WAIT_SLOT WaitSlot = MiRegisterPageWait(Segment, MI_SEGMENT_WAIT_PAGE(&Offset));
+
             MmUnlockSectionSegment(Segment);
             MmUnlockAddressSpace(AddressSpace);
-            KeDelayExecutionThread(KernelMode, FALSE, &TinyTime);
+            MiWaitForPageWait(WaitSlot);
             MmLockAddressSpace(AddressSpace);
             return STATUS_MM_RESTART_OPERATION;
         }
@@ -2983,6 +3160,8 @@ MmInitSectionImplementation(VOID)
     MmCreatePhysicalMemorySection();
 
     ExInitializeResourceLite(&MmpExtendSectionLock);
+
+    MiInitializePageWait();
 
     return STATUS_SUCCESS;
 }
@@ -4198,10 +4377,12 @@ MmFreeSectionPage(PVOID Context, MEMORY_AREA* MemoryArea, PVOID Address,
     Entry = MmGetPageEntrySectionSegment(Segment, &Offset);
     while (Entry && MM_IS_WAIT_PTE(Entry))
     {
+        PMI_PAGE_WAIT_SLOT WaitSlot = MiRegisterPageWait(Segment, MI_SEGMENT_WAIT_PAGE(&Offset));
+
         MmUnlockSectionSegment(Segment);
         MmUnlockAddressSpace(AddressSpace);
 
-        KeDelayExecutionThread(KernelMode, FALSE, &TinyTime);
+        MiWaitForPageWait(WaitSlot);
 
         MmLockAddressSpace(AddressSpace);
         MmLockSectionSegment(Segment);
@@ -4267,7 +4448,6 @@ MiWaitForViewPagingIo(
     PEPROCESS Process = MmGetAddressSpaceOwner(AddressSpace);
     ULONG_PTR Address, EndAddress;
     SWAPENTRY SwapEntry;
-    LARGE_INTEGER Delay;
     BOOLEAN Attached = FALSE;
 
     /* Paging file I/O with a wait entry only happens in user-mode views */
@@ -4280,17 +4460,19 @@ MiWaitForViewPagingIo(
         Attached = TRUE;
     }
 
-    Delay.QuadPart = -10 * 1000;
     EndAddress = (ULONG_PTR)MM_ROUND_UP(MA_GetEndingAddress(MemoryArea), PAGE_SIZE);
     for (Address = MA_GetStartingAddress(MemoryArea); Address < EndAddress; Address += PAGE_SIZE)
     {
         while (MmIsPageSwapEntry(Process, (PVOID)Address))
         {
+            PMI_PAGE_WAIT_SLOT WaitSlot;
+
             MmGetPageFileMapping(Process, (PVOID)Address, &SwapEntry);
             if (SwapEntry != MM_WAIT_ENTRY)
                 break;
+            WaitSlot = MiRegisterPageWait(AddressSpace, MI_VA_WAIT_PAGE(Address));
             MmUnlockAddressSpace(AddressSpace);
-            KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+            MiWaitForPageWait(WaitSlot);
             MmLockAddressSpace(AddressSpace);
         }
     }
@@ -7901,9 +8083,11 @@ MmMakePagesDirty(
         /* Let any pending read proceed */
         while (MM_IS_WAIT_PTE(Entry))
         {
+            PMI_PAGE_WAIT_SLOT WaitSlot = MiRegisterPageWait(Segment, MI_SEGMENT_WAIT_PAGE(&SegmentOffset));
+
             MmUnlockSectionSegment(Segment);
             MmUnlockAddressSpace(AddressSpace);
-            KeDelayExecutionThread(KernelMode, FALSE, &TinyTime);
+            MiWaitForPageWait(WaitSlot);
             MmLockAddressSpace(AddressSpace);
             MmLockSectionSegment(Segment);
             Entry = MmGetPageEntrySectionSegment(Segment, &SegmentOffset);
