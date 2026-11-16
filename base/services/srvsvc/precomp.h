@@ -20,9 +20,10 @@
 extern DWORD dwServiceBits;
 
 
-DWORD
-WINAPI
-RpcThreadRoutine(
-    LPVOID lpParameter);
+VOID
+StartRpcServer(VOID);
+
+VOID
+StopRpcServer(VOID);
 
 #endif /* _SRVSVC_PCH_ */

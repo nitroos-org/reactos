@@ -80,8 +80,8 @@ ServiceControlHandler(DWORD dwControl,
         case SERVICE_CONTROL_STOP:
             TRACE("  SERVICE_CONTROL_STOP received\n");
             UpdateServiceStatus(SERVICE_STOP_PENDING);
-            /* Stop listening to incoming RPC messages */
-            RpcMgmtStopServerListening(NULL);
+            /* Unregister the RPC interface of the service (the process keeps listening: it hosts other services) */
+            StopRpcServer();
             UpdateServiceStatus(SERVICE_STOPPED);
             return ERROR_SUCCESS;
 
@@ -104,8 +104,8 @@ ServiceControlHandler(DWORD dwControl,
         case SERVICE_CONTROL_SHUTDOWN:
             TRACE("  SERVICE_CONTROL_SHUTDOWN received\n");
             UpdateServiceStatus(SERVICE_STOP_PENDING);
-            /* Stop listening to incoming RPC messages */
-            RpcMgmtStopServerListening(NULL);
+            /* Unregister the RPC interface of the service (the process keeps listening: it hosts other services) */
+            StopRpcServer();
             UpdateServiceStatus(SERVICE_STOPPED);
             return ERROR_SUCCESS;
 
@@ -120,22 +120,7 @@ static
 DWORD
 ServiceInit(VOID)
 {
-    HANDLE hThread;
-
-    hThread = CreateThread(NULL,
-                           0,
-                           (LPTHREAD_START_ROUTINE)RpcThreadRoutine,
-                           NULL,
-                           0,
-                           NULL);
-
-    if (!hThread)
-    {
-        ERR("Can't create PortThread\n");
-        return GetLastError();
-    }
-    else
-        CloseHandle(hThread);
+    StartRpcServer();
 
     /* Report a running server service */
     SetServiceBits(ServiceStatusHandle,
