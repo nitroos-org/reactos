@@ -22,7 +22,7 @@
 #define DHCP6_VALUE_SERVER          "Dhcpv6ServerAddress"           /* REG_SZ, link-local address of the server, no zone */
 #define DHCP6_VALUE_REFRESH         "Dhcpv6InformationRefreshTime"  /* REG_DWORD seconds */
 #define DHCP6_VALUE_OPTIONS         "Dhcpv6Options"                 /* REG_BINARY, the options of the last Reply */
-#define DHCP6_VALUE_REPLIES         "Dhcpv6ReplyCount"              /* REG_DWORD, incremented with every accepted Reply */
+#define DHCP6_VALUE_REPLIES         "Dhcpv6ReplyCount"              /* REG_DWORD, a sequence number: changes with every accepted Reply */
 
 /* The stateful client (the router's M flag: addresses through IA_NA) adds, per interface key: */
 #define DHCP6_VALUE_STATEFUL        "Dhcpv6Stateful"                /* REG_DWORD 1 while the client asks for addresses on it */

@@ -126,7 +126,9 @@ NTSYSAPI ULONG __cdecl DbgPrint(PCCH Format, ...);
 #define D6_MAX_DOMAINS      16
 #define D6_MAX_DOMAIN_LEN   254
 #define D6_MAX_DUID         130
-#define D6_MAX_PACKET       4096        /* a Reply with many options is more than one Ethernet frame */
+#define D6_MAX_PACKET       4096        /* a message we build: the options we send are few */
+#define D6_MAX_RECV         65535       /* a message we read: a Reply with many options is several fragments, up to the
+                                           largest UDP datagram (the stack reassembles it; nothing is cut or dropped) */
 #define D6_MAX_ADDRS        4           /* addresses of one IA_NA the client takes (the stack has 8 address slots) */
 #define D6_NEVER            0xFFFFFFFFFFFFFFFFULL
 #define D6_INFINITE         0xFFFFFFFFUL /* a lifetime or timer of "never" */
@@ -270,6 +272,30 @@ static ULONGLONG NowMs(void)
         High += 0x100000000ULL;
     Last = Tick;
     return High + Tick;
+}
+
+/* The reply count of an interface is one sequence for the whole service, so it never goes back: an interface that
+   is dropped and learned again (a link that flapped, an adapter disabled and enabled) does not count 1, 2, ... a
+   second time, and a client that waits for the count to differ from the one it read (Dhcpv6RequestParams with a forced
+   request) does not wait out its limit because the new count equals the old one. The first value is the time in
+   seconds, so a restarted service does not repeat a count a client may still hold */
+static ULONG ReplySequence;
+
+static ULONG NextReplyCount(void)
+{
+    if (ReplySequence == 0)
+    {
+        FILETIME Now;
+        ULARGE_INTEGER Time;
+
+        GetSystemTimeAsFileTime(&Now);
+        Time.LowPart = Now.dwLowDateTime;
+        Time.HighPart = Now.dwHighDateTime;
+        ReplySequence = (ULONG)((Time.QuadPart / 10000000ULL) & 0x3FFFFFFFUL);
+    }
+    if (++ReplySequence == 0)
+        ReplySequence = 1;
+    return ReplySequence;
 }
 
 static ULONG Rand32(void)
@@ -525,7 +551,7 @@ static VOID Publish(D6IF *If, const D6REPLY *R, const UCHAR *Options, ULONG Opti
     SetDword(Key, DHCP6_VALUE_REFRESH, R->HasRefresh ? R->Refresh : (DWORD)IRT_DEFAULT_S);
     if (OptionsLen)
         RegSetValueExA(Key, DHCP6_VALUE_OPTIONS, 0, REG_BINARY, Options, OptionsLen);
-    If->Replies++;
+    If->Replies = NextReplyCount();
     /* last: a reader that waits for a new reply count sees the data complete */
     SetDword(Key, DHCP6_VALUE_REPLIES, If->Replies);
     RegCloseKey(Key);
@@ -545,7 +571,7 @@ static VOID CountReply(D6IF *If, const UCHAR *ServerAddress)
         AddressText(ServerAddress, One);
         SetString(Key, DHCP6_VALUE_SERVER, One);
     }
-    If->Replies++;
+    If->Replies = NextReplyCount();
     SetDword(Key, DHCP6_VALUE_REPLIES, If->Replies);
     RegCloseKey(Key);
     If->Published = TRUE;
@@ -1999,19 +2025,21 @@ static VOID RunCommand(D6IF *If, ULONG Command, ULONGLONG Now)
 /* TRUE: the budget ran out, more may be queued */
 static BOOL ReadSocket(D6IF *If, ULONGLONG Now)
 {
+    /* only the DHCPv6 thread reads, so one buffer serves every interface (64 KB is too much for its stack) */
+    static UCHAR Packet[D6_MAX_RECV];
     ULONG Budget;
 
     for (Budget = D6_READ_BUDGET; Budget; Budget--)
     {
-        UCHAR Packet[D6_MAX_PACKET];
         SOCKADDR_IN6 From;
         int FromLen = sizeof(From), Len;
         D6REPLY Reply;
 
-        Len = recvfrom(If->Sock, (char *)Packet, sizeof(Packet), 0, (PSOCKADDR)&From, &FromLen);
+        Len = recvfrom(If->Sock, (char *)Packet, D6_MAX_RECV, 0, (PSOCKADDR)&From, &FromLen);
         if (Len == SOCKET_ERROR)
         {
-            /* a datagram larger than the buffer is dropped by recvfrom; the ones queued behind it are still read */
+            /* a datagram larger than the buffer (more than any UDP datagram) is dropped by recvfrom; the ones queued
+               behind it are still read */
             if (WSAGetLastError() == WSAEMSGSIZE)
                 continue;
             break;
