@@ -1062,23 +1062,55 @@ FltpFastIoDeviceControl(_In_ PFILE_OBJECT FileObject,
     return FALSE;
 }
 
+/* Our device on a device which the I/O manager is deleting: the volume's instances go, then our device */
+static
+VOID
+DetachFromDeletedDevice(_In_ PDEVICE_OBJECT SourceDevice,
+                        _In_ PDEVICE_OBJECT TargetDevice)
+{
+    PFLTMGR_DEVICE_EXTENSION DeviceExtension = SourceDevice->DeviceExtension;
+
+    PAGED_CODE();
+
+    /*
+     * The file system deleted the volume device below ours without a dismount we saw (the medium is
+     * gone, a surprise removal, or the volume's last close after a dismount): the instances go as for
+     * a dismount, and the volume leaves the list. The FLT_VOLUME itself stays allocated (an operation
+     * of another thread may still look at it); FltGetDeviceObject says there is no device any more.
+     */
+    if (DeviceExtension && DeviceExtension->Volume)
+    {
+        PFLT_VOLUME Volume = DeviceExtension->Volume;
+
+        FltpTeardownVolume(Volume, FLTFL_INSTANCE_TEARDOWN_VOLUME_DISMOUNT);
+
+        KeEnterCriticalRegion();
+        ExAcquireResourceExclusiveLite(&FilterListLock, TRUE);
+        Volume->AttachedToDeviceObject = NULL;
+        ExReleaseResourceLite(&FilterListLock);
+        KeLeaveCriticalRegion();
+    }
+
+    /* Run any cleanup routines */
+    FltpCleanupDeviceObject(SourceDevice);
+
+    /* Detach from the target device: this is where the I/O manager frees it */
+    IoDetachDevice(TargetDevice);
+
+    /* Delete the source */
+    IoDeleteDevice(SourceDevice);
+}
+
 VOID
 NTAPI
 FltpFastIoDetachDeviceWorker(_In_ PVOID Parameter)
 {
     PDETACH_DEVICE_WORK_ITEM DetachDeviceWorkItem = Parameter;
 
-    /* Run any cleanup routines */
-    FltpCleanupDeviceObject(DetachDeviceWorkItem->SourceDevice);
-
-    /* Detach from the target device */
-    IoDetachDevice(DetachDeviceWorkItem->TargetDevice);
-
-    /* Delete the source */
-    IoDeleteDevice(DetachDeviceWorkItem->SourceDevice);
+    DetachFromDeletedDevice(DetachDeviceWorkItem->SourceDevice, DetachDeviceWorkItem->TargetDevice);
 
     /* Free the pool we allocated in FltpFastIoDetachDevice */
-    ExFreePoolWithTag(DetachDeviceWorkItem, 0x1234);
+    ExFreePoolWithTag(DetachDeviceWorkItem, FM_TAG_DETACH);
 }
 
 CODE_SEG("PAGE")
@@ -1092,34 +1124,27 @@ FltpFastIoDetachDevice(_In_ PDEVICE_OBJECT SourceDevice,
     PAGED_CODE();
 
     /*
-     * Detaching and deleting devices is a lot of work and takes too long
-     * to be a worthwhile FastIo candidate, so we defer this call to speed
-     * it up. There's no return value so we're okay to do this.
+     * The I/O manager calls this from IoDeleteDevice of the file system's device, maybe with the
+     * file system's own locks held, and the teardown of the instances calls the filters and waits
+     * for their operations: a worker does it. The target device stays until we detach from it.
      */
-
-    /* Allocate the work item and it's corresponding data */
     DetachDeviceWorkItem = ExAllocatePoolWithTag(NonPagedPool,
                                                  sizeof(DETACH_DEVICE_WORK_ITEM),
-                                                 0x1234);
+                                                 FM_TAG_DETACH);
     if (DetachDeviceWorkItem)
     {
-        /* Initialize the work item */
+        DetachDeviceWorkItem->SourceDevice = SourceDevice;
+        DetachDeviceWorkItem->TargetDevice = TargetDevice;
         ExInitializeWorkItem(&DetachDeviceWorkItem->WorkItem,
                              FltpFastIoDetachDeviceWorker,
                              DetachDeviceWorkItem);
-
-        /* Queue the work item and return the call */
-        ExQueueWorkItem(&DetachDeviceWorkItem->WorkItem,
-                        DelayedWorkQueue);
+        ExQueueWorkItem(&DetachDeviceWorkItem->WorkItem, DelayedWorkQueue);
     }
     else
     {
-        /* We failed to defer, just cleanup here */
-        FltpCleanupDeviceObject(SourceDevice);
-        IoDetachDevice(TargetDevice);
-        IoDeleteDevice(SourceDevice);
+        /* We failed to defer, do it here */
+        DetachFromDeletedDevice(SourceDevice, TargetDevice);
     }
-
 }
 
 CODE_SEG("PAGE")

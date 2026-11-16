@@ -30,6 +30,7 @@ static PDEVICE_OBJECT FsDevice;         /* the file system's control device */
 static PDEVICE_OBJECT DiskDevice;       /* \Device\FltFakeDisk */
 static PDEVICE_OBJECT VolumeDevice;     /* the mounted volume, if any */
 static FAST_MUTEX VolumeLock;
+static volatile LONG OpenFiles;         /* file objects of the volume not closed yet */
 static FLTFAKEFS_STATS Stats;
 
 /* One stream for every file: the files are all empty */
@@ -162,13 +163,14 @@ DeleteVolume(VOID)
         return STATUS_NOT_FOUND;
     }
 
-    IoAcquireVpbSpinLock(&OldIrql);
-    if (Vpb->ReferenceCount != 0)
+    /* Files still open: not now (the VPB keeps a reference of the mount, our own count is what tells) */
+    if (OpenFiles != 0)
     {
-        IoReleaseVpbSpinLock(OldIrql);
         ExReleaseFastMutex(&VolumeLock);
         return STATUS_DEVICE_BUSY;
     }
+
+    IoAcquireVpbSpinLock(&OldIrql);
     Vpb->Flags &= ~VPB_MOUNTED;
     Vpb->DeviceObject = NULL;
     IoReleaseVpbSpinLock(OldIrql);
@@ -229,12 +231,16 @@ VolumeRequest(_Inout_ PIRP Irp)
     {
         case IRP_MJ_CREATE:
             InterlockedIncrement((PLONG)&Stats.Creates);
+            InterlockedIncrement(&OpenFiles);
             if (FileObject)
                 FileObject->FsContext = FakeFcb;
             return Complete(Irp, STATUS_SUCCESS, FILE_OPENED, IsDpcName(FileObject));
 
-        case IRP_MJ_CLEANUP:
         case IRP_MJ_CLOSE:
+            InterlockedDecrement(&OpenFiles);
+            return Complete(Irp, STATUS_SUCCESS, 0, FALSE);
+
+        case IRP_MJ_CLEANUP:
             return Complete(Irp, STATUS_SUCCESS, 0, FALSE);
 
         case IRP_MJ_READ:

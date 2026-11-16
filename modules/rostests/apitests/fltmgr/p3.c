@@ -10,6 +10,10 @@
 
 #define FAKE_SERVICE    L"FltFakeFs"
 
+#ifndef FLTFL_INSTANCE_TEARDOWN_VOLUME_DISMOUNT
+#define FLTFL_INSTANCE_TEARDOWN_VOLUME_DISMOUNT 0x00000008
+#endif
+
 static HANDLE FakeControl = INVALID_HANDLE_VALUE;
 
 /* The fake file system: loaded once, it stays until the next boot */
@@ -123,6 +127,93 @@ test_CreateCompletedAtDispatch(void)
        S.Contexts[FLTSAMPLE_CTX_STREAM_NEW], S.Contexts[FLTSAMPLE_CTX_STREAM_HITS]);
 
     UnloadSample(&P, TRUE);
+}
+
+/*
+ * The file system deletes the device of a volume which is gone, without a dismount (the medium went
+ * away): the instances on it are torn down and the volume leaves the filter manager's list. A new
+ * mount of the disk is a new volume, with new instances.
+ */
+static
+void
+test_VolumeDeviceDeleted(void)
+{
+    SAMPLE P = { { 0 } };
+    FLTSAMPLE_STATS S0, S;
+    FLTFAKEFS_STATS F0, F;
+    HANDLE File;
+    NTSTATUS Status;
+    DWORD Bytes;
+    ULONG i;
+    BOOL Ret = FALSE;
+
+    if (!LoadSample(&P, L"FltSampleP", L"383000.5", 0xFFFF))
+    {
+        skip("Can't load the sample filter\n");
+        return;
+    }
+
+    /* Mounted, with an instance on it */
+    Status = OpenFake(L"gone.dat", &File);
+    ok(Status == STATUS_SUCCESS, "Open: 0x%lx\n", Status);
+    if (NT_SUCCESS(Status))
+        NtClose(File);
+    FakeStats(&F0);
+    SampleStats(&P, &S0);
+    ok(F0.Mounted, "The fake volume isn't mounted\n");
+
+    for (i = 0; i < 50 && !Ret; i++)
+    {
+        Ret = DeviceIoControl(FakeControl, FLTFAKEFS_IOCTL_DELETE_VOLUME, NULL, 0, NULL, 0, &Bytes, NULL);
+        if (!Ret)
+            Sleep(100);
+    }
+    ok(Ret, "The fake file system didn't delete its volume: %lu\n", GetLastError());
+
+    /* The teardown runs in a worker */
+    for (i = 0; i < 100; i++)
+    {
+        SampleStats(&P, &S);
+        if (S.InstanceTeardownCompletes > S0.InstanceTeardownCompletes && S.VolumeCount < S0.VolumeCount)
+            break;
+        Sleep(50);
+    }
+    ok(S.InstanceTeardownCompletes == S0.InstanceTeardownCompletes + 1,
+       "Teardowns: %lu before, %lu after\n", S0.InstanceTeardownCompletes, S.InstanceTeardownCompletes);
+    ok(S.LastTeardownReason == FLTFL_INSTANCE_TEARDOWN_VOLUME_DISMOUNT, "Teardown reason %lu\n", S.LastTeardownReason);
+    ok(S.VolumeCount == S0.VolumeCount - 1, "Volumes: %lu before, %lu after\n", S0.VolumeCount, S.VolumeCount);
+    ok(S.LiveInstances == S0.LiveInstances - 1, "Live instances: %lu before, %lu after\n", S0.LiveInstances, S.LiveInstances);
+
+    /* Mounted again: a new volume and a new instance */
+    Status = OpenFake(L"gone.dat", &File);
+    ok(Status == STATUS_SUCCESS, "Open after the delete: 0x%lx\n", Status);
+    if (NT_SUCCESS(Status))
+        NtClose(File);
+    FakeStats(&F);
+    SampleStats(&P, &S);
+    ok(F.Mounts == F0.Mounts + 1, "Mounts: %lu before, %lu after\n", F0.Mounts, F.Mounts);
+    ok(S.VolumeCount == S0.VolumeCount, "Volumes: %lu before, %lu after the new mount\n", S0.VolumeCount, S.VolumeCount);
+    ok(S.LiveInstances == S0.LiveInstances, "Live instances: %lu before, %lu after the new mount\n",
+       S0.LiveInstances, S.LiveInstances);
+
+    UnloadSample(&P, TRUE);
+}
+
+START_TEST(p3voldel)
+{
+    EnsureTestDirectory();
+    if (!StartFilterManager())
+    {
+        skip("No filter manager\n");
+        return;
+    }
+    if (!LoadFakeFs())
+    {
+        skip("No fake file system\n");
+        return;
+    }
+
+    test_VolumeDeviceDeleted();
 }
 
 START_TEST(p3create)

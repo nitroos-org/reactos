@@ -18,6 +18,7 @@ extern void func_rvchild(void);
 extern void func_portsec(void);
 extern void func_portrace(void);
 extern void func_p3create(void);
+extern void func_p3voldel(void);
 
 const struct test winetest_testlist[] =
 {
@@ -38,5 +39,6 @@ const struct test winetest_testlist[] =
     { "portsec", func_portsec },
     { "portrace", func_portrace },
     { "p3create", func_p3create },
+    { "p3voldel", func_p3voldel },
     { 0, 0 }
 };
