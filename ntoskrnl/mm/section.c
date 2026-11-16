@@ -260,20 +260,6 @@ MiWakePageWaitersSlow(
     KeReleaseSpinLock(&MiPageWaitLock, OldIrql);
 }
 
-/* The caller holds the segment lock and saw the entry at Offset busy: drop the lock, wait for the change, relock */
-static
-VOID
-MiWaitForSegmentPage(
-    _In_ PMM_SECTION_SEGMENT Segment,
-    _In_ PLARGE_INTEGER Offset)
-{
-    PMI_PAGE_WAIT_SLOT Slot = MiRegisterPageWait(Segment, MI_SEGMENT_WAIT_PAGE(Offset));
-
-    MmUnlockSectionSegment(Segment);
-    MiWaitForPageWait(Slot);
-    MmLockSectionSegment(Segment);
-}
-
 #ifndef NEWCC
 KEVENT MmWaitPageEvent;
 
@@ -1700,7 +1686,11 @@ MmMakeSegmentResident(
             /* Let any pending read proceed */
             while (MM_IS_WAIT_PTE(Entry))
             {
-                MiWaitForSegmentPage(Segment, &CurrentOffset);
+                MmUnlockSectionSegment(Segment);
+
+                KeDelayExecutionThread(KernelMode, FALSE, &TinyTime);
+
+                MmLockSectionSegment(Segment);
                 Entry = MmGetPageEntrySectionSegment(Segment, &CurrentOffset);
             }
 
@@ -6689,7 +6679,9 @@ restart:
              * enumeration, so restart it after the wait. */
             if (MM_IS_WAIT_PTE(Entry))
             {
-                MiWaitForSegmentPage(Segment, &PageOff);
+                MmUnlockSectionSegment(Segment);
+                KeDelayExecutionThread(KernelMode, FALSE, &TinyTime);
+                MmLockSectionSegment(Segment);
                 goto restart;
             }
 
@@ -6887,7 +6879,9 @@ MmZeroSegmentRange(
                     goto done;
                 }
                 /* Another thread's read is in flight: let it finish. This is not a memory shortage. */
-                MiWaitForSegmentPage(Segment, &Offset);
+                MmUnlockSectionSegment(Segment);
+                KeDelayExecutionThread(KernelMode, FALSE, &TinyTime);
+                MmLockSectionSegment(Segment);
                 continue;
             }
 
@@ -7046,8 +7040,10 @@ MmPurgeSegment(
 
         if (IS_WRITE_SSE(Entry))
         {
-            /* We're trying to purge an entry which is being written: wait for the write, then retry this page */
-            MiWaitForSegmentPage(Segment, &PurgeStart);
+            /* We're trying to purge an entry which is being written. Restart this loop iteration */
+            MmUnlockSectionSegment(Segment);
+            KeDelayExecutionThread(KernelMode, FALSE, &TinyTime);
+            MmLockSectionSegment(Segment);
             continue;
         }
 
@@ -7316,7 +7312,9 @@ MmMakeSegmentDirty(
         /* Let any pending read proceed */
         while (MM_IS_WAIT_PTE(Entry))
         {
-            MiWaitForSegmentPage(Segment, &RangeStart);
+            MmUnlockSectionSegment(Segment);
+            KeDelayExecutionThread(KernelMode, FALSE, &TinyTime);
+            MmLockSectionSegment(Segment);
             Entry = MmGetPageEntrySectionSegment(Segment, &RangeStart);
         }
 
@@ -7790,7 +7788,9 @@ MmFlushSegment(
 
                 do
                 {
-                    MiWaitForSegmentPage(Segment, &FlushStart);
+                    MmUnlockSectionSegment(Segment);
+                    KeDelayExecutionThread(KernelMode, FALSE, &TinyTime);
+                    MmLockSectionSegment(Segment);
                     Entry = MmGetPageEntrySectionSegment(Segment, &FlushStart);
                 } while (IS_WRITE_SSE(Entry) && !IS_SWAP_FROM_SSE(Entry) &&
                          (KeQueryInterruptTime() - WaitStart < (ULONGLONG)MI_FLUSH_WRITE_WAIT_100NS));
