@@ -145,6 +145,11 @@ KeConnectInterrupt(IN PKINTERRUPT Interrupt)
             goto Cleanup;
         }
 
+        /* This interrupt becomes the handler of the vector when the one
+         * connected now is disconnected first, and its dispatch code then
+         * calls DispatchAddress: set it here, as for an unshared vector */
+        Interrupt->DispatchAddress = KiInterruptDispatch;
+
         /* Insert the new interrupt into the connected interrupt's list */
         InsertTailList(&ConnectedInterrupt->InterruptListEntry,
                        &Interrupt->InterruptListEntry);
