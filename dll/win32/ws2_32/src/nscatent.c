@@ -44,6 +44,13 @@ WsNcEntryDelete(IN PNSCATALOG_ENTRY CatalogEntry)
         CatalogEntry->Provider = NULL;
     }
 
+    /* Free the display string read from the registry */
+    if (CatalogEntry->ProviderName)
+    {
+        HeapFree(WsSockHeap, 0, CatalogEntry->ProviderName);
+        CatalogEntry->ProviderName = NULL;
+    }
+
     /* Delete us */
     HeapFree(WsSockHeap, 0, CatalogEntry);
 }
