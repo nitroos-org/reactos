@@ -64,8 +64,9 @@ ServiceControlHandler(
     {
         case SERVICE_CONTROL_STOP:
             TRACE("  SERVICE_CONTROL_STOP received\n");
-            /* Stop listening to incoming RPC messages */
-            RpcMgmtStopServerListening(NULL);
+            /* The service lives in lsass.exe: only its interface goes, the LSA and SAM interfaces of the process
+               keep listening */
+            RpcServerUnregisterIf(logon_v1_0_s_ifspec, NULL, TRUE);
             UpdateServiceStatus(SERVICE_STOPPED);
             return ERROR_SUCCESS;
 
