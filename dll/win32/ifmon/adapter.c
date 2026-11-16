@@ -232,6 +232,24 @@ IfSetAdminState(
     return Error;
 }
 
+/* The caller is a member of the Administrators group. The connection names are machine-wide, and the network
+   connections folder (netshell) offers Rename to administrators only */
+BOOL
+IfCallerIsAdmin(VOID)
+{
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    PSID AdminSid;
+    BOOL IsMember = FALSE;
+
+    if (!AllocateAndInitializeSid(&NtAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS,
+                                  0, 0, 0, 0, 0, 0, &AdminSid))
+        return FALSE;
+    if (!CheckTokenMembership(NULL, AdminSid, &IsMember))
+        IsMember = FALSE;
+    FreeSid(AdminSid);
+    return IsMember;
+}
+
 DWORD
 IfRenameConnection(
     _In_ const IF_CONN *Conn,

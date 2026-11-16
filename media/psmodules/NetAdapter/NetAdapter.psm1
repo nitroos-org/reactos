@@ -134,7 +134,7 @@ function Invoke-NetAdapterState {
 function Disable-NetAdapter {
     [CmdletBinding(DefaultParameterSetName = 'ByName', SupportsShouldProcess = $true, ConfirmImpact = 'High')]
     param(
-        [Parameter(ParameterSetName = 'ByName', Position = 0, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(ParameterSetName = 'ByName', Mandatory = $true, Position = 0, ValueFromPipelineByPropertyName = $true)]
         [Alias('ifAlias', 'InterfaceAlias')]
         [string[]]$Name,
 
@@ -160,7 +160,7 @@ function Disable-NetAdapter {
 function Enable-NetAdapter {
     [CmdletBinding(DefaultParameterSetName = 'ByName', SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
     param(
-        [Parameter(ParameterSetName = 'ByName', Position = 0, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(ParameterSetName = 'ByName', Mandatory = $true, Position = 0, ValueFromPipelineByPropertyName = $true)]
         [Alias('ifAlias', 'InterfaceAlias')]
         [string[]]$Name,
 
@@ -186,7 +186,7 @@ function Enable-NetAdapter {
 function Restart-NetAdapter {
     [CmdletBinding(DefaultParameterSetName = 'ByName', SupportsShouldProcess = $true, ConfirmImpact = 'High')]
     param(
-        [Parameter(ParameterSetName = 'ByName', Position = 0, ValueFromPipelineByPropertyName = $true)]
+        [Parameter(ParameterSetName = 'ByName', Mandatory = $true, Position = 0, ValueFromPipelineByPropertyName = $true)]
         [Alias('ifAlias', 'InterfaceAlias')]
         [string[]]$Name,
 

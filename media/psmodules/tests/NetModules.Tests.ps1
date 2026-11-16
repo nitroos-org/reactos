@@ -1025,6 +1025,8 @@ Describe 'Disable-/Enable-/Restart-NetAdapter' {
         $keys = @((Get-Command $Name).Parameters.Keys)
         foreach ($p in $own) { $keys | Should -Contain $p }
         (PSetInfo $Name Name ByName).Position | Should -Be 0
+        # Windows: -Name is required in the ByName set (no name never means every adapter)
+        (PSetInfo $Name Name ByName).IsMandatory | Should -Be $true
         (Get-Command $Name).Parameters['Name'].ParameterType.FullName | Should -Be 'System.String[]'
     }
     It '<Name> -WhatIf is accepted, writes no error and changes nothing (the text "What if: <Name> ''<adapter>''" goes to the host)' -TestCases @(@{ Name = 'Disable-NetAdapter' }, @{ Name = 'Enable-NetAdapter' }, @{ Name = 'Restart-NetAdapter' }) {

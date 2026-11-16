@@ -31,6 +31,9 @@ IfSetAdminState(
     _In_ const IF_CONN *Conn,
     _In_ BOOL Enable);
 
+BOOL
+IfCallerIsAdmin(VOID);
+
 DWORD
 IfRenameConnection(
     _In_ const IF_CONN *Conn,

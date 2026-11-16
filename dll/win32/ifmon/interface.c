@@ -167,7 +167,13 @@ InterfaceSetInterface(
         return ERROR_NO_MORE_ITEMS;
     }
 
-    if (Values[3] != NULL && _wcsicmp(Values[3], Conn->Name) != 0 && FindConnection(List, Count, Values[3]) != NULL)
+    /* A new name: not empty (the connection would have no name netsh or the connections folder could use again) and
+       only from an administrator (the registry key of the name does not stop a standard user) */
+    if (Values[3] != NULL && Values[3][0] == UNICODE_NULL)
+        Error = ERROR_INVALID_PARAMETER;
+    else if (Values[3] != NULL && !IfCallerIsAdmin())
+        Error = ERROR_ACCESS_DENIED;
+    else if (Values[3] != NULL && _wcsicmp(Values[3], Conn->Name) != 0 && FindConnection(List, Count, Values[3]) != NULL)
         Error = ERROR_ALREADY_EXISTS;
 
     /* The administrative state first, then the name: the device keeps its connection either way */
