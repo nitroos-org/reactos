@@ -2,6 +2,7 @@
 #include <apitest.h>
 
 extern void func_DnscacheHandles(void);
+extern void func_DnsCache(void);
 extern void func_DnsQuery(void);
 extern void func_DnsQueryAaaa(void);
 extern void func_DnsQueryMany(void);
@@ -11,6 +12,7 @@ extern void func_HostsFile(void);
 const struct test winetest_testlist[] =
 {
     { "DnscacheHandles", func_DnscacheHandles },
+    { "DnsCache", func_DnsCache },
     { "DnsQuery", func_DnsQuery },
     { "DnsQueryAaaa", func_DnsQueryAaaa },
     { "DnsQueryMany", func_DnsQueryMany },

@@ -1,6 +1,7 @@
 
 list(APPEND SOURCE
     DnscacheHandles.c
+    DnsCache.c
     DnsQuery.c
     DnsQueryAaaa.c
     DnsQueryMany.c
