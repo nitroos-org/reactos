@@ -37,10 +37,26 @@ WSPEventSelect(
         return SOCKET_ERROR;
     }
 
+    /* Events to report need an event to set: WSAEINVAL on Windows 10. Checked before anything of the socket changes */
+    if (!hEventObject && lNetworkEvents)
+    {
+        if (lpErrno) *lpErrno = WSAEINVAL;
+        return SOCKET_ERROR;
+    }
+
     Status = NtCreateEvent(&SockEvent, EVENT_ALL_ACCESS,
                            NULL, SynchronizationEvent, FALSE);
 
     if (!NT_SUCCESS(Status)) return SOCKET_ERROR;
+
+    /* The caller's handle was not open: its value went to our own event, which AFD would take for it.
+     * A handle that names nothing gives WSAENOTSOCK (Windows 10) */
+    if (hEventObject && hEventObject == SockEvent)
+    {
+        NtClose(SockEvent);
+        if (lpErrno) *lpErrno = WSAENOTSOCK;
+        return SOCKET_ERROR;
+    }
 
     /* Set Socket to Non-Blocking */
     BlockMode = TRUE;
@@ -166,6 +182,14 @@ WSPEnumNetworkEvents(
 
     if( !NT_SUCCESS(Status) ) {
         ERR("Could not make an event %x\n", Status);
+        return SOCKET_ERROR;
+    }
+
+    /* As in WSPEventSelect: a caller's handle that was not open now names our own event */
+    if (hEventObject && hEventObject == SockEvent)
+    {
+        NtClose(SockEvent);
+        if (lpErrno) *lpErrno = WSAENOTSOCK;
         return SOCKET_ERROR;
     }
 

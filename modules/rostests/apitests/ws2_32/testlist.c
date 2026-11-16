@@ -65,6 +65,9 @@ extern void func_rcvwindow(void);
 extern void func_recv(void);
 extern void func_send(void);
 extern void func_selecttimeval(void);
+extern void func_selectclose(void);
+extern void func_eventhandle(void);
+extern void func_selectsets(void);
 extern void func_shutdownrecv(void);
 extern void func_sotimeout(void);
 extern void func_socketscale(void);
@@ -164,6 +167,9 @@ const struct test winetest_testlist[] =
     { "recv", func_recv },
     { "send", func_send },
     { "selecttimeval", func_selecttimeval },
+    { "selectclose", func_selectclose },
+    { "eventhandle", func_eventhandle },
+    { "selectsets", func_selectsets },
     { "shutdownrecv", func_shutdownrecv },
     { "sotimeout", func_sotimeout },
     { "socketscale", func_socketscale },
