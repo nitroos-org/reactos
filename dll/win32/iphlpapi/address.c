@@ -1370,6 +1370,48 @@ Gateways:
         Ipv6FreeDns(&Dns6);
     }
 
+    /* The DHCPv6 server that answered the DHCP service (Dhcpv6Server, W7 and later structure): a SOCKADDR_IN6 of its
+       link-local address behind the lists, for the adapters that have IPv6 and a server */
+    if (V6On && Family != AF_INET)
+    {
+        ULONG AdapterNumber;
+
+        for (AdapterNumber = 0; AdapterNumber < AdapterIndexCount; AdapterNumber++)
+        {
+            DWORD IfIndex = AdapterIndexes[AdapterNumber];
+            PIP_ADAPTER_ADDRESSES CurrentAA = NULL, Candidate;
+            UCHAR Server[16];
+            ULONG Size = (sizeof(SOCKADDR_IN6) + 7) & ~7UL;
+
+            if (!Ipv6FindInterface(V6, IfIndex) || !Ipv6ReadDhcpServer(AdapterNames[AdapterNumber], Server))
+                continue;
+
+            for (Candidate = pAdapterAddresses; Candidate; Candidate = Candidate->Next)
+            {
+                if (Candidate->Length && Candidate->IfIndex == IfIndex)
+                {
+                    CurrentAA = Candidate;
+                    break;
+                }
+            }
+
+            if (CurrentAA && Ptr && (RemainingSize >= Size))
+            {
+                LPSOCKADDR_IN6 Socket = (LPSOCKADDR_IN6)Ptr;
+
+                RtlZeroMemory(Socket, sizeof(*Socket));
+                Socket->sin6_family = AF_INET6;
+                RtlCopyMemory(&Socket->sin6_addr, Server, 16);
+                Socket->sin6_scope_id = IfIndex;
+                ((IP_ADAPTER_ADDRESSES_LH *)CurrentAA)->Dhcpv6Server.lpSockaddr = (LPSOCKADDR)Socket;
+                ((IP_ADAPTER_ADDRESSES_LH *)CurrentAA)->Dhcpv6Server.iSockaddrLength = sizeof(SOCKADDR_IN6);
+                Ptr += Size;
+                RemainingSize -= Size;
+            }
+            TotalSize += Size;
+        }
+    }
+
     /* We're done */
     HeapFree(GetProcessHeap(), 0, AdapterIndexes);
     HeapFree(GetProcessHeap(), 0, AdapterNames);

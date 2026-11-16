@@ -337,3 +337,35 @@ VOID Ipv6FillDhcpIdentity(PIP_ADAPTER_ADDRESSES_LH Out, PCSTR AdapterName)
     }
   }
 }
+
+/* The link-local address of the DHCPv6 server that answered the DHCP service last (Dhcpv6ServerAddress under the
+   interface's Tcpip6 key, written by the service); FALSE when the interface has none */
+BOOL Ipv6ReadDhcpServer(PCSTR AdapterName, PUCHAR Address)
+{
+  CHAR KeyName[256], Text[64];
+  HKEY Key;
+  DWORD Type, Size = sizeof(Text) - 1;
+  BOOL Found = FALSE;
+
+  if (!AdapterName || !AdapterName[0])
+    return FALSE;
+  snprintf(KeyName, sizeof(KeyName),
+           "SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters\\Interfaces\\%s", AdapterName);
+  if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, KeyName, 0, KEY_READ, &Key) != ERROR_SUCCESS)
+    return FALSE;
+  if (RegQueryValueExA(Key, "Dhcpv6ServerAddress", NULL, &Type, (LPBYTE)Text, &Size) == ERROR_SUCCESS && Type == REG_SZ)
+  {
+    IN6_ADDR Parsed;
+    PCSTR End;
+
+    Text[Size] = '\0';
+    Text[sizeof(Text) - 1] = '\0';
+    if (NT_SUCCESS(RtlIpv6StringToAddressA(Text, &End, &Parsed)) && *End == '\0')
+    {
+      memcpy(Address, &Parsed, 16);
+      Found = TRUE;
+    }
+  }
+  RegCloseKey(Key);
+  return Found;
+}
