@@ -26,6 +26,7 @@ list(APPEND SOURCE
     gaiconcurrent.c
     getaddrinfo.c
     getaddrinfo6.c
+    getaddrinfocanon.c
     GetHostNameW.c
     gethostname.c
     getnameinfo.c

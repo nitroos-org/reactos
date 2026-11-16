@@ -36,9 +36,10 @@ typedef struct _RESOLVER_CACHE_ENTRY
     LIST_ENTRY LruLink;         /* the entries of the answers of DNS servers, least recently used first */
     BOOL bHostsFileEntry;
     PDNS_RECORDW Record;        /* NULL for a negative entry */
-    PWSTR NegName;              /* the name of a negative entry (owned) */
-    PCWSTR Name;                /* the name of the entry (of the record, or NegName) */
-    WORD Type;
+    PWSTR KeyName;              /* owned copy of the name the entry is found by, when it is not the owner of the first
+                                   record: a negative entry, an answer that starts with the CNAME chain of an alias */
+    PCWSTR Name;                /* the name the entry is found by (the owner of the record, or KeyName) */
+    WORD Type;                  /* the type the entry answers (an answer through aliases starts with CNAME records) */
     BOOL bNoSearch;             /* negative entries: asked without the search list */
     DNS_STATUS NegStatus;       /* negative entries: DNS_ERROR_RCODE_NAME_ERROR or DNS_INFO_NO_RECORDS */
     ULONGLONG ExpiresAt;        /* in milliseconds of the cache clock, 0 = never */
@@ -102,6 +103,8 @@ DnsIntCacheAddEntry(
 
 VOID
 DnsIntCacheAddResult(
+    _In_ LPCWSTR Name,
+    _In_ WORD wType,
     _In_ PDNS_RECORDW Records);
 
 VOID

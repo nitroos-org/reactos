@@ -534,8 +534,10 @@ IsIpv6Usable(IN const IN6_ADDR *Address,
 
 /*
  * The IPv6 addresses of NodeName (DNS_TYPE_AAAA, which also answers this machine's own name and "localhost"
- * locally) as a chain of addrinfo structures in *pptResult; *pCanonical gets the name of the first record
- * (allocated here, NULL when there is none). Returns 0 or an EAI_ code: EAI_NONAME when the name has no AAAA record.
+ * locally) as a chain of addrinfo structures in *pptResult; *pCanonical gets the name of the first AAAA record
+ * (allocated here, NULL when there is none): the canonical name, as the answer of an alias starts with the CNAME
+ * records of its chain and its AAAA records are owned by the end of the chain (no further query is made for it).
+ * Returns 0 or an EAI_ code: EAI_NONAME when the name has no AAAA record.
  */
 static
 INT
@@ -952,7 +954,9 @@ LookupAddressForName(IN LPCSTR NodeName,
         }
         else
         {
-            /* Convert the alias to UNICODE */
+            /* Convert the alias to UNICODE: h_name, the owner of the A records of the answer, which for an alias is the
+               end of its CNAME chain (dnsapi returns the chain, from the server and from the cache) and for a name
+               answered locally (hosts file, this machine) the name itself; no further query is made for it */
             MultiByteToWideChar(CP_ACP,
                                 0,
                                 Alias,

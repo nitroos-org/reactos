@@ -1027,6 +1027,64 @@ SetListTtl(
         List->dwTtl = Ttl;
 }
 
+static
+PDNS_RECORDW
+AppendTypedRecord(
+    _In_ PCWSTR Name,
+    _In_ WORD Type,
+    _In_ WORD DataLength,
+    _In_ DWORD Ttl,
+    _Inout_ PDNS_RECORDW *First,
+    _Inout_ PDNS_RECORDW *Last);
+
+/*
+ * The CNAME records of an answer that came through a chain of aliases. Windows' DnsQuery answers an A or AAAA query
+ * of an alias with the CNAME records of the chain, in order (the first one is owned by the name asked for), then the
+ * records of the type, owned by the end of the chain; the canonical name of getaddrinfo and the h_name of
+ * gethostbyname are the owner of the first address record. A link (Owner -> Target) is appended to the list
+ * (First, Last); the owner of the next link, and of the address records, is ChainOwner(Name, Last).
+ */
+static
+BOOL
+AppendChainLink(
+    _In_ PCWSTR Owner,
+    _In_ PCSTR Target,
+    _Inout_ PDNS_RECORDW *First,
+    _Inout_ PDNS_RECORDW *Last)
+{
+    PDNS_RECORDW Record;
+
+    Record = AppendTypedRecord(Owner, DNS_TYPE_CNAME, sizeof(DNS_PTR_DATAW), 0, First, Last);
+    if (Record == NULL)
+        return FALSE;
+    Record->Data.CNAME.pNameHost = DnsCToW(Target);
+    return Record->Data.CNAME.pNameHost != NULL;
+}
+
+/* The name the next records of the answer are owned by: the target of the last link of the chain, else the name */
+static
+PCWSTR
+ChainOwner(
+    _In_ PCWSTR Name,
+    _In_opt_ PDNS_RECORDW Last)
+{
+    return Last ? Last->Data.CNAME.pNameHost : Name;
+}
+
+/* The answer: the links of the chain (if any) followed by the records of the type */
+static
+PDNS_RECORDW
+JoinChain(
+    _In_opt_ PDNS_RECORDW ChainFirst,
+    _In_opt_ PDNS_RECORDW ChainLast,
+    _In_opt_ PDNS_RECORDW Records)
+{
+    if (ChainFirst == NULL)
+        return Records;
+    ChainLast->pNext = Records;
+    return ChainFirst;
+}
+
 /*
  * PTR query: Name is a reverse name (like 8.8.8.8.in-addr.arpa); every PTR record in the answer is returned.
  * The name servers of the machine are asked, recursively.
@@ -1327,7 +1385,7 @@ QueryAaaa(LPCWSTR Name,
     PIP_ADDR_STRING pip;
     struct in_addr addr;
     PCHAR AnsiName, CurrentName, NextName;
-    PDNS_RECORDW First, Last;
+    PDNS_RECORDW First, Last, ChainFirst = NULL, ChainLast = NULL;
     DNS_STATUS Status;
     size_t NameLen;
     BOOL IsOwn;
@@ -1461,14 +1519,21 @@ QueryAaaa(LPCWSTR Name,
         {
             First = Last = NULL;
             Status = ERROR_SUCCESS;
-            for (i = 0; i < answer->nrrs; i++)
+
+            /* the CNAME record that adns followed itself (the last link of the chain), then the addresses, owned
+               by the end of the chain (see AppendChainLink) */
+            if (answer->cname && !AppendChainLink(ChainOwner(Name, ChainLast), answer->cname, &ChainFirst, &ChainLast))
+                Status = ERROR_OUTOFMEMORY;
+            for (i = 0; i < answer->nrrs && Status == ERROR_SUCCESS; i++)
             {
-                if (!AppendAaaaRecord(Name, &answer->rrs.in6addr[i], &First, &Last))
+                if (!AppendAaaaRecord(ChainOwner(Name, ChainLast), &answer->rrs.in6addr[i], &First, &Last))
                 {
                     Status = ERROR_OUTOFMEMORY;
                     break;
                 }
             }
+            First = JoinChain(ChainFirst, ChainLast, First);
+            ChainFirst = ChainLast = NULL;
             if (Status == ERROR_SUCCESS)
             {
                 ApplyChainExpiry(answer, ChainExpires);
@@ -1484,7 +1549,11 @@ QueryAaaa(LPCWSTR Name,
         if (answer->status == adns_s_prohibitedcname && answer->cname)
         {
             KeepChainExpiry(&ChainExpires, answer);
-            NextName = (PCHAR)xstrsaveA(answer->cname);
+            /* a link of the chain: CurrentName is an alias of answer->cname, which is an alias too */
+            if (AppendChainLink(ChainOwner(Name, ChainLast), answer->cname, &ChainFirst, &ChainLast))
+                NextName = (PCHAR)xstrsaveA(answer->cname);
+            else
+                NextName = NULL;
             free(answer);
             if (CurrentName != AnsiName)
                 RtlFreeHeap(RtlGetProcessHeap(), 0, CurrentName);
@@ -1510,6 +1579,9 @@ QueryAaaa(LPCWSTR Name,
         break;
     }
 
+    /* no answer: the links found so far are not returned */
+    if (ChainFirst)
+        DnsIntFreeRecordList((PDNS_RECORD)ChainFirst);
     adns_finish(astate);
     if (CurrentName != AnsiName)
         RtlFreeHeap(RtlGetProcessHeap(), 0, CurrentName);
@@ -1913,6 +1985,7 @@ Query_Main(LPCWSTR Name,
     LPSTR CurrentName;
     unsigned CNameLoop;
     time_t ChainExpires = 0;
+    PDNS_RECORDW ChainFirst = NULL, ChainLast = NULL;
     PFIXED_INFO network_info;
     ULONG network_info_blen = 0;
     DWORD network_info_result;
@@ -2076,6 +2149,8 @@ Query_Main(LPCWSTR Name,
                     RtlFreeHeap(RtlGetProcessHeap(), 0, CurrentName);
 
                 RtlFreeHeap(RtlGetProcessHeap(), 0, AnsiName);
+                if (ChainFirst)
+                    DnsIntFreeRecordList((PDNS_RECORD)ChainFirst);
                 return DnsIntTranslateAdnsToDNS_STATUS(adns_error);
             }
 
@@ -2090,16 +2165,23 @@ Query_Main(LPCWSTR Name,
 
                 RtlFreeHeap(RtlGetProcessHeap(), 0, AnsiName);
 
-                /* one record for every address of the answer, in the order of the answer */
-                for (n = 0; n < answer->nrrs; n++)
+                /* the CNAME record that adns followed itself (the last link of the chain) */
+                if (answer->cname && !AppendChainLink(ChainOwner(Name, ChainLast), answer->cname, &ChainFirst, &ChainLast))
+                    Result = ERROR_OUTOFMEMORY;
+
+                /* one record for every address of the answer, in the order of the answer, owned by the end of the
+                   chain (the name asked for when it is no alias) */
+                for (n = 0; n < answer->nrrs && Result == ERROR_SUCCESS; n++)
                 {
-                    if (!AppendARecord(Name, answer->rrs.addr[n].addr.inet.sin_addr.s_addr, &First, &Last))
+                    if (!AppendARecord(ChainOwner(Name, ChainLast),
+                                       answer->rrs.addr[n].addr.inet.sin_addr.s_addr, &First, &Last))
                     {
                         Result = ERROR_OUTOFMEMORY;
                         break;
                     }
                 }
 
+                First = JoinChain(ChainFirst, ChainLast, First);
                 ApplyChainExpiry(answer, ChainExpires);
                 SetListTtl(First, AnswerTtl(answer));
                 free(answer);
@@ -2134,20 +2216,28 @@ Query_Main(LPCWSTR Name,
                     RtlFreeHeap(RtlGetProcessHeap(), 0, CurrentName);
 
                 RtlFreeHeap(RtlGetProcessHeap(), 0, AnsiName);
+                if (ChainFirst)
+                    DnsIntFreeRecordList((PDNS_RECORD)ChainFirst);
                 return Negative;
             }
 
             if (CurrentName != AnsiName)
                 RtlFreeHeap(RtlGetProcessHeap(), 0, CurrentName);
 
+            /* a link of the chain: CurrentName is an alias of answer->cname, which is an alias too */
             KeepChainExpiry(&ChainExpires, answer);
-            CurrentName = (LPSTR)xstrsaveA(answer->cname);
+            if (!AppendChainLink(ChainOwner(Name, ChainLast), answer->cname, &ChainFirst, &ChainLast))
+                CurrentName = NULL;
+            else
+                CurrentName = (LPSTR)xstrsaveA(answer->cname);
             free(answer);
 
             if (!CurrentName)
             {
                 RtlFreeHeap(RtlGetProcessHeap(), 0, AnsiName);
                 adns_finish(astate);
+                if (ChainFirst)
+                    DnsIntFreeRecordList((PDNS_RECORD)ChainFirst);
                 return ERROR_OUTOFMEMORY;
             }
         }
@@ -2155,6 +2245,8 @@ Query_Main(LPCWSTR Name,
         adns_finish(astate);
         RtlFreeHeap(RtlGetProcessHeap(), 0, AnsiName);
         RtlFreeHeap(RtlGetProcessHeap(), 0, CurrentName);
+        if (ChainFirst)
+            DnsIntFreeRecordList((PDNS_RECORD)ChainFirst);
         return ERROR_FILE_NOT_FOUND;
 
     case DNS_TYPE_PTR:

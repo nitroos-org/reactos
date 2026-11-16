@@ -860,7 +860,9 @@ NSP_GetHostByNameHeapAllocW(_In_ PWSHANDLEINTERN data,
     //ASSERT(dp->wType == DNS_TYPE_A);
     //ASSERT(dp->wDataLength == sizeof(DNS_A_DATA));
 
-    /* The answer: CNAMEs (the aliases) and every A record, in the order of the answer */
+    /* The answer: the CNAME records of the chain of an alias, then every A record, in the order of the answer. The
+       owners of the CNAME records are the aliases (h_aliases); the owner of the A records, the end of the chain, is
+       the canonical name (h_name) */
     {
         DWORD Count = 0;
 
@@ -888,7 +890,7 @@ NSP_GetHostByNameHeapAllocW(_In_ PWSHANDLEINTERN data,
             if (curr->wType == DNS_TYPE_CNAME)
             {
                 if (AliasIndex < WS2_INTERNAL_MAX_ALIAS - 1)
-                    Aliases[AliasIndex++] = curr->Data.Cname.pNameHost;
+                    Aliases[AliasIndex++] = curr->pName;
             }
             else if (curr->wType == DNS_TYPE_A)
             {
