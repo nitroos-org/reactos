@@ -365,6 +365,11 @@ struct netif {
   /** Number of Router Solicitation messages that remain to be sent. */
   u8_t rs_count;
 #endif /* LWIP_IPV6_SEND_ROUTER_SOLICIT */
+#if LWIP_IPV6 && LWIP_IPV6_DUP_DETECT_ATTEMPTS
+  /** NitroOS: the duplicate address detection probes (RFC 4862 section 5.4) that remain to be sent, one per ND timer
+   *  tick, for the addresses in use after the link came up again (nd6_redad_netif). */
+  u8_t redad_count;
+#endif /* LWIP_IPV6 && LWIP_IPV6_DUP_DETECT_ATTEMPTS */
 #if MIB2_STATS
   /** link type (from "snmp_ifType" enum from snmp_mib2.h) */
   u8_t link_type;

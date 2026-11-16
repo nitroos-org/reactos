@@ -1285,6 +1285,23 @@ nd6_tmr(void)
         }
       }
     }
+#if LWIP_IPV6_DUP_DETECT_ATTEMPTS
+    /* NitroOS: the link came up again (nd6_redad_netif): probe the addresses in use once more, one probe per tick,
+     * as many as the interface's DAD transmits. They keep their state (and their connections): an answer marks the
+     * address duplicated like any other, and nobody answers when nobody else has the address. */
+    if (netif->redad_count > 0) {
+      netif->redad_count--;
+      if (netif_is_up(netif) && netif_is_link_up(netif)) {
+        for (i = 0; i < LWIP_IPV6_NUM_ADDRESSES; ++i) {
+          u8_t state = netif_ip6_addr_state(netif, i);
+          if (ip6_addr_ispreferred(state) || ip6_addr_isdeprecated(state)) {
+            nd6_send_ns(netif, netif_ip6_addr(netif, i),
+              ND6_SEND_FLAG_MULTICAST_DEST | ND6_SEND_FLAG_ANY_SRC);
+          }
+        }
+      }
+    }
+#endif /* LWIP_IPV6_DUP_DETECT_ATTEMPTS */
   }
 
 #if LWIP_IPV6_SEND_ROUTER_SOLICIT
@@ -2627,6 +2644,24 @@ nd6_adjust_mld_membership(struct netif *netif, s8_t addr_idx, u8_t new_state)
   }
 }
 #endif /* LWIP_IPV6_MLD */
+
+#if LWIP_IPV6_DUP_DETECT_ATTEMPTS
+/**
+ * NitroOS: the link of netif came up again. A host that was disconnected may have met another one with the same
+ * address meanwhile, so duplicate address detection runs again for the addresses in use (RFC 4862 section 5.4:
+ * after the interface was reconnected; Windows probes every address once at the moment the link comes up). The
+ * probes are sent by nd6_tmr, one per tick, as many as the interface has DAD transmits (zero: none).
+ */
+void
+nd6_redad_netif(struct netif *netif)
+{
+#ifdef LWIP_HOOK_ND6_DAD_ATTEMPTS
+  netif->redad_count = LWIP_HOOK_ND6_DAD_ATTEMPTS(netif);
+#else
+  netif->redad_count = LWIP_IPV6_DUP_DETECT_ATTEMPTS;
+#endif
+}
+#endif /* LWIP_IPV6_DUP_DETECT_ATTEMPTS */
 
 /** Netif was added, set up, or reconnected (link up) */
 void
