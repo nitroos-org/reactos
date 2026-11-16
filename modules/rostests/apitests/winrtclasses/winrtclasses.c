@@ -251,8 +251,8 @@ static void TestGetTicketAsync(void *statics)
     ok(hr == E_INVALIDARG, "GetTicketAsync without an ApplicationId returned 0x%08lx\n", hr);
     ok(operation == NULL, "GetTicketAsync without an ApplicationId returned the operation %p\n", operation);
 
-    /* With an ApplicationId set the behaviour on Windows was not measured; here the operation is completed at once
-     * (no Microsoft account) with no identity and a status other than Success. */
+    /* With an ApplicationId set and no Microsoft account, Windows 10 completes the operation at once with
+     * ServiceConnectionError (2), ExtendedError 0x800704CF (ERROR_NETWORK_UNREACHABLE) and no identity. */
     hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, GUID))VTBL(authenticator)[7])(authenticator, Id);
     ok(hr == S_OK, "put_ApplicationId returned 0x%08lx\n", hr);
     operation = NULL;
@@ -307,9 +307,9 @@ static void TestGetTicketAsync(void *statics)
                 ok(hr == S_OK && identity == NULL, "Identity returned 0x%08lx, %p\n", hr, identity);
                 status = -1;
                 hr = ((PFN_OUT)VTBL(iresult)[7])(iresult, &status);
-                ok(hr == S_OK && (status == 1 || status == 2), "Status returned 0x%08lx, %d\n", hr, status);
+                ok(hr == S_OK && status == 2, "Status returned 0x%08lx, %d\n", hr, status);
                 hr = ((PFN_OUT)VTBL(iresult)[8])(iresult, &status);
-                ok(hr == S_OK && status < 0, "ExtendedError returned 0x%08lx, 0x%08x\n", hr, status);
+                ok(hr == S_OK && status == (int)0x800704CF, "ExtendedError returned 0x%08lx, 0x%08x\n", hr, status);
                 RELEASE(iresult);
             }
             RELEASE(result);

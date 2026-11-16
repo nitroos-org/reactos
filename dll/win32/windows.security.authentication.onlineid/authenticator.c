@@ -208,9 +208,11 @@ static HRESULT WINAPI authenticator_GetTicketAsync( IOnlineIdSystemAuthenticator
     *operation = NULL;
     if (IsEqualGUID( &impl->application_id, &GUID_NULL )) return E_INVALIDARG;
 
-    /* TODO(oracle): what Windows returns once an ApplicationId is set is not measured (the one probe was spent on the
-     * default). No Microsoft account is signed in here, so the operation completes with no identity. */
-    return create_ticket_async( OnlineIdSystemTicketStatus_Error, E_FAIL, operation );
+    /* Measured on Windows 10 22H2 with an ApplicationId set and no Microsoft account signed in, both with the network
+     * down and with the sign-in service unreachable: the operation completes within a few milliseconds with
+     * ServiceConnectionError, ExtendedError ERROR_NETWORK_UNREACHABLE (0x800704CF) and no identity. */
+    return create_ticket_async( OnlineIdSystemTicketStatus_ServiceConnectionError,
+                                HRESULT_FROM_WIN32( ERROR_NETWORK_UNREACHABLE ), operation );
 }
 
 static HRESULT WINAPI authenticator_put_ApplicationId( IOnlineIdSystemAuthenticatorForUser *iface, GUID value )
