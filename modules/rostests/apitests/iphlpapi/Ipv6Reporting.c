@@ -1,9 +1,10 @@
 /*
  * PROJECT:     ReactOS API tests
  * LICENSE:     LGPL-2.1-or-later (https://spdx.org/licenses/LGPL-2.1-or-later)
- * PURPOSE:     What iphlpapi reports about IPv6: nothing while the stack has IPv6 off (the answers of a system
- *              without IPv6), and with Tcpip\Parameters\Ipv6Enable set the addresses, flags and interface rows
- *              the way a Windows 10 22H2 system reports them for the loopback interface and an Ethernet adapter
+ * PURPOSE:     What iphlpapi reports about IPv6: the addresses, flags and interface rows the way a Windows 10 22H2
+ *              system reports them for the loopback interface and an Ethernet adapter; and, while IPv6 is off on
+ *              the adapters (Tcpip\Parameters\Ipv6Enable = 0 or Tcpip6\Parameters\DisabledComponents with 0x10),
+ *              that only the loopback interface has IPv6 (the stack itself is always up)
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
@@ -107,20 +108,30 @@ static PFREE_MIB_TABLE pFreeMibTable;
 
 static BOOL Ipv6On;
 
-/* The switch the stack was started with is what Tcpip\Parameters\Ipv6Enable says at boot; the test reads the same
-   value (it is not changed while the system runs) */
+/* Whether IPv6 is on the adapters: what the stack read when it started (it is not changed while the system runs).
+   Ipv6Enable = 0 and DisabledComponents with 0x10 (0xFF has it) leave IPv6 on the loopback interface only; an
+   absent value is on */
 static BOOL ReadSwitch(void)
 {
     HKEY Key;
     DWORD Value = 0, Size = sizeof(Value), Type = 0;
-    BOOL On = FALSE;
+    BOOL On = TRUE;
 
     if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters", 0, KEY_READ, &Key) ==
         ERROR_SUCCESS)
     {
         if (RegQueryValueExA(Key, "Ipv6Enable", NULL, &Type, (LPBYTE)&Value, &Size) == ERROR_SUCCESS &&
-            Type == REG_DWORD && Value != 0)
-            On = TRUE;
+            Type == REG_DWORD && Value == 0)
+            On = FALSE;
+        RegCloseKey(Key);
+    }
+    if (On && RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters", 0, KEY_READ,
+                            &Key) == ERROR_SUCCESS)
+    {
+        Size = sizeof(Value);
+        if (RegQueryValueExA(Key, "DisabledComponents", NULL, &Type, (LPBYTE)&Value, &Size) == ERROR_SUCCESS &&
+            Type == REG_DWORD && (Value & 0x10))
+            On = FALSE;
         RegCloseKey(Key);
     }
     return On;
@@ -196,57 +207,38 @@ static void WaitForDad(void)
 static void TestOff(void)
 {
     IP_ADAPTER_ADDRESSES *Adapters, *A;
-    UNICAST_TABLE *Table = (UNICAST_TABLE *)(ULONG_PTR)0x12345678;
-    IPIF_TABLE *IfTable = (IPIF_TABLE *)(ULONG_PTR)0x12345678;
-    IPIF_ROW Row;
+    UNICAST_TABLE *Table = NULL;
+    IPIF_TABLE *IfTable = NULL;
     DWORD Result, Error;
     ULONG i;
 
-    /* Family IPv6 has nothing to say, and the other families list IPv4 only */
-    Adapters = GetAdapters(AF_INET6, 0, &Result);
-    ok(Result == ERROR_NO_DATA, "GetAdaptersAddresses(AF_INET6): %lu\n", Result);
-    ok(Adapters == NULL, "GetAdaptersAddresses(AF_INET6): adapters\n");
-
-    for (i = 0; i < 2; i++)
+    /* IPv6 is off on the adapters: only the loopback interface has it */
+    Adapters = GetAdapters(AF_UNSPEC, 0, &Result);
+    ok(Result == NO_ERROR, "GetAdaptersAddresses(AF_UNSPEC): %lu\n", Result);
+    for (A = Adapters; A; A = A->Next)
     {
-        Adapters = GetAdapters(i ? AF_INET : AF_UNSPEC, 0, &Result);
-        ok(Result == NO_ERROR, "GetAdaptersAddresses(%lu): %lu\n", i ? (ULONG)AF_INET : (ULONG)AF_UNSPEC, Result);
-        for (A = Adapters; A; A = A->Next)
-        {
-            ok(!(A->Flags & IPV6_ENABLED_FLAG), "adapter %lu: flags 0x%lx\n", A->IfIndex, A->Flags);
-            ok(A->Ipv6IfIndex == 0, "adapter %lu: Ipv6IfIndex %lu\n", A->IfIndex, A->Ipv6IfIndex);
-            ok(CountFamily(A, AF_INET6) == 0, "adapter %lu: IPv6 addresses\n", A->IfIndex);
-        }
-        free(Adapters);
+        if (A->IfType == IF_TYPE_SOFTWARE_LOOPBACK)
+            continue;
+        ok(!(A->Flags & IPV6_ENABLED_FLAG), "adapter %lu: flags 0x%lx\n", A->IfIndex, A->Flags);
+        ok(A->Ipv6IfIndex == 0, "adapter %lu: Ipv6IfIndex %lu\n", A->IfIndex, A->Ipv6IfIndex);
+        ok(CountFamily(A, AF_INET6) == 0, "adapter %lu: IPv6 addresses\n", A->IfIndex);
     }
+    free(Adapters);
 
     Error = pGetUnicastIpAddressTable(AF_INET6, &Table);
-    ok(Error == NO_ERROR, "GetUnicastIpAddressTable(AF_INET6): %lu\n", Error);
-    ok(Table && Table != (UNICAST_TABLE *)(ULONG_PTR)0x12345678 && Table->NumEntries == 0,
-       "GetUnicastIpAddressTable(AF_INET6): %lu rows\n", Table ? Table->NumEntries : 0xdead);
-    if (Table && Table != (UNICAST_TABLE *)(ULONG_PTR)0x12345678)
-        pFreeMibTable(Table);
-
-    Table = NULL;
-    Error = pGetUnicastIpAddressTable(AF_UNSPEC, &Table);
-    ok(Error == NO_ERROR && Table, "GetUnicastIpAddressTable(AF_UNSPEC): %lu\n", Error);
+    ok(Error == NO_ERROR && Table, "GetUnicastIpAddressTable(AF_INET6): %lu\n", Error);
     for (i = 0; Table && i < Table->NumEntries; i++)
-        ok(Table->Table[i].Address.si_family == AF_INET, "row %lu: family %u\n", i, Table->Table[i].Address.si_family);
+        ok(IsLoopback6(&Table->Table[i].Address.Ipv6), "row %lu: an IPv6 address that is not ::1\n", i);
     if (Table)
         pFreeMibTable(Table);
 
     Error = pGetIpInterfaceTable(AF_INET6, &IfTable);
-    ok(Error == NO_ERROR, "GetIpInterfaceTable(AF_INET6): %lu\n", Error);
-    ok(IfTable && IfTable != (IPIF_TABLE *)(ULONG_PTR)0x12345678 && IfTable->NumEntries == 0,
-       "GetIpInterfaceTable(AF_INET6): %lu rows\n", IfTable ? IfTable->NumEntries : 0xdead);
-    if (IfTable && IfTable != (IPIF_TABLE *)(ULONG_PTR)0x12345678)
+    ok(Error == NO_ERROR && IfTable, "GetIpInterfaceTable(AF_INET6): %lu\n", Error);
+    for (i = 0; IfTable && i < IfTable->NumEntries; i++)
+        ok(IfTable->Table[i].InterfaceIndex == 1, "interface row %lu: index %lu is not the loopback interface\n", i,
+           IfTable->Table[i].InterfaceIndex);
+    if (IfTable)
         pFreeMibTable(IfTable);
-
-    memset(&Row, 0, sizeof(Row));
-    Row.Family = AF_INET6;
-    Row.InterfaceIndex = 1;
-    Error = pGetIpInterfaceEntry(&Row);
-    ok(Error == ERROR_NOT_FOUND, "GetIpInterfaceEntry(AF_INET6, loopback): %lu\n", Error);
 }
 
 static void CheckLoopbackRow(const UNICAST_ROW *R)
@@ -708,9 +700,8 @@ START_TEST(Ipv6Reporting)
     }
 
     Ipv6On = ReadSwitch();
-    trace("Ipv6Enable is %s\n", Ipv6On ? "on" : "off");
-    if (Ipv6On)
-        TestOn();
-    else
+    trace("IPv6 on the adapters: %s\n", Ipv6On ? "yes" : "no (loopback only)");
+    TestOn();
+    if (!Ipv6On)
         TestOff();
 }

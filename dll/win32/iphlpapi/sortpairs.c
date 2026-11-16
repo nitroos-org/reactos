@@ -14,6 +14,7 @@
 WINE_DEFAULT_DEBUG_CHANNEL(iphlpapi);
 
 #define TCP6_PARAMETERS_KEY     L"SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters"
+#define TCP4_PARAMETERS_KEY     L"SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters"
 #define PREFIX_POLICIES_VALUE   L"PrefixPolicies"
 /* the documented limit: more destinations are rejected with ERROR_INVALID_PARAMETER */
 #define MAX_SORT_ADDRESSES      500
@@ -54,6 +55,25 @@ ReadPolicyValue(HKEY Key, PADDRSORT_POLICY_TABLE Table)
     return Count;
 }
 
+/* Tcpip\Parameters\Ipv6Enable = 0 is an alias of DisabledComponents = 0xFF (IPv6 on the loopback interface only), which
+   includes bit 0x20: prefer IPv4. A DWORD of 0 only; absent or any other value is "on" */
+static
+BOOL
+Ipv6EnableIsZero(VOID)
+{
+    HKEY Key;
+    DWORD Type, Value = 1, Size = sizeof(Value);
+    BOOL Zero = FALSE;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, TCP4_PARAMETERS_KEY, 0, KEY_QUERY_VALUE, &Key) != ERROR_SUCCESS)
+        return FALSE;
+    if (RegQueryValueExW(Key, L"Ipv6Enable", NULL, &Type, (LPBYTE)&Value, &Size) == ERROR_SUCCESS &&
+        Type == REG_DWORD && Size == sizeof(Value) && Value == 0)
+        Zero = TRUE;
+    RegCloseKey(Key);
+    return Zero;
+}
+
 /* Stored: only the stored table (an active-only one is left out) */
 static
 VOID
@@ -63,6 +83,8 @@ LoadPolicyEx(PADDRSORT_POLICY_TABLE Table, BOOL Stored)
     DWORD Type, Components = 0, ComponentsSize = sizeof(Components);
 
     AddrSortDefaultPolicy(Table);
+    if (Ipv6EnableIsZero())
+        AddrSortPreferIpv4(Table);
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, TCP6_PARAMETERS_KEY, 0, KEY_QUERY_VALUE, &Key) != ERROR_SUCCESS)
         return;
     /* DisabledComponents bit 0x20: prefer IPv4 (a PrefixPolicies value below still replaces the whole table) */

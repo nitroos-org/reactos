@@ -35,23 +35,6 @@ typedef INT (WINAPI *PWSH_NOTIFY_T)(PVOID, SOCKET, HANDLE, HANDLE, DWORD);
 
 static BOOL SwitchOn;
 
-static BOOL ReadSwitch(void)
-{
-    HKEY Key;
-    DWORD Type, Value = 0, Size = sizeof(Value);
-    BOOL On = FALSE;
-
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters",
-                      0, KEY_QUERY_VALUE, &Key) == ERROR_SUCCESS)
-    {
-        if (RegQueryValueExW(Key, L"Ipv6Enable", NULL, &Type, (LPBYTE)&Value, &Size) == ERROR_SUCCESS &&
-            Type == REG_DWORD && Value != 0)
-            On = TRUE;
-        RegCloseKey(Key);
-    }
-    return On;
-}
-
 static void InitIn6(SOCKADDR_IN6_LH *Sa, const USHORT Words[8], USHORT Port, ULONG Scope)
 {
     memset(Sa, 0, sizeof(*Sa));
@@ -476,8 +459,7 @@ START_TEST(ipv6sock)
     /* IPv6 sockets exist when the stack says IPv6 is on and it takes IPv6 sockets (the value alone, with a stack
        that has no IPv6 sockets, gives the answers of a system without IPv6) */
     SwitchOn = Ipv6SocketsOn();
-    trace("IPv6 switch (Tcpip\\Parameters\\Ipv6Enable): %s; stack state 0x%lx: IPv6 sockets %s\n",
-          ReadSwitch() ? "on" : "off", Ipv6StackFlags(), SwitchOn ? "on" : "off");
+    trace("stack state 0x%lx: IPv6 sockets %s\n", Ipv6StackFlags(), SwitchOn ? "on" : "off");
 
     TestHelper();
     TestCatalogErrors();

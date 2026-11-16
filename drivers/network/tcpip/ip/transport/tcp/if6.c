@@ -13,8 +13,10 @@
  * implements them.
  *
  * On by default: HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Ipv6Enable (REG_DWORD, read once
- * at startup; 0 = off, any other value, or no value, = on). Off, no interface has an IPv6 address, nothing IPv6
- * is sent, and a received IPv6 frame is dropped as before.
+ * at startup; 0 = IPv6 off on the adapters, any other value, or no value, = on). 0 is an alias of
+ * Tcpip6\Parameters\DisabledComponents = 0xFF: the stack stays up for the loopback interface (::1, AF_INET6
+ * sockets, the IPv6 Winsock protocols), as on every Windows, because programs such as Java 8 assume AF_INET6
+ * sockets exist. No adapter has an IPv6 address, nothing IPv6 is sent to or received from a wire.
  *
  * There is no IPv6 socket yet (no TDI address type, no Winsock helper): nothing outside this driver can
  * create an IPv6 connection or listener. A frame from an adapter goes through the firewall first
@@ -115,8 +117,10 @@ TCPReadIpv6Switch(VOID)
     ULONG Length;
     NTSTATUS Status;
 
-    /* the default is on: only a REG_DWORD of 0 turns IPv6 off */
+    /* The stack is always up (loopback IPv6, AF_INET6 sockets). Only a REG_DWORD of 0 takes IPv6 off the adapters,
+       like DisabledComponents = 0xFF */
     TCPIpv6Enabled = TRUE;
+    TCPIpv6Links = TRUE;
 
     InitializeObjectAttributes(&Attributes, &KeyName, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
     if (!NT_SUCCESS(ZwOpenKey(&Key, KEY_QUERY_VALUE, &Attributes)))
@@ -124,16 +128,16 @@ TCPReadIpv6Switch(VOID)
 
     Status = ZwQueryValueKey(Key, &ValueName, KeyValuePartialInformation, Info, sizeof(Buffer), &Length);
     if (NT_SUCCESS(Status) && Info->Type == REG_DWORD && Info->DataLength == sizeof(ULONG))
-        TCPIpv6Enabled = (*(PULONG)Info->Data != 0);
+        TCPIpv6Links = (*(PULONG)Info->Data != 0);
 
     ZwClose(Key);
 
     /* Tcpip6\Parameters\DisabledComponents (REG_DWORD, the documented Windows value, read once): 0x10 = no IPv6 on
        the non-loopback interfaces (0xFF has it: IPv6 stays on the loopback interface only), 0x20 = prefer IPv4 is
        user mode's (the prefix policy table of iphlpapi's sortpairs.c reads it), 0x01 (tunnels) has nothing to
-       turn off here, other bits are ignored. Ipv6Enable = 0 stays the hard off, and a value of another type counts as absent */
-    TCPIpv6Links = TCPIpv6Enabled;
-    if (TCPIpv6Enabled)
+       turn off here, other bits are ignored. Ipv6Enable = 0 already has the links off (the same state as 0xFF), and a
+       value of another type counts as absent */
+    if (TCPIpv6Links)
     {
         UNICODE_STRING ComponentsKeyName =
             RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\Tcpip6\\Parameters");
@@ -157,8 +161,7 @@ TCPReadIpv6Switch(VOID)
         }
     }
 
-    if (TCPIpv6Enabled)
-        DbgPrint("TCPIP: IPv6 on (Ipv6Enable)\n");
+    DbgPrint("TCPIP: IPv6 on (Ipv6Enable%s)\n", TCPIpv6Links ? "" : " 0: loopback only");
 
 #if DBG || defined(TCPIP_IPV6_SELFTEST)
     {
