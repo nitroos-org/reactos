@@ -6,6 +6,7 @@
  */
 
 #include "precomp.h"
+#include <stdlib.h>
 #include <fltuser.h>
 #include "fltfakefs.h"
 
@@ -995,6 +996,182 @@ START_TEST(p3ctxdpc)
     }
 
     test_ContextReleasedAtDispatch();
+}
+
+/* Pool tags: outstanding allocations (allocs - frees, paged + non-paged) per tag */
+typedef struct _TAG_COUNT
+{
+    ULONG Tag;
+    LONG Outstanding;
+    SIZE_T Bytes;
+
+} TAG_COUNT;
+
+static
+ULONG
+SnapshotPoolTags(TAG_COUNT *Tags, ULONG Max)
+{
+    PSYSTEM_POOLTAG_INFORMATION Info;
+    ULONG Size = 1024 * 1024, Count = 0, i;
+    NTSTATUS Status;
+
+    Info = HeapAlloc(GetProcessHeap(), 0, Size);
+    if (!Info)
+        return 0;
+    Status = NtQuerySystemInformation(SystemPoolTagInformation, Info, Size, &Size);
+    if (NT_SUCCESS(Status))
+    {
+        for (i = 0; i < Info->Count && Count < Max; i++)
+        {
+            Tags[Count].Tag = Info->TagInfo[i].TagUlong;
+            Tags[Count].Outstanding = (LONG)(Info->TagInfo[i].PagedAllocs - Info->TagInfo[i].PagedFrees) +
+                                      (LONG)(Info->TagInfo[i].NonPagedAllocs - Info->TagInfo[i].NonPagedFrees);
+            Tags[Count].Bytes = Info->TagInfo[i].PagedUsed + Info->TagInfo[i].NonPagedUsed;
+            Count++;
+        }
+    }
+    else
+    {
+        trace("SystemPoolTagInformation: 0x%lx\n", Status);
+    }
+    HeapFree(GetProcessHeap(), 0, Info);
+    return Count;
+}
+
+static
+const TAG_COUNT *
+FindTag(const TAG_COUNT *Tags, ULONG Count, ULONG Tag)
+{
+    ULONG i;
+
+    for (i = 0; i < Count; i++)
+    {
+        if (Tags[i].Tag == Tag)
+            return &Tags[i];
+    }
+    return NULL;
+}
+
+/* The filter manager's tags ('..MF' in the source: "FM.." in memory) and the sample's */
+static
+BOOL
+IsFilterTag(ULONG Tag)
+{
+    const UCHAR *c = (const UCHAR *)&Tag;
+
+    return (c[0] == 'F' && c[1] == 'M') || Tag == 'lSlF';
+}
+
+/*
+ * The life of a filter, over and over: load (instances on every volume), files opened, written and
+ * read with contexts, a client on the port, detach and attach every volume, unload. Afterwards no
+ * pool tag of the filter manager or the sample has more allocations outstanding than before.
+ * P3LOOP_COUNT (environment) sets the number of rounds, 200 by default.
+ */
+static
+void
+test_LoadUnloadLoop(void)
+{
+    static TAG_COUNT Before[8192], After[8192];
+    ULONG BeforeCount, AfterCount, Rounds = 200, Done = 0, i, Leaks = 0;
+    WCHAR Path[MAX_PATH];
+    char Value[16];
+    DWORD Bytes;
+    UCHAR Buffer[4096];
+
+    if (GetEnvironmentVariableA("P3LOOP_COUNT", Value, sizeof(Value)))
+        Rounds = strtoul(Value, NULL, 10);
+    MakeTestFile(L"p3loop.dat", Path, RTL_NUMBER_OF(Path));
+
+    for (i = 0; i <= Rounds; i++)
+    {
+        SAMPLE P = { { 0 } };
+        ATTACH_RESULT Result;
+        HANDLE File, Port = INVALID_HANDLE_VALUE;
+        UCHAR Ping[12] = { FLTSAMPLE_MSG_PING, 0, 0, 0, 0, 0, 0, 0, 'p', 'i', 'n', 'g' };
+        UCHAR Echo[16];
+
+        /* The first round warms up whatever is allocated once (lookasides, the first load) */
+        if (i == 1)
+        {
+            Sleep(500);
+            BeforeCount = SnapshotPoolTags(Before, RTL_NUMBER_OF(Before));
+        }
+
+        if (!LoadSample(&P, L"FltSampleL", L"384000.5", 0xFFFF))
+        {
+            ok(0, "Round %lu: can't load the sample filter\n", i);
+            break;
+        }
+
+        File = CreateFileW(Path, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+        if (File != INVALID_HANDLE_VALUE)
+        {
+            memset(Buffer, (int)i, sizeof(Buffer));
+            WriteFile(File, Buffer, sizeof(Buffer), &Bytes, NULL);
+            SetFilePointer(File, 0, NULL, FILE_BEGIN);
+            ReadFile(File, Buffer, sizeof(Buffer), &Bytes, NULL);
+            CloseHandle(File);
+        }
+        if (SUCCEEDED(FilterConnectCommunicationPort(L"\\FltSampleLPort", 0, NULL, 0, NULL, &Port)))
+        {
+            FilterSendMessage(Port, Ping, sizeof(Ping), Echo, sizeof(Echo), &Bytes);
+            CloseHandle(Port);
+        }
+        SampleIoctl(&P, FLTSAMPLE_IOCTL_DETACH_ALL, NULL, 0, &Result, sizeof(Result));
+        SampleIoctl(&P, FLTSAMPLE_IOCTL_ATTACH_ALL, NULL, 0, &Result, sizeof(Result));
+
+        if (!UnloadSample(&P, TRUE))
+        {
+            ok(0, "Round %lu: the sample filter didn't unload\n", i);
+            break;
+        }
+        Done++;
+    }
+    DeleteFileW(Path);
+
+    /* Workers (context cleanup, detach) finish asynchronously */
+    Sleep(2000);
+    AfterCount = SnapshotPoolTags(After, RTL_NUMBER_OF(After));
+    trace("%lu rounds, %lu pool tags before, %lu after\n", Done, BeforeCount, AfterCount);
+    ok(Done == Rounds + 1, "%lu of %lu rounds done\n", Done, Rounds + 1);
+    ok(AfterCount > 0, "No pool tag information\n");
+
+    for (i = 0; i < AfterCount; i++)
+    {
+        const TAG_COUNT *Old = FindTag(Before, BeforeCount, After[i].Tag);
+        LONG Delta = After[i].Outstanding - (Old ? Old->Outstanding : 0);
+        const UCHAR *c = (const UCHAR *)&After[i].Tag;
+
+        if (IsFilterTag(After[i].Tag))
+        {
+            trace("Tag %c%c%c%c: %ld outstanding (%+ld), %lu bytes\n", c[0], c[1], c[2], c[3],
+                  After[i].Outstanding, Delta, (ULONG)After[i].Bytes);
+            if (Delta > 2)
+            {
+                ok(0, "Tag %c%c%c%c: %ld more allocations outstanding after %lu rounds\n", c[0], c[1], c[2], c[3], Delta, Done);
+                Leaks++;
+            }
+        }
+        else if (Delta >= (LONG)Rounds)
+        {
+            /* Something else which grows with every round: worth a look, not ours to judge */
+            trace("Tag %c%c%c%c (not the filter manager's) grew by %ld\n", c[0], c[1], c[2], c[3], Delta);
+        }
+    }
+    ok(Leaks == 0, "%lu filter manager / sample pool tags leak\n", Leaks);
+}
+
+START_TEST(p3loop)
+{
+    EnsureTestDirectory();
+    if (!StartFilterManager())
+    {
+        skip("No filter manager\n");
+        return;
+    }
+
+    test_LoadUnloadLoop();
 }
 
 START_TEST(p3create)
