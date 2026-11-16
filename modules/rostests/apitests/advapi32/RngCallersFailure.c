@@ -173,8 +173,9 @@ static void
 TestRsaenh(void)
 {
     HCRYPTPROV Prov;
-    HCRYPTKEY Key, Rsa;
-    BYTE Buffer[16];
+    HCRYPTKEY Key, Rsa, Session = 0;
+    BYTE Buffer[16], SessionBytes[32];
+    DWORD SessionLength = 0;
     BOOL Result, Ok;
     DWORD Error;
     ALG_ID Algs[] = { CALG_RC4, CALG_RC2 };
@@ -191,6 +192,32 @@ TestRsaenh(void)
         CryptReleaseContext(Prov, 0);
         return;
     }
+
+    /* a session key made with random data, and its bytes (PLAINTEXTKEYBLOB: header, length, key) */
+    if (CryptGenKey(Prov, CALG_RC4, CRYPT_EXPORTABLE, &Session))
+    {
+        BYTE Plain[sizeof(BLOBHEADER) + sizeof(DWORD) + 32];
+        DWORD Length = sizeof(Plain);
+
+        if (CryptExportKey(Session, 0, PLAINTEXTKEYBLOB, 0, Plain, &Length) &&
+            Length > sizeof(BLOBHEADER) + sizeof(DWORD))
+        {
+            SessionLength = *(DWORD *)(Plain + sizeof(BLOBHEADER));
+            if (SessionLength && SessionLength <= sizeof(SessionBytes) &&
+                SessionLength <= Length - sizeof(BLOBHEADER) - sizeof(DWORD))
+                memcpy(SessionBytes, Plain + sizeof(BLOBHEADER) + sizeof(DWORD), SessionLength);
+            else
+                SessionLength = 0;
+        }
+        if (!SessionLength)
+        {
+            skip("no PLAINTEXTKEYBLOB of the session key: %lu\n", GetLastError());
+            CryptDestroyKey(Session);
+            Session = 0;
+        }
+    }
+    else
+        skip("no session key: %lu\n", GetLastError());
 
     SetHook(TRUE);
 
@@ -238,6 +265,35 @@ TestRsaenh(void)
         ok(Error == NTE_FAIL, "CryptEncrypt with OAEP: error %lx\n", Error);
     }
 
+    /* the session key goes into a SIMPLEBLOB with PKCS#1 padding: on failure the key must not be left in the blob */
+    if (Session)
+    {
+        BYTE Blob[sizeof(BLOBHEADER) + sizeof(ALG_ID) + 64];
+        DWORD Length = sizeof(Blob), j;
+        BOOL Found = FALSE;
+
+        memset(Blob, 0xCC, sizeof(Blob));
+        SetLastError(0);
+        Result = CryptExportKey(Session, Rsa, SIMPLEBLOB, 0, Blob, &Length);
+        Error = GetLastError();
+        ok(!Result, "CryptExportKey(SIMPLEBLOB) succeeded without random data\n");
+        ok(Error == NTE_FAIL, "CryptExportKey(SIMPLEBLOB): error %lx\n", Error);
+        for (j = 0; j + SessionLength <= sizeof(Blob); j++)
+            if (!memcmp(Blob + j, SessionBytes, SessionLength))
+                Found = TRUE;
+        ok(!Found, "CryptExportKey(SIMPLEBLOB) left the session key in the output buffer\n");
+    }
+
+    /* RSA key generation takes its primes from the same generator */
+    Key = 0xdeadbeef;
+    SetLastError(0);
+    Result = CryptGenKey(Prov, AT_SIGNATURE, 512 << 16, &Key);
+    Error = GetLastError();
+    ok(!Result, "CryptGenKey(AT_SIGNATURE) succeeded without random data\n");
+    ok(Error == NTE_FAIL, "CryptGenKey(AT_SIGNATURE): error %lx\n", Error);
+    if (Result)
+        CryptDestroyKey(Key);
+
     SetHook(FALSE);
 
     /* with random data again, the same calls work */
@@ -250,6 +306,20 @@ TestRsaenh(void)
     Ok = EncryptWithTimeout(Rsa, CRYPT_OAEP, &Result, &Error);
     ok(Ok && Result, "CryptEncrypt with OAEP failed after the hook: %d %lu\n", Result, Error);
 
+    if (Session)
+    {
+        BYTE Blob[sizeof(BLOBHEADER) + sizeof(ALG_ID) + 64];
+        DWORD Length = sizeof(Blob);
+
+        ok(CryptExportKey(Session, Rsa, SIMPLEBLOB, 0, Blob, &Length), "CryptExportKey(SIMPLEBLOB) failed after the hook: %lu\n",
+           GetLastError());
+        CryptDestroyKey(Session);
+    }
+    Key = 0;
+    ok(CryptGenKey(Prov, AT_SIGNATURE, 512 << 16, &Key), "CryptGenKey(AT_SIGNATURE) failed after the hook: %lu\n",
+       GetLastError());
+    if (Key)
+        CryptDestroyKey(Key);
     CryptDestroyKey(Rsa);
     CryptReleaseContext(Prov, 0);
 }
