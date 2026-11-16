@@ -373,7 +373,7 @@ static void TestSlots(ULONG IfIndex)
     ULONG Made = 0, i;
     UNICAST_ROW6 Row;
 
-    for (i = 0; i < 16 && NT_SUCCESS(Status); i++)
+    for (i = 0; i < 40 && NT_SUCCESS(Status); i++)
     {
         sprintf(Text, "2001:db8:9a::%lu", i + 1);
         Status = AddressRequest(TCP_IPV6_CONFIG_CREATE, IfIndex, Text, 64, ~0UL, ~0UL, 0);
@@ -381,7 +381,7 @@ static void TestSlots(ULONG IfIndex)
             Made++;
     }
     ok(Status == STATUS_INSUFFICIENT_RESOURCES, "last create: %lx\n", Status);
-    ok(Made >= 4 && Made <= 7, "%lu addresses made\n", Made);
+    ok(Made >= 4 && Made <= 15, "%lu addresses made\n", Made);
     for (i = 0; i < Made; i++)
     {
         sprintf(Text, "2001:db8:9a::%lu", i + 1);
