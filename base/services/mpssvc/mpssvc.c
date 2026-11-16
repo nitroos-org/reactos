@@ -63,8 +63,10 @@ static VOID Report(DWORD err, BOOL present)
 /* Rules the push could not carry (or not fully): HKLM\SOFTWARE\ReactOS\Nitro\Firewall LastPushRejectedRules (all),
    LastPushRejectedBlockRules (the Block rules among them: NOT enforced), LastPushPartialBlockRules,
    LastPushBroadBlockRules (Block rules whose only restriction is a condition the filter cannot match: the filter blocks
-   all traffic of their direction, Windows only the traffic that matches the condition), LastPushRejectedNames,
-   and one Application event per change of that state (not per push). */
+   all traffic of their direction (of their protocol), Windows only the traffic that matches the condition),
+   LastPushRejectedNames, and one Application event per change of that state (not per push): event 1 (error) when a rule
+   was rejected or is not fully enforced, 2 (warning) when only broad Block rules are left, 3 (information) when the
+   state is clean again. */
 static VOID ReportRules(VOID)
 {
     static ULONG lastRej, lastRejBlock, lastPar, lastBroad; static WCHAR lastNames[1024];
@@ -85,13 +87,23 @@ static VOID ReportRules(VOID)
         if (hes)
         {
             WCHAR msg[1280]; PCWSTR str[1];
-            _snwprintf(msg, 1279, L"NitroOS Firewall: %lu rule(s) were not pushed to the filter (%lu of them Block rule(s): not enforced), %lu Block rule(s) are not fully enforced and %lu Block rule(s) have only a condition the filter cannot match and now block all traffic of their direction: %ls",
+            _snwprintf(msg, 1279, L"NitroOS Firewall: %lu rule(s) were not pushed to the filter (%lu of them Block rule(s): not enforced), %lu Block rule(s) are not fully enforced and %lu Block rule(s) have only a condition the filter cannot match and now block all traffic of their direction (of their protocol): %ls",
                        rej, rejBlock, par, broad, names);
             msg[1279] = 0; str[0] = msg;
-            ReportEventW(hes, (rej || par) ? EVENTLOG_ERROR_TYPE : EVENTLOG_WARNING_TYPE, 0, 1, NULL, 1, 0, str, NULL);
+            ReportEventW(hes, (rej || par) ? EVENTLOG_ERROR_TYPE : EVENTLOG_WARNING_TYPE, 0, (rej || par) ? 1 : 2, NULL, 1, 0, str, NULL);
             DeregisterEventSource(hes);
         }
         OutputDebugStringW(L"mpssvc: firewall rules not pushed or not fully enforced\n");
+    }
+    else if (!rej && !par && !broad && (lastRej || lastPar || lastBroad))
+    {
+        HANDLE hes = RegisterEventSourceW(NULL, g_Name);
+        if (hes)
+        {
+            PCWSTR str[1] = { L"NitroOS Firewall: every rule is pushed to the filter again, nothing is left out or not fully enforced" };
+            ReportEventW(hes, EVENTLOG_INFORMATION_TYPE, 0, 3, NULL, 1, 0, str, NULL);
+            DeregisterEventSource(hes);
+        }
     }
     lastRej = rej; lastRejBlock = rejBlock; lastPar = par; lastBroad = broad; wcscpy(lastNames, names);
 }
