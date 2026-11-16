@@ -1044,6 +1044,36 @@ UDP6LeaveAll(PADDRESS_FILE AddrFile)
         ExFreePoolWithTag(M, UDP6_TAG);
 }
 
+/* Whether a UDP socket is bound to Address (16 bytes). The core lock may be held (as in Udp6HasReceiver: the order is
+   core lock, then AddressFileListLock) */
+BOOLEAN
+UDP6AddressInUse(const UCHAR *Address)
+{
+    PLIST_ENTRY Entry;
+    KIRQL OldIrql;
+    BOOLEAN Found = FALSE;
+    IP_ADDRESS Wanted;
+
+    Wanted.Type = IP_ADDRESS_V6;
+    RtlCopyMemory(Wanted.Address.IPv6Address, Address, 16);
+
+    TcpipAcquireSpinLock(&AddressFileListLock, &OldIrql);
+    for (Entry = AddressFileListHead.Flink; Entry != &AddressFileListHead; Entry = Entry->Flink)
+    {
+        PADDRESS_FILE AddrFile = CONTAINING_RECORD(Entry, ADDRESS_FILE, ListEntry);
+
+        if (AddrFile->Protocol == IPPROTO_UDP && !AddrFile->PortReleased && AddrFile->Address.Type == IP_ADDRESS_V6 &&
+            AddrIsEqual(&AddrFile->Address, &Wanted))
+        {
+            Found = TRUE;
+            break;
+        }
+    }
+    TcpipReleaseSpinLock(&AddressFileListLock, OldIrql);
+
+    return Found;
+}
+
 /* The row of an IPv6 UDP socket for the IPv6 UDP table (ninfo.c) */
 VOID
 UDP6BuildRow(PADDRESS_FILE AddrFile, PUDP6_ROW_OWNER_PID Row)

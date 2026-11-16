@@ -271,9 +271,12 @@ TCP6ReservedIdentifier(const UCHAR Iid[8]);
 /* Temporary addresses (ip/transport/tcp/temp6.c, RFC 8981), behind Tcpip6\Parameters\UseTemporaryAddresses: the
    settings (read by TCP6ReadIdentifierSettings), whether a slot holds one, a DAD conflict on one, the interface that
    goes, and the self-test's way to age one (core lock held but for the settings) */
+/* Address slots that stay free when a temporary address is made (temp6.c) */
+#define TCP6_TEMP_RESERVE 2
 extern BOOLEAN TCP6UseTemporaryAddresses;
 extern ULONG TCP6TempMaxValid, TCP6TempMaxPreferred, TCP6TempRegenerate, TCP6TempMaxRandom, TCP6TempMaxDad;
 extern ULONG TCP6TempDesync;
+extern ULONG TCP6TempDupHold;
 
 BOOLEAN
 TCP6ReadTemporarySettings(VOID);
@@ -283,6 +286,8 @@ BOOLEAN
 TCP6TemporarySlot(struct netif *netif, signed char Slot);
 BOOLEAN
 TCP6TemporaryDadFailed(struct netif *netif, signed char Index, int *Result);
+BOOLEAN
+TCP6TemporaryMakeRoom(struct netif *netif);
 VOID
 TCP6RemoveTemporaryOfNetif(struct netif *netif);
 BOOLEAN

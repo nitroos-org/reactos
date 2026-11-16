@@ -28,14 +28,20 @@
  * newest one of the prefix stops being preferred (3.5): the old one stays, deprecated (connections that use it go on)
  * until its valid lifetime ends, when lwIP removes it. Everything runs from lwIP's neighbour discovery timer
  * (LWIP_HOOK_ND6_TMR, once a second): no timer of its own. An address whose DAD fails gets a new random identifier,
- * MaxDadAttempts times; then it stays duplicated (listed so) until its valid lifetime ends, and no other temporary
- * address is made for that prefix meanwhile (RFC 8981 3.4: stop on repeated collisions).
+ * MaxDadAttempts times; then it stays duplicated (listed so) for TEMP6_DUP_HOLD seconds and no other temporary
+ * address is made for that prefix meanwhile (RFC 8981 3.4: stop on repeated collisions). After that it is dropped and
+ * the prefix gets a new attempt (its slot is not held for the valid lifetime, up to 7 days).
  *
  * The addresses live in lwIP's address slots (LWIP_IPV6_NUM_ADDRESSES); this file keeps which slot holds a temporary
  * address. lwIP's prefix processing leaves them alone (LWIP_HOOK_ND6_ADDR_CONFIGURED): they are not the address
- * nd6_process_autoconfig_prefix updates. When no slot is free for a new one, or only one is (it stays for the stable
- * address of a new prefix), the deprecated temporary address with the least valid lifetime left that no TCP
- * connection or listener uses gives way. There is no other limit of their number (Windows has no setting for it).
+ * nd6_process_autoconfig_prefix updates. A new one is made only while more than TEMP6_RESERVE slots are free (they
+ * stay for the stable address of a new prefix, a DHCPv6 or configured address); to get there a duplicated temporary
+ * address, else the deprecated one with the least valid lifetime left that no TCP connection, listener or UDP socket
+ * uses gives way. If that is not enough the new one is not made (logged once). The other way round, a temporary
+ * address never keeps an address that matters more from a slot: when no slot is free for the stable address of a
+ * new prefix (nd6.c, LWIP_HOOK_ND6_NO_FREE_ADDRESS) or for a configured or DHCPv6 address (addr6.c), an unused
+ * temporary address gives way (TCP6TemporaryMakeRoom), the newest one (older prefixes keep theirs longest). There is no
+ * other limit of their number (Windows has no setting for it).
  *
  * The identifier: TCP6RandomIdentifier (iid6.c), RDRAND when the processor has it, under a per-start key; never
  * the system random number generator (SEC-system-rng-not-cryptographic), never a reserved identifier (RFC 5453),
@@ -61,6 +67,11 @@
 #define TEMP6_PARAMETERS    L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\Tcpip6\\Parameters"
 /* Temporary addresses, over all interfaces */
 #define TEMP6_MAX           64
+/* Slots that stay free when a temporary address is made (the stable address of a new prefix, and a DHCPv6 or
+   configured address) */
+#define TEMP6_RESERVE       TCP6_TEMP_RESERVE
+/* Seconds a temporary address that DAD found in use too often keeps its slot and blocks its prefix */
+#define TEMP6_DUP_HOLD      600
 
 BOOLEAN TCP6UseTemporaryAddresses;
 ULONG TCP6TempMaxValid = 7 * 24 * 3600;
@@ -68,6 +79,8 @@ ULONG TCP6TempMaxPreferred = 24 * 3600;
 ULONG TCP6TempRegenerate = 5;
 ULONG TCP6TempMaxRandom = 10 * 60;
 ULONG TCP6TempMaxDad = 3;
+/* TEMP6_DUP_HOLD (a variable for the self-test) */
+ULONG TCP6TempDupHold = TEMP6_DUP_HOLD;
 /* DESYNC_FACTOR of this start */
 ULONG TCP6TempDesync;
 
@@ -76,8 +89,10 @@ typedef struct _TEMP6_ENTRY
     struct netif *Netif;        /* NULL: a free entry */
     s8_t Slot;
     UCHAR Retries;              /* new identifiers after DAD conflicts */
+    BOOLEAN DupSeen;            /* it was found duplicated (DupSince) */
     ip6_addr_t Address;
     ULONG Created;              /* Temp6Ticks when it was made */
+    ULONG DupSince;             /* Temp6Ticks when it was found duplicated */
 } TEMP6_ENTRY, *PTEMP6_ENTRY;
 
 static TEMP6_ENTRY Temp6Table[TEMP6_MAX];
@@ -85,10 +100,12 @@ static ULONG Temp6Count;
 /* Seconds, counted by the neighbour discovery timer (the clock of lwIP's lifetimes) */
 static ULONG Temp6Ticks;
 /* Per lwIP interface number: the slots that hold a temporary address (a quick no for source selection) */
-static UCHAR Temp6Mask[256];
+static USHORT Temp6Mask[256];
 static BOOLEAN Temp6NoSlotLogged;
+static BOOLEAN Temp6ShortLogged;
 
-C_ASSERT(LWIP_IPV6_NUM_ADDRESSES <= 8);
+C_ASSERT(LWIP_IPV6_NUM_ADDRESSES <= 16);
+C_ASSERT(LWIP_IPV6_NUM_ADDRESSES > TEMP6_RESERVE + 1);
 
 static
 ULONG
@@ -152,7 +169,11 @@ TCP6ReadTemporarySettings(VOID)
     if (TCP6TempMaxDad > 10)
         TCP6TempMaxDad = 10;
     if (TCP6TempRegenerate >= TCP6TempMaxPreferred)
+    {
+        DbgPrint("TCPIP: IPv6 temporary addresses: RegenerateTime %lus is not below the preferred lifetime %lus, "
+                 "using %lus\n", TCP6TempRegenerate, TCP6TempMaxPreferred, TCP6TempMaxPreferred / 2);
         TCP6TempRegenerate = TCP6TempMaxPreferred / 2;
+    }
     return TRUE;
 }
 
@@ -252,8 +273,11 @@ TCP6RemoveTemporaryOfNetif(struct netif *netif)
     Temp6Mask[netif->num] = 0;
 }
 
+static VOID Temp6Release(PTEMP6_ENTRY Entry);
+
 /* Drops entries whose slot no longer holds their address (lwIP removed it at the end of its valid lifetime, or it
-   was deleted) or holds it as a configured address (an administrator changed it) */
+   was deleted) or holds it as a configured address (an administrator changed it), and a duplicated temporary
+   address after TEMP6_DUP_HOLD seconds (its prefix gets a new attempt) */
 static
 VOID
 Temp6Prune(VOID)
@@ -269,11 +293,27 @@ Temp6Prune(VOID)
         if (ip6_addr_isinvalid(netif_ip6_addr_state(Entry->Netif, Entry->Slot)) ||
             !ip6_addr_zoneless_eq(&Entry->Address, netif_ip6_addr(Entry->Netif, Entry->Slot)) ||
             (Addr6Count && TCP6AddressInfo(Entry->Netif, Entry->Slot, NULL)))
+        {
             Temp6Free(Entry);
+            continue;
+        }
+        if (!ip6_addr_isduplicated(netif_ip6_addr_state(Entry->Netif, Entry->Slot)))
+            continue;
+        if (!Entry->DupSeen)
+        {
+            Entry->DupSeen = TRUE;
+            Entry->DupSince = Temp6Ticks;
+        }
+        else if (Temp6Ticks - Entry->DupSince >= TCP6TempDupHold)
+        {
+            DbgPrint("TCPIP: IPv6 temporary address %d of interface %u was a duplicate for %us: dropped, the prefix "
+                     "gets a new temporary address\n", (int)Entry->Slot, (UINT)Entry->Netif->num, (UINT)TCP6TempDupHold);
+            Temp6Release(Entry);
+        }
     }
 }
 
-/* Whether Address is the local address of a TCP connection or listener */
+/* Whether Address is the local address of a TCP connection or listener, or a UDP socket is bound to it */
 static
 BOOLEAN
 Temp6InUse(const ip6_addr_t *Address)
@@ -296,7 +336,8 @@ Temp6InUse(const ip6_addr_t *Address)
         if (IP_IS_V6_VAL(lpcb->local_ip) && ip6_addr_zoneless_eq(ip_2_ip6(&lpcb->local_ip), Address))
             return TRUE;
     }
-    return FALSE;
+    /* a datagram socket bound to it (a connected or unbound one chooses its source for each datagram) */
+    return UDP6AddressInUse((const UCHAR *)Address->addr);
 }
 
 /* A free slot of netif (not slot 0, the link-local one), -1 if none; *Free: how many there are */
@@ -319,8 +360,32 @@ Temp6FreeSlot(struct netif *netif, PULONG Free)
     return First;
 }
 
-/* Makes room: the deprecated temporary address of netif with the least valid lifetime left that no TCP connection
-   or listener uses goes. FALSE: there is none */
+/* The temporary address goes and its slot is free (lwIP leaves the group of its solicited-node address) */
+static
+VOID
+Temp6Release(PTEMP6_ENTRY Entry)
+{
+    struct netif *netif = Entry->Netif;
+    s8_t Slot = Entry->Slot;
+
+    Temp6Free(Entry);
+    netif_ip6_addr_set_valid_life(netif, Slot, 0);
+    netif_ip6_addr_set_pref_life(netif, Slot, 0);
+    netif_ip6_addr_set_state(netif, Slot, IP6_ADDR_INVALID);
+}
+
+/* Whether Entry is one of netif whose slot still holds its temporary address. Between two timer ticks (Temp6Prune)
+   an entry can be stale: its address was deleted or made a configured one (addr6.c) and the slot may hold another
+   address since, which must not be taken for a temporary one */
+static
+BOOLEAN
+Temp6Live(PTEMP6_ENTRY Entry, struct netif *netif)
+{
+    return Entry->Netif == netif && Temp6Find(netif, Entry->Slot) == Entry;
+}
+
+/* Makes room: a duplicated temporary address of netif (no one can use it), else the deprecated one with the least
+   valid lifetime left that no TCP connection, listener or UDP socket uses, goes. FALSE: there is none */
 static
 BOOLEAN
 Temp6Evict(struct netif *netif)
@@ -332,9 +397,20 @@ Temp6Evict(struct netif *netif)
     for (i = 0; i < TEMP6_MAX; i++)
     {
         PTEMP6_ENTRY Entry = &Temp6Table[i];
+
+        if (Temp6Live(Entry, netif) && ip6_addr_isduplicated(netif_ip6_addr_state(netif, Entry->Slot)))
+        {
+            Temp6Release(Entry);
+            return TRUE;
+        }
+    }
+
+    for (i = 0; i < TEMP6_MAX; i++)
+    {
+        PTEMP6_ENTRY Entry = &Temp6Table[i];
         u32_t Life;
 
-        if (Entry->Netif != netif || !ip6_addr_isdeprecated(netif_ip6_addr_state(netif, Entry->Slot)))
+        if (!Temp6Live(Entry, netif) || !ip6_addr_isdeprecated(netif_ip6_addr_state(netif, Entry->Slot)))
             continue;
         Life = netif_ip6_addr_valid_life(netif, Entry->Slot);
         if (Best && Life >= BestLife)
@@ -347,15 +423,51 @@ Temp6Evict(struct netif *netif)
     if (!Best)
         return FALSE;
 
-    {
-        s8_t Slot = Best->Slot;
-
-        Temp6Free(Best);
-        netif_ip6_addr_set_valid_life(netif, Slot, 0);
-        netif_ip6_addr_set_pref_life(netif, Slot, 0);
-        netif_ip6_addr_set_state(netif, Slot, IP6_ADDR_INVALID);
-    }
+    Temp6Release(Best);
     return TRUE;
+}
+
+/* A slot for an address that matters more than a temporary one (the stable address of a new prefix, a configured or
+   DHCPv6 address) when none is free: what Temp6Evict takes, else the tentative or preferred temporary address of netif
+   that no TCP connection, listener or UDP socket uses and that was made last (a prefix that is flooded keeps its
+   stable addresses and the older prefixes their temporary ones; temporary ones come back while more than
+   TEMP6_RESERVE slots are free).
+   FALSE: none. Core lock held */
+BOOLEAN
+TCP6TemporaryMakeRoom(struct netif *netif)
+{
+    PTEMP6_ENTRY Best = NULL;
+    ULONG i;
+
+    if (!Temp6Count)
+        return FALSE;
+    if (Temp6Evict(netif))
+        return TRUE;
+
+    for (i = 0; i < TEMP6_MAX; i++)
+    {
+        PTEMP6_ENTRY Entry = &Temp6Table[i];
+
+        if (!Temp6Live(Entry, netif))
+            continue;
+        if (Best && Entry->Created <= Best->Created)
+            continue;
+        if (Temp6InUse(&Entry->Address))
+            continue;
+        Best = Entry;
+    }
+    if (!Best)
+        return FALSE;
+
+    Temp6Release(Best);
+    return TRUE;
+}
+
+/* LWIP_HOOK_ND6_NO_FREE_ADDRESS (nd6.c): no slot for the stable address of a new prefix */
+int
+LibNd6MakeRoom(struct netif *netif)
+{
+    return TCP6TemporaryMakeRoom(netif);
 }
 
 /* A random identifier for Prefix that is not reserved and that no address of netif has (Address, zoned). FALSE:
@@ -429,14 +541,16 @@ Temp6Create(struct netif *netif, s8_t Public)
     if (Preferred <= TCP6TempRegenerate || Valid < 2)
         return FALSE;
 
-    /* one slot stays free for the stable address of a new prefix while a deprecated temporary address can give way */
+    /* TEMP6_RESERVE slots stay free (the stable address of a new prefix, a DHCPv6 or configured address): a duplicated
+       or an unused deprecated temporary address gives way for it, and if that does not make enough room, no new one */
     Slot = Temp6FreeSlot(netif, &Free);
-    if (Free < 2 && Temp6Evict(netif))
+    while (Free <= TEMP6_RESERVE && Temp6Evict(netif))
         Slot = Temp6FreeSlot(netif, &Free);
-    if (Slot < 0)
+    if (Slot < 0 || Free <= TEMP6_RESERVE)
     {
         if (!Temp6NoSlotLogged)
-            DbgPrint("TCPIP: no IPv6 address slot for a temporary address on interface %u\n", (UINT)netif->num);
+            DbgPrint("TCPIP: no IPv6 address slot for a temporary address on interface %u (%lu free, %u stay free)\n",
+                     (UINT)netif->num, Free, (UINT)TEMP6_RESERVE);
         Temp6NoSlotLogged = TRUE;
         return FALSE;
     }
@@ -456,7 +570,7 @@ Temp6Create(struct netif *netif, s8_t Public)
     Entry->Address = Address;
     Entry->Created = Temp6Ticks;
     Temp6Count++;
-    Temp6Mask[netif->num] |= (UCHAR)(1 << Slot);
+    Temp6Mask[netif->num] |= (USHORT)(1 << Slot);
 
     netif_ip6_addr_set(netif, Slot, &Address);
     netif_ip6_addr_set_valid_life(netif, Slot, Valid);
@@ -489,7 +603,7 @@ Temp6DoPrefix(struct netif *netif, s8_t Public)
     u8_t PublicState = netif_ip6_addr_state(netif, Public);
     u32_t PublicValid = netif_ip6_addr_valid_life(netif, Public), PublicPreferred = netif_ip6_addr_pref_life(netif, Public);
     BOOLEAN Current = FALSE;
-    ULONG i;
+    ULONG i, Seen = 0;
 
     /* a duplicated public address is no prefix of ours: its temporary addresses run down on their own lifetimes */
     if (ip6_addr_isduplicated(PublicState))
@@ -506,6 +620,7 @@ Temp6DoPrefix(struct netif *netif, s8_t Public)
 
         if (Entry->Netif != netif || !ip6_addr_net_zoneless_eq(&Entry->Address, Prefix))
             continue;
+        Seen++;
         State = netif_ip6_addr_state(netif, Entry->Slot);
 
         /* a duplicated one stops new ones for the prefix until it goes (RFC 8981 3.4) */
@@ -532,6 +647,14 @@ Temp6DoPrefix(struct netif *netif, s8_t Public)
 
     if (!Current && !ip6_addr_isdeprecated(PublicState) && PublicPreferred > TCP6TempRegenerate)
         Temp6Create(netif, Public);
+    else if (!Seen && !Current && !ip6_addr_isdeprecated(PublicState) && !Temp6ShortLogged)
+    {
+        /* a prefix that never had a temporary address, because its preferred lifetime is not above RegenerateTime
+           (a setting that does not fit the router's lifetimes): say so once */
+        Temp6ShortLogged = TRUE;
+        DbgPrint("TCPIP: no IPv6 temporary address for a prefix of interface %u: its preferred lifetime %lus is not above "
+                 "RegenerateTime %lus\n", (UINT)netif->num, (ULONG)PublicPreferred, TCP6TempRegenerate);
+    }
 }
 
 /* Part of LWIP_HOOK_ND6_TMR (once a second, after lwIP counted the lifetimes down) */

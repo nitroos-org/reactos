@@ -81,6 +81,9 @@ VOID UDP6LeaveAll(PADDRESS_FILE AddrFile);
 VOID UDP6Startup(VOID);
 /* The row of an IPv6 UDP socket (IP_UDP6_ROW_ENTRY_ID) */
 VOID UDP6BuildRow(PADDRESS_FILE AddrFile, PUDP6_ROW_OWNER_PID Row);
+/* Whether a UDP socket is bound to the IPv6 address (temp6.c: such a temporary address is in use). Takes
+   AddressFileListLock, which the core lock may be held over */
+BOOLEAN UDP6AddressInUse(const UCHAR *Address);
 
 /* ICMPv6 echo (ip/network/echo6.c): \Device\Ip6, made only with IPv6 on */
 extern PDEVICE_OBJECT Ip6DeviceObject;

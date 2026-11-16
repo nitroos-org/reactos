@@ -2747,6 +2747,334 @@ cleanup:
     UNLOCK_TCPIP_CORE();
 }
 
+/* ---- address slots (LWIP_IPV6_NUM_ADDRESSES, the temp6.c reserve) ---- */
+
+/* Nanoseconds of one source address selection to Dest on En (core lock taken here), and how many of its addresses
+   are valid then */
+static ULONG
+StSourceNs(struct netif *En, const ip6_addr_t *Dest, PULONG Valid)
+{
+    LARGE_INTEGER Start, End, Frequency;
+    ULONG i, Sink = 0;
+    s8_t j;
+
+    LOCK_TCPIP_CORE();
+    *Valid = 0;
+    for (j = 0; j < LWIP_IPV6_NUM_ADDRESSES; j++)
+    {
+        if (ip6_addr_isvalid(netif_ip6_addr_state(En, j)))
+            (*Valid)++;
+    }
+    Start = KeQueryPerformanceCounter(&Frequency);
+    for (i = 0; i < 100000; i++)
+        Sink += (ULONG)(ULONG_PTR)ip6_select_source_address(En, Dest);
+    End = KeQueryPerformanceCounter(NULL);
+    UNLOCK_TCPIP_CORE();
+    if (!Sink)
+        return 0;
+    return (ULONG)((End.QuadPart - Start.QuadPart) * 1000000000 / Frequency.QuadPart / 100000);
+}
+
+/* The addresses of En in the first Bytes bytes of the prefix P (core lock taken here): stable, temporary, and free slots */
+static VOID
+StCountSlots(struct netif *En, const UCHAR *P, ULONG Bytes, PULONG Stable, PULONG Temps, PULONG Free)
+{
+    s8_t j;
+
+    *Stable = *Temps = *Free = 0;
+    LOCK_TCPIP_CORE();
+    for (j = 1; j < LWIP_IPV6_NUM_ADDRESSES; j++)
+    {
+        if (ip6_addr_isinvalid(netif_ip6_addr_state(En, j)))
+            (*Free)++;
+        else if (StSame(netif_ip6_addr(En, j)->addr, P, Bytes))
+        {
+            if (TCP6TemporarySlot(En, j))
+                (*Temps)++;
+            else
+                (*Stable)++;
+        }
+    }
+    UNLOCK_TCPIP_CORE();
+}
+
+/* Prefixes advertised one by one, slowly (a stable address and, while room is left, a temporary one for each): no
+   stable address is lost (the temporary ones give way), a temporary address is made only while at least
+   TCP6_TEMP_RESERVE slots stay free afterwards, the table answer fits */
+#define ST_SLOT_PREFIXES 9
+
+static VOID
+StTestSlots(PIP_INTERFACE Eth)
+{
+    struct netif *En = Eth->TCPContext;
+    UCHAR Opts[64], P[16] = { 0x20, 0x01, 0x0d, 0xb8, 0x71, 0x00 }, Mac[6] = { 0x02, 0x00, 0x00, 0x7a, 0x00, 0x0a };
+    ip6_addr_t R, Dest;
+    ULONG k, n, Stable = 0, Temps = 0, PrevTemps, FirstStable = 0, FirstTemps = 0, Free2 = 0, Free = 0, Others = 0, Expect, Valid1 = 0, Valid2 = 0, Ns1, Ns2, Size;
+    CHAR Detail[260];
+    s8_t j;
+    BOOLEAN Ok, ReserveBroken = FALSE;
+
+    StPrint("address slots: %d per interface; their arrays %u bytes (struct netif %u bytes), reserve %d for temporaries",
+            LWIP_IPV6_NUM_ADDRESSES,
+            (UINT)(sizeof(En->ip6_addr) + sizeof(En->ip6_addr_state) + sizeof(En->ip6_addr_valid_life) +
+                   sizeof(En->ip6_addr_pref_life)), (UINT)sizeof(*En), TCP6_TEMP_RESERVE);
+
+    ip6addr_aton("fe80::7a:a", &R);
+    ip6addr_aton("2001:db8:7100::99", &Dest);
+
+    LOCK_TCPIP_CORE();
+    for (j = 1; j < LWIP_IPV6_NUM_ADDRESSES; j++)
+    {
+        if (!ip6_addr_isinvalid(netif_ip6_addr_state(En, j)))
+            Others++;
+    }
+    UNLOCK_TCPIP_CORE();
+
+    for (k = 0; k < ST_SLOT_PREFIXES; k++)
+    {
+        P[5] = (UCHAR)k;
+        n = StOptSlla(Opts, Mac);
+        n += StOptPrefix(Opts + n, 3600, 1800, P);
+        StInject(Eth, StRa(&R, 0, 0, 0, Opts, n), FALSE);
+        StSleep(1500);
+        /* a temporary address is made only while more than the reserve stays free afterwards */
+        PrevTemps = Temps;
+        StCountSlots(En, P, 5, &Stable, &Temps, &Free);
+        if (Temps > PrevTemps && Free < TCP6_TEMP_RESERVE)
+            ReserveBroken = TRUE;
+    }
+    StSleep(3000);
+    StCountSlots(En, P, 5, &Stable, &Temps, &Free);
+    P[5] = 0;
+    StCountSlots(En, P, 6, &FirstStable, &FirstTemps, &Free2);
+    StCountSlots(En, P, 5, &Stable, &Temps, &Free);
+    Expect = (LWIP_IPV6_NUM_ADDRESSES - 1 - Others) < ST_SLOT_PREFIXES ? (LWIP_IPV6_NUM_ADDRESSES - 1 - Others) : ST_SLOT_PREFIXES;
+    /* the temporary addresses of the first prefixes gave way for the stable address of the last one */
+    Ok = Stable == Expect && !ReserveBroken && (!TCP6UseTemporaryAddresses || Temps > 0 || Expect + Others >= LWIP_IPV6_NUM_ADDRESSES - 1) &&
+         FirstStable == 1 && (!TCP6UseTemporaryAddresses || FirstTemps == 1);
+    _snprintf(Detail, sizeof(Detail), "%lu prefixes: %lu stable (expected %lu), %lu temporary, %lu free, %lu other addresses, reserve %s; first prefix %lu + %lu",
+              (ULONG)ST_SLOT_PREFIXES, Stable, Expect, Temps, Free, Others, ReserveBroken ? "broken" : "kept", FirstStable, FirstTemps);
+    StResult(Ok, "slots: stable addresses all kept, temporary ones made only above the reserve, the newest give way for them", Detail);
+
+    Size = TCPQueryIpv6Table(NULL, 0);
+    _snprintf(Detail, sizeof(Detail), "table answer %lu bytes", Size);
+    StResult(Size > 0 && Size < 0x10000, "slots: the address table answer is below its cap", Detail);
+
+    Ns1 = StSourceNs(En, &Dest, &Valid1);
+
+    /* the test prefixes go */
+    for (k = 0; k < ST_SLOT_PREFIXES; k++)
+    {
+        P[5] = (UCHAR)k;
+        n = StOptPrefix(Opts, 0, 0, P);
+        StInject(Eth, StRa(&R, 0, 0, 0, Opts, n), FALSE);
+    }
+    LOCK_TCPIP_CORE();
+    for (j = 1; j < LWIP_IPV6_NUM_ADDRESSES; j++)
+    {
+        if (!ip6_addr_isinvalid(netif_ip6_addr_state(En, j)) && StSame(netif_ip6_addr(En, j)->addr, P, 5))
+        {
+            netif_ip6_addr_set_state(En, j, IP6_ADDR_INVALID);
+            netif_ip6_addr_set_valid_life(En, j, 0);
+            netif_ip6_addr_set_pref_life(En, j, 0);
+        }
+    }
+    UNLOCK_TCPIP_CORE();
+    StSleep(1500);
+    Ns2 = StSourceNs(En, &Dest, &Valid2);
+    StPrint("source address selection: %lu ns with %lu valid addresses, %lu ns with %lu", Ns1, Valid1, Ns2, Valid2);
+}
+
+/* A temporary address that DAD keeps finding in use is duplicated after MaxDadAttempts new identifiers, holds its
+   slot for TCP6TempDupHold seconds, then goes and the prefix gets a new temporary address */
+static VOID
+StTestDupHold(PIP_INTERFACE Eth)
+{
+    struct netif *En = Eth->TCPContext;
+    UCHAR Opts[64], P[16] = { 0x20, 0x01, 0x0d, 0xb8, 0x72, 0x00 }, Mac[6] = { 0x02, 0x00, 0x00, 0x7a, 0x00, 0x0b };
+    ip6_addr_t R, Dup, Target;
+    ULONG i, n, Temps = 0, OldHold = TCP6TempDupHold;
+    s8_t j, DupSlot = -1;
+    BOOLEAN Ok = FALSE, Found;
+    u8_t State = 0;
+    CHAR Detail[160];
+
+    if (!TCP6UseTemporaryAddresses)
+        return;
+    ip6addr_aton("fe80::7a:b", &R);
+    n = StOptSlla(Opts, Mac);
+    n += StOptPrefix(Opts + n, 3600, 1800, P);
+    StInject(Eth, StRa(&R, 0, 0, 0, Opts, n), FALSE);
+    TCP6TempDupHold = 4;
+
+    /* every new temporary address of the prefix is answered for by another node (a new one is tentative for a tick) */
+    for (i = 0; i < 120 && DupSlot < 0; i++)
+    {
+        Found = FALSE;
+        LOCK_TCPIP_CORE();
+        for (j = 1; j < LWIP_IPV6_NUM_ADDRESSES; j++)
+        {
+            State = netif_ip6_addr_state(En, j);
+            if (ip6_addr_isinvalid(State) || !StSame(netif_ip6_addr(En, j)->addr, P, 6) || !TCP6TemporarySlot(En, j))
+                continue;
+            if (ip6_addr_isduplicated(State))
+                DupSlot = j;
+            else if (ip6_addr_istentative(State))
+            {
+                ip6_addr_copy(Target, *netif_ip6_addr(En, j));
+                Found = TRUE;
+            }
+        }
+        UNLOCK_TCPIP_CORE();
+        if (Found)
+            StInject(Eth, StNa(&R, &Target), FALSE);
+        StSleep(250);
+    }
+    if (DupSlot >= 0)
+    {
+        LOCK_TCPIP_CORE();
+        ip6_addr_copy(Dup, *netif_ip6_addr(En, DupSlot));
+        UNLOCK_TCPIP_CORE();
+    }
+    _snprintf(Detail, sizeof(Detail), "slot %d after %lu ms", (int)DupSlot, i * 250);
+    StResult(DupSlot >= 0, "temporary: repeated DAD conflicts leave it duplicated", Detail);
+
+    if (DupSlot >= 0)
+    {
+        /* it holds its slot for the hold time, then it goes and a new one is made for the prefix */
+        for (i = 0; i < 200 && !Ok; i++)
+        {
+            StSleep(250);
+            LOCK_TCPIP_CORE();
+            Ok = FALSE;
+            Temps = 0;
+            for (j = 1; j < LWIP_IPV6_NUM_ADDRESSES; j++)
+            {
+                if (ip6_addr_isinvalid(netif_ip6_addr_state(En, j)) || !StSame(netif_ip6_addr(En, j)->addr, P, 6) ||
+                    !TCP6TemporarySlot(En, j))
+                    continue;
+                Temps++;
+                if (!ip6_addr_zoneless_eq(netif_ip6_addr(En, j), &Dup) && !ip6_addr_isduplicated(netif_ip6_addr_state(En, j)))
+                    Ok = TRUE;
+            }
+            UNLOCK_TCPIP_CORE();
+        }
+        _snprintf(Detail, sizeof(Detail), "after %lu ms (hold %lu s), %lu temporary", i * 250, TCP6TempDupHold, Temps);
+        StResult(Ok, "temporary: a duplicated one is dropped after its hold time and the prefix gets a new one", Detail);
+    }
+    TCP6TempDupHold = OldHold;
+
+    /* the test prefix goes */
+    n = StOptPrefix(Opts, 0, 0, P);
+    StInject(Eth, StRa(&R, 0, 0, 0, Opts, n), FALSE);
+    LOCK_TCPIP_CORE();
+    for (j = 1; j < LWIP_IPV6_NUM_ADDRESSES; j++)
+    {
+        if (!ip6_addr_isinvalid(netif_ip6_addr_state(En, j)) && StSame(netif_ip6_addr(En, j)->addr, P, 6))
+        {
+            netif_ip6_addr_set_state(En, j, IP6_ADDR_INVALID);
+            netif_ip6_addr_set_valid_life(En, j, 0);
+            netif_ip6_addr_set_pref_life(En, j, 0);
+        }
+    }
+    UNLOCK_TCPIP_CORE();
+}
+
+/* A temporary address deleted between two timer ticks leaves its entry until the next one; when another address has
+   its slot meanwhile and room is made (a new prefix, a configured address), that address is no temporary one and
+   stays. All under one hold of the core lock, so no tick comes between */
+static VOID
+StTestStaleTemporary(PIP_INTERFACE Eth)
+{
+    struct netif *En = Eth->TCPContext;
+    UCHAR Opts[64], P[16] = { 0x20, 0x01, 0x0d, 0xb8, 0x74, 0x00 }, Mac[6] = { 0x02, 0x00, 0x00, 0x7a, 0x00, 0x0c };
+    ip6_addr_t R, X, Filler;
+    ULONG i, n, Made = 0;
+    USHORT Filled = 0;
+    s8_t j, T = -1;
+    BOOLEAN Kept = FALSE;
+    CHAR Detail[160];
+
+    if (!TCP6UseTemporaryAddresses)
+        return;
+    ip6addr_aton("fe80::7a:c", &R);
+    ip6addr_aton("2001:db8:75::1", &X);
+    n = StOptSlla(Opts, Mac);
+    n += StOptPrefix(Opts + n, 3600, 1800, P);
+    StInject(Eth, StRa(&R, 0, 0, 0, Opts, n), FALSE);
+
+    for (i = 0; i < 40 && T < 0; i++)
+    {
+        StSleep(250);
+        LOCK_TCPIP_CORE();
+        for (j = 1; j < LWIP_IPV6_NUM_ADDRESSES && T < 0; j++)
+        {
+            if (!ip6_addr_isinvalid(netif_ip6_addr_state(En, j)) && StSame(netif_ip6_addr(En, j)->addr, P, 6) &&
+                TCP6TemporarySlot(En, j))
+                T = j;
+        }
+        UNLOCK_TCPIP_CORE();
+    }
+
+    if (T >= 0)
+    {
+        LOCK_TCPIP_CORE();
+        /* deleted as addr6.c deletes one, then another address takes the slot */
+        netif_ip6_addr_set_valid_life(En, T, 0);
+        netif_ip6_addr_set_pref_life(En, T, 0);
+        netif_ip6_addr_set_state(En, T, IP6_ADDR_INVALID);
+        netif_ip6_addr_set(En, T, &X);
+        netif_ip6_addr_set_valid_life(En, T, 3600);
+        netif_ip6_addr_set_pref_life(En, T, 3600);
+        netif_ip6_addr_set_state(En, T, IP6_ADDR_PREFERRED);
+        /* no free slot left */
+        for (j = 1; j < LWIP_IPV6_NUM_ADDRESSES; j++)
+        {
+            if (!ip6_addr_isinvalid(netif_ip6_addr_state(En, j)))
+                continue;
+            IP6_ADDR(&Filler, PP_HTONL(0x20010db8), PP_HTONL(0x00760000), 0, PP_HTONL((u32_t)j));
+            ip6_addr_assign_zone(&Filler, IP6_UNICAST, En);
+            netif_ip6_addr_set(En, j, &Filler);
+            netif_ip6_addr_set_valid_life(En, j, 3600);
+            netif_ip6_addr_set_pref_life(En, j, 3600);
+            netif_ip6_addr_set_state(En, j, IP6_ADDR_PREFERRED);
+            Filled |= (USHORT)(1 << j);
+        }
+        /* room is made until no temporary address is left to give way */
+        while (Made < LWIP_IPV6_NUM_ADDRESSES && TCP6TemporaryMakeRoom(En))
+            Made++;
+        Kept = ip6_addr_isvalid(netif_ip6_addr_state(En, T)) && ip6_addr_zoneless_eq(netif_ip6_addr(En, T), &X);
+        /* the test addresses go */
+        for (j = 1; j < LWIP_IPV6_NUM_ADDRESSES; j++)
+        {
+            if (j != T && !(Filled & (1 << j)))
+                continue;
+            netif_ip6_addr_set_valid_life(En, j, 0);
+            netif_ip6_addr_set_pref_life(En, j, 0);
+            netif_ip6_addr_set_state(En, j, IP6_ADDR_INVALID);
+        }
+        UNLOCK_TCPIP_CORE();
+    }
+    _snprintf(Detail, sizeof(Detail), "slot %d, %lu temporary addresses gave way", (int)T, Made);
+    StResult(T >= 0 && Kept, "slots: an address in the slot of a deleted temporary address does not give way as one",
+             Detail);
+
+    /* the test prefix goes */
+    n = StOptPrefix(Opts, 0, 0, P);
+    StInject(Eth, StRa(&R, 0, 0, 0, Opts, n), FALSE);
+    LOCK_TCPIP_CORE();
+    for (j = 1; j < LWIP_IPV6_NUM_ADDRESSES; j++)
+    {
+        if (!ip6_addr_isinvalid(netif_ip6_addr_state(En, j)) && StSame(netif_ip6_addr(En, j)->addr, P, 6))
+        {
+            netif_ip6_addr_set_state(En, j, IP6_ADDR_INVALID);
+            netif_ip6_addr_set_valid_life(En, j, 0);
+            netif_ip6_addr_set_pref_life(En, j, 0);
+        }
+    }
+    UNLOCK_TCPIP_CORE();
+}
+
 static VOID NTAPI
 StThread(PVOID Context)
 {
@@ -2846,6 +3174,9 @@ StThread(PVOID Context)
     StTestStableIds(Eth);
     StTestRaExtras(Eth);
     StTestTemporary(Eth);
+    StTestSlots(Eth);
+    StTestDupHold(Eth);
+    StTestStaleTemporary(Eth);
 
     /* IPv4 to the interface's own address takes the same way (a frame to our own MAC): the control for the
        link-local timings above */

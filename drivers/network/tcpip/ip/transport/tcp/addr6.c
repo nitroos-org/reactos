@@ -210,10 +210,17 @@ Addr6ConfigureLocked(struct netif *netif, const TCP_IPV6_ADDRESS_REQUEST *Reques
 
             /* slot 0 is the link-local address lwIP forms (SLAAC takes its identifier from it): a configured
                link-local address goes there only while it is free */
-            for (Slot = 1; Slot < LWIP_IPV6_NUM_ADDRESSES; Slot++)
+            for (;;)
             {
-                if (ip6_addr_isinvalid(netif_ip6_addr_state(netif, Slot)))
-                    break;
+                for (Slot = 1; Slot < LWIP_IPV6_NUM_ADDRESSES; Slot++)
+                {
+                    if (ip6_addr_isinvalid(netif_ip6_addr_state(netif, Slot)))
+                        break;
+                }
+                /* a temporary address (temp6.c) gives way to a configured or DHCPv6 address */
+                if (Slot == LWIP_IPV6_NUM_ADDRESSES && TCP6TemporaryMakeRoom(netif))
+                    continue;
+                break;
             }
             if (Slot == LWIP_IPV6_NUM_ADDRESSES && ip6_addr_islinklocal(&Address) &&
                 ip6_addr_isinvalid(netif_ip6_addr_state(netif, 0)))

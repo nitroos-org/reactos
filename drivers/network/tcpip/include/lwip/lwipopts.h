@@ -93,6 +93,8 @@
 /* Configured addresses (addr6.c) and temporary addresses (temp6.c): router advertisements and the DAD of the link-local
  * address leave them alone, and one marked skip-as-source is not chosen as a source (NitroOS hooks in nd6.c and ip6.c) */
 #define LWIP_HOOK_ND6_ADDR_CONFIGURED(netif, i) (LibNd6AddrConfigured(netif, i) || LibNd6AddrTemporary(netif, i))
+/* No free address slot for the stable address of a prefix: a temporary address of the interface gives way (temp6.c) */
+#define LWIP_HOOK_ND6_NO_FREE_ADDRESS(netif) LibNd6MakeRoom(netif)
 #define LWIP_HOOK_IP6_SKIP_SOURCE(netif, i) LibIp6SkipSource(netif, i)
 /* Source address selection prefers a temporary address (RFC 6724 5 rule 7; NitroOS hook in ip6.c) */
 #define LWIP_HOOK_IP6_SOURCE_TEMPORARY(netif, i) LibIp6SourceTemporary(netif, i)
@@ -108,9 +110,12 @@
 #define LWIP_ND6_NUM_PREFIXES           16
 #define LWIP_ND6_NUM_ROUTERS            8
 /* Address slots per interface: the link-local address, SLAAC addresses of the advertised prefixes, and configured
- * ones (lwIP's default is 3). A slot costs about 30 bytes per interface (address with zone, state, two lifetimes);
- * the loops over the slots are per datagram for the source and route choice (ip6.c), per interface */
-#define LWIP_IPV6_NUM_ADDRESSES         8
+ * ones (lwIP's default is 3). Every SLAAC prefix takes two (the stable address and the temporary one, temp6.c), the
+ * DHCPv6 client and AddIPAddress take more. A slot costs about 33 bytes per interface (address with zone, state, two
+ * lifetimes); the loops over the slots are per datagram for the source and route choice (ip6.c), per interface.
+ * Not more than 16: the answer of the IPv6 table (if6.c) is capped at 64 KB, 64 interfaces of 16 slots fill 49 KB, and
+ * the slot masks of temp6.c are 16 bits wide */
+#define LWIP_IPV6_NUM_ADDRESSES         16
 /* Duplicate address detection probes per address: 1, as Windows 10 (Get-NetIPInterface DadTransmits of an Ethernet
  * interface on the oracle; lwIP's default is the same, stated here because the interfaces report it) */
 #define LWIP_IPV6_DUP_DETECT_ATTEMPTS   1
