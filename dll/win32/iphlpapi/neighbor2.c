@@ -238,33 +238,33 @@ static BOOL find_cached_v6(const UCHAR *Address, DWORD Index, BOOL Constrained, 
   return Result;
 }
 
-/* A datagram to the discard port makes the stack's neighbour discovery ask for the address */
-static void trigger_resolution_v6(const UCHAR *Address, DWORD Scope)
+/*
+ * Neighbour solicitations for the address on the interface: all that Windows puts on the wire for ResolveIpNetEntry2
+ * (a read of the packets of Windows Server 2022: one solicitation to the solicited-node group of the address, again
+ * once a second up to three times while nothing answers; no datagram of any protocol). The stack asks for it with
+ * IOCTL_IP6_SOLICIT, which any caller may; FALSE: it could not (no such interface, link down, IPv6 off).
+ */
+static BOOL solicit_v6(const UCHAR *Address, DWORD Index)
 {
-  WSADATA Wsa;
-  SOCKET Socket;
-  SOCKADDR_IN6 To;
+  TCP_IPV6_SOLICIT_REQUEST Request;
+  HANDLE TcpFile;
+  IO_STATUS_BLOCK Iosb;
+  NTSTATUS Status;
 
-  if (WSAStartup(MAKEWORD(2, 2), &Wsa))
-    return;
-  Socket = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
-  if (Socket != INVALID_SOCKET)
-  {
-    memset(&To, 0, sizeof(To));
-    To.sin6_family = AF_INET6;
-    memcpy(&To.sin6_addr, Address, 16);
-    To.sin6_port = htons(9);
-    To.sin6_scope_id = Scope;
-    sendto(Socket, "", 1, 0, (const struct sockaddr *)&To, sizeof(To));
-    closesocket(Socket);
-  }
-  WSACleanup();
+  Request.IfIndex = Index;
+  memcpy(Request.Address, Address, 16);
+  if (!NT_SUCCESS(openTcpFile(&TcpFile, FILE_READ_DATA)))
+    return FALSE;
+  Status = NtDeviceIoControlFile(TcpFile, NULL, NULL, NULL, &Iosb, IOCTL_IP6_SOLICIT, &Request, sizeof(Request),
+                                 NULL, 0);
+  closeTcpFile(TcpFile);
+  return NT_SUCCESS(Status);
 }
 
 /*
  * ResolveIpNetEntry2 for an IPv6 address: ::1 resolves on the loopback interface, Permanent and without a link
  * address; an address of this computer to the link address of its interface, Permanent; a neighbour in the cache to
- * its entry. Any other on-link address is asked for by neighbour discovery (up to three seconds, the stack asks
+ * its entry. Any other on-link address is asked for by neighbour solicitations (up to three seconds, the stack asks
  * three times); everything else, an address the routes do not show on a link included, is ERROR_BAD_NET_NAME as before
  * there was an IPv6 stack. The unspecified address is ERROR_INVALID_PARAMETER.
  */
@@ -273,7 +273,7 @@ static DWORD resolve_v6(PMIB_IPNET_ROW2 Row, DWORD Index, BOOL Constrained)
   const UCHAR *Address = Row->Address.Ipv6.sin6_addr.u.Byte;
   static const UCHAR Zero[16];
   DWORD Own, Mode, Tries;
-  BOOL Have;
+  BOOL Have, Asked;
   MIB_IPNET_ROW2 Found;
   ULONG Length;
   BYTE Link[MAX_INTERFACE_PHYSADDR];
@@ -325,10 +325,11 @@ static DWORD resolve_v6(PMIB_IPNET_ROW2 Row, DWORD Index, BOOL Constrained)
     Index = Route.InterfaceIndex;
   }
 
+  /* Windows asks for the address whether it knows it or not (one solicitation, answered in milliseconds) */
   Have = find_cached_v6(Address, Index, TRUE, &Found);
-  if (!Have)
+  Asked = solicit_v6(Address, Row->Address.Ipv6.sin6_scope_id ? Row->Address.Ipv6.sin6_scope_id : Index);
+  if (!Have && Asked)
   {
-    trigger_resolution_v6(Address, Row->Address.Ipv6.sin6_scope_id ? Row->Address.Ipv6.sin6_scope_id : Index);
     for (Tries = 0; Tries < 30 && !Have; Tries++)
     {
       Sleep(100);
