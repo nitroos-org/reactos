@@ -906,7 +906,6 @@ ServiceControlHandler(DWORD dwControl,
 VOID WINAPI
 ServiceMain(DWORD argc, LPWSTR* argv)
 {
-    HANDLE hPipeThread = INVALID_HANDLE_VALUE;
     HANDLE hDiscoveryThread = INVALID_HANDLE_VALUE;
     HANDLE hDhcp6Thread = INVALID_HANDLE_VALUE;
     DWORD ret;
@@ -959,16 +958,7 @@ ServiceMain(DWORD argc, LPWSTR* argv)
 
     UpdateServiceStatus(SERVICE_START_PENDING);
 
-    hPipeThread = InitRpc();
-    if (hPipeThread == INVALID_HANDLE_VALUE)
-    {
-        DbgPrint("DHCPCSVC: PipeInit() failed!\n");
-        stop_client();
-        CloseHandle(hAdapterStateChangedEvent);
-        CloseHandle(hStopEvent);
-        UpdateServiceStatus(SERVICE_STOPPED);
-        return;
-    }
+    InitRpc();
 
     hDiscoveryThread = StartAdapterDiscovery(hStopEvent);
     if (hDiscoveryThread == INVALID_HANDLE_VALUE)
@@ -1000,15 +990,6 @@ ServiceMain(DWORD argc, LPWSTR* argv)
 
     /* Every thread that uses the stop event, the adapter list, the timers or the socket must be gone before any
        of them is torn down. A thread that does not end is left alone with its state (leaked, not freed under it). */
-    DPRINT("Wait for pipe thread to close! %p\n", hPipeThread);
-    if (hPipeThread != INVALID_HANDLE_VALUE)
-    {
-        ret = WaitForSingleObject(hPipeThread, THREAD_WAIT_MS);
-        DPRINT("Done %lx\n", ret);
-        if (ret != WAIT_OBJECT_0)
-            AllGone = FALSE;
-    }
-
     DPRINT("Wait for discovery thread to close! %p\n", hDiscoveryThread);
     if (hDiscoveryThread != INVALID_HANDLE_VALUE)
     {
@@ -1031,8 +1012,6 @@ ServiceMain(DWORD argc, LPWSTR* argv)
 
         if (hDiscoveryThread != INVALID_HANDLE_VALUE)
             CloseHandle(hDiscoveryThread);
-        if (hPipeThread != INVALID_HANDLE_VALUE)
-            CloseHandle(hPipeThread);
         if (hDhcp6Thread != INVALID_HANDLE_VALUE)
             CloseHandle(hDhcp6Thread);
 

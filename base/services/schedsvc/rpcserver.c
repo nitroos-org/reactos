@@ -39,10 +39,14 @@ WINE_DEFAULT_DEBUG_CHANNEL(schedsvc);
 
 /* FUNCTIONS *****************************************************************/
 
-DWORD
-WINAPI
-RpcThreadRoutine(
-    LPVOID lpParameter)
+static BOOL AtsvcRegistered = FALSE;
+static BOOL TaskSchedulerServiceRegistered = FALSE;
+
+/* The service shares its process (svchost -k netsvcs) with other services: its interfaces listen on their own
+   (auto-listen), so no service of the process starts or stops the listening of the others. They are registered
+   before the service reports that it runs. */
+VOID
+StartRpcServer(VOID)
 {
     RPC_BINDING_VECTOR *BindingVector;
     RPC_STATUS Status;
@@ -51,15 +55,17 @@ RpcThreadRoutine(
     if (Status != RPC_S_OK)
     {
         ERR("RpcServerUseProtseqEpW() failed (Status %lx)\n", Status);
-        return 0;
+        return;
     }
 
-    Status = RpcServerRegisterIf(atsvc_v1_0_s_ifspec, NULL, NULL);
+    Status = RpcServerRegisterIfEx(atsvc_v1_0_s_ifspec, NULL, NULL, RPC_IF_AUTOLISTEN,
+                                   RPC_C_LISTEN_MAX_CALLS_DEFAULT, NULL);
     if (Status != RPC_S_OK)
     {
-        ERR("RpcServerRegisterIf() failed (Status %lx)\n", Status);
-        return 0;
+        ERR("RpcServerRegisterIfEx() failed (Status %lx)\n", Status);
+        return;
     }
+    AtsvcRegistered = TRUE;
 
     /* Task Scheduler 2.0 (taskschd.dll binds to it over ncalrpc through the endpoint mapper) */
     Status = RpcServerUseProtseqEpW(L"ncalrpc", RPC_C_PROTSEQ_MAX_REQS_DEFAULT, L"atsvc", NULL);
@@ -69,10 +75,12 @@ RpcThreadRoutine(
     /* local only: rpcrt4 checks the flag and calls the callback; every entry point of the interface
        checks its transport as well (schedsvc_begin_call) */
     Status = RpcServerRegisterIfEx(ITaskSchedulerService_v1_0_s_ifspec, NULL, NULL,
-                                   RPC_IF_ALLOW_LOCAL_ONLY, RPC_C_LISTEN_MAX_CALLS_DEFAULT,
+                                   RPC_IF_ALLOW_LOCAL_ONLY | RPC_IF_AUTOLISTEN, RPC_C_LISTEN_MAX_CALLS_DEFAULT,
                                    schedsvc_if_callback);
     if (Status != RPC_S_OK)
         ERR("RpcServerRegisterIf(ITaskSchedulerService) failed (Status %lx)\n", Status);
+    else
+        TaskSchedulerServiceRegistered = TRUE;
 
     Status = RpcServerInqBindings(&BindingVector);
     if (Status == RPC_S_OK)
@@ -87,14 +95,25 @@ RpcThreadRoutine(
     }
     else
         ERR("RpcServerInqBindings() failed (Status %lx)\n", Status);
+}
 
-    Status = RpcServerListen(1, RPC_C_LISTEN_MAX_CALLS_DEFAULT, FALSE);
-    if (Status != RPC_S_OK)
+
+/* The service stops: only its interfaces go, once the calls in them have returned (the job lists and the Task
+   Scheduler 2.0 state are torn down next); the other services of the process keep listening */
+VOID
+StopRpcServer(VOID)
+{
+    if (TaskSchedulerServiceRegistered)
     {
-        ERR("RpcServerListen() failed (Status %lx)\n", Status);
+        RpcServerUnregisterIf(ITaskSchedulerService_v1_0_s_ifspec, NULL, TRUE);
+        TaskSchedulerServiceRegistered = FALSE;
     }
 
-    return 0;
+    if (AtsvcRegistered)
+    {
+        RpcServerUnregisterIf(atsvc_v1_0_s_ifspec, NULL, TRUE);
+        AtsvcRegistered = FALSE;
+    }
 }
 
 

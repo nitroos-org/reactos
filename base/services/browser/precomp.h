@@ -27,9 +27,10 @@
 extern HINSTANCE hDllInstance;
 extern PSVCHOST_GLOBAL_DATA lpServiceGlobals;
 
-DWORD
-WINAPI
-RpcThreadRoutine(
-    LPVOID lpParameter);
+VOID
+StartRpcServer(VOID);
+
+VOID
+StopRpcServer(VOID);
 
 #endif /* _BROWSER_PCH_ */

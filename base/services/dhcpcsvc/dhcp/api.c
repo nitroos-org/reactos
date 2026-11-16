@@ -37,10 +37,14 @@ VOID ApiFree() {
     DeleteCriticalSection( &ApiCriticalSection );
 }
 
-DWORD
-WINAPI
-RpcThreadRoutine(
-    LPVOID lpParameter)
+static BOOL RpcRegistered = FALSE;
+
+/* The service shares its process (svchost -k netsvcs) with other services. Its interface listens on its own
+   (auto-listen), so no service of the process starts or stops the listening of the others, and it is registered
+   before the service reports that it runs (no thread to race a stop). The service runs without its API when the
+   registration fails, as it did before. */
+VOID
+InitRpc(VOID)
 {
     RPC_STATUS Status;
 
@@ -48,43 +52,30 @@ RpcThreadRoutine(
     if (Status != RPC_S_OK && Status != RPC_S_DUPLICATE_ENDPOINT)
     {
         DPRINT1("RpcServerUseProtseqEpW() failed (Status %lx)\n", Status);
-        return 0;
+        return;
     }
 
-    Status = RpcServerRegisterIf(Server_dhcpcsvc_v0_0_s_ifspec, NULL, NULL);
-    if (Status != RPC_S_OK && Status != RPC_S_ALREADY_REGISTERED)
-    {
-        DPRINT1("RpcServerRegisterIf() failed (Status %lx)\n", Status);
-        return 0;
-    }
-
-    /* Returns at once with RPC_S_ALREADY_LISTENING when another service of this process listens, and returns
-       when any service of the process stops the listening: neither is a service stop, the interface stays */
-    Status = RpcServerListen(1, RPC_C_LISTEN_MAX_CALLS_DEFAULT, FALSE);
+    Status = RpcServerRegisterIfEx(Server_dhcpcsvc_v0_0_s_ifspec, NULL, NULL, RPC_IF_AUTOLISTEN,
+                                   RPC_C_LISTEN_MAX_CALLS_DEFAULT, NULL);
     if (Status != RPC_S_OK)
     {
-        DPRINT1("RpcServerListen() failed (Status %lx)\n", Status);
+        DPRINT1("RpcServerRegisterIfEx() failed (Status %lx)\n", Status);
+        return;
     }
 
-    return 0;
-}
-
-HANDLE
-InitRpc(VOID)
-{
-    HANDLE Thread = CreateThread( NULL, 0, RpcThreadRoutine, (LPVOID)NULL, 0, NULL);
-
-    /* the caller tests for INVALID_HANDLE_VALUE */
-    return Thread ? Thread : INVALID_HANDLE_VALUE;
+    RpcRegistered = TRUE;
 }
 
 VOID
 ShutdownRpc(VOID)
 {
-    RpcMgmtStopServerListening(NULL);
-
-    /* the service stops: the next start registers it again */
-    RpcServerUnregisterIf(Server_dhcpcsvc_v0_0_s_ifspec, NULL, FALSE);
+    /* Only this interface goes, once the calls in it have returned (the service state is torn down next);
+       the other services of the process keep listening. The next start registers it again. */
+    if (RpcRegistered)
+    {
+        RpcServerUnregisterIf(Server_dhcpcsvc_v0_0_s_ifspec, NULL, TRUE);
+        RpcRegistered = FALSE;
+    }
 }
 
 static

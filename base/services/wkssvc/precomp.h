@@ -61,9 +61,10 @@ SaveWorkstationInfo(
 
 /* rpcserver.c */
 
-DWORD
-WINAPI
-RpcThreadRoutine(
-    LPVOID lpParameter);
+VOID
+StartRpcServer(VOID);
+
+VOID
+StopRpcServer(VOID);
 
 #endif /* _WKSSVC_PCH_ */

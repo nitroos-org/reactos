@@ -7,8 +7,11 @@
  *              - a call the server faults (the fault is raised in the client),
  *              - a call that raises in the client before anything is sent (a NULL [ref] pointer),
  *              - a call to a server that is not there,
- *              and a run of calls does not make the heaps of the process grow (every binding is freed).
+ *              and a run of calls does not make the heaps or the handles of the process grow (every binding is freed,
+ *              the pooled connection is reused).
  *              A bind routine that returns NULL makes the call fail.
+ *              The server routine gets the generic handle object the client passed (the string), not the binding of the
+ *              call.
  *
  * The server lives in this process (generic_handle_srv.c), over ncalrpc.
  */
@@ -24,6 +27,8 @@
 
 RPC_STATUS gen_handle_server_start(const char *endpoint);
 void gen_handle_server_stop(void);
+extern LONG g_srv_calls, g_srv_name_is_binding, g_srv_bad_names;
+extern WCHAR g_srv_expected[16];
 
 static char g_endpoint[64];
 static LONG g_binds, g_unbinds;
@@ -120,9 +125,9 @@ START_TEST(generic_handle)
 {
     RPC_STATUS status;
     SIZE_T before, after;
-    DWORD code;
+    DWORD code, handles_before = 0, handles_after = 0;
     int result, i;
-    const int calls = 500;
+    const int calls = 5000;
 
     sprintf(g_endpoint, "gen_handle_test_%lu", GetCurrentProcessId());
     status = gen_handle_server_start(g_endpoint);
@@ -130,11 +135,16 @@ START_TEST(generic_handle)
     if (status != RPC_S_OK)
         return;
 
-    /* a call that returns */
+    /* a call that returns; the server routine gets the string */
     reset_counts();
+    wcscpy(g_srv_expected, L"plain");
     code = call(0, L"plain", 41, &result);
     ok(code == 0, "gen_add raised %lu\n", code);
     ok(result == 42, "gen_add returned %d\n", result);
+    ok(g_srv_calls == 1, "server calls %ld\n", g_srv_calls);
+    ok(g_srv_name_is_binding == 0, "the server routine got the binding of the call as its generic handle\n");
+    ok(g_srv_bad_names == 0, "the server routine got another string than the client passed\n");
+    g_srv_expected[0] = 0;
     ok(g_binds == 1, "binds %ld\n", g_binds);
     ok(g_unbinds == 1, "unbinds %ld, expected 1\n", g_unbinds);
     ok(g_bad_unbinds == 0, "unbinds with another handle or object: %ld\n", g_bad_unbinds);
@@ -172,10 +182,13 @@ START_TEST(generic_handle)
     trace("call with a NULL binding raised %lu, unbinds %ld\n", code, g_unbinds);
     ok(g_binds == 1, "binds %ld\n", g_binds);
 
-    /* many calls: every binding is freed, the heaps do not grow */
+    /* many calls: every binding is freed, the pooled connection is reused, the heaps and handles do not grow */
     for (i = 0; i < 100; i++)
         call(0, L"warm", i, NULL);
     reset_counts();
+    wcscpy(g_srv_expected, L"loop");
+    g_srv_calls = g_srv_name_is_binding = g_srv_bad_names = 0;
+    GetProcessHandleCount(GetCurrentProcess(), &handles_before);
     before = heap_busy();
     code = 0;
     for (i = 0; i < calls; i++)
@@ -185,16 +198,21 @@ START_TEST(generic_handle)
             break;
     }
     after = heap_busy();
+    GetProcessHandleCount(GetCurrentProcess(), &handles_after);
+    g_srv_expected[0] = 0;
     ok(i == calls, "call %d returned %d (exception %lu)\n", i, result, code);
+    ok(g_srv_calls == calls, "server calls %ld\n", g_srv_calls);
+    ok(g_srv_name_is_binding == 0, "the server routine got the binding of the call as its generic handle %ld times\n",
+       g_srv_name_is_binding);
+    ok(g_srv_bad_names == 0, "the server routine got another string than the client passed %ld times\n", g_srv_bad_names);
     ok(g_binds == calls, "binds %ld\n", g_binds);
     ok(g_unbinds == calls, "unbinds %ld, expected %d\n", g_unbinds, calls);
     ok(g_bad_unbinds == 0, "unbinds with another handle or object: %ld\n", g_bad_unbinds);
-    trace("heap growth over %d calls: %ld bytes\n", calls, (long)(after - before));
-    /* ReactOS, 32-bit: every call through a new binding handle to a server of the same process over ncalrpc leaves
-     * a connection behind (5 handles and about 750 bytes, the calls fail after about 1000), whether the binding is
-     * freed or not: not the unbind routine, a bug of its own */
-    todo_ros_if(sizeof(void *) == 4)
+    trace("heap growth over %d calls: %ld bytes, handles %lu -> %lu\n", calls, (long)(after - before),
+          handles_before, handles_after);
     ok((LONG_PTR)(after - before) < calls * 8, "heap grew by %ld bytes over %d calls\n", (long)(after - before), calls);
+    /* a few for the thread pool and the connections that come and go */
+    ok(handles_after <= handles_before + 8, "handles %lu -> %lu over %d calls\n", handles_before, handles_after, calls);
 
     gen_handle_server_stop();
 }

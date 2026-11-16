@@ -110,9 +110,10 @@ TaskSchedulerStop(VOID);
 
 /* rpcserver.c */
 
-DWORD
-WINAPI
-RpcThreadRoutine(
-    LPVOID lpParameter);
+VOID
+StartRpcServer(VOID);
+
+VOID
+StopRpcServer(VOID);
 
 #endif /* _SCHEDSVC_PCH_ */

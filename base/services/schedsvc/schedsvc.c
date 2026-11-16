@@ -86,8 +86,8 @@ ServiceControlHandler(DWORD dwControl,
         case SERVICE_CONTROL_SHUTDOWN:
             TRACE("  SERVICE_CONTROL_STOP/SERVICE_CONTROL_SHUTDOWN received\n");
             UpdateServiceStatus(SERVICE_STOP_PENDING);
-            /* Stop listening to incoming RPC messages */
-            RpcMgmtStopServerListening(NULL);
+            /* The service main unregisters the RPC interfaces of the service. The process keeps listening:
+               it hosts other services. */
             if (Events[0] != NULL)
                 SetEvent(Events[0]);
             return ERROR_SUCCESS;
@@ -129,7 +129,6 @@ static
 DWORD
 ServiceInit(VOID)
 {
-    HANDLE hThread;
     DWORD dwError;
 
     /* Initialize the job list */
@@ -148,21 +147,6 @@ ServiceInit(VOID)
     dwError = LoadJobs();
     if (dwError != ERROR_SUCCESS)
         return dwError;
-
-    /* Start the RPC thread */
-    hThread = CreateThread(NULL,
-                           0,
-                           (LPTHREAD_START_ROUTINE)RpcThreadRoutine,
-                           NULL,
-                           0,
-                           NULL);
-    if (!hThread)
-    {
-        ERR("Could not create the RPC thread\n");
-        return GetLastError();
-    }
-
-    CloseHandle(hThread);
 
     /* Start the Task Scheduler 2.0 trigger thread */
     dwError = TaskSchedulerStart();
@@ -194,6 +178,9 @@ ServiceInit(VOID)
         CloseHandle(Events[0]);
         return GetLastError();
     }
+
+    /* Register the RPC interfaces last: their calls use the events and the job lists */
+    StartRpcServer();
 
     return ERROR_SUCCESS;
 }
@@ -263,6 +250,9 @@ SchedServiceMain(DWORD argc, LPTSTR *argv)
             RtlReleaseResource(&JobListLock);
         }
     }
+
+    /* No call runs in the service any more once this returns */
+    StopRpcServer();
 
     TaskSchedulerStop();
 
