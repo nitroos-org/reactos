@@ -719,10 +719,19 @@ Done:
 
 /*
  * The descriptor of the parent of a key, found through the key's NT name. NULL when there is none to
- * inherit from (a hive root's parent is not one) or it cannot be read.
+ * inherit from or it cannot be read.
+ *
+ * ForSet: the parent of a hive root (\REGISTRY\MACHINE\<hive>, \REGISTRY\USER\<sid>) is the root of its
+ * class, which passes on its ACEs to the hive root as it does on Windows (measured on Windows Server 2022: a
+ * loaded hive's root gets the inheritable ACEs of HKLM, and its subkeys follow). Without ForSet (the reporting
+ * of inherited ACEs of a Get) only keys below a hive root have a parent.
+ * Unreadable: set to TRUE when a parent exists by name but the access to its descriptor is denied (the key is
+ * below a key whose owner or DACL shuts the caller out): the caller then inherits nothing from it, as on Windows.
  */
 static PSECURITY_DESCRIPTOR
-AccpQueryParentKeySd(IN HKEY Key)
+AccpQueryParentKeySd(IN HKEY Key,
+                     IN BOOLEAN ForSet,
+                     OUT PBOOLEAN Unreadable OPTIONAL)
 {
     HKEY Reopened = NULL;
     PKEY_NAME_INFORMATION Name = NULL;
@@ -734,6 +743,8 @@ AccpQueryParentKeySd(IN HKEY Key)
     NTSTATUS Status;
     PWCHAR Last;
 
+    if (Unreadable != NULL)
+        *Unreadable = FALSE;
     if (RegOpenKeyExW(Key, L"", REG_OPTION_OPEN_LINK, READ_CONTROL, &Reopened) != ERROR_SUCCESS)
         return NULL;
 
@@ -752,7 +763,7 @@ AccpQueryParentKeySd(IN HKEY Key)
         Size = Length;
     }
 
-    /* the parent is three components deep at least: \REGISTRY\MACHINE\SOFTWARE is the first */
+    /* the parent is three components deep at least (\REGISTRY\MACHINE\SOFTWARE is the first), two for a hive root of a Set */
     Length = Name->NameLength / sizeof(WCHAR);
     Last = NULL;
     for (i = 0; i < Length; i++)
@@ -764,14 +775,20 @@ AccpQueryParentKeySd(IN HKEY Key)
                 Components++;
         }
     }
-    if (Last == NULL || Last == Name->Name || Components < 3)
+    if (Last == NULL || Last == Name->Name || Components < (ForSet ? 2 : 3))
         goto Cleanup;
 
     ParentName.Buffer = Name->Name;
     ParentName.Length = ParentName.MaximumLength = (USHORT)((Last - Name->Name) * sizeof(WCHAR));
     InitializeObjectAttributes(&Attributes, &ParentName, OBJ_CASE_INSENSITIVE | OBJ_OPENLINK, NULL, NULL);
-    if (!NT_SUCCESS(NtOpenKey(&Parent, READ_CONTROL, &Attributes)))
+    Status = NtOpenKey(&Parent, READ_CONTROL, &Attributes);
+    if (!NT_SUCCESS(Status))
+    {
+        /* only a refusal counts: any other failure (no memory, a vanished parent) says nothing about the parent */
+        if (Unreadable != NULL && Status == STATUS_ACCESS_DENIED)
+            *Unreadable = TRUE;
         goto Cleanup;
+    }
 
     Size = 0x200;
     for (;;)
@@ -789,7 +806,11 @@ AccpQueryParentKeySd(IN HKEY Key)
         LocalFree(Sd);
         Sd = NULL;
         if (Status != STATUS_BUFFER_TOO_SMALL || Length <= Size)
+        {
+            if (Unreadable != NULL && Status == STATUS_ACCESS_DENIED)
+                *Unreadable = TRUE;
             break;
+        }
         Size = Length;
     }
 
@@ -800,6 +821,34 @@ Cleanup:
         LocalFree(Name);
     RegCloseKey(Reopened);
     return Sd;
+}
+
+/*
+ * A descriptor with an empty DACL (LocalAlloc, self-relative): what a key inherits from a parent the caller
+ * cannot read. NULL on a failure.
+ */
+static PSECURITY_DESCRIPTOR
+AccpCreateEmptyParentSd(VOID)
+{
+    SECURITY_DESCRIPTOR Absolute;
+    ACL Empty;
+    PSECURITY_DESCRIPTOR Relative = NULL;
+    DWORD Size = 0;
+
+    if (!InitializeAcl(&Empty, sizeof(Empty), ACL_REVISION) ||
+        !InitializeSecurityDescriptor(&Absolute, SECURITY_DESCRIPTOR_REVISION) ||
+        !SetSecurityDescriptorDacl(&Absolute, TRUE, &Empty, FALSE))
+        return NULL;
+    MakeSelfRelativeSD(&Absolute, NULL, &Size);
+    if (Size == 0)
+        return NULL;
+    Relative = LocalAlloc(LMEM_FIXED, Size);
+    if (Relative != NULL && !MakeSelfRelativeSD(&Absolute, Relative, &Size))
+    {
+        LocalFree(Relative);
+        Relative = NULL;
+    }
+    return Relative;
 }
 
 /*
@@ -1010,10 +1059,12 @@ Cleanup:
  * Key (ParentSd) passes on, and its own subkeys follow if it changed. Any other unprotected one keeps its DACL and
  * is only flagged protected and auto-inherited (as on Windows); its subtree is left alone.
  * A subkey that cannot be opened for READ_CONTROL | WRITE_DAC (or set) is skipped with its subtree; the
- * walk goes on with its siblings and the call still succeeds.
- * VERIFY ON ORACLE: what Windows returns when part of the subtree could not be updated (the documentation
- * of SetSecurityInfo does not say); and a handle opened with MAXIMUM_ALLOWED, which Windows documents as
- * not propagating (the access a handle was requested with is not recorded in it, so it is not detected).
+ * walk goes on with its siblings and the call still succeeds. Measured on Windows Server 2022 (caller
+ * Administrator, with and without SeBackup/SeRestore/SeTakeOwnership enabled): a subkey owned by someone else
+ * and closed to the caller is skipped with its subtree and the call returns 0, the siblings after it are
+ * updated; a subkey that denies the caller KEY_ENUMERATE_SUB_KEYS is updated itself, its subkeys are not.
+ * A handle opened with MAXIMUM_ALLOWED, which Windows documents as not propagating, is not detected (the
+ * access a handle was requested with is not recorded in it).
  *
  * The walk keeps its state in a heap array of frames (one per depth level), not on the stack: a service
  * thread with a small stack can walk a deep tree.
@@ -1211,6 +1262,7 @@ AccpSetKeySecurity(IN HKEY Key,
     PSID Owner = NULL, Group = NULL, OldOwner = NULL, OldGroup = NULL;
     PACL Dacl = NULL, MergedDacl = NULL, ProtectedDacl = NULL, Sacl = NULL;
     BOOL Present, Defaulted, SaclPresent = FALSE;
+    BOOLEAN ParentUnreadable = FALSE;
     DWORD Revision, Ret;
 
     if (!(SecurityInfo & DACL_SECURITY_INFORMATION) ||
@@ -1218,7 +1270,17 @@ AccpSetKeySecurity(IN HKEY Key,
         !IsValidAcl(Dacl))  /* a malformed ACL is the kernel's to reject, as on a plain set */
         return AccpSetKeySecurityPlain(Key, SecurityInfo, pSecurityDescriptor);
 
-    ParentSd = AccpQueryParentKeySd(Key);
+    ParentSd = AccpQueryParentKeySd(Key, TRUE, &ParentUnreadable);
+    if (ParentSd == NULL && ParentUnreadable)
+    {
+        /*
+         * The parent exists but the caller cannot read it. As on Windows (measured) the key is still made
+         * auto-inherited and its subtree follows, but it takes nothing from the parent: every ACE flagged
+         * inherited that the caller's DACL carries is dropped, and a key that was inheriting from the parent
+         * keeps only its explicit ACEs.
+         */
+        ParentSd = AccpCreateEmptyParentSd();
+    }
     if (ParentSd == NULL)
         return AccpSetKeySecurityPlain(Key, SecurityInfo, pSecurityDescriptor);
 
@@ -1463,7 +1525,7 @@ AccRewriteGetHandleRights(HANDLE handle,
         /* the ACEs of a key that its parent passes on are reported as inherited */
         if (ObjectType == SE_REGISTRY_KEY && (SecurityInfo & DACL_SECURITY_INFORMATION))
         {
-            PSECURITY_DESCRIPTOR ParentSd = AccpQueryParentKeySd((HKEY)handle);
+            PSECURITY_DESCRIPTOR ParentSd = AccpQueryParentKeySd((HKEY)handle, FALSE, NULL);
 
             if (ParentSd != NULL)
             {
