@@ -1708,6 +1708,11 @@ SkuValueToInfoName(PCWSTR Name)
         /* The bit set of the Office applications the SKU licenses: the string of the EUL's ApplicationBitmap information
          * (Word asks for it of every SKU once it has the status; without it Word stops with a licensing error) */
         { L"ApplicationBitmap", L"ApplicationBitmap" },
+        /* The product key group the SKU belongs to and the id of the product key configuration license (Windows 10, measured:
+         * strings; Office asks for the first one of its grace SKU before it installs the grace product key). Both are the
+         * same-named information of the end-user license; a license without it answers value not found */
+        { L"ProductKeyGroupUniqueness", L"ProductKeyGroupUniqueness" },
+        { L"pkeyConfigLicenseId", L"pkeyConfigLicenseId" },
     };
     UINT i;
 

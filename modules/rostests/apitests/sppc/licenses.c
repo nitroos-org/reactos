@@ -71,12 +71,16 @@ static const char g_Eul[] =
     "<tm:infoStr name=\"Family\">ApitestSuite</tm:infoStr>"
     "<tm:infoStr name=\"productAuthor\">Nobody</tm:infoStr>"
     "<tm:infoStr name=\"Channel\">not-a-sku-value</tm:infoStr>"
+    "<tm:infoStr name=\"ProductKeyGroupUniqueness\">Apitest_Suite_Grace</tm:infoStr>"
+    "<tm:infoStr name=\"pkeyConfigLicenseId\">{01234567-89ab-cdef-0123-456789abcdef}</tm:infoStr>"
+    "<tm:infoStr name=\"PKeyConfigLicenseId\">{upper-case-name-is-not-answered}</tm:infoStr>"
     "</tm:infoList></tm:infoTables></r:otherInfo></r:license>"
     "<r:license xmlns:r=\"urn:mpeg:mpeg21:2003:01-REL-R-NS\" licenseId=\"" LIC_E3 "\"><r:title>apitest E3</r:title>"
     "<r:otherInfo><tm:infoTables xmlns:tm=\"urn:x\"><tm:infoList tag=\"#global\">"
     "<tm:infoStr name=\"licenseType\">msft:sl/PL/GENERIC/PRIVATE</tm:infoStr>"
     "<tm:infoStr name=\"productSkuId\">" SKU2 "</tm:infoStr>"
     "<tm:infoStr name=\"applicationId\">" APP "</tm:infoStr>"
+    "<tm:infoStr name=\"ProductKeyGroupUniqueness\">not-from-a-private-license</tm:infoStr>"
     "</tm:infoList></tm:infoTables></r:otherInfo></r:license>"
     /* a SKU without an end-user license */
     "<r:license xmlns:r=\"urn:mpeg:mpeg21:2003:01-REL-R-NS\" licenseId=\"" LIC_E4 "\"><r:title>apitest E4</r:title>"
@@ -490,6 +494,28 @@ START_TEST(licenses)
         }
         if (Blob)
             LocalFree(Blob);
+        /* the product key group and the key configuration license id: strings of the end-user license, nothing else answers them */
+        Blob = NULL; cb = 0; Type = (SLDATATYPE)99;
+        hr = pSkuInfo(Slc, &g_Sku2, L"ProductKeyGroupUniqueness", &Type, &cb, &Blob);
+        ok(hr == S_OK && Type == SL_DATA_SZ && Blob && !wcscmp((WCHAR *)Blob, L"Apitest_Suite_Grace") && cb == 20 * sizeof(WCHAR),
+           "SLGetProductSkuInformation(ProductKeyGroupUniqueness): 0x%lx type %d cb %u\n", hr, (int)Type, cb);
+        if (Blob)
+            LocalFree(Blob);
+        Blob = NULL; cb = 0; Type = (SLDATATYPE)99;
+        hr = pSkuInfo(Slc, &g_Sku2, L"pkeyConfigLicenseId", &Type, &cb, &Blob);
+        ok(hr == S_OK && Type == SL_DATA_SZ && Blob && !wcscmp((WCHAR *)Blob, L"{01234567-89ab-cdef-0123-456789abcdef}") && cb == 39 * sizeof(WCHAR),
+           "SLGetProductSkuInformation(pkeyConfigLicenseId): 0x%lx type %d cb %u\n", hr, (int)Type, cb);
+        if (Blob)
+            LocalFree(Blob);
+        Blob = (PBYTE)1; cb = 9;
+        hr = pSkuInfo(Slc, &g_Sku2, L"PKeyConfigLicenseId", &Type, &cb, &Blob);
+        ok(hr == SL_E_VALUE_NOT_FOUND && cb == 0 && Blob == NULL, "SLGetProductSkuInformation(PKeyConfigLicenseId): 0x%lx\n", hr);
+        hr = pSkuInfo(Slc, &g_Sku2, L"productUniquenessGuid", &Type, &cb, &Blob);
+        ok(hr == SL_E_VALUE_NOT_FOUND, "SLGetProductSkuInformation(productUniquenessGuid): 0x%lx\n", hr);
+        /* a SKU without an end-user license answers neither */
+        Blob = (PBYTE)1; cb = 9;
+        hr = pSkuInfo(Slc, &g_Sku3, L"ProductKeyGroupUniqueness", &Type, &cb, &Blob);
+        ok(hr == SL_E_VALUE_NOT_FOUND && cb == 0 && Blob == NULL, "SLGetProductSkuInformation(ProductKeyGroupUniqueness, no EUL): 0x%lx\n", hr);
         /* names Windows does not answer for a SKU, even when the license happens to have a field of that name */
         Blob = (PBYTE)1; cb = 9;
         hr = pSkuInfo(Slc, &g_Sku2, L"Channel", &Type, &cb, &Blob);
