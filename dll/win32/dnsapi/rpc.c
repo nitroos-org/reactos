@@ -6,6 +6,9 @@
 #include <winbase.h>
 #include <dnsrslvr_c.h>
 
+VOID DnsapiV6CacheInit(VOID);
+VOID DnsapiV6CacheCleanup(VOID);
+
 #define NDEBUG
 #include <debug.h>
 
@@ -113,10 +116,13 @@ DllMain(HINSTANCE hInstance, DWORD dwReason, LPVOID lpReserved)
     {
         case DLL_PROCESS_ATTACH:
             DisableThreadLibraryCalls(hInstance);
+            DnsapiV6CacheInit();
             break;
 
         case DLL_PROCESS_DETACH:
             /* Unloaded (not the process ending): give the binding back */
+            if (lpReserved == NULL)
+                DnsapiV6CacheCleanup();
             if (lpReserved == NULL && g_LocalBinding != NULL)
             {
                 handle_t hBinding = g_LocalBinding;

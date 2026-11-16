@@ -161,20 +161,80 @@ DomainInList(PCSTR List, PCSTR Domain)
     return FALSE;
 }
 
+#define V6CFG_MAX_SERVERS   16
+#define V6CFG_SUFFIX_SIZE   1024
+/* A change notification can miss what a router advertisement alone changes: the cache expires anyway */
+#define V6CFG_MAX_AGE_MS    10000
+
+/* The IPv6 name servers and search domains of the adapters, as of one GetAdaptersAddresses call */
+typedef struct _V6CONFIG
+{
+    ULONG ServerCount;
+    struct
+    {
+        IN6_ADDR Address;
+        ULONG ScopeId;
+    } Servers[V6CFG_MAX_SERVERS];
+    CHAR Suffixes[V6CFG_SUFFIX_SIZE];   /* space separated, each once */
+} V6CONFIG, *PV6CONFIG;
+
+static CRITICAL_SECTION g_V6Lock;
+static BOOL g_V6LockInit;
+static V6CONFIG g_V6Cache;
+static BOOL g_V6CacheValid;
+static DWORD g_V6CacheTick;
+static HANDLE g_V6ChangeEvent;      /* signalled by the address change notification */
+static HANDLE g_V6ChangeHandle;
+static OVERLAPPED g_V6ChangeOv;
+static BOOL g_V6ChangeArmed;
+
+VOID DnsapiV6CacheInit(VOID);
+VOID DnsapiV6CacheCleanup(VOID);
+
+VOID
+DnsapiV6CacheInit(VOID)
+{
+    InitializeCriticalSection(&g_V6Lock);
+    g_V6LockInit = TRUE;
+}
+
+/* The DLL is unloaded: end the pending notification request, which a later address change would complete into
+   memory of the DLL */
+VOID
+DnsapiV6CacheCleanup(VOID)
+{
+    if (!g_V6LockInit)
+        return;
+
+    if (g_V6ChangeArmed)
+    {
+        CancelIPChangeNotify(&g_V6ChangeOv);
+        g_V6ChangeArmed = FALSE;
+    }
+    if (g_V6ChangeEvent)
+    {
+        CloseHandle(g_V6ChangeEvent);
+        g_V6ChangeEvent = NULL;
+    }
+    DeleteCriticalSection(&g_V6Lock);
+    g_V6LockInit = FALSE;
+}
+
 /*
  * The IPv6 name servers of the adapters (configured ones and those of router advertisements: iphlpapi's
- * GetAdaptersAddresses lists them with the IPv6 family), after the IPv4 servers that GetNetworkParams gave, so
- * that they are asked first and the IPv6 ones only when there is no IPv4 server or it does not answer. Without
- * IPv6 (the switch off) GetAdaptersAddresses has nothing for the IPv6 family and nothing is added.
+ * GetAdaptersAddresses lists them with the IPv6 family) and the search domains of their router advertisements.
+ * Without IPv6 (the switch off) GetAdaptersAddresses has nothing for the IPv6 family and the result is empty.
  */
 static
 VOID
-AddIpv6Servers(adns_state astate, PCHAR Search, SIZE_T SearchSize)
+CollectIpv6Config(PV6CONFIG Config)
 {
     PIP_ADAPTER_ADDRESSES Addresses = NULL, Adapter;
     PIP_ADAPTER_DNS_SERVER_ADDRESS Server;
     ULONG Size = 16 * 1024, Pass;
     DWORD Error = ERROR_BUFFER_OVERFLOW;
+
+    RtlZeroMemory(Config, sizeof(*Config));
 
     for (Pass = 0; Pass < 3 && Error == ERROR_BUFFER_OVERFLOW; Pass++)
     {
@@ -197,13 +257,17 @@ AddIpv6Servers(adns_state astate, PCHAR Search, SIZE_T SearchSize)
         {
             const SOCKADDR_IN6 *Sa = (const SOCKADDR_IN6 *)Server->Address.lpSockaddr;
 
-            if (Sa && Sa->sin6_family == AF_INET6)
-                adns_addserver6(astate, &Sa->sin6_addr, Sa->sin6_scope_id);
+            if (Sa && Sa->sin6_family == AF_INET6 && Config->ServerCount < V6CFG_MAX_SERVERS)
+            {
+                Config->Servers[Config->ServerCount].Address = Sa->sin6_addr;
+                Config->Servers[Config->ServerCount].ScopeId = Sa->sin6_scope_id;
+                Config->ServerCount++;
+            }
         }
 
         /* the DNS search domains its router advertisements gave (DNSSL): FirstDnsSuffix follows the last member
            of IP_ADAPTER_ADDRESSES_LH, which the headers of this tree stop before */
-        if (Search && Adapter->Length >= sizeof(DNSAPI_ADAPTER_ADDRESSES_W7))
+        if (Adapter->Length >= sizeof(DNSAPI_ADAPTER_ADDRESSES_W7))
         {
             PIP_ADAPTER_DNS_SUFFIX Suffix;
 
@@ -214,19 +278,114 @@ AddIpv6Servers(adns_state astate, PCHAR Search, SIZE_T SearchSize)
 
                 if (!WideCharToMultiByte(CP_ACP, 0, Suffix->String, -1, Text, sizeof(Text), NULL, NULL) || !Text[0])
                     continue;
-                Length = strlen(Search);
-                /* each domain once (the list is searched in order), and only while it fits */
-                if (DomainInList(Search, Text) || Length + (Length ? 1 : 0) + strlen(Text) + 1 > SearchSize)
+                Length = strlen(Config->Suffixes);
+                if (DomainInList(Config->Suffixes, Text) ||
+                    Length + (Length ? 1 : 0) + strlen(Text) + 1 > sizeof(Config->Suffixes))
                     continue;
                 if (Length)
-                    Search[Length++] = ' ';
-                strcpy(Search + Length, Text);
+                    Config->Suffixes[Length++] = ' ';
+                strcpy(Config->Suffixes + Length, Text);
             }
         }
     }
 
     if (Addresses)
         RtlFreeHeap(RtlGetProcessHeap(), 0, Addresses);
+}
+
+/*
+ * Copy the IPv6 configuration into Config: from the cache while no address change was signalled and it is
+ * young, else collected again (the notification is armed before the collection so that no change in between
+ * is lost). Where the notification cannot be had every call collects, as before the cache.
+ */
+static
+VOID
+GetIpv6Config(PV6CONFIG Config)
+{
+    DWORD Now = GetTickCount();
+    BOOL Changed;
+
+    if (!g_V6LockInit)
+    {
+        CollectIpv6Config(Config);
+        return;
+    }
+
+    EnterCriticalSection(&g_V6Lock);
+
+    if (!g_V6ChangeEvent)
+        g_V6ChangeEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+
+    Changed = !g_V6ChangeEvent || WaitForSingleObject(g_V6ChangeEvent, 0) != WAIT_TIMEOUT;
+
+    if (g_V6CacheValid && g_V6ChangeArmed && !Changed && (DWORD)(Now - g_V6CacheTick) < V6CFG_MAX_AGE_MS)
+    {
+        *Config = g_V6Cache;
+        LeaveCriticalSection(&g_V6Lock);
+        return;
+    }
+
+    if (g_V6ChangeEvent && (!g_V6ChangeArmed || Changed))
+    {
+        ResetEvent(g_V6ChangeEvent);
+        RtlZeroMemory(&g_V6ChangeOv, sizeof(g_V6ChangeOv));
+        g_V6ChangeOv.hEvent = g_V6ChangeEvent;
+        g_V6ChangeHandle = NULL;
+        g_V6ChangeArmed = (NotifyAddrChange(&g_V6ChangeHandle, &g_V6ChangeOv) == ERROR_IO_PENDING);
+    }
+
+    CollectIpv6Config(&g_V6Cache);
+    g_V6CacheValid = TRUE;
+    g_V6CacheTick = Now;
+    *Config = g_V6Cache;
+
+    LeaveCriticalSection(&g_V6Lock);
+}
+
+/*
+ * Add the IPv6 name servers of the adapters after the IPv4 servers that GetNetworkParams gave, so that they are
+ * asked first and the IPv6 ones only when there is no IPv4 server or it does not answer, and the search domains
+ * of their router advertisements to Search.
+ */
+static
+VOID
+AddIpv6Servers(adns_state astate, PCHAR Search, SIZE_T SearchSize)
+{
+    V6CONFIG Config;
+    ULONG i;
+
+    GetIpv6Config(&Config);
+
+    for (i = 0; i < Config.ServerCount; i++)
+        adns_addserver6(astate, &Config.Servers[i].Address, Config.Servers[i].ScopeId);
+
+    if (Search && Config.Suffixes[0])
+    {
+        PCHAR Token = Config.Suffixes;
+
+        while (*Token)
+        {
+            SIZE_T Part = strcspn(Token, " "), Length;
+            CHAR Text[MAX_DNS_SUFFIX_STRING_LENGTH];
+
+            if (Part < sizeof(Text))
+            {
+                memcpy(Text, Token, Part);
+                Text[Part] = 0;
+                Length = strlen(Search);
+                /* each domain once (the list is searched in order), and only while it fits */
+                if (!DomainInList(Search, Text) && Length + (Length ? 1 : 0) + Part + 1 <= SearchSize)
+                {
+                    if (Length)
+                        Search[Length++] = ' ';
+                    strcpy(Search + Length, Text);
+                }
+            }
+            Token += Part;
+            while (*Token == ' ')
+                Token++;
+        }
+    }
 }
 
 /* DnsQuery ****************************

@@ -6,6 +6,7 @@ list(APPEND SOURCE
     DnsQueryAaaa.c
     DnsQueryMany.c
     DnsQueryTypes.c
+    DnsRecordFields.c
     HostsFile.c
     testlist.c)
 
