@@ -1879,6 +1879,261 @@ StRaSuffixCount(const char *Name, ULONG *Lifetime)
     return Count;
 }
 
+/* The slot of the public SLAAC address of this /64 prefix on netif (core lock NOT held), or -1; *State gets its
+   state. The temporary addresses made beside it (temp6.c) are not it */
+static s8_t
+StFindPrefixAddress(struct netif *En, const UCHAR *P, u8_t *State)
+{
+    s8_t Found = -1, k;
+
+    LOCK_TCPIP_CORE();
+    for (k = 1; k < LWIP_IPV6_NUM_ADDRESSES; k++)
+    {
+        if (!ip6_addr_isinvalid(netif_ip6_addr_state(En, k)) && StSame(netif_ip6_addr(En, k)->addr, P, 8) &&
+            !TCP6TemporarySlot(En, k))
+        {
+            Found = k;
+            *State = netif_ip6_addr_state(En, k);
+        }
+    }
+    UNLOCK_TCPIP_CORE();
+    return Found;
+}
+
+/* Every address of the prefix goes: the public one and its temporary addresses */
+static VOID
+StDropPrefixAddress(struct netif *En, const UCHAR *P)
+{
+    s8_t k;
+
+    LOCK_TCPIP_CORE();
+    for (k = 1; k < LWIP_IPV6_NUM_ADDRESSES; k++)
+    {
+        if (!ip6_addr_isinvalid(netif_ip6_addr_state(En, k)) && StSame(netif_ip6_addr(En, k)->addr, P, 8))
+        {
+            netif_ip6_addr_set_state(En, k, IP6_ADDR_INVALID);
+            netif_ip6_addr_set_valid_life(En, k, 0);
+            netif_ip6_addr_set_pref_life(En, k, 0);
+        }
+    }
+    UNLOCK_TCPIP_CORE();
+}
+
+/* The per-interface parameters (ifcfg.c, SetIpInterfaceEntry) */
+static VOID
+StTestInterfaceParams(PIP_INTERFACE Eth, const ip6_addr_t *R1, const UCHAR *Mac1)
+{
+    struct netif *En = Eth->TCPContext;
+    TCP_IP_INTERFACE_REQUEST Req;
+    UCHAR Opts[64], P3[16] = { 0x20, 0x01, 0x0d, 0xb8, 0x70, 0x03 }, P4[16] = { 0x20, 0x01, 0x0d, 0xb8, 0x70, 0x04 };
+    UINT n, Link = Eth->LinkMtu ? Eth->LinkMtu : Eth->MTU;
+    NTSTATUS St;
+    BOOLEAN Ok;
+    CHAR Detail[96];
+    u8_t State = 0;
+    ULONG i, Ms;
+    LARGE_INTEGER Start;
+
+    RtlZeroMemory(&Req, sizeof(Req));
+    Req.Family = TCP_IPIF_IPV6;
+    Req.Store = TCP_IPV6_STORE_ACTIVE;
+    Req.IfIndex = Eth->Index;
+
+    /* MTU: each family has its own, below the link MTU; IPv6 not below 1280, IPv4 not below 576 */
+    Req.Fields = TCP_IPIF_SET_MTU;
+    Req.Mtu = 1280;
+    St = TCP6InterfaceConfigure(Eth, &Req);
+    _snprintf(Detail, sizeof(Detail), "status 0x%lx mtu6 %u mtu %u link %u", St, (UINT)En->mtu6, (UINT)En->mtu, Link);
+    StResult(St == STATUS_SUCCESS && En->mtu6 == 1280 && En->mtu == Link, "interface parameters: IPv6 MTU 1280 changes mtu6 only", Detail);
+    Req.Mtu = 1279;
+    St = TCP6InterfaceConfigure(Eth, &Req);
+    StResult(St == STATUS_INVALID_PARAMETER && En->mtu6 == 1280, "interface parameters: IPv6 MTU 1279 is refused, nothing changes", NULL);
+    Req.Mtu = Link + 1;
+    St = TCP6InterfaceConfigure(Eth, &Req);
+    StResult(St == STATUS_INVALID_PARAMETER && En->mtu6 == 1280, "interface parameters: an IPv6 MTU above the link MTU is refused", NULL);
+    Req.Family = TCP_IPIF_IPV4;
+    Req.Mtu = 575;
+    St = TCP6InterfaceConfigure(Eth, &Req);
+    StResult(St == STATUS_INVALID_PARAMETER, "interface parameters: IPv4 MTU 575 is refused", NULL);
+    Req.Mtu = 1000;
+    St = TCP6InterfaceConfigure(Eth, &Req);
+    _snprintf(Detail, sizeof(Detail), "status 0x%lx mtu %u (interface %u) mtu6 %u", St, (UINT)En->mtu, Eth->MTU, (UINT)En->mtu6);
+    StResult(St == STATUS_SUCCESS && En->mtu == 1000 && Eth->MTU == 1000 && En->mtu6 == 1280,
+             "interface parameters: IPv4 MTU 1000 changes the IPv4 MTU, IPv6 keeps its own", Detail);
+    Req.Mtu = Link;
+    St = TCP6InterfaceConfigure(Eth, &Req);
+    Req.Family = TCP_IPIF_IPV6;
+    St |= TCP6InterfaceConfigure(Eth, &Req);
+    _snprintf(Detail, sizeof(Detail), "mtu %u mtu6 %u", (UINT)En->mtu, (UINT)En->mtu6);
+    StResult(St == STATUS_SUCCESS && En->mtu == Link && En->mtu6 == Link, "interface parameters: both MTUs back to the link MTU", Detail);
+
+    /* the MTU option of a router advertisement lowers the IPv6 MTU at most to its own value: an IPv4 MTU set lower
+       (576, below the IPv6 minimum) is not the IPv6 one */
+    Req.Family = TCP_IPIF_IPV4;
+    Req.Mtu = 576;
+    St = TCP6InterfaceConfigure(Eth, &Req);
+    n = StOptSlla(Opts, Mac1);
+    RtlZeroMemory(Opts + n, 8);
+    Opts[n] = 5; Opts[n + 1] = 1;
+    Opts[n + 4] = (UCHAR)(Link >> 24); Opts[n + 5] = (UCHAR)(Link >> 16); Opts[n + 6] = (UCHAR)(Link >> 8); Opts[n + 7] = (UCHAR)Link;
+    n += 8;
+    StInject(Eth, StRa(R1, 0, 0, 0, Opts, n), FALSE);
+    StSleep(300);
+    _snprintf(Detail, sizeof(Detail), "status 0x%lx mtu %u mtu6 %u link %u", St, (UINT)En->mtu, (UINT)En->mtu6, Link);
+    Ok = (St == STATUS_SUCCESS && En->mtu == 576 && En->mtu6 == Link);
+    Req.Mtu = Link;
+    St = TCP6InterfaceConfigure(Eth, &Req);
+    Req.Family = TCP_IPIF_IPV6;
+    StResult(Ok && St == STATUS_SUCCESS && En->mtu == Link && En->mtu6 == Link,
+             "interface parameters: an advertised MTU is not bounded by a lower IPv4 MTU", Detail);
+
+    /* metric: the IPv6 one is added to the route metrics, 0 is automatic */
+    Req.Fields = TCP_IPIF_SET_METRIC;
+    Req.Metric = 50;
+    St = TCP6InterfaceConfigure(Eth, &Req);
+    Ok = St == STATUS_SUCCESS && Eth->Ip6Metric == 50;
+    LOCK_TCPIP_CORE();
+    Ok = Ok && TCP6InterfaceMetric(En) == 50;
+    UNLOCK_TCPIP_CORE();
+    StResult(Ok, "interface parameters: IPv6 metric 50 is what the route table adds", NULL);
+    Req.Metric = 10000;
+    St = TCP6InterfaceConfigure(Eth, &Req);
+    StResult(St == STATUS_INVALID_PARAMETER && Eth->Ip6Metric == 50, "interface parameters: a metric above 9999 is refused", NULL);
+    Req.Metric = 0;
+    St = TCP6InterfaceConfigure(Eth, &Req);
+    LOCK_TCPIP_CORE();
+    n = TCP6InterfaceMetric(En);
+    UNLOCK_TCPIP_CORE();
+    _snprintf(Detail, sizeof(Detail), "automatic metric %u", n);
+    StResult(St == STATUS_SUCCESS && Eth->Ip6Metric == 0 && n >= 15 && n <= 40, "interface parameters: metric 0 is automatic again", Detail);
+
+    /* what the stack cannot do */
+    Req.Fields = TCP_IPIF_SET_FORWARDING;
+    Req.Forwarding = 1;
+    St = TCP6InterfaceConfigure(Eth, &Req);
+    StResult(St == STATUS_NOT_SUPPORTED, "interface parameters: forwarding on is refused (IPv6)", NULL);
+    Req.Forwarding = 0;
+    St = TCP6InterfaceConfigure(Eth, &Req);
+    StResult(St == STATUS_SUCCESS, "interface parameters: forwarding off is accepted", NULL);
+    Req.Family = TCP_IPIF_IPV4;
+    Req.Fields = TCP_IPIF_SET_DAD_TRANSMITS;
+    Req.DadTransmits = 1;
+    St = TCP6InterfaceConfigure(Eth, &Req);
+    StResult(St == STATUS_NOT_SUPPORTED, "interface parameters: IPv4 DAD transmits are refused", NULL);
+    Req.Fields = TCP_IPIF_SET_ROUTER_DISCOVERY;
+    Req.RouterDiscovery = 0;
+    St = TCP6InterfaceConfigure(Eth, &Req);
+    StResult(St == STATUS_NOT_SUPPORTED, "interface parameters: IPv4 router discovery is refused", NULL);
+    Req.Family = TCP_IPIF_IPV6;
+    Req.Fields = TCP_IPIF_SET_DAD_TRANSMITS;
+    Req.DadTransmits = 8;
+    St = TCP6InterfaceConfigure(Eth, &Req);
+    StResult(St == STATUS_INVALID_PARAMETER, "interface parameters: DAD transmits 8 are refused", NULL);
+    Req.Fields = TCP_IPIF_SET_MTU | TCP_IPIF_SET_METRIC;
+    Req.Mtu = 1300;
+    Req.Metric = 20000;
+    St = TCP6InterfaceConfigure(Eth, &Req);
+    StResult(St == STATUS_INVALID_PARAMETER && En->mtu6 == Link, "interface parameters: a request with one wrong field changes nothing", NULL);
+
+    /* DAD transmits: 0 makes an address usable at the next timer tick, 3 takes about three seconds more */
+    Req.Fields = TCP_IPIF_SET_DAD_TRANSMITS;
+    Req.DadTransmits = 0;
+    St = TCP6InterfaceConfigure(Eth, &Req);
+    StResult(St == STATUS_SUCCESS && LibNd6DadAttempts(En) == 0, "interface parameters: DAD transmits 0 set", NULL);
+    n = StOptSlla(Opts, Mac1);
+    n += StOptPrefix(Opts + n, 3600, 1800, P3);
+    Start = KeQueryPerformanceCounter(NULL);
+    StInject(Eth, StRa(R1, 0, 0, 0, Opts, n), FALSE);
+    for (i = 0; i < 60; i++)
+    {
+        if (StFindPrefixAddress(En, P3, &State) >= 0 && ip6_addr_ispreferred(State))
+            break;
+        StSleep(50);
+    }
+    Ms = StMicroseconds(Start) / 1000;
+    _snprintf(Detail, sizeof(Detail), "preferred after %lu ms", Ms);
+    StResult(ip6_addr_ispreferred(State) && Ms <= 1600, "interface parameters: with 0 DAD transmits a SLAAC address is preferred at the next tick", Detail);
+    StDropPrefixAddress(En, P3);
+
+    Req.DadTransmits = 3;
+    St = TCP6InterfaceConfigure(Eth, &Req);
+    State = 0;
+    Start = KeQueryPerformanceCounter(NULL);
+    n = StOptSlla(Opts, Mac1);
+    n += StOptPrefix(Opts + n, 3600, 1800, P3);
+    StInject(Eth, StRa(R1, 0, 0, 0, Opts, n), FALSE);
+    for (i = 0; i < 160; i++)
+    {
+        if (StFindPrefixAddress(En, P3, &State) >= 0 && ip6_addr_ispreferred(State))
+            break;
+        StSleep(50);
+    }
+    Ms = StMicroseconds(Start) / 1000;
+    _snprintf(Detail, sizeof(Detail), "preferred after %lu ms", Ms);
+    StResult(St == STATUS_SUCCESS && LibNd6DadAttempts(En) == 3 && ip6_addr_ispreferred(State) && Ms >= 2900,
+             "interface parameters: with 3 DAD transmits it takes three probe intervals", Detail);
+    StDropPrefixAddress(En, P3);
+    Req.DadTransmits = 1;
+    TCP6InterfaceConfigure(Eth, &Req);
+
+    /* router discovery off: advertisements are ignored (no address of the prefix), on: they work again */
+    Req.Fields = TCP_IPIF_SET_ROUTER_DISCOVERY;
+    Req.RouterDiscovery = 0;
+    St = TCP6InterfaceConfigure(Eth, &Req);
+    n = StOptSlla(Opts, Mac1);
+    n += StOptPrefix(Opts + n, 3600, 1800, P4);
+    StInject(Eth, StRa(R1, 0, 0, 0, Opts, n), FALSE);
+    StSleep(2500);
+    StResult(St == STATUS_SUCCESS && !LibNd6RaAccept(En) && StFindPrefixAddress(En, P4, &State) < 0,
+             "interface parameters: router discovery off ignores a router advertisement (no address of its prefix)", NULL);
+    Req.RouterDiscovery = 1;
+    St = TCP6InterfaceConfigure(Eth, &Req);
+    n = StOptSlla(Opts, Mac1);
+    n += StOptPrefix(Opts + n, 3600, 1800, P4);
+    StInject(Eth, StRa(R1, 0, 0, 0, Opts, n), FALSE);
+    StSleep(300);
+    StResult(St == STATUS_SUCCESS && LibNd6RaAccept(En) && StFindPrefixAddress(En, P4, &State) >= 0,
+             "interface parameters: router discovery on takes the advertisement again", NULL);
+    StDropPrefixAddress(En, P4);
+    n = StOptPrefix(Opts, 0, 0, P4);
+    StInject(Eth, StRa(R1, 0, 0, 0, Opts, n), FALSE);
+
+    /* the table user mode reads */
+    {
+        ULONG Size = 8 * 1024;
+        PTCP_IP_INTERFACE_HEADER Table = ExAllocatePoolWithTag(NonPagedPool, Size, ST_TAG);
+        PTCP_IP_INTERFACE_ROW Rows;
+        ULONG Dad = 99, Rd = 99, Flags = 0;
+
+        Req.Fields = TCP_IPIF_SET_DAD_TRANSMITS | TCP_IPIF_SET_METRIC;
+        Req.DadTransmits = 2;
+        Req.Metric = 77;
+        TCP6InterfaceConfigure(Eth, &Req);
+        if (Table && TCPQueryIpInterfaces(Table, Size) <= Size)
+        {
+            Rows = (PTCP_IP_INTERFACE_ROW)(Table + 1);
+            for (i = 0; i < Table->Count; i++)
+            {
+                if (Rows[i].IfIndex == Eth->Index)
+                {
+                    Dad = Rows[i].Ip6DadTransmits;
+                    Rd = Rows[i].Ip6RouterDiscovery;
+                    Flags = Rows[i].Flags;
+                    n = Rows[i].Ip6Metric;
+                }
+            }
+        }
+        if (Table)
+            ExFreePoolWithTag(Table, ST_TAG);
+        _snprintf(Detail, sizeof(Detail), "flags 0x%lx dad %lu rd %lu metric %u", Flags, Dad, Rd, n);
+        StResult((Flags & TCP_IPIF_ROW_IP6) && Dad == 2 && Rd == 1 && n == 77,
+                 "interface parameters: the interface table reports the values in force", Detail);
+        Req.DadTransmits = 1;
+        Req.Metric = 0;
+        TCP6InterfaceConfigure(Eth, &Req);
+    }
+}
+
 static VOID
 StTestRaExtras(PIP_INTERFACE Eth)
 {
@@ -2251,6 +2506,8 @@ StTestRaExtras(PIP_INTERFACE Eth)
         }
         UNLOCK_TCPIP_CORE();
     }
+
+    StTestInterfaceParams(Eth, &R1, Mac1);
 
     StPrint("tables: neighbours %d, destinations %d, prefixes %d, routers %d; entry sizes %u, %u, %u, %u bytes",
             LWIP_ND6_NUM_NEIGHBORS, LWIP_ND6_NUM_DESTINATIONS, LWIP_ND6_NUM_PREFIXES, LWIP_ND6_NUM_ROUTERS,

@@ -215,7 +215,24 @@ typedef struct _IP_INTERFACE {
     IP_NTE Nte[IP_MAX_NTE];       /* The additional addresses */
     UCHAR Ra6Flags;               /* IPv6: the M and O flags of the last router advertisement (TCP_IPV6_IF_RA_), ra6.c */
     UCHAR Ra6HopLimit;            /* IPv6: its current hop limit, 0 for none (ra6.c) */
+    /* Per-interface parameters (ifcfg.c, SetIpInterfaceEntry); zero is the default of each */
+    UINT  LinkMtu;                /* The MTU the adapter reported; MTU is what IPv4 uses (the link MTU or the lower one set) */
+    UINT  Ip4MtuConfig;           /* IPv4 MTU set by hand, 0 = the link MTU */
+    UINT  Ip6MtuConfig;           /* IPv6 MTU set by hand, 0 = the link MTU */
+    UINT  Ip4MetricConfig;        /* IPv4 interface metric set by hand, 0 = automatic (Metric also takes a route's) */
+    UINT  Ip6Metric;              /* IPv6 interface metric set by hand, 0 = automatic (Metric is the IPv4 one) */
+    UCHAR Ip6RouterDiscovery;     /* 0 enabled (default), 1 disabled, 2 controlled by DHCP */
+    UCHAR Ip6DadSet;              /* Ip6DadTransmits was set (otherwise 1) */
+    UCHAR Ip6DadTransmits;        /* duplicate address detection probes per address */
 } IP_INTERFACE, *PIP_INTERFACE;
+
+/* The MTU IPv4 uses on an interface that knows its link MTU: the one set by hand when it is lower */
+FORCEINLINE
+UINT
+IFEffectiveIp4Mtu(PIP_INTERFACE IF)
+{
+    return (IF->Ip4MtuConfig && IF->Ip4MtuConfig < IF->LinkMtu) ? IF->Ip4MtuConfig : IF->LinkMtu;
+}
 
 typedef struct _IP_SET_ADDRESS {
     ULONG NteIndex;

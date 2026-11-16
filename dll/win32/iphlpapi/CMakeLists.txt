@@ -12,6 +12,7 @@ list(APPEND SOURCE
     config6.c
     dhcp_reactos.c
     icmp.c
+    ipif.c
     ifenum_reactos.c
     ipstats_reactos.c
     addrsort.c

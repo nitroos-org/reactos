@@ -423,7 +423,7 @@ VOID WINAPI InitializeIpInterfaceEntry(PMIB_IPINTERFACE_ROW Row)
 
 /* V6If: the stack's IPv6 row of the interface (the M and O flags of its router advertisements), for the IPv6 family */
 static void fill_ip_interface(const NETIO_IF *If, ADDRESS_FAMILY Family, const TCP_IPV6_INTERFACE_ROW *V6If,
-                              PMIB_IPINTERFACE_ROW Out)
+                              const TCP_IP_INTERFACE_ROW *Cfg, PMIB_IPINTERFACE_ROW Out)
 {
   ULONG i;
 
@@ -460,11 +460,26 @@ static void fill_ip_interface(const NETIO_IF *If, ADDRESS_FAMILY Family, const T
   }
   else
   {
+    DWORD Manual = If->ManualMetric;
+
     Out->NlMtu = If->Row.dwMtu;
-    if (If->ManualMetric)
+    /* what the stack has in force (the parameters set with SetIpInterfaceEntry, ipif.c); without its answer the
+       registry value and the adapter's MTU */
+    if (Cfg)
+    {
+      if (Family == AF_INET)
+        Manual = Cfg->Ip4Metric;
+      else if (Cfg->Flags & TCP_IPIF_ROW_IP6)
+      {
+        Manual = Cfg->Ip6Metric;
+        Out->NlMtu = Cfg->Ip6Mtu;
+        Out->RouterDiscoveryBehavior = Cfg->Ip6RouterDiscovery;
+      }
+    }
+    if (Manual)
     {
       Out->UseAutomaticMetric = FALSE;
-      Out->Metric = If->ManualMetric;
+      Out->Metric = Manual;
     }
     else
       Out->Metric = automatic_metric(If->Row.dwSpeed);
@@ -476,6 +491,8 @@ static void fill_ip_interface(const NETIO_IF *If, ADDRESS_FAMILY Family, const T
        (LWIP_IPV6_DUP_DETECT_ATTEMPTS, one value for all interfaces). TODO: a per-interface value settable through
        netsh / Set-NetIPInterface, and the same in the driver */
     Out->DadTransmits = (Family == AF_INET) ? 3 : 1;
+    if (Family == AF_INET6 && Cfg && (Cfg->Flags & TCP_IPIF_ROW_IP6))
+      Out->DadTransmits = Cfg->Ip6DadTransmits;
   }
 }
 
@@ -483,6 +500,7 @@ DWORD WINAPI GetIpInterfaceTable(ADDRESS_FAMILY Family, PMIB_IPINTERFACE_TABLE *
 {
   NETIO_IF *List;
   IPV6_STATE V6;
+  IP_INTERFACE_CONFIG Cfg;
   PMIB_IPINTERFACE_TABLE Out;
   ULONG Count = 0, i, Rows4, Rows6 = 0, Next = 0;
   DWORD Result;
@@ -500,6 +518,7 @@ DWORD WINAPI GetIpInterfaceTable(ADDRESS_FAMILY Family, PMIB_IPINTERFACE_TABLE *
   /* every interface is an IPv4 interface; an IPv6 one only where the stack has IPv6 on */
   Rows4 = (Family == AF_INET6) ? 0 : Count;
   Ipv6GetState(&V6);
+  IpGetInterfaceConfig(&Cfg);
   if (Family != AF_INET)
     for (i = 0; i < Count; i++)
       if (Ipv6FindInterface(&V6, List[i].Index))
@@ -510,17 +529,20 @@ DWORD WINAPI GetIpInterfaceTable(ADDRESS_FAMILY Family, PMIB_IPINTERFACE_TABLE *
   if (!Out)
   {
     Ipv6FreeState(&V6);
+    IpFreeInterfaceConfig(&Cfg);
     HeapFree(GetProcessHeap(), 0, List);
     *Table = NULL;
     return ERROR_NOT_ENOUGH_MEMORY;
   }
   for (i = 0; i < Rows4; i++)
-    fill_ip_interface(&List[i], AF_INET, NULL, &Out->Table[Next++]);
+    fill_ip_interface(&List[i], AF_INET, NULL, IpFindInterfaceConfig(&Cfg, List[i].Index), &Out->Table[Next++]);
   for (i = 0; Rows6 && i < Count; i++)
     if (Ipv6FindInterface(&V6, List[i].Index))
-      fill_ip_interface(&List[i], AF_INET6, Ipv6FindInterface(&V6, List[i].Index), &Out->Table[Next++]);
+      fill_ip_interface(&List[i], AF_INET6, Ipv6FindInterface(&V6, List[i].Index),
+                        IpFindInterfaceConfig(&Cfg, List[i].Index), &Out->Table[Next++]);
   Out->NumEntries = Next;
 
+  IpFreeInterfaceConfig(&Cfg);
   Ipv6FreeState(&V6);
   HeapFree(GetProcessHeap(), 0, List);
   *Table = Out;
@@ -565,7 +587,11 @@ DWORD WINAPI GetIpInterfaceEntry(PMIB_IPINTERFACE_ROW Row)
   {
     ADDRESS_FAMILY Family = Row->Family;
 
-    fill_ip_interface(If, Family, HaveV6Row ? &V6Row : NULL, Row);
+    IP_INTERFACE_CONFIG Cfg;
+
+    IpGetInterfaceConfig(&Cfg);
+    fill_ip_interface(If, Family, HaveV6Row ? &V6Row : NULL, IpFindInterfaceConfig(&Cfg, If->Index), Row);
+    IpFreeInterfaceConfig(&Cfg);
   }
   HeapFree(GetProcessHeap(), 0, List);
   return If ? NO_ERROR : Error;

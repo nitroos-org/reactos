@@ -68,6 +68,10 @@
  * datagrams whose sender chose none (ip6_output_if_src), the flags go to user mode with the interface */
 #define LWIP_HOOK_ND6_RA_HEADER(netif, hop_limit, flags) LibNd6RaHeader(netif, hop_limit, flags)
 #define LWIP_HOOK_IP6_HOP_LIMIT(netif, hl) LibIp6HopLimit(netif, hl)
+/* Per-interface parameters (ifcfg.c, SetIpInterfaceEntry): an interface with router discovery disabled drops router
+ * advertisements, and the number of DAD probes is the interface's (NitroOS hooks in nd6.c) */
+#define LWIP_HOOK_ND6_RA_ACCEPT(netif) LibNd6RaAccept(netif)
+#define LWIP_HOOK_ND6_DAD_ATTEMPTS(netif) LibNd6DadAttempts(netif)
 /* Route information options (RFC 4191 2.3) become routes of the route table (route6.c): through the router that sent
  * the advertisement, with the metric of their preference, until their lifetime ends */
 #define LWIP_HOOK_ND6_ROUTE_INFO(netif, router, prefix, length, preference, lifetime) \

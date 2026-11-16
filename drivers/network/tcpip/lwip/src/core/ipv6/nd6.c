@@ -618,6 +618,15 @@ nd6_input(struct pbuf *p, struct netif *inp)
 
     ra_hdr = (struct ra_header *)p->payload;
 
+    /* NitroOS: an interface whose router discovery is disabled (SetIpInterfaceEntry) ignores router advertisements */
+#ifdef LWIP_HOOK_ND6_RA_ACCEPT
+    if (!LWIP_HOOK_ND6_RA_ACCEPT(inp)) {
+      pbuf_free(p);
+      ND6_STATS_INC(nd6.drop);
+      return;
+    }
+#endif
+
     /* Check a subset of the other RFC 4861 Sec. 6.1.2 requirements. */
     if (!ip6_addr_islinklocal(ip6_current_src_addr()) ||
         IP6H_HOPLIM(ip6_current_header()) != ND6_HOPLIM || ra_hdr->code != 0) {
@@ -758,9 +767,13 @@ nd6_input(struct pbuf *p, struct netif *inp)
         mtu32 = lwip_htonl(mtu_opt->mtu);
         if ((mtu32 >= IP6_MIN_MTU_LENGTH) && (mtu32 <= 0xffff)) {
 #if LWIP_ND6_ALLOW_RA_UPDATES
-          if (inp->mtu) {
+          if (inp->mtu6) {
+            /* NitroOS: mtu6 is already limited to the link MTU (if.c); netif->mtu is the IPv4 MTU, which can be set
+             * apart from it (SetIpInterfaceEntry) and below the IPv6 minimum */
+            inp->mtu6 = LWIP_MIN(inp->mtu6, (u16_t)mtu32);
+          } else if (inp->mtu) {
             /* don't set the mtu for IPv6 higher than the netif driver supports */
-            inp->mtu6 = LWIP_MIN(LWIP_MIN(inp->mtu, inp->mtu6), (u16_t)mtu32);
+            inp->mtu6 = LWIP_MIN(inp->mtu, (u16_t)mtu32);
           } else {
             inp->mtu6 = (u16_t)mtu32;
           }
@@ -1229,7 +1242,12 @@ nd6_tmr(void)
       /* Step 2: update DAD state. */
       addr_state = netif_ip6_addr_state(netif, i);
       if (ip6_addr_istentative(addr_state)) {
+        /* NitroOS: the number of probes is the interface's (SetIpInterfaceEntry DadTransmits) */
+#ifdef LWIP_HOOK_ND6_DAD_ATTEMPTS
+        if ((addr_state & IP6_ADDR_TENTATIVE_COUNT_MASK) >= LWIP_HOOK_ND6_DAD_ATTEMPTS(netif)) {
+#else
         if ((addr_state & IP6_ADDR_TENTATIVE_COUNT_MASK) >= LWIP_IPV6_DUP_DETECT_ATTEMPTS) {
+#endif
           /* No NA received in response. Mark address as valid. For dynamic
            * addresses with an expired preferred lifetime, the state is set to
            * deprecated right away. That should almost never happen, though. */
@@ -1260,6 +1278,9 @@ nd6_tmr(void)
     nd6_tmr_rs_reduction = (ND6_RTR_SOLICITATION_INTERVAL / ND6_TMR_INTERVAL) - 1;
     NETIF_FOREACH(netif) {
       if ((netif->rs_count > 0) && netif_is_up(netif) &&
+#ifdef LWIP_HOOK_ND6_RA_ACCEPT
+          LWIP_HOOK_ND6_RA_ACCEPT(netif) && /* NitroOS: router discovery disabled for the interface */
+#endif
           netif_is_link_up(netif) &&
           !ip6_addr_isinvalid(netif_ip6_addr_state(netif, 0)) &&
           !ip6_addr_isduplicated(netif_ip6_addr_state(netif, 0))) {
@@ -2137,7 +2158,8 @@ nd6_get_next_hop_entry(const ip6_addr_t *ip6addr, struct netif *netif)
 #ifdef LWIP_HOOK_ND6_GET_GW
       } else if ((next_hop_addr = LWIP_HOOK_ND6_GET_GW(netif, ip6addr)) != NULL) {
         /* Next hop for destination provided by hook function. */
-        dest->pmtu = netif->mtu;
+        /* NitroOS: the IPv6 MTU (netif->mtu is the IPv4 one, which can be set apart from it) */
+        dest->pmtu = netif_mtu6(netif);
         ip6_addr_set(&dest->next_hop_addr, next_hop_addr);
 #endif /* LWIP_HOOK_ND6_GET_GW */
       } else {

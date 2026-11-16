@@ -48,6 +48,9 @@ NTSTATUS RouterShutdown(
 
 VOID RouterRemoveRoutesForInterface(PIP_INTERFACE Interface);
 
+/* The IPv4 routes of the interface take its (changed) interface metric */
+VOID RouterUpdateMetricsForInterface(PIP_INTERFACE Interface);
+
 UINT CountFIBs(PIP_INTERFACE IF);
 
 UINT CopyFIBs( PIP_INTERFACE IF, PFIB_ENTRY Target, UINT Capacity );

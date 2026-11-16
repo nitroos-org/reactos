@@ -1170,6 +1170,46 @@ namespace Nitro.Net
         static void Put(byte[] b, int off, uint v) { Array.Copy(BitConverter.GetBytes(v), 0, b, off, 4); }
         static uint Get(byte[] b, int off) { return BitConverter.ToUInt32(b, off); }
 
+        // ---- per-interface parameters (what SetIpInterfaceEntry sets): the stack's private request IOCTL_IP_INTERFACE_CONFIG
+        // (TCP_IP_INTERFACE_REQUEST: family 4 or 6, store, interface index, fields mask 1 mtu | 2 metric | 4 router discovery |
+        // 8 DAD transmits | 16 forwarding, then the values; metric 0 = automatic). persistent: written for the adapter's next start
+        // and in force now; not persistent: in force until the adapter starts again. Returns a Win32 error (0 = done).
+        const uint IOCTL_IP_INTERFACE_CONFIG = 0x00128070;   // CTL_CODE(FILE_DEVICE_NETWORK, 0x1C, METHOD_BUFFERED, FILE_WRITE_ACCESS)
+
+        public static uint SetInterface(uint ifIndex, int family, bool persistent, uint fields, uint mtu, uint metric, uint routerDiscovery, uint dadTransmits, uint forwarding)
+        {
+            byte[] b = new byte[36];
+            Put(b, 0, family == 6 ? 6u : 4u); Put(b, 4, persistent ? StorePersistent : StoreActive); Put(b, 8, ifIndex); Put(b, 12, fields);
+            Put(b, 16, mtu); Put(b, 20, metric); Put(b, 24, routerDiscovery); Put(b, 28, dadTransmits); Put(b, 32, forwarding);
+            return Win32Of(TcpIoctl(IOCTL_IP_INTERFACE_CONFIG, b));
+        }
+
+        // The persistent store alone: the values of the adapter's key (IPv6: Tcpip6\Parameters\Interfaces\{guid} NlMtu, InterfaceMetric,
+        // RouterDiscovery, DadTransmits; IPv4: Tcpip\Parameters\Interfaces\{guid} MTU, InterfaceMetric), read when the adapter starts.
+        // The same checks as the stack's request (values out of range are 87). A metric of 0 takes the value out.
+        public static uint StoreInterface(uint ifIndex, int family, uint fields, uint mtu, uint metric, uint routerDiscovery, uint dadTransmits)
+        {
+            bool v6 = family == 6;
+            if ((fields & 1) != 0 && (mtu < (v6 ? 1280u : 576u) || mtu > 65535)) return 87;
+            if ((fields & 2) != 0 && metric > 9999) return 87;
+            if ((fields & 4) != 0 && routerDiscovery > 2) return 87;
+            if ((fields & 8) != 0 && v6 && dadTransmits > 7) return 87;
+            if (!v6 && (fields & 12) != 0) return 50;
+            using (RegistryKey k = v6 ? InterfaceKey6(ifIndex, true) : InterfaceKey(ifIndex, true))
+            {
+                if (k == null) return 1168;
+                if ((fields & 1) != 0) k.SetValue(v6 ? "NlMtu" : "MTU", (int)mtu, RegistryValueKind.DWord);
+                if ((fields & 2) != 0)
+                {
+                    if (metric != 0) k.SetValue("InterfaceMetric", (int)metric, RegistryValueKind.DWord);
+                    else if (k.GetValue("InterfaceMetric", null) != null) k.DeleteValue("InterfaceMetric");
+                }
+                if ((fields & 4) != 0) k.SetValue("RouterDiscovery", (int)routerDiscovery, RegistryValueKind.DWord);
+                if ((fields & 8) != 0) k.SetValue("DadTransmits", (int)dadTransmits, RegistryValueKind.DWord);
+            }
+            return 0;
+        }
+
         static byte[] AddressRequest(uint op, uint store, uint ifIndex, byte[] addr, int prefix, uint valid, uint pref, bool skip)
         {
             byte[] b = new byte[AddrRecord];

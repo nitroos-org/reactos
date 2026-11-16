@@ -469,6 +469,30 @@ VOID RouterRemoveRoutesForInterface(PIP_INTERFACE Interface)
         RouteChangeNotify();
 }
 
+VOID RouterUpdateMetricsForInterface(PIP_INTERFACE Interface)
+{
+    KIRQL OldIrql;
+    PLIST_ENTRY CurrentEntry;
+    PFIB_ENTRY Current;
+    UINT Metric = ProcessAutoMetric(Interface);
+    BOOLEAN Changed = FALSE;
+
+    TcpipAcquireSpinLock(&FIBLock, &OldIrql);
+    for (CurrentEntry = FIBListHead.Flink; CurrentEntry != &FIBListHead; CurrentEntry = CurrentEntry->Flink)
+    {
+        Current = CONTAINING_RECORD(CurrentEntry, FIB_ENTRY, ListEntry);
+        if (Interface == Current->Router->Interface && Current->Metric != Metric)
+        {
+            Current->Metric = Metric;
+            Changed = TRUE;
+        }
+    }
+    TcpipReleaseSpinLock(&FIBLock, OldIrql);
+
+    if (Changed)
+        RouteChangeNotify();
+}
+
 NTSTATUS RouterRemoveRoute(PIP_ADDRESS Target, PIP_ADDRESS Router)
 /*
  * FUNCTION: Removes a route from the Forward Information Base (FIB)

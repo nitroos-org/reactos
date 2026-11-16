@@ -64,6 +64,10 @@
    Administrators only, as IOCTL_SET_IP_ADDRESS */
 #define IOCTL_IP6_ROUTE_CONFIG \
     _TCP_CTL_CODE(0x1B, METHOD_BUFFERED, FILE_WRITE_ACCESS)
+/* Sets per-interface parameters of the IPv4 or the IPv6 interface (SetIpInterfaceEntry): input one
+   TCP_IP_INTERFACE_REQUEST, no output. Administrators only, as IOCTL_SET_IP_ADDRESS */
+#define IOCTL_IP_INTERFACE_CONFIG \
+    _TCP_CTL_CODE(0x1C, METHOD_BUFFERED, FILE_WRITE_ACCESS)
 #endif
 
 #define IOCTL_ICMP_ECHO_REQUEST \
@@ -214,6 +218,60 @@ typedef struct _TCP_IPV6_ROUTE_REQUEST
     ULONG Protocol;
     ULONG Flags;            /* TCP_IPV6_ROUTE_PUBLISH, TCP_IPV6_ROUTE_IMMORTAL */
 } TCP_IPV6_ROUTE_REQUEST, *PTCP_IPV6_ROUTE_REQUEST;
+
+/* IOCTL_IP_INTERFACE_CONFIG. Family is TCP_IPIF_IPV4 or TCP_IPIF_IPV6; Fields names what the request changes (the
+   rest of the interface is left as it is); Store as for the other requests (the persistent one is written under
+   the adapter's key and read when the adapter first starts). Mtu: bytes, 576..the link MTU for IPv4, 1280..the link
+   MTU for IPv6. Metric: 1..9999, 0 = automatic. RouterDiscovery: an NL_ROUTER_DISCOVERY_BEHAVIOR value (IPv6:
+   disabled, enabled, controlled by DHCP; IPv4: only the value it already has). DadTransmits: 0..7 (IPv6 only).
+   Forwarding: 0 (the stack does not forward) */
+#define TCP_IPIF_IPV4                   4
+#define TCP_IPIF_IPV6                   6
+
+#define TCP_IPIF_SET_MTU                0x01
+#define TCP_IPIF_SET_METRIC             0x02
+#define TCP_IPIF_SET_ROUTER_DISCOVERY   0x04
+#define TCP_IPIF_SET_DAD_TRANSMITS      0x08
+#define TCP_IPIF_SET_FORWARDING         0x10
+
+typedef struct _TCP_IP_INTERFACE_REQUEST
+{
+    ULONG Family;           /* TCP_IPIF_ */
+    ULONG Store;            /* TCP_IPV6_STORE_ */
+    ULONG IfIndex;
+    ULONG Fields;           /* TCP_IPIF_SET_ */
+    ULONG Mtu;
+    ULONG Metric;
+    ULONG RouterDiscovery;
+    ULONG DadTransmits;
+    ULONG Forwarding;
+} TCP_IP_INTERFACE_REQUEST, *PTCP_IP_INTERFACE_REQUEST;
+
+/* Non public TOIID: the per-interface parameters of both families, for GetIpInterfaceEntry and GetIpInterfaceTable.
+   Asked as IP_IPV6_TABLE_ENTRY_ID is (CL_NL_ENTITY, instance 0); the answer is a TCP_IP_INTERFACE_HEADER, then Count
+   TCP_IP_INTERFACE_ROW. Sizes as for the other tables */
+#define IP_INTERFACE_CONFIG_ENTRY_ID    0x11B
+
+typedef struct _TCP_IP_INTERFACE_HEADER
+{
+    ULONG Count;
+} TCP_IP_INTERFACE_HEADER, *PTCP_IP_INTERFACE_HEADER;
+
+/* Ip6Valid: the interface has IPv6 (the IPv6 fields mean something); Loopback: the loopback interface */
+#define TCP_IPIF_ROW_IP6                0x1
+#define TCP_IPIF_ROW_LOOPBACK           0x2
+
+typedef struct _TCP_IP_INTERFACE_ROW
+{
+    ULONG IfIndex;
+    ULONG Flags;            /* TCP_IPIF_ROW_ */
+    ULONG Ip4Mtu;           /* in force */
+    ULONG Ip4Metric;        /* set by hand, 0 = automatic */
+    ULONG Ip6Mtu;           /* in force (a router advertisement may lower it) */
+    ULONG Ip6Metric;        /* set by hand, 0 = automatic */
+    ULONG Ip6RouterDiscovery;   /* NL_ROUTER_DISCOVERY_BEHAVIOR */
+    ULONG Ip6DadTransmits;
+} TCP_IP_INTERFACE_ROW, *PTCP_IP_INTERFACE_ROW;
 
 /* Non public TOIID: the IPv6 route table of the stack (route6.c), apart from the routes every address and interface
    has (the host routes, fe80::/64, ff00::/8: user mode adds those): the configured routes, the on-link prefixes of

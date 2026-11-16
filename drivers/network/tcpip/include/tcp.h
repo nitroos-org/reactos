@@ -382,6 +382,30 @@ TCP6PersistRoute(PIP_INTERFACE IF, const TCP_IPV6_ROUTE_REQUEST *Request, BOOLEA
 VOID
 TCP6ApplyPersistent(PIP_INTERFACE IF);
 
+/* Per-interface parameters (ifcfg.c, IOCTL_IP_INTERFACE_CONFIG; SetIpInterfaceEntry): the IP_INTERFACE_CONFIG_ENTRY_ID
+   answer (same convention), the request, the sum a route's metric gets (core lock held), and the persistent values
+   (persist6.c) that the adapter's start reads and applies */
+ULONG
+TCPQueryIpInterfaces(PVOID Out, ULONG OutSize);
+
+NTSTATUS
+DispInterfaceConfig(PIRP Irp, PIO_STACK_LOCATION IrpSp);
+
+NTSTATUS
+TCP6InterfaceConfigure(PIP_INTERFACE IF, const TCP_IP_INTERFACE_REQUEST *Request);
+
+ULONG
+TCP6InterfaceMetric(struct netif *netif);
+
+VOID
+TCP6ApplyInterfaceParams(PIP_INTERFACE IF);
+
+NTSTATUS
+TCP6PersistInterface(PIP_INTERFACE IF, const TCP_IP_INTERFACE_REQUEST *Request);
+
+VOID
+TCP6ReadInterfaceParams(PIP_INTERFACE IF, PULONG Mtu, PULONG Metric, PULONG RouterDiscovery, PULONG DadTransmits);
+
 NTSTATUS
 TCP6ApplyAddressLocked(struct netif *netif, const TCP_IPV6_ADDRESS_REQUEST *Record);
 

@@ -83,6 +83,7 @@
 @ stub GetIpForwardTableFromStack
 @ stdcall -version=0x600+ GetIpInterfaceEntry(ptr)
 @ stdcall -version=0x600+ GetIpInterfaceTable(long ptr)
+@ stdcall -version=0x600+ SetIpInterfaceEntry(ptr)
 @ stdcall -version=0x600+ GetIpNetEntry2(ptr)
 @ stdcall GetIpNetTable(ptr ptr long)
 @ stdcall -version=0x600+ GetIpNetTable2(long ptr)

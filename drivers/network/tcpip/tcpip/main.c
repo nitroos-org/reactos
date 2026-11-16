@@ -640,6 +640,12 @@ TiDispatch(
                     Status = DispRouteConfig6(Irp, IrpSp);
                 break;
 
+            case IOCTL_IP_INTERFACE_CONFIG:
+                Status = TiCheckControlAccess(Irp);
+                if (NT_SUCCESS(Status))
+                    Status = DispInterfaceConfig(Irp, IrpSp);
+                break;
+
             case IOCTL_IP_ADDCHANGE_NOTIFY_REQUEST:
                 TI_DbgPrint(MIN_TRACE, ("IP_ADDCHANGE_NOTIFY_REQUEST\n"));
                 Status = DispAddrChangeNotifyRequest(Irp);

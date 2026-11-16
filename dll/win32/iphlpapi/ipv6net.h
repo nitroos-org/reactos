@@ -51,4 +51,17 @@ DWORD Ipv6CreateUnicastAddress(const MIB_UNICASTIPADDRESS_ROW *Row);
 DWORD Ipv6DeleteUnicastAddress(const MIB_UNICASTIPADDRESS_ROW *Row);
 DWORD Ipv6SetUnicastAddress(const MIB_UNICASTIPADDRESS_ROW *Row);
 
+/* The per-interface parameters of the stack (ipif.c: IP_INTERFACE_CONFIG_ENTRY_ID, IOCTL_IP_INTERFACE_CONFIG) */
+typedef struct _IP_INTERFACE_CONFIG
+{
+    PVOID Memory;
+    PTCP_IP_INTERFACE_ROW Rows;
+    ULONG Count;
+} IP_INTERFACE_CONFIG, *PIP_INTERFACE_CONFIG;
+
+BOOL IpGetInterfaceConfig(PIP_INTERFACE_CONFIG Config);
+VOID IpFreeInterfaceConfig(PIP_INTERFACE_CONFIG Config);
+const TCP_IP_INTERFACE_ROW *IpFindInterfaceConfig(const IP_INTERFACE_CONFIG *Config, DWORD IfIndex);
+DWORD IpSetInterfaceConfig(PTCP_IP_INTERFACE_REQUEST Request, ULONG Store);
+
 #endif
