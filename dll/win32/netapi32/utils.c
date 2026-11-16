@@ -321,7 +321,8 @@ NetpPackStruct(
     _In_ ULONG StrCount)
 {
     PBYTE Old = *Block, New, Cursor;
-    ULONG Size, Length, i;
+    ULONGLONG Size;
+    ULONG Length, i;
     PWSTR *Member;
 
     if (Old == NULL)
@@ -332,10 +333,15 @@ NetpPackStruct(
     {
         Member = (PWSTR *)(Old + StrOffsets[i]);
         if (*Member != NULL)
-            Size += (((ULONG)wcslen(*Member) + 1) * sizeof(WCHAR) + 7) & ~7;
+            Size += (((ULONGLONG)wcslen(*Member) + 1) * sizeof(WCHAR) + 7) & ~7;
     }
 
-    if (NetApiBufferAllocate(Size, (PVOID *)&New) != NERR_Success)
+    /* NetApiBufferAllocate takes a 32-bit byte count; a remote server's strings must not wrap it. Leave the
+     * result as the stub made it (as on an allocation failure) rather than under-allocate the packed block. */
+    if (Size > 0xFFFFF000)
+        return;
+
+    if (NetApiBufferAllocate((ULONG)Size, (PVOID *)&New) != NERR_Success)
         return;
 
     memcpy(New, Old, FixedSize);
