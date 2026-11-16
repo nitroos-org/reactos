@@ -517,6 +517,31 @@ static unsigned int get_rpc_flags( const attr_list_t *attrs )
     return flags;
 }
 
+/* Does the structure, or a structure nested in it, hold a pointer whose size or length is given by a field of
+ * the structure that declares the pointer? The correlation offset of such a pointer is relative to its own
+ * structure, but a simple structure with pointers is marshalled with the pointer layout of the outermost
+ * structure flattened: the offset would then be applied to the wrong structure for every nested member
+ * but the first (RPC_UNICODE_STRING embedded twice: the second string took the counts of the first). */
+static int struct_has_correlated_pointer(const type_t *type)
+{
+    var_t *field;
+    var_list_t *fields = type_struct_get_fields(type);
+
+    if (fields) LIST_FOR_EACH_ENTRY( field, fields, var_t, entry )
+    {
+        type_t *t = field->declspec.type;
+
+        if (is_array(t) && type_array_is_decl_as_ptr(t) &&
+            (type_array_has_conformance(t) || type_array_has_variance(t)))
+            return 1;
+
+        if (typegen_detect_type(t, field->attrs, TDT_IGNORE_STRINGS) == TGT_STRUCT &&
+            struct_has_correlated_pointer(t))
+            return 1;
+    }
+    return 0;
+}
+
 unsigned char get_struct_fc(const type_t *type)
 {
   int has_pointer = 0;
@@ -587,7 +612,13 @@ unsigned char get_struct_fc(const type_t *type)
         return FC_BOGUS_STRUCT;
     case TGT_STRUCT:
     {
-        unsigned char fc = get_struct_fc(t);
+        unsigned char fc;
+
+        /* a nested structure with such a pointer needs the member by member marshalling */
+        if (struct_has_correlated_pointer(t))
+            return FC_BOGUS_STRUCT;
+
+        fc = get_struct_fc(t);
         switch (fc)
         {
         case FC_STRUCT:
