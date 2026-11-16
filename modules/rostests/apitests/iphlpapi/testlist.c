@@ -28,6 +28,7 @@ extern void func_Ipv6Statistics(void);
 extern void func_IpNetTable6(void);
 extern void func_IpForwardTable6(void);
 extern void func_Ipv6Dns(void);
+extern void func_Ipv6Followups(void);
 extern void func_Ipv6Persist(void);
 extern void func_Ipv6Reporting(void);
 extern void func_Ipv6RouteConfig(void);
@@ -75,6 +76,7 @@ const struct test winetest_testlist[] =
     { "Ipv6Statistics",             func_Ipv6Statistics },
     { "IpNetTable6",                func_IpNetTable6 },
     { "IpForwardTable6",            func_IpForwardTable6 },
+    { "Ipv6Followups",              func_Ipv6Followups },
     { "Ipv6Dns",                    func_Ipv6Dns },
     { "Ipv6Persist",                func_Ipv6Persist },
     { "Ipv6Reporting",              func_Ipv6Reporting },

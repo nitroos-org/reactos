@@ -646,6 +646,10 @@ TiDispatch(
                     Status = DispInterfaceConfig(Irp, IrpSp);
                 break;
 
+            case IOCTL_IP6_SOLICIT:
+                Status = DispSolicit6(Irp, IrpSp);
+                break;
+
             case IOCTL_IP_ADDCHANGE_NOTIFY_REQUEST:
                 TI_DbgPrint(MIN_TRACE, ("IP_ADDCHANGE_NOTIFY_REQUEST\n"));
                 Status = DispAddrChangeNotifyRequest(Irp);

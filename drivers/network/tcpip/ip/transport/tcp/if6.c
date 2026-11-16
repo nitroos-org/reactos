@@ -286,7 +286,7 @@ TCP6NetifEvent(struct netif *netif, netif_nsc_reason_t Reason, const netif_ext_c
     /* A link that goes down resets the interface: the addresses DAD found in use are forgotten (DAD runs again
        for the addresses it has) */
     if ((Reason & LWIP_NSC_LINK_CHANGED) && !Args->link_changed.state && TCP6DuplicateClear(netif))
-        AddrChangeNotify();
+        AddrChangeNotify6();
 
     if (Reason & (LWIP_NSC_IPV6_SET | LWIP_NSC_IPV6_ADDR_STATE_CHANGED))
     {
@@ -295,8 +295,8 @@ TCP6NetifEvent(struct netif *netif, netif_nsc_reason_t Reason, const netif_ext_c
         /* An address came, went or changed its state: users of NotifyUnicastIpAddressChange and
            NotifyIpInterfaceChange look again (their snapshots tell what changed), and so do those of
            NotifyRouteChange2, as the host routes and the link-local prefix route follow the addresses */
-        AddrChangeNotify();
-        RouteChangeNotify();
+        AddrChangeNotify6();
+        RouteChangeNotify6();
     }
 }
 

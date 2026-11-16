@@ -16,6 +16,17 @@
  * closes the last handle of its file object (see AddrChangeCleanup).
  */
 
+/* What a waiting request looks at: the families of the changes it waits for (TCP_CHANGE_FAMILY_*), kept with the
+ * request in the first driver context field */
+#define IRP_FAMILIES(Irp) ((ULONG)(ULONG_PTR)(Irp)->Tail.Overlay.DriverContext[0])
+
+/* Which waiting requests a removal looks for: those of one file object (NULL: any) that wait for one of Families */
+typedef struct _CHANGE_PEEK
+{
+    PFILE_OBJECT FileObject;
+    ULONG Families;
+} CHANGE_PEEK, *PCHANGE_PEEK;
+
 /* One queue for the address changes, one for the route changes */
 typedef struct _CHANGE_QUEUE
 {
@@ -54,13 +65,15 @@ ChangeCsqPeekNextIrp(PIO_CSQ Csq, PIRP Irp, PVOID PeekContext)
     PLIST_ENTRY Head = &QUEUE_OF(Csq)->List;
     PLIST_ENTRY Entry;
     PIRP Next;
+    PCHANGE_PEEK Peek = PeekContext;
 
     Entry = Irp ? Irp->Tail.Overlay.ListEntry.Flink : Head->Flink;
     for (; Entry != Head; Entry = Entry->Flink)
     {
         Next = CONTAINING_RECORD(Entry, IRP, Tail.Overlay.ListEntry);
-        if (!PeekContext ||
-            IoGetCurrentIrpStackLocation(Next)->FileObject == (PFILE_OBJECT)PeekContext)
+        if (!Peek ||
+            ((!Peek->FileObject || IoGetCurrentIrpStackLocation(Next)->FileObject == Peek->FileObject) &&
+             (IRP_FAMILIES(Next) & Peek->Families)))
             return Next;
     }
 
@@ -116,32 +129,46 @@ AddrChangeInitialize(VOID)
     ChangeQueueInitialize(&RouteChangeQueue);
 }
 
+/* Complete the waiting requests that wait for one of the families that changed; each one is told which of its
+   families it was (when its output buffer holds that) */
 static
 VOID
-ChangeQueueNotify(CHANGE_QUEUE *Queue)
+ChangeQueueNotify(CHANGE_QUEUE *Queue, ULONG Families)
 {
     PIRP Irp;
+    CHANGE_PEEK Peek;
+    ULONG Changed;
+    PIO_STACK_LOCATION IrpSp;
 
-    while ((Irp = IoCsqRemoveNextIrp(&Queue->Csq, NULL)) != NULL)
+    Peek.FileObject = NULL;
+    Peek.Families = Families;
+    while ((Irp = IoCsqRemoveNextIrp(&Queue->Csq, &Peek)) != NULL)
     {
+        Changed = IRP_FAMILIES(Irp) & Families;
+        IrpSp = IoGetCurrentIrpStackLocation(Irp);
         Irp->IoStatus.Status = STATUS_SUCCESS;
         Irp->IoStatus.Information = 0;
+        if (Irp->AssociatedIrp.SystemBuffer && IrpSp->Parameters.DeviceIoControl.OutputBufferLength >= sizeof(ULONG))
+        {
+            *(PULONG)Irp->AssociatedIrp.SystemBuffer = Changed;
+            Irp->IoStatus.Information = sizeof(ULONG);
+        }
         IoCompleteRequest(Irp, IO_NETWORK_INCREMENT);
     }
 }
 
-/* Complete every waiting request; callable at IRQL <= DISPATCH_LEVEL */
+/* The address table of these families (TCP_CHANGE_FAMILY_*) changed; callable at IRQL <= DISPATCH_LEVEL */
 VOID
-AddrChangeNotify(VOID)
+AddrChangeNotifyFamilies(ULONG Families)
 {
-    ChangeQueueNotify(&AddrChangeQueue);
+    ChangeQueueNotify(&AddrChangeQueue, Families);
 }
 
-/* The route table changed (a route added or removed); callable at IRQL <= DISPATCH_LEVEL */
+/* The route table of these families changed (a route added or removed); callable at IRQL <= DISPATCH_LEVEL */
 VOID
-RouteChangeNotify(VOID)
+RouteChangeNotifyFamilies(ULONG Families)
 {
-    ChangeQueueNotify(&RouteChangeQueue);
+    ChangeQueueNotify(&RouteChangeQueue, Families);
 }
 
 /* The most requests one file object keeps waiting, in both queues together: the pool is not charged to anyone */
@@ -173,29 +200,57 @@ ChangeQueueIsFull(PIRP Irp)
     return Count >= MAX_PENDING_PER_FILE;
 }
 
+/* The families a request waits for: its input ULONG, IPv4 alone without one */
+static
+NTSTATUS
+ChangeRequestFamilies(PIRP Irp, PULONG Families)
+{
+    PIO_STACK_LOCATION IrpSp = IoGetCurrentIrpStackLocation(Irp);
+
+    *Families = TCP_CHANGE_FAMILY_IPV4;
+    if (IrpSp->Parameters.DeviceIoControl.InputBufferLength != 0)
+    {
+        if (IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(ULONG) || !Irp->AssociatedIrp.SystemBuffer)
+            return STATUS_INVALID_PARAMETER;
+        *Families = *(PULONG)Irp->AssociatedIrp.SystemBuffer;
+        if (*Families == 0 || (*Families & ~(TCP_CHANGE_FAMILY_IPV4 | TCP_CHANGE_FAMILY_IPV6)))
+            return STATUS_INVALID_PARAMETER;
+    }
+    return STATUS_SUCCESS;
+}
+
+static
+NTSTATUS
+ChangeQueueRequest(CHANGE_QUEUE *Queue, PIRP Irp)
+{
+    ULONG Families;
+    NTSTATUS Status;
+
+    Status = ChangeRequestFamilies(Irp, &Families);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    if (ChangeQueueIsFull(Irp))
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    /* A plain pend: the IRP is completed by the next change of one of its families */
+    Irp->IoStatus.Information = 0;
+    Irp->Tail.Overlay.DriverContext[0] = (PVOID)(ULONG_PTR)Families;
+    IoCsqInsertIrp(&Queue->Csq, Irp, NULL);
+    return STATUS_PENDING;
+}
+
 /* IOCTL_IP_ADDCHANGE_NOTIFY_REQUEST: queue the request until the next change */
 NTSTATUS
 DispAddrChangeNotifyRequest(PIRP Irp)
 {
-    if (ChangeQueueIsFull(Irp))
-        return STATUS_INSUFFICIENT_RESOURCES;
-
-    /* The request carries no data; this is a plain pend, so any buffers are ignored */
-    Irp->IoStatus.Information = 0;
-    IoCsqInsertIrp(&AddrChangeQueue.Csq, Irp, NULL);
-    return STATUS_PENDING;
+    return ChangeQueueRequest(&AddrChangeQueue, Irp);
 }
 
 /* IOCTL_IP_ROUTECHANGE_NOTIFY_REQUEST: queue the request until the next route change */
 NTSTATUS
 DispRouteChangeNotifyRequest(PIRP Irp)
 {
-    if (ChangeQueueIsFull(Irp))
-        return STATUS_INSUFFICIENT_RESOURCES;
-
-    Irp->IoStatus.Information = 0;
-    IoCsqInsertIrp(&RouteChangeQueue.Csq, Irp, NULL);
-    return STATUS_PENDING;
+    return ChangeQueueRequest(&RouteChangeQueue, Irp);
 }
 
 /* Cancel the waiting requests of one file object, in both queues; returns how many */
@@ -207,10 +262,13 @@ AddrChangeCancelFile(PFILE_OBJECT FileObject)
     ULONG Count = 0;
     CHANGE_QUEUE *Queues[2] = { &AddrChangeQueue, &RouteChangeQueue };
     ULONG i;
+    CHANGE_PEEK Peek;
 
+    Peek.FileObject = FileObject;
+    Peek.Families = TCP_CHANGE_FAMILY_IPV4 | TCP_CHANGE_FAMILY_IPV6;
     for (i = 0; i < 2; i++)
     {
-        while ((Pending = IoCsqRemoveNextIrp(&Queues[i]->Csq, FileObject)) != NULL)
+        while ((Pending = IoCsqRemoveNextIrp(&Queues[i]->Csq, &Peek)) != NULL)
         {
             Pending->IoStatus.Status = STATUS_CANCELLED;
             Pending->IoStatus.Information = 0;

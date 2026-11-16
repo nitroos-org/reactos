@@ -375,6 +375,9 @@ DispAddressConfig6(PIRP Irp, PIO_STACK_LOCATION IrpSp);
 VOID
 TCP6SweepAddresses(VOID);
 
+NTSTATUS
+DispSolicit6(PIRP Irp, PIO_STACK_LOCATION IrpSp);
+
 BOOLEAN
 TCP6AddressInfo(struct netif *netif, signed char Slot, PTCP6_ADDRESS_INFO Info);
 

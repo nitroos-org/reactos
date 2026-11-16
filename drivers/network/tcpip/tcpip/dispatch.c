@@ -1802,7 +1802,7 @@ NTSTATUS DispTdiSetIPAddress( PIRP Irp, PIO_STACK_LOCATION IrpSp ) {
             IpAddrChange->Address = Context;
             Irp->IoStatus.Information = min(sizeof(IP_SET_ADDRESS),
                                             IrpSp->Parameters.DeviceIoControl.OutputBufferLength);
-            AddrChangeNotify();
+            AddrChangeNotify4();
         }
 
         IPDereferenceInterface(Target);
@@ -1831,7 +1831,7 @@ NTSTATUS DispTdiDeleteIPAddress( PIRP Irp, PIO_STACK_LOCATION IrpSp ) {
     if (*NteIndex >= IP_NTE_CONTEXT_BASE) {
         if (IFRemoveNteByContext(*NteIndex, &Removed, &Target)) {
             IPRemoveNteRoute(Target, Removed.Address, Removed.Netmask);
-            AddrChangeNotify();
+            AddrChangeNotify4();
             IPDereferenceInterface(Target);
             Status = STATUS_SUCCESS;
         }
@@ -1864,7 +1864,7 @@ NTSTATUS DispTdiDeleteIPAddress( PIRP Irp, PIO_STACK_LOCATION IrpSp ) {
         IF->Broadcast.Address.IPv4Address = 0;
 
         Status = STATUS_SUCCESS;
-        AddrChangeNotify();
+        AddrChangeNotify4();
 
         IPDereferenceInterface(Target);
     }

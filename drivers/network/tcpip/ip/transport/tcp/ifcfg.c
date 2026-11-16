@@ -318,7 +318,7 @@ TCP6InterfaceConfigure(PIP_INTERFACE IF, const TCP_IP_INTERFACE_REQUEST *Asked)
         if (Request.Fields & TCP_IPIF_SET_MTU)
             TCPUpdateInterfaceIPInformation(IF);
         if (Request.Fields & TCP_IPIF_SET_METRIC)
-            RouteChangeNotify();
+            RouteChangeNotify6();
     }
     else
     {
@@ -337,7 +337,7 @@ TCP6InterfaceConfigure(PIP_INTERFACE IF, const TCP_IP_INTERFACE_REQUEST *Asked)
     }
 
     /* the interface table changed (user mode compares it for NotifyIpInterfaceChange) */
-    AddrChangeNotify();
+    AddrChangeNotifyFamilies(V6 ? TCP_CHANGE_FAMILY_IPV6 : TCP_CHANGE_FAMILY_IPV4);
     return STATUS_SUCCESS;
 }
 

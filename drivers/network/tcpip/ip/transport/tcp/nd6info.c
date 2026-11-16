@@ -44,6 +44,16 @@ Nd6InfoInterfaceIndex(const struct netif *netif)
     return (netif && netif->state) ? ((PIP_INTERFACE)netif->state)->Index : 0;
 }
 
+/* A neighbour of an interface that is down (administratively, or without a link) is not listed: Windows drops the
+ * unicast IPv6 neighbours of an interface whose media is disconnected (read on Windows Server 2022) */
+static
+BOOLEAN
+Nd6InfoNeighborListed(const struct nd6_neighbor_cache_entry *Entry)
+{
+    return Entry->state != ND6_NO_ENTRY && Entry->netif != NULL && Nd6InfoInterfaceIndex(Entry->netif) &&
+           netif_is_up(Entry->netif) && netif_is_link_up(Entry->netif);
+}
+
 /* The IP_IPV6_ND_ENTRY_ID answer: TCP_IPV6_ND_HEADER, the neighbour rows, the prefix rows. Returns the size of
  * the whole answer; what fits in Out (OutSize bytes) is written, so a caller whose buffer is too small gets the
  * size and asks again. Off: the header alone, with Enabled 0. PASSIVE_LEVEL */
@@ -71,7 +81,7 @@ TCPQueryIpv6Nd(PVOID Out, ULONG OutSize)
     {
         const struct nd6_neighbor_cache_entry *Entry = &neighbor_cache[i];
 
-        if (Entry->state == ND6_NO_ENTRY || Entry->netif == NULL || !Nd6InfoInterfaceIndex(Entry->netif))
+        if (!Nd6InfoNeighborListed(Entry))
             continue;
         NeighborCount++;
     }
@@ -85,7 +95,7 @@ TCPQueryIpv6Nd(PVOID Out, ULONG OutSize)
         PTCP_IPV6_NEIGHBOR_ROW Row;
         ULONG IfIndex = Nd6InfoInterfaceIndex(Entry->netif), Length;
 
-        if (Entry->state == ND6_NO_ENTRY || Entry->netif == NULL || !IfIndex)
+        if (!Nd6InfoNeighborListed(Entry))
             continue;
 
         if (Fits && OutSize >= sizeof(*Header) + (NeighborCount + 1) * sizeof(*Row))
@@ -154,6 +164,80 @@ TCPQueryIpv6Nd(PVOID Out, ULONG OutSize)
 
     Size = PrefixBase + PrefixCount * sizeof(TCP_IPV6_PREFIX_ROW);
     return Size;
+}
+
+/* The solicitations IOCTL_IP6_SOLICIT sends at once, for all callers together, in one second. The request is not
+ * privileged, and an address that is cached would be asked for once more at every call: a caller asking in a loop
+ * must not put a flood of solicitations on the link. Beyond these an address without an entry still gets one, which
+ * the nd6 timer asks for (one solicitation a second for each of at most LWIP_ND6_NUM_NEIGHBORS entries, as for a
+ * datagram to an unknown neighbour), and an address with one is not asked for again. */
+#define SOLICIT6_PER_SECOND 16
+
+static ULONGLONG Solicit6WindowStart;
+static ULONG Solicit6InWindow;
+
+/* Lwip core lock held */
+static
+u8_t
+Solicit6MaySendNow(VOID)
+{
+    ULONGLONG Now = KeQueryInterruptTime();
+
+    if (Now - Solicit6WindowStart >= 10000000ULL)
+    {
+        Solicit6WindowStart = Now;
+        Solicit6InWindow = 0;
+    }
+    if (Solicit6InWindow >= SOLICIT6_PER_SECOND)
+        return 0;
+    Solicit6InWindow++;
+    return 1;
+}
+
+/* IOCTL_IP6_SOLICIT: neighbour solicitations for an address of an interface, no data packet (ResolveIpNetEntry2).
+ * Not privileged: any caller that can open the device may ask, as any caller may send a datagram that starts
+ * neighbour discovery too; the solicitations sent at once are bounded (SOLICIT6_PER_SECOND). PASSIVE_LEVEL */
+NTSTATUS
+DispSolicit6(PIRP Irp, PIO_STACK_LOCATION IrpSp)
+{
+    TCP_IPV6_SOLICIT_REQUEST Request;
+    PIP_INTERFACE IF;
+    struct netif *netif;
+    ip6_addr_t Address;
+    NTSTATUS Status;
+
+    if (IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(Request) || !Irp->AssociatedIrp.SystemBuffer)
+        return STATUS_INVALID_PARAMETER;
+    RtlCopyMemory(&Request, Irp->AssociatedIrp.SystemBuffer, sizeof(Request));
+
+    if (!TCPIpv6Enabled)
+        return STATUS_NOT_SUPPORTED;
+
+    RtlCopyMemory(Address.addr, Request.Address, 16);
+    ip6_addr_clear_zone(&Address);
+    if (ip6_addr_isany(&Address) || ip6_addr_ismulticast(&Address) || ip6_addr_isloopback(&Address) ||
+        ip6_addr_isipv4mappedipv6(&Address))
+        return STATUS_INVALID_PARAMETER;
+
+    IF = TCP6ReferenceInterface(Request.IfIndex);
+    if (!IF)
+        return STATUS_NOT_FOUND;
+    netif = IF->TCPContext;
+
+    LOCK_TCPIP_CORE();
+    if (TCP6NetifRegistered(netif) && netif_is_up(netif) && netif_is_link_up(netif))
+    {
+        if (ip6_addr_islinklocal(&Address))
+            ip6_addr_assign_zone(&Address, IP6_UNICAST, netif);
+        Status = (nd6_solicit_neighbor(netif, &Address, Solicit6MaySendNow()) == ERR_OK) ? STATUS_SUCCESS :
+                                                                                           STATUS_INSUFFICIENT_RESOURCES;
+    }
+    else
+        Status = STATUS_NOT_FOUND;
+    UNLOCK_TCPIP_CORE();
+
+    IPDereferenceInterface(IF);
+    return Status;
 }
 
 static volatile LONG Ip6InReceives;
@@ -294,5 +378,5 @@ TCPQueryIpv6Stats(PVOID Out, ULONG OutSize)
 void
 LibTCPRoutes6Changed(void)
 {
-    RouteChangeNotify();
+    RouteChangeNotify6();
 }

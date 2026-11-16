@@ -2948,12 +2948,13 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         case IOCTL_TCP_SET_INFORMATION_EX: /* setsockopt partner: TDIObjectID + BufferSize + inline bytes, no pointers. */
         case IOCTL_SET_IP_ADDRESS: /* AddIPAddress: three integers, no pointers. */
         case IOCTL_DELETE_IP_ADDRESS: /* DeleteIPAddress: one integer. */
-        case IOCTL_IP_ADDCHANGE_NOTIFY_REQUEST: /* NotifyAddrChange: no data; pends with the guest IOSB. */
+        case IOCTL_IP_ADDCHANGE_NOTIFY_REQUEST: /* NotifyAddrChange: optional ULONG family mask in and out, no pointers; pends with the guest IOSB. */
         case IOCTL_IP_ADDCHANGE_CANCEL_REQUEST: /* CancelIPChangeNotify: no data. */
-        case IOCTL_IP_ROUTECHANGE_NOTIFY_REQUEST: /* NotifyRouteChange: no data; pends with the guest IOSB. */
+        case IOCTL_IP_ROUTECHANGE_NOTIFY_REQUEST: /* NotifyRouteChange: as the address notification; pends with the guest IOSB. */
         case IOCTL_IP6_ADDRESS_CONFIG: /* TCP_IPV6_ADDRESS_REQUEST: ULONGs and bytes, the same in both ABIs, no pointers. */
         case IOCTL_IP6_ROUTE_CONFIG: /* TCP_IPV6_ROUTE_REQUEST: ULONGs and bytes, the same in both ABIs, no pointers. */
         case IOCTL_IP_INTERFACE_CONFIG: /* TCP_IP_INTERFACE_REQUEST: ULONGs, the same in both ABIs, no pointers. */
+        case IOCTL_IP6_SOLICIT: /* TCP_IPV6_SOLICIT_REQUEST: a ULONG and bytes, the same in both ABIs, no pointers. */
         case IOCTL_ICMP_ECHO_REQUEST: /* IcmpSendEcho2: the request has no pointers; tcpip writes the 32-bit reply layout. */
         case IOCTL_AFD_GET_TDI_HANDLES: /* AFD captures the 32-bit output handles. */
         case IOCTL_AFD_EVENT_SELECT: /* AFD captures event handles and the in/out record. */

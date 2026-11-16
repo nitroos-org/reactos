@@ -444,7 +444,7 @@ TCP6ApplyPersistent(PIP_INTERFACE IF)
     {
         DbgPrint("TCPIP: IPv6 persistent configuration of interface %u: %lu of %lu addresses and routes applied\n",
                  IF->Index, Added, AddressCount + RouteCount);
-        RouteChangeNotify();
+        RouteChangeNotify6();
     }
 
     if (Addresses)

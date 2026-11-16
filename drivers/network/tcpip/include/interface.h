@@ -27,8 +27,15 @@ PIP_INTERFACE IPReferenceDefaultInterface(VOID);
 
 /* tcpip/addrchange.c: wake the IOCTL_IP_ADDCHANGE_NOTIFY_REQUEST waiters */
 VOID AddrChangeInitialize(VOID);
-VOID AddrChangeNotify(VOID);
-VOID RouteChangeNotify(VOID);
+/* Wake the waiters of these families (TCP_CHANGE_FAMILY_*): an IPv4 waiter does not wake for an IPv6 change, as on
+   Windows */
+VOID AddrChangeNotifyFamilies(ULONG Families);
+VOID RouteChangeNotifyFamilies(ULONG Families);
+#define AddrChangeNotify4()   AddrChangeNotifyFamilies(TCP_CHANGE_FAMILY_IPV4)
+#define AddrChangeNotify6()   AddrChangeNotifyFamilies(TCP_CHANGE_FAMILY_IPV6)
+#define AddrChangeNotifyAll() AddrChangeNotifyFamilies(TCP_CHANGE_FAMILY_IPV4 | TCP_CHANGE_FAMILY_IPV6)
+#define RouteChangeNotify4()  RouteChangeNotifyFamilies(TCP_CHANGE_FAMILY_IPV4)
+#define RouteChangeNotify6()  RouteChangeNotifyFamilies(TCP_CHANGE_FAMILY_IPV6)
 NTSTATUS DispRouteChangeNotifyRequest(PIRP Irp);
 NTSTATUS DispAddrChangeNotifyRequest(PIRP Irp);
 NTSTATUS DispAddrChangeCancelRequest(PIRP Irp);

@@ -96,6 +96,32 @@ static BOOL find_broadcast_interface(PDWORD Index)
   return Found;
 }
 
+/*
+ * The metric of an IPv4 interface (GetIpInterfaceEntry). The route table of the stack, like GetIpForwardTable on
+ * Windows, shows the sum of the interface metric and the route metric; MIB_IPFORWARD_ROW2.Metric is the route's own
+ * (a read of Windows Server 2022: a default route of a metric 25 interface is 25 in the one and 0 in the other, an
+ * on-link route 281 and 256). 0 when the interface is not known.
+ */
+DWORD Ipv4InterfaceMetric(DWORD IfIndex)
+{
+  MIB_IPINTERFACE_ROW Interface;
+
+  memset(&Interface, 0, sizeof(Interface));
+  Interface.Family = AF_INET;
+  Interface.InterfaceIndex = IfIndex;
+  if (GetIpInterfaceEntry(&Interface) != NO_ERROR)
+    return 0;
+  return Interface.Metric;
+}
+
+/* The route metric of a route of the stack's table (the sum of the two), never below 0 */
+static ULONG route_own_metric(ULONG Total, DWORD IfIndex)
+{
+  ULONG Interface = Ipv4InterfaceMetric(IfIndex);
+
+  return Total > Interface ? Total - Interface : 0;
+}
+
 static ULONG mask_prefix_length(ULONG Mask)
 {
   ULONG Length = 0;
@@ -261,7 +287,8 @@ DWORD WINAPI GetBestRoute2(NET_LUID *InterfaceLuid, NET_IFINDEX InterfaceIndex,
 
     /* a gateway that is the interface address, or none, means the destination is on the link */
     Filled = fill_best_route(BestRoute, BestSourceAddress, Route->ifIndex, Route->dest & Route->mask, MatchedLength,
-                             OnLink ? 0 : Route->gateway, OnLink ? ON_LINK_METRIC : Route->metric, FALSE, Source);
+                             OnLink ? 0 : Route->gateway,
+                             OnLink ? ON_LINK_METRIC : route_own_metric(Route->metric, Route->ifIndex), FALSE, Source);
   }
   HeapFree(GetProcessHeap(), 0, Table);
 
@@ -352,6 +379,7 @@ DWORD Ipv4GetRouteRows(PMIB_IPFORWARD_ROW2 *Rows, ULONG *Count)
   DWORD Result = ERROR_INSUFFICIENT_BUFFER;
   DWORD LastIndex = 0xffffffff;
   ULONG64 LastLuid = 0;
+  ULONG LastMetric = 0;
 
   *Rows = NULL;
   *Count = 0;
@@ -392,6 +420,7 @@ DWORD Ipv4GetRouteRows(PMIB_IPFORWARD_ROW2 *Rows, ULONG *Count)
       LastIndex = Row->dwForwardIfIndex;
       if (!getInterfaceLuidByIndex(LastIndex, NULL, &LastLuid))
         LastLuid = 0;
+      LastMetric = Ipv4InterfaceMetric(LastIndex);
     }
     New->InterfaceLuid.Value = LastLuid;
     New->InterfaceIndex = Row->dwForwardIfIndex;
@@ -402,7 +431,7 @@ DWORD Ipv4GetRouteRows(PMIB_IPFORWARD_ROW2 *Rows, ULONG *Count)
     New->NextHop.Ipv4.sin_addr.s_addr = Row->dwForwardNextHop;
     New->ValidLifetime = 0xffffffff;
     New->PreferredLifetime = 0xffffffff;
-    New->Metric = Row->dwForwardMetric1;
+    New->Metric = Row->dwForwardMetric1 > LastMetric ? Row->dwForwardMetric1 - LastMetric : 0;
     New->Protocol = Row->dwForwardProto;
     New->Age = Row->dwForwardAge;
   }
