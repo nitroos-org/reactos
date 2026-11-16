@@ -545,42 +545,6 @@ DnsIntCacheGetEntryByName(
     return Status;
 }
 
-BOOL
-DnsIntCacheRemoveEntryByName(LPCWSTR Name)
-{
-    BOOL Ret = FALSE;
-    PRESOLVER_CACHE_ENTRY CacheEntry;
-    PLIST_ENTRY NextEntry, Following, Bucket;
-
-    DPRINT("DnsIntCacheRemoveEntryByName(%S)\n", Name);
-
-    /* Lock the cache */
-    DnsCacheLock();
-
-    if (DnsCache.Buckets)
-    {
-        /* Every entry of the name goes */
-        Bucket = BucketOf(NameHash(Name));
-        for (NextEntry = Bucket->Flink; NextEntry != Bucket; NextEntry = Following)
-        {
-            Following = NextEntry->Flink;
-            CacheEntry = CONTAINING_RECORD(NextEntry, RESOLVER_CACHE_ENTRY, HashLink);
-
-            if (NamesMatch(CacheEntry, Name))
-            {
-                DnsIntCacheRemoveEntryItem(CacheEntry);
-                Ret = TRUE;
-            }
-        }
-    }
-
-    /* Release the cache */
-    DnsCacheUnlock();
-
-    /* Return */
-    return Ret;
-}
-
 /*
  * Adds an entry (the lock is held). Record is the answer (copied), or NULL for a negative one of Name, Type and
  * NegStatus. A hosts entry never expires and is not counted; the other entries replace the entry of their name

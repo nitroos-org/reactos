@@ -113,10 +113,6 @@ DnsIntCacheAddNegative(
 VOID
 DnsIntCacheReadParameters(VOID);
 
-BOOL
-DnsIntCacheRemoveEntryByName(
-    _In_ LPCWSTR Name);
-
 DNS_STATUS
 DnsIntCacheGetEntries(
     _Out_ DNS_CACHE_ENTRY **ppCacheEntries);
