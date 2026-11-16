@@ -3764,7 +3764,11 @@ static DWORD send_frame( struct socket *socket, enum socket_opcode opcode, USHOR
     memcpy(ptr, hdr, offset);
     ptr += offset;
 
-    RtlGenRandom( socket->mask, 4 );
+    if (!RtlGenRandom( socket->mask, 4 ))
+    {
+        ERR( "no random data for the frame mask\n" );
+        return ERROR_WINHTTP_INTERNAL_ERROR;
+    }
     memcpy( ptr, socket->mask, 4 );
     ptr += 4;
     socket->mask_index = 0;
