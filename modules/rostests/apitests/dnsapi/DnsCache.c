@@ -511,10 +511,6 @@ TestFlush(void)
 }
 
 /*
- * chain30-*: the name is a CNAME (TTL 30) of l2-<name>, a CNAME (TTL 600) of l3-<name>, which has the addresses
- * (TTL 600). The answer is good for as long as its shortest link. v4only-*: an A record, no AAAA record.
- */
-/*
  * The answer of an alias, as Windows' DnsQuery gives it: the CNAME records of the chain in order (N -> l2-N,
  * l2-N -> l3-N), then the records of the type, owned by the end of the chain (l3-N)
  */
@@ -561,6 +557,10 @@ CheckChainShape(const char *Name, WORD Type, DWORD Flags, const char *What)
     DnsRecordListFree((PDNS_RECORD)Records, DnsFreeRecordList);
 }
 
+/*
+ * chain30-*: the name is a CNAME (TTL 30) of l2-<name>, a CNAME (TTL 600) of l3-<name>, which has the addresses
+ * (TTL 600). The answer is good for as long as its shortest link. v4only-*: an A record, no AAAA record.
+ */
 static
 void
 TestChain(void)

@@ -536,7 +536,8 @@ IsIpv6Usable(IN const IN6_ADDR *Address,
  * The IPv6 addresses of NodeName (DNS_TYPE_AAAA, which also answers this machine's own name and "localhost"
  * locally) as a chain of addrinfo structures in *pptResult; *pCanonical gets the name of the first AAAA record
  * (allocated here, NULL when there is none): the canonical name, as the answer of an alias starts with the CNAME
- * records of its chain and its AAAA records are owned by the end of the chain (no further query is made for it). Returns 0 or an EAI_ code: EAI_NONAME when the name has no AAAA record.
+ * records of its chain and its AAAA records are owned by the end of the chain (no further query is made for it).
+ * Returns 0 or an EAI_ code: EAI_NONAME when the name has no AAAA record.
  */
 static
 INT
