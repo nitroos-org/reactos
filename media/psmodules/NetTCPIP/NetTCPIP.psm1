@@ -610,7 +610,7 @@ function New-NetIPAddress {
             if (-not $PSBoundParameters.ContainsKey('PreferredLifetime') -and $pref6 -gt $valid6) { $pref6 = $valid6 }   # only a valid lifetime given: preferred ends with it
             if ($pref6 -gt $valid6) { Write-NetWin32Error $PSCmdlet 87 "Invalid parameter PreferredLifetime $PreferredLifetime`n" $class; return }
             if (-not [Nitro.Net.Native]::HasIpv6($ifx)) {
-                Write-NetWin32Error $PSCmdlet 50 "The request is not supported. IPv6 is turned off on this system (Tcpip\Parameters\Ipv6Enable = 0).`n" $class 'NotImplemented'; return
+                Write-NetWin32Error $PSCmdlet 50 "The request is not supported. IPv6 is turned off on this interface.`n" $class 'NotImplemented'; return
             }
             $bare = $ipText -replace '%.*$', ''
             if ($doActive) {
@@ -1106,7 +1106,7 @@ function New-NetRoute {
         $proto = if ($PSBoundParameters.ContainsKey('Protocol')) { [uint32][int]$Protocol } else { 3 }   # NetMgmt, as for a route made by hand
         $pub = $PSBoundParameters.ContainsKey('Publish') -and [int]$Publish -eq 1
         if (-not [Nitro.Net.Native]::HasIpv6($ifx)) {
-            Write-NetWin32Error $PSCmdlet 50 "The request is not supported. IPv6 is turned off on this system (Tcpip\Parameters\Ipv6Enable = 0).`n" $class 'NotImplemented'; return
+            Write-NetWin32Error $PSCmdlet 50 "The request is not supported. IPv6 is turned off on this interface.`n" $class 'NotImplemented'; return
         }
         if ($doActive) {
             foreach ($r in [Nitro.Net.Native]::Routes()) {
