@@ -92,6 +92,9 @@ static WCHAR SymLinkBuffer[80];
 static PFLT_FILTER SampleFilter;
 static PFLT_VOLUME HeldVolume;                  /* FLTSAMPLE_IOCTL_HOLD_VOLUME */
 static FLTSAMPLE_VOLUME_PROPS HeldBefore;
+#define LEAKED_VOLUMES_MAX 32
+static PFLT_VOLUME LeakedVolumes[LEAKED_VOLUMES_MAX];   /* FLTSAMPLE_IOCTL_LEAK_VOLUME: references kept on purpose (test only) */
+static ULONG LeakedCount;
 static FLTSAMPLE_STATS Stats;
 static ULONG AttachMask = 0xFFFF;
 static ULONG PendDelayMs = 200;
@@ -1192,6 +1195,8 @@ FilterUnload(_In_ FLT_FILTER_UNLOAD_FLAGS Flags)
         FltObjectDereference(HeldVolume);
         HeldVolume = NULL;
     }
+    while (LeakedCount)
+        FltObjectDereference(LeakedVolumes[--LeakedCount]);
 
     /* Pended operations need their worker, which needs our code, so wait for those */
     FltUnregisterFilter(SampleFilter);
@@ -1311,18 +1316,39 @@ GetVolumeProps(_In_ PFLT_VOLUME Volume,
     (VOID)FltGetVolumeName(Volume, &Name, NULL);
 }
 
+typedef struct _DELAYED_PING
+{
+    WORK_QUEUE_ITEM Item;
+    KEVENT Event;
+    volatile LONG Refs;
+} DELAYED_PING, *PDELAYED_PING;
+
+static
+VOID
+NTAPI
+DelayedPingWorker(_In_ PVOID Parameter)
+{
+    PDELAYED_PING Ping = Parameter;
+
+    KeSetEvent(&Ping->Event, IO_NO_INCREMENT, FALSE);
+    if (InterlockedDecrement(&Ping->Refs) == 0)
+        ExFreePoolWithTag(Ping, TAG_SAMPLE);
+}
+
 /* Takes a reference to the volume of that name, as a filter which keeps volumes around does */
 static
 NTSTATUS
 HoldVolume(_In_reads_bytes_(Length) PCWSTR Wanted,
-           _In_ ULONG Length)
+           _In_ ULONG Length,
+           _In_ BOOLEAN Leak)
 {
     PFLT_VOLUME *Volumes;
     ULONG Count = 0, i;
     UNICODE_STRING WantedName;
     NTSTATUS Status;
+    BOOLEAN Taken = FALSE;
 
-    if (HeldVolume || SampleFilter == NULL)
+    if ((!Leak && HeldVolume) || (Leak && LeakedCount >= LEAKED_VOLUMES_MAX) || SampleFilter == NULL)
         return STATUS_INVALID_DEVICE_STATE;
     WantedName.Buffer = (PWCH)Wanted;
     WantedName.Length = WantedName.MaximumLength = (USHORT)min(Length & ~1, 0xFFFE);
@@ -1348,11 +1374,19 @@ HoldVolume(_In_reads_bytes_(Length) PCWSTR Wanted,
 
         GetVolumeProps(Volumes[i], &Props);
         RtlInitUnicodeString(&Name, Props.VolumeName);
-        if (HeldVolume == NULL && RtlEqualUnicodeString(&Name, &WantedName, TRUE))
+        if (!Taken && RtlEqualUnicodeString(&Name, &WantedName, TRUE))
         {
             /* This reference stays */
-            HeldVolume = Volumes[i];
-            HeldBefore = Props;
+            if (Leak)
+            {
+                LeakedVolumes[LeakedCount++] = Volumes[i];
+            }
+            else
+            {
+                HeldVolume = Volumes[i];
+                HeldBefore = Props;
+            }
+            Taken = TRUE;
             Status = STATUS_SUCCESS;
             continue;
         }
@@ -1481,8 +1515,50 @@ ControlDispatch(_In_ PDEVICE_OBJECT DeviceObject,
 
             case FLTSAMPLE_IOCTL_HOLD_VOLUME:
                 if (InLength < sizeof(WCHAR)) { Status = STATUS_INVALID_PARAMETER; break; }
-                Status = HoldVolume(Buffer, InLength);
+                Status = HoldVolume(Buffer, InLength, FALSE);
                 break;
+
+            case FLTSAMPLE_IOCTL_LEAK_VOLUME:
+                /* Test only: a filter which never drops a volume reference, one more volume each time */
+                if (InLength < sizeof(WCHAR)) { Status = STATUS_INVALID_PARAMETER; break; }
+                Status = HoldVolume(Buffer, InLength, TRUE);
+                break;
+
+            case FLTSAMPLE_IOCTL_DELAYED_PING:
+            {
+                /* In: milliseconds to wait (ULONG). Out: ULONG, 1 if a work item of the delayed queue ran in time */
+                PDELAYED_PING Ping;
+                LARGE_INTEGER Timeout;
+
+                if (InLength < sizeof(ULONG) || OutLength < sizeof(ULONG)) { Status = STATUS_BUFFER_TOO_SMALL; break; }
+                Ping = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Ping), TAG_SAMPLE);
+                if (Ping == NULL) { Status = STATUS_INSUFFICIENT_RESOURCES; break; }
+                Ping->Refs = 2;
+                KeInitializeEvent(&Ping->Event, NotificationEvent, FALSE);
+                ExInitializeWorkItem(&Ping->Item, DelayedPingWorker, Ping);
+                Timeout.QuadPart = -(LONGLONG)(*(PULONG)Buffer) * 10000;
+                ExQueueWorkItem(&Ping->Item, DelayedWorkQueue);
+                Status = KeWaitForSingleObject(&Ping->Event, Executive, KernelMode, FALSE, &Timeout);
+                *(PULONG)Buffer = (Status == STATUS_SUCCESS);
+                Status = STATUS_SUCCESS;
+                Information = sizeof(ULONG);
+                /* The worker may still come: it frees the item then */
+                if (InterlockedDecrement(&Ping->Refs) == 0)
+                    ExFreePoolWithTag(Ping, TAG_SAMPLE);
+                break;
+            }
+
+            case FLTSAMPLE_IOCTL_DROP_LEAKED:
+            {
+                ULONG Dropped = LeakedCount;
+
+                if (OutLength < sizeof(ULONG)) { Status = STATUS_BUFFER_TOO_SMALL; break; }
+                while (LeakedCount)
+                    FltObjectDereference(LeakedVolumes[--LeakedCount]);
+                *(PULONG)Buffer = Dropped;
+                Information = sizeof(ULONG);
+                break;
+            }
 
             case FLTSAMPLE_IOCTL_RELEASE_VOLUME:
             {

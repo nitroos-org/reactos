@@ -1514,6 +1514,119 @@ test_VolumeDeleteRounds(void)
     UnloadSample(&P, TRUE);
 }
 
+/* Does a work item queued on the system's delayed queue run within Milliseconds? */
+static
+BOOL
+DelayedQueueRuns(PSAMPLE Sample, ULONG Milliseconds)
+{
+    ULONG Value = Milliseconds;
+
+    return SampleIoctl(Sample, FLTSAMPLE_IOCTL_DELAYED_PING, &Value, sizeof(Value), &Value, sizeof(Value)) && Value == 1;
+}
+
+static LONG
+OutstandingTag(ULONG Tag)
+{
+    static TAG_COUNT Tags[8192];
+    ULONG Count = SnapshotPoolTags(Tags, RTL_NUMBER_OF(Tags));
+    const TAG_COUNT *Found = FindTag(Tags, Count, Tag);
+
+    return Found ? Found->Outstanding : 0;
+}
+
+/*
+ * A filter which never drops a volume reference (the sample is told to keep 32, one per deleted volume):
+ * the deleted volumes wait for it, as they do on Windows, but the wait is not on a worker of the system's
+ * delayed queue. That queue has 12 threads, and the balance manager adds up to 16 more when it sees the
+ * queue stand still: when each leaked volume holds one of the 28, nothing queued on it runs again, not the
+ * next volume's deletion, not any other driver's work item.
+ * The volumes are freed once the filter lets go.
+ */
+static
+void
+test_LeakedVolumeReferences(void)
+{
+    const ULONG Rounds = 32;
+    SAMPLE P = { { 0 } };
+    FLTSAMPLE_STATS S;
+    WCHAR Name[] = FLTFAKEFS_DISK_NAME;
+    LONG Before, Held = 0;
+    ULONG Taken = 0, Deleted = 0, Dropped = 0, i;
+
+    if (!LoadSample(&P, L"FltSampleP", L"383000.5", 0xFFFF))
+    {
+        skip("Can't load the sample filter\n");
+        return;
+    }
+
+    ok(MountFake(), "Can't mount the fake volume\n");
+    ok(DelayedQueueRuns(&P, 5000), "The delayed queue does not run before the test\n");
+    Sleep(500);
+    Before = OutstandingTag('ovMF');
+
+    for (i = 0; i < Rounds; i++)
+    {
+        if (!MountFake())
+        {
+            ok(0, "Round %lu: can't mount the fake volume\n", i);
+            break;
+        }
+        SampleStats(&P, &S);
+        if (SampleIoctl(&P, FLTSAMPLE_IOCTL_LEAK_VOLUME, Name, sizeof(Name) - sizeof(WCHAR), NULL, 0))
+            Taken++;
+        if (DeleteFake(&P, S.VolumeCount))
+            Deleted++;
+    }
+    ok(Taken == Rounds, "%lu of %lu volumes held\n", Taken, Rounds);
+    ok(Deleted == Rounds, "%lu of %lu deleted volumes were taken down: the delayed queue is blocked\n", Deleted, Rounds);
+
+    ok(DelayedQueueRuns(&P, 5000), "A work item of the delayed queue does not run: the queue is starved\n");
+
+    Held = OutstandingTag('ovMF') - Before;
+    trace("%lu volumes deleted while held: FMvo %+ld\n", Deleted, Held);
+    /* (the volume which was mounted when the count was taken is the first one deleted, and not held) */
+    ok(Held >= (LONG)Taken - 1, "FMvo %+ld: a volume was freed while a filter held a reference\n", Held);
+
+    /* A volume which waits longer than 30 s for its references says so, once, on the debug port */
+    Sleep(32000);
+    ok(DelayedQueueRuns(&P, 5000), "The delayed queue does not run after the wait\n");
+
+    /* The references go: the volumes with them */
+    ok(SampleIoctl(&P, FLTSAMPLE_IOCTL_DROP_LEAKED, NULL, 0, &Dropped, sizeof(Dropped)), "Drop: %lu\n", GetLastError());
+    ok(Dropped == Taken, "%lu references dropped, %lu taken\n", Dropped, Taken);
+    for (i = 0; i < 100; i++)
+    {
+        Held = OutstandingTag('ovMF') - Before;
+        if (Held <= 0)
+            break;
+        Sleep(100);
+    }
+    trace("After the references are dropped: FMvo %+ld\n", Held);
+    ok(Held <= 0, "FMvo %+ld: the volumes are not freed after the last reference is dropped\n", Held);
+    ok(DelayedQueueRuns(&P, 5000), "The delayed queue does not run at the end\n");
+
+    /* Leave it mounted, as the other tests expect */
+    MountFake();
+    UnloadSample(&P, TRUE);
+}
+
+START_TEST(p3volleak)
+{
+    EnsureTestDirectory();
+    if (!StartFilterManager())
+    {
+        skip("No filter manager\n");
+        return;
+    }
+    if (!LoadFakeFs())
+    {
+        skip("No fake file system\n");
+        return;
+    }
+
+    test_LeakedVolumeReferences();
+}
+
 /*
  * The life of a filter, over and over: load (instances on every volume), files opened, written and
  * read with contexts, a client on the port, detach and attach every volume, unload. Afterwards no

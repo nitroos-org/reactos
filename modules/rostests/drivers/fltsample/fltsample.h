@@ -209,6 +209,13 @@ typedef struct _FLTSAMPLE_ASK_RESULT
 /* Out: FLTSAMPLE_HELD_VOLUME: the properties of the held volume now, then the reference goes */
 #define FLTSAMPLE_IOCTL_RELEASE_VOLUME  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x80D, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
+/* Test only. In: a volume's name. The filter keeps a reference to it, up to 32 volumes, until DROP_LEAKED or its unload */
+#define FLTSAMPLE_IOCTL_LEAK_VOLUME     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x80E, METHOD_BUFFERED, FILE_ANY_ACCESS)
+/* In/Out: ULONG: the milliseconds to wait / 1 if a work item queued on the system's delayed queue ran in that time */
+#define FLTSAMPLE_IOCTL_DELAYED_PING    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x810, METHOD_BUFFERED, FILE_ANY_ACCESS)
+/* Out: ULONG, how many references were dropped */
+#define FLTSAMPLE_IOCTL_DROP_LEAKED     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x80F, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
 typedef struct _FLTSAMPLE_VOLUME_PROPS
 {
     LONG Status;                    /* of FltGetVolumeProperties */
