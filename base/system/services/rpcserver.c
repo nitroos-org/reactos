@@ -1654,6 +1654,9 @@ ScmReleaseStoppedImage(
 
     DPRINT("Service %S image count:%d\n", lpService->lpServiceName, lpImage->dwImageRunCount);
 
+    /* The service is not waiting any more (it was counted when it reported STOPPED) */
+    lpImage->dwImageStopCount--;
+
     /* Decrement the image run counter */
     lpImage->dwImageRunCount--;
 
@@ -1674,14 +1677,33 @@ ScmStopThread(PVOID pParam)
     PSCM_STOP_CONTEXT Context = (PSCM_STOP_CONTEXT)pParam;
     PSERVICE lpService = Context->lpService;
     PSERVICE_IMAGE lpImage = Context->lpImage;
+    BOOL bStopDispatcher;
     WCHAR szLogBuffer[80];
     LPCWSTR lpLogStrings[2];
     LIST_ENTRY LogQueue;
 
     HeapFree(GetProcessHeap(), 0, Context);
 
-    /* Check if we are about to stop this service */
-    if (lpImage != NULL && lpImage->dwImageRunCount == 1)
+    /*
+     * Decide now, with the database locked, whether this stop ends the dispatcher of the image: every service
+     * left in the image is waiting for its stop thread, and no other stop thread took that already. A service
+     * of the image that started after this one reported STOPPED is counted in dwImageRunCount only, so the
+     * image keeps its process; once the dispatcher stop is taken, a new start makes a new image.
+     */
+    bStopDispatcher = FALSE;
+    if (lpImage != NULL)
+    {
+        ScmLockDatabaseExclusive();
+        if (!lpImage->bDispatcherStopSent &&
+            lpImage->dwImageRunCount == lpImage->dwImageStopCount)
+        {
+            lpImage->bDispatcherStopSent = TRUE;
+            bStopDispatcher = TRUE;
+        }
+        ScmUnlockDatabase();
+    }
+
+    if (bStopDispatcher)
     {
         /* Stop the dispatcher thread.
          * We must not send a control message while holding the database lock, otherwise it can cause timeouts
@@ -1855,6 +1877,8 @@ RSetServiceStatus(
         /* The stopped service gives up its image now; the stop thread releases that image */
         lpStoppedImage = lpService->lpImage;
         lpService->lpImage = NULL;
+        if (lpStoppedImage != NULL)
+            lpStoppedImage->dwImageStopCount++;
 
         hStopThread = NULL;
         StopContext = HeapAlloc(GetProcessHeap(), 0, sizeof(*StopContext));

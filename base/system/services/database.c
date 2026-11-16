@@ -170,6 +170,7 @@ ScmGetServiceImageByImagePath(LPWSTR lpImagePath)
                                          SERVICE_IMAGE,
                                          ImageListEntry);
         if (CurrentImage->bSharedProcess && !CurrentImage->bProcessEnded &&
+            !CurrentImage->bDispatcherStopSent &&
             _wcsicmp(CurrentImage->pszImagePath, lpImagePath) == 0)
         {
             DPRINT("Found image: '%S'\n", CurrentImage->pszImagePath);
