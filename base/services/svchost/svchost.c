@@ -1298,4 +1298,9 @@ wmainCRTStartup (
 
     /* And call into ADVAPI32 to get our services going */
     StartServiceCtrlDispatcherW(pServiceTable);
+
+    /* Every service of the process has stopped: the process ends, as on Windows. Returning would only end this
+     * thread, and threads the services leave behind (RPC listening, thread pool, timers) would keep a process with
+     * their endpoints open next to the one the next start of the service creates. */
+    ExitProcess(0);
 }
