@@ -60,7 +60,8 @@ ServiceControlHandler(
             break;
 
         case SERVICE_CONTROL_PARAMCHANGE:
-            DPRINT1("SERVICE_CONTROL_PARAMCHANGE!\n");
+            /* MaxCacheTtl and MaxNegativeCacheTtl */
+            DnsIntCacheReadParameters();
             return NO_ERROR;
 
         case SERVICE_CONTROL_INTERROGATE:

@@ -24,18 +24,38 @@
 
 #include <strsafe.h>
 
+/*
+ * An entry of the cache: the records of one answer (the name and the type of the first one are its key), or, with no
+ * records, a negative answer (the name does not exist, or has no record of the type). The entries of the hosts file
+ * never expire and are not counted against the size of the cache.
+ */
 typedef struct _RESOLVER_CACHE_ENTRY
 {
-    LIST_ENTRY CacheLink;
+    LIST_ENTRY CacheLink;       /* every entry, oldest first */
+    LIST_ENTRY HashLink;        /* the entries of one bucket, oldest first */
+    LIST_ENTRY LruLink;         /* the entries of the answers of DNS servers, least recently used first */
     BOOL bHostsFileEntry;
-    PDNS_RECORDW Record;
+    PDNS_RECORDW Record;        /* NULL for a negative entry */
+    PWSTR NegName;              /* the name of a negative entry (owned) */
+    PCWSTR Name;                /* the name of the entry (of the record, or NegName) */
+    WORD Type;
+    BOOL bNoSearch;             /* negative entries: asked without the search list */
+    DNS_STATUS NegStatus;       /* negative entries: DNS_ERROR_RCODE_NAME_ERROR or DNS_INFO_NO_RECORDS */
+    ULONGLONG ExpiresAt;        /* in milliseconds of the cache clock, 0 = never */
+    ULONG Hash;
 } RESOLVER_CACHE_ENTRY, *PRESOLVER_CACHE_ENTRY;
 
 typedef struct _RESOLVER_CACHE
 {
     LIST_ENTRY RecordList;
+    LIST_ENTRY LruList;
+    PLIST_ENTRY Buckets;
+    ULONG EntryCount;           /* the entries of the LruList */
     CRITICAL_SECTION Lock;
 } RESOLVER_CACHE, *PRESOLVER_CACHE;
+
+/* The answer of DnsIntCacheGetEntryByName when nothing is cached for the name and type */
+#define DNSRSLVR_CACHE_MISS     ERROR_NOT_FOUND
 
 
 /* cache.c */
@@ -78,6 +98,20 @@ VOID
 DnsIntCacheAddEntry(
     _In_ PDNS_RECORDW Record,
     _In_ BOOL bHostsFileEntry);
+
+VOID
+DnsIntCacheAddResult(
+    _In_ PDNS_RECORDW Records);
+
+VOID
+DnsIntCacheAddNegative(
+    _In_ LPCWSTR Name,
+    _In_ WORD wType,
+    _In_ DNS_STATUS Status,
+    _In_ BOOL bNoSearch);
+
+VOID
+DnsIntCacheReadParameters(VOID);
 
 BOOL
 DnsIntCacheRemoveEntryByName(
