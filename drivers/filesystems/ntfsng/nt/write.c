@@ -257,6 +257,12 @@ static VOID NgGroupCommitted(PNG_VCB Vcb, ULONG Seq, ULONGLONG Bytes)
     if ((LONG)(Seq - Vcb->GroupDone) > 0)
         Vcb->GroupDone = Seq;
     Vcb->GroupBytes = Vcb->GroupBytes > Bytes ? Vcb->GroupBytes - Bytes : 0;
+    /*
+     * What is left was written while the commit's I/O ran: its batch opens now.  GroupSince still naming the batch that was just
+     * committed would make the flusher commit again at once, and again after that for as long as writers overlap commits.
+     */
+    if (Vcb->GroupBytes)
+        Vcb->GroupSince = (LONGLONG)KeQueryInterruptTime();
 }
 
 int NgCommitEx(PNG_VCB Vcb, BOOLEAN Retain)
