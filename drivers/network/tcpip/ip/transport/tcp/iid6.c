@@ -265,7 +265,10 @@ LibNd6SlaacAddress(struct netif *netif, const ip6_addr_t *Prefix, ip6_addr_t *Ad
  * and ipconfig say so (Windows lists such an address as Duplicate) next to the new one. lwIP has no slot for it any
  * more, so the stack keeps the few it has replaced here, over all interfaces; the oldest gives way. They go
  * with the interface, with a link that goes down (an interface reset: DAD runs again for what is configured),
- * or when the address is deleted. Core lock held for everything here.
+ * or when the address is deleted. A record also ages out with the lifetimes it had when DAD found the conflict
+ * (what is left of them is reported, not the lifetimes of that moment), and it goes with its prefix: when the
+ * interface has no address left in the /64 the replaced one belonged to (an advertisement withdrew the prefix, the
+ * addresses expired), nothing of that prefix is listed. Core lock held for everything here.
  */
 typedef struct _DUP6_ENTRY
 {
@@ -273,6 +276,7 @@ typedef struct _DUP6_ENTRY
     ip6_addr_t Address;
     ULONG ValidLifetime;
     ULONG PreferredLifetime;
+    ULONGLONG Created;          /* KeQueryInterruptTime, 100 ns: when the lifetimes were taken */
 } DUP6_ENTRY;
 
 static DUP6_ENTRY Dup6Table[TCP6_DUP_MAX];
@@ -297,6 +301,7 @@ Dup6Remember(struct netif *netif, s8_t Index)
     if (!Entry)
         Entry = &Dup6Table[Dup6Next++ % TCP6_DUP_MAX];
     Entry->Netif = netif;
+    Entry->Created = KeQueryInterruptTime();
     ip6_addr_copy(Entry->Address, *Address);
     if (ip6_addr_life_isstatic(Valid))
         Entry->ValidLifetime = Entry->PreferredLifetime = 0xFFFFFFFF;
@@ -307,24 +312,83 @@ Dup6Remember(struct netif *netif, s8_t Index)
     }
 }
 
-/* The Number-th (from 0) duplicated address replaced on netif; FALSE when there is none */
+/* Seconds left of a lifetime taken at Created; 0xFFFFFFFF stays infinite */
+static
+ULONG
+Dup6Left(ULONG Lifetime, ULONGLONG Created, ULONGLONG Now)
+{
+    ULONGLONG Elapsed;
+
+    if (Lifetime == 0xFFFFFFFF)
+        return Lifetime;
+    Elapsed = (Now - Created) / 10000000ULL;
+    return Elapsed >= Lifetime ? 0 : (ULONG)(Lifetime - Elapsed);
+}
+
+/* A record is listed while its valid lifetime runs and the interface still has an address in its prefix (the
+   replacement the record stands for, or the address of that prefix that took its slot) */
+static
+BOOLEAN
+Dup6IsLive(const DUP6_ENTRY *Entry, ULONGLONG Now)
+{
+    s8_t i;
+
+    if (!Dup6Left(Entry->ValidLifetime, Entry->Created, Now))
+        return FALSE;
+    for (i = 0; i < LWIP_IPV6_NUM_ADDRESSES; i++)
+    {
+        const ip6_addr_t *Other;
+
+        if (ip6_addr_isinvalid(netif_ip6_addr_state(Entry->Netif, i)))
+            continue;
+        Other = netif_ip6_addr(Entry->Netif, i);
+        if (Other->addr[0] == Entry->Address.addr[0] && Other->addr[1] == Entry->Address.addr[1])
+            return TRUE;
+    }
+    return FALSE;
+}
+
+/* The Number-th (from 0) duplicated address replaced on netif that is still listed; FALSE when there is none.
+   The lifetimes are what is left of them now. */
 BOOLEAN
 TCP6DuplicateGet(struct netif *netif, ULONG Number, ip6_addr_t *Address, PULONG Valid, PULONG Preferred)
 {
+    ULONGLONG Now = KeQueryInterruptTime();
     ULONG i;
 
     for (i = 0; i < TCP6_DUP_MAX; i++)
     {
-        if (Dup6Table[i].Netif != netif)
+        if (Dup6Table[i].Netif != netif || !Dup6IsLive(&Dup6Table[i], Now))
             continue;
         if (Number--)
             continue;
         ip6_addr_copy(*Address, Dup6Table[i].Address);
-        *Valid = Dup6Table[i].ValidLifetime;
-        *Preferred = Dup6Table[i].PreferredLifetime;
+        *Valid = Dup6Left(Dup6Table[i].ValidLifetime, Dup6Table[i].Created, Now);
+        *Preferred = Dup6Left(Dup6Table[i].PreferredLifetime, Dup6Table[i].Created, Now);
+        if (*Preferred > *Valid)
+            *Preferred = *Valid;
         return TRUE;
     }
     return FALSE;
+}
+
+/* The records that are no longer listed are forgotten (the ND timer, once a second); TRUE when there were some, so
+   that the users of the address change notifications look again */
+BOOLEAN
+TCP6DuplicateSweep(VOID)
+{
+    ULONGLONG Now = KeQueryInterruptTime();
+    BOOLEAN Removed = FALSE;
+    ULONG i;
+
+    for (i = 0; i < TCP6_DUP_MAX; i++)
+    {
+        if (!Dup6Table[i].Netif || Dup6IsLive(&Dup6Table[i], Now))
+            continue;
+        RtlZeroMemory(&Dup6Table[i], sizeof(Dup6Table[i]));
+        Removed = TRUE;
+    }
+    return Removed;
 }
 
 /* All of netif's (its link went down, or it goes); how many there were */

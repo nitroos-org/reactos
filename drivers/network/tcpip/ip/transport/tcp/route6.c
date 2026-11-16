@@ -411,6 +411,8 @@ LibNd6Timer(void)
     ULONG i;
 
     TCP6SweepAddresses();
+    if (TCP6DuplicateSweep())
+        AddrChangeNotify6();
 
     if (!Route6Count)
         return;
