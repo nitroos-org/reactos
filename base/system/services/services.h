@@ -51,6 +51,8 @@ typedef struct _SERVICE_IMAGE
     LPWSTR pszImagePath;
     LPWSTR pszAccountName;
     DWORD dwImageRunCount;
+    DWORD dwImageStopCount; /* Services of the image that reported STOPPED and wait for their stop thread (still counted in dwImageRunCount) */
+    BOOL bDispatcherStopSent; /* A stop thread took the end of the dispatcher of this image: a new start makes a new image */
     BOOL bSharedProcess;
 
     HANDLE hControlPipe;
