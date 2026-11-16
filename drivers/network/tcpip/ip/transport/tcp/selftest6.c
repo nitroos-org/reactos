@@ -2980,6 +2980,101 @@ StTestDupHold(PIP_INTERFACE Eth)
     UNLOCK_TCPIP_CORE();
 }
 
+/* A temporary address deleted between two timer ticks leaves its entry until the next one; when another address has
+   its slot meanwhile and room is made (a new prefix, a configured address), that address is no temporary one and
+   stays. All under one hold of the core lock, so no tick comes between */
+static VOID
+StTestStaleTemporary(PIP_INTERFACE Eth)
+{
+    struct netif *En = Eth->TCPContext;
+    UCHAR Opts[64], P[16] = { 0x20, 0x01, 0x0d, 0xb8, 0x74, 0x00 }, Mac[6] = { 0x02, 0x00, 0x00, 0x7a, 0x00, 0x0c };
+    ip6_addr_t R, X, Filler;
+    ULONG i, n, Made = 0;
+    USHORT Filled = 0;
+    s8_t j, T = -1;
+    BOOLEAN Kept = FALSE;
+    CHAR Detail[160];
+
+    if (!TCP6UseTemporaryAddresses)
+        return;
+    ip6addr_aton("fe80::7a:c", &R);
+    ip6addr_aton("2001:db8:75::1", &X);
+    n = StOptSlla(Opts, Mac);
+    n += StOptPrefix(Opts + n, 3600, 1800, P);
+    StInject(Eth, StRa(&R, 0, 0, 0, Opts, n), FALSE);
+
+    for (i = 0; i < 40 && T < 0; i++)
+    {
+        StSleep(250);
+        LOCK_TCPIP_CORE();
+        for (j = 1; j < LWIP_IPV6_NUM_ADDRESSES && T < 0; j++)
+        {
+            if (!ip6_addr_isinvalid(netif_ip6_addr_state(En, j)) && StSame(netif_ip6_addr(En, j)->addr, P, 6) &&
+                TCP6TemporarySlot(En, j))
+                T = j;
+        }
+        UNLOCK_TCPIP_CORE();
+    }
+
+    if (T >= 0)
+    {
+        LOCK_TCPIP_CORE();
+        /* deleted as addr6.c deletes one, then another address takes the slot */
+        netif_ip6_addr_set_valid_life(En, T, 0);
+        netif_ip6_addr_set_pref_life(En, T, 0);
+        netif_ip6_addr_set_state(En, T, IP6_ADDR_INVALID);
+        netif_ip6_addr_set(En, T, &X);
+        netif_ip6_addr_set_valid_life(En, T, 3600);
+        netif_ip6_addr_set_pref_life(En, T, 3600);
+        netif_ip6_addr_set_state(En, T, IP6_ADDR_PREFERRED);
+        /* no free slot left */
+        for (j = 1; j < LWIP_IPV6_NUM_ADDRESSES; j++)
+        {
+            if (!ip6_addr_isinvalid(netif_ip6_addr_state(En, j)))
+                continue;
+            IP6_ADDR(&Filler, PP_HTONL(0x20010db8), PP_HTONL(0x00760000), 0, PP_HTONL((u32_t)j));
+            ip6_addr_assign_zone(&Filler, IP6_UNICAST, En);
+            netif_ip6_addr_set(En, j, &Filler);
+            netif_ip6_addr_set_valid_life(En, j, 3600);
+            netif_ip6_addr_set_pref_life(En, j, 3600);
+            netif_ip6_addr_set_state(En, j, IP6_ADDR_PREFERRED);
+            Filled |= (USHORT)(1 << j);
+        }
+        /* room is made until no temporary address is left to give way */
+        while (Made < LWIP_IPV6_NUM_ADDRESSES && TCP6TemporaryMakeRoom(En))
+            Made++;
+        Kept = ip6_addr_isvalid(netif_ip6_addr_state(En, T)) && ip6_addr_zoneless_eq(netif_ip6_addr(En, T), &X);
+        /* the test addresses go */
+        for (j = 1; j < LWIP_IPV6_NUM_ADDRESSES; j++)
+        {
+            if (j != T && !(Filled & (1 << j)))
+                continue;
+            netif_ip6_addr_set_valid_life(En, j, 0);
+            netif_ip6_addr_set_pref_life(En, j, 0);
+            netif_ip6_addr_set_state(En, j, IP6_ADDR_INVALID);
+        }
+        UNLOCK_TCPIP_CORE();
+    }
+    _snprintf(Detail, sizeof(Detail), "slot %d, %lu temporary addresses gave way", (int)T, Made);
+    StResult(T >= 0 && Kept, "slots: an address in the slot of a deleted temporary address does not give way as one",
+             Detail);
+
+    /* the test prefix goes */
+    n = StOptPrefix(Opts, 0, 0, P);
+    StInject(Eth, StRa(&R, 0, 0, 0, Opts, n), FALSE);
+    LOCK_TCPIP_CORE();
+    for (j = 1; j < LWIP_IPV6_NUM_ADDRESSES; j++)
+    {
+        if (!ip6_addr_isinvalid(netif_ip6_addr_state(En, j)) && StSame(netif_ip6_addr(En, j)->addr, P, 6))
+        {
+            netif_ip6_addr_set_state(En, j, IP6_ADDR_INVALID);
+            netif_ip6_addr_set_valid_life(En, j, 0);
+            netif_ip6_addr_set_pref_life(En, j, 0);
+        }
+    }
+    UNLOCK_TCPIP_CORE();
+}
+
 static VOID NTAPI
 StThread(PVOID Context)
 {
@@ -3081,6 +3176,7 @@ StThread(PVOID Context)
     StTestTemporary(Eth);
     StTestSlots(Eth);
     StTestDupHold(Eth);
+    StTestStaleTemporary(Eth);
 
     /* IPv4 to the interface's own address takes the same way (a frame to our own MAC): the control for the
        link-local timings above */

@@ -374,6 +374,16 @@ Temp6Release(PTEMP6_ENTRY Entry)
     netif_ip6_addr_set_state(netif, Slot, IP6_ADDR_INVALID);
 }
 
+/* Whether Entry is one of netif whose slot still holds its temporary address. Between two timer ticks (Temp6Prune)
+   an entry can be stale: its address was deleted or made a configured one (addr6.c) and the slot may hold another
+   address since, which must not be taken for a temporary one */
+static
+BOOLEAN
+Temp6Live(PTEMP6_ENTRY Entry, struct netif *netif)
+{
+    return Entry->Netif == netif && Temp6Find(netif, Entry->Slot) == Entry;
+}
+
 /* Makes room: a duplicated temporary address of netif (no one can use it), else the deprecated one with the least
    valid lifetime left that no TCP connection, listener or UDP socket uses, goes. FALSE: there is none */
 static
@@ -388,7 +398,7 @@ Temp6Evict(struct netif *netif)
     {
         PTEMP6_ENTRY Entry = &Temp6Table[i];
 
-        if (Entry->Netif == netif && ip6_addr_isduplicated(netif_ip6_addr_state(netif, Entry->Slot)))
+        if (Temp6Live(Entry, netif) && ip6_addr_isduplicated(netif_ip6_addr_state(netif, Entry->Slot)))
         {
             Temp6Release(Entry);
             return TRUE;
@@ -400,7 +410,7 @@ Temp6Evict(struct netif *netif)
         PTEMP6_ENTRY Entry = &Temp6Table[i];
         u32_t Life;
 
-        if (Entry->Netif != netif || !ip6_addr_isdeprecated(netif_ip6_addr_state(netif, Entry->Slot)))
+        if (!Temp6Live(Entry, netif) || !ip6_addr_isdeprecated(netif_ip6_addr_state(netif, Entry->Slot)))
             continue;
         Life = netif_ip6_addr_valid_life(netif, Entry->Slot);
         if (Best && Life >= BestLife)
@@ -438,7 +448,7 @@ TCP6TemporaryMakeRoom(struct netif *netif)
     {
         PTEMP6_ENTRY Entry = &Temp6Table[i];
 
-        if (Entry->Netif != netif || ip6_addr_isinvalid(netif_ip6_addr_state(netif, Entry->Slot)))
+        if (!Temp6Live(Entry, netif))
             continue;
         if (Best && Entry->Created <= Best->Created)
             continue;
