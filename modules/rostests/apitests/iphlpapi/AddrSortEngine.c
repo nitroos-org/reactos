@@ -453,7 +453,7 @@ static void TestOtherPolicy(void)
  * The source address selection of the stack itself (AddrSortSelectSource, the function tcpip.sys calls for every
  * IPv6 packet it sends, and GetBestRoute2 for its source answer): the addresses of one interface, each "address"
  * or "address/flags" with d = deprecated, t = temporary, s = skip-as-source. Expect: the index of the source, -1
- * none. 3fff::/20 (RFC 9637) stands for a global prefix of label 1 (2001:db8::/32 is in 2001::/32, label 5).
+ * none. 3fff::/20 (RFC 9637) stands for a global prefix of label 1.
  */
 static void CheckPick(const char *Label, const ADDRSORT_POLICY_TABLE *Policy, const char **Addrs, ULONG Count,
                       const char *Dest, LONG Expect)

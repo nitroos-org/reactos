@@ -147,6 +147,26 @@ static BOOL FindAddress(ULONG IfIndex, const char *Address, UNICAST_ROW6 *Out)
 #define ORIGIN_RANDOM   5
 
 /* Whether the interface has a preferred temporary address (SuffixOrigin Random, RFC 8981), and whether Source is one */
+/* A global address of the default policy table's label 1 (::/0): not link-local, site-local, unique local, 6to4,
+   Teredo (2001::/32) or 3ffe::/16, so RFC 6724 rules 2 and 6 rank it as they rank 2001:db8:99::5 */
+static BOOL GlobalLabelOne(const UCHAR *A)
+{
+    if (A[0] == 0xfe && ((A[1] & 0xc0) == 0x80 || (A[1] & 0xc0) == 0xc0))
+        return FALSE;
+    if ((A[0] & 0xfe) == 0xfc)
+        return FALSE;
+    if (A[0] == 0x20 && A[1] == 0x02)
+        return FALSE;
+    if (A[0] == 0x20 && A[1] == 0x01 && A[2] == 0 && A[3] == 0)
+        return FALSE;
+    if (A[0] == 0x3f && A[1] == 0xfe)
+        return FALSE;
+    return TRUE;
+}
+
+/* A preferred temporary address of the interface that competes with the configured one for a destination in its
+   prefix: of the same scope and label, so only rule 7 tells them apart (a temporary address of a site-local SLAAC
+   prefix, as QEMU's user network gives, loses at rule 2, one of another label at rule 6) */
 static BOOL HasTemporary(ULONG IfIndex, const SOCKADDR_INET *Source, BOOL *SourceIsTemporary)
 {
     UNICAST_TABLE6 *Table = NULL;
@@ -160,7 +180,8 @@ static BOOL HasTemporary(ULONG IfIndex, const SOCKADDR_INET *Source, BOOL *Sourc
     {
         const UNICAST_ROW6 *Row = &Table->Table[i];
 
-        if (Row->InterfaceIndex != IfIndex || Row->SuffixOrigin != ORIGIN_RANDOM || Row->DadState != DAD_PREFERRED)
+        if (Row->InterfaceIndex != IfIndex || Row->SuffixOrigin != ORIGIN_RANDOM || Row->DadState != DAD_PREFERRED ||
+            !GlobalLabelOne(Row->Address.Ipv6.sin6_addr.u.Byte))
             continue;
         Has = TRUE;
         if (Source->si_family == AF_INET6 && !memcmp(&Source->Ipv6.sin6_addr, &Row->Address.Ipv6.sin6_addr, 16))
@@ -378,7 +399,8 @@ static void TestAddress(ULONG IfIndex)
         BOOL IsTemporary, Has = HasTemporary(IfIndex, &Source, &IsTemporary);
 
         /* RFC 6724 5: rule 7 (a temporary address, of the SLAAC prefix when the interface has one) comes before rule 8
-           (the longest common prefix with the destination), so with a temporary address the source is that one */
+           (the longest common prefix with the destination), so with a temporary address of the same scope and label
+           (rules 2 and 6 come first) the source is that one */
         if (Has)
             ok(IsTemporary, "source is not the temporary address\n");
         else
