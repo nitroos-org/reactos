@@ -98,6 +98,7 @@ extern void func_RtlGenRandom(void);
 extern void func_RtlGenRandomChild(void);
 extern void func_KsecUnknownIoctl(void);
 extern void func_RngKnownAnswer(void);
+extern void func_RngCallersFailure(void);
 extern void func_SaferIdentifyLevel(void);
 extern void func_TokenDefaultDacl(void);
 extern void func_TokenElevation(void);
@@ -246,6 +247,7 @@ const struct test winetest_testlist[] =
     { "RtlGenRandomChild", func_RtlGenRandomChild },
     { "KsecUnknownIoctl", func_KsecUnknownIoctl },
     { "RngKnownAnswer", func_RngKnownAnswer },
+    { "RngCallersFailure", func_RngCallersFailure },
     { "SaferIdentifyLevel", func_SaferIdentifyLevel },
     { "TokenDefaultDacl", func_TokenDefaultDacl },
     { "TokenElevation", func_TokenElevation },

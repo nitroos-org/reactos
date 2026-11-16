@@ -80,6 +80,7 @@ list(APPEND SOURCE
     RegGetValue.c
     RtlEncryptMemory.c
     RtlGenRandom.c
+    RngCallersFailure.c
     RngKnownAnswer.c
     SaferIdentifyLevel.c
     TokenDefaultDacl.c
