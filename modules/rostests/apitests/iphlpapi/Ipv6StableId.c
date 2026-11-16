@@ -417,6 +417,12 @@ START_TEST(Ipv6StableId)
             TextLength = ARRAYSIZE(Text);
             WSAAddressToStringW(U->Address.lpSockaddr, U->Address.iSockaddrLength, NULL, Text, &TextLength);
             trace("adapter %lu address %ls origins %d/%d\n", A->IfIndex, Text, U->PrefixOrigin, U->SuffixOrigin);
+            /* a temporary address (RFC 8981) has a random identifier, not the stable one: Ipv6Temporary checks it */
+            if (U->SuffixOrigin == IpSuffixOriginRandom && !IsLinkLocal)
+            {
+                ok(!Eui, "%ls: a temporary address with the MAC's EUI-64\n", Text);
+                continue;
+            }
             Checked++;
             if (IsLinkLocal)
             {

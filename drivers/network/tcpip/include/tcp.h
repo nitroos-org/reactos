@@ -262,6 +262,32 @@ struct netif;
 BOOLEAN
 TCP6SetStableLinkLocal(struct netif *netif);
 
+/* Random identifiers for temporary addresses (iid6.c, any IRQL), and the RFC 5453 reserved ones */
+VOID
+TCP6RandomIdentifier(UCHAR Iid[8]);
+BOOLEAN
+TCP6ReservedIdentifier(const UCHAR Iid[8]);
+
+/* Temporary addresses (ip/transport/tcp/temp6.c, RFC 8981), behind Tcpip6\Parameters\UseTemporaryAddresses: the
+   settings (read by TCP6ReadIdentifierSettings), whether a slot holds one, a DAD conflict on one, the interface that
+   goes, and the self-test's way to age one (core lock held but for the settings) */
+extern BOOLEAN TCP6UseTemporaryAddresses;
+extern ULONG TCP6TempMaxValid, TCP6TempMaxPreferred, TCP6TempRegenerate, TCP6TempMaxRandom, TCP6TempMaxDad;
+extern ULONG TCP6TempDesync;
+
+BOOLEAN
+TCP6ReadTemporarySettings(VOID);
+VOID
+TCP6TemporaryStart(VOID);
+BOOLEAN
+TCP6TemporarySlot(struct netif *netif, signed char Slot);
+BOOLEAN
+TCP6TemporaryDadFailed(struct netif *netif, signed char Index, int *Result);
+VOID
+TCP6RemoveTemporaryOfNetif(struct netif *netif);
+BOOLEAN
+TCP6TemporaryAge(struct netif *netif, signed char Slot, ULONG Seconds);
+
 /* Addresses DAD found in use that were replaced by a new identifier, kept to be reported as duplicates (iid6.c, core
    lock held): at most TCP6_DUP_MAX over all interfaces */
 struct ip6_addr;

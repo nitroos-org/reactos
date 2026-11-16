@@ -593,6 +593,7 @@ LibTCPListenerInput6(void)
 #define TCP6_PREFIX_RA          4
 #define TCP6_SUFFIX_WELLKNOWN   2
 #define TCP6_SUFFIX_LINKLAYER   4
+#define TCP6_SUFFIX_RANDOM      5
 
 /* (with LWIP_IPV6_NUM_ADDRESSES 8 the answer for 256 interfaces would pass the cap below) */
 #define TCP6_MAX_TABLE_INTERFACES 128
@@ -704,6 +705,13 @@ TCPQueryIpv6Table(PVOID Out, ULONG OutSize)
                 Row->PrefixOrigin = Info.PrefixOrigin;
                 Row->SuffixOrigin = Info.SuffixOrigin;
                 Row->Flags = Info.Flags;
+            }
+            else if (TCP6TemporarySlot(netif, a))
+            {
+                /* a temporary address (temp6.c): Windows reports RouterAdvertisement / Random */
+                Row->PrefixLength = 64;
+                Row->PrefixOrigin = TCP6_PREFIX_RA;
+                Row->SuffixOrigin = TCP6_SUFFIX_RANDOM;
             }
             else if (ip6_addr_isloopback(Address))
             {

@@ -123,6 +123,7 @@ TCP6RemoveAddressesOfNetif(struct netif *netif)
     ULONG i;
 
     TCP6DuplicateClear(netif);
+    TCP6RemoveTemporaryOfNetif(netif);
     for (i = 0; i < ADDR6_MAX && Addr6Count; i++)
     {
         if (Addr6Table[i].Netif == netif)

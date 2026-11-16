@@ -2187,7 +2187,9 @@ StTestRaExtras(PIP_INTERFACE Eth)
             LOCK_TCPIP_CORE();
             for (k = 1; k < LWIP_IPV6_NUM_ADDRESSES; k++)
             {
-                if (!ip6_addr_isinvalid(netif_ip6_addr_state(En, (s8_t)k)) && StSame(netif_ip6_addr(En, (s8_t)k)->addr, P, 8))
+                /* the address stateless autoconfiguration formed, not its temporary address (temp6.c) */
+                if (!ip6_addr_isinvalid(netif_ip6_addr_state(En, (s8_t)k)) && StSame(netif_ip6_addr(En, (s8_t)k)->addr, P, 8) &&
+                    !TCP6TemporarySlot(En, (s8_t)k))
                 {
                     Found = (s8_t)k;
                     State = netif_ip6_addr_state(En, Found);
@@ -2221,7 +2223,7 @@ StTestRaExtras(PIP_INTERFACE Eth)
                 Addr = (PTCP_IPV6_ADDRESS_ROW)((PTCP_IPV6_INTERFACE_ROW)(Table + 1) + Table->InterfaceCount);
                 for (i = 0; i < Table->AddressCount; i++)
                 {
-                    if (StSame(Addr[i].Address, P, 8))
+                    if (StSame(Addr[i].Address, P, 8) && Addr[i].SuffixOrigin != 5)
                     {
                         Pref = Addr[i].PreferredLifetime;
                         State = (u8_t)Addr[i].DadState;
@@ -2234,15 +2236,18 @@ StTestRaExtras(PIP_INTERFACE Eth)
             StResult(State == 3 && Pref == 0, "prefix change: the address table reports Deprecated and a preferred lifetime of 0", Detail);
         }
 
-        /* take the test address and the on-link prefix away */
+        /* take the test addresses (with a temporary one) and the on-link prefix away */
         n = StOptPrefix(Opts, 0, 0, P);
         StInject(Eth, StRa(&R1, 0, 0, 0, Opts, n), FALSE);
         LOCK_TCPIP_CORE();
-        if (Found >= 0)
+        for (k = 1; k < LWIP_IPV6_NUM_ADDRESSES; k++)
         {
-            netif_ip6_addr_set_state(En, Found, IP6_ADDR_INVALID);
-            netif_ip6_addr_set_valid_life(En, Found, 0);
-            netif_ip6_addr_set_pref_life(En, Found, 0);
+            if (!ip6_addr_isinvalid(netif_ip6_addr_state(En, (s8_t)k)) && StSame(netif_ip6_addr(En, (s8_t)k)->addr, P, 8))
+            {
+                netif_ip6_addr_set_state(En, (s8_t)k, IP6_ADDR_INVALID);
+                netif_ip6_addr_set_valid_life(En, (s8_t)k, 0);
+                netif_ip6_addr_set_pref_life(En, (s8_t)k, 0);
+            }
         }
         UNLOCK_TCPIP_CORE();
     }
@@ -2251,6 +2256,238 @@ StTestRaExtras(PIP_INTERFACE Eth)
             LWIP_ND6_NUM_NEIGHBORS, LWIP_ND6_NUM_DESTINATIONS, LWIP_ND6_NUM_PREFIXES, LWIP_ND6_NUM_ROUTERS,
             (UINT)sizeof(struct nd6_neighbor_cache_entry), (UINT)sizeof(struct nd6_destination_cache_entry),
             (UINT)sizeof(struct nd6_prefix_list_entry), (UINT)sizeof(struct nd6_router_list_entry));
+}
+
+/* ---- temporary addresses (temp6.c, RFC 8981) ---- */
+
+/* The slots of En in the 64-bit prefix P (core lock held): the public address's (*Public, -1: none) and the temporary
+   ones (Temp[*Count]) */
+static VOID
+StPrefixSlots(struct netif *En, const UCHAR *P, s8_t *Public, s8_t *Temp, ULONG *Count)
+{
+    s8_t k;
+
+    *Public = -1;
+    *Count = 0;
+    for (k = 1; k < LWIP_IPV6_NUM_ADDRESSES; k++)
+    {
+        if (ip6_addr_isinvalid(netif_ip6_addr_state(En, k)) || !StSame(netif_ip6_addr(En, k)->addr, P, 8))
+            continue;
+        if (TCP6TemporarySlot(En, k))
+            Temp[(*Count)++] = k;
+        else
+            *Public = k;
+    }
+}
+
+/* The row of Address in the address table: its origins; FALSE: no row */
+static BOOLEAN
+StAddressRow(const ip6_addr_t *Address, PULONG PrefixOrigin, PULONG SuffixOrigin, PULONG PrefixLength)
+{
+    ULONG Size = 16 * 1024, i;
+    PTCP_IPV6_TABLE_HEADER Table = ExAllocatePoolWithTag(NonPagedPool, Size, ST_TAG);
+    PTCP_IPV6_ADDRESS_ROW Addr;
+    BOOLEAN Found = FALSE;
+
+    if (!Table)
+        return FALSE;
+    if (TCPQueryIpv6Table(Table, Size) <= Size)
+    {
+        Addr = (PTCP_IPV6_ADDRESS_ROW)((PTCP_IPV6_INTERFACE_ROW)(Table + 1) + Table->InterfaceCount);
+        for (i = 0; i < Table->AddressCount && !Found; i++)
+        {
+            if (StSame(Addr[i].Address, Address->addr, 16))
+            {
+                *PrefixOrigin = Addr[i].PrefixOrigin;
+                *SuffixOrigin = Addr[i].SuffixOrigin;
+                *PrefixLength = Addr[i].PrefixLength;
+                Found = TRUE;
+            }
+        }
+    }
+    ExFreePoolWithTag(Table, ST_TAG);
+    return Found;
+}
+
+static VOID
+StTestTemporary(PIP_INTERFACE Eth)
+{
+    struct netif *En = Eth->TCPContext;
+    UCHAR Opts[64], P[16] = { 0x20, 0x01, 0x0d, 0xb8, 0x70, 0x09 }, Mac[6] = { 0x02, 0x00, 0x00, 0x7a, 0x00, 0x09 };
+    ip6_addr_t R, Dest, First, Second, Now, Stable;
+    s8_t Public = -1, Temp[LWIP_IPV6_NUM_ADDRESSES], k;
+    ULONG Count = 0, i, n, Valid = 0, Pref = 0, MaxPref, PrefixOrigin = 0, SuffixOrigin = 0, PrefixLength = 0;
+    u8_t State = 0, NewPreferred = 0;
+    const ip_addr_t *Source;
+    CHAR Text[IP6ADDR_STRLEN_MAX], Text2[IP6ADDR_STRLEN_MAX], Detail[220];
+    BOOLEAN Ok, Same;
+    UCHAR Counter;
+
+    ip6addr_aton("fe80::7a:9", &R);
+    ip6addr_aton("2001:db8:7009::99", &Dest);
+
+    n = StOptSlla(Opts, Mac);
+    n += StOptPrefix(Opts + n, 3600, 1800, P);
+    StInject(Eth, StRa(&R, 0, 0, 0, Opts, n), FALSE);
+
+    if (!TCP6UseTemporaryAddresses)
+    {
+        StSleep(3000);
+        LOCK_TCPIP_CORE();
+        StPrefixSlots(En, P, &Public, Temp, &Count);
+        UNLOCK_TCPIP_CORE();
+        _snprintf(Detail, sizeof(Detail), "public slot %d, %lu temporary", (int)Public, Count);
+        StResult(Public >= 0 && Count == 0, "temporary: UseTemporaryAddresses=0, a SLAAC prefix gets no temporary address", Detail);
+        goto cleanup;
+    }
+
+    /* --- one temporary address per prefix, preferred, with a random identifier --- */
+    for (i = 0; i < 50; i++)
+    {
+        LOCK_TCPIP_CORE();
+        StPrefixSlots(En, P, &Public, Temp, &Count);
+        Ok = Public >= 0 && ip6_addr_ispreferred(netif_ip6_addr_state(En, Public)) && Count == 1 &&
+             ip6_addr_ispreferred(netif_ip6_addr_state(En, Temp[0]));
+        UNLOCK_TCPIP_CORE();
+        if (Ok)
+            break;
+        StSleep(100);
+    }
+    _snprintf(Detail, sizeof(Detail), "after %lu ms: public slot %d, %lu temporary", i * 100, (int)Public, Count);
+    StResult(Ok, "temporary: a SLAAC prefix gets one temporary address next to its public one, both preferred", Detail);
+    if (!Ok)
+        goto cleanup;
+
+    MaxPref = TCP6TempMaxPreferred - TCP6TempDesync;
+    LOCK_TCPIP_CORE();
+    ip6_addr_copy(First, *netif_ip6_addr(En, Temp[0]));
+    ip6_addr_copy(Stable, *netif_ip6_addr(En, Public));
+    Valid = netif_ip6_addr_valid_life(En, Temp[0]);
+    Pref = netif_ip6_addr_pref_life(En, Temp[0]);
+    Same = FALSE;
+    for (Counter = 0; Counter <= 3; Counter++)
+    {
+        ip6_addr_t Want;
+
+        if (TCP6StableAddress(En, (const ip6_addr_t *)&Stable, Counter, &Want) && ip6_addr_zoneless_eq(&Want, &First))
+            Same = TRUE;
+    }
+    Source = ip6_select_source_address(En, &Dest);
+    UNLOCK_TCPIP_CORE();
+    ip6addr_ntoa_r(&First, Text, sizeof(Text));
+    ip6addr_ntoa_r(&Stable, Text2, sizeof(Text2));
+    _snprintf(Detail, sizeof(Detail), "temporary %s public %s; valid %lu (<= 3600), preferred %lu (<= min(1800, %lu))", Text, Text2,
+              Valid, Pref, MaxPref);
+    StResult(!ip6_addr_zoneless_eq(&First, &Stable) && !Same && Valid <= 3600 && Valid >= 3590 && Pref <= min(1800, MaxPref) &&
+             Pref + 10 >= min(1800, MaxPref),
+             "temporary: its identifier is not the stable one, its lifetimes are the prefix's within the temporary maximums", Detail);
+
+    Ok = StAddressRow(&First, &PrefixOrigin, &SuffixOrigin, &PrefixLength) && PrefixOrigin == 4 && SuffixOrigin == 5 &&
+         PrefixLength == 64;
+    _snprintf(Detail, sizeof(Detail), "prefix origin %lu, suffix origin %lu, /%lu", PrefixOrigin, SuffixOrigin, PrefixLength);
+    StResult(Ok, "temporary: the address table reports RouterAdvertisement / Random", Detail);
+    Ok = StAddressRow(&Stable, &PrefixOrigin, &SuffixOrigin, &PrefixLength) && PrefixOrigin == 4 && SuffixOrigin == 4;
+    _snprintf(Detail, sizeof(Detail), "prefix origin %lu, suffix origin %lu", PrefixOrigin, SuffixOrigin);
+    StResult(Ok, "temporary: the public address stays RouterAdvertisement / Link", Detail);
+
+    ip6addr_ntoa_r(Source ? ip_2_ip6(Source) : &Dest, Text2, sizeof(Text2));
+    StResult(Source && ip6_addr_zoneless_eq(ip_2_ip6(Source), &First),
+             "temporary: source address selection prefers it (RFC 6724 rule 7)", Source ? Text2 : "no source");
+
+    /* --- regeneration RegenerateTime before it is deprecated, and DAD of the new one --- */
+    LOCK_TCPIP_CORE();
+    Ok = TCP6TemporaryAge(En, Temp[0], MaxPref > TCP6TempRegenerate ? MaxPref - TCP6TempRegenerate : 0);
+    UNLOCK_TCPIP_CORE();
+    k = -1;
+    for (i = 0; Ok && i < 40 && k < 0; i++)
+    {
+        StSleep(100);
+        LOCK_TCPIP_CORE();
+        StPrefixSlots(En, P, &Public, Temp, &Count);
+        for (n = 0; n < Count; n++)
+        {
+            if (!ip6_addr_zoneless_eq(netif_ip6_addr(En, Temp[n]), &First) &&
+                ip6_addr_istentative(netif_ip6_addr_state(En, Temp[n])))
+            {
+                k = Temp[n];
+                ip6_addr_copy(Second, *netif_ip6_addr(En, k));
+            }
+        }
+        UNLOCK_TCPIP_CORE();
+    }
+    _snprintf(Detail, sizeof(Detail), "after %lu ms, %lu temporary addresses", i * 100, Count);
+    StResult(k >= 0, "temporary: a new one is made RegenerateTime before the current one is deprecated", Detail);
+    if (k < 0)
+        goto cleanup;
+
+    /* another node has the new one: it gets another random identifier and DAD again */
+    StInject(Eth, StNa(&R, &Second), FALSE);
+    LOCK_TCPIP_CORE();
+    ip6_addr_copy(Now, *netif_ip6_addr(En, k));
+    State = netif_ip6_addr_state(En, k);
+    Ok = TCP6TemporarySlot(En, k) && !ip6_addr_zoneless_eq(&Now, &Second) && StSame(Now.addr, P, 8) && ip6_addr_istentative(State);
+    UNLOCK_TCPIP_CORE();
+    ip6addr_ntoa_r(&Now, Text, sizeof(Text));
+    _snprintf(Detail, sizeof(Detail), "now %s state 0x%x", Text, (UINT)State);
+    StResult(Ok, "temporary: a DAD conflict gives it a new random identifier, tentative again", Detail);
+
+    /* the old one is deprecated when its preferred lifetime ends and stays (valid); the new one is preferred and is the source */
+    for (i = 0; i < 100; i++)
+    {
+        LOCK_TCPIP_CORE();
+        StPrefixSlots(En, P, &Public, Temp, &Count);
+        Ok = FALSE;
+        State = 0;
+        for (n = 0; n < Count; n++)
+        {
+            if (ip6_addr_zoneless_eq(netif_ip6_addr(En, Temp[n]), &First))
+                State = netif_ip6_addr_state(En, Temp[n]);
+        }
+        NewPreferred = ip6_addr_ispreferred(netif_ip6_addr_state(En, k)) ? 1 : 0;
+        Ok = Count == 2 && ip6_addr_isdeprecated(State) && NewPreferred;
+        Source = ip6_select_source_address(En, &Dest);
+        UNLOCK_TCPIP_CORE();
+        if (Ok)
+            break;
+        StSleep(100);
+    }
+    _snprintf(Detail, sizeof(Detail), "after %lu ms: %lu temporary, old state 0x%x, new preferred %u", i * 100, Count, (UINT)State,
+              (UINT)NewPreferred);
+    StResult(Ok, "temporary: the old one is deprecated and kept, the new one preferred", Detail);
+    LOCK_TCPIP_CORE();
+    ip6_addr_copy(Now, *netif_ip6_addr(En, k));
+    UNLOCK_TCPIP_CORE();
+    StResult(Ok && Source && ip6_addr_zoneless_eq(ip_2_ip6(Source), &Now), "temporary: the source is the new one", NULL);
+
+    /* --- the router deprecates the prefix: its temporary addresses follow, no new one is made --- */
+    n = StOptSlla(Opts, Mac);
+    n += StOptPrefix(Opts + n, 3600, 0, P);
+    StInject(Eth, StRa(&R, 0, 0, 0, Opts, n), FALSE);
+    StSleep(3000);
+    LOCK_TCPIP_CORE();
+    StPrefixSlots(En, P, &Public, Temp, &Count);
+    Ok = Public >= 0 && ip6_addr_isdeprecated(netif_ip6_addr_state(En, Public)) && Count == 2;
+    for (n = 0; n < Count; n++)
+        Ok = Ok && ip6_addr_isdeprecated(netif_ip6_addr_state(En, Temp[n]));
+    UNLOCK_TCPIP_CORE();
+    _snprintf(Detail, sizeof(Detail), "%lu temporary", Count);
+    StResult(Ok, "temporary: a prefix advertised with preferred lifetime 0 deprecates them, none is made", Detail);
+
+cleanup:
+    /* the test prefix and its addresses go */
+    n = StOptPrefix(Opts, 0, 0, P);
+    StInject(Eth, StRa(&R, 0, 0, 0, Opts, n), FALSE);
+    LOCK_TCPIP_CORE();
+    for (k = 1; k < LWIP_IPV6_NUM_ADDRESSES; k++)
+    {
+        if (!ip6_addr_isinvalid(netif_ip6_addr_state(En, k)) && StSame(netif_ip6_addr(En, k)->addr, P, 8))
+        {
+            netif_ip6_addr_set_state(En, k, IP6_ADDR_INVALID);
+            netif_ip6_addr_set_valid_life(En, k, 0);
+            netif_ip6_addr_set_pref_life(En, k, 0);
+        }
+    }
+    UNLOCK_TCPIP_CORE();
 }
 
 static VOID NTAPI
@@ -2351,6 +2588,7 @@ StThread(PVOID Context)
     }
     StTestStableIds(Eth);
     StTestRaExtras(Eth);
+    StTestTemporary(Eth);
 
     /* IPv4 to the interface's own address takes the same way (a frame to our own MAC): the control for the
        link-local timings above */
