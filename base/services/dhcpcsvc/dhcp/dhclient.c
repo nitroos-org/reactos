@@ -101,6 +101,7 @@ int		 res_hnok(const char *dn);
 char		*option_as_string(unsigned int code, unsigned char *data, int len);
 int		 fork_privchld(int, int);
 int              check_arp( struct interface_info *ip, struct client_lease *lp );
+static VOID      DeleteLeftoverAddresses(PDHCP_ADAPTER Adapter, IPAddr Keep);
 
 #define	ADVANCE(x, n) (x += ROUNDUP((n)->sa_len))
 
@@ -577,6 +578,10 @@ void setup_adapter( PDHCP_ADAPTER Adapter, struct client_lease *new_lease ) {
         DeleteIPAddress( Adapter->NteContext );
         Adapter->NteContext = 0;
     }
+
+    /* The lease replaces an automatic private or alternate configuration address that an earlier run of this service
+       left on the adapter (a stop removes nothing): this run has no context for it, so the deletion above misses it */
+    DeleteLeftoverAddresses(Adapter, *((IPAddr*)new_lease->address.iabuf));
 
     /* Set up our default router if we got one from the DHCP server */
     if( new_lease->options[DHO_SUBNET_MASK].len == (int)sizeof(ULONG) ) {
@@ -1206,12 +1211,13 @@ send_discover(void *ipp)
 }
 
 /*
- * Look for an automatic private address (169.254.x.y) the stack already holds on the adapter, left by an earlier run of
- * this service (a stop leaves the address in place, as it does on Windows). Returns TRUE with the address (network
- * order) and its context (what DeleteIPAddress takes) when there is one.
+ * Look for an address the stack already holds on the adapter, left by an earlier run of this service (a stop leaves the
+ * address in place, as it does on Windows): the address Want (network order), or with Want == INADDR_ANY an automatic
+ * private address (169.254.x.y). Returns TRUE with the address (network order) and its context (what DeleteIPAddress
+ * takes) when there is one.
  */
 static BOOL
-FindExistingAutoAddress(DWORD IfIndex, IPAddr *Address, ULONG *Context)
+FindExistingAddress(DWORD IfIndex, IPAddr Want, IPAddr *Address, ULONG *Context)
 {
     PIP_ADAPTER_INFO Info = NULL, Cur;
     PIP_ADDR_STRING Entry;
@@ -1248,7 +1254,8 @@ FindExistingAutoAddress(DWORD IfIndex, IPAddr *Address, ULONG *Context)
         {
             IPAddr Addr = inet_addr(Entry->IpAddress.String);
 
-            if (Addr != INADDR_NONE && (ntohl(Addr) & 0xFFFF0000) == 0xA9FE0000)
+            if (Addr != INADDR_NONE &&
+                (Want != INADDR_ANY ? Addr == Want : (ntohl(Addr) & 0xFFFF0000) == 0xA9FE0000))
             {
                 *Address = Addr;
                 *Context = Entry->Context;
@@ -1260,6 +1267,54 @@ FindExistingAutoAddress(DWORD IfIndex, IPAddr *Address, ULONG *Context)
 
     free(Info);
     return Found;
+}
+
+/*
+ * Delete what an earlier run of this service left on the adapter and the current configuration replaces: automatic
+ * private addresses and the address of the alternate configuration, except Keep (network order), the address this run
+ * uses. Without this a lease bound right after a restart (or an alternate configuration applied after one) leaves the
+ * old address next to the new one, and the old one stays the primary address of the interface.
+ */
+static VOID
+DeleteLeftoverAddresses(PDHCP_ADAPTER Adapter, IPAddr Keep)
+{
+    IPAddr Address;
+    ULONG Context;
+    int i;
+
+    /* bounded: a context the stack does not delete must not loop for ever */
+    for (i = 0; i < 4; i++)
+    {
+        if (!FindExistingAddress(Adapter->IfMib.dwIndex, INADDR_ANY, &Address, &Context) || Address == Keep)
+            break;
+        DH_DbgPrint(MID_TRACE,("DHCPCSVC: Deleting the automatic private address of an earlier run\n"));
+        if (DeleteIPAddress(Context) != NO_ERROR)
+            break;
+    }
+
+    if (Adapter->AlternateConfiguration != NULL &&
+        Adapter->AlternateConfiguration->IpAddress != 0 &&
+        htonl(Adapter->AlternateConfiguration->IpAddress) != Keep &&
+        FindExistingAddress(Adapter->IfMib.dwIndex, htonl(Adapter->AlternateConfiguration->IpAddress),
+                            &Address, &Context))
+    {
+        DH_DbgPrint(MID_TRACE,("DHCPCSVC: Deleting the alternate configuration address of an earlier run\n"));
+        DeleteIPAddress(Context);
+
+        /* and its default route: left in place it keeps the default route of the lease from being added */
+        if (Adapter->AlternateConfiguration->DefaultGateway != 0)
+        {
+            MIB_IPFORWARDROW Route;
+
+            ZeroMemory(&Route, sizeof(Route));
+            Route.dwForwardDest = 0;
+            Route.dwForwardMask = 0;
+            Route.dwForwardMetric1 = 1;
+            Route.dwForwardIfIndex = Adapter->IfMib.dwIndex;
+            Route.dwForwardNextHop = htonl(Adapter->AlternateConfiguration->DefaultGateway);
+            DeleteIpForwardEntry(&Route);
+        }
+    }
 }
 
 /*
@@ -1290,7 +1345,7 @@ state_panic(void *ipp)
     struct in_addr addr;
     DWORD dwAddressType = 0;
     ULONG NteContext;
-    BOOL Adopted = FALSE;
+    BOOL Kept = FALSE;
 
     note("No DHCPOFFERS received.");
 
@@ -1312,14 +1367,29 @@ state_panic(void *ipp)
             /* Use the alternate configuration */
             DH_DbgPrint(MID_TRACE,("DHCPCSVC: The alternate configuration will be used.\n"));
 
-            /* IPAddress & SubnetMask */
-            Status = AddIPAddress(htonl(Adapter->AlternateConfiguration->IpAddress),
-                                  htonl(Adapter->AlternateConfiguration->SubnetMask),
-                                  Adapter->IfMib.dwIndex,
-                                  &Adapter->NteContext,
-                                  &Adapter->NteInstance);
-            if (!NT_SUCCESS(Status))
-                DH_DbgPrint(MID_TRACE,("AddIPAddress: %lx\n", Status));
+            /* the alternate configuration replaces an automatic private address of an earlier run */
+            DeleteLeftoverAddresses(Adapter, htonl(Adapter->AlternateConfiguration->IpAddress));
+
+            /* IPAddress & SubnetMask: the address of an earlier run of this service is still on the adapter (a stop
+               removes nothing): keep it instead of adding it again */
+            if (FindExistingAddress(Adapter->IfMib.dwIndex,
+                                    htonl(Adapter->AlternateConfiguration->IpAddress),
+                                    &IpAddress, &NteContext))
+            {
+                DH_DbgPrint(MID_TRACE,("DHCPCSVC: Adopting the alternate configuration address already on the adapter\n"));
+                Adapter->NteContext = NteContext;
+                Adapter->NteInstance = 0;
+            }
+            else
+            {
+                Status = AddIPAddress(htonl(Adapter->AlternateConfiguration->IpAddress),
+                                      htonl(Adapter->AlternateConfiguration->SubnetMask),
+                                      Adapter->IfMib.dwIndex,
+                                      &Adapter->NteContext,
+                                      &Adapter->NteInstance);
+                if (!NT_SUCCESS(Status))
+                    DH_DbgPrint(MID_TRACE,("AddIPAddress: %lx\n", Status));
+            }
 
             /* DefaultGateway */
             if (Adapter->AlternateConfiguration->DefaultGateway != 0)
@@ -1399,14 +1469,18 @@ state_panic(void *ipp)
             /* Generate an automatic private address */
             DH_DbgPrint(MID_TRACE,("DHCPCSVC: An automatic private address will be assigned.\n"));
 
-            /* An address of an earlier run of this service is still on the adapter: keep it (it is not a conflict
-               with itself) instead of probing for and adding another one, as Windows keeps its one address */
-            if (FindExistingAutoAddress(Adapter->IfMib.dwIndex, &IpAddress, &NteContext))
+            /* An address of an earlier run of this service is still on the adapter (a stop removes nothing, as on
+               Windows). Windows keeps that address but probes it again (ARP, source 0.0.0.0) and takes another one when
+               another host has it now. SendARP for an address of this adapter answers "in use" (that was the pile-up),
+               so the old address is taken off and probed as the first candidate: when it is free it is added again (the
+               same address, nothing piles up), else the next candidate is used. */
+            if (FindExistingAddress(Adapter->IfMib.dwIndex, INADDR_ANY, &IpAddress, &NteContext))
             {
-                DH_DbgPrint(MID_TRACE,("DHCPCSVC: Adopting the automatic private address already on the adapter\n"));
-                Adapter->NteContext = NteContext;
+                DH_DbgPrint(MID_TRACE,("DHCPCSVC: Probing the automatic private address already on the adapter\n"));
+                DeleteIPAddress(NteContext);
+                Adapter->NteContext = 0;
                 Adapter->NteInstance = 0;
-                Adopted = TRUE;
+                Kept = TRUE;
             }
 
             /* FIXME: The address generation code sucks */
@@ -1414,34 +1488,38 @@ state_panic(void *ipp)
 
             for (;;)
             {
-                if (!Adopted)
+                if (Kept)
+                {
+                    Kept = FALSE; /* the first candidate is the address kept from the earlier run */
+                }
+                else
                 {
                     address_low = rand();
                     for (i = 0; i < ip->hw_address.hlen; i++)
                         address_low += ip->hw_address.haddr[i];
 
                     IpAddress = htonl(0xA9FE0000 | address_low);  // 169.254.X.X
-
-                    /* Send an ARP request to check if the IP address is already in use */
-                    BufferSize = sizeof(Buffer);
-                    ret = SendARP(IpAddress,
-                                  IpAddress,
-                                  Buffer,
-                                  &BufferSize);
-                    DH_DbgPrint(MID_TRACE,("DHCPCSVC: SendARP returned %lu\n", ret));
-                    if (ret == 0)
-                        continue; /* In use (by this machine's other adapter or by another host): try the next one */
-
-                    /* The IP address is not in use */
-                    DH_DbgPrint(MID_TRACE,("DHCPCSVC: Using automatic private address\n"));
-                    Status = AddIPAddress(IpAddress,
-                                          htonl(0xFFFF0000), // 255.255.0.0
-                                          Adapter->IfMib.dwIndex,
-                                          &Adapter->NteContext,
-                                          &Adapter->NteInstance);
-                    if (!NT_SUCCESS(Status))
-                        DH_DbgPrint(MID_TRACE,("AddIPAddress: %lx\n", Status));
                 }
+
+                /* Send an ARP request to check if the IP address is already in use */
+                BufferSize = sizeof(Buffer);
+                ret = SendARP(IpAddress,
+                              IpAddress,
+                              Buffer,
+                              &BufferSize);
+                DH_DbgPrint(MID_TRACE,("DHCPCSVC: SendARP returned %lu\n", ret));
+                if (ret == 0)
+                    continue; /* In use (by this machine's other adapter or by another host): try the next one */
+
+                /* The IP address is not in use */
+                DH_DbgPrint(MID_TRACE,("DHCPCSVC: Using automatic private address\n"));
+                Status = AddIPAddress(IpAddress,
+                                      htonl(0xFFFF0000), // 255.255.0.0
+                                      Adapter->IfMib.dwIndex,
+                                      &Adapter->NteContext,
+                                      &Adapter->NteInstance);
+                if (!NT_SUCCESS(Status))
+                    DH_DbgPrint(MID_TRACE,("AddIPAddress: %lx\n", Status));
 
                 if (hKey)
                 {
