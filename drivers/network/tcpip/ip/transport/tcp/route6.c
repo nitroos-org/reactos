@@ -420,7 +420,7 @@ LibNd6Timer(void)
     if (Changed)
     {
         Route6Changed();
-        RouteChangeNotify();
+        RouteChangeNotify6();
     }
 }
 
@@ -468,7 +468,7 @@ LibNd6RouteInfo(struct netif *netif, const ip6_addr_t *Router, const u8_t *Prefi
             RtlZeroMemory(Entry, sizeof(*Entry));
             Route6Count--;
             Route6Changed();
-            RouteChangeNotify();
+            RouteChangeNotify6();
         }
         return;
     }
@@ -520,7 +520,7 @@ LibNd6RouteInfo(struct netif *netif, const ip6_addr_t *Router, const u8_t *Prefi
     if (Changed)
     {
         Route6Changed();
-        RouteChangeNotify();
+        RouteChangeNotify6();
     }
 }
 
@@ -547,7 +547,7 @@ TCP6RemoveRoutesOfNetif(struct netif *netif)
     if (Changed)
     {
         Route6Changed();
-        RouteChangeNotify();
+        RouteChangeNotify6();
     }
 }
 
@@ -969,6 +969,6 @@ DispRouteConfig6(PIRP Irp, PIO_STACK_LOCATION IrpSp)
     IPDereferenceInterface(IF);
 
     if (NT_SUCCESS(Status))
-        RouteChangeNotify();
+        RouteChangeNotify6();
     return Status;
 }

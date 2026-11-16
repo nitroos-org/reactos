@@ -254,7 +254,7 @@ LibNd6RaHeader(struct netif *netif, u8_t CurHopLimit, u8_t Flags)
         IF->Ra6Flags = RaFlags;
         /* the interface's M and O flags are part of what NotifyIpInterfaceChange compares; a DHCPv6 client
            watches them */
-        AddrChangeNotify();
+        AddrChangeNotify6();
     }
 }
 

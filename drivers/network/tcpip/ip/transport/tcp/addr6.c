@@ -307,7 +307,7 @@ Addr6ConfigureLocked(struct netif *netif, const TCP_IPV6_ADDRESS_REQUEST *Reques
                    duplicate: deleting it takes it off the list */
                 if (TCP6DuplicateRemove(netif, &Address))
                 {
-                    AddrChangeNotify();
+                    AddrChangeNotify6();
                     return STATUS_SUCCESS;
                 }
                 return STATUS_NOT_FOUND;
@@ -422,8 +422,8 @@ DispAddressConfig6(PIRP Irp, PIO_STACK_LOCATION IrpSp)
     /* a change without a state change made no interface event: the prefix length, origins or lifetimes are new */
     if (NT_SUCCESS(Status) && Request.Operation == TCP_IPV6_CONFIG_SET)
     {
-        AddrChangeNotify();
-        RouteChangeNotify();
+        AddrChangeNotify6();
+        RouteChangeNotify6();
     }
     return Status;
 }

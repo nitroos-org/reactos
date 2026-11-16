@@ -47,13 +47,19 @@
     _TCP_CTL_CODE(16, METHOD_BUFFERED, FILE_WRITE_ACCESS)
 
 #ifdef __REACTOS__
-/* Pends until the IPv4 address table changes (no input, no output) */
+/* Pends until the address table changes. Input (optional): a ULONG mask of the address families the request waits
+   for, TCP_CHANGE_FAMILY_IPV4 and/or TCP_CHANGE_FAMILY_IPV6; without input it waits for IPv4 changes only, as
+   NotifyAddrChange and an AF_INET socket do on Windows. Output (optional): a ULONG with the families that changed
+   (the part of the input mask), written when the output buffer holds it */
 #define IOCTL_IP_ADDCHANGE_NOTIFY_REQUEST \
     _TCP_CTL_CODE(0x17, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define TCP_CHANGE_FAMILY_IPV4  0x1
+#define TCP_CHANGE_FAMILY_IPV6  0x2
 /* Completes the waiting IOCTL_IP_ADDCHANGE_NOTIFY_REQUESTs of the file object with STATUS_CANCELLED */
 #define IOCTL_IP_ADDCHANGE_CANCEL_REQUEST \
     _TCP_CTL_CODE(0x18, METHOD_BUFFERED, FILE_ANY_ACCESS)
-/* Pends until the IPv4 route table changes (no input, no output); the cancel request above cancels it too */
+/* Pends until the route table changes; input and output as for IOCTL_IP_ADDCHANGE_NOTIFY_REQUEST (IPv4 only without
+   input); the cancel request above cancels it too */
 #define IOCTL_IP_ROUTECHANGE_NOTIFY_REQUEST \
     _TCP_CTL_CODE(0x19, METHOD_BUFFERED, FILE_ANY_ACCESS)
 /* Adds, changes or removes a unicast IPv6 address of an interface: input one TCP_IPV6_ADDRESS_REQUEST, no output.
@@ -68,6 +74,18 @@
    TCP_IP_INTERFACE_REQUEST, no output. Administrators only, as IOCTL_SET_IP_ADDRESS */
 #define IOCTL_IP_INTERFACE_CONFIG \
     _TCP_CTL_CODE(0x1C, METHOD_BUFFERED, FILE_WRITE_ACCESS)
+/* Asks the link of an interface for the link address of an IPv6 neighbour with neighbour solicitations alone (no
+   data packet): input one TCP_IPV6_SOLICIT_REQUEST, no output. Not privileged, as ResolveIpNetEntry2 is not. An
+   address without a neighbour cache entry gets an incomplete one that is asked for up to three times, one second
+   apart; the answer shows in the neighbour table (IP_IPV6_ND_ENTRY_ID) */
+#define IOCTL_IP6_SOLICIT \
+    _TCP_CTL_CODE(0x1D, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+typedef struct _TCP_IPV6_SOLICIT_REQUEST
+{
+    ULONG IfIndex;
+    UCHAR Address[16];
+} TCP_IPV6_SOLICIT_REQUEST, *PTCP_IPV6_SOLICIT_REQUEST;
 #endif
 
 #define IOCTL_ICMP_ECHO_REQUEST \
