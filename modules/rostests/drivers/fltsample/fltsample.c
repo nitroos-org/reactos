@@ -103,6 +103,7 @@ static BOOLEAN UseContexts = TRUE;
 static PFLT_PORT ServerPort;
 static PFLT_PORT ClientPort;
 static BOOLEAN ArmAsk;
+static BOOLEAN InNestedAttach;
 
 typedef struct _SAMPLE_CONTEXT
 {
@@ -938,6 +939,16 @@ InstanceSetup(_In_ PCFLT_RELATED_OBJECTS FltObjects,
             (VOID)FltSetInstanceContext(FltObjects->Instance, FLT_SET_CONTEXT_REPLACE_IF_EXISTS, Sample, NULL);
             FltReleaseContext(Sample);
         }
+    }
+    if ((RvFlags & FLTSAMPLE_RV_NESTED_ATTACH) && !InNestedAttach)
+    {
+        PFLT_INSTANCE Inner = NULL;
+
+        /* Review test: one instance per volume and name, so ours will be refused once we said yes */
+        InNestedAttach = TRUE;
+        if (NT_SUCCESS(FltAttachVolume(SampleFilter, FltObjects->Volume, NULL, &Inner)) && Inner)
+            FltObjectDereference(Inner);
+        InNestedAttach = FALSE;
     }
     if (Flags & FLTFL_INSTANCE_SETUP_MANUAL_ATTACHMENT)
         InterlockedIncrement((PLONG)&Stats.ManualSetups);

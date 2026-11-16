@@ -17,6 +17,7 @@
 
 #ifndef FLTFL_INSTANCE_TEARDOWN_VOLUME_DISMOUNT
 #define FLTFL_INSTANCE_TEARDOWN_VOLUME_DISMOUNT 0x00000008
+#define FLTFL_INSTANCE_TEARDOWN_INTERNAL_ERROR  0x00000010
 #endif
 
 static HANDLE FakeControl = INVALID_HANDLE_VALUE;
@@ -592,6 +593,68 @@ START_TEST(p3port)
     }
 
     test_ClosePortWhileSending();
+}
+
+/*
+ * An instance whose InstanceSetup said yes but which can't be attached after all (here: the filter
+ * attached another instance of the same name to the volume from inside the setup; also when the
+ * filter is being unloaded meanwhile) gets its teardown callbacks: every successful setup is paired
+ * with an InstanceTeardownComplete, where filters free what they set up for the instance.
+ */
+static
+void
+test_TeardownAfterRefusedAttach(void)
+{
+    SAMPLE P = { { 0 } };
+    FLTSAMPLE_STATS S0, S1, S2;
+    ATTACH_RESULT Result;
+    ULONG Flags;
+
+    if (!LoadSample(&P, L"FltSampleP", L"383000.5", 0xFFFF))
+    {
+        skip("Can't load the sample filter\n");
+        return;
+    }
+
+    ok(SampleIoctl(&P, FLTSAMPLE_IOCTL_DETACH_ALL, NULL, 0, &Result, sizeof(Result)), "Detach failed\n");
+    SampleStats(&P, &S0);
+    ok(S0.LiveInstances == 0, "%lu instances left after the detach\n", S0.LiveInstances);
+
+    Flags = FLTSAMPLE_RV_NESTED_ATTACH;
+    ok(SampleIoctl(&P, FLTSAMPLE_IOCTL_RV_FLAGS, &Flags, sizeof(Flags), NULL, 0), "Can't set the flags\n");
+    ok(SampleIoctl(&P, FLTSAMPLE_IOCTL_ATTACH_ALL, NULL, 0, &Result, sizeof(Result)), "Attach failed\n");
+    trace("Attach: %lu done, %lu failed, last status 0x%lx\n", Result.Done, Result.Failed, Result.LastStatus);
+    ok(Result.Failed > 0, "No attach was refused, the test says nothing\n");
+    Flags = 0;
+    SampleIoctl(&P, FLTSAMPLE_IOCTL_RV_FLAGS, &Flags, sizeof(Flags), NULL, 0);
+    SampleStats(&P, &S1);
+
+    /* The nested instances are attached, the refused ones are torn down already */
+    ok(S1.LiveInstances == Result.Failed, "%lu live instances for %lu volumes\n", S1.LiveInstances, Result.Failed);
+    ok(S1.InstanceSetups - S0.InstanceSetups == 2 * Result.Failed, "%lu setups\n", S1.InstanceSetups - S0.InstanceSetups);
+    ok(S1.InstanceTeardownCompletes - S0.InstanceTeardownCompletes == Result.Failed, "%lu teardowns for %lu refused\n",
+       S1.InstanceTeardownCompletes - S0.InstanceTeardownCompletes, Result.Failed);
+    ok(S1.LastTeardownReason == FLTFL_INSTANCE_TEARDOWN_INTERNAL_ERROR, "Teardown reason %lu\n", S1.LastTeardownReason);
+
+    ok(SampleIoctl(&P, FLTSAMPLE_IOCTL_DETACH_ALL, NULL, 0, &Result, sizeof(Result)), "Detach failed\n");
+    SampleStats(&P, &S2);
+    ok(S2.LiveInstances == 0, "%lu instances whose setup was never undone\n", S2.LiveInstances);
+    ok(S2.InstanceSetups == S2.InstanceTeardownCompletes, "%lu setups, %lu teardowns\n", S2.InstanceSetups,
+       S2.InstanceTeardownCompletes);
+
+    UnloadSample(&P, TRUE);
+}
+
+START_TEST(p3refuse)
+{
+    EnsureTestDirectory();
+    if (!StartFilterManager())
+    {
+        skip("No filter manager\n");
+        return;
+    }
+
+    test_TeardownAfterRefusedAttach();
 }
 
 START_TEST(p3create)

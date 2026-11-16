@@ -157,6 +157,8 @@ typedef struct _FLTSAMPLE_ASK_RESULT
 #define FLTSAMPLE_RV_PARK_READ_POST     0x2 /* the post-operation of a non paging IRP read parks, a worker completes it */
 #define FLTSAMPLE_RV_PARK_WRITE_POST    0x4 /* the same for writes */
 #define FLTSAMPLE_RV_PARK_FASTIO_POST   0x8 /* the post-operation of a fast I/O read parks (the WDK forbids it), a worker completes it */
+#define FLTSAMPLE_RV_NESTED_ATTACH      0x10 /* InstanceSetup attaches another instance of the filter to the volume first,
+                                                so the instance being set up collides with it after saying yes */
 #define FLTSAMPLE_IOCTL_CONTEXT_SELFTEST CTL_CODE(FILE_DEVICE_UNKNOWN, 0x809, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define FLTSAMPLE_IOCTL_CLOSE_CLIENT    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x80B, METHOD_BUFFERED, FILE_ANY_ACCESS) /* FltCloseClientPort */
 

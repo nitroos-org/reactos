@@ -250,6 +250,27 @@ FltpAttachInstance(_In_ PFLT_FILTER Filter,
     Status = InsertInstance(Volume, Instance);
     if (!NT_SUCCESS(Status))
     {
+        /*
+         * The filter said yes and may have set up state of its own for the instance, which it frees
+         * in its teardown callbacks: it gets them, with no operation ever having reached the instance.
+         */
+        if (Filter->InstanceSetup)
+        {
+            ULONG Reason = (Status == STATUS_FLT_DELETING_OBJECT) ? FLTFL_INSTANCE_TEARDOWN_FILTER_UNLOAD :
+                           (Status == STATUS_FLT_VOLUME_NOT_FOUND) ? FLTFL_INSTANCE_TEARDOWN_VOLUME_DISMOUNT :
+                                                                     FLTFL_INSTANCE_TEARDOWN_INTERNAL_ERROR;
+
+            InitRelatedObjects(&Objects, Instance);
+            InterlockedOr((PLONG)&Instance->Flags, INSFL_DELETING);
+            if (Filter->InstanceTeardownStart)
+                Filter->InstanceTeardownStart(&Objects, Reason);
+
+            /* References the filter took on the instance meanwhile, as in FltpTeardownInstance */
+            FltpObjectRundownWait(&Instance->Base.RundownRef);
+
+            if (Filter->InstanceTeardownComplete)
+                Filter->InstanceTeardownComplete(&Objects, Reason);
+        }
         FltpTeardownInstanceContexts(Instance);
         ExFreePoolWithTag(Instance, FM_TAG_INSTANCE);
         return Status;
