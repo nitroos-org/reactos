@@ -582,6 +582,78 @@ static void TestReplace(void)
     }
 }
 
+/* The depth a chain of keys reaches below Key ("k" inside "k" ...) */
+static ULONG ChainDepth(HKEY Key)
+{
+    HKEY Current = Key, Next;
+    ULONG Depth = 0;
+
+    while (RegOpenKeyExW(Current, L"k", 0, KEY_READ, &Next) == ERROR_SUCCESS)
+    {
+        if (Current != Key)
+            RegCloseKey(Current);
+        Current = Next;
+        Depth++;
+    }
+    if (Current != Key)
+        RegCloseKey(Current);
+    return Depth;
+}
+
+/* A tree deeper than a recursive copy fits on the kernel stack (the registry allows 512 levels): save and restore */
+static void TestDeepRestore(void)
+{
+    WCHAR Path[MAX_PATH], Source[MAX_PATH];
+    HKEY Root, Current, Next, Target;
+    ULONG i;
+    LONG Error;
+
+    StringCchPrintfW(Path, _countof(Path), L"%s\\Deep\\Src", Scratch);
+    Root = CreateKey(HKEY_LOCAL_MACHINE, Path);
+    if (!Root)
+        return;
+    Current = Root;
+    for (i = 0; i < 300; i++)
+    {
+        Error = RegCreateKeyExW(Current, L"k", 0, NULL, 0, KEY_ALL_ACCESS, NULL, &Next, NULL);
+        if (Current != Root)
+            RegCloseKey(Current);
+        if (Error != ERROR_SUCCESS)
+        {
+            ok(0, "RegCreateKeyExW at level %lu failed: %ld\n", i + 1, Error);
+            Current = Root;
+            break;
+        }
+        Current = Next;
+    }
+    if (Current != Root)
+    {
+        SetDword(Current, L"Bottom", 300);
+        RegCloseKey(Current);
+    }
+    ok(ChainDepth(Root) == 300, "the source chain is %lu levels deep\n", ChainDepth(Root));
+
+    RemoveHiveFiles(L"deep.hiv");
+    File(Source, L"deep.hiv");
+    Error = RegSaveKeyW(Root, Source, NULL);
+    ok(Error == ERROR_SUCCESS, "RegSaveKey of a 300 level tree returned %ld\n", Error);
+    RegCloseKey(Root);
+
+    StringCchPrintfW(Path, _countof(Path), L"%s\\Deep\\Dst", Scratch);
+    Target = CreateKey(HKEY_LOCAL_MACHINE, Path);
+    if (Target && Error == ERROR_SUCCESS)
+    {
+        Error = RegRestoreKeyW(Target, Source, 0);
+        ok(Error == ERROR_SUCCESS, "RegRestoreKey of a 300 level tree returned %ld\n", Error);
+        ok(ChainDepth(Target) == 300, "the restored chain is %lu levels deep\n", ChainDepth(Target));
+    }
+    if (Target)
+        RegCloseKey(Target);
+    StringCchPrintfW(Path, _countof(Path), L"%s\\Deep", Scratch);
+    DeleteTree(HKEY_LOCAL_MACHINE, Path);
+    RemoveHiveFiles(L"deep.hiv");
+}
+
 START_TEST(RegRestoreKey)
 {
     DWORD Length;
@@ -601,6 +673,7 @@ START_TEST(RegRestoreKey)
 
     TestRestore();
     TestBigRestore();
+    TestDeepRestore();
     TestReplace();
 
     DeleteTree(HKEY_LOCAL_MACHINE, Scratch);
