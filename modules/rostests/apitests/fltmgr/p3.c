@@ -235,22 +235,29 @@ WriteUncached(PCWSTR Path, DWORD Size)
 {
     HANDLE File;
     PUCHAR Buffer;
-    DWORD Written = 0, i;
+    DWORD Written = 0, Done = 0, Chunk, i;
 
     DeleteFileW(Path);
     File = CreateFileW(Path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH, NULL);
     if (File == INVALID_HANDLE_VALUE)
         return FALSE;
-    Buffer = VirtualAlloc(NULL, Size, MEM_COMMIT, PAGE_READWRITE);
+    /* In pieces of at most 1 MB: one uncached write of a big file is more than an MDL can describe */
+    Buffer = VirtualAlloc(NULL, min(Size, 1024 * 1024), MEM_COMMIT, PAGE_READWRITE);
     if (Buffer)
     {
-        for (i = 0; i < Size; i++)
-            Buffer[i] = (UCHAR)(i * 7 + 3);
-        WriteFile(File, Buffer, Size, &Written, NULL);
+        while (Done < Size)
+        {
+            Chunk = min(Size - Done, 1024 * 1024);
+            for (i = 0; i < Chunk; i++)
+                Buffer[i] = (UCHAR)((Done + i) * 7 + 3);
+            if (!WriteFile(File, Buffer, Chunk, &Written, NULL) || Written != Chunk)
+                break;
+            Done += Chunk;
+        }
         VirtualFree(Buffer, 0, MEM_RELEASE);
     }
     CloseHandle(File);
-    return Written == Size;
+    return Done == Size;
 }
 
 /*
@@ -636,6 +643,12 @@ test_ModifiedPageWriter(void)
     ULONGLONG Target, Total = 0;
     DWORD Start;
 
+    /* The dirty pages of the file are part of the pressure (where the commit limit stops the private memory early) */
+    Memory.dwLength = sizeof(Memory);
+    GlobalMemoryStatusEx(&Memory);
+    if (Memory.ullTotalPhys / 4 > FileSize)
+        FileSize = (SIZE_T)min(Memory.ullTotalPhys / 4, 256 * 1024 * 1024) & ~(SIZE_T)(1024 * 1024 - 1);
+
     MakeTestFile(L"p3modwr.fsf", Path, RTL_NUMBER_OF(Path));
     ok(WriteUncached(Path, (DWORD)FileSize), "Can't write %ls\n", Path);
 
@@ -724,7 +737,19 @@ test_ModifiedPageWriter(void)
         if (View[j] != ((UCHAR)(j >> 12) | 1))
             break;
     }
-    ok(j == FileSize, "View differs at 0x%Ix\n", j);
+    ok(j == FileSize, "View differs at 0x%Ix: 0x%x, expected 0x%x (written by WriteUncached: 0x%x)\n", j,
+       j < FileSize ? View[j] : 0, (UCHAR)(j >> 12) | 1, (UCHAR)(j * 7 + 3));
+    if (j < FileSize)
+    {
+        SIZE_T Bad = 0;
+
+        for (; j < FileSize; j += 4096)
+        {
+            if (View[j] != ((UCHAR)(j >> 12) | 1))
+                Bad++;
+        }
+        trace("%lu of %lu pages differ\n", (ULONG)Bad, (ULONG)(FileSize / 4096));
+    }
 
     UnmapViewOfFile(View);
     CloseHandle(Section);
