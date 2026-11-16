@@ -22,10 +22,10 @@
        &RectBounds,                              \
        ROP2_TO_MIX(pdcattr->jROP2));
 
-/* A line of a Pie (the two radial lines) or a Chord (the chord) between points that may lie anywhere in the range of the
- * coordinates. The line rasteriser steps along the whole line, also where it leaves the surface (a point at the end of
- * the range takes seconds, and the sums of its coordinates overflow); a line that is long or has such a point is cut to
- * the part on the surface (and the clip bounds) first. Short lines are drawn as they are. FPU state: the caller's. */
+/* A line of a Pie (the two radial lines) or a Chord (the chord). The line rasteriser (EngLineTo) takes only the steps
+ * in the clip bounds, from the exact state of the whole line, so the pixels (and the dash pattern) are those of the
+ * uncut line wherever the points are. Only a point outside the range of the coordinates (not reachable after the
+ * wrap of the box to 28 bits) is still cut to the surface and the clip bounds first. FPU state: the caller's. */
 static
 BOOL
 FASTCALL
@@ -35,12 +35,9 @@ IntArcLine(PDC dc,
            RECTL *pRectBounds,
            LONGLONG x1, LONGLONG y1, LONGLONG x2, LONGLONG y2)
 {
-    const LONGLONG lim = 0x40000000LL;
-    LONGLONG adx = x2 > x1 ? x2 - x1 : x1 - x2;
-    LONGLONG ady = y2 > y1 ? y2 - y1 : y1 - y2;
+    const LONGLONG lim = 0x7FFFFFFFLL;
 
-    if (adx > 0x100000LL || ady > 0x100000LL ||
-        x1 > lim || x1 < -lim || y1 > lim || y1 < -lim ||
+    if (x1 > lim || x1 < -lim || y1 > lim || y1 < -lim ||
         x2 > lim || x2 < -lim || y2 > lim || y2 < -lim)
     {
         RECTL rc;

@@ -81,6 +81,7 @@ list(APPEND SOURCE
     GetTextMetrics.c
     GradientFill.c
     LPtoDP.c
+    LineHugeCoords.c
     MaskBlt.c
     NtGdiAddFontResource.c
     OffsetClipRgn.c
