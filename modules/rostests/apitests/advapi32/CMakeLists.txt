@@ -45,6 +45,7 @@ list(APPEND SOURCE
     LsaLookupNamesUnmapped.c
     LsaPolicyInfoLeak.c
     LsassLeak.c
+    LsassServerLeak.c
     LsaLogonUserS4U.c
     LsaManageSidNameMapping.c
     ProcessThreadLabel.c
