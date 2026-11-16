@@ -37,6 +37,8 @@ static WCHAR ServiceName[] = L"Lanmanserver";
 static SERVICE_STATUS_HANDLE ServiceStatusHandle;
 static SERVICE_STATUS ServiceStatus;
 
+static LONG StopStarted = 0;
+
 DWORD dwServiceBits = 0;
 
 
@@ -68,6 +70,44 @@ UpdateServiceStatus(DWORD dwState)
 }
 
 static DWORD WINAPI
+StopThread(LPVOID lpParameter)
+{
+    UNREFERENCED_PARAMETER(lpParameter);
+
+    /* Unregister the RPC interface of the service and wait for its calls to return (the process keeps
+       listening: it hosts other services) */
+    StopRpcServer();
+    UpdateServiceStatus(SERVICE_STOPPED);
+    return 0;
+}
+
+/*
+ * The control handler runs on the one control thread of the host process, shared with the other services
+ * of it: the wait for the calls in flight must not block it.
+ */
+static VOID
+BeginStop(VOID)
+{
+    HANDLE hThread;
+
+    if (InterlockedExchange(&StopStarted, 1) != 0)
+        return;
+
+    UpdateServiceStatus(SERVICE_STOP_PENDING);
+
+    hThread = CreateThread(NULL, 0, StopThread, NULL, 0, NULL);
+    if (hThread != NULL)
+    {
+        CloseHandle(hThread);
+    }
+    else
+    {
+        StopRpcServer();
+        UpdateServiceStatus(SERVICE_STOPPED);
+    }
+}
+
+static DWORD WINAPI
 ServiceControlHandler(DWORD dwControl,
                       DWORD dwEventType,
                       LPVOID lpEventData,
@@ -79,10 +119,7 @@ ServiceControlHandler(DWORD dwControl,
     {
         case SERVICE_CONTROL_STOP:
             TRACE("  SERVICE_CONTROL_STOP received\n");
-            UpdateServiceStatus(SERVICE_STOP_PENDING);
-            /* Unregister the RPC interface of the service (the process keeps listening: it hosts other services) */
-            StopRpcServer();
-            UpdateServiceStatus(SERVICE_STOPPED);
+            BeginStop();
             return ERROR_SUCCESS;
 
         case SERVICE_CONTROL_PAUSE:
@@ -103,10 +140,7 @@ ServiceControlHandler(DWORD dwControl,
 
         case SERVICE_CONTROL_SHUTDOWN:
             TRACE("  SERVICE_CONTROL_SHUTDOWN received\n");
-            UpdateServiceStatus(SERVICE_STOP_PENDING);
-            /* Unregister the RPC interface of the service (the process keeps listening: it hosts other services) */
-            StopRpcServer();
-            UpdateServiceStatus(SERVICE_STOPPED);
+            BeginStop();
             return ERROR_SUCCESS;
 
         default :
@@ -152,6 +186,7 @@ ServiceMain(DWORD argc, LPTSTR *argv)
         return;
     }
 
+    InterlockedExchange(&StopStarted, 0);
     UpdateServiceStatus(SERVICE_START_PENDING);
 
     dwError = ServiceInit();
