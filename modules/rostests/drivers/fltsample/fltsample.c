@@ -1202,6 +1202,12 @@ ControlDispatch(_In_ PDEVICE_OBJECT DeviceObject,
                 RvFlags = *(PULONG)Buffer;
                 break;
 
+            case FLTSAMPLE_IOCTL_CLOSE_CLIENT:
+                /* The filter lets go of its client, whatever it is doing with it */
+                if (SampleFilter)
+                    FltCloseClientPort(SampleFilter, &ClientPort);
+                break;
+
             case FLTSAMPLE_IOCTL_REFUSE_UNLOAD:
                 if (InLength < sizeof(ULONG)) { Status = STATUS_INVALID_PARAMETER; break; }
                 RefuseUnload = *(PULONG)Buffer != 0;

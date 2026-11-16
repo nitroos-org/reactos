@@ -22,6 +22,7 @@ extern void func_p3voldel(void);
 extern void func_p3safe(void);
 extern void func_p3fpark(void);
 extern void func_p3section(void);
+extern void func_p3port(void);
 
 const struct test winetest_testlist[] =
 {
@@ -46,5 +47,6 @@ const struct test winetest_testlist[] =
     { "p3safe", func_p3safe },
     { "p3fpark", func_p3fpark },
     { "p3section", func_p3section },
+    { "p3port", func_p3port },
     { 0, 0 }
 };

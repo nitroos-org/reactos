@@ -815,12 +815,20 @@ FltSendMessage(_In_ PFLT_FILTER Filter,
     Message.ReplyCapacity = ReplyCapacity;
     KeInitializeEvent(&Message.Event, NotificationEvent, FALSE);
 
-    /* The pointer is the filter's own while it holds the lock */
+    /*
+     * The pointer is the filter's own while it holds the lock: a reference of ours keeps the connection
+     * from there on. The lock isn't held across the wait below, which may be for ever: a client which
+     * never answers would keep every FltCloseClientPort of the filter waiting (the disconnect of every
+     * other client, through its DisconnectNotify, and so the exit of those client processes and the
+     * filter's unregister). A FltCloseClientPort of this very port disconnects it, which wakes us.
+     */
     FltAcquirePushLockShared(&Filter->PortLock);
     Connection = (PFLT_CONNECTION)*ClientPort;
+    if (Connection)
+        InterlockedIncrement(&Connection->RefCount);
+    FltReleasePushLock(&Filter->PortLock);
     if (Connection == NULL)
     {
-        FltReleasePushLock(&Filter->PortLock);
         if (Copy) ExFreePoolWithTag(Copy, FM_TAG_MESSAGE);
         return STATUS_INVALID_PARAMETER;
     }
@@ -834,7 +842,7 @@ FltSendMessage(_In_ PFLT_FILTER Filter,
     if (Connection->Disconnected)
     {
         KeReleaseSpinLock(&Connection->Lock, OldIrql);
-        FltReleasePushLock(&Filter->PortLock);
+        ReleaseConnection(Connection);
         if (Copy) ExFreePoolWithTag(Copy, FM_TAG_MESSAGE);
         return STATUS_PORT_DISCONNECTED;
     }
@@ -865,7 +873,7 @@ FltSendMessage(_In_ PFLT_FILTER Filter,
         RemoveEntryList(&Message.Link);
     KeReleaseSpinLock(&Connection->Lock, OldIrql);
 
-    FltReleasePushLock(&Filter->PortLock);
+    ReleaseConnection(Connection);
 
     /* Nobody can write the answer any more: it goes to the filter's buffer at the filter's IRQL */
     if (ReplyLength)

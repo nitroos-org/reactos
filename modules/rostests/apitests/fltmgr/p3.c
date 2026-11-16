@@ -6,7 +6,12 @@
  */
 
 #include "precomp.h"
+#include <fltuser.h>
 #include "fltfakefs.h"
+
+#ifndef STATUS_PORT_DISCONNECTED
+#define STATUS_PORT_DISCONNECTED ((NTSTATUS)0xC0000037L)
+#endif
 
 #define FAKE_SERVICE    L"FltFakeFs"
 
@@ -479,6 +484,114 @@ START_TEST(p3section)
     }
 
     test_SectionSync();
+}
+
+typedef struct _ASK_THREAD
+{
+    HANDLE Port;
+    HRESULT Result;
+    DWORD Bytes;
+    FLTSAMPLE_ASK_RESULT Ask;
+
+} ASK_THREAD;
+
+/* The client asks the filter to ask it something, waiting for ever for the answer, which never comes */
+static
+DWORD
+WINAPI
+AskForeverThread(PVOID Parameter)
+{
+    ASK_THREAD *T = Parameter;
+    UCHAR Buffer[64];
+    PFLTSAMPLE_MSG Message = (PFLTSAMPLE_MSG)Buffer;
+
+    Message->Code = FLTSAMPLE_MSG_ASK;
+    Message->Arg = 16;
+    *(PULONG)Message->Data = 0;
+    T->Result = FilterSendMessage(T->Port, Message, FIELD_OFFSET(FLTSAMPLE_MSG, Data) + sizeof(ULONG),
+                                  &T->Ask, sizeof(T->Ask), &T->Bytes);
+    return 0;
+}
+
+static
+DWORD
+WINAPI
+CloseClientThread(PVOID Parameter)
+{
+    return SampleIoctl(Parameter, FLTSAMPLE_IOCTL_CLOSE_CLIENT, NULL, 0, NULL, 0) ? 0 : 1;
+}
+
+/*
+ * FltSendMessage with no timeout to a client which doesn't answer, and the filter closes its client port
+ * meanwhile (from another thread: its unload, a service stop, the DisconnectNotify of another client):
+ * FltCloseClientPort doesn't wait for the answer, it disconnects the port, which ends the send.
+ */
+static
+void
+test_ClosePortWhileSending(void)
+{
+    SAMPLE P = { { 0 } };
+    FLTSAMPLE_STATS S;
+    ASK_THREAD T = { 0 };
+    HANDLE Ask, Close;
+    HRESULT hr;
+    DWORD Wait;
+
+    if (!LoadSample(&P, L"FltSampleP", L"383000.5", 0xFFFF))
+    {
+        skip("Can't load the sample filter\n");
+        return;
+    }
+    T.Port = INVALID_HANDLE_VALUE;
+    hr = FilterConnectCommunicationPort(L"\\FltSamplePPort", 0, NULL, 0, NULL, &T.Port);
+    ok(SUCCEEDED(hr), "Connect failed: 0x%lx\n", (ULONG)hr);
+    if (FAILED(hr))
+        goto Quit;
+
+    T.Result = E_PENDING;
+    Ask = CreateThread(NULL, 0, AskForeverThread, &T, 0, NULL);
+    /* Until the filter's message is waiting for us */
+    for (Wait = 0; Wait < 100; Wait++)
+    {
+        SampleStats(&P, &S);
+        if (S.PortMessages > 0)
+            break;
+        Sleep(20);
+    }
+    Sleep(200);
+    ok(T.Result == E_PENDING, "The ask returned already: 0x%lx\n", (ULONG)T.Result);
+
+    Close = CreateThread(NULL, 0, CloseClientThread, &P, 0, NULL);
+    Wait = WaitForSingleObject(Close, 10000);
+    ok(Wait == WAIT_OBJECT_0, "FltCloseClientPort still waits after 10 s for an answer that never comes\n");
+    Wait = WaitForSingleObject(Ask, 10000);
+    ok(Wait == WAIT_OBJECT_0, "The send to the closed port still waits\n");
+    if (Wait == WAIT_OBJECT_0)
+    {
+        ok(SUCCEEDED(T.Result), "FilterSendMessage: 0x%lx\n", (ULONG)T.Result);
+        ok(T.Ask.Status == STATUS_PORT_DISCONNECTED, "FltSendMessage returned 0x%lx\n", T.Ask.Status);
+    }
+
+    /* Whatever happened above, this ends it: the client's own disconnect wakes the send */
+    CloseHandle(T.Port);
+    WaitForSingleObject(Ask, 10000);
+    WaitForSingleObject(Close, 10000);
+    CloseHandle(Ask);
+    CloseHandle(Close);
+Quit:
+    UnloadSample(&P, TRUE);
+}
+
+START_TEST(p3port)
+{
+    EnsureTestDirectory();
+    if (!StartFilterManager())
+    {
+        skip("No filter manager\n");
+        return;
+    }
+
+    test_ClosePortWhileSending();
 }
 
 START_TEST(p3create)

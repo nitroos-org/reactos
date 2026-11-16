@@ -158,6 +158,7 @@ typedef struct _FLTSAMPLE_ASK_RESULT
 #define FLTSAMPLE_RV_PARK_WRITE_POST    0x4 /* the same for writes */
 #define FLTSAMPLE_RV_PARK_FASTIO_POST   0x8 /* the post-operation of a fast I/O read parks (the WDK forbids it), a worker completes it */
 #define FLTSAMPLE_IOCTL_CONTEXT_SELFTEST CTL_CODE(FILE_DEVICE_UNKNOWN, 0x809, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define FLTSAMPLE_IOCTL_CLOSE_CLIENT    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x80B, METHOD_BUFFERED, FILE_ANY_ACCESS) /* FltCloseClientPort */
 
 /* Service key value PortSecurity (REG_DWORD): the descriptor the sample gives its port */
 #define PORT_SECURITY_NONE              0   /* none: the filter manager's default */
