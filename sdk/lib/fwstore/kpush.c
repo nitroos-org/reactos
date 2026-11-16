@@ -420,7 +420,7 @@ static PWSTR ToNtPath(PCWSTR app)
 /* ---- rules that were not (or not fully) pushed: the rule service reports them (FwPushGetReport) ---- */
 
 #define REPORT_CHARS 1024
-static ULONG g_Rejected, g_RejectedBlock, g_Partial;
+static ULONG g_Rejected, g_RejectedBlock, g_Partial, g_BroadBlock;
 static BOOL g_NamesCut;
 static BOOL g_OsKnown; static ULONG g_OsMajor, g_OsMinor;   /* the running OS, for Platform (read once per push) */
 static WCHAR g_RejNames[REPORT_CHARS];
@@ -630,17 +630,18 @@ typedef enum { BR_OK, BR_SKIPPED, BR_REJECTED } BR_RESULT;
    token resolves, a program path that does not resolve, too many kernel rules, out of memory): nothing is pushed
    for it, b is as before. The caller counts and reports it. *pPartial is set when a Block rule is pushed but a
    part of it is not enforced (an IPv6 half whose keywords do not resolve, tokens that gave nothing, or a key that
-   is not known). *pDropped is set when a Block rule is pushed without a narrowing condition (it blocks more).
-   A rule whose Platform list excludes the running OS is BR_SKIPPED too: it is not in force there. */
-static BR_RESULT BuildRule(BUF *b, const FW_RULE *r, BOOL v6, ULONG *pieces, ULONG maxPieces, BOOL *pPartial, BOOL *pDropped)
+   is not known). *pDropped is set when a Block rule is pushed without a narrowing condition (it blocks more), *pBroad
+   when that condition was the rule's only restriction (the pushed rule then applies to all traffic of its direction
+   and profiles). A rule whose Platform list excludes the running OS is BR_SKIPPED too: it is not in force there. */
+static BR_RESULT BuildRule(BUF *b, const FW_RULE *r, BOOL v6, ULONG *pieces, ULONG maxPieces, BOOL *pPartial, BOOL *pDropped, BOOL *pBroad)
 {
     NITROFW_RULE hdr; DIM lp, rp, la4, ra4, la6, ra6, ic;
     ULONG start = (ULONG)b->len, i, ifm = 0, first = *pieces, cond;
     PWSTR nt = NULL; PCWSTR v, svc = NULL, icKey; BR_RESULT res = BR_REJECTED;
-    BOOL block, lScoped, rScoped, do4, do6, ok = TRUE;
+    BOOL block, lScoped, rScoped, do4, do6, ok = TRUE, bare = FALSE;
     ULONG bad = 0, bad4, bad6, plat;
 
-    *pPartial = FALSE; *pDropped = FALSE;
+    *pPartial = FALSE; *pDropped = FALSE; *pBroad = FALSE;
     memset(&hdr, 0, sizeof(hdr));
     hdr.Action = r->Action ? NITROFW_ACTION_ALLOW : NITROFW_ACTION_BLOCK;
     block = !r->Action;
@@ -697,6 +698,8 @@ static BR_RESULT BuildRule(BUF *b, const FW_RULE *r, BOOL v6, ULONG *pieces, ULO
        other family without any condition = broader than the rule. */
     lScoped = (la4.cnt || la6.cnt) && !la4.wild && !la6.wild;
     rScoped = (ra4.cnt || ra6.cnt) && !ra4.wild && !ra6.wild;
+    /* nothing but direction and profile is left of the rule once its unmatchable condition is dropped */
+    bare = hdr.Protocol == NITROFW_PROTO_ANY && !DimScoped(&lp) && !DimScoped(&rp) && !DimScoped(&ic) && !lScoped && !rScoped && !nt && !ifm;
     if (!lScoped && !rScoped)
     {
         /* no address condition: one kernel rule (more if a list is long) for both families */
@@ -731,17 +734,18 @@ fail:
 done:
     if (res != BR_OK) { b->len = start; *pieces = first; }
     else if (block && cond == COND_UNKNOWN) *pPartial = TRUE;
-    else if (block && cond == COND_NARROWING) *pDropped = TRUE;
+    else if (block && cond == COND_NARROWING) { *pDropped = TRUE; *pBroad = bare; }
     if (nt) HeapFree(GetProcessHeap(), 0, nt);
     DimFree(&lp); DimFree(&rp); DimFree(&la4); DimFree(&ra4); DimFree(&la6); DimFree(&ra6); DimFree(&ic);
     return res;
 }
 
-VOID FwPushGetReport(ULONG *pRejected, ULONG *pRejectedBlock, ULONG *pPartial, PWSTR Names, ULONG Chars)
+VOID FwPushGetReport(ULONG *pRejected, ULONG *pRejectedBlock, ULONG *pPartial, ULONG *pBroadBlock, PWSTR Names, ULONG Chars)
 {
     if (pRejected) *pRejected = g_Rejected;
     if (pRejectedBlock) *pRejectedBlock = g_RejectedBlock;
     if (pPartial) *pPartial = g_Partial;
+    if (pBroadBlock) *pBroadBlock = g_BroadBlock;
     if (Names && Chars) { wcsncpy(Names, g_RejNames, Chars - 1); Names[Chars - 1] = 0; }
 }
 
@@ -750,7 +754,7 @@ DWORD FwPushToKernel(ULONGLONG gen, BOOL *pPresent)
     FW_RULESET rs; BUF b = { 0 }; NITROFW_POLICY pol; HANDLE h; DWORD err, ret, i;
     ULONG cnt = 0; ULONG bit, pass; BOOL v6on;
     HKEY hk; DWORD enforce = 1, cb = sizeof(DWORD), t;
-    g_Rejected = 0; g_RejectedBlock = 0; g_Partial = 0; g_RejNames[0] = 0; g_NamesCut = FALSE;
+    g_Rejected = 0; g_RejectedBlock = 0; g_Partial = 0; g_BroadBlock = 0; g_RejNames[0] = 0; g_NamesCut = FALSE;
     if (pPresent) *pPresent = FALSE;
     h = CreateFileW(NITROFW_USER_PATH, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
     if (h == INVALID_HANDLE_VALUE) return GetLastError();
@@ -784,9 +788,9 @@ DWORD FwPushToKernel(ULONGLONG gen, BOOL *pPresent)
     for (pass = 0; pass < 2; pass++)
     for (i = 0; i < rs.N; i++)
     {
-        ULONG before = cnt, savedLen = (ULONG)b.len; BOOL partial = FALSE, dropped = FALSE, isBlock = !rs.R[i].Action; BR_RESULT br;
+        ULONG before = cnt, savedLen = (ULONG)b.len; BOOL partial = FALSE, dropped = FALSE, broad = FALSE, isBlock = !rs.R[i].Action; BR_RESULT br;
         if (!rs.R[i].Enabled || (pass == 0) != isBlock) continue;
-        br = BuildRule(&b, &rs.R[i], v6on, &cnt, NITROFW_MAX_RULES, &partial, &dropped);
+        br = BuildRule(&b, &rs.R[i], v6on, &cnt, NITROFW_MAX_RULES, &partial, &dropped, &broad);
         /* a rule that would take the policy past its size limit is rejected on its own: the final size check below
            would fail the whole push and leave the previous policy in force */
         if (br == BR_OK && b.len > NITROFW_MAX_POLICY_SIZE) { b.len = savedLen; cnt = before; br = BR_REJECTED; }
@@ -800,6 +804,12 @@ DWORD FwPushToKernel(ULONGLONG gen, BOOL *pPresent)
         {
             g_Partial++;
             Note(L"Block rule not fully enforced", &rs.R[i]);
+        }
+        else if (br == BR_OK && broad)
+        {
+            /* the condition was the rule's only restriction: the rule now blocks every packet of its direction and profiles */
+            g_BroadBlock++;
+            Note(L"Block rule with only a condition the kernel cannot match, now blocks all traffic of its direction", &rs.R[i]);
         }
         else if (br == BR_OK && dropped) Note(L"Block rule pushed without a condition the kernel cannot match (blocks more)", &rs.R[i]);
     }
