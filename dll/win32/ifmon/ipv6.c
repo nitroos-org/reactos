@@ -28,8 +28,13 @@
  * CreateUnicastIpAddressEntry and CreateIpForwardEntry2, with the persistent store of New-NetIPAddress and
  * New-NetRoute -PolicyStore PersistentStore), the static DNS servers (the NameServer value of the interface in
  * Tcpip6, where iphlpapi and Set-DnsClientServerAddress look) and the one global parameter the stack reads,
- * RandomizeIdentifiers. What has no backing in the stack (interface parameters such as mtu, metric and
- * routerdiscovery, privacy, prefix policies, anycast addresses) has no command.
+ * RandomizeIdentifiers. The per-interface parameters of both families (set interface: mtu, metric, routerdiscovery,
+ * dadtransmits, forwarding=disabled) go through iphlpapi's NitroConfigureIpInterface, the request behind
+ * SetIpInterfaceEntry, with its active and persistent stores (Set-NetIPInterface). The temporary address parameters
+ * (set privacy) are the Tcpip6\Parameters values the stack reads when it starts, and the prefix policy table
+ * (add, set, delete prefixpolicy) is the one iphlpapi's NitroGetPrefixPolicies and NitroSetPrefixPolicies keep
+ * (Tcpip6\Parameters\PrefixPolicies; an active-only table is a volatile key that lasts until the computer
+ * restarts). What has no backing in the stack (the other interface tags, anycast addresses) has no command.
  */
 
 #define IPV6_PARAMETERS_KEY  L"SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters"
@@ -54,6 +59,12 @@ static FN_HANDLE_CMD Ipv6DeleteDnsServers;
 static FN_HANDLE_CMD Ipv6DeleteRoute;
 static FN_HANDLE_CMD Ipv6SetAddress;
 static FN_HANDLE_CMD Ipv6SetGlobal;
+static FN_HANDLE_CMD Ipv6SetInterface;
+static FN_HANDLE_CMD Ipv6SetPrivacy;
+static FN_HANDLE_CMD Ipv6SetPrefixPolicy;
+static FN_HANDLE_CMD Ipv6AddPrefixPolicy;
+static FN_HANDLE_CMD Ipv6DeletePrefixPolicy;
+static FN_HANDLE_CMD Ipv6ShowInterface;
 
 static
 CMD_ENTRY
@@ -61,6 +72,7 @@ Ipv6AddCommands[] =
 {
     {L"address", Ipv6AddAddress, IDS_HLP_IPV6_ADD_ADDRESS, IDS_HLP_IPV6_ADD_ADDRESS_EX, 0},
     {L"dnsservers", Ipv6AddDnsServers, IDS_HLP_IPV6_ADD_DNSSERVERS, IDS_HLP_IPV6_ADD_DNSSERVERS_EX, 0},
+    {L"prefixpolicy", Ipv6AddPrefixPolicy, IDS_HLP_IPV6_ADD_PREFIXPOLICY, IDS_HLP_IPV6_ADD_PREFIXPOLICY_EX, 0},
     {L"route", Ipv6AddRoute, IDS_HLP_IPV6_ADD_ROUTE, IDS_HLP_IPV6_ADD_ROUTE_EX, 0},
 };
 
@@ -70,6 +82,7 @@ Ipv6DeleteCommands[] =
 {
     {L"address", Ipv6DeleteAddress, IDS_HLP_IPV6_DELETE_ADDRESS, IDS_HLP_IPV6_DELETE_ADDRESS_EX, 0},
     {L"dnsservers", Ipv6DeleteDnsServers, IDS_HLP_IPV6_DELETE_DNSSERVERS, IDS_HLP_IPV6_DELETE_DNSSERVERS_EX, 0},
+    {L"prefixpolicy", Ipv6DeletePrefixPolicy, IDS_HLP_IPV6_DELETE_PREFIXPOLICY, IDS_HLP_IPV6_DELETE_PREFIXPOLICY_EX, 0},
     {L"route", Ipv6DeleteRoute, IDS_HLP_IPV6_DELETE_ROUTE, IDS_HLP_IPV6_DELETE_ROUTE_EX, 0},
 };
 
@@ -79,6 +92,9 @@ Ipv6SetCommands[] =
 {
     {L"address", Ipv6SetAddress, IDS_HLP_IPV6_SET_ADDRESS, IDS_HLP_IPV6_SET_ADDRESS_EX, 0},
     {L"global", Ipv6SetGlobal, IDS_HLP_IPV6_SET_GLOBAL, IDS_HLP_IPV6_SET_GLOBAL_EX, 0},
+    {L"interface", Ipv6SetInterface, IDS_HLP_IPV6_SET_INTERFACE, IDS_HLP_IPV6_SET_INTERFACE_EX, 0},
+    {L"prefixpolicy", Ipv6SetPrefixPolicy, IDS_HLP_IPV6_SET_PREFIXPOLICY, IDS_HLP_IPV6_SET_PREFIXPOLICY_EX, 0},
+    {L"privacy", Ipv6SetPrivacy, IDS_HLP_IPV6_SET_PRIVACY, IDS_HLP_IPV6_SET_PRIVACY_EX, 0},
 };
 
 static
@@ -89,6 +105,7 @@ Ipv6ShowCommands[] =
     {L"destinationcache", Ipv6ShowDestinationCache, IDS_HLP_IPV6_SHOW_DESTINATIONCACHE, IDS_HLP_IPV6_SHOW_DESTINATIONCACHE_EX, 0},
     {L"dnsservers", Ipv6ShowDnsServers, IDS_HLP_IPV6_SHOW_DNSSERVERS, IDS_HLP_IPV6_SHOW_DNSSERVERS_EX, 0},
     {L"global", Ipv6ShowGlobal, IDS_HLP_IPV6_SHOW_GLOBAL, IDS_HLP_IPV6_SHOW_GLOBAL_EX, 0},
+    {L"interface", Ipv6ShowInterface, IDS_HLP_IPV6_SHOW_INTERFACE, IDS_HLP_IPV6_SHOW_INTERFACE_EX, 0},
     {L"interfaces", Ipv6ShowInterfaces, IDS_HLP_IPV6_SHOW_INTERFACES, IDS_HLP_IPV6_SHOW_INTERFACES_EX, 0},
     {L"joins", Ipv6ShowJoins, IDS_HLP_IPV6_SHOW_JOINS, IDS_HLP_IPV6_SHOW_JOINS_EX, 0},
     {L"neighbors", Ipv6ShowNeighbors, IDS_HLP_IPV6_SHOW_NEIGHBORS, IDS_HLP_IPV6_SHOW_NEIGHBORS_EX, 0},
@@ -138,7 +155,8 @@ CompareInterfaces(
  */
 static
 DWORD
-LoadInterfaces(
+LoadInterfacesOf(
+    _In_ ULONG Family,
     _Out_ PIPV6_IF *ppList,
     _Out_ PULONG pCount)
 {
@@ -149,7 +167,7 @@ LoadInterfaces(
     *ppList = NULL;
     *pCount = 0;
 
-    if (GetIpInterfaceTable(AF_INET6, &Table) != NO_ERROR || Table == NULL)
+    if (GetIpInterfaceTable((ADDRESS_FAMILY)Family, &Table) != NO_ERROR || Table == NULL)
         return ERROR_SUCCESS;
 
     if (Table->NumEntries != 0)
@@ -184,6 +202,15 @@ LoadInterfaces(
     qsort(List, *pCount, sizeof(IPV6_IF), CompareInterfaces);
     *ppList = List;
     return ERROR_SUCCESS;
+}
+
+static
+DWORD
+LoadInterfaces(
+    _Out_ PIPV6_IF *ppList,
+    _Out_ PULONG pCount)
+{
+    return LoadInterfacesOf(AF_INET6, ppList, pCount);
 }
 
 static
@@ -1167,7 +1194,33 @@ Ipv6ShowGlobal(
     return ERROR_SUCCESS;
 }
 
-/* Temporary addresses are not generated yet: they are disabled, and the lifetimes are the ones they will get */
+/* The temporary address parameters (Tcpip6\Parameters, the values the stack reads when it starts), the defaults of
+   Windows when a value is absent. Random Time is drawn by the stack at every start and not kept anywhere: 0s. */
+typedef struct _PRIVACY_PARAMS
+{
+    DWORD Use, DadAttempts, MaxValid, MaxPreferred, Regenerate, MaxRandom;
+} PRIVACY_PARAMS, *PPRIVACY_PARAMS;
+
+static
+VOID
+ReadPrivacy(
+    _Out_ PPRIVACY_PARAMS Params)
+{
+    Params->Use = 1;
+    Params->DadAttempts = 3;
+    Params->MaxValid = 7 * 24 * 3600;
+    Params->MaxPreferred = 24 * 3600;
+    Params->Regenerate = 5;
+    Params->MaxRandom = 10 * 60;
+
+    ReadParameter(L"UseTemporaryAddresses", &Params->Use);
+    ReadParameter(L"MaxDadAttempts", &Params->DadAttempts);
+    ReadParameter(L"MaxValidLifetime", &Params->MaxValid);
+    ReadParameter(L"MaxPreferredLifetime", &Params->MaxPreferred);
+    ReadParameter(L"RegenerateTime", &Params->Regenerate);
+    ReadParameter(L"MaxRandomTime", &Params->MaxRandom);
+}
+
 static
 DWORD
 WINAPI
@@ -1180,21 +1233,98 @@ Ipv6ShowPrivacy(
     LPCVOID pvData,
     BOOL *pbDone)
 {
+    PRIVACY_PARAMS Params;
+    WCHAR Valid[32], Preferred[32], Regenerate[32], Random[32];
+
+    ReadPrivacy(&Params);
+    FormatDuration(Valid, Params.MaxValid);
+    FormatDuration(Preferred, Params.MaxPreferred);
+    FormatDuration(Regenerate, Params.Regenerate);
+    FormatDuration(Random, Params.MaxRandom);
+
     PrintMessage(L"Querying active state...\n\n");
     PrintMessage(L"Temporary Address Parameters\n");
     PrintMessage(L"---------------------------------------------\n");
-    PrintMessage(L"Use Temporary Addresses             : disabled\n");
-    PrintMessage(L"Duplicate Address Detection Attempts: 3\n");
-    PrintMessage(L"Maximum Valid Lifetime              : 7d\n");
-    PrintMessage(L"Maximum Preferred Lifetime          : 1d\n");
-    PrintMessage(L"Regenerate Time                     : 5s\n");
-    PrintMessage(L"Maximum Random Time                 : 10m\n");
+    PrintMessage(L"Use Temporary Addresses             : %s\n", Params.Use ? L"enabled" : L"disabled");
+    PrintMessage(L"Duplicate Address Detection Attempts: %lu\n", Params.DadAttempts);
+    PrintMessage(L"Maximum Valid Lifetime              : %s\n", Valid);
+    PrintMessage(L"Maximum Preferred Lifetime          : %s\n", Preferred);
+    PrintMessage(L"Regenerate Time                     : %s\n", Regenerate);
+    PrintMessage(L"Maximum Random Time                 : %s\n", Random);
     PrintMessage(L"Random Time                         : 0s\n\n");
 
     return ERROR_SUCCESS;
 }
 
-/* The Windows default policy table (RFC 6724 and the entries Windows adds), until the policy store is readable */
+/* RFC 5952 text of an address: hex groups without leading zeros, the longest run of two or more zero groups as "::"
+   (never the dotted form that RtlIpv6AddressToString uses for IPv4-mapped addresses: Windows prints ::ffff:0:0) */
+static
+VOID
+FormatPrefix(
+    _Out_writes_(48) PWSTR Buffer,
+    _In_ const UCHAR *Address)
+{
+    USHORT Groups[8];
+    LONG i, BestStart = -1, BestLength = 0, Start = -1, Length = 0;
+    SIZE_T Used = 0;
+
+    for (i = 0; i < 8; i++)
+        Groups[i] = (USHORT)((Address[i * 2] << 8) | Address[i * 2 + 1]);
+
+    for (i = 0; i < 8; i++)
+    {
+        if (Groups[i] == 0)
+        {
+            if (Start < 0)
+                Start = i;
+            Length = i - Start + 1;
+            if (Length > BestLength)
+            {
+                BestStart = Start;
+                BestLength = Length;
+            }
+        }
+        else
+        {
+            Start = -1;
+            Length = 0;
+        }
+    }
+    if (BestLength < 2)
+        BestStart = -1;
+
+    Buffer[0] = UNICODE_NULL;
+    for (i = 0; i < 8; i++)
+    {
+        if (i == BestStart)
+        {
+            Buffer[Used++] = L':';
+            Buffer[Used++] = L':';
+            Buffer[Used] = UNICODE_NULL;
+            i += BestLength - 1;
+            continue;
+        }
+        if (i != 0 && Used != 0 && Buffer[Used - 1] != L':')
+            Buffer[Used++] = L':';
+        StringCchPrintfW(Buffer + Used, 6, L"%x", Groups[i]);
+        Used += wcslen(Buffer + Used);
+    }
+}
+
+/* The policy table in force, ordered by precedence (highest first, a stable order for equal ones), as Windows lists it */
+static
+int
+ComparePolicies(
+    const void *p1,
+    const void *p2)
+{
+    const NITRO_PREFIX_POLICY *a = p1, *b = p2;
+
+    if (a->Precedence != b->Precedence)
+        return (a->Precedence > b->Precedence) ? -1 : 1;
+    return 0;
+}
+
 static
 DWORD
 WINAPI
@@ -1207,25 +1337,39 @@ Ipv6ShowPrefixPolicies(
     LPCVOID pvData,
     BOOL *pbDone)
 {
-    static const struct { UINT Precedence, Label; PCWSTR Prefix; } Policies[] =
+    NITRO_PREFIX_POLICY Rows[NITRO_MAX_PREFIX_POLICIES];
+    ULONG Count = ARRAYSIZE(Rows), i, j;
+    PCWSTR Filter;
+    DWORD Error;
+
+    /* interface=, level= and store= are accepted: the table is the host's, there is one */
+    Error = ParseShowArguments(argv, dwCurrentIndex, dwArgCount, &Filter);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+    Error = NitroGetPrefixPolicies(FALSE, Rows, &Count);
+    if (Error != NO_ERROR)
+        return Error;
+
+    /* insertion sort: qsort is not stable */
+    for (i = 1; i < Count; i++)
     {
-        {50,  0, L"::1/128"},
-        {40,  1, L"::/0"},
-        {35,  4, L"::ffff:0:0/96"},
-        {30,  2, L"2002::/16"},
-        { 5,  5, L"2001::/32"},
-        { 3, 13, L"fc00::/7"},
-        { 1, 11, L"fec0::/10"},
-        { 1, 12, L"3ffe::/16"},
-        { 1,  3, L"::/96"},
-    };
-    ULONG i;
+        NITRO_PREFIX_POLICY Row = Rows[i];
+
+        for (j = i; j > 0 && ComparePolicies(&Rows[j - 1], &Row) > 0; j--)
+            Rows[j] = Rows[j - 1];
+        Rows[j] = Row;
+    }
 
     PrintMessage(L"Querying active state...\n\n");
     PrintMessage(L"Precedence  Label  Prefix\n");
     PrintMessage(L"----------  -----  --------------------------------\n");
-    for (i = 0; i < ARRAYSIZE(Policies); i++)
-        PrintMessage(L"%10u  %5u  %s\n", Policies[i].Precedence, Policies[i].Label, Policies[i].Prefix);
+    for (i = 0; i < Count; i++)
+    {
+        WCHAR Text[48];
+
+        FormatPrefix(Text, Rows[i].Prefix);
+        PrintMessage(L"%10lu  %5lu  %s/%lu\n", Rows[i].Precedence, Rows[i].Label, Text, Rows[i].PrefixLength);
+    }
     PrintMessage(L"\n");
 
     return ERROR_SUCCESS;
@@ -1422,7 +1566,8 @@ ParseAddress(
 /* The IPv6 interface of a name or index. A system without IPv6 has none: the request is not supported. */
 static
 DWORD
-ResolveInterface(
+ResolveInterfaceOf(
+    _In_ ULONG Family,
     _In_ PCWSTR Text,
     _Out_ PULONG IfIndex)
 {
@@ -1431,7 +1576,7 @@ ResolveInterface(
     DWORD Error = ERROR_INVALID_PARAMETER;
 
     *IfIndex = 0;
-    Error = LoadInterfaces(&List, &Count);
+    Error = LoadInterfacesOf(Family, &List, &Count);
     if (Error != ERROR_SUCCESS)
         return Error;
     if (Count == 0)
@@ -1452,6 +1597,15 @@ ResolveInterface(
     }
     FreeInterfaces(List);
     return Error;
+}
+
+static
+DWORD
+ResolveInterface(
+    _In_ PCWSTR Text,
+    _Out_ PULONG IfIndex)
+{
+    return ResolveInterfaceOf(AF_INET6, Text, IfIndex);
 }
 
 /* netsh answers "Ok." for a change that worked */
@@ -2186,6 +2340,601 @@ Ipv6SetGlobal(
     if (Error == ERROR_SUCCESS)
         PrintMessage(L"The change takes effect when the computer restarts.\n");
     return Finish(Error);
+}
+
+
+/* set interface, show interface (both families) ****************************/
+
+/* A decimal number up to Max, digits only */
+static
+BOOL
+ParseNumber(
+    _In_ PCWSTR Text,
+    _In_ ULONG Max,
+    _Out_ PULONG Value)
+{
+    ULONGLONG Number = 0;
+
+    if (!iswdigit(Text[0]))
+        return FALSE;
+    for (; *Text != UNICODE_NULL; Text++)
+    {
+        if (!iswdigit(*Text))
+            return FALSE;
+        Number = Number * 10 + (*Text - L'0');
+        if (Number > Max)
+            return FALSE;
+    }
+    *Value = (ULONG)Number;
+    return TRUE;
+}
+
+/*
+ * set interface: what the stack has a setting for (mtu, metric, dadtransmits, routerdiscovery, forwarding=disabled), in
+ * the active store or in both (store=persistent, the default as on Windows). Every other tag of the Windows command is
+ * refused with "The request is not supported." rather than taken and ignored. The values are checked by the stack
+ * (the MTU range, a metric above 9999, DAD transmits above 7: "The parameter is incorrect.", what it cannot do on the
+ * family: "The request is not supported.").
+ */
+static
+DWORD
+SetInterfaceOf(
+    _In_ ULONG Family,
+    _In_ LPWSTR *argv,
+    _In_ DWORD dwCurrentIndex,
+    _In_ DWORD dwArgCount)
+{
+    /* the order of the Windows command (the tag positions); metric follows mtu as in its parameter list */
+    TAG_TYPE Tags[] = {{L"interface", NS_REQ_PRESENT, FALSE},
+                       {L"forwarding", NS_REQ_ZERO, FALSE},
+                       {L"advertise", NS_REQ_ZERO, FALSE},
+                       {L"mtu", NS_REQ_ZERO, FALSE},
+                       {L"metric", NS_REQ_ZERO, FALSE},
+                       {L"siteprefixlength", NS_REQ_ZERO, FALSE},
+                       {L"nud", NS_REQ_ZERO, FALSE},
+                       {L"basereachabletime", NS_REQ_ZERO, FALSE},
+                       {L"retransmittime", NS_REQ_ZERO, FALSE},
+                       {L"dadtransmits", NS_REQ_ZERO, FALSE},
+                       {L"routerdiscovery", NS_REQ_ZERO, FALSE},
+                       {L"managedaddress", NS_REQ_ZERO, FALSE},
+                       {L"otherstateful", NS_REQ_ZERO, FALSE},
+                       {L"weakhostsend", NS_REQ_ZERO, FALSE},
+                       {L"weakhostreceive", NS_REQ_ZERO, FALSE},
+                       {L"ignoredefaultroutes", NS_REQ_ZERO, FALSE},
+                       {L"advertisedrouterlifetime", NS_REQ_ZERO, FALSE},
+                       {L"advertisedefaultroute", NS_REQ_ZERO, FALSE},
+                       {L"currenthoplimit", NS_REQ_ZERO, FALSE},
+                       {L"store", NS_REQ_ZERO, FALSE},
+                       {L"forcearpndwolpattern", NS_REQ_ZERO, FALSE},
+                       {L"enabledirectedmacwolpattern", NS_REQ_ZERO, FALSE},
+                       {L"ecncapability", NS_REQ_ZERO, FALSE},
+                       {L"rabaseddnsconfig", NS_REQ_ZERO, FALSE},
+                       {L"dhcpstaticipcoexistence", NS_REQ_ZERO, FALSE}};
+    enum { INTERFACE = 0, FORWARDING = 1, MTU = 3, METRIC = 4, DADTRANSMITS = 9, ROUTERDISCOVERY = 10, STORE = 19 };
+    PWSTR Values[ARRAYSIZE(Tags)];
+    NITRO_IP_INTERFACE_CONFIG Config;
+    MIB_IPINTERFACE_ROW Current;
+    ULONG IfIndex, i;
+    BOOL Persistent;
+    DWORD Error;
+
+    Error = ParseTags(argv, dwCurrentIndex, dwArgCount, Tags, ARRAYSIZE(Tags), Values);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+
+    ZeroMemory(&Config, sizeof(Config));
+    /* the export names the family by its IP version */
+    Config.Family = (Family == AF_INET6) ? 6 : 4;
+    if (Values[FORWARDING] != NULL)
+    {
+        if (IsWord(Values[FORWARDING], L"enabled"))
+            Config.Forwarding = 1;
+        else if (!IsWord(Values[FORWARDING], L"disabled"))
+            return BadValue(Values[FORWARDING], L"forwarding");
+        Config.Fields |= NITRO_IPIF_FORWARDING;
+    }
+    if (Values[MTU] != NULL)
+    {
+        if (!ParseNumber(Values[MTU], 0xffffffff, &Config.Mtu))
+            return BadValue(Values[MTU], L"mtu");
+        Config.Fields |= NITRO_IPIF_MTU;
+    }
+    if (Values[METRIC] != NULL)
+    {
+        /* 0 is the automatic metric */
+        if (!ParseNumber(Values[METRIC], 0xffffffff, &Config.Metric))
+            return BadValue(Values[METRIC], L"metric");
+        Config.Fields |= NITRO_IPIF_METRIC;
+    }
+    if (Values[DADTRANSMITS] != NULL)
+    {
+        if (!ParseNumber(Values[DADTRANSMITS], 0xffffffff, &Config.DadTransmits))
+            return BadValue(Values[DADTRANSMITS], L"dadtransmits");
+        Config.Fields |= NITRO_IPIF_DAD_TRANSMITS;
+    }
+    if (Values[ROUTERDISCOVERY] != NULL)
+    {
+        /* NL_ROUTER_DISCOVERY_BEHAVIOR */
+        if (IsWord(Values[ROUTERDISCOVERY], L"disabled"))
+            Config.RouterDiscovery = 0;
+        else if (IsWord(Values[ROUTERDISCOVERY], L"enabled"))
+            Config.RouterDiscovery = 1;
+        else if (IsWord(Values[ROUTERDISCOVERY], L"dhcp"))
+            Config.RouterDiscovery = 2;
+        else
+            return BadValue(Values[ROUTERDISCOVERY], L"routerdiscovery");
+        Config.Fields |= NITRO_IPIF_ROUTER_DISCOVERY;
+    }
+    Error = ParseStore(Values[STORE], &Persistent);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+
+    /* the tags the stack has no setting for */
+    for (i = 0; i < ARRAYSIZE(Tags); i++)
+    {
+        if (Values[i] != NULL && i != INTERFACE && i != FORWARDING && i != MTU && i != METRIC &&
+            i != DADTRANSMITS && i != ROUTERDISCOVERY && i != STORE)
+            return ERROR_NOT_SUPPORTED;
+    }
+
+    Error = ResolveInterfaceOf(Family, Values[INTERFACE], &IfIndex);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+    if (Config.Fields == 0)
+        return ERROR_NETSH_OK;
+
+    /* the loopback interface (its link MTU is 4294967295) has none of these to set */
+    ZeroMemory(&Current, sizeof(Current));
+    Current.Family = (ADDRESS_FAMILY)Family;
+    Current.InterfaceIndex = IfIndex;
+    if (GetIpInterfaceEntry(&Current) == NO_ERROR && Current.NlMtu == 0xffffffff)
+        return ERROR_NOT_SUPPORTED;
+
+    Config.InterfaceIndex = IfIndex;
+    return Finish(NitroConfigureIpInterface(Persistent, &Config));
+}
+
+static
+PCWSTR
+Enabled(
+    _In_ BOOL Value)
+{
+    return Value ? L"enabled" : L"disabled";
+}
+
+/* show interface: the parameters of the interface as the stack reports them (GetIpInterfaceEntry), in the layout of the
+   Windows command; the lines the stack has no setting for are the Windows defaults */
+static
+DWORD
+ShowInterfaceOf(
+    _In_ ULONG Family,
+    _In_ LPWSTR *argv,
+    _In_ DWORD dwCurrentIndex,
+    _In_ DWORD dwArgCount)
+{
+    PIPV6_IF List = NULL;
+    PCWSTR Filter;
+    ULONG Count, i;
+    BOOL Found = FALSE;
+    DWORD Error;
+
+    Error = ParseShowArguments(argv, dwCurrentIndex, dwArgCount, &Filter);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+    Error = LoadInterfacesOf(Family, &List, &Count);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+
+    for (i = 0; i < Count; i++)
+    {
+        MIB_IPINTERFACE_ROW Row;
+        MIB_IPSTATS Stats;
+        WCHAR Luid[64];
+        PCWSTR Discovery;
+        BOOL Loopback;
+
+        if (!MatchesFilter(&List[i], Filter))
+            continue;
+
+        ZeroMemory(&Row, sizeof(Row));
+        Row.Family = (ADDRESS_FAMILY)Family;
+        Row.InterfaceIndex = List[i].Index;
+        if (GetIpInterfaceEntry(&Row) != NO_ERROR)
+            continue;
+        Found = TRUE;
+        Loopback = (Row.NlMtu == 0xffffffff);
+
+        if (ConvertInterfaceLuidToNameW(&Row.InterfaceLuid, Luid, ARRAYSIZE(Luid)) != NO_ERROR)
+            StringCchCopyW(Luid, ARRAYSIZE(Luid), L"unknown");
+        switch (Row.RouterDiscoveryBehavior)
+        {
+            case RouterDiscoveryDisabled:   Discovery = L"disabled"; break;
+            case RouterDiscoveryEnabled:    Discovery = L"enabled"; break;
+            default:                        Discovery = L"dhcp"; break;
+        }
+        ZeroMemory(&Stats, sizeof(Stats));
+        if (Loopback || GetIpStatisticsEx(&Stats, (ADDRESS_FAMILY)Family) != NO_ERROR)
+            Stats.dwDefaultTTL = 0;
+
+        PrintMessage(L"\nInterface %s Parameters\n", List[i].Name);
+        PrintMessage(L"----------------------------------------------\n");
+        PrintMessage(L"IfLuid                             : %s\n", Luid);
+        PrintMessage(L"IfIndex                            : %lu\n", Row.InterfaceIndex);
+        PrintMessage(L"State                              : %s\n", Row.Connected ? L"connected" : L"disconnected");
+        PrintMessage(L"Metric                             : %lu\n", Row.Metric);
+        PrintMessage(L"Link MTU                           : %lu bytes\n", Row.NlMtu);
+        PrintMessage(L"Reachable Time                     : %lu ms\n", Row.ReachableTime);
+        PrintMessage(L"Base Reachable Time                : %lu ms\n", Row.BaseReachableTime);
+        PrintMessage(L"Retransmission Interval            : %lu ms\n", Row.RetransmitTime);
+        PrintMessage(L"DAD Transmits                      : %lu\n", Row.DadTransmits);
+        PrintMessage(L"Site Prefix Length                 : %lu\n", Row.SitePrefixLength);
+        PrintMessage(L"Site Id                            : %lu\n", Row.ZoneIndices[ScopeLevelSite] ? Row.ZoneIndices[ScopeLevelSite] : 1);
+        PrintMessage(L"Forwarding                         : %s\n", Enabled(Row.ForwardingEnabled));
+        PrintMessage(L"Advertising                        : %s\n", Enabled(Row.AdvertisingEnabled));
+        PrintMessage(L"Neighbor Discovery                 : %s\n", Enabled(Row.SupportsNeighborDiscovery));
+        PrintMessage(L"Neighbor Unreachability Detection  : %s\n", Enabled(Row.UseNeighborUnreachabilityDetection));
+        PrintMessage(L"Router Discovery                   : %s\n", Discovery);
+        PrintMessage(L"Managed Address Configuration      : %s\n", Enabled(Row.ManagedAddressConfigurationSupported));
+        PrintMessage(L"Other Stateful Configuration       : %s\n", Enabled(Row.OtherStatefulConfigurationSupported));
+        PrintMessage(L"Weak Host Sends                    : %s\n", Enabled(Row.WeakHostSend));
+        PrintMessage(L"Weak Host Receives                 : %s\n", Enabled(Row.WeakHostReceive));
+        PrintMessage(L"Use Automatic Metric               : %s\n", Enabled(Row.UseAutomaticMetric));
+        PrintMessage(L"Ignore Default Routes              : %s\n", Enabled(Row.DisableDefaultRoutes));
+        PrintMessage(L"Advertised Router Lifetime         : 1800 seconds\n");
+        PrintMessage(L"Advertise Default Route            : %s\n", Enabled(Row.AdvertiseDefaultRoute));
+        PrintMessage(L"Current Hop Limit                  : %lu\n", Stats.dwDefaultTTL);
+        PrintMessage(L"Force ARPND Wake up patterns       : disabled\n");
+        PrintMessage(L"Directed MAC Wake up patterns      : disabled\n");
+        PrintMessage(L"ECN capability                     : application\n");
+        PrintMessage(L"RA Based DNS Config (RFC 6106)     : %s\n", Enabled(Family == AF_INET6));
+        PrintMessage(L"DHCP/Static IP coexistence         : %s\n\n", Enabled(Family == AF_INET6));
+    }
+    FreeInterfaces(List);
+
+    /* a name or index that no interface has: what the Windows command says */
+    if (!Found && Filter != NULL && *Filter != UNICODE_NULL)
+        return ERROR_NOT_FOUND;
+    return ERROR_SUCCESS;
+}
+
+static
+DWORD
+WINAPI
+Ipv6SetInterface(
+    LPCWSTR pwszMachine,
+    LPWSTR *argv,
+    DWORD dwCurrentIndex,
+    DWORD dwArgCount,
+    DWORD dwFlags,
+    LPCVOID pvData,
+    BOOL *pbDone)
+{
+    return SetInterfaceOf(AF_INET6, argv, dwCurrentIndex, dwArgCount);
+}
+
+static
+DWORD
+WINAPI
+Ipv6ShowInterface(
+    LPCWSTR pwszMachine,
+    LPWSTR *argv,
+    DWORD dwCurrentIndex,
+    DWORD dwArgCount,
+    DWORD dwFlags,
+    LPCVOID pvData,
+    BOOL *pbDone)
+{
+    return ShowInterfaceOf(AF_INET6, argv, dwCurrentIndex, dwArgCount);
+}
+
+/* The same two commands for the IPv4 context (ip.c) */
+DWORD
+WINAPI
+Ipv4SetInterface(
+    LPCWSTR pwszMachine,
+    LPWSTR *argv,
+    DWORD dwCurrentIndex,
+    DWORD dwArgCount,
+    DWORD dwFlags,
+    LPCVOID pvData,
+    BOOL *pbDone)
+{
+    return SetInterfaceOf(AF_INET, argv, dwCurrentIndex, dwArgCount);
+}
+
+DWORD
+WINAPI
+Ipv4ShowInterface(
+    LPCWSTR pwszMachine,
+    LPWSTR *argv,
+    DWORD dwCurrentIndex,
+    DWORD dwArgCount,
+    DWORD dwFlags,
+    LPCVOID pvData,
+    BOOL *pbDone)
+{
+    return ShowInterfaceOf(AF_INET, argv, dwCurrentIndex, dwArgCount);
+}
+
+
+/* set privacy ***************************************************************/
+
+/* A time as the Windows command takes it (seconds, or 1d2h3m4s); "infinite" means nothing for these */
+static
+BOOL
+ParsePrivacyTime(
+    _In_ PCWSTR Text,
+    _Out_ PULONG Seconds)
+{
+    return _wcsicmp(Text, L"infinite") != 0 && ParseLifetime(Text, Seconds);
+}
+
+/*
+ * The stack reads the values when it starts (Tcpip6\Parameters, the names of Get-NetIPv6Protocol): store=persistent
+ * (the default) writes them and says so; there is no active store for them. The stack makes the values fit together
+ * (an address is valid at least as long as it is preferred, a new one is made before the old one is deprecated, and the
+ * random delay is at most 2/5 of the preferred lifetime and leaves the address preferred for longer than
+ * RegenerateTime, RFC 8981 3.8): values that do not are refused here.
+ */
+static
+DWORD
+WINAPI
+Ipv6SetPrivacy(
+    LPCWSTR pwszMachine,
+    LPWSTR *argv,
+    DWORD dwCurrentIndex,
+    DWORD dwArgCount,
+    DWORD dwFlags,
+    LPCVOID pvData,
+    BOOL *pbDone)
+{
+    TAG_TYPE Tags[] = {{L"state", NS_REQ_ZERO, FALSE},
+                       {L"maxdadattempts", NS_REQ_ZERO, FALSE},
+                       {L"maxvalidlifetime", NS_REQ_ZERO, FALSE},
+                       {L"maxpreferredlifetime", NS_REQ_ZERO, FALSE},
+                       {L"regeneratetime", NS_REQ_ZERO, FALSE},
+                       {L"maxrandomtime", NS_REQ_ZERO, FALSE},
+                       {L"store", NS_REQ_ZERO, FALSE}};
+    enum { STATE, DADATTEMPTS, MAXVALID, MAXPREFERRED, REGENERATE, MAXRANDOM, STORE };
+    static const PCWSTR Names[] = {L"UseTemporaryAddresses", L"MaxDadAttempts", L"MaxValidLifetime",
+                                   L"MaxPreferredLifetime", L"RegenerateTime", L"MaxRandomTime"};
+    PWSTR Values[ARRAYSIZE(Tags)];
+    PRIVACY_PARAMS Params;
+    DWORD New[6];
+    BOOL Persistent, Timing = FALSE;
+    HKEY hKey;
+    DWORD Error, i;
+
+    Error = ParseTags(argv, dwCurrentIndex, dwArgCount, Tags, ARRAYSIZE(Tags), Values);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+
+    ReadPrivacy(&Params);
+    if (Values[STATE] != NULL)
+    {
+        if (IsWord(Values[STATE], L"enabled"))
+            Params.Use = 1;
+        else if (IsWord(Values[STATE], L"disabled"))
+            Params.Use = 0;
+        else
+            return BadValue(Values[STATE], L"state");
+    }
+    if (Values[DADATTEMPTS] != NULL)
+    {
+        if (!ParseNumber(Values[DADATTEMPTS], 0xffffffff, &Params.DadAttempts))
+            return BadValue(Values[DADATTEMPTS], L"maxdadattempts");
+        Timing = TRUE;
+    }
+    if (Values[MAXVALID] != NULL)
+    {
+        if (!ParsePrivacyTime(Values[MAXVALID], &Params.MaxValid))
+            return BadValue(Values[MAXVALID], L"maxvalidlifetime");
+        Timing = TRUE;
+    }
+    if (Values[MAXPREFERRED] != NULL)
+    {
+        if (!ParsePrivacyTime(Values[MAXPREFERRED], &Params.MaxPreferred))
+            return BadValue(Values[MAXPREFERRED], L"maxpreferredlifetime");
+        Timing = TRUE;
+    }
+    if (Values[REGENERATE] != NULL)
+    {
+        if (!ParsePrivacyTime(Values[REGENERATE], &Params.Regenerate))
+            return BadValue(Values[REGENERATE], L"regeneratetime");
+        Timing = TRUE;
+    }
+    if (Values[MAXRANDOM] != NULL)
+    {
+        if (!ParsePrivacyTime(Values[MAXRANDOM], &Params.MaxRandom))
+            return BadValue(Values[MAXRANDOM], L"maxrandomtime");
+        Timing = TRUE;
+    }
+    Error = ParseStore(Values[STORE], &Persistent);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+
+    /* the values must fit together (the stack would change them otherwise) */
+    if (Timing && (Params.DadAttempts > 10 || Params.MaxValid < 2 || Params.MaxPreferred == 0 ||
+                   Params.MaxPreferred > Params.MaxValid || Params.Regenerate >= Params.MaxPreferred ||
+                   Params.MaxRandom > Params.MaxPreferred / 5 * 2 ||
+                   (ULONGLONG)Params.MaxRandom + Params.Regenerate >= Params.MaxPreferred))
+        return ERROR_INVALID_PARAMETER;
+
+    if (Values[STATE] == NULL && !Timing)
+        return ERROR_NETSH_OK;
+    if (!Persistent)
+        return ERROR_NOT_SUPPORTED;
+
+    New[0] = Params.Use;
+    New[1] = Params.DadAttempts;
+    New[2] = Params.MaxValid;
+    New[3] = Params.MaxPreferred;
+    New[4] = Params.Regenerate;
+    New[5] = Params.MaxRandom;
+
+    Error = RegCreateKeyExW(HKEY_LOCAL_MACHINE, IPV6_PARAMETERS_KEY, 0, NULL, REG_OPTION_NON_VOLATILE,
+                            KEY_SET_VALUE, NULL, &hKey, NULL);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+    /* only the values that were given */
+    for (i = 0; i < ARRAYSIZE(New) && Error == ERROR_SUCCESS; i++)
+    {
+        if (Values[i] != NULL)
+            Error = RegSetValueExW(hKey, Names[i], 0, REG_DWORD, (const BYTE *)&New[i], sizeof(DWORD));
+    }
+    RegCloseKey(hKey);
+    if (Error == ERROR_SUCCESS)
+        PrintMessage(L"The change takes effect when the computer restarts.\n");
+    return Finish(Error);
+}
+
+
+/* add, set and delete prefixpolicy ******************************************/
+
+#define POLICY_ADD      1
+#define POLICY_SET      2
+#define POLICY_DELETE   3
+
+/*
+ * The table is kept whole (iphlpapi's NitroGetPrefixPolicies / NitroSetPrefixPolicies: Tcpip6\Parameters\PrefixPolicies
+ * replaces the Windows default table). A stored change starts from the stored table and replaces an active-only one;
+ * an active change starts from the table in force and lasts until the computer restarts. The last entry cannot be
+ * deleted (an empty table is the default table).
+ */
+static
+DWORD
+EditPolicy(
+    _In_ ULONG Operation,
+    _In_ LPWSTR *argv,
+    _In_ DWORD dwCurrentIndex,
+    _In_ DWORD dwArgCount)
+{
+    TAG_TYPE AddTags[] = {{L"prefix", NS_REQ_PRESENT, FALSE},
+                          {L"precedence", NS_REQ_PRESENT, FALSE},
+                          {L"label", NS_REQ_PRESENT, FALSE},
+                          {L"store", NS_REQ_ZERO, FALSE}};
+    TAG_TYPE DeleteTags[] = {{L"prefix", NS_REQ_PRESENT, FALSE},
+                             {L"store", NS_REQ_ZERO, FALSE}};
+    PWSTR Values[4];
+    NITRO_PREFIX_POLICY Rows[NITRO_MAX_PREFIX_POLICIES];
+    IN6_ADDR Prefix;
+    ULONG Length, Count = ARRAYSIZE(Rows), Precedence = 0, Label = 0, i, Found = 0xffffffff, Bit;
+    BOOL Persistent;
+    DWORD Error;
+
+    if (Operation == POLICY_DELETE)
+        Error = ParseTags(argv, dwCurrentIndex, dwArgCount, DeleteTags, ARRAYSIZE(DeleteTags), Values);
+    else
+        Error = ParseTags(argv, dwCurrentIndex, dwArgCount, AddTags, ARRAYSIZE(AddTags), Values);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+
+    /* a prefix is <address>/<length>, with no bit set beyond the length */
+    if (wcschr(Values[0], L'/') == NULL || !ParseAddress(Values[0], TRUE, 128, &Prefix, &Length))
+        return BadValue(Values[0], L"prefix");
+    for (Bit = Length; Bit < 128; Bit++)
+    {
+        if (Prefix.u.Byte[Bit / 8] & (0x80 >> (Bit % 8)))
+            return BadValue(Values[0], L"prefix");
+    }
+    if (Operation != POLICY_DELETE)
+    {
+        if (!ParseNumber(Values[1], NITRO_MAX_POLICY_VALUE, &Precedence))
+            return BadValue(Values[1], L"precedence");
+        if (!ParseNumber(Values[2], NITRO_MAX_POLICY_VALUE, &Label))
+            return BadValue(Values[2], L"label");
+    }
+    Error = ParseStore(Values[Operation == POLICY_DELETE ? 1 : 3], &Persistent);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+
+    Error = NitroGetPrefixPolicies(Persistent, Rows, &Count);
+    if (Error != NO_ERROR)
+        return Error;
+    for (i = 0; i < Count; i++)
+    {
+        if (Rows[i].PrefixLength == Length && memcmp(Rows[i].Prefix, &Prefix, sizeof(Prefix)) == 0)
+        {
+            Found = i;
+            break;
+        }
+    }
+
+    switch (Operation)
+    {
+        case POLICY_ADD:
+            if (Found != 0xffffffff)
+                return ERROR_OBJECT_ALREADY_EXISTS;
+            if (Count >= NITRO_MAX_PREFIX_POLICIES)
+                return ERROR_NOT_ENOUGH_MEMORY;
+            Found = Count++;
+            CopyMemory(Rows[Found].Prefix, &Prefix, sizeof(Prefix));
+            Rows[Found].PrefixLength = Length;
+            Rows[Found].Precedence = Precedence;
+            Rows[Found].Label = Label;
+            break;
+        case POLICY_SET:
+            if (Found == 0xffffffff)
+                return ERROR_NOT_FOUND;
+            Rows[Found].Precedence = Precedence;
+            Rows[Found].Label = Label;
+            break;
+        default:
+            if (Found == 0xffffffff)
+                return ERROR_NOT_FOUND;
+            if (Count == 1)
+                return ERROR_NOT_SUPPORTED;
+            for (i = Found; i + 1 < Count; i++)
+                Rows[i] = Rows[i + 1];
+            Count--;
+            break;
+    }
+    return Finish(NitroSetPrefixPolicies(Persistent, Rows, Count));
+}
+
+static
+DWORD
+WINAPI
+Ipv6AddPrefixPolicy(
+    LPCWSTR pwszMachine,
+    LPWSTR *argv,
+    DWORD dwCurrentIndex,
+    DWORD dwArgCount,
+    DWORD dwFlags,
+    LPCVOID pvData,
+    BOOL *pbDone)
+{
+    return EditPolicy(POLICY_ADD, argv, dwCurrentIndex, dwArgCount);
+}
+
+static
+DWORD
+WINAPI
+Ipv6SetPrefixPolicy(
+    LPCWSTR pwszMachine,
+    LPWSTR *argv,
+    DWORD dwCurrentIndex,
+    DWORD dwArgCount,
+    DWORD dwFlags,
+    LPCVOID pvData,
+    BOOL *pbDone)
+{
+    return EditPolicy(POLICY_SET, argv, dwCurrentIndex, dwArgCount);
+}
+
+static
+DWORD
+WINAPI
+Ipv6DeletePrefixPolicy(
+    LPCWSTR pwszMachine,
+    LPWSTR *argv,
+    DWORD dwCurrentIndex,
+    DWORD dwArgCount,
+    DWORD dwFlags,
+    LPCVOID pvData,
+    BOOL *pbDone)
+{
+    return EditPolicy(POLICY_DELETE, argv, dwCurrentIndex, dwArgCount);
 }
 
 

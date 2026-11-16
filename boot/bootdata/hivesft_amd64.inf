@@ -36,6 +36,11 @@ HKLM,"SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion\OpenGLDrivers\Mes
 HKLM,"SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion\OpenGLDrivers\Mesa3D","RequiresSSE2",0x00010001,0x00000001
 HKLM,"SOFTWARE\Wow6432Node\ReactOS\OpenGL",,0x00000000,"Mesa3D"
 
+; The 32-bit view of the netsh helper registration of hivesft.inf: the 32-bit netsh.exe of SysWOW64 loads the interface
+; helper (the i386 ifmon.dll, boot/bootdata/packages/syswow64.lst) from here. The other helpers are not in SysWOW64.
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\NetSh",,0x00000012
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\NetSh","2",0x00000002,"ifmon.dll"
+
 ; The 32-bit view of the PackageManager WinRT class of hivesft.inf (WindowsRuntime is redirected, not shared, as on
 ; Windows): the 32-bit Office Deployment Tool setup.exe activates it from SysWOW64\AppXDeploymentClient.dll.
 HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Management.Deployment.PackageManager","ActivationType",0x00010001,0

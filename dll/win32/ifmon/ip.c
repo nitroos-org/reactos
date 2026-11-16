@@ -45,6 +45,10 @@ static FN_HANDLE_CMD IpShowConfig;
 static FN_HANDLE_CMD IpShowDns;
 static FN_HANDLE_CMD IpReset;
 
+/* ipv6.c: the parameters of an interface are one implementation for both families */
+FN_HANDLE_CMD Ipv4SetInterface;
+FN_HANDLE_CMD Ipv4ShowInterface;
+
 static
 CMD_ENTRY
 IpAddCommands[] = 
@@ -67,7 +71,8 @@ CMD_ENTRY
 IpSetCommands[] = 
 {
     {L"address", IpSetAddress, IDS_HLP_IP_SET_ADDRESS, IDS_HLP_IP_SET_ADDRESS_EX, 0},
-    {L"dns", IpSetDns, IDS_HLP_IP_SET_DNS, IDS_HLP_IP_SET_DNS_EX, 0}
+    {L"dns", IpSetDns, IDS_HLP_IP_SET_DNS, IDS_HLP_IP_SET_DNS_EX, 0},
+    {L"interface", Ipv4SetInterface, IDS_HLP_IP_SET_INTERFACE, IDS_HLP_IP_SET_INTERFACE_EX, 0}
 };
 
 static
@@ -76,7 +81,8 @@ IpShowCommands[] =
 {
     {L"addresses", IpShowAddresses, IDS_HLP_IP_SHOW_ADDRESSES, IDS_HLP_IP_SHOW_ADDRESSES_EX, 0},
     {L"config", IpShowConfig, IDS_HLP_IP_SHOW_CONFIG, IDS_HLP_IP_SHOW_CONFIG_EX, 0},
-    {L"dns", IpShowDns, IDS_HLP_IP_SHOW_DNS, IDS_HLP_IP_SHOW_DNS_EX, 0}
+    {L"dns", IpShowDns, IDS_HLP_IP_SHOW_DNS, IDS_HLP_IP_SHOW_DNS_EX, 0},
+    {L"interface", Ipv4ShowInterface, IDS_HLP_IP_SHOW_INTERFACE, IDS_HLP_IP_SHOW_INTERFACE_EX, 0}
 };
 
 static

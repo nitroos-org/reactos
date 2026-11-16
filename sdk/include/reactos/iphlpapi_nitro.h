@@ -31,4 +31,55 @@ DWORD WINAPI NitroConfigureIpv6Address(ULONG Operation, BOOL Persistent, const M
    or not they are active now. The table is freed with FreeMibTable; no route is a table with no entries */
 DWORD WINAPI NitroGetPersistentIpv6Routes(PMIB_IPFORWARD_TABLE2 *Table);
 
+/*
+ * Per-interface parameters of both families (the request behind SetIpInterfaceEntry), in the active store or in both
+ * stores (Persistent TRUE: written under the adapter's key, read when the adapter starts, and in force now:
+ * Set-NetIPInterface -PolicyStore PersistentStore, netsh set interface store=persistent). Unlike SetIpInterfaceEntry
+ * every field named in Fields is sent, also when it equals the value in force, so that it is stored. Family is 4
+ * or 6; Metric 0 = automatic. The stack checks the values (ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED for what it
+ * cannot do: IPv4 router discovery other than DHCP, IPv4 DAD transmits, forwarding on).
+ */
+#define NITRO_IPIF_MTU                  0x01
+#define NITRO_IPIF_METRIC               0x02
+#define NITRO_IPIF_ROUTER_DISCOVERY     0x04    /* NL_ROUTER_DISCOVERY_BEHAVIOR: 0 disabled, 1 enabled, 2 DHCP */
+#define NITRO_IPIF_DAD_TRANSMITS        0x08
+#define NITRO_IPIF_FORWARDING           0x10
+
+typedef struct _NITRO_IP_INTERFACE_CONFIG
+{
+    ULONG Family;
+    ULONG InterfaceIndex;
+    ULONG Fields;
+    ULONG Mtu;
+    ULONG Metric;
+    ULONG RouterDiscovery;
+    ULONG DadTransmits;
+    ULONG Forwarding;
+} NITRO_IP_INTERFACE_CONFIG, *PNITRO_IP_INTERFACE_CONFIG;
+
+DWORD WINAPI NitroConfigureIpInterface(BOOL Persistent, const NITRO_IP_INTERFACE_CONFIG *Config);
+
+/*
+ * The IPv6 prefix policy table (RFC 6724) that CreateSortedAddressPairs and getaddrinfo use. NitroGetPrefixPolicies
+ * returns the table in force, or with Stored TRUE the stored one (an active-only table is left out). Count is the
+ * capacity of Rows on entry and the number of rows on return; ERROR_MORE_DATA when the table does not fit.
+ * NitroSetPrefixPolicies replaces the whole table (at least one row, at most
+ * NITRO_MAX_PREFIX_POLICIES, precedence and label at most 100000): Persistent TRUE writes the stored table
+ * (Tcpip6\Parameters\PrefixPolicies) and drops an active-only one, Persistent FALSE writes a table that lasts until
+ * the computer restarts (a volatile key). Prefix bits beyond PrefixLength must be zero.
+ */
+#define NITRO_MAX_PREFIX_POLICIES       64
+#define NITRO_MAX_POLICY_VALUE          100000
+
+typedef struct _NITRO_PREFIX_POLICY
+{
+    UCHAR Prefix[16];
+    ULONG PrefixLength;
+    ULONG Precedence;
+    ULONG Label;
+} NITRO_PREFIX_POLICY, *PNITRO_PREFIX_POLICY;
+
+DWORD WINAPI NitroGetPrefixPolicies(BOOL Stored, PNITRO_PREFIX_POLICY Rows, PULONG Count);
+DWORD WINAPI NitroSetPrefixPolicies(BOOL Persistent, const NITRO_PREFIX_POLICY *Rows, ULONG Count);
+
 #endif /* __IPHLPAPI_NITRO_H__ */

@@ -8,6 +8,8 @@
 #include "iphlpapi_private.h"
 #include "addrsort.h"
 #include <wine/netioapi.h>
+#include <strsafe.h>
+#include <iphlpapi_nitro.h>
 
 WINE_DEFAULT_DEBUG_CHANNEL(iphlpapi);
 
@@ -23,15 +25,42 @@ WINE_DEFAULT_DEBUG_CHANNEL(iphlpapi);
  * the NSI store, which is not documented, so there is no Windows location to follow. It is read on every call
  * (a few microseconds), so a change applies to the next sort.
  */
+/* "netsh interface ipv6 add prefixpolicy ... store=active" keeps its table in a volatile key below the one above, which
+   wins over the stored value while it exists (it is gone when the computer restarts); a stored change removes it */
+#define ACTIVE_STATE_KEY        L"ActiveState"
+/* one line is at most "<39 characters>/128 100000 100000" */
+#define POLICY_LINE_CHARS       64
+#define POLICY_BUFFER_CHARS     (ADDRSORT_MAX_POLICY * POLICY_LINE_CHARS + 2)
+
+/* The table of the value PrefixPolicies of Key, if it has at least one valid line */
+static
+ULONG
+ReadPolicyValue(HKEY Key, PADDRSORT_POLICY_TABLE Table)
+{
+    WCHAR *Buffer;
+    DWORD Type, Size = POLICY_BUFFER_CHARS * sizeof(WCHAR) - sizeof(WCHAR);
+    ULONG Count = 0;
+
+    Buffer = HeapAlloc(GetProcessHeap(), 0, POLICY_BUFFER_CHARS * sizeof(WCHAR));
+    if (!Buffer)
+        return 0;
+    if (RegQueryValueExW(Key, PREFIX_POLICIES_VALUE, NULL, &Type, (LPBYTE)Buffer, &Size) == ERROR_SUCCESS &&
+        Type == REG_MULTI_SZ)
+    {
+        Buffer[Size / sizeof(WCHAR)] = 0;
+        Count = AddrSortParsePolicy(Buffer, Size / sizeof(WCHAR) + 1, Table);
+    }
+    HeapFree(GetProcessHeap(), 0, Buffer);
+    return Count;
+}
+
+/* Stored: only the stored table (an active-only one is left out) */
 static
 VOID
-LoadPolicy(PADDRSORT_POLICY_TABLE Table)
+LoadPolicyEx(PADDRSORT_POLICY_TABLE Table, BOOL Stored)
 {
-    HKEY Key;
-    WCHAR Buffer[2048];
-    DWORD Type, Size = sizeof(Buffer) - sizeof(WCHAR);
-
-    DWORD Components = 0, ComponentsSize = sizeof(Components);
+    HKEY Key, Active;
+    DWORD Type, Components = 0, ComponentsSize = sizeof(Components);
 
     AddrSortDefaultPolicy(Table);
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, TCP6_PARAMETERS_KEY, 0, KEY_QUERY_VALUE, &Key) != ERROR_SUCCESS)
@@ -40,13 +69,144 @@ LoadPolicy(PADDRSORT_POLICY_TABLE Table)
     if (RegQueryValueExW(Key, L"DisabledComponents", NULL, &Type, (LPBYTE)&Components, &ComponentsSize) == ERROR_SUCCESS &&
         Type == REG_DWORD && ComponentsSize == sizeof(Components) && (Components & 0x20))
         AddrSortPreferIpv4(Table);
-    if (RegQueryValueExW(Key, PREFIX_POLICIES_VALUE, NULL, &Type, (LPBYTE)Buffer, &Size) == ERROR_SUCCESS &&
-        Type == REG_MULTI_SZ)
+    ReadPolicyValue(Key, Table);
+    if (!Stored && RegOpenKeyExW(Key, ACTIVE_STATE_KEY, 0, KEY_QUERY_VALUE, &Active) == ERROR_SUCCESS)
     {
-        Buffer[Size / sizeof(WCHAR)] = 0;
-        AddrSortParsePolicy(Buffer, Size / sizeof(WCHAR) + 1, Table);
+        ReadPolicyValue(Active, Table);
+        RegCloseKey(Active);
     }
     RegCloseKey(Key);
+}
+
+static
+VOID
+LoadPolicy(PADDRSORT_POLICY_TABLE Table)
+{
+    LoadPolicyEx(Table, FALSE);
+}
+
+/* NitroGetPrefixPolicies (iphlpapi_nitro.h): the table CreateSortedAddressPairs uses now, or the stored one */
+DWORD WINAPI
+NitroGetPrefixPolicies(BOOL Stored, PNITRO_PREFIX_POLICY Rows, PULONG Count)
+{
+    PADDRSORT_POLICY_TABLE Table;
+    ULONG i;
+
+    if (!Count || (*Count && !Rows))
+        return ERROR_INVALID_PARAMETER;
+    Table = HeapAlloc(GetProcessHeap(), 0, sizeof(*Table));
+    if (!Table)
+        return ERROR_NOT_ENOUGH_MEMORY;
+    LoadPolicyEx(Table, Stored);
+    if (Table->Count > *Count)
+    {
+        *Count = Table->Count;
+        HeapFree(GetProcessHeap(), 0, Table);
+        return ERROR_MORE_DATA;
+    }
+    for (i = 0; i < Table->Count; i++)
+    {
+        RtlCopyMemory(Rows[i].Prefix, Table->Entry[i].Prefix, 16);
+        Rows[i].PrefixLength = Table->Entry[i].Length;
+        Rows[i].Precedence = Table->Entry[i].Precedence;
+        Rows[i].Label = Table->Entry[i].Label;
+    }
+    *Count = Table->Count;
+    HeapFree(GetProcessHeap(), 0, Table);
+    return NO_ERROR;
+}
+
+/* The lines of the value: "<8 hex groups>/<length> <precedence> <label>" (the full form needs no "::" handling) */
+static
+DWORD
+FormatPolicyLines(const NITRO_PREFIX_POLICY *Rows, ULONG Count, WCHAR *Buffer, ULONG Chars, PULONG Used)
+{
+    ULONG i, g, Position = 0;
+
+    for (i = 0; i < Count; i++)
+    {
+        WCHAR Line[POLICY_LINE_CHARS];
+        HRESULT hr = S_OK;
+        size_t Length;
+
+        Line[0] = UNICODE_NULL;
+        for (g = 0; g < 8 && SUCCEEDED(hr); g++)
+            hr = StringCchPrintfW(Line + wcslen(Line), ARRAYSIZE(Line) - wcslen(Line), g ? L":%x" : L"%x",
+                                  (Rows[i].Prefix[g * 2] << 8) | Rows[i].Prefix[g * 2 + 1]);
+        if (SUCCEEDED(hr))
+            hr = StringCchPrintfW(Line + wcslen(Line), ARRAYSIZE(Line) - wcslen(Line), L"/%lu %lu %lu",
+                                  Rows[i].PrefixLength, Rows[i].Precedence, Rows[i].Label);
+        if (FAILED(hr))
+            return ERROR_INVALID_PARAMETER;
+        Length = wcslen(Line) + 1;
+        if (Position + Length + 1 > Chars)
+            return ERROR_INSUFFICIENT_BUFFER;
+        RtlCopyMemory(Buffer + Position, Line, Length * sizeof(WCHAR));
+        Position += (ULONG)Length;
+    }
+    Buffer[Position++] = UNICODE_NULL;
+    *Used = Position;
+    return NO_ERROR;
+}
+
+/* NitroSetPrefixPolicies (iphlpapi_nitro.h) */
+DWORD WINAPI
+NitroSetPrefixPolicies(BOOL Persistent, const NITRO_PREFIX_POLICY *Rows, ULONG Count)
+{
+    WCHAR *Buffer;
+    HKEY Key, Active;
+    ULONG i, Used = 0, Bits;
+    DWORD Error;
+
+    if (!Rows || Count == 0 || Count > NITRO_MAX_PREFIX_POLICIES)
+        return ERROR_INVALID_PARAMETER;
+    for (i = 0; i < Count; i++)
+    {
+        if (Rows[i].PrefixLength > 128 || Rows[i].Precedence > NITRO_MAX_POLICY_VALUE ||
+            Rows[i].Label > NITRO_MAX_POLICY_VALUE)
+            return ERROR_INVALID_PARAMETER;
+        /* the bits of the prefix beyond its length are zero */
+        for (Bits = Rows[i].PrefixLength; Bits < 128; Bits++)
+            if (Rows[i].Prefix[Bits / 8] & (0x80 >> (Bits % 8)))
+                return ERROR_INVALID_PARAMETER;
+    }
+
+    Buffer = HeapAlloc(GetProcessHeap(), 0, POLICY_BUFFER_CHARS * sizeof(WCHAR));
+    if (!Buffer)
+        return ERROR_NOT_ENOUGH_MEMORY;
+    Error = FormatPolicyLines(Rows, Count, Buffer, POLICY_BUFFER_CHARS, &Used);
+    if (Error == NO_ERROR)
+        Error = RegCreateKeyExW(HKEY_LOCAL_MACHINE, TCP6_PARAMETERS_KEY, 0, NULL, REG_OPTION_NON_VOLATILE,
+                                KEY_SET_VALUE | KEY_CREATE_SUB_KEY, NULL, &Key, NULL);
+    if (Error == NO_ERROR)
+    {
+        if (Persistent)
+        {
+            Error = RegSetValueExW(Key, PREFIX_POLICIES_VALUE, 0, REG_MULTI_SZ, (const BYTE *)Buffer,
+                                   Used * sizeof(WCHAR));
+            /* the stored table is in force now: an active-only one must not hide it */
+            if (Error == NO_ERROR)
+            {
+                Error = RegDeleteKeyW(Key, ACTIVE_STATE_KEY);
+                if (Error == ERROR_FILE_NOT_FOUND)
+                    Error = NO_ERROR;
+            }
+        }
+        else
+        {
+            Error = RegCreateKeyExW(Key, ACTIVE_STATE_KEY, 0, NULL, REG_OPTION_VOLATILE, KEY_SET_VALUE, NULL,
+                                    &Active, NULL);
+            if (Error == NO_ERROR)
+            {
+                Error = RegSetValueExW(Active, PREFIX_POLICIES_VALUE, 0, REG_MULTI_SZ, (const BYTE *)Buffer,
+                                       Used * sizeof(WCHAR));
+                RegCloseKey(Active);
+            }
+        }
+        RegCloseKey(Key);
+    }
+    HeapFree(GetProcessHeap(), 0, Buffer);
+    return Error;
 }
 
 typedef struct _SORT_CONTEXT

@@ -34,6 +34,10 @@
 
 #define IDS_HLP_IP_RESET                    227
 #define IDS_HLP_IP_RESET_EX                 228
+#define IDS_HLP_IP_SET_INTERFACE            217
+#define IDS_HLP_IP_SET_INTERFACE_EX         218
+#define IDS_HLP_IP_SHOW_INTERFACE           229
+#define IDS_HLP_IP_SHOW_INTERFACE_EX        230
 
 #define IDS_HLP_WINSOCK_RESET               250
 #define IDS_HLP_WINSOCK_RESET_EX            251
@@ -95,6 +99,8 @@
 #define IDS_HLP_IPV6_SHOW_PRIVACY_EX                1018
 #define IDS_HLP_IPV6_SHOW_ROUTE                     1019
 #define IDS_HLP_IPV6_SHOW_ROUTE_EX                  1020
+#define IDS_HLP_IPV6_SHOW_INTERFACE                 1021
+#define IDS_HLP_IPV6_SHOW_INTERFACE_EX              1022
 
 #define IDS_HLP_IPV6_ADD                            1100
 #define IDS_HLP_IPV6_ADD_ADDRESS                    1101
@@ -103,6 +109,8 @@
 #define IDS_HLP_IPV6_ADD_DNSSERVERS_EX              1104
 #define IDS_HLP_IPV6_ADD_ROUTE                      1105
 #define IDS_HLP_IPV6_ADD_ROUTE_EX                   1106
+#define IDS_HLP_IPV6_ADD_PREFIXPOLICY               1107
+#define IDS_HLP_IPV6_ADD_PREFIXPOLICY_EX            1108
 #define IDS_HLP_IPV6_DELETE                         1110
 #define IDS_HLP_IPV6_DELETE_ADDRESS                 1111
 #define IDS_HLP_IPV6_DELETE_ADDRESS_EX              1112
@@ -110,8 +118,16 @@
 #define IDS_HLP_IPV6_DELETE_DNSSERVERS_EX           1114
 #define IDS_HLP_IPV6_DELETE_ROUTE                   1115
 #define IDS_HLP_IPV6_DELETE_ROUTE_EX                1116
+#define IDS_HLP_IPV6_DELETE_PREFIXPOLICY            1117
+#define IDS_HLP_IPV6_DELETE_PREFIXPOLICY_EX         1118
 #define IDS_HLP_IPV6_SET                            1120
 #define IDS_HLP_IPV6_SET_ADDRESS                    1121
 #define IDS_HLP_IPV6_SET_ADDRESS_EX                 1122
 #define IDS_HLP_IPV6_SET_GLOBAL                     1123
 #define IDS_HLP_IPV6_SET_GLOBAL_EX                  1124
+#define IDS_HLP_IPV6_SET_INTERFACE                  1125
+#define IDS_HLP_IPV6_SET_INTERFACE_EX               1126
+#define IDS_HLP_IPV6_SET_PREFIXPOLICY               1127
+#define IDS_HLP_IPV6_SET_PREFIXPOLICY_EX            1128
+#define IDS_HLP_IPV6_SET_PRIVACY                    1129
+#define IDS_HLP_IPV6_SET_PRIVACY_EX                 1130

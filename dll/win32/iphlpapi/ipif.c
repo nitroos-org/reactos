@@ -22,6 +22,7 @@
 #include "iphlpapi_private.h"
 #include <wine/netioapi.h>
 #include "ipv6net.h"
+#include <iphlpapi_nitro.h>
 
 WINE_DEFAULT_DEBUG_CHANNEL(iphlpapi);
 
@@ -174,4 +175,49 @@ DWORD WINAPI SetIpInterfaceEntry(PMIB_IPINTERFACE_ROW Row)
   /* the active store, as the other row functions of this DLL (gone when the computer restarts); the persistent one
      is reached through the request alone (Set-NetIPInterface) */
   return IpSetInterfaceConfig(&Request, TCP_IPV6_STORE_ACTIVE);
+}
+
+/*
+ * The request of SetIpInterfaceEntry with the fields named by the caller, for the private iphlpapi_nitro.h export:
+ * what is named is sent, also when it equals the value in force (the persistent store has to get it), and the store
+ * is the caller's choice.
+ */
+DWORD WINAPI NitroConfigureIpInterface(BOOL Persistent, const NITRO_IP_INTERFACE_CONFIG *Config)
+{
+  TCP_IP_INTERFACE_REQUEST Request;
+
+  if (!Config || (Config->Family != 4 && Config->Family != 6) || Config->InterfaceIndex == 0 || Config->Fields == 0 ||
+      (Config->Fields & ~(ULONG)(NITRO_IPIF_MTU | NITRO_IPIF_METRIC | NITRO_IPIF_ROUTER_DISCOVERY |
+                                 NITRO_IPIF_DAD_TRANSMITS | NITRO_IPIF_FORWARDING)))
+    return ERROR_INVALID_PARAMETER;
+
+  memset(&Request, 0, sizeof(Request));
+  Request.Family = (Config->Family == 6) ? TCP_IPIF_IPV6 : TCP_IPIF_IPV4;
+  Request.IfIndex = Config->InterfaceIndex;
+  if (Config->Fields & NITRO_IPIF_MTU)
+  {
+    Request.Fields |= TCP_IPIF_SET_MTU;
+    Request.Mtu = Config->Mtu;
+  }
+  if (Config->Fields & NITRO_IPIF_METRIC)
+  {
+    Request.Fields |= TCP_IPIF_SET_METRIC;
+    Request.Metric = Config->Metric;
+  }
+  if (Config->Fields & NITRO_IPIF_ROUTER_DISCOVERY)
+  {
+    Request.Fields |= TCP_IPIF_SET_ROUTER_DISCOVERY;
+    Request.RouterDiscovery = Config->RouterDiscovery;
+  }
+  if (Config->Fields & NITRO_IPIF_DAD_TRANSMITS)
+  {
+    Request.Fields |= TCP_IPIF_SET_DAD_TRANSMITS;
+    Request.DadTransmits = Config->DadTransmits;
+  }
+  if (Config->Fields & NITRO_IPIF_FORWARDING)
+  {
+    Request.Fields |= TCP_IPIF_SET_FORWARDING;
+    Request.Forwarding = Config->Forwarding;
+  }
+  return IpSetInterfaceConfig(&Request, Persistent ? TCP_IPV6_STORE_PERSISTENT : TCP_IPV6_STORE_ACTIVE);
 }
