@@ -13,6 +13,7 @@
 #include <fltkernel.h>
 #include <ntddk.h>
 #include <ntstrsafe.h>
+#include <pseh/pseh2.h>
 
 #include "fltsample.h"
 
@@ -1348,15 +1349,57 @@ PortDisconnect(_In_opt_ PVOID ConnectionCookie)
     FltCloseClientPort(SampleFilter, &ClientPort);
 }
 
+/* Review test: where the message buffers are, and whether they are the client's (FLTSAMPLE_MSG_WHERE) */
 static
 NTSTATUS
-FLTAPI
-PortMessage(_In_opt_ PVOID PortCookie,
-            _In_reads_bytes_opt_(InputBufferLength) PVOID InputBuffer,
-            _In_ ULONG InputBufferLength,
-            _Out_writes_bytes_to_opt_(OutputBufferLength, *ReturnOutputBufferLength) PVOID OutputBuffer,
-            _In_ ULONG OutputBufferLength,
-            _Out_ PULONG ReturnOutputBufferLength)
+WhereAreTheBuffers(_In_ PFLTSAMPLE_MSG Message,
+                   _In_ ULONG InputBufferLength,
+                   _In_opt_ PVOID OutputBuffer,
+                   _In_ ULONG OutputBufferLength,
+                   _Out_ PULONG ReturnOutputBufferLength)
+{
+    FLTSAMPLE_WHERE_RESULT Result = { 0 };
+    ULONG64 Where[2];
+
+    if (InputBufferLength < FIELD_OFFSET(FLTSAMPLE_MSG, Data) + sizeof(Where) ||
+        OutputBufferLength < sizeof(Result))
+    {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    RtlCopyMemory(Where, Message->Data, sizeof(Where));
+    Result.InputIsClients = Where[0] == (ULONG64)(ULONG_PTR)Message;
+    Result.OutputIsClients = Where[1] == (ULONG64)(ULONG_PTR)OutputBuffer;
+    Result.PreviousModeUser = ExGetPreviousMode() == UserMode;
+    if (Result.PreviousModeUser)
+    {
+        /* What a filter ported from Windows does with them */
+        _SEH2_TRY
+        {
+            ProbeForRead(Message, InputBufferLength, 1);
+            ProbeForWrite(OutputBuffer, OutputBufferLength, 1);
+            Result.ProbesOk = TRUE;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Result.ProbesOk = FALSE;
+        }
+        _SEH2_END;
+    }
+
+    RtlCopyMemory(OutputBuffer, &Result, sizeof(Result));
+    *ReturnOutputBufferLength = sizeof(Result);
+    return STATUS_SUCCESS;
+}
+
+static
+NTSTATUS
+PortMessageWork(_In_opt_ PVOID PortCookie,
+                _In_reads_bytes_opt_(InputBufferLength) PVOID InputBuffer,
+                _In_ ULONG InputBufferLength,
+                _Out_writes_bytes_to_opt_(OutputBufferLength, *ReturnOutputBufferLength) PVOID OutputBuffer,
+                _In_ ULONG OutputBufferLength,
+                _Out_ PULONG ReturnOutputBufferLength)
 {
     PFLTSAMPLE_MSG Message = InputBuffer;
     NTSTATUS Status;
@@ -1392,6 +1435,15 @@ PortMessage(_In_opt_ PVOID PortCookie,
 
         case FLTSAMPLE_MSG_ARM:
             ArmAsk = Message->Arg != 0;
+            return STATUS_SUCCESS;
+
+        case FLTSAMPLE_MSG_WHERE:
+            return WhereAreTheBuffers(Message, InputBufferLength, OutputBuffer, OutputBufferLength,
+                                      ReturnOutputBufferLength);
+
+        case FLTSAMPLE_MSG_OVERREPORT:
+            /* A filter which claims more than it wrote: the client must not get bytes of ours */
+            *ReturnOutputBufferLength = OutputBufferLength;
             return STATUS_SUCCESS;
 
         case FLTSAMPLE_MSG_NOTIFY:
@@ -1441,6 +1493,37 @@ PortMessage(_In_opt_ PVOID PortCookie,
         default:
             return STATUS_INVALID_DEVICE_REQUEST;
     }
+}
+
+/*
+ * The message callback gets the client's own buffers, raw user mode memory (WDK, PFLT_MESSAGE_NOTIFY):
+ * everything that touches them runs inside an exception handler.
+ */
+static
+NTSTATUS
+FLTAPI
+PortMessage(_In_opt_ PVOID PortCookie,
+            _In_reads_bytes_opt_(InputBufferLength) PVOID InputBuffer,
+            _In_ ULONG InputBufferLength,
+            _Out_writes_bytes_to_opt_(OutputBufferLength, *ReturnOutputBufferLength) PVOID OutputBuffer,
+            _In_ ULONG OutputBufferLength,
+            _Out_ PULONG ReturnOutputBufferLength)
+{
+    NTSTATUS Status;
+
+    _SEH2_TRY
+    {
+        Status = PortMessageWork(PortCookie, InputBuffer, InputBufferLength, OutputBuffer, OutputBufferLength,
+                                 ReturnOutputBufferLength);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        *ReturnOutputBufferLength = 0;
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+
+    return Status;
 }
 
 /* A create the client has a say in: it gets the name, and a reply other than 0 refuses the create */

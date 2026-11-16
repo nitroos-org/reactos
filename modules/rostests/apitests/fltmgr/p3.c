@@ -848,6 +848,80 @@ START_TEST(p3pdpc)
     test_PendCompletedAtDispatch();
 }
 
+/*
+ * FilterSendMessage: the filter's message callback gets the client's own buffers, which a filter ported
+ * from Windows probes (ProbeForRead / ProbeForWrite) and accesses in try/except blocks (WDK,
+ * PFLT_MESSAGE_NOTIFY). A filter which says it returned more than it wrote gives the client nothing but
+ * the client's own bytes.
+ */
+static
+void
+test_MessageBuffers(void)
+{
+    SAMPLE P = { { 0 } };
+    HANDLE Port = INVALID_HANDLE_VALUE;
+    HRESULT hr;
+    struct { ULONG Code; ULONG Arg; ULONG64 Where[2]; } Message;
+    FLTSAMPLE_WHERE_RESULT Where;
+    UCHAR Out[256], In[16];
+    DWORD Bytes = 0, i, Foreign = 0;
+
+    if (!LoadSample(&P, L"FltSampleP", L"383000.5", 0xFFFF))
+    {
+        skip("Can't load the sample filter\n");
+        return;
+    }
+    hr = FilterConnectCommunicationPort(L"\\FltSamplePPort", 0, NULL, 0, NULL, &Port);
+    ok(SUCCEEDED(hr), "Connect failed: 0x%lx\n", (ULONG)hr);
+    if (FAILED(hr))
+        goto Quit;
+
+    C_ASSERT(FIELD_OFFSET(FLTSAMPLE_MSG, Data) == 8);
+    ZeroMemory(&Message, sizeof(Message));
+    Message.Code = FLTSAMPLE_MSG_WHERE;
+    Message.Where[0] = (ULONG64)(ULONG_PTR)&Message;
+    Message.Where[1] = (ULONG64)(ULONG_PTR)&Where;
+    ZeroMemory(&Where, sizeof(Where));
+    hr = FilterSendMessage(Port, &Message, sizeof(Message), &Where, sizeof(Where), &Bytes);
+    ok(hr == S_OK, "FilterSendMessage: 0x%lx\n", (ULONG)hr);
+    ok(Bytes == sizeof(Where), "%lu bytes back\n", Bytes);
+    ok(Where.PreviousModeUser, "The callback didn't run for a user mode caller\n");
+    ok(Where.InputIsClients, "The filter didn't get the client's input buffer\n");
+    ok(Where.OutputIsClients, "The filter didn't get the client's output buffer\n");
+    ok(Where.ProbesOk, "ProbeForRead / ProbeForWrite of the message buffers failed in the filter\n");
+
+    /* Over-reporting: the client's buffer keeps its own bytes */
+    ZeroMemory(In, sizeof(In));
+    ((PFLTSAMPLE_MSG)In)->Code = FLTSAMPLE_MSG_OVERREPORT;
+    memset(In + 8, 'm', sizeof(In) - 8);
+    memset(Out, 0xCC, sizeof(Out));
+    hr = FilterSendMessage(Port, In, sizeof(In), Out, sizeof(Out), &Bytes);
+    ok(hr == S_OK, "FilterSendMessage: 0x%lx\n", (ULONG)hr);
+    ok(Bytes == sizeof(Out), "%lu bytes back\n", Bytes);
+    for (i = 0; i < sizeof(Out); i++)
+    {
+        if (Out[i] != 0xCC)
+            Foreign++;
+    }
+    ok(Foreign == 0, "%lu bytes of the output buffer were not the client's own\n", Foreign);
+
+    CloseHandle(Port);
+Quit:
+    UnloadSample(&P, TRUE);
+}
+
+START_TEST(p3msg)
+{
+    EnsureTestDirectory();
+    if (!StartFilterManager())
+    {
+        skip("No filter manager\n");
+        return;
+    }
+
+    test_MessageBuffers();
+}
+
 START_TEST(p3create)
 {
     EnsureTestDirectory();

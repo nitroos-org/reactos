@@ -136,6 +136,18 @@ typedef struct _FLTSAMPLE_MSG
 #define FLTSAMPLE_MSG_NOTIFY        3   /* the driver sends Arg bytes of data to the client, without a reply; the status comes back */
 #define FLTSAMPLE_MSG_ASK           4   /* the same with a reply, waiting Arg ms (0: forever); { status, reply length, reply } comes back */
 #define FLTSAMPLE_MSG_ARM           5   /* Arg = 1: the creates of .msg files are put to the client, which can refuse them */
+#define FLTSAMPLE_MSG_WHERE         6   /* Data: the addresses of the client's input and output buffers (2 ULONG64);
+                                           the answer: FLTSAMPLE_WHERE_RESULT */
+#define FLTSAMPLE_MSG_OVERREPORT    7   /* the filter says it returned the whole output buffer, writing nothing */
+
+typedef struct _FLTSAMPLE_WHERE_RESULT
+{
+    ULONG InputIsClients;       /* the filter got the client's own buffers */
+    ULONG OutputIsClients;
+    ULONG ProbesOk;             /* ProbeForRead / ProbeForWrite of them worked (previous mode user) */
+    ULONG PreviousModeUser;
+
+} FLTSAMPLE_WHERE_RESULT, *PFLTSAMPLE_WHERE_RESULT;
 
 /* The messages of the driver to the client (after the FILTER_MESSAGE_HEADER) */
 #define FLTSAMPLE_KIND_CREATE       1   /* followed by the name of the file; the reply is a ULONG, not 0 for no */
