@@ -192,7 +192,27 @@ static HRESULT d3d11_create_device(IDXGIAdapter *adapter, D3D_DRIVER_TYPE driver
         switch(driver_type)
         {
             case D3D_DRIVER_TYPE_WARP:
+#ifdef __REACTOS__
+            {
+                /* The software (WARP) adapter, as Windows does: the one IDXGIFactory4::EnumWarpAdapter returns
+                 * and EnumAdapters1 lists last, not the first adapter of the display. */
+                IDXGIFactory4 *factory4;
+
+                if (SUCCEEDED(hr = IDXGIFactory_QueryInterface(factory, &IID_IDXGIFactory4, (void **)&factory4)))
+                {
+                    hr = IDXGIFactory4_EnumWarpAdapter(factory4, &IID_IDXGIAdapter, (void **)&adapter);
+                    IDXGIFactory4_Release(factory4);
+                    if (SUCCEEDED(hr))
+                        break;
+                }
+                WARN("No WARP adapter, returning %#lx.\n", hr);
+                IDXGIFactory_Release(factory);
+                return hr;
+            }
+#else
                 FIXME("WARP driver not implemented, falling back to hardware.\n");
+                /* fall through */
+#endif
             case D3D_DRIVER_TYPE_HARDWARE:
             {
                 hr = IDXGIFactory_EnumAdapters(factory, 0, &adapter);

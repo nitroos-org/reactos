@@ -21,6 +21,9 @@
 
 #define COBJMACROS
 #include "d3d10_1.h"
+#ifdef __REACTOS__
+#include "dxgi1_4.h"
+#endif
 
 WINE_DEFAULT_DEBUG_CHANNEL(d3d10);
 
@@ -104,7 +107,27 @@ static HRESULT d3d10_create_device1(IDXGIAdapter *adapter, D3D10_DRIVER_TYPE dri
         switch (driver_type)
         {
             case D3D10_DRIVER_TYPE_WARP:
+#ifdef __REACTOS__
+            {
+                /* The software (WARP) adapter, as Windows does: the one IDXGIFactory4::EnumWarpAdapter returns
+                 * and EnumAdapters1 lists last, not the first adapter of the display. */
+                IDXGIFactory4 *factory4;
+
+                if (SUCCEEDED(hr = IDXGIFactory_QueryInterface(factory, &IID_IDXGIFactory4, (void **)&factory4)))
+                {
+                    hr = IDXGIFactory4_EnumWarpAdapter(factory4, &IID_IDXGIAdapter, (void **)&adapter);
+                    IDXGIFactory4_Release(factory4);
+                    if (SUCCEEDED(hr))
+                        break;
+                }
+                WARN("No WARP adapter, hr %#lx.\n", hr);
+                IDXGIFactory_Release(factory);
+                return hr;
+            }
+#else
                 FIXME("WARP driver not implemented, falling back to hardware.\n");
+                /* fall through */
+#endif
             case D3D10_DRIVER_TYPE_HARDWARE:
             {
                 if (FAILED(hr = IDXGIFactory_EnumAdapters(factory, 0, &adapter)))
