@@ -491,6 +491,7 @@ static DWORD build_routes(const IPV6_ALL *All, PMIB_IPFORWARD_ROW2 *Rows, ULONG 
     Row->Protocol = Route->Protocol;
     Row->Publish = (Route->Flags & TCP_IPV6_ROUTE_PUBLISH) != 0;
     Row->Immortal = (Route->Flags & TCP_IPV6_ROUTE_IMMORTAL) != 0;
+    Row->AutoconfigureAddress = (Route->Flags & TCP_IPV6_ROUTE_NO_AUTOCONFIGURE) == 0;
     Row->Age = Route->Age;
   }
 

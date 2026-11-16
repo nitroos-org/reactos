@@ -16,7 +16,7 @@
 #include <ndk/obfuncs.h>
 #include <ndk/rtlfuncs.h>
 
-static PFN_GET_TABLE pGetUnicastIpAddressTable;
+static PFN_GET_TABLE pGetUnicastIpAddressTable, pGetIpForwardTable2;
 static PFN_FREE_TABLE pFreeMibTable;
 
 /* MIB_UNICASTIPADDRESS_ROW and its table */
@@ -278,6 +278,316 @@ static void TestRoutes(ULONG IfIndex)
     ok(Status == STATUS_SUCCESS, "delete active: %lx\n", Status);
 }
 
+/* Whether the address is in the active table of the interface */
+static BOOL AddressActive(ULONG IfIndex, const char *Text)
+{
+    SOCKADDR_INET Address;
+    UNICAST_TABLE6 *Table = NULL;
+    BOOL Found = FALSE;
+    ULONG i;
+
+    Ipv6Parse(&Address, Text, 0);
+    if (pGetUnicastIpAddressTable(AF_INET6, (PVOID *)&Table) != NO_ERROR || !Table)
+        return FALSE;
+    for (i = 0; i < Table->NumEntries; i++)
+    {
+        if (Table->Table[i].InterfaceIndex == IfIndex &&
+            !memcmp(&Table->Table[i].Address.Ipv6.sin6_addr, &Address.Ipv6.sin6_addr, 16))
+            Found = TRUE;
+    }
+    pFreeMibTable(Table);
+    return Found;
+}
+
+/* Whether the route (prefix, length, next hop in the table) is in the active table of the interface */
+static BOOL RouteActive(ULONG IfIndex, const char *Prefix, ULONG Length)
+{
+    SOCKADDR_INET Address;
+    ROUTE_TABLE6 *Table = NULL;
+    BOOL Found = FALSE;
+    ULONG i;
+
+    Ipv6Parse(&Address, Prefix, 0);
+    if (pGetIpForwardTable2(AF_INET6, (PVOID *)&Table) != NO_ERROR || !Table)
+        return FALSE;
+    for (i = 0; i < Table->NumEntries; i++)
+    {
+        if (Table->Table[i].InterfaceIndex == IfIndex && Table->Table[i].DestinationPrefix.PrefixLength == Length &&
+            !memcmp(&Table->Table[i].DestinationPrefix.Prefix.Ipv6.sin6_addr, &Address.Ipv6.sin6_addr, 16))
+            Found = TRUE;
+    }
+    pFreeMibTable(Table);
+    return Found;
+}
+
+/* Puts records in place of a value of the adapter's key (the test restores what it replaced) */
+static BOOL WriteRecords(const char *Value, const VOID *Data, DWORD Size)
+{
+    HKEY Key;
+    DWORD Error;
+
+    Error = RegCreateKeyExA(HKEY_LOCAL_MACHINE, KeyPath, 0, NULL, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, NULL, &Key,
+                            NULL);
+    if (Error != ERROR_SUCCESS)
+        return FALSE;
+    Error = Data ? RegSetValueExA(Key, Value, 0, REG_BINARY, Data, Size) : RegDeleteValueA(Key, Value);
+    RegCloseKey(Key);
+    return Error == ERROR_SUCCESS || (!Data && Error == ERROR_FILE_NOT_FOUND);
+}
+
+/* A creation racing a removal of the same entry: the persistent store ends as the active table does. Two threads
+   (the one that makes at a lower priority than the one that removes, so that the removal can overtake a creation
+   that is between the change of the table and the write of the record) make and remove the same persistent address
+   (or route) at the same moment, Rounds times; after each round, with both requests answered, the entry is in the
+   store exactly when it is in the table. Each round starts with neither */
+typedef struct
+{
+    BOOL Route;
+    ULONG Operation;
+    ULONG IfIndex;
+    HANDLE Start;
+    HANDLE Done;
+    volatile LONG Stop;
+    ULONG Unexpected;
+} RACE_PARAM;
+
+static DWORD WINAPI RaceThread(PVOID Param)
+{
+    RACE_PARAM *P = Param;
+    NTSTATUS Status;
+
+    for (;;)
+    {
+        WaitForSingleObject(P->Start, INFINITE);
+        if (P->Stop)
+            break;
+        if (P->Route)
+            Status = RouteRequest(P->Operation, TCP_IPV6_STORE_PERSISTENT, P->IfIndex, "2001:db8:a1::", 48,
+                                  "fe80::a1", 10);
+        else
+            Status = AddressRequest(P->Operation, TCP_IPV6_STORE_PERSISTENT, P->IfIndex, "2001:db8:a1::5", ~0UL);
+        if (Status != STATUS_SUCCESS && Status != STATUS_OBJECT_NAME_COLLISION && Status != STATUS_NOT_FOUND)
+            P->Unexpected++;
+        SetEvent(P->Done);
+    }
+    return 0;
+}
+
+/* Rounds: 10000, or the number the environment variable IPV6RACE gives */
+static ULONG RaceCount(void)
+{
+    char Text[16];
+
+    if (GetEnvironmentVariableA("IPV6RACE", Text, sizeof(Text)) && atol(Text) > 0)
+        return atol(Text);
+    return 10000;
+}
+
+static void RaceClean(ULONG IfIndex, BOOL Route)
+{
+    if (Route)
+        RouteRequest(TCP_IPV6_CONFIG_DELETE, TCP_IPV6_STORE_PERSISTENT, IfIndex, "2001:db8:a1::", 48, "fe80::a1", 0);
+    else
+        AddressRequest(TCP_IPV6_CONFIG_DELETE, TCP_IPV6_STORE_PERSISTENT, IfIndex, "2001:db8:a1::5", 0);
+}
+
+static void TestRace(ULONG IfIndex, BOOL Route)
+{
+    RACE_PARAM Make, Remove;
+    HANDLE Threads[2], Done[2];
+    TCP_IPV6_ADDRESS_REQUEST AddressRecord;
+    TCP_IPV6_ROUTE_REQUEST RouteRecord;
+    BOOL Active, Stored;
+    ULONG Round, Rounds = RaceCount(), Mismatches = 0, Unexpected, Left = 0, Extra = 0;
+
+    memset(&Make, 0, sizeof(Make));
+    memset(&Remove, 0, sizeof(Remove));
+    Make.Route = Remove.Route = Route;
+    Make.Operation = TCP_IPV6_CONFIG_CREATE;
+    Remove.Operation = TCP_IPV6_CONFIG_DELETE;
+    Make.IfIndex = Remove.IfIndex = IfIndex;
+    Make.Start = CreateEventW(NULL, FALSE, FALSE, NULL);
+    Make.Done = CreateEventW(NULL, FALSE, FALSE, NULL);
+    Remove.Start = CreateEventW(NULL, FALSE, FALSE, NULL);
+    Remove.Done = CreateEventW(NULL, FALSE, FALSE, NULL);
+    Done[0] = Make.Done;
+    Done[1] = Remove.Done;
+    Threads[0] = CreateThread(NULL, 0, RaceThread, &Make, 0, NULL);
+    Threads[1] = CreateThread(NULL, 0, RaceThread, &Remove, 0, NULL);
+    SetThreadPriority(Threads[0], THREAD_PRIORITY_BELOW_NORMAL);
+    SetThreadPriority(Threads[1], THREAD_PRIORITY_ABOVE_NORMAL);
+
+    RaceClean(IfIndex, Route);
+    for (Round = 0; Round < Rounds; Round++)
+    {
+        SetEvent(Make.Start);
+        SetEvent(Remove.Start);
+        WaitForMultipleObjects(2, Done, TRUE, INFINITE);
+
+        if (Route)
+        {
+            Active = RouteActive(IfIndex, "2001:db8:a1::", 48);
+            Stored = StoredRoute("2001:db8:a1::", 48, &RouteRecord);
+        }
+        else
+        {
+            Active = AddressActive(IfIndex, "2001:db8:a1::5");
+            Stored = StoredAddress("2001:db8:a1::5", &AddressRecord);
+        }
+        if (Active != Stored)
+        {
+            Mismatches++;
+            if (Active)
+                Left++;     /* in the table, not in the store */
+            else
+                Extra++;    /* in the store, not in the table */
+        }
+        /* neither, for the next round (a removal takes the entry out of both) */
+        RaceClean(IfIndex, Route);
+    }
+    ok(Mismatches == 0, "%s: %lu of %lu rounds ended with the store out of step (%lu in the table only, %lu in the "
+       "store only)\n", Route ? "route" : "address", Mismatches, Rounds, Left, Extra);
+
+    Make.Stop = Remove.Stop = TRUE;
+    SetEvent(Make.Start);
+    SetEvent(Remove.Start);
+    WaitForMultipleObjects(2, Threads, TRUE, INFINITE);
+    Unexpected = Make.Unexpected + Remove.Unexpected;
+    ok(Unexpected == 0, "%s race: %lu unexpected answers\n", Route ? "route" : "address", Unexpected);
+    CloseHandle(Threads[0]);
+    CloseHandle(Threads[1]);
+    CloseHandle(Make.Start);
+    CloseHandle(Make.Done);
+    CloseHandle(Remove.Start);
+    CloseHandle(Remove.Done);
+    RaceClean(IfIndex, Route);
+}
+
+/* A store that holds as many records as the value can (65520 bytes: 1260 addresses, 910 routes): one of them can be
+   changed and removed, and a creation that no longer fits is refused and leaves nothing behind */
+#define FULL_ADDRESSES  1260
+#define FULL_ROUTES     910
+
+static void TestFullAddressStore(ULONG IfIndex)
+{
+    TCP_IPV6_ADDRESS_REQUEST *Records, Record, Saved;
+    PVOID Old;
+    ULONG OldCount, Count, i;
+    NTSTATUS Status;
+
+    Old = ReadRecords("PersistentAddresses", sizeof(Record), &OldCount);
+    Status = AddressRequest(TCP_IPV6_CONFIG_CREATE, TCP_IPV6_STORE_PERSISTENT, IfIndex, "2001:db8:9e::5", ~0UL);
+    ok(Status == STATUS_SUCCESS, "create persistent: %lx\n", Status);
+    if (!StoredAddress("2001:db8:9e::5", &Saved))
+    {
+        ok(0, "the persistent address is not stored\n");
+        goto Done;
+    }
+
+    Records = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, FULL_ADDRESSES * sizeof(Record));
+    for (i = 0; i < FULL_ADDRESSES; i++)
+    {
+        Records[i] = Saved;
+        if (i)
+        {
+            Records[i].Address[0] = 0x20; Records[i].Address[1] = 0x01; Records[i].Address[2] = 0x0d;
+            Records[i].Address[3] = 0xb8; Records[i].Address[5] = 0xfe;
+            memset(Records[i].Address + 6, 0, 10);
+            Records[i].Address[14] = (UCHAR)(i >> 8);
+            Records[i].Address[15] = (UCHAR)i;
+        }
+    }
+    ok(WriteRecords("PersistentAddresses", Records, FULL_ADDRESSES * sizeof(Record)), "store not written\n");
+    HeapFree(GetProcessHeap(), 0, Records);
+
+    Status = AddressRequest(TCP_IPV6_CONFIG_SET, TCP_IPV6_STORE_ACTIVE, IfIndex, "2001:db8:9e::5", 86400);
+    ok(Status == STATUS_SUCCESS, "change in a full store: %lx\n", Status);
+    ok(StoredAddress("2001:db8:9e::5", &Record) && Record.ValidLifetime == 86400, "record not changed: %lu\n",
+       Record.ValidLifetime);
+    Records = ReadRecords("PersistentAddresses", sizeof(Record), &Count);
+    ok(Count == FULL_ADDRESSES, "records after the change: %lu\n", Count);
+    HeapFree(GetProcessHeap(), 0, Records);
+
+    Status = AddressRequest(TCP_IPV6_CONFIG_CREATE, TCP_IPV6_STORE_PERSISTENT, IfIndex, "2001:db8:9e::6", ~0UL);
+    ok(Status == STATUS_INSUFFICIENT_RESOURCES, "creation in a full store: %lx\n", Status);
+    ok(!AddressActive(IfIndex, "2001:db8:9e::6"), "the address the store refused is active\n");
+    ok(!StoredAddress("2001:db8:9e::6", &Record), "the address the store refused is stored\n");
+
+    Status = AddressRequest(TCP_IPV6_CONFIG_DELETE, TCP_IPV6_STORE_ACTIVE, IfIndex, "2001:db8:9e::5", 0);
+    ok(Status == STATUS_SUCCESS, "removal from a full store: %lx\n", Status);
+    ok(!StoredAddress("2001:db8:9e::5", &Record), "the removed address is still stored\n");
+    Records = ReadRecords("PersistentAddresses", sizeof(Record), &Count);
+    ok(Count == FULL_ADDRESSES - 1, "records after the removal: %lu\n", Count);
+    HeapFree(GetProcessHeap(), 0, Records);
+
+Done:
+    AddressRequest(TCP_IPV6_CONFIG_DELETE, TCP_IPV6_STORE_PERSISTENT, IfIndex, "2001:db8:9e::5", 0);
+    WriteRecords("PersistentAddresses", Old, OldCount * sizeof(Record));
+    if (Old)
+        HeapFree(GetProcessHeap(), 0, Old);
+}
+
+static void TestFullRouteStore(ULONG IfIndex)
+{
+    TCP_IPV6_ROUTE_REQUEST *Records, Record, Saved;
+    PVOID Old;
+    ULONG OldCount, Count, i;
+    NTSTATUS Status;
+
+    Old = ReadRecords("PersistentRoutes", sizeof(Record), &OldCount);
+    Status = RouteRequest(TCP_IPV6_CONFIG_CREATE, TCP_IPV6_STORE_PERSISTENT, IfIndex, "2001:db8:9f::", 48, "fe80::9f",
+                          10);
+    ok(Status == STATUS_SUCCESS, "create persistent: %lx\n", Status);
+    if (!StoredRoute("2001:db8:9f::", 48, &Saved))
+    {
+        ok(0, "the persistent route is not stored\n");
+        goto Done;
+    }
+
+    Records = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, FULL_ROUTES * sizeof(Record));
+    for (i = 0; i < FULL_ROUTES; i++)
+    {
+        Records[i] = Saved;
+        if (i)
+        {
+            Records[i].Prefix[0] = 0x20; Records[i].Prefix[1] = 0x01; Records[i].Prefix[2] = 0x0d;
+            Records[i].Prefix[3] = 0xb8; Records[i].Prefix[5] = 0xfd;
+            memset(Records[i].Prefix + 6, 0, 10);
+            Records[i].Prefix[6] = (UCHAR)(i >> 8);
+            Records[i].Prefix[7] = (UCHAR)i;
+            Records[i].PrefixLength = 64;
+        }
+    }
+    ok(WriteRecords("PersistentRoutes", Records, FULL_ROUTES * sizeof(Record)), "store not written\n");
+    HeapFree(GetProcessHeap(), 0, Records);
+
+    Status = RouteRequest(TCP_IPV6_CONFIG_SET, TCP_IPV6_STORE_ACTIVE, IfIndex, "2001:db8:9f::", 48, "fe80::9f", 20);
+    ok(Status == STATUS_SUCCESS, "change in a full store: %lx\n", Status);
+    ok(StoredRoute("2001:db8:9f::", 48, &Record) && Record.Metric == 20, "record not changed: %lu\n", Record.Metric);
+    Records = ReadRecords("PersistentRoutes", sizeof(Record), &Count);
+    ok(Count == FULL_ROUTES, "records after the change: %lu\n", Count);
+    HeapFree(GetProcessHeap(), 0, Records);
+
+    Status = RouteRequest(TCP_IPV6_CONFIG_CREATE, TCP_IPV6_STORE_PERSISTENT, IfIndex, "2001:db8:a0::", 48, "fe80::9f",
+                          10);
+    ok(Status == STATUS_INSUFFICIENT_RESOURCES, "creation in a full store: %lx\n", Status);
+    ok(!RouteActive(IfIndex, "2001:db8:a0::", 48), "the route the store refused is active\n");
+    ok(!StoredRoute("2001:db8:a0::", 48, &Record), "the route the store refused is stored\n");
+
+    Status = RouteRequest(TCP_IPV6_CONFIG_DELETE, TCP_IPV6_STORE_ACTIVE, IfIndex, "2001:db8:9f::", 48, "fe80::9f", 0);
+    ok(Status == STATUS_SUCCESS, "removal from a full store: %lx\n", Status);
+    ok(!StoredRoute("2001:db8:9f::", 48, &Record), "the removed route is still stored\n");
+    Records = ReadRecords("PersistentRoutes", sizeof(Record), &Count);
+    ok(Count == FULL_ROUTES - 1, "records after the removal: %lu\n", Count);
+    HeapFree(GetProcessHeap(), 0, Records);
+
+Done:
+    RouteRequest(TCP_IPV6_CONFIG_DELETE, TCP_IPV6_STORE_PERSISTENT, IfIndex, "2001:db8:9f::", 48, "fe80::9f", 0);
+    WriteRecords("PersistentRoutes", Old, OldCount * sizeof(Record));
+    if (Old)
+        HeapFree(GetProcessHeap(), 0, Old);
+}
+
 START_TEST(Ipv6Persist)
 {
     WSADATA Data;
@@ -285,8 +595,9 @@ START_TEST(Ipv6Persist)
     NTSTATUS Status;
 
     pGetUnicastIpAddressTable = (PFN_GET_TABLE)Ipv6Proc("GetUnicastIpAddressTable");
+    pGetIpForwardTable2 = (PFN_GET_TABLE)Ipv6Proc("GetIpForwardTable2");
     pFreeMibTable = (PFN_FREE_TABLE)Ipv6Proc("FreeMibTable");
-    if (!pGetUnicastIpAddressTable || !pFreeMibTable)
+    if (!pGetUnicastIpAddressTable || !pGetIpForwardTable2 || !pFreeMibTable)
     {
         skip("the IP Helper functions are missing\n");
         return;
@@ -311,5 +622,9 @@ START_TEST(Ipv6Persist)
     trace("adapter key %s\n", KeyPath);
     TestAddresses(IfIndex);
     TestRoutes(IfIndex);
+    TestFullAddressStore(IfIndex);
+    TestFullRouteStore(IfIndex);
+    TestRace(IfIndex, FALSE);
+    TestRace(IfIndex, TRUE);
     WSACleanup();
 }

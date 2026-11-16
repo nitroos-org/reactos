@@ -34,8 +34,7 @@
 #include "lwip/tcpip.h"
 #include <lwip_hooks.h>
 
-/* Configured addresses, over all interfaces (at most LWIP_IPV6_NUM_ADDRESSES - 1 per interface) */
-#define ADDR6_MAX               128
+/* Configured addresses, over all interfaces (at most LWIP_IPV6_NUM_ADDRESSES - 1 per interface): ADDR6_MAX of them */
 #define ADDR6_INFINITE          0xFFFFFFFF
 
 typedef struct _ADDR6_ENTRY
@@ -47,7 +46,9 @@ typedef struct _ADDR6_ENTRY
 } ADDR6_ENTRY, *PADDR6_ENTRY;
 
 static ADDR6_ENTRY Addr6Table[ADDR6_MAX];
-/* Entries in use (some may be stale: their slot changed meanwhile) */
+/* Entries in use. One whose slot changed meanwhile (the address expired, or the stack formed another one there) is
+   stale until the next sweep (TCP6SweepAddresses, once a second), so the count is the live entries to within a second:
+   the lookups that run per datagram while any address is configured scan no more than that */
 ULONG Addr6Count;
 
 /* The entry of a slot, if the slot still holds its address (core lock held) */
@@ -80,6 +81,24 @@ Addr6Free(PADDR6_ENTRY Entry)
 {
     RtlZeroMemory(Entry, sizeof(*Entry));
     Addr6Count--;
+}
+
+/* The entries whose slot no longer holds their address go (core lock held) */
+VOID
+TCP6SweepAddresses(VOID)
+{
+    ULONG i;
+
+    for (i = 0; i < ADDR6_MAX && Addr6Count; i++)
+    {
+        PADDR6_ENTRY Entry = &Addr6Table[i];
+
+        if (!Entry->Netif)
+            continue;
+        if (ip6_addr_isinvalid(netif_ip6_addr_state(Entry->Netif, Entry->Slot)) ||
+            !ip6_addr_eq(&Entry->Address, netif_ip6_addr(Entry->Netif, Entry->Slot)))
+            Addr6Free(Entry);
+    }
 }
 
 /* What was configured for the address in a slot; FALSE: the stack formed it (core lock held) */
@@ -156,6 +175,15 @@ Addr6SetLifetimes(struct netif *netif, s8_t Slot, ULONG Valid, ULONG Preferred)
     netif_ip6_addr_set_pref_life(netif, Slot, Preferred == ADDR6_INFINITE ? IP6_ADDR_LIFE_INFINITE : Preferred);
 }
 
+/* An origin value the stack keeps: 0..15 as asked, or what the field reads back for 8..15 (Windows keeps the value
+   in a signed 4-bit field: 0xFFFFFFF8..0xFFFFFFFF) */
+static
+BOOLEAN
+Addr6OriginValid(ULONG Origin)
+{
+    return Origin <= 15 || Origin >= 0xFFFFFFF8;
+}
+
 static
 NTSTATUS
 Addr6CheckRequest(const TCP_IPV6_ADDRESS_REQUEST *Request, ip6_addr_t *Address)
@@ -176,6 +204,11 @@ Addr6CheckRequest(const TCP_IPV6_ADDRESS_REQUEST *Request, ip6_addr_t *Address)
         if (Request->PrefixLength > 128)
             return STATUS_INVALID_PARAMETER;
         if (Request->ValidLifetime == 0 || Request->PreferredLifetime > Request->ValidLifetime)
+            return STATUS_INVALID_PARAMETER;
+        /* the origins are reported to user mode as they are: only values of the NL_PREFIX_ORIGIN and
+           NL_SUFFIX_ORIGIN fields (a signed 4-bit field: 0..7, and -8..-1 as ULONG) and no unknown flag */
+        if (!Addr6OriginValid(Request->PrefixOrigin) || !Addr6OriginValid(Request->SuffixOrigin) ||
+            (Request->Flags & ~TCP_IPV6_ADDRESS_SKIP_AS_SOURCE))
             return STATUS_INVALID_PARAMETER;
     }
     return STATUS_SUCCESS;
@@ -259,8 +292,8 @@ Addr6ConfigureLocked(struct netif *netif, const TCP_IPV6_ADDRESS_REQUEST *Reques
             Entry->Slot = Slot;
             Entry->Address = Address;
             Entry->Info.PrefixLength = (UCHAR)Request->PrefixLength;
-            Entry->Info.PrefixOrigin = (UCHAR)Request->PrefixOrigin;
-            Entry->Info.SuffixOrigin = (UCHAR)Request->SuffixOrigin;
+            Entry->Info.PrefixOrigin = Request->PrefixOrigin;
+            Entry->Info.SuffixOrigin = Request->SuffixOrigin;
             Entry->Info.Flags = (Request->Flags & TCP_IPV6_ADDRESS_SKIP_AS_SOURCE) | TCP_IPV6_ADDRESS_CONFIGURED |
                                 (Persistent ? TCP_IPV6_ADDRESS_PERSISTENT : 0);
             Addr6Count++;
@@ -289,8 +322,8 @@ Addr6ConfigureLocked(struct netif *netif, const TCP_IPV6_ADDRESS_REQUEST *Reques
                 Addr6Count++;
             }
             Entry->Info.PrefixLength = (UCHAR)Request->PrefixLength;
-            Entry->Info.PrefixOrigin = (UCHAR)Request->PrefixOrigin;
-            Entry->Info.SuffixOrigin = (UCHAR)Request->SuffixOrigin;
+            Entry->Info.PrefixOrigin = Request->PrefixOrigin;
+            Entry->Info.SuffixOrigin = Request->SuffixOrigin;
             Entry->Info.Flags = (Request->Flags & TCP_IPV6_ADDRESS_SKIP_AS_SOURCE) | TCP_IPV6_ADDRESS_CONFIGURED |
                                 (Persistent ? TCP_IPV6_ADDRESS_PERSISTENT : 0);
             Addr6SetLifetimes(netif, Slot, Request->ValidLifetime, Request->PreferredLifetime);
@@ -382,6 +415,9 @@ DispAddressConfig6(PIRP Irp, PIO_STACK_LOCATION IrpSp)
         return STATUS_NOT_SUPPORTED;
     }
 
+    /* from the change of the active table to the write of the record: one request at a time, so a creation racing a
+       removal of the same address leaves the store in step with the table */
+    TCP6ConfigLock();
     LOCK_TCPIP_CORE();
     if (TCP6NetifRegistered(netif))
         Status = Addr6ConfigureLocked(netif, &Request, &Address, Persistent, &WasPersistent);
@@ -417,6 +453,7 @@ DispAddressConfig6(PIRP Irp, PIO_STACK_LOCATION IrpSp)
             Status = StoreStatus;
         }
     }
+    TCP6ConfigUnlock();
     IPDereferenceInterface(IF);
 
     /* a change without a state change made no interface event: the prefix length, origins or lifetimes are new */

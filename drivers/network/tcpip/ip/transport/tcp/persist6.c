@@ -37,6 +37,9 @@
 #define PERSIST6_MAX_VALUE      0x10000
 
 static FAST_MUTEX Persist6Lock;
+/* One configuration request at a time, from the active table to the persistent record (taken before the core lock
+   and Persist6Lock; the application of the store at an adapter start takes it too) */
+static FAST_MUTEX Config6Lock;
 
 typedef BOOLEAN (*PERSIST6_SAME_KEY)(const VOID *A, const VOID *B);
 
@@ -44,6 +47,19 @@ VOID
 TCP6PersistInit(VOID)
 {
     ExInitializeFastMutex(&Persist6Lock);
+    ExInitializeFastMutex(&Config6Lock);
+}
+
+VOID
+TCP6ConfigLock(VOID)
+{
+    ExAcquireFastMutex(&Config6Lock);
+}
+
+VOID
+TCP6ConfigUnlock(VOID)
+{
+    ExReleaseFastMutex(&Config6Lock);
 }
 
 /* The key of the adapter of IF (Create: made if it is not there) */
@@ -146,12 +162,8 @@ Persist6Update(PIP_INTERFACE IF, PCWSTR Name, ULONG RecordSize, const VOID *Reco
         return Remove ? STATUS_SUCCESS : Status;
     }
 
+    /* the store holds at most PERSIST6_MAX_VALUE / RecordSize records (what is read back); Count is within it */
     Persist6ReadValue(Key, Name, RecordSize, (PVOID *)&Old, &Count);
-    if (Count + 1 > PERSIST6_MAX_VALUE / RecordSize)
-    {
-        Status = STATUS_INSUFFICIENT_RESOURCES;
-        goto Done;
-    }
     New = ExAllocatePoolWithTag(PagedPool, (Count + 1) * RecordSize, PERSIST6_TAG);
     if (!New)
     {
@@ -173,6 +185,15 @@ Persist6Update(PIP_INTERFACE IF, PCWSTR Name, ULONG RecordSize, const VOID *Reco
     {
         RtlCopyMemory(New + Kept * RecordSize, Record, RecordSize);
         Kept++;
+    }
+
+    /* judged by what the value would hold, not by what it holds: a store with exactly the most records can still
+       have one of them changed or removed */
+    if (Kept > PERSIST6_MAX_VALUE / RecordSize)
+    {
+        ExFreePoolWithTag(New, PERSIST6_TAG);
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Done;
     }
 
     if (Kept)
@@ -384,6 +405,9 @@ TCP6ApplyPersistent(PIP_INTERFACE IF)
     /* the interface parameters first: duplicate address detection and router discovery follow them */
     TCP6ApplyInterfaceParams(IF);
 
+    /* a request that removes an entry must not come between the read of the store and the application of what was
+       read: the entry would be added again */
+    TCP6ConfigLock();
     ExAcquireFastMutex(&Persist6Lock);
     if (NT_SUCCESS(Persist6OpenKey(IF, FALSE, &Key)))
     {
@@ -394,7 +418,10 @@ TCP6ApplyPersistent(PIP_INTERFACE IF)
     ExReleaseFastMutex(&Persist6Lock);
 
     if (!AddressCount && !RouteCount)
+    {
+        TCP6ConfigUnlock();
         return;
+    }
 
     LOCK_TCPIP_CORE();
     if (TCP6NetifRegistered(netif))
@@ -411,6 +438,7 @@ TCP6ApplyPersistent(PIP_INTERFACE IF)
         }
     }
     UNLOCK_TCPIP_CORE();
+    TCP6ConfigUnlock();
 
     if (Added)
     {

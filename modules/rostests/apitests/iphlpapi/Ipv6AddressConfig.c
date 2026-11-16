@@ -241,6 +241,55 @@ static BOOL WaitCount(volatile LONG *Count, LONG Want)
     return *Count >= Want;
 }
 
+/* A creation of 2001:db8:99::8 with these origins (the stack reports them to user mode as they are) */
+static NTSTATUS OriginsRequest(ULONG IfIndex, ULONG Prefix, ULONG Suffix)
+{
+    TCP_IPV6_ADDRESS_REQUEST Request;
+    SOCKADDR_INET Parsed;
+
+    memset(&Request, 0, sizeof(Request));
+    Request.Operation = TCP_IPV6_CONFIG_CREATE;
+    Request.Store = TCP_IPV6_STORE_ACTIVE;
+    Request.IfIndex = IfIndex;
+    Ipv6Parse(&Parsed, "2001:db8:99::8", 0);
+    memcpy(Request.Address, &Parsed.Ipv6.sin6_addr, 16);
+    Request.PrefixLength = 64;
+    Request.ValidLifetime = Request.PreferredLifetime = ~0UL;
+    Request.PrefixOrigin = Prefix;
+    Request.SuffixOrigin = Suffix;
+    return SendRequest(IOCTL_IP6_ADDRESS_CONFIG, &Request, sizeof(Request));
+}
+
+static void TestOriginsAndFlags(ULONG IfIndex)
+{
+    static const struct { ULONG Prefix, Suffix; NTSTATUS Status; } Origins[] =
+    {
+        { 16, 1, STATUS_INVALID_PARAMETER }, { 1, 16, STATUS_INVALID_PARAMETER }, { 16, 16, STATUS_INVALID_PARAMETER },
+        { 17, 1, STATUS_INVALID_PARAMETER }, { 1, 100, STATUS_INVALID_PARAMETER },
+        { 0xfffffff7, 1, STATUS_INVALID_PARAMETER }, { 1, 0x10000, STATUS_INVALID_PARAMETER },
+        { 0, 0, STATUS_SUCCESS }, { 15, 1, STATUS_SUCCESS }, { 1, 0xfffffff8, STATUS_SUCCESS },
+        { 0xffffffff, 0xffffffff, STATUS_SUCCESS },
+    };
+    NTSTATUS Status;
+    ULONG i;
+
+    for (i = 0; i < sizeof(Origins) / sizeof(Origins[0]); i++)
+    {
+        Status = OriginsRequest(IfIndex, Origins[i].Prefix, Origins[i].Suffix);
+        ok(Status == Origins[i].Status, "origins %lx/%lx: %lx\n", Origins[i].Prefix, Origins[i].Suffix, Status);
+        if (NT_SUCCESS(Status))
+            AddressRequest(TCP_IPV6_CONFIG_DELETE, IfIndex, "2001:db8:99::8", 64, 0, 0, 0);
+    }
+    /* flags the request does not know (the other bits are the row's) */
+    Status = AddressRequest(TCP_IPV6_CONFIG_CREATE, IfIndex, "2001:db8:99::8", 64, ~0UL, ~0UL, 0x2);
+    ok(Status == STATUS_INVALID_PARAMETER, "flag 2: %lx\n", Status);
+    Status = AddressRequest(TCP_IPV6_CONFIG_CREATE, IfIndex, "2001:db8:99::8", 64, ~0UL, ~0UL, 0x80);
+    ok(Status == STATUS_INVALID_PARAMETER, "flag 0x80: %lx\n", Status);
+    Status = AddressRequest(TCP_IPV6_CONFIG_CREATE, IfIndex, "2001:db8:99::8", 64, ~0UL, ~0UL, 0x1);
+    ok(Status == STATUS_SUCCESS, "skip as source: %lx\n", Status);
+    AddressRequest(TCP_IPV6_CONFIG_DELETE, IfIndex, "2001:db8:99::8", 64, 0, 0, 0);
+}
+
 static void TestInvalid(ULONG IfIndex)
 {
     TCP_IPV6_ADDRESS_REQUEST Request;
@@ -465,6 +514,7 @@ START_TEST(Ipv6AddressConfig)
     }
 
     TestInvalid(IfIndex);
+    TestOriginsAndFlags(IfIndex);
     TestAddress(IfIndex);
     TestSlots(IfIndex);
     WSACleanup();

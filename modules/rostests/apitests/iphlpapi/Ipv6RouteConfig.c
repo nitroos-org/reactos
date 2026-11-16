@@ -214,6 +214,53 @@ static BOOL WaitCount(volatile LONG *Count, LONG Want)
     return *Count >= Want;
 }
 
+/* A creation of 2001:db8:78::/48 with this metric, origin and flags (the stack reports them to user mode as they
+   are) */
+static NTSTATUS FieldsRequest(ULONG Operation, ULONG IfIndex, ULONG Metric, ULONG Origin, ULONG Flags)
+{
+    TCP_IPV6_ROUTE_REQUEST Request;
+    SOCKADDR_INET Address;
+
+    memset(&Request, 0, sizeof(Request));
+    Request.Operation = Operation;
+    Request.Store = TCP_IPV6_STORE_ACTIVE;
+    Request.IfIndex = IfIndex;
+    Ipv6Parse(&Address, "2001:db8:78::", 0);
+    memcpy(Request.Prefix, &Address.Ipv6.sin6_addr, 16);
+    Request.PrefixLength = 48;
+    Ipv6Parse(&Address, "fe80::78", 0);
+    memcpy(Request.NextHop, &Address.Ipv6.sin6_addr, 16);
+    Request.Metric = Metric;
+    Request.ValidLifetime = Request.PreferredLifetime = ~0UL;
+    Request.Origin = Origin;
+    Request.Protocol = 3;
+    Request.Flags = Flags;
+    return SendRequest(IOCTL_IP6_ROUTE_CONFIG, &Request, sizeof(Request));
+}
+
+static void TestFields(ULONG IfIndex)
+{
+    static const struct { ULONG Metric, Origin, Flags; NTSTATUS Status; } Cases[] =
+    {
+        { 0x80000000, 0, 0, STATUS_INVALID_PARAMETER }, { 0xffffffff, 0, 0, STATUS_INVALID_PARAMETER },
+        { 10, 5, 0, STATUS_INVALID_PARAMETER }, { 10, 0xffffffff, 0, STATUS_INVALID_PARAMETER },
+        { 10, 0, 0x40, STATUS_INVALID_PARAMETER }, { 10, 0, 0x4, STATUS_INVALID_PARAMETER },
+        { 0x7fffffff, 0, 0, STATUS_SUCCESS }, { 0, 0, 0, STATUS_SUCCESS }, { 10, 4, 0, STATUS_SUCCESS },
+        { 10, 0, 0x1 | 0x2 | 0x20, STATUS_SUCCESS },
+    };
+    NTSTATUS Status;
+    ULONG i;
+
+    for (i = 0; i < sizeof(Cases) / sizeof(Cases[0]); i++)
+    {
+        Status = FieldsRequest(TCP_IPV6_CONFIG_CREATE, IfIndex, Cases[i].Metric, Cases[i].Origin, Cases[i].Flags);
+        ok(Status == Cases[i].Status, "metric %lx origin %lu flags %lx: %lx\n", Cases[i].Metric, Cases[i].Origin,
+           Cases[i].Flags, Status);
+        if (NT_SUCCESS(Status))
+            FieldsRequest(TCP_IPV6_CONFIG_DELETE, IfIndex, 0, 0, 0);
+    }
+}
+
 static void TestInvalid(ULONG IfIndex)
 {
     NTSTATUS Status;
@@ -411,6 +458,7 @@ START_TEST(Ipv6RouteConfig)
     }
 
     TestInvalid(IfIndex);
+    TestFields(IfIndex);
     TestRoute(IfIndex);
     WSACleanup();
 }

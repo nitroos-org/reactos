@@ -58,6 +58,11 @@
 #define ROUTE6_PROTOCOL_LOCAL   2
 #define ROUTE6_PROTOCOL_NETMGMT 3
 #define ROUTE6_INFINITE         0xFFFFFFFF
+/* A configured route's metric (31 bits: the interface metric is added to it, and the sum cannot wrap), origin
+   (NL_ROUTE_ORIGIN: Manual .. 6to4) and the flags a request may carry */
+#define ROUTE6_METRIC_MAX       0x7FFFFFFF
+#define ROUTE6_ORIGIN_MAX       4
+#define ROUTE6_REQUEST_FLAGS    (TCP_IPV6_ROUTE_PUBLISH | TCP_IPV6_ROUTE_IMMORTAL | TCP_IPV6_ROUTE_NO_AUTOCONFIGURE)
 
 typedef struct _ROUTE6_ENTRY
 {
@@ -76,9 +81,11 @@ typedef struct _ROUTE6_ENTRY
     ULONGLONG Created;          /* seconds of interrupt time */
 } ROUTE6_ENTRY, *PROUTE6_ENTRY;
 
-/* The answer goes through a pool block that info.c caps at 64 KB: the largest one stays below */
+/* The answer goes through a pool block that info.c caps at 64 KB: the largest one stays below. Its rows: the
+   configured routes, the on-link prefix of each configured address (at most ADDR6_MAX), and what router
+   advertisements gave (prefixes and default routers) */
 C_ASSERT(sizeof(TCP_IPV6_ROUTE_HEADER) +
-         (ROUTE6_MAX + LWIP_ND6_NUM_PREFIXES + LWIP_ND6_NUM_ROUTERS) * sizeof(TCP_IPV6_ROUTE_ROW) < 0x10000);
+         (ROUTE6_MAX + ADDR6_MAX + LWIP_ND6_NUM_PREFIXES + LWIP_ND6_NUM_ROUTERS) * sizeof(TCP_IPV6_ROUTE_ROW) < 0x10000);
 
 static ROUTE6_ENTRY Route6Table[ROUTE6_MAX];
 /* Entries in use: with none, the hooks leave everything to lwIP */
@@ -394,13 +401,16 @@ Route6Changed(VOID)
     nd6_clear_destination_cache();
 }
 
-/* LWIP_HOOK_ND6_TMR (core lock held, once a second): configured routes whose valid lifetime ended go */
+/* LWIP_HOOK_ND6_TMR (core lock held, once a second): configured routes whose valid lifetime ended go, and the
+   entries of configured addresses that lwIP removed */
 void
 LibNd6Timer(void)
 {
     ULONGLONG Now;
     BOOLEAN Changed = FALSE;
     ULONG i;
+
+    TCP6SweepAddresses();
 
     if (!Route6Count)
         return;
@@ -787,8 +797,8 @@ Route6CheckRequest(const TCP_IPV6_ROUTE_REQUEST *Request, ip6_addr_t *Prefix, ip
 
     RtlCopyMemory(Prefix->addr, Request->Prefix, 16);
     ip6_addr_clear_zone(Prefix);
-    /* the bits after the prefix length name nothing (Windows is not asked whether it refuses them: it is not more
-       lenient to take them) */
+    /* the bits after the prefix length name nothing: this private request takes them off. The IP Helper functions
+       (iphlpapi, config6.c) refuse a row that has them, as Windows does (ERROR_INVALID_PARAMETER, measured) */
     Route6Mask(Prefix, (UCHAR)Request->PrefixLength);
 
     RtlCopyMemory(NextHop->addr, Request->NextHop, 16);
@@ -800,6 +810,12 @@ Route6CheckRequest(const TCP_IPV6_ROUTE_REQUEST *Request, ip6_addr_t *Prefix, ip
     if (Request->Operation != TCP_IPV6_CONFIG_DELETE)
     {
         if (Request->ValidLifetime == 0 || Request->PreferredLifetime > Request->ValidLifetime)
+            return STATUS_INVALID_PARAMETER;
+        /* what is reported to user mode as it was given must be a value the fields hold: a metric of the 31 bits
+           Windows takes (and one that cannot wrap when the interface metric is added), an NL_ROUTE_ORIGIN, no
+           unknown flag. Any protocol is kept, as Windows keeps it */
+        if (Request->Metric > ROUTE6_METRIC_MAX || Request->Origin > ROUTE6_ORIGIN_MAX ||
+            (Request->Flags & ~ROUTE6_REQUEST_FLAGS))
             return STATUS_INVALID_PARAMETER;
     }
     return STATUS_SUCCESS;
@@ -852,8 +868,7 @@ Route6ConfigureLocked(struct netif *netif, ULONG IfIndex, const TCP_IPV6_ROUTE_R
             Entry->Metric = Request->Metric;
             Entry->Origin = Request->Origin;
             Entry->Protocol = Request->Protocol;
-            Entry->Flags = (Request->Flags & (TCP_IPV6_ROUTE_PUBLISH | TCP_IPV6_ROUTE_IMMORTAL)) |
-                           (Persistent ? TCP_IPV6_ROUTE_PERSISTENT : 0);
+            Entry->Flags = (Request->Flags & ROUTE6_REQUEST_FLAGS) | (Persistent ? TCP_IPV6_ROUTE_PERSISTENT : 0);
             Entry->ValidLifetime = Request->ValidLifetime;
             Entry->PreferredLifetime = Request->PreferredLifetime;
             Entry->Created = Route6Seconds();
@@ -931,6 +946,9 @@ DispRouteConfig6(PIRP Irp, PIO_STACK_LOCATION IrpSp)
         return STATUS_NOT_SUPPORTED;
     }
 
+    /* from the change of the active table to the write of the record: one request at a time, so a creation racing a
+       removal of the same route leaves the store in step with the table */
+    TCP6ConfigLock();
     LOCK_TCPIP_CORE();
     if (TCP6NetifRegistered(netif))
         Status = Route6ConfigureLocked(netif, IF->Index, &Request, &Prefix, &NextHop, OnLink, Persistent,
@@ -966,6 +984,7 @@ DispRouteConfig6(PIRP Irp, PIO_STACK_LOCATION IrpSp)
             Status = StoreStatus;
         }
     }
+    TCP6ConfigUnlock();
     IPDereferenceInterface(IF);
 
     if (NT_SUCCESS(Status))
