@@ -1879,7 +1879,8 @@ StRaSuffixCount(const char *Name, ULONG *Lifetime)
     return Count;
 }
 
-/* The slot of the SLAAC address of this /64 prefix on netif (core lock NOT held), or -1; *State gets its state */
+/* The slot of the public SLAAC address of this /64 prefix on netif (core lock NOT held), or -1; *State gets its
+   state. The temporary addresses made beside it (temp6.c) are not it */
 static s8_t
 StFindPrefixAddress(struct netif *En, const UCHAR *P, u8_t *State)
 {
@@ -1888,7 +1889,8 @@ StFindPrefixAddress(struct netif *En, const UCHAR *P, u8_t *State)
     LOCK_TCPIP_CORE();
     for (k = 1; k < LWIP_IPV6_NUM_ADDRESSES; k++)
     {
-        if (!ip6_addr_isinvalid(netif_ip6_addr_state(En, k)) && StSame(netif_ip6_addr(En, k)->addr, P, 8))
+        if (!ip6_addr_isinvalid(netif_ip6_addr_state(En, k)) && StSame(netif_ip6_addr(En, k)->addr, P, 8) &&
+            !TCP6TemporarySlot(En, k))
         {
             Found = k;
             *State = netif_ip6_addr_state(En, k);
@@ -1898,18 +1900,22 @@ StFindPrefixAddress(struct netif *En, const UCHAR *P, u8_t *State)
     return Found;
 }
 
+/* Every address of the prefix goes: the public one and its temporary addresses */
 static VOID
 StDropPrefixAddress(struct netif *En, const UCHAR *P)
 {
-    u8_t State;
-    s8_t Slot = StFindPrefixAddress(En, P, &State);
+    s8_t k;
 
-    if (Slot < 0)
-        return;
     LOCK_TCPIP_CORE();
-    netif_ip6_addr_set_state(En, Slot, IP6_ADDR_INVALID);
-    netif_ip6_addr_set_valid_life(En, Slot, 0);
-    netif_ip6_addr_set_pref_life(En, Slot, 0);
+    for (k = 1; k < LWIP_IPV6_NUM_ADDRESSES; k++)
+    {
+        if (!ip6_addr_isinvalid(netif_ip6_addr_state(En, k)) && StSame(netif_ip6_addr(En, k)->addr, P, 8))
+        {
+            netif_ip6_addr_set_state(En, k, IP6_ADDR_INVALID);
+            netif_ip6_addr_set_valid_life(En, k, 0);
+            netif_ip6_addr_set_pref_life(En, k, 0);
+        }
+    }
     UNLOCK_TCPIP_CORE();
 }
 
