@@ -214,6 +214,103 @@ static void TestPolicy(void)
     ok(N == 0 && Parsed.Count == 9, "an empty value changed the table\n");
 }
 
+/* The lines Windows' netsh shows for the IPv4-mapped and IPv4-compatible prefixes have a dotted IPv4 tail */
+static void TestPolicyDottedTail(void)
+{
+    static const WCHAR Dotted[] = L"::ffff:0.0.0.0/96 60 4\0::/96 2 3\0::ffff:1.2.3.4/128 9 8\0\0";
+    static const struct { const WCHAR *Text; ULONG Used; UCHAR Tail[4]; UCHAR Head; } Addresses[] =
+    {
+        { L"::ffff:1.2.3.4", 14, { 1, 2, 3, 4 }, 0xff }, { L"::1.2.3.4", 9, { 1, 2, 3, 4 }, 0 },
+        { L"0:0:0:0:0:ffff:255.255.255.255/96", 30, { 255, 255, 255, 255 }, 0xff },
+    };
+    static const WCHAR *Invalid[] =
+    {
+        L"::ffff:1.2.3", L"::ffff:1.2.3.4.5", L"::ffff:256.1.1.1", L"::ffff:1.2.3.", L"::ffff:1..3.4", L"1.2.3.4",
+        L"1:2:3:4:5:6:7:1.2.3.4", L"::ffff:0001.2.3.4", L"::ffff:a.2.3.4", L"1::2::1.2.3.4",
+    };
+    ADDRSORT_POLICY_TABLE Table, Parsed;
+    UCHAR A[16];
+    ULONG i, N, P, L;
+
+    for (i = 0; i < RTL_NUMBER_OF(Addresses); i++)
+    {
+        memset(A, 0x55, sizeof(A));
+        N = AddrSortParseAddress(Addresses[i].Text, (ULONG)wcslen(Addresses[i].Text), A);
+        ok(N == Addresses[i].Used, "dotted tail %lu: used %lu, expected %lu\n", i, N, Addresses[i].Used);
+        ok(!memcmp(A + 12, Addresses[i].Tail, 4) && A[10] == Addresses[i].Head && A[11] == Addresses[i].Head,
+           "dotted tail %lu: parsed wrong\n", i);
+    }
+    for (i = 0; i < RTL_NUMBER_OF(Invalid); i++)
+    {
+        N = AddrSortParseAddress(Invalid[i], (ULONG)wcslen(Invalid[i]), A);
+        ok(N == 0, "invalid dotted tail %lu accepted (%lu characters)\n", i, N);
+    }
+
+    AddrSortDefaultPolicy(&Table);
+    Parsed = Table;
+    N = AddrSortParsePolicy(Dotted, RTL_NUMBER_OF(Dotted), &Parsed);
+    ok(N == 3, "dotted policy lines: %lu parsed of 3\n", N);
+    A6("::ffff:9.9.9.9", A);
+    AddrSortLookupPolicy(&Parsed, A, &P, &L);
+    ok(P == 60 && L == 4, "::ffff:0.0.0.0/96: %lu %lu\n", P, L);
+    A6("::ffff:1.2.3.4", A);
+    AddrSortLookupPolicy(&Parsed, A, &P, &L);
+    ok(P == 9 && L == 8, "::ffff:1.2.3.4/128: %lu %lu\n", P, L);
+    A6("::7", A);
+    AddrSortLookupPolicy(&Parsed, A, &P, &L);
+    ok(P == 2 && L == 3, "::/96: %lu %lu\n", P, L);
+}
+
+/* A value with more than 64 lines is not used as a whole (the callers log it); 64 are */
+static void TestPolicyTooMany(void)
+{
+    static WCHAR Value[70 * 32 + 1];
+    ADDRSORT_POLICY_TABLE Table, Parsed;
+    ULONG Lines, N, Length;
+
+    AddrSortDefaultPolicy(&Table);
+    for (Lines = 64; Lines <= 65; Lines++)
+    {
+        ULONG i, Position = 0;
+
+        for (i = 0; i < Lines; i++)
+        {
+            WCHAR Line[32];
+
+            _snwprintf(Line, RTL_NUMBER_OF(Line), L"2001:db8:%lx::/48 %lu 7", i + 1, i + 1);
+            Line[RTL_NUMBER_OF(Line) - 1] = 0;
+            Length = (ULONG)wcslen(Line) + 1;
+            memcpy(Value + Position, Line, Length * sizeof(WCHAR));
+            Position += Length;
+        }
+        Value[Position++] = 0;
+        Parsed = Table;
+        N = AddrSortParsePolicy(Value, Position, &Parsed);
+        if (Lines == 64)
+            ok(N == 64 && Parsed.Count == 64, "64 lines: %lu parsed, %lu in the table\n", N, Parsed.Count);
+        else
+            ok(N == ADDRSORT_POLICY_TOO_MANY && Parsed.Count == Table.Count && !memcmp(&Parsed, &Table, sizeof(Table)),
+               "65 lines: %lu parsed, table changed or not\n", N);
+    }
+    /* invalid lines do not count towards the limit */
+    {
+        ULONG Position = 0, i;
+
+        for (i = 0; i < 100; i++)
+        {
+            memcpy(Value + Position, L"nonsense", 9 * sizeof(WCHAR));
+            Position += 9;
+            if (Position > RTL_NUMBER_OF(Value) - 40)
+                break;
+        }
+        memcpy(Value + Position, L"fc00::/7 3 13\0", 15 * sizeof(WCHAR));
+        Position += 15;
+        Parsed = Table;
+        N = AddrSortParsePolicy(Value, Position, &Parsed);
+        ok(N == 1, "many invalid lines and one valid: %lu\n", N);
+    }
+}
+
 static void TestScopes(void)
 {
     static const struct { const char *Addr; ULONG Scope; } Cases[] =
@@ -629,6 +726,8 @@ START_TEST(AddrSortEngine)
 
     AddrSortDefaultPolicy(&Policy);
     TestPolicy();
+    TestPolicyDottedTail();
+    TestPolicyTooMany();
     TestScopes();
     TestOracle(&Policy);
     TestHosts(&Policy);

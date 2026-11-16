@@ -33,6 +33,21 @@ WINE_DEFAULT_DEBUG_CHANNEL(iphlpapi);
 #define POLICY_LINE_CHARS       ADDRSEL_POLICY_LINE_CHARS
 #define POLICY_BUFFER_CHARS     ADDRSEL_POLICY_BUFFER_CHARS
 
+/* A PrefixPolicies value that is too long is ignored as a whole (the defaults stay): said once per process, as the
+   stack says it once per boot */
+static LONG PolicyIgnoredLogged;
+
+#define LogPolicyIgnored(Why, Limit) \
+    do { \
+        if (!InterlockedExchange(&PolicyIgnoredLogged, 1)) \
+        { \
+            char Text[160]; \
+            if (SUCCEEDED(StringCbPrintfA(Text, sizeof(Text), "iphlpapi: PrefixPolicies value " Why \
+                                          ": ignored, the default prefix policy table stays\n", Limit))) \
+                OutputDebugStringA(Text); \
+        } \
+    } while (0)
+
 /* The table of the value PrefixPolicies of Key, if it has at least one valid line */
 static
 ULONG
@@ -41,15 +56,23 @@ ReadPolicyValue(HKEY Key, PADDRSORT_POLICY_TABLE Table)
     WCHAR *Buffer;
     DWORD Type, Size = POLICY_BUFFER_CHARS * sizeof(WCHAR) - sizeof(WCHAR);
     ULONG Count = 0;
+    LONG Error;
 
     Buffer = HeapAlloc(GetProcessHeap(), 0, POLICY_BUFFER_CHARS * sizeof(WCHAR));
     if (!Buffer)
         return 0;
-    if (RegQueryValueExW(Key, PREFIX_POLICIES_VALUE, NULL, &Type, (LPBYTE)Buffer, &Size) == ERROR_SUCCESS &&
-        Type == REG_MULTI_SZ)
+    Error = RegQueryValueExW(Key, PREFIX_POLICIES_VALUE, NULL, &Type, (LPBYTE)Buffer, &Size);
+    if (Error == ERROR_MORE_DATA)
+        LogPolicyIgnored("longer than the buffer of %u characters", ADDRSEL_POLICY_BUFFER_CHARS);
+    else if (Error == ERROR_SUCCESS && Type == REG_MULTI_SZ)
     {
         Buffer[Size / sizeof(WCHAR)] = 0;
         Count = AddrSortParsePolicy(Buffer, Size / sizeof(WCHAR) + 1, Table);
+        if (Count == ADDRSORT_POLICY_TOO_MANY)
+        {
+            LogPolicyIgnored("has more than %u lines", ADDRSORT_MAX_POLICY);
+            Count = 0;
+        }
     }
     HeapFree(GetProcessHeap(), 0, Buffer);
     return Count;

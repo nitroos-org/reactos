@@ -349,6 +349,45 @@ static void TestInvalid(ULONG IfIndex)
     ok(Status == STATUS_INVALID_PARAMETER, "short request: %lx\n", Status);
 }
 
+/* The source GetBestRoute2 answers for the multicast address Text */
+static void TestMulticastSource(ULONG IfIndex, const char *Text)
+{
+    SOCKADDR_INET Dest, Source;
+    ROUTE_ROW6 Route;
+    SOCKET Socket;
+    DWORD Error;
+    BOOL Link, Site;
+
+    Ipv6Parse(&Dest, Text, IfIndex);
+    Dest.Ipv6.sin6_port = htons(9);
+    Error = pGetBestRoute2(NULL, IfIndex, NULL, &Dest, 0, &Route, &Source);
+    ok(Error == NO_ERROR, "%s: GetBestRoute2: %lu\n", Text, Error);
+    if (Error != NO_ERROR)
+        return;
+
+    /* the link-local address for a link-scope destination, an address of at least the scope for a larger one (the
+       global address 2001:db8:99::5 and the site-local SLAAC address are there as well as the link-local one) */
+    Link = Source.Ipv6.sin6_addr.u.Byte[0] == 0xfe && (Source.Ipv6.sin6_addr.u.Byte[1] & 0xc0) == 0x80;
+    Site = Source.Ipv6.sin6_addr.u.Byte[0] == 0xfe && (Source.Ipv6.sin6_addr.u.Byte[1] & 0xc0) == 0xc0;
+    if (Dest.Ipv6.sin6_addr.u.Byte[1] == 0x02)
+        ok(Link, "%s: source is not link-local\n", Text);
+    else if (Dest.Ipv6.sin6_addr.u.Byte[1] == 0x05)
+        ok(!Link, "%s: source is link-local\n", Text);
+    else
+        ok(!Link && !Site, "%s: source is not of global scope\n", Text);
+
+    /* a datagram goes out with the same choice (the stack's source is not visible here: a socket connected to a
+       multicast address stays unbound; the wire shows it in the lane's bed) */
+    Socket = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+    ok(Socket != INVALID_SOCKET, "socket: %d\n", WSAGetLastError());
+    if (Socket != INVALID_SOCKET)
+    {
+        ok(sendto(Socket, "x", 1, 0, (struct sockaddr *)&Dest.Ipv6, sizeof(Dest.Ipv6)) == 1, "%s: sendto: %d\n", Text,
+           WSAGetLastError());
+        closesocket(Socket);
+    }
+}
+
 static void TestAddress(ULONG IfIndex)
 {
     UNICAST_ROW6 Row;
@@ -406,6 +445,12 @@ static void TestAddress(ULONG IfIndex)
         else
             ok(SameAddress(&Source, "2001:db8:99::5"), "source is not the address\n");
     }
+
+    /* a multicast destination: ff01/ff02 take the link-local address (rule 2), ff05 and ff0e the address of their
+       scope, and the stack answers the same as GetBestRoute2 (global address and link-local address present) */
+    TestMulticastSource(IfIndex, "ff02::1");
+    TestMulticastSource(IfIndex, "ff05::1:3");
+    TestMulticastSource(IfIndex, "ff0e::1");
 
     /* it can be bound, and a datagram from it to its prefix is sent on the link */
     Socket = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
