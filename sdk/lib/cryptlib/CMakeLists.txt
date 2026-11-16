@@ -1,12 +1,14 @@
 
 list(APPEND SOURCE
     aes.c
+    chacha20.c
     des.c
     md4.c
     md5.c
     mvAesAlg.c
     rc4.c
     sha1.c
+    sha256.c
     util.c)
 
 add_library(cryptlib STATIC ${SOURCE})
