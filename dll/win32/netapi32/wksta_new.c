@@ -889,6 +889,39 @@ NetWkstaGetInfo(
     }
     RpcEndExcept;
 
+    /* One block, as NetApiBufferFree frees one */
+    if (status == NERR_Success && *bufptr != NULL)
+    {
+        switch (level)
+        {
+            case 100:
+            {
+                static const USHORT Offsets[] = { FIELD_OFFSET(WKSTA_INFO_100, wki100_computername),
+                                                  FIELD_OFFSET(WKSTA_INFO_100, wki100_langroup) };
+                NetpPackStruct((PVOID *)bufptr, sizeof(WKSTA_INFO_100), Offsets, RTL_NUMBER_OF(Offsets));
+                break;
+            }
+
+            case 101:
+            {
+                static const USHORT Offsets[] = { FIELD_OFFSET(WKSTA_INFO_101, wki101_computername),
+                                                  FIELD_OFFSET(WKSTA_INFO_101, wki101_langroup),
+                                                  FIELD_OFFSET(WKSTA_INFO_101, wki101_lanroot) };
+                NetpPackStruct((PVOID *)bufptr, sizeof(WKSTA_INFO_101), Offsets, RTL_NUMBER_OF(Offsets));
+                break;
+            }
+
+            case 102:
+            {
+                static const USHORT Offsets[] = { FIELD_OFFSET(WKSTA_INFO_102, wki102_computername),
+                                                  FIELD_OFFSET(WKSTA_INFO_102, wki102_langroup),
+                                                  FIELD_OFFSET(WKSTA_INFO_102, wki102_lanroot) };
+                NetpPackStruct((PVOID *)bufptr, sizeof(WKSTA_INFO_102), Offsets, RTL_NUMBER_OF(Offsets));
+                break;
+            }
+        }
+    }
+
     return status;
 }
 
