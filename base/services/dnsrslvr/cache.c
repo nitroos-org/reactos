@@ -18,6 +18,9 @@
 #define NDEBUG
 #include <debug.h>
 
+/* RtlGenRandom, which advapi32 exports under this name */
+BOOLEAN WINAPI SystemFunction036(PVOID Buffer, ULONG Length);
+
 #define CACHE_BUCKET_COUNT      8192                /* a power of two */
 #define CACHE_MAX_ENTRIES       8192                /* the answers of DNS servers, positive and negative */
 #define CACHE_SWEEP_INTERVAL    60000               /* ms */
@@ -29,6 +32,7 @@ static BOOL DnsCacheInitialized = FALSE;
 static volatile LONG MaxCacheTtl = DEFAULT_MAX_CACHE_TTL;
 static volatile LONG MaxNegativeCacheTtl = DEFAULT_MAX_NEG_TTL;
 static ULONGLONG LastSweep;
+static ULONG HashSeed = 2166136261u;        /* the start value of the hash of a name, set at every start of the service */
 
 #define DnsCacheLock()          do { EnterCriticalSection(&DnsCache.Lock); } while (0)
 #define DnsCacheUnlock()        do { LeaveCriticalSection(&DnsCache.Lock); } while (0)
@@ -98,13 +102,34 @@ DnsIntCacheReadParameters(VOID)
     InterlockedExchange(&MaxNegativeCacheTtl, (LONG)min(NegTtl, 0x7fffffffu));
 }
 
+/*
+ * The start value of the hash is picked at random at every start of the service (the system random number
+ * generator, else a mix of what differs between starts): the names a client asks for cannot be chosen to land
+ * in one bucket. Called before the first entry is added.
+ */
+static
+VOID
+SeedNameHash(VOID)
+{
+    ULONG Seed = 0;
+    LARGE_INTEGER Counter;
+
+    if (!SystemFunction036(&Seed, sizeof(Seed)) || Seed == 0)
+    {
+        QueryPerformanceCounter(&Counter);
+        Seed = (ULONG)Counter.LowPart ^ (ULONG)Counter.HighPart ^ GetCurrentProcessId() ^
+               (ULONG)GetTickCount() ^ (ULONG)(ULONG_PTR)&Seed;
+    }
+    HashSeed = Seed ? Seed : 2166136261u;
+}
+
 /* The hash of a name: letters without case, the dot of the root label (after another character) left out */
 static
 ULONG
 NameHash(
     _In_ LPCWSTR Name)
 {
-    ULONG Hash = 2166136261u;
+    ULONG Hash = HashSeed;
     size_t Len = wcslen(Name), i;
 
     if (Len > 1 && Name[Len - 1] == L'.')
@@ -117,6 +142,13 @@ NameHash(
             c += L'a' - L'A';
         Hash = (Hash ^ c) * 16777619u;
     }
+
+    /* the bucket is the low bits: mix the high ones in (the finalizer of MurmurHash3) */
+    Hash ^= Hash >> 16;
+    Hash *= 0x85ebca6bu;
+    Hash ^= Hash >> 13;
+    Hash *= 0xc2b2ae35u;
+    Hash ^= Hash >> 16;
     return Hash;
 }
 
@@ -193,6 +225,7 @@ DnsIntCacheInitialize(VOID)
         for (i = 0; i < CACHE_BUCKET_COUNT; i++)
             InitializeListHead(&DnsCache.Buckets[i]);
     }
+    SeedNameHash();
     LastSweep = CacheNow();
     DnsIntCacheReadParameters();
     DnsCacheInitialized = TRUE;
