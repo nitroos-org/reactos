@@ -22,6 +22,8 @@
 /* The volumes we have a filter device on, protected by FilterListLock */
 LIST_ENTRY FltpVolumeList = { &FltpVolumeList, &FltpVolumeList };
 
+extern PDEVICE_OBJECT CommsDeviceObject;
+
 
 
 /* EXPORTED FUNCTIONS ******************************************************/
@@ -56,19 +58,12 @@ FltGetVolumeProperties(
     /* Clear out the buffer */
     RtlZeroMemory(VolumeProperties, sizeof(FLT_VOLUME_PROPERTIES));
 
-    /* Fill in the fixed data */
-    VolumeProperties->DeviceType = Volume->DeviceObject->DeviceType;
-    VolumeProperties->DeviceObjectFlags = Volume->DeviceObject->Flags;
-    VolumeProperties->AlignmentRequirement = Volume->DeviceObject->AlignmentRequirement;
-    VolumeProperties->SectorSize = Volume->DeviceObject->SectorSize;
-    if (Volume->DiskDeviceObject)
-    {
-        VolumeProperties->DeviceCharacteristics = Volume->DiskDeviceObject->Characteristics;
-    }
-    else
-    {
-        VolumeProperties->DeviceCharacteristics = Volume->DeviceObject->Characteristics;
-    }
+    /* Fill in the fixed data: taken when the volume was created, the devices may be gone */
+    VolumeProperties->DeviceType = Volume->VolumeDeviceType;
+    VolumeProperties->DeviceObjectFlags = Volume->VolumeDeviceFlags;
+    VolumeProperties->AlignmentRequirement = Volume->VolumeAlignmentRequirement;
+    VolumeProperties->SectorSize = Volume->VolumeSectorSize;
+    VolumeProperties->DeviceCharacteristics = Volume->VolumeCharacteristics;
 
     /* So far we've written the fixed struct data */
     BytesWritten = sizeof(FLT_VOLUME_PROPERTIES);
@@ -492,6 +487,13 @@ FltpAttachToVolumeDevice(_In_ PDEVICE_OBJECT VolumeDeviceObject,
     Volume->FileSystemType = GetFileSystemType(VolumeDeviceObject);
     Volume->DeviceObject = NewDeviceObject;
     Volume->DiskDeviceObject = DiskDeviceObject;
+    Volume->VolumeDeviceType = VolumeDeviceObject->DeviceType;
+    Volume->VolumeDeviceFlags = VolumeDeviceObject->Flags;
+    Volume->VolumeAlignmentRequirement = VolumeDeviceObject->AlignmentRequirement;
+    Volume->VolumeSectorSize = VolumeDeviceObject->SectorSize;
+    Volume->VolumeCharacteristics = DiskDeviceObject ? DiskDeviceObject->Characteristics :
+                                                       VolumeDeviceObject->Characteristics;
+    ExInitializeRundownProtection(&Extension->VolumeGate);
     ExInitializeResourceLite(&Volume->InstanceList.rLock);
     InitializeListHead(&Volume->InstanceList.rList);
     InitializeListHead(&Volume->ContextList);
@@ -602,6 +604,84 @@ FltpTeardownVolume(_In_ PFLT_VOLUME Volume,
 
     FltpTeardownVolumeInstances(Volume, Reason);
     FltpTeardownVolumeContexts(Volume);
+}
+
+/*
+ * The volume of one of our devices, with a reference (FltObjectReference) for the caller, or NULL: a
+ * device of a file system control device, or a volume which is being deleted. The gate of the device
+ * makes the read of the pointer and the reference one step for FltpDeleteVolume.
+ */
+PFLT_VOLUME
+FltpReferenceVolumeOfDevice(_In_ PDEVICE_OBJECT DeviceObject)
+{
+    PFLTMGR_DEVICE_EXTENSION Extension = DeviceObject->DeviceExtension;
+    PFLT_VOLUME Volume;
+
+    if (DeviceObject->DriverObject != DriverData.DriverObject || Extension == NULL ||
+        DeviceObject == DriverData.DeviceObject || DeviceObject == CommsDeviceObject)
+    {
+        return NULL;
+    }
+
+    if (!ExAcquireRundownProtection(&Extension->VolumeGate))
+        return NULL;
+    Volume = Extension->Volume;
+    if (Volume && !NT_SUCCESS(FltObjectReference(Volume)))
+        Volume = NULL;
+    ExReleaseRundownProtection(&Extension->VolumeGate);
+
+    return Volume;
+}
+
+/*
+ * Our device on a file system volume device is being deleted (the volume device went, the instances are
+ * already torn down): the FLT_VOLUME goes when the last reference to it is gone. Operations which reach
+ * our device from now on don't get it, the ones in flight and the filters holding a reference
+ * (FltEnumerateVolumes, FltGetVolumeFromInstance...) are waited for. PASSIVE_LEVEL, a worker thread.
+ */
+VOID
+FltpDeleteVolume(_In_ PDEVICE_OBJECT DeviceObject)
+{
+    PFLTMGR_DEVICE_EXTENSION Extension = DeviceObject->DeviceExtension;
+    PFLT_VOLUME Volume;
+
+    PAGED_CODE();
+
+    if (Extension == NULL || Extension->Volume == NULL)
+        return;
+    Volume = Extension->Volume;
+
+    /* Nobody gets the volume from the device any more */
+    ExWaitForRundownProtectionRelease(&Extension->VolumeGate);
+    InterlockedExchangePointer((PVOID *)&Extension->Volume, NULL);
+
+    KeEnterCriticalRegion();
+    ExAcquireResourceExclusiveLite(&FilterListLock, TRUE);
+    Volume->DeviceObject = NULL;
+    Volume->AttachedToDeviceObject = NULL;
+    if (!IsListEmpty(&Volume->GlobalLink))
+    {
+        RemoveEntryList(&Volume->GlobalLink);
+        InitializeListHead(&Volume->GlobalLink);
+    }
+    ExReleaseResourceLite(&FilterListLock);
+    KeLeaveCriticalRegion();
+
+    /* The last references: operations in flight, filters which still look at the volume */
+    FltpObjectRundownWait(&Volume->Base.RundownRef);
+
+    /* A context set or a stream recorded since the teardown, by those last users */
+    FltpTeardownVolumeContexts(Volume);
+    FltpExRundownCompleted(&Volume->Base.RundownRef);
+
+    ExDeleteResourceLite(&Volume->InstanceList.rLock);
+    FltpFreeUnicodeString(&Volume->DeviceName);
+    FltpFreeUnicodeString(&Volume->GuidName);
+    FltpFreeUnicodeString(&Volume->CDODeviceName);
+    FltpFreeUnicodeString(&Volume->CDODriverName);
+    if (Volume->DiskDeviceObject)
+        ObDereferenceObject(Volume->DiskDeviceObject);
+    ExFreePoolWithTag(Volume, FM_TAG_VOLUME);
 }
 
 /*

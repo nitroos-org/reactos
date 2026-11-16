@@ -342,7 +342,12 @@ VOID
 ReleaseCtrl(_In_ PFLTP_IRPCTRL Ctrl)
 {
     if (InterlockedDecrement(&Ctrl->RefCount) == 0)
+    {
+        /* The block had the reference of the volume from the dispatch which made it */
+        if (Ctrl->Volume)
+            FltObjectDereference(Ctrl->Volume);
         ExFreePoolWithTag(Ctrl, FM_TAG_IRPCTRL);
+    }
 }
 
 /* The operation is over for the filters: the instances are released, the block is freed with the last user */
@@ -803,14 +808,17 @@ TrackCreateCompletion(_In_ PDEVICE_OBJECT DeviceObject,
     return STATUS_MORE_PROCESSING_REQUIRED;
 }
 
-/* Hands the IRP to the volume's file system as if we weren't here, but for the contexts of the streams */
+/*
+ * Hands the IRP to the volume's file system as if we weren't here, but for the contexts of the streams.
+ * Takes over the caller's reference of the volume (NULL: none).
+ */
 static
 NTSTATUS
 PassThrough(_In_ PDEVICE_OBJECT DeviceObject,
-            _Inout_ PIRP Irp)
+            _Inout_ PIRP Irp,
+            _In_opt_ PFLT_VOLUME Volume)
 {
     PFLTMGR_DEVICE_EXTENSION DeviceExtension = DeviceObject->DeviceExtension;
-    PFLT_VOLUME Volume = DeviceExtension->Volume;
     PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
 
     if (Volume && Volume->ContextTracking)
@@ -838,12 +846,15 @@ PassThrough(_In_ PDEVICE_OBJECT DeviceObject,
             Status = Irp->IoStatus.Status;
             if (NT_SUCCESS(Status))
                 FltpStreamOpened(Volume, Stack->FileObject);
+            FltObjectDereference(Volume);
 
             IoCompleteRequest(Irp, IO_NO_INCREMENT);
             return Status;
         }
     }
 
+    if (Volume)
+        FltObjectDereference(Volume);
     IoSkipCurrentIrpStackLocation(Irp);
     return IoCallDriver(DeviceExtension->AttachedToDeviceObject, Irp);
 }
@@ -857,7 +868,7 @@ FltpPerformIrp(_In_ PDEVICE_OBJECT DeviceObject,
 {
     PFLTMGR_DEVICE_EXTENSION DeviceExtension = DeviceObject->DeviceExtension;
     PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
-    PFLT_VOLUME Volume = DeviceExtension->Volume;
+    PFLT_VOLUME Volume = FltpReferenceVolumeOfDevice(DeviceObject);
     PFLTP_IRPCTRL Ctrl;
     PLIST_ENTRY Entry;
     ULONG Count = 0;
@@ -870,7 +881,7 @@ FltpPerformIrp(_In_ PDEVICE_OBJECT DeviceObject,
         Volume->CallbackCount[Major] == 0 ||
         KeGetCurrentIrql() > APC_LEVEL)
     {
-        return PassThrough(DeviceObject, Irp);
+        return PassThrough(DeviceObject, Irp, Volume);
     }
 
     /* Count the instances for this operation and reference them, highest altitude first */
@@ -926,6 +937,7 @@ FltpPerformIrp(_In_ PDEVICE_OBJECT DeviceObject,
          * them by (a security filter would be bypassed under low memory). A close or a cleanup can't
          * fail, and paging I/O failing would take the system down: those go on unfiltered.
          */
+        FltObjectDereference(Volume);
         Irp->IoStatus.Status = STATUS_INSUFFICIENT_RESOURCES;
         Irp->IoStatus.Information = 0;
         IoCompleteRequest(Irp, IO_NO_INCREMENT);
@@ -933,15 +945,15 @@ FltpPerformIrp(_In_ PDEVICE_OBJECT DeviceObject,
     }
 
     if (Ctrl == NULL)
-        return PassThrough(DeviceObject, Irp);
+        return PassThrough(DeviceObject, Irp, Volume);
 
     if (Ctrl->Count == 0)
     {
         ExFreePoolWithTag(Ctrl, FM_TAG_IRPCTRL);
-        return PassThrough(DeviceObject, Irp);
+        return PassThrough(DeviceObject, Irp, Volume);
     }
 
-    /* The callback data: the filters see the operation through it */
+    /* The callback data: the filters see the operation through it (and keeps the reference of the volume) */
     Ctrl->RefCount = 1;
     Ctrl->Irp = Irp;
     Ctrl->Volume = Volume;
@@ -984,10 +996,14 @@ BOOLEAN
 FltpFastIoDisallowed(_In_ PDEVICE_OBJECT DeviceObject,
                      _In_ UCHAR MajorFunction)
 {
-    PFLTMGR_DEVICE_EXTENSION DeviceExtension = DeviceObject->DeviceExtension;
+    PFLT_VOLUME Volume = FltpReferenceVolumeOfDevice(DeviceObject);
+    BOOLEAN Disallowed;
 
-    return DeviceExtension && DeviceExtension->Volume &&
-           DeviceExtension->Volume->CallbackCount[MajorFunction] != 0;
+    if (Volume == NULL)
+        return FALSE;
+    Disallowed = Volume->CallbackCount[MajorFunction] != 0;
+    FltObjectDereference(Volume);
+    return Disallowed;
 }
 
 
@@ -1052,7 +1068,7 @@ FltpFastIoReadWrite(_In_ PDEVICE_OBJECT DeviceObject,
     PFLTMGR_DEVICE_EXTENSION DeviceExtension = DeviceObject->DeviceExtension;
     PDEVICE_OBJECT Lower = DeviceExtension->AttachedToDeviceObject;
     PFAST_IO_DISPATCH FastIoDispatch = Lower->DriverObject->FastIoDispatch;
-    PFLT_VOLUME Volume = DeviceExtension->Volume;
+    PFLT_VOLUME Volume;
     UCHAR Major = Write ? IRP_MJ_WRITE : IRP_MJ_READ;
     PFLTP_IRPCTRL Ctrl = NULL;
     FLT_RELATED_OBJECTS Related;
@@ -1068,7 +1084,10 @@ FltpFastIoReadWrite(_In_ PDEVICE_OBJECT DeviceObject,
         return FALSE;
     }
 
-    if (KeGetCurrentIrql() <= APC_LEVEL && Volume->CallbackCount[Major])
+    /* Our reference of the volume, which the callback data takes over if there is one */
+    Volume = FltpReferenceVolumeOfDevice(DeviceObject);
+
+    if (Volume && KeGetCurrentIrql() <= APC_LEVEL && Volume->CallbackCount[Major])
     {
         KeEnterCriticalRegion();
         ExAcquireResourceSharedLite(&Volume->InstanceList.rLock, TRUE);
@@ -1120,11 +1139,16 @@ FltpFastIoReadWrite(_In_ PDEVICE_OBJECT DeviceObject,
     else if (Ctrl == NULL && Count != 0)
     {
         /* Filters want to see it and we can't show it to them: not as fast I/O then, the IRP path decides */
+        FltObjectDereference(Volume);
         return FALSE;
     }
 
     if (Ctrl == NULL)
+    {
+        if (Volume)
+            FltObjectDereference(Volume);
         goto CallLower;
+    }
 
     Ctrl->RefCount = 1;
     Ctrl->Volume = Volume;
@@ -1252,7 +1276,10 @@ Quit:
     return Result;
 }
 
-/* The volume behind the top device of a file system stack: ours, or one below some other filter's */
+/*
+ * The volume of our device in a file system stack, referenced: FsRtl calls us with our own device, a
+ * caller may give the top of the stack (some other filter's device above ours)
+ */
 static
 PFLT_VOLUME
 VolumeOfStack(_In_ PDEVICE_OBJECT Top)
@@ -1263,15 +1290,14 @@ VolumeOfStack(_In_ PDEVICE_OBJECT Top)
     if (Top == NULL)
         return NULL;
     if (Top->DriverObject == DriverData.DriverObject)
-        return Top->DeviceExtension ? ((PFLTMGR_DEVICE_EXTENSION)Top->DeviceExtension)->Volume : NULL;
+        return FltpReferenceVolumeOfDevice(Top);
 
     ObReferenceObject(Top);
     for (Device = Top; Device; Device = Lower)
     {
         if (Device->DriverObject == DriverData.DriverObject)
         {
-            if (Device->DeviceExtension)
-                Volume = ((PFLTMGR_DEVICE_EXTENSION)Device->DeviceExtension)->Volume;
+            Volume = FltpReferenceVolumeOfDevice(Device);
             ObDereferenceObject(Device);
             break;
         }
@@ -1318,8 +1344,13 @@ FltpPreFsFilterOperation(_In_ PFS_FILTER_CALLBACK_DATA Data,
         return STATUS_SUCCESS;
 
     Volume = VolumeOfStack(Data->DeviceObject);
-    if (Volume == NULL || Volume->FsFilterCount[Index] == 0)
+    if (Volume == NULL)
         return STATUS_SUCCESS;
+    if (Volume->FsFilterCount[Index] == 0)
+    {
+        FltObjectDereference(Volume);
+        return STATUS_SUCCESS;
+    }
 
     KeEnterCriticalRegion();
     ExAcquireResourceSharedLite(&Volume->InstanceList.rLock, TRUE);
@@ -1354,14 +1385,17 @@ FltpPreFsFilterOperation(_In_ PFS_FILTER_CALLBACK_DATA Data,
     if (Ctrl == NULL)
     {
         /* Filters want to see it and we can't show it to them: no section rather than an unchecked one */
+        FltObjectDereference(Volume);
         return (Count && Acquire) ? STATUS_INSUFFICIENT_RESOURCES : STATUS_SUCCESS;
     }
     if (Ctrl->Count == 0)
     {
         ExFreePoolWithTag(Ctrl, FM_TAG_IRPCTRL);
+        FltObjectDereference(Volume);
         return STATUS_SUCCESS;
     }
 
+    /* The block keeps our reference of the volume */
     Ctrl->RefCount = 1;
     Ctrl->Volume = Volume;
     Ctrl->MajorFunction = Major;

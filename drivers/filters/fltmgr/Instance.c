@@ -234,7 +234,7 @@ FltpAttachInstance(_In_ PFLT_FILTER Filter,
         InitRelatedObjects(&Objects, Instance);
         Status = Filter->InstanceSetup(&Objects,
                                        SetupFlags,
-                                       Volume->DeviceObject->DeviceType,
+                                       Volume->VolumeDeviceType,
                                        Volume->FileSystemType);
         if (!NT_SUCCESS(Status))
         {

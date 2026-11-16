@@ -227,12 +227,13 @@ FltpDetachFromFileSystemDevice(_In_ PDEVICE_OBJECT DeviceObject)
 
 
     DeviceExtension = AttachedDevice->DeviceExtension;
-    if (DeviceExtension)
-    {
-        //
-        // FIXME: Put any device extension cleanup code here
-        //
-    }
+
+    /*
+     * The file system may have deleted its control device before it unregistered: then the I/O manager
+     * told us already (FltpFastIoDetachDevice) and that detach is done or under way
+     */
+    if (DeviceExtension && InterlockedExchange(&DeviceExtension->DetachClaimed, 1))
+        return ObDereferenceObject(AttachedDevice);
 
     /* Detach the device from the chain and delete the object */
     IoDetachDevice(DeviceObject);
@@ -407,7 +408,13 @@ FltpDismountVolume(_In_ PDEVICE_OBJECT DeviceObject,
 
     if (NT_SUCCESS(Status))
     {
-        FltpTeardownVolume(DeviceExtension->Volume, FLTFL_INSTANCE_TEARDOWN_VOLUME_DISMOUNT);
+        PFLT_VOLUME Volume = FltpReferenceVolumeOfDevice(DeviceObject);
+
+        if (Volume)
+        {
+            FltpTeardownVolume(Volume, FLTFL_INSTANCE_TEARDOWN_VOLUME_DISMOUNT);
+            FltObjectDereference(Volume);
+        }
     }
 
     Status = Irp->IoStatus.Status;
@@ -1051,11 +1058,16 @@ DetachFromDeletedDevice(_In_ PDEVICE_OBJECT SourceDevice,
 
     PAGED_CODE();
 
+    /* A file system control device: its unregistration may have detached us already */
+    if (DeviceExtension && InterlockedExchange(&DeviceExtension->DetachClaimed, 1))
+        return;
+
     /*
      * The file system deleted the volume device below ours without a dismount we saw (the medium is
      * gone, a surprise removal, or the volume's last close after a dismount): the instances go as for
-     * a dismount, and the volume leaves the list. The FLT_VOLUME itself stays allocated (an operation
-     * of another thread may still look at it); FltGetDeviceObject says there is no device any more.
+     * a dismount, and the volume leaves the list; FltGetDeviceObject says there is no device any more.
+     * The FLT_VOLUME goes with its last reference (FltpDeleteVolume): an operation of another thread or
+     * a filter may still look at it.
      */
     if (DeviceExtension && DeviceExtension->Volume)
     {
@@ -1076,7 +1088,8 @@ DetachFromDeletedDevice(_In_ PDEVICE_OBJECT SourceDevice,
     /* Detach from the target device: this is where the I/O manager frees it */
     IoDetachDevice(TargetDevice);
 
-    /* Delete the source */
+    /* The volume goes once nobody uses it any more, then our device */
+    FltpDeleteVolume(SourceDevice);
     IoDeleteDevice(SourceDevice);
 }
 
@@ -1087,6 +1100,7 @@ FltpFastIoDetachDeviceWorker(_In_ PVOID Parameter)
     PDETACH_DEVICE_WORK_ITEM DetachDeviceWorkItem = Parameter;
 
     DetachFromDeletedDevice(DetachDeviceWorkItem->SourceDevice, DetachDeviceWorkItem->TargetDevice);
+    ObDereferenceObject(DetachDeviceWorkItem->SourceDevice);
 
     /* Free the pool we allocated in FltpFastIoDetachDevice */
     ExFreePoolWithTag(DetachDeviceWorkItem, FM_TAG_DETACH);
@@ -1112,6 +1126,8 @@ FltpFastIoDetachDevice(_In_ PDEVICE_OBJECT SourceDevice,
                                                  FM_TAG_DETACH);
     if (DetachDeviceWorkItem)
     {
+        /* Our device stays until the worker is done with it, whoever else detaches and deletes it */
+        ObReferenceObject(SourceDevice);
         DetachDeviceWorkItem->SourceDevice = SourceDevice;
         DetachDeviceWorkItem->TargetDevice = TargetDevice;
         ExInitializeWorkItem(&DetachDeviceWorkItem->WorkItem,

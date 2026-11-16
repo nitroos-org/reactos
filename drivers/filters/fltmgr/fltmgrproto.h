@@ -53,6 +53,16 @@ FltpTeardownVolume(
     _In_ ULONG Reason
 );
 
+PFLT_VOLUME
+FltpReferenceVolumeOfDevice(
+    _In_ PDEVICE_OBJECT DeviceObject
+);
+
+VOID
+FltpDeleteVolume(
+    _In_ PDEVICE_OBJECT DeviceObject
+);
+
 NTSTATUS
 FltpSnapshotVolumes(
     _Outptr_result_buffer_(*Count) PFLT_VOLUME **Volumes,
