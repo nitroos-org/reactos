@@ -167,6 +167,9 @@ static const PCWSTR g_Order[] = {
 static int OrderOf(PCWSTR k)
 {
     int i;
+    /* Platform2 (the operator of the Platform entry in front of it) sorts with Platform, so the stable sort keeps the pair
+       together: "Platform=2:6:2|Platform2=GTEQ|Platform=2:6:1" must not become two entries followed by one operator */
+    if (!_wcsicmp(k, L"Platform2")) k = L"Platform";
     for (i = 0; i < (int)_countof(g_Order); i++) if (!_wcsicmp(k, g_Order[i])) return i;
     return (int)_countof(g_Order);
 }
