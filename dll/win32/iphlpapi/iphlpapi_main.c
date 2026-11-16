@@ -3161,6 +3161,18 @@ DWORD WINAPI GetUniDirectionalAdapterInfo(PIP_UNIDIRECTIONAL_ADAPTER_ADDRESS pIP
 }
 
 
+/* The adapter map from GetInterfaceInfo names an adapter \DEVICE\TCPIP_{GUID}; the DHCP client API wants the bare {GUID}. */
+static PCWSTR DhcpAdapterNameFromMap(PIP_ADAPTER_INDEX_MAP AdapterInfo)
+{
+  static const WCHAR Prefix[] = L"\\DEVICE\\TCPIP_";
+  const SIZE_T PrefixLen = ARRAYSIZE(Prefix) - 1;
+
+  if (_wcsnicmp(AdapterInfo->Name, Prefix, PrefixLen) == 0)
+      return AdapterInfo->Name + PrefixLen;
+  return AdapterInfo->Name;
+}
+
+
 /******************************************************************
  *    IpReleaseAddress (IPHLPAPI.@)
  *
@@ -3184,7 +3196,7 @@ DWORD WINAPI IpReleaseAddress(PIP_ADAPTER_INDEX_MAP AdapterInfo)
   if (DhcpCApiInitialize(&Version) != ERROR_SUCCESS)
       return ERROR_PROC_NOT_FOUND;
 
-  Status = DhcpReleaseParameters(AdapterInfo->Name);
+  Status = DhcpReleaseParameters((PWSTR)DhcpAdapterNameFromMap(AdapterInfo));
 
   DhcpCApiCleanup();
 
@@ -3215,7 +3227,7 @@ DWORD WINAPI IpRenewAddress(PIP_ADAPTER_INDEX_MAP AdapterInfo)
   if (DhcpCApiInitialize(&Version) != ERROR_SUCCESS)
       return ERROR_PROC_NOT_FOUND;
 
-  Status = DhcpAcquireParameters(AdapterInfo->Name);
+  Status = DhcpAcquireParameters((PWSTR)DhcpAdapterNameFromMap(AdapterInfo));
 
   DhcpCApiCleanup();
 
