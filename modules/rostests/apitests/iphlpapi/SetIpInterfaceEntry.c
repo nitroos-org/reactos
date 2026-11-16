@@ -366,6 +366,13 @@ static void TestFamily(USHORT Family, ULONG Index)
     ok(Error == NO_ERROR, "forwarding off: %lu\n", Error);
     ok(GetRow(Family, Index, &Back) && !Back.ForwardingEnabled, "forwarding reported off\n");
 
+    /* ReactOS: the stack has no switch for DisableDefaultRoutes (a VPN client's split-tunnel guard): refused, not ignored */
+    Row = Back;
+    Row.DisableDefaultRoutes = TRUE;
+    Error = pSet(&Row);
+    ok(Error == ERROR_NOT_SUPPORTED, "DisableDefaultRoutes: %lu\n", Error);
+    ok(GetRow(Family, Index, &Back) && !Back.DisableDefaultRoutes, "DisableDefaultRoutes reported off\n");
+
     /* a request with one wrong field changes nothing (the right MTU is not applied) */
     Row = Back;
     Row.NlMtu = Link - 50;

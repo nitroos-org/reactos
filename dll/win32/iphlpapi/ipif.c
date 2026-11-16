@@ -159,6 +159,10 @@ DWORD WINAPI SetIpInterfaceEntry(PMIB_IPINTERFACE_ROW Row)
     Request.Fields |= TCP_IPIF_SET_FORWARDING;
     Request.Forwarding = 1;
   }
+  /* DisableDefaultRoutes is what VPN clients set to stop split tunnelling: the stack has no such switch, and a success
+     would tell the caller the default routes of the interface are no longer used when they are */
+  if (Row->DisableDefaultRoutes == TRUE && !Current.DisableDefaultRoutes)
+    return ERROR_NOT_SUPPORTED;
 
   /* the loopback interface has none of these to set */
   if (Request.Fields && Current.NlMtu == 0xffffffff)
