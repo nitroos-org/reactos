@@ -308,7 +308,7 @@ R_ResolverQuery(
                 {
                     DPRINT("DNS query successful!\n");
                     /* kept for the time its records say (not at all with a TTL of 0) */
-                    DnsIntCacheAddResult(*ppResultRecords);
+                    DnsIntCacheAddResult(pszName, wType, *ppResultRecords);
                 }
                 else if (!IsOwnName(pszName))
                 {

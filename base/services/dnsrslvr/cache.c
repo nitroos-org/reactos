@@ -276,8 +276,8 @@ DnsIntCacheRemoveEntryItem(PRESOLVER_CACHE_ENTRY CacheEntry)
     /* Free record */
     if (CacheEntry->Record)
         DnsRecordListFree(CacheEntry->Record, DnsFreeRecordList);
-    if (CacheEntry->NegName)
-        HeapFree(GetProcessHeap(), 0, CacheEntry->NegName);
+    if (CacheEntry->KeyName)
+        HeapFree(GetProcessHeap(), 0, CacheEntry->KeyName);
 
     /* Delete us */
     HeapFree(GetProcessHeap(), 0, CacheEntry);
@@ -586,9 +586,13 @@ DnsIntCacheGetEntryByName(
 }
 
 /*
- * Adds an entry (the lock is held). Record is the answer (copied), or NULL for a negative one of Name, Type and
- * NegStatus. A hosts entry never expires and is not counted; the other entries replace the entry of their name
- * and type, and the oldest unused one goes when there are too many.
+ * Adds an entry (the lock is held) that answers the query of Name and Type. Record is the answer (copied), or NULL
+ * for a negative one with NegStatus. A hosts entry never expires and is not counted; the other entries replace the
+ * entry of their name and type, and the oldest unused one goes when there are too many.
+ *
+ * The answer of an alias starts with the CNAME records of its chain (the first one owned by Name, the address records
+ * owned by the end of the chain), so the entry is keyed on what was asked, not on its first record: the whole answer,
+ * chain included, is found again by the same query, and the canonical name comes with it.
  */
 static
 VOID
@@ -613,6 +617,7 @@ AddEntry(
         return;
 
     Entry->bHostsFileEntry = bHostsFileEntry;
+    Entry->Type = Type;
     if (Record)
     {
         Entry->Record = DnsRecordSetCopyEx(Record, DnsCharSetUnicode, DnsCharSetUnicode);
@@ -622,22 +627,28 @@ AddEntry(
             HeapFree(GetProcessHeap(), 0, Entry);
             return;
         }
-        Entry->Name = Entry->Record->pName;
-        Entry->Type = Entry->Record->wType;
+        if (Entry->Record->pName && wcscmp(Entry->Record->pName, Name) == 0)
+            Entry->Name = Entry->Record->pName;
     }
     else
     {
-        Entry->NegName = HeapAlloc(GetProcessHeap(), 0, (wcslen(Name) + 1) * sizeof(WCHAR));
-        if (!Entry->NegName)
+        Entry->NegStatus = NegStatus;
+        Entry->bNoSearch = bNoSearch;
+    }
+
+    /* the name asked for is not the owner of the first record (a negative entry has none): a copy of its own */
+    if (Entry->Name == NULL)
+    {
+        Entry->KeyName = HeapAlloc(GetProcessHeap(), 0, (wcslen(Name) + 1) * sizeof(WCHAR));
+        if (!Entry->KeyName)
         {
+            if (Entry->Record)
+                DnsRecordListFree(Entry->Record, DnsFreeRecordList);
             HeapFree(GetProcessHeap(), 0, Entry);
             return;
         }
-        wcscpy(Entry->NegName, Name);
-        Entry->Name = Entry->NegName;
-        Entry->Type = Type;
-        Entry->NegStatus = NegStatus;
-        Entry->bNoSearch = bNoSearch;
+        wcscpy(Entry->KeyName, Name);
+        Entry->Name = Entry->KeyName;
     }
     Entry->Hash = NameHash(Entry->Name);
     Bucket = BucketOf(Entry->Hash);
@@ -710,11 +721,13 @@ DnsIntCacheAddEntry(
 }
 
 /*
- * The answer of a DNS server: kept for the time of its shortest record (at most MaxCacheTtl); an answer
- * with a TTL of 0 is not kept.
+ * The answer of a DNS server to the query of Name and wType (the CNAME records of an alias included): kept for the
+ * time of its shortest record (at most MaxCacheTtl); an answer with a TTL of 0 is not kept.
  */
 VOID
 DnsIntCacheAddResult(
+    _In_ LPCWSTR Name,
+    _In_ WORD wType,
     _In_ PDNS_RECORDW Records)
 {
     PDNS_RECORDW Record;
@@ -737,7 +750,7 @@ DnsIntCacheAddResult(
 
     DnsCacheLock();
     SweepIfDue(CacheNow());
-    AddEntry(Records, FALSE, Records->pName, Records->wType, ERROR_SUCCESS, FALSE, Ttl);
+    AddEntry(Records, FALSE, Name, wType, ERROR_SUCCESS, FALSE, Ttl);
     DnsCacheUnlock();
 }
 
