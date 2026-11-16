@@ -390,6 +390,37 @@ NetServerGetInfo(
     }
     RpcEndExcept;
 
+    /* One block, as NetApiBufferFree frees one */
+    if (status == NERR_Success && *bufptr != NULL)
+    {
+        switch (level)
+        {
+            case 100:
+            {
+                static const USHORT Offsets[] = { FIELD_OFFSET(SERVER_INFO_100, sv100_name) };
+                NetpPackStruct((PVOID *)bufptr, sizeof(SERVER_INFO_100), Offsets, RTL_NUMBER_OF(Offsets));
+                break;
+            }
+
+            case 101:
+            {
+                static const USHORT Offsets[] = { FIELD_OFFSET(SERVER_INFO_101, sv101_name),
+                                                  FIELD_OFFSET(SERVER_INFO_101, sv101_comment) };
+                NetpPackStruct((PVOID *)bufptr, sizeof(SERVER_INFO_101), Offsets, RTL_NUMBER_OF(Offsets));
+                break;
+            }
+
+            case 102:
+            {
+                static const USHORT Offsets[] = { FIELD_OFFSET(SERVER_INFO_102, sv102_name),
+                                                  FIELD_OFFSET(SERVER_INFO_102, sv102_comment),
+                                                  FIELD_OFFSET(SERVER_INFO_102, sv102_userpath) };
+                NetpPackStruct((PVOID *)bufptr, sizeof(SERVER_INFO_102), Offsets, RTL_NUMBER_OF(Offsets));
+                break;
+            }
+        }
+    }
+
     return status;
 }
 
