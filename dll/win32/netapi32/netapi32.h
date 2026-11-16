@@ -112,6 +112,14 @@ NetpPackEnumEntries(
     _Out_ PVOID *Buffer);
 
 VOID
+NetpPackStructArray(
+    _Inout_ PVOID *Block,
+    _In_ ULONG Count,
+    _In_ ULONG FixedSize,
+    _In_ const USHORT *StrOffsets,
+    _In_ ULONG StrCount);
+
+VOID
 NetpPackStruct(
     _Inout_ PVOID *Block,
     _In_ ULONG FixedSize,
