@@ -553,6 +553,12 @@ static ULONG common_bits(const UCHAR *A, const UCHAR *B)
   return Bits;
 }
 
+/* A temporary address (RFC 8981): the stack reports its suffix origin as IpSuffixOriginRandom */
+static int is_temporary(const TCP_IPV6_ADDRESS_ROW *Row)
+{
+  return Row->SuffixOrigin == IpSuffixOriginRandom ? 1 : 0;
+}
+
 /* The address a packet to Dest leaves with over interface IfIndex */
 static void pick_source(const IPV6_ALL *All, DWORD IfIndex, const UCHAR *Dest, SOCKADDR_INET *Source)
 {
@@ -578,11 +584,13 @@ static void pick_source(const IPV6_ALL *All, DWORD IfIndex, const UCHAR *Dest, S
       if (!LinkLocal)
         LinkLocal = Row;
     }
-    /* a preferred address before a deprecated one, then the longest prefix in common with the destination
-       (RFC 6724 rules 3 and 8) */
+    /* a preferred address before a deprecated one, a temporary one (suffix origin Random) before a public one,
+       then the longest prefix in common with the destination (RFC 6724 rules 3, 7 and 8, as the stack chooses) */
     else if (!Global || (Global->DadState != DAD_PREFERRED && Row->DadState == DAD_PREFERRED) ||
              (Global->DadState == Row->DadState &&
-              common_bits(Row->Address, Dest) > common_bits(Global->Address, Dest)))
+              (is_temporary(Row) > is_temporary(Global) ||
+               (is_temporary(Row) == is_temporary(Global) &&
+                common_bits(Row->Address, Dest) > common_bits(Global->Address, Dest)))))
       Global = Row;
   }
 
