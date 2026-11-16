@@ -164,9 +164,12 @@
 @ stdcall NhGetInterfaceNameFromGuid(ptr ptr ptr long long)
 @ stdcall NhpAllocateAndGetInterfaceInfoFromStack(ptr ptr long ptr long)
 @ stub NhpGetInterfaceIndexFromStack
+@ stdcall NitroConfigureIpInterface(long ptr)
 @ stdcall NitroConfigureIpv6Address(long long ptr)
 @ stdcall NitroConfigureIpv6Route(long long ptr)
 @ stdcall NitroGetPersistentIpv6Routes(ptr)
+@ stdcall NitroGetPrefixPolicies(long ptr ptr)
+@ stdcall NitroSetPrefixPolicies(long ptr long)
 @ stdcall NotifyAddrChange(ptr ptr)
 @ stdcall NotifyRouteChange(ptr ptr)
 @ stub NotifyRouteChangeEx
