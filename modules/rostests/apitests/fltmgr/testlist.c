@@ -25,6 +25,7 @@ extern void func_p3section(void);
 extern void func_p3port(void);
 extern void func_p3refuse(void);
 extern void func_p3stream(void);
+extern void func_p3pdpc(void);
 
 const struct test winetest_testlist[] =
 {
@@ -52,5 +53,6 @@ const struct test winetest_testlist[] =
     { "p3port", func_p3port },
     { "p3refuse", func_p3refuse },
     { "p3stream", func_p3stream },
+    { "p3pdpc", func_p3pdpc },
     { 0, 0 }
 };

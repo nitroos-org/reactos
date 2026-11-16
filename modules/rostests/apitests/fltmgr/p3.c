@@ -763,6 +763,91 @@ START_TEST(p3stream)
     test_StreamContextRecords();
 }
 
+/*
+ * A pre-operation pended by the filter and completed from a DPC (FltCompletePendedPreOperation at
+ * DISPATCH_LEVEL): the rest of the operation goes on in a worker thread, which must use the address
+ * space of the process which sent it. Cached writes: the file system copies from the caller's buffer.
+ */
+static
+void
+test_PendCompletedAtDispatch(void)
+{
+    SAMPLE P = { { 0 } };
+    FLTSAMPLE_STATS S;
+    WCHAR Path[MAX_PATH];
+    HANDLE File;
+    UCHAR Buffer[4096], Check[4096];
+    DWORD Bytes, i, j, Bad = 0, Failed = 0;
+
+    MakeTestFile(L"p3pend.pdpc", Path, RTL_NUMBER_OF(Path));
+    DeleteFileW(Path);
+    if (!LoadSample(&P, L"FltSampleP", L"383000.5", 0xFFFF))
+    {
+        skip("Can't load the sample filter\n");
+        return;
+    }
+
+    File = CreateFileW(Path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    ok(File != INVALID_HANDLE_VALUE, "Create failed: %lu\n", GetLastError());
+    if (File != INVALID_HANDLE_VALUE)
+    {
+        for (i = 0; i < 16; i++)
+        {
+            for (j = 0; j < sizeof(Buffer); j++)
+                Buffer[j] = (UCHAR)(i * 13 + j * 5 + 1);
+            if (!WriteFile(File, Buffer, sizeof(Buffer), &Bytes, NULL) || Bytes != sizeof(Buffer))
+                Failed++;
+        }
+        CloseHandle(File);
+    }
+    ok(Failed == 0, "%lu writes failed, last error %lu\n", Failed, GetLastError());
+
+    SampleStats(&P, &S);
+    trace("Writes pended %lu, completed from a DPC %lu\n", S.PendDpc, S.PendDpcCompleted);
+    ok(S.PendDpc >= 16, "%lu writes pended\n", S.PendDpc);
+    ok(S.PendDpcCompleted == S.PendDpc, "%lu pended, %lu completed\n", S.PendDpc, S.PendDpcCompleted);
+    UnloadSample(&P, TRUE);
+
+    /* What is in the file is what was written */
+    File = CreateFileW(Path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    ok(File != INVALID_HANDLE_VALUE, "Open failed: %lu\n", GetLastError());
+    if (File != INVALID_HANDLE_VALUE)
+    {
+        for (i = 0; i < 16; i++)
+        {
+            ZeroMemory(Check, sizeof(Check));
+            if (!ReadFile(File, Check, sizeof(Check), &Bytes, NULL) || Bytes != sizeof(Check))
+            {
+                Bad++;
+                continue;
+            }
+            for (j = 0; j < sizeof(Check); j++)
+            {
+                if (Check[j] != (UCHAR)(i * 13 + j * 5 + 1))
+                {
+                    Bad++;
+                    break;
+                }
+            }
+        }
+        CloseHandle(File);
+    }
+    ok(Bad == 0, "%lu of 16 blocks don't hold what was written\n", Bad);
+    DeleteFileW(Path);
+}
+
+START_TEST(p3pdpc)
+{
+    EnsureTestDirectory();
+    if (!StartFilterManager())
+    {
+        skip("No filter manager\n");
+        return;
+    }
+
+    test_PendCompletedAtDispatch();
+}
+
 START_TEST(p3create)
 {
     EnsureTestDirectory();

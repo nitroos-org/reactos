@@ -1485,9 +1485,34 @@ PendedPreWorker(_In_ PVOID Parameter)
 {
     PFLTP_IRPCTRL Ctrl = Parameter;
     FLTP_PRE_RESULT Result;
+    PEPROCESS Process = NULL;
+    KAPC_STATE ApcState;
+
+    /*
+     * The operation goes on in this system thread, but its buffers may be user addresses of the
+     * process which sent it (a cached write: the file system copies from Irp->UserBuffer, or locks
+     * it into an MDL). So we go on in that address space, as the thread which sent it would. The
+     * process is referenced: the operation may be done and the process gone before we detach.
+     */
+    if (Ctrl->Data.Thread)
+    {
+        Process = IoThreadToProcess(Ctrl->Data.Thread);
+        if (Process == PsGetCurrentProcess())
+            Process = NULL;
+        else
+            ObReferenceObject(Process);
+    }
+    if (Process)
+        KeStackAttachProcess((PKPROCESS)Process, &ApcState);
 
     Result = RunPreOperations(Ctrl, TRUE);
     (VOID)ContinueAfterPre(Ctrl, Result);
+
+    if (Process)
+    {
+        KeUnstackDetachProcess(&ApcState);
+        ObDereferenceObject(Process);
+    }
 }
 
 VOID
@@ -1516,7 +1541,8 @@ FltCompletePendedPreOperation(_In_ PFLT_CALLBACK_DATA CallbackData,
     /*
      * The operation is parked, we carry on with it in this thread, unless the filter completes the pend
      * above APC_LEVEL (from a DPC or a completion routine): the rest of the pre-operations, the call to
-     * the file system and the waits of FLT_PREOP_SYNCHRONIZE need IRQL <= APC_LEVEL, so a worker does it.
+     * the file system and the waits of FLT_PREOP_SYNCHRONIZE need IRQL <= APC_LEVEL, so a worker does it,
+     * in the address space of the requestor (PendedPreWorker).
      * The work item of the block is free: FltDoCompletionProcessingWhenSafe uses it after the pre-operations only.
      */
     if (KeGetCurrentIrql() > APC_LEVEL)

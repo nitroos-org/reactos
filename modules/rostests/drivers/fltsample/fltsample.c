@@ -50,6 +50,7 @@ C_ASSERT(FIELD_OFFSET(FLT_PARAMETERS, SetFileInformation.ReplaceIfExists) ==
 #define MODE_MSG        8
 #define MODE_NOSEC      9
 #define MODE_SCTX       10
+#define MODE_PDPC       11
 
 #define MAX_OPEN        256
 
@@ -131,7 +132,7 @@ ModeFromName(_In_ PCUNICODE_STRING Name)
     {
         { L".blk", MODE_BLK }, { L".nowr", MODE_NOWR }, { L".half", MODE_HALF }, { L".pend", MODE_PEND },
         { L".sync", MODE_SYNC }, { L".safe", MODE_SAFE }, { L".nodel", MODE_NODEL }, { L".msg", MODE_MSG },
-        { L".nosec", MODE_NOSEC }, { L".sctx", MODE_SCTX },
+        { L".nosec", MODE_NOSEC }, { L".sctx", MODE_SCTX }, { L".pdpc", MODE_PDPC },
     };
     ULONG i, Length;
 
@@ -543,6 +544,40 @@ PendWorker(_In_ PVOID Parameter)
         KeSetEvent(&WorkersDone, IO_NO_INCREMENT, FALSE);
 }
 
+/*
+ * A timer DPC: a DPC queued at PASSIVE_LEVEL runs at once on this processor, before the pre-operation
+ * has even returned FLT_PREOP_PENDING, which is not the case to test.
+ */
+typedef struct _PEND_DPC_ITEM
+{
+    KTIMER Timer;
+    KDPC Dpc;
+    PFLT_CALLBACK_DATA Data;
+
+} PEND_DPC_ITEM, *PPEND_DPC_ITEM;
+
+/* .pdpc: the pended write is let go from a DPC, at DISPATCH_LEVEL, in whatever thread and process */
+static
+VOID
+NTAPI
+PendDpcRoutine(_In_ PKDPC Dpc,
+               _In_opt_ PVOID Context,
+               _In_opt_ PVOID Argument1,
+               _In_opt_ PVOID Argument2)
+{
+    PPEND_DPC_ITEM Item = Context;
+
+    UNREFERENCED_PARAMETER(Dpc);
+    UNREFERENCED_PARAMETER(Argument1);
+    UNREFERENCED_PARAMETER(Argument2);
+
+    InterlockedIncrement((PLONG)&Stats.PendDpcCompleted);
+    FltCompletePendedPreOperation(Item->Data, FLT_PREOP_SUCCESS_WITH_CALLBACK, NULL);
+    ExFreePoolWithTag(Item, TAG_SAMPLE);
+    if (InterlockedDecrement(&PendingWorkers) == 0)
+        KeSetEvent(&WorkersDone, IO_NO_INCREMENT, FALSE);
+}
+
 typedef struct _RV_PARK_ITEM
 {
     SAMPLE_WORK WorkItem;
@@ -625,7 +660,7 @@ PreOperation(_Inout_ PFLT_CALLBACK_DATA Data,
 
         ULONG FastMode = FindMode(FileObject);
 
-        if (FastMode == MODE_PEND || FastMode == MODE_HALF)
+        if (FastMode == MODE_PEND || FastMode == MODE_HALF || FastMode == MODE_PDPC)
             return FLT_PREOP_DISALLOW_FASTIO;
     }
 
@@ -690,6 +725,25 @@ PreOperation(_Inout_ PFLT_CALLBACK_DATA Data,
                 }
                 if (Item)
                     ExFreePoolWithTag(Item, TAG_SAMPLE);
+            }
+            else if (Mode == MODE_PDPC)
+            {
+                PPEND_DPC_ITEM Item = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Item), TAG_SAMPLE);
+
+                if (Item)
+                {
+                    LARGE_INTEGER Due;
+
+                    Item->Data = Data;
+                    KeInitializeDpc(&Item->Dpc, PendDpcRoutine, Item);
+                    KeInitializeTimer(&Item->Timer);
+                    InterlockedIncrement(&PendingWorkers);
+                    KeResetEvent(&WorkersDone);
+                    InterlockedIncrement((PLONG)&Stats.PendDpc);
+                    Due.QuadPart = -10000LL * 10;
+                    KeSetTimer(&Item->Timer, Due, &Item->Dpc);
+                    return FLT_PREOP_PENDING;
+                }
             }
             break;
 
@@ -1045,6 +1099,8 @@ FilterUnload(_In_ FLT_FILTER_UNLOAD_FLAGS Flags)
     SampleFilter = NULL;
     while (PendingWorkers)
         KeWaitForSingleObject(&WorkersDone, Executive, KernelMode, FALSE, NULL);
+    /* A DPC which woke us may still be on its way out of our code */
+    KeFlushQueuedDpcs();
 
     /* Leave a report in the service key: all instances must be gone by now */
     ReportRun(L"LastRunSetups", Stats.InstanceSetups);
