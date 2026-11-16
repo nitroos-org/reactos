@@ -738,7 +738,7 @@ static LONG_PTR ndr_client_call( const MIDL_STUB_DESC *stub_desc, const PFORMAT_
     finally_ctx.proc_header = proc_header;
     finally_ctx.This = This;
     finally_ctx.handle_format = handle_format;
-    finally_ctx.hbinding = hbinding;
+    finally_ctx.hbinding = NULL;
 
     __TRY
     {
@@ -749,7 +749,11 @@ static LONG_PTR ndr_client_call( const MIDL_STUB_DESC *stub_desc, const PFORMAT_
 
         /* we only need a handle if this isn't an object method */
         if (!(proc_header->Oi_flags & Oi_OBJECT_PROC))
+        {
             hbinding = client_get_handle(stub_msg, proc_header, handle_format);
+            /* the handle an explicit generic handle's bind routine returned goes to its unbind routine */
+            finally_ctx.hbinding = hbinding;
+        }
 
         stub_msg->BufferLength = 0;
 
