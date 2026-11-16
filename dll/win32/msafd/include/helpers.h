@@ -68,6 +68,8 @@ int SockGetTdiName(
     PDWORD Events
 );
 
+VOID SockFreeHelpers(VOID);
+
 #endif /* __HELPERS_H */
 
 /* EOF */

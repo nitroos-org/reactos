@@ -527,4 +527,31 @@ SockIsTripleInMapping(
     return FALSE;
 }
 
+/*
+ * Release the loaded helper DLLs, their mappings and descriptors when msafd is unloaded: ws2_32 unloads
+ * and loads msafd again for every WSAStartup that follows a WSACleanup of the last reference, and the
+ * list head is initialised on load, so what is left behind here is lost for good (and the library
+ * reference of the helper DLL with it).
+ */
+VOID
+SockFreeHelpers(VOID)
+{
+    PLIST_ENTRY Entry;
+    PHELPER_DATA HelperData;
+
+    if (!SockHelpersListHead.Flink)
+        return;
+
+    while (!IsListEmpty(&SockHelpersListHead))
+    {
+        Entry = RemoveHeadList(&SockHelpersListHead);
+        HelperData = CONTAINING_RECORD(Entry, HELPER_DATA, Helpers);
+
+        if (HelperData->hInstance)
+            FreeLibrary(HelperData->hInstance);
+        HeapFree(GlobalHeap, 0, HelperData->Mapping);
+        HeapFree(GlobalHeap, 0, HelperData);
+    }
+}
+
 /* EOF */

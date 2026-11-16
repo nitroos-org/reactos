@@ -74,6 +74,7 @@ WSPSocket(int AddressFamily,
     LARGE_INTEGER               GroupData;
     INT                         Status;
     PSOCK_SHARED_INFO           SharedData = NULL;
+    BOOLEAN                     HaveTransportName = FALSE;
 
     TRACE("Creating Socket, getting TDI Name - AddressFamily (%d)  SocketType (%d)  Protocol (%d).\n",
         AddressFamily, SocketType, Protocol);
@@ -174,6 +175,7 @@ WSPSocket(int AddressFamily,
         ERR("SockGetTdiName: Status %x\n", Status);
         goto error;
     }
+    HaveTransportName = TRUE;
 
     /* AFD Device Name */
     RtlInitUnicodeString(&DevName, L"\\Device\\Afd\\Endpoint");
@@ -429,6 +431,10 @@ WSPSocket(int AddressFamily,
     }
 ok:
 
+    /* The helper allocated the transport name for this call only (the EA buffer holds its own copy) */
+    if (HaveTransportName)
+        RtlFreeUnicodeString(&TransportName);
+
     /* Save in Process Sockets List */
     EnterCriticalSection(&SocketListLock);
     Socket->NextSocket = SocketListHead;
@@ -448,6 +454,9 @@ ok:
 
 error:
     TRACE("Ending %x\n", Status);
+
+    if (HaveTransportName)
+        RtlFreeUnicodeString(&TransportName);
 
     if( SharedData )
     {
@@ -4978,6 +4987,9 @@ MsafdAdoptInheritedSocket(SOCKET Handle)
                        &Socket->HelperEvents) != NO_ERROR)
         goto fail;
 
+    /* The endpoint exists already: the transport name the helper allocated is not needed (see WSPSocket) */
+    RtlFreeUnicodeString(&TransportName);
+
     Socket->Handle = Handle;
     Socket->LocalAddress = &Socket->SharedData->WSLocalAddress;
     Socket->RemoteAddress = &Socket->SharedData->WSRemoteAddress;
@@ -5614,6 +5626,10 @@ DllMain(HANDLE hInstDll,
         break;
 
     case DLL_PROCESS_DETACH:
+
+        /* A FreeLibrary (not the end of the process): nothing may stay allocated */
+        if (!Reserved)
+            SockFreeHelpers();
 
         /* Delete the socket list lock */
         DeleteCriticalSection(&SocketListLock);

@@ -53,6 +53,7 @@ extern void func_shortname(void);
 extern void func_listen(void);
 extern void func_udpconnreset(void);
 extern void func_manysockets(void);
+extern void func_memleak(void);
 extern void func_nbconnect(void);
 extern void func_nonblocking(void);
 extern void func_nostartup(void);
@@ -155,6 +156,7 @@ const struct test winetest_testlist[] =
     { "listen", func_listen },
     { "udpconnreset", func_udpconnreset },
     { "manysockets", func_manysockets },
+    { "memleak", func_memleak },
     { "nbconnect", func_nbconnect },
     { "nonblocking", func_nonblocking },
     { "nostartup", func_nostartup },
@@ -193,6 +195,7 @@ const struct test winetest_testlist[] =
     { "timewait", func_timewait },
     { "transmitfile", func_transmitfile },
     { "WSAAsync", func_WSAAsync },
+    { "WSAEnumNameSpaceProviders", func_WSAEnumNameSpaceProviders },
     { "WSAIoctl", func_WSAIoctl },
     { "WSAPoll", func_WSAPoll },
     { "WSALookupService", func_WSALookupService },

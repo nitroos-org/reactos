@@ -49,6 +49,7 @@ list(APPEND SOURCE
     listen.c
     udpconnreset.c
     manysockets.c
+    memleak.c
     nbconnect.c
     nonblocking.c
     nostartup.c
