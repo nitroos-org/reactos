@@ -43,6 +43,10 @@ void LibNd6RouteInfo(struct netif *netif, const ip6_addr_t *router, const u8_t *
 /* ip/transport/tcp/addr6.c */
 int LibNd6AddrConfigured(struct netif *netif, s8_t Slot);
 int LibIp6SkipSource(struct netif *netif, s8_t Slot);
+/* ip/transport/tcp/temp6.c */
+int LibNd6AddrTemporary(struct netif *netif, s8_t Slot);
+int LibIp6SourceTemporary(struct netif *netif, s8_t Slot);
+void LibNd6TemporaryTimer(void);
 /* ip/transport/udp/udp6.c */
 int LibIp6NexthInput(struct pbuf *p, struct netif *inp, u8_t nexth);
 int LibIp6McastAccept(struct netif *inp, const ip6_addr_t *dest);

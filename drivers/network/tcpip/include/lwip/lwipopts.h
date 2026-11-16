@@ -84,11 +84,14 @@
  * best match; the ND timer ends their lifetimes (NitroOS hook in nd6.c) */
 #define LWIP_HOOK_IP6_ROUTE(src, dest)  LibIp6Route(src, dest)
 #define LWIP_HOOK_ND6_GET_GW(netif, dest) LibNd6GetGw(netif, dest)
-#define LWIP_HOOK_ND6_TMR()             LibNd6Timer()
-/* Configured addresses (addr6.c): router advertisements and the DAD of the link-local address leave them alone, and
- * one marked skip-as-source is not chosen as a source (NitroOS hooks in nd6.c and ip6.c) */
-#define LWIP_HOOK_ND6_ADDR_CONFIGURED(netif, i) LibNd6AddrConfigured(netif, i)
+/* ... and the temporary addresses (RFC 8981, temp6.c) are made, renewed and given their lifetimes there */
+#define LWIP_HOOK_ND6_TMR()             (LibNd6Timer(), LibNd6TemporaryTimer())
+/* Configured addresses (addr6.c) and temporary addresses (temp6.c): router advertisements and the DAD of the link-local
+ * address leave them alone, and one marked skip-as-source is not chosen as a source (NitroOS hooks in nd6.c and ip6.c) */
+#define LWIP_HOOK_ND6_ADDR_CONFIGURED(netif, i) (LibNd6AddrConfigured(netif, i) || LibNd6AddrTemporary(netif, i))
 #define LWIP_HOOK_IP6_SKIP_SOURCE(netif, i) LibIp6SkipSource(netif, i)
+/* Source address selection prefers a temporary address (RFC 6724 5 rule 7; NitroOS hook in ip6.c) */
+#define LWIP_HOOK_IP6_SOURCE_TEMPORARY(netif, i) LibIp6SourceTemporary(netif, i)
 /* Neighbour discovery tables (lwIP's defaults are 10 neighbours, 10 destinations, 5 prefixes, 3 routers). A host with
  * a few dozen peers on the link (a server, a lab network, several addresses per peer) cycled the 10 neighbour entries and
  * asked again for each one; the destination cache keeps the next hop and path MTU of each destination it talks to.

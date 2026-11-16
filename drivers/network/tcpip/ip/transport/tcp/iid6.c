@@ -77,6 +77,10 @@
 
 BOOLEAN TCP6RandomizeIdentifiers;
 static UCHAR Iid6Secret[IID6_SECRET_SIZE];
+/* The key of the random identifiers of temporary addresses (temp6.c): made at every start, never stored */
+static UCHAR Iid6TempKey[IID6_SECRET_SIZE];
+static ULONGLONG Iid6TempCounter;
+static BOOLEAN Iid6TempRdrand;
 
 /* ---- SipHash-2-4 (Aumasson, Bernstein, "SipHash: a fast short-input PRF", 2012) ---- */
 
@@ -157,6 +161,13 @@ Iid6IsReserved(const UCHAR *Iid)
     if (RtlCompareMemory(Iid, Anycast, 7) == 7 && Iid[7] >= 0x80)
         return TRUE;
     return FALSE;
+}
+
+/* For temp6.c */
+BOOLEAN
+TCP6ReservedIdentifier(const UCHAR Iid[8])
+{
+    return Iid6IsReserved(Iid);
 }
 
 /* The address for Prefix (its first 64 bits) on netif with DAD counter Counter, in Address (zoned);
@@ -356,6 +367,11 @@ LibNd6DadFailed(struct netif *netif, s8_t Index)
     const ip6_addr_t *Current = netif_ip6_addr(netif, Index);
     ip6_addr_t Prefix, Candidate;
     UCHAR Counter;
+    int Result;
+
+    /* a temporary address (temp6.c) gets a new random identifier instead */
+    if (TCP6TemporaryDadFailed(netif, Index, &Result))
+        return Result;
 
     if (!Iid6Applies(netif) || !ip6_addr_istentative(netif_ip6_addr_state(netif, Index)))
         return 0;
@@ -435,7 +451,7 @@ Iid6Rdrand(PULONG Value)
 
 static
 VOID
-Iid6NewSecret(UCHAR Secret[IID6_SECRET_SIZE])
+Iid6NewSecret(UCHAR Secret[IID6_SECRET_SIZE], PCSTR What)
 {
     ULONGLONG Pool[8 + 4 + 2 * IID6_TIMING_SAMPLES];
     ULONGLONG Deltas[IID6_TIMING_SAMPLES];
@@ -514,10 +530,56 @@ Iid6NewSecret(UCHAR Secret[IID6_SECRET_SIZE])
 
     RtlSecureZeroMemory(Pool, sizeof(Pool));
 
-    DbgPrint("TCPIP: new IPv6 identifier secret from: RDRAND %s (%lu of 8 words), timing (%u samples, %lu distinct "
-             "intervals), system/interrupt/tick time; no kernel boot seed exists; strength: %s\n",
+    DbgPrint("TCPIP: new %s from: RDRAND %s (%lu of 8 words), timing (%u samples, %lu distinct "
+             "intervals), system/interrupt/tick time; no kernel boot seed exists; strength: %s\n", What,
              HaveRdrand ? "present" : "absent", RdrandWords, (UINT)IID6_TIMING_SAMPLES, Distinct,
              RdrandWords == 8 ? "hardware random source plus timing" : "timing only, weak");
+}
+
+/* ---- random identifiers of temporary addresses (temp6.c) ----
+ *
+ * RFC 8981 3.3.1: 64 random bits. Each one is SipHash-2-4 under Iid6TempKey (made at every start like the secret
+ * above: RDRAND plus timing) of a counter, two RDRAND words when the processor delivers them, the cycle counter and
+ * the interrupt time. With RDRAND every identifier has fresh hardware randomness; without it they are a keyed
+ * pseudorandom sequence, as unpredictable as the key. The system random number generator is not used
+ * (SEC-system-rng-not-cryptographic). Any IRQL; core lock held by the callers.
+ */
+VOID
+TCP6RandomIdentifier(UCHAR Iid[8])
+{
+    ULONGLONG Input[4];
+    ULONGLONG Id;
+    ULONG i;
+
+    Input[0] = ++Iid6TempCounter;
+    Input[1] = 0;
+#if defined(_M_IX86) || defined(_M_AMD64)
+    if (Iid6TempRdrand)
+    {
+        ULONG w, Try, Value;
+
+        for (w = 0; w < 2; w++)
+        {
+            for (Try = 0; Try < 10; Try++)
+            {
+                if (Iid6Rdrand(&Value) && Value != 0 && Value != 0xFFFFFFFF)
+                {
+                    Input[1] |= (ULONGLONG)Value << (32 * w);
+                    break;
+                }
+            }
+        }
+    }
+    Input[2] = __rdtsc();
+#else
+    Input[2] = 0;
+#endif
+    Input[3] = KeQueryInterruptTime();
+
+    Id = Iid6SipHash(Iid6TempKey, (const UCHAR *)Input, sizeof(Input));
+    for (i = 0; i < 8; i++)
+        Iid[i] = (UCHAR)(Id >> (8 * i));
+    RtlSecureZeroMemory(Input, sizeof(Input));
 }
 
 /* The DACL of the secret's key: SYSTEM and Administrators, full access, nobody else; not inherited from the
@@ -669,7 +731,7 @@ Iid6LoadSecret(VOID)
 
     if (!NT_SUCCESS(Iid6MakeSecurity(&Sd, &Dacl)))
     {
-        Iid6NewSecret(Iid6Secret);
+        Iid6NewSecret(Iid6Secret, "IPv6 identifier secret");
         DbgPrint("TCPIP: IPv6 identifier secret not kept (no security descriptor)\n");
         return;
     }
@@ -681,7 +743,7 @@ Iid6LoadSecret(VOID)
     if (!NT_SUCCESS(Status))
     {
         ExFreePoolWithTag(Dacl, TAG_IID6);
-        Iid6NewSecret(Iid6Secret);
+        Iid6NewSecret(Iid6Secret, "IPv6 identifier secret");
         DbgPrint("TCPIP: IPv6 identifier secret not kept (key: 0x%lx)\n", Status);
         return;
     }
@@ -697,7 +759,7 @@ Iid6LoadSecret(VOID)
         {
             ExFreePoolWithTag(Dacl, TAG_IID6);
             ZwClose(Key);
-            Iid6NewSecret(Iid6Secret);
+            Iid6NewSecret(Iid6Secret, "IPv6 identifier secret");
             DbgPrint("TCPIP: IPv6 identifier secret not kept (key DACL: 0x%lx), a secret for this start only\n",
                      Status);
             return;
@@ -722,7 +784,7 @@ Iid6LoadSecret(VOID)
     {
         if (HaveSecret)
             DbgPrint("TCPIP: IPv6 identifier secret was made during setup: replacing it (first normal start)\n");
-        Iid6NewSecret(Iid6Secret);
+        Iid6NewSecret(Iid6Secret, "IPv6 identifier secret");
         Status = STATUS_SUCCESS;
         if (Setup)
         {
@@ -772,6 +834,16 @@ TCP6ReadIdentifierSettings(VOID)
     ULONG Length;
 
     TCP6RandomizeIdentifiers = TRUE;
+
+    /* temporary addresses (temp6.c): the key of their identifiers, for this start only */
+    if (TCP6ReadTemporarySettings())
+    {
+#if defined(_M_IX86) || defined(_M_AMD64)
+        Iid6TempRdrand = ExIsProcessorFeaturePresent(PF_RDRAND_INSTRUCTION_AVAILABLE);
+#endif
+        Iid6NewSecret(Iid6TempKey, "IPv6 temporary address key (this start only)");
+        TCP6TemporaryStart();
+    }
 
     InitializeObjectAttributes(&Attributes, &KeyName, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
     if (NT_SUCCESS(ZwOpenKey(&Key, KEY_QUERY_VALUE, &Attributes)))

@@ -289,6 +289,7 @@ ip6_select_source_address(struct netif *netif, const ip6_addr_t *dest)
   u8_t i, cand_pref, cand_bits;
   u8_t best_pref = 0;
   u8_t best_bits = 0;
+  u8_t cand_temp = 0, best_temp = 0;
 
   /* Start by determining the scope of the given destination address. These
    * tests are hopefully (roughly) in order of likeliness to match. */
@@ -342,16 +343,22 @@ ip6_select_source_address(struct netif *netif, const ip6_addr_t *dest)
     if (cand_bits && ip6_addr_nethost_eq(cand_addr, dest)) {
       return netif_ip_addr6(netif, i); /* Rule 1 */
     }
+#ifdef LWIP_HOOK_IP6_SOURCE_TEMPORARY
+    /* NitroOS: a temporary address (RFC 8981) is preferred over a public one */
+    cand_temp = LWIP_HOOK_IP6_SOURCE_TEMPORARY(netif, i) ? 1 : 0;
+#endif /* LWIP_HOOK_IP6_SOURCE_TEMPORARY */
     if ((best_addr == NULL) || /* no alternative yet */
         ((cand_scope < best_scope) && (cand_scope >= dest_scope)) ||
         ((cand_scope > best_scope) && (best_scope < dest_scope)) || /* Rule 2 */
         ((cand_scope == best_scope) && ((cand_pref > best_pref) || /* Rule 3 */
-        ((cand_pref == best_pref) && (cand_bits > best_bits))))) { /* Rule 8 */
+        ((cand_pref == best_pref) && ((cand_temp > best_temp) || /* Rule 7 */
+        ((cand_temp == best_temp) && (cand_bits > best_bits))))))) { /* Rule 8 */
       /* We found a new "winning" candidate. */
       best_addr = netif_ip_addr6(netif, i);
       best_scope = cand_scope;
       best_pref = cand_pref;
       best_bits = cand_bits;
+      best_temp = cand_temp;
     }
   }
 

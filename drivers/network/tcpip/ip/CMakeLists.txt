@@ -43,6 +43,7 @@ list(APPEND SOURCE
     transport/tcp/route6.c
     transport/tcp/selftest6.c
     transport/tcp/tcp.c
+    transport/tcp/temp6.c
     transport/udp/udp.c
     transport/udp/udp6.c)
 
