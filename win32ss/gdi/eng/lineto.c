@@ -534,7 +534,7 @@ EngLineTo(
     ULONG i;
     ULONG Pixel = pbo->iSolidColor;
     SURFOBJ *OutputObj;
-    RECTL DestRect;
+    RECTL DestRect, rcVis;
     POINTL Translate;
     INTENG_ENTER_LEAVE EnterLeave;
     RECT_ENUM RectEnum;
@@ -555,11 +555,30 @@ EngLineTo(
         return TRUE;
     }
 
-    if (deltax <= 0x10000 && deltay <= 0x10000 &&
-        x1 < 0x40000000 && x1 > -0x40000000 && x2 < 0x40000000 && x2 > -0x40000000 &&
-        y1 < 0x40000000 && y1 > -0x40000000 && y2 < 0x40000000 && y2 > -0x40000000)
+    /* The bounds of what can be drawn: the clip object (or RectBounds) on the surface */
+    if (Clip)
+        rcVis = Clip->rclBounds;
+    else if (RectBounds)
+        rcVis = *RectBounds;
+    else
     {
-        /* A short line is stepped from its start */
+        rcVis.left = rcVis.top = 0;
+        rcVis.right = DestObj->sizlBitmap.cx;
+        rcVis.bottom = DestObj->sizlBitmap.cy;
+    }
+    if (rcVis.left < 0) rcVis.left = 0;
+    if (rcVis.top < 0) rcVis.top = 0;
+    if (rcVis.right > DestObj->sizlBitmap.cx) rcVis.right = DestObj->sizlBitmap.cx;
+    if (rcVis.bottom > DestObj->sizlBitmap.cy) rcVis.bottom = DestObj->sizlBitmap.cy;
+    if (rcVis.right <= rcVis.left || rcVis.bottom <= rcVis.top)
+    {
+        return TRUE;
+    }
+
+    if (rcVis.left <= x1 && x1 < rcVis.right && rcVis.top <= y1 && y1 < rcVis.bottom &&
+        rcVis.left <= x2 && x2 < rcVis.right && rcVis.top <= y2 && y2 < rcVis.bottom)
+    {
+        /* A line inside the bounds (every step can be drawn) is stepped from its start */
         iFirst = 0;
         count = max(deltax, deltay);
         error0 = count >> 1;
@@ -592,12 +611,12 @@ EngLineTo(
     }
     else
     {
-        /* A long line, or one with an end far out: only the steps that lie in the bounds of the clip object and the
-           surface are taken, from the exact state of the stepping there (position, error term, dash state). The
-           pixels are those of the whole line. The coordinate along the axis of the larger delta is a + s * i, the
-           other one a + s * floor((delta / 2 + i * m) / delta): both are monotonic in i, so the steps in the
-           bounds are one interval. */
-        RECTL rcVis;
+        /* A line that leaves the bounds (it can be long, or have an end far out): only the steps that lie in the
+           bounds of the clip object and the surface are taken, from the exact state of the stepping there
+           (position, error term, dash state), so the time does not depend on the length. The pixels are those of
+           the whole line. The coordinate along the axis of the larger delta is a + s * i, the other one
+           a + s * floor((delta / 2 + i * m) / delta): both are monotonic in i, so the steps in the bounds are one
+           interval. */
         BOOLEAN bXMajor = (deltax >= deltay);
         ULONGLONG D = bXMajor ? (ULONGLONG)deltax : (ULONGLONG)deltay;
         ULONGLONG m = bXMajor ? (ULONGLONG)deltay : (ULONGLONG)deltax;
@@ -605,25 +624,6 @@ EngLineTo(
         LONGLONG a[2], s[2], lo[2], hi[2], glo, ghi;
         ULONGLONG step, sub;
         int k;
-
-        if (Clip)
-            rcVis = Clip->rclBounds;
-        else if (RectBounds)
-            rcVis = *RectBounds;
-        else
-        {
-            rcVis.left = rcVis.top = 0;
-            rcVis.right = DestObj->sizlBitmap.cx;
-            rcVis.bottom = DestObj->sizlBitmap.cy;
-        }
-        if (rcVis.left < 0) rcVis.left = 0;
-        if (rcVis.top < 0) rcVis.top = 0;
-        if (rcVis.right > DestObj->sizlBitmap.cx) rcVis.right = DestObj->sizlBitmap.cx;
-        if (rcVis.bottom > DestObj->sizlBitmap.cy) rcVis.bottom = DestObj->sizlBitmap.cy;
-        if (rcVis.right <= rcVis.left || rcVis.bottom <= rcVis.top)
-        {
-            return TRUE;
-        }
 
         a[0] = x1; s[0] = xchange; lo[0] = rcVis.left; hi[0] = rcVis.right;
         a[1] = y1; s[1] = ychange; lo[1] = rcVis.top; hi[1] = rcVis.bottom;

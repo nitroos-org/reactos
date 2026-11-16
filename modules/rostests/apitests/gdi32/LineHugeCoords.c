@@ -431,6 +431,59 @@ static void test_StyleSumWraps(void)
     DeleteObject(pen);
 }
 
+/* Many segments of ordinary length (up to 65536 steps) that cross the view: each one must cost its visible part
+   only, not the steps outside the surface (a Polyline of 60000 points crossing a 256 pixel view from 30000 pixels
+   outside it) */
+static void test_ManySegments(void)
+{
+    enum { NPT = 60000, FAR_OUT = 30000 };
+    static BYTE ex[DIMS * DIMS];
+    POINT *pt;
+    int ip, j;
+
+    pt = HeapAlloc(GetProcessHeap(), 0, NPT * sizeof(POINT));
+    if (!pt)
+    {
+        skip("no memory\n");
+        return;
+    }
+    for (j = 0; j < NPT; j++)
+    {
+        pt[j].x = (j & 1) ? DIMS + FAR_OUT : -FAR_OUT;
+        pt[j].y = (j * 7) % DIMS;
+    }
+
+    for (ip = 0; ip < 2; ip++)
+    {
+        HPEN pen = MakePen(&g_pens[ip]), old = SelectObject(g_dc, pen);
+        DWORD t;
+        int nb;
+
+        Clear();
+        ZeroMemory(ex, sizeof(ex));
+        t = GetTickCount();
+        ok(Polyline(g_dc, pt, NPT), "%s: Polyline failed\n", g_pens[ip].name);
+        GdiFlush();
+        ok(GetTickCount() - t < SLOW_MS, "%s: Polyline of %d points took %lu ms\n", g_pens[ip].name, NPT,
+           GetTickCount() - t);
+        if (ip == 0)
+        {
+            /* (the solid pen only: whether the dash pattern goes on from one segment to the next is not tested here) */
+            for (j = 1; j < NPT; j++)
+                RefLine(pt[j - 1].x, pt[j - 1].y, pt[j].x, pt[j].y, &g_pens[ip], ex);
+            nb = Compare(ex);
+            ok(nb == 0, "%s: %d pixels differ from the lines\n", g_pens[ip].name, nb);
+        }
+        else
+        {
+            ok(CountInk() > 0, "%s: nothing drawn\n", g_pens[ip].name);
+        }
+        SelectObject(g_dc, old);
+        DeleteObject(pen);
+    }
+    HeapFree(GetProcessHeap(), 0, pt);
+}
+
 START_TEST(LineHugeCoords)
 {
     BITMAPINFO bi;
@@ -459,6 +512,7 @@ START_TEST(LineHugeCoords)
     test_PieChordStyled();
     test_StyleSumWraps();
     test_NoStall();
+    test_ManySegments();
 
     SelectObject(g_dc, bmpOld);
     DeleteObject(bmp);
