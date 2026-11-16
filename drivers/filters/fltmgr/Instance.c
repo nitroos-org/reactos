@@ -312,6 +312,8 @@ FltpTeardownInstance(_In_ PFLT_INSTANCE Instance,
         return;
     }
 
+    FltpNoteVolumeFilter(Volume, &Filter->Name);
+
     /* No new operation takes the instance from here on */
     KeEnterCriticalRegion();
     ExAcquireResourceExclusiveLite(&Volume->InstanceList.rLock, TRUE);

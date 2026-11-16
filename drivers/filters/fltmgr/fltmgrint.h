@@ -344,6 +344,10 @@ typedef struct _FLT_VOLUME
     USHORT VolumeSectorSize;
     ULONG VolumeCharacteristics;
 
+    /* Names of the filters which had an instance on the volume (diagnostics: who may hold the last references) */
+    volatile LONG HolderChars;
+    WCHAR Holders[96];
+
 } FLT_VOLUME, *PFLT_VOLUME;
 
 

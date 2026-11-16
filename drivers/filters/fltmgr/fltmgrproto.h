@@ -63,6 +63,12 @@ FltpDeleteVolume(
     _In_ PDEVICE_OBJECT DeviceObject
 );
 
+VOID
+FltpNoteVolumeFilter(
+    _Inout_ PFLT_VOLUME Volume,
+    _In_ PCUNICODE_STRING FilterName
+);
+
 NTSTATUS
 FltpSnapshotVolumes(
     _Outptr_result_buffer_(*Count) PFLT_VOLUME **Volumes,
