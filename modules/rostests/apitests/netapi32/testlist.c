@@ -10,6 +10,7 @@
 
 extern void func_DavPaths(void);
 extern void func_DsRoleGetPrimaryDomainInformation(void);
+extern void func_NetApiLeak(void);
 extern void func_NetEnum(void);
 extern void func_NetGetAadJoinInformation(void);
 extern void func_NetLocalGroup(void);
@@ -23,6 +24,7 @@ const struct test winetest_testlist[] =
 {
     { "DavPaths", func_DavPaths },
     { "DsRoleGetPrimaryDomainInformation", func_DsRoleGetPrimaryDomainInformation },
+    { "NetApiLeak", func_NetApiLeak },
     { "NetEnum", func_NetEnum },
     { "NetGetAadJoinInformation", func_NetGetAadJoinInformation },
     { "NetLocalGroup", func_NetLocalGroup },
