@@ -107,8 +107,9 @@ VOID ICMPPortUnreachable(
     PIP_PACKET IPPacket,
     PVOID TransportHeader)
 {
-    static LONG Sent;
-    static LONGLONG Window;
+    static volatile LONG Sent;
+    static volatile LONGLONG Window;
+    LONGLONG Start;
     UCHAR Buffer[8 + 60 + 8];
     UINT Size, HeaderSize = IPPacket->HeaderSize;
     LARGE_INTEGER Now;
@@ -128,11 +129,15 @@ VOID ICMPPortUnreachable(
     if (AddrIsBroadcastMatch(&ReplySource, &IPPacket->DstAddr) || AddrIsBroadcastMatch(&ReplySource, &IPPacket->SrcAddr))
         return;
 
+    /* One window for the whole machine. The start is a 64-bit value: read and replaced with interlocked operations
+       (a plain access tears on i386 when two processors meet at a window's end); the one that moves it restarts
+       the count */
     KeQuerySystemTime(&Now);
-    if (Now.QuadPart - Window >= 10000000LL)
+    Start = InterlockedCompareExchange64(&Window, 0, 0);
+    if (Now.QuadPart - Start >= 10000000LL &&
+        InterlockedCompareExchange64(&Window, Now.QuadPart, Start) == Start)
     {
-        Window = Now.QuadPart;
-        Sent = 0;
+        InterlockedExchange(&Sent, 0);
     }
     if (InterlockedIncrement(&Sent) > ICMP_UNREACH_PER_SECOND)
         return;

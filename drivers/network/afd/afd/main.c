@@ -520,6 +520,10 @@ AfdRawAllowed(PIRP Irp, PIO_STACK_LOCATION IrpSp, ULONG Protocol)
     NTSTATUS AccessStatus;
     BOOLEAN Allowed;
 
+    /* ICMP and ICMPv6 sockets are open to every user (Windows: a standard user may make them). AFD does not look at
+       the token for them, so tcpip's send and option gates (RawIpUnprivilegedMaySend, RawIp6UnprivilegedMaySend,
+       the IP_HDRINCL / IPV6_HDRINCL refusal in ainfo.c, and TiRawCallerPrivileged at every address open) are the
+       only enforcement for these two protocols: an unprivileged socket sends echo requests only. */
     if (Protocol == IPPROTO_ICMP || Protocol == 58 /* IPPROTO_ICMPV6 */)
         return TRUE;
     if (Irp->RequestorMode == KernelMode)
