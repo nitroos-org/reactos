@@ -922,6 +922,12 @@ HandleSendMessage(_In_ PFLT_CONNECTION Connection,
 
     *Information = 0;
 
+    /* A client which gives a length without a buffer: the filter sees no buffer, not (NULL, length) */
+    if (Input == NULL)
+        InLength = 0;
+    if (Output == NULL)
+        OutLength = 0;
+
     if (Server->MessageNotify == NULL)
         return STATUS_INVALID_DEVICE_REQUEST;
 
