@@ -3092,33 +3092,32 @@ CmpSnapshotOpenSubKeys(
     return STATUS_SUCCESS;
 }
 
+static VOID CmpRestoreFreeDetached(IN PHHIVE Hive, IN HCELL_INDEX Cell);
+
+/* Copies one key without its subkeys (its node, class, descriptor and values); the copy has no subkeys yet */
 static
 NTSTATUS
-CmpDeepCopyKeyInternal(IN PHHIVE SourceHive,
-                       IN HCELL_INDEX SrcKeyCell,
-                       IN PHHIVE DestinationHive,
-                       IN HCELL_INDEX Parent,
-                       IN HSTORAGE_TYPE StorageType,
-                       IN BOOLEAN SkipVolatile,
-                       OUT PHCELL_INDEX DestKeyCell OPTIONAL)
+CmpCopyKeyNode(IN PHHIVE SourceHive,
+               IN HCELL_INDEX SrcKeyCell,
+               IN PHHIVE DestinationHive,
+               IN HCELL_INDEX Parent,
+               IN HSTORAGE_TYPE StorageType,
+               OUT PHCELL_INDEX DestKeyCell)
 {
     NTSTATUS Status;
     PCM_KEY_NODE SrcNode;
     PCM_KEY_NODE DestNode = NULL;
     HCELL_INDEX NewKeyCell = HCELL_NIL;
     HCELL_INDEX NewClassCell = HCELL_NIL, NewSecCell = HCELL_NIL;
-    HCELL_INDEX SubKey, NewSubKey;
-    ULONG Index, SubKeyCount;
 
     PAGED_CODE();
 
-    DPRINT("CmpDeepCopyKeyInternal(0x%08X, 0x%08X, 0x%08X, 0x%08X, 0x%08X, 0x%08X)\n",
+    DPRINT("CmpCopyKeyNode(0x%08X, 0x%08X, 0x%08X, 0x%08X, 0x%08X)\n",
            SourceHive,
            SrcKeyCell,
            DestinationHive,
            Parent,
-           StorageType,
-           DestKeyCell);
+           StorageType);
 
     /* Get the source cell node */
     SrcNode = (PCM_KEY_NODE)HvGetCell(SourceHive, SrcKeyCell);
@@ -3203,48 +3202,9 @@ CmpDeepCopyKeyInternal(IN PHHIVE SourceHive,
     if (!NT_SUCCESS(Status))
         goto Cleanup;
 
-    /* Clear the invalid subkey index */
+    /* Clear the invalid subkey index: the subkeys are linked as they are copied */
     DestNode->SubKeyCounts[Stable] = DestNode->SubKeyCounts[Volatile] = 0;
     DestNode->SubKeyLists[Stable] = DestNode->SubKeyLists[Volatile] = HCELL_NIL;
-
-    /* Calculate the total number of subkeys (the stable ones come first in the index order) */
-    SubKeyCount = SrcNode->SubKeyCounts[Stable];
-    if (!SkipVolatile)
-        SubKeyCount += SrcNode->SubKeyCounts[Volatile];
-
-    /* Loop through all the subkeys */
-    for (Index = 0; Index < SubKeyCount; Index++)
-    {
-        /* Get the subkey */
-        SubKey = CmpFindSubKeyByNumber(SourceHive, SrcNode, Index);
-        ASSERT(SubKey != HCELL_NIL);
-
-        /* Call the function recursively for the subkey */
-        //
-        // FIXME: Danger!! Kernel stack exhaustion!!
-        //
-        Status = CmpDeepCopyKeyInternal(SourceHive,
-                                        SubKey,
-                                        DestinationHive,
-                                        NewKeyCell,
-                                        StorageType,
-                                        SkipVolatile,
-                                        &NewSubKey);
-        if (!NT_SUCCESS(Status))
-            goto Cleanup;
-
-        /* Add the copy of the subkey to the new key */
-        if (!CmpAddSubKey(DestinationHive,
-                          NewKeyCell,
-                          NewSubKey))
-        {
-            /* Cleanup allocated cell */
-            HvFreeCell(DestinationHive, NewSubKey);
-
-            Status = STATUS_INSUFFICIENT_RESOURCES;
-            goto Cleanup;
-        }
-    }
 
     /* Set success */
     Status = STATUS_SUCCESS;
@@ -3271,6 +3231,151 @@ Cleanup:
     }
 
     /* Set the cell index if requested and return status */
+    if (DestKeyCell) *DestKeyCell = NewKeyCell;
+    return Status;
+}
+
+/* One level of a tree copy: a source key, its copy, and the next of its subkeys to copy */
+typedef struct _CMP_COPY_LEVEL
+{
+    HCELL_INDEX SrcCell;
+    HCELL_INDEX DestCell;
+    ULONG Index;
+    ULONG Count;
+} CMP_COPY_LEVEL, *PCMP_COPY_LEVEL;
+
+/* The subkeys of a source key that are copied (the stable ones come first in the index order) */
+static
+BOOLEAN
+CmpCopyLevelInit(IN PHHIVE SourceHive,
+                 IN HCELL_INDEX SrcCell,
+                 IN HCELL_INDEX DestCell,
+                 IN BOOLEAN SkipVolatile,
+                 OUT PCMP_COPY_LEVEL Level)
+{
+    PCM_KEY_NODE SrcNode = (PCM_KEY_NODE)HvGetCell(SourceHive, SrcCell);
+
+    if (!SrcNode)
+        return FALSE;
+    Level->SrcCell = SrcCell;
+    Level->DestCell = DestCell;
+    Level->Index = 0;
+    Level->Count = SrcNode->SubKeyCounts[Stable] + (SkipVolatile ? 0 : SrcNode->SubKeyCounts[Volatile]);
+    HvReleaseCell(SourceHive, SrcCell);
+    return TRUE;
+}
+
+/*
+ * Copies a key and the tree below it. The tree is walked with a stack of levels in pool, not by recursion: a hive
+ * file may hold a tree as deep as the hive check allows (512 levels) and a live tree may be deeper, far more than
+ * the kernel stack has room for frames of a recursive copy (an amd64 frame took 176 bytes of the 24 KB stack).
+ * Each copied subkey is linked to the copy of its parent at once; on a failure the whole copy, which is not linked
+ * to Parent yet, is freed again.
+ */
+static
+NTSTATUS
+CmpDeepCopyKeyInternal(IN PHHIVE SourceHive,
+                       IN HCELL_INDEX SrcKeyCell,
+                       IN PHHIVE DestinationHive,
+                       IN HCELL_INDEX Parent,
+                       IN HSTORAGE_TYPE StorageType,
+                       IN BOOLEAN SkipVolatile,
+                       OUT PHCELL_INDEX DestKeyCell OPTIONAL)
+{
+    NTSTATUS Status;
+    HCELL_INDEX NewKeyCell = HCELL_NIL, SubKey, NewSubKey;
+    PCMP_COPY_LEVEL Levels = NULL, Bigger;
+    PCM_KEY_NODE SrcNode;
+    ULONG Depth = 0, MaxDepth = 16;
+
+    PAGED_CODE();
+
+    Status = CmpCopyKeyNode(SourceHive, SrcKeyCell, DestinationHive, Parent, StorageType, &NewKeyCell);
+    if (!NT_SUCCESS(Status))
+        goto Quit;
+
+    Levels = ExAllocatePoolWithTag(PagedPool, MaxDepth * sizeof(CMP_COPY_LEVEL), TAG_CM);
+    if (!Levels)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Quit;
+    }
+    if (!CmpCopyLevelInit(SourceHive, SrcKeyCell, NewKeyCell, SkipVolatile, &Levels[0]))
+    {
+        Status = STATUS_REGISTRY_CORRUPT;
+        goto Quit;
+    }
+    Depth = 1;
+
+    while (Depth)
+    {
+        PCMP_COPY_LEVEL Level = &Levels[Depth - 1];
+
+        /* All the subkeys of this level are copied: back to its parent */
+        if (Level->Index >= Level->Count)
+        {
+            Depth--;
+            continue;
+        }
+
+        SrcNode = (PCM_KEY_NODE)HvGetCell(SourceHive, Level->SrcCell);
+        if (!SrcNode)
+        {
+            Status = STATUS_REGISTRY_CORRUPT;
+            break;
+        }
+        SubKey = CmpFindSubKeyByNumber(SourceHive, SrcNode, Level->Index);
+        HvReleaseCell(SourceHive, Level->SrcCell);
+        if (SubKey == HCELL_NIL)
+        {
+            Status = STATUS_REGISTRY_CORRUPT;
+            break;
+        }
+        Level->Index++;
+
+        /* The subkey itself, linked to the copy of its parent */
+        Status = CmpCopyKeyNode(SourceHive, SubKey, DestinationHive, Level->DestCell, StorageType, &NewSubKey);
+        if (!NT_SUCCESS(Status))
+            break;
+        if (!CmpAddSubKey(DestinationHive, Level->DestCell, NewSubKey))
+        {
+            /* It has no subkeys yet */
+            CmpFreeKeyByCell(DestinationHive, NewSubKey, FALSE);
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+            break;
+        }
+
+        /* Then its own subkeys, one level down */
+        if (Depth == MaxDepth)
+        {
+            Bigger = ExAllocatePoolWithTag(PagedPool, 2 * MaxDepth * sizeof(CMP_COPY_LEVEL), TAG_CM);
+            if (!Bigger)
+            {
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+                break;
+            }
+            RtlCopyMemory(Bigger, Levels, MaxDepth * sizeof(CMP_COPY_LEVEL));
+            ExFreePoolWithTag(Levels, TAG_CM);
+            Levels = Bigger;
+            MaxDepth *= 2;
+        }
+        if (!CmpCopyLevelInit(SourceHive, SubKey, NewSubKey, SkipVolatile, &Levels[Depth]))
+        {
+            Status = STATUS_REGISTRY_CORRUPT;
+            break;
+        }
+        Depth++;
+    }
+
+Quit:
+    if (Levels)
+        ExFreePoolWithTag(Levels, TAG_CM);
+    if (!NT_SUCCESS(Status) && (NewKeyCell != HCELL_NIL))
+    {
+        /* The copy is not linked to Parent: all of it goes */
+        CmpRestoreFreeDetached(DestinationHive, NewKeyCell);
+        NewKeyCell = HCELL_NIL;
+    }
     if (DestKeyCell) *DestKeyCell = NewKeyCell;
     return Status;
 }
