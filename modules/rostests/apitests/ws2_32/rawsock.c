@@ -438,6 +438,279 @@ static void ConnReset(int Family, BOOL Off, BOOL Connect)
     closesocket(s);
 }
 
+/* ---- Windows parity rows measured on the Windows Server 2022 peer (evidence rawfu-20261116) ---- */
+
+static USHORT Sum16(const UCHAR *Data, int Length, ULONG Sum)
+{
+    for (; Length > 1; Data += 2, Length -= 2)
+        Sum += (Data[0] << 8) | Data[1];
+    if (Length)
+        Sum += Data[0] << 8;
+    while (Sum >> 16)
+        Sum = (Sum & 0xFFFF) + (Sum >> 16);
+    return (USHORT)~Sum;
+}
+
+/* An ICMP destination unreachable (port) as a whole IPv4 packet on 127.0.0.1: the invoking datagram came from
+   127.0.0.1:InnerSrcPort and went to InnerDst:InnerDstPort (host order ports, InnerDst network order) */
+static int Build4Unreachable(UCHAR *Pkt, ULONG InnerDst, USHORT InnerSrcPort, USHORT InnerDstPort)
+{
+    ULONG Lo = htonl(INADDR_LOOPBACK);
+    USHORT Sum;
+
+    memset(Pkt, 0, 56);
+    Pkt[0] = 0x45; Pkt[3] = 56; Pkt[8] = 128; Pkt[9] = 1;
+    memcpy(Pkt + 12, &Lo, 4); memcpy(Pkt + 16, &Lo, 4);
+    Sum = Sum16(Pkt, 20, 0); Pkt[10] = Sum >> 8; Pkt[11] = Sum & 255;
+    Pkt[20] = 3; Pkt[21] = 3;                                   /* port unreachable */
+    Pkt[28] = 0x45; Pkt[31] = 32; Pkt[36] = 128; Pkt[37] = 17;   /* the invoking datagram: UDP, 4 data bytes */
+    memcpy(Pkt + 40, &Lo, 4); memcpy(Pkt + 44, &InnerDst, 4);
+    Sum = Sum16(Pkt + 28, 20, 0); Pkt[38] = Sum >> 8; Pkt[39] = Sum & 255;
+    Pkt[48] = InnerSrcPort >> 8; Pkt[49] = InnerSrcPort & 255; Pkt[50] = InnerDstPort >> 8; Pkt[51] = InnerDstPort & 255;
+    Pkt[53] = 12;
+    Sum = Sum16(Pkt + 20, 36, 0); Pkt[22] = Sum >> 8; Pkt[23] = Sum & 255;
+    return 56;
+}
+
+/* The same for IPv6 on ::1 (ICMPv6 type 1 code 4, checksum with the pseudo header) */
+static int Build6Unreachable(UCHAR *Pkt, const UCHAR *InnerDst, USHORT InnerSrcPort, USHORT InnerDstPort)
+{
+    UCHAR Pseudo[40];
+    ULONG Sum;
+    USHORT Fold;
+
+    memset(Pkt, 0, 96);
+    Pkt[0] = 0x60; Pkt[5] = 56; Pkt[6] = 58; Pkt[7] = 64;
+    memcpy(Pkt + 8, Loopback6, 16); memcpy(Pkt + 24, Loopback6, 16);
+    Pkt[40] = 1; Pkt[41] = 4;
+    Pkt[48] = 0x60; Pkt[53] = 12; Pkt[54] = 17; Pkt[55] = 128;
+    memcpy(Pkt + 56, Loopback6, 16); memcpy(Pkt + 72, InnerDst, 16);
+    Pkt[88] = InnerSrcPort >> 8; Pkt[89] = InnerSrcPort & 255; Pkt[90] = InnerDstPort >> 8; Pkt[91] = InnerDstPort & 255;
+    Pkt[93] = 12;
+    memset(Pseudo, 0, sizeof(Pseudo));
+    memcpy(Pseudo, Loopback6, 16); memcpy(Pseudo + 16, Loopback6, 16);
+    Pseudo[35] = 56; Pseudo[39] = 58;
+    Sum = (USHORT)~Sum16(Pseudo, 40, 0);
+    Fold = Sum16(Pkt + 40, 56, Sum);
+    Pkt[42] = Fold >> 8; Pkt[43] = Fold & 255;
+    return 96;
+}
+
+static USHORT PortOf(SOCKET s, int Family)
+{
+    struct sockaddr_storage Name;
+    int Length = sizeof(Name);
+
+    getsockname(s, (struct sockaddr *)&Name, &Length);
+    return Family == AF_INET6 ? ((SOCKADDR_IN6_LH *)&Name)->sin6_port : ((struct sockaddr_in *)&Name)->sin_port;
+}
+
+/* An ICMP or ICMPv6 port unreachable is matched to a UDP socket by the local port of its invoking datagram: Windows
+   resets a connected socket (and an unconnected one) whatever destination address or port the invoking datagram
+   names, and not when the source port is another (peer row: crafted messages from another host, fire wall off,
+   both families, 64 and 32 bit). Needs a privileged process: the message is made by hand through a raw socket with
+   a header of its own */
+static void TestInnerDestination(int Family, BOOL Connect)
+{
+    static const char *Names[] = { "same destination", "other port", "other address", "other source port" };
+    static const UCHAR Other6[16] = { 0xfd,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0x77,0x77 };
+    struct sockaddr_storage Lo;
+    SOCKET s, Peer, Raw;
+    UCHAR Pkt[128];
+    DWORD One = 1;
+    USHORT SPort, PPort;
+    int i, Length, Result, Error, SaLen = Family == AF_INET6 ? (int)sizeof(SOCKADDR_IN6_LH) : (int)sizeof(struct sockaddr_in);
+    char Label[64], Buf[16];
+    BOOL Control = TRUE;
+
+    if (Family == AF_INET6)
+        Init6((SOCKADDR_IN6_LH *)&Lo, 0);
+    else
+        Init4((struct sockaddr_in *)&Lo, 0);
+    sprintf(Label, "inner destination v%d%s", Family == AF_INET6 ? 6 : 4, Connect ? " connected" : "");
+
+    Raw = Family == AF_INET6 ? socket(AF_INET6, SOCK_RAW, T_IPPROTO_ICMPV6) : socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
+    ok(Raw != INVALID_SOCKET, "%s: raw socket %d\n", Label, WSAGetLastError());
+    if (Raw == INVALID_SOCKET)
+        return;
+    Result = setsockopt(Raw, Family == AF_INET6 ? IPPROTO_IPV6 : IPPROTO_IP, Family == AF_INET6 ? T_IPV6_HDRINCL : IP_HDRINCL,
+                        (char *)&One, sizeof(One));
+    ok(Result == 0, "%s: HDRINCL %d\n", Label, WSAGetLastError());
+
+    Peer = socket(Family, SOCK_DGRAM, IPPROTO_UDP);
+    ok(bind(Peer, (struct sockaddr *)&Lo, SaLen) == 0, "%s: bind peer %d\n", Label, WSAGetLastError());
+    PPort = ntohs(PortOf(Peer, Family));
+
+    for (i = 0; i < 4; i++)
+    {
+        s = socket(Family, SOCK_DGRAM, IPPROTO_UDP);
+        ok(bind(s, (struct sockaddr *)&Lo, SaLen) == 0, "%s: bind %d\n", Label, WSAGetLastError());
+        SPort = ntohs(PortOf(s, Family));
+        if (Connect)
+        {
+            if (Family == AF_INET6)
+                ((SOCKADDR_IN6_LH *)&Lo)->sin6_port = htons(PPort);
+            else
+                ((struct sockaddr_in *)&Lo)->sin_port = htons(PPort);
+            ok(connect(s, (struct sockaddr *)&Lo, SaLen) == 0, "%s: connect %d\n", Label, WSAGetLastError());
+            if (Family == AF_INET6)
+                ((SOCKADDR_IN6_LH *)&Lo)->sin6_port = 0;
+            else
+                ((struct sockaddr_in *)&Lo)->sin_port = 0;
+        }
+
+        if (Family == AF_INET6)
+        {
+            Length = Build6Unreachable(Pkt, i == 2 ? Other6 : Loopback6, i == 3 ? SPort + 1 : SPort,
+                                       i == 1 ? PPort + 1 : PPort);
+            Result = sendto(Raw, (char *)Pkt, Length, 0, (struct sockaddr *)&Lo, SaLen);
+        }
+        else
+        {
+            Length = Build4Unreachable(Pkt, i == 2 ? htonl(0x7F000063) : htonl(INADDR_LOOPBACK), i == 3 ? SPort + 1 : SPort,
+                                       i == 1 ? PPort + 1 : PPort);
+            Result = sendto(Raw, (char *)Pkt, Length, 0, (struct sockaddr *)&Lo, SaLen);
+        }
+        ok(Result == Length, "%s (%s): crafted send %d error %d\n", Label, Names[i], Result, WSAGetLastError());
+
+        Result = RecvWait(s, Buf, sizeof(Buf), i == 0 ? 1500 : 1000, &Error);
+        if (i == 0 && Result == SOCKET_ERROR && Error == WSAETIMEDOUT)
+        {
+            /* The rows need a message that a raw socket sent to this machine to arrive (Windows does not deliver an
+               ICMPv6 one to ::1; this stack does not honour a header of its own in IPv4 raw sends): no verdict */
+            skip("%s: a hand-made message to the loopback address is not delivered\n", Label);
+            Control = FALSE;
+        }
+        else if (i == 3)
+        {
+            ok(Result == SOCKET_ERROR && Error == WSAETIMEDOUT, "%s (%s): receive %d error %d (nothing expected)\n", Label,
+               Names[i], Result, Error);
+        }
+        else if (Control)
+        {
+            ok(Result == SOCKET_ERROR && Error == WSAECONNRESET, "%s (%s): receive %d error %d (WSAECONNRESET expected)\n",
+               Label, Names[i], Result, Error);
+        }
+        closesocket(s);
+        if (!Control)
+            break;
+    }
+    closesocket(Peer);
+    closesocket(Raw);
+}
+
+/* recv(MSG_PEEK) of a queued port unreachable report does not consume it: every peek fails WSAECONNRESET, so does
+   the first receive, the one after it does not (Windows Server 2022, both families, 64 and 32 bit; a datagram that
+   arrives after the report is behind it) */
+static void TestPeekReport(int Family, int Variant)
+{
+    struct sockaddr_storage Lo, Closed;
+    SOCKET s, t;
+    char Buf[16], Label[48];
+    int i, Result, Error, SaLen = Family == AF_INET6 ? (int)sizeof(SOCKADDR_IN6_LH) : (int)sizeof(struct sockaddr_in), Length;
+
+    sprintf(Label, "peek v%d %s", Family == AF_INET6 ? 6 : 4, Variant == 0 ? "connected" : (Variant == 1 ? "unconnected" : "data behind"));
+    if (Family == AF_INET6)
+        Init6((SOCKADDR_IN6_LH *)&Lo, 0);
+    else
+        Init4((struct sockaddr_in *)&Lo, 0);
+    s = socket(Family, SOCK_DGRAM, IPPROTO_UDP);
+    t = socket(Family, SOCK_DGRAM, IPPROTO_UDP);
+    ok(bind(s, (struct sockaddr *)&Lo, SaLen) == 0, "%s: bind %d\n", Label, WSAGetLastError());
+    ok(bind(t, (struct sockaddr *)&Lo, SaLen) == 0, "%s: bind %d\n", Label, WSAGetLastError());
+    Length = sizeof(Closed);
+    getsockname(t, (struct sockaddr *)&Closed, &Length);
+    closesocket(t);                           /* a port nobody has */
+
+    if (Variant == 0)
+    {
+        ok(connect(s, (struct sockaddr *)&Closed, SaLen) == 0, "%s: connect %d\n", Label, WSAGetLastError());
+        Result = send(s, "x", 1, 0);
+    }
+    else
+    {
+        Result = sendto(s, "x", 1, 0, (struct sockaddr *)&Closed, SaLen);
+    }
+    ok(Result == 1, "%s: send %d %d\n", Label, Result, WSAGetLastError());
+    Sleep(700);
+    if (Variant == 2)
+    {
+        struct sockaddr_storage To = Lo;
+
+        t = socket(Family, SOCK_DGRAM, IPPROTO_UDP);
+        if (Family == AF_INET6)
+            ((SOCKADDR_IN6_LH *)&To)->sin6_port = PortOf(s, Family);
+        else
+            ((struct sockaddr_in *)&To)->sin_port = PortOf(s, Family);
+        ok(sendto(t, "DATA", 4, 0, (struct sockaddr *)&To, SaLen) == 4, "%s: data send %d\n", Label, WSAGetLastError());
+        closesocket(t);
+        Sleep(300);
+    }
+
+    for (i = 1; i <= 3; i++)
+    {
+        Result = recv(s, Buf, sizeof(Buf), MSG_PEEK);
+        Error = WSAGetLastError();
+        ok(Result == SOCKET_ERROR && Error == WSAECONNRESET, "%s: peek %d returned %d error %d\n", Label, i, Result, Error);
+    }
+    Result = recv(s, Buf, sizeof(Buf), 0);
+    Error = WSAGetLastError();
+    ok(Result == SOCKET_ERROR && Error == WSAECONNRESET, "%s: receive after the peeks %d error %d\n", Label, Result, Error);
+    Result = RecvWait(s, Buf, sizeof(Buf), 800, &Error);
+    if (Variant == 2)
+        ok(Result == 4 && !memcmp(Buf, "DATA", 4), "%s: the datagram behind the report: %d error %d\n", Label, Result, Error);
+    else
+        ok(Result == SOCKET_ERROR && Error == WSAETIMEDOUT, "%s: second receive %d error %d\n", Label, Result, Error);
+    closesocket(s);
+}
+
+/* IPV6_HDRINCL on a privileged raw socket sends a header whose source is not an address of this machine (Windows
+   Server 2022 put such packets on the wire for an administrator, with a global, a unique-local, another link-local
+   and the unspecified source); to ::1 the receiving raw socket gets the payload */
+static void TestHdrInclSource6(void)
+{
+    static const UCHAR Sources[][16] = {
+        { 0x20,0x01,0x0d,0xb8, 0,0,0,0, 0,0,0,0, 0,0,0,1 },
+        { 0xfd,0x00,0x5e,0xad, 0,0,0,0, 0,0,0,0, 0,0,0,1 },
+        { 0xfe,0x80,0,0, 0,0,0,0, 0,0,0,0, 0,0,0x12,0x34 } };
+    SOCKADDR_IN6_LH To, Bound;
+    SOCKET Tx, Rx;
+    DWORD One = 1;
+    UCHAR Pkt[64];
+    char In[64];
+    int i, Tries, Result, Error;
+
+    Rx = socket(AF_INET6, SOCK_RAW, 253);
+    Tx = socket(AF_INET6, SOCK_RAW, 253);
+    ok(Rx != INVALID_SOCKET && Tx != INVALID_SOCKET, "hdrincl source: sockets %d\n", WSAGetLastError());
+    if (Rx == INVALID_SOCKET || Tx == INVALID_SOCKET)
+        return;
+    Init6(&Bound, 0);
+    ok(bind(Rx, (struct sockaddr *)&Bound, sizeof(Bound)) == 0, "hdrincl source: bind %d\n", WSAGetLastError());
+    ok(setsockopt(Tx, IPPROTO_IPV6, T_IPV6_HDRINCL, (char *)&One, sizeof(One)) == 0, "hdrincl source: option %d\n",
+       WSAGetLastError());
+    Init6(&To, 0);
+    for (i = 0; i < 3; i++)
+    {
+        memset(Pkt, 0, sizeof(Pkt));
+        Pkt[0] = 0x60; Pkt[5] = 12; Pkt[6] = 253; Pkt[7] = 64;
+        memcpy(Pkt + 8, Sources[i], 16); memcpy(Pkt + 24, Loopback6, 16);
+        memcpy(Pkt + 40, "RAWFU-SRC-", 10); Pkt[50] = (UCHAR)('0' + i); Pkt[51] = 'x';
+        Result = sendto(Tx, (char *)Pkt, 52, 0, (struct sockaddr *)&To, sizeof(To));
+        ok(Result == 52, "hdrincl source %d: sent %d error %d\n", i, Result, WSAGetLastError());
+        /* (a datagram of protocol 253 that an earlier test sent to ::1, 65495 bytes, may still arrive: skipped) */
+        for (Tries = 0; Tries < 4; Tries++)
+        {
+            Result = RecvWait(Rx, In, sizeof(In), 2000, &Error);
+            if ((Result == 12 && !memcmp(In, "RAWFU-SRC-", 10)) || (Result == SOCKET_ERROR && Error == WSAETIMEDOUT))
+                break;
+        }
+        ok(Result == 12 && !memcmp(In, "RAWFU-SRC-", 10), "hdrincl source %d: received %d error %d\n", i, Result, Error);
+    }
+    closesocket(Tx);
+    closesocket(Rx);
+}
+
 static void TestConnResetIoctl(void)
 {
     BOOL Flag = TRUE;
@@ -540,7 +813,17 @@ START_TEST(rawsock)
     {
         TestRawAccess(TRUE);
         if (Have6)
+        {
             TestRaw6();
+            TestHdrInclSource6();
+        }
+        TestInnerDestination(AF_INET, TRUE);
+        TestInnerDestination(AF_INET, FALSE);
+        if (Have6)
+        {
+            TestInnerDestination(AF_INET6, TRUE);
+            TestInnerDestination(AF_INET6, FALSE);
+        }
     }
     else
     {
@@ -565,8 +848,14 @@ START_TEST(rawsock)
     ConnReset(AF_INET, FALSE, FALSE);
     ConnReset(AF_INET, TRUE, FALSE);
     ConnReset(AF_INET, FALSE, TRUE);
+    TestPeekReport(AF_INET, 0);
+    TestPeekReport(AF_INET, 1);
+    TestPeekReport(AF_INET, 2);
     if (Have6)
     {
+        TestPeekReport(AF_INET6, 0);
+        TestPeekReport(AF_INET6, 1);
+        TestPeekReport(AF_INET6, 2);
         ConnReset(AF_INET6, FALSE, FALSE);
         ConnReset(AF_INET6, TRUE, FALSE);
         ConnReset(AF_INET6, FALSE, TRUE);

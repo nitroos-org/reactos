@@ -396,9 +396,10 @@ RawIPSendDatagram6(
     ip6_addr_clear_zone(&Dest);
     RtlZeroMemory(&Source, sizeof(Source));
 
-    /* IPV6_HDRINCL: the data is the IPv6 header and its payload. The destination, next header, hop limit and
-       traffic class come from the header; the source must be :: or an address of this machine (no packet is sent
-       in another host's name) and the payload length must be what follows the header */
+    /* IPV6_HDRINCL: the data is the IPv6 header and its payload. The destination, next header, hop limit, traffic
+       class and source come from the header (any source: Windows sends a header whose source is not an address of
+       the machine, measured on the Server 2022 peer, evidence rawfu-20261116; the socket's owner is privileged, see
+       RawIp6UnprivilegedMaySend) and the payload length must be what follows the header */
     if (HeaderIncl)
     {
         UCHAR Header[IP6_HLEN];
@@ -470,15 +471,10 @@ RawIPSendDatagram6(
             ip6_addr_assign_zone(&Dest, IP6_UNICAST, netif);
     }
 
-    /* The source: the header's (IPV6_HDRINCL), else the bound address, else what lwIP selects */
+    /* The source: the header's (IPV6_HDRINCL, whatever address it is), else the bound address, else what lwIP
+       selects */
     if (HeaderIncl && !ip6_addr_isany(&Source))
     {
-        if (!Ip6IsLocalAddress(&Source))
-        {
-            pbuf_free(p);
-            UNLOCK_TCPIP_CORE();
-            return STATUS_INVALID_ADDRESS;
-        }
         if (!netif)
             netif = Udp6Route(&Source, &Dest);
         if (netif && ip6_addr_islinklocal(&Source))
