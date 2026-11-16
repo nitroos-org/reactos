@@ -734,6 +734,10 @@ done:
         RtlFreeHeap(RtlGetProcessHeap(), 0, UserInfoArray);
     }
 
+    /* A response that was refused (failed protocol status, too short) is not in the array */
+    if (UserInfoResponseBuffer != NULL)
+        LsaFreeReturnBuffer(UserInfoResponseBuffer);
+
     if (EnumResponseBuffer != NULL)
         LsaFreeReturnBuffer(EnumResponseBuffer);
 
