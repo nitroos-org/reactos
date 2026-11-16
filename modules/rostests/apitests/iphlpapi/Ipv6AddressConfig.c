@@ -144,6 +144,32 @@ static BOOL FindAddress(ULONG IfIndex, const char *Address, UNICAST_ROW6 *Out)
     return Found;
 }
 
+#define ORIGIN_RANDOM   5
+
+/* Whether the interface has a preferred temporary address (SuffixOrigin Random, RFC 8981), and whether Source is one */
+static BOOL HasTemporary(ULONG IfIndex, const SOCKADDR_INET *Source, BOOL *SourceIsTemporary)
+{
+    UNICAST_TABLE6 *Table = NULL;
+    ULONG i;
+    BOOL Has = FALSE;
+
+    *SourceIsTemporary = FALSE;
+    if (pGetUnicastIpAddressTable(AF_INET6, (PVOID *)&Table) != NO_ERROR || !Table)
+        return FALSE;
+    for (i = 0; i < Table->NumEntries; i++)
+    {
+        const UNICAST_ROW6 *Row = &Table->Table[i];
+
+        if (Row->InterfaceIndex != IfIndex || Row->SuffixOrigin != ORIGIN_RANDOM || Row->DadState != DAD_PREFERRED)
+            continue;
+        Has = TRUE;
+        if (Source->si_family == AF_INET6 && !memcmp(&Source->Ipv6.sin6_addr, &Row->Address.Ipv6.sin6_addr, 16))
+            *SourceIsTemporary = TRUE;
+    }
+    pFreeMibTable(Table);
+    return Has;
+}
+
 static BOOL WaitState(ULONG IfIndex, const char *Address, ULONG State, UNICAST_ROW6 *Out)
 {
     int i;
@@ -298,7 +324,17 @@ static void TestAddress(ULONG IfIndex)
     ok(Error == NO_ERROR, "GetBestRoute2: %lu\n", Error);
     ok(Error != NO_ERROR || (Route.InterfaceIndex == IfIndex && Route.DestinationPrefix.PrefixLength == 64),
        "best route /%u over %lu\n", Route.DestinationPrefix.PrefixLength, Route.InterfaceIndex);
-    ok(Error != NO_ERROR || SameAddress(&Source, "2001:db8:99::5"), "source is not the address\n");
+    if (Error == NO_ERROR)
+    {
+        BOOL IsTemporary, Has = HasTemporary(IfIndex, &Source, &IsTemporary);
+
+        /* RFC 6724 5: rule 7 (a temporary address, of the SLAAC prefix when the interface has one) comes before rule 8
+           (the longest common prefix with the destination), so with a temporary address the source is that one */
+        if (Has)
+            ok(IsTemporary, "source is not the temporary address\n");
+        else
+            ok(SameAddress(&Source, "2001:db8:99::5"), "source is not the address\n");
+    }
 
     /* it can be bound, and a datagram from it to its prefix is sent on the link */
     Socket = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
