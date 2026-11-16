@@ -317,10 +317,20 @@ TestTtl(void)
     ok(R4.Ttl >= 90 && R4.Ttl <= 97, "TTL left after 3 s of 100: %lu\n", R4.Ttl);
     ok(ServerCount(N) == 1, "the server was asked %d times\n", ServerCount(N));
 
-    /* a name that is not in the cache: nothing, and no query */
+    /* a name that is not in the cache: DNS_ERROR_RECORD_DOES_NOT_EXIST (Windows 10 and Server 2022 measured, for
+       a name never asked, for a type of a cached name that was never asked, and after a flush), and no query */
     R4 = Query(MakeName("ttl100", "never"), DNS_TYPE_A, DNS_QUERY_NO_WIRE_QUERY);
-    ok(R4.Status == DNS_INFO_NO_RECORDS, "cache-only query of an unknown name: %lu\n", R4.Status);
+    ok(R4.Status == DNS_ERROR_RECORD_DOES_NOT_EXIST, "cache-only query of an unknown name: %lu, expected %d\n",
+       R4.Status, DNS_ERROR_RECORD_DOES_NOT_EXIST);
+    R4 = Query(MakeName("ttl100", "never"), DNS_TYPE_AAAA, DNS_QUERY_NO_WIRE_QUERY);
+    ok(R4.Status == DNS_ERROR_RECORD_DOES_NOT_EXIST, "cache-only AAAA query of an unknown name: %lu\n", R4.Status);
     ok(ServerCount(MakeName("ttl100", "never")) == 0, "the server was asked for it\n");
+    N = MakeName("ttl100", "left");
+    R4 = Query(N, DNS_TYPE_AAAA, DNS_QUERY_NO_WIRE_QUERY);
+    ok(R4.Status == DNS_ERROR_RECORD_DOES_NOT_EXIST, "cache-only AAAA query of a name cached for A only: %lu\n", R4.Status);
+    DnsFlushResolverCache();
+    R4 = Query(N, DNS_TYPE_A, DNS_QUERY_NO_WIRE_QUERY);
+    ok(R4.Status == DNS_ERROR_RECORD_DOES_NOT_EXIST, "cache-only query after a flush: %lu\n", R4.Status);
 
     /* DNS_QUERY_BYPASS_CACHE asks again and keeps the new answer */
     N = MakeName("ttl300", "bypass");
@@ -430,7 +440,7 @@ TestFlush(void)
         ok(R.Status == ERROR_SUCCESS, "hosts row of localhost after the flush: %lu\n", R.Status);
     }
     R = Query(N, DNS_TYPE_A, DNS_QUERY_NO_WIRE_QUERY);
-    ok(R.Status == DNS_INFO_NO_RECORDS, "cache-only query after the flush: %lu\n", R.Status);
+    ok(R.Status == DNS_ERROR_RECORD_DOES_NOT_EXIST, "cache-only query after the flush: %lu\n", R.Status);
     Query(N, DNS_TYPE_A, DNS_QUERY_STANDARD);
     ok(ServerCount(N) == 2, "after the flush: asked %d times, expected 2\n", ServerCount(N));
 
@@ -452,9 +462,9 @@ TestFlush(void)
     }
     ok(DnsFlushResolverCacheEntry_W(NameW), "DnsFlushResolverCacheEntry_W failed\n");
     R = Query(N, DNS_TYPE_A, DNS_QUERY_NO_WIRE_QUERY);
-    ok(R.Status == DNS_INFO_NO_RECORDS, "A after the flush of the name: %lu\n", R.Status);
+    ok(R.Status == DNS_ERROR_RECORD_DOES_NOT_EXIST, "A after the flush of the name: %lu\n", R.Status);
     R = Query(N, DNS_TYPE_AAAA, DNS_QUERY_NO_WIRE_QUERY);
-    ok(R.Status == DNS_INFO_NO_RECORDS, "AAAA after the flush of the name: %lu\n", R.Status);
+    ok(R.Status == DNS_ERROR_RECORD_DOES_NOT_EXIST, "AAAA after the flush of the name: %lu\n", R.Status);
 
     /* a reverse name flushed with the dot of the root label (and without) */
     M = "7.2.0.192.in-addr.arpa";
@@ -464,7 +474,7 @@ TestFlush(void)
     MultiByteToWideChar(CP_ACP, 0, "7.2.0.192.IN-ADDR.ARPA.", -1, NameW, ARRAYSIZE(NameW));
     ok(DnsFlushResolverCacheEntry_W(NameW), "flush of the reverse name failed\n");
     R = Query(M, DNS_TYPE_PTR, DNS_QUERY_NO_WIRE_QUERY);
-    ok(R.Status == DNS_INFO_NO_RECORDS, "reverse entry after a flush of the name with the dot: %lu\n", R.Status);
+    ok(R.Status == DNS_ERROR_RECORD_DOES_NOT_EXIST, "reverse entry after a flush of the name with the dot: %lu\n", R.Status);
 }
 
 /*

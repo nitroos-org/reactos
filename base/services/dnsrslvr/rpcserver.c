@@ -244,7 +244,9 @@ R_ResolverQuery(
                                            ppResultRecords);
         if (Status == DNSRSLVR_CACHE_MISS)
         {
-            Status = DNS_INFO_NO_RECORDS;
+            /* nothing cached for the name and type: Windows 10 and Server 2022 answer DNS_ERROR_RECORD_DOES_NOT_EXIST
+               (9701) here, whatever the type and whether the name has records of other types in the cache */
+            Status = DNS_ERROR_RECORD_DOES_NOT_EXIST;
 
             /* The names that need no server (localhost, this machine) have an IPv6 answer that is not in the cache */
             if (wType == DNS_TYPE_AAAA)
