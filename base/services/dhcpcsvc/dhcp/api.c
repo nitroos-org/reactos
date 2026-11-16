@@ -12,11 +12,17 @@
 #include <reactos/debug.h>
 
 static CRITICAL_SECTION ApiCriticalSection;
+static BOOL ApiCriticalSectionReady = FALSE;
 
 extern HANDLE hAdapterStateChangedEvent;
 
 VOID ApiInit() {
-    InitializeCriticalSection( &ApiCriticalSection );
+    /* ServiceMain can run again in the same process after a stop and start: initialize the lock once */
+    if (!ApiCriticalSectionReady)
+    {
+        InitializeCriticalSection( &ApiCriticalSection );
+        ApiCriticalSectionReady = TRUE;
+    }
 }
 
 VOID ApiLock() {
@@ -39,19 +45,21 @@ RpcThreadRoutine(
     RPC_STATUS Status;
 
     Status = RpcServerUseProtseqEpW(L"ncacn_np", 20, L"\\pipe\\dhcpcsvc", NULL);
-    if (Status != RPC_S_OK)
+    if (Status != RPC_S_OK && Status != RPC_S_DUPLICATE_ENDPOINT)
     {
         DPRINT1("RpcServerUseProtseqEpW() failed (Status %lx)\n", Status);
         return 0;
     }
 
     Status = RpcServerRegisterIf(Server_dhcpcsvc_v0_0_s_ifspec, NULL, NULL);
-    if (Status != RPC_S_OK)
+    if (Status != RPC_S_OK && Status != RPC_S_ALREADY_REGISTERED)
     {
         DPRINT1("RpcServerRegisterIf() failed (Status %lx)\n", Status);
         return 0;
     }
 
+    /* Returns at once with RPC_S_ALREADY_LISTENING when another service of this process listens, and returns
+       when any service of the process stops the listening: neither is a service stop, the interface stays */
     Status = RpcServerListen(1, RPC_C_LISTEN_MAX_CALLS_DEFAULT, FALSE);
     if (Status != RPC_S_OK)
     {
@@ -64,13 +72,19 @@ RpcThreadRoutine(
 HANDLE
 InitRpc(VOID)
 {
-    return CreateThread( NULL, 0, RpcThreadRoutine, (LPVOID)NULL, 0, NULL);
+    HANDLE Thread = CreateThread( NULL, 0, RpcThreadRoutine, (LPVOID)NULL, 0, NULL);
+
+    /* the caller tests for INVALID_HANDLE_VALUE */
+    return Thread ? Thread : INVALID_HANDLE_VALUE;
 }
 
 VOID
 ShutdownRpc(VOID)
 {
     RpcMgmtStopServerListening(NULL);
+
+    /* the service stops: the next start registers it again */
+    RpcServerUnregisterIf(Server_dhcpcsvc_v0_0_s_ifspec, NULL, FALSE);
 }
 
 static

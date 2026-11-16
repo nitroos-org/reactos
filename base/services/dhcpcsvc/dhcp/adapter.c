@@ -418,8 +418,9 @@ DWORD WINAPI AdapterDiscoveryThread(LPVOID Context) {
 
        if( Error != NO_ERROR )
        {
-           /* HACK: We are waiting until TCP/IP starts */
-           Sleep(2000);
+           /* HACK: We are waiting until TCP/IP starts (but a stop request ends the wait) */
+           if (WaitForSingleObject(hStopEvent, 2000) == WAIT_OBJECT_0)
+               break;
            continue;
        }
 
@@ -589,7 +590,10 @@ DWORD WINAPI AdapterDiscoveryThread(LPVOID Context) {
 }
 
 HANDLE StartAdapterDiscovery(HANDLE hStopEvent) {
-    return CreateThread(NULL, 0, AdapterDiscoveryThread, (LPVOID)hStopEvent, 0, NULL);
+    HANDLE Thread = CreateThread(NULL, 0, AdapterDiscoveryThread, (LPVOID)hStopEvent, 0, NULL);
+
+    /* the caller tests for INVALID_HANDLE_VALUE */
+    return Thread ? Thread : INVALID_HANDLE_VALUE;
 }
 
 void AdapterStop() {
@@ -600,6 +604,11 @@ void AdapterStop() {
         ListEntry = (PLIST_ENTRY)RemoveHeadList( &AdapterList );
         Adapter = CONTAINING_RECORD( ListEntry, DHCP_ADAPTER, ListEntry );
         FreeAdapter( Adapter );
+    }
+    if (DhcpSocket != INVALID_SOCKET)
+    {
+        closesocket(DhcpSocket);
+        DhcpSocket = INVALID_SOCKET;
     }
     ApiUnlock();
     WSACleanup();

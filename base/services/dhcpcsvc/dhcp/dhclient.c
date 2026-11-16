@@ -128,9 +128,12 @@ init_client(void)
 void
 stop_client(void)
 {
-    // AdapterStop();
-    // ApiFree();
-    /* FIXME: Close pipe and kill pipe thread */
+    /* Called once the worker threads are gone: nothing of this run may survive into the next ServiceMain
+       (timers and protocol handlers point at the adapters freed here; the socket is closed and reset) */
+    ApiLock();
+    dispatch_reset();
+    ApiUnlock();
+    AdapterStop();
 }
 
 /* XXX Implement me */

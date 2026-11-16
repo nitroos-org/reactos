@@ -21,6 +21,13 @@ SERVICE_STATUS ServiceStatus;
 HANDLE hStopEvent = NULL;
 HANDLE hAdapterStateChangedEvent = NULL;
 
+/* how long a stopping service waits for each of its worker threads */
+#define THREAD_WAIT_MS 20000
+
+/* a worker thread of an earlier run did not end: it still uses the adapter list, the timers and the socket,
+   so a new run in this process would initialise them under it */
+static BOOL WorkerLeftRunning = FALSE;
+
 extern SOCKET DhcpSocket;
 
 
@@ -903,6 +910,7 @@ ServiceMain(DWORD argc, LPWSTR* argv)
     HANDLE hDiscoveryThread = INVALID_HANDLE_VALUE;
     HANDLE hDhcp6Thread = INVALID_HANDLE_VALUE;
     DWORD ret;
+    BOOL AllGone = TRUE;
 
     ServiceStatusHandle = RegisterServiceCtrlHandlerExW(ServiceName,
                                                         ServiceControlHandler,
@@ -910,6 +918,13 @@ ServiceMain(DWORD argc, LPWSTR* argv)
     if (!ServiceStatusHandle)
     {
         DPRINT1("DHCPCSVC: Unable to register service control handler (%lx)\n", GetLastError());
+        return;
+    }
+
+    if (WorkerLeftRunning)
+    {
+        DbgPrint("DHCPCSVC: a worker thread of the previous run is still running, the service does not start\n");
+        UpdateServiceStatus(SERVICE_STOPPED);
         return;
     }
 
@@ -982,39 +997,55 @@ ServiceMain(DWORD argc, LPWSTR* argv)
     DH_DbgPrint(MID_TRACE,("DHCPCSVC: DHCP service is shutting down\n"));
 
     ShutdownRpc();
-    stop_client();
 
+    /* Every thread that uses the stop event, the adapter list, the timers or the socket must be gone before any
+       of them is torn down. A thread that does not end is left alone with its state (leaked, not freed under it). */
     DPRINT("Wait for pipe thread to close! %p\n", hPipeThread);
     if (hPipeThread != INVALID_HANDLE_VALUE)
     {
-        DPRINT("Waiting for pipe thread\n");
-        ret = WaitForSingleObject(hPipeThread, 5000);
+        ret = WaitForSingleObject(hPipeThread, THREAD_WAIT_MS);
         DPRINT("Done %lx\n", ret);
+        if (ret != WAIT_OBJECT_0)
+            AllGone = FALSE;
     }
 
     DPRINT("Wait for discovery thread to close! %p\n", hDiscoveryThread);
     if (hDiscoveryThread != INVALID_HANDLE_VALUE)
     {
-        DPRINT("Waiting for discovery thread\n");
-        ret = WaitForSingleObject(hDiscoveryThread, 5000);
+        ret = WaitForSingleObject(hDiscoveryThread, THREAD_WAIT_MS);
         DPRINT("Done %lx\n", ret);
+        if (ret != WAIT_OBJECT_0)
+            AllGone = FALSE;
     }
 
     if (hDhcp6Thread != INVALID_HANDLE_VALUE)
     {
-        WaitForSingleObject(hDhcp6Thread, 5000);
-        CloseHandle(hDhcp6Thread);
+        if (WaitForSingleObject(hDhcp6Thread, THREAD_WAIT_MS) != WAIT_OBJECT_0)
+            AllGone = FALSE;
     }
 
-    DPRINT("Closing events!\n");
-    CloseHandle(hAdapterStateChangedEvent);
-    CloseHandle(hStopEvent);
+    if (AllGone)
+    {
+        DPRINT("Closing events!\n");
+        stop_client();
 
-    if (DhcpSocket != INVALID_SOCKET)
-        closesocket(DhcpSocket);
+        if (hDiscoveryThread != INVALID_HANDLE_VALUE)
+            CloseHandle(hDiscoveryThread);
+        if (hPipeThread != INVALID_HANDLE_VALUE)
+            CloseHandle(hPipeThread);
+        if (hDhcp6Thread != INVALID_HANDLE_VALUE)
+            CloseHandle(hDhcp6Thread);
 
-    CloseHandle(hDiscoveryThread);
-    CloseHandle(hPipeThread);
+        CloseHandle(hAdapterStateChangedEvent);
+        hAdapterStateChangedEvent = NULL;
+        CloseHandle(hStopEvent);
+        hStopEvent = NULL;
+    }
+    else
+    {
+        DbgPrint("DHCPCSVC: a worker thread did not stop; its state is left in place\n");
+        WorkerLeftRunning = TRUE;
+    }
 
     DPRINT("Done!\n");
 

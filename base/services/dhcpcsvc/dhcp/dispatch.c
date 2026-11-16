@@ -408,6 +408,33 @@ remove_protocol(struct protocol *proto)
     }
 }
 
+/* Drop every timer and protocol handler (service stop): they point at adapters that are about to be freed */
+void
+dispatch_reset(void)
+{
+    struct timeout *t;
+    struct protocol *p;
+
+    while (timeouts)
+    {
+        t = timeouts;
+        timeouts = t->next;
+        free(t);
+    }
+    while (free_timeouts)
+    {
+        t = free_timeouts;
+        free_timeouts = t->next;
+        free(t);
+    }
+    while (protocols)
+    {
+        p = protocols;
+        protocols = p->next;
+        free(p);
+    }
+}
+
 struct protocol *
 find_protocol_by_adapter(struct interface_info *info)
 {
