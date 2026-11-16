@@ -906,9 +906,11 @@ NTSTATUS FileCloseAddress(
       TCPClose( Listener );
   }
 
-  /* The IPv6 multicast groups the socket joined are left */
+  /* The IPv6 and IPv4 multicast groups the socket joined are left */
   if (AddrFile->Groups6)
       UDP6LeaveAll(AddrFile);
+  if (AddrFile->Groups4)
+      UDP4LeaveAll(AddrFile);
 
   DereferenceObject(AddrFile);
 

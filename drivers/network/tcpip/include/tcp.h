@@ -250,6 +250,10 @@ TCPReadIpv6Switch(VOID);
 VOID
 TCPInterfaceInit6(PIP_INTERFACE IF);
 
+/* A registered adapter's interface gets the IPv4 groups sockets joined in its multicast list (if6.c) */
+VOID
+TCPInterfaceMulticast4(PIP_INTERFACE IF);
+
 VOID
 TCPAddLoopbackAddress6(PIP_INTERFACE IF);
 
