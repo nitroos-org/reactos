@@ -1470,7 +1470,7 @@ IopUnloadDriver(PUNICODE_STRING DriverServiceName, BOOLEAN UnloadPnpDrivers)
         {
             /* Set the unload pending flag for the device */
             DeviceExtension = IoGetDevObjExtension(DeviceObject);
-            DeviceExtension->ExtensionFlags |= DOE_UNLOAD_PENDING;
+            InterlockedOr((PLONG)&DeviceExtension->ExtensionFlags, DOE_UNLOAD_PENDING);
 
             /* Make sure there are no attached devices or no reference counts */
             if ((DeviceObject->ReferenceCount) || (DeviceObject->AttachedDevice))

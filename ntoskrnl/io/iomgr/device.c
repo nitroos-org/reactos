@@ -107,7 +107,7 @@ IopAttachDeviceToDeviceStackSafe(
 
         /* Check for pending start flag and propagate it */
         if (IoGetDevObjExtension(AttachedDevice)->ExtensionFlags & DOE_START_PENDING)
-            IoGetDevObjExtension(SourceDevice)->ExtensionFlags |= DOE_START_PENDING;
+            InterlockedOr((PLONG)&IoGetDevObjExtension(SourceDevice)->ExtensionFlags, DOE_START_PENDING);
 
         /* Set the attachment in the device extension */
         SourceDeviceExtension->AttachedTo = AttachedDevice;
@@ -437,7 +437,14 @@ IopUnloadDevice(IN PDEVICE_OBJECT DeviceObject)
     /* Check if deletion is pending */
     if (ThisExtension->ExtensionFlags & DOE_DELETE_PENDING)
     {
-        /* Read once: the device on top may detach meanwhile */
+        /*
+         * Read once: the device on top may detach meanwhile. It is not referenced: a reference taken
+         * here would race with the detach and the deletion of that device in the same way as the read
+         * (there is no lock which orders them, ReactOS has no device database lock), so it would only
+         * move the window. What the read is used for is the driver's FastIoDetachDevice, which runs the
+         * deletion of that device itself, so it is gone only when its driver detached it on its own
+         * (an unload) in this very moment.
+         */
         AttachedDevice = *(PDEVICE_OBJECT volatile *)&DeviceObject->AttachedDevice;
         if (AttachedDevice)
         {
@@ -1326,7 +1333,7 @@ IoDeleteDevice(IN PDEVICE_OBJECT DeviceObject)
     }
 
     /* Set the pending delete flag */
-    IoGetDevObjExtension(DeviceObject)->ExtensionFlags |= DOE_DELETE_PENDING;
+    InterlockedOr((PLONG)&IoGetDevObjExtension(DeviceObject)->ExtensionFlags, DOE_DELETE_PENDING);
 
     /* Unlink with the power manager */
     if (DeviceObject->Vpb) PoRemoveVolumeDevice(DeviceObject);
