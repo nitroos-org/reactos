@@ -33,6 +33,8 @@ BOOL Ipv6FindOwner(const UCHAR *Address, DWORD Scope, PDWORD IfIndex);
 
 /* The IPv6 route rows, sorted by prefix, length and interface; same convention */
 DWORD Ipv6GetRouteRows(PMIB_IPFORWARD_ROW2 *Rows, ULONG *Count);
+/* The metric of an IPv4 interface; 0 when it is not known (route2.c) */
+DWORD Ipv4InterfaceMetric(DWORD IfIndex);
 /* The IPv4 routes in the same layout (route2.c) */
 DWORD Ipv4GetRouteRows(PMIB_IPFORWARD_ROW2 *Rows, ULONG *Count);
 

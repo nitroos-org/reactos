@@ -276,7 +276,8 @@ static void legacy_row(const MIB_IPFORWARD_ROW2 *Row, DWORD IfIndex, PMIB_IPFORW
   Out->dwForwardIfIndex = IfIndex;
   Out->dwForwardType = Out->dwForwardNextHop ? MIB_IPROUTE_TYPE_INDIRECT : MIB_IPROUTE_TYPE_DIRECT;
   Out->dwForwardProto = MIB_IPPROTO_NETMGMT;
-  Out->dwForwardMetric1 = route_metric(Row->Metric);
+  /* the table of the stack holds the sum of the interface metric and the route metric (route2.c) */
+  Out->dwForwardMetric1 = route_metric(Row->Metric) + Ipv4InterfaceMetric(IfIndex);
   Out->dwForwardMetric2 = Out->dwForwardMetric3 = Out->dwForwardMetric4 = Out->dwForwardMetric5 = (DWORD)-1;
 }
 
