@@ -4987,6 +4987,9 @@ MsafdAdoptInheritedSocket(SOCKET Handle)
                        &Socket->HelperEvents) != NO_ERROR)
         goto fail;
 
+    /* The endpoint exists already: the transport name the helper allocated is not needed (see WSPSocket) */
+    RtlFreeUnicodeString(&TransportName);
+
     Socket->Handle = Handle;
     Socket->LocalAddress = &Socket->SharedData->WSLocalAddress;
     Socket->RemoteAddress = &Socket->SharedData->WSRemoteAddress;

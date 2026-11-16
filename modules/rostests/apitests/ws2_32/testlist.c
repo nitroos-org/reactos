@@ -195,6 +195,7 @@ const struct test winetest_testlist[] =
     { "timewait", func_timewait },
     { "transmitfile", func_transmitfile },
     { "WSAAsync", func_WSAAsync },
+    { "WSAEnumNameSpaceProviders", func_WSAEnumNameSpaceProviders },
     { "WSAIoctl", func_WSAIoctl },
     { "WSAPoll", func_WSAPoll },
     { "WSALookupService", func_WSALookupService },
