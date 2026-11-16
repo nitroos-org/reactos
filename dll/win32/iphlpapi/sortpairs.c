@@ -56,7 +56,10 @@ ReadPolicyValue(HKEY Key, PADDRSORT_POLICY_TABLE Table)
 }
 
 /* Tcpip\Parameters\Ipv6Enable = 0 is an alias of DisabledComponents = 0xFF (IPv6 on the loopback interface only), which
-   includes bit 0x20: prefer IPv4. A DWORD of 0 only; absent or any other value is "on" */
+   includes bit 0x20: prefer IPv4. A DWORD of 0 only; absent or any other value is "on".
+   This is read at every call (like DisabledComponents bit 0x20 below), while tcpip reads Ipv6Enable once, at boot:
+   after a change without a restart the order follows the new value at once, and the adapters keep their IPv6 until
+   the restart. That mixed state is the one a DisabledComponents of 0x20 gives, and it is by design */
 static
 BOOL
 Ipv6EnableIsZero(VOID)

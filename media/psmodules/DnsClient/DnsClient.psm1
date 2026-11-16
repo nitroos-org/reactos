@@ -125,7 +125,7 @@ function Set-DnsClientServerAddress {
         if (-not $ResetServerAddresses -and $PSCmdlet.ParameterSetName -ne 'InputObject (cdxml)' -and @($rows | Where-Object { [int]$_.AddressFamily -eq 23 }).Count -eq 0) {
             $off = @($addresses | Where-Object { $ip = $null; [System.Net.IPAddress]::TryParse($_, [ref]$ip) -and $ip.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6 })
             if ($off.Count -gt 0) {
-                $PSCmdlet.WriteError([Nitro.Net.Errors]::Win32(50, "The request is not supported. IPv6 is turned off on this system (Tcpip\Parameters\Ipv6Enable = 0): $($off -join ', ') was not set.`n", $class, 'NotImplemented'))
+                $PSCmdlet.WriteError([Nitro.Net.Errors]::Win32(50, "The request is not supported. IPv6 is turned off on this interface: $($off -join ', ') was not set.`n", $class, 'NotImplemented'))
             }
         }
         foreach ($row in $rows) {
