@@ -28,16 +28,77 @@ TranslateRects(RECT_ENUM *RectEnum, POINTL* Translate)
     }
 }
 
+/*
+ * Move the dash state on by "count" steps along the line, exactly as the stepping loops below do it: when a
+ * segment is used up the next one is taken (backwards the index goes down, in unsigned arithmetic as in the loops),
+ * a segment of length 0 is never left again. Whole turns of the pattern are skipped, so the time does not depend
+ * on count.
+ */
+static VOID
+AdvanceStyle(
+    PULONG pulStyles,
+    ULONG cStyles,
+    BOOLEAN bBackwards,
+    PULONG piStyle,
+    ULONGLONG *pRemain,
+    ULONGLONG count)
+{
+    ULONGLONG remain = *pRemain, first[16];
+    ULONG iStyle = *piStyle, i;
+    BOOLEAN seen[16];
+    BOOLEAN bTurnsSkipped = FALSE;
+
+    for (i = 0; i < 16; i++)
+        seen[i] = FALSE;
+
+    while (count != 0 && remain != 0)
+    {
+        if (count < remain)
+        {
+            remain -= count;
+            break;
+        }
+        count -= remain;
+        if (bBackwards)
+            iStyle = (iStyle - 1) % cStyles;
+        else
+            iStyle = (iStyle + 1) % cStyles;
+        remain = pulStyles[iStyle];
+
+        if (!bTurnsSkipped && iStyle < 16)
+        {
+            if (seen[iStyle])
+            {
+                ULONGLONG turn = first[iStyle] - count;
+
+                /* the same segment again: a whole turn of the pattern used "turn" steps */
+                if (turn != 0)
+                    count %= turn;
+                bTurnsSkipped = TRUE;
+            }
+            else
+            {
+                seen[iStyle] = TRUE;
+                first[iStyle] = count;
+            }
+        }
+    }
+
+    *piStyle = iStyle;
+    *pRemain = remain;
+}
+
 LONG
 HandleStyles(
     BRUSHOBJ *pbo,
     POINTL* Translate,
     LONG x,
     LONG y,
-    LONG deltax,
-    LONG deltay,
+    LONGLONG deltax,
+    LONGLONG deltay,
     LONG dx,
     LONG dy,
+    LONGLONG iFirst,
     PULONG piStyle)
 {
     PEBRUSHOBJ pebo = (PEBRUSHOBJ)pbo;
@@ -47,34 +108,60 @@ HandleStyles(
 
     if (cStyles > 0)
     {
+        ULONG ulStyleSize = pebo->pbrush->ulStyleSize;
+        ULONGLONG remain;
+
         /* The line functions step along x unless deltax < deltay: the style counts the same axis (at a 45 degree
            line it counted y, so the dashes started and ended where x == y only: another place in a window DC) */
         if (deltax >= deltay)
         {
-            offStyle = (- Translate->x) % pebo->pbrush->ulStyleSize;
+            offStyle = (ulStyleSize != 0) ? (- Translate->x) % ulStyleSize : 0;
             diStyle = dx;
             lStyleMax = x;
         }
         else
         {
-            offStyle = (- Translate->y) % pebo->pbrush->ulStyleSize;
+            offStyle = (ulStyleSize != 0) ? (- Translate->y) % ulStyleSize : 0;
             diStyle = dy;
             lStyleMax = y;
         }
 
         /* Now loop until we have found the style index */
-        for (iStyle = 0; offStyle >= pulStyles[iStyle]; iStyle++)
+        for (iStyle = 0; iStyle < cStyles - 1 && (ULONG)offStyle >= pulStyles[iStyle]; iStyle++)
         {
             offStyle -= pulStyles[iStyle];
         }
 
+        /* (only a sum of the segments that wrapped around 2^32 can leave the offset behind the last one) */
+        if ((ULONG)offStyle >= pulStyles[iStyle])
+        {
+            offStyle = 0;
+        }
+
+        /* the number of steps until the style changes */
         if (diStyle > 0)
         {
-            lStyleMax += pulStyles[iStyle] - offStyle;
+            remain = pulStyles[iStyle] - (ULONG)offStyle;
         }
         else
         {
-            lStyleMax -= offStyle + 1;
+            remain = (ULONG)offStyle + 1;
+        }
+
+        /* A line clipped to its visible part starts iFirst steps into the pattern */
+        if (iFirst != 0)
+        {
+            AdvanceStyle(pulStyles, cStyles, diStyle < 0, &iStyle, &remain, (ULONGLONG)iFirst);
+        }
+
+        /* The loops compare the coordinate with this value, modulo 2^32 */
+        if (diStyle > 0)
+        {
+            lStyleMax = (LONG)((ULONG)lStyleMax + (ULONG)remain);
+        }
+        else
+        {
+            lStyleMax = (LONG)((ULONG)lStyleMax - (ULONG)remain);
         }
     }
     else
@@ -92,31 +179,29 @@ HandleStyles(
  */
 void FASTCALL
 NWtoSE(SURFOBJ* OutputObj, CLIPOBJ* Clip,
-       BRUSHOBJ* pbo, LONG x, LONG y, LONG deltax, LONG deltay,
-       POINTL* Translate)
+       BRUSHOBJ* pbo, LONG x, LONG y, LONGLONG deltax, LONGLONG deltay,
+       LONGLONG iFirst, LONGLONG count, LONGLONG error0, POINTL* Translate)
 {
-    int i;
-    int error;
+    LONGLONG i;
+    LONGLONG error;
     BOOLEAN EnumMore;
     RECTL* ClipRect;
     RECT_ENUM RectEnum;
     ULONG Pixel = pbo->iSolidColor;
-    LONG delta;
     PEBRUSHOBJ pebo = (PEBRUSHOBJ)pbo;
     PULONG pulStyles = pebo->pbrush->pStyle;
     ULONG iStyle, cStyles = pebo->pbrush->dwStyleCount;
     LONG lStyleMax;
 
-    lStyleMax = HandleStyles(pbo, Translate, x, y, deltax, deltay, 1, 1, &iStyle);
+    lStyleMax = HandleStyles(pbo, Translate, x, y, deltax, deltay, 1, 1, iFirst, &iStyle);
 
     CLIPOBJ_cEnumStart(Clip, FALSE, CT_RECTANGLES, CD_RIGHTDOWN, 0);
     EnumMore = CLIPOBJ_bEnum(Clip, (ULONG) sizeof(RectEnum), (PVOID) &RectEnum);
     TranslateRects(&RectEnum, Translate);
     ClipRect = RectEnum.arcl;
-    delta = max(deltax, deltay);
     i = 0;
-    error = delta >> 1;
-    while (i < delta && (ClipRect < RectEnum.arcl + RectEnum.c || EnumMore))
+    error = error0;
+    while (i < count && (ClipRect < RectEnum.arcl + RectEnum.c || EnumMore))
     {
         while ((ClipRect < RectEnum.arcl + RectEnum.c /* there's still a current clip rect */
                 && (ClipRect->bottom <= y             /* but it's above us */
@@ -145,9 +230,8 @@ NWtoSE(SURFOBJ* OutputObj, CLIPOBJ* Clip,
             if (deltax < deltay)
             {
                 y++;
-                if (y == lStyleMax)
+                if (y == lStyleMax && cStyles != 0)
                 {
-                    ASSERT(cStyles);
                     iStyle = (iStyle + 1) % cStyles;
                     lStyleMax = y + pulStyles[iStyle];
                 }
@@ -161,9 +245,8 @@ NWtoSE(SURFOBJ* OutputObj, CLIPOBJ* Clip,
             else
             {
                 x++;
-                if (x == lStyleMax)
+                if (x == lStyleMax && cStyles != 0)
                 {
-                    ASSERT(cStyles);
                     iStyle = (iStyle + 1) % cStyles;
                     lStyleMax = x + pulStyles[iStyle];
                 }
@@ -181,31 +264,29 @@ NWtoSE(SURFOBJ* OutputObj, CLIPOBJ* Clip,
 
 void FASTCALL
 SWtoNE(SURFOBJ* OutputObj, CLIPOBJ* Clip,
-       BRUSHOBJ* pbo, LONG x, LONG y, LONG deltax, LONG deltay,
-       POINTL* Translate)
+       BRUSHOBJ* pbo, LONG x, LONG y, LONGLONG deltax, LONGLONG deltay,
+       LONGLONG iFirst, LONGLONG count, LONGLONG error0, POINTL* Translate)
 {
-    int i;
-    int error;
+    LONGLONG i;
+    LONGLONG error;
     BOOLEAN EnumMore;
     RECTL* ClipRect;
     RECT_ENUM RectEnum;
     ULONG Pixel = pbo->iSolidColor;
-    LONG delta;
     PEBRUSHOBJ pebo = (PEBRUSHOBJ)pbo;
     PULONG pulStyles = pebo->pbrush->pStyle;
     ULONG iStyle, cStyles = pebo->pbrush->dwStyleCount;
     LONG lStyleMax;
 
-    lStyleMax = HandleStyles(pbo, Translate, x, y, deltax, deltay, 1, -1, &iStyle);
+    lStyleMax = HandleStyles(pbo, Translate, x, y, deltax, deltay, 1, -1, iFirst, &iStyle);
 
     CLIPOBJ_cEnumStart(Clip, FALSE, CT_RECTANGLES, CD_RIGHTUP, 0);
     EnumMore = CLIPOBJ_bEnum(Clip, (ULONG) sizeof(RectEnum), (PVOID) &RectEnum);
     TranslateRects(&RectEnum, Translate);
     ClipRect = RectEnum.arcl;
-    delta = max(deltax, deltay);
     i = 0;
-    error = delta >> 1;
-    while (i < delta && (ClipRect < RectEnum.arcl + RectEnum.c || EnumMore))
+    error = error0;
+    while (i < count && (ClipRect < RectEnum.arcl + RectEnum.c || EnumMore))
     {
         while ((ClipRect < RectEnum.arcl + RectEnum.c
                 && (y < ClipRect->top
@@ -233,9 +314,8 @@ SWtoNE(SURFOBJ* OutputObj, CLIPOBJ* Clip,
             if (deltax < deltay)
             {
                 y--;
-                if (y == lStyleMax)
+                if (y == lStyleMax && cStyles != 0)
                 {
-                    ASSERT(cStyles);
                     iStyle = (iStyle - 1) % cStyles;
                     lStyleMax = y - pulStyles[iStyle];
                 }
@@ -249,9 +329,8 @@ SWtoNE(SURFOBJ* OutputObj, CLIPOBJ* Clip,
             else
             {
                 x++;
-                if (x == lStyleMax)
+                if (x == lStyleMax && cStyles != 0)
                 {
-                    ASSERT(cStyles);
                     iStyle = (iStyle + 1) % cStyles;
                     lStyleMax = x + pulStyles[iStyle];
                 }
@@ -269,31 +348,29 @@ SWtoNE(SURFOBJ* OutputObj, CLIPOBJ* Clip,
 
 void FASTCALL
 NEtoSW(SURFOBJ* OutputObj, CLIPOBJ* Clip,
-       BRUSHOBJ* pbo, LONG x, LONG y, LONG deltax, LONG deltay,
-       POINTL* Translate)
+       BRUSHOBJ* pbo, LONG x, LONG y, LONGLONG deltax, LONGLONG deltay,
+       LONGLONG iFirst, LONGLONG count, LONGLONG error0, POINTL* Translate)
 {
-    int i;
-    int error;
+    LONGLONG i;
+    LONGLONG error;
     BOOLEAN EnumMore;
     RECTL* ClipRect;
     RECT_ENUM RectEnum;
     ULONG Pixel = pbo->iSolidColor;
-    LONG delta;
     PEBRUSHOBJ pebo = (PEBRUSHOBJ)pbo;
     PULONG pulStyles = pebo->pbrush->pStyle;
     ULONG iStyle, cStyles = pebo->pbrush->dwStyleCount;
     LONG lStyleMax;
 
-    lStyleMax = HandleStyles(pbo, Translate, x, y, deltax, deltay, -1, 1, &iStyle);
+    lStyleMax = HandleStyles(pbo, Translate, x, y, deltax, deltay, -1, 1, iFirst, &iStyle);
 
     CLIPOBJ_cEnumStart(Clip, FALSE, CT_RECTANGLES, CD_LEFTDOWN, 0);
     EnumMore = CLIPOBJ_bEnum(Clip, (ULONG) sizeof(RectEnum), (PVOID) &RectEnum);
     TranslateRects(&RectEnum, Translate);
     ClipRect = RectEnum.arcl;
-    delta = max(deltax, deltay);
     i = 0;
-    error = delta >> 1;
-    while (i < delta && (ClipRect < RectEnum.arcl + RectEnum.c || EnumMore))
+    error = error0;
+    while (i < count && (ClipRect < RectEnum.arcl + RectEnum.c || EnumMore))
     {
         while ((ClipRect < RectEnum.arcl + RectEnum.c
                 && (ClipRect->bottom <= y
@@ -321,9 +398,8 @@ NEtoSW(SURFOBJ* OutputObj, CLIPOBJ* Clip,
             if (deltax < deltay)
             {
                 y++;
-                if (y == lStyleMax)
+                if (y == lStyleMax && cStyles != 0)
                 {
-                    ASSERT(cStyles);
                     iStyle = (iStyle + 1) % cStyles;
                     lStyleMax = y + pulStyles[iStyle];
                 }
@@ -337,9 +413,8 @@ NEtoSW(SURFOBJ* OutputObj, CLIPOBJ* Clip,
             else
             {
                 x--;
-                if (x == lStyleMax)
+                if (x == lStyleMax && cStyles != 0)
                 {
-                    ASSERT(cStyles);
                     iStyle = (iStyle - 1) % cStyles;
                     lStyleMax = x - pulStyles[iStyle];
                 }
@@ -357,31 +432,29 @@ NEtoSW(SURFOBJ* OutputObj, CLIPOBJ* Clip,
 
 void FASTCALL
 SEtoNW(SURFOBJ* OutputObj, CLIPOBJ* Clip,
-       BRUSHOBJ* pbo, LONG x, LONG y, LONG deltax, LONG deltay,
-       POINTL* Translate)
+       BRUSHOBJ* pbo, LONG x, LONG y, LONGLONG deltax, LONGLONG deltay,
+       LONGLONG iFirst, LONGLONG count, LONGLONG error0, POINTL* Translate)
 {
-    int i;
-    int error;
+    LONGLONG i;
+    LONGLONG error;
     BOOLEAN EnumMore;
     RECTL* ClipRect;
     RECT_ENUM RectEnum;
     ULONG Pixel = pbo->iSolidColor;
-    LONG delta;
     PEBRUSHOBJ pebo = (PEBRUSHOBJ)pbo;
     PULONG pulStyles = pebo->pbrush->pStyle;
     ULONG iStyle, cStyles = pebo->pbrush->dwStyleCount;
     LONG lStyleMax;
 
-    lStyleMax = HandleStyles(pbo, Translate, x, y, deltax, deltay, -1, -1, &iStyle);
+    lStyleMax = HandleStyles(pbo, Translate, x, y, deltax, deltay, -1, -1, iFirst, &iStyle);
 
     CLIPOBJ_cEnumStart(Clip, FALSE, CT_RECTANGLES, CD_LEFTUP, 0);
     EnumMore = CLIPOBJ_bEnum(Clip, (ULONG) sizeof(RectEnum), (PVOID) &RectEnum);
     TranslateRects(&RectEnum, Translate);
     ClipRect = RectEnum.arcl;
-    delta = max(deltax, deltay);
     i = 0;
-    error = delta >> 1;
-    while (i < delta && (ClipRect < RectEnum.arcl + RectEnum.c || EnumMore))
+    error = error0;
+    while (i < count && (ClipRect < RectEnum.arcl + RectEnum.c || EnumMore))
     {
         while ((ClipRect < RectEnum.arcl + RectEnum.c
                 && (y < ClipRect->top
@@ -409,9 +482,8 @@ SEtoNW(SURFOBJ* OutputObj, CLIPOBJ* Clip,
             if (deltax < deltay)
             {
                 y--;
-                if (y == lStyleMax)
+                if (y == lStyleMax && cStyles != 0)
                 {
-                    ASSERT(cStyles);
                     iStyle = (iStyle - 1) % cStyles;
                     lStyleMax = y - pulStyles[iStyle];
                 }
@@ -425,9 +497,8 @@ SEtoNW(SURFOBJ* OutputObj, CLIPOBJ* Clip,
             else
             {
                 x--;
-                if (x == lStyleMax)
+                if (x == lStyleMax && cStyles != 0)
                 {
-                    ASSERT(cStyles);
                     iStyle = (iStyle - 1) % cStyles;
                     lStyleMax = x - pulStyles[iStyle];
                 }
@@ -458,7 +529,8 @@ EngLineTo(
     _In_opt_ RECTL *RectBounds,
     _In_ MIX mix)
 {
-    LONG x, y, deltax, deltay, xchange, ychange, hx, vy;
+    LONG x, y, xchange, ychange, hx, vy;
+    LONGLONG deltax, deltay, iFirst, count, error0;
     ULONG i;
     ULONG Pixel = pbo->iSolidColor;
     SURFOBJ *OutputObj;
@@ -470,27 +542,193 @@ EngLineTo(
     CLIPOBJ *pcoPriv = NULL;
     PEBRUSHOBJ pebo = (PEBRUSHOBJ)pbo;
     ULONG cStyles = pebo->pbrush->dwStyleCount;
+    LONGLONG ldx = (LONGLONG)x2 - x1, ldy = (LONGLONG)y2 - y1;
 
-    if (x1 < x2)
+    deltax = (ldx < 0) ? -ldx : ldx;
+    deltay = (ldy < 0) ? -ldy : ldy;
+    xchange = (ldx < 0) ? -1 : 1;
+    ychange = (ldy < 0) ? -1 : 1;
+
+    if (0 == deltax && 0 == deltay)
     {
-        DestRect.left = x1;
-        DestRect.right = x2;
+        /* Nothing to draw */
+        return TRUE;
+    }
+
+    if (deltax <= 0x10000 && deltay <= 0x10000 &&
+        x1 < 0x40000000 && x1 > -0x40000000 && x2 < 0x40000000 && x2 > -0x40000000 &&
+        y1 < 0x40000000 && y1 > -0x40000000 && y2 < 0x40000000 && y2 > -0x40000000)
+    {
+        /* A short line is stepped from its start */
+        iFirst = 0;
+        count = max(deltax, deltay);
+        error0 = count >> 1;
+        x = x1;
+        y = y1;
+
+        if (x1 < x2)
+        {
+            DestRect.left = x1;
+            DestRect.right = x2;
+        }
+        else
+        {
+            DestRect.left = x2;
+            DestRect.right = x1 + 1;
+        }
+        if (y1 < y2)
+        {
+            DestRect.top = y1;
+            DestRect.bottom = y2;
+        }
+        else
+        {
+            DestRect.top = y2;
+            DestRect.bottom = y1 + 1;
+        }
     }
     else
     {
-        DestRect.left = x2;
-        DestRect.right = x1 + 1;
+        /* A long line, or one with an end far out: only the steps that lie in the bounds of the clip object and the
+           surface are taken, from the exact state of the stepping there (position, error term, dash state). The
+           pixels are those of the whole line. The coordinate along the axis of the larger delta is a + s * i, the
+           other one a + s * floor((delta / 2 + i * m) / delta): both are monotonic in i, so the steps in the
+           bounds are one interval. */
+        RECTL rcVis;
+        BOOLEAN bXMajor = (deltax >= deltay);
+        ULONGLONG D = bXMajor ? (ULONGLONG)deltax : (ULONGLONG)deltay;
+        ULONGLONG m = bXMajor ? (ULONGLONG)deltay : (ULONGLONG)deltax;
+        ULONGLONG i0 = 0, i1 = D, t;
+        LONGLONG a[2], s[2], lo[2], hi[2], glo, ghi;
+        ULONGLONG step, sub;
+        int k;
+
+        if (Clip)
+            rcVis = Clip->rclBounds;
+        else if (RectBounds)
+            rcVis = *RectBounds;
+        else
+        {
+            rcVis.left = rcVis.top = 0;
+            rcVis.right = DestObj->sizlBitmap.cx;
+            rcVis.bottom = DestObj->sizlBitmap.cy;
+        }
+        if (rcVis.left < 0) rcVis.left = 0;
+        if (rcVis.top < 0) rcVis.top = 0;
+        if (rcVis.right > DestObj->sizlBitmap.cx) rcVis.right = DestObj->sizlBitmap.cx;
+        if (rcVis.bottom > DestObj->sizlBitmap.cy) rcVis.bottom = DestObj->sizlBitmap.cy;
+        if (rcVis.right <= rcVis.left || rcVis.bottom <= rcVis.top)
+        {
+            return TRUE;
+        }
+
+        a[0] = x1; s[0] = xchange; lo[0] = rcVis.left; hi[0] = rcVis.right;
+        a[1] = y1; s[1] = ychange; lo[1] = rcVis.top; hi[1] = rcVis.bottom;
+        for (k = 0; k < 2; k++)
+        {
+            BOOLEAN bMajor = (k == 0) == bXMajor;
+
+            /* the values of the coordinate offset g = (c - a) * s that are in the bounds: glo <= g <= ghi */
+            if (s[k] > 0)
+            {
+                glo = lo[k] - a[k];
+                ghi = hi[k] - a[k] - 1;
+            }
+            else
+            {
+                glo = a[k] - hi[k] + 1;
+                ghi = a[k] - lo[k];
+            }
+
+            /* i0 = the first step with g >= glo, i1 = the first step with g >= ghi + 1 */
+            for (sub = 0; sub < 2; sub++)
+            {
+                LONGLONG v = sub ? ghi + 1 : glo;
+
+                if (v <= 0)
+                {
+                    t = 0;
+                }
+                else if (bMajor)
+                {
+                    t = ((ULONGLONG)v >= D) ? D : (ULONGLONG)v;
+                }
+                else if (m == 0 || (ULONGLONG)v > m)
+                {
+                    t = D;
+                }
+                else
+                {
+                    t = ((ULONGLONG)v * D - (D >> 1) + m - 1) / m;
+                    if (t > D) t = D;
+                }
+
+                if (sub == 0)
+                {
+                    if (t > i0) i0 = t;
+                }
+                else
+                {
+                    if (t < i1) i1 = t;
+                }
+            }
+        }
+
+        if (i0 >= i1)
+        {
+            /* nothing of the line is in the bounds */
+            return TRUE;
+        }
+
+        /* the state at step i0 */
+        step = ((D >> 1) + i0 * m);
+        error0 = step % D;
+        step = step / D;
+        if (bXMajor)
+        {
+            x = (LONG)(x1 + xchange * (LONGLONG)i0);
+            y = (LONG)(y1 + ychange * (LONGLONG)step);
+        }
+        else
+        {
+            y = (LONG)(y1 + ychange * (LONGLONG)i0);
+            x = (LONG)(x1 + xchange * (LONGLONG)step);
+        }
+        iFirst = i0;
+        count = i1 - i0;
+
+        /* the pixel of the last step */
+        {
+            ULONGLONG last = i1 - 1;
+            ULONGLONG lstep = ((D >> 1) + last * m) / D;
+            LONG xe, ye;
+
+            if (bXMajor)
+            {
+                xe = (LONG)(x1 + xchange * (LONGLONG)last);
+                ye = (LONG)(y1 + ychange * (LONGLONG)lstep);
+            }
+            else
+            {
+                ye = (LONG)(y1 + ychange * (LONGLONG)last);
+                xe = (LONG)(x1 + xchange * (LONGLONG)lstep);
+            }
+            DestRect.left = min(x, xe);
+            DestRect.right = max(x, xe) + 1;
+            DestRect.top = min(y, ye);
+            DestRect.bottom = max(y, ye) + 1;
+        }
     }
-    if (y1 < y2)
-    {
-        DestRect.top = y1;
-        DestRect.bottom = y2;
-    }
+
+    /* The pixels from here: (x, y) is the first, "count" steps. */
+    if (xchange < 0)
+        hx = x - (LONG)count + 1;
     else
-    {
-        DestRect.top = y2;
-        DestRect.bottom = y1 + 1;
-    }
+        hx = x;
+    if (ychange < 0)
+        vy = y - (LONG)count + 1;
+    else
+        vy = y;
 
     if (! IntEngEnter(&EnterLeave, DestObj, &DestRect, FALSE, &Translate, &OutputObj))
     {
@@ -508,51 +746,15 @@ EngLineTo(
         IntEngUpdateClipRegion((XCLIPOBJ*)Clip, 0, 0, RectBounds);
     }
 
-    x1 += Translate.x;
-    x2 += Translate.x;
-    y1 += Translate.y;
-    y2 += Translate.y;
+    x += Translate.x;
+    y += Translate.y;
+    hx += Translate.x;
+    vy += Translate.y;
+    /* the horizontal and vertical lines below, and Translate for them */
+    x1 = x;
+    y1 = y;
 
-    x = x1;
-    y = y1;
-    deltax = x2 - x1;
-    deltay = y2 - y1;
-
-    if (0 == deltax && 0 == deltay)
-    {
-        /* Nothing to draw, but give back the copy IntEngEnter made */
-        if (pcoPriv)
-        {
-            EngDeleteClip(pcoPriv);
-        }
-        return IntEngLeave(&EnterLeave);
-    }
-
-    if (deltax < 0)
-    {
-        xchange = -1;
-        deltax = - deltax;
-        hx = x2 + 1;
-    }
-    else
-    {
-        xchange = 1;
-        hx = x1;
-    }
-
-    if (deltay < 0)
-    {
-        ychange = -1;
-        deltay = - deltay;
-        vy = y2 + 1;
-    }
-    else
-    {
-        ychange = 1;
-        vy = y1;
-    }
-
-    if ((y1 == y2) && (cStyles == 0))
+    if ((ldy == 0) && (cStyles == 0))
     {
         CLIPOBJ_cEnumStart(Clip, FALSE, CT_RECTANGLES, CD_RIGHTDOWN, 0);
         do
@@ -561,22 +763,22 @@ EngLineTo(
             for (i = 0; i < RectEnum.c && RectEnum.arcl[i].top + Translate.y <= y1; i++)
             {
                 if (y1 < RectEnum.arcl[i].bottom + Translate.y &&
-                        RectEnum.arcl[i].left + Translate.x <= hx + deltax &&
+                        RectEnum.arcl[i].left + Translate.x <= hx + (LONG)count &&
                         hx < RectEnum.arcl[i].right + Translate.x &&
                         max(hx, RectEnum.arcl[i].left + Translate.x) <
-                        min(hx + deltax, RectEnum.arcl[i].right + Translate.x))
+                        min(hx + (LONG)count, RectEnum.arcl[i].right + Translate.x))
                 {
                     DibFunctionsForBitmapFormat[OutputObj->iBitmapFormat].DIB_HLine(
                         OutputObj,
                         max(hx, RectEnum.arcl[i].left + Translate.x),
-                        min(hx + deltax, RectEnum.arcl[i].right + Translate.x),
+                        min(hx + (LONG)count, RectEnum.arcl[i].right + Translate.x),
                         y1, Pixel);
                 }
             }
         }
         while (EnumMore);
     }
-    else if ((x1 == x2) && (cStyles == 0))
+    else if ((ldx == 0) && (cStyles == 0))
     {
         CLIPOBJ_cEnumStart(Clip, FALSE, CT_RECTANGLES, CD_RIGHTDOWN, 0);
         do
@@ -586,13 +788,13 @@ EngLineTo(
             {
                 if (RectEnum.arcl[i].left + Translate.x <= x1 &&
                         x1 < RectEnum.arcl[i].right + Translate.x &&
-                        RectEnum.arcl[i].top + Translate.y <= vy + deltay &&
+                        RectEnum.arcl[i].top + Translate.y <= vy + (LONG)count &&
                         vy < RectEnum.arcl[i].bottom + Translate.y)
                 {
                     DibFunctionsForBitmapFormat[OutputObj->iBitmapFormat].DIB_VLine(
                         OutputObj, x1,
                         max(vy, RectEnum.arcl[i].top + Translate.y),
-                        min(vy + deltay, RectEnum.arcl[i].bottom + Translate.y),
+                        min(vy + (LONG)count, RectEnum.arcl[i].bottom + Translate.y),
                         Pixel);
                 }
             }
@@ -605,22 +807,26 @@ EngLineTo(
         {
             if (0 < ychange)
             {
-                NWtoSE(OutputObj, Clip, pbo, x, y, deltax, deltay, &Translate);
+                NWtoSE(OutputObj, Clip, pbo, x, y, deltax, deltay,
+                       iFirst, count, error0, &Translate);
             }
             else
             {
-                SWtoNE(OutputObj, Clip, pbo, x, y, deltax, deltay, &Translate);
+                SWtoNE(OutputObj, Clip, pbo, x, y, deltax, deltay,
+                       iFirst, count, error0, &Translate);
             }
         }
         else
         {
             if (0 < ychange)
             {
-                NEtoSW(OutputObj, Clip, pbo, x, y, deltax, deltay, &Translate);
+                NEtoSW(OutputObj, Clip, pbo, x, y, deltax, deltay,
+                       iFirst, count, error0, &Translate);
             }
             else
             {
-                SEtoNW(OutputObj, Clip, pbo, x, y, deltax, deltay, &Translate);
+                SEtoNW(OutputObj, Clip, pbo, x, y, deltax, deltay,
+                       iFirst, count, error0, &Translate);
             }
         }
     }
