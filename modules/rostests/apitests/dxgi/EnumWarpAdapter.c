@@ -11,6 +11,8 @@
  * EnumAdapters, EnumAdapters1 and EnumAdapterByGpuPreference list WARP last, after the display adapter(s):
  * the same identity as EnumWarpAdapter returns (LUID, flags), and no other listed adapter is software.
  * Programs that want WARP walk that list for DXGI_ADAPTER_FLAG_SOFTWARE (Microsoft Office does).
+ * D3D11CreateDevice, D3D10CreateDevice1 and D3D10CreateDevice with a NULL adapter and the WARP driver type create
+ * the device on that WARP adapter (same LUID, SOFTWARE flag); with the HARDWARE type it is on the first adapter.
  * No adapter of that machine has an output (EnumOutputs fails with DXGI_ERROR_NOT_CURRENTLY_AVAILABLE).
  */
 
@@ -295,6 +297,166 @@ static void TestAdapterZeroDevice(IDXGIFactory1 *Factory1)
     IDXGIAdapter1_Release(Adapter);
 }
 
+typedef HRESULT (WINAPI *PFN_D3D10_CREATE_DEVICE1)(IDXGIAdapter *, UINT, HMODULE, UINT, UINT, UINT, void **);
+typedef HRESULT (WINAPI *PFN_D3D10_CREATE_DEVICE)(IDXGIAdapter *, UINT, HMODULE, UINT, UINT, void **);
+
+/* LUID and flags of the adapter a device is on; FALSE when the device cannot tell */
+static BOOL GetDeviceAdapterDesc(IUnknown *Device, DXGI_ADAPTER_DESC1 *Desc)
+{
+    IDXGIDevice *DxgiDevice = NULL;
+    IDXGIAdapter *Adapter = NULL;
+    IDXGIAdapter1 *Adapter1 = NULL;
+    HRESULT hr;
+    BOOL Ok = FALSE;
+
+    hr = IUnknown_QueryInterface(Device, &IID_IDXGIDevice, (void **)&DxgiDevice);
+    ok(hr == S_OK, "QueryInterface(IDXGIDevice) returned %08lx\n", hr);
+    if (!DxgiDevice)
+        return FALSE;
+    hr = IDXGIDevice_GetAdapter(DxgiDevice, &Adapter);
+    ok(hr == S_OK, "GetAdapter returned %08lx\n", hr);
+    if (Adapter)
+    {
+        hr = IDXGIAdapter_QueryInterface(Adapter, &IID_IDXGIAdapter1, (void **)&Adapter1);
+        ok(hr == S_OK, "QueryInterface(IDXGIAdapter1) returned %08lx\n", hr);
+        if (Adapter1)
+        {
+            Ok = IDXGIAdapter1_GetDesc1(Adapter1, Desc) == S_OK;
+            IDXGIAdapter1_Release(Adapter1);
+        }
+        IDXGIAdapter_Release(Adapter);
+    }
+    IDXGIDevice_Release(DxgiDevice);
+    return Ok;
+}
+
+static void CheckDeviceIsWarp(const char *Api, IUnknown *Device, const DXGI_ADAPTER_DESC1 *Warp)
+{
+    DXGI_ADAPTER_DESC1 Desc;
+
+    if (!GetDeviceAdapterDesc(Device, &Desc))
+        return;
+    /* measured on Windows 10 22H2: the device of a NULL adapter and the WARP driver type is on the adapter
+     * EnumAdapters1 lists last and EnumWarpAdapter returns, not on the first adapter */
+    ok(Desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE, "%s: WARP device adapter flags are %#x\n", Api, Desc.Flags);
+    ok(SameLuid(Desc.AdapterLuid, Warp->AdapterLuid), "%s: WARP device is on another adapter (LUID %08lx:%08lx)\n",
+       Api, Desc.AdapterLuid.HighPart, Desc.AdapterLuid.LowPart);
+    ok(Desc.VendorId == 0x1414 && Desc.DeviceId == 0x008c, "%s: WARP device adapter is %04x:%04x\n", Api,
+       Desc.VendorId, Desc.DeviceId);
+}
+
+/* CreateDevice with a NULL adapter: WARP gets the software adapter, HARDWARE keeps adapter 0 */
+static void TestWarpDriverType(IDXGIFactory4 *Factory, IDXGIFactory1 *Factory1)
+{
+    HMODULE D3d11 = LoadLibraryW(L"d3d11.dll"), D3d101 = LoadLibraryW(L"d3d10_1.dll"), D3d10 = LoadLibraryW(L"d3d10.dll");
+    PFN_D3D11_CREATE_DEVICE pCreate11 = D3d11 ? (PFN_D3D11_CREATE_DEVICE)GetProcAddress(D3d11, "D3D11CreateDevice") : NULL;
+    PFN_D3D10_CREATE_DEVICE1 pCreate101 = D3d101 ? (PFN_D3D10_CREATE_DEVICE1)GetProcAddress(D3d101, "D3D10CreateDevice1") : NULL;
+    PFN_D3D10_CREATE_DEVICE pCreate10 = D3d10 ? (PFN_D3D10_CREATE_DEVICE)GetProcAddress(D3d10, "D3D10CreateDevice") : NULL;
+    IDXGIAdapter1 *Warp = NULL, *First = NULL;
+    DXGI_ADAPTER_DESC1 WarpDesc, FirstDesc, Desc;
+    IUnknown *Device;
+    UINT Level;
+    HRESULT hr;
+
+    hr = IDXGIFactory4_EnumWarpAdapter(Factory, &IID_IDXGIAdapter1, (void **)&Warp);
+    ok(hr == S_OK, "EnumWarpAdapter returned %08lx\n", hr);
+    if (!Warp)
+        return;
+    hr = IDXGIAdapter1_GetDesc1(Warp, &WarpDesc);
+    ok(hr == S_OK, "GetDesc1 returned %08lx\n", hr);
+    IDXGIAdapter1_Release(Warp);
+    hr = IDXGIFactory1_EnumAdapters1(Factory1, 0, &First);
+    ok(hr == S_OK, "EnumAdapters1(0) returned %08lx\n", hr);
+    if (!First)
+        return;
+    hr = IDXGIAdapter1_GetDesc1(First, &FirstDesc);
+    ok(hr == S_OK, "GetDesc1 returned %08lx\n", hr);
+    IDXGIAdapter1_Release(First);
+
+    if (pCreate11)
+    {
+        /* D3D_DRIVER_TYPE_HARDWARE = 1, D3D_DRIVER_TYPE_WARP = 5, D3D11_SDK_VERSION = 7 */
+        Device = NULL;
+        Level = 0;
+        hr = pCreate11(NULL, 5, NULL, 0, NULL, 0, 7, (void **)&Device, &Level, NULL);
+        ok(hr == S_OK, "D3D11CreateDevice(WARP) returned %08lx\n", hr);
+        ok(Level != 0, "D3D11CreateDevice(WARP) returned no feature level\n");
+        if (Device)
+        {
+            CheckDeviceIsWarp("D3D11", Device, &WarpDesc);
+            IUnknown_Release(Device);
+        }
+
+        Device = NULL;
+        hr = pCreate11(NULL, 1, NULL, 0, NULL, 0, 7, (void **)&Device, NULL, NULL);
+        ok(hr == S_OK, "D3D11CreateDevice(HARDWARE) returned %08lx\n", hr);
+        if (Device)
+        {
+            if (GetDeviceAdapterDesc(Device, &Desc))
+            {
+                ok(SameLuid(Desc.AdapterLuid, FirstDesc.AdapterLuid), "the HARDWARE device is not on adapter 0\n");
+                ok(!(Desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE), "the HARDWARE device is on a software adapter\n");
+            }
+            IUnknown_Release(Device);
+        }
+    }
+    else
+        skip("no D3D11CreateDevice\n");
+
+    if (pCreate101)
+    {
+        /* D3D10_DRIVER_TYPE_HARDWARE = 0, D3D10_FEATURE_LEVEL_10_1 = 0x9100, D3D10_1_SDK_VERSION = 0x20 */
+        Device = NULL;
+        hr = pCreate101(NULL, 0, NULL, 0, 0x9100, 0x20, (void **)&Device);
+        if (FAILED(hr))
+            skip("no Direct3D 10 device on the first adapter (%08lx)\n", hr);
+        else
+        {
+            if (GetDeviceAdapterDesc(Device, &Desc))
+                ok(SameLuid(Desc.AdapterLuid, FirstDesc.AdapterLuid), "the HARDWARE device is not on adapter 0\n");
+            IUnknown_Release(Device);
+
+            /* D3D10_DRIVER_TYPE_WARP = 5 */
+            Device = NULL;
+            hr = pCreate101(NULL, 5, NULL, 0, 0x9100, 0x20, (void **)&Device);
+            ok(hr == S_OK, "D3D10CreateDevice1(WARP) returned %08lx\n", hr);
+            if (Device)
+            {
+                CheckDeviceIsWarp("D3D10.1", Device, &WarpDesc);
+                IUnknown_Release(Device);
+            }
+        }
+    }
+    else
+        skip("no D3D10CreateDevice1\n");
+
+    if (pCreate10)
+    {
+        /* D3D10_SDK_VERSION = 29 */
+        Device = NULL;
+        hr = pCreate10(NULL, 0, NULL, 0, 29, (void **)&Device);
+        if (FAILED(hr))
+            skip("no Direct3D 10 device on the first adapter (%08lx)\n", hr);
+        else
+        {
+            if (GetDeviceAdapterDesc(Device, &Desc))
+                ok(SameLuid(Desc.AdapterLuid, FirstDesc.AdapterLuid), "the HARDWARE device is not on adapter 0\n");
+            IUnknown_Release(Device);
+
+            Device = NULL;
+            hr = pCreate10(NULL, 5, NULL, 0, 29, (void **)&Device);
+            ok(hr == S_OK, "D3D10CreateDevice(WARP) returned %08lx\n", hr);
+            if (Device)
+            {
+                CheckDeviceIsWarp("D3D10", Device, &WarpDesc);
+                IUnknown_Release(Device);
+            }
+        }
+    }
+    else
+        skip("no D3D10CreateDevice\n");
+}
+
 /* the list ends with WARP: one software adapter, the last one, with the identity of EnumWarpAdapter */
 static void TestAdapterList(IDXGIFactory4 *Factory, IDXGIFactory1 *Factory1)
 {
@@ -465,6 +627,7 @@ START_TEST(EnumWarpAdapter)
     {
         TestWarpAdapter(Factory4, Factory1);
         TestAdapterList(Factory4, Factory1);
+        TestWarpDriverType(Factory4, Factory1);
         IDXGIFactory4_Release(Factory4);
     }
     TestAdapterZeroDevice(Factory1);
