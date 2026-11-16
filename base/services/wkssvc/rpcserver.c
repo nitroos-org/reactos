@@ -87,6 +87,25 @@ void __RPC_USER midl_user_free(void __RPC_FAR * ptr)
     HeapFree(GetProcessHeap(), 0, ptr);
 }
 
+/* A copy of a string of the logon information, null terminated, in a block the RPC stub frees */
+static
+LPWSTR
+DuplicateLogonString(
+    PUNICODE_STRING String)
+{
+    LPWSTR Copy;
+
+    Copy = midl_user_allocate(String->Length + sizeof(WCHAR));
+    if (Copy == NULL)
+        return NULL;
+
+    ZeroMemory(Copy, String->Length + sizeof(WCHAR));
+    if (String->Length != 0 && String->Buffer != NULL)
+        CopyMemory(Copy, String->Buffer, String->Length);
+
+    return Copy;
+}
+
 
 static
 NET_API_STATUS
@@ -468,8 +487,9 @@ NetrWkstaUserEnum(
     PMSV1_0_GETUSERINFO_RESPONSE *UserInfoArray = NULL;
     DWORD EnumResponseBufferSize = 0;
     DWORD UserInfoResponseBufferSize = 0;
-    NTSTATUS Status, ProtocolStatus;
+    NTSTATUS Status, ProtocolStatus = STATUS_SUCCESS;
     ULONG i, start, count;
+    ULONG ResponseCount = 0;
     PLUID pLogonId;
     PULONG pEnumHandle;
     DWORD dwResult = NERR_Success;
@@ -497,9 +517,21 @@ NetrWkstaUserEnum(
                                           &ProtocolStatus);
 
     TRACE("LsaCallAuthenticationPackage Status 0x%08lx ResponseBufferSize %lu\n", Status, EnumResponseBufferSize);
+    if (NT_SUCCESS(Status) && !NT_SUCCESS(ProtocolStatus))
+        Status = ProtocolStatus;
     if (!NT_SUCCESS(Status))
     {
+        ERR("MsV1_0EnumerateUsers failed (Status 0x%08lx)\n", Status);
         dwResult = RtlNtStatusToDosError(Status);
+        goto done;
+    }
+
+    /* The package returned success without a response: nothing to read */
+    if (EnumResponseBuffer == NULL ||
+        EnumResponseBufferSize < sizeof(MSV1_0_ENUMUSERS_RESPONSE))
+    {
+        ERR("MsV1_0EnumerateUsers returned no response\n");
+        dwResult = ERROR_INVALID_DATA;
         goto done;
     }
 
@@ -537,13 +569,26 @@ NetrWkstaUserEnum(
                                                   &UserInfoResponseBufferSize,
                                                   &ProtocolStatus);
             TRACE("LsaCallAuthenticationPackage:MsV1_0GetUserInfo Status 0x%08lx ResponseBufferSize %lu\n", Status, UserInfoResponseBufferSize);
+            if (NT_SUCCESS(Status) && !NT_SUCCESS(ProtocolStatus))
+                Status = ProtocolStatus;
             if (!NT_SUCCESS(Status))
             {
+                ERR("MsV1_0GetUserInfo failed (Status 0x%08lx)\n", Status);
                 dwResult = RtlNtStatusToDosError(Status);
                 goto done;
             }
 
+            if (UserInfoResponseBuffer == NULL ||
+                UserInfoResponseBufferSize < sizeof(MSV1_0_GETUSERINFO_RESPONSE))
+            {
+                ERR("MsV1_0GetUserInfo returned no response\n");
+                dwResult = ERROR_INVALID_DATA;
+                goto done;
+            }
+
             UserInfoArray[i] = UserInfoResponseBuffer;
+            ResponseCount = i + 1;
+            UserInfoResponseBuffer = NULL;
 
             TRACE("UserName: %wZ\n", &UserInfoArray[i]->UserName);
             TRACE("LogonDomain: %wZ\n", &UserInfoArray[i]->LogonDomainName);
@@ -565,6 +610,7 @@ NetrWkstaUserEnum(
             goto done;
         }
 
+        /* The strings of the logon information are copied one by one: a failure frees what was built so far */
         switch (UserInfo->Level)
         {
             case 0:
@@ -578,24 +624,27 @@ NetrWkstaUserEnum(
 
                 ZeroMemory(pUserInfo0, count * sizeof(WKSTA_USER_INFO_0));
 
-                for (i = 0; i < 0 + count; i++) 
+                for (i = 0; i < count; i++)
                 {
-                    pUserInfo0[i].wkui0_username = midl_user_allocate(UserInfoArray[start + i]->UserName.Length + sizeof(WCHAR));
+                    pUserInfo0[i].wkui0_username = DuplicateLogonString(&UserInfoArray[start + i]->UserName);
                     if (pUserInfo0[i].wkui0_username == NULL)
                     {
                         ERR("\n");
                         dwResult = ERROR_NOT_ENOUGH_MEMORY;
                         break;
                     }
+                }
 
-                    ZeroMemory(pUserInfo0[i].wkui0_username, UserInfoArray[start + i]->UserName.Length + sizeof(WCHAR));
-                    CopyMemory(pUserInfo0[i].wkui0_username, UserInfoArray[start + i]->UserName.Buffer, UserInfoArray[start + i]->UserName.Length);
+                if (dwResult != NERR_Success)
+                {
+                    for (i = 0; i < count; i++)
+                        midl_user_free(pUserInfo0[i].wkui0_username);
+                    midl_user_free(pUserInfo0);
+                    break;
                 }
 
                 UserInfo->WkstaUserInfo.Level0.EntriesRead = count;
                 UserInfo->WkstaUserInfo.Level0.Buffer = pUserInfo0;
-                *TotalEntries = EnumResponseBuffer->NumberOfLoggedOnUsers;
-                *ResumeHandle = 0;
                 break;
 
             case 1:
@@ -609,51 +658,48 @@ NetrWkstaUserEnum(
 
                 ZeroMemory(pUserInfo1, count * sizeof(WKSTA_USER_INFO_1));
 
-                for (i = 0; i < 0 + count; i++) 
+                for (i = 0; i < count; i++)
                 {
-                    pUserInfo1[i].wkui1_username = midl_user_allocate(UserInfoArray[start + i]->UserName.Length + sizeof(WCHAR));
-                    if (pUserInfo1[i].wkui1_username == NULL)
-                    {
-                        ERR("\n");
-                        dwResult = ERROR_NOT_ENOUGH_MEMORY;
-                        break;
-                    }
-
-                    ZeroMemory(pUserInfo1[i].wkui1_username, UserInfoArray[start + i]->UserName.Length + sizeof(WCHAR));
-                    CopyMemory(pUserInfo1[i].wkui1_username, UserInfoArray[start + i]->UserName.Buffer, UserInfoArray[start + i]->UserName.Length);
-
-                    pUserInfo1[i].wkui1_logon_domain = midl_user_allocate(UserInfoArray[start + i]->LogonDomainName.Length + sizeof(WCHAR));
-                    if (pUserInfo1[i].wkui1_logon_domain == NULL)
-                    {
-                        ERR("\n");
-                        dwResult = ERROR_NOT_ENOUGH_MEMORY;
-                        break;
-                    }
-
-                    ZeroMemory(pUserInfo1[i].wkui1_logon_domain, UserInfoArray[start + i]->LogonDomainName.Length + sizeof(WCHAR));
-                    CopyMemory(pUserInfo1[i].wkui1_logon_domain, UserInfoArray[start + i]->LogonDomainName.Buffer, UserInfoArray[start + i]->LogonDomainName.Length);
-
+                    pUserInfo1[i].wkui1_username = DuplicateLogonString(&UserInfoArray[start + i]->UserName);
+                    pUserInfo1[i].wkui1_logon_domain = DuplicateLogonString(&UserInfoArray[start + i]->LogonDomainName);
                     // FIXME: wkui1_oth_domains
+                    pUserInfo1[i].wkui1_logon_server = DuplicateLogonString(&UserInfoArray[start + i]->LogonServer);
 
-                    pUserInfo1[i].wkui1_logon_server = midl_user_allocate(UserInfoArray[start + i]->LogonServer.Length + sizeof(WCHAR));
-                    if (pUserInfo1[i].wkui1_logon_server == NULL)
+                    if (pUserInfo1[i].wkui1_username == NULL ||
+                        pUserInfo1[i].wkui1_logon_domain == NULL ||
+                        pUserInfo1[i].wkui1_logon_server == NULL)
                     {
                         ERR("\n");
                         dwResult = ERROR_NOT_ENOUGH_MEMORY;
+                        i++;
                         break;
                     }
+                }
 
-                    ZeroMemory(pUserInfo1[i].wkui1_logon_server, UserInfoArray[start + i]->LogonServer.Length + sizeof(WCHAR));
-                    CopyMemory(pUserInfo1[i].wkui1_logon_server, UserInfoArray[start + i]->LogonServer.Buffer, UserInfoArray[start + i]->LogonServer.Length);
+                if (dwResult != NERR_Success)
+                {
+                    /* i entries were started: the one that failed holds the strings that were made */
+                    count = i;
+                    for (i = 0; i < count; i++)
+                    {
+                        midl_user_free(pUserInfo1[i].wkui1_username);
+                        midl_user_free(pUserInfo1[i].wkui1_logon_domain);
+                        midl_user_free(pUserInfo1[i].wkui1_logon_server);
+                    }
+                    midl_user_free(pUserInfo1);
+                    break;
                 }
 
                 UserInfo->WkstaUserInfo.Level1.EntriesRead = count;
                 UserInfo->WkstaUserInfo.Level1.Buffer = pUserInfo1;
-                *TotalEntries = EnumResponseBuffer->NumberOfLoggedOnUsers;
-                *ResumeHandle = 0;
                 break;
+        }
 
-                break;
+        if (dwResult == NERR_Success)
+        {
+            *TotalEntries = EnumResponseBuffer->NumberOfLoggedOnUsers;
+            if (ResumeHandle != NULL)
+                *ResumeHandle = 0;
         }
     }
     else
@@ -670,25 +716,19 @@ NetrWkstaUserEnum(
         }
 
         *TotalEntries = 0;
+        if (ResumeHandle != NULL)
+            *ResumeHandle = 0;
         dwResult = NERR_Success;
     }
 
 done:
-    if (UserInfoArray !=NULL)
+    /* The response of each MsV1_0GetUserInfo is one block: its strings point into it */
+    if (UserInfoArray != NULL)
     {
-
-        for (i = 0; i < EnumResponseBuffer->NumberOfLoggedOnUsers; i++)
+        for (i = 0; i < ResponseCount; i++)
         {
-            if (UserInfoArray[i]->UserName.Buffer != NULL)
-                LsaFreeReturnBuffer(UserInfoArray[i]->UserName.Buffer);
-
-            if (UserInfoArray[i]->LogonDomainName.Buffer != NULL)
-                LsaFreeReturnBuffer(UserInfoArray[i]->LogonDomainName.Buffer);
-
-            if (UserInfoArray[i]->LogonServer.Buffer != NULL)
-                LsaFreeReturnBuffer(UserInfoArray[i]->LogonServer.Buffer);
-
-            LsaFreeReturnBuffer(UserInfoArray[i]);
+            if (UserInfoArray[i] != NULL)
+                LsaFreeReturnBuffer(UserInfoArray[i]);
         }
 
         RtlFreeHeap(RtlGetProcessHeap(), 0, UserInfoArray);
