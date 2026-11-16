@@ -44,6 +44,9 @@
  *          own from the pre- to the post-operation, which releases its last reference there
  *   .sctx  a read tries FltSetStreamContext, even on a file object the filter didn't see created
  *          (SctxReads, LastSctxStatus)
+ *   .fsf   the FsFilter operations other than a section's acquire (its release, the modified page
+ *          writer's and the cache flush's acquire and release) are counted (FsFilterPre/Post), and so are
+ *          the modified page writer's paging writes (ModWriterWrites)
  * Anything else is counted and let through.
  */
 
@@ -115,8 +118,24 @@ typedef struct _FLTSAMPLE_STATS
     ULONG DpcReadPosts;             /* post-reads of .dpc files (fltfakefs completes them from a DPC) */
     ULONG DpcReadPostsAtDispatch;   /* ... at DISPATCH_LEVEL, where the last reference of a context was released */
     ULONG CleanupAboveApc;          /* context cleanup callbacks called above APC_LEVEL (never, WDK) */
+    LONG LastSectionSyncPostStatus; /* the status the last post-operation of a section's acquire saw */
+    ULONG FsFilterPre[5];           /* the other FsFilter operations on .fsf files, FLTSAMPLE_FSF_* */
+    ULONG FsFilterPost[5];
+    ULONG FsFilterFailed[5];        /* ... post-operations which saw a failure */
+    ULONG FsFilterOtherThread;      /* ... post-operations not in the thread of their pre-operation */
+    ULONG ModWriterWrites;          /* paging writes of .fsf files by the modified page writer */
+    ULONG MsgNullWithLength;        /* messages whose input or output buffer was NULL with a length */
 
 } FLTSAMPLE_STATS, *PFLTSAMPLE_STATS;
+
+/* FsFilter "major functions" (IRP_MJ_RELEASE_FOR_SECTION_SYNCHRONIZATION ((UCHAR)-2) ... IRP_MJ_RELEASE_FOR_CC_FLUSH ((UCHAR)-6)) */
+#define FLTSAMPLE_FSF_OPS               5
+#define FLTSAMPLE_FSF_INDEX(Major)      ((ULONG)(UCHAR)(0x100 - (Major)) - 2)
+#define FLTSAMPLE_FSF_RELEASE_SECTION   0
+#define FLTSAMPLE_FSF_ACQUIRE_MODWRITE  1
+#define FLTSAMPLE_FSF_RELEASE_MODWRITE  2
+#define FLTSAMPLE_FSF_ACQUIRE_CCFLUSH   3
+#define FLTSAMPLE_FSF_RELEASE_CCFLUSH   4
 
 #define FLTSAMPLE_CTX_ALLOCATED         0
 #define FLTSAMPLE_CTX_CLEANED           1
@@ -185,6 +204,31 @@ typedef struct _FLTSAMPLE_ASK_RESULT
                                                 so the instance being set up collides with it after saying yes */
 #define FLTSAMPLE_IOCTL_CONTEXT_SELFTEST CTL_CODE(FILE_DEVICE_UNKNOWN, 0x809, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define FLTSAMPLE_IOCTL_CLOSE_CLIENT    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x80B, METHOD_BUFFERED, FILE_ANY_ACCESS) /* FltCloseClientPort */
+/* In: the volume's name (WCHAR, no NUL needed). The filter keeps a reference to that volume and its properties */
+#define FLTSAMPLE_IOCTL_HOLD_VOLUME     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x80C, METHOD_BUFFERED, FILE_ANY_ACCESS)
+/* Out: FLTSAMPLE_HELD_VOLUME: the properties of the held volume now, then the reference goes */
+#define FLTSAMPLE_IOCTL_RELEASE_VOLUME  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x80D, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+typedef struct _FLTSAMPLE_VOLUME_PROPS
+{
+    LONG Status;                    /* of FltGetVolumeProperties */
+    ULONG DeviceType;
+    ULONG DeviceCharacteristics;
+    ULONG DeviceObjectFlags;
+    ULONG AlignmentRequirement;
+    ULONG SectorSize;
+    WCHAR DriverName[32];
+    WCHAR VolumeName[48];           /* FltGetVolumeName */
+
+} FLTSAMPLE_VOLUME_PROPS;
+
+typedef struct _FLTSAMPLE_HELD_VOLUME
+{
+    ULONG Held;                     /* a volume was held */
+    FLTSAMPLE_VOLUME_PROPS Before;  /* when it was taken */
+    FLTSAMPLE_VOLUME_PROPS After;   /* when it was let go */
+
+} FLTSAMPLE_HELD_VOLUME;
 
 /* Service key value PortSecurity (REG_DWORD): the descriptor the sample gives its port */
 #define PORT_SECURITY_NONE              0   /* none: the filter manager's default */
