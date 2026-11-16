@@ -1779,6 +1779,168 @@ LsaQueryInfoTrustedDomain(IN LSA_HANDLE TrustedDomainHandle,
 
 
 /*
+ * The policy information structure the stub returns has its strings, SIDs and the audit options array allocated
+ * one by one. Windows returns the structure and the data behind it as ONE block; a caller frees it with a single
+ * LsaFreeMemory, so the pieces were leaked on every call (a domain name and a SID per LsaQueryInformationPolicy).
+ * Same packing as the lookup results above.
+ */
+typedef struct _LSAP_POLICY_LAYOUT
+{
+    POLICY_INFORMATION_CLASS Class;
+    ULONG StructSize;
+    ULONG StringCount;
+    ULONG StringOffsets[3];     /* UNICODE_STRING members */
+    LONG SidOffset;             /* PSID member, or -1 */
+} LSAP_POLICY_LAYOUT;
+
+static const LSAP_POLICY_LAYOUT LsapPolicyLayouts[] =
+{
+    { PolicyPrimaryDomainInformation, sizeof(LSAPR_POLICY_PRIMARY_DOM_INFO), 1,
+      { FIELD_OFFSET(LSAPR_POLICY_PRIMARY_DOM_INFO, Name) },
+      FIELD_OFFSET(LSAPR_POLICY_PRIMARY_DOM_INFO, Sid) },
+    { PolicyPdAccountInformation, sizeof(LSAPR_POLICY_PD_ACCOUNT_INFO), 1,
+      { FIELD_OFFSET(LSAPR_POLICY_PD_ACCOUNT_INFO, Name) }, -1 },
+    { PolicyAccountDomainInformation, sizeof(LSAPR_POLICY_ACCOUNT_DOM_INFO), 1,
+      { FIELD_OFFSET(LSAPR_POLICY_ACCOUNT_DOM_INFO, DomainName) },
+      FIELD_OFFSET(LSAPR_POLICY_ACCOUNT_DOM_INFO, Sid) },
+    { PolicyLocalAccountDomainInformation, sizeof(LSAPR_POLICY_ACCOUNT_DOM_INFO), 1,
+      { FIELD_OFFSET(LSAPR_POLICY_ACCOUNT_DOM_INFO, DomainName) },
+      FIELD_OFFSET(LSAPR_POLICY_ACCOUNT_DOM_INFO, Sid) },
+    { PolicyReplicaSourceInformation, sizeof(POLICY_LSA_REPLICA_SRCE_INFO), 2,
+      { FIELD_OFFSET(POLICY_LSA_REPLICA_SRCE_INFO, ReplicaSource),
+        FIELD_OFFSET(POLICY_LSA_REPLICA_SRCE_INFO, ReplicaAccountName) }, -1 },
+    { PolicyDnsDomainInformation, sizeof(LSAPR_POLICY_DNS_DOMAIN_INFO), 3,
+      { FIELD_OFFSET(LSAPR_POLICY_DNS_DOMAIN_INFO, Name),
+        FIELD_OFFSET(LSAPR_POLICY_DNS_DOMAIN_INFO, DnsDomainName),
+        FIELD_OFFSET(LSAPR_POLICY_DNS_DOMAIN_INFO, DnsForestName) },
+      FIELD_OFFSET(LSAPR_POLICY_DNS_DOMAIN_INFO, Sid) },
+    { PolicyDnsDomainInformationInt, sizeof(LSAPR_POLICY_DNS_DOMAIN_INFO), 3,
+      { FIELD_OFFSET(LSAPR_POLICY_DNS_DOMAIN_INFO, Name),
+        FIELD_OFFSET(LSAPR_POLICY_DNS_DOMAIN_INFO, DnsDomainName),
+        FIELD_OFFSET(LSAPR_POLICY_DNS_DOMAIN_INFO, DnsForestName) },
+      FIELD_OFFSET(LSAPR_POLICY_DNS_DOMAIN_INFO, Sid) },
+};
+
+static
+VOID
+LsapPackPolicyInformation(
+    _In_ POLICY_INFORMATION_CLASS InformationClass,
+    _Inout_ PVOID *PolicyInformation)
+{
+    PUCHAR Old = *PolicyInformation, New, Cursor;
+    const LSAP_POLICY_LAYOUT *Layout = NULL;
+    PLSAPR_POLICY_AUDIT_EVENTS_INFO OldAudit, NewAudit;
+    PUNICODE_STRING OldString, NewString;
+    PSID *OldSid, *NewSid;
+    ULONGLONG Size;
+    ULONG i, SidLength;
+
+    if (Old == NULL)
+        return;
+
+    if (InformationClass == PolicyAuditEventsInformation)
+    {
+        OldAudit = (PLSAPR_POLICY_AUDIT_EVENTS_INFO)Old;
+        if (OldAudit->EventAuditingOptions == NULL || OldAudit->MaximumAuditEventCount == 0 ||
+            OldAudit->MaximumAuditEventCount > 0x10000)
+            return;
+
+        Size = LSAP_ALIGN(sizeof(*OldAudit)) + (ULONGLONG)OldAudit->MaximumAuditEventCount * sizeof(DWORD);
+        New = HeapAlloc(GetProcessHeap(), 0, (SIZE_T)Size);
+        if (New == NULL)
+            return;
+
+        NewAudit = (PLSAPR_POLICY_AUDIT_EVENTS_INFO)New;
+        *NewAudit = *OldAudit;
+        NewAudit->EventAuditingOptions = (DWORD *)(New + (SIZE_T)LSAP_ALIGN(sizeof(*OldAudit)));
+        RtlCopyMemory(NewAudit->EventAuditingOptions, OldAudit->EventAuditingOptions,
+                      OldAudit->MaximumAuditEventCount * sizeof(DWORD));
+
+        MIDL_user_free(OldAudit->EventAuditingOptions);
+        MIDL_user_free(Old);
+        *PolicyInformation = New;
+        return;
+    }
+
+    for (i = 0; i < RTL_NUMBER_OF(LsapPolicyLayouts); i++)
+    {
+        if (LsapPolicyLayouts[i].Class == InformationClass)
+        {
+            Layout = &LsapPolicyLayouts[i];
+            break;
+        }
+    }
+    if (Layout == NULL)
+        return;
+
+    /* The structure, then each string (aligned), then the SID */
+    Size = LSAP_ALIGN(Layout->StructSize);
+    for (i = 0; i < Layout->StringCount; i++)
+    {
+        OldString = (PUNICODE_STRING)(Old + Layout->StringOffsets[i]);
+        if (OldString->Buffer != NULL && OldString->MaximumLength != 0)
+            Size += LSAP_ALIGN(OldString->MaximumLength);
+    }
+    if (Layout->SidOffset >= 0)
+    {
+        OldSid = (PSID *)(Old + Layout->SidOffset);
+        if (*OldSid != NULL)
+            Size += LSAP_ALIGN(RtlLengthSid(*OldSid));
+    }
+
+    New = HeapAlloc(GetProcessHeap(), 0, (SIZE_T)Size);
+    if (New == NULL)
+        return;
+
+    RtlCopyMemory(New, Old, Layout->StructSize);
+    Cursor = New + (SIZE_T)LSAP_ALIGN(Layout->StructSize);
+    for (i = 0; i < Layout->StringCount; i++)
+    {
+        OldString = (PUNICODE_STRING)(Old + Layout->StringOffsets[i]);
+        NewString = (PUNICODE_STRING)(New + Layout->StringOffsets[i]);
+        if (OldString->Buffer != NULL && OldString->MaximumLength != 0)
+        {
+            RtlCopyMemory(Cursor, OldString->Buffer, OldString->MaximumLength);
+            NewString->Buffer = (PWSTR)Cursor;
+            Cursor += (SIZE_T)LSAP_ALIGN(OldString->MaximumLength);
+        }
+        else
+        {
+            NewString->Buffer = NULL;
+        }
+    }
+    if (Layout->SidOffset >= 0)
+    {
+        OldSid = (PSID *)(Old + Layout->SidOffset);
+        NewSid = (PSID *)(New + Layout->SidOffset);
+        if (*OldSid != NULL)
+        {
+            SidLength = RtlLengthSid(*OldSid);
+            RtlCopyMemory(Cursor, *OldSid, SidLength);
+            *NewSid = (PSID)Cursor;
+        }
+    }
+
+    /* Free the pieces as the stub allocated them */
+    for (i = 0; i < Layout->StringCount; i++)
+    {
+        OldString = (PUNICODE_STRING)(Old + Layout->StringOffsets[i]);
+        if (OldString->Buffer != NULL)
+            MIDL_user_free(OldString->Buffer);
+    }
+    if (Layout->SidOffset >= 0)
+    {
+        OldSid = (PSID *)(Old + Layout->SidOffset);
+        if (*OldSid != NULL)
+            MIDL_user_free(*OldSid);
+    }
+    MIDL_user_free(Old);
+
+    *PolicyInformation = New;
+}
+
+
+/*
  * @implemented
  */
 NTSTATUS
@@ -1798,6 +1960,8 @@ LsaQueryInformationPolicy(IN LSA_HANDLE PolicyHandle,
         Status = LsarQueryInformationPolicy((LSAPR_HANDLE)PolicyHandle,
                                             InformationClass,
                                             &PolicyInformation);
+        if (NT_SUCCESS(Status))
+            LsapPackPolicyInformation(InformationClass, (PVOID *)&PolicyInformation);
         *Buffer = PolicyInformation;
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
