@@ -388,14 +388,14 @@ static void TestHosts(const ADDRSORT_POLICY_TABLE *Policy)
         Check("IPv4-only host", &H, Policy, L, 2, E, 1);
     }
 
-    /* link-local IPv6 only, with a default router: there is a route, but no source address for a global
-       destination (a link-local source is never chosen for it, as the stack does): unreachable, last */
+    /* link-local IPv6 only, with a default router: the global destination is reachable from the link-local
+       address (Windows sends from it); rule 2 puts the IPv4 destination, whose source has the same scope, first */
     H.V6Default = TRUE;
     {
         static const char *L[] = { "2001:db8::1", "192.0.2.7" };
         static const ULONG E[] = { 1, 0 };
 
-        Check("link-local-only host", &H, Policy, L, 2, E, 1);
+        Check("link-local-only host", &H, Policy, L, 2, E, 2);
     }
 
     /* source selection: deprecated, temporary, longest prefix */
@@ -575,14 +575,14 @@ static void TestSourceRules(const ADDRSORT_POLICY_TABLE *Policy)
         CheckPick("link-scope multicast", Policy, L, 3, "ff02::1", 1);
         CheckPick("global multicast", Policy, L, 3, "ff0e::1", 0);
     }
-    /* link-local only: no source beyond the link (unicast), the link-local one on the link and for multicast */
+    /* link-local only: the link-local address is the source for every destination (Windows sends from it) */
     {
         static const char *L[] = { "fe80::10" };
         static const char *Loop[] = { "::1" };
 
-        CheckPick("link-local only, global destination", Policy, L, 1, "3fff:ff::1", -1);
-        CheckPick("link-local only, ULA destination", Policy, L, 1, "fd00::1", -1);
-        CheckPick("link-local only, site-local destination", Policy, L, 1, "fec0::1", -1);
+        CheckPick("link-local only, global destination", Policy, L, 1, "3fff:ff::1", 0);
+        CheckPick("link-local only, ULA destination", Policy, L, 1, "fd00::1", 0);
+        CheckPick("link-local only, site-local destination", Policy, L, 1, "fec0::1", 0);
         CheckPick("link-local only, link-local destination", Policy, L, 1, "fe80::1", 0);
         CheckPick("link-local only, global multicast", Policy, L, 1, "ff0e::1", 0);
         CheckPick("loopback interface, global destination", Policy, Loop, 1, "3fff:ff::1", 0);
@@ -596,7 +596,8 @@ static void TestSourceRules(const ADDRSORT_POLICY_TABLE *Policy)
         CheckPick("own deprecated address", Policy, L, 4, "3fff:a1::10", 1);
         CheckPick("own skip-as-source address", Policy, L, 4, "3fff:a1::20", 2);
         CheckPick("skip-as-source not chosen", Policy, L, 4, "3fff:a1::99", 3);
-        CheckPick("skip-as-source only: none", Policy, S, 2, "3fff:ff::1", -1);
+        CheckPick("skip-as-source and link-local only: the link-local one", Policy, S, 2, "3fff:ff::1", 0);
+        CheckPick("skip-as-source only: none", Policy, S + 1, 1, "3fff:ff::1", -1);
     }
     /* IPv4: the IPv4 address, never an IPv6 one */
     {

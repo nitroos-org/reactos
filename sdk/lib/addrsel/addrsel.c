@@ -469,10 +469,8 @@ AddrSortSelectSource(const ADDRSORT_POLICY_TABLE *Policy, const ADDRSEL_CANDIDAT
         }
     }
 
-    /* no link-local source for a unicast destination beyond the link (the loopback address stays a source: what
-       the loopback interface sends never leaves the host) */
-    if (Chosen >= 0 && Dest[0] != 0xff && D.Level > ADDRSORT_SCOPE_LINK &&
-        IsLinkLocalUnicast(Best.Candidate->Address))
-        return -1;
+    /* A host whose only address is link-local keeps it as the source for a global destination: Windows sends from
+       it (measured on a Windows Server 2022 peer behind a router that advertises no prefix: ping and TCP to a
+       global and to a ULA address leave from the fe80 address and are answered) */
     return Chosen;
 }

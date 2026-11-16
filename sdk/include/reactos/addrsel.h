@@ -95,10 +95,9 @@ ULONG AddrSortCommonPrefix(const UCHAR *Source, const UCHAR *Dest);
  * RFC 6724 section 5: the best source for Dest among Candidates (the addresses of the interface the packet leaves
  * over, all of one family as Dest). Rules 1 (Dest itself), 2 (appropriate scope), 3 (avoid deprecated), 6 (matching
  * label, with Policy), 7 (temporary preferred, as Windows by default) and 8 (longest matching prefix); 4 and 5 have
- * nothing to choose between (no home addresses, one interface), 5.5 is not used. On top of the rules, a link-local
- * source is never chosen for a unicast destination of a larger scope: a host with only a link-local address has no
- * source for a global destination and fails locally instead of sending a packet no router may forward (RFC 4291
- * 2.5.6, RFC 4007 section 9). Returns the index of the chosen candidate, -1 when there is none.
+ * nothing to choose between (no home addresses, one interface), 5.5 is not used. A link-local address that is the
+ * only candidate is chosen for a destination of a larger scope too, as Windows does. Returns the index of the chosen
+ * candidate, -1 when there is none.
  */
 LONG AddrSortSelectSource(const ADDRSORT_POLICY_TABLE *Policy, const ADDRSEL_CANDIDATE *Candidates, ULONG Count,
                           const UCHAR *Dest);

@@ -10,8 +10,7 @@
  * comes from ip6_select_source_address, which the NitroOS hook LWIP_HOOK_IP6_SELECT_SOURCE sends here. The rules
  * themselves are AddrSortSelectSource of sdk/lib/addrsel, the same function iphlpapi's GetBestRoute2 and
  * CreateSortedAddressPairs (and through them getaddrinfo) use, with the same prefix policy table: rules 1, 2, 3, 6
- * (label), 7 (temporary addresses, temp6.c) and 8 (longest matching prefix up to the /64 of the source), and no
- * link-local source for a unicast destination beyond the link.
+ * (label), 7 (temporary addresses, temp6.c) and 8 (longest matching prefix up to the /64 of the source).
  *
  * The table: Tcpip6\Parameters\PrefixPolicies (and its ActiveState subkey, DisabledComponents 0x20, Tcpip\Parameters\
  * Ipv6Enable = 0), as user mode
