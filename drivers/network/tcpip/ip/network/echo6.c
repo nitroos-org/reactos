@@ -596,7 +596,7 @@ DispEchoRequest6(PIRP Irp, PIO_STACK_LOCATION IrpSp)
         else if (ip6_addr_islinklocal(&Dest))
         {
             netif = Req.DestinationAddress.sin6_scope_id ? Udp6NetifOfIndex(Req.DestinationAddress.sin6_scope_id) :
-                    (Zone != IP6_NO_ZONE ? netif_get_by_index(Zone) : NULL);
+                    (Zone != IP6_NO_ZONE ? netif_get_by_index(Zone) : TCP6DefaultLinkLocalNetif());
             if (netif)
                 ip6_addr_assign_zone(&Dest, IP6_UNICAST, netif);
         }

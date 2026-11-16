@@ -33,6 +33,7 @@ extern void func_Ipv6Persist(void);
 extern void func_Ipv6Reporting(void);
 extern void func_Ipv6RouteConfig(void);
 extern void func_Ipv6StableId(void);
+extern void func_Ipv6UnscopedLinkLocal(void);
 extern void func_Ipv6Temporary(void);
 extern void func_NeighborEntry2(void);
 extern void func_NetstatOutput(void);
@@ -83,6 +84,7 @@ const struct test winetest_testlist[] =
     { "Ipv6Reporting",              func_Ipv6Reporting },
     { "Ipv6RouteConfig",            func_Ipv6RouteConfig },
     { "Ipv6StableId",               func_Ipv6StableId },
+    { "Ipv6UnscopedLinkLocal",      func_Ipv6UnscopedLinkLocal },
     { "Ipv6Temporary",              func_Ipv6Temporary },
     { "NeighborEntry2",             func_NeighborEntry2 },
     { "NetstatOutput",              func_NetstatOutput },
