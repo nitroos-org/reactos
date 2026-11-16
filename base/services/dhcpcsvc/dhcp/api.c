@@ -58,14 +58,13 @@ RpcThreadRoutine(
         return 0;
     }
 
+    /* Returns at once with RPC_S_ALREADY_LISTENING when another service of this process listens, and returns
+       when any service of the process stops the listening: neither is a service stop, the interface stays */
     Status = RpcServerListen(1, RPC_C_LISTEN_MAX_CALLS_DEFAULT, FALSE);
     if (Status != RPC_S_OK)
     {
         DPRINT1("RpcServerListen() failed (Status %lx)\n", Status);
     }
-
-    /* the next start registers it again */
-    RpcServerUnregisterIf(Server_dhcpcsvc_v0_0_s_ifspec, NULL, FALSE);
 
     return 0;
 }
@@ -73,13 +72,19 @@ RpcThreadRoutine(
 HANDLE
 InitRpc(VOID)
 {
-    return CreateThread( NULL, 0, RpcThreadRoutine, (LPVOID)NULL, 0, NULL);
+    HANDLE Thread = CreateThread( NULL, 0, RpcThreadRoutine, (LPVOID)NULL, 0, NULL);
+
+    /* the caller tests for INVALID_HANDLE_VALUE */
+    return Thread ? Thread : INVALID_HANDLE_VALUE;
 }
 
 VOID
 ShutdownRpc(VOID)
 {
     RpcMgmtStopServerListening(NULL);
+
+    /* the service stops: the next start registers it again */
+    RpcServerUnregisterIf(Server_dhcpcsvc_v0_0_s_ifspec, NULL, FALSE);
 }
 
 static

@@ -24,6 +24,10 @@ HANDLE hAdapterStateChangedEvent = NULL;
 /* how long a stopping service waits for each of its worker threads */
 #define THREAD_WAIT_MS 20000
 
+/* a worker thread of an earlier run did not end: it still uses the adapter list, the timers and the socket,
+   so a new run in this process would initialise them under it */
+static BOOL WorkerLeftRunning = FALSE;
+
 extern SOCKET DhcpSocket;
 
 
@@ -917,6 +921,13 @@ ServiceMain(DWORD argc, LPWSTR* argv)
         return;
     }
 
+    if (WorkerLeftRunning)
+    {
+        DbgPrint("DHCPCSVC: a worker thread of the previous run is still running, the service does not start\n");
+        UpdateServiceStatus(SERVICE_STOPPED);
+        return;
+    }
+
     UpdateServiceStatus(SERVICE_START_PENDING);
 
     /* Create the stop event */
@@ -1033,6 +1044,7 @@ ServiceMain(DWORD argc, LPWSTR* argv)
     else
     {
         DbgPrint("DHCPCSVC: a worker thread did not stop; its state is left in place\n");
+        WorkerLeftRunning = TRUE;
     }
 
     DPRINT("Done!\n");

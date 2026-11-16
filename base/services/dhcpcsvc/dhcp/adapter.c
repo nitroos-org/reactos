@@ -590,7 +590,10 @@ DWORD WINAPI AdapterDiscoveryThread(LPVOID Context) {
 }
 
 HANDLE StartAdapterDiscovery(HANDLE hStopEvent) {
-    return CreateThread(NULL, 0, AdapterDiscoveryThread, (LPVOID)hStopEvent, 0, NULL);
+    HANDLE Thread = CreateThread(NULL, 0, AdapterDiscoveryThread, (LPVOID)hStopEvent, 0, NULL);
+
+    /* the caller tests for INVALID_HANDLE_VALUE */
+    return Thread ? Thread : INVALID_HANDLE_VALUE;
 }
 
 void AdapterStop() {
