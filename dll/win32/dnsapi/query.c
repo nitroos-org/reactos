@@ -854,16 +854,16 @@ WCHAR
 *xstrsave(const WCHAR *str)
 {
     WCHAR *p;
-    size_t len = 0;
+    size_t len;
 
-    /* FIXME: how much instead of MAX_PATH? */
-    StringCbLengthW(str, MAX_PATH, &len);
-    len+=sizeof(WCHAR);
+    /* The whole string: a name of 130 characters or more used to get an empty copy (the length was capped at
+       MAX_PATH bytes and the failed measurement left 0) */
+    len = (wcslen(str) + 1) * sizeof(WCHAR);
 
     p = RtlAllocateHeap(RtlGetProcessHeap(), 0, len);
 
     if (p)
-        StringCbCopyW(p, len, str);
+        RtlCopyMemory(p, str, len);
 
     return p;
 }
@@ -872,16 +872,15 @@ CHAR
 *xstrsaveA(const CHAR *str)
 {
     CHAR *p;
-    size_t len = 0;
+    size_t len;
 
-    /* FIXME: how much instead of MAX_PATH? */
-    StringCbLengthA(str, MAX_PATH, &len);
-    len++;
+    /* The whole string, as xstrsave does */
+    len = strlen(str) + 1;
 
     p = RtlAllocateHeap(RtlGetProcessHeap(), 0, len);
 
     if (p)
-        StringCbCopyA(p, len, str);
+        RtlCopyMemory(p, str, len);
 
     return p;
 }
@@ -2306,32 +2305,106 @@ DnsFlushResolverCacheEntry_W(
 }
 
 
+/* The entries of a page, which the RPC allocated entry by entry, are freed the same way */
+static
+VOID
+FreeCacheEntries(
+    _In_ PDNS_CACHE_ENTRY Entry)
+{
+    PDNS_CACHE_ENTRY Next;
+
+    for (; Entry; Entry = Next)
+    {
+        Next = Entry->pNext;
+        if (Entry->pszName)
+            midl_user_free(Entry->pszName);
+        midl_user_free(Entry);
+    }
+}
+
+/* The most entries of one page: the marshalling of a linked list takes about half a kilobyte of the stack of the
+   caller for every element, so the pages are short enough for the smallest stacks and the list as a whole is not
+   limited by the stack */
+#define CACHE_PAGE_ENTRIES  200
+
 BOOL
 WINAPI
 DnsGetCacheDataTable(
     _Out_ PDNS_CACHE_ENTRY *DnsCache)
 {
     DNS_STATUS Status = ERROR_SUCCESS;
-    PDNS_CACHE_ENTRY CacheEntries = NULL;
+    PDNS_CACHE_ENTRY CacheEntries = NULL, Page, Tail = NULL;
+    ULONGLONG After = 0, Next;
+    BOOL bFirst = TRUE;
 
     if (DnsCache == NULL)
         return FALSE;
 
-    RpcTryExcept
+    for (;;)
     {
-        Status = CRrReadCache(NULL,
-                              &CacheEntries);
-        DPRINT("CRrReadCache() returned %lu\n", Status);
-    }
-    RpcExcept(EXCEPTION_EXECUTE_HANDLER)
-    {
-        Status = RpcExceptionCode();
-        DPRINT1("Exception returned %lu\n", Status);
-    }
-    RpcEndExcept;
+        Page = NULL;
+        Next = After;
 
-    if (Status != ERROR_SUCCESS)
-        return FALSE;
+        RpcTryExcept
+        {
+            Status = NitroReadCachePage(NULL, After, CACHE_PAGE_ENTRIES, &Page, &Next);
+            DPRINT("NitroReadCachePage() returned %lu\n", Status);
+        }
+        RpcExcept(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = RpcExceptionCode();
+            DPRINT("Exception returned %lu\n", Status);
+        }
+        RpcEndExcept;
+
+        /* A service of an older build has no paged call: its whole list (cut at a few thousand entries) */
+        if (bFirst && (Status == RPC_S_PROCNUM_OUT_OF_RANGE || Status == RPC_S_UNKNOWN_IF))
+        {
+            Page = NULL;
+            RpcTryExcept
+            {
+                Status = CRrReadCache(NULL, &Page);
+                DPRINT("CRrReadCache() returned %lu\n", Status);
+            }
+            RpcExcept(EXCEPTION_EXECUTE_HANDLER)
+            {
+                Status = RpcExceptionCode();
+                DPRINT1("Exception returned %lu\n", Status);
+            }
+            RpcEndExcept;
+
+            if (Status != ERROR_SUCCESS)
+            {
+                FreeCacheEntries(Page);
+                return FALSE;
+            }
+            CacheEntries = Page;
+            break;
+        }
+        bFirst = FALSE;
+
+        if (Status != ERROR_SUCCESS)
+        {
+            FreeCacheEntries(Page);
+            FreeCacheEntries(CacheEntries);
+            return FALSE;
+        }
+
+        /* an empty page is the end of the list (and a key that does not move would never end) */
+        if (Page == NULL || Next <= After)
+        {
+            FreeCacheEntries(Page);
+            break;
+        }
+
+        if (Tail)
+            Tail->pNext = Page;
+        else
+            CacheEntries = Page;
+        for (Tail = Page; Tail->pNext; Tail = Tail->pNext)
+            ;
+        After = Next;
+    }
 
     if (CacheEntries == NULL)
         return FALSE;

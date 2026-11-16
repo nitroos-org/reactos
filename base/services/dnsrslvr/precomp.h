@@ -43,6 +43,7 @@ typedef struct _RESOLVER_CACHE_ENTRY
     DNS_STATUS NegStatus;       /* negative entries: DNS_ERROR_RCODE_NAME_ERROR or DNS_INFO_NO_RECORDS */
     ULONGLONG ExpiresAt;        /* in milliseconds of the cache clock, 0 = never */
     ULONG Hash;
+    ULONGLONG Serial;           /* the order of adding: the position in the list of the RPC */
 } RESOLVER_CACHE_ENTRY, *PRESOLVER_CACHE_ENTRY;
 
 typedef struct _RESOLVER_CACHE
@@ -113,14 +114,25 @@ DnsIntCacheAddNegative(
 VOID
 DnsIntCacheReadParameters(VOID);
 
-BOOL
-DnsIntCacheRemoveEntryByName(
-    _In_ LPCWSTR Name);
-
 DNS_STATUS
 DnsIntCacheGetEntries(
     _Out_ DNS_CACHE_ENTRY **ppCacheEntries);
 
+DNS_STATUS
+DnsIntCacheGetEntriesPage(
+    _In_ ULONGLONG After,
+    _In_ ULONG Max,
+    _Out_ DNS_CACHE_ENTRY **ppCacheEntries,
+    _Out_ PULONGLONG pNext);
+
+
+/* netchange.c */
+
+VOID
+DnsIntNetChangeStart(VOID);
+
+VOID
+DnsIntNetChangeStop(VOID);
 
 /* hostsfile.c */
 

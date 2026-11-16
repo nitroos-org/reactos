@@ -284,6 +284,34 @@ IsListed(const char *Name)
     return FALSE;
 }
 
+/* The list is taken by a thread with a small stack (1 MB, half of the default of our programs): the paged call
+   does not need a stack for the whole list */
+static int ListedBySmallStack;
+
+static
+DWORD
+WINAPI
+SmallStackThread(LPVOID Parameter)
+{
+    ListedBySmallStack = CacheEntryCount();
+    return 0;
+}
+
+static
+void
+TestListSmallStack(int Expected)
+{
+    HANDLE Thread = CreateThread(NULL, 1024 * 1024, SmallStackThread, NULL, STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
+
+    ok(Thread != NULL, "CreateThread failed\n");
+    if (!Thread)
+        return;
+    ok(WaitForSingleObject(Thread, 180000) == WAIT_OBJECT_0, "the listing with a 1 MB stack did not finish\n");
+    CloseHandle(Thread);
+    ok(ListedBySmallStack >= Expected, "DnsGetCacheDataTable listed %d entries on a thread with a 1 MB stack, expected %d or more\n",
+       ListedBySmallStack, Expected);
+}
+
 static
 void
 TestTtl(void)
@@ -317,10 +345,20 @@ TestTtl(void)
     ok(R4.Ttl >= 90 && R4.Ttl <= 97, "TTL left after 3 s of 100: %lu\n", R4.Ttl);
     ok(ServerCount(N) == 1, "the server was asked %d times\n", ServerCount(N));
 
-    /* a name that is not in the cache: nothing, and no query */
+    /* a name that is not in the cache: DNS_ERROR_RECORD_DOES_NOT_EXIST (Windows 10 and Server 2022 measured, for
+       a name never asked, for a type of a cached name that was never asked, and after a flush), and no query */
     R4 = Query(MakeName("ttl100", "never"), DNS_TYPE_A, DNS_QUERY_NO_WIRE_QUERY);
-    ok(R4.Status == DNS_INFO_NO_RECORDS, "cache-only query of an unknown name: %lu\n", R4.Status);
+    ok(R4.Status == DNS_ERROR_RECORD_DOES_NOT_EXIST, "cache-only query of an unknown name: %lu, expected %d\n",
+       R4.Status, DNS_ERROR_RECORD_DOES_NOT_EXIST);
+    R4 = Query(MakeName("ttl100", "never"), DNS_TYPE_AAAA, DNS_QUERY_NO_WIRE_QUERY);
+    ok(R4.Status == DNS_ERROR_RECORD_DOES_NOT_EXIST, "cache-only AAAA query of an unknown name: %lu\n", R4.Status);
     ok(ServerCount(MakeName("ttl100", "never")) == 0, "the server was asked for it\n");
+    N = MakeName("ttl100", "left");
+    R4 = Query(N, DNS_TYPE_AAAA, DNS_QUERY_NO_WIRE_QUERY);
+    ok(R4.Status == DNS_ERROR_RECORD_DOES_NOT_EXIST, "cache-only AAAA query of a name cached for A only: %lu\n", R4.Status);
+    DnsFlushResolverCache();
+    R4 = Query(N, DNS_TYPE_A, DNS_QUERY_NO_WIRE_QUERY);
+    ok(R4.Status == DNS_ERROR_RECORD_DOES_NOT_EXIST, "cache-only query after a flush: %lu\n", R4.Status);
 
     /* DNS_QUERY_BYPASS_CACHE asks again and keeps the new answer */
     N = MakeName("ttl300", "bypass");
@@ -430,7 +468,7 @@ TestFlush(void)
         ok(R.Status == ERROR_SUCCESS, "hosts row of localhost after the flush: %lu\n", R.Status);
     }
     R = Query(N, DNS_TYPE_A, DNS_QUERY_NO_WIRE_QUERY);
-    ok(R.Status == DNS_INFO_NO_RECORDS, "cache-only query after the flush: %lu\n", R.Status);
+    ok(R.Status == DNS_ERROR_RECORD_DOES_NOT_EXIST, "cache-only query after the flush: %lu\n", R.Status);
     Query(N, DNS_TYPE_A, DNS_QUERY_STANDARD);
     ok(ServerCount(N) == 2, "after the flush: asked %d times, expected 2\n", ServerCount(N));
 
@@ -452,9 +490,9 @@ TestFlush(void)
     }
     ok(DnsFlushResolverCacheEntry_W(NameW), "DnsFlushResolverCacheEntry_W failed\n");
     R = Query(N, DNS_TYPE_A, DNS_QUERY_NO_WIRE_QUERY);
-    ok(R.Status == DNS_INFO_NO_RECORDS, "A after the flush of the name: %lu\n", R.Status);
+    ok(R.Status == DNS_ERROR_RECORD_DOES_NOT_EXIST, "A after the flush of the name: %lu\n", R.Status);
     R = Query(N, DNS_TYPE_AAAA, DNS_QUERY_NO_WIRE_QUERY);
-    ok(R.Status == DNS_INFO_NO_RECORDS, "AAAA after the flush of the name: %lu\n", R.Status);
+    ok(R.Status == DNS_ERROR_RECORD_DOES_NOT_EXIST, "AAAA after the flush of the name: %lu\n", R.Status);
 
     /* a reverse name flushed with the dot of the root label (and without) */
     M = "7.2.0.192.in-addr.arpa";
@@ -464,7 +502,7 @@ TestFlush(void)
     MultiByteToWideChar(CP_ACP, 0, "7.2.0.192.IN-ADDR.ARPA.", -1, NameW, ARRAYSIZE(NameW));
     ok(DnsFlushResolverCacheEntry_W(NameW), "flush of the reverse name failed\n");
     R = Query(M, DNS_TYPE_PTR, DNS_QUERY_NO_WIRE_QUERY);
-    ok(R.Status == DNS_INFO_NO_RECORDS, "reverse entry after a flush of the name with the dot: %lu\n", R.Status);
+    ok(R.Status == DNS_ERROR_RECORD_DOES_NOT_EXIST, "reverse entry after a flush of the name with the dot: %lu\n", R.Status);
 }
 
 /*
@@ -505,6 +543,43 @@ TestChain(void)
     R = Query(N, DNS_TYPE_A, DNS_QUERY_STANDARD);
     ok(R.Status == ERROR_SUCCESS, "A again: %lu\n", R.Status);
     ok(ServerCount(N) == 2, "name with an A record only: the server was asked %d times, expected 2\n", ServerCount(N));
+}
+
+/* The owner name of the answer to a long name (130 characters and more) is the name, not an empty string */
+static
+void
+TestLongName(void)
+{
+    static const char Label[] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";   /* 60 characters */
+    char Name[300];
+    WCHAR NameW[300];
+    PDNS_RECORD Record;
+    DNS_STATUS Status;
+    int Extra, Length;
+
+    for (Extra = 1; Extra <= 3; Extra++)
+    {
+        int i;
+
+        Length = _snprintf(Name, sizeof(Name), "ttl300-long%d-%s", Extra, Uniq);
+        for (i = 0; i < Extra; i++)
+            Length += _snprintf(Name + Length, sizeof(Name) - Length, ".%s", Label);
+        Length += _snprintf(Name + Length, sizeof(Name) - Length, ".cache.test");
+        MultiByteToWideChar(CP_ACP, 0, Name, -1, NameW, ARRAYSIZE(NameW));
+
+        Record = NULL;
+        Status = DnsQuery_W(NameW, DNS_TYPE_A, DNS_QUERY_STANDARD, NULL, &Record, NULL);
+        ok(Status == ERROR_SUCCESS && Record, "name of %d characters: status %lu\n", Length, Status);
+        if (Status == ERROR_SUCCESS && Record)
+        {
+            PWSTR Owner = (PWSTR)Record->pName;     /* DnsQuery_W: a wide string */
+
+            ok(Owner && _wcsicmp(Owner, NameW) == 0,
+               "name of %d characters: the owner name of the answer is \"%S\" (%d characters)\n",
+               Length, Owner ? Owner : L"(null)", Owner ? (int)wcslen(Owner) : 0);
+            DnsRecordListFree(Record, DnsFreeRecordList);
+        }
+    }
 }
 
 /* The average time of Iterations lookups of the name (microseconds) */
@@ -597,7 +672,10 @@ TestSize(int Names)
     }
     k = CacheEntryCount();
     trace("entries listed by DnsGetCacheDataTable (ipconfig /displaydns): %d\n", k);
-    ok(k > 1000 && k <= 3000, "DnsGetCacheDataTable listed %d entries with a full cache, expected a list of some thousand at most\n", k);
+    /* the whole cache is listed (it was cut at 2800 entries, which a 2 MB stack of the caller could take) */
+    ok(k >= (Names < 8192 ? Names - 1 : 8192), "DnsGetCacheDataTable listed %d entries of a cache of %d answers\n", k, Names < 8192 ? Names : 8192);
+    ok(k <= 8192 + 1000, "DnsGetCacheDataTable listed %d entries, more than the cache can hold\n", k);
+    TestListSmallStack(Names < 8192 ? Names - 1 : 8192);
     _snprintf(Buffer, sizeof(Buffer), "big-%s-%d.cache.test", Uniq, Names - 1);
     ok(IsListed(Buffer), "the newest name is not in the list of DnsGetCacheDataTable\n");
 
@@ -612,6 +690,158 @@ TestSize(int Names)
     ok(Us < 5000.0, "a cached lookup took %.1f us\n", Us);
     Us = LookupCost(MakeName("ttl100", "unknown2"), DNS_TYPE_A, DNS_QUERY_NO_WIRE_QUERY, 2000);
     trace("lookup of an unknown name: %.1f us per query (cache only, 2000 queries)\n", Us);
+}
+
+/*
+ * The cache goes when the first IPv4 address of an adapter goes, and not when another address comes or goes (the
+ * behaviour of Windows 10 and Server 2022: ipconfig /displaydns before and after each step). The first address is
+ * taken away by releasing the lease of the adapter and given back by renewing it; both steps need an adapter with a
+ * DHCP lease and an administrator, otherwise only the first part runs.
+ */
+#define NC_ADDRESS  "10.254.77.1"
+#define NC_MASK     "255.255.255.0"
+
+static
+BOOL
+FindAdapter(DWORD *Index, BOOL *Dhcp, WCHAR *Name, int NameSize)
+{
+    PIP_ADAPTER_INFO Info, Adapter;
+    ULONG Size = 0;
+    BOOL Found = FALSE;
+
+    GetAdaptersInfo(NULL, &Size);
+    Info = Size ? malloc(Size) : NULL;
+    if (!Info)
+        return FALSE;
+    if (GetAdaptersInfo(Info, &Size) == NO_ERROR)
+    {
+        for (Adapter = Info; Adapter; Adapter = Adapter->Next)
+        {
+            const char *Ip = Adapter->IpAddressList.IpAddress.String;
+
+            if (strcmp(Ip, "0.0.0.0") != 0 && strncmp(Ip, "127.", 4) != 0)
+            {
+                *Index = Adapter->Index;
+                *Dhcp = Adapter->DhcpEnabled != 0;
+                MultiByteToWideChar(CP_ACP, 0, Adapter->AdapterName, -1, Name, NameSize);
+                Found = TRUE;
+                break;
+            }
+        }
+    }
+    free(Info);
+    return Found;
+}
+
+/* Does the adapter have an IPv4 address (Present) or none (!Present) within Ms milliseconds? */
+static
+BOOL
+WaitForAddress(DWORD Index, BOOL Present, DWORD Ms)
+{
+    DWORD Start = GetTickCount();
+
+    do
+    {
+        PIP_ADAPTER_INFO Info, Adapter;
+        ULONG Size = 0;
+        BOOL Has = FALSE;
+
+        GetAdaptersInfo(NULL, &Size);
+        Info = Size ? malloc(Size) : NULL;
+        if (Info && GetAdaptersInfo(Info, &Size) == NO_ERROR)
+        {
+            for (Adapter = Info; Adapter; Adapter = Adapter->Next)
+            {
+                if (Adapter->Index == Index && strcmp(Adapter->IpAddressList.IpAddress.String, "0.0.0.0") != 0)
+                    Has = TRUE;
+            }
+        }
+        free(Info);
+        if (Has == Present)
+            return TRUE;
+        Sleep(500);
+    } while (GetTickCount() - Start < Ms);
+    return FALSE;
+}
+
+static
+void
+TestNetChange(void)
+{
+    typedef DWORD (WINAPI *PFN_INIT)(PDWORD);
+    typedef DWORD (WINAPI *PFN_ADAPTER)(LPWSTR);
+    typedef VOID (WINAPI *PFN_CLEANUP)(VOID);
+    const char *N;
+    DWORD Index, Context, Instance, Error, Version;
+    BOOL Dhcp;
+    WCHAR Adapter[MAX_ADAPTER_NAME_LENGTH + 4];
+    HMODULE Dhcpcsvc;
+    PFN_INIT Init;
+    PFN_ADAPTER Release, Acquire;
+    PFN_CLEANUP Cleanup;
+
+    if (!FindAdapter(&Index, &Dhcp, Adapter, ARRAYSIZE(Adapter)))
+    {
+        skip("no adapter with an IPv4 address\n");
+        return;
+    }
+
+    N = MakeName("ttl300", "netchg");
+    ok(Query(N, DNS_TYPE_A, DNS_QUERY_STANDARD).Status == ERROR_SUCCESS, "query\n");
+    ok(Query(N, DNS_TYPE_A, DNS_QUERY_NO_WIRE_QUERY).Status == ERROR_SUCCESS, "cached before the change\n");
+
+    /* another address comes: the cache stays (Windows measured) */
+    Error = AddIPAddress(inet_addr(NC_ADDRESS), inet_addr(NC_MASK), Index, &Context, &Instance);
+    if (Error != NO_ERROR)
+    {
+        skip("AddIPAddress failed (%lu): no address change to test\n", Error);
+        return;
+    }
+    Sleep(6000);
+    ok(Query(N, DNS_TYPE_A, DNS_QUERY_NO_WIRE_QUERY).Status == ERROR_SUCCESS, "the cache was flushed when a second address came\n");
+
+    /* and goes again: the cache stays */
+    Error = DeleteIPAddress(Context);
+    ok(Error == NO_ERROR, "DeleteIPAddress: %lu\n", Error);
+    Sleep(4000);
+    ok(Query(N, DNS_TYPE_A, DNS_QUERY_NO_WIRE_QUERY).Status == ERROR_SUCCESS, "the cache was flushed when the second address went\n");
+
+    if (!Dhcp)
+    {
+        skip("the adapter has no DHCP lease: the first address cannot be taken away and given back\n");
+        return;
+    }
+
+    /* the first address goes (the lease is released, as ipconfig /release does): the cache goes */
+    Dhcpcsvc = LoadLibraryW(L"dhcpcsvc.dll");
+    Init = Dhcpcsvc ? (PFN_INIT)GetProcAddress(Dhcpcsvc, "DhcpCApiInitialize") : NULL;
+    Release = Dhcpcsvc ? (PFN_ADAPTER)GetProcAddress(Dhcpcsvc, "DhcpReleaseParameters") : NULL;
+    Acquire = Dhcpcsvc ? (PFN_ADAPTER)GetProcAddress(Dhcpcsvc, "DhcpAcquireParameters") : NULL;
+    Cleanup = Dhcpcsvc ? (PFN_CLEANUP)GetProcAddress(Dhcpcsvc, "DhcpCApiCleanup") : NULL;
+    if (!Init || !Release || !Acquire || !Cleanup || Init(&Version) != ERROR_SUCCESS)
+    {
+        skip("no DHCP client API\n");
+        return;
+    }
+
+    Error = Release(Adapter);
+    if (Error != NO_ERROR)
+    {
+        skip("DhcpReleaseParameters failed (%lu)\n", Error);
+        Cleanup();
+        return;
+    }
+    ok(WaitForAddress(Index, FALSE, 15000), "the address is still there after the release\n");
+    Sleep(3000);
+    ok(Query(N, DNS_TYPE_A, DNS_QUERY_NO_WIRE_QUERY).Status == DNS_ERROR_RECORD_DOES_NOT_EXIST,
+       "the cache was not flushed when the first address went\n");
+
+    /* the address comes back */
+    Error = Acquire(Adapter);
+    ok(Error == NO_ERROR, "DhcpAcquireParameters: %lu\n", Error);
+    ok(WaitForAddress(Index, TRUE, 40000), "no address after the renewal\n");
+    Sleep(3000);
+    Cleanup();
 }
 
 START_TEST(DnsCache)
@@ -654,7 +884,9 @@ START_TEST(DnsCache)
     TestNegative();
     TestFlush();
     TestChain();
+    TestLongName();
     TestSize(Names);
+    TestNetChange();
 
     SetParam("MaxCacheTtl", -1);
     SetParam("MaxNegativeCacheTtl", -1);

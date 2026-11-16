@@ -6,6 +6,7 @@ list(APPEND SOURCE
     cache.c
     dnsrslvr.c
     hostsfile.c
+    netchange.c
     rpcserver.c
     precomp.h
     ${CMAKE_CURRENT_BINARY_DIR}/dnsrslvr_s.c)

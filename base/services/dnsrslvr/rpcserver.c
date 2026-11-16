@@ -66,6 +66,23 @@ CRrReadCache(
 }
 
 
+/* NitroOS addition: one page of the list that CRrReadCache returns */
+DWORD
+__stdcall
+NitroReadCachePage(
+    _In_ DNSRSLVR_HANDLE pwszServerName,
+    _In_ ULONGLONG ullAfter,
+    _In_ DWORD dwMaxEntries,
+    _Out_ DNS_CACHE_ENTRY **ppCacheEntries,
+    _Out_ ULONGLONG *pullNext)
+{
+    DPRINT("NitroReadCachePage(%S %I64u %lu %p)\n",
+           pwszServerName, ullAfter, dwMaxEntries, ppCacheEntries);
+
+    return DnsIntCacheGetEntriesPage(ullAfter, dwMaxEntries, ppCacheEntries, pullNext);
+}
+
+
 /* Function: 0x04 */
 DWORD
 __stdcall
@@ -244,7 +261,9 @@ R_ResolverQuery(
                                            ppResultRecords);
         if (Status == DNSRSLVR_CACHE_MISS)
         {
-            Status = DNS_INFO_NO_RECORDS;
+            /* nothing cached for the name and type: Windows 10 and Server 2022 answer DNS_ERROR_RECORD_DOES_NOT_EXIST
+               (9701) here, whatever the type and whether the name has records of other types in the cache */
+            Status = DNS_ERROR_RECORD_DOES_NOT_EXIST;
 
             /* The names that need no server (localhost, this machine) have an IPv6 answer that is not in the cache */
             if (wType == DNS_TYPE_AAAA)
