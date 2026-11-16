@@ -1206,12 +1206,13 @@ send_discover(void *ipp)
 }
 
 /*
- * Look for an automatic private address (169.254.x.y) the stack already holds on the adapter, left by an earlier run of
- * this service (a stop leaves the address in place, as it does on Windows). Returns TRUE with the address (network
- * order) and its context (what DeleteIPAddress takes) when there is one.
+ * Look for an address the stack already holds on the adapter, left by an earlier run of this service (a stop leaves the
+ * address in place, as it does on Windows): the address Want (network order), or with Want == INADDR_ANY an automatic
+ * private address (169.254.x.y). Returns TRUE with the address (network order) and its context (what DeleteIPAddress
+ * takes) when there is one.
  */
 static BOOL
-FindExistingAutoAddress(DWORD IfIndex, IPAddr *Address, ULONG *Context)
+FindExistingAddress(DWORD IfIndex, IPAddr Want, IPAddr *Address, ULONG *Context)
 {
     PIP_ADAPTER_INFO Info = NULL, Cur;
     PIP_ADDR_STRING Entry;
@@ -1248,7 +1249,8 @@ FindExistingAutoAddress(DWORD IfIndex, IPAddr *Address, ULONG *Context)
         {
             IPAddr Addr = inet_addr(Entry->IpAddress.String);
 
-            if (Addr != INADDR_NONE && (ntohl(Addr) & 0xFFFF0000) == 0xA9FE0000)
+            if (Addr != INADDR_NONE &&
+                (Want != INADDR_ANY ? Addr == Want : (ntohl(Addr) & 0xFFFF0000) == 0xA9FE0000))
             {
                 *Address = Addr;
                 *Context = Entry->Context;
@@ -1290,7 +1292,7 @@ state_panic(void *ipp)
     struct in_addr addr;
     DWORD dwAddressType = 0;
     ULONG NteContext;
-    BOOL Adopted = FALSE;
+    BOOL Kept = FALSE;
 
     note("No DHCPOFFERS received.");
 
@@ -1312,14 +1314,26 @@ state_panic(void *ipp)
             /* Use the alternate configuration */
             DH_DbgPrint(MID_TRACE,("DHCPCSVC: The alternate configuration will be used.\n"));
 
-            /* IPAddress & SubnetMask */
-            Status = AddIPAddress(htonl(Adapter->AlternateConfiguration->IpAddress),
-                                  htonl(Adapter->AlternateConfiguration->SubnetMask),
-                                  Adapter->IfMib.dwIndex,
-                                  &Adapter->NteContext,
-                                  &Adapter->NteInstance);
-            if (!NT_SUCCESS(Status))
-                DH_DbgPrint(MID_TRACE,("AddIPAddress: %lx\n", Status));
+            /* IPAddress & SubnetMask: the address of an earlier run of this service is still on the adapter (a stop
+               removes nothing): keep it instead of adding it again */
+            if (FindExistingAddress(Adapter->IfMib.dwIndex,
+                                    htonl(Adapter->AlternateConfiguration->IpAddress),
+                                    &IpAddress, &NteContext))
+            {
+                DH_DbgPrint(MID_TRACE,("DHCPCSVC: Adopting the alternate configuration address already on the adapter\n"));
+                Adapter->NteContext = NteContext;
+                Adapter->NteInstance = 0;
+            }
+            else
+            {
+                Status = AddIPAddress(htonl(Adapter->AlternateConfiguration->IpAddress),
+                                      htonl(Adapter->AlternateConfiguration->SubnetMask),
+                                      Adapter->IfMib.dwIndex,
+                                      &Adapter->NteContext,
+                                      &Adapter->NteInstance);
+                if (!NT_SUCCESS(Status))
+                    DH_DbgPrint(MID_TRACE,("AddIPAddress: %lx\n", Status));
+            }
 
             /* DefaultGateway */
             if (Adapter->AlternateConfiguration->DefaultGateway != 0)
@@ -1399,14 +1413,18 @@ state_panic(void *ipp)
             /* Generate an automatic private address */
             DH_DbgPrint(MID_TRACE,("DHCPCSVC: An automatic private address will be assigned.\n"));
 
-            /* An address of an earlier run of this service is still on the adapter: keep it (it is not a conflict
-               with itself) instead of probing for and adding another one, as Windows keeps its one address */
-            if (FindExistingAutoAddress(Adapter->IfMib.dwIndex, &IpAddress, &NteContext))
+            /* An address of an earlier run of this service is still on the adapter (a stop removes nothing, as on
+               Windows). Windows keeps that address but probes it again (ARP, source 0.0.0.0) and takes another one when
+               another host has it now. SendARP for an address of this adapter answers "in use" (that was the pile-up),
+               so the old address is taken off and probed as the first candidate: when it is free it is added again (the
+               same address, nothing piles up), else the next candidate is used. */
+            if (FindExistingAddress(Adapter->IfMib.dwIndex, INADDR_ANY, &IpAddress, &NteContext))
             {
-                DH_DbgPrint(MID_TRACE,("DHCPCSVC: Adopting the automatic private address already on the adapter\n"));
-                Adapter->NteContext = NteContext;
+                DH_DbgPrint(MID_TRACE,("DHCPCSVC: Probing the automatic private address already on the adapter\n"));
+                DeleteIPAddress(NteContext);
+                Adapter->NteContext = 0;
                 Adapter->NteInstance = 0;
-                Adopted = TRUE;
+                Kept = TRUE;
             }
 
             /* FIXME: The address generation code sucks */
@@ -1414,34 +1432,38 @@ state_panic(void *ipp)
 
             for (;;)
             {
-                if (!Adopted)
+                if (Kept)
+                {
+                    Kept = FALSE; /* the first candidate is the address kept from the earlier run */
+                }
+                else
                 {
                     address_low = rand();
                     for (i = 0; i < ip->hw_address.hlen; i++)
                         address_low += ip->hw_address.haddr[i];
 
                     IpAddress = htonl(0xA9FE0000 | address_low);  // 169.254.X.X
-
-                    /* Send an ARP request to check if the IP address is already in use */
-                    BufferSize = sizeof(Buffer);
-                    ret = SendARP(IpAddress,
-                                  IpAddress,
-                                  Buffer,
-                                  &BufferSize);
-                    DH_DbgPrint(MID_TRACE,("DHCPCSVC: SendARP returned %lu\n", ret));
-                    if (ret == 0)
-                        continue; /* In use (by this machine's other adapter or by another host): try the next one */
-
-                    /* The IP address is not in use */
-                    DH_DbgPrint(MID_TRACE,("DHCPCSVC: Using automatic private address\n"));
-                    Status = AddIPAddress(IpAddress,
-                                          htonl(0xFFFF0000), // 255.255.0.0
-                                          Adapter->IfMib.dwIndex,
-                                          &Adapter->NteContext,
-                                          &Adapter->NteInstance);
-                    if (!NT_SUCCESS(Status))
-                        DH_DbgPrint(MID_TRACE,("AddIPAddress: %lx\n", Status));
                 }
+
+                /* Send an ARP request to check if the IP address is already in use */
+                BufferSize = sizeof(Buffer);
+                ret = SendARP(IpAddress,
+                              IpAddress,
+                              Buffer,
+                              &BufferSize);
+                DH_DbgPrint(MID_TRACE,("DHCPCSVC: SendARP returned %lu\n", ret));
+                if (ret == 0)
+                    continue; /* In use (by this machine's other adapter or by another host): try the next one */
+
+                /* The IP address is not in use */
+                DH_DbgPrint(MID_TRACE,("DHCPCSVC: Using automatic private address\n"));
+                Status = AddIPAddress(IpAddress,
+                                      htonl(0xFFFF0000), // 255.255.0.0
+                                      Adapter->IfMib.dwIndex,
+                                      &Adapter->NteContext,
+                                      &Adapter->NteInstance);
+                if (!NT_SUCCESS(Status))
+                    DH_DbgPrint(MID_TRACE,("AddIPAddress: %lx\n", Status));
 
                 if (hKey)
                 {
