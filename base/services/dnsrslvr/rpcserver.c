@@ -12,34 +12,43 @@
 #define NDEBUG
 #include <debug.h>
 
-DWORD
-WINAPI
-RpcThreadRoutine(LPVOID lpParameter)
+static BOOL RpcRegistered = FALSE;
+
+/* The service can share its process (svchost -k NetworkService) with other services: its interface listens on its
+   own (auto-listen), so no service of the process starts or stops the listening of the others. It is registered
+   before the service reports that it runs. */
+VOID
+StartRpcServer(VOID)
 {
     RPC_STATUS Status;
 
     Status = RpcServerUseProtseqEpW(L"ncalrpc", 20, L"DNSResolver", NULL);
     if (Status != RPC_S_OK)
     {
-        DPRINT("RpcServerUseProtseqEpW() failed (Status %lx)\n", Status);
-        return 0;
+        DPRINT1("RpcServerUseProtseqEpW() failed (Status %lx)\n", Status);
+        return;
     }
 
-    Status = RpcServerRegisterIf(DnsResolver_v2_0_s_ifspec, NULL, NULL);
+    Status = RpcServerRegisterIfEx(DnsResolver_v2_0_s_ifspec, NULL, NULL, RPC_IF_AUTOLISTEN,
+                                   RPC_C_LISTEN_MAX_CALLS_DEFAULT, NULL);
     if (Status != RPC_S_OK)
     {
-        DPRINT("RpcServerRegisterIf() failed (Status %lx)\n", Status);
-        return 0;
+        DPRINT1("RpcServerRegisterIfEx() failed (Status %lx)\n", Status);
+        return;
     }
 
-    Status = RpcServerListen(1, RPC_C_LISTEN_MAX_CALLS_DEFAULT, 0);
-    if (Status != RPC_S_OK)
+    RpcRegistered = TRUE;
+}
+
+/* The service stops: only its interface goes, once the calls in it have returned (the cache is freed next) */
+VOID
+StopRpcServer(VOID)
+{
+    if (RpcRegistered)
     {
-        DPRINT("RpcServerListen() failed (Status %lx)\n", Status);
+        RpcServerUnregisterIf(DnsResolver_v2_0_s_ifspec, NULL, TRUE);
+        RpcRegistered = FALSE;
     }
-
-    DPRINT("RpcServerListen finished\n");
-    return 0;
 }
 
 

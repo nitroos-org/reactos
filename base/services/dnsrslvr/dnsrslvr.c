@@ -20,7 +20,8 @@ SERVICE_STATUS_HANDLE ServiceStatusHandle;
 SERVICE_STATUS SvcStatus;
 static WCHAR ServiceName[] = L"Dnscache";
 
-DWORD WINAPI RpcThreadRoutine(LPVOID lpParameter);
+VOID StartRpcServer(VOID);
+VOID StopRpcServer(VOID);
 
 /* FUNCTIONS *****************************************************************/
 
@@ -54,7 +55,8 @@ ServiceControlHandler(
         case SERVICE_CONTROL_SHUTDOWN:
         case SERVICE_CONTROL_STOP:
             UpdateServiceStatus(ServiceStatusHandle, SERVICE_STOP_PENDING, 1);
-            RpcMgmtStopServerListening(NULL);
+            /* the process keeps listening: it can host other services */
+            StopRpcServer();
             DnsIntCacheFree();
             UpdateServiceStatus(ServiceStatusHandle, SERVICE_STOPPED, 0);
             break;
@@ -79,8 +81,6 @@ ServiceMain(
     DWORD argc,
     LPWSTR *argv)
 {
-    HANDLE hThread;
-
     UNREFERENCED_PARAMETER(argc);
     UNREFERENCED_PARAMETER(argv);
 
@@ -108,24 +108,7 @@ ServiceMain(
 
     HostsFileInitialize();
 
-    hThread = CreateThread(NULL,
-                           0,
-                           (LPTHREAD_START_ROUTINE)
-                           RpcThreadRoutine,
-                           NULL,
-                           0,
-                           NULL);
-
-    if (!hThread)
-    {
-        DnsIntCacheFree();
-        DPRINT("Can't create RpcThread\n");
-        UpdateServiceStatus(ServiceStatusHandle, SERVICE_STOPPED, 0);
-    }
-    else
-    {
-        CloseHandle(hThread);
-    }
+    StartRpcServer();
 
     DPRINT("ServiceMain() done\n");
     UpdateServiceStatus(ServiceStatusHandle, SERVICE_RUNNING, 0);
