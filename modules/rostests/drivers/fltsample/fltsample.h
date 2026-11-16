@@ -95,6 +95,9 @@ typedef struct _FLTSAMPLE_STATS
     ULONG CreatePosts;              /* post-creates of test files */
     ULONG CreatePostNotPassive;     /* ... not at PASSIVE_LEVEL */
     ULONG CreatePostOtherThread;    /* ... not in the thread of the pre-create */
+    ULONG SafePagingCalls;          /* FltDoCompletionProcessingWhenSafe for paging reads of .safe files */
+    ULONG SafePagingPosted;         /* ... which said it posted the paging read to a worker */
+    ULONG SafePagingRefused;        /* ... which returned FALSE */
 
 } FLTSAMPLE_STATS, *PFLTSAMPLE_STATS;
 

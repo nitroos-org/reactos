@@ -1339,11 +1339,22 @@ FltDoCompletionProcessingWhenSafe(_In_ PFLT_CALLBACK_DATA Data,
 {
     PFLTP_IRPCTRL Ctrl = CONTAINING_RECORD(Data, FLTP_IRPCTRL, Data);
 
-    /* In an IRP's thread, below DISPATCH_LEVEL and not paging, it's safe to go on right now */
-    if (KeGetCurrentIrql() <= APC_LEVEL && !(Ctrl->Iopb.IrpFlags & IRP_PAGING_IO))
+    /* Below DISPATCH_LEVEL it's safe to go on right now, whatever the operation (WDK) */
+    if (KeGetCurrentIrql() <= APC_LEVEL)
     {
         *RetPostOperationStatus = SafePostCallback(Data, FltObjects, CompletionContext, Flags);
         return TRUE;
+    }
+
+    /*
+     * Paging I/O can't be posted to a worker (WDK): the worker may need memory, which may need this
+     * very paging I/O to finish. Nor can anything but an IRP operation. The caller hears FALSE and
+     * finishes the operation itself.
+     */
+    if (!FLT_IS_IRP_OPERATION(Data) || (Ctrl->Iopb.IrpFlags & IRP_PAGING_IO))
+    {
+        *RetPostOperationStatus = FLT_POSTOP_FINISHED_PROCESSING;
+        return FALSE;
     }
 
     /* Otherwise a worker thread does it, and the post-operation returns for now */

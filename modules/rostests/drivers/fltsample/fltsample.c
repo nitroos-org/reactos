@@ -811,15 +811,25 @@ PostOperation(_Inout_ PFLT_CALLBACK_DATA Data,
             }
             else if (FindMode(FileObject) == MODE_SAFE)
             {
-                if (FltDoCompletionProcessingWhenSafe(Data,
-                                                      FltObjects,
-                                                      CompletionContext,
-                                                      Flags,
-                                                      SafePostOperation,
-                                                      &Status))
+                BOOLEAN PagingRead = FLT_IS_IRP_OPERATION(Data) && (Data->Iopb->IrpFlags & IRP_PAGING_IO);
+                BOOLEAN Done = FltDoCompletionProcessingWhenSafe(Data,
+                                                                 FltObjects,
+                                                                 CompletionContext,
+                                                                 Flags,
+                                                                 SafePostOperation,
+                                                                 &Status);
+
+                /* Paging I/O is never posted to a worker (WDK): run right here, or FALSE */
+                if (PagingRead)
                 {
-                    return Status;
+                    InterlockedIncrement((PLONG)&Stats.SafePagingCalls);
+                    if (!Done)
+                        InterlockedIncrement((PLONG)&Stats.SafePagingRefused);
+                    else if (Status == FLT_POSTOP_MORE_PROCESSING_REQUIRED)
+                        InterlockedIncrement((PLONG)&Stats.SafePagingPosted);
                 }
+                if (Done)
+                    return Status;
             }
             break;
 

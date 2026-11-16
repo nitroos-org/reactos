@@ -216,6 +216,118 @@ START_TEST(p3voldel)
     test_VolumeDeviceDeleted();
 }
 
+/* Writes Size bytes of a pattern, not cached: the data isn't in the cache afterwards */
+static
+BOOL
+WriteUncached(PCWSTR Path, DWORD Size)
+{
+    HANDLE File;
+    PUCHAR Buffer;
+    DWORD Written = 0, i;
+
+    DeleteFileW(Path);
+    File = CreateFileW(Path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH, NULL);
+    if (File == INVALID_HANDLE_VALUE)
+        return FALSE;
+    Buffer = VirtualAlloc(NULL, Size, MEM_COMMIT, PAGE_READWRITE);
+    if (Buffer)
+    {
+        for (i = 0; i < Size; i++)
+            Buffer[i] = (UCHAR)(i * 7 + 3);
+        WriteFile(File, Buffer, Size, &Written, NULL);
+        VirtualFree(Buffer, 0, MEM_RELEASE);
+    }
+    CloseHandle(File);
+    return Written == Size;
+}
+
+/*
+ * FltDoCompletionProcessingWhenSafe and paging I/O: the WDK says it can't post paging I/O to a worker.
+ * Below DISPATCH_LEVEL the callback runs at once, at DISPATCH_LEVEL the call returns FALSE. Paging reads
+ * come from a cached read (the cache manager) and from a mapped view.
+ */
+static
+void
+test_SafePagingRead(void)
+{
+    SAMPLE P = { { 0 } };
+    FLTSAMPLE_STATS S;
+    WCHAR Path[MAX_PATH], Path2[MAX_PATH];
+    HANDLE File, Section;
+    PUCHAR Buffer, View;
+    DWORD Read = 0, i;
+    ULONG Sum = 0;
+
+    MakeTestFile(L"p3paging.safe", Path, RTL_NUMBER_OF(Path));
+    MakeTestFile(L"p3paging2.safe", Path2, RTL_NUMBER_OF(Path2));
+    ok(WriteUncached(Path, 65536 * 2), "Can't write %ls\n", Path);
+    ok(WriteUncached(Path2, 65536 * 2), "Can't write %ls\n", Path2);
+    if (!LoadSample(&P, L"FltSampleP", L"383000.5", 0xFFFF))
+    {
+        skip("Can't load the sample filter\n");
+        return;
+    }
+
+    /* A cached read: the cache manager reads the pages in */
+    Buffer = VirtualAlloc(NULL, 65536 * 2, MEM_COMMIT, PAGE_READWRITE);
+    File = CreateFileW(Path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    ok(File != INVALID_HANDLE_VALUE, "Open failed: %lu\n", GetLastError());
+    if (File != INVALID_HANDLE_VALUE && Buffer)
+    {
+        ok(ReadFile(File, Buffer, 65536 * 2, &Read, NULL) && Read == 65536 * 2, "Cached read: %lu bytes, %lu\n",
+           Read, GetLastError());
+        ok(Buffer[4097] == (UCHAR)(4097 * 7 + 3), "Wrong data read\n");
+        CloseHandle(File);
+    }
+
+    /* A mapped view: the memory manager reads the pages in */
+    File = CreateFileW(Path2, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    ok(File != INVALID_HANDLE_VALUE, "Open failed: %lu\n", GetLastError());
+    if (File != INVALID_HANDLE_VALUE)
+    {
+        Section = CreateFileMappingW(File, NULL, PAGE_READONLY, 0, 0, NULL);
+        ok(Section != NULL, "CreateFileMapping failed: %lu\n", GetLastError());
+        if (Section)
+        {
+            View = MapViewOfFile(Section, FILE_MAP_READ, 0, 0, 0);
+            ok(View != NULL, "MapViewOfFile failed: %lu\n", GetLastError());
+            if (View)
+            {
+                for (i = 0; i < 65536 * 2; i += 4096)
+                    Sum += View[i + 5];
+                ok(View[8197] == (UCHAR)(8197 * 7 + 3), "Wrong data in the view\n");
+                UnmapViewOfFile(View);
+            }
+            CloseHandle(Section);
+        }
+        CloseHandle(File);
+    }
+
+    SampleStats(&P, &S);
+    trace("Paging reads through FltDoCompletionProcessingWhenSafe: %lu, posted %lu, refused %lu (sum %lu)\n",
+          S.SafePagingCalls, S.SafePagingPosted, S.SafePagingRefused, Sum);
+    ok(S.SafePagingCalls > 0, "No paging read of a .safe file was seen, the test says nothing\n");
+    ok(S.SafePagingPosted == 0, "%lu paging reads were posted to a worker\n", S.SafePagingPosted);
+
+    if (Buffer)
+        VirtualFree(Buffer, 0, MEM_RELEASE);
+    UnloadSample(&P, TRUE);
+    DeleteFileW(Path);
+    DeleteFileW(Path2);
+}
+
+START_TEST(p3safe)
+{
+    EnsureTestDirectory();
+    if (!StartFilterManager())
+    {
+        skip("No filter manager\n");
+        return;
+    }
+
+    test_SafePagingRead();
+}
+
 START_TEST(p3create)
 {
     EnsureTestDirectory();
