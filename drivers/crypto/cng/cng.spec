@@ -4,3 +4,4 @@
 @ stdcall BCryptHashData(ptr ptr long long)
 @ stdcall BCryptFinishHash(ptr ptr long long)
 @ stdcall BCryptDestroyHash(ptr)
+@ stdcall BCryptGenRandom(ptr ptr long long) ksecdd.BCryptGenRandom
