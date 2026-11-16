@@ -4,6 +4,15 @@
 
 #define MAX_CONTEXT_TYPES   6
 
+/*
+ * The FsFilter "major functions" a filter may register (IRP_MJ_ACQUIRE_FOR_SECTION_SYNCHRONIZATION ((UCHAR)-1)
+ * to IRP_MJ_RELEASE_FOR_CC_FLUSH ((UCHAR)-6)): the FsRtl filter callbacks of the filter manager run them. Their
+ * values are those of the FS_FILTER_* operations. Index 1..6 of FLT_FILTER::FsFilterTable / FLT_VOLUME::FsFilterCount.
+ */
+#define FLTP_FSFILTER_OPERATIONS    6
+#define FLTP_FSFILTER_INDEX(Major)  ((UCHAR)(0 - (UCHAR)(Major)))
+#define FLTP_IS_FSFILTER(Major)     (FLTP_FSFILTER_INDEX(Major) >= 1 && FLTP_FSFILTER_INDEX(Major) <= FLTP_FSFILTER_OPERATIONS)
+
 
 typedef enum _FLT_OBJECT_FLAGS
 {
@@ -146,6 +155,7 @@ typedef struct _FLT_FILTER   // size = 0x120
     ULONG RegistrationFlags;        /* FLTFL_REGISTRATION_* */
     UNICODE_STRING DefaultInstanceName;
     PFLT_OPERATION_REGISTRATION OperationTable[IRP_MJ_MAXIMUM_FUNCTION + 1];
+    PFLT_OPERATION_REGISTRATION FsFilterTable[FLTP_FSFILTER_OPERATIONS + 1]; /* FLTP_FSFILTER_INDEX */
     FLTP_CONTEXT_DEF ContextDefs[MAX_CONTEXT_TYPES];
 
 }  FLT_FILTER, *PFLT_FILTER;
@@ -320,6 +330,7 @@ typedef struct _FLT_VOLUME
     LIST_ENTRY StreamList;              /* FLTP_STREAM_OPEN: open counts of the streams, under ContextLock */
     FAST_MUTEX StreamListLock;          /* the ContextLock */
     volatile LONG ContextTracking;      /* instances whose filter uses stream or stream handle contexts */
+    volatile LONG FsFilterCount[FLTP_FSFILTER_OPERATIONS + 1]; /* instances with a callback for an FsFilter operation */
     BOOLEAN Dismounted;
 
 } FLT_VOLUME, *PFLT_VOLUME;

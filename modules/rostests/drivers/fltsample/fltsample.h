@@ -38,6 +38,12 @@
  *   .sync  reads ask for FLT_PREOP_SYNCHRONIZE, the post-operation checks it is the same thread
  *   .safe  the post-operation of reads goes through FltDoCompletionProcessingWhenSafe
  *   .nodel the file can't be deleted or renamed (set information is refused)
+ *   .nosec no section can be created for the file (IRP_MJ_ACQUIRE_FOR_SECTION_SYNCHRONIZATION is refused)
+ *   .pdpc  writes are pended by the pre-operation and completed from a DPC, at DISPATCH_LEVEL
+ *   .dpc   (on fltfakefs, which completes their reads at DISPATCH_LEVEL) a read carries a context of its
+ *          own from the pre- to the post-operation, which releases its last reference there
+ *   .sctx  a read tries FltSetStreamContext, even on a file object the filter didn't see created
+ *          (SctxReads, LastSctxStatus)
  * Anything else is counted and let through.
  */
 
@@ -92,6 +98,23 @@ typedef struct _FLTSAMPLE_STATS
     ULONG RvFastIoDisallowed;       /* review tests: fast I/O refused because of FLTSAMPLE_IOCTL_RV_FLAGS */
     ULONG RvParked;                 /* review tests: read post-operations parked (MORE_PROCESSING_REQUIRED) */
     ULONG RvParkDone;               /* ... and completed by the worker */
+    ULONG CreatePosts;              /* post-creates of test files */
+    ULONG CreatePostNotPassive;     /* ... not at PASSIVE_LEVEL */
+    ULONG CreatePostOtherThread;    /* ... not in the thread of the pre-create */
+    ULONG SafePagingCalls;          /* FltDoCompletionProcessingWhenSafe for paging reads of .safe files */
+    ULONG SafePagingPosted;         /* ... which said it posted the paging read to a worker */
+    ULONG SafePagingRefused;        /* ... which returned FALSE */
+    ULONG SectionSyncPre;           /* IRP_MJ_ACQUIRE_FOR_SECTION_SYNCHRONIZATION pre-operations on test files */
+    ULONG SectionSyncPost;
+    ULONG SectionSyncDenied;        /* ... refused (.nosec files, a section for them is created) */
+    ULONG SectionSyncBadData;       /* ... whose callback data didn't say FLTFL_CALLBACK_DATA_FS_FILTER_OPERATION */
+    ULONG SctxReads;                /* reads of .sctx files, opened with or without the filter seeing it */
+    LONG LastSctxStatus;            /* ... what FltSetStreamContext (keep if exists) said for the last one */
+    ULONG PendDpc;                  /* .pdpc writes pended */
+    ULONG PendDpcCompleted;         /* ... and completed from a DPC */
+    ULONG DpcReadPosts;             /* post-reads of .dpc files (fltfakefs completes them from a DPC) */
+    ULONG DpcReadPostsAtDispatch;   /* ... at DISPATCH_LEVEL, where the last reference of a context was released */
+    ULONG CleanupAboveApc;          /* context cleanup callbacks called above APC_LEVEL (never, WDK) */
 
 } FLTSAMPLE_STATS, *PFLTSAMPLE_STATS;
 
@@ -118,6 +141,18 @@ typedef struct _FLTSAMPLE_MSG
 #define FLTSAMPLE_MSG_NOTIFY        3   /* the driver sends Arg bytes of data to the client, without a reply; the status comes back */
 #define FLTSAMPLE_MSG_ASK           4   /* the same with a reply, waiting Arg ms (0: forever); { status, reply length, reply } comes back */
 #define FLTSAMPLE_MSG_ARM           5   /* Arg = 1: the creates of .msg files are put to the client, which can refuse them */
+#define FLTSAMPLE_MSG_WHERE         6   /* Data: the addresses of the client's input and output buffers (2 ULONG64);
+                                           the answer: FLTSAMPLE_WHERE_RESULT */
+#define FLTSAMPLE_MSG_OVERREPORT    7   /* the filter says it returned the whole output buffer, writing nothing */
+
+typedef struct _FLTSAMPLE_WHERE_RESULT
+{
+    ULONG InputIsClients;       /* the filter got the client's own buffers */
+    ULONG OutputIsClients;
+    ULONG ProbesOk;             /* ProbeForRead / ProbeForWrite of them worked (previous mode user) */
+    ULONG PreviousModeUser;
+
+} FLTSAMPLE_WHERE_RESULT, *PFLTSAMPLE_WHERE_RESULT;
 
 /* The messages of the driver to the client (after the FILTER_MESSAGE_HEADER) */
 #define FLTSAMPLE_KIND_CREATE       1   /* followed by the name of the file; the reply is a ULONG, not 0 for no */
@@ -145,7 +180,11 @@ typedef struct _FLTSAMPLE_ASK_RESULT
 #define FLTSAMPLE_RV_DISALLOW_FASTIO    0x1 /* every fast I/O operation on a test file: FLT_PREOP_DISALLOW_FASTIO */
 #define FLTSAMPLE_RV_PARK_READ_POST     0x2 /* the post-operation of a non paging IRP read parks, a worker completes it */
 #define FLTSAMPLE_RV_PARK_WRITE_POST    0x4 /* the same for writes */
+#define FLTSAMPLE_RV_PARK_FASTIO_POST   0x8 /* the post-operation of a fast I/O read parks (the WDK forbids it), a worker completes it */
+#define FLTSAMPLE_RV_NESTED_ATTACH      0x10 /* InstanceSetup attaches another instance of the filter to the volume first,
+                                                so the instance being set up collides with it after saying yes */
 #define FLTSAMPLE_IOCTL_CONTEXT_SELFTEST CTL_CODE(FILE_DEVICE_UNKNOWN, 0x809, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define FLTSAMPLE_IOCTL_CLOSE_CLIENT    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x80B, METHOD_BUFFERED, FILE_ANY_ACCESS) /* FltCloseClientPort */
 
 /* Service key value PortSecurity (REG_DWORD): the descriptor the sample gives its port */
 #define PORT_SECURITY_NONE              0   /* none: the filter manager's default */

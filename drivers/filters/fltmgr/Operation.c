@@ -61,6 +61,7 @@ typedef struct _FLTP_IRPCTRL
     PVOID SafeContext;
     FLT_POST_OPERATION_FLAGS SafeFlags;
     PFLTP_NODE SafeNode;
+    BOOLEAN CreateWaiter;           /* a create: the dispatch thread waits out a pended pre-operation */
     FLTP_NODE Nodes[1];
 
 } FLTP_IRPCTRL, *PFLTP_IRPCTRL;
@@ -75,6 +76,19 @@ typedef enum _FLTP_PRE_RESULT
 
 
 /* PRIVATE FUNCTIONS ********************************************************/
+
+/* The registration of a filter for an operation: an IRP major function or an FsFilter one */
+static
+PFLT_OPERATION_REGISTRATION
+OperationOf(_In_ PFLT_FILTER Filter,
+            _In_ UCHAR Major)
+{
+    if (Major <= IRP_MJ_MAXIMUM_FUNCTION)
+        return Filter->OperationTable[Major];
+    if (FLTP_IS_FSFILTER(Major))
+        return Filter->FsFilterTable[FLTP_FSFILTER_INDEX(Major)];
+    return NULL;
+}
 
 static
 VOID
@@ -467,7 +481,7 @@ RunPostOperations(_Inout_ PFLTP_IRPCTRL Ctrl,
             continue;
         }
 
-        Op = Node->Instance->Filter->OperationTable[Ctrl->MajorFunction];
+        Op = OperationOf(Node->Instance->Filter, Ctrl->MajorFunction);
 
         /* An instance which is being torn down must not rely on anything but the operation itself */
         Flags = (Node->Instance->Flags & INSFL_DELETING) ? FLTFL_POST_OPERATION_DRAINING : 0;
@@ -568,13 +582,12 @@ IrpCompletion(_In_ PDEVICE_OBJECT DeviceObject,
     Ctrl->Data.IoStatus = Irp->IoStatus;
     Ctrl->Data.Flags |= FLTFL_CALLBACK_DATA_POST_OPERATION;
 
-    /* The contexts of the stream live as long as it is open, so before the filters see the new file */
-    if (Ctrl->MajorFunction == IRP_MJ_CREATE && Ctrl->Volume->ContextTracking && NT_SUCCESS(Irp->IoStatus.Status))
-        FltpStreamOpened(Ctrl->Volume, Ctrl->Iopb.TargetFileObject);
-
     if (Ctrl->Synchronize)
     {
-        /* The post-operations run in the thread of the dispatch routine, which is waiting */
+        /*
+         * The post-operations run in the thread of the dispatch routine, which is waiting. That is
+         * always the case for a create (see SendDown): this may well be DISPATCH_LEVEL.
+         */
         KeSetEvent(&Ctrl->SyncEvent, IO_NO_INCREMENT, FALSE);
         return STATUS_MORE_PROCESSING_REQUIRED;
     }
@@ -690,6 +703,15 @@ SendDown(_In_ PFLTP_IRPCTRL Ctrl)
         return Pended ? STATUS_PENDING : Status;
     }
 
+    /*
+     * A create is finished in this thread, whenever and wherever the file system completes it: the
+     * post-create callbacks are called at PASSIVE_LEVEL in the thread which sent the create (WDK,
+     * "Writing postoperation callback routines"), and the open of the stream is recorded there too
+     * (Volume->StreamListLock is a fast mutex). The I/O manager waits for a create anyway.
+     */
+    if (Stack->MajorFunction == IRP_MJ_CREATE)
+        Synchronize = Ctrl->Synchronize = TRUE;
+
     Ctrl->PostIndex = Ctrl->Count;
     if (Synchronize)
         KeInitializeEvent(&Ctrl->SyncEvent, NotificationEvent, FALSE);
@@ -715,6 +737,14 @@ SendDown(_In_ PFLTP_IRPCTRL Ctrl)
     /* FLT_PREOP_SYNCHRONIZE: we are still in the thread which sent the IRP, and it stays so */
     KeWaitForSingleObject(&Ctrl->SyncEvent, Executive, KernelMode, FALSE, NULL);
     Ctrl->SyncOwner = TRUE;
+
+    /* The contexts of the stream live as long as it is open, so before the filters see the new file */
+    if (Ctrl->MajorFunction == IRP_MJ_CREATE && Ctrl->Volume->ContextTracking &&
+        NT_SUCCESS(Ctrl->Data.IoStatus.Status))
+    {
+        FltpStreamOpened(Ctrl->Volume, Ctrl->Iopb.TargetFileObject);
+    }
+
     for (;;)
     {
         KeClearEvent(&Ctrl->SyncEvent);
@@ -757,7 +787,7 @@ ContinueAfterPre(_In_ PFLTP_IRPCTRL Ctrl,
     return Pended ? STATUS_PENDING : Status;
 }
 
-/* A file object which has been created: the stream gets one more open */
+/* The file system is done with a create: the thread which sent it goes on with it */
 static
 NTSTATUS
 NTAPI
@@ -765,17 +795,12 @@ TrackCreateCompletion(_In_ PDEVICE_OBJECT DeviceObject,
                       _In_ PIRP Irp,
                       _In_ PVOID Context)
 {
-    PFLT_VOLUME Volume = Context;
-
     UNREFERENCED_PARAMETER(DeviceObject);
+    UNREFERENCED_PARAMETER(Irp);
 
-    if (NT_SUCCESS(Irp->IoStatus.Status))
-        FltpStreamOpened(Volume, IoGetCurrentIrpStackLocation(Irp)->FileObject);
-
-    if (Irp->PendingReturned)
-        IoMarkIrpPending(Irp);
-
-    return STATUS_SUCCESS;
+    /* Maybe at DISPATCH_LEVEL: nothing but the wake-up here */
+    KeSetEvent((PKEVENT)Context, IO_NO_INCREMENT, FALSE);
+    return STATUS_MORE_PROCESSING_REQUIRED;
 }
 
 /* Hands the IRP to the volume's file system as if we weren't here, but for the contexts of the streams */
@@ -796,9 +821,26 @@ PassThrough(_In_ PDEVICE_OBJECT DeviceObject,
         }
         else if (Stack->MajorFunction == IRP_MJ_CREATE)
         {
+            KEVENT Event;
+            NTSTATUS Status;
+
+            /*
+             * The stream gets one more open, recorded in this thread (PASSIVE_LEVEL, as every create
+             * is sent): the file system may complete the create at DISPATCH_LEVEL, where the fast
+             * mutex of the stream list can't be taken.
+             */
+            KeInitializeEvent(&Event, NotificationEvent, FALSE);
             IoCopyCurrentIrpStackLocationToNext(Irp);
-            IoSetCompletionRoutine(Irp, TrackCreateCompletion, Volume, TRUE, TRUE, TRUE);
-            return IoCallDriver(DeviceExtension->AttachedToDeviceObject, Irp);
+            IoSetCompletionRoutine(Irp, TrackCreateCompletion, &Event, TRUE, TRUE, TRUE);
+            if (IoCallDriver(DeviceExtension->AttachedToDeviceObject, Irp) == STATUS_PENDING)
+                KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+
+            Status = Irp->IoStatus.Status;
+            if (NT_SUCCESS(Status))
+                FltpStreamOpened(Volume, Stack->FileObject);
+
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            return Status;
         }
     }
 
@@ -913,7 +955,24 @@ FltpPerformIrp(_In_ PDEVICE_OBJECT DeviceObject,
     if (Irp->AssociatedIrp.SystemBuffer && (Irp->Flags & IRP_BUFFERED_IO))
         Ctrl->Data.Flags |= FLTFL_CALLBACK_DATA_SYSTEM_BUFFER;
 
+    /*
+     * A create stays in this thread from the first pre-operation to the last post-operation: a
+     * pre-create which pends is waited for here, FltCompletePendedPreOperation just wakes us.
+     */
+    if (Major == IRP_MJ_CREATE)
+    {
+        KeInitializeEvent(&Ctrl->SyncEvent, NotificationEvent, FALSE);
+        Ctrl->CreateWaiter = TRUE;
+    }
+
     Result = RunPreOperations(Ctrl, FALSE);
+    while (Result == PreParked && Ctrl->CreateWaiter)
+    {
+        KeWaitForSingleObject(&Ctrl->SyncEvent, Executive, KernelMode, FALSE, NULL);
+        KeClearEvent(&Ctrl->SyncEvent);
+        Result = RunPreOperations(Ctrl, TRUE);
+    }
+
     return ContinueAfterPre(Ctrl, Result);
 }
 
@@ -937,6 +996,31 @@ FltpFastIoDisallowed(_In_ PDEVICE_OBJECT DeviceObject,
  * Ctrl->PostIndex down are told so. A pre-operation's post-operation is never lost, whichever way the
  * operation goes; the caller then sends an IRP, which the filters see as an operation of its own.
  */
+/*
+ * The post-operations of an operation without an IRP (fast I/O), in the thread of the operation.
+ * MORE_PROCESSING_REQUIRED isn't for those (WDK), but a filter which returns it anyway will call
+ * FltCompletePendedPostOperation with the callback data later: the block has to be there then, so
+ * we wait for that call, and go on with the post-operations above that filter afterwards.
+ */
+static
+VOID
+RunPostOperationsInThread(_Inout_ PFLTP_IRPCTRL Ctrl)
+{
+    KeInitializeEvent(&Ctrl->SyncEvent, NotificationEvent, FALSE);
+    Ctrl->SyncOwner = TRUE;
+    for (;;)
+    {
+        KeClearEvent(&Ctrl->SyncEvent);
+        if (RunPostOperations(Ctrl, FALSE))
+            break;
+
+        DPRINT1("FLTMGR: a post-operation of a fast I/O operation returned FLT_POSTOP_MORE_PROCESSING_REQUIRED\n");
+        KeWaitForSingleObject(&Ctrl->SyncEvent, Executive, KernelMode, FALSE, NULL);
+        FltObjectDereference(Ctrl->Parked->Instance);
+        Ctrl->Parked->Instance = NULL;
+    }
+}
+
 static
 VOID
 RunFastIoPostOperations(_Inout_ PFLTP_IRPCTRL Ctrl,
@@ -945,12 +1029,7 @@ RunFastIoPostOperations(_Inout_ PFLTP_IRPCTRL Ctrl,
     Ctrl->Data.IoStatus.Status = Status;
     Ctrl->Data.IoStatus.Information = 0;
     Ctrl->Data.Flags |= FLTFL_CALLBACK_DATA_POST_OPERATION;
-    if (!RunPostOperations(Ctrl, FALSE) && Ctrl->Parked && Ctrl->Parked->Instance)
-    {
-        /* MORE_PROCESSING_REQUIRED isn't for fast I/O (WDK): the operation is over for us anyway */
-        FltObjectDereference(Ctrl->Parked->Instance);
-        Ctrl->Parked->Instance = NULL;
-    }
+    RunPostOperationsInThread(Ctrl);
 }
 
 /*
@@ -980,7 +1059,7 @@ FltpFastIoReadWrite(_In_ PDEVICE_OBJECT DeviceObject,
     LARGE_INTEGER Offset = *FileOffset;
     PLIST_ENTRY Entry;
     ULONG Count = 0, i;
-    BOOLEAN Done, Result = FALSE, Completed = FALSE;
+    BOOLEAN Result = FALSE, Completed = FALSE;
 
     /* Without a lower driver for it, there's nothing to do */
     if (FastIoDispatch == NULL ||
@@ -1120,12 +1199,7 @@ FltpFastIoReadWrite(_In_ PDEVICE_OBJECT DeviceObject,
             Ctrl->Nodes[i].WantPost = FALSE;
         Ctrl->PostIndex = Ctrl->CompleteIndex;
         Ctrl->Data.Flags |= FLTFL_CALLBACK_DATA_POST_OPERATION;
-        Done = RunPostOperations(Ctrl, FALSE);
-        if (!Done && Ctrl->Parked && Ctrl->Parked->Instance)
-        {
-            FltObjectDereference(Ctrl->Parked->Instance);
-            Ctrl->Parked->Instance = NULL;
-        }
+        RunPostOperationsInThread(Ctrl);
         *IoStatus = Ctrl->Data.IoStatus;
         Result = TRUE;
         goto Quit;
@@ -1162,12 +1236,7 @@ CallLower:
         Ctrl->Data.IoStatus = *IoStatus;
         Ctrl->Data.Flags |= FLTFL_CALLBACK_DATA_POST_OPERATION;
         Ctrl->PostIndex = Ctrl->Count;
-        Done = RunPostOperations(Ctrl, FALSE);
-        if (!Done && Ctrl->Parked && Ctrl->Parked->Instance)
-        {
-            FltObjectDereference(Ctrl->Parked->Instance);
-            Ctrl->Parked->Instance = NULL;
-        }
+        RunPostOperationsInThread(Ctrl);
         *IoStatus = Ctrl->Data.IoStatus;
     }
     else if (Ctrl)
@@ -1183,6 +1252,230 @@ Quit:
     return Result;
 }
 
+/* The volume behind the top device of a file system stack: ours, or one below some other filter's */
+static
+PFLT_VOLUME
+VolumeOfStack(_In_ PDEVICE_OBJECT Top)
+{
+    PDEVICE_OBJECT Device, Lower;
+    PFLT_VOLUME Volume = NULL;
+
+    if (Top == NULL)
+        return NULL;
+    if (Top->DriverObject == DriverData.DriverObject)
+        return Top->DeviceExtension ? ((PFLTMGR_DEVICE_EXTENSION)Top->DeviceExtension)->Volume : NULL;
+
+    ObReferenceObject(Top);
+    for (Device = Top; Device; Device = Lower)
+    {
+        if (Device->DriverObject == DriverData.DriverObject)
+        {
+            if (Device->DeviceExtension)
+                Volume = ((PFLTMGR_DEVICE_EXTENSION)Device->DeviceExtension)->Volume;
+            ObDereferenceObject(Device);
+            break;
+        }
+        Lower = IoGetLowerDeviceObject(Device);
+        ObDereferenceObject(Device);
+    }
+
+    return Volume;
+}
+
+/*
+ * The FsFilter operations (section synchronization, modified page writer, cache flush) come to the
+ * FsRtl filter callbacks of the filter manager, from FsRtl, in the thread which wants the file's
+ * resources, at IRQL <= APC_LEVEL. The instances of the volume which registered for the operation
+ * (IRP_MJ_ACQUIRE_FOR_SECTION_SYNCHRONIZATION and the other FsFilter "major functions") see it with
+ * callback data flagged FLTFL_CALLBACK_DATA_FS_FILTER_OPERATION.
+ *
+ * A pre-operation which completes the operation with a failure status fails it: that is how an
+ * anti-virus filter keeps a file from being mapped (executed). A success status of a completing
+ * filter lets the operation go on as usual: the file system still takes its resources, since the
+ * release always comes. These operations can't pend (FLT_PREOP_PENDING is taken as
+ * FLT_PREOP_SUCCESS_NO_CALLBACK). The post-operations run in the post-callback, which FsRtl only
+ * calls if the pre-callback succeeded; until then the block is the completion context.
+ */
+NTSTATUS
+NTAPI
+FltpPreFsFilterOperation(_In_ PFS_FILTER_CALLBACK_DATA Data,
+                         _Out_ PVOID *CompletionContext)
+{
+    UCHAR Major = Data->Operation;
+    UCHAR Index = FLTP_FSFILTER_INDEX(Major);
+    BOOLEAN Acquire = (Index & 1) != 0;     /* the acquires may fail, the releases may not */
+    PFLT_VOLUME Volume;
+    PFLTP_IRPCTRL Ctrl = NULL;
+    FLT_RELATED_OBJECTS Related;
+    PLIST_ENTRY Entry;
+    ULONG Count = 0, i;
+    BOOLEAN Completed = FALSE, AnyPost = FALSE;
+    NTSTATUS Status;
+
+    *CompletionContext = NULL;
+
+    if (!FLTP_IS_FSFILTER(Major) || KeGetCurrentIrql() > APC_LEVEL)
+        return STATUS_SUCCESS;
+
+    Volume = VolumeOfStack(Data->DeviceObject);
+    if (Volume == NULL || Volume->FsFilterCount[Index] == 0)
+        return STATUS_SUCCESS;
+
+    KeEnterCriticalRegion();
+    ExAcquireResourceSharedLite(&Volume->InstanceList.rLock, TRUE);
+    for (Entry = Volume->InstanceList.rList.Flink; Entry != &Volume->InstanceList.rList; Entry = Entry->Flink)
+    {
+        PFLT_INSTANCE Instance = CONTAINING_RECORD(Entry, FLT_INSTANCE, VolumeLink);
+
+        if (Instance->Filter->FsFilterTable[Index] && !(Instance->Flags & INSFL_DELETING))
+            Count++;
+    }
+    if (Count)
+        Ctrl = ExAllocatePoolWithTag(NonPagedPool, sizeof(FLTP_IRPCTRL) + (Count - 1) * sizeof(FLTP_NODE), FM_TAG_IRPCTRL);
+    if (Ctrl)
+    {
+        RtlZeroMemory(Ctrl, sizeof(FLTP_IRPCTRL) + (Count - 1) * sizeof(FLTP_NODE));
+        for (Entry = Volume->InstanceList.rList.Flink;
+             Entry != &Volume->InstanceList.rList && Ctrl->Count < Count;
+             Entry = Entry->Flink)
+        {
+            PFLT_INSTANCE Instance = CONTAINING_RECORD(Entry, FLT_INSTANCE, VolumeLink);
+
+            if (Instance->Filter->FsFilterTable[Index] && !(Instance->Flags & INSFL_DELETING) &&
+                NT_SUCCESS(FltObjectReference(Instance)))
+            {
+                Ctrl->Nodes[Ctrl->Count++].Instance = Instance;
+            }
+        }
+    }
+    ExReleaseResourceLite(&Volume->InstanceList.rLock);
+    KeLeaveCriticalRegion();
+
+    if (Ctrl == NULL)
+    {
+        /* Filters want to see it and we can't show it to them: no section rather than an unchecked one */
+        return (Count && Acquire) ? STATUS_INSUFFICIENT_RESOURCES : STATUS_SUCCESS;
+    }
+    if (Ctrl->Count == 0)
+    {
+        ExFreePoolWithTag(Ctrl, FM_TAG_IRPCTRL);
+        return STATUS_SUCCESS;
+    }
+
+    Ctrl->RefCount = 1;
+    Ctrl->Volume = Volume;
+    Ctrl->MajorFunction = Major;
+    Ctrl->Iopb.MajorFunction = Major;
+    Ctrl->Iopb.TargetFileObject = Data->FileObject;
+    switch (Major)
+    {
+        case IRP_MJ_ACQUIRE_FOR_SECTION_SYNCHRONIZATION:
+            Ctrl->Iopb.Parameters.AcquireForSectionSynchronization.SyncType =
+                Data->Parameters.AcquireForSectionSynchronization.SyncType;
+            Ctrl->Iopb.Parameters.AcquireForSectionSynchronization.PageProtection =
+                Data->Parameters.AcquireForSectionSynchronization.PageProtection;
+            break;
+
+        case IRP_MJ_ACQUIRE_FOR_MOD_WRITE:
+            Ctrl->Iopb.Parameters.AcquireForModifiedPageWriter.EndingOffset =
+                Data->Parameters.AcquireForModifiedPageWriter.EndingOffset;
+            Ctrl->Iopb.Parameters.AcquireForModifiedPageWriter.ResourceToRelease =
+                Data->Parameters.AcquireForModifiedPageWriter.ResourceToRelease;
+            break;
+
+        case IRP_MJ_RELEASE_FOR_MOD_WRITE:
+            Ctrl->Iopb.Parameters.ReleaseForModifiedPageWriter.ResourceToRelease =
+                Data->Parameters.ReleaseForModifiedPageWriter.ResourceToRelease;
+            break;
+
+        default:
+            break;
+    }
+    *(PFLT_IO_PARAMETER_BLOCK *)&Ctrl->Data.Iopb = &Ctrl->Iopb;
+    *(PETHREAD *)&Ctrl->Data.Thread = PsGetCurrentThread();
+    Ctrl->Data.RequestorMode = KernelMode;
+    Ctrl->Data.Flags = FLTFL_CALLBACK_DATA_FS_FILTER_OPERATION;
+
+    for (i = 0; i < Ctrl->Count; i++)
+    {
+        PFLTP_NODE Node = &Ctrl->Nodes[i];
+        PFLT_OPERATION_REGISTRATION Op = Node->Instance->Filter->FsFilterTable[Index];
+        FLT_PREOP_CALLBACK_STATUS PreStatus;
+        PVOID Context = NULL;
+
+        if (Op->PreOperation == NULL)
+        {
+            Node->WantPost = (Op->PostOperation != NULL);
+            AnyPost |= Node->WantPost;
+            continue;
+        }
+
+        Ctrl->Iopb.TargetInstance = Node->Instance;
+        InitRelatedObjects(&Related, Ctrl, Node->Instance);
+        PreStatus = Op->PreOperation(&Ctrl->Data, &Related, &Context);
+
+        if (PreStatus == FLT_PREOP_COMPLETE)
+        {
+            Completed = TRUE;
+            Ctrl->CompleteIndex = i;
+            break;
+        }
+        else if (PreStatus == FLT_PREOP_SUCCESS_WITH_CALLBACK || PreStatus == FLT_PREOP_SYNCHRONIZE)
+        {
+            Node->WantPost = (Op->PostOperation != NULL);
+            Node->CompletionContext = Context;
+            AnyPost |= Node->WantPost;
+        }
+        else if (PreStatus == FLT_PREOP_PENDING)
+        {
+            DPRINT1("FLTMGR: FLT_PREOP_PENDING for FsFilter operation %d isn't allowed\n", (CHAR)Major);
+        }
+    }
+
+    if (Completed)
+    {
+        /* The filters above the one which completed it hear about it, and so does FsRtl if it failed */
+        Status = Ctrl->Data.IoStatus.Status;
+        for (i = Ctrl->CompleteIndex; i < Ctrl->Count; i++)
+            Ctrl->Nodes[i].WantPost = FALSE;
+        Ctrl->PostIndex = Ctrl->CompleteIndex;
+        Ctrl->Data.Flags |= FLTFL_CALLBACK_DATA_POST_OPERATION;
+        RunPostOperationsInThread(Ctrl);
+        FreeCtrl(Ctrl);
+        return (NT_SUCCESS(Status) || !Acquire) ? STATUS_SUCCESS : Status;
+    }
+
+    if (!AnyPost)
+    {
+        FreeCtrl(Ctrl);
+        return STATUS_SUCCESS;
+    }
+
+    *CompletionContext = Ctrl;
+    return STATUS_SUCCESS;
+}
+
+VOID
+NTAPI
+FltpPostFsFilterOperation(_In_ PFS_FILTER_CALLBACK_DATA Data,
+                          _In_ NTSTATUS OperationStatus,
+                          _In_ PVOID CompletionContext)
+{
+    PFLTP_IRPCTRL Ctrl = CompletionContext;
+
+    UNREFERENCED_PARAMETER(Data);
+
+    if (Ctrl == NULL)
+        return;
+
+    Ctrl->Data.IoStatus.Status = OperationStatus;
+    Ctrl->Data.IoStatus.Information = 0;
+    Ctrl->Data.Flags |= FLTFL_CALLBACK_DATA_POST_OPERATION;
+    Ctrl->PostIndex = Ctrl->Count;
+    RunPostOperationsInThread(Ctrl);
+    FreeCtrl(Ctrl);
+}
+
 /* EXPORTED FUNCTIONS *******************************************************/
 
 static
@@ -1192,9 +1485,34 @@ PendedPreWorker(_In_ PVOID Parameter)
 {
     PFLTP_IRPCTRL Ctrl = Parameter;
     FLTP_PRE_RESULT Result;
+    PEPROCESS Process = NULL;
+    KAPC_STATE ApcState;
+
+    /*
+     * The operation goes on in this system thread, but its buffers may be user addresses of the
+     * process which sent it (a cached write: the file system copies from Irp->UserBuffer, or locks
+     * it into an MDL). So we go on in that address space, as the thread which sent it would. The
+     * process is referenced: the operation may be done and the process gone before we detach.
+     */
+    if (Ctrl->Data.Thread)
+    {
+        Process = IoThreadToProcess(Ctrl->Data.Thread);
+        if (Process == PsGetCurrentProcess())
+            Process = NULL;
+        else
+            ObReferenceObject(Process);
+    }
+    if (Process)
+        KeStackAttachProcess((PKPROCESS)Process, &ApcState);
 
     Result = RunPreOperations(Ctrl, TRUE);
     (VOID)ContinueAfterPre(Ctrl, Result);
+
+    if (Process)
+    {
+        KeUnstackDetachProcess(&ApcState);
+        ObDereferenceObject(Process);
+    }
 }
 
 VOID
@@ -1213,10 +1531,18 @@ FltCompletePendedPreOperation(_In_ PFLT_CALLBACK_DATA CallbackData,
     if (InterlockedCompareExchange(&Ctrl->PendState, 2, 0) == 0)
         return;
 
+    /* A create: the thread which sent it is waiting to go on with it (FltpPerformIrp) */
+    if (Ctrl->CreateWaiter)
+    {
+        KeSetEvent(&Ctrl->SyncEvent, IO_NO_INCREMENT, FALSE);
+        return;
+    }
+
     /*
      * The operation is parked, we carry on with it in this thread, unless the filter completes the pend
      * above APC_LEVEL (from a DPC or a completion routine): the rest of the pre-operations, the call to
-     * the file system and the waits of FLT_PREOP_SYNCHRONIZE need IRQL <= APC_LEVEL, so a worker does it.
+     * the file system and the waits of FLT_PREOP_SYNCHRONIZE need IRQL <= APC_LEVEL, so a worker does it,
+     * in the address space of the requestor (PendedPreWorker).
      * The work item of the block is free: FltDoCompletionProcessingWhenSafe uses it after the pre-operations only.
      */
     if (KeGetCurrentIrql() > APC_LEVEL)
@@ -1286,11 +1612,22 @@ FltDoCompletionProcessingWhenSafe(_In_ PFLT_CALLBACK_DATA Data,
 {
     PFLTP_IRPCTRL Ctrl = CONTAINING_RECORD(Data, FLTP_IRPCTRL, Data);
 
-    /* In an IRP's thread, below DISPATCH_LEVEL and not paging, it's safe to go on right now */
-    if (KeGetCurrentIrql() <= APC_LEVEL && !(Ctrl->Iopb.IrpFlags & IRP_PAGING_IO))
+    /* Below DISPATCH_LEVEL it's safe to go on right now, whatever the operation (WDK) */
+    if (KeGetCurrentIrql() <= APC_LEVEL)
     {
         *RetPostOperationStatus = SafePostCallback(Data, FltObjects, CompletionContext, Flags);
         return TRUE;
+    }
+
+    /*
+     * Paging I/O can't be posted to a worker (WDK): the worker may need memory, which may need this
+     * very paging I/O to finish. Nor can anything but an IRP operation. The caller hears FALSE and
+     * finishes the operation itself.
+     */
+    if (!FLT_IS_IRP_OPERATION(Data) || (Ctrl->Iopb.IrpFlags & IRP_PAGING_IO))
+    {
+        *RetPostOperationStatus = FLT_POSTOP_FINISHED_PROCESSING;
+        return FALSE;
     }
 
     /* Otherwise a worker thread does it, and the post-operation returns for now */

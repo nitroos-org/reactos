@@ -103,6 +103,21 @@ FltpTeardownVolumeInstances(
 
 /* Operation.c */
 NTSTATUS
+NTAPI
+FltpPreFsFilterOperation(
+    _In_ PFS_FILTER_CALLBACK_DATA Data,
+    _Out_ PVOID *CompletionContext
+);
+
+VOID
+NTAPI
+FltpPostFsFilterOperation(
+    _In_ PFS_FILTER_CALLBACK_DATA Data,
+    _In_ NTSTATUS OperationStatus,
+    _In_ PVOID CompletionContext
+);
+
+NTSTATUS
 FltpPerformIrp(
     _In_ PDEVICE_OBJECT DeviceObject,
     _Inout_ PIRP Irp
@@ -152,6 +167,11 @@ FltpTeardownInstanceContexts(
 
 VOID
 FltpTeardownVolumeContexts(
+    _In_ PFLT_VOLUME Volume
+);
+
+VOID
+FltpDropStreamRecords(
     _In_ PFLT_VOLUME Volume
 );
 

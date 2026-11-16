@@ -143,14 +143,14 @@ typedef union _FLT_PARAMETERS {
     ULONG Length;
     FILE_INFORMATION_CLASS POINTER_ALIGNMENT FileInformationClass;
     PFILE_OBJECT ParentOfTarget;
-    union {
-      struct {
+    _ANONYMOUS_UNION union {
+      _ANONYMOUS_STRUCT struct {
         BOOLEAN ReplaceIfExists;
         BOOLEAN AdvanceOnly;
-      };
+      } DUMMYSTRUCTNAME;
       ULONG ClusterCount;
       HANDLE DeleteHandle;
-    };
+    } DUMMYUNIONNAME;
     PVOID InfoBuffer;
   } SetFileInformation;
   struct {

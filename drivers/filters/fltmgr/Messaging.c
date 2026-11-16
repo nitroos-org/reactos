@@ -815,12 +815,20 @@ FltSendMessage(_In_ PFLT_FILTER Filter,
     Message.ReplyCapacity = ReplyCapacity;
     KeInitializeEvent(&Message.Event, NotificationEvent, FALSE);
 
-    /* The pointer is the filter's own while it holds the lock */
+    /*
+     * The pointer is the filter's own while it holds the lock: a reference of ours keeps the connection
+     * from there on. The lock isn't held across the wait below, which may be for ever: a client which
+     * never answers would keep every FltCloseClientPort of the filter waiting (the disconnect of every
+     * other client, through its DisconnectNotify, and so the exit of those client processes and the
+     * filter's unregister). A FltCloseClientPort of this very port disconnects it, which wakes us.
+     */
     FltAcquirePushLockShared(&Filter->PortLock);
     Connection = (PFLT_CONNECTION)*ClientPort;
+    if (Connection)
+        InterlockedIncrement(&Connection->RefCount);
+    FltReleasePushLock(&Filter->PortLock);
     if (Connection == NULL)
     {
-        FltReleasePushLock(&Filter->PortLock);
         if (Copy) ExFreePoolWithTag(Copy, FM_TAG_MESSAGE);
         return STATUS_INVALID_PARAMETER;
     }
@@ -834,7 +842,7 @@ FltSendMessage(_In_ PFLT_FILTER Filter,
     if (Connection->Disconnected)
     {
         KeReleaseSpinLock(&Connection->Lock, OldIrql);
-        FltReleasePushLock(&Filter->PortLock);
+        ReleaseConnection(Connection);
         if (Copy) ExFreePoolWithTag(Copy, FM_TAG_MESSAGE);
         return STATUS_PORT_DISCONNECTED;
     }
@@ -865,7 +873,7 @@ FltSendMessage(_In_ PFLT_FILTER Filter,
         RemoveEntryList(&Message.Link);
     KeReleaseSpinLock(&Connection->Lock, OldIrql);
 
-    FltReleasePushLock(&Filter->PortLock);
+    ReleaseConnection(Connection);
 
     /* Nobody can write the answer any more: it goes to the filter's buffer at the filter's IRQL */
     if (ReplyLength)
@@ -907,39 +915,51 @@ HandleSendMessage(_In_ PFLT_CONNECTION Connection,
     ULONG InLength = Stack->Parameters.DeviceIoControl.InputBufferLength;
     ULONG OutLength = Stack->Parameters.DeviceIoControl.OutputBufferLength;
     PFLT_SERVER_PORT Server = Connection->ServerPort;
-    PVOID Input = NULL;
+    PVOID Input = InLength ? Stack->Parameters.DeviceIoControl.Type3InputBuffer : NULL;
+    PVOID Output = OutLength ? Irp->UserBuffer : NULL;
     ULONG Returned = 0;
-    NTSTATUS Status;
+    NTSTATUS Status = STATUS_SUCCESS;
 
     *Information = 0;
 
     if (Server->MessageNotify == NULL)
         return STATUS_INVALID_DEVICE_REQUEST;
 
-    /* The buffer is shared by the message and the answer: the filter gets a copy of the message */
-    if (InLength)
+    /*
+     * The filter gets the client's own buffers, as on Windows (WDK, PFLT_MESSAGE_NOTIFY): raw, unlocked
+     * user mode buffers, valid in this thread's process only, which the filter accesses in try/except
+     * blocks. We call it in the client's thread and only check that they are user buffers; we never
+     * touch them ourselves. Nothing of ours goes back to the client: what it gets in the output
+     * buffer is what the filter wrote there.
+     */
+    if (Irp->RequestorMode != KernelMode)
     {
-        Input = ExAllocatePoolWithTag(NonPagedPool, InLength, FM_TAG_MESSAGE);
-        if (Input == NULL)
-            return STATUS_INSUFFICIENT_RESOURCES;
-        RtlCopyMemory(Input, Irp->AssociatedIrp.SystemBuffer, InLength);
+        _SEH2_TRY
+        {
+            if (Input)
+                ProbeForRead(Input, InLength, 1);
+            if (Output)
+                ProbeForWrite(Output, OutLength, 1);
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = _SEH2_GetExceptionCode();
+        }
+        _SEH2_END;
+        if (!NT_SUCCESS(Status))
+            return Status;
     }
 
     if (!ExAcquireRundownProtection(&Connection->MsgNotifRundownRef))
-    {
-        if (Input) ExFreePoolWithTag(Input, FM_TAG_MESSAGE);
         return STATUS_PORT_DISCONNECTED;
-    }
 
     Status = Server->MessageNotify(Connection->Cookie,
                                    Input,
                                    InLength,
-                                   OutLength ? Irp->AssociatedIrp.SystemBuffer : NULL,
+                                   Output,
                                    OutLength,
                                    &Returned);
     ExReleaseRundownProtection(&Connection->MsgNotifRundownRef);
-
-    if (Input) ExFreePoolWithTag(Input, FM_TAG_MESSAGE);
 
     if (Returned > OutLength)
         Returned = OutLength;

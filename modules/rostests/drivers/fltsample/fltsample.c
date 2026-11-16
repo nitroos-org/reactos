@@ -13,6 +13,7 @@
 #include <fltkernel.h>
 #include <ntddk.h>
 #include <ntstrsafe.h>
+#include <pseh/pseh2.h>
 
 #include "fltsample.h"
 
@@ -35,6 +36,9 @@ C_ASSERT(sizeof(((PFLT_PARAMETERS)0)->LockControl) != 0 &&
          sizeof(((PFLT_PARAMETERS)0)->FastIoCheckIfPossible) != 0 &&
          sizeof(((PFLT_PARAMETERS)0)->MdlRead) != 0 &&
          sizeof(((PFLT_PARAMETERS)0)->MountVolume) != 0);
+/* The anonymous union of SetFileInformation: the WDK names, and DUMMYUNIONNAME (NONAMELESSUNION builds) */
+C_ASSERT(FIELD_OFFSET(FLT_PARAMETERS, SetFileInformation.ReplaceIfExists) ==
+         FIELD_OFFSET(FLT_PARAMETERS, SetFileInformation.DeleteHandle));
 
 #define MODE_NONE       0
 #define MODE_BLK        1
@@ -45,6 +49,10 @@ C_ASSERT(sizeof(((PFLT_PARAMETERS)0)->LockControl) != 0 &&
 #define MODE_SAFE       6
 #define MODE_NODEL      7
 #define MODE_MSG        8
+#define MODE_NOSEC      9
+#define MODE_SCTX       10
+#define MODE_PDPC       11
+#define MODE_DPCREAD    12
 
 #define MAX_OPEN        256
 
@@ -99,6 +107,7 @@ static BOOLEAN UseContexts = TRUE;
 static PFLT_PORT ServerPort;
 static PFLT_PORT ClientPort;
 static BOOLEAN ArmAsk;
+static BOOLEAN InNestedAttach;
 
 typedef struct _SAMPLE_CONTEXT
 {
@@ -125,6 +134,8 @@ ModeFromName(_In_ PCUNICODE_STRING Name)
     {
         { L".blk", MODE_BLK }, { L".nowr", MODE_NOWR }, { L".half", MODE_HALF }, { L".pend", MODE_PEND },
         { L".sync", MODE_SYNC }, { L".safe", MODE_SAFE }, { L".nodel", MODE_NODEL }, { L".msg", MODE_MSG },
+        { L".nosec", MODE_NOSEC }, { L".sctx", MODE_SCTX }, { L".pdpc", MODE_PDPC },
+        { L".dpc", MODE_DPCREAD },
     };
     ULONG i, Length;
 
@@ -276,6 +287,8 @@ ContextCleanup(_In_ PFLT_CONTEXT Context,
     PSAMPLE_CONTEXT Sample = Context;
 
     InterlockedIncrement((PLONG)&Stats.Contexts[FLTSAMPLE_CTX_CLEANED]);
+    if (KeGetCurrentIrql() > APC_LEVEL)
+        InterlockedIncrement((PLONG)&Stats.CleanupAboveApc);
     if (Sample->Magic != CONTEXT_MAGIC)
         InterlockedIncrement((PLONG)&Stats.ContextMismatch);
 
@@ -536,6 +549,40 @@ PendWorker(_In_ PVOID Parameter)
         KeSetEvent(&WorkersDone, IO_NO_INCREMENT, FALSE);
 }
 
+/*
+ * A timer DPC: a DPC queued at PASSIVE_LEVEL runs at once on this processor, before the pre-operation
+ * has even returned FLT_PREOP_PENDING, which is not the case to test.
+ */
+typedef struct _PEND_DPC_ITEM
+{
+    KTIMER Timer;
+    KDPC Dpc;
+    PFLT_CALLBACK_DATA Data;
+
+} PEND_DPC_ITEM, *PPEND_DPC_ITEM;
+
+/* .pdpc: the pended write is let go from a DPC, at DISPATCH_LEVEL, in whatever thread and process */
+static
+VOID
+NTAPI
+PendDpcRoutine(_In_ PKDPC Dpc,
+               _In_opt_ PVOID Context,
+               _In_opt_ PVOID Argument1,
+               _In_opt_ PVOID Argument2)
+{
+    PPEND_DPC_ITEM Item = Context;
+
+    UNREFERENCED_PARAMETER(Dpc);
+    UNREFERENCED_PARAMETER(Argument1);
+    UNREFERENCED_PARAMETER(Argument2);
+
+    InterlockedIncrement((PLONG)&Stats.PendDpcCompleted);
+    FltCompletePendedPreOperation(Item->Data, FLT_PREOP_SUCCESS_WITH_CALLBACK, NULL);
+    ExFreePoolWithTag(Item, TAG_SAMPLE);
+    if (InterlockedDecrement(&PendingWorkers) == 0)
+        KeSetEvent(&WorkersDone, IO_NO_INCREMENT, FALSE);
+}
+
 typedef struct _RV_PARK_ITEM
 {
     SAMPLE_WORK WorkItem;
@@ -576,6 +623,26 @@ PreOperation(_Inout_ PFLT_CALLBACK_DATA Data,
 
     *CompletionContext = NULL;
 
+    /*
+     * .sctx: a stream context for the file, whether we saw its create or not. The filter manager
+     * only allows stream contexts for streams whose opens it followed.
+     */
+    if (Major == IRP_MJ_READ && !Paging && FileObject && ModeFromName(&FileObject->FileName) == MODE_SCTX)
+    {
+        PSAMPLE_CONTEXT Sample = NewContext(FLT_STREAM_CONTEXT, MODE_SCTX);
+        PFLT_CONTEXT Old = NULL;
+
+        if (Sample)
+        {
+            Stats.LastSctxStatus = FltSetStreamContext(FltObjects->Instance, FileObject,
+                                                       FLT_SET_CONTEXT_KEEP_IF_EXISTS, Sample, &Old);
+            InterlockedIncrement((PLONG)&Stats.SctxReads);
+            if (Old)
+                FltReleaseContext(Old);
+            FltReleaseContext(Sample);
+        }
+    }
+
     /* Nothing but the test files counts */
     if (Major == IRP_MJ_CREATE)
     {
@@ -598,7 +665,7 @@ PreOperation(_Inout_ PFLT_CALLBACK_DATA Data,
 
         ULONG FastMode = FindMode(FileObject);
 
-        if (FastMode == MODE_PEND || FastMode == MODE_HALF)
+        if (FastMode == MODE_PEND || FastMode == MODE_HALF || FastMode == MODE_PDPC)
             return FLT_PREOP_DISALLOW_FASTIO;
     }
 
@@ -623,6 +690,8 @@ PreOperation(_Inout_ PFLT_CALLBACK_DATA Data,
             if (VetoEnabled && Mode == MODE_NODEL && (Data->Iopb->Parameters.Create.Options & FILE_DELETE_ON_CLOSE))
                 return Veto(Data);
             AddOpen(FileObject, Mode);
+            /* The post-create must come in this thread (WDK) */
+            *CompletionContext = PsGetCurrentThread();
             break;
 
         case IRP_MJ_CLOSE:
@@ -662,12 +731,43 @@ PreOperation(_Inout_ PFLT_CALLBACK_DATA Data,
                 if (Item)
                     ExFreePoolWithTag(Item, TAG_SAMPLE);
             }
+            else if (Mode == MODE_PDPC)
+            {
+                PPEND_DPC_ITEM Item = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Item), TAG_SAMPLE);
+
+                if (Item)
+                {
+                    LARGE_INTEGER Due;
+
+                    Item->Data = Data;
+                    KeInitializeDpc(&Item->Dpc, PendDpcRoutine, Item);
+                    KeInitializeTimer(&Item->Timer);
+                    InterlockedIncrement(&PendingWorkers);
+                    KeResetEvent(&WorkersDone);
+                    InterlockedIncrement((PLONG)&Stats.PendDpc);
+                    Due.QuadPart = -10000LL * 10;
+                    KeSetTimer(&Item->Timer, Due, &Item->Dpc);
+                    return FLT_PREOP_PENDING;
+                }
+            }
             break;
 
         case IRP_MJ_READ:
             if (Paging)
                 break;
             Mode = FindMode(FileObject);
+            if (Mode == MODE_DPCREAD)
+            {
+                /* A context of this read only: its last reference goes in the post-operation */
+                PSAMPLE_CONTEXT Sample = NewContext(FLT_STREAMHANDLE_CONTEXT, Mode);
+
+                if (Sample)
+                {
+                    *CompletionContext = Sample;
+                    return FLT_PREOP_SUCCESS_WITH_CALLBACK;
+                }
+                break;
+            }
             if (Mode == MODE_SYNC)
             {
                 InterlockedIncrement((PLONG)&Stats.Synchronized);
@@ -736,6 +836,8 @@ PostOperation(_Inout_ PFLT_CALLBACK_DATA Data,
     if (Flags & FLTFL_POST_OPERATION_DRAINING)
     {
         InterlockedIncrement((PLONG)&Stats.DrainingPosts);
+        if (Major == IRP_MJ_READ && CompletionContext && FindMode(FileObject) == MODE_DPCREAD)
+            FltReleaseContext(CompletionContext);
         return FLT_POSTOP_FINISHED_PROCESSING;
     }
 
@@ -746,6 +848,15 @@ PostOperation(_Inout_ PFLT_CALLBACK_DATA Data,
     {
         case IRP_MJ_CREATE:
             Stats.LastCreatePost = KeQueryPerformanceCounter(NULL).QuadPart;
+            /* Post-create callbacks run at PASSIVE_LEVEL in the thread which sent the create (WDK) */
+            InterlockedIncrement((PLONG)&Stats.CreatePosts);
+            if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+            {
+                InterlockedIncrement((PLONG)&Stats.CreatePostNotPassive);
+                break;
+            }
+            if (CompletionContext && CompletionContext != PsGetCurrentThread())
+                InterlockedIncrement((PLONG)&Stats.CreatePostOtherThread);
             if (!NT_SUCCESS(Data->IoStatus.Status))
                 RemoveOpen(FileObject);
             else if (UseContexts)
@@ -772,6 +883,30 @@ PostOperation(_Inout_ PFLT_CALLBACK_DATA Data,
             break;
 
         case IRP_MJ_READ:
+            if (CompletionContext && FindMode(FileObject) == MODE_DPCREAD)
+            {
+                /* Maybe DISPATCH_LEVEL: the cleanup callback must still come at APC_LEVEL or below */
+                InterlockedIncrement((PLONG)&Stats.DpcReadPosts);
+                if (KeGetCurrentIrql() == DISPATCH_LEVEL)
+                    InterlockedIncrement((PLONG)&Stats.DpcReadPostsAtDispatch);
+                FltReleaseContext(CompletionContext);
+                break;
+            }
+            if ((RvFlags & FLTSAMPLE_RV_PARK_FASTIO_POST) && FLT_IS_FASTIO_OPERATION(Data))
+            {
+                PRV_PARK_ITEM Item = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Item), TAG_SAMPLE);
+
+                /* A filter breaking the rule: it will call FltCompletePendedPostOperation later */
+                if (Item)
+                {
+                    Item->Data = Data;
+                    InterlockedIncrement(&PendingWorkers);
+                    KeResetEvent(&WorkersDone);
+                    InterlockedIncrement((PLONG)&Stats.RvParked);
+                    QueueSampleWork(&Item->WorkItem, RvParkWorker, Item);
+                    return FLT_POSTOP_MORE_PROCESSING_REQUIRED;
+                }
+            }
             if ((RvFlags & FLTSAMPLE_RV_PARK_READ_POST) && FLT_IS_IRP_OPERATION(Data) &&
                 !(Data->Iopb->IrpFlags & IRP_PAGING_IO) && CompletionContext == NULL)
             {
@@ -797,15 +932,25 @@ PostOperation(_Inout_ PFLT_CALLBACK_DATA Data,
             }
             else if (FindMode(FileObject) == MODE_SAFE)
             {
-                if (FltDoCompletionProcessingWhenSafe(Data,
-                                                      FltObjects,
-                                                      CompletionContext,
-                                                      Flags,
-                                                      SafePostOperation,
-                                                      &Status))
+                BOOLEAN PagingRead = FLT_IS_IRP_OPERATION(Data) && (Data->Iopb->IrpFlags & IRP_PAGING_IO);
+                BOOLEAN Done = FltDoCompletionProcessingWhenSafe(Data,
+                                                                 FltObjects,
+                                                                 CompletionContext,
+                                                                 Flags,
+                                                                 SafePostOperation,
+                                                                 &Status);
+
+                /* Paging I/O is never posted to a worker (WDK): run right here, or FALSE */
+                if (PagingRead)
                 {
-                    return Status;
+                    InterlockedIncrement((PLONG)&Stats.SafePagingCalls);
+                    if (!Done)
+                        InterlockedIncrement((PLONG)&Stats.SafePagingRefused);
+                    else if (Status == FLT_POSTOP_MORE_PROCESSING_REQUIRED)
+                        InterlockedIncrement((PLONG)&Stats.SafePagingPosted);
                 }
+                if (Done)
+                    return Status;
             }
             break;
 
@@ -813,6 +958,56 @@ PostOperation(_Inout_ PFLT_CALLBACK_DATA Data,
             break;
     }
 
+    return FLT_POSTOP_FINISHED_PROCESSING;
+}
+
+
+/* A section for a file is about to be created: the anti-virus pattern refuses it for some files */
+static
+FLT_PREOP_CALLBACK_STATUS
+FLTAPI
+PreSectionSync(_Inout_ PFLT_CALLBACK_DATA Data,
+               _In_ PCFLT_RELATED_OBJECTS FltObjects,
+               _Outptr_result_maybenull_ PVOID *CompletionContext)
+{
+    PFILE_OBJECT FileObject = Data->Iopb->TargetFileObject;
+
+    UNREFERENCED_PARAMETER(FltObjects);
+    *CompletionContext = NULL;
+
+    if (FileObject == NULL || !IsTracked(FileObject))
+        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+
+    InterlockedIncrement((PLONG)&Stats.SectionSyncPre);
+    if (!FLT_IS_FS_FILTER_OPERATION(Data))
+        InterlockedIncrement((PLONG)&Stats.SectionSyncBadData);
+
+    if (FindMode(FileObject) == MODE_NOSEC &&
+        Data->Iopb->Parameters.AcquireForSectionSynchronization.SyncType == SyncTypeCreateSection)
+    {
+        InterlockedIncrement((PLONG)&Stats.SectionSyncDenied);
+        Data->IoStatus.Status = STATUS_ACCESS_DENIED;
+        Data->IoStatus.Information = 0;
+        return FLT_PREOP_COMPLETE;
+    }
+
+    return FLT_PREOP_SUCCESS_WITH_CALLBACK;
+}
+
+static
+FLT_POSTOP_CALLBACK_STATUS
+FLTAPI
+PostSectionSync(_Inout_ PFLT_CALLBACK_DATA Data,
+                _In_ PCFLT_RELATED_OBJECTS FltObjects,
+                _In_opt_ PVOID CompletionContext,
+                _In_ FLT_POST_OPERATION_FLAGS Flags)
+{
+    UNREFERENCED_PARAMETER(Data);
+    UNREFERENCED_PARAMETER(FltObjects);
+    UNREFERENCED_PARAMETER(CompletionContext);
+    UNREFERENCED_PARAMETER(Flags);
+
+    InterlockedIncrement((PLONG)&Stats.SectionSyncPost);
     return FLT_POSTOP_FINISHED_PROCESSING;
 }
 
@@ -847,6 +1042,16 @@ InstanceSetup(_In_ PCFLT_RELATED_OBJECTS FltObjects,
             (VOID)FltSetInstanceContext(FltObjects->Instance, FLT_SET_CONTEXT_REPLACE_IF_EXISTS, Sample, NULL);
             FltReleaseContext(Sample);
         }
+    }
+    if ((RvFlags & FLTSAMPLE_RV_NESTED_ATTACH) && !InNestedAttach)
+    {
+        PFLT_INSTANCE Inner = NULL;
+
+        /* Review test: one instance per volume and name, so ours will be refused once we said yes */
+        InNestedAttach = TRUE;
+        if (NT_SUCCESS(FltAttachVolume(SampleFilter, FltObjects->Volume, NULL, &Inner)) && Inner)
+            FltObjectDereference(Inner);
+        InNestedAttach = FALSE;
     }
     if (Flags & FLTFL_INSTANCE_SETUP_MANUAL_ATTACHMENT)
         InterlockedIncrement((PLONG)&Stats.ManualSetups);
@@ -922,6 +1127,8 @@ FilterUnload(_In_ FLT_FILTER_UNLOAD_FLAGS Flags)
     SampleFilter = NULL;
     while (PendingWorkers)
         KeWaitForSingleObject(&WorkersDone, Executive, KernelMode, FALSE, NULL);
+    /* A DPC which woke us may still be on its way out of our code */
+    KeFlushQueuedDpcs();
 
     /* Leave a report in the service key: all instances must be gone by now */
     ReportRun(L"LastRunSetups", Stats.InstanceSetups);
@@ -1111,6 +1318,12 @@ ControlDispatch(_In_ PDEVICE_OBJECT DeviceObject,
                 RvFlags = *(PULONG)Buffer;
                 break;
 
+            case FLTSAMPLE_IOCTL_CLOSE_CLIENT:
+                /* The filter lets go of its client, whatever it is doing with it */
+                if (SampleFilter)
+                    FltCloseClientPort(SampleFilter, &ClientPort);
+                break;
+
             case FLTSAMPLE_IOCTL_REFUSE_UNLOAD:
                 if (InLength < sizeof(ULONG)) { Status = STATUS_INVALID_PARAMETER; break; }
                 RefuseUnload = *(PULONG)Buffer != 0;
@@ -1163,15 +1376,57 @@ PortDisconnect(_In_opt_ PVOID ConnectionCookie)
     FltCloseClientPort(SampleFilter, &ClientPort);
 }
 
+/* Review test: where the message buffers are, and whether they are the client's (FLTSAMPLE_MSG_WHERE) */
 static
 NTSTATUS
-FLTAPI
-PortMessage(_In_opt_ PVOID PortCookie,
-            _In_reads_bytes_opt_(InputBufferLength) PVOID InputBuffer,
-            _In_ ULONG InputBufferLength,
-            _Out_writes_bytes_to_opt_(OutputBufferLength, *ReturnOutputBufferLength) PVOID OutputBuffer,
-            _In_ ULONG OutputBufferLength,
-            _Out_ PULONG ReturnOutputBufferLength)
+WhereAreTheBuffers(_In_ PFLTSAMPLE_MSG Message,
+                   _In_ ULONG InputBufferLength,
+                   _In_opt_ PVOID OutputBuffer,
+                   _In_ ULONG OutputBufferLength,
+                   _Out_ PULONG ReturnOutputBufferLength)
+{
+    FLTSAMPLE_WHERE_RESULT Result = { 0 };
+    ULONG64 Where[2];
+
+    if (InputBufferLength < FIELD_OFFSET(FLTSAMPLE_MSG, Data) + sizeof(Where) ||
+        OutputBufferLength < sizeof(Result))
+    {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    RtlCopyMemory(Where, Message->Data, sizeof(Where));
+    Result.InputIsClients = Where[0] == (ULONG64)(ULONG_PTR)Message;
+    Result.OutputIsClients = Where[1] == (ULONG64)(ULONG_PTR)OutputBuffer;
+    Result.PreviousModeUser = ExGetPreviousMode() == UserMode;
+    if (Result.PreviousModeUser)
+    {
+        /* What a filter ported from Windows does with them */
+        _SEH2_TRY
+        {
+            ProbeForRead(Message, InputBufferLength, 1);
+            ProbeForWrite(OutputBuffer, OutputBufferLength, 1);
+            Result.ProbesOk = TRUE;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Result.ProbesOk = FALSE;
+        }
+        _SEH2_END;
+    }
+
+    RtlCopyMemory(OutputBuffer, &Result, sizeof(Result));
+    *ReturnOutputBufferLength = sizeof(Result);
+    return STATUS_SUCCESS;
+}
+
+static
+NTSTATUS
+PortMessageWork(_In_opt_ PVOID PortCookie,
+                _In_reads_bytes_opt_(InputBufferLength) PVOID InputBuffer,
+                _In_ ULONG InputBufferLength,
+                _Out_writes_bytes_to_opt_(OutputBufferLength, *ReturnOutputBufferLength) PVOID OutputBuffer,
+                _In_ ULONG OutputBufferLength,
+                _Out_ PULONG ReturnOutputBufferLength)
 {
     PFLTSAMPLE_MSG Message = InputBuffer;
     NTSTATUS Status;
@@ -1207,6 +1462,15 @@ PortMessage(_In_opt_ PVOID PortCookie,
 
         case FLTSAMPLE_MSG_ARM:
             ArmAsk = Message->Arg != 0;
+            return STATUS_SUCCESS;
+
+        case FLTSAMPLE_MSG_WHERE:
+            return WhereAreTheBuffers(Message, InputBufferLength, OutputBuffer, OutputBufferLength,
+                                      ReturnOutputBufferLength);
+
+        case FLTSAMPLE_MSG_OVERREPORT:
+            /* A filter which claims more than it wrote: the client must not get bytes of ours */
+            *ReturnOutputBufferLength = OutputBufferLength;
             return STATUS_SUCCESS;
 
         case FLTSAMPLE_MSG_NOTIFY:
@@ -1258,6 +1522,37 @@ PortMessage(_In_opt_ PVOID PortCookie,
     }
 }
 
+/*
+ * The message callback gets the client's own buffers, raw user mode memory (WDK, PFLT_MESSAGE_NOTIFY):
+ * everything that touches them runs inside an exception handler.
+ */
+static
+NTSTATUS
+FLTAPI
+PortMessage(_In_opt_ PVOID PortCookie,
+            _In_reads_bytes_opt_(InputBufferLength) PVOID InputBuffer,
+            _In_ ULONG InputBufferLength,
+            _Out_writes_bytes_to_opt_(OutputBufferLength, *ReturnOutputBufferLength) PVOID OutputBuffer,
+            _In_ ULONG OutputBufferLength,
+            _Out_ PULONG ReturnOutputBufferLength)
+{
+    NTSTATUS Status;
+
+    _SEH2_TRY
+    {
+        Status = PortMessageWork(PortCookie, InputBuffer, InputBufferLength, OutputBuffer, OutputBufferLength,
+                                 ReturnOutputBufferLength);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        *ReturnOutputBufferLength = 0;
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+
+    return Status;
+}
+
 /* A create the client has a say in: it gets the name, and a reply other than 0 refuses the create */
 static
 BOOLEAN
@@ -1301,6 +1596,7 @@ static const FLT_OPERATION_REGISTRATION Operations[] =
     { IRP_MJ_QUERY_INFORMATION, 0, PreOperation, PostOperation },
     { IRP_MJ_SET_INFORMATION, 0, PreOperation, PostOperation },
     { IRP_MJ_DIRECTORY_CONTROL, 0, PreOperation, PostOperation },
+    { IRP_MJ_ACQUIRE_FOR_SECTION_SYNCHRONIZATION, 0, PreSectionSync, PostSectionSync },
     { IRP_MJ_OPERATION_END }
 };
 

@@ -204,16 +204,22 @@ FltGetDeviceObject(
     _In_ PFLT_VOLUME Volume,
     _Outptr_ PDEVICE_OBJECT *DeviceObject)
 {
-    /* The file system volume device object our device is attached to */
-    if (Volume->AttachedToDeviceObject == NULL)
-    {
-        *DeviceObject = NULL;
-        return STATUS_FLT_NO_DEVICE_OBJECT;
-    }
+    PDEVICE_OBJECT Device;
 
-    ObReferenceObject(Volume->AttachedToDeviceObject);
-    *DeviceObject = Volume->AttachedToDeviceObject;
-    return STATUS_SUCCESS;
+    /*
+     * The file system volume device object our device is attached to. It is cleared, under the
+     * lock, before we detach from a device the file system deleted (Interface.c).
+     */
+    KeEnterCriticalRegion();
+    ExAcquireResourceSharedLite(&FilterListLock, TRUE);
+    Device = Volume->AttachedToDeviceObject;
+    if (Device)
+        ObReferenceObject(Device);
+    ExReleaseResourceLite(&FilterListLock);
+    KeLeaveCriticalRegion();
+
+    *DeviceObject = Device;
+    return Device ? STATUS_SUCCESS : STATUS_FLT_NO_DEVICE_OBJECT;
 }
 
 

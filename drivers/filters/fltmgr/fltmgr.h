@@ -31,6 +31,7 @@
 #define FM_TAG_WORKITEM         'iwMF'
 #define FM_TAG_MESSAGE          'gmMF'
 #define FM_TAG_SECURITY         'dsMF'
+#define FM_TAG_DETACH           'tdMF'
 
 #define MAX_DEVNAME_LENGTH  64
 

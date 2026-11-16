@@ -392,6 +392,38 @@ IopEditDeviceList(IN PDRIVER_OBJECT DriverObject,
     KeReleaseQueuedSpinLock(LockQueueIoDatabaseLock, OldIrql);
 }
 
+/* ReactOS-private: the device attached on top of a deleted device was told (FastIoDetachDevice) */
+#define DOE_DETACH_NOTIFIED 0x80000000
+
+/*
+ * A deleted device which still has a device attached on top of it: the driver of that device is asked to
+ * detach (and usually to delete its device), through its FastIoDetachDevice routine, as the WDK documents
+ * for file system filter drivers (a file system deletes the volume device of a volume which is gone).
+ * Once. Nothing may look at DeviceObject after the call: the routine may detach at once, and the
+ * detach frees the device.
+ */
+static
+VOID
+IopNotifyAttachedDeviceOfDelete(IN PDEVICE_OBJECT DeviceObject)
+{
+    PEXTENDED_DEVOBJ_EXTENSION ThisExtension = IoGetDevObjExtension(DeviceObject);
+    PDEVICE_OBJECT AttachedDevice = DeviceObject->AttachedDevice;
+    PFAST_IO_DISPATCH FastIoDispatch = AttachedDevice->DriverObject->FastIoDispatch;
+
+    if (ThisExtension->ExtensionFlags & DOE_DETACH_NOTIFIED)
+        return;
+
+    if (FastIoDispatch == NULL ||
+        FastIoDispatch->SizeOfFastIoDispatch <= FIELD_OFFSET(FAST_IO_DISPATCH, FastIoDetachDevice) ||
+        FastIoDispatch->FastIoDetachDevice == NULL)
+    {
+        return;
+    }
+
+    ThisExtension->ExtensionFlags |= DOE_DETACH_NOTIFIED;
+    FastIoDispatch->FastIoDetachDevice(AttachedDevice, DeviceObject);
+}
+
 VOID
 NTAPI
 IopUnloadDevice(IN PDEVICE_OBJECT DeviceObject)
@@ -405,6 +437,9 @@ IopUnloadDevice(IN PDEVICE_OBJECT DeviceObject)
         if (DeviceObject->AttachedDevice)
         {
             DPRINT("Device object is in the middle of a device stack\n");
+
+            /* The device goes once the one on top has detached; its driver gets told */
+            IopNotifyAttachedDeviceOfDelete(DeviceObject);
             return;
         }
 

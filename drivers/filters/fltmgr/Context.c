@@ -503,6 +503,27 @@ FltpTeardownVolumeContexts(_In_ PFLT_VOLUME Volume)
     ExReleaseFastMutex(&Volume->StreamListLock);
 }
 
+/*
+ * No instance on the volume uses stream or stream handle contexts any more: the opens aren't followed
+ * from now on (the closes aren't seen), so the records of the streams go. A record kept would outlive
+ * the closes of its file objects, and a stream which later gets the same FsContext (the same file
+ * reopened while no one followed, or another file in the same memory) would pass for one whose opens
+ * we know: a stream context set on it then would outlive the stream. Without a record the stream has
+ * no stream contexts (FltSetStreamContext: STATUS_NOT_SUPPORTED) until it is opened again.
+ * Checked under the lock: an instance which starts tracking meanwhile records its opens after this.
+ */
+VOID
+FltpDropStreamRecords(_In_ PFLT_VOLUME Volume)
+{
+    ExAcquireFastMutex(&Volume->StreamListLock);
+    if (Volume->ContextTracking == 0)
+    {
+        while (!IsListEmpty(&Volume->StreamList))
+            FreeStreamOpen(CONTAINING_RECORD(RemoveHeadList(&Volume->StreamList), FLTP_STREAM_OPEN, Link));
+    }
+    ExReleaseFastMutex(&Volume->StreamListLock);
+}
+
 /* The contexts a filter has on volumes which stay, when it unregisters */
 VOID
 FltpPurgeFilterContexts(_In_ PFLT_FILTER Filter)

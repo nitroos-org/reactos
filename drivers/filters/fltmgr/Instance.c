@@ -47,6 +47,12 @@ UpdateVolumeCallbackCounts(_In_ PFLT_VOLUME Volume,
             InterlockedAdd((PLONG)&Volume->CallbackCount[i], Delta);
     }
 
+    for (i = 1; i <= FLTP_FSFILTER_OPERATIONS; i++)
+    {
+        if (Filter->FsFilterTable[i])
+            InterlockedAdd((PLONG)&Volume->FsFilterCount[i], Delta);
+    }
+
     /* Stream and stream handle contexts live as long as the file is open: someone has to count the opens */
     if (Filter->ContextDefs[FLTP_CTX_INDEX_STREAM].Registered ||
         Filter->ContextDefs[FLTP_CTX_INDEX_STREAMHANDLE].Registered)
@@ -244,6 +250,27 @@ FltpAttachInstance(_In_ PFLT_FILTER Filter,
     Status = InsertInstance(Volume, Instance);
     if (!NT_SUCCESS(Status))
     {
+        /*
+         * The filter said yes and may have set up state of its own for the instance, which it frees
+         * in its teardown callbacks: it gets them, with no operation ever having reached the instance.
+         */
+        if (Filter->InstanceSetup)
+        {
+            ULONG Reason = (Status == STATUS_FLT_DELETING_OBJECT) ? FLTFL_INSTANCE_TEARDOWN_FILTER_UNLOAD :
+                           (Status == STATUS_FLT_VOLUME_NOT_FOUND) ? FLTFL_INSTANCE_TEARDOWN_VOLUME_DISMOUNT :
+                                                                     FLTFL_INSTANCE_TEARDOWN_INTERNAL_ERROR;
+
+            InitRelatedObjects(&Objects, Instance);
+            InterlockedOr((PLONG)&Instance->Flags, INSFL_DELETING);
+            if (Filter->InstanceTeardownStart)
+                Filter->InstanceTeardownStart(&Objects, Reason);
+
+            /* References the filter took on the instance meanwhile, as in FltpTeardownInstance */
+            FltpObjectRundownWait(&Instance->Base.RundownRef);
+
+            if (Filter->InstanceTeardownComplete)
+                Filter->InstanceTeardownComplete(&Objects, Reason);
+        }
         FltpTeardownInstanceContexts(Instance);
         ExFreePoolWithTag(Instance, FM_TAG_INSTANCE);
         return Status;
@@ -311,6 +338,10 @@ FltpTeardownInstance(_In_ PFLT_INSTANCE Instance,
 
     /* Whatever the filter attached to the instance goes now */
     FltpTeardownInstanceContexts(Instance);
+
+    /* The last instance which followed the opens of the streams: their records go too */
+    if (Volume->ContextTracking == 0)
+        FltpDropStreamRecords(Volume);
 
     /*
      * Only now, with the last callback into the filter made, the instance leaves the filter's list:
