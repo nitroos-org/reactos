@@ -161,7 +161,7 @@ TCPReadIpv6Switch(VOID)
         }
     }
 
-    DbgPrint("TCPIP: IPv6 on (Ipv6Enable%s)\n", TCPIpv6Links ? "" : " 0: loopback only");
+    DbgPrint("TCPIP: IPv6 on (%s)\n", TCPIpv6Links ? "all interfaces" : "loopback interface only");
 
 #if DBG || defined(TCPIP_IPV6_SELFTEST)
     {

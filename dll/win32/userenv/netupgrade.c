@@ -327,8 +327,8 @@ NuReadSerial(VOID)
 }
 
 /*
- * Called by winlogon at every start (SYSTEM context). Cheap when there is nothing to do: the switch is
- * read, and the INF's size and time compared to the ones kept.
+ * Called by winlogon at every start (SYSTEM context). Cheap when there is nothing to do: the INF's size
+ * and time are compared to the ones kept.
  */
 BOOL
 WINAPI

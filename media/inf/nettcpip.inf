@@ -249,7 +249,7 @@ HKLM,"SYSTEM\CurrentControlSet\Services\Winsock2\Parameters\Protocol_Catalog9\Ca
 
 ; The IPv6 transport and the AF_INET6 entries of the Winsock protocol catalog (MSAFD, TCP, UDP and raw). A new install gets them
 ; with the rest (PrimaryInstall); an install that predates them gets this section from winlogon (userenv, netupgrade.c:
-; UpgradeNetworkCatalog, run once in the SYSTEM context through MS_TCPIP.Ipv6Upgrade) when the stack has IPv6 on. It reads the
+; UpgradeNetworkCatalog, run once in the SYSTEM context through MS_TCPIP.Ipv6Upgrade). It reads the
 ; entries (their PackedCatalogItem provider ids) and the next entry id from this section, so an entry added here is picked up with
 ; no code change. It is idempotent and must stay so: Transports is appended to, and the catalog count and next id come last.
 ; The next id must stay above every entry of the section, and the entry keys of the section must not be reused.
@@ -258,7 +258,7 @@ AddReg = TCPIP_AddReg_Ipv6.NT
 
 [TCPIP_AddReg_Ipv6.NT]
 ; The IPv6 transport: msafd finds the helper of an AF_INET6 socket through it (the same helper DLL; it makes the socket only while
-; the stack says it has IPv6 sockets on (Tcpip\Parameters\Ipv6Enable), so IPv6 sockets still fail with WSAEAFNOSUPPORT until then)
+; the stack says it takes IPv6 sockets, which it does even with Tcpip\Parameters\Ipv6Enable = 0: that only takes IPv6 off the adapters)
 HKLM,"SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\WinSock","UseDelayedAcceptance",0x00010001,0x00000000
 HKLM,"SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\WinSock","MaxSockAddrLength",0x00010001,0x0000001c
 HKLM,"SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\WinSock","MinSockAddrLength",0x00010001,0x0000001c
