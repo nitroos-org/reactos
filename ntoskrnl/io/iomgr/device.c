@@ -404,10 +404,10 @@ IopEditDeviceList(IN PDRIVER_OBJECT DriverObject,
  */
 static
 VOID
-IopNotifyAttachedDeviceOfDelete(IN PDEVICE_OBJECT DeviceObject)
+IopNotifyAttachedDeviceOfDelete(IN PDEVICE_OBJECT DeviceObject,
+                                IN PDEVICE_OBJECT AttachedDevice)
 {
     PEXTENDED_DEVOBJ_EXTENSION ThisExtension = IoGetDevObjExtension(DeviceObject);
-    PDEVICE_OBJECT AttachedDevice = DeviceObject->AttachedDevice;
     PFAST_IO_DISPATCH FastIoDispatch = AttachedDevice->DriverObject->FastIoDispatch;
 
     if (ThisExtension->ExtensionFlags & DOE_DETACH_NOTIFIED)
@@ -420,7 +420,9 @@ IopNotifyAttachedDeviceOfDelete(IN PDEVICE_OBJECT DeviceObject)
         return;
     }
 
-    ThisExtension->ExtensionFlags |= DOE_DETACH_NOTIFIED;
+    /* IoDeleteDevice and the last dereference may both get here: one of them tells the driver */
+    if (InterlockedOr((PLONG)&ThisExtension->ExtensionFlags, DOE_DETACH_NOTIFIED) & DOE_DETACH_NOTIFIED)
+        return;
     FastIoDispatch->FastIoDetachDevice(AttachedDevice, DeviceObject);
 }
 
@@ -430,16 +432,19 @@ IopUnloadDevice(IN PDEVICE_OBJECT DeviceObject)
 {
     PDRIVER_OBJECT DriverObject = DeviceObject->DriverObject;
     PEXTENDED_DEVOBJ_EXTENSION ThisExtension = IoGetDevObjExtension(DeviceObject);
+    PDEVICE_OBJECT AttachedDevice;
 
     /* Check if deletion is pending */
     if (ThisExtension->ExtensionFlags & DOE_DELETE_PENDING)
     {
-        if (DeviceObject->AttachedDevice)
+        /* Read once: the device on top may detach meanwhile */
+        AttachedDevice = *(PDEVICE_OBJECT volatile *)&DeviceObject->AttachedDevice;
+        if (AttachedDevice)
         {
             DPRINT("Device object is in the middle of a device stack\n");
 
             /* The device goes once the one on top has detached; its driver gets told */
-            IopNotifyAttachedDeviceOfDelete(DeviceObject);
+            IopNotifyAttachedDeviceOfDelete(DeviceObject, AttachedDevice);
             return;
         }
 
