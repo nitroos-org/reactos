@@ -170,9 +170,10 @@ KsecDeviceControl(
             break;
 
         default:
+            /* Any caller can open the device: an unknown code is an error, not a reason to break in */
             DPRINT1("Unhandled control code 0x%lx\n", IoControlCode);
-            __debugbreak();
-            return STATUS_INVALID_PARAMETER;
+            *OutputLength = 0;
+            return STATUS_INVALID_DEVICE_REQUEST;
     }
 
     return Status;
@@ -201,6 +202,14 @@ KsecDdDispatch(
         case IRP_MJ_CLOSE:
 
             /* Just return success */
+            Status = STATUS_SUCCESS;
+            Information = 0;
+            break;
+
+        case IRP_MJ_SHUTDOWN:
+
+            /* Save a random seed for the next start */
+            KsecShutdownRandom();
             Status = STATUS_SUCCESS;
             Information = 0;
             break;

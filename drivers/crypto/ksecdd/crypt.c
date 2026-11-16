@@ -46,9 +46,17 @@ KsecInitializeEncryptionSupport (
     KSEC_ENTROPY_DATA EntropyData;
     MD5_CTX Md5Context;
     UCHAR KeyDataBuffer[32];
+    UCHAR RandomData[64];
+    ULONG i;
+
+    /* Secret material from the system random number generator; the gathered data stays in, for the case where
+       the generator failed its self-test (then RandomData is zero) */
+    RtlZeroMemory(RandomData, sizeof(RandomData));
+    KsecGenRandom(RandomData, sizeof(RandomData));
 
     KsecGatherEntropyData(&EntropyData);
     MD5Init(&Md5Context);
+    MD5Update(&Md5Context, RandomData, 32);
     MD5Update(&Md5Context, (PVOID)&EntropyData, sizeof(EntropyData));
     KsecLoadTimeStartMd5s[0] = Md5Context;
     MD5Final(&Md5Context);
@@ -60,6 +68,12 @@ KsecInitializeEncryptionSupport (
     KsecLoadTimeStartMd5s[1] = Md5Context;
     MD5Final(&Md5Context);
     RtlCopyMemory(&KeyDataBuffer[16], &Md5Context.digest, 16);
+
+    /* The keys themselves are random: the MD5 values above only add to them */
+    for (i = 0; i < sizeof(KeyDataBuffer); i++)
+        KeyDataBuffer[i] ^= RandomData[32 + i];
+    RtlSecureZeroMemory(RandomData, sizeof(RandomData));
+    RtlSecureZeroMemory(&EntropyData, sizeof(EntropyData));
 
     /* Create the global keys */
     aes_setup(KeyDataBuffer, 32, 0, &KsecGlobalAesKey);

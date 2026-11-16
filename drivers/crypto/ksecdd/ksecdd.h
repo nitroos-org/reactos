@@ -91,6 +91,28 @@ KsecGenRandom(
     PVOID Buffer,
     SIZE_T Length);
 
+/* bcrypt.h values, for the kernel-mode BCryptGenRandom export */
+#define KSEC_BCRYPT_RNG_ALG_HANDLE              ((PVOID)(ULONG_PTR)0x81)
+#define KSEC_BCRYPT_RNG_USE_ENTROPY_IN_BUFFER   0x00000001
+#define KSEC_BCRYPT_USE_SYSTEM_PREFERRED_RNG    0x00000002
+
+NTSTATUS
+NTAPI
+BCryptGenRandom(
+    _In_opt_ PVOID Algorithm,
+    _Out_writes_bytes_(Count) PUCHAR Buffer,
+    _In_ ULONG Count,
+    _In_ ULONG Flags);
+
+NTSTATUS
+NTAPI
+KsecInitializeRandom(
+    _In_ PDEVICE_OBJECT DeviceObject);
+
+VOID
+NTAPI
+KsecShutdownRandom(VOID);
+
 VOID
 NTAPI
 KsecInitializeEncryptionSupport (

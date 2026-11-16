@@ -50,6 +50,17 @@ DriverEntry(
     DriverObject->MajorFunction[IRP_MJ_QUERY_INFORMATION] = KsecDdDispatch;
     DriverObject->MajorFunction[IRP_MJ_QUERY_VOLUME_INFORMATION] = KsecDdDispatch;
     DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = KsecDdDispatch;
+    DriverObject->MajorFunction[IRP_MJ_SHUTDOWN] = KsecDdDispatch;
+
+    /* The system random number generator first: the encryption keys come from it */
+    KsecInitializeRandom(KsecDeviceObject);
+
+    /* Write the saved random seed at shutdown */
+    Status = IoRegisterShutdownNotification(KsecDeviceObject);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("Failed to register for shutdown notification: 0x%lx\n", Status);
+    }
 
     /* Initialize */
     KsecInitializeEncryptionSupport();
