@@ -6907,7 +6907,7 @@ SampQueryUserAll(PSAM_DB_OBJECT UserObject,
     {
         Status = SampGetObjectAttributeString(UserObject,
                                               L"HomeDirectoryDrive",
-                                              &InfoBuffer->Home.HomeDirectoryDrive);
+                                              &InfoBuffer->All.HomeDirectoryDrive);
         if (!NT_SUCCESS(Status))
         {
             TRACE("Status 0x%08lx\n", Status);
