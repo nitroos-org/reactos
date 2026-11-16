@@ -284,9 +284,11 @@ MakeTestFile(PCWSTR Name, PWSTR Path, ULONG Length)
 ULONG
 CurrentFileSystem(void)
 {
-    WCHAR Root[4], Name[32];
+    WCHAR Root[MAX_PATH], Name[32];
 
-    GetWindowsDirectoryW(Root, RTL_NUMBER_OF(Root));
+    /* The whole path has to fit, or nothing is returned */
+    if (GetWindowsDirectoryW(Root, RTL_NUMBER_OF(Root)) < 3)
+        return 0;
     Root[3] = UNICODE_NULL;
     Root[2] = L'\\';
     if (!GetVolumeInformationW(Root, NULL, 0, NULL, NULL, NULL, Name, RTL_NUMBER_OF(Name)))
