@@ -34,21 +34,29 @@ static ULONGLONG LastSweep;
 #define DnsCacheUnlock()        do { LeaveCriticalSection(&DnsCache.Lock); } while (0)
 
 /*
- * The clock of the cache: milliseconds since the start, 64 bits wide. GetTickCount wraps after 49 days; it is
- * called with the lock held on every use of the cache, which is more often than that for as long as there are
- * entries (the longest an entry lives is MaxCacheTtl).
+ * The clock of the cache: milliseconds of the performance counter, 64 bits wide (it does not wrap, as GetTickCount does
+ * after 49 days). GetTickCount64 would do as well but is not in every version of kernel32 this service is built for.
  */
 static
 ULONGLONG
 CacheNow(VOID)
 {
-    static DWORD Last, High;
-    DWORD Tick = GetTickCount();
+    static LONGLONG Frequency;
+    LARGE_INTEGER Counter;
 
-    if (Tick < Last)
-        High++;
-    Last = Tick;
-    return ((ULONGLONG)High << 32) | Tick;
+    if (Frequency == 0)
+    {
+        LARGE_INTEGER Freq;
+
+        if (!QueryPerformanceFrequency(&Freq) || Freq.QuadPart <= 0)
+            Freq.QuadPart = 1000;
+        Frequency = Freq.QuadPart;
+    }
+    if (!QueryPerformanceCounter(&Counter))
+        return GetTickCount();
+
+    return (ULONGLONG)(Counter.QuadPart / Frequency) * 1000 +
+           (ULONGLONG)(Counter.QuadPart % Frequency) * 1000 / (ULONGLONG)Frequency;
 }
 
 static
