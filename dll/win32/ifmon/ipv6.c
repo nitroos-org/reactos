@@ -2672,8 +2672,9 @@ ParsePrivacyTime(
 /*
  * The stack reads the values when it starts (Tcpip6\Parameters, the names of Get-NetIPv6Protocol): store=persistent
  * (the default) writes them and says so; there is no active store for them. The stack makes the values fit together
- * (an address is valid at least as long as it is preferred and a new one is made before the old one is deprecated):
- * values that do not are refused here.
+ * (an address is valid at least as long as it is preferred, a new one is made before the old one is deprecated, and the
+ * random delay is at most 2/5 of the preferred lifetime and leaves the address preferred for longer than
+ * RegenerateTime, RFC 8981 3.8): values that do not are refused here.
  */
 static
 DWORD
@@ -2754,7 +2755,9 @@ Ipv6SetPrivacy(
 
     /* the values must fit together (the stack would change them otherwise) */
     if (Timing && (Params.DadAttempts > 10 || Params.MaxValid < 2 || Params.MaxPreferred == 0 ||
-                   Params.MaxPreferred > Params.MaxValid || Params.Regenerate >= Params.MaxPreferred))
+                   Params.MaxPreferred > Params.MaxValid || Params.Regenerate >= Params.MaxPreferred ||
+                   Params.MaxRandom > Params.MaxPreferred / 5 * 2 ||
+                   (ULONGLONG)Params.MaxRandom + Params.Regenerate >= Params.MaxPreferred))
         return ERROR_INVALID_PARAMETER;
 
     if (Values[STATE] == NULL && !Timing)
