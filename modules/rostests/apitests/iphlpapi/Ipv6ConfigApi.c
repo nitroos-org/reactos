@@ -376,7 +376,9 @@ static void TestAddress(ULONG IfIndex)
  * (a throwaway VM; the rows were added and removed again): an origin is a 4-bit value (16, Unchanged, for both
  * origins or none) and a change never changes the origins; SkipAsSource 255 is "not given"; a length of 255 is a
  * /128 on a creation; a metric has 31 bits; Publish and Immortal are true for 1 only; Origin and Loopback are
- * ignored; the site prefix length is 0 or 255; a prefix with bits after its length is refused; a preferred lifetime
+ * ignored; a site prefix length longer than the route's prefix is refused (0 and 255 are taken; the lengths between
+ * were not measured: taken here, as the field's documentation has them legal); a prefix with bits after its length
+ * is refused; a preferred lifetime
  * over the valid one is refused.
  */
 #define E_INVALID   ERROR_INVALID_PARAMETER
@@ -549,7 +551,9 @@ static void TestRouteFields(ULONG IfIndex)
         { 0xffffffff, 3 },
     };
     static const UCHAR Flags[] = { 0, 1, 2, 255 };
-    static const UCHAR Sites[] = { 1, 64, 128, 129, 254 };
+    /* the route is a /48: refused (measured), then taken (0 and 255 measured, 1 and 48 not: VERIFY ON ORACLE) */
+    static const UCHAR Sites[] = { 49, 64, 128, 129, 254 };
+    static const UCHAR SitesTaken[] = { 0, 1, 48, 255 };
     ROUTE_ROW6 Route, Got;
     DWORD Error;
     ULONG i;
@@ -615,7 +619,7 @@ static void TestRouteFields(ULONG IfIndex)
         pDeleteIpForwardEntry2(&Route);
     }
 
-    /* the site prefix length is 0 or 255 */
+    /* a site prefix length longer than the route's prefix is refused; the others are taken and read back as 0 */
     for (i = 0; i < sizeof(Sites) / sizeof(Sites[0]); i++)
     {
         InitFieldRoute(&Route, IfIndex);
@@ -625,6 +629,19 @@ static void TestRouteFields(ULONG IfIndex)
         if (Error == NO_ERROR)
             pDeleteIpForwardEntry2(&Route);
     }
+    for (i = 0; i < sizeof(SitesTaken) / sizeof(SitesTaken[0]); i++)
+    {
+        InitFieldRoute(&Route, IfIndex);
+        Route.SitePrefixLength = SitesTaken[i];
+        Error = pCreateIpForwardEntry2(&Route);
+        ok(Error == NO_ERROR, "site prefix length %u: %lu\n", SitesTaken[i], Error);
+        if (Error != NO_ERROR)
+            continue;
+        InitFieldRoute(&Got, IfIndex);
+        ok(pGetIpForwardEntry2(&Got) == NO_ERROR, "get\n");
+        ok(Got.SitePrefixLength == 0, "site prefix length %u reads %u\n", SitesTaken[i], Got.SitePrefixLength);
+        pDeleteIpForwardEntry2(&Route);
+    }
     InitFieldRoute(&Route, IfIndex);
     Route.SitePrefixLength = 0;
     Error = pCreateIpForwardEntry2(&Route);
@@ -632,6 +649,9 @@ static void TestRouteFields(ULONG IfIndex)
     Route.SitePrefixLength = 64;
     Error = pSetIpForwardEntry2(&Route);
     ok(Error == E_INVALID, "change to site prefix length 64: %lu\n", Error);
+    Route.SitePrefixLength = 32;
+    Error = pSetIpForwardEntry2(&Route);
+    ok(Error == NO_ERROR, "change to site prefix length 32: %lu\n", Error);
     pDeleteIpForwardEntry2(&Route);
 
     /* lifetimes: a valid lifetime of 0 is taken (the route lasts) */

@@ -24,7 +24,8 @@
  * RouterAdvertisement prefix with a Random suffix are refused), and a change of an address does not change its
  * origins; SkipAsSource 255 is "not given" (false on a creation, unchanged on a change), any other non-zero value is
  * true; an OnLinkPrefixLength of 255 is a /128 on a creation and the length it has on a change. A route's metric is
- * at most 0x7fffffff (-1 = not given), its SitePrefixLength 0 or 255, its Publish and Immortal are true only for 1,
+ * at most 0x7fffffff (-1 = not given), its SitePrefixLength not longer than its prefix or 255 (a /48 refuses 64 and
+ * more; the shorter lengths were not measured), its Publish and Immortal are true only for 1,
  * AutoconfigureAddress is true for 1 and 255 (not given), Origin and Loopback are ignored (reported as 0), the
  * protocol is kept whatever it is, and a prefix with bits after its length is ERROR_INVALID_PARAMETER for a
  * creation, a change and a removal (a lookup of it finds nothing). The preferred lifetime of an address or route may
@@ -344,11 +345,14 @@ static void legacy_row(const MIB_IPFORWARD_ROW2 *Row, DWORD IfIndex, PMIB_IPFORW
 }
 
 /* The fields a creation or a change of a route row gives (measured on Windows): the metric has 31 bits (-1: not
-   given), the site prefix length is 0 or 255, the preferred lifetime is not over the valid one */
+   given), the site prefix length is not longer than the route's prefix (255: not given), the preferred lifetime is
+   not over the valid one. The site prefix length is not kept (it reads 0). Measured: 0 and 255 taken, 64, 128, 129
+   and 254 refused for a /48 (and a /24 IPv4) route; the lengths up to the route's own were not measured, and the
+   documentation of the field calls 0..128 (IPv4 0..32) legal, so they are taken (VERIFY ON ORACLE) */
 static DWORD route_lifetimes_ok(const MIB_IPFORWARD_ROW2 *Row)
 {
   if ((Row->Metric > 0x7fffffff && Row->Metric != (ULONG)-1) ||
-      (Row->SitePrefixLength != 0 && Row->SitePrefixLength != 255) ||
+      (Row->SitePrefixLength != 255 && Row->SitePrefixLength > Row->DestinationPrefix.PrefixLength) ||
       Row->PreferredLifetime > Row->ValidLifetime)
     return ERROR_INVALID_PARAMETER;
   return NO_ERROR;
