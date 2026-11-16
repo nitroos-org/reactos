@@ -164,24 +164,37 @@ static const PCWSTR g_Order[] = {
     L"TTK", L"TTK2_22", L"TTK2_27", L"TTK2_28", L"Edge", L"Defer", L"Security", L"LSM", L"RUAuth", L"RMauth", L"LOwner"
 };
 
-static int OrderOf(PCWSTR k)
+/* Sort position of a token (twice the index in g_Order, so that a stray operator can take the place just in front of Platform).
+   Platform2 is the operator of the Platform entry directly in front of it in the string as it was read: it takes that
+   entry's position, so the stable sort keeps the pair together ("Platform=2:6:2|Platform2=GTEQ|Platform=2:6:1" must not
+   become two entries followed by one operator). A Platform2 that does not follow a Platform has no entry: it is sorted in
+   front of every Platform, where it still has no entry in front of it (an operator is never given to an entry it did not
+   come with, which would turn a rule that cannot be evaluated into "this version or later"). */
+static int OrderOf(PCWSTR k, BOOL paired)
 {
     int i;
-    /* Platform2 (the operator of the Platform entry in front of it) sorts with Platform, so the stable sort keeps the pair
-       together: "Platform=2:6:2|Platform2=GTEQ|Platform=2:6:1" must not become two entries followed by one operator */
     if (!_wcsicmp(k, L"Platform2")) k = L"Platform";
-    for (i = 0; i < (int)_countof(g_Order); i++) if (!_wcsicmp(k, g_Order[i])) return i;
-    return (int)_countof(g_Order);
+    else paired = TRUE;
+    for (i = 0; i < (int)_countof(g_Order); i++) if (!_wcsicmp(k, g_Order[i])) break;
+    if (i == (int)_countof(g_Order)) return 2 * i;
+    return (!paired && !_wcsicmp(k, L"Platform")) ? 2 * i - 1 : 2 * i;
 }
 
 VOID FwrNormalize(FWR *r)
 {
     ULONG i, j;
+    int *ord;
+    if (r->N < 2) return;
+    ord = HeapAlloc(GetProcessHeap(), 0, r->N * sizeof(int));
+    if (!ord) return;      /* left as it is: a valid order, only not the canonical one */
+    for (i = 0; i < r->N; i++)
+        ord[i] = OrderOf(r->T[i].Key, i > 0 && !_wcsicmp(r->T[i - 1].Key, L"Platform"));
     for (i = 1; i < r->N; i++)   /* stable insertion sort */
     {
         FWR_TOKEN t = r->T[i];
-        int o = OrderOf(t.Key);
-        for (j = i; j > 0 && OrderOf(r->T[j - 1].Key) > o; j--) r->T[j] = r->T[j - 1];
-        r->T[j] = t;
+        int o = ord[i];
+        for (j = i; j > 0 && ord[j - 1] > o; j--) { r->T[j] = r->T[j - 1]; ord[j] = ord[j - 1]; }
+        r->T[j] = t; ord[j] = o;
     }
+    HeapFree(GetProcessHeap(), 0, ord);
 }
