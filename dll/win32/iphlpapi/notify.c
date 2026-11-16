@@ -198,6 +198,15 @@ static const KIND_OPS Kinds[] =
   { sizeof(MIB_IPFORWARD_ROW2), snapshot_routes, same_route_key, same_route_data, IOCTL_IP_ROUTECHANGE_NOTIFY_REQUEST },
 };
 
+/* The operations of a registration kind; NULL for a kind that has no snapshot of rows (KIND_STABLE is a one-shot
+   wait with its own worker) or a value out of range. */
+static const KIND_OPS *kind_ops(int Kind)
+{
+  if (Kind < 0 || (SIZE_T)Kind >= sizeof(Kinds) / sizeof(Kinds[0]))
+    return NULL;
+  return &Kinds[Kind];
+}
+
 /* ---- the worker ---- */
 
 static BOOL is_stopping(MIB_NOTIFY *Notify)
@@ -208,10 +217,13 @@ static BOOL is_stopping(MIB_NOTIFY *Notify)
 /* Calls back for what differs between the last snapshot and a new one, and keeps the new one. */
 static void report_changes(MIB_NOTIFY *Notify)
 {
-  const KIND_OPS *Ops = &Kinds[Notify->Kind];
+  const KIND_OPS *Ops = kind_ops(Notify->Kind);
   PVOID NewRows = NULL;
   ULONG NewCount = 0, i, j;
   BYTE *Old, *New;
+
+  if (!Ops)
+    return;
 
   if (Ops->Snapshot(Notify->Family, &NewRows, &NewCount) != NO_ERROR)
     return;
@@ -260,7 +272,7 @@ static void free_notify(MIB_NOTIFY *Notify)
 
 static void notify_worker_main(MIB_NOTIFY *Notify)
 {
-  const KIND_OPS *Ops = &Kinds[Notify->Kind];
+  const KIND_OPS *Ops = kind_ops(Notify->Kind);
   IO_STATUS_BLOCK Iosb;
   NTSTATUS Status;
   HANDLE Wait[2];
@@ -270,6 +282,9 @@ static void notify_worker_main(MIB_NOTIFY *Notify)
   ULONG Families = (Notify->Family == AF_INET) ? TCP_CHANGE_FAMILY_IPV4 :
                    (Notify->Family == AF_INET6) ? TCP_CHANGE_FAMILY_IPV6 :
                    (TCP_CHANGE_FAMILY_IPV4 | TCP_CHANGE_FAMILY_IPV6);
+
+  if (!Ops)
+    return;
 
   Wait[0] = Notify->IoEvent;
   Wait[1] = Notify->Stop;
@@ -343,7 +358,7 @@ static DWORD register_notify(int Kind, ADDRESS_FAMILY Family, PVOID Callback, PV
   NTSTATUS Status;
   DWORD Result;
 
-  if ((Family != AF_UNSPEC && Family != AF_INET && Family != AF_INET6) || !NotificationHandle)
+  if ((Family != AF_UNSPEC && Family != AF_INET && Family != AF_INET6) || !NotificationHandle || !kind_ops(Kind))
     return ERROR_INVALID_PARAMETER;
 
   Notify = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*Notify));
@@ -370,7 +385,7 @@ static DWORD register_notify(int Kind, ADDRESS_FAMILY Family, PVOID Callback, PV
       free_notify(Notify);
       return Result;
     }
-    Result = Kinds[Kind].Snapshot(Family, &Notify->Rows, &Notify->Count);
+    Result = kind_ops(Kind)->Snapshot(Family, &Notify->Rows, &Notify->Count);
     if (Result != NO_ERROR)
     {
       free_notify(Notify);
