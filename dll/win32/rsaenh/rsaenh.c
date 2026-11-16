@@ -1806,6 +1806,8 @@ static BOOL pad_data_pkcs1(const BYTE *abData, DWORD dwDataLen, BYTE *abBuffer, 
         {
             if (!RtlGenRandom(&abBuffer[i], 1))
             {
+                /* do not leave the moved data (on export: the session key) in the buffer */
+                memset(abBuffer, 0, dwBufferLen);
                 SetLastError(NTE_FAIL);
                 return FALSE;
             }
@@ -3595,8 +3597,13 @@ BOOL WINAPI RSAENH_CPGenKey(HCRYPTPROV hProv, ALG_ID Algid, DWORD dwFlags, HCRYP
         case AT_SIGNATURE:
         case CALG_RSA_SIGN:
             *phKey = new_key(hProv, CALG_RSA_SIGN, dwFlags, &pCryptKey);
-            if (pCryptKey) { 
-                new_key_impl(pCryptKey->aiAlgid, &pCryptKey->context, pCryptKey->dwKeyLen);
+            if (pCryptKey) {
+                if (!new_key_impl(pCryptKey->aiAlgid, &pCryptKey->context, pCryptKey->dwKeyLen))
+                {
+                    RSAENH_CPDestroyKey(hProv, *phKey);
+                    *phKey = (HCRYPTKEY)INVALID_HANDLE_VALUE;
+                    return FALSE;
+                }
                 setup_key(pCryptKey);
                 release_and_install_key(hProv, *phKey,
                                         &pKeyContainer->hSignatureKeyPair,
@@ -3607,8 +3614,13 @@ BOOL WINAPI RSAENH_CPGenKey(HCRYPTPROV hProv, ALG_ID Algid, DWORD dwFlags, HCRYP
         case AT_KEYEXCHANGE:
         case CALG_RSA_KEYX:
             *phKey = new_key(hProv, CALG_RSA_KEYX, dwFlags, &pCryptKey);
-            if (pCryptKey) { 
-                new_key_impl(pCryptKey->aiAlgid, &pCryptKey->context, pCryptKey->dwKeyLen);
+            if (pCryptKey) {
+                if (!new_key_impl(pCryptKey->aiAlgid, &pCryptKey->context, pCryptKey->dwKeyLen))
+                {
+                    RSAENH_CPDestroyKey(hProv, *phKey);
+                    *phKey = (HCRYPTKEY)INVALID_HANDLE_VALUE;
+                    return FALSE;
+                }
                 setup_key(pCryptKey);
                 release_and_install_key(hProv, *phKey,
                                         &pKeyContainer->hKeyExchangeKeyPair,
