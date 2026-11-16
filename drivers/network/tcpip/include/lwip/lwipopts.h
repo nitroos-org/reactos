@@ -98,6 +98,9 @@
 #define LWIP_HOOK_IP6_SKIP_SOURCE(netif, i) LibIp6SkipSource(netif, i)
 /* Source address selection prefers a temporary address (RFC 6724 5 rule 7; NitroOS hook in ip6.c) */
 #define LWIP_HOOK_IP6_SOURCE_TEMPORARY(netif, i) LibIp6SourceTemporary(netif, i)
+/* Source address selection itself: RFC 6724 section 5 with the prefix policy table, the function user mode uses too
+ * (policy6.c, sdk/lib/addrsel; NitroOS hook in ip6.c). The candidates still pass the two hooks above */
+#define LWIP_HOOK_IP6_SELECT_SOURCE(netif, dest) LibIp6SelectSource(netif, dest)
 /* Neighbour discovery tables (lwIP's defaults are 10 neighbours, 10 destinations, 5 prefixes, 3 routers). A host with
  * a few dozen peers on the link (a server, a lab network, several addresses per peer) cycled the 10 neighbour entries and
  * asked again for each one; the destination cache keeps the next hop and path MTU of each destination it talks to.

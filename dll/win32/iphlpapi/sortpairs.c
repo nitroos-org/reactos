@@ -13,9 +13,9 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(iphlpapi);
 
-#define TCP6_PARAMETERS_KEY     L"SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters"
+#define TCP6_PARAMETERS_KEY     ADDRSEL_PARAMETERS_KEY
 #define TCP4_PARAMETERS_KEY     L"SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters"
-#define PREFIX_POLICIES_VALUE   L"PrefixPolicies"
+#define PREFIX_POLICIES_VALUE   ADDRSEL_POLICY_VALUE
 /* the documented limit: more destinations are rejected with ERROR_INVALID_PARAMETER */
 #define MAX_SORT_ADDRESSES      500
 
@@ -24,14 +24,14 @@ WINE_DEFAULT_DEBUG_CHANNEL(iphlpapi);
  * value PrefixPolicies (REG_MULTI_SZ, one "prefix/length precedence label" per string, e.g. "fc00::/7 3 13")
  * replaces the whole table when it holds at least one valid line; netsh can write it. Windows keeps its table in
  * the NSI store, which is not documented, so there is no Windows location to follow. It is read on every call
- * (a few microseconds), so a change applies to the next sort.
+ * (a few microseconds), so a change applies to the next sort; the stack, which chooses the source addresses with
+ * the same table, reads it again when NitroSetPrefixPolicies tells it to (addrsel.h).
  */
 /* "netsh interface ipv6 add prefixpolicy ... store=active" keeps its table in a volatile key below the one above, which
    wins over the stored value while it exists (it is gone when the computer restarts); a stored change removes it */
-#define ACTIVE_STATE_KEY        L"ActiveState"
-/* one line is at most "<39 characters>/128 100000 100000" */
-#define POLICY_LINE_CHARS       64
-#define POLICY_BUFFER_CHARS     (ADDRSORT_MAX_POLICY * POLICY_LINE_CHARS + 2)
+#define ACTIVE_STATE_KEY        ADDRSEL_ACTIVE_STATE_KEY
+#define POLICY_LINE_CHARS       ADDRSEL_POLICY_LINE_CHARS
+#define POLICY_BUFFER_CHARS     ADDRSEL_POLICY_BUFFER_CHARS
 
 /* The table of the value PrefixPolicies of Key, if it has at least one valid line */
 static
@@ -100,11 +100,28 @@ LoadPolicyEx(PADDRSORT_POLICY_TABLE Table, BOOL Stored)
     RegCloseKey(Key);
 }
 
-static
 VOID
-LoadPolicy(PADDRSORT_POLICY_TABLE Table)
+AddrSortLoadPolicy(PADDRSORT_POLICY_TABLE Table)
 {
     LoadPolicyEx(Table, FALSE);
+}
+
+/* The stack reads the table again (IOCTL_IP6_POLICY_RELOAD); IPv6 off or an older stack: nothing to tell */
+static
+VOID
+ReloadStackPolicy(VOID)
+{
+    HANDLE TcpFile;
+    IO_STATUS_BLOCK Iosb;
+    NTSTATUS Status;
+
+    Status = openTcpFile(&TcpFile, FILE_READ_DATA | FILE_WRITE_DATA);
+    if (!NT_SUCCESS(Status))
+        return;
+    Status = NtDeviceIoControlFile(TcpFile, NULL, NULL, NULL, &Iosb, IOCTL_IP6_POLICY_RELOAD, NULL, 0, NULL, 0);
+    if (!NT_SUCCESS(Status))
+        TRACE("the stack did not reload the prefix policies: 0x%lx\n", Status);
+    closeTcpFile(TcpFile);
 }
 
 /* NitroGetPrefixPolicies (iphlpapi_nitro.h): the table CreateSortedAddressPairs uses now, or the stored one */
@@ -228,6 +245,9 @@ NitroSetPrefixPolicies(BOOL Persistent, const NITRO_PREFIX_POLICY *Rows, ULONG C
         RegCloseKey(Key);
     }
     HeapFree(GetProcessHeap(), 0, Buffer);
+    /* the source addresses the stack chooses follow the new table at once, as the sort does */
+    if (Error == NO_ERROR)
+        ReloadStackPolicy();
     return Error;
 }
 
@@ -329,6 +349,8 @@ CollectLocal(PULONG Count)
         L->Deprecated = Row->DadState == 3 || Row->PreferredLifetime == 0;
         /* NL_SUFFIX_ORIGIN_RANDOM: the temporary (privacy) addresses */
         L->Temporary = Row->SuffixOrigin == 5;
+        /* configured skip-as-source: only the source of a packet to itself, as the stack has it */
+        L->SkipAsSource = Row->SkipAsSource ? TRUE : FALSE;
         L->Loopback = (Row->Address.si_family == AF_INET6) ?
                       (L->Address[15] == 1 && !memcmp(L->Address, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0", 15)) :
                       (L->Address[12] == 127);
@@ -384,7 +406,7 @@ CreateSortedAddressPairs(const PSOCKADDR_IN6 SourceAddressList,
         return ERROR_NOT_ENOUGH_MEMORY;
     Local = CollectLocal(&LocalCount);
 
-    LoadPolicy(&Policy);
+    AddrSortLoadPolicy(&Policy);
     Context.Local = Local;
     Context.LocalCount = LocalCount;
     Env.Policy = &Policy;

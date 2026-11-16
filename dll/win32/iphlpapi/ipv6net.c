@@ -7,6 +7,7 @@
 
 #include "iphlpapi_private.h"
 #include "ipv6net.h"
+#include "addrsort.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(iphlpapi);
 
@@ -539,70 +540,50 @@ DWORD Ipv6GetRouteRows(PMIB_IPFORWARD_ROW2 *Rows, ULONG *Count)
 
 /* ---- the best route ---- */
 
-/* The number of leading bits two addresses share */
-static ULONG common_bits(const UCHAR *A, const UCHAR *B)
-{
-  ULONG Bits = 0, i;
-  UCHAR Diff;
+/* At most this many addresses of one interface are candidates (the stack has 16 slots per interface) */
+#define MAX_SOURCE_CANDIDATES 32
 
-  for (i = 0; i < 16 && A[i] == B[i]; i++)
-    Bits += 8;
-  if (i == 16)
-    return Bits;
-  for (Diff = A[i] ^ B[i]; !(Diff & 0x80); Diff <<= 1)
-    Bits++;
-  return Bits;
-}
-
-/* A temporary address (RFC 8981): the stack reports its suffix origin as IpSuffixOriginRandom */
-static int is_temporary(const TCP_IPV6_ADDRESS_ROW *Row)
-{
-  return Row->SuffixOrigin == IpSuffixOriginRandom ? 1 : 0;
-}
-
-/* The address a packet to Dest leaves with over interface IfIndex */
+/*
+ * The address a packet to Dest leaves with over interface IfIndex: the stack's own choice (RFC 6724 section 5,
+ * AddrSortSelectSource of sdk/lib/addrsel, the function tcpip.sys calls for every TCP connection, UDP datagram and
+ * echo request, with the same prefix policy table), from the same address rows. A multicast destination keeps the
+ * link-local address of the interface when it has one (measured for a multicast destination without an interface).
+ */
 static void pick_source(const IPV6_ALL *All, DWORD IfIndex, const UCHAR *Dest, SOCKADDR_INET *Source)
 {
-  const TCP_IPV6_ADDRESS_ROW *LinkLocal = NULL, *Global = NULL, *Loopback = NULL, *Own = NULL;
-  const TCP_IPV6_ADDRESS_ROW *Chosen;
-  ULONG i;
+  ADDRSEL_CANDIDATE Candidates[MAX_SOURCE_CANDIDATES];
+  const TCP_IPV6_ADDRESS_ROW *Of[MAX_SOURCE_CANDIDATES];
+  const TCP_IPV6_ADDRESS_ROW *LinkLocal = NULL, *Chosen = NULL;
+  ADDRSORT_POLICY_TABLE Policy;
+  ULONG i, Count = 0;
+  LONG Best;
 
-  for (i = 0; i < All->State.Header->AddressCount; i++)
+  for (i = 0; i < All->State.Header->AddressCount && Count < MAX_SOURCE_CANDIDATES; i++)
   {
     const TCP_IPV6_ADDRESS_ROW *Row = &All->State.Addresses[i];
 
     if (Row->IfIndex != IfIndex || !usable_state(Row->DadState))
       continue;
-    if (!memcmp(Row->Address, Dest, 16))
-      Own = Row;
+    memcpy(Candidates[Count].Address, Row->Address, 16);
+    Candidates[Count].Deprecated = Row->DadState != DAD_PREFERRED;
+    /* a temporary address (RFC 8981): the stack reports its suffix origin as IpSuffixOriginRandom */
+    Candidates[Count].Temporary = Row->SuffixOrigin == IpSuffixOriginRandom;
     /* an address configured with skip-as-source is not chosen (only bound to) */
-    if (Row->Flags & TCP_IPV6_ADDRESS_SKIP_AS_SOURCE)
-      continue;
-    if (is_loopback_address(Row->Address))
-      Loopback = Row;
-    else if (is_link_local(Row->Address))
-    {
-      if (!LinkLocal)
-        LinkLocal = Row;
-    }
-    /* a preferred address before a deprecated one, a temporary one (suffix origin Random) before a public one,
-       then the longest prefix in common with the destination (RFC 6724 rules 3, 7 and 8, as the stack chooses) */
-    else if (!Global || (Global->DadState != DAD_PREFERRED && Row->DadState == DAD_PREFERRED) ||
-             (Global->DadState == Row->DadState &&
-              (is_temporary(Row) > is_temporary(Global) ||
-               (is_temporary(Row) == is_temporary(Global) &&
-                common_bits(Row->Address, Dest) > common_bits(Global->Address, Dest)))))
-      Global = Row;
+    Candidates[Count].SkipAsSource = (Row->Flags & TCP_IPV6_ADDRESS_SKIP_AS_SOURCE) ? TRUE : FALSE;
+    if (!LinkLocal && !Candidates[Count].SkipAsSource && is_link_local(Row->Address))
+      LinkLocal = Row;
+    Of[Count++] = Row;
   }
 
-  if (Own)
-    Chosen = Own;
-  else if (Loopback)
-    Chosen = Loopback;
-  else if (Dest[0] == 0xff || is_link_local(Dest))
-    Chosen = LinkLocal ? LinkLocal : Global;
+  if (Dest[0] == 0xff && LinkLocal)
+    Chosen = LinkLocal;
   else
-    Chosen = Global ? Global : LinkLocal;
+  {
+    AddrSortLoadPolicy(&Policy);
+    Best = AddrSortSelectSource(&Policy, Candidates, Count, Dest);
+    if (Best >= 0)
+      Chosen = Of[Best];
+  }
 
   if (!Chosen)
   {

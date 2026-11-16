@@ -283,6 +283,11 @@ BOOLEAN
 TCP6ReadTemporarySettings(VOID);
 VOID
 TCP6TemporaryStart(VOID);
+
+/* The prefix policy table of source address selection (ip/transport/tcp/policy6.c): read at start and on
+   IOCTL_IP6_POLICY_RELOAD (PASSIVE_LEVEL, no lock held) */
+NTSTATUS
+TCP6LoadPrefixPolicies(VOID);
 BOOLEAN
 TCP6TemporarySlot(struct netif *netif, signed char Slot);
 BOOLEAN

@@ -31,7 +31,7 @@ static void A6(const char *Text, UCHAR *Address)
     for (i = 0; Text[i] && i < 63; i++)
         Wide[i] = Text[i];
     Wide[i] = 0;
-    ok(ParseV6(Wide, i, Address) == i, "bad test address %s\n", Text);
+    ok(AddrSortParseAddress(Wide, i, Address) == i, "bad test address %s\n", Text);
 }
 
 static void A4(const char *Text, UCHAR *Address)
@@ -388,7 +388,8 @@ static void TestHosts(const ADDRSORT_POLICY_TABLE *Policy)
         Check("IPv4-only host", &H, Policy, L, 2, E, 1);
     }
 
-    /* link-local IPv6 only, with a default router: the destination is reachable but its source has the wrong scope */
+    /* link-local IPv6 only, with a default router: the global destination is reachable from the link-local
+       address (Windows sends from it); rule 2 puts the IPv4 destination, whose source has the same scope, first */
     H.V6Default = TRUE;
     {
         static const char *L[] = { "2001:db8::1", "192.0.2.7" };
@@ -448,6 +449,180 @@ static void TestOtherPolicy(void)
     Check("IPv4 preferred by DisabledComponents", &H, &Table, L, 2, E, 2);
 }
 
+/*
+ * The source address selection of the stack itself (AddrSortSelectSource, the function tcpip.sys calls for every
+ * IPv6 packet it sends, and GetBestRoute2 for its source answer): the addresses of one interface, each "address"
+ * or "address/flags" with d = deprecated, t = temporary, s = skip-as-source. Expect: the index of the source, -1
+ * none. 3fff::/20 (RFC 9637) stands for a global prefix of label 1.
+ */
+static void CheckPick(const char *Label, const ADDRSORT_POLICY_TABLE *Policy, const char **Addrs, ULONG Count,
+                      const char *Dest, LONG Expect)
+{
+    ADDRSEL_CANDIDATE C[16];
+    UCHAR D[16];
+    ULONG i;
+    LONG Got;
+
+    for (i = 0; i < Count; i++)
+    {
+        char Copy[64], *Flags;
+
+        strcpy(Copy, Addrs[i]);
+        memset(&C[i], 0, sizeof(C[i]));
+        Flags = strchr(Copy, '/');
+        if (Flags)
+        {
+            *Flags++ = 0;
+            C[i].Deprecated = strchr(Flags, 'd') != NULL;
+            C[i].Temporary = strchr(Flags, 't') != NULL;
+            C[i].SkipAsSource = strchr(Flags, 's') != NULL;
+        }
+        Addr(Copy, C[i].Address);
+    }
+    Addr(Dest, D);
+    Got = AddrSortSelectSource(Policy, C, Count, D);
+    ok(Got == Expect, "%s: source for %s is %ld (%s), expected %ld (%s)\n", Label, Dest, Got,
+       Got >= 0 ? Addrs[Got] : "none", Expect, Expect >= 0 ? Addrs[Expect] : "none");
+}
+
+static void TestSourceRules(const ADDRSORT_POLICY_TABLE *Policy)
+{
+    UCHAR A[16], B[16];
+
+    /* a new on-link prefix: the source of a packet into it is its address, not the older prefix's */
+    {
+        static const char *L[] = { "fe80::10", "3fff:a1::10", "3fff:b1::10" };
+
+        CheckPick("new prefix", Policy, L, 3, "3fff:b1::1", 2);
+        CheckPick("old prefix", Policy, L, 3, "3fff:a1::1", 1);
+    }
+    /* rule 3 before rule 8: a deprecated address loses even with the longer match */
+    {
+        static const char *L[] = { "fe80::10", "3fff:a1::10/d", "3fff:b1::10" };
+        static const char *P[] = { "fe80::10", "3fff:a1::10", "3fff:b1::10" };
+
+        CheckPick("deprecated avoided", Policy, L, 3, "3fff:a1:ff::1", 2);
+        CheckPick("deprecated avoided, on its own prefix", Policy, L, 3, "3fff:a1::1", 2);
+        CheckPick("both preferred: longest match", Policy, P, 3, "3fff:a1:ff::1", 1);
+        /* only deprecated ones: still a source */
+        {
+            static const char *O[] = { "fe80::10", "3fff:a1::10/d" };
+
+            CheckPick("only a deprecated global", Policy, O, 2, "3fff:ff::1", 1);
+        }
+    }
+    /* rule 6: the matching label wins over a longer match (2a00:: shares 4 bits with 2002::, 3 with 3fff::) */
+    {
+        static const char *L[] = { "fe80::10", "2002:c000:201::10", "3fff:a1::10" };
+
+        CheckPick("label: global destination, global source", Policy, L, 3, "2a00:ff::1", 2);
+        CheckPick("label: 6to4 destination, 6to4 source", Policy, L, 3, "2002:abcd::1", 1);
+    }
+    /* GUA and ULA on one interface: each destination takes the source of its kind */
+    {
+        static const char *L[] = { "fe80::10", "fd00:a1::10", "3fff:a1::10" };
+        static const char *R[] = { "fe80::10", "3fff:a1::10", "fd00:a1::10" };
+        static const char *Dep[] = { "fe80::10", "fd00:a1::10", "3fff:a1::10/d" };
+
+        CheckPick("ULA destination", Policy, L, 3, "fd00:ff::1", 1);
+        CheckPick("GUA destination", Policy, L, 3, "3fff:ff::1", 2);
+        CheckPick("ULA destination, other order", Policy, R, 3, "fd00:ff::1", 2);
+        CheckPick("GUA destination, other order", Policy, R, 3, "2a00::1", 1);
+        /* a ULA is of global scope (RFC 6724 3.1): a preferred ULA before a deprecated GUA, rule 3 before rule 6 */
+        CheckPick("deprecated GUA, preferred ULA", Policy, Dep, 3, "3fff:ff::1", 1);
+    }
+    /* rule 8: the longest matching prefix, not only "same /64 or not" */
+    {
+        static const char *L[] = { "fe80::10", "3fff:a1:0:1::10", "3fff:a1:0:2::10" };
+        static const char *R[] = { "fe80::10", "3fff:a1:0:2::10", "3fff:a1:0:1::10" };
+
+        CheckPick("longest prefix (63 bits against 62)", Policy, L, 3, "3fff:a1:0:3::1", 2);
+        CheckPick("longest prefix, other order", Policy, R, 3, "3fff:a1:0:3::1", 1);
+        /* 3fff:a1:0:0:ff::1 shares 63 bits with 3fff:a1:0:1::/64, 62 with 3fff:a1:0:2::/64 */
+        CheckPick("longest prefix (more bits of the first)", Policy, L, 3, "3fff:a1:0:0:ff::1", 1);
+        CheckPick("longest prefix (more bits of the first), other order", Policy, R, 3, "3fff:a1:0:0:ff::1", 2);
+    }
+    /* CommonPrefixLen stops at the /64 of the source: the interface identifier does not decide */
+    {
+        static const char *L[] = { "fe80::10", "3fff:a1:0:1:8000::1", "3fff:a1:0:1::10" };
+
+        CheckPick("prefix length capped at 64", Policy, L, 3, "3fff:a1:0:1::11", 1);
+        Addr("3fff:a1:0:1::10", A);
+        Addr("3fff:a1:0:1::11", B);
+        ok(AddrSortCommonPrefix(A, B) == 64, "CommonPrefixLen %lu\n", AddrSortCommonPrefix(A, B));
+        Addr("3fff:a1:0:3::1", B);
+        ok(AddrSortCommonPrefix(A, B) == 62, "CommonPrefixLen %lu\n", AddrSortCommonPrefix(A, B));
+        Addr("10.1.2.3", A);
+        Addr("10.1.2.4", B);
+        ok(AddrSortCommonPrefix(A, B) == 125, "CommonPrefixLen (IPv4) %lu\n", AddrSortCommonPrefix(A, B));
+    }
+    /* rule 7: a temporary address before a public one of the same state; rule 3 still comes first */
+    {
+        static const char *L[] = { "fe80::10", "3fff:a1::10", "3fff:a1::9d3c:11ff:fe01:7/t" };
+        static const char *D[] = { "fe80::10", "3fff:a1::10", "3fff:a1::9d3c:11ff:fe01:7/td" };
+
+        CheckPick("temporary preferred", Policy, L, 3, "3fff:ff::1", 2);
+        CheckPick("temporary preferred, on-link", Policy, L, 3, "3fff:a1::99", 2);
+        CheckPick("deprecated temporary loses", Policy, D, 3, "3fff:ff::1", 1);
+    }
+    /* rule 2: scope */
+    {
+        static const char *L[] = { "3fff:a1::10", "fe80::10", "fec0::10" };
+
+        CheckPick("link-local destination", Policy, L, 3, "fe80::99", 1);
+        CheckPick("site-local destination", Policy, L, 3, "fec0::99", 2);
+        CheckPick("global destination", Policy, L, 3, "3fff:ff::1", 0);
+        CheckPick("link-scope multicast", Policy, L, 3, "ff02::1", 1);
+        CheckPick("global multicast", Policy, L, 3, "ff0e::1", 0);
+    }
+    /* link-local only: the link-local address is the source for every destination (Windows sends from it) */
+    {
+        static const char *L[] = { "fe80::10" };
+        static const char *Loop[] = { "::1" };
+
+        CheckPick("link-local only, global destination", Policy, L, 1, "3fff:ff::1", 0);
+        CheckPick("link-local only, ULA destination", Policy, L, 1, "fd00::1", 0);
+        CheckPick("link-local only, site-local destination", Policy, L, 1, "fec0::1", 0);
+        CheckPick("link-local only, link-local destination", Policy, L, 1, "fe80::1", 0);
+        CheckPick("link-local only, global multicast", Policy, L, 1, "ff0e::1", 0);
+        CheckPick("loopback interface, global destination", Policy, Loop, 1, "3fff:ff::1", 0);
+        CheckPick("no address at all", Policy, L, 0, "3fff:ff::1", -1);
+    }
+    /* rule 1 and skip-as-source */
+    {
+        static const char *L[] = { "fe80::10", "3fff:a1::10/d", "3fff:a1::20/s", "3fff:a1::30" };
+        static const char *S[] = { "fe80::10", "3fff:a1::20/s" };
+
+        CheckPick("own deprecated address", Policy, L, 4, "3fff:a1::10", 1);
+        CheckPick("own skip-as-source address", Policy, L, 4, "3fff:a1::20", 2);
+        CheckPick("skip-as-source not chosen", Policy, L, 4, "3fff:a1::99", 3);
+        CheckPick("skip-as-source and link-local only: the link-local one", Policy, S, 2, "3fff:ff::1", 0);
+        CheckPick("skip-as-source only: none", Policy, S + 1, 1, "3fff:ff::1", -1);
+    }
+    /* IPv4: the IPv4 address, never an IPv6 one */
+    {
+        static const char *L[] = { "fe80::10", "3fff:a1::10", "192.0.2.10" };
+
+        CheckPick("IPv4 destination", Policy, L, 3, "198.51.100.1", 2);
+        CheckPick("IPv6 destination with IPv4 there", Policy, L, 3, "3fff:ff::1", 1);
+    }
+}
+
+/* the label rule follows the table: a table that gives 3fff::/16 the 6to4 label turns the choice around */
+static void TestSourcePolicy(void)
+{
+    ADDRSORT_POLICY_TABLE Table;
+    static const WCHAR Lines[] = L"::/0 40 1\0" L"3fff::/16 30 2\0" L"2002::/16 30 7\0\0";
+    static const char *L[] = { "fe80::10", "2002:c000:201::10", "3fff:a1::10" };
+
+    AddrSortDefaultPolicy(&Table);
+    ok(AddrSortParsePolicy(Lines, RTL_NUMBER_OF(Lines), &Table) == 3, "policy lines\n");
+    /* 2a00::1 has label 1, neither source has it now: rule 8 decides (2002:: shares 4 bits) */
+    CheckPick("other table: no label matches", &Table, L, 3, "2a00:ff::1", 1);
+    /* a destination in 3fff::/16 (label 2) */
+    CheckPick("other table: label 2 matches 3fff", &Table, L, 3, "3fff:ff::1", 2);
+}
+
 START_TEST(AddrSortEngine)
 {
     ADDRSORT_POLICY_TABLE Policy;
@@ -458,4 +633,6 @@ START_TEST(AddrSortEngine)
     TestOracle(&Policy);
     TestHosts(&Policy);
     TestOtherPolicy();
+    TestSourceRules(&Policy);
+    TestSourcePolicy();
 }

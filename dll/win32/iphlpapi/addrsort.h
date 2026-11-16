@@ -10,33 +10,14 @@
 
 #include <windef.h>
 #include <winbase.h>
+/* the policy table, scopes and source address selection, shared with the stack (sdk/lib/addrsel) */
+#include <addrsel.h>
 
 /*
  * All addresses are 16 bytes: IPv4 ones are IPv4-mapped (::ffff:a.b.c.d), as CreateSortedAddressPairs takes
  * them. The engine knows nothing about the stack: the addresses of the host and the route lookup are given in
  * the environment, so a test can sort a fixed list against a fixed host.
  */
-
-#define ADDRSORT_MAX_POLICY     64
-
-/* RFC 6724 scopes (the multicast scope values; unicast: 2 link-local, 5 site-local, 14 global) */
-#define ADDRSORT_SCOPE_LINK     2
-#define ADDRSORT_SCOPE_SITE     5
-#define ADDRSORT_SCOPE_GLOBAL   14
-
-typedef struct _ADDRSORT_POLICY
-{
-    UCHAR Prefix[16];
-    ULONG Length;               /* bits, 0..128 */
-    ULONG Precedence;
-    ULONG Label;
-} ADDRSORT_POLICY, *PADDRSORT_POLICY;
-
-typedef struct _ADDRSORT_POLICY_TABLE
-{
-    ULONG Count;
-    ADDRSORT_POLICY Entry[ADDRSORT_MAX_POLICY];
-} ADDRSORT_POLICY_TABLE, *PADDRSORT_POLICY_TABLE;
 
 /* A unicast address of this host that can be used as a source (tentative and duplicate ones are left out) */
 typedef struct _ADDRSORT_LOCAL
@@ -46,6 +27,7 @@ typedef struct _ADDRSORT_LOCAL
     BOOLEAN Deprecated;
     BOOLEAN Temporary;
     BOOLEAN Loopback;           /* the address is on the loopback interface */
+    BOOLEAN SkipAsSource;       /* configured skip-as-source: the source of a packet to itself only */
 } ADDRSORT_LOCAL, *PADDRSORT_LOCAL;
 
 /* The interface a packet to Dest (scope id Scope, 0 = none) leaves over. FALSE: no route, Dest cannot be reached */
@@ -75,27 +57,10 @@ typedef struct _ADDRSORT_ENTRY
     BOOLEAN Mapped, SrcDeprecated, Own, OwnOnLoopback;
 } ADDRSORT_ENTRY, *PADDRSORT_ENTRY;
 
-/* The Windows default prefix policy table (precedence, label, prefix) */
-VOID AddrSortDefaultPolicy(PADDRSORT_POLICY_TABLE Table);
-
-/* Tcpip6\Parameters\DisabledComponents bit 0x20 ("prefer IPv4 in the default prefix policy"): the IPv4-mapped prefix
-   ::ffff:0:0/96 gets precedence 100. Microsoft's documentation only asks for it to rank above ::/0 (40); 100 also puts
-   it above ::1/128 (50), and the value Windows uses is not documented */
-VOID AddrSortPreferIpv4(PADDRSORT_POLICY_TABLE Table);
-
-/*
- * The table from the lines of a REG_MULTI_SZ value ("prefix/length precedence label", one per string; a line
- * that does not parse is skipped). Returns the number of entries read; Table is filled with them only when it
- * is more than 0, so a value without a valid line leaves Table (the defaults) alone.
- */
-ULONG AddrSortParsePolicy(const WCHAR *MultiSz, ULONG Chars, PADDRSORT_POLICY_TABLE Table);
-
-/* Precedence and label of an address: the longest matching prefix of the table (0 and 0 when none matches) */
-VOID AddrSortLookupPolicy(const ADDRSORT_POLICY_TABLE *Table, const UCHAR *Address, PULONG Precedence, PULONG Label);
-
-ULONG AddrSortScope(const UCHAR *Address);
-
 /* Orders Entries (Count of them, Original and the outputs are filled in): stable, RFC 6724 section 6 */
 VOID AddrSortOrder(const ADDRSORT_ENV *Env, PADDRSORT_ENTRY Entries, ULONG Count);
+
+/* sortpairs.c: the table in force now (Tcpip6\Parameters, see addrsel.h), as the stack has it */
+VOID AddrSortLoadPolicy(PADDRSORT_POLICY_TABLE Table);
 
 #endif

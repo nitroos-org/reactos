@@ -2955,6 +2955,7 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         case IOCTL_IP6_ROUTE_CONFIG: /* TCP_IPV6_ROUTE_REQUEST: ULONGs and bytes, the same in both ABIs, no pointers. */
         case IOCTL_IP_INTERFACE_CONFIG: /* TCP_IP_INTERFACE_REQUEST: ULONGs, the same in both ABIs, no pointers. */
         case IOCTL_IP6_SOLICIT: /* TCP_IPV6_SOLICIT_REQUEST: a ULONG and bytes, the same in both ABIs, no pointers. */
+        case IOCTL_IP6_POLICY_RELOAD: /* NitroSetPrefixPolicies: no data. */
         case IOCTL_ICMP_ECHO_REQUEST: /* IcmpSendEcho2: the request has no pointers; tcpip writes the 32-bit reply layout. */
         case IOCTL_AFD_GET_TDI_HANDLES: /* AFD captures the 32-bit output handles. */
         case IOCTL_AFD_EVENT_SELECT: /* AFD captures event handles and the in/out record. */
