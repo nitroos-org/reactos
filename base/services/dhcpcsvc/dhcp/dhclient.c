@@ -101,6 +101,7 @@ int		 res_hnok(const char *dn);
 char		*option_as_string(unsigned int code, unsigned char *data, int len);
 int		 fork_privchld(int, int);
 int              check_arp( struct interface_info *ip, struct client_lease *lp );
+static VOID      DeleteLeftoverAddresses(PDHCP_ADAPTER Adapter, IPAddr Keep);
 
 #define	ADVANCE(x, n) (x += ROUNDUP((n)->sa_len))
 
@@ -577,6 +578,10 @@ void setup_adapter( PDHCP_ADAPTER Adapter, struct client_lease *new_lease ) {
         DeleteIPAddress( Adapter->NteContext );
         Adapter->NteContext = 0;
     }
+
+    /* The lease replaces an automatic private or alternate configuration address that an earlier run of this service
+       left on the adapter (a stop removes nothing): this run has no context for it, so the deletion above misses it */
+    DeleteLeftoverAddresses(Adapter, *((IPAddr*)new_lease->address.iabuf));
 
     /* Set up our default router if we got one from the DHCP server */
     if( new_lease->options[DHO_SUBNET_MASK].len == (int)sizeof(ULONG) ) {
@@ -1265,6 +1270,54 @@ FindExistingAddress(DWORD IfIndex, IPAddr Want, IPAddr *Address, ULONG *Context)
 }
 
 /*
+ * Delete what an earlier run of this service left on the adapter and the current configuration replaces: automatic
+ * private addresses and the address of the alternate configuration, except Keep (network order), the address this run
+ * uses. Without this a lease bound right after a restart (or an alternate configuration applied after one) leaves the
+ * old address next to the new one, and the old one stays the primary address of the interface.
+ */
+static VOID
+DeleteLeftoverAddresses(PDHCP_ADAPTER Adapter, IPAddr Keep)
+{
+    IPAddr Address;
+    ULONG Context;
+    int i;
+
+    /* bounded: a context the stack does not delete must not loop for ever */
+    for (i = 0; i < 4; i++)
+    {
+        if (!FindExistingAddress(Adapter->IfMib.dwIndex, INADDR_ANY, &Address, &Context) || Address == Keep)
+            break;
+        DH_DbgPrint(MID_TRACE,("DHCPCSVC: Deleting the automatic private address of an earlier run\n"));
+        if (DeleteIPAddress(Context) != NO_ERROR)
+            break;
+    }
+
+    if (Adapter->AlternateConfiguration != NULL &&
+        Adapter->AlternateConfiguration->IpAddress != 0 &&
+        htonl(Adapter->AlternateConfiguration->IpAddress) != Keep &&
+        FindExistingAddress(Adapter->IfMib.dwIndex, htonl(Adapter->AlternateConfiguration->IpAddress),
+                            &Address, &Context))
+    {
+        DH_DbgPrint(MID_TRACE,("DHCPCSVC: Deleting the alternate configuration address of an earlier run\n"));
+        DeleteIPAddress(Context);
+
+        /* and its default route: left in place it keeps the default route of the lease from being added */
+        if (Adapter->AlternateConfiguration->DefaultGateway != 0)
+        {
+            MIB_IPFORWARDROW Route;
+
+            ZeroMemory(&Route, sizeof(Route));
+            Route.dwForwardDest = 0;
+            Route.dwForwardMask = 0;
+            Route.dwForwardMetric1 = 1;
+            Route.dwForwardIfIndex = Adapter->IfMib.dwIndex;
+            Route.dwForwardNextHop = htonl(Adapter->AlternateConfiguration->DefaultGateway);
+            DeleteIpForwardEntry(&Route);
+        }
+    }
+}
+
+/*
  * state_panic gets called if we haven't received any offers in a preset
  * amount of time.   When this happens, we try to use existing leases
  * that haven't yet expired, and failing that, we call the client script
@@ -1313,6 +1366,9 @@ state_panic(void *ipp)
         {
             /* Use the alternate configuration */
             DH_DbgPrint(MID_TRACE,("DHCPCSVC: The alternate configuration will be used.\n"));
+
+            /* the alternate configuration replaces an automatic private address of an earlier run */
+            DeleteLeftoverAddresses(Adapter, htonl(Adapter->AlternateConfiguration->IpAddress));
 
             /* IPAddress & SubnetMask: the address of an earlier run of this service is still on the adapter (a stop
                removes nothing): keep it instead of adding it again */
