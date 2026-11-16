@@ -1037,7 +1037,8 @@ GetAddrInfoW(IN PCWSTR pszNodeName,
     }
 
     /*
-     * Whether the stack has IPv6 on (Tcpip\Parameters\Ipv6Enable, off by default). Off, every answer below is
+     * Whether the stack has IPv6 on (it is, unless it is too old to know the question; Ipv6Enable = 0 and
+     * DisabledComponents 0xFF keep it up for the loopback interface only). Off, every answer below is
      * the one of a system without IPv6. On, the names that mean this machine (no node, "localhost") answer
      * IPv6 before IPv4 as Windows 10 does, AI_ADDRCONFIG leaves the IPv6 answers out while no non-loopback IPv6
      * address is usable, and the IPv6 family is a family: it finds no IPv4 address (WSAHOST_NOT_FOUND) instead

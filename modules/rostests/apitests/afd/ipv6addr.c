@@ -14,25 +14,6 @@
 #include <winreg.h>
 
 static
-BOOL
-Ipv6SwitchOn(void)
-{
-    HKEY Key;
-    DWORD Type, Value = 0, Size = sizeof(Value);
-    BOOL On = FALSE;
-
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters",
-                      0, KEY_QUERY_VALUE, &Key) == ERROR_SUCCESS)
-    {
-        if (RegQueryValueExW(Key, L"Ipv6Enable", NULL, &Type, (LPBYTE)&Value, &Size) == ERROR_SUCCESS &&
-            Type == REG_DWORD && Value != 0)
-            On = TRUE;
-        RegCloseKey(Key);
-    }
-    return On;
-}
-
-static
 NTSTATUS
 AfdRawIoctl6(
     _In_ HANDLE Socket,
@@ -89,10 +70,9 @@ START_TEST(ipv6addr)
     HANDLE Socket;
     UCHAR Buffer[BIND6_LENGTH + 16];
     PAFD_BIND_DATA Bind = (PAFD_BIND_DATA)Buffer;
-    BOOL On = Ipv6SwitchOn();
+    /* the stack always takes IPv6 addresses (loopback), whatever Ipv6Enable says */
+    BOOL On = TRUE;
     int i;
-
-    trace("IPv6 switch (Tcpip\\Parameters\\Ipv6Enable): %s\n", On ? "on" : "off");
 
     for (i = 0; i < 2; i++)
     {

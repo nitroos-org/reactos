@@ -6,11 +6,11 @@
  *
  * A new install gets the Tcpip6 transport (Services\Tcpip6\Parameters\WinSock, its name in
  * Winsock\Parameters\Transports) and the AF_INET6 entries of the Winsock protocol catalog from nettcpip.inf.
- * An install made before they were added has neither, so IPv6 sockets could not be made on it with the stack's
- * switch (Tcpip\Parameters\Ipv6Enable) on.
+ * An install made before they were added has neither, so IPv6 sockets could not be made on it.
  *
- * Winlogon calls UpgradeNetworkCatalog at every start, in the SYSTEM context. It does nothing while the switch is
- * off (nothing is read from the INF, nothing is written), and nothing once it has settled the INF that is on the
+ * Winlogon calls UpgradeNetworkCatalog at every start, in the SYSTEM context. The stack always has IPv6 now (the
+ * loopback interface stays up even with Tcpip\Parameters\Ipv6Enable = 0), so it does not look at that value. It does
+ * nothing once it has settled the INF that is on the
  * disk: the size and last write time of nettcpip.inf are kept in the registry (Winsock2\Parameters\Ipv6CatalogInf)
  * when the catalog holds every entry of the INF section TCPIP_AddReg_Ipv6.NT or was left alone on purpose. So the
  * one-shot is per version of the INF: a later INF with more entries is looked at once.
@@ -32,7 +32,6 @@
 #include <debug.h>
 
 #define NU_SERVICES_KEY     L"SYSTEM\\CurrentControlSet\\Services"
-#define NU_TCPIP_KEY        NU_SERVICES_KEY L"\\Tcpip\\Parameters"
 #define NU_WINSOCK2_KEY     NU_SERVICES_KEY L"\\Winsock2\\Parameters"
 #define NU_CATALOG_KEY      NU_WINSOCK2_KEY L"\\Protocol_Catalog9"
 #define NU_ENTRIES_KEY      NU_CATALOG_KEY L"\\Catalog_Entries"
@@ -75,23 +74,6 @@ typedef BOOL (WINAPI *PFN_GETSTRING)(PINFCONTEXT, DWORD, PWSTR, DWORD, PDWORD);
 typedef BOOL (WINAPI *PFN_GETINT)(PINFCONTEXT, DWORD, PINT);
 typedef BOOL (WINAPI *PFN_GETBINARY)(PINFCONTEXT, DWORD, PBYTE, DWORD, PDWORD);
 typedef BOOL (WINAPI *PFN_INSTALL)(HWND, HINF, PCWSTR, UINT, HKEY, PCWSTR, UINT, PVOID, PVOID, HDEVINFO, PSP_DEVINFO_DATA);
-
-static
-BOOL
-NuSwitchOn(VOID)
-{
-    HKEY hKey;
-    DWORD Value = 0, Size = sizeof(Value), Type;
-    BOOL On = TRUE; /* the stack's default: on unless the value is a DWORD of 0 */
-
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, NU_TCPIP_KEY, 0, KEY_QUERY_VALUE, &hKey) != ERROR_SUCCESS)
-        return TRUE;
-    if (RegQueryValueExW(hKey, L"Ipv6Enable", NULL, &Type, (LPBYTE)&Value, &Size) == ERROR_SUCCESS &&
-        Type == REG_DWORD)
-        On = (Value != 0);
-    RegCloseKey(hKey);
-    return On;
-}
 
 static
 BOOL
@@ -345,8 +327,8 @@ NuReadSerial(VOID)
 }
 
 /*
- * Called by winlogon at every start (SYSTEM context). Cheap when there is nothing to do: the switch is
- * read, and the INF's size and time compared to the ones kept.
+ * Called by winlogon at every start (SYSTEM context). Cheap when there is nothing to do: the INF's size
+ * and time are compared to the ones kept.
  */
 BOOL
 WINAPI
@@ -360,9 +342,6 @@ UpgradeNetworkCatalog(VOID)
     NU_VERDICT Verdict;
     UINT Length;
     BOOL Read, Installed = FALSE;
-
-    if (!NuSwitchOn())
-        return TRUE;
 
     Length = GetSystemWindowsDirectoryW(szInf, MAX_PATH);
     if (Length == 0 || Length > MAX_PATH - 1)

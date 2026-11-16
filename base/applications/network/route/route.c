@@ -595,7 +595,7 @@ PrintIPv6RouteList(
     *pEntriesFound = EntriesFound;
 }
 
-/* An IPv6 stack that is off (Ipv6Enable=0) has no table: the section stays empty, as for a failed query.
+/* A stack without IPv6 (one too old to answer) has no table: the section stays empty, as for a failed query.
    *pHaveStack tells the persistent section whether there is an IPv6 stack to show routes of. */
 static
 DWORD

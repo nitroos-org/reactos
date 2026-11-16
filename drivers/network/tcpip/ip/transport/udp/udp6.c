@@ -184,11 +184,16 @@ Udp6DefaultMulticastNetif(VOID)
 
     /* An adapter that is up but whose link-local address has not passed duplicate address detection yet is still
        the interface of a group (a join made in the first second after the adapter came up would otherwise land
-       on the loopback interface, where a later leave without an interface does not find it) */
-    NETIF_FOREACH(netif)
+       on the loopback interface, where a later leave without an interface does not find it). Not while IPv6 is off
+       on the adapters (Ipv6Enable = 0, DisabledComponents 0x10): no adapter ever gets an address or sends IPv6 then,
+       and the group belongs to the loopback interface */
+    if (TCPIpv6Links)
     {
-        if (netif != LoopNetif && netif->state && netif_is_up(netif) && (netif->flags & NETIF_FLAG_LINK_UP))
-            return netif;
+        NETIF_FOREACH(netif)
+        {
+            if (netif != LoopNetif && netif->state && netif_is_up(netif) && (netif->flags & NETIF_FLAG_LINK_UP))
+                return netif;
+        }
     }
 
     return (LoopNetif && netif_is_up(LoopNetif)) ? LoopNetif : NULL;

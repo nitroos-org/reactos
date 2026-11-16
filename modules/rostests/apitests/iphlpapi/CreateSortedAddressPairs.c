@@ -186,6 +186,43 @@ static BOOL FirstAdapterAddress(SOCKADDR_IN6 *Out)
 }
 
 static BOOL Ipv6On;
+/* The default table prefers IPv4 over ::1 when Tcpip\Parameters\Ipv6Enable is 0 (an alias of DisabledComponents 0xFF)
+   or Tcpip6\Parameters\DisabledComponents has bit 0x20 */
+static BOOL Ipv4First;
+
+static BOOL ReadDword(const WCHAR *KeyName, const WCHAR *Name, DWORD *Value)
+{
+    HKEY Key;
+    DWORD Type, Size = sizeof(*Value);
+    BOOL Found = FALSE;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, KeyName, 0, KEY_QUERY_VALUE, &Key) == ERROR_SUCCESS)
+    {
+        Found = RegQueryValueExW(Key, Name, NULL, &Type, (LPBYTE)Value, &Size) == ERROR_SUCCESS && Type == REG_DWORD &&
+                Size == sizeof(*Value);
+        RegCloseKey(Key);
+    }
+    return Found;
+}
+
+static void ReadPolicyKnobs(void)
+{
+    DWORD Value;
+
+    Ipv4First = FALSE;
+    if (ReadDword(L"SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters", L"Ipv6Enable", &Value) && Value == 0)
+        Ipv4First = TRUE;
+    if (ReadDword(L"SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters", L"DisabledComponents", &Value) &&
+        (Value & 0x20))
+        Ipv4First = TRUE;
+}
+
+/* D[0] = 127.0.0.1, D[1] = ::1: the order the default table gives */
+static void ExpectDefaultOrder(const SOCKADDR_IN6 *D, SOCKADDR_IN6 *E)
+{
+    E[0] = Ipv4First ? D[0] : D[1];
+    E[1] = Ipv4First ? D[1] : D[0];
+}
 
 static void TestOrder(void)
 {
@@ -203,13 +240,12 @@ static void TestOrder(void)
     if (!Ipv6On)
         skip("IPv6 is off: no ::1\n");
 
-    /* 127.0.0.1 and ::1: ::1 has the higher precedence (50) whatever the order given */
+    /* 127.0.0.1 and ::1: ::1 has the higher precedence (50) whatever the order given, unless IPv4 is preferred */
     Mapped(&D[0], 127, 0, 0, 1);
     Loop6(&D[1]);
     if (Ipv6On)
     {
-        E[0] = D[1];
-        E[1] = D[0];
+        ExpectDefaultOrder(D, E);
         Sorted("::1 before 127.0.0.1", D, 2, E, 2);
         D[0] = E[0];
         D[1] = E[1];
@@ -325,8 +361,7 @@ static void TestRegistryPolicy(void)
 
     Mapped(&D[0], 127, 0, 0, 1);
     Loop6(&D[1]);
-    E[0] = D[1];
-    E[1] = D[0];
+    ExpectDefaultOrder(D, E);
     RegDeleteValueW(Key, L"PrefixPolicies");
     Sorted("default table", D, 2, E, 2);
 
@@ -339,8 +374,7 @@ static void TestRegistryPolicy(void)
     /* a value without a valid line leaves the defaults */
     Error = RegSetValueExW(Key, L"PrefixPolicies", 0, REG_MULTI_SZ, (const BYTE *)L"garbage\0\0", 18);
     ok(Error == ERROR_SUCCESS, "set bad value: %lu\n", Error);
-    E[0] = D[1];
-    E[1] = D[0];
+    ExpectDefaultOrder(D, E);
     Sorted("invalid table is ignored", D, 2, E, 2);
 
     if (Had)
@@ -366,6 +400,7 @@ START_TEST(CreateSortedAddressPairs)
         return;
     }
 
+    ReadPolicyKnobs();
     TestParameters();
     TestOrder();
     TestAlwaysAList();

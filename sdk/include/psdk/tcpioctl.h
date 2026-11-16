@@ -114,9 +114,10 @@ typedef struct _TCP_TIMEWAIT_ROW
 
 /* Non public TOIID: the IPv6 state of the stack, for iphlpapi and ws2_32. Asked of any network layer entity
    (CL_NL_ENTITY, instance 0); the answer is a TCP_IPV6_TABLE_HEADER, then InterfaceCount
-   TCP_IPV6_INTERFACE_ROW, then AddressCount TCP_IPV6_ADDRESS_ROW. Enabled is 0 (and both counts 0) while the
-   IPv6 switch (Tcpip\Parameters\Ipv6Enable) is off: that is the only thing user mode may take as "this
-   system has no IPv6". The sizes are the whole answer, as for the other tables: a caller whose buffer is too
+   TCP_IPV6_INTERFACE_ROW, then AddressCount TCP_IPV6_ADDRESS_ROW. Enabled 0 (and both counts 0), or a
+   stack that does not know the request, is the only thing user mode may take as "this system has no IPv6"; this
+   stack always answers TCP_IPV6_STATE_ON (Tcpip\Parameters\Ipv6Enable = 0 and Tcpip6\Parameters\DisabledComponents
+   0x10 clear only TCP_IPV6_STATE_LINKS). The sizes are the whole answer, as for the other tables: a caller whose buffer is too
    small gets the size that does and asks again */
 #define IP_IPV6_TABLE_ENTRY_ID          0x112
 
@@ -138,7 +139,7 @@ typedef struct _TCP_IPV6_TABLE_HEADER
 /* Enabled: the transport takes IPv6 addresses for raw IP: only then are AF_INET6 raw sockets made */
 #define TCP_IPV6_STATE_RAW              0x8
 /* Enabled: IPv6 is on the non-loopback interfaces too. Without it (Tcpip6\Parameters\DisabledComponents with the
-   0x10 bit) only the loopback interface has IPv6 (::1), and name resolution asks for no IPv6 addresses */
+   0x10 bit, or Tcpip\Parameters\Ipv6Enable = 0) only the loopback interface has IPv6 (::1), and name resolution asks for no IPv6 addresses */
 #define TCP_IPV6_STATE_LINKS            0x10
 
 /* IPv6 is usable on the interface */

@@ -238,18 +238,29 @@ static BOOL FindUsableV6(void)
     return Found;
 }
 
-static BOOL ReadSwitch(void)
+/* Whether IPv6 is on the adapters (the stack is up for the loopback interface either way): Ipv6Enable = 0 and
+   DisabledComponents with 0x10 (0xFF has it) leave it on the loopback interface only; an absent value is on */
+static BOOL ReadLinks(void)
 {
     HKEY Key;
     DWORD Value = 0, Size = sizeof(Value), Type = 0;
-    BOOL On = FALSE;
+    BOOL On = TRUE;
 
     if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters", 0, KEY_READ, &Key) ==
         ERROR_SUCCESS)
     {
         if (RegQueryValueExA(Key, "Ipv6Enable", NULL, &Type, (LPBYTE)&Value, &Size) == ERROR_SUCCESS &&
-            Type == REG_DWORD && Value != 0)
-            On = TRUE;
+            Type == REG_DWORD && Value == 0)
+            On = FALSE;
+        RegCloseKey(Key);
+    }
+    if (On && RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters", 0, KEY_READ,
+                            &Key) == ERROR_SUCCESS)
+    {
+        Size = sizeof(Value);
+        if (RegQueryValueExA(Key, "DisabledComponents", NULL, &Type, (LPBYTE)&Value, &Size) == ERROR_SUCCESS &&
+            Type == REG_DWORD && (Value & 0x10))
+            On = FALSE;
         RegCloseKey(Key);
     }
     return On;
@@ -658,14 +669,16 @@ START_TEST(getaddrinfo6)
     Error = WSAStartup(MAKEWORD(2, 2), &WsaData);
     ok_dec(Error, 0);
 
-    Ipv6On = ReadSwitch();
-    if (Ipv6On)
+    /* the stack always has IPv6 (the loopback interface): the "no usable address" answers are those of IPv6
+       off on the adapters */
+    Ipv6On = TRUE;
+    if (ReadLinks())
     {
         /* DAD takes a moment: wait until the link-local address can be used */
         for (i = 0; i < 30 && !(HasUsableV6 = FindUsableV6()); i++)
             Sleep(500);
     }
-    trace("Ipv6Enable is %s, usable non-loopback IPv6 address: %s\n", Ipv6On ? "on" : "off",
+    trace("IPv6 on the adapters: %s, usable non-loopback IPv6 address: %s\n", ReadLinks() ? "yes" : "no",
           HasUsableV6 ? "yes" : "no");
 
     for (i = 0; i < sizeof(Cases) / sizeof(Cases[0]); i++)

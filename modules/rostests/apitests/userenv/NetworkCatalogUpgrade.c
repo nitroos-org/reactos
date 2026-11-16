@@ -9,7 +9,7 @@
  * pushed down, an IPv4 entry sits where the INF has an IPv6 one) must be left alone, not rewritten.
  *
  * The test changes the catalog of the running system (and puts it back): it runs only as an administrator with the
- * IPv6 switch (Tcpip\Parameters\Ipv6Enable) on and the catalog the INF makes. Otherwise it skips.
+ * catalog the INF makes. Otherwise it skips.
  */
 
 #include <apitest.h>
@@ -87,21 +87,6 @@ EntryExists(PCWSTR pszEntry)
     return TRUE;
 }
 
-static BOOL
-SwitchIsOn(VOID)
-{
-    HKEY hKey;
-    DWORD Value = 1, Size = sizeof(Value), Type;
-
-    /* the stack's default is on: only a DWORD of 0 is off */
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, SERVICES L"\\Tcpip\\Parameters", 0, KEY_QUERY_VALUE, &hKey) != ERROR_SUCCESS)
-        return TRUE;
-    if (RegQueryValueExW(hKey, L"Ipv6Enable", NULL, &Type, (LPBYTE)&Value, &Size) != ERROR_SUCCESS || Type != REG_DWORD)
-        Value = 1;
-    RegCloseKey(hKey);
-    return Value != 0;
-}
-
 START_TEST(NetworkCatalogUpgrade)
 {
     BYTE Entry1[BLOB_MAX], Entry4[BLOB_MAX], Check[BLOB_MAX];
@@ -115,11 +100,6 @@ START_TEST(NetworkCatalogUpgrade)
     if (!s_Upgrade)
     {
         skip("UpgradeNetworkCatalog is not exported\n");
-        return;
-    }
-    if (!SwitchIsOn())
-    {
-        skip("The IPv6 switch is off\n");
         return;
     }
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, ENTRIES L"\\000000000006", 0, KEY_ALL_ACCESS, &hKey) != ERROR_SUCCESS)
