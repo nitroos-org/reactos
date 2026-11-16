@@ -8646,6 +8646,261 @@ static void test_ipv6_literals(void)
     }
 }
 
+enum tls_proxy_auth { TLS_PROXY_NO_AUTH, TLS_PROXY_BASIC, TLS_PROXY_NTLM };
+
+struct tls_proxy
+{
+    SOCKET listener;
+    volatile LONG stop;
+    enum tls_proxy_auth auth;     /* what the proxy asks for before it answers a CONNECT with 200 */
+    int conns;                    /* connections the proxy accepted */
+    int connects;                 /* tunnels: "CONNECT <target> HTTP/1.x" answered with 200 */
+    int plain;                    /* requests that were not CONNECT <target> */
+    int auth407;                  /* 407 answers */
+    int ntlm_type3;               /* NTLM AUTHENTICATE messages */
+    unsigned short hello_ver[4];  /* client_version of the ClientHello after each tunnel */
+    char target[64];
+};
+
+/* reads one request head (up to the empty line); returns its length, 0 when the peer closed or timed out */
+static int tls_proxy_recv_head(SOCKET c, char *req, int size)
+{
+    int i, r;
+
+    for (i = 0; i < size - 1; i++)
+    {
+        r = recv(c, &req[i], 1, 0);
+        if (r != 1) break;
+        if (i >= 3 && !memcmp(&req[i - 3], "\r\n\r\n", 4)) { i++; break; }
+    }
+    req[i] = 0;
+    return (i >= 4 && !memcmp(&req[i - 4], "\r\n\r\n", 4)) ? i : 0;
+}
+
+static DWORD CALLBACK tls_proxy_thread(void *param)
+{
+    static const char ok200[] = "HTTP/1.1 200 Connection established\r\n\r\n";
+    static const char hello[] = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello";
+    static const char basic407[] = "HTTP/1.1 407 Proxy Authentication Required\r\n"
+        "Proxy-Authenticate: Basic realm=\"tls\"\r\nContent-Length: 0\r\n\r\n";
+    static const char ntlm407[] = "HTTP/1.1 407 Proxy Authentication Required\r\n"
+        "Proxy-Authenticate: NTLM\r\nContent-Length: 0\r\n\r\n";
+    /* CHALLENGE_MESSAGE (MS-NLMP 2.2.1.2): target "D", fixed server challenge, target info NbComputerName "S",
+     * NbDomainName "D"; the proxy accepts any AUTHENTICATE message after it */
+    static const char ntlm407_challenge[] = "HTTP/1.1 407 Proxy Authentication Required\r\n"
+        "Proxy-Authenticate: NTLM TlRMTVNTUAACAAAAAgACADAAAAAFgokAASNFZ4mrze8AAAAAAAAAABAAEAAyAAAARAABAAIAUwACAAIARAAAAAAA\r\n"
+        "Content-Length: 0\r\n\r\n";
+    /* fatal alert, protocol_version: every handshake fails with a security channel error */
+    static const unsigned char alert[] = { 0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x46 };
+    struct tls_proxy *p = param;
+
+    while (!p->stop)
+    {
+        struct timeval tv = { 0, 100000 };
+        char req[2048], want[96];
+        unsigned char ch[600];
+        DWORD to = 3000;
+        SOCKET c;
+        fd_set rs;
+        int r;
+
+        FD_ZERO(&rs);
+        FD_SET(p->listener, &rs);
+        if (select(0, &rs, NULL, NULL, &tv) < 1) continue;
+        c = accept(p->listener, NULL, NULL);
+        if (c == INVALID_SOCKET) continue;
+        setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, (char *)&to, sizeof(to));
+        p->conns++;
+        /* Windows sends CONNECT as HTTP/1.0, Wine as HTTP/1.1 */
+        sprintf(want, "CONNECT %s HTTP/1.", p->target);
+        while (tls_proxy_recv_head(c, req, sizeof(req)))
+        {
+            if (strncmp(req, want, strlen(want)))
+            {
+                p->plain++;
+                send(c, hello, sizeof(hello) - 1, 0);
+                break;
+            }
+            if (p->auth == TLS_PROXY_BASIC && !strstr(req, "\r\nProxy-Authorization: Basic "))
+            {
+                p->auth407++;
+                send(c, basic407, sizeof(basic407) - 1, 0);
+                continue;
+            }
+            if (p->auth == TLS_PROXY_NTLM)
+            {
+                if (strstr(req, "\r\nProxy-Authorization: NTLM TlRMTVNTUAAB"))
+                {
+                    p->auth407++;
+                    send(c, ntlm407_challenge, sizeof(ntlm407_challenge) - 1, 0);
+                    continue;
+                }
+                if (!strstr(req, "\r\nProxy-Authorization: NTLM TlRMTVNTUAAD"))
+                {
+                    p->auth407++;
+                    send(c, ntlm407, sizeof(ntlm407) - 1, 0);
+                    continue;
+                }
+                p->ntlm_type3++;
+            }
+            send(c, ok200, sizeof(ok200) - 1, 0);
+            r = recv(c, (char *)ch, sizeof(ch), 0);
+            if (r >= 11 && ch[0] == 0x16 && p->connects < ARRAY_SIZE(p->hello_ver))
+                p->hello_ver[p->connects] = (ch[9] << 8) | ch[10];
+            p->connects++;
+            send(c, (const char *)alert, sizeof(alert), 0);
+            break;
+        }
+        closesocket(c);
+    }
+    return 0;
+}
+
+static char tls_cb_addr[8][64];
+static int tls_cb_count;
+static BOOL tls_cb_all_proxy;
+
+static void CALLBACK tls_proxy_status_cb(HINTERNET handle, DWORD_PTR ctx, DWORD status, void *info, DWORD len)
+{
+    if (status != INTERNET_STATUS_CONNECTING_TO_SERVER && status != INTERNET_STATUS_CONNECTED_TO_SERVER) return;
+    if (tls_cb_count < ARRAY_SIZE(tls_cb_addr))
+        lstrcpynA(tls_cb_addr[tls_cb_count], info && len ? info : "(none)", sizeof(tls_cb_addr[0]));
+    tls_cb_count++;
+    if (!info || !len || strcmp(info, "127.0.0.1") || len != 10) tls_cb_all_proxy = FALSE;
+}
+
+/* HTTPS through an explicit proxy whose tunnel fails the handshake: the retry without TLS 1.1/1.2 goes to the
+ * proxy again (a new CONNECT), never to the host (whose address is not resolved when a proxy is used); the
+ * CONNECTING/CONNECTED callbacks carry the proxy address. Windows makes a new CONNECT with a TLS 1.0 ClientHello
+ * after the TLS 1.2 one (then a third CONNECT without a handshake) and names the proxy in the callbacks of a plain
+ * request. The host is a name that never resolves: a connection around the proxy cannot succeed.
+ * With proxy authentication the retry authenticates again: Basic is sent again, NTLM (bound to the connection)
+ * runs its handshake again on the new connection. */
+static void tls_fallback_proxy_run(enum tls_proxy_auth auth)
+{
+    static const char *names[] = { "no auth", "Basic", "NTLM" };
+    struct sockaddr_in sa;
+    struct tls_proxy proxy;
+    HINTERNET ses, con, req;
+    WCHAR wproxy[32];
+    DWORD err, tmo = 15000;
+    HANDLE thread;
+    BOOL ret;
+    int len = sizeof(sa), i;
+
+    winetest_push_context("%s", names[auth]);
+    memset(&proxy, 0, sizeof(proxy));
+    proxy.auth = auth;
+    proxy.listener = socket(AF_INET, SOCK_STREAM, 0);
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(proxy.listener, (struct sockaddr *)&sa, sizeof(sa)) || getsockname(proxy.listener, (struct sockaddr *)&sa, &len)
+        || listen(proxy.listener, 4))
+    {
+        skip("no loopback sockets\n");
+        closesocket(proxy.listener);
+        winetest_pop_context();
+        return;
+    }
+    sprintf(proxy.target, "example.invalid:%u", 4443);
+    thread = CreateThread(NULL, 0, tls_proxy_thread, &proxy, 0, NULL);
+
+    swprintf(wproxy, ARRAY_SIZE(wproxy), L"127.0.0.1:%u", ntohs(sa.sin_port));
+    ses = InternetOpenW(L"winetest", INTERNET_OPEN_TYPE_PROXY, wproxy, NULL, 0);
+    ok(ses != NULL, "InternetOpen failed %lu\n", GetLastError());
+    InternetSetOptionW(ses, INTERNET_OPTION_RECEIVE_TIMEOUT, &tmo, sizeof(tmo));
+    pInternetSetStatusCallbackA(ses, tls_proxy_status_cb);
+    con = InternetConnectW(ses, L"example.invalid", 4443, NULL, NULL, INTERNET_SERVICE_HTTP, 0, 1);
+    ok(con != NULL, "InternetConnect failed %lu\n", GetLastError());
+
+    if (auth == TLS_PROXY_NO_AUTH)
+    {
+        /* plain HTTP through the proxy: the callbacks name the proxy */
+        tls_cb_count = 0;
+        tls_cb_all_proxy = TRUE;
+        req = HttpOpenRequestW(con, L"GET", L"/", NULL, NULL, NULL, INTERNET_FLAG_NO_CACHE_WRITE | INTERNET_FLAG_RELOAD, 1);
+        ok(req != NULL, "HttpOpenRequest failed %lu\n", GetLastError());
+        ret = HttpSendRequestW(req, NULL, 0, NULL, 0);
+        ok(ret, "HttpSendRequest failed %lu\n", GetLastError());
+        ok(proxy.plain == 1, "got %d plain requests at the proxy\n", proxy.plain);
+        ok(tls_cb_count == 2, "got %d connect callbacks\n", tls_cb_count);
+        ok(tls_cb_all_proxy, "callbacks: %s / %s, expected the proxy 127.0.0.1\n", tls_cb_addr[0], tls_cb_addr[1]);
+        InternetCloseHandle(req);
+    }
+
+    /* HTTPS: every handshake fails */
+    tls_cb_count = 0;
+    tls_cb_all_proxy = TRUE;
+    req = HttpOpenRequestW(con, L"GET", L"/", NULL, NULL, NULL,
+                           INTERNET_FLAG_SECURE | INTERNET_FLAG_NO_CACHE_WRITE | INTERNET_FLAG_RELOAD, 1);
+    ok(req != NULL, "HttpOpenRequest failed %lu\n", GetLastError());
+    if (auth != TLS_PROXY_NO_AUTH)
+    {
+        ret = InternetSetOptionW(req, INTERNET_OPTION_PROXY_USERNAME, (void *)L"user", 5);
+        ok(ret, "set proxy user name failed %lu\n", GetLastError());
+        ret = InternetSetOptionW(req, INTERNET_OPTION_PROXY_PASSWORD, (void *)L"pass", 5);
+        ok(ret, "set proxy password failed %lu\n", GetLastError());
+    }
+    SetLastError(0xdeadbeef);
+    ret = HttpSendRequestW(req, NULL, 0, NULL, 0);
+    err = GetLastError();
+    if (ret)
+    {
+        DWORD status = 0, size = sizeof(status);
+
+        HttpQueryInfoW(req, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER, &status, &size, NULL);
+        ok(0, "HttpSendRequest succeeded, status %lu\n", status);
+    }
+    else
+        ok(err == ERROR_INTERNET_SECURITY_CHANNEL_ERROR || err == ERROR_INTERNET_CANNOT_CONNECT, "got %lu\n", err);
+    InternetCloseHandle(req);
+    InternetCloseHandle(con);
+    InternetCloseHandle(ses);
+
+    proxy.stop = 1;
+    WaitForSingleObject(thread, 5000);
+    CloseHandle(thread);
+    closesocket(proxy.listener);
+
+    if (auth == TLS_PROXY_NTLM && !proxy.ntlm_type3)
+    {
+        skip("no NTLM AUTHENTICATE message reached the proxy (%d connections, %d 407 answers)\n", proxy.conns, proxy.auth407);
+        winetest_pop_context();
+        return;
+    }
+    ok(proxy.plain == (auth == TLS_PROXY_NO_AUTH), "%d connections, %d CONNECT %s, %d other requests\n",
+       proxy.conns, proxy.connects, proxy.target, proxy.plain);
+    ok(proxy.connects == 2 || broken(proxy.connects == 3), "got %d tunnels, expected the first and the retry\n",
+       proxy.connects);
+    for (i = 0; i < 2 && i < proxy.connects; i++)
+        ok(proxy.hello_ver[i] != 0, "tunnel %d: no ClientHello\n", i);
+    if (proxy.connects >= 2)
+        ok(proxy.hello_ver[1] < proxy.hello_ver[0], "retry hello 0x%04x not below the first 0x%04x\n",
+           proxy.hello_ver[1], proxy.hello_ver[0]);
+    if (auth == TLS_PROXY_NO_AUTH)
+    {
+        ok(tls_cb_count == 4 || broken(!tls_cb_count), "got %d connect callbacks\n", tls_cb_count);
+        ok(tls_cb_all_proxy, "callbacks: %s %s %s %s, expected the proxy 127.0.0.1\n", tls_cb_addr[0], tls_cb_addr[1],
+           tls_cb_addr[2], tls_cb_addr[3]);
+    }
+    else if (auth == TLS_PROXY_BASIC)
+        ok(proxy.auth407 >= 1 && proxy.auth407 <= proxy.connects, "got %d 407 answers\n", proxy.auth407);
+    else
+        ok(proxy.ntlm_type3 == proxy.connects, "%d NTLM handshakes for %d tunnels\n", proxy.ntlm_type3, proxy.connects);
+    winetest_pop_context();
+}
+
+static void test_tls_fallback_through_proxy(void)
+{
+    WSADATA wsa;
+
+    WSAStartup(MAKEWORD(2, 2), &wsa);
+    tls_fallback_proxy_run(TLS_PROXY_NO_AUTH);
+    tls_fallback_proxy_run(TLS_PROXY_BASIC);
+    tls_fallback_proxy_run(TLS_PROXY_NTLM);
+}
+
 START_TEST(http)
 {
     HMODULE hdll;
@@ -8668,6 +8923,7 @@ START_TEST(http)
     init_events();
     init_status_tests();
     test_ipv6_literals();
+    test_tls_fallback_through_proxy();
     test_InternetCloseHandle();
     InternetReadFile_test(INTERNET_FLAG_ASYNC, &test_data[0]);
     InternetReadFile_test(INTERNET_FLAG_ASYNC, &test_data[1]);

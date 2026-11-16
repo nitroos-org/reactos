@@ -412,7 +412,10 @@ WCHAR *INTERNET_FindProxyForProtocol(LPCWSTR szProxy, LPCWSTR proto);
 DWORD create_netconn(server_t*,DWORD,BOOL,DWORD,netconn_t**);
 void free_netconn(netconn_t*);
 void NETCON_unload(void);
-DWORD NETCON_secure_connect(netconn_t*,server_t*);
+#define NETCON_TLS_NO_FALLBACK 1
+#define NETCON_TLS_COMPAT      2
+DWORD NETCON_secure_connect(netconn_t*,server_t*,DWORD);
+BOOL NETCON_have_tls_compat(void);
 DWORD NETCON_send(netconn_t *connection, const void *msg, size_t len, int flags,
 		int *sent /* out */);
 DWORD NETCON_recv(netconn_t*,void*,size_t,BOOL,int*);
