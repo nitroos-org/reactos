@@ -77,6 +77,19 @@ typedef enum _FLTP_PRE_RESULT
 
 /* PRIVATE FUNCTIONS ********************************************************/
 
+/* The registration of a filter for an operation: an IRP major function or an FsFilter one */
+static
+PFLT_OPERATION_REGISTRATION
+OperationOf(_In_ PFLT_FILTER Filter,
+            _In_ UCHAR Major)
+{
+    if (Major <= IRP_MJ_MAXIMUM_FUNCTION)
+        return Filter->OperationTable[Major];
+    if (FLTP_IS_FSFILTER(Major))
+        return Filter->FsFilterTable[FLTP_FSFILTER_INDEX(Major)];
+    return NULL;
+}
+
 static
 VOID
 InitRelatedObjects(_Out_ PFLT_RELATED_OBJECTS Objects,
@@ -468,7 +481,7 @@ RunPostOperations(_Inout_ PFLTP_IRPCTRL Ctrl,
             continue;
         }
 
-        Op = Node->Instance->Filter->OperationTable[Ctrl->MajorFunction];
+        Op = OperationOf(Node->Instance->Filter, Ctrl->MajorFunction);
 
         /* An instance which is being torn down must not rely on anything but the operation itself */
         Flags = (Node->Instance->Flags & INSFL_DELETING) ? FLTFL_POST_OPERATION_DRAINING : 0;
@@ -1237,6 +1250,230 @@ Quit:
     if (Ctrl)
         FreeCtrl(Ctrl);
     return Result;
+}
+
+/* The volume behind the top device of a file system stack: ours, or one below some other filter's */
+static
+PFLT_VOLUME
+VolumeOfStack(_In_ PDEVICE_OBJECT Top)
+{
+    PDEVICE_OBJECT Device, Lower;
+    PFLT_VOLUME Volume = NULL;
+
+    if (Top == NULL)
+        return NULL;
+    if (Top->DriverObject == DriverData.DriverObject)
+        return Top->DeviceExtension ? ((PFLTMGR_DEVICE_EXTENSION)Top->DeviceExtension)->Volume : NULL;
+
+    ObReferenceObject(Top);
+    for (Device = Top; Device; Device = Lower)
+    {
+        if (Device->DriverObject == DriverData.DriverObject)
+        {
+            if (Device->DeviceExtension)
+                Volume = ((PFLTMGR_DEVICE_EXTENSION)Device->DeviceExtension)->Volume;
+            ObDereferenceObject(Device);
+            break;
+        }
+        Lower = IoGetLowerDeviceObject(Device);
+        ObDereferenceObject(Device);
+    }
+
+    return Volume;
+}
+
+/*
+ * The FsFilter operations (section synchronization, modified page writer, cache flush) come to the
+ * FsRtl filter callbacks of the filter manager, from FsRtl, in the thread which wants the file's
+ * resources, at IRQL <= APC_LEVEL. The instances of the volume which registered for the operation
+ * (IRP_MJ_ACQUIRE_FOR_SECTION_SYNCHRONIZATION and the other FsFilter "major functions") see it with
+ * callback data flagged FLTFL_CALLBACK_DATA_FS_FILTER_OPERATION.
+ *
+ * A pre-operation which completes the operation with a failure status fails it: that is how an
+ * anti-virus filter keeps a file from being mapped (executed). A success status of a completing
+ * filter lets the operation go on as usual: the file system still takes its resources, since the
+ * release always comes. These operations can't pend (FLT_PREOP_PENDING is taken as
+ * FLT_PREOP_SUCCESS_NO_CALLBACK). The post-operations run in the post-callback, which FsRtl only
+ * calls if the pre-callback succeeded; until then the block is the completion context.
+ */
+NTSTATUS
+NTAPI
+FltpPreFsFilterOperation(_In_ PFS_FILTER_CALLBACK_DATA Data,
+                         _Out_ PVOID *CompletionContext)
+{
+    UCHAR Major = Data->Operation;
+    UCHAR Index = FLTP_FSFILTER_INDEX(Major);
+    BOOLEAN Acquire = (Index & 1) != 0;     /* the acquires may fail, the releases may not */
+    PFLT_VOLUME Volume;
+    PFLTP_IRPCTRL Ctrl = NULL;
+    FLT_RELATED_OBJECTS Related;
+    PLIST_ENTRY Entry;
+    ULONG Count = 0, i;
+    BOOLEAN Completed = FALSE, AnyPost = FALSE;
+    NTSTATUS Status;
+
+    *CompletionContext = NULL;
+
+    if (!FLTP_IS_FSFILTER(Major) || KeGetCurrentIrql() > APC_LEVEL)
+        return STATUS_SUCCESS;
+
+    Volume = VolumeOfStack(Data->DeviceObject);
+    if (Volume == NULL || Volume->FsFilterCount[Index] == 0)
+        return STATUS_SUCCESS;
+
+    KeEnterCriticalRegion();
+    ExAcquireResourceSharedLite(&Volume->InstanceList.rLock, TRUE);
+    for (Entry = Volume->InstanceList.rList.Flink; Entry != &Volume->InstanceList.rList; Entry = Entry->Flink)
+    {
+        PFLT_INSTANCE Instance = CONTAINING_RECORD(Entry, FLT_INSTANCE, VolumeLink);
+
+        if (Instance->Filter->FsFilterTable[Index] && !(Instance->Flags & INSFL_DELETING))
+            Count++;
+    }
+    if (Count)
+        Ctrl = ExAllocatePoolWithTag(NonPagedPool, sizeof(FLTP_IRPCTRL) + (Count - 1) * sizeof(FLTP_NODE), FM_TAG_IRPCTRL);
+    if (Ctrl)
+    {
+        RtlZeroMemory(Ctrl, sizeof(FLTP_IRPCTRL) + (Count - 1) * sizeof(FLTP_NODE));
+        for (Entry = Volume->InstanceList.rList.Flink;
+             Entry != &Volume->InstanceList.rList && Ctrl->Count < Count;
+             Entry = Entry->Flink)
+        {
+            PFLT_INSTANCE Instance = CONTAINING_RECORD(Entry, FLT_INSTANCE, VolumeLink);
+
+            if (Instance->Filter->FsFilterTable[Index] && !(Instance->Flags & INSFL_DELETING) &&
+                NT_SUCCESS(FltObjectReference(Instance)))
+            {
+                Ctrl->Nodes[Ctrl->Count++].Instance = Instance;
+            }
+        }
+    }
+    ExReleaseResourceLite(&Volume->InstanceList.rLock);
+    KeLeaveCriticalRegion();
+
+    if (Ctrl == NULL)
+    {
+        /* Filters want to see it and we can't show it to them: no section rather than an unchecked one */
+        return (Count && Acquire) ? STATUS_INSUFFICIENT_RESOURCES : STATUS_SUCCESS;
+    }
+    if (Ctrl->Count == 0)
+    {
+        ExFreePoolWithTag(Ctrl, FM_TAG_IRPCTRL);
+        return STATUS_SUCCESS;
+    }
+
+    Ctrl->RefCount = 1;
+    Ctrl->Volume = Volume;
+    Ctrl->MajorFunction = Major;
+    Ctrl->Iopb.MajorFunction = Major;
+    Ctrl->Iopb.TargetFileObject = Data->FileObject;
+    switch (Major)
+    {
+        case IRP_MJ_ACQUIRE_FOR_SECTION_SYNCHRONIZATION:
+            Ctrl->Iopb.Parameters.AcquireForSectionSynchronization.SyncType =
+                Data->Parameters.AcquireForSectionSynchronization.SyncType;
+            Ctrl->Iopb.Parameters.AcquireForSectionSynchronization.PageProtection =
+                Data->Parameters.AcquireForSectionSynchronization.PageProtection;
+            break;
+
+        case IRP_MJ_ACQUIRE_FOR_MOD_WRITE:
+            Ctrl->Iopb.Parameters.AcquireForModifiedPageWriter.EndingOffset =
+                Data->Parameters.AcquireForModifiedPageWriter.EndingOffset;
+            Ctrl->Iopb.Parameters.AcquireForModifiedPageWriter.ResourceToRelease =
+                Data->Parameters.AcquireForModifiedPageWriter.ResourceToRelease;
+            break;
+
+        case IRP_MJ_RELEASE_FOR_MOD_WRITE:
+            Ctrl->Iopb.Parameters.ReleaseForModifiedPageWriter.ResourceToRelease =
+                Data->Parameters.ReleaseForModifiedPageWriter.ResourceToRelease;
+            break;
+
+        default:
+            break;
+    }
+    *(PFLT_IO_PARAMETER_BLOCK *)&Ctrl->Data.Iopb = &Ctrl->Iopb;
+    *(PETHREAD *)&Ctrl->Data.Thread = PsGetCurrentThread();
+    Ctrl->Data.RequestorMode = KernelMode;
+    Ctrl->Data.Flags = FLTFL_CALLBACK_DATA_FS_FILTER_OPERATION;
+
+    for (i = 0; i < Ctrl->Count; i++)
+    {
+        PFLTP_NODE Node = &Ctrl->Nodes[i];
+        PFLT_OPERATION_REGISTRATION Op = Node->Instance->Filter->FsFilterTable[Index];
+        FLT_PREOP_CALLBACK_STATUS PreStatus;
+        PVOID Context = NULL;
+
+        if (Op->PreOperation == NULL)
+        {
+            Node->WantPost = (Op->PostOperation != NULL);
+            AnyPost |= Node->WantPost;
+            continue;
+        }
+
+        Ctrl->Iopb.TargetInstance = Node->Instance;
+        InitRelatedObjects(&Related, Ctrl, Node->Instance);
+        PreStatus = Op->PreOperation(&Ctrl->Data, &Related, &Context);
+
+        if (PreStatus == FLT_PREOP_COMPLETE)
+        {
+            Completed = TRUE;
+            Ctrl->CompleteIndex = i;
+            break;
+        }
+        else if (PreStatus == FLT_PREOP_SUCCESS_WITH_CALLBACK || PreStatus == FLT_PREOP_SYNCHRONIZE)
+        {
+            Node->WantPost = (Op->PostOperation != NULL);
+            Node->CompletionContext = Context;
+            AnyPost |= Node->WantPost;
+        }
+        else if (PreStatus == FLT_PREOP_PENDING)
+        {
+            DPRINT1("FLTMGR: FLT_PREOP_PENDING for FsFilter operation %d isn't allowed\n", (CHAR)Major);
+        }
+    }
+
+    if (Completed)
+    {
+        /* The filters above the one which completed it hear about it, and so does FsRtl if it failed */
+        Status = Ctrl->Data.IoStatus.Status;
+        for (i = Ctrl->CompleteIndex; i < Ctrl->Count; i++)
+            Ctrl->Nodes[i].WantPost = FALSE;
+        Ctrl->PostIndex = Ctrl->CompleteIndex;
+        Ctrl->Data.Flags |= FLTFL_CALLBACK_DATA_POST_OPERATION;
+        RunPostOperationsInThread(Ctrl);
+        FreeCtrl(Ctrl);
+        return (NT_SUCCESS(Status) || !Acquire) ? STATUS_SUCCESS : Status;
+    }
+
+    if (!AnyPost)
+    {
+        FreeCtrl(Ctrl);
+        return STATUS_SUCCESS;
+    }
+
+    *CompletionContext = Ctrl;
+    return STATUS_SUCCESS;
+}
+
+VOID
+NTAPI
+FltpPostFsFilterOperation(_In_ PFS_FILTER_CALLBACK_DATA Data,
+                          _In_ NTSTATUS OperationStatus,
+                          _In_ PVOID CompletionContext)
+{
+    PFLTP_IRPCTRL Ctrl = CompletionContext;
+
+    UNREFERENCED_PARAMETER(Data);
+
+    if (Ctrl == NULL)
+        return;
+
+    Ctrl->Data.IoStatus.Status = OperationStatus;
+    Ctrl->Data.IoStatus.Information = 0;
+    Ctrl->Data.Flags |= FLTFL_CALLBACK_DATA_POST_OPERATION;
+    Ctrl->PostIndex = Ctrl->Count;
+    RunPostOperationsInThread(Ctrl);
+    FreeCtrl(Ctrl);
 }
 
 /* EXPORTED FUNCTIONS *******************************************************/

@@ -245,28 +245,7 @@ FltpDetachFromFileSystemDevice(_In_ PDEVICE_OBJECT DeviceObject)
 
 /* DISPATCH ROUTINES **********************************************/
 
-NTSTATUS
-NTAPI
-FltpPreFsFilterOperation(_In_ PFS_FILTER_CALLBACK_DATA Data,
-                         _Out_ PVOID *CompletionContext)
-{
-    UNREFERENCED_PARAMETER(Data);
-
-    /* The section and cache synchronization operations just need to proceed */
-    *CompletionContext = NULL;
-    return STATUS_SUCCESS;
-}
-
-VOID
-NTAPI
-FltpPostFsFilterOperation(_In_ PFS_FILTER_CALLBACK_DATA Data,
-                          _In_ NTSTATUS OperationStatus,
-                          _In_ PVOID CompletionContext)
-{
-    UNREFERENCED_PARAMETER(Data);
-    UNREFERENCED_PARAMETER(OperationStatus);
-    UNREFERENCED_PARAMETER(CompletionContext);
-}
+/* FltpPreFsFilterOperation / FltpPostFsFilterOperation: Operation.c */
 
 NTSTATUS
 NTAPI

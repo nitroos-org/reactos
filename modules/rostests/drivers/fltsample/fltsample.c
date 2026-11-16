@@ -48,6 +48,7 @@ C_ASSERT(FIELD_OFFSET(FLT_PARAMETERS, SetFileInformation.ReplaceIfExists) ==
 #define MODE_SAFE       6
 #define MODE_NODEL      7
 #define MODE_MSG        8
+#define MODE_NOSEC      9
 
 #define MAX_OPEN        256
 
@@ -128,6 +129,7 @@ ModeFromName(_In_ PCUNICODE_STRING Name)
     {
         { L".blk", MODE_BLK }, { L".nowr", MODE_NOWR }, { L".half", MODE_HALF }, { L".pend", MODE_PEND },
         { L".sync", MODE_SYNC }, { L".safe", MODE_SAFE }, { L".nodel", MODE_NODEL }, { L".msg", MODE_MSG },
+        { L".nosec", MODE_NOSEC },
     };
     ULONG i, Length;
 
@@ -856,6 +858,56 @@ PostOperation(_Inout_ PFLT_CALLBACK_DATA Data,
 }
 
 
+/* A section for a file is about to be created: the anti-virus pattern refuses it for some files */
+static
+FLT_PREOP_CALLBACK_STATUS
+FLTAPI
+PreSectionSync(_Inout_ PFLT_CALLBACK_DATA Data,
+               _In_ PCFLT_RELATED_OBJECTS FltObjects,
+               _Outptr_result_maybenull_ PVOID *CompletionContext)
+{
+    PFILE_OBJECT FileObject = Data->Iopb->TargetFileObject;
+
+    UNREFERENCED_PARAMETER(FltObjects);
+    *CompletionContext = NULL;
+
+    if (FileObject == NULL || !IsTracked(FileObject))
+        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+
+    InterlockedIncrement((PLONG)&Stats.SectionSyncPre);
+    if (!FLT_IS_FS_FILTER_OPERATION(Data))
+        InterlockedIncrement((PLONG)&Stats.SectionSyncBadData);
+
+    if (FindMode(FileObject) == MODE_NOSEC &&
+        Data->Iopb->Parameters.AcquireForSectionSynchronization.SyncType == SyncTypeCreateSection)
+    {
+        InterlockedIncrement((PLONG)&Stats.SectionSyncDenied);
+        Data->IoStatus.Status = STATUS_ACCESS_DENIED;
+        Data->IoStatus.Information = 0;
+        return FLT_PREOP_COMPLETE;
+    }
+
+    return FLT_PREOP_SUCCESS_WITH_CALLBACK;
+}
+
+static
+FLT_POSTOP_CALLBACK_STATUS
+FLTAPI
+PostSectionSync(_Inout_ PFLT_CALLBACK_DATA Data,
+                _In_ PCFLT_RELATED_OBJECTS FltObjects,
+                _In_opt_ PVOID CompletionContext,
+                _In_ FLT_POST_OPERATION_FLAGS Flags)
+{
+    UNREFERENCED_PARAMETER(Data);
+    UNREFERENCED_PARAMETER(FltObjects);
+    UNREFERENCED_PARAMETER(CompletionContext);
+    UNREFERENCED_PARAMETER(Flags);
+
+    InterlockedIncrement((PLONG)&Stats.SectionSyncPost);
+    return FLT_POSTOP_FINISHED_PROCESSING;
+}
+
+
 /* INSTANCES **************************************************************/
 
 static
@@ -1340,6 +1392,7 @@ static const FLT_OPERATION_REGISTRATION Operations[] =
     { IRP_MJ_QUERY_INFORMATION, 0, PreOperation, PostOperation },
     { IRP_MJ_SET_INFORMATION, 0, PreOperation, PostOperation },
     { IRP_MJ_DIRECTORY_CONTROL, 0, PreOperation, PostOperation },
+    { IRP_MJ_ACQUIRE_FOR_SECTION_SYNCHRONIZATION, 0, PreSectionSync, PostSectionSync },
     { IRP_MJ_OPERATION_END }
 };
 

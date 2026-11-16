@@ -401,6 +401,86 @@ START_TEST(p3fpark)
     test_FastIoParkedPost();
 }
 
+/* Can a section (file mapping) be made for the file? Returns the error, 0 for yes */
+static
+DWORD
+MapError(PCWSTR Path)
+{
+    HANDLE File, Section;
+    DWORD Error = 0;
+
+    File = CreateFileW(Path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (File == INVALID_HANDLE_VALUE)
+        return GetLastError() | 0x80000000;
+    Section = CreateFileMappingW(File, NULL, PAGE_READONLY, 0, 0, NULL);
+    if (Section)
+        CloseHandle(Section);
+    else
+        Error = GetLastError();
+    CloseHandle(File);
+    return Error;
+}
+
+/*
+ * IRP_MJ_ACQUIRE_FOR_SECTION_SYNCHRONIZATION: a filter registered for it sees every section created
+ * for a file of its volume, and can refuse it (what anti-virus filters do to keep a file from being
+ * executed). The sample refuses the sections of .nosec files.
+ */
+static
+void
+test_SectionSync(void)
+{
+    SAMPLE P = { { 0 } };
+    FLTSAMPLE_STATS S;
+    WCHAR Path[MAX_PATH], Path2[MAX_PATH];
+    DWORD Error;
+
+    MakeTestFile(L"p3section.nosec", Path, RTL_NUMBER_OF(Path));
+    MakeTestFile(L"p3section.dat", Path2, RTL_NUMBER_OF(Path2));
+    ok(WriteUncached(Path, 4096), "Can't write %ls\n", Path);
+    ok(WriteUncached(Path2, 4096), "Can't write %ls\n", Path2);
+
+    /* Without the filter both can be mapped */
+    ok(MapError(Path) == 0, "Mapping %ls without the filter: %lu\n", Path, MapError(Path));
+
+    if (!LoadSample(&P, L"FltSampleP", L"383000.5", 0xFFFF))
+    {
+        skip("Can't load the sample filter\n");
+        return;
+    }
+
+    Error = MapError(Path);
+    ok(Error == ERROR_ACCESS_DENIED, "Mapping %ls: %lu, expected ERROR_ACCESS_DENIED\n", Path, Error);
+    Error = MapError(Path2);
+    ok(Error == 0, "Mapping %ls: %lu\n", Path2, Error);
+
+    SampleStats(&P, &S);
+    trace("Section synchronization: %lu pre, %lu post, %lu refused\n", S.SectionSyncPre, S.SectionSyncPost, S.SectionSyncDenied);
+    ok(S.SectionSyncPre >= 2, "%lu pre-operations\n", S.SectionSyncPre);
+    ok(S.SectionSyncDenied >= 1, "%lu refused\n", S.SectionSyncDenied);
+    ok(S.SectionSyncPost >= 1, "%lu post-operations\n", S.SectionSyncPost);
+    ok(S.SectionSyncBadData == 0, "%lu without FLTFL_CALLBACK_DATA_FS_FILTER_OPERATION\n", S.SectionSyncBadData);
+
+    UnloadSample(&P, TRUE);
+
+    /* And without the filter again */
+    ok(MapError(Path) == 0, "Mapping %ls after the filter: %lu\n", Path, MapError(Path));
+    DeleteFileW(Path);
+    DeleteFileW(Path2);
+}
+
+START_TEST(p3section)
+{
+    EnsureTestDirectory();
+    if (!StartFilterManager())
+    {
+        skip("No filter manager\n");
+        return;
+    }
+
+    test_SectionSync();
+}
+
 START_TEST(p3create)
 {
     EnsureTestDirectory();

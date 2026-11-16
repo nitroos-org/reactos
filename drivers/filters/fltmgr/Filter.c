@@ -303,6 +303,11 @@ FltRegisterFilter(_In_ PDRIVER_OBJECT DriverObject,
             {
                 Filter->OperationTable[Op->MajorFunction] = Op;
             }
+            else if (FLTP_IS_FSFILTER(Op->MajorFunction))
+            {
+                /* Section synchronization, modified page writer and cache flush: the FsRtl callbacks */
+                Filter->FsFilterTable[FLTP_FSFILTER_INDEX(Op->MajorFunction)] = Op;
+            }
         }
     }
 

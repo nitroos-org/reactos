@@ -47,6 +47,12 @@ UpdateVolumeCallbackCounts(_In_ PFLT_VOLUME Volume,
             InterlockedAdd((PLONG)&Volume->CallbackCount[i], Delta);
     }
 
+    for (i = 1; i <= FLTP_FSFILTER_OPERATIONS; i++)
+    {
+        if (Filter->FsFilterTable[i])
+            InterlockedAdd((PLONG)&Volume->FsFilterCount[i], Delta);
+    }
+
     /* Stream and stream handle contexts live as long as the file is open: someone has to count the opens */
     if (Filter->ContextDefs[FLTP_CTX_INDEX_STREAM].Registered ||
         Filter->ContextDefs[FLTP_CTX_INDEX_STREAMHANDLE].Registered)
