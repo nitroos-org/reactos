@@ -506,6 +506,9 @@ LogfBackupFile(PLOGFILE LogFile,
 
     DPRINT("LogfBackupFile(%p, %wZ)\n", LogFile, BackupFileName);
 
+    /* No handle yet: a backup file that cannot be created must not close what the stack held */
+    RtlZeroMemory(&BackupLogFile, sizeof(BackupLogFile));
+
     /* Lock the log file shared */
     RtlAcquireResourceShared(&LogFile->Lock, TRUE);
 

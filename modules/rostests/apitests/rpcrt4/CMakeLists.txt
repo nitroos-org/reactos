@@ -5,11 +5,19 @@ set(IDL_FLAGS ${IDL_FLAGS} -Oif --prefix-client=)
 add_rpc_files(client interface_access.idl)
 add_rpc_files(client ntlm_auth.idl)
 set(IDL_FLAGS ${OLD_IDL_FLAGS})
+set(IDL_FLAGS ${IDL_FLAGS} --prefix-client= --prefix-server=s_)
+add_rpc_files(client generic_handle.idl)
+add_rpc_files(server generic_handle.idl)
+set(IDL_FLAGS ${OLD_IDL_FLAGS})
 
 list(APPEND SOURCE
     conn_reuse.c
+    generic_handle.c
+    generic_handle_srv.c
     interface_access.c
     ntlm_auth.c
+    ${CMAKE_CURRENT_BINARY_DIR}/generic_handle_c.c
+    ${CMAKE_CURRENT_BINARY_DIR}/generic_handle_s.c
     ${CMAKE_CURRENT_BINARY_DIR}/interface_access_c.c
     ${CMAKE_CURRENT_BINARY_DIR}/ntlm_auth_c.c)
 
