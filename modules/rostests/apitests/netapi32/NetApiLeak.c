@@ -1,7 +1,7 @@
 /*
  * PROJECT:     ReactOS netapi32.dll API Tests
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
- * PURPOSE:     NetWkstaGetInfo and NetUserEnum return one buffer that NetApiBufferFree frees whole
+ * PURPOSE:     NetWkstaGetInfo, NetUserEnum, NetWkstaUserEnum and NetLocalGroupEnum return one buffer that NetApiBufferFree frees whole
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
@@ -134,6 +134,86 @@ static BOOL UserEnumOnce(DWORD Level)
     return TRUE;
 }
 
+/* NetWkstaUserEnum: the array and the strings are one block; a failure (an access violation in the service came
+ * back as 0xC0000005) is a test failure when Check is set */
+static BOOL WkstaUserEnumOnce(DWORD Level, BOOL Check)
+{
+    LPBYTE Buffer = NULL;
+    DWORD Read = 0, Total = 0, Resume = 0, i;
+    NET_API_STATUS Status;
+
+    Status = NetWkstaUserEnum(NULL, Level, &Buffer, MAX_PREFERRED_LENGTH, &Read, &Total, &Resume);
+    if (Check)
+        ok(Status == NERR_Success, "NetWkstaUserEnum(%lu) returned %lu\n", Level, Status);
+    if (Status != NERR_Success)
+        return FALSE;
+
+    if (Check)
+    {
+        ok(Read >= 1, "NetWkstaUserEnum(%lu) returned %lu entries\n", Level, Read);
+        ok(Total >= Read, "NetWkstaUserEnum(%lu): total %lu, read %lu\n", Level, Total, Read);
+        ok(Buffer != NULL, "NetWkstaUserEnum(%lu) returned no buffer\n", Level);
+    }
+
+    if (Check && Buffer != NULL)
+    {
+        for (i = 0; i < Read; i++)
+        {
+            if (Level == 0)
+            {
+                LPWKSTA_USER_INFO_0 Info = (LPWKSTA_USER_INFO_0)Buffer + i;
+                CheckStringInBuffer(Buffer, Info->wkui0_username, "wksta user 0 name");
+                ok(Info->wkui0_username != NULL && Info->wkui0_username[0] != UNICODE_NULL, "wksta user 0: empty name\n");
+            }
+            else
+            {
+                LPWKSTA_USER_INFO_1 Info = (LPWKSTA_USER_INFO_1)Buffer + i;
+                CheckStringInBuffer(Buffer, Info->wkui1_username, "wksta user 1 name");
+                CheckStringInBuffer(Buffer, Info->wkui1_logon_domain, "wksta user 1 logon domain");
+                CheckStringInBuffer(Buffer, Info->wkui1_oth_domains, "wksta user 1 other domains");
+                CheckStringInBuffer(Buffer, Info->wkui1_logon_server, "wksta user 1 logon server");
+            }
+        }
+    }
+
+    if (Buffer != NULL)
+        NetApiBufferFree(Buffer);
+    return TRUE;
+}
+
+/* NetLocalGroupEnum level 1: the comment is the comment (the name of the group came back in its place when the
+ * RPC stub took the counts of the first string for the second) and lies within the block */
+static BOOL LocalGroupEnumOnce(BOOL Check)
+{
+    LPBYTE Buffer = NULL;
+    DWORD Read = 0, Total = 0, i;
+    DWORD_PTR Resume = 0;
+    NET_API_STATUS Status;
+
+    Status = NetLocalGroupEnum(NULL, 1, &Buffer, MAX_PREFERRED_LENGTH, &Read, &Total, &Resume);
+    if (Status != NERR_Success)
+        return FALSE;
+
+    if (Check && Buffer != NULL)
+    {
+        ok(Read >= 1, "NetLocalGroupEnum(1) returned %lu entries\n", Read);
+        for (i = 0; i < Read; i++)
+        {
+            LPLOCALGROUP_INFO_1 Info = (LPLOCALGROUP_INFO_1)Buffer + i;
+
+            CheckStringInBuffer(Buffer, Info->lgrpi1_name, "local group 1 name");
+            CheckStringInBuffer(Buffer, Info->lgrpi1_comment, "local group 1 comment");
+            if (Info->lgrpi1_name != NULL && Info->lgrpi1_comment != NULL && Info->lgrpi1_comment[0] != UNICODE_NULL)
+                ok(wcscmp(Info->lgrpi1_name, Info->lgrpi1_comment) != 0,
+                   "local group %ls: the comment is the name\n", Info->lgrpi1_name);
+        }
+    }
+
+    if (Buffer != NULL)
+        NetApiBufferFree(Buffer);
+    return TRUE;
+}
+
 static void CheckGrowth(PCSTR What, HEAP_TOTALS *Before, HEAP_TOTALS *After)
 {
     trace("%s: heap busy before: %Iu blocks, %Iu bytes; after %d calls: %Iu blocks, %Iu bytes\n",
@@ -145,6 +225,7 @@ static void CheckGrowth(PCSTR What, HEAP_TOTALS *Before, HEAP_TOTALS *After)
 
 START_TEST(NetApiLeak)
 {
+    static const DWORD WkstaUserLevels[] = { 0, 1 };
     static const DWORD WkstaLevels[] = { 100, 101, 102 };
     static const DWORD UserLevels[] = { 0, 1, 2, 3, 20 };
     HEAP_TOTALS Before, After;
@@ -185,5 +266,38 @@ START_TEST(NetApiLeak)
             UserEnumOnce(UserLevels[k]);
         SnapshotHeaps(&After);
         CheckGrowth(Name, &Before, &After);
+    }
+
+    for (k = 0; k < ARRAYSIZE(WkstaUserLevels); k++)
+    {
+        sprintf(Name, "NetWkstaUserEnum(%lu)", WkstaUserLevels[k]);
+        if (!WkstaUserEnumOnce(WkstaUserLevels[k], TRUE))
+        {
+            skip("%s failed\n", Name);
+            continue;
+        }
+
+        for (i = 0; i < WARMUP_ITERATIONS; i++)
+            WkstaUserEnumOnce(WkstaUserLevels[k], FALSE);
+        SnapshotHeaps(&Before);
+        for (i = 0; i < CALL_ITERATIONS; i++)
+            WkstaUserEnumOnce(WkstaUserLevels[k], FALSE);
+        SnapshotHeaps(&After);
+        CheckGrowth(Name, &Before, &After);
+    }
+
+    if (!LocalGroupEnumOnce(TRUE))
+    {
+        skip("NetLocalGroupEnum(1) failed\n");
+    }
+    else
+    {
+        for (i = 0; i < WARMUP_ITERATIONS; i++)
+            LocalGroupEnumOnce(FALSE);
+        SnapshotHeaps(&Before);
+        for (i = 0; i < CALL_ITERATIONS; i++)
+            LocalGroupEnumOnce(FALSE);
+        SnapshotHeaps(&After);
+        CheckGrowth("NetLocalGroupEnum(1)", &Before, &After);
     }
 }

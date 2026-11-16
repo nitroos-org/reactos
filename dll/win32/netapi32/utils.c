@@ -307,33 +307,37 @@ NetpPackEnumEntries(
 }
 
 /*
- * The RPC client stub allocates a returned structure and each string it points to as separate blocks, but a caller
- * frees the result with one NetApiBufferFree: the strings leaked on every call. Moves the structure and its
- * strings (the pointer members at StrOffsets, null terminated wide strings) into one NetApiBuffer block, the
- * structure first, and frees the pieces. If the new block cannot be allocated the result is left as the stub
- * made it.
+ * The RPC client stub allocates a returned structure (or array of structures) and each string it points to as
+ * separate blocks, but a caller frees the result with one NetApiBufferFree: the strings leaked on every call.
+ * Moves the Count structures of FixedSize bytes and their strings (the pointer members at StrOffsets of each
+ * structure, null terminated wide strings) into one NetApiBuffer block, the structures first, and frees the
+ * pieces. If the new block cannot be allocated the result is left as the stub made it.
  */
 VOID
-NetpPackStruct(
+NetpPackStructArray(
     _Inout_ PVOID *Block,
+    _In_ ULONG Count,
     _In_ ULONG FixedSize,
     _In_ const USHORT *StrOffsets,
     _In_ ULONG StrCount)
 {
     PBYTE Old = *Block, New, Cursor;
     ULONGLONG Size;
-    ULONG Length, i;
+    ULONG Length, i, j;
     PWSTR *Member;
 
-    if (Old == NULL)
+    if (Old == NULL || Count == 0)
         return;
 
-    Size = (FixedSize + 7) & ~7;
-    for (i = 0; i < StrCount; i++)
+    Size = ((ULONGLONG)Count * FixedSize + 7) & ~7ULL;
+    for (j = 0; j < Count; j++)
     {
-        Member = (PWSTR *)(Old + StrOffsets[i]);
-        if (*Member != NULL)
-            Size += (((ULONGLONG)wcslen(*Member) + 1) * sizeof(WCHAR) + 7) & ~7;
+        for (i = 0; i < StrCount; i++)
+        {
+            Member = (PWSTR *)(Old + (ULONGLONG)j * FixedSize + StrOffsets[i]);
+            if (*Member != NULL)
+                Size += (((ULONGLONG)wcslen(*Member) + 1) * sizeof(WCHAR) + 7) & ~7ULL;
+        }
     }
 
     /* NetApiBufferAllocate takes a 32-bit byte count; a remote server's strings must not wrap it. Leave the
@@ -344,29 +348,50 @@ NetpPackStruct(
     if (NetApiBufferAllocate((ULONG)Size, (PVOID *)&New) != NERR_Success)
         return;
 
-    memcpy(New, Old, FixedSize);
-    Cursor = New + ((FixedSize + 7) & ~7);
-    for (i = 0; i < StrCount; i++)
+    /* The structures (an array of FixedSize each), then the strings */
+    Cursor = New + (((ULONGLONG)Count * FixedSize + 7) & ~7ULL);
+    for (j = 0; j < Count; j++)
     {
-        Member = (PWSTR *)(Old + StrOffsets[i]);
-        if (*Member == NULL)
-            continue;
+        PBYTE OldEntry = Old + (ULONGLONG)j * FixedSize;
+        PBYTE NewEntry = New + (ULONGLONG)j * FixedSize;
 
-        Length = ((ULONG)wcslen(*Member) + 1) * sizeof(WCHAR);
-        memcpy(Cursor, *Member, Length);
-        *(PWSTR *)(New + StrOffsets[i]) = (PWSTR)Cursor;
-        Cursor += (Length + 7) & ~7;
+        memcpy(NewEntry, OldEntry, FixedSize);
+        for (i = 0; i < StrCount; i++)
+        {
+            Member = (PWSTR *)(OldEntry + StrOffsets[i]);
+            if (*Member == NULL)
+                continue;
+
+            Length = ((ULONG)wcslen(*Member) + 1) * sizeof(WCHAR);
+            memcpy(Cursor, *Member, Length);
+            *(PWSTR *)(NewEntry + StrOffsets[i]) = (PWSTR)Cursor;
+            Cursor += (Length + 7) & ~7;
+        }
     }
 
-    for (i = 0; i < StrCount; i++)
+    for (j = 0; j < Count; j++)
     {
-        Member = (PWSTR *)(Old + StrOffsets[i]);
-        if (*Member != NULL)
-            NetApiBufferFree(*Member);
+        for (i = 0; i < StrCount; i++)
+        {
+            Member = (PWSTR *)(Old + (ULONGLONG)j * FixedSize + StrOffsets[i]);
+            if (*Member != NULL)
+                NetApiBufferFree(*Member);
+        }
     }
     NetApiBufferFree(Old);
 
     *Block = New;
+}
+
+/* One structure and its strings in one block (see NetpPackStructArray) */
+VOID
+NetpPackStruct(
+    _Inout_ PVOID *Block,
+    _In_ ULONG FixedSize,
+    _In_ const USHORT *StrOffsets,
+    _In_ ULONG StrCount)
+{
+    NetpPackStructArray(Block, 1, FixedSize, StrOffsets, StrCount);
 }
 
 /* EOF */

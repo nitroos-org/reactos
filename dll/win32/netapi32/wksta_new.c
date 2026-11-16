@@ -1094,21 +1094,19 @@ NetWkstaUserEnum(
     TRACE("NetWkstaUserEnum(%s, %d, %p, %d, %p, %p, %p)\n", debugstr_w(servername),
           level, bufptr, prefmaxlen, entriesread, totalentries, resumehandle);
 
+    *bufptr = NULL;
+    *entriesread = 0;
+    *totalentries = 0;
+
     UserEnumInfo.Level = level;
     switch (level)
     {
         case 0:
-//            UserEnumInfo.WkstaUserInfo.Level0 = &Container0;
-//            Container0.EntriesRead = 0;
-//            Container0.Buffer = NULL;
             UserEnumInfo.WkstaUserInfo.Level0.EntriesRead = 0;
             UserEnumInfo.WkstaUserInfo.Level0.Buffer = NULL;
             break;
 
         case 1:
-//            UserEnumInfo.WkstaUserInfo.Level1 = &Container1;
-//            Container1.EntriesRead = 0;
-//            Container1.Buffer = NULL;
             UserEnumInfo.WkstaUserInfo.Level1.EntriesRead = 0;
             UserEnumInfo.WkstaUserInfo.Level1.Buffer = NULL;
             break;
@@ -1129,18 +1127,32 @@ NetWkstaUserEnum(
             switch (level)
             {
                 case 0:
-//                    *bufptr = (LPBYTE)UserEnumInfo.WkstaUserInfo.Level0->Buffer;
-//                    *entriesread = UserEnumInfo.WkstaUserInfo.Level0->EntriesRead;
+                {
+                    static const USHORT Offsets[] = { FIELD_OFFSET(WKSTA_USER_INFO_0, wkui0_username) };
+
                     *bufptr = (LPBYTE)UserEnumInfo.WkstaUserInfo.Level0.Buffer;
                     *entriesread = UserEnumInfo.WkstaUserInfo.Level0.EntriesRead;
+
+                    /* One block, as NetApiBufferFree frees one */
+                    NetpPackStructArray((PVOID *)bufptr, *entriesread, sizeof(WKSTA_USER_INFO_0),
+                                        Offsets, RTL_NUMBER_OF(Offsets));
                     break;
+                }
 
                 case 1:
-//                    *bufptr = (LPBYTE)UserEnumInfo.WkstaUserInfo.Level1->Buffer;
-//                    *entriesread = UserEnumInfo.WkstaUserInfo.Level1->EntriesRead;
+                {
+                    static const USHORT Offsets[] = { FIELD_OFFSET(WKSTA_USER_INFO_1, wkui1_username),
+                                                      FIELD_OFFSET(WKSTA_USER_INFO_1, wkui1_logon_domain),
+                                                      FIELD_OFFSET(WKSTA_USER_INFO_1, wkui1_oth_domains),
+                                                      FIELD_OFFSET(WKSTA_USER_INFO_1, wkui1_logon_server) };
+
                     *bufptr = (LPBYTE)UserEnumInfo.WkstaUserInfo.Level1.Buffer;
                     *entriesread = UserEnumInfo.WkstaUserInfo.Level1.EntriesRead;
+
+                    NetpPackStructArray((PVOID *)bufptr, *entriesread, sizeof(WKSTA_USER_INFO_1),
+                                        Offsets, RTL_NUMBER_OF(Offsets));
                     break;
+                }
             }
         }
     }
