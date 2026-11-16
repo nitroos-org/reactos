@@ -26,6 +26,7 @@ list(APPEND SOURCE
     Ipv6ConfigApi.c
     Ipv6Statistics.c
     Ipv6Dns.c
+    Ipv6Followups.c
     Ipv6Persist.c
     Ipv6Reporting.c
     Ipv6RouteConfig.c
