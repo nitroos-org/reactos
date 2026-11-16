@@ -911,7 +911,10 @@ function Set-NetIPInterface {
         if ($PSCmdlet.ParameterSetName -eq 'InputObject (cdxml)') { $rows = @($InputObject) }
         else {
             $filters = @('InterfaceIndex', 'InterfaceAlias', 'AddressFamily', 'ReachableTime', 'NeighborDiscoverySupported', 'CompartmentId')
-            $rows = @(Invoke-NetQuery $PSCmdlet $class ([Nitro.Net.Native]::IPInterfaces()) $PSBoundParameters $filters)
+            # the interfaces are the active ones whatever store is written: -PolicyStore PersistentStore is not a filter here
+            $qb = @{}
+            foreach ($bk in $PSBoundParameters.Keys) { if ($bk -ne 'PolicyStore') { $qb[$bk] = $PSBoundParameters[$bk] } }
+            $rows = @(Invoke-NetQuery $PSCmdlet $class ([Nitro.Net.Native]::IPInterfaces()) $qb $filters)
         }
         $stores = Get-NetStores $PSCmdlet $PSBoundParameters $class
         if ($null -eq $stores) { return }
