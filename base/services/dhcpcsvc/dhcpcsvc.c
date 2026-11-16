@@ -102,6 +102,7 @@ SetBinaryClassId(
     _In_ PWSTR pszAdapterName)
 {
     WCHAR szKeyName[256];
+    static const WCHAR szKeyPrefix[] = L"System\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\";
     PWSTR pszUnicodeBuffer = NULL;
     PSZ pszAnsiBuffer = NULL;
     DWORD dwUnicodeSize = 0, dwAnsiSize = 0;
@@ -110,9 +111,12 @@ SetBinaryClassId(
 
     DPRINT("SetBinaryClassId(%S)\n", pszAdapterName);
 
-    _swprintf(szKeyName,
-              L"System\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\%s",
-              pszAdapterName);
+    /* the caller's name goes into a fixed buffer: a name that does not fit is no adapter key */
+    if (!pszAdapterName ||
+        wcslen(pszAdapterName) >= ARRAYSIZE(szKeyName) - ARRAYSIZE(szKeyPrefix) + 1)
+        return ERROR_INVALID_PARAMETER;
+
+    _swprintf(szKeyName, L"%s%s", szKeyPrefix, pszAdapterName);
     DPRINT("KeyName %S\n", szKeyName);
 
     dwError = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
