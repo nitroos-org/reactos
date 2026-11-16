@@ -829,12 +829,91 @@ static void Test_NtFreeVirtualMemory_DecommitOtherProcessor(BOOLEAN Sleeping)
     ok_ntstatus(Status, STATUS_SUCCESS);
 }
 
+/* A size-0 free at an address inside the region's first page acts on the whole region
+ * (checked against Windows 10 22H2, x64 and x86); from the second page on it fails */
+static void Test_NtFreeVirtualMemory_InteriorBase(void)
+{
+    static const ULONG Types[] = { MEM_RELEASE, MEM_DECOMMIT };
+    const SIZE_T RegionBytes = 0x10000;
+    MEMORY_BASIC_INFORMATION Mbi;
+    PVOID Base, Address;
+    SIZE_T Size;
+    NTSTATUS Status;
+    ULONG i;
+
+    for (i = 0; i < RTL_NUMBER_OF(Types); i++)
+    {
+        ULONG Type = Types[i];
+
+        /* First page, not at its start: the whole region goes */
+        Base = NULL;
+        Size = RegionBytes;
+        Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Base, 0, &Size,
+                                         MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        if (!NT_SUCCESS(Status))
+            continue;
+        Address = (PUCHAR)Base + 0x10;
+        Size = 0;
+        Status = NtFreeVirtualMemory(NtCurrentProcess(), &Address, &Size, Type);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        ok_eq_pointer(Address, Base);
+        if (Type == MEM_RELEASE)
+            ok_eq_hex(Size, RegionBytes);
+        Status = NtQueryVirtualMemory(NtCurrentProcess(), (PUCHAR)Base + RegionBytes - PAGE_SIZE,
+                                      MemoryBasicInformation, &Mbi, sizeof(Mbi), NULL);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        if (Type == MEM_RELEASE)
+        {
+            ok_eq_hex(Mbi.State, MEM_FREE);
+        }
+        else
+        {
+            ok_eq_hex(Mbi.State, MEM_RESERVE);
+            ok_eq_pointer(Mbi.AllocationBase, Base);
+            ok_eq_hex(Mbi.RegionSize, PAGE_SIZE);
+        }
+        if (Type == MEM_DECOMMIT)
+        {
+            Address = Base;
+            Size = 0;
+            Status = NtFreeVirtualMemory(NtCurrentProcess(), &Address, &Size, MEM_RELEASE);
+            ok_ntstatus(Status, STATUS_SUCCESS);
+        }
+
+        /* Second page: refused, the region stays as it was */
+        Base = NULL;
+        Size = RegionBytes;
+        Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Base, 0, &Size,
+                                         MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        if (!NT_SUCCESS(Status))
+            continue;
+        Address = (PUCHAR)Base + PAGE_SIZE + 0x10;
+        Size = 0;
+        Status = NtFreeVirtualMemory(NtCurrentProcess(), &Address, &Size, Type);
+        ok_ntstatus(Status, STATUS_FREE_VM_NOT_AT_BASE);
+        ok_eq_pointer(Address, (PUCHAR)Base + PAGE_SIZE + 0x10);
+        ok_eq_hex(Size, 0);
+        Status = NtQueryVirtualMemory(NtCurrentProcess(), Base, MemoryBasicInformation,
+                                      &Mbi, sizeof(Mbi), NULL);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        ok_eq_hex(Mbi.State, MEM_COMMIT);
+        ok_eq_hex(Mbi.RegionSize, RegionBytes);
+        Address = Base;
+        Size = 0;
+        Status = NtFreeVirtualMemory(NtCurrentProcess(), &Address, &Size, MEM_RELEASE);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+    }
+}
+
 START_TEST(NtFreeVirtualMemory)
 {
     Test_NtFreeVirtualMemory_DecommitOtherProcessor(FALSE);
     Test_NtFreeVirtualMemory_DecommitOtherProcessor(TRUE);
     Test_NtFreeVirtualMemory();
     Test_NtFreeVirtualMemory_Parameters();
+    Test_NtFreeVirtualMemory_InteriorBase();
     Test_NtFreeVirtualMemory_DecommitInaccessible();
     Test_NtFreeVirtualMemory_LockedPages();
     Test_NtFreeVirtualMemory_ReleaseCost();
