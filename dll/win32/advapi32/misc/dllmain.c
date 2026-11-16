@@ -14,6 +14,7 @@ extern BOOL RegInitialize(VOID);
 extern BOOL RegCleanup(VOID);
 extern VOID UnloadNtMarta(VOID);
 extern VOID CloseKsecDdHandle(VOID);
+extern VOID RngCleanup(VOID);
 
 BOOL
 WINAPI
@@ -33,6 +34,7 @@ DllMain(
             CloseLogonLsaHandle();
             RegCleanup();
             UnloadNtMarta();
+            RngCleanup();
             CloseKsecDdHandle();
             break;
     }

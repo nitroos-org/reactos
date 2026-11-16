@@ -16,6 +16,9 @@
 #include <md4.h>
 #include <md5.h>
 #include <rc4.h>
+#include <chacha20.h>
+
+WINE_DEFAULT_DEBUG_CHANNEL(advapi);
 
 static const unsigned char CRYPT_LMhash_Magic[8] =
     { 'K', 'G', 'S', '!', '@', '#', '$', '%' };
@@ -585,6 +588,91 @@ BOOL WINAPI SystemFunction035(LPCSTR lpszDllFilePath)
     return TRUE;
 }
 
+HANDLE KsecDeviceHandle;
+
+static
+NTSTATUS
+KsecDeviceIoControl(
+    ULONG IoControlCode,
+    PVOID InputBuffer,
+    SIZE_T InputBufferLength,
+    PVOID OutputBuffer,
+    SIZE_T OutputBufferLength);
+
+/*
+ * The per-process generator behind RtlGenRandom (and so ProcessPrng, BCryptGenRandom, CryptGenRandom, rand_s,
+ * UuidCreate): a 256-bit key from the system generator in ksecdd.sys (IOCTL_KSEC_RANDOM_FILL_BUFFER), expanded
+ * here with ChaCha20 (RFC 8439) the way ksecdd does it: a request takes one block under the key, whose first half
+ * replaces the key (so earlier output cannot be recomputed from a later state) and whose second half keys the
+ * request's ChaCha20 keystream, made outside the lock. A request needs no system call except at a reseed: the
+ * key takes 32 new bytes from ksecdd (XORed in) at the first use, after RNG_RESEED_BYTES of output, when
+ * RNG_RESEED_MS have passed since the last reseed, and in a process that is not the one that seeded it (a clone
+ * made with RtlCloneUserProcess starts with a copy of the parent's key).
+ */
+#define RNG_RESEED_BYTES    (1024 * 1024)
+#define RNG_RESEED_MS       1000
+#define RNG_REQUEST_MAX     (64 * 1024)
+
+static CRITICAL_SECTION RngLock;
+static CRITICAL_SECTION_DEBUG RngLockDebug =
+{
+    0, 0, &RngLock,
+    { &RngLockDebug.ProcessLocksList, &RngLockDebug.ProcessLocksList },
+      0, 0, { (DWORD_PTR)(__FILE__ ": RngLock") }
+};
+static CRITICAL_SECTION RngLock = { &RngLockDebug, -1, 0, 0, 0, 0 };
+
+static UCHAR RngKey[CHACHA20_KEY_SIZE];
+static ULONGLONG RngBytesSinceSeed;
+static DWORD RngSeedTime;
+static HANDLE RngProcessId;
+static BOOLEAN RngSeeded;
+
+static const UCHAR RngNonce[CHACHA20_NONCE_SIZE] = { 0 };
+
+/* Called with RngLock held */
+static
+BOOLEAN
+RngReseedIfDue(SIZE_T Request)
+{
+    UCHAR Seed[CHACHA20_KEY_SIZE];
+    HANDLE ProcessId = NtCurrentTeb()->ClientId.UniqueProcess;
+    DWORD Now = GetTickCount();
+    NTSTATUS Status;
+    ULONG i;
+
+    if (RngSeeded && RngProcessId == ProcessId && RngBytesSinceSeed + Request <= RNG_RESEED_BYTES &&
+        (DWORD)(Now - RngSeedTime) < RNG_RESEED_MS)
+    {
+        return TRUE;
+    }
+
+    Status = KsecDeviceIoControl(IOCTL_KSEC_RANDOM_FILL_BUFFER, NULL, 0, Seed, sizeof(Seed));
+    if (!NT_SUCCESS(Status))
+    {
+        RtlSecureZeroMemory(Seed, sizeof(Seed));
+        /* No output from a key that never came from the system generator, or that another process holds too */
+        if (!RngSeeded || RngProcessId != ProcessId)
+        {
+            ERR("No random seed from ksecdd: 0x%lx\n", Status);
+            return FALSE;
+        }
+        /* A seeded key stays usable, it is only not refreshed; try again at the next request */
+        WARN("Random reseed from ksecdd failed: 0x%lx\n", Status);
+        return TRUE;
+    }
+
+    for (i = 0; i < sizeof(RngKey); i++)
+        RngKey[i] ^= Seed[i];
+    RtlSecureZeroMemory(Seed, sizeof(Seed));
+
+    RngBytesSinceSeed = 0;
+    RngSeedTime = Now;
+    RngProcessId = ProcessId;
+    RngSeeded = TRUE;
+    return TRUE;
+}
+
 /******************************************************************************
  * SystemFunction036   (ADVAPI32.@)
  *
@@ -595,54 +683,60 @@ BOOL WINAPI SystemFunction035(LPCSTR lpszDllFilePath)
  *  dwLen    [I] Number of random bytes to fetch.
  *
  * RETURNS
- *  Always TRUE in my tests
+ *  Success: TRUE
+ *  Failure: FALSE (no seed from the system generator in ksecdd.sys; the buffer is not filled)
  */
 BOOLEAN
 WINAPI
 SystemFunction036(PVOID pbBuffer, ULONG dwLen)
 {
-    ////////////////////////////////////////////////////////////////
-    //////////////////// B I G   W A R N I N G  !!! ////////////////
-    // This function will output numbers based on the tick count. //
-    // It will NOT OUTPUT CRYPTOGRAPHIC-SAFE RANDOM NUMBERS !!!    //
-    ////////////////////////////////////////////////////////////////
+    UCHAR Block[CHACHA20_BLOCK_SIZE];
+    PUCHAR Output = pbBuffer;
+    ULONG Chunk;
 
-    DWORD dwSeed;
-    PBYTE pBuffer;
-    ULONG uPseudoRandom;
-    LARGE_INTEGER time;
-    static ULONG uCounter = 17;
-
-    if(!pbBuffer || !dwLen)
+    if (!pbBuffer || !dwLen)
     {
         /* This function always returns TRUE, even if invalid parameters were passed. (verified under WinXP SP2) */
         return TRUE;
     }
 
-    /* Get the first seed from the performance counter */
-    QueryPerformanceCounter(&time);
-    dwSeed = time.LowPart ^ time.HighPart ^ RtlUlongByteSwap(uCounter++);
-
-    /* We will access the buffer bytewise */
-    pBuffer = (PBYTE)pbBuffer;
-
-    do
+    while (dwLen)
     {
-        /* Use the pseudo random number generator RtlRandom, which outputs a 4-byte value and a new seed */
-        uPseudoRandom = RtlRandom(&dwSeed);
+        Chunk = min(dwLen, RNG_REQUEST_MAX);
 
-        do
+        EnterCriticalSection(&RngLock);
+        if (!RngReseedIfDue(Chunk))
         {
-            /* Get each byte from the pseudo random number and store it in the buffer */
-            *pBuffer = (BYTE)(uPseudoRandom >> 8 * (dwLen % 3) & 0xFF);
-            ++pBuffer;
-        } while(--dwLen % 3);
-    } while(dwLen);
+            LeaveCriticalSection(&RngLock);
+            SetLastError(NTE_FAIL);
+            return FALSE;
+        }
+        /* one block: the next key, and the key of this request */
+        ChaCha20Block(RngKey, 0, RngNonce, Block);
+        RtlCopyMemory(RngKey, Block, CHACHA20_KEY_SIZE);
+        RngBytesSinceSeed += Chunk;
+        LeaveCriticalSection(&RngLock);
 
+        if (Chunk <= CHACHA20_BLOCK_SIZE - CHACHA20_KEY_SIZE)
+            RtlCopyMemory(Output, Block + CHACHA20_KEY_SIZE, Chunk);
+        else
+            ChaCha20KeyStream(Block + CHACHA20_KEY_SIZE, 0, RngNonce, Output, Chunk);
+
+        Output += Chunk;
+        dwLen -= Chunk;
+    }
+
+    RtlSecureZeroMemory(Block, sizeof(Block));
     return TRUE;
 }
 
-HANDLE KsecDeviceHandle;
+/* DLL_PROCESS_DETACH: no key left in memory */
+VOID
+RngCleanup(VOID)
+{
+    RtlSecureZeroMemory(RngKey, sizeof(RngKey));
+    RngSeeded = FALSE;
+}
 
 static
 NTSTATUS

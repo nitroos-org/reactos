@@ -2,6 +2,7 @@
 @ stdcall AcquireCredentialsHandleW(ptr ptr long ptr ptr long ptr ptr ptr)
 @ stdcall AddCredentialsW(ptr ptr ptr long ptr long ptr ptr)
 @ stdcall ApplyControlToken(ptr ptr)
+@ stdcall BCryptGenRandom(ptr ptr long long)
 @ stdcall CredMarshalTargetInfo()
 @ stdcall DeleteSecurityContext(ptr)
 @ stdcall EfsDecryptFek()

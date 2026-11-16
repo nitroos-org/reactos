@@ -20,8 +20,9 @@
  * reboot, another address on every other prefix, and two machines cloned from one disk still differ (their
  * adapters' addresses do). An identifier RFC 5453 reserves is skipped like a duplicate.
  *
- * The secret is made at the first start with IPv6 on, from RDRAND (when it works) and timing (Iid6NewSecret says
- * which sources it used), and kept in
+ * The secret is made at the first start with IPv6 on, by the system random number generator (ksecdd.sys
+ * BCryptGenRandom; when it refuses, from RDRAND and timing gathered here, marked Weak = 1 and replaced at a later
+ * start where the generator works), and kept in
  * HKLM\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\StableIdentifiers, value SecretKey (REG_BINARY,
  * 16 bytes). The key is created with a protected DACL: SYSTEM and Administrators only, so a standard user
  * cannot read it (Tcpip6\Parameters itself is readable by everybody) once the configuration manager enforces
@@ -73,6 +74,7 @@
 
 #define IID6_PARAMETERS     L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\Tcpip6\\Parameters"
 #define IID6_SETUP_MARK     L"FromSetup"
+#define IID6_WEAK_MARK      L"Weak"
 #define IID6_SECRET_KEY     L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\Tcpip6\\Parameters\\StableIdentifiers"
 
 BOOLEAN TCP6RandomizeIdentifiers;
@@ -435,9 +437,8 @@ Iid6Rdrand(PULONG Value)
 }
 #endif
 
-/* The kernel keeps no random seed a driver can use (ksecdd's KsecGenRandom runs RtlRandomEx from a constant and the
-   tick count; the registry has no saved seed: SEC-system-rng-not-cryptographic), so a new secret is made from what
-   this code can gather itself, and says truthfully what it used:
+/* The fallback when the system random number generator (ksecdd.sys BCryptGenRandom) refuses: a secret made from
+   what this code can gather itself, which says truthfully what it used:
    - RDRAND (x86), eight 32-bit words, each retried up to ten times (Intel's rule). Only words the instruction
      delivered are mixed in (a failed try leaves the destination at zero, which is not entropy; a word of 0 or
      all ones counts as a failed try: what a broken RDRAND returns with success every time). All eight
@@ -451,7 +452,7 @@ Iid6Rdrand(PULONG Value)
 
 static
 VOID
-Iid6NewSecret(UCHAR Secret[IID6_SECRET_SIZE], PCSTR What)
+Iid6GatherSecret(UCHAR Secret[IID6_SECRET_SIZE], PCSTR What)
 {
     ULONGLONG Pool[8 + 4 + 2 * IID6_TIMING_SAMPLES];
     ULONGLONG Deltas[IID6_TIMING_SAMPLES];
@@ -531,18 +532,43 @@ Iid6NewSecret(UCHAR Secret[IID6_SECRET_SIZE], PCSTR What)
     RtlSecureZeroMemory(Pool, sizeof(Pool));
 
     DbgPrint("TCPIP: new %s from: RDRAND %s (%lu of 8 words), timing (%u samples, %lu distinct "
-             "intervals), system/interrupt/tick time; no kernel boot seed exists; strength: %s\n", What,
+             "intervals), system/interrupt/tick time; the system generator refused; strength: %s\n", What,
              HaveRdrand ? "present" : "absent", RdrandWords, (UINT)IID6_TIMING_SAMPLES, Distinct,
              RdrandWords == 8 ? "hardware random source plus timing" : "timing only, weak");
 }
 
+/* ksecdd.sys, kernel-mode BCryptGenRandom (bcrypt.h is a user-mode header) */
+#define IID6_BCRYPT_USE_SYSTEM_PREFERRED_RNG 0x00000002
+NTSTATUS NTAPI BCryptGenRandom(PVOID Algorithm, PUCHAR Buffer, ULONG Count, ULONG Flags);
+
+/* A new secret from the system random number generator; when it refuses (it failed its self-test), one gathered
+   here (Iid6GatherSecret). Returns FALSE for the gathered one: the caller marks it (value Weak = 1) so that a later
+   start replaces it with one from the generator */
+static
+BOOLEAN
+Iid6NewSecret(UCHAR Secret[IID6_SECRET_SIZE], PCSTR What)
+{
+    NTSTATUS Status;
+
+    Status = BCryptGenRandom(NULL, Secret, IID6_SECRET_SIZE, IID6_BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+    if (NT_SUCCESS(Status))
+    {
+        DbgPrint("TCPIP: new %s from the system random number generator\n", What);
+        return TRUE;
+    }
+
+    DbgPrint("TCPIP: system random number generator refused (0x%lx), %s gathered here\n", Status, What);
+    Iid6GatherSecret(Secret, What);
+    return FALSE;
+}
+
 /* ---- random identifiers of temporary addresses (temp6.c) ----
  *
- * RFC 8981 3.3.1: 64 random bits. Each one is SipHash-2-4 under Iid6TempKey (made at every start like the secret
- * above: RDRAND plus timing) of a counter, two RDRAND words when the processor delivers them, the cycle counter and
- * the interrupt time. With RDRAND every identifier has fresh hardware randomness; without it they are a keyed
- * pseudorandom sequence, as unpredictable as the key. The system random number generator is not used
- * (SEC-system-rng-not-cryptographic). Any IRQL; core lock held by the callers.
+ * RFC 8981 3.3.1: 64 random bits. Each one is SipHash-2-4 under Iid6TempKey (made at every start by the system
+ * random number generator, like the secret above) of a counter, two RDRAND words when the processor delivers them,
+ * the cycle counter and the interrupt time. With RDRAND every identifier has fresh hardware randomness; without it
+ * they are a keyed pseudorandom sequence, as unpredictable as the key. The generator itself is not called per
+ * identifier (this runs at any IRQL with the core lock held). Any IRQL; core lock held by the callers.
  */
 VOID
 TCP6RandomIdentifier(UCHAR Iid[8])
@@ -708,6 +734,9 @@ Iid6SetupInProgress(VOID)
    A secret made while the system is being installed is marked (value FromSetup = 1 in the secret's key): the
    installed disk may be copied to other machines, so the first start after setup (the first normal boot) makes
    a new one, stores it, and removes the mark. From then on the secret stays for the life of the installation.
+   A secret not made by the system random number generator (it refused) is marked Weak = 1 and replaced at the first
+   start where the generator gives one; the mark is removed then. Secrets stored by builds before the Weak mark
+   carry no mark and are kept.
    Whenever the key cannot be given the protected DACL nothing is read from or written to it: a secret for this
    start only (random, not stable), logged. */
 static
@@ -717,6 +746,7 @@ Iid6LoadSecret(VOID)
     UNICODE_STRING KeyName = RTL_CONSTANT_STRING(IID6_SECRET_KEY);
     UNICODE_STRING ValueName = RTL_CONSTANT_STRING(L"SecretKey");
     UNICODE_STRING MarkName = RTL_CONSTANT_STRING(IID6_SETUP_MARK);
+    UNICODE_STRING WeakName = RTL_CONSTANT_STRING(IID6_WEAK_MARK);
     OBJECT_ATTRIBUTES Attributes;
     SECURITY_DESCRIPTOR Sd;
     PACL Dacl = NULL;
@@ -724,7 +754,7 @@ Iid6LoadSecret(VOID)
     PKEY_VALUE_PARTIAL_INFORMATION Info = (PKEY_VALUE_PARTIAL_INFORMATION)Buffer;
     HANDLE Key;
     ULONG Length, Disposition, Mark = 1;
-    BOOLEAN Setup, HaveSecret, Marked = FALSE;
+    BOOLEAN Setup, HaveSecret, Marked = FALSE, Weak = FALSE, Keep, Strong = FALSE, Fresh = FALSE;
     NTSTATUS Status;
 
     Setup = Iid6SetupInProgress();
@@ -771,20 +801,40 @@ Iid6LoadSecret(VOID)
     Marked = NT_SUCCESS(Status) && Info->Type == REG_DWORD && Info->DataLength == sizeof(ULONG) &&
              *(PULONG)Info->Data != 0;
 
+    Status = ZwQueryValueKey(Key, &WeakName, KeyValuePartialInformation, Info, sizeof(Buffer), &Length);
+    Weak = NT_SUCCESS(Status) && Info->Type == REG_DWORD && Info->DataLength == sizeof(ULONG) &&
+           *(PULONG)Info->Data != 0;
+
     Status = ZwQueryValueKey(Key, &ValueName, KeyValuePartialInformation, Info, sizeof(Buffer), &Length);
     HaveSecret = NT_SUCCESS(Status) && Info->Type == REG_BINARY && Info->DataLength == IID6_SECRET_SIZE;
 
-    if (HaveSecret && !(Marked && !Setup))
+    Keep = HaveSecret && !(Marked && !Setup);
+    if (Keep && Weak)
+    {
+        /* made without the system generator: replaced as soon as the generator gives one, kept while it refuses */
+        Strong = Iid6NewSecret(Iid6Secret, "IPv6 identifier secret");
+        if (Strong)
+        {
+            Keep = FALSE;
+            Fresh = TRUE;
+            DbgPrint("TCPIP: IPv6 identifier secret was made without the system generator: replacing it\n");
+        }
+    }
+
+    if (Keep)
     {
         RtlCopyMemory(Iid6Secret, Info->Data, IID6_SECRET_SIZE);
         if (Marked)
             DbgPrint("TCPIP: IPv6 identifier secret made during setup, replaced at the first start after it\n");
+        if (Weak)
+            DbgPrint("TCPIP: IPv6 identifier secret made without the system generator kept (it still refuses)\n");
     }
     else
     {
-        if (HaveSecret)
+        if (HaveSecret && !Fresh)
             DbgPrint("TCPIP: IPv6 identifier secret was made during setup: replacing it (first normal start)\n");
-        Iid6NewSecret(Iid6Secret, "IPv6 identifier secret");
+        if (!Fresh)
+            Strong = Iid6NewSecret(Iid6Secret, "IPv6 identifier secret");
         Status = STATUS_SUCCESS;
         if (Setup)
         {
@@ -792,6 +842,13 @@ Iid6LoadSecret(VOID)
             Status = ZwSetValueKey(Key, &MarkName, 0, REG_DWORD, &Mark, sizeof(Mark));
             if (!NT_SUCCESS(Status))
                 DbgPrint("TCPIP: IPv6 identifier secret not kept (setup mark: 0x%lx)\n", Status);
+        }
+        if (NT_SUCCESS(Status) && !Strong)
+        {
+            /* the same for the weak mark */
+            Status = ZwSetValueKey(Key, &WeakName, 0, REG_DWORD, &Mark, sizeof(Mark));
+            if (!NT_SUCCESS(Status))
+                DbgPrint("TCPIP: IPv6 identifier secret not kept (weak mark: 0x%lx)\n", Status);
         }
         if (NT_SUCCESS(Status))
         {
@@ -806,7 +863,18 @@ Iid6LoadSecret(VOID)
                         /* a mark that stays set would replace the secret at every start: clear it instead */
                         Mark = 0;
                         Status = ZwSetValueKey(Key, &MarkName, 0, REG_DWORD, &Mark, sizeof(Mark));
+                        Mark = 1;
                         DbgPrint("TCPIP: IPv6 identifier setup mark not removed, cleared: 0x%lx\n", Status);
+                    }
+                }
+                if (Strong && Weak)
+                {
+                    Status = ZwDeleteValueKey(Key, &WeakName);
+                    if (!NT_SUCCESS(Status))
+                    {
+                        Mark = 0;
+                        Status = ZwSetValueKey(Key, &WeakName, 0, REG_DWORD, &Mark, sizeof(Mark));
+                        DbgPrint("TCPIP: IPv6 identifier weak mark not removed, cleared: 0x%lx\n", Status);
                     }
                 }
                 ZwFlushKey(Key);

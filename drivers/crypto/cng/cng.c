@@ -6,6 +6,7 @@
  *
  * Drivers such as WinFsp import the BCrypt functions from cng.sys, and use them
  * for SHA-1 only. Everything else is refused with STATUS_NOT_SUPPORTED.
+ * BCryptGenRandom is forwarded to ksecdd.sys (the system random number generator).
  */
 
 /* INCLUDES *******************************************************************/

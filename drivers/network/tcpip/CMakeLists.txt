@@ -51,6 +51,6 @@ target_include_directories(tcpip BEFORE
 
 target_link_libraries(tcpip ip ${PSEH_LIB})
 set_module_type(tcpip kernelmodedriver)
-add_importlibs(tcpip ndis ntoskrnl hal)
+add_importlibs(tcpip ndis ksecdd ntoskrnl hal)
 add_pch(tcpip include/lwip/precomp.h SOURCE)
 add_cd_file(TARGET tcpip DESTINATION reactos/system32/drivers FOR all)

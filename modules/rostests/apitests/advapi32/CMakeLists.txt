@@ -79,6 +79,8 @@ list(APPEND SOURCE
     RegSharedKeyName.c
     RegGetValue.c
     RtlEncryptMemory.c
+    RtlGenRandom.c
+    RngKnownAnswer.c
     SaferIdentifyLevel.c
     TokenDefaultDacl.c
     TokenElevation.c
@@ -118,7 +120,7 @@ add_executable(advapi32_apitest
     ${SOURCE}
     ${PCH_SKIP_SOURCE})
 
-target_link_libraries(advapi32_apitest wine evtlib ${PSEH_LIB})
+target_link_libraries(advapi32_apitest wine evtlib cryptlib ${PSEH_LIB})
 set_module_type(advapi32_apitest win32cui)
 add_importlibs(advapi32_apitest advapi32 user32 iphlpapi ws2_32 netapi32 userenv msvcrt kernel32 ntdll)
 add_pch(advapi32_apitest precomp.h "${PCH_SKIP_SOURCE}")

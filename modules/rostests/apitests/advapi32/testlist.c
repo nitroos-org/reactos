@@ -94,6 +94,10 @@ extern void func_RegSharedKeyName(void);
 extern void func_RestrictedSidsCopy(void);
 extern void func_RestrictedTokenAccess(void);
 extern void func_RtlEncryptMemory(void);
+extern void func_RtlGenRandom(void);
+extern void func_RtlGenRandomChild(void);
+extern void func_KsecUnknownIoctl(void);
+extern void func_RngKnownAnswer(void);
 extern void func_SaferIdentifyLevel(void);
 extern void func_TokenDefaultDacl(void);
 extern void func_TokenElevation(void);
@@ -238,6 +242,10 @@ const struct test winetest_testlist[] =
     { "RestrictedSidsCopy", func_RestrictedSidsCopy },
     { "RestrictedTokenAccess", func_RestrictedTokenAccess },
     { "RtlEncryptMemory", func_RtlEncryptMemory },
+    { "RtlGenRandom", func_RtlGenRandom },
+    { "RtlGenRandomChild", func_RtlGenRandomChild },
+    { "KsecUnknownIoctl", func_KsecUnknownIoctl },
+    { "RngKnownAnswer", func_RngKnownAnswer },
     { "SaferIdentifyLevel", func_SaferIdentifyLevel },
     { "TokenDefaultDacl", func_TokenDefaultDacl },
     { "TokenElevation", func_TokenElevation },
