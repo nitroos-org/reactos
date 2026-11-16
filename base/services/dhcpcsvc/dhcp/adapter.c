@@ -1,4 +1,5 @@
 #include <rosdhcp.h>
+#include "adapname.h"
 
 #define NDEBUG
 #include <reactos/debug.h>
@@ -250,8 +251,9 @@ BOOL PrepareAdapterForService( PDHCP_ADAPTER Adapter ) {
     DWORD Error = ERROR_SUCCESS, DhcpEnabled, Length = sizeof(DWORD);
 
     Adapter->DhclientState.config = &Adapter->DhclientConfig;
-    strncpy(Adapter->DhclientInfo.name, (char*)Adapter->IfMib.bDescr,
-            sizeof(Adapter->DhclientInfo.name));
+    /* cut and zero-terminated: the registry paths in dhclient.c append this name to fixed buffers */
+    DhcpAdapterNameCopy(Adapter->DhclientInfo.name, sizeof(Adapter->DhclientInfo.name),
+                        Adapter->IfMib.bDescr, sizeof(Adapter->IfMib.bDescr));
 
     AdapterKey = FindAdapterKey( Adapter );
     if( AdapterKey )
@@ -631,13 +633,13 @@ PDHCP_ADAPTER AdapterFindIndex( unsigned int indx ) {
 PDHCP_ADAPTER AdapterFindName( const WCHAR *name ) {
     PDHCP_ADAPTER Adapter;
     PLIST_ENTRY ListEntry;
-    WCHAR UnicodeName[45];
+    WCHAR UnicodeName[DHCP_ADAPTER_NAME_WIDE_CCH];
 
     for( ListEntry = AdapterList.Flink;
          ListEntry != &AdapterList;
          ListEntry = ListEntry->Flink ) {
         Adapter = CONTAINING_RECORD( ListEntry, DHCP_ADAPTER, ListEntry );
-        mbstowcs(UnicodeName, (const CHAR *)Adapter->IfMib.bDescr, strlen((const CHAR *)Adapter->IfMib.bDescr) + 1);
+        DhcpAdapterNameToWide(UnicodeName, Adapter->IfMib.bDescr, sizeof(Adapter->IfMib.bDescr));
         if( !wcsicmp(UnicodeName, name ) ) return Adapter;
     }
 
