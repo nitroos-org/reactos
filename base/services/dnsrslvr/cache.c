@@ -32,6 +32,7 @@ static BOOL DnsCacheInitialized = FALSE;
 static volatile LONG MaxCacheTtl = DEFAULT_MAX_CACHE_TTL;
 static volatile LONG MaxNegativeCacheTtl = DEFAULT_MAX_NEG_TTL;
 static ULONGLONG LastSweep;
+static ULONGLONG NextSerial;                /* the number of the next entry added (the lock is held) */
 static ULONG HashSeed = 2166136261u;        /* the start value of the hash of a name, set at every start of the service */
 
 #define DnsCacheLock()          do { EnterCriticalSection(&DnsCache.Lock); } while (0)
@@ -640,6 +641,7 @@ AddEntry(
     }
     Entry->Hash = NameHash(Entry->Name);
     Bucket = BucketOf(Entry->Hash);
+    Entry->Serial = ++NextSerial;
 
     if (!bHostsFileEntry)
     {
@@ -763,9 +765,11 @@ DnsIntCacheAddNegative(
 
 /*
  * The list of ipconfig /displaydns goes over the RPC as a linked list, which the marshalling of the RPC does not
- * take beyond a few thousand elements (the call fails): the list is cut at this many entries.
+ * take beyond a few thousand elements (the call fails): CRrReadCache (what a client of an older build calls) cuts the
+ * list at this many entries; NitroReadCachePage gives the whole list in pages of at most CACHE_PAGE_MAX.
  */
 #define CACHE_LIST_MAX      2800
+#define CACHE_PAGE_MAX      200
 
 /* Adds the entry to the list (pHead, pLast) of the RPC; ERROR_OUTOFMEMORY when it cannot */
 static
@@ -804,9 +808,31 @@ ListEntry(
     return ERROR_SUCCESS;
 }
 
+/* The order of the list is the order of the keys: the answers of DNS servers in the order they were added, then the
+   rows of the hosts file */
+#define CACHE_HOSTS_KEY     0x8000000000000000ULL
+
+static
+ULONGLONG
+EntryKey(
+    _In_ PRESOLVER_CACHE_ENTRY CacheEntry)
+{
+    return CacheEntry->bHostsFileEntry ? (CACHE_HOSTS_KEY | CacheEntry->Serial) : CacheEntry->Serial;
+}
+
+/*
+ * The entries of the list of ipconfig /displaydns whose key is above After, at most Max of them, as the list of
+ * the RPC (*ppCacheEntries); *pNext is the key of the last one listed (After when none). bNewest: when there are more
+ * answers of DNS servers than Max, the oldest are left out, so that the newest are listed.
+ */
+static
 DNS_STATUS
-DnsIntCacheGetEntries(
-    _Out_ DNS_CACHE_ENTRY **ppCacheEntries)
+ListEntries(
+    _In_ ULONGLONG After,
+    _In_ ULONG Max,
+    _In_ BOOL bNewest,
+    _Out_ DNS_CACHE_ENTRY **ppCacheEntries,
+    _Out_ PULONGLONG pNext)
 {
     PRESOLVER_CACHE_ENTRY CacheEntry;
     PLIST_ENTRY NextEntry, Chain, Other;
@@ -818,24 +844,26 @@ DnsIntCacheGetEntries(
     DnsCacheLock();
 
     *ppCacheEntries = NULL;
+    *pNext = After;
 
     /* The entries that are over their time are not listed (they go now) */
     SweepExpired(CacheNow());
 
-    /* When the list is cut, the newest answers are the ones listed (the name just asked for is there) */
-    Skip = (DnsCache.EntryCount > CACHE_LIST_MAX) ? DnsCache.EntryCount - CACHE_LIST_MAX : 0;
+    Skip = (bNewest && DnsCache.EntryCount > Max) ? DnsCache.EntryCount - Max : 0;
 
     /* The answers of the DNS servers first, then the rows of the hosts file */
     for (Pass = 0; Pass < 2 && Status == ERROR_SUCCESS; Pass++)
     {
         for (NextEntry = DnsCache.RecordList.Flink;
-             NextEntry != &DnsCache.RecordList && Count < CACHE_LIST_MAX;
+             NextEntry != &DnsCache.RecordList && Count < Max;
              NextEntry = NextEntry->Flink)
         {
             /* Get the Current Entry */
             CacheEntry = CONTAINING_RECORD(NextEntry, RESOLVER_CACHE_ENTRY, CacheLink);
 
             if (CacheEntry->bHostsFileEntry != (Pass == 1))
+                continue;
+            if (EntryKey(CacheEntry) <= After)
                 continue;
             if (Pass == 0 && Skip > 0)
             {
@@ -863,12 +891,17 @@ DnsIntCacheGetEntries(
                     }
                 }
                 if (bListed)
+                {
+                    /* not listed, but passed: the next page starts after it */
+                    *pNext = EntryKey(CacheEntry);
                     continue;
+                }
             }
 
             Status = ListEntry(CacheEntry, ppCacheEntries, &pLastEntry);
             if (Status != ERROR_SUCCESS)
                 break;
+            *pNext = EntryKey(CacheEntry);
             Count++;
         }
     }
@@ -877,4 +910,28 @@ DnsIntCacheGetEntries(
     DnsCacheUnlock();
 
     return Status;
+}
+
+/* The whole list, cut at CACHE_LIST_MAX entries (the newest answers): what a client without the paged call gets */
+DNS_STATUS
+DnsIntCacheGetEntries(
+    _Out_ DNS_CACHE_ENTRY **ppCacheEntries)
+{
+    ULONGLONG Next;
+
+    return ListEntries(0, CACHE_LIST_MAX, TRUE, ppCacheEntries, &Next);
+}
+
+/* One page of the list: the entries after the key After (0 for the first page), at most Max */
+DNS_STATUS
+DnsIntCacheGetEntriesPage(
+    _In_ ULONGLONG After,
+    _In_ ULONG Max,
+    _Out_ DNS_CACHE_ENTRY **ppCacheEntries,
+    _Out_ PULONGLONG pNext)
+{
+    if (Max == 0 || Max > CACHE_PAGE_MAX)
+        Max = CACHE_PAGE_MAX;
+
+    return ListEntries(After, Max, FALSE, ppCacheEntries, pNext);
 }

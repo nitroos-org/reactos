@@ -77,4 +77,19 @@ interface DnsResolver
     /* Function: 0x09 */
     /* R_ResolverPoke */
 
+    /*
+     * A NitroOS addition (no function of Windows is here): a page of the list that CRrReadCache returns whole.
+     * The list of CRrReadCache is cut at a few thousand entries because the marshalling of a linked list uses
+     * the stack of the caller for every element. ullAfter is 0 for the first page and the value that the
+     * previous call gave in *pullNext for the next one; a page without entries is the end. dwMaxEntries is
+     * the most entries of a page (the service may give fewer).
+     */
+    DWORD
+    __stdcall
+    NitroReadCachePage(
+        [in, unique, string] DNSRSLVR_HANDLE pwszServerName,
+        [in] ULONGLONG ullAfter,
+        [in] DWORD dwMaxEntries,
+        [out] DNS_CACHE_ENTRY **ppCacheEntries,
+        [out] ULONGLONG *pullNext);
 }

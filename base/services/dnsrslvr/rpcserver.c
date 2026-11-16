@@ -66,6 +66,23 @@ CRrReadCache(
 }
 
 
+/* NitroOS addition: one page of the list that CRrReadCache returns */
+DWORD
+__stdcall
+NitroReadCachePage(
+    _In_ DNSRSLVR_HANDLE pwszServerName,
+    _In_ ULONGLONG ullAfter,
+    _In_ DWORD dwMaxEntries,
+    _Out_ DNS_CACHE_ENTRY **ppCacheEntries,
+    _Out_ ULONGLONG *pullNext)
+{
+    DPRINT("NitroReadCachePage(%S %I64u %lu %p)\n",
+           pwszServerName, ullAfter, dwMaxEntries, ppCacheEntries);
+
+    return DnsIntCacheGetEntriesPage(ullAfter, dwMaxEntries, ppCacheEntries, pullNext);
+}
+
+
 /* Function: 0x04 */
 DWORD
 __stdcall

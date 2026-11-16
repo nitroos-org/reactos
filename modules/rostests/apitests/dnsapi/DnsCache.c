@@ -284,6 +284,34 @@ IsListed(const char *Name)
     return FALSE;
 }
 
+/* The list is taken by a thread with a small stack (1 MB, half of the default of our programs): the paged call
+   does not need a stack for the whole list */
+static int ListedBySmallStack;
+
+static
+DWORD
+WINAPI
+SmallStackThread(LPVOID Parameter)
+{
+    ListedBySmallStack = CacheEntryCount();
+    return 0;
+}
+
+static
+void
+TestListSmallStack(int Expected)
+{
+    HANDLE Thread = CreateThread(NULL, 1024 * 1024, SmallStackThread, NULL, STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
+
+    ok(Thread != NULL, "CreateThread failed\n");
+    if (!Thread)
+        return;
+    ok(WaitForSingleObject(Thread, 180000) == WAIT_OBJECT_0, "the listing with a 1 MB stack did not finish\n");
+    CloseHandle(Thread);
+    ok(ListedBySmallStack >= Expected, "DnsGetCacheDataTable listed %d entries on a thread with a 1 MB stack, expected %d or more\n",
+       ListedBySmallStack, Expected);
+}
+
 static
 void
 TestTtl(void)
@@ -644,7 +672,10 @@ TestSize(int Names)
     }
     k = CacheEntryCount();
     trace("entries listed by DnsGetCacheDataTable (ipconfig /displaydns): %d\n", k);
-    ok(k > 1000 && k <= 3000, "DnsGetCacheDataTable listed %d entries with a full cache, expected a list of some thousand at most\n", k);
+    /* the whole cache is listed (it was cut at 2800 entries, which a 2 MB stack of the caller could take) */
+    ok(k >= (Names < 8192 ? Names - 1 : 8192), "DnsGetCacheDataTable listed %d entries of a cache of %d answers\n", k, Names < 8192 ? Names : 8192);
+    ok(k <= 8192 + 1000, "DnsGetCacheDataTable listed %d entries, more than the cache can hold\n", k);
+    TestListSmallStack(Names < 8192 ? Names - 1 : 8192);
     _snprintf(Buffer, sizeof(Buffer), "big-%s-%d.cache.test", Uniq, Names - 1);
     ok(IsListed(Buffer), "the newest name is not in the list of DnsGetCacheDataTable\n");
 
