@@ -19,6 +19,7 @@ extern void func_portsec(void);
 extern void func_portrace(void);
 extern void func_p3create(void);
 extern void func_p3voldel(void);
+extern void func_p3volleak(void);
 extern void func_p3safe(void);
 extern void func_p3fpark(void);
 extern void func_p3section(void);
@@ -29,6 +30,7 @@ extern void func_p3pdpc(void);
 extern void func_p3msg(void);
 extern void func_p3ctxdpc(void);
 extern void func_p3loop(void);
+extern void func_p3secstress(void);
 
 const struct test winetest_testlist[] =
 {
@@ -50,6 +52,7 @@ const struct test winetest_testlist[] =
     { "portrace", func_portrace },
     { "p3create", func_p3create },
     { "p3voldel", func_p3voldel },
+    { "p3volleak", func_p3volleak },
     { "p3safe", func_p3safe },
     { "p3fpark", func_p3fpark },
     { "p3section", func_p3section },
@@ -60,5 +63,6 @@ const struct test winetest_testlist[] =
     { "p3msg", func_p3msg },
     { "p3ctxdpc", func_p3ctxdpc },
     { "p3loop", func_p3loop },
+    { "p3secstress", func_p3secstress },
     { 0, 0 }
 };

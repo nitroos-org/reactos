@@ -234,7 +234,7 @@ FltpAttachInstance(_In_ PFLT_FILTER Filter,
         InitRelatedObjects(&Objects, Instance);
         Status = Filter->InstanceSetup(&Objects,
                                        SetupFlags,
-                                       Volume->DeviceObject->DeviceType,
+                                       Volume->VolumeDeviceType,
                                        Volume->FileSystemType);
         if (!NT_SUCCESS(Status))
         {
@@ -311,6 +311,8 @@ FltpTeardownInstance(_In_ PFLT_INSTANCE Instance,
         FltObjectDereference(Instance);
         return;
     }
+
+    FltpNoteVolumeFilter(Volume, &Filter->Name);
 
     /* No new operation takes the instance from here on */
     KeEnterCriticalRegion();

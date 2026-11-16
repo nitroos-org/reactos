@@ -53,6 +53,7 @@ C_ASSERT(FIELD_OFFSET(FLT_PARAMETERS, SetFileInformation.ReplaceIfExists) ==
 #define MODE_SCTX       10
 #define MODE_PDPC       11
 #define MODE_DPCREAD    12
+#define MODE_FSF        13
 
 #define MAX_OPEN        256
 
@@ -89,6 +90,11 @@ static PDEVICE_OBJECT ControlDevice;
 static UNICODE_STRING SymLinkName;
 static WCHAR SymLinkBuffer[80];
 static PFLT_FILTER SampleFilter;
+static PFLT_VOLUME HeldVolume;                  /* FLTSAMPLE_IOCTL_HOLD_VOLUME */
+static FLTSAMPLE_VOLUME_PROPS HeldBefore;
+#define LEAKED_VOLUMES_MAX 32
+static PFLT_VOLUME LeakedVolumes[LEAKED_VOLUMES_MAX];   /* FLTSAMPLE_IOCTL_LEAK_VOLUME: references kept on purpose (test only) */
+static ULONG LeakedCount;
 static FLTSAMPLE_STATS Stats;
 static ULONG AttachMask = 0xFFFF;
 static ULONG PendDelayMs = 200;
@@ -135,7 +141,7 @@ ModeFromName(_In_ PCUNICODE_STRING Name)
         { L".blk", MODE_BLK }, { L".nowr", MODE_NOWR }, { L".half", MODE_HALF }, { L".pend", MODE_PEND },
         { L".sync", MODE_SYNC }, { L".safe", MODE_SAFE }, { L".nodel", MODE_NODEL }, { L".msg", MODE_MSG },
         { L".nosec", MODE_NOSEC }, { L".sctx", MODE_SCTX }, { L".pdpc", MODE_PDPC },
-        { L".dpc", MODE_DPCREAD },
+        { L".dpc", MODE_DPCREAD }, { L".fsf", MODE_FSF },
     };
     ULONG i, Length;
 
@@ -672,6 +678,13 @@ PreOperation(_Inout_ PFLT_CALLBACK_DATA Data,
     if (Major < FLTSAMPLE_MAX_MAJOR)
         InterlockedIncrement((PLONG)&Stats.Pre[Major]);
 
+    /* A page of a .fsf file written by the modified page writer (which acquired the file for it before) */
+    if (Major == IRP_MJ_WRITE && Paging && IoGetTopLevelIrp() == (PIRP)FSRTL_MOD_WRITE_TOP_LEVEL_IRP &&
+        FindMode(FileObject) == MODE_FSF)
+    {
+        InterlockedIncrement((PLONG)&Stats.ModWriterWrites);
+    }
+
     if (UseContexts && Major != IRP_MJ_CREATE)
         LookAtContexts(FltObjects, FileObject, FindMode(FileObject));
 
@@ -1002,12 +1015,66 @@ PostSectionSync(_Inout_ PFLT_CALLBACK_DATA Data,
                 _In_opt_ PVOID CompletionContext,
                 _In_ FLT_POST_OPERATION_FLAGS Flags)
 {
-    UNREFERENCED_PARAMETER(Data);
     UNREFERENCED_PARAMETER(FltObjects);
     UNREFERENCED_PARAMETER(CompletionContext);
     UNREFERENCED_PARAMETER(Flags);
 
     InterlockedIncrement((PLONG)&Stats.SectionSyncPost);
+    /* What the file system's own callback (below the filter manager) said, if it has one */
+    if (Data->Iopb->Parameters.AcquireForSectionSynchronization.SyncType == SyncTypeCreateSection)
+        Stats.LastSectionSyncPostStatus = Data->IoStatus.Status;
+    return FLT_POSTOP_FINISHED_PROCESSING;
+}
+
+/*
+ * The other FsFilter operations: the release of a section synchronization, the modified page writer's
+ * acquire and release, the cache flush's acquire and release. Counted for .fsf files, by operation
+ * (FLTSAMPLE_FSF_INDEX), with the thread (an acquire and its release come from the same thread).
+ */
+static
+FLT_PREOP_CALLBACK_STATUS
+FLTAPI
+PreFsFilter(_Inout_ PFLT_CALLBACK_DATA Data,
+            _In_ PCFLT_RELATED_OBJECTS FltObjects,
+            _Outptr_result_maybenull_ PVOID *CompletionContext)
+{
+    PFILE_OBJECT FileObject = Data->Iopb->TargetFileObject;
+    ULONG Index = FLTSAMPLE_FSF_INDEX(Data->Iopb->MajorFunction);
+
+    UNREFERENCED_PARAMETER(FltObjects);
+    *CompletionContext = NULL;
+
+    if (FileObject == NULL || Index >= FLTSAMPLE_FSF_OPS || FindMode(FileObject) != MODE_FSF)
+        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+
+    InterlockedIncrement((PLONG)&Stats.FsFilterPre[Index]);
+    if (!FLT_IS_FS_FILTER_OPERATION(Data))
+        InterlockedIncrement((PLONG)&Stats.SectionSyncBadData);
+    *CompletionContext = PsGetCurrentThread();
+    return FLT_PREOP_SUCCESS_WITH_CALLBACK;
+}
+
+static
+FLT_POSTOP_CALLBACK_STATUS
+FLTAPI
+PostFsFilter(_Inout_ PFLT_CALLBACK_DATA Data,
+             _In_ PCFLT_RELATED_OBJECTS FltObjects,
+             _In_opt_ PVOID CompletionContext,
+             _In_ FLT_POST_OPERATION_FLAGS Flags)
+{
+    ULONG Index = FLTSAMPLE_FSF_INDEX(Data->Iopb->MajorFunction);
+
+    UNREFERENCED_PARAMETER(FltObjects);
+    UNREFERENCED_PARAMETER(Flags);
+
+    if (Index < FLTSAMPLE_FSF_OPS)
+    {
+        InterlockedIncrement((PLONG)&Stats.FsFilterPost[Index]);
+        if (CompletionContext != PsGetCurrentThread())
+            InterlockedIncrement((PLONG)&Stats.FsFilterOtherThread);
+        if (!NT_SUCCESS(Data->IoStatus.Status))
+            InterlockedIncrement((PLONG)&Stats.FsFilterFailed[Index]);
+    }
     return FLT_POSTOP_FINISHED_PROCESSING;
 }
 
@@ -1122,6 +1189,15 @@ FilterUnload(_In_ FLT_FILTER_UNLOAD_FLAGS Flags)
         ServerPort = NULL;
     }
 
+    /* A volume we still hold (FLTSAMPLE_IOCTL_HOLD_VOLUME) */
+    if (HeldVolume)
+    {
+        FltObjectDereference(HeldVolume);
+        HeldVolume = NULL;
+    }
+    while (LeakedCount)
+        FltObjectDereference(LeakedVolumes[--LeakedCount]);
+
     /* Pended operations need their worker, which needs our code, so wait for those */
     FltUnregisterFilter(SampleFilter);
     SampleFilter = NULL;
@@ -1211,6 +1287,114 @@ ForEachVolume(_In_ BOOLEAN Attach,
 
     ExFreePoolWithTag(Volumes, TAG_SAMPLE);
     return STATUS_SUCCESS;
+}
+
+/* What FltGetVolumeProperties and FltGetVolumeName say about a volume */
+static
+VOID
+GetVolumeProps(_In_ PFLT_VOLUME Volume,
+               _Out_ FLTSAMPLE_VOLUME_PROPS *Props)
+{
+    ULONG Buffer[128];
+    PFLT_VOLUME_PROPERTIES Properties = (PFLT_VOLUME_PROPERTIES)Buffer;
+    UNICODE_STRING Name;
+    ULONG Length = 0;
+
+    RtlZeroMemory(Props, sizeof(*Props));
+    Props->Status = FltGetVolumeProperties(Volume, Properties, sizeof(Buffer), &Length);
+    if (NT_SUCCESS(Props->Status))
+    {
+        Props->DeviceType = Properties->DeviceType;
+        Props->DeviceCharacteristics = Properties->DeviceCharacteristics;
+        Props->DeviceObjectFlags = Properties->DeviceObjectFlags;
+        Props->AlignmentRequirement = Properties->AlignmentRequirement;
+        Props->SectorSize = Properties->SectorSize;
+        RtlCopyMemory(Props->DriverName, Properties->FileSystemDriverName.Buffer,
+                      min(Properties->FileSystemDriverName.Length, sizeof(Props->DriverName) - sizeof(WCHAR)));
+    }
+    RtlInitEmptyUnicodeString(&Name, Props->VolumeName, sizeof(Props->VolumeName) - sizeof(WCHAR));
+    (VOID)FltGetVolumeName(Volume, &Name, NULL);
+}
+
+typedef struct _DELAYED_PING
+{
+    WORK_QUEUE_ITEM Item;
+    KEVENT Event;
+    volatile LONG Refs;
+} DELAYED_PING, *PDELAYED_PING;
+
+static
+VOID
+NTAPI
+DelayedPingWorker(_In_ PVOID Parameter)
+{
+    PDELAYED_PING Ping = Parameter;
+
+    KeSetEvent(&Ping->Event, IO_NO_INCREMENT, FALSE);
+    if (InterlockedDecrement(&Ping->Refs) == 0)
+        ExFreePoolWithTag(Ping, TAG_SAMPLE);
+}
+
+/* Takes a reference to the volume of that name, as a filter which keeps volumes around does */
+static
+NTSTATUS
+HoldVolume(_In_reads_bytes_(Length) PCWSTR Wanted,
+           _In_ ULONG Length,
+           _In_ BOOLEAN Leak)
+{
+    PFLT_VOLUME *Volumes;
+    ULONG Count = 0, i;
+    UNICODE_STRING WantedName;
+    NTSTATUS Status;
+    BOOLEAN Taken = FALSE;
+
+    if ((!Leak && HeldVolume) || (Leak && LeakedCount >= LEAKED_VOLUMES_MAX) || SampleFilter == NULL)
+        return STATUS_INVALID_DEVICE_STATE;
+    WantedName.Buffer = (PWCH)Wanted;
+    WantedName.Length = WantedName.MaximumLength = (USHORT)min(Length & ~1, 0xFFFE);
+
+    Status = FltEnumerateVolumes(SampleFilter, NULL, 0, &Count);
+    if (Status != STATUS_BUFFER_TOO_SMALL || Count == 0)
+        return STATUS_NOT_FOUND;
+    Volumes = ExAllocatePoolWithTag(NonPagedPool, (Count + 4) * sizeof(PFLT_VOLUME), TAG_SAMPLE);
+    if (Volumes == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    Status = FltEnumerateVolumes(SampleFilter, Volumes, Count + 4, &Count);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreePoolWithTag(Volumes, TAG_SAMPLE);
+        return Status;
+    }
+
+    Status = STATUS_NOT_FOUND;
+    for (i = 0; i < Count; i++)
+    {
+        FLTSAMPLE_VOLUME_PROPS Props;
+        UNICODE_STRING Name;
+
+        GetVolumeProps(Volumes[i], &Props);
+        RtlInitUnicodeString(&Name, Props.VolumeName);
+        if (!Taken && RtlEqualUnicodeString(&Name, &WantedName, TRUE))
+        {
+            /* This reference stays */
+            if (Leak)
+            {
+                LeakedVolumes[LeakedCount++] = Volumes[i];
+            }
+            else
+            {
+                HeldVolume = Volumes[i];
+                HeldBefore = Props;
+            }
+            Taken = TRUE;
+            Status = STATUS_SUCCESS;
+            continue;
+        }
+        FltObjectDereference(Volumes[i]);
+    }
+
+    ExFreePoolWithTag(Volumes, TAG_SAMPLE);
+    return Status;
 }
 
 static
@@ -1329,6 +1513,71 @@ ControlDispatch(_In_ PDEVICE_OBJECT DeviceObject,
                 RefuseUnload = *(PULONG)Buffer != 0;
                 break;
 
+            case FLTSAMPLE_IOCTL_HOLD_VOLUME:
+                if (InLength < sizeof(WCHAR)) { Status = STATUS_INVALID_PARAMETER; break; }
+                Status = HoldVolume(Buffer, InLength, FALSE);
+                break;
+
+            case FLTSAMPLE_IOCTL_LEAK_VOLUME:
+                /* Test only: a filter which never drops a volume reference, one more volume each time */
+                if (InLength < sizeof(WCHAR)) { Status = STATUS_INVALID_PARAMETER; break; }
+                Status = HoldVolume(Buffer, InLength, TRUE);
+                break;
+
+            case FLTSAMPLE_IOCTL_DELAYED_PING:
+            {
+                /* In: milliseconds to wait (ULONG). Out: ULONG, 1 if a work item of the delayed queue ran in time */
+                PDELAYED_PING Ping;
+                LARGE_INTEGER Timeout;
+
+                if (InLength < sizeof(ULONG) || OutLength < sizeof(ULONG)) { Status = STATUS_BUFFER_TOO_SMALL; break; }
+                Ping = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Ping), TAG_SAMPLE);
+                if (Ping == NULL) { Status = STATUS_INSUFFICIENT_RESOURCES; break; }
+                Ping->Refs = 2;
+                KeInitializeEvent(&Ping->Event, NotificationEvent, FALSE);
+                ExInitializeWorkItem(&Ping->Item, DelayedPingWorker, Ping);
+                Timeout.QuadPart = -(LONGLONG)(*(PULONG)Buffer) * 10000;
+                ExQueueWorkItem(&Ping->Item, DelayedWorkQueue);
+                Status = KeWaitForSingleObject(&Ping->Event, Executive, KernelMode, FALSE, &Timeout);
+                *(PULONG)Buffer = (Status == STATUS_SUCCESS);
+                Status = STATUS_SUCCESS;
+                Information = sizeof(ULONG);
+                /* The worker may still come: it frees the item then */
+                if (InterlockedDecrement(&Ping->Refs) == 0)
+                    ExFreePoolWithTag(Ping, TAG_SAMPLE);
+                break;
+            }
+
+            case FLTSAMPLE_IOCTL_DROP_LEAKED:
+            {
+                ULONG Dropped = LeakedCount;
+
+                if (OutLength < sizeof(ULONG)) { Status = STATUS_BUFFER_TOO_SMALL; break; }
+                while (LeakedCount)
+                    FltObjectDereference(LeakedVolumes[--LeakedCount]);
+                *(PULONG)Buffer = Dropped;
+                Information = sizeof(ULONG);
+                break;
+            }
+
+            case FLTSAMPLE_IOCTL_RELEASE_VOLUME:
+            {
+                FLTSAMPLE_HELD_VOLUME *Out = Buffer;
+
+                if (OutLength < sizeof(*Out)) { Status = STATUS_BUFFER_TOO_SMALL; break; }
+                RtlZeroMemory(Out, sizeof(*Out));
+                if (HeldVolume)
+                {
+                    Out->Held = 1;
+                    Out->Before = HeldBefore;
+                    GetVolumeProps(HeldVolume, &Out->After);
+                    FltObjectDereference(HeldVolume);
+                    HeldVolume = NULL;
+                }
+                Information = sizeof(*Out);
+                break;
+            }
+
             default:
                 Status = STATUS_INVALID_DEVICE_REQUEST;
                 break;
@@ -1435,6 +1684,8 @@ PortMessageWork(_In_opt_ PVOID PortCookie,
 
     *ReturnOutputBufferLength = 0;
     InterlockedIncrement((PLONG)&Stats.PortMessages);
+    if ((InputBuffer == NULL && InputBufferLength != 0) || (OutputBuffer == NULL && OutputBufferLength != 0))
+        InterlockedIncrement((PLONG)&Stats.MsgNullWithLength);
 
     if (PortCookie != (PVOID)(ULONG_PTR)0x4C4F4B43 || Message == NULL || InputBufferLength < FIELD_OFFSET(FLTSAMPLE_MSG, Data))
         return STATUS_INVALID_PARAMETER;
@@ -1597,6 +1848,11 @@ static const FLT_OPERATION_REGISTRATION Operations[] =
     { IRP_MJ_SET_INFORMATION, 0, PreOperation, PostOperation },
     { IRP_MJ_DIRECTORY_CONTROL, 0, PreOperation, PostOperation },
     { IRP_MJ_ACQUIRE_FOR_SECTION_SYNCHRONIZATION, 0, PreSectionSync, PostSectionSync },
+    { IRP_MJ_RELEASE_FOR_SECTION_SYNCHRONIZATION, 0, PreFsFilter, PostFsFilter },
+    { IRP_MJ_ACQUIRE_FOR_MOD_WRITE, 0, PreFsFilter, PostFsFilter },
+    { IRP_MJ_RELEASE_FOR_MOD_WRITE, 0, PreFsFilter, PostFsFilter },
+    { IRP_MJ_ACQUIRE_FOR_CC_FLUSH, 0, PreFsFilter, PostFsFilter },
+    { IRP_MJ_RELEASE_FOR_CC_FLUSH, 0, PreFsFilter, PostFsFilter },
     { IRP_MJ_OPERATION_END }
 };
 

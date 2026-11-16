@@ -333,6 +333,21 @@ typedef struct _FLT_VOLUME
     volatile LONG FsFilterCount[FLTP_FSFILTER_OPERATIONS + 1]; /* instances with a callback for an FsFilter operation */
     BOOLEAN Dismounted;
 
+    /*
+     * The properties of the file system's volume device (FltGetVolumeProperties, InstanceSetup), taken when the
+     * volume is created: the devices may be deleted while filters still hold the volume. DeviceObject is
+     * NULL once our device is deleted.
+     */
+    DEVICE_TYPE VolumeDeviceType;
+    ULONG VolumeDeviceFlags;
+    ULONG VolumeAlignmentRequirement;
+    USHORT VolumeSectorSize;
+    ULONG VolumeCharacteristics;
+
+    /* Names of the filters which had an instance on the volume (diagnostics: who may hold the last references) */
+    volatile LONG HolderChars;
+    WCHAR Holders[96];
+
 } FLT_VOLUME, *PFLT_VOLUME;
 
 

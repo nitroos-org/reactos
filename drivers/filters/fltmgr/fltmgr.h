@@ -32,6 +32,7 @@
 #define FM_TAG_MESSAGE          'gmMF'
 #define FM_TAG_SECURITY         'dsMF'
 #define FM_TAG_DETACH           'tdMF'
+#define FM_TAG_VOLWAIT          'wvMF'
 
 #define MAX_DEVNAME_LENGTH  64
 
@@ -65,6 +66,12 @@ typedef struct _FLTMGR_DEVICE_EXTENSION
 
     /* Set for a file system volume device (the ones filtered), NULL for a file system control device */
     struct _FLT_VOLUME *Volume;
+
+    /* Taken around the read of Volume and its reference (FltpReferenceVolumeOfDevice), run down when the volume goes */
+    EX_RUNDOWN_REF VolumeGate;
+
+    /* Set by whoever detaches the device: the unregistration of the file system or its device's deletion */
+    volatile LONG DetachClaimed;
 
 } FLTMGR_DEVICE_EXTENSION, *PFLTMGR_DEVICE_EXTENSION;
 

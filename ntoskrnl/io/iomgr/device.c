@@ -107,7 +107,7 @@ IopAttachDeviceToDeviceStackSafe(
 
         /* Check for pending start flag and propagate it */
         if (IoGetDevObjExtension(AttachedDevice)->ExtensionFlags & DOE_START_PENDING)
-            IoGetDevObjExtension(SourceDevice)->ExtensionFlags |= DOE_START_PENDING;
+            InterlockedOr((PLONG)&IoGetDevObjExtension(SourceDevice)->ExtensionFlags, DOE_START_PENDING);
 
         /* Set the attachment in the device extension */
         SourceDeviceExtension->AttachedTo = AttachedDevice;
@@ -404,10 +404,10 @@ IopEditDeviceList(IN PDRIVER_OBJECT DriverObject,
  */
 static
 VOID
-IopNotifyAttachedDeviceOfDelete(IN PDEVICE_OBJECT DeviceObject)
+IopNotifyAttachedDeviceOfDelete(IN PDEVICE_OBJECT DeviceObject,
+                                IN PDEVICE_OBJECT AttachedDevice)
 {
     PEXTENDED_DEVOBJ_EXTENSION ThisExtension = IoGetDevObjExtension(DeviceObject);
-    PDEVICE_OBJECT AttachedDevice = DeviceObject->AttachedDevice;
     PFAST_IO_DISPATCH FastIoDispatch = AttachedDevice->DriverObject->FastIoDispatch;
 
     if (ThisExtension->ExtensionFlags & DOE_DETACH_NOTIFIED)
@@ -420,7 +420,9 @@ IopNotifyAttachedDeviceOfDelete(IN PDEVICE_OBJECT DeviceObject)
         return;
     }
 
-    ThisExtension->ExtensionFlags |= DOE_DETACH_NOTIFIED;
+    /* IoDeleteDevice and the last dereference may both get here: one of them tells the driver */
+    if (InterlockedOr((PLONG)&ThisExtension->ExtensionFlags, DOE_DETACH_NOTIFIED) & DOE_DETACH_NOTIFIED)
+        return;
     FastIoDispatch->FastIoDetachDevice(AttachedDevice, DeviceObject);
 }
 
@@ -430,16 +432,26 @@ IopUnloadDevice(IN PDEVICE_OBJECT DeviceObject)
 {
     PDRIVER_OBJECT DriverObject = DeviceObject->DriverObject;
     PEXTENDED_DEVOBJ_EXTENSION ThisExtension = IoGetDevObjExtension(DeviceObject);
+    PDEVICE_OBJECT AttachedDevice;
 
     /* Check if deletion is pending */
     if (ThisExtension->ExtensionFlags & DOE_DELETE_PENDING)
     {
-        if (DeviceObject->AttachedDevice)
+        /*
+         * Read once: the device on top may detach meanwhile. It is not referenced: a reference taken
+         * here would race with the detach and the deletion of that device in the same way as the read
+         * (there is no lock which orders them, ReactOS has no device database lock), so it would only
+         * move the window. What the read is used for is the driver's FastIoDetachDevice, which runs the
+         * deletion of that device itself, so it is gone only when its driver detached it on its own
+         * (an unload) in this very moment.
+         */
+        AttachedDevice = *(PDEVICE_OBJECT volatile *)&DeviceObject->AttachedDevice;
+        if (AttachedDevice)
         {
             DPRINT("Device object is in the middle of a device stack\n");
 
             /* The device goes once the one on top has detached; its driver gets told */
-            IopNotifyAttachedDeviceOfDelete(DeviceObject);
+            IopNotifyAttachedDeviceOfDelete(DeviceObject, AttachedDevice);
             return;
         }
 
@@ -1321,7 +1333,7 @@ IoDeleteDevice(IN PDEVICE_OBJECT DeviceObject)
     }
 
     /* Set the pending delete flag */
-    IoGetDevObjExtension(DeviceObject)->ExtensionFlags |= DOE_DELETE_PENDING;
+    InterlockedOr((PLONG)&IoGetDevObjExtension(DeviceObject)->ExtensionFlags, DOE_DELETE_PENDING);
 
     /* Unlink with the power manager */
     if (DeviceObject->Vpb) PoRemoveVolumeDevice(DeviceObject);

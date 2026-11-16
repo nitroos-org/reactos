@@ -206,6 +206,9 @@ test_VolumeDeviceDeleted(void)
     UnloadSample(&P, TRUE);
 }
 
+static void test_DeletedVolumeHeld(void);
+static void test_VolumeDeleteRounds(void);
+
 START_TEST(p3voldel)
 {
     EnsureTestDirectory();
@@ -221,6 +224,8 @@ START_TEST(p3voldel)
     }
 
     test_VolumeDeviceDeleted();
+    test_DeletedVolumeHeld();
+    test_VolumeDeleteRounds();
 }
 
 /* Writes Size bytes of a pattern, not cached: the data isn't in the cache afterwards */
@@ -230,22 +235,29 @@ WriteUncached(PCWSTR Path, DWORD Size)
 {
     HANDLE File;
     PUCHAR Buffer;
-    DWORD Written = 0, i;
+    DWORD Written = 0, Done = 0, Chunk, i;
 
     DeleteFileW(Path);
     File = CreateFileW(Path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH, NULL);
     if (File == INVALID_HANDLE_VALUE)
         return FALSE;
-    Buffer = VirtualAlloc(NULL, Size, MEM_COMMIT, PAGE_READWRITE);
+    /* In pieces of at most 1 MB: one uncached write of a big file is more than an MDL can describe */
+    Buffer = VirtualAlloc(NULL, min(Size, 1024 * 1024), MEM_COMMIT, PAGE_READWRITE);
     if (Buffer)
     {
-        for (i = 0; i < Size; i++)
-            Buffer[i] = (UCHAR)(i * 7 + 3);
-        WriteFile(File, Buffer, Size, &Written, NULL);
+        while (Done < Size)
+        {
+            Chunk = min(Size - Done, 1024 * 1024);
+            for (i = 0; i < Chunk; i++)
+                Buffer[i] = (UCHAR)((Done + i) * 7 + 3);
+            if (!WriteFile(File, Buffer, Chunk, &Written, NULL) || Written != Chunk)
+                break;
+            Done += Chunk;
+        }
         VirtualFree(Buffer, 0, MEM_RELEASE);
     }
     CloseHandle(File);
-    return Written == Size;
+    return Done == Size;
 }
 
 /*
@@ -476,6 +488,276 @@ test_SectionSync(void)
     DeleteFileW(Path2);
 }
 
+#define TEST_STATUS_FILE_LOCKED_WITH_ONLY_READERS   0x0000012AL
+#define TEST_STATUS_FILE_LOCKED_WITH_WRITERS        0x0000012BL
+
+/* Until the acquires of an FsFilter operation have their releases (the lazy writer may be between them) */
+static
+void
+WaitBalanced(PSAMPLE Sample, PFLTSAMPLE_STATS Stats, ULONG Acquire, ULONG Release)
+{
+    ULONG i;
+
+    for (i = 0; i < 50; i++)
+    {
+        SampleStats(Sample, Stats);
+        if (Stats->FsFilterPost[Acquire] - Stats->FsFilterFailed[Acquire] == Stats->FsFilterPre[Release] &&
+            Stats->FsFilterPre[Release] == Stats->FsFilterPost[Release])
+        {
+            break;
+        }
+        Sleep(100);
+    }
+}
+
+/*
+ * The release of a section synchronization and the cache flush's acquire and release (FsRtl calls the
+ * FsFilter callbacks of every driver in the file system's stack for them): a section created for a .fsf
+ * file, a view of it written and flushed. And below the filter manager the file system's own callback
+ * for a section's acquire (fastfat has one) is reached: the post-operation sees its status.
+ */
+static
+void
+test_FsFilterOperations(void)
+{
+    SAMPLE P = { { 0 } };
+    FLTSAMPLE_STATS S;
+    WCHAR Path[MAX_PATH];
+    HANDLE File, Section;
+    PUCHAR View = NULL;
+    ULONG i;
+
+    MakeTestFile(L"p3section.fsf", Path, RTL_NUMBER_OF(Path));
+    ok(WriteUncached(Path, 65536), "Can't write %ls\n", Path);
+
+    if (!LoadSample(&P, L"FltSampleP", L"383000.5", 0xFFFF))
+    {
+        skip("Can't load the sample filter\n");
+        return;
+    }
+
+    File = CreateFileW(Path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    ok(File != INVALID_HANDLE_VALUE, "Can't open %ls: %lu\n", Path, GetLastError());
+    if (File == INVALID_HANDLE_VALUE)
+    {
+        UnloadSample(&P, TRUE);
+        return;
+    }
+    Section = CreateFileMappingW(File, NULL, PAGE_READWRITE, 0, 0, NULL);
+    ok(Section != NULL, "CreateFileMapping failed: %lu\n", GetLastError());
+    if (Section)
+    {
+        View = MapViewOfFile(Section, FILE_MAP_WRITE, 0, 0, 0);
+        ok(View != NULL, "MapViewOfFile failed: %lu\n", GetLastError());
+    }
+    if (View)
+    {
+        for (i = 0; i < 65536; i += 4096)
+            View[i + 7] = (UCHAR)(i >> 12) + 1;
+        ok(FlushViewOfFile(View, 0), "FlushViewOfFile failed: %lu\n", GetLastError());
+        UnmapViewOfFile(View);
+    }
+    if (Section)
+        CloseHandle(Section);
+    ok(FlushFileBuffers(File), "FlushFileBuffers failed: %lu\n", GetLastError());
+
+    WaitBalanced(&P, &S, FLTSAMPLE_FSF_ACQUIRE_CCFLUSH, FLTSAMPLE_FSF_RELEASE_CCFLUSH);
+    trace("FsFilter: section %lu/%lu (release %lu/%lu), cache flush acquire %lu/%lu release %lu/%lu, last section status 0x%lx\n",
+          S.SectionSyncPre, S.SectionSyncPost,
+          S.FsFilterPre[FLTSAMPLE_FSF_RELEASE_SECTION], S.FsFilterPost[FLTSAMPLE_FSF_RELEASE_SECTION],
+          S.FsFilterPre[FLTSAMPLE_FSF_ACQUIRE_CCFLUSH], S.FsFilterPost[FLTSAMPLE_FSF_ACQUIRE_CCFLUSH],
+          S.FsFilterPre[FLTSAMPLE_FSF_RELEASE_CCFLUSH], S.FsFilterPost[FLTSAMPLE_FSF_RELEASE_CCFLUSH],
+          S.LastSectionSyncPostStatus);
+
+    /* The section: acquired and released */
+    ok(S.SectionSyncPre >= 1 && S.SectionSyncPost >= 1, "section acquire: %lu pre, %lu post\n", S.SectionSyncPre, S.SectionSyncPost);
+    ok(S.FsFilterPre[FLTSAMPLE_FSF_RELEASE_SECTION] >= 1, "%lu section release pre-operations\n",
+       S.FsFilterPre[FLTSAMPLE_FSF_RELEASE_SECTION]);
+    ok(S.FsFilterPost[FLTSAMPLE_FSF_RELEASE_SECTION] == S.FsFilterPre[FLTSAMPLE_FSF_RELEASE_SECTION],
+       "section release: %lu post for %lu pre\n", S.FsFilterPost[FLTSAMPLE_FSF_RELEASE_SECTION],
+       S.FsFilterPre[FLTSAMPLE_FSF_RELEASE_SECTION]);
+
+    /* The cache flush of the view: acquired and released */
+    ok(S.FsFilterPre[FLTSAMPLE_FSF_ACQUIRE_CCFLUSH] >= 1, "%lu cache flush acquire pre-operations\n",
+       S.FsFilterPre[FLTSAMPLE_FSF_ACQUIRE_CCFLUSH]);
+    ok(S.FsFilterPost[FLTSAMPLE_FSF_ACQUIRE_CCFLUSH] == S.FsFilterPre[FLTSAMPLE_FSF_ACQUIRE_CCFLUSH],
+       "cache flush acquire: %lu post for %lu pre\n", S.FsFilterPost[FLTSAMPLE_FSF_ACQUIRE_CCFLUSH],
+       S.FsFilterPre[FLTSAMPLE_FSF_ACQUIRE_CCFLUSH]);
+    ok(S.FsFilterPre[FLTSAMPLE_FSF_RELEASE_CCFLUSH] >= 1, "%lu cache flush release pre-operations\n",
+       S.FsFilterPre[FLTSAMPLE_FSF_RELEASE_CCFLUSH]);
+    ok(S.FsFilterPre[FLTSAMPLE_FSF_RELEASE_CCFLUSH] ==
+       S.FsFilterPost[FLTSAMPLE_FSF_ACQUIRE_CCFLUSH] - S.FsFilterFailed[FLTSAMPLE_FSF_ACQUIRE_CCFLUSH],
+       "cache flush: %lu releases for %lu acquires (%lu failed)\n", S.FsFilterPre[FLTSAMPLE_FSF_RELEASE_CCFLUSH],
+       S.FsFilterPost[FLTSAMPLE_FSF_ACQUIRE_CCFLUSH], S.FsFilterFailed[FLTSAMPLE_FSF_ACQUIRE_CCFLUSH]);
+    ok(S.FsFilterOtherThread == 0, "%lu post-operations in another thread\n", S.FsFilterOtherThread);
+    ok(S.SectionSyncBadData == 0, "%lu without FLTFL_CALLBACK_DATA_FS_FILTER_OPERATION\n", S.SectionSyncBadData);
+
+    /* The file system below: fastfat acquires the file itself and says who can write it */
+    if (CurrentFileSystem() == FLTAPI_FSTYPE_FAT)
+    {
+        ok(S.LastSectionSyncPostStatus == TEST_STATUS_FILE_LOCKED_WITH_ONLY_READERS ||
+           S.LastSectionSyncPostStatus == TEST_STATUS_FILE_LOCKED_WITH_WRITERS,
+           "fastfat's section callback not reached: post-operation status 0x%lx\n", S.LastSectionSyncPostStatus);
+    }
+    else
+    {
+        ok(S.LastSectionSyncPostStatus == 0, "post-operation status 0x%lx\n", S.LastSectionSyncPostStatus);
+    }
+
+    /* The data is there */
+    if (View)
+    {
+        UCHAR Byte = 0;
+        DWORD Read = 0;
+        LARGE_INTEGER Offset;
+
+        Offset.QuadPart = 4096 * 3 + 7;
+        SetFilePointerEx(File, Offset, NULL, FILE_BEGIN);
+        ok(ReadFile(File, &Byte, 1, &Read, NULL) && Read == 1 && Byte == 4, "read back %u (%lu bytes)\n", Byte, Read);
+    }
+
+    CloseHandle(File);
+    UnloadSample(&P, TRUE);
+    DeleteFileW(Path);
+}
+
+/*
+ * The modified page writer: the dirty pages of a mapped .fsf file, written to the file when memory
+ * runs short, each under an acquire / release for the modified page writer, which the filter sees.
+ * The pressure comes from committing and touching more private memory than the machine has; if no page
+ * of the file was written by the modified page writer in the time, the test says so (skip).
+ */
+static
+void
+test_ModifiedPageWriter(void)
+{
+    SAMPLE P = { { 0 } };
+    FLTSAMPLE_STATS S;
+    WCHAR Path[MAX_PATH];
+    HANDLE File, Section;
+    PUCHAR View = NULL;
+    MEMORYSTATUSEX Memory;
+    PVOID Chunks[256];
+    ULONG Count = 0, i;
+    SIZE_T FileSize = 16 * 1024 * 1024, Chunk = 32 * 1024 * 1024, j;
+    ULONGLONG Target, Total = 0;
+    DWORD Start;
+
+    /* The dirty pages of the file are part of the pressure (where the commit limit stops the private memory early) */
+    Memory.dwLength = sizeof(Memory);
+    GlobalMemoryStatusEx(&Memory);
+    if (Memory.ullTotalPhys / 4 > FileSize)
+        FileSize = (SIZE_T)min(Memory.ullTotalPhys / 4, 256 * 1024 * 1024) & ~(SIZE_T)(1024 * 1024 - 1);
+
+    MakeTestFile(L"p3modwr.fsf", Path, RTL_NUMBER_OF(Path));
+    ok(WriteUncached(Path, (DWORD)FileSize), "Can't write %ls\n", Path);
+
+    if (!LoadSample(&P, L"FltSampleP", L"383000.5", 0xFFFF))
+    {
+        skip("Can't load the sample filter\n");
+        return;
+    }
+
+    File = CreateFileW(Path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    ok(File != INVALID_HANDLE_VALUE, "Can't open %ls: %lu\n", Path, GetLastError());
+    Section = File != INVALID_HANDLE_VALUE ? CreateFileMappingW(File, NULL, PAGE_READWRITE, 0, 0, NULL) : NULL;
+    if (Section)
+        View = MapViewOfFile(Section, FILE_MAP_WRITE, 0, 0, 0);
+    ok(View != NULL, "Can't map %ls: %lu\n", Path, GetLastError());
+    if (View == NULL)
+    {
+        if (Section)
+            CloseHandle(Section);
+        if (File != INVALID_HANDLE_VALUE)
+            CloseHandle(File);
+        UnloadSample(&P, TRUE);
+        DeleteFileW(Path);
+        return;
+    }
+    for (j = 0; j < FileSize; j += 4096)
+        View[j] = (UCHAR)(j >> 12) | 1;
+
+    Memory.dwLength = sizeof(Memory);
+    GlobalMemoryStatusEx(&Memory);
+    Target = Memory.ullTotalPhys + Memory.ullTotalPhys / 2;
+    Start = GetTickCount();
+    while (Total < Target && Count < RTL_NUMBER_OF(Chunks) && GetTickCount() - Start < 180000)
+    {
+        PUCHAR Block = VirtualAlloc(NULL, Chunk, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+
+        if (Block == NULL)
+        {
+            /* Out of commit or address space: keep touching what we have, page by page again */
+            if (Count == 0)
+                break;
+            Block = Chunks[(GetTickCount() / 1000) % Count];
+            for (j = 0; j < Chunk; j += 4096)
+                Block[j]++;
+        }
+        else
+        {
+            Chunks[Count++] = Block;
+            for (j = 0; j < Chunk; j += 4096)
+                Block[j] = 1;
+            Total += Chunk;
+        }
+        SampleStats(&P, &S);
+        if (S.ModWriterWrites > 0 && S.FsFilterPre[FLTSAMPLE_FSF_RELEASE_MODWRITE] > 0)
+            break;
+    }
+    for (i = 0; i < Count; i++)
+        VirtualFree(Chunks[i], 0, MEM_RELEASE);
+
+    WaitBalanced(&P, &S, FLTSAMPLE_FSF_ACQUIRE_MODWRITE, FLTSAMPLE_FSF_RELEASE_MODWRITE);
+    trace("Modified page writer: %lu writes, acquire %lu/%lu (%lu failed), release %lu/%lu; %I64u MB committed in %lu ms\n",
+          S.ModWriterWrites, S.FsFilterPre[FLTSAMPLE_FSF_ACQUIRE_MODWRITE], S.FsFilterPost[FLTSAMPLE_FSF_ACQUIRE_MODWRITE],
+          S.FsFilterFailed[FLTSAMPLE_FSF_ACQUIRE_MODWRITE], S.FsFilterPre[FLTSAMPLE_FSF_RELEASE_MODWRITE],
+          S.FsFilterPost[FLTSAMPLE_FSF_RELEASE_MODWRITE], Total >> 20, GetTickCount() - Start);
+
+    if (S.ModWriterWrites == 0)
+    {
+        skip("No page of the file was written by the modified page writer\n");
+    }
+    else
+    {
+        ok(S.FsFilterPre[FLTSAMPLE_FSF_ACQUIRE_MODWRITE] >= S.ModWriterWrites,
+           "%lu modified page writer acquires for %lu writes\n", S.FsFilterPre[FLTSAMPLE_FSF_ACQUIRE_MODWRITE], S.ModWriterWrites);
+        ok(S.FsFilterPost[FLTSAMPLE_FSF_ACQUIRE_MODWRITE] == S.FsFilterPre[FLTSAMPLE_FSF_ACQUIRE_MODWRITE],
+           "acquire: %lu post for %lu pre\n", S.FsFilterPost[FLTSAMPLE_FSF_ACQUIRE_MODWRITE], S.FsFilterPre[FLTSAMPLE_FSF_ACQUIRE_MODWRITE]);
+        ok(S.FsFilterPre[FLTSAMPLE_FSF_RELEASE_MODWRITE] >= 1, "%lu modified page writer releases\n",
+           S.FsFilterPre[FLTSAMPLE_FSF_RELEASE_MODWRITE]);
+        ok(S.FsFilterPost[FLTSAMPLE_FSF_RELEASE_MODWRITE] == S.FsFilterPre[FLTSAMPLE_FSF_RELEASE_MODWRITE],
+           "release: %lu post for %lu pre\n", S.FsFilterPost[FLTSAMPLE_FSF_RELEASE_MODWRITE], S.FsFilterPre[FLTSAMPLE_FSF_RELEASE_MODWRITE]);
+        ok(S.FsFilterOtherThread == 0, "%lu post-operations in another thread\n", S.FsFilterOtherThread);
+    }
+
+    /* What was written comes back */
+    for (j = 0; j < FileSize; j += 4096)
+    {
+        if (View[j] != ((UCHAR)(j >> 12) | 1))
+            break;
+    }
+    ok(j == FileSize, "View differs at 0x%Ix: 0x%x, expected 0x%x (written by WriteUncached: 0x%x)\n", j,
+       j < FileSize ? View[j] : 0, (UCHAR)(j >> 12) | 1, (UCHAR)(j * 7 + 3));
+    if (j < FileSize)
+    {
+        SIZE_T Bad = 0;
+
+        for (; j < FileSize; j += 4096)
+        {
+            if (View[j] != ((UCHAR)(j >> 12) | 1))
+                Bad++;
+        }
+        trace("%lu of %lu pages differ\n", (ULONG)Bad, (ULONG)(FileSize / 4096));
+    }
+
+    UnmapViewOfFile(View);
+    CloseHandle(Section);
+    CloseHandle(File);
+    UnloadSample(&P, TRUE);
+    DeleteFileW(Path);
+}
+
 START_TEST(p3section)
 {
     EnsureTestDirectory();
@@ -486,6 +768,8 @@ START_TEST(p3section)
     }
 
     test_SectionSync();
+    test_FsFilterOperations();
+    test_ModifiedPageWriter();
 }
 
 typedef struct _ASK_THREAD
@@ -906,6 +1190,16 @@ test_MessageBuffers(void)
     }
     ok(Foreign == 0, "%lu bytes of the output buffer were not the client's own\n", Foreign);
 
+    /* A length without a buffer: the filter doesn't get (NULL, length) */
+    {
+        FLTSAMPLE_STATS S;
+
+        hr = FilterSendMessage(Port, NULL, 16, NULL, 16, &Bytes);
+        trace("FilterSendMessage(NULL, 16, NULL, 16): 0x%lx\n", (ULONG)hr);
+        SampleStats(&P, &S);
+        ok(S.MsgNullWithLength == 0, "%lu messages reached the filter as a NULL buffer with a length\n", S.MsgNullWithLength);
+    }
+
     CloseHandle(Port);
 Quit:
     UnloadSample(&P, TRUE);
@@ -1062,6 +1356,277 @@ IsFilterTag(ULONG Tag)
     return (c[0] == 'F' && c[1] == 'M') || Tag == 'lSlF';
 }
 
+/* Mounts the fake volume (an open does it) */
+static
+BOOL
+MountFake(void)
+{
+    HANDLE File;
+    NTSTATUS Status;
+
+    Status = OpenFake(L"round.dat", &File);
+    if (NT_SUCCESS(Status))
+        NtClose(File);
+    return NT_SUCCESS(Status);
+}
+
+/* The fake file system deletes its volume device; then the filter manager's worker takes the volume down */
+static
+BOOL
+DeleteFake(PSAMPLE Sample, ULONG VolumesBefore)
+{
+    FLTSAMPLE_STATS S;
+    DWORD Bytes;
+    ULONG i;
+    BOOL Ret = FALSE;
+
+    for (i = 0; i < 50 && !Ret; i++)
+    {
+        Ret = DeviceIoControl(FakeControl, FLTFAKEFS_IOCTL_DELETE_VOLUME, NULL, 0, NULL, 0, &Bytes, NULL);
+        if (!Ret)
+            Sleep(100);
+    }
+    if (!Ret)
+        return FALSE;
+    for (i = 0; i < 100; i++)
+    {
+        SampleStats(Sample, &S);
+        if (S.VolumeCount < VolumesBefore)
+            return TRUE;
+        Sleep(50);
+    }
+    return FALSE;
+}
+
+/*
+ * A filter keeps a reference to a volume whose device goes (FltEnumerateVolumes): the volume stays
+ * usable for it, and FltGetVolumeProperties / FltGetVolumeName say what they said before, from what the
+ * filter manager took when it made the volume, not from the deleted devices.
+ */
+static
+void
+test_DeletedVolumeHeld(void)
+{
+    SAMPLE P = { { 0 } };
+    FLTSAMPLE_STATS S0, S;
+    FLTSAMPLE_HELD_VOLUME Held;
+    WCHAR Name[] = FLTFAKEFS_DISK_NAME;
+
+    if (!LoadSample(&P, L"FltSampleP", L"383000.5", 0xFFFF))
+    {
+        skip("Can't load the sample filter\n");
+        return;
+    }
+
+    ok(MountFake(), "Can't mount the fake volume\n");
+    SampleStats(&P, &S0);
+    ok(SampleIoctl(&P, FLTSAMPLE_IOCTL_HOLD_VOLUME, Name, sizeof(Name) - sizeof(WCHAR), NULL, 0),
+       "The filter didn't find %ls: %lu\n", Name, GetLastError());
+
+    ok(DeleteFake(&P, S0.VolumeCount), "The fake volume wasn't taken down\n");
+
+    ZeroMemory(&Held, sizeof(Held));
+    ok(SampleIoctl(&P, FLTSAMPLE_IOCTL_RELEASE_VOLUME, NULL, 0, &Held, sizeof(Held)), "Release: %lu\n", GetLastError());
+    trace("Held volume: before 0x%lx type %lu flags 0x%lx sector %lu '%ls' '%ls'; after 0x%lx type %lu flags 0x%lx sector %lu '%ls' '%ls'\n",
+          Held.Before.Status, Held.Before.DeviceType, Held.Before.DeviceObjectFlags, Held.Before.SectorSize,
+          Held.Before.DriverName, Held.Before.VolumeName,
+          Held.After.Status, Held.After.DeviceType, Held.After.DeviceObjectFlags, Held.After.SectorSize,
+          Held.After.DriverName, Held.After.VolumeName);
+    ok(Held.Held == 1, "No volume held\n");
+    ok(Held.Before.Status == 0 && Held.After.Status == 0, "FltGetVolumeProperties: 0x%lx before, 0x%lx after\n",
+       Held.Before.Status, Held.After.Status);
+    ok(Held.After.DeviceType == Held.Before.DeviceType && Held.After.DeviceObjectFlags == Held.Before.DeviceObjectFlags &&
+       Held.After.SectorSize == Held.Before.SectorSize &&
+       Held.After.AlignmentRequirement == Held.Before.AlignmentRequirement &&
+       Held.After.DeviceCharacteristics == Held.Before.DeviceCharacteristics,
+       "The properties changed with the device gone\n");
+    ok(!wcscmp(Held.After.DriverName, Held.Before.DriverName) && !wcscmp(Held.After.VolumeName, Held.Before.VolumeName),
+       "Names: '%ls' '%ls' -> '%ls' '%ls'\n", Held.Before.DriverName, Held.Before.VolumeName,
+       Held.After.DriverName, Held.After.VolumeName);
+    ok(!_wcsicmp(Held.Before.VolumeName, FLTFAKEFS_DISK_NAME), "Volume name '%ls'\n", Held.Before.VolumeName);
+
+    /* And the disk mounts again */
+    ok(MountFake(), "Can't mount the fake volume again\n");
+    SampleStats(&P, &S);
+    ok(S.VolumeCount == S0.VolumeCount, "Volumes: %lu before, %lu after the new mount\n", S0.VolumeCount, S.VolumeCount);
+
+    UnloadSample(&P, TRUE);
+}
+
+/*
+ * Mount, delete, mount, ... the volume objects of the filter manager and their names go with their
+ * volume devices: after 60 rounds no more of them are allocated than after the first.
+ */
+static
+void
+test_VolumeDeleteRounds(void)
+{
+    static TAG_COUNT Before[8192], After[8192];
+    ULONG BeforeCount = 0, AfterCount, Rounds = 60, Done = 0, i;
+    const TAG_COUNT *Old, *New;
+    SAMPLE P = { { 0 } };
+    FLTSAMPLE_STATS S;
+    LONG Volumes, Strings;
+
+    if (!LoadSample(&P, L"FltSampleP", L"383000.5", 0xFFFF))
+    {
+        skip("Can't load the sample filter\n");
+        return;
+    }
+
+    for (i = 0; i <= Rounds; i++)
+    {
+        if (!MountFake())
+        {
+            ok(0, "Round %lu: can't mount the fake volume\n", i);
+            break;
+        }
+        SampleStats(&P, &S);
+        if (!DeleteFake(&P, S.VolumeCount))
+        {
+            ok(0, "Round %lu: the fake volume wasn't taken down\n", i);
+            break;
+        }
+        if (i == 0)
+        {
+            Sleep(500);
+            BeforeCount = SnapshotPoolTags(Before, RTL_NUMBER_OF(Before));
+        }
+        Done++;
+    }
+
+    Sleep(2000);
+    AfterCount = SnapshotPoolTags(After, RTL_NUMBER_OF(After));
+    ok(Done == Rounds + 1, "%lu of %lu rounds\n", Done, Rounds + 1);
+
+    Old = FindTag(Before, BeforeCount, 'ovMF');
+    New = FindTag(After, AfterCount, 'ovMF');
+    Volumes = (New ? New->Outstanding : 0) - (Old ? Old->Outstanding : 0);
+    Old = FindTag(Before, BeforeCount, 'suMF');
+    New = FindTag(After, AfterCount, 'suMF');
+    Strings = (New ? New->Outstanding : 0) - (Old ? Old->Outstanding : 0);
+    trace("%lu mount / delete rounds: FMvo %+ld, FMus %+ld\n", Done - 1, Volumes, Strings);
+    ok(Volumes <= 1, "FMvo: %+ld allocations after %lu rounds\n", Volumes, Done - 1);
+    ok(Strings <= 2, "FMus: %+ld allocations after %lu rounds\n", Strings, Done - 1);
+
+    /* Leave it mounted, as the other tests expect */
+    MountFake();
+    UnloadSample(&P, TRUE);
+}
+
+/* Does a work item queued on the system's delayed queue run within Milliseconds? */
+static
+BOOL
+DelayedQueueRuns(PSAMPLE Sample, ULONG Milliseconds)
+{
+    ULONG Value = Milliseconds;
+
+    return SampleIoctl(Sample, FLTSAMPLE_IOCTL_DELAYED_PING, &Value, sizeof(Value), &Value, sizeof(Value)) && Value == 1;
+}
+
+static LONG
+OutstandingTag(ULONG Tag)
+{
+    static TAG_COUNT Tags[8192];
+    ULONG Count = SnapshotPoolTags(Tags, RTL_NUMBER_OF(Tags));
+    const TAG_COUNT *Found = FindTag(Tags, Count, Tag);
+
+    return Found ? Found->Outstanding : 0;
+}
+
+/*
+ * A filter which never drops a volume reference (the sample is told to keep 32, one per deleted volume):
+ * the deleted volumes wait for it, as they do on Windows, but the wait is not on a worker of the system's
+ * delayed queue. That queue has 12 threads, and the balance manager adds up to 16 more when it sees the
+ * queue stand still: when each leaked volume holds one of the 28, nothing queued on it runs again, not the
+ * next volume's deletion, not any other driver's work item.
+ * The volumes are freed once the filter lets go.
+ */
+static
+void
+test_LeakedVolumeReferences(void)
+{
+    const ULONG Rounds = 32;
+    SAMPLE P = { { 0 } };
+    FLTSAMPLE_STATS S;
+    WCHAR Name[] = FLTFAKEFS_DISK_NAME;
+    LONG Before, Held = 0;
+    ULONG Taken = 0, Deleted = 0, Dropped = 0, i;
+
+    if (!LoadSample(&P, L"FltSampleP", L"383000.5", 0xFFFF))
+    {
+        skip("Can't load the sample filter\n");
+        return;
+    }
+
+    ok(MountFake(), "Can't mount the fake volume\n");
+    ok(DelayedQueueRuns(&P, 5000), "The delayed queue does not run before the test\n");
+    Sleep(500);
+    Before = OutstandingTag('ovMF');
+
+    for (i = 0; i < Rounds; i++)
+    {
+        if (!MountFake())
+        {
+            ok(0, "Round %lu: can't mount the fake volume\n", i);
+            break;
+        }
+        SampleStats(&P, &S);
+        if (SampleIoctl(&P, FLTSAMPLE_IOCTL_LEAK_VOLUME, Name, sizeof(Name) - sizeof(WCHAR), NULL, 0))
+            Taken++;
+        if (DeleteFake(&P, S.VolumeCount))
+            Deleted++;
+    }
+    ok(Taken == Rounds, "%lu of %lu volumes held\n", Taken, Rounds);
+    ok(Deleted == Rounds, "%lu of %lu deleted volumes were taken down: the delayed queue is blocked\n", Deleted, Rounds);
+
+    ok(DelayedQueueRuns(&P, 5000), "A work item of the delayed queue does not run: the queue is starved\n");
+
+    Held = OutstandingTag('ovMF') - Before;
+    trace("%lu volumes deleted while held: FMvo %+ld\n", Deleted, Held);
+    /* (the volume which was mounted when the count was taken is the first one deleted, and not held) */
+    ok(Held >= (LONG)Taken - 1, "FMvo %+ld: a volume was freed while a filter held a reference\n", Held);
+
+    /* A volume which waits longer than 30 s for its references says so, once, on the debug port */
+    Sleep(32000);
+    ok(DelayedQueueRuns(&P, 5000), "The delayed queue does not run after the wait\n");
+
+    /* The references go: the volumes with them */
+    ok(SampleIoctl(&P, FLTSAMPLE_IOCTL_DROP_LEAKED, NULL, 0, &Dropped, sizeof(Dropped)), "Drop: %lu\n", GetLastError());
+    ok(Dropped == Taken, "%lu references dropped, %lu taken\n", Dropped, Taken);
+    for (i = 0; i < 100; i++)
+    {
+        Held = OutstandingTag('ovMF') - Before;
+        if (Held <= 0)
+            break;
+        Sleep(100);
+    }
+    trace("After the references are dropped: FMvo %+ld\n", Held);
+    ok(Held <= 0, "FMvo %+ld: the volumes are not freed after the last reference is dropped\n", Held);
+    ok(DelayedQueueRuns(&P, 5000), "The delayed queue does not run at the end\n");
+
+    /* Leave it mounted, as the other tests expect */
+    MountFake();
+    UnloadSample(&P, TRUE);
+}
+
+START_TEST(p3volleak)
+{
+    EnsureTestDirectory();
+    if (!StartFilterManager())
+    {
+        skip("No filter manager\n");
+        return;
+    }
+    if (!LoadFakeFs())
+    {
+        skip("No fake file system\n");
+        return;
+    }
+
+    test_LeakedVolumeReferences();
+}
+
 /*
  * The life of a filter, over and over: load (instances on every volume), files opened, written and
  * read with contexts, a client on the port, detach and attach every volume, unload. Afterwards no
@@ -1172,6 +1737,230 @@ START_TEST(p3loop)
     }
 
     test_LoadUnloadLoop();
+}
+
+/*
+ * Sections and the cache under the FsFilter callbacks, for a while: threads which write files, map
+ * them, write the views, flush them (the cache flush's acquire / release), unmap, truncate, read back;
+ * one thread which now and then commits more memory than the machine has (the modified page writer).
+ * The sample filter counts every FsFilter operation on the .fsf files. Nothing may fail, the data read
+ * back is what was written, and the acquires have their releases.
+ * FLTMGR_SECSTRESS_SECONDS (environment) sets the time, 60 s by default.
+ */
+typedef struct _SECSTRESS
+{
+    ULONG Index;
+    volatile LONG *Stop;
+    ULONG Rounds;
+    ULONG Failures;
+    DWORD LastError;
+
+} SECSTRESS;
+
+static
+DWORD
+WINAPI
+SectionStressThread(PVOID Parameter)
+{
+    SECSTRESS *T = Parameter;
+    WCHAR Name[32], Path[MAX_PATH];
+    ULONG Size;
+    UCHAR Byte;
+    DWORD Read;
+    LARGE_INTEGER Offset;
+
+    StringCbPrintfW(Name, sizeof(Name), L"p3secstr%lu.fsf", T->Index);
+    MakeTestFile(Name, Path, RTL_NUMBER_OF(Path));
+
+    while (!*T->Stop)
+    {
+        HANDLE File, Section = NULL;
+        PUCHAR View = NULL;
+        ULONG i, Pages;
+        BOOL Good = TRUE;
+
+        Size = (1 + (T->Rounds % 16)) * 65536;
+        Pages = Size / 4096;
+        File = CreateFileW(Path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                           OPEN_ALWAYS, 0, NULL);
+        if (File == INVALID_HANDLE_VALUE)
+        {
+            T->Failures++;
+            T->LastError = GetLastError();
+            Sleep(10);
+            continue;
+        }
+        Offset.QuadPart = Size;
+        Good = SetFilePointerEx(File, Offset, NULL, FILE_BEGIN) && SetEndOfFile(File);
+        if (Good)
+            Section = CreateFileMappingW(File, NULL, PAGE_READWRITE, 0, 0, NULL);
+        if (Section)
+            View = MapViewOfFile(Section, FILE_MAP_WRITE, 0, 0, 0);
+        if (View)
+        {
+            for (i = 0; i < Pages; i++)
+                View[i * 4096 + (T->Rounds % 4000)] = (UCHAR)(T->Rounds + i);
+            if (!FlushViewOfFile(View, (T->Rounds & 1) ? 0 : Size / 2))
+                Good = FALSE;
+            UnmapViewOfFile(View);
+        }
+        else
+        {
+            Good = FALSE;
+        }
+        if (Section)
+            CloseHandle(Section);
+
+        /* Cached I/O on the same file: read back through the cache, written, flushed */
+        if (Good)
+        {
+            Offset.QuadPart = (LONGLONG)(Pages - 1) * 4096 + (T->Rounds % 4000);
+            Good = SetFilePointerEx(File, Offset, NULL, FILE_BEGIN) &&
+                   ReadFile(File, &Byte, 1, &Read, NULL) && Read == 1 && Byte == (UCHAR)(T->Rounds + Pages - 1);
+            Byte = 0x5A;
+            Good = Good && SetFilePointerEx(File, Offset, NULL, FILE_BEGIN) && WriteFile(File, &Byte, 1, &Read, NULL);
+            Good = Good && FlushFileBuffers(File);
+        }
+
+        /* And a truncation every other round, the section is gone */
+        if (Good && (T->Rounds & 1))
+        {
+            Offset.QuadPart = 4096;
+            Good = SetFilePointerEx(File, Offset, NULL, FILE_BEGIN) && SetEndOfFile(File);
+        }
+        if (!Good)
+        {
+            T->Failures++;
+            T->LastError = GetLastError();
+        }
+        CloseHandle(File);
+        T->Rounds++;
+    }
+
+    DeleteFileW(Path);
+    return 0;
+}
+
+static
+DWORD
+WINAPI
+MemoryPressureThread(PVOID Parameter)
+{
+    SECSTRESS *T = Parameter;
+    MEMORYSTATUSEX Memory;
+    SIZE_T Chunk = 32 * 1024 * 1024, j;
+    PVOID Chunks[128];
+    ULONG Count, i;
+    ULONGLONG Total;
+
+    Memory.dwLength = sizeof(Memory);
+    GlobalMemoryStatusEx(&Memory);
+    while (!*T->Stop)
+    {
+        Count = 0;
+        Total = 0;
+        while (!*T->Stop && Total < Memory.ullTotalPhys + Memory.ullTotalPhys / 4 && Count < RTL_NUMBER_OF(Chunks))
+        {
+            PUCHAR Block = VirtualAlloc(NULL, Chunk, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+
+            if (Block == NULL)
+                break;
+            for (j = 0; j < Chunk; j += 4096)
+                Block[j] = 1;
+            Chunks[Count++] = Block;
+            Total += Chunk;
+        }
+        for (i = 0; i < Count; i++)
+            VirtualFree(Chunks[i], 0, MEM_RELEASE);
+        T->Rounds++;
+        for (i = 0; i < 50 && !*T->Stop; i++)
+            Sleep(100);
+    }
+    return 0;
+}
+
+static
+void
+test_SectionStress(void)
+{
+    SAMPLE P = { { 0 } };
+    FLTSAMPLE_STATS S;
+    SECSTRESS T[5];
+    HANDLE Threads[5];
+    volatile LONG Stop = 0;
+    ULONG Seconds = 60, i, Rounds = 0, Failures = 0;
+    char Value[16];
+
+    if (GetEnvironmentVariableA("FLTMGR_SECSTRESS_SECONDS", Value, sizeof(Value)))
+        Seconds = strtoul(Value, NULL, 10);
+
+    if (!LoadSample(&P, L"FltSampleP", L"383000.5", 0xFFFF))
+    {
+        skip("Can't load the sample filter\n");
+        return;
+    }
+
+    for (i = 0; i < RTL_NUMBER_OF(T); i++)
+    {
+        ZeroMemory(&T[i], sizeof(T[i]));
+        T[i].Index = i;
+        T[i].Stop = &Stop;
+        Threads[i] = CreateThread(NULL, 0, i == 0 ? MemoryPressureThread : SectionStressThread, &T[i], 0, NULL);
+        ok(Threads[i] != NULL, "CreateThread failed: %lu\n", GetLastError());
+    }
+
+    Sleep(Seconds * 1000);
+    InterlockedExchange(&Stop, 1);
+    for (i = 0; i < RTL_NUMBER_OF(T); i++)
+    {
+        if (Threads[i])
+        {
+            ok(WaitForSingleObject(Threads[i], 120000) == WAIT_OBJECT_0, "Thread %lu didn't stop\n", i);
+            CloseHandle(Threads[i]);
+        }
+        if (i > 0)
+        {
+            Rounds += T[i].Rounds;
+            Failures += T[i].Failures;
+            if (T[i].Failures)
+                trace("Thread %lu: %lu failures of %lu rounds, last error %lu\n", i, T[i].Failures, T[i].Rounds, T[i].LastError);
+        }
+    }
+
+    WaitBalanced(&P, &S, FLTSAMPLE_FSF_ACQUIRE_CCFLUSH, FLTSAMPLE_FSF_RELEASE_CCFLUSH);
+    WaitBalanced(&P, &S, FLTSAMPLE_FSF_ACQUIRE_MODWRITE, FLTSAMPLE_FSF_RELEASE_MODWRITE);
+    trace("%lu s: %lu rounds, %lu pressure cycles, %lu failures; section %lu/%lu release %lu, cache flush %lu/%lu, "
+          "modified page writer %lu/%lu (%lu writes)\n",
+          Seconds, Rounds, T[0].Rounds, Failures, S.SectionSyncPre, S.SectionSyncPost,
+          S.FsFilterPre[FLTSAMPLE_FSF_RELEASE_SECTION], S.FsFilterPre[FLTSAMPLE_FSF_ACQUIRE_CCFLUSH],
+          S.FsFilterPre[FLTSAMPLE_FSF_RELEASE_CCFLUSH], S.FsFilterPre[FLTSAMPLE_FSF_ACQUIRE_MODWRITE],
+          S.FsFilterPre[FLTSAMPLE_FSF_RELEASE_MODWRITE], S.ModWriterWrites);
+    ok(Rounds > 0, "No round done\n");
+    ok(Failures == 0, "%lu failures\n", Failures);
+    ok(S.FsFilterPre[FLTSAMPLE_FSF_ACQUIRE_CCFLUSH] > 0, "No cache flush seen\n");
+    ok(S.FsFilterPost[FLTSAMPLE_FSF_ACQUIRE_CCFLUSH] - S.FsFilterFailed[FLTSAMPLE_FSF_ACQUIRE_CCFLUSH] ==
+       S.FsFilterPre[FLTSAMPLE_FSF_RELEASE_CCFLUSH], "cache flush: %lu acquires (%lu failed), %lu releases\n",
+       S.FsFilterPost[FLTSAMPLE_FSF_ACQUIRE_CCFLUSH], S.FsFilterFailed[FLTSAMPLE_FSF_ACQUIRE_CCFLUSH],
+       S.FsFilterPre[FLTSAMPLE_FSF_RELEASE_CCFLUSH]);
+    ok(S.FsFilterPost[FLTSAMPLE_FSF_ACQUIRE_MODWRITE] - S.FsFilterFailed[FLTSAMPLE_FSF_ACQUIRE_MODWRITE] ==
+       S.FsFilterPre[FLTSAMPLE_FSF_RELEASE_MODWRITE], "modified page writer: %lu acquires (%lu failed), %lu releases\n",
+       S.FsFilterPost[FLTSAMPLE_FSF_ACQUIRE_MODWRITE], S.FsFilterFailed[FLTSAMPLE_FSF_ACQUIRE_MODWRITE],
+       S.FsFilterPre[FLTSAMPLE_FSF_RELEASE_MODWRITE]);
+    ok(S.FsFilterOtherThread == 0, "%lu post-operations in another thread\n", S.FsFilterOtherThread);
+
+    UnloadSample(&P, TRUE);
+}
+
+START_TEST(p3secstress)
+{
+    EnsureTestDirectory();
+    if (!StartFilterManager())
+    {
+        skip("No filter manager\n");
+        return;
+    }
+
+    test_SectionStress();
 }
 
 START_TEST(p3create)

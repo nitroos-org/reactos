@@ -22,6 +22,8 @@
 /* The volumes we have a filter device on, protected by FilterListLock */
 LIST_ENTRY FltpVolumeList = { &FltpVolumeList, &FltpVolumeList };
 
+extern PDEVICE_OBJECT CommsDeviceObject;
+
 
 
 /* EXPORTED FUNCTIONS ******************************************************/
@@ -56,19 +58,12 @@ FltGetVolumeProperties(
     /* Clear out the buffer */
     RtlZeroMemory(VolumeProperties, sizeof(FLT_VOLUME_PROPERTIES));
 
-    /* Fill in the fixed data */
-    VolumeProperties->DeviceType = Volume->DeviceObject->DeviceType;
-    VolumeProperties->DeviceObjectFlags = Volume->DeviceObject->Flags;
-    VolumeProperties->AlignmentRequirement = Volume->DeviceObject->AlignmentRequirement;
-    VolumeProperties->SectorSize = Volume->DeviceObject->SectorSize;
-    if (Volume->DiskDeviceObject)
-    {
-        VolumeProperties->DeviceCharacteristics = Volume->DiskDeviceObject->Characteristics;
-    }
-    else
-    {
-        VolumeProperties->DeviceCharacteristics = Volume->DeviceObject->Characteristics;
-    }
+    /* Fill in the fixed data: taken when the volume was created, the devices may be gone */
+    VolumeProperties->DeviceType = Volume->VolumeDeviceType;
+    VolumeProperties->DeviceObjectFlags = Volume->VolumeDeviceFlags;
+    VolumeProperties->AlignmentRequirement = Volume->VolumeAlignmentRequirement;
+    VolumeProperties->SectorSize = Volume->VolumeSectorSize;
+    VolumeProperties->DeviceCharacteristics = Volume->VolumeCharacteristics;
 
     /* So far we've written the fixed struct data */
     BytesWritten = sizeof(FLT_VOLUME_PROPERTIES);
@@ -492,6 +487,13 @@ FltpAttachToVolumeDevice(_In_ PDEVICE_OBJECT VolumeDeviceObject,
     Volume->FileSystemType = GetFileSystemType(VolumeDeviceObject);
     Volume->DeviceObject = NewDeviceObject;
     Volume->DiskDeviceObject = DiskDeviceObject;
+    Volume->VolumeDeviceType = VolumeDeviceObject->DeviceType;
+    Volume->VolumeDeviceFlags = VolumeDeviceObject->Flags;
+    Volume->VolumeAlignmentRequirement = VolumeDeviceObject->AlignmentRequirement;
+    Volume->VolumeSectorSize = VolumeDeviceObject->SectorSize;
+    Volume->VolumeCharacteristics = DiskDeviceObject ? DiskDeviceObject->Characteristics :
+                                                       VolumeDeviceObject->Characteristics;
+    ExInitializeRundownProtection(&Extension->VolumeGate);
     ExInitializeResourceLite(&Volume->InstanceList.rLock);
     InitializeListHead(&Volume->InstanceList.rList);
     InitializeListHead(&Volume->ContextList);
@@ -602,6 +604,253 @@ FltpTeardownVolume(_In_ PFLT_VOLUME Volume,
 
     FltpTeardownVolumeInstances(Volume, Reason);
     FltpTeardownVolumeContexts(Volume);
+}
+
+/*
+ * The volume of one of our devices, with a reference (FltObjectReference) for the caller, or NULL: a
+ * device of a file system control device, or a volume which is being deleted. The gate of the device
+ * makes the read of the pointer and the reference one step for FltpDeleteVolume.
+ */
+PFLT_VOLUME
+FltpReferenceVolumeOfDevice(_In_ PDEVICE_OBJECT DeviceObject)
+{
+    PFLTMGR_DEVICE_EXTENSION Extension = DeviceObject->DeviceExtension;
+    PFLT_VOLUME Volume;
+
+    if (DeviceObject->DriverObject != DriverData.DriverObject || Extension == NULL ||
+        DeviceObject == DriverData.DeviceObject || DeviceObject == CommsDeviceObject)
+    {
+        return NULL;
+    }
+
+    if (!ExAcquireRundownProtection(&Extension->VolumeGate))
+        return NULL;
+    Volume = Extension->Volume;
+    if (Volume && !NT_SUCCESS(FltObjectReference(Volume)))
+        Volume = NULL;
+    ExReleaseRundownProtection(&Extension->VolumeGate);
+
+    return Volume;
+}
+
+static VOID FltpDeleteVolumeLater(_In_ PFLT_VOLUME Volume);
+
+/*
+ * Our device on a file system volume device is being deleted (the volume device went, the instances are
+ * already torn down): the FLT_VOLUME goes when the last reference to it is gone. Operations which reach
+ * our device from now on don't get it, the ones in flight and the filters holding a reference
+ * (FltEnumerateVolumes, FltGetVolumeFromInstance...) are waited for. PASSIVE_LEVEL, a worker thread.
+ */
+VOID
+FltpDeleteVolume(_In_ PDEVICE_OBJECT DeviceObject)
+{
+    PFLTMGR_DEVICE_EXTENSION Extension = DeviceObject->DeviceExtension;
+    PFLT_VOLUME Volume;
+
+    PAGED_CODE();
+
+    if (Extension == NULL || Extension->Volume == NULL)
+        return;
+    Volume = Extension->Volume;
+
+    /* Nobody gets the volume from the device any more */
+    ExWaitForRundownProtectionRelease(&Extension->VolumeGate);
+    InterlockedExchangePointer((PVOID *)&Extension->Volume, NULL);
+
+    KeEnterCriticalRegion();
+    ExAcquireResourceExclusiveLite(&FilterListLock, TRUE);
+    Volume->DeviceObject = NULL;
+    Volume->AttachedToDeviceObject = NULL;
+    if (!IsListEmpty(&Volume->GlobalLink))
+    {
+        RemoveEntryList(&Volume->GlobalLink);
+        InitializeListHead(&Volume->GlobalLink);
+    }
+    ExReleaseResourceLite(&FilterListLock);
+    KeLeaveCriticalRegion();
+
+    /*
+     * The last references: operations in flight, filters which still look at the volume. A filter may
+     * never drop one, and this is a worker of the system wide delayed queue (a fixed number of threads
+     * which every driver shares, and our own SafePostWorker): the wait is a thread of ours.
+     */
+    FltpDeleteVolumeLater(Volume);
+}
+
+/* The wait for the last references of a deleted volume, and what it frees: one of these per volume */
+typedef struct _VOLUME_RUNDOWN_WAIT
+{
+    PFLT_VOLUME Volume;
+    KTIMER Timer;
+    KDPC Dpc;
+    volatile LONG Refs;                 /* the thread, and the timer while it is set */
+    PVOID VolumeAddress;                /* for the message only: the volume may be gone when it is read */
+    CHAR DeviceName[64];                /* narrow: the message is printed at DISPATCH_LEVEL, where %ws is paged code */
+    CHAR Holders[96];
+} VOLUME_RUNDOWN_WAIT, *PVOLUME_RUNDOWN_WAIT;
+
+/* Characters above 7 bit are a '?': this is for a message */
+static
+VOID
+NarrowForMessage(_Out_writes_(Size) PCHAR Dest,
+                 _In_ ULONG Size,
+                 _In_reads_opt_(Chars) const WCHAR *Source,
+                 _In_ ULONG Chars)
+{
+    ULONG i;
+
+    for (i = 0; Source && i < Chars && i + 1 < Size && Source[i]; i++)
+        Dest[i] = (Source[i] < 0x80) ? (CHAR)Source[i] : '?';
+    Dest[i] = ANSI_NULL;
+}
+
+/* How long a deleted volume may wait for its references before somebody is told (once) */
+#define VOLUME_LEAK_REPORT_SECONDS  30
+
+static
+VOID
+ReleaseRundownWait(_In_ PVOLUME_RUNDOWN_WAIT Wait)
+{
+    if (InterlockedDecrement(&Wait->Refs) == 0)
+        ExFreePoolWithTag(Wait, FM_TAG_VOLWAIT);
+}
+
+/* DISPATCH_LEVEL: the volume is still waiting for its references: say so, the Wait has all it needs */
+static
+VOID
+NTAPI
+VolumeLeakReportDpc(_In_ PKDPC Dpc,
+                    _In_opt_ PVOID Context,
+                    _In_opt_ PVOID SystemArgument1,
+                    _In_opt_ PVOID SystemArgument2)
+{
+    PVOLUME_RUNDOWN_WAIT Wait = Context;
+
+    UNREFERENCED_PARAMETER(Dpc);
+    UNREFERENCED_PARAMETER(SystemArgument1);
+    UNREFERENCED_PARAMETER(SystemArgument2);
+
+    DPRINT1("fltmgr: the deleted volume %p (%s) has been waiting %u s for its last references: a filter does not "
+            "drop a volume reference (FltEnumerateVolumes, FltGetVolumeFromInstance...). Filters which had an "
+            "instance on it: %s\n",
+            Wait->VolumeAddress, Wait->DeviceName, VOLUME_LEAK_REPORT_SECONDS,
+            Wait->Holders[0] ? Wait->Holders : "(none)");
+    ReleaseRundownWait(Wait);
+}
+
+static
+VOID
+FinishDeleteVolume(_In_ PFLT_VOLUME Volume)
+{
+    /* A context set or a stream recorded since the teardown, by those last users */
+    FltpTeardownVolumeContexts(Volume);
+    FltpExRundownCompleted(&Volume->Base.RundownRef);
+
+    ExDeleteResourceLite(&Volume->InstanceList.rLock);
+    FltpFreeUnicodeString(&Volume->DeviceName);
+    FltpFreeUnicodeString(&Volume->GuidName);
+    FltpFreeUnicodeString(&Volume->CDODeviceName);
+    FltpFreeUnicodeString(&Volume->CDODriverName);
+    if (Volume->DiskDeviceObject)
+        ObDereferenceObject(Volume->DiskDeviceObject);
+    ExFreePoolWithTag(Volume, FM_TAG_VOLUME);
+}
+
+static
+VOID
+NTAPI
+VolumeRundownWaitThread(_In_ PVOID Context)
+{
+    PVOLUME_RUNDOWN_WAIT Wait = Context;
+    PFLT_VOLUME Volume = Wait->Volume;
+
+    FltpObjectRundownWait(&Volume->Base.RundownRef);
+
+    /* The report may be set, running or done: it holds its own reference on the Wait */
+    if (KeCancelTimer(&Wait->Timer))
+        ReleaseRundownWait(Wait);
+    ReleaseRundownWait(Wait);
+
+    FinishDeleteVolume(Volume);
+    PsTerminateSystemThread(STATUS_SUCCESS);
+}
+
+/*
+ * The rest of FltpDeleteVolume: the wait for the references, then the free. A thread per volume which is
+ * still referenced when we get here (one which is not referenced doesn't wait for anything), so a volume a
+ * filter holds on to holds that thread, and nothing else: no worker of a shared queue, no other volume.
+ */
+static
+VOID
+FltpDeleteVolumeLater(_In_ PFLT_VOLUME Volume)
+{
+    PVOLUME_RUNDOWN_WAIT Wait;
+    OBJECT_ATTRIBUTES Attributes;
+    LARGE_INTEGER DueTime;
+    HANDLE Thread;
+    NTSTATUS Status;
+    ULONG Chars;
+
+    PAGED_CODE();
+
+    Wait = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Wait), FM_TAG_VOLWAIT);
+    if (Wait == NULL)
+    {
+        /* Nothing to report with and no thread: this is the worker's wait, as it was */
+        FltpObjectRundownWait(&Volume->Base.RundownRef);
+        FinishDeleteVolume(Volume);
+        return;
+    }
+    RtlZeroMemory(Wait, sizeof(*Wait));
+    Wait->Volume = Volume;
+    Wait->VolumeAddress = Volume;
+    Wait->Refs = 2;
+    NarrowForMessage(Wait->DeviceName, sizeof(Wait->DeviceName), Volume->DeviceName.Buffer,
+                     Volume->DeviceName.Length / sizeof(WCHAR));
+    Chars = (ULONG)Volume->HolderChars;
+    if (Chars > RTL_NUMBER_OF(Volume->Holders))
+        Chars = RTL_NUMBER_OF(Volume->Holders);
+    NarrowForMessage(Wait->Holders, sizeof(Wait->Holders), Volume->Holders, Chars);
+
+    KeInitializeTimer(&Wait->Timer);
+    KeInitializeDpc(&Wait->Dpc, VolumeLeakReportDpc, Wait);
+
+    /* Set before the thread exists: it cancels the timer when its wait is over */
+    DueTime.QuadPart = -(LONGLONG)VOLUME_LEAK_REPORT_SECONDS * 10 * 1000 * 1000;
+    KeSetTimer(&Wait->Timer, DueTime, &Wait->Dpc);
+
+    InitializeObjectAttributes(&Attributes, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
+    Status = PsCreateSystemThread(&Thread, THREAD_ALL_ACCESS, &Attributes, NULL, NULL,
+                                  VolumeRundownWaitThread, Wait);
+    if (!NT_SUCCESS(Status))
+    {
+        if (KeCancelTimer(&Wait->Timer))
+            ReleaseRundownWait(Wait);
+        /* The thread's reference: nobody else holds the Wait but a report which has started */
+        ReleaseRundownWait(Wait);
+        FltpObjectRundownWait(&Volume->Base.RundownRef);
+        FinishDeleteVolume(Volume);
+        return;
+    }
+    ZwClose(Thread);
+}
+
+/* A filter has an instance on the volume: its name goes into the message about a volume which is not released */
+VOID
+FltpNoteVolumeFilter(_Inout_ PFLT_VOLUME Volume,
+                     _In_ PCUNICODE_STRING FilterName)
+{
+    ULONG Chars = FilterName->Length / sizeof(WCHAR);
+    LONG Start;
+
+    /* A name, a space: whatever does not fit is left out, this is a hint */
+    if (Chars == 0 || Chars + 1 > RTL_NUMBER_OF(Volume->Holders) - 1)
+        return;
+    Start = InterlockedExchangeAdd(&Volume->HolderChars, (LONG)(Chars + 1));
+    if ((ULONG)Start + Chars + 1 > RTL_NUMBER_OF(Volume->Holders) - 1)
+        return;
+    RtlCopyMemory(&Volume->Holders[Start], FilterName->Buffer, Chars * sizeof(WCHAR));
+    Volume->Holders[Start + Chars] = L' ';
 }
 
 /*

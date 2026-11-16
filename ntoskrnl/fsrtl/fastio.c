@@ -1561,6 +1561,186 @@ Cleanup:
     return Result;
 }
 
+/*
+ * The FsFilter callbacks (FsRtlRegisterFileSystemFilterCallbacks) of every driver in the file system
+ * stack of a file: the WDK (FS_FILTER_CALLBACKS) says a filter's callback runs before the request goes
+ * to the lower filters and the file system, its completion callback after them. So the stack is walked
+ * from the top device down to the file system's volume device, and each device whose driver registered
+ * a callback for the operation is called, with that device in the callback data:
+ *  - STATUS_SUCCESS: go on with the next lower device (the completion callback is called afterwards);
+ *  - another success status (STATUS_FSFILTER_OP_COMPLETED_SUCCESSFULLY, and for a section, the
+ *    STATUS_FILE_LOCKED_WITH_* statuses a file system returns): that driver did the operation, nothing
+ *    below it (nor FsRtl's own fast I/O / resource fallback) runs;
+ *  - an error fails an acquire. A release can't fail: its error is ignored, like the WDK says, and so
+ *    is an error for a SyncTypeOther section synchronization ("should always return a success status";
+ *    its caller, FsRtlAcquireFileExclusive, can't fail).
+ * The completion callbacks of the drivers called (with STATUS_SUCCESS) are then called bottom-up with
+ * the status of the operation. A driver with only a completion callback gets it with no context.
+ */
+#define FSRTLP_FILTER_CALLS 16
+
+typedef struct _FSRTLP_FILTER_CALL
+{
+    PDEVICE_OBJECT DeviceObject;                    /* referenced until its completion callback ran */
+    PFS_FILTER_COMPLETION_CALLBACK PostCallback;
+    PVOID CompletionContext;
+} FSRTLP_FILTER_CALL, *PFSRTLP_FILTER_CALL;
+
+typedef struct _FSRTLP_FILTER_CHAIN
+{
+    FS_FILTER_CALLBACK_DATA Data;
+    ULONG Count;
+    FSRTLP_FILTER_CALL Calls[FSRTLP_FILTER_CALLS];
+} FSRTLP_FILTER_CHAIN, *PFSRTLP_FILTER_CHAIN;
+
+static
+VOID
+FsRtlpGetFilterCallbacks(_In_ PDRIVER_OBJECT DriverObject,
+                         _In_ UCHAR Operation,
+                         _Out_ PFS_FILTER_CALLBACK *PreCallback,
+                         _Out_ PFS_FILTER_COMPLETION_CALLBACK *PostCallback)
+{
+    PFS_FILTER_CALLBACKS Callbacks = IoGetDrvObjExtension(DriverObject)->FsFilterCallbacks;
+
+    *PreCallback = NULL;
+    *PostCallback = NULL;
+    if (Callbacks == NULL)
+        return;
+
+    switch (Operation)
+    {
+        case FS_FILTER_ACQUIRE_FOR_SECTION_SYNCHRONIZATION:
+            *PreCallback = Callbacks->PreAcquireForSectionSynchronization;
+            *PostCallback = Callbacks->PostAcquireForSectionSynchronization;
+            break;
+        case FS_FILTER_RELEASE_FOR_SECTION_SYNCHRONIZATION:
+            *PreCallback = Callbacks->PreReleaseForSectionSynchronization;
+            *PostCallback = Callbacks->PostReleaseForSectionSynchronization;
+            break;
+        case FS_FILTER_ACQUIRE_FOR_MOD_WRITE:
+            *PreCallback = Callbacks->PreAcquireForModifiedPageWriter;
+            *PostCallback = Callbacks->PostAcquireForModifiedPageWriter;
+            break;
+        case FS_FILTER_RELEASE_FOR_MOD_WRITE:
+            *PreCallback = Callbacks->PreReleaseForModifiedPageWriter;
+            *PostCallback = Callbacks->PostReleaseForModifiedPageWriter;
+            break;
+        case FS_FILTER_ACQUIRE_FOR_CC_FLUSH:
+            *PreCallback = Callbacks->PreAcquireForCcFlush;
+            *PostCallback = Callbacks->PostAcquireForCcFlush;
+            break;
+        case FS_FILTER_RELEASE_FOR_CC_FLUSH:
+            *PreCallback = Callbacks->PreReleaseForCcFlush;
+            *PostCallback = Callbacks->PostReleaseForCcFlush;
+            break;
+    }
+}
+
+/*
+ * The pre-callbacks, top-down. The caller fills Chain->Data.Parameters first. Returns STATUS_SUCCESS if
+ * the operation is still to be done (by the caller), another success status if a driver did it, an
+ * error if it failed. FsRtlpCallPostFilterCallbacks must follow in every case.
+ */
+static
+NTSTATUS
+FsRtlpCallPreFilterCallbacks(_Inout_ PFSRTLP_FILTER_CHAIN Chain,
+                             _In_ UCHAR Operation,
+                             _In_ PFILE_OBJECT FileObject)
+{
+    BOOLEAN MayFail;
+    PDEVICE_OBJECT Device, Lower, Base;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    Chain->Count = 0;
+    Chain->Data.SizeOfFsFilterCallbackData = sizeof(FS_FILTER_CALLBACK_DATA);
+    Chain->Data.Operation = Operation;
+    Chain->Data.Reserved = 0;
+    Chain->Data.FileObject = FileObject;
+
+    MayFail = (Operation == FS_FILTER_ACQUIRE_FOR_MOD_WRITE || Operation == FS_FILTER_ACQUIRE_FOR_CC_FLUSH ||
+               (Operation == FS_FILTER_ACQUIRE_FOR_SECTION_SYNCHRONIZATION &&
+                Chain->Data.Parameters.AcquireForSectionSynchronization.SyncType == SyncTypeCreateSection));
+
+    Base = IoGetBaseFileSystemDeviceObject(FileObject);
+    Device = IoGetRelatedDeviceObject(FileObject);
+    ObReferenceObject(Device);
+
+    while (Device)
+    {
+        PFS_FILTER_CALLBACK PreCallback;
+        PFS_FILTER_COMPLETION_CALLBACK PostCallback;
+        PVOID Context = NULL;
+        BOOLEAN Keep = FALSE;
+
+        FsRtlpGetFilterCallbacks(Device->DriverObject, Operation, &PreCallback, &PostCallback);
+        if (PreCallback)
+        {
+            Chain->Data.DeviceObject = Device;
+            Status = PreCallback(&Chain->Data, &Context);
+            if (!NT_SUCCESS(Status) && !MayFail)
+            {
+                /* The WDK: ignored */
+                DPRINT1("FsFilter callback %p failed operation %d with 0x%lx (ignored)\n",
+                        PreCallback, (CHAR)Operation, Status);
+                Status = STATUS_SUCCESS;
+            }
+        }
+
+        if (Status == STATUS_SUCCESS && PostCallback)
+        {
+            if (Chain->Count < FSRTLP_FILTER_CALLS)
+            {
+                PFSRTLP_FILTER_CALL Call = &Chain->Calls[Chain->Count++];
+
+                Call->DeviceObject = Device;
+                Call->PostCallback = PostCallback;
+                Call->CompletionContext = Context;
+                Keep = TRUE;
+            }
+            else
+            {
+                /* A stack of more filters with callbacks than we keep track of: an acquire fails (the driver
+                   above hears it at once), a release goes on and that driver is told now */
+                DPRINT1("FsFilter callbacks: more than %u filters in the stack of %p\n", FSRTLP_FILTER_CALLS, FileObject);
+                if (MayFail)
+                    Status = STATUS_INSUFFICIENT_RESOURCES;
+                Chain->Data.DeviceObject = Device;
+                PostCallback(&Chain->Data, Status, Context);
+            }
+        }
+
+        if (Status != STATUS_SUCCESS || Device == Base)
+            Lower = NULL;
+        else
+            Lower = IoGetLowerDeviceObject(Device);
+        if (!Keep)
+            ObDereferenceObject(Device);
+        Device = Lower;
+    }
+
+    return Status;
+}
+
+/* The completion callbacks, bottom-up, with the status of the operation */
+static
+VOID
+FsRtlpCallPostFilterCallbacks(_Inout_ PFSRTLP_FILTER_CHAIN Chain,
+                              _In_ NTSTATUS OperationStatus)
+{
+    while (Chain->Count)
+    {
+        PFSRTLP_FILTER_CALL Call = &Chain->Calls[--Chain->Count];
+
+        Chain->Data.DeviceObject = Call->DeviceObject;
+        Call->PostCallback(&Chain->Data, OperationStatus, Call->CompletionContext);
+        ObDereferenceObject(Call->DeviceObject);
+    }
+}
+
+/*
+ * The acquire for a section synchronization. On success the caller holds the file (and is in a critical
+ * region, FsRtlEnterFileSystem) until FsRtlReleaseFile; on a failure neither.
+ */
 NTSTATUS
 NTAPI
 FsRtlAcquireFileExclusiveCommon(IN PFILE_OBJECT FileObject,
@@ -1570,8 +1750,8 @@ FsRtlAcquireFileExclusiveCommon(IN PFILE_OBJECT FileObject,
     PFSRTL_COMMON_FCB_HEADER FcbHeader;
     PDEVICE_OBJECT DeviceObject;
     PFAST_IO_DISPATCH FastDispatch;
-    PEXTENDED_DRIVER_EXTENSION DriverExtension;
-    PFS_FILTER_CALLBACKS FilterCallbacks;
+    FSRTLP_FILTER_CHAIN Chain;
+    NTSTATUS Status;
 
     /* Get Device Object and Fast Calls */
     FcbHeader = (PFSRTL_COMMON_FCB_HEADER)FileObject->FsContext;
@@ -1580,65 +1760,37 @@ FsRtlAcquireFileExclusiveCommon(IN PFILE_OBJECT FileObject,
     /* Get master FsRtl lock */
     FsRtlEnterFileSystem();
 
-    DriverExtension = IoGetDrvObjExtension(DeviceObject->DriverObject);
-    FilterCallbacks = DriverExtension->FsFilterCallbacks;
+    /* The filters and the file system: they may do it, refuse it, or let us do it */
+    RtlZeroMemory(&Chain.Data.Parameters, sizeof(Chain.Data.Parameters));
+    Chain.Data.Parameters.AcquireForSectionSynchronization.SyncType = SyncType;
+    Chain.Data.Parameters.AcquireForSectionSynchronization.PageProtection = Reserved;
+    Status = FsRtlpCallPreFilterCallbacks(&Chain, FS_FILTER_ACQUIRE_FOR_SECTION_SYNCHRONIZATION, FileObject);
 
-    /* Check if Filter Callbacks are supported */
-    if (FilterCallbacks && FilterCallbacks->PreAcquireForSectionSynchronization)
+    if (Status == STATUS_SUCCESS)
     {
-        NTSTATUS Status;
-        PVOID CompletionContext;
+        FastDispatch = DeviceObject->DriverObject->FastIoDispatch;
 
-        FS_FILTER_CALLBACK_DATA CbData;
-
-        RtlZeroMemory(&CbData, sizeof(CbData));
-
-        CbData.SizeOfFsFilterCallbackData = sizeof(CbData);
-        CbData.Operation = FS_FILTER_ACQUIRE_FOR_SECTION_SYNCHRONIZATION;
-        CbData.DeviceObject = DeviceObject;
-        CbData.FileObject = FileObject;
-        CbData.Parameters.AcquireForSectionSynchronization.PageProtection = Reserved;
-        CbData.Parameters.AcquireForSectionSynchronization.SyncType = SyncType;
-
-        Status = FilterCallbacks->PreAcquireForSectionSynchronization(&CbData, &CompletionContext);
-        if (!NT_SUCCESS(Status))
+        /* Check if Fast Calls are supported, and check AcquireFileForNtCreateSection */
+        if (FastDispatch &&
+            FastDispatch->AcquireFileForNtCreateSection)
         {
-            FsRtlExitFileSystem();
-            return Status;
+            /* Call the AcquireFileForNtCreateSection FastIo handler */
+            FastDispatch->AcquireFileForNtCreateSection(FileObject);
         }
-
-        /* Should we do something in-between ? */
-
-        if (FilterCallbacks->PostAcquireForSectionSynchronization)
+        else
         {
-            FilterCallbacks->PostAcquireForSectionSynchronization(&CbData, Status, CompletionContext);
-        }
-
-        /* Return here when the status is based on the synchonization type and write access to the file */
-        if (Status == STATUS_FSFILTER_OP_COMPLETED_SUCCESSFULLY ||
-            Status == STATUS_FILE_LOCKED_WITH_ONLY_READERS ||
-            Status == STATUS_FILE_LOCKED_WITH_WRITERS)
-        {
-            return Status;
+            /* No FastIo handler, acquire file's resource exclusively */
+            if (FcbHeader && FcbHeader->Resource) ExAcquireResourceExclusiveLite(FcbHeader->Resource, TRUE);
         }
     }
 
-    FastDispatch = DeviceObject->DriverObject->FastIoDispatch;
+    FsRtlpCallPostFilterCallbacks(&Chain, Status);
 
-    /* Check if Fast Calls are supported, and check AcquireFileForNtCreateSection */
-    if (FastDispatch &&
-        FastDispatch->AcquireFileForNtCreateSection)
-    {
-        /* Call the AcquireFileForNtCreateSection FastIo handler */
-        FastDispatch->AcquireFileForNtCreateSection(FileObject);
-    }
-    else
-    {
-        /* No FastIo handler, acquire file's resource exclusively */
-        if (FcbHeader && FcbHeader->Resource) ExAcquireResourceExclusiveLite(FcbHeader->Resource, TRUE);
-    }
+    /* A failure leaves the critical region; a success (whoever acquired the file) stays in it until the release */
+    if (!NT_SUCCESS(Status))
+        FsRtlExitFileSystem();
 
-    return STATUS_SUCCESS;
+    return Status;
 }
 
 /*
@@ -1676,24 +1828,34 @@ FsRtlReleaseFile(IN PFILE_OBJECT FileObject)
     PFSRTL_COMMON_FCB_HEADER FcbHeader;
     PDEVICE_OBJECT DeviceObject;
     PFAST_IO_DISPATCH FastDispatch;
+    FSRTLP_FILTER_CHAIN Chain;
+    NTSTATUS Status;
 
     /* Get Device Object and Fast Calls */
     FcbHeader = (PFSRTL_COMMON_FCB_HEADER)FileObject->FsContext;
     DeviceObject = IoGetRelatedDeviceObject(FileObject);
     FastDispatch = DeviceObject->DriverObject->FastIoDispatch;
 
-    /* Check if Fast Calls are supported and check ReleaseFileForNtCreateSection */
-    if (FastDispatch &&
-        FastDispatch->ReleaseFileForNtCreateSection)
+    RtlZeroMemory(&Chain.Data.Parameters, sizeof(Chain.Data.Parameters));
+    Status = FsRtlpCallPreFilterCallbacks(&Chain, FS_FILTER_RELEASE_FOR_SECTION_SYNCHRONIZATION, FileObject);
+
+    if (Status == STATUS_SUCCESS)
     {
-        /* Call the ReleaseFileForNtCreateSection FastIo handler */
-        FastDispatch->ReleaseFileForNtCreateSection(FileObject);
+        /* Check if Fast Calls are supported and check ReleaseFileForNtCreateSection */
+        if (FastDispatch &&
+            FastDispatch->ReleaseFileForNtCreateSection)
+        {
+            /* Call the ReleaseFileForNtCreateSection FastIo handler */
+            FastDispatch->ReleaseFileForNtCreateSection(FileObject);
+        }
+        else
+        {
+            /* No FastIo handler, release file's resource */
+            if (FcbHeader && FcbHeader->Resource) ExReleaseResourceLite(FcbHeader->Resource);
+        }
     }
-    else
-    {
-        /* No FastIo handler, release file's resource */
-        if (FcbHeader && FcbHeader->Resource) ExReleaseResourceLite(FcbHeader->Resource);
-    }
+
+    FsRtlpCallPostFilterCallbacks(&Chain, Status);
 
     /* Release master FsRtl lock */
     FsRtlExitFileSystem();
@@ -1709,6 +1871,7 @@ FsRtlAcquireFileForCcFlushEx(IN PFILE_OBJECT FileObject)
     PFSRTL_COMMON_FCB_HEADER FcbHeader;
     PDEVICE_OBJECT DeviceObject, BaseDeviceObject;
     PFAST_IO_DISPATCH FastDispatch;
+    FSRTLP_FILTER_CHAIN Chain;
     NTSTATUS Status;
 
     /* Get the Base File System (Volume) and Fast Calls */
@@ -1720,42 +1883,53 @@ FsRtlAcquireFileForCcFlushEx(IN PFILE_OBJECT FileObject)
     /* Get master FsRtl lock */
     FsRtlEnterFileSystem();
 
-    /* Check if Fast Calls are supported, and check AcquireForCcFlush */
-    if (FastDispatch &&
-        FastDispatch->AcquireForCcFlush)
+    RtlZeroMemory(&Chain.Data.Parameters, sizeof(Chain.Data.Parameters));
+    Status = FsRtlpCallPreFilterCallbacks(&Chain, FS_FILTER_ACQUIRE_FOR_CC_FLUSH, FileObject);
+
+    if (Status == STATUS_SUCCESS)
     {
-        /* Call the AcquireForCcFlush FastIo handler */
-        Status = FastDispatch->AcquireForCcFlush(FileObject, BaseDeviceObject);
+        Status = STATUS_INVALID_DEVICE_REQUEST;
 
-        /* Return either success or inability to wait.
-           In case of other failure - fall through */
-        if (NT_SUCCESS(Status))
-            return Status;
-
-        if (Status == STATUS_CANT_WAIT)
+        /* Check if Fast Calls are supported, and check AcquireForCcFlush */
+        if (FastDispatch &&
+            FastDispatch->AcquireForCcFlush)
         {
-            DPRINT1("STATUS_CANT_WAIT\n");
-            FsRtlExitFileSystem();
-            return Status;
+            /* Call the AcquireForCcFlush FastIo handler */
+            Status = FastDispatch->AcquireForCcFlush(FileObject, BaseDeviceObject);
+
+            /* Either success or inability to wait. In case of other failure - fall through */
+            if (Status == STATUS_CANT_WAIT)
+                DPRINT1("STATUS_CANT_WAIT\n");
+        }
+
+        if (!NT_SUCCESS(Status) && Status != STATUS_CANT_WAIT)
+        {
+            /* No FastIo handler (or it failed). Acquire Main resource */
+            if (FcbHeader->Resource)
+            {
+                /* Acquire it - either shared if it's already acquired
+                    or exclusively if we are the first */
+                if (ExIsResourceAcquiredSharedLite(FcbHeader->Resource))
+                    ExAcquireResourceSharedLite(FcbHeader->Resource, TRUE);
+                else
+                    ExAcquireResourceExclusiveLite(FcbHeader->Resource, TRUE);
+            }
+
+            /* Also acquire its PagingIO resource */
+            if (FcbHeader->PagingIoResource)
+                ExAcquireResourceSharedLite(FcbHeader->PagingIoResource, TRUE);
+
+            Status = STATUS_SUCCESS;
         }
     }
 
-    /* No FastIo handler (or it failed). Acquire Main resource */
-    if (FcbHeader->Resource)
-    {
-        /* Acquire it - either shared if it's already acquired
-            or exclusively if we are the first */
-        if (ExIsResourceAcquiredSharedLite(FcbHeader->Resource))
-            ExAcquireResourceSharedLite(FcbHeader->Resource, TRUE);
-        else
-            ExAcquireResourceExclusiveLite(FcbHeader->Resource, TRUE);
-    }
+    FsRtlpCallPostFilterCallbacks(&Chain, Status);
 
-    /* Also acquire its PagingIO resource */
-    if (FcbHeader->PagingIoResource)
-        ExAcquireResourceSharedLite(FcbHeader->PagingIoResource, TRUE);
+    /* A failure leaves the critical region; a success stays in it until FsRtlReleaseFileForCcFlush */
+    if (!NT_SUCCESS(Status))
+        FsRtlExitFileSystem();
 
-    return STATUS_SUCCESS;
+    return Status;
 }
 
 /*
@@ -1782,7 +1956,8 @@ FsRtlReleaseFileForCcFlush(IN PFILE_OBJECT FileObject)
     PFSRTL_COMMON_FCB_HEADER FcbHeader;
     PDEVICE_OBJECT DeviceObject, BaseDeviceObject;
     PFAST_IO_DISPATCH FastDispatch;
-    NTSTATUS Status = STATUS_INVALID_DEVICE_REQUEST;
+    FSRTLP_FILTER_CHAIN Chain;
+    NTSTATUS Status;
 
     /* Get Device Object and Fast Calls */
     FcbHeader = (PFSRTL_COMMON_FCB_HEADER)FileObject->FsContext;
@@ -1790,21 +1965,32 @@ FsRtlReleaseFileForCcFlush(IN PFILE_OBJECT FileObject)
     BaseDeviceObject = IoGetBaseFileSystemDeviceObject(FileObject);
     FastDispatch = DeviceObject->DriverObject->FastIoDispatch;
 
-    /* Check if Fast Calls are supported, and check ReleaseForCcFlush */
-    if (FastDispatch &&
-        FastDispatch->ReleaseForCcFlush)
+    RtlZeroMemory(&Chain.Data.Parameters, sizeof(Chain.Data.Parameters));
+    Status = FsRtlpCallPreFilterCallbacks(&Chain, FS_FILTER_RELEASE_FOR_CC_FLUSH, FileObject);
+
+    if (Status == STATUS_SUCCESS)
     {
-        /* Call the ReleaseForCcFlush FastIo handler */
-        Status = FastDispatch->ReleaseForCcFlush(FileObject, BaseDeviceObject);
+        Status = STATUS_INVALID_DEVICE_REQUEST;
+
+        /* Check if Fast Calls are supported, and check ReleaseForCcFlush */
+        if (FastDispatch &&
+            FastDispatch->ReleaseForCcFlush)
+        {
+            /* Call the ReleaseForCcFlush FastIo handler */
+            Status = FastDispatch->ReleaseForCcFlush(FileObject, BaseDeviceObject);
+        }
+
+        if (!NT_SUCCESS(Status))
+        {
+            /* No FastIo handler (or it failed). Release PagingIO resource and
+               then Main resource */
+            if (FcbHeader->PagingIoResource) ExReleaseResourceLite(FcbHeader->PagingIoResource);
+            if (FcbHeader->Resource) ExReleaseResourceLite(FcbHeader->Resource);
+        }
+        Status = STATUS_SUCCESS;
     }
 
-    if (!NT_SUCCESS(Status))
-    {
-        /* No FastIo handler (or it failed). Release PagingIO resource and
-           then Main resource */
-        if (FcbHeader->PagingIoResource) ExReleaseResourceLite(FcbHeader->PagingIoResource);
-        if (FcbHeader->Resource) ExReleaseResourceLite(FcbHeader->Resource);
-    }
+    FsRtlpCallPostFilterCallbacks(&Chain, Status);
 
     /* Release master FsRtl lock */
     FsRtlExitFileSystem();
@@ -1861,12 +2047,41 @@ FsRtlpGetResourceForModWrite(_In_ PFSRTL_COMMON_FCB_HEADER FcbHeader,
  *
  * @return Relevant NTSTATUS value
  */
+static
+NTSTATUS
+FsRtlpAcquireFileForModWrite(_In_ PFILE_OBJECT FileObject,
+                             _In_ PLARGE_INTEGER EndingOffset,
+                             _Outptr_result_maybenull_ PERESOURCE *ResourceToRelease);
+
 _Check_return_
 NTSTATUS
 NTAPI
 FsRtlAcquireFileForModWriteEx(_In_ PFILE_OBJECT FileObject,
                               _In_ PLARGE_INTEGER EndingOffset,
                               _Outptr_result_maybenull_ PERESOURCE *ResourceToRelease)
+{
+    FSRTLP_FILTER_CHAIN Chain;
+    NTSTATUS Status;
+
+    /* The filters and the file system first: one of them may do it (and say what to release) or refuse it */
+    RtlZeroMemory(&Chain.Data.Parameters, sizeof(Chain.Data.Parameters));
+    Chain.Data.Parameters.AcquireForModifiedPageWriter.EndingOffset = EndingOffset;
+    Chain.Data.Parameters.AcquireForModifiedPageWriter.ResourceToRelease = ResourceToRelease;
+    Status = FsRtlpCallPreFilterCallbacks(&Chain, FS_FILTER_ACQUIRE_FOR_MOD_WRITE, FileObject);
+
+    if (Status == STATUS_SUCCESS)
+        Status = FsRtlpAcquireFileForModWrite(FileObject, EndingOffset, ResourceToRelease);
+
+    FsRtlpCallPostFilterCallbacks(&Chain, Status);
+    return Status;
+}
+
+/* FsRtlAcquireFileForModWriteEx without the filter callbacks: the fast I/O routine or the FCB's resources */
+static
+NTSTATUS
+FsRtlpAcquireFileForModWrite(_In_ PFILE_OBJECT FileObject,
+                             _In_ PLARGE_INTEGER EndingOffset,
+                             _Outptr_result_maybenull_ PERESOURCE *ResourceToRelease)
 {
     PFSRTL_COMMON_FCB_HEADER FcbHeader;
     PDEVICE_OBJECT DeviceObject, BaseDeviceObject;
@@ -1976,28 +2191,41 @@ FsRtlReleaseFileForModWrite(_In_ PFILE_OBJECT FileObject,
 {
     PDEVICE_OBJECT DeviceObject, BaseDeviceObject;
     PFAST_IO_DISPATCH FastDispatch;
-    NTSTATUS Status = STATUS_UNSUCCESSFUL;
+    FSRTLP_FILTER_CHAIN Chain;
+    NTSTATUS Status;
 
     /* Get Device Object and Fast Calls */
     DeviceObject = IoGetRelatedDeviceObject(FileObject);
     BaseDeviceObject = IoGetBaseFileSystemDeviceObject(FileObject);
     FastDispatch = DeviceObject->DriverObject->FastIoDispatch;
 
-    /* Check if Fast Calls are supported and check ReleaseForModWrite */
-    if (FastDispatch &&
-        FastDispatch->ReleaseForModWrite)
+    RtlZeroMemory(&Chain.Data.Parameters, sizeof(Chain.Data.Parameters));
+    Chain.Data.Parameters.ReleaseForModifiedPageWriter.ResourceToRelease = ResourceToRelease;
+    Status = FsRtlpCallPreFilterCallbacks(&Chain, FS_FILTER_RELEASE_FOR_MOD_WRITE, FileObject);
+
+    if (Status == STATUS_SUCCESS)
     {
-        /* Call the ReleaseForModWrite FastIo handler */
-        Status = FastDispatch->ReleaseForModWrite(FileObject,
-                                                  ResourceToRelease,
-                                                  BaseDeviceObject);
+        Status = STATUS_UNSUCCESSFUL;
+
+        /* Check if Fast Calls are supported and check ReleaseForModWrite */
+        if (FastDispatch &&
+            FastDispatch->ReleaseForModWrite)
+        {
+            /* Call the ReleaseForModWrite FastIo handler */
+            Status = FastDispatch->ReleaseForModWrite(FileObject,
+                                                      ResourceToRelease,
+                                                      BaseDeviceObject);
+        }
+
+        /* Just release the resource if previous op failed */
+        if (!NT_SUCCESS(Status) && ResourceToRelease)
+        {
+            ExReleaseResourceLite(ResourceToRelease);
+        }
+        Status = STATUS_SUCCESS;
     }
 
-    /* Just release the resource if previous op failed */
-    if (!NT_SUCCESS(Status))
-    {
-        ExReleaseResourceLite(ResourceToRelease);
-    }
+    FsRtlpCallPostFilterCallbacks(&Chain, Status);
 }
 
 
@@ -2034,9 +2262,15 @@ FsRtlRegisterFileSystemFilterCallbacks(
         return STATUS_INVALID_PARAMETER;
     }
 
-    /* Allocate a buffer for a copy of the callbacks */
+    if (Callbacks->SizeOfFsFilterCallbacks == 0)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    /* Allocate a buffer for a copy of the callbacks: all of ours, the ones a caller's (older, smaller)
+       structure doesn't have are NULL, the ones of a newer structure we don't know are not kept */
     NewCallbacks = ExAllocatePoolWithTag(NonPagedPool,
-                                         Callbacks->SizeOfFsFilterCallbacks,
+                                         sizeof(FS_FILTER_CALLBACKS),
                                          'gmSF');
     if (NewCallbacks == NULL)
     {
@@ -2044,7 +2278,9 @@ FsRtlRegisterFileSystemFilterCallbacks(
     }
 
     /* Copy the callbacks */
-    RtlCopyMemory(NewCallbacks, Callbacks, Callbacks->SizeOfFsFilterCallbacks);
+    RtlZeroMemory(NewCallbacks, sizeof(FS_FILTER_CALLBACKS));
+    RtlCopyMemory(NewCallbacks, Callbacks, min(Callbacks->SizeOfFsFilterCallbacks, sizeof(FS_FILTER_CALLBACKS)));
+    NewCallbacks->SizeOfFsFilterCallbacks = sizeof(FS_FILTER_CALLBACKS);
 
     /* Set the callbacks in the driver extension */
     DriverExtension = IoGetDrvObjExtension(FilterDriverObject);
