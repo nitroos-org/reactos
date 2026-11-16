@@ -295,6 +295,18 @@ NTSTATUS UDPSendDatagram(
 
         LocalAddress = NCE->Interface->Unicast;
         LocalAddress.Address.IPv4Address = IFSelectSourceAddress(NCE->Interface, RemoteAddress.Address.IPv4Address);
+
+        /* A DHCP client without a leased address (BOOTREQUEST, ciaddr 0: DISCOVER, the REQUEST of the selecting and
+           init-reboot states, DECLINE) sends from 0.0.0.0, also while the adapter holds an automatic private address
+           (RFC 2131 4.1; Windows does, measured on its peer); the address of the interface would make a server with
+           reverse-path filtering drop it. A REBIND/RENEW carries ciaddr and keeps the address of the interface. */
+        if (RemoteAddress.Address.IPv4Address == 0xFFFFFFFF &&
+            AddrFile->Port == WH2N(68) && RemotePort == WH2N(67) &&
+            DataSize >= 240 && BufferData[0] == 1 &&
+            BufferData[12] == 0 && BufferData[13] == 0 && BufferData[14] == 0 && BufferData[15] == 0)
+        {
+            LocalAddress.Address.IPv4Address = 0;
+        }
     }
     else
     {
