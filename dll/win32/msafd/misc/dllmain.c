@@ -5624,6 +5624,10 @@ DllMain(HANDLE hInstDll,
 
     case DLL_PROCESS_DETACH:
 
+        /* A FreeLibrary (not the end of the process): nothing may stay allocated */
+        if (!Reserved)
+            SockFreeHelpers();
+
         /* Delete the socket list lock */
         DeleteCriticalSection(&SocketListLock);
         DeleteCriticalSection(&AsyncSelectLock);
