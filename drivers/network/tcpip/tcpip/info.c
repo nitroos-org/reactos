@@ -351,8 +351,8 @@ InfoTdiQueryGetIpv6Table(
     ULONG Size = 0, Room = 0;
     TDI_STATUS Status;
 
-    /* The caller's buffer length is its own to choose: the whole answer (at most 256 interfaces with three
-       addresses each) is far below this, so it is all the room that is ever needed */
+    /* The caller's buffer length is its own to choose: the whole answer (at most 64 interfaces with 16
+       addresses each, if6.c) is below this, so it is all the room that is ever needed */
     if (Buffer && *BufferSize != 0)
     {
         Room = min(*BufferSize, IPV6_TABLE_MAX_ANSWER);

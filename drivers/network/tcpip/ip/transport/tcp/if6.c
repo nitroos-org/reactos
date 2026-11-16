@@ -595,8 +595,8 @@ LibTCPListenerInput6(void)
 #define TCP6_SUFFIX_LINKLAYER   4
 #define TCP6_SUFFIX_RANDOM      5
 
-/* (with LWIP_IPV6_NUM_ADDRESSES 8 the answer for 256 interfaces would pass the cap below) */
-#define TCP6_MAX_TABLE_INTERFACES 128
+/* (with 16 address slots per interface the answer for 128 interfaces would pass the cap below; 64 of them fill 50 KB) */
+#define TCP6_MAX_TABLE_INTERFACES 64
 
 /* The answer is copied through a pool block that InfoTdiQueryGetIpv6Table (info.c) caps at 64 KB: the largest
    answer has to stay below the cap, or the caller would get a size that is no answer */

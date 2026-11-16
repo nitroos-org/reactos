@@ -311,6 +311,17 @@ nd6_process_autoconfig_prefix(struct netif *netif,
       free_idx = i;
     }
   }
+#ifdef LWIP_HOOK_ND6_NO_FREE_ADDRESS
+  /* NitroOS: a temporary address gives way to the stable address of a new prefix */
+  if (free_idx == 0 && LWIP_HOOK_ND6_NO_FREE_ADDRESS(netif)) {
+    for (i = 1; i < LWIP_IPV6_NUM_ADDRESSES; i++) {
+      if (ip6_addr_isinvalid(netif_ip6_addr_state(netif, i))) {
+        free_idx = i;
+        break;
+      }
+    }
+  }
+#endif /* LWIP_HOOK_ND6_NO_FREE_ADDRESS */
   if (free_idx == 0) {
     return; /* no address slots available, try again on next advertisement */
   }
