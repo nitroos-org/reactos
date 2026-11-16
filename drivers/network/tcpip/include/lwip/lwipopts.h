@@ -48,8 +48,10 @@
 /* The IPv6 core (ip_addr_t is a tagged union). It is used only with Tcpip\Parameters\Ipv6Enable on
  * (ip/transport/tcp/if6.c); off, no interface has an IPv6 address and no IPv6 frame reaches lwIP */
 #define LWIP_IPV6                       1
-/* MLD (MLDv1, RFC 2710): the solicited-node groups of the addresses and the groups sockets joined (udp6.c) are
- * reported, queries answered, a done message sent on the last leave, so switches that snoop MLD forward them to us.
+/* MLD: the solicited-node groups of the addresses and the groups sockets joined (udp6.c), with the sockets' merged
+ * source filters, are reported with MLDv2 (RFC 3810, MLD6_V2: state change reports, answers to general, group and
+ * group-and-source specific queries), or MLDv1 (RFC 2710) while an MLDv1 querier is on the link, so switches and
+ * routers that snoop MLD forward them to us.
  * Ethernet interfaces only (NETIF_FLAG_MLD6, if6.c). The adapter's multicast list stays ours (if6.c, no
  * mld_mac_filter). No cyclic 100 ms timer: one timeout while a report is pending, none on an idle machine (mld6.c).
  * The random report delay comes from udp6.c, so lwIP's LWIP_RAND users (port numbers) do not change. With MLD,
@@ -57,6 +59,7 @@
  * used only with LWIP_IPV6_MLD 0 */
 #define LWIP_IPV6_MLD                   1
 #define MLD6_TMR_ON_DEMAND              1
+#define MLD6_V2                         1
 #define MLD6_RAND()                     LibMld6Random()
 /* Router advertisement DNS servers (RFC 8106, up to 3 per advertisement) go to the stack's list for the resolver
  * (rdnss6.c); lwIP's own DNS client is not part of this tree */

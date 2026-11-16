@@ -79,7 +79,32 @@ typedef struct _SOCKET_CONTEXT {
     LONG Ipv6MtuDiscover;
     /* IP_HDRINCL of a raw IPv4 socket as set */
     LONG IpHdrIncl;
+    /* The multicast groups of a datagram socket with their source filters (mcast.c) */
+    struct _WSH_MCAST *Mcast;
 } SOCKET_CONTEXT, *PSOCKET_CONTEXT;
+
+/* Which IPPROTO_IPV6 options of an AF_INET6 socket were set (SOCKET_CONTEXT Ipv6OptionsSet) */
+#define WSH_SET6_V6ONLY     0x01
+#define WSH_SET6_UNIHOPS    0x02
+#define WSH_SET6_MCASTHOPS  0x04
+#define WSH_SET6_MCASTLOOP  0x08
+#define WSH_SET6_DONTFRAG   0x10
+#define WSH_SET6_MCASTIF    0x20
+#define WSH_SET6_HDRINCL    0x40
+#define WSH_SET6_RECVTCLASS 0x80
+#define WSH_SET6_RECVIF     0x100
+#define WSH_SET6_UNICASTIF  0x200
+#define WSH_SET6_MTUD       0x400
+
+/* mcast.c: multicast groups and source filters (MCAST_*, IP_*_MEMBERSHIP, IP_*_SOURCE*, IPV6_*_MEMBERSHIP, the
+   multicast filter ioctls) */
+BOOLEAN WshMcastIsOption(INT Level, INT OptionName);
+INT WshMcastSetOption(PSOCKET_CONTEXT Context, INT Level, INT OptionName, PCHAR OptionValue, INT OptionLength,
+                      PBOOLEAN Handled);
+INT WshMcastIoctl(PSOCKET_CONTEXT Context, DWORD Code, PVOID InputBuffer, DWORD InputBufferLength, PVOID OutputBuffer,
+                  DWORD OutputBufferLength, LPDWORD Returned, PBOOLEAN Handled);
+INT WshMcastBind(PSOCKET_CONTEXT Context);
+VOID WshMcastFree(PSOCKET_CONTEXT Context);
 
 INT
 WSHIoctl_GetInterfaceList(

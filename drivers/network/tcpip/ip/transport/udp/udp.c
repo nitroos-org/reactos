@@ -11,6 +11,7 @@
 #include "precomp.h"
 #include <nitrofwk.h>
 #include <icmp.h>
+#include <nitrotdi.h>
 #include "lwip/netif.h"
 #include "lwip/tcpip.h"
 
@@ -386,17 +387,24 @@ NTSTATUS UDPSendDatagram(
  * group in the adapter's multicast list (RFC 1112 6.4: 01:00:5e and the low 23 bits of the group), next to IPv6's
  * groups (if6.c, UDP4AddMulticastList); an adapter that filters multicast frames by its list passes none of the
  * group otherwise. That holds with IPv6 on the adapters and without it (DisabledComponents, Ipv6Enable = 0).
- * Delivery is unchanged: a multicast datagram the adapter passes reaches every socket bound to its port (no
- * per-socket membership), and the stack sends no IGMP (a snooping switch does not forward the groups).
- * A socket's joins are changed under its object lock and the core lock; the adapter list reads them under the
- * core lock.
+ * A socket's filter for a group (IP_ADD_SOURCE_MEMBERSHIP, MCAST_JOIN_SOURCE_GROUP, MCAST_BLOCK_SOURCE,
+ * SIO_SET_MULTICAST_FILTER and the others: the Winsock helper keeps the socket API's rules and hands the stack the
+ * group's whole filter, NITRO_AO_OPTION_MCAST_FILTER, nitrotdi.h) is kept on the same table: Mode with the
+ * sources. Delivery: a multicast datagram the adapter passes reaches every socket bound to its port (no per-socket
+ * membership); a socket with a filter for the group takes it only from a source the filter allows (INCLUDE: listed,
+ * EXCLUDE: not listed). The stack sends no IGMP (a snooping switch does not forward the groups).
+ * A socket's joins are changed under its object lock and the core lock; delivery reads them under the former, the
+ * adapter list under the latter.
  */
 #define UDP4_TAG            'M4pU'
-#define UDP4_SOCKET_GROUPS  20      /* IP_MAX_MEMBERSHIPS */
+#define UDP4_SOCKET_GROUPS  NITRO_MCAST_MAX_GROUPS      /* IP_MAX_MEMBERSHIPS */
 
 typedef struct _UDP4_GROUP {
     ULONG Group;                /* network order */
     ULONG IfIndex;              /* 0: no interface given, every adapter */
+    UCHAR Mode;                 /* NITRO_MCAST_INCLUDE / NITRO_MCAST_EXCLUDE (a plain join: EXCLUDE with no source) */
+    ULONG NumSources;
+    PULONG Sources;             /* sorted, no duplicates, network order; UDP4_TAG */
 } UDP4_GROUP, *PUDP4_GROUP;
 
 typedef struct _UDP4_MEMBERSHIPS {
@@ -501,12 +509,175 @@ UDP4AddMulticastList(ULONG IfIndex, PUCHAR List, PUINT Count, UINT Max)
     TcpipReleaseSpinLock(&AddressFileListLock, OldIrql);
 }
 
+/* The sources of a filter sorted (so delivery can search them) and without duplicates; returns how many are left */
+static
+ULONG
+Udp4SortSources(PULONG Sources, ULONG Count)
+{
+    ULONG Gap, i, j, Value, Kept;
+
+    for (Gap = Count / 2; Gap; Gap /= 2)
+    {
+        for (i = Gap; i < Count; i++)
+        {
+            Value = Sources[i];
+            for (j = i; j >= Gap && Sources[j - Gap] > Value; j -= Gap)
+                Sources[j] = Sources[j - Gap];
+            Sources[j] = Value;
+        }
+    }
+    for (i = Kept = 0; i < Count; i++)
+    {
+        if (!Kept || Sources[Kept - 1] != Sources[i])
+            Sources[Kept++] = Sources[i];
+    }
+    return Kept;
+}
+
+/*
+ * A socket's filter for one IPv4 group, set as a whole (the group is joined by the first one): Mode with NumSources
+ * sources, sorted, owned from here on (Copy, UDP4_TAG; freed when it fails or is replaced). INCLUDE with none leaves
+ * the group. MustBeNew: STATUS_INVALID_PARAMETER when the socket has the group already (a second join). CheckIfIndex:
+ * the interface (given as an index) must exist (the stack's own joins; the Winsock helper's requests are checked there)
+ */
+static
+NTSTATUS
+Udp4Apply(PADDRESS_FILE AddrFile, ULONG IfIndex, ULONG Group, UCHAR Mode, ULONG NumSources, PULONG Copy,
+          BOOLEAN MustBeNew, BOOLEAN CheckIfIndex)
+{
+    PUDP4_MEMBERSHIPS M, New = NULL;
+    PULONG Old = NULL;
+    BOOLEAN Leave = (Mode == NITRO_MCAST_INCLUDE && NumSources == 0);
+    NTSTATUS Status = STATUS_SUCCESS;
+    ULONG i;
+
+    if (!Leave)
+    {
+        New = ExAllocatePoolWithTag(NonPagedPool, sizeof(*New), UDP4_TAG);
+        if (!New)
+        {
+            if (Copy)
+                ExFreePoolWithTag(Copy, UDP4_TAG);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+        RtlZeroMemory(New, sizeof(*New));
+    }
+
+    LockObject(AddrFile);
+    LOCK_TCPIP_CORE();
+
+    if (CheckIfIndex && IfIndex && !Udp4InterfaceExists(IfIndex))
+    {
+        Status = STATUS_INVALID_ADDRESS;
+        goto Done;
+    }
+
+    if (!AddrFile->Groups4 && New)
+    {
+        AddrFile->Groups4 = New;
+        New = NULL;
+    }
+    M = AddrFile->Groups4;
+
+    /* the socket's filter of the group: on that interface, or (no interface given) on any */
+    for (i = 0; M && i < M->Count; i++)
+    {
+        if (M->Groups[i].Group == Group && UDP4_SAME_INTERFACE(M->Groups[i].IfIndex, IfIndex))
+            break;
+    }
+
+    if (!M || i == M->Count)
+    {
+        /* A new group: a leave of one the socket is not in is WSAEADDRNOTAVAIL, one past the limit as well */
+        if (Leave)
+        {
+            Status = STATUS_INVALID_ADDRESS;
+        }
+        else if (M->Count == UDP4_SOCKET_GROUPS)
+        {
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+        }
+        else
+        {
+            M->Groups[M->Count].Group = Group;
+            M->Groups[M->Count].IfIndex = IfIndex;
+            M->Groups[M->Count].Mode = Mode;
+            M->Groups[M->Count].NumSources = NumSources;
+            M->Groups[M->Count].Sources = Copy;
+            Copy = NULL;
+            M->Count++;
+            Udp4Joins++;
+            Udp4GroupsChanged(IfIndex);
+        }
+    }
+    else if (MustBeNew)
+    {
+        /* A second join: WSAEINVAL through the helper */
+        Status = STATUS_INVALID_PARAMETER;
+    }
+    else if (Leave)
+    {
+        Old = M->Groups[i].Sources;
+        IfIndex = M->Groups[i].IfIndex;
+        M->Groups[i] = M->Groups[--M->Count];
+        Udp4Joins--;
+        Udp4GroupsChanged(IfIndex);
+    }
+    else
+    {
+        Old = M->Groups[i].Sources;
+        M->Groups[i].Mode = Mode;
+        M->Groups[i].NumSources = NumSources;
+        M->Groups[i].Sources = Copy;
+        Copy = NULL;
+    }
+
+Done:
+    UNLOCK_TCPIP_CORE();
+    UnlockObject(AddrFile);
+
+    if (New)
+        ExFreePoolWithTag(New, UDP4_TAG);
+    if (Copy)
+        ExFreePoolWithTag(Copy, UDP4_TAG);
+    if (Old)
+        ExFreePoolWithTag(Old, UDP4_TAG);
+    return Status;
+}
+
+/* A group's whole source filter (NITRO_AO_OPTION_MCAST_FILTER): the Winsock helper's requests; IfIndex 0 is no
+   interface given (every adapter) */
+NTSTATUS
+UDP4SetFilter(PADDRESS_FILE AddrFile, ULONG IfIndex, ULONG Group, UCHAR Mode, ULONG NumSources,
+              const UCHAR (*Sources)[16], BOOLEAN MustBeNew)
+{
+    PULONG Copy = NULL;
+    ULONG i;
+
+    if (Mode > NITRO_MCAST_EXCLUDE)
+        return STATUS_INVALID_PARAMETER;
+    if ((Group & 0xF0) != 0xE0)
+        return STATUS_INVALID_ADDRESS;
+    if (NumSources > NITRO_MCAST_MAX_SOURCES)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    if (NumSources)
+    {
+        Copy = ExAllocatePoolWithTag(NonPagedPool, NumSources * sizeof(ULONG), UDP4_TAG);
+        if (!Copy)
+            return STATUS_INSUFFICIENT_RESOURCES;
+        for (i = 0; i < NumSources; i++)
+            RtlCopyMemory(&Copy[i], Sources[i], sizeof(ULONG));
+        NumSources = Udp4SortSources(Copy, NumSources);
+    }
+    return Udp4Apply(AddrFile, IfIndex, Group, Mode, NumSources, Copy, MustBeNew, FALSE);
+}
+
+/* IP_ADD_MEMBERSHIP / IP_DROP_MEMBERSHIP as the stack had them before the source filters (AO_OPTION_ADD_MCAST and
+ * _DEL_; struct ip_mreq): a join is EXCLUDE with no source (any source), a leave INCLUDE with none */
 NTSTATUS
 UDP4SetMembership(PADDRESS_FILE AddrFile, BOOLEAN Join, const VOID *Request, UINT Length)
 {
-    ULONG Group, Interface, IfIndex = 0, i;
-    PUDP4_MEMBERSHIPS M, New = NULL;
-    NTSTATUS Status = STATUS_SUCCESS;
+    ULONG Group, Interface, IfIndex = 0;
 
     /* struct ip_mreq: the group, then the interface: 0.0.0.0 for none, an address of it, or its index as 0.0.0.x
        (network order) */
@@ -534,81 +705,58 @@ UDP4SetMembership(PADDRESS_FILE AddrFile, BOOLEAN Join, const VOID *Request, UIN
         IfIndex = RtlUlongByteSwap(Interface);
     }
 
-    if (Join)
-    {
-        New = ExAllocatePoolWithTag(NonPagedPool, sizeof(*New), UDP4_TAG);
-        if (!New)
-            return STATUS_INSUFFICIENT_RESOURCES;
-        RtlZeroMemory(New, sizeof(*New));
-    }
+    return Udp4Apply(AddrFile, IfIndex, Group, Join ? NITRO_MCAST_EXCLUDE : NITRO_MCAST_INCLUDE, 0, NULL, Join,
+                     Interface && !(Interface & 0xFF));
+}
 
+/* Whether the socket takes a datagram to Group from Source that came in on IfIndex: no filter of the socket for the
+   group (it did before filters: no per-socket membership), or one that takes the source (INCLUDE: listed,
+   EXCLUDE: not listed). The sources are sorted. Takes the socket's object lock */
+BOOLEAN
+UDP4FilterAccepts(PADDRESS_FILE AddrFile, ULONG Group, ULONG Source, ULONG IfIndex)
+{
+    PUDP4_MEMBERSHIPS M;
+    BOOLEAN Filtered = FALSE, Accept = FALSE;
+    ULONG i;
+
+    if (!AddrFile->Groups4)
+        return TRUE;
     LockObject(AddrFile);
-    LOCK_TCPIP_CORE();
-
-    if (Interface && !(Interface & 0xFF) && !Udp4InterfaceExists(IfIndex))
-    {
-        Status = STATUS_INVALID_ADDRESS;
-        goto Done;
-    }
-
-    if (!AddrFile->Groups4 && Join)
-    {
-        AddrFile->Groups4 = New;
-        New = NULL;
-    }
     M = AddrFile->Groups4;
+    for (i = 0; M && i < M->Count && !Accept; i++)
+    {
+        PUDP4_GROUP G = &M->Groups[i];
+        ULONG Low = 0, High = G->NumSources;
+        BOOLEAN Listed = FALSE;
 
-    for (i = 0; M && i < M->Count; i++)
-    {
-        if (M->Groups[i].Group == Group && UDP4_SAME_INTERFACE(M->Groups[i].IfIndex, IfIndex))
-            break;
-    }
+        if (G->Group != Group || (G->IfIndex && G->IfIndex != IfIndex))
+            continue;
+        Filtered = TRUE;
+        while (Low < High)
+        {
+            ULONG Mid = Low + (High - Low) / 2;
 
-    if (Join)
-    {
-        /* A second join: WSAEINVAL through the helper; one past the limit: WSAEADDRNOTAVAIL */
-        if (i < M->Count)
-        {
-            Status = STATUS_INVALID_PARAMETER;
+            if (G->Sources[Mid] == Source)
+            {
+                Listed = TRUE;
+                break;
+            }
+            if (G->Sources[Mid] < Source)
+                Low = Mid + 1;
+            else
+                High = Mid;
         }
-        else if (M->Count == UDP4_SOCKET_GROUPS)
-        {
-            Status = STATUS_INSUFFICIENT_RESOURCES;
-        }
-        else
-        {
-            M->Groups[M->Count].Group = Group;
-            M->Groups[M->Count].IfIndex = IfIndex;
-            M->Count++;
-            Udp4Joins++;
-            Udp4GroupsChanged(IfIndex);
-        }
+        Accept = (G->Mode == NITRO_MCAST_INCLUDE) ? Listed : !Listed;
     }
-    else if (!M || i == M->Count)
-    {
-        Status = STATUS_INVALID_ADDRESS;
-    }
-    else
-    {
-        IfIndex = M->Groups[i].IfIndex;
-        M->Groups[i] = M->Groups[--M->Count];
-        Udp4Joins--;
-        Udp4GroupsChanged(IfIndex);
-    }
-
-Done:
-    UNLOCK_TCPIP_CORE();
     UnlockObject(AddrFile);
-
-    if (New)
-        ExFreePoolWithTag(New, UDP4_TAG);
-    return Status;
+    return Accept || !Filtered;
 }
 
 VOID
 UDP4LeaveAll(PADDRESS_FILE AddrFile)
 {
     PUDP4_MEMBERSHIPS M;
+    ULONG i;
 
     LockObject(AddrFile);
     LOCK_TCPIP_CORE();
@@ -623,7 +771,14 @@ UDP4LeaveAll(PADDRESS_FILE AddrFile)
     UnlockObject(AddrFile);
 
     if (M)
+    {
+        for (i = 0; i < M->Count; i++)
+        {
+            if (M->Groups[i].Sources)
+                ExFreePoolWithTag(M->Groups[i].Sources, UDP4_TAG);
+        }
         ExFreePoolWithTag(M, UDP4_TAG);
+    }
 }
 
 VOID UDPReceive(PIP_INTERFACE Interface, PIP_PACKET IPPacket)
@@ -730,7 +885,14 @@ VOID UDPReceive(PIP_INTERFACE Interface, PIP_PACKET IPPacket)
     }
 
     do {
-      if (ToAll)
+      if (ToAll && (DstAddress->Address.IPv4Address & 0xF0) == 0xE0 && SrcAddress->Type == IP_ADDRESS_V4 &&
+          !UDP4FilterAccepts(AddrFile, DstAddress->Address.IPv4Address, SrcAddress->Address.IPv4Address,
+                             Interface ? Interface->Index : 0))
+      {
+        /* the socket's source filter for the group does not take this source */
+        DereferenceObject(AddrFile);
+      }
+      else if (ToAll)
       {
         DGDeliverData(Interface,
                       AddrFile,

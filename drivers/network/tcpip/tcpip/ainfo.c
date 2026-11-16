@@ -8,6 +8,8 @@
 
 #include "precomp.h"
 
+#include <nitrotdi.h>
+
 TDI_STATUS SetAddressFileInfo(TDIObjectID *ID,
                               PADDRESS_FILE AddrFile,
                               PVOID Buffer,
@@ -113,6 +115,34 @@ TDI_STATUS SetAddressFileInfo(TDIObjectID *ID,
              return TDI_INVALID_PARAMETER;
 
          return UDP4SetMembership(AddrFile, ID->toi_id == AO_OPTION_ADD_MCAST, Buffer, BufferSize);
+
+      /* A group's whole source filter from the Winsock helper (nitrotdi.h): an IPv6 group for an IPv6 UDP socket, an
+         IPv4 one for an IPv4 UDP or raw socket or a dual stack IPv6 one (raw sockets join IPv4 groups as before) */
+      case NITRO_AO_OPTION_MCAST_FILTER:
+      {
+         const NITRO_MCAST_FILTER *F = Buffer;
+
+         if (AddrFile->Protocol == IPPROTO_TCP)
+             return TDI_INVALID_REQUEST;
+         if (BufferSize < NITRO_MCAST_FILTER_SIZE(0) || F->NumSources > NITRO_MCAST_MAX_SOURCES ||
+             BufferSize < NITRO_MCAST_FILTER_SIZE(F->NumSources) || F->Mode > NITRO_MCAST_EXCLUDE)
+             return TDI_INVALID_PARAMETER;
+
+         if (F->Family == NITRO_MCAST_FAMILY_IP6 && AddrFile->Family == TDI_ADDRESS_TYPE_IP6 &&
+             AddrFile->Protocol == IPPROTO_UDP)
+             return UDP6SetFilter(AddrFile, F->InterfaceIndex, F->Group, F->Mode, F->NumSources,
+                                  (const UCHAR (*)[16])F->Sources, (F->Flags & NITRO_MCAST_FILTER_NEW) != 0);
+         if (F->Family == NITRO_MCAST_FAMILY_IP &&
+             (AddrFile->Family != TDI_ADDRESS_TYPE_IP6 || AddrFile->DualStack))
+         {
+             ULONG Group;
+
+             RtlCopyMemory(&Group, F->Group, sizeof(Group));
+             return UDP4SetFilter(AddrFile, F->InterfaceIndex, Group, F->Mode, F->NumSources,
+                                  (const UCHAR (*)[16])F->Sources, (F->Flags & NITRO_MCAST_FILTER_NEW) != 0);
+         }
+         return TDI_INVALID_PARAMETER;
+      }
 
       default:
          DbgPrint("Unimplemented option %x\n", ID->toi_id);

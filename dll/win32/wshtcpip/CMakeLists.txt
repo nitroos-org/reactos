@@ -3,6 +3,7 @@ spec2def(wshtcpip.dll wshtcpip.spec)
 
 list(APPEND SOURCE
     iflist.c
+    mcast.c
     wshtcpip.c
     wshtcpip.rc
     ${CMAKE_CURRENT_BINARY_DIR}/wshtcpip.def)

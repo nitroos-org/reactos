@@ -42,17 +42,6 @@
 #define WSH_SOCKADDR_IN6_LENGTH 28
 C_ASSERT(sizeof(SOCKADDR_IN6_LH) == WSH_SOCKADDR_IN6_LENGTH);
 
-#define WSH_SET6_V6ONLY     0x01
-#define WSH_SET6_UNIHOPS    0x02
-#define WSH_SET6_MCASTHOPS  0x04
-#define WSH_SET6_MCASTLOOP  0x08
-#define WSH_SET6_DONTFRAG   0x10
-#define WSH_SET6_MCASTIF    0x20
-#define WSH_SET6_HDRINCL    0x40
-#define WSH_SET6_RECVTCLASS 0x80
-#define WSH_SET6_RECVIF     0x100
-#define WSH_SET6_UNICASTIF  0x200
-#define WSH_SET6_MTUD       0x400
 /* Not in every SDK header of this tree */
 #ifndef IPV6_MTU_DISCOVER
 #define IPV6_MTU_DISCOVER   71
@@ -587,14 +576,6 @@ GetTdiTypeId(
                  *TdiId = AO_OPTION_IP_HDRINCL;
                  return;
 
-             case IP_ADD_MEMBERSHIP:
-                 *TdiId = AO_OPTION_ADD_MCAST;
-                 return;
-
-             case IP_DROP_MEMBERSHIP:
-                 *TdiId = AO_OPTION_DEL_MCAST;
-                 return;
-
              default:
                 break;
           }
@@ -897,6 +878,16 @@ WSHIoctl(
     PSOCKET_CONTEXT Context = HelperDllSocketContext;
     PTCP_REQUEST_SET_INFORMATION_EX Info;
     PQUEUED_REQUEST Queued, NextQueued;
+    BOOLEAN Handled;
+
+    /* The multicast source filter ioctls (mcast.c) */
+    res = WshMcastIoctl(Context, IoControlCode, InputBuffer, InputBufferLength, OutputBuffer, OutputBufferLength,
+                        NumberOfBytesReturned, &Handled);
+    if (Handled)
+    {
+        *NeedsCompletion = FALSE;
+        return res;
+    }
 
     if (IoControlCode == SIO_GET_INTERFACE_LIST)
     {
@@ -1053,27 +1044,6 @@ SendRequest(
     return NO_ERROR;
 }
 
-/* IPV6_ADD_MEMBERSHIP / IPV6_DROP_MEMBERSHIP and IP_ADD_MEMBERSHIP / IP_DROP_MEMBERSHIP to the stack. Its answers:
- * a group joined twice is invalid (STATUS_INVALID_PARAMETER: WSAEINVAL); a group left that was not joined, an
- * interface that does not exist, no room: WSAEADDRNOTAVAIL (Windows 10 oracle for the first two; Windows Server 2022
- * for IPv4) */
-static
-INT
-WshSendMembershipRequest(
-    _In_opt_ HANDLE AddressHandle,
-    _In_ PVOID Request,
-    _In_ DWORD RequestSize)
-{
-    DWORD Error;
-
-    Error = WshSetInformationEx(AddressHandle, IOCTL_TCP_SET_INFORMATION_EX, Request, RequestSize);
-    if (Error == NO_ERROR)
-        return NO_ERROR;
-    if (Error == ERROR_INVALID_PARAMETER || Error == ERROR_OPEN_FAILED)
-        return WSAEINVAL;
-    return WSAEADDRNOTAVAIL;
-}
-
 INT
 EXPORT
 WSHNotify(
@@ -1089,6 +1059,7 @@ WSHNotify(
     TDIEntityID *EntityIDs;
     DWORD EntityCount, i;
     PQUEUED_REQUEST QueuedRequest, NextQueuedRequest;
+    INT Error;
 
     switch (NotifyEvent)
     {
@@ -1104,6 +1075,7 @@ WSHNotify(
 
                 QueuedRequest = NextQueuedRequest;
             }
+            WshMcastFree(Context);
             HeapFree(GetProcessHeap(), 0, HelperDllSocketContext);
             break;
 
@@ -1159,6 +1131,11 @@ WSHNotify(
                 QueuedRequest = NextQueuedRequest;
             }
             Context->RequestQueue = NULL;
+
+            /* The groups and filters the socket set before the bind (mcast.c): the stack's refusals fail the bind */
+            Error = WshMcastBind(Context);
+            if (Error != NO_ERROR)
+                return Error;
             break;
 
         default:
@@ -1330,6 +1307,16 @@ WSHSetSocketInformation(
 
     DPRINT("WSHSetSocketInformation\n");
 
+    /* Multicast groups and source filters (mcast.c) */
+    if (WshMcastIsOption(Level, OptionName))
+    {
+        BOOLEAN Handled;
+
+        Status = WshMcastSetOption(Context, Level, OptionName, OptionValue, OptionLength, &Handled);
+        if (Handled)
+            return Status;
+    }
+
     /* FIXME: We only handle address file object here */
 
     switch (Level)
@@ -1443,23 +1430,6 @@ WSHSetSocketInformation(
                     /* Send these to TCPIP */
                     break;
 
-                case IP_ADD_MEMBERSHIP:
-                case IP_DROP_MEMBERSHIP:
-                    /* Joining and leaving an IPv4 group (struct ip_mreq: the group, then the interface's address,
-                     * its index as 0.0.0.x, or 0.0.0.0 for none): a datagram or raw socket's, done by the stack,
-                     * which puts the group in the adapter's multicast list (after the bind when the socket is not
-                     * bound yet, as the other options it takes). A stream socket WSAEINVAL, a short request
-                     * WSAEFAULT, an address that is no group WSAEADDRNOTAVAIL (Windows); the rest is the stack's
-                     * (WshSendMembershipRequest) */
-                    if (Context->SocketType != SOCK_DGRAM && Context->SocketType != SOCK_RAW)
-                        return WSAEINVAL;
-                    if (!OptionValue || OptionLength < (INT)sizeof(IP_MREQ))
-                        return WSAEFAULT;
-                    if ((((PUCHAR)OptionValue)[0] & 0xF0) != 0xE0)
-                        return WSAEADDRNOTAVAIL;
-                    OptionLength = sizeof(IP_MREQ);
-                    break;
-
                 default:
                     /* Invalid option -- FIXME */
                     DPRINT1("Set: Received unsupported IPPROTO_IP option %d\n", OptionName);
@@ -1502,22 +1472,7 @@ WSHSetSocketInformation(
                 return 0;
             }
 
-            /* Joining and leaving a group (struct ipv6_mreq: the group, then the interface index, 0 for the
-             * stack's choice): a datagram socket's, done by the stack (after the bind when the socket is not bound
-             * yet, as the other options it takes; an unbound socket's join succeeds, oracle). A short request
-             * WSAEFAULT, an address that is no group WSAEADDRNOTAVAIL (oracle); the rest is the stack's
-             * (WshSendMembershipRequest) */
-            if (OptionName == IPV6_ADD_MEMBERSHIP || OptionName == IPV6_DROP_MEMBERSHIP)
-            {
-                if (Context->SocketType != SOCK_DGRAM)
-                    return WSAEINVAL;
-                if (!OptionValue || OptionLength < (INT)WSH_IPV6_MREQ_LENGTH)
-                    return WSAEFAULT;
-                if (((PUCHAR)OptionValue)[0] != 0xFF)
-                    return WSAEADDRNOTAVAIL;
-                OptionLength = WSH_IPV6_MREQ_LENGTH;
-                break;
-            }
+            /* Joining and leaving a group (IPV6_ADD_MEMBERSHIP, IPV6_DROP_MEMBERSHIP) is mcast.c's */
 
             Kept = WshKeptIpv6Option(Context, OptionName, &Bit, &Default, &Boolean);
             if (!Kept)
@@ -1670,11 +1625,7 @@ WSHSetSocketInformation(
         return 0;
     }
 
-    if ((Level == IPPROTO_IPV6 && (OptionName == IPV6_ADD_MEMBERSHIP || OptionName == IPV6_DROP_MEMBERSHIP)) ||
-        (Level == IPPROTO_IP && (OptionName == IP_ADD_MEMBERSHIP || OptionName == IP_DROP_MEMBERSHIP)))
-        Status = WshSendMembershipRequest(TdiAddressObjectHandle, Info, sizeof(*Info) + Info->BufferSize);
-    else
-        Status = SendRequest(TdiAddressObjectHandle, Info, sizeof(*Info) + Info->BufferSize, IOCTL_TCP_SET_INFORMATION_EX);
+    Status = SendRequest(TdiAddressObjectHandle, Info, sizeof(*Info) + Info->BufferSize, IOCTL_TCP_SET_INFORMATION_EX);
 
     HeapFree(GetProcessHeap(), 0, Info);
 
