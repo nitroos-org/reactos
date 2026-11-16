@@ -357,15 +357,23 @@ TCP6NetifRegistered(struct netif *netif);
 typedef struct _TCP6_ADDRESS_INFO
 {
     UCHAR PrefixLength;
-    UCHAR PrefixOrigin;     /* NL_PREFIX_ORIGIN */
-    UCHAR SuffixOrigin;     /* NL_SUFFIX_ORIGIN */
+    ULONG PrefixOrigin;     /* NL_PREFIX_ORIGIN, as given (a ULONG: -8..-1 are kept) */
+    ULONG SuffixOrigin;     /* NL_SUFFIX_ORIGIN */
     ULONG Flags;            /* TCP_IPV6_ADDRESS_ */
 } TCP6_ADDRESS_INFO, *PTCP6_ADDRESS_INFO;
+
+/* Configured addresses, over all interfaces; the on-link rows of the route answer (route6.c) are bounded by it */
+#define ADDR6_MAX               128
 
 extern ULONG Addr6Count;
 
 NTSTATUS
 DispAddressConfig6(PIRP Irp, PIO_STACK_LOCATION IrpSp);
+
+/* The entries of configured addresses whose slot no longer holds the address go, so Addr6Count counts live ones
+   (core lock held, once a second from the neighbour discovery timer) */
+VOID
+TCP6SweepAddresses(VOID);
 
 BOOLEAN
 TCP6AddressInfo(struct netif *netif, signed char Slot, PTCP6_ADDRESS_INFO Info);
@@ -377,6 +385,15 @@ TCP6RemoveAddressesOfNetif(struct netif *netif);
    no lock held), applied when an adapter starts; the addresses and routes it applies (core lock held) */
 VOID
 TCP6PersistInit(VOID);
+
+/* The configuration requests (addresses and routes) and the application of the persistent store run one at a time,
+   from the change of the active table to the write of the persistent record, so the two stay in step (PASSIVE_LEVEL;
+   taken before the core lock, never under it) */
+VOID
+TCP6ConfigLock(VOID);
+
+VOID
+TCP6ConfigUnlock(VOID);
 
 NTSTATUS
 TCP6PersistAddress(PIP_INTERFACE IF, const TCP_IPV6_ADDRESS_REQUEST *Request, BOOLEAN Remove, PBOOLEAN Found);

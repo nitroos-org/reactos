@@ -17,6 +17,19 @@
  * added were given to it): a NULL row or a row without an address family is ERROR_INVALID_PARAMETER; then the
  * interface is looked for (an unknown luid ERROR_NOT_FOUND, an unknown index ERROR_FILE_NOT_FOUND), before the prefix
  * length and the family of the next hop are checked (ERROR_INVALID_PARAMETER).
+ *
+ * The values of the other fields were measured on Windows Server 2022 (the same IP stack as Windows 10; a throwaway
+ * VM, the rows added and removed again; harness evidence cfgmeas): an origin of a unicast address is a value of a
+ * 4-bit field (0..15 or -1 are taken, 16 = Unchanged only for both origins together, anything else and a
+ * RouterAdvertisement prefix with a Random suffix are refused), and a change of an address does not change its
+ * origins; SkipAsSource 255 is "not given" (false on a creation, unchanged on a change), any other non-zero value is
+ * true; an OnLinkPrefixLength of 255 is a /128 on a creation and the length it has on a change. A route's metric is
+ * at most 0x7fffffff (-1 = not given), its SitePrefixLength 0 or 255, its Publish and Immortal are true only for 1,
+ * AutoconfigureAddress is true for 1 and 255 (not given), Origin and Loopback are ignored (reported as 0), the
+ * protocol is kept whatever it is, and a prefix with bits after its length is ERROR_INVALID_PARAMETER for a
+ * creation, a change and a removal (a lookup of it finds nothing). The preferred lifetime of an address or route may
+ * not be over its valid lifetime; a valid lifetime of 0 is taken: an address with it expires at once (kept for a
+ * second here), a route with it lasts (here: infinite, so that is what a lookup reports).
  */
 
 #include "iphlpapi_private.h"
@@ -79,7 +92,7 @@ static DWORD row_interface(const NET_LUID *Luid, NET_IFINDEX Index, PDWORD IfInd
 /* ---- unicast addresses (netio.c calls these for AF_INET6) ---- */
 
 static DWORD unicast_request(ULONG Operation, ULONG Store, const MIB_UNICASTIPADDRESS_ROW *Row, ULONG PrefixLength,
-                             ULONG PrefixOrigin, ULONG SuffixOrigin)
+                             ULONG PrefixOrigin, ULONG SuffixOrigin, BOOL SkipAsSource, ULONG Valid, ULONG Preferred)
 {
   TCP_IPV6_ADDRESS_REQUEST Request;
   DWORD IfIndex = 0, Error;
@@ -94,48 +107,91 @@ static DWORD unicast_request(ULONG Operation, ULONG Store, const MIB_UNICASTIPAD
   Request.IfIndex = IfIndex;
   memcpy(Request.Address, &Row->Address.Ipv6.sin6_addr, 16);
   Request.PrefixLength = PrefixLength;
-  Request.ValidLifetime = Row->ValidLifetime;
-  Request.PreferredLifetime = Row->PreferredLifetime;
+  Request.ValidLifetime = Valid;
+  Request.PreferredLifetime = Preferred;
   Request.PrefixOrigin = PrefixOrigin;
   Request.SuffixOrigin = SuffixOrigin;
-  Request.Flags = Row->SkipAsSource ? TCP_IPV6_ADDRESS_SKIP_AS_SOURCE : 0;
+  Request.Flags = SkipAsSource ? TCP_IPV6_ADDRESS_SKIP_AS_SOURCE : 0;
   return status_to_error(send_request(IOCTL_IP6_ADDRESS_CONFIG, &Request, sizeof(Request)));
 }
 
-/* An origin of the row, or what it becomes when the row leaves it to the stack (Unchanged, Other) */
-static ULONG origin_or(ULONG Origin, ULONG Default)
+#define ORIGIN_UNCHANGED    16      /* IpPrefixOriginUnchanged, IpSuffixOriginUnchanged */
+
+/* The origins of a row (a creation, a change): Unchanged is for both or none, the others are a 4-bit value, and a
+   prefix learnt from a router advertisement does not go with a random suffix */
+static DWORD check_origins(ULONG PrefixOrigin, ULONG SuffixOrigin)
 {
-  return (Origin == IpPrefixOriginOther || Origin == IpPrefixOriginUnchanged) ? Default : Origin;
+  if ((PrefixOrigin == ORIGIN_UNCHANGED) != (SuffixOrigin == ORIGIN_UNCHANGED))
+    return ERROR_INVALID_PARAMETER;
+  if (PrefixOrigin == ORIGIN_UNCHANGED)
+    return NO_ERROR;
+  if ((PrefixOrigin > 15 && PrefixOrigin != 0xffffffff) || (SuffixOrigin > 15 && SuffixOrigin != 0xffffffff))
+    return ERROR_INVALID_PARAMETER;
+  if (PrefixOrigin == IpPrefixOriginRouterAdvertisement && SuffixOrigin == IpSuffixOriginRandom)
+    return ERROR_INVALID_PARAMETER;
+  return NO_ERROR;
+}
+
+/* What an origin reads back as: the value sits in a signed 4-bit field (8..15 are -8..-1) */
+static ULONG origin_stored(ULONG Origin)
+{
+  return (Origin >= 8 && Origin <= 15) ? (Origin | 0xfffffff0) : Origin;
+}
+
+/* The lifetimes of an address row: the preferred one is not over the valid one; a valid lifetime of 0 (with a
+   preferred one of 0) is an address that expires at once: it is kept for the second the stack counts in */
+static DWORD address_lifetimes(const MIB_UNICASTIPADDRESS_ROW *Row, PULONG Valid, PULONG Preferred)
+{
+  if (Row->PreferredLifetime > Row->ValidLifetime)
+    return ERROR_INVALID_PARAMETER;
+  *Valid = Row->ValidLifetime ? Row->ValidLifetime : 1;
+  *Preferred = Row->PreferredLifetime;
+  return NO_ERROR;
 }
 
 static DWORD create_address(const MIB_UNICASTIPADDRESS_ROW *Row, ULONG Store)
 {
-  ULONG Length = Row->OnLinkPrefixLength;
+  ULONG Length = Row->OnLinkPrefixLength, PrefixOrigin = Row->PrefixOrigin, SuffixOrigin = Row->SuffixOrigin;
+  ULONG Valid, Preferred;
   DWORD IfIndex, Error;
 
   /* the interface first (probe: a length of 129 over an unknown interface is ERROR_FILE_NOT_FOUND) */
   Error = row_interface(&Row->InterfaceLuid, Row->InterfaceIndex, &IfIndex);
   if (Error != NO_ERROR)
     return Error;
-  /* 255 (InitializeUnicastIpAddressEntry) leaves the length to the stack: /64, the length of an IPv6 subnet */
+  /* 255 (InitializeUnicastIpAddressEntry) is not a length: Windows makes a /128 of it */
   if (Length == 255)
-    Length = 64;
+    Length = 128;
   else if (Length > 128)
     return ERROR_INVALID_PARAMETER;
-  if (Row->ValidLifetime == 0 || Row->PreferredLifetime > Row->ValidLifetime)
-    return ERROR_INVALID_PARAMETER;
+  Error = check_origins(PrefixOrigin, SuffixOrigin);
+  if (Error == NO_ERROR)
+    Error = address_lifetimes(Row, &Valid, &Preferred);
+  if (Error != NO_ERROR)
+    return Error;
 
-  return unicast_request(TCP_IPV6_CONFIG_CREATE, Store, Row, Length, origin_or(Row->PrefixOrigin, IpPrefixOriginManual),
-                         origin_or(Row->SuffixOrigin, IpSuffixOriginManual));
+  /* both origins Unchanged: the address is a manual one */
+  if (PrefixOrigin == ORIGIN_UNCHANGED)
+    PrefixOrigin = SuffixOrigin = IpPrefixOriginManual;     /* 1 = IpSuffixOriginManual */
+  /* a suffix origin of -1 makes the prefix origin read -1 too (measured: the two share a word) */
+  else if (SuffixOrigin == 0xffffffff)
+    PrefixOrigin = 0xffffffff;
+
+  /* SkipAsSource 255 is "not given": false */
+  return unicast_request(TCP_IPV6_CONFIG_CREATE, Store, Row, Length, origin_stored(PrefixOrigin),
+                         origin_stored(SuffixOrigin), Row->SkipAsSource != 0 && Row->SkipAsSource != 255, Valid,
+                         Preferred);
 }
 
 static DWORD set_address(const MIB_UNICASTIPADDRESS_ROW *Row, ULONG Store)
 {
   MIB_UNICASTIPADDRESS_ROW Current;
-  ULONG Length = Row->OnLinkPrefixLength;
+  ULONG Length = Row->OnLinkPrefixLength, Valid, Preferred;
+  BOOL Skip;
   DWORD Error;
 
-  /* what the row leaves unchanged (an Unchanged origin, a length of 255) stays what the address has */
+  /* what the row leaves unchanged (a length of 255, SkipAsSource 255) stays what the address has; its origins are
+     never changed (they are checked all the same) */
   Current = *Row;
   Error = GetUnicastIpAddressEntry(&Current);
   if (Error != NO_ERROR)
@@ -144,12 +200,15 @@ static DWORD set_address(const MIB_UNICASTIPADDRESS_ROW *Row, ULONG Store)
     Length = Current.OnLinkPrefixLength;
   else if (Length > 128)
     return ERROR_INVALID_PARAMETER;
-  if (Row->ValidLifetime == 0 || Row->PreferredLifetime > Row->ValidLifetime)
-    return ERROR_INVALID_PARAMETER;
+  Error = check_origins(Row->PrefixOrigin, Row->SuffixOrigin);
+  if (Error == NO_ERROR)
+    Error = address_lifetimes(Row, &Valid, &Preferred);
+  if (Error != NO_ERROR)
+    return Error;
+  Skip = Row->SkipAsSource == 255 ? Current.SkipAsSource != 0 : Row->SkipAsSource != 0;
 
-  return unicast_request(TCP_IPV6_CONFIG_SET, Store, Row, Length,
-                         Row->PrefixOrigin == IpPrefixOriginUnchanged ? Current.PrefixOrigin : Row->PrefixOrigin,
-                         Row->SuffixOrigin == IpSuffixOriginUnchanged ? Current.SuffixOrigin : Row->SuffixOrigin);
+  return unicast_request(TCP_IPV6_CONFIG_SET, Store, Row, Length, Current.PrefixOrigin, Current.SuffixOrigin, Skip,
+                         Valid, Preferred);
 }
 
 DWORD Ipv6CreateUnicastAddress(const MIB_UNICASTIPADDRESS_ROW *Row)
@@ -159,7 +218,7 @@ DWORD Ipv6CreateUnicastAddress(const MIB_UNICASTIPADDRESS_ROW *Row)
 
 DWORD Ipv6DeleteUnicastAddress(const MIB_UNICASTIPADDRESS_ROW *Row)
 {
-  return unicast_request(TCP_IPV6_CONFIG_DELETE, TCP_IPV6_STORE_ACTIVE, Row, 0, 0, 0);
+  return unicast_request(TCP_IPV6_CONFIG_DELETE, TCP_IPV6_STORE_ACTIVE, Row, 0, 0, 0, FALSE, 0, 0);
 }
 
 DWORD Ipv6SetUnicastAddress(const MIB_UNICASTIPADDRESS_ROW *Row)
@@ -234,10 +293,11 @@ static ULONG route_metric(ULONG Metric)
   return Metric == (ULONG)-1 ? 256 : Metric;
 }
 
-/* A flag of the row, or its default when the row does not give it (255, InitializeIpForwardEntry) */
+/* A flag of the row, or its default when the row does not give it (255, InitializeIpForwardEntry); the only true
+   value is 1 (Windows: a 2 is false) */
 static BOOLEAN route_flag(BOOLEAN Flag, BOOLEAN Default)
 {
-  return Flag == 255 ? Default : (Flag != FALSE);
+  return Flag == 255 ? Default : (Flag == 1);
 }
 
 static DWORD route_request6(ULONG Operation, ULONG Store, const MIB_IPFORWARD_ROW2 *Row, DWORD IfIndex)
@@ -253,13 +313,16 @@ static DWORD route_request6(ULONG Operation, ULONG Store, const MIB_IPFORWARD_RO
   if (Row->NextHop.si_family == AF_INET6)
     memcpy(Request.NextHop, &Row->NextHop.Ipv6.sin6_addr, 16);
   Request.Metric = route_metric(Row->Metric);
-  Request.ValidLifetime = Row->ValidLifetime;
+  /* a valid lifetime of 0 is a route that lasts (Windows keeps it, reported as 0): infinite here */
+  Request.ValidLifetime = Row->ValidLifetime ? Row->ValidLifetime : INFINITE_LIFETIME;
   Request.PreferredLifetime = Row->PreferredLifetime;
-  Request.Origin = Row->Origin;
+  /* the origin of the row is ignored: a route made by a program is a manual one (NlroManual) */
+  Request.Origin = NlroManual;
   /* a route the protocol of which is not given is one of network management, as CreateIpForwardEntry makes */
   Request.Protocol = Row->Protocol == (NL_ROUTE_PROTOCOL)-1 ? MIB_IPPROTO_NETMGMT : Row->Protocol;
   Request.Flags = (route_flag(Row->Publish, FALSE) ? TCP_IPV6_ROUTE_PUBLISH : 0) |
-                  (route_flag(Row->Immortal, FALSE) ? TCP_IPV6_ROUTE_IMMORTAL : 0);
+                  (route_flag(Row->Immortal, FALSE) ? TCP_IPV6_ROUTE_IMMORTAL : 0) |
+                  (route_flag(Row->AutoconfigureAddress, TRUE) ? 0 : TCP_IPV6_ROUTE_NO_AUTOCONFIGURE);
   return status_to_error(send_request(IOCTL_IP6_ROUTE_CONFIG, &Request, sizeof(Request)));
 }
 
@@ -280,11 +343,33 @@ static void legacy_row(const MIB_IPFORWARD_ROW2 *Row, DWORD IfIndex, PMIB_IPFORW
   Out->dwForwardMetric2 = Out->dwForwardMetric3 = Out->dwForwardMetric4 = Out->dwForwardMetric5 = (DWORD)-1;
 }
 
+/* The fields a creation or a change of a route row gives (measured on Windows): the metric has 31 bits (-1: not
+   given), the site prefix length is 0 or 255, the preferred lifetime is not over the valid one */
 static DWORD route_lifetimes_ok(const MIB_IPFORWARD_ROW2 *Row)
 {
-  if (Row->ValidLifetime == 0 || Row->PreferredLifetime > Row->ValidLifetime)
+  if ((Row->Metric > 0x7fffffff && Row->Metric != (ULONG)-1) ||
+      (Row->SitePrefixLength != 0 && Row->SitePrefixLength != 255) ||
+      Row->PreferredLifetime > Row->ValidLifetime)
     return ERROR_INVALID_PARAMETER;
   return NO_ERROR;
+}
+
+static void mask_prefix(UCHAR *Address, ULONG Length);
+
+/* A prefix with bits set after its length (creation, change and removal refuse it; a lookup finds nothing) */
+static DWORD route_prefix_ok(const MIB_IPFORWARD_ROW2 *Row)
+{
+  ULONG Length = Row->DestinationPrefix.PrefixLength, Mask = 0;
+  UCHAR Masked[16];
+
+  if (Row->DestinationPrefix.Prefix.si_family == AF_INET)
+  {
+    ConvertLengthToIpv4Mask(Length, &Mask);
+    return (Row->DestinationPrefix.Prefix.Ipv4.sin_addr.s_addr & ~Mask) ? ERROR_INVALID_PARAMETER : NO_ERROR;
+  }
+  memcpy(Masked, &Row->DestinationPrefix.Prefix.Ipv6.sin6_addr, 16);
+  mask_prefix(Masked, Length);
+  return memcmp(Masked, &Row->DestinationPrefix.Prefix.Ipv6.sin6_addr, 16) ? ERROR_INVALID_PARAMETER : NO_ERROR;
 }
 
 DWORD WINAPI CreateIpForwardEntry2(const MIB_IPFORWARD_ROW2 *Row)
@@ -298,6 +383,8 @@ DWORD WINAPI CreateIpForwardEntry2(const MIB_IPFORWARD_ROW2 *Row)
   Error = check_route_row(Row, &Family, &IfIndex);
   if (Error == NO_ERROR)
     Error = route_lifetimes_ok(Row);
+  if (Error == NO_ERROR)
+    Error = route_prefix_ok(Row);
   if (Error != NO_ERROR)
     return Error;
 
@@ -325,6 +412,8 @@ static DWORD set_route6(const MIB_IPFORWARD_ROW2 *Row, DWORD IfIndex, ULONG Stor
     Change.Publish = Current.Publish;
   if (Change.Immortal == 255)
     Change.Immortal = Current.Immortal;
+  if (Change.AutoconfigureAddress == 255)
+    Change.AutoconfigureAddress = Current.AutoconfigureAddress;
   return route_request6(TCP_IPV6_CONFIG_SET, Store, &Change, IfIndex);
 }
 
@@ -339,6 +428,8 @@ DWORD WINAPI SetIpForwardEntry2(const MIB_IPFORWARD_ROW2 *Row)
   Error = check_route_row(Row, &Family, &IfIndex);
   if (Error == NO_ERROR)
     Error = route_lifetimes_ok(Row);
+  if (Error == NO_ERROR)
+    Error = route_prefix_ok(Row);
   if (Error != NO_ERROR)
     return Error;
 
@@ -358,6 +449,8 @@ DWORD WINAPI DeleteIpForwardEntry2(const MIB_IPFORWARD_ROW2 *Row)
   TRACE("(%p)\n", Row);
 
   Error = check_route_row(Row, &Family, &IfIndex);
+  if (Error == NO_ERROR)
+    Error = route_prefix_ok(Row);
   if (Error != NO_ERROR)
     return Error;
 
@@ -619,6 +712,8 @@ DWORD WINAPI NitroConfigureIpv6Route(ULONG Operation, BOOL Persistent, const MIB
   Error = check_route_row(Row, &Family, &IfIndex);
   if (Error == NO_ERROR && Operation != TCP_IPV6_CONFIG_DELETE)
     Error = route_lifetimes_ok(Row);
+  if (Error == NO_ERROR)
+    Error = route_prefix_ok(Row);
   if (Error != NO_ERROR)
     return Error;
   if (Family != AF_INET6)
@@ -663,7 +758,7 @@ DWORD WINAPI NitroConfigureIpv6Address(ULONG Operation, BOOL Persistent, const M
     return ERROR_INVALID_PARAMETER;
 
   if (Persistent)
-    return unicast_request(Operation, Store, Row, 0, 0, 0);
+    return unicast_request(Operation, Store, Row, 0, 0, 0, FALSE, 0, 0);
 
   Error = row_interface(&Row->InterfaceLuid, Row->InterfaceIndex, &IfIndex);
   if (Error != NO_ERROR)
@@ -674,7 +769,7 @@ DWORD WINAPI NitroConfigureIpv6Address(ULONG Operation, BOOL Persistent, const M
                        ADDRESS_KEY_TO, (UCHAR *)&Saved, &Kept);
   if (Error != NO_ERROR)
     return Error;
-  Error = unicast_request(Operation, Store, Row, 0, 0, 0);
+  Error = unicast_request(Operation, Store, Row, 0, 0, 0, FALSE, 0, 0);
   if (Kept && Error == NO_ERROR)
     Error = put_record(IfIndex, PERSIST_ADDRESSES, sizeof(Saved), (const UCHAR *)&Saved, ADDRESS_KEY_FROM,
                        ADDRESS_KEY_TO);
@@ -768,7 +863,7 @@ DWORD WINAPI NitroGetPersistentIpv6Routes(PMIB_IPFORWARD_TABLE2 *Table)
       Row->Publish = (Records[i].Flags & TCP_IPV6_ROUTE_PUBLISH) != 0;
       Row->Immortal = (Records[i].Flags & TCP_IPV6_ROUTE_IMMORTAL) != 0;
       Row->Loopback = FALSE;
-      Row->AutoconfigureAddress = FALSE;
+      Row->AutoconfigureAddress = (Records[i].Flags & TCP_IPV6_ROUTE_NO_AUTOCONFIGURE) == 0;
     }
     HeapFree(GetProcessHeap(), 0, Records);
     if (Error != NO_ERROR)

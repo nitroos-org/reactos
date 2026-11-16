@@ -200,6 +200,9 @@ typedef struct _TCP_IPV6_ADDRESS_REQUEST
 #define TCP_IPV6_ROUTE_FROM_ADDRESS     0x8
 /* row: a router advertisement gave it (an on-link prefix or a default router) */
 #define TCP_IPV6_ROUTE_FROM_RA          0x10
+/* request and row: the route is one that does not autoconfigure an address (MIB_IPFORWARD_ROW2::AutoconfigureAddress
+   FALSE); kept and reported only */
+#define TCP_IPV6_ROUTE_NO_AUTOCONFIGURE 0x20
 
 /* IOCTL_IP6_ROUTE_CONFIG. Prefix, PrefixLength, NextHop (all zero: on-link) and IfIndex name the entry; the other
    fields are what it becomes. Origin is an NL_ROUTE_ORIGIN value, Protocol an NL_ROUTE_PROTOCOL one */
@@ -216,7 +219,7 @@ typedef struct _TCP_IPV6_ROUTE_REQUEST
     ULONG PreferredLifetime;
     ULONG Origin;
     ULONG Protocol;
-    ULONG Flags;            /* TCP_IPV6_ROUTE_PUBLISH, TCP_IPV6_ROUTE_IMMORTAL */
+    ULONG Flags;            /* TCP_IPV6_ROUTE_PUBLISH, TCP_IPV6_ROUTE_IMMORTAL, TCP_IPV6_ROUTE_NO_AUTOCONFIGURE */
 } TCP_IPV6_ROUTE_REQUEST, *PTCP_IPV6_ROUTE_REQUEST;
 
 /* IOCTL_IP_INTERFACE_CONFIG. Family is TCP_IPIF_IPV4 or TCP_IPIF_IPV6; Fields names what the request changes (the
