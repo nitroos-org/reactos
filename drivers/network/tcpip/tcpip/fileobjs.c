@@ -516,7 +516,12 @@ VOID AddrFileFree(
 
   /* The creator process was referenced when the address file was listed */
   if (AddrFile->FwCreator)
+  {
       ObDereferenceObject(AddrFile->FwCreator);
+      /* (listed: counted in FileOpenAddress) */
+      if (RawIp6IsRawFile(AddrFile))
+          InterlockedDecrement(&RawIp6Sockets);
+  }
 
   /* Give up the port unless another address file shares it */
   AddrReleasePort(AddrFile);
@@ -634,6 +639,9 @@ NTSTATUS FileOpenAddress(
   AddrFile->DF = 0;
   AddrFile->BCast = 1;
   AddrFile->HeaderIncl = 1;
+  /* The stack's own address files (the ICMP echo of IOCTL_ICMP_ECHO_REQUEST) are privileged; an open from outside
+     sets it from the opener's token (TiCreateFileObject) */
+  AddrFile->RawPrivileged = TRUE;
   AddrFile->ProcessId = PsGetCurrentProcessId();
 
   _SEH2_TRY {
@@ -752,7 +760,8 @@ NTSTATUS FileOpenAddress(
 
   case IPPROTO_ICMP:
     AddrFile->Port = 0;
-    AddrFile->Send = ICMPSendDatagram;
+    /* (ICMP in an IPv6 packet: a raw IPv6 socket of next header 1) */
+    AddrFile->Send = (AddrFile->Family == TDI_ADDRESS_TYPE_IP6) ? RawIPSendDatagram6 : ICMPSendDatagram;
 
     /* FIXME: Verify this */
     EntityType = ER_ENTITY;
@@ -760,9 +769,9 @@ NTSTATUS FileOpenAddress(
     break;
 
   default:
-    /* Use raw IP for all other protocols */
+    /* Use raw IP for all other protocols (an IPv6 socket: rawip6.c, ICMPv6 and any other next header) */
     AddrFile->Port = 0;
-    AddrFile->Send = RawIPSendDatagram;
+    AddrFile->Send = (AddrFile->Family == TDI_ADDRESS_TYPE_IP6) ? RawIPSendDatagram6 : RawIPSendDatagram;
 
     /* FIXME: Verify this */
     EntityType = CL_TL_ENTITY;
@@ -843,6 +852,10 @@ NTSTATUS FileOpenAddress(
      program rules (no work otherwise). Done once the file is listed, so a policy installed
      concurrently finds it in its backfill pass. */
   NITROFW_ADDRFILE_CREATED(AddrFile);
+
+  /* IPv6 input copies packets for raw IPv6 sockets only while there is one (rawip6.c) */
+  if (RawIp6IsRawFile(AddrFile))
+      InterlockedIncrement(&RawIp6Sockets);
 
   TI_DbgPrint(MAX_TRACE, ("Leaving.\n"));
 

@@ -776,9 +776,9 @@ TCPQueryIpv6Table(PVOID Out, ULONG OutSize)
         IPDereferenceInterface(Interfaces[i]);
     ExFreePoolWithTag(Interfaces, TDI_ENTITY_TAG);
 
-    /* This stack takes IPv6 addresses for TCP and UDP sockets (not raw IP yet): user mode makes AF_INET6 sockets
-       of those types and lists the IPv6 protocols only when it says so */
-    Header->Enabled = TCP_IPV6_STATE_ON | TCP_IPV6_STATE_SOCKETS | TCP_IPV6_STATE_DATAGRAMS |
+    /* This stack takes IPv6 addresses for TCP, UDP and raw sockets (rawip6.c): user mode makes AF_INET6 sockets of
+       those types and lists the IPv6 protocols only when it says so */
+    Header->Enabled = TCP_IPV6_STATE_ON | TCP_IPV6_STATE_SOCKETS | TCP_IPV6_STATE_DATAGRAMS | TCP_IPV6_STATE_RAW |
                       (TCPIpv6Links ? TCP_IPV6_STATE_LINKS : 0);
     Header->InterfaceCount = Count;
     Header->AddressCount = AddrCount;

@@ -222,6 +222,11 @@ AfdSetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
             case AFD_INFO_INLINING_MODE:
                 FCB->OobInline = InfoReq->Information.Boolean;
                 break;
+            case AFD_INFO_NITRO_UDP_CONNRESET:
+                /* Taken by the next datagram receive AFD posts; one already posted that reports a port
+                   unreachable is dropped here once it is off (read.c) */
+                FCB->NoPortUnreachable = !InfoReq->Information.Boolean;
+                break;
             case AFD_INFO_RECEIVE_WINDOW_HINT:
                 /* SO_RCVBUF: kept in any socket state and given to the transport once there is a connection
                  * (at connect and accept, MakeSocketIntoConnection). AFD_INFO_RECEIVE_WINDOW_SIZE reports

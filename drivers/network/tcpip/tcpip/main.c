@@ -104,6 +104,94 @@ VOID TiWriteErrorLog(
 }
 
 /*
+ * Raw sockets. Windows (Windows Server 2022 and 10, evidence v6raw-20261116) lets Administrators, LocalSystem,
+ * LocalService and NetworkService open raw sockets of any protocol; anybody else gets IPPROTO_ICMP and
+ * IPPROTO_ICMPV6 ones only (in either family; WSAEACCES at socket() for the others), which send echo requests only
+ * and may not set the header-include option. AFD refuses the socket itself (afd/main.c); this checks every address
+ * opened on the raw devices, whoever opens it, against the opener's token (for AFD's open at bind: the
+ * application's), and records the answer on the address file (RawPrivileged) for the send and the option.
+ */
+#define TI_IPPROTO_ICMPV6   58
+static PSECURITY_DESCRIPTOR TiRawSD;
+
+static
+NTSTATUS
+TiCreateRawSecurityDescriptor(VOID)
+{
+    PSID Sids[4];
+    SECURITY_DESCRIPTOR AbsSD;
+    ULONG DaclSize, RelSize = 0, i;
+    PACL Dacl;
+    NTSTATUS Status;
+
+    Sids[0] = SeExports->SeAliasAdminsSid;
+    Sids[1] = SeExports->SeLocalSystemSid;
+    Sids[2] = SeExports->SeLocalServiceSid;
+    Sids[3] = SeExports->SeNetworkServiceSid;
+
+    DaclSize = sizeof(ACL);
+    for (i = 0; i < RTL_NUMBER_OF(Sids); i++)
+        DaclSize += sizeof(ACCESS_ALLOWED_ACE) + RtlLengthSid(Sids[i]);
+    Dacl = ExAllocatePoolWithTag(PagedPool, DaclSize, DEVICE_OBJ_SECURITY_TAG);
+    if (!Dacl)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = RtlCreateSecurityDescriptor(&AbsSD, SECURITY_DESCRIPTOR_REVISION);
+    if (NT_SUCCESS(Status))
+        Status = RtlCreateAcl(Dacl, DaclSize, ACL_REVISION);
+    for (i = 0; NT_SUCCESS(Status) && i < RTL_NUMBER_OF(Sids); i++)
+        Status = RtlAddAccessAllowedAce(Dacl, ACL_REVISION, GENERIC_ALL, Sids[i]);
+    if (NT_SUCCESS(Status))
+        Status = RtlSetDaclSecurityDescriptor(&AbsSD, TRUE, Dacl, FALSE);
+    if (NT_SUCCESS(Status))
+        Status = RtlSetOwnerSecurityDescriptor(&AbsSD, SeExports->SeAliasAdminsSid, FALSE);
+    if (NT_SUCCESS(Status))
+        Status = RtlSetGroupSecurityDescriptor(&AbsSD, SeExports->SeLocalSystemSid, FALSE);
+    if (NT_SUCCESS(Status))
+    {
+        Status = RtlAbsoluteToSelfRelativeSD(&AbsSD, NULL, &RelSize);
+        if (Status == STATUS_BUFFER_TOO_SMALL)
+        {
+            TiRawSD = ExAllocatePoolWithTag(PagedPool, RelSize, DEVICE_OBJ_SECURITY_TAG);
+            Status = TiRawSD ? RtlAbsoluteToSelfRelativeSD(&AbsSD, TiRawSD, &RelSize) : STATUS_INSUFFICIENT_RESOURCES;
+            if (!NT_SUCCESS(Status) && TiRawSD)
+            {
+                ExFreePoolWithTag(TiRawSD, DEVICE_OBJ_SECURITY_TAG);
+                TiRawSD = NULL;
+            }
+        }
+        else if (NT_SUCCESS(Status))
+        {
+            Status = STATUS_UNSUCCESSFUL;
+        }
+    }
+    ExFreePoolWithTag(Dacl, DEVICE_OBJ_SECURITY_TAG);
+    return Status;
+}
+
+/* Whether the opener of this create may use any raw protocol. The token is always checked (an open from kernel
+   mode for a user, AFD's, carries the user's subject context); no descriptor or no security context: no */
+static
+BOOLEAN
+TiRawCallerPrivileged(
+    _In_ PIO_STACK_LOCATION IrpSp)
+{
+    PIO_SECURITY_CONTEXT Sc = IrpSp->Parameters.Create.SecurityContext;
+    ACCESS_MASK Granted;
+    NTSTATUS AccessStatus;
+    BOOLEAN Allowed;
+
+    if (!TiRawSD || !Sc || !Sc->AccessState)
+        return FALSE;
+
+    SeLockSubjectContext(&Sc->AccessState->SubjectSecurityContext);
+    Allowed = SeAccessCheck(TiRawSD, &Sc->AccessState->SubjectSecurityContext, TRUE, FILE_WRITE_DATA, 0, NULL,
+                            IoGetFileObjectGenericMapping(), UserMode, &Granted, &AccessStatus);
+    SeUnlockSubjectContext(&Sc->AccessState->SubjectSecurityContext);
+    return Allowed;
+}
+
+/*
  * FUNCTION: Creates a file object
  * ARGUMENTS:
  *     DeviceObject = Pointer to a device object for this driver
@@ -124,6 +212,7 @@ NTSTATUS TiCreateFileObject(
     PVOID ClientContext;
     NTSTATUS Status;
     ULONG Protocol;
+    BOOLEAN RawPrivileged = TRUE;
 
     TI_DbgPrint(DEBUG_IRP, ("Called. DeviceObject is at (0x%X), IRP is at (0x%X).\n", DeviceObject, Irp));
 
@@ -162,15 +251,16 @@ NTSTATUS TiCreateFileObject(
 
         Address = (PTA_IP_ADDRESS)(EaInfo->EaName + EaInfo->EaNameLength + 1); //0-term
 
-        /* An IPv6 address (TA_IP6_ADDRESS, the whole of it within the EA value) is taken for TCP and UDP while
-           the stack has IPv6 on; raw IP takes IPv4 addresses only */
+        /* An IPv6 address (TA_IP6_ADDRESS, the whole of it within the EA value) is taken for TCP, UDP and raw IP
+           (rawip6.c) while the stack has IPv6 on */
         if ((EaInfo->EaValueLength >= sizeof(TA_IP_ADDRESS)) &&
             (Address->TAAddressCount == 1) &&
             (Address->Address[0].AddressType == TDI_ADDRESS_TYPE_IP6))
         {
             if ((EaInfo->EaValueLength < sizeof(TA_IP6_ADDRESS)) ||
                 (Address->Address[0].AddressLength < TDI_ADDRESS_LENGTH_IP6) ||
-                (DeviceObject != TCPDeviceObject && DeviceObject != UDPDeviceObject) ||
+                (DeviceObject != TCPDeviceObject && DeviceObject != UDPDeviceObject &&
+                 DeviceObject != RawIPDeviceObject) ||
                 !TCPIpv6Enabled)
             {
                 TI_DbgPrint(MIN_TRACE, ("IPv6 address refused (length %u, device %p).\n",
@@ -224,9 +314,23 @@ NTSTATUS TiCreateFileObject(
             return STATUS_INVALID_PARAMETER;
         }
 
+        /* A raw address: any protocol for a privileged opener, ICMP and ICMPv6 for everybody */
+        if (DeviceObject == RawIPDeviceObject || DeviceObject == IPDeviceObject)
+        {
+            RawPrivileged = TiRawCallerPrivileged(IrpSp);
+            if (!RawPrivileged && Protocol != IPPROTO_ICMP && Protocol != TI_IPPROTO_ICMPV6)
+            {
+                TI_DbgPrint(MIN_TRACE, ("Raw protocol %u refused to an unprivileged opener.\n", Protocol));
+                ExFreePoolWithTag(Context, TRANS_CONTEXT_TAG);
+                return STATUS_ACCESS_DENIED;
+            }
+        }
+
         Status = FileOpenAddress(&Request, Address, Protocol, IrpSp->Parameters.Create.ShareAccess, NULL);
         if (NT_SUCCESS(Status))
         {
+            /* (the handle is not out yet: nothing sends on it before this is set) */
+            ((PADDRESS_FILE)Request.Handle.AddressHandle)->RawPrivileged = RawPrivileged;
             IrpSp->FileObject->FsContext2 = (PVOID)TDI_TRANSPORT_ADDRESS_FILE;
             Context->Handle.AddressHandle = Request.Handle.AddressHandle;
         }
@@ -905,6 +1009,14 @@ NTSTATUS TiSecurityStartup(
         return Status;
     }
 
+    /* Who may open raw sockets of any protocol (without it nobody may: only ICMP and ICMPv6 ones) */
+    Status = TiCreateRawSecurityDescriptor();
+    if (!NT_SUCCESS(Status))
+    {
+        TI_DbgPrint(MIN_TRACE, ("Failed to create the raw socket security descriptor\n"));
+        return Status;
+    }
+
     /* Set security data for the TCP and IP device objects */
     Status = TiSetupTcpDeviceSD(TCPDeviceObject, FILE_GENERIC_READ | FILE_GENERIC_WRITE);
     if (!NT_SUCCESS(Status))
@@ -968,6 +1080,11 @@ VOID NTAPI TiUnload(
     {
         ExFreePoolWithTag(TiControlSD, DEVICE_OBJ_SECURITY_TAG);
         TiControlSD = NULL;
+    }
+    if (TiRawSD)
+    {
+        ExFreePoolWithTag(TiRawSD, DEVICE_OBJ_SECURITY_TAG);
+        TiRawSD = NULL;
     }
 
     /* Unregister loopback adapter */

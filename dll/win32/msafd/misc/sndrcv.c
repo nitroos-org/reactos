@@ -711,6 +711,15 @@ MsafdRecvFrom(SOCKET Handle,
         return SOCKET_ERROR;
     }
 
+    /* An unbound raw socket cannot receive: WSAEINVAL, as on Windows (Windows Server 2022 and 10, evidence
+     * v6raw-20261116); a datagram socket is bound to the wildcard address first, as before */
+    if (Socket->SharedData->State == SocketOpen && Socket->SharedData->SocketType == SOCK_RAW)
+    {
+        if (lpErrno)
+            *lpErrno = WSAEINVAL;
+        return SOCKET_ERROR;
+    }
+
     /* Bind us First */
     if (Socket->SharedData->State == SocketOpen)
     {

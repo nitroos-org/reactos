@@ -72,6 +72,12 @@ VOID ICMPReceive(
     PIP_INTERFACE Interface,
     PIP_PACKET IPPacket);
 
+/* Port unreachable for a UDP datagram nobody takes (TransportHeader: its UDP header) */
+VOID ICMPPortUnreachable(
+    PIP_INTERFACE Interface,
+    PIP_PACKET IPPacket,
+    PVOID TransportHeader);
+
 VOID ICMPReply(
     PIP_INTERFACE Interface,
     PIP_PACKET IPPacket,

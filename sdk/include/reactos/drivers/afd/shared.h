@@ -274,6 +274,9 @@ typedef struct _AFD_TDI_HANDLE_DATA
 #define AFD_INFO_CONNECTION_ABORTED     0x13L
 /* ReactOS: SO_RCVBUF as the largest receive window of the transport (accepted in any socket state) */
 #define AFD_INFO_RECEIVE_WINDOW_HINT    0x40L
+/* NitroOS: SIO_UDP_CONNRESET of a datagram socket (Boolean; TRUE, the default, reports an ICMP port unreachable as
+   WSAECONNRESET on the next receive) */
+#define AFD_INFO_NITRO_UDP_CONNRESET    0x41L
 
 /* AFD Share Flags */
 #define AFD_SHARE_UNIQUE		0x0L

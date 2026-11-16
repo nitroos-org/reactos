@@ -9,6 +9,7 @@
  */
 
 #include "precomp.h"
+#include <nitrotdi.h>
 
 BOOLEAN DGRemoveIRP(
     PADDRESS_FILE AddrFile,
@@ -670,6 +671,7 @@ NTSTATUS DGReceiveDatagram(
 	ReceiveRequest->Context = ReceiveRequest;
         ReceiveRequest->AddressFile = AddrFile;
         ReceiveRequest->Irp = Irp;
+        ReceiveRequest->Flags = ReceiveFlags;
 
 	/* Queue receive request */
 	InsertTailList(&AddrFile->ReceiveQueue, &ReceiveRequest->ListEntry);
@@ -689,4 +691,54 @@ NTSTATUS DGReceiveDatagram(
     TI_DbgPrint(MAX_TRACE, ("Leaving with errors (0x%X).\n", Status));
 
     return Status;
+}
+
+/*
+ * An ICMP or ICMPv6 port unreachable came back for a datagram that this UDP address file sent (icmp.c, udp6.c).
+ * The first posted receive that asks for it (TDI_RECEIVE_NITRO_PORT_UNREACHABLE: AFD, while the socket has
+ * SIO_UDP_CONNRESET on) completes with STATUS_PORT_UNREACHABLE and no data. With none posted (AFD keeps one posted
+ * except while it completes one) the message is dropped: it is not kept for a later receive, whose post would then
+ * complete at once, inside AFD's completion of the previous one, as deep as the messages that waited. Windows fails
+ * one receive per port unreachable with WSAECONNRESET, for IPv4 and IPv6, connected or not (evidence
+ * v6raw-20261116). Called with no lock held, never under lwIP's core lock.
+ */
+VOID
+DGReportPortUnreachable(PADDRESS_FILE AddrFile)
+{
+    PLIST_ENTRY Entry;
+    PDATAGRAM_RECEIVE_REQUEST Current = NULL;
+
+    LockObject(AddrFile);
+    for (Entry = AddrFile->ReceiveQueue.Flink; Entry != &AddrFile->ReceiveQueue; Entry = Entry->Flink)
+    {
+        PDATAGRAM_RECEIVE_REQUEST Request = CONTAINING_RECORD(Entry, DATAGRAM_RECEIVE_REQUEST, ListEntry);
+
+        if (Request->Flags & TDI_RECEIVE_NITRO_PORT_UNREACHABLE)
+        {
+            Current = Request;
+            break;
+        }
+    }
+
+    if (!Current)
+    {
+        UnlockObject(AddrFile);
+        return;
+    }
+
+    RemoveEntryList(&Current->ListEntry);
+    InterlockedIncrement(&AddrFile->Completing);
+    ReferenceObject(AddrFile);
+    UnlockObject(AddrFile);
+
+    Current->Complete(Current->Context, STATUS_PORT_UNREACHABLE, 0);
+
+    LockObject(AddrFile);
+    InterlockedDecrement(&AddrFile->Completing);
+    UnlockObject(AddrFile);
+
+    /* What came during the completion goes to the receive it posted */
+    if (!IsListEmpty(&AddrFile->PendingDatagrams))
+        DGFlushPending(AddrFile);
+    DereferenceObject(AddrFile);
 }

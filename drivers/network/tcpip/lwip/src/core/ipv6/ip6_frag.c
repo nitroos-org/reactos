@@ -317,6 +317,14 @@ ip6_reass(struct pbuf *p)
     IP6_FRAG_STATS_INC(ip6_frag.proterr);
     goto nullreturn;
   }
+  /* NitroOS: the reassembled packet, its IPv6 header and the extension headers before the fragment header included,
+   * must fit the 16-bit pbuf lengths (the chain's tot_len would wrap otherwise): a fragment that ends beyond that is
+   * dropped, and so is the datagram (its reassembly times out). So the largest payload received is 65495 bytes
+   * (a UDP datagram of 65487), where the IPv6 payload length field allows 65535 (release notes, ipv6-notes.md) */
+  if ((u32_t)start + len + (hdrdiff - IP6_FRAG_HLEN) + IP6_HLEN > 0xFFFF) {
+    IP6_FRAG_STATS_INC(ip6_frag.proterr);
+    goto nullreturn;
+  }
 
   /* Look for the datagram the fragment belongs to in the current datagram queue,
    * remembering the previous in the queue for later dequeueing. */

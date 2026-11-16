@@ -1392,7 +1392,24 @@ VOID NitroFwNoteIcmpSend(PIP_ADDRESS Remote, PUCHAR Icmp, ULONG Length)
     USHORT Ident;
     BOOLEAN NonUnicast;
 
-    if (!Remote || Remote->Type != IP_ADDRESS_V4 || !Icmp || Length < 8)
+    if (!Remote || !Icmp || Length < 8)
+        return;
+    /* An ICMPv6 echo request of a raw IPv6 socket (rawip6.c): its reply passes, keyed on the peer's flow key, as
+       the replies to the echo requests of Icmp6SendEcho2 do (echo6.c) */
+    if (Remote->Type == IP_ADDRESS_V6)
+    {
+        const UCHAR *Bytes = (const UCHAR *)Remote->Address.IPv6Address;
+
+        if (Icmp[0] != 128)
+            return;
+        Ident = *(USHORT UNALIGNED *)(Icmp + 4);
+        if (Bytes[0] == 0xFF)
+            FwIcmpInsert(0, Ident, 129, FW_BCAST_TIMEOUT);
+        else
+            FwIcmpInsert(Fw6FlowKey(Bytes), Ident, 129, FW_ICMP_TIMEOUT);
+        return;
+    }
+    if (Remote->Type != IP_ADDRESS_V4)
         return;
     Reply = FwIcmpReplyFor(Icmp[0]);
     if (Reply == 0xFF)
@@ -2176,7 +2193,8 @@ BOOLEAN NitroFwInboundAllowed6(PIP_INTERFACE Interface, const UCHAR *D, ULONG Le
                     /* echo reply: it passes if it answers an echo request this host sent and still waits for
                        (Icmp6SendEcho2, echo6.c), as IPv4's FwIcmpReplyExpected; otherwise it is unsolicited and
                        is evaluated like a request (the rules, then the default) */
-                    if (Echo6ReplyExpected(Src, D + Off, Avail))
+                    if (Echo6ReplyExpected(Src, D + Off, Avail) ||
+                        FwIcmpReplyExpected(Fw6FlowKey(Src), (PUCHAR)(D + Off), Avail))
                         goto PassCounted;
                     Pkt.IcmpUnsolicitedReply = TRUE;
                     break;

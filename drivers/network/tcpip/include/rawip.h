@@ -18,6 +18,20 @@ VOID RawIpReceive(
     PIP_INTERFACE Interface,
     PIP_PACKET IPPacket);
 
+/* Raw IPv6 sockets (ip/transport/rawip/rawip6.c) */
+NTSTATUS RawIPSendDatagram6(
+    PADDRESS_FILE AddrFile,
+    PTDI_CONNECTION_INFORMATION ConnInfo,
+    PCHAR Buffer,
+    ULONG DataSize,
+    PULONG DataUsed);
+BOOLEAN RawIp6IsRawFile(PADDRESS_FILE AddrFile);
+VOID RawIp6Startup(VOID);
+extern volatile LONG RawIp6Sockets;
+
+/* An unprivileged raw IPv4 socket (an ICMP one of a standard user) sends echo requests only (rawip.c) */
+BOOLEAN RawIpUnprivilegedMaySend(PADDRESS_FILE AddrFile, PCHAR Data, ULONG Size);
+
 NTSTATUS RawIPStartup(
     VOID);
 

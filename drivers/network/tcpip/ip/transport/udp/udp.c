@@ -10,6 +10,7 @@
 
 #include "precomp.h"
 #include <nitrofwk.h>
+#include <icmp.h>
 
 BOOLEAN UDPInitialized = FALSE;
 PORT_SET UDPPorts;
@@ -506,16 +507,69 @@ VOID UDPReceive(PIP_INTERFACE Interface, PIP_PACKET IPPacket)
       DereferenceObject(Best);
     }
   } else {
-    /* There are no open address files that will take this datagram */
-    /* FIXME: IPv4 only */
+    /* There are no open address files that will take this datagram: port unreachable (not for a broadcast
+       or multicast one, ICMPPortUnreachable decides) */
     TI_DbgPrint(MID_TRACE, ("Cannot deliver IPv4 UDP datagram to address (0x%X).\n",
       DN2H(DstAddress->Address.IPv4Address)));
 
-    /* FIXME: Send ICMP reply */
+    ICMPPortUnreachable(Interface, IPPacket, UDPHeader);
   }
   TI_DbgPrint(MAX_TRACE, ("Leaving.\n"));
 }
 
+
+/*
+ * An ICMP port unreachable (icmp.c) whose invoking datagram is UDP from one of our addresses: the socket that sent it
+ * (the one that would receive on its address and port) fails its next receive (DGReportPortUnreachable). Icmp: the
+ * ICMP message (checksum checked), Size bytes.
+ */
+VOID UDPPortUnreachable(
+    PIP_PACKET IPPacket,
+    PUCHAR Icmp,
+    UINT Size)
+{
+    PIPv4_HEADER Inner;
+    UINT InnerLength;
+    USHORT LocalPort;
+    IP_ADDRESS Local;
+    AF_SEARCH SearchContext;
+    PADDRESS_FILE AddrFile, Best = NULL;
+
+    if (Size < 8 + sizeof(IPv4_HEADER) + 8)
+        return;
+    Inner = (PIPv4_HEADER)(Icmp + 8);
+    InnerLength = (Inner->VerIHL & 0x0F) * 4;
+    if ((Inner->VerIHL >> 4) != 4 || InnerLength < sizeof(IPv4_HEADER) || Size < 8 + InnerLength + 8 ||
+        Inner->Protocol != IPPROTO_UDP)
+        return;
+    /* The datagram came from the address this message went to */
+    if (IPPacket->DstAddr.Type != IP_ADDRESS_V4 || Inner->SrcAddr != IPPacket->DstAddr.Address.IPv4Address)
+        return;
+
+    AddrInitIPv4(&Local, Inner->SrcAddr);
+    RtlCopyMemory(&LocalPort, Icmp + 8 + InnerLength, sizeof(LocalPort));
+
+    for (AddrFile = AddrSearchFirst(&Local, LocalPort, IPPROTO_UDP, &SearchContext);
+         AddrFile != NULL;
+         AddrFile = AddrSearchNext(&SearchContext))
+    {
+        if (!Best || !AddrIsUnspecified(&AddrFile->Address) || AddrIsUnspecified(&Best->Address))
+        {
+            if (Best)
+                DereferenceObject(Best);
+            Best = AddrFile;
+        }
+        else
+        {
+            DereferenceObject(AddrFile);
+        }
+    }
+    if (Best)
+    {
+        DGReportPortUnreachable(Best);
+        DereferenceObject(Best);
+    }
+}
 
 NTSTATUS UDPStartup(
   VOID)

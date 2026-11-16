@@ -624,6 +624,8 @@ TranslateNtStatusError(NTSTATUS Status)
           return WSAECONNREFUSED;
 
        case STATUS_CONNECTION_RESET:
+       /* A datagram socket's receive after an ICMP port unreachable (AFD, SIO_UDP_CONNRESET) */
+       case STATUS_PORT_UNREACHABLE:
           return WSAECONNRESET;
 
        case STATUS_NETWORK_UNREACHABLE:
@@ -3479,25 +3481,37 @@ WSPIoctl(IN  SOCKET Handle,
             break;
         case SIO_UDP_CONNRESET:
         case SIO_UDP_NETRESET:
-            /* These control whether a datagram socket reports a prior ICMP
-             * port- or network-unreachable as a receive error. Our transport
-             * never reports it, so the state they request is already in effect;
-             * accept the request on datagram sockets (Windows fails it with
-             * WSAEINVAL on other socket types) so applications such as the Go
-             * runtime, which disables connection reset on every UDP socket, can
-             * create datagram sockets. */
+            /* Whether a datagram socket reports a prior ICMP port unreachable (SIO_UDP_CONNRESET, on by default:
+             * the next receive fails with WSAECONNRESET; AFD keeps the switch) or network unreachable
+             * (SIO_UDP_NETRESET, which the transport never reports, so whatever it asks is in effect). Windows
+             * (evidence v6raw-20261116): datagram and raw sockets take them, a stream socket fails with WSAEINVAL;
+             * no input buffer or a length of 0 is WSAEFAULT, any other length is taken (a BOOL's first bytes) */
             /* A rejected request fails at once; the overlapped tail would report success */
-            if (Socket->SharedData->SocketType != SOCK_DGRAM)
+            if (Socket->SharedData->SocketType != SOCK_DGRAM && Socket->SharedData->SocketType != SOCK_RAW)
             {
                 Errno = WSAEINVAL;
                 NeedsCompletion = FALSE;
                 break;
             }
-            if (IS_INTRESOURCE(lpvInBuffer) || cbInBuffer < sizeof(BOOL))
+            if (IS_INTRESOURCE(lpvInBuffer) || cbInBuffer == 0)
             {
                 Errno = WSAEFAULT;
                 NeedsCompletion = FALSE;
                 break;
+            }
+            if (dwIoControlCode == SIO_UDP_CONNRESET)
+            {
+                BOOL Value = FALSE;
+                BOOLEAN Report;
+
+                RtlCopyMemory(&Value, lpvInBuffer, min(cbInBuffer, sizeof(Value)));
+                Report = (Value != FALSE);
+                Errno = SetSocketInformation(Socket, AFD_INFO_NITRO_UDP_CONNRESET, &Report, NULL, NULL, NULL, NULL);
+                if (Errno != NO_ERROR)
+                {
+                    NeedsCompletion = FALSE;
+                    break;
+                }
             }
             cbRet = 0;
             Errno = NO_ERROR;
