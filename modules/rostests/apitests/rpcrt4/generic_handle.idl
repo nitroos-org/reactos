@@ -1,0 +1,16 @@
+/*
+ * PROJECT:     ReactOS API tests
+ * LICENSE:     LGPL-2.1-or-later (https://spdx.org/licenses/LGPL-2.1-or-later)
+ * PURPOSE:     An interface whose operations take an explicit generic handle (the name of the test case), for the
+ *              generic_handle test: its bind and unbind routines count the calls
+ */
+
+[uuid(5ec0ac10-4321-1234-0000-000000000010), version(1.0)]
+interface gen_handle
+{
+    typedef [handle, string] wchar_t *GEN_HANDLE;
+
+    int gen_add([in] GEN_HANDLE name, [in] int a, [in] int b);
+    int gen_fault([in] GEN_HANDLE name, [in] int code);
+    int gen_ref([in] GEN_HANDLE name, [in, ref] int *value);
+}
