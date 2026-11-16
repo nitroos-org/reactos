@@ -4100,9 +4100,10 @@ CmRestoreKey(IN PCM_KEY_CONTROL_BLOCK Kcb,
             goto Quit;
         }
     }
-    if (Kcb->RefCount > 1)
+    /* Only counted here: a forced restore kills the handles below the key once nothing before the swap can fail */
+    if ((Kcb->RefCount > 1) && !(Flags & REG_FORCE_RESTORE))
     {
-        if (CmpEnumerateOpenSubKeys(Kcb, TRUE, (Flags & REG_FORCE_RESTORE) ? TRUE : FALSE) != 0)
+        if (CmpEnumerateOpenSubKeys(Kcb, TRUE, FALSE) != 0)
         {
             Status = STATUS_CANNOT_DELETE;
             goto Quit;
@@ -4175,6 +4176,16 @@ CmRestoreKey(IN PCM_KEY_CONTROL_BLOCK Kcb,
         }
         if (!NT_SUCCESS(Status))
             goto Release;
+    }
+
+    /* A forced restore: the handles below the key die now (a failed copy above left them alive) */
+    if ((Flags & REG_FORCE_RESTORE) && (Kcb->RefCount > 1))
+    {
+        if (CmpEnumerateOpenSubKeys(Kcb, TRUE, TRUE) != 0)
+        {
+            Status = STATUS_CANNOT_DELETE;
+            goto Release;
+        }
     }
 
     /* The old content goes ... */
@@ -4302,6 +4313,20 @@ CmpRenameFileHandle(IN HANDLE File,
     return Status;
 }
 
+/* The key is alive and its hive has a file of its own (the registry is locked) */
+static
+BOOLEAN
+CmpReplaceKeyHasFile(IN PCM_KEY_CONTROL_BLOCK Kcb)
+{
+    PCMHIVE CmHive = (PCMHIVE)Kcb->KeyHive;
+
+    return !Kcb->Delete &&
+           (CmHive != CmiVolatileHive) &&
+           !(CmHive->Hive.HiveFlags & HIVE_VOLATILE) &&
+           CmHive->FileHandles[HFILE_TYPE_PRIMARY] &&
+           CmHive->FileFullPath.Length;
+}
+
 /*
  * The file of the hive of the key becomes the new file and the file it had is kept under the backup name. As
  * measured on Windows both renames happen at once on disk; the hive in memory goes on with its (renamed)
@@ -4317,28 +4342,30 @@ CmReplaceKey(IN PCM_KEY_CONTROL_BLOCK Kcb,
     PCMHIVE CmHive, Check = NULL;
     UNICODE_STRING HivePath;
     PWCHAR PathBuffer;
+    BOOLEAN HasFile;
 
+    /* The key is checked first (the measured order of the statuses) ... */
+    CmpLockRegistry();
+    HasFile = CmpReplaceKeyHasFile(Kcb);
+    CmpUnlockRegistry();
+    if (!HasFile)
+        return STATUS_INVALID_HANDLE;
+
+    /* ... then the new file must be a hive. It is read with the registry unlocked: loading a whole hive file does not
+     * hold up every other registry caller, and nobody can write the file meanwhile (it is open without write share). */
+    Status = CmpOpenRestoreSource(KmNewFile, &Check);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    CmpCloseRestoreSource(Check);
+
+    /* The key may have gone meanwhile */
     CmpLockRegistryExclusive();
-
-    CmHive = (PCMHIVE)Kcb->KeyHive;
-    if (Kcb->Delete ||
-        (CmHive == CmiVolatileHive) ||
-        (CmHive->Hive.HiveFlags & HIVE_VOLATILE) ||
-        !CmHive->FileHandles[HFILE_TYPE_PRIMARY] ||
-        !CmHive->FileFullPath.Length)
+    if (!CmpReplaceKeyHasFile(Kcb))
     {
         CmpUnlockRegistry();
         return STATUS_INVALID_HANDLE;
     }
-
-    /* The new file must be a hive */
-    Status = CmpOpenRestoreSource(KmNewFile, &Check);
-    if (!NT_SUCCESS(Status))
-    {
-        CmpUnlockRegistry();
-        return Status;
-    }
-    CmpCloseRestoreSource(Check);
+    CmHive = (PCMHIVE)Kcb->KeyHive;
 
     /* The path the hive has now (it is still what a next load will open) */
     PathBuffer = ExAllocatePoolWithTag(PagedPool, CmHive->FileFullPath.Length, TAG_CM);
