@@ -141,12 +141,17 @@ Query(const char *Name, WORD Type, DWORD Flags)
     R.Status = DnsQuery_W(NameW, Type, Flags, NULL, &Record, NULL);
     if (R.Status == ERROR_SUCCESS && Record)
     {
+        PDNS_RECORD First = Record;
+
+        /* the answer of an alias starts with the CNAME records of its chain: the first record of the type */
+        while (Record->pNext && Record->wType != Type)
+            Record = Record->pNext;
         R.Ttl = Record->dwTtl;
         if (Record->wType == DNS_TYPE_A)
             R.Last = ((PUCHAR)&Record->Data.A.IpAddress)[3];
         else if (Record->wType == DNS_TYPE_AAAA)
             R.Last = ((PUCHAR)&Record->Data.AAAA.Ip6Address)[15];
-        DnsRecordListFree(Record, DnsFreeRecordList);
+        DnsRecordListFree(First, DnsFreeRecordList);
     }
     return R;
 }
@@ -509,12 +514,60 @@ TestFlush(void)
  * chain30-*: the name is a CNAME (TTL 30) of l2-<name>, a CNAME (TTL 600) of l3-<name>, which has the addresses
  * (TTL 600). The answer is good for as long as its shortest link. v4only-*: an A record, no AAAA record.
  */
+/*
+ * The answer of an alias, as Windows' DnsQuery gives it: the CNAME records of the chain in order (N -> l2-N,
+ * l2-N -> l3-N), then the records of the type, owned by the end of the chain (l3-N)
+ */
+static
+void
+CheckChainShape(const char *Name, WORD Type, DWORD Flags, const char *What)
+{
+    WCHAR NameW[300], L2[300], L3[300];
+    char Buffer[300];
+    PDNS_RECORDW Records = NULL, Record;
+    DNS_STATUS Status;
+    int Addresses = 0;
+
+    MultiByteToWideChar(CP_ACP, 0, Name, -1, NameW, ARRAYSIZE(NameW));
+    _snprintf(Buffer, sizeof(Buffer), "l2-%s", Name);
+    MultiByteToWideChar(CP_ACP, 0, Buffer, -1, L2, ARRAYSIZE(L2));
+    _snprintf(Buffer, sizeof(Buffer), "l3-%s", Name);
+    MultiByteToWideChar(CP_ACP, 0, Buffer, -1, L3, ARRAYSIZE(L3));
+
+    Status = DnsQuery_W(NameW, Type, Flags, NULL, (PDNS_RECORD *)&Records, NULL);
+    ok(Status == ERROR_SUCCESS && Records != NULL, "%s: %lu\n", What, Status);
+    if (Status != ERROR_SUCCESS || !Records)
+        return;
+
+    Record = Records;
+    ok(Record->wType == DNS_TYPE_CNAME && Record->pName && _wcsicmp(Record->pName, NameW) == 0 &&
+       Record->Data.CNAME.pNameHost && _wcsicmp(Record->Data.CNAME.pNameHost, L2) == 0,
+       "%s: first record type %u \"%S\" -> \"%S\", expected the CNAME \"%S\" -> \"%S\"\n", What, Record->wType,
+       Record->pName ? Record->pName : L"(null)",
+       (Record->wType == DNS_TYPE_CNAME && Record->Data.CNAME.pNameHost) ? Record->Data.CNAME.pNameHost : L"-",
+       NameW, L2);
+    Record = Record->pNext;
+    ok(Record && Record->wType == DNS_TYPE_CNAME && Record->pName && _wcsicmp(Record->pName, L2) == 0 &&
+       Record->Data.CNAME.pNameHost && _wcsicmp(Record->Data.CNAME.pNameHost, L3) == 0,
+       "%s: second record is not the CNAME \"%S\" -> \"%S\" (type %u)\n", What, L2, L3, Record ? Record->wType : 0);
+    for (Record = Record ? Record->pNext : NULL; Record; Record = Record->pNext)
+    {
+        ok(Record->wType == Type && Record->pName && _wcsicmp(Record->pName, L3) == 0,
+           "%s: record type %u owned by \"%S\", expected type %u owned by \"%S\"\n", What, Record->wType,
+           Record->pName ? Record->pName : L"(null)", Type, L3);
+        Addresses++;
+    }
+    ok(Addresses >= 1, "%s: no record of the type after the chain\n", What);
+    DnsRecordListFree((PDNS_RECORD)Records, DnsFreeRecordList);
+}
+
 static
 void
 TestChain(void)
 {
     const char *N;
     QRESULT R;
+    int Count;
 
     SetParam("MaxCacheTtl", -1);
     SetParam("MaxNegativeCacheTtl", -1);
@@ -526,6 +579,17 @@ TestChain(void)
     R = Query(N, DNS_TYPE_A, DNS_QUERY_NO_WIRE_QUERY);
     ok(R.Status == ERROR_SUCCESS, "cache-only query of the chain: %lu\n", R.Status);
     ok(R.Ttl <= 30, "time left of the cached answer of the chain: %lu, expected 30 at most\n", R.Ttl);
+
+    /* the chain is part of the answer, from the server and from the cache (which keeps it under the alias) */
+    N = MakeName("chain30", "shape");
+    CheckChainShape(N, DNS_TYPE_A, DNS_QUERY_STANDARD, "A of an alias, from the server");
+    Count = ServerCount(N);
+    CheckChainShape(N, DNS_TYPE_A, DNS_QUERY_NO_WIRE_QUERY, "A of an alias, cache only");
+    CheckChainShape(N, DNS_TYPE_A, DNS_QUERY_STANDARD, "A of an alias, again");
+    ok(ServerCount(N) == Count, "A of an alias asked again: the server was asked %d more times\n", ServerCount(N) - Count);
+    N = MakeName("chain30", "shape6");
+    CheckChainShape(N, DNS_TYPE_AAAA, DNS_QUERY_STANDARD, "AAAA of an alias, from the server");
+    CheckChainShape(N, DNS_TYPE_AAAA, DNS_QUERY_NO_WIRE_QUERY, "AAAA of an alias, cache only");
 
     N = MakeName("chain30", "aaaa");
     R = Query(N, DNS_TYPE_AAAA, DNS_QUERY_STANDARD);
