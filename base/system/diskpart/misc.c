@@ -166,11 +166,15 @@ DuplicateString(
 }
 
 
-VOID
+BOOL
 CreateGUID(
     _Out_ GUID *pGuid)
 {
-    RtlGenRandom(pGuid, sizeof(*pGuid));
+    if (!RtlGenRandom(pGuid, sizeof(*pGuid)))
+    {
+        RtlZeroMemory(pGuid, sizeof(*pGuid));
+        return FALSE;
+    }
     /* Clear the version bits and set the version (4) */
     pGuid->Data3 &= 0x0fff;
     pGuid->Data3 |= (4 << 12);
@@ -179,6 +183,7 @@ CreateGUID(
      */
     pGuid->Data4[0] &= 0x3f;
     pGuid->Data4[0] |= 0x80;
+    return TRUE;
 }
 
 

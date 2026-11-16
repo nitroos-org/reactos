@@ -1216,9 +1216,11 @@ static BYTE *build_catalog(struct cryptcat *cc, DWORD *out_len)
         memset(list_id, 0, sizeof(list_id));
         if (CryptAcquireContextW(&prov, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT))
         {
-            CryptGenRandom(prov, sizeof(list_id), list_id);
+            /* a catalog with a list identifier that is not random is not written */
+            if (!CryptGenRandom(prov, sizeof(list_id), list_id)) out.failed = TRUE;
             CryptReleaseContext(prov, 0);
         }
+        else out.failed = TRUE;
     }
 
     /* subject usage */

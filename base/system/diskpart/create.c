@@ -20,6 +20,11 @@ InsertGptPartition(
 {
     PPARTENTRY PartEntry, NewPartEntry;
     PLIST_ENTRY ListEntry;
+    GUID PartitionId;
+
+    /* The identifier comes first: with no random data no partition is claimed */
+    if (!CreateGUID(&PartitionId))
+        return NULL;
 
     for (ListEntry = pDisk->PrimaryPartListHead.Flink;
          ListEntry != &CurrentDisk->PrimaryPartListHead;
@@ -35,7 +40,7 @@ InsertGptPartition(
             PartEntry->IsPartitioned = TRUE;
             PartEntry->New = TRUE;
             CopyMemory(&PartEntry->Gpt.PartitionType, pPartitionType, sizeof(GUID));
-            CreateGUID(&PartEntry->Gpt.PartitionId);
+            PartEntry->Gpt.PartitionId = PartitionId;
             PartEntry->Gpt.Attributes = 0ULL;
             PartEntry->PartitionNumber = 0;
             PartEntry->FormatState = Unformatted;
@@ -51,7 +56,7 @@ InsertGptPartition(
                 PartEntry->IsPartitioned = TRUE;
                 PartEntry->New = TRUE;
                 CopyMemory(&PartEntry->Gpt.PartitionType, pPartitionType, sizeof(GUID));
-                CreateGUID(&PartEntry->Gpt.PartitionId);
+                PartEntry->Gpt.PartitionId = PartitionId;
                 PartEntry->Gpt.Attributes = 0ULL;
                 PartEntry->PartitionNumber = 0;
                 PartEntry->FormatState = Unformatted;
@@ -78,7 +83,7 @@ InsertGptPartition(
                 NewPartEntry->IsPartitioned = TRUE;
                 NewPartEntry->New = TRUE;
                 CopyMemory(&NewPartEntry->Gpt.PartitionType, pPartitionType, sizeof(GUID));
-                CreateGUID(&NewPartEntry->Gpt.PartitionId);
+                NewPartEntry->Gpt.PartitionId = PartitionId;
                 NewPartEntry->Gpt.Attributes = 0ULL;
                 NewPartEntry->PartitionNumber = 0;
                 NewPartEntry->FormatState = Unformatted;

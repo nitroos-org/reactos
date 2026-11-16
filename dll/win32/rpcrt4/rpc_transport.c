@@ -3134,9 +3134,9 @@ static RPC_STATUS rpcrt4_ncacn_http_open(RpcConnection* Connection)
 
     httpc->async_data->completion_event = CreateEventW(NULL, FALSE, FALSE, NULL);
 
-    UuidCreate(&httpc->connection_uuid);
-    UuidCreate(&httpc->in_pipe_uuid);
-    UuidCreate(&httpc->out_pipe_uuid);
+    if ((status = UuidCreate(&httpc->connection_uuid))) return status;
+    if ((status = UuidCreate(&httpc->in_pipe_uuid))) return status;
+    if ((status = UuidCreate(&httpc->out_pipe_uuid))) return status;
 
     status = rpcrt4_http_internet_connect(httpc);
     if (status != RPC_S_OK)

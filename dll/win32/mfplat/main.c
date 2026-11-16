@@ -4677,7 +4677,8 @@ HRESULT WINAPI MFCreateTempFile(MF_FILE_ACCESSMODE accessmode, MF_FILE_OPENMODE 
 
     TRACE("%d, %d, %#x, %p.\n", accessmode, openmode, flags, bytestream);
 
-    BCryptGenRandom(NULL, (UCHAR *)&rnd, sizeof(rnd), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+    if (BCryptGenRandom(NULL, (UCHAR *)&rnd, sizeof(rnd), BCRYPT_USE_SYSTEM_PREFERRED_RNG))
+        return HRESULT_FROM_WIN32(ERROR_GEN_FAILURE);
     swprintf(name, ARRAY_SIZE(name), L"MFP%llX.TMP", rnd);
     GetTempPathW(ARRAY_SIZE(tmppath), tmppath);
 

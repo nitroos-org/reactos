@@ -1017,7 +1017,11 @@ static D6MODE WantedMode(BOOL Managed, BOOL Other)
 
 static VOID StartExchange(D6IF *If, ULONGLONG Now, BOOL Immediate)
 {
-    SystemFunction036(If->Xid, 3);
+    ULONG XidValue = Rand32(); /* Rand32 has a fallback for a refusing generator; a transaction id need not be secret */
+
+    If->Xid[0] = (UCHAR)(XidValue >> 16);
+    If->Xid[1] = (UCHAR)(XidValue >> 8);
+    If->Xid[2] = (UCHAR)XidValue;
     If->Sent = 0;
     If->Rt = 0;
     If->FirstSent = Now;

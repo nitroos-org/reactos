@@ -122,7 +122,12 @@ ConvertGPT(
 #endif
 
     DiskInfo.PartitionStyle = PARTITION_STYLE_GPT;
-    CreateGUID(&DiskInfo.Gpt.DiskId);
+    if (!CreateGUID(&DiskInfo.Gpt.DiskId))
+    {
+        DPRINT1("CreateGUID() failed!\n");
+        ConPuts(StdOut, L"No random data is available to identify the disk.\n");
+        return EXIT_SUCCESS;
+    }
     DiskInfo.Gpt.MaxPartitionCount = 128;
 
     Status = CreateDisk(CurrentDisk->DiskNumber, &DiskInfo);

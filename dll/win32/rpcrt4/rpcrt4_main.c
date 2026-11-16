@@ -331,7 +331,12 @@ RPC_STATUS WINAPI UuidCreateNil(UUID *Uuid)
  */
 RPC_STATUS WINAPI UuidCreate(UUID *Uuid)
 {
-    RtlGenRandom(Uuid, sizeof(*Uuid));
+    if (!RtlGenRandom(Uuid, sizeof(*Uuid)))
+    {
+        /* no random data: do not hand out a UUID made of whatever the buffer held */
+        memset(Uuid, 0, sizeof(*Uuid));
+        return RPC_S_OUT_OF_MEMORY;
+    }
     /* Clear the version bits and set the version (4) */
     Uuid->Data3 &= 0x0fff;
     Uuid->Data3 |= (4 << 12);
@@ -389,9 +394,13 @@ static RPC_STATUS RPC_UuidGetNodeAddress(BYTE *address)
     /* We can't get a hardware address, just use random numbers.
        Set the multicast bit to prevent conflicts with real cards. */
     else {
-        RtlGenRandom(address, ADDRESS_BYTES_NEEDED);
-        address[0] |= 0x01;
-        status = RPC_S_UUID_LOCAL_ONLY;
+        if (!RtlGenRandom(address, ADDRESS_BYTES_NEEDED))
+            status = RPC_S_OUT_OF_MEMORY;
+        else
+        {
+            address[0] |= 0x01;
+            status = RPC_S_UUID_LOCAL_ONLY;
+        }
     }
 
     free(adapter);
@@ -436,6 +445,13 @@ RPC_STATUS WINAPI UuidCreateSequential(UUID *Uuid)
         sequence &= 0x1fff;
 
         status = RPC_UuidGetNodeAddress(address);
+        if (status == RPC_S_OUT_OF_MEMORY)
+        {
+            /* no hardware address and no random data: try again on the next call */
+            LeaveCriticalSection(&uuid_cs);
+            memset(Uuid, 0, sizeof(*Uuid));
+            return RPC_S_OUT_OF_MEMORY;
+        }
         initialised = TRUE;
     }
 

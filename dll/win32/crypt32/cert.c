@@ -4133,7 +4133,11 @@ PCCERT_CONTEXT WINAPI CertCreateSelfSignCertificate(HCRYPTPROV_OR_NCRYPT_KEY_HAN
             BYTE serial[16];
             CRYPT_DATA_BLOB serialBlob = { sizeof(serial), serial };
 
-            CryptGenRandom(hProv, sizeof(serial), serial);
+            if (!CryptGenRandom(hProv, sizeof(serial), serial))
+            {
+                CryptMemFree(pubKey);
+                goto end;
+            }
             CRYPT_MakeCertInfo(&info, &serialBlob, pSubjectIssuerBlob,
              pSignatureAlgorithm, pStartTime, pEndTime, pubKey, pExtensions);
             ret = CryptEncodeObjectEx(X509_ASN_ENCODING, X509_CERT_TO_BE_SIGNED,
