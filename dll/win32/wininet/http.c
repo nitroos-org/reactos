@@ -5413,6 +5413,14 @@ static DWORD HTTP_HttpSendRequestW(http_request_t *request, LPCWSTR lpszHeaders,
                      * whose address is not resolved) and a new CONNECT. */
                     TRACE("handshake failed, reconnecting through the proxy without TLS 1.1/1.2\n");
                     http_release_netconn(request, FALSE);
+                    /* A connection-based proxy authentication (NTLM, Negotiate) belonged to the dropped
+                     * connection: the new one authenticates from the start. Basic is sent again as it is. */
+                    if (request->proxyAuthInfo && wcsicmp(request->proxyAuthInfo->scheme, L"Basic"))
+                    {
+                        remove_header(request, L"Proxy-Authorization", TRUE);
+                        destroy_authinfo(request->proxyAuthInfo);
+                        request->proxyAuthInfo = NULL;
+                    }
                     tls_compat_retry = TRUE;
                     res = ERROR_SUCCESS;
                     loop_next = TRUE;
