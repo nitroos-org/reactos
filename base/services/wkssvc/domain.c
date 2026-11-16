@@ -138,13 +138,9 @@ NetpGetJoinInformation(
     }
 
 done:
+    /* The SID and the name are part of the one block LsaQueryInformationPolicy returns */
     if (PrimaryDomainInfo)
-    {
-        if (PrimaryDomainInfo->Sid)
-            LsaFreeMemory(PrimaryDomainInfo->Sid);
-
         LsaFreeMemory(PrimaryDomainInfo);
-    }
 
     if (PolicyHandle)
         LsaClose(PolicyHandle);

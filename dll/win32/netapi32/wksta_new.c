@@ -889,6 +889,39 @@ NetWkstaGetInfo(
     }
     RpcEndExcept;
 
+    /* One block, as NetApiBufferFree frees one */
+    if (status == NERR_Success && *bufptr != NULL)
+    {
+        switch (level)
+        {
+            case 100:
+            {
+                static const USHORT Offsets[] = { FIELD_OFFSET(WKSTA_INFO_100, wki100_computername),
+                                                  FIELD_OFFSET(WKSTA_INFO_100, wki100_langroup) };
+                NetpPackStruct((PVOID *)bufptr, sizeof(WKSTA_INFO_100), Offsets, RTL_NUMBER_OF(Offsets));
+                break;
+            }
+
+            case 101:
+            {
+                static const USHORT Offsets[] = { FIELD_OFFSET(WKSTA_INFO_101, wki101_computername),
+                                                  FIELD_OFFSET(WKSTA_INFO_101, wki101_langroup),
+                                                  FIELD_OFFSET(WKSTA_INFO_101, wki101_lanroot) };
+                NetpPackStruct((PVOID *)bufptr, sizeof(WKSTA_INFO_101), Offsets, RTL_NUMBER_OF(Offsets));
+                break;
+            }
+
+            case 102:
+            {
+                static const USHORT Offsets[] = { FIELD_OFFSET(WKSTA_INFO_102, wki102_computername),
+                                                  FIELD_OFFSET(WKSTA_INFO_102, wki102_langroup),
+                                                  FIELD_OFFSET(WKSTA_INFO_102, wki102_lanroot) };
+                NetpPackStruct((PVOID *)bufptr, sizeof(WKSTA_INFO_102), Offsets, RTL_NUMBER_OF(Offsets));
+                break;
+            }
+        }
+    }
+
     return status;
 }
 
@@ -1149,6 +1182,37 @@ NetWkstaUserGetInfo(
         status = I_RpcMapWin32Status(RpcExceptionCode());
     }
     RpcEndExcept;
+
+    /* One block, as NetApiBufferFree frees one */
+    if (status == NERR_Success && *bufptr != NULL)
+    {
+        switch (level)
+        {
+            case 0:
+            {
+                static const USHORT Offsets[] = { FIELD_OFFSET(WKSTA_USER_INFO_0, wkui0_username) };
+                NetpPackStruct((PVOID *)bufptr, sizeof(WKSTA_USER_INFO_0), Offsets, RTL_NUMBER_OF(Offsets));
+                break;
+            }
+
+            case 1:
+            {
+                static const USHORT Offsets[] = { FIELD_OFFSET(WKSTA_USER_INFO_1, wkui1_username),
+                                                  FIELD_OFFSET(WKSTA_USER_INFO_1, wkui1_logon_domain),
+                                                  FIELD_OFFSET(WKSTA_USER_INFO_1, wkui1_oth_domains),
+                                                  FIELD_OFFSET(WKSTA_USER_INFO_1, wkui1_logon_server) };
+                NetpPackStruct((PVOID *)bufptr, sizeof(WKSTA_USER_INFO_1), Offsets, RTL_NUMBER_OF(Offsets));
+                break;
+            }
+
+            case 1101:
+            {
+                static const USHORT Offsets[] = { FIELD_OFFSET(WKSTA_USER_INFO_1101, wkui1101_oth_domains) };
+                NetpPackStruct((PVOID *)bufptr, sizeof(WKSTA_USER_INFO_1101), Offsets, RTL_NUMBER_OF(Offsets));
+                break;
+            }
+        }
+    }
 
     return status;
 }

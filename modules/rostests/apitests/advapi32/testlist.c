@@ -43,6 +43,7 @@ extern void func_LogonUserUserRights(void);
 extern void func_LsaLogonSession(void);
 extern void func_LsaLookupLeak(void);
 extern void func_LsaLookupNamesUnmapped(void);
+extern void func_LsaPolicyInfoLeak(void);
 extern void func_LsassLeak(void);
 extern void func_LsaLogonUserS4U(void);
 extern void func_LsaManageSidNameMapping(void);
@@ -192,6 +193,7 @@ const struct test winetest_testlist[] =
     { "LsaLogonSession", func_LsaLogonSession },
     { "LsaLookupLeak", func_LsaLookupLeak },
     { "LsaLookupNamesUnmapped", func_LsaLookupNamesUnmapped },
+    { "LsaPolicyInfoLeak", func_LsaPolicyInfoLeak },
     { "LsassLeak", func_LsassLeak },
     { "LsaLogonUserS4U", func_LsaLogonUserS4U },
     { "LsaManageSidNameMapping", func_LsaManageSidNameMapping },

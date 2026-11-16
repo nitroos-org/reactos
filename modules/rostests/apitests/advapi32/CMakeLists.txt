@@ -43,6 +43,7 @@ list(APPEND SOURCE
     LogonUserUserRights.c
     LsaLookupLeak.c
     LsaLookupNamesUnmapped.c
+    LsaPolicyInfoLeak.c
     LsassLeak.c
     LsaLogonUserS4U.c
     LsaManageSidNameMapping.c

@@ -306,4 +306,67 @@ NetpPackEnumEntries(
     return NERR_Success;
 }
 
+/*
+ * The RPC client stub allocates a returned structure and each string it points to as separate blocks, but a caller
+ * frees the result with one NetApiBufferFree: the strings leaked on every call. Moves the structure and its
+ * strings (the pointer members at StrOffsets, null terminated wide strings) into one NetApiBuffer block, the
+ * structure first, and frees the pieces. If the new block cannot be allocated the result is left as the stub
+ * made it.
+ */
+VOID
+NetpPackStruct(
+    _Inout_ PVOID *Block,
+    _In_ ULONG FixedSize,
+    _In_ const USHORT *StrOffsets,
+    _In_ ULONG StrCount)
+{
+    PBYTE Old = *Block, New, Cursor;
+    ULONGLONG Size;
+    ULONG Length, i;
+    PWSTR *Member;
+
+    if (Old == NULL)
+        return;
+
+    Size = (FixedSize + 7) & ~7;
+    for (i = 0; i < StrCount; i++)
+    {
+        Member = (PWSTR *)(Old + StrOffsets[i]);
+        if (*Member != NULL)
+            Size += (((ULONGLONG)wcslen(*Member) + 1) * sizeof(WCHAR) + 7) & ~7;
+    }
+
+    /* NetApiBufferAllocate takes a 32-bit byte count; a remote server's strings must not wrap it. Leave the
+     * result as the stub made it (as on an allocation failure) rather than under-allocate the packed block. */
+    if (Size > 0xFFFFF000)
+        return;
+
+    if (NetApiBufferAllocate((ULONG)Size, (PVOID *)&New) != NERR_Success)
+        return;
+
+    memcpy(New, Old, FixedSize);
+    Cursor = New + ((FixedSize + 7) & ~7);
+    for (i = 0; i < StrCount; i++)
+    {
+        Member = (PWSTR *)(Old + StrOffsets[i]);
+        if (*Member == NULL)
+            continue;
+
+        Length = ((ULONG)wcslen(*Member) + 1) * sizeof(WCHAR);
+        memcpy(Cursor, *Member, Length);
+        *(PWSTR *)(New + StrOffsets[i]) = (PWSTR)Cursor;
+        Cursor += (Length + 7) & ~7;
+    }
+
+    for (i = 0; i < StrCount; i++)
+    {
+        Member = (PWSTR *)(Old + StrOffsets[i]);
+        if (*Member != NULL)
+            NetApiBufferFree(*Member);
+    }
+    NetApiBufferFree(Old);
+
+    *Block = New;
+}
+
 /* EOF */
