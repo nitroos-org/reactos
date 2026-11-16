@@ -773,6 +773,33 @@ CheckForCurrentHostname(CONST CHAR * Name, PFIXED_INFO network_info)
 
 
 /*
+ * The time that an answer of adns is good for, in seconds (adns knows the end of the lifetime, which is that of
+ * the shortest record, not the TTL). The resolver service keeps the answer for this long.
+ */
+static
+DWORD
+AnswerTtl(
+    _In_ const adns_answer *Answer)
+{
+    time_t Now = time(NULL);
+
+    if (Answer->expires > Now)
+        return (Answer->expires - Now > 0x7fffffff) ? 0x7fffffff : (DWORD)(Answer->expires - Now);
+    return 0;
+}
+
+/* Sets the TTL of every record of the list */
+static
+VOID
+SetListTtl(
+    _In_opt_ PDNS_RECORDW List,
+    _In_ DWORD Ttl)
+{
+    for (; List; List = List->pNext)
+        List->dwTtl = Ttl;
+}
+
+/*
  * PTR query: Name is a reverse name (like 8.8.8.8.in-addr.arpa); every PTR record in the answer is returned.
  * The name servers of the machine are asked, recursively.
  */
@@ -791,6 +818,7 @@ QueryPtr(LPCWSTR Name,
     struct in_addr addr;
     CHAR AnsiName[MAX_PATH];
     DNS_STATUS Status;
+    DWORD Ttl;
     PDNS_RECORDW Record, Last = NULL;
     int i, Len;
 
@@ -853,6 +881,7 @@ QueryPtr(LPCWSTR Name,
         Status = DNS_ERROR_RCODE_SERVER_FAILURE;
     else
         Status = ERROR_SUCCESS;
+    Ttl = AnswerTtl(answer);
 
     for (i = 0; Status == ERROR_SUCCESS && i < answer->nrrs; i++)
     {
@@ -872,6 +901,7 @@ QueryPtr(LPCWSTR Name,
         Record->wDataLength = sizeof(DNS_PTR_DATA);
         Record->Flags.S.Section = DnsSectionAnswer;
         Record->Flags.S.CharSet = DnsCharSetUnicode;
+        Record->dwTtl = Ttl;
         Record->pName = xstrsave(Name);
         Record->Data.PTR.pNameHost = (PWSTR)DnsCToW(answer->rrs.str[i]);
         if (Record->pName == NULL || Record->Data.PTR.pNameHost == NULL)
@@ -1211,7 +1241,10 @@ QueryAaaa(LPCWSTR Name,
                 }
             }
             if (Status == ERROR_SUCCESS)
+            {
+                SetListTtl(First, AnswerTtl(answer));
                 *QueryResultSet = (PDNS_RECORD)First;
+            }
             else if (First)
                 DnsIntFreeRecordList((PDNS_RECORD)First);
             free(answer);
@@ -1398,13 +1431,8 @@ BuildTypedRecords(
 {
     PDNS_RECORDW First = NULL, Last = NULL, Record;
     DNS_STATUS Status = ERROR_SUCCESS;
-    DWORD Ttl = 0;
-    time_t Now = time(NULL);
+    DWORD Ttl = AnswerTtl(Answer);
     int i;
-
-    /* The time that the answer is good for (adns knows the end of the lifetime, not the TTL) */
-    if (Answer->expires > Now)
-        Ttl = (Answer->expires - Now > 0x7fffffff) ? 0x7fffffff : (DWORD)(Answer->expires - Now);
 
     for (i = 0; i < Answer->nrrs && Status == ERROR_SUCCESS; i++)
     {
@@ -1837,6 +1865,7 @@ Query_Main(LPCWSTR Name,
                     }
                 }
 
+                SetListTtl(First, AnswerTtl(answer));
                 free(answer);
                 adns_finish(astate);
 
@@ -1853,6 +1882,15 @@ Query_Main(LPCWSTR Name,
 
             if (NULL == answer || adns_s_prohibitedcname != answer->status || NULL == answer->cname)
             {
+                /* The name servers said that the name (or the type) is not there: that is a status of its
+                   own (the resolver service keeps it for a while), a failure to ask is not */
+                DNS_STATUS Negative = ERROR_FILE_NOT_FOUND;
+
+                if (answer && answer->status == adns_s_nxdomain)
+                    Negative = DNS_ERROR_RCODE_NAME_ERROR;
+                else if (answer && answer->status == adns_s_nodata)
+                    Negative = DNS_INFO_NO_RECORDS;
+
                 free(answer);
                 adns_finish(astate);
 
@@ -1860,7 +1898,7 @@ Query_Main(LPCWSTR Name,
                     RtlFreeHeap(RtlGetProcessHeap(), 0, CurrentName);
 
                 RtlFreeHeap(RtlGetProcessHeap(), 0, AnsiName);
-                return ERROR_FILE_NOT_FOUND;
+                return Negative;
             }
 
             if (CurrentName != AnsiName)
