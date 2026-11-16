@@ -29,6 +29,7 @@ extern void func_p3pdpc(void);
 extern void func_p3msg(void);
 extern void func_p3ctxdpc(void);
 extern void func_p3loop(void);
+extern void func_p3secstress(void);
 
 const struct test winetest_testlist[] =
 {
@@ -60,5 +61,6 @@ const struct test winetest_testlist[] =
     { "p3msg", func_p3msg },
     { "p3ctxdpc", func_p3ctxdpc },
     { "p3loop", func_p3loop },
+    { "p3secstress", func_p3secstress },
     { 0, 0 }
 };

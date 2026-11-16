@@ -1601,6 +1601,230 @@ START_TEST(p3loop)
     test_LoadUnloadLoop();
 }
 
+/*
+ * Sections and the cache under the FsFilter callbacks, for a while: threads which write files, map
+ * them, write the views, flush them (the cache flush's acquire / release), unmap, truncate, read back;
+ * one thread which now and then commits more memory than the machine has (the modified page writer).
+ * The sample filter counts every FsFilter operation on the .fsf files. Nothing may fail, the data read
+ * back is what was written, and the acquires have their releases.
+ * FLTMGR_SECSTRESS_SECONDS (environment) sets the time, 60 s by default.
+ */
+typedef struct _SECSTRESS
+{
+    ULONG Index;
+    volatile LONG *Stop;
+    ULONG Rounds;
+    ULONG Failures;
+    DWORD LastError;
+
+} SECSTRESS;
+
+static
+DWORD
+WINAPI
+SectionStressThread(PVOID Parameter)
+{
+    SECSTRESS *T = Parameter;
+    WCHAR Name[32], Path[MAX_PATH];
+    ULONG Size;
+    UCHAR Byte;
+    DWORD Read;
+    LARGE_INTEGER Offset;
+
+    StringCbPrintfW(Name, sizeof(Name), L"p3secstr%lu.fsf", T->Index);
+    MakeTestFile(Name, Path, RTL_NUMBER_OF(Path));
+
+    while (!*T->Stop)
+    {
+        HANDLE File, Section = NULL;
+        PUCHAR View = NULL;
+        ULONG i, Pages;
+        BOOL Good = TRUE;
+
+        Size = (1 + (T->Rounds % 16)) * 65536;
+        Pages = Size / 4096;
+        File = CreateFileW(Path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                           OPEN_ALWAYS, 0, NULL);
+        if (File == INVALID_HANDLE_VALUE)
+        {
+            T->Failures++;
+            T->LastError = GetLastError();
+            Sleep(10);
+            continue;
+        }
+        Offset.QuadPart = Size;
+        Good = SetFilePointerEx(File, Offset, NULL, FILE_BEGIN) && SetEndOfFile(File);
+        if (Good)
+            Section = CreateFileMappingW(File, NULL, PAGE_READWRITE, 0, 0, NULL);
+        if (Section)
+            View = MapViewOfFile(Section, FILE_MAP_WRITE, 0, 0, 0);
+        if (View)
+        {
+            for (i = 0; i < Pages; i++)
+                View[i * 4096 + (T->Rounds % 4000)] = (UCHAR)(T->Rounds + i);
+            if (!FlushViewOfFile(View, (T->Rounds & 1) ? 0 : Size / 2))
+                Good = FALSE;
+            UnmapViewOfFile(View);
+        }
+        else
+        {
+            Good = FALSE;
+        }
+        if (Section)
+            CloseHandle(Section);
+
+        /* Cached I/O on the same file: read back through the cache, written, flushed */
+        if (Good)
+        {
+            Offset.QuadPart = (LONGLONG)(Pages - 1) * 4096 + (T->Rounds % 4000);
+            Good = SetFilePointerEx(File, Offset, NULL, FILE_BEGIN) &&
+                   ReadFile(File, &Byte, 1, &Read, NULL) && Read == 1 && Byte == (UCHAR)(T->Rounds + Pages - 1);
+            Byte = 0x5A;
+            Good = Good && SetFilePointerEx(File, Offset, NULL, FILE_BEGIN) && WriteFile(File, &Byte, 1, &Read, NULL);
+            Good = Good && FlushFileBuffers(File);
+        }
+
+        /* And a truncation every other round, the section is gone */
+        if (Good && (T->Rounds & 1))
+        {
+            Offset.QuadPart = 4096;
+            Good = SetFilePointerEx(File, Offset, NULL, FILE_BEGIN) && SetEndOfFile(File);
+        }
+        if (!Good)
+        {
+            T->Failures++;
+            T->LastError = GetLastError();
+        }
+        CloseHandle(File);
+        T->Rounds++;
+    }
+
+    DeleteFileW(Path);
+    return 0;
+}
+
+static
+DWORD
+WINAPI
+MemoryPressureThread(PVOID Parameter)
+{
+    SECSTRESS *T = Parameter;
+    MEMORYSTATUSEX Memory;
+    SIZE_T Chunk = 32 * 1024 * 1024, j;
+    PVOID Chunks[128];
+    ULONG Count, i;
+    ULONGLONG Total;
+
+    Memory.dwLength = sizeof(Memory);
+    GlobalMemoryStatusEx(&Memory);
+    while (!*T->Stop)
+    {
+        Count = 0;
+        Total = 0;
+        while (!*T->Stop && Total < Memory.ullTotalPhys + Memory.ullTotalPhys / 4 && Count < RTL_NUMBER_OF(Chunks))
+        {
+            PUCHAR Block = VirtualAlloc(NULL, Chunk, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+
+            if (Block == NULL)
+                break;
+            for (j = 0; j < Chunk; j += 4096)
+                Block[j] = 1;
+            Chunks[Count++] = Block;
+            Total += Chunk;
+        }
+        for (i = 0; i < Count; i++)
+            VirtualFree(Chunks[i], 0, MEM_RELEASE);
+        T->Rounds++;
+        for (i = 0; i < 50 && !*T->Stop; i++)
+            Sleep(100);
+    }
+    return 0;
+}
+
+static
+void
+test_SectionStress(void)
+{
+    SAMPLE P = { { 0 } };
+    FLTSAMPLE_STATS S;
+    SECSTRESS T[5];
+    HANDLE Threads[5];
+    volatile LONG Stop = 0;
+    ULONG Seconds = 60, i, Rounds = 0, Failures = 0;
+    char Value[16];
+
+    if (GetEnvironmentVariableA("FLTMGR_SECSTRESS_SECONDS", Value, sizeof(Value)))
+        Seconds = strtoul(Value, NULL, 10);
+
+    if (!LoadSample(&P, L"FltSampleP", L"383000.5", 0xFFFF))
+    {
+        skip("Can't load the sample filter\n");
+        return;
+    }
+
+    for (i = 0; i < RTL_NUMBER_OF(T); i++)
+    {
+        ZeroMemory(&T[i], sizeof(T[i]));
+        T[i].Index = i;
+        T[i].Stop = &Stop;
+        Threads[i] = CreateThread(NULL, 0, i == 0 ? MemoryPressureThread : SectionStressThread, &T[i], 0, NULL);
+        ok(Threads[i] != NULL, "CreateThread failed: %lu\n", GetLastError());
+    }
+
+    Sleep(Seconds * 1000);
+    InterlockedExchange(&Stop, 1);
+    for (i = 0; i < RTL_NUMBER_OF(T); i++)
+    {
+        if (Threads[i])
+        {
+            ok(WaitForSingleObject(Threads[i], 120000) == WAIT_OBJECT_0, "Thread %lu didn't stop\n", i);
+            CloseHandle(Threads[i]);
+        }
+        if (i > 0)
+        {
+            Rounds += T[i].Rounds;
+            Failures += T[i].Failures;
+            if (T[i].Failures)
+                trace("Thread %lu: %lu failures of %lu rounds, last error %lu\n", i, T[i].Failures, T[i].Rounds, T[i].LastError);
+        }
+    }
+
+    WaitBalanced(&P, &S, FLTSAMPLE_FSF_ACQUIRE_CCFLUSH, FLTSAMPLE_FSF_RELEASE_CCFLUSH);
+    WaitBalanced(&P, &S, FLTSAMPLE_FSF_ACQUIRE_MODWRITE, FLTSAMPLE_FSF_RELEASE_MODWRITE);
+    trace("%lu s: %lu rounds, %lu pressure cycles, %lu failures; section %lu/%lu release %lu, cache flush %lu/%lu, "
+          "modified page writer %lu/%lu (%lu writes)\n",
+          Seconds, Rounds, T[0].Rounds, Failures, S.SectionSyncPre, S.SectionSyncPost,
+          S.FsFilterPre[FLTSAMPLE_FSF_RELEASE_SECTION], S.FsFilterPre[FLTSAMPLE_FSF_ACQUIRE_CCFLUSH],
+          S.FsFilterPre[FLTSAMPLE_FSF_RELEASE_CCFLUSH], S.FsFilterPre[FLTSAMPLE_FSF_ACQUIRE_MODWRITE],
+          S.FsFilterPre[FLTSAMPLE_FSF_RELEASE_MODWRITE], S.ModWriterWrites);
+    ok(Rounds > 0, "No round done\n");
+    ok(Failures == 0, "%lu failures\n", Failures);
+    ok(S.FsFilterPre[FLTSAMPLE_FSF_ACQUIRE_CCFLUSH] > 0, "No cache flush seen\n");
+    ok(S.FsFilterPost[FLTSAMPLE_FSF_ACQUIRE_CCFLUSH] - S.FsFilterFailed[FLTSAMPLE_FSF_ACQUIRE_CCFLUSH] ==
+       S.FsFilterPre[FLTSAMPLE_FSF_RELEASE_CCFLUSH], "cache flush: %lu acquires (%lu failed), %lu releases\n",
+       S.FsFilterPost[FLTSAMPLE_FSF_ACQUIRE_CCFLUSH], S.FsFilterFailed[FLTSAMPLE_FSF_ACQUIRE_CCFLUSH],
+       S.FsFilterPre[FLTSAMPLE_FSF_RELEASE_CCFLUSH]);
+    ok(S.FsFilterPost[FLTSAMPLE_FSF_ACQUIRE_MODWRITE] - S.FsFilterFailed[FLTSAMPLE_FSF_ACQUIRE_MODWRITE] ==
+       S.FsFilterPre[FLTSAMPLE_FSF_RELEASE_MODWRITE], "modified page writer: %lu acquires (%lu failed), %lu releases\n",
+       S.FsFilterPost[FLTSAMPLE_FSF_ACQUIRE_MODWRITE], S.FsFilterFailed[FLTSAMPLE_FSF_ACQUIRE_MODWRITE],
+       S.FsFilterPre[FLTSAMPLE_FSF_RELEASE_MODWRITE]);
+    ok(S.FsFilterOtherThread == 0, "%lu post-operations in another thread\n", S.FsFilterOtherThread);
+
+    UnloadSample(&P, TRUE);
+}
+
+START_TEST(p3secstress)
+{
+    EnsureTestDirectory();
+    if (!StartFilterManager())
+    {
+        skip("No filter manager\n");
+        return;
+    }
+
+    test_SectionStress();
+}
+
 START_TEST(p3create)
 {
     EnsureTestDirectory();
