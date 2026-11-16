@@ -66,6 +66,10 @@ static RPC_STATUS RpcAssoc_Alloc(LPCSTR Protseq, LPCSTR NetworkAddr,
                                  RpcAssoc **assoc_out)
 {
     RpcAssoc *assoc;
+    UUID http_uuid;
+    RPC_STATUS status;
+
+    if ((status = UuidCreate(&http_uuid))) return status;
     assoc = malloc(sizeof(*assoc));
     if (!assoc)
         return RPC_S_OUT_OF_RESOURCES;
@@ -84,7 +88,7 @@ static RPC_STATUS RpcAssoc_Alloc(LPCSTR Protseq, LPCSTR NetworkAddr,
     assoc->connection_cnt = 0;
     assoc->idle_since = 0;
     assoc->is_client = FALSE;
-    UuidCreate(&assoc->http_uuid);
+    assoc->http_uuid = http_uuid;
     list_init(&assoc->entry);
     *assoc_out = assoc;
     return RPC_S_OK;
@@ -730,9 +734,16 @@ RPC_STATUS RpcServerAssoc_UpdateContextHandle(RpcAssoc *assoc,
     EnterCriticalSection(&assoc->cs);
     if (UuidIsNil(&context_handle->uuid, &status))
     {
+        UUID uuid;
+
+        if ((status = UuidCreate(&uuid)))
+        {
+            LeaveCriticalSection(&assoc->cs);
+            return status;
+        }
         /* add a ref for the data being valid */
         context_handle->refs++;
-        UuidCreate(&context_handle->uuid);
+        context_handle->uuid = uuid;
         context_handle->rundown_routine = rundown_routine;
         TRACE("allocated uuid %s for context handle %p\n",
               debugstr_guid(&context_handle->uuid), context_handle);
