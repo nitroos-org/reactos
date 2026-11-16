@@ -35,6 +35,9 @@ C_ASSERT(sizeof(((PFLT_PARAMETERS)0)->LockControl) != 0 &&
          sizeof(((PFLT_PARAMETERS)0)->FastIoCheckIfPossible) != 0 &&
          sizeof(((PFLT_PARAMETERS)0)->MdlRead) != 0 &&
          sizeof(((PFLT_PARAMETERS)0)->MountVolume) != 0);
+/* The anonymous union of SetFileInformation: the WDK names, and DUMMYUNIONNAME (NONAMELESSUNION builds) */
+C_ASSERT(FIELD_OFFSET(FLT_PARAMETERS, SetFileInformation.ReplaceIfExists) ==
+         FIELD_OFFSET(FLT_PARAMETERS, SetFileInformation.DeleteHandle));
 
 #define MODE_NONE       0
 #define MODE_BLK        1
