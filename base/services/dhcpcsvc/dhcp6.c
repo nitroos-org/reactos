@@ -24,7 +24,9 @@
  *            of the server, /128); Renew at T1, Rebind at T2, an address goes when its valid lifetime ends
  *   RENEW / REBIND   Renew to the server, then Rebind to any server
  *   CONFIRM  the link changed: ask whether the addresses still are on the link (RFC 8415 18.2.3)
- *   DECLINE  duplicate address detection found an address in use: tell the server, take it out of the stack
+ *   DECLINE  duplicate address detection found an address in use: tell the server, take it out of the stack (an address
+ *            the stack already has from another source, e.g. configured by an administrator, is declined the same way
+ *            and left as it is)
  *   RELEASE  ipconfig /release6: the addresses leave the stack first, then the Release goes out
  *   RELEASED nothing is asked until ipconfig /renew6
  * A message is only taken while our request for it is outstanding (a Reply in BOUND or LEASED is dropped: the
@@ -161,6 +163,8 @@ typedef struct _D6ADDR
     ULONGLONG Expire;               /* absolute, ms; D6_NEVER for an infinite valid lifetime */
     BOOL Installed;                 /* the stack has it (as far as this client knows) */
     BOOL DadDone;                   /* duplicate address detection ended with a usable address */
+    BOOL Foreign;                   /* the stack holds it from another source (configured, router advertisement,
+                                       temporary): left as it is and declined like a duplicate */
 } D6ADDR;
 
 typedef struct _D6IF
@@ -1157,19 +1161,45 @@ static VOID FillRow(const D6IF *If, const UCHAR *Addr, ULONG Pref, ULONG Valid, 
     Row->SkipAsSource = FALSE;
 }
 
+/* TRUE: the stack has the address on this interface; *Ours: with the DHCP origin (put there by this client, or by the
+   service before a restart) */
+static BOOL StackHas(D6IF *If, const UCHAR *Addr, BOOL *Ours)
+{
+    MIB_UNICASTIPADDRESS_ROW Row;
+
+    *Ours = FALSE;
+    if (!pGetUnicast || !pInitializeUnicast)
+        return FALSE;
+    FillRow(If, Addr, 0, 0, &Row);
+    if (pGetUnicast(&Row) != NO_ERROR)
+        return FALSE;
+    *Ours = (Row.PrefixOrigin == IpPrefixOriginDhcp && Row.SuffixOrigin == IpSuffixOriginDhcp);
+    return TRUE;
+}
+
 /* Puts an address into the stack with the lifetimes the server gave (a change of the lifetimes when it is there
-   already). OnlyCreate: an address that is there is left alone (its lifetimes already run down). */
-static BOOL InstallAddress(D6IF *If, const D6IAADDR *Ia, BOOL OnlyCreate)
+   already). OnlyCreate: an address that is there is left alone (its lifetimes already run down). *Foreign: the stack
+   has the address from another source (an administrator configured it, a router advertisement formed it, a temporary
+   address): it is not changed (its origin, prefix length, lifetimes and persistent record stay) and not taken. */
+static BOOL InstallAddress(D6IF *If, const D6IAADDR *Ia, BOOL OnlyCreate, BOOL *Foreign)
 {
     MIB_UNICASTIPADDRESS_ROW Row;
     DWORD Error;
+    BOOL Ours;
 
+    *Foreign = FALSE;
     if (!pCreateUnicast || !pSetUnicast || !pInitializeUnicast)
         return FALSE;
     FillRow(If, Ia->Addr, Ia->Pref, Ia->Valid, &Row);
     Error = pCreateUnicast(&Row);
     if (Error == ERROR_OBJECT_ALREADY_EXISTS)
     {
+        if (StackHas(If, Ia->Addr, &Ours) && !Ours)
+        {
+            D6_LOG("interface %lu: a leased address is in the stack from another source, not taken\n", If->IfIndex);
+            *Foreign = TRUE;
+            return FALSE;
+        }
         if (OnlyCreate)
             return TRUE;
         FillRow(If, Ia->Addr, Ia->Pref, Ia->Valid, &Row);
@@ -1183,8 +1213,13 @@ static BOOL InstallAddress(D6IF *If, const D6IAADDR *Ia, BOOL OnlyCreate)
 static VOID RemoveAddress(D6IF *If, const UCHAR *Addr)
 {
     MIB_UNICASTIPADDRESS_ROW Row;
+    BOOL Ours;
 
     if (!pDeleteUnicast || !pInitializeUnicast)
+        return;
+    /* only an address with the DHCP origin: one that is the stack's or an administrator's (meanwhile) stays, and so
+       does its persistent record (a deletion takes the address out of both stores) */
+    if (pGetUnicast && (!StackHas(If, Addr, &Ours) || !Ours))
         return;
     FillRow(If, Addr, 0, 0, &Row);
     pDeleteUnicast(&Row); /* gone already (its valid lifetime ended in the stack): nothing to do */
@@ -1448,7 +1483,7 @@ static VOID SetTimes(D6IF *If, ULONG ServerT1, ULONG ServerT2, ULONGLONG Now)
 static VOID AcceptLease(D6IF *If, const D6REPLY *R, const UCHAR *Msg, ULONG Len, const SOCKADDR_IN6 *From, ULONGLONG Now)
 {
     ULONG i;
-    BOOL Renewing = (If->State == D6S_RENEW || If->State == D6S_REBIND);
+    BOOL Renewing = (If->State == D6S_RENEW || If->State == D6S_REBIND), Foreign;
 
     /* the server of the lease: the one that answered a Request, or a Rebind */
     if (If->State != D6S_RENEW)
@@ -1481,8 +1516,11 @@ static VOID AcceptLease(D6IF *If, const D6REPLY *R, const UCHAR *Msg, ULONG Len,
         }
         If->Lease[At].Ia = *Ia;
         If->Lease[At].Expire = ExpireOf(Now, Ia->Valid);
-        If->Lease[At].Installed = InstallAddress(If, Ia, FALSE);
-        if (!If->Lease[At].Installed)
+        If->Lease[At].Installed = InstallAddress(If, Ia, FALSE, &Foreign);
+        If->Lease[At].Foreign = Foreign;
+        if (Foreign)
+            If->Lease[At].DadDone = FALSE; /* the next DAD check declines it */
+        else if (!If->Lease[At].Installed)
             If->Lease[At].DadDone = TRUE; /* nothing to wait for */
     }
 
@@ -1624,7 +1662,7 @@ static VOID CheckDad(D6IF *If, ULONGLONG Now)
 
         if (If->Lease[i].DadDone)
             continue;
-        Dad = DadOf(If, If->Lease[i].Ia.Addr);
+        Dad = If->Lease[i].Foreign ? 2 : DadOf(If, If->Lease[i].Ia.Addr);
         if (Dad == 2)
             memcpy(Dup[DupCount++], If->Lease[i].Ia.Addr, 16);
         else if (Dad == 1)
@@ -1877,10 +1915,11 @@ static VOID HandleStateful(D6IF *If, const UCHAR *Packet, ULONG Len, const SOCKA
                 /* still on the link: make sure the stack has them (a disabled adapter lost them) */
                 for (i = 0; i < If->LeaseCount; i++)
                 {
-                    BOOL Was = If->Lease[i].Installed;
+                    BOOL Was = If->Lease[i].Installed, Foreign;
 
-                    If->Lease[i].Installed = InstallAddress(If, &If->Lease[i].Ia, TRUE);
-                    if (!Was && If->Lease[i].Installed)
+                    If->Lease[i].Installed = InstallAddress(If, &If->Lease[i].Ia, TRUE, &Foreign);
+                    If->Lease[i].Foreign = Foreign;
+                    if ((!Was && If->Lease[i].Installed) || Foreign)
                         If->Lease[i].DadDone = FALSE;
                 }
                 If->DadPending = AnyDadPending(If);
