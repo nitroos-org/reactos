@@ -266,6 +266,11 @@ static void notify_worker_main(MIB_NOTIFY *Notify)
   HANDLE Wait[2];
   BOOL Detached;
 
+  /* a request wakes for the families that were asked for: the stack keeps IPv4 and IPv6 changes apart, as Windows */
+  ULONG Families = (Notify->Family == AF_INET) ? TCP_CHANGE_FAMILY_IPV4 :
+                   (Notify->Family == AF_INET6) ? TCP_CHANGE_FAMILY_IPV6 :
+                   (TCP_CHANGE_FAMILY_IPV4 | TCP_CHANGE_FAMILY_IPV6);
+
   Wait[0] = Notify->IoEvent;
   Wait[1] = Notify->Stop;
 
@@ -275,7 +280,7 @@ static void notify_worker_main(MIB_NOTIFY *Notify)
     ResetEvent(Notify->IoEvent);
     Iosb.Status = STATUS_PENDING;
     Status = NtDeviceIoControlFile(Notify->File, Notify->IoEvent, NULL, NULL, &Iosb,
-                                   Ops->IoControl, NULL, 0, NULL, 0);
+                                   Ops->IoControl, &Families, sizeof(Families), NULL, 0);
     if (Status == STATUS_NOT_IMPLEMENTED || Status == STATUS_NOT_SUPPORTED || Status == STATUS_INVALID_DEVICE_REQUEST)
     {
       /* an older tcpip.sys without this request: there is nothing to wait for, so do not poll */

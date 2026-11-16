@@ -43,6 +43,7 @@ typedef struct _ADDR_WAITER
     LPWSAOVERLAPPED_COMPLETION_ROUTINE Routine;
     HANDLE Thread;                                  /* the issuing thread, for the completion routine */
     HANDLE BlockEvent;                              /* the blocking form: signalled on completion */
+    ULONG Families;                                 /* the changes it waits for: TCP_CHANGE_FAMILY_* of its socket */
     NTSTATUS Result;
     BOOLEAN Done;
 } ADDR_WAITER, *PADDR_WAITER;
@@ -185,20 +186,43 @@ CompleteWaiter(PADDR_WAITER Waiter, NTSTATUS Status)
     HeapFree(GlobalHeap, 0, Waiter);
 }
 
+/* Lock held. The waiters of the families that changed (Changed 0: not known, every waiter) */
+static
+VOID
+CompleteWaitersOf(NTSTATUS Status, ULONG Changed)
+{
+    PLIST_ENTRY Entry, Next;
+    PADDR_WAITER Waiter;
+
+    for (Entry = AddrWaiters.Flink; Entry != &AddrWaiters; Entry = Next)
+    {
+        Next = Entry->Flink;
+        Waiter = CONTAINING_RECORD(Entry, ADDR_WAITER, Link);
+        if (Changed && !(Waiter->Families & Changed))
+            continue;
+        RemoveEntryList(Entry);
+        AddrWaiterCount--;
+        CompleteWaiter(Waiter, Status);
+    }
+}
+
 /* Lock held */
 static
 VOID
 CompleteAllWaiters(NTSTATUS Status)
 {
-    PLIST_ENTRY Entry;
-
-    while (!IsListEmpty(&AddrWaiters))
-    {
-        Entry = RemoveHeadList(&AddrWaiters);
-        AddrWaiterCount--;
-        CompleteWaiter(CONTAINING_RECORD(Entry, ADDR_WAITER, Link), Status);
-    }
+    CompleteWaitersOf(Status, 0);
 }
+
+/* One request of the worker in the driver: one per address family, so a waiter of the family that did not change
+ * never has a moment without a request in the driver */
+typedef struct _ADDR_REQUEST
+{
+    HANDLE Event;
+    IO_STATUS_BLOCK Iosb;
+    ULONG Families;     /* what the request waits for (TCP_CHANGE_FAMILY_*) */
+    BOOLEAN Pending;
+} ADDR_REQUEST;
 
 static
 DWORD
@@ -209,16 +233,24 @@ AddrChangeThread(PVOID Param)
     UNICODE_STRING Name = RTL_CONSTANT_STRING(L"\\Device\\Tcp");
     OBJECT_ATTRIBUTES Attributes;
     IO_STATUS_BLOCK Iosb;
-    HANDLE Event = NULL, File = NULL;
+    HANDLE File = NULL, Events[2], Pendings[2];
+    ADDR_REQUEST Requests[2];
     NTSTATUS Status;
+    ULONG i, Families, Count;
+    BOOLEAN AnyPending;
+    LONG Index;
+
+    RtlZeroMemory(Requests, sizeof(Requests));
+    Requests[0].Families = TCP_CHANGE_FAMILY_IPV4;
+    Requests[1].Families = TCP_CHANGE_FAMILY_IPV6;
 
     InitializeObjectAttributes(&Attributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
 
     /* An asynchronous handle: another thread can cancel the request on it */
     Status = NtOpenFile(&File, FILE_READ_DATA | SYNCHRONIZE, &Attributes, &Iosb,
                         FILE_SHARE_READ | FILE_SHARE_WRITE, 0);
-    if (NT_SUCCESS(Status))
-        Status = NtCreateEvent(&Event, EVENT_ALL_ACCESS, NULL, SynchronizationEvent, FALSE);
+    for (i = 0; i < 2 && NT_SUCCESS(Status); i++)
+        Status = NtCreateEvent(&Requests[i].Event, EVENT_ALL_ACCESS, NULL, SynchronizationEvent, FALSE);
 
     if (!NT_SUCCESS(Status))
     {
@@ -228,47 +260,91 @@ AddrChangeThread(PVOID Param)
         LeaveCriticalSection(&AddrChangeLock);
         goto done;
     }
+    Events[0] = Requests[0].Event;
+    Events[1] = Requests[1].Event;
 
     for (;;)
     {
         EnterCriticalSection(&AddrChangeLock);
         if (IsListEmpty(&AddrWaiters))
         {
-            AddrThreadRunning = FALSE;
+            AnyPending = Requests[0].Pending || Requests[1].Pending;
+            if (!AnyPending)
+            {
+                AddrThreadRunning = FALSE;
+                LeaveCriticalSection(&AddrChangeLock);
+                break;
+            }
+            /* nobody waits any more: take the requests out of the driver before the buffers go away */
+            NtDeviceIoControlFile(File, NULL, NULL, NULL, &Iosb, IOCTL_IP_ADDCHANGE_CANCEL_REQUEST, NULL, 0, NULL, 0);
             LeaveCriticalSection(&AddrChangeLock);
-            break;
+            for (i = 0, Count = 0; i < 2; i++)
+                if (Requests[i].Pending)
+                    Pendings[Count++] = Requests[i].Event;
+            NtWaitForMultipleObjects(Count, Pendings, WaitAll, FALSE, NULL);
+            EnterCriticalSection(&AddrChangeLock);
+            Requests[0].Pending = Requests[1].Pending = FALSE;
+            AddrRequestPending = FALSE;
+            AddrTcpFile = NULL;
+            LeaveCriticalSection(&AddrChangeLock);
+            continue;
         }
         LeaveCriticalSection(&AddrChangeLock);
 
-        Status = NtDeviceIoControlFile(File, Event, NULL, NULL, &Iosb,
-                                       IOCTL_IP_ADDCHANGE_NOTIFY_REQUEST, NULL, 0, NULL, 0);
-        if (Status == STATUS_PENDING)
+        /* a request for each family: the driver completes the one of the family that changed, and only the waiters
+         * of that family complete (an AF_INET socket does not wake for an IPv6 change, nor an AF_INET6 one for an
+         * IPv4 change) */
+        for (i = 0; i < 2; i++)
         {
-            /* The last waiter may have left since the check above: cancel for it */
-            EnterCriticalSection(&AddrChangeLock);
-            AddrTcpFile = File;
-            AddrRequestPending = TRUE;
-            CancelDriverRequestIfIdle();
-            LeaveCriticalSection(&AddrChangeLock);
+            if (Requests[i].Pending)
+                continue;
+            Families = Requests[i].Families;
+            Status = NtDeviceIoControlFile(File, Requests[i].Event, NULL, NULL, &Requests[i].Iosb,
+                                           IOCTL_IP_ADDCHANGE_NOTIFY_REQUEST, &Families, sizeof(Families), NULL, 0);
+            if (Status == STATUS_PENDING)
+            {
+                Requests[i].Pending = TRUE;
+                continue;
+            }
 
-            NtWaitForSingleObject(Event, FALSE, NULL);
-            Status = Iosb.Status;
+            /* The transport refuses the request (or, if it ever completed at once, a change): every waiter */
+            EnterCriticalSection(&AddrChangeLock);
+            CompleteWaitersOf(Status, 0);
+            LeaveCriticalSection(&AddrChangeLock);
         }
 
         EnterCriticalSection(&AddrChangeLock);
-        AddrRequestPending = FALSE;
-        AddrTcpFile = NULL;
+        AnyPending = Requests[0].Pending || Requests[1].Pending;
+        AddrTcpFile = File;
+        AddrRequestPending = AnyPending;
+        /* The last waiter may have left since the check above: cancel for it */
+        CancelDriverRequestIfIdle();
+        LeaveCriticalSection(&AddrChangeLock);
+        if (!AnyPending)
+            continue;
+
+        Index = NtWaitForMultipleObjects(2, Events, WaitAny, FALSE, NULL);
+        if (Index < 0 || Index > 1)
+            continue;
+
+        Status = Requests[Index].Iosb.Status;
+        Requests[Index].Pending = FALSE;
+        EnterCriticalSection(&AddrChangeLock);
+        AddrRequestPending = Requests[0].Pending || Requests[1].Pending;
+        if (!AddrRequestPending)
+            AddrTcpFile = NULL;
         if (Status != STATUS_CANCELLED)
         {
-            /* A change, or the transport refuses the request: every waiter gets the result */
-            CompleteAllWaiters(Status);
+            /* A change (the waiters of its family), or the transport refuses the request (every waiter) */
+            CompleteWaitersOf(Status, NT_SUCCESS(Status) ? Requests[Index].Families : 0);
         }
         LeaveCriticalSection(&AddrChangeLock);
     }
 
 done:
-    if (Event)
-        NtClose(Event);
+    for (i = 0; i < 2; i++)
+        if (Requests[i].Event)
+            NtClose(Requests[i].Event);
     if (File)
         NtClose(File);
     FreeLibraryAndExitThread(Module, 0);
@@ -336,6 +412,7 @@ MsafdAddressListChange(
 
     Waiter->Socket = Socket;
     Waiter->Handle = Socket->Handle;
+    Waiter->Families = (Socket->SharedData->AddressFamily == AF_INET6) ? TCP_CHANGE_FAMILY_IPV6 : TCP_CHANGE_FAMILY_IPV4;
 
     if (lpOverlapped)
     {
