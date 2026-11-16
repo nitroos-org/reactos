@@ -151,6 +151,7 @@ typedef struct _FLTSAMPLE_ASK_RESULT
 #define FLTSAMPLE_RV_DISALLOW_FASTIO    0x1 /* every fast I/O operation on a test file: FLT_PREOP_DISALLOW_FASTIO */
 #define FLTSAMPLE_RV_PARK_READ_POST     0x2 /* the post-operation of a non paging IRP read parks, a worker completes it */
 #define FLTSAMPLE_RV_PARK_WRITE_POST    0x4 /* the same for writes */
+#define FLTSAMPLE_RV_PARK_FASTIO_POST   0x8 /* the post-operation of a fast I/O read parks (the WDK forbids it), a worker completes it */
 #define FLTSAMPLE_IOCTL_CONTEXT_SELFTEST CTL_CODE(FILE_DEVICE_UNKNOWN, 0x809, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 /* Service key value PortSecurity (REG_DWORD): the descriptor the sample gives its port */

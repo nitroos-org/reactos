@@ -983,6 +983,31 @@ FltpFastIoDisallowed(_In_ PDEVICE_OBJECT DeviceObject,
  * Ctrl->PostIndex down are told so. A pre-operation's post-operation is never lost, whichever way the
  * operation goes; the caller then sends an IRP, which the filters see as an operation of its own.
  */
+/*
+ * The post-operations of an operation without an IRP (fast I/O), in the thread of the operation.
+ * MORE_PROCESSING_REQUIRED isn't for those (WDK), but a filter which returns it anyway will call
+ * FltCompletePendedPostOperation with the callback data later: the block has to be there then, so
+ * we wait for that call, and go on with the post-operations above that filter afterwards.
+ */
+static
+VOID
+RunPostOperationsInThread(_Inout_ PFLTP_IRPCTRL Ctrl)
+{
+    KeInitializeEvent(&Ctrl->SyncEvent, NotificationEvent, FALSE);
+    Ctrl->SyncOwner = TRUE;
+    for (;;)
+    {
+        KeClearEvent(&Ctrl->SyncEvent);
+        if (RunPostOperations(Ctrl, FALSE))
+            break;
+
+        DPRINT1("FLTMGR: a post-operation of a fast I/O operation returned FLT_POSTOP_MORE_PROCESSING_REQUIRED\n");
+        KeWaitForSingleObject(&Ctrl->SyncEvent, Executive, KernelMode, FALSE, NULL);
+        FltObjectDereference(Ctrl->Parked->Instance);
+        Ctrl->Parked->Instance = NULL;
+    }
+}
+
 static
 VOID
 RunFastIoPostOperations(_Inout_ PFLTP_IRPCTRL Ctrl,
@@ -991,12 +1016,7 @@ RunFastIoPostOperations(_Inout_ PFLTP_IRPCTRL Ctrl,
     Ctrl->Data.IoStatus.Status = Status;
     Ctrl->Data.IoStatus.Information = 0;
     Ctrl->Data.Flags |= FLTFL_CALLBACK_DATA_POST_OPERATION;
-    if (!RunPostOperations(Ctrl, FALSE) && Ctrl->Parked && Ctrl->Parked->Instance)
-    {
-        /* MORE_PROCESSING_REQUIRED isn't for fast I/O (WDK): the operation is over for us anyway */
-        FltObjectDereference(Ctrl->Parked->Instance);
-        Ctrl->Parked->Instance = NULL;
-    }
+    RunPostOperationsInThread(Ctrl);
 }
 
 /*
@@ -1026,7 +1046,7 @@ FltpFastIoReadWrite(_In_ PDEVICE_OBJECT DeviceObject,
     LARGE_INTEGER Offset = *FileOffset;
     PLIST_ENTRY Entry;
     ULONG Count = 0, i;
-    BOOLEAN Done, Result = FALSE, Completed = FALSE;
+    BOOLEAN Result = FALSE, Completed = FALSE;
 
     /* Without a lower driver for it, there's nothing to do */
     if (FastIoDispatch == NULL ||
@@ -1166,12 +1186,7 @@ FltpFastIoReadWrite(_In_ PDEVICE_OBJECT DeviceObject,
             Ctrl->Nodes[i].WantPost = FALSE;
         Ctrl->PostIndex = Ctrl->CompleteIndex;
         Ctrl->Data.Flags |= FLTFL_CALLBACK_DATA_POST_OPERATION;
-        Done = RunPostOperations(Ctrl, FALSE);
-        if (!Done && Ctrl->Parked && Ctrl->Parked->Instance)
-        {
-            FltObjectDereference(Ctrl->Parked->Instance);
-            Ctrl->Parked->Instance = NULL;
-        }
+        RunPostOperationsInThread(Ctrl);
         *IoStatus = Ctrl->Data.IoStatus;
         Result = TRUE;
         goto Quit;
@@ -1208,12 +1223,7 @@ CallLower:
         Ctrl->Data.IoStatus = *IoStatus;
         Ctrl->Data.Flags |= FLTFL_CALLBACK_DATA_POST_OPERATION;
         Ctrl->PostIndex = Ctrl->Count;
-        Done = RunPostOperations(Ctrl, FALSE);
-        if (!Done && Ctrl->Parked && Ctrl->Parked->Instance)
-        {
-            FltObjectDereference(Ctrl->Parked->Instance);
-            Ctrl->Parked->Instance = NULL;
-        }
+        RunPostOperationsInThread(Ctrl);
         *IoStatus = Ctrl->Data.IoStatus;
     }
     else if (Ctrl)

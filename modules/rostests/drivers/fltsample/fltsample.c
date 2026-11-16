@@ -786,6 +786,21 @@ PostOperation(_Inout_ PFLT_CALLBACK_DATA Data,
             break;
 
         case IRP_MJ_READ:
+            if ((RvFlags & FLTSAMPLE_RV_PARK_FASTIO_POST) && FLT_IS_FASTIO_OPERATION(Data))
+            {
+                PRV_PARK_ITEM Item = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Item), TAG_SAMPLE);
+
+                /* A filter breaking the rule: it will call FltCompletePendedPostOperation later */
+                if (Item)
+                {
+                    Item->Data = Data;
+                    InterlockedIncrement(&PendingWorkers);
+                    KeResetEvent(&WorkersDone);
+                    InterlockedIncrement((PLONG)&Stats.RvParked);
+                    QueueSampleWork(&Item->WorkItem, RvParkWorker, Item);
+                    return FLT_POSTOP_MORE_PROCESSING_REQUIRED;
+                }
+            }
             if ((RvFlags & FLTSAMPLE_RV_PARK_READ_POST) && FLT_IS_IRP_OPERATION(Data) &&
                 !(Data->Iopb->IrpFlags & IRP_PAGING_IO) && CompletionContext == NULL)
             {

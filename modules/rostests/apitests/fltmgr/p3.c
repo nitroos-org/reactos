@@ -328,6 +328,79 @@ START_TEST(p3safe)
     test_SafePagingRead();
 }
 
+/*
+ * A filter which returns FLT_POSTOP_MORE_PROCESSING_REQUIRED from the post-operation of a fast I/O read
+ * (the WDK forbids it) and calls FltCompletePendedPostOperation from a worker later: the callback data
+ * must still be there then. The filter manager waits for that call before the read returns.
+ */
+static
+void
+test_FastIoParkedPost(void)
+{
+    SAMPLE P = { { 0 } };
+    FLTSAMPLE_STATS S;
+    WCHAR Path[MAX_PATH];
+    HANDLE File;
+    UCHAR Buffer[4096];
+    DWORD Read, i, Early = 0;
+    ULONG Flags;
+
+    MakeTestFile(L"p3fpark.dat", Path, RTL_NUMBER_OF(Path));
+    ok(WriteUncached(Path, 65536), "Can't write %ls\n", Path);
+    if (!LoadSample(&P, L"FltSampleP", L"383000.5", 0xFFFF))
+    {
+        skip("Can't load the sample filter\n");
+        return;
+    }
+
+    File = CreateFileW(Path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    ok(File != INVALID_HANDLE_VALUE, "Open failed: %lu\n", GetLastError());
+    if (File == INVALID_HANDLE_VALUE)
+        goto Quit;
+
+    /* The first read sets up the cache, the next ones can be fast I/O */
+    ok(ReadFile(File, Buffer, sizeof(Buffer), &Read, NULL), "Read failed: %lu\n", GetLastError());
+
+    Flags = FLTSAMPLE_RV_PARK_FASTIO_POST;
+    ok(SampleIoctl(&P, FLTSAMPLE_IOCTL_RV_FLAGS, &Flags, sizeof(Flags), NULL, 0), "Can't set the flags\n");
+    for (i = 0; i < 32; i++)
+    {
+        SetFilePointer(File, (i % 16) * 4096, NULL, FILE_BEGIN);
+        ok(ReadFile(File, Buffer, sizeof(Buffer), &Read, NULL) && Read == sizeof(Buffer), "Read %lu failed: %lu\n",
+           i, GetLastError());
+        ok(Buffer[5] == (UCHAR)(((i % 16) * 4096 + 5) * 7 + 3), "Read %lu: wrong data\n", i);
+
+        /* Every parked post-operation was finished before the read returned */
+        SampleStats(&P, &S);
+        if (S.RvParkDone != S.RvParked)
+            Early++;
+    }
+    Flags = 0;
+    SampleIoctl(&P, FLTSAMPLE_IOCTL_RV_FLAGS, &Flags, sizeof(Flags), NULL, 0);
+    CloseHandle(File);
+
+    SampleStats(&P, &S);
+    trace("Fast I/O post-operations parked %lu, finished by the filter %lu\n", S.RvParked, S.RvParkDone);
+    ok(S.RvParked > 0, "No fast I/O read was parked, the test says nothing\n");
+    ok(Early == 0, "%lu reads returned before the filter finished their post-operation\n", Early);
+
+Quit:
+    UnloadSample(&P, TRUE);
+    DeleteFileW(Path);
+}
+
+START_TEST(p3fpark)
+{
+    EnsureTestDirectory();
+    if (!StartFilterManager())
+    {
+        skip("No filter manager\n");
+        return;
+    }
+
+    test_FastIoParkedPost();
+}
+
 START_TEST(p3create)
 {
     EnsureTestDirectory();

@@ -20,6 +20,7 @@ extern void func_portrace(void);
 extern void func_p3create(void);
 extern void func_p3voldel(void);
 extern void func_p3safe(void);
+extern void func_p3fpark(void);
 
 const struct test winetest_testlist[] =
 {
@@ -42,5 +43,6 @@ const struct test winetest_testlist[] =
     { "p3create", func_p3create },
     { "p3voldel", func_p3voldel },
     { "p3safe", func_p3safe },
+    { "p3fpark", func_p3fpark },
     { 0, 0 }
 };
