@@ -42,6 +42,7 @@
 #include "lwip/tcpip.h"
 #include "lwip/priv/tcp_priv.h"
 #include "lwip/priv/nd6_priv.h"
+#include "lwip/prot/nd6.h"
 #include <reactos/nitrofw.h>
 #include <nitrofwk.h>
 #include <stdio.h>
@@ -2134,6 +2135,418 @@ StTestInterfaceParams(PIP_INTERFACE Eth, const ip6_addr_t *R1, const UCHAR *Mac1
     }
 }
 
+/* The entry of the router at Addr in the default router list (core lock held), or -1 */
+static int
+StRouterIndex(const ip6_addr_t *Addr)
+{
+    int i;
+
+    for (i = 0; i < LWIP_ND6_NUM_ROUTERS; i++)
+    {
+        struct nd6_neighbor_cache_entry *N = default_router_list[i].neighbor_entry;
+
+        if (N && ip6_addr_zoneless_eq(&N->next_hop_address, Addr))
+            return i;
+    }
+    return -1;
+}
+
+static ULONG
+StRouterCount(VOID)
+{
+    ULONG n = 0;
+    int i;
+
+    LOCK_TCPIP_CORE();
+    for (i = 0; i < LWIP_ND6_NUM_ROUTERS; i++)
+    {
+        if (default_router_list[i].neighbor_entry)
+            n++;
+    }
+    UNLOCK_TCPIP_CORE();
+    return n;
+}
+
+/* The neighbour cache entry of the router at Addr (core lock held), or NULL */
+static struct nd6_neighbor_cache_entry *
+StNeighbor(const ip6_addr_t *Addr)
+{
+    int i;
+
+    for (i = 0; i < LWIP_ND6_NUM_NEIGHBORS; i++)
+    {
+        if (neighbor_cache[i].state != ND6_NO_ENTRY && ip6_addr_zoneless_eq(&neighbor_cache[i].next_hop_address, Addr))
+            return &neighbor_cache[i];
+    }
+    return NULL;
+}
+
+/* How many routes of the table are router advertisement routes of this prefix length, optionally for a next hop and
+   with the first byte after 20 01 0d b8 (Prefix[4]) equal to Tag (Tag 0: any) */
+static ULONG
+StRaRouteCount(UCHAR Length, const ip6_addr_t *Router, UCHAR Tag, ULONG *First, ULONG *Last)
+{
+    ULONG Count = 0, Total, i;
+    PTCP_IPV6_ROUTE_HEADER Routes = StRoutes(&Total);
+    const TCP_IPV6_ROUTE_ROW *Rows = Routes ? (const TCP_IPV6_ROUTE_ROW *)(Routes + 1) : NULL;
+
+    if (First)
+        *First = 0xFFFF;
+    if (Last)
+        *Last = 0;
+    for (i = 0; Routes && i < Routes->Count; i++)
+    {
+        if ((Rows[i].Flags & TCP_IPV6_ROUTE_FROM_RA) && Rows[i].PrefixLength == Length &&
+            (!Router || StSame(Rows[i].NextHop, Router->addr, 16)) && (!Tag || Rows[i].Prefix[4] == Tag))
+        {
+            Count++;
+            if (First && Rows[i].Prefix[5] < *First)
+                *First = Rows[i].Prefix[5];
+            if (Last && Rows[i].Prefix[5] > *Last)
+                *Last = Rows[i].Prefix[5];
+        }
+    }
+    if (Routes)
+        ExFreePoolWithTag(Routes, ST_TAG);
+    return Count;
+}
+
+/* the follow-ups of the router advertisement extras: a ::/0 route information option, search list and route
+   information eviction per interface or router, deprioritising routes through an unreachable router, an
+   advertisement of a ninth router */
+static VOID
+StTestRaFollowups(PIP_INTERFACE Eth)
+{
+    struct netif *En = Eth->TCPContext;
+    ip6_addr_t Rt[12], Dest;
+    UCHAR Opts[1024], Mac[6] = {0x02, 0x00, 0x00, 0x7c, 0x00, 0x00}, Prefix[16] = {0x20, 0x01, 0x0d, 0xb8, 0x72};
+    UINT n;
+    ULONG k, Count, First, Last;
+    CHAR Detail[200], Name[16];
+    BOOLEAN Ok;
+    int Idx;
+    UCHAR OldFlags = Eth->Ra6Flags, OldHop = Eth->Ra6HopLimit;
+
+    for (k = 1; k <= 11; k++)
+    {
+        CHAR Text[32];
+
+        _snprintf(Text, sizeof(Text), "fe80::7c:%lx", k);
+        ip6addr_aton(Text, &Rt[k]);
+    }
+    ip6addr_aton("2001:db8:7200::5", &Dest);
+
+    /* --- RFC 4191 3.1: a ::/0 route information option replaces the header's preference and lifetime --- */
+    {
+        UCHAR Zero[16] = {0};
+
+        Mac[5] = 1;
+        n = StOptSlla(Opts, Mac);
+        n += StOptRio(Opts + n, 1, 0, 1, 600, Zero);               /* high, 600 s; the header says lifetime 0, medium */
+        StInject(Eth, StRa(&Rt[1], 0, 0x00, 0, Opts, n), FALSE);
+        LOCK_TCPIP_CORE();
+        Idx = StRouterIndex(&Rt[1]);
+        Ok = Idx >= 0 && default_router_list[Idx].invalidation_timer > 590 && default_router_list[Idx].invalidation_timer <= 600 &&
+             (default_router_list[Idx].flags & ND6_RA_PREFERENCE_MASK) == ND6_RA_PREFERENCE_HIGH;
+        _snprintf(Detail, sizeof(Detail), "entry %d lifetime %lu flags 0x%x", Idx, Idx >= 0 ? (ULONG)default_router_list[Idx].invalidation_timer : 0,
+                  Idx >= 0 ? default_router_list[Idx].flags : 0);
+        UNLOCK_TCPIP_CORE();
+        StResult(Ok, "RA ::/0 route information: its lifetime and preference replace the header's (a router of lifetime 0 is a default router)", Detail);
+        Count = StRaRouteCount(0, &Rt[1], 0, NULL, NULL);
+        _snprintf(Detail, sizeof(Detail), "%lu rows for ::/0 through the router", Count);
+        StResult(Count == 1, "RA ::/0 route information: it is the router's default route, not a route of its own", Detail);
+
+        n = StOptSlla(Opts, Mac);
+        n += StOptRio(Opts + n, 1, 0, 3, 0, Zero);                 /* lifetime 0: no longer a default router */
+        StInject(Eth, StRa(&Rt[1], 0, 0x08, 1800, Opts, n), FALSE);
+        LOCK_TCPIP_CORE();
+        Idx = StRouterIndex(&Rt[1]);
+        Ok = Idx < 0 || default_router_list[Idx].invalidation_timer == 0;
+        UNLOCK_TCPIP_CORE();
+        StResult(Ok, "RA ::/0 route information: lifetime 0 ends the router as a default router whatever the header says", NULL);
+        n = StOptSlla(Opts, Mac);
+        StInject(Eth, StRa(&Rt[1], 0, 0x00, 0, Opts, n), FALSE);
+        StSleep(2500);
+    }
+
+    /* --- RFC 4191 3.2: a route through a router that failed reachability comes after the others --- */
+    {
+        const ip6_addr_t *Gw;
+        struct nd6_neighbor_cache_entry *X;
+        ULONG Pfx;
+
+        Prefix[4] = 0x72;
+        Prefix[5] = 0;
+        for (Pfx = 2; Pfx <= 3; Pfx++)
+        {
+            Mac[5] = (UCHAR)Pfx;
+            n = StOptSlla(Opts, Mac);
+            n += StOptRio(Opts + n, 2, 48, Pfx == 2 ? 1 : 0, 600, Prefix);      /* r2 high, r3 medium */
+            StInject(Eth, StRa(&Rt[Pfx], 0, 0x00, 1800, Opts, n), FALSE);
+        }
+        LOCK_TCPIP_CORE();
+        Gw = LibNd6GetGw(En, &Dest);
+        Ok = Gw && ip6_addr_zoneless_eq(Gw, &Rt[2]);
+        UNLOCK_TCPIP_CORE();
+        StResult(Ok, "RA route information: of two routers the high preference one is the next hop while both answer", NULL);
+
+        LOCK_TCPIP_CORE();
+        X = StNeighbor(&Rt[2]);
+        if (X)
+        {
+            X->state = ND6_INCOMPLETE;
+            X->counter.probes_sent = LWIP_ND6_MAX_MULTICAST_SOLICIT;
+        }
+        Gw = LibNd6GetGw(En, &Dest);
+        Ok = X && Gw && ip6_addr_zoneless_eq(Gw, &Rt[3]);
+        UNLOCK_TCPIP_CORE();
+        StResult(Ok, "RA route information: a route through a router that failed reachability is passed over for the next best one", NULL);
+
+        LOCK_TCPIP_CORE();
+        X = StNeighbor(&Rt[3]);
+        if (X)
+        {
+            X->state = ND6_INCOMPLETE;
+            X->counter.probes_sent = LWIP_ND6_MAX_MULTICAST_SOLICIT;
+        }
+        Gw = LibNd6GetGw(En, &Dest);
+        /* the next best route: a default router of the link that still answers (the link's own router, the stack then
+           picks it: no next hop from the table), or with none the best of the failed routes (router 2, high) */
+        Ok = X && (!Gw || ip6_addr_zoneless_eq(Gw, &Rt[2]));
+        UNLOCK_TCPIP_CORE();
+        StResult(Ok, "RA route information: with both routers failed the next best route is used, a reachable default router before a failed one", NULL);
+
+        LOCK_TCPIP_CORE();
+        X = StNeighbor(&Rt[2]);
+        if (X)
+            X->state = ND6_REACHABLE;
+        X = StNeighbor(&Rt[3]);
+        if (X)
+            X->state = ND6_REACHABLE;
+        Gw = LibNd6GetGw(En, &Dest);
+        Ok = Gw && ip6_addr_zoneless_eq(Gw, &Rt[2]);
+        UNLOCK_TCPIP_CORE();
+        StResult(Ok, "RA route information: a router that answers again is used again", NULL);
+
+        for (Pfx = 2; Pfx <= 3; Pfx++)
+        {
+            Mac[5] = (UCHAR)Pfx;
+            n = StOptSlla(Opts, Mac);
+            n += StOptRio(Opts + n, 2, 48, 0, 0, Prefix);
+            StInject(Eth, StRa(&Rt[Pfx], 0, 0x00, 0, Opts, n), FALSE);
+        }
+        StSleep(2500);
+    }
+
+    /* --- route information routes: the router with the most gives up its oldest, not the one that sent one --- */
+    {
+        for (k = 0; k < 32; k++)
+        {
+            Prefix[4] = 0x7e; Prefix[5] = (UCHAR)k;
+            n = StOptRio(Opts, 2, 48, 0, 600, Prefix);
+            StInject(Eth, StRa(&Rt[4], 0, 0, 0, Opts, n), FALSE);
+        }
+        Prefix[4] = 0x7f; Prefix[5] = 0;
+        n = StOptRio(Opts, 2, 48, 0, 600, Prefix);
+        StInject(Eth, StRa(&Rt[5], 0, 0, 0, Opts, n), FALSE);
+        Count = StRaRouteCount(48, &Rt[4], 0x7e, &First, &Last);
+        _snprintf(Detail, sizeof(Detail), "router 4 holds %lu (%lu..%lu), router 5's route %lu", Count, First, Last,
+                  StRaRouteCount(48, &Rt[5], 0x7f, NULL, NULL));
+        StResult(Count == 31 && First == 1 && Last == 31 && StRaRouteCount(48, &Rt[5], 0x7f, NULL, NULL) == 1,
+                 "RA route information: when all 32 are used the router that holds them gives up its oldest for another router's", Detail);
+        /* the sender with the most replaces its own: router 4 sends a new one, router 5's stays */
+        Prefix[4] = 0x7e; Prefix[5] = 40;
+        n = StOptRio(Opts, 2, 48, 0, 600, Prefix);
+        StInject(Eth, StRa(&Rt[4], 0, 0, 0, Opts, n), FALSE);
+        Count = StRaRouteCount(48, &Rt[4], 0x7e, &First, &Last);
+        _snprintf(Detail, sizeof(Detail), "router 4 holds %lu (%lu..%lu)", Count, First, Last);
+        StResult(Count == 31 && First == 2 && Last == 40 && StRaRouteCount(48, &Rt[5], 0x7f, NULL, NULL) == 1,
+                 "RA route information: the router that sends the most replaces its own oldest, not the others'", Detail);
+        for (k = 0; k < 41; k++)
+        {
+            Prefix[4] = 0x7e; Prefix[5] = (UCHAR)k;
+            n = StOptRio(Opts, 2, 48, 0, 0, Prefix);
+            StInject(Eth, StRa(&Rt[4], 0, 0, 0, Opts, n), FALSE);
+        }
+        Prefix[4] = 0x7f; Prefix[5] = 0;
+        n = StOptRio(Opts, 2, 48, 0, 0, Prefix);
+        StInject(Eth, StRa(&Rt[5], 0, 0, 0, Opts, n), FALSE);
+        StSleep(2500);                  /* the entries of these routers (advertised lifetime 0) go */
+    }
+
+    /* --- search list entries: when the 16 are in use the oldest of the interface goes, a refreshed one stays --- */
+    {
+        UCHAR Names[4 * 9];
+        ULONG g, t;
+        BOOLEAN All = TRUE;
+
+        n = 0;
+        for (g = 0; g < 4; g++)
+        {
+            for (t = 0; t < 4; t++)
+            {
+                UCHAR *P = Names + t * 9;
+
+                P[0] = 3; P[1] = 'd'; P[2] = (UCHAR)('0' + (g * 4 + t + 1) / 10); P[3] = (UCHAR)('0' + (g * 4 + t + 1) % 10);
+                P[4] = 3; P[5] = 'l'; P[6] = 'r'; P[7] = 'u'; P[8] = 0;
+            }
+            n += StOptDnssl(Opts + n, 1000, Names, sizeof(Names));
+        }
+        StInject(Eth, StRa(&Rt[6], 0, 0, 0, Opts, n), FALSE);
+        for (k = 1; k <= 16; k++)
+        {
+            _snprintf(Name, sizeof(Name), "d%02lu.lru", k);
+            if (StRaSuffixCount(Name, NULL) != 1)
+                All = FALSE;
+        }
+        StResult(All && StRaSuffixCount(NULL, NULL) == 16, "RA DNSSL: 16 names fill the list", NULL);
+        /* refresh the first four, then a 17th name */
+        for (t = 0; t < 4; t++)
+        {
+            UCHAR *P = Names + t * 9;
+
+            P[0] = 3; P[1] = 'd'; P[2] = '0'; P[3] = (UCHAR)('1' + t);
+            P[4] = 3; P[5] = 'l'; P[6] = 'r'; P[7] = 'u'; P[8] = 0;
+        }
+        n = StOptDnssl(Opts, 1000, Names, sizeof(Names));
+        {
+            static const UCHAR Extra[] = { 3, 'e', '0', '1', 3, 'l', 'r', 'u', 0 };
+
+            n += StOptDnssl(Opts + n, 1000, Extra, sizeof(Extra));
+        }
+        StInject(Eth, StRa(&Rt[6], 0, 0, 0, Opts, n), FALSE);
+        Ok = StRaSuffixCount("d01.lru", NULL) == 1 && StRaSuffixCount("d04.lru", NULL) == 1 &&
+             StRaSuffixCount("d05.lru", NULL) == 0 && StRaSuffixCount("d06.lru", NULL) == 1 &&
+             StRaSuffixCount("e01.lru", NULL) == 1 && StRaSuffixCount(NULL, NULL) == 16;
+        _snprintf(Detail, sizeof(Detail), "d01 %lu d05 %lu e01 %lu total %lu", StRaSuffixCount("d01.lru", NULL),
+                  StRaSuffixCount("d05.lru", NULL), StRaSuffixCount("e01.lru", NULL), StRaSuffixCount(NULL, NULL));
+        StResult(Ok, "RA DNSSL: a new name replaces the least recently refreshed of the interface, a refreshed one stays", Detail);
+
+        /* the list is full of this interface's names: a name of another interface takes the place of one of them */
+        if (Loopback && Loopback->Index != Eth->Index)
+        {
+            static const UCHAR Other[] = { 3, 'o', 't', 'h', 3, 'l', 'r', 'u', 0 };
+
+            LOCK_TCPIP_CORE();
+            Ra6ParseNames(Loopback->Index, Other, sizeof(Other), 1000);
+            UNLOCK_TCPIP_CORE();
+            Count = StRaSuffixCount("oth.lru", NULL);
+            if (Count == 1)
+            {
+                _snprintf(Detail, sizeof(Detail), "oth %lu, interface's own: %lu of 16", Count, StRaSuffixCount(NULL, NULL) - 1);
+                StResult(StRaSuffixCount(NULL, NULL) == 16 && StRaSuffixCount("d01.lru", NULL) == 1 &&
+                         StRaSuffixCount("d06.lru", NULL) == 0,
+                         "RA DNSSL: when all are used, another interface's name replaces the oldest name of the interface that holds them", Detail);
+            }
+            else
+                StPrint("RA DNSSL: no second interface in the list; the name of another interface was not kept (skipped)");
+            LOCK_TCPIP_CORE();
+            Ra6ParseNames(Loopback->Index, Other, sizeof(Other), 0);
+            UNLOCK_TCPIP_CORE();
+        }
+        /* remove all */
+        for (g = 0; g < 4; g++)
+        {
+            for (t = 0; t < 4; t++)
+            {
+                UCHAR *P = Names + t * 9;
+
+                P[0] = 3; P[1] = 'd'; P[2] = (UCHAR)('0' + (g * 4 + t + 1) / 10); P[3] = (UCHAR)('0' + (g * 4 + t + 1) % 10);
+                P[4] = 3; P[5] = 'l'; P[6] = 'r'; P[7] = 'u'; P[8] = 0;
+            }
+            n = StOptDnssl(Opts, 0, Names, sizeof(Names));
+            StInject(Eth, StRa(&Rt[6], 0, 0, 0, Opts, n), FALSE);
+        }
+        {
+            static const UCHAR Extra[] = { 3, 'e', '0', '1', 3, 'l', 'r', 'u', 0 };
+
+            n = StOptDnssl(Opts, 0, Extra, sizeof(Extra));
+            StInject(Eth, StRa(&Rt[6], 0, 0, 0, Opts, n), FALSE);
+        }
+    }
+
+    /* --- a router table that is full: the options of another router's advertisement are still taken --- */
+    {
+        ULONG Routers;
+        UCHAR Hi = 0;
+
+        /* nine routers of medium preference, each with a route information option for a prefix of its own */
+        for (k = 1; k <= 9; k++)
+        {
+            Mac[5] = (UCHAR)(0x10 + k);
+            Prefix[4] = 0x73; Prefix[5] = (UCHAR)k;
+            n = StOptSlla(Opts, Mac);
+            n += StOptRio(Opts + n, 2, 48, 0, 600, Prefix);
+            StInject(Eth, StRa(&Rt[k], 0, 0x00, 1800, Opts, n), FALSE);
+        }
+        Routers = StRouterCount();
+        Count = StRaRouteCount(48, NULL, 0x73, NULL, NULL);
+        LOCK_TCPIP_CORE();
+        for (k = 1; k <= 9; k++)
+        {
+            if (StRouterIndex(&Rt[k]) < 0)
+                Hi++;
+        }
+        UNLOCK_TCPIP_CORE();
+        _snprintf(Detail, sizeof(Detail), "%lu routers kept (of %d), %u of the 9 without an entry, %lu routes", Routers,
+                  LWIP_ND6_NUM_ROUTERS, Hi, Count);
+        StResult(Routers == LWIP_ND6_NUM_ROUTERS && Hi >= 1 && Count == 9,
+                 "router table full: the route information of every advertisement is kept, also of a router without an entry", Detail);
+
+        /* the hop limit of an advertisement of a router without an entry counts, its M flag does not */
+        OldFlags = Eth->Ra6Flags;
+        for (k = 9; k >= 1; k--)
+        {
+            LOCK_TCPIP_CORE();
+            Idx = StRouterIndex(&Rt[k]);
+            UNLOCK_TCPIP_CORE();
+            if (Idx < 0)
+                break;
+        }
+        if (k >= 1)
+        {
+            n = StOptSlla(Opts, Mac);
+            StInject(Eth, StRa(&Rt[k], 61, 0x80, 1800, Opts, n), FALSE);
+            Ok = Eth->Ra6HopLimit == 61 && !(Eth->Ra6Flags & TCP_IPV6_IF_RA_MANAGED);
+            _snprintf(Detail, sizeof(Detail), "hop limit %u flags 0x%x", Eth->Ra6HopLimit, Eth->Ra6Flags);
+            StResult(Ok, "router table full: a router without an entry sets the hop limit and not the M and O flags", Detail);
+        }
+
+        /* a router of higher preference takes the place of a medium one; a lower one does not */
+        Mac[5] = 0x1b;
+        n = StOptSlla(Opts, Mac);
+        StInject(Eth, StRa(&Rt[11], 0, 0x18, 1800, Opts, n), FALSE);     /* low */
+        LOCK_TCPIP_CORE();
+        Idx = StRouterIndex(&Rt[11]);
+        UNLOCK_TCPIP_CORE();
+        StResult(Idx < 0, "router table full: a router of lower preference than all of them gets no entry", NULL);
+        Mac[5] = 0x1a;
+        n = StOptSlla(Opts, Mac);
+        StInject(Eth, StRa(&Rt[10], 0, 0x08, 1800, Opts, n), FALSE);     /* high */
+        LOCK_TCPIP_CORE();
+        Idx = StRouterIndex(&Rt[10]);
+        UNLOCK_TCPIP_CORE();
+        StResult(Idx >= 0 && StRouterCount() == LWIP_ND6_NUM_ROUTERS,
+                 "router table full: a router of higher preference takes the entry of a lower one", NULL);
+
+        /* all go */
+        for (k = 1; k <= 11; k++)
+        {
+            Mac[5] = (UCHAR)(0x10 + k);
+            Prefix[4] = 0x73; Prefix[5] = (UCHAR)k;
+            n = StOptSlla(Opts, Mac);
+            if (k <= 9)
+                n += StOptRio(Opts + n, 2, 48, 0, 0, Prefix);
+            StInject(Eth, StRa(&Rt[k], 33, 0x00, 0, Opts, n), FALSE);
+        }
+        StSleep(2500);
+    }
+    LOCK_TCPIP_CORE();
+    Eth->Ra6HopLimit = OldHop;
+    Eth->Ra6Flags = OldFlags;
+    UNLOCK_TCPIP_CORE();
+}
+
 static VOID
 StTestRaExtras(PIP_INTERFACE Eth)
 {
@@ -3173,6 +3586,7 @@ StThread(PVOID Context)
     }
     StTestStableIds(Eth);
     StTestRaExtras(Eth);
+    StTestRaFollowups(Eth);
     StTestTemporary(Eth);
     StTestSlots(Eth);
     StTestDupHold(Eth);

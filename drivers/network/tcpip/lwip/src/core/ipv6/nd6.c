@@ -129,6 +129,9 @@ static s8_t nd6_select_router(const ip6_addr_t *ip6addr, struct netif *netif);
 static u8_t nd6_router_rank(u8_t flags);
 static s8_t nd6_get_router(const ip6_addr_t *router_addr, struct netif *netif);
 static s8_t nd6_new_router(const ip6_addr_t *router_addr, struct netif *netif);
+static void nd6_free_router(s8_t i);
+static u8_t nd6_make_router_room(u8_t flags);
+static void nd6_default_route_option(struct netif *netif, s8_t i, u8_t preference, u32_t lifetime, u8_t ra_flags);
 static s8_t nd6_get_onlink_prefix(const ip6_addr_t *prefix, struct netif *netif);
 static s8_t nd6_new_onlink_prefix(const ip6_addr_t *prefix, struct netif *netif);
 static s8_t nd6_get_next_hop_entry(const ip6_addr_t *ip6addr, struct netif *netif);
@@ -665,6 +668,11 @@ nd6_input(struct pbuf *p, struct netif *inp)
     if (i < 0) {
       /* Create a new router entry. */
       i = nd6_new_router(ip6_current_src_addr(), inp);
+      /* NitroOS: a full router table gives way to a default router that is better than one it has (see
+         nd6_make_router_room); an advertisement of lifetime 0 is not a default router and takes no entry from it */
+      if (i < 0 && ra_hdr->router_lifetime != 0 && nd6_make_router_room(ra_hdr->flags)) {
+        i = nd6_new_router(ip6_current_src_addr(), inp);
+      }
       /* NitroOS: user mode learns of a new default router (when there is one) */
 #ifdef LWIP_HOOK_ND6_ROUTES_CHANGED
       if (i >= 0) {
@@ -674,14 +682,18 @@ nd6_input(struct pbuf *p, struct netif *inp)
     }
 
     if (i < 0) {
-      /* Could not create a new router entry. */
-      pbuf_free(p);
+      /* NitroOS: no router entry for this sender (the table is full of routers that rank as well or better, or
+         there is no neighbour entry). The advertisement is not dropped for it: RFC 4861 6.3.4 has the prefix
+         information, the MTU and the other options, and RFC 8106 the DNS servers and search lists, taken from every
+         valid advertisement whether or not the sender is kept as a router. What needs the entry is left: the
+         router's lifetime and preference, its link-layer address from the options, its M and O flags (those of the
+         routers kept stay), a ::/0 route option. Its other route information options still make routes of the
+         route table (through the sender, as everything about the route is in the option). */
       ND6_STATS_INC(nd6.memerr);
-      return;
+    } else {
+      /* Re-set invalidation timer. */
+      default_router_list[i].invalidation_timer = lwip_htons(ra_hdr->router_lifetime);
     }
-
-    /* Re-set invalidation timer. */
-    default_router_list[i].invalidation_timer = lwip_htons(ra_hdr->router_lifetime);
 
     /* Re-set default timer values. */
 #if LWIP_ND6_ALLOW_RA_UPDATES
@@ -696,21 +708,26 @@ nd6_input(struct pbuf *p, struct netif *inp)
 
     /* Update flags in local entry (incl. preference). NitroOS: a changed preference changes which router the
        destinations use, so the next hops lwIP kept are found again */
-    if (nd6_router_rank(default_router_list[i].flags) != nd6_router_rank(ra_hdr->flags)) {
-      nd6_clear_destination_cache();
+    if (i >= 0) {
+      if (nd6_router_rank(default_router_list[i].flags) != nd6_router_rank(ra_hdr->flags)) {
+        nd6_clear_destination_cache();
+      }
+      default_router_list[i].flags = ra_hdr->flags;
     }
-    default_router_list[i].flags = ra_hdr->flags;
 
     /* NitroOS: the current hop limit and the M and O flags go to the stack (ra6.c), after this router's entry has its
-       flags; 0 for the hop limit is "unspecified" (RFC 4861 4.2) */
+       flags; 0 for the hop limit is "unspecified" (RFC 4861 4.2). A sender without an entry gives the hop limit
+       (RFC 4861 6.3.4: every advertisement does) but no flags: they are those of the routers that are kept */
 #ifdef LWIP_HOOK_ND6_RA_HEADER
-    LWIP_HOOK_ND6_RA_HEADER(inp, ra_hdr->current_hop_limit, ra_hdr->flags);
+    LWIP_HOOK_ND6_RA_HEADER(inp, ra_hdr->current_hop_limit, (u8_t)(i >= 0 ? ra_hdr->flags : 0));
 #endif
 
 #if LWIP_IPV6_DHCP6
     /* Trigger DHCPv6 if enabled */
-    dhcp6_nd6_ra_trigger(inp, ra_hdr->flags & ND6_RA_FLAG_MANAGED_ADDR_CONFIG,
-      ra_hdr->flags & ND6_RA_FLAG_OTHER_CONFIG);
+    if (i >= 0) {
+      dhcp6_nd6_ra_trigger(inp, ra_hdr->flags & ND6_RA_FLAG_MANAGED_ADDR_CONFIG,
+        ra_hdr->flags & ND6_RA_FLAG_OTHER_CONFIG);
+    }
 #endif
 
     /* Offset to options. */
@@ -761,7 +778,7 @@ nd6_input(struct pbuf *p, struct netif *inp)
           goto lenerr_drop_free_return;
         }
         lladdr_opt = (struct lladdr_option *)buffer;
-        if ((default_router_list[i].neighbor_entry != NULL) &&
+        if (i >= 0 && (default_router_list[i].neighbor_entry != NULL) &&
             (default_router_list[i].neighbor_entry->state == ND6_INCOMPLETE)) {
           SMEMCPY(default_router_list[i].neighbor_entry->lladdr, lladdr_opt->addr, inp->hwaddr_len);
           default_router_list[i].neighbor_entry->state = ND6_REACHABLE;
@@ -860,6 +877,16 @@ nd6_input(struct pbuf *p, struct netif *inp)
         plen = route_opt->prefix_length;
         prf = (u8_t)((route_opt->preference >> 3) & 3);
         if (plen > 128 || (plen > 64 && option_len8 < 3) || (plen > 0 && option_len8 < 2) || prf == 2) {
+          break;
+        }
+        if (plen == 0 && i >= 0) {
+          /* RFC 4191 3.1: the preference and lifetime of a ::/0 option are those of the sender as a default router,
+             in place of the ones in the header; it is not a route of its own. A route of the route table that an
+             earlier advertisement of this sender made for ::/0 (it had no entry then) goes. */
+          u8_t zero[16];
+          memset(zero, 0, sizeof(zero));
+          LWIP_HOOK_ND6_ROUTE_INFO(inp, ip6_current_src_addr(), zero, 0, prf, 0);
+          nd6_default_route_option(inp, i, prf, lwip_htonl(route_opt->route_lifetime), ra_hdr->flags);
           break;
         }
         have = (u8_t)(((u8_t)option_len8 - 1) << 3);
@@ -1168,20 +1195,7 @@ nd6_tmr(void)
       if (default_router_list[i].invalidation_timer <= ND6_TMR_INTERVAL / 1000) {
         /* No more than 1 second remaining. Clear this entry. Also clear any of
          * its destination cache entries, as per RFC 4861 Sec. 5.3 and 6.3.5. */
-        s8_t j;
-        for (j = 0; j < LWIP_ND6_NUM_DESTINATIONS; j++) {
-          if (ip6_addr_eq(&destination_cache[j].next_hop_addr,
-               &default_router_list[i].neighbor_entry->next_hop_address)) {
-             ip6_addr_set_any(&destination_cache[j].destination_addr);
-          }
-        }
-        default_router_list[i].neighbor_entry->isrouter = 0;
-        default_router_list[i].neighbor_entry = NULL;
-        default_router_list[i].invalidation_timer = 0;
-        default_router_list[i].flags = 0;
-#ifdef LWIP_HOOK_ND6_ROUTES_CHANGED
-        LWIP_HOOK_ND6_ROUTES_CHANGED();
-#endif
+        nd6_free_router(i);
       } else {
         default_router_list[i].invalidation_timer -= ND6_TMR_INTERVAL / 1000;
       }
@@ -1955,6 +1969,127 @@ nd6_find_route(const ip6_addr_t *ip6addr)
   }
 
   return NULL;
+}
+
+/**
+ * Remove a default router entry (its lifetime ended, or it gave way to a better one): the destination cache entries
+ * that go through it are cleared too (RFC 4861 5.3, 6.3.5), user mode hears of the change.
+ *
+ * @param i the index of an entry that is in use
+ */
+static void
+nd6_free_router(s8_t i)
+{
+  s8_t j;
+
+  for (j = 0; j < LWIP_ND6_NUM_DESTINATIONS; j++) {
+    if (ip6_addr_eq(&destination_cache[j].next_hop_addr,
+         &default_router_list[i].neighbor_entry->next_hop_address)) {
+       ip6_addr_set_any(&destination_cache[j].destination_addr);
+    }
+  }
+  default_router_list[i].neighbor_entry->isrouter = 0;
+  default_router_list[i].neighbor_entry = NULL;
+  default_router_list[i].invalidation_timer = 0;
+  default_router_list[i].flags = 0;
+#ifdef LWIP_HOOK_ND6_ROUTES_CHANGED
+  LWIP_HOOK_ND6_ROUTES_CHANGED();
+#endif
+}
+
+/**
+ * The router table is full and an advertisement from a sender that has no entry has a non-zero router lifetime: make
+ * room for it where that costs nothing, or where the new router is the better one. NitroOS policy (RFC 4861 6.3.4
+ * leaves the choice to the host, 6.3.5 only says an entry whose lifetime ended goes), the first of:
+ *  1. an entry that has no lifetime left (its advertisement said 0, or a ::/0 route option did);
+ *  2. an entry whose router has no neighbour entry state to reach it by (INCOMPLETE: it never answered, or stopped:
+ *     nd6_select_router does not use it either);
+ *  3. the entry with the lowest preference (RFC 4191 2.1) when that is lower than the new one's, and of those the one
+ *     with the least lifetime left.
+ * With none of these the new sender stays without an entry: the advertisement's other options are taken all the
+ * same (see the RA handler).
+ *
+ * @param flags the flags of the new advertisement (its router preference)
+ * @return 1 if an entry is free now, 0 if not
+ */
+static u8_t
+nd6_make_router_room(u8_t flags)
+{
+  s8_t i, victim = -1;
+  u8_t victim_class = 0, victim_rank = 0, new_rank = nd6_router_rank(flags);
+  u32_t victim_left = 0;
+
+  for (i = 0; i < LWIP_ND6_NUM_ROUTERS; i++) {
+    u8_t cls, rank;
+
+    if (default_router_list[i].neighbor_entry == NULL) {
+      return 1; /* not full: the entry was not made for another reason (no neighbour entry) */
+    }
+    rank = nd6_router_rank(default_router_list[i].flags);
+    if (default_router_list[i].invalidation_timer == 0) {
+      cls = 3;
+    } else if (default_router_list[i].neighbor_entry->state == ND6_INCOMPLETE) {
+      cls = 2;
+    } else if (rank < new_rank) {
+      cls = 1;
+    } else {
+      continue;
+    }
+    if (victim < 0 || cls > victim_class ||
+        (cls == victim_class && cls == 1 &&
+         (rank < victim_rank ||
+          (rank == victim_rank && default_router_list[i].invalidation_timer < victim_left)))) {
+      victim = i;
+      victim_class = cls;
+      victim_rank = rank;
+      victim_left = default_router_list[i].invalidation_timer;
+    }
+  }
+  if (victim < 0) {
+    return 0;
+  }
+  nd6_free_router(victim);
+  return 1;
+}
+
+/**
+ * A route information option with prefix length 0 (RFC 4191 3.1) of an advertisement of the router in entry i: its
+ * preference and lifetime replace those of the advertisement's header. The router lifetime of an entry is 16 bits
+ * (RFC 4861 4.2) and the option's 32: a longer one is cut to 65535 seconds, and so is the infinite one, which the
+ * router's next advertisement renews. The M and O flags and the rest stay those of the header.
+ *
+ * @param netif the interface the advertisement came in on
+ * @param i the router entry
+ * @param preference the 2 bits of the option's preference field (the reserved value was dropped by the caller)
+ * @param lifetime the route lifetime of the option, in seconds
+ * @param ra_flags the flags of the advertisement header
+ */
+static void
+nd6_default_route_option(struct netif *netif, s8_t i, u8_t preference, u32_t lifetime, u8_t ra_flags)
+{
+  u8_t old_flags = default_router_list[i].flags;
+  u8_t new_flags = (u8_t)((old_flags & ~ND6_RA_PREFERENCE_MASK) | ((preference & 3) << 3));
+  u32_t old_timer = default_router_list[i].invalidation_timer;
+  u32_t new_timer = (lifetime > 0xFFFF) ? 0xFFFF : lifetime;
+
+  default_router_list[i].flags = new_flags;
+  default_router_list[i].invalidation_timer = new_timer;
+
+  if (nd6_router_rank(old_flags) != nd6_router_rank(new_flags)) {
+    nd6_clear_destination_cache();
+  }
+  if ((old_timer == 0) != (new_timer == 0)) {
+#ifdef LWIP_HOOK_ND6_ROUTES_CHANGED
+    LWIP_HOOK_ND6_ROUTES_CHANGED();
+#endif
+    nd6_clear_destination_cache();
+#ifdef LWIP_HOOK_ND6_RA_HEADER
+    /* the M and O flags follow the routers that have a lifetime */
+    LWIP_HOOK_ND6_RA_HEADER(netif, 0, (u8_t)(new_timer ? ra_flags : 0));
+#endif
+  }
+  LWIP_UNUSED_ARG(netif);
+  LWIP_UNUSED_ARG(ra_flags);
 }
 
 /**

@@ -11,8 +11,10 @@
  * that passed its checks (link-local source, hop limit 255); nothing is stored while IPv6 is off.
  *
  * - LibTCPDnssl6Input reads one DNSSL option from the packet and keeps its domain names with their lifetime
- *   (RA6_MAX_SUFFIXES over all interfaces, a neighbour that sends them all the time replaces its own entries
- *   first); IP_IPV6_RA_ENTRY_ID hands them to iphlpapi (GetAdaptersAddresses FirstDnsSuffix, the resolver's
+ *   (RA6_MAX_SUFFIXES over all interfaces; when they are all in use the interface that holds the most gives one up,
+ *   its least recently refreshed, so an interface that sends names all the time replaces its own first and cannot
+ *   push out those of the others; it is the interface, not the router, because an interface's search list is one
+ *   list whoever sent a name and the stored name carries no sender); IP_IPV6_RA_ENTRY_ID hands them to iphlpapi (GetAdaptersAddresses FirstDnsSuffix, the resolver's
  *   search list, ipconfig /all). The option comes from the network: every length is checked here, and a name is
  *   kept only when it is made of letters, digits, '-' and '_' (what a host name or a punycode label has).
  * - LibNd6RaHeader keeps the M and O flags and the current hop limit of an interface, in its IP_INTERFACE. The
@@ -47,12 +49,13 @@ typedef struct _RA6_SUFFIX
     BOOLEAN Infinite;
     ULONG IfIndex;
     ULONGLONG Expire;           /* Ra6Now() */
+    ULONGLONG Seq;              /* Ra6Sequence when stored or last refreshed: the smallest is the oldest */
     CHAR Name[RA6_NAME_MAX + 1];
 } RA6_SUFFIX;
 
 /* Guarded by the lwIP core lock */
 static RA6_SUFFIX Ra6Suffixes[RA6_MAX_SUFFIXES];
-static ULONG Ra6Next;
+static ULONGLONG Ra6Sequence;
 /* The option as read from the packet (core lock: one reader at a time) */
 static UCHAR Ra6Option[RA6_OPTION_MAX];
 
@@ -96,6 +99,40 @@ Ra6SameName(const CHAR *A, const CHAR *B)
     return _stricmp(A, B) == 0;
 }
 
+/* All entries are in use: the one that gives way to a name of interface IfIndex. The interface that holds the most
+   entries loses its least recently refreshed (on a tie the one the name is for: it replaces its own); core lock held */
+static
+ULONG
+Ra6Victim(ULONG IfIndex)
+{
+    ULONG i, j, Best = 0, BestCount = 0, BestIf = 0, Victim = RA6_MAX_SUFFIXES;
+
+    for (i = 0; i < RA6_MAX_SUFFIXES; i++)
+    {
+        ULONG Count = 0;
+
+        for (j = 0; j < RA6_MAX_SUFFIXES; j++)
+        {
+            if (Ra6Suffixes[j].InUse && Ra6Suffixes[j].IfIndex == Ra6Suffixes[i].IfIndex)
+                Count++;
+        }
+        if (Count > BestCount || (Count == BestCount && Ra6Suffixes[i].IfIndex == IfIndex))
+        {
+            Best = i;
+            BestCount = Count;
+            BestIf = Ra6Suffixes[i].IfIndex;
+        }
+    }
+
+    for (i = 0; i < RA6_MAX_SUFFIXES; i++)
+    {
+        if (Ra6Suffixes[i].InUse && Ra6Suffixes[i].IfIndex == BestIf &&
+            (Victim == RA6_MAX_SUFFIXES || Ra6Suffixes[i].Seq < Ra6Suffixes[Victim].Seq))
+            Victim = i;
+    }
+    return Victim == RA6_MAX_SUFFIXES ? Best : Victim;
+}
+
 /* One domain name of the list, in the dotted form, for the interface: stores it, or removes it for a lifetime of 0
    (RFC 8106 5.2); core lock held */
 static
@@ -127,8 +164,9 @@ Ra6SetSuffix(ULONG IfIndex, const CHAR *Name, ULONG Lifetime)
     }
 
     if (Slot == RA6_MAX_SUFFIXES)
-        Slot = Ra6Next++ % RA6_MAX_SUFFIXES;
+        Slot = Ra6Victim(IfIndex);
 
+    Ra6Suffixes[Slot].Seq = ++Ra6Sequence;
     Ra6Suffixes[Slot].InUse = TRUE;
     Ra6Suffixes[Slot].IfIndex = IfIndex;
     RtlCopyMemory(Ra6Suffixes[Slot].Name, Name, strlen(Name) + 1);
