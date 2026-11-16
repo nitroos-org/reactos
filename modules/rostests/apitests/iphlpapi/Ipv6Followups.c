@@ -296,6 +296,74 @@ static void TestSolicitRequest(ULONG Index, BOOL On)
     ok(Gone, "an unanswered neighbour is dropped after the solicitations\n");
 }
 
+/* IOCTL_IP6_SOLICIT in a loop does not flood the link: an address being asked for is not asked again, and a cached
+ * neighbour is asked for at most 16 times a second (the stack's bound) */
+static void TestSolicitBound(ULONG Index)
+{
+    TCP_IPV6_SOLICIT_REQUEST Request;
+    SOCKADDR_INET Target;
+    NEIGH_TABLE6 *Table = NULL;
+    DWORD Before, After, Start;
+    NTSTATUS Status;
+    ULONG i, Failed;
+
+    if (!IsUp(Index))
+    {
+        skip("The interface is not up\n");
+        return;
+    }
+
+    /* an address nobody answers: the first request makes an incomplete entry, the others leave it to the timer */
+    Ipv6Parse(&Target, "fe80::6c0b:8:9:a", 0);
+    memset(&Request, 0, sizeof(Request));
+    Request.IfIndex = Index;
+    memcpy(Request.Address, &Target.Ipv6.sin6_addr, 16);
+    Before = NeighbourSolicitations();
+    for (i = 0, Failed = 0; i < 200; i++)
+        if (!NT_SUCCESS(SendRequest(IOCTL_IP6_SOLICIT, &Request, sizeof(Request))))
+            Failed++;
+    After = NeighbourSolicitations();
+    ok(Failed == 0, "%lu of 200 solicit requests failed\n", Failed);
+    ok(After - Before <= 3, "%lu neighbour solicitations for 200 requests for one address being asked for\n",
+       After - Before);
+
+    /* a cached neighbour */
+    if (pGetIpNetTable2(AF_INET6, (PVOID *)&Table) != NO_ERROR || !Table)
+        return;
+    for (i = 0; i < Table->NumEntries; i++)
+    {
+        const NEIGH_ROW6 *Source = &Table->Table[i];
+
+        if (Source->InterfaceIndex == Index && Source->State >= NLNS_STALE && Source->State != NLNS_PERMANENT &&
+            Source->PhysicalAddressLength == 6)
+        {
+            memcpy(Request.Address, &Source->Address.Ipv6.sin6_addr, 16);
+            break;
+        }
+    }
+    if (i == Table->NumEntries)
+    {
+        pFreeMibTable(Table);
+        skip("No cached neighbour\n");
+        return;
+    }
+    pFreeMibTable(Table);
+    Sleep(1100);
+    Start = GetTickCount();
+    Before = NeighbourSolicitations();
+    for (i = 0, Failed = 0; i < 500; i++)
+    {
+        Status = SendRequest(IOCTL_IP6_SOLICIT, &Request, sizeof(Request));
+        if (!NT_SUCCESS(Status))
+            Failed++;
+    }
+    After = NeighbourSolicitations();
+    ok(Failed == 0, "%lu of 500 solicit requests for a cached neighbour failed\n", Failed);
+    /* 16 in every second the loop touched, and a few the stack sends by itself (probes of other neighbours) */
+    ok(After - Before >= 1 && After - Before <= 16 * ((GetTickCount() - Start) / 1000 + 2) + 4,
+       "%lu neighbour solicitations for 500 requests in %lu ms\n", After - Before, GetTickCount() - Start);
+}
+
 /* ResolveIpNetEntry2: solicitations only, for an unknown neighbour and for a cached one */
 static void TestResolveWire(ULONG Index)
 {
@@ -320,7 +388,9 @@ static void TestResolveWire(ULONG Index)
     Error = pResolveIpNetEntry2(&Row, NULL);
     ok(Error == ERROR_BAD_NET_NAME, "resolve a missing neighbour: %lu\n", Error);
     After = NeighbourSolicitations();
-    ok(After - Before >= 1 && After - Before <= 4, "%lu neighbour solicitations for a missing neighbour\n", After - Before);
+    /* the stack asks three times; the counter also counts what it sends for other neighbours in these three seconds
+       (a probe of the router), which a slow Debug build lets in */
+    ok(After - Before >= 1 && After - Before <= 6, "%lu neighbour solicitations for a missing neighbour\n", After - Before);
 
     /* a cached neighbour: resolved, and asked for once more */
     if (pGetIpNetTable2(AF_INET6, (PVOID *)&Table) != NO_ERROR || !Table)
@@ -709,6 +779,8 @@ START_TEST(Ipv6Followups)
     if (On && Index)
     {
         TestResolveWire(Index);
+        if (is_reactos())
+            TestSolicitBound(Index);
         TestNeighboursOfDownInterfaces();
         TestNotifyFamilies(Index);
     }

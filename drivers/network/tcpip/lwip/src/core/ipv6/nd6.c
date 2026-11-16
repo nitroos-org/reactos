@@ -2642,14 +2642,16 @@ nd6_restart_netif(struct netif *netif)
  * NitroOS: ask a neighbour for its link-layer address with neighbour solicitations alone (what
  * ResolveIpNetEntry2 does): no data packet is sent. Without a neighbour cache entry for the address an INCOMPLETE
  * one is created, which the timer asks for up to LWIP_ND6_MAX_MULTICAST_SOLICIT times; one that exists is asked for
- * once more and keeps its state until the advertisement comes.
+ * once more and keeps its state until the advertisement comes, unless it is INCOMPLETE (the timer is asking for it).
  *
  * @param netif the interface the neighbour is on
  * @param addr the address of the neighbour
+ * @param now 0: send nothing at once (the caller bounds the rate): a new entry is left to the timer, an existing
+ *            one is not asked for again
  * @return ERR_OK, ERR_MEM when the neighbour cache has no room for it
  */
 err_t
-nd6_solicit_neighbor(struct netif *netif, const ip6_addr_t *addr)
+nd6_solicit_neighbor(struct netif *netif, const ip6_addr_t *addr, u8_t now)
 {
   s8_t i;
 
@@ -2663,9 +2665,11 @@ nd6_solicit_neighbor(struct netif *netif, const ip6_addr_t *addr)
     neighbor_cache[i].netif = netif;
     neighbor_cache[i].q = NULL;
     neighbor_cache[i].state = ND6_INCOMPLETE;
-    neighbor_cache[i].counter.probes_sent = 1;
-    nd6_send_neighbor_cache_probe(&neighbor_cache[i], ND6_SEND_FLAG_MULTICAST_DEST);
-  } else {
+    neighbor_cache[i].counter.probes_sent = now ? 1 : 0;
+    if (now) {
+      nd6_send_neighbor_cache_probe(&neighbor_cache[i], ND6_SEND_FLAG_MULTICAST_DEST);
+    }
+  } else if (now && neighbor_cache[i].state != ND6_INCOMPLETE) {
     nd6_send_ns(netif, addr, ND6_SEND_FLAG_MULTICAST_DEST);
   }
   return ERR_OK;

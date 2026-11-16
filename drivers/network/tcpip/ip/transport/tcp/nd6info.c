@@ -166,9 +166,37 @@ TCPQueryIpv6Nd(PVOID Out, ULONG OutSize)
     return Size;
 }
 
+/* The solicitations IOCTL_IP6_SOLICIT sends at once, for all callers together, in one second. The request is not
+ * privileged, and an address that is cached would be asked for once more at every call: a caller asking in a loop
+ * must not put a flood of solicitations on the link. Beyond these an address without an entry still gets one, which
+ * the nd6 timer asks for (one solicitation a second for each of at most LWIP_ND6_NUM_NEIGHBORS entries, as for a
+ * datagram to an unknown neighbour), and an address with one is not asked for again. */
+#define SOLICIT6_PER_SECOND 16
+
+static ULONGLONG Solicit6WindowStart;
+static ULONG Solicit6InWindow;
+
+/* Lwip core lock held */
+static
+u8_t
+Solicit6MaySendNow(VOID)
+{
+    ULONGLONG Now = KeQueryInterruptTime();
+
+    if (Now - Solicit6WindowStart >= 10000000ULL)
+    {
+        Solicit6WindowStart = Now;
+        Solicit6InWindow = 0;
+    }
+    if (Solicit6InWindow >= SOLICIT6_PER_SECOND)
+        return 0;
+    Solicit6InWindow++;
+    return 1;
+}
+
 /* IOCTL_IP6_SOLICIT: neighbour solicitations for an address of an interface, no data packet (ResolveIpNetEntry2).
  * Not privileged: any caller that can open the device may ask, as any caller may send a datagram that starts
- * neighbour discovery too. PASSIVE_LEVEL */
+ * neighbour discovery too; the solicitations sent at once are bounded (SOLICIT6_PER_SECOND). PASSIVE_LEVEL */
 NTSTATUS
 DispSolicit6(PIRP Irp, PIO_STACK_LOCATION IrpSp)
 {
@@ -201,7 +229,8 @@ DispSolicit6(PIRP Irp, PIO_STACK_LOCATION IrpSp)
     {
         if (ip6_addr_islinklocal(&Address))
             ip6_addr_assign_zone(&Address, IP6_UNICAST, netif);
-        Status = (nd6_solicit_neighbor(netif, &Address) == ERR_OK) ? STATUS_SUCCESS : STATUS_INSUFFICIENT_RESOURCES;
+        Status = (nd6_solicit_neighbor(netif, &Address, Solicit6MaySendNow()) == ERR_OK) ? STATUS_SUCCESS :
+                                                                                           STATUS_INSUFFICIENT_RESOURCES;
     }
     else
         Status = STATUS_NOT_FOUND;

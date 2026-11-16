@@ -81,7 +81,7 @@ void nd6_adjust_mld_membership(struct netif *netif, s8_t addr_idx, u8_t new_stat
 #endif /* LWIP_IPV6_MLD */
 void nd6_restart_netif(struct netif *netif);
 /* NitroOS: neighbour solicitations for an address, no data packet (ResolveIpNetEntry2) */
-err_t nd6_solicit_neighbor(struct netif *netif, const ip6_addr_t *addr);
+err_t nd6_solicit_neighbor(struct netif *netif, const ip6_addr_t *addr, u8_t now);
 
 #ifdef __cplusplus
 }
