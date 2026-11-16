@@ -420,8 +420,9 @@ static PWSTR ToNtPath(PCWSTR app)
 /* ---- rules that were not (or not fully) pushed: the rule service reports them (FwPushGetReport) ---- */
 
 #define REPORT_CHARS 1024
-static ULONG g_Rejected, g_RejectedBlock, g_Partial;
+static ULONG g_Rejected, g_RejectedBlock, g_Partial, g_BroadBlock;
 static BOOL g_NamesCut;
+static BOOL g_OsKnown; static ULONG g_OsMajor, g_OsMinor;   /* the running OS, for Platform (read once per push) */
 static WCHAR g_RejNames[REPORT_CHARS];
 
 /* A rejected Allow rule is narrower than written (harmless); a rejected Block rule leaves its traffic to the Allow rules
@@ -452,8 +453,9 @@ static VOID Note(PCWSTR tag, const FW_RULE *r)
                   LA4 LA6 RA4 RA42 RA6 RA62 IFType App
      service:     Svc (the kernel cannot resolve the owning service; "*" limits the rule to services, which the kernel
                   cannot tell apart either; handled by the caller)
-     no packet condition: Name Desc EmbedCtxt Edge Defer (edge traversal widens, it never narrows) Platform Platform2
-                  (OS applicability of the rule, not a packet property; semantics VERIFY ON ORACLE)
+     no packet condition: Name Desc EmbedCtxt Edge Defer (edge traversal widens, it never narrows)
+     OS applicability: Platform Platform2 (not a packet property; evaluated by PlatformApplies against the running OS:
+                  a rule whose list does not include it is not enforced at all, as on Windows)
      Security with the value NotRequired is the absence of the condition.
      narrowing, not matchable: Security (any other value), RMauth, RUAuth, LUAuth, LUOwn, LOwner, AppPkgId, IF, TTK,
                   TTK2_*
@@ -494,6 +496,75 @@ static ULONG UnmatchableCondition(const FW_RULE *r, BOOL svcCondition)
         cond = COND_NARROWING;
     }
     return cond;
+}
+
+/* ---- OS applicability of a rule: Platform / Platform2 ----
+   Windows writes one "Platform=2:<major>:<minor>" token per entry (2 = VER_PLATFORM_WIN32_NT) and, directly after an
+   entry that means "this version or later", "Platform2=GTEQ"; an entry without it means exactly that version. A rule
+   with at least one entry is in force only when one entry matches the running OS; otherwise it is ignored, Allow and
+   Block alike (measured on Windows Server 2022, 10.0: Platform=2:6:1 and 2:6:1|2:6:2 are not enforced, 2:6:2+GTEQ,
+   2:10:0 and 2:10:0+GTEQ are, 2:10:1+GTEQ is not; the GTEQ belongs to the entry in front of it, "6.2+,6.1" and
+   "6.1,6.2+" both apply). A rule without Platform applies to every OS. */
+#define PLAT_NONE   0   /* no Platform token */
+#define PLAT_YES    1   /* an entry matches the running OS */
+#define PLAT_NO     2   /* entries, none of which matches: the rule is not in force on this OS */
+#define PLAT_BAD    3   /* a token that does not parse and no entry that matches: unknown, treated as an unmatchable condition */
+
+/* one field of an entry: 1 to 5 decimal digits, at most 65535, followed by stop. No blank, sign or overflow (wcstoul
+   would take " 2", "-2" or a saturated 4294967295, a version that never matches: a Block rule with such a list would
+   be left out silently instead of being handled as a list that does not parse) */
+static BOOL ParsePlatformField(PCWSTR *pv, WCHAR stop, ULONG *out)
+{
+    PCWSTR v = *pv; ULONG n = 0, digits = 0;
+    while (*v >= L'0' && *v <= L'9' && digits < 5) { n = n * 10 + (ULONG)(*v - L'0'); v++; digits++; }
+    if (!digits || n > 0xFFFF || *v != stop) return FALSE;
+    *pv = stop ? v + 1 : v;
+    *out = n;
+    return TRUE;
+}
+
+static BOOL ParsePlatformEntry(PCWSTR v, ULONG *id, ULONG *maj, ULONG *min)
+{
+    if (!v) return FALSE;
+    return ParsePlatformField(&v, L':', id) && ParsePlatformField(&v, L':', maj) && ParsePlatformField(&v, 0, min);
+}
+
+static ULONG PlatformApplies(const FW_RULE *r, ULONG osMajor, ULONG osMinor)
+{
+    ULONG i, entries = 0; BOOL hit = FALSE, bad = FALSE;
+    for (i = 0; i < r->Raw.N; i++)
+    {
+        PCWSTR k = r->Raw.T[i].Key;
+        if (!_wcsicmp(k, L"Platform"))
+        {
+            ULONG id, maj, min; BOOL gteq = FALSE; PCWSTR entry = r->Raw.T[i].Val;
+            if (i + 1 < r->Raw.N && !_wcsicmp(r->Raw.T[i + 1].Key, L"Platform2"))
+            {
+                PCWSTR op = r->Raw.T[i + 1].Val;
+                i++;
+                if (op && !_wcsicmp(op, L"GTEQ")) gteq = TRUE; else { bad = TRUE; continue; }   /* unknown operator */
+            }
+            if (!ParsePlatformEntry(entry, &id, &maj, &min)) { bad = TRUE; continue; }
+            entries++;
+            if (id == 2 && (gteq ? (osMajor > maj || (osMajor == maj && osMinor >= min)) : (osMajor == maj && osMinor == min))) hit = TRUE;
+        }
+        else if (!_wcsicmp(k, L"Platform2")) bad = TRUE;     /* an operator with no entry in front of it */
+    }
+    if (hit) return PLAT_YES;
+    if (bad) return PLAT_BAD;
+    return entries ? PLAT_NO : PLAT_NONE;
+}
+
+/* the version the kernel reports (RtlGetVersion: no application manifest or compatibility shim in the way) */
+static VOID QueryOsVersion(VOID)
+{
+    typedef LONG (NTAPI *PFN_RTLGETVERSION)(OSVERSIONINFOW *);
+    HMODULE nt = GetModuleHandleW(L"ntdll.dll");
+    PFN_RTLGETVERSION fn = nt ? (PFN_RTLGETVERSION)GetProcAddress(nt, "RtlGetVersion") : NULL;
+    OSVERSIONINFOW vi;
+    g_OsKnown = FALSE;
+    memset(&vi, 0, sizeof(vi)); vi.dwOSVersionInfoSize = sizeof(vi);
+    if (fn && fn(&vi) >= 0) { g_OsKnown = TRUE; g_OsMajor = vi.dwMajorVersion; g_OsMinor = vi.dwMinorVersion; }
 }
 
 /* ---- one source rule -> one or more kernel rules ----
@@ -567,19 +638,24 @@ typedef enum { BR_OK, BR_SKIPPED, BR_REJECTED } BR_RESULT;
    token resolves, a program path that does not resolve, too many kernel rules, out of memory): nothing is pushed
    for it, b is as before. The caller counts and reports it. *pPartial is set when a Block rule is pushed but a
    part of it is not enforced (an IPv6 half whose keywords do not resolve, tokens that gave nothing, or a key that
-   is not known). *pDropped is set when a Block rule is pushed without a narrowing condition (it blocks more). */
-static BR_RESULT BuildRule(BUF *b, const FW_RULE *r, BOOL v6, ULONG *pieces, ULONG maxPieces, BOOL *pPartial, BOOL *pDropped)
+   is not known). *pDropped is set when a Block rule is pushed without a narrowing condition (it blocks more), *pBroad
+   when that condition was the rule's only restriction (the pushed rule then applies to all traffic of its direction
+   and profiles). A rule whose Platform list excludes the running OS is BR_SKIPPED too: it is not in force there. */
+static BR_RESULT BuildRule(BUF *b, const FW_RULE *r, BOOL v6, ULONG *pieces, ULONG maxPieces, BOOL *pPartial, BOOL *pDropped, BOOL *pBroad)
 {
     NITROFW_RULE hdr; DIM lp, rp, la4, ra4, la6, ra6, ic;
     ULONG start = (ULONG)b->len, i, ifm = 0, first = *pieces, cond;
     PWSTR nt = NULL; PCWSTR v, svc = NULL, icKey; BR_RESULT res = BR_REJECTED;
-    BOOL block, lScoped, rScoped, do4, do6, ok = TRUE;
-    ULONG bad = 0, bad4, bad6;
+    BOOL block, lScoped, rScoped, do4, do6, ok = TRUE, bare = FALSE;
+    ULONG bad = 0, bad4, bad6, plat;
 
-    *pPartial = FALSE; *pDropped = FALSE;
+    *pPartial = FALSE; *pDropped = FALSE; *pBroad = FALSE;
     memset(&hdr, 0, sizeof(hdr));
     hdr.Action = r->Action ? NITROFW_ACTION_ALLOW : NITROFW_ACTION_BLOCK;
     block = !r->Action;
+    plat = PlatformApplies(r, g_OsMajor, g_OsMinor);
+    if (plat != PLAT_NONE && !g_OsKnown) plat = PLAT_BAD;   /* the running OS is not known: nothing can be said */
+    if (plat == PLAT_NO) return BR_SKIPPED;                 /* not in force on this OS (Windows ignores such a rule) */
     hdr.Direction = (UCHAR)(r->Dir == 2 ? NITROFW_DIR_OUT : NITROFW_DIR_IN);
     hdr.Protocol = (USHORT)r->Protocol;
     hdr.ProfileMask = (r->Profiles == FWP_ANY_COM) ? FWP_ALL : (r->Profiles & FWP_ALL);
@@ -610,6 +686,7 @@ static BR_RESULT BuildRule(BUF *b, const FW_RULE *r, BOOL v6, ULONG *pieces, ULO
        allow, so the Allow rule is rejected (reported). A Block rule is pushed without it: it blocks more than written
        (a key that is not known: reported as not fully enforced, it may add to the rule). */
     cond = UnmatchableCondition(r, svc != NULL || (r->Svc && !wcscmp(r->Svc, L"*")));
+    if (plat == PLAT_BAD && cond == COND_NONE) cond = COND_NARROWING;   /* a Platform list that cannot be evaluated narrows the rule */
     if (cond != COND_NONE && !block) ok = FALSE;
     if (r->App && *r->App)
     {
@@ -629,6 +706,8 @@ static BR_RESULT BuildRule(BUF *b, const FW_RULE *r, BOOL v6, ULONG *pieces, ULO
        other family without any condition = broader than the rule. */
     lScoped = (la4.cnt || la6.cnt) && !la4.wild && !la6.wild;
     rScoped = (ra4.cnt || ra6.cnt) && !ra4.wild && !ra6.wild;
+    /* nothing but direction and profile is left of the rule once its unmatchable condition is dropped */
+    bare = hdr.Protocol == NITROFW_PROTO_ANY && !DimScoped(&lp) && !DimScoped(&rp) && !DimScoped(&ic) && !lScoped && !rScoped && !nt && !ifm;
     if (!lScoped && !rScoped)
     {
         /* no address condition: one kernel rule (more if a list is long) for both families */
@@ -663,17 +742,18 @@ fail:
 done:
     if (res != BR_OK) { b->len = start; *pieces = first; }
     else if (block && cond == COND_UNKNOWN) *pPartial = TRUE;
-    else if (block && cond == COND_NARROWING) *pDropped = TRUE;
+    else if (block && cond == COND_NARROWING) { *pDropped = TRUE; *pBroad = bare; }
     if (nt) HeapFree(GetProcessHeap(), 0, nt);
     DimFree(&lp); DimFree(&rp); DimFree(&la4); DimFree(&ra4); DimFree(&la6); DimFree(&ra6); DimFree(&ic);
     return res;
 }
 
-VOID FwPushGetReport(ULONG *pRejected, ULONG *pRejectedBlock, ULONG *pPartial, PWSTR Names, ULONG Chars)
+VOID FwPushGetReport(ULONG *pRejected, ULONG *pRejectedBlock, ULONG *pPartial, ULONG *pBroadBlock, PWSTR Names, ULONG Chars)
 {
     if (pRejected) *pRejected = g_Rejected;
     if (pRejectedBlock) *pRejectedBlock = g_RejectedBlock;
     if (pPartial) *pPartial = g_Partial;
+    if (pBroadBlock) *pBroadBlock = g_BroadBlock;
     if (Names && Chars) { wcsncpy(Names, g_RejNames, Chars - 1); Names[Chars - 1] = 0; }
 }
 
@@ -682,12 +762,13 @@ DWORD FwPushToKernel(ULONGLONG gen, BOOL *pPresent)
     FW_RULESET rs; BUF b = { 0 }; NITROFW_POLICY pol; HANDLE h; DWORD err, ret, i;
     ULONG cnt = 0; ULONG bit, pass; BOOL v6on;
     HKEY hk; DWORD enforce = 1, cb = sizeof(DWORD), t;
-    g_Rejected = 0; g_RejectedBlock = 0; g_Partial = 0; g_RejNames[0] = 0; g_NamesCut = FALSE;
+    g_Rejected = 0; g_RejectedBlock = 0; g_Partial = 0; g_BroadBlock = 0; g_RejNames[0] = 0; g_NamesCut = FALSE;
     if (pPresent) *pPresent = FALSE;
     h = CreateFileW(NITROFW_USER_PATH, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
     if (h == INVALID_HANDLE_VALUE) return GetLastError();
     if (pPresent) *pPresent = TRUE;
     v6on = KernelHasIpv6(h);
+    QueryOsVersion();
     err = FwStoreLoad(&rs);
     if (err) { CloseHandle(h); return err; }
     memset(&pol, 0, sizeof(pol));
@@ -715,9 +796,9 @@ DWORD FwPushToKernel(ULONGLONG gen, BOOL *pPresent)
     for (pass = 0; pass < 2; pass++)
     for (i = 0; i < rs.N; i++)
     {
-        ULONG before = cnt, savedLen = (ULONG)b.len; BOOL partial = FALSE, dropped = FALSE, isBlock = !rs.R[i].Action; BR_RESULT br;
+        ULONG before = cnt, savedLen = (ULONG)b.len; BOOL partial = FALSE, dropped = FALSE, broad = FALSE, isBlock = !rs.R[i].Action; BR_RESULT br;
         if (!rs.R[i].Enabled || (pass == 0) != isBlock) continue;
-        br = BuildRule(&b, &rs.R[i], v6on, &cnt, NITROFW_MAX_RULES, &partial, &dropped);
+        br = BuildRule(&b, &rs.R[i], v6on, &cnt, NITROFW_MAX_RULES, &partial, &dropped, &broad);
         /* a rule that would take the policy past its size limit is rejected on its own: the final size check below
            would fail the whole push and leave the previous policy in force */
         if (br == BR_OK && b.len > NITROFW_MAX_POLICY_SIZE) { b.len = savedLen; cnt = before; br = BR_REJECTED; }
@@ -731,6 +812,12 @@ DWORD FwPushToKernel(ULONGLONG gen, BOOL *pPresent)
         {
             g_Partial++;
             Note(L"Block rule not fully enforced", &rs.R[i]);
+        }
+        else if (br == BR_OK && broad)
+        {
+            /* the condition was the rule's only restriction: the rule now blocks every packet of its direction and profiles */
+            g_BroadBlock++;
+            Note(L"Block rule with only a condition the kernel cannot match, now blocks all traffic of its direction", &rs.R[i]);
         }
         else if (br == BR_OK && dropped) Note(L"Block rule pushed without a condition the kernel cannot match (blocks more)", &rs.R[i]);
     }

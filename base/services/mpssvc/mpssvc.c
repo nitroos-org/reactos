@@ -61,36 +61,39 @@ static VOID Report(DWORD err, BOOL present)
 }
 
 /* Rules the push could not carry (or not fully): HKLM\SOFTWARE\ReactOS\Nitro\Firewall LastPushRejectedRules (all),
-   LastPushRejectedBlockRules (the Block rules among them: NOT enforced), LastPushPartialBlockRules, LastPushRejectedNames,
+   LastPushRejectedBlockRules (the Block rules among them: NOT enforced), LastPushPartialBlockRules,
+   LastPushBroadBlockRules (Block rules whose only restriction is a condition the filter cannot match: the filter blocks
+   all traffic of their direction, Windows only the traffic that matches the condition), LastPushRejectedNames,
    and one Application event per change of that state (not per push). */
 static VOID ReportRules(VOID)
 {
-    static ULONG lastRej, lastRejBlock, lastPar; static WCHAR lastNames[1024];
-    ULONG rej, rejBlock, par; WCHAR names[1024]; HKEY hk; DWORD disp;
-    FwPushGetReport(&rej, &rejBlock, &par, names, 1024);
+    static ULONG lastRej, lastRejBlock, lastPar, lastBroad; static WCHAR lastNames[1024];
+    ULONG rej, rejBlock, par, broad; WCHAR names[1024]; HKEY hk; DWORD disp;
+    FwPushGetReport(&rej, &rejBlock, &par, &broad, names, 1024);
     if (!RegCreateKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\ReactOS\\Nitro\\Firewall", 0, NULL, 0, KEY_SET_VALUE, NULL, &hk, &disp))
     {
         RegSetValueExW(hk, L"LastPushRejectedRules", 0, REG_DWORD, (BYTE *)&rej, 4);
         RegSetValueExW(hk, L"LastPushRejectedBlockRules", 0, REG_DWORD, (BYTE *)&rejBlock, 4);
         RegSetValueExW(hk, L"LastPushPartialBlockRules", 0, REG_DWORD, (BYTE *)&par, 4);
+        RegSetValueExW(hk, L"LastPushBroadBlockRules", 0, REG_DWORD, (BYTE *)&broad, 4);
         RegSetValueExW(hk, L"LastPushRejectedNames", 0, REG_SZ, (BYTE *)names, (DWORD)((wcslen(names) + 1) * sizeof(WCHAR)));
         RegCloseKey(hk);
     }
-    if ((rej || par) && (rej != lastRej || rejBlock != lastRejBlock || par != lastPar || wcscmp(names, lastNames)))
+    if ((rej || par || broad) && (rej != lastRej || rejBlock != lastRejBlock || par != lastPar || broad != lastBroad || wcscmp(names, lastNames)))
     {
         HANDLE hes = RegisterEventSourceW(NULL, g_Name);
         if (hes)
         {
             WCHAR msg[1280]; PCWSTR str[1];
-            _snwprintf(msg, 1279, L"NitroOS Firewall: %lu rule(s) were not pushed to the filter (%lu of them Block rule(s): not enforced) and %lu Block rule(s) are not fully enforced: %ls",
-                       rej, rejBlock, par, names);
+            _snwprintf(msg, 1279, L"NitroOS Firewall: %lu rule(s) were not pushed to the filter (%lu of them Block rule(s): not enforced), %lu Block rule(s) are not fully enforced and %lu Block rule(s) have only a condition the filter cannot match and now block all traffic of their direction: %ls",
+                       rej, rejBlock, par, broad, names);
             msg[1279] = 0; str[0] = msg;
-            ReportEventW(hes, EVENTLOG_ERROR_TYPE, 0, 1, NULL, 1, 0, str, NULL);
+            ReportEventW(hes, (rej || par) ? EVENTLOG_ERROR_TYPE : EVENTLOG_WARNING_TYPE, 0, 1, NULL, 1, 0, str, NULL);
             DeregisterEventSource(hes);
         }
         OutputDebugStringW(L"mpssvc: firewall rules not pushed or not fully enforced\n");
     }
-    lastRej = rej; lastRejBlock = rejBlock; lastPar = par; wcscpy(lastNames, names);
+    lastRej = rej; lastRejBlock = rejBlock; lastPar = par; lastBroad = broad; wcscpy(lastNames, names);
 }
 
 /* ---- address changes ----
