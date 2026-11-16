@@ -59,6 +59,14 @@ NTAPI
 RtlRandomEx(
     _Inout_ PULONG Seed);
 
+/* rawip6.c */
+BOOLEAN RawIp6Input(struct pbuf *p, struct netif *inp, u8_t nexth);
+VOID RawIp6DeliverDeferred(VOID);
+BOOLEAN RawIp6HasDeferred(VOID);
+BOOLEAN Ip6IsLocalAddress(const ip6_addr_t *Address);
+err_t Ip6SendFragmented(struct pbuf *p, const ip6_addr_t *Source, const ip6_addr_t *Dest, u8_t Hops, u8_t TClass,
+                        u8_t Protocol, struct netif *netif);
+
 /* echo6.c */
 int Echo6Input(struct pbuf *p, struct netif *inp);
 VOID Echo6CompleteDone(VOID);
@@ -74,10 +82,13 @@ VOID Echo6Startup(VOID);
 /* Datagrams waiting for UDP6DeliverDeferred: beyond these the newest are dropped */
 #define UDP6_DEFERRED_MAX       4096
 #define UDP6_DEFERRED_MAX_BYTES (16 * 1024 * 1024)
-/* The largest UDP payload this stack sends over IPv6: lwIP keeps a datagram with its IPv6 header in buffers of
-   16-bit length, so 65535 - 40 - 8 = 65487 bytes, where Windows sends 65535 - 8 = 65527 (oracle). A larger one is
-   WSAEMSGSIZE, as Windows answers beyond 65527 */
-#define UDP6_MAX_PAYLOAD        (0xFFFF - 40 - sizeof(UDP_HEADER))
+/* The largest UDP payload over IPv6: 65535 - 8 = 65527 bytes, as Windows (oracle; WSAEMSGSIZE beyond). lwIP keeps
+   a datagram with its IPv6 header in buffers of 16-bit length, so one of more than 65535 - 40 - 8 = 65487 bytes goes
+   out as fragments built here (Ip6SendFragmented, rawip6.c). lwIP's reassembly cannot hold such a datagram either,
+   so this machine receives at most 65487 bytes: a larger datagram to one of its own addresses is refused at the
+   send (WSAEMSGSIZE) rather than lost (release notes, ipv6-notes.md) */
+#define UDP6_MAX_PAYLOAD        (0xFFFF - sizeof(UDP_HEADER))
+#define UDP6_MAX_LWIP_PAYLOAD   (0xFFFF - 40 - sizeof(UDP_HEADER))
 
 typedef struct _UDP6_GROUP {
     UCHAR Group[16];
@@ -106,6 +117,7 @@ typedef struct _UDP6_DEFERRED {
     USHORT DstPort;
     UCHAR Zone;                 /* the interface it arrived on (multicast membership) */
     BOOLEAN Multicast;
+    BOOLEAN Unreachable;        /* no datagram: an ICMPv6 port unreachable for the socket on Src:SrcPort */
     DG_RX_INFO6 Info;
     UINT Length;
     UCHAR Data[ANYSIZE_ARRAY];
@@ -272,6 +284,44 @@ Udp6AllocateDeferred(UINT Length)
 }
 
 /*
+ * An ICMPv6 destination unreachable, port unreachable (RFC 4443 3.1, code 4) whose invoking packet is a UDP datagram
+ * we sent: the socket that sent it is told (DGReportPortUnreachable, from UDP6DeliverDeferred: not under the core
+ * lock). p at the ICMPv6 header, core lock held, not freed here. The invoking packet must start with its UDP
+ * header right after the IPv6 header (extension headers are not followed) and come from one of our addresses
+ */
+static
+VOID
+Udp6IcmpInput(struct pbuf *p)
+{
+    UCHAR Msg[8 + 40 + 8];
+    PUDP6_DEFERRED D;
+    ip6_addr_t Inner;
+
+    if (p->tot_len < sizeof(Msg) || pbuf_copy_partial(p, Msg, sizeof(Msg), 0) != sizeof(Msg))
+        return;
+    if (Msg[0] != ICMP6_TYPE_DUR || Msg[1] != ICMP6_DUR_PORT || (Msg[8] >> 4) != 6 || Msg[8 + 6] != IP6_NEXTH_UDP)
+        return;
+    if (ip6_chksum_pseudo(p, IP6_NEXTH_ICMP6, p->tot_len, ip6_current_src_addr(), ip6_current_dest_addr()) != 0)
+        return;
+
+    /* The invoking packet's source is ours (the destination of this message) */
+    RtlCopyMemory(Inner.addr, &Msg[8 + 8], 16);
+    ip6_addr_clear_zone(&Inner);
+    if (!ip6_addr_zoneless_eq(&Inner, ip6_current_dest_addr()) && !ip6_addr_isloopback(&Inner))
+        return;
+
+    D = Udp6AllocateDeferred(0);
+    if (!D)
+        return;
+    D->Unreachable = TRUE;
+    RtlCopyMemory(D->Src, &Msg[8 + 8], 16);
+    RtlCopyMemory(D->Dst, &Msg[8 + 24], 16);
+    RtlCopyMemory(&D->SrcPort, &Msg[8 + 40], sizeof(USHORT));
+    RtlCopyMemory(&D->DstPort, &Msg[8 + 42], sizeof(USHORT));
+    Udp6Defer(D);
+}
+
+/*
  * NitroOS hook LWIP_HOOK_IP6_NEXTH_INPUT (lwipopts.h): ip6_input hands over the payload of a datagram for us after
  * its extension headers and reassembly, p at the transport header, core lock held. Returns 1 when it took p (it is
  * freed here), 0 to let lwIP go on (any other protocol).
@@ -287,11 +337,25 @@ LibIp6NexthInput(struct pbuf *p, struct netif *inp, u8_t nexth)
 
     if (!TCPIpv6Enabled)
         return 0;
-    /* ICMPv6: the answers to our echo requests (echo6.c) */
+    /* ICMPv6: a copy for the raw ICMPv6 sockets, a port unreachable for the UDP socket that sent the datagram,
+       the answers to our echo requests (echo6.c) */
     if (nexth == IP6_NEXTH_ICMP6)
+    {
+        RawIp6Input(p, inp, nexth);
+        Udp6IcmpInput(p);
         return Echo6Input(p, inp);
+    }
     if (nexth != IP6_NEXTH_UDP)
+    {
+        /* Another protocol: to the raw sockets of it, if there are any (lwIP answers the others with a parameter
+           problem, and takes TCP itself) */
+        if (nexth != IP6_NEXTH_TCP && RawIp6Input(p, inp, nexth))
+        {
+            pbuf_free(p);
+            return 1;
+        }
         return 0;
+    }
 
     Src = ip6_current_src_addr();
     Dst = ip6_current_dest_addr();
@@ -384,6 +448,34 @@ Udp6Deliver(PUDP6_DEFERRED D)
     Dst.Type = IP_ADDRESS_V6;
     RtlCopyMemory(Dst.Address.IPv6Address, D->Dst, 16);
 
+    /* A port unreachable: the socket on the datagram's source address and port that would receive there (the one
+       bound to the address itself rather than the wildcard, the latest bound among equals) */
+    if (D->Unreachable)
+    {
+        for (AddrFile = AddrSearchFirst(&Src, D->SrcPort, IPPROTO_UDP, &SearchContext);
+             AddrFile != NULL;
+             AddrFile = AddrSearchNext(&SearchContext))
+        {
+            if (AddrFile->Address.Type == IP_ADDRESS_V6 &&
+                (!Best || !AddrIsUnspecified(&AddrFile->Address) || AddrIsUnspecified(&Best->Address)))
+            {
+                if (Best)
+                    DereferenceObject(Best);
+                Best = AddrFile;
+            }
+            else
+            {
+                DereferenceObject(AddrFile);
+            }
+        }
+        if (Best)
+        {
+            DGReportPortUnreachable(Best);
+            DereferenceObject(Best);
+        }
+        return;
+    }
+
     /* DGDeliverData reads the payload at Data (IPPacket->Header for raw IP only) */
     RtlZeroMemory(&Packet, sizeof(Packet));
     Packet.Type = IP_ADDRESS_V6;
@@ -441,6 +533,9 @@ UDP6DeliverDeferred(VOID)
     /* The echo requests the input answered (echo6.c) */
     Echo6CompleteDone();
 
+    /* The raw IPv6 sockets' packets (rawip6.c) */
+    RawIp6DeliverDeferred();
+
     /* Cheap when there is nothing: every IPv6 input calls this */
     if (IsListEmpty(&Udp6Deferred))
         return;
@@ -488,14 +583,13 @@ Udp6DeliveryWorker(PDEVICE_OBJECT DeviceObject, PVOID Context)
 }
 
 /* Delivers the queue from a system thread: now when this is one, else from a work item (inline when there is
-   no memory for one: the datagram may then be lost as before, never more than that) */
-static
+   no memory for one: the datagram may then be lost as before, never more than that). rawip6.c too */
 VOID
 Udp6DeliverFromSystemThread(VOID)
 {
     PIO_WORKITEM Item;
 
-    if (IsListEmpty(&Udp6Deferred))
+    if (IsListEmpty(&Udp6Deferred) && !RawIp6HasDeferred())
         return;
     if (PsIsSystemThread(PsGetCurrentThread()))
     {
@@ -677,7 +771,12 @@ UDPSendDatagram6(
     /* Replies to this datagram pass the inbound filter */
     NITROFW_NOTE_UDP_SEND(LocalPort, &RemoteIp, RemotePort, Multicast);
 
-    Result = ip6_output_if(p, &Source, &Dest, Multicast ? McastHops : Hops, 0, IP6_NEXTH_UDP, netif);
+    /* More than lwIP can hold with the IPv6 header goes out in fragments built here; to this machine it would not be
+       reassembled (UDP6_MAX_PAYLOAD) */
+    if (DataSize > UDP6_MAX_LWIP_PAYLOAD && (netif == LoopNetif || Ip6IsLocalAddress(&Dest)))
+        Result = ERR_VAL;
+    else
+        Result = Ip6SendFragmented(p, &Source, &Dest, Multicast ? McastHops : Hops, 0, IP6_NEXTH_UDP, netif);
 
     /* Only a datagram that was sent (or is kept for neighbour discovery, which counts as sent) reaches the members
        here: nobody sees one whose sendto fails */
@@ -708,7 +807,9 @@ UDPSendDatagram6(
     UNLOCK_TCPIP_CORE();
 
     /* A datagram lwIP keeps for neighbour discovery counts as sent, as an IPv4 one waiting for ARP */
-    if (Result != ERR_OK && Result != ERR_INPROGRESS)
+    if (Result == ERR_VAL)
+        Status = STATUS_BUFFER_TOO_SMALL;
+    else if (Result != ERR_OK && Result != ERR_INPROGRESS)
         Status = (Result == ERR_MEM || Result == ERR_BUF) ? STATUS_INSUFFICIENT_RESOURCES : STATUS_NETWORK_UNREACHABLE;
 
     /* The looped copy, and anything the send put on the queue meanwhile */

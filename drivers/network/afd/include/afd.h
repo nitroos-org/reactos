@@ -221,6 +221,7 @@ typedef struct _AFD_STORED_DATAGRAM {
     UINT Len;
     PTRANSPORT_ADDRESS Address;
     AFD_RECV_PKTINFO PktInfo;
+    NTSTATUS Error;     /* not a datagram: the receive that takes it fails with this (STATUS_PORT_UNREACHABLE) */
     CHAR Buffer[1];
 } AFD_STORED_DATAGRAM, *PAFD_STORED_DATAGRAM;
 
@@ -306,6 +307,7 @@ typedef struct _AFD_FCB {
     BOOLEAN AcceptWorkQueued;
     PIO_WORKITEM RecvRelaunchWorkItem;
     BOOLEAN RecvRelaunchQueued;
+    BOOLEAN NoPortUnreachable; /* SIO_UDP_CONNRESET off: an ICMP port unreachable is not reported */
     PEPROCESS OwnerProcess; /* stream socket: the process that created it (referenced), for the window's quota */
 } AFD_FCB, *PAFD_FCB;
 
@@ -480,6 +482,7 @@ IO_COMPLETION_ROUTINE AcceptExReceiveComplete;
 IO_COMPLETION_ROUTINE ReceiveComplete;
 
 IO_COMPLETION_ROUTINE PacketSocketRecvComplete;
+USHORT AfdDatagramReceiveFlags(PAFD_FCB FCB);
 
 NTSTATUS AfdApplyReceiveHint(PAFD_FCB FCB);
 

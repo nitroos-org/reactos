@@ -63,6 +63,7 @@ extern void func_ReverseLookup6(void);
 extern void func_open_osfhandle(void);
 extern void func_rcvbuf(void);
 extern void func_rcvwindow(void);
+extern void func_rawsock(void);
 extern void func_recv(void);
 extern void func_send(void);
 extern void func_selecttimeval(void);
@@ -166,6 +167,7 @@ const struct test winetest_testlist[] =
     { "ReverseLookup6", func_ReverseLookup6 },
     { "rcvbuf", func_rcvbuf },
     { "rcvwindow", func_rcvwindow },
+    { "rawsock", func_rawsock },
     { "recv", func_recv },
     { "send", func_send },
     { "selecttimeval", func_selecttimeval },

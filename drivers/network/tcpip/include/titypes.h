@@ -86,6 +86,7 @@ typedef struct _DATAGRAM_RECEIVE_REQUEST {
     DATAGRAM_COMPLETION_ROUTINE UserComplete;   /* Completion routine */
     PVOID UserContext;                     /* Pointer to context information */
     PIRP Irp;                              /* IRP on behalf of */
+    ULONG Flags;                           /* The TDI receive flags (TDI_RECEIVE_NITRO_PORT_UNREACHABLE) */
 } DATAGRAM_RECEIVE_REQUEST, *PDATAGRAM_RECEIVE_REQUEST;
 
 /* Datagram build routine prototype */
@@ -169,6 +170,12 @@ typedef struct _ADDRESS_FILE {
     BOOLEAN McastLoop;
     ULONG McastIf;
     struct _UDP6_MEMBERSHIPS *Groups6;
+    /* A raw socket: whether its opener may use any protocol and the header-include option (Administrators,
+       LocalSystem, LocalService, NetworkService; main.c). An unprivileged one (an ICMP or ICMPv6 socket of a
+       standard user) sends echo requests only. HeaderIncl6: IPV6_HDRINCL of a raw IPv6 socket (off by default;
+       HeaderIncl above is the IPv4 one, which is about receives as well) */
+    BOOLEAN RawPrivileged;
+    BOOLEAN HeaderIncl6;
 
     /* The following members are used to control event notification */
 

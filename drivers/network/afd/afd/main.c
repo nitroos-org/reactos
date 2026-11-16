@@ -419,6 +419,121 @@ AfdIsCreatePacketNt6(PAFD_CREATE_PACKET ConnectInfo, ULONG EaValueLength)
     return (Nt6Consistent && !Nt5Consistent);
 }
 
+/*
+ * Raw sockets: who may open one. Windows (Windows Server 2022 and 10, evidence v6raw-20261116) lets Administrators,
+ * LocalSystem, LocalService and NetworkService open raw sockets of any protocol and everybody else only IPPROTO_ICMP
+ * and IPPROTO_ICMPV6 ones, in either family: socket() fails with WSAEACCES for the others. Checked here, at the
+ * socket's creation, against the creator's token (the transport checks every raw address it opens as well, and
+ * holds an unprivileged ICMP socket to echo requests).
+ */
+static PSECURITY_DESCRIPTOR AfdRawSD;
+
+static NTSTATUS
+AfdCreateRawSD(VOID)
+{
+    PSID Sids[4];
+    SECURITY_DESCRIPTOR AbsSD;
+    ULONG DaclSize, RelSize = 0, i;
+    PACL Dacl;
+    NTSTATUS Status;
+
+    Sids[0] = SeExports->SeAliasAdminsSid;
+    Sids[1] = SeExports->SeLocalSystemSid;
+    Sids[2] = SeExports->SeLocalServiceSid;
+    Sids[3] = SeExports->SeNetworkServiceSid;
+
+    DaclSize = sizeof(ACL);
+    for (i = 0; i < RTL_NUMBER_OF(Sids); i++)
+        DaclSize += sizeof(ACCESS_ALLOWED_ACE) + RtlLengthSid(Sids[i]);
+    Dacl = ExAllocatePoolWithTag(PagedPool, DaclSize, TAG_AFD_DATA_BUFFER);
+    if (!Dacl)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = RtlCreateSecurityDescriptor(&AbsSD, SECURITY_DESCRIPTOR_REVISION);
+    if (NT_SUCCESS(Status))
+        Status = RtlCreateAcl(Dacl, DaclSize, ACL_REVISION);
+    for (i = 0; NT_SUCCESS(Status) && i < RTL_NUMBER_OF(Sids); i++)
+        Status = RtlAddAccessAllowedAce(Dacl, ACL_REVISION, GENERIC_ALL, Sids[i]);
+    if (NT_SUCCESS(Status))
+        Status = RtlSetDaclSecurityDescriptor(&AbsSD, TRUE, Dacl, FALSE);
+    if (NT_SUCCESS(Status))
+        Status = RtlSetOwnerSecurityDescriptor(&AbsSD, SeExports->SeAliasAdminsSid, FALSE);
+    if (NT_SUCCESS(Status))
+        Status = RtlSetGroupSecurityDescriptor(&AbsSD, SeExports->SeLocalSystemSid, FALSE);
+    if (NT_SUCCESS(Status))
+    {
+        Status = RtlAbsoluteToSelfRelativeSD(&AbsSD, NULL, &RelSize);
+        if (Status == STATUS_BUFFER_TOO_SMALL)
+        {
+            AfdRawSD = ExAllocatePoolWithTag(PagedPool, RelSize, TAG_AFD_DATA_BUFFER);
+            Status = AfdRawSD ? RtlAbsoluteToSelfRelativeSD(&AbsSD, AfdRawSD, &RelSize) : STATUS_INSUFFICIENT_RESOURCES;
+            if (!NT_SUCCESS(Status) && AfdRawSD)
+            {
+                ExFreePoolWithTag(AfdRawSD, TAG_AFD_DATA_BUFFER);
+                AfdRawSD = NULL;
+            }
+        }
+        else if (NT_SUCCESS(Status))
+        {
+            Status = STATUS_UNSUCCESSFUL;
+        }
+    }
+    ExFreePoolWithTag(Dacl, TAG_AFD_DATA_BUFFER);
+    return Status;
+}
+
+/* A transport name \Device\RawIp[\<protocol>] (any case): TRUE and the protocol (255 when none can be read) */
+static BOOLEAN
+AfdRawTransportProtocol(const WCHAR *Name, ULONG Size, PULONG Protocol)
+{
+    static const WCHAR Prefix[] = L"\\Device\\RawIp";
+    UNICODE_STRING Have, Want;
+    ULONG Chars = Size / sizeof(WCHAR), Len = RTL_NUMBER_OF(Prefix) - 1, i, Value = 0;
+
+    if (Chars < Len)
+        return FALSE;
+    Have.Buffer = (PWCH)Name;
+    Have.Length = Have.MaximumLength = (USHORT)(Len * sizeof(WCHAR));
+    RtlInitUnicodeString(&Want, Prefix);
+    if (!RtlEqualUnicodeString(&Have, &Want, TRUE))
+        return FALSE;
+    if (Chars > Len && Name[Len] != L'\\')
+        return FALSE;
+
+    *Protocol = 255;
+    if (Chars > Len + 1)
+    {
+        for (i = Len + 1; i < Chars && Name[i] >= L'0' && Name[i] <= L'9' && Value <= 255; i++)
+            Value = Value * 10 + (Name[i] - L'0');
+        if (i == Chars && i > Len + 1 && Value <= 255)
+            *Protocol = Value;
+    }
+    return TRUE;
+}
+
+/* May the creator of this socket open a raw socket of Protocol (a kernel-mode creator always may) */
+static BOOLEAN
+AfdRawAllowed(PIRP Irp, PIO_STACK_LOCATION IrpSp, ULONG Protocol)
+{
+    PIO_SECURITY_CONTEXT Sc = IrpSp->Parameters.Create.SecurityContext;
+    ACCESS_MASK Granted;
+    NTSTATUS AccessStatus;
+    BOOLEAN Allowed;
+
+    if (Protocol == IPPROTO_ICMP || Protocol == 58 /* IPPROTO_ICMPV6 */)
+        return TRUE;
+    if (Irp->RequestorMode == KernelMode)
+        return TRUE;
+    if (!AfdRawSD || !Sc || !Sc->AccessState)
+        return FALSE;
+
+    SeLockSubjectContext(&Sc->AccessState->SubjectSecurityContext);
+    Allowed = SeAccessCheck(AfdRawSD, &Sc->AccessState->SubjectSecurityContext, TRUE, FILE_WRITE_DATA, 0, NULL,
+                            IoGetFileObjectGenericMapping(), UserMode, &Granted, &AccessStatus);
+    SeUnlockSubjectContext(&Sc->AccessState->SubjectSecurityContext);
+    return Allowed;
+}
+
 static NTSTATUS NTAPI
 AfdCreateSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                 PIO_STACK_LOCATION IrpSp) {
@@ -482,6 +597,20 @@ AfdCreateSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
             Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
             IoCompleteRequest( Irp, IO_NO_INCREMENT );
             return STATUS_INVALID_PARAMETER;
+        }
+
+        /* A raw socket of a protocol its creator may not use: WSAEACCES, as on Windows */
+        {
+            ULONG RawProtocol;
+
+            if( AfdRawTransportProtocol(TransportName, SizeOfTransportName, &RawProtocol) &&
+                !AfdRawAllowed(Irp, IrpSp, RawProtocol) )
+            {
+                AFD_DbgPrint(MIN_TRACE,("Raw protocol %lu refused\n", RawProtocol));
+                Irp->IoStatus.Status = STATUS_ACCESS_DENIED;
+                IoCompleteRequest( Irp, IO_NO_INCREMENT );
+                return STATUS_ACCESS_DENIED;
+            }
         }
 
         AFD_DbgPrint(MID_TRACE,("EaInfo: %p, EaInfoValue: %p\n",
@@ -1801,6 +1930,11 @@ AfdUnload(PDRIVER_OBJECT DriverObject)
 {
     UNREFERENCED_PARAMETER(DriverObject);
     AfdFreeCapture();
+    if (AfdRawSD)
+    {
+        ExFreePoolWithTag(AfdRawSD, TAG_AFD_DATA_BUFFER);
+        AfdRawSD = NULL;
+    }
 }
 
 NTSTATUS NTAPI
@@ -1837,6 +1971,10 @@ DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
     }
 
     AfdInitCapture();
+
+    /* Without it nobody but kernel mode gets a raw socket other than ICMP and ICMPv6 ones */
+    if (!NT_SUCCESS(AfdCreateRawSD()))
+        AFD_DbgPrint(MIN_TRACE,("No raw socket security descriptor\n"));
 
     /* Budget of the nonpaged receive windows: 1/128 of the RAM (32 MB of 4 GB), at least 4 MB, at most 64 MB */
     {

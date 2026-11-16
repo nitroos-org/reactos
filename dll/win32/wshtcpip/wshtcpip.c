@@ -48,6 +48,15 @@ C_ASSERT(sizeof(SOCKADDR_IN6_LH) == WSH_SOCKADDR_IN6_LENGTH);
 #define WSH_SET6_MCASTLOOP  0x08
 #define WSH_SET6_DONTFRAG   0x10
 #define WSH_SET6_MCASTIF    0x20
+#define WSH_SET6_HDRINCL    0x40
+#define WSH_SET6_RECVTCLASS 0x80
+#define WSH_SET6_RECVIF     0x100
+#define WSH_SET6_UNICASTIF  0x200
+#define WSH_SET6_MTUD       0x400
+/* Not in every SDK header of this tree */
+#ifndef IPV6_MTU_DISCOVER
+#define IPV6_MTU_DISCOVER   71
+#endif
 
 /*
  * An AF_INET6 socket is made only while the stack says it has IPv6 on (Tcpip\Parameters\Ipv6Enable, read by
@@ -417,6 +426,80 @@ WshKeptOption(
     return NULL;
 }
 
+/* The socket type an IPPROTO_IPV6 option needs, as Windows answers it: WSAEINVAL (get and set) otherwise */
+static
+BOOLEAN
+WshIpv6OptionFitsType(
+    _In_ PSOCKET_CONTEXT Context,
+    _In_ INT OptionName)
+{
+    switch (OptionName)
+    {
+        case IPV6_HDRINCL:
+            return Context->SocketType == SOCK_RAW;
+        case IPV6_RECVTCLASS:
+        case IPV6_RECVIF:
+            return Context->SocketType == SOCK_DGRAM || Context->SocketType == SOCK_RAW;
+        default:
+            return TRUE;
+    }
+}
+
+/*
+ * Whether the caller may use the header-include option of a raw socket: Windows answers WSAEACCES at setsockopt to
+ * anybody but Administrators, LocalSystem, LocalService and NetworkService (evidence v6raw-20261116). The stack
+ * holds the rule for every request that reaches it (tcpip.sys, by the socket's opener); this gives the error at once
+ * for a socket that is not bound yet (whose option waits for the bind).
+ */
+static
+BOOLEAN
+WshRawPrivileged(VOID)
+{
+    static const ULONG Rids[][2] = { { SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS },
+                                     { SECURITY_LOCAL_SYSTEM_RID, 0 },
+                                     { SECURITY_LOCAL_SERVICE_RID, 0 },
+                                     { SECURITY_NETWORK_SERVICE_RID, 0 } };
+    SID_IDENTIFIER_AUTHORITY Nt = {SECURITY_NT_AUTHORITY};
+    BOOL Member;
+    PSID Sid;
+    ULONG i;
+
+    for (i = 0; i < RTL_NUMBER_OF(Rids); i++)
+    {
+        if (!AllocateAndInitializeSid(&Nt, Rids[i][1] ? 2 : 1, Rids[i][0], Rids[i][1], 0, 0, 0, 0, 0, 0, &Sid))
+            continue;
+        Member = FALSE;
+        if (!CheckTokenMembership(NULL, Sid, &Member))
+            Member = FALSE;
+        FreeSid(Sid);
+        if (Member)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+/* An interface index this machine has (IPV6_UNICAST_IF: WSAEINVAL for another, as on Windows) */
+static
+BOOLEAN
+WshInterfaceExists(
+    _In_ ULONG Index)
+{
+    typedef PCHAR (WINAPI *PIF_INDEXTONAME)(ULONG, PCHAR);
+    static PIF_INDEXTONAME IndexToName;
+    CHAR Name[260];
+
+    if (!IndexToName)
+    {
+        HMODULE Iphlpapi = LoadLibraryW(L"iphlpapi.dll");
+
+        if (Iphlpapi)
+            IndexToName = (PIF_INDEXTONAME)GetProcAddress(Iphlpapi, "if_indextoname");
+        if (!IndexToName)
+            return TRUE;    /* cannot tell: taken */
+    }
+    return IndexToName(Index, Name) != NULL;
+}
+
 /*
  * The IPPROTO_IPV6 options of an AF_INET6 socket, kept with the socket (a datagram socket's hop limits, multicast
  * loop and interface also go to the stack; IPV6_V6ONLY and the others do not reach it): what was set reads back, an
@@ -444,6 +527,17 @@ WshKeptIpv6Option(
         case IPV6_MULTICAST_LOOP: *Bit = WSH_SET6_MCASTLOOP; *Default = 1; *Boolean = TRUE; return &Context->Ipv6MulticastLoop;
         case IPV6_DONTFRAG:      *Bit = WSH_SET6_DONTFRAG; *Boolean = TRUE; return &Context->Ipv6DontFragment;
         case IPV6_MULTICAST_IF:  *Bit = WSH_SET6_MCASTIF; return &Context->Ipv6MulticastIf;
+        /* Windows Server 2022 and 10 (evidence v6raw-20261116): IPV6_HDRINCL a raw socket's (WSAEINVAL on
+         * another), IPV6_RECVTCLASS and IPV6_RECVIF a datagram or raw socket's (WSAEINVAL on a stream), all off by
+         * default and read back as 0 or 1; IPV6_UNICAST_IF an interface index (0 = none), IPV6_MTU_DISCOVER 0 to 3
+         * (0, IP_PMTUDISC_NOT_SET, by default) on any socket. The stack takes IPV6_HDRINCL; the others are kept
+         * with the socket (the control messages of the two receive switches are not delivered yet, the unicast
+         * interface is not enforced yet: release notes) */
+        case IPV6_HDRINCL:       *Bit = WSH_SET6_HDRINCL; *Boolean = TRUE; return &Context->Ipv6HdrIncl;
+        case IPV6_RECVTCLASS:    *Bit = WSH_SET6_RECVTCLASS; *Boolean = TRUE; return &Context->Ipv6RecvTclass;
+        case IPV6_RECVIF:        *Bit = WSH_SET6_RECVIF; *Boolean = TRUE; return &Context->Ipv6RecvIf;
+        case IPV6_UNICAST_IF:    *Bit = WSH_SET6_UNICASTIF; return &Context->Ipv6UnicastIf;
+        case IPV6_MTU_DISCOVER:  *Bit = WSH_SET6_MTUD; return &Context->Ipv6MtuDiscover;
         default: break;
     }
     return NULL;
@@ -521,6 +615,7 @@ GetTdiTypeId(
              case IPV6_MULTICAST_IF:    *TdiId = AO_OPTION_INDEX_MCASTIF; return;
              case IPV6_ADD_MEMBERSHIP:  *TdiId = AO_OPTION_INDEX_ADD_MCAST; return;
              case IPV6_DROP_MEMBERSHIP: *TdiId = AO_OPTION_INDEX_DEL_MCAST; return;
+             case IPV6_HDRINCL:         *TdiId = AO_OPTION_IP_HDRINCL; return;
              default: break;
           }
           break;
@@ -561,6 +656,11 @@ WSHGetSocketInformation(
             DPRINT1("Get: Unknown IPPROTO_IPV6 option: %d\n", OptionName);
             if (OptionLength) *OptionLength = 0;
             return WSAENOPROTOOPT;
+        }
+        if (!WshIpv6OptionFitsType(Context, OptionName))
+        {
+            if (OptionLength) *OptionLength = 0;
+            return WSAEINVAL;
         }
 
         if (!OptionLength || !OptionValue || *OptionLength < (INT)sizeof(CHAR))
@@ -603,6 +703,24 @@ WSHGetSocketInformation(
             *(PUCHAR)OptionValue = (UCHAR)Value;
             *OptionLength = sizeof(UCHAR);
         }
+        return NO_ERROR;
+    }
+
+    /* IP_HDRINCL: a raw socket's, as set (0 by default); WSAEINVAL on another */
+    if (Context && Level == IPPROTO_IP && OptionName == IP_HDRINCL)
+    {
+        if (Context->SocketType != SOCK_RAW)
+        {
+            if (OptionLength) *OptionLength = 0;
+            return WSAEINVAL;
+        }
+        if (!OptionLength || !OptionValue || *OptionLength < (INT)sizeof(LONG))
+        {
+            if (OptionLength) *OptionLength = sizeof(LONG);
+            return WSAEFAULT;
+        }
+        *(PLONG)OptionValue = Context->IpHdrIncl;
+        *OptionLength = sizeof(LONG);
         return NO_ERROR;
     }
 
@@ -1220,6 +1338,19 @@ WSHSetSocketInformation(
             break;
 
         case IPPROTO_IP:
+            /* IP_HDRINCL: a raw socket's (WSAEINVAL on another), for a privileged caller only (WSAEACCES, as
+             * Windows answers a standard user's ICMP socket); kept for getsockopt and given to the stack */
+            if (OptionName == IP_HDRINCL)
+            {
+                if (Context->SocketType != SOCK_RAW)
+                    return WSAEINVAL;
+                if (!OptionValue || OptionLength < (INT)sizeof(CHAR))
+                    return WSAEFAULT;
+                if (!WshRawPrivileged())
+                    return WSAEACCES;
+                Context->IpHdrIncl = ((OptionLength >= (INT)sizeof(LONG)) ? *(PLONG)OptionValue
+                                                                          : *(PUCHAR)OptionValue) != 0;
+            }
             if (OptionName != IP_HDRINCL)
             {
                 PLONG Kept;
@@ -1354,8 +1485,12 @@ WSHSetSocketInformation(
                 DPRINT1("Set: Received unexpected IPPROTO_IPV6 option %d\n", OptionName);
                 return WSAENOPROTOOPT;
             }
+            if (!WshIpv6OptionFitsType(Context, OptionName))
+                return WSAEINVAL;
             if (!OptionValue || OptionLength < (INT)sizeof(CHAR))
                 return WSAEFAULT;
+            if (OptionName == IPV6_HDRINCL && !WshRawPrivileged())
+                return WSAEACCES;
 
             /* IPV6_V6ONLY goes to the stack with the bind (WSPBind): once bound it cannot change. WSAEINVAL, as
              * Windows 10 answers (oracle probe) */
@@ -1365,6 +1500,17 @@ WSHSetSocketInformation(
             Value = (OptionLength >= (INT)sizeof(LONG)) ? *(PLONG)OptionValue : *(PUCHAR)OptionValue;
             if (Boolean)
                 Value = (Value != 0);
+            else if (OptionName == IPV6_UNICAST_IF)
+            {
+                /* An interface index in host order, 0 for none (Windows: WSAEINVAL for one that does not exist) */
+                if (Value != 0 && (Value < 0 || !WshInterfaceExists((ULONG)Value)))
+                    return WSAEINVAL;
+            }
+            else if (OptionName == IPV6_MTU_DISCOVER)
+            {
+                if (Value < 0 || Value > 3)
+                    return WSAEINVAL;
+            }
             else if (OptionName == IPV6_MULTICAST_IF)
             {
                 /* An interface index: the stack takes it as unsigned, a negative one is no index (VERIFY ON
@@ -1387,7 +1533,16 @@ WSHSetSocketInformation(
             /* The hop limits, the multicast loop and interface of a datagram socket reach the stack (as a LONG,
              * -1 = the default); a stream socket keeps them only, as before, and so does IPV6_DONTFRAG (the
              * stack does not act on it) */
-            if (OptionName == IPV6_V6ONLY || OptionName == IPV6_DONTFRAG || Context->SocketType != SOCK_DGRAM)
+            if (OptionName == IPV6_HDRINCL)
+            {
+                /* The raw socket's: the stack takes it (AO_OPTION_IP_HDRINCL) */
+                OptionValue = (PCHAR)Kept;
+                OptionLength = sizeof(LONG);
+                break;
+            }
+            if (OptionName == IPV6_V6ONLY || OptionName == IPV6_DONTFRAG || OptionName == IPV6_RECVTCLASS ||
+                OptionName == IPV6_RECVIF || OptionName == IPV6_UNICAST_IF || OptionName == IPV6_MTU_DISCOVER ||
+                Context->SocketType != SOCK_DGRAM)
                 return NO_ERROR;
             OptionValue = (PCHAR)Kept;
             OptionLength = sizeof(LONG);

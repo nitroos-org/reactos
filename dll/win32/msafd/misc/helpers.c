@@ -523,6 +523,19 @@ SockIsTripleInMapping(
             return TRUE;
         }
     }
+
+    /* A raw socket takes any IP protocol number (0 to 255) of a family whose mapping has raw sockets at all:
+       Windows opens AF_INET and AF_INET6 raw sockets of every protocol (evidence v6raw-20261116), where the
+       transports' mappings list a handful (the helper and the transport check the number) */
+    if (SocketType == SOCK_RAW && Protocol >= 0 && Protocol <= 255)
+    {
+        for (Row = 0; Row < Mapping->Rows; Row++)
+        {
+            if ((INT)Mapping->Mapping[Row].AddressFamily == AddressFamily &&
+                (INT)Mapping->Mapping[Row].SocketType == SOCK_RAW)
+                return TRUE;
+        }
+    }
     WARN("Not found\n");
     return FALSE;
 }

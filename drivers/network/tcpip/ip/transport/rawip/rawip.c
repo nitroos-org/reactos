@@ -170,6 +170,23 @@ NTSTATUS BuildRawIpPacket(
     return STATUS_SUCCESS;
 }
 
+/* An unprivileged raw socket (an ICMP socket of a standard user, AddrFile->RawPrivileged clear) sends echo requests
+   of at least 8 bytes only: anything else is WSAEACCES at sendto on Windows (Windows Server 2022 and 10, evidence
+   v6raw-20261116) */
+BOOLEAN
+RawIpUnprivilegedMaySend(PADDRESS_FILE AddrFile, PCHAR Data, ULONG Size)
+{
+    UCHAR Type;
+
+    if (AddrFile->RawPrivileged)
+        return TRUE;
+    if (AddrFile->Protocol != IPPROTO_ICMP || Size < 8)
+        return FALSE;
+    /* (the send's buffer is the system mapping of its locked MDL, DispTdiSendDatagram) */
+    Type = *(PUCHAR)Data;
+    return Type == 8;   /* ICMP echo request */
+}
+
 NTSTATUS RawIPSendDatagram(
     PADDRESS_FILE AddrFile,
     PTDI_CONNECTION_INFORMATION ConnInfo,
@@ -193,6 +210,9 @@ NTSTATUS RawIPSendDatagram(
     USHORT RemotePort;
     NTSTATUS Status;
     PNEIGHBOR_CACHE_ENTRY NCE;
+
+    if (!RawIpUnprivilegedMaySend(AddrFile, BufferData, DataSize))
+        return STATUS_ACCESS_DENIED;
 
     LockObject(AddrFile);
 
@@ -357,6 +377,8 @@ NTSTATUS RawIPStartup(VOID)
 
   /* Register this protocol with IP layer */
   IPRegisterProtocol(IPPROTO_RAW, RawIpReceive);
+
+  RawIp6Startup();
 
   return STATUS_SUCCESS;
 }

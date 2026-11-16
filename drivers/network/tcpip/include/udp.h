@@ -54,6 +54,12 @@ VOID UDPReceive(
     PIP_INTERFACE Interface,
     PIP_PACKET IPPacket);
 
+/* An ICMP port unreachable for one of our UDP datagrams (icmp.c) */
+VOID UDPPortUnreachable(
+    PIP_PACKET IPPacket,
+    PUCHAR Icmp,
+    UINT Size);
+
 NTSTATUS UDPStartup(
   VOID);
 

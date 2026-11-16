@@ -21,6 +21,9 @@ NTSTATUS DGReceiveDatagram(
     PVOID Context,
     PIRP Irp);
 
+/* An ICMP / ICMPv6 port unreachable for a datagram the UDP address file sent (no lock held) */
+VOID DGReportPortUnreachable(PADDRESS_FILE AddrFile);
+
 BOOLEAN DGRemoveIRP(
     PADDRESS_FILE AddrFile,
     PIRP Irp);

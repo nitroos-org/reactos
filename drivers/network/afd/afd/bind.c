@@ -76,7 +76,7 @@ NTSTATUS WarmSocketForBind( PAFD_FCB FCB, ULONG ShareType ) {
         {
             Status = TdiReceiveDatagram(&FCB->ReceiveIrp.InFlightRequest,
                                         FCB->AddressFile.Object,
-                                        0,
+                                        AfdDatagramReceiveFlags(FCB),
                                         FCB->Recv.Window,
                                         FCB->Recv.Size,
                                         FCB->AddressFrom,

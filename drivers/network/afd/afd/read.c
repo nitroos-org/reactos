@@ -9,6 +9,7 @@
  */
 
 #include "afd.h"
+#include <nitrotdi.h>
 #include <ndk/psfuncs.h>
 
 ULONG AfdNonPagedWindowBudget = 0x2000000;
@@ -524,6 +525,14 @@ NTSTATUS NTAPI ReceiveComplete
 
 static IO_WORKITEM_ROUTINE RelaunchPacketReceiveWorker;
 
+/* The flags of a datagram socket's receive: a UDP socket that reports port unreachable (SIO_UDP_CONNRESET on, the
+   default) asks the transport for it (nitrotdi.h). bind.c too */
+USHORT
+AfdDatagramReceiveFlags(PAFD_FCB FCB)
+{
+    return FCB->NoPortUnreachable ? 0 : TDI_RECEIVE_NITRO_PORT_UNREACHABLE;
+}
+
 /* Datagrams of no data that one datagram socket keeps waiting for a read */
 #define AFD_MAX_QUEUED_EMPTY_DATAGRAMS 1024
 
@@ -565,7 +574,7 @@ RelaunchPacketReceive(PAFD_FCB FCB)
 
     TdiReceiveDatagram(&FCB->ReceiveIrp.InFlightRequest,
                        FCB->AddressFile.Object,
-                       0,
+                       AfdDatagramReceiveFlags(FCB),
                        FCB->Recv.Window,
                        FCB->Recv.Size,
                        FCB->AddressFrom,
@@ -752,6 +761,20 @@ SatisfyPacketRecvRequest( PAFD_FCB FCB, PIRP Irp,
     Map = (PAFD_MAPBUF)(RecvReq->BufferArray +
                         RecvReq->BufferCount +
                         (ExtraBuffers ? EXTRA_LOCK_BUFFERS : 0));
+
+    /* A port unreachable report (PacketSocketRecvComplete): the receive fails with it, no data, no address */
+    if (DatagramRecv->Error)
+    {
+        *TotalBytesCopied = 0;
+        Irp->IoStatus.Information = 0;
+        Status = Irp->IoStatus.Status = DatagramRecv->Error;
+        if (!(RecvReq->TdiFlags & TDI_RECEIVE_PEEK))
+        {
+            ExFreePoolWithTag(DatagramRecv->Address, TAG_AFD_TRANSPORT_ADDRESS);
+            ExFreePoolWithTag(DatagramRecv, TAG_AFD_STORED_DATAGRAM);
+        }
+        return Status;
+    }
 
     /* LockBuffers puts the address and its length after the data buffers */
     if( ExtraBuffers &&
@@ -986,6 +1009,64 @@ AfdConnectedSocketReadData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     return Status;
 }
 
+/* Hands the stored datagrams (and port unreachable reports) to the receives waiting, in order, and sets the read
+   readiness from what is left (state lock held) */
+static VOID
+AfdSatisfyPacketReceives(PAFD_FCB FCB)
+{
+    PIRP NextIrp;
+    PIO_STACK_LOCATION NextIrpSp;
+    PLIST_ENTRY ListEntry;
+    PAFD_RECV_INFO RecvReq;
+    PAFD_STORED_DATAGRAM DatagramRecv;
+    NTSTATUS Status;
+
+    while( !IsListEmpty( &FCB->DatagramList ) &&
+           !IsListEmpty( &FCB->PendingIrpList[FUNCTION_RECV] ) ) {
+        AFD_DbgPrint(MID_TRACE,("Looping trying to satisfy request\n"));
+        ListEntry = RemoveHeadList( &FCB->DatagramList );
+        DatagramRecv = CONTAINING_RECORD( ListEntry, AFD_STORED_DATAGRAM,
+                                          ListEntry );
+        ListEntry = RemoveHeadList( &FCB->PendingIrpList[FUNCTION_RECV] );
+        NextIrp = CONTAINING_RECORD( ListEntry, IRP, Tail.Overlay.ListEntry );
+        NextIrpSp = IoGetCurrentIrpStackLocation( NextIrp );
+        RecvReq = GetLockedData(NextIrp, NextIrpSp);
+
+        AFD_DbgPrint(MID_TRACE,("RecvReq: %p, DatagramRecv: %p\n",
+                                RecvReq, DatagramRecv));
+
+        AFD_DbgPrint(MID_TRACE,("Satisfying\n"));
+        Status = SatisfyPacketRecvRequest
+        ( FCB, NextIrp, DatagramRecv,
+         (PUINT)&NextIrp->IoStatus.Information );
+
+        if (RecvReq->TdiFlags & TDI_RECEIVE_PEEK)
+        {
+            InsertHeadList(&FCB->DatagramList,
+                           &DatagramRecv->ListEntry);
+        }
+
+        AFD_DbgPrint(MID_TRACE,("Unlocking\n"));
+        UnlockBuffers( RecvReq->BufferArray, RecvReq->BufferCount, CheckUnlockExtraBuffers(FCB, NextIrpSp) );
+        if (AfdRequestLocked(NextIrp)) UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
+
+        AFD_DbgPrint(MID_TRACE,("Completing\n"));
+        AfdClearCancelRoutine(NextIrp);
+        NextIrp->IoStatus.Status = Status;
+
+        IoCompleteRequest( NextIrp, IO_NETWORK_INCREMENT );
+    }
+
+    if( !IsListEmpty( &FCB->DatagramList ) && IsListEmpty(&FCB->PendingIrpList[FUNCTION_RECV]) ) {
+        AFD_DbgPrint(MID_TRACE,("Signalling\n"));
+        FCB->PollState |= AFD_EVENT_RECEIVE;
+        FCB->PollStatus[FD_READ_BIT] = STATUS_SUCCESS;
+        PollReeval( FCB->DeviceExt, FCB->FileObject );
+    } else
+        FCB->PollState &= ~AFD_EVENT_RECEIVE;
+
+}
+
 NTSTATUS NTAPI
 PacketSocketRecvComplete(
         PDEVICE_OBJECT DeviceObject,
@@ -1038,6 +1119,34 @@ PacketSocketRecvComplete(
         return STATUS_FILE_CLOSED;
     }
 
+    if (Irp->IoStatus.Status == STATUS_PORT_UNREACHABLE)
+    {
+        /* An ICMP port unreachable for a datagram the socket sent: the next receive fails with it (WSAECONNRESET),
+           in order with the datagrams, one per message, as on Windows; nothing while SIO_UDP_CONNRESET is off */
+        if (!FCB->NoPortUnreachable && !FCB->TdiReceiveClosed)
+        {
+            DatagramRecv = ExAllocatePoolWithTag(NonPagedPool, sizeof(AFD_STORED_DATAGRAM), TAG_AFD_STORED_DATAGRAM);
+            if (DatagramRecv)
+            {
+                RtlZeroMemory(DatagramRecv, sizeof(AFD_STORED_DATAGRAM));
+                DatagramRecv->Error = STATUS_PORT_UNREACHABLE;
+                DatagramRecv->Address = TaCopyTransportAddress(FCB->AddressFrom->RemoteAddress);
+                if (DatagramRecv->Address)
+                {
+                    InsertTailList(&FCB->DatagramList, &DatagramRecv->ListEntry);
+                    AfdSatisfyPacketReceives(FCB);
+                }
+                else
+                {
+                    ExFreePoolWithTag(DatagramRecv, TAG_AFD_STORED_DATAGRAM);
+                }
+            }
+        }
+        RelaunchPacketReceive(FCB);
+        SocketStateUnlock(FCB);
+        return STATUS_SUCCESS;
+    }
+
     if (Irp->IoStatus.Status != STATUS_SUCCESS)
     {
         /* A datagram larger than the receive window arrives truncated with
@@ -1088,6 +1197,7 @@ PacketSocketRecvComplete(
 
     if( DatagramRecv ) {
         DatagramRecv->Len = Irp->IoStatus.Information;
+        DatagramRecv->Error = STATUS_SUCCESS;
         RtlCopyMemory( DatagramRecv->Buffer, FCB->Recv.Window,
                        DatagramRecv->Len );
         AFD_DbgPrint(MID_TRACE,("Received (A %p)\n",
@@ -1122,50 +1232,7 @@ PacketSocketRecvComplete(
     }
 
     /* Satisfy as many requests as we can */
-
-    while( !IsListEmpty( &FCB->DatagramList ) &&
-           !IsListEmpty( &FCB->PendingIrpList[FUNCTION_RECV] ) ) {
-        AFD_DbgPrint(MID_TRACE,("Looping trying to satisfy request\n"));
-        ListEntry = RemoveHeadList( &FCB->DatagramList );
-        DatagramRecv = CONTAINING_RECORD( ListEntry, AFD_STORED_DATAGRAM,
-                                          ListEntry );
-        ListEntry = RemoveHeadList( &FCB->PendingIrpList[FUNCTION_RECV] );
-        NextIrp = CONTAINING_RECORD( ListEntry, IRP, Tail.Overlay.ListEntry );
-        NextIrpSp = IoGetCurrentIrpStackLocation( NextIrp );
-        RecvReq = GetLockedData(NextIrp, NextIrpSp);
-
-        AFD_DbgPrint(MID_TRACE,("RecvReq: %p, DatagramRecv: %p\n",
-                                RecvReq, DatagramRecv));
-
-        AFD_DbgPrint(MID_TRACE,("Satisfying\n"));
-        Status = SatisfyPacketRecvRequest
-        ( FCB, NextIrp, DatagramRecv,
-         (PUINT)&NextIrp->IoStatus.Information );
-
-        if (RecvReq->TdiFlags & TDI_RECEIVE_PEEK)
-        {
-            InsertHeadList(&FCB->DatagramList,
-                           &DatagramRecv->ListEntry);
-        }
-
-        AFD_DbgPrint(MID_TRACE,("Unlocking\n"));
-        UnlockBuffers( RecvReq->BufferArray, RecvReq->BufferCount, CheckUnlockExtraBuffers(FCB, NextIrpSp) );
-        if (AfdRequestLocked(NextIrp)) UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
-
-        AFD_DbgPrint(MID_TRACE,("Completing\n"));
-        AfdClearCancelRoutine(NextIrp);
-        NextIrp->IoStatus.Status = Status;
-
-        IoCompleteRequest( NextIrp, IO_NETWORK_INCREMENT );
-    }
-
-    if( !IsListEmpty( &FCB->DatagramList ) && IsListEmpty(&FCB->PendingIrpList[FUNCTION_RECV]) ) {
-        AFD_DbgPrint(MID_TRACE,("Signalling\n"));
-        FCB->PollState |= AFD_EVENT_RECEIVE;
-        FCB->PollStatus[FD_READ_BIT] = STATUS_SUCCESS;
-        PollReeval( FCB->DeviceExt, FCB->FileObject );
-    } else
-        FCB->PollState &= ~AFD_EVENT_RECEIVE;
+    AfdSatisfyPacketReceives(FCB);
 
     /* The receive that was kept after shutdown(SD_RECEIVE) is served */
     AfdCompleteReceiveShutdown(FCB);

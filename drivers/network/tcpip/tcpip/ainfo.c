@@ -53,8 +53,19 @@ TDI_STATUS SetAddressFileInfo(TDIObjectID *ID,
          if (BufferSize < sizeof(UINT))
              return TDI_INVALID_PARAMETER;
 
+         /* A raw socket's option (WSAEINVAL on a TCP or UDP one); only a privileged opener may set it, either way
+            (WSAEACCES for a standard user's ICMP socket, as on Windows) */
+         if (AddrFile->Protocol == IPPROTO_TCP || AddrFile->Protocol == IPPROTO_UDP)
+             return TDI_INVALID_PARAMETER;
+         if (!AddrFile->RawPrivileged)
+             return STATUS_ACCESS_DENIED;
+
          LockObject(AddrFile);
-         AddrFile->HeaderIncl = *((PUINT)Buffer);
+         /* IPV6_HDRINCL of an IPv6 socket is about what it sends only (rawip6.c) */
+         if (AddrFile->Family == TDI_ADDRESS_TYPE_IP6)
+             AddrFile->HeaderIncl6 = (*((PUINT)Buffer) != 0);
+         else
+             AddrFile->HeaderIncl = *((PUINT)Buffer);
          UnlockObject(AddrFile);
 
          return TDI_SUCCESS;

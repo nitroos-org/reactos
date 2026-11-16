@@ -30,6 +30,7 @@ list(APPEND SOURCE
     network/transmit.c
     transport/datagram/datagram.c
     transport/rawip/rawip.c
+    transport/rawip/rawip6.c
     transport/tcp/accept.c
     transport/tcp/addr6.c
     transport/tcp/event.c

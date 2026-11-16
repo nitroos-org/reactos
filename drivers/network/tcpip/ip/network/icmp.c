@@ -86,6 +86,89 @@ VOID ICMPReceive(
     {
         ICMPReply(Interface, IPPacket, ICMP_TYPE_ECHO_REPLY, 0);
     }
+    else if (ICMPHeader->Type == ICMP_TYPE_DEST_UNREACH && ICMPHeader->Code == ICMP_CODE_DU_PORT_UNREACH)
+    {
+        /* The UDP socket that sent the datagram fails its next receive (WSAECONNRESET) */
+        UDPPortUnreachable(IPPacket, (PUCHAR)IPPacket->Data, DataSize);
+    }
+}
+
+/*
+ * A UDP datagram for a port nobody has: ICMP destination unreachable, port unreachable (RFC 1122 4.1.3.1, RFC 792),
+ * with the datagram's IP header and the first 8 bytes of its data (the UDP header), from the address it was sent
+ * to. Not for a datagram to a broadcast or multicast address or from an address that is not a unicast one
+ * (RFC 1122 3.2.2), and at most ICMP_UNREACH_PER_SECOND a second (RFC 1812 4.3.2.8). Windows answers so, which is
+ * what makes the sender's next receive fail with WSAECONNRESET (evidence v6raw-20261116).
+ */
+#define ICMP_UNREACH_PER_SECOND 200
+
+VOID ICMPPortUnreachable(
+    PIP_INTERFACE Interface,
+    PIP_PACKET IPPacket,
+    PVOID TransportHeader)
+{
+    static LONG Sent;
+    static LONGLONG Window;
+    UCHAR Buffer[8 + 60 + 8];
+    UINT Size, HeaderSize = IPPacket->HeaderSize;
+    LARGE_INTEGER Now;
+    IP_PACKET NewPacket;
+    ADDRESS_FILE FakeAddrFile;
+    PNEIGHBOR_CACHE_ENTRY NCE;
+    IP_ADDRESS ReplySource;
+    ULONG Src, Dst;
+
+    if (IPPacket->Type != IP_ADDRESS_V4 || HeaderSize < sizeof(IPv4_HEADER) || HeaderSize > 60)
+        return;
+    Src = IPPacket->SrcAddr.Address.IPv4Address;
+    Dst = IPPacket->DstAddr.Address.IPv4Address;
+    if (Src == 0 || Src == 0xFFFFFFFF || (Src & 0xF0) == 0xE0 || Dst == 0xFFFFFFFF || (Dst & 0xF0) == 0xE0)
+        return;
+    AddrInitIPv4(&ReplySource, 0);
+    if (AddrIsBroadcastMatch(&ReplySource, &IPPacket->DstAddr) || AddrIsBroadcastMatch(&ReplySource, &IPPacket->SrcAddr))
+        return;
+
+    KeQuerySystemTime(&Now);
+    if (Now.QuadPart - Window >= 10000000LL)
+    {
+        Window = Now.QuadPart;
+        Sent = 0;
+    }
+    if (InterlockedIncrement(&Sent) > ICMP_UNREACH_PER_SECOND)
+        return;
+
+    NCE = RouteGetRouteToDestination(&IPPacket->SrcAddr);
+    if (!NCE)
+        return;
+
+    Size = 8 + HeaderSize + 8;
+    RtlZeroMemory(Buffer, 8);
+    Buffer[0] = ICMP_TYPE_DEST_UNREACH;
+    Buffer[1] = ICMP_CODE_DU_PORT_UNREACH;
+    RtlCopyMemory(Buffer + 8, IPPacket->Header, HeaderSize);
+    RtlCopyMemory(Buffer + 8 + HeaderSize, TransportHeader, 8);
+
+    RtlZeroMemory(&FakeAddrFile, sizeof(FakeAddrFile));
+    FakeAddrFile.Protocol = IPPROTO_ICMP;
+    FakeAddrFile.TTL = 128;
+
+    /* From the address the datagram went to when it is ours, else from the interface */
+    ReplySource = Interface->Unicast;
+    if (IFIsNteIPv4Address(Interface, Dst) || AddrIsEqual(&Interface->Unicast, &IPPacket->DstAddr) ||
+        (Dst & 0xFF) == 0x7F)
+        ReplySource = IPPacket->DstAddr;
+
+    if (!NT_SUCCESS(BuildRawIpPacket(&FakeAddrFile, &NewPacket, &IPPacket->SrcAddr, 0, &ReplySource, 0,
+                                     (PCHAR)Buffer, Size)))
+    {
+        NBDereferenceNeighbor(NCE);
+        return;
+    }
+    ((PICMP_HEADER)NewPacket.Data)->Checksum = 0;
+    ((PICMP_HEADER)NewPacket.Data)->Checksum = (USHORT)IPv4Checksum(NewPacket.Data, Size, 0);
+
+    IPSendDatagram(&NewPacket, NCE);
+    NBDereferenceNeighbor(NCE);
 }
 
 VOID ICMPReply(

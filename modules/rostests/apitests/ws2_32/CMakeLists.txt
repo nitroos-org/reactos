@@ -57,6 +57,7 @@ list(APPEND SOURCE
     OwnHostname.c
     ReverseLookup.c
     ReverseLookup6.c
+    rawsock.c
     rcvbuf.c
     rcvwindow.c
     recv.c

@@ -72,6 +72,13 @@ typedef struct _SOCKET_CONTEXT {
     LONG Ipv6MulticastLoop;
     LONG Ipv6DontFragment;
     LONG Ipv6MulticastIf;
+    LONG Ipv6HdrIncl;
+    LONG Ipv6RecvTclass;
+    LONG Ipv6RecvIf;
+    LONG Ipv6UnicastIf;
+    LONG Ipv6MtuDiscover;
+    /* IP_HDRINCL of a raw IPv4 socket as set */
+    LONG IpHdrIncl;
 } SOCKET_CONTEXT, *PSOCKET_CONTEXT;
 
 INT

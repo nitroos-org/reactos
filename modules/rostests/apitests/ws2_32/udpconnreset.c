@@ -42,13 +42,14 @@ START_TEST(udpconnreset)
     ok(Result == 0, "SIO_UDP_CONNRESET(TRUE) returned %d, error %d\n", Result, WSAGetLastError());
     ok(Returned == 0, "SIO_UDP_CONNRESET(TRUE) returned %lu bytes\n", Returned);
 
-    /* A missing or short input buffer is rejected, also for an overlapped request */
+    /* A missing input buffer is rejected, also for an overlapped request; a short one is taken (Windows Server 2022
+       and 10 take 1 and 2 bytes for SIO_UDP_CONNRESET, evidence v6raw-20261116) */
     Result = WSAIoctl(Socket, SIO_UDP_CONNRESET, NULL, 0, NULL, 0, &Returned, NULL, NULL);
     Error = WSAGetLastError();
     ok(Result == SOCKET_ERROR && Error == WSAEFAULT, "NULL input returned %d, error %d\n", Result, Error);
-    Result = WSAIoctl(Socket, SIO_UDP_NETRESET, &Flag, 1, NULL, 0, &Returned, NULL, NULL);
+    Result = WSAIoctl(Socket, SIO_UDP_CONNRESET, &Flag, 1, NULL, 0, &Returned, NULL, NULL);
     Error = WSAGetLastError();
-    ok(Result == SOCKET_ERROR && Error == WSAEFAULT, "short input returned %d, error %d\n", Result, Error);
+    ok(Result == 0, "short input returned %d, error %d\n", Result, Error);
     ZeroMemory(&Overlapped, sizeof(Overlapped));
     Overlapped.hEvent = WSACreateEvent();
     ok(Overlapped.hEvent != WSA_INVALID_EVENT, "WSACreateEvent failed %d\n", WSAGetLastError());
