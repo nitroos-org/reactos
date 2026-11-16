@@ -76,7 +76,6 @@ ServiceInit(VOID)
     LSA_STRING ProcessName = RTL_CONSTANT_STRING("Workstation");
     LSA_STRING PackageName = RTL_CONSTANT_STRING(MSV1_0_PACKAGE_NAME);
     LSA_OPERATIONAL_MODE Mode;
-    HANDLE hThread;
     NTSTATUS Status;
 
     ERR("ServiceInit()\n");
@@ -105,20 +104,7 @@ ServiceInit(VOID)
         return 1;
     }
 
-    hThread = CreateThread(NULL,
-                           0,
-                           (LPTHREAD_START_ROUTINE)RpcThreadRoutine,
-                           NULL,
-                           0,
-                           NULL);
-
-    if (!hThread)
-    {
-        ERR("Can't create PortThread\n");
-        return GetLastError();
-    }
-    else
-        CloseHandle(hThread);
+    StartRpcServer();
 
     /* Report a running workstation service */
     SetServiceBits(ServiceStatusHandle,
@@ -160,8 +146,8 @@ ServiceControlHandler(DWORD dwControl,
         case SERVICE_CONTROL_STOP:
             TRACE("  SERVICE_CONTROL_STOP received\n");
             UpdateServiceStatus(SERVICE_STOP_PENDING);
-            /* Stop listening to incoming RPC messages */
-            RpcMgmtStopServerListening(NULL);
+            /* Unregister the RPC interface of the service (the process keeps listening: it hosts other services) */
+            StopRpcServer();
             ServiceShutdown();
             UpdateServiceStatus(SERVICE_STOPPED);
             return ERROR_SUCCESS;
@@ -185,8 +171,8 @@ ServiceControlHandler(DWORD dwControl,
         case SERVICE_CONTROL_SHUTDOWN:
             TRACE("  SERVICE_CONTROL_SHUTDOWN received\n");
             UpdateServiceStatus(SERVICE_STOP_PENDING);
-            /* Stop listening to incoming RPC messages */
-            RpcMgmtStopServerListening(NULL);
+            /* Unregister the RPC interface of the service (the process keeps listening: it hosts other services) */
+            StopRpcServer();
             ServiceShutdown();
             UpdateServiceStatus(SERVICE_STOPPED);
             return ERROR_SUCCESS;
