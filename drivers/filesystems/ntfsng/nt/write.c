@@ -248,11 +248,24 @@ static VOID NgPinUnlocked(PNG_VCB Vcb)
         KeClearEvent(&Vcb->DioIdle);
 }
 
+/*
+ * Under CoreLock, after a commit that began (sealed) when GroupSeq was @Seq and GroupBytes @Bytes completed: the writes of a
+ * group commit up to @Seq are durable.  Writes made while its I/O ran without the lock are not, and stay counted.
+ */
+static VOID NgGroupCommitted(PNG_VCB Vcb, ULONG Seq, ULONGLONG Bytes)
+{
+    if ((LONG)(Seq - Vcb->GroupDone) > 0)
+        Vcb->GroupDone = Seq;
+    Vcb->GroupBytes = Vcb->GroupBytes > Bytes ? Vcb->GroupBytes - Bytes : 0;
+}
+
 int NgCommitEx(PNG_VCB Vcb, BOOLEAN Retain)
 {
     for (;;)
     {
         BOOLEAN Unlock = Vcb->CoreDepth == 1 && !Vcb->Dismounted;
+        ULONG Seq = Vcb->GroupSeq;
+        ULONGLONG Bytes = Vcb->GroupBytes;
         int R = ngc_commit_begin(Vcb->Core, Retain);
         if (R == NGC_COMMIT_IO)
         {
@@ -269,8 +282,12 @@ int NgCommitEx(PNG_VCB Vcb, BOOLEAN Retain)
             else
                 R = ngc_commit_io(Vcb->Core);
             ngc_commit_end(Vcb->Core);
+            if (R == 0)
+                NgGroupCommitted(Vcb, Seq, Bytes);
             return R;
         }
+        if (R == 0)
+            NgGroupCommitted(Vcb, Seq, Bytes);
         if (R != NGC_COMMIT_BUSY)
             return R;
         /* The lock is let go: file data this thread sent must be on its way done first (readers take the lock). */
@@ -358,6 +375,64 @@ static NTSTATUS NgCommitWriteThrough(PNG_VCB Vcb)
     if (Err)
         DPRINT1("ntfsng: write-through commit failed %d\n", Err);
     return Err ? STATUS_UNEXPECTED_IO_ERROR : STATUS_SUCCESS;
+}
+
+/*
+ * Group commit, under CoreLock: a non-cached write-through write of @Length bytes that extended @Fcb was written to the
+ * device and waited for (its data is in the device's cache: any later commit's first flush puts it on the medium before the
+ * COMMITTED header that records the new sizes), and its commit is left to a batch.  The batch is committed here once
+ * GroupCommitMB accumulated; until then FlushFileBuffers, a cleanup of the file, the flusher (within NG_GROUP_PERIOD_MS)
+ * or any other commit covers it.  Windows does not make such a write durable at its return on a disk with a volatile cache
+ * and no FUA either (it sends neither a flush nor FUA for it there).  Returns the commit's error, if it ran.
+ */
+static int NgGroupWritten(PNG_VCB Vcb, PNG_FCB Fcb, ULONG Length)
+{
+    BOOLEAN First = Vcb->GroupBytes == 0;
+    int Err = 0;
+
+    Vcb->GroupSeq++;
+    if (Vcb->GroupSeq == 0)
+        Vcb->GroupSeq = 1;     /* 0 means "none" in an FCB */
+    Fcb->GroupSeq = Vcb->GroupSeq;
+    if (First)
+        Vcb->GroupSince = (LONGLONG)KeQueryInterruptTime();
+    Vcb->GroupBytes += Length;
+    NgProfile.Stage[NGP_GROUP_WRITE].Count++;
+    NgProfile.Stage[NGP_GROUP_WRITE].Bytes += Length;
+    if (Vcb->GroupBytes >= ((ULONGLONG)NgGlobal.GroupCommitMB << 20))
+    {
+        Err = NgCommitEx(Vcb, TRUE);
+        Vcb->Syncs++;
+        NgProfile.Stage[NGP_GROUP_COMMIT].Count++;
+        if (Err)
+            DPRINT1("ntfsng: group commit failed %d\n", Err);
+    }
+    else if (First)
+    {
+        /* The flusher shortens its period to NG_GROUP_PERIOD_MS while a batch is open. */
+        KeSetEvent(&Vcb->CommitKick, IO_NO_INCREMENT, FALSE);
+    }
+    return Err;
+}
+
+/* IRP_MJ_CLEANUP of a handle to @Fcb (MainResource held, not CoreLock): writes of a group commit to it that no commit covers yet are committed. */
+VOID NgGroupCleanup(PNG_VCB Vcb, PNG_FCB Fcb)
+{
+    int Err;
+
+    if (!Fcb->GroupSeq || (LONG)(Fcb->GroupSeq - Vcb->GroupDone) <= 0)
+        return;
+    NgAcquireCore(Vcb);
+    if ((LONG)(Fcb->GroupSeq - Vcb->GroupDone) > 0 && !Vcb->WrongMedia && !Vcb->RawWritten && !Vcb->Dismounted)
+    {
+        Err = NgCommitEx(Vcb, TRUE);
+        Vcb->Syncs++;
+        NgProfile.Stage[NGP_GROUP_CLEANUP].Count++;
+        if (Err)
+            DPRINT1("ntfsng: group commit at cleanup of %I64x failed %d\n", Fcb->MftNo, Err);
+    }
+    Fcb->GroupSeq = 0;
+    NgReleaseCore(Vcb);
 }
 
 /* Header sizes from the core inode (caller holds CoreLock and the node). */
@@ -1388,6 +1463,7 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     BOOLEAN NonCached = (Irp->Flags & IRP_NOCACHE) != 0;
     BOOLEAN WriteThrough = (FileObject->Flags & FO_WRITE_THROUGH) || (Stack->Flags & SL_WRITE_THROUGH);
     BOOLEAN Append = (Offset.LowPart == FILE_WRITE_TO_END_OF_FILE && Offset.HighPart == -1);
+    BOOLEAN Group;
     PMDL LockedMdl = NULL;
     PVOID Buffer;
     IO_STATUS_BLOCK Iosb;
@@ -1575,14 +1651,20 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             if (Err == NG_ZGAP_DELETED || Err == NG_ZGAP_DROP)
                 Err = -NGC_EIO;
         }
+        /*
+         * A write-through write that extends the file goes to a group commit (NgGroupWritten) on a volume that does that: its
+         * data is written and waited for inside ngc_write, before the initialized size moves in the overlay, as for a plain
+         * non-cached write.  Any other write-through write commits before it returns.
+         */
+        Group = WriteThrough && Vcb->GroupCommit && !Vcb->WriteThrough && End > OldSize;
         /* The data of a write-through write goes to the device with FUA when it honours it (the journal commit that follows then needs no flush for it). */
-        if (WriteThrough)
+        if (WriteThrough && !Group)
         {
             ngc_set_data_fua(Vcb->Core, 1);
             ngc_set_defer(Vcb->Core, 1);	/* the data is sent and waited for in NgCommitEx (in flight with the journal slots), or below */
         }
         Done = Err ? Err : ngc_write(Vcb->Core, Fcb->Node, Offset.QuadPart, Length, Buffer);
-        if (WriteThrough)
+        if (WriteThrough && !Group)
         {
             ngc_set_defer(Vcb->Core, 0);
             ngc_set_data_fua(Vcb->Core, 0);
@@ -1591,7 +1673,12 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         {
             NgAfterChange(Vcb);
             /* Between core operations: the journal I/O runs without CoreLock. */
-            if (WriteThrough && NgCommitEx(Vcb, TRUE))
+            if (Group)
+            {
+                if (NgGroupWritten(Vcb, Fcb, Length))
+                    Done = -NGC_EIO;
+            }
+            else if (WriteThrough && NgCommitEx(Vcb, TRUE))
                 Done = -NGC_EIO;
         }
         /* Nothing sent for this write may be in flight when the lock is let go or the buffer is given back. */
@@ -1676,7 +1763,13 @@ int NgFlushVolume(PNG_VCB Vcb)
     if (List)
         ExFreePoolWithTag(List, TAG_NTFSNG);
     NgAcquireCore(Vcb);
-    Err = ngc_sync(Vcb->Core);
+    {
+        ULONG Seq = Vcb->GroupSeq;
+        ULONGLONG Bytes = Vcb->GroupBytes;
+        Err = ngc_sync(Vcb->Core);
+        if (!Err)
+            NgGroupCommitted(Vcb, Seq, Bytes);
+    }
     Vcb->Syncs++;
     NgReleaseCore(Vcb);
     if (Err)
@@ -1877,6 +1970,17 @@ static VOID NTAPI NgFlusherThread(PVOID Context)
     Objects[2] = &Vcb->PurgeKick;
     for (;;)
     {
+        BOOLEAN GroupDue;
+        Period.QuadPart = -10000LL * NG_FLUSH_PERIOD_MS;
+        if (Vcb->GroupBytes)
+        {
+            /* A batch of a group commit is open (read without the lock: a hint, checked again under it): wake when it is due. */
+            LONGLONG Left = Vcb->GroupSince + 10000LL * NG_GROUP_PERIOD_MS - (LONGLONG)KeQueryInterruptTime();
+            if (Left < 1)
+                Left = 1;
+            if (Left < -Period.QuadPart)
+                Period.QuadPart = -Left;
+        }
         Wait = KeWaitForMultipleObjects(3, Objects, WaitAny, Executive, KernelMode, FALSE, &Period, NULL);
         if (Wait == STATUS_WAIT_0)
         {
@@ -1890,7 +1994,14 @@ static VOID NTAPI NgFlusherThread(PVOID Context)
             continue;
         }
         NgAcquireCore(Vcb);
-        if (Wait == STATUS_WAIT_1)
+        GroupDue = Vcb->GroupBytes && (LONGLONG)KeQueryInterruptTime() - Vcb->GroupSince >= 10000LL * NG_GROUP_PERIOD_MS;
+        if (GroupDue && (Vcb->WrongMedia || Vcb->RawWritten))
+        {
+            /* Nothing of this mount reaches the disk any more: no batch to wait for (the period would be 0). */
+            Vcb->GroupBytes = 0;
+            GroupDue = FALSE;
+        }
+        if (Wait == STATUS_WAIT_1 && !GroupDue)
         {
             /* The core asked for a commit (its overlay is past the threshold): the journal I/O runs without CoreLock. */
             if (!Vcb->WrongMedia && !Vcb->RawWritten && ngc_commit_wanted(Vcb->Core, 0))
@@ -1901,13 +2012,28 @@ static VOID NTAPI NgFlusherThread(PVOID Context)
                     DPRINT1("ntfsng: requested commit failed %d\n", Err);
             }
         }
-        else if (!Vcb->WrongMedia && !Vcb->RawWritten && ngc_dirty(Vcb->Core))
+        else if (!Vcb->WrongMedia && !Vcb->RawWritten && (GroupDue || ngc_dirty(Vcb->Core)))
         {
-            /* Busy: commit and keep VOLUME_IS_DIRTY.  Quiet for a whole period: also clear the flag. */
-            int Err = ngc_changed(Vcb->Core) ? NgCommit(Vcb) : ngc_sync(Vcb->Core);
+            /* Busy (or a batch of a group commit is due): commit and keep VOLUME_IS_DIRTY.  Quiet for a whole period: also clear the flag. */
+            int Err;
+            if (GroupDue || ngc_changed(Vcb->Core))
+                Err = NgCommit(Vcb);
+            else
+            {
+                ULONG Seq = Vcb->GroupSeq;
+                ULONGLONG Bytes = Vcb->GroupBytes;
+                Err = ngc_sync(Vcb->Core);
+                if (!Err)
+                    NgGroupCommitted(Vcb, Seq, Bytes);
+            }
             Vcb->Syncs++;
             if (Err)
+            {
                 DPRINT1("ntfsng: background sync failed %d\n", Err);
+                /* A failed volume commits nothing again (it is read-only or failed now): the batch is not waited for. */
+                if (GroupDue)
+                    Vcb->GroupBytes = 0;
+            }
         }
         NgReleaseCore(Vcb);
     }

@@ -913,6 +913,17 @@ NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Registry
     NgGlobal.ForceReadOnly = NgReadDword(RegistryPath, L"ReadOnly");
     NgGlobal.NoFua = NgReadDword(RegistryPath, L"NoFua");
     NgGlobal.FuaAliasMB = NgReadDword(RegistryPath, L"FuaAliasMB");
+    /* Group commit of extending write-through writes (write.c NgGroupWritten): "GroupCommitMB" = batch size (1-1024), "NoGroupCommit"=1 = off. */
+    NgGlobal.GroupCommitMB = NgReadDword(RegistryPath, L"GroupCommitMB");
+    if (!NgGlobal.GroupCommitMB)
+        NgGlobal.GroupCommitMB = NG_GROUP_DEFAULT_MB;
+    else if (NgGlobal.GroupCommitMB > 1024)
+        NgGlobal.GroupCommitMB = 1024;
+    if (NgReadDword(RegistryPath, L"NoGroupCommit"))
+    {
+        NgGlobal.GroupCommitMB = 0;
+        DPRINT1("ntfsng: NoGroupCommit: every write-through write commits before it returns\n");
+    }
     NgGlobal.Verbose = NgReadDword(RegistryPath, L"Verbose");
     /* "MountCheck": 0 or absent = after an unclean shutdown and for small MFTs, 1 = always, 2 = never. */
     i = NgReadDword(RegistryPath, L"MountCheck");
