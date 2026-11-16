@@ -687,12 +687,27 @@ static DWORD netcon_secure_connect_setup(netconn_t *connection, BOOL compat_mode
     return ERROR_SUCCESS;
 }
 
+/* Whether a handshake with the compatibility credentials (no TLS 1.1/1.2) can be tried after a failed one. */
+BOOL NETCON_have_tls_compat(void)
+{
+    return ensure_cred_handle() && have_compat_cred_handle;
+}
+
 /******************************************************************************
  * NETCON_secure_connect
  * Initiates a secure connection over an existing plaintext connection.
+ *
+ * The socket is connected to the peer (the host itself, or the proxy for a tunnel), which is not always the host
+ * the TLS session is for: connection->server becomes the host of the session, the peer is remembered for a
+ * reconnect.
+ * NETCON_TLS_NO_FALLBACK: when the handshake fails with a security channel error, return it as it is. A caller
+ * that tunnels through a proxy reconnects to the proxy and repeats the CONNECT itself, then calls again with
+ * NETCON_TLS_COMPAT.
+ * NETCON_TLS_COMPAT: handshake with the compatibility credentials straight away.
  */
-DWORD NETCON_secure_connect(netconn_t *connection, server_t *server)
+DWORD NETCON_secure_connect(netconn_t *connection, server_t *server, DWORD flags)
 {
+    server_t *peer = connection->server;
     DWORD res;
 
     /* can't connect if we are already connected */
@@ -708,8 +723,8 @@ DWORD NETCON_secure_connect(netconn_t *connection, server_t *server)
     }
 
     /* connect with given TLS options */
-    res = netcon_secure_connect_setup(connection, FALSE);
-    if (res == ERROR_SUCCESS)
+    res = netcon_secure_connect_setup(connection, (flags & NETCON_TLS_COMPAT) != 0);
+    if (res == ERROR_SUCCESS || (flags & (NETCON_TLS_COMPAT | NETCON_TLS_NO_FALLBACK)))
         return res;
 
     /* FIXME: when got version alert and FIN from server */
@@ -717,8 +732,9 @@ DWORD NETCON_secure_connect(netconn_t *connection, server_t *server)
     if (res == ERROR_INTERNET_SECURITY_CHANNEL_ERROR && have_compat_cred_handle)
     {
         closesocket(connection->socket);
-        /* 500 ms (enforced here: is_blocking is already TRUE on this path) cut off slow links; use the 60 s default */
-        res = create_netconn_socket(connection->server, connection, 60000);
+        /* 500 ms (enforced here: is_blocking is already TRUE on this path) cut off slow links; use the 60 s default.
+         * Reconnect to the peer: only its addresses were resolved, connection->server may be a host behind it. */
+        res = create_netconn_socket(peer, connection, 60000);
         if (res != ERROR_SUCCESS)
             return res;
         res = netcon_secure_connect_setup(connection, TRUE);

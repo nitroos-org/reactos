@@ -4987,7 +4987,14 @@ static void http_process_keep_alive(http_request_t *req)
     LeaveCriticalSection( &req->headers_section );
 }
 
-static DWORD open_http_connection(http_request_t *request, BOOL *reusing)
+/* The address the handle connects to, as the status callbacks report it: the proxy when one is used. */
+static const char *connect_peer_addr_str(http_request_t *request)
+{
+    return request->proxy ? request->proxy->addr_str : request->server->addr_str;
+}
+
+/* fresh: connect anew even when the pool holds a connection of the host (the retry of a tunnel) */
+static DWORD open_http_connection(http_request_t *request, BOOL *reusing, BOOL fresh)
 {
     netconn_t *netconn = NULL;
     DWORD res;
@@ -5014,7 +5021,7 @@ static DWORD open_http_connection(http_request_t *request, BOOL *reusing)
 
     EnterCriticalSection(&connection_pool_cs);
 
-    while(!list_empty(&request->server->conn_pool)) {
+    while(!fresh && !list_empty(&request->server->conn_pool)) {
         netconn = LIST_ENTRY(list_head(&request->server->conn_pool), netconn_t, pool_entry);
         list_remove(&netconn->pool_entry);
 
@@ -5040,7 +5047,7 @@ static DWORD open_http_connection(http_request_t *request, BOOL *reusing)
 
     {
         char cb_str[INET6_ADDRSTRLEN + 3];
-        const char *cb = callback_address(request->server->addr_str, cb_str);
+        const char *cb = callback_address(connect_peer_addr_str(request), cb_str);
 
         INTERNET_SendCallback(&request->hdr, request->hdr.dwContext,
                               INTERNET_STATUS_CONNECTING_TO_SERVER, (void *)cb, strlen(cb)+1);
@@ -5058,7 +5065,7 @@ static DWORD open_http_connection(http_request_t *request, BOOL *reusing)
 
     {
         char cb_str[INET6_ADDRSTRLEN + 3];
-        const char *cb = callback_address(request->server->addr_str, cb_str);
+        const char *cb = callback_address(connect_peer_addr_str(request), cb_str);
 
         INTERNET_SendCallback(&request->hdr, request->hdr.dwContext,
                               INTERNET_STATUS_CONNECTED_TO_SERVER, (void *)cb, strlen(cb)+1);
@@ -5104,7 +5111,7 @@ static DWORD HTTP_HttpSendRequestW(http_request_t *request, LPCWSTR lpszHeaders,
 	DWORD dwHeaderLength, LPVOID lpOptional, DWORD dwOptionalLength,
 	DWORD dwContentLength, BOOL bEndRequest)
 {
-    BOOL redirected = FALSE, secure_proxy_connect = FALSE, loop_next;
+    BOOL redirected = FALSE, secure_proxy_connect = FALSE, tls_compat_retry = FALSE, loop_next;
     WCHAR *request_header = NULL;
     INT responseLen, cnt;
     DWORD res;
@@ -5196,7 +5203,7 @@ static DWORD HTTP_HttpSendRequestW(http_request_t *request, LPCWSTR lpszHeaders,
         if (!(request->hdr.dwFlags & INTERNET_FLAG_NO_COOKIES))
             HTTP_InsertCookies(request);
 
-        res = open_http_connection(request, &reusing_connection);
+        res = open_http_connection(request, &reusing_connection, tls_compat_retry);
         if (res != ERROR_SUCCESS)
             break;
 
@@ -5205,7 +5212,7 @@ static DWORD HTTP_HttpSendRequestW(http_request_t *request, LPCWSTR lpszHeaders,
             if (request->proxy) secure_proxy_connect = TRUE;
             else
             {
-                res = NETCON_secure_connect(request->netconn, request->server);
+                res = NETCON_secure_connect(request->netconn, request->server, 0);
                 if (res != ERROR_SUCCESS)
                 {
                     WARN("failed to upgrade to secure connection\n");
@@ -5398,13 +5405,26 @@ static DWORD HTTP_HttpSendRequestW(http_request_t *request, LPCWSTR lpszHeaders,
             }
             if (secure_proxy_connect && request->status_code == HTTP_STATUS_OK)
             {
-                res = NETCON_secure_connect(request->netconn, request->server);
+                res = NETCON_secure_connect(request->netconn, request->server,
+                                            tls_compat_retry ? NETCON_TLS_COMPAT : NETCON_TLS_NO_FALLBACK);
+                if (res == ERROR_INTERNET_SECURITY_CHANNEL_ERROR && !tls_compat_retry && NETCON_have_tls_compat())
+                {
+                    /* The handshake without TLS 1.1/1.2 needs a new connection to the proxy (not to the host,
+                     * whose address is not resolved) and a new CONNECT. */
+                    TRACE("handshake failed, reconnecting through the proxy without TLS 1.1/1.2\n");
+                    http_release_netconn(request, FALSE);
+                    tls_compat_retry = TRUE;
+                    res = ERROR_SUCCESS;
+                    loop_next = TRUE;
+                    continue;
+                }
                 if (res != ERROR_SUCCESS)
                 {
                     WARN("failed to upgrade to secure proxy connection\n");
                     http_release_netconn( request, FALSE );
                     break;
                 }
+                tls_compat_retry = FALSE;
                 remove_header(request, L"Proxy-Authorization", TRUE);
                 destroy_authinfo(request->proxyAuthInfo);
                 request->proxyAuthInfo = NULL;

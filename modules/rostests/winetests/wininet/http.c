@@ -8646,6 +8646,167 @@ static void test_ipv6_literals(void)
     }
 }
 
+struct tls_proxy
+{
+    SOCKET listener;
+    volatile LONG stop;
+    int conns;                    /* connections the proxy accepted */
+    int connects;                 /* of them whose request is "CONNECT <target> HTTP/1.1" */
+    int plain;                    /* requests that were not CONNECT <target> */
+    unsigned short hello_ver[4];  /* client_version of the ClientHello after each CONNECT */
+    char target[64];
+};
+
+static DWORD CALLBACK tls_proxy_thread(void *param)
+{
+    static const char ok200[] = "HTTP/1.1 200 Connection established\r\n\r\n";
+    static const char hello[] = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello";
+    /* fatal alert, protocol_version: every handshake fails with a security channel error */
+    static const unsigned char alert[] = { 0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x46 };
+    struct tls_proxy *p = param;
+
+    while (!p->stop)
+    {
+        struct timeval tv = { 0, 100000 };
+        char req[1024], want[96];
+        unsigned char ch[600];
+        DWORD to = 3000;
+        SOCKET c;
+        fd_set rs;
+        int i, r;
+
+        FD_ZERO(&rs);
+        FD_SET(p->listener, &rs);
+        if (select(0, &rs, NULL, NULL, &tv) < 1) continue;
+        c = accept(p->listener, NULL, NULL);
+        if (c == INVALID_SOCKET) continue;
+        setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, (char *)&to, sizeof(to));
+        for (i = 0; i < sizeof(req) - 1; i++)
+        {
+            r = recv(c, &req[i], 1, 0);
+            if (r != 1) break;
+            if (i >= 3 && !memcmp(&req[i - 3], "\r\n\r\n", 4)) { i++; break; }
+        }
+        req[i] = 0;
+        p->conns++;
+        sprintf(want, "CONNECT %s HTTP/1.1\r\n", p->target);
+        if (!strncmp(req, want, strlen(want)))
+        {
+            send(c, ok200, sizeof(ok200) - 1, 0);
+            r = recv(c, (char *)ch, sizeof(ch), 0);
+            if (r >= 11 && ch[0] == 0x16 && p->connects < ARRAY_SIZE(p->hello_ver))
+                p->hello_ver[p->connects] = (ch[9] << 8) | ch[10];
+            p->connects++;
+            send(c, (const char *)alert, sizeof(alert), 0);
+        }
+        else
+        {
+            p->plain++;
+            send(c, hello, sizeof(hello) - 1, 0);
+        }
+        closesocket(c);
+    }
+    return 0;
+}
+
+static char tls_cb_addr[8][64];
+static int tls_cb_count;
+static BOOL tls_cb_all_proxy;
+
+static void CALLBACK tls_proxy_status_cb(HINTERNET handle, DWORD_PTR ctx, DWORD status, void *info, DWORD len)
+{
+    if (status != INTERNET_STATUS_CONNECTING_TO_SERVER && status != INTERNET_STATUS_CONNECTED_TO_SERVER) return;
+    if (tls_cb_count < ARRAY_SIZE(tls_cb_addr))
+        lstrcpynA(tls_cb_addr[tls_cb_count], info && len ? info : "(none)", sizeof(tls_cb_addr[0]));
+    tls_cb_count++;
+    if (!info || !len || strcmp(info, "127.0.0.1") || len != 10) tls_cb_all_proxy = FALSE;
+}
+
+/* HTTPS through an explicit proxy whose tunnel fails the handshake: the retry without TLS 1.1/1.2 goes to the
+ * proxy again (a new CONNECT), never to the host (whose address is not resolved when a proxy is used); the
+ * CONNECTING/CONNECTED callbacks carry the proxy address. Windows does the same (a new CONNECT with a TLS 1.0
+ * ClientHello after the TLS 1.2 one, address of the proxy in both callbacks). The host is a name that never
+ * resolves: a connection around the proxy cannot succeed. */
+static void test_tls_fallback_through_proxy(void)
+{
+    struct sockaddr_in sa;
+    struct tls_proxy proxy;
+    HINTERNET ses, con, req;
+    WCHAR wproxy[32];
+    DWORD err, tmo = 15000;
+    HANDLE thread;
+    BOOL ret;
+    WSADATA wsa;
+    int len = sizeof(sa), i;
+
+    WSAStartup(MAKEWORD(2, 2), &wsa);
+    memset(&proxy, 0, sizeof(proxy));
+    proxy.listener = socket(AF_INET, SOCK_STREAM, 0);
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(proxy.listener, (struct sockaddr *)&sa, sizeof(sa)) || getsockname(proxy.listener, (struct sockaddr *)&sa, &len)
+        || listen(proxy.listener, 4))
+    {
+        skip("no loopback sockets\n");
+        closesocket(proxy.listener);
+        return;
+    }
+    sprintf(proxy.target, "example.invalid:%u", 4443);
+    thread = CreateThread(NULL, 0, tls_proxy_thread, &proxy, 0, NULL);
+
+    swprintf(wproxy, ARRAY_SIZE(wproxy), L"127.0.0.1:%u", ntohs(sa.sin_port));
+    ses = InternetOpenW(L"winetest", INTERNET_OPEN_TYPE_PROXY, wproxy, NULL, 0);
+    ok(ses != NULL, "InternetOpen failed %lu\n", GetLastError());
+    InternetSetOptionW(ses, INTERNET_OPTION_RECEIVE_TIMEOUT, &tmo, sizeof(tmo));
+    pInternetSetStatusCallbackA(ses, tls_proxy_status_cb);
+
+    /* plain HTTP through the proxy: the callbacks name the proxy */
+    tls_cb_count = 0;
+    tls_cb_all_proxy = TRUE;
+    con = InternetConnectW(ses, L"example.invalid", 4443, NULL, NULL, INTERNET_SERVICE_HTTP, 0, 1);
+    ok(con != NULL, "InternetConnect failed %lu\n", GetLastError());
+    req = HttpOpenRequestW(con, L"GET", L"/", NULL, NULL, NULL, INTERNET_FLAG_NO_CACHE_WRITE | INTERNET_FLAG_RELOAD, 1);
+    ok(req != NULL, "HttpOpenRequest failed %lu\n", GetLastError());
+    ret = HttpSendRequestW(req, NULL, 0, NULL, 0);
+    ok(ret, "HttpSendRequest failed %lu\n", GetLastError());
+    ok(proxy.plain == 1, "got %d plain requests at the proxy\n", proxy.plain);
+    ok(tls_cb_count == 2, "got %d connect callbacks\n", tls_cb_count);
+    ok(tls_cb_all_proxy, "callbacks: %s / %s, expected the proxy 127.0.0.1\n", tls_cb_addr[0], tls_cb_addr[1]);
+    InternetCloseHandle(req);
+
+    /* HTTPS: every handshake fails */
+    tls_cb_count = 0;
+    tls_cb_all_proxy = TRUE;
+    req = HttpOpenRequestW(con, L"GET", L"/", NULL, NULL, NULL,
+                           INTERNET_FLAG_SECURE | INTERNET_FLAG_NO_CACHE_WRITE | INTERNET_FLAG_RELOAD, 1);
+    ok(req != NULL, "HttpOpenRequest failed %lu\n", GetLastError());
+    SetLastError(0xdeadbeef);
+    ret = HttpSendRequestW(req, NULL, 0, NULL, 0);
+    err = GetLastError();
+    ok(!ret, "HttpSendRequest succeeded\n");
+    ok(err == ERROR_INTERNET_SECURITY_CHANNEL_ERROR || err == ERROR_INTERNET_CANNOT_CONNECT, "got %lu\n", err);
+    InternetCloseHandle(req);
+    InternetCloseHandle(con);
+    InternetCloseHandle(ses);
+
+    proxy.stop = 1;
+    WaitForSingleObject(thread, 5000);
+    CloseHandle(thread);
+    ok(proxy.plain == 1, "%d connections, %d CONNECT %s, %d other requests, expected 1\n",
+       proxy.conns, proxy.connects, proxy.target, proxy.plain);
+    ok(proxy.connects == 2, "got %d tunnels, expected the first and the retry\n", proxy.connects);
+    for (i = 0; i < proxy.connects && i < ARRAY_SIZE(proxy.hello_ver); i++)
+        ok(proxy.hello_ver[i] != 0, "tunnel %d: no ClientHello\n", i);
+    if (proxy.connects == 2)
+        ok(proxy.hello_ver[1] < proxy.hello_ver[0], "retry hello 0x%04x not below the first 0x%04x\n",
+           proxy.hello_ver[1], proxy.hello_ver[0]);
+    ok(tls_cb_count == 4, "got %d connect callbacks\n", tls_cb_count);
+    ok(tls_cb_all_proxy, "callbacks: %s %s %s %s, expected the proxy 127.0.0.1\n", tls_cb_addr[0], tls_cb_addr[1],
+       tls_cb_addr[2], tls_cb_addr[3]);
+    closesocket(proxy.listener);
+}
+
 START_TEST(http)
 {
     HMODULE hdll;
@@ -8668,6 +8829,7 @@ START_TEST(http)
     init_events();
     init_status_tests();
     test_ipv6_literals();
+    test_tls_fallback_through_proxy();
     test_InternetCloseHandle();
     InternetReadFile_test(INTERNET_FLAG_ASYNC, &test_data[0]);
     InternetReadFile_test(INTERNET_FLAG_ASYNC, &test_data[1]);
