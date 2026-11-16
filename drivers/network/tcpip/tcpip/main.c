@@ -754,6 +754,12 @@ TiDispatch(
                 Status = DispSolicit6(Irp, IrpSp);
                 break;
 
+            case IOCTL_IP6_POLICY_RELOAD:
+                Status = TiCheckControlAccess(Irp);
+                if (NT_SUCCESS(Status))
+                    Status = TCP6LoadPrefixPolicies();
+                break;
+
             case IOCTL_IP_ADDCHANGE_NOTIFY_REQUEST:
                 TI_DbgPrint(MIN_TRACE, ("IP_ADDCHANGE_NOTIFY_REQUEST\n"));
                 Status = DispAddrChangeNotifyRequest(Irp);

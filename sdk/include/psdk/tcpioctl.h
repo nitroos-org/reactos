@@ -86,6 +86,12 @@ typedef struct _TCP_IPV6_SOLICIT_REQUEST
     ULONG IfIndex;
     UCHAR Address[16];
 } TCP_IPV6_SOLICIT_REQUEST, *PTCP_IPV6_SOLICIT_REQUEST;
+
+/* Reads the IPv6 prefix policy table (Tcpip6\Parameters\PrefixPolicies, see sdk/include/reactos/addrsel.h) again
+   for source address selection: no input, no output. Administrators only, as the table can only be changed by
+   them; iphlpapi's NitroSetPrefixPolicies sends it after every change */
+#define IOCTL_IP6_POLICY_RELOAD \
+    _TCP_CTL_CODE(0x1E, METHOD_BUFFERED, FILE_WRITE_ACCESS)
 #endif
 
 #define IOCTL_ICMP_ECHO_REQUEST \

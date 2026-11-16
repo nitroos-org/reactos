@@ -273,6 +273,9 @@ ip6_route(const ip6_addr_t *src, const ip6_addr_t *dest)
  * As long as temporary addresses are not supported (as used in Rule 7), a
  * proper implementation of Rule 8 would obviate the need to implement Rule 6.
  *
+ * NitroOS: with LWIP_HOOK_IP6_SELECT_SOURCE defined the hook makes the whole
+ * choice instead (rules 1, 2, 3, 6, 7 and 8 with the prefix policy table).
+ *
  * @param netif the netif on which to send a packet
  * @param dest the destination we are trying to reach (possibly not properly
  *             zoned)
@@ -281,6 +284,13 @@ ip6_route(const ip6_addr_t *src, const ip6_addr_t *dest)
  */
 const ip_addr_t *
 ip6_select_source_address(struct netif *netif, const ip6_addr_t *dest)
+#ifdef LWIP_HOOK_IP6_SELECT_SOURCE
+{
+  /* NitroOS: the whole of RFC 6724 section 5 that applies (rules 1, 2, 3, 6 with the prefix policy table, 7 and
+   * a real longest-prefix rule 8), the function user mode uses for the same answer */
+  return LWIP_HOOK_IP6_SELECT_SOURCE(netif, dest);
+}
+#else /* LWIP_HOOK_IP6_SELECT_SOURCE */
 {
   const ip_addr_t *best_addr;
   const ip6_addr_t *cand_addr;
@@ -364,6 +374,7 @@ ip6_select_source_address(struct netif *netif, const ip6_addr_t *dest)
 
   return best_addr; /* may be NULL */
 }
+#endif /* LWIP_HOOK_IP6_SELECT_SOURCE */
 
 #if LWIP_IPV6_FORWARD
 /**

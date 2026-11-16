@@ -49,6 +49,8 @@ int LibIp6SkipSource(struct netif *netif, s8_t Slot);
 /* ip/transport/tcp/temp6.c */
 int LibNd6AddrTemporary(struct netif *netif, s8_t Slot);
 int LibIp6SourceTemporary(struct netif *netif, s8_t Slot);
+/* ip/transport/tcp/policy6.c */
+const ip_addr_t *LibIp6SelectSource(struct netif *netif, const ip6_addr_t *dest);
 void LibNd6TemporaryTimer(void);
 int LibNd6MakeRoom(struct netif *netif);
 /* ip/transport/udp/udp6.c */

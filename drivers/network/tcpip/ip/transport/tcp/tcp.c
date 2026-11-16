@@ -240,6 +240,9 @@ NTSTATUS TCPStartup(VOID)
     /* Initialize our IP library */
     LibIPInitialize();
 
+    /* the prefix policy table of IPv6 source address selection (the defaults when it cannot be read) */
+    TCP6LoadPrefixPolicies();
+
     /* Register this protocol with IP layer */
     IPRegisterProtocol(IPPROTO_TCP, TCPReceive);
 
