@@ -80,6 +80,7 @@ extern void func_GetTextFace(void);
 extern void func_GetTextMetrics(void);
 extern void func_GradientFill(void);
 extern void func_LPtoDP(void);
+extern void func_LineHugeCoords(void);
 extern void func_MaskBlt(void);
 extern void func_NtGdiAddFontResource(void);
 extern void func_OffsetClipRgn(void);
@@ -195,6 +196,7 @@ const struct test winetest_testlist[] =
     { "GetTextFace", func_GetTextFace },
     { "GradientFill", func_GradientFill },
     { "LPtoDP", func_LPtoDP },
+    { "LineHugeCoords", func_LineHugeCoords },
     { "MaskBlt", func_MaskBlt },
     { "NtGdiAddFontResource", func_NtGdiAddFontResource},
     { "OffsetClipRgn", func_OffsetClipRgn },
