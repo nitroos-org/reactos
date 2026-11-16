@@ -52,6 +52,7 @@ C_ASSERT(FIELD_OFFSET(FLT_PARAMETERS, SetFileInformation.ReplaceIfExists) ==
 #define MODE_NOSEC      9
 #define MODE_SCTX       10
 #define MODE_PDPC       11
+#define MODE_DPCREAD    12
 
 #define MAX_OPEN        256
 
@@ -134,6 +135,7 @@ ModeFromName(_In_ PCUNICODE_STRING Name)
         { L".blk", MODE_BLK }, { L".nowr", MODE_NOWR }, { L".half", MODE_HALF }, { L".pend", MODE_PEND },
         { L".sync", MODE_SYNC }, { L".safe", MODE_SAFE }, { L".nodel", MODE_NODEL }, { L".msg", MODE_MSG },
         { L".nosec", MODE_NOSEC }, { L".sctx", MODE_SCTX }, { L".pdpc", MODE_PDPC },
+        { L".dpc", MODE_DPCREAD },
     };
     ULONG i, Length;
 
@@ -285,6 +287,8 @@ ContextCleanup(_In_ PFLT_CONTEXT Context,
     PSAMPLE_CONTEXT Sample = Context;
 
     InterlockedIncrement((PLONG)&Stats.Contexts[FLTSAMPLE_CTX_CLEANED]);
+    if (KeGetCurrentIrql() > APC_LEVEL)
+        InterlockedIncrement((PLONG)&Stats.CleanupAboveApc);
     if (Sample->Magic != CONTEXT_MAGIC)
         InterlockedIncrement((PLONG)&Stats.ContextMismatch);
 
@@ -752,6 +756,18 @@ PreOperation(_Inout_ PFLT_CALLBACK_DATA Data,
             if (Paging)
                 break;
             Mode = FindMode(FileObject);
+            if (Mode == MODE_DPCREAD)
+            {
+                /* A context of this read only: its last reference goes in the post-operation */
+                PSAMPLE_CONTEXT Sample = NewContext(FLT_STREAMHANDLE_CONTEXT, Mode);
+
+                if (Sample)
+                {
+                    *CompletionContext = Sample;
+                    return FLT_PREOP_SUCCESS_WITH_CALLBACK;
+                }
+                break;
+            }
             if (Mode == MODE_SYNC)
             {
                 InterlockedIncrement((PLONG)&Stats.Synchronized);
@@ -820,6 +836,8 @@ PostOperation(_Inout_ PFLT_CALLBACK_DATA Data,
     if (Flags & FLTFL_POST_OPERATION_DRAINING)
     {
         InterlockedIncrement((PLONG)&Stats.DrainingPosts);
+        if (Major == IRP_MJ_READ && CompletionContext && FindMode(FileObject) == MODE_DPCREAD)
+            FltReleaseContext(CompletionContext);
         return FLT_POSTOP_FINISHED_PROCESSING;
     }
 
@@ -865,6 +883,15 @@ PostOperation(_Inout_ PFLT_CALLBACK_DATA Data,
             break;
 
         case IRP_MJ_READ:
+            if (CompletionContext && FindMode(FileObject) == MODE_DPCREAD)
+            {
+                /* Maybe DISPATCH_LEVEL: the cleanup callback must still come at APC_LEVEL or below */
+                InterlockedIncrement((PLONG)&Stats.DpcReadPosts);
+                if (KeGetCurrentIrql() == DISPATCH_LEVEL)
+                    InterlockedIncrement((PLONG)&Stats.DpcReadPostsAtDispatch);
+                FltReleaseContext(CompletionContext);
+                break;
+            }
             if ((RvFlags & FLTSAMPLE_RV_PARK_FASTIO_POST) && FLT_IS_FASTIO_OPERATION(Data))
             {
                 PRV_PARK_ITEM Item = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Item), TAG_SAMPLE);

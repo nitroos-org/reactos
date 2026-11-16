@@ -40,6 +40,8 @@
  *   .nodel the file can't be deleted or renamed (set information is refused)
  *   .nosec no section can be created for the file (IRP_MJ_ACQUIRE_FOR_SECTION_SYNCHRONIZATION is refused)
  *   .pdpc  writes are pended by the pre-operation and completed from a DPC, at DISPATCH_LEVEL
+ *   .dpc   (on fltfakefs, which completes their reads at DISPATCH_LEVEL) a read carries a context of its
+ *          own from the pre- to the post-operation, which releases its last reference there
  *   .sctx  a read tries FltSetStreamContext, even on a file object the filter didn't see created
  *          (SctxReads, LastSctxStatus)
  * Anything else is counted and let through.
@@ -110,6 +112,9 @@ typedef struct _FLTSAMPLE_STATS
     LONG LastSctxStatus;            /* ... what FltSetStreamContext (keep if exists) said for the last one */
     ULONG PendDpc;                  /* .pdpc writes pended */
     ULONG PendDpcCompleted;         /* ... and completed from a DPC */
+    ULONG DpcReadPosts;             /* post-reads of .dpc files (fltfakefs completes them from a DPC) */
+    ULONG DpcReadPostsAtDispatch;   /* ... at DISPATCH_LEVEL, where the last reference of a context was released */
+    ULONG CleanupAboveApc;          /* context cleanup callbacks called above APC_LEVEL (never, WDK) */
 
 } FLTSAMPLE_STATS, *PFLTSAMPLE_STATS;
 

@@ -922,6 +922,81 @@ START_TEST(p3msg)
     test_MessageBuffers();
 }
 
+/*
+ * The last reference of a context released at DISPATCH_LEVEL (a post-operation in a completion
+ * routine): the cleanup callback runs later in a worker, at IRQL <= APC_LEVEL (WDK, FltReleaseContext).
+ */
+static
+void
+test_ContextReleasedAtDispatch(void)
+{
+    SAMPLE P = { { 0 } };
+    FLTSAMPLE_STATS S0, S;
+    HANDLE File;
+    NTSTATUS Status;
+    IO_STATUS_BLOCK Iosb;
+    UCHAR Buffer[512];
+    LARGE_INTEGER Offset;
+    ULONG i;
+
+    if (!LoadSample(&P, L"FltSampleP", L"383000.5", 0xFFFF))
+    {
+        skip("Can't load the sample filter\n");
+        return;
+    }
+
+    Status = OpenFake(L"ctxrel.dpc", &File);
+    ok(Status == STATUS_SUCCESS, "Open: 0x%lx\n", Status);
+    if (!NT_SUCCESS(Status))
+        goto Quit;
+
+    SampleStats(&P, &S0);
+    for (i = 0; i < 20; i++)
+    {
+        Offset.QuadPart = 0;
+        Status = NtReadFile(File, NULL, NULL, NULL, &Iosb, Buffer, sizeof(Buffer), &Offset, NULL);
+        ok(Status == STATUS_SUCCESS, "Read %lu: 0x%lx\n", i, Status);
+    }
+    NtClose(File);
+
+    /* The cleanups run in a worker */
+    for (i = 0; i < 100; i++)
+    {
+        SampleStats(&P, &S);
+        if (S.Contexts[FLTSAMPLE_CTX_CLEANED] - S0.Contexts[FLTSAMPLE_CTX_CLEANED] >= 20)
+            break;
+        Sleep(50);
+    }
+    trace("Post-reads %lu, at DISPATCH_LEVEL %lu, contexts cleaned %lu\n", S.DpcReadPosts - S0.DpcReadPosts,
+          S.DpcReadPostsAtDispatch - S0.DpcReadPostsAtDispatch,
+          S.Contexts[FLTSAMPLE_CTX_CLEANED] - S0.Contexts[FLTSAMPLE_CTX_CLEANED]);
+    ok(S.DpcReadPostsAtDispatch - S0.DpcReadPostsAtDispatch >= 10, "Only %lu post-reads at DISPATCH_LEVEL, the test says little\n",
+       S.DpcReadPostsAtDispatch - S0.DpcReadPostsAtDispatch);
+    ok(S.Contexts[FLTSAMPLE_CTX_CLEANED] - S0.Contexts[FLTSAMPLE_CTX_CLEANED] >= 20, "%lu contexts cleaned\n",
+       S.Contexts[FLTSAMPLE_CTX_CLEANED] - S0.Contexts[FLTSAMPLE_CTX_CLEANED]);
+    ok(S.CleanupAboveApc == 0, "%lu cleanup callbacks above APC_LEVEL\n", S.CleanupAboveApc);
+
+Quit:
+    UnloadSample(&P, TRUE);
+}
+
+START_TEST(p3ctxdpc)
+{
+    EnsureTestDirectory();
+    if (!StartFilterManager())
+    {
+        skip("No filter manager\n");
+        return;
+    }
+    if (!LoadFakeFs())
+    {
+        skip("No fake file system\n");
+        return;
+    }
+
+    test_ContextReleasedAtDispatch();
+}
+
 START_TEST(p3create)
 {
     EnsureTestDirectory();
