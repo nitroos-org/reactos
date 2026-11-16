@@ -2070,6 +2070,9 @@ MmFindRegion(
 #define IS_DIRTY_SSE(E)          ((E) & 2)
 #define WRITE_SSE(E)             ((E) | 4)
 #define IS_WRITE_SSE(E)          ((E) & 4)
+/* A read or page operation (wait entry) or a write is in flight on the page of this entry */
+#define MM_IS_BUSY_SSE(E)        \
+    (MM_IS_WAIT_PTE(E) || (((E) != 0) && !IS_SWAP_FROM_SSE(E) && IS_WRITE_SSE(E)))
 #ifdef _WIN64
 #define PAGE_FROM_SSE(E)         ((E) & 0xFFFFFFF000ULL)
 #else
@@ -2376,6 +2379,44 @@ _MmGetPageEntrySectionSegment(PMM_SECTION_SEGMENT Segment,
 #define MmSetPageEntrySectionSegment(S,O,E) _MmSetPageEntrySectionSegment(S,O,E,__FILE__,__LINE__)
 
 #define MmGetPageEntrySectionSegment(S,O) _MmGetPageEntrySectionSegment(S,O,__FILE__,__LINE__)
+
+/* section.c: waiting for a busy page entry (see MiRegisterPageWait) */
+
+typedef struct _MI_PAGE_WAIT_SLOT *PMI_PAGE_WAIT_SLOT;
+
+extern volatile LONG MiPageWaitActive;
+
+PMI_PAGE_WAIT_SLOT
+NTAPI
+MiRegisterPageWait(
+    _In_ PVOID Owner,
+    _In_ ULONG_PTR Page);
+
+VOID
+NTAPI
+MiWaitForPageWait(
+    _In_opt_ PMI_PAGE_WAIT_SLOT Slot);
+
+VOID
+NTAPI
+MiWakePageWaitersSlow(
+    _In_ PVOID Owner,
+    _In_ ULONG_PTR Page,
+    _In_ BOOLEAN AllPages);
+
+/* The thread that changes a busy entry, still holding the lock that protects it */
+FORCEINLINE
+VOID
+MiWakePageWaiters(
+    _In_ PVOID Owner,
+    _In_ ULONG_PTR Page)
+{
+    if (*(volatile LONG *)&MiPageWaitActive != 0)
+        MiWakePageWaitersSlow(Owner, Page, FALSE);
+}
+
+#define MI_SEGMENT_WAIT_PAGE(Offset)  ((ULONG_PTR)((ULONGLONG)(Offset)->QuadPart >> PAGE_SHIFT))
+#define MI_VA_WAIT_PAGE(Address)      ((ULONG_PTR)(Address) >> PAGE_SHIFT)
 
 /* sysldr.c ******************************************************************/
 

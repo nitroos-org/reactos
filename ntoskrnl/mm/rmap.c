@@ -230,6 +230,8 @@ GetEntry:
                 MmLockAddressSpace(AddressSpace);
                 MmDeletePageFileMapping(Process, Address, &Dummy);
                 ASSERT(Dummy == MM_WAIT_ENTRY);
+                /* The write is over: a waiter for this PTE checks again once it has the address space lock */
+                MiWakePageWaiters(AddressSpace, MI_VA_WAIT_PAGE(Address));
 
                 if (!NT_SUCCESS(Status))
                 {
