@@ -181,6 +181,7 @@ list(APPEND SOURCE
     MappedViewEvict.c
     MultiByteToWideChar.c
     NamedPipeInstanceReuse.c
+    NamedPipeListenCancel.c
     PerformanceCounter.c
     Pipes.c
     PipeSqos.c

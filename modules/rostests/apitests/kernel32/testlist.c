@@ -184,6 +184,7 @@ extern void func_FileLockCloseOther(void);
 extern void func_MappedViewEvict(void);
 extern void func_MultiByteToWideChar(void);
 extern void func_NamedPipeInstanceReuse(void);
+extern void func_NamedPipeListenCancel(void);
 extern void func_PartialContext(void);
 extern void func_Placeholder(void);
 extern void func_PageTargetsFlag(void);
@@ -455,6 +456,7 @@ const struct test winetest_testlist[] =
     { "MappedViewEvict",            func_MappedViewEvict },
     { "MultiByteToWideChar",         func_MultiByteToWideChar },
     { "NamedPipeInstanceReuse",     func_NamedPipeInstanceReuse },
+    { "NamedPipeListenCancel",      func_NamedPipeListenCancel },
     { "PartialContext",             func_PartialContext },
     { "Placeholder",                func_Placeholder },
     { "PageTargetsFlag",            func_PageTargetsFlag },
