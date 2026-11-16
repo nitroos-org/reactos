@@ -503,6 +503,141 @@ Done:
         closesocket(other);
 }
 
+/* The first adapter that is up with IPv4 and has no IPv6 (Ipv6IfIndex 0): the loopback-only state of Ipv6Enable = 0
+   and DisabledComponents 0x10/0xFF leaves every adapter like that. 0 when there is none (IPv6 is on, or no adapter) */
+static ULONG AdapterWithoutIpv6(void)
+{
+    ULONG Size = 0, Index = 0, Result;
+    PIP_ADAPTER_ADDRESSES Addresses, Adapter;
+
+    GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER, NULL,
+                         NULL, &Size);
+    Addresses = HeapAlloc(GetProcessHeap(), 0, Size ? Size : 1);
+    if (!Addresses)
+        return 0;
+    Result = GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER,
+                                  NULL, Addresses, &Size);
+    if (Result == NO_ERROR)
+    {
+        for (Adapter = Addresses; Adapter; Adapter = Adapter->Next)
+        {
+            if (Adapter->IfType != IF_TYPE_SOFTWARE_LOOPBACK && Adapter->OperStatus == IfOperStatusUp &&
+                Adapter->IfIndex != 0 && Adapter->Ipv6IfIndex == 0)
+            {
+                Index = Adapter->IfIndex;
+                break;
+            }
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, Addresses);
+    return Index;
+}
+
+/* A datagram to a group over an adapter that has no IPv6 (IPV6_MULTICAST_IF names it) fails with WSAENETUNREACH:
+   it is not sent, and the error is the one of the send, not 0 or WSAEFAULT. Only where such an adapter exists
+   (the loopback-only state, with a NIC) */
+static void TestMulticastAdapterWithoutIpv6(void)
+{
+    SOCKADDR_IN6_LH To;
+    USHORT PortS;
+    SOCKET s;
+    DWORD Value;
+    ULONG Index = AdapterWithoutIpv6();
+    int Result, Error;
+
+    if (!Index)
+    {
+        skip("no adapter without IPv6\n");
+        return;
+    }
+
+    s = Udp6(TRUE, Any6, &PortS);
+    if (s == INVALID_SOCKET)
+        return;
+
+    Init6(&To, Group6, PortS);
+
+    /* Without an interface: the group belongs to the loopback interface, the datagram is sent (and looped) */
+    ok(sendto(s, "x", 1, 0, (struct sockaddr *)&To, sizeof(To)) == 1, "sendto the group, no interface: %d\n",
+       WSAGetLastError());
+
+    Value = Index;
+    Result = setsockopt(s, IPPROTO_IPV6, IPV6_MULTICAST_IF, (char *)&Value, sizeof(Value));
+    Error = WSAGetLastError();
+    trace("IPV6_MULTICAST_IF %lu (adapter without IPv6): %d %d\n", Index, Result, Result ? Error : 0);
+    if (Result == 0)
+    {
+        WSASetLastError(0);
+        Result = sendto(s, "x", 1, 0, (struct sockaddr *)&To, sizeof(To));
+        Error = WSAGetLastError();
+        ok(Result == SOCKET_ERROR && Error == WSAENETUNREACH, "sendto the group over adapter %lu: %d %d\n", Index,
+           Result, Error);
+
+        /* The same send as an overlapped WSASendTo: the error is the one of the completed request */
+        {
+            WSABUF Buf;
+            WSAOVERLAPPED Ov;
+            DWORD Sent = 0, Flags = 0;
+
+            Buf.buf = (char *)"x";
+            Buf.len = 1;
+            memset(&Ov, 0, sizeof(Ov));
+            Ov.hEvent = WSACreateEvent();
+            WSASetLastError(0);
+            Result = WSASendTo(s, &Buf, 1, &Sent, 0, (struct sockaddr *)&To, sizeof(To), &Ov, NULL);
+            Error = WSAGetLastError();
+            if (Result == SOCKET_ERROR && Error == WSA_IO_PENDING)
+            {
+                WaitForSingleObject(Ov.hEvent, 5000);
+                WSASetLastError(0);
+                Result = WSAGetOverlappedResult(s, &Ov, &Sent, FALSE, &Flags) ? 0 : SOCKET_ERROR;
+                Error = WSAGetLastError();
+            }
+            ok(Result == SOCKET_ERROR && Error == WSAENETUNREACH, "overlapped WSASendTo the group over adapter %lu: %d %d\n",
+               Index, Result, Error);
+            WSACloseEvent(Ov.hEvent);
+        }
+    }
+
+    /* A scope id naming the adapter, with the group of the link-local scope, and a link-local unicast destination */
+    Value = 0;
+    setsockopt(s, IPPROTO_IPV6, IPV6_MULTICAST_IF, (char *)&Value, sizeof(Value));
+    {
+        static const UCHAR Group6Link[16] = { 0xff,0x02,0,0, 0,0,0,0, 0,0,0,0, 0,0,0x42,0x43 };
+        static const UCHAR Host6Link[16] = { 0xfe,0x80,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0x42 };
+
+        Init6(&To, Group6Link, PortS);
+        To.sin6_scope_id = Index;
+        WSASetLastError(0);
+        Result = sendto(s, "x", 1, 0, (struct sockaddr *)&To, sizeof(To));
+        Error = WSAGetLastError();
+        ok(Result == SOCKET_ERROR && Error == WSAENETUNREACH, "sendto ff02::4243%%%lu: %d %d\n", Index, Result, Error);
+
+        Init6(&To, Host6Link, PortS);
+        To.sin6_scope_id = Index;
+        WSASetLastError(0);
+        Result = sendto(s, "x", 1, 0, (struct sockaddr *)&To, sizeof(To));
+        Error = WSAGetLastError();
+        ok(Result == SOCKET_ERROR && Error == WSAENETUNREACH, "sendto fe80::42%%%lu: %d %d\n", Index, Result, Error);
+
+        /* A connected socket: send() reports the same error */
+        Init6(&To, Group6Link, PortS);
+        To.sin6_scope_id = Index;
+        Result = connect(s, (struct sockaddr *)&To, sizeof(To));
+        Error = WSAGetLastError();
+        trace("connect ff02::4243%%%lu: %d %d\n", Index, Result, Result ? Error : 0);
+        if (Result == 0)
+        {
+            WSASetLastError(0);
+            Result = send(s, "x", 1, 0);
+            Error = WSAGetLastError();
+            ok(Result == SOCKET_ERROR && Error == WSAENETUNREACH, "send to ff02::4243%%%lu: %d %d\n", Index, Result,
+               Error);
+        }
+    }
+    closesocket(s);
+}
+
 /* Datagrams to a group sent back to back, the member reading each one before the next send: none is lost, whatever
    the sender is bound to and also when it is the member itself (its looped copies must reach it one by one) */
 #define BURST_COUNT 100
@@ -793,6 +928,7 @@ START_TEST(ipv6udp)
     TestDualStack();
     TestRecvMsg();
     TestMulticast();
+    TestMulticastAdapterWithoutIpv6();
     TestMulticastBurst();
     TestMulticastGroupLimit();
     TestTables();
