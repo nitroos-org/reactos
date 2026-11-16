@@ -182,8 +182,11 @@ VOID
 Route6Consider(PROUTE6_MATCH Best, struct netif *netif, UCHAR Length, ULONG Metric, const ip6_addr_t *NextHop,
                BOOLEAN FromRa)
 {
-    /* the route metric and the interface metric (set by hand or automatic) are added, as on Windows */
-    Metric += TCP6InterfaceMetric(netif);
+    /* the route metric and the interface metric (set by hand or automatic) are added, as on Windows; a route metric
+       near the top of the range (it is not limited) stays the highest instead of wrapping to a low one */
+    ULONG IfMetric = TCP6InterfaceMetric(netif);
+
+    Metric = (Metric > MAXULONG - IfMetric) ? MAXULONG : Metric + IfMetric;
 
     if (Best->Found)
     {

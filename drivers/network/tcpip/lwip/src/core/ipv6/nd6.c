@@ -767,9 +767,13 @@ nd6_input(struct pbuf *p, struct netif *inp)
         mtu32 = lwip_htonl(mtu_opt->mtu);
         if ((mtu32 >= IP6_MIN_MTU_LENGTH) && (mtu32 <= 0xffff)) {
 #if LWIP_ND6_ALLOW_RA_UPDATES
-          if (inp->mtu) {
+          if (inp->mtu6) {
+            /* NitroOS: mtu6 is already limited to the link MTU (if.c); netif->mtu is the IPv4 MTU, which can be set
+             * apart from it (SetIpInterfaceEntry) and below the IPv6 minimum */
+            inp->mtu6 = LWIP_MIN(inp->mtu6, (u16_t)mtu32);
+          } else if (inp->mtu) {
             /* don't set the mtu for IPv6 higher than the netif driver supports */
-            inp->mtu6 = LWIP_MIN(LWIP_MIN(inp->mtu, inp->mtu6), (u16_t)mtu32);
+            inp->mtu6 = LWIP_MIN(inp->mtu, (u16_t)mtu32);
           } else {
             inp->mtu6 = (u16_t)mtu32;
           }
@@ -2154,7 +2158,8 @@ nd6_get_next_hop_entry(const ip6_addr_t *ip6addr, struct netif *netif)
 #ifdef LWIP_HOOK_ND6_GET_GW
       } else if ((next_hop_addr = LWIP_HOOK_ND6_GET_GW(netif, ip6addr)) != NULL) {
         /* Next hop for destination provided by hook function. */
-        dest->pmtu = netif->mtu;
+        /* NitroOS: the IPv6 MTU (netif->mtu is the IPv4 one, which can be set apart from it) */
+        dest->pmtu = netif_mtu6(netif);
         ip6_addr_set(&dest->next_hop_addr, next_hop_addr);
 #endif /* LWIP_HOOK_ND6_GET_GW */
       } else {

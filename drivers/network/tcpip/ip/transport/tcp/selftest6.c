@@ -1961,6 +1961,26 @@ StTestInterfaceParams(PIP_INTERFACE Eth, const ip6_addr_t *R1, const UCHAR *Mac1
     _snprintf(Detail, sizeof(Detail), "mtu %u mtu6 %u", (UINT)En->mtu, (UINT)En->mtu6);
     StResult(St == STATUS_SUCCESS && En->mtu == Link && En->mtu6 == Link, "interface parameters: both MTUs back to the link MTU", Detail);
 
+    /* the MTU option of a router advertisement lowers the IPv6 MTU at most to its own value: an IPv4 MTU set lower
+       (576, below the IPv6 minimum) is not the IPv6 one */
+    Req.Family = TCP_IPIF_IPV4;
+    Req.Mtu = 576;
+    St = TCP6InterfaceConfigure(Eth, &Req);
+    n = StOptSlla(Opts, Mac1);
+    RtlZeroMemory(Opts + n, 8);
+    Opts[n] = 5; Opts[n + 1] = 1;
+    Opts[n + 4] = (UCHAR)(Link >> 24); Opts[n + 5] = (UCHAR)(Link >> 16); Opts[n + 6] = (UCHAR)(Link >> 8); Opts[n + 7] = (UCHAR)Link;
+    n += 8;
+    StInject(Eth, StRa(R1, 0, 0, 0, Opts, n), FALSE);
+    StSleep(300);
+    _snprintf(Detail, sizeof(Detail), "status 0x%lx mtu %u mtu6 %u link %u", St, (UINT)En->mtu, (UINT)En->mtu6, Link);
+    Ok = (St == STATUS_SUCCESS && En->mtu == 576 && En->mtu6 == Link);
+    Req.Mtu = Link;
+    St = TCP6InterfaceConfigure(Eth, &Req);
+    Req.Family = TCP_IPIF_IPV6;
+    StResult(Ok && St == STATUS_SUCCESS && En->mtu == Link && En->mtu6 == Link,
+             "interface parameters: an advertised MTU is not bounded by a lower IPv4 MTU", Detail);
+
     /* metric: the IPv6 one is added to the route metrics, 0 is automatic */
     Req.Fields = TCP_IPIF_SET_METRIC;
     Req.Metric = 50;

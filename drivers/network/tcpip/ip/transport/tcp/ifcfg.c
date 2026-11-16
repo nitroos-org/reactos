@@ -179,7 +179,9 @@ TCPQueryIpInterfaces(PVOID Out, ULONG OutSize)
             Row->Ip4Metric = CurrentIF->Ip4MetricConfig;
             if (IsLoopback)
                 Row->Flags |= TCP_IPIF_ROW_LOOPBACK;
-            if (TCPIpv6Enabled && (IsLoopback || (CurrentIF->AddressLength == 6 && netif->hwaddr_len == 6)))
+            /* DisabledComponents (TCPIpv6Links FALSE): IPv6 is on the loopback interface only */
+            if (TCPIpv6Enabled &&
+                (IsLoopback || (TCPIpv6Links && CurrentIF->AddressLength == 6 && netif->hwaddr_len == 6)))
             {
                 Row->Flags |= TCP_IPIF_ROW_IP6;
                 Row->Ip6Mtu = IsLoopback ? 0xFFFFFFFF : netif->mtu6;
@@ -250,7 +252,8 @@ TCP6InterfaceConfigure(PIP_INTERFACE IF, const TCP_IP_INTERFACE_REQUEST *Asked)
     V6 = (Request.Family == TCP_IPIF_IPV6);
     Persistent = (Request.Store == TCP_IPV6_STORE_PERSISTENT);
 
-    if (V6 && !TCPIpv6Enabled)
+    /* the interfaces here are not the loopback one: with DisabledComponents they have no IPv6 (as DispRouteConfig6) */
+    if (V6 && (!TCPIpv6Enabled || !TCPIpv6Links))
         return STATUS_NOT_SUPPORTED;
 
     /* everything is checked before anything changes: wrong values first, then what the stack cannot do */
