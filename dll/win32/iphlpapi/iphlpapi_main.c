@@ -958,58 +958,62 @@ static int TcpTableSorter(const void *a, const void *b)
   return ret;
 }
 
-static int __cdecl Tcp6TableSorter(const void *a, const void *b)
+/* The order of the IPv6 TCP tables: local address, scope, port, remote address, scope, port. The DWORDs are compared
+ * as unsigned values (a difference of two of them is not an int); the three row layouts only differ in where the
+ * key is */
+static int Tcp6CompareDword(DWORD A, DWORD B)
 {
-    const MIB_TCP6ROW_OWNER_PID *rowA = a, *rowB = b;
-    int ret = memcmp(rowA->ucLocalAddr, rowB->ucLocalAddr, sizeof(rowA->ucLocalAddr));
+    return (A > B) - (A < B);
+}
+
+static int Tcp6CompareKeys(const void *LocalA, DWORD LocalScopeA, DWORD LocalPortA,
+                           const void *RemoteA, DWORD RemoteScopeA, DWORD RemotePortA,
+                           const void *LocalB, DWORD LocalScopeB, DWORD LocalPortB,
+                           const void *RemoteB, DWORD RemoteScopeB, DWORD RemotePortB)
+{
+    int ret = memcmp(LocalA, LocalB, 16);
 
     if (ret == 0)
-        ret = (int)rowA->dwLocalScopeId - (int)rowB->dwLocalScopeId;
+        ret = Tcp6CompareDword(LocalScopeA, LocalScopeB);
     if (ret == 0)
-        ret = (int)rowA->dwLocalPort - (int)rowB->dwLocalPort;
+        ret = Tcp6CompareDword(LocalPortA, LocalPortB);
     if (ret == 0)
-        ret = memcmp(rowA->ucRemoteAddr, rowB->ucRemoteAddr, sizeof(rowA->ucRemoteAddr));
+        ret = memcmp(RemoteA, RemoteB, 16);
     if (ret == 0)
-        ret = (int)rowA->dwRemoteScopeId - (int)rowB->dwRemoteScopeId;
+        ret = Tcp6CompareDword(RemoteScopeA, RemoteScopeB);
     if (ret == 0)
-        ret = (int)rowA->dwRemotePort - (int)rowB->dwRemotePort;
+        ret = Tcp6CompareDword(RemotePortA, RemotePortB);
     return ret;
+}
+
+static int __cdecl Tcp6TableSorter(const void *a, const void *b)
+{
+    const MIB_TCP6ROW_OWNER_PID *A = a, *B = b;
+
+    return Tcp6CompareKeys(A->ucLocalAddr, A->dwLocalScopeId, A->dwLocalPort,
+                           A->ucRemoteAddr, A->dwRemoteScopeId, A->dwRemotePort,
+                           B->ucLocalAddr, B->dwLocalScopeId, B->dwLocalPort,
+                           B->ucRemoteAddr, B->dwRemoteScopeId, B->dwRemotePort);
 }
 
 static int __cdecl Tcp6Table2Sorter(const void *a, const void *b)
 {
-    const MIB_TCP6ROW2 *rowA = a, *rowB = b;
-    int ret = memcmp(&rowA->LocalAddr, &rowB->LocalAddr, sizeof(rowA->LocalAddr));
+    const MIB_TCP6ROW2 *A = a, *B = b;
 
-    if (ret == 0)
-        ret = (int)rowA->dwLocalScopeId - (int)rowB->dwLocalScopeId;
-    if (ret == 0)
-        ret = (int)rowA->dwLocalPort - (int)rowB->dwLocalPort;
-    if (ret == 0)
-        ret = memcmp(&rowA->RemoteAddr, &rowB->RemoteAddr, sizeof(rowA->RemoteAddr));
-    if (ret == 0)
-        ret = (int)rowA->dwRemoteScopeId - (int)rowB->dwRemoteScopeId;
-    if (ret == 0)
-        ret = (int)rowA->dwRemotePort - (int)rowB->dwRemotePort;
-    return ret;
+    return Tcp6CompareKeys(&A->LocalAddr, A->dwLocalScopeId, A->dwLocalPort,
+                           &A->RemoteAddr, A->dwRemoteScopeId, A->dwRemotePort,
+                           &B->LocalAddr, B->dwLocalScopeId, B->dwLocalPort,
+                           &B->RemoteAddr, B->dwRemoteScopeId, B->dwRemotePort);
 }
 
 static int __cdecl Tcp6TableSorter2(const void *a, const void *b)
 {
-    const MIB_TCP6ROW *rowA = a, *rowB = b;
-    int ret = memcmp(&rowA->LocalAddr, &rowB->LocalAddr, sizeof(rowA->LocalAddr));
+    const MIB_TCP6ROW *A = a, *B = b;
 
-    if (ret == 0)
-        ret = (int)rowA->dwLocalScopeId - (int)rowB->dwLocalScopeId;
-    if (ret == 0)
-        ret = (int)rowA->dwLocalPort - (int)rowB->dwLocalPort;
-    if (ret == 0)
-        ret = memcmp(&rowA->RemoteAddr, &rowB->RemoteAddr, sizeof(rowA->RemoteAddr));
-    if (ret == 0)
-        ret = (int)rowA->dwRemoteScopeId - (int)rowB->dwRemoteScopeId;
-    if (ret == 0)
-        ret = (int)rowA->dwRemotePort - (int)rowB->dwRemotePort;
-    return ret;
+    return Tcp6CompareKeys(&A->LocalAddr, A->dwLocalScopeId, A->dwLocalPort,
+                           &A->RemoteAddr, A->dwRemoteScopeId, A->dwRemotePort,
+                           &B->LocalAddr, B->dwLocalScopeId, B->dwLocalPort,
+                           &B->RemoteAddr, B->dwRemoteScopeId, B->dwRemotePort);
 }
 
 /* The IPv6 TCP table (AF_INET6): the owner-pid classes, while the stack has IPv6 on. With IPv6 off it is not
