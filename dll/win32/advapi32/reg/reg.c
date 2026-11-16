@@ -5089,7 +5089,7 @@ Exit:
 /************************************************************************
  *  RegReplaceKeyW
  *
- * @unimplemented
+ * @implemented
  */
 LONG WINAPI
 RegReplaceKeyW(HKEY hKey,
@@ -5210,7 +5210,7 @@ RegReplaceKeyW(HKEY hKey,
 
     if (!NT_SUCCESS(Status))
     {
-        return RtlNtStatusToDosError(Status);
+        ErrorCode = RtlNtStatusToDosError(Status);
     }
 
 Cleanup:

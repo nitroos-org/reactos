@@ -391,7 +391,8 @@ CmpOpenHiveFiles(IN PCUNICODE_STRING BaseName,
     {
         /* We want to write exclusively */
         ShareMode = 0;
-        DesiredAccess = FILE_READ_DATA | FILE_WRITE_DATA;
+        /* DELETE: NtReplaceKey renames the file of a loaded hive through this handle */
+        DesiredAccess = FILE_READ_DATA | FILE_WRITE_DATA | DELETE;
     }
 
     /* Default attributes */
