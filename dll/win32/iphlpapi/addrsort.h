@@ -78,6 +78,11 @@ typedef struct _ADDRSORT_ENTRY
 /* The Windows default prefix policy table (precedence, label, prefix) */
 VOID AddrSortDefaultPolicy(PADDRSORT_POLICY_TABLE Table);
 
+/* Tcpip6\Parameters\DisabledComponents bit 0x20 ("prefer IPv4 in the default prefix policy"): the IPv4-mapped prefix
+   ::ffff:0:0/96 gets precedence 100. Microsoft's documentation only asks for it to rank above ::/0 (40); 100 also puts
+   it above ::1/128 (50), and the value Windows uses is not documented */
+VOID AddrSortPreferIpv4(PADDRSORT_POLICY_TABLE Table);
+
 /*
  * The table from the lines of a REG_MULTI_SZ value ("prefix/length precedence label", one per string; a line
  * that does not parse is skipped). Returns the number of entries read; Table is filled with them only when it

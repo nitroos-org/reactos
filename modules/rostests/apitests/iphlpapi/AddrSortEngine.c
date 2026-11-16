@@ -441,6 +441,11 @@ static void TestOtherPolicy(void)
     AddrSortDefaultPolicy(&Table);
     ok(AddrSortParsePolicy(Prefer4, RTL_NUMBER_OF(Prefer4), &Table) == 2, "policy lines\n");
     Check("IPv4 preferred by the table", &H, &Table, L, 2, E, 2);
+
+    /* DisabledComponents 0x20: the default table with the mapped prefix raised, the same order */
+    AddrSortDefaultPolicy(&Table);
+    AddrSortPreferIpv4(&Table);
+    Check("IPv4 preferred by DisabledComponents", &H, &Table, L, 2, E, 2);
 }
 
 START_TEST(AddrSortEngine)

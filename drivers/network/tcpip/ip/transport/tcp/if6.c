@@ -43,6 +43,7 @@
 VOID UDP6AddMulticastList(struct netif *netif, PUCHAR List, PUINT Count, UINT Max);
 
 BOOLEAN TCPIpv6Enabled = TRUE;
+BOOLEAN TCPIpv6Links = TRUE;
 
 /* Set while a datagram from one of our adapters, that the adapter looped back from our own send, is in
    ip6_input (core lock held) */
@@ -127,6 +128,35 @@ TCPReadIpv6Switch(VOID)
 
     ZwClose(Key);
 
+    /* Tcpip6\Parameters\DisabledComponents (REG_DWORD, the documented Windows value, read once): 0x10 = no IPv6 on
+       the non-loopback interfaces (0xFF has it: IPv6 stays on the loopback interface only), 0x20 = prefer IPv4 is
+       user mode's (the prefix policy table of iphlpapi's sortpairs.c reads it), 0x01 (tunnels) has nothing to
+       turn off here, other bits are ignored. Ipv6Enable = 0 stays the hard off, and a value of another type counts as absent */
+    TCPIpv6Links = TCPIpv6Enabled;
+    if (TCPIpv6Enabled)
+    {
+        UNICODE_STRING ComponentsKeyName =
+            RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\Tcpip6\\Parameters");
+        UNICODE_STRING ComponentsName = RTL_CONSTANT_STRING(L"DisabledComponents");
+        OBJECT_ATTRIBUTES ComponentsAttributes;
+
+        InitializeObjectAttributes(&ComponentsAttributes, &ComponentsKeyName, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+                                   NULL, NULL);
+        if (NT_SUCCESS(ZwOpenKey(&Key, KEY_QUERY_VALUE, &ComponentsAttributes)))
+        {
+            Status = ZwQueryValueKey(Key, &ComponentsName, KeyValuePartialInformation, Info, sizeof(Buffer), &Length);
+            if (NT_SUCCESS(Status) && Info->Type == REG_DWORD && Info->DataLength == sizeof(ULONG))
+            {
+                ULONG Components = *(PULONG)Info->Data;
+
+                TCPIpv6Links = !(Components & 0x10);
+                DbgPrint("TCPIP: IPv6 DisabledComponents 0x%x (non-loopback interfaces %s)\n", Components,
+                         TCPIpv6Links ? "on" : "off");
+            }
+            ZwClose(Key);
+        }
+    }
+
     if (TCPIpv6Enabled)
         DbgPrint("TCPIP: IPv6 on (Ipv6Enable)\n");
 
@@ -185,7 +215,9 @@ TCP6UpdateMulticast(struct netif *netif)
     UINT Count = 0, i, j;
     s8_t Index;
 
-    if (!TCPIpv6Enabled || !IF || IF == Loopback || !IF->SetMulticast || IF->AddressLength != 6)
+    /* With IPv6 on the loopback interface only (DisabledComponents) the adapter list stays as it is without IPv6:
+       a group a socket joins on an adapter asks for no frames that would only be dropped (TCPReceive6) */
+    if (!TCPIpv6Links || !IF || IF == Loopback || !IF->SetMulticast || IF->AddressLength != 6)
         return;
 
     RtlZeroMemory(List, sizeof(List));
@@ -288,7 +320,7 @@ TCPInterfaceInit6(PIP_INTERFACE IF)
 #if LWIP_IPV6_MLD
     /* An Ethernet interface does MLD: the solicited-node groups of its addresses are joined (nd6.c) and reported
        with the groups sockets join (mld6.c, udp6.c). The loopback interface keeps its groups unreported */
-    if (IF->AddressLength == 6 && netif->hwaddr_len == 6)
+    if (IF->AddressLength == 6 && netif->hwaddr_len == 6 && TCPIpv6Links)
         netif->flags |= NETIF_FLAG_MLD6;
     UDP6MldStart();
 #endif
@@ -305,7 +337,7 @@ TCPInterfaceInit6(PIP_INTERFACE IF)
        or with Tcpip6\Parameters\RandomizeIdentifiers = 0 one from its MAC (modified EUI-64, RFC 4291 2.5.1).
        It stays tentative until lwIP's duplicate address detection (RFC 4862 5.4) passes, which runs once
        the interface is up with its link */
-    if (IF->AddressLength == 6 && netif->hwaddr_len == 6 && !TCP6SetStableLinkLocal(netif))
+    if (TCPIpv6Links && IF->AddressLength == 6 && netif->hwaddr_len == 6 && !TCP6SetStableLinkLocal(netif))
         netif_create_ip6_linklocal_address(netif, 1);
 }
 
@@ -376,6 +408,10 @@ TCPSendData6Callback(struct netif *netif, struct pbuf *p, const ip6_addr_t *Dest
         TCP6CountOutput(p);
         return ERR_OK;
     }
+
+    /* DisabledComponents: nothing IPv6 leaves on an adapter */
+    if (!TCPIpv6Links)
+        return ERR_IF;
 
     if (IF->AddressLength != 6 || !IF->Transmit || p->tot_len > IF->MTU)
         return ERR_IF;
@@ -474,7 +510,7 @@ TCPReceive6(PIP_INTERFACE IF, PIP_PACKET IPPacket)
     UINT Available, PayloadLength, Total, i;
     struct pbuf *p;
 
-    if (!TCPIpv6Enabled || !IF->TCPContext || IF == Loopback)
+    if (!TCPIpv6Enabled || !TCPIpv6Links || !IF->TCPContext || IF == Loopback)
         return;
 
     /* What the adapter delivered after the media header; the datagram must fit in it, whatever its
@@ -633,7 +669,7 @@ TCPQueryIpv6Table(PVOID Out, ULONG OutSize)
         /* IPv6 is usable on the loopback interface and on an interface with an Ethernet address (the one that
            has the link-local address, TCPInterfaceInit6) */
         IfRows[i].Flags = (IsLoopback ? (TCP_IPV6_IF_ENABLED | TCP_IPV6_IF_LOOPBACK) :
-                           (IF->AddressLength == 6 && netif->hwaddr_len == 6) ? TCP_IPV6_IF_ENABLED : 0);
+                           (TCPIpv6Links && IF->AddressLength == 6 && netif->hwaddr_len == 6) ? TCP_IPV6_IF_ENABLED : 0);
         IfRows[i].Mtu = IsLoopback ? 0xFFFFFFFF : netif->mtu6;
         /* what its router advertisements said (ra6.c) */
         IfRows[i].Flags |= IF->Ra6Flags;
@@ -731,7 +767,8 @@ TCPQueryIpv6Table(PVOID Out, ULONG OutSize)
 
     /* This stack takes IPv6 addresses for TCP and UDP sockets (not raw IP yet): user mode makes AF_INET6 sockets
        of those types and lists the IPv6 protocols only when it says so */
-    Header->Enabled = TCP_IPV6_STATE_ON | TCP_IPV6_STATE_SOCKETS | TCP_IPV6_STATE_DATAGRAMS;
+    Header->Enabled = TCP_IPV6_STATE_ON | TCP_IPV6_STATE_SOCKETS | TCP_IPV6_STATE_DATAGRAMS |
+                      (TCPIpv6Links ? TCP_IPV6_STATE_LINKS : 0);
     Header->InterfaceCount = Count;
     Header->AddressCount = AddrCount;
 

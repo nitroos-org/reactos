@@ -31,9 +31,15 @@ LoadPolicy(PADDRSORT_POLICY_TABLE Table)
     WCHAR Buffer[2048];
     DWORD Type, Size = sizeof(Buffer) - sizeof(WCHAR);
 
+    DWORD Components = 0, ComponentsSize = sizeof(Components);
+
     AddrSortDefaultPolicy(Table);
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, TCP6_PARAMETERS_KEY, 0, KEY_QUERY_VALUE, &Key) != ERROR_SUCCESS)
         return;
+    /* DisabledComponents bit 0x20: prefer IPv4 (a PrefixPolicies value below still replaces the whole table) */
+    if (RegQueryValueExW(Key, L"DisabledComponents", NULL, &Type, (LPBYTE)&Components, &ComponentsSize) == ERROR_SUCCESS &&
+        Type == REG_DWORD && ComponentsSize == sizeof(Components) && (Components & 0x20))
+        AddrSortPreferIpv4(Table);
     if (RegQueryValueExW(Key, PREFIX_POLICIES_VALUE, NULL, &Type, (LPBYTE)Buffer, &Size) == ERROR_SUCCESS &&
         Type == REG_MULTI_SZ)
     {

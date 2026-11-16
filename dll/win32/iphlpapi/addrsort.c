@@ -58,6 +58,19 @@ AddrSortDefaultPolicy(PADDRSORT_POLICY_TABLE Table)
     Table->Count = i;
 }
 
+VOID
+AddrSortPreferIpv4(PADDRSORT_POLICY_TABLE Table)
+{
+    static const UCHAR Mapped[16] = { 0,0,0,0,0,0,0,0,0,0,0xff,0xff,0,0,0,0 };
+    ULONG i;
+
+    for (i = 0; i < Table->Count; i++)
+    {
+        if (Table->Entry[i].Length == 96 && !memcmp(Table->Entry[i].Prefix, Mapped, 16))
+            Table->Entry[i].Precedence = 100;
+    }
+}
+
 static
 LONG
 HexValue(WCHAR c)

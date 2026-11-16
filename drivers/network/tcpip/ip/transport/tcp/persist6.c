@@ -245,7 +245,7 @@ TCP6ApplyPersistent(PIP_INTERFACE IF)
     struct netif *netif = IF->TCPContext;
     HANDLE Key;
 
-    if (!TCPIpv6Enabled || IF == Loopback || !netif || IF->AddressLength != 6)
+    if (!TCPIpv6Links || IF == Loopback || !netif || IF->AddressLength != 6)
         return;
 
     ExAcquireFastMutex(&Persist6Lock);

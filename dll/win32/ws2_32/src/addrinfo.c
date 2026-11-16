@@ -1341,8 +1341,9 @@ GetAddrInfoW(IN PCWSTR pszNodeName,
             if (!iError && (iFlags & AI_CANONNAME))
                 iError = SetComputerNameCanon(*pptResult);
         }
-        else if (!bV6On || iFamily == PF_INET)
+        else if (!bV6On || iFamily == PF_INET || !WsIpv6LinksOn())
         {
+            /* IPv6 on the loopback interface only (DisabledComponents): no AAAA records are asked for */
             iError = LookupAddressForName(AnsiNodeName,
                                           iSocketType,
                                           iProtocol,

@@ -922,6 +922,9 @@ WsSortAddrInfo(PADDRINFOW List);
 INT
 WsAddressListSort(LPVOID InBuffer, DWORD InSize, LPVOID OutBuffer, DWORD OutSize, LPDWORD BytesReturned);
 
+BOOL
+WsIpv6LinksOn(VOID);
+
 FORCEINLINE
 DWORD
 WsQuickProlog(VOID)

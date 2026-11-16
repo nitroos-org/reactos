@@ -115,6 +115,9 @@ typedef struct _TCP_IPV6_TABLE_HEADER
 #define TCP_IPV6_STATE_DATAGRAMS        0x4
 /* Enabled: the transport takes IPv6 addresses for raw IP: only then are AF_INET6 raw sockets made */
 #define TCP_IPV6_STATE_RAW              0x8
+/* Enabled: IPv6 is on the non-loopback interfaces too. Without it (Tcpip6\Parameters\DisabledComponents with the
+   0x10 bit) only the loopback interface has IPv6 (::1), and name resolution asks for no IPv6 addresses */
+#define TCP_IPV6_STATE_LINKS            0x10
 
 /* IPv6 is usable on the interface */
 #define TCP_IPV6_IF_ENABLED             0x1
