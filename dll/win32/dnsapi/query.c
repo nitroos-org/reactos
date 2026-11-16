@@ -854,16 +854,16 @@ WCHAR
 *xstrsave(const WCHAR *str)
 {
     WCHAR *p;
-    size_t len = 0;
+    size_t len;
 
-    /* FIXME: how much instead of MAX_PATH? */
-    StringCbLengthW(str, MAX_PATH, &len);
-    len+=sizeof(WCHAR);
+    /* The whole string: a name of 130 characters or more used to get an empty copy (the length was capped at
+       MAX_PATH bytes and the failed measurement left 0) */
+    len = (wcslen(str) + 1) * sizeof(WCHAR);
 
     p = RtlAllocateHeap(RtlGetProcessHeap(), 0, len);
 
     if (p)
-        StringCbCopyW(p, len, str);
+        RtlCopyMemory(p, str, len);
 
     return p;
 }
@@ -872,16 +872,15 @@ CHAR
 *xstrsaveA(const CHAR *str)
 {
     CHAR *p;
-    size_t len = 0;
+    size_t len;
 
-    /* FIXME: how much instead of MAX_PATH? */
-    StringCbLengthA(str, MAX_PATH, &len);
-    len++;
+    /* The whole string, as xstrsave does */
+    len = strlen(str) + 1;
 
     p = RtlAllocateHeap(RtlGetProcessHeap(), 0, len);
 
     if (p)
-        StringCbCopyA(p, len, str);
+        RtlCopyMemory(p, str, len);
 
     return p;
 }

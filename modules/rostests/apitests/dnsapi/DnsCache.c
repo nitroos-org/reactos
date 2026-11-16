@@ -507,6 +507,43 @@ TestChain(void)
     ok(ServerCount(N) == 2, "name with an A record only: the server was asked %d times, expected 2\n", ServerCount(N));
 }
 
+/* The owner name of the answer to a long name (130 characters and more) is the name, not an empty string */
+static
+void
+TestLongName(void)
+{
+    static const char Label[] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";   /* 60 characters */
+    char Name[300];
+    WCHAR NameW[300];
+    PDNS_RECORD Record;
+    DNS_STATUS Status;
+    int Extra, Length;
+
+    for (Extra = 1; Extra <= 3; Extra++)
+    {
+        int i;
+
+        Length = _snprintf(Name, sizeof(Name), "ttl300-long%d-%s", Extra, Uniq);
+        for (i = 0; i < Extra; i++)
+            Length += _snprintf(Name + Length, sizeof(Name) - Length, ".%s", Label);
+        Length += _snprintf(Name + Length, sizeof(Name) - Length, ".cache.test");
+        MultiByteToWideChar(CP_ACP, 0, Name, -1, NameW, ARRAYSIZE(NameW));
+
+        Record = NULL;
+        Status = DnsQuery_W(NameW, DNS_TYPE_A, DNS_QUERY_STANDARD, NULL, &Record, NULL);
+        ok(Status == ERROR_SUCCESS && Record, "name of %d characters: status %lu\n", Length, Status);
+        if (Status == ERROR_SUCCESS && Record)
+        {
+            PWSTR Owner = (PWSTR)Record->pName;     /* DnsQuery_W: a wide string */
+
+            ok(Owner && _wcsicmp(Owner, NameW) == 0,
+               "name of %d characters: the owner name of the answer is \"%S\" (%d characters)\n",
+               Length, Owner ? Owner : L"(null)", Owner ? (int)wcslen(Owner) : 0);
+            DnsRecordListFree(Record, DnsFreeRecordList);
+        }
+    }
+}
+
 /* The average time of Iterations lookups of the name (microseconds) */
 static
 double
@@ -654,6 +691,7 @@ START_TEST(DnsCache)
     TestNegative();
     TestFlush();
     TestChain();
+    TestLongName();
     TestSize(Names);
 
     SetParam("MaxCacheTtl", -1);
