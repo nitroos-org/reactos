@@ -510,15 +510,23 @@ static ULONG UnmatchableCondition(const FW_RULE *r, BOOL svcCondition)
 #define PLAT_NO     2   /* entries, none of which matches: the rule is not in force on this OS */
 #define PLAT_BAD    3   /* a token that does not parse and no entry that matches: unknown, treated as an unmatchable condition */
 
+/* one field of an entry: 1 to 5 decimal digits, at most 65535, followed by stop. No blank, sign or overflow (wcstoul
+   would take " 2", "-2" or a saturated 4294967295, a version that never matches: a Block rule with such a list would
+   be left out silently instead of being handled as a list that does not parse) */
+static BOOL ParsePlatformField(PCWSTR *pv, WCHAR stop, ULONG *out)
+{
+    PCWSTR v = *pv; ULONG n = 0, digits = 0;
+    while (*v >= L'0' && *v <= L'9' && digits < 5) { n = n * 10 + (ULONG)(*v - L'0'); v++; digits++; }
+    if (!digits || n > 0xFFFF || *v != stop) return FALSE;
+    *pv = stop ? v + 1 : v;
+    *out = n;
+    return TRUE;
+}
+
 static BOOL ParsePlatformEntry(PCWSTR v, ULONG *id, ULONG *maj, ULONG *min)
 {
-    PWSTR end; ULONG a, b, c;
-    if (!v || !*v) return FALSE;
-    a = wcstoul(v, &end, 10);   if (end == v || *end != L':') return FALSE;
-    v = end + 1;  b = wcstoul(v, &end, 10);  if (end == v || *end != L':') return FALSE;
-    v = end + 1;  c = wcstoul(v, &end, 10);  if (end == v || *end) return FALSE;
-    *id = a; *maj = b; *min = c;
-    return TRUE;
+    if (!v) return FALSE;
+    return ParsePlatformField(&v, L':', id) && ParsePlatformField(&v, L':', maj) && ParsePlatformField(&v, 0, min);
 }
 
 static ULONG PlatformApplies(const FW_RULE *r, ULONG osMajor, ULONG osMinor)
