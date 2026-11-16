@@ -605,7 +605,7 @@ PWSTR
 DuplicateString(
     _In_ PWSTR pszInString);
 
-VOID
+BOOL
 CreateGUID(
     _Out_ GUID *pGuid);
 
