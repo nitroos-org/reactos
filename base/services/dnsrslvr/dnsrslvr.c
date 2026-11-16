@@ -19,6 +19,7 @@ HINSTANCE hDllInstance;
 SERVICE_STATUS_HANDLE ServiceStatusHandle;
 SERVICE_STATUS SvcStatus;
 static WCHAR ServiceName[] = L"Dnscache";
+static volatile LONG StopStarted = 0;
 
 VOID StartRpcServer(VOID);
 VOID StopRpcServer(VOID);
@@ -44,6 +45,49 @@ UpdateServiceStatus(
 static
 DWORD
 WINAPI
+StopThread(
+    LPVOID lpParameter)
+{
+    UNREFERENCED_PARAMETER(lpParameter);
+
+    /* Unregister the RPC interface and wait for its calls to return (the process keeps listening: it can
+       host other services), then free what the calls used */
+    StopRpcServer();
+    DnsIntCacheFree();
+    UpdateServiceStatus(ServiceStatusHandle, SERVICE_STOPPED, 0);
+    return 0;
+}
+
+/*
+ * The control handler runs on the one control thread of the host process, shared with the other services
+ * of it: the wait for the calls in flight must not block it.
+ */
+static
+VOID
+BeginStop(VOID)
+{
+    HANDLE hThread;
+
+    if (InterlockedExchange(&StopStarted, 1) != 0)
+        return;
+
+    SvcStatus.dwControlsAccepted = 0;
+    UpdateServiceStatus(ServiceStatusHandle, SERVICE_STOP_PENDING, 1);
+
+    hThread = CreateThread(NULL, 0, StopThread, NULL, 0, NULL);
+    if (hThread != NULL)
+    {
+        CloseHandle(hThread);
+    }
+    else
+    {
+        StopThread(NULL);
+    }
+}
+
+static
+DWORD
+WINAPI
 ServiceControlHandler(
     DWORD dwControl,
     DWORD dwEventType,
@@ -54,16 +98,13 @@ ServiceControlHandler(
     {
         case SERVICE_CONTROL_SHUTDOWN:
         case SERVICE_CONTROL_STOP:
-            UpdateServiceStatus(ServiceStatusHandle, SERVICE_STOP_PENDING, 1);
-            /* the process keeps listening: it can host other services */
-            StopRpcServer();
-            DnsIntCacheFree();
-            UpdateServiceStatus(ServiceStatusHandle, SERVICE_STOPPED, 0);
+            BeginStop();
             break;
 
         case SERVICE_CONTROL_PARAMCHANGE:
-            /* MaxCacheTtl and MaxNegativeCacheTtl */
-            DnsIntCacheReadParameters();
+            /* MaxCacheTtl and MaxNegativeCacheTtl (the cache is going away at a stop) */
+            if (!StopStarted)
+                DnsIntCacheReadParameters();
             return NO_ERROR;
 
         case SERVICE_CONTROL_INTERROGATE:
@@ -86,6 +127,7 @@ ServiceMain(
 
     DPRINT("ServiceMain() called\n");
 
+    InterlockedExchange(&StopStarted, 0);
     SvcStatus.dwServiceType             = SERVICE_WIN32_OWN_PROCESS;
     SvcStatus.dwCurrentState            = SERVICE_START_PENDING;
     SvcStatus.dwControlsAccepted        = SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN | SERVICE_ACCEPT_PARAMCHANGE;

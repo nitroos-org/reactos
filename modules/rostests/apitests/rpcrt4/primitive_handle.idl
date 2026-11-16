@@ -1,0 +1,13 @@
+/*
+ * PROJECT:     ReactOS API tests
+ * LICENSE:     LGPL-2.1-or-later (https://spdx.org/licenses/LGPL-2.1-or-later)
+ * PURPOSE:     Client side of the primitive_handle test: two operations with an explicit primitive handle_t
+ *              (the server side is built by hand in primitive_handle.c)
+ */
+
+[uuid(5ec0ac10-4321-1234-0000-000000000011), version(1.0)]
+interface prim_handle
+{
+    int prim_val([in] handle_t h, [in] int a, [in] int b);
+    int prim_ptr([in] handle_t h, [in] int a, [in] int b);
+}
