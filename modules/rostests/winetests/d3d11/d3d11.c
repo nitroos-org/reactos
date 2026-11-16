@@ -2129,7 +2129,11 @@ static void test_create_device(void)
     immediate_context = (ID3D11DeviceContext *)0xdeadbeef;
     hr = D3D11CreateDevice(NULL, D3D_DRIVER_TYPE_UNKNOWN, NULL, 0, NULL, 0, D3D11_SDK_VERSION,
             &device, &feature_level, &immediate_context);
+#ifdef __REACTOS__
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+#else
     todo_wine ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+#endif
     ok(!device, "Got unexpected device pointer %p.\n", device);
     ok(!feature_level, "Got unexpected feature level %#x.\n", feature_level);
     ok(!immediate_context, "Got unexpected immediate context pointer %p.\n", immediate_context);

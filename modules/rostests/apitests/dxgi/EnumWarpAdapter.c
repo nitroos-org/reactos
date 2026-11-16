@@ -457,6 +457,76 @@ static void TestWarpDriverType(IDXGIFactory4 *Factory, IDXGIFactory1 *Factory1)
         skip("no D3D10CreateDevice\n");
 }
 
+/* CreateDevice with a NULL adapter and the other driver types: the codes of Windows without graphics driver
+ * and reference rasterizer. The NULL driver type (a device on an adapter with an all-zero desc) is not tested. */
+static void TestOtherDriverTypes(void)
+{
+    HMODULE D3d11 = LoadLibraryW(L"d3d11.dll"), D3d101 = LoadLibraryW(L"d3d10_1.dll"), D3d10 = LoadLibraryW(L"d3d10.dll");
+    PFN_D3D11_CREATE_DEVICE pCreate11 = D3d11 ? (PFN_D3D11_CREATE_DEVICE)GetProcAddress(D3d11, "D3D11CreateDevice") : NULL;
+    PFN_D3D10_CREATE_DEVICE1 pCreate101 = D3d101 ? (PFN_D3D10_CREATE_DEVICE1)GetProcAddress(D3d101, "D3D10CreateDevice1") : NULL;
+    PFN_D3D10_CREATE_DEVICE pCreate10 = D3d10 ? (PFN_D3D10_CREATE_DEVICE)GetProcAddress(D3d10, "D3D10CreateDevice") : NULL;
+    IUnknown *Device;
+    HRESULT hr;
+
+    if (pCreate11)
+    {
+        /* D3D_DRIVER_TYPE_UNKNOWN = 0, REFERENCE = 2, SOFTWARE = 4 */
+        Device = NULL;
+        hr = pCreate11(NULL, 0, NULL, 0, NULL, 0, 7, (void **)&Device, NULL, NULL);
+        ok(hr == E_INVALIDARG, "D3D11CreateDevice(UNKNOWN) returned %08lx\n", hr);
+        ok(Device == NULL, "D3D11CreateDevice(UNKNOWN) returned a device\n");
+
+        Device = NULL;
+        hr = pCreate11(NULL, 2, NULL, 0, NULL, 0, 7, (void **)&Device, NULL, NULL);
+        ok(hr == DXGI_ERROR_UNSUPPORTED, "D3D11CreateDevice(REFERENCE) returned %08lx\n", hr);
+        ok(Device == NULL, "D3D11CreateDevice(REFERENCE) returned a device\n");
+
+        Device = NULL;
+        hr = pCreate11(NULL, 4, NULL, 0, NULL, 0, 7, (void **)&Device, NULL, NULL);
+        ok(hr == E_INVALIDARG, "D3D11CreateDevice(SOFTWARE, NULL module) returned %08lx\n", hr);
+        ok(Device == NULL, "D3D11CreateDevice(SOFTWARE) returned a device\n");
+    }
+    else
+        skip("no D3D11CreateDevice\n");
+
+    if (pCreate101)
+    {
+        /* D3D10_DRIVER_TYPE_REFERENCE = 1, SOFTWARE = 3, invalid = 4 */
+        Device = NULL;
+        hr = pCreate101(NULL, 1, NULL, 0, 0x9100, 0x20, (void **)&Device);
+        ok(hr == E_NOINTERFACE, "D3D10CreateDevice1(REFERENCE) returned %08lx\n", hr);
+        ok(Device == NULL, "D3D10CreateDevice1(REFERENCE) returned a device\n");
+
+        Device = NULL;
+        hr = pCreate101(NULL, 3, NULL, 0, 0x9100, 0x20, (void **)&Device);
+        ok(hr == E_INVALIDARG, "D3D10CreateDevice1(SOFTWARE, NULL module) returned %08lx\n", hr);
+
+        Device = NULL;
+        hr = pCreate101(NULL, 4, NULL, 0, 0x9100, 0x20, (void **)&Device);
+        ok(hr == E_INVALIDARG, "D3D10CreateDevice1(type 4) returned %08lx\n", hr);
+    }
+    else
+        skip("no D3D10CreateDevice1\n");
+
+    if (pCreate10)
+    {
+        Device = NULL;
+        hr = pCreate10(NULL, 1, NULL, 0, 29, (void **)&Device);
+        ok(hr == DXGI_ERROR_UNSUPPORTED, "D3D10CreateDevice(REFERENCE) returned %08lx\n", hr);
+        ok(Device == NULL, "D3D10CreateDevice(REFERENCE) returned a device\n");
+
+        Device = NULL;
+        hr = pCreate10(NULL, 3, NULL, 0, 29, (void **)&Device);
+        ok(hr == E_INVALIDARG, "D3D10CreateDevice(SOFTWARE, NULL module) returned %08lx\n", hr);
+
+        Device = NULL;
+        hr = pCreate10(NULL, 4, NULL, 0, 29, (void **)&Device);
+        ok(hr == E_INVALIDARG, "D3D10CreateDevice(type 4) returned %08lx\n", hr);
+    }
+    else
+        skip("no D3D10CreateDevice\n");
+}
+
 /* the list ends with WARP: one software adapter, the last one, with the identity of EnumWarpAdapter */
 static void TestAdapterList(IDXGIFactory4 *Factory, IDXGIFactory1 *Factory1)
 {
@@ -628,6 +698,7 @@ START_TEST(EnumWarpAdapter)
         TestWarpAdapter(Factory4, Factory1);
         TestAdapterList(Factory4, Factory1);
         TestWarpDriverType(Factory4, Factory1);
+        TestOtherDriverTypes();
         IDXGIFactory4_Release(Factory4);
     }
     TestAdapterZeroDevice(Factory1);

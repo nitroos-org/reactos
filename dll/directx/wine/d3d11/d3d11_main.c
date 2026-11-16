@@ -233,9 +233,16 @@ static HRESULT d3d11_create_device(IDXGIAdapter *adapter, D3D_DRIVER_TYPE driver
                 HMODULE refrast = LoadLibraryA("d3d11ref.dll");
                 if (!refrast)
                 {
+#ifdef __REACTOS__
+                    /* Windows without the reference rasterizer installed: DXGI_ERROR_UNSUPPORTED. */
+                    WARN("Failed to load refrast, returning DXGI_ERROR_UNSUPPORTED.\n");
+                    IDXGIFactory_Release(factory);
+                    return DXGI_ERROR_UNSUPPORTED;
+#else
                     WARN("Failed to load refrast, returning E_FAIL.\n");
                     IDXGIFactory_Release(factory);
                     return E_FAIL;
+#endif
                 }
                 hr = IDXGIFactory_CreateSoftwareAdapter(factory, refrast, &adapter);
                 FreeLibrary(refrast);
@@ -252,9 +259,15 @@ static HRESULT d3d11_create_device(IDXGIAdapter *adapter, D3D_DRIVER_TYPE driver
             {
                 if (!swrast)
                 {
+#ifdef __REACTOS__
+                    WARN("Software device requested, but NULL swrast passed, returning E_INVALIDARG.\n");
+                    IDXGIFactory_Release(factory);
+                    return E_INVALIDARG;
+#else
                     WARN("Software device requested, but NULL swrast passed, returning E_FAIL.\n");
                     IDXGIFactory_Release(factory);
                     return E_FAIL;
+#endif
                 }
                 hr = IDXGIFactory_CreateSoftwareAdapter(factory, swrast, &adapter);
                 if (FAILED(hr))
@@ -265,6 +278,14 @@ static HRESULT d3d11_create_device(IDXGIAdapter *adapter, D3D_DRIVER_TYPE driver
                 }
                 break;
             }
+
+#ifdef __REACTOS__
+            case D3D_DRIVER_TYPE_UNKNOWN:
+                /* Windows: an unknown driver type needs an adapter. */
+                WARN("Unknown driver type without an adapter, returning E_INVALIDARG.\n");
+                IDXGIFactory_Release(factory);
+                return E_INVALIDARG;
+#endif
 
             default:
                 FIXME("Unhandled driver type %#x.\n", driver_type);
