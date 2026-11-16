@@ -421,22 +421,22 @@ static PWSTR ToNtPath(PCWSTR app)
 
 #define REPORT_CHARS 1024
 static ULONG g_Rejected, g_RejectedBlock, g_Partial, g_BroadBlock;
-static BOOL g_NamesCut;
+static BOOL g_NamesCut; static ULONG g_NamesMore;     /* the names list is full; the entries that did not fit */
 static BOOL g_OsKnown; static ULONG g_OsMajor, g_OsMinor;   /* the running OS, for Platform (read once per push) */
 static WCHAR g_RejNames[REPORT_CHARS];
 
 /* A rejected Allow rule is narrower than written (harmless); a rejected Block rule leaves its traffic to the Allow rules
-   and the profile default (fail open), so the two are counted and tagged apart. The names list ends with "..." once,
-   and nothing is appended after that. */
+   and the profile default (fail open), so the two are counted and tagged apart. Once the list is full no name is
+   appended, the entries that did not fit are counted and FwPushGetReport ends the list with "... and N more". */
+#define REPORT_TAIL 32      /* room kept for that ending */
 static VOID Note(PCWSTR tag, const FW_RULE *r)
 {
     SIZE_T have = wcslen(g_RejNames);
     PCWSTR name = r->Name && *r->Name ? r->Name : L"(unnamed)";
-    if (g_NamesCut) return;
-    if (have + wcslen(tag) + wcslen(name) + 6 >= REPORT_CHARS)
+    if (g_NamesCut) { g_NamesMore++; return; }
+    if (have + wcslen(tag) + wcslen(name) + 6 >= REPORT_CHARS - REPORT_TAIL)
     {
-        g_NamesCut = TRUE;
-        if (have + 4 < REPORT_CHARS) wcscat(g_RejNames, L"...");
+        g_NamesCut = TRUE; g_NamesMore = 1;
         return;
     }
     if (have) wcscat(g_RejNames, L"; ");
@@ -639,8 +639,8 @@ typedef enum { BR_OK, BR_SKIPPED, BR_REJECTED } BR_RESULT;
    for it, b is as before. The caller counts and reports it. *pPartial is set when a Block rule is pushed but a
    part of it is not enforced (an IPv6 half whose keywords do not resolve, tokens that gave nothing, or a key that
    is not known). *pDropped is set when a Block rule is pushed without a narrowing condition (it blocks more), *pBroad
-   when that condition was the rule's only restriction (the pushed rule then applies to all traffic of its direction
-   and profiles). A rule whose Platform list excludes the running OS is BR_SKIPPED too: it is not in force there. */
+   when that condition was the rule's only restriction (the pushed rule then applies to all traffic of its direction,
+   of its protocol if it names one, and profiles). A rule whose Platform list excludes the running OS is BR_SKIPPED too: it is not in force there. */
 static BR_RESULT BuildRule(BUF *b, const FW_RULE *r, BOOL v6, ULONG *pieces, ULONG maxPieces, BOOL *pPartial, BOOL *pDropped, BOOL *pBroad)
 {
     NITROFW_RULE hdr; DIM lp, rp, la4, ra4, la6, ra6, ic;
@@ -706,8 +706,9 @@ static BR_RESULT BuildRule(BUF *b, const FW_RULE *r, BOOL v6, ULONG *pieces, ULO
        other family without any condition = broader than the rule. */
     lScoped = (la4.cnt || la6.cnt) && !la4.wild && !la6.wild;
     rScoped = (ra4.cnt || ra6.cnt) && !ra4.wild && !ra6.wild;
-    /* nothing but direction and profile is left of the rule once its unmatchable condition is dropped */
-    bare = hdr.Protocol == NITROFW_PROTO_ANY && !DimScoped(&lp) && !DimScoped(&rp) && !DimScoped(&ic) && !lScoped && !rScoped && !nt && !ifm;
+    /* nothing but direction, profile and protocol is left of the rule once its unmatchable condition is dropped (a per-user
+       "Block outbound TCP" rule then blocks all TCP of that direction for everybody, not only all traffic) */
+    bare = !DimScoped(&lp) && !DimScoped(&rp) && !DimScoped(&ic) && !lScoped && !rScoped && !nt && !ifm;
     if (!lScoped && !rScoped)
     {
         /* no address condition: one kernel rule (more if a list is long) for both families */
@@ -754,7 +755,16 @@ VOID FwPushGetReport(ULONG *pRejected, ULONG *pRejectedBlock, ULONG *pPartial, U
     if (pRejectedBlock) *pRejectedBlock = g_RejectedBlock;
     if (pPartial) *pPartial = g_Partial;
     if (pBroadBlock) *pBroadBlock = g_BroadBlock;
-    if (Names && Chars) { wcsncpy(Names, g_RejNames, Chars - 1); Names[Chars - 1] = 0; }
+    if (Names && Chars)
+    {
+        wcsncpy(Names, g_RejNames, Chars - 1); Names[Chars - 1] = 0;
+        if (g_NamesMore)
+        {
+            SIZE_T have = wcslen(Names);
+            _snwprintf(Names + have, Chars - 1 - have, L"%ls... and %lu more", have ? L"; " : L"", g_NamesMore);
+            Names[Chars - 1] = 0;
+        }
+    }
 }
 
 DWORD FwPushToKernel(ULONGLONG gen, BOOL *pPresent)
@@ -762,7 +772,7 @@ DWORD FwPushToKernel(ULONGLONG gen, BOOL *pPresent)
     FW_RULESET rs; BUF b = { 0 }; NITROFW_POLICY pol; HANDLE h; DWORD err, ret, i;
     ULONG cnt = 0; ULONG bit, pass; BOOL v6on;
     HKEY hk; DWORD enforce = 1, cb = sizeof(DWORD), t;
-    g_Rejected = 0; g_RejectedBlock = 0; g_Partial = 0; g_BroadBlock = 0; g_RejNames[0] = 0; g_NamesCut = FALSE;
+    g_Rejected = 0; g_RejectedBlock = 0; g_Partial = 0; g_BroadBlock = 0; g_RejNames[0] = 0; g_NamesCut = FALSE; g_NamesMore = 0;
     if (pPresent) *pPresent = FALSE;
     h = CreateFileW(NITROFW_USER_PATH, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
     if (h == INVALID_HANDLE_VALUE) return GetLastError();
@@ -811,15 +821,15 @@ DWORD FwPushToKernel(ULONGLONG gen, BOOL *pPresent)
         else if (br == BR_OK && partial)
         {
             g_Partial++;
-            Note(L"Block rule not fully enforced", &rs.R[i]);
+            Note(L"Block not fully enforced", &rs.R[i]);
         }
         else if (br == BR_OK && broad)
         {
             /* the condition was the rule's only restriction: the rule now blocks every packet of its direction and profiles */
             g_BroadBlock++;
-            Note(L"Block rule with only a condition the kernel cannot match, now blocks all traffic of its direction", &rs.R[i]);
+            Note(L"Block now blocks all its traffic", &rs.R[i]);
         }
-        else if (br == BR_OK && dropped) Note(L"Block rule pushed without a condition the kernel cannot match (blocks more)", &rs.R[i]);
+        else if (br == BR_OK && dropped) Note(L"Block pushed without a condition", &rs.R[i]);
     }
     ((NITROFW_POLICY *)b.p)->RuleCount = cnt;
     ((NITROFW_POLICY *)b.p)->TotalSize = (ULONG)b.len;
