@@ -273,7 +273,8 @@ CheckInfFile(
                              NULL,
                              &MfgContext))
     {
-        ERR("No Manufacurer section found!\n");
+        /* Most INFs of the directory are not network component INFs */
+        TRACE("No Manufacturer section found!\n");
         goto done;
     }
 
@@ -486,15 +487,6 @@ StartNetworkServices(
     SC_HANDLE hManager = NULL;
     SC_HANDLE hService = NULL;
 
-    hManager = OpenSCManagerW(NULL,
-                              NULL,
-                              SC_MANAGER_ALL_ACCESS);
-    if (hManager == NULL)
-    {
-        ERR("\n");
-        goto done;
-    }
-
     hInf = SetupOpenInfFileW(pComponentInfo->pszFullInfPath,
                              NULL,
                              INF_STYLE_WIN4,
@@ -518,12 +510,23 @@ StartNetworkServices(
 
     TRACE("ServiceSection: %S\n", pServiceSection);
 
+    /* A component without a service of its own (TCP/IPv6) has nothing to start: no wait for the SCM */
     if (!SetupFindFirstLineW(hInf,
                              pServiceSection,
                              L"AddService",
                              &Context))
     {
-        ERR("\n");
+        TRACE("No services to start\n");
+        goto done;
+    }
+
+    /* Opened only when there is a service to start (OpenSCManagerW waits up to 3 minutes for the SCM) */
+    hManager = OpenSCManagerW(NULL,
+                              NULL,
+                              SC_MANAGER_ALL_ACCESS);
+    if (hManager == NULL)
+    {
+        ERR("OpenSCManagerW() failed (Error %lu)\n", GetLastError());
         goto done;
     }
 
@@ -1010,6 +1013,12 @@ RegisterTcpip6NotifyObject(VOID)
     return dwError;
 }
 
+static
+BOOL
+InstallNetworkComponentEx(
+    _In_ PCWSTR pszComponentId,
+    _In_ BOOL bStartServices);
+
 /*
  * What winlogon runs (through userenv, netupgrade.c) at the start after the INF changed: one instance of every
  * component (the duplicates an older install made are removed) and the TCP/IPv6 component, with its notify object
@@ -1026,7 +1035,9 @@ UpgradeNetworkComponents(VOID)
     if (dwError != ERROR_SUCCESS)
         return dwError;
 
-    if (!InstallNetworkComponent(L"MS_TCPIP6"))
+    /* Winlogon runs this before it starts services.exe: no call into the SCM here (OpenSCManagerW would wait for the
+       SCM that cannot start until this returns). The services of a component start at boot by their start type */
+    if (!InstallNetworkComponentEx(L"MS_TCPIP6", FALSE))
     {
         dwError = GetLastError();
         return dwError != ERROR_SUCCESS ? dwError : ERROR_GEN_FAILURE;
@@ -1048,6 +1059,15 @@ NitroUpgradeNetworkComponents(VOID)
 BOOL
 InstallNetworkComponent(
     _In_ PCWSTR pszComponentId)
+{
+    return InstallNetworkComponentEx(pszComponentId, TRUE);
+}
+
+static
+BOOL
+InstallNetworkComponentEx(
+    _In_ PCWSTR pszComponentId,
+    _In_ BOOL bStartServices)
 {
     COMPONENT_INFO ComponentInfo;
     HKEY hInstanceKey = NULL;
@@ -1095,7 +1115,8 @@ InstallNetworkComponent(
 
     bResult = TRUE;
 
-    StartNetworkServices(&ComponentInfo);
+    if (bStartServices)
+        StartNetworkServices(&ComponentInfo);
 
 done:
     if (hInstanceKey != NULL)
