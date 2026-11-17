@@ -976,6 +976,23 @@ AccpInheritedAcesAreTail(IN PACL Dacl)
     return TRUE;
 }
 
+/* TRUE if an ACE of Dacl is flagged INHERITED_ACE */
+static BOOLEAN
+AccpHasInheritedAce(IN PACL Dacl)
+{
+    PACE_HEADER Ace;
+    DWORD i;
+
+    for (i = 0; i < Dacl->AceCount; i++)
+    {
+        if (!GetAce(Dacl, i, (PVOID *)&Ace))
+            return FALSE;
+        if (Ace->AceFlags & INHERITED_ACE)
+            return TRUE;
+    }
+    return FALSE;
+}
+
 /*
  * Flags the ACEs of the DACL of Sd (in place) that the parent's inheritable ACEs account for. A DACL that is
  * auto-inherited already, or protected, says what it inherits itself and is left alone (FALSE).
@@ -1055,25 +1072,36 @@ Cleanup:
 }
 
 /*
- * The subkeys of Key: each auto-inherited, unprotected one gets its explicit ACEs plus what the new descriptor of
- * Key (ParentSd) passes on, and its own subkeys follow if it changed. Any other unprotected one keeps its DACL and
- * is only flagged protected and auto-inherited (as on Windows); its subtree is left alone.
+ * The subkeys of Key, as on Windows (measured on Windows Server 2022, x64 and x86 callers):
+ *  - an auto-inherited, unprotected subkey gets its explicit ACEs plus what the new descriptor of Key (ParentSd)
+ *    passes on, and its own subkeys follow if it changed;
+ *  - a subkey that is not auto-inherited but carries an ACE flagged INHERITED_ACE (a legacy writer copied the
+ *    flag) is treated the same way: every ACE flagged inherited is dropped, wherever it stands and whatever it
+ *    grants or denies, the explicit ACEs are kept, the parent's set follows, it becomes auto-inherited and its
+ *    subkeys follow;
+ *  - any other unprotected subkey with a DACL keeps its ACEs and is only flagged protected and auto-inherited
+ *    (control 0x9404), and its subtree is then rebuilt from that DACL: the subkeys below it lose what they had
+ *    inherited from above it (a stale inherited ACE would grant more than the key passes on);
+ *  - a protected subkey and one without a DACL are left alone with their subtree.
  * A subkey that cannot be opened for READ_CONTROL | WRITE_DAC (or set) is skipped with its subtree; the
- * walk goes on with its siblings and the call still succeeds. Measured on Windows Server 2022 (caller
- * Administrator, with and without SeBackup/SeRestore/SeTakeOwnership enabled): a subkey owned by someone else
- * and closed to the caller is skipped with its subtree and the call returns 0, the siblings after it are
- * updated; a subkey that denies the caller KEY_ENUMERATE_SUB_KEYS is updated itself, its subkeys are not.
+ * walk goes on with its siblings and the call still succeeds. Measured (caller Administrator, with and without
+ * SeBackup/SeRestore/SeTakeOwnership enabled): a subkey owned by someone else and closed to the caller is
+ * skipped with its subtree and the call returns 0, the siblings after it are updated; a subkey that does not
+ * grant the caller both KEY_QUERY_VALUE and KEY_ENUMERATE_SUB_KEYS is updated itself, its subkeys are not.
  * A handle opened with MAXIMUM_ALLOWED, which Windows documents as not propagating, is not detected (the
  * access a handle was requested with is not recorded in it).
  *
  * The walk keeps its state in a heap array of frames (one per depth level), not on the stack: a service
  * thread with a small stack can walk a deep tree.
  */
+#define ACCP_WALK_ACCESS (KEY_ENUMERATE_SUB_KEYS | KEY_QUERY_VALUE)
+
 typedef struct _ACCP_WALK_FRAME
 {
     HKEY Enumerate;                         /* the key whose subkeys this level lists */
     PSECURITY_DESCRIPTOR ParentSd;          /* what it passes on (owned by every level but the first) */
-    PSECURITY_DESCRIPTOR OldParentSd;       /* what it passed on before (the same) */
+    PSECURITY_DESCRIPTOR OldParentSd;       /* what it passed on before (the same; LocalAlloc) */
+    BOOLEAN ParentSdLocal;                  /* ParentSd is LocalAlloc'd (else RtlNewSecurityObjectEx's) */
     DWORD Index;                            /* the next subkey to list */
 } ACCP_WALK_FRAME, *PACCP_WALK_FRAME;
 
@@ -1109,7 +1137,7 @@ AccpPropagateToSubkeys(IN HKEY Key,
         SECURITY_DESCRIPTOR Absolute;
         PSID Owner = NULL, Group = NULL;
         PACL OldDacl = NULL, NewDacl = NULL;
-        BOOL Present, Defaulted, Same, Inherits;
+        BOOL Present, Defaulted, Same, Inherits, Rebuild = FALSE;
 
         Length = RTL_NUMBER_OF(Name);
         EnumRet = RegEnumKeyExW(Frame->Enumerate, Frame->Index++, Name, &Length, NULL, NULL, NULL, NULL);
@@ -1121,7 +1149,10 @@ AccpPropagateToSubkeys(IN HKEY Key,
             RegCloseKey(Frame->Enumerate);
             if (Top > 0)
             {
-                RtlDeleteSecurityObject(&Frame->ParentSd);
+                if (Frame->ParentSdLocal)
+                    LocalFree(Frame->ParentSd);
+                else
+                    RtlDeleteSecurityObject(&Frame->ParentSd);
                 LocalFree(Frame->OldParentSd);
             }
             RtlZeroMemory(Frame, sizeof(*Frame));
@@ -1138,28 +1169,37 @@ AccpPropagateToSubkeys(IN HKEY Key,
             GetSecurityDescriptorDacl(OldSd, &Present, &OldDacl, &Defaulted) && Present && OldDacl != NULL)
         {
             /*
-             * Only a key that is auto-inherited (its inherited ACEs the tail of the DACL) or whose DACL ends
-             * in what the old parent passed on is updated; every other key is treated as protected and left
-             * alone with its subtree: an explicit, empty or non-canonical DACL is its owner's own.
+             * An auto-inherited key whose inherited ACEs are the tail of its DACL is updated; one whose are not
+             * (non-canonical) is left alone with its subtree.
              */
             GetSecurityDescriptorControl(OldSd, &Control, &Revision);
             if (Control & SE_DACL_AUTO_INHERITED)
             {
                 Inherits = AccpInheritedAcesAreTail(OldDacl);
             }
+            else if (AccpHasInheritedAce(OldDacl))
+            {
+                /*
+                 * Not auto-inherited, but an ACE is flagged inherited: as on Windows (measured) the key is
+                 * updated like an auto-inherited one. The merge drops every ACE flagged inherited, wherever it
+                 * stands, keeps the explicit ones and appends what the parent passes on.
+                 */
+                Inherits = TRUE;
+            }
             else
             {
                 /*
-                 * Not auto-inherited (created below a parent that was not, set by a legacy writer, empty): as
-                 * on Windows (measured) the DACL stays exactly as it is and the key is only flagged protected
-                 * and auto-inherited (control 0x9404); its subtree is not touched.
+                 * Not auto-inherited and nothing flagged inherited (created below a parent that was not, set by
+                 * a legacy writer, empty): as on Windows (measured) the ACEs stay exactly as they are, the key
+                 * is only flagged protected and auto-inherited (control 0x9404), and its subtree is rebuilt
+                 * from that DACL below.
                  */
-                if (InitializeSecurityDescriptor(&Absolute, SECURITY_DESCRIPTOR_REVISION) &&
-                    SetSecurityDescriptorDacl(&Absolute, TRUE, OldDacl, FALSE) &&
-                    SetSecurityDescriptorControl(&Absolute,
-                                                 SE_DACL_PROTECTED | SE_DACL_AUTO_INHERIT_REQ | SE_DACL_AUTO_INHERITED,
-                                                 SE_DACL_PROTECTED | SE_DACL_AUTO_INHERIT_REQ | SE_DACL_AUTO_INHERITED))
-                    RegSetKeySecurity(Child, DACL_SECURITY_INFORMATION, &Absolute);
+                Rebuild = InitializeSecurityDescriptor(&Absolute, SECURITY_DESCRIPTOR_REVISION) &&
+                          SetSecurityDescriptorDacl(&Absolute, TRUE, OldDacl, FALSE) &&
+                          SetSecurityDescriptorControl(&Absolute,
+                                                       SE_DACL_PROTECTED | SE_DACL_AUTO_INHERIT_REQ | SE_DACL_AUTO_INHERITED,
+                                                       SE_DACL_PROTECTED | SE_DACL_AUTO_INHERIT_REQ | SE_DACL_AUTO_INHERITED) &&
+                          RegSetKeySecurity(Child, DACL_SECURITY_INFORMATION, &Absolute) == ERROR_SUCCESS;
                 Inherits = FALSE;
             }
             GetSecurityDescriptorOwner(OldSd, &Owner, &Defaulted);
@@ -1181,10 +1221,11 @@ AccpPropagateToSubkeys(IN HKEY Key,
                 {
                     /* descend: the new level takes over NewSd and OldSd; the depth is capped */
                     if (Top + 1 < ACCP_MAX_KEY_DEPTH &&
-                        RegOpenKeyExW(Child, L"", REG_OPTION_OPEN_LINK, KEY_ENUMERATE_SUB_KEYS,
+                        RegOpenKeyExW(Child, L"", REG_OPTION_OPEN_LINK, ACCP_WALK_ACCESS,
                                       &Stack[Top + 1].Enumerate) == ERROR_SUCCESS)
                     {
                         Stack[Top + 1].ParentSd = NewSd;
+                        Stack[Top + 1].ParentSdLocal = FALSE;
                         Stack[Top + 1].OldParentSd = OldSd;
                         Stack[Top + 1].Index = 0;
                         NewSd = NULL;
@@ -1192,6 +1233,30 @@ AccpPropagateToSubkeys(IN HKEY Key,
                         Top++;
                     }
                 }
+            }
+            else if (Rebuild && Top + 1 < ACCP_MAX_KEY_DEPTH)
+            {
+                /*
+                 * The subkeys below a key that was just flagged protected inherit from its own DACL now, not
+                 * from above it: descend with the descriptor the key has (read back as stored).
+                 */
+                PSECURITY_DESCRIPTOR KeySd = AccpQueryKeySd(Child, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
+                                                                   DACL_SECURITY_INFORMATION);
+
+                if (KeySd != NULL &&
+                    RegOpenKeyExW(Child, L"", REG_OPTION_OPEN_LINK, ACCP_WALK_ACCESS,
+                                  &Stack[Top + 1].Enumerate) == ERROR_SUCCESS)
+                {
+                    Stack[Top + 1].ParentSd = KeySd;
+                    Stack[Top + 1].ParentSdLocal = TRUE;
+                    Stack[Top + 1].OldParentSd = OldSd;
+                    Stack[Top + 1].Index = 0;
+                    KeySd = NULL;
+                    OldSd = NULL;
+                    Top++;
+                }
+                if (KeySd != NULL)
+                    LocalFree(KeySd);
             }
         }
 
