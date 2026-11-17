@@ -60,7 +60,14 @@ IntUserHeapCommitRoutine(
             Mapping = Mapping->Next;
         }
 
-        ASSERT(UserBase != NULL);
+        if (UserBase == NULL)
+        {
+            /* This process has not mapped the heap (a heap grows before its creator maps it: the
+               initial commit must hold what is allocated before the handle is opened). Never commit
+               at an address computed from NULL. */
+            DPRINT1("No user mapping of the heap %p in this process, cannot commit\n", Base);
+            return STATUS_NO_MEMORY;
+        }
     }
     else
     {
@@ -118,11 +125,12 @@ IntUserHeapCommitRoutine(
 static PWIN32HEAP
 IntUserHeapCreate(IN PVOID SectionObject,
                   IN PVOID *SystemMappedBase,
-                  IN ULONG HeapSize)
+                  IN ULONG HeapSize,
+                  IN SIZE_T InitialCommit)
 {
     PVOID MappedView = NULL;
     LARGE_INTEGER Offset;
-    SIZE_T ViewSize = PAGE_SIZE;
+    SIZE_T ViewSize = InitialCommit;
     RTL_HEAP_PARAMETERS Parameters = {0};
     PVOID pHeap;
     NTSTATUS Status;
@@ -180,13 +188,21 @@ IntUserHeapCreate(IN PVOID SectionObject,
 PWIN32HEAP
 UserCreateHeap(OUT PVOID *SectionObject,
                IN OUT PVOID *SystemBase,
-               IN SIZE_T HeapSize)
+               IN SIZE_T HeapSize,
+               IN SIZE_T InitialCommit)
 {
     LARGE_INTEGER SizeHeap;
     PWIN32HEAP pHeap = NULL;
     NTSTATUS Status;
 
     SizeHeap.QuadPart = HeapSize;
+
+    /* At least the first page, at most the whole heap, whole pages */
+    InitialCommit = (InitialCommit + PAGE_SIZE - 1) & ~((SIZE_T)PAGE_SIZE - 1);
+    if (InitialCommit < PAGE_SIZE)
+        InitialCommit = PAGE_SIZE;
+    if (InitialCommit > HeapSize)
+        InitialCommit = HeapSize;
 
     /* Create the section and map it into session space */
     Status = MmCreateSection((PVOID*)SectionObject,
@@ -229,7 +245,8 @@ UserCreateHeap(OUT PVOID *SectionObject,
     /* Create the heap */
     pHeap = IntUserHeapCreate(*SectionObject,
                               SystemBase,
-                              HeapSize);
+                              HeapSize,
+                              InitialCommit);
 
     if (pHeap == NULL)
     {
