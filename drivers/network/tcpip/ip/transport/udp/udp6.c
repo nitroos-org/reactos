@@ -1340,6 +1340,15 @@ UDP6SetFilter(PADDRESS_FILE AddrFile, ULONG IfIndex, const UCHAR *GroupAddress, 
     LockObject(AddrFile);
     LOCK_TCPIP_CORE();
 
+    /* The socket's last handle is closed (FileCloseAddress, under the object lock): its groups are left now or
+       already (UDP6LeaveAll), so nothing may join again. A request that referenced the address object by its entity
+       before the close would otherwise link a member nobody leaves: the group stays joined and charged until reboot */
+    if (AddrFile->PortReleased && !Leave)
+    {
+        Status = STATUS_INVALID_ADDRESS;
+        goto Done;
+    }
+
     netif = IfIndex ? Udp6NetifOfIndex(IfIndex) : Udp6DefaultMulticastNetif();
     if (netif)
     {

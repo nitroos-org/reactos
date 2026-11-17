@@ -566,6 +566,14 @@ Udp4Apply(PADDRESS_FILE AddrFile, ULONG IfIndex, ULONG Group, UCHAR Mode, ULONG 
     LockObject(AddrFile);
     LOCK_TCPIP_CORE();
 
+    /* The socket's last handle is closed: its groups are left now or already (UDP4LeaveAll), so nothing joins again
+       (a request that referenced it by its entity before the close would leave a group in the adapter's list) */
+    if (AddrFile->PortReleased && !Leave)
+    {
+        Status = STATUS_INVALID_ADDRESS;
+        goto Done;
+    }
+
     if (CheckIfIndex && IfIndex && !Udp4InterfaceExists(IfIndex))
     {
         Status = STATUS_INVALID_ADDRESS;
