@@ -12,11 +12,17 @@
 
 #include <ws2tcpip.h>
 #include <windns.h>
+#include <reactos/ipv6literal.h>
 
 #define NDEBUG
 #include <debug.h>
 
 /* DEFINES *******************************************************************/
+
+/* The canonical name asked for as the name given by the caller (Vista+; hidden at _WIN32_WINNT 0x502) */
+#ifndef AI_FQDN
+#define AI_FQDN 0x00020000
+#endif
 
 /*
  * ws2_32 is built with _WIN32_WINNT 0x502, where the Vista+ headers hide the
@@ -270,9 +276,10 @@ NewAddrInfo(IN INT SocketType,
 }
 
 /*
- * An IPv6 address in text form: "::1", "fe80::1%4", and both of them in brackets, with or without a
- * port ("[::1]:80", the port is not used). Windows answers it whether or not the machine has IPv6:
- * nothing is looked up. A numeric scope id after '%' is the only zone accepted.
+ * An IPv6 address in text form: "::1", "fe80::1%4", and both of them in brackets, with or without a port
+ * ("[::1]:80", the port is not used). Windows answers it whether or not the machine has IPv6:
+ * nothing is looked up. A numeric scope id after '%' is the only zone accepted. The parsing is shared
+ * with the names of the "<address>.ipv6-literal.net" form (see below) and dnsapi.
  */
 static
 BOOL
@@ -280,66 +287,7 @@ ParseV6Address(IN PCWSTR AddressString,
                OUT PIN6_ADDR pAddress,
                OUT PULONG pScopeId)
 {
-    WCHAR Text[64];
-    PCWSTR Terminator = NULL;
-    PCWSTR Scope, Close;
-    SIZE_T Length;
-    ULONG Id = 0;
-
-    *pScopeId = 0;
-    if (!AddressString || !wcschr(AddressString, L':'))
-        return FALSE;
-
-    if (*AddressString == L'[')
-    {
-        Close = wcschr(AddressString, L']');
-        if (!Close)
-            return FALSE;
-
-        /* After the bracket: nothing, or a port */
-        Scope = Close + 1;
-        if (*Scope == L':')
-        {
-            if (!*++Scope)
-                return FALSE;
-            for (; *Scope; Scope++)
-            {
-                if (*Scope < L'0' || *Scope > L'9')
-                    return FALSE;
-            }
-        }
-        else if (*Scope)
-        {
-            return FALSE;
-        }
-
-        Length = Close - (AddressString + 1);
-        if (!Length || Length >= RTL_NUMBER_OF(Text))
-            return FALSE;
-        RtlCopyMemory(Text, AddressString + 1, Length * sizeof(WCHAR));
-        Text[Length] = UNICODE_NULL;
-        AddressString = Text;
-    }
-
-    if (!NT_SUCCESS(RtlIpv6StringToAddressW(AddressString, &Terminator, pAddress)) || !Terminator)
-        return FALSE;
-
-    if (*Terminator == L'%')
-    {
-        Scope = Terminator + 1;
-        if (!*Scope)
-            return FALSE;
-        for (; *Scope; Scope++)
-        {
-            if (*Scope < L'0' || *Scope > L'9')
-                return FALSE;
-            Id = Id * 10 + (*Scope - L'0');
-        }
-        *pScopeId = Id;
-        return TRUE;
-    }
-
-    return *Terminator == UNICODE_NULL;
+    return Ipv6TextToAddress(AddressString, pAddress, pScopeId);
 }
 
 static
@@ -1015,10 +963,11 @@ GetAddrInfoW(IN PCWSTR pszNodeName,
     PCHAR pc = NULL;
     BOOL bClone = FALSE;
     BOOL bNumeric, bNumeric6 = FALSE, bNoNode6 = FALSE, bTrailingSpace = FALSE;
+    BOOL bLiteralName = FALSE;
     BOOL bV6On;
     WS_IPV6_INFO V6Info;
-    IN6_ADDR Address6;
-    ULONG ulScope6 = 0;
+    IN6_ADDR Address6, LiteralAddress6;
+    ULONG ulScope6 = 0, ulLiteralScope6 = 0;
     WORD wTcpPort = 0;
     WORD wUdpPort = 0;
     WCHAR CanonicalName[0x42];
@@ -1039,6 +988,13 @@ GetAddrInfoW(IN PCWSTR pszNodeName,
         SetLastError(EAI_NONAME);
         return EAI_NONAME;
     }
+
+    /*
+     * A name of the "<address>.ipv6-literal.net" form is an IPv6 address (Windows Server 2022 measured): it is
+     * answered like the address itself, nothing is looked up, for every API of the family. Only the IPv6
+     * family can have it: the IPv4 family finds nothing for it (WSAHOST_NOT_FOUND, no query either).
+     */
+    bLiteralName = pszNodeName && Ipv6LiteralNameToAddress(pszNodeName, &LiteralAddress6, &ulLiteralScope6);
 
     /*
      * Whether the stack has IPv6 on (it is, unless it is too old to know the question; Ipv6Enable = 0 and
@@ -1079,6 +1035,12 @@ GetAddrInfoW(IN PCWSTR pszNodeName,
         iFamily = ptHints->ai_family;
         bNumeric6 = (iFamily == PF_UNSPEC || iFamily == PF_INET6) &&
                     ParseV6Address(pszNodeName, &Address6, &ulScope6);
+        if (!bNumeric6 && bLiteralName && (iFamily == PF_UNSPEC || iFamily == PF_INET6))
+        {
+            Address6 = LiteralAddress6;
+            ulScope6 = ulLiteralScope6;
+            bNumeric6 = TRUE;
+        }
 
         /*
          * No node name for the IPv6 family: Windows 10 (IPv6 installed, measured) answers the
@@ -1213,7 +1175,15 @@ GetAddrInfoW(IN PCWSTR pszNodeName,
 
     /* An IPv6 address answers with itself, and with the family the caller allowed */
     if (!ptHints)
+    {
         bNumeric6 = ParseV6Address(pszNodeName, &Address6, &ulScope6);
+        if (!bNumeric6 && bLiteralName)
+        {
+            Address6 = LiteralAddress6;
+            ulScope6 = ulLiteralScope6;
+            bNumeric6 = TRUE;
+        }
+    }
 
     /* Check if this is a valid IPv4 address */
     bNumeric = pszNodeName && !bNumeric6 && ParseV4Address(pszNodeName, &dwAddress, &bTrailingSpace);
@@ -1241,6 +1211,18 @@ GetAddrInfoW(IN PCWSTR pszNodeName,
             {
                 iError = SetComputerNameCanon(*pptResult);
             }
+            /* AI_FQDN for a name of the literal form: the name as the caller gave it (root dot included;
+               Windows Server 2022 measured; an address gives its numeric form) */
+            else if ((iFlags & AI_FQDN) && bLiteralName)
+            {
+                SIZE_T NameLength = wcslen(pszNodeName) + 1;
+
+                (*pptResult)->ai_canonname = HeapAlloc(WsSockHeap, 0, NameLength * sizeof(WCHAR));
+                if (!(*pptResult)->ai_canonname)
+                    iError = EAI_MEMORY;
+                else
+                    RtlMoveMemory((*pptResult)->ai_canonname, pszNodeName, NameLength * sizeof(WCHAR));
+            }
             /* The canonical name of an address is its numeric form, as for an IPv4 address */
             else if (iFlags & AI_CANONNAME)
             {
@@ -1261,6 +1243,11 @@ GetAddrInfoW(IN PCWSTR pszNodeName,
                                   (wcslen(CanonicalName) + 1) * sizeof(WCHAR));
             }
         }
+    }
+    /* A literal name for the IPv4 family: no address of that family, and nothing to look up */
+    else if (bLiteralName)
+    {
+        iError = EAI_NONAME;
     }
     /* Check if no node was given or if this is is a valid IPv4 address */
     else if ((!pszNodeName) || bNumeric)

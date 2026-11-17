@@ -17,6 +17,7 @@
 #include <ndk/iofuncs.h>
 #include <ndk/obfuncs.h>
 #include <tcpioctl.h>
+#include <reactos/ipv6literal.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -68,6 +69,7 @@ CreateRecordForIpAddress(
 {
     IN_ADDR Ip4Address;
     IN6_ADDR Ip6Address;
+    ULONG ScopeId;
     PDNS_RECORDW pRecord = NULL;
 
     if (Type == DNS_TYPE_A)
@@ -103,7 +105,10 @@ CreateRecordForIpAddress(
     }
     else if (Type == DNS_TYPE_AAAA)
     {
-        if (ParseIpv6Address(Name, &Ip6Address))
+        /* An address, or a name of the "<address>.ipv6-literal.net" form, which means one (the scope of such a
+           name is not part of the record, as Windows Server 2022 gives it) */
+        if (ParseIpv6Address(Name, &Ip6Address) ||
+            Ipv6LiteralNameToAddress(Name, &Ip6Address, &ScopeId))
         {
             pRecord = RtlAllocateHeap(RtlGetProcessHeap(),
                                       HEAP_ZERO_MEMORY,
@@ -795,6 +800,18 @@ DnsQuery_W(LPCWSTR Name,
     {
         *QueryResultSet = (PDNS_RECORD)pRecord;
         return ERROR_SUCCESS;
+    }
+
+    /*
+     * A name of the "<address>.ipv6-literal.net" form has no record of another type and nothing is asked for it:
+     * the answer is "name does not exist" (Windows Server 2022 measured, no query on the wire)
+     */
+    {
+        IN6_ADDR LiteralAddress;
+        ULONG LiteralScope;
+
+        if (Ipv6LiteralNameToAddress(Name, &LiteralAddress, &LiteralScope))
+            return DNS_ERROR_RCODE_NAME_ERROR;
     }
 
     /*
