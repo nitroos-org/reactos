@@ -993,6 +993,179 @@ AccpHasInheritedAce(IN PACL Dacl)
     return FALSE;
 }
 
+/* TRUE if an ACE that allows access stands ahead of one that denies it */
+static BOOLEAN
+AccpAllowBeforeDeny(IN PACL Dacl)
+{
+    PACE_HEADER Ace;
+    BOOLEAN SeenAllow = FALSE;
+    DWORD i;
+
+    for (i = 0; i < Dacl->AceCount; i++)
+    {
+        if (!GetAce(Dacl, i, (PVOID *)&Ace))
+            return TRUE;
+        switch (Ace->AceType)
+        {
+            case ACCESS_ALLOWED_ACE_TYPE:
+            case ACCESS_ALLOWED_OBJECT_ACE_TYPE:
+            case ACCESS_ALLOWED_CALLBACK_ACE_TYPE:
+            case ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE:
+                SeenAllow = TRUE;
+                break;
+            case ACCESS_DENIED_ACE_TYPE:
+            case ACCESS_DENIED_OBJECT_ACE_TYPE:
+            case ACCESS_DENIED_CALLBACK_ACE_TYPE:
+            case ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE:
+                if (SeenAllow)
+                    return TRUE;
+                break;
+            default:
+                break;
+        }
+    }
+    return FALSE;
+}
+
+/*
+ * TRUE if the ACE at Index of Dacl is a CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE copy of an earlier ACE with the same
+ * type, mask, SID and flags otherwise: what AccpDedupInheritedAces leaves of an ACE the DACL has twice.
+ */
+static BOOLEAN
+AccpIsInheritOnlyCopy(IN PACL Dacl, IN DWORD Index)
+{
+    PACE_HEADER Ace, Earlier;
+    DWORD j;
+
+    if (!GetAce(Dacl, Index, (PVOID *)&Ace) || (Ace->AceFlags & (CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE)) !=
+        (CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE))
+        return FALSE;
+    for (j = 0; j < Index; j++)
+    {
+        if (GetAce(Dacl, j, (PVOID *)&Earlier) &&
+            Earlier->AceType == Ace->AceType && Earlier->AceSize == Ace->AceSize &&
+            (Earlier->AceFlags & INHERIT_ONLY_ACE) == 0 &&
+            (Earlier->AceFlags & ~INHERIT_ONLY_ACE) == (Ace->AceFlags & ~INHERIT_ONLY_ACE) &&
+            RtlEqualMemory((PUCHAR)Earlier + sizeof(ACE_HEADER), (PUCHAR)Ace + sizeof(ACE_HEADER),
+                           Ace->AceSize - sizeof(ACE_HEADER)))
+            return TRUE;
+    }
+    return FALSE;
+}
+
+/*
+ * A subkey that is not auto-inherited and has no ACE flagged INHERITED_ACE is converted, as on Windows (measured on
+ * Windows Server 2022), if its DACL holds every ACE the OLD descriptor of its parent (OldParentSd) passed on to it:
+ * those ACEs, compared as explicit ones (INHERITED_ACE ignored), in any order and anywhere in the DACL, are the
+ * inherited set. Each ACE the parent passed on accounts for one ACE of the DACL (a duplicate stays explicit);
+ * the ACEs left over are the explicit ones, and the key gets them plus what the new descriptor of the parent
+ * (ParentSd) passes on, exactly as an auto-inherited key does. A parent that passed nothing on is matched by
+ * every DACL.
+ * It is not converted (the caller flags it protected and auto-inherited, keeping the ACEs) if the DACL has an
+ * allow ACE ahead of a deny ACE, or if the DACL it would get has: the merge moves the explicit ACEs to the front
+ * and would reorder them against the ACEs taken out. (Neither is checked when the parent passed nothing on.)
+ * Returns the explicit ACEs as a LocalAlloc'd ACL (free with LocalFree), or NULL if the key is not converted.
+ */
+static PACL
+AccpMatchOldInheritedSet(IN PSECURITY_DESCRIPTOR OldParentSd OPTIONAL,
+                         IN PSECURITY_DESCRIPTOR ParentSd,
+                         IN PSID Owner OPTIONAL,
+                         IN PSID Group OPTIONAL,
+                         IN PACL Dacl)
+{
+    PSECURITY_DESCRIPTOR Expected = NULL, Merged = NULL;
+    PACL ExpectedDacl = NULL, MergedDacl = NULL, Explicit = NULL, Result = NULL;
+    PACE_HEADER Ace, Other;
+    PBOOLEAN Used = NULL;
+    BOOL Present, Defaulted;
+    BOOLEAN Passes = FALSE;
+    DWORD i, j, ExpectedCount;
+
+    if (OldParentSd == NULL)
+        return NULL;
+
+    /* does the old parent pass anything on? (a descriptor that passes nothing on gets the default DACL of the token) */
+    if (GetSecurityDescriptorDacl(OldParentSd, &Present, &ExpectedDacl, &Defaulted) && Present && ExpectedDacl != NULL)
+    {
+        for (i = 0; i < ExpectedDacl->AceCount; i++)
+        {
+            if (!GetAce(ExpectedDacl, i, (PVOID *)&Other))
+                goto Cleanup;
+            if (Other->AceFlags & (CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE))
+                Passes = TRUE;
+        }
+    }
+    ExpectedDacl = NULL;
+    if (Passes)
+    {
+        if (!NT_SUCCESS(AccpMergeInheritedDacl(OldParentSd, Owner, Group, NULL, FALSE, TRUE, &Expected)) ||
+            !GetSecurityDescriptorDacl(Expected, &Present, &ExpectedDacl, &Defaulted))
+            goto Cleanup;
+    }
+    ExpectedCount = (Passes && Present && ExpectedDacl != NULL) ? ExpectedDacl->AceCount : 0;
+    /* (measured) nothing to account for: no order is checked, whatever the DACL looks like */
+    if (ExpectedCount != 0 && AccpAllowBeforeDeny(Dacl))
+        goto Cleanup;
+
+    Used = (PBOOLEAN)LocalAlloc(LMEM_FIXED | LMEM_ZEROINIT, Dacl->AceCount + 1);
+    Explicit = (PACL)LocalAlloc(LMEM_FIXED, Dacl->AclSize);
+    if (Used == NULL || Explicit == NULL)
+        goto Cleanup;
+
+    for (i = 0; i < ExpectedCount; i++)
+    {
+        if (!GetAce(ExpectedDacl, i, (PVOID *)&Other))
+            goto Cleanup;
+        if (AccpIsInheritOnlyCopy(ExpectedDacl, i))
+            continue;   /* the merge kept a repeated ACE inherit-only; Windows leaves such a repeat out */
+        for (j = 0; j < Dacl->AceCount; j++)
+        {
+            if (Used[j])
+                continue;
+            if (!GetAce(Dacl, j, (PVOID *)&Ace))
+                goto Cleanup;
+            if (Other->AceType == Ace->AceType && Other->AceSize == Ace->AceSize &&
+                (Other->AceFlags & ~INHERITED_ACE) == (Ace->AceFlags & ~INHERITED_ACE) &&
+                RtlEqualMemory((PUCHAR)Other + sizeof(ACE_HEADER), (PUCHAR)Ace + sizeof(ACE_HEADER),
+                               Ace->AceSize - sizeof(ACE_HEADER)))
+            {
+                Used[j] = TRUE;
+                break;
+            }
+        }
+        if (j == Dacl->AceCount)
+            goto Cleanup;   /* part of what the parent passed on is not there */
+    }
+
+    if (!InitializeAcl(Explicit, Dacl->AclSize, Dacl->AclRevision))
+        goto Cleanup;
+    for (j = 0; j < Dacl->AceCount; j++)
+    {
+        if (!Used[j] &&
+            (!GetAce(Dacl, j, (PVOID *)&Ace) || !AddAce(Explicit, Dacl->AclRevision, MAXDWORD, Ace, Ace->AceSize)))
+            goto Cleanup;
+    }
+
+    if (!NT_SUCCESS(AccpMergeInheritedDacl(ParentSd, Owner, Group, Explicit, FALSE, TRUE, &Merged)) ||
+        !GetSecurityDescriptorDacl(Merged, &Present, &MergedDacl, &Defaulted) || !Present || MergedDacl == NULL ||
+        (ExpectedCount != 0 && AccpAllowBeforeDeny(MergedDacl)))
+        goto Cleanup;
+
+    Result = Explicit;
+    Explicit = NULL;
+
+Cleanup:
+    if (Explicit != NULL)
+        LocalFree(Explicit);
+    if (Used != NULL)
+        LocalFree(Used);
+    if (Merged != NULL)
+        RtlDeleteSecurityObject(&Merged);
+    if (Expected != NULL)
+        RtlDeleteSecurityObject(&Expected);
+    return Result;
+}
+
 /*
  * Flags the ACEs of the DACL of Sd (in place) that the parent's inheritable ACEs account for. A DACL that is
  * auto-inherited already, or protected, says what it inherits itself and is left alone (FALSE).
@@ -1079,6 +1252,9 @@ Cleanup:
  *    flag) is treated the same way: every ACE flagged inherited is dropped, wherever it stands and whatever it
  *    grants or denies, the explicit ACEs are kept, the parent's set follows, it becomes auto-inherited and its
  *    subkeys follow;
+ *  - a subkey that is not auto-inherited, has no ACE flagged inherited, and whose DACL holds every ACE the OLD
+ *    descriptor of its parent passed on (see AccpMatchOldInheritedSet) is converted too: those ACEs are the
+ *    inherited set, the rest stays explicit, the key becomes auto-inherited and its subkeys follow;
  *  - any other unprotected subkey with a DACL keeps its ACEs and is only flagged protected and auto-inherited
  *    (control 0x9404), and its subtree is then rebuilt from that DACL: the subkeys below it lose what they had
  *    inherited from above it (a stale inherited ACE would grant more than the key passes on);
@@ -1137,6 +1313,7 @@ AccpPropagateToSubkeys(IN HKEY Key,
         SECURITY_DESCRIPTOR Absolute;
         PSID Owner = NULL, Group = NULL;
         PACL OldDacl = NULL, NewDacl = NULL;
+        PACL Matched = NULL;
         BOOL Present, Defaulted, Same, Inherits, Rebuild = FALSE;
 
         Length = RTL_NUMBER_OF(Name);
@@ -1173,6 +1350,8 @@ AccpPropagateToSubkeys(IN HKEY Key,
              * (non-canonical) is left alone with its subtree.
              */
             GetSecurityDescriptorControl(OldSd, &Control, &Revision);
+            GetSecurityDescriptorOwner(OldSd, &Owner, &Defaulted);
+            GetSecurityDescriptorGroup(OldSd, &Group, &Defaulted);
             if (Control & SE_DACL_AUTO_INHERITED)
             {
                 Inherits = AccpInheritedAcesAreTail(OldDacl);
@@ -1183,6 +1362,16 @@ AccpPropagateToSubkeys(IN HKEY Key,
                  * Not auto-inherited, but an ACE is flagged inherited: as on Windows (measured) the key is
                  * updated like an auto-inherited one. The merge drops every ACE flagged inherited, wherever it
                  * stands, keeps the explicit ones and appends what the parent passes on.
+                 */
+                Inherits = TRUE;
+            }
+            else if ((Matched = AccpMatchOldInheritedSet(Frame->OldParentSd, ParentSd, Owner, Group, OldDacl)) != NULL)
+            {
+                /*
+                 * Not auto-inherited and nothing flagged inherited, but its DACL holds everything the old
+                 * descriptor of the parent passed on (and the result stays in canonical order): as on Windows
+                 * (measured) those ACEs are the inherited ones, the others stay explicit, and the key is updated
+                 * like an auto-inherited one.
                  */
                 Inherits = TRUE;
             }
@@ -1202,10 +1391,9 @@ AccpPropagateToSubkeys(IN HKEY Key,
                           RegSetKeySecurity(Child, DACL_SECURITY_INFORMATION, &Absolute) == ERROR_SUCCESS;
                 Inherits = FALSE;
             }
-            GetSecurityDescriptorOwner(OldSd, &Owner, &Defaulted);
-            GetSecurityDescriptorGroup(OldSd, &Group, &Defaulted);
 
-            if (Inherits && NT_SUCCESS(AccpMergeInheritedDacl(ParentSd, Owner, Group, OldDacl, FALSE, TRUE, &NewSd)) &&
+            if (Inherits &&
+                NT_SUCCESS(AccpMergeInheritedDacl(ParentSd, Owner, Group, Matched != NULL ? Matched : OldDacl, FALSE, TRUE, &NewSd)) &&
                 GetSecurityDescriptorDacl(NewSd, &Present, &NewDacl, &Defaulted) && Present && NewDacl != NULL)
             {
                 /* nothing to do, here or below, if the key has what it would get */
@@ -1260,6 +1448,8 @@ AccpPropagateToSubkeys(IN HKEY Key,
             }
         }
 
+        if (Matched != NULL)
+            LocalFree(Matched);
         if (NewSd != NULL)
             RtlDeleteSecurityObject(&NewSd);
         if (OldSd != NULL)
