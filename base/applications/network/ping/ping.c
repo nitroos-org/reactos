@@ -528,6 +528,14 @@ Ping(void)
             SockAddrIn6.sin6_family = AF_INET6;
             CopyMemory(SockAddrIn6.sin6_addr.u.Word, Ipv6Addr->sin6_addr, sizeof(SockAddrIn6.sin6_addr));
             //SockAddrIn6.sin6_addr = Ipv6Addr->sin6_addr;
+
+            /* Windows shows the scope id of a link-local reply when the target was given with one (Reply from
+               fe80::2%3) and none when it was not (Reply from fe80::2) */
+            if (Target->ai_addr != NULL && Target->ai_addr->sa_family == AF_INET6 &&
+                !memcmp(&((struct sockaddr_in6 *)Target->ai_addr)->sin6_addr, SockAddrIn6.sin6_addr.u.Word, sizeof(SockAddrIn6.sin6_addr)))
+            {
+                SockAddrIn6.sin6_scope_id = ((struct sockaddr_in6 *)Target->ai_addr)->sin6_scope_id;
+            }
             SockAddr = (PSOCKADDR)&SockAddrIn6;
             Size = sizeof(SOCKADDR_IN6);
 

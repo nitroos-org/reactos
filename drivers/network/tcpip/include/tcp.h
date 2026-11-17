@@ -432,6 +432,12 @@ TCP6InterfaceConfigure(PIP_INTERFACE IF, const TCP_IP_INTERFACE_REQUEST *Request
 ULONG
 TCP6InterfaceMetric(struct netif *netif);
 
+struct netif *
+TCP6DefaultLinkLocalNetif(VOID);
+
+UCHAR
+TCP6DefaultLinkLocalZone(VOID);
+
 VOID
 TCP6ApplyInterfaceParams(PIP_INTERFACE IF);
 

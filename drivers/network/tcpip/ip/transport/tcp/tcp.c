@@ -492,14 +492,31 @@ TCPConnect6(
             return STATUS_INVALID_ADDRESS;
         }
 
-        /* A link-local peer is on the interface the scope id names; without one lwIP picks the interface */
-        if (ip6_addr_islinklocal(ip_2_ip6(&ConnectIp)) && Scope != 0)
+        /* A link-local peer is on the interface the scope id names; without one, the interface of the socket's
+           bound address, else the one the route table prefers (Windows: the lowest metric; no adapter: no route) */
+        if (ip6_addr_islinklocal(ip_2_ip6(&ConnectIp)))
         {
-            Zone = TCPZoneOfInterface6(Scope);
-            if (Zone == IP6_NO_ZONE)
+            if (Scope != 0)
             {
-                UnlockObject(Connection);
-                return STATUS_INVALID_ADDRESS;
+                Zone = TCPZoneOfInterface6(Scope);
+                if (Zone == IP6_NO_ZONE)
+                {
+                    UnlockObject(Connection);
+                    return STATUS_INVALID_ADDRESS;
+                }
+            }
+            else if (AddrFile->Zone6 != IP6_NO_ZONE)
+            {
+                Zone = AddrFile->Zone6;
+            }
+            else
+            {
+                Zone = TCP6DefaultLinkLocalZone();
+                if (Zone == IP6_NO_ZONE)
+                {
+                    UnlockObject(Connection);
+                    return STATUS_NETWORK_UNREACHABLE;
+                }
             }
             ip6_addr_set_zone(ip_2_ip6(&ConnectIp), Zone);
         }

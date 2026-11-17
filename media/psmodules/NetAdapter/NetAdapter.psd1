@@ -6,11 +6,11 @@
     Author                = 'ReactOS-Nitro'
     CompanyName           = 'ReactOS-Nitro'
     Copyright             = 'ReactOS-Nitro contributors. GNU GPL v2 or later.'
-    Description           = 'Network adapter cmdlets for PowerShell 7 on ReactOS-Nitro: a clean-room script module over iphlpapi with the cmdlet names, parameters and output shapes of the Windows NetAdapter module (read side only).'
+    Description           = 'Network adapter cmdlets for PowerShell 7 on ReactOS-Nitro: a clean-room script module over iphlpapi with the cmdlet names, parameters and output shapes of the Windows NetAdapter module (adapters, statistics, enable, disable and restart).'
     PowerShellVersion     = '5.1'
     CompatiblePSEditions  = @('Desktop', 'Core')
     FormatsToProcess      = @('NetAdapter.format.ps1xml')
-    FunctionsToExport     = @('Get-NetAdapter', 'Get-NetAdapterStatistics')
+    FunctionsToExport     = @('Get-NetAdapter', 'Get-NetAdapterStatistics', 'Disable-NetAdapter', 'Enable-NetAdapter', 'Restart-NetAdapter')
     CmdletsToExport       = @()
     VariablesToExport     = @()
     AliasesToExport       = @()

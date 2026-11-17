@@ -719,6 +719,8 @@ UDPSendDatagram6(
             netif = Udp6NetifOfIndex(ScopeId);
         else if (Zone != IP6_NO_ZONE)
             netif = netif_get_by_index(Zone);
+        else
+            netif = TCP6DefaultLinkLocalNetif();   /* no scope id: the adapter of the lowest metric (Windows) */
         if (netif)
             ip6_addr_assign_zone(&Dest, IP6_UNICAST, netif);
     }

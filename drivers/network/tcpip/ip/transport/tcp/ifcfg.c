@@ -101,6 +101,70 @@ TCP6InterfaceMetric(struct netif *netif)
     return IF->Ip6Metric ? IF->Ip6Metric : IfcfgAutomaticMetric(IF);
 }
 
+/* The interface an IPv6 link-local destination without a scope id goes out on (core lock held). Measured on Windows
+ * Server 2022 (ping, connect, sendto, one and two adapters; the name resolver leaves the scope id 0): the stack
+ * takes the on-link fe80::/64 route of the lowest interface metric, so the adapter that is up with an address and
+ * the lowest metric (the lowest interface index decides a tie here), the same one for every protocol; no adapter that can
+ * carry it: no route (NULL). Windows also moves on to the next interface after neighbour discovery failed on the
+ * first, which is not done here. The loopback interface is never chosen */
+struct netif *
+TCP6DefaultLinkLocalNetif(VOID)
+{
+    struct netif *netif, *Best = NULL;
+    ULONG BestMetric = 0;
+    s8_t i;
+
+    NETIF_FOREACH(netif)
+    {
+        PIP_INTERFACE IF = netif->state;
+        BOOLEAN HasAddress = FALSE;
+        ULONG Metric;
+
+        if (!IF || IF == Loopback || !netif_is_up(netif) || !(netif->flags & NETIF_FLAG_LINK_UP))
+            continue;
+        for (i = 0; i < LWIP_IPV6_NUM_ADDRESSES; i++)
+        {
+            if (ip6_addr_isvalid(netif_ip6_addr_state(netif, i)))
+            {
+                HasAddress = TRUE;
+                break;
+            }
+        }
+        if (!HasAddress)
+            continue;
+
+        Metric = TCP6InterfaceMetric(netif);
+        /* the lowest metric; a tie: the lowest interface index (the netif list is newest first) */
+        if (!Best || Metric < BestMetric ||
+            (Metric == BestMetric && IF->Index < ((PIP_INTERFACE)Best->state)->Index))
+        {
+            Best = netif;
+            BestMetric = Metric;
+        }
+    }
+
+    return Best;
+}
+
+/* The lwIP zone of TCP6DefaultLinkLocalNetif, IP6_NO_ZONE when there is none. PASSIVE_LEVEL */
+UCHAR
+TCP6DefaultLinkLocalZone(VOID)
+{
+    struct netif *netif;
+    UCHAR Zone = IP6_NO_ZONE;
+
+    if (!TCPIpv6Enabled)
+        return IP6_NO_ZONE;
+
+    LOCK_TCPIP_CORE();
+    netif = TCP6DefaultLinkLocalNetif();
+    if (netif)
+        Zone = (UCHAR)netif_get_index(netif);
+    UNLOCK_TCPIP_CORE();
+
+    return Zone;
+}
+
 /* lwIP hook: router advertisements and solicitations of an interface whose router discovery is disabled */
 int
 LibNd6RaAccept(struct netif *netif)
