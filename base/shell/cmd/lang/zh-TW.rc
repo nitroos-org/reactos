@@ -484,7 +484,7 @@ RESTORE       恢復視窗\n\
     STRING_ERROR_UNEXPECTED "%s was unexpected.\n"
     STRING_ERROR_WHILE_PROCESSING "Error occurred while processing: %s.\n"
     STRING_SET_ENV_ERROR "環境變數 '%s' 尚未定義\n"
-    STRING_CMD_INFOLINE "  NitroOS 命令列直譯器                                        輸入 HELP = 說明  "
+    STRING_CMD_INFOLINE "  NitroOS 命令列直譯器                                       輸入 HELP = 說明  "
     STRING_CMD_COPYRIGHT "(C) Copyright 1996-%s ReactOS Team.\n"
     STRING_REACTOS_VERSION "NitroOS [版本 %s %s]\n"
     STRING_CMD_SHELLINFO "\nNitroOS 命令列直譯器\n版本 %s %s"
