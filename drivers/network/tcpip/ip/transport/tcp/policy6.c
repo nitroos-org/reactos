@@ -35,24 +35,41 @@
 /* the table in force (core lock); Count 0 until the first load: the defaults are put in on first use */
 static ADDRSORT_POLICY_TABLE Policy6Table;
 
+/* A PrefixPolicies value that is too long is ignored as a whole (the defaults stay): said once per boot */
+static LONG Policy6IgnoredLogged;
+
+#define Policy6LogIgnored(Why, Limit) \
+    do { \
+        if (!InterlockedExchange(&Policy6IgnoredLogged, 1)) \
+            DbgPrint("TCPIP: IPv6 PrefixPolicies value " Why ": ignored, the default prefix policy table stays\n", Limit); \
+    } while (0)
+
 /* PrefixPolicies of Key into Table when it has at least one valid line */
 static
 VOID
 Policy6ReadValue(HANDLE Key, PADDRSORT_POLICY_TABLE Table, PKEY_VALUE_PARTIAL_INFORMATION Info, ULONG InfoSize)
 {
     UNICODE_STRING ValueName = RTL_CONSTANT_STRING(ADDRSEL_POLICY_VALUE);
-    ULONG Length, Chars;
+    ULONG Length, Chars, Lines;
     PWCHAR Text;
+    NTSTATUS Status;
 
     /* one WCHAR of the buffer stays free for the terminator put after the data */
-    if (!NT_SUCCESS(ZwQueryValueKey(Key, &ValueName, KeyValuePartialInformation, Info, InfoSize - sizeof(WCHAR),
-                                    &Length)) ||
-        Info->Type != REG_MULTI_SZ)
+    Status = ZwQueryValueKey(Key, &ValueName, KeyValuePartialInformation, Info, InfoSize - sizeof(WCHAR), &Length);
+    if (Status == STATUS_BUFFER_OVERFLOW || Status == STATUS_BUFFER_TOO_SMALL)
+    {
+        /* longer than 64 lines of at most ADDRSEL_POLICY_LINE_CHARS characters: not used, as in user mode */
+        Policy6LogIgnored("longer than the buffer of %u characters", ADDRSEL_POLICY_BUFFER_CHARS);
+        return;
+    }
+    if (!NT_SUCCESS(Status) || Info->Type != REG_MULTI_SZ)
         return;
     Text = (PWCHAR)Info->Data;
     Chars = Info->DataLength / sizeof(WCHAR);
     Text[Chars] = UNICODE_NULL;
-    AddrSortParsePolicy(Text, Chars + 1, Table);
+    Lines = AddrSortParsePolicy(Text, Chars + 1, Table);
+    if (Lines == ADDRSORT_POLICY_TOO_MANY)
+        Policy6LogIgnored("has more than %u lines", ADDRSORT_MAX_POLICY);
 }
 
 /* IOCTL_IP6_POLICY_RELOAD and the start (PASSIVE_LEVEL, no lock held) */

@@ -70,11 +70,15 @@ VOID AddrSortPreferIpv4(PADDRSORT_POLICY_TABLE Table);
 /*
  * The table from the lines of a REG_MULTI_SZ value ("prefix/length precedence label", one per string; a line
  * that does not parse is skipped). Returns the number of entries read; Table is filled with them only when it
- * is more than 0, so a value without a valid line leaves Table (the defaults) alone.
+ * is more than 0, so a value without a valid line leaves Table (the defaults) alone. A value with more than
+ * ADDRSORT_MAX_POLICY valid lines is not used as a whole: ADDRSORT_POLICY_TOO_MANY is returned and Table is left
+ * alone (the callers log it once).
  */
+#define ADDRSORT_POLICY_TOO_MANY    ((ULONG)-1)
 ULONG AddrSortParsePolicy(const WCHAR *MultiSz, ULONG Chars, PADDRSORT_POLICY_TABLE Table);
 
-/* An IPv6 address in text (hex groups and one "::"), up to Chars characters or the first one that is not part of
+/* An IPv6 address in text (hex groups and one "::", the last 32 bits may be a dotted IPv4 address as in
+   ::ffff:0.0.0.0), up to Chars characters or the first one that is not part of
    it. Returns the number of characters used, 0 when it is not an address */
 ULONG AddrSortParseAddress(const WCHAR *Text, ULONG Chars, UCHAR *Address);
 

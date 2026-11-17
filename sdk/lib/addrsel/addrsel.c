@@ -83,11 +83,47 @@ HexValue(WCHAR c)
     return -1;
 }
 
+/* A dotted IPv4 tail "a.b.c.d" (as in ::ffff:0.0.0.0): the four octets as two 16-bit groups, 0 when malformed */
+static
+ULONG
+ParseIpv4Tail(const WCHAR *Text, ULONG Chars, USHORT *Groups)
+{
+    ULONG Used = 0, Octet, Value, Digits;
+    UCHAR Bytes[4];
+
+    for (Octet = 0; Octet < 4; Octet++)
+    {
+        Value = Digits = 0;
+        while (Used < Chars && Text[Used] >= L'0' && Text[Used] <= L'9')
+        {
+            Value = Value * 10 + (Text[Used] - L'0');
+            if (++Digits > 3 || Value > 255)
+                return 0;
+            Used++;
+        }
+        if (!Digits)
+            return 0;
+        Bytes[Octet] = (UCHAR)Value;
+        if (Octet < 3)
+        {
+            if (Used >= Chars || Text[Used] != L'.')
+                return 0;
+            Used++;
+        }
+    }
+    /* "1.2.3.4.5" and "1.2.3.4a" are not an address with a tail */
+    if (Used < Chars && (Text[Used] == L'.' || HexValue(Text[Used]) >= 0))
+        return 0;
+    Groups[0] = (USHORT)((Bytes[0] << 8) | Bytes[1]);
+    Groups[1] = (USHORT)((Bytes[2] << 8) | Bytes[3]);
+    return Used;
+}
+
 ULONG
 AddrSortParseAddress(const WCHAR *Text, ULONG Chars, UCHAR *Address)
 {
     USHORT Groups[8];
-    ULONG Used = 0, Count = 0, i, After;
+    ULONG Used = 0, Count = 0, i, After, End;
     LONG Gap = -1, Digit;
 
     memset(Groups, 0, sizeof(Groups));
@@ -102,6 +138,23 @@ AddrSortParseAddress(const WCHAR *Text, ULONG Chars, UCHAR *Address)
     while (Used < Chars && HexValue(Text[Used]) >= 0)
     {
         ULONG Value = 0, Digits = 0;
+
+        /* a token with a '.' is the dotted IPv4 tail: it is the last part and takes two groups */
+        for (End = Used; End < Chars && (HexValue(Text[End]) >= 0 || Text[End] == L'.'); End++)
+        {
+            if (Text[End] == L'.')
+            {
+                USHORT Pair[2];
+                ULONG Tail = ParseIpv4Tail(Text + Used, Chars - Used, Pair);
+
+                if (!Tail || Count > 6)
+                    return 0;
+                Groups[Count++] = Pair[0];
+                Groups[Count++] = Pair[1];
+                Used += Tail;
+                goto Parsed;
+            }
+        }
 
         while (Used < Chars && (Digit = HexValue(Text[Used])) >= 0)
         {
@@ -132,6 +185,7 @@ AddrSortParseAddress(const WCHAR *Text, ULONG Chars, UCHAR *Address)
         }
     }
 
+Parsed:
     if (Used == 0)
         return 0;
     if (Gap < 0 ? Count != 8 : Count > 7)
@@ -218,14 +272,21 @@ AddrSortParsePolicy(const WCHAR *MultiSz, ULONG Chars, PADDRSORT_POLICY_TABLE Ta
     ULONG Position = 0, Start;
 
     memset(&Read, 0, sizeof(Read));
-    while (Position < Chars && Read.Count < ADDRSORT_MAX_POLICY)
+    while (Position < Chars)
     {
+        ADDRSORT_POLICY Line;
+
         for (Start = Position; Position < Chars && MultiSz[Position]; Position++)
             ;
         if (Position == Start)
             break;      /* the empty string that ends the value */
-        if (ParseLine(MultiSz + Start, Position - Start, &Read.Entry[Read.Count]))
-            Read.Count++;
+        if (ParseLine(MultiSz + Start, Position - Start, &Line))
+        {
+            /* more valid lines than the table holds: the value as a whole is not used */
+            if (Read.Count >= ADDRSORT_MAX_POLICY)
+                return ADDRSORT_POLICY_TOO_MANY;
+            Read.Entry[Read.Count++] = Line;
+        }
         Position++;
     }
     if (Read.Count)

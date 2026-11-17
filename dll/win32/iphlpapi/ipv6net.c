@@ -546,14 +546,15 @@ DWORD Ipv6GetRouteRows(PMIB_IPFORWARD_ROW2 *Rows, ULONG *Count)
 /*
  * The address a packet to Dest leaves with over interface IfIndex: the stack's own choice (RFC 6724 section 5,
  * AddrSortSelectSource of sdk/lib/addrsel, the function tcpip.sys calls for every TCP connection, UDP datagram and
- * echo request, with the same prefix policy table), from the same address rows. A multicast destination keeps the
- * link-local address of the interface when it has one (measured for a multicast destination without an interface).
+ * echo request, with the same prefix policy table), from the same address rows. A multicast destination is no
+ * special case: rule 2 gives ff01/ff02 the link-local address of the interface (measured for a multicast destination
+ * without an interface) and ff05/ff0e the address of its scope, as the stack does.
  */
 static void pick_source(const IPV6_ALL *All, DWORD IfIndex, const UCHAR *Dest, SOCKADDR_INET *Source)
 {
   ADDRSEL_CANDIDATE Candidates[MAX_SOURCE_CANDIDATES];
   const TCP_IPV6_ADDRESS_ROW *Of[MAX_SOURCE_CANDIDATES];
-  const TCP_IPV6_ADDRESS_ROW *LinkLocal = NULL, *Chosen = NULL;
+  const TCP_IPV6_ADDRESS_ROW *Chosen = NULL;
   ADDRSORT_POLICY_TABLE Policy;
   ULONG i, Count = 0;
   LONG Best;
@@ -570,20 +571,13 @@ static void pick_source(const IPV6_ALL *All, DWORD IfIndex, const UCHAR *Dest, S
     Candidates[Count].Temporary = Row->SuffixOrigin == IpSuffixOriginRandom;
     /* an address configured with skip-as-source is not chosen (only bound to) */
     Candidates[Count].SkipAsSource = (Row->Flags & TCP_IPV6_ADDRESS_SKIP_AS_SOURCE) ? TRUE : FALSE;
-    if (!LinkLocal && !Candidates[Count].SkipAsSource && is_link_local(Row->Address))
-      LinkLocal = Row;
     Of[Count++] = Row;
   }
 
-  if (Dest[0] == 0xff && LinkLocal)
-    Chosen = LinkLocal;
-  else
-  {
-    AddrSortLoadPolicy(&Policy);
-    Best = AddrSortSelectSource(&Policy, Candidates, Count, Dest);
-    if (Best >= 0)
-      Chosen = Of[Best];
-  }
+  AddrSortLoadPolicy(&Policy);
+  Best = AddrSortSelectSource(&Policy, Candidates, Count, Dest);
+  if (Best >= 0)
+    Chosen = Of[Best];
 
   if (!Chosen)
   {
