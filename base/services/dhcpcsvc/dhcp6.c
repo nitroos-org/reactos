@@ -398,8 +398,10 @@ static HKEY OpenCommandKey(PCSTR Name, BOOL Create)
         if (ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:(A;;KA;;;SY)(A;;KA;;;BA)(A;;0x20003;;;AU)",
                                                                  SDDL_REVISION_1, &Sd, NULL))
             Sa.lpSecurityDescriptor = Sd;
-        Result = RegCreateKeyExA(HKEY_LOCAL_MACHINE, Path, 0, NULL, 0, KEY_QUERY_VALUE | KEY_SET_VALUE, Sd ? &Sa : NULL,
-                                 &Key, NULL);
+        /* volatile: what a standard user writes there never reaches the SYSTEM hive on disk (Windows gives a standard
+           user no persistent value under HKLM\SYSTEM for this); the client makes it again with the lease */
+        Result = RegCreateKeyExA(HKEY_LOCAL_MACHINE, Path, 0, NULL, REG_OPTION_VOLATILE, KEY_QUERY_VALUE | KEY_SET_VALUE,
+                                 Sd ? &Sa : NULL, &Key, NULL);
         if (Sd)
             LocalFree(Sd);
         if (Result != ERROR_SUCCESS)
@@ -2402,18 +2404,20 @@ static VOID CheckCommands(ULONGLONG Now)
     for (If = Interfaces; If; If = If->Next)
     {
         HKEY Key;
-        DWORD Command = 0, Size = sizeof(Command), Type;
+        DWORD Command = 0, Size = sizeof(Command), Type = REG_NONE;
+        LONG Result;
 
         if (If->Cmd || If->Mode != D6M_STATEFUL)
             continue;
         Key = OpenCommandKey(If->Name, FALSE);
         if (!Key)
             continue;
-        if (RegQueryValueExA(Key, DHCP6_VALUE_COMMAND, NULL, &Type, (LPBYTE)&Command, &Size) != ERROR_SUCCESS ||
-            Type != REG_DWORD || (Command != DHCP6_COMMAND_RENEW && Command != DHCP6_COMMAND_RELEASE))
+        Result = RegQueryValueExA(Key, DHCP6_VALUE_COMMAND, NULL, &Type, (LPBYTE)&Command, &Size);
+        if (Result != ERROR_SUCCESS || Type != REG_DWORD || Size != sizeof(Command) ||
+            (Command != DHCP6_COMMAND_RENEW && Command != DHCP6_COMMAND_RELEASE))
         {
-            if (Command != 0)
-                RegDeleteValueA(Key, DHCP6_VALUE_COMMAND); /* not a command: gone */
+            if (Result != ERROR_FILE_NOT_FOUND)
+                RegDeleteValueA(Key, DHCP6_VALUE_COMMAND); /* not a command (also one of another type or size): gone */
             RegCloseKey(Key);
             continue;
         }
