@@ -881,8 +881,8 @@ WSHIoctl(
     BOOLEAN Handled;
 
     /* The multicast source filter ioctls (mcast.c) */
-    res = WshMcastIoctl(Context, IoControlCode, InputBuffer, InputBufferLength, OutputBuffer, OutputBufferLength,
-                        NumberOfBytesReturned, &Handled);
+    res = WshMcastIoctl(Context, TdiAddressObjectHandle, IoControlCode, InputBuffer, InputBufferLength, OutputBuffer,
+                        OutputBufferLength, NumberOfBytesReturned, &Handled);
     if (Handled)
     {
         *NeedsCompletion = FALSE;
@@ -993,8 +993,7 @@ WSHJoinLeaf(
 /* A socket option to the stack: on the socket's own address handle (AFD's, from bind; the stack takes the request
  * for that socket whatever entity it names), else on a control channel by the socket's entity id, which the stack
  * allows to the socket's own process and user only (tcpip main.c). NO_ERROR or the Win32 error;
- * ERROR_OPEN_FAILED when no control channel could be opened */
-static
+ * ERROR_OPEN_FAILED when no control channel could be opened (also used by mcast.c) */
 DWORD
 WshSetInformationEx(
     _In_opt_ HANDLE AddressHandle,
@@ -1133,7 +1132,7 @@ WSHNotify(
             Context->RequestQueue = NULL;
 
             /* The groups and filters the socket set before the bind (mcast.c): the stack's refusals fail the bind */
-            Error = WshMcastBind(Context);
+            Error = WshMcastBind(Context, TdiAddressObjectHandle);
             if (Error != NO_ERROR)
                 return Error;
             break;
@@ -1312,7 +1311,8 @@ WSHSetSocketInformation(
     {
         BOOLEAN Handled;
 
-        Status = WshMcastSetOption(Context, Level, OptionName, OptionValue, OptionLength, &Handled);
+        Status = WshMcastSetOption(Context, TdiAddressObjectHandle, Level, OptionName, OptionValue, OptionLength,
+                                   &Handled);
         if (Handled)
             return Status;
     }

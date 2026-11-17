@@ -97,14 +97,18 @@ typedef struct _SOCKET_CONTEXT {
 #define WSH_SET6_MTUD       0x400
 
 /* mcast.c: multicast groups and source filters (MCAST_*, IP_*_MEMBERSHIP, IP_*_SOURCE*, IPV6_*_MEMBERSHIP, the
-   multicast filter ioctls) */
+   multicast filter ioctls); AddressHandle: the socket's address handle the requests go on (NULL before the bind) */
 BOOLEAN WshMcastIsOption(INT Level, INT OptionName);
-INT WshMcastSetOption(PSOCKET_CONTEXT Context, INT Level, INT OptionName, PCHAR OptionValue, INT OptionLength,
-                      PBOOLEAN Handled);
-INT WshMcastIoctl(PSOCKET_CONTEXT Context, DWORD Code, PVOID InputBuffer, DWORD InputBufferLength, PVOID OutputBuffer,
-                  DWORD OutputBufferLength, LPDWORD Returned, PBOOLEAN Handled);
-INT WshMcastBind(PSOCKET_CONTEXT Context);
+INT WshMcastSetOption(PSOCKET_CONTEXT Context, HANDLE AddressHandle, INT Level, INT OptionName, PCHAR OptionValue,
+                      INT OptionLength, PBOOLEAN Handled);
+INT WshMcastIoctl(PSOCKET_CONTEXT Context, HANDLE AddressHandle, DWORD Code, PVOID InputBuffer,
+                  DWORD InputBufferLength, PVOID OutputBuffer, DWORD OutputBufferLength, LPDWORD Returned,
+                  PBOOLEAN Handled);
+INT WshMcastBind(PSOCKET_CONTEXT Context, HANDLE AddressHandle);
 VOID WshMcastFree(PSOCKET_CONTEXT Context);
+
+/* A socket option request to the stack on the socket's address handle, else a control channel (wshtcpip.c) */
+DWORD WshSetInformationEx(HANDLE AddressHandle, DWORD IOCTL, PVOID Request, DWORD RequestSize);
 
 INT
 WSHIoctl_GetInterfaceList(

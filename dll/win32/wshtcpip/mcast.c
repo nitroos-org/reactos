@@ -355,16 +355,16 @@ WshMcastFindSource(const UCHAR (*Sources)[16], ULONG Count, const UCHAR *Source)
     return -1;
 }
 
-/* The stack's answer to a filter request, as the socket API answers (STATUS_INVALID_PARAMETER: the group is
- * joined already, WSAEINVAL; the rest - no such interface, not a member, no room - WSAEADDRNOTAVAIL, the answer the
- * stack gave IPV6_ADD_MEMBERSHIP before) */
+/* A filter request to the stack, on the socket's own address handle (WshSetInformationEx: the stack takes it for that
+ * socket whatever entity it names; a control channel only without one), and the stack's answer as the socket API
+ * answers (STATUS_INVALID_PARAMETER: the group is joined already, WSAEINVAL; the rest - no such interface, not a
+ * member, no room - WSAEADDRNOTAVAIL, the answer the stack gave IPV6_ADD_MEMBERSHIP before) */
 static
 INT
-WshMcastSend(PSOCKET_CONTEXT Context, PNITRO_MCAST_FILTER Filter, ULONG Size)
+WshMcastSend(PSOCKET_CONTEXT Context, HANDLE AddressHandle, PNITRO_MCAST_FILTER Filter, ULONG Size)
 {
     PTCP_REQUEST_SET_INFORMATION_EX Info;
-    HANDLE TcpCC;
-    DWORD Returned;
+    DWORD Status;
     INT Error = NO_ERROR;
 
     /* An unbound socket has no address object in the stack yet: its groups wait in the socket's table (one entry
@@ -383,17 +383,14 @@ WshMcastSend(PSOCKET_CONTEXT Context, PNITRO_MCAST_FILTER Filter, ULONG Size)
     Info->BufferSize = Size;
     RtlCopyMemory(Info->Buffer, Filter, Size);
 
-    if (openTcpFile(&TcpCC, FILE_READ_DATA | FILE_WRITE_DATA) != STATUS_SUCCESS)
-    {
-        HeapFree(GetProcessHeap(), 0, Info);
-        return WSAENOBUFS;
-    }
-    if (!DeviceIoControl(TcpCC, IOCTL_TCP_SET_INFORMATION_EX, Info,
-                         FIELD_OFFSET(TCP_REQUEST_SET_INFORMATION_EX, Buffer) + Size, NULL, 0, &Returned, NULL))
-    {
-        Error = (GetLastError() == ERROR_INVALID_PARAMETER) ? WSAEINVAL : WSAEADDRNOTAVAIL;
-    }
-    closeTcpFile(TcpCC);
+    Status = WshSetInformationEx(AddressHandle, IOCTL_TCP_SET_INFORMATION_EX, Info,
+                                 FIELD_OFFSET(TCP_REQUEST_SET_INFORMATION_EX, Buffer) + Size);
+    if (Status == ERROR_OPEN_FAILED)
+        Error = WSAENOBUFS;
+    else if (Status == ERROR_INVALID_PARAMETER)
+        Error = WSAEINVAL;
+    else if (Status != NO_ERROR)
+        Error = WSAEADDRNOTAVAIL;
     HeapFree(GetProcessHeap(), 0, Info);
     return Error;
 }
@@ -406,8 +403,8 @@ WshMcastSend(PSOCKET_CONTEXT Context, PNITRO_MCAST_FILTER Filter, ULONG Size)
  */
 static
 INT
-WshMcastCommit(PSOCKET_CONTEXT Context, PWSH_MCAST Entry, UCHAR Family, const UCHAR *Group, ULONG Given, UCHAR Mode,
-               const UCHAR (*Sources)[16], ULONG NumSources)
+WshMcastCommit(PSOCKET_CONTEXT Context, HANDLE AddressHandle, PWSH_MCAST Entry, UCHAR Family, const UCHAR *Group,
+               ULONG Given, UCHAR Mode, const UCHAR (*Sources)[16], ULONG NumSources)
 {
     BOOLEAN Leave = (Mode == MCAST_INCLUDE && NumSources == 0);
     PNITRO_MCAST_FILTER Filter;
@@ -459,7 +456,7 @@ WshMcastCommit(PSOCKET_CONTEXT Context, PWSH_MCAST Entry, UCHAR Family, const UC
     Filter->NumSources = NumSources;
     if (NumSources)
         RtlCopyMemory(Filter->Sources, Sources, NumSources * 16);
-    Error = WshMcastSend(Context, Filter, Size);
+    Error = WshMcastSend(Context, AddressHandle, Filter, Size);
     HeapFree(GetProcessHeap(), 0, Filter);
     if (Error != NO_ERROR)
     {
@@ -503,8 +500,8 @@ WshMcastCommit(PSOCKET_CONTEXT Context, PWSH_MCAST Entry, UCHAR Family, const UC
 /* One option's operation on the socket's group (the request already checked) */
 static
 INT
-WshMcastOperate(PSOCKET_CONTEXT Context, WSH_MCAST_OP Op, UCHAR Family, const UCHAR *Group, ULONG Given,
-                const UCHAR *Source)
+WshMcastOperate(PSOCKET_CONTEXT Context, HANDLE AddressHandle, WSH_MCAST_OP Op, UCHAR Family, const UCHAR *Group,
+                ULONG Given, const UCHAR *Source)
 {
     PWSH_MCAST Entry = WshMcastFind(Context, Family, Group, Given);
     UCHAR (*List)[16];
@@ -516,16 +513,16 @@ WshMcastOperate(PSOCKET_CONTEXT Context, WSH_MCAST_OP Op, UCHAR Family, const UC
         case McastJoin:
             if (Entry)
                 return WSAEINVAL;
-            return WshMcastCommit(Context, NULL, Family, Group, Given, MCAST_EXCLUDE, NULL, 0);
+            return WshMcastCommit(Context, AddressHandle,NULL, Family, Group, Given, MCAST_EXCLUDE, NULL, 0);
 
         case McastLeave:
             if (!Entry)
                 return WSAEADDRNOTAVAIL;
-            return WshMcastCommit(Context, Entry, Family, Group, Given, MCAST_INCLUDE, NULL, 0);
+            return WshMcastCommit(Context, AddressHandle,Entry, Family, Group, Given, MCAST_INCLUDE, NULL, 0);
 
         case McastJoinSource:
             if (!Entry)
-                return WshMcastCommit(Context, NULL, Family, Group, Given, MCAST_INCLUDE, (const UCHAR (*)[16])Source, 1);
+                return WshMcastCommit(Context, AddressHandle,NULL, Family, Group, Given, MCAST_INCLUDE, (const UCHAR (*)[16])Source, 1);
             /* fall through */
         case McastBlock:
             if (!Entry || Entry->Mode != ((Op == McastBlock) ? MCAST_EXCLUDE : MCAST_INCLUDE))
@@ -538,7 +535,7 @@ WshMcastOperate(PSOCKET_CONTEXT Context, WSH_MCAST_OP Op, UCHAR Family, const UC
             if (Entry->NumSources)
                 RtlCopyMemory(List, Entry->Sources, Entry->NumSources * 16);
             RtlCopyMemory(List[Entry->NumSources], Source, 16);
-            Error = WshMcastCommit(Context, Entry, Family, Group, Given, Entry->Mode, (const UCHAR (*)[16])List,
+            Error = WshMcastCommit(Context, AddressHandle,Entry, Family, Group, Given, Entry->Mode, (const UCHAR (*)[16])List,
                                    Entry->NumSources + 1);
             HeapFree(GetProcessHeap(), 0, List);
             return Error;
@@ -556,7 +553,7 @@ WshMcastOperate(PSOCKET_CONTEXT Context, WSH_MCAST_OP Op, UCHAR Family, const UC
             RtlCopyMemory(List, Entry->Sources, Entry->NumSources * 16);
             RtlMoveMemory(List[At], List[At + 1], (Entry->NumSources - At - 1) * 16);
             /* the last source of a source-specific group: the group is left */
-            Error = WshMcastCommit(Context, Entry, Family, Group, Given, Entry->Mode, (const UCHAR (*)[16])List,
+            Error = WshMcastCommit(Context, AddressHandle,Entry, Family, Group, Given, Entry->Mode, (const UCHAR (*)[16])List,
                                    Entry->NumSources - 1);
             HeapFree(GetProcessHeap(), 0, List);
             return Error;
@@ -593,8 +590,8 @@ WshMcastIsOption(INT Level, INT OptionName)
  * here (*Handled FALSE: the caller answers as before)
  */
 INT
-WshMcastSetOption(PSOCKET_CONTEXT Context, INT Level, INT OptionName, PCHAR OptionValue, INT OptionLength,
-                  PBOOLEAN Handled)
+WshMcastSetOption(PSOCKET_CONTEXT Context, HANDLE AddressHandle, INT Level, INT OptionName, PCHAR OptionValue,
+                  INT OptionLength, PBOOLEAN Handled)
 {
     WSH_MCAST_OP Op;
     UCHAR Family, Group[16], Source[16];
@@ -701,7 +698,7 @@ WshMcastSetOption(PSOCKET_CONTEXT Context, INT Level, INT OptionName, PCHAR Opti
             return WSAEADDRNOTAVAIL;
     }
 
-    return WshMcastOperate(Context, Op, Family, Group, IfIndex, HasSource ? Source : NULL);
+    return WshMcastOperate(Context, AddressHandle, Op, Family, Group, IfIndex, HasSource ? Source : NULL);
 }
 
 /* Duplicate sources in a filter (WSAEADDRINUSE) */
@@ -722,8 +719,8 @@ WshMcastHasDuplicate(const UCHAR (*Sources)[16], ULONG Count)
 /* A whole filter set by an ioctl: the group and sources already converted */
 static
 INT
-WshMcastSetFilter(PSOCKET_CONTEXT Context, UCHAR Family, const UCHAR *Group, ULONG Given, ULONG Mode,
-                  const UCHAR (*Sources)[16], ULONG NumSources)
+WshMcastSetFilter(PSOCKET_CONTEXT Context, HANDLE AddressHandle, UCHAR Family, const UCHAR *Group, ULONG Given,
+                  ULONG Mode, const UCHAR (*Sources)[16], ULONG NumSources)
 {
     PWSH_MCAST Entry = WshMcastFind(Context, Family, Group, Given);
     ULONG i;
@@ -737,8 +734,8 @@ WshMcastSetFilter(PSOCKET_CONTEXT Context, UCHAR Family, const UCHAR *Group, ULO
         return WSAEADDRINUSE;
     /* Windows takes any mode that is not MCAST_INCLUDE (2 included) as MCAST_EXCLUDE (VERIFY ON ORACLE what it does
        with it) */
-    return WshMcastCommit(Context, Entry, Family, Group, Given, Mode == MCAST_INCLUDE ? MCAST_INCLUDE : MCAST_EXCLUDE,
-                          Sources, NumSources);
+    return WshMcastCommit(Context, AddressHandle, Entry, Family, Group, Given,
+                          Mode == MCAST_INCLUDE ? MCAST_INCLUDE : MCAST_EXCLUDE, Sources, NumSources);
 }
 
 /*
@@ -746,8 +743,8 @@ WshMcastSetFilter(PSOCKET_CONTEXT Context, UCHAR Family, const UCHAR *Group, ULO
  * any other code)
  */
 INT
-WshMcastIoctl(PSOCKET_CONTEXT Context, DWORD Code, PVOID InputBuffer, DWORD InputBufferLength, PVOID OutputBuffer,
-              DWORD OutputBufferLength, LPDWORD Returned, PBOOLEAN Handled)
+WshMcastIoctl(PSOCKET_CONTEXT Context, HANDLE AddressHandle, DWORD Code, PVOID InputBuffer, DWORD InputBufferLength,
+              PVOID OutputBuffer, DWORD OutputBufferLength, LPDWORD Returned, PBOOLEAN Handled)
 {
     BOOLEAN Set, V4;
     UCHAR Family, Group[16];
@@ -831,7 +828,8 @@ WshMcastIoctl(PSOCKET_CONTEXT Context, DWORD Code, PVOID InputBuffer, DWORD Inpu
 
     if (Set)
     {
-        Error = WshMcastSetFilter(Context, Family, Group, IfIndex, Mode, (const UCHAR (*)[16])Sources, NumSources);
+        Error = WshMcastSetFilter(Context, AddressHandle, Family, Group, IfIndex, Mode, (const UCHAR (*)[16])Sources,
+                                  NumSources);
         if (Sources)
             HeapFree(GetProcessHeap(), 0, Sources);
         return Error;
@@ -894,7 +892,7 @@ WshMcastIoctl(PSOCKET_CONTEXT Context, DWORD Code, PVOID InputBuffer, DWORD Inpu
  * so no later answer says it is joined, and the first refusal fails the bind with the answer the join would have had
  */
 INT
-WshMcastBind(PSOCKET_CONTEXT Context)
+WshMcastBind(PSOCKET_CONTEXT Context, HANDLE AddressHandle)
 {
     PWSH_MCAST M, Next, Reversed = NULL, *Link;
     PNITRO_MCAST_FILTER Filter;
@@ -929,7 +927,7 @@ WshMcastBind(PSOCKET_CONTEXT Context)
             Filter->NumSources = M->NumSources;
             if (M->NumSources)
                 RtlCopyMemory(Filter->Sources, M->Sources, M->NumSources * 16);
-            Error = WshMcastSend(Context, Filter, Size);
+            Error = WshMcastSend(Context, AddressHandle, Filter, Size);
             HeapFree(GetProcessHeap(), 0, Filter);
         }
         if (Error == NO_ERROR)
