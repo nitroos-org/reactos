@@ -472,9 +472,9 @@ TCPInterfaceOfZone6(UCHAR Zone, BOOLEAN CoreLocked);
 NTSTATUS
 TCPAddrFileTransportAddress(PADDRESS_FILE AddrFile, PTRANSPORT_ADDRESS Address, ULONG Length);
 
-/* The local address of a connection of an IPv6 socket (connection locked) */
+/* The local address of a connection of an IPv6 socket (takes the connection lock itself: call it unlocked) */
 NTSTATUS
-TCPGetLocalAddress6(PCONNECTION_ENDPOINT Connection, PADDRESS_FILE AddrFile, PTRANSPORT_ADDRESS Address, ULONG Length);
+TCPGetLocalAddress6(PCONNECTION_ENDPOINT Connection, PTRANSPORT_ADDRESS Address, ULONG Length);
 
 #if DBG || defined(TCPIP_IPV6_SELFTEST)
 /* ip/transport/tcp/selftest6.c: runs with Tcpip\Parameters\Ipv6SelfTest set */

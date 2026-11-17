@@ -966,27 +966,59 @@ TCPAddrFileTransportAddress(
     return TCPBuildTransportAddress(&Ip, AddrFile->Port, Address, Length, FALSE);
 }
 
-/* The local address of a connection of an IPv6 socket (TDI_QUERY_ADDRESS_INFO), called with the connection
+/* The local address of a connection of an IPv6 socket (TDI_QUERY_ADDRESS_INFO), called with the connection NOT
  * locked: once it is connected (or accepted) the address it has, which the stack chose for a socket bound to the
  * unspecified address (an IPv4 one for an IPv4 peer of a dual stack socket); before that the address of its
- * address file. AFD and the Winsock provider need no route lookup of their own for it. PASSIVE_LEVEL */
+ * address file. AFD and the Winsock provider need no route lookup of their own for it. The two locks are never
+ * held together, as in TCPGetConnectionEnds: the PCB is read under the core lock (lwIP frees a PCB it aborts before
+ * its error callback clears SocketContext), the address file under the connection lock, and the transport address
+ * is built with neither (it takes the core lock for a link-local address). lwIP's callbacks take the connection lock
+ * under the core lock: a getsockname that took the core lock with the connection locked, racing the peer's first
+ * data, held one each and waited for the other. PASSIVE_LEVEL */
 NTSTATUS
 TCPGetLocalAddress6(
     PCONNECTION_ENDPOINT Connection,
-    PADDRESS_FILE AddrFile,
     PTRANSPORT_ADDRESS Address,
     ULONG Length)
 {
-    PTCP_PCB pcb = Connection->SocketContext;
+    PADDRESS_FILE AddrFile;
+    PTCP_PCB pcb;
     ip_addr_t Ip;
+    USHORT Port = 0;
+    BOOLEAN Found = FALSE;
 
+    LOCK_TCPIP_CORE();
+    pcb = Connection->SocketContext;
     if (pcb && pcb->state != CLOSED && pcb->state != LISTEN)
     {
         ip_addr_copy(Ip, pcb->local_ip);
-        return TCPBuildTransportAddress(&Ip, lwip_htons(pcb->local_port), Address, Length, FALSE);
+        Port = lwip_htons(pcb->local_port);
+        Found = TRUE;
+    }
+    UNLOCK_TCPIP_CORE();
+
+    if (!Found)
+    {
+        LockObject(Connection);
+
+        /* A concurrent close can disassociate the connection from its address */
+        AddrFile = Connection->AddressFile;
+        if (AddrFile == NULL)
+        {
+            UnlockObject(Connection);
+            return STATUS_INVALID_CONNECTION;
+        }
+
+        if (AddrFile->Address.Type == IP_ADDRESS_V6)
+            TCPAddrFileIp6(AddrFile, &Ip);
+        else
+            ip_addr_set_ip4_u32_val(Ip, AddrFile->Address.Address.IPv4Address);
+        Port = AddrFile->Port;
+
+        UnlockObject(Connection);
     }
 
-    return TCPAddrFileTransportAddress(AddrFile, Address, Length);
+    return TCPBuildTransportAddress(&Ip, Port, Address, Length, FALSE);
 }
 
 BOOLEAN TCPRemoveIRP( PCONNECTION_ENDPOINT Endpoint, PIRP Irp )
