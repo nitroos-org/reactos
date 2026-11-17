@@ -892,9 +892,10 @@ Done:
 }
 
 /*
- * An explicit ACE before an inherited tail, set by a legacy writer: the key is not auto-inherited, so it keeps its
- * DACL (explicit ACE first) when the parent changes and is only flagged protected + auto-inherited.
- * The parent here is a plain key whose DACL was set before any subkey existed.
+ * An explicit ACE before the ACEs the parent passes on, set by a legacy writer: the key is not auto-inherited but
+ * holds the whole set the parent passed on, so when the parent changes it is converted: the explicit ACE stays
+ * first, the rest is the parent's inherited set. The parent here is a plain key whose DACL was set before any
+ * subkey existed.
  */
 static void TestExplicitBeforeTail(void)
 {
@@ -937,11 +938,25 @@ static void TestExplicitBeforeTail(void)
 
     AddEveryoneRead();
     ok(OpenDacl(Key, L"c", &Dacl), "cannot read c\n");
-    /* not auto-inherited: it keeps its DACL and is only flagged protected + auto-inherited (as on Windows) */
-    ok(FindAce(&Dacl, ACCESS_ALLOWED_ACE_TYPE, World) < 0, "c got the new ACE\n");
-    ok_hex(Dacl.Control, SE_DACL_PRESENT | SE_DACL_AUTO_INHERITED | SE_DACL_PROTECTED | SE_SELF_RELATIVE);
+    /*
+     * c holds everything the parent passed on, so it is converted (measured on Windows Server 2022, x64 and x86):
+     * those ACEs are the inherited ones now, the new ACE comes with them, c is auto-inherited and not protected and
+     * only the ACE of its own is explicit (a parent whose set has a deny ACE is another matter, see TestParentSetMatch).
+     */
+    ok(FindAce(&Dacl, ACCESS_ALLOWED_ACE_TYPE, World) >= 0, "c did not get the new ACE\n");
+    ok_hex(Dacl.Control, SE_DACL_PRESENT | SE_DACL_AUTO_INHERITED | SE_SELF_RELATIVE);
     ok(Dacl.Count && Dacl.Aces[0].Mask == KEY_READ && EqualSid(Dacl.Aces[0].Sid, Network) && !(Dacl.Aces[0].Flags & INHERITED_ACE),
        "the explicit ACE is not first\n");
+    {
+        ULONG Explicit = 0, k;
+
+        for (k = 0; k < Dacl.Count; k++)
+        {
+            if (!(Dacl.Aces[k].Flags & INHERITED_ACE))
+                Explicit++;
+        }
+        ok(Explicit == 1, "c has %lu explicit ACEs\n", Explicit);
+    }
     FreeDacl(&Dacl);
 
 Done:
@@ -1804,6 +1819,240 @@ Done:
 }
 #undef DACL_IS
 
+/*
+ * Subkeys that are not auto-inherited and carry no ACE flagged INHERITED_ACE, when the DACL of their parent changes
+ * (measured on Windows Server 2022, x64 and x86 callers). One parent per row: it passes on Old (CI ACEs) while the
+ * key s and its subkey g are made, s then gets the raw DACL S (a legacy writer), the parent's DACL becomes New.
+ * Windows converts s (those of its ACEs that the old set accounts for become the inherited ones, the others stay
+ * explicit, s becomes auto-inherited and g follows) if S holds every ACE the OLD descriptor of the parent passed on
+ * to it, compared as explicit ones, in any order and anywhere. It only flags s protected + auto-inherited (the ACEs
+ * stay, g is rebuilt from them) if S lacks one, or an allow ACE stands ahead of a deny ACE in S or in what the
+ * conversion would give (nothing is checked when the parent passed nothing on). An ACE the parent passed on
+ * accounts for one ACE of S: a duplicate stays explicit. The subkey g of D-add-new, G-dup-sy, H-dup-wd-tail and
+ * ZC-co-exact-id is not checked: it inherits an ACE twice (explicit and inherited in s), which Windows Server 2022
+ * leaves out and the merge keeps as an inherit-only copy (an older row, measured on Windows 10, expects that;
+ * Windows 10 not measured now). A parent whose own set repeats an ACE is not a row either, for the same reason.
+ * The subkey g of Q-mask-sub and R-type-diff is not checked:
+ * Windows does not descend into a key that does not grant the caller KEY_QUERY_VALUE and KEY_ENUMERATE_SUB_KEYS
+ * (here the caller has the first only, or is denied), and g keeps what it had; NitroOS does not check the access
+ * of key opens yet.
+ */
+#define SYF L"(A;CI;KA;;;SY)"
+#define WDR L"(A;CI;KR;;;WD)"
+#define O1 SYF WDR
+#define NUR L"(A;;KR;;;NU)"
+#define NOR L"(A;CI;KR;;;NO)"
+#define BAF L"(A;CI;KA;;;BA)"
+#define ANK L"(D;CI;KW;;;AN)"
+#define COF L"(A;CIIO;KA;;;CO)"
+static void TestParentSetMatch(void)
+{
+    static const struct { PCWSTR Name, Old, New, S, ExpectedS, ExpectedG; } Rows[] = {
+    {L"A-add-set", O1, O1 NOR, L"D:" NUR O1, L"D:AI(A;;KR;;;NU)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)"},
+    {L"B-drop-old", O1, SYF, L"D:" NUR O1, L"D:AI(A;;KR;;;NU)(A;CIID;KA;;;SY)", L"D:AI(A;CIID;KA;;;SY)"},
+    {L"C-drop-new", O1, SYF, L"D:" NUR SYF, L"D:PAI(A;;KR;;;NU)(A;CI;KA;;;SY)", L"D:AI(A;CIID;KA;;;SY)"},
+    {L"D-add-new", O1, O1 NOR, L"D:" NUR O1 NOR, L"D:AI(A;;KR;;;NU)(A;CI;KR;;;NO)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)", NULL},
+    {L"E-rev-inter", O1, O1 NOR, L"D:" WDR NUR SYF, L"D:AI(A;;KR;;;NU)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)"},
+    {L"F-expl-after", O1, O1 NOR, L"D:" O1 NUR, L"D:AI(A;;KR;;;NU)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)"},
+    {L"G-dup-sy", O1, O1 NOR, L"D:" NUR SYF SYF WDR, L"D:AI(A;;KR;;;NU)(A;CI;KA;;;SY)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)", NULL},
+    {L"H-dup-wd-tail", O1, O1 NOR, L"D:" SYF WDR WDR, L"D:AI(A;CI;KR;;;WD)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)", NULL},
+    {L"I-extra-ci", O1, O1 NOR, L"D:" SYF L"(A;CI;KR;;;BU)" WDR, L"D:AI(A;CI;KR;;;BU)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)", L"D:AI(A;CIID;KR;;;BU)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)"},
+    {L"J-deny-before", O1, O1 NOR, L"D:(D;;KW;;;BU)" O1, L"D:AI(D;;KW;;;BU)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)"},
+    {L"K-deny-between", O1, O1 NOR, L"D:" SYF L"(D;;KW;;;BU)" WDR, L"D:PAI(A;CI;KA;;;SY)(D;;KW;;;BU)(A;CI;KR;;;WD)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)"},
+    {L"L-nonci", O1, O1 NOR, L"D:(A;;KA;;;SY)(A;;KR;;;WD)", L"D:PAI(A;;KA;;;SY)(A;;KR;;;WD)", L"D:AI"},
+    {L"M-part-nonci", O1, O1 NOR, L"D:" SYF L"(A;;KR;;;WD)", L"D:PAI(A;CI;KA;;;SY)(A;;KR;;;WD)", L"D:AI(A;CIID;KA;;;SY)"},
+    {L"N-oici", O1, O1 NOR, L"D:(A;OICI;KA;;;SY)(A;OICI;KR;;;WD)", L"D:PAI(A;OICI;KA;;;SY)(A;OICI;KR;;;WD)", L"D:AI(A;OICIID;KA;;;SY)(A;OICIID;KR;;;WD)"},
+    {L"O-ciio", O1, O1 NOR, L"D:(A;CIIO;KA;;;SY)(A;CIIO;KR;;;WD)", L"D:PAI(A;CIIO;KA;;;SY)(A;CIIO;KR;;;WD)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)"},
+    {L"P-mask-super", O1, O1 NOR, L"D:" SYF L"(A;CI;KA;;;WD)", L"D:PAI(A;CI;KA;;;SY)(A;CI;KA;;;WD)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KA;;;WD)"},
+    {L"Q-mask-sub", O1, O1 NOR, L"D:" SYF L"(A;CI;0x1;;;WD)", L"D:PAI(A;CI;KA;;;SY)(A;CI;CC;;;WD)", NULL},
+    {L"R-type-diff", O1, O1 NOR, L"D:" SYF L"(D;CI;KR;;;WD)", L"D:PAI(A;CI;KA;;;SY)(D;CI;KR;;;WD)", NULL},
+    {L"T-protected", O1, O1 NOR, L"D:P" NUR O1, L"D:P(A;;KR;;;NU)(A;CI;KA;;;SY)(A;CI;KR;;;WD)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)"},
+    {L"AI-new-empty", O1, L"", L"D:" NUR O1, L"D:AI(A;;KR;;;NU)", L"D:AI"},
+    {L"AJ-same-set", O1, O1 L"(A;;KR;;;NU)", L"D:" NUR O1, L"D:AI(A;;KR;;;NU)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)"},
+    {L"AK-set-only", O1, O1 NOR, L"D:" O1, L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)"},
+    {L"V-pdeny-match", L"(D;CI;KW;;;BU)" O1, L"(D;CI;KW;;;BU)" O1 NOR, L"D:" NUR L"(D;CI;KW;;;BU)" O1, L"D:PAI(A;;KR;;;NU)(D;CI;KW;;;BU)(A;CI;KA;;;SY)(A;CI;KR;;;WD)", L"D:AI(D;CIID;KW;;;BU)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)"},
+    {L"W-pdeny-lacks", L"(D;CI;KW;;;BU)" O1, L"(D;CI;KW;;;BU)" O1 NOR, L"D:" NUR O1, L"D:PAI(A;;KR;;;NU)(A;CI;KA;;;SY)(A;CI;KR;;;WD)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)"},
+    {L"X-pdeny-order", L"(D;CI;KW;;;BU)" O1, L"(D;CI;KW;;;BU)" O1 NOR, L"D:" O1 L"(D;CI;KW;;;BU)", L"D:PAI(A;CI;KA;;;SY)(A;CI;KR;;;WD)(D;CI;KW;;;BU)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(D;CIID;KW;;;BU)"},
+    {L"Z-co-owner-ci", L"(A;CI;KA;;;CO)" WDR, L"(A;CI;KA;;;CO)" WDR NOR, L"D:" NUR L"(A;CI;KA;;;BA)" WDR, L"D:PAI(A;;KR;;;NU)(A;CI;KA;;;BA)(A;CI;KR;;;WD)", L"D:AI(A;CIID;KA;;;BA)(A;CIID;KR;;;WD)"},
+    {L"ZA-co-owner-nci", L"(A;CI;KA;;;CO)" WDR, L"(A;CI;KA;;;CO)" WDR NOR, L"D:" NUR L"(A;;KA;;;BA)" WDR, L"D:PAI(A;;KR;;;NU)(A;;KA;;;BA)(A;CI;KR;;;WD)", L"D:AI(A;CIID;KR;;;WD)"},
+    {L"ZB-co-exact", L"(A;CI;KA;;;CO)" WDR, L"(A;CI;KA;;;CO)" WDR NOR, L"D:(A;;KA;;;BA)(A;CIIO;KA;;;CO)" WDR, L"D:AI(A;ID;KA;;;BA)(A;CIIOID;KA;;;CO)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)", L"D:AI(A;ID;KA;;;BA)(A;CIIOID;KA;;;CO)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)"},
+    {L"ZC-co-exact-id", L"(A;CI;KA;;;CO)" WDR, L"(A;CI;KA;;;CO)" WDR NOR, L"D:(A;ID;KA;;;BA)(A;CIIOID;KA;;;CO)" WDR, L"D:AI(A;CI;KR;;;WD)(A;ID;KA;;;BA)(A;CIIOID;KA;;;CO)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)", NULL},
+    {L"AC-io-flags", O1 L"(A;CIIO;KR;;;BU)", O1 L"(A;CIIO;KR;;;BU)" NOR, L"D:" O1 L"(A;CI;KR;;;BU)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;BU)(A;CIID;KR;;;NO)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;BU)(A;CIID;KR;;;NO)"},
+    {L"AD-io-exact", O1 L"(A;CIIO;KR;;;BU)", O1 L"(A;CIIO;KR;;;BU)" NOR, L"D:" O1 L"(A;CIIO;KR;;;BU)", L"D:PAI(A;CI;KA;;;SY)(A;CI;KR;;;WD)(A;CIIO;KR;;;BU)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;BU)"},
+    {L"AE-io-missing", O1 L"(A;CIIO;KR;;;BU)", O1 L"(A;CIIO;KR;;;BU)" NOR, L"D:" O1, L"D:PAI(A;CI;KA;;;SY)(A;CI;KR;;;WD)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)"},
+    {L"AF-np-plain", O1 L"(A;CINP;KR;;;BU)", O1 L"(A;CINP;KR;;;BU)" NOR, L"D:" O1 L"(A;;KR;;;BU)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;ID;KR;;;BU)(A;CIID;KR;;;NO)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)"},
+    {L"AG-np-same", O1 L"(A;CINP;KR;;;BU)", O1 L"(A;CINP;KR;;;BU)" NOR, L"D:" O1 L"(A;CINP;KR;;;BU)", L"D:PAI(A;CI;KA;;;SY)(A;CI;KR;;;WD)(A;CINP;KR;;;BU)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;ID;KR;;;BU)"},
+    {L"AH-oi-parent", O1 L"(A;OI;KR;;;BU)", O1 L"(A;OI;KR;;;BU)" NOR, L"D:" O1, L"D:PAI(A;CI;KA;;;SY)(A;CI;KR;;;WD)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)"},
+    {L"AL-oi-incl", O1 L"(A;OI;KR;;;BU)", O1 L"(A;OI;KR;;;BU)" NOR, L"D:" O1 L"(A;OI;KR;;;BU)", L"D:PAI(A;CI;KA;;;SY)(A;CI;KR;;;WD)(A;OI;KR;;;BU)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;OIIOID;KR;;;BU)"},
+    {L"AM-oi-exact", O1 L"(A;OI;KR;;;BU)", O1 L"(A;OI;KR;;;BU)" NOR, L"D:" O1 L"(A;OIIO;KR;;;BU)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;OIIOID;KR;;;BU)(A;CIID;KR;;;NO)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;OIIOID;KR;;;BU)(A;CIID;KR;;;NO)"},
+    {L"N1-pdeny-canon", L"(D;CI;KW;;;BU)" O1, L"(D;CI;KW;;;BU)" O1 NOR, L"D:(D;CI;KW;;;BU)" O1, L"D:AI(D;CIID;KW;;;BU)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)", L"D:AI(D;CIID;KW;;;BU)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)"},
+    {L"N2-pdeny-expden", L"(D;CI;KW;;;BU)" O1, L"(D;CI;KW;;;BU)" O1 NOR, L"D:(D;;KW;;;NU)(D;CI;KW;;;BU)" O1, L"D:AI(D;;KW;;;NU)(D;CIID;KW;;;BU)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)", L"D:AI(D;CIID;KW;;;BU)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)"},
+    {L"N3-pdeny-allow", L"(D;CI;KW;;;BU)" O1, L"(D;CI;KW;;;BU)" O1 NOR, L"D:(D;CI;KW;;;BU)" NUR SYF WDR, L"D:PAI(D;CI;KW;;;BU)(A;;KR;;;NU)(A;CI;KA;;;SY)(A;CI;KR;;;WD)", L"D:AI(D;CIID;KW;;;BU)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)"},
+    {L"N4-expden-after", O1, O1 NOR, L"D:" O1 L"(D;;KW;;;NU)", L"D:PAI(A;CI;KA;;;SY)(A;CI;KR;;;WD)(D;;KW;;;NU)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)"},
+    {L"N5-allow-between", O1, O1 NOR, L"D:(D;;KW;;;NU)" SYF L"(A;;KR;;;BU)" WDR, L"D:AI(D;;KW;;;NU)(A;;KR;;;BU)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)"},
+    {L"N6-noncanon-lead", O1, O1 NOR, L"D:" NUR L"(D;;KW;;;BU)" O1, L"D:PAI(A;;KR;;;NU)(D;;KW;;;BU)(A;CI;KA;;;SY)(A;CI;KR;;;WD)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)"},
+    {L"N7-noncanon-trail", O1, O1 NOR, L"D:" NUR O1 L"(D;;KW;;;BU)", L"D:PAI(A;;KR;;;NU)(A;CI;KA;;;SY)(A;CI;KR;;;WD)(D;;KW;;;BU)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)"},
+    {L"N8-noncanon-nomatch", O1, O1 NOR, L"D:" NUR L"(D;;KW;;;BU)" SYF, L"D:PAI(A;;KR;;;NU)(D;;KW;;;BU)(A;CI;KA;;;SY)", L"D:AI(A;CIID;KA;;;SY)"},
+    {L"N9-empty-old", L"", O1, L"D:" NUR, L"D:AI(A;;KR;;;NU)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)", NULL},
+    {L"N10-empty-old-e", L"", O1, L"D:", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)", NULL},
+    {L"N15-empty-old-noncanon", L"", O1, L"D:" NUR L"(D;;KW;;;BU)", L"D:AI(A;;KR;;;NU)(D;;KW;;;BU)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)", NULL},
+    {L"N11-empty-set", L"", O1, L"D:" O1, L"D:AI(A;CI;KA;;;SY)(A;CI;KR;;;WD)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)", NULL},
+    {L"N12-deny-mid-pdeny", L"(D;CI;KW;;;BU)" O1, L"(D;CI;KW;;;BU)" O1 NOR, L"D:(D;CI;KW;;;BU)" SYF L"(D;;KW;;;NU)" WDR, L"D:PAI(D;CI;KW;;;BU)(A;CI;KA;;;SY)(D;;KW;;;NU)(A;CI;KR;;;WD)", L"D:AI(D;CIID;KW;;;BU)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)"},
+    {L"Q1-ba-only", SYF BAF, SYF BAF NOR, L"D:" SYF BAF, L"D:AI(A;CIID;KA;;;SY)(A;CIID;KA;;;BA)(A;CIID;KR;;;NO)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KA;;;BA)(A;CIID;KR;;;NO)"},
+    {L"Q2-ba-exp", SYF BAF, SYF BAF NOR, L"D:" NUR SYF BAF, L"D:AI(A;;KR;;;NU)(A;CIID;KA;;;SY)(A;CIID;KA;;;BA)(A;CIID;KR;;;NO)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KA;;;BA)(A;CIID;KR;;;NO)"},
+    {L"Q3-deny-set", ANK SYF BAF, ANK SYF BAF NOR, L"D:" ANK SYF BAF, L"D:AI(D;CIID;KW;;;AN)(A;CIID;KA;;;SY)(A;CIID;KA;;;BA)(A;CIID;KR;;;NO)", L"D:AI(D;CIID;KW;;;AN)(A;CIID;KA;;;SY)(A;CIID;KA;;;BA)(A;CIID;KR;;;NO)"},
+    {L"Q4-co-ci-set", SYF BAF COF, SYF BAF COF NOR, L"D:" SYF BAF L"(A;;KA;;;BA)" COF, L"D:AI(A;;KA;;;BA)(A;CIID;KA;;;SY)(A;CIID;KA;;;BA)(A;CIIOID;KA;;;CO)(A;CIID;KR;;;NO)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KA;;;BA)(A;CIIOID;KA;;;CO)(A;CIID;KR;;;NO)"},
+    {L"Q5-co-set-nu", SYF BAF COF, SYF BAF COF NOR, L"D:" NUR SYF BAF L"(A;;KA;;;BA)" COF, L"D:AI(A;;KR;;;NU)(A;;KA;;;BA)(A;CIID;KA;;;SY)(A;CIID;KA;;;BA)(A;CIIOID;KA;;;CO)(A;CIID;KR;;;NO)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KA;;;BA)(A;CIIOID;KA;;;CO)(A;CIID;KR;;;NO)"},
+    {L"Q6-ka-sa", ANK SYF BAF COF, ANK SYF BAF COF NOR, L"D:" ANK SYF BAF L"(A;;KA;;;BA)" COF, L"D:PAI(D;CI;KW;;;AN)(A;CI;KA;;;SY)(A;CI;KA;;;BA)(A;;KA;;;BA)(A;CIIO;KA;;;CO)", L"D:AI(D;CIID;KW;;;AN)(A;CIID;KA;;;SY)(A;CIID;KA;;;BA)(A;CIIOID;KA;;;CO)"},
+    {L"Q7-ka-sa-nu", ANK SYF BAF COF, ANK SYF BAF COF NOR, L"D:" NUR ANK SYF BAF L"(A;;KA;;;BA)" COF, L"D:PAI(A;;KR;;;NU)(D;CI;KW;;;AN)(A;CI;KA;;;SY)(A;CI;KA;;;BA)(A;;KA;;;BA)(A;CIIO;KA;;;CO)", L"D:AI(D;CIID;KW;;;AN)(A;CIID;KA;;;SY)(A;CIID;KA;;;BA)(A;CIIOID;KA;;;CO)"},
+    {L"Q8-ka-no-ba", ANK SYF COF, ANK SYF COF NOR, L"D:" ANK SYF L"(A;;KA;;;BA)" COF, L"D:AI(D;CIID;KW;;;AN)(A;CIID;KA;;;SY)(A;ID;KA;;;BA)(A;CIIOID;KA;;;CO)(A;CIID;KR;;;NO)", L"D:AI(D;CIID;KW;;;AN)(A;CIID;KA;;;SY)(A;ID;KA;;;BA)(A;CIIOID;KA;;;CO)(A;CIID;KR;;;NO)"},
+    {L"Q9-an-wd", ANK SYF WDR, ANK SYF WDR NOR, L"D:" ANK SYF WDR, L"D:AI(D;CIID;KW;;;AN)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)", L"D:AI(D;CIID;KW;;;AN)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)"},
+    };
+    WCHAR Path[320], Sddl[1024], Name[16];
+    BYTE Buffer[512];
+    DWORD Length = sizeof(Buffer);
+    LPWSTR OwnerSddl = NULL;
+    BOOL OwnerIsAdmins = FALSE;
+    HKEY Scratch = NULL, P = NULL, S = NULL, G = NULL;
+    DWORD Error;
+    ULONG i;
+
+    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    Error = RegCreateKeyExW(HKEY_CURRENT_USER, ScratchPath, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &Scratch, NULL);
+    ok_long(Error, ERROR_SUCCESS);
+    if (Error)
+        goto Done;
+    /* CREATOR OWNER rows name the owner of the keys: Administrators for an elevated Administrator */
+    if (RegGetKeySecurity(Scratch, OWNER_SECURITY_INFORMATION, Buffer, &Length) == ERROR_SUCCESS &&
+        ConvertSecurityDescriptorToStringSecurityDescriptorW(Buffer, SDDL_REVISION_1, OWNER_SECURITY_INFORMATION, &OwnerSddl, NULL))
+    {
+        OwnerIsAdmins = !wcsncmp(OwnerSddl, L"O:BA", 4);
+        LocalFree(OwnerSddl);
+    }
+
+    for (i = 0; i < ARRAYSIZE(Rows); i++)
+    {
+        if (!OwnerIsAdmins && wcsstr(Rows[i].Old, L";;;CO)"))
+        {
+            skip("%ls: the keys are not owned by Administrators\n", Rows[i].Name);
+            continue;
+        }
+        wsprintfW(Name, L"p%lu", i);
+        if (!MakeKey(Scratch, Name, 0, &P))
+            goto Done;
+        /* the caller is granted nothing by what the parent passes on in some rows: it may create below the parent first */
+        if (!SetSddlDacl(P, PROTECTED_DACL_SECURITY_INFORMATION, L"D:P(A;;KA;;;BA)(A;;KA;;;SY)(A;CI;KA;;;BA)") ||
+            !MakeKey(P, L"s", 0, &S) || !MakeKey(S, L"g", 0, &G))
+            goto Done;
+        RegCloseKey(G);
+        G = NULL;
+        RegCloseKey(S);
+        S = NULL;
+        wsprintfW(Sddl, L"D:P(A;;KA;;;BA)(A;;KA;;;SY)%ls", Rows[i].Old);
+        ok(SetSddlDacl(P, PROTECTED_DACL_SECURITY_INFORMATION, Sddl), "%ls: old\n", Rows[i].Name);
+        if (!RawSetSddl(P, L"s", Rows[i].S))
+            goto Done;
+        wsprintfW(Sddl, L"D:P(A;;KA;;;BA)(A;;KA;;;SY)%ls", Rows[i].New);
+        ok(SetSddlDacl(P, PROTECTED_DACL_SECURITY_INFORMATION, Sddl), "%ls: new\n", Rows[i].Name);
+        RegCloseKey(P);
+        P = NULL;
+
+        wsprintfW(Path, L"%ls\\%ls\\s", ScratchPath, Name);
+        trace("%ls\n", Rows[i].Name);
+        DaclSddlIs(Path, Rows[i].ExpectedS, __LINE__);
+        if (Rows[i].ExpectedG)
+        {
+            wsprintfW(Path, L"%ls\\%ls\\s\\g", ScratchPath, Name);
+            DaclSddlIs(Path, Rows[i].ExpectedG, __LINE__);
+        }
+    }
+
+Done:
+    if (G) RegCloseKey(G);
+    if (S) RegCloseKey(S);
+    if (P) RegCloseKey(P);
+    /* hand every key back to Administrators so that the tree can be deleted */
+    for (i = 0; i < ARRAYSIZE(Rows); i++)
+    {
+        static const PCWSTR Tails[] = {L"\\s\\g", L"\\s", L""};
+        ULONG k;
+
+        for (k = 0; k < ARRAYSIZE(Tails); k++)
+        {
+            wsprintfW(Path, L"%ls\\p%lu%ls", ScratchPath, i, Tails[k]);
+            RestoreSddl(HKEY_CURRENT_USER, Path, DACL_SECURITY_INFORMATION, L"D:P(A;;KA;;;BA)(A;;KA;;;SY)");
+        }
+    }
+    if (Scratch) RegCloseKey(Scratch);
+    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+}
+#undef SYF
+#undef WDR
+#undef O1
+#undef NUR
+#undef NOR
+#undef BAF
+#undef ANK
+#undef COF
+
+/*
+ * The same below a key the change converts (s: its subkey t holds the set s passed on, so it is converted too) and
+ * below one it only flags (u: its subkey w holds what u passes on, and w is converted, matched against u's old DACL).
+ * Measured on Windows Server 2022, x64 and x86.
+ */
+static void TestParentSetNested(void)
+{
+    static const PCWSTR Keys[] = {L"q\\s\\t", L"q\\s", L"q\\u\\w", L"q\\u", L"q"};
+    WCHAR Path[320];
+    HKEY Scratch = NULL, Q = NULL, Key = NULL;
+    DWORD Error;
+    ULONG i;
+
+    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    Error = RegCreateKeyExW(HKEY_CURRENT_USER, ScratchPath, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &Scratch, NULL);
+    ok_long(Error, ERROR_SUCCESS);
+    if (Error || !MakeKey(Scratch, L"q", 0, &Q))
+        goto Done;
+    if (!SetSddlDacl(Q, PROTECTED_DACL_SECURITY_INFORMATION, L"D:P(A;;KA;;;BA)(A;;KA;;;SY)(A;CI;KA;;;BA)") ||
+        !MakeKey(Q, L"s", 0, &Key))
+        goto Done;
+    RegCloseKey(Key);
+    if (!MakeKey(Q, L"s\\t", 0, &Key))
+        goto Done;
+    RegCloseKey(Key);
+    if (!MakeKey(Q, L"u", 0, &Key))
+        goto Done;
+    RegCloseKey(Key);
+    if (!MakeKey(Q, L"u\\w", 0, &Key))
+        goto Done;
+    RegCloseKey(Key);
+    ok(SetSddlDacl(Q, PROTECTED_DACL_SECURITY_INFORMATION, L"D:P(A;;KA;;;BA)(A;;KA;;;SY)(A;CI;KA;;;SY)(A;CI;KR;;;WD)"), "old\n");
+    if (!RawSetSddl(Q, L"s\\t", L"D:(A;;KR;;;NU)(A;CI;KA;;;SY)(A;CI;KR;;;WD)") ||
+        !RawSetSddl(Q, L"u", L"D:(A;;KR;;;NU)(A;CI;KR;;;BU)") ||
+        !RawSetSddl(Q, L"u\\w", L"D:(A;;KR;;;NU)(A;CI;KR;;;BU)"))
+        goto Done;
+    ok(SetSddlDacl(Q, PROTECTED_DACL_SECURITY_INFORMATION, L"D:P(A;;KA;;;BA)(A;;KA;;;SY)(A;CI;KA;;;SY)(A;CI;KR;;;WD)(A;CI;KR;;;NO)"), "new\n");
+
+    wsprintfW(Path, L"%ls\\q\\s", ScratchPath);
+    DaclSddlIs(Path, L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)", __LINE__);
+    wsprintfW(Path, L"%ls\\q\\s\\t", ScratchPath);
+    DaclSddlIs(Path, L"D:AI(A;;KR;;;NU)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)", __LINE__);
+    wsprintfW(Path, L"%ls\\q\\u", ScratchPath);
+    DaclSddlIs(Path, L"D:PAI(A;;KR;;;NU)(A;CI;KR;;;BU)", __LINE__);
+    wsprintfW(Path, L"%ls\\q\\u\\w", ScratchPath);
+    DaclSddlIs(Path, L"D:AI(A;;KR;;;NU)(A;CIID;KR;;;BU)", __LINE__);
+
+Done:
+    if (Q) RegCloseKey(Q);
+    for (i = 0; i < ARRAYSIZE(Keys); i++)
+    {
+        wsprintfW(Path, L"%ls\\%ls", ScratchPath, Keys[i]);
+        RestoreSddl(HKEY_CURRENT_USER, Path, DACL_SECURITY_INFORMATION, L"D:P(A;;KA;;;BA)(A;;KA;;;SY)");
+    }
+    if (Scratch) RegCloseKey(Scratch);
+    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+}
+
 START_TEST(SetSecurityInfoKeyInherit)
 {
     pRegDeleteTreeW = (PVOID)GetProcAddress(GetModuleHandleW(L"advapi32.dll"), "RegDeleteTreeW");
@@ -1825,6 +2074,8 @@ START_TEST(SetSecurityInfoKeyInherit)
     TestUnreadableParent();
     TestClosedSubkey();
     TestLegacySubkeys();
+    TestParentSetMatch();
+    TestParentSetNested();
 
     KEY_DACL Initial, P1, C1a, C1b, P2, C2, G;
     HKEY Key = NULL, Child1 = NULL, Child2 = NULL, Grand = NULL;
