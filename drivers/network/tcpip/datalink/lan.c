@@ -1812,13 +1812,14 @@ VOID GetName( PUNICODE_STRING RegistryKey,
 
 /*
  * Multicast reception. BindAdapter's packet filter takes the adapter's own address, broadcast, and the
- * multicast addresses of the adapter's multicast list, which is empty until something asks for one. Only
- * IPv6 does (if6.c): the all-nodes group and the solicited-node group of each of its addresses (RFC 4861,
- * RFC 2464 section 7), without which neighbour solicitations and router advertisements do not arrive.
+ * multicast addresses of the adapter's multicast list, which is empty until something asks for one. IPv6
+ * does (if6.c): the all-nodes group and the solicited-node group of each of its addresses (RFC 4861,
+ * RFC 2464 section 7), without which neighbour solicitations and router advertisements do not arrive; and
+ * so do the IPv4 groups sockets join (IP_ADD_MEMBERSHIP, udp.c), in the same list, with IPv6 or without.
  * LanSetMulticast records the list, LanMulticastWorker sets it (OID_802_3_MULTICAST_LIST). An adapter whose
  * list is too short for it, or that refuses it, takes all multicast frames instead
- * (NDIS_PACKET_TYPE_ALL_MULTICAST); never all frames (promiscuous). Without IPv6 nothing asks, and the
- * adapter's filter and list stay as BindAdapter set them.
+ * (NDIS_PACKET_TYPE_ALL_MULTICAST); never all frames (promiscuous). Without IPv6 and without an IPv4 group
+ * nothing asks, and the adapter's filter and list stay as BindAdapter set them.
  *
  * A miniport that takes the list can still break unicast reception: some drivers keep the multicast list in
  * the receive address registers that also hold the station address, and the list overwrites it (the adapter
@@ -2552,6 +2553,9 @@ BOOLEAN BindAdapter(
 
     /* Register interface with IP layer */
     IPRegisterInterface(IF);
+
+    /* The IPv4 groups sockets already joined (an adapter that came back): its multicast list, set below */
+    TCPInterfaceMulticast4(IF);
 
     /* Get the media state */
     NdisStatus = NDISCall(Adapter,

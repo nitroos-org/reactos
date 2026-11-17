@@ -170,6 +170,9 @@ typedef struct _ADDRESS_FILE {
     BOOLEAN McastLoop;
     ULONG McastIf;
     struct _UDP6_MEMBERSHIPS *Groups6;
+    /* The IPv4 groups a UDP or raw socket (or a dual stack IPv6 one) joined (udp.c; allocated with the first one,
+       changed under the object lock and the core lock) */
+    struct _UDP4_MEMBERSHIPS *Groups4;
     /* A raw socket: whether its opener may use any protocol and the header-include option (Administrators,
        LocalSystem, LocalService, NetworkService; main.c). An unprivileged one (an ICMP or ICMPv6 socket of a
        standard user) sends echo requests only. HeaderIncl6: IPV6_HDRINCL of a raw IPv6 socket (off by default;

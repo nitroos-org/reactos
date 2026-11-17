@@ -43,6 +43,9 @@
 
 /* udp6.c: the groups sockets joined on an interface, for its multicast list (core lock held) */
 VOID UDP6AddMulticastList(struct netif *netif, PUCHAR List, PUINT Count, UINT Max);
+/* udp.c: the same for the IPv4 groups, and whether there is any (core lock held) */
+VOID UDP4AddMulticastList(ULONG IfIndex, PUCHAR List, PUINT Count, UINT Max);
+BOOLEAN UDP4HasGroups(VOID);
 
 BOOLEAN TCPIpv6Enabled = TRUE;
 BOOLEAN TCPIpv6Links = TRUE;
@@ -208,7 +211,8 @@ TCPReadIpv6Switch(VOID)
  * Ethernet addresses as RFC 2464 7 says (33:33 and the last 32 bits). With the MAC-derived identifier the
  * addresses on one interface share it (link-local and SLAAC), so this is usually two addresses; with stable random
  * identifiers (iid6.c) each address has its own group. The adapter list is ours; the groups are reported to the
- * link by lwIP's MLD (lwipopts.h, udp6.c) */
+ * link by lwIP's MLD (lwipopts.h, udp6.c). The IPv4 groups sockets joined (udp.c) go in the same list, with IPv6
+ * on the adapters or not */
 static
 VOID
 TCP6UpdateMulticast(struct netif *netif)
@@ -218,12 +222,15 @@ TCP6UpdateMulticast(struct netif *netif)
     UINT Count = 0, i, j;
     s8_t Index;
 
-    /* With IPv6 on the loopback interface only (DisabledComponents) the adapter list stays as it is without IPv6:
-       a group a socket joins on an adapter asks for no frames that would only be dropped (TCPReceive6) */
-    if (!TCPIpv6Links || !IF || IF == Loopback || !IF->SetMulticast || IF->AddressLength != 6)
+    if (!IF || IF == Loopback || !IF->SetMulticast || IF->AddressLength != 6)
         return;
 
     RtlZeroMemory(List, sizeof(List));
+
+    /* With IPv6 on the loopback interface only (DisabledComponents, Ipv6Enable = 0) the list has no IPv6 group:
+       a group a socket joins on an adapter asks for no frames that would only be dropped (TCPReceive6) */
+    if (!TCPIpv6Links)
+        goto Ipv4Groups;
 
     /* ff02::1 */
     List[0] = 0x33; List[1] = 0x33; List[2] = 0x00; List[3] = 0x00; List[4] = 0x00; List[5] = 0x01;
@@ -271,14 +278,39 @@ TCP6UpdateMulticast(struct netif *netif)
         Count = LL_MULTICAST_MAX + 1;
 #endif
 
+Ipv4Groups:
+    /* The IPv4 groups sockets joined on this interface or without one (udp.c) */
+    if (Count <= LL_MULTICAST_MAX)
+        UDP4AddMulticastList(IF->Index, List, &Count, LL_MULTICAST_MAX);
+
+    /* Without IPv6 on the adapters the adapter keeps the list BindAdapter gave it until an IPv4 group asks for one
+       (lan.c); after that the list follows the groups, down to an empty one */
+    if (!TCPIpv6Links)
+    {
+        if (!Count && !IF->McastListSet)
+            return;
+        IF->McastListSet = TRUE;
+    }
+
     IF->SetMulticast(IF->Context, List, Count);
 }
 
-/* A socket joined or left a group on netif (udp6.c, core lock held) */
+/* A socket joined or left a group on netif (udp6.c, udp.c; core lock held) */
 VOID
 TCP6UpdateMulticastList(struct netif *netif)
 {
     TCP6UpdateMulticast(netif);
+}
+
+/* An adapter's interface registered (lan.c, after IPRegisterInterface, which gives it its index): the IPv4 groups
+   sockets joined without an interface or on that index (an adapter that came back) go in its list */
+VOID
+TCPInterfaceMulticast4(PIP_INTERFACE IF)
+{
+    LOCK_TCPIP_CORE();
+    if (IF->TCPContext && UDP4HasGroups())
+        TCP6UpdateMulticast(IF->TCPContext);
+    UNLOCK_TCPIP_CORE();
 }
 
 /* lwIP's interface events (core lock held): an address set, removed, or changing state */

@@ -224,6 +224,7 @@ typedef struct _IP_INTERFACE {
     UCHAR Ip6RouterDiscovery;     /* 0 enabled (default), 1 disabled, 2 controlled by DHCP */
     UCHAR Ip6DadSet;              /* Ip6DadTransmits was set (otherwise 1) */
     UCHAR Ip6DadTransmits;        /* duplicate address detection probes per address */
+    BOOLEAN McastListSet;         /* A multicast list was asked for with IPv6 off the adapters (if6.c, core lock) */
 } IP_INTERFACE, *PIP_INTERFACE;
 
 /* The MTU IPv4 uses on an interface that knows its link MTU: the one set by hand when it is lower */

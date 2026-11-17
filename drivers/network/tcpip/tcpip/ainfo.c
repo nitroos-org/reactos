@@ -103,6 +103,17 @@ TDI_STATUS SetAddressFileInfo(TDIObjectID *ID,
 
          return UDP6SetMembership(AddrFile, ID->toi_id == AO_OPTION_INDEX_ADD_MCAST, Buffer, BufferSize);
 
+      /* IP_ADD_MEMBERSHIP / IP_DROP_MEMBERSHIP (struct ip_mreq) of a datagram or raw socket; an IPv6 socket takes an
+         IPv4 group only when it is dual stack (WSAEINVAL otherwise, as Windows answers an IPv6-only one) */
+      case AO_OPTION_ADD_MCAST:
+      case AO_OPTION_DEL_MCAST:
+         if (AddrFile->Protocol == IPPROTO_TCP)
+             return TDI_INVALID_REQUEST;
+         if (AddrFile->Family == TDI_ADDRESS_TYPE_IP6 && !AddrFile->DualStack)
+             return TDI_INVALID_PARAMETER;
+
+         return UDP4SetMembership(AddrFile, ID->toi_id == AO_OPTION_ADD_MCAST, Buffer, BufferSize);
+
       default:
          DbgPrint("Unimplemented option %x\n", ID->toi_id);
 

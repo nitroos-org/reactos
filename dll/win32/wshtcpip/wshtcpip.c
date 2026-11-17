@@ -587,6 +587,14 @@ GetTdiTypeId(
                  *TdiId = AO_OPTION_IP_HDRINCL;
                  return;
 
+             case IP_ADD_MEMBERSHIP:
+                 *TdiId = AO_OPTION_ADD_MCAST;
+                 return;
+
+             case IP_DROP_MEMBERSHIP:
+                 *TdiId = AO_OPTION_DEL_MCAST;
+                 return;
+
              default:
                 break;
           }
@@ -1023,9 +1031,10 @@ SendRequest(
     return NO_ERROR;
 }
 
-/* IPV6_ADD_MEMBERSHIP / IPV6_DROP_MEMBERSHIP to the stack. Its answers: a group joined twice is invalid
- * (STATUS_INVALID_PARAMETER: WSAEINVAL); a group left that was not joined, an interface that does not exist, no
- * room: WSAEADDRNOTAVAIL (Windows 10 oracle for the first two) */
+/* IPV6_ADD_MEMBERSHIP / IPV6_DROP_MEMBERSHIP and IP_ADD_MEMBERSHIP / IP_DROP_MEMBERSHIP to the stack. Its answers:
+ * a group joined twice is invalid (STATUS_INVALID_PARAMETER: WSAEINVAL); a group left that was not joined, an
+ * interface that does not exist, no room: WSAEADDRNOTAVAIL (Windows 10 oracle for the first two; Windows Server 2022
+ * for IPv4) */
 static
 INT
 WshSendMembershipRequest(
@@ -1420,6 +1429,23 @@ WSHSetSocketInformation(
                     /* Send these to TCPIP */
                     break;
 
+                case IP_ADD_MEMBERSHIP:
+                case IP_DROP_MEMBERSHIP:
+                    /* Joining and leaving an IPv4 group (struct ip_mreq: the group, then the interface's address,
+                     * its index as 0.0.0.x, or 0.0.0.0 for none): a datagram or raw socket's, done by the stack,
+                     * which puts the group in the adapter's multicast list (after the bind when the socket is not
+                     * bound yet, as the other options it takes). A stream socket WSAEINVAL, a short request
+                     * WSAEFAULT, an address that is no group WSAEADDRNOTAVAIL (Windows); the rest is the stack's
+                     * (WshSendMembershipRequest) */
+                    if (Context->SocketType != SOCK_DGRAM && Context->SocketType != SOCK_RAW)
+                        return WSAEINVAL;
+                    if (!OptionValue || OptionLength < (INT)sizeof(IP_MREQ))
+                        return WSAEFAULT;
+                    if ((((PUCHAR)OptionValue)[0] & 0xF0) != 0xE0)
+                        return WSAEADDRNOTAVAIL;
+                    OptionLength = sizeof(IP_MREQ);
+                    break;
+
                 default:
                     /* Invalid option -- FIXME */
                     DPRINT1("Set: Received unsupported IPPROTO_IP option %d\n", OptionName);
@@ -1630,7 +1656,8 @@ WSHSetSocketInformation(
         return 0;
     }
 
-    if (Level == IPPROTO_IPV6 && (OptionName == IPV6_ADD_MEMBERSHIP || OptionName == IPV6_DROP_MEMBERSHIP))
+    if ((Level == IPPROTO_IPV6 && (OptionName == IPV6_ADD_MEMBERSHIP || OptionName == IPV6_DROP_MEMBERSHIP)) ||
+        (Level == IPPROTO_IP && (OptionName == IP_ADD_MEMBERSHIP || OptionName == IP_DROP_MEMBERSHIP)))
         Status = WshSendMembershipRequest(Info, sizeof(*Info) + Info->BufferSize);
     else
         Status = SendRequest(Info, sizeof(*Info) + Info->BufferSize, IOCTL_TCP_SET_INFORMATION_EX);

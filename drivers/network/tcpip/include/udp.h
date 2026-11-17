@@ -84,6 +84,9 @@ VOID UDP6DeliverDeferred(VOID);
 /* IPV6_ADD_MEMBERSHIP / IPV6_DROP_MEMBERSHIP (Request: struct ipv6_mreq) and the end of a socket's groups */
 NTSTATUS UDP6SetMembership(PADDRESS_FILE AddrFile, BOOLEAN Join, const VOID *Request, UINT Length);
 VOID UDP6LeaveAll(PADDRESS_FILE AddrFile);
+/* IP_ADD_MEMBERSHIP / IP_DROP_MEMBERSHIP (Request: struct ip_mreq) and the end of a socket's IPv4 groups */
+NTSTATUS UDP4SetMembership(PADDRESS_FILE AddrFile, BOOLEAN Join, const VOID *Request, UINT Length);
+VOID UDP4LeaveAll(PADDRESS_FILE AddrFile);
 VOID UDP6Startup(VOID);
 /* The row of an IPv6 UDP socket (IP_UDP6_ROW_ENTRY_ID) */
 VOID UDP6BuildRow(PADDRESS_FILE AddrFile, PUDP6_ROW_OWNER_PID Row);
