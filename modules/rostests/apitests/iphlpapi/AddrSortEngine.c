@@ -227,6 +227,8 @@ static void TestPolicyDottedTail(void)
     {
         L"::ffff:1.2.3", L"::ffff:1.2.3.4.5", L"::ffff:256.1.1.1", L"::ffff:1.2.3.", L"::ffff:1..3.4", L"1.2.3.4",
         L"1:2:3:4:5:6:7:1.2.3.4", L"::ffff:0001.2.3.4", L"::ffff:a.2.3.4", L"1::2::1.2.3.4",
+        L"::ffff:4294967297.1.1.1", L"::ffff:1.2.3.99999999999", L"1:2:3:4:5:6::1.2.3.4", L"::ffff:.1.2.3",
+        L"::1.2.3.4.", L"::ffff:1.2.3.4a",
     };
     ADDRSORT_POLICY_TABLE Table, Parsed;
     UCHAR A[16];
@@ -245,6 +247,19 @@ static void TestPolicyDottedTail(void)
         N = AddrSortParseAddress(Invalid[i], (ULONG)wcslen(Invalid[i]), A);
         ok(N == 0, "invalid dotted tail %lu accepted (%lu characters)\n", i, N);
     }
+    /* the tail stops at Chars: a cut inside it is no address ("::ffff:1", cut at 8, is a plain address), a cut after
+       a whole octet is */
+    for (i = 9; i < 14; i++)
+    {
+        N = AddrSortParseAddress(L"::ffff:1.2.3.45", i, A);
+        ok(N == 0, "dotted tail cut at %lu accepted (%lu characters)\n", i, N);
+    }
+    memset(A, 0x55, sizeof(A));
+    N = AddrSortParseAddress(L"::ffff:1.2.3.45", 14, A);
+    ok(N == 14 && A[12] == 1 && A[13] == 2 && A[14] == 3 && A[15] == 4, "dotted tail cut at 14: %lu\n", N);
+    memset(A, 0x55, sizeof(A));
+    N = AddrSortParseAddress(L"1:2:3:4:5:6:1.2.3.4", 19, A);
+    ok(N == 19 && A[11] == 6 && A[12] == 1 && A[15] == 4, "full form with a dotted tail: %lu\n", N);
 
     AddrSortDefaultPolicy(&Table);
     Parsed = Table;
@@ -671,6 +686,24 @@ static void TestSourceRules(const ADDRSORT_POLICY_TABLE *Policy)
         CheckPick("global destination", Policy, L, 3, "3fff:ff::1", 0);
         CheckPick("link-scope multicast", Policy, L, 3, "ff02::1", 1);
         CheckPick("global multicast", Policy, L, 3, "ff0e::1", 0);
+        CheckPick("interface-local multicast", Policy, L, 3, "ff01::1", 1);
+        CheckPick("site-local multicast", Policy, L, 3, "ff05::1:3", 2);
+    }
+    /* multicast with a global and a link-local address (no site-local one): GetBestRoute2 and the stack both ask
+       this function, so the scope of the group alone decides; a skip-as-source link-local address is not taken */
+    {
+        static const char *L[] = { "fe80::10", "3fff:a1::10" };
+        static const char *T[] = { "fe80::10", "3fff:a1::10", "3fff:a1::9d3c:11ff:fe01:7/t" };
+        static const char *S[] = { "fe80::10/s", "3fff:a1::10" };
+
+        CheckPick("multicast ff01, GUA + LL", Policy, L, 2, "ff01::1", 0);
+        CheckPick("multicast ff02, GUA + LL", Policy, L, 2, "ff02::1", 0);
+        CheckPick("multicast ff05, GUA + LL", Policy, L, 2, "ff05::1:3", 1);
+        CheckPick("multicast ff0e, GUA + LL", Policy, L, 2, "ff0e::1", 1);
+        CheckPick("multicast ff02, GUA + temporary + LL", Policy, T, 3, "ff02::1", 0);
+        CheckPick("multicast ff05, GUA + temporary + LL", Policy, T, 3, "ff05::1:3", 2);
+        CheckPick("multicast ff0e, GUA + temporary + LL", Policy, T, 3, "ff0e::1", 2);
+        CheckPick("multicast ff02, skip-as-source LL", Policy, S, 2, "ff02::1", 1);
     }
     /* link-local only: the link-local address is the source for every destination (Windows sends from it) */
     {
@@ -682,6 +715,9 @@ static void TestSourceRules(const ADDRSORT_POLICY_TABLE *Policy)
         CheckPick("link-local only, site-local destination", Policy, L, 1, "fec0::1", 0);
         CheckPick("link-local only, link-local destination", Policy, L, 1, "fe80::1", 0);
         CheckPick("link-local only, global multicast", Policy, L, 1, "ff0e::1", 0);
+        CheckPick("link-local only, site-local multicast", Policy, L, 1, "ff05::1:3", 0);
+        CheckPick("link-local only, link-scope multicast", Policy, L, 1, "ff02::1", 0);
+        CheckPick("link-local only, interface-local multicast", Policy, L, 1, "ff01::1", 0);
         CheckPick("loopback interface, global destination", Policy, Loop, 1, "3fff:ff::1", 0);
         CheckPick("no address at all", Policy, L, 0, "3fff:ff::1", -1);
     }

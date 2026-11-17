@@ -369,7 +369,7 @@ static void TestMulticastSource(ULONG IfIndex, const char *Text)
        global address 2001:db8:99::5 and the site-local SLAAC address are there as well as the link-local one) */
     Link = Source.Ipv6.sin6_addr.u.Byte[0] == 0xfe && (Source.Ipv6.sin6_addr.u.Byte[1] & 0xc0) == 0x80;
     Site = Source.Ipv6.sin6_addr.u.Byte[0] == 0xfe && (Source.Ipv6.sin6_addr.u.Byte[1] & 0xc0) == 0xc0;
-    if (Dest.Ipv6.sin6_addr.u.Byte[1] == 0x02)
+    if (Dest.Ipv6.sin6_addr.u.Byte[1] <= 0x02)
         ok(Link, "%s: source is not link-local\n", Text);
     else if (Dest.Ipv6.sin6_addr.u.Byte[1] == 0x05)
         ok(!Link, "%s: source is link-local\n", Text);
@@ -448,6 +448,7 @@ static void TestAddress(ULONG IfIndex)
 
     /* a multicast destination: ff01/ff02 take the link-local address (rule 2), ff05 and ff0e the address of their
        scope, and the stack answers the same as GetBestRoute2 (global address and link-local address present) */
+    TestMulticastSource(IfIndex, "ff01::1");
     TestMulticastSource(IfIndex, "ff02::1");
     TestMulticastSource(IfIndex, "ff05::1:3");
     TestMulticastSource(IfIndex, "ff0e::1");
