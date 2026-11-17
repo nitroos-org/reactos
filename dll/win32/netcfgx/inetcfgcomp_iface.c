@@ -54,13 +54,62 @@ INetCfgComponentBindings_fnRelease(
     return INetCfgComponent_Release((INetCfgComponent*)This);
 }
 
+/*
+ * Binding a component to an adapter, or taking the binding away (the check box of a connection's property list). The
+ * state the component reports (IsBoundTo) changes at once; the registry (the Bind, Export and Route lists of the
+ * component's Linkage key, the way Windows keeps them) is written by INetCfg::Apply.
+ */
+static
+HRESULT
+ChangeBinding(
+    INetCfgComponentBindings *iface,
+    INetCfgComponent *pnccItem,
+    BOOL bBind)
+{
+    INetCfgComponentImpl *pComponent = impl_from_INetCfgComponentBindings(iface);
+    NetCfgComponentItem *pItem, *pAdapter;
+    WCHAR szDevice[100], szChange[100], szOpposite[100];
+    LPWSTR pszNew, pszTemp, pszChanges;
+
+    if (!pComponent || !pComponent->pItem || !pnccItem)
+        return E_POINTER;
+
+    pItem = pComponent->pItem;
+    pAdapter = ((INetCfgComponentImpl *)pnccItem)->pItem;
+    if (!pAdapter || !pItem->szBindName || !pAdapter->szBindName)
+        return E_POINTER;
+    if (!IsEqualGUID(&pAdapter->ClassGUID, &GUID_DEVCLASS_NET) || wcslen(pAdapter->szBindName) > 80)
+        return E_INVALIDARG;
+
+    _swprintf(szDevice, L"\\Device\\%s", pAdapter->szBindName);
+    _swprintf(szChange, L"%c%s", bBind ? L'+' : L'-', pAdapter->szBindName);
+    _swprintf(szOpposite, L"%c%s", bBind ? L'-' : L'+', pAdapter->szBindName);
+
+    pszNew = MultiSzWithEntry(pItem->pszBinding, szDevice, bBind);
+    pszTemp = MultiSzWithEntry(pItem->pszBindChanges, szOpposite, FALSE);
+    pszChanges = pszTemp ? MultiSzWithEntry(pszTemp, szChange, TRUE) : NULL;
+    CoTaskMemFree(pszTemp);
+    if (!pszNew || !pszChanges)
+    {
+        CoTaskMemFree(pszNew);
+        CoTaskMemFree(pszChanges);
+        return E_OUTOFMEMORY;
+    }
+
+    CoTaskMemFree(pItem->pszBinding);
+    pItem->pszBinding = pszNew;
+    CoTaskMemFree(pItem->pszBindChanges);
+    pItem->pszBindChanges = pszChanges;
+    return S_OK;
+}
+
 HRESULT
 WINAPI
 INetCfgComponentBindings_fnBindTo(
     INetCfgComponentBindings *iface,
     INetCfgComponent *pnccItem)
 {
-    return E_NOTIMPL;
+    return ChangeBinding(iface, pnccItem, TRUE);
 }
 
 HRESULT
@@ -69,7 +118,7 @@ INetCfgComponentBindings_fnUnbindFrom(
     INetCfgComponentBindings *iface,
     INetCfgComponent *pnccItem)
 {
-    return E_NOTIMPL;
+    return ChangeBinding(iface, pnccItem, FALSE);
 }
 
 HRESULT
@@ -741,6 +790,7 @@ INetCfgComponent_fnRaisePropertyUi(
     HPROPSHEETPAGE * hppages;
     INT_PTR iResult;
     INetCfgComponentImpl * This = (INetCfgComponentImpl*)iface;
+    WCHAR szFormat[64], szCaption[300];
 
     hr = CreateNotifyObject(This, iface);
     if (FAILED(hr))
@@ -771,6 +821,18 @@ INetCfgComponent_fnRaisePropertyUi(
     pinfo.nPages = Pages;
     pinfo.hInstance = netcfgx_hInstance;
     pinfo.pszCaption = This->pItem->szDisplayName;
+    /* Windows names the sheet "<component> Properties"; comctl32's PSH_PROPTITLE here says "Properties for <component>".
+       The English text is the netcfgx string; another language keeps the comctl32 text of that language */
+    if (PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_ENGLISH && This->pItem->szDisplayName &&
+        LoadStringW(netcfgx_hInstance, IDS_PROPERTIES_TITLE, szFormat, ARRAYSIZE(szFormat)) &&
+        wcsstr(szFormat, L"%s") &&
+        wcslen(This->pItem->szDisplayName) + wcslen(szFormat) < ARRAYSIZE(szCaption))
+    {
+        _snwprintf(szCaption, ARRAYSIZE(szCaption) - 1, szFormat, This->pItem->szDisplayName);
+        szCaption[ARRAYSIZE(szCaption) - 1] = UNICODE_NULL;
+        pinfo.pszCaption = szCaption;
+        pinfo.dwFlags &= ~PSH_PROPTITLE;
+    }
     pinfo.u.pszIcon = MAKEINTRESOURCEW(IDI_INTERNET);
     pinfo.pfnCallback = PropSheetProc;
 

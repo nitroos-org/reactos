@@ -327,6 +327,29 @@ NuReadSerial(VOID)
 }
 
 /*
+ * The network components of the INF (netcfgx, NitroUpgradeNetworkComponents): one instance of each, and the TCP/IPv6
+ * component (the row and the property page of a connection) on an install that has none. Netcfgx is loaded only here,
+ * and only when the INF changed.
+ */
+static
+BOOL
+NuUpgradeComponents(VOID)
+{
+    typedef BOOL (WINAPI *PFN_UPGRADE_COMPONENTS)(VOID);
+    PFN_UPGRADE_COMPONENTS Upgrade;
+    HMODULE Netcfgx = LoadLibraryW(L"netcfgx.dll");
+    BOOL Done = FALSE;
+
+    if (!Netcfgx)
+        return FALSE;
+    Upgrade = (PFN_UPGRADE_COMPONENTS)GetProcAddress(Netcfgx, "NitroUpgradeNetworkComponents");
+    if (Upgrade)
+        Done = Upgrade();
+    FreeLibrary(Netcfgx);
+    return Done;
+}
+
+/*
  * Called by winlogon at every start (SYSTEM context). Cheap when there is nothing to do: the INF's size
  * and time are compared to the ones kept.
  */
@@ -341,7 +364,7 @@ UpgradeNetworkCatalog(VOID)
     HMODULE Setupapi;
     NU_VERDICT Verdict;
     UINT Length;
-    BOOL Read, Installed = FALSE;
+    BOOL Read, Installed = FALSE, Components;
 
     Length = GetSystemWindowsDirectoryW(szInf, MAX_PATH);
     if (Length == 0 || Length > MAX_PATH - 1)
@@ -352,6 +375,11 @@ UpgradeNetworkCatalog(VOID)
         return TRUE;
     if (NuStampIsCurrent(&Stamp))
         return TRUE;
+
+    /* The components first: a failure keeps the INF unsettled (tried again at the next start) but the catalog is still looked at */
+    Components = NuUpgradeComponents();
+    if (!Components)
+        DPRINT1("The network components could not be upgraded\n");
 
     Setupapi = LoadLibraryW(L"setupapi.dll");
     if (!Setupapi)
@@ -398,6 +426,9 @@ UpgradeNetworkCatalog(VOID)
         }
     }
     FreeLibrary(Setupapi);
+
+    if (!Components)
+        return FALSE;
 
     /* Complete, added, or left alone on purpose: settled for this INF */
     NuWriteStamp(&Stamp);

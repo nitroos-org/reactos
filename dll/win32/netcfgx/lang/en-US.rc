@@ -25,6 +25,32 @@ BEGIN
     PUSHBUTTON "Ad&vanced", IDC_ADVANCED, 186, 199, 50, 14
 END
 
+IDD_TCPIP6_DLG DIALOGEX 0, 0, 280, 216
+STYLE DS_SHELLFONT | WS_CHILD | WS_CAPTION
+CAPTION "General"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    LTEXT "You can get IPv6 settings assigned automatically if your network supports this capability. Otherwise, you need to ask your network administrator for the appropriate IPv6 settings.", -1, 9, 9, 262, 27
+    GROUPBOX "", -1, 9, 61, 262, 60, BS_GROUPBOX
+    CONTROL "&Obtain an IPv6 address automatically", IDC_V6_AUTOADDR, "BUTTON", BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, 14, 43, 240, 12
+    CONTROL "U&se the following IPv6 address:", IDC_V6_STATICADDR, "BUTTON", BS_AUTORADIOBUTTON, 14, 59, 150, 12
+    LTEXT "&IPv6 address:", -1, 14, 75, 84, 8
+    EDITTEXT IDC_V6_ADDRESS, 100, 73, 164, 12, ES_AUTOHSCROLL
+    LTEXT "S&ubnet prefix length:", -1, 14, 90, 84, 8
+    EDITTEXT IDC_V6_PREFIX, 100, 88, 24, 12, ES_AUTOHSCROLL | ES_NUMBER
+    LTEXT "&Default gateway:", -1, 14, 105, 84, 8
+    EDITTEXT IDC_V6_GATEWAY, 100, 103, 164, 12, ES_AUTOHSCROLL
+    GROUPBOX "", -1, 9, 147, 262, 47, BS_GROUPBOX
+    CONTROL "O&btain DNS server address automatically", IDC_V6_AUTODNS, "BUTTON", BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, 14, 129, 240, 12
+    CONTROL "Us&e the following DNS server addresses:", IDC_V6_STATICDNS, "BUTTON", BS_AUTORADIOBUTTON, 14, 145, 170, 12
+    LTEXT "&Preferred DNS server:", -1, 14, 161, 84, 8
+    EDITTEXT IDC_V6_DNS1, 100, 159, 164, 12, ES_AUTOHSCROLL
+    LTEXT "&Alternate DNS server:", -1, 14, 176, 84, 8
+    EDITTEXT IDC_V6_DNS2, 100, 174, 164, 12, ES_AUTOHSCROLL
+    CONTROL "Va&lidate settings upon exit", IDC_V6_VALIDATE, "BUTTON", BS_AUTOCHECKBOX | WS_TABSTOP, 14, 199, 150, 12
+    PUSHBUTTON "Ad&vanced...", IDC_V6_ADVANCED, 214, 199, 57, 14
+END
+
 IDD_TCPIP_ALTCF_DLG DIALOGEX 0, 0, 246, 216
 STYLE DS_SHELLFONT | WS_CHILD | WS_CAPTION
 CAPTION "Alternate Configuration"
@@ -242,4 +268,11 @@ BEGIN
     IDS_DUP_IPADDR "The IP address is already on the list."
     IDS_DUP_GW "The default gateway is already on the list."
     IDS_METRIC_RANGE "Please enter a metric value between 1 and 9999."
+    IDS_V6_TITLE "Internet Protocol Version 6 (TCP/IPv6)"
+    IDS_V6_NOADDRESS "Enter an IPv6 address."
+    IDS_V6_BADADDRESS """%s"" is not a valid IPv6 address."
+    IDS_V6_BADPREFIX "The subnet prefix length must be a number from 1 to 128."
+    IDS_V6_APPLYFAILED "The IPv6 settings could not be applied (error %s)."
+    IDS_V6_LINKLOCAL """%s"" is a link-local address. The connection makes its link-local address itself: enter a global or unique local address."
+    IDS_PROPERTIES_TITLE "%s Properties"
 END

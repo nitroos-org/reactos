@@ -477,6 +477,23 @@ InstallNetDevice(
         ERR("AppendStringToMultiSZ() failed with error 0x%lx\n", rc);
         goto cleanup;
     }
+    RegCloseKey(hKey);
+    hKey = NULL;
+
+    /* TCP/IPv6 (when the component is installed: its Linkage key is there) is bound to the new adapter too */
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Linkage", 0,
+                      KEY_QUERY_VALUE | KEY_SET_VALUE, &hKey) == ERROR_SUCCESS)
+    {
+        WCHAR szExport6[100];
+
+        if (wcslen(UuidString) < 60)
+        {
+            _swprintf(szExport6, L"\\Device\\Tcpip6_%s", UuidString);
+            AppendStringToMultiSZ(hKey, L"Bind", DeviceName);
+            AppendStringToMultiSZ(hKey, L"Export", szExport6);
+            AppendStringToMultiSZ(hKey, L"Route", UuidString);
+        }
+    }
 
     /* Start the device */
     if (!SetupDiRestartDevices(DeviceInfoSet, DeviceInfoData))

@@ -617,6 +617,11 @@ HKCR,"CLSID\{A907657F-6FDF-11D0-8EFB-00C04FD912B2}","",0x00000000,"TCP/IP Config
 HKCR,"CLSID\{A907657F-6FDF-11D0-8EFB-00C04FD912B2}\InProcServer32","",0x00000000,"netcfgx.dll"
 HKCR,"CLSID\{A907657F-6FDF-11D0-8EFB-00C04FD912B2}\InProcServer32","ThreadingModel",0x00000000,"Both"
 
+; For the TCP/IPv6 Protocol property page (an install that predates it gets the same keys from netcfgx, see netinstall.c)
+HKCR,"CLSID\{F3152BFE-301B-4830-981B-D8F31ED16005}","",0x00000000,"TCP/IPv6 Configuration Notify Object"
+HKCR,"CLSID\{F3152BFE-301B-4830-981B-D8F31ED16005}\InProcServer32","",0x00000000,"netcfgx.dll"
+HKCR,"CLSID\{F3152BFE-301B-4830-981B-D8F31ED16005}\InProcServer32","ThreadingModel",0x00000000,"Both"
+
 ; For dxdiagn.dll
 HKCR,"CLSID\{A65B8071-3BFE-4213-9A5B-491DA4461CA7}","",0x00000000,"DxDiagProvider Class"
 HKCR,"CLSID\{A65B8071-3BFE-4213-9A5B-491DA4461CA7}\InProcServer32","",0x00000000,"%SystemRoot%\system32\dxdiagn.dll"

@@ -17,6 +17,28 @@
 #define IDD_TCPIPSUFFIX_DLG  109
 #define IDD_TCPIP_PORT_DLG   110
 #define IDD_NET_PROPERTY_DLG 111
+#define IDD_TCPIP6_DLG       112
+
+/* the TCP/IPv6 page */
+#define IDC_V6_AUTOADDR   1100
+#define IDC_V6_STATICADDR 1101
+#define IDC_V6_ADDRESS    1102
+#define IDC_V6_PREFIX     1103
+#define IDC_V6_GATEWAY    1104
+#define IDC_V6_AUTODNS    1105
+#define IDC_V6_STATICDNS  1106
+#define IDC_V6_DNS1       1107
+#define IDC_V6_DNS2       1108
+#define IDC_V6_VALIDATE   1109
+#define IDC_V6_ADVANCED   1110
+
+#define IDS_V6_TITLE      8040
+#define IDS_V6_NOADDRESS  8041
+#define IDS_V6_BADADDRESS 8042
+#define IDS_V6_BADPREFIX  8043
+#define IDS_V6_APPLYFAILED 8044
+#define IDS_V6_LINKLOCAL  8045
+#define IDS_PROPERTIES_TITLE 8046
 
 
 /* controls */

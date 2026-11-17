@@ -14,3 +14,4 @@
 15 stub RasRemoveBindings
 16 stub SvchostChangeSvchostGroup
 17 stub UpdateLanaConfigUsingAnswerfile
+@ stdcall NitroUpgradeNetworkComponents()

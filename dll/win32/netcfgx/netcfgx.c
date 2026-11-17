@@ -14,6 +14,8 @@
 
 HINSTANCE netcfgx_hInstance;
 const GUID CLSID_TcpipConfigNotifyObject      = {0xA907657F, 0x6FDF, 0x11D0, {0x8E, 0xFB, 0x00, 0xC0, 0x4F, 0xD9, 0x12, 0xB2}};
+/* The notify object of MS_TCPIP6 (nettcpip.inf, Ndi\ClsId): {F3152BFE-301B-4830-981B-D8F31ED16005} */
+const GUID CLSID_Tcpip6ConfigNotifyObject     = {0xF3152BFE, 0x301B, 0x4830, {0x98, 0x1B, 0xD8, 0xF3, 0x1E, 0xD1, 0x60, 0x05}};
 
 static INTERFACE_TABLE InterfaceTable[] =
 {
@@ -24,6 +26,10 @@ static INTERFACE_TABLE InterfaceTable[] =
     {
         &CLSID_TcpipConfigNotifyObject,
         TcpipConfigNotify_Constructor
+    },
+    {
+        &CLSID_Tcpip6ConfigNotifyObject,
+        Tcpip6ConfigNotify_Constructor
     },
     {
         NULL,

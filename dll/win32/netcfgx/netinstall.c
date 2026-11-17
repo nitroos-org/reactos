@@ -87,6 +87,13 @@ InstallInfSections(
     wcscpy(Buffer, InfSection);
     wcscat(Buffer, L".Services");
 
+    /* A component without a service of its own (TCP/IPv6 is part of the stack that TCP/IPv4 installs) has no .Services section */
+    if (SetupGetLineCountW(hInf, Buffer) == -1)
+    {
+        ret = TRUE;
+        goto cleanup;
+    }
+
     ret = SetupInstallServicesFromInfSectionW(hInf, Buffer, 0);
     if (ret == FALSE)
     {
@@ -557,6 +564,487 @@ done:
 }
 
 
+/* ---- one instance per component, the Linkage lists, and the upgrade of an install that predates a component ---- */
+
+#define NETWORK_KEY             L"SYSTEM\\CurrentControlSet\\Control\\Network\\"
+#define SERVICES_KEY            L"SYSTEM\\CurrentControlSet\\Services\\"
+#define NETTRANS_CLASS          L"{4D36E975-E325-11CE-BFC1-08002BE10318}"
+#define TCPIP6_CLSID_KEY        L"SOFTWARE\\Classes\\CLSID\\{F3152BFE-301B-4830-981B-D8F31ED16005}"
+#define MAX_SEEN_COMPONENTS     64
+
+/* The strings of a multi-sz list without the entry (compared without regard to case), and the entry at the end when
+   bPresent. A CoTaskMemAlloc block that ends with an empty string (the list of nothing is two characters), or NULL */
+LPWSTR
+MultiSzWithEntry(
+    _In_opt_ LPCWSTR pszList,
+    _In_ LPCWSTR pszEntry,
+    _In_ BOOL bPresent)
+{
+    SIZE_T cchTotal = 1, cchEntry = wcslen(pszEntry);
+    LPCWSTR p;
+    LPWSTR pszNew, q;
+
+    for (p = pszList; p && *p; p += wcslen(p) + 1)
+    {
+        if (_wcsicmp(p, pszEntry))
+            cchTotal += wcslen(p) + 1;
+    }
+    if (bPresent)
+        cchTotal += cchEntry + 1;
+
+    /* the list of nothing is the terminating character alone (AppendStringToMultiSZ of installer.c appends over it) */
+    pszNew = CoTaskMemAlloc(cchTotal * sizeof(WCHAR));
+    if (!pszNew)
+        return NULL;
+    ZeroMemory(pszNew, cchTotal * sizeof(WCHAR));
+
+    q = pszNew;
+    for (p = pszList; p && *p; p += wcslen(p) + 1)
+    {
+        if (_wcsicmp(p, pszEntry))
+        {
+            wcscpy(q, p);
+            q += wcslen(p) + 1;
+        }
+    }
+    if (bPresent)
+        wcscpy(q, pszEntry);
+    return pszNew;
+}
+
+/* A multi-sz value (CoTaskMemAlloc, double-terminated), or NULL when there is none */
+static
+LPWSTR
+ReadMultiSz(
+    _In_ HKEY hKey,
+    _In_ LPCWSTR pszValue)
+{
+    DWORD dwType, dwSize = 0;
+    LPWSTR pszList;
+
+    if (RegQueryValueExW(hKey, pszValue, NULL, &dwType, NULL, &dwSize) != ERROR_SUCCESS ||
+        (dwType != REG_MULTI_SZ && dwType != REG_SZ) || dwSize == 0 || dwSize > 0x10000)
+        return NULL;
+
+    /* a value of an odd size or without its terminators still ends in two whole null characters */
+    dwSize = (dwSize + 1) & ~1;
+    pszList = CoTaskMemAlloc(dwSize + 2 * sizeof(WCHAR));
+    if (!pszList)
+        return NULL;
+    ZeroMemory(pszList, dwSize + 2 * sizeof(WCHAR));
+    if (RegQueryValueExW(hKey, pszValue, NULL, &dwType, (LPBYTE)pszList, &dwSize) != ERROR_SUCCESS)
+    {
+        CoTaskMemFree(pszList);
+        return NULL;
+    }
+    return pszList;
+}
+
+static
+DWORD
+WriteMultiSz(
+    _In_ HKEY hKey,
+    _In_ LPCWSTR pszValue,
+    _In_ LPCWSTR pszList)
+{
+    SIZE_T cch = 0;
+    LPCWSTR p;
+
+    for (p = pszList; *p; p += wcslen(p) + 1)
+        cch += wcslen(p) + 1;
+    cch++;
+    return RegSetValueExW(hKey, pszValue, 0, REG_MULTI_SZ, (const BYTE *)pszList, (DWORD)(cch * sizeof(WCHAR)));
+}
+
+/* Adds the entry to a list value of the key, or takes it out (the value is made when it was not there) */
+static
+VOID
+UpdateLinkageValue(
+    _In_ HKEY hKey,
+    _In_ LPCWSTR pszValue,
+    _In_ LPCWSTR pszEntry,
+    _In_ BOOL bPresent)
+{
+    LPWSTR pszOld = ReadMultiSz(hKey, pszValue);
+    LPWSTR pszNew = MultiSzWithEntry(pszOld, pszEntry, bPresent);
+
+    if (pszNew)
+        WriteMultiSz(hKey, pszValue, pszNew);
+    CoTaskMemFree(pszOld);
+    CoTaskMemFree(pszNew);
+}
+
+/* Writes the bindings that INetCfgComponentBindings::BindTo and UnbindFrom recorded: the adapter goes into or out of the
+   Bind (\Device\<adapter>), Export (\Device\<service>_<adapter>) and Route (<adapter>) lists of the service's Linkage key */
+VOID
+WriteBindingChanges(
+    _In_ const NetCfgComponentItem *pItem)
+{
+    WCHAR szKey[128], szDevice[128], szExport[160];
+    LPCWSTR p;
+    HKEY hKey;
+
+    if (!pItem->szBindName || !pItem->pszBindChanges || wcslen(pItem->szBindName) > 40)
+        return;
+
+    _swprintf(szKey, SERVICES_KEY L"%s\\Linkage", pItem->szBindName);
+    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, szKey, 0, NULL, REG_OPTION_NON_VOLATILE,
+                        KEY_QUERY_VALUE | KEY_SET_VALUE, NULL, &hKey, NULL) != ERROR_SUCCESS)
+        return;
+
+    for (p = pItem->pszBindChanges; *p; p += wcslen(p) + 1)
+    {
+        BOOL bBound = (*p == L'+');
+        LPCWSTR pszAdapter = p + 1;
+
+        if (wcslen(pszAdapter) > 60)
+            continue;
+        _swprintf(szDevice, L"\\Device\\%s", pszAdapter);
+        _swprintf(szExport, L"\\Device\\%s_%s", pItem->szBindName, pszAdapter);
+        UpdateLinkageValue(hKey, L"Bind", szDevice, bBound);
+        UpdateLinkageValue(hKey, L"Export", szExport, bBound);
+        UpdateLinkageValue(hKey, L"Route", pszAdapter, bBound);
+    }
+    RegCloseKey(hKey);
+}
+
+/*
+ * Does the class have a complete instance of the component (an instance key with Ndi\Service)? An instance of it
+ * without one is what an install that failed half way leaves: removed when bRepair, so that the install is made again.
+ */
+static
+BOOL
+FindInstanceKey(
+    _In_ LPCWSTR pszClassGuid,
+    _In_ LPCWSTR pszComponentId,
+    _In_ BOOL bRepair)
+{
+    WCHAR szPath[160], szName[64], szId[128];
+    HKEY hClass, hInstance, hNdi;
+    DWORD dwIndex = 0, dwSize, dwType;
+    BOOL bFound = FALSE;
+
+    if (wcslen(pszClassGuid) > 60)
+        return FALSE;
+    _swprintf(szPath, NETWORK_KEY L"%s", pszClassGuid);
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, szPath, 0, KEY_READ | KEY_WRITE, &hClass) != ERROR_SUCCESS)
+        return FALSE;
+
+    for (;;)
+    {
+        BOOL bMatch = FALSE, bComplete = FALSE;
+
+        dwSize = ARRAYSIZE(szName);
+        if (RegEnumKeyExW(hClass, dwIndex, szName, &dwSize, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
+            break;
+
+        if (RegOpenKeyExW(hClass, szName, 0, KEY_READ, &hInstance) == ERROR_SUCCESS)
+        {
+            dwSize = sizeof(szId) - sizeof(WCHAR);
+            ZeroMemory(szId, sizeof(szId));
+            if (RegQueryValueExW(hInstance, L"ComponentId", NULL, &dwType, (LPBYTE)szId, &dwSize) == ERROR_SUCCESS &&
+                dwType == REG_SZ && !_wcsicmp(szId, pszComponentId))
+            {
+                bMatch = TRUE;
+                if (RegOpenKeyExW(hInstance, L"Ndi", 0, KEY_READ, &hNdi) == ERROR_SUCCESS)
+                {
+                    bComplete = (RegQueryValueExW(hNdi, L"Service", NULL, NULL, NULL, NULL) == ERROR_SUCCESS);
+                    RegCloseKey(hNdi);
+                }
+            }
+            RegCloseKey(hInstance);
+        }
+
+        if (bMatch && bComplete)
+        {
+            bFound = TRUE;
+            break;
+        }
+        if (bMatch && bRepair && RegDeleteTreeW(hClass, szName) == ERROR_SUCCESS)
+            continue;   /* the next key has this index now */
+        dwIndex++;
+    }
+
+    RegCloseKey(hClass);
+    return bFound;
+}
+
+typedef struct
+{
+    WCHAR szId[100];        /* ComponentId */
+    WCHAR szKeep[64];       /* the instance key that stays */
+    BOOL bComplete;         /* szKeep has Ndi\Service */
+} SEEN_COMPONENT;
+
+/* The ComponentId of an instance key, and whether the instance is complete (has Ndi\Service). FALSE: no usable id */
+static
+BOOL
+ReadInstanceId(
+    _In_ HKEY hClass,
+    _In_ LPCWSTR pszName,
+    _Out_writes_(cchId) LPWSTR pszId,
+    _In_ DWORD cchId,
+    _Out_ BOOL *pbComplete)
+{
+    HKEY hInstance, hNdi;
+    DWORD dwSize, dwType;
+    BOOL bRead = FALSE;
+
+    *pbComplete = FALSE;
+    if (RegOpenKeyExW(hClass, pszName, 0, KEY_READ, &hInstance) != ERROR_SUCCESS)
+        return FALSE;
+
+    ZeroMemory(pszId, cchId * sizeof(WCHAR));
+    dwSize = (cchId - 1) * sizeof(WCHAR);
+    if (RegQueryValueExW(hInstance, L"ComponentId", NULL, &dwType, (LPBYTE)pszId, &dwSize) == ERROR_SUCCESS &&
+        dwType == REG_SZ && pszId[0])
+    {
+        bRead = TRUE;
+        if (RegOpenKeyExW(hInstance, L"Ndi", 0, KEY_READ, &hNdi) == ERROR_SUCCESS)
+        {
+            *pbComplete = (RegQueryValueExW(hNdi, L"Service", NULL, NULL, NULL, NULL) == ERROR_SUCCESS);
+            RegCloseKey(hNdi);
+        }
+    }
+    RegCloseKey(hInstance);
+    return bRead;
+}
+
+/*
+ * When one component has several instances in the class, one stays: the first complete one (with Ndi\Service) in
+ * key order, else the first one. The others are removed: what the install of TCP/IPv4 by both the setup and its
+ * network step left. A component with one instance, complete or not, is never touched; neither is an instance whose
+ * id cannot be read, nor any component beyond the first MAX_SEEN_COMPONENTS ids.
+ */
+static
+VOID
+RemoveDuplicateInstances(
+    _In_ LPCWSTR pszClassGuid)
+{
+    WCHAR szPath[160], szName[64], szId[100];
+    SEEN_COMPONENT *Seen;
+    HKEY hClass;
+    DWORD dwIndex, dwSize, cSeen = 0, i;
+    BOOL bComplete;
+
+    if (wcslen(pszClassGuid) > 60)
+        return;
+    _swprintf(szPath, NETWORK_KEY L"%s", pszClassGuid);
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, szPath, 0, KEY_READ | KEY_WRITE, &hClass) != ERROR_SUCCESS)
+        return;
+
+    Seen = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, MAX_SEEN_COMPONENTS * sizeof(*Seen));
+    if (!Seen)
+    {
+        RegCloseKey(hClass);
+        return;
+    }
+
+    /* The instance that stays, per component */
+    for (dwIndex = 0; ; dwIndex++)
+    {
+        dwSize = ARRAYSIZE(szName);
+        if (RegEnumKeyExW(hClass, dwIndex, szName, &dwSize, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
+            break;
+        if (!ReadInstanceId(hClass, szName, szId, ARRAYSIZE(szId), &bComplete))
+            continue;
+
+        for (i = 0; i < cSeen; i++)
+        {
+            if (!_wcsicmp(Seen[i].szId, szId))
+                break;
+        }
+        if (i == cSeen)
+        {
+            if (cSeen == MAX_SEEN_COMPONENTS)
+                continue;
+            wcscpy(Seen[i].szId, szId);
+            wcscpy(Seen[i].szKeep, szName);
+            Seen[i].bComplete = bComplete;
+            cSeen++;
+        }
+        else if (bComplete && !Seen[i].bComplete)
+        {
+            wcscpy(Seen[i].szKeep, szName);
+            Seen[i].bComplete = TRUE;
+        }
+    }
+
+    /* The other instances of those components */
+    for (dwIndex = 0; ; )
+    {
+        BOOL bRemove = FALSE;
+
+        dwSize = ARRAYSIZE(szName);
+        if (RegEnumKeyExW(hClass, dwIndex, szName, &dwSize, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
+            break;
+        if (ReadInstanceId(hClass, szName, szId, ARRAYSIZE(szId), &bComplete))
+        {
+            for (i = 0; i < cSeen; i++)
+            {
+                if (!_wcsicmp(Seen[i].szId, szId))
+                {
+                    bRemove = (_wcsicmp(Seen[i].szKeep, szName) != 0);
+                    break;
+                }
+            }
+        }
+
+        if (bRemove && RegDeleteTreeW(hClass, szName) == ERROR_SUCCESS)
+        {
+            TRACE("removed the duplicate instance %S of %S\n", szName, szId);
+            continue;   /* the next key has this index now */
+        }
+        dwIndex++;
+    }
+
+    HeapFree(GetProcessHeap(), 0, Seen);
+    RegCloseKey(hClass);
+}
+
+/* The Linkage lists of TCP/IPv6 start as the adapters TCP/IPv4 is bound to; it is bound to every adapter that is installed
+   afterwards (installer.c). The lists are not touched once there: an adapter taken out by the user stays out */
+static
+VOID
+EnsureTcpip6Linkage(VOID)
+{
+    HKEY hSource = NULL, hLinkage = NULL;
+    LPWSTR pszBind = NULL, pszNewBind = NULL, pszExport = NULL, pszRoute = NULL;
+    LPCWSTR p;
+    WCHAR szExport[160];
+
+    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, SERVICES_KEY L"Tcpip6\\Linkage", 0, NULL, REG_OPTION_NON_VOLATILE,
+                        KEY_QUERY_VALUE | KEY_SET_VALUE, NULL, &hLinkage, NULL) != ERROR_SUCCESS)
+        return;
+
+    if (RegQueryValueExW(hLinkage, L"Bind", NULL, NULL, NULL, NULL) == ERROR_SUCCESS)
+        goto done;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, SERVICES_KEY L"Tcpip\\Linkage", 0, KEY_QUERY_VALUE, &hSource) == ERROR_SUCCESS)
+        pszBind = ReadMultiSz(hSource, L"Bind");
+
+    for (p = pszBind; p && *p; p += wcslen(p) + 1)
+    {
+        LPWSTR pszTemp;
+
+        if (wcslen(p) <= 8 || wcslen(p) > 60)
+            continue;   /* \Device\<adapter> */
+
+        pszTemp = MultiSzWithEntry(pszNewBind, p, TRUE);
+        CoTaskMemFree(pszNewBind);
+        pszNewBind = pszTemp;
+        _swprintf(szExport, L"\\Device\\Tcpip6_%s", p + 8);
+        pszTemp = MultiSzWithEntry(pszExport, szExport, TRUE);
+        CoTaskMemFree(pszExport);
+        pszExport = pszTemp;
+        pszTemp = MultiSzWithEntry(pszRoute, p + 8, TRUE);
+        CoTaskMemFree(pszRoute);
+        pszRoute = pszTemp;
+    }
+
+    /* The lists are there, empty or not: that is what tells installer.c that the component is installed */
+    if (!pszNewBind)
+        pszNewBind = MultiSzWithEntry(NULL, L"", FALSE);
+    if (!pszExport)
+        pszExport = MultiSzWithEntry(NULL, L"", FALSE);
+    if (!pszRoute)
+        pszRoute = MultiSzWithEntry(NULL, L"", FALSE);
+    if (pszNewBind && pszExport && pszRoute)
+    {
+        WriteMultiSz(hLinkage, L"Export", pszExport);
+        WriteMultiSz(hLinkage, L"Route", pszRoute);
+        WriteMultiSz(hLinkage, L"Bind", pszNewBind);
+    }
+
+done:
+    CoTaskMemFree(pszBind);
+    CoTaskMemFree(pszNewBind);
+    CoTaskMemFree(pszExport);
+    CoTaskMemFree(pszRoute);
+    if (hSource)
+        RegCloseKey(hSource);
+    RegCloseKey(hLinkage);
+}
+
+static
+VOID
+EnsureComponentLinkage(
+    _In_ LPCWSTR pszComponentId)
+{
+    if (!_wcsicmp(pszComponentId, L"MS_TCPIP6"))
+        EnsureTcpip6Linkage();
+}
+
+/* The notify object of TCP/IPv6 is in the CLASSES hive of a new install (hivecls.inf); an install that predates it gets
+   the same keys here */
+static
+DWORD
+RegisterTcpip6NotifyObject(VOID)
+{
+    HKEY hKey, hServer;
+    DWORD dwError;
+    static const WCHAR szName[] = L"TCP/IPv6 Configuration Notify Object";
+    static const WCHAR szServer[] = L"netcfgx.dll";
+    static const WCHAR szModel[] = L"Both";
+
+    dwError = RegCreateKeyExW(HKEY_LOCAL_MACHINE, TCPIP6_CLSID_KEY, 0, NULL, REG_OPTION_NON_VOLATILE,
+                              KEY_CREATE_SUB_KEY | KEY_QUERY_VALUE | KEY_SET_VALUE, NULL, &hKey, NULL);
+    if (dwError != ERROR_SUCCESS)
+        return dwError;
+
+    if (RegQueryValueExW(hKey, NULL, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
+        dwError = RegSetValueExW(hKey, NULL, 0, REG_SZ, (const BYTE *)szName, sizeof(szName));
+
+    if (dwError == ERROR_SUCCESS)
+        dwError = RegCreateKeyExW(hKey, L"InProcServer32", 0, NULL, REG_OPTION_NON_VOLATILE,
+                                  KEY_QUERY_VALUE | KEY_SET_VALUE, NULL, &hServer, NULL);
+    if (dwError == ERROR_SUCCESS)
+    {
+        if (RegQueryValueExW(hServer, NULL, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
+            dwError = RegSetValueExW(hServer, NULL, 0, REG_SZ, (const BYTE *)szServer, sizeof(szServer));
+        if (dwError == ERROR_SUCCESS && RegQueryValueExW(hServer, L"ThreadingModel", NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
+            dwError = RegSetValueExW(hServer, L"ThreadingModel", 0, REG_SZ, (const BYTE *)szModel, sizeof(szModel));
+        RegCloseKey(hServer);
+    }
+    RegCloseKey(hKey);
+    return dwError;
+}
+
+/*
+ * What winlogon runs (through userenv, netupgrade.c) at the start after the INF changed: one instance of every
+ * component (the duplicates an older install made are removed) and the TCP/IPv6 component, with its notify object
+ * and its Linkage lists, on an install that has none. Idempotent. Returns a Win32 error, ERROR_SUCCESS when settled.
+ */
+DWORD
+UpgradeNetworkComponents(VOID)
+{
+    DWORD dwError;
+
+    RemoveDuplicateInstances(NETTRANS_CLASS);
+
+    dwError = RegisterTcpip6NotifyObject();
+    if (dwError != ERROR_SUCCESS)
+        return dwError;
+
+    if (!InstallNetworkComponent(L"MS_TCPIP6"))
+    {
+        dwError = GetLastError();
+        return dwError != ERROR_SUCCESS ? dwError : ERROR_GEN_FAILURE;
+    }
+    EnsureTcpip6Linkage();
+    return ERROR_SUCCESS;
+}
+
+BOOL
+WINAPI
+NitroUpgradeNetworkComponents(VOID)
+{
+    DWORD dwError = UpgradeNetworkComponents();
+
+    SetLastError(dwError);
+    return dwError == ERROR_SUCCESS;
+}
+
 BOOL
 InstallNetworkComponent(
     _In_ PCWSTR pszComponentId)
@@ -578,6 +1066,16 @@ InstallNetworkComponent(
     TRACE("InfPath: %S\n", ComponentInfo.pszInfPath);
     TRACE("InfSection: %S\n", ComponentInfo.pszInfSection);
     TRACE("ClassGuid: %S\n", ComponentInfo.pszClassGuid);
+
+    /* One instance per component: a second install of one (the setup and its network step both install TCP/IPv4) is
+       a no-op, not a second row in every connection's property list */
+    if (FindInstanceKey(ComponentInfo.pszClassGuid, ComponentInfo.pszComponentId, TRUE))
+    {
+        TRACE("%S is installed already\n", ComponentInfo.pszComponentId);
+        bResult = TRUE;
+        EnsureComponentLinkage(ComponentInfo.pszComponentId);
+        goto done;
+    }
 
     if (!CreateInstanceKey(&ComponentInfo,
                            &hInstanceKey))

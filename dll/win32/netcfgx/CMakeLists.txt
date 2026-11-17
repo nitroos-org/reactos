@@ -15,6 +15,7 @@ list(APPEND SOURCE
     netcfgclass_iface.c
     inetcfgcomp_iface.c
     tcpipconf_notify.c
+    tcpip6conf_notify.c
     propertypage.c
     precomp.h
     ${CMAKE_CURRENT_BINARY_DIR}/netcfgx_stubs.c)
