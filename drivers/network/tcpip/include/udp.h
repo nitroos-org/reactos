@@ -81,11 +81,19 @@ NTSTATUS UDPSendDatagram6(
    held (PASSIVE_LEVEL) after lwIP's core lock was released */
 VOID UDP6DeliverDeferred(VOID);
 
-/* IPV6_ADD_MEMBERSHIP / IPV6_DROP_MEMBERSHIP (Request: struct ipv6_mreq) and the end of a socket's groups */
+/* IPV6_ADD_MEMBERSHIP / IPV6_DROP_MEMBERSHIP (Request: struct ipv6_mreq), a group's source filter
+   (NITRO_AO_OPTION_MCAST_FILTER, nitrotdi.h) and the end of a socket's groups */
 NTSTATUS UDP6SetMembership(PADDRESS_FILE AddrFile, BOOLEAN Join, const VOID *Request, UINT Length);
+NTSTATUS UDP6SetFilter(PADDRESS_FILE AddrFile, ULONG IfIndex, const UCHAR *GroupAddress, UCHAR Mode, ULONG NumSources,
+                       const UCHAR (*Sources)[16], BOOLEAN MustBeNew);
 VOID UDP6LeaveAll(PADDRESS_FILE AddrFile);
-/* IP_ADD_MEMBERSHIP / IP_DROP_MEMBERSHIP (Request: struct ip_mreq) and the end of a socket's IPv4 groups */
+/* IP_ADD_MEMBERSHIP / IP_DROP_MEMBERSHIP (Request: struct ip_mreq), an IPv4 group's source filter of a socket
+   (NITRO_AO_OPTION_MCAST_FILTER), whether the socket takes a datagram to a group from a source by them (no filter
+   for the group: it does, as before) and the end of a socket's IPv4 groups */
 NTSTATUS UDP4SetMembership(PADDRESS_FILE AddrFile, BOOLEAN Join, const VOID *Request, UINT Length);
+NTSTATUS UDP4SetFilter(PADDRESS_FILE AddrFile, ULONG IfIndex, ULONG Group, UCHAR Mode, ULONG NumSources,
+                       const UCHAR (*Sources)[16], BOOLEAN MustBeNew);
+BOOLEAN UDP4FilterAccepts(PADDRESS_FILE AddrFile, ULONG Group, ULONG Source, ULONG IfIndex);
 VOID UDP4LeaveAll(PADDRESS_FILE AddrFile);
 VOID UDP6Startup(VOID);
 /* The row of an IPv6 UDP socket (IP_UDP6_ROW_ENTRY_ID) */

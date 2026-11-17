@@ -5,7 +5,8 @@
  * @defgroup mld6 MLD6
  * @ingroup ip6
  * Multicast listener discovery for IPv6. Aims to be compliant with RFC 2710.
- * No support for MLDv2.<br>
+ * NitroOS: with MLD6_V2, MLDv2 (RFC 3810): listener reports with source filters, MLDv1 while an MLDv1 querier
+ * is present (RFC 3810 8).<br>
  * Note: The allnodes (ff01::1, ff02::1) group is assumed be received by your
  * netif since it must always be received for correct IPv6 operation (e.g. SLAAC).
  * Ensure the netif filters are configured accordingly!<br>
@@ -91,6 +92,52 @@
 #define MLD6_GROUP_DELAYING_MEMBER        1
 #define MLD6_GROUP_IDLE_MEMBER            2
 
+#if MLD6_V2
+/* NitroOS: MLDv2 (RFC 3810) */
+#define MLD6_V2_REPORT                    143
+#define MLD6_REC_IS_IN                    1
+#define MLD6_REC_IS_EX                    2
+#define MLD6_REC_TO_IN                    3
+#define MLD6_REC_TO_EX                    4
+#define MLD6_REC_ALLOW                    5
+#define MLD6_REC_BLOCK                    6
+/* A report (the ICMPv6 message) fits the minimum link MTU with its IPv6 and hop-by-hop headers */
+#define MLD6_V2_REPORT_MAX                (1280 - IP6_HLEN - MLD6_HBH_HLEN)
+#define MLD6_V2_REPORT_HLEN               8
+#define MLD6_V2_RECORD_HLEN               20
+#define MLD6_V2_QUERY_HLEN                28
+/* RFC 3810 9: Robustness Variable, Query Interval (s), Unsolicited Report Interval (ticks) */
+#define MLD6_DEFAULT_QRV                  2
+#define MLD6_DEFAULT_QI                   125
+#define MLD6_URI_TICKS                    (1000 / MLD6_TMR_INTERVAL)
+
+/* Per interface (by netif index): the pending answer to a general query, what the querier said (robustness,
+ * query interval), the MLDv1 querier present timer (RFC 3810 8.2.1: a time, so it costs no wake-up) and the groups
+ * no longer listened to whose state change report is still being retransmitted */
+struct mld6_ifstate {
+  u16_t gtimer;
+  u8_t  qrv;
+  u8_t  v1;
+  u32_t qi;
+  u32_t v1_until;
+  struct mld_group *leaving;
+};
+static struct mld6_ifstate mld6_ifs[256];
+#define MLD6_IFS(netif) (&mld6_ifs[netif_get_index(netif)])
+
+/* A report under construction: records are added until the message is full, then it is sent */
+struct mld6_rb {
+  struct netif *netif;
+  struct pbuf *p;
+  u16_t len;
+  u16_t nrec;
+};
+
+static void mld6_group_free(struct mld_group *group);
+static void mld6_v2_changed(struct netif *netif, struct mld_group *group, u8_t omode, const u8_t (*olist)[16], u16_t on);
+static void mld6_v2_cancel(struct netif *netif);
+#endif /* MLD6_V2 */
+
 /* Forward declarations. */
 static struct mld_group *mld6_new_group(struct netif *ifp, const ip6_addr_t *addr);
 static err_t mld6_remove_group(struct netif *netif, struct mld_group *group);
@@ -118,6 +165,46 @@ static u32_t mld6_tmr_base;
 
 static void mld6_tmr_arm(void);
 
+/* One running timer: Sub whole ticks taken off it (a due one stays at 1), and the earliest kept in *Next */
+static void
+mld6_tmr_adjust(u16_t *timer, u32_t sub, u16_t *next)
+{
+  if (*timer == 0) {
+    return;
+  }
+  if (sub) {
+    *timer = (*timer > sub) ? (u16_t)(*timer - sub) : 1;
+  }
+  if (next != NULL && (*next == 0 || *timer < *next)) {
+    *next = *timer;
+  }
+}
+
+/* Every timer of MLD: the groups' report timers and, with MLDv2, their retransmission timers, the general query
+ * answer of each interface and the retransmissions of the groups no longer listened to */
+static void
+mld6_tmr_walk(u32_t sub, u16_t *next)
+{
+  struct netif *netif;
+
+  NETIF_FOREACH(netif) {
+    struct mld_group *group;
+
+    for (group = netif_mld6_data(netif); group != NULL; group = group->next) {
+      mld6_tmr_adjust(&group->timer, sub, next);
+#if MLD6_V2
+      mld6_tmr_adjust(&group->rtimer, sub, next);
+#endif
+    }
+#if MLD6_V2
+    mld6_tmr_adjust(&MLD6_IFS(netif)->gtimer, sub, next);
+    for (group = MLD6_IFS(netif)->leaving; group != NULL; group = group->next) {
+      mld6_tmr_adjust(&group->rtimer, sub, next);
+    }
+#endif
+  }
+}
+
 /* The timeout: what is due is sent, then the next timeout is armed if a report is still pending */
 static void
 mld6_tmr_fire(void *arg)
@@ -136,7 +223,6 @@ mld6_tmr_fire(void *arg)
 static void
 mld6_tmr_settle(void)
 {
-  struct netif *netif;
   u32_t ticks;
 
   if (!mld6_tmr_armed) {
@@ -147,16 +233,7 @@ mld6_tmr_settle(void)
     return;
   }
   mld6_tmr_base += ticks * MLD6_TMR_INTERVAL;
-
-  NETIF_FOREACH(netif) {
-    struct mld_group *group;
-
-    for (group = netif_mld6_data(netif); group != NULL; group = group->next) {
-      if (group->timer > 0) {
-        group->timer = (group->timer > ticks) ? (u16_t)(group->timer - ticks) : 1;
-      }
-    }
-  }
+  mld6_tmr_walk(ticks, NULL);
 }
 
 /* Arms the timeout for the earliest running timer, or removes it when none runs. Called after mld6_tmr_settle
@@ -164,19 +241,10 @@ mld6_tmr_settle(void)
 static void
 mld6_tmr_arm(void)
 {
-  struct netif *netif;
   u16_t next = 0;
   u32_t elapsed, delay;
 
-  NETIF_FOREACH(netif) {
-    struct mld_group *group;
-
-    for (group = netif_mld6_data(netif); group != NULL; group = group->next) {
-      if (group->timer > 0 && (next == 0 || group->timer < next)) {
-        next = group->timer;
-      }
-    }
-  }
+  mld6_tmr_walk(0, &next);
 
   if (mld6_tmr_armed) {
     sys_untimeout(mld6_tmr_fire, NULL);
@@ -195,6 +263,553 @@ mld6_tmr_arm(void)
   mld6_tmr_armed = 1;
 }
 #endif /* MLD6_TMR_ON_DEMAND */
+
+#if MLD6_TMR_ON_DEMAND
+#define MLD6_TMR_SETTLE() mld6_tmr_settle()
+#define MLD6_TMR_ARM()    mld6_tmr_arm()
+#else
+#define MLD6_TMR_SETTLE()
+#define MLD6_TMR_ARM()
+#endif
+
+#if MLD6_V2
+/* A random delay of 1 to max ticks */
+static u16_t
+mld6_rand_ticks(u32_t max)
+{
+  u16_t t;
+
+  if (max > 0xFFFF) {
+    max = 0xFFFF;
+  }
+  if (max <= 1) {
+    return 1;
+  }
+#ifdef MLD6_RAND
+  t = (u16_t)(MLD6_RAND() % max);
+#else
+  t = (u16_t)max;
+#endif
+  return t ? t : 1;
+}
+
+/* The MLD version the interface speaks: 1 while an MLDv1 querier was heard within the Older Version Querier Present
+ * Timeout (RFC 3810 8.2.1), else 2 */
+u8_t
+mld6_version(struct netif *netif)
+{
+  struct mld6_ifstate *ifs = MLD6_IFS(netif);
+
+  if (ifs->v1 && (s32_t)(ifs->v1_until - sys_now()) > 0) {
+    return 1;
+  }
+  ifs->v1 = 0;
+  return 2;
+}
+
+/* (the kernel's C library of this port has no memcmp/memmove on every architecture: plain loops) */
+static int
+mld6_src_find(const u8_t (*list)[16], u16_t n, const u8_t *a)
+{
+  u16_t i, k;
+
+  for (i = 0; i < n; i++) {
+    for (k = 0; k < 16 && list[i][k] == a[k]; k++) {
+    }
+    if (k == 16) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/* A source list with room for 16 more whenever it is full; 0 when there is no memory or the list is at
+ * MLD6_MAX_SOURCES */
+static int
+mld6_list_add(u8_t (**list)[16], u16_t *n, const u8_t *a)
+{
+  if (mld6_src_find((const u8_t (*)[16])*list, *n, a) >= 0) {
+    return 1;
+  }
+  if (*n >= MLD6_MAX_SOURCES) {
+    return 0;
+  }
+  if ((*n & 15) == 0) {
+    u8_t (*grown)[16] = (u8_t (*)[16])mem_malloc((mem_size_t)((*n + 16) * 16));
+    if (grown == NULL) {
+      return 0;
+    }
+    if (*n) {
+      MEMCPY(grown, *list, (size_t)*n * 16);
+    }
+    if (*list) {
+      mem_free(*list);
+    }
+    *list = grown;
+  }
+  MEMCPY((*list)[*n], a, 16);
+  (*n)++;
+  return 1;
+}
+
+static void
+mld6_list_del(u8_t (**list)[16], u16_t *n, const u8_t *a)
+{
+  int i = mld6_src_find((const u8_t (*)[16])*list, *n, a);
+
+  if (i < 0) {
+    return;
+  }
+  for (; (u16_t)i + 1 < *n; i++) {
+    MEMCPY((*list)[i], (*list)[i + 1], 16);
+  }
+  if (--(*n) == 0) {
+    mem_free(*list);
+    *list = NULL;
+  }
+}
+
+static void
+mld6_list_free(u8_t (**list)[16], u16_t *n)
+{
+  if (*list) {
+    mem_free(*list);
+  }
+  *list = NULL;
+  *n = 0;
+}
+
+/* The pending state change and query answer of a group are forgotten */
+static void
+mld6_pending_clear(struct mld_group *group)
+{
+  group->rtimer = 0;
+  group->rexmit = 0;
+  group->chg_mode = 0;
+  mld6_list_free(&group->allow, &group->nallow);
+  mld6_list_free(&group->block, &group->nblock);
+}
+
+static void
+mld6_group_free(struct mld_group *group)
+{
+  mld6_pending_clear(group);
+  mld6_list_free(&group->sock_srcs, &group->sock_nsrc);
+  mld6_list_free(&group->qsrc, &group->nqsrc);
+  memp_free(MEMP_MLD6_GROUP, group);
+}
+
+/* The filter MLD reports for a group (RFC 3810 4.2): an any-source join (use) makes it EXCLUDE with no source,
+ * whatever the sockets want; otherwise the sockets' merged filter. Beyond MLD6_MAX_SOURCES: EXCLUDE with none */
+static void
+mld6_filter(const struct mld_group *group, u8_t *mode, const u8_t (**list)[16], u16_t *n)
+{
+  if (group->use > 0 || group->sock_nsrc > MLD6_MAX_SOURCES) {
+    *mode = MLD6_FMODE_EXCLUDE;
+    *list = NULL;
+    *n = 0;
+  } else {
+    *mode = group->sock_mode;
+    *list = (const u8_t (*)[16])group->sock_srcs;
+    *n = group->sock_nsrc;
+  }
+}
+
+#define mld6_listening(mode, n) ((mode) == MLD6_FMODE_EXCLUDE || (n) > 0)
+
+static int
+mld6_group_listening(const struct mld_group *group)
+{
+  u8_t mode;
+  const u8_t (*list)[16];
+  u16_t n;
+
+  mld6_filter(group, &mode, &list, &n);
+  return mld6_listening(mode, n);
+}
+
+static void
+mld6_rb_init(struct mld6_rb *rb, struct netif *netif)
+{
+  rb->netif = netif;
+  rb->p = NULL;
+  rb->len = 0;
+  rb->nrec = 0;
+}
+
+static int
+mld6_rb_alloc(struct mld6_rb *rb)
+{
+  u8_t *b;
+
+  rb->p = pbuf_alloc(PBUF_IP, MLD6_HBH_HLEN + MLD6_V2_REPORT_MAX, PBUF_RAM);
+  if (rb->p == NULL) {
+    MLD6_STATS_INC(mld6.memerr);
+    return 0;
+  }
+  /* room for the hop-by-hop options header in front, as mld6_send */
+  if (pbuf_remove_header(rb->p, MLD6_HBH_HLEN)) {
+    pbuf_free(rb->p);
+    rb->p = NULL;
+    return 0;
+  }
+  b = (u8_t *)rb->p->payload;
+  memset(b, 0, MLD6_V2_REPORT_HLEN);
+  b[0] = MLD6_V2_REPORT;
+  rb->len = MLD6_V2_REPORT_HLEN;
+  rb->nrec = 0;
+  return 1;
+}
+
+/* Sends the report built so far (RFC 3810 5.2): to all MLDv2-capable routers (ff02::16) from the link-local
+ * address (:: while it is tentative), hop limit 1, router alert */
+static void
+mld6_rb_flush(struct mld6_rb *rb)
+{
+  struct netif *netif = rb->netif;
+  const ip6_addr_t *src_addr;
+  ip6_addr_t dest_addr;
+  u8_t *b;
+  u16_t chksum;
+
+  if (rb->p == NULL) {
+    return;
+  }
+  if (rb->nrec == 0) {
+    pbuf_free(rb->p);
+    rb->p = NULL;
+    return;
+  }
+  b = (u8_t *)rb->p->payload;
+  b[6] = (u8_t)(rb->nrec >> 8);
+  b[7] = (u8_t)rb->nrec;
+  pbuf_realloc(rb->p, rb->len);
+
+  IP6_ADDR(&dest_addr, PP_HTONL(0xff020000UL), 0, 0, PP_HTONL(0x00000016UL));
+  ip6_addr_assign_zone(&dest_addr, IP6_MULTICAST, netif);
+  if (!ip6_addr_isvalid(netif_ip6_addr_state(netif, 0))) {
+    src_addr = IP6_ADDR_ANY6;
+  } else {
+    src_addr = netif_ip6_addr(netif, 0);
+  }
+  chksum = 0;
+#if CHECKSUM_GEN_ICMP6
+  IF__NETIF_CHECKSUM_ENABLED(netif, NETIF_CHECKSUM_GEN_ICMP6) {
+    chksum = ip6_chksum_pseudo(rb->p, IP6_NEXTH_ICMP6, rb->p->len, src_addr, &dest_addr);
+  }
+#endif /* CHECKSUM_GEN_ICMP6 */
+  SMEMCPY(&b[2], &chksum, sizeof(chksum));
+  ip6_options_add_hbh_ra(rb->p, IP6_NEXTH_ICMP6, IP6_ROUTER_ALERT_VALUE_MLD);
+
+  MLD6_STATS_INC(mld6.tx_report);
+  MLD6_STATS_INC(mld6.xmit);
+  ip6_output_if(rb->p, (ip6_addr_isany(src_addr)) ? NULL : src_addr, &dest_addr,
+      MLD6_HL, 0, IP6_NEXTH_HOPBYHOP, netif);
+  pbuf_free(rb->p);
+  rb->p = NULL;
+}
+
+/* One multicast address record. One that does not fit a report is split into records of the same type, except
+ * MODE_IS_EXCLUDE and CHANGE_TO_EXCLUDE_MODE, whose excess sources are left out (RFC 3810 5.2.15) */
+static void
+mld6_rb_record(struct mld6_rb *rb, u8_t type, const ip6_addr_t *group, const u8_t (*list)[16], u16_t n)
+{
+  u8_t ex = (type == MLD6_REC_IS_EX || type == MLD6_REC_TO_EX);
+
+  for (;;) {
+    u16_t room, take;
+    u8_t *b;
+
+    if (rb->p == NULL && !mld6_rb_alloc(rb)) {
+      return;
+    }
+    room = (rb->len + MLD6_V2_RECORD_HLEN <= MLD6_V2_REPORT_MAX) ?
+           (u16_t)((MLD6_V2_REPORT_MAX - rb->len - MLD6_V2_RECORD_HLEN) / 16) : 0;
+    if (rb->nrec > 0 && (rb->len + MLD6_V2_RECORD_HLEN > MLD6_V2_REPORT_MAX || (room < n && (ex || room == 0)))) {
+      /* a fresh report: the whole record, or as much of it as one report holds */
+      mld6_rb_flush(rb);
+      continue;
+    }
+    take = (n < room) ? n : room;
+    b = (u8_t *)rb->p->payload + rb->len;
+    b[0] = type;
+    b[1] = 0;
+    b[2] = (u8_t)(take >> 8);
+    b[3] = (u8_t)take;
+    MEMCPY(&b[4], group->addr, 16);
+    if (take) {
+      MEMCPY(&b[MLD6_V2_RECORD_HLEN], list, (size_t)take * 16);
+    }
+    rb->len = (u16_t)(rb->len + MLD6_V2_RECORD_HLEN + take * 16);
+    rb->nrec++;
+    if (ex || take == n) {
+      return;
+    }
+    list += take;
+    n = (u16_t)(n - take);
+    mld6_rb_flush(rb);
+  }
+}
+
+/* A Current State Record of a group (answer to a general or group specific query) */
+static void
+mld6_rb_current(struct mld6_rb *rb, struct mld_group *group)
+{
+  u8_t mode;
+  const u8_t (*list)[16];
+  u16_t n;
+
+  if (!mld6_reportable(&group->group_address)) {
+    return;
+  }
+  mld6_filter(group, &mode, &list, &n);
+  if (mld6_listening(mode, n)) {
+    mld6_rb_record(rb, mode == MLD6_FMODE_INCLUDE ? MLD6_REC_IS_IN : MLD6_REC_IS_EX, &group->group_address, list, n);
+  }
+}
+
+/* The answer to a group-and-source specific query (RFC 3810 6.3): IS_IN with the sources asked about that are
+ * listened to (INCLUDE: those in the list, EXCLUDE: those not in it); none when there is none */
+static void
+mld6_rb_source_answer(struct mld6_rb *rb, struct mld_group *group)
+{
+  u8_t mode;
+  const u8_t (*list)[16];
+  u16_t n, i, k = 0;
+  u8_t (*answer)[16];
+
+  mld6_filter(group, &mode, &list, &n);
+  if (group->nqsrc == 0) {
+    return;
+  }
+  answer = (u8_t (*)[16])mem_malloc((mem_size_t)(group->nqsrc * 16));
+  if (answer == NULL) {
+    /* no memory: the whole state, which says at least as much */
+    mld6_rb_current(rb, group);
+    return;
+  }
+  for (i = 0; i < group->nqsrc; i++) {
+    int in = mld6_src_find(list, n, group->qsrc[i]) >= 0;
+    if ((mode == MLD6_FMODE_INCLUDE) == in) {
+      MEMCPY(answer[k], group->qsrc[i], 16);
+      k++;
+    }
+  }
+  if (k) {
+    mld6_rb_record(rb, MLD6_REC_IS_IN, &group->group_address, (const u8_t (*)[16])answer, k);
+  }
+  mem_free(answer);
+}
+
+/* The pending state change records of a group (RFC 3810 6.1): the new mode with its whole list after a mode
+ * change, else the sources allowed and blocked since */
+static void
+mld6_rb_pending(struct mld6_rb *rb, struct mld_group *group)
+{
+  u8_t mode;
+  const u8_t (*list)[16];
+  u16_t n;
+
+  mld6_filter(group, &mode, &list, &n);
+  if (group->chg_mode) {
+    mld6_rb_record(rb, mode == MLD6_FMODE_INCLUDE ? MLD6_REC_TO_IN : MLD6_REC_TO_EX, &group->group_address, list, n);
+    return;
+  }
+  if (group->nallow) {
+    mld6_rb_record(rb, MLD6_REC_ALLOW, &group->group_address, (const u8_t (*)[16])group->allow, group->nallow);
+  }
+  if (group->nblock) {
+    mld6_rb_record(rb, MLD6_REC_BLOCK, &group->group_address, (const u8_t (*)[16])group->block, group->nblock);
+  }
+}
+
+/* The filter of a group changed from (omode, olist): a State Change Report at once and Robustness - 1 more at
+ * random times within the Unsolicited Report Interval (RFC 3810 6.1). Changes while one is pending are merged:
+ * a mode change sends the whole new state, source changes the sources allowed and blocked since */
+static void
+mld6_v2_changed(struct netif *netif, struct mld_group *group, u8_t omode, const u8_t (*olist)[16], u16_t on)
+{
+  struct mld6_ifstate *ifs = MLD6_IFS(netif);
+  struct mld6_rb rb;
+  u8_t mode;
+  const u8_t (*list)[16];
+  u16_t n, i;
+
+  if (!mld6_reportable(&group->group_address) || !(netif->flags & NETIF_FLAG_MLD6)) {
+    return;
+  }
+  mld6_filter(group, &mode, &list, &n);
+
+  if (mode != omode) {
+    group->chg_mode = 1;
+    mld6_list_free(&group->allow, &group->nallow);
+    mld6_list_free(&group->block, &group->nblock);
+  } else if (!group->chg_mode) {
+    /* INCLUDE: a new source is allowed, a removed one blocked; EXCLUDE: the other way round */
+    u8_t (**more)[16] = (mode == MLD6_FMODE_INCLUDE) ? &group->allow : &group->block;
+    u16_t *nmore = (mode == MLD6_FMODE_INCLUDE) ? &group->nallow : &group->nblock;
+    u8_t (**less)[16] = (mode == MLD6_FMODE_INCLUDE) ? &group->block : &group->allow;
+    u16_t *nless = (mode == MLD6_FMODE_INCLUDE) ? &group->nblock : &group->nallow;
+    int ok = 1;
+
+    for (i = 0; i < n && ok; i++) {
+      if (mld6_src_find(olist, on, list[i]) < 0) {
+        mld6_list_del(less, nless, list[i]);
+        ok = mld6_list_add(more, nmore, list[i]);
+      }
+    }
+    for (i = 0; i < on && ok; i++) {
+      if (mld6_src_find(list, n, olist[i]) < 0) {
+        mld6_list_del(more, nmore, olist[i]);
+        ok = mld6_list_add(less, nless, olist[i]);
+      }
+    }
+    if (!ok) {
+      /* no room for the difference: the whole state instead */
+      group->chg_mode = 1;
+      mld6_list_free(&group->allow, &group->nallow);
+      mld6_list_free(&group->block, &group->nblock);
+    }
+  }
+  if (!group->chg_mode && group->nallow == 0 && group->nblock == 0) {
+    return;
+  }
+
+  mld6_rb_init(&rb, netif);
+  mld6_rb_pending(&rb, group);
+  mld6_rb_flush(&rb);
+
+  MLD6_TMR_SETTLE();
+  group->rexmit = (u8_t)((ifs->qrv ? ifs->qrv : MLD6_DEFAULT_QRV) - 1);
+  if (group->rexmit) {
+    group->rtimer = mld6_rand_ticks(MLD6_URI_TICKS);
+  } else {
+    mld6_pending_clear(group);
+  }
+  MLD6_TMR_ARM();
+}
+
+/* An MLDv1 querier was heard (RFC 3810 8.2.1): every pending MLDv2 answer and retransmission is cancelled */
+static void
+mld6_v2_cancel(struct netif *netif)
+{
+  struct mld6_ifstate *ifs = MLD6_IFS(netif);
+  struct mld_group *group;
+
+  ifs->gtimer = 0;
+  while (ifs->leaving != NULL) {
+    group = ifs->leaving;
+    ifs->leaving = group->next;
+    mld6_group_free(group);
+  }
+  for (group = netif_mld6_data(netif); group != NULL; group = group->next) {
+    mld6_pending_clear(group);
+    mld6_list_free(&group->qsrc, &group->nqsrc);
+    group->qsrc_pending = 0;
+    if (group->group_state == MLD6_GROUP_DELAYING_MEMBER) {
+      group->timer = 0;
+      group->group_state = MLD6_GROUP_IDLE_MEMBER;
+    }
+  }
+}
+
+/* An MLDv2 query (RFC 3810 5.1, 6.2) of Length bytes on netif, the version answered being 2 */
+static void
+mld6_v2_query(struct netif *netif, struct pbuf *p, u16_t length)
+{
+  struct mld6_ifstate *ifs = MLD6_IFS(netif);
+  u8_t h[MLD6_V2_QUERY_HLEN];
+  u32_t maxresp, qi;
+  u16_t code, nsrc, delay, i;
+  ip6_addr_t addr;
+  struct mld_group *group;
+
+  if (pbuf_copy_partial(p, h, MLD6_V2_QUERY_HLEN, 0) != MLD6_V2_QUERY_HLEN) {
+    return;
+  }
+  nsrc = (u16_t)((h[26] << 8) | h[27]);
+  if ((u32_t)MLD6_V2_QUERY_HLEN + (u32_t)nsrc * 16 > length) {
+    MLD6_STATS_INC(mld6.lenerr);
+    return;
+  }
+
+  /* Maximum Response Code (5.1.3) in milliseconds, QRV and QQIC (5.1.8, 5.1.9) */
+  code = (u16_t)((h[4] << 8) | h[5]);
+  maxresp = (code < 32768) ? code : (u32_t)((code & 0x0FFF) | 0x1000) << (((code >> 12) & 7) + 3);
+  if (h[24] & 7) {
+    ifs->qrv = (u8_t)(h[24] & 7);
+  }
+  qi = (h[25] < 128) ? h[25] : (u32_t)((h[25] & 0x0F) | 0x10) << (((h[25] >> 4) & 7) + 3);
+  ifs->qi = qi;
+  delay = mld6_rand_ticks(maxresp / MLD6_TMR_INTERVAL);
+
+  MEMCPY(addr.addr, &h[8], 16);
+  ip6_addr_clear_zone(&addr);
+
+  MLD6_TMR_SETTLE();
+  if (ip6_addr_isany(&addr)) {
+    /* a general query: one answer for every group at a random time, unless one is due earlier */
+    if (nsrc == 0 && ip6_addr_isallnodes_linklocal(ip6_current_dest_addr())) {
+      MLD6_STATS_INC(mld6.rx_general);
+      if (ifs->gtimer == 0 || delay < ifs->gtimer) {
+        ifs->gtimer = delay;
+      }
+    }
+  } else if (ifs->gtimer == 0 || delay < ifs->gtimer) {
+    ip6_addr_assign_zone(&addr, IP6_MULTICAST, netif);
+    group = mld6_lookfor_group(netif, &addr);
+    MLD6_STATS_INC(mld6.rx_group);
+    if (group != NULL && mld6_reportable(&group->group_address)) {
+      u8_t pending = (group->group_state == MLD6_GROUP_DELAYING_MEMBER && group->timer > 0);
+
+      if (nsrc == 0 || (pending && !group->qsrc_pending)) {
+        /* group specific, or a group specific answer is pending already */
+        group->qsrc_pending = 0;
+        mld6_list_free(&group->qsrc, &group->nqsrc);
+      } else {
+        if (!pending) {
+          group->qsrc_pending = 1;
+          mld6_list_free(&group->qsrc, &group->nqsrc);
+        }
+        for (i = 0; i < nsrc; i++) {
+          u8_t a[16];
+
+          if (pbuf_copy_partial(p, a, 16, (u16_t)(MLD6_V2_QUERY_HLEN + i * 16)) != 16 ||
+              !mld6_list_add(&group->qsrc, &group->nqsrc, a)) {
+            /* too many: the group specific answer */
+            group->qsrc_pending = 0;
+            mld6_list_free(&group->qsrc, &group->nqsrc);
+            break;
+          }
+        }
+      }
+      if (!pending || delay < group->timer) {
+        group->timer = delay;
+      }
+      group->group_state = MLD6_GROUP_DELAYING_MEMBER;
+    }
+  }
+  MLD6_TMR_ARM();
+}
+
+/* The group's revival from the interface's leaving list, if it is there (core lock held) */
+static struct mld_group *
+mld6_revive_group(struct netif *netif, const ip6_addr_t *addr)
+{
+  struct mld6_ifstate *ifs = MLD6_IFS(netif);
+  struct mld_group **link, *group;
+
+  for (link = &ifs->leaving; (group = *link) != NULL; link = &group->next) {
+    if (ip6_addr_eq(&group->group_address, addr)) {
+      *link = group->next;
+      group->next = netif_mld6_data(netif);
+      netif_set_client_data(netif, LWIP_NETIF_CLIENT_DATA_INDEX_MLD6, group);
+      return group;
+    }
+  }
+  return NULL;
+}
+#endif /* MLD6_V2 */
 
 
 /**
@@ -218,11 +833,24 @@ mld6_stop(struct netif *netif)
     }
 
     /* free group */
+#if MLD6_V2
+    mld6_group_free(group);
+#else
     memp_free(MEMP_MLD6_GROUP, group);
+#endif
 
     /* move to "next" */
     group = next;
   }
+#if MLD6_V2
+  /* NitroOS: the groups whose leave was still being retransmitted, and the interface's MLD state */
+  while (MLD6_IFS(netif)->leaving != NULL) {
+    group = MLD6_IFS(netif)->leaving;
+    MLD6_IFS(netif)->leaving = group->next;
+    mld6_group_free(group);
+  }
+  memset(MLD6_IFS(netif), 0, sizeof(struct mld6_ifstate));
+#endif
   return ERR_OK;
 }
 
@@ -235,6 +863,31 @@ void
 mld6_report_groups(struct netif *netif)
 {
   struct mld_group *group = netif_mld6_data(netif);
+
+#if MLD6_V2
+  /* NitroOS: MLDv2 announces every group again with a state change report (its whole state), sent within half a
+   * second and retransmitted (RFC 3810 6.1) */
+  if (mld6_version(netif) == 2) {
+    struct mld6_ifstate *ifs = MLD6_IFS(netif);
+
+    if (!(netif->flags & NETIF_FLAG_MLD6)) {
+      return;
+    }
+    MLD6_TMR_SETTLE();
+    for (; group != NULL; group = group->next) {
+      if (!mld6_reportable(&group->group_address)) {
+        continue;
+      }
+      mld6_list_free(&group->allow, &group->nallow);
+      mld6_list_free(&group->block, &group->nblock);
+      group->chg_mode = 1;
+      group->rexmit = ifs->qrv ? ifs->qrv : MLD6_DEFAULT_QRV;
+      group->rtimer = mld6_rand_ticks(MLD6_JOIN_DELAYING_MEMBER_TMR_MS / MLD6_TMR_INTERVAL);
+    }
+    MLD6_TMR_ARM();
+    return;
+  }
+#endif
 
   while (group != NULL) {
     mld6_delayed_report(group, MLD6_JOIN_DELAYING_MEMBER_TMR_MS);
@@ -286,6 +939,21 @@ mld6_new_group(struct netif *ifp, const ip6_addr_t *addr)
     group->group_state        = MLD6_GROUP_IDLE_MEMBER;
     group->last_reporter_flag = 0;
     group->use                = 0;
+#if MLD6_V2
+    group->sock_mode          = MLD6_FMODE_INCLUDE;
+    group->sock_nsrc          = 0;
+    group->sock_srcs          = NULL;
+    group->rtimer             = 0;
+    group->rexmit             = 0;
+    group->chg_mode           = 0;
+    group->nallow             = 0;
+    group->nblock             = 0;
+    group->allow              = NULL;
+    group->block              = NULL;
+    group->qsrc_pending       = 0;
+    group->nqsrc              = 0;
+    group->qsrc               = NULL;
+#endif
     group->next               = netif_mld6_data(ifp);
 
     netif_set_client_data(ifp, LWIP_NETIF_CLIENT_DATA_INDEX_MLD6, group);
@@ -338,6 +1006,7 @@ mld6_input(struct pbuf *p, struct netif *inp)
 {
   struct mld_header *mld_hdr;
   struct mld_group *group;
+  u16_t maxresp;
 
   MLD6_STATS_INC(mld6.recv);
 
@@ -360,6 +1029,36 @@ mld6_input(struct pbuf *p, struct netif *inp)
       MLD6_STATS_INC(mld6.drop);
       break;
     }
+    maxresp = lwip_ntohs(mld_hdr->max_resp_delay);
+#if MLD6_V2
+    /* NitroOS: the query's version by its length (RFC 3810 8.1): 24 bytes MLDv1, 28 or more MLDv2, others ignored.
+     * An MLDv1 query starts (or extends) MLDv1 compatibility for the Older Version Querier Present Timeout
+     * (RFC 3810 8.2.1, 9.12), which cancels what MLDv2 had pending; an MLDv2 query is answered with MLDv2 unless
+     * MLDv1 compatibility holds, then as an MLDv1 query (its maximum response code decoded) */
+    if (p->tot_len >= MLD6_V2_QUERY_HLEN) {
+      if (mld6_version(inp) == 2) {
+        mld6_v2_query(inp, p, p->tot_len);
+        break;
+      }
+      if (maxresp >= 32768) {
+        u32_t decoded = (u32_t)((maxresp & 0x0FFF) | 0x1000) << (((maxresp >> 12) & 7) + 3);
+        maxresp = (decoded > 0xFFFF) ? 0xFFFF : (u16_t)decoded;
+      }
+    } else if (p->tot_len == sizeof(struct mld_header)) {
+      struct mld6_ifstate *ifs = MLD6_IFS(inp);
+
+      if (mld6_version(inp) == 2) {
+        mld6_v2_cancel(inp);
+      }
+      ifs->v1 = 1;
+      ifs->v1_until = sys_now() + (u32_t)(ifs->qrv ? ifs->qrv : MLD6_DEFAULT_QRV) *
+                      (ifs->qi ? ifs->qi : MLD6_DEFAULT_QI) * 1000 + maxresp;
+    } else {
+      MLD6_STATS_INC(mld6.lenerr);
+      MLD6_STATS_INC(mld6.drop);
+      break;
+    }
+#endif /* MLD6_V2 */
     /* Is it a general query? */
     if (ip6_addr_isallnodes_linklocal(ip6_current_dest_addr()) &&
         ip6_addr_isany(&(mld_hdr->multicast_address))) {
@@ -369,7 +1068,7 @@ mld6_input(struct pbuf *p, struct netif *inp)
       while (group != NULL) {
         if ((!(ip6_addr_ismulticast_iflocal(&(group->group_address)))) &&
             (!(ip6_addr_isallnodes_linklocal(&(group->group_address))))) {
-          mld6_delayed_report(group, lwip_ntohs(mld_hdr->max_resp_delay));
+          mld6_delayed_report(group, maxresp);
         }
         group = group->next;
       }
@@ -381,7 +1080,7 @@ mld6_input(struct pbuf *p, struct netif *inp)
       group = mld6_lookfor_group(inp, ip6_current_dest_addr());
       if (group != NULL) {
         /* Schedule a report. */
-        mld6_delayed_report(group, lwip_ntohs(mld_hdr->max_resp_delay));
+        mld6_delayed_report(group, maxresp);
       }
     }
     break; /* ICMP6_TYPE_MLQ */
@@ -390,6 +1089,16 @@ mld6_input(struct pbuf *p, struct netif *inp)
      * We use IP6 destination address to have a memory aligned copy.
      * mld_hdr->multicast_address should be the same. */
     MLD6_STATS_INC(mld6.rx_report);
+    /* NitroOS: another listener's report cancels ours only from the link (link-local source, hop limit 1, as a
+     * query), and only in MLDv1: MLDv2 has no report suppression (RFC 3810 7.2.1) */
+    if (!ip6_addr_islinklocal(ip6_current_src_addr()) || IP6H_HOPLIM(ip6_current_header()) != MLD6_HL) {
+      break;
+    }
+#if MLD6_V2
+    if (mld6_version(inp) == 2) {
+      break;
+    }
+#endif
     group = mld6_lookfor_group(inp, ip6_current_dest_addr());
     if (group != NULL) {
       /* If we are waiting to report, cancel it. */
@@ -411,6 +1120,153 @@ mld6_input(struct pbuf *p, struct netif *inp)
 
   pbuf_free(p);
 }
+
+#if MLD6_V2
+/* NitroOS: the group of addr on netif, made (or revived from the leaving list) when there is none */
+static struct mld_group *
+mld6_get_group(struct netif *netif, const ip6_addr_t *addr, u8_t *created)
+{
+  struct mld_group *group = mld6_lookfor_group(netif, addr);
+
+  *created = 0;
+  if (group != NULL) {
+    return group;
+  }
+  group = mld6_revive_group(netif, addr);
+  if (group == NULL) {
+    group = mld6_new_group(netif, addr);
+    if (group == NULL) {
+      return NULL;
+    }
+  }
+  *created = 1;
+  /* Activate this address on the MAC layer. */
+  if (netif->mld_mac_filter != NULL) {
+    netif->mld_mac_filter(netif, addr, NETIF_ADD_MAC_FILTER);
+  }
+  return group;
+}
+
+/* NitroOS: the filter of a group changed from (omode, olist): the reports of the MLD version the interface speaks
+ * (MLDv1: a report when the group starts to be listened to; MLDv2: a state change report), and the group goes
+ * when nothing listens any more (MLDv1: a done message if we reported last; MLDv2: kept on the leaving list while
+ * its state change report is retransmitted) */
+static void
+mld6_after_change(struct netif *netif, struct mld_group *group, u8_t omode, const u8_t (*olist)[16], u16_t on)
+{
+  u8_t was = mld6_listening(omode, on), is = (u8_t)mld6_group_listening(group);
+  u8_t v1 = (mld6_version(netif) == 1);
+
+  if (v1) {
+    if (!was && is) {
+      MLD6_STATS_INC(mld6.tx_report);
+      mld6_send(netif, group, ICMP6_TYPE_MLR);
+      mld6_delayed_report(group, MLD6_JOIN_DELAYING_MEMBER_TMR_MS);
+    }
+  } else {
+    mld6_v2_changed(netif, group, omode, olist, on);
+  }
+  if (is) {
+    return;
+  }
+
+  mld6_remove_group(netif, group);
+  if (v1 && group->last_reporter_flag) {
+    MLD6_STATS_INC(mld6.tx_leave);
+    mld6_send(netif, group, ICMP6_TYPE_MLD);
+  }
+  if (netif->mld_mac_filter != NULL) {
+    netif->mld_mac_filter(netif, &group->group_address, NETIF_DEL_MAC_FILTER);
+  }
+  if (!v1 && group->rexmit > 0 && group->rtimer > 0) {
+    group->timer = 0;
+    group->group_state = MLD6_GROUP_IDLE_MEMBER;
+    group->qsrc_pending = 0;
+    mld6_list_free(&group->qsrc, &group->nqsrc);
+    group->next = MLD6_IFS(netif)->leaving;
+    MLD6_IFS(netif)->leaving = group;
+  } else {
+    mld6_group_free(group);
+  }
+}
+
+/* NitroOS: one retransmission of a group's pending state change records */
+static void
+mld6_rexmit(struct mld6_rb *rb, struct mld_group *group)
+{
+  mld6_rb_pending(rb, group);
+  if (group->rexmit) {
+    group->rexmit--;
+  }
+  if (group->rexmit) {
+    group->rtimer = mld6_rand_ticks(MLD6_URI_TICKS);
+  } else {
+    mld6_pending_clear(group);
+  }
+}
+
+/**
+ * NitroOS: set the sockets' filter of a group on a network interface (RFC 3810 4.2: the merge of every socket's
+ * filter; INCLUDE with no source = no socket listens). The group's filter is this one unless an any-source join
+ * (mld6_joingroup_netif) holds it, which makes it EXCLUDE with no source. A change is reported.
+ *
+ * @param srcs nsrc source addresses of 16 bytes each (copied)
+ * @return ERR_OK, or ERR_MEM
+ */
+err_t
+mld6_set_filter_netif(struct netif *netif, const ip6_addr_t *groupaddr, u8_t mode, const u8_t (*srcs)[16], u16_t nsrc)
+{
+  struct mld_group *group;
+  u8_t created = 0, omode;
+  const u8_t (*olist)[16];
+  u16_t on;
+  u8_t (*copy)[16] = NULL, (*old)[16];
+#if LWIP_IPV6_SCOPES
+  ip6_addr_t ip6addr;
+
+  if (ip6_addr_lacks_zone(groupaddr, IP6_MULTICAST)) {
+    ip6_addr_set(&ip6addr, groupaddr);
+    ip6_addr_assign_zone(&ip6addr, IP6_MULTICAST, netif);
+    groupaddr = &ip6addr;
+  }
+  IP6_ADDR_ZONECHECK_NETIF(groupaddr, netif);
+#endif /* LWIP_IPV6_SCOPES */
+
+  LWIP_ASSERT_CORE_LOCKED();
+
+  if (!mld6_listening(mode, nsrc)) {
+    group = mld6_lookfor_group(netif, groupaddr);
+    if (group == NULL) {
+      return ERR_OK;
+    }
+  } else {
+    group = mld6_get_group(netif, groupaddr, &created);
+    if (group == NULL) {
+      return ERR_MEM;
+    }
+  }
+  if (nsrc) {
+    copy = (u8_t (*)[16])mem_malloc((mem_size_t)(nsrc * 16));
+    if (copy == NULL) {
+      if (created) {
+        mld6_after_change(netif, group, MLD6_FMODE_INCLUDE, NULL, 0);
+      }
+      return ERR_MEM;
+    }
+    MEMCPY(copy, srcs, (size_t)nsrc * 16);
+  }
+  mld6_filter(group, &omode, &olist, &on);
+  old = group->sock_srcs;
+  group->sock_srcs = copy;
+  group->sock_nsrc = nsrc;
+  group->sock_mode = mode;
+  mld6_after_change(netif, group, omode, olist, on);
+  if (old != NULL) {
+    mem_free(old);
+  }
+  return ERR_OK;
+}
+#endif /* MLD6_V2 */
 
 /**
  * @ingroup mld6
@@ -477,6 +1333,24 @@ mld6_joingroup_netif(struct netif *netif, const ip6_addr_t *groupaddr)
 #endif /* LWIP_IPV6_SCOPES */
 
   LWIP_ASSERT_CORE_LOCKED();
+
+#if MLD6_V2
+  /* NitroOS: an any-source join (EXCLUDE with no source), reported by the version the interface speaks */
+  {
+    u8_t created, omode;
+    const u8_t (*olist)[16];
+    u16_t on;
+
+    group = mld6_get_group(netif, groupaddr, &created);
+    if (group == NULL) {
+      return ERR_MEM;
+    }
+    mld6_filter(group, &omode, &olist, &on);
+    group->use++;
+    mld6_after_change(netif, group, omode, olist, on);
+    return ERR_OK;
+  }
+#endif /* MLD6_V2 */
 
   /* find group or create a new one if not found */
   group = mld6_lookfor_group(netif, groupaddr);
@@ -569,6 +1443,21 @@ mld6_leavegroup_netif(struct netif *netif, const ip6_addr_t *groupaddr)
   /* find group */
   group = mld6_lookfor_group(netif, groupaddr);
 
+#if MLD6_V2
+  /* NitroOS: one any-source join less; the group goes when no other join and no socket's filter holds it */
+  if (group != NULL && group->use > 0) {
+    u8_t omode;
+    const u8_t (*olist)[16];
+    u16_t on;
+
+    mld6_filter(group, &omode, &olist, &on);
+    group->use--;
+    mld6_after_change(netif, group, omode, olist, on);
+    return ERR_OK;
+  }
+  return ERR_VAL;
+#endif /* MLD6_V2 */
+
   if (group != NULL) {
     /* Leave if there is no other use of the group */
     if (group->use <= 1) {
@@ -626,6 +1515,25 @@ mld6_tmr_ticks(u32_t ticks)
 
   NETIF_FOREACH(netif) {
     struct mld_group *group = netif_mld6_data(netif);
+#if MLD6_V2
+    /* NitroOS: MLDv2 records due in this tick go out together, in as few reports as they fit */
+    struct mld6_ifstate *ifs = MLD6_IFS(netif);
+    struct mld_group **link;
+    struct mld6_rb rb;
+    u8_t v2 = (mld6_version(netif) == 2);
+
+    mld6_rb_init(&rb, netif);
+    if (ifs->gtimer > 0) {
+      ifs->gtimer = (ifs->gtimer > ticks) ? (u16_t)(ifs->gtimer - ticks) : 0;
+      if (ifs->gtimer == 0 && v2) {
+        struct mld_group *g;
+
+        for (g = group; g != NULL; g = g->next) {
+          mld6_rb_current(&rb, g);
+        }
+      }
+    }
+#endif /* MLD6_V2 */
 
     while (group != NULL) {
       if (group->timer > 0) {
@@ -633,14 +1541,56 @@ mld6_tmr_ticks(u32_t ticks)
         if (group->timer == 0) {
           /* If the state is MLD6_GROUP_DELAYING_MEMBER then we send a report for this group */
           if (group->group_state == MLD6_GROUP_DELAYING_MEMBER) {
-            MLD6_STATS_INC(mld6.tx_report);
-            mld6_send(netif, group, ICMP6_TYPE_MLR);
+#if MLD6_V2
+            if (v2) {
+              /* the answer to a group (and source) specific query */
+              if (group->qsrc_pending) {
+                mld6_rb_source_answer(&rb, group);
+              } else {
+                mld6_rb_current(&rb, group);
+              }
+              group->qsrc_pending = 0;
+              mld6_list_free(&group->qsrc, &group->nqsrc);
+            } else
+#endif /* MLD6_V2 */
+            {
+              MLD6_STATS_INC(mld6.tx_report);
+              mld6_send(netif, group, ICMP6_TYPE_MLR);
+            }
             group->group_state = MLD6_GROUP_IDLE_MEMBER;
           }
         }
       }
+#if MLD6_V2
+      if (group->rtimer > 0) {
+        group->rtimer = (group->rtimer > ticks) ? (u16_t)(group->rtimer - ticks) : 0;
+        if (group->rtimer == 0) {
+          mld6_rexmit(&rb, group);
+        }
+      }
+#endif /* MLD6_V2 */
       group = group->next;
     }
+
+#if MLD6_V2
+    /* the groups no longer listened to: their retransmissions, then they go */
+    link = &ifs->leaving;
+    while ((group = *link) != NULL) {
+      if (group->rtimer > 0) {
+        group->rtimer = (group->rtimer > ticks) ? (u16_t)(group->rtimer - ticks) : 0;
+        if (group->rtimer == 0) {
+          mld6_rexmit(&rb, group);
+        }
+      }
+      if (group->rtimer == 0) {
+        *link = group->next;
+        mld6_group_free(group);
+        continue;
+      }
+      link = &group->next;
+    }
+    mld6_rb_flush(&rb);
+#endif /* MLD6_V2 */
   }
 }
 

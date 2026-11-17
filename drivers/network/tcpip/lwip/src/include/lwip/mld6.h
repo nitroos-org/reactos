@@ -54,6 +54,17 @@
 extern "C" {
 #endif
 
+/* NitroOS: MLD6_V2 1 = MLDv2 listener reports (RFC 3810) with source filters, and MLDv1 (RFC 2710) while an
+ * MLDv1 querier is on the link (RFC 3810 8); 0 = lwIP's MLDv1 only */
+#ifndef MLD6_V2
+#define MLD6_V2                        0
+#endif
+#define MLD6_FMODE_INCLUDE             0
+#define MLD6_FMODE_EXCLUDE             1
+/* The sources of a group's filter MLD reports at most: a larger INCLUDE set is reported as EXCLUDE with none (all
+ * sources: more traffic, never less), a larger EXCLUDE set as no exclusion at all, for the same reason */
+#define MLD6_MAX_SOURCES               256
+
 /** MLD group */
 struct mld_group {
   /** next link */
@@ -68,6 +79,24 @@ struct mld_group {
   u16_t              timer;
   /** counter of simultaneous uses */
   u8_t               use;
+#if MLD6_V2
+  /* NitroOS: the group's filter is that of the any-source joins (use, mld6_joingroup_netif: EXCLUDE with no
+   * source) merged with the sockets' filter (mld6_set_filter_netif) */
+  u8_t               sock_mode;     /* MLD6_FMODE_*; INCLUDE with no source: no socket listens */
+  u16_t              sock_nsrc;
+  u8_t             (*sock_srcs)[16];
+  /* state change report (RFC 3810 6.1): the pending records, sent at once and rexmit more times */
+  u16_t              rtimer;
+  u8_t               rexmit;
+  u8_t               chg_mode;      /* a filter mode change: CHANGE_TO_INCLUDE / CHANGE_TO_EXCLUDE */
+  u16_t              nallow, nblock;
+  u8_t             (*allow)[16];
+  u8_t             (*block)[16];
+  /* a pending answer to a group-and-source specific query (RFC 3810 6.2): the sources asked about */
+  u8_t               qsrc_pending;
+  u16_t              nqsrc;
+  u8_t             (*qsrc)[16];
+#endif /* MLD6_V2 */
 };
 
 #define MLD6_TMR_INTERVAL              100 /* Milliseconds */
@@ -87,6 +116,10 @@ err_t  mld6_joingroup(const ip6_addr_t *srcaddr, const ip6_addr_t *groupaddr);
 err_t  mld6_joingroup_netif(struct netif *netif, const ip6_addr_t *groupaddr);
 err_t  mld6_leavegroup(const ip6_addr_t *srcaddr, const ip6_addr_t *groupaddr);
 err_t  mld6_leavegroup_netif(struct netif *netif, const ip6_addr_t *groupaddr);
+#if MLD6_V2
+err_t  mld6_set_filter_netif(struct netif *netif, const ip6_addr_t *groupaddr, u8_t mode, const u8_t (*srcs)[16], u16_t nsrc);
+u8_t   mld6_version(struct netif *netif);
+#endif /* MLD6_V2 */
 
 /** @ingroup mld6
  * Get list head of MLD6 groups for netif.

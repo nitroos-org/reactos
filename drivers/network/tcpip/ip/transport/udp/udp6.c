@@ -22,19 +22,23 @@
  * is answered with an ICMPv6 port unreachable (RFC 4443 3.1; lwIP rate limits its errors), unless it went to a
  * multicast group.
  *
- * Multicast groups (IPV6_ADD_MEMBERSHIP): per socket (up to UDP6_SOCKET_GROUPS), and per interface a count of
- * the sockets that joined. The first socket in a group joins it in lwIP's MLD on that interface (mld6.c, MLDv1,
- * RFC 2710): ip6_input then takes the group, and MLD reports it to the link (at once, again within half a second,
- * and in answer to each query), so a switch that snoops MLD forwards it; the last socket leaving sends the done
- * message. The group also goes in the adapter's multicast list (if6.c, TCP6UpdateMulticast). A socket receives a
- * group's datagram only if it joined the group on the interface the datagram arrived on (VERIFY ON ORACLE).
- * Windows reports with MLDv2 (RFC 3810, VERIFY on a capture); MLDv1 is what lwIP has, and an MLDv2 router or
- * snooping switch falls back to it for the link (RFC 3810 8).
+ * Multicast groups (IPV6_ADD_MEMBERSHIP, MCAST_JOIN_GROUP, MCAST_JOIN_SOURCE_GROUP, source filters): per socket
+ * (up to UDP6_SOCKET_GROUPS), each with its filter (RFC 3678: INCLUDE these sources, or EXCLUDE these; the Winsock
+ * helper keeps the socket API's rules and hands the stack a group's whole filter, UDP6SetFilter), and per interface
+ * the list of the sockets' joins. The filters of every socket in a group on an interface are merged (RFC 3810
+ * 4.2; one walk of that list under the core lock, over sorted source lists, with bounded work: Udp6UpdateMld) into
+ * the filter MLD reports (mld6.c, MLDv2 with source lists, RFC 3810; MLDv1 while an MLDv1 querier is on
+ * the link): ip6_input takes the group while any socket listens to it, and a switch or router that snoops MLD
+ * forwards it (and, with MLDv2, only the sources asked for). The group also goes in the adapter's multicast list
+ * (if6.c, TCP6UpdateMulticast). A socket receives a group's datagram only if it joined the group on the interface
+ * the datagram arrived on and its filter takes the source. Windows Server 2022 (peer capture 2026-11-16) reports
+ * with MLDv2 and falls back to MLDv1 with an MLDv1 querier, as here.
  */
 
 #include "precomp.h"
 
 #include <nitrofwk.h>
+#include <nitrotdi.h>
 #include "lwip/pbuf.h"
 #include "lwip/ip.h"
 #include "lwip/ip6.h"
@@ -73,8 +77,10 @@ VOID Echo6CompleteDone(VOID);
 VOID Echo6Startup(VOID);
 
 #define UDP6_TAG                'U6pT'
-#define UDP6_SOCKET_GROUPS      20      /* IP_MAX_MEMBERSHIPS */
+#define UDP6_SOCKET_GROUPS      NITRO_MCAST_MAX_GROUPS  /* IP_MAX_MEMBERSHIPS (Windows takes at least 300: release notes) */
 #define UDP6_MACHINE_GROUPS     128
+/* The sources of a group's merged filter MLD is told (MLD6_MAX_SOURCES); beyond them EXCLUDE with none */
+#define UDP6_MLD_SOURCES        256
 /* Table entries one process can take: a group joined by sockets of other processes costs a joiner nothing (it
    shares the entry), a new one is charged to the process that joined it first, so no process can fill the table
    for everybody (Windows limits a socket, not the machine) */
@@ -95,9 +101,20 @@ typedef struct _UDP6_GROUP {
     UCHAR Zone;                 /* lwIP's netif index of the interface */
 } UDP6_GROUP, *PUDP6_GROUP;
 
+/* A socket's group and its source filter (one allocation per join). The sources are written under the socket's object
+   lock AND the core lock: delivery reads them under the object lock, the MLD merge (Udp6UpdateMld) under the core lock.
+   They are sorted and have no duplicates (delivery searches them, the merge walks them) */
+typedef struct _UDP6_MEMBER {
+    LIST_ENTRY GroupLink;       /* in the members of the machine's entry of the group (core lock) */
+    UDP6_GROUP Group;
+    UCHAR Mode;                 /* NITRO_MCAST_INCLUDE / NITRO_MCAST_EXCLUDE */
+    ULONG NumSources;
+    UCHAR (*Sources)[16];       /* UDP6_TAG */
+} UDP6_MEMBER, *PUDP6_MEMBER;
+
 typedef struct _UDP6_MEMBERSHIPS {
     ULONG Count;
-    UDP6_GROUP Groups[UDP6_SOCKET_GROUPS];
+    PUDP6_MEMBER Groups[UDP6_SOCKET_GROUPS];
 } UDP6_MEMBERSHIPS, *PUDP6_MEMBERSHIPS;
 
 /* The groups some socket joined, per interface (core lock) */
@@ -105,7 +122,8 @@ typedef struct _UDP6_MACHINE_GROUP {
     UDP6_GROUP Group;
     ULONG Sockets;
     HANDLE Owner;               /* the process that took the entry (it stays charged until the entry is free) */
-} UDP6_MACHINE_GROUP;
+    LIST_ENTRY Members;         /* the UDP6_MEMBERs, Sockets of them: the merge walks these, not every socket */
+} UDP6_MACHINE_GROUP, *PUDP6_MACHINE_GROUP;
 
 static UDP6_MACHINE_GROUP Udp6Groups[UDP6_MACHINE_GROUPS];
 
@@ -416,10 +434,77 @@ Drop:
     return 1;
 }
 
-/* Joined Group on Zone (the socket's object lock held) */
+/* The order of two sources (bytewise: no memcmp in the kernel build) */
+static
+LONG
+Udp6CompareSource(const UCHAR *A, const UCHAR *B)
+{
+    ULONG i;
+
+    for (i = 0; i < 16; i++)
+    {
+        if (A[i] != B[i])
+            return A[i] < B[i] ? -1 : 1;
+    }
+    return 0;
+}
+
+/* Whether Source is in a sorted list */
 static
 BOOLEAN
-Udp6IsMember(PADDRESS_FILE AddrFile, const UCHAR *Group, UCHAR Zone)
+Udp6HasSource(const UCHAR (*Sources)[16], ULONG Count, const UCHAR *Source)
+{
+    ULONG Low = 0, High = Count;
+
+    while (Low < High)
+    {
+        ULONG Mid = Low + (High - Low) / 2;
+        LONG Order = Udp6CompareSource(Sources[Mid], Source);
+
+        if (Order == 0)
+            return TRUE;
+        if (Order < 0)
+            Low = Mid + 1;
+        else
+            High = Mid;
+    }
+    return FALSE;
+}
+
+/* A list of sources sorted and without duplicates; returns how many are left */
+static
+ULONG
+Udp6SortSources(UCHAR (*Sources)[16], ULONG Count)
+{
+    ULONG Gap, i, j, Kept;
+    UCHAR Value[16];
+
+    for (Gap = Count / 2; Gap; Gap /= 2)
+    {
+        for (i = Gap; i < Count; i++)
+        {
+            RtlCopyMemory(Value, Sources[i], 16);
+            for (j = i; j >= Gap && Udp6CompareSource(Sources[j - Gap], Value) > 0; j -= Gap)
+                RtlCopyMemory(Sources[j], Sources[j - Gap], 16);
+            RtlCopyMemory(Sources[j], Value, 16);
+        }
+    }
+    for (i = Kept = 0; i < Count; i++)
+    {
+        if (!Kept || Udp6CompareSource(Sources[Kept - 1], Sources[i]) != 0)
+        {
+            if (Kept != i)
+                RtlCopyMemory(Sources[Kept], Sources[i], 16);
+            Kept++;
+        }
+    }
+    return Kept;
+}
+
+/* Joined Group on Zone with a filter that takes Source (the socket's object lock held) */
+static
+BOOLEAN
+Udp6IsMember(PADDRESS_FILE AddrFile, const UCHAR *Group, UCHAR Zone, const UCHAR *Source)
 {
     PUDP6_MEMBERSHIPS M = AddrFile->Groups6;
     ULONG i;
@@ -428,8 +513,14 @@ Udp6IsMember(PADDRESS_FILE AddrFile, const UCHAR *Group, UCHAR Zone)
         return FALSE;
     for (i = 0; i < M->Count; i++)
     {
-        if (M->Groups[i].Zone == Zone && RtlCompareMemory(M->Groups[i].Group, Group, 16) == 16)
-            return TRUE;
+        PUDP6_MEMBER Member = M->Groups[i];
+
+        if (Member->Group.Zone == Zone && RtlCompareMemory(Member->Group.Group, Group, 16) == 16)
+        {
+            BOOLEAN Listed = Udp6HasSource((const UCHAR (*)[16])Member->Sources, Member->NumSources, Source);
+
+            return (Member->Mode == NITRO_MCAST_INCLUDE) ? Listed : !Listed;
+        }
     }
     return FALSE;
 }
@@ -498,7 +589,7 @@ Udp6Deliver(PUDP6_DEFERRED D)
             BOOLEAN Member;
 
             LockObject(AddrFile);
-            Member = Udp6IsMember(AddrFile, D->Dst, D->Zone);
+            Member = Udp6IsMember(AddrFile, D->Dst, D->Zone, D->Src);
             UnlockObject(AddrFile);
             if (Member)
                 DGDeliverDataEx(NULL, AddrFile, &Src, &Dst, D->SrcPort, D->DstPort, &Packet, D->Length, &D->Info);
@@ -896,19 +987,208 @@ LibMld6Random(VOID)
         Seed = (ULONG)KeQueryPerformanceCounter(NULL).QuadPart | 1;
     return RtlRandomEx(&Seed);
 }
+C_ASSERT(NITRO_MCAST_INCLUDE == MLD6_FMODE_INCLUDE && NITRO_MCAST_EXCLUDE == MLD6_FMODE_EXCLUDE);
+C_ASSERT(UDP6_MLD_SOURCES == MLD6_MAX_SOURCES);
+#endif /* LWIP_IPV6_MLD */
 
-/* Group in lwIP's MLD on netif: joined for the first socket, left after the last (core lock held) */
+/* The machine's entry of a group on an interface, or NULL when no socket is in it (core lock held) */
 static
-err_t
-Udp6Mld(struct netif *netif, const UDP6_GROUP *Group, BOOLEAN Join)
+PUDP6_MACHINE_GROUP
+Udp6FindGroup(const UDP6_GROUP *Group)
 {
-    ip6_addr_t Address;
+    ULONG i;
 
-    RtlCopyMemory(Address.addr, Group->Group, 16);
-    ip6_addr_clear_zone(&Address);
-    return Join ? mld6_joingroup_netif(netif, &Address) : mld6_leavegroup_netif(netif, &Address);
+    for (i = 0; i < UDP6_MACHINE_GROUPS; i++)
+    {
+        if (Udp6Groups[i].Sockets && Udp6Groups[i].Group.Zone == Group->Zone &&
+            RtlCompareMemory(Udp6Groups[i].Group.Group, Group->Group, 16) == 16)
+            return &Udp6Groups[i];
+    }
+    return NULL;
 }
 
+/* The work one merge may do, in list elements stepped over: what a handful of sockets with full lists cost, and
+   what no number of sockets can make more. Beyond it the merge reports EXCLUDE with no source (more traffic, never
+   less; the sockets' own filters still decide what they receive) */
+#define UDP6_MLD_WORK           16384
+
+/* The merge's lists (core lock) */
+static UCHAR Udp6MldList[2][UDP6_MLD_SOURCES][16];
+
+/* List of Count sorted sources becomes its intersection with the sorted Other (Keep) or its difference from it
+   (!Keep), in place; *Work counts the steps. Returns the new count */
+static
+ULONG
+Udp6MergeSources(UCHAR (*List)[16], ULONG Count, const UCHAR (*Other)[16], ULONG OtherCount, BOOLEAN Keep,
+                 PULONG Work)
+{
+    ULONG i = 0, j = 0, Kept = 0;
+
+    *Work += Count + OtherCount;
+    while (i < Count)
+    {
+        LONG Order = (j < OtherCount) ? Udp6CompareSource(List[i], Other[j]) : -1;
+
+        if (Order > 0)
+        {
+            j++;
+            continue;
+        }
+        if ((Order == 0) == Keep)
+        {
+            if (Kept != i)
+                RtlCopyMemory(List[Kept], List[i], 16);
+            Kept++;
+        }
+        if (Order == 0)
+            j++;
+        i++;
+    }
+    return Kept;
+}
+
+/* The merge of the sorted lists A and B (the union) into Out, which has room for UDP6_MLD_SOURCES; *Work counts the
+   steps. Returns the count, or more than UDP6_MLD_SOURCES when it does not fit */
+static
+ULONG
+Udp6UnionSources(UCHAR (*Out)[16], const UCHAR (*A)[16], ULONG ACount, const UCHAR (*B)[16], ULONG BCount, PULONG Work)
+{
+    ULONG i = 0, j = 0, Count = 0;
+
+    *Work += ACount + BCount;
+    while (i < ACount || j < BCount)
+    {
+        LONG Order = (i == ACount) ? 1 : (j == BCount) ? -1 : Udp6CompareSource(A[i], B[j]);
+        const UCHAR *Next = (Order <= 0) ? A[i] : B[j];
+
+        if (Count == UDP6_MLD_SOURCES)
+            return UDP6_MLD_SOURCES + 1;
+        RtlCopyMemory(Out[Count++], Next, 16);
+        if (Order <= 0)
+            i++;
+        if (Order >= 0)
+            j++;
+    }
+    return Count;
+}
+
+/* The filters of every socket's join of Group merged (RFC 3810 4.2): EXCLUDE when any socket excludes, with the
+ * sources every excluding socket excludes and no including socket includes; else INCLUDE with every source some
+ * socket includes (none: nobody listens). MLD reports it (mld6.c). Core lock held, so no socket's filter changes
+ * meanwhile (they change under the core lock). The members are the entry's own list (no walk over every socket, no
+ * other lock), the lists are sorted, and the work is bounded (UDP6_MLD_WORK): the starting point of the intersection
+ * is the smallest excluding list, so it never exceeds it. More sources than MLD reports, or more work than the bound:
+ * EXCLUDE with none (more traffic, never less) */
+static
+err_t
+Udp6UpdateMld(struct netif *netif, const UDP6_GROUP *Group)
+{
+    PUDP6_MACHINE_GROUP Machine = Udp6FindGroup(Group);
+    PLIST_ENTRY Entry;
+    PUDP6_MEMBER Smallest = NULL;
+    ULONG Excluders = 0, Included = 0, Count = 0, Work = 0, Bound = 0, Current = 0;
+    UCHAR (*List)[16] = NULL;
+    UCHAR Mode;
+    ip6_addr_t Address;
+    err_t Err;
+
+    for (Entry = Machine ? Machine->Members.Flink : NULL; Machine && Entry != &Machine->Members; Entry = Entry->Flink)
+    {
+        PUDP6_MEMBER Member = CONTAINING_RECORD(Entry, UDP6_MEMBER, GroupLink);
+
+        if (Member->Mode == NITRO_MCAST_EXCLUDE)
+        {
+            if (!Smallest || Member->NumSources < Smallest->NumSources)
+                Smallest = Member;
+            Excluders++;
+        }
+        else
+        {
+            Included += Member->NumSources;
+        }
+    }
+
+    Mode = Excluders ? NITRO_MCAST_EXCLUDE : NITRO_MCAST_INCLUDE;
+    Bound = Excluders ? Smallest->NumSources : Included;
+    if (Bound > UDP6_MLD_SOURCES)
+    {
+        Mode = NITRO_MCAST_EXCLUDE;
+        Bound = 0;
+    }
+
+    if (Bound)
+    {
+        if (Excluders)
+        {
+            /* the intersection of the excluded sources, starting from the smallest list ... */
+            List = Udp6MldList[0];
+            Count = Smallest->NumSources;
+            RtlCopyMemory(List, Smallest->Sources, Count * 16);
+            for (Entry = Machine->Members.Flink; Entry != &Machine->Members && Count && Work <= UDP6_MLD_WORK;
+                 Entry = Entry->Flink)
+            {
+                PUDP6_MEMBER Member = CONTAINING_RECORD(Entry, UDP6_MEMBER, GroupLink);
+
+                if (Member != Smallest && Member->Mode == NITRO_MCAST_EXCLUDE)
+                    Count = Udp6MergeSources(List, Count, (const UCHAR (*)[16])Member->Sources, Member->NumSources,
+                                             TRUE, &Work);
+            }
+            /* ... less every included one */
+            for (Entry = Machine->Members.Flink; Entry != &Machine->Members && Count && Work <= UDP6_MLD_WORK;
+                 Entry = Entry->Flink)
+            {
+                PUDP6_MEMBER Member = CONTAINING_RECORD(Entry, UDP6_MEMBER, GroupLink);
+
+                if (Member->Mode == NITRO_MCAST_INCLUDE)
+                    Count = Udp6MergeSources(List, Count, (const UCHAR (*)[16])Member->Sources, Member->NumSources,
+                                             FALSE, &Work);
+            }
+        }
+        else
+        {
+            /* the union of the included sources */
+            for (Entry = Machine->Members.Flink; Entry != &Machine->Members && Count <= UDP6_MLD_SOURCES &&
+                                                 Work <= UDP6_MLD_WORK; Entry = Entry->Flink)
+            {
+                PUDP6_MEMBER Member = CONTAINING_RECORD(Entry, UDP6_MEMBER, GroupLink);
+
+                Count = Udp6UnionSources(Udp6MldList[1 - Current], (const UCHAR (*)[16])Udp6MldList[Current], Count,
+                                         (const UCHAR (*)[16])Member->Sources, Member->NumSources, &Work);
+                Current = 1 - Current;
+            }
+            List = Udp6MldList[Current];
+        }
+        if (Work > UDP6_MLD_WORK || Count > UDP6_MLD_SOURCES)
+        {
+            Mode = NITRO_MCAST_EXCLUDE;
+            Count = 0;
+        }
+    }
+
+    if (!Count)
+        List = NULL;
+
+#if LWIP_IPV6_MLD
+    RtlCopyMemory(Address.addr, Group->Group, 16);
+    ip6_addr_clear_zone(&Address);
+    Err = mld6_set_filter_netif(netif, &Address, Mode, (const u8_t (*)[16])List, (u16_t)Count);
+    if (Err != ERR_OK && Count)
+    {
+        /* No memory for MLD's copy of the sources: the coarse filter, which needs none (more traffic, never less;
+           keeping the old report could keep a source the sockets now listen to out) */
+        Err = mld6_set_filter_netif(netif, &Address, NITRO_MCAST_EXCLUDE, NULL, 0);
+    }
+#else
+    UNREFERENCED_PARAMETER(netif);
+    UNREFERENCED_PARAMETER(Address);
+    UNREFERENCED_PARAMETER(Mode);
+    Err = ERR_OK;
+#endif
+    return Err;
+}
+
+
+#if LWIP_IPV6_MLD
 /* lwIP's interface events for MLD (core lock held) */
 static
 void
@@ -925,7 +1205,7 @@ Udp6MldNetifEvent(struct netif *netif, netif_nsc_reason_t Reason, const netif_ex
         for (i = 0; i < UDP6_MACHINE_GROUPS; i++)
         {
             if (Udp6Groups[i].Sockets && Udp6Groups[i].Group.Zone == Zone)
-                Udp6Mld(netif, &Udp6Groups[i].Group, TRUE);
+                Udp6UpdateMld(netif, &Udp6Groups[i].Group);
         }
     }
 
@@ -956,8 +1236,9 @@ UDP6MldStart(VOID)
 }
 #endif /* LWIP_IPV6_MLD */
 
-/* One socket more or less in Group on its interface (core lock held). FALSE: no room for another group, in the
- * table or in Process's share of it */
+/* One socket more or less in Group on its interface (core lock held): the machine's table of groups and the adapter's
+ * multicast list (MLD follows the filters, Udp6UpdateMld). FALSE: no room for another group, in the table or in
+ * Process's share of it */
 static
 BOOLEAN
 Udp6CountMember(const UDP6_GROUP *Group, BOOLEAN Join, HANDLE Process)
@@ -996,59 +1277,85 @@ Udp6CountMember(const UDP6_GROUP *Group, BOOLEAN Join, HANDLE Process)
             return TRUE;
         if (Free == UDP6_MACHINE_GROUPS || Taken >= UDP6_PROCESS_GROUPS)
             return FALSE;
-#if LWIP_IPV6_MLD
-        /* MLD takes the group first: without it ip6_input would not take the group's datagrams */
-        netif = netif_get_by_index(Group->Zone);
-        if (netif && Udp6Mld(netif, Group, TRUE) != ERR_OK)
-            return FALSE;
-#endif
         Udp6Groups[Free].Group = *Group;
         Udp6Groups[Free].Sockets = 1;
         Udp6Groups[Free].Owner = Process;
+        InitializeListHead(&Udp6Groups[Free].Members);
     }
 
-    /* The first socket in the group, or the last one gone: the adapter's list changes (and MLD leaves the group
-       after the last one) */
+    /* The first socket in the group, or the last one gone: the adapter's list changes */
     netif = netif_get_by_index(Group->Zone);
     if (netif)
-    {
-#if LWIP_IPV6_MLD
-        if (!Join)
-            Udp6Mld(netif, Group, FALSE);
-#endif
         TCP6UpdateMulticastList(netif);
-    }
     return TRUE;
 }
 
+/*
+ * A socket's filter for one group (NITRO_AO_OPTION_MCAST_FILTER, nitrotdi.h; and IPV6_ADD/DROP_MEMBERSHIP):
+ * Mode with NumSources sources of 16 bytes; INCLUDE with none leaves the group. IfIndex 0 is the stack's choice:
+ * the interface the socket has the group on (for a change or a leave), else the default multicast interface.
+ * MustBeNew: STATUS_INVALID_PARAMETER when the socket has the group already (IPV6_ADD_MEMBERSHIP twice).
+ */
 NTSTATUS
-UDP6SetMembership(PADDRESS_FILE AddrFile, BOOLEAN Join, const VOID *Request, UINT Length)
+UDP6SetFilter(PADDRESS_FILE AddrFile, ULONG IfIndex, const UCHAR *GroupAddress, UCHAR Mode, ULONG NumSources,
+              const UCHAR (*Sources)[16], BOOLEAN MustBeNew)
 {
     UDP6_GROUP Group;
-    ULONG IfIndex, i;
+    ULONG i;
     struct netif *netif;
-    BOOLEAN Resolved = FALSE;
+    BOOLEAN Resolved = FALSE, Leave = (Mode == NITRO_MCAST_INCLUDE && NumSources == 0);
     PUDP6_MEMBERSHIPS M, New = NULL;
+    PUDP6_MEMBER NewMember = NULL, Gone = NULL, Member;
+    PUDP6_MACHINE_GROUP Machine;
+    UCHAR (*Copy)[16] = NULL, (*Old)[16] = NULL;
     NTSTATUS Status = STATUS_SUCCESS;
 
-    /* struct ipv6_mreq: the group, the interface index (0: the stack's choice) */
-    if (Length < 20 || !TCPIpv6Enabled)
+    if (!TCPIpv6Enabled || Mode > NITRO_MCAST_EXCLUDE)
         return STATUS_INVALID_PARAMETER;
-    RtlCopyMemory(Group.Group, Request, 16);
-    RtlCopyMemory(&IfIndex, (const UCHAR *)Request + 16, sizeof(IfIndex));
-    if (Group.Group[0] != 0xFF)
+    if (GroupAddress[0] != 0xFF)
         return STATUS_INVALID_ADDRESS;
+    if (NumSources > NITRO_MCAST_MAX_SOURCES)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    RtlZeroMemory(&Group, sizeof(Group));
+    RtlCopyMemory(Group.Group, GroupAddress, 16);
 
-    if (Join)
+    if (!Leave)
     {
         New = ExAllocatePoolWithTag(NonPagedPool, sizeof(*New), UDP6_TAG);
-        if (!New)
+        NewMember = ExAllocatePoolWithTag(NonPagedPool, sizeof(*NewMember), UDP6_TAG);
+        if (NumSources)
+            Copy = ExAllocatePoolWithTag(NonPagedPool, NumSources * 16, UDP6_TAG);
+        if (!New || !NewMember || (NumSources && !Copy))
+        {
+            if (New)
+                ExFreePoolWithTag(New, UDP6_TAG);
+            if (NewMember)
+                ExFreePoolWithTag(NewMember, UDP6_TAG);
+            if (Copy)
+                ExFreePoolWithTag(Copy, UDP6_TAG);
             return STATUS_INSUFFICIENT_RESOURCES;
+        }
         RtlZeroMemory(New, sizeof(*New));
+        RtlZeroMemory(NewMember, sizeof(*NewMember));
+        if (NumSources)
+        {
+            /* sorted, no duplicates (before any lock): delivery searches the list, the MLD merge walks it */
+            RtlCopyMemory(Copy, Sources, NumSources * 16);
+            NumSources = Udp6SortSources(Copy, NumSources);
+        }
     }
 
     LockObject(AddrFile);
     LOCK_TCPIP_CORE();
+
+    /* The socket's last handle is closed (FileCloseAddress, under the object lock): its groups are left now or
+       already (UDP6LeaveAll), so nothing may join again. A request that referenced the address object by its entity
+       before the close would otherwise link a member nobody leaves: the group stays joined and charged until reboot */
+    if (AddrFile->PortReleased && !Leave)
+    {
+        Status = STATUS_INVALID_ADDRESS;
+        goto Done;
+    }
 
     netif = IfIndex ? Udp6NetifOfIndex(IfIndex) : Udp6DefaultMulticastNetif();
     if (netif)
@@ -1056,21 +1363,21 @@ UDP6SetMembership(PADDRESS_FILE AddrFile, BOOLEAN Join, const VOID *Request, UIN
         Group.Zone = (UCHAR)netif_get_index(netif);
         Resolved = TRUE;
     }
-    if (!Join && !IfIndex && AddrFile->Groups6)
+    if (!MustBeNew && !IfIndex && AddrFile->Groups6)
     {
-        /* A leave without an interface ends the socket's join of the group, on whichever interface the join
-           landed: the default one may have changed since (an adapter that got its address, or went away) */
+        /* Without an interface, a change or a leave is for the socket's join of the group, on whichever interface
+           the join landed: the default one may have changed since (an adapter that got its address, or went away) */
         BOOLEAN Found = FALSE;
         UCHAR Zone = 0;
 
         M = AddrFile->Groups6;
         for (i = 0; i < M->Count; i++)
         {
-            if (RtlCompareMemory(M->Groups[i].Group, Group.Group, 16) == 16 &&
-                (!Found || (Resolved && M->Groups[i].Zone == Group.Zone)))
+            if (RtlCompareMemory(M->Groups[i]->Group.Group, Group.Group, 16) == 16 &&
+                (!Found || (Resolved && M->Groups[i]->Group.Zone == Group.Zone)))
             {
                 Found = TRUE;
-                Zone = M->Groups[i].Zone;
+                Zone = M->Groups[i]->Group.Zone;
             }
         }
         if (Found)
@@ -1084,8 +1391,9 @@ UDP6SetMembership(PADDRESS_FILE AddrFile, BOOLEAN Join, const VOID *Request, UIN
         Status = STATUS_INVALID_ADDRESS;
         goto Done;
     }
+    netif = netif_get_by_index(Group.Zone);
 
-    if (!AddrFile->Groups6 && Join)
+    if (!AddrFile->Groups6 && New)
     {
         AddrFile->Groups6 = New;
         New = NULL;
@@ -1094,31 +1402,74 @@ UDP6SetMembership(PADDRESS_FILE AddrFile, BOOLEAN Join, const VOID *Request, UIN
 
     for (i = 0; M && i < M->Count; i++)
     {
-        if (M->Groups[i].Zone == Group.Zone && RtlCompareMemory(M->Groups[i].Group, Group.Group, 16) == 16)
+        if (M->Groups[i]->Group.Zone == Group.Zone && RtlCompareMemory(M->Groups[i]->Group.Group, Group.Group, 16) == 16)
             break;
     }
 
-    if (Join)
+    if (!M || i == M->Count)
     {
-        /* A second join: WSAEINVAL through the helper (oracle); one past the limit: VERIFY ON ORACLE */
-        if (i < M->Count)
-            Status = STATUS_INVALID_PARAMETER;
-        else if (M->Count == UDP6_SOCKET_GROUPS || !Udp6CountMember(&Group, TRUE, AddrFile->ProcessId))
-            Status = STATUS_INSUFFICIENT_RESOURCES;
-        else
-            M->Groups[M->Count++] = Group;
-    }
-    else
-    {
-        if (!M || i == M->Count)
+        /* A new group: the socket's limit, the machine's table, and MLD's memory (Windows Server 2022 took 300
+           groups on one socket without an error: release notes) */
+        if (Leave)
         {
             Status = STATUS_INVALID_ADDRESS;
         }
+        else if (M->Count == UDP6_SOCKET_GROUPS || !Udp6CountMember(&Group, TRUE, AddrFile->ProcessId))
+        {
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+        }
         else
         {
-            M->Groups[i] = M->Groups[--M->Count];
-            Udp6CountMember(&Group, FALSE, NULL);
+            Member = NewMember;
+            Member->Group = Group;
+            Member->Mode = Mode;
+            Member->NumSources = NumSources;
+            Member->Sources = Copy;
+            Machine = Udp6FindGroup(&Group);
+            InsertTailList(&Machine->Members, &Member->GroupLink);
+            M->Groups[M->Count++] = Member;
+            NewMember = NULL;
+            Copy = NULL;
+            if (netif && Udp6UpdateMld(netif, &Group) != ERR_OK)
+            {
+                /* without MLD ip6_input would not take the group's datagrams */
+                M->Count--;
+                RemoveEntryList(&Member->GroupLink);
+                NewMember = Member;
+                Copy = Member->Sources;
+                Udp6CountMember(&Group, FALSE, NULL);
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+            }
         }
+    }
+    else if (MustBeNew)
+    {
+        /* a second join: WSAEINVAL through the helper (oracle) */
+        Status = STATUS_INVALID_PARAMETER;
+    }
+    else if (Leave)
+    {
+        Member = M->Groups[i];
+        M->Groups[i] = M->Groups[--M->Count];
+        RemoveEntryList(&Member->GroupLink);
+        Old = Member->Sources;
+        Gone = Member;
+        Udp6CountMember(&Group, FALSE, NULL);
+        if (netif)
+            Udp6UpdateMld(netif, &Group);
+    }
+    else
+    {
+        Member = M->Groups[i];
+        Old = Member->Sources;
+        Member->Mode = Mode;
+        Member->NumSources = NumSources;
+        Member->Sources = Copy;
+        Copy = NULL;
+        /* without memory for MLD's copy the group is reported as EXCLUDE with none (Udp6UpdateMld); the socket's own
+           filter is in force either way */
+        if (netif)
+            Udp6UpdateMld(netif, &Group);
     }
 
 Done:
@@ -1127,7 +1478,29 @@ Done:
 
     if (New)
         ExFreePoolWithTag(New, UDP6_TAG);
+    if (NewMember)
+        ExFreePoolWithTag(NewMember, UDP6_TAG);
+    if (Gone && Gone != NewMember)
+        ExFreePoolWithTag(Gone, UDP6_TAG);
+    if (Copy)
+        ExFreePoolWithTag(Copy, UDP6_TAG);
+    if (Old)
+        ExFreePoolWithTag(Old, UDP6_TAG);
     return Status;
+}
+
+/* IPV6_ADD_MEMBERSHIP / IPV6_DROP_MEMBERSHIP as the stack had them before the source filters (AO_OPTION_INDEX_ADD_MCAST
+ * and _DEL_; struct ipv6_mreq: the group, the interface index, 0 for the stack's choice): a join is EXCLUDE with no
+ * source, a leave INCLUDE with none */
+NTSTATUS
+UDP6SetMembership(PADDRESS_FILE AddrFile, BOOLEAN Join, const VOID *Request, UINT Length)
+{
+    ULONG IfIndex;
+
+    if (Length < 20 || !TCPIpv6Enabled)
+        return STATUS_INVALID_PARAMETER;
+    RtlCopyMemory(&IfIndex, (const UCHAR *)Request + 16, sizeof(IfIndex));
+    return UDP6SetFilter(AddrFile, IfIndex, Request, Join ? NITRO_MCAST_EXCLUDE : NITRO_MCAST_INCLUDE, 0, NULL, Join);
 }
 
 VOID
@@ -1137,19 +1510,33 @@ UDP6LeaveAll(PADDRESS_FILE AddrFile)
     ULONG i;
 
     LockObject(AddrFile);
+    LOCK_TCPIP_CORE();
     M = AddrFile->Groups6;
     AddrFile->Groups6 = NULL;
-    if (M && M->Count)
+    for (i = 0; M && i < M->Count; i++)
     {
-        LOCK_TCPIP_CORE();
-        for (i = 0; i < M->Count; i++)
-            Udp6CountMember(&M->Groups[i], FALSE, NULL);
-        UNLOCK_TCPIP_CORE();
+        struct netif *netif;
+        PUDP6_MEMBER Member = M->Groups[i];
+
+        RemoveEntryList(&Member->GroupLink);
+        Udp6CountMember(&Member->Group, FALSE, NULL);
+        netif = netif_get_by_index(Member->Group.Zone);
+        if (netif)
+            Udp6UpdateMld(netif, &Member->Group);
     }
+    UNLOCK_TCPIP_CORE();
     UnlockObject(AddrFile);
 
     if (M)
+    {
+        for (i = 0; i < M->Count; i++)
+        {
+            if (M->Groups[i]->Sources)
+                ExFreePoolWithTag(M->Groups[i]->Sources, UDP6_TAG);
+            ExFreePoolWithTag(M->Groups[i], UDP6_TAG);
+        }
         ExFreePoolWithTag(M, UDP6_TAG);
+    }
 }
 
 /* Whether a UDP socket is bound to Address (16 bytes). The core lock may be held (as in Udp6HasReceiver: the order is

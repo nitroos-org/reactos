@@ -50,6 +50,7 @@ list(APPEND SOURCE
     listen.c
     udpconnreset.c
     manysockets.c
+    mcastfilter.c
     memleak.c
     nbconnect.c
     nonblocking.c

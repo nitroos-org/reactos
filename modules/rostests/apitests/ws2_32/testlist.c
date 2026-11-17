@@ -54,6 +54,7 @@ extern void func_shortname(void);
 extern void func_listen(void);
 extern void func_udpconnreset(void);
 extern void func_manysockets(void);
+extern void func_mcastfilter(void);
 extern void func_memleak(void);
 extern void func_nbconnect(void);
 extern void func_nonblocking(void);
@@ -159,6 +160,7 @@ const struct test winetest_testlist[] =
     { "listen", func_listen },
     { "udpconnreset", func_udpconnreset },
     { "manysockets", func_manysockets },
+    { "mcastfilter", func_mcastfilter },
     { "memleak", func_memleak },
     { "nbconnect", func_nbconnect },
     { "nonblocking", func_nonblocking },
