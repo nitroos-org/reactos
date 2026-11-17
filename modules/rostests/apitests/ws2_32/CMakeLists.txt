@@ -82,6 +82,7 @@ list(APPEND SOURCE
     udprecv.c
     udpzerolen.c
     v6only.c
+    ipv6literal.c
     ipv6sock.c
     ipv6stack.c
     ipv6tcp.c
