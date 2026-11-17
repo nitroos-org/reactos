@@ -1331,6 +1331,7 @@ BOOL WINAPI CertEnumSystemStore(DWORD dwFlags, void *pvSystemStoreLocationPara,
     LONG rc;
     HKEY key;
     CERT_SYSTEM_STORE_INFO info = { sizeof(info) };
+    BOOL rootListed = FALSE;
 
     TRACE("(%08lx, %p, %p, %p)\n", dwFlags, pvSystemStoreLocationPara, pvArg,
         pfnEnum);
@@ -1348,17 +1349,22 @@ BOOL WINAPI CertEnumSystemStore(DWORD dwFlags, void *pvSystemStoreLocationPara,
             rc = RegEnumKeyExW(key, index++, name, &size, NULL, NULL, NULL,
                 NULL);
             if (!rc)
+            {
+                if (!lstrcmpiW(name, L"Root"))
+                    rootListed = TRUE;
                 ret = pfnEnum(name, dwFlags, &info, NULL, pvArg);
+            }
         } while (ret && !rc);
         if (ret && rc != ERROR_NO_MORE_ITEMS)
             SetLastError(rc);
+        RegCloseKey(key);
     }
     else
         SetLastError(rc);
-    /* Include root store for the local machine location (it isn't in the
-     * registry)
+    /* Include root store for the local machine location unless the registry
+     * already listed it (it is not there until the system roots are imported)
      */
-    if (ret && (dwFlags & CERT_SYSTEM_STORE_LOCATION_MASK) ==
+    if (ret && !rootListed && (dwFlags & CERT_SYSTEM_STORE_LOCATION_MASK) ==
      CERT_SYSTEM_STORE_LOCAL_MACHINE)
         ret = pfnEnum(L"Root", dwFlags, &info, NULL, pvArg);
     return ret;
