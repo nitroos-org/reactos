@@ -199,6 +199,116 @@ Exit:
     return Result;
 }
 
+/*
+ * What Windows leaves out of the inherited ACEs of a key created below a parent with an auto-inherited DACL
+ * (measured on Windows 10 22H2 and Windows Server 2022, identical; the same rule as ntmarta applies when a
+ * change of a DACL is passed on to the existing subkeys, see AccpDedupInheritedAces).
+ * The ACEs flagged inherited are taken in order, and each is judged against the inherited ACEs before it with
+ * the same type and SID:
+ *  - it is covered for the key if it is inherit-only itself, or the earlier ones that are effective for the key
+ *    (not inherit-only) have together every access bit of its mask;
+ *  - it is covered for the subkeys if, for each way it passes on (CONTAINER_INHERIT_ACE, OBJECT_INHERIT_ACE),
+ *    the earlier ones that pass on that way have together every bit of its mask;
+ *  - covered both ways, it is dropped; covered for the key only, it is kept as INHERIT_ONLY_ACE for what it
+ *    passes on; otherwise it stays.
+ * Never grants or denies anything the DACL did not. Sd is the self-relative descriptor SeAssignSecurityEx made;
+ * it is made smaller in place (the parts behind the DACL move up).
+ */
+static
+VOID
+CmpDedupInheritedAces(IN OUT PSECURITY_DESCRIPTOR Sd)
+{
+    PISECURITY_DESCRIPTOR_RELATIVE Relative = (PISECURITY_DESCRIPTOR_RELATIVE)Sd;
+    PACL Dacl;
+    PACE_HEADER Ace, Earlier;
+    ULONG i, j, Total, OldSize, NewSize;
+    BOOLEAN Deleted = FALSE;
+
+    if (!(Relative->Control & SE_SELF_RELATIVE) || !(Relative->Control & SE_DACL_PRESENT) || Relative->Dacl == 0)
+        return;
+    Total = RtlLengthSecurityDescriptor(Sd);
+    Dacl = (PACL)((PUCHAR)Sd + Relative->Dacl);
+    OldSize = Dacl->AclSize;
+    if (Relative->Dacl + OldSize > Total)
+        return;
+
+    for (i = 0; i < Dacl->AceCount; i++)
+    {
+        PACCESS_ALLOWED_ACE Plain, PlainEarlier;
+        ACCESS_MASK KeyMask = 0, ContainerMask = 0, ObjectMask = 0;
+        BOOLEAN KeyCovered, PassCovered;
+
+        if (!NT_SUCCESS(RtlGetAce(Dacl, i, (PVOID *)&Ace)))
+            return;
+        if ((Ace->AceType != ACCESS_ALLOWED_ACE_TYPE && Ace->AceType != ACCESS_DENIED_ACE_TYPE) ||
+            !(Ace->AceFlags & INHERITED_ACE))
+            continue;
+        if ((Ace->AceFlags & INHERIT_ONLY_ACE) && !(Ace->AceFlags & (CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE)))
+            continue;
+        Plain = (PACCESS_ALLOWED_ACE)Ace;
+
+        for (j = 0; j < i; j++)
+        {
+            if (!NT_SUCCESS(RtlGetAce(Dacl, j, (PVOID *)&Earlier)))
+                return;
+            PlainEarlier = (PACCESS_ALLOWED_ACE)Earlier;
+            if (Earlier->AceType != Ace->AceType || !(Earlier->AceFlags & INHERITED_ACE) ||
+                !RtlEqualSid((PSID)&PlainEarlier->SidStart, (PSID)&Plain->SidStart))
+                continue;
+            if (!(Earlier->AceFlags & INHERIT_ONLY_ACE))
+                KeyMask |= PlainEarlier->Mask;
+            if (Earlier->AceFlags & CONTAINER_INHERIT_ACE)
+                ContainerMask |= PlainEarlier->Mask;
+            if (Earlier->AceFlags & OBJECT_INHERIT_ACE)
+                ObjectMask |= PlainEarlier->Mask;
+        }
+
+        KeyCovered = (Ace->AceFlags & INHERIT_ONLY_ACE) || (Plain->Mask & ~KeyMask) == 0;
+        PassCovered = (!(Ace->AceFlags & CONTAINER_INHERIT_ACE) || (Plain->Mask & ~ContainerMask) == 0) &&
+                      (!(Ace->AceFlags & OBJECT_INHERIT_ACE) || (Plain->Mask & ~ObjectMask) == 0);
+        if (!KeyCovered)
+            continue;
+        if (PassCovered)
+        {
+            if (!NT_SUCCESS(RtlDeleteAce(Dacl, i)))
+                return;
+            Deleted = TRUE;
+            i--;
+        }
+        else
+        {
+            Ace->AceFlags |= INHERIT_ONLY_ACE;
+        }
+    }
+    if (!Deleted)
+        return;
+
+    /* the ACL ends where its last ACE does; what stands behind it moves up */
+    NewSize = sizeof(ACL);
+    if (Dacl->AceCount != 0)
+    {
+        if (!NT_SUCCESS(RtlGetAce(Dacl, Dacl->AceCount - 1, (PVOID *)&Ace)))
+            return;
+        NewSize = (ULONG)((PUCHAR)Ace + Ace->AceSize - (PUCHAR)Dacl);
+    }
+    NewSize = ALIGN_UP_BY(NewSize, sizeof(ULONG));
+    if (NewSize >= OldSize)
+        return;
+    {
+        ULONG Behind = Relative->Dacl + OldSize, Delta = OldSize - NewSize;
+
+        RtlMoveMemory((PUCHAR)Sd + Relative->Dacl + NewSize, (PUCHAR)Sd + Behind, Total - Behind);
+        RtlZeroMemory((PUCHAR)Sd + Total - Delta, Delta);
+        Dacl->AclSize = (USHORT)NewSize;
+        if (Relative->Sacl >= Behind)
+            Relative->Sacl -= Delta;
+        if (Relative->Owner >= Behind)
+            Relative->Owner -= Delta;
+        if (Relative->Group >= Behind)
+            Relative->Group -= Delta;
+    }
+}
+
 NTSTATUS
 NTAPI
 CmpDoCreateChild(IN PHHIVE Hive,
@@ -311,6 +421,9 @@ CmpDoCreateChild(IN PHHIVE Hive,
         CmpFreeParentSecurity(ParentSd);
     if (!NT_SUCCESS(Status))
         return Status;
+    /* (ParentDescriptor is only tested, it may be freed already) */
+    if (DaclAutoInherit && ParentDescriptor)
+        CmpDedupInheritedAces(NewDescriptor);
     if (ParentDescriptor || StoreExplicit)
     {
         Status = CmpInsertSecurityDescriptor((PCMHIVE)Hive,
