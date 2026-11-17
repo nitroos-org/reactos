@@ -626,6 +626,8 @@ ReadMultiSz(
         (dwType != REG_MULTI_SZ && dwType != REG_SZ) || dwSize == 0 || dwSize > 0x10000)
         return NULL;
 
+    /* a value of an odd size or without its terminators still ends in two whole null characters */
+    dwSize = (dwSize + 1) & ~1;
     pszList = CoTaskMemAlloc(dwSize + 2 * sizeof(WCHAR));
     if (!pszList)
         return NULL;
