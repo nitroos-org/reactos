@@ -331,6 +331,7 @@ NTSTATUS TiCreateFileObject(
         {
             /* (the handle is not out yet: nothing sends on it before this is set) */
             ((PADDRESS_FILE)Request.Handle.AddressHandle)->RawPrivileged = RawPrivileged;
+            TiRecordAddressFileOwner(IrpSp, Request.Handle.AddressHandle);
             IrpSp->FileObject->FsContext2 = (PVOID)TDI_TRANSPORT_ADDRESS_FILE;
             Context->Handle.AddressHandle = Request.Handle.AddressHandle;
         }
@@ -642,6 +643,89 @@ NTSTATUS TiCheckControlAccess(
     return Allowed ? STATUS_SUCCESS : STATUS_ACCESS_DENIED;
 }
 
+/*
+ * Socket options by entity id. IOCTL_TCP_SET_INFORMATION_EX / QUERY_INFORMATION_EX with INFO_TYPE_ADDRESS_OBJECT or
+ * INFO_TYPE_CONNECTION name their socket by a TDI entity id, and the entity list is public (netstat, iphlpapi).
+ * Sent on the socket's own address handle (the one AFD gives the application at bind, which the Winsock helper
+ * uses), the request is about that socket and needs nothing more: holding the handle is the right to it. Sent on
+ * any other handle (a control channel), the socket the id names must be the caller's: the request comes from the
+ * process that opened the address, or from a token of the same user that is not restricted, or from an
+ * administrator (LocalSystem, NetworkService: TiControlSD, as for routes and addresses). Anybody else may still read
+ * the public tables, but not set or read the options of another user's socket (TTL, broadcast, don't-fragment,
+ * multicast groups and options, TCP keepalive and nodelay).
+ */
+
+/* Records the user of the opener's token on a new address file. No security context or no memory: no owner, so only
+ * the opening process and administrators pass TiCheckAddressFileAccess */
+VOID
+TiRecordAddressFileOwner(
+    _In_ PIO_STACK_LOCATION IrpSp,
+    _In_ PADDRESS_FILE AddrFile)
+{
+    PIO_SECURITY_CONTEXT Sc = IrpSp->Parameters.Create.SecurityContext;
+    PTOKEN_USER User = NULL;
+    PACCESS_TOKEN Token;
+    PSID Sid;
+    ULONG Length;
+
+    if (!Sc || !Sc->AccessState)
+        return;
+
+    Token = SeQuerySubjectContextToken(&Sc->AccessState->SubjectSecurityContext);
+    if (!Token || !NT_SUCCESS(SeQueryInformationToken(Token, TokenUser, (PVOID *)&User)) || !User)
+        return;
+
+    if (RtlValidSid(User->User.Sid))
+    {
+        Length = RtlLengthSid(User->User.Sid);
+        Sid = ExAllocatePoolWithTag(NonPagedPool, Length, OWNER_SID_TAG);
+        if (Sid && NT_SUCCESS(RtlCopySid(Length, Sid, User->User.Sid)))
+            AddrFile->OwnerSid = Sid;
+        else if (Sid)
+            ExFreePoolWithTag(Sid, OWNER_SID_TAG);
+    }
+
+    ExFreePool(User);
+}
+
+/* Whether the sender of this request may set or read the options of AddrFile, which it named by entity id (see
+ * above). Kernel-mode senders are trusted */
+NTSTATUS
+TiCheckAddressFileAccess(
+    _In_ PIRP Irp,
+    _In_ PADDRESS_FILE AddrFile)
+{
+    SECURITY_SUBJECT_CONTEXT SubjectContext;
+    PTOKEN_USER User = NULL;
+    PACCESS_TOKEN Token;
+    BOOLEAN SameUser = FALSE;
+
+    if (Irp->RequestorMode == KernelMode)
+        return STATUS_SUCCESS;
+
+    /* The process that opened it (referenced while the address file is listed, so it is not another one) */
+    if (AddrFile->FwCreator && AddrFile->FwCreator == (PVOID)PsGetCurrentProcess())
+        return STATUS_SUCCESS;
+
+    if (AddrFile->OwnerSid)
+    {
+        SeCaptureSubjectContext(&SubjectContext);
+        Token = SeQuerySubjectContextToken(&SubjectContext);
+        if (Token && !SeTokenIsRestricted(Token) &&
+            NT_SUCCESS(SeQueryInformationToken(Token, TokenUser, (PVOID *)&User)) && User)
+        {
+            SameUser = RtlEqualSid(User->User.Sid, AddrFile->OwnerSid);
+            ExFreePool(User);
+        }
+        SeReleaseSubjectContext(&SubjectContext);
+
+        if (SameUser)
+            return STATUS_SUCCESS;
+    }
+
+    return TiCheckControlAccess(Irp);
+}
+
 /**
  * @brief Dispatch routine for IRP_MJ_DEVICE_CONTROL requests
  *
@@ -690,7 +774,8 @@ TiDispatch(
             case IOCTL_TCP_SET_INFORMATION_EX:
                 TI_DbgPrint(MIN_TRACE, ("TCP_SET_INFORMATION_EX\n"));
                 /* Provider-class (ARP table / route) writes are privileged.
-                 * Per-socket address-object/connection options are not. */
+                 * Per-socket address-object/connection options are the
+                 * socket's owner's (TiCheckAddressFileAccess, from info.c). */
                 if (IrpSp->Parameters.DeviceIoControl.InputBufferLength <
                     FIELD_OFFSET(TCP_REQUEST_SET_INFORMATION_EX, Buffer))
                 {

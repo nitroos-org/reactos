@@ -239,6 +239,59 @@ ReferenceAddressFileByEntity(TDIEntityID ID)
     return AddrFile;
 }
 
+/* The address file a socket's own information (INFO_TYPE_ADDRESS_OBJECT, INFO_TYPE_CONNECTION) is asked of,
+ * referenced for the caller (DereferenceObject), in *AddrFile. On the socket's own address handle it is that
+ * socket; otherwise the one the entity id names, if the caller may use it (TiCheckAddressFileAccess, main.c:
+ * the opening process, the same user or an administrator). The tables every caller may read (connection rows,
+ * entity list) do not come here. */
+static
+TDI_STATUS
+ReferenceAddressFileForCaller(
+    TDIEntityID ID,
+    PTI_INFO_CALLER Caller,
+    PADDRESS_FILE *AddrFile)
+{
+    PADDRESS_FILE Found;
+    NTSTATUS Status;
+
+    *AddrFile = NULL;
+
+    switch (ID.tei_entity)
+    {
+        case CO_TL_ENTITY:
+        case CL_TL_ENTITY:
+        case ER_ENTITY:
+            break;
+        default:
+            return TDI_INVALID_PARAMETER;
+    }
+
+    if (Caller && Caller->Own)
+    {
+        /* The request holds the file object, so the address file is not closed meanwhile */
+        ReferenceObject(Caller->Own);
+        *AddrFile = Caller->Own;
+        return TDI_SUCCESS;
+    }
+
+    Found = ReferenceAddressFileByEntity(ID);
+    if (Found == NULL)
+        return TDI_INVALID_PARAMETER;
+
+    if (Caller && Caller->Irp)
+    {
+        Status = TiCheckAddressFileAccess(Caller->Irp, Found);
+        if (!NT_SUCCESS(Status))
+        {
+            DereferenceObject(Found);
+            return STATUS_ACCESS_DENIED;
+        }
+    }
+
+    *AddrFile = Found;
+    return TDI_SUCCESS;
+}
+
 /* The TCP and UDP connection tables answer for the address file the entity names. The caller picks the
  * entity, so the address file is referenced (not taken from GetContext) while its row is read: a close
  * cannot free it meanwhile. An entity that is not a transport entity, or whose address file is closing,
@@ -608,7 +661,8 @@ TDI_STATUS InfoTdiQueryInformationEx(
   TDIObjectID *ID,
   PNDIS_BUFFER Buffer,
   PUINT BufferSize,
-  PVOID Context)
+  PVOID Context,
+  PTI_INFO_CALLER Caller)
 /*
  * FUNCTION: Returns extended information
  * ARGUMENTS:
@@ -618,6 +672,7 @@ TDI_STATUS InfoTdiQueryInformationEx(
  *   BufferSize = Pointer to buffer with size of Buffer. On return
  *                this is filled with number of bytes returned
  *   Context    = Pointer to context buffer
+ *   Caller     = The request and the handle it came on (per-socket information)
  * RETURNS:
  *   Status of operation
  */
@@ -660,9 +715,9 @@ TDI_STATUS InfoTdiQueryInformationEx(
                PADDRESS_FILE AddressFile;
                TDI_STATUS AddrStatus;
 
-               AddressFile = ReferenceAddressFileByEntity(ID->toi_entity);
-               if (AddressFile == NULL)
-                   return TDI_INVALID_PARAMETER;
+               AddrStatus = ReferenceAddressFileForCaller(ID->toi_entity, Caller, &AddressFile);
+               if (AddrStatus != TDI_SUCCESS)
+                   return AddrStatus;
 
                AddrStatus = GetAddressFileInfo(ID, AddressFile, Buffer, BufferSize);
                DereferenceObject(AddressFile);
@@ -862,7 +917,8 @@ TDI_STATUS InfoTdiSetInformationEx
 (PTDI_REQUEST Request,
  TDIObjectID *ID,
  PVOID Buffer,
- UINT BufferSize)
+ UINT BufferSize,
+ PTI_INFO_CALLER Caller)
 /*
  * FUNCTION: Sets extended information
  * ARGUMENTS:
@@ -870,6 +926,7 @@ TDI_STATUS InfoTdiSetInformationEx
  *   ID         = Pointer to TDI object ID
  *   Buffer     = Pointer to buffer with data to use
  *   BufferSize = Size of Buffer
+ *   Caller     = The request and the handle it came on (per-socket options)
  * RETURNS:
  *   Status of operation
  */
@@ -888,9 +945,9 @@ TDI_STATUS InfoTdiSetInformationEx
                     PADDRESS_FILE AddressFile;
                     TDI_STATUS AddrStatus;
 
-                    AddressFile = ReferenceAddressFileByEntity(ID->toi_entity);
-                    if (AddressFile == NULL)
-                        return TDI_INVALID_PARAMETER;
+                    AddrStatus = ReferenceAddressFileForCaller(ID->toi_entity, Caller, &AddressFile);
+                    if (AddrStatus != TDI_SUCCESS)
+                        return AddrStatus;
 
                     AddrStatus = SetAddressFileInfo(ID, AddressFile, Buffer, BufferSize);
                     DereferenceObject(AddressFile);
@@ -901,9 +958,9 @@ TDI_STATUS InfoTdiSetInformationEx
                     PADDRESS_FILE AddressFile;
                     TDI_STATUS AddrStatus;
 
-                    AddressFile = ReferenceAddressFileByEntity(ID->toi_entity);
-                    if (AddressFile == NULL)
-                        return TDI_INVALID_PARAMETER;
+                    AddrStatus = ReferenceAddressFileForCaller(ID->toi_entity, Caller, &AddressFile);
+                    if (AddrStatus != TDI_SUCCESS)
+                        return AddrStatus;
 
                     AddrStatus = SetConnectionInfo(ID, AddressFile->Connection, Buffer, BufferSize);
                     DereferenceObject(AddressFile);

@@ -963,7 +963,7 @@ WSHIoctl(
             return 0;
         }
 
-        res = SendRequest(Info, sizeof(*Info) + Info->BufferSize, IOCTL_TCP_SET_INFORMATION_EX);
+        res = SendRequest(TdiAddressObjectHandle, Info, sizeof(*Info) + Info->BufferSize, IOCTL_TCP_SET_INFORMATION_EX);
 
         HeapFree(GetProcessHeap(), 0, Info);
         return res;
@@ -999,33 +999,55 @@ WSHJoinLeaf(
     return NO_ERROR;
 }
 
+/* A socket option to the stack: on the socket's own address handle (AFD's, from bind; the stack takes the request
+ * for that socket whatever entity it names), else on a control channel by the socket's entity id, which the stack
+ * allows to the socket's own process and user only (tcpip main.c). NO_ERROR or the Win32 error;
+ * ERROR_OPEN_FAILED when no control channel could be opened */
+static
+DWORD
+WshSetInformationEx(
+    _In_opt_ HANDLE AddressHandle,
+    _In_ DWORD IOCTL,
+    _In_ PVOID Request,
+    _In_ DWORD RequestSize)
+{
+    HANDLE TcpCC;
+    DWORD BytesReturned, Error;
+
+    if (AddressHandle)
+    {
+        if (DeviceIoControl(AddressHandle, IOCTL, Request, RequestSize, NULL, 0, &BytesReturned, NULL))
+            return NO_ERROR;
+        Error = GetLastError();
+        DPRINT("DeviceIoControl (address handle): %lu\n", Error);
+        /* A handle that does not take the request: the control channel */
+        if (Error != ERROR_ACCESS_DENIED && Error != ERROR_INVALID_HANDLE)
+            return Error;
+    }
+
+    if (openTcpFile(&TcpCC, FILE_READ_DATA | FILE_WRITE_DATA) != STATUS_SUCCESS)
+        return ERROR_OPEN_FAILED;
+
+    if (DeviceIoControl(TcpCC, IOCTL, Request, RequestSize, NULL, 0, &BytesReturned, NULL))
+        Error = NO_ERROR;
+    else
+        Error = GetLastError();
+
+    closeTcpFile(TcpCC);
+
+    DPRINT("DeviceIoControl: %lu\n", Error);
+
+    return Error;
+}
+
 INT
 SendRequest(
+    IN HANDLE AddressHandle,
     IN PVOID Request,
     IN DWORD RequestSize,
     IN DWORD IOCTL)
 {
-    BOOLEAN Success;
-    HANDLE TcpCC;
-    DWORD BytesReturned;
-
-    if (openTcpFile(&TcpCC, FILE_READ_DATA | FILE_WRITE_DATA) != STATUS_SUCCESS)
-        return WSAEINVAL;
-
-    Success = DeviceIoControl(TcpCC,
-                              IOCTL,
-                              Request,
-                              RequestSize,
-                              NULL,
-                              0,
-                              &BytesReturned,
-                              NULL);
-
-    closeTcpFile(TcpCC);
-
-    DPRINT("DeviceIoControl: %ld\n", (Success ? NO_ERROR : GetLastError()));
-
-    if (!Success)
+    if (WshSetInformationEx(AddressHandle, IOCTL, Request, RequestSize) != NO_ERROR)
         return WSAEINVAL;
 
     return NO_ERROR;
@@ -1038,26 +1060,17 @@ SendRequest(
 static
 INT
 WshSendMembershipRequest(
+    _In_opt_ HANDLE AddressHandle,
     _In_ PVOID Request,
     _In_ DWORD RequestSize)
 {
-    HANDLE TcpCC;
-    DWORD BytesReturned;
+    DWORD Error;
 
-    if (openTcpFile(&TcpCC, FILE_READ_DATA | FILE_WRITE_DATA) != STATUS_SUCCESS)
-        return WSAEINVAL;
-
-    if (DeviceIoControl(TcpCC, IOCTL_TCP_SET_INFORMATION_EX, Request, RequestSize, NULL, 0, &BytesReturned, NULL))
-    {
-        closeTcpFile(TcpCC);
+    Error = WshSetInformationEx(AddressHandle, IOCTL_TCP_SET_INFORMATION_EX, Request, RequestSize);
+    if (Error == NO_ERROR)
         return NO_ERROR;
-    }
-    if (GetLastError() == ERROR_INVALID_PARAMETER)
-    {
-        closeTcpFile(TcpCC);
+    if (Error == ERROR_INVALID_PARAMETER || Error == ERROR_OPEN_FAILED)
         return WSAEINVAL;
-    }
-    closeTcpFile(TcpCC);
     return WSAEADDRNOTAVAIL;
 }
 
@@ -1133,7 +1146,8 @@ WSHNotify(
                 QueuedRequest->Info->ID.toi_entity.tei_entity = Context->AddrFileEntityType;
                 QueuedRequest->Info->ID.toi_entity.tei_instance = Context->AddrFileInstance;
 
-                SendRequest(QueuedRequest->Info,
+                SendRequest(TdiAddressObjectHandle,
+                            QueuedRequest->Info,
                             sizeof(*QueuedRequest->Info) + QueuedRequest->Info->BufferSize,
                             IOCTL_TCP_SET_INFORMATION_EX);
 
@@ -1658,9 +1672,9 @@ WSHSetSocketInformation(
 
     if ((Level == IPPROTO_IPV6 && (OptionName == IPV6_ADD_MEMBERSHIP || OptionName == IPV6_DROP_MEMBERSHIP)) ||
         (Level == IPPROTO_IP && (OptionName == IP_ADD_MEMBERSHIP || OptionName == IP_DROP_MEMBERSHIP)))
-        Status = WshSendMembershipRequest(Info, sizeof(*Info) + Info->BufferSize);
+        Status = WshSendMembershipRequest(TdiAddressObjectHandle, Info, sizeof(*Info) + Info->BufferSize);
     else
-        Status = SendRequest(Info, sizeof(*Info) + Info->BufferSize, IOCTL_TCP_SET_INFORMATION_EX);
+        Status = SendRequest(TdiAddressObjectHandle, Info, sizeof(*Info) + Info->BufferSize, IOCTL_TCP_SET_INFORMATION_EX);
 
     HeapFree(GetProcessHeap(), 0, Info);
 

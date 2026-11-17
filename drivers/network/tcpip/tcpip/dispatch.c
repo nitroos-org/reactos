@@ -1466,6 +1466,7 @@ NTSTATUS DispTdiQueryInformationEx(
     PTI_QUERY_CONTEXT QueryContext;
     PVOID OutputBuffer;
     TDI_REQUEST Request;
+    TI_INFO_CALLER Caller = { Irp, NULL };
     UINT Size;
     UINT InputBufferLength;
     ULONG ContextOffset = DispQueryContextOffset(Irp);
@@ -1484,6 +1485,8 @@ NTSTATUS DispTdiQueryInformationEx(
     switch ((ULONG_PTR)IrpSp->FileObject->FsContext2) {
     case TDI_TRANSPORT_ADDRESS_FILE:
         Request.Handle.AddressHandle = TranContext->Handle.AddressHandle;
+        /* The socket's own handle: its own information is about this socket */
+        Caller.Own = TranContext->Handle.AddressHandle;
         break;
 
     case TDI_CONNECTION_FILE:
@@ -1552,7 +1555,7 @@ NTSTATUS DispTdiQueryInformationEx(
                 Request.RequestContext      = QueryContext;
                 Status = InfoTdiQueryInformationEx(&Request,
                     &QueryContext->QueryInfo.ID, OutputMdl,
-                    &Size, &QueryContext->QueryInfo.Context);
+                    &Size, &QueryContext->QueryInfo.Context, &Caller);
                 DispTdiQueryInformationExComplete(QueryContext, Status, Size);
 
                 TI_DbgPrint(MAX_TRACE, ("Leaving. Status = (0x%X)\n", Status));
@@ -1625,7 +1628,8 @@ NTSTATUS DispTdiQueryInformationEx(
 					   &QueryContext->QueryInfo.ID,
 					   NULL,
 					   &Size,
-					   &QueryContext->QueryInfo.Context);
+					   &QueryContext->QueryInfo.Context,
+					   &Caller);
 	DispTdiQueryInformationExComplete(QueryContext, Status, Size);
 	TI_DbgPrint(MAX_TRACE, ("Leaving. Status = (0x%X)\n", Status));
     } else Status = STATUS_INVALID_PARAMETER;
@@ -1651,6 +1655,7 @@ NTSTATUS DispTdiSetInformationEx(
     PTRANSPORT_CONTEXT TranContext;
     PTCP_REQUEST_SET_INFORMATION_EX Info;
     TDI_REQUEST Request;
+    TI_INFO_CALLER Caller = { Irp, NULL };
     TDI_STATUS Status;
 
     TI_DbgPrint(DEBUG_IRP, ("Called.\n"));
@@ -1661,6 +1666,8 @@ NTSTATUS DispTdiSetInformationEx(
     switch ((ULONG_PTR)IrpSp->FileObject->FsContext2) {
     case TDI_TRANSPORT_ADDRESS_FILE:
         Request.Handle.AddressHandle = TranContext->Handle.AddressHandle;
+        /* The socket's own handle (the Winsock helper's): its options are this socket's */
+        Caller.Own = TranContext->Handle.AddressHandle;
         break;
 
     case TDI_CONNECTION_FILE:
@@ -1700,7 +1707,7 @@ NTSTATUS DispTdiSetInformationEx(
     Request.RequestContext      = NULL;
 
     Status = InfoTdiSetInformationEx(&Request, &Info->ID,
-            &Info->Buffer, Info->BufferSize);
+            &Info->Buffer, Info->BufferSize, &Caller);
 
     return Status;
 }

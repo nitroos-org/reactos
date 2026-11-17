@@ -16,6 +16,7 @@ extern void func_dgramfail(void);
 extern void func_dgramlate(void);
 extern void func_tcpnonadmin(void);
 extern void func_tcpsetinfoex(void);
+extern void func_tcpaoowner(void);
 extern void func_tcpaccept(void);
 extern void func_outputprobe(void);
 extern void func_connectoptions(void);
@@ -58,6 +59,7 @@ const struct test winetest_testlist[] =
     { "dgramlate", func_dgramlate },
     { "tcpnonadmin", func_tcpnonadmin },
     { "tcpsetinfoex", func_tcpsetinfoex },
+    { "tcpaoowner", func_tcpaoowner },
     { "tcpaccept", func_tcpaccept },
     { "outputprobe", func_outputprobe },
     { "connectoptions", func_connectoptions },

@@ -89,18 +89,35 @@ typedef enum TDI_TCPUDP_CLASS_INFO {
 TDI_STATUS InfoCopyOut( PCHAR DataOut, UINT SizeOut,
 			PNDIS_BUFFER ClientBuf, PUINT ClientBufSize );
 
+/* Who asks for a socket's own information (INFO_TYPE_ADDRESS_OBJECT, INFO_TYPE_CONNECTION), for the owner check
+ * (TiCheckAddressFileAccess, main.c) */
+typedef struct _TI_INFO_CALLER {
+    PIRP Irp;                       /* The request */
+    struct _ADDRESS_FILE *Own;      /* The address file whose own handle the request came on, or NULL */
+} TI_INFO_CALLER, *PTI_INFO_CALLER;
+
 TDI_STATUS InfoTdiQueryInformationEx(
     PTDI_REQUEST Request,
     TDIObjectID *ID,
     PNDIS_BUFFER Buffer,
     PUINT BufferSize,
-    PVOID Context);
+    PVOID Context,
+    PTI_INFO_CALLER Caller);
 
 TDI_STATUS InfoTdiSetInformationEx(
     PTDI_REQUEST Request,
     TDIObjectID *ID,
     PVOID Buffer,
-    UINT BufferSize);
+    UINT BufferSize,
+    PTI_INFO_CALLER Caller);
+
+NTSTATUS TiCheckAddressFileAccess(
+    PIRP Irp,
+    struct _ADDRESS_FILE *AddrFile);
+
+VOID TiRecordAddressFileOwner(
+    PIO_STACK_LOCATION IrpSp,
+    struct _ADDRESS_FILE *AddrFile);
 
 TDI_STATUS InfoTdiQueryGetAddrTable(TDIEntityID ID,
 				    PNDIS_BUFFER Buffer,
