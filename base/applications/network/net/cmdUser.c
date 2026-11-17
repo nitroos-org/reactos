@@ -1289,6 +1289,9 @@ cmdUser(
             nExit = PrintCommandStatus(Status);
             goto done;
         }
+
+        /* The new password of the existing account (NULL leaves it as it is) */
+        pUserInfo->usri4_password = lpPassword;
     }
     else if (bAdd)
     {
