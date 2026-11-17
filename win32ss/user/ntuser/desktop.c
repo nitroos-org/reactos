@@ -2945,11 +2945,16 @@ UserInitializeDesktop(PDESKTOP pdesk, PUNICODE_STRING DesktopName, PWINSTATION_O
     pdesk->rpwinstaParent = pwinsta;
     InsertTailList(&pwinsta->DesktopListHead, &pdesk->ListEntry);
 
-    /* Create the desktop heap */
+    DesktopInfoSize = sizeof(DESKTOPINFO) + DesktopName->Length + sizeof(WCHAR);
+
+    /* Create the desktop heap. DESKTOPINFO is allocated before the caller has the heap mapped
+       (IntMapDesktopView runs when the handle is opened), and a heap cannot grow before that:
+       commit the heap header and the whole DESKTOPINFO up front, whatever the name length. */
     pdesk->hsectionDesktop = NULL;
     pdesk->pheapDesktop = UserCreateHeap(&pdesk->hsectionDesktop,
                                          &DesktopHeapSystemBase,
-                                         HeapSize);
+                                         HeapSize,
+                                         DesktopInfoSize + PAGE_SIZE);
     if (pdesk->pheapDesktop == NULL)
     {
         ERR("Failed to create desktop heap!\n");
@@ -2957,7 +2962,6 @@ UserInitializeDesktop(PDESKTOP pdesk, PUNICODE_STRING DesktopName, PWINSTATION_O
     }
 
     /* Create DESKTOPINFO */
-    DesktopInfoSize = sizeof(DESKTOPINFO) + DesktopName->Length + sizeof(WCHAR);
     pdesk->pDeskInfo = RtlAllocateHeap(pdesk->pheapDesktop,
                                        HEAP_NO_SERIALIZE | HEAP_ZERO_MEMORY,
                                        DesktopInfoSize);

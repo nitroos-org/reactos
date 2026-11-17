@@ -1153,7 +1153,8 @@ DriverEntry(
     /* Create the global USER heap */
     GlobalUserHeap = UserCreateHeap(&GlobalUserHeapSection,
                                     &GlobalUserHeapBase,
-                                    1 * 1024 * 1024); /* FIXME: 1 MB for now... */
+                                    1 * 1024 * 1024, /* FIXME: 1 MB for now... */
+                                    PAGE_SIZE);
     if (GlobalUserHeap == NULL)
     {
         DPRINT1("Failed to initialize the global heap!\n");
