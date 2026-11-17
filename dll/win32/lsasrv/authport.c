@@ -91,21 +91,30 @@ LsapIsTrustedClient(
     BOOL Trusted = FALSE;
     NTSTATUS Status;
 
-    /* As on Windows, a thread that impersonates is judged by the token it impersonates */
+    /*
+     * A thread that impersonates is judged by the token it impersonates. Only a thread that impersonates nobody
+     * (STATUS_NO_TOKEN) is judged by its process; if the token of the thread cannot be opened for any other reason
+     * (an anonymous level token, a token the LSA may not open), the caller is not trusted: its process may hold
+     * privileges that the impersonated identity does not.
+     */
     InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, NULL);
     Status = NtOpenThread(&ThreadHandle,
                           THREAD_QUERY_INFORMATION,
                           &ObjectAttributes,
                           ClientId);
-    if (NT_SUCCESS(Status))
+    if (!NT_SUCCESS(Status))
+        goto done;
+
+    Status = NtOpenThreadTokenEx(ThreadHandle,
+                                 TOKEN_QUERY,
+                                 TRUE,
+                                 0,
+                                 &TokenHandle);
+    if (!NT_SUCCESS(Status))
     {
-        Status = NtOpenThreadTokenEx(ThreadHandle,
-                                     TOKEN_QUERY,
-                                     TRUE,
-                                     0,
-                                     &TokenHandle);
-        if (!NT_SUCCESS(Status))
-            TokenHandle = NULL;
+        if (Status != STATUS_NO_TOKEN)
+            goto done;
+        TokenHandle = NULL;
     }
 
     if (TokenHandle == NULL)

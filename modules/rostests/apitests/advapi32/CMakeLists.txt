@@ -47,6 +47,7 @@ list(APPEND SOURCE
     LsassLeak.c
     LsassServerLeak.c
     LsaLogonUserS4U.c
+    LsaTrustedClientToken.c
     LsaManageSidNameMapping.c
     ProcessThreadLabel.c
     QueryServiceConfig.c
