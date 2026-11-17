@@ -2,17 +2,17 @@ LANGUAGE LANG_BULGARIAN, SUBLANG_DEFAULT
 
 IDD_WELCOMEPAGE DIALOGEX 0, 0, 317, 193
 STYLE DS_SHELLFONT | DS_MODALFRAME | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
-CAPTION "Настройка на РеактОС"
+CAPTION "Настройка на NitroOS"
 FONT 8, "MS Shell Dlg"
 BEGIN
-    LTEXT "Съветникът за настройка на РеактОС ви приветства", IDC_WELCOMETITLE, 115, 8, 195, 24
-    LTEXT "Този съветник ще сложи РеактОС на компютъра ви.\nСъветникът трябва да събере сведения за компютъра, за да настрои РеактОС правилно.", IDC_STATIC, 115, 40, 195, 50
+    LTEXT "Съветникът за настройка на NitroOS ви приветства", IDC_WELCOMETITLE, 115, 8, 195, 24
+    LTEXT "Този съветник ще сложи NitroOS на компютъра ви.\nСъветникът трябва да събере сведения за компютъра, за да настрои NitroOS правилно.", IDC_STATIC, 115, 40, 195, 50
     LTEXT "Натиснете „Напред“ за продължаване на настройката.", IDC_STATIC, 115, 169, 195, 17
 END
 
 IDD_ACKPAGE DIALOGEX 0, 0, 317, 145
 STYLE DS_SHELLFONT | DS_MODALFRAME | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
-CAPTION "Настройка на РеактОС"
+CAPTION "Настройка на NitroOS"
 FONT 8, "MS Shell Dlg"
 BEGIN
     LTEXT "Разработчиците на РеактОС биха желали да изразят признателността си към следните проекти с отворен код, (части от) които са използвани при създаването на РеактОС:", IDC_STATIC, 15, 2, 286, 24
@@ -23,7 +23,7 @@ BEGIN
 END
 
 IDD_INSTALLATION DIALOGEX 0, 0, 317, 143
-CAPTION "Настройка на РеактОС"
+CAPTION "Настройка на NitroOS"
 STYLE DS_MODALFRAME | DS_SHELLFONT | WS_POPUPWINDOW | WS_CAPTION | WS_VISIBLE
 FONT 8, "MS Shell Dlg"
 BEGIN
@@ -38,7 +38,7 @@ END
 
 IDD_OWNERPAGE DIALOGEX 0, 0, 317, 143
 STYLE DS_SHELLFONT | DS_MODALFRAME | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
-CAPTION "Настройка на РеактОС"
+CAPTION "Настройка на NitroOS"
 FONT 8, "MS Shell Dlg"
 BEGIN
     ICON IDI_ICON2, IDC_STATIC, 21, 7, 20, 20
@@ -51,7 +51,7 @@ END
 
 IDD_COMPUTERPAGE DIALOGEX 0, 0, 317, 143
 STYLE DS_SHELLFONT | DS_MODALFRAME | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
-CAPTION "Настройка на РеактОС"
+CAPTION "Настройка на NitroOS"
 FONT 8, "MS Shell Dlg"
 BEGIN
     ICON IDI_ICON1, IDC_STATIC, 21, 7, 20, 20
@@ -69,7 +69,7 @@ END
 
 IDD_LOCALEPAGE DIALOGEX 0, 0, 317, 143
 STYLE DS_SHELLFONT | DS_MODALFRAME | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
-CAPTION "Настройка на РеактОС"
+CAPTION "Настройка на NitroOS"
 FONT 8, "MS Shell Dlg"
 BEGIN
     ICON IDI_ICON4, IDC_STATIC, 21, 7, 20, 20
@@ -86,7 +86,7 @@ END
 
 IDD_DATETIMEPAGE DIALOGEX 0, 0, 317, 143
 STYLE DS_SHELLFONT | DS_MODALFRAME | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
-CAPTION "Настройка на РеактОС"
+CAPTION "Настройка на NitroOS"
 FONT 8, "MS Shell Dlg"
 BEGIN
     ICON IDI_ICON3, IDC_STATIC, 21, 10, 20, 20
@@ -100,7 +100,7 @@ END
 
 IDD_THEMEPAGE DIALOGEX 0, 0, 317, 143
 STYLE DS_SHELLFONT | DS_MODALFRAME | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
-CAPTION "Настройка на РеактОС"
+CAPTION "Настройка на NitroOS"
 FONT 8, "MS Shell Dlg"
 BEGIN
     CONTROL "", IDC_THEMEPICKER, "SysListView32", LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_ALIGNLEFT | WS_TABSTOP, 18, 8, 288, 130
@@ -108,7 +108,7 @@ END
 
 IDD_PROCESSPAGE DIALOGEX 0, 0, 317, 143
 STYLE DS_SHELLFONT | DS_MODALFRAME | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
-CAPTION "Настройка на РеактОС"
+CAPTION "Настройка на NitroOS"
 FONT 8, "MS Shell Dlg"
 BEGIN
     LTEXT "Вписване на съставните", IDC_TASKTEXT1, 65, 27, 232, 8
@@ -127,11 +127,11 @@ END
 
 IDD_FINISHPAGE DIALOGEX 0, 0, 317, 193
 STYLE DS_SHELLFONT | DS_MODALFRAME | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
-CAPTION "Настройка на РеактОС"
+CAPTION "Настройка на NitroOS"
 FONT 8, "MS Shell Dlg"
 BEGIN
-    LTEXT "Приключване на съветника по настройката на РеактОС", IDC_FINISHTITLE, 115, 8, 195, 24
-    LTEXT "Настройката на РеактОС завърши успешно.\n\nАко в КД устройството има диск, го извадете. След това презапуснете компютъра и натиснете „Приключи“.", IDC_STATIC, 115, 40, 195, 48
+    LTEXT "Приключване на съветника по настройката на NitroOS", IDC_FINISHTITLE, 115, 8, 195, 24
+    LTEXT "Настройката на NitroOS завърши успешно.\n\nАко в КД устройството има диск, го извадете. След това презапуснете компютъра и натиснете „Приключи“.", IDC_STATIC, 115, 40, 195, 48
     LTEXT "Your computer will automatically restart in 15 seconds.", IDC_STATIC, 115, 110, 195, 24
     CONTROL "", IDC_RESTART_PROGRESS, "msctls_progress32", PBS_SMOOTH | WS_CHILD | WS_VISIBLE | WS_BORDER, 115, 135, 188, 12
 END
@@ -179,11 +179,11 @@ BEGIN
     IDS_ACKTITLE "Благодарности"
     IDS_ACKSUBTITLE "Основи на РеактОС и разрешителни сведения"
     IDS_OWNERTITLE "Нагласяване на приложенията."
-    IDS_OWNERSUBTITLE "Настройката използва сведенията за вас, за да нагласи РеактОС."
+    IDS_OWNERSUBTITLE "Настройката използва сведенията за вас, за да нагласи NitroOS."
     IDS_COMPUTERTITLE "Име на компютъра и администраторска парола"
     IDS_COMPUTERSUBTITLE "Трябва да въведете администраторска парола и име на компютъра"
     IDS_LOCALETITLE "Местни настройки"
-    IDS_LOCALESUBTITLE "Можете да нагласите РеактОС за различни области и езици."
+    IDS_LOCALESUBTITLE "Можете да нагласите NitroOS за различни области и езици."
     IDS_LOCALETEXT "The Standards and formats are set to %s, and the location is set to %s."
     IDS_LAYOUTTEXT "Your default text input language and method is: %s keyboard layout"
     IDS_DATETIMETITLE "Дата и време"
@@ -196,7 +196,7 @@ END
 
 STRINGTABLE
 BEGIN
-    IDS_REACTOS_SETUP "Настройка на РеактОС"
+    IDS_REACTOS_SETUP "Настройка на NitroOS"
     IDS_UNKNOWN_ERROR "Неизвестна грешка"
     IDS_LOADLIBRARY_FAILED "Грешка при LoadLibrary: "
     IDS_GETPROCADDR_FAILED "Грешка при GetProcAddr: "
@@ -256,11 +256,11 @@ STRINGTABLE
 BEGIN
     IDS_INSTALLATIONTITLE "Installation Type"
     IDS_INSTALLATIONSUBTITLE "Choose an installation type that determines how the system is configured."
-    IDS_INSTALLATIONSERVERNAME "ReactOS Server"
+    IDS_INSTALLATIONSERVERNAME "NitroOS Server"
     IDS_INSTALLATIONSERVERINFO "The system will be recognized as a server. Private folders ""My Pictures"", ""My Videos"" and ""My Music"" are independent from ""My Documents""."
-    IDS_INSTALLATIONWORKSTATIONNAME "ReactOS Workstation"
+    IDS_INSTALLATIONWORKSTATIONNAME "NitroOS Workstation"
     IDS_INSTALLATIONWORKSTATIONINFO "The system will be recognized as a workstation. Private folders ""My Pictures"", ""My Videos"" and ""My Music"" are in ""My Documents""."
-    IDS_INSTALLATIONSERVERCORENAME "ReactOS Server Core"
+    IDS_INSTALLATIONSERVERCORENAME "NitroOS Server Core"
     IDS_INSTALLATIONSERVERCOREINFO "The system will be recognized as a server. The graphical shell is not installed, and the system starts in a command-line environment to reduce resource usage and attack surface."
     /* Reserved for future use
      * IDS_INSTALLATIONNANOSERVERNAME "ReactOS Nano Server"

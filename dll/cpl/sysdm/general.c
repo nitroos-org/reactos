@@ -575,35 +575,8 @@ static VOID GetSystemInformation(HWND hwnd)
 
 static VOID GetSystemVersion(HWND hwnd)
 {
-    HWND hRosVersion;
-    SIZE_T lenStr, lenVersion;
-    PCWSTR pwszVersion = L" " TEXT(KERNEL_VERSION_RC);
-    PWSTR pwszStr;
-
-    lenVersion = wcslen(pwszVersion);
-    if (lenVersion == 0)
-    {
-        return;
-    }
-
-    hRosVersion = GetDlgItem(hwnd, IDC_ROSVERSION);
-    if (!hRosVersion)
-    {
-        return;
-    }
-    lenStr = GetWindowTextLengthW(hRosVersion);
-    lenStr += lenVersion + 1;
-    pwszStr = HeapAlloc(GetProcessHeap(), 0, lenStr * sizeof(WCHAR));
-    if (!pwszStr)
-    {
-        return;
-    }
-    GetWindowText(hRosVersion, pwszStr, lenStr);
-
-    StringCchCatW(pwszStr, lenStr, pwszVersion);
-    SetWindowText(hRosVersion, pwszStr);
-
-    HeapFree(GetProcessHeap(), 0, pwszStr);
+    /* The product version alone: with the "Version" label it overflows the column */
+    SetDlgItemTextW(hwnd, IDC_ROSVERSION, L"" BRAND_VERSION_STR);
 }
 
 /**

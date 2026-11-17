@@ -9,6 +9,7 @@
 
 #include "precomp.h"
 #include <reactos/regacl_sd.h>
+#include <reactos/buildno.h>
 
 #include <sddl.h>
 
@@ -2334,7 +2335,7 @@ cleanup:
     {
         // TODO: Use a localized *.mc resource message* error.
         ReportError(lpProfileInfo->dwFlags,
-                    L"ReactOS could not load the locally stored user profile. "
+                    BRAND_PRODUCT_NAME_W L" could not load the locally stored user profile. "
                     L"Possible causes of this error include insufficient security rights or a corrupt local profile.\n"
                     L"\nError: %lu\n",
                     dwError);

@@ -19,6 +19,7 @@
  */
 
 #include "precomp.h"
+#include <reactos/buildno.h>
 
 #include <shellapi.h>
 #include <htiframe.h>
@@ -4019,7 +4020,7 @@ LRESULT CShellBrowser::OnDisconnectNetworkDrive(WORD wNotifyCode, WORD wID, HWND
 
 LRESULT CShellBrowser::OnAboutReactOS(WORD wNotifyCode, WORD wID, HWND hWndCtl, BOOL &bHandled)
 {
-    ShellAbout(m_hWnd, _T("ReactOS"), NULL, NULL);
+    ShellAbout(m_hWnd, _T(BRAND_PRODUCT_NAME), NULL, NULL);
     return 0;
 }
 

@@ -225,7 +225,7 @@ BEGIN
     IDS_DHCPACTIVE "SHCP включен"
     IDS_AUTOMATIC "Само"
     IDS_NOITEMSEL "Не сте избрали предмет. Първо изберете нещо."
-    IDS_TCPIP "РеактОС- TCP/IP"
+    IDS_TCPIP "NitroOS- TCP/IP"
     IDS_ADD "Добавяне"
     IDS_MOD "Добре"
     IDS_TCP_PORTS "TCP изводи"

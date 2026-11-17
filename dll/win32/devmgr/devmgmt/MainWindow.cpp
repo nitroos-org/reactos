@@ -8,6 +8,7 @@
 
 
 #include "precomp.h"
+#include <reactos/buildno.h>
 #include "devmgmt.h"
 #include "MainWindow.h"
 
@@ -662,7 +663,7 @@ CDeviceManager::OnCommand(_In_ WPARAM wParam,
             CAtlStringW szAppAuthors;
 
             if (!szAppName.LoadStringW(g_hThisInstance, IDS_APPNAME))
-                szAppName = L"ReactOS Device Manager";
+                szAppName = BRAND_PRODUCT_NAME_W L" Device Manager";
             if (!szAppAuthors.LoadStringW(g_hThisInstance, IDS_APP_AUTHORS))
                 szAppAuthors = L"";
             ShellAboutW(m_hMainWnd, szAppName, szAppAuthors,

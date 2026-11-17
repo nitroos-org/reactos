@@ -52,7 +52,7 @@ BEGIN
     IDS_TIMEZONEUNKNOWN "Неизвестно"
     IDS_INETTIMESUCSYNC "Времето бе успешно сверено с %s на %s в %s"
     IDS_INETTIMENEXTSYNC "Следващо сверяване: %s at %s"
-    IDS_INETTIMESYNCING "Почакайте, докато РеактОС сверява времето с %s"
+    IDS_INETTIMESYNCING "Почакайте, докато NitroOS сверява времето с %s"
     IDS_INETTIMEERROR "Възникна грешка при сверяване на времето %s"
     IDS_INETTIMESUCFILL "Please type an NTP server name in order to synchronize the time"
     IDS_INETTIMEWELCOME "Select an NTP server from the list or type an NTP server name to synchronize the computer's time"
