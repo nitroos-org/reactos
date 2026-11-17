@@ -858,6 +858,26 @@ DhcpUndoRequestParams(
 }
 
 static VOID
+UpdateServiceStatus(DWORD dwState);
+
+/* Wait for a worker thread to end, keeping the stop pending with a growing checkpoint so that whoever waits for
+   STOPPED (net stop, the SCM) sees progress. TRUE when the thread ended. */
+static BOOL
+WaitForWorkerStop(HANDLE hThread)
+{
+    DWORD dwWaited;
+
+    for (dwWaited = 0; dwWaited < THREAD_WAIT_MS; dwWaited += 1000)
+    {
+        if (WaitForSingleObject(hThread, 1000) == WAIT_OBJECT_0)
+            return TRUE;
+        ServiceStatus.dwCheckPoint++;
+        SetServiceStatus(ServiceStatusHandle, &ServiceStatus);
+    }
+    return FALSE;
+}
+
+static VOID
 UpdateServiceStatus(DWORD dwState)
 {
     ServiceStatus.dwServiceType = SERVICE_WIN32_SHARE_PROCESS;
@@ -874,7 +894,7 @@ UpdateServiceStatus(DWORD dwState)
 
     if (dwState == SERVICE_START_PENDING ||
         dwState == SERVICE_STOP_PENDING)
-        ServiceStatus.dwWaitHint = 1000;
+        ServiceStatus.dwWaitHint = (dwState == SERVICE_STOP_PENDING) ? 5000 : 1000;
     else
         ServiceStatus.dwWaitHint = 0;
 
@@ -997,15 +1017,15 @@ ServiceMain(DWORD argc, LPWSTR* argv)
     DPRINT("Wait for discovery thread to close! %p\n", hDiscoveryThread);
     if (hDiscoveryThread != INVALID_HANDLE_VALUE)
     {
-        ret = WaitForSingleObject(hDiscoveryThread, THREAD_WAIT_MS);
+        ret = WaitForWorkerStop(hDiscoveryThread);
         DPRINT("Done %lx\n", ret);
-        if (ret != WAIT_OBJECT_0)
+        if (!ret)
             AllGone = FALSE;
     }
 
     if (hDhcp6Thread != INVALID_HANDLE_VALUE)
     {
-        if (WaitForSingleObject(hDhcp6Thread, THREAD_WAIT_MS) != WAIT_OBJECT_0)
+        if (!WaitForWorkerStop(hDhcp6Thread))
             AllGone = FALSE;
     }
 
