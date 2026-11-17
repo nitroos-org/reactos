@@ -59,7 +59,7 @@ ERRORLEVEL este setat la compensarea tastelor apăsate de utilizator în opțiun
     STRING_CMD_HELP5 "  [completarea numelui de fișier Bash]"
     STRING_CMD_HELP6 "  [stiva de directoare]"
     STRING_CMD_HELP7 "  [redirecționări și conectări]"
-    STRING_CMD_HELP8 "Deschide o nouă instanță a interpretorului de comenzi ReactOS.\n\n\
+    STRING_CMD_HELP8 "Deschide o nouă instanță a interpretorului de comenzi NitroOS.\n\n\
 CMD [/[C|K] comandă][/P][/Q][/T:culori]\n\n\
   /C comandă  Execută comanda specificată, apoi închide instanța.\n\
   /K comandă  Execută comanda specificată menținând apoi instanța deschisă.\n\
@@ -540,10 +540,10 @@ titlu         Noul titlu.\n"
     STRING_ERROR_UNEXPECTED "%s was unexpected.\n"
     STRING_ERROR_WHILE_PROCESSING "Error occurred while processing: %s.\n"
     STRING_SET_ENV_ERROR "Variabila de mediu '%s' nu este definită\n"
-    STRING_CMD_INFOLINE "  Interpretorul de comenzi ReactOS                       Tastați HELP = Ajutor  "
+    STRING_CMD_INFOLINE "  Interpretorul de comenzi NitroOS                        Tastați HELP = Ajutor  "
     STRING_CMD_COPYRIGHT "(C) Copyright 1996-%s ReactOS Team.\n"
-    STRING_REACTOS_VERSION "ReactOS [Versiunea %s %s]\n"
-    STRING_CMD_SHELLINFO "\nInterpretorul de comenzi ReactOS\nVersiunea %s %s"
+    STRING_REACTOS_VERSION "NitroOS [Versiunea %s %s]\n"
+    STRING_CMD_SHELLINFO "\nInterpretorul de comenzi NitroOS\nVersiunea %s %s"
     STRING_VERSION_RUNNING_ON "Operând pe: "
     STRING_VERSION_RUNVER "%s [Versiunea %d.%d.%d] %s"
     STRING_COPY_FILE "        %d fișier(e) copiat(e)\n"
