@@ -29,9 +29,12 @@
 #define DHCP6_VALUE_ADDRESSES       "Dhcpv6Address"                 /* REG_SZ, the leased addresses, blank separated */
 #define DHCP6_VALUE_T1              "Dhcpv6T1"                      /* REG_DWORD seconds (0xFFFFFFFF never), renew time of the lease */
 #define DHCP6_VALUE_T2              "Dhcpv6T2"                      /* REG_DWORD seconds (0xFFFFFFFF never), rebind time of the lease */
-/* ipconfig /renew6 and /release6 (administrators only: the key and the event): the command goes into Dhcpv6Command,
+/* ipconfig /renew6 and /release6 (any authenticated user, as on Windows): the command goes into Dhcpv6Command of the
+   interface's subkey Dhcpv6Cmd (a subkey standard users may write to, so the interface key itself need not be writable
+   by them),
    the event wakes the client; the client deletes Dhcpv6Command when it is done and leaves the outcome (a Win32 error,
-   0 = success) in Dhcpv6CommandResult */
+   0 = success) in Dhcpv6CommandResult of the same subkey */
+#define DHCP6_COMMAND_SUBKEY        "Dhcpv6Cmd"
 #define DHCP6_VALUE_COMMAND         "Dhcpv6Command"                 /* REG_DWORD, DHCP6_COMMAND_ */
 #define DHCP6_VALUE_COMMAND_RESULT  "Dhcpv6CommandResult"           /* REG_DWORD */
 #define DHCP6_COMMAND_RENEW         1

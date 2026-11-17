@@ -1314,8 +1314,8 @@ IsDhcpv6Adapter(
     return bResult;
 }
 
-/* Hands a renew or release to the DHCPv6 client: the command goes into the interface's key (administrators only)
-   and the client is woken through its named event; the client removes the command when it is done and leaves the
+/* Hands a renew or release to the DHCPv6 client: the command goes into the command subkey of the interface's key
+   (standard users may write it, like Windows lets them force a renew) and the client is woken through its named event; the client removes the command when it is done and leaves the
    outcome next to it. A Win32 error code. */
 static
 DWORD
@@ -1328,8 +1328,8 @@ SendDhcpv6Command(
     HANDLE hEvent;
     DWORD dwError, dwType, dwSize, dwValue, dwWaited;
 
-    StringCchPrintfA(KeyName, _countof(KeyName), DHCP6_INTERFACES_KEY "\\%s", pszAdapterName);
-    dwError = RegOpenKeyExA(HKEY_LOCAL_MACHINE, KeyName, 0, KEY_READ | KEY_WRITE, &hKey);
+    StringCchPrintfA(KeyName, _countof(KeyName), DHCP6_INTERFACES_KEY "\\%s\\" DHCP6_COMMAND_SUBKEY, pszAdapterName);
+    dwError = RegOpenKeyExA(HKEY_LOCAL_MACHINE, KeyName, 0, KEY_QUERY_VALUE | KEY_SET_VALUE, &hKey);
     if (dwError != ERROR_SUCCESS)
         return dwError;
 
