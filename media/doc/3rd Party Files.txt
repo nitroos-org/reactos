@@ -264,6 +264,12 @@ Used Version: Selawik 1.01, Carlito 1.104, Caladea 1.001
 License: OFL-1.1 (https://spdx.org/licenses/OFL-1.1.html)
 URL: https://github.com/microsoft/Selawik, https://github.com/googlefonts/carlito, https://github.com/huertatipografica/Caladea
 
+Title: Inter Fonts (used to draw the NitroOS artwork, not installed on the system)
+Path: media/branding/src/fonts
+Used Version: 4.1
+License: OFL-1.1 (https://spdx.org/licenses/OFL-1.1.html), media/branding/src/fonts/OFL.txt
+URL: https://github.com/rsms/inter/releases/tag/v4.1
+
 Title: Noto Sans CJK (SC and KR subset OTF)
 Path: media/fonts/NotoSansSC-Regular.otf
 Path: media/fonts/NotoSansKR-Regular.otf
