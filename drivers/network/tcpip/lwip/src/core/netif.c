@@ -333,6 +333,11 @@ netif_add(struct netif *netif,
 #endif /* LWIP_IPV6_ADDRESS_LIFETIMES */
   }
   netif->output_ip6 = netif_null_output_ip6;
+#if LWIP_IPV6_DUP_DETECT_ATTEMPTS
+  netif->redad_count = 0;
+  netif->redad_na = 0;
+  netif->na_sent = 0;
+#endif
 #endif /* LWIP_IPV6 */
   NETIF_SET_CHECKSUM_CTRL(netif, NETIF_CHECKSUM_ENABLE_ALL);
   netif->mtu = 0;
@@ -1035,6 +1040,9 @@ netif_set_link_up(struct netif *netif)
     netif_issue_reports(netif, NETIF_REPORT_TYPE_IPV4 | NETIF_REPORT_TYPE_IPV6);
 #if LWIP_IPV6
     nd6_restart_netif(netif);
+#if LWIP_IPV6_DUP_DETECT_ATTEMPTS
+    nd6_redad_netif(netif);
+#endif
 #endif /* LWIP_IPV6 */
 
     NETIF_LINK_CALLBACK(netif);

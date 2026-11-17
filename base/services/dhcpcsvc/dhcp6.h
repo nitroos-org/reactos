@@ -22,16 +22,19 @@
 #define DHCP6_VALUE_SERVER          "Dhcpv6ServerAddress"           /* REG_SZ, link-local address of the server, no zone */
 #define DHCP6_VALUE_REFRESH         "Dhcpv6InformationRefreshTime"  /* REG_DWORD seconds */
 #define DHCP6_VALUE_OPTIONS         "Dhcpv6Options"                 /* REG_BINARY, the options of the last Reply */
-#define DHCP6_VALUE_REPLIES         "Dhcpv6ReplyCount"              /* REG_DWORD, incremented with every accepted Reply */
+#define DHCP6_VALUE_REPLIES         "Dhcpv6ReplyCount"              /* REG_DWORD, a sequence number: changes with every accepted Reply */
 
 /* The stateful client (the router's M flag: addresses through IA_NA) adds, per interface key: */
 #define DHCP6_VALUE_STATEFUL        "Dhcpv6Stateful"                /* REG_DWORD 1 while the client asks for addresses on it */
 #define DHCP6_VALUE_ADDRESSES       "Dhcpv6Address"                 /* REG_SZ, the leased addresses, blank separated */
 #define DHCP6_VALUE_T1              "Dhcpv6T1"                      /* REG_DWORD seconds (0xFFFFFFFF never), renew time of the lease */
 #define DHCP6_VALUE_T2              "Dhcpv6T2"                      /* REG_DWORD seconds (0xFFFFFFFF never), rebind time of the lease */
-/* ipconfig /renew6 and /release6 (administrators only: the key and the event): the command goes into Dhcpv6Command,
+/* ipconfig /renew6 and /release6 (any authenticated user, as on Windows): the command goes into Dhcpv6Command of the
+   interface's subkey Dhcpv6Cmd (a subkey standard users may write to, so the interface key itself need not be writable
+   by them),
    the event wakes the client; the client deletes Dhcpv6Command when it is done and leaves the outcome (a Win32 error,
-   0 = success) in Dhcpv6CommandResult */
+   0 = success) in Dhcpv6CommandResult of the same subkey */
+#define DHCP6_COMMAND_SUBKEY        "Dhcpv6Cmd"
 #define DHCP6_VALUE_COMMAND         "Dhcpv6Command"                 /* REG_DWORD, DHCP6_COMMAND_ */
 #define DHCP6_VALUE_COMMAND_RESULT  "Dhcpv6CommandResult"           /* REG_DWORD */
 #define DHCP6_COMMAND_RENEW         1

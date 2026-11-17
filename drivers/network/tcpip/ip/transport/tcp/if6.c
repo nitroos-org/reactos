@@ -318,8 +318,10 @@ static
 void
 TCP6NetifEvent(struct netif *netif, netif_nsc_reason_t Reason, const netif_ext_callback_args_t *Args)
 {
-    /* A link that goes down resets the interface: the addresses DAD found in use are forgotten (DAD runs again
-       for the addresses it has) */
+    /* A link that goes down resets the interface: the addresses DAD found in use are forgotten. When the link comes
+       up again DAD runs again for the addresses the interface has: one probe each, as many as its DAD transmits
+       (nd6_redad_netif, sent by the ND timer; an address keeps its state and its connections unless somebody answers;
+       one that was found in use starts DAD again, tentative) */
     if ((Reason & LWIP_NSC_LINK_CHANGED) && !Args->link_changed.state && TCP6DuplicateClear(netif))
         AddrChangeNotify6();
 

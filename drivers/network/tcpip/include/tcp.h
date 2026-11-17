@@ -312,6 +312,8 @@ TCP6DuplicateGet(struct netif *netif, ULONG Number, struct ip6_addr *Address, PU
 ULONG
 TCP6DuplicateClear(struct netif *netif);
 BOOLEAN
+TCP6DuplicateSweep(VOID);
+BOOLEAN
 TCP6DuplicateRemove(struct netif *netif, const struct ip6_addr *Address);
 
 VOID

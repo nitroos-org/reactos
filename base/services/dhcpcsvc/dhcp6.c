@@ -126,7 +126,9 @@ NTSYSAPI ULONG __cdecl DbgPrint(PCCH Format, ...);
 #define D6_MAX_DOMAINS      16
 #define D6_MAX_DOMAIN_LEN   254
 #define D6_MAX_DUID         130
-#define D6_MAX_PACKET       4096        /* a Reply with many options is more than one Ethernet frame */
+#define D6_MAX_PACKET       4096        /* a message we build: the options we send are few */
+#define D6_MAX_RECV         65535       /* a message we read: a Reply with many options is several fragments, up to the
+                                           largest UDP datagram (the stack reassembles it; nothing is cut or dropped) */
 #define D6_MAX_ADDRS        4           /* addresses of one IA_NA the client takes (the stack has 8 address slots) */
 #define D6_NEVER            0xFFFFFFFFFFFFFFFFULL
 #define D6_INFINITE         0xFFFFFFFFUL /* a lifetime or timer of "never" */
@@ -272,6 +274,30 @@ static ULONGLONG NowMs(void)
     return High + Tick;
 }
 
+/* The reply count of an interface is one sequence for the whole service, so it never goes back: an interface that
+   is dropped and learned again (a link that flapped, an adapter disabled and enabled) does not count 1, 2, ... a
+   second time, and a client that waits for the count to differ from the one it read (Dhcpv6RequestParams with a forced
+   request) does not wait out its limit because the new count equals the old one. The first value is the time in
+   seconds, so a restarted service does not repeat a count a client may still hold */
+static ULONG ReplySequence;
+
+static ULONG NextReplyCount(void)
+{
+    if (ReplySequence == 0)
+    {
+        FILETIME Now;
+        ULARGE_INTEGER Time;
+
+        GetSystemTimeAsFileTime(&Now);
+        Time.LowPart = Now.dwLowDateTime;
+        Time.HighPart = Now.dwHighDateTime;
+        ReplySequence = (ULONG)((Time.QuadPart / 10000000ULL) & 0x3FFFFFFFUL);
+    }
+    if (++ReplySequence == 0)
+        ReplySequence = 1;
+    return ReplySequence;
+}
+
 static ULONG Rand32(void)
 {
     ULONG Value;
@@ -347,6 +373,62 @@ static HKEY OpenInterfaceKey(PCSTR Name, BOOL Create)
     return Key;
 }
 
+/* The mailbox of ipconfig /renew6 and /release6: a subkey of the interface key that a standard user may write to
+   (Windows lets a standard user force a renew or release; the interface key itself need not be writable by them, as
+   it is not on Windows). Only the two command values live there, and CheckCommands accepts nothing but a known
+   command. */
+static HKEY OpenCommandKey(PCSTR Name, BOOL Create)
+{
+    CHAR Path[300];
+    HKEY Key = NULL;
+
+    _snprintf(Path, sizeof(Path), DHCP6_INTERFACES_KEY "\\%s\\" DHCP6_COMMAND_SUBKEY, Name);
+    Path[sizeof(Path) - 1] = '\0';
+    if (Create)
+    {
+        SECURITY_ATTRIBUTES Sa;
+        PSECURITY_DESCRIPTOR Sd = NULL;
+        LONG Result;
+
+        Sa.nLength = sizeof(Sa);
+        Sa.bInheritHandle = FALSE;
+        Sa.lpSecurityDescriptor = NULL;
+        /* SYSTEM and administrators: all; authenticated users: query and set values (0x20003 = READ_CONTROL,
+           KEY_SET_VALUE, KEY_QUERY_VALUE) */
+        if (ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:(A;;KA;;;SY)(A;;KA;;;BA)(A;;0x20003;;;AU)",
+                                                                 SDDL_REVISION_1, &Sd, NULL))
+            Sa.lpSecurityDescriptor = Sd;
+        /* volatile: what a standard user writes there never reaches the SYSTEM hive on disk (Windows gives a standard
+           user no persistent value under HKLM\SYSTEM for this); the client makes it again with the lease */
+        Result = RegCreateKeyExA(HKEY_LOCAL_MACHINE, Path, 0, NULL, REG_OPTION_VOLATILE, KEY_QUERY_VALUE | KEY_SET_VALUE,
+                                 Sd ? &Sa : NULL, &Key, NULL);
+        if (Sd)
+            LocalFree(Sd);
+        if (Result != ERROR_SUCCESS)
+            return NULL;
+    }
+    else if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, Path, 0, KEY_QUERY_VALUE | KEY_SET_VALUE, &Key) != ERROR_SUCCESS)
+        return NULL;
+    return Key;
+}
+
+static VOID DeleteCommandKey(PCSTR Name)
+{
+    CHAR Path[300];
+
+    _snprintf(Path, sizeof(Path), DHCP6_INTERFACES_KEY "\\%s", Name);
+    Path[sizeof(Path) - 1] = '\0';
+    {
+        HKEY Parent;
+
+        if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, Path, 0, KEY_WRITE, &Parent) == ERROR_SUCCESS)
+        {
+            RegDeleteKeyA(Parent, DHCP6_COMMAND_SUBKEY);
+            RegCloseKey(Parent);
+        }
+    }
+}
+
 static VOID SetString(HKEY Key, PCSTR Value, PCSTR Text)
 {
     if (Text && Text[0])
@@ -394,9 +476,10 @@ static VOID ClearAllLearned(VOID)
         if (Key)
         {
             DeleteLearnedValues(Key);
-            RegDeleteValueA(Key, DHCP6_VALUE_COMMAND);
+            RegDeleteValueA(Key, DHCP6_VALUE_COMMAND);        /* a command of an earlier version */
             RegDeleteValueA(Key, DHCP6_VALUE_COMMAND_RESULT);
             RegCloseKey(Key);
+            DeleteCommandKey(Name);
         }
     }
     RegCloseKey(Parent);
@@ -525,7 +608,7 @@ static VOID Publish(D6IF *If, const D6REPLY *R, const UCHAR *Options, ULONG Opti
     SetDword(Key, DHCP6_VALUE_REFRESH, R->HasRefresh ? R->Refresh : (DWORD)IRT_DEFAULT_S);
     if (OptionsLen)
         RegSetValueExA(Key, DHCP6_VALUE_OPTIONS, 0, REG_BINARY, Options, OptionsLen);
-    If->Replies++;
+    If->Replies = NextReplyCount();
     /* last: a reader that waits for a new reply count sees the data complete */
     SetDword(Key, DHCP6_VALUE_REPLIES, If->Replies);
     RegCloseKey(Key);
@@ -545,7 +628,7 @@ static VOID CountReply(D6IF *If, const UCHAR *ServerAddress)
         AddressText(ServerAddress, One);
         SetString(Key, DHCP6_VALUE_SERVER, One);
     }
-    If->Replies++;
+    If->Replies = NextReplyCount();
     SetDword(Key, DHCP6_VALUE_REPLIES, If->Replies);
     RegCloseKey(Key);
     If->Published = TRUE;
@@ -561,6 +644,13 @@ static VOID PublishLease(const D6IF *If)
     if (!Key)
         return;
     SetDword(Key, DHCP6_VALUE_STATEFUL, 1);
+    {
+        /* the mailbox of ipconfig /renew6 and /release6 exists as long as the interface is a stateful one */
+        HKEY Cmd = OpenCommandKey(If->Name, TRUE);
+
+        if (Cmd)
+            RegCloseKey(Cmd);
+    }
     Text[0] = '\0';
     for (i = 0; i < If->LeaseCount; i++)
     {
@@ -590,7 +680,7 @@ static VOID CompleteCommand(D6IF *If, DWORD Error)
 
     if (!If->Cmd)
         return;
-    Key = OpenInterfaceKey(If->Name, FALSE);
+    Key = OpenCommandKey(If->Name, FALSE);
     if (Key)
     {
         SetDword(Key, DHCP6_VALUE_COMMAND_RESULT, Error);
@@ -1999,19 +2089,21 @@ static VOID RunCommand(D6IF *If, ULONG Command, ULONGLONG Now)
 /* TRUE: the budget ran out, more may be queued */
 static BOOL ReadSocket(D6IF *If, ULONGLONG Now)
 {
+    /* only the DHCPv6 thread reads, so one buffer serves every interface (64 KB is too much for its stack) */
+    static UCHAR Packet[D6_MAX_RECV];
     ULONG Budget;
 
     for (Budget = D6_READ_BUDGET; Budget; Budget--)
     {
-        UCHAR Packet[D6_MAX_PACKET];
         SOCKADDR_IN6 From;
         int FromLen = sizeof(From), Len;
         D6REPLY Reply;
 
-        Len = recvfrom(If->Sock, (char *)Packet, sizeof(Packet), 0, (PSOCKADDR)&From, &FromLen);
+        Len = recvfrom(If->Sock, (char *)Packet, D6_MAX_RECV, 0, (PSOCKADDR)&From, &FromLen);
         if (Len == SOCKET_ERROR)
         {
-            /* a datagram larger than the buffer is dropped by recvfrom; the ones queued behind it are still read */
+            /* a datagram larger than the buffer (more than any UDP datagram) is dropped by recvfrom; the ones queued
+               behind it are still read */
             if (WSAGetLastError() == WSAEMSGSIZE)
                 continue;
             break;
@@ -2303,8 +2395,8 @@ static VOID ForceAll(ULONGLONG Now)
     }
 }
 
-/* The commands of ipconfig /renew6 and /release6: a value in the interface key (administrators only), the event
-   wakes the client */
+/* The commands of ipconfig /renew6 and /release6: a value in the command subkey of the interface key (writable by
+   standard users, like Windows), the event wakes the client */
 static VOID CheckCommands(ULONGLONG Now)
 {
     D6IF *If;
@@ -2312,18 +2404,20 @@ static VOID CheckCommands(ULONGLONG Now)
     for (If = Interfaces; If; If = If->Next)
     {
         HKEY Key;
-        DWORD Command = 0, Size = sizeof(Command), Type;
+        DWORD Command = 0, Size = sizeof(Command), Type = REG_NONE;
+        LONG Result;
 
         if (If->Cmd || If->Mode != D6M_STATEFUL)
             continue;
-        Key = OpenInterfaceKey(If->Name, FALSE);
+        Key = OpenCommandKey(If->Name, FALSE);
         if (!Key)
             continue;
-        if (RegQueryValueExA(Key, DHCP6_VALUE_COMMAND, NULL, &Type, (LPBYTE)&Command, &Size) != ERROR_SUCCESS ||
-            Type != REG_DWORD || (Command != DHCP6_COMMAND_RENEW && Command != DHCP6_COMMAND_RELEASE))
+        Result = RegQueryValueExA(Key, DHCP6_VALUE_COMMAND, NULL, &Type, (LPBYTE)&Command, &Size);
+        if (Result != ERROR_SUCCESS || Type != REG_DWORD || Size != sizeof(Command) ||
+            (Command != DHCP6_COMMAND_RENEW && Command != DHCP6_COMMAND_RELEASE))
         {
-            if (Command != 0)
-                RegDeleteValueA(Key, DHCP6_VALUE_COMMAND); /* not a command: gone */
+            if (Result != ERROR_FILE_NOT_FOUND)
+                RegDeleteValueA(Key, DHCP6_VALUE_COMMAND); /* not a command (also one of another type or size): gone */
             RegCloseKey(Key);
             continue;
         }
@@ -2374,6 +2468,27 @@ static HANDLE MakeAdminEvent(PCWSTR Name)
     return Event;
 }
 
+/* The command event may be set by any authenticated user (a standard user may force a renew or release); the
+   events that force an Information-Request stay SYSTEM and administrators only */
+static HANDLE MakeCommandEvent(PCWSTR Name)
+{
+    SECURITY_ATTRIBUTES Sa;
+    PSECURITY_DESCRIPTOR Sd = NULL;
+    HANDLE Event;
+
+    Sa.nLength = sizeof(Sa);
+    Sa.bInheritHandle = FALSE;
+    Sa.lpSecurityDescriptor = NULL;
+    /* 0x100002 = SYNCHRONIZE | EVENT_MODIFY_STATE */
+    if (ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x100002;;;AU)", SDDL_REVISION_1,
+                                                             &Sd, NULL))
+        Sa.lpSecurityDescriptor = Sd;
+    Event = CreateEventW(Sd ? &Sa : NULL, FALSE, FALSE, Name);
+    if (Sd)
+        LocalFree(Sd);
+    return Event;
+}
+
 static DWORD WINAPI Dhcp6Thread(LPVOID Context)
 {
     HANDLE StopEvent = Context, NotifyEvent, ForceEvent = NULL, CommandEvent = NULL, Handles[5], NotifyHandle = NULL;
@@ -2394,9 +2509,10 @@ static DWORD WINAPI Dhcp6Thread(LPVOID Context)
         return 1;
     }
 
-    /* SYSTEM and administrators only may ask for a new Information-Request, a Renew or a Release */
+    /* SYSTEM and administrators only may ask for a new Information-Request; any authenticated user may ask for a
+       Renew or a Release of its interface (Windows lets a standard user do that) */
     ForceEvent = MakeAdminEvent(DHCP6_FORCE_EVENT_NAME);
-    CommandEvent = MakeAdminEvent(DHCP6_COMMAND_EVENT_NAME);
+    CommandEvent = MakeCommandEvent(DHCP6_COMMAND_EVENT_NAME);
 
     ClearAllLearned();
     {

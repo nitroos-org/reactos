@@ -85,8 +85,9 @@ ServiceControlHandler(DWORD dwControl,
     {
         case SERVICE_CONTROL_STOP:
             DPRINT1("  SERVICE_CONTROL_STOP received\n");
-            SetEvent(hStopEvent);
+            /* report the stop first: once the event is set, ServiceMain may report SERVICE_STOPPED at any moment */
             UpdateServiceStatus(SERVICE_STOP_PENDING);
+            SetEvent(hStopEvent);
             return ERROR_SUCCESS;
 
         case SERVICE_CONTROL_PAUSE:
@@ -107,8 +108,8 @@ ServiceControlHandler(DWORD dwControl,
 
         case SERVICE_CONTROL_SHUTDOWN:
             DPRINT1("  SERVICE_CONTROL_SHUTDOWN received\n");
-            SetEvent(hStopEvent);
             UpdateServiceStatus(SERVICE_STOP_PENDING);
+            SetEvent(hStopEvent);
             return ERROR_SUCCESS;
 
         default :

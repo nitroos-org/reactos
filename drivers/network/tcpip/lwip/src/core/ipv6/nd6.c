@@ -1270,6 +1270,11 @@ nd6_tmr(void)
 #endif /* LWIP_IPV6_ADDRESS_LIFETIMES */
       /* Step 2: update DAD state. */
       addr_state = netif_ip6_addr_state(netif, i);
+#if LWIP_IPV6_DUP_DETECT_ATTEMPTS
+      if (ip6_addr_istentative(addr_state) || ip6_addr_isinvalid(addr_state)) {
+        netif->na_sent &= ~(1UL << i); /* NitroOS: (another) address in this slot: it is announced when it is used */
+      }
+#endif
       if (ip6_addr_istentative(addr_state)) {
         /* NitroOS: the number of probes is the interface's (SetIpInterfaceEntry DadTransmits) */
 #ifdef LWIP_HOOK_ND6_DAD_ATTEMPTS
@@ -1288,6 +1293,22 @@ nd6_tmr(void)
           }
 #endif /* LWIP_IPV6_ADDRESS_LIFETIMES */
           netif_ip6_addr_set_state(netif, i, addr_state);
+          /* NitroOS: DAD found nobody: tell the neighbours about the address (RFC 4861 section 7.2.6: an unsolicited
+           * Neighbor Advertisement, Override set, to all nodes; Windows sends one, 1 s after its probe). Not for an
+           * interface that sends no probes (DadTransmits 0), and not for one without a link-layer address (the
+           * loopback interface): its own advertisement would come back to it and mark the address duplicated. */
+          if (addr_state == IP6_ADDR_PREFERRED && netif_is_up(netif) && netif_is_link_up(netif) &&
+              netif->hwaddr_len != 0 &&
+#ifdef LWIP_HOOK_ND6_DAD_ATTEMPTS
+              LWIP_HOOK_ND6_DAD_ATTEMPTS(netif) > 0) {
+#else
+              LWIP_IPV6_DUP_DETECT_ATTEMPTS > 0) {
+#endif
+            nd6_send_na(netif, netif_ip6_addr(netif, i), ND6_FLAG_OVERRIDE | ND6_SEND_FLAG_ALLNODES_DEST);
+#if LWIP_IPV6_DUP_DETECT_ATTEMPTS
+            netif->na_sent |= 1UL << i;
+#endif
+          }
         } else if (netif_is_up(netif) && netif_is_link_up(netif)) {
           /* tentative: set next state by increasing by one */
           netif_ip6_addr_set_state(netif, i, addr_state + 1);
@@ -1299,6 +1320,42 @@ nd6_tmr(void)
         }
       }
     }
+#if LWIP_IPV6_DUP_DETECT_ATTEMPTS
+    /* NitroOS: the link came up again (nd6_redad_netif): probe the addresses in use once more, one probe per tick,
+     * as many as the interface's DAD transmits. They keep their state (and their connections): an answer marks the
+     * address duplicated like any other, and nobody answers when nobody else has the address. */
+    if (netif->redad_na) {
+      /* the last probe of the re-check went out a tick ago and nobody answered: announce the addresses in use (not
+       * one that its own DAD has announced since the link came up, an address that was tried again or was still
+       * tentative then: one advertisement per address) */
+      netif->redad_na = 0;
+      if (netif_is_up(netif) && netif_is_link_up(netif)) {
+        for (i = 0; i < LWIP_IPV6_NUM_ADDRESSES; ++i) {
+          if (ip6_addr_ispreferred(netif_ip6_addr_state(netif, i)) && !(netif->na_sent & (1UL << i))) {
+            nd6_send_na(netif, netif_ip6_addr(netif, i), ND6_FLAG_OVERRIDE | ND6_SEND_FLAG_ALLNODES_DEST);
+            netif->na_sent |= 1UL << i;
+          }
+        }
+      }
+    }
+    if (netif->redad_count > 0) {
+      netif->redad_count--;
+      if (netif_is_up(netif) && netif_is_link_up(netif)) {
+        u8_t probed = 0;
+        for (i = 0; i < LWIP_IPV6_NUM_ADDRESSES; ++i) {
+          u8_t state = netif_ip6_addr_state(netif, i);
+          if (ip6_addr_ispreferred(state) || ip6_addr_isdeprecated(state)) {
+            nd6_send_ns(netif, netif_ip6_addr(netif, i),
+              ND6_SEND_FLAG_MULTICAST_DEST | ND6_SEND_FLAG_ANY_SRC);
+            probed = 1;
+          }
+        }
+        if (netif->redad_count == 0 && probed && netif->hwaddr_len != 0) {
+          netif->redad_na = 1; /* (the loopback interface announces nothing: see above) */
+        }
+      }
+    }
+#endif /* LWIP_IPV6_DUP_DETECT_ATTEMPTS */
   }
 
 #if LWIP_IPV6_SEND_ROUTER_SOLICIT
@@ -2790,6 +2847,42 @@ nd6_adjust_mld_membership(struct netif *netif, s8_t addr_idx, u8_t new_state)
   }
 }
 #endif /* LWIP_IPV6_MLD */
+
+#if LWIP_IPV6_DUP_DETECT_ATTEMPTS
+#if LWIP_IPV6_NUM_ADDRESSES > 32
+#error "netif->na_sent has one bit per address"
+#endif
+/**
+ * NitroOS: the link of netif came up again. A host that was disconnected may have met another one with the same
+ * address meanwhile, so duplicate address detection runs again for the addresses in use (RFC 4862 section 5.4:
+ * after the interface was reconnected; Windows probes every address once at the moment the link comes up). The
+ * probes are sent by nd6_tmr, one per tick, as many as the interface has DAD transmits (zero: none).
+ */
+void
+nd6_redad_netif(struct netif *netif)
+{
+  s8_t i;
+
+#ifdef LWIP_HOOK_ND6_DAD_ATTEMPTS
+  netif->redad_count = LWIP_HOOK_ND6_DAD_ATTEMPTS(netif);
+#else
+  netif->redad_count = LWIP_IPV6_DUP_DETECT_ATTEMPTS;
+#endif
+  /* An announcement still due from an earlier link up (the link went down and up within one tick) waits for the
+   * probes of this one: it is not sent before them, on a link where somebody else may have the address. */
+  netif->redad_na = 0;
+  netif->na_sent = 0;
+  /* An address DAD found in use (before the link went down, or by the probes of an earlier link up) is tried again
+   * from the start: the other host may be gone. It has no connections left to keep. Nobody answers: it is used
+   * again; an answer marks it duplicated again, or gives it a new identifier (LWIP_HOOK_ND6_DAD_FAILED). Without
+   * this it would stay duplicated for good, its lifetimes renewed by every advertisement of its prefix. */
+  for (i = 0; i < LWIP_IPV6_NUM_ADDRESSES; i++) {
+    if (ip6_addr_isduplicated(netif_ip6_addr_state(netif, i))) {
+      netif_ip6_addr_set_state(netif, i, IP6_ADDR_TENTATIVE);
+    }
+  }
+}
+#endif /* LWIP_IPV6_DUP_DETECT_ATTEMPTS */
 
 /** Netif was added, set up, or reconnected (link up) */
 void
