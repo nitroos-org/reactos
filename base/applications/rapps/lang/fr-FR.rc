@@ -171,9 +171,9 @@ END
 
 STRINGTABLE
 BEGIN
-    IDS_APPTITLE "Gestionnaire d'applications ReactOS"
+    IDS_APPTITLE "Gestionnaire d'applications NitroOS"
     IDS_APP_AUTHORS "Copyright 2009 Dmitry Chapyshev"
-    IDS_WELCOME_TITLE "Bienvenue dans ReactOS Applications Manager !"
+    IDS_WELCOME_TITLE "Bienvenue dans NitroOS Applications Manager !"
     IDS_WELCOME_TEXT "Choisissez une catégorie à gauche, ensuite choisissez une application à installer ou désinstaller.\nSite internet de " BRAND_PRODUCT_NAME " : "
     IDS_WELCOME_URL BRAND_SUPPORT_URL
 

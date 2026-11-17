@@ -171,9 +171,9 @@ END
 
 STRINGTABLE
 BEGIN
-    IDS_APPTITLE "ReactOS Uygulama Yöneticisi"
+    IDS_APPTITLE "NitroOS Uygulama Yöneticisi"
     IDS_APP_AUTHORS "Telif Hakkı: 2009 Dmitry Chapyshev"
-    IDS_WELCOME_TITLE "ReactOS Uygulama Yöneticisi'ne hoş geldiniz."
+    IDS_WELCOME_TITLE "NitroOS Uygulama Yöneticisi'ne hoş geldiniz."
     IDS_WELCOME_TEXT "Solda bir kategori seçiniz, ardından kurmak ya da kaldırmak için bir uygulama seçiniz.\n" BRAND_PRODUCT_NAME "'un İnternet sitesi: "
     IDS_WELCOME_URL BRAND_SUPPORT_URL
 

@@ -6,6 +6,7 @@
  */
 
 #include "precomp.h"
+#include <reactos/buildno.h>
 #include <winuser.h>
 #include <algorithm>
 #include <shlobj.h>
@@ -358,7 +359,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR cmdLine, INT)
         {
             xfprintf(stdout, "%s\n", szUsage);
             if (CanShowUi())
-                MessageBoxA(NULL, szUsage, "ReactOS Crash Reporter", MB_OK);
+                MessageBoxA(NULL, szUsage, BRAND_PRODUCT_NAME " Crash Reporter", MB_OK);
             return abort(output, 0);
         }
         else if (!wcscmp(arg, L"/?"))
@@ -372,7 +373,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR cmdLine, INT)
     {
         xfprintf(stdout, "%s\n", szUsage);
         if (CanShowUi())
-            MessageBoxA(NULL, szUsage, "ReactOS Crash Reporter", MB_OK);
+            MessageBoxA(NULL, szUsage, BRAND_PRODUCT_NAME " Crash Reporter", MB_OK);
         return abort(stdout, 0);
     }
 
@@ -387,7 +388,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR cmdLine, INT)
         if (res != ERROR_SUCCESS && res != ERROR_ALREADY_EXISTS)
         {
             xfprintf(stdout, "Could not create output directory, not writing dump\n");
-            Notify(NULL, L"Could not create directory to write crash report.", L"ReactOS Crash Reporter", MB_ICONERROR | MB_OK);
+            Notify(NULL, L"Could not create directory to write crash report.", BRAND_PRODUCT_NAME_W L" Crash Reporter", MB_ICONERROR | MB_OK);
             return abort(stdout, 0);
         }
     }

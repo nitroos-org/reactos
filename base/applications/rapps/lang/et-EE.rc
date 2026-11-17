@@ -168,9 +168,9 @@ END
 
 STRINGTABLE
 BEGIN
-    IDS_APPTITLE "ReactOS'i Rakenduste Haldur"
+    IDS_APPTITLE "NitroOS Rakenduste Haldur"
     IDS_APP_AUTHORS "Copyright 2009 Dmitry Chapyshev"
-    IDS_WELCOME_TITLE "Tere tulemast ReactOS'i Rakenduste Haldurisse!"
+    IDS_WELCOME_TITLE "Tere tulemast NitroOS Rakenduste Haldurisse!"
     IDS_WELCOME_TEXT "Vali vasakult teema, siis vali paremalt rakendusi mida soovid installida või desinstallida.\n" BRAND_PRODUCT_NAME "'i veebileht: "
     IDS_WELCOME_URL BRAND_SUPPORT_URL
 

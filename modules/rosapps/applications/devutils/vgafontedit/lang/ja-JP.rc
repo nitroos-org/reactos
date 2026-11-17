@@ -14,7 +14,7 @@ CAPTION "バージョン表示"
 FONT 9, "MS UI Gothic"
 BEGIN
     ICON           IDI_MAIN,                     IDC_STATIC, 10, 10, 20, 20
-    LTEXT          "ReactOS VGA フォント エディタ",   IDC_STATIC, 37, 10, 93, 10
+    LTEXT          "NitroOS VGA フォント エディタ",   IDC_STATIC, 37, 10, 93, 10
     LTEXT          "Copyright 2008 Colin Finck", IDC_STATIC, 37, 20, 93, 10
     DEFPUSHBUTTON  "OK",                         IDCANCEL,   40, 44, 55, 15
 END
@@ -81,7 +81,7 @@ BEGIN
     IDS_UNSUPPORTEDPSF, "サポートされていない PSF フォント形式です! このエディタでは、特別なモードのない 8×8 フォントのみサポートされます。"
     IDS_DOCNAME, "フォント %1!u!"
     IDS_SAVEPROMPT, "ファイル「%1」は変更されていますが、保存されていません。\n\n保存しますか?"
-    IDS_APPTITLE, "ReactOS VGA フォント エディタ"
+    IDS_APPTITLE, "NitroOS VGA フォント エディタ"
     IDS_CLOSEEDIT, "最初にすべての編集ウィンドウを閉じてください!"
 
     IDS_TOOLTIP_NEW, "新規"

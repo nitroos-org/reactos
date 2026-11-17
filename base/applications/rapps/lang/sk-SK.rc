@@ -169,9 +169,9 @@ END
 
 STRINGTABLE
 BEGIN
-    IDS_APPTITLE "Manažér aplikácií systému ReactOS"
+    IDS_APPTITLE "Manažér aplikácií systému NitroOS"
     IDS_APP_AUTHORS "Copyright 2009 Dmitry Chapyshev"
-    IDS_WELCOME_TITLE "Víta Vás Manažér aplikácií systému ReactOS!"
+    IDS_WELCOME_TITLE "Víta Vás Manažér aplikácií systému NitroOS!"
     IDS_WELCOME_TEXT "Vyberte si kategóriu na ľavej strane, potom vyberte aplikáciu, ktorú chcete nainštalovať alebo odinštalovať.\nWebstránka projektu " BRAND_PRODUCT_NAME ": "
     IDS_WELCOME_URL BRAND_SUPPORT_URL
 
