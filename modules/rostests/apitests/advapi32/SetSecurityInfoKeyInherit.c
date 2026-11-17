@@ -754,8 +754,9 @@ static LONG FindAce(const KEY_DACL *Dacl, UCHAR Type, PSID Sid)
 }
 
 /*
- * A subkey is only brought up to date if its DACL really is auto-inherited. Anything else is the owner's own
- * DACL and a change of the parent must not touch its ACEs (it is only flagged protected + auto-inherited), and no round trip may put an allow ACE ahead of a deny ACE:
+ * A subkey is only brought up to date if its DACL is auto-inherited or carries an ACE flagged inherited. Anything
+ * else is the owner's own DACL and a change of the parent must not touch its ACEs (it is only flagged protected +
+ * auto-inherited), and no round trip may put an allow ACE ahead of a deny ACE:
  *  W1  explicit deny/allow order of a legacy writer, parent changed: the ACEs stay as they were (control 0x9404)
  *  W2  the same key, read and written back by itself: the deny still comes before the allow
  *  W3  an explicit empty DACL, parent changed: it stays empty
@@ -851,9 +852,19 @@ static void TestNoWidening(void)
     ok_hex(Dacl.Control, SE_DACL_PRESENT | SE_DACL_AUTO_INHERITED | SE_DACL_PROTECTED | SE_SELF_RELATIVE);
     FreeDacl(&Dacl);
 
-    /* the key is not auto-inherited and does not end in what the parent passed on either (its last ACE is not the parent's) */
+    /*
+     * The key is not auto-inherited, but one of its ACEs is flagged inherited: as on Windows (W6b, measured) it is
+     * updated like an auto-inherited key. Its explicit ACEs stay first and in their order, the ACE flagged
+     * inherited is replaced by what the parent passes on.
+     */
     ok(OpenDacl(Key, L"c4", &Dacl), "cannot read c4\n");
-    ok(FindAce(&Dacl, ACCESS_ALLOWED_ACE_TYPE, World) < 0, "c4 (not a tail of the parent's ACEs) got an ACE for Everyone\n");
+    ok_hex(Dacl.Control, AUTO_CONTROL);
+    Allow = FindAce(&Dacl, ACCESS_ALLOWED_ACE_TYPE, World);
+    ok(Allow >= 4 && (Dacl.Aces[Allow].Flags & INHERITED_ACE), "c4: the ACE for Everyone is at %ld\n", Allow);
+    ok(Dacl.Count >= 4 && Dacl.Aces[0].Type == ACCESS_ALLOWED_ACE_TYPE && Dacl.Aces[0].Flags == 0 &&
+       EqualSid(Dacl.Aces[0].Sid, Network) && Dacl.Aces[1].Type == ACCESS_DENIED_ACE_TYPE &&
+       Dacl.Aces[1].Flags == CONTAINER_INHERIT_ACE && EqualSid(Dacl.Aces[1].Sid, Network),
+       "c4: the explicit ACEs are not first\n");
     FreeDacl(&Dacl);
 
     /* a malformed ACL (more ACEs than its size holds) is refused, and read nowhere past its end */
@@ -1544,7 +1555,7 @@ static void TestClosedSubkey(void)
     /* T passes on SYSTEM and Everyone read only: nobody of the caller's has WRITE_DAC below it once it is not theirs */
     ok(SetSddlDacl(T, PROTECTED_DACL_SECURITY_INFORMATION, L"D:P(A;;KA;;;BA)(A;;KA;;;SY)(A;CI;KA;;;SY)(A;CI;KR;;;WD)"), "restrict T\n");
 
-    /* b1: auto-inherited and owned by LOCAL SERVICE; b2: denies the caller KEY_ENUMERATE_SUB_KEYS */
+    /* b1: auto-inherited and owned by LOCAL SERVICE; b2: denies the caller KEY_QUERY_VALUE (CC) */
     if (!OpenSubkey(L"b1", T, &B1) || !OpenSubkey(L"b2", T, &B2))
         goto Done;
     EnableRestorePrivileges(TRUE);
@@ -1592,8 +1603,8 @@ static void TestClosedSubkey(void)
     }
     ok(Reads[0] && Reads[1], "a1 and a1\\g were not updated\n");
     ok(!Reads[2] && !Reads[3], "b1 (closed to the caller) or its subkey was updated\n");
-    ok(Reads[4], "b2 (denies enumeration) was not updated\n");
-    ok(!Reads[5], "the subkey of b2 (denies enumeration) was updated\n");
+    ok(Reads[4], "b2 (denies KEY_QUERY_VALUE) was not updated\n");
+    ok(!Reads[5], "the subkey of b2 (denies KEY_QUERY_VALUE) was updated\n");
     ok(Reads[6] && Reads[7], "c1 and c1\\g (siblings after the closed key) were not updated\n");
 
 Done:
@@ -1605,6 +1616,193 @@ Done:
     RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
     if (Auth) FreeSid(Auth);
 }
+
+/* the DACL of Root\Path as SDDL ("D:" and its flags, then the ACEs), compared with what Windows stores */
+static void DaclSddlIs(PCWSTR Path, PCWSTR Expected, int Line)
+{
+    BYTE Buffer[4096];
+    DWORD Length = sizeof(Buffer);
+    LPWSTR Sddl = NULL;
+    HKEY Key;
+    DWORD Error;
+
+    Error = RegOpenKeyExW(HKEY_CURRENT_USER, Path, 0, READ_CONTROL, &Key);
+    ok_(__FILE__, Line)(Error == ERROR_SUCCESS, "%ls: open error %lu\n", Path, Error);
+    if (Error)
+        return;
+    Error = RegGetKeySecurity(Key, DACL_SECURITY_INFORMATION, Buffer, &Length);
+    RegCloseKey(Key);
+    ok_(__FILE__, Line)(Error == ERROR_SUCCESS, "%ls: RegGetKeySecurity error %lu\n", Path, Error);
+    if (Error)
+        return;
+    if (!ConvertSecurityDescriptorToStringSecurityDescriptorW(Buffer, SDDL_REVISION_1, DACL_SECURITY_INFORMATION, &Sddl, NULL))
+    {
+        ok_(__FILE__, Line)(0, "%ls: no SDDL, error %lu\n", Path, GetLastError());
+        return;
+    }
+    ok_(__FILE__, Line)(!wcscmp(Sddl, Expected), "%ls: %ls, expected %ls\n", Path, Sddl, Expected);
+    LocalFree(Sddl);
+}
+#define DACL_IS(Name, Expected) do { wsprintfW(Path, L"%ls\\T\\%ls", ScratchPath, Name); DaclSddlIs(Path, Expected, __LINE__); } while (0)
+
+/*
+ * Subkeys that are not auto-inherited, when their parent's DACL changes (measured on Windows Server 2022, x64 and
+ * x86 callers, the same shapes below HKLM; HKCU behaves the same):
+ *  W6b  a key with an ACE flagged INHERITED_ACE (a legacy writer copied the flag) is updated like an auto-inherited
+ *       one: every ACE flagged inherited is dropped (first or last, allow or deny, passed on by the parent or not),
+ *       its explicit ACEs stay, the parent's set follows, it becomes auto-inherited and its subkeys follow;
+ *  W6c  a key without one keeps its ACEs and is flagged protected + auto-inherited, and its subtree is rebuilt
+ *       from its DACL: what the subkeys had inherited from above it is gone (it granted more than the key passes
+ *       on). A key below it that is not auto-inherited either is handled the same way, a protected one and a key
+ *       without a DACL are left alone;
+ *       a key that does not grant the caller KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS is flagged, its subkeys are
+ *       not touched (checked only where key security is enforced).
+ */
+static void TestLegacySubkeys(void)
+{
+    static const struct { PCWSTR Name; int How; PCWSTR Sddl; } Tree[] = {
+        {L"b4", 1, L"D:(A;;KA;;;BA)(A;ID;KR;;;WD)"}, {L"b4\\g", 0, NULL},
+        {L"b4n", 1, L"D:(A;ID;KR;;;WD)(A;;KA;;;BA)"}, {L"b4n\\g", 0, NULL},
+        {L"b4d", 1, L"D:(A;;KA;;;BA)(D;ID;KW;;;BU)"}, {L"b4d\\g", 0, NULL},
+        {L"b4x", 1, L"D:(A;;KA;;;BA)(A;ID;KA;;;BU)"}, {L"b4x\\g", 0, NULL},
+        {L"b4o", 1, L"D:(A;ID;KR;;;WD)"}, {L"b4o\\g", 0, NULL},
+        {L"b4c", 1, L"D:(A;;KA;;;BA)(A;CI;KR;;;BU)(A;CIID;KR;;;WD)"}, {L"b4c\\g", 0, NULL}, {L"b4c\\g\\h", 0, NULL},
+        {L"b4l", 1, L"D:(A;;KA;;;BA)(A;CIID;KR;;;WD)"}, {L"b4l\\g", 1, L"D:(A;;KA;;;BA)(A;;KR;;;IU)"}, {L"b4l\\g\\h", 0, NULL},
+        {L"b5", 1, L"D:(A;;KA;;;BA)(A;;KR;;;WD)"}, {L"b5\\g", 2, L"D:(A;;KR;;;IU)"}, {L"b5\\g\\h", 0, NULL},
+        {L"b5c", 1, L"D:(A;;KA;;;BA)(A;CI;KR;;;BU)"}, {L"b5c\\g", 0, NULL}, {L"b5c\\g\\h", 0, NULL},
+        {L"b5n", 1, L"D:(A;;KA;;;BA)(A;CI;KR;;;BU)"}, {L"b5n\\g", 1, L"D:(A;;KA;;;BA)(A;;KR;;;IU)"}, {L"b5n\\g\\h", 0, NULL},
+        {L"b5p", 1, L"D:(A;;KA;;;BA)(A;CI;KR;;;BU)"}, {L"b5p\\g", 3, L"D:P(A;;KA;;;BA)(A;CI;KR;;;IU)"}, {L"b5p\\g\\h", 0, NULL},
+        {L"b5a", 1, L"D:(A;;KR;;;WD)"}, {L"b5a\\g", 0, NULL},
+        {L"b5v", 1, L"D:(D;;KW;;;BU)(A;;CCSW;;;BA)"}, {L"b5v\\g", 0, NULL},
+        {L"b5e", 1, L"D:"}, {L"b5e\\g", 0, NULL},
+        {L"b5z", 1, NULL /* a NULL DACL */}, {L"b5z\\g", 0, NULL},
+    };
+    static const PCWSTR Stale = L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)";
+    static const PCWSTR Updated = L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;AU)";
+    static const PCWSTR B4 = L"D:AI(A;;KA;;;BA)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;AU)";
+    WCHAR Path[320];
+    HKEY Scratch = NULL, T = NULL, Key = NULL;
+    DWORD Error;
+    ULONG i;
+
+    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    Error = RegCreateKeyExW(HKEY_CURRENT_USER, ScratchPath, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &Scratch, NULL);
+    ok_long(Error, ERROR_SUCCESS);
+    if (Error || !MakeKey(Scratch, L"T", 0, &T))
+        goto Done;
+    ok(SetSddlDacl(T, UNPROTECTED_DACL_SECURITY_INFORMATION, L"D:(A;CI;KA;;;SY)(A;CI;KA;;;BA)(A;CI;KR;;;WD)"), "T\n");
+    for (i = 0; i < ARRAYSIZE(Tree); i++)
+    {
+        if (!MakeKey(T, Tree[i].Name, 0, &Key))
+            goto Done;
+        RegCloseKey(Key);
+    }
+    /* T passes on SYSTEM full and Everyone read */
+    ok(SetSddlDacl(T, PROTECTED_DACL_SECURITY_INFORMATION, L"D:P(A;;KA;;;BA)(A;;KA;;;SY)(A;CI;KA;;;SY)(A;CI;KR;;;WD)"), "restrict T\n");
+    /* the SetSecurityInfo setups first (they still inherit from T), then the legacy writes */
+    for (i = 0; i < 2 * ARRAYSIZE(Tree); i++)
+    {
+        ULONG k = i % ARRAYSIZE(Tree);
+
+        if ((i < ARRAYSIZE(Tree)) != (Tree[k].How >= 2) || Tree[k].How == 0)
+            continue;
+        if (Tree[k].How == 1 && Tree[k].Sddl)
+        {
+            if (!RawSetSddl(T, Tree[k].Name, Tree[k].Sddl))
+                goto Done;
+            continue;
+        }
+        if (Tree[k].How == 1)
+        {
+            SECURITY_DESCRIPTOR Null;
+
+            InitializeSecurityDescriptor(&Null, SECURITY_DESCRIPTOR_REVISION);
+            SetSecurityDescriptorDacl(&Null, TRUE, NULL, FALSE);
+            ok_long(RegOpenKeyExW(T, Tree[k].Name, 0, WRITE_DAC, &Key), ERROR_SUCCESS);
+            ok_long(RegSetKeySecurity(Key, DACL_SECURITY_INFORMATION, &Null), ERROR_SUCCESS);
+            RegCloseKey(Key);
+            continue;
+        }
+        /* the caller keeps READ_CONTROL | WRITE_DAC as the owner; T passes it no other right on Windows */
+        if (RegOpenKeyExW(T, Tree[k].Name, 0, READ_CONTROL | WRITE_DAC, &Key) != ERROR_SUCCESS)
+            goto Done;
+        ok(SetSddlDacl(Key, Tree[k].How == 3 ? PROTECTED_DACL_SECURITY_INFORMATION : UNPROTECTED_DACL_SECURITY_INFORMATION,
+                       Tree[k].Sddl), "%ls\n", Tree[k].Name);
+        RegCloseKey(Key);
+    }
+    DACL_IS(L"b4", L"D:(A;;KA;;;BA)(A;ID;KR;;;WD)");
+    DACL_IS(L"b5\\g", L"D:AI(A;;KR;;;IU)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)");
+    DACL_IS(L"b5\\g\\h", Stale);
+
+    /* T gets one more inheritable ACE */
+    ok(SetSddlDacl(T, PROTECTED_DACL_SECURITY_INFORMATION, L"D:P(A;;KA;;;BA)(A;;KA;;;SY)(A;CI;KA;;;SY)(A;CI;KR;;;WD)(A;CI;KR;;;AU)"),
+       "set T\n");
+
+    /* W6b */
+    DACL_IS(L"b4", B4);
+    DACL_IS(L"b4\\g", Updated);
+    DACL_IS(L"b4n", B4);
+    DACL_IS(L"b4n\\g", Updated);
+    DACL_IS(L"b4d", B4);
+    DACL_IS(L"b4d\\g", Updated);
+    DACL_IS(L"b4x", B4);
+    DACL_IS(L"b4x\\g", Updated);
+    DACL_IS(L"b4o", Updated);
+    DACL_IS(L"b4o\\g", Updated);
+    DACL_IS(L"b4c", L"D:AI(A;;KA;;;BA)(A;CI;KR;;;BU)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;AU)");
+    DACL_IS(L"b4c\\g", L"D:AI(A;CIID;KR;;;BU)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;AU)");
+    DACL_IS(L"b4c\\g\\h", L"D:AI(A;CIID;KR;;;BU)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;AU)");
+    DACL_IS(L"b4l", B4);
+    DACL_IS(L"b4l\\g", L"D:PAI(A;;KA;;;BA)(A;;KR;;;IU)");
+    DACL_IS(L"b4l\\g\\h", L"D:AI");
+
+    /* W6c */
+    DACL_IS(L"b5", L"D:PAI(A;;KA;;;BA)(A;;KR;;;WD)");
+    DACL_IS(L"b5\\g", L"D:AI(A;;KR;;;IU)");
+    DACL_IS(L"b5\\g\\h", L"D:AI");
+    DACL_IS(L"b5c", L"D:PAI(A;;KA;;;BA)(A;CI;KR;;;BU)");
+    DACL_IS(L"b5c\\g", L"D:AI(A;CIID;KR;;;BU)");
+    DACL_IS(L"b5c\\g\\h", L"D:AI(A;CIID;KR;;;BU)");
+    DACL_IS(L"b5n", L"D:PAI(A;;KA;;;BA)(A;CI;KR;;;BU)");
+    DACL_IS(L"b5n\\g", L"D:PAI(A;;KA;;;BA)(A;;KR;;;IU)");
+    DACL_IS(L"b5n\\g\\h", L"D:AI");
+    DACL_IS(L"b5p", L"D:PAI(A;;KA;;;BA)(A;CI;KR;;;BU)");
+    DACL_IS(L"b5p\\g", L"D:PAI(A;;KA;;;BA)(A;CI;KR;;;IU)");
+    DACL_IS(L"b5p\\g\\h", L"D:AI(A;CIID;KR;;;IU)");
+    DACL_IS(L"b5a", L"D:PAI(A;;KR;;;WD)");
+    DACL_IS(L"b5a\\g", L"D:AI");
+    DACL_IS(L"b5v", L"D:PAI(D;;KW;;;BU)(A;;CCSW;;;BA)");
+    DACL_IS(L"b5v\\g", L"D:AI");
+    DACL_IS(L"b5e", L"D:PAI");
+    /* b5z: a NULL DACL, not auto-inherited: untouched (not even flagged), and so is its subtree */
+    {
+        BYTE Raw[512] = {0};
+        PACL Dacl = (PACL)1;
+        BOOL Present = FALSE, Defaulted;
+
+        ok(RawGet(T, L"b5z", Raw, sizeof(Raw)) != 0 && GetSecurityDescriptorDacl(Raw, &Present, &Dacl, &Defaulted) &&
+           Present && !Dacl, "b5z: the NULL DACL is gone (present %d, %p)\n", Present, Dacl);
+        ok_hex(*(WORD *)(Raw + 2) & (SE_DACL_AUTO_INHERITED | SE_DACL_PROTECTED), 0);
+    }
+    DACL_IS(L"b5z\\g", Stale);
+    wsprintfW(Path, L"%ls\\T\\b5e", ScratchPath);
+    if (KeyOpens(HKEY_CURRENT_USER, Path, KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS))
+        skip("a key cannot be shut away from the caller on this system (key security is not enforced)\n");
+    else
+        DACL_IS(L"b5e\\g", Stale);
+
+Done:
+    /* hand every key back to Administrators so that the tree can be deleted (b5e, b5a, b5v do not grant DELETE) */
+    for (i = ARRAYSIZE(Tree); i-- > 0; )
+    {
+        wsprintfW(Path, L"%ls\\T\\%ls", ScratchPath, Tree[i].Name);
+        RestoreSddl(HKEY_CURRENT_USER, Path, DACL_SECURITY_INFORMATION, L"D:P(A;;KA;;;BA)(A;;KA;;;SY)");
+    }
+    if (T) RegCloseKey(T);
+    if (Scratch) RegCloseKey(Scratch);
+    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+}
+#undef DACL_IS
 
 START_TEST(SetSecurityInfoKeyInherit)
 {
@@ -1626,6 +1824,7 @@ START_TEST(SetSecurityInfoKeyInherit)
     TestHiveRoot();
     TestUnreadableParent();
     TestClosedSubkey();
+    TestLegacySubkeys();
 
     KEY_DACL Initial, P1, C1a, C1b, P2, C2, G;
     HKEY Key = NULL, Child1 = NULL, Child2 = NULL, Grand = NULL;
