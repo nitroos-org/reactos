@@ -2547,6 +2547,206 @@ StTestRaFollowups(PIP_INTERFACE Eth)
     UNLOCK_TCPIP_CORE();
 }
 
+/* the router table is one for all interfaces: a link that holds more than its share gives up an entry to another
+   link, and preferences are compared within a link only; a route information route whose router answers again is
+   used again for a destination the stack already has a next hop for */
+static VOID
+StTestRaFairness(PIP_INTERFACE Eth)
+{
+    struct netif *En = Eth->TCPContext, *Lo = (Loopback && Loopback->TCPContext) ? Loopback->TCPContext : NULL;
+    ip6_addr_t Rt[15], Dest;
+    UCHAR Opts[256], Mac[6] = {0x02, 0x00, 0x00, 0x7d, 0x00, 0x00}, Prefix[16] = {0x20, 0x01, 0x0d, 0xb8, 0x74};
+    CHAR Detail[160];
+    ULONG k, OnLo, OnEn;
+    UINT n;
+    int Idx;
+    BOOLEAN Ok;
+
+    for (k = 1; k <= 14; k++)
+    {
+        CHAR Text[32];
+
+        _snprintf(Text, sizeof(Text), "fe80::7d:%lx", k);
+        ip6addr_aton(Text, &Rt[k]);
+    }
+
+#define ST_COUNT_NETIFS() \
+    do { int i_; OnLo = OnEn = 0; LOCK_TCPIP_CORE(); \
+         for (i_ = 0; i_ < LWIP_ND6_NUM_ROUTERS; i_++) { \
+             struct nd6_neighbor_cache_entry *N_ = default_router_list[i_].neighbor_entry; \
+             if (N_ && N_->netif == Lo) OnLo++; else if (N_ && N_->netif == En) OnEn++; } \
+         UNLOCK_TCPIP_CORE(); } while (0)
+
+    if (!Lo || Lo == En)
+    {
+        StPrint("router table fairness: no second interface (skipped)");
+    }
+    else
+    {
+        ULONG Before;
+
+        /* eight routers of medium preference, then moved to the other interface: it holds the table but for this
+           link's own router (QEMU's, when it advertises) */
+        for (k = 1; k <= 8; k++)
+        {
+            Mac[5] = (UCHAR)k;
+            n = StOptSlla(Opts, Mac);
+            StInject(Eth, StRa(&Rt[k], 0, 0x00, 1800, Opts, n), FALSE);
+        }
+        LOCK_TCPIP_CORE();
+        for (k = 1; k <= 8; k++)
+        {
+            Idx = StRouterIndex(&Rt[k]);
+            if (Idx >= 0)
+                default_router_list[Idx].neighbor_entry->netif = Lo;
+        }
+        UNLOCK_TCPIP_CORE();
+        ST_COUNT_NETIFS();
+        if (OnLo + OnEn == LWIP_ND6_NUM_ROUTERS && OnLo >= LWIP_ND6_NUM_ROUTERS - 1)
+        {
+            /* a router of low preference on this link: the other link holds more than its share */
+            Before = OnLo;
+            Mac[5] = 9;
+            n = StOptSlla(Opts, Mac);
+            StInject(Eth, StRa(&Rt[9], 0, 0x18, 1800, Opts, n), FALSE);
+            LOCK_TCPIP_CORE();
+            Idx = StRouterIndex(&Rt[9]);
+            UNLOCK_TCPIP_CORE();
+            ST_COUNT_NETIFS();
+            _snprintf(Detail, sizeof(Detail), "entry %d, other link %lu (was %lu), this link %lu", Idx, OnLo, Before, OnEn);
+            StResult(Idx >= 0 && OnLo == Before - 1,
+                     "router table fairness: a link with fewer than its share gets an entry from a link that holds the table", Detail);
+
+            /* three more of medium preference: the links end at four each */
+            for (k = 10; k <= 12; k++)
+            {
+                Mac[5] = (UCHAR)k;
+                n = StOptSlla(Opts, Mac);
+                StInject(Eth, StRa(&Rt[k], 0, 0x00, 1800, Opts, n), FALSE);
+            }
+            ST_COUNT_NETIFS();
+            _snprintf(Detail, sizeof(Detail), "other link %lu, this link %lu", OnLo, OnEn);
+            StResult(OnLo == LWIP_ND6_NUM_ROUTERS / 2 && OnEn == LWIP_ND6_NUM_ROUTERS / 2,
+                     "router table fairness: the links share the table", Detail);
+
+            /* one more of medium preference: the low one of this link has given way (to it, or to the last of the
+               three when QEMU's router has an entry), none of the other link */
+            Mac[5] = 13;
+            n = StOptSlla(Opts, Mac);
+            StInject(Eth, StRa(&Rt[13], 0, 0x00, 1800, Opts, n), FALSE);
+            LOCK_TCPIP_CORE();
+            Ok = StRouterIndex(&Rt[9]) < 0;
+            UNLOCK_TCPIP_CORE();
+            ST_COUNT_NETIFS();
+            _snprintf(Detail, sizeof(Detail), "other link %lu, this link %lu", OnLo, OnEn);
+            StResult(Ok && OnLo == LWIP_ND6_NUM_ROUTERS / 2,
+                     "router table fairness: a better router replaces the lower one of its own link, not one of the other link", Detail);
+
+            /* high preference: a medium one of this link goes, the medium ones of the other link (older) stay */
+            Mac[5] = 14;
+            n = StOptSlla(Opts, Mac);
+            StInject(Eth, StRa(&Rt[14], 0, 0x08, 1800, Opts, n), FALSE);
+            LOCK_TCPIP_CORE();
+            Idx = StRouterIndex(&Rt[14]);
+            UNLOCK_TCPIP_CORE();
+            ST_COUNT_NETIFS();
+            _snprintf(Detail, sizeof(Detail), "entry %d, other link %lu, this link %lu", Idx, OnLo, OnEn);
+            StResult(Idx >= 0 && OnLo == LWIP_ND6_NUM_ROUTERS / 2,
+                     "router table fairness: preference is compared within a link, the other link's routers stay", Detail);
+        }
+        else
+        {
+            _snprintf(Detail, sizeof(Detail), "other link %lu, this link %lu", OnLo, OnEn);
+            StResult(FALSE, "router table fairness: setup (the routers moved to the other link hold the table)", Detail);
+        }
+
+        /* all go: back to this interface (also the neighbour entries of routers that gave way), then lifetime 0 */
+        LOCK_TCPIP_CORE();
+        for (k = 1; k <= 14; k++)
+        {
+            struct nd6_neighbor_cache_entry *X = StNeighbor(&Rt[k]);
+
+            if (X && X->netif == Lo)
+                X->netif = En;
+        }
+        UNLOCK_TCPIP_CORE();
+        for (k = 1; k <= 14; k++)
+        {
+            Mac[5] = (UCHAR)k;
+            n = StOptSlla(Opts, Mac);
+            StInject(Eth, StRa(&Rt[k], 0, 0x00, 0, Opts, n), FALSE);
+        }
+        StSleep(2500);
+    }
+#undef ST_COUNT_NETIFS
+
+    /* --- a route information route through a router that answers again: the next hop lwIP kept is found again --- */
+    ip6addr_aton("2001:db8:7400::9", &Dest);
+    ip6addr_aton("fe80::7e:1", &Rt[1]);                     /* routers of their own: no neighbour entry from above */
+    ip6addr_aton("fe80::7e:2", &Rt[2]);
+    {
+        const u8_t *Hw = NULL;
+        struct nd6_neighbor_cache_entry *X;
+        err_t Err;
+        ULONG j;
+
+        Prefix[5] = 0;
+        for (k = 1; k <= 2; k++)
+        {
+            Mac[5] = (UCHAR)(0x20 + k);
+            n = StOptSlla(Opts, Mac);
+            n += StOptRio(Opts + n, 2, 48, k == 1 ? 1 : 0, 600, Prefix);       /* r1 high, r2 medium */
+            StInject(Eth, StRa(&Rt[k], 0, 0x00, 1800, Opts, n), FALSE);
+        }
+        /* r1 stops answering: the ND timer sees it, the destination goes through r2 */
+        LOCK_TCPIP_CORE();
+        X = StNeighbor(&Rt[1]);
+        if (X)
+        {
+            X->state = ND6_INCOMPLETE;
+            X->counter.probes_sent = LWIP_ND6_MAX_MULTICAST_SOLICIT;
+        }
+        UNLOCK_TCPIP_CORE();
+        StSleep(1500);
+        LOCK_TCPIP_CORE();
+        Err = nd6_get_next_hop_addr_or_queue(En, NULL, &Dest, &Hw);
+        Mac[5] = 0x22;
+        Ok = X && Err == ERR_OK && Hw && StSame(Hw, Mac, 6);
+        UNLOCK_TCPIP_CORE();
+        StResult(Ok, "RA route information: a destination goes through the next router while the best one does not answer", NULL);
+
+        /* r1's next advertisement (its link-layer address, the route again) makes it reachable */
+        Mac[5] = 0x21;
+        n = StOptSlla(Opts, Mac);
+        n += StOptRio(Opts + n, 2, 48, 1, 600, Prefix);
+        StInject(Eth, StRa(&Rt[1], 0, 0x00, 1800, Opts, n), FALSE);
+        LOCK_TCPIP_CORE();
+        X = StNeighbor(&Rt[1]);
+        Ok = FALSE;
+        for (j = 0; j < LWIP_ND6_NUM_DESTINATIONS; j++)
+        {
+            if (ip6_addr_zoneless_eq(&destination_cache[j].destination_addr, &Dest))
+                break;
+        }
+        /* the destination's entry is gone (found again on the next packet) or goes through r1 */
+        Ok = X && X->state != ND6_INCOMPLETE &&
+             (j == LWIP_ND6_NUM_DESTINATIONS || ip6_addr_zoneless_eq(&destination_cache[j].next_hop_addr, &Rt[1]));
+        _snprintf(Detail, sizeof(Detail), "router 1 state %d, destination %s", X ? X->state : -1,
+                  j == LWIP_ND6_NUM_DESTINATIONS ? "found again" : "still cached");
+        UNLOCK_TCPIP_CORE();
+        StResult(Ok, "RA route information: a router that answers again is the next hop again of a destination already seen", Detail);
+
+        for (k = 1; k <= 2; k++)
+        {
+            Mac[5] = (UCHAR)(0x20 + k);
+            n = StOptSlla(Opts, Mac);
+            n += StOptRio(Opts + n, 2, 48, 0, 0, Prefix);
+            StInject(Eth, StRa(&Rt[k], 0, 0x00, 0, Opts, n), FALSE);
+        }
+        StSleep(2500);
+    }
+}
+
 static VOID
 StTestRaExtras(PIP_INTERFACE Eth)
 {
@@ -3587,6 +3787,7 @@ StThread(PVOID Context)
     StTestStableIds(Eth);
     StTestRaExtras(Eth);
     StTestRaFollowups(Eth);
+    StTestRaFairness(Eth);
     StTestTemporary(Eth);
     StTestSlots(Eth);
     StTestDupHold(Eth);

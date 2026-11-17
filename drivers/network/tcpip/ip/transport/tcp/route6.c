@@ -614,8 +614,18 @@ LibNd6RouteInfo(struct netif *netif, const ip6_addr_t *Router, const u8_t *Prefi
         Route6Count++;
         Changed = TRUE;
     }
-    else if (Entry->Metric != Metric)
-        Changed = TRUE;
+    else
+    {
+        BOOLEAN Unreachable = Route6RouterUnreachable(netif, &NextHop);
+
+        if (Entry->Metric != Metric)
+            Changed = TRUE;
+        /* the router answers again (the advertisement's link-layer address made it reachable) or stopped: what the
+           ND timer would notice it does not see any more once the entry has the new state, so the next hops lwIP
+           kept are found again here */
+        else if (Unreachable != Entry->Unreachable)
+            Route6Changed();
+    }
 
     Entry->Metric = Metric;
     Entry->Origin = ROUTE6_ORIGIN_RA;

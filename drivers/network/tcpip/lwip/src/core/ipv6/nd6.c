@@ -130,7 +130,7 @@ static u8_t nd6_router_rank(u8_t flags);
 static s8_t nd6_get_router(const ip6_addr_t *router_addr, struct netif *netif);
 static s8_t nd6_new_router(const ip6_addr_t *router_addr, struct netif *netif);
 static void nd6_free_router(s8_t i);
-static u8_t nd6_make_router_room(u8_t flags);
+static u8_t nd6_make_router_room(struct netif *netif, u8_t flags);
 static void nd6_default_route_option(struct netif *netif, s8_t i, u8_t preference, u32_t lifetime, u8_t ra_flags);
 static s8_t nd6_get_onlink_prefix(const ip6_addr_t *prefix, struct netif *netif);
 static s8_t nd6_new_onlink_prefix(const ip6_addr_t *prefix, struct netif *netif);
@@ -668,9 +668,9 @@ nd6_input(struct pbuf *p, struct netif *inp)
     if (i < 0) {
       /* Create a new router entry. */
       i = nd6_new_router(ip6_current_src_addr(), inp);
-      /* NitroOS: a full router table gives way to a default router that is better than one it has (see
-         nd6_make_router_room); an advertisement of lifetime 0 is not a default router and takes no entry from it */
-      if (i < 0 && ra_hdr->router_lifetime != 0 && nd6_make_router_room(ra_hdr->flags)) {
+      /* NitroOS: a full router table gives way to a default router that is better than one its link has, or to a
+         link that has fewer than its share (see nd6_make_router_room); an advertisement of lifetime 0 is not a default router and takes no entry from it */
+      if (i < 0 && ra_hdr->router_lifetime != 0 && nd6_make_router_room(inp, ra_hdr->flags)) {
         i = nd6_new_router(ip6_current_src_addr(), inp);
       }
       /* NitroOS: user mode learns of a new default router (when there is one) */
@@ -2002,33 +2002,59 @@ nd6_free_router(s8_t i)
  * room for it where that costs nothing, or where the new router is the better one. NitroOS policy (RFC 4861 6.3.4
  * leaves the choice to the host, 6.3.5 only says an entry whose lifetime ended goes), the first of:
  *  1. an entry that has no lifetime left (its advertisement said 0, or a ::/0 route option did);
- *  2. an entry whose router has no neighbour entry state to reach it by (INCOMPLETE: it never answered, or stopped:
- *     nd6_select_router does not use it either);
- *  3. the entry with the lowest preference (RFC 4191 2.1) when that is lower than the new one's, and of those the one
- *     with the least lifetime left.
+ *  2. an entry of another interface that holds more than its share (more entries than the new sender's interface
+ *     would have with one more): the table is one for all interfaces, and the routers of one link (or a flood of
+ *     advertisements on it) must not keep those of another link out; of those an INCOMPLETE one, else the lowest
+ *     preference, else the least lifetime left;
+ *  3. an entry of the sender's interface whose router has no neighbour entry state to reach it by (INCOMPLETE: it
+ *     never answered, or stopped: nd6_select_router does not use it either);
+ *  4. the entry of the sender's interface with the lowest preference (RFC 4191 2.1) when that is lower than the new
+ *     one's, and of those the one with the least lifetime left. Preferences are compared within a link only: the
+ *     routers of another interface are not pushed out by them.
  * With none of these the new sender stays without an entry: the advertisement's other options are taken all the
  * same (see the RA handler).
  *
+ * @param netif the interface the advertisement came in on
  * @param flags the flags of the new advertisement (its router preference)
  * @return 1 if an entry is free now, 0 if not
  */
 static u8_t
-nd6_make_router_room(u8_t flags)
+nd6_make_router_room(struct netif *netif, u8_t flags)
 {
-  s8_t i, victim = -1;
-  u8_t victim_class = 0, victim_rank = 0, new_rank = nd6_router_rank(flags);
+  s8_t i, j, victim = -1;
+  u8_t victim_class = 0, victim_rank = 0, victim_incomplete = 0, new_rank = nd6_router_rank(flags), own = 0;
   u32_t victim_left = 0;
 
   for (i = 0; i < LWIP_ND6_NUM_ROUTERS; i++) {
-    u8_t cls, rank;
-
     if (default_router_list[i].neighbor_entry == NULL) {
       return 1; /* not full: the entry was not made for another reason (no neighbour entry) */
     }
+    if (default_router_list[i].neighbor_entry->netif == netif) {
+      own++;
+    }
+  }
+
+  for (i = 0; i < LWIP_ND6_NUM_ROUTERS; i++) {
+    struct netif *router_netif = default_router_list[i].neighbor_entry->netif;
+    u8_t cls, rank, held = 0;
+    u8_t incomplete = (default_router_list[i].neighbor_entry->state == ND6_INCOMPLETE);
+
+    if (router_netif != netif) {
+      for (j = 0; j < LWIP_ND6_NUM_ROUTERS; j++) {
+        if (default_router_list[j].neighbor_entry->netif == router_netif) {
+          held++;
+        }
+      }
+    }
     rank = nd6_router_rank(default_router_list[i].flags);
     if (default_router_list[i].invalidation_timer == 0) {
+      cls = 4;
+    } else if (router_netif != netif) {
+      if (held <= own + 1) {
+        continue;
+      }
       cls = 3;
-    } else if (default_router_list[i].neighbor_entry->state == ND6_INCOMPLETE) {
+    } else if (incomplete) {
       cls = 2;
     } else if (rank < new_rank) {
       cls = 1;
@@ -2036,12 +2062,14 @@ nd6_make_router_room(u8_t flags)
       continue;
     }
     if (victim < 0 || cls > victim_class ||
-        (cls == victim_class && cls == 1 &&
+        (cls == victim_class && cls == 3 && incomplete > victim_incomplete) ||
+        (cls == victim_class && (cls == 1 || (cls == 3 && incomplete == victim_incomplete)) &&
          (rank < victim_rank ||
           (rank == victim_rank && default_router_list[i].invalidation_timer < victim_left)))) {
       victim = i;
       victim_class = cls;
       victim_rank = rank;
+      victim_incomplete = incomplete;
       victim_left = default_router_list[i].invalidation_timer;
     }
   }
