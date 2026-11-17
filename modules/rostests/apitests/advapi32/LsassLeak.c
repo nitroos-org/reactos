@@ -15,6 +15,13 @@
 #define WARMUP_ITERATIONS   30
 #define LOOP_ITERATIONS     200
 
+/*
+ * The process heap of lsass parks freed small blocks per thread in size classes, bounded per slot (the heap front
+ * end). The classes fill over the first thousand calls or so and then stay flat, so a loop is measured again, up to
+ * this many times, until it grows by no more than the limit. A leak grows in every round.
+ */
+#define MAX_ROUNDS          8
+
 static WCHAR UserName[] = L"lsassleaktest";
 static WCHAR UserPassword[] = L"Lsass#Leak12x";
 
@@ -99,35 +106,41 @@ static DWORD FindProcessId(PCWSTR Name)
 static void MeasureLoop(PCSTR Name, LOOP_FUNC Func, SIZE_T MaxGrowth)
 {
     LSASS_USAGE Before, After;
-    ULONG i, Wait;
+    ULONG i, Wait, Round;
 
     for (i = 0; i < WARMUP_ITERATIONS; i++)
         Func();
 
-    for (Wait = 0; Wait < 50; Wait++)
+    for (Round = 0; Round < MAX_ROUNDS; Round++)
     {
+        for (Wait = 0; Wait < 50; Wait++)
+        {
+            QueryUsage(&Before);
+            Sleep(20);
+            QueryUsage(&After);
+            if (Before.Sessions == After.Sessions)
+                break;
+        }
+
         QueryUsage(&Before);
-        Sleep(20);
-        QueryUsage(&After);
-        if (Before.Sessions == After.Sessions)
+        for (i = 0; i < LOOP_ITERATIONS; i++)
+            Func();
+
+        for (Wait = 0; Wait < 100; Wait++)
+        {
+            QueryUsage(&After);
+            if (After.Sessions <= Before.Sessions + 1)
+                break;
+            Sleep(50);
+        }
+
+        trace("%s: lsass private %Iu -> %Iu bytes, handles %lu -> %lu, logon sessions %lu -> %lu after %d iterations (round %lu)\n",
+              Name, Before.PrivateBytes, After.PrivateBytes, Before.Handles, After.Handles,
+              Before.Sessions, After.Sessions, LOOP_ITERATIONS, Round + 1);
+
+        if (After.PrivateBytes <= Before.PrivateBytes + MaxGrowth)
             break;
     }
-
-    QueryUsage(&Before);
-    for (i = 0; i < LOOP_ITERATIONS; i++)
-        Func();
-
-    for (Wait = 0; Wait < 100; Wait++)
-    {
-        QueryUsage(&After);
-        if (After.Sessions <= Before.Sessions + 1)
-            break;
-        Sleep(50);
-    }
-
-    trace("%s: lsass private %Iu -> %Iu bytes, handles %lu -> %lu, logon sessions %lu -> %lu after %d iterations\n",
-          Name, Before.PrivateBytes, After.PrivateBytes, Before.Handles, After.Handles,
-          Before.Sessions, After.Sessions, LOOP_ITERATIONS);
 
     ok(After.Handles <= Before.Handles + 3, "%s: lsass handles grew from %lu to %lu\n",
        Name, Before.Handles, After.Handles);
