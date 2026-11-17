@@ -149,8 +149,6 @@ InitMetrics(VOID)
     piSysMet[SM_CYMENUSIZE] = gspv.ncm.iMenuHeight;     // 18;
 
     /* Mouse */
-    /* SM_MOUSEPRESENT, SM_CMOUSEBUTTONS and the wheel metrics follow the attached devices */
-    UserApplyMouseMetrics();
     piSysMet[SM_SWAPBUTTON] = gspv.bMouseBtnSwap ? 1 : 0;
     piSysMet[SM_CXDOUBLECLK] = gspv.iDblClickWidth;
     piSysMet[SM_CYDOUBLECLK] = gspv.iDblClickHeight;
