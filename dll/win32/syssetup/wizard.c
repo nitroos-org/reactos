@@ -2423,6 +2423,7 @@ RegistrationNotificationProc(PVOID Context,
 
 
 #if defined(_M_AMD64) && defined(BUILD_WOW64_ENABLED)
+#ifdef REGISTER_SYSWOW64
 /* Registration must execute in the guest: provider and COM registrations
  * belong in the redirected 32-bit registry view. Keep these lists in sync
  * with the registration-capable runtime in packages/syswow64.lst.
@@ -2580,6 +2581,7 @@ RegisterWow64Dlls(VOID)
                       ARRAYSIZE(Wow64ExtraDlls), FALSE);
     return Result;
 }
+#endif /* REGISTER_SYSWOW64 */
 
 /* The .NET Framework shim finds the runtime through
  * HKLM\SOFTWARE\Microsoft\.NETFramework\InstallRoot. syssetup.inf writes the
@@ -2703,8 +2705,11 @@ RegisterDlls(
         CoUninitialize();
 
 #if defined(_M_AMD64) && defined(BUILD_WOW64_ENABLED)
+#ifdef REGISTER_SYSWOW64
+    /* Without a SysWOW64 tree there is no 32-bit regsvr32 to run (CreateProcess fails with ERROR_PATH_NOT_FOUND) */
     if (Error == ERROR_SUCCESS)
         Error = RegisterWow64Dlls();
+#endif
     if (Error == ERROR_SUCCESS)
     {
         /* Not fatal: only managed programs depend on it, so do not fail all of
