@@ -226,6 +226,10 @@ NTSTATUS TCPSetKeepAlive(PCONNECTION_ENDPOINT Connection, BOOLEAN Set);
 
 NTSTATUS TCPSetKeepAliveValues(PCONNECTION_ENDPOINT Connection, DWORD KeepAliveTime, DWORD KeepAliveInterval);
 
+/* Gives the connection endpoint the TCP options its address file holds (a no-op when none were set, or when the
+   endpoint has no PCB yet) */
+VOID TCPApplyAddressFileOptions(PADDRESS_FILE AddressFile, PCONNECTION_ENDPOINT Connection);
+
 VOID
 TCPUpdateInterfaceLinkStatus(PIP_INTERFACE IF);
 

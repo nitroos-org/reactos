@@ -416,6 +416,10 @@ NTSTATUS DispTdiAssociateAddress(
   UnlockObject(AddrFile);
   UnlockObject(Connection);
 
+  /* The TCP options the socket set before this connection existed (TCP_NODELAY, SO_KEEPALIVE). With no object lock
+     held: the PCB is used under the core lock (the address file is referenced by the endpoint now) */
+  TCPApplyAddressFileOptions(AddrFile, Connection);
+
   return STATUS_SUCCESS;
 }
 
