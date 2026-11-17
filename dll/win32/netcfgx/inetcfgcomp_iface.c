@@ -790,6 +790,7 @@ INetCfgComponent_fnRaisePropertyUi(
     HPROPSHEETPAGE * hppages;
     INT_PTR iResult;
     INetCfgComponentImpl * This = (INetCfgComponentImpl*)iface;
+    WCHAR szFormat[64], szCaption[300];
 
     hr = CreateNotifyObject(This, iface);
     if (FAILED(hr))
@@ -820,6 +821,18 @@ INetCfgComponent_fnRaisePropertyUi(
     pinfo.nPages = Pages;
     pinfo.hInstance = netcfgx_hInstance;
     pinfo.pszCaption = This->pItem->szDisplayName;
+    /* Windows names the sheet "<component> Properties"; comctl32's PSH_PROPTITLE here says "Properties for <component>".
+       The English text is the netcfgx string; another language keeps the comctl32 text of that language */
+    if (PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_ENGLISH && This->pItem->szDisplayName &&
+        LoadStringW(netcfgx_hInstance, IDS_PROPERTIES_TITLE, szFormat, ARRAYSIZE(szFormat)) &&
+        wcsstr(szFormat, L"%s") &&
+        wcslen(This->pItem->szDisplayName) + wcslen(szFormat) < ARRAYSIZE(szCaption))
+    {
+        _snwprintf(szCaption, ARRAYSIZE(szCaption) - 1, szFormat, This->pItem->szDisplayName);
+        szCaption[ARRAYSIZE(szCaption) - 1] = UNICODE_NULL;
+        pinfo.pszCaption = szCaption;
+        pinfo.dwFlags &= ~PSH_PROPTITLE;
+    }
     pinfo.u.pszIcon = MAKEINTRESOURCEW(IDI_INTERNET);
     pinfo.pfnCallback = PropSheetProc;
 

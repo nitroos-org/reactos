@@ -273,4 +273,6 @@ BEGIN
     IDS_V6_BADADDRESS """%s"" is not a valid IPv6 address."
     IDS_V6_BADPREFIX "The subnet prefix length must be a number from 1 to 128."
     IDS_V6_APPLYFAILED "The IPv6 settings could not be applied (error %s)."
+    IDS_V6_LINKLOCAL """%s"" is a link-local address. The connection makes its link-local address itself: enter a global or unique local address."
+    IDS_PROPERTIES_TITLE "%s Properties"
 END

@@ -14,6 +14,7 @@
 #include <windef.h>
 #include <winbase.h>
 #include <winreg.h>
+#include <winnls.h>
 #include <winsvc.h>
 #include <windowsx.h>
 #include <objbase.h>

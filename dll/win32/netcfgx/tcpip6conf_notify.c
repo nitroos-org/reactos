@@ -99,6 +99,67 @@ IsUnspecified(
     return memcmp(pAddress, &Zero, sizeof(Zero)) == 0;
 }
 
+static
+BOOL
+IsMulticast(
+    _In_ const IN6_ADDR *pAddress)
+{
+    return pAddress->u.Byte[0] == 0xff;
+}
+
+static
+BOOL
+IsLoopback(
+    _In_ const IN6_ADDR *pAddress)
+{
+    static const IN6_ADDR Loopback = {{{ 0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,1 }}};
+
+    return memcmp(pAddress, &Loopback, sizeof(Loopback)) == 0;
+}
+
+static
+BOOL
+IsLinkLocal(
+    _In_ const IN6_ADDR *pAddress)
+{
+    return pAddress->u.Byte[0] == 0xfe && (pAddress->u.Byte[1] & 0xc0) == 0x80;
+}
+
+/* Two texts of the page that are the same address (or both empty); a text that is no address is only itself */
+static
+BOOL
+SameAddressText(
+    _In_ PCWSTR pszA,
+    _In_ PCWSTR pszB)
+{
+    IN6_ADDR A, B;
+
+    if (!pszA[0] || !pszB[0])
+        return !pszA[0] && !pszB[0];
+    if (ParseIpv6(pszA, &A) && ParseIpv6(pszB, &B))
+        return memcmp(&A, &B, sizeof(A)) == 0;
+    return _wcsicmp(pszA, pszB) == 0;
+}
+
+/* Would MakeSettings change anything that ReadSettings found? (OK of an unchanged page makes nothing: a second manual
+   address or route that netsh made, which the page does not show, stays) */
+static
+BOOL
+SameSettings(
+    _In_ const V6_SETTINGS *pA,
+    _In_ const V6_SETTINGS *pB)
+{
+    if (pA->bStaticAddress != pB->bStaticAddress)
+        return FALSE;
+    if (pA->bStaticAddress &&
+        (pA->PrefixLength != pB->PrefixLength || !SameAddressText(pA->szAddress, pB->szAddress) ||
+         !SameAddressText(pA->szGateway, pB->szGateway)))
+        return FALSE;
+    /* the DNS servers that are written: none without the manual choice */
+    return SameAddressText(pA->bStaticDns ? pA->szDns1 : L"", pB->bStaticDns ? pB->szDns1 : L"") &&
+           SameAddressText(pA->bStaticDns ? pA->szDns2 : L"", pB->bStaticDns ? pB->szDns2 : L"");
+}
+
 /* The interface index of the connection (its adapter GUID), 0 when the stack has no interface for it */
 static
 ULONG
@@ -455,9 +516,6 @@ UpdateControls(
     EnableWindow(GetDlgItem(hwndDlg, IDC_V6_AUTODNS), !bStaticAddress);
     EnableWindow(GetDlgItem(hwndDlg, IDC_V6_DNS1), bStaticDns);
     EnableWindow(GetDlgItem(hwndDlg, IDC_V6_DNS2), bStaticDns);
-    EnableWindow(GetDlgItem(hwndDlg, IDC_V6_VALIDATE), bStaticAddress);
-    if (!bStaticAddress)
-        CheckDlgButton(hwndDlg, IDC_V6_VALIDATE, BST_UNCHECKED);
 }
 
 static
@@ -494,6 +552,9 @@ InitializeDialog(
 
     /* the Advanced dialog (several addresses and gateways, metric, DNS suffix) is not there yet */
     EnableWindow(GetDlgItem(hwndDlg, IDC_V6_ADVANCED), FALSE);
+    /* nor the diagnosis "Validate settings upon exit" runs on Windows: a box that would do nothing is not shown */
+    ShowWindow(GetDlgItem(hwndDlg, IDC_V6_VALIDATE), SW_HIDE);
+    EnableWindow(GetDlgItem(hwndDlg, IDC_V6_VALIDATE), FALSE);
 }
 
 /* What the fields hold, checked. FALSE: an error was shown and the page stays */
@@ -521,10 +582,21 @@ TakeDialog(
             SetFocus(GetDlgItem(hwndDlg, IDC_V6_ADDRESS));
             return FALSE;
         }
-        /* an address that is not an address, the unspecified one, or a multicast one cannot be assigned to a connection */
-        if (!ParseIpv6(pSettings->szAddress, &Address) || IsUnspecified(&Address) || Address.u.Byte[0] == 0xff)
+        /* an address that is not an address, the unspecified one, the loopback one or a multicast one cannot be
+           assigned to a connection */
+        if (!ParseIpv6(pSettings->szAddress, &Address) || IsUnspecified(&Address) || IsMulticast(&Address) ||
+            IsLoopback(&Address))
         {
             ShowError(hwndDlg, IDS_V6_BADADDRESS, pSettings->szAddress, L"\"%s\" is not a valid IPv6 address.");
+            SetFocus(GetDlgItem(hwndDlg, IDC_V6_ADDRESS));
+            return FALSE;
+        }
+        /* the link-local address is the stack's own (made from the adapter); the page neither shows nor removes a
+           manual one, so it does not make one */
+        if (IsLinkLocal(&Address))
+        {
+            ShowError(hwndDlg, IDS_V6_LINKLOCAL, pSettings->szAddress,
+                      L"\"%s\" is a link-local address. The connection makes its link-local address itself: enter a global or unique local address.");
             SetFocus(GetDlgItem(hwndDlg, IDC_V6_ADDRESS));
             return FALSE;
         }
@@ -540,7 +612,8 @@ TakeDialog(
         pSettings->PrefixLength = Prefix;
 
         GetDlgItemTextW(hwndDlg, IDC_V6_GATEWAY, pSettings->szGateway, ARRAYSIZE(pSettings->szGateway));
-        if (pSettings->szGateway[0] && (!ParseIpv6(pSettings->szGateway, &Address) || IsUnspecified(&Address)))
+        if (pSettings->szGateway[0] && (!ParseIpv6(pSettings->szGateway, &Address) || IsUnspecified(&Address) ||
+                                        IsMulticast(&Address) || IsLoopback(&Address)))
         {
             ShowError(hwndDlg, IDS_V6_BADADDRESS, pSettings->szGateway, L"\"%s\" is not a valid IPv6 address.");
             SetFocus(GetDlgItem(hwndDlg, IDC_V6_GATEWAY));
@@ -552,18 +625,25 @@ TakeDialog(
     {
         GetDlgItemTextW(hwndDlg, IDC_V6_DNS1, pSettings->szDns1, ARRAYSIZE(pSettings->szDns1));
         GetDlgItemTextW(hwndDlg, IDC_V6_DNS2, pSettings->szDns2, ARRAYSIZE(pSettings->szDns2));
-        if (pSettings->szDns1[0] && (!ParseIpv6(pSettings->szDns1, &Address) || IsUnspecified(&Address)))
+        if (pSettings->szDns1[0] &&
+            (!ParseIpv6(pSettings->szDns1, &Address) || IsUnspecified(&Address) || IsMulticast(&Address)))
         {
             ShowError(hwndDlg, IDS_V6_BADADDRESS, pSettings->szDns1, L"\"%s\" is not a valid IPv6 address.");
             SetFocus(GetDlgItem(hwndDlg, IDC_V6_DNS1));
             return FALSE;
         }
-        if (pSettings->szDns2[0] && (!ParseIpv6(pSettings->szDns2, &Address) || IsUnspecified(&Address)))
+        /* NameServer holds the plain form (no zone: "%<n>" is the page's text only) */
+        if (pSettings->szDns1[0])
+            RtlIpv6AddressToStringW(&Address, pSettings->szDns1);
+        if (pSettings->szDns2[0] &&
+            (!ParseIpv6(pSettings->szDns2, &Address) || IsUnspecified(&Address) || IsMulticast(&Address)))
         {
             ShowError(hwndDlg, IDS_V6_BADADDRESS, pSettings->szDns2, L"\"%s\" is not a valid IPv6 address.");
             SetFocus(GetDlgItem(hwndDlg, IDC_V6_DNS2));
             return FALSE;
         }
+        if (pSettings->szDns2[0])
+            RtlIpv6AddressToStringW(&Address, pSettings->szDns2);
         /* a lone alternate server is the preferred one */
         if (!pSettings->szDns1[0] && pSettings->szDns2[0])
         {
@@ -593,7 +673,8 @@ Tcpip6Dlg(
         case WM_INITDIALOG:
             This = (Tcpip6ConfNotifyImpl *)((LPPROPSHEETPAGE)lParam)->lParam;
             SetWindowLongPtrW(hwndDlg, DWLP_USER, (LONG_PTR)This);
-            InitializeDialog(hwndDlg, &This->Current);
+            /* a change taken by an earlier OK and not applied yet is what the page shows again */
+            InitializeDialog(hwndDlg, This->bEntered ? &This->Entered : &This->Current);
             return TRUE;
 
         case WM_NOTIFY:
@@ -603,8 +684,9 @@ Tcpip6Dlg(
                 This = (Tcpip6ConfNotifyImpl *)GetWindowLongPtrW(hwndDlg, DWLP_USER);
                 if (TakeDialog(hwndDlg, &Settings))
                 {
+                    /* OK of a page that shows what the connection has makes nothing */
                     This->Entered = Settings;
-                    This->bEntered = TRUE;
+                    This->bEntered = !SameSettings(&Settings, &This->Current);
                     SetWindowLongPtrW(hwndDlg, DWLP_MSGRESULT, PSNRET_NOERROR);
                 }
                 else
@@ -645,11 +727,6 @@ Tcpip6Dlg(
                             break;
                     }
                     UpdateControls(hwndDlg);
-                    break;
-
-                case IDC_V6_VALIDATE:
-                    if (HIWORD(wParam) == BN_CLICKED)
-                        PropSheet_Changed(GetParent(hwndDlg), hwndDlg);
                     break;
 
                 case IDC_V6_ADDRESS:
@@ -746,11 +823,14 @@ Tcpip6PropertyUi_fnSetContext(
         CoTaskMemFree(pszGuid);
         return E_INVALIDARG;
     }
+    /* the page of another connection drops what an earlier OK took for the first one (one notify object, one
+       pending change); the same connection keeps it */
+    if (_wcsicmp(This->szAdapter, pszGuid))
+        This->bEntered = FALSE;
     wcscpy(This->szAdapter, pszGuid);
     CoTaskMemFree(pszGuid);
 
     ReadSettings(This->szAdapter, &This->Current);
-    This->bEntered = FALSE;
     return S_OK;
 }
 
@@ -814,14 +894,13 @@ Tcpip6PropertyUi_fnApplyProperties(
     return This->bEntered ? S_OK : S_FALSE;
 }
 
+/* Cancel of the page: this showing took nothing (PSN_APPLY did not run); a change an earlier OK took stays for Apply,
+   INetCfg::Cancel drops it (CancelChanges) */
 HRESULT
 WINAPI
 Tcpip6PropertyUi_fnCancelProperties(
     INetCfgComponentPropertyUi *iface)
 {
-    Tcpip6ConfNotifyImpl *This = impl_from_INetCfgComponentPropertyUi(iface);
-
-    This->bEntered = FALSE;
     return S_OK;
 }
 
