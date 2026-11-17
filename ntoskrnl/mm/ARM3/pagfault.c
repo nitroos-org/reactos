@@ -601,6 +601,106 @@ MiCheckPdeForPagedPool(IN PVOID Address)
 }
 #endif
 
+#if defined(_M_IX86) || defined(_M_AMD64)
+/*
+ * Per-processor mapping window for MiZeroPfn and MiCopyPfn: two system PTEs
+ * per processor (slot 0: the page zeroed or the copy's destination, slot 1:
+ * the copy's source), reserved by the processor on its first use.
+ *
+ * A slot is used only at DISPATCH_LEVEL, from its mapping to its unmapping,
+ * so the thread cannot move to another processor and nothing else on the
+ * processor can use the slot meanwhile: no DPC or thread runs before the
+ * IRQL drops, and interrupt service routines never zero or copy pages. Only
+ * the owning processor ever makes a slot valid, and it drops its own
+ * translation (invlpg) as it unmaps it, so no processor holds a translation
+ * of a slot that a later use could meet. The pages need no flush of the
+ * other processors, as for the zero page thread's window (hypermap.c).
+ *
+ * The global system PTE path used before (and still used if a processor
+ * cannot reserve its window) queues every release for a flush of all the
+ * processors' TBs, one IPI round per 64 releases.
+ */
+static PMMPTE MiProcessorMappingPtes[MAXIMUM_PROCESSORS];
+
+#define MI_MAPPING_SLOTS 2
+
+/* Called at DISPATCH_LEVEL; NULL if the processor has no window */
+static
+PMMPTE
+MiGetProcessorMappingPtes(VOID)
+{
+    ULONG Number = KeGetCurrentProcessorNumber();
+    PMMPTE MappingPtes;
+
+    ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
+    if (Number >= RTL_NUMBER_OF(MiProcessorMappingPtes))
+        return NULL;
+
+    MappingPtes = MiProcessorMappingPtes[Number];
+    if (MappingPtes == NULL)
+    {
+        /* Free system PTEs carry no translation on any processor: a release
+           reaches the free list only after the TB flush that covers it */
+        MappingPtes = MiReserveSystemPtes(MI_MAPPING_SLOTS, SystemPteSpace);
+        MiProcessorMappingPtes[Number] = MappingPtes;
+    }
+    return MappingPtes;
+}
+#endif
+
+/* A valid kernel PTE for the page with the caching type it is used with */
+static
+MMPTE
+MiMakeMappingPte(
+    _In_ PFN_NUMBER PageFrameNumber,
+    _In_ MI_PFN_CACHE_ATTRIBUTE CacheAttribute)
+{
+    MMPTE TempPte;
+
+    TempPte = ValidKernelPte;
+    TempPte.u.Hard.PageFrameNumber = PageFrameNumber;
+
+    if (CacheAttribute == MiWriteCombined)
+    {
+        /* Write combining, no caching */
+        MI_MAKE_PTE_WRITE_COMBINE(&TempPte);
+    }
+    else if (CacheAttribute == MiNonCached)
+    {
+        /* Disable caching */
+        MI_MAKE_PTE_NON_CACHED(&TempPte);
+    }
+    return TempPte;
+}
+
+#if defined(_M_IX86) || defined(_M_AMD64)
+FORCEINLINE
+PVOID
+MiMapProcessorSlot(
+    _In_ PMMPTE SlotPte,
+    _In_ MMPTE TempPte)
+{
+    PVOID Address = MiPteToAddress(SlotPte);
+
+    MI_WRITE_VALID_PTE(SlotPte, TempPte);
+#ifdef _X86PAE_
+    /* The 8-byte PTE is written in two halves: drop a translation this
+       processor may have fetched between them */
+    KxFlushSingleCurrentTb(Address);
+#endif
+    return Address;
+}
+
+FORCEINLINE
+VOID
+MiUnmapProcessorSlot(
+    _In_ PMMPTE SlotPte)
+{
+    MI_ERASE_PTE(SlotPte);
+    KxFlushSingleCurrentTb(MiPteToAddress(SlotPte));
+}
+#endif
+
 VOID
 NTAPI
 MiZeroPfn(IN PFN_NUMBER PageFrameNumber)
@@ -609,30 +709,36 @@ MiZeroPfn(IN PFN_NUMBER PageFrameNumber)
     MMPTE TempPte;
     PMMPFN Pfn1;
     PVOID ZeroAddress;
+#if defined(_M_IX86) || defined(_M_AMD64)
+    KIRQL OldIrql;
+#endif
 
     /* Get the PFN for this page */
     Pfn1 = MiGetPfnEntry(PageFrameNumber);
     ASSERT(Pfn1);
 
+    /* Initialize the PTE for it, with the caching type the page is used with */
+    TempPte = MiMakeMappingPte(PageFrameNumber, Pfn1->u3.e1.CacheAttribute);
+
+#if defined(_M_IX86) || defined(_M_AMD64)
+    /* Zero through this processor's window: no TB flush on the others */
+    ASSERT(KeGetCurrentIrql() <= DISPATCH_LEVEL);
+    KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
+    ZeroPte = MiGetProcessorMappingPtes();
+    if (ZeroPte != NULL)
+    {
+        ZeroAddress = MiMapProcessorSlot(&ZeroPte[0], TempPte);
+        KeZeroPages(ZeroAddress, PAGE_SIZE);
+        MiUnmapProcessorSlot(&ZeroPte[0]);
+        KeLowerIrql(OldIrql);
+        return;
+    }
+    KeLowerIrql(OldIrql);
+#endif
+
     /* Grab a system PTE we can use to zero the page */
     ZeroPte = MiReserveSystemPtes(1, SystemPteSpace);
     ASSERT(ZeroPte);
-
-    /* Initialize the PTE for it */
-    TempPte = ValidKernelPte;
-    TempPte.u.Hard.PageFrameNumber = PageFrameNumber;
-
-    /* Setup caching */
-    if (Pfn1->u3.e1.CacheAttribute == MiWriteCombined)
-    {
-        /* Write combining, no caching */
-        MI_MAKE_PTE_WRITE_COMBINE(&TempPte);
-    }
-    else if (Pfn1->u3.e1.CacheAttribute == MiNonCached)
-    {
-        /* Disable caching */
-        MI_MAKE_PTE_NON_CACHED(&TempPte);
-    }
 
     /* Make the system PTE valid with our PFN */
     MI_WRITE_VALID_PTE(ZeroPte, TempPte);
@@ -652,10 +758,13 @@ MiCopyPfn(
     _In_ PFN_NUMBER SrcPage)
 {
     PMMPTE SysPtes;
-    MMPTE TempPte;
+    MMPTE DestPte, SrcPte;
     PMMPFN DestPfn, SrcPfn;
     PVOID DestAddress;
     const VOID* SrcAddress;
+#if defined(_M_IX86) || defined(_M_AMD64)
+    KIRQL OldIrql;
+#endif
 
     /* Get the PFNs */
     DestPfn = MiGetPfnEntry(DestPage);
@@ -663,45 +772,35 @@ MiCopyPfn(
     SrcPfn = MiGetPfnEntry(SrcPage);
     ASSERT(SrcPfn);
 
+    /* Initialize the PTEs, with the caching type each page is used with */
+    DestPte = MiMakeMappingPte(DestPage, DestPfn->u3.e1.CacheAttribute);
+    SrcPte = MiMakeMappingPte(SrcPage, SrcPfn->u3.e1.CacheAttribute);
+
+#if defined(_M_IX86) || defined(_M_AMD64)
+    /* Copy through this processor's window: no TB flush on the others */
+    ASSERT(KeGetCurrentIrql() <= DISPATCH_LEVEL);
+    KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
+    SysPtes = MiGetProcessorMappingPtes();
+    if (SysPtes != NULL)
+    {
+        DestAddress = MiMapProcessorSlot(&SysPtes[0], DestPte);
+        SrcAddress = MiMapProcessorSlot(&SysPtes[1], SrcPte);
+        RtlCopyMemory(DestAddress, SrcAddress, PAGE_SIZE);
+        MiUnmapProcessorSlot(&SysPtes[1]);
+        MiUnmapProcessorSlot(&SysPtes[0]);
+        KeLowerIrql(OldIrql);
+        return;
+    }
+    KeLowerIrql(OldIrql);
+#endif
+
     /* Grab 2 system PTEs */
     SysPtes = MiReserveSystemPtes(2, SystemPteSpace);
     ASSERT(SysPtes);
 
-    /* Initialize the destination PTE */
-    TempPte = ValidKernelPte;
-    TempPte.u.Hard.PageFrameNumber = DestPage;
-
-    /* Setup caching */
-    if (DestPfn->u3.e1.CacheAttribute == MiWriteCombined)
-    {
-        /* Write combining, no caching */
-        MI_MAKE_PTE_WRITE_COMBINE(&TempPte);
-    }
-    else if (DestPfn->u3.e1.CacheAttribute == MiNonCached)
-    {
-        /* Disable caching */
-        MI_MAKE_PTE_NON_CACHED(&TempPte);
-    }
-
-    /* Make the system PTE valid with our PFN */
-    MI_WRITE_VALID_PTE(&SysPtes[0], TempPte);
-
-    /* Initialize the source PTE */
-    TempPte = ValidKernelPte;
-    TempPte.u.Hard.PageFrameNumber = SrcPage;
-
-    /* Setup caching */
-    if (SrcPfn->u3.e1.CacheAttribute == MiNonCached)
-    {
-        MI_MAKE_PTE_NON_CACHED(&TempPte);
-    }
-    else if (SrcPfn->u3.e1.CacheAttribute == MiWriteCombined)
-    {
-        MI_MAKE_PTE_WRITE_COMBINE(&TempPte);
-    }
-
-    /* Make the system PTE valid with our PFN */
-    MI_WRITE_VALID_PTE(&SysPtes[1], TempPte);
+    /* Make the system PTEs valid with our PFNs */
+    MI_WRITE_VALID_PTE(&SysPtes[0], DestPte);
+    MI_WRITE_VALID_PTE(&SysPtes[1], SrcPte);
 
     /* Get the addresses and perform the copy */
     DestAddress = MiPteToAddress(&SysPtes[0]);
@@ -2277,6 +2376,7 @@ MmArmAccessFault(IN ULONG FaultCode,
     PFN_NUMBER PageFrameIndex;
     ULONG Color;
     BOOLEAN IsSessionAddress;
+    BOOLEAN NeedZero;
     PMMPFN Pfn1;
     DPRINT("ARM3 FAULT AT: %p\n", Address);
 
@@ -3087,37 +3187,30 @@ UserFault:
             MI_SET_PROCESS2(CurrentProcess->ImageFileName);
             Color = MI_GET_NEXT_PROCESS_COLOR(CurrentProcess);
             PageFrameIndex = MiRemoveZeroPageSafe(Color);
+            NeedZero = FALSE;
             if (!PageFrameIndex)
             {
                 /* Grab a page out of there. Later we should grab a colored zero page */
                 PageFrameIndex = MiRemoveAnyPage(Color);
-
-                /* Zero it through a mapping of the type it is about to be mapped with */
-                if (PageFrameIndex != 0)
-                {
-                    MI_PFN_ELEMENT(PageFrameIndex)->u3.e1.CacheAttribute =
-                        MiCacheAttributeFromProtection(PointerPte->u.Soft.Protection);
-                }
-
-                /* Release the lock since we need to do some zeroing */
-                MiReleasePfnLock(OldIrql);
-
                 if (PageFrameIndex == 0)
                 {
+                    MiReleasePfnLock(OldIrql);
                     Status = STATUS_NO_MEMORY;
                     goto ExitUser;
                 }
 
-                /* Zero out the page, since it's for user-mode */
-                if (MI_PFN_ELEMENT(PageFrameIndex)->u3.e1.CacheAttribute != MiCached)
-                    MiFlushReleasedSystemPtesBeforeUncachedMapping();
-                MiZeroPfn(PageFrameIndex);
-
-                /* Grab the lock again so we can initialize the PFN entry */
-                OldIrql = MiAcquirePfnLock();
+                /* Zero it through a mapping of the type it is about to be mapped with,
+                   below, after the PFN lock is dropped */
+                MI_PFN_ELEMENT(PageFrameIndex)->u3.e1.CacheAttribute =
+                    MiCacheAttributeFromProtection(PointerPte->u.Soft.Protection);
+                NeedZero = TRUE;
             }
 
-            /* Initialize the PFN entry now */
+            /*
+             * Initialize the PFN entry now. Until the PTE is made valid at the end, the
+             * page is reachable only through this fault: the PTE stays invalid
+             * and the working set lock is held, as in MiResolveDemandZeroFault
+             */
             MiInitializePfn(PageFrameIndex, PointerPte, 1);
 
             /* Increment the count of pages in the process */
@@ -3129,9 +3222,13 @@ UserFault:
             /* And we're done with the lock */
             MiReleasePfnLock(OldIrql);
 
-            /* A page from the zeroed list was zeroed write-back */
+            /* A previous owner's write-back system PTE must be gone before the page
+               is mapped another way (a page from the zeroed list was zeroed write-back) */
             if (MI_PFN_ELEMENT(PageFrameIndex)->u3.e1.CacheAttribute != MiCached)
                 MiFlushReleasedSystemPtesBeforeUncachedMapping();
+
+            /* Zero out the page, since it's for user-mode */
+            if (NeedZero) MiZeroPfn(PageFrameIndex);
 
             /* Fault on user PDE, or fault on user PTE? */
             if (PointerPte <= MiHighestUserPte)
