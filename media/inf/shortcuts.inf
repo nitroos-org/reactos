@@ -81,11 +81,11 @@ COMMUNICATIONS=Communications
 GAMES=Games
 
 README_TITLE=Read Me
-README_DESC=ReactOS Read-Me file
+README_DESC=NitroOS Read-Me file
 
 CMD_TITLE=Command Prompt
 CMD_DESC=Open command prompt
-EXPLORER_TITLE=ReactOS Explorer
+EXPLORER_TITLE=NitroOS Explorer
 EXPLORER_DESC=Launch Explorer
 FEATMGR_TITLE=Optional Features
 FEATMGR_DESC=Turn NitroOS features on or off, and install software
@@ -152,7 +152,7 @@ GAMES=Игри
 
 CMD_TITLE=Команден прозорец
 CMD_DESC=Отваряне на командния прозорец
-EXPLORER_TITLE=Изследователят на РеактОС
+EXPLORER_TITLE=Изследователят на NitroOS
 EXPLORER_DESC=Пускане на изследователя
 SERVMAN_TITLE=Управител на услугите
 SERVMAN_DESC=Пускане на управителя на услугите
@@ -210,11 +210,11 @@ COMMUNICATIONS=通訊
 GAMES=遊樂場
 
 README_TITLE=讀我檔案
-README_DESC=ReactOS 讀我檔案
+README_DESC=NitroOS 讀我檔案
 
 CMD_TITLE=命令提示字元
 CMD_DESC=啟動命令提示字元
-EXPLORER_TITLE=ReactOS 檔案總管
+EXPLORER_TITLE=NitroOS 檔案總管
 EXPLORER_DESC=啟動檔案總管
 SERVMAN_TITLE=服務管理員
 SERVMAN_DESC=啟動服務管理員
@@ -279,7 +279,7 @@ GAMES=Hry
 
 CMD_TITLE=Příkazový řádek
 CMD_DESC=Otevřít Příkazový řádek
-EXPLORER_TITLE=ReactOS Průzkumník
+EXPLORER_TITLE=NitroOS Průzkumník
 EXPLORER_DESC=Spustit Průzkumníka
 SERVMAN_TITLE=Správce služeb
 SERVMAN_DESC=Spustit Správce služeb
@@ -337,11 +337,11 @@ COMMUNICATIONS=Kommunikation
 GAMES=Spiele
 
 README_TITLE=Lies Mich
-README_DESC=Lies-Mich Datei für ReactOS
+README_DESC=Lies-Mich Datei für NitroOS
 
 CMD_TITLE=Eingabeaufforderung
 CMD_DESC=Öffne Kommandozeilenfenster
-EXPLORER_TITLE=ReactOS Explorer
+EXPLORER_TITLE=NitroOS Explorer
 EXPLORER_DESC=Starte Explorer
 SERVMAN_TITLE=Dienste-Manager
 SERVMAN_DESC=Starte Dienstmanager
@@ -402,7 +402,7 @@ GAMES=Παιχνίδια
 
 CMD_TITLE=Γραμμή εντολών
 CMD_DESC=Open command prompt
-EXPLORER_TITLE=Εξερεύνηση του ReactOS
+EXPLORER_TITLE=Εξερεύνηση του NitroOS
 EXPLORER_DESC=Εξερευνητής
 SERVMAN_TITLE=Υπηρεσίες
 SERVMAN_DESC=Υπηρεσίες
@@ -460,11 +460,11 @@ COMMUNICATIONS=Comunicaciones
 GAMES=Juegos
 
 README_TITLE=Léame
-README_DESC=Documento Léame de ReactOS
+README_DESC=Documento Léame de NitroOS
 
 CMD_TITLE=Consola
 CMD_DESC=Abre una consola de comandos
-EXPLORER_TITLE=Explorador de ReactOS
+EXPLORER_TITLE=Explorador de NitroOS
 EXPLORER_DESC=Ejecuta una nueva ventana del explorador de archivos
 SERVMAN_TITLE=Administrador de servicios
 SERVMAN_DESC=Ejecuta el administrador de servicios
@@ -489,7 +489,7 @@ MSPAINT_DESC=Ejecuta un sencillo programa de edición de imágenes
 CHARMAP_TITLE=Mapa de caracteres
 CHARMAP_DESC=Ejecuta el mapa de caracteres
 CLIPBRD_TITLE=Visor del Portapapeles
-CLIPBRD_DESC=Controla lo que copias y pegas en el visor del portapapeles de ReactOS
+CLIPBRD_DESC=Controla lo que copias y pegas en el visor del portapapeles de NitroOS
 KBSWITCH_TITLE=Ajustes de distribución de teclado
 KBSWITCH_DESC=Cambia la distribución de teclas del equipo
 REGEDIT_TITLE=Editor del Registro
@@ -526,11 +526,11 @@ COMMUNICATIONS=Kommunikatsioon
 GAMES=Mängud
 
 README_TITLE=Loe mind
-README_DESC=ReactOS'i Loe-mind fail
+README_DESC=NitroOS Loe-mind fail
 
 CMD_TITLE=Käsurida
 CMD_DESC=Ava käsurida
-EXPLORER_TITLE=ReactOS Explorer
+EXPLORER_TITLE=NitroOS Explorer
 EXPLORER_DESC=Ava sirvija
 SERVMAN_TITLE=Service Manager
 SERVMAN_DESC=Ava Teenustehaldur
@@ -590,11 +590,11 @@ COMMUNICATIONS=Communications
 GAMES=Jeux
 
 README_TITLE=Lisez-Moi
-README_DESC=Fichier Lisez-Moi pour ReactOS
+README_DESC=Fichier Lisez-Moi pour NitroOS
 
 CMD_TITLE=Invite de commandes
 CMD_DESC=Ouvrir l'invite de commandes
-EXPLORER_TITLE=Explorateur ReactOS
+EXPLORER_TITLE=Explorateur NitroOS
 EXPLORER_DESC=Lancer Explorer
 SERVMAN_TITLE=Gestionnaire de services
 SERVMAN_DESC=Lancer le gestionnaire de services
@@ -659,7 +659,7 @@ GAMES=משחקים
 
 CMD_TITLE=שורת הפקודה
 CMD_DESC=שורת הפקודה
-EXPLORER_TITLE=סייר ReactOS
+EXPLORER_TITLE=סייר NitroOS
 EXPLORER_DESC=סייר
 SERVMAN_TITLE=מנהל השירותים
 SERVMAN_DESC=מנהל השירותים
@@ -721,11 +721,11 @@ COMMUNICATIONS=Kommunikáció
 GAMES=Játékok
 
 README_TITLE=Olvass el
-README_DESC=ReactOS Olvass-el fájl
+README_DESC=NitroOS Olvass-el fájl
 
 CMD_TITLE=Parancssor
 CMD_DESC=Parancssor megnyitása
-EXPLORER_TITLE=ReactOS Intéző
+EXPLORER_TITLE=NitroOS Intéző
 EXPLORER_DESC=Intéző indítása
 SERVMAN_TITLE=Szolgáltatáskezelő
 SERVMAN_DESC=Szolgáltatáskezelő indítása
@@ -788,7 +788,7 @@ GAMES=Permainan
 
 CMD_TITLE=Perintah Cepat
 CMD_DESC=Buka Perintah Cepat
-EXPLORER_TITLE=Penjelajah ReactOS
+EXPLORER_TITLE=Penjelajah NitroOS
 EXPLORER_DESC=Jalankan Penjelajah
 SERVMAN_TITLE=Manajer Layanan
 SERVMAN_DESC=Jalankan Manajer Layanan
@@ -846,11 +846,11 @@ COMMUNICATIONS=Comunicazioni
 GAMES=Giochi
 
 README_TITLE=Leggimi
-README_DESC=File Leggimi per ReactOS
+README_DESC=File Leggimi per NitroOS
 
 CMD_TITLE=Prompt dei comandi
 CMD_DESC=Apri la finestra dei comandi
-EXPLORER_TITLE=ReactOS Explorer
+EXPLORER_TITLE=NitroOS Explorer
 EXPLORER_DESC=Avvia Explorer
 SERVMAN_TITLE=Gestione servizi
 SERVMAN_DESC=Avvia la Gestione dei servizi
@@ -909,7 +909,7 @@ GAMES=ゲーム
 
 CMD_TITLE=コマンド プロンプト
 CMD_DESC=コマンド プロンプトを開きます
-EXPLORER_TITLE=ReactOS Explorer
+EXPLORER_TITLE=NitroOS Explorer
 EXPLORER_DESC=エクスプローラを起動します
 SERVMAN_TITLE=サービス マネージャ
 SERVMAN_DESC=サービス マネージャを起動します
@@ -967,11 +967,11 @@ COMMUNICATIONS=Communications
 GAMES=Games
 
 README_TITLE=Lees Mij
-README_DESC=LeesMij bestand voor ReactOS
+README_DESC=LeesMij bestand voor NitroOS
 
 CMD_TITLE=Command Prompt
 CMD_DESC=Open command prompt
-EXPLORER_TITLE=ReactOS Explorer
+EXPLORER_TITLE=NitroOS Explorer
 EXPLORER_DESC=Launch Explorer
 SERVMAN_TITLE=Service Manager
 SERVMAN_DESC=Launch Service Manager
@@ -1030,7 +1030,7 @@ GAMES=Spill
 
 CMD_TITLE=Command Prompt
 CMD_DESC=Åpne Kommandolinje
-EXPLORER_TITLE=ReactOS Explorer
+EXPLORER_TITLE=NitroOS Explorer
 EXPLORER_DESC=Start Utforsker
 SERVMAN_TITLE=Service Manager
 SERVMAN_DESC=Start Tjenestebehandler
@@ -1088,11 +1088,11 @@ COMMUNICATIONS=Komunikacja
 GAMES=Gry
 
 README_TITLE=Przeczytaj Mnie
-README_DESC=Plik Przeczytaj Mnie ReactOS
+README_DESC=Plik Przeczytaj Mnie NitroOS
 
 CMD_TITLE=Wiersz polecenia
 CMD_DESC=Uruchom konsolę
-EXPLORER_TITLE=Eksplorator ReactOS
+EXPLORER_TITLE=Eksplorator NitroOS
 EXPLORER_DESC=Uruchom Eksplorator
 SERVMAN_TITLE=Menedżer usług
 SERVMAN_DESC=Uruchom Menedżer usług
@@ -1154,11 +1154,11 @@ COMMUNICATIONS=Communications
 GAMES=Jogos
 
 README_TITLE=Leia-Me
-README_DESC=Arquivo de informações para ReactOS
+README_DESC=Arquivo de informações para NitroOS
 
 CMD_TITLE=Command Prompt
 CMD_DESC=Abrir prompt de comando
-EXPLORER_TITLE=ReactOS Explorer
+EXPLORER_TITLE=NitroOS Explorer
 EXPLORER_DESC=Iniciar Explorer
 SERVMAN_TITLE=Service Manager
 SERVMAN_DESC=Iniciar Gerenciador de Serviços
@@ -1216,11 +1216,11 @@ COMMUNICATIONS=Comunicações
 GAMES=Jogos
 
 README_TITLE=Leia-Me
-README_DESC=Arquivo de informações para o ReactOS
+README_DESC=Arquivo de informações para o NitroOS
 
 CMD_TITLE=Linha de Comandos
 CMD_DESC=Abrir Linha de comando
-EXPLORER_TITLE=Explorador do ReactOS
+EXPLORER_TITLE=Explorador do NitroOS
 EXPLORER_DESC=Iniciar Explorador
 SERVMAN_TITLE=Gestor de Serviços
 SERVMAN_DESC=Iniciar Gestor de Serviços
@@ -1278,14 +1278,14 @@ COMMUNICATIONS=Communicații
 GAMES=Jocuri
 
 README_TITLE=De citit
-README_DESC=Fișier de informare ReactOS
+README_DESC=Fișier de informare NitroOS
 
 CMD_TITLE=Linie de comandă
 CMD_DESC=Efectuează funcții de tip text (linie de comandă)
-EXPLORER_TITLE=ReactOS Explorer
+EXPLORER_TITLE=NitroOS Explorer
 EXPLORER_DESC=Afișează fișierele și folderele de pe computer
 SERVMAN_TITLE=Gestionar de servicii
-SERVMAN_DESC=Pornește, oprește și configurează serviciile ReactOS
+SERVMAN_DESC=Pornește, oprește și configurează serviciile NitroOS
 DEVMGMT_TITLE=Manager dispozitive
 DEVMGMT_DESC=Vizualizați și actualizați setările hardware și software-ul pentru drivere
 DISKMGMT_TITLE=Disk Management
@@ -1342,11 +1342,11 @@ COMMUNICATIONS=Связь
 GAMES=Игры
 
 README_TITLE=Прочти Меня
-README_DESC=файл ReadMe для ReactOS
+README_DESC=файл ReadMe для NitroOS
 
 CMD_TITLE=Командная строка
 CMD_DESC=Используется для выполнения вводимых с клавиатуры команд
-EXPLORER_TITLE=Проводник ReactOS
+EXPLORER_TITLE=Проводник NitroOS
 EXPLORER_DESC=Отображает файлы и папки на компьютере
 SERVMAN_TITLE=Диспетчер служб
 SERVMAN_DESC=Запустить диспетчер служб
@@ -1409,7 +1409,7 @@ GAMES=Hry
 
 CMD_TITLE=Príkazový riadok
 CMD_DESC=Otvoriť Príkazový riadok
-EXPLORER_TITLE=Prieskumník systému ReactOS
+EXPLORER_TITLE=Prieskumník systému NitroOS
 EXPLORER_DESC=Spustiť Prieskumníka
 SERVMAN_TITLE=Správca služieb
 SERVMAN_DESC=Spustiť Správcu služieb
@@ -1467,11 +1467,11 @@ COMMUNICATIONS=İletişim
 GAMES=Oyunlar
 
 README_TITLE=Beni Oku
-README_DESC=ReactOS Beni Oku
+README_DESC=NitroOS Beni Oku
 
 CMD_TITLE=Komut İstemi
 CMD_DESC=Komut İstemi'ni aç
-EXPLORER_TITLE=ReactOS Gezgini
+EXPLORER_TITLE=NitroOS Gezgini
 EXPLORER_DESC=Gezgin'i başlat
 SERVMAN_TITLE=Hizmet Yöneticisi
 SERVMAN_DESC=Hizmet Yöneticisi'ni başlat
@@ -1533,11 +1533,11 @@ COMMUNICATIONS=Зв'язок
 GAMES=Ігри
 
 README_TITLE=Прочитай мене
-README_DESC=Файл ReadMe для ReactOS
+README_DESC=Файл ReadMe для NitroOS
 
 CMD_TITLE=Командний рядок
 CMD_DESC=Відкрити командний рядок
-EXPLORER_TITLE=Провідник ReactOS
+EXPLORER_TITLE=Провідник NitroOS
 EXPLORER_DESC=Запустити провідник
 SERVMAN_TITLE=Диспетчер служб
 SERVMAN_DESC=Запустити Диспетчер керування службами
@@ -1597,11 +1597,11 @@ COMMUNICATIONS=Komunikazioak
 GAMES=Jolasak
 
 README_TITLE=Irakurri hau
-README_DESC=ReactOS gidaliburua irakurtzeko
+README_DESC=NitroOS gidaliburua irakurtzeko
 
 CMD_TITLE=Kontsola
 CMD_DESC=Ireki komanduen konstsola
-EXPLORER_TITLE=ReactOS Esploradorea
+EXPLORER_TITLE=NitroOS Esploradorea
 EXPLORER_DESC=Ireki fitxategi-esploradore lehio bat
 SERVMAN_TITLE=Konfiguratu zerbitzaria
 SERVMAN_DESC=Hasi Zerbitzu kudeaketa
@@ -1626,7 +1626,7 @@ MSPAINT_DESC=Hasi irudiaren editore funtsezkoa
 CHARMAP_TITLE=Karaktere-mapa
 CHARMAP_DESC=Karaktere-mapa hasi
 CLIPBRD_TITLE=Arbel-ikustailea
-CLIPBRD_DESC=Controla lo que copias y pegas en el visor del portapapeles de ReactOS
+CLIPBRD_DESC=Controla lo que copias y pegas en el visor del portapapeles de NitroOS
 KBSWITCH_TITLE=Teklatuen diztribuzio aukerak
 KBSWITCH_DESC=Cambia la distribución de teclas del equipo
 REGEDIT_TITLE=Erregistro editorea
@@ -1663,12 +1663,12 @@ COMMUNICATIONS=通讯
 GAMES=游戏
 
 README_TITLE=自述文件
-README_DESC=ReactOS 自述文件
+README_DESC=NitroOS 自述文件
 
 CMD_TITLE=命令提示符
 CMD_DESC=命令提示符
-EXPLORER_TITLE=ReactOS 资源管理器
-EXPLORER_DESC=ReactOS 资源管理器
+EXPLORER_TITLE=NitroOS 资源管理器
+EXPLORER_DESC=NitroOS 资源管理器
 SERVMAN_TITLE=服务
 SERVMAN_DESC=服务
 DEVMGMT_TITLE=设备管理器
@@ -1727,11 +1727,11 @@ COMMUNICATIONS=通訊
 GAMES=遊樂場
 
 README_TITLE=讀我檔案
-README_DESC=ReactOS 讀我檔案
+README_DESC=NitroOS 讀我檔案
 
 CMD_TITLE=命令提示字元
 CMD_DESC=啟動命令提示字元
-EXPLORER_TITLE=ReactOS 檔案總管
+EXPLORER_TITLE=NitroOS 檔案總管
 EXPLORER_DESC=啟動檔案總管
 SERVMAN_TITLE=服務管理員
 SERVMAN_DESC=啟動服務管理員
