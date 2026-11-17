@@ -18,6 +18,7 @@ extern void func_NetLocalGroupServiceMember(void);
 extern void func_NetLocalGroupUnknownMember(void);
 extern void func_NetScheduleJob(void);
 extern void func_NetServerGetInfo(void);
+extern void func_NetUserPassword(void);
 extern void func_NetShare(void);
 
 const struct test winetest_testlist[] =
@@ -33,6 +34,7 @@ const struct test winetest_testlist[] =
     { "NetScheduleJob", func_NetScheduleJob },
     { "NetServerGetInfo", func_NetServerGetInfo },
     { "NetShare", func_NetShare },
+    { "NetUserPassword", func_NetUserPassword },
 
     { 0, 0 }
 };
