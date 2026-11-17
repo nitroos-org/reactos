@@ -16,6 +16,7 @@
 #include <apitest.h>
 #include <windef.h>
 #include <winbase.h>
+#include <winreg.h>
 #include <wincrypt.h>
 
 #define MAX_STORES 64
@@ -111,6 +112,25 @@ CheckLocation(
 
 START_TEST(CertEnumSystemStore)
 {
+    static const WCHAR RootPath[] = L"Software\\Microsoft\\SystemCertificates\\Root";
+    HKEY Key;
+    DWORD Disposition = 0;
+    LONG Err;
+
     CheckLocation(CERT_SYSTEM_STORE_CURRENT_USER, "CurrentUser");
     CheckLocation(CERT_SYSTEM_STORE_LOCAL_MACHINE, "LocalMachine");
+
+    /* Once the system roots are in the registry the Root key is enumerated
+     * from there and must not be listed a second time. Make sure the key
+     * exists, whatever the state of the machine was. */
+    Err = RegCreateKeyExW(HKEY_LOCAL_MACHINE, RootPath, 0, NULL, 0, KEY_READ | KEY_WRITE, NULL, &Key, &Disposition);
+    if (Err != ERROR_SUCCESS)
+    {
+        skip("Cannot create the Root key (%ld)\n", Err);
+        return;
+    }
+    RegCloseKey(Key);
+    CheckLocation(CERT_SYSTEM_STORE_LOCAL_MACHINE, "LocalMachine with Root key");
+    if (Disposition == REG_CREATED_NEW_KEY)
+        RegDeleteKeyW(HKEY_LOCAL_MACHINE, RootPath);
 }
