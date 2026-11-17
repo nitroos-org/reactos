@@ -996,18 +996,42 @@ static NTSTATUS get_design_glyph_metrics(void *args)
 
 #endif /* HAVE_FREETYPE */
 
+/* One FreeType library serves every factory and face of the process, and FreeType does not lock it:
+   creating and releasing faces edits the driver's face list, and loading glyphs edits the face and
+   its active size. Calls from several threads are therefore serialized here. */
+static SRWLOCK ft_lock = SRWLOCK_INIT;
+
+#define FT_LOCKED_ENTRY(name) \
+static NTSTATUS locked_##name(void *args) \
+{ \
+    NTSTATUS status; \
+    AcquireSRWLockExclusive(&ft_lock); \
+    status = name(args); \
+    ReleaseSRWLockExclusive(&ft_lock); \
+    return status; \
+}
+
+FT_LOCKED_ENTRY(create_font_object)
+FT_LOCKED_ENTRY(release_font_object)
+FT_LOCKED_ENTRY(get_glyph_outline)
+FT_LOCKED_ENTRY(get_glyph_count)
+FT_LOCKED_ENTRY(get_glyph_advance)
+FT_LOCKED_ENTRY(get_glyph_bbox)
+FT_LOCKED_ENTRY(get_glyph_bitmap)
+FT_LOCKED_ENTRY(get_design_glyph_metrics)
+
 const unixlib_entry_t __wine_unix_call_funcs[] =
 {
     process_attach,
     process_detach,
-    create_font_object,
-    release_font_object,
-    get_glyph_outline,
-    get_glyph_count,
-    get_glyph_advance,
-    get_glyph_bbox,
-    get_glyph_bitmap,
-    get_design_glyph_metrics,
+    locked_create_font_object,
+    locked_release_font_object,
+    locked_get_glyph_outline,
+    locked_get_glyph_count,
+    locked_get_glyph_advance,
+    locked_get_glyph_bbox,
+    locked_get_glyph_bitmap,
+    locked_get_design_glyph_metrics,
 };
 
 #ifndef __REACTOS__
@@ -1236,18 +1260,27 @@ static NTSTATUS wow64_get_design_glyph_metrics(void *args)
     return get_design_glyph_metrics(&params);
 };
 
+FT_LOCKED_ENTRY(wow64_create_font_object)
+FT_LOCKED_ENTRY(wow64_release_font_object)
+FT_LOCKED_ENTRY(wow64_get_glyph_outline)
+FT_LOCKED_ENTRY(wow64_get_glyph_count)
+FT_LOCKED_ENTRY(wow64_get_glyph_advance)
+FT_LOCKED_ENTRY(wow64_get_glyph_bbox)
+FT_LOCKED_ENTRY(wow64_get_glyph_bitmap)
+FT_LOCKED_ENTRY(wow64_get_design_glyph_metrics)
+
 const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
 {
     process_attach,
     process_detach,
-    wow64_create_font_object,
-    wow64_release_font_object,
-    wow64_get_glyph_outline,
-    wow64_get_glyph_count,
-    wow64_get_glyph_advance,
-    wow64_get_glyph_bbox,
-    wow64_get_glyph_bitmap,
-    wow64_get_design_glyph_metrics,
+    locked_wow64_create_font_object,
+    locked_wow64_release_font_object,
+    locked_wow64_get_glyph_outline,
+    locked_wow64_get_glyph_count,
+    locked_wow64_get_glyph_advance,
+    locked_wow64_get_glyph_bbox,
+    locked_wow64_get_glyph_bitmap,
+    locked_wow64_get_design_glyph_metrics,
 };
 
 #ifndef __REACTOS__
