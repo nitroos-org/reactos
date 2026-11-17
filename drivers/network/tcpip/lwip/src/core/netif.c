@@ -336,6 +336,7 @@ netif_add(struct netif *netif,
 #if LWIP_IPV6_DUP_DETECT_ATTEMPTS
   netif->redad_count = 0;
   netif->redad_na = 0;
+  netif->na_sent = 0;
 #endif
 #endif /* LWIP_IPV6 */
   NETIF_SET_CHECKSUM_CTRL(netif, NETIF_CHECKSUM_ENABLE_ALL);

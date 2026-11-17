@@ -1256,6 +1256,11 @@ nd6_tmr(void)
 #endif /* LWIP_IPV6_ADDRESS_LIFETIMES */
       /* Step 2: update DAD state. */
       addr_state = netif_ip6_addr_state(netif, i);
+#if LWIP_IPV6_DUP_DETECT_ATTEMPTS
+      if (ip6_addr_istentative(addr_state) || ip6_addr_isinvalid(addr_state)) {
+        netif->na_sent &= ~(1UL << i); /* NitroOS: (another) address in this slot: it is announced when it is used */
+      }
+#endif
       if (ip6_addr_istentative(addr_state)) {
         /* NitroOS: the number of probes is the interface's (SetIpInterfaceEntry DadTransmits) */
 #ifdef LWIP_HOOK_ND6_DAD_ATTEMPTS
@@ -1286,6 +1291,9 @@ nd6_tmr(void)
               LWIP_IPV6_DUP_DETECT_ATTEMPTS > 0) {
 #endif
             nd6_send_na(netif, netif_ip6_addr(netif, i), ND6_FLAG_OVERRIDE | ND6_SEND_FLAG_ALLNODES_DEST);
+#if LWIP_IPV6_DUP_DETECT_ATTEMPTS
+            netif->na_sent |= 1UL << i;
+#endif
           }
         } else if (netif_is_up(netif) && netif_is_link_up(netif)) {
           /* tentative: set next state by increasing by one */
@@ -1303,12 +1311,15 @@ nd6_tmr(void)
      * as many as the interface's DAD transmits. They keep their state (and their connections): an answer marks the
      * address duplicated like any other, and nobody answers when nobody else has the address. */
     if (netif->redad_na) {
-      /* the last probe of the re-check went out a tick ago and nobody answered: announce the addresses in use */
+      /* the last probe of the re-check went out a tick ago and nobody answered: announce the addresses in use (not
+       * one that its own DAD has announced since the link came up, an address that was tried again or was still
+       * tentative then: one advertisement per address) */
       netif->redad_na = 0;
       if (netif_is_up(netif) && netif_is_link_up(netif)) {
         for (i = 0; i < LWIP_IPV6_NUM_ADDRESSES; ++i) {
-          if (ip6_addr_ispreferred(netif_ip6_addr_state(netif, i))) {
+          if (ip6_addr_ispreferred(netif_ip6_addr_state(netif, i)) && !(netif->na_sent & (1UL << i))) {
             nd6_send_na(netif, netif_ip6_addr(netif, i), ND6_FLAG_OVERRIDE | ND6_SEND_FLAG_ALLNODES_DEST);
+            netif->na_sent |= 1UL << i;
           }
         }
       }
@@ -2675,6 +2686,9 @@ nd6_adjust_mld_membership(struct netif *netif, s8_t addr_idx, u8_t new_state)
 #endif /* LWIP_IPV6_MLD */
 
 #if LWIP_IPV6_DUP_DETECT_ATTEMPTS
+#if LWIP_IPV6_NUM_ADDRESSES > 32
+#error "netif->na_sent has one bit per address"
+#endif
 /**
  * NitroOS: the link of netif came up again. A host that was disconnected may have met another one with the same
  * address meanwhile, so duplicate address detection runs again for the addresses in use (RFC 4862 section 5.4:
@@ -2691,6 +2705,10 @@ nd6_redad_netif(struct netif *netif)
 #else
   netif->redad_count = LWIP_IPV6_DUP_DETECT_ATTEMPTS;
 #endif
+  /* An announcement still due from an earlier link up (the link went down and up within one tick) waits for the
+   * probes of this one: it is not sent before them, on a link where somebody else may have the address. */
+  netif->redad_na = 0;
+  netif->na_sent = 0;
   /* An address DAD found in use (before the link went down, or by the probes of an earlier link up) is tried again
    * from the start: the other host may be gone. It has no connections left to keep. Nobody answers: it is used
    * again; an answer marks it duplicated again, or gives it a new identifier (LWIP_HOOK_ND6_DAD_FAILED). Without

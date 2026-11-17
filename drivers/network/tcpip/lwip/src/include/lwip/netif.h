@@ -371,6 +371,9 @@ struct netif {
   u8_t redad_count;
   /** NitroOS: 1 when the last re-check probe went out on the previous tick: the addresses in use are announced. */
   u8_t redad_na;
+  /** NitroOS: one bit per address index: the address was announced (unsolicited NA) since the link last came up, so
+   *  the announcement after the re-check skips it (one advertisement per address). */
+  u32_t na_sent;
 #endif /* LWIP_IPV6 && LWIP_IPV6_DUP_DETECT_ATTEMPTS */
 #if MIB2_STATS
   /** link type (from "snmp_ifType" enum from snmp_mib2.h) */
