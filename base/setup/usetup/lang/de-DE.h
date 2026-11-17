@@ -2275,7 +2275,7 @@ MUI_STRING deDEStrings[] =
     {STRING_REBOOTPROGRESSBAR,
     " Der Computer wird in %li Sekunde(n) neugestartet... "},
     {STRING_BRAND_NOTICE,
-    BRAND_PRODUCT_NAME " ist ein inoffizieller Build auf Basis von ReactOS.\nReactOS ist eine Marke des ReactOS-Projekts.\nMelden Sie Probleme dieses Builds nicht dem ReactOS-Projekt."},
+    BRAND_PRODUCT_NAME " basiert auf ReactOS, einer Marke des ReactOS-Projekts,\nund ist nicht mit diesem verbunden.\nMelden Sie Probleme dieses Builds nicht dem ReactOS-Projekt."},
     {STRING_CONSOLEFAIL1,
     "Konsole konnte nicht ge\224ffnet werden\r\n\r\n"},
     {STRING_CONSOLEFAIL2,

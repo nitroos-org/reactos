@@ -197,7 +197,7 @@ END
 STRINGTABLE
 BEGIN
     IDS_REACTOS_SETUP "Installation de NitroOS"
-    IDS_NITRO_NOTICE BRAND_PRODUCT_NAME " est une version non officielle basée sur ReactOS. ReactOS est une marque du projet ReactOS. Ne signalez pas les problèmes de cette version au projet ReactOS."
+    IDS_NITRO_NOTICE BRAND_PRODUCT_NAME " est basé sur ReactOS, une marque du projet ReactOS, et n'est pas affilié à celui-ci. Ne signalez pas les problèmes de cette version au projet ReactOS."
     IDS_UNKNOWN_ERROR "Erreur inconnue"
     IDS_LOADLIBRARY_FAILED "Échec de LoadLibrary : "
     IDS_GETPROCADDR_FAILED "Échec de GetProcAddr : "

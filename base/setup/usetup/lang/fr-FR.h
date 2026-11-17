@@ -2307,7 +2307,7 @@ MUI_STRING frFRStrings[] =
     {STRING_REBOOTPROGRESSBAR,
     " Votre ordinateur va red\202marrer dans %li seconde(s)... "},
     {STRING_BRAND_NOTICE,
-    BRAND_PRODUCT_NAME " est une version non officielle bas\202e sur ReactOS.\nReactOS est une marque du projet ReactOS.\nNe signalez pas les probl\212mes de cette version au projet ReactOS."},
+    BRAND_PRODUCT_NAME " est bas\202 sur ReactOS, une marque du projet ReactOS,\net n'est pas affili\202 \205 celui-ci.\nNe signalez pas les probl\212mes de cette version au projet ReactOS."},
     {STRING_CONSOLEFAIL1,
     "Impossible d'ouvrir la console\r\n\r\n"},
     {STRING_CONSOLEFAIL2,

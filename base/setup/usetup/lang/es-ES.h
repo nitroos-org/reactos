@@ -2284,7 +2284,7 @@ MUI_STRING esESStrings[] =
     {STRING_REBOOTPROGRESSBAR,
     " Tu ordenador se reiniciar\240 en %li segundo(s)... "},
     {STRING_BRAND_NOTICE,
-    BRAND_PRODUCT_NAME " es una compilaci\242n no oficial basada en ReactOS.\nReactOS es una marca del proyecto ReactOS.\nNo informe de problemas de esta compilaci\242n al proyecto ReactOS."},
+    BRAND_PRODUCT_NAME " est\240 basado en ReactOS, una marca del proyecto ReactOS,\ny no est\240 afiliado a \202l.\nNo informe de problemas de esta compilaci\242n al proyecto ReactOS."},
     {STRING_CONSOLEFAIL1,
     "No se pudo abrir la consola\r\n\r\n"},
     {STRING_CONSOLEFAIL2,

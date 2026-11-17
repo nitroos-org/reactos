@@ -823,7 +823,7 @@ BEGIN
 
     /* About shell dialog version string */
     IDS_ABOUT_VERSION_STRING "Versión %S (%S)"
-    IDS_ABOUT_NITRO_NOTICE BRAND_PRODUCT_NAME " es una compilación no oficial basada en ReactOS. ReactOS es una marca del proyecto ReactOS. No informe de problemas de esta compilación al proyecto ReactOS."
+    IDS_ABOUT_NITRO_NOTICE BRAND_PRODUCT_NAME " está basado en ReactOS, una marca del proyecto ReactOS, y no está afiliado a él. No informe de problemas de esta compilación al proyecto ReactOS."
 
     /* context menus */
     IDS_VIEW_LARGE "Iconos &grandes"
