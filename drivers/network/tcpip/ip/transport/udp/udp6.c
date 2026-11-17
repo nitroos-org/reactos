@@ -1170,6 +1170,12 @@ Udp6UpdateMld(struct netif *netif, const UDP6_GROUP *Group)
     RtlCopyMemory(Address.addr, Group->Group, 16);
     ip6_addr_clear_zone(&Address);
     Err = mld6_set_filter_netif(netif, &Address, Mode, (const u8_t (*)[16])List, (u16_t)Count);
+    if (Err != ERR_OK && Count)
+    {
+        /* No memory for MLD's copy of the sources: the coarse filter, which needs none (more traffic, never less;
+           keeping the old report could keep a source the sockets now listen to out) */
+        Err = mld6_set_filter_netif(netif, &Address, NITRO_MCAST_EXCLUDE, NULL, 0);
+    }
 #else
     UNREFERENCED_PARAMETER(netif);
     UNREFERENCED_PARAMETER(Address);
@@ -1458,7 +1464,8 @@ UDP6SetFilter(PADDRESS_FILE AddrFile, ULONG IfIndex, const UCHAR *GroupAddress, 
         Member->NumSources = NumSources;
         Member->Sources = Copy;
         Copy = NULL;
-        /* no memory for MLD's copy keeps its report of the old filter; the socket's own filter is in force */
+        /* without memory for MLD's copy the group is reported as EXCLUDE with none (Udp6UpdateMld); the socket's own
+           filter is in force either way */
         if (netif)
             Udp6UpdateMld(netif, &Group);
     }
