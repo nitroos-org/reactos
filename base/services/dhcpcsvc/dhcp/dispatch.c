@@ -70,7 +70,7 @@ void
 dispatch(HANDLE hStopEvent)
 {
     int count, to_msec;
-    struct protocol *l;
+    struct protocol *l, *nextl;
     time_t howlong, cur_time;
     HANDLE Events[3];
     int EventCount = 2;
@@ -172,8 +172,10 @@ dispatch(HANDLE hStopEvent)
             continue;
         }
 
-        for (l = protocols; l; l = l->next) {
+        /* A handler may remove its own protocol (an interface that went away): take the next one first */
+        for (l = protocols; l; l = nextl) {
             struct interface_info *ip;
+            nextl = l->next;
             ip = l->local;
             if (ip && (l->handler != got_one ||
                         !ip->dead)) {
@@ -210,15 +212,18 @@ got_one(struct protocol *l)
 
     if ((result = receive_packet(ip, u.packbuf, sizeof(u), &from,
                                  &hfrom)) == -1) {
+        /* The socket is shared by every adapter and the dispatcher runs the handler of each one when it
+           wakes: the first one reads the datagram, the others find nothing to read. That is no error */
+        if (WSAGetLastError() == WSAEWOULDBLOCK)
+            return;
         warning("receive_packet failed on %s: %d", ip->name,
                 WSAGetLastError());
         ip->errors++;
         if (ip->errors > 20) {
-            /* our interface has gone away. */
+            /* our interface has gone away. The socket is the one of every adapter: it stays open */
             warning("Interface %s no longer appears valid.",
                     ip->name);
             ip->dead = 1;
-            closesocket(l->fd);
             remove_protocol(l);
             adapter = AdapterFindInfo(ip);
             if (adapter) {
@@ -230,6 +235,7 @@ got_one(struct protocol *l)
     }
     if (result == 0)
         return;
+    ip->errors = 0;
 
     if (bootp_packet_handler) {
         ifrom.len = 4;
@@ -404,7 +410,9 @@ remove_protocol(struct protocol *proto)
             else
                 protocols = p->next;
             free(p);
+            break;
         }
+        prev = p;
     }
 }
 
