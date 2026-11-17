@@ -931,39 +931,6 @@ TCPBuildTransportAddress(
     return STATUS_SUCCESS;
 }
 
-NTSTATUS TCPGetSockAddress
-( PCONNECTION_ENDPOINT Connection,
-  PTRANSPORT_ADDRESS Address,
-  ULONG Length,
-  BOOLEAN GetRemote )
-{
-    ip_addr_t ipaddr;
-    u16_t Port = 0;
-    NTSTATUS Status;
-
-    LockObject(Connection);
-
-    if (GetRemote)
-    {
-        Status = TCPTranslateError(LibTCPGetPeerName(Connection->SocketContext,
-                                    &ipaddr,
-                                    &Port));
-    }
-    else
-    {
-        Status = TCPTranslateError(LibTCPGetHostName(Connection->SocketContext,
-                                    &ipaddr,
-                                    &Port));
-    }
-
-    UnlockObject(Connection);
-
-    if (!NT_SUCCESS(Status))
-        return Status;
-
-    return TCPBuildTransportAddress(&ipaddr, Port, Address, Length, FALSE);
-}
-
 /* The address of an address file as a transport address (TDI_QUERY_ADDRESS_INFO): a TA_IP_ADDRESS for an IPv4
  * address (that of a dual stack socket bound to ::ffff:a.b.c.d too), a TA_IP6_ADDRESS otherwise. Length is the
  * room at Address. PASSIVE_LEVEL */
@@ -1084,18 +1051,22 @@ TCPSetNoDelay(
     PCONNECTION_ENDPOINT Connection,
     BOOLEAN Set)
 {
+    PTCP_PCB Pcb;
+
     if (!Connection)
         return STATUS_UNSUCCESSFUL;
 
-    LockObject(Connection);
-    if (Connection->SocketContext == NULL)
+    /* The PCB is used under the core lock, with no connection lock held (see TCPGetConnectionEnds) */
+    LOCK_TCPIP_CORE();
+    Pcb = Connection->SocketContext;
+    if (Pcb == NULL)
     {
-        UnlockObject(Connection);
+        UNLOCK_TCPIP_CORE();
         return STATUS_UNSUCCESSFUL;
     }
 
-    LibTCPSetNoDelay(Connection->SocketContext, Set);
-    UnlockObject(Connection);
+    LibTCPSetNoDelay(Pcb, Set);
+    UNLOCK_TCPIP_CORE();
     return STATUS_SUCCESS;
 }
 
@@ -1115,18 +1086,21 @@ TCPSetKeepAlive(
     PCONNECTION_ENDPOINT Connection,
     BOOLEAN Value)
 {
+    PTCP_PCB Pcb;
+
     if (!Connection)
         return STATUS_UNSUCCESSFUL;
 
-    LockObject(Connection);
-    if (Connection->SocketContext == NULL)
+    LOCK_TCPIP_CORE();
+    Pcb = Connection->SocketContext;
+    if (Pcb == NULL)
     {
-        UnlockObject(Connection);
+        UNLOCK_TCPIP_CORE();
         return STATUS_UNSUCCESSFUL;
     }
 
-    LibTCPSetKeepAlive(Connection->SocketContext, Value);
-    UnlockObject(Connection);
+    LibTCPSetKeepAlive(Pcb, Value);
+    UNLOCK_TCPIP_CORE();
     return STATUS_SUCCESS;
 }
 
@@ -1136,38 +1110,21 @@ TCPSetKeepAliveValues(
     DWORD KeepAliveTime,
     DWORD KeepAliveInterval)
 {
+    PTCP_PCB Pcb;
+
     if (!Connection)
         return STATUS_UNSUCCESSFUL;
 
-    LockObject(Connection);
-    if (Connection->SocketContext == NULL)
+    LOCK_TCPIP_CORE();
+    Pcb = Connection->SocketContext;
+    if (Pcb == NULL)
     {
-        UnlockObject(Connection);
+        UNLOCK_TCPIP_CORE();
         return STATUS_UNSUCCESSFUL;
     }
 
-    LibTcpSetKeepAliveValues(Connection->SocketContext, KeepAliveTime, KeepAliveInterval);
-    UnlockObject(Connection);
-    return STATUS_SUCCESS;
-}
-
-NTSTATUS
-TCPGetSocketStatus(
-    PCONNECTION_ENDPOINT Connection,
-    PULONG State)
-{
-    if (!Connection)
-        return STATUS_UNSUCCESSFUL;
-
-    LockObject(Connection);
-    if (Connection->SocketContext == NULL)
-    {
-        UnlockObject(Connection);
-        return STATUS_UNSUCCESSFUL;
-    }
-
-    LibTCPGetSocketStatus(Connection->SocketContext, State);
-    UnlockObject(Connection);
+    LibTcpSetKeepAliveValues(Pcb, KeepAliveTime, KeepAliveInterval);
+    UNLOCK_TCPIP_CORE();
     return STATUS_SUCCESS;
 }
 
