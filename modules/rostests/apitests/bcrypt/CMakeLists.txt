@@ -3,6 +3,7 @@ list(APPEND SOURCE
     BCryptDeriveKey.c
     BCryptKeyExport.c
     BCryptEccPublicKey.c
+    BCryptMacCcmKdf.c
     testlist.c)
 
 add_executable(bcrypt_apitest ${SOURCE})
