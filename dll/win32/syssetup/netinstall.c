@@ -463,6 +463,50 @@ ScanForInfFile(
 }
 
 
+/* Has the class a complete instance (one with Ndi\Service) of the component? Every install of a component that is there
+   would make a second instance, which is a second row in the property list of every connection */
+static
+BOOL
+IsComponentInstalled(
+    _In_ PCOMPONENT_INFO pComponentInfo)
+{
+    WCHAR szPath[160], szName[64], szId[128];
+    HKEY hClass, hInstance, hNdi;
+    DWORD dwIndex, dwSize, dwType;
+    BOOL bFound = FALSE;
+
+    if (!pComponentInfo->pszClassGuid || wcslen(pComponentInfo->pszClassGuid) > 60)
+        return FALSE;
+    wcscpy(szPath, L"SYSTEM\\CurrentControlSet\\Control\\Network\\");
+    wcscat(szPath, pComponentInfo->pszClassGuid);
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, szPath, 0, KEY_READ, &hClass) != ERROR_SUCCESS)
+        return FALSE;
+
+    for (dwIndex = 0; !bFound; dwIndex++)
+    {
+        dwSize = ARRAYSIZE(szName);
+        if (RegEnumKeyExW(hClass, dwIndex, szName, &dwSize, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
+            break;
+        if (RegOpenKeyExW(hClass, szName, 0, KEY_READ, &hInstance) != ERROR_SUCCESS)
+            continue;
+
+        ZeroMemory(szId, sizeof(szId));
+        dwSize = sizeof(szId) - sizeof(WCHAR);
+        if (RegQueryValueExW(hInstance, L"ComponentId", NULL, &dwType, (LPBYTE)szId, &dwSize) == ERROR_SUCCESS &&
+            dwType == REG_SZ && !_wcsicmp(szId, pComponentInfo->pszComponentId) &&
+            RegOpenKeyExW(hInstance, L"Ndi", 0, KEY_READ, &hNdi) == ERROR_SUCCESS)
+        {
+            bFound = (RegQueryValueExW(hNdi, L"Service", NULL, NULL, NULL, NULL) == ERROR_SUCCESS);
+            RegCloseKey(hNdi);
+        }
+        RegCloseKey(hInstance);
+    }
+
+    RegCloseKey(hClass);
+    return bFound;
+}
+
+
 BOOL
 InstallNetworkComponent(
     _In_ PWSTR pszComponentId)
@@ -484,6 +528,13 @@ InstallNetworkComponent(
     DPRINT("InfPath: %S\n", ComponentInfo.pszInfPath);
     DPRINT("InfSection: %S\n", ComponentInfo.pszInfSection);
     DPRINT("ClassGuid: %S\n", ComponentInfo.pszClassGuid);
+
+    if (IsComponentInstalled(&ComponentInfo))
+    {
+        DPRINT("%S is installed already\n", ComponentInfo.pszComponentId);
+        bResult = TRUE;
+        goto done;
+    }
 
     if (!CreateInstanceKey(&ComponentInfo,
                            &hInstanceKey))

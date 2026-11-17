@@ -54,6 +54,7 @@ typedef struct tagNetCfgComponentItem
     LPWSTR pszUpperRange;
     LPWSTR pszLowerRange;
     LPWSTR pszBinding;
+    LPWSTR pszBindChanges;      /* multi-sz: "+<adapter bind name>" bound, "-<adapter bind name>" unbound, written on Apply */
     DWORD dwSupportedNotifications;
     INetCfgComponentControl *pControl;
     INetCfgComponentPropertyUi *pPropertyUi;
@@ -114,10 +115,17 @@ HRESULT WINAPI INetCfgClass_Constructor(IUnknown *pUnkOuter, REFIID riid, LPVOID
 
 /* netinstall.c */
 BOOL InstallNetworkComponent(_In_ PCWSTR pszComponentId);
+DWORD UpgradeNetworkComponents(VOID);
+VOID WriteBindingChanges(_In_ const NetCfgComponentItem *pItem);
+LPWSTR MultiSzWithEntry(_In_opt_ LPCWSTR pszList, _In_ LPCWSTR pszEntry, _In_ BOOL bPresent);
 
 /* tcpipconf_notify.c */
 HRESULT WINAPI TcpipConfigNotify_Constructor (IUnknown * pUnkOuter, REFIID riid, LPVOID * ppv);
 
+/* tcpip6conf_notify.c */
+HRESULT WINAPI Tcpip6ConfigNotify_Constructor (IUnknown * pUnkOuter, REFIID riid, LPVOID * ppv);
+
 extern const GUID CLSID_TcpipConfigNotifyObject;
+extern const GUID CLSID_Tcpip6ConfigNotifyObject;
 
 #endif /* _PRECOMP_H__ */

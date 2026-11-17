@@ -17,6 +17,7 @@ typedef struct
     LPWSTR szHelp;
     INetCfgComponent  *pNCfgComp;
     UINT NumPropDialogOpen;
+    BOOL bChecked;      /* the state of the check box when the list was filled: a change is a (un)binding on Apply */
 } NET_ITEM, *PNET_ITEM;
 
 class CNetConnectionPropertyUi:
@@ -47,6 +48,7 @@ class CNetConnectionPropertyUi:
         VOID EnumComponents(HWND hDlgCtrl, INetCfg *pNCfg, const GUID *CompGuid, UINT Type, PSP_CLASSIMAGELIST_DATA pCILD);
         VOID InitializeLANPropertiesUIDlg(HWND hwndDlg);
         VOID ShowNetworkComponentProperties(HWND hwndDlg);
+        HRESULT ApplyBindingChanges(HWND hwndDlg);
         BOOL GetDeviceInstanceID(OUT LPOLESTR *DeviceInstanceID);
         static INT_PTR CALLBACK LANPropertiesUIDlg(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam);
 

@@ -250,6 +250,8 @@ ReadBindingString(
     return S_OK;
 }
 
+VOID FreeComponentItem(NetCfgComponentItem *pItem);
+
 HRESULT
 EnumClientServiceProtocol(HKEY hKey, const GUID * pGuid, NetCfgComponentItem ** pHead)
 {
@@ -257,9 +259,9 @@ EnumClientServiceProtocol(HKEY hKey, const GUID * pGuid, NetCfgComponentItem ** 
     DWORD dwSize;
     DWORD dwType;
     WCHAR szName[100];
-    WCHAR szText[100];
+    WCHAR szText[400];  /* the description of TCP/IPv6 is longer than 100 characters */
     HKEY hSubKey, hNDIKey, hInterfacesKey;
-    NetCfgComponentItem * pLast = NULL, *pCurrent;
+    NetCfgComponentItem * pLast = NULL, *pCurrent, *pSeen;
 
     *pHead = NULL;
     do
@@ -385,6 +387,19 @@ EnumClientServiceProtocol(HKEY hKey, const GUID * pGuid, NetCfgComponentItem ** 
                     RegCloseKey(hNDIKey);
                 }
                 RegCloseKey(hSubKey);
+
+                /* A component that was installed twice (an install made before the install of a component checked for an
+                   existing one) is listed once: the first instance is the component */
+                for (pSeen = *pHead; pSeen; pSeen = pSeen->pNext)
+                {
+                    if (pSeen->szId && pCurrent->szId && !_wcsicmp(pSeen->szId, pCurrent->szId))
+                        break;
+                }
+                if (pSeen)
+                {
+                    FreeComponentItem(pCurrent);
+                    continue;
+                }
 
                 ReadBindingString(pCurrent);
 
@@ -707,6 +722,15 @@ ApplyOrCancelChanges(
 
     while (pHead)
     {
+        /* bindings made or taken away through INetCfgComponentBindings */
+        if (pHead->pszBindChanges)
+        {
+            if (bApply)
+                WriteBindingChanges(pHead);
+            CoTaskMemFree(pHead->pszBindChanges);
+            pHead->pszBindChanges = NULL;
+        }
+
         if (pHead->bChanged)
         {
             if (IsEqualGUID(lpClassGUID, &GUID_DEVCLASS_NET))
@@ -756,6 +780,7 @@ FreeComponentItem(NetCfgComponentItem *pItem)
     CoTaskMemFree(pItem->pszUpperRange);
     CoTaskMemFree(pItem->pszLowerRange);
     CoTaskMemFree(pItem->pszBinding);
+    CoTaskMemFree(pItem->pszBindChanges);
     CoTaskMemFree(pItem);
 }
 

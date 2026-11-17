@@ -16,6 +16,7 @@ DriverVer  = 04/12/2006,1.00
 
 [ReactOS]
 %MS_TCPIP.DisplayName% = MS_TCPIP.PrimaryInstall, MS_TCPIP
+%MS_TCPIP6.DisplayName% = MS_TCPIP6.PrimaryInstall, MS_TCPIP6
 
 ;--------------------------- TCP/IPv4 DRIVER ----------------------------
 
@@ -255,6 +256,24 @@ HKLM,"SYSTEM\CurrentControlSet\Services\Winsock2\Parameters\Protocol_Catalog9\Ca
 ; The next id must stay above every entry of the section, and the entry keys of the section must not be reused.
 [MS_TCPIP.Ipv6Upgrade]
 AddReg = TCPIP_AddReg_Ipv6.NT
+
+;--------------------------- TCP/IPv6 COMPONENT -------------------------
+; The "Internet Protocol Version 6 (TCP/IPv6)" row of a connection's property list and its property page (netcfgx,
+; tcpip6conf_notify.c). The stack is the same driver as TCP/IPv4 (Tcpip, with the IPv6 settings under Tcpip6\Parameters), so the
+; component has no service of its own: it is the instance key, its Ndi values and, per adapter, a Tcpip6\Linkage list
+; (netcfgx writes it when the component or an adapter is installed). The upper and lower ranges are those of TCP/IPv4.
+; An install that predates the component gets it from winlogon (netupgrade.c: UpgradeNetworkCatalog) through netcfgx.
+
+[MS_TCPIP6.PrimaryInstall]
+Characteristics = 0xA0
+AddReg = TCPIP6_AddReg_Ndi
+
+[TCPIP6_AddReg_Ndi]
+HKR,"Ndi","ClsId",0x00000000,"{F3152BFE-301B-4830-981B-D8F31ED16005}"
+HKR,"Ndi","HelpText",0x00000000,"%TCPIP6_DEF%"
+HKR,"Ndi","Service",0x00000000,"Tcpip6"
+HKR,"Ndi\Interfaces","UpperRange",0x00000000,"tdi"
+HKR,"Ndi\Interfaces","LowerRange",0x00000000,"ndis4,ndis5"
 
 [TCPIP_AddReg_Ipv6.NT]
 ; The IPv6 transport: msafd finds the helper of an AF_INET6 socket through it (the same helper DLL; it makes the socket only while
@@ -513,6 +532,9 @@ ReactOS = "ReactOS Project"
 
 ; Localizable
 MS_TCPIP.DisplayName = "Internet Protocol Version 4 (TCP/IPv4)"
+; The next two are the texts of Windows (read from the list and the description box of a Windows connection)
+MS_TCPIP6.DisplayName = "Internet Protocol Version 6 (TCP/IPv6)"
+TCPIP6_DEF = "TCP/IP version 6. The latest version of the internet protocol that provides communication across diverse interconnected networks."
 DNSCLIENT_NAME = "DNS Client"
 DNSCLIENT_DESC = "Service that caches local DNS queries"
 DHCPCLIENT_NAME = "DHCP Client"
@@ -521,6 +543,9 @@ TCPIP_DEF = "Transmission Control Protocol/Internet Protocol"
 
 [Strings.0404]
 MS_TCPIP.DisplayName = "網際網路通訊協定第四版 (TCP/IPv4)"
+; UNVERIFIED: the IPv4 name with the version number changed; the description is the English one
+MS_TCPIP6.DisplayName = "網際網路通訊協定第六版 (TCP/IPv6)"
+TCPIP6_DEF = "TCP/IP version 6. The latest version of the internet protocol that provides communication across diverse interconnected networks."
 DNSCLIENT_NAME = "DNS 用戶端"
 DNSCLIENT_DESC = "快取本地 DNS 查詢的服務"
 DHCPCLIENT_NAME = "DHCP 用戶端"
@@ -529,6 +554,9 @@ TCPIP_DEF = "傳輸控制協議 / 互聯網協議"
 
 [Strings.040c]
 MS_TCPIP.DisplayName = "Protocole Internet Version 4 (TCP/IPv4)"
+; UNVERIFIED: the IPv4 name with the version number changed; the description is the English one
+MS_TCPIP6.DisplayName = "Protocole Internet Version 6 (TCP/IPv6)"
+TCPIP6_DEF = "TCP/IP version 6. The latest version of the internet protocol that provides communication across diverse interconnected networks."
 DNSCLIENT_NAME = "Client DNS"
 DNSCLIENT_DESC = "Service de mise en cache de requêtes DNS locales"
 DHCPCLIENT_NAME = "Client DHCP"
@@ -537,6 +565,9 @@ TCPIP_DEF = "Transmission Control Protocol/Internet Protocol"
 
 [Strings.0415]
 MS_TCPIP.DisplayName = "Protokół internetowy w wersji 4 (TCP/IPv4)"
+; UNVERIFIED: the IPv4 name with the version number changed; the description is the English one
+MS_TCPIP6.DisplayName = "Protokół internetowy w wersji 6 (TCP/IPv6)"
+TCPIP6_DEF = "TCP/IP version 6. The latest version of the internet protocol that provides communication across diverse interconnected networks."
 DNSCLIENT_NAME = "Klient DNS"
 DNSCLIENT_DESC = "Usługa buforująca lokalne zapytania DNS"
 DHCPCLIENT_NAME = "Klient DHCP"
@@ -545,6 +576,9 @@ TCPIP_DEF = "Protokół kontroli transmisji/Protokół internetowy (TCP/IP)"
 
 [Strings.0419]
 MS_TCPIP.DisplayName = "Протокол Интернета версии 4 (TCP/IPv4)"
+; UNVERIFIED: the IPv4 name with the version number changed; the description is the English one
+MS_TCPIP6.DisplayName = "Протокол Интернета версии 6 (TCP/IPv6)"
+TCPIP6_DEF = "TCP/IP version 6. The latest version of the internet protocol that provides communication across diverse interconnected networks."
 DNSCLIENT_NAME = "Клиент DNS"
 DNSCLIENT_DESC = "Служба кэширования локальных DNS запросов"
 DHCPCLIENT_NAME = "Клиент DHCP"
@@ -553,6 +587,9 @@ TCPIP_DEF = "Протокол контроля передачи/Протокол
 
 [Strings.041f]
 MS_TCPIP.DisplayName = "Genel Ağ Protokolü Sürüm 4 (TCP/IPv4)"
+; UNVERIFIED: the IPv4 name with the version number changed; the description is the English one
+MS_TCPIP6.DisplayName = "Genel Ağ Protokolü Sürüm 6 (TCP/IPv6)"
+TCPIP6_DEF = "TCP/IP version 6. The latest version of the internet protocol that provides communication across diverse interconnected networks."
 DNSCLIENT_NAME = "DNS İstemcisi"
 DNSCLIENT_DESC = "Yerel DNS sorgularını önbelleğe alan hizmet"
 DHCPCLIENT_NAME = "DHCP İstemcisi"
@@ -561,6 +598,9 @@ TCPIP_DEF = "Aktarım Denetim Protokolü/Genel Ağ Protokolü"
 
 [Strings.0804]
 MS_TCPIP.DisplayName = "Internet 协议版本 4 (TCP/IPv4)"
+; UNVERIFIED: the IPv4 name with the version number changed; the description is the English one
+MS_TCPIP6.DisplayName = "Internet 协议版本 6 (TCP/IPv6)"
+TCPIP6_DEF = "TCP/IP version 6. The latest version of the internet protocol that provides communication across diverse interconnected networks."
 DNSCLIENT_NAME = "DNS Client"
 DNSCLIENT_DESC = "本地 DNS 查询缓存服务"
 DHCPCLIENT_NAME = "DHCP Client"
@@ -569,6 +609,9 @@ TCPIP_DEF = "传输控制协议 / Internet 协议"
 
 [Strings.0816]
 MS_TCPIP.DisplayName = "Internet Protocol Version 4 (TCP/IPv4)"
+; UNVERIFIED: English, as the IPv4 name of this language section is
+MS_TCPIP6.DisplayName = "Internet Protocol Version 6 (TCP/IPv6)"
+TCPIP6_DEF = "TCP/IP version 6. The latest version of the internet protocol that provides communication across diverse interconnected networks."
 DNSCLIENT_NAME = "DNS Client"
 DNSCLIENT_DESC = "Serviço que armazena em cache consultas DNS locais"
 DHCPCLIENT_NAME = "DHCP Client"
@@ -577,6 +620,9 @@ TCPIP_DEF = "Transmission Control Protocol/Internet Protocol"
 
 [Strings.0C04]
 MS_TCPIP.DisplayName = "互聯網通訊協定第四版 (TCP/IPv4)"
+; UNVERIFIED: the IPv4 name with the version number changed; the description is the English one
+MS_TCPIP6.DisplayName = "互聯網通訊協定第六版 (TCP/IPv6)"
+TCPIP6_DEF = "TCP/IP version 6. The latest version of the internet protocol that provides communication across diverse interconnected networks."
 DNSCLIENT_NAME = "DNS 用户端" 
 DNSCLIENT_DESC = "快取本地 DNS 查詢的服務" 
 DHCPCLIENT_NAME = "DHCP 用户端" 

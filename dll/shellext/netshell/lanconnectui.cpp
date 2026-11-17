@@ -127,6 +127,7 @@ CNetConnectionPropertyUi::EnumComponents(HWND hDlgCtrl, INetCfg *pNCfg, const GU
         pItem->Type = (NET_TYPE)Type;
         pItem->pNCfgComp = pNCfgComp.Detach();
         pItem->NumPropDialogOpen = 0;
+        pItem->bChecked = bChecked;
 
         INT image;
         if (!pCILD->ImageList || !SetupDiGetClassImageIndex(pCILD, CompGuid, &image))
@@ -260,6 +261,54 @@ CNetConnectionPropertyUi::ShowNetworkComponentProperties(HWND hwndDlg)
     }
 }
 
+/* A check box that changed since the list was filled is a binding of the component to this connection (checked) or
+   the removal of it (unchecked), as on Windows; INetCfg::Apply writes it */
+HRESULT
+CNetConnectionPropertyUi::ApplyBindingChanges(HWND hwndDlg)
+{
+    HWND hDlgCtrl = GetDlgItem(hwndDlg, IDC_COMPONENTSLIST);
+    UINT Index, Count = ListView_GetItemCount(hDlgCtrl);
+    CComPtr<INetCfgComponent> pAdapter;
+    HRESULT hrResult = S_OK;
+
+    if (!m_pNCfg || !GetINetCfgComponent(m_pNCfg, &pAdapter))
+        return S_OK;
+
+    for (Index = 0; Index < Count; Index++)
+    {
+        LVITEMW lvItem;
+        PNET_ITEM pItem;
+        BOOL bChecked;
+        CComPtr<INetCfgComponentBindings> pBindings;
+        HRESULT hr;
+
+        ZeroMemory(&lvItem, sizeof(lvItem));
+        lvItem.mask = LVIF_PARAM;
+        lvItem.iItem = Index;
+        if (!SendMessageW(hDlgCtrl, LVM_GETITEMW, 0, (LPARAM)&lvItem))
+            continue;
+
+        pItem = (PNET_ITEM)lvItem.lParam;
+        if (!pItem || !pItem->pNCfgComp)
+            continue;
+
+        bChecked = ListView_GetCheckState(hDlgCtrl, Index) ? TRUE : FALSE;
+        if (bChecked == pItem->bChecked)
+            continue;
+
+        hr = pItem->pNCfgComp->QueryInterface(IID_PPV_ARG(INetCfgComponentBindings, &pBindings));
+        if (FAILED(hr))
+            continue;
+
+        hr = bChecked ? pBindings->BindTo(pAdapter) : pBindings->UnbindFrom(pAdapter);
+        if (SUCCEEDED(hr))
+            pItem->bChecked = bChecked;
+        else
+            hrResult = hr;
+    }
+    return hrResult;
+}
+
 INT_PTR
 CALLBACK
 CNetConnectionPropertyUi::LANPropertiesUIDlg(
@@ -296,6 +345,8 @@ CNetConnectionPropertyUi::LANPropertiesUIDlg(
                 This = (CNetConnectionPropertyUi*)GetWindowLongPtr(hwndDlg, DWLP_USER);
                 if (This->m_pNCfg)
                 {
+                    /* a component that cannot be (un)bound leaves the others as they are */
+                    This->ApplyBindingChanges(hwndDlg);
                     hr = This->m_pNCfg->Apply();
                     if (FAILED(hr))
                         return PSNRET_INVALID;
