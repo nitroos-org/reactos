@@ -834,14 +834,14 @@ NTSTATUS DispTdiQueryInformation(
                 return STATUS_INVALID_CONNECTION;
             }
 
-            /* An IPv6 socket: the address the connection has (the stack chose it for a wildcard binding) */
+            /* An IPv6 socket: the address the connection has (the stack chose it for a wildcard binding). Asked
+               with the connection unlocked: for a link-local address it takes the core lock, which lwIP's
+               callbacks hold while they take the connection lock */
             if (AddrFile->Family == TDI_ADDRESS_TYPE_IP6)
             {
-                NTSTATUS Status6 = TCPGetLocalAddress6(Endpoint, AddrFile, (PTRANSPORT_ADDRESS)&AddressInfo->Address,
-                                                       MmGetMdlByteCount(Irp->MdlAddress) -
-                                                       FIELD_OFFSET(TDI_ADDRESS_INFO, Address));
                 UnlockObject(Endpoint);
-                return Status6;
+                return TCPGetLocalAddress6(Endpoint, (PTRANSPORT_ADDRESS)&AddressInfo->Address,
+                                           MmGetMdlByteCount(Irp->MdlAddress) - FIELD_OFFSET(TDI_ADDRESS_INFO, Address));
             }
 
             Address->TAAddressCount = 1;
