@@ -9,17 +9,17 @@ LANGUAGE LANG_HINDI, SUBLANG_HINDI_INDIA
 
 IDD_WELCOMEPAGE DIALOGEX 0, 0, 317, 193
 STYLE DS_SHELLFONT | DS_MODALFRAME | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
-CAPTION "रिऐक्ट ओएस सेटअप"
+CAPTION "NitroOS सेटअप"
 FONT 8, "MS Shell Dlg"
 BEGIN
-    LTEXT "रिऐक्ट ओएस सेटअप विज़ार्ड में आपका स्वागत है", IDC_WELCOMETITLE, 115, 8, 195, 24
-    LTEXT "यह विज़ार्ड आपके कंप्यूटर पर रिऐक्ट ओएस इंस्टॉल करता है।\nविज़ार्ड को आपके और आपके कंप्यूटर के बारे में कुछ जानकारी इकट्ठा करने की आवश्यकता है ताकि रिऐक्ट ओएस को ठीक से इंस्टॉल किया जा सके।", IDC_STATIC, 115, 40, 195, 50
+    LTEXT "NitroOS सेटअप विज़ार्ड में आपका स्वागत है", IDC_WELCOMETITLE, 115, 8, 195, 24
+    LTEXT "यह विज़ार्ड आपके कंप्यूटर पर NitroOS इंस्टॉल करता है।\nविज़ार्ड को आपके और आपके कंप्यूटर के बारे में कुछ जानकारी इकट्ठा करने की आवश्यकता है ताकि NitroOS को ठीक से इंस्टॉल किया जा सके।", IDC_STATIC, 115, 40, 195, 50
     LTEXT "सेटअप के साथ जारी रखने के लिए आगे क्लिक करें।", IDC_STATIC, 115, 169, 195, 17
 END
 
 IDD_ACKPAGE DIALOGEX 0, 0, 317, 145
 STYLE DS_SHELLFONT | DS_MODALFRAME | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
-CAPTION "रिऐक्ट ओएस सेटअप"
+CAPTION "NitroOS सेटअप"
 FONT 8, "MS Shell Dlg"
 BEGIN
     LTEXT "रिऐक्ट ओएस डेवलपर्स निम्नलिखित ओपन सोर्स प्रोजेक्ट्स, (के कुछ हिस्सों) को स्वीकार करना चाहेंगे, जिनका उपयोग रिऐक्ट ओएस बनाने के लिए किया गया था:", IDC_STATIC, 15, 7, 286, 19
@@ -31,7 +31,7 @@ END
 
 IDD_INSTALLATION DIALOGEX 0, 0, 317, 143
 STYLE DS_MODALFRAME | DS_SHELLFONT | WS_POPUPWINDOW | WS_CAPTION | WS_VISIBLE
-CAPTION "रिऐक्ट ओएस सेटअप"
+CAPTION "NitroOS सेटअप"
 FONT 8, "MS Shell Dlg"
 BEGIN
     ICON "", IDC_INSTALLATION_ICON, 5, 5, 20, 20
@@ -45,7 +45,7 @@ END
 
 IDD_OWNERPAGE DIALOGEX 0, 0, 317, 143
 STYLE DS_SHELLFONT | DS_MODALFRAME | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
-CAPTION "रिऐक्ट ओएस सेटअप"
+CAPTION "NitroOS सेटअप"
 FONT 8, "MS Shell Dlg"
 BEGIN
     ICON IDI_ICON2, IDC_STATIC, 21, 7, 20, 20
@@ -58,7 +58,7 @@ END
 
 IDD_COMPUTERPAGE DIALOGEX 0, 0, 317, 143
 STYLE DS_SHELLFONT | DS_MODALFRAME | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
-CAPTION "रिऐक्ट ओएस सेटअप"
+CAPTION "NitroOS सेटअप"
 FONT 8, "MS Shell Dlg"
 BEGIN
     ICON IDI_ICON1, IDC_STATIC, 21, 7, 20, 20
@@ -76,7 +76,7 @@ END
 
 IDD_LOCALEPAGE DIALOGEX 0, 0, 317, 143
 STYLE DS_SHELLFONT | DS_MODALFRAME | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
-CAPTION "रिऐक्ट ओएस सेटअप"
+CAPTION "NitroOS सेटअप"
 FONT 8, "MS Shell Dlg"
 BEGIN
     ICON IDI_ICON4, IDC_STATIC, 21, 7, 20, 20
@@ -93,7 +93,7 @@ END
 
 IDD_DATETIMEPAGE DIALOGEX 0, 0, 317, 143
 STYLE DS_SHELLFONT | DS_MODALFRAME | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
-CAPTION "रिऐक्ट ओएस सेटअप"
+CAPTION "NitroOS सेटअप"
 FONT 8, "MS Shell Dlg"
 BEGIN
     ICON IDI_ICON3, IDC_STATIC, 21, 10, 20, 20
@@ -107,7 +107,7 @@ END
 
 IDD_THEMEPAGE DIALOGEX 0, 0, 317, 143
 STYLE DS_SHELLFONT | DS_MODALFRAME | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
-CAPTION "रिऐक्ट ओएस सेटअप"
+CAPTION "NitroOS सेटअप"
 FONT 8, "MS Shell Dlg"
 BEGIN
     CONTROL "", IDC_THEMEPICKER, "SysListView32", LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_ALIGNLEFT | WS_TABSTOP, 18, 8, 288, 130
@@ -115,7 +115,7 @@ END
 
 IDD_PROCESSPAGE DIALOGEX 0, 0, 317, 143
 STYLE DS_SHELLFONT | DS_MODALFRAME | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
-CAPTION "रिऐक्ट ओएस सेटअप"
+CAPTION "NitroOS सेटअप"
 FONT 8, "MS Shell Dlg"
 BEGIN
     LTEXT "कॉम्पोनेन्ट का दर्ज होना", IDC_TASKTEXT1, 65, 27, 232, 8
@@ -134,11 +134,11 @@ END
 
 IDD_FINISHPAGE DIALOGEX 0, 0, 317, 193
 STYLE DS_SHELLFONT | DS_MODALFRAME | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
-CAPTION "रिऐक्ट ओएस सेटअप"
+CAPTION "NitroOS सेटअप"
 FONT 8, "MS Shell Dlg"
 BEGIN
-    LTEXT "रिऐक्ट ओएस सेटअप विज़ार्ड को पूरा करना", IDC_FINISHTITLE, 115, 8, 195, 24
-    LTEXT "आपने रिऐक्ट ओएस सेटअप को सफलतापूर्वक पूरा कर लिया है।\n\nयदि किसी ड्राइव में एक सीडी है, तो उसे हटा दें। फिर, अपने कंप्यूटर को रीस्टॉर्ट करने के लिए, समाप्त पर क्लिक करें।", IDC_STATIC, 115, 40, 195, 48
+    LTEXT "NitroOS सेटअप विज़ार्ड को पूरा करना", IDC_FINISHTITLE, 115, 8, 195, 24
+    LTEXT "आपने NitroOS सेटअप को सफलतापूर्वक पूरा कर लिया है।\n\nयदि किसी ड्राइव में एक सीडी है, तो उसे हटा दें। फिर, अपने कंप्यूटर को रीस्टॉर्ट करने के लिए, समाप्त पर क्लिक करें।", IDC_STATIC, 115, 40, 195, 48
     LTEXT "Your computer will automatically restart in 15 seconds.", IDC_STATIC, 115, 110, 195, 24
     CONTROL "", IDC_RESTART_PROGRESS, "msctls_progress32", PBS_SMOOTH | WS_CHILD | WS_VISIBLE | WS_BORDER, 115, 135, 188, 12
 END
@@ -186,11 +186,11 @@ BEGIN
     IDS_ACKTITLE "अक्नॉलज्मन्ट"
     IDS_ACKSUBTITLE "कंधे जिसमे रिऐक्ट ओएस खड़ा होता है और लाइसेंस जानकारी"
     IDS_OWNERTITLE "अपने सॉफ़्टवेयर का निजीकृत"
-    IDS_OWNERSUBTITLE "सेटअप रिऐक्ट ओएस को निजीकृत करने के लिए अपने बारे में इस जानकारी का उपयोग करता है।"
+    IDS_OWNERSUBTITLE "सेटअप NitroOS को निजीकृत करने के लिए अपने बारे में इस जानकारी का उपयोग करता है।"
     IDS_COMPUTERTITLE "कंप्यूटर का नाम और एडमिनिस्ट्रेटर पासवर्ड"
     IDS_COMPUTERSUBTITLE "आपको अपने कंप्यूटर के लिए एक नाम और एक एडमिनिस्ट्रेटर पासवर्ड प्रदान करना होगा।"
     IDS_LOCALETITLE "क्षेत्रीय सेटिंग"
-    IDS_LOCALESUBTITLE "आप विभिन्न क्षेत्रों और भाषाओं के लिए रिऐक्ट ओएस को अनुकूलित कर सकते हैं।"
+    IDS_LOCALESUBTITLE "आप विभिन्न क्षेत्रों और भाषाओं के लिए NitroOS को अनुकूलित कर सकते हैं।"
     IDS_LOCALETEXT "The Standards and formats are set to %s, and the location is set to %s."
     IDS_LAYOUTTEXT "Your default text input language and method is: %s keyboard layout"
     IDS_DATETIMETITLE "दिनांक और समय"
@@ -203,7 +203,7 @@ END
 
 STRINGTABLE
 BEGIN
-    IDS_REACTOS_SETUP "रिऐक्ट ओएस सेटअप"
+    IDS_REACTOS_SETUP "NitroOS सेटअप"
     IDS_UNKNOWN_ERROR "अज्ञात त्रुटि"
     IDS_LOADLIBRARY_FAILED "लोडलाइब्रेरी विफल रहा: "
     IDS_GETPROCADDR_FAILED "गैटप्रौकऐड्र विफल रहा: "
@@ -263,11 +263,11 @@ STRINGTABLE
 BEGIN
     IDS_INSTALLATIONTITLE "Installation Type"
     IDS_INSTALLATIONSUBTITLE "Choose an installation type that determines how the system is configured."
-    IDS_INSTALLATIONSERVERNAME "ReactOS Server"
+    IDS_INSTALLATIONSERVERNAME "NitroOS Server"
     IDS_INSTALLATIONSERVERINFO "The system will be recognized as a server. Private folders ""My Pictures"", ""My Videos"" and ""My Music"" are independent from ""My Documents""."
-    IDS_INSTALLATIONWORKSTATIONNAME "ReactOS Workstation"
+    IDS_INSTALLATIONWORKSTATIONNAME "NitroOS Workstation"
     IDS_INSTALLATIONWORKSTATIONINFO "The system will be recognized as a workstation. Private folders ""My Pictures"", ""My Videos"" and ""My Music"" are in ""My Documents""."
-    IDS_INSTALLATIONSERVERCORENAME "ReactOS Server Core"
+    IDS_INSTALLATIONSERVERCORENAME "NitroOS Server Core"
     IDS_INSTALLATIONSERVERCOREINFO "The system will be recognized as a server. The graphical shell is not installed, and the system starts in a command-line environment to reduce resource usage and attack surface."
     /* Reserved for future use
      * IDS_INSTALLATIONNANOSERVERNAME "ReactOS Nano Server"

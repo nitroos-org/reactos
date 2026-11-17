@@ -18,6 +18,7 @@
  */
 
 #include "precomp.h"
+#include <reactos/buildno.h>
 #include <shellapi.h>
 #include <stdlib.h>
 #include <strsafe.h>
@@ -151,7 +152,7 @@ FrameOnCreate(HWND hwnd,
     SetMenu(Info->hwnd,
             Info->hMenuConsoleSmall);
 
-    SetWindowText(Info->hwnd, TEXT("ReactOS Management Console"));
+    SetWindowText(Info->hwnd, TEXT(BRAND_PRODUCT_NAME " Management Console"));
 
     ccs.hWindowMenu = GetSubMenu(Info->hMenuConsoleLarge, 1);
     ccs.idFirstChild = IDM_MDI_FIRSTCHILD;

@@ -9,6 +9,7 @@
 /* INCLUDES *******************************************************************/
 
 #include "ntvdm.h"
+#include <reactos/buildno.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -52,7 +53,7 @@ WinNtVdmBiosReset(LPWORD Stack)
     DisplayMessage(L"You are loading Windows NTVDM BIOS!\n");
     // Bios32Post(Stack);
 
-    DisplayMessage(L"ReactOS NTVDM doesn't support Windows NTVDM BIOS at the moment. The VDM will shut down.");
+    DisplayMessage(BRAND_PRODUCT_NAME_W L" NTVDM doesn't support Windows NTVDM BIOS at the moment. The VDM will shut down.");
     EmulatorTerminate();
 }
 

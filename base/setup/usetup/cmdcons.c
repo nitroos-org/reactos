@@ -7,6 +7,7 @@
  */
 
 #include "usetup.h"
+#include <reactos/buildno.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -1174,7 +1175,7 @@ RecoveryConsole(VOID)
     CONSOLE_ClearScreen();
     CONSOLE_SetCursorXY(0, 0);
 
-    CONSOLE_ConOutPrintf("ReactOS Recovery Console\n\nEnter HELP to get a list of commands.\n\n");
+    CONSOLE_ConOutPrintf(BRAND_PRODUCT_NAME " Recovery Console\n\nEnter HELP to get a list of commands.\n\n");
 
     while (!State.bExit)
     {

@@ -54,7 +54,7 @@ ERRORLEVEL est modifié à l'offset de la touche enfoncée parmi les choix."
     STRING_CMD_HELP5 "  [complétion des noms de fichiers façon Bash]"
     STRING_CMD_HELP6 "  [pile de répertoires]"
     STRING_CMD_HELP7 "  [redirections et canaux]"
-    STRING_CMD_HELP8 "Démarre une nouvelle instance de l'interpréteur de commandes de ReactOS.\n\n\
+    STRING_CMD_HELP8 "Démarre une nouvelle instance de l'interpréteur de commandes de NitroOS.\n\n\
 CMD [/[C|K] commande][/P][/Q][/T:ap]\n\n\
   /C commande  Lance la commande spécifiée et se termine.\n\
   /K commande  Lance la commande spécifiée et reste en mémoire.\n\
@@ -328,7 +328,7 @@ des caractères spéciaux suivants:\n\n\
   $Q   = (signe égale)\n\
   $S   (espace)\n\
   $T   Heure courante\n\
-  $V   Numéro de version de ReactOS\n\
+  $V   Numéro de version de NitroOS\n\
   $_   Retour chariot/saut de ligne\n\
   $$   $ (signe dollar)"
     STRING_PROMPT_HELP2 "  $+   Affiche la hauteur de la pile de répertoires"
@@ -517,10 +517,10 @@ titre         titre de la fenêtre"
     STRING_ERROR_UNEXPECTED "%s n'était pas attendu.\n"
     STRING_ERROR_WHILE_PROCESSING "Une erreur est apparue lors du traitement : %s.\n"
     STRING_SET_ENV_ERROR "Variable d'environnement '%s' non définie\n"
-    STRING_CMD_INFOLINE "  ReactOS Command Prompt                                      Type HELP = Help  "
+    STRING_CMD_INFOLINE "  NitroOS Command Prompt                                      Type HELP = Help  "
     STRING_CMD_COPYRIGHT "(C) Copyright 1996-%s ReactOS Team.\n"
-    STRING_REACTOS_VERSION "ReactOS [Version %s %s]\n"
-    STRING_CMD_SHELLINFO "\nInterpréteur de ligne de commandes ReactOS\nVersion %s %s"
+    STRING_REACTOS_VERSION "NitroOS [Version %s %s]\n"
+    STRING_CMD_SHELLINFO "\nInterpréteur de ligne de commandes NitroOS\nVersion %s %s"
     STRING_VERSION_RUNNING_ON "Fonctionnant sous: "
     STRING_VERSION_RUNVER "%s [Version %d.%d.%d] %s"
     STRING_COPY_FILE "        %d fichier(s) copié(s)\n"

@@ -12,7 +12,7 @@ STYLE DS_SHELLFONT | WS_CHILD | WS_DISABLED | WS_CAPTION
 CAPTION "अनुकूलता"
 FONT 8, "MS Shell Dlg", 0, 0, 0x0
 BEGIN
-    LTEXT "यदि आपको रिऐक्ट ओएस में इस प्रोग्राम को चलाने में कोई समस्या है, तो एक ऑपरेटिंग सिस्टम चुनें। रिऐक्ट ओएस को एप्लिकेशन को रिपोर्ट करना चाहिए।\nकृपया ध्यान दें कि यह कार्य प्रगति पर है।", IDC_EXPLANATION, 7, 7, 210, 31
+    LTEXT "यदि आपको NitroOS में इस प्रोग्राम को चलाने में कोई समस्या है, तो एक ऑपरेटिंग सिस्टम चुनें। NitroOS को एप्लिकेशन को रिपोर्ट करना चाहिए।\nकृपया ध्यान दें कि यह कार्य प्रगति पर है।", IDC_EXPLANATION, 7, 7, 210, 31
     GROUPBOX "अनुकूलता प्रणाली", IDC_COMPATGROUP, 7, 41, 210, 49
     CHECKBOX "इस प्रोग्राम को कंपेटिबिलिटी मोड के लिए चलाएं:", IDC_CHKRUNCOMPATIBILITY, 18, 57, 188, 10, BS_AUTOCHECKBOX | WS_TABSTOP
     COMBOBOX IDC_COMPATIBILITYMODE, 18, 70, 188, 85, CBS_HASSTRINGS | CBS_DROPDOWNLIST | WS_TABSTOP | WS_DISABLED
@@ -45,6 +45,6 @@ STRINGTABLE
 BEGIN
     IDS_COMPAT_TITLE "अनुकूलता"
     IDS_FAILED_NETWORK "इस प्रोग्राम पर अनुकूलता मोड सेट नहीं किए जा सकते क्योंकि यह नेटवर्क ड्राइव पर है।"
-    IDS_FAILED_PROTECTED "इस प्रोग्राम पर अनुकूलता मोड सेट नहीं किए जा सकते क्योंकि यह रिऐक्ट ओएस का एक हिस्सा है।"
+    IDS_FAILED_PROTECTED "इस प्रोग्राम पर अनुकूलता मोड सेट नहीं किए जा सकते क्योंकि यह NitroOS का एक हिस्सा है।"
 END
 

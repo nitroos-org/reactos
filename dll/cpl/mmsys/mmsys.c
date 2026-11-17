@@ -10,6 +10,7 @@
  */
 
 #include "mmsys.h"
+#include <reactos/buildno.h>
 
 #include <winsvc.h>
 #include <shlwapi.h>
@@ -46,13 +47,13 @@ static EVENT_LABEL_ITEM EventLabels[] =
 {
     {
         L"WindowsLogon",
-        L"ReactOS Logon",
+        BRAND_PRODUCT_NAME_W L" Logon",
         IDS_REACTOS_LOGON,
         L"ReactOS_Logon.wav"
     },
     {
         L"WindowsLogoff",
-        L"ReactOS Logoff",
+        BRAND_PRODUCT_NAME_W L" Logoff",
         IDS_REACTOS_LOGOFF,
         L"ReactOS_Logoff.wav"
     },

@@ -1,0 +1,14 @@
+/* NitroOS palette (brand v7): the one definition of the brand colours. media/branding/tools/render.py reads the hex
+   values from this file (the `.f-NAME{fill:#HEX}` rules). The SVG masters carry their hex values themselves.
+   Mark: navy tile (deep to ink), stems cyan (sky) to violet, flame diagonal orange (lamp) to yellow (glow). */
+/* deep    #1B1F3B */ .f-deep{fill:#1B1F3B}
+/* ink     #0B0E1F */ .f-ink{fill:#0B0E1F}
+/* harbor  #2A2F66 */ .f-harbor{fill:#2A2F66}
+/* sky     #00C2FF */ .f-sky{fill:#00C2FF}
+/* violet  #7B5CFF */ .f-violet{fill:#7B5CFF}
+/* mist    #E4E8FF */ .f-mist{fill:#E4E8FF}
+/* lamp    #FF7A18 */ .f-lamp{fill:#FF7A18}
+/* glow    #FFD23F */ .f-glow{fill:#FFD23F}
+/* cloud   #F4F5FB */ .f-cloud{fill:#F4F5FB}
+/* slate   #545A7A */ .f-slate{fill:#545A7A}
+/* white   #FFFFFF */ .f-white{fill:#FFFFFF}

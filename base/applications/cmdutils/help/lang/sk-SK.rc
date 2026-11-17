@@ -15,7 +15,7 @@ END
 
 STRINGTABLE
 BEGIN
-    IDS_USAGE "Poskytuje informácie pomocníka pre príkazy ReactOS.\n\n\
+    IDS_USAGE "Poskytuje informácie pomocníka pre príkazy NitroOS.\n\n\
 HELP [command]\n\n\
   command - Zobrazí pomocníka pre určitý príkaz.\n"
     IDS_HELP1 "Zoznam všetkých dostupných príkazov (+ popis)\n\n\
@@ -30,7 +30,7 @@ CD       Zobrazí názov pracovného priečinka alebo ho zmení.\n\
 CHCP     Zobrazí alebo nastaví aktívne číslo znakovej stránky.\n\
 CHOICE   Počká, kým používateľ vyberie jednu z niekoľkých možností.\n\
 CLS      Vymaže obrazovku.\n\
-CMD      Spustí novú inštanciu interpreta príkazového riadka ReactOS.\n\
+CMD      Spustí novú inštanciu interpreta príkazového riadka NitroOS.\n\
 COLOR    Nastaví predvolenú farbu popredia a pozadia konzoly.\n\
 COPY     Skopíruje jeden alebo viac súborov na iné umiestnenie.\n\
 DATE     Zobrazí alebo nastaví dátum.\n\
@@ -41,9 +41,9 @@ ERASE    Odstráni jeden alebo viacero súborov.\n\
 EXIT     Ukončí program CMD.EXE (interpret príkazov).\n\
 FOR      Spustí určitý príkaz pre každý súbor v množine súborov.\n\
 FREE     (voľné) miesto na disku.\n\
-GOTO     Nasmeruje interpret príkazového riadka ReactOS na označený riadok\n\
+GOTO     Nasmeruje interpret príkazového riadka NitroOS na označený riadok\n\
          v dávkovom súbore.\n\
-HELP     Poskytuje informácie pomocníka pre príkazy ReactOS.\n\
+HELP     Poskytuje informácie pomocníka pre príkazy NitroOS.\n\
 HISTORY  Vypíše všetky príkazy, ktoré boli použité\n\
 IF       Vykoná podmienené vyhodnotenie v dávkovom súbore.\n\
 LABEL    Vytvorí, zmení alebo vymaže názov zväzku disku.\n\
@@ -64,7 +64,7 @@ RENAME   Premenuje súbor alebo súbory.\n\
 REPLACE  Nahradí súbory.\n\
 RMDIR    Odstráni priečinok.\n\
 SCREEN   Premiestni kurzor a voliteľne vypíše text.\n\
-SET      Zobrazí, nastaví alebo odstráni premenné prostredia ReactOS.\n\
+SET      Zobrazí, nastaví alebo odstráni premenné prostredia NitroOS.\n\
 SHIFT    Posunie pozíciu nahraditeľných parametrov v dávkovom súbore.\n"
     IDS_HELP2 "START    Spustí nové okno na vykonanie určitého programu alebo príkazu.\n\
          Spustí príkaz.\n\
@@ -72,8 +72,8 @@ TIME     Zobrazí alebo nastaví systémový čas.\n\
 TIMER    Umožňuje použitie až desiatich meračov času.\n\
 TITLE    Nastaví titulok okna pre reláciu CMD.EXE.\n\
 TYPE     Zobrazí obsah textového súboru.\n\
-VER      Zobrazí verziu ReactOS.\n\
-VERIFY   Určí, či má ReactOS overiť, že vaše súbory boli zapísané\n\
+VER      Zobrazí verziu NitroOS.\n\
+VERIFY   Určí, či má NitroOS overiť, že vaše súbory boli zapísané\n\
          na disk správne.\n\
 VOL      Zobrazí názov a sériové číslo zväzku disku.\n"
 END

@@ -135,7 +135,7 @@ INT cmd_ver (LPTSTR param)
         return 0;
     }
 
-    ConOutResPrintf(STRING_CMD_SHELLINFO, _T(KERNEL_VERSION_STR), _T(KERNEL_VERSION_BUILD_STR));
+    ConOutResPrintf(STRING_CMD_SHELLINFO, _T(BRAND_VERSION_MAIN_STR), _T("(") _T(BRAND_VERSION_DETAIL_STR) _T(")"));
     ConOutChar(_T('\n'));
     ConOutResPuts(STRING_VERSION_RUNNING_ON);
     PrintOSVersion();

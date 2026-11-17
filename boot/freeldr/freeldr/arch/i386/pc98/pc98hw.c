@@ -8,6 +8,7 @@
 /* INCLUDES *******************************************************************/
 
 #include <freeldr.h>
+#include <reactos/buildno.h>
 #include <cportlib/cportlib.h>
 #include <drivers/pc98/pit.h>
 #include <drivers/pc98/fdc.h>
@@ -1308,7 +1309,7 @@ FrLdrCheckCpuCompatibility(VOID)
         FrLdrBugCheckWithMessage(MISSING_HARDWARE_REQUIREMENTS,
                                  __FILE__,
                                  __LINE__,
-                                 "ReactOS requires the CPUID instruction to return "
+                                 BRAND_PRODUCT_NAME " requires the CPUID instruction to return "
                                  "more than one supported ID.\n\n");
     }
 
@@ -1329,7 +1330,7 @@ FrLdrCheckCpuCompatibility(VOID)
                                      __FILE__,
                                      __LINE__,
                                      "Processor is too old (family %u < 5)\n"
-                                     "ReactOS requires a Pentium-level processor or newer.",
+                                     BRAND_PRODUCT_NAME " requires a Pentium-level processor or newer.",
                                      ProcessorFamily);
         }
     }

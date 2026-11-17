@@ -19,6 +19,7 @@
 */
 
 #include "precomp.h"
+#include <reactos/buildno.h>
 
 #include "uimain.h"
 
@@ -773,7 +774,7 @@ mi_create_window(void)
   /* name of window class */
   str_to_uni(classname, "rdesktop");
   wc.lpszClassName = classname;
-  str_to_uni(caption, "ReactOS Remote Desktop");
+  str_to_uni(caption, BRAND_PRODUCT_NAME " Remote Desktop");
   wc.hIcon = LoadIcon(g_Instance,
                       MAKEINTRESOURCE(IDI_MSTSC));
   /* Register the window class. */

@@ -274,10 +274,10 @@ END
 
 STRINGTABLE
 BEGIN
-    IDS_PROGRESS_INFO_START "РеактОС се опитва да пусне следната услуга"
-    IDS_PROGRESS_INFO_STOP "РеактОС се опитва да спре следната услуга"
-    IDS_PROGRESS_INFO_PAUSE "РеактОС се опитва да задържи следната услуга"
-    IDS_PROGRESS_INFO_RESUME "РеактОС се опитва да продължи следната услуга"
+    IDS_PROGRESS_INFO_START "NitroOS се опитва да пусне следната услуга"
+    IDS_PROGRESS_INFO_STOP "NitroOS се опитва да спре следната услуга"
+    IDS_PROGRESS_INFO_PAUSE "NitroOS се опитва да задържи следната услуга"
+    IDS_PROGRESS_INFO_RESUME "NitroOS се опитва да продължи следната услуга"
     IDS_CREATE_SUCCESS "Услугата е успешно създадена"
     IDS_DELETE_SUCCESS "Услугата е успешно изтрита"
     IDS_CREATE_REQ "Полетата, отбелязани със\nзвездичка са задължителни"
@@ -312,7 +312,7 @@ BEGIN
     IDS_HINT_DETAILS " Показване на сведения за всеки предмет в прозореца."
     IDS_HINT_CUST " Нагаждане на изгледа."
     IDS_HINT_HELP " Показва помощен прозорец."
-    IDS_HINT_ABOUT " За управителя на устройствата на РеактОС."
+    IDS_HINT_ABOUT " За управителя на устройствата на NitroOS."
     IDS_HINT_SYS_RESTORE " Възстановява прозореца до обичайния му рамер."
     IDS_HINT_SYS_MOVE " Премества прозореца."
     IDS_HINT_SYS_SIZE " Преоразмерява прозореца."
@@ -324,7 +324,7 @@ END
 /* Application title */
 STRINGTABLE
 BEGIN
-    IDS_APPNAME "Управление на услугите на РеактОС"
+    IDS_APPNAME "Управление на услугите на NitroOS"
     IDS_APPAUTHORS "Copyright (C) 2005-2007 by Ged Murphy (gedmurphy@reactos.org)"
 END
 

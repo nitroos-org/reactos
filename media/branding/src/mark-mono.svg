@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- one colour, N only: stems and diagonal are separated by the same gap as in the colour mark -->
+  <defs><mask id="k" maskUnits="userSpaceOnUse" x="0" y="0" width="512" height="512"><rect width="512" height="512" fill="#fff"/><polygon points="133,122 213,122 379,390 299,390" fill="#000" stroke="#000" stroke-width="16"/></mask></defs>
+  <g fill="#000"><g mask="url(#k)"><polygon points="133,122 199,122 199,390 133,390"/><polygon points="313,122 379,122 379,390 313,390"/></g><polygon points="133,122 213,122 379,390 299,390"/></g>
+</svg>

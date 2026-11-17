@@ -6,6 +6,7 @@
  */
 
 #include "userinit.h"
+#include <reactos/buildno.h>
 
 HWND hList;
 HWND hLocaleList;
@@ -690,7 +691,7 @@ LocaleDlgProc(
                         static WCHAR szMsg[RC_STRING_MAX_SIZE];
                         INT ret;
                         LoadStringW(GetModuleHandle(NULL), IDS_CANCEL_CONFIRM, szMsg, ARRAYSIZE(szMsg));
-                        ret = MessageBoxW(hwndDlg, szMsg, L"ReactOS LiveCD", MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2);
+                        ret = MessageBoxW(hwndDlg, szMsg, BRAND_PRODUCT_NAME_W L" LiveCD", MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2);
                         if (ret == IDOK || ret == IDYES)
                         {
                             pState->NextPage = DONE;
@@ -786,7 +787,7 @@ StartDlgProc(
                             static WCHAR szMsg[RC_STRING_MAX_SIZE];
                             INT ret;
                             LoadStringW(GetModuleHandle(NULL), IDS_CANCEL_CONFIRM, szMsg, ARRAYSIZE(szMsg));
-                            ret = MessageBoxW(hwndDlg, szMsg, L"ReactOS LiveCD", MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2);
+                            ret = MessageBoxW(hwndDlg, szMsg, BRAND_PRODUCT_NAME_W L" LiveCD", MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2);
                             if (ret == IDOK || ret == IDYES)
                             {
                                 pState->NextPage = DONE;

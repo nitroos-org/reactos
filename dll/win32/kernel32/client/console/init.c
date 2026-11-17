@@ -11,6 +11,7 @@
 /* INCLUDES *******************************************************************/
 
 #include <k32.h>
+#include <reactos/buildno.h>
 
 // For Control Panel Applet
 #include <cpl.h>
@@ -26,7 +27,7 @@ BOOLEAN ConsoleInitialized = FALSE;
 extern HANDLE InputWaitHandle;
 static volatile LONG g_bConsoleIMEStartingUp = FALSE; // We use interlock, so LONG
 
-static const PWSTR DefaultConsoleTitle = L"ReactOS Console";
+static const PWSTR DefaultConsoleTitle = BRAND_PRODUCT_NAME_W L" Console";
 
 /* FUNCTIONS ******************************************************************/
 

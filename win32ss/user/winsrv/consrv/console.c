@@ -11,6 +11,7 @@
 /* INCLUDES *******************************************************************/
 
 #include "consrv.h"
+#include <reactos/buildno.h>
 
 /* This is for COM usage */
 #define COBJMACROS
@@ -752,7 +753,7 @@ ConSrvInitConsole(OUT PHANDLE NewConsoleHandle,
         }
         else
         {
-            ConsoleCreateUnicodeString(&Console->Title, L"ReactOS Console");
+            ConsoleCreateUnicodeString(&Console->Title, BRAND_PRODUCT_NAME_W L" Console");
         }
     }
     else

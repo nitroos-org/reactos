@@ -10,6 +10,7 @@
 /* INCLUDES *******************************************************************/
 
 #include "ntvdm.h"
+#include <reactos/buildno.h>
 
 #define NDEBUG
 #include <debug.h>

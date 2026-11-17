@@ -19,10 +19,11 @@
  */
 
 #include "3dtext.h"
+#include <reactos/buildno.h>
 
 #include <winreg.h>
 
-TCHAR g_Text[MAX_TEXT_LENGTH + 1] = _T("ReactOS Rocks!");
+TCHAR g_Text[MAX_TEXT_LENGTH + 1] = _T(BRAND_PRODUCT_NAME " Rocks!");
 
 VOID LoadSettings(VOID)
 {

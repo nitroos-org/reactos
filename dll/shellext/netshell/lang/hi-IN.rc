@@ -84,30 +84,30 @@ END
 
 IDD_NETWORKINITPAGE DIALOGEX 0, 0, 317, 143
 STYLE DS_SHELLFONT | DS_MODALFRAME | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
-CAPTION "ReactOS Setup"
+CAPTION "NitroOS Setup"
 FONT 8, "MS Shell Dlg"
 BEGIN
     ICON IDI_NET_SETUP, IDC_STATIC, 21, 10, 20, 20
-    LTEXT "Please wait while ReactOS installs networking components.", IDC_STATIC, 53, 7, 240, 20
+    LTEXT "Please wait while NitroOS installs networking components.", IDC_STATIC, 53, 7, 240, 20
     CONTROL "", IDC_INSTALL_PROGRESS, "msctls_progress32", PBS_SMOOTH | WS_CHILD | WS_VISIBLE | WS_BORDER, 21, 58, 275, 11
 END
 
 IDD_NETWORKSETTINGSPAGE DIALOGEX 0, 0, 317, 143
 STYLE DS_SHELLFONT | DS_MODALFRAME | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
-CAPTION "रिऐक्ट ओएस सेटअप"
+CAPTION "NitroOS सेटअप"
 FONT 8, "MS Shell Dlg"
 BEGIN
     ICON IDI_NET_SETUP, IDC_STATIC, 21, 10, 20, 20
     LTEXT "चुनें कि ठेठ या कस्टम सेटिंग्स का उपयोग करना है या नहीं:", IDC_STATIC, 53, 7, 240, 20
     AUTORADIOBUTTON "ठेठ सेटिंग्स", IDC_NETWORK_TYPICAL, 53, 27, 253, 18, WS_TABSTOP | WS_GROUP
     AUTORADIOBUTTON "कस्टम सेटिंग्स", IDC_NETWORK_CUSTOM, 53, 72, 253, 18, WS_TABSTOP
-    LTEXT "रिऐक्ट ओएस नेटवर्क के लिए क्लाइंट का उपयोग करके नेटवर्क कनेक्शन बनाता है, रिऐक्ट ओएस नेटवर्क के लिए फ़ाइल और प्रिंट शेयरिंग, और स्वचालित पते के साथ टीसीपी / आईपी परिवहन प्रोटोकॉल।", IDC_STATIC, 65, 45, 240, 30
+    LTEXT "NitroOS नेटवर्क के लिए क्लाइंट का उपयोग करके नेटवर्क कनेक्शन बनाता है, NitroOS नेटवर्क के लिए फ़ाइल और प्रिंट शेयरिंग, और स्वचालित पते के साथ टीसीपी / आईपी परिवहन प्रोटोकॉल।", IDC_STATIC, 65, 45, 240, 30
     LTEXT "आपको नेटवर्क कम्पोनन्ट को मैन्युअल रूप से कॉन्फ़िगर करने की अनुमति देता है।", IDC_STATIC, 65, 90, 243, 20
 END
 
 IDD_NETWORKCOMPONENTPAGE DIALOGEX 0, 0, 317, 143
 STYLE DS_SHELLFONT | DS_MODALFRAME | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
-CAPTION "रिऐक्ट ओएस सेटअप"
+CAPTION "NitroOS सेटअप"
 FONT 8, "MS Shell Dlg"
 BEGIN
     LTEXT "डिवाइस के लिए:", IDC_STATIC, 33, 2, 100, 20
@@ -122,7 +122,7 @@ END
 
 IDD_NETWORKDOMAINPAGE DIALOGEX 0, 0, 317, 143
 STYLE DS_SHELLFONT | DS_MODALFRAME | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
-CAPTION "रिऐक्ट ओएस सेटअप"
+CAPTION "NitroOS सेटअप"
 FONT 8, "MS Shell Dlg"
 BEGIN
     LTEXT "क्या आप चाहते हैं कि यह कंप्यूटर किसी डोमेन का सदस्य हो?\n\
@@ -190,6 +190,6 @@ BEGIN
     IDS_NETWORKCOMPONENTSUBTITLE "निर्धारित करें कि आपके कंप्यूटर पर कौन से नेटवर्किंग कम्पोनेन्ट उपयोग किए जाते हैं। नए कम्पोनेन्ट को ऐड करने के लिए, इंस्टॉल पर क्लिक करें।"
     IDS_NETWORKDOMAINTITLE "कार्यसमूह या नेटवर्क डोमेन"
     IDS_NETWORKDOMAINSUBTITLE "निर्दिष्ट करें कि कंप्यूटर का उपयोग कैसे किया जाएगा - एक कार्यसमूह के भाग के रूप में या नेटवर्क डोमेन के भाग के रूप में।"
-    IDS_REACTOS_SETUP "रिऐक्ट ओएस सेटअप"
+    IDS_REACTOS_SETUP "NitroOS सेटअप"
     IDS_WZD_DOMAIN_NAME "जब तक आप अपने डोमेन या कार्यसमूह का\nनाम दर्ज नहीं करते तब तक सेटअप\nजारी नहीं रह सकता।"
 END

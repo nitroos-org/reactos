@@ -2,7 +2,7 @@ LANGUAGE LANG_BULGARIAN, SUBLANG_DEFAULT
 
 STRINGTABLE
 BEGIN
-    IDS_APPTITLE "Прегледът за снимки и факсове на РеактОС"
+    IDS_APPTITLE "Прегледът за снимки и факсове на NitroOS"
     IDS_SETASDESKBG "Слагане като подкраска"
     IDS_NOPREVIEW "No preview available."
     IDS_PREVIEW "Преглед"

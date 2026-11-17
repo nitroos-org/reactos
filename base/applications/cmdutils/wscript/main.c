@@ -17,6 +17,7 @@
  */
 
 #include <stdarg.h>
+#include <reactos/buildno.h>
 
 #define COBJMACROS
 #ifdef __REACTOS__
@@ -436,7 +437,7 @@ void schedule_timeout(LONG seconds)
 static void print_banner(void)
 {
 #ifdef __REACTOS__
-    const WCHAR *header = L"ReactOS Script Host";
+    const WCHAR *header = BRAND_PRODUCT_NAME_W L" Script Host";
 #else
     const char * (CDECL *wine_get_version)(void);
     WCHAR header[64];
