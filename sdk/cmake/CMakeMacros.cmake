@@ -1081,7 +1081,10 @@ function(add_rostests_file)
         set(_ROSTESTS_SUBDIR "/${_ROSTESTS_SUBDIR}")
     endif()
 
-    if(_ROSTESTS_TARGET)
+    if(_ROSTESTS_TARGET AND _ROSTESTS_RENAME)
+        # no FILE: add_cd_file then renames the file in reactos.cab as well, not only on the CD tree
+        add_cd_file(TARGET ${_ROSTESTS_TARGET} DESTINATION "reactos/bin${_ROSTESTS_SUBDIR}" NAME_ON_CD ${_ROSTESTS_NAME_ON_CD} FOR all)
+    elseif(_ROSTESTS_TARGET)
         add_cd_file(TARGET ${_ROSTESTS_TARGET} FILE ${_ROSTESTS_FILE} DESTINATION "reactos/bin${_ROSTESTS_SUBDIR}" NAME_ON_CD ${_ROSTESTS_NAME_ON_CD} FOR all)
     else()
         add_cd_file(FILE ${_ROSTESTS_FILE} DESTINATION "reactos/bin${_ROSTESTS_SUBDIR}" NAME_ON_CD ${_ROSTESTS_NAME_ON_CD} FOR all)
