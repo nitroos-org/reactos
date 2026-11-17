@@ -16,6 +16,7 @@ list(APPEND SOURCE
     dgramstub.c
     tcpnonadmin.c
     tcpsetinfoex.c
+    tcpaoowner.c
     tcpaccept.c
     outputprobe.c
     acceptstate.c

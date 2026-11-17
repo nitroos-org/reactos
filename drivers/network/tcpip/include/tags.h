@@ -9,6 +9,7 @@
 
 #define CONN_ENDPT_TAG 'pEnC'
 #define ADDR_FILE_TAG 'FrdA'
+#define OWNER_SID_TAG 'SwOT'
 #define CONTROL_CHANNEL_TAG 'CnoC'
 #define TRANS_CONTEXT_TAG 'noCT'
 #define TDI_ENTITY_TAG 'EidT'

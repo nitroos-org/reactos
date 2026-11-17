@@ -179,6 +179,10 @@ typedef struct _ADDRESS_FILE {
        HeaderIncl above is the IPv4 one, which is about receives as well) */
     BOOLEAN RawPrivileged;
     BOOLEAN HeaderIncl6;
+    /* The user of the token that opened the address file (for AFD's open at bind: the application's), or NULL.
+       Its options asked for by entity id from another process are its user's or an administrator's to set
+       (TiCheckAddressFileAccess, main.c). Nonpaged, OWNER_SID_TAG; freed with the address file */
+    PSID OwnerSid;
 
     /* The following members are used to control event notification */
 

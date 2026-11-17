@@ -568,6 +568,9 @@ VOID AddrFileFree(
 
   ExDeleteResourceLite(&AddrFile->Resource);
 
+  if (AddrFile->OwnerSid)
+      ExFreePoolWithTag(AddrFile->OwnerSid, OWNER_SID_TAG);
+
   ExFreePoolWithTag(Object, ADDR_FILE_TAG);
 }
 

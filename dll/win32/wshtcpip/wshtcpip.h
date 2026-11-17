@@ -90,6 +90,7 @@ WSHIoctl_GetInterfaceList(
 
 INT
 SendRequest(
+    IN HANDLE AddressHandle,
     IN PVOID Request,
     IN DWORD RequestSize,
     IN DWORD IOCTL);
