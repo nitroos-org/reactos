@@ -1146,6 +1146,30 @@ Quit:
 
 
 /*
+ * The token that CreateProcessAsUser hands to kernel32 when it creates the process. kernel32 uses it only to place
+ * the process in the token's session. A token of the caller's own session is not passed: with a token present
+ * kernel32 leaves the caller's process and thread descriptors out of the creation (the creation of a process with a
+ * user token takes its security from the token), but CreateProcessAsUserCommon relies on the creation having
+ * validated an explicit descriptor (a label above the caller fails creation). So the process is created as without a
+ * token, and the helper below gives it the token and the descriptors.
+ */
+static
+HANDLE
+GetCreationToken(
+    _In_opt_ HANDLE hToken)
+{
+    ULONG TokenSession, Length;
+
+    if (hToken != NULL &&
+        NT_SUCCESS(NtQueryInformationToken(hToken, TokenSessionId, &TokenSession, sizeof(TokenSession), &Length)) &&
+        TokenSession != NtCurrentPeb()->SessionId)
+        return hToken;
+
+    return NULL;
+}
+
+
+/*
  * @implemented
  */
 BOOL
@@ -1169,7 +1193,7 @@ CreateProcessAsUserA(
         dwCreationFlags, lpEnvironment, debugstr_a(lpCurrentDirectory), lpStartupInfo, lpProcessInformation);
 
     /* Create the process with a suspended main thread, in the token's session (see CreateProcessAsUserW) */
-    if (!CreateProcessInternalA(hToken,
+    if (!CreateProcessInternalA(GetCreationToken(hToken),
                                 lpApplicationName,
                                 lpCommandLine,
                                 lpProcessAttributes,
@@ -1222,7 +1246,7 @@ CreateProcessAsUserW(
      * Create the process with a suspended main thread. The token goes to kernel32 so that the process is
      * created in the token's session (NitroSessions); it is given the token below.
      */
-    if (!CreateProcessInternalW(hToken,
+    if (!CreateProcessInternalW(GetCreationToken(hToken),
                                 lpApplicationName,
                                 lpCommandLine,
                                 lpProcessAttributes,
