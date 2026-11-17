@@ -767,17 +767,63 @@ FindInstanceKey(
     return bFound;
 }
 
-/* The second and later instances of one component in the class are removed (the first one in key order stays, the
-   one the property list shows): what the install of TCP/IPv4 by both the setup and its network step left */
+typedef struct
+{
+    WCHAR szId[100];        /* ComponentId */
+    WCHAR szKeep[64];       /* the instance key that stays */
+    BOOL bComplete;         /* szKeep has Ndi\Service */
+} SEEN_COMPONENT;
+
+/* The ComponentId of an instance key, and whether the instance is complete (has Ndi\Service). FALSE: no usable id */
+static
+BOOL
+ReadInstanceId(
+    _In_ HKEY hClass,
+    _In_ LPCWSTR pszName,
+    _Out_writes_(cchId) LPWSTR pszId,
+    _In_ DWORD cchId,
+    _Out_ BOOL *pbComplete)
+{
+    HKEY hInstance, hNdi;
+    DWORD dwSize, dwType;
+    BOOL bRead = FALSE;
+
+    *pbComplete = FALSE;
+    if (RegOpenKeyExW(hClass, pszName, 0, KEY_READ, &hInstance) != ERROR_SUCCESS)
+        return FALSE;
+
+    ZeroMemory(pszId, cchId * sizeof(WCHAR));
+    dwSize = (cchId - 1) * sizeof(WCHAR);
+    if (RegQueryValueExW(hInstance, L"ComponentId", NULL, &dwType, (LPBYTE)pszId, &dwSize) == ERROR_SUCCESS &&
+        dwType == REG_SZ && pszId[0])
+    {
+        bRead = TRUE;
+        if (RegOpenKeyExW(hInstance, L"Ndi", 0, KEY_READ, &hNdi) == ERROR_SUCCESS)
+        {
+            *pbComplete = (RegQueryValueExW(hNdi, L"Service", NULL, NULL, NULL, NULL) == ERROR_SUCCESS);
+            RegCloseKey(hNdi);
+        }
+    }
+    RegCloseKey(hInstance);
+    return bRead;
+}
+
+/*
+ * When one component has several instances in the class, one stays: the first complete one (with Ndi\Service) in
+ * key order, else the first one. The others are removed: what the install of TCP/IPv4 by both the setup and its
+ * network step left. A component with one instance, complete or not, is never touched; neither is an instance whose
+ * id cannot be read, nor any component beyond the first MAX_SEEN_COMPONENTS ids.
+ */
 static
 VOID
 RemoveDuplicateInstances(
     _In_ LPCWSTR pszClassGuid)
 {
-    WCHAR szPath[160], szName[64], szId[128];
-    WCHAR (*Seen)[100];
-    HKEY hClass, hInstance;
-    DWORD dwIndex = 0, dwSize, dwType, cSeen = 0, i;
+    WCHAR szPath[160], szName[64], szId[100];
+    SEEN_COMPONENT *Seen;
+    HKEY hClass;
+    DWORD dwIndex, dwSize, cSeen = 0, i;
+    BOOL bComplete;
 
     if (wcslen(pszClassGuid) > 60)
         return;
@@ -792,37 +838,61 @@ RemoveDuplicateInstances(
         return;
     }
 
-    for (;;)
+    /* The instance that stays, per component */
+    for (dwIndex = 0; ; dwIndex++)
     {
-        BOOL bDuplicate = FALSE;
+        dwSize = ARRAYSIZE(szName);
+        if (RegEnumKeyExW(hClass, dwIndex, szName, &dwSize, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
+            break;
+        if (!ReadInstanceId(hClass, szName, szId, ARRAYSIZE(szId), &bComplete))
+            continue;
+
+        for (i = 0; i < cSeen; i++)
+        {
+            if (!_wcsicmp(Seen[i].szId, szId))
+                break;
+        }
+        if (i == cSeen)
+        {
+            if (cSeen == MAX_SEEN_COMPONENTS)
+                continue;
+            wcscpy(Seen[i].szId, szId);
+            wcscpy(Seen[i].szKeep, szName);
+            Seen[i].bComplete = bComplete;
+            cSeen++;
+        }
+        else if (bComplete && !Seen[i].bComplete)
+        {
+            wcscpy(Seen[i].szKeep, szName);
+            Seen[i].bComplete = TRUE;
+        }
+    }
+
+    /* The other instances of those components */
+    for (dwIndex = 0; ; )
+    {
+        BOOL bRemove = FALSE;
 
         dwSize = ARRAYSIZE(szName);
         if (RegEnumKeyExW(hClass, dwIndex, szName, &dwSize, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
             break;
-
-        if (RegOpenKeyExW(hClass, szName, 0, KEY_READ, &hInstance) == ERROR_SUCCESS)
+        if (ReadInstanceId(hClass, szName, szId, ARRAYSIZE(szId), &bComplete))
         {
-            dwSize = sizeof(szId) - sizeof(WCHAR);
-            ZeroMemory(szId, sizeof(szId));
-            if (RegQueryValueExW(hInstance, L"ComponentId", NULL, &dwType, (LPBYTE)szId, &dwSize) == ERROR_SUCCESS &&
-                dwType == REG_SZ && szId[0] && wcslen(szId) < ARRAYSIZE(Seen[0]))
+            for (i = 0; i < cSeen; i++)
             {
-                for (i = 0; i < cSeen; i++)
+                if (!_wcsicmp(Seen[i].szId, szId))
                 {
-                    if (!_wcsicmp(Seen[i], szId))
-                    {
-                        bDuplicate = TRUE;
-                        break;
-                    }
+                    bRemove = (_wcsicmp(Seen[i].szKeep, szName) != 0);
+                    break;
                 }
-                if (!bDuplicate && cSeen < MAX_SEEN_COMPONENTS)
-                    wcscpy(Seen[cSeen++], szId);
             }
-            RegCloseKey(hInstance);
         }
 
-        if (bDuplicate && RegDeleteTreeW(hClass, szName) == ERROR_SUCCESS)
-            continue;
+        if (bRemove && RegDeleteTreeW(hClass, szName) == ERROR_SUCCESS)
+        {
+            TRACE("removed the duplicate instance %S of %S\n", szName, szId);
+            continue;   /* the next key has this index now */
+        }
         dwIndex++;
     }
 
