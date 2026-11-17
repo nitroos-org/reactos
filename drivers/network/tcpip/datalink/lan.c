@@ -653,25 +653,36 @@ static VOID LanReceivePacket(
     }
 }
 
-/* An IPv4 TCP segment; the packet is a frame, or the data after the frame's
-   media header (LegacyReceive) */
+/* A TCP segment over IPv4, or over IPv6 with no extension header in between; the packet is a frame,
+   or the data after the frame's media header (LegacyReceive). Segments of one connection must reach
+   TCP in the order they arrived: the serial receive queue keeps it, a work item per frame does not
+   (a reordered stream makes the peer see duplicate acknowledgements and retransmit) */
 static BOOLEAN LanIsTcpPacket(
     PLAN_ADAPTER Adapter,
     PNDIS_PACKET Packet,
     BOOLEAN LegacyReceive) {
     UCHAR Header[sizeof(ETH_HEADER) + 10];
     UINT Offset = 0;
+    UINT EType;
 
     if (LegacyReceive) {
-        if (PC(Packet)->PacketType != ETYPE_IPv4 ||
+        EType = PC(Packet)->PacketType;
+        if ((EType != ETYPE_IPv4 && EType != ETYPE_IPv6) ||
             CopyPacketToBuffer((PCHAR)Header, Packet, 0, 10) != 10)
             return FALSE;
     } else {
         if (Adapter->Media != NdisMedium802_3 ||
-            CopyPacketToBuffer((PCHAR)Header, Packet, 0, sizeof(Header)) != sizeof(Header) ||
-            ((PETH_HEADER)Header)->EType != ETYPE_IPv4)
+            CopyPacketToBuffer((PCHAR)Header, Packet, 0, sizeof(Header)) != sizeof(Header))
+            return FALSE;
+        EType = ((PETH_HEADER)Header)->EType;
+        if (EType != ETYPE_IPv4 && EType != ETYPE_IPv6)
             return FALSE;
         Offset = sizeof(ETH_HEADER);
+    }
+
+    if (EType == ETYPE_IPv6) {
+        /* Version 6, next header (byte 6 of the fixed header) TCP */
+        return (Header[Offset] >> 4) == 6 && Header[Offset + 6] == IPPROTO_TCP;
     }
 
     /* Version 4, protocol TCP */
