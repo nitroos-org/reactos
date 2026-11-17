@@ -177,6 +177,39 @@ test_LimitToDirectories(void)
     }
 }
 
+/*
+ * The search handle must not block deleting the directory it enumerates: cleanup helpers (the WiX Burn bootstrapper
+ * behind vcredist, which InstallShield runs as a prerequisite) remove the directory while their enumeration handle
+ * is still open, and otherwise fall back to PendingFileRenameOperations ("reboot required").
+ */
+static void
+test_RemoveWhileEnumerating(void)
+{
+    WCHAR Dir[MAX_PATH], Pattern[MAX_PATH];
+    WIN32_FIND_DATAW Data;
+    HANDLE Find;
+    BOOL Ret;
+
+    StringCbPrintfW(Dir, sizeof(Dir), L"%s\\emptysub", TestDir);
+    ok(CreateDirectoryW(Dir, NULL), "CreateDirectoryW failed, error %lu\n", GetLastError());
+    StringCbPrintfW(Pattern, sizeof(Pattern), L"%s\\*", Dir);
+
+    Find = FindFirstFileW(Pattern, &Data);
+    ok(Find != INVALID_HANDLE_VALUE, "FindFirstFileW failed, error %lu\n", GetLastError());
+    if (Find == INVALID_HANDLE_VALUE)
+    {
+        RemoveDirectoryW(Dir);
+        return;
+    }
+    SetLastError(0xdeadbeef);
+    Ret = RemoveDirectoryW(Dir);
+    ok(Ret, "RemoveDirectoryW with the search handle open failed, error %lu\n", GetLastError());
+    FindClose(Find);
+    if (!Ret)
+        RemoveDirectoryW(Dir);
+    ok(GetFileAttributesW(Dir) == INVALID_FILE_ATTRIBUTES, "the directory still exists after RemoveDirectoryW\n");
+}
+
 START_TEST(FindFirstFileEx)
 {
     WCHAR File[MAX_PATH];
@@ -208,6 +241,7 @@ START_TEST(FindFirstFileEx)
     test_SameEntries();
     test_LimitToDirectories();
     test_Ansi();
+    test_RemoveWhileEnumerating();
 
     StringCbPrintfW(File, sizeof(File), L"%s\\a long file name.txt", TestDir);
     DeleteFileW(File);
