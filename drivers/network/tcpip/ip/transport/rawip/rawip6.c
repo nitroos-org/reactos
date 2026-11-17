@@ -476,7 +476,13 @@ RawIPSendDatagram6(
     if (HeaderIncl && !ip6_addr_isany(&Source))
     {
         if (!netif)
+        {
             netif = Udp6Route(&Source, &Dest);
+            /* A source that is not an address of this machine has no route of its own (lwIP routes a scoped
+               source only to the interface that owns it): route by the destination, as for an unspecified source */
+            if (!netif && !(ip6_addr_islinklocal(&Dest) || ip6_addr_ismulticast(&Dest)))
+                netif = Udp6Route(IP6_ADDR_ANY6, &Dest);
+        }
         if (netif && ip6_addr_islinklocal(&Source))
             ip6_addr_assign_zone(&Source, IP6_UNICAST, netif);
     }
