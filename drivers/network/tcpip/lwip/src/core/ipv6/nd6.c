@@ -2655,11 +2655,22 @@ nd6_adjust_mld_membership(struct netif *netif, s8_t addr_idx, u8_t new_state)
 void
 nd6_redad_netif(struct netif *netif)
 {
+  s8_t i;
+
 #ifdef LWIP_HOOK_ND6_DAD_ATTEMPTS
   netif->redad_count = LWIP_HOOK_ND6_DAD_ATTEMPTS(netif);
 #else
   netif->redad_count = LWIP_IPV6_DUP_DETECT_ATTEMPTS;
 #endif
+  /* An address DAD found in use (before the link went down, or by the probes of an earlier link up) is tried again
+   * from the start: the other host may be gone. It has no connections left to keep. Nobody answers: it is used
+   * again; an answer marks it duplicated again, or gives it a new identifier (LWIP_HOOK_ND6_DAD_FAILED). Without
+   * this it would stay duplicated for good, its lifetimes renewed by every advertisement of its prefix. */
+  for (i = 0; i < LWIP_IPV6_NUM_ADDRESSES; i++) {
+    if (ip6_addr_isduplicated(netif_ip6_addr_state(netif, i))) {
+      netif_ip6_addr_set_state(netif, i, IP6_ADDR_TENTATIVE);
+    }
+  }
 }
 #endif /* LWIP_IPV6_DUP_DETECT_ATTEMPTS */
 
