@@ -48,8 +48,9 @@
 #define ROUTE6_RA_METRIC        256
 #define ROUTE6_RA_METRIC_HIGH   128
 #define ROUTE6_RA_METRIC_LOW    512
-/* Routes of route information options (RFC 4191) kept at most: a router that sends them all the time replaces its
-   own, and the oldest goes first, so an advertisement cannot fill the table the configured routes live in */
+/* Routes of route information options (RFC 4191) kept at most, over all routers and interfaces: when they are all
+   there the router that holds the most gives up its least recently refreshed one (Route6RaVictim), so a router that
+   sends them all the time replaces its own, and an advertisement cannot fill the table the configured routes live in */
 #define ROUTE6_RA_MAX           32
 /* NL_ROUTE_ORIGIN and NL_ROUTE_PROTOCOL values of router advertisement routes, and of the on-link prefix of a
    configured address (a route of the stack, as the host routes are) */
@@ -79,6 +80,8 @@ typedef struct _ROUTE6_ENTRY
     ULONG ValidLifetime;        /* as configured at Created */
     ULONG PreferredLifetime;
     ULONGLONG Created;          /* seconds of interrupt time */
+    ULONGLONG Seq;              /* router advertisement routes: Route6Sequence when made or refreshed */
+    BOOLEAN Unreachable;        /* router advertisement routes: what the ND timer last saw of the router */
 } ROUTE6_ENTRY, *PROUTE6_ENTRY;
 
 /* The answer goes through a pool block that info.c caps at 64 KB: the largest one stays below. Its rows: the
@@ -96,6 +99,7 @@ typedef struct _ROUTE6_MATCH
 {
     BOOLEAN Found;
     BOOLEAN FromRa;
+    BOOLEAN Unreachable;        /* its router failed neighbour unreachability detection (RFC 4191 3.2) */
     UCHAR Length;
     ULONG Metric;
     struct netif *Netif;
@@ -187,7 +191,7 @@ Route6NetifUsable(struct netif *netif)
 static
 VOID
 Route6Consider(PROUTE6_MATCH Best, struct netif *netif, UCHAR Length, ULONG Metric, const ip6_addr_t *NextHop,
-               BOOLEAN FromRa)
+               BOOLEAN FromRa, BOOLEAN Unreachable)
 {
     /* the route metric and the interface metric (set by hand or automatic) are added, as on Windows; a route metric
        near the top of the range (it is not limited) stays the highest instead of wrapping to a low one */
@@ -195,7 +199,16 @@ Route6Consider(PROUTE6_MATCH Best, struct netif *netif, UCHAR Length, ULONG Metr
 
     Metric = (Metric > MAXULONG - IfMetric) ? MAXULONG : Metric + IfMetric;
 
-    if (Best->Found)
+    /* RFC 4191 3.2: a route through a router that is not reachable is only used when no matching route goes through
+       a reachable one, whatever their prefix lengths and preferences (the best route's unreachable router is passed
+       over and the next best consulted) */
+    if (Best->Found && Unreachable != Best->Unreachable)
+    {
+        if (Unreachable)
+            return;
+        /* a reachable route replaces the unreachable best one */
+    }
+    else if (Best->Found)
     {
         if (Length < Best->Length)
             return;
@@ -210,12 +223,34 @@ Route6Consider(PROUTE6_MATCH Best, struct netif *netif, UCHAR Length, ULONG Metr
         }
     }
 
+    Best->Unreachable = Unreachable;
     Best->Found = TRUE;
     Best->FromRa = FromRa;
     Best->Length = Length;
     Best->Metric = Metric;
     Best->Netif = netif;
     Best->NextHop = NextHop;
+}
+
+/* Whether the router at NextHop on netif failed reachability: its neighbour entry is INCOMPLETE or in PROBE and has
+   used up its solicitations (what lwIP keeps for a router that does not answer: the entry of a router is not freed).
+   No entry, or one in any other state: unknown, which counts as reachable (RFC 4191 3.2). Core lock held */
+static
+BOOLEAN
+Route6RouterUnreachable(const struct netif *netif, const ip6_addr_t *NextHop)
+{
+    ULONG i;
+
+    for (i = 0; i < LWIP_ND6_NUM_NEIGHBORS; i++)
+    {
+        const struct nd6_neighbor_cache_entry *Neighbor = &neighbor_cache[i];
+
+        if (Neighbor->state == ND6_NO_ENTRY || Neighbor->netif != netif || !ip6_addr_eq(&Neighbor->next_hop_address, NextHop))
+            continue;
+        return (Neighbor->state == ND6_INCOMPLETE || Neighbor->state == ND6_PROBE) &&
+               Neighbor->counter.probes_sent >= LWIP_ND6_MAX_MULTICAST_SOLICIT;
+    }
+    return FALSE;
 }
 
 /* The on-link prefix the configured address in a slot gives: FALSE for none (the address was formed by the
@@ -282,7 +317,8 @@ Route6Find(const ip6_addr_t *Dest, struct netif *Only, PROUTE6_MATCH Best)
         if (!Route6Covers(&Entry->Prefix, Entry->PrefixLength, Dest))
             continue;
         Route6Consider(Best, Entry->Netif, Entry->PrefixLength, Entry->Metric,
-                       Entry->OnLink ? NULL : &Entry->NextHop, FALSE);
+                       Entry->OnLink ? NULL : &Entry->NextHop, FALSE,
+                       (Entry->Flags & TCP_IPV6_ROUTE_FROM_RA) && Route6RouterUnreachable(Entry->Netif, &Entry->NextHop));
     }
 
     /* the on-link prefixes of configured addresses */
@@ -300,7 +336,7 @@ Route6Find(const ip6_addr_t *Dest, struct netif *Only, PROUTE6_MATCH Best)
             for (Slot = 0; Slot < LWIP_IPV6_NUM_ADDRESSES; Slot++)
             {
                 if (Route6AddressPrefix(netif, Slot, &Prefix, &Length) && Route6Covers(&Prefix, Length, Dest))
-                    Route6Consider(Best, netif, Length, ROUTE6_RA_METRIC, NULL, FALSE);
+                    Route6Consider(Best, netif, Length, ROUTE6_RA_METRIC, NULL, FALSE, FALSE);
             }
         }
     }
@@ -314,7 +350,7 @@ Route6Find(const ip6_addr_t *Dest, struct netif *Only, PROUTE6_MATCH Best)
             continue;
         if (!Route6Covers(&prefix_list[i].prefix, 64, Dest))
             continue;
-        Route6Consider(Best, netif, 64, ROUTE6_RA_METRIC, NULL, TRUE);
+        Route6Consider(Best, netif, 64, ROUTE6_RA_METRIC, NULL, TRUE, FALSE);
     }
 
     for (i = 0; i < LWIP_ND6_NUM_ROUTERS; i++)
@@ -326,7 +362,8 @@ Route6Find(const ip6_addr_t *Dest, struct netif *Only, PROUTE6_MATCH Best)
         if ((Only && Neighbor->netif != Only) || !Route6NetifUsable(Neighbor->netif))
             continue;
         Route6Consider(Best, Neighbor->netif, 0, Route6PreferenceMetric((UCHAR)(default_router_list[i].flags >> 3)),
-                       &Neighbor->next_hop_address, TRUE);
+                       &Neighbor->next_hop_address, TRUE,
+                       Route6RouterUnreachable(Neighbor->netif, &Neighbor->next_hop_address));
     }
 
     return Best->Found;
@@ -420,8 +457,24 @@ LibNd6Timer(void)
     {
         PROUTE6_ENTRY Entry = &Route6Table[i];
 
-        if (!Entry->Netif || Route6Left(Entry->ValidLifetime, Entry->Created, Now))
+        if (!Entry->Netif)
             continue;
+        if (Route6Left(Entry->ValidLifetime, Entry->Created, Now))
+        {
+            /* a router of a route information option that stopped (or started again) answering: the next hops lwIP
+               kept for destinations are found again */
+            if (Entry->Flags & TCP_IPV6_ROUTE_FROM_RA)
+            {
+                BOOLEAN Unreachable = Route6RouterUnreachable(Entry->Netif, &Entry->NextHop);
+
+                if (Unreachable != Entry->Unreachable)
+                {
+                    Entry->Unreachable = Unreachable;
+                    Route6Changed();
+                }
+            }
+            continue;
+        }
         RtlZeroMemory(Entry, sizeof(*Entry));
         Route6Count--;
         Changed = TRUE;
@@ -436,6 +489,55 @@ LibNd6Timer(void)
 
 static PROUTE6_ENTRY Route6Lookup(struct netif *netif, const ip6_addr_t *Prefix, UCHAR Length, BOOLEAN OnLink,
                                   const ip6_addr_t *NextHop);
+
+static ULONGLONG Route6Sequence;
+
+/* The ROUTE6_RA_MAX routes of route information options are all there and one more comes from the router NextHop on
+   netif: the entry that gives way. The router that has the most of them loses its least recently refreshed one (on a
+   tie the sender: a router that sends them all the time replaces its own first and cannot push out the routes of
+   the others); core lock held */
+static
+ULONG
+Route6RaVictim(struct netif *netif, const ip6_addr_t *NextHop)
+{
+    ULONG i, j, BestCount = 0, Best = ROUTE6_MAX, Victim = ROUTE6_MAX;
+
+    for (i = 0; i < ROUTE6_MAX; i++)
+    {
+        PROUTE6_ENTRY Entry = &Route6Table[i];
+        ULONG Count = 0;
+
+        if (!Entry->Netif || !(Entry->Flags & TCP_IPV6_ROUTE_FROM_RA))
+            continue;
+        for (j = 0; j < ROUTE6_MAX; j++)
+        {
+            PROUTE6_ENTRY Other = &Route6Table[j];
+
+            if (Other->Netif == Entry->Netif && (Other->Flags & TCP_IPV6_ROUTE_FROM_RA) &&
+                ip6_addr_eq(&Other->NextHop, &Entry->NextHop))
+                Count++;
+        }
+        if (Count > BestCount ||
+            (Count == BestCount && Entry->Netif == netif && ip6_addr_eq(&Entry->NextHop, NextHop)))
+        {
+            Best = i;
+            BestCount = Count;
+        }
+    }
+    if (Best == ROUTE6_MAX)
+        return ROUTE6_MAX;
+
+    for (i = 0; i < ROUTE6_MAX; i++)
+    {
+        PROUTE6_ENTRY Entry = &Route6Table[i];
+
+        if (Entry->Netif == Route6Table[Best].Netif && (Entry->Flags & TCP_IPV6_ROUTE_FROM_RA) &&
+            ip6_addr_eq(&Entry->NextHop, &Route6Table[Best].NextHop) &&
+            (Victim == ROUTE6_MAX || Entry->Seq < Route6Table[Victim].Seq))
+            Victim = i;
+    }
+    return Victim;
+}
 
 /* LWIP_HOOK_ND6_ROUTE_INFO (core lock held): a route information option (RFC 4191 2.3) of a router advertisement
    that passed lwIP's checks: Prefix (16 bytes, the bits after Length are ignored) is reachable through Router, with
@@ -487,15 +589,11 @@ LibNd6RouteInfo(struct netif *netif, const ip6_addr_t *Router, const u8_t *Prefi
     {
         for (i = 0; i < ROUTE6_MAX; i++)
         {
-            PROUTE6_ENTRY Other = &Route6Table[i];
-
-            if (Other->Netif && (Other->Flags & TCP_IPV6_ROUTE_FROM_RA))
-            {
+            if (Route6Table[i].Netif && (Route6Table[i].Flags & TCP_IPV6_ROUTE_FROM_RA))
                 RaCount++;
-                if (Oldest == ROUTE6_MAX || Other->Created < Route6Table[Oldest].Created)
-                    Oldest = i;
-            }
         }
+        if (RaCount >= ROUTE6_RA_MAX)
+            Oldest = Route6RaVictim(netif, &NextHop);
         if (RaCount >= ROUTE6_RA_MAX && Oldest < ROUTE6_MAX)
         {
             RtlZeroMemory(&Route6Table[Oldest], sizeof(Route6Table[Oldest]));
@@ -516,8 +614,18 @@ LibNd6RouteInfo(struct netif *netif, const ip6_addr_t *Router, const u8_t *Prefi
         Route6Count++;
         Changed = TRUE;
     }
-    else if (Entry->Metric != Metric)
-        Changed = TRUE;
+    else
+    {
+        BOOLEAN Unreachable = Route6RouterUnreachable(netif, &NextHop);
+
+        if (Entry->Metric != Metric)
+            Changed = TRUE;
+        /* the router answers again (the advertisement's link-layer address made it reachable) or stopped: what the
+           ND timer would notice it does not see any more once the entry has the new state, so the next hops lwIP
+           kept are found again here */
+        else if (Unreachable != Entry->Unreachable)
+            Route6Changed();
+    }
 
     Entry->Metric = Metric;
     Entry->Origin = ROUTE6_ORIGIN_RA;
@@ -526,6 +634,8 @@ LibNd6RouteInfo(struct netif *netif, const ip6_addr_t *Router, const u8_t *Prefi
     Entry->ValidLifetime = Lifetime;
     Entry->PreferredLifetime = Lifetime;
     Entry->Created = Route6Seconds();
+    Entry->Seq = ++Route6Sequence;
+    Entry->Unreachable = Route6RouterUnreachable(netif, &NextHop);
 
     if (Changed)
     {

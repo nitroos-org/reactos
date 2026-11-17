@@ -639,6 +639,14 @@ typedef struct _IPCONFIG_ADAPTER_ADDRESSES_W7
     PIP_ADAPTER_DNS_SUFFIX FirstDnsSuffix;
 } IPCONFIG_ADAPTER_ADDRESSES_W7;
 
+/* The member is appended after IP_ADAPTER_ADDRESSES_LH, which only holds while the header leaves it out (it has it
+   inside _LH at NTDDI >= VISTASP1: then _LH ends 4 or 8 bytes later and the member would be read past the adapter).
+   It must start right behind Dhcpv6Iaid, not a pointer later. */
+C_ASSERT(FIELD_OFFSET(IPCONFIG_ADAPTER_ADDRESSES_W7, FirstDnsSuffix) >=
+         FIELD_OFFSET(IP_ADAPTER_ADDRESSES_LH, Dhcpv6Iaid) + sizeof(ULONG));
+C_ASSERT(FIELD_OFFSET(IPCONFIG_ADAPTER_ADDRESSES_W7, FirstDnsSuffix) <
+         FIELD_OFFSET(IP_ADAPTER_ADDRESSES_LH, Dhcpv6Iaid) + sizeof(ULONG) + sizeof(PVOID));
+
 static
 VOID
 ShowConnectionSearchList(

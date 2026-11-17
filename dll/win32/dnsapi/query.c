@@ -146,6 +146,14 @@ typedef struct _DNSAPI_ADAPTER_ADDRESSES_W7
     PIP_ADAPTER_DNS_SUFFIX FirstDnsSuffix;
 } DNSAPI_ADAPTER_ADDRESSES_W7;
 
+/* This struct appends FirstDnsSuffix after IP_ADAPTER_ADDRESSES_LH, which only holds when the header leaves it out
+   (it has it inside _LH at NTDDI >= VISTASP1: then _LH ends 4 or 8 bytes later and the member would be read past the
+   adapter). Where FirstDnsSuffix starts must be right behind Dhcpv6Iaid, not a pointer later. */
+C_ASSERT(FIELD_OFFSET(DNSAPI_ADAPTER_ADDRESSES_W7, FirstDnsSuffix) >=
+         FIELD_OFFSET(IP_ADAPTER_ADDRESSES_LH, Dhcpv6Iaid) + sizeof(ULONG));
+C_ASSERT(FIELD_OFFSET(DNSAPI_ADAPTER_ADDRESSES_W7, FirstDnsSuffix) <
+         FIELD_OFFSET(IP_ADAPTER_ADDRESSES_LH, Dhcpv6Iaid) + sizeof(ULONG) + sizeof(PVOID));
+
 static
 BOOL
 DomainInList(PCSTR List, PCSTR Domain)
