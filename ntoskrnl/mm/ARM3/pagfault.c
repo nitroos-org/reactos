@@ -51,6 +51,21 @@ BOOLEAN UserPdeFault = FALSE;
  */
 #define MI_USER_STACK_END_PAGES 3
 
+/*
+ * A page table page that a user fault creates counts as one more page fault of the process
+ * (PageFaultCount), as Windows reports it: one extra fault per new page table when a region is
+ * touched for the first time. The fault itself is counted by MmAccessFault.
+ */
+FORCEINLINE
+VOID
+MiCountPageTableFault(
+    _In_ PEPROCESS Process,
+    _In_ PVOID Address)
+{
+    if (Address <= MM_HIGHEST_USER_ADDRESS)
+        InterlockedIncrement((PLONG)&Process->Vm.PageFaultCount);
+}
+
 static
 NTSTATUS
 NTAPI
@@ -2847,6 +2862,7 @@ UserFault:
 
         /* We should come back with a valid PXE */
         ASSERT(PointerPxe->u.Hard.Valid == 1);
+        MiCountPageTableFault(CurrentProcess, Address);
     }
 #endif
 
@@ -2886,6 +2902,7 @@ UserFault:
         /* We should come back with a valid PPE */
         ASSERT(PointerPpe->u.Hard.Valid == 1);
         MiIncrementPageTableReferences(PointerPde);
+        MiCountPageTableFault(CurrentProcess, Address);
     }
 #endif
 
@@ -2929,6 +2946,7 @@ UserFault:
         {
             goto ExitUser;
         }
+        MiCountPageTableFault(CurrentProcess, Address);
 
 #if _MI_PAGING_LEVELS >= 3
         MiIncrementPageTableReferences(PointerPte);

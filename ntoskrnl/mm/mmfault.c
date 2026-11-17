@@ -20,6 +20,24 @@ extern MM_AVL_TABLE MiRosKernelVadRoot;
 
 /* PRIVATE FUNCTIONS **********************************************************/
 
+/*
+ * The page fault count of a process (PageFaultCount of GetProcessMemoryInfo, VM_COUNTERS and
+ * SYSTEM_PROCESS_INFORMATION): one per fault on an address of the current user address space.
+ * A guard page fault that grew a user stack is not counted: the access is retried and the
+ * demand zero fault that maps the page is the one that counts, so stack growth counts one fault
+ * per page, as Windows reports it. The page table pages a fault creates are counted where they
+ * are created (MmArmAccessFault).
+ */
+FORCEINLINE
+VOID
+MiCountProcessPageFault(
+    _In_ PVOID Address,
+    _In_ NTSTATUS Status)
+{
+    if ((Address <= MM_HIGHEST_USER_ADDRESS) && (Status != STATUS_PAGE_FAULT_GUARD_PAGE))
+        InterlockedIncrement((PLONG)&PsGetCurrentProcess()->Vm.PageFaultCount);
+}
+
 NTSTATUS
 NTAPI
 MmpAccessFault(KPROCESSOR_MODE Mode,
@@ -506,6 +524,7 @@ Again:
         MI_IS_NOT_PRESENT_FAULT(FaultCode))
     {
         MiPagerEndOfFault();
+        MiCountProcessPageFault(Address, STATUS_ACCESS_VIOLATION);
         return STATUS_ACCESS_VIOLATION;
     }
 
@@ -544,6 +563,7 @@ Again:
     }
 
     MiPagerEndOfFault();
+    MiCountProcessPageFault(Address, Status);
     return Status;
 
 Arm3Done:
@@ -556,6 +576,7 @@ Arm3Done:
         if (MiRetryOutOfMemoryFault(&NoProgressSpins, &WaitStart, Address))
             goto Again;
         MiPagerEndOfFault();
+        MiCountProcessPageFault(Address, Status);
         return Status;
     }
 
@@ -564,6 +585,7 @@ Arm3Done:
         goto Again;
 
     MiPagerEndOfFault();
+    MiCountProcessPageFault(Address, Status);
     return Status;
 }
 
