@@ -87,7 +87,7 @@ Formats are read from the upstream originals (`--orig`, default the branch's ups
 | `base/system/logonui/res/123.bmp` | 137x86, 24 bpp | Welcome screen |
 | `base/shell/explorer/res/bmp/158.bmp` | 21x233, 24 bpp | classic Start menu banner |
 | `base/shell/explorer/res/bmp/143.bmp` | 25x20, 32 bpp with alpha | Start button |
-| `base/shell/explorer/res/bmp/146.bmp` to `153.bmp` | 336x35, 24 bpp (Start button and the "Nitro Explorer" window button only) | taskbar properties, Taskbar page |
+| `base/shell/explorer/res/bmp/146.bmp` to `153.bmp` | 336x35, 24 bpp (Start button and the "NitroOS Explorer" window button only) | taskbar properties, Taskbar page |
 | `base/shell/explorer/res/bmp/170.bmp`, `171.bmp` | 300x180, 8 bpp (Start button and the classic menu banner only) | taskbar properties, Start Menu page |
 | `dll/win32/syssetup/resources/thm*.bmp` | 180x163, 24 bpp (Start button area only) | setup theme page previews |
 | `media/themes/*/.../*STARTBUTTON.bmp` (Lautus also `.png`) | theme sizes, 24 or 32 bpp, three states | themed Start buttons |
@@ -111,18 +111,13 @@ Run on a machine with `rsvg-convert`, Pillow, numpy and fontTools:
 Resource files do not track the bitmaps they embed: after changing artwork, build from a fresh build directory or
 delete the affected `.res` objects.
 
-## Applying the layer to a new main (brand/nitro)
+## The product name in the source
 
-The branding is a SEPARATE layer: `brand/nitro` is main plus the NitroOS branding commits, and it is never pushed
-to the fork's `main` (no upstreaming). To brand a newer main, merge main INTO the brand branch (a merge, not a
-rebase), re-brand what conflicts, check for new display literals, build. The exact recipe, with where the canonical
-bundle and its backups live, is `process/BRAND-APPLY.md` in the harness repo; the short form:
+The rename is display only: version APIs, the registry ProductName, file, service and registry data names, paths
+and URLs used by code keep their values. After merging new upstream code, list the display lines it added that
+still spell the old name:
 
-    git fetch <bundle> 'refs/*:refs/bundle/*'               # branch brand/nitro-vN
-    git checkout -b brand/nitro-vN+1 refs/bundle/heads/brand/nitro-vN
-    git merge --no-ff <main-sha>                             # conflicts: keep main's functional hunks, re-apply the brand macro/name
-    python3 media/branding/rename-product.py Nitro NitroOS --check       # must print 0 occurrence(s)
-    python3 media/branding/rename-product.py --new-since <old-brand-head> <merge-commit>   # new "ReactOS"/"Nitro" lines main brought
+    python3 media/branding/rename-product.py --new-since <before-merge> <merge-commit>
 
 Display strings that C/C++ can build from a macro use `BRAND_PRODUCT_NAME` / `BRAND_PRODUCT_NAME_W` (buildno.h,
 from `NITRO_NAME` in `sdk/include/reactos/version.cmake`). Text that cannot (translated .rc tables, .inf/.ini/.mc,
@@ -137,6 +132,6 @@ when HEAD moves (`.git/HEAD`, its ref and the HEAD reflog are CMake configure de
 shows the real head; `-DNITRO_SHA=<sha>` pins it.
 
 .res gotcha: resource files do not track the bitmaps/icons they embed. After any artwork change, or when moving an
-existing build tree to a brand head that changed artwork, delete the affected `*.res` / `*.rc.obj` files (for
+existing build tree to a commit that changed artwork, delete the affected `*.res` / `*.rc.obj` files (for
 example `ntoskrnl/ntoskrnl.rc.res` for the boot logo) or build in a fresh directory; otherwise the old art stays in
 the binary.

@@ -13,7 +13,7 @@ assembly, CMake shortcut names) still spells the name out.  After changing NITRO
 
 Only whole-word occurrences are rewritten.  Not touched: identifiers/ProgIds (OLD.xxx, OLD\\path), the
 "ReactOS-OLD" project tags, the font family "OLD Caption Icons", third-party data (pci_vendors.ids), the
-PowerShell modules, featmgr fixtures/catalog, harness docs.
+PowerShell modules, featmgr fixtures/catalog.
 """
 import os, re, subprocess, sys
 
