@@ -18,6 +18,7 @@ typedef struct
     INetCfgComponent  *pNCfgComp;
     UINT NumPropDialogOpen;
     BOOL bChecked;      /* the state of the check box when the list was filled: a change is a (un)binding on Apply */
+    BOOL bLocked;       /* the box shows the stack's state and cannot be changed (TCP/IPv4, TCP/IPv6) */
 } NET_ITEM, *PNET_ITEM;
 
 class CNetConnectionPropertyUi:

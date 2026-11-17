@@ -17,6 +17,7 @@ list(APPEND SOURCE
     setup.cpp)
 
 list(APPEND PCH_SKIP_SOURCE
+    stackstate.c
     ${CMAKE_CURRENT_BINARY_DIR}/netshell_stubs.c)
 
 file(GLOB netshell_rc_deps res/*.*)

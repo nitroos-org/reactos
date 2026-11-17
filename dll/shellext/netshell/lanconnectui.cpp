@@ -73,6 +73,9 @@ CNetConnectionPropertyUi::GetINetCfgComponent(INetCfg *pNCfg, INetCfgComponent *
     return FALSE;
 }
 
+/* stackstate.c: what the stack does on the connection (TCP/IPv4 bound, IPv6 on it); S_FALSE when it has no interface */
+extern "C" HRESULT GetStackProtocols(const GUID *pAdapter, BOOL *pbIpv4, BOOL *pbIpv6);
+
 VOID
 CNetConnectionPropertyUi::EnumComponents(HWND hDlgCtrl, INetCfg *pNCfg, const GUID *CompGuid, UINT Type, PSP_CLASSIMAGELIST_DATA pCILD)
 {
@@ -118,6 +121,29 @@ CNetConnectionPropertyUi::EnumComponents(HWND hDlgCtrl, INetCfg *pNCfg, const GU
             }
         }
 
+        /*
+         * TCP/IPv4 and TCP/IPv6 are one driver here: it is bound to an adapter or not (Tcpip\Linkage, which NDIS
+         * reads when the driver starts), and IPv6 is on all adapters or none of them. Taking one of the two off one
+         * connection, as the check box does on Windows, would either do nothing (TCP/IPv6) or take both away at
+         * the next start (TCP/IPv4). So their boxes show what the stack does on the connection and cannot be changed
+         */
+        BOOL bLocked = FALSE;
+        LPWSTR pszId = NULL;
+        if (SUCCEEDED(pNCfgComp->GetId(&pszId)) && pszId)
+        {
+            BOOL bIpv6 = !_wcsicmp(pszId, L"MS_TCPIP6");
+
+            if (bIpv6 || !_wcsicmp(pszId, L"MS_TCPIP"))
+            {
+                BOOL bStackIpv4, bStackIpv6;
+
+                bLocked = TRUE;
+                if (m_pProperties && GetStackProtocols(&m_pProperties->guidId, &bStackIpv4, &bStackIpv6) == S_OK)
+                    bChecked = bIpv6 ? bStackIpv6 : bStackIpv4;
+            }
+            CoTaskMemFree(pszId);
+        }
+
         pItem = static_cast<NET_ITEM*>(CoTaskMemAlloc(sizeof(NET_ITEM)));
         if (!pItem)
             continue;
@@ -128,11 +154,13 @@ CNetConnectionPropertyUi::EnumComponents(HWND hDlgCtrl, INetCfg *pNCfg, const GU
         pItem->pNCfgComp = pNCfgComp.Detach();
         pItem->NumPropDialogOpen = 0;
         pItem->bChecked = bChecked;
+        pItem->bLocked = FALSE;     /* the box is set below */
 
         INT image;
         if (!pCILD->ImageList || !SetupDiGetClassImageIndex(pCILD, CompGuid, &image))
             image = I_IMAGENONE;
         AddItemToListView(hDlgCtrl, pItem, pDisplayName, bChecked, image);
+        pItem->bLocked = bLocked;
         CoTaskMemFree(pDisplayName);
     }
 }
@@ -289,7 +317,7 @@ CNetConnectionPropertyUi::ApplyBindingChanges(HWND hwndDlg)
             continue;
 
         pItem = (PNET_ITEM)lvItem.lParam;
-        if (!pItem || !pItem->pNCfgComp)
+        if (!pItem || !pItem->pNCfgComp || pItem->bLocked)
             continue;
 
         bChecked = ListView_GetCheckState(hDlgCtrl, Index) ? TRUE : FALSE;
@@ -411,6 +439,15 @@ CNetConnectionPropertyUi::LANPropertiesUIDlg(
                 pItem = (PNET_ITEM)li.lParam;
                 if (!pItem)
                     return TRUE;
+
+                /* a box that shows the stack's state (TCP/IPv4, TCP/IPv6) keeps it */
+                if (pItem->bLocked && (lppl->uChanged & LVIF_STATE) &&
+                    ((lppl->uOldState ^ lppl->uNewState) & LVIS_STATEIMAGEMASK))
+                {
+                    MessageBeep(MB_ICONWARNING);
+                    SetWindowLongPtr(hwndDlg, DWLP_MSGRESULT, TRUE);
+                    return TRUE;
+                }
 
                 if (!(lppl->uOldState & LVIS_FOCUSED) && (lppl->uNewState & LVIS_FOCUSED))
                 {
