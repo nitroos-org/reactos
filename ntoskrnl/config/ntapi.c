@@ -330,16 +330,6 @@ NtCreateKey(OUT PHANDLE KeyHandle,
         /* Prepare to probe parameters */
         _SEH2_TRY
         {
-            /* Check if we have a class */
-            if (Class)
-            {
-                /* Probe it */
-                ParseContext.Class = ProbeForReadUnicodeString(Class);
-                ProbeForRead(ParseContext.Class.Buffer,
-                             ParseContext.Class.Length,
-                             sizeof(WCHAR));
-            }
-
             /* Probe the key handle */
             ProbeForWriteHandle(KeyHandle);
             *KeyHandle = NULL;
@@ -358,6 +348,18 @@ NtCreateKey(OUT PHANDLE KeyHandle,
             _SEH2_YIELD(return _SEH2_GetExceptionCode());
         }
         _SEH2_END;
+
+        /*
+         * Capture the class: it is copied into the hive while the key is
+         * created, long after the probe, and must not be read from the
+         * caller's memory then.
+         */
+        if (Class)
+        {
+            Status = ProbeAndCaptureUnicodeString(&ParseContext.Class, PreviousMode, Class);
+            if (!NT_SUCCESS(Status))
+                return Status;
+        }
     }
     else
     {
@@ -377,6 +379,10 @@ NtCreateKey(OUT PHANDLE KeyHandle,
                                 DesiredAccess,
                                 &ParseContext,
                                 &Handle);
+
+    /* Free the captured class */
+    if (Class && PreviousMode != KernelMode)
+        ReleaseCapturedUnicodeString(&ParseContext.Class, PreviousMode);
 
     _SEH2_TRY
     {
@@ -2637,39 +2643,32 @@ NtUnloadKey2(IN POBJECT_ATTRIBUTES TargetKey,
         return STATUS_PRIVILEGE_NOT_HELD;
     }
 
-    /* Check for user-mode caller */
+    /* The attributes are required */
     if (PreviousMode != KernelMode)
     {
-        /* Prepare to probe parameters */
         _SEH2_TRY
         {
-            /* Probe object attributes */
-            ProbeForRead(TargetKey,
-                         sizeof(OBJECT_ATTRIBUTES),
-                         sizeof(ULONG));
-
-            CapturedTargetKey = *TargetKey;
-
-            /* Probe the string */
-            ObjectName = ProbeForReadUnicodeString(CapturedTargetKey.ObjectName);
-            ProbeForRead(ObjectName.Buffer,
-                         ObjectName.Length,
-                         sizeof(WCHAR));
-
-            CapturedTargetKey.ObjectName = &ObjectName;
+            ProbeForRead(TargetKey, sizeof(OBJECT_ATTRIBUTES), sizeof(ULONG));
         }
         _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
         {
-            /* Return the exception code */
             _SEH2_YIELD(return _SEH2_GetExceptionCode());
         }
         _SEH2_END;
     }
-    else
-    {
-        /* Save the target attributes directly */
-        CapturedTargetKey = *TargetKey;
-    }
+
+    /*
+     * Capture the attributes, the name and the security descriptor once: the
+     * caller's buffers are never read again after this point, so another
+     * thread of the caller cannot change or unmap them under the kernel.
+     */
+    Status = ProbeAndCaptureObjectAttributes(&CapturedTargetKey,
+                                             &ObjectName,
+                                             PreviousMode,
+                                             TargetKey,
+                                             TRUE);
+    if (!NT_SUCCESS(Status))
+        return Status;
 
     /* Make sure the target key root directory handle is a kernel handle */
     Status = CmpConvertHandleToKernelHandle(CapturedTargetKey.RootDirectory,
@@ -2678,7 +2677,10 @@ NtUnloadKey2(IN POBJECT_ATTRIBUTES TargetKey,
                                             PreviousMode,
                                             &KmTargetKeyRootDir);
     if (!NT_SUCCESS(Status))
+    {
+        ReleaseCapturedObjectAttributes(&CapturedTargetKey, PreviousMode);
         return Status;
+    }
     CapturedTargetKey.RootDirectory = KmTargetKeyRootDir;
     CapturedTargetKey.Attributes |= OBJ_KERNEL_HANDLE;
 
@@ -2712,6 +2714,9 @@ NtUnloadKey2(IN POBJECT_ATTRIBUTES TargetKey,
     /* Close the local kernel handle */
     if (KmTargetKeyRootDir)
         ObCloseHandle(KmTargetKeyRootDir, KernelMode);
+
+    /* The captured attributes are not needed any more */
+    ReleaseCapturedObjectAttributes(&CapturedTargetKey, PreviousMode);
 
     /* Return if a failure was encountered */
     if (!NT_SUCCESS(Status))
