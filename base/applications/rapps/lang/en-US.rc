@@ -184,7 +184,7 @@ END
 
 STRINGTABLE
 BEGIN
-    IDS_APPWIZ_FEATURES "NitroOS Features"
+    IDS_APPWIZ_FEATURES "Turn Windows features on or off"
 END
 
 STRINGTABLE
