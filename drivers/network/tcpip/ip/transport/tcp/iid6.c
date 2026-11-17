@@ -439,6 +439,16 @@ LibNd6DadFailed(struct netif *netif, s8_t Index)
     if (TCP6TemporaryDadFailed(netif, Index, &Result))
         return Result;
 
+    /* An established link-local address found in use (the probes after the link came up, or an advertisement) is
+       a duplicate on its own: with random identifiers the other addresses are not formed from it, so they keep their
+       state and their connections. lwIP would mark every autoconfigured address duplicated with it, which is right
+       only for identifiers taken from the hardware address. */
+    if (Index == 0 && Iid6Applies(netif) && !ip6_addr_istentative(netif_ip6_addr_state(netif, Index)))
+    {
+        netif_ip6_addr_set_state(netif, 0, IP6_ADDR_DUPLICATED);
+        return 1;
+    }
+
     if (!Iid6Applies(netif) || !ip6_addr_istentative(netif_ip6_addr_state(netif, Index)))
         return 0;
     /* a configured address (addr6.c) stays what it is: duplicated */
