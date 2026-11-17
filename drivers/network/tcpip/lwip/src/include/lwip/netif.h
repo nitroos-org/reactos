@@ -369,6 +369,8 @@ struct netif {
   /** NitroOS: the duplicate address detection probes (RFC 4862 section 5.4) that remain to be sent, one per ND timer
    *  tick, for the addresses in use after the link came up again (nd6_redad_netif). */
   u8_t redad_count;
+  /** NitroOS: 1 when the last re-check probe went out on the previous tick: the addresses in use are announced. */
+  u8_t redad_na;
 #endif /* LWIP_IPV6 && LWIP_IPV6_DUP_DETECT_ATTEMPTS */
 #if MIB2_STATS
   /** link type (from "snmp_ifType" enum from snmp_mib2.h) */

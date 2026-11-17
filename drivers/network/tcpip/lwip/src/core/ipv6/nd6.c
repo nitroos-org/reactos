@@ -1274,6 +1274,19 @@ nd6_tmr(void)
           }
 #endif /* LWIP_IPV6_ADDRESS_LIFETIMES */
           netif_ip6_addr_set_state(netif, i, addr_state);
+          /* NitroOS: DAD found nobody: tell the neighbours about the address (RFC 4861 section 7.2.6: an unsolicited
+           * Neighbor Advertisement, Override set, to all nodes; Windows sends one, 1 s after its probe). Not for an
+           * interface that sends no probes (DadTransmits 0), and not for one without a link-layer address (the
+           * loopback interface): its own advertisement would come back to it and mark the address duplicated. */
+          if (addr_state == IP6_ADDR_PREFERRED && netif_is_up(netif) && netif_is_link_up(netif) &&
+              netif->hwaddr_len != 0 &&
+#ifdef LWIP_HOOK_ND6_DAD_ATTEMPTS
+              LWIP_HOOK_ND6_DAD_ATTEMPTS(netif) > 0) {
+#else
+              LWIP_IPV6_DUP_DETECT_ATTEMPTS > 0) {
+#endif
+            nd6_send_na(netif, netif_ip6_addr(netif, i), ND6_FLAG_OVERRIDE | ND6_SEND_FLAG_ALLNODES_DEST);
+          }
         } else if (netif_is_up(netif) && netif_is_link_up(netif)) {
           /* tentative: set next state by increasing by one */
           netif_ip6_addr_set_state(netif, i, addr_state + 1);
@@ -1289,15 +1302,31 @@ nd6_tmr(void)
     /* NitroOS: the link came up again (nd6_redad_netif): probe the addresses in use once more, one probe per tick,
      * as many as the interface's DAD transmits. They keep their state (and their connections): an answer marks the
      * address duplicated like any other, and nobody answers when nobody else has the address. */
+    if (netif->redad_na) {
+      /* the last probe of the re-check went out a tick ago and nobody answered: announce the addresses in use */
+      netif->redad_na = 0;
+      if (netif_is_up(netif) && netif_is_link_up(netif)) {
+        for (i = 0; i < LWIP_IPV6_NUM_ADDRESSES; ++i) {
+          if (ip6_addr_ispreferred(netif_ip6_addr_state(netif, i))) {
+            nd6_send_na(netif, netif_ip6_addr(netif, i), ND6_FLAG_OVERRIDE | ND6_SEND_FLAG_ALLNODES_DEST);
+          }
+        }
+      }
+    }
     if (netif->redad_count > 0) {
       netif->redad_count--;
       if (netif_is_up(netif) && netif_is_link_up(netif)) {
+        u8_t probed = 0;
         for (i = 0; i < LWIP_IPV6_NUM_ADDRESSES; ++i) {
           u8_t state = netif_ip6_addr_state(netif, i);
           if (ip6_addr_ispreferred(state) || ip6_addr_isdeprecated(state)) {
             nd6_send_ns(netif, netif_ip6_addr(netif, i),
               ND6_SEND_FLAG_MULTICAST_DEST | ND6_SEND_FLAG_ANY_SRC);
+            probed = 1;
           }
+        }
+        if (netif->redad_count == 0 && probed && netif->hwaddr_len != 0) {
+          netif->redad_na = 1; /* (the loopback interface announces nothing: see above) */
         }
       }
     }
