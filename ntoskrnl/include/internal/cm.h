@@ -1622,6 +1622,23 @@ CmpDeepCopyKey(
 
 NTSTATUS
 NTAPI
+CmRestoreKey(
+    IN PCM_KEY_CONTROL_BLOCK Kcb,
+    IN HANDLE KmKeyHandle,
+    IN HANDLE KmFile,
+    IN ULONG Flags
+);
+
+NTSTATUS
+NTAPI
+CmReplaceKey(
+    IN PCM_KEY_CONTROL_BLOCK Kcb,
+    IN HANDLE KmNewFile,
+    IN PCUNICODE_STRING BackupName
+);
+
+NTSTATUS
+NTAPI
 CmSaveKey(
     IN PCM_KEY_CONTROL_BLOCK Kcb,
     IN HANDLE FileHandle,

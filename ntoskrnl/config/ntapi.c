@@ -2235,8 +2235,81 @@ NtReplaceKey(IN POBJECT_ATTRIBUTES ObjectAttributes,
              IN HANDLE Key,
              IN POBJECT_ATTRIBUTES ReplacedObjectAttributes)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    NTSTATUS Status;
+    KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
+    OBJECT_ATTRIBUTES CapturedNew, CapturedOld;
+    UNICODE_STRING NewName, OldName;
+    PCM_KEY_BODY KeyBody = NULL;
+    HANDLE NewFile = NULL;
+    IO_STATUS_BLOCK IoStatusBlock;
+    BOOLEAN CapturedNewOk = FALSE, CapturedOldOk = FALSE;
+
+    PAGED_CODE();
+
+    /* Validate privilege */
+    if (!SeSinglePrivilegeCheck(SeRestorePrivilege, PreviousMode))
+        return STATUS_PRIVILEGE_NOT_HELD;
+
+    KeEnterCriticalRegion();
+
+    if (PreviousMode != KernelMode)
+    {
+        _SEH2_TRY
+        {
+            ProbeForRead(ObjectAttributes, sizeof(OBJECT_ATTRIBUTES), sizeof(ULONG));
+            ProbeForRead(ReplacedObjectAttributes, sizeof(OBJECT_ATTRIBUTES), sizeof(ULONG));
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = _SEH2_GetExceptionCode();
+            _SEH2_YIELD(goto Quit);
+        }
+        _SEH2_END;
+    }
+
+    Status = ProbeAndCaptureObjectAttributes(&CapturedNew, &NewName, PreviousMode, ObjectAttributes, FALSE);
+    if (!NT_SUCCESS(Status))
+        goto Quit;
+    CapturedNewOk = TRUE;
+    Status = ProbeAndCaptureObjectAttributes(&CapturedOld, &OldName, PreviousMode, ReplacedObjectAttributes, FALSE);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+    CapturedOldOk = TRUE;
+
+    /* Both files are named by absolute paths */
+    if (CapturedNew.RootDirectory || CapturedOld.RootDirectory ||
+        !CapturedOld.ObjectName || !CapturedOld.ObjectName->Length)
+    {
+        Status = STATUS_INVALID_PARAMETER;
+        goto Cleanup;
+    }
+
+    Status = ObReferenceObjectByHandle(Key, 0, CmpKeyObjectType, PreviousMode, (PVOID*)&KeyBody, NULL);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    /* The new file: read (to check it), renamed (DELETE), nobody may write it meanwhile */
+    CapturedNew.Attributes |= OBJ_KERNEL_HANDLE;
+    Status = ZwOpenFile(&NewFile,
+                        FILE_READ_DATA | DELETE | SYNCHRONIZE,
+                        &CapturedNew,
+                        &IoStatusBlock,
+                        FILE_SHARE_READ,
+                        FILE_SYNCHRONOUS_IO_NONALERT);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    Status = CmReplaceKey(KeyBody->KeyControlBlock, NewFile, CapturedOld.ObjectName);
+
+Cleanup:
+    if (NewFile) ObCloseHandle(NewFile, KernelMode);
+    if (KeyBody) ObDereferenceObject(KeyBody);
+    if (CapturedOldOk) ReleaseCapturedObjectAttributes(&CapturedOld, PreviousMode);
+    if (CapturedNewOk) ReleaseCapturedObjectAttributes(&CapturedNew, PreviousMode);
+
+Quit:
+    KeLeaveCriticalRegion();
+    return Status;
 }
 
 NTSTATUS
@@ -2245,8 +2318,75 @@ NtRestoreKey(IN HANDLE KeyHandle,
              IN HANDLE FileHandle,
              IN ULONG RestoreFlags)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    NTSTATUS Status;
+    KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
+    HANDLE KmFile = NULL, KmKey = NULL;
+    PCM_KEY_BODY KeyBody = NULL;
+    PCM_KEY_CONTROL_BLOCK Kcb;
+
+    PAGED_CODE();
+
+    /* Validate privilege */
+    if (!SeSinglePrivilegeCheck(SeRestorePrivilege, PreviousMode))
+        return STATUS_PRIVILEGE_NOT_HELD;
+
+    /* REG_REFRESH_HIVE is not a restore flag */
+    if (RestoreFlags & REG_REFRESH_HIVE)
+        return STATUS_INVALID_PARAMETER;
+
+    /* The file is read, it must allow that. A NULL handle is not a file. */
+    if (!FileHandle)
+        return STATUS_INVALID_HANDLE;
+    Status = CmpConvertHandleToKernelHandle(FileHandle, IoFileObjectType, FILE_READ_DATA, PreviousMode, &KmFile);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    /* The key: no access is asked of the handle (the privilege is what counts) */
+    if (!KeyHandle)
+    {
+        Status = STATUS_INVALID_HANDLE;
+        goto Quit;
+    }
+    Status = ObReferenceObjectByHandle(KeyHandle, 0, CmpKeyObjectType, PreviousMode, (PVOID*)&KeyBody, NULL);
+    if (!NT_SUCCESS(Status))
+        goto Quit;
+    Kcb = KeyBody->KeyControlBlock;
+
+    if (RestoreFlags & REG_WHOLE_HIVE_VOLATILE)
+    {
+        /* Only \REGISTRY\MACHINE and \REGISTRY\USER can hold a volatile hive */
+        static const UNICODE_STRING Machine = RTL_CONSTANT_STRING(L"\\REGISTRY\\MACHINE");
+        static const UNICODE_STRING User = RTL_CONSTANT_STRING(L"\\REGISTRY\\USER");
+        PUNICODE_STRING Path;
+        BOOLEAN Ok = FALSE;
+
+        CmpLockRegistry();
+        Path = (!Kcb->Delete && (Kcb->KeyHive == &CmiVolatileHive->Hive)) ? CmpConstructName(Kcb) : NULL;
+        CmpUnlockRegistry();
+        if (Path)
+        {
+            Ok = RtlEqualUnicodeString(Path, &Machine, TRUE) || RtlEqualUnicodeString(Path, &User, TRUE);
+            ExFreePoolWithTag(Path, TAG_CM);
+        }
+        if (!Ok)
+        {
+            Status = STATUS_INVALID_PARAMETER;
+            goto Quit;
+        }
+
+        /* The link is made through a handle of the key that nothing is asked of */
+        Status = CmpConvertHandleToKernelHandle(KeyHandle, CmpKeyObjectType, 0, PreviousMode, &KmKey);
+        if (!NT_SUCCESS(Status))
+            goto Quit;
+    }
+
+    Status = CmRestoreKey(Kcb, KmKey, KmFile, RestoreFlags);
+
+Quit:
+    if (KeyBody) ObDereferenceObject(KeyBody);
+    if (KmKey) ObCloseHandle(KmKey, KernelMode);
+    if (KmFile) ObCloseHandle(KmFile, KernelMode);
+    return Status;
 }
 
 NTSTATUS

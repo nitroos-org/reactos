@@ -172,8 +172,8 @@ START_TEST(RegHiveFiles)
         TestNtSideServices(File);
     }
 
-    /* NtRestoreKey and NtReplaceKey are not implemented by the kernel here. What matters is that the call
-     * reaches it, whatever the process type: the status must not be the one of a missing service. */
+    /* NtRestoreKey and NtReplaceKey must reach the kernel whatever the process type: the status must not be
+     * the one of a missing service. The saved copy of the key restores onto the key itself. */
     {
         NTSTATUS Status;
         HANDLE FileHandle = CreateFileW(File2, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
@@ -183,6 +183,7 @@ START_TEST(RegHiveFiles)
         {
             Status = NtRestoreKey(Key, FileHandle, REG_FORCE_RESTORE);
             ok(Status != STATUS_INVALID_SYSTEM_SERVICE, "NtRestoreKey is not thunked: 0x%lx\n", Status);
+            ok(Status == STATUS_SUCCESS, "NtRestoreKey returned 0x%lx\n", Status);
             CloseHandle(FileHandle);
         }
         Status = NtReplaceKey(NULL, Key, NULL);

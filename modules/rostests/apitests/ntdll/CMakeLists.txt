@@ -168,6 +168,7 @@ list(APPEND SOURCE
     NtQueryVolumeInformationFile.c
     NtRaiseHardErrorMode.c
     NtReadFile.c
+    NtRestoreKey.c
     NtSaveKey.c
     NtSaveMergedKeys.c
     NtSetDefaultLocale.c
