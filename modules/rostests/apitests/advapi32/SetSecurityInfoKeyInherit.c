@@ -88,6 +88,31 @@ static BOOL AllInherited(const KEY_DACL *Dacl)
     return Dacl->Count != 0;
 }
 
+/*
+ * The number of ACEs a key passes on to a new subkey when every ACE of Dacl is inheritable: Windows (10 and Server 2022,
+ * measured) leaves out an ACE that an earlier one with the same type, mask, SID and flags (INHERITED_ACE apart) repeats,
+ * wherever the repeat comes from (a repeat in the DACL, or an explicit ACE equal to an inherited one).
+ */
+static ULONG DistinctAces(const KEY_DACL *Dacl)
+{
+    ULONG i, j, Count = 0;
+
+    for (i = 0; i < Dacl->Count; i++)
+    {
+        for (j = 0; j < i; j++)
+        {
+            if (Dacl->Aces[j].Type == Dacl->Aces[i].Type &&
+                Dacl->Aces[j].Mask == Dacl->Aces[i].Mask &&
+                (Dacl->Aces[j].Flags & ~INHERITED_ACE) == (Dacl->Aces[i].Flags & ~INHERITED_ACE) &&
+                EqualSid(Dacl->Aces[j].Sid, Dacl->Aces[i].Sid))
+                break;
+        }
+        if (j == i)
+            Count++;
+    }
+    return Count;
+}
+
 static BOOL HasAce(const KEY_DACL *Dacl, PSID Sid, ACCESS_MASK Mask)
 {
     ULONG i;
@@ -499,7 +524,8 @@ Done:
 
 /*
  * A parent that holds an ACE twice (an explicit one equal to one it inherits, then more distinct ACEs
- * after it): a key created below inherits everything, in a valid ACL, none of the ACEs is lost.
+ * after it): a key created below inherits every distinct ACE, in a valid ACL, and not the repeat (measured on
+ * Windows 10 and Windows Server 2022: the parent keeps all, the child gets each ACE once).
  */
 static void TestDuplicateParent(void)
 {
@@ -550,7 +576,7 @@ static void TestDuplicateParent(void)
     ok(Child.Ok, "the DACL of the new key cannot be read\n");
     ok_hex(Child.Control, AUTO_CONTROL);
     ok(AllInherited(&Child), "child: %lu ACEs, not all inherited\n", Child.Count);
-    ok(Child.Count == Parent.Count, "child: %lu ACEs, expected %lu\n", Child.Count, Parent.Count);
+    ok(Child.Count == DistinctAces(&Parent), "child: %lu ACEs, expected %lu\n", Child.Count, DistinctAces(&Parent));
     for (i = 0; i < Parent.Count; i++)
         ok(HasAce(&Child, Parent.Aces[i].Sid, Parent.Aces[i].Mask), "child lacks the ACE %lu of its parent\n", i);
     ok(Child.Sd && GetSecurityDescriptorDacl(Child.Sd, &Present, &ChildDacl, &Defaulted) && Present &&
@@ -1829,9 +1855,8 @@ Done:
  * stay, g is rebuilt from them) if S lacks one, or an allow ACE stands ahead of a deny ACE in S or in what the
  * conversion would give (nothing is checked when the parent passed nothing on). An ACE the parent passed on
  * accounts for one ACE of S: a duplicate stays explicit. The subkey g of D-add-new, G-dup-sy, H-dup-wd-tail and
- * ZC-co-exact-id is not checked: it inherits an ACE twice (explicit and inherited in s), which Windows Server 2022
- * leaves out and the merge keeps as an inherit-only copy (an older row, measured on Windows 10, expects that;
- * Windows 10 not measured now). A parent whose own set repeats an ACE is not a row either, for the same reason.
+ * ZC-co-exact-id inherits an ACE twice (explicit and inherited in s): the repeat is left out (see TestDuplicateAces),
+ * as it is from a parent whose own set repeats an ACE (N13, N14).
  * The subkey g of Q-mask-sub and R-type-diff is not checked:
  * Windows does not descend into a key that does not grant the caller KEY_QUERY_VALUE and KEY_ENUMERATE_SUB_KEYS
  * (here the caller has the first only, or is denied), and g keeps what it had; NitroOS does not check the access
@@ -1851,11 +1876,11 @@ static void TestParentSetMatch(void)
     {L"A-add-set", O1, O1 NOR, L"D:" NUR O1, L"D:AI(A;;KR;;;NU)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)"},
     {L"B-drop-old", O1, SYF, L"D:" NUR O1, L"D:AI(A;;KR;;;NU)(A;CIID;KA;;;SY)", L"D:AI(A;CIID;KA;;;SY)"},
     {L"C-drop-new", O1, SYF, L"D:" NUR SYF, L"D:PAI(A;;KR;;;NU)(A;CI;KA;;;SY)", L"D:AI(A;CIID;KA;;;SY)"},
-    {L"D-add-new", O1, O1 NOR, L"D:" NUR O1 NOR, L"D:AI(A;;KR;;;NU)(A;CI;KR;;;NO)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)", NULL},
+    {L"D-add-new", O1, O1 NOR, L"D:" NUR O1 NOR, L"D:AI(A;;KR;;;NU)(A;CI;KR;;;NO)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)", L"D:AI(A;CIID;KR;;;NO)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)"},
     {L"E-rev-inter", O1, O1 NOR, L"D:" WDR NUR SYF, L"D:AI(A;;KR;;;NU)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)"},
     {L"F-expl-after", O1, O1 NOR, L"D:" O1 NUR, L"D:AI(A;;KR;;;NU)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)"},
-    {L"G-dup-sy", O1, O1 NOR, L"D:" NUR SYF SYF WDR, L"D:AI(A;;KR;;;NU)(A;CI;KA;;;SY)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)", NULL},
-    {L"H-dup-wd-tail", O1, O1 NOR, L"D:" SYF WDR WDR, L"D:AI(A;CI;KR;;;WD)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)", NULL},
+    {L"G-dup-sy", O1, O1 NOR, L"D:" NUR SYF SYF WDR, L"D:AI(A;;KR;;;NU)(A;CI;KA;;;SY)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)"},
+    {L"H-dup-wd-tail", O1, O1 NOR, L"D:" SYF WDR WDR, L"D:AI(A;CI;KR;;;WD)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)", L"D:AI(A;CIID;KR;;;WD)(A;CIID;KA;;;SY)(A;CIID;KR;;;NO)"},
     {L"I-extra-ci", O1, O1 NOR, L"D:" SYF L"(A;CI;KR;;;BU)" WDR, L"D:AI(A;CI;KR;;;BU)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)", L"D:AI(A;CIID;KR;;;BU)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)"},
     {L"J-deny-before", O1, O1 NOR, L"D:(D;;KW;;;BU)" O1, L"D:AI(D;;KW;;;BU)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)"},
     {L"K-deny-between", O1, O1 NOR, L"D:" SYF L"(D;;KW;;;BU)" WDR, L"D:PAI(A;CI;KA;;;SY)(D;;KW;;;BU)(A;CI;KR;;;WD)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)"},
@@ -1876,7 +1901,7 @@ static void TestParentSetMatch(void)
     {L"Z-co-owner-ci", L"(A;CI;KA;;;CO)" WDR, L"(A;CI;KA;;;CO)" WDR NOR, L"D:" NUR L"(A;CI;KA;;;BA)" WDR, L"D:PAI(A;;KR;;;NU)(A;CI;KA;;;BA)(A;CI;KR;;;WD)", L"D:AI(A;CIID;KA;;;BA)(A;CIID;KR;;;WD)"},
     {L"ZA-co-owner-nci", L"(A;CI;KA;;;CO)" WDR, L"(A;CI;KA;;;CO)" WDR NOR, L"D:" NUR L"(A;;KA;;;BA)" WDR, L"D:PAI(A;;KR;;;NU)(A;;KA;;;BA)(A;CI;KR;;;WD)", L"D:AI(A;CIID;KR;;;WD)"},
     {L"ZB-co-exact", L"(A;CI;KA;;;CO)" WDR, L"(A;CI;KA;;;CO)" WDR NOR, L"D:(A;;KA;;;BA)(A;CIIO;KA;;;CO)" WDR, L"D:AI(A;ID;KA;;;BA)(A;CIIOID;KA;;;CO)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)", L"D:AI(A;ID;KA;;;BA)(A;CIIOID;KA;;;CO)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)"},
-    {L"ZC-co-exact-id", L"(A;CI;KA;;;CO)" WDR, L"(A;CI;KA;;;CO)" WDR NOR, L"D:(A;ID;KA;;;BA)(A;CIIOID;KA;;;CO)" WDR, L"D:AI(A;CI;KR;;;WD)(A;ID;KA;;;BA)(A;CIIOID;KA;;;CO)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)", NULL},
+    {L"ZC-co-exact-id", L"(A;CI;KA;;;CO)" WDR, L"(A;CI;KA;;;CO)" WDR NOR, L"D:(A;ID;KA;;;BA)(A;CIIOID;KA;;;CO)" WDR, L"D:AI(A;CI;KR;;;WD)(A;ID;KA;;;BA)(A;CIIOID;KA;;;CO)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)", L"D:AI(A;CIID;KR;;;WD)(A;ID;KA;;;BA)(A;CIIOID;KA;;;CO)(A;CIID;KR;;;NO)"},
     {L"AC-io-flags", O1 L"(A;CIIO;KR;;;BU)", O1 L"(A;CIIO;KR;;;BU)" NOR, L"D:" O1 L"(A;CI;KR;;;BU)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;BU)(A;CIID;KR;;;NO)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;BU)(A;CIID;KR;;;NO)"},
     {L"AD-io-exact", O1 L"(A;CIIO;KR;;;BU)", O1 L"(A;CIIO;KR;;;BU)" NOR, L"D:" O1 L"(A;CIIO;KR;;;BU)", L"D:PAI(A;CI;KA;;;SY)(A;CI;KR;;;WD)(A;CIIO;KR;;;BU)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;BU)"},
     {L"AE-io-missing", O1 L"(A;CIIO;KR;;;BU)", O1 L"(A;CIIO;KR;;;BU)" NOR, L"D:" O1, L"D:PAI(A;CI;KA;;;SY)(A;CI;KR;;;WD)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)"},
@@ -1898,6 +1923,8 @@ static void TestParentSetMatch(void)
     {L"N15-empty-old-noncanon", L"", O1, L"D:" NUR L"(D;;KW;;;BU)", L"D:AI(A;;KR;;;NU)(D;;KW;;;BU)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)", NULL},
     {L"N11-empty-set", L"", O1, L"D:" O1, L"D:AI(A;CI;KA;;;SY)(A;CI;KR;;;WD)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)", NULL},
     {L"N12-deny-mid-pdeny", L"(D;CI;KW;;;BU)" O1, L"(D;CI;KW;;;BU)" O1 NOR, L"D:(D;CI;KW;;;BU)" SYF L"(D;;KW;;;NU)" WDR, L"D:PAI(D;CI;KW;;;BU)(A;CI;KA;;;SY)(D;;KW;;;NU)(A;CI;KR;;;WD)", L"D:AI(D;CIID;KW;;;BU)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)"},
+    {L"N13-dupset-parent", SYF SYF WDR, SYF SYF WDR NOR, L"D:" NUR SYF SYF WDR, L"D:AI(A;;KR;;;NU)(A;CI;KA;;;SY)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)"},
+    {L"N14-dupset-one", SYF SYF WDR, SYF SYF WDR NOR, L"D:" NUR SYF WDR, L"D:AI(A;;KR;;;NU)(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)(A;CIID;KR;;;NO)"},
     {L"Q1-ba-only", SYF BAF, SYF BAF NOR, L"D:" SYF BAF, L"D:AI(A;CIID;KA;;;SY)(A;CIID;KA;;;BA)(A;CIID;KR;;;NO)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KA;;;BA)(A;CIID;KR;;;NO)"},
     {L"Q2-ba-exp", SYF BAF, SYF BAF NOR, L"D:" NUR SYF BAF, L"D:AI(A;;KR;;;NU)(A;CIID;KA;;;SY)(A;CIID;KA;;;BA)(A;CIID;KR;;;NO)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KA;;;BA)(A;CIID;KR;;;NO)"},
     {L"Q3-deny-set", ANK SYF BAF, ANK SYF BAF NOR, L"D:" ANK SYF BAF, L"D:AI(D;CIID;KW;;;AN)(A;CIID;KA;;;SY)(A;CIID;KA;;;BA)(A;CIID;KR;;;NO)", L"D:AI(D;CIID;KW;;;AN)(A;CIID;KA;;;SY)(A;CIID;KA;;;BA)(A;CIID;KR;;;NO)"},
@@ -2053,6 +2080,269 @@ Done:
     RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
 }
 
+/*
+ * An ACE a key would get from its parent twice (measured on Windows 10 22H2 and Windows Server 2022, identical, x64 and
+ * x86 callers). The parent holds the list L (after its own plain full-control ACEs for Administrators and SYSTEM;
+ * SetSecurityInfo, protected), and a new subkey c, then a subkey g of c, are made below it; or c and g exist and L is
+ * set afterwards (the change is passed on): c holds the same either way.
+ * The ACEs the parent passes on are taken in order, and an ACE X is judged against the ones before it with the same
+ * type and SID (an explicit ACE of the key itself never counts, nor does the INHERITED_ACE flag):
+ *  - X is covered for the key if it is inherit-only, or the earlier ACEs effective for the key have together every
+ *    bit of its mask; it is covered for the subkeys if, for each way it passes on (CI, OI), the earlier ACEs that pass
+ *    on that way have together every bit of its mask;
+ *  - covered both ways: X is left out (a repeat in any form, a smaller mask, the owner copy a CREATOR OWNER ACE
+ *    makes when an earlier ACE covers the owner, a no-propagate copy); covered for the key only: X stays with the
+ *    flags it has as an inherit-only ACE (08, 33, 36, 41); otherwise it stays as it is (15, 16, 35, 38).
+ * A key's own DACL keeps what was set (the parent of every row holds the repeat), also an explicit ACE equal to an
+ * inherited one (X rows: the key keeps both, its subkeys get one). RegSetKeySecurity neither dedups nor propagates (raw
+ * rows). The rows are the same on NitroOS: the kernel does it when a key is created below an auto-inherited
+ * parent, ntmarta when a DACL change is passed on.
+ */
+static BOOL MakeKeyBackup(HKEY Parent, PCWSTR Name, HKEY *Key)
+{
+    DWORD Error;
+
+    /* the new key may grant the caller nothing (its inherited ACEs are the parent's list) */
+    EnableRestorePrivileges(TRUE);
+    Error = RegCreateKeyExW(Parent, Name, 0, NULL, REG_OPTION_BACKUP_RESTORE, KEY_ALL_ACCESS, NULL, Key, NULL);
+    EnableRestorePrivileges(FALSE);
+    ok_long(Error, ERROR_SUCCESS);
+    if (Error)
+        *Key = NULL;
+    return Error == ERROR_SUCCESS;
+}
+
+static void TestDuplicateAces(void)
+{
+    static const struct { PCWSTR Name, List, ExpectedC, ExpectedG; } Rows[] = {
+    {L"01-nodup", L"(A;CI;KA;;;SY)(A;CI;KR;;;WD)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)", L"D:AI(A;CIID;KA;;;SY)(A;CIID;KR;;;WD)"},
+    {L"02-dup-ci", L"(A;CI;KR;;;WD)(A;CI;KR;;;WD)", L"D:AI(A;CIID;KR;;;WD)", L"D:AI(A;CIID;KR;;;WD)"},
+    {L"03-dup-ci-x3", L"(A;CI;KR;;;WD)(A;CI;KR;;;WD)(A;CI;KR;;;WD)", L"D:AI(A;CIID;KR;;;WD)", L"D:AI(A;CIID;KR;;;WD)"},
+    {L"04-dup-nonadj", L"(A;CI;KR;;;WD)(A;CI;KA;;;SY)(A;CI;KR;;;WD)", L"D:AI(A;CIID;KR;;;WD)(A;CIID;KA;;;SY)", L"D:AI(A;CIID;KR;;;WD)(A;CIID;KA;;;SY)"},
+    {L"05-dup-oici", L"(A;OICI;KR;;;WD)(A;OICI;KR;;;WD)", L"D:AI(A;OICIID;KR;;;WD)", L"D:AI(A;OICIID;KR;;;WD)"},
+    {L"06-dup-oi", L"(A;OI;KR;;;WD)(A;OI;KR;;;WD)", L"D:AI(A;OIIOID;KR;;;WD)", L"D:AI(A;OIIOID;KR;;;WD)"},
+    {L"07-dup-ciio", L"(A;CIIO;KR;;;WD)(A;CIIO;KR;;;WD)", L"D:AI(A;CIID;KR;;;WD)", L"D:AI(A;CIID;KR;;;WD)"},
+    {L"08-ci-oici", L"(A;CI;KR;;;WD)(A;OICI;KR;;;WD)", L"D:AI(A;CIID;KR;;;WD)(A;OICIIOID;KR;;;WD)", L"D:AI(A;CIID;KR;;;WD)(A;OICIIOID;KR;;;WD)"},
+    {L"09-ci-ciio", L"(A;CI;KR;;;WD)(A;CIIO;KR;;;WD)", L"D:AI(A;CIID;KR;;;WD)", L"D:AI(A;CIID;KR;;;WD)"},
+    {L"10-oi-oici", L"(A;OI;KR;;;WD)(A;OICI;KR;;;WD)", L"D:AI(A;OIIOID;KR;;;WD)(A;OICIID;KR;;;WD)", L"D:AI(A;OIIOID;KR;;;WD)(A;OICIID;KR;;;WD)"},
+    {L"11-ci-cinp", L"(A;CI;KR;;;WD)(A;CINP;KR;;;WD)", L"D:AI(A;CIID;KR;;;WD)", L"D:AI(A;CIID;KR;;;WD)"},
+    {L"12-oici-oiio", L"(A;OICI;KR;;;WD)(A;OIIO;KR;;;WD)", L"D:AI(A;OICIID;KR;;;WD)", L"D:AI(A;OICIID;KR;;;WD)"},
+    {L"13-ci-oi", L"(A;CI;KR;;;WD)(A;OI;KR;;;WD)", L"D:AI(A;CIID;KR;;;WD)(A;OIIOID;KR;;;WD)", L"D:AI(A;CIID;KR;;;WD)(A;OIIOID;KR;;;WD)"},
+    {L"14-super-first", L"(A;CI;KA;;;WD)(A;CI;KR;;;WD)", L"D:AI(A;CIID;KA;;;WD)", L"D:AI(A;CIID;KA;;;WD)"},
+    {L"15-sub-first", L"(A;CI;KR;;;WD)(A;CI;KA;;;WD)", L"D:AI(A;CIID;KR;;;WD)(A;CIID;KA;;;WD)", L"D:AI(A;CIID;KR;;;WD)(A;CIID;KA;;;WD)"},
+    {L"16-disjoint-mask", L"(A;CI;0x1;;;WD)(A;CI;0x2;;;WD)", L"D:AI(A;CIID;CC;;;WD)(A;CIID;DC;;;WD)", L"D:AI(A;CIID;CC;;;WD)(A;CIID;DC;;;WD)"},
+    {L"17-dup-deny", L"(D;CI;KW;;;BU)(D;CI;KW;;;BU)(A;CI;KR;;;WD)", L"D:AI(D;CIID;KW;;;BU)(A;CIID;KR;;;WD)", L"D:AI(D;CIID;KW;;;BU)(A;CIID;KR;;;WD)"},
+    {L"19-dup-after-deny", L"(D;CI;KW;;;BU)(A;CI;KR;;;WD)(A;CI;KR;;;WD)", L"D:AI(D;CIID;KW;;;BU)(A;CIID;KR;;;WD)", L"D:AI(D;CIID;KW;;;BU)(A;CIID;KR;;;WD)"},
+    {L"20-expl-plus-id", L"(A;CI;KR;;;WD)(A;CIID;KR;;;WD)", L"D:AI(A;CIID;KR;;;WD)", L"D:AI(A;CIID;KR;;;WD)"},
+    {L"21-dup-both-id", L"(A;CIID;KR;;;WD)(A;CIID;KR;;;WD)", L"D:AI(A;CIID;KR;;;WD)", L"D:AI(A;CIID;KR;;;WD)"},
+    {L"22-dup-co", L"(A;CI;KA;;;CO)(A;CI;KA;;;CO)", L"D:AI(A;ID;KA;;;BA)(A;CIIOID;KA;;;CO)", L"D:AI(A;ID;KA;;;BA)(A;CIIOID;KA;;;CO)"},
+    {L"23-plain-plus-ci", L"(A;;KR;;;WD)(A;CI;KR;;;WD)", L"D:AI(A;CIID;KR;;;WD)", L"D:AI(A;CIID;KR;;;WD)"},
+    {L"24-twosids-nodup", L"(A;CI;KR;;;WD)(A;CI;KR;;;BU)", L"D:AI(A;CIID;KR;;;WD)(A;CIID;KR;;;BU)", L"D:AI(A;CIID;KR;;;WD)(A;CIID;KR;;;BU)"},
+    {L"25-ciio-oiio", L"(A;CIIO;KR;;;WD)(A;OIIO;KR;;;WD)", L"D:AI(A;CIID;KR;;;WD)(A;OIIOID;KR;;;WD)", L"D:AI(A;CIID;KR;;;WD)(A;OIIOID;KR;;;WD)"},
+    {L"26-io-then-ci", L"(A;CIIO;KR;;;WD)(A;CI;KR;;;WD)", L"D:AI(A;CIID;KR;;;WD)", L"D:AI(A;CIID;KR;;;WD)"},
+    {L"27-interleave", L"(A;CI;KR;;;WD)(A;CI;KA;;;SY)(A;CI;KR;;;WD)(A;CI;KA;;;SY)", L"D:AI(A;CIID;KR;;;WD)(A;CIID;KA;;;SY)", L"D:AI(A;CIID;KR;;;WD)(A;CIID;KA;;;SY)"},
+    {L"28-dup-oiio", L"(A;OIIO;KR;;;WD)(A;OIIO;KR;;;WD)", L"D:AI(A;OIIOID;KR;;;WD)", L"D:AI(A;OIIOID;KR;;;WD)"},
+    {L"29-dup-cinp", L"(A;CINP;KR;;;WD)(A;CINP;KR;;;WD)", L"D:AI(A;ID;KR;;;WD)", NULL},
+    {L"30-ci-then-oi-io", L"(A;CI;KR;;;WD)(A;OIIO;KR;;;WD)", L"D:AI(A;CIID;KR;;;WD)(A;OIIOID;KR;;;WD)", L"D:AI(A;CIID;KR;;;WD)(A;OIIOID;KR;;;WD)"},
+    {L"31-union-mask", L"(A;CI;0x1;;;WD)(A;CI;0x2;;;WD)(A;CI;0x3;;;WD)", L"D:AI(A;CIID;CC;;;WD)(A;CIID;DC;;;WD)", L"D:AI(A;CIID;CC;;;WD)(A;CIID;DC;;;WD)"},
+    {L"32-union-prop", L"(A;CI;KR;;;WD)(A;OI;KR;;;WD)(A;OICI;KR;;;WD)", L"D:AI(A;CIID;KR;;;WD)(A;OIIOID;KR;;;WD)", L"D:AI(A;CIID;KR;;;WD)(A;OIIOID;KR;;;WD)"},
+    {L"33-ci-ci-oici", L"(A;CI;KR;;;WD)(A;CI;KR;;;WD)(A;OICI;KR;;;WD)", L"D:AI(A;CIID;KR;;;WD)(A;OICIIOID;KR;;;WD)", L"D:AI(A;CIID;KR;;;WD)(A;OICIIOID;KR;;;WD)"},
+    {L"34-oici-ci-oi", L"(A;OICI;KR;;;WD)(A;CI;KR;;;WD)(A;OI;KR;;;WD)", L"D:AI(A;OICIID;KR;;;WD)", L"D:AI(A;OICIID;KR;;;WD)"},
+    {L"35-oi-then-ci", L"(A;OI;KR;;;WD)(A;CI;KR;;;WD)", L"D:AI(A;OIIOID;KR;;;WD)(A;CIID;KR;;;WD)", L"D:AI(A;OIIOID;KR;;;WD)(A;CIID;KR;;;WD)"},
+    {L"36-ci-super-oici-sub", L"(A;CI;KA;;;WD)(A;OICI;KR;;;WD)", L"D:AI(A;CIID;KA;;;WD)(A;OICIIOID;KR;;;WD)", L"D:AI(A;CIID;KA;;;WD)(A;OICIIOID;KR;;;WD)"},
+    {L"37-oici-super-ci-sub", L"(A;OICI;KA;;;WD)(A;CI;KR;;;WD)", L"D:AI(A;OICIID;KA;;;WD)", L"D:AI(A;OICIID;KA;;;WD)"},
+    {L"38-sub-ci-super-oici", L"(A;CI;KR;;;WD)(A;OICI;KA;;;WD)", L"D:AI(A;CIID;KR;;;WD)(A;OICIID;KA;;;WD)", L"D:AI(A;CIID;KR;;;WD)(A;OICIID;KA;;;WD)"},
+    {L"39-super-sub-sub", L"(A;CI;KA;;;WD)(A;CI;KR;;;WD)(A;CI;KR;;;WD)", L"D:AI(A;CIID;KA;;;WD)", L"D:AI(A;CIID;KA;;;WD)"},
+    {L"40-deny-dup-split", L"(D;CI;KW;;;BU)(A;CI;KR;;;WD)(D;CI;KW;;;BU)", L"D:AI(D;CIID;KW;;;BU)(A;CIID;KR;;;WD)", L"D:AI(D;CIID;KW;;;BU)(A;CIID;KR;;;WD)"},
+    {L"41-cinp-then-ci", L"(A;CINP;KR;;;WD)(A;CI;KR;;;WD)", L"D:AI(A;ID;KR;;;WD)(A;CIIOID;KR;;;WD)", L"D:AI(A;CIID;KR;;;WD)"},
+    {L"43-ba-co-ba", L"(A;CI;KA;;;BA)(A;CI;KA;;;CO)(A;CI;KA;;;BA)", L"D:AI(A;CIID;KA;;;BA)(A;CIIOID;KA;;;CO)", L"D:AI(A;CIID;KA;;;BA)(A;CIIOID;KA;;;CO)"},
+    {L"44-oici-oici-ci", L"(A;OICI;KR;;;WD)(A;OICI;KR;;;WD)(A;CI;KR;;;WD)", L"D:AI(A;OICIID;KR;;;WD)", L"D:AI(A;OICIID;KR;;;WD)"},
+    {L"45-oi-oi-oici", L"(A;OI;KR;;;WD)(A;OI;KR;;;WD)(A;OICI;KR;;;WD)", L"D:AI(A;OIIOID;KR;;;WD)(A;OICIID;KR;;;WD)", L"D:AI(A;OIIOID;KR;;;WD)(A;OICIID;KR;;;WD)"},
+    {L"46-ci-then-cinp", L"(A;CI;KR;;;WD)(A;CINP;KR;;;WD)(A;CINP;KR;;;WD)", L"D:AI(A;CIID;KR;;;WD)", L"D:AI(A;CIID;KR;;;WD)"},
+    {L"47-sub-then-super-then-sub", L"(A;CI;KR;;;WD)(A;CI;KA;;;WD)(A;CI;KR;;;WD)", L"D:AI(A;CIID;KR;;;WD)(A;CIID;KA;;;WD)", L"D:AI(A;CIID;KR;;;WD)(A;CIID;KA;;;WD)"},
+    };
+    static const struct { PCWSTR Name, List, ExpectedC, ExpectedAfterSet; } Raw[] = {
+    {L"02-dup-ci", L"(A;CI;KR;;;WD)(A;CI;KR;;;WD)", L"D:(A;CI;KR;;;WD)(A;CI;KR;;;WD)", L"D:AI(A;CIID;KA;;;SY)"},
+    {L"09-ci-ciio", L"(A;CI;KR;;;WD)(A;CIIO;KR;;;WD)", L"D:(A;CI;KR;;;WD)(A;CI;KR;;;WD)", L"D:AI(A;CIID;KA;;;SY)"},
+    {L"14-super-first", L"(A;CI;KA;;;WD)(A;CI;KR;;;WD)", L"D:(A;CI;KA;;;WD)(A;CI;KR;;;WD)", L"D:AI(A;CIID;KA;;;SY)"},
+    };
+    static const struct { PCWSTR Name, ParentSet, KeySet, AfterC, AfterG, AfterNew, ChangedC, ChangedG, ChangedNew; } Explicit[] = {
+    {L"X1-expl-same", L"(A;CI;KA;;;SY)(A;OICI;KR;;;WD)", L"(A;CI;KA;;;SY)(A;OICI;KR;;;WD)",
+     L"D:AI(A;CI;KA;;;SY)(A;OICI;KR;;;WD)(A;CIID;KA;;;SY)(A;OICIID;KR;;;WD)", L"D:AI(A;CIID;KA;;;SY)(A;OICIID;KR;;;WD)", L"D:AI(A;CIID;KA;;;SY)(A;OICIID;KR;;;WD)",
+     L"D:AI(A;CI;KA;;;SY)(A;OICI;KR;;;WD)(A;CIID;KA;;;SY)(A;OICIID;KR;;;WD)(A;CIID;KR;;;NO)", L"D:AI(A;CIID;KA;;;SY)(A;OICIID;KR;;;WD)(A;CIID;KR;;;NO)", L"D:AI(A;CIID;KA;;;SY)(A;OICIID;KR;;;WD)(A;CIID;KR;;;NO)"},
+    {L"X2-expl-oici", L"(A;CI;KA;;;SY)(A;OICI;KR;;;WD)", L"(A;OICI;KA;;;SY)(A;OICI;KR;;;WD)",
+     L"D:AI(A;OICI;KA;;;SY)(A;OICI;KR;;;WD)(A;CIID;KA;;;SY)(A;OICIID;KR;;;WD)", L"D:AI(A;OICIID;KA;;;SY)(A;OICIID;KR;;;WD)", L"D:AI(A;OICIID;KA;;;SY)(A;OICIID;KR;;;WD)",
+     L"D:AI(A;OICI;KA;;;SY)(A;OICI;KR;;;WD)(A;CIID;KA;;;SY)(A;OICIID;KR;;;WD)(A;CIID;KR;;;NO)", L"D:AI(A;OICIID;KA;;;SY)(A;OICIID;KR;;;WD)(A;CIID;KR;;;NO)", L"D:AI(A;OICIID;KA;;;SY)(A;OICIID;KR;;;WD)(A;CIID;KR;;;NO)"},
+    {L"X3-expl-ciio", L"(A;CI;KA;;;SY)(A;OICI;KR;;;WD)", L"(A;CIIO;KA;;;SY)(A;OICI;KR;;;WD)",
+     L"D:AI(A;CIIO;KA;;;SY)(A;OICI;KR;;;WD)(A;CIID;KA;;;SY)(A;OICIID;KR;;;WD)", L"D:AI(A;CIID;KA;;;SY)(A;OICIID;KR;;;WD)", L"D:AI(A;CIID;KA;;;SY)(A;OICIID;KR;;;WD)",
+     L"D:AI(A;CIIO;KA;;;SY)(A;OICI;KR;;;WD)(A;CIID;KA;;;SY)(A;OICIID;KR;;;WD)(A;CIID;KR;;;NO)", L"D:AI(A;CIID;KA;;;SY)(A;OICIID;KR;;;WD)(A;CIID;KR;;;NO)", L"D:AI(A;CIID;KA;;;SY)(A;OICIID;KR;;;WD)(A;CIID;KR;;;NO)"},
+    {L"X5-expl-one", L"(A;CI;KA;;;SY)(A;OICI;KR;;;WD)", L"(A;CI;KR;;;WD)",
+     L"D:AI(A;CI;KR;;;WD)(A;CIID;KA;;;SY)(A;OICIID;KR;;;WD)", L"D:AI(A;CIID;KR;;;WD)(A;CIID;KA;;;SY)(A;OICIIOID;KR;;;WD)", L"D:AI(A;CIID;KR;;;WD)(A;CIID;KA;;;SY)(A;OICIIOID;KR;;;WD)",
+     L"D:AI(A;CI;KR;;;WD)(A;CIID;KA;;;SY)(A;OICIID;KR;;;WD)(A;CIID;KR;;;NO)", L"D:AI(A;CIID;KR;;;WD)(A;CIID;KA;;;SY)(A;OICIIOID;KR;;;WD)(A;CIID;KR;;;NO)", L"D:AI(A;CIID;KR;;;WD)(A;CIID;KA;;;SY)(A;OICIIOID;KR;;;WD)(A;CIID;KR;;;NO)"},
+    };
+    WCHAR Path[320], Sddl[1024], Name[16];
+    BYTE Buffer[512];
+    DWORD Length = sizeof(Buffer);
+    LPWSTR OwnerSddl = NULL;
+    BOOL OwnerIsAdmins = FALSE;
+    HKEY Scratch = NULL, P = NULL, C = NULL, G = NULL, N = NULL;
+    DWORD Error;
+    ULONG i, Count = 0, k;
+    static const PCWSTR Tails[] = {L"\\c\\g", L"\\c\\n", L"\\c", L""};
+
+    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    Error = RegCreateKeyExW(HKEY_CURRENT_USER, ScratchPath, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &Scratch, NULL);
+    ok_long(Error, ERROR_SUCCESS);
+    if (Error)
+        goto Done;
+    if (RegGetKeySecurity(Scratch, OWNER_SECURITY_INFORMATION, Buffer, &Length) == ERROR_SUCCESS &&
+        ConvertSecurityDescriptorToStringSecurityDescriptorW(Buffer, SDDL_REVISION_1, OWNER_SECURITY_INFORMATION, &OwnerSddl, NULL))
+    {
+        OwnerIsAdmins = !wcsncmp(OwnerSddl, L"O:BA", 4);
+        LocalFree(OwnerSddl);
+    }
+
+    for (i = 0; i < ARRAYSIZE(Rows); i++)
+    {
+        if (!OwnerIsAdmins && wcsstr(Rows[i].List, L";;;CO)"))
+        {
+            skip("%ls: the keys are not owned by Administrators\n", Rows[i].Name);
+            continue;
+        }
+        trace("%ls\n", Rows[i].Name);
+
+        /* created below the parent */
+        wsprintfW(Name, L"p%lu", Count++);
+        if (!MakeKey(Scratch, Name, 0, &P))
+            goto Done;
+        wsprintfW(Sddl, L"D:P(A;;KA;;;BA)(A;;KA;;;SY)%ls", Rows[i].List);
+        ok(SetSddlDacl(P, PROTECTED_DACL_SECURITY_INFORMATION, Sddl), "%ls: parent\n", Rows[i].Name);
+        if (!MakeKeyBackup(P, L"c", &C) || !MakeKeyBackup(C, L"g", &G))
+            goto Done;
+        RegCloseKey(G);
+        G = NULL;
+        RegCloseKey(C);
+        C = NULL;
+        RegCloseKey(P);
+        P = NULL;
+        wsprintfW(Path, L"%ls\\%ls\\c", ScratchPath, Name);
+        DaclSddlIs(Path, Rows[i].ExpectedC, __LINE__);
+        if (Rows[i].ExpectedG)
+        {
+            wsprintfW(Path, L"%ls\\%ls\\c\\g", ScratchPath, Name);
+            DaclSddlIs(Path, Rows[i].ExpectedG, __LINE__);
+        }
+
+        /* the change passed on to existing subkeys */
+        wsprintfW(Name, L"p%lu", Count++);
+        if (!MakeKey(Scratch, Name, 0, &P))
+            goto Done;
+        ok(SetSddlDacl(P, PROTECTED_DACL_SECURITY_INFORMATION, L"D:P(A;;KA;;;BA)(A;;KA;;;SY)(A;CI;KA;;;SY)"), "%ls: first set\n", Rows[i].Name);
+        if (!MakeKeyBackup(P, L"c", &C) || !MakeKeyBackup(C, L"g", &G))
+            goto Done;
+        RegCloseKey(G);
+        G = NULL;
+        RegCloseKey(C);
+        C = NULL;
+        wsprintfW(Sddl, L"D:P(A;;KA;;;BA)(A;;KA;;;SY)%ls", Rows[i].List);
+        ok(SetSddlDacl(P, PROTECTED_DACL_SECURITY_INFORMATION, Sddl), "%ls: set\n", Rows[i].Name);
+        RegCloseKey(P);
+        P = NULL;
+        wsprintfW(Path, L"%ls\\%ls\\c", ScratchPath, Name);
+        DaclSddlIs(Path, Rows[i].ExpectedC, __LINE__);
+    }
+
+    /* RegSetKeySecurity: no propagation, and a key created below copies the ACEs as they are */
+    for (i = 0; i < ARRAYSIZE(Raw); i++)
+    {
+        trace("raw %ls\n", Raw[i].Name);
+        wsprintfW(Name, L"p%lu", Count++);
+        if (!MakeKey(Scratch, Name, 0, &P))
+            goto Done;
+        wsprintfW(Sddl, L"D:P(A;;KA;;;BA)(A;;KA;;;SY)%ls", Raw[i].List);
+        if (!RawSetSddl(Scratch, Name, Sddl) || !MakeKeyBackup(P, L"c", &C))
+            goto Done;
+        RegCloseKey(C);
+        C = NULL;
+        RegCloseKey(P);
+        P = NULL;
+        wsprintfW(Path, L"%ls\\%ls\\c", ScratchPath, Name);
+        DaclSddlIs(Path, Raw[i].ExpectedC, __LINE__);
+
+        wsprintfW(Name, L"p%lu", Count++);
+        if (!MakeKey(Scratch, Name, 0, &P))
+            goto Done;
+        ok(SetSddlDacl(P, PROTECTED_DACL_SECURITY_INFORMATION, L"D:P(A;;KA;;;BA)(A;;KA;;;SY)(A;CI;KA;;;SY)"), "raw %ls: first set\n", Raw[i].Name);
+        if (!MakeKeyBackup(P, L"c", &C))
+            goto Done;
+        RegCloseKey(C);
+        C = NULL;
+        RegCloseKey(P);
+        P = NULL;
+        wsprintfW(Sddl, L"D:P(A;;KA;;;BA)(A;;KA;;;SY)%ls", Raw[i].List);
+        if (!RawSetSddl(Scratch, Name, Sddl))
+            goto Done;
+        wsprintfW(Path, L"%ls\\%ls\\c", ScratchPath, Name);
+        DaclSddlIs(Path, Raw[i].ExpectedAfterSet, __LINE__);
+    }
+
+    /* a key that holds ACEs equal to the ones it inherits keeps both; its subkeys get each once */
+    for (i = 0; i < ARRAYSIZE(Explicit); i++)
+    {
+        trace("%ls\n", Explicit[i].Name);
+        wsprintfW(Name, L"p%lu", Count++);
+        if (!MakeKey(Scratch, Name, 0, &P))
+            goto Done;
+        wsprintfW(Sddl, L"D:P(A;;KA;;;BA)(A;;KA;;;SY)%ls", Explicit[i].ParentSet);
+        ok(SetSddlDacl(P, PROTECTED_DACL_SECURITY_INFORMATION, Sddl), "%ls: parent\n", Explicit[i].Name);
+        if (!MakeKeyBackup(P, L"c", &C) || !MakeKeyBackup(C, L"g", &G))
+            goto Done;
+        RegCloseKey(G);
+        G = NULL;
+        wsprintfW(Sddl, L"D:%ls", Explicit[i].KeySet);
+        ok(SetSddlDacl(C, 0, Sddl), "%ls: key\n", Explicit[i].Name);
+        if (!MakeKeyBackup(C, L"n", &N))
+            goto Done;
+        RegCloseKey(N);
+        N = NULL;
+        RegCloseKey(C);
+        C = NULL;
+        wsprintfW(Path, L"%ls\\%ls\\c", ScratchPath, Name);
+        DaclSddlIs(Path, Explicit[i].AfterC, __LINE__);
+        wsprintfW(Path, L"%ls\\%ls\\c\\g", ScratchPath, Name);
+        DaclSddlIs(Path, Explicit[i].AfterG, __LINE__);
+        wsprintfW(Path, L"%ls\\%ls\\c\\n", ScratchPath, Name);
+        DaclSddlIs(Path, Explicit[i].AfterNew, __LINE__);
+        wsprintfW(Sddl, L"D:P(A;;KA;;;BA)(A;;KA;;;SY)%ls(A;CI;KR;;;NO)", Explicit[i].ParentSet);
+        ok(SetSddlDacl(P, PROTECTED_DACL_SECURITY_INFORMATION, Sddl), "%ls: parent changed\n", Explicit[i].Name);
+        RegCloseKey(P);
+        P = NULL;
+        wsprintfW(Path, L"%ls\\%ls\\c", ScratchPath, Name);
+        DaclSddlIs(Path, Explicit[i].ChangedC, __LINE__);
+        wsprintfW(Path, L"%ls\\%ls\\c\\g", ScratchPath, Name);
+        DaclSddlIs(Path, Explicit[i].ChangedG, __LINE__);
+        wsprintfW(Path, L"%ls\\%ls\\c\\n", ScratchPath, Name);
+        DaclSddlIs(Path, Explicit[i].ChangedNew, __LINE__);
+    }
+
+Done:
+    if (N) RegCloseKey(N);
+    if (G) RegCloseKey(G);
+    if (C) RegCloseKey(C);
+    if (P) RegCloseKey(P);
+    /* hand every key back to Administrators so that the tree can be deleted */
+    for (i = 0; i < Count; i++)
+    {
+        for (k = 0; k < ARRAYSIZE(Tails); k++)
+        {
+            wsprintfW(Path, L"%ls\\p%lu%ls", ScratchPath, i, Tails[k]);
+            RestoreSddl(HKEY_CURRENT_USER, Path, DACL_SECURITY_INFORMATION, L"D:P(A;;KA;;;BA)(A;;KA;;;SY)");
+        }
+    }
+    if (Scratch) RegCloseKey(Scratch);
+    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+}
+
 START_TEST(SetSecurityInfoKeyInherit)
 {
     pRegDeleteTreeW = (PVOID)GetProcAddress(GetModuleHandleW(L"advapi32.dll"), "RegDeleteTreeW");
@@ -2076,6 +2366,7 @@ START_TEST(SetSecurityInfoKeyInherit)
     TestLegacySubkeys();
     TestParentSetMatch();
     TestParentSetNested();
+    TestDuplicateAces();
 
     KEY_DACL Initial, P1, C1a, C1b, P2, C2, G;
     HKEY Key = NULL, Child1 = NULL, Child2 = NULL, Grand = NULL;
@@ -2126,8 +2417,8 @@ START_TEST(SetSecurityInfoKeyInherit)
     ok_hex(C1a.Control, AUTO_CONTROL);
     ok(AllInherited(&C1a), "child1: %lu ACEs, not all inherited\n", C1a.Count);
     ok(HasAce(&C1a, World, KEY_READ), "child1 has no ACE for Everyone\n");
-    /* every inheritable ACE of the parent is inherited, one that it has twice too (measured raw on Windows) */
-    ok(C1a.Count == P1.Count, "child1: %lu ACEs, expected %lu\n", C1a.Count, P1.Count);
+    /* every distinct inheritable ACE of the parent is inherited, an ACE it has twice once (measured on Windows) */
+    ok(C1a.Count == DistinctAces(&P1), "child1: %lu ACEs, expected %lu\n", C1a.Count, DistinctAces(&P1));
 
     /* pass 2 adds an ACE: the existing child gets it */
     if (!SetSddlDacl(Key, UNPROTECTED_DACL_SECURITY_INFORMATION,
@@ -2142,7 +2433,7 @@ START_TEST(SetSecurityInfoKeyInherit)
     ok_hex(C1b.Control, AUTO_CONTROL);
     ok(AllInherited(&C1b), "child1 after pass 2: %lu ACEs, not all inherited\n", C1b.Count);
     ok(C1b.Count == C1a.Count + 1, "child1 after pass 2: %lu ACEs, expected %lu\n", C1b.Count, C1a.Count + 1);
-    ok(C1b.Count == P2.Count, "child1 after pass 2: %lu ACEs, expected %lu\n", C1b.Count, P2.Count);
+    ok(C1b.Count == DistinctAces(&P2), "child1 after pass 2: %lu ACEs, expected %lu\n", C1b.Count, DistinctAces(&P2));
     ok(HasAce(&C1b, Users, KEY_READ) && !HasAce(&C1a, Users, KEY_READ), "the new ACE did not reach child1\n");
 
     /* new keys: a sibling and a grandchild */

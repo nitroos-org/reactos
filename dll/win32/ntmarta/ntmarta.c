@@ -852,11 +852,20 @@ AccpCreateEmptyParentSd(VOID)
 }
 
 /*
- * What Windows leaves out of the DACL of a key it merges the parent's ACEs into (measured on Windows 10 22H2):
- * an inherited ACE that an earlier inherited ACE of the same type and SID, effective for the key, covers
- * (its access mask a superset) adds nothing to the key itself. If it also passes on (CONTAINER_INHERIT_ACE) it
- * is kept as INHERIT_ONLY_ACE; if it only stood for the key (the CREATOR OWNER / CREATOR GROUP copy made with
- * the owner or group of the key) it is dropped. Never grants or denies anything the DACL did not.
+ * What Windows leaves out of the DACL of a key it merges the parent's ACEs into, and so out of what the key passes on
+ * (measured on Windows 10 22H2 and Windows Server 2022, identical): the ACEs flagged inherited are taken in order, and
+ * an ACE X is judged against the inherited ACEs before it that have the same type and SID (explicit ACEs of the key
+ * never count: the key keeps an explicit ACE and the equal inherited one):
+ *  - X is covered for the key if it is inherit-only itself, or the earlier ACEs that are effective for the key
+ *    (not inherit-only) have together every access bit of its mask;
+ *  - X is covered for the subkeys if, for each way it passes on, the earlier ACEs that pass on that way have
+ *    together every bit of its mask: CONTAINER_INHERIT_ACE against the earlier CONTAINER_INHERIT_ACE ones,
+ *    OBJECT_INHERIT_ACE against the earlier OBJECT_INHERIT_ACE ones (an inherit-only ACE passes on too);
+ *  - covered both ways: X is dropped (a repeat, a smaller mask, a copy that only stood for the key, such as the
+ *    CREATOR OWNER / CREATOR GROUP copy made with the owner or group of the key);
+ *  - covered for the key only: X is kept as an inherit-only ACE, with the flags it has, for what it passes on;
+ *  - otherwise X is kept as it is.
+ * Never grants or denies anything the DACL did not.
  */
 static VOID
 AccpDedupInheritedAces(IN OUT PSECURITY_DESCRIPTOR Sd)
@@ -872,39 +881,51 @@ AccpDedupInheritedAces(IN OUT PSECURITY_DESCRIPTOR Sd)
     for (i = 0; i < Dacl->AceCount; i++)
     {
         PACCESS_ALLOWED_ACE Plain;
-        BOOLEAN Covered = FALSE;
+        ACCESS_MASK KeyMask = 0, ContainerMask = 0, ObjectMask = 0;
+        BOOLEAN KeyCovered, PassCovered;
 
         if (!GetAce(Dacl, i, (PVOID *)&Ace))
             return;
         if ((Ace->AceType != ACCESS_ALLOWED_ACE_TYPE && Ace->AceType != ACCESS_DENIED_ACE_TYPE) ||
-            !(Ace->AceFlags & INHERITED_ACE) || (Ace->AceFlags & INHERIT_ONLY_ACE))
+            !(Ace->AceFlags & INHERITED_ACE))
+            continue;
+        if ((Ace->AceFlags & INHERIT_ONLY_ACE) && !(Ace->AceFlags & (CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE)))
             continue;
         Plain = (PACCESS_ALLOWED_ACE)Ace;
 
-        for (j = 0; j < i && !Covered; j++)
+        for (j = 0; j < i; j++)
         {
             PACCESS_ALLOWED_ACE PlainEarlier;
 
             if (!GetAce(Dacl, j, (PVOID *)&Earlier))
                 return;
             PlainEarlier = (PACCESS_ALLOWED_ACE)Earlier;
-            Covered = Earlier->AceType == Ace->AceType &&
-                      (Earlier->AceFlags & INHERITED_ACE) && !(Earlier->AceFlags & INHERIT_ONLY_ACE) &&
-                      (PlainEarlier->Mask & Plain->Mask) == Plain->Mask &&
-                      EqualSid((PSID)&PlainEarlier->SidStart, (PSID)&Plain->SidStart);
+            if (Earlier->AceType != Ace->AceType || !(Earlier->AceFlags & INHERITED_ACE) ||
+                !EqualSid((PSID)&PlainEarlier->SidStart, (PSID)&Plain->SidStart))
+                continue;
+            if (!(Earlier->AceFlags & INHERIT_ONLY_ACE))
+                KeyMask |= PlainEarlier->Mask;
+            if (Earlier->AceFlags & CONTAINER_INHERIT_ACE)
+                ContainerMask |= PlainEarlier->Mask;
+            if (Earlier->AceFlags & OBJECT_INHERIT_ACE)
+                ObjectMask |= PlainEarlier->Mask;
         }
-        if (!Covered)
+
+        KeyCovered = (Ace->AceFlags & INHERIT_ONLY_ACE) || (Plain->Mask & ~KeyMask) == 0;
+        PassCovered = (!(Ace->AceFlags & CONTAINER_INHERIT_ACE) || (Plain->Mask & ~ContainerMask) == 0) &&
+                      (!(Ace->AceFlags & OBJECT_INHERIT_ACE) || (Plain->Mask & ~ObjectMask) == 0);
+        if (!KeyCovered)
             continue;
 
-        if (Ace->AceFlags & CONTAINER_INHERIT_ACE)
-        {
-            Ace->AceFlags |= INHERIT_ONLY_ACE;
-        }
-        else if (!(Ace->AceFlags & (OBJECT_INHERIT_ACE | INHERIT_ONLY_ACE)))
+        if (PassCovered)
         {
             if (!DeleteAce(Dacl, i))
                 return;
             i--;
+        }
+        else
+        {
+            Ace->AceFlags |= INHERIT_ONLY_ACE;
         }
     }
 
@@ -1028,36 +1049,12 @@ AccpAllowBeforeDeny(IN PACL Dacl)
 }
 
 /*
- * TRUE if the ACE at Index of Dacl is a CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE copy of an earlier ACE with the same
- * type, mask, SID and flags otherwise: what AccpDedupInheritedAces leaves of an ACE the DACL has twice.
- */
-static BOOLEAN
-AccpIsInheritOnlyCopy(IN PACL Dacl, IN DWORD Index)
-{
-    PACE_HEADER Ace, Earlier;
-    DWORD j;
-
-    if (!GetAce(Dacl, Index, (PVOID *)&Ace) || (Ace->AceFlags & (CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE)) !=
-        (CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE))
-        return FALSE;
-    for (j = 0; j < Index; j++)
-    {
-        if (GetAce(Dacl, j, (PVOID *)&Earlier) &&
-            Earlier->AceType == Ace->AceType && Earlier->AceSize == Ace->AceSize &&
-            (Earlier->AceFlags & INHERIT_ONLY_ACE) == 0 &&
-            (Earlier->AceFlags & ~INHERIT_ONLY_ACE) == (Ace->AceFlags & ~INHERIT_ONLY_ACE) &&
-            RtlEqualMemory((PUCHAR)Earlier + sizeof(ACE_HEADER), (PUCHAR)Ace + sizeof(ACE_HEADER),
-                           Ace->AceSize - sizeof(ACE_HEADER)))
-            return TRUE;
-    }
-    return FALSE;
-}
-
-/*
  * A subkey that is not auto-inherited and has no ACE flagged INHERITED_ACE is converted, as on Windows (measured on
  * Windows Server 2022), if its DACL holds every ACE the OLD descriptor of its parent (OldParentSd) passed on to it:
  * those ACEs, compared as explicit ones (INHERITED_ACE ignored), in any order and anywhere in the DACL, are the
- * inherited set. Each ACE the parent passed on accounts for one ACE of the DACL (a duplicate stays explicit);
+ * inherited set. What the parent passed on is what AccpDedupInheritedAces leaves of its ACEs (a repeat is not
+ * there, so the key need not hold it; an inherit-only copy that is there must be held, as measured on Windows
+ * 10 and Windows Server 2022). Each ACE the parent passed on accounts for one ACE of the DACL (a duplicate stays explicit);
  * the ACEs left over are the explicit ones, and the key gets them plus what the new descriptor of the parent
  * (ParentSd) passes on, exactly as an auto-inherited key does. A parent that passed nothing on is matched by
  * every DACL.
@@ -1116,8 +1113,6 @@ AccpMatchOldInheritedSet(IN PSECURITY_DESCRIPTOR OldParentSd OPTIONAL,
     {
         if (!GetAce(ExpectedDacl, i, (PVOID *)&Other))
             goto Cleanup;
-        if (AccpIsInheritOnlyCopy(ExpectedDacl, i))
-            continue;   /* the merge kept a repeated ACE inherit-only; Windows leaves such a repeat out */
         for (j = 0; j < Dacl->AceCount; j++)
         {
             if (Used[j])
