@@ -40,6 +40,9 @@ add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/aac.ini
             DESTINATION reactos/Featmgr/Catalog FOR all)
 add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/winfsp.ini
             DESTINATION reactos/Featmgr/Catalog FOR all)
+# Optional Remote Desktop (RDP) server, built out of tree (pkg repository): this is only its catalog entry, hidden on i386, OFF by default
+add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/nitro-rdp.ini
+            DESTINATION reactos/Featmgr/Catalog FOR all)
 add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/payload/gl-sw-pack/glsw-pack.txt
             DESTINATION reactos/Featmgr/Payload/gl-sw-pack FOR all)
 
