@@ -96,8 +96,8 @@
 
 //
 // Registry access control mode (cmacl.c): /REGACL=LEGACY|AUDIT|ENFORCE boot
-// option, else Configuration Manager\RegistryAclMode. ENFORCE behaves as
-// AUDIT until enforcement exists.
+// option, else Configuration Manager\RegistryAclMode. ENFORCE decides key
+// opens and creates by the keys' own security descriptors.
 //
 #define CM_REGACL_MODE_LEGACY                           0
 #define CM_REGACL_MODE_AUDIT                            1
@@ -110,6 +110,7 @@
 #define CM_REGACL_OP_CREATE                             1
 #define CM_REGACL_OP_CREATELINK                         2
 #define CM_REGACL_OP_LINKNODE                           3
+#define CM_REGACL_OP_FOLLOWLINK                         4
 
 //
 // EnlistKeyBodyWithKCB Flags
@@ -845,6 +846,19 @@ CmpCaptureKeySecurity(
     _In_ PCM_KEY_CONTROL_BLOCK Kcb
 );
 
+VOID
+NTAPI
+CmpAclStampHiveRoot(
+    _In_ PCM_KEY_CONTROL_BLOCK Kcb
+);
+
+NTSTATUS
+NTAPI
+CmpStampKeySecurity(
+    _In_ PCM_KEY_CONTROL_BLOCK Kcb,
+    _In_ PSECURITY_DESCRIPTOR SecurityDescriptor
+);
+
 BOOLEAN
 NTAPI
 CmpCheckKeyOpenAccess(
@@ -852,6 +866,35 @@ CmpCheckKeyOpenAccess(
     _Inout_ PACCESS_STATE AccessState,
     _In_ KPROCESSOR_MODE AccessMode,
     _Out_ PNTSTATUS AccessStatus
+);
+
+BOOLEAN
+NTAPI
+CmpAclCheckKeyOpen(
+    _In_ PVOID Object,
+    _In_ PCM_KEY_CONTROL_BLOCK Kcb,
+    _Inout_ PACCESS_STATE AccessState,
+    _In_ KPROCESSOR_MODE AccessMode,
+    _In_ ULONG Options,
+    _Out_ PNTSTATUS AccessStatus
+);
+
+NTSTATUS
+NTAPI
+CmpAclCheckKeyCreate(
+    _In_ PCM_KEY_CONTROL_BLOCK ParentKcb,
+    _In_ PCUNICODE_STRING ChildName,
+    _In_ ULONG Operation,
+    _In_ PACCESS_STATE AccessState,
+    _In_ KPROCESSOR_MODE AccessMode,
+    _In_ ULONG Options
+);
+
+BOOLEAN
+NTAPI
+CmpAclCheckLinkFollow(
+    _In_ PCM_KEY_CONTROL_BLOCK LinkKcb,
+    _In_ PCUNICODE_STRING Target
 );
 
 NTSTATUS

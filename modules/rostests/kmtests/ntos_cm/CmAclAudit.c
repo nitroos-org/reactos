@@ -8,19 +8,25 @@
 /*
  * The configuration manager's audit mode runs a shadow access check against
  * the descriptor a key has on Windows and logs what Windows would deny, while
- * the open or create itself goes on exactly as before. This test opens and
- * creates keys through a token that Windows would refuse (the caller's token
- * with its user and Administrators made deny-only) and checks that:
- *  - every open and create still succeeds (no behaviour change, any mode);
- *  - in audit mode a denial is counted (Control\RegAcl\AuditStats) and
- *    written to \SystemRoot\System32\LogFiles\RegAcl\audit.log;
+ * the open or create itself goes on exactly as before; enforce mode takes the
+ * same decision before the open or create and lets it stand. This test opens
+ * and creates keys through a token that Windows would refuse (the caller's
+ * token with its user and Administrators made deny-only) and checks that:
+ *  - in audit mode every open and create still succeeds (no behaviour change),
+ *    in enforce mode exactly those are denied (STATUS_ACCESS_DENIED);
+ *  - in both a denial is counted (Control\RegAcl\AuditStats) and written to
+ *    \SystemRoot\System32\LogFiles\RegAcl\audit.log;
  *  - a granted open, and a kernel-mode open (not access checked), are not;
  *  - in legacy mode nothing is logged;
- *  - the published mode is consistent (ENFORCE runs as AUDIT for now).
+ *  - the published mode is the configured one.
  * The mode itself is chosen at boot (/REGACL=...); run the test under each.
  */
 
 #include <kmt_test.h>
+
+/* Mode 2 runs: the opens and creates the audit logs are denied */
+static BOOLEAN Enforced;
+#define DENIED_STATUS   (Enforced ? STATUS_ACCESS_DENIED : STATUS_SUCCESS)
 
 #define STATS_KEY   L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\RegAcl\\AuditStats"
 #define AUDIT_LOG   L"\\SystemRoot\\System32\\LogFiles\\RegAcl\\audit.log"
@@ -40,6 +46,7 @@ typedef struct _AUDIT_STATS
     ULONG StoresDescriptors;
     ULONG SetupExclusion;
     ULONG SwitchesIgnored;
+    ULONG EnforceFallback;
 } AUDIT_STATS, *PAUDIT_STATS;
 
 static
@@ -87,6 +94,7 @@ ReadStats(
     Stats->StoresDescriptors = ReadDword(Key, L"StoresDescriptors");
     Stats->SetupExclusion = ReadDword(Key, L"SetupExclusion");
     Stats->SwitchesIgnored = ReadDword(Key, L"SwitchesIgnored");
+    Stats->EnforceFallback = ReadDword(Key, L"EnforceFallback");
     ZwClose(Key);
 }
 
@@ -340,7 +348,11 @@ GetUserHive(
     if (NT_SUCCESS(RtlConvertSidToUnicodeString(&SidString, User->User.Sid, TRUE)))
     {
         RtlStringCchPrintfW(Path, PathChars, L"\\Registry\\User\\%wZ", &SidString);
-        RtlStringCchPrintfA(Needle, NeedleChars, "%wZ\\\\Software\",\"desired\":\"0x00000002\",\"granted\":\"0x00000000\",\"status\":\"0xc0000022\",\"rule\":\"user\"", &SidString);
+        /*
+         * The rule is "user" (the policy descriptor) while the hive root has no stored
+         * descriptor, "inherited" (from the root) once the kernel stamped it at load
+         */
+        RtlStringCchPrintfA(Needle, NeedleChars, "%wZ\\\\Software\",\"desired\":\"0x00000002\",\"granted\":\"0x00000000\",\"status\":\"0xc0000022\",\"rule\":\"", &SidString);
         RtlFreeUnicodeString(&SidString);
         Result = TRUE;
     }
@@ -506,7 +518,7 @@ TestLongNonAsciiKey(
     InitializeObjectAttributes(&ObjectAttributes, &String,
                                OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE | OBJ_FORCE_ACCESS_CHECK, NULL, NULL);
     Status = ZwOpenKey(&Key, KEY_SET_VALUE, &ObjectAttributes);
-    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok_eq_hex(Status, DENIED_STATUS);
     if (NT_SUCCESS(Status))
         ZwClose(Key);
     PsRevertToSelf();
@@ -615,7 +627,8 @@ TestEntryCap(
         else
             Failed++;
     }
-    ok_eq_ulong(Failed, 0UL);
+    ok_eq_ulong(Failed, Enforced ? (ULONG)CAP_KEYS : 0UL);
+    Failed = 0;
 
     /* At least the keys past the cap are dropped */
     Seen = WaitDropped(Start.Dropped + (CAP_KEYS - 2048), 90, &Capped);
@@ -631,7 +644,7 @@ TestEntryCap(
         else
             Failed++;
     }
-    ok_eq_ulong(Failed, 0UL);
+    ok_eq_ulong(Failed, Enforced ? (ULONG)CAP_REPEATS : 0UL);
     Seen = WaitDropped(Capped.Dropped + CAP_REPEATS, 130, &Repeated);
     ok(Seen, "Dropped %lu -> %lu after %d repeats of a dropped denial\n", Capped.Dropped, Repeated.Dropped, CAP_REPEATS);
 
@@ -674,9 +687,11 @@ START_TEST(CmAclAudit)
           Before.Mode, Before.ConfiguredMode, Before.ModeSource, Before.Checks, Before.Denials, Before.Entries);
     ok(Before.ConfiguredMode <= 2, "ConfiguredMode = %lu\n", Before.ConfiguredMode);
     ok(Before.ModeSource <= 2, "ModeSource = %lu\n", Before.ModeSource);
-    /* Enforcement does not exist yet: ENFORCE runs as AUDIT */
-    ok_eq_ulong(Before.Mode, Before.ConfiguredMode == 2 ? 1UL : Before.ConfiguredMode);
-    Audit = (Before.Mode == 1);
+    /* The configured mode runs (ENFORCE falls back to AUDIT only when SYSTEM would be locked out) */
+    ok_eq_ulong(Before.EnforceFallback, 0UL);
+    ok_eq_ulong(Before.Mode, Before.ConfiguredMode);
+    Audit = (Before.Mode == 1 || Before.Mode == 2);
+    Enforced = (Before.Mode == 2);
 
     /*
      * The switches that turn storage off for a boot: legacy mode, and setup
@@ -728,16 +743,17 @@ START_TEST(CmAclAudit)
         goto Cleanup;
     Impersonating = TRUE;
 
-    /* A: write access to an HKLM\SOFTWARE key. Windows denies it; nitro still opens it */
-    ok_eq_hex(OpenAs(SOFTWARE, NameA, KEY_SET_VALUE, TRUE), STATUS_SUCCESS);
+    /* A: write access to an HKLM\SOFTWARE key. Windows denies it; audit mode still opens it */
+    ok_eq_hex(OpenAs(SOFTWARE, NameA, KEY_SET_VALUE, TRUE), DENIED_STATUS);
 
     /* B: read access to an HKLM\HARDWARE key, which Everyone may read: granted, not logged */
     ok_eq_hex(OpenAs(HARDWARE, NameB, KEY_READ, TRUE), STATUS_SUCCESS);
 
-    /* C: a subkey under A, which needs KEY_CREATE_SUB_KEY on A. Windows denies it; nitro creates it */
+    /* C: a subkey under A, which needs KEY_CREATE_SUB_KEY on A. Windows denies it; audit mode creates it */
     Status = CreateAs(KeyA, NameC, &Disposition, &KeyC);
-    ok_eq_hex(Status, STATUS_SUCCESS);
-    ok_eq_ulong(Disposition, (ULONG)REG_CREATED_NEW_KEY);
+    ok_eq_hex(Status, DENIED_STATUS);
+    if (NT_SUCCESS(Status))
+        ok_eq_ulong(Disposition, (ULONG)REG_CREATED_NEW_KEY);
 
     /* D: the same write open as A, but from kernel mode without a forced check: not checked, not logged */
     ok_eq_hex(OpenAs(SOFTWARE, NameD, KEY_SET_VALUE, FALSE), STATUS_SUCCESS);
@@ -745,8 +761,8 @@ START_TEST(CmAclAudit)
     /* E twice: the second open takes the cached HKU descriptor and lands on the same entry */
     if (HaveUserHive)
     {
-        ok_eq_hex(OpenAs(UserHive, L"Software", KEY_SET_VALUE, TRUE), STATUS_SUCCESS);
-        ok_eq_hex(OpenAs(UserHive, L"Software", KEY_SET_VALUE, TRUE), STATUS_SUCCESS);
+        ok_eq_hex(OpenAs(UserHive, L"Software", KEY_SET_VALUE, TRUE), DENIED_STATUS);
+        ok_eq_hex(OpenAs(UserHive, L"Software", KEY_SET_VALUE, TRUE), DENIED_STATUS);
     }
 
     PsRevertToSelf();

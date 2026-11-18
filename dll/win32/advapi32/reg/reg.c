@@ -4024,9 +4024,24 @@ RegOpenKeyExW(HKEY hKey,
                                KeyHandle,
                                NULL);
 
-    Status = NtOpenKey((PHANDLE)phkResult,
-                       samDesired,
-                       &ObjectAttributes);
+    /*
+     * REG_OPTION_BACKUP_RESTORE goes to the kernel (NtOpenKeyEx): with SeBackupPrivilege or
+     * SeRestorePrivilege enabled the open gets the backup/restore rights whatever the key's DACL says,
+     * which is how backup tools and a caller handing a locked key back open it
+     */
+    if (ulOptions & REG_OPTION_BACKUP_RESTORE)
+    {
+        Status = NtOpenKeyEx((PHANDLE)phkResult,
+                             samDesired,
+                             &ObjectAttributes,
+                             REG_OPTION_BACKUP_RESTORE);
+    }
+    else
+    {
+        Status = NtOpenKey((PHANDLE)phkResult,
+                           samDesired,
+                           &ObjectAttributes);
+    }
 
 Exit:
 

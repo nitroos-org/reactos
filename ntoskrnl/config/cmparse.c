@@ -670,6 +670,21 @@ CmpDoCreate(IN PHHIVE Hive,
         goto Exit;
     }
 
+    /*
+     * The right Windows checks on the parent (KEY_CREATE_SUB_KEY, or
+     * KEY_CREATE_LINK for a link) before anything is created, when key
+     * access is enforced; otherwise the audit after the create records it
+     */
+    Status = CmpAclCheckKeyCreate(ParentKcb,
+                                  Name,
+                                  (ParseContext->CreateOptions & REG_OPTION_CREATE_LINK) ?
+                                      CM_REGACL_OP_CREATELINK : CM_REGACL_OP_CREATE,
+                                  AccessState,
+                                  AccessMode,
+                                  ParseContext->CreateOptions);
+    if (!NT_SUCCESS(Status))
+        goto Exit;
+
     /* Make the cell dirty for now */
     HvMarkCellDirty(Hive, Cell, FALSE);
 
@@ -818,7 +833,6 @@ CmpDoOpen(IN PHHIVE Hive,
     BOOLEAN IsLockShared = FALSE;
     PCM_KEY_BODY KeyBody = NULL;
     PCM_KEY_CONTROL_BLOCK Kcb = NULL;
-    ACCESS_MASK AclDesired, AclPrevious;
 
     /* Make sure the hive isn't locked */
     if ((Hive->HiveFlags & HIVE_IS_UNLOADING) &&
@@ -1010,36 +1024,22 @@ CmpDoOpen(IN PHHIVE Hive,
          */
         KeyBody->KcbLocked = TRUE;
 
-        /* What the access check is asked for, before it updates the access state */
-        AclDesired = AccessState->RemainingDesiredAccess;
-        AclPrevious = AccessState->PreviouslyGrantedAccess;
-
         /*
          * The open decision is the configuration manager's, not a check of
-         * the descriptor the key reports (that is the real one now): see
-         * CmpCheckKeyOpenAccess. It grants what opens always got until key
-         * access is enforced (registry ACL plan R8).
+         * the descriptor the key reports through the object manager: see
+         * CmpAclCheckKeyOpen. Unless key access is enforced (registry ACL
+         * mode 2), it grants what opens always got and the audit records
+         * what the key's own descriptor decides.
          */
-        if (!CmpCheckKeyOpenAccess(*Object,
-                                   AccessState,
-                                   AccessMode,
-                                   &Status))
+        if (!CmpAclCheckKeyOpen(*Object,
+                                Kcb,
+                                AccessState,
+                                AccessMode,
+                                AclOptions,
+                                &Status))
         {
             /* Access check failed */
             ObDereferenceObject(*Object);
-        }
-        else
-        {
-            /* Registry ACL audit: what Windows would decide (logged only, the open stands) */
-            CmpShadowAccessCheck(Kcb,
-                                 NULL,
-                                 CM_REGACL_OP_OPEN,
-                                 AccessState,
-                                 AclDesired,
-                                 AclPrevious,
-                                 AccessState->PreviouslyGrantedAccess,
-                                 AccessMode,
-                                 AclOptions);
         }
 
         /*
@@ -1106,6 +1106,12 @@ CmpCreateLinkNode(IN PHHIVE Hive,
         Status = STATUS_OBJECT_NAME_NOT_FOUND;
         goto Exit;
     }
+
+    /* Hive links are made from kernel mode; a user-mode one needs the create right when enforced */
+    Status = CmpAclCheckKeyCreate(ParentKcb, &Name, CM_REGACL_OP_LINKNODE, AccessState,
+                                  AccessMode, Context->CreateOptions);
+    if (!NT_SUCCESS(Status))
+        goto Exit;
 
     /* Allocate a link node */
     LinkCell = HvAllocateCell(Hive,
@@ -2659,8 +2665,8 @@ CmpParseKeyWorker(IN PVOID ParseObject,
                                Kcb,
                                &Current))
         {
-            /* Symlink parse succeeded */
-            Status = STATUS_REPARSE;
+            /* Symlink parse succeeded; a link in a user's hive stays in that user's hives */
+            Status = CmpAclCheckLinkFollow(Kcb, CompleteName) ? STATUS_REPARSE : STATUS_ACCESS_DENIED;
         }
         else
         {
@@ -2749,6 +2755,11 @@ KeyCachedOpenNow:
                             {
                                 /* Symlink parse failed */
                                 Status = STATUS_OBJECT_NAME_NOT_FOUND;
+                            }
+                            else if (!CmpAclCheckLinkFollow(Kcb, CompleteName))
+                            {
+                                /* A link in a user's hive stays in that user's hives */
+                                Status = STATUS_ACCESS_DENIED;
                             }
                         }
 
@@ -2877,8 +2888,8 @@ KeyCachedOpenNow:
                                        Kcb,
                                        &Current))
                 {
-                    /* Symlink parse succeeded */
-                    Status = STATUS_REPARSE;
+                    /* Symlink parse succeeded; a link in a user's hive stays in that user's hives */
+                    Status = CmpAclCheckLinkFollow(Kcb, CompleteName) ? STATUS_REPARSE : STATUS_ACCESS_DENIED;
                 }
                 else
                 {

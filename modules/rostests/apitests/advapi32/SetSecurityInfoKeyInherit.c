@@ -26,6 +26,81 @@ static const WCHAR ScratchPath[] = L"Software\\ReactOS-apitest-SetSecurityInfoKe
 static LSTATUS (WINAPI *pRegDeleteTreeW)(HKEY, LPCWSTR);
 #define RegDeleteTreeW pRegDeleteTreeW
 
+static BOOL RestoreSddl(HKEY Root, PCWSTR Path, SECURITY_INFORMATION Info, PCWSTR Sddl);
+
+/* Are key opens and creates decided by the keys' DACLs: Windows, or NitroOS in registry ACL mode 2 */
+static BOOL KeysEnforced(void)
+{
+    static int Enforced = -1;
+    HKEY Key;
+    DWORD Mode = 0, Size = sizeof(Mode), Type;
+
+    if (Enforced < 0)
+    {
+        Enforced = !is_reactos();
+        if (!Enforced &&
+            RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\RegAcl\\AuditStats",
+                          0, KEY_QUERY_VALUE, &Key) == ERROR_SUCCESS)
+        {
+            Enforced = RegQueryValueExW(Key, L"Mode", NULL, &Type, (LPBYTE)&Mode, &Size) == ERROR_SUCCESS &&
+                       Type == REG_DWORD && Mode == 2;
+            RegCloseKey(Key);
+        }
+    }
+    return Enforced;
+}
+
+/* Is the NETWORK SID in the caller's token (a remote shell on the Windows peer has it) */
+static BOOL CallerIsNetwork(void)
+{
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    PSID Network = NULL;
+    BOOL Member = FALSE;
+
+    if (AllocateAndInitializeSid(&NtAuthority, 1, SECURITY_NETWORK_RID, 0, 0, 0, 0, 0, 0, 0, &Network))
+    {
+        if (!CheckTokenMembership(NULL, Network, &Member))
+            Member = FALSE;
+        FreeSid(Network);
+    }
+    return Member;
+}
+
+/*
+ * Delete the scratch tree whatever the DACLs a test left on its keys: each key is first handed back to
+ * Administrators with backup/restore semantics (as an administrator may), then the tree is deleted.
+ * Where key access is enforced, a key a test shut away from the caller cannot be deleted otherwise,
+ * and the next test would find it in place of a new one.
+ */
+static void WipeTree(HKEY Root, PCWSTR Path, ULONG Depth)
+{
+    WCHAR Sub[600], Name[256];
+    DWORD Length, i;
+    HKEY Key;
+
+    if (Depth > 40)
+        return;
+    RestoreSddl(Root, Path, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, L"O:BAD:(A;;KA;;;BA)(A;;KA;;;SY)");
+    if (RegOpenKeyExW(Root, Path, REG_OPTION_OPEN_LINK, KEY_ENUMERATE_SUB_KEYS, &Key) != ERROR_SUCCESS)
+        return;
+    for (i = 0; ; i++)
+    {
+        Length = ARRAYSIZE(Name);
+        if (RegEnumKeyExW(Key, i, Name, &Length, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
+            break;
+        wsprintfW(Sub, L"%ls\\%ls", Path, Name);
+        WipeTree(Root, Sub, Depth + 1);
+    }
+    RegCloseKey(Key);
+}
+
+static void WipeScratch(void)
+{
+    WipeTree(HKEY_CURRENT_USER, ScratchPath, 0);
+    if (pRegDeleteTreeW)
+        pRegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+}
+
 typedef struct _ACE_INFO
 {
     UCHAR Type;
@@ -163,7 +238,7 @@ static void TestNamedRoundTrip(void)
     ULONG i, Explicit = 0;
 
     AllocateAndInitializeSid(&NtAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_USERS, 0, 0, 0, 0, 0, 0, &Users);
-    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    WipeScratch();
     Error = RegCreateKeyExW(HKEY_CURRENT_USER, ScratchPath, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &Key, NULL);
     ok_long(Error, ERROR_SUCCESS);
     if (Error)
@@ -220,7 +295,7 @@ Done:
     if (Sd) LocalFree(Sd);
     if (NewDacl) LocalFree(NewDacl);
     if (Key) RegCloseKey(Key);
-    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    WipeScratch();
     if (Users) FreeSid(Users);
 }
 
@@ -299,7 +374,7 @@ static void TestExtraCases(void)
     HKEY Probe;
 
     AllocateAndInitializeSid(&NtAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_USERS, 0, 0, 0, 0, 0, 0, &Users);
-    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    WipeScratch();
     RegDeleteTreeW(HKEY_CURRENT_USER, TargetName);
     if (!MakeKey(HKEY_CURRENT_USER, ScratchPath, 0, &Key))
         goto Done;
@@ -361,7 +436,15 @@ static void TestExtraCases(void)
         ok(D.Count && D.Aces[0].Type == ACCESS_DENIED_ACE_TYPE, "deny: first ACE of the existing subkey has type %u\n", D.Aces[0].Type);
         ok(D.Count && D.Aces[0].Flags == INHERITED_FLAGS, "deny: flags 0x%x, expected 0x%x\n", D.Aces[0].Flags, INHERITED_FLAGS);
         FreeDacl(&D);
-        if (MakeKey(DenyP, L"c2", 0, &C2))
+        /*
+         * The deny ACE for Users (KEY_WRITE includes KEY_CREATE_SUB_KEY) applies to a caller in Users, as
+         * administrators are: where key access is enforced (Windows; NitroOS in registry ACL mode 2) the
+         * create of the new subkey is refused
+         */
+        Error = RegCreateKeyExW(DenyP, L"c2", 0, NULL, 0, KEY_ALL_ACCESS, NULL, &C2, NULL);
+        ok(Error == ERROR_SUCCESS || (Error == ERROR_ACCESS_DENIED && KeysEnforced()),
+           "deny: create of the new subkey: %lu\n", Error);
+        if (Error == ERROR_SUCCESS)
         {
             ReadDacl(C2, &D);
             ok(D.Count >= 3, "deny: new subkey has %lu ACEs\n", D.Count);
@@ -517,7 +600,7 @@ Done:
     if (DenyP) RegCloseKey(DenyP);
     if (Target) RegCloseKey(Target);
     if (Key) RegCloseKey(Key);
-    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    WipeScratch();
     RegDeleteTreeW(HKEY_CURRENT_USER, TargetName);
     if (Users) FreeSid(Users);
 }
@@ -537,7 +620,7 @@ static void TestDuplicateParent(void)
     DWORD Error;
     ULONG i;
 
-    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    WipeScratch();
     Error = RegCreateKeyExW(HKEY_CURRENT_USER, ScratchPath, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &Key, NULL);
     ok_long(Error, ERROR_SUCCESS);
     if (Error)
@@ -600,7 +683,7 @@ Done1:
 Done:
     FreeDacl(&Initial);
     RegCloseKey(Key);
-    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    WipeScratch();
 }
 
 /*
@@ -617,7 +700,7 @@ static void TestProtectKeepsAces(void)
     DWORD Error;
     ULONG i;
 
-    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    WipeScratch();
     Error = RegCreateKeyExW(HKEY_CURRENT_USER, ScratchPath, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &Key, NULL);
     ok_long(Error, ERROR_SUCCESS);
     if (Error)
@@ -687,7 +770,7 @@ Done:
     if (Grand) RegCloseKey(Grand);
     if (Child) RegCloseKey(Child);
     RegCloseKey(Key);
-    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    WipeScratch();
 }
 
 /* a plain RegSetKeySecurity: what a legacy writer does, no auto-inheritance */
@@ -810,7 +893,7 @@ static void TestNoWidening(void)
     AllocateAndInitializeSid(&NtAuthority, 1, SECURITY_NETWORK_RID, 0, 0, 0, 0, 0, 0, 0, &Network);
     AllocateAndInitializeSid(&WorldAuthority, 1, SECURITY_WORLD_RID, 0, 0, 0, 0, 0, 0, 0, &World);
     AllocateAndInitializeSid(&NtAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_USERS, 0, 0, 0, 0, 0, 0, &Users);
-    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    WipeScratch();
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(ParentSddl, SDDL_REVISION_1, &Attributes.lpSecurityDescriptor, NULL))
     {
         skip("cannot make the parent descriptor: %lu\n", GetLastError());
@@ -911,7 +994,7 @@ static void TestNoWidening(void)
 Done:
     if (Attributes.lpSecurityDescriptor) LocalFree(Attributes.lpSecurityDescriptor);
     if (Key) RegCloseKey(Key);
-    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    WipeScratch();
     if (Network) FreeSid(Network);
     if (World) FreeSid(World);
     if (Users) FreeSid(Users);
@@ -936,7 +1019,7 @@ static void TestExplicitBeforeTail(void)
 
     AllocateAndInitializeSid(&NtAuthority, 1, SECURITY_NETWORK_RID, 0, 0, 0, 0, 0, 0, 0, &Network);
     AllocateAndInitializeSid(&WorldAuthority, 1, SECURITY_WORLD_RID, 0, 0, 0, 0, 0, 0, 0, &World);
-    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    WipeScratch();
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(ParentSddl, SDDL_REVISION_1, &Attributes.lpSecurityDescriptor, NULL))
     {
         skip("cannot make the parent descriptor: %lu\n", GetLastError());
@@ -988,7 +1071,7 @@ static void TestExplicitBeforeTail(void)
 Done:
     if (Attributes.lpSecurityDescriptor) LocalFree(Attributes.lpSecurityDescriptor);
     if (Key) RegCloseKey(Key);
-    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    WipeScratch();
     if (Network) FreeSid(Network);
     if (World) FreeSid(World);
 }
@@ -1025,7 +1108,7 @@ static void TestGetUsesKeyOwner(void)
     DWORD Error, Length;
     ULONG i;
 
-    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    WipeScratch();
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(ParentSddl, SDDL_REVISION_1, &Attributes.lpSecurityDescriptor, NULL))
     {
         skip("cannot make the parent descriptor: %lu\n", GetLastError());
@@ -1102,7 +1185,7 @@ Done:
     if (Child) RegCloseKey(Child);
     if (Attributes.lpSecurityDescriptor) LocalFree(Attributes.lpSecurityDescriptor);
     if (Key) RegCloseKey(Key);
-    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    WipeScratch();
 }
 
 /*
@@ -1194,7 +1277,7 @@ static void TestOracleRows(void)
     DWORD Error;
     ULONG i;
 
-    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    WipeScratch();
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(ParentSddl, SDDL_REVISION_1, &Attributes.lpSecurityDescriptor, NULL))
     {
         skip("cannot make the parent descriptor: %lu\n", GetLastError());
@@ -1304,7 +1387,7 @@ static void TestOracleRows(void)
 Done:
     if (Attributes.lpSecurityDescriptor) LocalFree(Attributes.lpSecurityDescriptor);
     if (Key) RegCloseKey(Key);
-    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    WipeScratch();
 }
 
 /*
@@ -1409,7 +1492,7 @@ static void TestHiveRoot(void)
     GetTempPathW(ARRAYSIZE(File), File);
     lstrcatW(File, L"ros-apitest-hive-mt.hiv");
     DeleteFileW(File);
-    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    WipeScratch();
 
     Error = RegCreateKeyExW(HKEY_CURRENT_USER, Source, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &Src, NULL);
     ok_long(Error, ERROR_SUCCESS);
@@ -1490,7 +1573,7 @@ Done:
     }
     if (Src) RegCloseKey(Src);
     DeleteFileW(File);
-    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    WipeScratch();
     if (Auth) FreeSid(Auth);
 }
 
@@ -1505,7 +1588,7 @@ static void TestUnreadableParent(void)
 
     AllocateAndInitializeSid(&NtAuthority, 1, SECURITY_AUTHENTICATED_USER_RID, 0, 0, 0, 0, 0, 0, 0, &Auth);
     wsprintfW(Parent, L"%ls\\U", ScratchPath);
-    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    WipeScratch();
     Error = RegCreateKeyExW(HKEY_CURRENT_USER, ScratchPath, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &Scratch, NULL);
     ok_long(Error, ERROR_SUCCESS);
     if (Error || !Auth || !MakeKey(Scratch, L"U", 0, &Up))
@@ -1563,7 +1646,7 @@ Done:
     if (K) RegCloseKey(K);
     if (Up) RegCloseKey(Up);
     if (Scratch) RegCloseKey(Scratch);
-    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    WipeScratch();
     if (Auth) FreeSid(Auth);
 }
 
@@ -1581,7 +1664,7 @@ static void TestClosedSubkey(void)
     BOOL Reads[8];
 
     AllocateAndInitializeSid(&NtAuthority, 1, SECURITY_AUTHENTICATED_USER_RID, 0, 0, 0, 0, 0, 0, 0, &Auth);
-    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    WipeScratch();
     Error = RegCreateKeyExW(HKEY_CURRENT_USER, ScratchPath, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &Scratch, NULL);
     ok_long(Error, ERROR_SUCCESS);
     if (Error || !Auth || !MakeKey(Scratch, L"T", 0, &T))
@@ -1654,7 +1737,7 @@ Done:
     if (B1) RegCloseKey(B1);
     if (T) RegCloseKey(T);
     if (Scratch) RegCloseKey(Scratch);
-    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    WipeScratch();
     if (Auth) FreeSid(Auth);
 }
 
@@ -1726,7 +1809,7 @@ static void TestLegacySubkeys(void)
     DWORD Error;
     ULONG i;
 
-    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    WipeScratch();
     Error = RegCreateKeyExW(HKEY_CURRENT_USER, ScratchPath, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &Scratch, NULL);
     ok_long(Error, ERROR_SUCCESS);
     if (Error || !MakeKey(Scratch, L"T", 0, &T))
@@ -1841,7 +1924,7 @@ Done:
     }
     if (T) RegCloseKey(T);
     if (Scratch) RegCloseKey(Scratch);
-    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    WipeScratch();
 }
 #undef DACL_IS
 
@@ -1944,7 +2027,7 @@ static void TestParentSetMatch(void)
     DWORD Error;
     ULONG i;
 
-    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    WipeScratch();
     Error = RegCreateKeyExW(HKEY_CURRENT_USER, ScratchPath, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &Scratch, NULL);
     ok_long(Error, ERROR_SUCCESS);
     if (Error)
@@ -1987,7 +2070,18 @@ static void TestParentSetMatch(void)
         wsprintfW(Path, L"%ls\\%ls\\s", ScratchPath, Name);
         trace("%ls\n", Rows[i].Name);
         DaclSddlIs(Path, Rows[i].ExpectedS, __LINE__);
-        if (Rows[i].ExpectedG)
+        /*
+         * The walk descends into s only if s grants the caller query and enumerate (measured on Windows);
+         * the expected g values come from a caller with the NETWORK SID (the remote shell of the peer),
+         * which several new DACLs of s grant read. Where key access is enforced and s no longer lets this
+         * caller read it, g is left as it was, on Windows as here.
+         */
+        if (Rows[i].ExpectedG && KeysEnforced() && !CallerIsNetwork() &&
+            !KeyOpens(HKEY_CURRENT_USER, Path, KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS))
+        {
+            skip("%ls: s does not let this caller read it (no NETWORK SID): no descent to g\n", Rows[i].Name);
+        }
+        else if (Rows[i].ExpectedG)
         {
             wsprintfW(Path, L"%ls\\%ls\\s\\g", ScratchPath, Name);
             DaclSddlIs(Path, Rows[i].ExpectedG, __LINE__);
@@ -2011,7 +2105,7 @@ Done:
         }
     }
     if (Scratch) RegCloseKey(Scratch);
-    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    WipeScratch();
 }
 #undef SYF
 #undef WDR
@@ -2035,7 +2129,7 @@ static void TestParentSetNested(void)
     DWORD Error;
     ULONG i;
 
-    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    WipeScratch();
     Error = RegCreateKeyExW(HKEY_CURRENT_USER, ScratchPath, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &Scratch, NULL);
     ok_long(Error, ERROR_SUCCESS);
     if (Error || !MakeKey(Scratch, L"q", 0, &Q))
@@ -2077,7 +2171,7 @@ Done:
         RestoreSddl(HKEY_CURRENT_USER, Path, DACL_SECURITY_INFORMATION, L"D:P(A;;KA;;;BA)(A;;KA;;;SY)");
     }
     if (Scratch) RegCloseKey(Scratch);
-    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    WipeScratch();
 }
 
 /*
@@ -2190,7 +2284,7 @@ static void TestDuplicateAces(void)
     ULONG i, Count = 0, k;
     static const PCWSTR Tails[] = {L"\\c\\g", L"\\c\\n", L"\\c", L""};
 
-    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    WipeScratch();
     Error = RegCreateKeyExW(HKEY_CURRENT_USER, ScratchPath, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &Scratch, NULL);
     ok_long(Error, ERROR_SUCCESS);
     if (Error)
@@ -2340,7 +2434,7 @@ Done:
         }
     }
     if (Scratch) RegCloseKey(Scratch);
-    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    WipeScratch();
 }
 
 START_TEST(SetSecurityInfoKeyInherit)
@@ -2351,6 +2445,18 @@ START_TEST(SetSecurityInfoKeyInherit)
         skip("RegDeleteTreeW is not available\n");
         return;
     }
+    /*
+     * The tests shut keys away from the caller and hand them back with SeRestorePrivilege. Where key
+     * access is enforced, a caller without it (a standard user) is left with keys it can neither
+     * change nor delete, and every later test fails on them
+     */
+    if (KeysEnforced() && !EnableRestorePrivileges(TRUE))
+    {
+        EnableRestorePrivileges(FALSE);
+        skip("key access is enforced and the caller cannot enable SeRestorePrivilege (run as an administrator)\n");
+        return;
+    }
+    EnableRestorePrivileges(FALSE);
 
     TestNamedRoundTrip();
     TestExtraCases();
@@ -2379,7 +2485,7 @@ START_TEST(SetSecurityInfoKeyInherit)
     AllocateAndInitializeSid(&NtAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_USERS, 0, 0, 0, 0, 0, 0, &Users);
     AllocateAndInitializeSid(&WorldAuthority, 1, SECURITY_WORLD_RID, 0, 0, 0, 0, 0, 0, 0, &World);
 
-    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    WipeScratch();
     Error = RegCreateKeyExW(HKEY_CURRENT_USER, ScratchPath, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &Key, NULL);
     ok_long(Error, ERROR_SUCCESS);
     if (Error)
@@ -2480,7 +2586,7 @@ Done:
     if (Child2) RegCloseKey(Child2);
     if (Child1) RegCloseKey(Child1);
     if (Key) RegCloseKey(Key);
-    RegDeleteTreeW(HKEY_CURRENT_USER, ScratchPath);
+    WipeScratch();
     if (Users) FreeSid(Users);
     if (World) FreeSid(World);
 }

@@ -61,15 +61,16 @@ C_ASSERT(sizeof(CMP_LEGACY_KEY_SD) <= CMP_LEGACY_SD_BUFFER);
 /* FUNCTIONS *****************************************************************/
 
 /*
- * The access decision of a key open (CmpDoOpen), made in the configuration
- * manager rather than by the object manager: ObCheckObjectAccess would check
- * the descriptor the key reports (NtQuerySecurityObject), which is now the
- * key's real one, and so would enforce key security in every mode. Until
- * enforcement exists (registry ACL plan R8, mode 2 only), the decision is the
- * one opens always had: the check runs against the legacy descriptor, so it
- * grants what was granted before (and still asks for SeSecurityPrivilege for
- * ACCESS_SYSTEM_SECURITY), and the audit mode's shadow check (CmpDoOpen)
- * records what Windows would decide. Same steps as ObCheckObjectAccess: the
+ * The access decision of a key open (CmpDoOpen, through CmpAclCheckKeyOpen)
+ * when key access is not enforced, and for kernel-mode opens: made in the
+ * configuration manager rather than by the object manager, since
+ * ObCheckObjectAccess would check the descriptor the key reports
+ * (NtQuerySecurityObject), which is the key's real one, and so would enforce
+ * key security in every mode. The check runs against the legacy descriptor,
+ * so it grants what was granted before (and still asks for SeSecurityPrivilege
+ * for ACCESS_SYSTEM_SECURITY), and the audit mode's shadow check records what
+ * the key's own descriptor decides; registry ACL mode 2 (enforce) decides by
+ * that descriptor instead (cmacl.c). Same steps as ObCheckObjectAccess: the
  * privileges used go into the access state, the granted access moves from
  * the remaining to the granted mask, and the open audit alarm runs.
  *
@@ -693,6 +694,87 @@ CmpAssignSecurityDescriptor(IN PCM_KEY_CONTROL_BLOCK Kcb,
         if (NT_SUCCESS(Status))
             Node->Security = SecurityCell;
     }
+    HvReleaseCell(Hive, Kcb->KeyCell);
+    return Status;
+}
+
+/*
+ * Give a key that has no stored descriptor the one passed (a validated,
+ * self-relative copy): the stamping of hive roots (CmpAclStampHiveRoot).
+ * A key that has one keeps it. Same storage steps as a set (flusher lock
+ * shared, the cell switched under the hive's security lock), but nothing
+ * else changes: no last write time, no notification, as the descriptor the
+ * key reports stays the same. The caller holds the KCB exclusively.
+ */
+NTSTATUS
+NTAPI
+CmpStampKeySecurity(
+    _In_ PCM_KEY_CONTROL_BLOCK Kcb,
+    _In_ PSECURITY_DESCRIPTOR SecurityDescriptor)
+{
+    PHHIVE Hive = Kcb->KeyHive;
+    PCM_KEY_NODE Node;
+    HCELL_INDEX SecurityCell;
+    BOOLEAN Acquired;
+    ULONG Length;
+    NTSTATUS Status;
+
+    /* A read-only (flat) hive cannot be written: nothing to stamp there */
+    if (!Hive || Hive->ReadOnly || Kcb->KeyCell == HCELL_NIL ||
+        (Kcb->ExtFlags & (CM_KCB_KEY_NON_EXIST | CM_KCB_READ_ONLY_KEY)) || Kcb->Delete)
+    {
+        return STATUS_ACCESS_DENIED;
+    }
+
+    Length = RtlLengthSecurityDescriptor(SecurityDescriptor);
+    if (!(((PISECURITY_DESCRIPTOR)SecurityDescriptor)->Control & SE_SELF_RELATIVE) ||
+        Length > CMP_MAX_STORED_SD_LENGTH ||
+        !RtlValidRelativeSecurityDescriptor(SecurityDescriptor, Length, 0))
+    {
+        return STATUS_INVALID_SECURITY_DESCR;
+    }
+
+    Node = (PCM_KEY_NODE)HvGetCell(Hive, Kcb->KeyCell);
+    if (!Node)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    if (Node->Signature != CM_KEY_NODE_SIGNATURE)
+    {
+        HvReleaseCell(Hive, Kcb->KeyCell);
+        return STATUS_REGISTRY_CORRUPT;
+    }
+
+    /* The same lock order as a set: flusher, dirty mark, then the security lock */
+    CmpLockHiveFlusherShared((PCMHIVE)Hive);
+    if (Node->Security != HCELL_NIL)
+    {
+        /* It has one: stamping never replaces a descriptor */
+        Status = STATUS_OBJECT_NAME_EXISTS;
+    }
+    else if (!HvMarkCellDirty(Hive, Kcb->KeyCell, FALSE))
+    {
+        Status = STATUS_NO_LOG_SPACE;
+    }
+    else
+    {
+        Acquired = CmpAcquireHiveSecurityLock(Hive);
+        /* Looked at again under the lock (the KCB lock already keeps sets out) */
+        if (Node->Security != HCELL_NIL)
+        {
+            Status = STATUS_OBJECT_NAME_EXISTS;
+        }
+        else
+        {
+            Status = CmpInsertSecurityDescriptor((PCMHIVE)Hive,
+                                                 SecurityDescriptor,
+                                                 Length,
+                                                 HvGetCellType(Kcb->KeyCell),
+                                                 &SecurityCell);
+            if (NT_SUCCESS(Status))
+                Node->Security = SecurityCell;
+        }
+        CmpReleaseHiveSecurityLock(Hive, Acquired);
+    }
+    CmpUnlockHiveFlusher((PCMHIVE)Hive);
     HvReleaseCell(Hive, Kcb->KeyCell);
     return Status;
 }

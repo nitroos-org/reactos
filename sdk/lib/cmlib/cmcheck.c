@@ -916,7 +916,8 @@ CmpValidateValueList(
          */
         ValueSize = HvGetCellSize(Hive, ValueListData);
         TotalValueLength = ValueListCount * sizeof(HCELL_INDEX);
-        if (TotalValueLength > ValueSize)
+        /* The count comes from the hive: compare without the product, which can wrap */
+        if (ValueListCount > ValueSize / sizeof(HCELL_INDEX))
         {
             DPRINT1("The value list is bigger than the cell (value list size %u, cell size %u)\n",
                     TotalValueLength, ValueSize);
@@ -1399,6 +1400,21 @@ CmpValidateKey(
             DPRINT1("The parent key node signature is not valid\n");
             return CM_CHECK_REGISTRY_BAD_KEY_NODE_SIGNATURE;
         }
+    }
+
+    /*
+     * A key of a hive file is never a hive exit (a link node of the master
+     * hive, made in memory when a hive is linked): its subkey fields would be
+     * taken for a pointer to another hive (CmpHandleExitNode). The flag comes
+     * from the file, which may have been edited (a user's profile hive): drop
+     * it, the key is checked as the ordinary key it is.
+     */
+    if (CellData->u.KeyNode.Flags & KEY_HIVE_EXIT)
+    {
+        DPRINT1("Key 0x%x is marked as a hive exit in a hive file, flag dropped\n", CurrentCell);
+        CellData->u.KeyNode.Flags &= ~KEY_HIVE_EXIT;
+        if (FixHive)
+            HvMarkCellDirty(Hive, CurrentCell, FALSE);
     }
 
     /*
@@ -2000,7 +2016,9 @@ HvValidateHive(
              * is not bogus.
              */
             Bin = GET_HHIVE_BIN(Hive, StorageIndex, BlockIndex);
-            if (Bin->Size > (StorageLength * HBLOCK_SIZE) ||
+            /* The loop advances by the bin's size: less than a block would never end it */
+            if (Bin->Size < HBLOCK_SIZE || (Bin->Size % HBLOCK_SIZE) != 0 ||
+                Bin->Size > (StorageLength * HBLOCK_SIZE) ||
                 (Bin->FileOffset / HBLOCK_SIZE) != BlockIndex)
             {
                 DPRINT1("Bin size or offset is corrupt (bin size %u, file offset %u, storage length %u)\n",

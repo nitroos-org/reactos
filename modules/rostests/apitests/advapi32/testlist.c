@@ -86,6 +86,8 @@ extern void func_RegRenameKeyPersist(void);
 extern void func_RegRenameKeyStress(void);
 extern void func_RegGetValue(void);
 extern void func_RegHiveKeyControl(void);
+extern void func_RegEnforceGaps(void);
+extern void func_RegHiveRootStamp(void);
 extern void func_RegSdTemplates(void);
 extern void func_RegSecurityDump(void);
 extern void func_RegSecurityDefaultSd(void);
@@ -93,6 +95,7 @@ extern void func_RegSecurityAccess(void);
 extern void func_RegSecurityMapping(void);
 extern void func_RegSecurityRoundTrip(void);
 extern void func_RegSecurityCreate(void);
+extern void func_RegSecurityEnforce(void);
 extern void func_RegSecurityQuerySet(void);
 extern void func_RegSharedKeyName(void);
 extern void func_RestrictedSidsCopy(void);
@@ -240,6 +243,8 @@ const struct test winetest_testlist[] =
     { "RegRenameKeyStress", func_RegRenameKeyStress },
     { "RegGetValue", func_RegGetValue },
     { "RegHiveKeyControl", func_RegHiveKeyControl },
+    { "RegEnforceGaps", func_RegEnforceGaps },
+    { "RegHiveRootStamp", func_RegHiveRootStamp },
     { "RegSdTemplates", func_RegSdTemplates },
     { "RegSecurityDump", func_RegSecurityDump },
     { "RegSecurityDefaultSd", func_RegSecurityDefaultSd },
@@ -247,6 +252,7 @@ const struct test winetest_testlist[] =
     { "RegSecurityMapping", func_RegSecurityMapping },
     { "RegSecurityRoundTrip", func_RegSecurityRoundTrip },
     { "RegSecurityCreate", func_RegSecurityCreate },
+    { "RegSecurityEnforce", func_RegSecurityEnforce },
     { "RegSecurityQuerySet", func_RegSecurityQuerySet },
     { "RegSharedKeyName", func_RegSharedKeyName },
     { "RestrictedSidsCopy", func_RestrictedSidsCopy },
