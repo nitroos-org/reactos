@@ -55,9 +55,6 @@ DllMain(HANDLE hModule,
     switch (dwReason)
     {
         case DLL_PROCESS_ATTACH:
-            /* Save DLL Handle */
-            WsDllHandle = hModule;
-
             /* Get Global Heap */
             WsSockHeap = GetProcessHeap();
 
@@ -75,6 +72,12 @@ DllMain(HANDLE hModule,
             WsCreateStartupSynchronization();
             WsAsyncGlobalInitialize();
             WsRasInitializeAutodial();
+
+            /* Save DLL Handle, only now: when the attach fails, the C runtime
+             * still calls us with DLL_PROCESS_DETACH, and that call must not
+             * touch the critical sections above (they were not initialized;
+             * entering one waits forever, with the loader lock held) */
+            WsDllHandle = hModule;
             break;
 
         case DLL_THREAD_ATTACH:
@@ -86,30 +89,33 @@ DllMain(HANDLE hModule,
             break;
 
         case DLL_PROCESS_DETACH:
-            /* Make sure we were initialized */
+            /* Make sure we were initialized (not after a failed attach) */
             if (!WsDllHandle) break;
 
-            /* Check if this was a FreeLibrary call (ie: not process cleanup) */
-            if (lpReserved)
-            {
-                /* Destroy the thread which is exiting */
-                WsThreadDestroyCurrentThread();
+            /* Clean up on FreeLibrary as well as at process exit (lpReserved
+             * set), which was the only case before: the TLS index and the
+             * critical section debug data belong to the process and outlive
+             * this mapping, so every load/unload cycle that kept them leaked
+             * a TLS index, until TlsAlloc failed in DLL_PROCESS_ATTACH */
 
-                /* Check if we have a process and destroy it */
-                WsProcess = WsGetProcess();
-                if (WsProcess) WsProcDelete(WsProcess);
+            /* Destroy the thread which is exiting */
+            WsThreadDestroyCurrentThread();
 
-                /* Cleanup the Thread and Socket managers */
-                WsThreadCleanup();
-                WsSockCleanup();
+            /* Check if we have a process and destroy it */
+            WsProcess = WsGetProcess();
+            if (WsProcess) WsProcDelete(WsProcess);
 
-                /* Cleanup critical sections */
-                WsDestroyStartupSynchronization();
-                WsAsyncGlobalTerminate();
+            /* Cleanup the Thread and Socket managers */
+            WsThreadCleanup();
+            WsSockCleanup();
 
-                /* Free the TLS Index */
-                TlsFree(GlobalTlsIndex);
-            }
+            /* Cleanup critical sections */
+            WsDestroyStartupSynchronization();
+            WsAsyncGlobalTerminate();
+
+            /* Free the TLS Index */
+            TlsFree(GlobalTlsIndex);
+            GlobalTlsIndex = TLS_OUT_OF_INDEXES;
 
             /* Cleanup RAS auto-dial helper */
             WsRasUninitializeAutodial();
