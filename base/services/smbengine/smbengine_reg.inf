@@ -1,0 +1,17 @@
+; SMB client engine service: own process, LocalService, demand start (nothing starts it at boot).
+; Starting it starts mrxsmb (DependOnService). Recovery: restart after 1 s, 5 s, 30 s; an error exit
+; counts as a failure (FailureActionsOnNonCrashFailures). RequiredPrivileges and ServiceSidType are
+; recorded for the service controller; it does not apply them to the process token yet.
+[AddReg]
+HKLM,"SYSTEM\CurrentControlSet\Services\smbengine","Description",0x00000000,"Makes the SMB connections of the SMB client for each signed-in user. Started on demand."
+HKLM,"SYSTEM\CurrentControlSet\Services\smbengine","DisplayName",0x00000000,"SMB Client Engine"
+HKLM,"SYSTEM\CurrentControlSet\Services\smbengine","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\smbengine","ImagePath",0x00020000,"%SystemRoot%\system32\smbengine.exe"
+HKLM,"SYSTEM\CurrentControlSet\Services\smbengine","ObjectName",0x00000000,"NT AUTHORITY\LocalService"
+HKLM,"SYSTEM\CurrentControlSet\Services\smbengine","Start",0x00010001,0x00000003
+HKLM,"SYSTEM\CurrentControlSet\Services\smbengine","Type",0x00010001,0x00000010
+HKLM,"SYSTEM\CurrentControlSet\Services\smbengine","DependOnService",0x00010000,"mrxsmb"
+HKLM,"SYSTEM\CurrentControlSet\Services\smbengine","RequiredPrivileges",0x00010000,"SeImpersonatePrivilege","SeChangeNotifyPrivilege"
+HKLM,"SYSTEM\CurrentControlSet\Services\smbengine","ServiceSidType",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\smbengine","FailureActions",0x00000001,80,51,01,00,00,00,00,00,00,00,00,00,03,00,00,00,14,00,00,00,01,00,00,00,E8,03,00,00,01,00,00,00,88,13,00,00,01,00,00,00,30,75,00,00
+HKLM,"SYSTEM\CurrentControlSet\Services\smbengine","FailureActionsOnNonCrashFailures",0x00010001,0x00000001
