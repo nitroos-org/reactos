@@ -11,6 +11,7 @@ extern void func_PanningFeedback(void);
 extern void func_SetThemeAppProperties(void);
 extern void func_SetWindowTheme(void);
 extern void func_ThemeRegion(void);
+extern void func_VisualStyles(void);
 
 const struct test winetest_testlist[] =
 {
@@ -23,5 +24,6 @@ const struct test winetest_testlist[] =
     { "SetWindowTheme", func_SetWindowTheme },
     { "SetThemeAppProperties", func_SetThemeAppProperties },
     { "ThemeRegion", func_ThemeRegion },
+    { "VisualStyles", func_VisualStyles },
     { 0, 0 }
 };
