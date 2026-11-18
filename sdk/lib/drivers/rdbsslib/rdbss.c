@@ -3051,13 +3051,123 @@ RxCommonLockControl(
     return Status;
 }
 
+/*
+ * @implemented
+ *
+ * IRP_MJ_QUERY_EA, passed to MRxQueryEaInfo (Info.Buffer, Info.LengthRemaining
+ * and QueryEa.*). A mini-redirector without EA support (no MRxQueryEaInfo)
+ * gets STATUS_EAS_NOT_SUPPORTED, what a Windows redirector returns for a
+ * server without EAs. The EA name list comes from the requestor and is
+ * captured into pool before the mini-redirector sees it.
+ */
 NTSTATUS
 NTAPI
 RxCommonQueryEa(
     PRX_CONTEXT Context)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PIRP Irp;
+    PFCB Fcb;
+    NTSTATUS Status;
+    PIO_STACK_LOCATION Stack;
+    PVOID CapturedList;
+    ULONG Length, ListLength;
+
+    PAGED_CODE();
+
+    Fcb = (PFCB)Context->pFcb;
+    Irp = Context->CurrentIrp;
+    Stack = Context->CurrentIrpSp;
+    Length = Stack->Parameters.QueryEa.Length;
+    ListLength = Stack->Parameters.QueryEa.EaListLength;
+    CapturedList = NULL;
+
+    DPRINT("RxCommonQueryEa(%p) FCB: %p, Length: %lu\n", Context, Fcb, Length);
+
+    if (NodeType(Fcb) != RDBSS_NTC_STORAGE_TYPE_FILE && NodeType(Fcb) != RDBSS_NTC_STORAGE_TYPE_DIRECTORY)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (Fcb->MRxDispatch->MRxQueryEaInfo == NULL)
+    {
+        return STATUS_EAS_NOT_SUPPORTED;
+    }
+
+    /* An EA list is at most 64 KB on the wire */
+    if (Stack->Parameters.QueryEa.EaList != NULL && (ListLength == 0 || ListLength > 0x10000))
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    Status = RxAcquireSharedFcb(Context, Fcb);
+    if (Status == STATUS_LOCK_NOT_GRANTED)
+    {
+        return RxFsdPostRequest(Context);
+    }
+    else if (!NT_SUCCESS(Status))
+    {
+        return Status;
+    }
+
+    _SEH2_TRY
+    {
+        if (Stack->Parameters.QueryEa.EaList != NULL)
+        {
+            CapturedList = RxAllocatePoolWithTag(PagedPool, ListLength, RX_MISC_POOLTAG);
+            if (CapturedList == NULL)
+            {
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+                _SEH2_LEAVE;
+            }
+
+            if (Irp->RequestorMode != KernelMode)
+            {
+                ProbeForRead(Stack->Parameters.QueryEa.EaList, ListLength, sizeof(UCHAR));
+            }
+            RtlCopyMemory(CapturedList, Stack->Parameters.QueryEa.EaList, ListLength);
+        }
+
+        Context->Info.Buffer = NULL;
+        if (Length != 0)
+        {
+            RxLockUserBuffer(Context, IoWriteAccess, Length);
+            Context->Info.Buffer = RxNewMapUserBuffer(Context);
+            if (Context->Info.Buffer == NULL)
+            {
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+                _SEH2_LEAVE;
+            }
+        }
+
+        Context->Info.LengthRemaining = (LONG)Length;
+        Context->QueryEa.UserEaList = CapturedList;
+        Context->QueryEa.UserEaListLength = (CapturedList != NULL ? ListLength : 0);
+        Context->QueryEa.UserEaIndex = Stack->Parameters.QueryEa.EaIndex;
+        Context->QueryEa.RestartScan = BooleanFlagOn(Stack->Flags, SL_RESTART_SCAN);
+        Context->QueryEa.ReturnSingleEntry = BooleanFlagOn(Stack->Flags, SL_RETURN_SINGLE_ENTRY);
+        Context->QueryEa.IndexSpecified = BooleanFlagOn(Stack->Flags, SL_INDEX_SPECIFIED);
+
+        MINIRDR_CALL(Status, Context, Fcb->MRxDispatch, MRxQueryEaInfo, (Context));
+
+        if (NT_SUCCESS(Status) || Status == STATUS_BUFFER_OVERFLOW)
+        {
+            Irp->IoStatus.Information = Length - Context->Info.LengthRemaining;
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+
+    RxReleaseFcb(Context, Fcb);
+    if (CapturedList != NULL)
+    {
+        RxFreePoolWithTag(CapturedList, RX_MISC_POOLTAG);
+    }
+
+    DPRINT("Status: %lx\n", Status);
+    return Status;
 }
 
 /*
@@ -3268,22 +3378,117 @@ RxCommonQueryInformation(
 #undef SET_SIZE_AND_QUERY
 }
 
+/*
+ * @implemented
+ *
+ * Quotas over a redirector: not supported (no M1 consumer); the request is
+ * refused cleanly rather than passed with unvalidated SID lists.
+ */
 NTSTATUS
 NTAPI
 RxCommonQueryQuotaInformation(
     PRX_CONTEXT Context)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PAGED_CODE();
+
+    UNREFERENCED_PARAMETER(Context);
+    return STATUS_INVALID_DEVICE_REQUEST;
 }
 
+/*
+ * @implemented
+ *
+ * IRP_MJ_QUERY_SECURITY: the descriptor is the server's. Contract
+ * (MRxQuerySdInfo): QuerySecurity.SecurityInformation, Info.Buffer (the
+ * locked user buffer) and Info.LengthRemaining in; InformationToReturn out,
+ * the length returned or, with STATUS_BUFFER_TOO_SMALL, the length needed.
+ * A short buffer is reported as STATUS_BUFFER_OVERFLOW with the needed length
+ * in IoStatus.Information, the form the I/O manager turns into
+ * STATUS_BUFFER_TOO_SMALL for NtQuerySecurityObject. Without MRxQuerySdInfo
+ * the request is invalid for the device, so the I/O manager supplies its
+ * default descriptor, as for any file system without security.
+ */
 NTSTATUS
 NTAPI
 RxCommonQuerySecurity(
     PRX_CONTEXT Context)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PIRP Irp;
+    PFCB Fcb;
+    NTSTATUS Status;
+    PIO_STACK_LOCATION Stack;
+    ULONG Length;
+
+    PAGED_CODE();
+
+    Fcb = (PFCB)Context->pFcb;
+    Irp = Context->CurrentIrp;
+    Stack = Context->CurrentIrpSp;
+    Length = Stack->Parameters.QuerySecurity.Length;
+
+    DPRINT("RxCommonQuerySecurity(%p) FCB: %p, Info: %lx, Length: %lu\n", Context, Fcb,
+           Stack->Parameters.QuerySecurity.SecurityInformation, Length);
+
+    if (NodeType(Fcb) != RDBSS_NTC_STORAGE_TYPE_FILE && NodeType(Fcb) != RDBSS_NTC_STORAGE_TYPE_DIRECTORY &&
+        NodeType(Fcb) != RDBSS_NTC_STORAGE_TYPE_UNKNOWN)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (Fcb->MRxDispatch->MRxQuerySdInfo == NULL)
+    {
+        return STATUS_INVALID_DEVICE_REQUEST;
+    }
+
+    Status = RxAcquireSharedFcb(Context, Fcb);
+    if (Status == STATUS_LOCK_NOT_GRANTED)
+    {
+        return RxFsdPostRequest(Context);
+    }
+    else if (!NT_SUCCESS(Status))
+    {
+        return Status;
+    }
+
+    _SEH2_TRY
+    {
+        Context->Info.Buffer = NULL;
+        if (Length != 0)
+        {
+            RxLockUserBuffer(Context, IoWriteAccess, Length);
+            Context->Info.Buffer = RxNewMapUserBuffer(Context);
+            if (Context->Info.Buffer == NULL)
+            {
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+                _SEH2_LEAVE;
+            }
+        }
+
+        Context->QuerySecurity.SecurityInformation = Stack->Parameters.QuerySecurity.SecurityInformation;
+        Context->QuerySecurity.Length = Length;
+        Context->Info.LengthRemaining = (LONG)Length;
+        Context->InformationToReturn = 0;
+
+        MINIRDR_CALL(Status, Context, Fcb->MRxDispatch, MRxQuerySdInfo, (Context));
+
+        if (NT_SUCCESS(Status))
+        {
+            Irp->IoStatus.Information = Context->InformationToReturn;
+        }
+        else if (Status == STATUS_BUFFER_TOO_SMALL || Status == STATUS_BUFFER_OVERFLOW)
+        {
+            Irp->IoStatus.Information = Context->InformationToReturn;
+            Status = STATUS_BUFFER_OVERFLOW;
+        }
+    }
+    _SEH2_FINALLY
+    {
+        RxReleaseFcb(Context, Fcb);
+    }
+    _SEH2_END;
+
+    DPRINT("Status: %lx, Information: %Iu\n", Status, Irp->IoStatus.Information);
+    return Status;
 }
 
 /*
@@ -3793,13 +3998,69 @@ RxCommonRead(
     return Status;
 }
 
+/*
+ * @implemented
+ *
+ * IRP_MJ_SET_EA, passed to MRxSetEaInfo with the buffered EA list in
+ * Info.Buffer (the I/O manager captured it). STATUS_EAS_NOT_SUPPORTED without
+ * EA support, see RxCommonQueryEa.
+ */
 NTSTATUS
 NTAPI
 RxCommonSetEa(
     PRX_CONTEXT Context)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PIRP Irp;
+    PFCB Fcb;
+    NTSTATUS Status;
+    PIO_STACK_LOCATION Stack;
+
+    PAGED_CODE();
+
+    Fcb = (PFCB)Context->pFcb;
+    Irp = Context->CurrentIrp;
+    Stack = Context->CurrentIrpSp;
+
+    DPRINT("RxCommonSetEa(%p) FCB: %p, Length: %lu\n", Context, Fcb, Stack->Parameters.SetEa.Length);
+
+    if (NodeType(Fcb) != RDBSS_NTC_STORAGE_TYPE_FILE && NodeType(Fcb) != RDBSS_NTC_STORAGE_TYPE_DIRECTORY)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (Fcb->MRxDispatch->MRxSetEaInfo == NULL)
+    {
+        return STATUS_EAS_NOT_SUPPORTED;
+    }
+
+    if (Irp->AssociatedIrp.SystemBuffer == NULL && Stack->Parameters.SetEa.Length != 0)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    Status = RxAcquireExclusiveFcb(Context, Fcb);
+    if (Status == STATUS_LOCK_NOT_GRANTED)
+    {
+        return RxFsdPostRequest(Context);
+    }
+    else if (!NT_SUCCESS(Status))
+    {
+        return Status;
+    }
+
+    Context->Info.Buffer = Irp->AssociatedIrp.SystemBuffer;
+    Context->Info.Length = Stack->Parameters.SetEa.Length;
+
+    MINIRDR_CALL(Status, Context, Fcb->MRxDispatch, MRxSetEaInfo, (Context));
+    if (NT_SUCCESS(Status))
+    {
+        ++Fcb->EaModificationCount;
+    }
+
+    RxReleaseFcb(Context, Fcb);
+
+    DPRINT("Status: %lx\n", Status);
+    return Status;
 }
 
 /*
@@ -4047,31 +4308,120 @@ try_exit: NOTHING;
     return Status;
 }
 
+/*
+ * @implemented
+ *
+ * See RxCommonQueryQuotaInformation.
+ */
 NTSTATUS
 NTAPI
 RxCommonSetQuotaInformation(
     PRX_CONTEXT Context)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PAGED_CODE();
+
+    UNREFERENCED_PARAMETER(Context);
+    return STATUS_INVALID_DEVICE_REQUEST;
 }
 
+/*
+ * @implemented
+ *
+ * IRP_MJ_SET_SECURITY: passed to the mini-redirector (MRxSetSdInfo with
+ * SetSecurity.SecurityInformation and SetSecurity.SecurityDescriptor, a
+ * descriptor the I/O manager captured). Without MRxSetSdInfo the request is
+ * invalid for the device and the I/O manager reports success, as for any
+ * file system without security.
+ */
 NTSTATUS
 NTAPI
 RxCommonSetSecurity(
     PRX_CONTEXT Context)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PFCB Fcb;
+    NTSTATUS Status;
+    PIO_STACK_LOCATION Stack;
+
+    PAGED_CODE();
+
+    Fcb = (PFCB)Context->pFcb;
+    Stack = Context->CurrentIrpSp;
+
+    DPRINT("RxCommonSetSecurity(%p) FCB: %p, Info: %lx\n", Context, Fcb,
+           Stack->Parameters.SetSecurity.SecurityInformation);
+
+    if (NodeType(Fcb) != RDBSS_NTC_STORAGE_TYPE_FILE && NodeType(Fcb) != RDBSS_NTC_STORAGE_TYPE_DIRECTORY &&
+        NodeType(Fcb) != RDBSS_NTC_STORAGE_TYPE_UNKNOWN)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (Fcb->MRxDispatch->MRxSetSdInfo == NULL)
+    {
+        return STATUS_INVALID_DEVICE_REQUEST;
+    }
+
+    Status = RxAcquireExclusiveFcb(Context, Fcb);
+    if (Status == STATUS_LOCK_NOT_GRANTED)
+    {
+        return RxFsdPostRequest(Context);
+    }
+    else if (!NT_SUCCESS(Status))
+    {
+        return Status;
+    }
+
+    Context->SetSecurity.SecurityInformation = Stack->Parameters.SetSecurity.SecurityInformation;
+    Context->SetSecurity.SecurityDescriptor = Stack->Parameters.SetSecurity.SecurityDescriptor;
+
+    MINIRDR_CALL(Status, Context, Fcb->MRxDispatch, MRxSetSdInfo, (Context));
+
+    RxReleaseFcb(Context, Fcb);
+
+    DPRINT("Status: %lx\n", Status);
+    return Status;
 }
 
+/*
+ * @implemented
+ *
+ * IRP_MJ_SET_VOLUME_INFORMATION: MRxSetVolumeInfo with Info.FsInformationClass,
+ * Info.Buffer (system buffer) and Info.LengthRemaining.
+ */
 NTSTATUS
 NTAPI
 RxCommonSetVolumeInformation(
     PRX_CONTEXT Context)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PIRP Irp;
+    PFCB Fcb;
+    NTSTATUS Status;
+    PIO_STACK_LOCATION Stack;
+
+    PAGED_CODE();
+
+    Fcb = (PFCB)Context->pFcb;
+    Irp = Context->CurrentIrp;
+    Stack = Context->CurrentIrpSp;
+
+    if (Fcb->MRxDispatch->MRxSetVolumeInfo == NULL)
+    {
+        return STATUS_INVALID_DEVICE_REQUEST;
+    }
+
+    Context->Info.FsInformationClass = Stack->Parameters.SetVolume.FsInformationClass;
+    Context->Info.Buffer = Irp->AssociatedIrp.SystemBuffer;
+    Context->Info.LengthRemaining = Stack->Parameters.SetVolume.Length;
+
+    MINIRDR_CALL(Status, Context, Fcb->MRxDispatch, MRxSetVolumeInfo, (Context));
+
+    if (Context->PostRequest)
+    {
+        Status = RxFsdPostRequest(Context);
+    }
+
+    DPRINT("RxCommonSetVolumeInformation(%p) Status: %lx\n", Context, Status);
+    return Status;
 }
 
 NTSTATUS
