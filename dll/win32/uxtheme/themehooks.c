@@ -72,11 +72,59 @@ PWND_DATA ThemeFindWndData(HWND hWnd)
     return pwndData;
 }
 
+/* Contexts whose window is gone without the hook having seen WM_NCDESTROY (the window was destroyed while the
+   hooks were not active, its thread was killed) would stay for the life of the process and be found again when
+   the handle value comes back: a context is made only for a live window of this process, and every 256 contexts
+   the table is swept for dead ones. */
+static ULONG g_cWndDataMade;
+static void ThemeFreeWndData(HWND hWnd, PWND_DATA pwndData);
+
+static void ThemeSweepWndData(void)
+{
+    UINT i;
+    PWND_DATA *pp, pwndData;
+    PWND_DATA pDead = NULL;
+
+    EnterCriticalSection(&g_WndDataLock);
+    for (i = 0; i < WND_DATA_BUCKETS; i++)
+    {
+        pp = &g_WndDataTable[i];
+        while ((pwndData = *pp) != NULL)
+        {
+            if (!IsWindow(pwndData->hWnd))
+            {
+                *pp = pwndData->pNext;
+                pwndData->pNext = pDead;
+                pDead = pwndData;
+            }
+            else
+            {
+                pp = &pwndData->pNext;
+            }
+        }
+    }
+    LeaveCriticalSection(&g_WndDataLock);
+
+    while (pDead)
+    {
+        pwndData = pDead;
+        pDead = pwndData->pNext;
+        ThemeFreeWndData(pwndData->hWnd, pwndData);
+    }
+}
+
 PWND_DATA ThemeGetWndData(HWND hWnd)
 {
     PWND_DATA pwndData, *ppHead;
+    DWORD pid = 0;
+    BOOL bSweep = FALSE;
 
-    if (!g_WndDataLockReady)
+    pwndData = ThemeFindWndData(hWnd);
+    if (pwndData != NULL || !g_WndDataLockReady)
+        return pwndData;
+
+    /* Not seen yet: only a live window of this process gets a context */
+    if (GetWindowThreadProcessId(hWnd, &pid) == 0 || pid != GetCurrentProcessId())
         return NULL;
 
     EnterCriticalSection(&g_WndDataLock);
@@ -94,9 +142,13 @@ PWND_DATA ThemeGetWndData(HWND hWnd)
             pwndData->hWnd = hWnd;
             pwndData->pNext = *ppHead;
             *ppHead = pwndData;
+            bSweep = ((++g_cWndDataMade & 255) == 0);
         }
     }
     LeaveCriticalSection(&g_WndDataLock);
+
+    if (bSweep)
+        ThemeSweepWndData();
 
     return pwndData;
 }
@@ -122,6 +174,34 @@ static PWND_DATA ThemeUnlinkWndData(HWND hWnd)
     LeaveCriticalSection(&g_WndDataLock);
 
     return pwndData;
+}
+
+/* The GDI and theme objects of a context, and the context */
+static void ThemeFreeWndData(HWND hWnd, PWND_DATA pwndData)
+{
+    if (pwndData->hTabBackgroundBrush != NULL)
+    {
+        CloseThemeData(GetWindowTheme(hWnd));
+
+        DeleteObject(pwndData->hTabBackgroundBrush);
+    }
+
+    if (pwndData->hTabBackgroundBmp != NULL)
+    {
+        DeleteObject(pwndData->hTabBackgroundBmp);
+    }
+
+    if (pwndData->hthemeWindow)
+    {
+        CloseThemeData(pwndData->hthemeWindow);
+    }
+
+    if (pwndData->hthemeScrollbar)
+    {
+        CloseThemeData(pwndData->hthemeScrollbar);
+    }
+
+    HeapFree(GetProcessHeap(), 0, pwndData);
 }
 
 void ThemeDestroyWndData(HWND hWnd)
@@ -155,29 +235,7 @@ void ThemeDestroyWndData(HWND hWnd)
         return;
     }
 
-    if (pwndData->hTabBackgroundBrush != NULL)
-    {
-        CloseThemeData(GetWindowTheme(hWnd));
-
-        DeleteObject(pwndData->hTabBackgroundBrush);
-    }
-
-    if (pwndData->hTabBackgroundBmp != NULL)
-    {
-        DeleteObject(pwndData->hTabBackgroundBmp);
-    }
-
-    if (pwndData->hthemeWindow)
-    {
-        CloseThemeData(pwndData->hthemeWindow);
-    }
-
-    if (pwndData->hthemeScrollbar)
-    {
-        CloseThemeData(pwndData->hthemeScrollbar);
-    }
-
-    HeapFree(GetProcessHeap(), 0, pwndData);
+    ThemeFreeWndData(hWnd, pwndData);
 }
 
 HTHEME GetNCCaptionTheme(HWND hWnd, DWORD style)
