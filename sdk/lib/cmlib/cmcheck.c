@@ -916,7 +916,8 @@ CmpValidateValueList(
          */
         ValueSize = HvGetCellSize(Hive, ValueListData);
         TotalValueLength = ValueListCount * sizeof(HCELL_INDEX);
-        if (TotalValueLength > ValueSize)
+        /* The count comes from the hive: compare without the product, which can wrap */
+        if (ValueListCount > ValueSize / sizeof(HCELL_INDEX))
         {
             DPRINT1("The value list is bigger than the cell (value list size %u, cell size %u)\n",
                     TotalValueLength, ValueSize);
