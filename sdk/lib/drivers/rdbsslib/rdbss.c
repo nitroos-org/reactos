@@ -4226,8 +4226,9 @@ RxCommonRead(
                 }
             }
 
-            /* We cannot return more than asked */
-            if (Status == STATUS_SUCCESS)
+            /* We cannot return more than asked (Status is stale when an
+             * exception unwinds through here) */
+            if (!_SEH2_AbnormalTermination() && Status == STATUS_SUCCESS)
             {
                 ASSERT(Irp->IoStatus.Information <= Stack->Parameters.Read.Length);
             }
@@ -5583,8 +5584,9 @@ try_exit: NOTHING;
                 }
             }
 
-            /* Sanity check for write */
-            if (Status == STATUS_SUCCESS)
+            /* Sanity check for write (Status is stale when an exception
+             * unwinds through here) */
+            if (!_SEH2_AbnormalTermination() && Status == STATUS_SUCCESS)
             {
                 ASSERT(Irp->IoStatus.Information <= Stack->Parameters.Write.Length);
             }
@@ -7203,12 +7205,33 @@ RxFsdCommonDispatch(
             }
             else
             {
-                /* Retry as long as we have */
-                do
+                /* Retry as long as we have. Cc raises the failures it meets
+                 * on the caller's behalf (STATUS_INVALID_USER_BUFFER for a
+                 * user buffer it cannot copy to or from, the status of a
+                 * failed paging read): the common routines release what they
+                 * hold in their termination handlers, and the request fails
+                 * with that status. Unexpected exceptions (a bug) still
+                 * propagate */
+                _SEH2_TRY
                 {
-                    Status = DispatchFunc(Context);
+                    do
+                    {
+                        Status = DispatchFunc(Context);
+                    }
+                    while (Status == STATUS_RETRY);
                 }
-                while (Status == STATUS_RETRY);
+                _SEH2_EXCEPT(FsRtlIsNtstatusExpected(_SEH2_GetExceptionCode()) ?
+                             EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH)
+                {
+                    Status = _SEH2_GetExceptionCode();
+                    DPRINT1("Exception %lx in the dispatch of %p (major %u)\n", Status, Context, MajorFunction);
+                    /* Nothing was transferred for a failed request */
+                    if (Context->CurrentIrp != NULL)
+                    {
+                        Context->CurrentIrp->IoStatus.Information = 0;
+                    }
+                }
+                _SEH2_END;
 
                 if (Status == STATUS_PENDING)
                 {
@@ -7430,7 +7453,23 @@ RxFspDispatch(
 
             NoComplete = BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_NO_COMPLETE_FROM_FSP);
 
-            Status = RxContext->ResumeRoutine(RxContext);
+            /* Same as in RxFsdCommonDispatch: an expected status raised
+             * below us fails the request instead of the worker thread */
+            _SEH2_TRY
+            {
+                Status = RxContext->ResumeRoutine(RxContext);
+            }
+            _SEH2_EXCEPT(FsRtlIsNtstatusExpected(_SEH2_GetExceptionCode()) ?
+                         EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH)
+            {
+                Status = _SEH2_GetExceptionCode();
+                DPRINT1("Exception %lx in the FSP for %p\n", Status, RxContext);
+                if (RxContext->CurrentIrp != NULL)
+                {
+                    RxContext->CurrentIrp->IoStatus.Information = 0;
+                }
+            }
+            _SEH2_END;
             if (!NoComplete && Status != STATUS_PENDING)
             {
                 if (Status != STATUS_RETRY)
