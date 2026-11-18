@@ -691,7 +691,17 @@ OpenDataFile(HANDLE hFile, DWORD dwUnused)
 }
 
 /*
- * @unimplemented
+ * Bits of dwFlags that ReOpenFile rejects with ERROR_INVALID_PARAMETER. They are the FILE_ATTRIBUTE_* values:
+ * the parameter takes FILE_FLAG_* values only. The set was measured on Windows Server 2022 by passing every single bit;
+ * 0x8, 0x40, 0x10000, 0x40000 and the FILE_FLAG_* bits above 0x200000 are accepted (and mostly ignored).
+ */
+#define REOPENFILE_INVALID_FLAGS 0x005affb7
+
+/*
+ * @implemented
+ *
+ * Opens the file object of a handle again with other access, sharing and flags: a relative open with the handle as the
+ * root directory and an empty name. The new handle does not share the file pointer of the original handle.
  */
 HANDLE
 WINAPI
@@ -700,8 +710,61 @@ ReOpenFile(IN HANDLE hOriginalFile,
            IN DWORD dwShareMode,
            IN DWORD dwFlags)
 {
-   STUB;
-   return INVALID_HANDLE_VALUE;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    UNICODE_STRING EmptyName = {0, 0, NULL};
+    IO_STATUS_BLOCK IoStatusBlock;
+    ULONG Options = FILE_NON_DIRECTORY_FILE;
+    NTSTATUS Status;
+    HANDLE Handle;
+
+    if (dwFlags & REOPENFILE_INVALID_FLAGS)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return INVALID_HANDLE_VALUE;
+    }
+
+    /* Deleting the file when the new handle is closed needs the delete access */
+    if (dwFlags & FILE_FLAG_DELETE_ON_CLOSE)
+        dwDesiredAccess |= DELETE;
+
+    InitializeObjectAttributes(&ObjectAttributes, &EmptyName, OBJ_CASE_INSENSITIVE, hOriginalFile, NULL);
+
+    /* Same translation of FILE_FLAG_* to NtCreateFile options as CreateFile (directories are refused: measured) */
+    if (dwFlags & FILE_FLAG_BACKUP_SEMANTICS)
+        Options |= FILE_OPEN_FOR_BACKUP_INTENT;
+    if (dwFlags & FILE_FLAG_DELETE_ON_CLOSE)
+        Options |= FILE_DELETE_ON_CLOSE;
+    if (dwFlags & FILE_FLAG_NO_BUFFERING)
+        Options |= FILE_NO_INTERMEDIATE_BUFFERING;
+    if (!(dwFlags & FILE_FLAG_OVERLAPPED))
+        Options |= FILE_SYNCHRONOUS_IO_NONALERT;
+    if (dwFlags & FILE_FLAG_RANDOM_ACCESS)
+        Options |= FILE_RANDOM_ACCESS;
+    if (dwFlags & FILE_FLAG_SEQUENTIAL_SCAN)
+        Options |= FILE_SEQUENTIAL_ONLY;
+    if (dwFlags & FILE_FLAG_WRITE_THROUGH)
+        Options |= FILE_WRITE_THROUGH;
+    if (dwFlags & FILE_FLAG_OPEN_REPARSE_POINT)
+        Options |= FILE_OPEN_REPARSE_POINT;
+
+    Status = NtCreateFile(&Handle,
+                          dwDesiredAccess | SYNCHRONIZE | FILE_READ_ATTRIBUTES,
+                          &ObjectAttributes,
+                          &IoStatusBlock,
+                          NULL,
+                          0,
+                          dwShareMode,
+                          FILE_OPEN,
+                          Options,
+                          NULL,
+                          0);
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return INVALID_HANDLE_VALUE;
+    }
+
+    return Handle;
 }
 
 /* EOF */

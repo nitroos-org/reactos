@@ -261,6 +261,7 @@ extern void func_WriteProcessMemory(void);
 extern void func_XState(void);
 extern void func_XStateContext(void);
 extern void func_SetFileInformationByHandle(void);
+extern void func_ReOpenFile(void);
 
 extern void func_Wow64Environment(void);
 extern void func_Wow64ProgramFiles(void);
@@ -534,6 +535,7 @@ const struct test winetest_testlist[] =
     { "XState",                      func_XState },
     { "XStateContext",               func_XStateContext },
     { "SetFileInformationByHandle",  func_SetFileInformationByHandle },
+    { "ReOpenFile",                  func_ReOpenFile },
     { "ReadFile",                    func_ReadFile },
     { "SetSearchPathMode",           func_SetSearchPathMode },
     { "WriteFile",                   func_WriteFile },
