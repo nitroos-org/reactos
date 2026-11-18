@@ -162,6 +162,7 @@ extern void func_NtSetVolumeInformationFile(void);
 extern void func_NtStartProfile(void);
 extern void func_NtSystemInformation(void);
 extern void func_NtUnloadDriver(void);
+extern void func_NtUnloadKeyBuffer(void);
 extern void func_NtWriteFile(void);
 extern void func_PagerBasic(void);
 extern void func_RtlAllocateHeap(void);
@@ -457,6 +458,7 @@ const struct test winetest_testlist[] =
     { "NtStartProfile",                 func_NtStartProfile },
     { "NtSystemInformation",            func_NtSystemInformation },
     { "NtUnloadDriver",                 func_NtUnloadDriver },
+    { "NtUnloadKeyBuffer",              func_NtUnloadKeyBuffer },
     { "NtWriteFile",                    func_NtWriteFile },
     { "PagerBasic",                     func_PagerBasic },
     { "RtlAllocateHeap",                func_RtlAllocateHeap },

@@ -184,6 +184,7 @@ list(APPEND SOURCE
     NtSetVolumeInformationFile.c
     NtStartProfile.c
     NtUnloadDriver.c
+    NtUnloadKeyBuffer.c
     NtWriteFile.c
     PagerBasic.c
     probelib.c
