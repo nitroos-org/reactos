@@ -2135,6 +2135,8 @@ SECURITY_STATUS SEC_ENTRY ntlm_MakeSignature(PCtxtHandle phContext,
         return SEC_E_BUFFER_TOO_SMALL;
 
     helper = (PNegoHelper)phContext->dwLower;
+    if (!helper || helper->state != 1)
+        return SEC_E_INVALID_HANDLE;   /* only a complete exchange has keys (Windows: SEC_E_INVALID_HANDLE, measured) */
     TRACE("Negotiated flags are: 0x%08x\n", helper->neg_flags);
 
     return ntlm_CreateSignature(helper, pMessage, token_idx, NTLM_SEND, TRUE);
@@ -2172,6 +2174,8 @@ SECURITY_STATUS SEC_ENTRY ntlm_VerifySignature(PCtxtHandle phContext,
         FIXME("Ignoring MessageSeqNo\n");
 
     helper = (PNegoHelper)phContext->dwLower;
+    if (!helper || helper->state != 1)
+        return SEC_E_INVALID_HANDLE;   /* only a complete exchange has keys (Windows: SEC_E_INVALID_HANDLE, measured) */
     TRACE("Negotiated flags: 0x%08x\n", helper->neg_flags);
 
     local_buff = HeapAlloc(GetProcessHeap(), 0, pMessage->cBuffers * sizeof(SecBuffer));
@@ -2354,6 +2358,8 @@ SECURITY_STATUS SEC_ENTRY ntlm_EncryptMessage(PCtxtHandle phContext,
         return SEC_E_BUFFER_TOO_SMALL;
 
     helper = (PNegoHelper) phContext->dwLower;
+    if (!helper || helper->state != 1)
+        return SEC_E_INVALID_HANDLE;   /* only a complete exchange has keys (Windows: SEC_E_INVALID_HANDLE, measured) */
 
     if(helper->neg_flags & NTLMSSP_NEGOTIATE_NTLM2 && 
             helper->neg_flags & NTLMSSP_NEGOTIATE_SEAL)
@@ -2423,6 +2429,8 @@ SECURITY_STATUS SEC_ENTRY ntlm_DecryptMessage(PCtxtHandle phContext,
         return SEC_E_BUFFER_TOO_SMALL;
 
     helper = (PNegoHelper) phContext->dwLower;
+    if (!helper || helper->state != 1)
+        return SEC_E_INVALID_HANDLE;   /* only a complete exchange has keys (Windows: SEC_E_INVALID_HANDLE, measured) */
 
     if(helper->neg_flags & NTLMSSP_NEGOTIATE_NTLM2 && helper->neg_flags & NTLMSSP_NEGOTIATE_SEAL)
     {

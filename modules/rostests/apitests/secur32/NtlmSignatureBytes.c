@@ -6,7 +6,8 @@
  *              gives (measured on Windows Server 2022 with an SSPI-only probe, each byte in turn, NTLM and Negotiate):
  *              version bytes 0-3 SEC_E_INVALID_TOKEN, checksum bytes 4-11 SEC_E_MESSAGE_ALTERED, sequence bytes 12-15
  *              SEC_E_OUT_OF_SEQUENCE; the next unchanged message verifies. With more than one part wrong the
- *              version comes first, then the checksum (measured the same way).
+ *              version comes first, then the checksum (measured the same way). Before the exchange is complete
+ *              there is no key: signing and sealing calls fail with SEC_E_INVALID_HANDLE (measured the same way).
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
@@ -196,6 +197,79 @@ static void test_order(const WCHAR *pkg)
     pair_free(&p);
 }
 
+static void early_calls(const WCHAR *pkg, const char *who, CtxtHandle *c)
+{
+    BYTE data[32], sig[16];
+    SecBuffer b[2];
+    SecBufferDesc d = { SECBUFFER_VERSION, 2, b };
+    ULONG qop;
+    SECURITY_STATUS st;
+
+    memset(data, 'e', sizeof(data));
+    b[0].BufferType = SECBUFFER_DATA; b[0].pvBuffer = data; b[0].cbBuffer = sizeof(data);
+    b[1].BufferType = SECBUFFER_TOKEN; b[1].pvBuffer = sig; b[1].cbBuffer = sizeof(sig);
+    st = MakeSignature(c, 0, &d, 0);
+    ok(st == SEC_E_INVALID_HANDLE, "%ls %s: MakeSignature 0x%08lx\n", pkg, who, (unsigned long)st);
+    memset(sig, 0, sizeof(sig)); sig[0] = 1;    /* the keyless "dummy" signature */
+    b[1].cbBuffer = sizeof(sig);
+    st = VerifySignature(c, &d, 0, &qop);
+    ok(st == SEC_E_INVALID_HANDLE, "%ls %s: VerifySignature of a dummy signature 0x%08lx\n", pkg, who, (unsigned long)st);
+    b[1].cbBuffer = sizeof(sig);
+    st = EncryptMessage(c, 0, &d, 0);
+    ok(st == SEC_E_INVALID_HANDLE, "%ls %s: EncryptMessage 0x%08lx\n", pkg, who, (unsigned long)st);
+    memset(sig, 0, sizeof(sig)); sig[0] = 1;
+    b[1].cbBuffer = sizeof(sig);
+    st = DecryptMessage(c, &d, 0, &qop);
+    ok(st == SEC_E_INVALID_HANDLE, "%ls %s: DecryptMessage of a dummy signature 0x%08lx\n", pkg, who, (unsigned long)st);
+}
+
+/* raw NTLM (explicit credentials): the client after its NEGOTIATE, the server after its CHALLENGE */
+static void test_early(const WCHAR *pkg)
+{
+    SEC_WINNT_AUTH_IDENTITY_W id;
+    CredHandle cc, sc;
+    CtxtHandle cctx, sctx;
+    TimeStamp ts;
+    BYTE a[MAXT], b[MAXT];
+    SecBuffer ib, ob;
+    SecBufferDesc idesc = { SECBUFFER_VERSION, 1, &ib }, odesc = { SECBUFFER_VERSION, 1, &ob };
+    ULONG attr;
+    SECURITY_STATUS st;
+
+    memset(&id, 0, sizeof(id));
+    id.User = (unsigned short *)g_user; id.UserLength = (ULONG)wcslen(g_user);
+    id.Domain = (unsigned short *)L"."; id.DomainLength = 1;
+    id.Password = (unsigned short *)TEST_PASSWORD; id.PasswordLength = (ULONG)wcslen(TEST_PASSWORD);
+    id.Flags = SEC_WINNT_AUTH_IDENTITY_UNICODE;
+    st = AcquireCredentialsHandleW(NULL, (SEC_WCHAR *)pkg, SECPKG_CRED_OUTBOUND, NULL, &id, NULL, NULL, &cc, &ts);
+    ok(st == SEC_E_OK, "%ls: ACH 0x%08lx\n", pkg, (unsigned long)st);
+    if (st) return;
+    st = AcquireCredentialsHandleW(NULL, (SEC_WCHAR *)pkg, SECPKG_CRED_INBOUND, NULL, NULL, NULL, NULL, &sc, &ts);
+    ok(st == SEC_E_OK, "%ls: ACH 0x%08lx\n", pkg, (unsigned long)st);
+    if (st) { FreeCredentialsHandle(&cc); return; }
+    ob.BufferType = SECBUFFER_TOKEN; ob.pvBuffer = a; ob.cbBuffer = MAXT;
+    st = InitializeSecurityContextW(&cc, NULL, NULL, ISC_REQ_CONNECTION | ISC_REQ_INTEGRITY | ISC_REQ_CONFIDENTIALITY, 0,
+                                    SECURITY_NATIVE_DREP, NULL, 0, &cctx, &odesc, &attr, &ts);
+    ok(st == SEC_I_CONTINUE_NEEDED, "%ls: NEGOTIATE 0x%08lx\n", pkg, (unsigned long)st);
+    if (st == SEC_I_CONTINUE_NEEDED)
+    {
+        early_calls(pkg, "client after its NEGOTIATE", &cctx);
+        ib.BufferType = SECBUFFER_TOKEN; ib.pvBuffer = a; ib.cbBuffer = ob.cbBuffer;
+        ob.pvBuffer = b; ob.cbBuffer = MAXT;
+        st = AcceptSecurityContext(&sc, NULL, &idesc, ASC_REQ_CONNECTION | ASC_REQ_INTEGRITY | ASC_REQ_CONFIDENTIALITY,
+                                   SECURITY_NATIVE_DREP, &sctx, &odesc, &attr, &ts);
+        ok(st == SEC_I_CONTINUE_NEEDED, "%ls: CHALLENGE 0x%08lx\n", pkg, (unsigned long)st);
+        if (st == SEC_I_CONTINUE_NEEDED)
+        {
+            early_calls(pkg, "server after its CHALLENGE", &sctx);
+            DeleteSecurityContext(&sctx);
+        }
+        DeleteSecurityContext(&cctx);
+    }
+    FreeCredentialsHandle(&cc);
+    FreeCredentialsHandle(&sc);
+}
+
 START_TEST(NtlmSignatureBytes)
 {
     if (!create_user()) return;
@@ -205,5 +279,7 @@ START_TEST(NtlmSignatureBytes)
     test_bytes(L"Negotiate", TRUE);
     test_order(L"NTLM");
     test_order(L"Negotiate");
+    test_early(L"NTLM");
+    test_early(L"Negotiate");
     NetUserDel(NULL, g_user);
 }
