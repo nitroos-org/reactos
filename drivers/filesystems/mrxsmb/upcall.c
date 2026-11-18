@@ -51,12 +51,14 @@ SmbReserveBytes(ULONG Bytes)
 {
     LARGE_INTEGER Slice;
     KIRQL OldIrql;
-    ULONG Waited;
+    ULONGLONG Deadline, Now;
 
     PAGED_CODE();
 
-    Slice.QuadPart = -10000000LL;   /* 1 s: a waiter that misses the event looks again */
-    for (Waited = 0; ; Waited++)
+    /* The limit is real time: every freed request wakes the waiters, so a count of wake-ups
+     * would refuse a waiter after a second or two under load */
+    Deadline = KeQueryInterruptTime() + (ULONGLONG)SmbRequestTimeoutSeconds * 10000000ULL;
+    for (;;)
     {
         KeClearEvent(&SmbEngine.BudgetEvent);
         KeAcquireSpinLock(&SmbEngine.Lock, &OldIrql);
@@ -69,12 +71,15 @@ SmbReserveBytes(ULONG Bytes)
         }
         KeReleaseSpinLock(&SmbEngine.Lock, OldIrql);
 
-        if (Waited >= SmbRequestTimeoutSeconds)
+        Now = KeQueryInterruptTime();
+        if (Now >= Deadline)
         {
             DPRINT1("mrxsmb: %lu bytes of requests outstanding, refused %lu more\n",
                     (ULONG)SmbEngine.OutstandingBytes, Bytes);
             return STATUS_INSUFFICIENT_RESOURCES;
         }
+        /* at most 1 s: a waiter that misses the event looks again */
+        Slice.QuadPart = -(LONGLONG)min(Deadline - Now, 10000000ULL);
         KeWaitForSingleObject(&SmbEngine.BudgetEvent, Executive, KernelMode, FALSE, &Slice);
     }
 }
