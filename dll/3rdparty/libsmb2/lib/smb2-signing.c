@@ -68,6 +68,10 @@
 #include "aes.h"
 #include "sha.h"
 #include "sha-private.h"
+#ifdef NITRO_SMB2_BCRYPT_AES
+/* NitroOS: AES-CMAC through bcrypt (nitro/aes-bcrypt.c) */
+#include "nitro-aes.h"
+#endif
 
 #define AES128_KEY_LEN     16
 #define AES_BLOCK_SIZE     16
@@ -445,6 +449,15 @@ smb2_calc_signature(struct smb2_context *smb2, uint8_t *signature,
                 for (i=0; i < niov; i++) {
                         len += iov[i].len;
                 }
+#ifdef NITRO_SMB2_BCRYPT_AES
+                /* NitroOS: AES-CMAC through bcrypt (nitro/aes-bcrypt.c) */
+                if (nitro_smb2_aes_cmac(smb2->signing_key, iov, niov, aes_mac) < 0) {
+                        smb2_set_error(smb2, "Failed to calculate the signature");
+                        return -1;
+                }
+                memcpy(&signature[0], aes_mac, SMB2_SIGNATURE_SIZE);
+                return 0;
+#endif
 #if defined(__x86_64__) && (defined(__clang__) || defined(__GNUC__))
                 if (smb2_aesni_available()) {
                         smb2_aesni_cmac_iov(smb2->signing_key, iov, niov, len, aes_mac);
