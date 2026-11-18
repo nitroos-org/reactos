@@ -110,6 +110,7 @@ list(APPEND SOURCE
     RedrawWindow.c
     RegisterClassEx.c
     RegisterHotKey.c
+    SaveBits.c
     ScrollBarRedraw.c
     ScrollBarWndExtra.c
     ScrollDC.c

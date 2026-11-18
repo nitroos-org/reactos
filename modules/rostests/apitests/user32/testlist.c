@@ -109,6 +109,7 @@ extern void func_RedirScroll(void);
 extern void func_RedrawWindow(void);
 extern void func_RegisterHotKey(void);
 extern void func_RegisterClassEx(void);
+extern void func_SaveBits(void);
 extern void func_ScrollBarRedraw(void);
 extern void func_ScrollBarWndExtra(void);
 extern void func_ScrollDC(void);
@@ -275,6 +276,7 @@ const struct test winetest_testlist[] =
     { "RedrawWindow", func_RedrawWindow },
     { "RegisterHotKey", func_RegisterHotKey },
     { "RegisterClassEx", func_RegisterClassEx },
+    { "SaveBits", func_SaveBits },
     { "ScrollBarRedraw", func_ScrollBarRedraw },
     { "ScrollBarWndExtra", func_ScrollBarWndExtra },
     { "ScrollDC", func_ScrollDC },
