@@ -1368,7 +1368,7 @@ CmpAclStampHiveRoot(
 
     CmpLockRegistry();
     CmpAcquireKcbLockExclusive(Kcb);
-    if (!Kcb->Delete && Kcb->KeyHive &&
+    if (!Kcb->Delete && Kcb->KeyHive && !Kcb->KeyHive->ReadOnly &&
         !(Kcb->KeyHive->HiveFlags & HIVE_VOLATILE) &&
         !(Kcb->ExtFlags & (CM_KCB_KEY_NON_EXIST | CM_KCB_READ_ONLY_KEY)) &&
         CmpAclStampTarget(Kcb, &ExpectedRule))

@@ -718,7 +718,8 @@ CmpStampKeySecurity(
     ULONG Length;
     NTSTATUS Status;
 
-    if (!Hive || Kcb->KeyCell == HCELL_NIL ||
+    /* A read-only (flat) hive cannot be written: nothing to stamp there */
+    if (!Hive || Hive->ReadOnly || Kcb->KeyCell == HCELL_NIL ||
         (Kcb->ExtFlags & (CM_KCB_KEY_NON_EXIST | CM_KCB_READ_ONLY_KEY)) || Kcb->Delete)
     {
         return STATUS_ACCESS_DENIED;
