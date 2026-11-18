@@ -41,6 +41,7 @@ list(APPEND SOURCE
     routinectx.c
     notconn.c
     tcpnodelay.c
+    tcpchurn.c
     inheritedsocket.c
     helpers.c
     iocpskip.c

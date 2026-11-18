@@ -200,14 +200,6 @@ UINT TCPAllocateEphemeralPort( PPORT_IN_USE_ROUTINE InUse );
 
 VOID TCPFreePort( const UINT Port );
 
-/* The local or remote address of a connection as a TA_IP_ADDRESS, or a TA_IP6_ADDRESS for an IPv6 one; Length is
-   the room at TransportAddress (STATUS_BUFFER_TOO_SMALL when the address does not fit) */
-NTSTATUS TCPGetSockAddress
-( PCONNECTION_ENDPOINT Connection,
-  PTRANSPORT_ADDRESS TransportAddress,
-  ULONG Length,
-  BOOLEAN RemoteAddress );
-
 /* What the Winsock provider puts in the sin6_flowinfo of the address it binds an IPv6 socket to when IPV6_V6ONLY is
    off (a dual stack socket); any other value is a socket with IPV6_V6ONLY on, the default. No flow information has
    the top bits set (RFC 8200: 8 bits of traffic class, 20 of flow label). AFD clears the field once the address is
@@ -532,7 +524,6 @@ VOID TCPLeaveReceiveWorker(VOID);
 void
 LibTCPDumpPcb(PVOID SocketContext);
 
-NTSTATUS TCPGetSocketStatus(PCONNECTION_ENDPOINT Connection, PULONG State);
 /* The local and remote address (TA_IP_ADDRESS, or TA_IP6_ADDRESS for an IPv6 one; Length is the room at each) and
    the state (MIB_TCP_STATE_xxx) of a connection that has a socket, read together under the core lock. An error when it
    has none (not connected yet, or closed meanwhile). PASSIVE_LEVEL, the core lock not held */
