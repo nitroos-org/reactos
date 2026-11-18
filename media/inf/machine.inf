@@ -49,6 +49,7 @@ HKR, , Icon,           0, "-27"
 %*PNP0C0E.DeviceDesc% = NO_DRV,*PNP0C0E
 %*PNP0C0F.DeviceDesc% = NO_DRV,*PNP0C0F
 %*PNP0C15.DeviceDesc% = NO_DRV,*PNP0C15
+%*QEMU0002.DeviceDesc% = NO_DRV,*QEMU0002
 
 %SWENUM.DeviceDesc%   = SWENUM_Inst, ROOT\SWENUM
 %ACPI\FixedButton.DeviceDesc% = NO_DRV,ACPI\FixedButton
@@ -195,6 +196,7 @@ GenericMfg = "(Generic system devices)"
 *PNP0C0E.DeviceDesc = "ACPI sleep button device"
 *PNP0C0F.DeviceDesc = "PCI interrupt link device"
 *PNP0C15.DeviceDesc = "Docking Station"
+*QEMU0002.DeviceDesc = "QEMU firmware configuration device"
 
 SWENUM.DeviceDesc  = "Plug & Play Software Bus Enumerator"
 ACPI\FixedButton.DeviceDesc = "ACPI fixed feature button"
