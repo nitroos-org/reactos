@@ -19,7 +19,7 @@
 ##
 ## ISO image identifier names
 ISO_MANUFACTURER="ReactOS Project"  # For both the publisher and the preparer
-ISO_VOLNAME="ReactOS"               # For both the Volume ID and the Volume set ID
+ISO_VOLNAME="NitroOS"               # For both the Volume ID and the Volume set ID
 
 ## Image names of the MKISOFS and ISOHYBRID tools
 MKISOFS=mkisofs
