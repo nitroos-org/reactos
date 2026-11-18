@@ -23,7 +23,7 @@ add_library(kernelbase_ros MODULE
 # NtAllocateVirtualMemoryEx, NtMapViewOfSectionEx, NtUnmapViewOfSectionEx and NtCreateLowBoxToken are exported by
 # ntdll from 0x600 on only
 if(DLL_EXPORT_VERSION GREATER_EQUAL 0x600)
-    target_sources(kernelbase_ros PRIVATE memory.c)
+    target_sources(kernelbase_ros PRIVATE memory.c handle.c)
     target_compile_definitions(kernelbase_ros PRIVATE KERNELBASE_NT6_NTDLL)
 endif()
 

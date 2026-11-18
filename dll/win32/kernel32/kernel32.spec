@@ -160,7 +160,6 @@
 @ stdcall CommConfigDialogA(str long ptr)
 @ stdcall CommConfigDialogW(wstr long ptr)
 @ stdcall -stub -version=0x600+ CompareCalendarDates(ptr ptr ptr)
-@ stdcall -version=0x601+ CompareObjectHandles(ptr ptr)
 @ stdcall CompareFileTime(ptr ptr)
 @ stdcall CompareStringA(long long str long str long)
 @ stdcall -version=0x600+ CompareStringEx(wstr long wstr long wstr long ptr ptr ptr)
@@ -1079,10 +1078,7 @@
 @ stub -version=0x600+ QueryProcessAffinityUpdateMode
 @ stdcall -version=0x600+ QueryProcessCycleTime(ptr ptr)
 @ stdcall -version=0x600+ QueryThreadCycleTime(ptr ptr)
-@ stdcall -version=0x601+ QueryInterruptTime(ptr)
-@ stdcall -version=0x601+ QueryInterruptTimePrecise(ptr)
 @ stdcall -version=0x601+ QueryUnbiasedInterruptTime(ptr)
-@ stdcall -version=0x601+ QueryUnbiasedInterruptTimePrecise(ptr)
 @ stdcall QueueUserAPC(ptr long long)
 @ stdcall QueueUserWorkItem(ptr ptr long)
 @ stdcall -norelay RaiseException(long long long ptr)

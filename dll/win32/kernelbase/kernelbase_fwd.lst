@@ -53,7 +53,6 @@
 @ CloseThreadpoolWait -version=0x600+
 @ CloseThreadpoolWork -version=0x600+
 @ CompareFileTime
-@ CompareObjectHandles -version=0x601+
 @ CompareStringA
 @ CompareStringEx -version=0x600+
 @ CompareStringW

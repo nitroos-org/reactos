@@ -47,6 +47,12 @@ RETARGET_HOSTS = {
         'api-ms-win-shcore-sysinfo-l1-1',
         'api-ms-win-shcore-thread-l1-1',
     ),
+    # Windows 10 and Server 2022 (measured): CompareObjectHandles and the interrupt time functions are exported by kernelbase and not
+    # by kernel32, and LoadLibrary of these contracts answers the kernelbase module
+    'kernelbase.dll': (
+        'api-ms-win-core-handle-l1-1',
+        'api-ms-win-core-realtime-l1-1',
+    ),
     'kernelbase_ros.dll': (
         'api-ms-win-core-path-l1-1',
         'api-ms-win-core-synch-l1-2',
