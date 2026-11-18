@@ -1170,6 +1170,10 @@ SmbRenameTarget(PRX_CONTEXT RxContext, PFILE_RENAME_INFORMATION Info, ULONG Info
         while (Parent.Length != 0 && Parent.Buffer[Parent.Length / sizeof(WCHAR) - 1] != OBJ_NAME_PATH_SEPARATOR)
             Parent.Length -= sizeof(WCHAR);
 
+        /* Both are up to 64 KiB: their sum must still be a name (Target->Length is a USHORT) */
+        if ((ULONG)Parent.Length + Name.Length > SMBUP_MAX_NAME_BYTES)
+            return STATUS_OBJECT_NAME_INVALID;
+
         *Allocated = ExAllocatePoolWithTag(PagedPool, Parent.Length + Name.Length, TAG_SMB_MISC);
         if (*Allocated == NULL)
             return STATUS_INSUFFICIENT_RESOURCES;
