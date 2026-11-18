@@ -9631,12 +9631,13 @@ RxQueryInternalInfo(
         return STATUS_BUFFER_TOO_SMALL;
     }
 
-    /* The file ID is the server's; if the mini-redirector has none, use a
-     * value unique among the files open on this client */
+    /* The file ID is the server's; if the mini-redirector has none, derive
+     * one from the name (the FCB table's hash of the path). Never the FCB
+     * address: that would hand a kernel pool address to user mode */
     Status = RxpQueryInfoMiniRdr(RxContext, FileInternalInformation, InternalInfo);
     if (!NT_SUCCESS(Status))
     {
-        InternalInfo->IndexNumber.QuadPart = (LONGLONG)(ULONG_PTR)RxContext->pFcb;
+        InternalInfo->IndexNumber.QuadPart = ((PFCB)RxContext->pFcb)->FcbTableEntry.HashValue;
         RxContext->Info.LengthRemaining -= sizeof(FILE_INTERNAL_INFORMATION);
         Status = STATUS_SUCCESS;
     }
