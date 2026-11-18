@@ -357,6 +357,85 @@ TestRegisteredByName(VOID)
     EXPECT_REFUSED(L"\\Device\\Mup\\;" LEGACY_NAME L"\\server\\share", STATUS_OBJECT_PATH_INVALID);
 }
 
+/*
+ * UNC opens while the provider registers and deregisters by device object: every open goes
+ * through MUP's prefix query loop, which must not use the device of a provider that
+ * deregistered meanwhile (deregistration clears and releases it)
+ */
+static volatile LONG RaceStop;
+static volatile LONG RaceOpens, RaceOpened;
+
+static
+VOID
+NTAPI
+RaceOpenThread(
+    _In_ PVOID Context)
+{
+    UNREFERENCED_PARAMETER(Context);
+
+    while (!RaceStop)
+    {
+        if (NT_SUCCESS(DoCreate(L"\\Device\\Mup\\kmrace\\share\\x", NULL)))
+            InterlockedIncrement(&RaceOpened);
+        InterlockedIncrement(&RaceOpens);
+    }
+    PsTerminateSystemThread(STATUS_SUCCESS);
+}
+
+static
+VOID
+TestQueryRace(VOID)
+{
+    UNICODE_STRING Name = RTL_CONSTANT_STRING(L"\\Device\\" PROVIDER_NAME);
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    PVOID Threads[2] = { NULL, NULL };
+    HANDLE MupHandle, ThreadHandle;
+    ULONG i, Cycles = 0;
+    NTSTATUS Status;
+
+    RaceStop = 0;
+    RaceOpens = RaceOpened = 0;
+    InitializeObjectAttributes(&ObjectAttributes, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
+    for (i = 0; i < RTL_NUMBER_OF(Threads); i++)
+    {
+        Status = PsCreateSystemThread(&ThreadHandle, THREAD_ALL_ACCESS, &ObjectAttributes, NULL, NULL, RaceOpenThread, NULL);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (!NT_SUCCESS(Status))
+            break;
+        Status = ObReferenceObjectByHandle(ThreadHandle, SYNCHRONIZE, *PsThreadType, KernelMode, &Threads[i], NULL);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        ObCloseHandle(ThreadHandle, KernelMode);
+    }
+
+    for (i = 0; i < 400; i++)
+    {
+        MupHandle = NULL;
+        Status = pFsRtlRegisterUncProviderEx(&MupHandle, &Name, TestDevice, 0);
+        if (!NT_SUCCESS(Status))
+        {
+            ok_eq_hex(Status, STATUS_SUCCESS);
+            break;
+        }
+        FsRtlDeregisterUncProvider(MupHandle);
+        Cycles++;
+    }
+
+    RaceStop = 1;
+    for (i = 0; i < RTL_NUMBER_OF(Threads); i++)
+    {
+        if (Threads[i] != NULL)
+        {
+            KeWaitForSingleObject(Threads[i], Executive, KernelMode, FALSE, NULL);
+            ObDereferenceObject(Threads[i]);
+        }
+    }
+
+    ok(Cycles == 400, "%lu registration cycles\n", Cycles);
+    ok(RaceOpens > 0, "no open ran during the registrations\n");
+    ok(RaceOpened == 0, "%ld opens of a name no provider claims succeeded\n", RaceOpened);
+    trace("%lu registration cycles, %ld opens during them\n", Cycles, RaceOpens);
+}
+
 static
 NTSTATUS
 TestIrpHandler(
@@ -406,6 +485,7 @@ TestIrpHandler(
             TestMupNamespace();
             TestRegisteredByDevice();
             TestRegisteredByName();
+            TestQueryRace();
             TestDevice = NULL;
         }
     }
