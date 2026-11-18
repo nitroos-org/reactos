@@ -497,7 +497,6 @@ NTSTATUS
 SmbEngineGet(PIRP Irp, PIO_STACK_LOCATION Stack)
 {
     PVOID Objects[2] = { &SmbEngine.QueueSemaphore, &SmbEngine.DetachEvent };
-    KWAIT_BLOCK WaitBlocks[2];
     PSMB_REQUEST Request;
     NTSTATUS Status;
     KIRQL OldIrql;
@@ -515,8 +514,10 @@ SmbEngineGet(PIRP Irp, PIO_STACK_LOCATION Stack)
         if (SmbEngine.FileObject != Stack->FileObject)
             return STATUS_CONNECTION_DISCONNECTED;
 
-        /* Alertable in user mode: the engine's threads can be terminated while they wait */
-        Status = KeWaitForMultipleObjects(2, Objects, WaitAny, UserRequest, UserMode, TRUE, NULL, WaitBlocks);
+        /* Alertable in user mode: the engine's threads can be terminated while they wait.
+         * The thread's own wait blocks (2 <= THREAD_WAIT_OBJECTS): the kernel stack of a
+         * user-mode wait may be swapped out, so no wait blocks on it */
+        Status = KeWaitForMultipleObjects(2, Objects, WaitAny, UserRequest, UserMode, TRUE, NULL, NULL);
         if (Status == STATUS_WAIT_1)
             return STATUS_CONNECTION_DISCONNECTED;
         if (Status != STATUS_WAIT_0)
