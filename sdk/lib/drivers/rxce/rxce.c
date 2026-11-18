@@ -5428,8 +5428,12 @@ RxLockUserBuffer(
         }
         else
         {
-            /* That likely means the driver asks for buffered IOs - we don't support it! */
-            ASSERT(!BooleanFlagOn(Irp->Flags, IRP_INPUT_OPERATION));
+            /* That likely means the driver asks for buffered IOs - we don't
+             * support it! IRP_INPUT_OPERATION is also IRP_SYNCHRONOUS_PAGING_IO
+             * (the same bit): a synchronous paging read without an MDL (Mm
+             * reading image headers into its own buffer) is not buffered I/O */
+            ASSERT(!BooleanFlagOn(Irp->Flags, IRP_BUFFERED_IO) &&
+                   (BooleanFlagOn(Irp->Flags, IRP_PAGING_IO) || !BooleanFlagOn(Irp->Flags, IRP_INPUT_OPERATION)));
 
             /* If we have a real length */
             if (BufferLength > 0)
