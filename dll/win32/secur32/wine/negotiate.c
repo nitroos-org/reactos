@@ -835,6 +835,9 @@ static SECURITY_STATUS nego_server_auth(NegoContext *ctx, PCredHandle phCredenti
     return SEC_E_OK;
 }
 
+#define NEGO_TAG_INIT   0x60    /* the outer tag of a NegTokenInit (GSS InitialContextToken) */
+#define NEGO_TAG_RESP   0xa1    /* the outer tag of a NegTokenResp */
+
 /* A client token may arrive in parts (Windows reassembles them, measured): an SPNEGO token whose header is complete,
  * with some content, and whose outer length says there is more, is kept and SEC_I_CONTINUE_NEEDED goes back without
  * output. Returns SEC_E_OK with (*data, *len) = the whole token when it is complete. */
@@ -862,6 +865,11 @@ static SECURITY_STATUS nego_server_collect(NegoContext *ctx, const BYTE **data, 
         return SEC_E_OK;
     }
     if (nego_is_raw_ntlm(*data, *len)) return SEC_E_OK;
+    /* Only an SPNEGO token is kept in pieces: a NegTokenInit (APPLICATION 0) or a NegTokenResp ([1]). Any other token
+     * is passed on as it is. A raw NTLM token has no length to wait for: its first bytes ('N', 'T', ...) parse as a DER
+     * header of some length, and keeping such a prefix would end with the layers above and below seeing different bytes
+     * (the whole token here, the last piece in NTLM). */
+    if (!*len || ((*data)[0] != NEGO_TAG_INIT && (*data)[0] != NEGO_TAG_RESP)) return SEC_E_OK;
     if (spnego_outer_length(*data, *len, &total) != SPNEGO_OK) return SEC_E_INVALID_TOKEN;
     if (total <= *len) return SEC_E_OK;
     /* the header and at least one byte of content: the length of the header is total minus the content length */
@@ -895,8 +903,8 @@ static SECURITY_STATUS SEC_ENTRY nego_AcceptSecurityContext(
     PSecBufferDesc pOutput, ULONG *pfContextAttr, PTimeStamp ptsExpiry)
 {
     NegoContext *ctx;
-    const BYTE *in;
-    ULONG in_len, attr = 0;
+    const BYTE *in, *caller_in;
+    ULONG in_len, caller_len, attr = 0;
     BOOL fresh = FALSE, more;
     SECURITY_STATUS ret;
 
@@ -906,6 +914,8 @@ static SECURITY_STATUS SEC_ENTRY nego_AcceptSecurityContext(
 
     if (!phNewContext) return SEC_E_INVALID_HANDLE;
     nego_input_token(pInput, &in, &in_len);
+    caller_in = in;
+    caller_len = in_len;
 
     if (!phContext)
     {
@@ -965,8 +975,9 @@ static SECURITY_STATUS SEC_ENTRY nego_AcceptSecurityContext(
         {
             if (nego_is_raw_ntlm(in, in_len))
             {
-                /* a raw NTLM NEGOTIATE: the exchange is plain NTLM (Windows accepts it, measured) */
-                if (ctx->have_ntlm) { ret = SEC_E_INVALID_TOKEN; break; }
+                /* a raw NTLM NEGOTIATE: the exchange is plain NTLM (Windows accepts it, measured). NTLM is handed the
+                 * caller's input buffer, so what was checked here must be that buffer, whole */
+                if (ctx->have_ntlm || in != caller_in || in_len != caller_len) { ret = SEC_E_INVALID_TOKEN; break; }
                 ctx->mode = NEGO_RAW;
                 ret = ntlm_AcceptSecurityContext(phCredential, NULL, pInput, fContextReq, TargetDataRep, &ctx->ntlm,
                                                  pOutput, pfContextAttr, ptsExpiry);

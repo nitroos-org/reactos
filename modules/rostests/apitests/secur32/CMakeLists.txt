@@ -4,6 +4,7 @@ list(APPEND SOURCE
     InvalidHandles.c
     LsaConnectUnprivileged.c
     LsaLogonContext.c
+    NegotiateReassembly.c
     NegotiateSpnego.c
     ReadConfigHandles.c
     SchannelHandshake.c
