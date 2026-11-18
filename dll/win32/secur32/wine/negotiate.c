@@ -210,7 +210,8 @@ typedef struct
     BOOL have_ntlm;             /* ntlm is a live NTLM context */
     CtxtHandle ntlm;
     ULONG req;                  /* the caller's request flags of the last call */
-    ULONG ntlm_attr;            /* the attributes of the last NTLM leg */
+    SecBuffer *cbt;             /* server: the channel bindings buffer of the caller's input of this call, or NULL */
+    ULONG ntlm_attr;           /* the attributes of the last NTLM leg */
     BYTE *mech_list;            /* the DER MechTypeList the mechListMIC covers */
     ULONG mech_list_len;
     BYTE *pending;              /* server: the first part of a token that arrives in pieces */
@@ -385,7 +386,7 @@ static SECURITY_STATUS nego_ntlm_leg(NegoContext *ctx, PCredHandle cred, SEC_WCH
                                      ULONG data_rep, const BYTE *in, ULONG in_len, BOOL have_in, BYTE **out,
                                      ULONG *out_len, PTimeStamp expiry)
 {
-    SecBuffer ib, ob;
+    SecBuffer ib[2], ob;
     SecBufferDesc id, od;
     SECURITY_STATUS ret;
     ULONG attr = 0;
@@ -393,11 +394,18 @@ static SECURITY_STATUS nego_ntlm_leg(NegoContext *ctx, PCredHandle cred, SEC_WCH
 
     *out = NULL;
     *out_len = 0;
-    ib.BufferType = SECBUFFER_TOKEN; ib.pvBuffer = (void *)in; ib.cbBuffer = in_len;
+    ib[0].BufferType = SECBUFFER_TOKEN; ib[0].pvBuffer = (void *)in; ib[0].cbBuffer = in_len;
     ob.BufferType = SECBUFFER_TOKEN; ob.pvBuffer = NULL; ob.cbBuffer = 0;
     id.ulVersion = od.ulVersion = SECBUFFER_VERSION;
-    id.cBuffers = od.cBuffers = 1;
-    id.pBuffers = &ib;
+    id.cBuffers = 1;
+    od.cBuffers = 1;
+    /* the channel bindings of the application go to NTLM, which checks them against the ones in the AUTHENTICATE */
+    if (ctx->server && ctx->cbt)
+    {
+        ib[1] = *ctx->cbt;
+        id.cBuffers = 2;
+    }
+    id.pBuffers = ib;
     od.pBuffers = &ob;
     req |= ISC_REQ_ALLOCATE_MEMORY;
     /* the NTLM of the Negotiate package always signs (Windows, measured: SIGN and KEY_EXCH are offered whatever the
@@ -1073,6 +1081,18 @@ static SECURITY_STATUS SEC_ENTRY nego_AcceptSecurityContext(
         }
     }
     ctx->req = fContextReq;
+    ctx->cbt = NULL;
+    if (pInput && pInput->pBuffers)
+    {
+        ULONG i;
+
+        for (i = 0; i < pInput->cBuffers; i++)
+            if ((pInput->pBuffers[i].BufferType & ~SECBUFFER_ATTRMASK) == SECBUFFER_CHANNEL_BINDINGS)
+            {
+                ctx->cbt = &pInput->pBuffers[i];
+                break;
+            }
+    }
 
     switch (ctx->state)
     {
@@ -1123,6 +1143,7 @@ static SECURITY_STATUS SEC_ENTRY nego_AcceptSecurityContext(
         ret = SEC_E_INVALID_HANDLE;
         break;
     }
+    ctx->cbt = NULL;
 
     if (ret == SEC_E_OK || ret == SEC_I_CONTINUE_NEEDED)
     {
