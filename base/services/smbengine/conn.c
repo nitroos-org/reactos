@@ -318,6 +318,13 @@ static
 VOID
 ConnectFailed(PSMBENG_CONN Conn, NTSTATUS Status, ULONG Win32)
 {
+    /* A LOGOFF that tears down a connect in progress gets here from ConnectCb: the key
+     * stays logged off (no reconnect, every later request refused) */
+    if (Conn->State == ConnLoggedOff)
+    {
+        FailPending(Conn, STATUS_USER_SESSION_DELETED, ERROR_NETNAME_DELETED);
+        return;
+    }
     Conn->State = ConnDown;
     /* A connect refused at once as unreachable (seen for the first connects after boot, while
      * the stack resolves the neighbour) is tried again shortly, before the waiting requests fail */
