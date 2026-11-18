@@ -17,8 +17,9 @@
  * needs SeImpersonatePrivilege and the device admits SYSTEM, LocalService and
  * administrators only), then loops:
  *   IOCTL_SMBRDR_ENGINE_GET     (output: one request message, blocks until one is
- *                                queued, or the engine is detached, or the thread's
- *                                I/O is cancelled)
+ *                                queued, or the engine is detached; the wait is
+ *                                alertable, so the thread can be terminated, but
+ *                                CancelIoEx does not end it)
  *   IOCTL_SMBRDR_ENGINE_REPLY   (input: one reply message for a request it got)
  * Both are METHOD_BUFFERED: the I/O manager captures each message once, so a
  * message cannot change while the other side checks it.
@@ -33,7 +34,9 @@
  * closed (it exits or crashes), every queued and pending request completes with
  * STATUS_CONNECTION_DISCONNECTED; new requests fail with
  * STATUS_REDIRECTOR_NOT_STARTED until an engine attaches again. Each request has
- * a time limit (NITRO_SMBRDR_REQUEST_TIMEOUT_SECONDS): nothing waits forever.
+ * a time limit (NITRO_SMBRDR_REQUEST_TIMEOUT_SECONDS): nothing waits forever. A
+ * request sent for a caller's IRP also ends (STATUS_CANCELLED, with a CANCEL
+ * notification) when that IRP is cancelled or its thread is terminating.
  * The engine likewise checks every request (it must not trust the sizes either:
  * a different driver build could be loaded).
  *
@@ -277,8 +280,9 @@ typedef struct _SMBUP_CANCEL_REQUEST
     ULONGLONG RequestId;
 } SMBUP_CANCEL_REQUEST, *PSMBUP_CANCEL_REQUEST;
 
-/* Engine device for the network provider/test tools, on \Device\LanmanRedirector:
- * IOCTL_SMBRDR_QUERY_STATE answers whether an engine is attached (output: ULONG 0/1). */
+/* On the engine device (\Device\NitroSmbEngine, so for its admitted callers only), for
+ * test tools: IOCTL_SMBRDR_QUERY_STATE answers whether an engine is attached (output:
+ * ULONG 0/1). */
 #define IOCTL_SMBRDR_QUERY_STATE        SMBUP_CTL_CODE(16, METHOD_BUFFERED)
 
 #ifdef __cplusplus
