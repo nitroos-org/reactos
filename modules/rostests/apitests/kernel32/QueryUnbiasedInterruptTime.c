@@ -11,7 +11,10 @@ typedef BOOL (WINAPI *FN_QueryUnbiasedInterruptTime)(PULONGLONG);
 typedef ULONGLONG (WINAPI *FN_GetTickCount64)(VOID);
 typedef VOID (WINAPI *FN_QueryUnbiasedInterruptTimePrecise)(PULONGLONG);
 
-/* Windows 10 (and kernel32 here) exports the precise unbiased interrupt time; it has no result value */
+/*
+ * Windows (Server 2022, 20348, x64 and x86) exports QueryUnbiasedInterruptTimePrecise from kernelbase.dll only; programs reach it
+ * through api-ms-win-core-realtime-l1-1-x, which is kernelbase there and here
+ */
 static
 VOID
 test_Precise(
@@ -19,40 +22,44 @@ test_Precise(
     _In_ FN_QueryUnbiasedInterruptTime pQueryUnbiasedInterruptTime)
 {
     FN_QueryUnbiasedInterruptTimePrecise pPrecise;
+    HMODULE hKernelbase = LoadLibraryW(L"kernelbase.dll");
     ULONGLONG Coarse1, Coarse2, Time1, Time2, Prev;
     int i;
 
-    /*
-     * Windows exports it from kernelbase.dll only (programs reach it through api-ms-win-core-realtime-l1-1-1, which is
-     * kernelbase there); the apisets of this system name kernel32, which implements it
-     */
-    pPrecise = (FN_QueryUnbiasedInterruptTimePrecise)GetProcAddress(hKernel32, "QueryUnbiasedInterruptTimePrecise");
-    if (is_reactos() && pPrecise)
+    if (!hKernelbase)
     {
-        /*
-         * Chrome delay-loads it through api-ms-win-core-realtime-l1-1-1 inside its sandbox, after lockdown, where loading
-         * another DLL fails: the api set must resolve to kernel32, which implements the function, and not to kernelbase.dll
-         * (it forwarded there once, and the renderer crashed in the delay-load failure handler). Whether kernelbase.dll
-         * is loaded in the process does not matter: shlwapi imports it
-         */
-        HMODULE hApi = LoadLibraryW(L"api-ms-win-core-realtime-l1-1-1.dll");
-        ok(hApi != NULL, "api-ms-win-core-realtime-l1-1-1.dll does not load, error %lu\n", GetLastError());
-        if (hApi)
-            ok(GetProcAddress(hApi, "QueryUnbiasedInterruptTimePrecise") == (FARPROC)pPrecise,
-               "The api set does not resolve to the kernel32 export\n");
-        ok(hApi == hKernel32, "The api set resolves to module %p, not to kernel32 %p\n", hApi, hKernel32);
+        skip("kernelbase.dll does not load\n");
+        return;
     }
-    if (!pPrecise && !is_reactos())
-        pPrecise = (FN_QueryUnbiasedInterruptTimePrecise)GetProcAddress(LoadLibraryW(L"kernelbase.dll"),
-                                                                         "QueryUnbiasedInterruptTimePrecise");
+    pPrecise = (FN_QueryUnbiasedInterruptTimePrecise)GetProcAddress(hKernelbase, "QueryUnbiasedInterruptTimePrecise");
     if (!pPrecise && is_reactos() && !GetProcAddress(hKernel32, "K32EnumProcesses"))
     {
         skip("No NT 6.1 exports\n");
         return;
     }
-    ok(pPrecise != NULL, "QueryUnbiasedInterruptTimePrecise is not exported\n");
+    ok(pPrecise != NULL, "QueryUnbiasedInterruptTimePrecise is not exported by kernelbase.dll\n");
+    ok(GetProcAddress(hKernel32, "QueryUnbiasedInterruptTimePrecise") == NULL, "kernel32.dll exports QueryUnbiasedInterruptTimePrecise\n");
     if (!pPrecise)
         return;
+
+    {
+        static const WCHAR *Contracts[] = { L"api-ms-win-core-realtime-l1-1-0.dll", L"api-ms-win-core-realtime-l1-1-1.dll",
+                                            L"api-ms-win-core-realtime-l1-1-2.dll" };
+        int c;
+
+        for (c = 0; c < 3; c++)
+        {
+            HMODULE hApi = LoadLibraryW(Contracts[c]);
+
+            ok(hApi != NULL, "%ls does not load, error %lu\n", Contracts[c], GetLastError());
+            if (hApi)
+            {
+                ok(hApi == hKernelbase, "%ls resolves to module %p, not to kernelbase.dll %p\n", Contracts[c], hApi, hKernelbase);
+                ok(GetProcAddress(hApi, "QueryUnbiasedInterruptTimePrecise") == (FARPROC)pPrecise,
+                   "%ls does not resolve QueryUnbiasedInterruptTimePrecise to the kernelbase export\n", Contracts[c]);
+            }
+        }
+    }
 
     /* It agrees with the coarse time to within a clock tick or two (15.6 ms each) */
     pQueryUnbiasedInterruptTime(&Coarse1);
@@ -91,9 +98,9 @@ test_Precise(
 typedef VOID (WINAPI *FN_QueryInterruptTime)(PULONGLONG);
 
 /*
- * QueryInterruptTime and QueryInterruptTimePrecise (the biased interrupt time) must resolve through
- * api-ms-win-core-realtime-l1-1-1, which is kernel32 here: Chrome 158 delay-loads QueryInterruptTimePrecise
- * through the api set, and a failed lookup ends the browser process in its delay-load failure handler.
+ * QueryInterruptTime and QueryInterruptTimePrecise (the biased interrupt time): exported from kernelbase.dll and not from
+ * kernel32.dll (Windows Server 2022), and resolved through api-ms-win-core-realtime-l1-1-1: Chrome 158 delay-loads
+ * QueryInterruptTimePrecise through the api set, and a failed lookup ends the browser process in its delay-load failure handler.
  */
 static
 VOID
@@ -102,19 +109,15 @@ test_InterruptTime(
     _In_ FN_QueryUnbiasedInterruptTime pQueryUnbiasedInterruptTime)
 {
     FN_QueryInterruptTime pInterrupt, pInterruptPrecise, pApiInterrupt, pApiPrecise;
-    HMODULE hHost = hKernel32, hApi;
+    HMODULE hHost, hApi;
     ULONGLONG Unbiased1, Unbiased2, Time1, Time2, Prev;
     int i;
 
-    if (!is_reactos())
+    hHost = LoadLibraryW(L"kernelbase.dll");
+    if (!hHost)
     {
-        /* Windows exports them from kernelbase.dll */
-        hHost = LoadLibraryW(L"kernelbase.dll");
-        if (!hHost)
-        {
-            skip("kernelbase.dll does not load\n");
-            return;
-        }
+        skip("kernelbase.dll does not load\n");
+        return;
     }
     pInterrupt = (FN_QueryInterruptTime)GetProcAddress(hHost, "QueryInterruptTime");
     pInterruptPrecise = (FN_QueryInterruptTime)GetProcAddress(hHost, "QueryInterruptTimePrecise");
@@ -125,6 +128,8 @@ test_InterruptTime(
     }
     ok(pInterrupt != NULL, "QueryInterruptTime is not exported\n");
     ok(pInterruptPrecise != NULL, "QueryInterruptTimePrecise is not exported\n");
+    ok(GetProcAddress(hKernel32, "QueryInterruptTime") == NULL, "kernel32.dll exports QueryInterruptTime\n");
+    ok(GetProcAddress(hKernel32, "QueryInterruptTimePrecise") == NULL, "kernel32.dll exports QueryInterruptTimePrecise\n");
     if (!pInterrupt || !pInterruptPrecise)
         return;
 
@@ -136,11 +141,8 @@ test_InterruptTime(
         pApiPrecise = (FN_QueryInterruptTime)GetProcAddress(hApi, "QueryInterruptTimePrecise");
         ok(pApiInterrupt != NULL, "The api set has no QueryInterruptTime, error %lu\n", GetLastError());
         ok(pApiPrecise != NULL, "The api set has no QueryInterruptTimePrecise, error %lu\n", GetLastError());
-        if (is_reactos())
-        {
-            ok(pApiInterrupt == pInterrupt, "The api set does not resolve to the kernel32 QueryInterruptTime\n");
-            ok(pApiPrecise == pInterruptPrecise, "The api set does not resolve to the kernel32 QueryInterruptTimePrecise\n");
-        }
+        ok(pApiInterrupt == pInterrupt, "The api set does not resolve to the kernelbase QueryInterruptTime\n");
+        ok(pApiPrecise == pInterruptPrecise, "The api set does not resolve to the kernelbase QueryInterruptTimePrecise\n");
     }
     else
     {

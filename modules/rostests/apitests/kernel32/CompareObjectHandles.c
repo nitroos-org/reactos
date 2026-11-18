@@ -57,6 +57,19 @@ START_TEST(CompareObjectHandles)
         return;
     }
 
+    /* Windows (Server 2022): kernel32 does not export it, and the handle contract is kernelbase */
+    ok(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "CompareObjectHandles") == NULL, "kernel32.dll exports CompareObjectHandles\n");
+    {
+        HMODULE Api = LoadLibraryW(L"api-ms-win-core-handle-l1-1-0.dll");
+
+        ok(Api != NULL, "api-ms-win-core-handle-l1-1-0.dll does not load, error %lu\n", GetLastError());
+        if (Api)
+        {
+            ok(Api == Kernelbase, "the handle contract resolves to module %p, not to kernelbase.dll %p\n", Api, Kernelbase);
+            ok(GetProcAddress(Api, "CompareObjectHandles") == (FARPROC)pCompareObjectHandles, "the handle contract has another CompareObjectHandles\n");
+            ok(GetProcAddress(Api, "CloseHandle") != NULL, "the handle contract has no CloseHandle\n");
+        }
+    }
 
     StringCchPrintfW(Name, ARRAYSIZE(Name), L"AppexpCompare%lu", GetCurrentProcessId());
     Event1 = CreateEventW(NULL, TRUE, FALSE, Name);

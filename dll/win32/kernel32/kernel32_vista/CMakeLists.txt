@@ -10,7 +10,6 @@ list(APPEND SOURCE
     Barrier.c
     CancelIoEx.c
     CancelSynchronousIo.c
-    CompareObjectHandles.c
     DiscardVirtualMemory.c
     DiskSpaceInfo.c
     EnumSystemLocalesEx.c

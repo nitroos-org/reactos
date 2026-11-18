@@ -155,7 +155,7 @@
 #@ stdcall CloseThreadpoolWork(ptr) ntdll.TpReleaseWork
 # #@ stub CommitStateAtom
 #@ stdcall CompareFileTime(ptr ptr)
-#@ stdcall CompareObjectHandles(ptr ptr)
+@ stdcall -version=0x601+ CompareObjectHandles(ptr ptr)
 #@ stdcall CompareStringA(long long str long str long)
 #@ stdcall CompareStringEx(wstr long wstr long wstr long ptr ptr long)
 @ stdcall CompareStringOrdinal(wstr long wstr long long)
@@ -1239,7 +1239,7 @@
 #@ stdcall QueryIdleProcessorCycleTime(ptr ptr)
 #@ stdcall QueryIdleProcessorCycleTimeEx(long ptr ptr)
 @ stdcall QueryInterruptTime(ptr)
-@ stdcall -version=0x601+ QueryInterruptTimePrecise(ptr) kernel32.QueryInterruptTimePrecise
+@ stdcall -version=0x601+ QueryInterruptTimePrecise(ptr)
 #@ stdcall QueryMemoryResourceNotification(ptr ptr)
 # #@ stub QueryOptionalDelayLoadedAPI
 #@ stdcall QueryPerformanceCounter(ptr) ntdll.RtlQueryPerformanceCounter
@@ -1254,7 +1254,7 @@
 #@ stdcall QueryThreadCycleTime(long ptr)
 #@ stdcall QueryThreadpoolStackInformation(ptr ptr)
 @ stdcall -version=0x601+ QueryUnbiasedInterruptTime(ptr) kernel32.QueryUnbiasedInterruptTime
-@ stdcall QueryUnbiasedInterruptTimePrecise(ptr) kernel32.QueryUnbiasedInterruptTimePrecise
+@ stdcall QueryUnbiasedInterruptTimePrecise(ptr)
 #@ stdcall QueryVirtualMemoryInformation(long ptr long ptr long ptr)
 @ stdcall -version=0x601+ QueryWorkingSet(ptr ptr long) psapi.QueryWorkingSet
 @ stdcall -version=0x601+ QueryWorkingSetEx(ptr ptr long) psapi.QueryWorkingSetEx
