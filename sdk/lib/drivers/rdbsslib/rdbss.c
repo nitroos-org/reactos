@@ -5780,6 +5780,14 @@ RxCreateFromNetRoot(
         return STATUS_BAD_NETWORK_PATH;
     }
 
+    /* Named pipes and mailslots over a redirector are not implemented:
+     * refuse here, before any pipe-specific path is taken. A connection to
+     * the share itself (tree connect) is still possible */
+    if (NetRoot->Type == NET_ROOT_PIPE || NetRoot->Type == NET_ROOT_MAILSLOT)
+    {
+        return STATUS_NOT_SUPPORTED;
+    }
+
     if (Context->Create.NtCreateParameters.DfsContext == UIntToPtr(DFS_OPEN_CONTEXT) &&
         !BooleanFlagOn(NetRoot->pSrvCall->Flags, SRVCALL_FLAG_DFS_AWARE_SERVER))
     {
@@ -5924,11 +5932,13 @@ RxCreateFromNetRoot(
             /* There are already opens, check for conflict */
             if (Fcb->OpenCount != 0)
             {
-                if (!NT_SUCCESS(RxCheckShareAccess(DesiredAccess, DesiredShareAccess,
-                                                   FileObject, &Fcb->ShareAccess,
-                                                   FALSE, "second check per useropens",
-                                                   "2ndAccPerUO")))
+                Status = RxCheckShareAccess(DesiredAccess, DesiredShareAccess,
+                                            FileObject, &Fcb->ShareAccess,
+                                            FALSE, "second check per useropens",
+                                            "2ndAccPerUO");
+                if (!NT_SUCCESS(Status))
                 {
+                    /* Return the sharing failure, not the open's success */
                     ++SrvOpen->UncleanFobxCount;
                     RxDereferenceNetFobx(Fobx, LHS_LockNotHeld);
 
@@ -6723,12 +6733,33 @@ RxFirstCanonicalize(
         }
         else
         {
-            UNIMPLEMENTED;
-            DPRINT1("WARNING: Assuming not special + disk!\n");
-            Type = NET_ROOT_DISK;
+            UNICODE_STRING ShareName, IpcShare;
+            PWSTR ShareEnd;
+
+            /* Classify by share name: IPC$ is the named pipe share, anything
+             * else is taken as a disk (a print share is only known to the
+             * server, the mini-redirector may still change the type) */
+            for (ShareEnd = FirstSlash + 1; ShareEnd != EndOfString; ++ShareEnd)
+            {
+                if (*ShareEnd == OBJ_NAME_PATH_SEPARATOR)
+                {
+                    break;
+                }
+            }
+            ShareName.Buffer = FirstSlash + 1;
+            ShareName.Length = (USHORT)((ULONG_PTR)ShareEnd - (ULONG_PTR)ShareName.Buffer);
+            ShareName.MaximumLength = ShareName.Length;
+            RtlInitUnicodeString(&IpcShare, L"IPC$");
+
+            if (RtlEqualUnicodeString(&ShareName, &IpcShare, TRUE))
+            {
+                Type = NET_ROOT_PIPE;
+            }
+            else
+            {
+                Type = NET_ROOT_DISK;
+            }
             Status = STATUS_SUCCESS;
-            //Status = STATUS_NOT_IMPLEMENTED;
-            /* Should be check against IPC, mailslot, and so on */
         }
     }
 
@@ -6783,7 +6814,7 @@ RxFirstCanonicalize(
             RtlAppendUnicodeStringToString(CanonicalName, &SessionIdString);
             RtlAppendUnicodeStringToString(CanonicalName, FileName);
 
-            DPRINT1("CanonicalName: %wZ\n", CanonicalName);
+            DPRINT("CanonicalName: %wZ\n", CanonicalName);
         }
         /* Otherwise, that's a simple copy */
         else
