@@ -271,22 +271,49 @@ RxAcquireFcbForReadAhead(
     return Ret;
 }
 
+/*
+ * @implemented
+ *
+ * Section creation: Mm wants the file stable while it looks at the sizes;
+ * the FCB is taken exclusive (same lock order as every other path: FCB
+ * before paging I/O resource).
+ */
 VOID
 NTAPI
 RxAcquireFileForNtCreateSection(
     PFILE_OBJECT FileObject)
 {
-    UNIMPLEMENTED;
+    PFCB Fcb;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    Fcb = FileObject->FsContext;
+    ASSERT(NodeTypeIsFcb(Fcb));
+
+    Status = RxAcquireExclusiveFcb(NULL, Fcb);
+    ASSERT(Status == STATUS_SUCCESS);
+    (void)Status;
+#if (_WIN32_WINNT < 0x0600)
+    Fcb->CreateSectionThread = PsGetCurrentThread();
+#endif
 }
 
+/*
+ * @implemented
+ *
+ * Cc/Mm flushes: STATUS_INVALID_DEVICE_REQUEST asks FsRtl for its default,
+ * which takes the main resource (exclusive unless already shared) and then
+ * the paging I/O resource shared: the FCB-before-paging-resource order RDBSS
+ * uses everywhere.
+ */
 NTSTATUS
 NTAPI
 RxAcquireForCcFlush(
     PFILE_OBJECT FileObject,
     PDEVICE_OBJECT DeviceObject)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    return STATUS_INVALID_DEVICE_REQUEST;
 }
 
 /*
@@ -7625,22 +7652,39 @@ RxReleaseFcbFromReadAhead(
     ExReleaseResourceLite(Fcb->Header.Resource);
 }
 
+/*
+ * @implemented
+ */
 VOID
 NTAPI
 RxReleaseFileForNtCreateSection(
     PFILE_OBJECT FileObject)
 {
-    UNIMPLEMENTED;
+    PFCB Fcb;
+
+    PAGED_CODE();
+
+    Fcb = FileObject->FsContext;
+    ASSERT(NodeTypeIsFcb(Fcb));
+
+#if (_WIN32_WINNT < 0x0600)
+    Fcb->CreateSectionThread = NULL;
+#endif
+    RxReleaseFcb(NULL, Fcb);
 }
 
+/*
+ * @implemented
+ *
+ * See RxAcquireForCcFlush: FsRtl releases what its default took.
+ */
 NTSTATUS
 NTAPI
 RxReleaseForCcFlush(
     PFILE_OBJECT FileObject,
     PDEVICE_OBJECT DeviceObject)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    return STATUS_INVALID_DEVICE_REQUEST;
 }
 
 /*
@@ -8719,7 +8763,20 @@ RxTrackPagingIoResource(
     _In_ ULONG Line,
     _In_ PCSTR File)
 {
-    UNIMPLEMENTED;
+    PFCB Fcb = Instance;
+
+    /* Debugging aid: who last took the paging I/O resource (1 exclusive,
+     * 2 shared), and forget it on release (3) */
+    if (Type == 3)
+    {
+        Fcb->PagingIoResourceFile = NULL;
+        Fcb->PagingIoResourceLine = 0;
+    }
+    else
+    {
+        Fcb->PagingIoResourceFile = (PCHAR)File;
+        Fcb->PagingIoResourceLine = Line;
+    }
 }
 
 /*

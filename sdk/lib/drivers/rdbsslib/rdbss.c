@@ -2913,13 +2913,64 @@ RxCommonFileSystemControl(
     return STATUS_NOT_IMPLEMENTED;
 }
 
+/*
+ * @implemented
+ *
+ * IRP_MJ_FLUSH_BUFFERS: write back what the cache holds, then ask the
+ * mini-redirector to flush on the server (MRxFlush). Lock order: FCB
+ * exclusive -> (RxFlushFcbInSystemCache) paging I/O resource -> Cc; the
+ * paging writes the flush issues take the paging resource shared again,
+ * which the owner may do. Directories only reach the mini-redirector.
+ */
 NTSTATUS
 NTAPI
 RxCommonFlushBuffers(
     PRX_CONTEXT Context)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PFCB Fcb;
+    NTSTATUS Status, MiniStatus;
+
+    PAGED_CODE();
+
+    Fcb = (PFCB)Context->pFcb;
+    DPRINT("RxCommonFlushBuffers(%p) FCB: %p\n", Context, Fcb);
+
+    if (NodeType(Fcb) != RDBSS_NTC_STORAGE_TYPE_FILE && NodeType(Fcb) != RDBSS_NTC_STORAGE_TYPE_DIRECTORY)
+    {
+        return STATUS_INVALID_DEVICE_REQUEST;
+    }
+
+    Status = RxAcquireExclusiveFcb(Context, Fcb);
+    if (Status == STATUS_LOCK_NOT_GRANTED)
+    {
+        return RxFsdPostRequest(Context);
+    }
+    else if (!NT_SUCCESS(Status))
+    {
+        return Status;
+    }
+
+    Status = STATUS_SUCCESS;
+    if (NodeType(Fcb) == RDBSS_NTC_STORAGE_TYPE_FILE &&
+        Fcb->NonPaged->SectionObjectPointers.DataSectionObject != NULL)
+    {
+        Status = RxFlushFcbInSystemCache(Fcb, TRUE);
+    }
+
+    if (NT_SUCCESS(Status) && Fcb->MRxDispatch->MRxFlush != NULL)
+    {
+        MINIRDR_CALL(MiniStatus, Context, Fcb->MRxDispatch, MRxFlush, (Context));
+        /* A mini-redirector that cannot flush has nothing to flush */
+        if (MiniStatus != STATUS_NOT_IMPLEMENTED && MiniStatus != STATUS_INVALID_DEVICE_REQUEST)
+        {
+            Status = MiniStatus;
+        }
+    }
+
+    RxReleaseFcb(Context, Fcb);
+
+    DPRINT("Status: %lx\n", Status);
+    return Status;
 }
 
 /*
