@@ -4,6 +4,7 @@ list(APPEND SOURCE
     InvalidHandles.c
     LsaConnectUnprivileged.c
     LsaLogonContext.c
+    NegotiateSpnego.c
     ReadConfigHandles.c
     SchannelHandshake.c
     SchannelServerCert.c
