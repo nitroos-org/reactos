@@ -1390,6 +1390,77 @@ RxCanonicalizeFileNameByServerSpecs(
     return STATUS_MORE_PROCESSING_REQUIRED;
 }
 
+/*
+ * Builds the canonical name of a relative open: the related FCB's V_NET_ROOT
+ * prefix, its path below that prefix, a separator and the relative name. All
+ * lengths are checked: the result must fit a UNICODE_STRING.
+ */
+static
+NTSTATUS
+RxBuildRelativeCanonicalName(
+    PRX_CONTEXT RxContext,
+    PFCB RelatedFcb,
+    PUNICODE_STRING FileName,
+    PUNICODE_STRING CanonicalName)
+{
+    NTSTATUS Status;
+    ULONG Length;
+    BOOLEAN Separator;
+    PV_NET_ROOT VNetRoot;
+    PUNICODE_STRING Prefix, Path;
+
+    PAGED_CODE();
+
+    VNetRoot = RelatedFcb->VNetRoot;
+    if (VNetRoot == NULL || (NodeType(VNetRoot) & ~RX_SCAVENGER_MASK) != RDBSS_NTC_V_NETROOT)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    Prefix = &VNetRoot->PrefixEntry.Prefix;
+    Path = &RelatedFcb->FcbTableEntry.Path;
+
+    /* No separator to add for a re-open (empty name) or after a path that
+     * already ends with one (a share root) */
+    Separator = (FileName->Length != 0);
+    if (Path->Length != 0 && Path->Buffer[Path->Length / sizeof(WCHAR) - 1] == OBJ_NAME_PATH_SEPARATOR)
+    {
+        Separator = FALSE;
+    }
+    else if (Path->Length == 0 && Prefix->Length != 0 &&
+             Prefix->Buffer[Prefix->Length / sizeof(WCHAR) - 1] == OBJ_NAME_PATH_SEPARATOR)
+    {
+        Separator = FALSE;
+    }
+
+    Length = (ULONG)Prefix->Length + Path->Length + FileName->Length + (Separator ? sizeof(WCHAR) : 0);
+    if (Length > MAXUSHORT - 1)
+    {
+        return STATUS_OBJECT_NAME_INVALID;
+    }
+
+    Status = RxAllocateCanonicalNameBuffer(RxContext, CanonicalName, (USHORT)Length);
+    if (!NT_SUCCESS(Status))
+    {
+        return Status;
+    }
+
+    RtlCopyMemory(CanonicalName->Buffer, Prefix->Buffer, Prefix->Length);
+    CanonicalName->Length = Prefix->Length;
+    RtlCopyMemory(Add2Ptr(CanonicalName->Buffer, CanonicalName->Length), Path->Buffer, Path->Length);
+    CanonicalName->Length += Path->Length;
+    if (Separator)
+    {
+        CanonicalName->Buffer[CanonicalName->Length / sizeof(WCHAR)] = OBJ_NAME_PATH_SEPARATOR;
+        CanonicalName->Length += sizeof(WCHAR);
+    }
+    RtlCopyMemory(Add2Ptr(CanonicalName->Buffer, CanonicalName->Length), FileName->Buffer, FileName->Length);
+    CanonicalName->Length += FileName->Length;
+
+    DPRINT("Relative open: %wZ\n", CanonicalName);
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS
 RxCanonicalizeNameAndObtainNetRoot(
     PRX_CONTEXT RxContext,
@@ -1435,7 +1506,23 @@ RxCanonicalizeNameAndObtainNetRoot(
             return STATUS_INVALID_PARAMETER;
         }
 
-        UNIMPLEMENTED;
+        /* A relative name is never rooted (VERIFY ON PEER: the status) */
+        if (FileName->Length != 0 && FileName->Buffer[0] == OBJ_NAME_PATH_SEPARATOR)
+        {
+            return STATUS_OBJECT_NAME_INVALID;
+        }
+
+        /* The name is the related file's canonical name (its V_NET_ROOT
+         * prefix and its path below it, both canonical already), a
+         * separator and the relative name. The related FCB is referenced by
+         * its open file object, which the I/O manager holds for us */
+        Status = RxBuildRelativeCanonicalName(RxContext, Fcb, FileName, &CanonicalName);
+        if (!NT_SUCCESS(Status))
+        {
+            return Status;
+        }
+
+        NetRootType = Fcb->pNetRoot->Type;
     }
 
     /* Get/Create the associated VNetRoot for opening */
