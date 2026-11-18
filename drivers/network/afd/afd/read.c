@@ -901,6 +901,9 @@ AfdConnectedSocketReadData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                                        Irp, 0 );
     }
 
+    /* The peer ended the connection and may have reset it since: nothing is outstanding to tell us */
+    AfdCheckPeerReset(FCB);
+
     if( !AfdRequestLengthValid( Irp, IrpSp, sizeof(AFD_RECV_INFO) ) )
         return UnlockAndMaybeComplete( FCB, STATUS_INVALID_PARAMETER,
                                        Irp, 0 );

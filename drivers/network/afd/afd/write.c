@@ -926,6 +926,9 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         }
     }
 
+    /* The peer ended the connection and may have reset it since: nothing is outstanding to tell us */
+    AfdCheckPeerReset(FCB);
+
     if (FCB->PollState & AFD_EVENT_CLOSE)
     {
         AFD_DbgPrint(MIN_TRACE,("Connection reset by remote peer\n"));

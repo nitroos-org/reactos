@@ -743,6 +743,13 @@ AfdCleanupSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
        object stays referenced by it, so the socket is never closed) */
     FCB->CleanedUp = TRUE;
 
+    /* Closing a stream socket that holds received data nobody read resets the connection instead of ending it
+       gracefully, as on Windows: the peer's operations fail with a reset, not after its next send */
+    if (FCB->Recv.Content > FCB->Recv.BytesUsed &&
+        !(FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS) &&
+        FCB->SharedData.State == SOCKET_STATE_CONNECTED)
+        AfdAbortConnection(FCB);
+
     for (Function = 0; Function < MAX_FUNCTIONS; Function++)
     {
         /* Closing a stream socket aborts its pending receives (STATUS_CONNECTION_ABORTED,
@@ -1164,6 +1171,27 @@ AfdAbortConnection(PAFD_FCB FCB)
     DoDisconnect(FCB);
 }
 
+/* A stream socket whose peer ended the connection gracefully (its receive request is done: nothing is outstanding)
+ * learns of a later reset only by asking the transport. Windows resets the connection of a peer that has closed
+ * when more data reaches it: the sender's operations then fail with WSAECONNABORTED, the data it did not read is
+ * lost and FD_CLOSE comes again with that error. Asked by the operations that would otherwise go on as if the
+ * connection lived. The state lock is held. */
+VOID
+AfdCheckPeerReset(PAFD_FCB FCB)
+{
+    if (FCB->ConnectionAborted ||
+        (FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS) ||
+        FCB->SharedData.State != SOCKET_STATE_CONNECTED ||
+        !FCB->Connection.Object ||
+        !FCB->TdiReceiveClosed ||
+        FCB->LocalReceiveShutdown ||
+        FCB->LastReceiveStatus != STATUS_SUCCESS)
+        return;
+
+    if (AfdQueryConnectionStatus(FCB->Connection.Object) == STATUS_CONNECTION_RESET)
+        AfdMarkConnectionAborted(FCB, FALSE);
+}
+
 static NTSTATUS NTAPI
 AfdDisconnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
               PIO_STACK_LOCATION IrpSp) {
@@ -1198,6 +1226,19 @@ AfdDisconnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     {
         /* Perform a controlled disconnect */
         Flags = TDI_DISCONNECT_RELEASE;
+
+        /* Closing the socket (not shutdown(SD_SEND)) with received data that nobody read resets the connection
+           instead of ending it, as on Windows: the peer's operations fail with a reset at once */
+        if ((DisReq->DisconnectType & AFD_DISCONNECT_CLOSE) &&
+            !(FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS) &&
+            FCB->SharedData.State == SOCKET_STATE_CONNECTED &&
+            FCB->ConnectCallInfo &&
+            !FCB->TdiReceiveClosed &&
+            FCB->Recv.Content != FCB->Recv.BytesUsed)
+        {
+            AfdMarkConnectionAborted(FCB, TRUE);
+            Flags = TDI_DISCONNECT_ABORT;
+        }
     }
     /* Receive direction or both */
     else

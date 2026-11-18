@@ -57,6 +57,7 @@ list(APPEND SOURCE
     memleak.c
     nbconnect.c
     nonblocking.c
+    peerclose.c
     nostartup.c
     open_osfhandle.c
     OwnHostname.c

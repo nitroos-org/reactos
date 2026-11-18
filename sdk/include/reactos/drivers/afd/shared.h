@@ -289,6 +289,9 @@ typedef struct _AFD_TDI_HANDLE_DATA
 #define AFD_DISCONNECT_RECV		0x02L
 #define AFD_DISCONNECT_ABORT		0x04L
 #define AFD_DISCONNECT_DATAGRAM		0x08L
+/* Private, with AFD_DISCONNECT_SEND: the disconnect of closesocket (not of shutdown), which resets a connection
+ * that holds received data nobody read */
+#define AFD_DISCONNECT_CLOSE		0x10L
 
 /* AFD Event Flags */
 #define AFD_EVENT_RECEIVE                   (1 << AFD_EVENT_RECEIVE_BIT)
