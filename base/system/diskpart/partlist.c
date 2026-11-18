@@ -2063,6 +2063,8 @@ AddVolumeToList(
         return;
 
     VolumeEntry->VolumeNumber = ulVolumeNumber;
+    /* Zero is VOLUME_TYPE_CDROM: a volume whose type is not known yet must not pass for one */
+    VolumeEntry->VolumeType = VOLUME_TYPE_UNKNOWN;
     wcscpy(VolumeEntry->VolumeName, pszVolumeName);
 
     Index = wcslen(pszVolumeName) - 1;
@@ -2102,6 +2104,15 @@ AddVolumeToList(
         NtClose(VolumeHandle);
     }
 
+    /* The device could not be opened (no medium): take the type from the device name */
+    if (VolumeEntry->VolumeType == VOLUME_TYPE_UNKNOWN)
+    {
+        if (_wcsnicmp(VolumeEntry->DeviceName, L"\\Device\\CdRom", 13) == 0)
+            VolumeEntry->VolumeType = VOLUME_TYPE_CDROM;
+        else if (_wcsnicmp(VolumeEntry->DeviceName, L"\\Device\\Floppy", 14) == 0)
+            VolumeEntry->VolumeType = VOLUME_TYPE_REMOVABLE;
+    }
+
     if (GetVolumeInformationW(pszVolumeName,
                               szVolumeName,
                               MAX_PATH + 1,
@@ -2137,7 +2148,9 @@ AddVolumeToList(
             VolumeEntry->SerialNumber = 0;
             VolumeEntry->SectorsPerAllocationUnit = 1;
             VolumeEntry->BytesPerSector = 512;
-            VolumeEntry->VolumeType = VOLUME_TYPE_PARTITION;
+            /* A CD-ROM or a removable drive with an unrecognised medium keeps its type */
+            if (VolumeEntry->VolumeType == VOLUME_TYPE_UNKNOWN)
+                VolumeEntry->VolumeType = VOLUME_TYPE_PARTITION;
             VolumeEntry->VolumeStatus = VOLUME_STATUS_HEALTHY;
         }
         else if (dwError == ERROR_NOT_READY)
@@ -2175,15 +2188,101 @@ AddVolumeToList(
 
 
 static
-VOID
-InsertListAfter(
-    _In_ PLIST_ENTRY ListEntry,
-    _In_ PLIST_ENTRY EntryToInsert)
+ULONG
+GetVolumeSortRank(
+    _In_ PVOLENTRY VolumeEntry)
 {
-    EntryToInsert->Blink = ListEntry;
-    EntryToInsert->Flink = ListEntry->Flink;
-    ListEntry->Flink->Blink = EntryToInsert;
-    ListEntry->Flink = EntryToInsert;
+    switch (VolumeEntry->VolumeType)
+    {
+        case VOLUME_TYPE_PARTITION:
+            return 0;
+        case VOLUME_TYPE_REMOVABLE:
+            return 1;
+        case VOLUME_TYPE_CDROM:
+            return 2;
+        default:
+            return 3;
+    }
+}
+
+
+/* Compares device names, a run of digits by its value: CdRom2 before CdRom10 */
+static
+INT
+CompareDeviceNames(
+    _In_ PCWSTR pszA,
+    _In_ PCWSTR pszB)
+{
+    while (*pszA != UNICODE_NULL && *pszB != UNICODE_NULL)
+    {
+        if (iswdigit(*pszA) && iswdigit(*pszB))
+        {
+            ULONGLONG ullA = 0, ullB = 0;
+
+            while (iswdigit(*pszA))
+                ullA = ullA * 10 + (*pszA++ - L'0');
+            while (iswdigit(*pszB))
+                ullB = ullB * 10 + (*pszB++ - L'0');
+            if (ullA != ullB)
+                return (ullA < ullB) ? -1 : 1;
+        }
+        else
+        {
+            WCHAR chA = towupper(*pszA), chB = towupper(*pszB);
+
+            if (chA != chB)
+                return (chA < chB) ? -1 : 1;
+            pszA++;
+            pszB++;
+        }
+    }
+
+    if (*pszA == *pszB)
+        return 0;
+    return (*pszA == UNICODE_NULL) ? -1 : 1;
+}
+
+
+static
+int
+__cdecl
+CompareVolumes(
+    const void *pA,
+    const void *pB)
+{
+    PVOLENTRY A = *(PVOLENTRY const *)pA;
+    PVOLENTRY B = *(PVOLENTRY const *)pB;
+    ULONG RankA = GetVolumeSortRank(A);
+    ULONG RankB = GetVolumeSortRank(B);
+    INT Result;
+
+    if (RankA != RankB)
+        return (RankA < RankB) ? -1 : 1;
+
+    /* Volumes on a disk: by disk number, then starting offset of the first extent */
+    if (A->pExtents != NULL && A->pExtents->NumberOfDiskExtents != 0 &&
+        B->pExtents != NULL && B->pExtents->NumberOfDiskExtents != 0)
+    {
+        PDISK_EXTENT ExtA = &A->pExtents->Extents[0];
+        PDISK_EXTENT ExtB = &B->pExtents->Extents[0];
+
+        if (ExtA->DiskNumber != ExtB->DiskNumber)
+            return (ExtA->DiskNumber < ExtB->DiskNumber) ? -1 : 1;
+        if (ExtA->StartingOffset.QuadPart != ExtB->StartingOffset.QuadPart)
+            return (ExtA->StartingOffset.QuadPart < ExtB->StartingOffset.QuadPart) ? -1 : 1;
+    }
+    else if ((A->pExtents != NULL && A->pExtents->NumberOfDiskExtents != 0) !=
+             (B->pExtents != NULL && B->pExtents->NumberOfDiskExtents != 0))
+    {
+        /* Volumes with extents before those without */
+        return (A->pExtents != NULL && A->pExtents->NumberOfDiskExtents != 0) ? -1 : 1;
+    }
+
+    Result = CompareDeviceNames(A->DeviceName, B->DeviceName);
+    if (Result != 0)
+        return Result;
+
+    return _wcsicmp(A->VolumeName, B->VolumeName);
 }
 
 
@@ -2191,37 +2290,41 @@ static
 VOID
 SortVolumeList(VOID)
 {
-    PLIST_ENTRY Entry, TempEntry, LastInsertEntry;
+    PLIST_ENTRY Entry;
     PVOLENTRY VolumeEntry;
-    ULONG VolumeNumber;
+    PVOLENTRY *Array;
+    ULONG VolumeNumber, Count, i;
 
-    /* Desired sort order: CDROM volumes, Partition volumes */
+    /*
+     * The order does not depend on the order in which the system hands the
+     * volumes out: partition volumes first, by disk number and starting
+     * offset, then removable volumes, CD-ROM volumes and volumes of unknown
+     * type, each of these by device name (numbers compared as numbers),
+     * and the volume GUID name as the last resort.
+     */
 
     if (IsListEmpty(&VolumeListHead))
         return;
 
-    /* Move CDROM volumes to the head of the list */
-    LastInsertEntry = NULL;
-    Entry = VolumeListHead.Flink;
-    while (Entry != &VolumeListHead)
-    {
-        VolumeEntry = CONTAINING_RECORD(Entry, VOLENTRY, ListEntry);
+    Count = 0;
+    for (Entry = VolumeListHead.Flink; Entry != &VolumeListHead; Entry = Entry->Flink)
+        Count++;
 
-        if (VolumeEntry->VolumeType == VOLUME_TYPE_CDROM)
-        {
-            TempEntry = Entry;
-            Entry = Entry->Blink;
+    Array = RtlAllocateHeap(RtlGetProcessHeap(), 0, Count * sizeof(*Array));
+    if (Array == NULL)
+        return;
 
-            RemoveEntryList(TempEntry);
-            if (LastInsertEntry == NULL)
-                InsertHeadList(&VolumeListHead, TempEntry);
-            else
-                InsertListAfter(LastInsertEntry, TempEntry);
-            LastInsertEntry = TempEntry;
-        }
+    Count = 0;
+    for (Entry = VolumeListHead.Flink; Entry != &VolumeListHead; Entry = Entry->Flink)
+        Array[Count++] = CONTAINING_RECORD(Entry, VOLENTRY, ListEntry);
 
-        Entry = Entry->Flink;
-    }
+    qsort(Array, Count, sizeof(*Array), CompareVolumes);
+
+    InitializeListHead(&VolumeListHead);
+    for (i = 0; i < Count; i++)
+        InsertTailList(&VolumeListHead, &Array[i]->ListEntry);
+
+    RtlFreeHeap(RtlGetProcessHeap(), 0, Array);
 
     /* Update the VolumeNumber */
     VolumeNumber = 0;
@@ -2401,7 +2504,9 @@ UpdateVolumeInfo(
             VolumeEntry->SerialNumber = 0;
             VolumeEntry->SectorsPerAllocationUnit = 1;
             VolumeEntry->BytesPerSector = 512;
-            VolumeEntry->VolumeType = VOLUME_TYPE_PARTITION;
+            /* A CD-ROM or a removable drive with an unrecognised medium keeps its type */
+            if (VolumeEntry->VolumeType == VOLUME_TYPE_UNKNOWN)
+                VolumeEntry->VolumeType = VOLUME_TYPE_PARTITION;
             VolumeEntry->VolumeStatus = VOLUME_STATUS_HEALTHY;
         }
         else if (dwError == ERROR_NOT_READY)
