@@ -264,6 +264,9 @@ struct smb2_context {
         /* NitroOS: state of the SSPI authentication backend (nitro/sspi.c) */
         struct smb2_sspi_ctx *sspi;
 #endif
+        /* NitroOS: smb2->pdu's callback is running (socket.c), so a
+         * reconnect from inside it must leave that pdu to the dispatcher */
+        int dispatching_pdu;
         /*
          * For handling received smb3 encrypted blobs
          */

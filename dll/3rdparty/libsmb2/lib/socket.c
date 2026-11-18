@@ -1220,7 +1220,9 @@ read_more_data:
                 smb2->next_pdu = NULL;
         } else {
                 if (pdu->cb) {
+                        smb2->dispatching_pdu++;  /* NitroOS */
                         pdu->cb(smb2, smb2->hdr.status, pdu->payload, pdu->cb_data);
+                        smb2->dispatching_pdu--;
                 }
                 if (!pdu->caller_frees_pdu) {
                         smb2_free_pdu(smb2, pdu);
@@ -1879,6 +1881,18 @@ static void interleave_addrinfo(struct addrinfo *base)
 static void
 smb2_fail_stale_pdus(struct smb2_context *smb2)
 {
+        /* the request whose reply was cut off by the close (it is no longer
+         * on the waitqueue); not while its own callback is running */
+        if (smb2->pdu && !smb2->dispatching_pdu) {
+                struct smb2_pdu *pdu = smb2->pdu;
+
+                smb2->pdu = NULL;
+                if (pdu->cb) {
+                        pdu->cb(smb2, SMB2_STATUS_SHUTDOWN, NULL,
+                                pdu->cb_data);
+                }
+                smb2_free_pdu(smb2, pdu);
+        }
         while (smb2->outqueue || smb2->waitqueue) {
                 struct smb2_pdu *pdu, *p;
 
