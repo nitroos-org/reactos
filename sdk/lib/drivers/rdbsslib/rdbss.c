@@ -7177,13 +7177,99 @@ RxLogEventWithAnnotation(
     UNIMPLEMENTED;
 }
 
+/* Worker for a low I/O completion that could not run where it was signalled */
+static
+VOID
+NTAPI
+RxpLowIoCompletionWorker(
+    IN PVOID Context)
+{
+    PRX_CONTEXT RxContext = Context;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    Status = RxLowIoCompletionTail(RxContext);
+    if (Status == STATUS_RETRY)
+    {
+        /* The completion routine wants the operation reissued */
+        RxLowIoSubmit(RxContext, RxContext->LowIoContext.CompletionRoutine);
+    }
+}
+
+/* Worker reissuing a low I/O operation whose completion asked for a retry */
+static
+VOID
+NTAPI
+RxpLowIoResubmitWorker(
+    IN PVOID Context)
+{
+    PRX_CONTEXT RxContext = Context;
+
+    PAGED_CODE();
+
+    RxLowIoSubmit(RxContext, RxContext->LowIoContext.CompletionRoutine);
+}
+
+/*
+ * @implemented
+ *
+ * Called by the mini-redirector when a low I/O operation it returned
+ * STATUS_PENDING for has finished, with RxContext->IoStatusBlock set. A
+ * synchronous caller is waiting in RxLowIoSubmit and is only woken up. An
+ * asynchronous operation is finished here (completion routine, IRP
+ * completion), or from a worker thread when the mini-redirector calls in at
+ * DISPATCH_LEVEL without LOWIO_CONTEXT_FLAG_CAN_COMPLETE_AT_DPC_LEVEL.
+ */
 NTSTATUS
 NTAPI
 RxLowIoCompletion(
     PRX_CONTEXT RxContext)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    NTSTATUS Status;
+
+    DPRINT("RxLowIoCompletion(%p) Status: %lx\n", RxContext, RxContext->IoStatusBlock.Status);
+
+    ASSERT(NodeType(RxContext) == RDBSS_NTC_RX_CONTEXT);
+
+    if (!BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_ASYNC_OPERATION))
+    {
+        RxSignalSynchronousWaiter(RxContext);
+        return STATUS_SUCCESS;
+    }
+
+    Status = STATUS_MORE_PROCESSING_REQUIRED;
+    if (!RxShouldPostCompletion() ||
+        BooleanFlagOn(RxContext->LowIoContext.Flags, LOWIO_CONTEXT_FLAG_CAN_COMPLETE_AT_DPC_LEVEL))
+    {
+        Status = RxLowIoCompletionTail(RxContext);
+    }
+
+    if (Status == STATUS_MORE_PROCESSING_REQUIRED || Status == STATUS_RETRY)
+    {
+        if (Status == STATUS_MORE_PROCESSING_REQUIRED)
+        {
+            Status = RxPostToWorkerThread(RxContext->RxDeviceObject, CriticalWorkQueue,
+                                          &RxContext->WorkQueueItem,
+                                          RxpLowIoCompletionWorker, RxContext);
+        }
+        else
+        {
+            /* Reissue from a worker: the mini-redirector may have called us
+             * from its own completion path */
+            Status = RxPostToWorkerThread(RxContext->RxDeviceObject, CriticalWorkQueue,
+                                          &RxContext->WorkQueueItem,
+                                          RxpLowIoResubmitWorker, RxContext);
+        }
+
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("Failed to post completion of %p: %lx\n", RxContext, Status);
+        }
+        return STATUS_PENDING;
+    }
+
+    return Status;
 }
 
 /*
