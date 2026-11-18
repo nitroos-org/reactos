@@ -3961,7 +3961,18 @@ RxCommonRead(
         }
         else
         {
-            if (!ReadCachingEnabled)
+            /* Every non-paging read holds the FCB shared, cached reads of
+             * an FCB that caches reads included: nothing else orders them
+             * with cleanup and purges, which uninitialize the cache maps and
+             * tear the shared cache map down (a cached read copied from a
+             * map being deleted, and one that initialized a private cache
+             * map between cleanup's uninitialization and the
+             * FO_CLEANUP_COMPLETE mark left it on a file object nobody would
+             * uninitialize again: purges that uninitialize the cache maps
+             * then looped on it or used the freed file object). A paging
+             * read of an FCB that caches reads (it comes here too) takes
+             * nothing, as before */
+            if (!PagingIo)
             {
                 if (!CanWait && NoCache)
                 {
@@ -3984,6 +3995,8 @@ RxCommonRead(
                     }
                     else
                     {
+                        /* Posted: the FSP takes it again (this exit kept it) */
+                        RxReleaseFcb(RxContext, Fcb);
                         PostRequest = TRUE;
                         _SEH2_LEAVE;
                     }
@@ -4006,9 +4019,11 @@ RxCommonRead(
 
         RxItsTheSameContext();
 
-        ReadCachingDisabled = (ReadCachingEnabled == FALSE);
-        /* What this read holds, for an asynchronous completion to release:
-         * nothing when the FCB caches reads (no lock was taken above) */
+        /* From here on, ReadCachingDisabled means "this read holds its lock"
+         * (the FCB for every non-paging read; the paging I/O resource for a
+         * paging read of an FCB that does not cache reads) */
+        ReadCachingDisabled = (!PagingIo || ReadCachingEnabled == FALSE);
+        /* What this read holds, for an asynchronous completion to release */
         if (PagingIo)
         {
             RxContext->FcbPagingIoResourceAcquired = ReadCachingDisabled;
