@@ -81,6 +81,7 @@ list(APPEND SOURCE
     keybd_event.c
     MouseHookTransport.c
     MouseWheel.c
+    WmCharAnsi.c
     KeyboardLLHook.c
     LayeredCompose.c
     LoadImage.c
