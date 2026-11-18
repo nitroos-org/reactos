@@ -4133,6 +4133,11 @@ RxCommonRead(
 
                 if (InFsp && ReadCachingDisabled)
                 {
+                    /* The release (by the completion, or below) is for this
+                     * owner: record it, as the write path does. (It stayed
+                     * the FSP thread, so an asynchronous completion released
+                     * a resource that thread did not own: RESOURCE_NOT_OWNED) */
+                    LowIoContext->ResourceThreadId = (ULONG_PTR)RxContext | 3;
                     ExSetResourceOwnerPointer((PagingIo ? Fcb->Header.PagingIoResource : Fcb->Header.Resource),
                                               (PVOID)((ULONG_PTR)RxContext | 3));
                     OwnerSet = TRUE;
