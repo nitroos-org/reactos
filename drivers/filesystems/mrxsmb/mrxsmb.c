@@ -116,7 +116,7 @@ SmbConnect(PMRX_V_NET_ROOT VNetRoot, PSMB_VNETROOT Ext, PIRP Irp)
     if (!Ext->ClientContextValid)
         return STATUS_NO_TOKEN;
 
-    Status = SmbAllocateRequest(SmbUpConnect, Server.Length + Share.Length, &LogonId, &Request);
+    Status = SmbAllocateRequestForIrp(SmbUpConnect, Server.Length + Share.Length, &LogonId, Irp, &Request);
     if (!NT_SUCCESS(Status))
         return Status;
 
@@ -208,7 +208,7 @@ SmbAllocateHandleRequest(PRX_CONTEXT RxContext, USHORT Opcode, ULONG VariableSiz
     if (!NT_SUCCESS(Status))
         return Status;
     VNetRoot = RxContext->pRelevantSrvOpen->pVNetRoot;
-    Status = SmbAllocateRequest(Opcode, VariableSize, &VNetRoot->LogonId, Request);
+    Status = SmbAllocateRequestForIrp(Opcode, VariableSize, &VNetRoot->LogonId, RxContext->CurrentIrp, Request);
     if (NT_SUCCESS(Status))
         (*Request)->Irp = RxContext->CurrentIrp;
     return Status;
@@ -620,7 +620,7 @@ SmbCreate(PRX_CONTEXT RxContext)
     if (!NT_SUCCESS(Status))
         return Status;
 
-    Status = SmbAllocateRequest(SmbUpCreate, Path.Length, &VNetRoot->LogonId, &Request);
+    Status = SmbAllocateRequestForIrp(SmbUpCreate, Path.Length, &VNetRoot->LogonId, RxContext->CurrentIrp, &Request);
     if (!NT_SUCCESS(Status))
         return Status;
     Request->Irp = RxContext->CurrentIrp;

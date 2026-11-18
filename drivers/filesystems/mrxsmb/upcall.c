@@ -43,11 +43,15 @@ SmbEngineInitialize(VOID)
 /*
  * Counts Bytes of a new request against SMB_MAX_OUTSTANDING_BYTES. Over the limit
  * the caller waits for requests of others to be freed, at most the request time
- * limit. A request alone is always admitted.
+ * limit. A request alone is always admitted. The wait ends within a second when Irp
+ * (the user's request this is for; NULL for closes and other cleanup, which must not
+ * be given up) is cancelled or its thread terminates (SmbIrpCancelled), as the wait
+ * for the reply does: a killed process does not sit out the request time limit when
+ * the budget does not move (server or engine stalled).
  */
 static
 NTSTATUS
-SmbReserveBytes(ULONG Bytes)
+SmbReserveBytesFor(ULONG Bytes, PIRP Irp)
 {
     LARGE_INTEGER Slice;
     KIRQL OldIrql;
@@ -78,10 +82,20 @@ SmbReserveBytes(ULONG Bytes)
                     (ULONG)SmbEngine.OutstandingBytes, Bytes);
             return STATUS_INSUFFICIENT_RESOURCES;
         }
+        if (SmbIrpCancelled(Irp))
+            return STATUS_CANCELLED;
         /* at most 1 s: a waiter that misses the event looks again */
         Slice.QuadPart = -(LONGLONG)min(Deadline - Now, 10000000ULL);
         KeWaitForSingleObject(&SmbEngine.BudgetEvent, Executive, KernelMode, FALSE, &Slice);
     }
+}
+
+/* Not cancellable */
+static inline
+NTSTATUS
+SmbReserveBytes(ULONG Bytes)
+{
+    return SmbReserveBytesFor(Bytes, NULL);
 }
 
 static
@@ -162,11 +176,13 @@ SmbReleaseRequest(PSMB_REQUEST Request)
         SmbFreeRequest(Request);
 }
 
+/* Irp: the user's request this message is for, whose cancellation ends the wait for the budget (NULL: none) */
 NTSTATUS
-SmbAllocateRequest(
+SmbAllocateRequestForIrp(
     USHORT Opcode,
     ULONG VariableSize,
     PLUID LogonId,
+    PIRP Irp,
     PSMB_REQUEST *Out)
 {
     PSMB_REQUEST Request;
@@ -187,7 +203,7 @@ SmbAllocateRequest(
     /* Notifications (small, sent from callbacks and timeouts) are not held back */
     if (Opcode != SmbUpLogoff && Opcode != SmbUpCancel)
     {
-        Status = SmbReserveBytes((ULONG)Total);
+        Status = SmbReserveBytesFor((ULONG)Total, Irp);
         if (!NT_SUCCESS(Status))
             return Status;
     }
@@ -235,6 +251,16 @@ SmbAllocateRequest(
 
     *Out = Request;
     return STATUS_SUCCESS;
+}
+
+NTSTATUS
+SmbAllocateRequest(
+    USHORT Opcode,
+    ULONG VariableSize,
+    PLUID LogonId,
+    PSMB_REQUEST *Out)
+{
+    return SmbAllocateRequestForIrp(Opcode, VariableSize, LogonId, NULL, Out);
 }
 
 PVOID
