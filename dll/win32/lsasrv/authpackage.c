@@ -772,6 +772,9 @@ LsapCallAuthenticationPackage(PLSA_API_MSG RequestMsg,
 }
 
 
+/* LocalGroups of one LsaLogonUser request (a token has room for far fewer groups anyway) */
+#define LSAP_MAX_LOCAL_GROUPS 1024
+
 static
 NTSTATUS
 LsapCopyLocalGroups(
@@ -789,6 +792,11 @@ LsapCopyLocalGroups(
     ULONG AllocatedSids = 0;
     ULONG i;
     NTSTATUS Status;
+
+    /* The count comes from the request message: bound it before it sizes anything (a huge one
+     * wrapped the length below, and the copy loop wrote past the buffer) */
+    if (ClientGroupsCount == 0 || ClientGroupsCount > LSAP_MAX_LOCAL_GROUPS)
+        return STATUS_INVALID_PARAMETER;
 
     LocalGroupsLength = sizeof(TOKEN_GROUPS) +
                         (ClientGroupsCount - ANYSIZE_ARRAY) * sizeof(SID_AND_ATTRIBUTES);
@@ -809,6 +817,9 @@ LsapCopyLocalGroups(
     if (!NT_SUCCESS(Status))
         goto done;
 
+    /* GroupCount came with the caller's memory: every later loop (the token, the frees) uses it, so it must
+     * be the count of entries copied here, not the caller's word for it */
+    LocalGroups->GroupCount = ClientGroupsCount;
 
     SidHeaderLength  = RtlLengthRequiredSid(0);
     SidHeader = RtlAllocateHeap(RtlGetProcessHeap(),
