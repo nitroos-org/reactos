@@ -35,6 +35,7 @@
 #include <ndk/rtlfuncs.h>
 #include <ntstatus.h>
 #include <drivers/smbrdr/smbupcall.h>
+#include "sysopen.h"
 
 #ifndef STATUS_CONNECTION_ACTIVE
 #define STATUS_CONNECTION_ACTIVE ((NTSTATUS)0xC000023BL)
@@ -791,7 +792,7 @@ int wmain(int argc, WCHAR **argv)
     }
 
     start_driver();
-    Dev = CreateFileW(NITRO_SMBRDR_ENGINE_DOS_NAME, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    Dev = SmbTestOpenAsSystem(NITRO_SMBRDR_ENGINE_DOS_NAME, GENERIC_READ | GENERIC_WRITE, 0);
     if (Dev == INVALID_HANDLE_VALUE)
     {
         printf("smbfuzz: open engine device failed %lu\n", GetLastError());
