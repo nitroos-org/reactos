@@ -81,6 +81,11 @@ static BOOL _CopyAndUnquoteText(LPCWSTR strFieldSource, LPWSTR strField, size_t 
         cChar = *strFieldSource;
     }
 
+    // Terminate the text first: CharNextW() below reads the character after the one it is given, and
+    // the caller's buffer is not initialised (a leftover combining mark there is taken as part of the
+    // last character, which put a stray character at the end of the path).
+    *tmpField = 0;
+
     // Remove trailing whitespace
     while (tmpField > strField)
     {
