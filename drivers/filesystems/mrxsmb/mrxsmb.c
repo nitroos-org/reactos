@@ -82,7 +82,7 @@ SmbSendAndCheck(PSMB_REQUEST Request, ULONG Timeout)
 /* Tree connect (again, after an engine restart) for a virtual net root */
 static
 NTSTATUS
-SmbConnect(PMRX_V_NET_ROOT VNetRoot, PSMB_VNETROOT Ext)
+SmbConnect(PMRX_V_NET_ROOT VNetRoot, PSMB_VNETROOT Ext, PIRP Irp)
 {
     PMRX_NET_ROOT NetRoot = VNetRoot->pNetRoot;
     PMRX_SRV_CALL SrvCall = NetRoot->pSrvCall;
@@ -133,6 +133,7 @@ SmbConnect(PMRX_V_NET_ROOT VNetRoot, PSMB_VNETROOT Ext)
     /* The engine gets a handle to the user's (copied) token when it takes the request */
     Request->Token = Ext->ClientContext.ClientToken;
     ObReferenceObject(Request->Token);
+    Request->Irp = Irp;
 
     Status = SmbSendAndCheck(Request, 0);
     if (NT_SUCCESS(Status))
@@ -159,7 +160,7 @@ SmbConnect(PMRX_V_NET_ROOT VNetRoot, PSMB_VNETROOT Ext)
 /* The connection of a virtual net root, reconnecting once after an engine restart */
 static
 NTSTATUS
-SmbGetConnection(PMRX_V_NET_ROOT VNetRoot, PULONGLONG ConnectionId)
+SmbGetConnection(PMRX_V_NET_ROOT VNetRoot, PULONGLONG ConnectionId, PIRP Irp)
 {
     PSMB_VNETROOT Ext = SmbVNetRoot(VNetRoot);
     NTSTATUS Status = STATUS_SUCCESS;
@@ -170,7 +171,7 @@ SmbGetConnection(PMRX_V_NET_ROOT VNetRoot, PULONGLONG ConnectionId)
     if (Ext->ConnectionId == 0 || Ext->Generation != SmbCurrentGeneration())
     {
         Ext->ConnectionId = 0;
-        Status = SmbConnect(VNetRoot, Ext);
+        Status = SmbConnect(VNetRoot, Ext, Irp);
     }
     *ConnectionId = Ext->ConnectionId;
     ExReleaseFastMutex(&Ext->ConnectLock);
@@ -207,7 +208,10 @@ SmbAllocateHandleRequest(PRX_CONTEXT RxContext, USHORT Opcode, ULONG VariableSiz
     if (!NT_SUCCESS(Status))
         return Status;
     VNetRoot = RxContext->pRelevantSrvOpen->pVNetRoot;
-    return SmbAllocateRequest(Opcode, VariableSize, &VNetRoot->LogonId, Request);
+    Status = SmbAllocateRequest(Opcode, VariableSize, &VNetRoot->LogonId, Request);
+    if (NT_SUCCESS(Status))
+        (*Request)->Irp = RxContext->CurrentIrp;
+    return Status;
 }
 
 /* Structure checks of returned information ********************************/
@@ -459,7 +463,7 @@ SmbCreateVNetRoot(PMRX_CREATENETROOT_CONTEXT Context)
     }
 
     ExAcquireFastMutex(&Ext->ConnectLock);
-    Status = SmbConnect(VNetRoot, Ext);
+    Status = SmbConnect(VNetRoot, Ext, RxContext->CurrentIrp);
     ExReleaseFastMutex(&Ext->ConnectLock);
 
     if (NT_SUCCESS(Status))
@@ -612,13 +616,14 @@ SmbCreate(PRX_CONTEXT RxContext)
     if (Path.Length > SMBUP_MAX_NAME_BYTES)
         return STATUS_OBJECT_NAME_INVALID;
 
-    Status = SmbGetConnection(VNetRoot, &ConnectionId);
+    Status = SmbGetConnection(VNetRoot, &ConnectionId, RxContext->CurrentIrp);
     if (!NT_SUCCESS(Status))
         return Status;
 
     Status = SmbAllocateRequest(SmbUpCreate, Path.Length, &VNetRoot->LogonId, &Request);
     if (!NT_SUCCESS(Status))
         return Status;
+    Request->Irp = RxContext->CurrentIrp;
 
     Fixed = SmbRequestFixed(Request);
     Fixed->ConnectionId = ConnectionId;
@@ -795,6 +800,12 @@ SmbRead(PRX_CONTEXT RxContext)
 
     while (Done < Count)
     {
+        /* A large read is many requests: stop between them when the caller gave up */
+        if (SmbIrpCancelled(RxContext->CurrentIrp))
+        {
+            Status = STATUS_CANCELLED;
+            break;
+        }
         Status = SmbAllocateHandleRequest(RxContext, SmbUpRead, 0, &Handle, &Request);
         if (!NT_SUCCESS(Status))
             break;
@@ -860,6 +871,11 @@ SmbWrite(PRX_CONTEXT RxContext)
 
     while (Done < Count)
     {
+        if (SmbIrpCancelled(RxContext->CurrentIrp))
+        {
+            Status = STATUS_CANCELLED;
+            break;
+        }
         Chunk = min(Count - Done, SmbVNetRoot(RxContext->pRelevantSrvOpen->pVNetRoot)->MaxWriteSize);
         if (Chunk == 0)
             Chunk = min(Count - Done, SMBUP_MAX_IO);
@@ -901,7 +917,8 @@ SmbWrite(PRX_CONTEXT RxContext)
             break;
     }
 
-    if (Done != 0 && !NT_SUCCESS(Status) && Status != STATUS_CONNECTION_DISCONNECTED && Status != STATUS_IO_TIMEOUT)
+    if (Done != 0 && !NT_SUCCESS(Status) && Status != STATUS_CONNECTION_DISCONNECTED && Status != STATUS_IO_TIMEOUT &&
+        Status != STATUS_CANCELLED)
         Status = STATUS_SUCCESS;
 
     RxContext->IoStatusBlock.Information = Done;

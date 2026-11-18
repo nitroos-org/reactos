@@ -83,6 +83,7 @@ typedef struct _SMB_REQUEST
     PSMBUP_HEADER Reply;            /* paged pool copy of the engine's reply, NULL if none */
     ULONG ReplySize;
     ULONG ReservedBytes;            /* counted in SmbEngine.OutstandingBytes */
+    PIRP Irp;                       /* the caller's IRP, if the wait may end when it is cancelled */
 } SMB_REQUEST, *PSMB_REQUEST;
 
 /* Extensions of the rdbss structures */
@@ -120,6 +121,7 @@ NTSTATUS SmbAllocateRequest(USHORT Opcode, ULONG VariableSize, PLUID LogonId, PS
 PVOID SmbRequestFixed(PSMB_REQUEST Request);
 NTSTATUS SmbRequestPutBytes(PSMB_REQUEST Request, ULONG *Cursor, const VOID *Data, ULONG Length, PSMBUP_STRING String);
 NTSTATUS SmbSendRequest(PSMB_REQUEST Request, ULONG TimeoutSeconds);
+BOOLEAN SmbIrpCancelled(PIRP Irp);
 VOID SmbSendNotification(PSMB_REQUEST Request);
 VOID SmbReleaseRequest(PSMB_REQUEST Request);
 NTSTATUS SmbReplyStatus(PSMB_REQUEST Request, ULONG MaxDataLength, PVOID *Data, PULONG DataLength);

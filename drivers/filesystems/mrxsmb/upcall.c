@@ -312,6 +312,17 @@ SmbQueueRequest(PSMB_REQUEST Request)
     return STATUS_SUCCESS;
 }
 
+/* The caller gave up: its IRP was cancelled, or the thread that sent it is terminating */
+BOOLEAN
+SmbIrpCancelled(PIRP Irp)
+{
+    if (Irp == NULL || BooleanFlagOn(Irp->Flags, IRP_PAGING_IO))
+        return FALSE;
+    if (Irp->Cancel)
+        return TRUE;
+    return Irp->Tail.Overlay.Thread != NULL && PsIsThreadTerminating(Irp->Tail.Overlay.Thread);
+}
+
 /* A notification (LOGOFF, CANCEL): queued, no reply; the queue owns it */
 VOID
 SmbSendNotification(PSMB_REQUEST Request)
@@ -344,10 +355,11 @@ SmbSendCancel(ULONGLONG RequestId)
 NTSTATUS
 SmbSendRequest(PSMB_REQUEST Request, ULONG TimeoutSeconds)
 {
-    NTSTATUS Status;
+    NTSTATUS Status, Reason = STATUS_IO_TIMEOUT;
     LARGE_INTEGER Timeout;
     KIRQL OldIrql;
     BOOLEAN WasSent = FALSE;
+    ULONG Waited;
 
     PAGED_CODE();
     ASSERT(!Request->Notification);
@@ -358,19 +370,40 @@ SmbSendRequest(PSMB_REQUEST Request, ULONG TimeoutSeconds)
 
     if (TimeoutSeconds == 0 || TimeoutSeconds > SmbRequestTimeoutSeconds)
         TimeoutSeconds = SmbRequestTimeoutSeconds;
-    Timeout.QuadPart = -10000000LL * TimeoutSeconds;
-    Status = KeWaitForSingleObject(&Request->Done, Executive, KernelMode, FALSE, &Timeout);
+
+    /* With the caller's IRP, wait in slices of one second and give up early when the
+     * IRP is cancelled (CancelIoEx, IoCancelThreadIo) or its thread is terminating:
+     * rdbss has no cancel routine for a mini-redirector, and the thread cannot be
+     * stopped in this wait otherwise (normal kernel APCs are disabled in file systems) */
+    Timeout.QuadPart = Request->Irp != NULL ? -10000000LL : -10000000LL * TimeoutSeconds;
+    for (Waited = 0; ; )
+    {
+        Status = KeWaitForSingleObject(&Request->Done, Executive, KernelMode, FALSE, &Timeout);
+        if (Status != STATUS_TIMEOUT)
+            break;
+        if (Request->Irp == NULL || ++Waited >= TimeoutSeconds)
+        {
+            Reason = STATUS_IO_TIMEOUT;
+            break;
+        }
+        if (SmbIrpCancelled(Request->Irp))
+        {
+            Reason = STATUS_CANCELLED;
+            break;
+        }
+    }
     if (Status == STATUS_TIMEOUT)
     {
         KeAcquireSpinLock(&SmbEngine.Lock, &OldIrql);
         if (Request->State != SmbRequestCompleted)
         {
             WasSent = (Request->State != SmbRequestQueued);
-            SmbCompleteLocked(Request, STATUS_IO_TIMEOUT);
+            SmbCompleteLocked(Request, Reason);
         }
         KeReleaseSpinLock(&SmbEngine.Lock, OldIrql);
 
-        DPRINT1("mrxsmb: request %I64u (op %u) timed out\n", Request->RequestId, Request->Opcode);
+        DPRINT1("mrxsmb: request %I64u (op %u) %s\n", Request->RequestId, Request->Opcode,
+                Reason == STATUS_CANCELLED ? "cancelled" : "timed out");
         if (WasSent)
             SmbSendCancel(Request->RequestId);
     }
