@@ -20,6 +20,7 @@ extern void func_NetScheduleJob(void);
 extern void func_NetServerGetInfo(void);
 extern void func_NetUserPassword(void);
 extern void func_NetShare(void);
+extern void func_NetWkstaUserGetInfo(void);
 
 const struct test winetest_testlist[] =
 {
@@ -35,6 +36,7 @@ const struct test winetest_testlist[] =
     { "NetServerGetInfo", func_NetServerGetInfo },
     { "NetShare", func_NetShare },
     { "NetUserPassword", func_NetUserPassword },
+    { "NetWkstaUserGetInfo", func_NetWkstaUserGetInfo },
 
     { 0, 0 }
 };
