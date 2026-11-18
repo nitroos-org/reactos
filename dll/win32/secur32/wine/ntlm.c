@@ -79,6 +79,7 @@ VOID WINAPI MD4Final(NTLM_MD4_CTX *ctx);
 #define MSV_AV_NB_DOMAIN_NAME   2
 #define MSV_AV_FLAGS            6
 #define MSV_AV_TIMESTAMP        7
+#define MSV_AV_CHANNEL_BINDINGS 10
 #define MSV_AV_FLAG_MIC         0x00000002
 
 /* NEGOTIATE: signature, type, flags, domain, workstation */
@@ -1451,13 +1452,60 @@ done:
     return ret;
 }
 
-static SECURITY_STATUS server_authenticate(PNegoHelper h, const BYTE *msg, ULONG msg_len)
+/* The channel bindings the application gave to AcceptSecurityContext, as the MsvAvChannelBindings pair carries them
+ * ([MS-NLMP] 2.2.2.1: the MD5 of the gss_channel_bindings_struct of RFC 2744: the types and lengths of the initiator
+ * and the acceptor with their addresses, and the length and value of the application data). *present says whether
+ * the application gave any; a buffer that does not hold what it says is SEC_E_BAD_BINDINGS. */
+static SECURITY_STATUS app_channel_bindings(PSecBufferDesc input, BOOL *present, BYTE *hash)
+{
+    const SEC_CHANNEL_BINDINGS *cb;
+    const BYTE *base;
+    MD5_CTX ctx;
+    BYTE n[4];
+    ULONG i, size;
+
+    *present = FALSE;
+    if (!input || !input->pBuffers) return SEC_E_OK;
+    for (i = 0; i < input->cBuffers; i++)
+        if ((input->pBuffers[i].BufferType & ~SECBUFFER_ATTRMASK) == SECBUFFER_CHANNEL_BINDINGS) break;
+    if (i == input->cBuffers || !input->pBuffers[i].cbBuffer) return SEC_E_OK;
+
+    base = input->pBuffers[i].pvBuffer;
+    size = input->pBuffers[i].cbBuffer;
+    if (!base || size < sizeof(*cb)) return SEC_E_BAD_BINDINGS;
+    cb = (const SEC_CHANNEL_BINDINGS *)base;
+#define CHECK_PART(len, off) (((len) && ((off) < sizeof(*cb) || (off) > size || (len) > size - (off))) ? TRUE : FALSE)
+    if (CHECK_PART(cb->cbInitiatorLength, cb->dwInitiatorOffset) ||
+        CHECK_PART(cb->cbAcceptorLength, cb->dwAcceptorOffset) ||
+        CHECK_PART(cb->cbApplicationDataLength, cb->dwApplicationDataOffset))
+        return SEC_E_BAD_BINDINGS;
+#undef CHECK_PART
+
+    MD5Init(&ctx);
+#define ADD32(v) do { put32(n, (v)); MD5Update(&ctx, n, 4); } while (0)
+    ADD32(cb->dwInitiatorAddrType);
+    ADD32(cb->cbInitiatorLength);
+    if (cb->cbInitiatorLength) MD5Update(&ctx, base + cb->dwInitiatorOffset, cb->cbInitiatorLength);
+    ADD32(cb->dwAcceptorAddrType);
+    ADD32(cb->cbAcceptorLength);
+    if (cb->cbAcceptorLength) MD5Update(&ctx, base + cb->dwAcceptorOffset, cb->cbAcceptorLength);
+    ADD32(cb->cbApplicationDataLength);
+    if (cb->cbApplicationDataLength) MD5Update(&ctx, base + cb->dwApplicationDataOffset, cb->cbApplicationDataLength);
+#undef ADD32
+    MD5Final(&ctx);
+    memcpy(hash, ctx.digest, 16);
+    *present = TRUE;
+    return SEC_E_OK;
+}
+
+static SECURITY_STATUS server_authenticate(PNegoHelper h, const BYTE *msg, ULONG msg_len, PSecBufferDesc input)
 {
     const BYTE *lm, *nt, *domain, *user, *workstation, *enc_key;
     ULONG lm_len, nt_len, domain_len, user_len, ws_len, enc_len;
     ULONG flags, pos, first_payload;
     BYTE session_base[16], exported[16];
-    BOOL mic_required = FALSE;
+    BYTE client_cb[16], app_cb[16];
+    BOOL mic_required = FALSE, have_client_cb = FALSE, have_app_cb;
     SECURITY_STATUS ret;
     WCHAR computer[MAX_COMPUTERNAME_LENGTH + 1];
     DWORD computer_len = ARRAYSIZE(computer);
@@ -1479,12 +1527,14 @@ static SECURITY_STATUS server_authenticate(PNegoHelper h, const BYTE *msg, ULONG
         if (l && off < first_payload) first_payload = off;
     }
 
-    /* the flags of the exchange must be what the server offered */
-    if ((flags & ~(h->offered_flags | NTLMSSP_NEGOTIATE_TARGET_INFO | NTLMSSP_NEGOTIATE_TARGET_TYPE_SERVER |
-                   NTLMSSP_REQUEST_TARGET | NTLMSSP_NEGOTIATE_DOMAIN_SUPPLIED |
-                   NTLMSSP_NEGOTIATE_WORKSTATION_SUPPLIED | NTLMSSP_NEGOTIATE_ANONYMOUS |
-                   NTLMSSP_NEGOTIATE_IDENTIFY | NTLMSSP_NEGOTIATE_LOCAL_CALL | NTLMSSP_NEGOTIATE_VERSION)) ||
-        !(flags & NTLMSSP_NEGOTIATE_UNICODE) || !(flags & NTLMSSP_NEGOTIATE_NTLM2))
+    /* The exchange needs Unicode and the extended session security. A flag that the server did not offer is not an
+     * error ([MS-NLMP] 3.2.5.1.2: the server takes what it offered and ignores the rest): clients set bits of their
+     * own, NEGOTIATE_56 (0x80000000) of every one that supports it, which this server does not offer. The session
+     * runs on flags & offered_flags (below). Only the flags that change what the messages hold stay checked: signing,
+     * sealing and the key exchange are there only when the server offered them. */
+    if (!(flags & NTLMSSP_NEGOTIATE_UNICODE) || !(flags & NTLMSSP_NEGOTIATE_NTLM2) ||
+        (flags & (NTLMSSP_NEGOTIATE_SIGN | NTLMSSP_NEGOTIATE_SEAL | NTLMSSP_NEGOTIATE_KEY_EXCHANGE |
+                  NTLMSSP_NEGOTIATE_ALWAYS_SIGN) & ~h->offered_flags))
         return TOKEN_FAIL();
 
     /* the local call: no response and no name, the client is the one that bound the context in the LSA */
@@ -1512,6 +1562,13 @@ static SECURITY_STATUS server_authenticate(PNegoHelper h, const BYTE *msg, ULONG
             if (id == MSV_AV_EOL || l > av_len - p - 4) break;
             if (id == MSV_AV_FLAGS && l == 4 && (get32(av + p + 4) & MSV_AV_FLAG_MIC))
                 mic_required = TRUE;
+            else if (id == MSV_AV_CHANNEL_BINDINGS && l == 16)
+            {
+                memcpy(client_cb, av + p + 4, 16);
+                have_client_cb = TRUE;
+            }
+            /* the other pairs (the names, the timestamp, the target name, the ones this server does not know) are
+             * covered by the response; they need no check here */
             p += 4 + l;
         }
     }
@@ -1557,6 +1614,26 @@ static SECURITY_STATUS server_authenticate(PNegoHelper h, const BYTE *msg, ULONG
              * and Negotiate: SEC_E_INVALID_TOKEN) */
             return SEC_E_INVALID_TOKEN;
         }
+    }
+
+    /* Channel bindings: checked when the application gave some and the client says which it has (a non-zero hash). A
+     * client without bindings sends zeros and a server that does not require them accepts that. Not checked when the
+     * application gave none. (VERIFY ON PEER: Windows' default policy, no extended protection configured.) */
+    ret = app_channel_bindings(input, &have_app_cb, app_cb);
+    if (ret == SEC_E_OK && have_app_cb && have_client_cb)
+    {
+        static const BYTE zero_cb[16] = { 0 };
+
+        if (memcmp(client_cb, zero_cb, 16) && memcmp(client_cb, app_cb, 16))
+        {
+            WARN("channel bindings of the client are not the ones of the application\n");
+            ret = SEC_E_BAD_BINDINGS;
+        }
+    }
+    if (ret != SEC_E_OK)
+    {
+        SecureZeroMemory(exported, sizeof(exported));
+        return ret;
     }
 
     /* user and domain as the client gave them; the machine's own name stands for an empty or local domain */
@@ -1647,7 +1724,7 @@ SECURITY_STATUS SEC_ENTRY ntlm_AcceptSecurityContext(
     if (h->state == NTLM_SERVER_FAILED) return SEC_E_OUT_OF_SEQUENCE;
     if (h->state != 0) return SEC_E_INVALID_HANDLE;
 
-    ret = server_authenticate(h, token, token_len);
+    ret = server_authenticate(h, token, token_len, pInput);
     if (ret != SEC_E_OK)
     {
         /* As on Windows (measured, Server 2022): a failed AUTHENTICATE ends the context. Another AUTHENTICATE gets

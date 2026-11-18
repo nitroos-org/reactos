@@ -20,6 +20,7 @@ list(APPEND SOURCE
     NtlmFailedContext.c
     NtlmLocalCall.c
     NtlmLoopback.c
+    NtlmServerAuthenticate.c
     NtlmSignatureBytes.c
     testlist.c)
 
