@@ -93,7 +93,11 @@ FASTCALL DIB_BitmapInfoSize(
         {
             return info->bmiHeader.biSize;
         }
-        colors = max ? (1 << info->bmiHeader.biBitCount) : info->bmiHeader.biClrUsed;
+        /* Only a palette bitmap needs room for its whole color table. A bitmap of more than 8 bits has no
+           palette to return: asking for 256 entries made GetDIBits read 1 KB behind a header that the caller
+           had put at the end of its allocation (or of the heap's committed pages) */
+        colors = (max && info->bmiHeader.biBitCount <= 8) ? (1 << info->bmiHeader.biBitCount)
+                                                         : info->bmiHeader.biClrUsed;
         if (colors > 256)
             colors = 256;
         if (!colors && (info->bmiHeader.biBitCount <= 8))
