@@ -94,6 +94,33 @@ valid. Because both write the same files and keys they exclude each other, with 
 Turning `aac` off removes everything; `aac-lc` stays off (it is not restored). Tests: `tests\aac-live.cmd` (A: turn on, notice, files, both
 views, decoder LC/HE-AAC/HE-AAC v2, off, on again; upgrade from `aac-lc`; `aac-lc` refused while `aac` is on).
 
+## OpenSSH Client (Win32-OpenSSH), on demand
+
+Entry `openssh-client` (`catalog/openssh-client.ini`, i386 and amd64; Provider=component, recipe in `catalog/components.ini`). The
+client programs are not in the image: Install downloads the official Win32-OpenSSH 10.4.0.0p1 zip of this architecture from the
+project's GitHub release (the 64-bit or the 32-bit archive, each pinned by URL, size and SHA-256 with `Url.amd64` / `Url.x86` and so
+on), refuses it unless the SHA-256 matches, and unpacks it itself (`featmgr /zip-install`, `zipinst.c`; the engine runs it as a child like
+`/nat-install`). Licence: BSD-style (OpenSSH; no GPL code), `LICENSE.txt` and `NOTICE.txt` of the release are installed next to the programs.
+
+- Installed: `ssh scp sftp ssh-keygen ssh-add ssh-agent ssh-keyscan ssh-pkcs11-helper ssh-sk-helper` (`.exe`), `libcrypto.dll`, the two
+  licence texts, into `%SystemRoot%\System32\OpenSSH` (the list is `ZipFiles=` of the component; every file must be in the archive, nothing
+  else is unpacked; the folder name is `ZipDir=`, which must be a folder of its own directly below System32 or Program Files).
+  No server file (`sshd*`, `sftp-server`, `ssh-shellhost`), no `.ps1` script, no service: `ssh-agent` is not registered (Windows documents
+  it as disabled by default; how it is registered is not recorded in our evidence, so it is left to the user), and `sshd` is a separate item.
+- `ZipPath=1` puts the folder on the machine PATH (`HKLM ...\Session Manager\Environment`, REG_EXPAND_SZ form
+  `%SystemRoot%\System32\OpenSSH` when the PATH is one); an entry that already names the folder is not added twice. The engine
+  broadcasts `WM_SETTINGCHANGE` and the CLI/GUI print the "open a new terminal" hint, as for PowerShell 7.
+- Nothing is replaced: a target file that exists stops the install before anything is written. What was written (folder, files, the exact
+  PATH text) is recorded in `HKLM\SOFTWARE\ReactOS\Nitro\Featmgr\Zip\<id>`; `featmgr /zip-uninstall <id>` removes exactly that (a file in
+  use is renamed and deleted at the next restart), the PATH entry it added, and the folder when it created it and it is empty. A failed
+  install removes what it wrote. Without a record nothing is removed.
+- Tests: `tests\openssh-live.cmd` (install, files, no server files, PATH, `ssh -V`, uninstall leaves the PATH as it was and a user file in the
+  folder alone); `tests\openssh-negative.cmd <zip>` (the refusals and rollbacks: an existing file, a file that is not a zip, a listed file
+  missing from the archive, folders that are not allowed, a PATH that already has the folder, a second install and uninstall). Note for
+  test scripts: `|` in a `ZipFiles=` line must not meet the batch parser (`%var%` is expanded before pipes are parsed, as on Windows):
+  use delayed expansion. A version bump: take the new asset digests from the release page and change `Url.*`, `Sha256.*`, `SizeBytes.*`,
+  `FileName.*` in components.ini and `Version=` / the Description in `openssh-client.ini`.
+
 ## Wine Gecko 2.47.4 (the mshtml engine), on demand
 
 Entry `wine-gecko` (`catalog/wine-gecko.ini`, i386 and amd64; Provider=component, recipe in `catalog/components.ini`). Gecko is not

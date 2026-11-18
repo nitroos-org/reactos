@@ -444,6 +444,8 @@ int wmain(int argc, WCHAR **argv)
         return FmNativeUninstallMain(argc, argv);
     if (!_wcsicmp(cmd, L"/nat-install"))
         return FmNativeInstallMain(argc, argv);
+    if (!_wcsicmp(cmd, L"/zip-install") || !_wcsicmp(cmd, L"/zip-uninstall"))
+        return FmZipMain(argc, argv);
 
     if (!_wcsicmp(cmd, L"/import-scoop") || !_wcsicmp(cmd, L"import-scoop"))
         return DoImportScoop(argc, argv);
