@@ -400,9 +400,34 @@ static void test_sign_only_messages(void)
     }
 }
 
+/* A STREAM shorter than a signature: nobody measured the status Windows gives (.NET maps every failure but
+ * SEC_E_MESSAGE_ALTERED to InvalidToken, so it does not tell). Not asserted beyond "not OK"; the row prints the status
+ * (VERIFY ON PEER: dnprobe.exe). */
+static void test_short_stream(void)
+{
+    PAIR p;
+    static const ULONG lengths[] = { 0, 1, 15 };
+    UINT i;
+
+    if (!establish(L"NTLM", NULL, DN_CLIENT_ENCRYPT, DN_SERVER_ENCRYPT, &p, "short stream"))
+        return;
+    for (i = 0; i < ARRAYSIZE(lengths); i++)
+    {
+        BYTE stream[16] = { 0 };
+        SecBuffer bufs[2] = { { lengths[i], SECBUFFER_STREAM, stream }, { 0, SECBUFFER_DATA, NULL } };
+        SecBufferDesc desc = { SECBUFFER_VERSION, 2, bufs };
+        SECURITY_STATUS st = DecryptMessage(&p.sctx, &desc, 0, NULL);
+
+        ok(st != SEC_E_OK, "a stream of %lu bytes was accepted\n", (unsigned long)lengths[i]);
+        trace("VERIFY ON PEER: DecryptMessage(STREAM of %lu bytes, DATA) = 0x%08lx\n", (unsigned long)lengths[i], (unsigned long)st);
+    }
+    release(&p);
+}
+
 START_TEST(DotNetSspi)
 {
     test_opaque_identity();
     test_stream_decrypt();
     test_sign_only_messages();
+    test_short_stream();
 }
