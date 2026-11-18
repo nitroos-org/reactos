@@ -1885,6 +1885,13 @@ static void REBAR_DrawBandBackground (const REBAR_INFO *infoPtr, REBAR_BAND *lpB
 
     if (theme)
     {
+        /* A theme that leaves the rebar background transparent (BgType None, as the
+         * taskbar styles do) shows what is behind the rebar: draw the parent's
+         * background first, otherwise nothing is erased and children that repaint
+         * over the old pixels (the taskbar buttons) leave ghosts */
+        if (IsThemeBackgroundPartiallyTransparent (theme, 0, 0))
+            DrawThemeParentBackground (infoPtr->hwndSelf, hdc, (RECT *)client_rect);
+
         /* When themed, the background color is ignored (but not a background bitmap) */
         DrawThemeBackground (theme, hdc, 0, 0, client_rect, band_rect);
         return;
