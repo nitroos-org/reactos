@@ -4961,7 +4961,18 @@ LRESULT WINAPI EditWndProc_common( HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
 	if (msg == WM_NCCREATE) NtUserSetWindowFNID( hwnd, MAKE_FNID(NTUSER_WNDPROC_EDIT) );
 
 	if (!es && msg != WM_NCCREATE)
+	{
+#ifdef __REACTOS__
+		/* ReactOS: win32k keeps the window name from CreateWindow, so DefWindowProc would still return it
+		 * (WM_GETTEXT) after WM_NCDESTROY. Windows gives an edit control that has been destroyed nothing
+		 * to return (user32_winetest edit: test_edit_control_6). The check of r50219 that the Wine sync of
+		 * 11.11 dropped: a window of FNID_DESTROY gets no more messages. */
+		PWND pWnd = ValidateHwnd(hwnd);
+		if (pWnd && (pWnd->fnid & FNID_DESTROY))
+			return 0;
+#endif
 		return DefWindowProcT(hwnd, msg, wParam, lParam, unicode);
+	}
 
 	if (es && (msg != WM_NCDESTROY)) EDIT_LockBuffer(es);
 
