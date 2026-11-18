@@ -10,6 +10,7 @@ list(APPEND SOURCE
     SchannelServerCert.c
     SetCredentialsAttributes.c
     SspiAuthIdentityExports.c
+    SspiInitRace.c
     QueryContextAttributesEx.c
     NtlmConcurrent.c
     NtlmLocalCall.c

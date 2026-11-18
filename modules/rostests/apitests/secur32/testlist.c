@@ -18,6 +18,7 @@ extern void func_SchannelHandshake(void);
 extern void func_SchannelServerCert(void);
 extern void func_SetCredentialsAttributes(void);
 extern void func_SspiAuthIdentityExports(void);
+extern void func_SspiInitRace(void);
 extern void func_QueryContextAttributesEx(void);
 extern void func_NtlmConcurrent(void);
 extern void func_NtlmLocalCall(void);
@@ -36,6 +37,7 @@ const struct test winetest_testlist[] =
     { "SchannelServerCert", func_SchannelServerCert },
     { "SetCredentialsAttributes", func_SetCredentialsAttributes },
     { "SspiAuthIdentityExports", func_SspiAuthIdentityExports },
+    { "SspiInitRace", func_SspiInitRace },
 
     { "QueryContextAttributesEx", func_QueryContextAttributesEx },
     { "NtlmConcurrent", func_NtlmConcurrent },
