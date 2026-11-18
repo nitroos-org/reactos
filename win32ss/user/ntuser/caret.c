@@ -245,7 +245,9 @@ BOOL FASTCALL co_UserHideCaret(PWND Window OPTIONAL)
 
    if(ThreadQueue->CaretInfo.Visible)
    {
-      PWND pwnd = UserGetWindowObject(ThreadQueue->CaretInfo.hWnd);
+      /* The caret's window may be gone or never set: look it up without
+         touching the last error (the callers include TrackPopupMenu). */
+      PWND pwnd = ValidateHwndNoErr(ThreadQueue->CaretInfo.hWnd);
       IntKillTimer(pwnd, IDCARETTIMER, TRUE);
 
       co_IntHideCaret(&ThreadQueue->CaretInfo);
