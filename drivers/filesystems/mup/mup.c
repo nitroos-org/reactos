@@ -223,6 +223,7 @@ MupAllocateUncProvider(ULONG RedirectorDeviceNameLength)
     UncProvider->NodeSize = sizeof(MUP_UNC) + RedirectorDeviceNameLength;
     UncProvider->Registered = FALSE;
     UncProvider->ByDeviceObject = FALSE;
+    UncProvider->LinkCreated = FALSE;
     UncProvider->DeviceHandle = NULL;
     UncProvider->DeviceObject = NULL;
     UncProvider->FileObject = NULL;
@@ -1081,6 +1082,167 @@ MupCheckForUnregisteredProvider(PUNICODE_STRING RedirectorDeviceName)
     return UncProvider;
 }
 
+/*
+ * The name of a provider for MUP: the last component of the name it registered,
+ * "LanmanRedirector" for \Device\LanmanRedirector.
+ */
+VOID
+MupGetProviderShortName(PMUP_UNC UncProvider,
+                        PUNICODE_STRING ShortName)
+{
+    USHORT Chars, Start;
+
+    Chars = UncProvider->DeviceName.Length / sizeof(WCHAR);
+    for (Start = Chars; Start > 0 && UncProvider->DeviceName.Buffer[Start - 1] != L'\\'; --Start);
+
+    ShortName->Buffer = &UncProvider->DeviceName.Buffer[Start];
+    ShortName->Length = (Chars - Start) * sizeof(WCHAR);
+    ShortName->MaximumLength = ShortName->Length;
+}
+
+/*
+ * Creates the permanent link LinkName -> Target with the descriptor Windows gives
+ * the provider links (measured on Windows 10 22H2: owner administrators, group
+ * SYSTEM, DACL (A;;CCRC;;;WD)(A;;CCSDRCWDWO;;;SY)(A;;CCSDRCWDWO;;;BA)(A;;CCRC;;;RC)),
+ * whatever the token of the thread that registers the provider.
+ */
+NTSTATUS
+MupCreateLinkObject(PUNICODE_STRING LinkName,
+                    PUNICODE_STRING Target)
+{
+    NTSTATUS Status;
+    HANDLE LinkHandle;
+    PACL Dacl;
+    ULONG AclSize;
+    SECURITY_DESCRIPTOR Sd;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    const ACCESS_MASK QueryAccess = SYMBOLIC_LINK_QUERY | READ_CONTROL;
+    const ACCESS_MASK AdminAccess = SYMBOLIC_LINK_QUERY | DELETE | READ_CONTROL | WRITE_DAC | WRITE_OWNER;
+
+    AclSize = sizeof(ACL) + 4 * FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart) +
+              RtlLengthSid(SeExports->SeWorldSid) + RtlLengthSid(SeExports->SeLocalSystemSid) +
+              RtlLengthSid(SeExports->SeAliasAdminsSid) + RtlLengthSid(SeExports->SeRestrictedSid);
+    Dacl = ExAllocatePoolWithTag(PagedPool, AclSize, TAG_MUP);
+    if (Dacl == NULL)
+    {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    Status = RtlCreateAcl(Dacl, AclSize, ACL_REVISION);
+    if (NT_SUCCESS(Status))
+        Status = RtlAddAccessAllowedAce(Dacl, ACL_REVISION, QueryAccess, SeExports->SeWorldSid);
+    if (NT_SUCCESS(Status))
+        Status = RtlAddAccessAllowedAce(Dacl, ACL_REVISION, AdminAccess, SeExports->SeLocalSystemSid);
+    if (NT_SUCCESS(Status))
+        Status = RtlAddAccessAllowedAce(Dacl, ACL_REVISION, AdminAccess, SeExports->SeAliasAdminsSid);
+    if (NT_SUCCESS(Status))
+        Status = RtlAddAccessAllowedAce(Dacl, ACL_REVISION, QueryAccess, SeExports->SeRestrictedSid);
+    if (NT_SUCCESS(Status))
+        Status = RtlCreateSecurityDescriptor(&Sd, SECURITY_DESCRIPTOR_REVISION);
+    if (NT_SUCCESS(Status))
+        Status = RtlSetDaclSecurityDescriptor(&Sd, TRUE, Dacl, FALSE);
+    if (NT_SUCCESS(Status))
+        Status = RtlSetOwnerSecurityDescriptor(&Sd, SeExports->SeAliasAdminsSid, FALSE);
+    if (NT_SUCCESS(Status))
+        Status = RtlSetGroupSecurityDescriptor(&Sd, SeExports->SeLocalSystemSid, FALSE);
+
+    if (NT_SUCCESS(Status))
+    {
+        InitializeObjectAttributes(&ObjectAttributes,
+                                   LinkName,
+                                   OBJ_CASE_INSENSITIVE | OBJ_PERMANENT | OBJ_KERNEL_HANDLE,
+                                   NULL,
+                                   &Sd);
+        Status = ZwCreateSymbolicLinkObject(&LinkHandle, SYMBOLIC_LINK_ALL_ACCESS, &ObjectAttributes, Target);
+        if (NT_SUCCESS(Status))
+        {
+            ZwClose(LinkHandle);
+        }
+    }
+
+    ExFreePoolWithTag(Dacl, TAG_MUP);
+    return Status;
+}
+
+/*
+ * The device of a provider registered by device object, referenced, if the provider
+ * is (still) registered; NULL otherwise. The node must be referenced by the caller.
+ */
+PDEVICE_OBJECT
+MupReferenceProviderDevice(PMUP_UNC UncProvider)
+{
+    PDEVICE_OBJECT ProviderDevice = NULL;
+
+    ExAcquireResourceSharedLite(&MupGlobalLock, TRUE);
+    if (UncProvider->Registered && UncProvider->ByDeviceObject && UncProvider->DeviceObject != NULL)
+    {
+        ProviderDevice = UncProvider->DeviceObject;
+        ObReferenceObject(ProviderDevice);
+    }
+    ExReleaseResourceLite(&MupGlobalLock);
+
+    return ProviderDevice;
+}
+
+/*
+ * As on Windows, the name a provider registered becomes a symbolic link to
+ * \Device\Mup\;<name>: a connection on a drive letter is a link to
+ * \Device\<provider>\..., so its opens come to MUP with the name of the provider,
+ * and MupOpenByProviderName hands them to that provider. Only for a provider
+ * registered by device object (FsRtlRegisterUncProviderEx): the name of one
+ * registered with FsRtlRegisterUncProvider is its device (or a link to it),
+ * which MUP opened, so the opens of that name go to the provider already.
+ * Called with MupGlobalLock held exclusively.
+ */
+VOID
+MupCreateProviderLink(PMUP_UNC UncProvider)
+{
+    NTSTATUS Status;
+    UNICODE_STRING ShortName, Target;
+    static const WCHAR MupPrefix[] = L"\\Device\\Mup\\;";
+
+    MupGetProviderShortName(UncProvider, &ShortName);
+    if (!UncProvider->ByDeviceObject || UncProvider->LinkCreated || ShortName.Length == 0 ||
+        ShortName.Length > MAXUSHORT - sizeof(MupPrefix))
+    {
+        return;
+    }
+
+    Target.Length = 0;
+    Target.MaximumLength = sizeof(MupPrefix) - sizeof(UNICODE_NULL) + ShortName.Length;
+    Target.Buffer = ExAllocatePoolWithTag(PagedPool, Target.MaximumLength, TAG_MUP);
+    if (Target.Buffer == NULL)
+    {
+        return;
+    }
+
+    RtlAppendUnicodeToString(&Target, MupPrefix);
+    RtlAppendUnicodeStringToString(&Target, &ShortName);
+
+    Status = MupCreateLinkObject(&UncProvider->DeviceName, &Target);
+    if (NT_SUCCESS(Status))
+    {
+        UncProvider->LinkCreated = TRUE;
+    }
+    else if (Status != STATUS_OBJECT_NAME_COLLISION)
+    {
+        DPRINT1("No link %wZ -> %wZ: %lx\n", &UncProvider->DeviceName, &Target, Status);
+    }
+
+    ExFreePoolWithTag(Target.Buffer, TAG_MUP);
+}
+
+/* Called with MupGlobalLock held exclusively */
+VOID
+MupDeleteProviderLink(PMUP_UNC UncProvider)
+{
+    if (UncProvider->LinkCreated)
+    {
+        IoDeleteSymbolicLink(&UncProvider->DeviceName);
+        UncProvider->LinkCreated = FALSE;
+    }
+}
+
 NTSTATUS
 RegisterUncProvider(PDEVICE_OBJECT DeviceObject,
                     PIRP Irp)
@@ -1271,6 +1433,7 @@ RegisterUncProvider(PDEVICE_OBJECT DeviceObject,
                 InsertTailList(Entry, &UncProvider->ProviderListEntry);
             }
             UncProvider->Registered = TRUE;
+            MupCreateProviderLink(UncProvider);
             ExReleaseResourceLite(&MupGlobalLock);
             Status = STATUS_SUCCESS;
 
@@ -1729,6 +1892,7 @@ MupDereferenceMasterQueryContext(PMUP_MQC MasterQueryContext)
     LONG References;
     NTSTATUS Status;
     BOOLEAN KeepExtraRef;
+    PDEVICE_OBJECT ProviderDevice;
 
     ExAcquireResourceExclusiveLite(&MupGlobalLock, TRUE);
     --MasterQueryContext->NodeReferences;
@@ -1771,14 +1935,12 @@ MupDereferenceMasterQueryContext(PMUP_MQC MasterQueryContext)
 
             ExReleaseResourceLite(&MupPrefixTableLock);
 
-            if (MasterQueryContext->LatestProvider->ByDeviceObject &&
-                MasterQueryContext->LatestProvider->DeviceObject != NULL)
+            ProviderDevice = MupReferenceProviderDevice(MasterQueryContext->LatestProvider);
+            if (ProviderDevice != NULL)
             {
                 PIRP Irp = MasterQueryContext->Irp;
-                PDEVICE_OBJECT ProviderDevice = MasterQueryContext->LatestProvider->DeviceObject;
 
                 /* No name to reparse to: the provider completes the create itself */
-                ObReferenceObject(ProviderDevice);
                 MasterQueryContext->Irp = NULL;
                 MupFreeMasterQueryContext(MasterQueryContext);
 
@@ -2001,6 +2163,111 @@ Cleanup:
     return STATUS_MORE_PROCESSING_REQUIRED;
 }
 
+/*
+ * An open of \;<provider>[\rest] (\Device\<provider>\rest through the link that
+ * MupCreateProviderLink made, like the \Device\<provider>\;X:<logon id>\server\share
+ * target of a drive letter) goes to that provider, without prefix resolution, with
+ * the name \rest: as on Windows, the rest, \;X:... included, is the provider's.
+ * The IRP is completed (or handed to the provider) here.
+ */
+NTSTATUS
+MupOpenByProviderName(PIRP Irp,
+                      PFILE_OBJECT FileObject)
+{
+    NTSTATUS Status;
+    PLIST_ENTRY Entry;
+    USHORT Chars, End;
+    PMUP_UNC UncProvider, Found;
+    PDEVICE_OBJECT ProviderDevice;
+    UNICODE_STRING Name, ShortName;
+    PWSTR Buffer = FileObject->FileName.Buffer;
+
+    /* The caller checked that the name starts with \; */
+    Chars = FileObject->FileName.Length / sizeof(WCHAR);
+    ASSERT(Chars >= 2 && Buffer[0] == L'\\' && Buffer[1] == L';');
+
+    for (End = 2; End < Chars && Buffer[End] != L'\\'; ++End);
+    Name.Buffer = &Buffer[2];
+    Name.Length = (End - 2) * sizeof(WCHAR);
+    Name.MaximumLength = Name.Length;
+
+    Found = NULL;
+    ProviderDevice = NULL;
+    if (Name.Length != 0)
+    {
+        ExAcquireResourceExclusiveLite(&MupGlobalLock, TRUE);
+        for (Entry = MupProviderList.Flink; Entry != &MupProviderList; Entry = Entry->Flink)
+        {
+            UncProvider = CONTAINING_RECORD(Entry, MUP_UNC, ProviderListEntry);
+            if (!UncProvider->Registered || UncProvider->DeviceObject == NULL)
+            {
+                continue;
+            }
+
+            MupGetProviderShortName(UncProvider, &ShortName);
+            if (RtlEqualUnicodeString(&Name, &ShortName, TRUE))
+            {
+                Found = UncProvider;
+                break;
+            }
+        }
+
+        /* While it is registered, the provider holds its device (and MUP the node, for good):
+         * keep the one or the other for the time of the open */
+        if (Found != NULL)
+        {
+            if (Found->ByDeviceObject)
+            {
+                ProviderDevice = Found->DeviceObject;
+                ObReferenceObject(ProviderDevice);
+            }
+            else
+            {
+                ++Found->NodeReferences;
+            }
+        }
+        ExReleaseResourceLite(&MupGlobalLock);
+    }
+
+    if (Found == NULL)
+    {
+        DPRINT("No provider for %wZ\n", &FileObject->FileName);
+
+        Irp->IoStatus.Status = STATUS_OBJECT_PATH_INVALID;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_DISK_INCREMENT);
+
+        return STATUS_OBJECT_PATH_INVALID;
+    }
+
+    /* Strip \;<provider> */
+    RtlMoveMemory(Buffer, &Buffer[End], FileObject->FileName.Length - End * sizeof(WCHAR));
+    FileObject->FileName.Length -= End * sizeof(WCHAR);
+
+    DPRINT("Open of %wZ goes to %wZ\n", &FileObject->FileName, &Found->DeviceName);
+
+    if (ProviderDevice != NULL)
+    {
+        return MupForwardOpen(Irp, ProviderDevice);
+    }
+
+    Status = MupRerouteOpen(FileObject, Found);
+    MupDereferenceUncProvider(Found);
+    if (Status == STATUS_REPARSE)
+    {
+        Irp->IoStatus.Information = IO_REPARSE;
+    }
+    else
+    {
+        Irp->IoStatus.Information = 0;
+    }
+
+    Irp->IoStatus.Status = Status;
+    IoCompleteRequest(Irp, IO_DISK_INCREMENT);
+
+    return Status;
+}
+
 NTSTATUS
 CreateRedirectedFile(PIRP Irp,
                      PFILE_OBJECT FileObject,
@@ -2023,6 +2290,10 @@ CreateRedirectedFile(PIRP Irp,
     BOOLEAN Locked, Referenced, BreakOnFirst;
     PVOID InputBuffer;
     ULONG InputLength, IoctlCode;
+    PDEVICE_OBJECT ProviderDevice;
+    PDEVICE_OBJECT QueryDevice = NULL;
+    PFILE_OBJECT QueryFile = NULL;
+    BOOLEAN QueryByDevice;
 
     /* We cannot open a file without a name */
     if (FileObject->FileName.Length == 0)
@@ -2034,6 +2305,15 @@ CreateRedirectedFile(PIRP Irp,
     }
 
     DPRINT("Request for opening: %wZ\n", &FileObject->FileName);
+
+    /* \;<provider>\...: the provider is named, there is no prefix to resolve */
+    if (FileObject->RelatedFileObject == NULL &&
+        FileObject->FileName.Length >= 2 * sizeof(WCHAR) &&
+        FileObject->FileName.Buffer[0] == L'\\' &&
+        FileObject->FileName.Buffer[1] == L';')
+    {
+        return MupOpenByProviderName(Irp, FileObject);
+    }
 
     Referenced = FALSE;
     BreakOnFirst = TRUE;
@@ -2054,29 +2334,34 @@ CreateRedirectedFile(PIRP Irp,
         {
             /* It is: so, update its validity period and reroute file opening */
             MupCalculateTimeout(&Prefix->ValidityTimeout);
-            if (Prefix->UncProvider->ByDeviceObject && Prefix->UncProvider->DeviceObject != NULL)
-            {
-                PDEVICE_OBJECT ProviderDevice = Prefix->UncProvider->DeviceObject;
 
-                /* No name to reparse to: hand the create over to the provider */
-                ObReferenceObject(ProviderDevice);
+            /* No name to reparse to: hand the create over to the provider, if it is still there
+             * (its device is read and referenced under the global lock: it may be deregistering) */
+            ProviderDevice = MupReferenceProviderDevice(Prefix->UncProvider);
+            if (ProviderDevice != NULL)
+            {
                 ExReleaseResourceLite(&MupPrefixTableLock);
 
                 return MupForwardOpen(Irp, ProviderDevice);
             }
 
-            Status = MupRerouteOpen(FileObject, Prefix->UncProvider);
-            ExReleaseResourceLite(&MupPrefixTableLock);
-
-            if (Status == STATUS_REPARSE)
+            if (Prefix->UncProvider->Registered && !Prefix->UncProvider->ByDeviceObject)
             {
-                Irp->IoStatus.Information = FILE_SUPERSEDED;
+                Status = MupRerouteOpen(FileObject, Prefix->UncProvider);
+                ExReleaseResourceLite(&MupPrefixTableLock);
+
+                if (Status == STATUS_REPARSE)
+                {
+                    Irp->IoStatus.Information = FILE_SUPERSEDED;
+                }
+
+                Irp->IoStatus.Status = Status;
+                IoCompleteRequest(Irp, IO_DISK_INCREMENT);
+
+                return Status;
             }
 
-            Irp->IoStatus.Status = Status;
-            IoCompleteRequest(Irp, IO_DISK_INCREMENT);
-
-            return Status;
+            /* The provider is gone: forget the prefix, search again */
         }
 
         /* When here, we found a matching prefix, but expired, remove it from the table
@@ -2189,13 +2474,31 @@ CreateRedirectedFile(PIRP Irp,
                 ++UncProvider->NodeReferences;
                 Referenced = TRUE;
 
+                /* Read the provider's device (and file object) under the lock and keep a reference
+                 * for the query: a provider deregistering meanwhile clears and releases them
+                 * (MupCloseUncProvider), and only the node is kept alive by its reference */
+                QueryDevice = NULL;
+                QueryFile = NULL;
+                QueryByDevice = FALSE;
+                if (UncProvider->Registered && UncProvider->DeviceObject != NULL)
+                {
+                    QueryByDevice = UncProvider->ByDeviceObject;
+                    QueryDevice = UncProvider->DeviceObject;
+                    ObReferenceObject(QueryDevice);
+                    if (!QueryByDevice && UncProvider->FileObject != NULL)
+                    {
+                        QueryFile = UncProvider->FileObject;
+                        ObReferenceObject(QueryFile);
+                    }
+                }
+
                 ExReleaseResourceLite(&MupGlobalLock);
                 Locked = FALSE;
 
                 /* We will obviously only query registered providers */
-                if (UncProvider->Registered)
+                if (QueryDevice != NULL)
                 {
-                    if (UncProvider->ByDeviceObject)
+                    if (QueryByDevice)
                     {
                         PQUERY_PATH_REQUEST_EX QueryPathRequestEx;
                         ULONG RequestOffset = ROUND_UP(sizeof(QUERY_PATH_RESPONSE), sizeof(PVOID));
@@ -2259,8 +2562,8 @@ CreateRedirectedFile(PIRP Irp,
                     QueryContext->QueryPathRequest = QueryPathRequest;
 
                     /* Build our IRP for the query */
-                    QueryIrp = MupBuildIoControlRequest(UncProvider->DeviceObject,
-                                                        UncProvider->FileObject,
+                    QueryIrp = MupBuildIoControlRequest(QueryDevice,
+                                                        QueryFile,
                                                         QueryContext,
                                                         IRP_MJ_DEVICE_CONTROL,
                                                         IoctlCode,
@@ -2291,8 +2594,19 @@ CreateRedirectedFile(PIRP Irp,
 
                     /* Query the provider !*/
                     DPRINT("Requesting UNC provider: %wZ\n", &UncProvider->DeviceName);
-                    DPRINT("Calling: %wZ\n", &UncProvider->DeviceObject->DriverObject->DriverName);
-                    Status = IoCallDriver(UncProvider->DeviceObject, QueryIrp);
+                    DPRINT("Calling: %wZ\n", &QueryDevice->DriverObject->DriverName);
+                    Status = IoCallDriver(QueryDevice, QueryIrp);
+                }
+
+                if (QueryFile != NULL)
+                {
+                    ObDereferenceObject(QueryFile);
+                    QueryFile = NULL;
+                }
+                if (QueryDevice != NULL)
+                {
+                    ObDereferenceObject(QueryDevice);
+                    QueryDevice = NULL;
                 }
 
                 ExAcquireResourceExclusiveLite(&MupGlobalLock, TRUE);
@@ -2316,6 +2630,15 @@ CreateRedirectedFile(PIRP Irp,
             if (_SEH2_AbnormalTermination())
             {
                 MasterQueryContext->LatestStatus = STATUS_INSUFFICIENT_RESOURCES;
+            }
+
+            if (QueryFile != NULL)
+            {
+                ObDereferenceObject(QueryFile);
+            }
+            if (QueryDevice != NULL)
+            {
+                ObDereferenceObject(QueryDevice);
             }
 
             if (Referenced)
@@ -2439,16 +2762,24 @@ MupCloseUncProvider(PMUP_UNC UncProvider)
     /* If the node was still valid, reregister the UNC provider */
     if (UncProvider->NodeStatus == NODE_STATUS_HEALTHY)
     {
+        PDEVICE_OBJECT ProviderDevice = NULL;
+        BOOLEAN ByDeviceObject = UncProvider->ByDeviceObject;
+
         UncProvider->NodeStatus = NODE_STATUS_CLEANUP;
         UncProvider->Registered = FALSE;
-        ExReleaseResourceLite(&MupGlobalLock);
+        MupDeleteProviderLink(UncProvider);
 
-        if (UncProvider->ByDeviceObject)
+        /* Under the lock: MupReferenceProviderDevice reads the device under it */
+        if (ByDeviceObject)
         {
-            PDEVICE_OBJECT ProviderDevice = UncProvider->DeviceObject;
-
+            ProviderDevice = UncProvider->DeviceObject;
             UncProvider->DeviceObject = NULL;
             UncProvider->ByDeviceObject = FALSE;
+        }
+        ExReleaseResourceLite(&MupGlobalLock);
+
+        if (ByDeviceObject)
+        {
             if (ProviderDevice != NULL)
             {
                 ObDereferenceObject(ProviderDevice);
@@ -2664,6 +2995,10 @@ VOID
 NTAPI
 MupUnload(PDRIVER_OBJECT DriverObject)
 {
+    UNICODE_STRING UncString;
+
+    RtlInitUnicodeString(&UncString, L"\\DosDevices\\UNC");
+    IoDeleteSymbolicLink(&UncString);
     IoDeleteDevice(mupDeviceObject);
 
     if (MupEnableDfs)
@@ -2672,6 +3007,94 @@ MupUnload(PDRIVER_OBJECT DriverObject)
     }
 
     MupUninitializeData();
+}
+
+/*
+ * MUP is a network file system device, so the I/O manager asks it for
+ * FileFsDeviceInformation of its own handles; it has no other volume information
+ * (Server 2022: FileFsAttributeInformation of \Device\Mup is STATUS_INVALID_DEVICE_REQUEST).
+ */
+NTSTATUS
+NTAPI
+MupQueryVolumeInformation(PDEVICE_OBJECT DeviceObject,
+                          PIRP Irp)
+{
+    NTSTATUS Status;
+    PIO_STACK_LOCATION Stack;
+    PFILE_FS_DEVICE_INFORMATION DeviceInfo;
+
+    Stack = IoGetCurrentIrpStackLocation(Irp);
+    Irp->IoStatus.Information = 0;
+
+    if (Stack->Parameters.QueryVolume.FsInformationClass != FileFsDeviceInformation)
+    {
+        Status = STATUS_INVALID_DEVICE_REQUEST;
+    }
+    else if (Stack->Parameters.QueryVolume.Length < sizeof(FILE_FS_DEVICE_INFORMATION))
+    {
+        Status = STATUS_BUFFER_TOO_SMALL;
+    }
+    else
+    {
+        DeviceInfo = Irp->AssociatedIrp.SystemBuffer;
+        DeviceInfo->DeviceType = DeviceObject->DeviceType;
+        DeviceInfo->Characteristics = DeviceObject->Characteristics;
+        Irp->IoStatus.Information = sizeof(FILE_FS_DEVICE_INFORMATION);
+        Status = STATUS_SUCCESS;
+    }
+
+    Irp->IoStatus.Status = Status;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+
+    return Status;
+}
+
+/*
+ * Every request runs with normal kernel APCs disabled, as a file system must: MUP
+ * holds its ERESOURCEs (MupGlobalLock, MupPrefixTableLock, ...) across calls into
+ * providers, and the opens of UNC names come from user threads now that \??\UNC
+ * always leads to MUP.
+ */
+NTSTATUS
+NTAPI
+MupDispatch(PDEVICE_OBJECT DeviceObject,
+            PIRP Irp)
+{
+    NTSTATUS Status;
+
+    FsRtlEnterFileSystem();
+    switch (IoGetCurrentIrpStackLocation(Irp)->MajorFunction)
+    {
+        case IRP_MJ_CREATE:
+        case IRP_MJ_CREATE_NAMED_PIPE:
+        case IRP_MJ_CREATE_MAILSLOT:
+            Status = MupCreate(DeviceObject, Irp);
+            break;
+        case IRP_MJ_WRITE:
+            Status = MupForwardIoRequest(DeviceObject, Irp);
+            break;
+        case IRP_MJ_FILE_SYSTEM_CONTROL:
+            Status = MupFsControl(DeviceObject, Irp);
+            break;
+        case IRP_MJ_CLEANUP:
+            Status = MupCleanup(DeviceObject, Irp);
+            break;
+        case IRP_MJ_CLOSE:
+            Status = MupClose(DeviceObject, Irp);
+            break;
+        case IRP_MJ_QUERY_VOLUME_INFORMATION:
+            Status = MupQueryVolumeInformation(DeviceObject, Irp);
+            break;
+        default:
+            Status = STATUS_INVALID_DEVICE_REQUEST;
+            Irp->IoStatus.Status = Status;
+            Irp->IoStatus.Information = 0;
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            break;
+    }
+    FsRtlExitFileSystem();
+
+    return Status;
 }
 
 /*
@@ -2688,7 +3111,7 @@ DriverEntry(PDRIVER_OBJECT DriverObject,
             PUNICODE_STRING RegistryPath)
 {
     NTSTATUS Status;
-    UNICODE_STRING MupString;
+    UNICODE_STRING MupString, UncString;
     PDEVICE_OBJECT DeviceObject;
 
     /* Only initialize global state of the driver
@@ -2704,9 +3127,16 @@ DriverEntry(PDRIVER_OBJECT DriverObject,
         MupEnableDfs = FALSE;
     }
 
-    /* Create the MUP device */
+    /* Create the MUP device: a network file system, remote, as on Windows (Windows 10 22H2 and
+     * Server 2022: FileFsDeviceInformation of \Device\Mup is DeviceType 0x14, Characteristics 0x20010) */
     RtlInitUnicodeString(&MupString, L"\\Device\\Mup");
-    Status = IoCreateDevice(DriverObject, sizeof(MUP_VCB), &MupString, FILE_DEVICE_MULTI_UNC_PROVIDER, 0, FALSE, &DeviceObject);
+    Status = IoCreateDevice(DriverObject,
+                            sizeof(MUP_VCB),
+                            &MupString,
+                            FILE_DEVICE_NETWORK_FILE_SYSTEM,
+                            FILE_REMOTE_DEVICE | FILE_DEVICE_ALLOW_APPCONTAINER_TRAVERSAL,
+                            FALSE,
+                            &DeviceObject);
     if (!NT_SUCCESS(Status))
     {
         if (MupEnableDfs)
@@ -2721,17 +3151,27 @@ DriverEntry(PDRIVER_OBJECT DriverObject,
 
     /* Set our MJ */
     DriverObject->DriverUnload = MupUnload;
-    DriverObject->MajorFunction[IRP_MJ_CREATE] = MupCreate;
-    DriverObject->MajorFunction[IRP_MJ_CREATE_NAMED_PIPE] = MupCreate;
-    DriverObject->MajorFunction[IRP_MJ_CREATE_MAILSLOT] = MupCreate;
-    DriverObject->MajorFunction[IRP_MJ_WRITE] = MupForwardIoRequest;
-    DriverObject->MajorFunction[IRP_MJ_FILE_SYSTEM_CONTROL] = MupFsControl;
-    DriverObject->MajorFunction[IRP_MJ_CLEANUP] = MupCleanup;
-    DriverObject->MajorFunction[IRP_MJ_CLOSE] = MupClose;
+    DriverObject->MajorFunction[IRP_MJ_CREATE] = MupDispatch;
+    DriverObject->MajorFunction[IRP_MJ_CREATE_NAMED_PIPE] = MupDispatch;
+    DriverObject->MajorFunction[IRP_MJ_CREATE_MAILSLOT] = MupDispatch;
+    DriverObject->MajorFunction[IRP_MJ_WRITE] = MupDispatch;
+    DriverObject->MajorFunction[IRP_MJ_FILE_SYSTEM_CONTROL] = MupDispatch;
+    DriverObject->MajorFunction[IRP_MJ_CLEANUP] = MupDispatch;
+    DriverObject->MajorFunction[IRP_MJ_CLOSE] = MupDispatch;
+    DriverObject->MajorFunction[IRP_MJ_QUERY_VOLUME_INFORMATION] = MupDispatch;
 
     /* And finish init */
     mupDeviceObject = DeviceObject;
     MupInitializeVcb(DeviceObject->DeviceExtension);
+
+    /* UNC names are MUP's, whether a provider is registered or not, as on Windows
+     * (\??\UNC and \GLOBAL??\UNC are links to \Device\Mup) */
+    RtlInitUnicodeString(&UncString, L"\\DosDevices\\UNC");
+    Status = IoCreateSymbolicLink(&UncString, &MupString);
+    if (!NT_SUCCESS(Status) && Status != STATUS_OBJECT_NAME_COLLISION)
+    {
+        DPRINT1("No \\DosDevices\\UNC link: %lx\n", Status);
+    }
 
     return STATUS_SUCCESS;
 }

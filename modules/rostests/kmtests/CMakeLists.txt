@@ -8,6 +8,7 @@ add_subdirectory(example)
 add_subdirectory(fltmgr)
 add_subdirectory(hidparse)
 add_subdirectory(kernel32)
+add_subdirectory(mup)
 add_subdirectory(ntos_cc)
 add_subdirectory(ntos_cm)
 add_subdirectory(ntos_io)
@@ -258,6 +259,7 @@ list(APPEND KMTEST_SOURCE
     ntos_mm/MmPager_user.c
     ntos_mm/MmSpecialPool_user.c
     ntos_mm/NtCreateSection_user.c
+    mup/MupProvider_user.c
     ntos_po/PoIrp_user.c
     tcpip/TcpIp_user.c
     ${COMMON_SOURCE}

@@ -251,6 +251,8 @@ VOID
 NTAPI
 FsRtlDeregisterUncProvider(IN HANDLE Handle)
 {
+    BOOLEAN CloseMupHandle;
+
     PAGED_CODE();
 
     /* We won't work on invalid input */
@@ -258,6 +260,11 @@ FsRtlDeregisterUncProvider(IN HANDLE Handle)
     {
         return;
     }
+
+    /* A provider registered by device object (FsRtlRegisterUncProviderEx) has a kernel
+     * handle to MUP, and MUP holds its device until that handle is closed: close it, the
+     * provider does not (WinFsp deregisters at unload, then deletes the device) */
+    CloseMupHandle = ObpIsKernelHandle(Handle, KernelMode);
 
     KeWaitForSingleObject(&FsRtlpUncSemaphore, Executive, KernelMode, FALSE, NULL);
 
@@ -297,9 +304,14 @@ FsRtlDeregisterUncProvider(IN HANDLE Handle)
 
     KeReleaseSemaphore(&FsRtlpUncSemaphore, IO_NO_INCREMENT, 1, FALSE);
 
+    if (CloseMupHandle)
+    {
+        ZwClose(Handle);
+    }
+
     /* Final note:
-     * NULL device handle and 'normal' MUP device handle are not closed by
-     * FsRtl. It's up to the user to close them afterwards.
+     * NULL device handle and 'normal' MUP device handle (of FsRtlRegisterUncProvider)
+     * are not closed by FsRtl. It's up to the user to close them afterwards.
      * If the handle is leaked, MUP will never be notified about the
      * unregistration.
      */
@@ -326,22 +338,18 @@ FsRtlpRegisterUncProvider(OUT PHANDLE Handle,
 
     KeWaitForSingleObject(&FsRtlpUncSemaphore, Executive, KernelMode, FALSE, NULL);
 
-    /* In case no provider was registered yet, check for DFS present.
-     * If DFS is present, we need to go with MUP, whatever the case
+    /* As on Windows, UNC names always go through MUP (\??\UNC is \Device\Mup and the
+     * names of the providers are \Device\Mup\;<provider>), also with a single provider
+     * and DFS disabled: a provider is never the target of \??\UNC itself.
      */
     if (FsRtlpRedirs == 0)
     {
-        if (ProviderDevice != NULL || FsRtlpIsDfsEnabled())
-        {
-            DPRINT1("DFS is not disabled (or provider has no name). Going through MUP\n");
-
-            /* We've to go with MUP, make sure our internal structure doesn't
-             * contain any leftover data and raise redirs to one, to make sure
-             * we use MUP.
-             */
-            RtlZeroMemory(&FsRtlpDRD, sizeof(FsRtlpDRD));
-            FsRtlpRedirs = 1;
-        }
+        /* We've to go with MUP, make sure our internal structure doesn't
+         * contain any leftover data and raise redirs to one, to make sure
+         * we use MUP.
+         */
+        RtlZeroMemory(&FsRtlpDRD, sizeof(FsRtlpDRD));
+        FsRtlpRedirs = 1;
     }
 
     /* In case no UNC provider was already registered,

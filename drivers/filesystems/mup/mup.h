@@ -12,6 +12,16 @@
 
 #define TAG_MUP ' puM'
 
+/* Exported by the kernel; not declared by the IFS headers of this tree */
+NTSYSAPI
+NTSTATUS
+NTAPI
+ZwCreateSymbolicLinkObject(
+    _Out_ PHANDLE LinkHandle,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_ POBJECT_ATTRIBUTES ObjectAttributes,
+    _In_ PUNICODE_STRING LinkTarget);
+
 #define FILE_SIMPLE_RIGHTS_MASK (FILE_ALL_ACCESS & ~STANDARD_RIGHTS_REQUIRED &~ SYNCHRONIZE)
 
 #define NODE_TYPE_VCB 0x1
@@ -83,6 +93,7 @@ typedef struct _MUP_UNC
     BOOLEAN MailslotsSupported;
     BOOLEAN Registered;
     BOOLEAN ByDeviceObject; /* registered with FsRtlRegisterUncProviderEx: no named device, no FileObject */
+    BOOLEAN LinkCreated; /* MUP made DeviceName a symbolic link to \Device\Mup\;<name> */
 } MUP_UNC, *PMUP_UNC;
 
 typedef struct _MUP_PFX
