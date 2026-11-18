@@ -288,6 +288,8 @@ static LRESULT CALLBACK
 ThemeDefWindowProcW(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
 {
     PWND_DATA pwndData;
+    LRESULT lResult;
+    DWORD dwLastError = GetLastError();
 
     pwndData = (PWND_DATA)GetPropW(hWnd, (LPCWSTR)MAKEINTATOM(atWndContext));
 
@@ -295,23 +297,29 @@ ThemeDefWindowProcW(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
        !(GetThemeAppProperties() & STAP_ALLOW_NONCLIENT) ||
        (pwndData && pwndData->HasAppDefinedRgn))
     {
+        /* The theme checks above are not the caller's business: keep its last error */
+        SetLastError(dwLastError);
         return g_user32ApiHook.DefWindowProcW(hWnd,
                                             Msg,
                                             wParam,
                                             lParam);
     }
 
-    return ThemeWndProc(hWnd,
-                        Msg,
-                        wParam,
-                        lParam,
-                        g_user32ApiHook.DefWindowProcW);
+    lResult = ThemeWndProc(hWnd,
+                           Msg,
+                           wParam,
+                           lParam,
+                           g_user32ApiHook.DefWindowProcW);
+    SetLastError(dwLastError);
+    return lResult;
 }
 
 static LRESULT CALLBACK
 ThemeDefWindowProcA(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
 {
     PWND_DATA pwndData;
+    LRESULT lResult;
+    DWORD dwLastError = GetLastError();
 
     pwndData = (PWND_DATA)GetPropW(hWnd, (LPCWSTR)MAKEINTATOM(atWndContext));
 
@@ -319,21 +327,25 @@ ThemeDefWindowProcA(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
        !(GetThemeAppProperties() & STAP_ALLOW_NONCLIENT) ||
        (pwndData && pwndData->HasAppDefinedRgn))
     {
+        /* The theme checks above are not the caller's business: keep its last error */
+        SetLastError(dwLastError);
         return g_user32ApiHook.DefWindowProcA(hWnd,
                                             Msg,
                                             wParam,
                                             lParam);
     }
 
-    return ThemeWndProc(hWnd,
-                        Msg,
-                        wParam,
-                        lParam,
-                        g_user32ApiHook.DefWindowProcA);
+    lResult = ThemeWndProc(hWnd,
+                           Msg,
+                           wParam,
+                           lParam,
+                           g_user32ApiHook.DefWindowProcA);
+    SetLastError(dwLastError);
+    return lResult;
 }
 
-static LRESULT CALLBACK
-ThemePreWindowProc(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam, ULONG_PTR ret,PDWORD unknown)
+static LRESULT
+ThemePreWindowProcWork(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam, ULONG_PTR ret,PDWORD unknown)
 {
     switch(Msg)
     {
@@ -398,9 +410,20 @@ ThemePreWindowProc(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam, ULONG_PTR 
     return 0;
 }
 
-
 static LRESULT CALLBACK
-ThemePostWindowProc(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam, ULONG_PTR ret,PDWORD unknown)
+ThemePreWindowProc(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam, ULONG_PTR ret,PDWORD unknown)
+{
+    /* The theme code runs inside the caller's user32 call: it must not change the caller's last error */
+    DWORD dwLastError = GetLastError();
+    LRESULT lResult = ThemePreWindowProcWork(hWnd, Msg, wParam, lParam, ret, unknown);
+
+    SetLastError(dwLastError);
+    return lResult;
+}
+
+
+static LRESULT
+ThemePostWindowProcWork(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam, ULONG_PTR ret,PDWORD unknown)
 {
     switch(Msg)
     {
@@ -416,6 +439,17 @@ ThemePostWindowProc(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam, ULONG_PTR
     }
 
     return 0;
+}
+
+static LRESULT CALLBACK
+ThemePostWindowProc(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam, ULONG_PTR ret,PDWORD unknown)
+{
+    /* The theme code runs inside the caller's user32 call: it must not change the caller's last error */
+    DWORD dwLastError = GetLastError();
+    LRESULT lResult = ThemePostWindowProcWork(hWnd, Msg, wParam, lParam, ret, unknown);
+
+    SetLastError(dwLastError);
+    return lResult;
 }
 
 HRESULT GetDiaogTextureBrush(HTHEME theme, HWND hwnd, HDC hdc, HBRUSH* result, BOOL changeOrigin)
@@ -498,8 +532,8 @@ ThemeDlgPreWindowProc(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam, ULONG_P
     return 0;
 }
 
-static LRESULT CALLBACK
-ThemeDlgPostWindowProc(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam, ULONG_PTR ret,PDWORD unknown)
+static LRESULT
+ThemeDlgPostWindowProcWork(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam, ULONG_PTR ret,PDWORD unknown)
 {
     switch(Msg)
     {
@@ -543,6 +577,17 @@ ThemeDlgPostWindowProc(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam, ULONG_
     }
 
     return 0;
+}
+
+static LRESULT CALLBACK
+ThemeDlgPostWindowProc(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam, ULONG_PTR ret,PDWORD unknown)
+{
+    /* The theme code runs inside the caller's user32 call: it must not change the caller's last error */
+    DWORD dwLastError = GetLastError();
+    LRESULT lResult = ThemeDlgPostWindowProcWork(hWnd, Msg, wParam, lParam, ret, unknown);
+
+    SetLastError(dwLastError);
+    return lResult;
 }
 
 int WINAPI ThemeSetWindowRgn(HWND hWnd, HRGN hRgn, BOOL bRedraw)
