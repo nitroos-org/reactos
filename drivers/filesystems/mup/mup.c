@@ -3009,6 +3009,54 @@ MupQueryVolumeInformation(PDEVICE_OBJECT DeviceObject,
 }
 
 /*
+ * Every request runs with normal kernel APCs disabled, as a file system must: MUP
+ * holds its ERESOURCEs (MupGlobalLock, MupPrefixTableLock, ...) across calls into
+ * providers, and the opens of UNC names come from user threads now that \??\UNC
+ * always leads to MUP.
+ */
+NTSTATUS
+NTAPI
+MupDispatch(PDEVICE_OBJECT DeviceObject,
+            PIRP Irp)
+{
+    NTSTATUS Status;
+
+    FsRtlEnterFileSystem();
+    switch (IoGetCurrentIrpStackLocation(Irp)->MajorFunction)
+    {
+        case IRP_MJ_CREATE:
+        case IRP_MJ_CREATE_NAMED_PIPE:
+        case IRP_MJ_CREATE_MAILSLOT:
+            Status = MupCreate(DeviceObject, Irp);
+            break;
+        case IRP_MJ_WRITE:
+            Status = MupForwardIoRequest(DeviceObject, Irp);
+            break;
+        case IRP_MJ_FILE_SYSTEM_CONTROL:
+            Status = MupFsControl(DeviceObject, Irp);
+            break;
+        case IRP_MJ_CLEANUP:
+            Status = MupCleanup(DeviceObject, Irp);
+            break;
+        case IRP_MJ_CLOSE:
+            Status = MupClose(DeviceObject, Irp);
+            break;
+        case IRP_MJ_QUERY_VOLUME_INFORMATION:
+            Status = MupQueryVolumeInformation(DeviceObject, Irp);
+            break;
+        default:
+            Status = STATUS_INVALID_DEVICE_REQUEST;
+            Irp->IoStatus.Status = Status;
+            Irp->IoStatus.Information = 0;
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            break;
+    }
+    FsRtlExitFileSystem();
+
+    return Status;
+}
+
+/*
  * FUNCTION: Called by the system to initialize the driver
  * ARGUMENTS:
  *           DriverObject = object describing this driver
@@ -3062,14 +3110,14 @@ DriverEntry(PDRIVER_OBJECT DriverObject,
 
     /* Set our MJ */
     DriverObject->DriverUnload = MupUnload;
-    DriverObject->MajorFunction[IRP_MJ_CREATE] = MupCreate;
-    DriverObject->MajorFunction[IRP_MJ_CREATE_NAMED_PIPE] = MupCreate;
-    DriverObject->MajorFunction[IRP_MJ_CREATE_MAILSLOT] = MupCreate;
-    DriverObject->MajorFunction[IRP_MJ_WRITE] = MupForwardIoRequest;
-    DriverObject->MajorFunction[IRP_MJ_FILE_SYSTEM_CONTROL] = MupFsControl;
-    DriverObject->MajorFunction[IRP_MJ_CLEANUP] = MupCleanup;
-    DriverObject->MajorFunction[IRP_MJ_CLOSE] = MupClose;
-    DriverObject->MajorFunction[IRP_MJ_QUERY_VOLUME_INFORMATION] = MupQueryVolumeInformation;
+    DriverObject->MajorFunction[IRP_MJ_CREATE] = MupDispatch;
+    DriverObject->MajorFunction[IRP_MJ_CREATE_NAMED_PIPE] = MupDispatch;
+    DriverObject->MajorFunction[IRP_MJ_CREATE_MAILSLOT] = MupDispatch;
+    DriverObject->MajorFunction[IRP_MJ_WRITE] = MupDispatch;
+    DriverObject->MajorFunction[IRP_MJ_FILE_SYSTEM_CONTROL] = MupDispatch;
+    DriverObject->MajorFunction[IRP_MJ_CLEANUP] = MupDispatch;
+    DriverObject->MajorFunction[IRP_MJ_CLOSE] = MupDispatch;
+    DriverObject->MajorFunction[IRP_MJ_QUERY_VOLUME_INFORMATION] = MupDispatch;
 
     /* And finish init */
     mupDeviceObject = DeviceObject;
