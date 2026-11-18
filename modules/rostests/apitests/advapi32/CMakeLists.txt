@@ -111,6 +111,7 @@ list(APPEND SOURCE
     SddlRights.c
     SddlSids.c
     ServiceProcess.c
+    ServiceSidToken.c
     PerfCounterValues.c
     PerfProvider.c
     ServiceStructLayout.c
