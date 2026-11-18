@@ -370,6 +370,14 @@ ConnectCb(struct smb2_context *smb2, int status, void *command_data, void *priva
     Conn->QuickRetries = 0;
     Conn->MaxRead = min(smb2_get_max_read_size(smb2), SMBUP_MAX_IO);
     Conn->MaxWrite = min(smb2_get_max_write_size(smb2), SMBUP_MAX_IO);
+    /* SMB 2.0.2 has no multi-credit requests: libsmb2 then cuts every READ and WRITE to
+     * 64 KiB whatever the server's maximum says, and the cut would reach the driver as a
+     * short read (an early end of file) or a short write. Offer only what goes out whole. */
+    if (smb2_get_dialect(smb2) == SMB2_VERSION_0202)
+    {
+        Conn->MaxRead = min(Conn->MaxRead, 64 * 1024);
+        Conn->MaxWrite = min(Conn->MaxWrite, 64 * 1024);
+    }
     if (Conn->MaxRead < 4096 || Conn->MaxWrite < 4096)
     {
         /* A server that cannot move a page per request is not one we talk to */
