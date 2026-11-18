@@ -4,7 +4,7 @@ project(featmgr)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
 # --- CLI frontend (automation): featmgr /list /query /enable /disable ---
-add_executable(featmgr cli.c engine.c components.c shelldefaults.c rapps_import.c native.c natgen.c rappsdb.c scoop.c scoopdefaults.c featmgr.rc)
+add_executable(featmgr cli.c engine.c components.c shelldefaults.c rapps_import.c native.c natgen.c zipinst.c rappsdb.c scoop.c scoopdefaults.c featmgr.rc)
 set_module_type(featmgr win32cui UNICODE)
 target_link_libraries(featmgr uuid minizip zlib)
 add_importlibs(featmgr advapi32 shlwapi shell32 ole32 user32 wininet crypt32 msvcrt kernel32 ntdll)
@@ -102,6 +102,12 @@ add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/dotnet-framework-4.8.ini
 # MSI packages (the same sources and SHA-1 pins as the add-on prompt of appwiz.cpl, tools/check-gecko-pins.sh compares them),
 # refuses them unless the SHA-256 matches, and never bundles them. Compatibility only (old engine, MPL 2.0).
 add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/wine-gecko.ini
+            DESTINATION reactos/Featmgr/Catalog FOR all)
+
+# --- OpenSSH Client: software-tier entry, i386 and amd64, on demand. The manifest only; its recipe is the [openssh-client] section of
+# Catalog\components.ini (the official Win32-OpenSSH zip, downloaded at install time and SHA-256 checked, never bundled; unpacked by
+# "featmgr /zip-install", zipinst.c).
+add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/openssh-client.ini
             DESTINATION reactos/Featmgr/Catalog FOR all)
 
 # --- WineVDM (16-bit Windows applications): software-tier entry, i386 only, on demand (setup no longer requests it) ---

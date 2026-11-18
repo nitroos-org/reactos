@@ -26,6 +26,11 @@ static BOOL CompFile(LPWSTR out, DWORD cch)
     return SUCCEEDED(StringCchPrintfW(out, cch, L"%s\\Catalog\\components.ini", root));
 }
 
+BOOL FmCompFilePath(LPWSTR out, DWORD cch)
+{
+    return CompFile(out, cch);
+}
+
 static void ReadKey(LPCWSTR file, LPCWSTR sec, LPCWSTR key, LPWSTR out, DWORD cch)
 {
     GetPrivateProfileStringW(sec, key, L"", out, cch, file);
@@ -72,13 +77,15 @@ static BOOL LoadSection(LPCWSTR file, LPCWSTR id, FM_COMPONENT *c)
 
     ZeroMemory(c, sizeof(*c));
     ReadKey(file, id, L"Name", c->Name, ARRAYSIZE(c->Name));
-    ReadKey(file, id, L"Url", c->Url, ARRAYSIZE(c->Url));
+    /* Url, Sha256, Sha1, FileName and SizeBytes also take a .amd64 or .x86 suffix that wins for that build
+     * (one entry, one archive per architecture: openssh-client) */
+    ReadKeyArch(file, id, L"Url", c->Url, ARRAYSIZE(c->Url));
     if (!c->Name[0] && !c->Url[0]) return FALSE;                 /* no such section */
     StringCchCopyW(c->Id, ARRAYSIZE(c->Id), id);
     if (!c->Name[0]) StringCchCopyW(c->Name, ARRAYSIZE(c->Name), id);
-    ReadKey(file, id, L"Sha256", c->Sha256, ARRAYSIZE(c->Sha256));
-    ReadKey(file, id, L"Sha1", c->Sha1, ARRAYSIZE(c->Sha1));     /* optional, checked in addition to the SHA-256 */
-    ReadKey(file, id, L"FileName", c->FileName, ARRAYSIZE(c->FileName));
+    ReadKeyArch(file, id, L"Sha256", c->Sha256, ARRAYSIZE(c->Sha256));
+    ReadKeyArch(file, id, L"Sha1", c->Sha1, ARRAYSIZE(c->Sha1));     /* optional, checked in addition to the SHA-256 */
+    ReadKeyArch(file, id, L"FileName", c->FileName, ARRAYSIZE(c->FileName));
     if (!c->FileName[0]) StringCchPrintfW(c->FileName, ARRAYSIZE(c->FileName), L"%s.bin", id);
     ReadKeyArch(file, id, L"DetectReg", c->DetectReg, ARRAYSIZE(c->DetectReg));
     ReadKeyArch(file, id, L"DetectFile", c->DetectFile, ARRAYSIZE(c->DetectFile));
@@ -92,7 +99,7 @@ static BOOL LoadSection(LPCWSTR file, LPCWSTR id, FM_COMPONENT *c)
     ReadKey(file, id, L"Uninstall.x86", c->Uninstall, ARRAYSIZE(c->Uninstall));
 #endif
     if (!c->Uninstall[0]) ReadKey(file, id, L"Uninstall", c->Uninstall, ARRAYSIZE(c->Uninstall));
-    ReadKey(file, id, L"SizeBytes", tmp, ARRAYSIZE(tmp));
+    ReadKeyArch(file, id, L"SizeBytes", tmp, ARRAYSIZE(tmp));
     c->Size = tmp[0] ? _wcstoui64(tmp, NULL, 10) : 0;
     ReadKey(file, id, L"Default", tmp, ARRAYSIZE(tmp));
     c->Default = _wtoi(tmp) != 0;

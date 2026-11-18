@@ -317,6 +317,8 @@ int    FmNativeGuessInstaller(LPCWSTR path);           /* 0 unknown, 1 Inno Setu
 LPCWSTR FmNativeSilentSwitches(int type);
 int    FmNativeUninstallMain(int argc, WCHAR **argv);  /* featmgr /nat-uninstall <regname|-> <name> <tag> */
 int    FmNativeInstallMain(int argc, WCHAR **argv);    /* featmgr /nat-install <id> <file>  (natgen.c, featmgr.exe only) */
+int    FmZipMain(int argc, WCHAR **argv);              /* featmgr /zip-install <id> <zip> | /zip-uninstall <id>  (zipinst.c, featmgr.exe only) */
+BOOL   FmCompFilePath(LPWSTR out, DWORD cch);          /* the component list (components.ini) */
 /* The RAPPS online catalog, fetched by featmgr itself: the same address rapps used (rappmgr2.cab), certificate-pinned, the
  * entries (*.txt) extracted into %SystemRoot%\Featmgr\RappsDb\appdb. */
 #define FM_RAPPS_DB_URL L"https://rapps.reactos.org/rappmgr2.cab"
