@@ -584,7 +584,16 @@ static SECURITY_STATUS nego_client_final(NegoContext *ctx, const BYTE *in, ULONG
     if (resp.neg_state != SPNEGO_ACCEPT_COMPLETED) return SEC_E_INVALID_TOKEN;
     /* Windows completes without the server's mechListMIC (measured); with NTLM as the only mechanism offered there
      * is no list to protect. One that is present must be right; a token for the mechanism without one is refused
-     * (measured). */
+     * (measured).
+     *
+     * !!! WHEN A SECOND MECHANISM (KERBEROS, NEGOEX) IS ADDED TO nego_mech_oids THIS MUST CHANGE !!!
+     * RFC 4178 5: the mechListMIC may only be left out when the mechanism the acceptor chose is the initiator's first
+     * (preferred) one and the optimistic token was for it. Otherwise an attacker in the middle can strip the preferred
+     * mechanism from mechTypes and choose a weaker one, and only the MIC over the list as the client sent it shows
+     * that. The client must then require a valid server mechListMIC whenever the selected mechanism is not
+     * mechs[0] or the server answered request-mic, and must record which mechanism it actually got; the server side
+     * already requires the client's MIC in every case. Measure Windows' client with two mechanisms offered before
+     * deciding what it accepts there. */
     if (resp.has_response_token && !resp.has_mic) return SEC_E_INVALID_TOKEN;
     if (resp.has_mic)
     {
