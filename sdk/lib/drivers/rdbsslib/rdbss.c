@@ -3902,6 +3902,8 @@ RxCommonRead(
     PostRequest = FALSE;
     ReadCachingDisabled = FALSE;
     OwnerSet = FALSE;
+    RxContext->FcbResourceAcquired = FALSE;
+    RxContext->FcbPagingIoResourceAcquired = FALSE;
     ReadCachingEnabled = BooleanFlagOn(Fcb->FcbState, FCB_STATE_READCACHING_ENABLED);
     FileObject = Stack->FileObject;
     NetRoot = (PNET_ROOT)Fcb->pNetRoot;
@@ -4005,6 +4007,16 @@ RxCommonRead(
         RxItsTheSameContext();
 
         ReadCachingDisabled = (ReadCachingEnabled == FALSE);
+        /* What this read holds, for an asynchronous completion to release:
+         * nothing when the FCB caches reads (no lock was taken above) */
+        if (PagingIo)
+        {
+            RxContext->FcbPagingIoResourceAcquired = ReadCachingDisabled;
+        }
+        else
+        {
+            RxContext->FcbResourceAcquired = ReadCachingDisabled;
+        }
         if (IsPipe)
         {
             UNIMPLEMENTED;
@@ -8676,10 +8688,15 @@ RxLowIoReadShellCompletion(
 
     Stack = RxContext->CurrentIrpSp;
     IsPipe = BooleanFlagOn(RxContext->FlagsForLowIo, RXCONTEXT_FLAG4LOWIO_PIPE_OPERATION);
-    /* Release lock if required */
+    /* Release the lock RxCommonRead took, if it took one (a read of an FCB
+     * that caches reads takes none; this released it all the same:
+     * RESOURCE_NOT_OWNED, or a corrupted resource) */
     if (PagingIo)
     {
-        RxReleasePagingIoResourceForThread(RxContext, Fcb, LowIoContext->ResourceThreadId);
+        if (RxContext->FcbPagingIoResourceAcquired)
+        {
+            RxReleasePagingIoResourceForThread(RxContext, Fcb, LowIoContext->ResourceThreadId);
+        }
     }
     else
     {
@@ -8693,8 +8710,9 @@ RxLowIoReadShellCompletion(
         {
             RxResumeBlockedOperations_Serially(RxContext, &((PFOBX)RxContext->pFobx)->Specific.NamedPipe.ReadSerializationQueue);
         }
-        else
+        else if (RxContext->FcbResourceAcquired)
         {
+            RxContext->FcbResourceAcquired = FALSE;
             RxReleaseFcbForThread(RxContext, Fcb, LowIoContext->ResourceThreadId);
         }
     }
