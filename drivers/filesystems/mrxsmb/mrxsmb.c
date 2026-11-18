@@ -462,6 +462,12 @@ SmbCreateVNetRoot(PMRX_CREATENETROOT_CONTEXT Context)
         goto Done;
     }
 
+    /* The routine registered with SeRegisterLogonSessionTerminatedRoutine is called only for logon
+     * sessions marked for it: without this the engine never heard of a logoff */
+    if (!NT_SUCCESS(SeMarkLogonSessionForTerminationNotification(&VNetRoot->LogonId)))
+        DPRINT1("mrxsmb: logon %lx:%lx not marked for its termination notice\n",
+                VNetRoot->LogonId.HighPart, VNetRoot->LogonId.LowPart);
+
     ExAcquireFastMutex(&Ext->ConnectLock);
     Status = SmbConnect(VNetRoot, Ext, RxContext->CurrentIrp);
     ExReleaseFastMutex(&Ext->ConnectLock);
