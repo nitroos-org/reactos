@@ -14,23 +14,112 @@ BYTE gabMSGPmessages[UAHOWP_MAX_SIZE];
 BYTE gabDLGPmessages[UAHOWP_MAX_SIZE];
 BOOL g_bThemeHooksActive = FALSE;
 
-PWND_DATA ThemeGetWndData(HWND hWnd)
+/* The window contexts live in a process-wide table keyed by window handle,
+   not in window properties: properties are visible to EnumProps and to
+   GetProp/RemoveProp of the application, a context that Windows does not show
+   must not be listed there. */
+#define WND_DATA_BUCKETS 64
+
+static CRITICAL_SECTION g_WndDataLock;
+static PWND_DATA g_WndDataTable[WND_DATA_BUCKETS];
+static BOOL g_WndDataLockReady = FALSE;
+
+#define WND_DATA_BUCKET(hWnd) (((ULONG_PTR)(hWnd) >> 2) % WND_DATA_BUCKETS)
+
+void ThemeInitWndDataTable(void)
+{
+    InitializeCriticalSection(&g_WndDataLock);
+    g_WndDataLockReady = TRUE;
+}
+
+void ThemeDeleteWndDataTable(void)
+{
+    UINT i;
+    PWND_DATA pwndData, pNext;
+
+    if (!g_WndDataLockReady)
+        return;
+    g_WndDataLockReady = FALSE;
+
+    /* Contexts of windows that are still alive at process exit */
+    for (i = 0; i < WND_DATA_BUCKETS; i++)
+    {
+        for (pwndData = g_WndDataTable[i]; pwndData; pwndData = pNext)
+        {
+            pNext = pwndData->pNext;
+            HeapFree(GetProcessHeap(), 0, pwndData);
+        }
+        g_WndDataTable[i] = NULL;
+    }
+    DeleteCriticalSection(&g_WndDataLock);
+}
+
+PWND_DATA ThemeFindWndData(HWND hWnd)
 {
     PWND_DATA pwndData;
 
-    pwndData = (PWND_DATA)GetPropW(hWnd, (LPCWSTR)MAKEINTATOM(atWndContext));
-    if(pwndData == NULL)
-    {
-        pwndData = HeapAlloc(GetProcessHeap(),
-                            HEAP_ZERO_MEMORY,
-                            sizeof(WND_DATA));
-        if(pwndData == NULL)
-        {
-            return NULL;
-        }
+    if (!g_WndDataLockReady)
+        return NULL;
 
-        SetPropW( hWnd, (LPCWSTR)MAKEINTATOM(atWndContext), pwndData);
+    EnterCriticalSection(&g_WndDataLock);
+    for (pwndData = g_WndDataTable[WND_DATA_BUCKET(hWnd)]; pwndData; pwndData = pwndData->pNext)
+    {
+        if (pwndData->hWnd == hWnd)
+            break;
     }
+    LeaveCriticalSection(&g_WndDataLock);
+
+    return pwndData;
+}
+
+PWND_DATA ThemeGetWndData(HWND hWnd)
+{
+    PWND_DATA pwndData, *ppHead;
+
+    if (!g_WndDataLockReady)
+        return NULL;
+
+    EnterCriticalSection(&g_WndDataLock);
+    ppHead = &g_WndDataTable[WND_DATA_BUCKET(hWnd)];
+    for (pwndData = *ppHead; pwndData; pwndData = pwndData->pNext)
+    {
+        if (pwndData->hWnd == hWnd)
+            break;
+    }
+    if (pwndData == NULL)
+    {
+        pwndData = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(WND_DATA));
+        if (pwndData != NULL)
+        {
+            pwndData->hWnd = hWnd;
+            pwndData->pNext = *ppHead;
+            *ppHead = pwndData;
+        }
+    }
+    LeaveCriticalSection(&g_WndDataLock);
+
+    return pwndData;
+}
+
+/* Take the context of the window out of the table; the caller owns it afterwards */
+static PWND_DATA ThemeUnlinkWndData(HWND hWnd)
+{
+    PWND_DATA pwndData, *pp;
+
+    if (!g_WndDataLockReady)
+        return NULL;
+
+    EnterCriticalSection(&g_WndDataLock);
+    for (pp = &g_WndDataTable[WND_DATA_BUCKET(hWnd)]; (pwndData = *pp) != NULL; pp = &pwndData->pNext)
+    {
+        if (pwndData->hWnd == hWnd)
+        {
+            *pp = pwndData->pNext;
+            pwndData->pNext = NULL;
+            break;
+        }
+    }
+    LeaveCriticalSection(&g_WndDataLock);
 
     return pwndData;
 }
@@ -47,7 +136,7 @@ void ThemeDestroyWndData(HWND hWnd)
         return;
     }
 
-    pwndData = (PWND_DATA)GetPropW(hWnd, (LPCWSTR)MAKEINTATOM(atWndContext));
+    pwndData = ThemeFindWndData(hWnd);
     if(pwndData == NULL)
     {
         return;
@@ -60,7 +149,7 @@ void ThemeDestroyWndData(HWND hWnd)
 
     /* Claim the context: the hook cleanup can run in another thread of the
        process while the window's own thread handles WM_NCDESTROY */
-    pwndData = (PWND_DATA)RemovePropW(hWnd, (LPCWSTR)MAKEINTATOM(atWndContext));
+    pwndData = ThemeUnlinkWndData(hWnd);
     if(pwndData == NULL)
     {
         return;
@@ -231,7 +320,7 @@ int OnPostWinPosChanged(HWND hWnd, WINDOWPOS* pWinPos)
     if((style & WS_CAPTION)!=WS_CAPTION)
     {
         /* Drop the theme region once the caption is gone, e.g. when going fullscreen */
-        pwndData = (PWND_DATA)GetPropW(hWnd, (LPCWSTR)MAKEINTATOM(atWndContext));
+        pwndData = ThemeFindWndData(hWnd);
         if (pwndData && pwndData->HasThemeRgn && !pwndData->UpdatingRgn)
         {
             pwndData->HasThemeRgn = FALSE;
@@ -291,7 +380,7 @@ ThemeDefWindowProcW(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
     LRESULT lResult;
     DWORD dwLastError = GetLastError();
 
-    pwndData = (PWND_DATA)GetPropW(hWnd, (LPCWSTR)MAKEINTATOM(atWndContext));
+    pwndData = ThemeFindWndData(hWnd);
 
     if(!IsAppThemed() ||
        !(GetThemeAppProperties() & STAP_ALLOW_NONCLIENT) ||
@@ -321,7 +410,7 @@ ThemeDefWindowProcA(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
     LRESULT lResult;
     DWORD dwLastError = GetLastError();
 
-    pwndData = (PWND_DATA)GetPropW(hWnd, (LPCWSTR)MAKEINTATOM(atWndContext));
+    pwndData = ThemeFindWndData(hWnd);
 
     if(!IsAppThemed() ||
        !(GetThemeAppProperties() & STAP_ALLOW_NONCLIENT) ||
