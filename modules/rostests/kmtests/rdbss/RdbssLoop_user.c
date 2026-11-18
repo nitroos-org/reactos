@@ -1856,7 +1856,9 @@ EnvNumber(
  * inline, p = posted asynchronous read completed late, q = late asynchronous
  * read of an FCB that caches reads, l = latency of a
  * posted request behind a waiting lock (measurement), n = odd names,
- * m = image section of a share file, u = user buffers, b = break vs close */
+ * m = image section of a share file, u = user buffers, b = break vs close,
+ * w = a waiting lock does not stall other requests, and ends on cancel and
+ * on the cleanup of its handle */
 static
 BOOLEAN
 RaceSelected(
@@ -2373,6 +2375,228 @@ out:
     LoopOptions(FCB_ALL_CACHE, 0);
 }
 
+/* w: a waiting lock must not stall anybody else. One handle holds an
+ * exclusive lock; an overlapped lock of another handle waits for it (pending
+ * at the mini-redirector) for RDBSS_WL_SECS seconds (default 25; the
+ * loopback "server" gives up after 30). Meanwhile 3 threads, each on its own
+ * file, do overlapped lock/unlock pairs (which RDBSS posted to its FSP before
+ * the waiting lock went asynchronous) and overlapped unbuffered reads: every
+ * single operation must finish within 1 s. Then the waiting lock is
+ * cancelled (CancelIoEx), a second one ends with the cleanup of its handle,
+ * a third one is granted when the holder unlocks: each within 1 s */
+typedef struct _WL_WORKER
+{
+    ULONG Index;
+    DWORD Seconds;
+    ULONG Ops;
+    ULONG Failures;
+    DWORD MaxLatency;
+    PCWSTR MaxOp;
+} WL_WORKER, *PWL_WORKER;
+
+static
+BOOL
+WlWait(
+    _In_ HANDLE File,
+    _In_ BOOL Ok,
+    _Inout_ LPOVERLAPPED Ov)
+{
+    DWORD Done;
+
+    if (!Ok && GetLastError() == ERROR_IO_PENDING)
+        Ok = GetOverlappedResult(File, Ov, &Done, TRUE);
+    return Ok;
+}
+
+static
+DWORD
+WINAPI
+WlWorker(
+    _In_ PVOID Parameter)
+{
+    PWL_WORKER W = Parameter;
+    WCHAR U[MAX_PATH], Name[64];
+    HANDLE File;
+    OVERLAPPED Ov;
+    PUCHAR Data;
+    DWORD Start, T0, Latency;
+    ULONG i;
+
+    Data = VirtualAlloc(NULL, 4096, MEM_COMMIT, PAGE_READWRITE);
+    StringCchPrintfW(Name, RTL_NUMBER_OF(Name), L"race\\wl%lu.bin", W->Index);
+    File = CreateFileW(P(U, TRUE, Name), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                       CREATE_ALWAYS, FILE_FLAG_OVERLAPPED | FILE_FLAG_NO_BUFFERING, NULL);
+    if (File == INVALID_HANDLE_VALUE || Data == NULL)
+    {
+        W->Failures++;
+        return 1;
+    }
+    RtlZeroMemory(&Ov, sizeof(Ov));
+    Ov.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    for (i = 0; i < 16; ++i)
+    {
+        Ov.Offset = i * 4096;
+        ResetEvent(Ov.hEvent);
+        WlWait(File, WriteFile(File, Data, 4096, NULL, &Ov), &Ov);
+    }
+
+    Start = GetTickCount();
+    for (i = 0; GetTickCount() - Start < W->Seconds * 1000; ++i)
+    {
+        static const PCWSTR Names[] = { L"lock", L"unlock", L"read" };
+        ULONG k;
+
+        for (k = 0; k < 3; ++k)
+        {
+            BOOL Ok;
+
+            Ov.Offset = (i % 16) * 4096;
+            ResetEvent(Ov.hEvent);
+            T0 = GetTickCount();
+            if (k == 0)
+                Ok = WlWait(File, LockFileEx(File, LOCKFILE_EXCLUSIVE_LOCK, 0, 4096, 0, &Ov), &Ov);
+            else if (k == 1)
+                Ok = WlWait(File, UnlockFileEx(File, 0, 4096, 0, &Ov), &Ov);
+            else
+                Ok = WlWait(File, ReadFile(File, Data, 4096, NULL, &Ov), &Ov);
+            Latency = GetTickCount() - T0;
+            W->Ops++;
+            if (!Ok)
+                W->Failures++;
+            if (Latency > W->MaxLatency)
+            {
+                W->MaxLatency = Latency;
+                W->MaxOp = Names[k];
+            }
+        }
+    }
+    CloseHandle(Ov.hEvent);
+    CloseHandle(File);
+    VirtualFree(Data, 0, MEM_RELEASE);
+    return 0;
+}
+
+static
+VOID
+TestWaitingLockNoStall(VOID)
+{
+    WCHAR U[MAX_PATH], Env[16];
+    HANDLE Holder, Waiter, Threads[3];
+    OVERLAPPED HolderOv, LockOv;
+    WL_WORKER Workers[3];
+    LOOPRDR_COUNTERS Counters;
+    DWORD Seconds = 25, T0, Latency, Done;
+    ULONG i;
+    BOOL Ok;
+
+    if (GetEnvironmentVariableW(L"RDBSS_WL_SECS", Env, RTL_NUMBER_OF(Env)))
+        Seconds = wcstoul(Env, NULL, 10);
+    LoopOptions(0, 0);
+    Holder = CreateFileW(P(U, TRUE, L"race\\wlock.bin"), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                         NULL, CREATE_ALWAYS, FILE_FLAG_OVERLAPPED, NULL);
+    Waiter = CreateFileW(P(U, TRUE, L"race\\wlock.bin"), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                         NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
+    if (Holder == INVALID_HANDLE_VALUE || Waiter == INVALID_HANDLE_VALUE)
+    {
+        ok(FALSE, "opens failed: %lu\n", GetLastError());
+        goto out;
+    }
+    RtlZeroMemory(&HolderOv, sizeof(HolderOv));
+    RtlZeroMemory(&LockOv, sizeof(LockOv));
+    HolderOv.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    LockOv.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    ok(WlWait(Holder, LockFileEx(Holder, LOCKFILE_EXCLUSIVE_LOCK, 0, 4096, 0, &HolderOv), &HolderOv),
+       "holder lock: %lu\n", GetLastError());
+
+    /* The waiting lock */
+    Ok = LockFileEx(Waiter, LOCKFILE_EXCLUSIVE_LOCK, 0, 4096, 0, &LockOv);
+    ok(!Ok && GetLastError() == ERROR_IO_PENDING, "waiting lock: ok %d, error %lu (expected pending)\n", Ok, GetLastError());
+    Sleep(300);
+
+    /* Three other users of the redirector, on other files */
+    for (i = 0; i < 3; ++i)
+    {
+        RtlZeroMemory(&Workers[i], sizeof(Workers[i]));
+        Workers[i].Index = i;
+        Workers[i].Seconds = Seconds;
+        Workers[i].MaxOp = L"-";
+        Threads[i] = CreateThread(NULL, 0, WlWorker, &Workers[i], 0, NULL);
+    }
+    for (i = 0; i < 3; ++i)
+    {
+        if (Threads[i] != NULL)
+        {
+            WaitForSingleObject(Threads[i], (Seconds + 120) * 1000);
+            CloseHandle(Threads[i]);
+        }
+        trace("waiting lock: worker %lu: %lu operations, %lu failed, slowest %lu ms (%ls)\n", i, Workers[i].Ops,
+              Workers[i].Failures, Workers[i].MaxLatency, Workers[i].MaxOp);
+        ok(Workers[i].Ops > 0 && Workers[i].Failures == 0, "worker %lu: %lu operations, %lu failed\n", i,
+           Workers[i].Ops, Workers[i].Failures);
+        ok(Workers[i].MaxLatency < 1000, "worker %lu: an operation took %lu ms (%ls) behind a waiting lock\n", i,
+           Workers[i].MaxLatency, Workers[i].MaxOp);
+    }
+    ok(WaitForSingleObject(LockOv.hEvent, 0) == WAIT_TIMEOUT, "the waiting lock ended before it was cancelled\n");
+
+    /* CancelIoEx reaches the waiting lock */
+    T0 = GetTickCount();
+    HostileCancel(Waiter, &LockOv);
+    Ok = GetOverlappedResult(Waiter, &LockOv, &Done, TRUE);
+    Latency = GetTickCount() - T0;
+    trace("waiting lock: cancel done after %lu ms, ok %d, error %lu\n", Latency, Ok, Ok ? 0 : GetLastError());
+    ok(!Ok && GetLastError() == ERROR_OPERATION_ABORTED, "cancelled lock: ok %d, error %lu\n", Ok, GetLastError());
+    ok(Latency < 1000, "cancel took %lu ms\n", Latency);
+
+    /* Closing the handle ends a waiting lock */
+    ResetEvent(LockOv.hEvent);
+    Ok = LockFileEx(Waiter, LOCKFILE_EXCLUSIVE_LOCK, 0, 4096, 0, &LockOv);
+    ok(!Ok && GetLastError() == ERROR_IO_PENDING, "second waiting lock: ok %d, error %lu\n", Ok, GetLastError());
+    Sleep(300);
+    T0 = GetTickCount();
+    CloseHandle(Waiter);
+    Waiter = INVALID_HANDLE_VALUE;
+    ok(WaitForSingleObject(LockOv.hEvent, 5000) == WAIT_OBJECT_0, "lock not ended by the cleanup of its handle\n");
+    Latency = GetTickCount() - T0;
+    trace("waiting lock: ended %lu ms after CloseHandle, status %lx\n", Latency, (ULONG)LockOv.Internal);
+    ok(Latency < 1000, "close took %lu ms to end the waiting lock\n", Latency);
+    ok((ULONG)LockOv.Internal != 0, "a lock granted after the cleanup of its handle\n");
+
+    /* A waiting lock is granted when the holder unlocks */
+    Waiter = CreateFileW(P(U, TRUE, L"race\\wlock.bin"), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                         NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
+    ok(Waiter != INVALID_HANDLE_VALUE, "reopen: %lu\n", GetLastError());
+    if (Waiter != INVALID_HANDLE_VALUE)
+    {
+        ResetEvent(LockOv.hEvent);
+        Ok = LockFileEx(Waiter, LOCKFILE_EXCLUSIVE_LOCK, 0, 4096, 0, &LockOv);
+        ok(!Ok && GetLastError() == ERROR_IO_PENDING, "third waiting lock: ok %d, error %lu\n", Ok, GetLastError());
+        Sleep(300);
+        ResetEvent(HolderOv.hEvent);
+        T0 = GetTickCount();
+        ok(WlWait(Holder, UnlockFileEx(Holder, 0, 4096, 0, &HolderOv), &HolderOv), "holder unlock: %lu\n", GetLastError());
+        Ok = GetOverlappedResult(Waiter, &LockOv, &Done, TRUE);
+        Latency = GetTickCount() - T0;
+        trace("waiting lock: granted %lu ms after the unlock (ok %d)\n", Latency, Ok);
+        ok(Ok, "third waiting lock not granted: %lu\n", GetLastError());
+        ok(Latency < 1000, "grant took %lu ms\n", Latency);
+        ResetEvent(LockOv.hEvent);
+        ok(WlWait(Waiter, UnlockFileEx(Waiter, 0, 4096, 0, &LockOv), &LockOv), "unlock: %lu\n", GetLastError());
+    }
+    CloseHandle(HolderOv.hEvent);
+    CloseHandle(LockOv.hEvent);
+
+    LoopCounters(&Counters);
+    trace("waiting lock: pended %ld, granted %ld, cancelled %ld, timed out %ld, still pending %ld\n",
+          Counters.LocksPended, Counters.LocksPendingGranted, Counters.LocksPendingCancelled,
+          Counters.LocksPendingTimedOut, Counters.LocksPendingNow);
+    ok(Counters.LocksPendingNow == 0, "%ld locks still pending at the mini-redirector\n", Counters.LocksPendingNow);
+
+out:
+    if (Holder != INVALID_HANDLE_VALUE) CloseHandle(Holder);
+    if (Waiter != INVALID_HANDLE_VALUE) CloseHandle(Waiter);
+    LoopOptions(FCB_ALL_CACHE, 0);
+}
+
 /* Names the server-specs canonicalization walks to their last character:
  * short last components, dots, stream colons (with special pool on the RDBSS
  * tags, a read past the name stops the machine) */
@@ -2706,6 +2930,8 @@ START_TEST(RdbssRaces)
         TestCachedFcbAsyncRead();
     if (RaceSelected(L'l'))
         TestWaitingLockBlocksFsp();
+    if (RaceSelected(L'w'))
+        TestWaitingLockNoStall();
     if (RaceSelected(L'n'))
         TestOddNames();
     if (RaceSelected(L'm'))

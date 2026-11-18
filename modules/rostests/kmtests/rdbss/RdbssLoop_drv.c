@@ -420,6 +420,206 @@ LoopLockConflicts(
     return FALSE;
 }
 
+/* One attempt at a lock: STATUS_SUCCESS (inserted, Lock owned by the table),
+ * STATUS_FILE_CLOSED (Lock freed) or STATUS_LOCK_NOT_GRANTED (a conflict,
+ * Lock still the caller's) */
+static
+NTSTATUS
+LoopTryLock(
+    _In_ PLOOP_FCB Ext,
+    _In_ PLOOP_LOCK Lock)
+{
+    BOOLEAN Conflict = FALSE;
+    PLIST_ENTRY Entry;
+    PVOID Owner = Lock->Owner;
+
+    ExAcquireFastMutex(&LoopLockMutex);
+    for (Entry = Ext->Locks.Flink; Entry != &Ext->Locks; Entry = Entry->Flink)
+    {
+        PLOOP_LOCK Other = CONTAINING_RECORD(Entry, LOOP_LOCK, Links);
+
+        if (!LoopRangesOverlap(Other->Offset, Other->Length, Lock->Offset, Lock->Length))
+        {
+            continue;
+        }
+        /* Shared locks stack; anything exclusive conflicts, even for the
+         * same owner (NT semantics) unless both are shared */
+        if (Lock->Exclusive || Other->Exclusive)
+        {
+            Conflict = TRUE;
+            break;
+        }
+    }
+    /* The SRV_OPEN's server open may be gone while this lock waited (a
+     * delete-on-close cleanup releases it): a server refuses locks on a
+     * closed handle, and the lock would never be dropped */
+    if (!Conflict && (Owner == NULL || ((PMRX_SRV_OPEN)Owner)->Context == NULL ||
+                      LoopSrvOpen(Owner)->Handle == NULL))
+    {
+        ExReleaseFastMutex(&LoopLockMutex);
+        ExFreePoolWithTag(Lock, LOOP_TAG);
+        return STATUS_FILE_CLOSED;
+    }
+    if (!Conflict)
+    {
+        InsertTailList(&Ext->Locks, &Lock->Links);
+        ExReleaseFastMutex(&LoopLockMutex);
+        CountUp(Locks);
+        return STATUS_SUCCESS;
+    }
+    ExReleaseFastMutex(&LoopLockMutex);
+    return STATUS_LOCK_NOT_GRANTED;
+}
+
+/* ---------------------------------------------------------------------- */
+/* Asynchronous waiting locks: what a network mini-redirector does with a  */
+/* lock the server holds back (MS Learn, RxLowIoCompletion and             */
+/* RxSetMinirdrCancelRoutine): answer STATUS_PENDING, keep a cancel routine */
+/* for the wait, call RxLowIoCompletion when the "server" answers. Here    */
+/* one thread of the test driver polls the pending locks every 50 ms and   */
+/* gives up after 30 s, as the synchronous wait does.                      */
+/* ---------------------------------------------------------------------- */
+
+typedef struct _LOOP_PENDING_LOCK
+{
+    LIST_ENTRY Links;       /* LoopPendingLocks, under LoopPendingMutex */
+    PRX_CONTEXT RxContext;
+    PLOOP_FCB Ext;
+    PLOOP_LOCK Lock;
+    ULONG Polls;
+    BOOLEAN Cancelled;
+} LOOP_PENDING_LOCK, *PLOOP_PENDING_LOCK;
+
+static LIST_ENTRY LoopPendingLocks;
+static FAST_MUTEX LoopPendingMutex;
+static KEVENT LoopPendingWake;
+static PVOID LoopPendingThread;
+static volatile LONG LoopPendingStop;
+
+/* MRx cancel routine of a pending lock (RDBSS: CancelIo, or the cleanup of
+ * the handle). The request may already be answered: then it is not found */
+static
+NTSTATUS
+NTAPI
+LoopCancelPendingLock(
+    _Inout_ PRX_CONTEXT RxContext)
+{
+    PLIST_ENTRY Entry;
+    BOOLEAN Found = FALSE;
+
+    ExAcquireFastMutex(&LoopPendingMutex);
+    for (Entry = LoopPendingLocks.Flink; Entry != &LoopPendingLocks; Entry = Entry->Flink)
+    {
+        PLOOP_PENDING_LOCK Item = CONTAINING_RECORD(Entry, LOOP_PENDING_LOCK, Links);
+
+        if (Item->RxContext == RxContext)
+        {
+            Item->Cancelled = TRUE;
+            Found = TRUE;
+            break;
+        }
+    }
+    ExReleaseFastMutex(&LoopPendingMutex);
+    if (Found)
+    {
+        KeSetEvent(&LoopPendingWake, IO_NO_INCREMENT, FALSE);
+    }
+    return STATUS_SUCCESS;
+}
+
+static
+VOID
+NTAPI
+LoopPendingLockThread(
+    _In_ PVOID Context)
+{
+    LARGE_INTEGER Period;
+
+    UNREFERENCED_PARAMETER(Context);
+    Period.QuadPart = -500000LL;
+
+    for (;;)
+    {
+        LIST_ENTRY Done;
+        PLIST_ENTRY Entry, Next;
+        BOOLEAN Stop;
+
+        KeWaitForSingleObject(&LoopPendingWake, Executive, KernelMode, FALSE, &Period);
+        KeClearEvent(&LoopPendingWake);
+        Stop = (LoopPendingStop != 0);
+
+        InitializeListHead(&Done);
+        ExAcquireFastMutex(&LoopPendingMutex);
+        for (Entry = LoopPendingLocks.Flink; Entry != &LoopPendingLocks; Entry = Next)
+        {
+            PLOOP_PENDING_LOCK Item = CONTAINING_RECORD(Entry, LOOP_PENDING_LOCK, Links);
+            NTSTATUS Status;
+
+            Next = Entry->Flink;
+            if (Item->Cancelled || Stop)
+            {
+                Status = STATUS_CANCELLED;
+            }
+            else
+            {
+                Status = LoopTryLock(Item->Ext, Item->Lock);
+                if (Status == STATUS_LOCK_NOT_GRANTED && ++Item->Polls <= 600)
+                {
+                    continue;
+                }
+            }
+            if (Status == STATUS_SUCCESS)
+            {
+                CountUp(LocksPendingGranted);
+            }
+            else if (Status == STATUS_CANCELLED)
+            {
+                CountUp(LocksPendingCancelled);
+            }
+            else if (Status == STATUS_LOCK_NOT_GRANTED)
+            {
+                CountUp(LocksPendingTimedOut);
+            }
+            if (Status != STATUS_SUCCESS && Status != STATUS_FILE_CLOSED)
+            {
+                ExFreePoolWithTag(Item->Lock, LOOP_TAG);
+            }
+            Item->Lock = NULL;
+            Item->RxContext->IoStatusBlock.Status = Status;
+            RemoveEntryList(&Item->Links);
+            InsertTailList(&Done, &Item->Links);
+        }
+        ExReleaseFastMutex(&LoopPendingMutex);
+
+        /* Answered outside the list lock: the completion runs the RDBSS
+         * completion routine and completes the IRP in this thread */
+        while (!IsListEmpty(&Done))
+        {
+            PLOOP_PENDING_LOCK Item = CONTAINING_RECORD(RemoveHeadList(&Done), LOOP_PENDING_LOCK, Links);
+            PRX_CONTEXT RxContext = Item->RxContext;
+
+            ExFreePoolWithTag(Item, LOOP_TAG);
+            RxSetMinirdrCancelRoutine(RxContext, NULL);
+            RxContext->IoStatusBlock.Information = 0;
+            CountDown(LocksPendingNow);
+            CountUp(AsyncCompletions);
+            RxLowIoCompletion(RxContext);
+        }
+
+        if (Stop)
+        {
+            ExAcquireFastMutex(&LoopPendingMutex);
+            Stop = IsListEmpty(&LoopPendingLocks);
+            ExReleaseFastMutex(&LoopPendingMutex);
+            if (Stop)
+            {
+                break;
+            }
+        }
+    }
+    PsTerminateSystemThread(STATUS_SUCCESS);
+}
+
 static
 NTSTATUS
 LoopLockRange(
@@ -451,50 +651,53 @@ LoopLockRange(
 
     for (Tries = 0; ; ++Tries)
     {
-        BOOLEAN Conflict = FALSE;
-        PLIST_ENTRY Entry;
+        NTSTATUS Status;
         LARGE_INTEGER Delay;
 
-        ExAcquireFastMutex(&LoopLockMutex);
-        for (Entry = Ext->Locks.Flink; Entry != &Ext->Locks; Entry = Entry->Flink)
+        Status = LoopTryLock(Ext, Lock);
+        if (Status != STATUS_LOCK_NOT_GRANTED)
         {
-            PLOOP_LOCK Other = CONTAINING_RECORD(Entry, LOOP_LOCK, Links);
-
-            if (!LoopRangesOverlap(Other->Offset, Other->Length, Offset, Length))
-            {
-                continue;
-            }
-            /* Shared locks stack; anything exclusive conflicts, even for the
-             * same owner (NT semantics) unless both are shared */
-            if (Exclusive || Other->Exclusive)
-            {
-                Conflict = TRUE;
-                break;
-            }
+            return Status;
         }
-        /* The SRV_OPEN's server open may be gone while this lock waited (a
-         * delete-on-close cleanup releases it): a server refuses locks on a
-         * closed handle, and the lock would never be dropped */
-        if (!Conflict && (Owner == NULL || ((PMRX_SRV_OPEN)Owner)->Context == NULL ||
-                          LoopSrvOpen(Owner)->Handle == NULL))
-        {
-            ExReleaseFastMutex(&LoopLockMutex);
-            ExFreePoolWithTag(Lock, LOOP_TAG);
-            return STATUS_FILE_CLOSED;
-        }
-        if (!Conflict)
-        {
-            InsertTailList(&Ext->Locks, &Lock->Links);
-            ExReleaseFastMutex(&LoopLockMutex);
-            CountUp(Locks);
-            return STATUS_SUCCESS;
-        }
-        ExReleaseFastMutex(&LoopLockMutex);
 
         if (FailImmediately || Tries > 600)
         {
             ExFreePoolWithTag(Lock, LOOP_TAG);
             return STATUS_LOCK_NOT_GRANTED;
+        }
+
+        /* An asynchronous request: the "server" answers later */
+        if (BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_ASYNC_OPERATION) && LoopPendingThread != NULL)
+        {
+            PLOOP_PENDING_LOCK Item;
+
+            Item = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Item), LOOP_TAG);
+            if (Item == NULL)
+            {
+                ExFreePoolWithTag(Lock, LOOP_TAG);
+                return STATUS_INSUFFICIENT_RESOURCES;
+            }
+            Item->RxContext = RxContext;
+            Item->Ext = Ext;
+            Item->Lock = Lock;
+            Item->Polls = 0;
+            Item->Cancelled = FALSE;
+
+            /* Listed before the cancel routine is set, so that a cancel
+             * that comes right after finds it. Already cancelled: the
+             * thread answers it (STATUS_CANCELLED); it may even have answered
+             * it before this returns, which RDBSS allows for STATUS_PENDING */
+            CountUp(LocksPended);
+            CountUp(LocksPendingNow);
+            ExAcquireFastMutex(&LoopPendingMutex);
+            InsertTailList(&LoopPendingLocks, &Item->Links);
+            ExReleaseFastMutex(&LoopPendingMutex);
+            if (RxSetMinirdrCancelRoutine(RxContext, LoopCancelPendingLock) == STATUS_CANCELLED)
+            {
+                LoopCancelPendingLock(RxContext);
+            }
+            KeSetEvent(&LoopPendingWake, IO_NO_INCREMENT, FALSE);
+            return STATUS_PENDING;
         }
 
         /* A waiting lock: poll every 50 ms, for at most 30 s */
@@ -2716,6 +2919,11 @@ DriverEntry(
     InitializeListHead(&LoopFcbList);
     ExInitializeFastMutex(&LoopPagingMutex);
     KeInitializeEvent(&LoopBreakAckEvent, NotificationEvent, FALSE);
+    InitializeListHead(&LoopPendingLocks);
+    ExInitializeFastMutex(&LoopPendingMutex);
+    KeInitializeEvent(&LoopPendingWake, NotificationEvent, FALSE);
+    LoopPendingStop = 0;
+    LoopPendingThread = NULL;
     RtlZeroMemory(&LoopCounters, sizeof(LoopCounters));
     LoopRoot.Length = 0;
     LoopRoot.Buffer = LoopRootBuffer;
@@ -2760,6 +2968,23 @@ DriverEntry(
     }
     DriverObject->DriverUnload = LoopUnload;
 
+    /* The "server" side of asynchronous waiting locks. Without it, they
+     * wait synchronously in the submitting thread (as before) */
+    {
+        HANDLE Thread;
+
+        if (NT_SUCCESS(PsCreateSystemThread(&Thread, THREAD_ALL_ACCESS, NULL, NULL, NULL,
+                                            LoopPendingLockThread, NULL)))
+        {
+            if (!NT_SUCCESS(ObReferenceObjectByHandle(Thread, SYNCHRONIZE, *PsThreadType, KernelMode,
+                                                      &LoopPendingThread, NULL)))
+            {
+                LoopPendingThread = NULL;
+            }
+            ZwClose(Thread);
+        }
+    }
+
     return STATUS_SUCCESS;
 }
 
@@ -2774,6 +2999,16 @@ LoopUnload(
 
     RtlInitUnicodeString(&DosName, LOOPRDR_DOS_NAME);
     IoDeleteSymbolicLink(&DosName);
+
+    /* The pending-lock thread answers what is left (STATUS_CANCELLED) and ends */
+    if (LoopPendingThread != NULL)
+    {
+        InterlockedExchange(&LoopPendingStop, 1);
+        KeSetEvent(&LoopPendingWake, IO_NO_INCREMENT, FALSE);
+        KeWaitForSingleObject(LoopPendingThread, Executive, KernelMode, FALSE, NULL);
+        ObDereferenceObject(LoopPendingThread);
+        LoopPendingThread = NULL;
+    }
 
     /* Stop if the test did not: RxStopMinirdr wants the FSP */
     RxContext = RxCreateRxContext(NULL, LoopDeviceObject, RX_CONTEXT_FLAG_IN_FSP | RX_CONTEXT_FLAG_WAIT);

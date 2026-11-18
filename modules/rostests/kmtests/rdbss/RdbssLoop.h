@@ -119,6 +119,11 @@ typedef struct _LOOPRDR_COUNTERS
     LONG BreaksInClose;
     LONG SlowConnects;
     LONG LeakedServerLocks; /* server locks still held when their FCB went away */
+    LONG LocksPended;       /* asynchronous waiting locks answered STATUS_PENDING */
+    LONG LocksPendingGranted;
+    LONG LocksPendingCancelled;
+    LONG LocksPendingTimedOut;
+    LONG LocksPendingNow;   /* waiting in the mini-redirector right now */
 } LOOPRDR_COUNTERS, *PLOOPRDR_COUNTERS;
 
 #endif /* _RDBSSLOOP_H_ */
