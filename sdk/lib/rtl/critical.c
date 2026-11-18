@@ -37,6 +37,56 @@ extern HANDLE LdrpShutdownThreadId;
     (((CriticalSection)->DebugInfo != NULL) && \
      ((CriticalSection)->DebugInfo != LongToPtr(-1)))
 
+/*
+ * LockCount holds the state of the section as on Windows Server 2003 SP1
+ * and later: bit 0 is set while the section is free, bit 1 is set while no
+ * woken waiter is on its way back, and every waiting thread subtracts 4.
+ * -1 is a free section nobody waits for, -2 an owned one (the owner's
+ * recursion is in RecursionCount only); see RTLP_CS_* in rtlp.h.
+ *
+ * Leaving frees the section before it wakes a waiter, and the woken thread
+ * competes for it with the running ones. Ownership is not handed to a
+ * waiter that is not running yet: with that, the section stays owned for
+ * the time a wake-up takes, every thread arriving meanwhile has to wait and
+ * be woken in turn as well, and a section that many threads use stays in
+ * that state (a lock convoy) until they stop using it.
+ */
+
+/* Take the section if it is free, starting from the value Old read from LockCount.
+   TRUE when the caller now owns it. */
+FORCEINLINE
+BOOLEAN
+RtlpTryTakeCriticalSectionFrom(
+    _Inout_ PRTL_CRITICAL_SECTION CriticalSection,
+    _In_ LONG Old)
+{
+    LONG Previous;
+
+    while (Old & RTLP_CS_FREE)
+    {
+        Previous = InterlockedCompareExchange(&CriticalSection->LockCount,
+                                              Old - RTLP_CS_FREE,
+                                              Old);
+        if (Previous == Old)
+            return TRUE;
+        Old = Previous;
+    }
+
+    return FALSE;
+}
+
+/* Take the section if it is free. TRUE when the caller now owns it. */
+FORCEINLINE
+BOOLEAN
+RtlpTryTakeCriticalSection(
+    _Inout_ PRTL_CRITICAL_SECTION CriticalSection)
+{
+    /* The usual case first, with no load before the CAS: free, nobody waiting */
+    LONG Old = InterlockedCompareExchange(&CriticalSection->LockCount, -2, -1);
+
+    return (Old == -1) || RtlpTryTakeCriticalSectionFrom(CriticalSection, Old);
+}
+
 /*++
  * RtlpCreateCriticalSectionSem
  *
@@ -103,7 +153,8 @@ RtlpCreateCriticalSectionSem(PRTL_CRITICAL_SECTION CriticalSection)
 /*++
  * RtlpWaitForCriticalSection
  *
- *     Slow path of RtlEnterCriticalSection. Waits on an Event Object.
+ *     Slow path of RtlEnterCriticalSection. Waits on an Event Object
+ *     until a leaving thread wakes this one.
  *
  * Params:
  *     CriticalSection - Critical section to acquire.
@@ -112,7 +163,9 @@ RtlpCreateCriticalSectionSem(PRTL_CRITICAL_SECTION CriticalSection)
  *     STATUS_SUCCESS, or raises an exception if a deadlock is occuring.
  *
  * Remarks:
- *     None
+ *     The caller is counted as a waiter in LockCount. Being woken does not
+ *     give it the section: it tries to take it again (see
+ *     RtlpEnterCriticalSectionContended).
  *
  *--*/
 NTSTATUS
@@ -130,17 +183,6 @@ RtlpWaitForCriticalSection(PRTL_CRITICAL_SECTION CriticalSection)
 
     if (CRITSECT_HAS_DEBUG_INFO(CriticalSection))
         CriticalSection->DebugInfo->EntryCount++;
-
-    /*
-     * If we're shutting down the process, we're allowed to acquire any
-     * critical sections by force (the loader lock in particular)
-     */
-    if (LdrpShutdownInProgress &&
-        LdrpShutdownThreadId == NtCurrentTeb()->RealClientId.UniqueThread)
-    {
-        DPRINT("Forcing ownership of critical section %p\n", CriticalSection);
-        return STATUS_SUCCESS;
-    }
 
     /* Do we have an Event yet? */
     if (!CriticalSection->LockSemaphore)
@@ -191,6 +233,13 @@ RtlpWaitForCriticalSection(PRTL_CRITICAL_SECTION CriticalSection)
 
             /* One more try */
             LastChance = TRUE;
+        }
+        else if (!NT_SUCCESS(Status))
+        {
+            /* The section is broken (e.g. an invalid event handle): waiting
+               again would fail again, so raise the status as Windows does */
+            DPRINT1("Waiting for critical section %p failed: 0x%08lx\n", CriticalSection, Status);
+            RtlRaiseStatus(Status);
         }
         else
         {
@@ -479,6 +528,85 @@ RtlSetCriticalSectionSpinCount(PRTL_CRITICAL_SECTION CriticalSection,
     return OldCount;
 }
 
+/*
+ * Slow path of RtlEnterCriticalSection: another thread owns the section.
+ * Returns once the calling thread owns it.
+ */
+static
+VOID
+RtlpEnterCriticalSectionContended(
+    _Inout_ PRTL_CRITICAL_SECTION CriticalSection)
+{
+    ULONG_PTR Spin;
+    LONG Old, New;
+    BOOLEAN Woken = FALSE;
+
+    /*
+     * If we're shutting down the process, we're allowed to acquire any
+     * critical sections by force (the loader lock in particular): its owner
+     * is gone. The section stays owned, now by this thread, and is freed
+     * when this thread leaves it.
+     */
+    if (LdrpShutdownInProgress &&
+        LdrpShutdownThreadId == NtCurrentTeb()->RealClientId.UniqueThread)
+    {
+        DPRINT("Forcing ownership of critical section %p\n", CriticalSection);
+        return;
+    }
+
+    /*
+     * On a multiprocessor the owner is usually about to leave (short hold
+     * times), so poll for the release for up to the section's spin count
+     * before paying for a kernel wait and wake-up. The spin count is zero
+     * on a uniprocessor.
+     */
+    Spin = CriticalSection->SpinCount & ~RTL_CRITICAL_SECTION_ALL_FLAG_BITS;
+    while (Spin)
+    {
+        /* Only a free section is tried: a CAS on an owned one would pull its cache line away from the owner */
+        Old = *(volatile LONG *)&CriticalSection->LockCount;
+        if (RtlpTryTakeCriticalSectionFrom(CriticalSection, Old))
+        {
+            return;
+        }
+        YieldProcessor();
+        Spin--;
+    }
+
+    for (;;)
+    {
+        /*
+         * Take the section if it is free, else count this thread as a waiter.
+         * A thread that was woken also sets the no-woken-waiter bit again, so
+         * that the next leaving thread wakes another waiter.
+         */
+        Old = *(volatile LONG *)&CriticalSection->LockCount;
+        if (Old & RTLP_CS_FREE)
+            New = Old - RTLP_CS_FREE;
+        else
+            New = Old - RTLP_CS_WAITER;
+        if (Woken)
+            New += RTLP_CS_NOT_WOKEN;
+
+        if (InterlockedCompareExchange(&CriticalSection->LockCount, New, Old) != Old)
+            continue;
+
+        if (Old & RTLP_CS_FREE)
+            return;
+
+        /* NOTE - CriticalSection->OwningThread can be NULL here because
+                  changing this information is not serialized. This
+                  happens when thread a acquires the lock and thread b
+                  tries to acquire it as well but thread a hasn't had a
+                  chance to set the OwningThread! So it's not an error
+                  when OwningThread is NULL here! */
+
+        /* Wait until a leaving thread wakes this one, then try again */
+        RtlpWaitForCriticalSection(CriticalSection);
+        Woken = TRUE;
+    }
+}
+
 /*++
  * RtlEnterCriticalSection
  * @implemented NT4
@@ -500,10 +628,9 @@ NTAPI
 RtlEnterCriticalSection(PRTL_CRITICAL_SECTION CriticalSection)
 {
     HANDLE Thread = (HANDLE)NtCurrentTeb()->ClientId.UniqueThread;
-    ULONG_PTR Spin;
 
-    /* Fast path: an unowned section (LockCount == -1) is taken in one step */
-    if (InterlockedCompareExchange(&CriticalSection->LockCount, 0, -1) != -1)
+    /* Fast path: a free section is taken in one step */
+    if (!RtlpTryTakeCriticalSection(CriticalSection))
     {
         /* Does this thread already own it? Only the owner ever stores its own id here. */
         if (Thread == CriticalSection->OwningThread)
@@ -511,52 +638,17 @@ RtlEnterCriticalSection(PRTL_CRITICAL_SECTION CriticalSection)
             /*
              * You own it, so you'll get it when you're done with it! No need
              * to use the interlocked functions for the recursion count as only
-             * the thread who already owns the lock can modify this data, but
-             * LockCount must be bumped, as Leave drops it again.
+             * the thread who already owns the lock can modify this data.
+             * LockCount does not count recursion.
              */
-            InterlockedIncrement(&CriticalSection->LockCount);
             CriticalSection->RecursionCount++;
             return STATUS_SUCCESS;
         }
 
-        /*
-         * Somebody else owns it. On a multiprocessor the owner is usually
-         * about to leave (short hold times), so poll for the release for up
-         * to the section's spin count before paying for a kernel wait and
-         * wake-up. A spinner does not touch LockCount, so Leave is unchanged
-         * and the waiters already queued on the event keep their turn: the
-         * section is only taken here when it is free with nobody waiting.
-         * The spin count is zero on a uniprocessor.
-         */
-        Spin = CriticalSection->SpinCount & ~RTL_CRITICAL_SECTION_ALL_FLAG_BITS;
-        while (Spin)
-        {
-            if ((CriticalSection->LockCount == -1) &&
-                (InterlockedCompareExchange(&CriticalSection->LockCount, 0, -1) == -1))
-            {
-                goto Owned;
-            }
-            YieldProcessor();
-            Spin--;
-        }
-
-        /* Register as a waiter; if the owner left meanwhile this takes the lock */
-        if (InterlockedIncrement(&CriticalSection->LockCount) != 0)
-        {
-            /* NOTE - CriticalSection->OwningThread can be NULL here because
-                      changing this information is not serialized. This
-                      happens when thread a acquires the lock (LockCount == 0)
-                      and thread b tries to acquire it as well (LockCount == 1)
-                      but thread a hasn't had a chance to set the
-                      OwningThread! So it's not an error when OwningThread is
-                      NULL here! */
-
-            /* We don't own it, so we must wait for it */
-            RtlpWaitForCriticalSection(CriticalSection);
-        }
+        /* Somebody else owns it */
+        RtlpEnterCriticalSectionContended(CriticalSection);
     }
 
-Owned:
     /*
      * Lock successful. Changing this information has not to be serialized
      * because only one thread at a time can actually change it (the one who
@@ -862,11 +954,13 @@ RtlLeaveCriticalSection(PRTL_CRITICAL_SECTION CriticalSection)
             DPRINT1("CRITICAL SECTION MESS: Section %p is not acquired!\n", CriticalSection);
             return STATUS_UNSUCCESSFUL;
         }
-        /* Someone still owns us, but we are free. This needs to be done atomically. */
-        InterlockedDecrement(&CriticalSection->LockCount);
+        /* We still own it: LockCount does not count recursion */
     }
     else
     {
+        LONG Old, New, Previous;
+        BOOLEAN Wake;
+
         /*
          * Nobody owns us anymore. No need to do this atomically.
          * See comment above.
@@ -874,10 +968,32 @@ RtlLeaveCriticalSection(PRTL_CRITICAL_SECTION CriticalSection)
         CriticalSection->OwningThread = 0;
         NtCurrentTeb()->CountOfOwnedCriticalSections--;
 
-        /* Was someone wanting us? This needs to be done atomically. */
-        if (-1 != InterlockedDecrement(&CriticalSection->LockCount))
+        /*
+         * Free the section. If threads wait and none of them has been woken
+         * yet, take one off the count of waiters and wake it: it competes for
+         * the section when it runs. A woken thread that has not come back yet
+         * is enough, it wakes no other.
+         */
+        /* The usual case first: owned, nobody waiting (no load before the CAS) */
+        Old = InterlockedCompareExchange(&CriticalSection->LockCount, -1, -2);
+        if (Old == -2)
+            return STATUS_SUCCESS;
+
+        for (;;)
         {
-            /* Let him have us */
+            Wake = (((ULONG)~Old >> 2) != 0) && (Old & RTLP_CS_NOT_WOKEN);
+            New = Old + RTLP_CS_FREE;
+            if (Wake)
+                New += RTLP_CS_WAITER - RTLP_CS_NOT_WOKEN;
+
+            Previous = InterlockedCompareExchange(&CriticalSection->LockCount, New, Old);
+            if (Previous == Old)
+                break;
+            Old = Previous;
+        }
+
+        if (Wake)
+        {
             RtlpUnWaitCriticalSection(CriticalSection);
         }
     }
@@ -907,7 +1023,7 @@ NTAPI
 RtlTryEnterCriticalSection(PRTL_CRITICAL_SECTION CriticalSection)
 {
     /* Try to take control */
-    if (InterlockedCompareExchange(&CriticalSection->LockCount, 0, -1) == -1)
+    if (RtlpTryTakeCriticalSection(CriticalSection))
     {
         /* It's ours */
         CriticalSection->OwningThread = NtCurrentTeb()->ClientId.UniqueThread;
@@ -917,8 +1033,7 @@ RtlTryEnterCriticalSection(PRTL_CRITICAL_SECTION CriticalSection)
     }
     else if (CriticalSection->OwningThread == NtCurrentTeb()->ClientId.UniqueThread)
     {
-        /* It's already ours */
-        InterlockedIncrement(&CriticalSection->LockCount);
+        /* It's already ours; LockCount does not count recursion */
         CriticalSection->RecursionCount++;
         return TRUE;
     }

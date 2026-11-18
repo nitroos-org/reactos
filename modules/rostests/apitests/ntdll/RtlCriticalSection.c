@@ -380,6 +380,100 @@ Test_Acquire(void)
     WaitForSingleObject(hThread2, INFINITE);
 }
 
+static volatile LONG g_WakeWaiterOwned;
+
+static
+DWORD
+WINAPI
+WakeWaiterProc(
+    _In_ PVOID Param)
+{
+    RtlEnterCriticalSection(&CritSect);
+    InterlockedExchange(&g_WakeWaiterOwned, 1);
+    RtlLeaveCriticalSection(&CritSect);
+    return 0;
+}
+
+/*
+ * Leaving a section that a thread waits for frees it before the waiter runs:
+ * the leaving thread can take it again at once, and the woken waiter, finding
+ * it owned, waits again until the next leave.
+ * Both threads run on the first processor, the waiter at a lower priority, so
+ * that the waiter cannot run between the leave and the TryEnter.
+ */
+static
+void
+Test_FreeThenWake(void)
+{
+    HANDLE hThread;
+    DWORD_PTR OldMask;
+    int OldPriority;
+    BOOL Owned;
+    LONG Before;
+    ULONG i;
+
+    RtlInitializeCriticalSection(&CritSect);
+    g_WakeWaiterOwned = 0;
+
+    OldMask = SetThreadAffinityMask(GetCurrentThread(), 1);
+    OldPriority = GetThreadPriority(GetCurrentThread());
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+
+    RtlEnterCriticalSection(&CritSect);
+    Before = CritSect.LockCount;
+    hThread = CreateThread(NULL, 0, WakeWaiterProc, NULL, CREATE_SUSPENDED, NULL);
+    ok(hThread != NULL, "CreateThread failed: %lu\n", GetLastError());
+    if (hThread == NULL)
+    {
+        RtlLeaveCriticalSection(&CritSect);
+        goto Cleanup;
+    }
+    SetThreadAffinityMask(hThread, 1);
+    SetThreadPriority(hThread, THREAD_PRIORITY_LOWEST);
+    ResumeThread(hThread);
+
+    // Wait up to 10 s for the waiter to block (LockCount changes when it counts itself)
+    for (i = 0; (CritSect.LockCount == Before) && (i < 1000); i++)
+    {
+        Sleep(10);
+    }
+    Sleep(50);
+    ok_long(CritSect.LockCount, -6);
+
+    // Free, a waiter woken and not back yet, no waiter left in the count
+    RtlLeaveCriticalSection(&CritSect);
+    ok_long(CritSect.LockCount, -3);
+
+    Owned = RtlTryEnterCriticalSection(&CritSect);
+    ok(Owned, "The section was not free after the leave\n");
+    if (Owned)
+    {
+        ok_long(CritSect.LockCount, -4);
+        ok_ptr(CritSect.OwningThread, UlongToHandle(GetCurrentThreadId()));
+
+        // Let the woken waiter run: it finds the section owned and waits again
+        for (i = 0; (CritSect.LockCount == -4) && (i < 1000); i++)
+        {
+            Sleep(10);
+        }
+        ok_long(CritSect.LockCount, -6);
+        ok_long(g_WakeWaiterOwned, 0);
+        RtlLeaveCriticalSection(&CritSect);
+    }
+
+    ok(WaitForSingleObject(hThread, 10000) == WAIT_OBJECT_0, "The waiter did not finish\n");
+    ok_long(g_WakeWaiterOwned, 1);
+    ok_long(CritSect.LockCount, -1);
+    ok_long(CritSect.RecursionCount, 0);
+    ok_ptr(CritSect.OwningThread, NULL);
+    CloseHandle(hThread);
+
+Cleanup:
+    SetThreadPriority(GetCurrentThread(), OldPriority);
+    SetThreadAffinityMask(GetCurrentThread(), OldMask);
+    RtlDeleteCriticalSection(&CritSect);
+}
+
 START_TEST(RtlCriticalSection)
 {
     HMODULE hmodNtDll = GetModuleHandleA("ntdll.dll");
@@ -408,4 +502,5 @@ START_TEST(RtlCriticalSection)
 
     Test_Init();
     Test_Acquire();
+    Test_FreeThenWake();
 }
