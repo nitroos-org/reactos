@@ -1041,7 +1041,12 @@ session_setup_cb(struct smb2_context *smb2, int status,
 #endif
 
 
-        if (smb2->sign || smb2->seal || smb2->dialect == SMB2_VERSION_0311) {
+        /* NitroOS: every SMB 3.x session derives its keys (was: only 3.1.1,
+         * or when signing or sealing was asked for). A share that requires
+         * encryption tells us so only at TREE_CONNECT, and a 3.0 / 3.0.2
+         * session without keys then failed: "Share requires encryption but
+         * dialect 0x0300 has no encryption keys". */
+        if (smb2->sign || smb2->seal || smb2->dialect >= SMB2_VERSION_0300) {
                 uint8_t zero_key[SMB2_KEY_SIZE] = {0};
                 int have_valid_session_key = 1;
 
@@ -2763,6 +2768,23 @@ stat_unref(struct smb2_context *smb2, struct stat_cb_data *stat_data)
  * here. This query is compounded ahead of the FILE_ALL_INFORMATION one
  * so that the tag is already known when we build the stat structure.
  */
+/* NitroOS: whether a reply with this status was parsed as the command's
+ * own reply, so that command_data is that reply and may carry an allocated
+ * output buffer: the rule of smb2_is_error_response() in pdu.c. Any other
+ * status hands the callback an error reply (struct smb2_error_reply). */
+static int
+smb2_reply_was_parsed(int status)
+{
+        if ((uint32_t)status == SMB2_STATUS_MORE_PROCESSING_REQUIRED) {
+                return 1;
+        }
+        if (((uint32_t)status & SMB2_STATUS_SEVERITY_MASK) ==
+            SMB2_STATUS_SEVERITY_ERROR) {
+                return 0;
+        }
+        return (uint32_t)status != SMB2_STATUS_STOPPED_ON_SYMLINK;
+}
+
 static void
 stat_attribute_tag_cb(struct smb2_context *smb2, int status,
                       void *command_data, void *private_data)
@@ -2784,6 +2806,12 @@ stat_attribute_tag_cb(struct smb2_context *smb2, int status,
                         smb2_free_data(smb2, tag);
                 }
         }
+        /* NitroOS: a warning status (e.g. BUFFER_OVERFLOW) still carries a
+         * parsed reply; its buffer was leaked here */
+        else if (rep != NULL && smb2_reply_was_parsed(status) &&
+                 rep->output_buffer) {
+                smb2_free_data(smb2, rep->output_buffer);
+        }
         stat_unref(smb2, stat_data);
 }
 
@@ -2803,6 +2831,11 @@ fstat_cb_1(struct smb2_context *smb2, int status,
                 smb2_set_nterror(smb2, stat_data->status, "Query info failed with "
                                  "(0x%08x) %s", stat_data->status,
                                  nterror_to_str(stat_data->status));
+                /* NitroOS: a warning status still carries a parsed reply */
+                if (rep != NULL && smb2_reply_was_parsed(status) &&
+                    rep->output_buffer) {
+                        smb2_free_data(smb2, rep->output_buffer);
+                }
                 stat_unref(smb2, stat_data);
                 return;
         }
@@ -2934,6 +2967,11 @@ getinfo_cb_2(struct smb2_context *smb2, int status,
                 stat_data->status = status;
         }
         if (stat_data->status != SMB2_STATUS_SUCCESS) {
+                /* NitroOS: a warning status still carries a parsed reply */
+                if (rep != NULL && smb2_reply_was_parsed(status) &&
+                    rep->output_buffer) {
+                        smb2_free_data(smb2, rep->output_buffer);
+                }
                 stat_unref(smb2, stat_data);
                 return;
         }

@@ -254,6 +254,10 @@ inline int writev(t_socket sock, struct iovec *iov, int nvecs)
   if (res == 0) {
     return (int)ret;
   }
+  /* NitroOS: smb2_write_to_socket() tests errno, Winsock reports through
+   * WSAGetLastError(): a full send buffer (WSAEWOULDBLOCK) was taken for a
+   * broken connection and every write larger than the buffer failed */
+  errno = WSAGetLastError() == WSAEWOULDBLOCK ? EAGAIN : WSAGetLastError();
   return -1;
 }
 

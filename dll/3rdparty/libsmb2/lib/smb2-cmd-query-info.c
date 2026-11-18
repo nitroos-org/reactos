@@ -54,6 +54,7 @@
 #include "smb2.h"
 #include "libsmb2.h"
 #include "libsmb2-private.h"
+#include "libsmb2-raw.h" /* NitroOS: smb2_free_data() for the decode failure path */
 
 int
 smb2_encode_query_info_request(struct smb2_context *smb2,
@@ -468,7 +469,7 @@ int smb2_process_query_info_variable(struct smb2_context *smb2,
                                 smb2_set_error(smb2, "could not decode file "
                                                "all info. %s",
                                                smb2_get_error(smb2));
-                                return -1;
+                                goto failed;
                         }
                         break;
                 case SMB2_FILE_ALTERNATE_NAME_INFORMATION:
@@ -484,7 +485,7 @@ int smb2_process_query_info_variable(struct smb2_context *smb2,
                                 smb2_set_error(smb2, "could not decode file "
                                                "attribute tag info. %s",
                                                smb2_get_error(smb2));
-                                return -1;
+                                goto failed;
                         }
                         break;
                 case SMB2_FILE_BASIC_INFORMATION:
@@ -497,7 +498,7 @@ int smb2_process_query_info_variable(struct smb2_context *smb2,
                                 smb2_set_error(smb2, "could not decode file "
                                                "basic info. %s",
                                                smb2_get_error(smb2));
-                                return -1;
+                                goto failed;
                         }
                         break;
                 case SMB2_FILE_COMPRESSION_INFORMATION:
@@ -520,7 +521,7 @@ int smb2_process_query_info_variable(struct smb2_context *smb2,
                                 smb2_set_error(smb2, "could not decode file "
                                                "network open info. %s",
                                                smb2_get_error(smb2));
-                                return -1;
+                                goto failed;
                         }
                         break;
                 case SMB2_FILE_NORMALIZED_NAME_INFORMATION:
@@ -533,7 +534,7 @@ int smb2_process_query_info_variable(struct smb2_context *smb2,
                                 smb2_set_error(smb2, "could not decode file "
                                                "normalized name info. %s",
                                                smb2_get_error(smb2));
-                                return -1;
+                                goto failed;
                         }
                         break;
                 case SMB2_FILE_PIPE_INFORMATION:
@@ -553,7 +554,7 @@ int smb2_process_query_info_variable(struct smb2_context *smb2,
                                 smb2_set_error(smb2, "could not decode file "
                                                "positiion info. %s",
                                                smb2_get_error(smb2));
-                                return -1;
+                                goto failed;
                         }
                         break;
                 case SMB2_FILE_STANDARD_INFORMATION:
@@ -567,7 +568,7 @@ int smb2_process_query_info_variable(struct smb2_context *smb2,
                                 smb2_set_error(smb2, "could not decode file "
                                                "standard info. %s",
                                                smb2_get_error(smb2));
-                                return -1;
+                                goto failed;
                         }
                         break;
                 case SMB2_FILE_STREAM_INFORMATION:
@@ -581,7 +582,7 @@ int smb2_process_query_info_variable(struct smb2_context *smb2,
                                 smb2_set_error(smb2, "could not decode file "
                                                "stream info. %s",
                                                smb2_get_error(smb2));
-                                return -1;
+                                goto failed;
                         }
                         break;
                 case SMB2_FILE_INFO_CLASS_RESERVED:
@@ -603,7 +604,7 @@ int smb2_process_query_info_variable(struct smb2_context *smb2,
                                 smb2_set_error(smb2, "could not decode file "
                                                "fs attribute info. %s",
                                                smb2_get_error(smb2));
-                                return -1;
+                                goto failed;
                         }
                         break;
                 case SMB2_FILE_FS_CONTROL_INFORMATION:
@@ -617,7 +618,7 @@ int smb2_process_query_info_variable(struct smb2_context *smb2,
                                 smb2_set_error(smb2, "could not decode file "
                                                "fs control info. %s",
                                                smb2_get_error(smb2));
-                                return -1;
+                                goto failed;
                         }
                         break;
                 case SMB2_FILE_FS_DEVICE_INFORMATION:
@@ -631,7 +632,7 @@ int smb2_process_query_info_variable(struct smb2_context *smb2,
                                 smb2_set_error(smb2, "could not decode file "
                                                "fs device info. %s",
                                                smb2_get_error(smb2));
-                                return -1;
+                                goto failed;
                         }
                         break;
                 case SMB2_FILE_FS_FULL_SIZE_INFORMATION:
@@ -645,7 +646,7 @@ int smb2_process_query_info_variable(struct smb2_context *smb2,
                                 smb2_set_error(smb2, "could not decode file "
                                                "fs full size info. %s",
                                                smb2_get_error(smb2));
-                                return -1;
+                                goto failed;
                         }
                         break;
                 case SMB2_FILE_FS_OBJECT_ID_INFORMATION:
@@ -659,7 +660,7 @@ int smb2_process_query_info_variable(struct smb2_context *smb2,
                                 smb2_set_error(smb2, "could not decode file "
                                                "object id info. %s",
                                                smb2_get_error(smb2));
-                                return -1;
+                                goto failed;
                         }
                         break;
                 case SMB2_FILE_FS_SECTOR_SIZE_INFORMATION:
@@ -673,7 +674,7 @@ int smb2_process_query_info_variable(struct smb2_context *smb2,
                                 smb2_set_error(smb2, "could not decode file "
                                                "fs sector size info. %s",
                                                smb2_get_error(smb2));
-                                return -1;
+                                goto failed;
                         }
                         break;
                 case SMB2_FILE_FS_SIZE_INFORMATION:
@@ -687,7 +688,7 @@ int smb2_process_query_info_variable(struct smb2_context *smb2,
                                 smb2_set_error(smb2, "could not decode file "
                                                "fs size info. %s",
                                                smb2_get_error(smb2));
-                                return -1;
+                                goto failed;
                         }
                         break;
                 case SMB2_FILE_FS_VOLUME_INFORMATION:
@@ -701,7 +702,7 @@ int smb2_process_query_info_variable(struct smb2_context *smb2,
                                 smb2_set_error(smb2, "could not decode file "
                                                "fs volume info. %s",
                                                smb2_get_error(smb2));
-                                return -1;
+                                goto failed;
                         }
                         break;
                 default:
@@ -723,7 +724,7 @@ int smb2_process_query_info_variable(struct smb2_context *smb2,
                         smb2_set_error(smb2, "could not decode security "
                                        "descriptor. %s",
                                        smb2_get_error(smb2));
-                        return -1;
+                        goto failed;
                 }
                 break;
         case SMB2_0_INFO_QUOTA:
@@ -753,6 +754,11 @@ int smb2_process_query_info_variable(struct smb2_context *smb2,
 
         rep->output_buffer = ptr;
         return 0;
+
+        /* NitroOS: a reply that does not decode used to leak the buffer */
+failed:
+        smb2_free_data(smb2, ptr);
+        return -1;
 }
 
 #define IOVREQ_OFFSET_QUERY (req->input_buffer_offset - SMB2_HEADER_SIZE - \
