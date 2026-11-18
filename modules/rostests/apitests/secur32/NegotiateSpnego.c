@@ -407,7 +407,7 @@ static void check_messages(CtxtHandle *a, CtxtHandle *b, BOOL seal, const char *
     data[1] ^= 1;
     st = VerifySignature(b, &d, 0, &qop);
     ok(st == SEC_E_MESSAGE_ALTERED, "%s: altered message: 0x%08lx\n", what, (unsigned long)st);
-    if (!seal) return;
+    /* sealing works whether or not CONFIDENTIALITY was negotiated (Windows, measured) */
     for (i = 0; i < 3; i++)
     {
         memset(data, 'A' + i, sizeof(data));

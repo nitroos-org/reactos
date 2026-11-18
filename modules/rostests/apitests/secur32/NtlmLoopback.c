@@ -188,6 +188,25 @@ static void check_seal(CtxtHandle *a, CtxtHandle *b, const char *what)
     }
 }
 
+static void check_no_seal(CtxtHandle *a, CtxtHandle *b, const char *what)
+{
+    BYTE data[100], plain[100], sig[16];
+    SecBuffer bufs[2];
+    SecBufferDesc desc;
+    SECURITY_STATUS st;
+
+    memset(data, 'q', sizeof(data));
+    memcpy(plain, data, sizeof(data));
+    desc.ulVersion = SECBUFFER_VERSION; desc.cBuffers = 2; desc.pBuffers = bufs;
+    bufs[0].BufferType = SECBUFFER_DATA; bufs[0].pvBuffer = data; bufs[0].cbBuffer = sizeof(data);
+    bufs[1].BufferType = SECBUFFER_TOKEN; bufs[1].pvBuffer = sig; bufs[1].cbBuffer = sizeof(sig);
+    st = EncryptMessage(a, 0, &desc, 0);
+    ok(st == SEC_E_UNSUPPORTED_FUNCTION, "%s: EncryptMessage: 0x%08lx\n", what, (unsigned long)st);
+    ok(!memcmp(data, plain, sizeof(data)), "%s: the data was changed\n", what);
+    st = DecryptMessage(b, &desc, 0, NULL);
+    ok(st == SEC_E_UNSUPPORTED_FUNCTION, "%s: DecryptMessage: 0x%08lx\n", what, (unsigned long)st);
+}
+
 static void test_exchange(CredHandle *cc, CredHandle *sc, ULONG creq, ULONG sreq, BOOL sign, BOOL seal)
 {
     CtxtHandle cctx, sctx;
@@ -292,10 +311,17 @@ static void test_exchange(CredHandle *cc, CredHandle *sc, ULONG creq, ULONG sreq
         check_signature(&cctx, &sctx, "client to server");
         check_signature(&sctx, &cctx, "server to client");
     }
-    if (seal)
+    if (sign || seal)
     {
-        check_seal(&cctx, &sctx, "client to server");
-        check_seal(&sctx, &cctx, "server to client");
+        /* EncryptMessage seals whether or not SEAL was negotiated (Windows, measured: the peer decrypts it) */
+        check_seal(&cctx, &sctx, seal ? "client to server" : "client to server, sealing not negotiated");
+        check_seal(&sctx, &cctx, seal ? "server to client" : "server to client, sealing not negotiated");
+    }
+    else
+    {
+        /* nothing keyed was negotiated: Windows answers SEC_E_UNSUPPORTED_FUNCTION (measured) */
+        check_no_seal(&cctx, &sctx, "client to server, nothing negotiated");
+        check_no_seal(&sctx, &cctx, "server to client, nothing negotiated");
     }
 
     DeleteSecurityContext(&cctx);
