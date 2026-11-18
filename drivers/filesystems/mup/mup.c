@@ -2291,6 +2291,9 @@ CreateRedirectedFile(PIRP Irp,
     PVOID InputBuffer;
     ULONG InputLength, IoctlCode;
     PDEVICE_OBJECT ProviderDevice;
+    PDEVICE_OBJECT QueryDevice = NULL;
+    PFILE_OBJECT QueryFile = NULL;
+    BOOLEAN QueryByDevice;
 
     /* We cannot open a file without a name */
     if (FileObject->FileName.Length == 0)
@@ -2471,13 +2474,31 @@ CreateRedirectedFile(PIRP Irp,
                 ++UncProvider->NodeReferences;
                 Referenced = TRUE;
 
+                /* Read the provider's device (and file object) under the lock and keep a reference
+                 * for the query: a provider deregistering meanwhile clears and releases them
+                 * (MupCloseUncProvider), and only the node is kept alive by its reference */
+                QueryDevice = NULL;
+                QueryFile = NULL;
+                QueryByDevice = FALSE;
+                if (UncProvider->Registered && UncProvider->DeviceObject != NULL)
+                {
+                    QueryByDevice = UncProvider->ByDeviceObject;
+                    QueryDevice = UncProvider->DeviceObject;
+                    ObReferenceObject(QueryDevice);
+                    if (!QueryByDevice && UncProvider->FileObject != NULL)
+                    {
+                        QueryFile = UncProvider->FileObject;
+                        ObReferenceObject(QueryFile);
+                    }
+                }
+
                 ExReleaseResourceLite(&MupGlobalLock);
                 Locked = FALSE;
 
                 /* We will obviously only query registered providers */
-                if (UncProvider->Registered)
+                if (QueryDevice != NULL)
                 {
-                    if (UncProvider->ByDeviceObject)
+                    if (QueryByDevice)
                     {
                         PQUERY_PATH_REQUEST_EX QueryPathRequestEx;
                         ULONG RequestOffset = ROUND_UP(sizeof(QUERY_PATH_RESPONSE), sizeof(PVOID));
@@ -2541,8 +2562,8 @@ CreateRedirectedFile(PIRP Irp,
                     QueryContext->QueryPathRequest = QueryPathRequest;
 
                     /* Build our IRP for the query */
-                    QueryIrp = MupBuildIoControlRequest(UncProvider->DeviceObject,
-                                                        UncProvider->FileObject,
+                    QueryIrp = MupBuildIoControlRequest(QueryDevice,
+                                                        QueryFile,
                                                         QueryContext,
                                                         IRP_MJ_DEVICE_CONTROL,
                                                         IoctlCode,
@@ -2573,8 +2594,19 @@ CreateRedirectedFile(PIRP Irp,
 
                     /* Query the provider !*/
                     DPRINT("Requesting UNC provider: %wZ\n", &UncProvider->DeviceName);
-                    DPRINT("Calling: %wZ\n", &UncProvider->DeviceObject->DriverObject->DriverName);
-                    Status = IoCallDriver(UncProvider->DeviceObject, QueryIrp);
+                    DPRINT("Calling: %wZ\n", &QueryDevice->DriverObject->DriverName);
+                    Status = IoCallDriver(QueryDevice, QueryIrp);
+                }
+
+                if (QueryFile != NULL)
+                {
+                    ObDereferenceObject(QueryFile);
+                    QueryFile = NULL;
+                }
+                if (QueryDevice != NULL)
+                {
+                    ObDereferenceObject(QueryDevice);
+                    QueryDevice = NULL;
                 }
 
                 ExAcquireResourceExclusiveLite(&MupGlobalLock, TRUE);
@@ -2598,6 +2630,15 @@ CreateRedirectedFile(PIRP Irp,
             if (_SEH2_AbnormalTermination())
             {
                 MasterQueryContext->LatestStatus = STATUS_INSUFFICIENT_RESOURCES;
+            }
+
+            if (QueryFile != NULL)
+            {
+                ObDereferenceObject(QueryFile);
+            }
+            if (QueryDevice != NULL)
+            {
+                ObDereferenceObject(QueryDevice);
             }
 
             if (Referenced)
