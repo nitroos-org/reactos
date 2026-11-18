@@ -2755,13 +2755,48 @@ RxCommonDevFCBClose(
     return Status;
 }
 
+/*
+ * @implemented
+ *
+ * FSCTLs sent to the device itself (\Device\<minirdr> opened without a
+ * name): user requests go to MRxDevFcbXXXControlFile, like device IOCTLs.
+ */
 NTSTATUS
 NTAPI
 RxCommonDevFCBFsCtl(
     PRX_CONTEXT Context)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    NTSTATUS Status;
+    PIO_STACK_LOCATION Stack;
+
+    PAGED_CODE();
+
+    Stack = Context->CurrentIrpSp;
+    DPRINT("RxCommonDevFCBFsCtl(%p) Minor: %x, Code: %lx\n", Context, Stack->MinorFunction,
+           Stack->Parameters.FileSystemControl.FsControlCode);
+
+    if (Context->pFobx != NULL)
+    {
+        return STATUS_INVALID_HANDLE;
+    }
+
+    if (Stack->MinorFunction != IRP_MN_USER_FS_REQUEST && Stack->MinorFunction != IRP_MN_TRACK_LINK)
+    {
+        return STATUS_INVALID_DEVICE_REQUEST;
+    }
+
+    Context->LowIoContext.ParamsFor.FsCtl.MinorFunction = Stack->MinorFunction;
+    Context->LowIoContext.ParamsFor.FsCtl.FsControlCode = Stack->Parameters.FileSystemControl.FsControlCode;
+
+    Status = RxXXXControlFileCallthru(Context);
+    if (Status != STATUS_PENDING && Context->PostRequest)
+    {
+        Context->ResumeRoutine = RxCommonDevFCBFsCtl;
+        Status = RxFsdPostRequest(Context);
+    }
+
+    DPRINT("Status: %lx\n", Status);
+    return Status;
 }
 
 /*
@@ -2804,13 +2839,19 @@ RxCommonDevFCBIoCtl(
     return Status;
 }
 
+/*
+ * @implemented
+ */
 NTSTATUS
 NTAPI
 RxCommonDevFCBQueryVolInfo(
     PRX_CONTEXT Context)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PAGED_CODE();
+
+    /* Not a request the device itself (opened without a file name) serves */
+    UNREFERENCED_PARAMETER(Context);
+    return STATUS_INVALID_DEVICE_REQUEST;
 }
 
 /*
@@ -2883,21 +2924,39 @@ RxCommonDirectoryControl(
     return Status;
 }
 
+/*
+ * @implemented
+ */
 NTSTATUS
 NTAPI
 RxCommonDispatchProblem(
     PRX_CONTEXT Context)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PAGED_CODE();
+
+    /* Not a request the device itself (opened without a file name) serves */
+    UNREFERENCED_PARAMETER(Context);
+    return STATUS_INVALID_DEVICE_REQUEST;
 }
 
+/*
+ * @implemented
+ *
+ * IRP_MJ_FILE_SYSTEM_CONTROL on a file or directory: user requests go to the
+ * mini-redirector through LOWIO_OP_FSCTL (RxLowIoPopulateFsctlInfo maps the
+ * buffers by transfer method). For METHOD_NEITHER the buffers are the
+ * requestor's own pointers (RequestorMode tells whether to probe them): the
+ * mini-redirector must treat them as untrusted. Mount and verify requests do
+ * not apply to a network file system.
+ */
 NTSTATUS
 NTAPI
 RxCommonFileSystemControl(
     PRX_CONTEXT Context)
 {
     PIRP Irp;
+    PFCB Fcb;
+    NTSTATUS Status;
     ULONG ControlCode;
     PIO_STACK_LOCATION Stack;
 
@@ -2905,12 +2964,32 @@ RxCommonFileSystemControl(
 
     Irp = Context->CurrentIrp;
     Stack = Context->CurrentIrpSp;
+    Fcb = (PFCB)Context->pFcb;
     ControlCode = Stack->Parameters.FileSystemControl.FsControlCode;
 
-    DPRINT1("RxCommonFileSystemControl: %p, %p, %d, %lx\n", Context, Irp, Stack->MinorFunction, ControlCode);
+    DPRINT("RxCommonFileSystemControl: %p, %p, %d, %lx\n", Context, Irp, Stack->MinorFunction, ControlCode);
 
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    if (Stack->MinorFunction != IRP_MN_USER_FS_REQUEST)
+    {
+        return STATUS_INVALID_DEVICE_REQUEST;
+    }
+
+    if (NodeType(Fcb) != RDBSS_NTC_STORAGE_TYPE_FILE && NodeType(Fcb) != RDBSS_NTC_STORAGE_TYPE_DIRECTORY &&
+        NodeType(Fcb) != RDBSS_NTC_STORAGE_TYPE_UNKNOWN)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    RxInitializeLowIoContext(&Context->LowIoContext, LOWIO_OP_FSCTL);
+    Status = RxLowIoSubmit(Context, RxLowIoIoCtlShellCompletion);
+    if (Status == STATUS_PENDING)
+    {
+        /* The completion owns the IRP: drop the dispatcher's reference */
+        RxDereferenceAndDeleteRxContext_Real(Context);
+    }
+
+    DPRINT("Status: %lx\n", Status);
+    return Status;
 }
 
 /*
@@ -8570,8 +8649,10 @@ RxPostStackOverflowRead (
 {
     PAGED_CODE();
 
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    /* Too little stack left for a read (paging I/O nested deep in another
+     * file system, typically): run it from the FSP, which starts fresh */
+    RxContext->ResumeRoutine = RxCommonRead;
+    return RxFsdPostRequest(RxContext);
 }
 
 /*
@@ -10536,8 +10617,14 @@ RxSystemControl(
     IN PRDBSS_DEVICE_OBJECT RxDeviceObject,
     IN PIRP Irp)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    NTSTATUS Status;
+
+    /* No WMI provider here and no lower device to pass the request to:
+     * complete it untouched, as WMI expects from such a driver (it used to
+     * be left pending for ever) */
+    Status = Irp->IoStatus.Status;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return Status;
 }
 
 /*
