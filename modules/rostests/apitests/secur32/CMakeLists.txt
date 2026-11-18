@@ -15,6 +15,7 @@ list(APPEND SOURCE
     NtlmConcurrent.c
     NtlmLocalCall.c
     NtlmLoopback.c
+    NtlmSignatureBytes.c
     testlist.c)
 
 add_executable(secur32_apitest ${SOURCE})

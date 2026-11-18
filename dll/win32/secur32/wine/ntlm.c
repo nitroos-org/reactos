@@ -2129,7 +2129,8 @@ SECURITY_STATUS SEC_ENTRY ntlm_VerifySignature(PCtxtHandle phContext,
     SECURITY_STATUS ret;
     SecBufferDesc local_desc;
     PSecBuffer     local_buff;
-    BYTE          local_sig[16];
+    BYTE          local_sig[16], diff = 0;
+    const BYTE    *expect, *got;
 
     TRACE("%p %p %d %p\n", phContext, pMessage, MessageSeqNo, pfQOP);
     if(!phContext)
@@ -2151,6 +2152,8 @@ SECURITY_STATUS SEC_ENTRY ntlm_VerifySignature(PCtxtHandle phContext,
     TRACE("Negotiated flags: 0x%08x\n", helper->neg_flags);
 
     local_buff = HeapAlloc(GetProcessHeap(), 0, pMessage->cBuffers * sizeof(SecBuffer));
+    if (!local_buff)
+        return SEC_E_INSUFFICIENT_MEMORY;
 
     local_desc.ulVersion = SECBUFFER_VERSION;
     local_desc.cBuffers = pMessage->cBuffers;
@@ -2173,13 +2176,32 @@ SECURITY_STATUS SEC_ENTRY ntlm_VerifySignature(PCtxtHandle phContext,
     }
 
     if((ret = ntlm_CreateSignature(helper, &local_desc, token_idx, NTLM_RECV, TRUE)) != SEC_E_OK)
+    {
+        HeapFree(GetProcessHeap(), 0, local_buff);
         return ret;
+    }
 
-    if(memcmp(((PBYTE)local_buff[token_idx].pvBuffer) + 8,
-                ((PBYTE)pMessage->pBuffers[token_idx].pvBuffer) + 8, 8))
-        ret = SEC_E_MESSAGE_ALTERED;
+    expect = local_buff[token_idx].pvBuffer;
+    got = pMessage->pBuffers[token_idx].pvBuffer;
+    if (helper->neg_flags & NTLMSSP_NEGOTIATE_NTLM2 && helper->neg_flags & NTLMSSP_NEGOTIATE_SIGN)
+    {
+        /* [MS-NLMP] 2.2.2.9.2: version (4 bytes), checksum (8: the first half of the HMAC-MD5, RC4-sealed with key
+         * exchange), sequence number (4). Every byte counts, as on Windows (measured, Server 2022, each byte flipped
+         * in turn, and several at once): a wrong version is SEC_E_INVALID_TOKEN, else a wrong checksum
+         * SEC_E_MESSAGE_ALTERED, else a wrong sequence number SEC_E_OUT_OF_SEQUENCE. Comparing from byte 8 left half
+         * of the checksum unchecked. */
+        for (i = 4; i < 12; i++) diff |= expect[i] ^ got[i];
+        if (memcmp(expect, got, 4)) ret = SEC_E_INVALID_TOKEN;
+        else if (diff) ret = SEC_E_MESSAGE_ALTERED;
+        else if (memcmp(expect + 12, got + 12, 4)) ret = SEC_E_OUT_OF_SEQUENCE;
+        else ret = SEC_E_OK;
+    }
     else
-        ret = SEC_E_OK;
+    {
+        /* [MS-NLMP] 2.2.2.9.1: bytes 4-7 are the random pad, not checked */
+        for (i = 8; i < 16; i++) diff |= expect[i] ^ got[i];
+        ret = diff ? SEC_E_MESSAGE_ALTERED : SEC_E_OK;
+    }
 
     HeapFree(GetProcessHeap(), 0, local_buff);
 
