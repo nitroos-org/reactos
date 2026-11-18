@@ -38,6 +38,7 @@ KMT_TESTFUNC Test_MmMapLockedPagesProcessExit;
 KMT_TESTFUNC Test_MmMapLockedPagesSpecifyCache;
 KMT_TESTFUNC Test_MmPager;
 KMT_TESTFUNC Test_MmSpecialPoolUser;
+KMT_TESTFUNC Test_MupProvider;
 KMT_TESTFUNC Test_NtCreateSection;
 KMT_TESTFUNC Test_NtSystemDebugControl;
 KMT_TESTFUNC Test_PoIrp;
@@ -91,6 +92,7 @@ const KMT_TEST TestList[] =
     { "MmMapLockedPagesSpecifyCache", Test_MmMapLockedPagesSpecifyCache },
     { "MmPager",                      Test_MmPager },
     { "MmSpecialPoolUser",            Test_MmSpecialPoolUser },
+    { "MupProvider",                  Test_MupProvider },
     { "NtCreateSection",              Test_NtCreateSection },
     { "NtSystemDebugControl",         Test_NtSystemDebugControl },
     { "PoIrp",                        Test_PoIrp },
