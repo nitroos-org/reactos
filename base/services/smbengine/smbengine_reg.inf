@@ -1,7 +1,8 @@
 ; SMB client engine service: own process, LocalService, demand start (nothing starts it at boot).
 ; Starting it starts mrxsmb (DependOnService). Recovery: restart after 1 s, 5 s, 30 s; an error exit
-; counts as a failure (FailureActionsOnNonCrashFailures). RequiredPrivileges and ServiceSidType are
-; recorded for the service controller; it does not apply them to the process token yet.
+; counts as a failure (FailureActionsOnNonCrashFailures). The service controller applies ServiceSidType
+; and RequiredPrivileges to the process token: NT SERVICE\smbengine (the only account besides SYSTEM that
+; mrxsmb lets open the engine device) and no privileges but these two.
 [AddReg]
 HKLM,"SYSTEM\CurrentControlSet\Services\smbengine","Description",0x00000000,"Makes the SMB connections of the SMB client for each signed-in user. Started on demand."
 HKLM,"SYSTEM\CurrentControlSet\Services\smbengine","DisplayName",0x00000000,"SMB Client Engine"
