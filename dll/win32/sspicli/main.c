@@ -55,6 +55,9 @@ SECURITY_STATUS SEC_ENTRY SspiEncodeStringsAsAuthIdentity(
     if (creds) size += (len_password + 1) * sizeof(WCHAR);
     if (!(id = calloc( 1, size ))) return ERROR_OUTOFMEMORY;
     ptr = (WCHAR *)(id + 1);
+    /* the strings are UTF-16: the SSPs read them by the flag (System.Net.Security hands this identity to
+     * AcquireCredentialsHandle for every explicit credential) */
+    id->Flags = SEC_WINNT_AUTH_IDENTITY_UNICODE;
 
     if (username)
     {

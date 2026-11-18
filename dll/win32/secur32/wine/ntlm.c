@@ -2433,7 +2433,43 @@ SECURITY_STATUS SEC_ENTRY ntlm_DecryptMessage(PCtxtHandle phContext,
         return TOKEN_FAIL();
 
     if((token_idx = ntlm_GetTokenBufferIndex(pMessage)) == -1)
-        return TOKEN_FAIL();
+    {
+        /* The message as one SECBUFFER_STREAM (the signature, then the data) and a DATA buffer that is to point at the
+         * data in it: how System.Net.Security reads every message (NegotiateAuthenticationPal.UnwrapInPlace). */
+        SecBuffer parts[2];
+        SecBufferDesc split;
+        BYTE *stream;
+        ULONG stream_len;
+        UINT i;
+
+        for (i = 0; i < pMessage->cBuffers; i++)
+            if (pMessage->pBuffers[i].BufferType == SECBUFFER_STREAM) break;
+        if (i == pMessage->cBuffers)
+            return TOKEN_FAIL();
+        if((data_idx = ntlm_GetDataBufferIndex(pMessage)) == -1)
+            return TOKEN_FAIL();
+        stream = pMessage->pBuffers[i].pvBuffer;
+        stream_len = pMessage->pBuffers[i].cbBuffer;
+        if (!stream || stream_len < 16)
+            return TOKEN_FAIL();   /* VERIFY ON PEER: the status of a stream shorter than a signature */
+
+        parts[0].BufferType = SECBUFFER_TOKEN;
+        parts[0].pvBuffer = stream;
+        parts[0].cbBuffer = 16;
+        parts[1].BufferType = SECBUFFER_DATA;
+        parts[1].pvBuffer = stream + 16;
+        parts[1].cbBuffer = stream_len - 16;
+        split.ulVersion = SECBUFFER_VERSION;
+        split.cBuffers = 2;
+        split.pBuffers = parts;
+        ret = ntlm_DecryptMessage(phContext, &split, MessageSeqNo, pfQOP);
+        if (ret == SEC_E_OK)
+        {
+            pMessage->pBuffers[data_idx].pvBuffer = stream + 16;
+            pMessage->pBuffers[data_idx].cbBuffer = stream_len - 16;
+        }
+        return ret;
+    }
 
     if((data_idx = ntlm_GetDataBufferIndex(pMessage)) ==-1)
         return TOKEN_FAIL();
@@ -2470,6 +2506,8 @@ SECURITY_STATUS SEC_ENTRY ntlm_DecryptMessage(PCtxtHandle phContext,
 
     helper->neg_flags = ntlmssp_flags_save;
 
+    /* the message was sealed: no SECQOP_WRAP_NO_ENCRYPT (the caller reads wasEncrypted from it) */
+    if (ret == SEC_E_OK && pfQOP) *pfQOP = 0;
     return ret;
 }
 

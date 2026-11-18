@@ -1,6 +1,7 @@
 
 list(APPEND SOURCE
     AcquireCredentialsHandleVersions.c
+    DotNetSspi.c
     InvalidHandles.c
     LsaConnectUnprivileged.c
     LsaLogonContext.c

@@ -9,6 +9,7 @@
 #include <apitest.h>
 
 extern void func_AcquireCredentialsHandleVersions(void);
+extern void func_DotNetSspi(void);
 extern void func_InvalidHandles(void);
 extern void func_LsaConnectUnprivileged(void);
 extern void func_LsaLogonContext(void);
@@ -33,6 +34,7 @@ extern void func_NtlmSignatureBytes(void);
 const struct test winetest_testlist[] =
 {
     { "AcquireCredentialsHandleVersions", func_AcquireCredentialsHandleVersions },
+    { "DotNetSspi", func_DotNetSspi },
     { "InvalidHandles", func_InvalidHandles },
     { "LsaConnectUnprivileged", func_LsaConnectUnprivileged },
     { "LsaLogonContext", func_LsaLogonContext },
