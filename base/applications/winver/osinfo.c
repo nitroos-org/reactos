@@ -60,6 +60,34 @@ Winver_GetFormattedSpkInfo(
     StringCchPrintfW(pBuffer, cchSize, szFormat, szRegValue);
 }
 
+typedef LONG (WINAPI *PRTLGETVERSION)(OSVERSIONINFOW *);
+
+static
+BOOL
+Winver_GetRtlVersion(
+    _Out_ LPWSTR pVersion,
+    _In_ DWORD cchVersion,
+    _Out_ LPWSTR pBuild,
+    _In_ DWORD cchBuild)
+{
+    OSVERSIONINFOW osvi;
+    PRTLGETVERSION pRtlGetVersion;
+    HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
+
+    pRtlGetVersion = hNtdll ? (PRTLGETVERSION)GetProcAddress(hNtdll, "RtlGetVersion") : NULL;
+    if (!pRtlGetVersion)
+        return FALSE;
+
+    ZeroMemory(&osvi, sizeof(osvi));
+    osvi.dwOSVersionInfoSize = sizeof(osvi);
+    if (pRtlGetVersion(&osvi) != 0 || !osvi.dwMajorVersion)
+        return FALSE;
+
+    StringCchPrintfW(pVersion, cchVersion, L"%lu.%lu", osvi.dwMajorVersion, osvi.dwMinorVersion);
+    StringCchPrintfW(pBuild, cchBuild, L"%lu", osvi.dwBuildNumber);
+    return TRUE;
+}
+
 static
 VOID
 Winver_FormatCompatInfo(
@@ -72,9 +100,14 @@ Winver_FormatCompatInfo(
     WCHAR szNtSpk[64];
     WCHAR szFormat[64] = L"";
 
+    /* The version the system reports (RtlGetVersion: the same as the desktop shows). The registry keeps
+     * CurrentVersion at 6.3 for the programs that read it. The registry is the fallback. */
+    if (!Winver_GetRtlVersion(szNtVersion, _countof(szNtVersion), szNtBuild, _countof(szNtBuild)))
+    {
+        Winver_GetRegValueString(hKey, L"CurrentVersion", szNtVersion, _countof(szNtVersion));
+        Winver_GetRegValueString(hKey, L"CurrentBuildNumber", szNtBuild, _countof(szNtBuild));
+    }
     /* NOTE: Required info must be valid */
-    Winver_GetRegValueString(hKey, L"CurrentVersion", szNtVersion, _countof(szNtVersion));
-    Winver_GetRegValueString(hKey, L"CurrentBuildNumber", szNtBuild, _countof(szNtBuild));
     if (!szNtVersion[0] || !szNtBuild[0])
     {
         /* Return empty string on failure */
