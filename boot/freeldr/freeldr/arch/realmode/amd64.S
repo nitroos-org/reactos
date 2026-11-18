@@ -206,7 +206,7 @@ BuildPageTables:
 
     /* One entry in the PML4 pointing to PDP */
     mov eax, PDP_ADDRESS
-    or eax, HEX(0F)
+    or eax, HEX(07)
     stosd
 
     /* clear rest */
@@ -216,7 +216,7 @@ BuildPageTables:
 
     /* One entry in the PDP pointing to PD */
     mov eax, PD_ADDRESS
-    or eax, HEX(0F)
+    or eax, HEX(07)
     stosd
 
     /* clear rest */
@@ -226,7 +226,7 @@ BuildPageTables:
 
     /* 512 entries in the PD, each defining a 2MB page each */
     mov ecx, 512
-    mov eax, HEX(008f)
+    mov eax, HEX(0087)
 
 .Bpt2:
     mov es:[di], eax
