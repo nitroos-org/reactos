@@ -338,22 +338,18 @@ FsRtlpRegisterUncProvider(OUT PHANDLE Handle,
 
     KeWaitForSingleObject(&FsRtlpUncSemaphore, Executive, KernelMode, FALSE, NULL);
 
-    /* In case no provider was registered yet, check for DFS present.
-     * If DFS is present, we need to go with MUP, whatever the case
+    /* As on Windows, UNC names always go through MUP (\??\UNC is \Device\Mup and the
+     * names of the providers are \Device\Mup\;<provider>), also with a single provider
+     * and DFS disabled: a provider is never the target of \??\UNC itself.
      */
     if (FsRtlpRedirs == 0)
     {
-        if (ProviderDevice != NULL || FsRtlpIsDfsEnabled())
-        {
-            DPRINT1("DFS is not disabled (or provider has no name). Going through MUP\n");
-
-            /* We've to go with MUP, make sure our internal structure doesn't
-             * contain any leftover data and raise redirs to one, to make sure
-             * we use MUP.
-             */
-            RtlZeroMemory(&FsRtlpDRD, sizeof(FsRtlpDRD));
-            FsRtlpRedirs = 1;
-        }
+        /* We've to go with MUP, make sure our internal structure doesn't
+         * contain any leftover data and raise redirs to one, to make sure
+         * we use MUP.
+         */
+        RtlZeroMemory(&FsRtlpDRD, sizeof(FsRtlpDRD));
+        FsRtlpRedirs = 1;
     }
 
     /* In case no UNC provider was already registered,

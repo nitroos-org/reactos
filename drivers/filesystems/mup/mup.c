@@ -2954,6 +2954,10 @@ VOID
 NTAPI
 MupUnload(PDRIVER_OBJECT DriverObject)
 {
+    UNICODE_STRING UncString;
+
+    RtlInitUnicodeString(&UncString, L"\\DosDevices\\UNC");
+    IoDeleteSymbolicLink(&UncString);
     IoDeleteDevice(mupDeviceObject);
 
     if (MupEnableDfs)
@@ -2962,6 +2966,46 @@ MupUnload(PDRIVER_OBJECT DriverObject)
     }
 
     MupUninitializeData();
+}
+
+/*
+ * MUP is a network file system device, so the I/O manager asks it for
+ * FileFsDeviceInformation of its own handles; it has no other volume information
+ * (Server 2022: FileFsAttributeInformation of \Device\Mup is STATUS_INVALID_DEVICE_REQUEST).
+ */
+NTSTATUS
+NTAPI
+MupQueryVolumeInformation(PDEVICE_OBJECT DeviceObject,
+                          PIRP Irp)
+{
+    NTSTATUS Status;
+    PIO_STACK_LOCATION Stack;
+    PFILE_FS_DEVICE_INFORMATION DeviceInfo;
+
+    Stack = IoGetCurrentIrpStackLocation(Irp);
+    Irp->IoStatus.Information = 0;
+
+    if (Stack->Parameters.QueryVolume.FsInformationClass != FileFsDeviceInformation)
+    {
+        Status = STATUS_INVALID_DEVICE_REQUEST;
+    }
+    else if (Stack->Parameters.QueryVolume.Length < sizeof(FILE_FS_DEVICE_INFORMATION))
+    {
+        Status = STATUS_BUFFER_TOO_SMALL;
+    }
+    else
+    {
+        DeviceInfo = Irp->AssociatedIrp.SystemBuffer;
+        DeviceInfo->DeviceType = DeviceObject->DeviceType;
+        DeviceInfo->Characteristics = DeviceObject->Characteristics;
+        Irp->IoStatus.Information = sizeof(FILE_FS_DEVICE_INFORMATION);
+        Status = STATUS_SUCCESS;
+    }
+
+    Irp->IoStatus.Status = Status;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+
+    return Status;
 }
 
 /*
@@ -2978,7 +3022,7 @@ DriverEntry(PDRIVER_OBJECT DriverObject,
             PUNICODE_STRING RegistryPath)
 {
     NTSTATUS Status;
-    UNICODE_STRING MupString;
+    UNICODE_STRING MupString, UncString;
     PDEVICE_OBJECT DeviceObject;
 
     /* Only initialize global state of the driver
@@ -2994,9 +3038,16 @@ DriverEntry(PDRIVER_OBJECT DriverObject,
         MupEnableDfs = FALSE;
     }
 
-    /* Create the MUP device */
+    /* Create the MUP device: a network file system, remote, as on Windows (Windows 10 22H2 and
+     * Server 2022: FileFsDeviceInformation of \Device\Mup is DeviceType 0x14, Characteristics 0x20010) */
     RtlInitUnicodeString(&MupString, L"\\Device\\Mup");
-    Status = IoCreateDevice(DriverObject, sizeof(MUP_VCB), &MupString, FILE_DEVICE_MULTI_UNC_PROVIDER, 0, FALSE, &DeviceObject);
+    Status = IoCreateDevice(DriverObject,
+                            sizeof(MUP_VCB),
+                            &MupString,
+                            FILE_DEVICE_NETWORK_FILE_SYSTEM,
+                            FILE_REMOTE_DEVICE | FILE_DEVICE_ALLOW_APPCONTAINER_TRAVERSAL,
+                            FALSE,
+                            &DeviceObject);
     if (!NT_SUCCESS(Status))
     {
         if (MupEnableDfs)
@@ -3018,10 +3069,20 @@ DriverEntry(PDRIVER_OBJECT DriverObject,
     DriverObject->MajorFunction[IRP_MJ_FILE_SYSTEM_CONTROL] = MupFsControl;
     DriverObject->MajorFunction[IRP_MJ_CLEANUP] = MupCleanup;
     DriverObject->MajorFunction[IRP_MJ_CLOSE] = MupClose;
+    DriverObject->MajorFunction[IRP_MJ_QUERY_VOLUME_INFORMATION] = MupQueryVolumeInformation;
 
     /* And finish init */
     mupDeviceObject = DeviceObject;
     MupInitializeVcb(DeviceObject->DeviceExtension);
+
+    /* UNC names are MUP's, whether a provider is registered or not, as on Windows
+     * (\??\UNC and \GLOBAL??\UNC are links to \Device\Mup) */
+    RtlInitUnicodeString(&UncString, L"\\DosDevices\\UNC");
+    Status = IoCreateSymbolicLink(&UncString, &MupString);
+    if (!NT_SUCCESS(Status) && Status != STATUS_OBJECT_NAME_COLLISION)
+    {
+        DPRINT1("No \\DosDevices\\UNC link: %lx\n", Status);
+    }
 
     return STATUS_SUCCESS;
 }
