@@ -12,11 +12,13 @@
 /*
  * A crash handler, a debugger and a runtime that preempts its threads read the context of a thread that is running,
  * including xmm6 to xmm15, which a system call saves for the caller. The kernel finds where it saved them by unwinding
- * the kernel stack of the thread. The GDI system calls that save xmm registers have a frame register that is set before
- * the rest of the frame is allocated; the unwinder used the frame register as the base of the saved xmm registers and
- * read them from an address that is 8 bytes off 16 byte alignment: a general protection fault in the kernel (bugcheck
- * 0x1E, exception code 0xC0000001) for a thread that was in NtGdiRectVisible, NtGdiTransformPoints, NtGdiGetBoundsRect,
- * NtGdiSetBoundsRect, NtGdiSetDIBitsToDeviceInternal or NtGdiStretchDIBitsInternal when it was stopped.
+ * the kernel stack of the thread. The GDI system calls NtGdiRectVisible, NtGdiTransformPoints, NtGdiGetBoundsRect,
+ * NtGdiSetBoundsRect, NtGdiSetDIBitsToDeviceInternal and NtGdiStretchDIBitsInternal had a frame register that is set
+ * before the rest of the frame is allocated and saved xmm registers relative to the stack pointer after it; the
+ * unwinder takes the frame register as the base of the saved xmm registers (as Windows does) and read them from an
+ * address 8 bytes off 16 byte alignment: a general protection fault in the kernel (bugcheck 0x1E, exception code
+ * 0xC0000001) for a thread that was in one of them when it was stopped. win32k is now built so that it saves no xmm
+ * register in such a frame (ros_no_nonvolatile_xmm).
  *
  * The worker puts a pattern in xmm6 to xmm13 and calls those system calls in a loop; the xmm registers are callee saved,
  * so the pattern is still the worker's value wherever it is stopped. Any context that is read from it must carry the
@@ -92,6 +94,47 @@ GdiWorker(
     return 0;
 }
 
+/* The except blocks of the same system calls: a user pointer that ProbeForRead/ProbeForWrite rejects raises in the
+   kernel, the system call catches it and fails; the kernel unwinds through the system call's frame to get there */
+static
+VOID
+TestBadPointers(VOID)
+{
+    static const ULONG_PTR Bad[] = { 0x10, 0x7, (ULONG_PTR)0xFFFF800000000000ULL, (ULONG_PTR)0xFFFFF78000000000ULL };
+    HDC hdc = CreateCompatibleDC(NULL);
+    ULONG i;
+    BOOL Result;
+    UINT Bounds;
+
+    ok(hdc != NULL, "CreateCompatibleDC failed, error %lu\n", GetLastError());
+    if (!hdc)
+        return;
+
+    /* The return values are not checked (Windows' are not measured here): the calls must come back, and the DC
+       must still work */
+    for (i = 0; i < RTL_NUMBER_OF(Bad); i++)
+    {
+        Result = RectVisible(hdc, (const RECT *)Bad[i]);
+        trace("RectVisible(%p) = %d\n", (PVOID)Bad[i], Result);
+        Result = LPtoDP(hdc, (LPPOINT)Bad[i], 1);
+        trace("LPtoDP(%p) = %d\n", (PVOID)Bad[i], Result);
+        Bounds = GetBoundsRect(hdc, (LPRECT)Bad[i], 0);
+        trace("GetBoundsRect(%p) = %u\n", (PVOID)Bad[i], Bounds);
+        Bounds = SetBoundsRect(hdc, (const RECT *)Bad[i], DCB_ACCUMULATE);
+        trace("SetBoundsRect(%p) = %u\n", (PVOID)Bad[i], Bounds);
+    }
+
+    {
+        RECT rc = { 0, 0, 0, 0 };
+        POINT pt = { 3, 4 };
+        Bounds = GetBoundsRect(hdc, &rc, 0);
+        ok(Bounds != 0, "GetBoundsRect after the bad pointers failed\n");
+        ok(LPtoDP(hdc, &pt, 1) && pt.x == 3 && pt.y == 4, "LPtoDP after the bad pointers: %ld,%ld\n", pt.x, pt.y);
+    }
+
+    DeleteDC(hdc);
+}
+
 START_TEST(ThreadContextGdi)
 {
     HANDLE hThread;
@@ -99,6 +142,8 @@ START_TEST(ThreadContextGdi)
     PVOID pBuffer;
     ULONG i, j, Failed = 0, Wrong = 0, Done = 0;
     PM128A pXmm;
+
+    TestBadPointers();
 
     /* CONTEXT needs 16 byte alignment for the floating point state */
     pBuffer = VirtualAlloc(NULL, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);

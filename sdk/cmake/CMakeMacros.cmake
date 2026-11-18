@@ -722,6 +722,24 @@ function(ros_add_compat_manifest MODULE)
     target_sources(${MODULE} PRIVATE ${_compat_rc})
 endfunction()
 
+# amd64 unwind data that Windows reads the way it was written.
+#
+# GCC sets the frame register right after the pushes, before the stack allocation, in every function that takes
+# __builtin_frame_address(0) (each amd64 PSEH try block does; ix86_compute_frame_layout keeps the frame pointer at the
+# establisher frame for them), and records the XMM registers the function saves with mov relative to the stack pointer
+# after the allocation (seh_emit_save). Windows' unwinder reads those slots relative to the frame register, so for such
+# a function it takes the wrong slots, which cannot be expressed in Windows' format at all (they lie below the frame
+# register). native-pefixup --check-unwind (set_module_type, amd64) fails the build for such a function; its module is
+# built with ros_no_nonvolatile_xmm(): the compiler then never allocates XMM6-XMM15 in it (they are preserved for the
+# callers by not being touched), so no function of the module saves them.
+function(ros_no_nonvolatile_xmm MODULE)
+    if(ARCH STREQUAL "amd64" AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
+        target_compile_options(${MODULE} PRIVATE
+            -ffixed-xmm6 -ffixed-xmm7 -ffixed-xmm8 -ffixed-xmm9 -ffixed-xmm10
+            -ffixed-xmm11 -ffixed-xmm12 -ffixed-xmm13 -ffixed-xmm14 -ffixed-xmm15)
+    endif()
+endfunction()
+
 function(set_module_type MODULE TYPE)
     cmake_parse_arguments(__module "UNICODE;NO_COMPAT_MANIFEST" "IMAGEBASE" "ENTRYPOINT" ${ARGN})
 
@@ -757,6 +775,14 @@ function(set_module_type MODULE TYPE)
         ros_add_compat_manifest(${MODULE})
         add_custom_command(TARGET ${MODULE} POST_BUILD
             COMMAND native-pefixup --require-supportedos=win10 $<TARGET_FILE:${MODULE}>)
+        set_property(TARGET ${MODULE} APPEND PROPERTY LINK_DEPENDS $<TARGET_PROPERTY:native-pefixup,IMPORTED_LOCATION>)
+    endif()
+
+    # amd64 unwind data Windows reads the way it was written (see ros_no_nonvolatile_xmm)
+    get_target_property(_target_type ${MODULE} TYPE)
+    if(ARCH STREQUAL "amd64" AND NOT MSVC AND _target_type MATCHES "^(EXECUTABLE|MODULE_LIBRARY|SHARED_LIBRARY)$")
+        add_custom_command(TARGET ${MODULE} POST_BUILD
+            COMMAND native-pefixup --check-unwind $<TARGET_FILE:${MODULE}>)
         set_property(TARGET ${MODULE} APPEND PROPERTY LINK_DEPENDS $<TARGET_PROPERTY:native-pefixup,IMPORTED_LOCATION>)
     endif()
 

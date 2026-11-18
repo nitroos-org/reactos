@@ -340,6 +340,127 @@ missing:
     return 1;
 }
 
+/* ---- --check-unwind: lint of amd64 unwind data, reads only ----
+ *
+ * Windows' unwinder reads the slots that UWOP_SAVE_NONVOL[_FAR] and UWOP_SAVE_XMM128[_FAR] record relative to the
+ * frame base: the frame register minus 16 * FrameOffset once a frame register is set, else the stack pointer after
+ * the prolog. GCC (seh_emit_save in config/i386/winnt.c, up to at least GCC 13) writes the offsets relative to the
+ * stack pointer after the allocation. The two agree unless the prolog sets the frame register before an allocation
+ * or push, which GCC does for every function that takes __builtin_frame_address(0) (each PSEH try block, setjmp):
+ * there the recorded slots are wrong for Windows' rule (a kernel context read of a thread stopped in such a function
+ * took an unaligned XMM slot above the frame and bugchecked, 0x1E). Fail the build for such a function; a module that
+ * has one is built with ros_no_nonvolatile_xmm (sdk/cmake/CMakeMacros.cmake), so that it never saves XMM6-XMM15. */
+
+#define UNW_SECTIONS_MAX 96
+typedef struct { unsigned int va, vsize, raw, rawsize; } unw_section;
+
+static const unsigned char *unw_ptr(const unsigned char *buffer, size_t len, const unw_section *sec, unsigned int nsec,
+                                    unsigned int rva, unsigned int size)
+{
+    unsigned int i;
+    for (i = 0; i < nsec; i++)
+    {
+        if (rva >= sec[i].va && rva - sec[i].va < sec[i].vsize && rva - sec[i].va + size <= sec[i].rawsize &&
+            (size_t)sec[i].raw + (rva - sec[i].va) + size <= len)
+            return buffer + sec[i].raw + (rva - sec[i].va);
+    }
+    return NULL;
+}
+
+/* Slots used by an unwind code with operation op and operation info info */
+static unsigned int unw_slots(unsigned int op, unsigned int info)
+{
+    switch (op)
+    {
+        case 1: return info ? 3 : 2;    /* UWOP_ALLOC_LARGE */
+        case 4: case 6: case 8: return 2; /* UWOP_SAVE_NONVOL, UWOP_EPILOG, UWOP_SAVE_XMM128 */
+        case 5: case 7: case 9: return 3; /* UWOP_SAVE_NONVOL_FAR, UWOP_SPARE_CODE, UWOP_SAVE_XMM128_FAR */
+        default: return 1;
+    }
+}
+
+static int check_unwind(const unsigned char *buffer, size_t len)
+{
+    unw_section sec[UNW_SECTIONS_MAX];
+    unsigned int pe, nsec, optsize, opt, i, n, pdata_rva, pdata_size, bad = 0;
+    const unsigned char *pdata;
+
+    if (len < 0x40) return 0;
+    pe = rd32(buffer + 0x3c);
+    if ((size_t)pe + 24 > len || memcmp(buffer + pe, "PE\0\0", 4) != 0) return 0;
+    if (rd16(buffer + pe + 4) != 0x8664) return 0;          /* IMAGE_FILE_MACHINE_AMD64 only */
+    nsec = rd16(buffer + pe + 6);
+    optsize = rd16(buffer + pe + 20);
+    opt = pe + 24;
+    if ((size_t)opt + optsize > len || optsize < 112 + 4 * 8 || rd16(buffer + opt) != 0x20b) return 0;
+    if (rd32(buffer + opt + 108) <= 3) return 0;            /* NumberOfRvaAndSizes: no exception directory */
+    if (nsec > UNW_SECTIONS_MAX || (size_t)opt + optsize + 40 * nsec > len) return 0;
+    for (i = 0; i < nsec; i++)
+    {
+        const unsigned char *s = buffer + opt + optsize + 40 * i;
+        sec[i].vsize = rd32(s + 8); sec[i].va = rd32(s + 12); sec[i].rawsize = rd32(s + 16); sec[i].raw = rd32(s + 20);
+        if (sec[i].vsize < sec[i].rawsize) sec[i].vsize = sec[i].rawsize;
+    }
+    pdata_rva = rd32(buffer + opt + 112 + 3 * 8);
+    pdata_size = rd32(buffer + opt + 112 + 3 * 8 + 4);
+    if (!pdata_rva || !pdata_size) return 0;
+    pdata = unw_ptr(buffer, len, sec, nsec, pdata_rva, pdata_size);
+    if (!pdata)
+    {
+        error("the exception directory lies outside the file's sections\n");
+        return 1;
+    }
+
+    for (n = 0; n + 12 <= pdata_size; n += 12)
+    {
+        unsigned int begin = rd32(pdata + n), unwind_rva = rd32(pdata + n + 8), depth;
+        /* the codes of the function and of its chained parents, in array order (the reverse of the prolog order) */
+        unsigned int op[512], arg[512], count = 0, k, fp_seen = 0, after_fp = 0, saves = 0;
+
+        if (unwind_rva & 1) continue;                        /* an indirect entry: the target is checked itself */
+        for (depth = 0; depth < 8; depth++)
+        {
+            const unsigned char *ui = unw_ptr(buffer, len, sec, nsec, unwind_rva, 4), *codes;
+            unsigned int flags, ncodes, j;
+            if (!ui) break;
+            flags = ui[0] >> 3;
+            ncodes = ui[2];
+            codes = unw_ptr(buffer, len, sec, nsec, unwind_rva + 4, 2 * ((ncodes + 1) & ~1u) + 12);
+            if (!codes) break;
+            for (j = 0; j < ncodes && count < 512; )
+            {
+                unsigned int o = codes[2 * j + 1] & 15, inf = codes[2 * j + 1] >> 4, sl = unw_slots(o, inf), a = 0;
+                if (j + sl > ncodes) break;
+                if (o == 1) a = inf ? rd32(codes + 2 * j + 2) : rd16(codes + 2 * j + 2) * 8;
+                else if (o == 2) a = inf * 8 + 8;
+                else if (o == 0) a = 8;
+                op[count] = o; arg[count] = a; count++;
+                j += sl;
+            }
+            if (!(flags & 4)) break;                         /* UNW_FLAG_CHAININFO: a RUNTIME_FUNCTION follows */
+            unwind_rva = rd32(codes + 2 * ((ncodes + 1) & ~1u) + 8) & ~1u;
+        }
+
+        /* prolog order */
+        for (k = count; k-- > 0; )
+        {
+            if (op[k] == 3) fp_seen = 1;                     /* UWOP_SET_FPREG */
+            else if (op[k] <= 2 && fp_seen) after_fp += arg[k];
+            else if (op[k] == 4 || op[k] == 5 || op[k] == 8 || op[k] == 9) saves++;
+        }
+        if (fp_seen && after_fp && saves)
+        {
+            error("the function at RVA 0x%x sets its frame register before a %u-byte stack allocation and records %u "
+                  "register save(s) relative to the stack pointer: Windows' unwinder reads them relative to the frame "
+                  "register (GCC frame layout of a function that takes __builtin_frame_address(0), e.g. a PSEH try "
+                  "block). Build its module with ros_no_nonvolatile_xmm() (sdk/cmake/CMakeMacros.cmake)\n",
+                  begin, after_fp, saves);
+            bad++;
+        }
+    }
+    return bad ? 1 : 0;
+}
+
 static int change_section_attribs(char* section_attribs, unsigned char* buffer, PIMAGE_NT_HEADERS nt_header)
 {
     char *sectionName, *newSectionName;
@@ -563,7 +684,10 @@ print_usage(void)
            "                        Sets the linker version of the image header;\n"
            "  --require-supportedos=win10\n"
            "                        Only check (the file is not modified): fail if a GUI or console\n"
-           "                        executable has no manifest naming Windows 10.\n");
+           "                        executable has no manifest naming Windows 10.\n"
+           "  --check-unwind        Only check (the file is not modified): fail if an amd64 function\n"
+           "                        sets its frame register before a stack allocation and records\n"
+           "                        register saves (unwind data Windows reads differently).\n");
 }
 
 int main(int argc, char **argv)
@@ -579,6 +703,7 @@ int main(int argc, char **argv)
     unsigned int linker_major = 0, linker_minor = 0;
     int set_linker_version = 0;
     int require_supportedos = 0;
+    int check_unwind_data = 0;
 
     g_ApplicationName = argv[0];
 
@@ -629,6 +754,10 @@ int main(int argc, char **argv)
         else if (strcmp(&argv[i][2], "require-supportedos=win10") == 0)
         {
             require_supportedos = 1;
+        }
+        else if (strcmp(&argv[i][2], "check-unwind") == 0)
+        {
+            check_unwind_data = 1;
         }
         else if (strncmp(&argv[i][2], "linkerversion=", 14) == 0)
         {
@@ -708,9 +837,12 @@ int main(int argc, char **argv)
     result = 0;
 
     /* Lint only: no fixups, nothing written */
-    if (require_supportedos)
+    if (require_supportedos || check_unwind_data)
     {
-        result = check_supportedos(buffer, len);
+        if (require_supportedos)
+            result = check_supportedos(buffer, len);
+        if (check_unwind_data && check_unwind(buffer, len))
+            result = 1;
         goto Quit;
     }
 

@@ -254,6 +254,9 @@ add_library(win32k MODULE
 add_pch(win32k pch.h SOURCE)
 
 set_module_type(win32k kernelmodedriver)
+# amd64 GCC: system calls with a PSEH try block and float math (NtGdiRectVisible, NtGdiStretchDIBitsInternal, ...)
+# would save XMM registers in a frame Windows' unwinder reads differently (see ros_no_nonvolatile_xmm)
+ros_no_nonvolatile_xmm(win32k)
 target_link_libraries(win32k ${PSEH_LIB} dxguid libcntpr)
 
 if(USE_DIBLIB)
