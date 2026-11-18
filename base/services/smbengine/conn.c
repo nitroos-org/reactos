@@ -1053,6 +1053,20 @@ EncodeInfo(PSMBENG_OP Op, const struct smb2_query_info_reply *qr, PULONG Length)
     return STATUS_SUCCESS;
 }
 
+/*
+ * Whether libsmb2 passed a reply of this status to the callback as an ERROR response
+ * (struct smb2_error_reply, smb2_is_error_response in lib/pdu.c) rather than as the
+ * command's own reply structure. Local statuses (shutdown, time-out) come without data.
+ */
+static
+BOOLEAN
+ErrorReply(uint32_t Wire)
+{
+    if ((Wire & 0xC0000000) == 0xC0000000)
+        return Wire != (uint32_t)STATUS_MORE_PROCESSING_REQUIRED;
+    return Wire == (uint32_t)STATUS_STOPPED_ON_SYMLINK;
+}
+
 /* Every request libsmb2 had ends here (also at teardown: SHUTDOWN) */
 static
 VOID
@@ -1206,7 +1220,12 @@ OpCb(struct smb2_context *smb2, int status, void *command_data, void *private_da
                     }
                 }
             }
-            if (qr != NULL && qr->output_buffer != NULL)
+            /* An error reply's command_data is libsmb2's struct smb2_error_reply, not a query
+             * reply: its error_data (same offset as output_buffer) points into the receive
+             * buffer when the server sent error data, and is not ours to free. Only a reply
+             * libsmb2 decoded as QUERY_INFO (success, a warning but STOPPED_ON_SYMLINK,
+             * MORE_PROCESSING_REQUIRED) carries an output buffer it allocated. */
+            if (qr != NULL && qr->output_buffer != NULL && !ErrorReply(Wire))
                 smb2_free_data(smb2, qr->output_buffer);
             break;
         }
