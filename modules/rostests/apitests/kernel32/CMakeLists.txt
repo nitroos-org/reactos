@@ -264,6 +264,7 @@ list(APPEND SOURCE
     ReadProcessMemory.c
     WriteProcessMemory.c
     SetFileInformationByHandle.c
+    ReOpenFile.c
 )
 
 list(APPEND PCH_SKIP_SOURCE
