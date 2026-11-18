@@ -2188,6 +2188,95 @@ SECURITY_STATUS SEC_ENTRY ntlm_VerifySignature(PCtxtHandle phContext,
 }
 
 /***********************************************************************
+ * The mechListMIC of SPNEGO ([MS-SPNG] 3.1.5.1, RFC 4178 5): GSS_GetMIC and GSS_VerifyMIC of this context over the
+ * DER encoding of the mechTypes list. Measured on Windows (Server 2022 and 10): each side signs with its own sending
+ * key and sequence number 0, the receiver checks with its receiving key; afterwards the RC4 states of both
+ * directions start again from the sealing keys while the sequence numbers go on (ntlm_SpnegoResetSealing).
+ */
+SECURITY_STATUS ntlm_SpnegoMakeMic(PCtxtHandle phContext, const BYTE *data, ULONG len, BYTE *mic)
+{
+    PNegoHelper helper;
+    SecBuffer bufs[2];
+    SecBufferDesc desc;
+    SECURITY_STATUS ret;
+
+    if (!phContext || !(helper = (PNegoHelper)phContext->dwLower) || !helper->session_key)
+        return SEC_E_INVALID_HANDLE;
+    desc.ulVersion = SECBUFFER_VERSION;
+    desc.cBuffers = 2;
+    desc.pBuffers = bufs;
+    bufs[0].BufferType = SECBUFFER_DATA;
+    bufs[0].pvBuffer = (void *)data;
+    bufs[0].cbBuffer = len;
+    bufs[1].BufferType = SECBUFFER_TOKEN;
+    bufs[1].pvBuffer = mic;
+    bufs[1].cbBuffer = 16;
+    ret = ntlm_CreateSignature(helper, &desc, 1, NTLM_SEND, TRUE);
+    if (ret == SEC_E_OK && bufs[1].cbBuffer != 16) ret = SEC_E_INTERNAL_ERROR;
+    return ret;
+}
+
+SECURITY_STATUS ntlm_SpnegoVerifyMic(PCtxtHandle phContext, const BYTE *data, ULONG len, const BYTE *mic, ULONG mic_len)
+{
+    PNegoHelper helper;
+    SecBuffer bufs[2];
+    SecBufferDesc desc;
+    SECURITY_STATUS ret;
+    BYTE expect[16], diff = 0;
+    ULONG i;
+
+    if (!phContext || !(helper = (PNegoHelper)phContext->dwLower) || !helper->session_key)
+        return SEC_E_INVALID_HANDLE;
+    if (mic_len != 16) return SEC_E_INVALID_TOKEN;
+    desc.ulVersion = SECBUFFER_VERSION;
+    desc.cBuffers = 2;
+    desc.pBuffers = bufs;
+    bufs[0].BufferType = SECBUFFER_DATA;
+    bufs[0].pvBuffer = (void *)data;
+    bufs[0].cbBuffer = len;
+    bufs[1].BufferType = SECBUFFER_TOKEN;
+    bufs[1].pvBuffer = expect;
+    bufs[1].cbBuffer = sizeof(expect);
+    /* the expected signature with the receiving key and sequence number (this consumes both, as on Windows) */
+    ret = ntlm_CreateSignature(helper, &desc, 1, NTLM_RECV, TRUE);
+    if (ret != SEC_E_OK) return ret;
+    if (bufs[1].cbBuffer != 16) return SEC_E_INTERNAL_ERROR;
+    /* all 16 bytes count, as Windows reports them (measured): another version is a malformed token, a wrong sequence
+     * number SEC_E_OUT_OF_SEQUENCE, a wrong checksum SEC_E_MESSAGE_ALTERED */
+    if (memcmp(expect, mic, 4)) return SEC_E_INVALID_TOKEN;
+    if (memcmp(expect + 12, mic + 12, 4)) return SEC_E_OUT_OF_SEQUENCE;
+    for (i = 4; i < 12; i++) diff |= expect[i] ^ mic[i];
+    return diff ? SEC_E_MESSAGE_ALTERED : SEC_E_OK;
+}
+
+void ntlm_SpnegoResetSealing(PCtxtHandle phContext)
+{
+    PNegoHelper helper;
+
+    if (!phContext || !(helper = (PNegoHelper)phContext->dwLower) || !helper->session_key) return;
+    if (helper->crypt.ntlm2.send_a4i && helper->crypt.ntlm2.send_seal_key)
+        SECUR32_arc4Init(helper->crypt.ntlm2.send_a4i, helper->crypt.ntlm2.send_seal_key, 16);
+    if (helper->crypt.ntlm2.recv_a4i && helper->crypt.ntlm2.recv_seal_key)
+        SECUR32_arc4Init(helper->crypt.ntlm2.recv_a4i, helper->crypt.ntlm2.recv_seal_key, 16);
+}
+
+/* the credentials name a user (explicit identity) rather than the caller's own logon */
+BOOL ntlm_CredentialsHaveIdentity(PCredHandle phCredential)
+{
+    PNtlmCredentials cred = phCredential ? (PNtlmCredentials)phCredential->dwLower : NULL;
+
+    return cred && cred->has_identity;
+}
+
+/* the use of the credentials (SECPKG_CRED_INBOUND, _OUTBOUND or both), 0 for no credentials */
+ULONG ntlm_CredentialsUse(PCredHandle phCredential)
+{
+    PNtlmCredentials cred = phCredential ? (PNtlmCredentials)phCredential->dwLower : NULL;
+
+    return cred ? cred->use : 0;
+}
+
+/***********************************************************************
  *             EncryptMessage
  */
 SECURITY_STATUS SEC_ENTRY ntlm_EncryptMessage(PCtxtHandle phContext,

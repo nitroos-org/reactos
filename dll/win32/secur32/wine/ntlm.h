@@ -110,6 +110,13 @@ SECURITY_STATUS SEC_ENTRY ntlm_QuerySecurityContextToken(PCtxtHandle, HANDLE *) 
 SECURITY_STATUS SEC_ENTRY ntlm_MakeSignature(PCtxtHandle, ULONG, PSecBufferDesc, ULONG) DECLSPEC_HIDDEN;
 SECURITY_STATUS SEC_ENTRY ntlm_VerifySignature(PCtxtHandle, PSecBufferDesc, ULONG, PULONG) DECLSPEC_HIDDEN;
 
+/* for the SPNEGO layer of the Negotiate package (negotiate.c) */
+SECURITY_STATUS ntlm_SpnegoMakeMic(PCtxtHandle, const BYTE *, ULONG, BYTE *) DECLSPEC_HIDDEN;
+SECURITY_STATUS ntlm_SpnegoVerifyMic(PCtxtHandle, const BYTE *, ULONG, const BYTE *, ULONG) DECLSPEC_HIDDEN;
+void ntlm_SpnegoResetSealing(PCtxtHandle) DECLSPEC_HIDDEN;
+BOOL ntlm_CredentialsHaveIdentity(PCredHandle) DECLSPEC_HIDDEN;
+ULONG ntlm_CredentialsUse(PCredHandle) DECLSPEC_HIDDEN;
+
 SecPkgInfoW *ntlm_copy_package_infoW(void) DECLSPEC_HIDDEN;
 SecPkgInfoA *ntlm_copy_package_infoA(void) DECLSPEC_HIDDEN;
 extern SecPkgInfoW *ntlm_package_infoW DECLSPEC_HIDDEN;
