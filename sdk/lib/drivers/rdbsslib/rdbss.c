@@ -5846,8 +5846,9 @@ RxConjureOriginalName(
     /* If we still have room to write data */
     if (*LengthRemaining != -1)
     {
-        /* If we can copy everything, it's fine! */
-        if (*LengthRemaining > ToCopy)
+        /* If we can copy everything, it's fine! (an exact fit too: the I/O
+         * manager asks again with exactly the length the first query gave) */
+        if (*LengthRemaining >= ToCopy)
         {
             *LengthRemaining = *LengthRemaining - ToCopy;
         }
