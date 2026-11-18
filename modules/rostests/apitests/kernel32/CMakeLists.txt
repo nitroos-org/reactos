@@ -32,6 +32,7 @@ list(APPEND SOURCE
     ConsoleBufferSwitch.c
     ConsoleCaret.c
     ConsoleRedraw.c
+    GetModuleHandleLoaderLock.c
     ConsoleUtf8CP.c
     ConsoleCreateRace.c
     ConsoleOrphanChild.c

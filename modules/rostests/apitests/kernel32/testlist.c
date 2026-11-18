@@ -39,6 +39,7 @@ extern void func_CopyFileStreams(void);
 extern void func_ConsoleBufferSwitch(void);
 extern void func_ConsoleCaret(void);
 extern void func_ConsoleRedraw(void);
+extern void func_GetModuleHandleLoaderLock(void);
 extern void func_ConsoleUtf8CP(void);
 extern void func_ConsoleCreateRace(void);
 extern void func_ConsoleOrphanChild(void);
@@ -314,6 +315,7 @@ const struct test winetest_testlist[] =
     { "ConsoleBufferSwitch",         func_ConsoleBufferSwitch },
     { "ConsoleCaret",                func_ConsoleCaret },
     { "ConsoleRedraw",               func_ConsoleRedraw },
+    { "GetModuleHandleLoaderLock",   func_GetModuleHandleLoaderLock },
     { "ConsoleUtf8CP",               func_ConsoleUtf8CP },
     { "ConsoleCreateRace",           func_ConsoleCreateRace },
     { "ConsoleOrphanChild",          func_ConsoleOrphanChild },

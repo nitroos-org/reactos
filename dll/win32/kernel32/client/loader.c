@@ -1079,8 +1079,17 @@ GetModuleHandleExW(IN DWORD dwFlags,
     /* If result is 2, there is no need to do anything - return success. */
     if (dwValid == BASEP_GET_MODULE_HANDLE_EX_PARAMETER_VALIDATION_SUCCESS) return TRUE;
 
-    /* Use common helper routine */
-    Ret = BasepGetModuleHandleExW(FALSE,
+    /*
+     * A lookup by address that leaves the reference count alone needs no loader lock: the address ranges of the
+     * loaded modules answer lock-free (RtlPcToFileHeader). Windows returns at once while another thread holds
+     * the loader lock; waiting for it here deadlocks a program that calls this while it holds one of its own
+     * locks, against a thread that loads or unloads a DLL and needs that lock from a DLL entry point (Firefox
+     * at shutdown, NSPR with its thread detach).
+     */
+    Ret = BasepGetModuleHandleExW(((dwFlags & (GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT)) ==
+                                    (GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                     GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT)),
                                   dwFlags,
                                   lpwModuleName,
                                   phModule);
@@ -1113,8 +1122,8 @@ GetModuleHandleExA(IN DWORD dwFlags,
     /* Check if we don't need to convert the name */
     if (dwFlags & GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS)
     {
-        /* Call the extended version of the API without conversion */
-        Ret = BasepGetModuleHandleExW(FALSE,
+        /* Call the extended version of the API without conversion (no loader lock when the count stays: see GetModuleHandleExW) */
+        Ret = BasepGetModuleHandleExW(!!(dwFlags & GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT),
                                       dwFlags,
                                       (LPCWSTR)lpModuleName,
                                       phModule);
