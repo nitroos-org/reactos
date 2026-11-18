@@ -1365,7 +1365,10 @@ RxCanonicalizeFileNameByServerSpecs(
         {
             if ((CurChar - NextChar) == 1)
             {
-                if (NetRootName->Buffer[NextChar + 2] != '.')
+                /* NextChar + 2 is the separator that ended the component, or
+                 * the end of the name: never read past it (a name ending in a
+                 * two-character component read one WCHAR past the buffer) */
+                if (NextChar + 2 >= MaxChars || NetRootName->Buffer[NextChar + 2] != '.')
                 {
                     continue;
                 }
