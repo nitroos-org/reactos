@@ -10970,9 +10970,16 @@ RxStopMinirdr(
 
         RxScavengerFinalizeEntries(DeviceObject);
 
+        /* Requests that passed the state check before the stop began (a
+         * create still on its way to building a connection) must have left
+         * too: each holds an RX_CONTEXT, ours is the only one allowed */
         RxAcquirePrefixTableLockShared(DeviceObject->pRxNetNameTable, TRUE);
         Empty = IsListEmpty(&DeviceObject->pRxNetNameTable->MemberQueue);
         RxReleasePrefixTableLock(DeviceObject->pRxNetNameTable);
+        if (Empty && DeviceObject->NumberOfActiveContexts > 1)
+        {
+            Empty = FALSE;
+        }
         if (Empty)
         {
             break;
