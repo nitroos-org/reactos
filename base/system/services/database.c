@@ -19,6 +19,7 @@
 #include <reason.h>
 #include <strsafe.h>
 #include <ntsecapi.h>
+#include <svcsid.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -412,6 +413,280 @@ ScmGetServicePassword(
 }
 
 
+/* advapi32 export (documented; not declared in our SDK headers) */
+BOOL WINAPI
+LogonUserExExW(
+    _In_ LPWSTR lpszUsername,
+    _In_opt_ LPWSTR lpszDomain,
+    _In_opt_ LPWSTR lpszPassword,
+    _In_ DWORD dwLogonType,
+    _In_ DWORD dwLogonProvider,
+    _In_opt_ PTOKEN_GROUPS pTokenGroups,
+    _Out_opt_ PHANDLE phToken,
+    _Out_opt_ PSID *ppLogonSid,
+    _Out_opt_ PVOID *ppProfileBuffer,
+    _Out_opt_ LPDWORD pdwProfileLength,
+    _Out_opt_ PQUOTA_LIMITS pQuotaLimits);
+
+/*
+ * The token settings of a service: ServiceSidType (SERVICE_CONFIG_SERVICE_SID_INFO) and
+ * RequiredPrivileges (SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO). Measured on Windows Server 2022
+ * (own-process services of LocalService / NetworkService):
+ * - SID type UNRESTRICTED or RESTRICTED: the group NT SERVICE\<name> (S-1-5-80-<SHA-1 of the upper-case
+ *   name>) with SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_OWNER, and the default DACL
+ *   D:(A;;GA;;;SY)(A;;RC;;;OW)(A;;GA;;;<service SID>). The owner stays the account.
+ * - RequiredPrivileges: every privilege of the account that is not listed is removed from the token,
+ *   except SeChangeNotifyPrivilege; the listed ones keep their attributes. A listed privilege the
+ *   account does not hold: the start fails with ERROR_INCOMPATIBLE_SERVICE_PRIVILEGE.
+ * A service that sets neither gets the token it got before. Applied to own-process services of
+ * accounts the SCM logs on (not LocalSystem: its processes use the SCM's own token; not shared
+ * processes: Windows merges the settings of all services of the process, not done here).
+ */
+typedef struct _SCM_TOKEN_CONFIG
+{
+    DWORD dwSidType;
+    PWSTR pszPrivileges;    /* REG_MULTI_SZ, NULL when the service has no list */
+    PSID pServiceSid;
+} SCM_TOKEN_CONFIG, *PSCM_TOKEN_CONFIG;
+
+static
+VOID
+ScmFreeTokenConfig(
+    _Inout_ PSCM_TOKEN_CONFIG pConfig)
+{
+    if (pConfig->pszPrivileges != NULL)
+        HeapFree(GetProcessHeap(), 0, pConfig->pszPrivileges);
+    if (pConfig->pServiceSid != NULL)
+        HeapFree(GetProcessHeap(), 0, pConfig->pServiceSid);
+    RtlZeroMemory(pConfig, sizeof(*pConfig));
+}
+
+static
+DWORD
+ScmReadTokenConfig(
+    _In_ PSERVICE pService,
+    _Out_ PSCM_TOKEN_CONFIG pConfig)
+{
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    ULONG SubAuthorities[5];
+    HKEY hServiceKey;
+    DWORD dwType, dwSize, dwValue, dwError;
+    ULONG i;
+
+    RtlZeroMemory(pConfig, sizeof(*pConfig));
+
+    dwError = ScmOpenServiceKey(pService->lpServiceName, KEY_READ, &hServiceKey);
+    if (dwError != ERROR_SUCCESS)
+        return dwError;
+
+    dwSize = sizeof(dwValue);
+    if (RegQueryValueExW(hServiceKey, L"ServiceSidType", NULL, &dwType, (LPBYTE)&dwValue, &dwSize) == ERROR_SUCCESS &&
+        dwType == REG_DWORD &&
+        (dwValue == SERVICE_SID_TYPE_UNRESTRICTED || dwValue == SERVICE_SID_TYPE_RESTRICTED))
+    {
+        pConfig->dwSidType = dwValue;
+    }
+
+    dwSize = 0;
+    if (RegQueryValueExW(hServiceKey, L"RequiredPrivileges", NULL, &dwType, NULL, &dwSize) == ERROR_SUCCESS &&
+        dwType == REG_MULTI_SZ && dwSize >= 2 * sizeof(WCHAR) && dwSize <= 64 * 1024)
+    {
+        /* two extra NULs: the list is terminated even when the value is not */
+        pConfig->pszPrivileges = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, dwSize + 2 * sizeof(WCHAR));
+        if (pConfig->pszPrivileges == NULL)
+        {
+            RegCloseKey(hServiceKey);
+            return ERROR_NOT_ENOUGH_MEMORY;
+        }
+        if (RegQueryValueExW(hServiceKey, L"RequiredPrivileges", NULL, &dwType,
+                             (LPBYTE)pConfig->pszPrivileges, &dwSize) != ERROR_SUCCESS ||
+            dwType != REG_MULTI_SZ || pConfig->pszPrivileges[0] == UNICODE_NULL)
+        {
+            HeapFree(GetProcessHeap(), 0, pConfig->pszPrivileges);
+            pConfig->pszPrivileges = NULL;
+        }
+    }
+
+    RegCloseKey(hServiceKey);
+
+    if (pConfig->dwSidType != SERVICE_SID_TYPE_NONE)
+    {
+        if (!LsapServiceNameToSubAuthorities(pService->lpServiceName,
+                                             (ULONG)wcslen(pService->lpServiceName),
+                                             SubAuthorities))
+        {
+            ScmFreeTokenConfig(pConfig);
+            return ERROR_INVALID_NAME;
+        }
+
+        pConfig->pServiceSid = HeapAlloc(GetProcessHeap(), 0, RtlLengthRequiredSid(LSAP_SERVICE_SID_SUBAUTHS));
+        if (pConfig->pServiceSid == NULL)
+        {
+            ScmFreeTokenConfig(pConfig);
+            return ERROR_NOT_ENOUGH_MEMORY;
+        }
+
+        RtlInitializeSid(pConfig->pServiceSid, &NtAuthority, LSAP_SERVICE_SID_SUBAUTHS);
+        *RtlSubAuthoritySid(pConfig->pServiceSid, 0) = SECURITY_SERVICE_ID_BASE_RID;
+        for (i = 0; i < 5; i++)
+            *RtlSubAuthoritySid(pConfig->pServiceSid, i + 1) = SubAuthorities[i];
+
+        if (pConfig->dwSidType == SERVICE_SID_TYPE_RESTRICTED)
+        {
+            /* Windows makes the token write-restricted (restricted SIDs: the service SID, Everyone, the logon
+             * SID, WRITE RESTRICTED). The kernel has no write-restricted tokens yet: the service gets the
+             * service SID as for UNRESTRICTED and keeps write access its account has. */
+            DPRINT1("Service %S: SERVICE_SID_TYPE_RESTRICTED is applied as UNRESTRICTED\n", pService->lpServiceName);
+        }
+    }
+
+    return ERROR_SUCCESS;
+}
+
+static
+DWORD
+ScmSetServiceDefaultDacl(
+    _In_ HANDLE hToken,
+    _In_ PSID pServiceSid)
+{
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    SID_IDENTIFIER_AUTHORITY CreatorAuthority = {SECURITY_CREATOR_SID_AUTHORITY};
+    ULONG SystemSidBuffer[SECURITY_MAX_SID_SIZE / sizeof(ULONG)];
+    ULONG OwnerRightsSidBuffer[SECURITY_MAX_SID_SIZE / sizeof(ULONG)];
+    PSID pSystemSid = (PSID)SystemSidBuffer;
+    PSID pOwnerRightsSid = (PSID)OwnerRightsSidBuffer;
+    TOKEN_DEFAULT_DACL DefaultDacl;
+    PACL pDacl;
+    DWORD dwSize, dwError = ERROR_SUCCESS;
+
+    RtlInitializeSid(pSystemSid, &NtAuthority, 1);
+    *RtlSubAuthoritySid(pSystemSid, 0) = SECURITY_LOCAL_SYSTEM_RID;
+    RtlInitializeSid(pOwnerRightsSid, &CreatorAuthority, 1);
+    *RtlSubAuthoritySid(pOwnerRightsSid, 0) = SECURITY_CREATOR_OWNER_RIGHTS_RID;
+
+    dwSize = sizeof(ACL) + 3 * FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart) +
+             RtlLengthSid(pSystemSid) + RtlLengthSid(pOwnerRightsSid) + RtlLengthSid(pServiceSid);
+    pDacl = HeapAlloc(GetProcessHeap(), 0, dwSize);
+    if (pDacl == NULL)
+        return ERROR_NOT_ENOUGH_MEMORY;
+
+    if (!InitializeAcl(pDacl, dwSize, ACL_REVISION) ||
+        !AddAccessAllowedAce(pDacl, ACL_REVISION, GENERIC_ALL, pSystemSid) ||
+        !AddAccessAllowedAce(pDacl, ACL_REVISION, READ_CONTROL, pOwnerRightsSid) ||
+        !AddAccessAllowedAce(pDacl, ACL_REVISION, GENERIC_ALL, pServiceSid))
+    {
+        dwError = GetLastError();
+    }
+    else
+    {
+        DefaultDacl.DefaultDacl = pDacl;
+        if (!SetTokenInformation(hToken, TokenDefaultDacl, &DefaultDacl, sizeof(DefaultDacl)))
+            dwError = GetLastError();
+    }
+
+    HeapFree(GetProcessHeap(), 0, pDacl);
+    return dwError;
+}
+
+static
+DWORD
+ScmApplyRequiredPrivileges(
+    _In_ PSERVICE pService,
+    _In_ HANDLE hToken,
+    _In_ PCWSTR pszPrivileges)
+{
+    PTOKEN_PRIVILEGES pPrivileges = NULL, pRemove = NULL;
+    PCWSTR pszName;
+    LUID Luid;
+    DWORD dwSize = 0, dwError = ERROR_SUCCESS;
+    ULONG i;
+    BOOL bListed;
+
+    GetTokenInformation(hToken, TokenPrivileges, NULL, 0, &dwSize);
+    pPrivileges = HeapAlloc(GetProcessHeap(), 0, dwSize ? dwSize : sizeof(TOKEN_PRIVILEGES));
+    if (pPrivileges == NULL)
+        return ERROR_NOT_ENOUGH_MEMORY;
+    if (!GetTokenInformation(hToken, TokenPrivileges, pPrivileges, dwSize, &dwSize))
+    {
+        dwError = GetLastError();
+        goto done;
+    }
+
+    /* Every listed privilege must be one the account holds */
+    for (pszName = pszPrivileges; *pszName != UNICODE_NULL; pszName += wcslen(pszName) + 1)
+    {
+        if (!LookupPrivilegeValueW(NULL, pszName, &Luid))
+        {
+            DPRINT1("Service %S: unknown required privilege %S\n", pService->lpServiceName, pszName);
+            dwError = ERROR_INCOMPATIBLE_SERVICE_PRIVILEGE;
+            goto done;
+        }
+        for (i = 0; i < pPrivileges->PrivilegeCount; i++)
+        {
+            if (RtlEqualLuid(&pPrivileges->Privileges[i].Luid, &Luid))
+                break;
+        }
+        if (i == pPrivileges->PrivilegeCount)
+        {
+            DPRINT1("Service %S: the account does not hold the required privilege %S\n",
+                    pService->lpServiceName, pszName);
+            dwError = ERROR_INCOMPATIBLE_SERVICE_PRIVILEGE;
+            goto done;
+        }
+    }
+
+    pRemove = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
+                        sizeof(TOKEN_PRIVILEGES) + pPrivileges->PrivilegeCount * sizeof(LUID_AND_ATTRIBUTES));
+    if (pRemove == NULL)
+    {
+        dwError = ERROR_NOT_ENOUGH_MEMORY;
+        goto done;
+    }
+
+    /* Remove the others; SeChangeNotifyPrivilege always stays */
+    for (i = 0; i < pPrivileges->PrivilegeCount; i++)
+    {
+        if (pPrivileges->Privileges[i].Luid.HighPart == 0 &&
+            pPrivileges->Privileges[i].Luid.LowPart == SE_CHANGE_NOTIFY_PRIVILEGE)
+            continue;
+
+        bListed = FALSE;
+        for (pszName = pszPrivileges; *pszName != UNICODE_NULL; pszName += wcslen(pszName) + 1)
+        {
+            if (LookupPrivilegeValueW(NULL, pszName, &Luid) &&
+                RtlEqualLuid(&pPrivileges->Privileges[i].Luid, &Luid))
+            {
+                bListed = TRUE;
+                break;
+            }
+        }
+        if (bListed)
+            continue;
+
+        pRemove->Privileges[pRemove->PrivilegeCount].Luid = pPrivileges->Privileges[i].Luid;
+        pRemove->Privileges[pRemove->PrivilegeCount].Attributes = SE_PRIVILEGE_REMOVED;
+        pRemove->PrivilegeCount++;
+    }
+
+    if (pRemove->PrivilegeCount > 0)
+    {
+        if (!AdjustTokenPrivileges(hToken, FALSE, pRemove, 0, NULL, NULL) ||
+            GetLastError() != ERROR_SUCCESS)
+        {
+            dwError = GetLastError();
+            DPRINT1("Service %S: removing privileges failed (Error %lu)\n", pService->lpServiceName, dwError);
+            if (dwError == ERROR_SUCCESS)
+                dwError = ERROR_INCOMPATIBLE_SERVICE_PRIVILEGE;
+        }
+    }
+
+done:
+    if (pRemove != NULL)
+        HeapFree(GetProcessHeap(), 0, pRemove);
+    HeapFree(GetProcessHeap(), 0, pPrivileges);
+    return dwError;
+}
+
 static
 DWORD
 ScmLogonService(
@@ -424,12 +699,26 @@ ScmLogonService(
     PWSTR pszPassword = NULL;
     PWSTR ptr;
     DWORD dwError = ERROR_SUCCESS;
+    SCM_TOKEN_CONFIG TokenConfig;
+    TOKEN_GROUPS ServiceGroups;
 
     DPRINT("ScmLogonService(%p %p)\n", pService, pImage);
     DPRINT("Service %S\n", pService->lpServiceName);
 
     if (ScmIsLocalSystemAccount(pImage->pszAccountName) || ScmLiveSetup || ScmSetupInProgress)
         return ERROR_SUCCESS;
+
+    /* The service SID and the required privileges: own-process services only (see SCM_TOKEN_CONFIG) */
+    RtlZeroMemory(&TokenConfig, sizeof(TokenConfig));
+    if (!pImage->bSharedProcess)
+    {
+        dwError = ScmReadTokenConfig(pService, &TokenConfig);
+        if (dwError != ERROR_SUCCESS)
+        {
+            DPRINT1("ScmReadTokenConfig() failed (Error %lu)\n", dwError);
+            return dwError;
+        }
+    }
 
     /* Get the user and domain names */
     ptr = wcschr(pImage->pszAccountName, L'\\');
@@ -460,13 +749,21 @@ ScmLogonService(
 
     DPRINT("Domain: %S  User: %S\n", pszDomainName, pszUserName);
 
-    /* Do the service logon */
-    if (!LogonUserW(pszUserName,
-                    pszDomainName,
-                    pszPassword,
-                    LOGON32_LOGON_SERVICE,
-                    LOGON32_PROVIDER_DEFAULT,
-                    &pImage->hToken))
+    /* Do the service logon; a service with a service SID gets it as a group of the logon */
+    ServiceGroups.GroupCount = 1;
+    ServiceGroups.Groups[0].Sid = TokenConfig.pServiceSid;
+    ServiceGroups.Groups[0].Attributes = SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_OWNER;
+    if (!LogonUserExExW(pszUserName,
+                        pszDomainName,
+                        pszPassword,
+                        LOGON32_LOGON_SERVICE,
+                        LOGON32_PROVIDER_DEFAULT,
+                        (TokenConfig.pServiceSid != NULL) ? &ServiceGroups : NULL,
+                        &pImage->hToken,
+                        NULL,
+                        NULL,
+                        NULL,
+                        NULL))
     {
         dwError = GetLastError();
         DPRINT1("LogonUserW() failed (Error %lu)\n", dwError);
@@ -500,7 +797,33 @@ ScmLogonService(
 
     pImage->hProfile = ProfileInfo.hProfile;
 
+    /* The default DACL of the service SID, then the privileges (after the profile: loading it may need them) */
+    if (TokenConfig.pServiceSid != NULL)
+    {
+        dwError = ScmSetServiceDefaultDacl(pImage->hToken, TokenConfig.pServiceSid);
+        if (dwError != ERROR_SUCCESS)
+            DPRINT1("ScmSetServiceDefaultDacl() failed (Error %lu)\n", dwError);
+    }
+    if (dwError == ERROR_SUCCESS && TokenConfig.pszPrivileges != NULL)
+        dwError = ScmApplyRequiredPrivileges(pService, pImage->hToken, TokenConfig.pszPrivileges);
+
+    if (dwError != ERROR_SUCCESS)
+    {
+        ScmEnableBackupRestorePrivileges(pImage->hToken, TRUE);
+        UnloadUserProfile(pImage->hToken, pImage->hProfile);
+        ScmEnableBackupRestorePrivileges(pImage->hToken, FALSE);
+        pImage->hProfile = NULL;
+    }
+
 done:
+    if (dwError != ERROR_SUCCESS && pImage->hToken != NULL)
+    {
+        CloseHandle(pImage->hToken);
+        pImage->hToken = NULL;
+    }
+
+    ScmFreeTokenConfig(&TokenConfig);
+
     if (pszPassword != NULL)
     {
         SecureZeroMemory(pszPassword, (wcslen(pszPassword) + 1) * sizeof(WCHAR));
