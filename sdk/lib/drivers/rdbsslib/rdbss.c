@@ -1223,8 +1223,10 @@ RxCancelOperationInOverflowQueue(
                 --RxFileSystemDeviceObject->OverflowQueueCount[DelayedWorkQueue];
             }
 
-            /* Clear the flag */
-            ClearFlag(RxContext->Flags, ~(RX_CONTEXT_FLAG_FSP_DELAYED_OVERFLOW_QUEUE | RX_CONTEXT_FLAG_FSP_CRITICAL_OVERFLOW_QUEUE));
+            /* Clear the flag (only the queue flags: this cleared every other
+             * flag, RX_CONTEXT_FLAG_FROM_POOL included, so the context of a
+             * request cancelled while queued was never freed) */
+            ClearFlag(RxContext->Flags, (RX_CONTEXT_FLAG_FSP_DELAYED_OVERFLOW_QUEUE | RX_CONTEXT_FLAG_FSP_CRITICAL_OVERFLOW_QUEUE));
 
             /* Time to cancel! */
             OperationToCancel = TRUE;
@@ -1255,28 +1257,33 @@ RxCancelRoutine(
     KIRQL OldIrql;
     PLIST_ENTRY Entry;
     PRX_CONTEXT RxContext;
+    BOOLEAN Found;
 
     /* Lock our contexts list */
     KeAcquireSpinLock(&RxStrucSupSpinLock, &OldIrql);
 
-    /* Now, find a context that matches the cancelled IRP */
-    Entry = RxActiveContexts.Flink;
-    while (Entry != &RxActiveContexts)
+    /* Now, find a context that matches the cancelled IRP. (The end of the
+     * walk was the test for "not found", but the walk has already moved past
+     * the match then: a match at the tail of the list, the newest context,
+     * was taken for none and its cancel was lost) */
+    Found = FALSE;
+    RxContext = NULL;
+    for (Entry = RxActiveContexts.Flink; Entry != &RxActiveContexts; Entry = Entry->Flink)
     {
         RxContext = CONTAINING_RECORD(Entry, RX_CONTEXT, ContextListEntry);
-        Entry = Entry->Flink;
 
         /* Found! */
         if (RxContext->CurrentIrp == Irp)
         {
+            Found = TRUE;
             break;
         }
     }
 
-    /* If we reached the end of the list, we didn't find any context, so zero the buffer
-     * If the context is already under cancellation, forget about it too
+    /* If we didn't find any context, or the context is already under
+     * cancellation, forget about it
      */
-    if (Entry == &RxActiveContexts || BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_CANCELLED))
+    if (!Found || BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_CANCELLED))
     {
         RxContext = NULL;
     }
