@@ -139,6 +139,15 @@ NTSTATUS
 NTAPI
 RtlLeaveHeapLock(IN OUT PHEAP_LOCK Lock);
 
+/* Critical section LockCount (critical.c): free bit, no-woken-waiter bit, -4 per waiter */
+#define RTLP_CS_FREE        1
+#define RTLP_CS_NOT_WOKEN   2
+#define RTLP_CS_WAITER      4
+
+/* TRUE when a thread waits for the section, or was woken and has not taken it yet */
+#define RtlpCriticalSectionIsContended(LockCount) \
+    (((ULONG)~(LockCount) & ~(ULONG)RTLP_CS_FREE) != 0)
+
 BOOLEAN
 NTAPI
 RtlpCheckForActiveDebugger(VOID);

@@ -754,8 +754,10 @@ RtlpHeapFeRefill(PHEAP Heap,
        slot had nothing of its size class. A thread that keeps missing gets a few more blocks of the
        class now, so that its next requests do not need the lock. Only the blocks the front end files
        under exactly one class: plain, of a class size. */
-    /* Only while another thread waits for the heap lock: a thread alone gains nothing from taking blocks it may not use */
-    if (Heap->LockVariable->CriticalSection.LockCount <= 0)
+    /* Only while the heap lock is wanted again: another thread waits for it, or the caller holds it more than once
+       (HeapLock, GlobalReAlloc). A thread alone gains nothing from taking blocks it may not use */
+    if (!RtlpCriticalSectionIsContended(Heap->LockVariable->CriticalSection.LockCount) &&
+        (Heap->LockVariable->CriticalSection.RecursionCount <= 1))
         return;
 
     if (Fe->Disabled || Index < 2 || Index >= HEAP_FE_UNITS ||
