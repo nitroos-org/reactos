@@ -951,6 +951,7 @@ session_setup_cb(struct smb2_context *smb2, int status,
         struct smb2_tree_connect_request req;
         struct smb2_pdu *pdu;
         int ret;
+        int final_must_be_signed; /* NitroOS */
 
         if (status == SMB2_STATUS_MORE_PROCESSING_REQUIRED &&
             rep->security_buffer) {
@@ -983,6 +984,20 @@ session_setup_cb(struct smb2_context *smb2, int status,
                 free_c_data(smb2, c_data);
                 return;
         }
+
+        /* NitroOS: the final SESSION_SETUP response is the only proof that
+         * the server holds the session key. It must be signed (and is
+         * verified below) when the caller or the server required signing -
+         * also when the response sets ENCRYPT_DATA, which turns smb2->sign
+         * off just below - and always on 3.1.1, where it also protects the
+         * NEGOTIATE exchange through the preauth integrity hash ([MS-SMB2]
+         * 3.2.5.3.1: "If Connection.Dialect is 3.1.1, and if
+         * SMB2_FLAGS_SIGNED is not set ... the client MUST return an
+         * error"). Guest and anonymous sessions have no key to sign with. */
+        final_must_be_signed = (smb2->sign ||
+                                    smb2->dialect == SMB2_VERSION_0311) &&
+                !(rep->session_flags & (SMB2_SESSION_FLAG_IS_GUEST |
+                                        SMB2_SESSION_FLAG_IS_NULL));
 
         if (smb2->seal_requested != SMB2_SEAL_NONE &&
             (rep->session_flags & SMB2_SESSION_FLAG_IS_ENCRYPT_DATA)) {
@@ -1072,7 +1087,7 @@ session_setup_cb(struct smb2_context *smb2, int status,
                 if (smb2->session_key == NULL || memcmp(smb2->session_key, zero_key, SMB2_KEY_SIZE) == 0) {
                         have_valid_session_key = 0;
                 }
-                if (smb2->sign && have_valid_session_key == 0) {
+                if (final_must_be_signed && have_valid_session_key == 0) { /* NitroOS: was smb2->sign */
                         smb2_close_context(smb2);
                         smb2_set_error(smb2, "Signing required by server. Session "
                                        "Key is not available %s",
@@ -1095,7 +1110,8 @@ session_setup_cb(struct smb2_context *smb2, int status,
                  * signature to check" would let an attacker on the path strip
                  * it and skip verification. See MS-SMB2 3.2.5.3.1.
                  */
-                if (smb2->sign && !(smb2->hdr.flags & SMB2_FLAGS_SIGNED)) {
+                if (final_must_be_signed && /* NitroOS: was smb2->sign */
+                    !(smb2->hdr.flags & SMB2_FLAGS_SIGNED)) {
                         smb2_close_context(smb2);
                         smb2_set_error(smb2, "Session setup reply is not "
                                        "signed but signing is required");
@@ -1111,6 +1127,8 @@ session_setup_cb(struct smb2_context *smb2, int status,
                         if (smb2_calc_signature(smb2, &smb2->in.iov[1].buf[48],
                                                 &smb2->in.iov[1],
                                                 smb2->in.niov - 1) < 0) {
+                                /* NitroOS: the session must not stay usable */
+                                smb2_close_context(smb2);
                                 c_data->cb(smb2, -EINVAL, NULL, c_data->cb_data);
                                 free_c_data(smb2, c_data);
                                 return;
@@ -1287,12 +1305,26 @@ negotiate_cb(struct smb2_context *smb2, int status,
                 return;
         }
 
+        /* NitroOS: encryption required, but the 3.1.1 server has no
+         * cipher in common with us (CipherId 0, or no encryption context):
+         * fail here instead of sealing with a cipher it did not choose */
+        if (smb2->seal_requested == SMB2_SEAL_MUST &&
+            smb2->dialect == SMB2_VERSION_0311 && smb2->cypher == 0) {
+                smb2_set_error(smb2, "Encryption required but the server "
+                               "selected no cipher");
+                smb2_close_context(smb2);
+                c_data->cb(smb2, -EACCES, NULL, c_data->cb_data);
+                free_c_data(smb2, c_data);
+                return;
+        }
+
         if (smb2->sign &&
             !(rep->security_mode & SMB2_NEGOTIATE_SIGNING_ENABLED)) {
                 smb2_set_error(smb2, "Signing requested but server "
                                "does not support signing.");
                 smb2_close_context(smb2);
-                c_data->cb(smb2, -ENOMEM, NULL, c_data->cb_data);
+                /* NitroOS: -EACCES (a local refusal, Win32 5), was -ENOMEM */
+                c_data->cb(smb2, -EACCES, NULL, c_data->cb_data);
                 free_c_data(smb2, c_data);
                 return;
         }
