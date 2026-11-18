@@ -4195,7 +4195,31 @@ RxCommonRead(
                 }
 
                 SystemBuffer = RxNewMapUserBuffer(RxContext);
-                RtlZeroMemory(SystemBuffer, ReadLength);
+                if (SystemBuffer == NULL)
+                {
+                    Status = STATUS_INSUFFICIENT_RESOURCES;
+                    _SEH2_LEAVE;
+                }
+
+                /* Without an MDL this is the caller's buffer, which another
+                 * thread can decommit meanwhile: fail the read, as Cc does
+                 * for the cached read, instead of faulting in the kernel */
+                Status = STATUS_SUCCESS;
+                _SEH2_TRY
+                {
+                    RtlZeroMemory(SystemBuffer, ReadLength);
+                }
+                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    Status = STATUS_INVALID_USER_BUFFER;
+                }
+                _SEH2_END;
+
+                if (Status == STATUS_INVALID_USER_BUFFER)
+                {
+                    _SEH2_LEAVE;
+                }
+
                 Irp->IoStatus.Information = ReadLength;
             }
         }
