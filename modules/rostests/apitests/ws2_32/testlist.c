@@ -61,6 +61,7 @@ extern void func_mcastfilter(void);
 extern void func_memleak(void);
 extern void func_nbconnect(void);
 extern void func_nonblocking(void);
+extern void func_peerclose(void);
 extern void func_nostartup(void);
 extern void func_OwnHostname(void);
 extern void func_ReverseLookup(void);
@@ -171,6 +172,7 @@ const struct test winetest_testlist[] =
     { "memleak", func_memleak },
     { "nbconnect", func_nbconnect },
     { "nonblocking", func_nonblocking },
+    { "peerclose", func_peerclose },
     { "nostartup", func_nostartup },
     { "open_osfhandle", func_open_osfhandle },
     { "OwnHostname", func_OwnHostname },

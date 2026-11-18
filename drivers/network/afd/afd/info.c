@@ -443,6 +443,28 @@ AfdQueryRouteSourceOn(PFILE_OBJECT Object, ULONG Destination, PULONG Source)
     return Status;
 }
 
+/* Whether the transport says the peer reset the connection: STATUS_CONNECTION_RESET, else STATUS_SUCCESS (or the
+ * failure of the query itself, which the caller takes for no reset) */
+NTSTATUS
+AfdQueryConnectionStatus(PFILE_OBJECT Object)
+{
+    PULONG Buffer;
+    NTSTATUS Status;
+
+    Buffer = ExAllocatePoolWithTag(NonPagedPool, sizeof(ULONG), TAG_AFD_TRANSPORT_ADDRESS);
+    if (Buffer == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    *Buffer = 0;
+
+    Status = AfdQueryTransportBuffer(Object,
+                                     TDI_QUERY_ROS_CONNECTION_STATUS,
+                                     Buffer,
+                                     sizeof(ULONG));
+
+    ExFreePoolWithTag(Buffer, TAG_AFD_TRANSPORT_ADDRESS);
+    return Status;
+}
+
 NTSTATUS
 AfdQueryRouteSource(PAFD_FCB FCB, ULONG Destination, PULONG Source)
 {

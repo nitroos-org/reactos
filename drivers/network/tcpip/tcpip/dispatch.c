@@ -775,6 +775,29 @@ NTSTATUS DispTdiQueryInformation(
         return STATUS_SUCCESS;
       }
 
+    case TDI_QUERY_ROS_CONNECTION_STATUS:
+      {
+        /* Whether the peer reset the connection: the error callback of the PCB leaves the PCB cleared and the
+         * reset as the receive status. The request carries no data */
+        PCONNECTION_ENDPOINT Connection;
+        NTSTATUS Status = STATUS_SUCCESS;
+
+        if ((ULONG_PTR)IrpSp->FileObject->FsContext2 != TDI_CONNECTION_FILE)
+          return STATUS_INVALID_PARAMETER;
+
+        Connection = (PCONNECTION_ENDPOINT)TranContext->Handle.ConnectionContext;
+        if (!Connection)
+          return STATUS_INVALID_PARAMETER;
+
+        LockObject(Connection);
+        if (Connection->SocketContext == NULL && Connection->ReceiveShutdown &&
+            Connection->ReceiveShutdownStatus == STATUS_CONNECTION_RESET)
+          Status = STATUS_CONNECTION_RESET;
+        UnlockObject(Connection);
+
+        return Status;
+      }
+
     case TDI_QUERY_ADDRESS_INFO:
       {
         PTDI_ADDRESS_INFO AddressInfo;

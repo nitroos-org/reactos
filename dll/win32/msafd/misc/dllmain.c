@@ -933,7 +933,7 @@ WSPCloseSocket(IN SOCKET Handle,
         if (LingerWait <= 0)
         {
             DisconnectInfo.Timeout.QuadPart = 0LL;
-            DisconnectInfo.DisconnectType = LingerWait < 0 ? AFD_DISCONNECT_SEND : AFD_DISCONNECT_ABORT;
+            DisconnectInfo.DisconnectType = LingerWait < 0 ? (AFD_DISCONNECT_SEND | AFD_DISCONNECT_CLOSE) : AFD_DISCONNECT_ABORT;
 
             if (((DisconnectInfo.DisconnectType & AFD_DISCONNECT_SEND) && (!Socket->SharedData->SendShutdown)) ||
                 ((DisconnectInfo.DisconnectType & AFD_DISCONNECT_ABORT) && (!Socket->SharedData->ReceiveShutdown)))

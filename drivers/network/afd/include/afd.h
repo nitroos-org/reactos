@@ -379,6 +379,7 @@ AfdSetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
 NTSTATUS AfdQueryRouteSource(PAFD_FCB FCB, ULONG Destination, PULONG Source);
 NTSTATUS AfdQueryRouteSourceOn(PFILE_OBJECT Object, ULONG Destination, PULONG Source);
+NTSTATUS AfdQueryConnectionStatus(PFILE_OBJECT Object);
 
 NTSTATUS NTAPI
 AfdGetSockName( PDEVICE_OBJECT DeviceObject, PIRP Irp,
@@ -447,6 +448,7 @@ VOID AfdFreeCapture( VOID );
 VOID AfdAbortPendingReceives( PAFD_FCB FCB );
 VOID AfdCompleteReceiveShutdown( PAFD_FCB FCB );
 VOID AfdAbortConnection( PAFD_FCB FCB );
+VOID AfdCheckPeerReset( PAFD_FCB FCB );
 PVOID GetLockedData( PIRP Irp, PIO_STACK_LOCATION IrpSp );
 BOOLEAN AfdRequestLengthValid( PIRP Irp, PIO_STACK_LOCATION IrpSp, ULONG MinLength );
 NTSTATUS LeaveIrpUntilLater( PAFD_FCB FCB, PIRP Irp, UINT Function );
