@@ -97,6 +97,7 @@ extern void func_RegSecurityQuerySet(void);
 extern void func_RegSharedKeyName(void);
 extern void func_RestrictedSidsCopy(void);
 extern void func_RestrictedTokenAccess(void);
+extern void func_RestrictedTokenCrypt(void);
 extern void func_RtlEncryptMemory(void);
 extern void func_RtlGenRandom(void);
 extern void func_RtlGenRandomChild(void);
@@ -250,6 +251,7 @@ const struct test winetest_testlist[] =
     { "RegSharedKeyName", func_RegSharedKeyName },
     { "RestrictedSidsCopy", func_RestrictedSidsCopy },
     { "RestrictedTokenAccess", func_RestrictedTokenAccess },
+    { "RestrictedTokenCrypt", func_RestrictedTokenCrypt },
     { "RtlEncryptMemory", func_RtlEncryptMemory },
     { "RtlGenRandom", func_RtlGenRandom },
     { "RtlGenRandomChild", func_RtlGenRandomChild },

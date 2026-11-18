@@ -16,6 +16,7 @@ list(APPEND SOURCE
     OwnerRightsAccess.c
     RestrictedSidsCopy.c
     RestrictedTokenAccess.c
+    RestrictedTokenCrypt.c
     CreateService.c
     CreateProcessAsUserToken.c
     CreateProcessWithLogon.c
