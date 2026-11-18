@@ -588,6 +588,100 @@ ScmSetServiceDefaultDacl(
     return dwError;
 }
 
+/*
+ * The descriptors of the process and the first thread of a service with a service SID. Measured on Windows
+ * Server 2022: such a process has the owner <logon SID> and the DACL (A;;0x1fffff;;;<logon SID>)(A;;0x1400;;;BA),
+ * and another process of the same account opens it with no access at all (not even READ_CONTROL), while a
+ * service without a service SID is owned by its account and another process of that account gets
+ * READ_CONTROL and WRITE_DAC on it. The controller cannot make the logon SID the owner (it is not an owner
+ * group of the token here), so the account stays the owner and an OWNER RIGHTS ACE limits it to READ_CONTROL;
+ * SYSTEM keeps full access (Windows: through SeDebugPrivilege). The result for another process of the
+ * account: READ_CONTROL only.
+ */
+static
+DWORD
+ScmCreateServiceProcessSd(
+    _In_ HANDLE hToken,
+    _In_ BOOL bProcess,
+    _Out_ PSECURITY_DESCRIPTOR *ppSd)
+{
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    SID_IDENTIFIER_AUTHORITY CreatorAuthority = {SECURITY_CREATOR_SID_AUTHORITY};
+    ULONG SystemSidBuffer[SECURITY_MAX_SID_SIZE / sizeof(ULONG)];
+    ULONG OwnerRightsSidBuffer[SECURITY_MAX_SID_SIZE / sizeof(ULONG)];
+    ULONG AdminsSidBuffer[SECURITY_MAX_SID_SIZE / sizeof(ULONG)];
+    PSID pSystemSid = (PSID)SystemSidBuffer, pOwnerRightsSid = (PSID)OwnerRightsSidBuffer;
+    PSID pAdminsSid = (PSID)AdminsSidBuffer, pLogonSid = NULL;
+    PTOKEN_GROUPS pGroups = NULL;
+    PSECURITY_DESCRIPTOR pSd = NULL;
+    PACL pDacl;
+    DWORD dwSize = 0, dwError = ERROR_SUCCESS, i;
+
+    *ppSd = NULL;
+    GetTokenInformation(hToken, TokenGroups, NULL, 0, &dwSize);
+    pGroups = HeapAlloc(GetProcessHeap(), 0, dwSize ? dwSize : sizeof(TOKEN_GROUPS));
+    if (pGroups == NULL)
+        return ERROR_NOT_ENOUGH_MEMORY;
+    if (!GetTokenInformation(hToken, TokenGroups, pGroups, dwSize, &dwSize))
+    {
+        dwError = GetLastError();
+        goto done;
+    }
+    for (i = 0; i < pGroups->GroupCount; i++)
+    {
+        if ((pGroups->Groups[i].Attributes & SE_GROUP_LOGON_ID) == SE_GROUP_LOGON_ID)
+        {
+            pLogonSid = pGroups->Groups[i].Sid;
+            break;
+        }
+    }
+    if (pLogonSid == NULL)
+    {
+        dwError = ERROR_NO_SUCH_LOGON_SESSION;
+        goto done;
+    }
+
+    RtlInitializeSid(pSystemSid, &NtAuthority, 1);
+    *RtlSubAuthoritySid(pSystemSid, 0) = SECURITY_LOCAL_SYSTEM_RID;
+    RtlInitializeSid(pOwnerRightsSid, &CreatorAuthority, 1);
+    *RtlSubAuthoritySid(pOwnerRightsSid, 0) = SECURITY_CREATOR_OWNER_RIGHTS_RID;
+    RtlInitializeSid(pAdminsSid, &NtAuthority, 2);
+    *RtlSubAuthoritySid(pAdminsSid, 0) = SECURITY_BUILTIN_DOMAIN_RID;
+    *RtlSubAuthoritySid(pAdminsSid, 1) = DOMAIN_ALIAS_RID_ADMINS;
+
+    dwSize = SECURITY_DESCRIPTOR_MIN_LENGTH + sizeof(ACL) + 4 * FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart) +
+             RtlLengthSid(pLogonSid) + RtlLengthSid(pSystemSid) + RtlLengthSid(pOwnerRightsSid) +
+             RtlLengthSid(pAdminsSid);
+    pSd = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, dwSize);
+    if (pSd == NULL)
+    {
+        dwError = ERROR_NOT_ENOUGH_MEMORY;
+        goto done;
+    }
+    pDacl = (PACL)((PBYTE)pSd + SECURITY_DESCRIPTOR_MIN_LENGTH);
+    if (!InitializeSecurityDescriptor(pSd, SECURITY_DESCRIPTOR_REVISION) ||
+        !InitializeAcl(pDacl, dwSize - SECURITY_DESCRIPTOR_MIN_LENGTH, ACL_REVISION) ||
+        !AddAccessAllowedAce(pDacl, ACL_REVISION, GENERIC_ALL, pLogonSid) ||
+        !AddAccessAllowedAce(pDacl, ACL_REVISION, GENERIC_ALL, pSystemSid) ||
+        !AddAccessAllowedAce(pDacl, ACL_REVISION, READ_CONTROL, pOwnerRightsSid) ||
+        (bProcess && !AddAccessAllowedAce(pDacl, ACL_REVISION,
+                                          PROCESS_QUERY_INFORMATION | 0x1000 /* QUERY_LIMITED_INFORMATION */,
+                                          pAdminsSid)) ||
+        !SetSecurityDescriptorDacl(pSd, TRUE, pDacl, FALSE))
+    {
+        dwError = GetLastError();
+        goto done;
+    }
+    *ppSd = pSd;
+    pSd = NULL;
+
+done:
+    if (pSd != NULL)
+        HeapFree(GetProcessHeap(), 0, pSd);
+    HeapFree(GetProcessHeap(), 0, pGroups);
+    return dwError;
+}
+
 static
 DWORD
 ScmApplyRequiredPrivileges(
@@ -803,6 +897,7 @@ ScmLogonService(
         dwError = ScmSetServiceDefaultDacl(pImage->hToken, TokenConfig.pServiceSid);
         if (dwError != ERROR_SUCCESS)
             DPRINT1("ScmSetServiceDefaultDacl() failed (Error %lu)\n", dwError);
+        pImage->bServiceSid = TRUE;
     }
     if (dwError == ERROR_SUCCESS && TokenConfig.pszPrivileges != NULL)
         dwError = ScmApplyRequiredPrivileges(pService, pImage->hToken, TokenConfig.pszPrivileges);
@@ -2887,6 +2982,7 @@ ScmStartUserModeService(PSERVICE Service,
     PROCESS_INFORMATION ProcessInformation;
     STARTUPINFOW StartupInfo;
     LPVOID lpEnvironment;
+    SECURITY_ATTRIBUTES ProcessSa = {0}, ThreadSa = {0};
     BOOL Result;
     DWORD dwError = ERROR_SUCCESS;
 
@@ -2913,6 +3009,24 @@ ScmStartUserModeService(PSERVICE Service,
             lpEnvironment = NULL;
         }
 
+        /* A service with a service SID: its process and thread admit its logon, not its whole account */
+        if (Service->lpImage->bServiceSid)
+        {
+            dwError = ScmCreateServiceProcessSd(Service->lpImage->hToken, TRUE, &ProcessSa.lpSecurityDescriptor);
+            if (dwError == ERROR_SUCCESS)
+                dwError = ScmCreateServiceProcessSd(Service->lpImage->hToken, FALSE, &ThreadSa.lpSecurityDescriptor);
+            if (dwError != ERROR_SUCCESS)
+            {
+                DPRINT1("ScmCreateServiceProcessSd() failed (Error %lu)\n", dwError);
+                if (lpEnvironment)
+                    DestroyEnvironmentBlock(lpEnvironment);
+                Result = FALSE;
+                goto SdQuit;
+            }
+            ProcessSa.nLength = ThreadSa.nLength = sizeof(SECURITY_ATTRIBUTES);
+            ProcessSa.bInheritHandle = ThreadSa.bInheritHandle = FALSE;
+        }
+
         /* Impersonate the new user */
         Result = ImpersonateLoggedOnUser(Service->lpImage->hToken);
         if (Result)
@@ -2921,8 +3035,8 @@ ScmStartUserModeService(PSERVICE Service,
             Result = CreateProcessAsUserW(Service->lpImage->hToken,
                                           NULL,
                                           Service->lpImage->pszImagePath,
-                                          NULL,
-                                          NULL,
+                                          Service->lpImage->bServiceSid ? &ProcessSa : NULL,
+                                          Service->lpImage->bServiceSid ? &ThreadSa : NULL,
                                           FALSE,
                                           CREATE_UNICODE_ENVIRONMENT | DETACHED_PROCESS | CREATE_SUSPENDED,
                                           lpEnvironment,
@@ -2985,6 +3099,12 @@ ScmStartUserModeService(PSERVICE Service,
 
     if (lpEnvironment)
         DestroyEnvironmentBlock(lpEnvironment);
+
+SdQuit:
+    if (ProcessSa.lpSecurityDescriptor != NULL)
+        HeapFree(GetProcessHeap(), 0, ProcessSa.lpSecurityDescriptor);
+    if (ThreadSa.lpSecurityDescriptor != NULL)
+        HeapFree(GetProcessHeap(), 0, ThreadSa.lpSecurityDescriptor);
 
     if (!Result)
     {
