@@ -824,6 +824,16 @@ static BOOL AppendFeature(const FM_FEATURE *f, FM_FEATURE **parr, int *pcount, i
     return TRUE;
 }
 
+/* [Source] HideOnOtherArch=1 together with Arch=: on a build the Arch list does not name, the feature is not listed
+ * at all (instead of being listed as "not available"). Only for features that do not exist there. */
+static BOOL ManifestHiddenHere(LPCWSTR manifest)
+{
+    WCHAR arch[64];
+    if (!GetPrivateProfileIntW(L"Source", L"HideOnOtherArch", 0, manifest)) return FALSE;
+    GetPrivateProfileStringW(L"Source", L"Arch", L"", arch, ARRAYSIZE(arch), manifest);
+    return arch[0] && !FmArchListed(arch);
+}
+
 /* Append every valid manifest in dir (*.ini) to the growing array. */
 static void EnumDir(LPCWSTR dir, BOOL fast, FM_FEATURE **parr, int *pcount, int *pcap)
 {
@@ -840,6 +850,7 @@ static void EnumDir(LPCWSTR dir, BOOL fast, FM_FEATURE **parr, int *pcount, int 
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
         StringCchPrintfW(path, MAX_PATH, L"%s\\%s", dir, fd.cFileName);
         if (!LoadManifestEx(path, &f, fast)) continue;
+        if (ManifestHiddenHere(path)) continue;
         FinishEntry(&f, -1);
         if (!AppendFeature(&f, parr, pcount, pcap)) break;
     } while (FindNextFileW(h, &fd));
@@ -1210,10 +1221,13 @@ static void RevertRegUndo(LPCWSTR line, FILE *log)
 
 /* ---- driver/service registration ----------------------------------------- */
 
-/* [Service] spec: Name|Type|StartType|ImagePath|DisplayName|Run
+/* [Service] spec: Name|Type|StartType|ImagePath|DisplayName|Run|Account
  *   Type      = filesys | kernel | win32   (SERVICE_FILE_SYSTEM_DRIVER / KERNEL_DRIVER / WIN32_OWN_PROCESS)
  *   StartType = boot | system | auto | demand | disabled
  *   Run       = 1 => start the service right after creating it (failure is logged, not fatal)
+ *   Account   = optional account the service runs as, e.g. "NT AUTHORITY\LocalService" or the virtual account
+ *               "NT SERVICE\<name>" (no password); empty = LocalSystem as before. Only for win32 services.
+ *   %VAR% in ImagePath is expanded (CreateService stores the path as given).
  * Whether we created the service is recorded in the state value "Services"
  * (one service name per line) so disable removes exactly what enable made. */
 static DWORD ParseSvcType(LPCWSTR s)
@@ -1232,10 +1246,53 @@ static DWORD ParseSvcStart(LPCWSTR s)
     return SERVICE_DEMAND_START;
 }
 
+/* [Hooks] Enable= / Disable= : one command line each, run by featmgr (with its own privileges) once the files,
+ * registry entries and services of the feature are in place (Enable) or before they are removed (Disable).
+ * %VAR% is expanded; the program is started without a shell, no window, and must finish within 120 s (it is
+ * killed otherwise). Exit code 0 = success. A failed Enable rolls the whole feature back and runs Disable once
+ * (so a hook that did half of its work can undo it); a failed Disable is logged and does not stop the removal.
+ * The command line comes from the manifest in the image's catalog, never from a download. */
+static HRESULT RunHook(LPCWSTR manifest, LPCWSTR key, FILE *log)
+{
+    WCHAR raw[1024], cmd[1024];
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    DWORD code = 1, w;
+
+    GetPrivateProfileStringW(L"Hooks", key, L"", raw, ARRAYSIZE(raw), manifest);
+    if (!raw[0]) return S_FALSE;                      /* no hook */
+    if (!ExpandEnvironmentStringsW(raw, cmd, ARRAYSIZE(cmd)) || wcslen(cmd) >= ARRAYSIZE(cmd) - 1)
+    {
+        LOGF(log, L"  hook %s: command line too long\n", key);
+        return E_INVALIDARG;
+    }
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    LOGF(log, L"  hook %s: %s\n", key, cmd);
+    if (!CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
+    {
+        LOGF(log, L"  hook %s: cannot start (%lu)\n", key, GetLastError());
+        return HRESULT_FROM_WIN32(GetLastError());
+    }
+    w = WaitForSingleObject(pi.hProcess, 120000);
+    if (w != WAIT_OBJECT_0)
+    {
+        TerminateProcess(pi.hProcess, 1);
+        WaitForSingleObject(pi.hProcess, 5000);
+        LOGF(log, L"  hook %s: timed out after 120 s, killed\n", key);
+        CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
+        return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+    }
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
+    LOGF(log, L"  hook %s: exit code %lu\n", key, code);
+    return code == 0 ? S_OK : E_FAIL;
+}
+
 static HRESULT ApplyServiceAction(LPCWSTR spec, HKEY state, FILE *log)
 {
-    WCHAR buf[1024];
-    WCHAR *tok[6] = {0};
+    WCHAR buf[1024], image[MAX_PATH + 16];
+    WCHAR *tok[7] = {0};
     int ti = 0;
     WCHAR *p, *start;
     SC_HANDLE scm, svc;
@@ -1249,19 +1306,31 @@ static HRESULT ApplyServiceAction(LPCWSTR spec, HKEY state, FILE *log)
         {
             BOOL end = (*p == L'\0');
             *p = L'\0';
-            if (ti < 6) tok[ti++] = start;
+            if (ti < 7) tok[ti++] = start;
             start = p + 1;
             if (end) break;
         }
     }
     if (ti < 4) { LOGF(log, L"  bad service spec: %s\n", spec); return E_INVALIDARG; }
+    /* an account only makes sense for a user-mode service, and a path expanded here must still fit */
+    if (ti > 6 && tok[6][0] && ParseSvcType(tok[1]) != SERVICE_WIN32_OWN_PROCESS)
+    {
+        LOGF(log, L"  bad service spec (an account needs Type=win32): %s\n", spec);
+        return E_INVALIDARG;
+    }
+    if (!ExpandEnvironmentStringsW(tok[3], image, ARRAYSIZE(image)) || wcslen(image) >= MAX_PATH)
+    {
+        LOGF(log, L"  bad service spec (image path too long): %s\n", spec);
+        return E_INVALIDARG;
+    }
 
     scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_ALL_ACCESS);
     if (!scm) { LOGF(log, L"  ERROR: OpenSCManager (%lu)\n", GetLastError()); return HRESULT_FROM_WIN32(GetLastError()); }
 
     svc = CreateServiceW(scm, tok[0], (ti > 4 && tok[4][0]) ? tok[4] : tok[0],
                          SERVICE_ALL_ACCESS, ParseSvcType(tok[1]), ParseSvcStart(tok[2]),
-                         SERVICE_ERROR_NORMAL, tok[3], NULL, NULL, NULL, NULL, NULL);
+                         SERVICE_ERROR_NORMAL, image, NULL, NULL, NULL,
+                         (ti > 6 && tok[6][0]) ? tok[6] : NULL, NULL);
     if (!svc)
     {
         DWORD e = GetLastError();
@@ -3163,7 +3232,7 @@ static HRESULT FmEnableInner(LPCWSTR id, FILE *log)
     WCHAR payloadDir[MAX_PATH], now[32];
     WCHAR *sect, *p, *fetched = NULL, want[72];
     HRESULT hr = S_OK;
-    BOOL hosted;
+    BOOL hosted, hookRan = FALSE;
 
     if (!FmFindFeature(id, &f))
     {
@@ -3348,7 +3417,15 @@ static HRESULT FmEnableInner(LPCWSTR id, FILE *log)
             hr = ApplyServiceAction(eq + 1, state, log);
             if (FAILED(hr)) goto done;
         }
+        HeapFree(GetProcessHeap(), 0, sect);
+        sect = NULL;
     }
+
+    /* [Hooks] Enable: whatever the files and services cannot express (an access list, a firewall rule) */
+    hookRan = TRUE;
+    hr = RunHook(f.ManifestPath, L"Enable", log);
+    if (FAILED(hr)) goto done;
+    if (hr == S_FALSE) { hr = S_OK; hookRan = FALSE; }
 
     UtcNow(now, 32);
     SetStateSz(state, L"State", L"Enabled");
@@ -3363,6 +3440,7 @@ done:
     if (FAILED(hr))
     {
         LOGF(log, L"enable FAILED (0x%08lx); rolling back\n", hr);
+        if (hookRan) RunHook(f.ManifestPath, L"Disable", log);   /* before the files it uses go away */
         if (state) RevertState(state, log);
     }
     if (state) RegCloseKey(state);
@@ -3547,6 +3625,13 @@ static HRESULT DisableOne(LPCWSTR id, DWORD flags, FILE *log)
     RegDeleteValueW(state, L"PendingFiles");
     RegDeleteValueW(state, L"PendingServices");
     RegDeleteValueW(state, L"PendingReboot");
+    {
+        /* [Hooks] Disable runs first: it may need the service and the files that RevertState removes */
+        FM_FEATURE hf;
+        if (FmFindFeature(id, &hf) && hf.Tier == FM_TIER_OS)
+            if (FAILED(RunHook(hf.ManifestPath, L"Disable", log)))
+                LOGF(log, L"warn: the Disable hook failed; removing the feature anyway\n");
+    }
     RevertState(state, log);
     {
         DWORD cb = 0;
