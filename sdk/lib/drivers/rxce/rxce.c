@@ -3731,6 +3731,11 @@ RxFindOrConstructVirtualNetRoot(
                     {
                         RxReferenceVNetRoot(SavedVNetRoot);
                     }
+                    /* What follows uses the one kept and referenced, not the
+                     * one just dereferenced (another logon's: it was handed
+                     * to the caller without a reference, and dereferenced
+                     * again when the create ended) */
+                    VNetRoot = SavedVNetRoot;
                 }
             }
 
