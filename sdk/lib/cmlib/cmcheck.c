@@ -2016,7 +2016,9 @@ HvValidateHive(
              * is not bogus.
              */
             Bin = GET_HHIVE_BIN(Hive, StorageIndex, BlockIndex);
-            if (Bin->Size > (StorageLength * HBLOCK_SIZE) ||
+            /* The loop advances by the bin's size: less than a block would never end it */
+            if (Bin->Size < HBLOCK_SIZE || (Bin->Size % HBLOCK_SIZE) != 0 ||
+                Bin->Size > (StorageLength * HBLOCK_SIZE) ||
                 (Bin->FileOffset / HBLOCK_SIZE) != BlockIndex)
             {
                 DPRINT1("Bin size or offset is corrupt (bin size %u, file offset %u, storage length %u)\n",
