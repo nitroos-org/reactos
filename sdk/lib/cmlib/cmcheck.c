@@ -1402,6 +1402,21 @@ CmpValidateKey(
     }
 
     /*
+     * A key of a hive file is never a hive exit (a link node of the master
+     * hive, made in memory when a hive is linked): its subkey fields would be
+     * taken for a pointer to another hive (CmpHandleExitNode). The flag comes
+     * from the file, which may have been edited (a user's profile hive): drop
+     * it, the key is checked as the ordinary key it is.
+     */
+    if (CellData->u.KeyNode.Flags & KEY_HIVE_EXIT)
+    {
+        DPRINT1("Key 0x%x is marked as a hive exit in a hive file, flag dropped\n", CurrentCell);
+        CellData->u.KeyNode.Flags &= ~KEY_HIVE_EXIT;
+        if (FixHive)
+            HvMarkCellDirty(Hive, CurrentCell, FALSE);
+    }
+
+    /*
      * Validate the security cell. A bad one is not a reason to refuse the hive
      * or to stop the boot: the key loses its stored descriptor (Security is
      * reset to HCELL_NIL, the state of every key of a hive that has none) and
