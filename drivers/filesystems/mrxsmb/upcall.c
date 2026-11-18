@@ -96,8 +96,15 @@ NTSTATUS
 SmbEngineCreateDevice(PDRIVER_OBJECT DriverObject)
 {
     UNICODE_STRING Name = RTL_CONSTANT_STRING(NITRO_SMBRDR_ENGINE_DEVICE);
-    /* SYSTEM, LocalService (the engine service account) and administrators */
-    UNICODE_STRING Sddl = RTL_CONSTANT_STRING(L"D:P(A;;GA;;;SY)(A;;GA;;;LS)(A;;GA;;;BA)");
+    /*
+     * SYSTEM and the service SID of the engine service only: NT SERVICE\smbengine =
+     * S-1-5-80-<SHA-1 of "SMBENGINE" in UTF-16LE> (the service controller puts it into the engine's
+     * token: ServiceSidType 1). Not LocalService: every LocalService process would be admitted (and
+     * receive users' tokens while no engine is attached). Not administrators: test engines that run
+     * elevated open the device as SYSTEM.
+     */
+    UNICODE_STRING Sddl = RTL_CONSTANT_STRING(
+        L"D:P(A;;GA;;;SY)(A;;GA;;;S-1-5-80-589501614-767465580-2714278881-1358990225-2449632110)");
 
     return IoCreateDeviceSecure(DriverObject,
                                 0,
