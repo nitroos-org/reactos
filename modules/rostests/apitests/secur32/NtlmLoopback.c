@@ -586,7 +586,7 @@ START_TEST(NtlmLoopback)
     /* the account and the machine name as the domain, in other cases */
     test_refusals(&sc, g_user, L".", L"wrong password", NULL, SEC_E_LOGON_DENIED, "wrong password");
     test_refusals(&sc, L"nosuchuser_ntlm", L".", TEST_PASSWORD, NULL, SEC_E_LOGON_DENIED, "unknown user");
-    test_refusals(&sc, g_user, L".", TEST_PASSWORD, tamper_mic, SEC_E_MESSAGE_ALTERED, "altered MIC");
+    test_refusals(&sc, g_user, L".", TEST_PASSWORD, tamper_mic, SEC_E_INVALID_TOKEN, "altered MIC");
     test_refusals(&sc, g_user, L".", TEST_PASSWORD, tamper_response, SEC_E_LOGON_DENIED, "altered response");
 
     /* the Negotiate package over the same exchange (Oracle's NTS adapter and others ask for it): the server context

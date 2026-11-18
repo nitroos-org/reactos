@@ -12,6 +12,9 @@ extern void func_AcquireCredentialsHandleVersions(void);
 extern void func_InvalidHandles(void);
 extern void func_LsaConnectUnprivileged(void);
 extern void func_LsaLogonContext(void);
+extern void func_NegotiateBusy(void);
+extern void func_NegotiatePending(void);
+extern void func_NegotiateReassembly(void);
 extern void func_NegotiateSpnego(void);
 extern void func_ReadConfigHandles(void);
 extern void func_SchannelHandshake(void);
@@ -33,6 +36,9 @@ const struct test winetest_testlist[] =
     { "InvalidHandles", func_InvalidHandles },
     { "LsaConnectUnprivileged", func_LsaConnectUnprivileged },
     { "LsaLogonContext", func_LsaLogonContext },
+    { "NegotiateBusy", func_NegotiateBusy },
+    { "NegotiatePending", func_NegotiatePending },
+    { "NegotiateReassembly", func_NegotiateReassembly },
     { "NegotiateSpnego", func_NegotiateSpnego },
     { "ReadConfigHandles", func_ReadConfigHandles },
     { "SchannelHandshake", func_SchannelHandshake },

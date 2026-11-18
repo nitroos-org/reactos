@@ -214,9 +214,19 @@ typedef struct
     BYTE *mech_list;            /* the DER MechTypeList the mechListMIC covers */
     ULONG mech_list_len;
     BYTE *pending;              /* server: the first part of a token that arrives in pieces */
-    ULONG pending_len;
-    ULONG pending_total;
+    ULONG pending_len;          /* bytes kept */
+    ULONG pending_cap;          /* bytes allocated (grows with what arrives, up to pending_total) */
+    ULONG pending_total;        /* the length the token's own outer header announced */
+    volatile LONG use;          /* NEGO_USE_BUSY: a call is inside the context; NEGO_USE_DOOMED: Delete was called */
 } NegoContext;
+
+#define NEGO_USE_BUSY   1
+#define NEGO_USE_DOOMED 2
+
+/* The status of a call that finds the context in use by another call. SSPI wants the calls on one context serialised;
+ * a caller that does not gets this instead of a race. Windows' status for it was not measured: VERIFY ON PEER (the
+ * probe: two threads in InitializeSecurityContext or MakeSignature on one context). */
+#define NEGO_BUSY_STATUS SEC_E_INVALID_HANDLE
 
 /* the mechanisms this package can negotiate, in the order it offers them */
 static const BYTE *const nego_mech_oids[] = { spnego_oid_ntlm };
@@ -252,6 +262,51 @@ static void nego_free_context(NegoContext *ctx)
     HeapFree(GetProcessHeap(), 0, ctx->pending);
     ctx->magic = 0;
     HeapFree(GetProcessHeap(), 0, ctx);
+}
+
+/* The context of a handle, claimed for the length of one call. NULL: not a context of this package, deleted, or in
+ * use by another call (the same status for all three). Every call that uses the context, apart from the ones that
+ * make it, is between nego_enter and nego_leave, so no two run inside one context together. */
+static NegoContext *nego_enter(PCtxtHandle phContext)
+{
+    NegoContext *ctx = nego_get_context(phContext);
+
+    if (!ctx) return NULL;
+    if (InterlockedCompareExchange(&ctx->use, NEGO_USE_BUSY, 0) != 0)
+    {
+        WARN("context %p is in use by another call (or deleted)\n", ctx);
+        return NULL;
+    }
+    return ctx;
+}
+
+static void nego_leave(NegoContext *ctx)
+{
+    LONG old, cur = ctx->use;
+
+    /* the call is over; when Delete came while it ran, the context goes now */
+    for (;;)
+    {
+        old = InterlockedCompareExchange(&ctx->use, cur & ~NEGO_USE_BUSY, cur);
+        if (old == cur) break;
+        cur = old;
+    }
+    if (cur & NEGO_USE_DOOMED) nego_free_context(ctx);
+}
+
+/* DeleteSecurityContext: now when no call is inside the context, else the call that is leaves it */
+static void nego_delete(NegoContext *ctx)
+{
+    LONG old, cur = ctx->use;
+
+    for (;;)
+    {
+        if (cur & NEGO_USE_DOOMED) return;      /* deleted already: whoever did it frees it */
+        old = InterlockedCompareExchange(&ctx->use, cur | NEGO_USE_DOOMED, cur);
+        if (old == cur) break;
+        cur = old;
+    }
+    if (!(cur & NEGO_USE_BUSY)) nego_free_context(ctx);
 }
 
 static void nego_set_handle(PCtxtHandle h, NegoContext *ctx)
@@ -636,17 +691,23 @@ static SECURITY_STATUS SEC_ENTRY nego_InitializeSecurityContextW(
         return nego_client_first(phCredential, pszTargetName, fContextReq, TargetDataRep, pInput, phNewContext,
                                  pOutput, pfContextAttr, ptsExpiry);
 
-    ctx = nego_get_context(phContext);
-    if (!ctx || ctx->server) return SEC_E_INVALID_HANDLE;
+    ctx = nego_enter(phContext);
+    if (!ctx) return NEGO_BUSY_STATUS;
+    if (ctx->server)
+    {
+        nego_leave(ctx);
+        return SEC_E_INVALID_HANDLE;
+    }
     if (ctx->mode == NEGO_RAW)
     {
         ret = ntlm_InitializeSecurityContextW(phCredential, &ctx->ntlm, pszTargetName, fContextReq | ISC_REQ_INTEGRITY, Reserved1,
                                               TargetDataRep, pInput, Reserved2, &ctx->ntlm, pOutput, pfContextAttr,
                                               ptsExpiry);
     }
+    else if (!nego_input_token(pInput, &in, &in_len) || !in_len)
+        ret = SEC_E_INVALID_TOKEN;
     else
     {
-        if (!nego_input_token(pInput, &in, &in_len) || !in_len) return SEC_E_INVALID_TOKEN;
         ctx->req = fContextReq;
         switch (ctx->state)
         {
@@ -658,11 +719,14 @@ static SECURITY_STATUS SEC_ENTRY nego_InitializeSecurityContextW(
             ret = nego_client_final(ctx, in, in_len, pOutput, pfContextAttr, ptsExpiry);
             break;
         default:
-            return SEC_E_INVALID_HANDLE;
+            ret = SEC_E_INVALID_HANDLE;
+            goto done;
         }
     }
     if ((ret == SEC_E_OK || ret == SEC_I_CONTINUE_NEEDED) && phNewContext != phContext)
         nego_set_handle(phNewContext, ctx);
+done:
+    nego_leave(ctx);
     return ret;
 }
 
@@ -839,6 +903,40 @@ static SECURITY_STATUS nego_server_auth(NegoContext *ctx, PCredHandle phCredenti
     return SEC_E_OK;
 }
 
+#define NEGO_TAG_INIT   0x60    /* the outer tag of a NegTokenInit (GSS InitialContextToken) */
+#define NEGO_TAG_RESP   0xa1    /* the outer tag of a NegTokenResp */
+
+static void nego_server_collected(NegoContext *ctx);
+
+/* What the peer can make this context hold is bounded by what it sent: the kept part has room for the bytes that
+ * arrived (and doubles from there), never beyond the length the token's own outer header announced, and never for the
+ * announced length before the bytes are there. A token that announces more than SPNEGO_MAX_TOKEN is refused with the
+ * first piece (spnego_outer_length). */
+static BOOL nego_pending_reserve(NegoContext *ctx, ULONG want)
+{
+    ULONG cap;
+    BYTE *p;
+
+    if (want <= ctx->pending_cap) return TRUE;
+    cap = ctx->pending_cap > want / 2 ? ctx->pending_cap * 2 : want;
+    if (cap < want) cap = want;
+    if (cap > ctx->pending_total) cap = ctx->pending_total;
+    p = ctx->pending ? HeapReAlloc(GetProcessHeap(), 0, ctx->pending, cap) : HeapAlloc(GetProcessHeap(), 0, cap);
+    if (!p) return FALSE;
+    ctx->pending = p;
+    ctx->pending_cap = cap;
+    return TRUE;
+}
+
+/* The kept part is dropped with every refusal, and the context takes nothing more (as after any token it refused
+ * for the shape of the exchange): the peer cannot keep a buffer on a context it has spoiled. */
+static SECURITY_STATUS nego_pending_fail(NegoContext *ctx, SECURITY_STATUS ret)
+{
+    nego_server_collected(ctx);
+    ctx->state = NS_SERVER_DEAD;
+    return ret;
+}
+
 /* A client token may arrive in parts (Windows reassembles them, measured): an SPNEGO token whose header is complete,
  * with some content, and whose outer length says there is more, is kept and SEC_I_CONTINUE_NEEDED goes back without
  * output. Returns SEC_E_OK with (*data, *len) = the whole token when it is complete. */
@@ -852,6 +950,7 @@ static SECURITY_STATUS nego_server_collect(NegoContext *ctx, const BYTE **data, 
         ULONG need = ctx->pending_total - ctx->pending_len;
         ULONG take = *len < need ? *len : need;
 
+        if (!nego_pending_reserve(ctx, ctx->pending_len + take)) return nego_pending_fail(ctx, SEC_E_INSUFFICIENT_MEMORY);
         memcpy(ctx->pending + ctx->pending_len, *data, take);
         ctx->pending_len += take;
         if (ctx->pending_len < ctx->pending_total)
@@ -860,12 +959,17 @@ static SECURITY_STATUS nego_server_collect(NegoContext *ctx, const BYTE **data, 
             return SEC_E_OK;
         }
         /* the completing part may not carry bytes behind the token (the parts are only ever one token) */
-        if (take < *len) return SEC_E_INVALID_TOKEN;
+        if (take < *len) return nego_pending_fail(ctx, SEC_E_INVALID_TOKEN);
         *data = ctx->pending;
         *len = ctx->pending_len;
         return SEC_E_OK;
     }
     if (nego_is_raw_ntlm(*data, *len)) return SEC_E_OK;
+    /* Only an SPNEGO token is kept in pieces: a NegTokenInit (APPLICATION 0) or a NegTokenResp ([1]). Any other token
+     * is passed on as it is. A raw NTLM token has no length to wait for: its first bytes ('N', 'T', ...) parse as a DER
+     * header of some length, and keeping such a prefix would end with the layers above and below seeing different bytes
+     * (the whole token here, the last piece in NTLM). */
+    if (!*len || ((*data)[0] != NEGO_TAG_INIT && (*data)[0] != NEGO_TAG_RESP)) return SEC_E_OK;
     if (spnego_outer_length(*data, *len, &total) != SPNEGO_OK) return SEC_E_INVALID_TOKEN;
     if (total <= *len) return SEC_E_OK;
     /* the header and at least one byte of content: the length of the header is total minus the content length */
@@ -874,11 +978,14 @@ static SECURITY_STATUS nego_server_collect(NegoContext *ctx, const BYTE **data, 
 
         if (*len <= hdr) return SEC_E_INVALID_TOKEN;
     }
-    ctx->pending = HeapAlloc(GetProcessHeap(), 0, total);
-    if (!ctx->pending) return SEC_E_INSUFFICIENT_MEMORY;
+    ctx->pending_total = total;
+    if (!nego_pending_reserve(ctx, *len))
+    {
+        nego_server_collected(ctx);
+        return SEC_E_INSUFFICIENT_MEMORY;
+    }
     memcpy(ctx->pending, *data, *len);
     ctx->pending_len = *len;
-    ctx->pending_total = total;
     *more = TRUE;
     return SEC_E_OK;
 }
@@ -887,7 +994,7 @@ static void nego_server_collected(NegoContext *ctx)
 {
     HeapFree(GetProcessHeap(), 0, ctx->pending);
     ctx->pending = NULL;
-    ctx->pending_len = ctx->pending_total = 0;
+    ctx->pending_len = ctx->pending_cap = ctx->pending_total = 0;
 }
 
 /***********************************************************************
@@ -898,9 +1005,9 @@ static SECURITY_STATUS SEC_ENTRY nego_AcceptSecurityContext(
     ULONG fContextReq, ULONG TargetDataRep, PCtxtHandle phNewContext,
     PSecBufferDesc pOutput, ULONG *pfContextAttr, PTimeStamp ptsExpiry)
 {
-    NegoContext *ctx;
-    const BYTE *in;
-    ULONG in_len, attr = 0;
+    NegoContext *ctx, *claimed = NULL;
+    const BYTE *in, *caller_in;
+    ULONG in_len, caller_len, attr = 0;
     BOOL fresh = FALSE, more;
     SECURITY_STATUS ret;
 
@@ -910,6 +1017,8 @@ static SECURITY_STATUS SEC_ENTRY nego_AcceptSecurityContext(
 
     if (!phNewContext) return SEC_E_INVALID_HANDLE;
     nego_input_token(pInput, &in, &in_len);
+    caller_in = in;
+    caller_len = in_len;
 
     if (!phContext)
     {
@@ -942,13 +1051,26 @@ static SECURITY_STATUS SEC_ENTRY nego_AcceptSecurityContext(
     }
     else
     {
-        ctx = nego_get_context(phContext);
-        if (!ctx || !ctx->server) return SEC_E_INVALID_HANDLE;
+        ctx = nego_enter(phContext);
+        if (!ctx) return NEGO_BUSY_STATUS;
+        claimed = ctx;
+        if (!ctx->server)
+        {
+            ret = SEC_E_INVALID_HANDLE;
+            goto out;
+        }
         if (ctx->mode == NEGO_RAW)
-            return ntlm_AcceptSecurityContext(phCredential, &ctx->ntlm, pInput, fContextReq, TargetDataRep,
-                                              &ctx->ntlm, pOutput, pfContextAttr, ptsExpiry);
+        {
+            ret = ntlm_AcceptSecurityContext(phCredential, &ctx->ntlm, pInput, fContextReq, TargetDataRep, &ctx->ntlm,
+                                             pOutput, pfContextAttr, ptsExpiry);
+            goto out;
+        }
         /* no token on a context that goes on: SEC_E_INVALID_HANDLE (measured) */
-        if (!in_len) return SEC_E_INVALID_HANDLE;
+        if (!in_len)
+        {
+            ret = SEC_E_INVALID_HANDLE;
+            goto out;
+        }
     }
     ctx->req = fContextReq;
 
@@ -969,12 +1091,17 @@ static SECURITY_STATUS SEC_ENTRY nego_AcceptSecurityContext(
         {
             if (nego_is_raw_ntlm(in, in_len))
             {
-                /* a raw NTLM NEGOTIATE: the exchange is plain NTLM (Windows accepts it, measured) */
-                if (ctx->have_ntlm) { ret = SEC_E_INVALID_TOKEN; break; }
-                ctx->mode = NEGO_RAW;
-                ret = ntlm_AcceptSecurityContext(phCredential, NULL, pInput, fContextReq, TargetDataRep, &ctx->ntlm,
-                                                 pOutput, pfContextAttr, ptsExpiry);
-                if (ret == SEC_E_OK || ret == SEC_I_CONTINUE_NEEDED) ctx->have_ntlm = TRUE;
+                /* a raw NTLM NEGOTIATE: the exchange is plain NTLM (Windows accepts it, measured). NTLM is handed the
+                 * caller's input buffer, so what was checked here must be that buffer, whole */
+                if (ctx->have_ntlm || in != caller_in || in_len != caller_len)
+                    ret = SEC_E_INVALID_TOKEN;
+                else
+                {
+                    ctx->mode = NEGO_RAW;
+                    ret = ntlm_AcceptSecurityContext(phCredential, NULL, pInput, fContextReq, TargetDataRep, &ctx->ntlm,
+                                                     pOutput, pfContextAttr, ptsExpiry);
+                    if (ret == SEC_E_OK || ret == SEC_I_CONTINUE_NEEDED) ctx->have_ntlm = TRUE;
+                }
             }
             else
                 ret = nego_server_init(ctx, phCredential, fContextReq, TargetDataRep, in, in_len, pOutput,
@@ -1003,6 +1130,8 @@ static SECURITY_STATUS SEC_ENTRY nego_AcceptSecurityContext(
     }
     else if (fresh)
         nego_free_context(ctx);
+out:
+    if (claimed) nego_leave(claimed);       /* the context may go here (Delete came during the call) */
     return ret;
 }
 
@@ -1039,7 +1168,7 @@ static SECURITY_STATUS SEC_ENTRY nego_DeleteSecurityContext(PCtxtHandle phContex
     phContext->dwUpper = 0;
     phContext->dwLower = 0;
     if (!ctx) return SEC_E_INVALID_HANDLE;
-    nego_free_context(ctx);
+    nego_delete(ctx);
     return SEC_E_OK;
 }
 
@@ -1066,9 +1195,9 @@ static SECURITY_STATUS SEC_ENTRY nego_ApplyControlToken(PCtxtHandle phContext,
 /* the NTLM context of a finished exchange (raw NTLM: at once), NULL while SPNEGO still negotiates */
 static PCtxtHandle nego_finished_ntlm(PCtxtHandle phContext, NegoContext **out)
 {
-    NegoContext *ctx = nego_get_context(phContext);
+    NegoContext *ctx = nego_enter(phContext);
 
-    if (out) *out = ctx;
+    *out = ctx;                 /* claimed: the caller leaves it with nego_leave */
     if (!ctx || !ctx->have_ntlm) return NULL;
     if (ctx->mode == NEGO_RAW || ctx->state == NS_DONE) return &ctx->ntlm;
     return NULL;
@@ -1084,16 +1213,8 @@ static PCtxtHandle nego_finished_ntlm(PCtxtHandle phContext, NegoContext **out)
 /***********************************************************************
  *              QueryContextAttributesW
  */
-static SECURITY_STATUS SEC_ENTRY nego_QueryContextAttributesW(
-    PCtxtHandle phContext, ULONG ulAttribute, void *pBuffer)
+static SECURITY_STATUS nego_query_attributesW(NegoContext *ctx, PCtxtHandle ntlm, ULONG ulAttribute, void *pBuffer)
 {
-    NegoContext *ctx;
-    PCtxtHandle ntlm;
-
-    TRACE("%p, %u, %p\n", phContext, ulAttribute, pBuffer);
-
-    ntlm = nego_finished_ntlm(phContext, &ctx);
-    if (!ctx) return SEC_E_INVALID_HANDLE;
     if (!pBuffer) return SEC_E_INVALID_PARAMETER;
 
     if (ctx->mode == NEGO_RAW)
@@ -1147,19 +1268,27 @@ static SECURITY_STATUS SEC_ENTRY nego_QueryContextAttributesW(
     return ntlm_QueryContextAttributesW( ntlm, ulAttribute, pBuffer );
 }
 
-/***********************************************************************
- *              QueryContextAttributesA
- */
-static SECURITY_STATUS SEC_ENTRY nego_QueryContextAttributesA(PCtxtHandle phContext,
- ULONG ulAttribute, void *pBuffer)
+static SECURITY_STATUS SEC_ENTRY nego_QueryContextAttributesW(
+    PCtxtHandle phContext, ULONG ulAttribute, void *pBuffer)
 {
     NegoContext *ctx;
     PCtxtHandle ntlm;
+    SECURITY_STATUS ret;
 
     TRACE("%p, %u, %p\n", phContext, ulAttribute, pBuffer);
 
     ntlm = nego_finished_ntlm(phContext, &ctx);
-    if (!ctx) return SEC_E_INVALID_HANDLE;
+    if (!ctx) return NEGO_BUSY_STATUS;
+    ret = nego_query_attributesW(ctx, ntlm, ulAttribute, pBuffer);
+    nego_leave(ctx);
+    return ret;
+}
+
+/***********************************************************************
+ *              QueryContextAttributesA
+ */
+static SECURITY_STATUS nego_query_attributesA(NegoContext *ctx, PCtxtHandle ntlm, ULONG ulAttribute, void *pBuffer)
+{
     if (!pBuffer) return SEC_E_INVALID_PARAMETER;
 
     switch (ulAttribute)
@@ -1173,13 +1302,29 @@ static SECURITY_STATUS SEC_ENTRY nego_QueryContextAttributesA(PCtxtHandle phCont
         return info->PackageInfo ? SEC_E_OK : SEC_E_INSUFFICIENT_MEMORY;
     }
     case SECPKG_ATTR_SIZES:
-        if (ctx->mode == NEGO_RAW || !ntlm) return nego_QueryContextAttributesW( phContext, ulAttribute, pBuffer );
+        if (ctx->mode == NEGO_RAW || !ntlm) return nego_query_attributesW( ctx, ntlm, ulAttribute, pBuffer );
         break;
     }
     if (ctx->mode == NEGO_RAW)
         return ctx->have_ntlm ? ntlm_QueryContextAttributesA( &ctx->ntlm, ulAttribute, pBuffer ) : SEC_E_INVALID_HANDLE;
     if (!ntlm) return SEC_E_UNSUPPORTED_FUNCTION;
     return ntlm_QueryContextAttributesA( ntlm, ulAttribute, pBuffer );
+}
+
+static SECURITY_STATUS SEC_ENTRY nego_QueryContextAttributesA(PCtxtHandle phContext,
+ ULONG ulAttribute, void *pBuffer)
+{
+    NegoContext *ctx;
+    PCtxtHandle ntlm;
+    SECURITY_STATUS ret;
+
+    TRACE("%p, %u, %p\n", phContext, ulAttribute, pBuffer);
+
+    ntlm = nego_finished_ntlm(phContext, &ctx);
+    if (!ctx) return NEGO_BUSY_STATUS;
+    ret = nego_query_attributesA(ctx, ntlm, ulAttribute, pBuffer);
+    nego_leave(ctx);
+    return ret;
 }
 
 /***********************************************************************
@@ -1189,14 +1334,16 @@ static SECURITY_STATUS SEC_ENTRY nego_ImpersonateSecurityContext(PCtxtHandle phC
 {
     NegoContext *ctx;
     PCtxtHandle ntlm;
+    SECURITY_STATUS ret;
 
     TRACE("%p\n", phContext);
 
     ntlm = nego_finished_ntlm(phContext, &ctx);
-    if (!ctx) return SEC_E_INVALID_HANDLE;
+    if (!ctx) return NEGO_BUSY_STATUS;
     /* no token before the exchange (and its mechListMIC) is complete */
-    if (!ntlm) return SEC_E_NO_IMPERSONATION;
-    return ntlm_ImpersonateSecurityContext( ntlm );
+    ret = ntlm ? ntlm_ImpersonateSecurityContext( ntlm ) : SEC_E_NO_IMPERSONATION;
+    nego_leave(ctx);
+    return ret;
 }
 
 /***********************************************************************
@@ -1206,13 +1353,15 @@ static SECURITY_STATUS SEC_ENTRY nego_RevertSecurityContext(PCtxtHandle phContex
 {
     NegoContext *ctx;
     PCtxtHandle ntlm;
+    SECURITY_STATUS ret;
 
     TRACE("%p\n", phContext);
 
     ntlm = nego_finished_ntlm(phContext, &ctx);
-    if (!ctx) return SEC_E_INVALID_HANDLE;
-    if (!ntlm) return SEC_E_NO_IMPERSONATION;
-    return ntlm_RevertSecurityContext( ntlm );
+    if (!ctx) return NEGO_BUSY_STATUS;
+    ret = ntlm ? ntlm_RevertSecurityContext( ntlm ) : SEC_E_NO_IMPERSONATION;
+    nego_leave(ctx);
+    return ret;
 }
 
 /***********************************************************************
@@ -1222,12 +1371,15 @@ static SECURITY_STATUS SEC_ENTRY nego_QuerySecurityContextToken(PCtxtHandle phCo
 {
     NegoContext *ctx;
     PCtxtHandle ntlm;
+    SECURITY_STATUS ret = SEC_E_INVALID_HANDLE;
 
     TRACE("%p %p\n", phContext, phToken);
 
     ntlm = nego_finished_ntlm(phContext, &ctx);
-    if (!ctx || !ntlm) return SEC_E_INVALID_HANDLE;
-    return ntlm_QuerySecurityContextToken( ntlm, phToken );
+    if (!ctx) return NEGO_BUSY_STATUS;
+    if (ntlm) ret = ntlm_QuerySecurityContextToken( ntlm, phToken );
+    nego_leave(ctx);
+    return ret;
 }
 
 /***********************************************************************
@@ -1236,11 +1388,15 @@ static SECURITY_STATUS SEC_ENTRY nego_QuerySecurityContextToken(PCtxtHandle phCo
 static SECURITY_STATUS SEC_ENTRY nego_MakeSignature(PCtxtHandle phContext,
     ULONG fQOP, PSecBufferDesc pMessage, ULONG MessageSeqNo)
 {
-    PCtxtHandle ntlm = nego_finished_ntlm(phContext, NULL);
+    NegoContext *ctx;
+    PCtxtHandle ntlm = nego_finished_ntlm(phContext, &ctx);
+    SECURITY_STATUS ret = SEC_E_INVALID_HANDLE;
 
     TRACE("%p, 0x%08x, %p, %u\n", phContext, fQOP, pMessage, MessageSeqNo);
-    if (!ntlm) return SEC_E_INVALID_HANDLE;
-    return ntlm_MakeSignature( ntlm, fQOP, pMessage, MessageSeqNo );
+    if (!ctx) return NEGO_BUSY_STATUS;
+    if (ntlm) ret = ntlm_MakeSignature( ntlm, fQOP, pMessage, MessageSeqNo );
+    nego_leave(ctx);
+    return ret;
 }
 
 /***********************************************************************
@@ -1249,11 +1405,15 @@ static SECURITY_STATUS SEC_ENTRY nego_MakeSignature(PCtxtHandle phContext,
 static SECURITY_STATUS SEC_ENTRY nego_VerifySignature(PCtxtHandle phContext,
     PSecBufferDesc pMessage, ULONG MessageSeqNo, PULONG pfQOP)
 {
-    PCtxtHandle ntlm = nego_finished_ntlm(phContext, NULL);
+    NegoContext *ctx;
+    PCtxtHandle ntlm = nego_finished_ntlm(phContext, &ctx);
+    SECURITY_STATUS ret = SEC_E_INVALID_HANDLE;
 
     TRACE("%p, %p, %u, %p\n", phContext, pMessage, MessageSeqNo, pfQOP);
-    if (!ntlm) return SEC_E_INVALID_HANDLE;
-    return ntlm_VerifySignature( ntlm, pMessage, MessageSeqNo, pfQOP );
+    if (!ctx) return NEGO_BUSY_STATUS;
+    if (ntlm) ret = ntlm_VerifySignature( ntlm, pMessage, MessageSeqNo, pfQOP );
+    nego_leave(ctx);
+    return ret;
 }
 
 /***********************************************************************
@@ -1272,11 +1432,15 @@ static SECURITY_STATUS SEC_ENTRY nego_FreeCredentialsHandle(PCredHandle phCreden
 static SECURITY_STATUS SEC_ENTRY nego_EncryptMessage(PCtxtHandle phContext,
     ULONG fQOP, PSecBufferDesc pMessage, ULONG MessageSeqNo)
 {
-    PCtxtHandle ntlm = nego_finished_ntlm(phContext, NULL);
+    NegoContext *ctx;
+    PCtxtHandle ntlm = nego_finished_ntlm(phContext, &ctx);
+    SECURITY_STATUS ret = SEC_E_INVALID_HANDLE;
 
     TRACE("%p, 0x%08x, %p, %u\n", phContext, fQOP, pMessage, MessageSeqNo);
-    if (!ntlm) return SEC_E_INVALID_HANDLE;
-    return ntlm_EncryptMessage( ntlm, fQOP, pMessage, MessageSeqNo );
+    if (!ctx) return NEGO_BUSY_STATUS;
+    if (ntlm) ret = ntlm_EncryptMessage( ntlm, fQOP, pMessage, MessageSeqNo );
+    nego_leave(ctx);
+    return ret;
 }
 
 /***********************************************************************
@@ -1285,11 +1449,15 @@ static SECURITY_STATUS SEC_ENTRY nego_EncryptMessage(PCtxtHandle phContext,
 static SECURITY_STATUS SEC_ENTRY nego_DecryptMessage(PCtxtHandle phContext,
     PSecBufferDesc pMessage, ULONG MessageSeqNo, PULONG pfQOP)
 {
-    PCtxtHandle ntlm = nego_finished_ntlm(phContext, NULL);
+    NegoContext *ctx;
+    PCtxtHandle ntlm = nego_finished_ntlm(phContext, &ctx);
+    SECURITY_STATUS ret = SEC_E_INVALID_HANDLE;
 
     TRACE("%p, %p, %u, %p\n", phContext, pMessage, MessageSeqNo, pfQOP);
-    if (!ntlm) return SEC_E_INVALID_HANDLE;
-    return ntlm_DecryptMessage( ntlm, pMessage, MessageSeqNo, pfQOP );
+    if (!ctx) return NEGO_BUSY_STATUS;
+    if (ntlm) ret = ntlm_DecryptMessage( ntlm, pMessage, MessageSeqNo, pfQOP );
+    nego_leave(ctx);
+    return ret;
 }
 
 static const SecurityFunctionTableA negoTableA = {

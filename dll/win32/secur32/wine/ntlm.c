@@ -1553,7 +1553,9 @@ static SECURITY_STATUS server_authenticate(PNegoHelper h, const BYTE *msg, ULONG
         {
             WARN("MIC mismatch\n");
             SecureZeroMemory(exported, sizeof(exported));
-            return SEC_E_MESSAGE_ALTERED;
+            /* a wrong MIC in the AUTHENTICATE is a malformed token for Windows (measured on Windows Server 2022, NTLM
+             * and Negotiate: SEC_E_INVALID_TOKEN) */
+            return SEC_E_INVALID_TOKEN;
         }
     }
 
@@ -2290,12 +2292,14 @@ SECURITY_STATUS ntlm_SpnegoVerifyMic(PCtxtHandle phContext, const BYTE *data, UL
     ret = ntlm_CreateSignature(helper, &desc, 1, NTLM_RECV, TRUE);
     if (ret != SEC_E_OK) return ret;
     if (bufs[1].cbBuffer != 16) return SEC_E_INTERNAL_ERROR;
-    /* all 16 bytes count, as Windows reports them (measured): another version is a malformed token, a wrong sequence
-     * number SEC_E_OUT_OF_SEQUENCE, a wrong checksum SEC_E_MESSAGE_ALTERED */
+    /* all 16 bytes count, as Windows reports them (measured): another version is a malformed token, a wrong checksum
+     * SEC_E_MESSAGE_ALTERED, a wrong sequence number SEC_E_OUT_OF_SEQUENCE; with several parts wrong the version is
+     * reported first, then the checksum (the order of VerifySignature on Windows, measured), as ntlm_VerifySignature */
     if (memcmp(expect, mic, 4)) return SEC_E_INVALID_TOKEN;
-    if (memcmp(expect + 12, mic + 12, 4)) return SEC_E_OUT_OF_SEQUENCE;
     for (i = 4; i < 12; i++) diff |= expect[i] ^ mic[i];
-    return diff ? SEC_E_MESSAGE_ALTERED : SEC_E_OK;
+    if (diff) return SEC_E_MESSAGE_ALTERED;
+    if (memcmp(expect + 12, mic + 12, 4)) return SEC_E_OUT_OF_SEQUENCE;
+    return SEC_E_OK;
 }
 
 void ntlm_SpnegoResetSealing(PCtxtHandle phContext)

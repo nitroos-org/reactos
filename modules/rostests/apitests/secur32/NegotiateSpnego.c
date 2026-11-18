@@ -620,7 +620,26 @@ typedef struct { int kind; ULONG arg; } mut_arg;
 enum { M_REPLACE, M_TRUNC, M_TRAILING, M_FLIP, M_OUTER_TAG, M_FIN_NOMIC, M_FIN_MICFLIP, M_FIN_MICSEQ, M_FIN_MIC15,
        M_FIN_COMPLETED, M_FIN_RAW, M_SF_NOMIC, M_SF_MICFLIP, M_SF_INCOMPLETE, M_SF_REJECT, M_RESP_REJECT,
        M_RESP_KRB, M_RESP_NOTOKEN, M_RESP_NONEG, M_RESP_COMPLETED, M_RESP_RAW, M_HUGE_LEN, M_FIN_MICVERSION,
-       M_SF_TOKEN_NOMIC, M_SF_TOKEN_MIC, M_RESP_STATE7, M_EMPTY };
+       M_SF_TOKEN_NOMIC, M_SF_TOKEN_MIC, M_RESP_STATE7, M_EMPTY, M_FIN_MICPARTS, M_SF_MICPARTS, M_FIN_AUTHMIC };
+
+/* the parts of a mechListMIC that M_FIN_MICPARTS and M_SF_MICPARTS change (arg is a mask of them) */
+#define MIC_VERSION     1
+#define MIC_CHECKSUM    2
+#define MIC_SEQUENCE    4
+
+/* The status of a mechListMIC with several parts wrong at once. One part alone is in the measured table above (version
+ * SEC_E_INVALID_TOKEN, checksum SEC_E_MESSAGE_ALTERED, sequence SEC_E_OUT_OF_SEQUENCE). Several at once: the order
+ * measured on Windows Server 2022 for the same NTLM signature check in VerifySignature, each part flipped alone and
+ * together (version first, then checksum, then sequence). The mechListMIC with several parts wrong was not measured
+ * itself: VERIFY ON PEER (probe: a server mechListMIC with the version and the checksum, the checksum and the sequence
+ * changed, in the last call of a Negotiate client; the same for the client's MIC in the server's last call). */
+static const struct { ULONG parts; SECURITY_STATUS st; } mic_order[] =
+{
+    { MIC_VERSION | MIC_CHECKSUM,                SEC_E_INVALID_TOKEN },
+    { MIC_VERSION | MIC_SEQUENCE,                SEC_E_INVALID_TOKEN },
+    { MIC_CHECKSUM | MIC_SEQUENCE,               SEC_E_MESSAGE_ALTERED },
+    { MIC_VERSION | MIC_CHECKSUM | MIC_SEQUENCE, SEC_E_INVALID_TOKEN },
+};
 
 static const BYTE *g_replace;
 static ULONG g_replace_len;
@@ -650,6 +669,23 @@ static ULONG mutate(const BYTE *in, ULONG len, BYTE *out, void *argp)
     case M_FIN_MICSEQ: mic[12] = 1; return mk_resp(out, 1, NULL, 0, f.tok, f.tok_len, mic, 16);
     case M_FIN_MIC15: return mk_resp(out, 1, NULL, 0, f.tok, f.tok_len, mic, 15);
     case M_FIN_MICVERSION: mic[0] ^= 1; return mk_resp(out, 1, NULL, 0, f.tok, f.tok_len, mic, 16);
+    case M_FIN_AUTHMIC:
+    {
+        /* the MIC inside the AUTHENTICATE (offset 72 of the message), the mechListMIC as it was */
+        BYTE auth[MAX_TOK];
+
+        if (!f.tok || f.tok_len < 88 || f.tok_len > MAX_TOK) return 0;
+        memcpy(auth, f.tok, f.tok_len);
+        auth[72] ^= 1;
+        return mk_resp(out, 1, NULL, 0, auth, f.tok_len, mic, 16);
+    }
+    case M_FIN_MICPARTS:
+    case M_SF_MICPARTS:
+        if (a->arg & MIC_VERSION) mic[0] ^= 1;
+        if (a->arg & MIC_CHECKSUM) mic[4] ^= 1;
+        if (a->arg & MIC_SEQUENCE) mic[12] = 1;
+        if (a->kind == M_FIN_MICPARTS) return mk_resp(out, 1, NULL, 0, f.tok, f.tok_len, mic, 16);
+        return mk_resp(out, 0, NULL, 0, NULL, 0, mic, 16);
     case M_SF_TOKEN_NOMIC: return mk_resp(out, 0, NULL, 0, mic, 16, NULL, 0);
     case M_SF_TOKEN_MIC: { static const BYTE x[4] = { 1, 2, 3, 4 }; return mk_resp(out, 0, NULL, 0, x, 4, mic, 16); }
     case M_RESP_STATE7: return mk_resp(out, 7, OID_NTLM, sizeof(OID_NTLM), f.tok, f.tok_len, NULL, 0);
@@ -803,6 +839,8 @@ static void test_malformed(CredHandle *cc, CredHandle *sc)
     mal(cc, sc, "final: mechListMIC altered", 3, M_FIN_MICFLIP, 0, SEC_E_MESSAGE_ALTERED);
     mal(cc, sc, "final: mechListMIC with sequence 1", 3, M_FIN_MICSEQ, 0, SEC_E_OUT_OF_SEQUENCE);
     mal(cc, sc, "final: mechListMIC of 15 bytes", 3, M_FIN_MIC15, 0, SEC_E_INVALID_TOKEN);
+    /* a wrong MIC inside the AUTHENTICATE (measured on Windows Server 2022, NTLM and Negotiate: SEC_E_INVALID_TOKEN) */
+    mal(cc, sc, "final: the MIC of the AUTHENTICATE altered", 3, M_FIN_AUTHMIC, 0, SEC_E_INVALID_TOKEN);
     mal(cc, sc, "final: mechListMIC of another version", 3, M_FIN_MICVERSION, 0, SEC_E_INVALID_TOKEN);
     mal(cc, sc, "final: an empty token on the context", 3, M_EMPTY, 0, SEC_E_INVALID_HANDLE);
     mal(cc, sc, "final: negState accept-completed", 3, M_FIN_COMPLETED, 0, SEC_E_INVALID_TOKEN);
@@ -839,6 +877,20 @@ static void test_malformed(CredHandle *cc, CredHandle *sc)
     mal(cc, sc, "server final: a responseToken without mechListMIC", 4, M_SF_TOKEN_NOMIC, 0, SEC_E_INVALID_TOKEN);
     mal(cc, sc, "server final: a responseToken with the mechListMIC (accepted)", 4, M_SF_TOKEN_MIC, 0, SEC_E_OK);
     mal(cc, sc, "server final: truncated", 4, M_TRUNC, 1, SEC_E_INVALID_TOKEN);
+
+    /* the mechListMIC with several parts wrong (see mic_order), in both directions */
+    {
+        ULONG i;
+        char name[80];
+
+        for (i = 0; i < ARRAYSIZE(mic_order); i++)
+        {
+            sprintf(name, "final: mechListMIC with parts 0x%lx wrong", mic_order[i].parts);
+            mal(cc, sc, name, 3, M_FIN_MICPARTS, mic_order[i].parts, mic_order[i].st);
+            sprintf(name, "server final: mechListMIC with parts 0x%lx wrong", mic_order[i].parts);
+            mal(cc, sc, name, 4, M_SF_MICPARTS, mic_order[i].parts, mic_order[i].st);
+        }
+    }
 
     /* the hint, to the client (token 0) */
     oids[0] = OID_KRB; lens[0] = sizeof(OID_KRB);
