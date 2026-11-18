@@ -29,7 +29,7 @@ typedef struct _NtlmCredentials
 /* a security context of one side of an exchange (the name is from the helper process based version) */
 typedef struct _NegoHelper {
     HelperMode mode;
-    int state;                  /* 0: the exchange is not complete, 1: complete */
+    int state;                  /* 0: the exchange is not complete, 1: complete, 2: server, the AUTHENTICATE failed */
     ULONG req_flags;            /* the request flags of the context */
     ULONG offered_flags;        /* the NTLMSSP flags this side put in its message */
     ULONG neg_flags;            /* the negotiated NTLMSSP flags */

@@ -94,6 +94,10 @@ VOID WINAPI MD4Final(NTLM_MD4_CTX *ctx);
 #define AUTH_HEADER_LEN         88
 #define AUTH_MIC_OFFSET         72
 
+/* NegoHelper.state of a server context whose AUTHENTICATE failed */
+#define NTLM_SERVER_FAILED      2
+#define NTLM_DEAD(h)            ((h)->mode == NTLM_SERVER && (h)->state == NTLM_SERVER_FAILED)
+
 static const BYTE ntlm_signature[8] = { 'N', 'T', 'L', 'M', 'S', 'S', 'P', 0 };
 
 /***********************************************************************
@@ -1637,10 +1641,25 @@ SECURITY_STATUS SEC_ENTRY ntlm_AcceptSecurityContext(
     }
 
     h = (PNegoHelper)phContext->dwLower;
-    if (!h || h->mode != NTLM_SERVER || h->state != 0) return SEC_E_INVALID_HANDLE;
+    if (!h || h->mode != NTLM_SERVER) return SEC_E_INVALID_HANDLE;
+    if (h->state == NTLM_SERVER_FAILED) return SEC_E_OUT_OF_SEQUENCE;
+    if (h->state != 0) return SEC_E_INVALID_HANDLE;
 
     ret = server_authenticate(h, token, token_len);
-    if (ret != SEC_E_OK) return ret;
+    if (ret != SEC_E_OK)
+    {
+        /* As on Windows (measured, Server 2022): a failed AUTHENTICATE ends the context. Another AUTHENTICATE gets
+         * SEC_E_OUT_OF_SEQUENCE and the context has no token, names or key (SEC_E_INVALID_HANDLE). The logon of a
+         * response whose MIC is wrong has already given a token: it goes now. */
+        h->state = NTLM_SERVER_FAILED;
+        if (h->token)
+        {
+            CloseHandle(h->token);
+            h->token = NULL;
+        }
+        server_release_local(h);
+        return ret;
+    }
     h->state = 1;
     if (phNewContext != phContext)
     {
@@ -1745,7 +1764,7 @@ SECURITY_STATUS SEC_ENTRY ntlm_QueryContextAttributesW(PCtxtHandle phContext,
     if (!phContext)
         return SEC_E_INVALID_HANDLE;
     helper = (PNegoHelper)phContext->dwLower;
-    if (!helper)
+    if (!helper || NTLM_DEAD(helper))
         return SEC_E_INVALID_HANDLE;
 
     switch(ulAttribute)
@@ -1904,6 +1923,8 @@ SECURITY_STATUS SEC_ENTRY ntlm_ImpersonateSecurityContext(PCtxtHandle phContext)
     if (!phContext || !phContext->dwLower)
         return SEC_E_INVALID_HANDLE;
     helper = (PNegoHelper)phContext->dwLower;
+    if (NTLM_DEAD(helper))
+        return SEC_E_INVALID_HANDLE;
     /* only the server side of an exchange has the token of the client */
     if (helper->mode != NTLM_SERVER || !helper->token)
         return SEC_E_NO_IMPERSONATION;
@@ -1923,6 +1944,8 @@ SECURITY_STATUS SEC_ENTRY ntlm_RevertSecurityContext(PCtxtHandle phContext)
     if (!phContext || !phContext->dwLower)
         return SEC_E_INVALID_HANDLE;
     helper = (PNegoHelper)phContext->dwLower;
+    if (NTLM_DEAD(helper))
+        return SEC_E_INVALID_HANDLE;
     if (helper->mode != NTLM_SERVER || !helper->token)
         return SEC_E_NO_IMPERSONATION;
     if (!SetThreadToken(NULL, NULL))

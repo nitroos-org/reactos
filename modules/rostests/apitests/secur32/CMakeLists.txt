@@ -13,6 +13,7 @@ list(APPEND SOURCE
     SspiInitRace.c
     QueryContextAttributesEx.c
     NtlmConcurrent.c
+    NtlmFailedContext.c
     NtlmLocalCall.c
     NtlmLoopback.c
     NtlmSignatureBytes.c
