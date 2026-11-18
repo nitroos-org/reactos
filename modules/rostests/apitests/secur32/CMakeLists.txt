@@ -4,15 +4,19 @@ list(APPEND SOURCE
     InvalidHandles.c
     LsaConnectUnprivileged.c
     LsaLogonContext.c
+    NegotiateSpnego.c
     ReadConfigHandles.c
     SchannelHandshake.c
     SchannelServerCert.c
     SetCredentialsAttributes.c
     SspiAuthIdentityExports.c
+    SspiInitRace.c
     QueryContextAttributesEx.c
     NtlmConcurrent.c
+    NtlmFailedContext.c
     NtlmLocalCall.c
     NtlmLoopback.c
+    NtlmSignatureBytes.c
     testlist.c)
 
 add_executable(secur32_apitest ${SOURCE})

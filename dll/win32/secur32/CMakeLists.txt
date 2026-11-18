@@ -12,6 +12,7 @@ list(APPEND SOURCE
     wrapper.c
     wine/hmac_md5.c
     wine/kerberos.c
+    spnego_der.c
     wine/negotiate.c
     wine/ntlm.c
     wine/util.c

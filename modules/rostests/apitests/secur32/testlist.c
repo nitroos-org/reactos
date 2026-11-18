@@ -12,16 +12,20 @@ extern void func_AcquireCredentialsHandleVersions(void);
 extern void func_InvalidHandles(void);
 extern void func_LsaConnectUnprivileged(void);
 extern void func_LsaLogonContext(void);
+extern void func_NegotiateSpnego(void);
 extern void func_ReadConfigHandles(void);
 extern void func_SchannelHandshake(void);
 extern void func_SchannelServerCert(void);
 extern void func_SetCredentialsAttributes(void);
 extern void func_SspiAuthIdentityExports(void);
+extern void func_SspiInitRace(void);
 extern void func_QueryContextAttributesEx(void);
 extern void func_NtlmConcurrent(void);
+extern void func_NtlmFailedContext(void);
 extern void func_NtlmLocalCall(void);
 extern void func_NtlmLocalCallExpiry(void);
 extern void func_NtlmLoopback(void);
+extern void func_NtlmSignatureBytes(void);
 
 const struct test winetest_testlist[] =
 {
@@ -29,16 +33,20 @@ const struct test winetest_testlist[] =
     { "InvalidHandles", func_InvalidHandles },
     { "LsaConnectUnprivileged", func_LsaConnectUnprivileged },
     { "LsaLogonContext", func_LsaLogonContext },
+    { "NegotiateSpnego", func_NegotiateSpnego },
     { "ReadConfigHandles", func_ReadConfigHandles },
     { "SchannelHandshake", func_SchannelHandshake },
     { "SchannelServerCert", func_SchannelServerCert },
     { "SetCredentialsAttributes", func_SetCredentialsAttributes },
     { "SspiAuthIdentityExports", func_SspiAuthIdentityExports },
+    { "SspiInitRace", func_SspiInitRace },
 
     { "QueryContextAttributesEx", func_QueryContextAttributesEx },
     { "NtlmConcurrent", func_NtlmConcurrent },
+    { "NtlmFailedContext", func_NtlmFailedContext },
     { "NtlmLocalCall", func_NtlmLocalCall },
     { "NtlmLocalCallExpiry", func_NtlmLocalCallExpiry },
     { "NtlmLoopback", func_NtlmLoopback },
+    { "NtlmSignatureBytes", func_NtlmSignatureBytes },
     { 0, 0 }
 };

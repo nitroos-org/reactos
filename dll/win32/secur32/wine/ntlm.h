@@ -29,7 +29,7 @@ typedef struct _NtlmCredentials
 /* a security context of one side of an exchange (the name is from the helper process based version) */
 typedef struct _NegoHelper {
     HelperMode mode;
-    int state;                  /* 0: the exchange is not complete, 1: complete */
+    int state;                  /* 0: the exchange is not complete, 1: complete, 2: server, the AUTHENTICATE failed */
     ULONG req_flags;            /* the request flags of the context */
     ULONG offered_flags;        /* the NTLMSSP flags this side put in its message */
     ULONG neg_flags;            /* the negotiated NTLMSSP flags */
@@ -109,6 +109,13 @@ SECURITY_STATUS SEC_ENTRY ntlm_RevertSecurityContext(PCtxtHandle) DECLSPEC_HIDDE
 SECURITY_STATUS SEC_ENTRY ntlm_QuerySecurityContextToken(PCtxtHandle, HANDLE *) DECLSPEC_HIDDEN;
 SECURITY_STATUS SEC_ENTRY ntlm_MakeSignature(PCtxtHandle, ULONG, PSecBufferDesc, ULONG) DECLSPEC_HIDDEN;
 SECURITY_STATUS SEC_ENTRY ntlm_VerifySignature(PCtxtHandle, PSecBufferDesc, ULONG, PULONG) DECLSPEC_HIDDEN;
+
+/* for the SPNEGO layer of the Negotiate package (negotiate.c) */
+SECURITY_STATUS ntlm_SpnegoMakeMic(PCtxtHandle, const BYTE *, ULONG, BYTE *) DECLSPEC_HIDDEN;
+SECURITY_STATUS ntlm_SpnegoVerifyMic(PCtxtHandle, const BYTE *, ULONG, const BYTE *, ULONG) DECLSPEC_HIDDEN;
+void ntlm_SpnegoResetSealing(PCtxtHandle) DECLSPEC_HIDDEN;
+BOOL ntlm_CredentialsHaveIdentity(PCredHandle) DECLSPEC_HIDDEN;
+ULONG ntlm_CredentialsUse(PCredHandle) DECLSPEC_HIDDEN;
 
 SecPkgInfoW *ntlm_copy_package_infoW(void) DECLSPEC_HIDDEN;
 SecPkgInfoA *ntlm_copy_package_infoA(void) DECLSPEC_HIDDEN;

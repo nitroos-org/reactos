@@ -55,6 +55,31 @@ static CRITICAL_SECTION cs = { &cs_debug, -1, 0, 0, 0, 0 };
 static SecurePackageTable *packageTable = NULL;
 static SecureProviderTable *providerTable = NULL;
 
+/* The providers are loaded on the first use of a package. Threads that get there together wait for the one that
+ * loads them: the table exists (with the registry providers) before the built-in ones are in it, so testing the table
+ * instead let a thread find no NTLM package at all, and several threads loaded everything once each. */
+static CRITICAL_SECTION init_cs;
+static CRITICAL_SECTION_DEBUG init_cs_debug =
+{
+    0, 0, &init_cs,
+    { &init_cs_debug.ProcessLocksList, &init_cs_debug.ProcessLocksList },
+      0, 0, { (DWORD_PTR)(__FILE__ ": init_cs") }
+};
+static CRITICAL_SECTION init_cs = { &init_cs_debug, -1, 0, 0, 0, 0 };
+static LONG providersLoaded = 0;
+
+static void SECUR32_ensureProviders(void)
+{
+    if (InterlockedCompareExchange(&providersLoaded, 0, 0)) return;
+    EnterCriticalSection(&init_cs);
+    if (!providersLoaded)
+    {
+        SECUR32_initializeProviders();
+        InterlockedExchange(&providersLoaded, 1);
+    }
+    LeaveCriticalSection(&init_cs);
+}
+
 static SecurityFunctionTableA securityFunctionTableA = {
     SECURITY_SUPPORT_PROVIDER_INTERFACE_VERSION,
     EnumerateSecurityPackagesA,
@@ -437,12 +462,12 @@ void SECUR32_addPackages(SecureProvider *provider, ULONG toAdd,
         if (!package)
             continue;
 
-        list_add_tail(&packageTable->table, &package->entry);
-
+        /* complete before it is linked: lookups walk the table without the lock */
         package->provider = provider;
         _copyPackageInfo(&package->infoW,
             infoA ? &infoA[i] : NULL,
             infoW ? &infoW[i] : NULL);
+        list_add_tail(&packageTable->table, &package->entry);
     }
     packageTable->numPackages += toAdd;
 
@@ -595,8 +620,7 @@ SecurePackage *SECUR32_findPackageW(PCWSTR packageName)
     BOOL matched = FALSE;
 
 #ifdef __REACTOS__
-    if (!packageTable)
-        SECUR32_initializeProviders();
+    SECUR32_ensureProviders();
 #endif
 
     if (packageTable && packageName)
@@ -729,8 +753,7 @@ SECURITY_STATUS WINAPI EnumerateSecurityPackagesW(PULONG pcPackages,
     TRACE("(%p, %p)\n", pcPackages, ppPackageInfo);
 
 #ifdef __REACTOS__
-    if (!packageTable)
-        SECUR32_initializeProviders();
+    SECUR32_ensureProviders();
 #endif
 
     /* windows just crashes if pcPackages or ppPackageInfo is NULL, so will I */

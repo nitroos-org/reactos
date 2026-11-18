@@ -409,7 +409,12 @@ SECURITY_STATUS WINAPI AcceptSecurityContext(
                 ret = package->provider->fnTableW.AcceptSecurityContext(
                  cred, phContext ? &myCtxt : NULL, pInput, fContextReq,
                  TargetDataRep, &myCtxt, pOutput, pfContextAttr, ptsExpiry);
-                if (ret == SEC_E_OK || ret == SEC_I_CONTINUE_NEEDED)
+                if ((ret == SEC_E_OK || ret == SEC_I_CONTINUE_NEEDED) && phContext && phNewContext == phContext)
+                {
+                    /* the context goes on in place: its handle keeps its block (a new one each leg leaked the old) */
+                    *(PSecHandle)phContext->dwLower = myCtxt;
+                }
+                else if (ret == SEC_E_OK || ret == SEC_I_CONTINUE_NEEDED)
                 {
                     SECURITY_STATUS ret2;
                     ret2 = SECUR32_makeSecHandle(phNewContext, package, &myCtxt);

@@ -94,6 +94,10 @@ VOID WINAPI MD4Final(NTLM_MD4_CTX *ctx);
 #define AUTH_HEADER_LEN         88
 #define AUTH_MIC_OFFSET         72
 
+/* NegoHelper.state of a server context whose AUTHENTICATE failed */
+#define NTLM_SERVER_FAILED      2
+#define NTLM_DEAD(h)            ((h)->mode == NTLM_SERVER && (h)->state == NTLM_SERVER_FAILED)
+
 static const BYTE ntlm_signature[8] = { 'N', 'T', 'L', 'M', 'S', 'S', 'P', 0 };
 
 /***********************************************************************
@@ -1637,10 +1641,25 @@ SECURITY_STATUS SEC_ENTRY ntlm_AcceptSecurityContext(
     }
 
     h = (PNegoHelper)phContext->dwLower;
-    if (!h || h->mode != NTLM_SERVER || h->state != 0) return SEC_E_INVALID_HANDLE;
+    if (!h || h->mode != NTLM_SERVER) return SEC_E_INVALID_HANDLE;
+    if (h->state == NTLM_SERVER_FAILED) return SEC_E_OUT_OF_SEQUENCE;
+    if (h->state != 0) return SEC_E_INVALID_HANDLE;
 
     ret = server_authenticate(h, token, token_len);
-    if (ret != SEC_E_OK) return ret;
+    if (ret != SEC_E_OK)
+    {
+        /* As on Windows (measured, Server 2022): a failed AUTHENTICATE ends the context. Another AUTHENTICATE gets
+         * SEC_E_OUT_OF_SEQUENCE and the context has no token, names or key (SEC_E_INVALID_HANDLE). The logon of a
+         * response whose MIC is wrong has already given a token: it goes now. */
+        h->state = NTLM_SERVER_FAILED;
+        if (h->token)
+        {
+            CloseHandle(h->token);
+            h->token = NULL;
+        }
+        server_release_local(h);
+        return ret;
+    }
     h->state = 1;
     if (phNewContext != phContext)
     {
@@ -1745,7 +1764,7 @@ SECURITY_STATUS SEC_ENTRY ntlm_QueryContextAttributesW(PCtxtHandle phContext,
     if (!phContext)
         return SEC_E_INVALID_HANDLE;
     helper = (PNegoHelper)phContext->dwLower;
-    if (!helper)
+    if (!helper || NTLM_DEAD(helper))
         return SEC_E_INVALID_HANDLE;
 
     switch(ulAttribute)
@@ -1904,6 +1923,8 @@ SECURITY_STATUS SEC_ENTRY ntlm_ImpersonateSecurityContext(PCtxtHandle phContext)
     if (!phContext || !phContext->dwLower)
         return SEC_E_INVALID_HANDLE;
     helper = (PNegoHelper)phContext->dwLower;
+    if (NTLM_DEAD(helper))
+        return SEC_E_INVALID_HANDLE;
     /* only the server side of an exchange has the token of the client */
     if (helper->mode != NTLM_SERVER || !helper->token)
         return SEC_E_NO_IMPERSONATION;
@@ -1923,6 +1944,8 @@ SECURITY_STATUS SEC_ENTRY ntlm_RevertSecurityContext(PCtxtHandle phContext)
     if (!phContext || !phContext->dwLower)
         return SEC_E_INVALID_HANDLE;
     helper = (PNegoHelper)phContext->dwLower;
+    if (NTLM_DEAD(helper))
+        return SEC_E_INVALID_HANDLE;
     if (helper->mode != NTLM_SERVER || !helper->token)
         return SEC_E_NO_IMPERSONATION;
     if (!SetThreadToken(NULL, NULL))
@@ -2112,6 +2135,8 @@ SECURITY_STATUS SEC_ENTRY ntlm_MakeSignature(PCtxtHandle phContext,
         return SEC_E_BUFFER_TOO_SMALL;
 
     helper = (PNegoHelper)phContext->dwLower;
+    if (!helper || helper->state != 1)
+        return SEC_E_INVALID_HANDLE;   /* only a complete exchange has keys (Windows: SEC_E_INVALID_HANDLE, measured) */
     TRACE("Negotiated flags are: 0x%08x\n", helper->neg_flags);
 
     return ntlm_CreateSignature(helper, pMessage, token_idx, NTLM_SEND, TRUE);
@@ -2129,7 +2154,8 @@ SECURITY_STATUS SEC_ENTRY ntlm_VerifySignature(PCtxtHandle phContext,
     SECURITY_STATUS ret;
     SecBufferDesc local_desc;
     PSecBuffer     local_buff;
-    BYTE          local_sig[16];
+    BYTE          local_sig[16], diff = 0;
+    const BYTE    *expect, *got;
 
     TRACE("%p %p %d %p\n", phContext, pMessage, MessageSeqNo, pfQOP);
     if(!phContext)
@@ -2148,9 +2174,13 @@ SECURITY_STATUS SEC_ENTRY ntlm_VerifySignature(PCtxtHandle phContext,
         FIXME("Ignoring MessageSeqNo\n");
 
     helper = (PNegoHelper)phContext->dwLower;
+    if (!helper || helper->state != 1)
+        return SEC_E_INVALID_HANDLE;   /* only a complete exchange has keys (Windows: SEC_E_INVALID_HANDLE, measured) */
     TRACE("Negotiated flags: 0x%08x\n", helper->neg_flags);
 
     local_buff = HeapAlloc(GetProcessHeap(), 0, pMessage->cBuffers * sizeof(SecBuffer));
+    if (!local_buff)
+        return SEC_E_INSUFFICIENT_MEMORY;
 
     local_desc.ulVersion = SECBUFFER_VERSION;
     local_desc.cBuffers = pMessage->cBuffers;
@@ -2173,18 +2203,126 @@ SECURITY_STATUS SEC_ENTRY ntlm_VerifySignature(PCtxtHandle phContext,
     }
 
     if((ret = ntlm_CreateSignature(helper, &local_desc, token_idx, NTLM_RECV, TRUE)) != SEC_E_OK)
+    {
+        HeapFree(GetProcessHeap(), 0, local_buff);
         return ret;
+    }
 
-    if(memcmp(((PBYTE)local_buff[token_idx].pvBuffer) + 8,
-                ((PBYTE)pMessage->pBuffers[token_idx].pvBuffer) + 8, 8))
-        ret = SEC_E_MESSAGE_ALTERED;
+    expect = local_buff[token_idx].pvBuffer;
+    got = pMessage->pBuffers[token_idx].pvBuffer;
+    if (helper->neg_flags & NTLMSSP_NEGOTIATE_NTLM2 && helper->neg_flags & NTLMSSP_NEGOTIATE_SIGN)
+    {
+        /* [MS-NLMP] 2.2.2.9.2: version (4 bytes), checksum (8: the first half of the HMAC-MD5, RC4-sealed with key
+         * exchange), sequence number (4). Every byte counts, as on Windows (measured, Server 2022, each byte flipped
+         * in turn, and several at once): a wrong version is SEC_E_INVALID_TOKEN, else a wrong checksum
+         * SEC_E_MESSAGE_ALTERED, else a wrong sequence number SEC_E_OUT_OF_SEQUENCE. Comparing from byte 8 left half
+         * of the checksum unchecked. */
+        for (i = 4; i < 12; i++) diff |= expect[i] ^ got[i];
+        if (memcmp(expect, got, 4)) ret = SEC_E_INVALID_TOKEN;
+        else if (diff) ret = SEC_E_MESSAGE_ALTERED;
+        else if (memcmp(expect + 12, got + 12, 4)) ret = SEC_E_OUT_OF_SEQUENCE;
+        else ret = SEC_E_OK;
+    }
     else
-        ret = SEC_E_OK;
+    {
+        /* [MS-NLMP] 2.2.2.9.1: bytes 4-7 are the random pad, not checked */
+        for (i = 8; i < 16; i++) diff |= expect[i] ^ got[i];
+        ret = diff ? SEC_E_MESSAGE_ALTERED : SEC_E_OK;
+    }
 
     HeapFree(GetProcessHeap(), 0, local_buff);
 
     return ret;
 
+}
+
+/***********************************************************************
+ * The mechListMIC of SPNEGO ([MS-SPNG] 3.1.5.1, RFC 4178 5): GSS_GetMIC and GSS_VerifyMIC of this context over the
+ * DER encoding of the mechTypes list. Measured on Windows (Server 2022 and 10): each side signs with its own sending
+ * key and sequence number 0, the receiver checks with its receiving key; afterwards the RC4 states of both
+ * directions start again from the sealing keys while the sequence numbers go on (ntlm_SpnegoResetSealing).
+ */
+SECURITY_STATUS ntlm_SpnegoMakeMic(PCtxtHandle phContext, const BYTE *data, ULONG len, BYTE *mic)
+{
+    PNegoHelper helper;
+    SecBuffer bufs[2];
+    SecBufferDesc desc;
+    SECURITY_STATUS ret;
+
+    if (!phContext || !(helper = (PNegoHelper)phContext->dwLower) || !helper->session_key)
+        return SEC_E_INVALID_HANDLE;
+    desc.ulVersion = SECBUFFER_VERSION;
+    desc.cBuffers = 2;
+    desc.pBuffers = bufs;
+    bufs[0].BufferType = SECBUFFER_DATA;
+    bufs[0].pvBuffer = (void *)data;
+    bufs[0].cbBuffer = len;
+    bufs[1].BufferType = SECBUFFER_TOKEN;
+    bufs[1].pvBuffer = mic;
+    bufs[1].cbBuffer = 16;
+    ret = ntlm_CreateSignature(helper, &desc, 1, NTLM_SEND, TRUE);
+    if (ret == SEC_E_OK && bufs[1].cbBuffer != 16) ret = SEC_E_INTERNAL_ERROR;
+    return ret;
+}
+
+SECURITY_STATUS ntlm_SpnegoVerifyMic(PCtxtHandle phContext, const BYTE *data, ULONG len, const BYTE *mic, ULONG mic_len)
+{
+    PNegoHelper helper;
+    SecBuffer bufs[2];
+    SecBufferDesc desc;
+    SECURITY_STATUS ret;
+    BYTE expect[16], diff = 0;
+    ULONG i;
+
+    if (!phContext || !(helper = (PNegoHelper)phContext->dwLower) || !helper->session_key)
+        return SEC_E_INVALID_HANDLE;
+    if (mic_len != 16) return SEC_E_INVALID_TOKEN;
+    desc.ulVersion = SECBUFFER_VERSION;
+    desc.cBuffers = 2;
+    desc.pBuffers = bufs;
+    bufs[0].BufferType = SECBUFFER_DATA;
+    bufs[0].pvBuffer = (void *)data;
+    bufs[0].cbBuffer = len;
+    bufs[1].BufferType = SECBUFFER_TOKEN;
+    bufs[1].pvBuffer = expect;
+    bufs[1].cbBuffer = sizeof(expect);
+    /* the expected signature with the receiving key and sequence number (this consumes both, as on Windows) */
+    ret = ntlm_CreateSignature(helper, &desc, 1, NTLM_RECV, TRUE);
+    if (ret != SEC_E_OK) return ret;
+    if (bufs[1].cbBuffer != 16) return SEC_E_INTERNAL_ERROR;
+    /* all 16 bytes count, as Windows reports them (measured): another version is a malformed token, a wrong sequence
+     * number SEC_E_OUT_OF_SEQUENCE, a wrong checksum SEC_E_MESSAGE_ALTERED */
+    if (memcmp(expect, mic, 4)) return SEC_E_INVALID_TOKEN;
+    if (memcmp(expect + 12, mic + 12, 4)) return SEC_E_OUT_OF_SEQUENCE;
+    for (i = 4; i < 12; i++) diff |= expect[i] ^ mic[i];
+    return diff ? SEC_E_MESSAGE_ALTERED : SEC_E_OK;
+}
+
+void ntlm_SpnegoResetSealing(PCtxtHandle phContext)
+{
+    PNegoHelper helper;
+
+    if (!phContext || !(helper = (PNegoHelper)phContext->dwLower) || !helper->session_key) return;
+    if (helper->crypt.ntlm2.send_a4i && helper->crypt.ntlm2.send_seal_key)
+        SECUR32_arc4Init(helper->crypt.ntlm2.send_a4i, helper->crypt.ntlm2.send_seal_key, 16);
+    if (helper->crypt.ntlm2.recv_a4i && helper->crypt.ntlm2.recv_seal_key)
+        SECUR32_arc4Init(helper->crypt.ntlm2.recv_a4i, helper->crypt.ntlm2.recv_seal_key, 16);
+}
+
+/* the credentials name a user (explicit identity) rather than the caller's own logon */
+BOOL ntlm_CredentialsHaveIdentity(PCredHandle phCredential)
+{
+    PNtlmCredentials cred = phCredential ? (PNtlmCredentials)phCredential->dwLower : NULL;
+
+    return cred && cred->has_identity;
+}
+
+/* the use of the credentials (SECPKG_CRED_INBOUND, _OUTBOUND or both), 0 for no credentials */
+ULONG ntlm_CredentialsUse(PCredHandle phCredential)
+{
+    PNtlmCredentials cred = phCredential ? (PNtlmCredentials)phCredential->dwLower : NULL;
+
+    return cred ? cred->use : 0;
 }
 
 /***********************************************************************
@@ -2220,6 +2358,8 @@ SECURITY_STATUS SEC_ENTRY ntlm_EncryptMessage(PCtxtHandle phContext,
         return SEC_E_BUFFER_TOO_SMALL;
 
     helper = (PNegoHelper) phContext->dwLower;
+    if (!helper || helper->state != 1)
+        return SEC_E_INVALID_HANDLE;   /* only a complete exchange has keys (Windows: SEC_E_INVALID_HANDLE, measured) */
 
     if(helper->neg_flags & NTLMSSP_NEGOTIATE_NTLM2 && 
             helper->neg_flags & NTLMSSP_NEGOTIATE_SEAL)
@@ -2289,6 +2429,8 @@ SECURITY_STATUS SEC_ENTRY ntlm_DecryptMessage(PCtxtHandle phContext,
         return SEC_E_BUFFER_TOO_SMALL;
 
     helper = (PNegoHelper) phContext->dwLower;
+    if (!helper || helper->state != 1)
+        return SEC_E_INVALID_HANDLE;   /* only a complete exchange has keys (Windows: SEC_E_INVALID_HANDLE, measured) */
 
     if(helper->neg_flags & NTLMSSP_NEGOTIATE_NTLM2 && helper->neg_flags & NTLMSSP_NEGOTIATE_SEAL)
     {
