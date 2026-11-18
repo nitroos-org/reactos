@@ -42,6 +42,37 @@ extern ULONG CmpBootType;
  * so updating the fast index count is not necessary (aka
  * UpdateCount is set to FALSE).
  */
+/*
+ * Does the cell of a key index (Index, its cell data) hold Count entries of
+ * EntrySize bytes? The count comes from the hive: the repairs below walk and
+ * shift that many entries, so a count the cell cannot hold must stop them.
+ */
+static
+BOOLEAN
+CmpIndexCountFits(
+    _In_ PHHIVE Hive,
+    _In_ PVOID Index,
+    _In_ ULONG Count,
+    _In_ ULONG EntrySize)
+{
+    /* Negative for a cell the header says is free */
+    LONG CellSize = HvGetCellSize(Hive, Index);
+
+    if (CellSize < (LONG)FIELD_OFFSET(CM_KEY_INDEX, List))
+        return FALSE;
+    return Count <= ((ULONG)CellSize - FIELD_OFFSET(CM_KEY_INDEX, List)) / EntrySize;
+}
+
+/* The size of one entry of a key index: a fast or hash leaf holds CM_INDEX, the others HCELL_INDEX */
+static
+ULONG
+CmpIndexEntrySize(
+    _In_ PCM_KEY_INDEX Index)
+{
+    return ((Index->Signature == CM_KEY_FAST_LEAF) || (Index->Signature == CM_KEY_HASH_LEAF)) ?
+           sizeof(CM_INDEX) : sizeof(HCELL_INDEX);
+}
+
 static
 VOID
 CmpRemoveFastIndexKeyCell(
@@ -176,6 +207,12 @@ CmpRemoveSubkeyInRoot(
 
     ASSERT(RootIndex);
 
+    if (!CmpIndexCountFits(Hive, RootIndex, RootIndex->Count, sizeof(HCELL_INDEX)))
+    {
+        DPRINT1("The root index count %u does not fit its cell\n", RootIndex->Count);
+        return FALSE;
+    }
+
     /* Loop the root index */
     for (RootCountIndex = 0; RootCountIndex < RootIndex->Count; RootCountIndex++)
     {
@@ -197,6 +234,12 @@ CmpRemoveSubkeyInRoot(
         if (!Leaf)
         {
             DPRINT1("Couldn't get the leaf from cell\n");
+            return FALSE;
+        }
+        if (!CmpIndexCountFits(Hive, Leaf, Leaf->Count, CmpIndexEntrySize(Leaf)))
+        {
+            DPRINT1("The leaf count %u does not fit its cell\n", Leaf->Count);
+            HvReleaseCell(Hive, LeafCell);
             return FALSE;
         }
 
@@ -286,6 +329,12 @@ CmpRemoveSubKeyInLeaf(
 {
     PCM_KEY_FAST_INDEX FastIndex;
     ULONG LeafIndex;
+
+    if (!CmpIndexCountFits(Hive, Leaf, Leaf->Count, CmpIndexEntrySize(Leaf)))
+    {
+        DPRINT1("The leaf count %u does not fit its cell\n", Leaf->Count);
+        return FALSE;
+    }
 
     /* Loop the leaf index */
     for (LeafIndex = 0; LeafIndex < Leaf->Count; LeafIndex++)
