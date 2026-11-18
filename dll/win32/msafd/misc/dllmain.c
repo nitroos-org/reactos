@@ -35,6 +35,38 @@ BOOLEAN SockAsyncSelectCalled;
 /* AFD_INFO_SEND_WINDOW_SIZE of a fresh endpoint (0 until the first socket asked) */
 static volatile ULONG MsafdDefaultSendWindow = 0;
 
+/* the two flag bytes and the padding byte after them: adding bits there must not move the fields behind them */
+C_ASSERT(FIELD_OFFSET(SOCK_SHARED_INFO, CreateFlags) == 56);
+
+/*
+ * The options a socket takes from the listener it was accepted on (Windows Server 2022, loopback, x64 and x86 alike):
+ * accept() gives every option that has a value of its own - TCP_NODELAY, SO_KEEPALIVE, SO_DONTROUTE, SO_OOBINLINE, SO_LINGER,
+ * SO_RCVBUF, SO_SNDBUF, SO_REUSEADDR, SO_DEBUG and the two timeouts - but not SO_EXCLUSIVEADDRUSE. The socket AcceptEx fills
+ * already shows the first three when the call is made (the stack gave them to the connection) and gets the others when
+ * SO_UPDATE_ACCEPT_CONTEXT is set.
+ */
+static
+VOID
+MsafdInheritListenerOptions(
+    _In_ PSOCKET_INFORMATION Accepted,
+    _In_ PSOCKET_INFORMATION Listener,
+    _In_ BOOLEAN All)
+{
+    Accepted->SharedData->TcpNoDelay = Listener->SharedData->TcpNoDelay;
+    Accepted->SharedData->KeepAlive = Listener->SharedData->KeepAlive;
+    Accepted->SharedData->DontRoute = Listener->SharedData->DontRoute;
+    if (!All) return;
+
+    Accepted->SharedData->OobInline = Listener->SharedData->OobInline;
+    Accepted->SharedData->ReuseAddresses = Listener->SharedData->ReuseAddresses;
+    Accepted->SharedData->Debug = Listener->SharedData->Debug;
+    Accepted->SharedData->LingerData = Listener->SharedData->LingerData;
+    Accepted->SharedData->SizeOfRecvBuffer = Listener->SharedData->SizeOfRecvBuffer;
+    Accepted->SharedData->SizeOfSendBuffer = Listener->SharedData->SizeOfSendBuffer;
+    Accepted->SharedData->RecvTimeout = Listener->SharedData->RecvTimeout;
+    Accepted->SharedData->SendTimeout = Listener->SharedData->SendTimeout;
+}
+
 /*
  * FUNCTION: Creates a new socket
  * ARGUMENTS:
@@ -2178,10 +2210,7 @@ WSPAccept(
     AcceptSocketInfo->SharedData->State = SocketConnected;
     AcceptSocketInfo->SharedData->ConnectTime = GetCurrentTimeInSeconds();
     AcceptSocketInfo->SharedData->NonBlocking = Socket->SharedData->NonBlocking;
-    AcceptSocketInfo->SharedData->TcpNoDelay = Socket->SharedData->TcpNoDelay;
-    AcceptSocketInfo->SharedData->SizeOfRecvBuffer = Socket->SharedData->SizeOfRecvBuffer;
-    AcceptSocketInfo->SharedData->RecvTimeout = Socket->SharedData->RecvTimeout;
-    AcceptSocketInfo->SharedData->SendTimeout = Socket->SharedData->SendTimeout;
+    MsafdInheritListenerOptions(AcceptSocketInfo, Socket, TRUE);
 
     /* Return Address in SOCKADDR FORMAT */
     if( SocketAddress )
@@ -2292,6 +2321,9 @@ WSPAcceptEx(
         SetLastError(WSAEFAULT);
         return FALSE;
     }
+
+    /* the connection the stack makes has the listener's TCP_NODELAY, SO_KEEPALIVE and SO_DONTROUTE from the start */
+    MsafdInheritListenerOptions(AcceptSocket, ListenSocket, FALSE);
 
     /* Populate IOCTL super accept structure */
     AcceptInfo.SanActive = FALSE;
@@ -3671,6 +3703,25 @@ WSPGetSockOpt(IN SOCKET Handle,
         return NO_ERROR;
     }
 
+    /* SO_KEEPALIVE (stream sockets only) and SO_DONTROUTE are one byte answers as well (Windows Server 2022); an empty
+     * buffer is WSAEFAULT even where the option does not exist */
+    if (Level == SOL_SOCKET && (OptionName == SO_KEEPALIVE || OptionName == SO_DONTROUTE))
+    {
+        if (*OptionLength < (INT)sizeof(BOOLEAN))
+        {
+            if (lpErrno) *lpErrno = WSAEFAULT;
+            return SOCKET_ERROR;
+        }
+        if (OptionName == SO_KEEPALIVE && Socket->SharedData->SocketType != SOCK_STREAM)
+        {
+            if (lpErrno) *lpErrno = WSAENOPROTOOPT;
+            return SOCKET_ERROR;
+        }
+        *(BOOLEAN *)OptionValue = (OptionName == SO_KEEPALIVE ? Socket->SharedData->KeepAlive : Socket->SharedData->DontRoute) ? TRUE : FALSE;
+        *OptionLength = sizeof(BOOLEAN);
+        return NO_ERROR;
+    }
+
     switch (Level)
     {
         case SOL_SOCKET:
@@ -3730,11 +3781,6 @@ WSPGetSockOpt(IN SOCKET Handle,
                     Buffer = &BoolBuffer;
                     BufferSize = sizeof(BOOL);
                     break;
-
-                case SO_KEEPALIVE:
-                case SO_DONTROUTE:
-                   /* These guys go directly to the helper */
-                   goto SendToHelper;
 
                 case SO_CONDITIONAL_ACCEPT:
                     BoolBuffer = (Socket->SharedData->UseDelayedAcceptance != 0);
@@ -3817,6 +3863,8 @@ WSPGetSockOpt(IN SOCKET Handle,
                 return SOCKET_ERROR;
             }
             RtlCopyMemory(OptionValue, Buffer, BufferSize);
+            /* Windows reports the size of the value, not the size of the buffer (Server 2022: 4 for a buffer of 8) */
+            *OptionLength = BufferSize;
 
             return 0;
 
@@ -3955,6 +4003,7 @@ WSPSetSockOpt(
 {
     PSOCKET_INFORMATION Socket;
     INT Errno;
+    BOOL Flag;
 
     /* Get the Socket Structure associate to this Socket*/
     Socket = GetSocketStructure(s);
@@ -4043,6 +4092,41 @@ WSPSetSockOpt(
         if (Errno != NO_ERROR)
             return SOCKET_ERROR;
         Socket->SharedData->TcpNoDelay = (*(BOOLEAN *)optval != 0) ? 1 : 0;
+        return NO_ERROR;
+    }
+
+    /* SO_KEEPALIVE (stream sockets only) and SO_DONTROUTE: the value is the first byte of the buffer, an empty buffer is
+     * WSAEFAULT (Windows Server 2022). The helper still gets the option, the socket keeps it for getsockopt and for
+     * the sockets accepted on it. */
+    if (level == SOL_SOCKET && (optname == SO_KEEPALIVE || optname == SO_DONTROUTE))
+    {
+        if (optname == SO_KEEPALIVE && Socket->SharedData->SocketType != SOCK_STREAM)
+        {
+            if (lpErrno) *lpErrno = WSAENOPROTOOPT;
+            return SOCKET_ERROR;
+        }
+        if (optlen < (INT)sizeof(BOOLEAN) || IsBadReadPtr(optval, sizeof(BOOLEAN)))
+        {
+            if (lpErrno) *lpErrno = WSAEFAULT;
+            return SOCKET_ERROR;
+        }
+        /* the helper wants a whole BOOL, the caller may give one byte */
+        Flag = (*(BOOLEAN *)optval != 0) ? TRUE : FALSE;
+        Errno = Socket->HelperData->WSHSetSocketInformation(Socket->HelperContext,
+                                                            s,
+                                                            Socket->TdiAddressHandle,
+                                                            Socket->TdiConnectionHandle,
+                                                            level,
+                                                            optname,
+                                                            (PCHAR)&Flag,
+                                                            sizeof(Flag));
+        if (lpErrno) *lpErrno = Errno;
+        if (Errno != NO_ERROR)
+            return SOCKET_ERROR;
+        if (optname == SO_KEEPALIVE)
+            Socket->SharedData->KeepAlive = (*(BOOLEAN *)optval != 0) ? 1 : 0;
+        else
+            Socket->SharedData->DontRoute = (*(BOOLEAN *)optval != 0) ? 1 : 0;
         return NO_ERROR;
     }
 
@@ -4191,7 +4275,7 @@ WSPSetSockOpt(
                   PSOCKET_INFORMATION ListenSocket = GetSocketStructure(*(SOCKET *)optval);
 
                   if (ListenSocket && ListenSocket->SharedData->Listening)
-                      Socket->SharedData->TcpNoDelay = ListenSocket->SharedData->TcpNoDelay;
+                      MsafdInheritListenerOptions(Socket, ListenSocket, TRUE);
               }
               return MsafdUpdateConnectionContext(s, lpErrno);
 
@@ -4231,10 +4315,14 @@ WSPSetSockOpt(
                             sizeof(DWORD));
               return NO_ERROR;
 
-           case SO_KEEPALIVE:
-           case SO_DONTROUTE:
-              /* These go directly to the helper dll */
-              goto SendToHelper;
+           case SO_DEBUG:
+              if (!optval || optlen < sizeof(BOOL))
+              {
+                  if (lpErrno) *lpErrno = WSAEFAULT;
+                  return SOCKET_ERROR;
+              }
+              Socket->SharedData->Debug = (*optval != 0) ? 1 : 0;
+              return NO_ERROR;
 
            default:
               /* Obviously this is a hack */
@@ -4243,7 +4331,6 @@ WSPSetSockOpt(
         }
     }
 
-SendToHelper:
     Errno = Socket->HelperData->WSHSetSocketInformation(Socket->HelperContext,
                                                         s,
                                                         Socket->TdiAddressHandle,
