@@ -744,7 +744,7 @@ static void TestStackEnd(void)
     ULONG Count = 0, i, Xs = 0, Plain = 0, Over = 0;
     SIZE_T Distance;
     PVOID Handler;
-    LONG LastXs = -1, FirstPlain = -1;
+    LONG LastXs = -1, FirstPlain = -1, FirstOver = -1;
 
     pNtTerminateThread = (PFN_NtTerminateThread)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtTerminateThread");
 #if !defined(__x86_64__)
@@ -777,12 +777,21 @@ static void TestStackEnd(void)
         trace("stack end, distance 0x%lx: %ld\n", (ULONG)(0x5000 - i * 0x80), Sequence[i]);
         if (Sequence[i] == XSC_DEEP_XSTATE) { Xs++; LastXs = i; }
         else if (Sequence[i] == XSC_DEEP_PLAIN) { Plain++; if (FirstPlain < 0) FirstPlain = i; }
-        else Over++;
+        else { Over++; if (FirstOver < 0) FirstOver = i; }
     }
     trace("stack end: %lu with the extended state, %lu without, %lu overflow or none\n", Xs, Plain, Over);
     ok(Xs != 0, "no exception had room for the extended state\n");
     ok(FirstPlain < 0 || LastXs < FirstPlain, "a frame with the extended state was dispatched after one without it\n");
-    ok(Plain != 0, "an exception whose frame fits without the extended state was not dispatched\n");
+
+    /*
+     * The write of the frame with the extended state that reaches the last guard page raises the stack overflow
+     * (the exception is not delivered in the smaller frame instead, which would lose the overflow), so no frame
+     * without the extended state is required between the frames with it and the overflow. What the stack end
+     * must still guarantee is that nothing is dispatched after the first overflow or missing exception.
+     */
+    for (i = (FirstOver < 0) ? Count : (ULONG)FirstOver; i < Count; i++)
+        ok(Sequence[i] != XSC_DEEP_XSTATE && Sequence[i] != XSC_DEEP_PLAIN,
+           "an exception was dispatched at index %lu, after the stack end was reached at %ld\n", i, FirstOver);
 }
 #endif /* __GNUC__ */
 
