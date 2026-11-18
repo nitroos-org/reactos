@@ -295,6 +295,9 @@ SysWOW64/mscoree.dll
 SysWOW64/sspicli.dll
 SysWOW64/wevtapi.dll
 
+# 32-bit programs of the Windows Filtering Platform (VPN, security and sandbox software) import fwpuclnt.dll and load it from here.
+@0x600 SysWOW64/fwpuclnt.dll
+
 # More 32-bit .NET P/Invoke targets (found by scanning the ModuleRef tables and strings of the PowerShell 7 win-x86
 # assemblies). Each is reached only from a rarely used API; without the i386 copy the first call throws DllNotFoundException.
 # Loading only; no functional claim beyond what each DLL implements. Every import chain is already listed above.
