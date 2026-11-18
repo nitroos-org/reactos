@@ -345,6 +345,9 @@ static SECURITY_STATUS nego_ntlm_leg(NegoContext *ctx, PCredHandle cred, SEC_WCH
     id.pBuffers = &ib;
     od.pBuffers = &ob;
     req |= ISC_REQ_ALLOCATE_MEMORY;
+    /* the NTLM of the Negotiate package always signs (Windows, measured: SIGN and KEY_EXCH are offered whatever the
+     * caller asked for), so EncryptMessage and MakeSignature have the session keys */
+    if (!ctx->server) req |= ISC_REQ_INTEGRITY;
     if (ctx->server)
         ret = ntlm_AcceptSecurityContext(cred, old, have_in ? &id : NULL, req, data_rep, &ctx->ntlm, &od, &attr, expiry);
     else
@@ -499,7 +502,8 @@ static SECURITY_STATUS nego_client_first(PCredHandle phCredential, SEC_WCHAR *ps
     if (!use_spnego)
     {
         ctx->mode = NEGO_RAW;
-        ret = ntlm_InitializeSecurityContextW(phCredential, NULL, pszTargetName, fContextReq, 0, TargetDataRep, NULL,
+        ret = ntlm_InitializeSecurityContextW(phCredential, NULL, pszTargetName, fContextReq | ISC_REQ_INTEGRITY, 0,
+                                              TargetDataRep, NULL,
                                               0, &ctx->ntlm, pOutput, pfContextAttr, ptsExpiry);
         if (ret != SEC_E_OK && ret != SEC_I_CONTINUE_NEEDED)
         {
@@ -636,7 +640,7 @@ static SECURITY_STATUS SEC_ENTRY nego_InitializeSecurityContextW(
     if (!ctx || ctx->server) return SEC_E_INVALID_HANDLE;
     if (ctx->mode == NEGO_RAW)
     {
-        ret = ntlm_InitializeSecurityContextW(phCredential, &ctx->ntlm, pszTargetName, fContextReq, Reserved1,
+        ret = ntlm_InitializeSecurityContextW(phCredential, &ctx->ntlm, pszTargetName, fContextReq | ISC_REQ_INTEGRITY, Reserved1,
                                               TargetDataRep, pInput, Reserved2, &ctx->ntlm, pOutput, pfContextAttr,
                                               ptsExpiry);
     }

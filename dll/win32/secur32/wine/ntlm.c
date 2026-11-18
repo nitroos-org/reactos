@@ -2360,11 +2360,20 @@ SECURITY_STATUS SEC_ENTRY ntlm_EncryptMessage(PCtxtHandle phContext,
     helper = (PNegoHelper) phContext->dwLower;
     if (!helper || helper->state != 1)
         return SEC_E_INVALID_HANDLE;   /* only a complete exchange has keys (Windows: SEC_E_INVALID_HANDLE, measured) */
+    /* neither signing nor sealing was negotiated: Windows has no keyed messages (SEC_E_UNSUPPORTED_FUNCTION, measured) */
+    if (!(helper->neg_flags & (NTLMSSP_NEGOTIATE_SIGN | NTLMSSP_NEGOTIATE_SEAL)))
+        return SEC_E_UNSUPPORTED_FUNCTION;
 
-    if(helper->neg_flags & NTLMSSP_NEGOTIATE_NTLM2 && 
-            helper->neg_flags & NTLMSSP_NEGOTIATE_SEAL)
-    { 
+    /* Windows seals whether or not SEAL was negotiated (measured on Windows Server 2022: a context without it
+     * encrypts and the peer decrypts); extended session security always has the keys of the sealing handles */
+    if(helper->neg_flags & NTLMSSP_NEGOTIATE_NTLM2)
+    {
+        ULONG save_flags = helper->neg_flags;
+
+        /* EncryptMessage always produces real signatures */
+        helper->neg_flags |= NTLMSSP_NEGOTIATE_SIGN;
         ntlm_CreateSignature(helper, pMessage, token_idx, NTLM_SEND, FALSE);
+        helper->neg_flags = save_flags;
         SECUR32_arc4Process(helper->crypt.ntlm2.send_a4i,
                 pMessage->pBuffers[data_idx].pvBuffer,
                 pMessage->pBuffers[data_idx].cbBuffer);
@@ -2431,8 +2440,11 @@ SECURITY_STATUS SEC_ENTRY ntlm_DecryptMessage(PCtxtHandle phContext,
     helper = (PNegoHelper) phContext->dwLower;
     if (!helper || helper->state != 1)
         return SEC_E_INVALID_HANDLE;   /* only a complete exchange has keys (Windows: SEC_E_INVALID_HANDLE, measured) */
+    /* neither signing nor sealing was negotiated: Windows has no keyed messages (SEC_E_UNSUPPORTED_FUNCTION, measured) */
+    if (!(helper->neg_flags & (NTLMSSP_NEGOTIATE_SIGN | NTLMSSP_NEGOTIATE_SEAL)))
+        return SEC_E_UNSUPPORTED_FUNCTION;
 
-    if(helper->neg_flags & NTLMSSP_NEGOTIATE_NTLM2 && helper->neg_flags & NTLMSSP_NEGOTIATE_SEAL)
+    if(helper->neg_flags & NTLMSSP_NEGOTIATE_NTLM2)
     {
         SECUR32_arc4Process(helper->crypt.ntlm2.recv_a4i,
                 pMessage->pBuffers[data_idx].pvBuffer,
