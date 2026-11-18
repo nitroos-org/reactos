@@ -437,7 +437,26 @@ static int do_cancel(const WCHAR *dir, int seconds, int threads)
 
 /* flood (pool budget) ******************************************************/
 
-static struct { const WCHAR *file; DWORD until; LONG writes, fails; } Fl;
+static struct { const WCHAR *file; DWORD until; LONG writes, fails; LONG ok[1024]; LONG errs[64]; DWORD errcode[64]; CRITICAL_SECTION cs; } Fl;
+
+/* Block k of writer t = 16-byte tag "T<t> K<k>" then (t*131 + k*7 + j) & 0xff,
+ * so that the server's copy can be checked against the successful writes (block k = the k-th successful write) */
+static void flood_fill(UCHAR *buf, ULONG t, ULONG k)
+{
+    ULONG j;
+    for (j = 0; j < 1024 * 1024; j++)
+        buf[j] = (UCHAR)(t * 131 + k * 7 + j);
+    _snprintf((char *)buf, 16, "T%04lu K%08lu", t, k);
+}
+
+static void flood_err(DWORD e)
+{
+    int i;
+    EnterCriticalSection(&Fl.cs);
+    for (i = 0; i < 64; i++)
+        if (Fl.errs[i] == 0 || Fl.errcode[i] == e) { Fl.errcode[i] = e; Fl.errs[i]++; break; }
+    LeaveCriticalSection(&Fl.cs);
+}
 
 static DWORD WINAPI flood_thread(LPVOID p)
 {
@@ -445,25 +464,45 @@ static DWORD WINAPI flood_thread(LPVOID p)
     WCHAR name[600];
     HANDLE f;
     DWORD n;
+    ULONG t = (ULONG)(ULONG_PTR)p, k = 0;
 
     /* one file per thread (FILE-<n>): many handles of one file closing at once is "closestorm" */
-    _snwprintf(name, ARRAYSIZE(name) - 1, L"%ls-%lu", Fl.file, (ULONG)(ULONG_PTR)p);
+    _snwprintf(name, ARRAYSIZE(name) - 1, L"%ls-%lu", Fl.file, t);
     name[ARRAYSIZE(name) - 1] = 0;
-    f = CreateFileW(name, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, 0, NULL);
+    f = CreateFileW(name, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, CREATE_ALWAYS, 0, NULL);
 
     if (f == INVALID_HANDLE_VALUE)
     {
+        flood_err(GetLastError());
         InterlockedIncrement(&Fl.fails);
         return 0;
     }
+    flood_fill(buf, t, k);
     while (GetTickCount() < Fl.until)
     {
-        if (WriteFile(f, buf, 1024 * 1024, &n, NULL))
+        if (WriteFile(f, buf, 1024 * 1024, &n, NULL) && n == 1024 * 1024)
+        {
             InterlockedIncrement(&Fl.writes);
+            k++;
+            flood_fill(buf, t, k);
+        }
         else
+        {
+            flood_err(n != 0 && n != 1024 * 1024 ? 0xFFFF0000 | (n >> 12) : GetLastError());
             InterlockedIncrement(&Fl.fails);
+            if (n != 0)
+            {
+                /* a short write moved the file pointer: put it back to the block boundary */
+                LARGE_INTEGER z;
+                z.QuadPart = (LONGLONG)k * 1024 * 1024;
+                SetFilePointerEx(f, z, NULL, FILE_BEGIN);
+            }
+        }
     }
-    CloseHandle(f);
+    if (!CloseHandle(f))
+        flood_err(0xC1000000 | GetLastError());
+    if (t < 1024)
+        Fl.ok[t] = (LONG)k;
     free(buf);
     return 0;
 }
@@ -496,6 +535,7 @@ static int do_flood(const WCHAR *file, int threads, int seconds)
     int i, k;
 
     Fl.file = file;
+    InitializeCriticalSection(&Fl.cs);
     Fl.until = GetTickCount() + seconds * 1000;
     pool_tags("before");
     for (i = 0; i < threads; i++)
@@ -512,6 +552,10 @@ static int do_flood(const WCHAR *file, int threads, int seconds)
     }
     pool_tags("after");
     printf("ATTACK flood threads=%d writes=%ld fails=%ld\n", threads, Fl.writes, Fl.fails);
+    for (i = 0; i < 64 && Fl.errs[i]; i++)
+        printf("ATTACK flood error %lu (0x%08lx) count=%ld\n", Fl.errcode[i], Fl.errcode[i], Fl.errs[i]);
+    for (i = 0; i < threads && i < 1024; i++)
+        printf("ATTACK flood file %d blocks=%ld\n", i, Fl.ok[i]);
     return 0;
 }
 
