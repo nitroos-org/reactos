@@ -259,7 +259,21 @@ static int acquire(struct smb2_context *smb2, struct smb2_sspi_ctx *ctx, const c
     if (!explicit_cred &&
         !OpenThreadToken(GetCurrentThread(), TOKEN_IMPERSONATE | TOKEN_QUERY, TRUE, &ctx->sso_token) &&
         !OpenThreadToken(GetCurrentThread(), TOKEN_IMPERSONATE | TOKEN_QUERY, FALSE, &ctx->sso_token))
-        ctx->sso_token = NULL;     /* not impersonating: the process's own logon session */
+    {
+        ctx->sso_token = NULL;
+        /* ERROR_NO_TOKEN: not impersonating, the process's own logon session.
+         * Any other failure while impersonating: the caller's identity cannot
+         * be kept, and InitializeSecurityContext would later run as whoever
+         * the thread is then (a service: itself). Refuse. */
+        if (GetLastError() != ERROR_NO_TOKEN)
+        {
+            FreeCredentialsHandle(&ctx->cred);
+            ctx->have_cred = 0;
+            fail(smb2, ctx, NITRO_SMB2_REASON_SSPI, 0, "the impersonation token of the caller could not be kept");
+            ret = -EACCES;
+            goto out;
+        }
+    }
 
     ctx->max_token = 12000;
     if (QuerySecurityPackageInfoW(wpkg, &info) == SEC_E_OK && info)
@@ -359,6 +373,10 @@ void *smb2_sspi_negotiate_reply(struct smb2_context *smb2, const char *server,
             wipe_string(smb2->password);
             free((void *)smb2->password);
             smb2->password = NULL;
+            /* the password is gone: a later connect on this context must not
+             * fall back to the default (single sign-on) credentials */
+            if (ret < 0)
+                ctx->cred_failed = 1;
         }
         else
         {
@@ -385,14 +403,30 @@ void *smb2_sspi_negotiate_reply(struct smb2_context *smb2, const char *server,
         memcpy(auth->hint, hint, (size_t)hint_len);
         auth->hint_len = hint_len;
     }
-    /* SPN cifs/<server> (only Kerberos uses it) */
-    if (server == NULL)
-        server = "";
-    spn = malloc(strlen(server) + 6);
-    if (spn == NULL)
-        goto nomem;
-    strcpy(spn, "cifs/");
-    strcat(spn, server);
+    /* SPN cifs/<host>: the host the caller named, without libsmb2's ":port"
+     * suffix or the brackets of an IPv6 literal (NTLM puts it in the
+     * AUTHENTICATE message as MsvAvTargetName, Kerberos looks it up) */
+    {
+        const char *host = server ? server : "";
+        size_t hl = strlen(host);
+        const char *colon = strchr(host, ':');
+
+        if (host[0] == '[')
+        {
+            const char *end = strchr(host, ']');
+
+            host++;
+            hl = end ? (size_t)(end - host) : strlen(host);
+        }
+        else if (colon && strchr(colon + 1, ':') == NULL)
+            hl = (size_t)(colon - host);    /* host:port (a bare IPv6 address has more colons) */
+        spn = malloc(hl + 6);
+        if (spn == NULL)
+            goto nomem;
+        memcpy(spn, "cifs/", 5);
+        memcpy(spn + 5, host, hl);
+        spn[5 + hl] = 0;
+    }
     auth->target = to_utf16(spn, NULL);
     free(spn);
     if (auth->target == NULL)
@@ -433,7 +467,13 @@ static SECURITY_STATUS isc(struct smb2_sspi_auth *auth, const uint8_t *in, int i
     {
         /* the caller's own impersonation (if any) is put back afterwards */
         if (!OpenThreadToken(GetCurrentThread(), TOKEN_IMPERSONATE, TRUE, &saved))
+        {
             saved = NULL;
+            /* impersonating, but the token cannot be opened to be put back
+             * afterwards: do not change the thread's identity at all */
+            if (GetLastError() != ERROR_NO_TOKEN)
+                return SEC_E_NO_IMPERSONATION;
+        }
         if (!SetThreadToken(NULL, auth->ctx->sso_token))
         {
             if (saved)
@@ -576,6 +616,9 @@ int smb2_sspi_session_complete(struct smb2_context *smb2, void *auth_data,
     if (status == SEC_E_OK && key.SessionKey && key.SessionKeyLength > 0)
     {
         uint32_t len = key.SessionKeyLength > 255 ? 255 : key.SessionKeyLength;
+        /* NitroOS review: a key shorter than 16 bytes is right-padded with
+         * zeros ([MS-SMB2] 3.2.5.3.1); libsmb2 reads 16 bytes of it */
+        uint32_t alloc = len < 16 ? 16 : len;
 
         if (smb2->session_key)
         {
@@ -583,11 +626,11 @@ int smb2_sspi_session_complete(struct smb2_context *smb2, void *auth_data,
             free(smb2->session_key);
         }
         smb2->session_key_size = 0;
-        smb2->session_key = malloc(len);
+        smb2->session_key = calloc(1, alloc);
         if (smb2->session_key)
         {
             memcpy(smb2->session_key, key.SessionKey, len);
-            smb2->session_key_size = (uint8_t)len;
+            smb2->session_key_size = (uint8_t)alloc;
         }
         SecureZeroMemory(key.SessionKey, key.SessionKeyLength);
         FreeContextBuffer(key.SessionKey);
@@ -596,7 +639,7 @@ int smb2_sspi_session_complete(struct smb2_context *smb2, void *auth_data,
             fail(smb2, ctx, NITRO_SMB2_REASON_NO_MEMORY, 0, "out of memory");
             return -1;
         }
-        ctx->session_key_length = (uint16_t)len;
+        ctx->session_key_length = (uint16_t)len;   /* as SSPI gave it */
     }
     /* No session key: libsmb2 fails the connection if signing or sealing
      * needs one (lib/libsmb2.c session_setup_cb). */
