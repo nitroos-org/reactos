@@ -519,6 +519,13 @@ smb2_process_negotiate_fixed(struct smb2_context *smb2,
         smb2_get_uint32(iov, 60, &rep->negotiate_context_offset);
 
         if (rep->security_buffer_length == 0) {
+                /* NitroOS: a 3.1.1 reply without a security buffer still
+                 * carries its negotiate contexts (cipher, preauth hash):
+                 * they were skipped and the cipher stayed 0 */
+                if (rep->dialect_revision >= SMB2_VERSION_0311) {
+                        return smb2->spl - SMB2_HEADER_SIZE -
+                                (SMB2_NEGOTIATE_REPLY_SIZE & 0xfffe);
+                }
                 return 0;
         }
         if (rep->security_buffer_offset < SMB2_HEADER_SIZE +
@@ -553,7 +560,10 @@ smb2_process_negotiate_variable(struct smb2_context *smb2,
         struct smb2_iovec *iov = &smb2->in.iov[smb2->in.niov - 1];
         int offset;
 
-        rep->security_buffer = &iov->buf[IOV_OFFSET_NEGOTIATE];
+        /* NitroOS: only when there is one (the offset is 0 otherwise) */
+        if (rep->security_buffer_length) {
+                rep->security_buffer = &iov->buf[IOV_OFFSET_NEGOTIATE];
+        }
 
         if (rep->dialect_revision < SMB2_VERSION_0311 ||
             !rep->negotiate_context_count) {
