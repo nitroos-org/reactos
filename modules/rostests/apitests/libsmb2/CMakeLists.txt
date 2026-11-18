@@ -7,6 +7,16 @@ include_directories(
     ${REACTOS_SOURCE_DIR}/dll/3rdparty/libsmb2/include/smb2
     ${REACTOS_SOURCE_DIR}/dll/3rdparty/libsmb2/nitro)
 
+list(APPEND SOURCE
+    Smb2Engine.c
+    testlist.c)
+
+add_executable(libsmb2_apitest ${SOURCE})
+target_link_libraries(libsmb2_apitest wine ${PSEH_LIB})
+set_module_type(libsmb2_apitest win32cui)
+add_importlibs(libsmb2_apitest libsmb2 ws2_32 msvcrt kernel32 ntdll)
+add_rostests_file(TARGET libsmb2_apitest)
+
 # smbcli: the test client for the SMB interop matrix (installed with the tests only)
 add_executable(smbcli smbcli.c)
 set_module_type(smbcli win32cui)
