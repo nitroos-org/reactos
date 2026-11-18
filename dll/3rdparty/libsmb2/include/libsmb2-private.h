@@ -260,6 +260,10 @@ struct smb2_context {
         /* for delegation of client creds to proxy-client */
         gss_cred_id_t cred_handle;
 #endif
+#ifdef HAVE_SSPI
+        /* NitroOS: state of the SSPI authentication backend (nitro/sspi.c) */
+        struct smb2_sspi_ctx *sspi;
+#endif
         /*
          * For handling received smb3 encrypted blobs
          */

@@ -110,6 +110,10 @@
 #include "krb5-wrapper.h"
 #endif
 #include "spnego-wrapper.h"
+#ifdef HAVE_SSPI
+/* NitroOS: the SSPI authentication backend (nitro/sspi.c) */
+#include "nitro-sspi.h"
+#endif
 
 #if defined(ESP_PLATFORM)
 #define DEFAULT_OUTPUT_BUFFER_LENGTH 512
@@ -735,6 +739,10 @@ extern void
 free_c_data(struct smb2_context *smb2, struct connect_data *c_data)
 {
         if (c_data->auth_data) {
+#ifdef HAVE_SSPI
+                /* NitroOS: client session setups run through the SSPI backend only */
+                smb2_sspi_free_auth_data(c_data->auth_data);
+#else
                 if (smb2->sec == SMB2_SEC_NTLMSSP) {
                         ntlmssp_destroy_context(c_data->auth_data);
                 }
@@ -743,6 +751,7 @@ free_c_data(struct smb2_context *smb2, struct connect_data *c_data)
                         krb5_free_auth_data(c_data->auth_data);
                 }
 #endif
+#endif /* HAVE_SSPI */
         }
 
         if (smb2->connect_data == c_data) {
@@ -990,6 +999,22 @@ session_setup_cb(struct smb2_context *smb2, int status,
                 smb2->sign = 0;
         }
 
+#ifdef HAVE_SSPI
+        /* NitroOS: a guest or anonymous session is never accepted (insecure
+         * guest logons are off); then the server's last token (SPNEGO
+         * accept-completed with its mechListMIC) goes to SSPI, which must
+         * complete, and the session key comes from SSPI. */
+        if (smb2_sspi_session_complete(smb2, c_data->auth_data,
+                                       rep->session_flags,
+                                       rep->security_buffer,
+                                       rep->security_buffer_length) < 0) {
+                smb2_close_context(smb2);
+                c_data->cb(smb2, -EACCES, NULL, c_data->cb_data);
+                free_c_data(smb2, c_data);
+                return;
+        }
+#endif
+
 #ifdef HAVE_LIBKRB5
        if (smb2->sec == SMB2_SEC_KRB5 ||
            smb2->sec == SMB2_SEC_IAKERB) {
@@ -1020,6 +1045,9 @@ session_setup_cb(struct smb2_context *smb2, int status,
                 uint8_t zero_key[SMB2_KEY_SIZE] = {0};
                 int have_valid_session_key = 1;
 
+#ifndef HAVE_SSPI
+                /* NitroOS: with SSPI, smb2_sspi_session_complete() has set
+                 * the session key already */
                 if (smb2->sec == SMB2_SEC_NTLMSSP) {
                         if (ntlmssp_get_session_key(c_data->auth_data,
                                                     &smb2->session_key,
@@ -1034,6 +1062,7 @@ session_setup_cb(struct smb2_context *smb2, int status,
                         }
                 }
 #endif
+#endif /* !HAVE_SSPI */
                 /* check if the session key is proper */
                 if (smb2->session_key == NULL || memcmp(smb2->session_key, zero_key, SMB2_KEY_SIZE) == 0) {
                         have_valid_session_key = 0;
@@ -1135,6 +1164,15 @@ send_session_setup_request(struct smb2_context *smb2,
         memset(&req, 0, sizeof(struct smb2_session_setup_request));
         req.security_mode = (uint8_t)smb2_request_security_mode(smb2);
 
+#ifdef HAVE_SSPI
+        /* NitroOS: the next token of the SSPI exchange */
+        if (smb2_sspi_session_request(smb2, c_data->auth_data, buf, len,
+                                      &req.security_buffer,
+                                      &req.security_buffer_length) < 0) {
+                smb2_close_context(smb2);
+                return -EACCES;
+        }
+#else
         if (smb2->sec == SMB2_SEC_NTLMSSP) {
                 if (ntlmssp_generate_blob(NULL, smb2, time(NULL), c_data->auth_data,
                                           buf, len,
@@ -1157,6 +1195,7 @@ send_session_setup_request(struct smb2_context *smb2,
                         krb5_get_output_token_buffer(c_data->auth_data);
         }
 #endif
+#endif /* HAVE_SSPI */
 
         pdu = smb2_cmd_session_setup_async(smb2, &req,
                                            session_setup_cb, c_data);
@@ -1269,6 +1308,21 @@ negotiate_cb(struct smb2_context *smb2, int status,
          * where signing actually gets disabled, once sealing is real.
          */
 
+#ifdef HAVE_SSPI
+        /* NitroOS: SSPI authenticates. The server's SPNEGO hint goes to the
+         * Negotiate package as is (libsmb2's own SPNEGO parser and wrapping
+         * are not used); the package picks the mechanism. */
+        (void)spnego_mechs;
+        c_data->auth_data = smb2_sspi_negotiate_reply(smb2, c_data->server,
+                                                      rep->security_buffer,
+                                                      rep->security_buffer_length);
+        if (c_data->auth_data == NULL) {
+                smb2_close_context(smb2);
+                c_data->cb(smb2, -EACCES, NULL, c_data->cb_data);
+                free_c_data(smb2, c_data);
+                return;
+        }
+#else
         /* if there is a gssapi blob in the reply, parse it to determine which
          * mechanisms are supported if caller hasn't explicitly set security
          */
@@ -1336,6 +1390,7 @@ negotiate_cb(struct smb2_context *smb2, int status,
                 free_c_data(smb2, c_data);
                 return;
         }
+#endif /* HAVE_SSPI */
 
         if ((ret = send_session_setup_request(smb2, c_data, NULL, 0)) < 0) {
                 smb2_close_context(smb2);
@@ -1360,6 +1415,10 @@ connect_cb(struct smb2_context *smb2, int status,
                 free_c_data(smb2, c_data);
                 return;
         }
+#ifdef HAVE_SSPI
+        /* NitroOS: the transport is up (for the error mapping) */
+        smb2_sspi_transport_connected(smb2);
+#endif
 
         memset(&req, 0, sizeof(struct smb2_negotiate_request));
         req.capabilities = SMB2_GLOBAL_CAP_LARGE_MTU;

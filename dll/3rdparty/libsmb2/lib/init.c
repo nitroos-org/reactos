@@ -86,6 +86,10 @@
 #include "libsmb2.h"
 #include "libsmb2-private.h"
 #include "slist.h"
+#ifdef HAVE_SSPI
+/* NitroOS: the SSPI authentication backend (nitro/sspi.c) */
+#include "nitro-sspi.h"
+#endif
 
 #define MAX_URL_SIZE 1024
 
@@ -448,6 +452,11 @@ struct smb2_context *smb2_init_context(void)
         smb2->sec = SMB2_SEC_UNDEFINED;
         smb2->version = SMB2_VERSION_ANY;
         smb2->ndr = 1;
+#ifdef HAVE_SSPI
+        /* NitroOS: always offer signing (the Windows client default:
+         * EnableSecuritySignature 1); it is required when the server says so */
+        smb2->security_mode = SMB2_NEGOTIATE_SIGNING_ENABLED;
+#endif
 
         smb2_random_bytes(smb2->client_challenge,
                           sizeof(smb2->client_challenge));
@@ -565,6 +574,11 @@ void smb2_destroy_context(struct smb2_context *smb2)
                          NULL, smb2->connect_data);
            smb2->connect_cb = NULL;
         }
+#ifdef HAVE_SSPI
+        /* NitroOS: release the SSPI credentials and wipe the session key,
+         * the derived keys and any password before they are freed */
+        smb2_sspi_destroy(smb2);
+#endif
         free(smb2->session_key);
         smb2->session_key = NULL;
 
