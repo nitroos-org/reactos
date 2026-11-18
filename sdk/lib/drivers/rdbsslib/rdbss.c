@@ -874,16 +874,36 @@ RxAdjustFileTimesAndSize(
         return;
     }
 
+    /* The size first: on most servers, changing it moves the last write
+     * time, which the time update below then settles */
+    if (FileModified)
+    {
+        FileEOFInfo.EndOfFile.QuadPart = capFcb->Header.FileSize.QuadPart;
+
+        RxContext->Info.FileInformationClass = FileEndOfFileInformation;
+        RxContext->Info.Buffer = &FileEOFInfo;
+        RxContext->Info.Length = sizeof(FileEOFInfo);
+
+        MINIRDR_CALL(Status, RxContext, capFcb->MRxDispatch, MRxSetFileInfoAtCleanup, (RxContext));
+        (void)Status;
+    }
+
     /* By default, we won't issue any MRxSetFileInfoAtCleanup call */
     NeedUpdate = FALSE;
     RtlZeroMemory(&FileBasicInfo, sizeof(FileBasicInfo));
 
-    /* Update lastwrite time if required */
+    /* Update lastwrite time if required; a time the user set on this
+     * handle is sent again so that the size update cannot override it */
     if (SetLastWrite)
     {
         NeedUpdate = TRUE;
         capFcb->LastWriteTime.QuadPart = CurrentTime.QuadPart;
         FileBasicInfo.LastWriteTime.QuadPart = CurrentTime.QuadPart;
+    }
+    else if (FileModified && BooleanFlagOn(capFobx->Flags, FOBX_FLAG_USER_SET_LAST_WRITE))
+    {
+        NeedUpdate = TRUE;
+        FileBasicInfo.LastWriteTime.QuadPart = capFcb->LastWriteTime.QuadPart;
     }
 
     /* Update lastaccess time if required */
@@ -908,19 +928,6 @@ RxAdjustFileTimesAndSize(
         RxContext->Info.FileInformationClass = FileBasicInformation;
         RxContext->Info.Buffer = &FileBasicInfo;
         RxContext->Info.Length = sizeof(FileBasicInfo);
-
-        MINIRDR_CALL(Status, RxContext, capFcb->MRxDispatch, MRxSetFileInfoAtCleanup, (RxContext));
-        (void)Status;
-    }
-
-    /* If the file was modified, update its EOF */
-    if (FileModified)
-    {
-        FileEOFInfo.EndOfFile.QuadPart = capFcb->Header.FileSize.QuadPart;
-
-        RxContext->Info.FileInformationClass = FileEndOfFileInformation;
-        RxContext->Info.Buffer = &FileEOFInfo;
-        RxContext->Info.Length = sizeof(FileEOFInfo);
 
         MINIRDR_CALL(Status, RxContext, capFcb->MRxDispatch, MRxSetFileInfoAtCleanup, (RxContext));
         (void)Status;
@@ -8529,13 +8536,18 @@ RxPurgeNetFcb(
     ASSERT(Status == STATUS_SUCCESS);
 }
 
+/*
+ * @implemented
+ */
 NTSTATUS
 RxQueryAlternateNameInfo(
     PRX_CONTEXT RxContext,
     PFILE_NAME_INFORMATION AltNameInfo)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PAGED_CODE();
+
+    /* Short names are the server's: ask the mini-redirector */
+    return RxpQueryInfoMiniRdr(RxContext, FileAlternateNameInformation, AltNameInfo);
 }
 
 /*
@@ -8555,13 +8567,17 @@ RxQueryBasicInfo(
     return RxpQueryInfoMiniRdr(RxContext, FileBasicInformation, BasicInfo);
 }
 
+/*
+ * @implemented
+ */
 NTSTATUS
 RxQueryCompressedInfo(
     PRX_CONTEXT RxContext,
     PFILE_COMPRESSION_INFORMATION CompressionInfo)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PAGED_CODE();
+
+    return RxpQueryInfoMiniRdr(RxContext, FileCompressionInformation, CompressionInfo);
 }
 
 /*
@@ -8780,22 +8796,71 @@ RxQueryDirectory(
     return Status;
 }
 
+/*
+ * @implemented
+ */
 NTSTATUS
 RxQueryEaInfo(
     PRX_CONTEXT RxContext,
     PFILE_EA_INFORMATION EaInfo)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    if (RxContext->Info.LengthRemaining < (LONG)sizeof(FILE_EA_INFORMATION))
+    {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    /* A mini-redirector without EA support has no EAs: size 0 */
+    EaInfo->EaSize = 0;
+    if (((PFCB)RxContext->pFcb)->MRxDispatch->MRxQueryEaInfo == NULL)
+    {
+        RxContext->Info.LengthRemaining -= sizeof(FILE_EA_INFORMATION);
+        return STATUS_SUCCESS;
+    }
+
+    Status = RxpQueryInfoMiniRdr(RxContext, FileEaInformation, EaInfo);
+    if (Status == STATUS_NOT_IMPLEMENTED || Status == STATUS_INVALID_PARAMETER ||
+        Status == STATUS_EAS_NOT_SUPPORTED || Status == STATUS_NOT_SUPPORTED)
+    {
+        EaInfo->EaSize = 0;
+        RxContext->Info.LengthRemaining -= sizeof(FILE_EA_INFORMATION);
+        Status = STATUS_SUCCESS;
+    }
+
+    return Status;
 }
 
+/*
+ * @implemented
+ */
 NTSTATUS
 RxQueryInternalInfo(
     PRX_CONTEXT RxContext,
     PFILE_INTERNAL_INFORMATION InternalInfo)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    if (RxContext->Info.LengthRemaining < (LONG)sizeof(FILE_INTERNAL_INFORMATION))
+    {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    /* The file ID is the server's; if the mini-redirector has none, use a
+     * value unique among the files open on this client */
+    Status = RxpQueryInfoMiniRdr(RxContext, FileInternalInformation, InternalInfo);
+    if (!NT_SUCCESS(Status))
+    {
+        InternalInfo->IndexNumber.QuadPart = (LONGLONG)(ULONG_PTR)RxContext->pFcb;
+        RxContext->Info.LengthRemaining -= sizeof(FILE_INTERNAL_INFORMATION);
+        Status = STATUS_SUCCESS;
+    }
+
+    return Status;
 }
 
 /*
@@ -8855,22 +8920,42 @@ RxQueryNameInfo(
     return STATUS_SUCCESS;
 }
 
+/*
+ * @implemented
+ */
 NTSTATUS
 RxQueryPipeInfo(
     PRX_CONTEXT RxContext,
     PFILE_PIPE_INFORMATION PipeInfo)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PAGED_CODE();
+
+    UNREFERENCED_PARAMETER(PipeInfo);
+
+    /* Named pipes over a redirector are not supported: pipe net roots are
+     * refused at create, so a disk file is asking */
+    return STATUS_INVALID_PARAMETER;
 }
 
+/*
+ * @implemented
+ */
 NTSTATUS
 RxQueryPositionInfo(
     PRX_CONTEXT RxContext,
     PFILE_POSITION_INFORMATION PositionInfo)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PAGED_CODE();
+
+    if (RxContext->Info.LengthRemaining < (LONG)sizeof(FILE_POSITION_INFORMATION))
+    {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    PositionInfo->CurrentByteOffset.QuadPart = RxContext->CurrentIrpSp->FileObject->CurrentByteOffset.QuadPart;
+    RxContext->Info.LengthRemaining -= sizeof(FILE_POSITION_INFORMATION);
+
+    return STATUS_SUCCESS;
 }
 
 /*
@@ -9383,12 +9468,86 @@ TryAgain:
     return Status;
 }
 
+/*
+ * @implemented
+ *
+ * Called with the FCB exclusive. The server is told first; the FCB sizes and
+ * Cc follow only when it agreed. Lock order: FCB (held) -> paging I/O
+ * resource (taken here to change the sizes) ; Cc is called with only the FCB
+ * held.
+ */
 NTSTATUS
 RxSetAllocationInfo(
     PRX_CONTEXT RxContext)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PFCB Fcb;
+    NTSTATUS Status;
+    PFILE_OBJECT FileObject;
+    LONGLONG NewAllocation;
+    PFILE_ALLOCATION_INFORMATION AllocationInfo;
+
+    PAGED_CODE();
+
+    Fcb = (PFCB)RxContext->pFcb;
+    FileObject = RxContext->CurrentIrpSp->FileObject;
+    AllocationInfo = RxContext->CurrentIrp->AssociatedIrp.SystemBuffer;
+
+    if (NodeType(Fcb) != RDBSS_NTC_STORAGE_TYPE_FILE)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (RxContext->CurrentIrpSp->Parameters.SetFile.Length < sizeof(FILE_ALLOCATION_INFORMATION))
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    NewAllocation = AllocationInfo->AllocationSize.QuadPart;
+    if (NewAllocation < 0)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    /* Shrinking below the end of file truncates: not under a mapped view */
+    if (NewAllocation < Fcb->Header.FileSize.QuadPart)
+    {
+        LARGE_INTEGER NewSize;
+
+        NewSize.QuadPart = NewAllocation;
+        if (!MmCanFileBeTruncated(&Fcb->NonPaged->SectionObjectPointers, &NewSize))
+        {
+            return STATUS_USER_MAPPED_FILE;
+        }
+    }
+
+    Status = RxpSetInfoMiniRdr(RxContext, FileAllocationInformation);
+    if (!NT_SUCCESS(Status))
+    {
+        return Status;
+    }
+
+    RxAcquirePagingIoResource(RxContext, Fcb);
+    Fcb->Header.AllocationSize.QuadPart = NewAllocation;
+    Fcb->ActualAllocationLength = NewAllocation;
+    if (Fcb->Header.FileSize.QuadPart > NewAllocation)
+    {
+        RxSetFileSizeWithLock(Fcb, &NewAllocation);
+        SetFlag(FileObject->Flags, FO_FILE_SIZE_CHANGED);
+    }
+    if (Fcb->Header.ValidDataLength.QuadPart > Fcb->Header.FileSize.QuadPart)
+    {
+        Fcb->Header.ValidDataLength.QuadPart = Fcb->Header.FileSize.QuadPart;
+    }
+    RxReleasePagingIoResource(RxContext, Fcb);
+
+    /* Cc may hold the sizes: update them (a smaller size purges) */
+    if (Fcb->NonPaged->SectionObjectPointers.SharedCacheMap != NULL)
+    {
+        RxAdjustAllocationSizeforCC(Fcb);
+        CcSetFileSizes(FileObject, (PCC_FILE_SIZES)&Fcb->Header.AllocationSize);
+    }
+
+    return STATUS_SUCCESS;
 }
 
 /*
@@ -9537,28 +9696,139 @@ RxSetDispositionInfo(
     return Status;
 }
 
+/*
+ * @implemented
+ *
+ * Called with the FCB exclusive (RxCommonSetInformation). AdvanceOnly
+ * requests (Cc moving the valid data length) never reach this routine. The
+ * server is told first; the FCB and Cc follow only when it agreed. Lock
+ * order: FCB (held) -> paging I/O resource (sizes) ; Cc is called with only
+ * the FCB held, so a purge caused by the truncation can issue paging I/O.
+ */
 NTSTATUS
 RxSetEndOfFileInfo(
     PRX_CONTEXT RxContext)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PFCB Fcb;
+    NTSTATUS Status;
+    PFILE_OBJECT FileObject;
+    LONGLONG NewSize, OldSize;
+    PFILE_END_OF_FILE_INFORMATION EofInfo;
+
+    PAGED_CODE();
+
+    Fcb = (PFCB)RxContext->pFcb;
+    FileObject = RxContext->CurrentIrpSp->FileObject;
+    EofInfo = RxContext->CurrentIrp->AssociatedIrp.SystemBuffer;
+
+    if (NodeType(Fcb) != RDBSS_NTC_STORAGE_TYPE_FILE)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (RxContext->CurrentIrpSp->Parameters.SetFile.Length < sizeof(FILE_END_OF_FILE_INFORMATION))
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    NewSize = EofInfo->EndOfFile.QuadPart;
+    if (NewSize < 0)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    OldSize = Fcb->Header.FileSize.QuadPart;
+    if (NewSize < OldSize)
+    {
+        LARGE_INTEGER Size;
+
+        Size.QuadPart = NewSize;
+        if (!MmCanFileBeTruncated(&Fcb->NonPaged->SectionObjectPointers, &Size))
+        {
+            return STATUS_USER_MAPPED_FILE;
+        }
+    }
+
+    /* Data cached beyond the new end must not be written back after the
+     * server truncated: flush what remains below it first */
+    if (NewSize < OldSize && Fcb->NonPaged->SectionObjectPointers.DataSectionObject != NULL)
+    {
+        RxFlushFcbInSystemCache(Fcb, TRUE);
+    }
+
+    Status = RxpSetInfoMiniRdr(RxContext, FileEndOfFileInformation);
+    if (!NT_SUCCESS(Status))
+    {
+        return Status;
+    }
+
+    RxAcquirePagingIoResource(RxContext, Fcb);
+    RxSetFileSizeWithLock(Fcb, &NewSize);
+    if (Fcb->Header.ValidDataLength.QuadPart > NewSize)
+    {
+        Fcb->Header.ValidDataLength.QuadPart = NewSize;
+    }
+    if (NewSize > Fcb->Header.AllocationSize.QuadPart)
+    {
+        Fcb->Header.AllocationSize.QuadPart = NewSize;
+        Fcb->ActualAllocationLength = NewSize;
+    }
+    RxReleasePagingIoResource(RxContext, Fcb);
+
+    SetFlag(FileObject->Flags, FO_FILE_SIZE_CHANGED);
+
+    if (Fcb->NonPaged->SectionObjectPointers.SharedCacheMap != NULL)
+    {
+        RxAdjustAllocationSizeforCC(Fcb);
+        CcSetFileSizes(FileObject, (PCC_FILE_SIZES)&Fcb->Header.AllocationSize);
+    }
+
+    return STATUS_SUCCESS;
 }
 
+/*
+ * @implemented
+ */
 NTSTATUS
 RxSetPipeInfo(
     PRX_CONTEXT RxContext)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PAGED_CODE();
+
+    /* See RxQueryPipeInfo */
+    return STATUS_INVALID_PARAMETER;
 }
 
+/*
+ * @implemented
+ */
 NTSTATUS
 RxSetPositionInfo(
     PRX_CONTEXT RxContext)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PFILE_OBJECT FileObject;
+    PFILE_POSITION_INFORMATION PositionInfo;
+
+    PAGED_CODE();
+
+    FileObject = RxContext->CurrentIrpSp->FileObject;
+    PositionInfo = RxContext->CurrentIrp->AssociatedIrp.SystemBuffer;
+
+    if (RxContext->CurrentIrpSp->Parameters.SetFile.Length < sizeof(FILE_POSITION_INFORMATION) ||
+        PositionInfo->CurrentByteOffset.QuadPart < 0)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    /* Unbuffered handles may only seek to aligned offsets */
+    if (BooleanFlagOn(FileObject->Flags, FO_NO_INTERMEDIATE_BUFFERING) &&
+        (PositionInfo->CurrentByteOffset.LowPart & RxContext->RxDeviceObject->DeviceObject.AlignmentRequirement) != 0)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    FileObject->CurrentByteOffset.QuadPart = PositionInfo->CurrentByteOffset.QuadPart;
+    return STATUS_SUCCESS;
 }
 
 /*
@@ -9655,12 +9925,17 @@ RxSetShareAccess(
 }
 #endif
 
+/*
+ * @implemented
+ */
 NTSTATUS
 RxSetSimpleInfo(
     PRX_CONTEXT RxContext)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PAGED_CODE();
+
+    /* Short names and other plain sets: the server decides */
+    return RxpSetInfoMiniRdr(RxContext, RxContext->CurrentIrpSp->Parameters.SetFile.FileInformationClass);
 }
 
 /*
