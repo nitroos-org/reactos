@@ -404,8 +404,10 @@ void *smb2_sspi_negotiate_reply(struct smb2_context *smb2, const char *server,
         auth->hint_len = hint_len;
     }
     /* SPN cifs/<host>: the host the caller named, without libsmb2's ":port"
-     * suffix or the brackets of an IPv6 literal (NTLM puts it in the
-     * AUTHENTICATE message as MsvAvTargetName, Kerberos looks it up) */
+     * suffix or the brackets of an IPv6 literal. secur32's NTLM puts it
+     * into the AUTHENTICATE message as MsvAvTargetName, as a Windows
+     * client does (measured: "cifs/<address>"); Negotiate has no
+     * Kerberos here, a Kerberos package would look it up */
     {
         const char *host = server ? server : "";
         size_t hl = strlen(host);
