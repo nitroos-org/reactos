@@ -4525,14 +4525,17 @@ RxGatherRequestsForSrvOpen(
     /* Dispatch any pending operation first */
     RxpDispatchChangeBufferingStateRequests(SrvCall, SrvOpen, &Discarded);
 
-    /* Then, get any entry related to our key and SRV_OPEN */
+    /* Then, get any entry accepted for our SRV_OPEN. Match the SRV_OPEN only:
+     * an accepted request holds a reference on it, and its key may no longer
+     * be the SRV_OPEN's (a close sets the key to -1 before it purges, which
+     * left the request queued for ever with its SRV_OPEN reference) */
     KeAcquireSpinLock(&SrvCall->BufferingManager.SpinLock, &OldIrql);
     Entry = SrvCall->BufferingManager.HandlerList.Flink;
     while (Entry != &SrvCall->BufferingManager.HandlerList)
     {
         Request = CONTAINING_RECORD(Entry, CHANGE_BUFFERING_STATE_REQUEST, ListEntry);
         Entry = Entry->Flink;
-        if (Request->SrvOpenKey == SrvOpen->Key && Request->SrvOpen == SrvOpen)
+        if (Request->SrvOpen == SrvOpen)
         {
             RemoveEntryList(&Request->ListEntry);
             InsertTailList(RequestsListHead, &Request->ListEntry);
@@ -4546,7 +4549,7 @@ RxGatherRequestsForSrvOpen(
     {
         Request = CONTAINING_RECORD(Entry, CHANGE_BUFFERING_STATE_REQUEST, ListEntry);
         Entry = Entry->Flink;
-        if (Request->SrvOpenKey == SrvOpen->Key && Request->SrvOpen == SrvOpen)
+        if (Request->SrvOpen == SrvOpen)
         {
             RemoveEntryList(&Request->ListEntry);
             InsertTailList(RequestsListHead, &Request->ListEntry);
