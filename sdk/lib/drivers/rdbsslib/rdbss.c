@@ -514,6 +514,26 @@ NTAPI
 RxDispatchChangeBufferingStateRequests(
     PVOID Context);
 
+/* rxce internals used for stop and unload */
+VOID
+RxSpinDownMRxDispatcher(
+    IN OUT PRDBSS_DEVICE_OBJECT pMRxDeviceObject);
+
+VOID
+RxTearDownDispatcher(
+    VOID);
+
+VOID
+RxScavengerFinalizeEntries(
+    PRDBSS_DEVICE_OBJECT DeviceObject);
+
+VOID
+RxStopScavenger(
+    IN PRDBSS_DEVICE_OBJECT DeviceObject);
+
+extern volatile LONG RxpLivePoolAllocations;
+extern volatile LONG RxNumberOfActiveFcbs;
+
 static
 NTSTATUS
 RxpGatherLocksForUnlockAll(
@@ -7712,13 +7732,17 @@ RxInitializeDispatchVectors(
     RxData.CacheManagerNoOpCallbacks.ReleaseFromReadAhead = RxNoOpRelease;
 }
 
+/*
+ * @implemented
+ */
 NTSTATUS
 NTAPI
 RxInitializeLog(
     VOID)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    /* RDBSS keeps no log of its own: failures go to the debugger
+     * (RxLogEventWithAnnotation) */
+    return STATUS_SUCCESS;
 }
 
 /*
@@ -7956,7 +7980,9 @@ RxLogEventWithAnnotation(
     IN PUNICODE_STRING Annotation,
     IN ULONG AnnotationCount)
 {
-    UNIMPLEMENTED;
+    /* No event log entry: report to the debugger */
+    DPRINT1("RDBSS event %lx status %lx on %p (%wZ)\n", EventId, Status, DeviceObject,
+            (AnnotationCount != 0 && Annotation != NULL) ? Annotation : (PUNICODE_STRING)&unknownId);
 }
 
 /* Worker for a low I/O completion that could not run where it was signalled */
@@ -9125,12 +9151,61 @@ RxpSetInfoMiniRdr(
     return Status;
 }
 
+/*
+ * @implemented
+ *
+ * Undoes RxRegisterMinirdr: the device leaves the list of registered
+ * mini-redirectors and is deleted. The mini-redirector stopped it before
+ * (RxStopMinirdr) and no file is open on it any more.
+ */
 VOID
 NTAPI
 RxpUnregisterMinirdr(
     IN PRDBSS_DEVICE_OBJECT RxDeviceObject)
 {
-    UNIMPLEMENTED;
+    PAGED_CODE();
+
+    DPRINT("RxpUnregisterMinirdr(%p)\n", RxDeviceObject);
+
+    ExAcquireFastMutex(&RxData.MinirdrRegistrationMutex);
+    if (RxDeviceObject->MiniRdrListLinks.Flink != NULL)
+    {
+        RemoveEntryList(&RxDeviceObject->MiniRdrListLinks);
+        RxDeviceObject->MiniRdrListLinks.Flink = NULL;
+    }
+    ExReleaseFastMutex(&RxData.MinirdrRegistrationMutex);
+
+    if (RxGetRdbssState(RxDeviceObject) == RDBSS_STARTED)
+    {
+        DPRINT1("Unregistering %wZ while started\n", &RxDeviceObject->DeviceName);
+    }
+
+    /* Should not happen: still registered with MUP or the I/O manager */
+    if (RxDeviceObject->MupHandle != NULL)
+    {
+        FsRtlDeregisterUncProvider(RxDeviceObject->MupHandle);
+        ZwClose(RxDeviceObject->MupHandle);
+        RxDeviceObject->MupHandle = NULL;
+    }
+    if (RxDeviceObject->RegisteredAsFileSystem)
+    {
+        IoUnregisterFileSystem(&RxDeviceObject->DeviceObject);
+        RxDeviceObject->RegisteredAsFileSystem = FALSE;
+    }
+
+    /* A scavenger request must not outlive the device */
+    RxStopScavenger(RxDeviceObject);
+
+    /* The name table's lock is an ERESOURCE on the system list */
+    if (RxDeviceObject->pRxNetNameTable == &RxDeviceObject->RxNetNameTableInDeviceObject)
+    {
+        ASSERT(IsListEmpty(&RxDeviceObject->RxNetNameTableInDeviceObject.MemberQueue));
+        ExDeleteResourceLite(&RxDeviceObject->RxNetNameTableInDeviceObject.TableLock);
+        RxDeviceObject->pRxNetNameTable = NULL;
+    }
+
+    --RxFileSystemDeviceObject->ReferenceCount;
+    IoDeleteDevice(&RxDeviceObject->DeviceObject);
 }
 
 /*
@@ -10739,14 +10814,132 @@ RxStartMinirdr(
     return Status;
 }
 
+/*
+ * @implemented
+ *
+ * Stops a started mini-redirector: no new request reaches it (state
+ * RDBSS_STOP_IN_PROGRESS, MUP registration removed), the structures nobody
+ * uses any more are finalized now instead of by the scavenger timer, the
+ * mini-redirector's MRxStop runs, and the device can be started again.
+ * Fails with STATUS_REDIRECTOR_HAS_OPEN_HANDLES while files or connections are
+ * still open (the device stays started). Runs in the FSP, like RxStartMinirdr.
+ * Lock order: RxData.Resource -> prefix table; both are released before the
+ * structures are finalized (which takes the prefix table again, then FCB
+ * table and FCB locks).
+ */
 NTSTATUS
 NTAPI
 RxStopMinirdr(
     IN PRX_CONTEXT RxContext,
     OUT PBOOLEAN PostToFsp)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    NTSTATUS Status;
+    PRDBSS_DEVICE_OBJECT DeviceObject;
+    BOOLEAN Empty;
+    ULONG Tries;
+
+    PAGED_CODE();
+
+    if (!BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_IN_FSP))
+    {
+        *PostToFsp = TRUE;
+        return STATUS_PENDING;
+    }
+
+    DeviceObject = RxContext->RxDeviceObject;
+
+    ExAcquireResourceExclusiveLite(&RxData.Resource, TRUE);
+    if (RxGetRdbssState(DeviceObject) != RDBSS_STARTED)
+    {
+        ExReleaseResourceLite(&RxData.Resource);
+        return STATUS_REDIRECTOR_NOT_STARTED;
+    }
+    RxSetRdbssState(DeviceObject, RDBSS_STOP_IN_PROGRESS);
+    ExReleaseResourceLite(&RxData.Resource);
+
+    /* Finalize what is only waiting for the scavenger; structures freed by a
+     * worker (SRV_CALLs) need a moment, hence a few rounds */
+    Empty = FALSE;
+    for (Tries = 0; Tries < 50; ++Tries)
+    {
+        LARGE_INTEGER Delay;
+
+        RxScavengerFinalizeEntries(DeviceObject);
+
+        RxAcquirePrefixTableLockShared(DeviceObject->pRxNetNameTable, TRUE);
+        Empty = IsListEmpty(&DeviceObject->pRxNetNameTable->MemberQueue);
+        RxReleasePrefixTableLock(DeviceObject->pRxNetNameTable);
+        if (Empty)
+        {
+            break;
+        }
+
+        Delay.QuadPart = -100LL * 10000;
+        KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+    }
+
+    if (!Empty)
+    {
+        PLIST_ENTRY Entry;
+
+        DPRINT1("%wZ: connections still in use, not stopping\n", &DeviceObject->DeviceName);
+        RxAcquirePrefixTableLockShared(DeviceObject->pRxNetNameTable, TRUE);
+        for (Entry = DeviceObject->pRxNetNameTable->MemberQueue.Flink;
+             Entry != &DeviceObject->pRxNetNameTable->MemberQueue;
+             Entry = Entry->Flink)
+        {
+            PRX_PREFIX_ENTRY PrefixEntry = CONTAINING_RECORD(Entry, RX_PREFIX_ENTRY, MemberQLinks);
+
+            DPRINT1("  in use: %wZ (type %x, references %lu)\n", &PrefixEntry->Prefix,
+                    NodeType(PrefixEntry->ContainingRecord),
+                    PrefixEntry->ContainerRefCount != NULL ? *PrefixEntry->ContainerRefCount : 0);
+        }
+        RxReleasePrefixTableLock(DeviceObject->pRxNetNameTable);
+        RxSetRdbssState(DeviceObject, RDBSS_STARTED);
+        return STATUS_REDIRECTOR_HAS_OPEN_HANDLES;
+    }
+
+    /* Nothing left to scavenge: no timer request may outlive the device */
+    RxStopScavenger(DeviceObject);
+
+    ExAcquireResourceExclusiveLite(&RxData.Resource, TRUE);
+    RxAcquirePrefixTableLockExclusive(DeviceObject->pRxNetNameTable, TRUE);
+
+    if (DeviceObject->MupHandle != NULL)
+    {
+        FsRtlDeregisterUncProvider(DeviceObject->MupHandle);
+        /* The handle FsRtlRegisterUncProvider returned is the caller's to
+         * close; MUP releases the provider when it is closed. Start, stop
+         * and unload all run in the system process, where it was opened */
+        ZwClose(DeviceObject->MupHandle);
+        DeviceObject->MupHandle = NULL;
+    }
+
+    if (DeviceObject->RegisteredAsFileSystem)
+    {
+        IoUnregisterFileSystem(&DeviceObject->DeviceObject);
+        DeviceObject->RegisteredAsFileSystem = FALSE;
+    }
+
+    MINIRDR_CALL(Status, RxContext, DeviceObject->Dispatch, MRxStop, (RxContext, DeviceObject));
+    if (Status == STATUS_NOT_IMPLEMENTED)
+    {
+        Status = STATUS_SUCCESS;
+    }
+
+    RxReleasePrefixTableLock(DeviceObject->pRxNetNameTable);
+    ExReleaseResourceLite(&RxData.Resource);
+
+    /* Wait for work this device queued (SRV_CALL destruction, buffering
+     * state handlers, low I/O completions) */
+    RxSpinDownMRxDispatcher(DeviceObject);
+
+    ++DeviceObject->StartStopContext.Version;
+    InterlockedDecrement(&RxData.NumberOfMinirdrsStarted);
+    RxSetRdbssState(DeviceObject, RDBSS_STARTABLE);
+
+    DPRINT("RxStopMinirdr(%wZ): %lx\n", &DeviceObject->DeviceName, Status);
+    return Status;
 }
 
 NTSTATUS
@@ -10862,12 +11055,57 @@ RxUninitializeCacheMap(
     ASSERT(NT_SUCCESS(Status));
 }
 
+/*
+ * @implemented
+ *
+ * Called from the mini-redirector's unload routine (it stopped and
+ * unregistered its device, or RDBSS unregisters what is left). Stops the
+ * RDBSS worker threads and timer, which run code of this image, and frees
+ * the global structures.
+ */
 VOID
 NTAPI
 RxUnload(
     IN PDRIVER_OBJECT DriverObject)
 {
-    UNIMPLEMENTED;
+    PAGED_CODE();
+
+    DPRINT("RxUnload(%p)\n", DriverObject);
+
+    /* A mini-redirector that did not unregister its device (nfs41): do it */
+    for (;;)
+    {
+        PRDBSS_DEVICE_OBJECT RxDeviceObject;
+
+        ExAcquireFastMutex(&RxData.MinirdrRegistrationMutex);
+        if (IsListEmpty(&RxData.RegisteredMiniRdrs))
+        {
+            ExReleaseFastMutex(&RxData.MinirdrRegistrationMutex);
+            break;
+        }
+        RxDeviceObject = CONTAINING_RECORD(RxData.RegisteredMiniRdrs.Flink, RDBSS_DEVICE_OBJECT, MiniRdrListLinks);
+        ExReleaseFastMutex(&RxData.MinirdrRegistrationMutex);
+
+        RxUnregisterMinirdr(RxDeviceObject);
+    }
+
+    RxTearDownDispatcher();
+
+    ExDeleteNPagedLookasideList(&RxContextLookasideList);
+    ExDeleteResourceLite(&RxData.Resource);
+
+#if DBG
+    /* Leak check: every RDBSS pool block is freed by now */
+    if (RxpLivePoolAllocations != 0 || RxNumberOfActiveFcbs != 0)
+    {
+        DPRINT1("RDBSS unload: %ld pool blocks and %ld FCBs not freed\n",
+                RxpLivePoolAllocations, RxNumberOfActiveFcbs);
+    }
+    else
+    {
+        DPRINT1("RDBSS unload: no RDBSS pool block left\n");
+    }
+#endif
 }
 
 VOID
@@ -10884,12 +11122,36 @@ RxUnlockOperation(
     UNREFERENCED_PARAMETER(LockInfo);
 }
 
+/*
+ * @implemented
+ *
+ * Undoes a failed RxStartMinirdr (RxData.Resource and the prefix table lock
+ * are held by the caller).
+ */
 VOID
 RxUnstart(
     PRX_CONTEXT Context,
     PRDBSS_DEVICE_OBJECT DeviceObject)
 {
-    UNIMPLEMENTED;
+    PAGED_CODE();
+
+    if (DeviceObject->MupHandle != NULL)
+    {
+        FsRtlDeregisterUncProvider(DeviceObject->MupHandle);
+        /* The handle FsRtlRegisterUncProvider returned is the caller's to
+         * close; MUP releases the provider when it is closed. Start, stop
+         * and unload all run in the system process, where it was opened */
+        ZwClose(DeviceObject->MupHandle);
+        DeviceObject->MupHandle = NULL;
+    }
+
+    if (DeviceObject->RegisteredAsFileSystem)
+    {
+        IoUnregisterFileSystem(&DeviceObject->DeviceObject);
+        DeviceObject->RegisteredAsFileSystem = FALSE;
+    }
+
+    RxSetRdbssState(DeviceObject, RDBSS_STARTABLE);
 }
 
 /*

@@ -144,6 +144,10 @@ KDPC RxTimerDpc;
 KTIMER RxTimer;
 ULONG RxTimerTickCount;
 FAST_MUTEX RxContextPerFileSerializationMutex;
+/* Pool blocks RDBSS allocated and has not freed yet (reported at unload) */
+volatile LONG RxpLivePoolAllocations = 0;
+/* The spin-up dispatcher thread, waited for at unload */
+static PETHREAD RxpSpinUpDispatcherThread = NULL;
 #if DBG
 BOOLEAN DumpDispatchRoutine = TRUE;
 #else
@@ -4875,6 +4879,12 @@ RxInitializeDispatcher(
                                   NULL, NULL, RxSpinUpRequestsDispatcher, &RxDispatcher);
     if (NT_SUCCESS(Status))
     {
+        /* Kept to wait for the thread's end at unload */
+        if (!NT_SUCCESS(ObReferenceObjectByHandle(ThreadHandle, SYNCHRONIZE, *PsThreadType, KernelMode,
+                                                  (PVOID *)&RxpSpinUpDispatcherThread, NULL)))
+        {
+            RxpSpinUpDispatcherThread = NULL;
+        }
         ZwClose(ThreadHandle);
     }
 
@@ -5953,7 +5963,34 @@ VOID
 RxOrphanThisFcb(
     PFCB Fcb)
 {
-    UNIMPLEMENTED;
+    NTSTATUS Status;
+    PNET_ROOT NetRoot;
+
+    PAGED_CODE();
+
+    /* Called when a delete-on-close handle closes, with the FCB table lock
+     * exclusive and the FCB released. Once no user handle is left, the name
+     * no longer designates this FCB (the file is being deleted): take it out
+     * of the table so that a new open gets a new FCB. SRV_OPENs without
+     * handles (delayed closes) are orphaned. Handles still open keep working:
+     * forced disconnection of live handles is not implemented. */
+    NetRoot = (PNET_ROOT)Fcb->pNetRoot;
+    ASSERT(RxIsFcbTableLockExclusive(&NetRoot->FcbTable));
+
+    Status = RxAcquireExclusiveFcb(NULL, Fcb);
+    if (Status != STATUS_SUCCESS)
+    {
+        return;
+    }
+
+    if (Fcb->UncleanCount == 0 && !BooleanFlagOn(Fcb->FcbState, FCB_STATE_NAME_ALREADY_REMOVED))
+    {
+        RxRemoveNameNetFcb(Fcb);
+    }
+
+    RxReleaseFcb(NULL, Fcb);
+
+    RxOrphanSrvOpensForThisFcb(Fcb, NULL, TRUE);
 }
 
 VOID
@@ -6021,7 +6058,38 @@ RxOrphanSrvOpensForThisFcb(
     IN PV_NET_ROOT ThisVNetRoot,
     IN BOOLEAN OrphanAll)
 {
-    UNIMPLEMENTED;
+    NTSTATUS Status;
+    PLIST_ENTRY Entry;
+
+    PAGED_CODE();
+
+    /* Marks the SRV_OPENs of the V_NET_ROOT (or all of them) that no handle
+     * uses any more as orphaned: no new open collapses onto them. A SRV_OPEN
+     * with handles is left alone (see RxOrphanThisFcb). The caller holds the
+     * FCB table lock; the FCB is taken here. */
+    Status = RxAcquireExclusiveFcb(NULL, Fcb);
+    if (Status != STATUS_SUCCESS)
+    {
+        return;
+    }
+
+    for (Entry = Fcb->SrvOpenList.Flink; Entry != &Fcb->SrvOpenList; Entry = Entry->Flink)
+    {
+        PSRV_OPEN SrvOpen;
+
+        SrvOpen = CONTAINING_RECORD(Entry, SRV_OPEN, SrvOpenQLinks);
+        if (!OrphanAll && (PV_NET_ROOT)SrvOpen->pVNetRoot != ThisVNetRoot)
+        {
+            continue;
+        }
+
+        if (SrvOpen->UncleanFobxCount == 0 && !BooleanFlagOn(SrvOpen->Flags, SRVOPEN_FLAG_CLOSED))
+        {
+            SetFlag(SrvOpen->Flags, SRVOPEN_FLAG_ORPHANED | SRVOPEN_FLAG_COLLAPSING_DISABLED);
+        }
+    }
+
+    RxReleaseFcb(NULL, Fcb);
 }
 
 /*
@@ -8279,11 +8347,123 @@ RxScavengeRelatedFobxs(
     return TRUE;
 }
 
+/*
+ * Finalizes the SRV_CALL/NET_ROOT/V_NET_ROOT structures the scavenger was
+ * given (their last user reference went away without the prefix table lock).
+ * Lock order: prefix table (exclusive) -> scavenger mutex, released before the
+ * finalization, which may take FCB table and FCB locks. V_NET_ROOTs first:
+ * they hold their NET_ROOT, which holds its SRV_CALL. Returns how many
+ * structures were finalized.
+ */
+static
+ULONG
+RxpScavengeNetStructures(
+    PRDBSS_DEVICE_OBJECT DeviceObject,
+    BOOLEAN VNetRootsOnly)
+{
+    ULONG Count;
+    PRDBSS_SCAVENGER Scavenger;
+
+    PAGED_CODE();
+
+    Count = 0;
+    Scavenger = DeviceObject->pRdbssScavenger;
+    for (;;)
+    {
+        PVOID Instance;
+        NODE_TYPE_CODE Type;
+
+        RxAcquirePrefixTableLockExclusive(DeviceObject->pRxNetNameTable, TRUE);
+        RxAcquireScavengerMutex();
+
+        Instance = NULL;
+        if (!IsListEmpty(&Scavenger->VNetRootFinalizationList))
+        {
+            Instance = CONTAINING_RECORD(Scavenger->VNetRootFinalizationList.Flink, V_NET_ROOT, ScavengerFinalizationList);
+        }
+        else if (!VNetRootsOnly && !IsListEmpty(&Scavenger->NetRootFinalizationList))
+        {
+            Instance = CONTAINING_RECORD(Scavenger->NetRootFinalizationList.Flink, NET_ROOT, ScavengerFinalizationList);
+        }
+        else if (!VNetRootsOnly && !IsListEmpty(&Scavenger->SrvCallFinalizationList))
+        {
+            Instance = CONTAINING_RECORD(Scavenger->SrvCallFinalizationList.Flink, SRV_CALL, ScavengerFinalizationList);
+        }
+
+        if (Instance == NULL)
+        {
+            RxReleaseScavengerMutex();
+            RxReleasePrefixTableLock(DeviceObject->pRxNetNameTable);
+            break;
+        }
+
+        /* Drops the scavenger's reference: one reference is left when nobody
+         * else took the structure back in the meantime */
+        RxpUndoScavengerFinalizationMarking(Instance);
+        RxReleaseScavengerMutex();
+
+        Type = NodeType(Instance);
+        switch (Type)
+        {
+            case RDBSS_NTC_V_NETROOT:
+                RxFinalizeVNetRoot((PV_NET_ROOT)Instance, TRUE, FALSE);
+                break;
+
+            case RDBSS_NTC_NETROOT:
+                RxFinalizeNetRoot((PNET_ROOT)Instance, TRUE, FALSE);
+                break;
+
+            case RDBSS_NTC_SRVCALL:
+                RxFinalizeSrvCall((PSRV_CALL)Instance, TRUE, FALSE);
+                break;
+
+            default:
+                ASSERT(FALSE);
+                break;
+        }
+
+        RxReleasePrefixTableLock(DeviceObject->pRxNetNameTable);
+        ++Count;
+    }
+
+    return Count;
+}
+
+/*
+ * @implemented
+ *
+ * Scavenger pass: dormant FOBXs first (they keep SRV_OPENs and FCBs alive),
+ * then the net structures.
+ */
 VOID
 RxScavengerFinalizeEntries(
     PRDBSS_DEVICE_OBJECT DeviceObject)
 {
-    UNIMPLEMENTED;
+    PRDBSS_SCAVENGER Scavenger;
+    LIST_ENTRY FobxToScavenge;
+
+    PAGED_CODE();
+
+    Scavenger = DeviceObject->pRdbssScavenger;
+
+    InitializeListHead(&FobxToScavenge);
+    RxAcquireScavengerMutex();
+    while (!IsListEmpty(&Scavenger->FobxFinalizationList))
+    {
+        PFOBX Fobx;
+
+        Fobx = CONTAINING_RECORD(Scavenger->FobxFinalizationList.Flink, FOBX, ScavengerFinalizationList);
+        /* Same hand-over as RxScavengeFobxsForNetRoot: our reference goes
+         * with the FOBX to RxpScavengeFobxs */
+        RxReferenceNetFobx(Fobx);
+        RxpUndoScavengerFinalizationMarking(Fobx);
+        InsertTailList(&FobxToScavenge, &Fobx->ScavengerFinalizationList);
+    }
+    RxReleaseScavengerMutex();
+
+    RxpScavengeFobxs(Scavenger, &FobxToScavenge);
+
+    RxpScavengeNetStructures(DeviceObject, FALSE);
 }
 
 /*
@@ -8353,12 +8533,17 @@ RxScavengerTimerRoutine(
     KeSetEvent(&Scavenger->ScavengeEvent, IO_NO_INCREMENT, FALSE);
 }
 
+/*
+ * @implemented
+ */
 BOOLEAN
 RxScavengeVNetRoots(
     PRDBSS_DEVICE_OBJECT RxDeviceObject)
 {
-    UNIMPLEMENTED;
-    return FALSE;
+    PAGED_CODE();
+
+    /* The caller must not hold the prefix table lock */
+    return (RxpScavengeNetStructures(RxDeviceObject, TRUE) != 0);
 }
 
 /*
@@ -8489,18 +8674,97 @@ RxSpinUpWorkerThread(
     return Status;
 }
 
+/* Runs in the spin-up dispatcher thread */
+static
+VOID
+NTAPI
+RxpSpinUpWorkerThreadsRoutine(
+    PVOID Context)
+{
+    KIRQL OldIrql;
+    BOOLEAN SpinUp;
+    PRX_WORK_QUEUE WorkQueue;
+
+    PAGED_CODE();
+
+    WorkQueue = Context;
+    KeAcquireSpinLock(&WorkQueue->SpinLock, &OldIrql);
+    WorkQueue->SpinUpRequestPending = FALSE;
+    SpinUp = (WorkQueue->State == RxWorkQueueActive &&
+              WorkQueue->NumberOfIdleWorkerThreads < WorkQueue->NumberOfWorkItemsToBeDispatched &&
+              WorkQueue->NumberOfActiveWorkerThreads < WorkQueue->MaximumNumberOfWorkerThreads);
+    if (SpinUp)
+    {
+        ++WorkQueue->NumberOfSpinUpRequests;
+    }
+    KeReleaseSpinLock(&WorkQueue->SpinLock, OldIrql);
+
+    if (SpinUp)
+    {
+        RxSpinUpWorkerThread(WorkQueue, RxBootstrapWorkerThreadDispatcher, WorkQueue);
+    }
+}
+
+/*
+ * @implemented
+ *
+ * Asks the spin-up dispatcher (a system thread, so the new worker is created
+ * from a known context) for one more worker thread on the queue: work items
+ * outnumber the idle workers. RxInsertWorkQueueItem set SpinUpRequestPending.
+ */
 VOID
 RxSpinUpWorkerThreads(
    PRX_WORK_QUEUE WorkQueue)
 {
-    UNIMPLEMENTED;
+    KIRQL OldIrql;
+    PWORK_QUEUE_ITEM Item;
+
+    if (InterlockedIncrement(&WorkQueue->WorkQueueItemForSpinUpWorkerThreadInUse) > 1)
+    {
+        /* Already queued: it decides when it runs */
+        InterlockedDecrement(&WorkQueue->WorkQueueItemForSpinUpWorkerThreadInUse);
+        return;
+    }
+
+    Item = (PWORK_QUEUE_ITEM)&WorkQueue->WorkQueueItemForSpinUpWorkerThread;
+    ExInitializeWorkItem(Item, RxpSpinUpWorkerThreadsRoutine, WorkQueue);
+
+    KeAcquireSpinLock(&RxDispatcher.SpinUpRequestsLock, &OldIrql);
+    if (RxDispatcher.State != RxDispatcherActive)
+    {
+        KeReleaseSpinLock(&RxDispatcher.SpinUpRequestsLock, OldIrql);
+        InterlockedDecrement(&WorkQueue->WorkQueueItemForSpinUpWorkerThreadInUse);
+        return;
+    }
+    InsertTailList(&RxDispatcher.SpinUpRequests, &Item->List);
+    KeReleaseSpinLock(&RxDispatcher.SpinUpRequestsLock, OldIrql);
+
+    KeSetEvent(&RxDispatcher.SpinUpRequestsEvent, IO_NO_INCREMENT, FALSE);
 }
 
+/*
+ * @implemented
+ *
+ * Waits until no scavenger pass runs. A caller holding its FCB does not wait:
+ * the scavenger takes FCBs exclusive to finalize FOBXs, so it cannot be
+ * inside this FCB, and waiting could deadlock with it.
+ */
 VOID
 RxSynchronizeWithScavenger(
     IN PRX_CONTEXT RxContext)
 {
-    UNIMPLEMENTED;
+    PRDBSS_SCAVENGER Scavenger;
+
+    PAGED_CODE();
+
+    if (RxContext->pFcb != NULL && RxIsFcbAcquired((PFCB)RxContext->pFcb))
+    {
+        return;
+    }
+
+    Scavenger = RxContext->RxDeviceObject->pRdbssScavenger;
+    KeWaitForSingleObject(&Scavenger->ScavengeEvent, Executive, KernelMode, FALSE, NULL);
+    KeSetEvent(&Scavenger->ScavengeEvent, IO_NO_INCREMENT, FALSE);
 }
 
 /*
@@ -8847,6 +9111,240 @@ RxTearDownBufferingManager(
 
     RxpDiscardChangeBufferingStateRequests(&Leftover);
     return STATUS_SUCCESS;
+}
+
+/*
+ * @implemented
+ *
+ * Stop support: makes sure the device's scavenger has neither a timer
+ * request queued nor a pass running, so that the device (which holds the
+ * scavenger) can go away. Called when nothing is left to scavenge.
+ */
+VOID
+RxStopScavenger(
+    IN PRDBSS_DEVICE_OBJECT DeviceObject)
+{
+    KIRQL OldIrql;
+    PLIST_ENTRY Entry;
+    BOOLEAN Removed;
+    LARGE_INTEGER Delay;
+    PRDBSS_SCAVENGER Scavenger;
+
+    PAGED_CODE();
+
+    Scavenger = DeviceObject->pRdbssScavenger;
+    if (Scavenger == NULL)
+    {
+        return;
+    }
+
+    for (;;)
+    {
+        RxAcquireScavengerMutex();
+        if (Scavenger->State == RDBSS_SCAVENGER_INACTIVE)
+        {
+            RxReleaseScavengerMutex();
+            break;
+        }
+
+        if (Scavenger->State == RDBSS_SCAVENGER_DORMANT)
+        {
+            /* Waiting for its timer? Take the request back */
+            Removed = FALSE;
+            KeAcquireSpinLock(&RxTimerLock, &OldIrql);
+            for (Entry = RxTimerQueueHead.Flink; Entry != &RxTimerQueueHead; Entry = Entry->Flink)
+            {
+                if (Entry == &Scavenger->WorkItem.WorkQueueItem.List)
+                {
+                    RemoveEntryList(Entry);
+                    Removed = TRUE;
+                    break;
+                }
+            }
+            KeReleaseSpinLock(&RxTimerLock, OldIrql);
+
+            if (Removed)
+            {
+                Scavenger->State = RDBSS_SCAVENGER_INACTIVE;
+                RxReleaseScavengerMutex();
+                break;
+            }
+        }
+
+        /* Running, or posted to a worker: let it finish */
+        RxReleaseScavengerMutex();
+        Delay.QuadPart = -50LL * 10000;
+        KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+    }
+
+    /* The pass sets the event as its last access to the scavenger */
+    KeWaitForSingleObject(&Scavenger->ScavengeEvent, Executive, KernelMode, FALSE, NULL);
+    KeSetEvent(&Scavenger->ScavengeEvent, IO_NO_INCREMENT, FALSE);
+}
+
+/*
+ * @implemented
+ *
+ * Waits until the work items a mini-redirector device queued have run (they
+ * are counted in its DispatcherContext). New items are refused meanwhile
+ * (RxInsertWorkQueueItem checks pTearDownEvent).
+ */
+VOID
+RxSpinDownMRxDispatcher(
+    IN OUT PRDBSS_DEVICE_OBJECT pMRxDeviceObject)
+{
+    KEVENT TearDownEvent;
+
+    PAGED_CODE();
+
+    KeInitializeEvent(&TearDownEvent, NotificationEvent, FALSE);
+    InterlockedExchangePointer((void * volatile *)&pMRxDeviceObject->DispatcherContext.pTearDownEvent, &TearDownEvent);
+
+    if (pMRxDeviceObject->DispatcherContext.NumberOfWorkerThreads != 0)
+    {
+        KeWaitForSingleObject(&TearDownEvent, Executive, KernelMode, FALSE, NULL);
+    }
+
+    /* The last worker cleared it if it signalled; clear it in any case */
+    InterlockedExchangePointer((void * volatile *)&pMRxDeviceObject->DispatcherContext.pTearDownEvent, NULL);
+}
+
+/* Work item that only wakes a worker thread during rundown */
+static
+VOID
+NTAPI
+RxpRundownWakeUp(
+    PVOID Context)
+{
+    RxFreePoolWithTag(Context, RX_WORKQ_POOLTAG);
+}
+
+/*
+ * Stops the worker threads of one queue and waits until each has left
+ * RDBSS code (by waiting on the thread object), so the image can unload.
+ */
+static
+VOID
+RxpRundownWorkQueue(
+    PRX_WORK_QUEUE WorkQueue,
+    PRX_WORK_QUEUE_RUNDOWN_CONTEXT RundownContext)
+{
+    KIRQL OldIrql;
+    LONG Active, i;
+
+    PAGED_CODE();
+
+    KeAcquireSpinLock(&WorkQueue->SpinLock, &OldIrql);
+    WorkQueue->State = RxWorkQueueRundownInProgress;
+    WorkQueue->pRundownContext = RundownContext;
+    Active = WorkQueue->NumberOfActiveWorkerThreads;
+    KeReleaseSpinLock(&WorkQueue->SpinLock, OldIrql);
+
+    if (Active == 0)
+    {
+        KeSetEvent(&RundownContext->RundownCompletionEvent, IO_NO_INCREMENT, FALSE);
+    }
+
+    /* Workers wait on the queue without a timeout: give each one an item to
+     * wake up for; after it ran, a worker sees the rundown and exits */
+    for (i = 0; i < Active; ++i)
+    {
+        PRX_WORK_QUEUE_ITEM Item;
+
+        Item = RxAllocatePoolWithTag(NonPagedPool, sizeof(RX_WORK_QUEUE_ITEM), RX_WORKQ_POOLTAG);
+        if (Item == NULL)
+        {
+            break;
+        }
+        ExInitializeWorkItem((PWORK_QUEUE_ITEM)Item, RxpRundownWakeUp, Item);
+        Item->pDeviceObject = RxFileSystemDeviceObject;
+        InterlockedIncrement(&RxFileSystemDeviceObject->DispatcherContext.NumberOfWorkerThreads);
+        InterlockedIncrement(&WorkQueue->NumberOfWorkItemsToBeDispatched);
+        KeInsertQueue(&WorkQueue->Queue, &Item->List);
+    }
+}
+
+/*
+ * @implemented
+ *
+ * Unload support: stops the spin-up dispatcher and every worker thread, and
+ * waits for them to be gone. Called by RxUnload once no minirdr device
+ * exists any more, so no new work can be queued.
+ */
+VOID
+RxTearDownDispatcher(
+    VOID)
+{
+    KIRQL OldIrql;
+    ULONG Queue;
+    LONG i;
+    RX_WORK_QUEUE_RUNDOWN_CONTEXT Rundown[RxMaximumWorkQueue];
+    PETHREAD *Threads[RxMaximumWorkQueue];
+
+    PAGED_CODE();
+
+    if (RxDispatcher.State != RxDispatcherActive)
+    {
+        return;
+    }
+
+    /* The spin-up dispatcher first: no new worker after this */
+    KeAcquireSpinLock(&RxDispatcher.SpinUpRequestsLock, &OldIrql);
+    RxDispatcher.State = RxDispatcherInactive;
+    KeReleaseSpinLock(&RxDispatcher.SpinUpRequestsLock, OldIrql);
+    KeSetEvent(&RxDispatcher.SpinUpRequestsEvent, IO_NO_INCREMENT, FALSE);
+    if (RxpSpinUpDispatcherThread != NULL)
+    {
+        KeWaitForSingleObject(RxpSpinUpDispatcherThread, Executive, KernelMode, FALSE, NULL);
+        ObDereferenceObject(RxpSpinUpDispatcherThread);
+        RxpSpinUpDispatcherThread = NULL;
+    }
+    else
+    {
+        KeWaitForSingleObject(&RxDispatcher.SpinUpRequestsTearDownEvent, Executive, KernelMode, FALSE, NULL);
+    }
+
+    for (Queue = 0; Queue < RxMaximumWorkQueue; ++Queue)
+    {
+        PRX_WORK_QUEUE WorkQueue = &RxDispatcher.pWorkQueueDispatcher->WorkQueue[Queue];
+
+        KeInitializeEvent(&Rundown[Queue].RundownCompletionEvent, NotificationEvent, FALSE);
+        Rundown[Queue].NumberOfThreadsSpunDown = 0;
+        Threads[Queue] = RxAllocatePoolWithTag(NonPagedPool,
+                                               sizeof(PETHREAD) * (WorkQueue->MaximumNumberOfWorkerThreads + 1),
+                                               RX_WORKQ_POOLTAG);
+        Rundown[Queue].ThreadPointers = Threads[Queue];
+        if (Threads[Queue] == NULL)
+        {
+            /* Cannot track the threads: leave this queue running (leak, but
+             * no unload under a live thread) */
+            DPRINT1("No memory to run down work queue %lu\n", Queue);
+            continue;
+        }
+        RxpRundownWorkQueue(WorkQueue, &Rundown[Queue]);
+    }
+
+    for (Queue = 0; Queue < RxMaximumWorkQueue; ++Queue)
+    {
+        if (Threads[Queue] == NULL)
+        {
+            continue;
+        }
+
+        KeWaitForSingleObject(&Rundown[Queue].RundownCompletionEvent, Executive, KernelMode, FALSE, NULL);
+        for (i = 0; i < Rundown[Queue].NumberOfThreadsSpunDown; ++i)
+        {
+            /* The worker kept a reference on itself for us */
+            KeWaitForSingleObject(Threads[Queue][i], Executive, KernelMode, FALSE, NULL);
+            ObDereferenceObject(Threads[Queue][i]);
+        }
+        RxDispatcher.pWorkQueueDispatcher->WorkQueue[Queue].pRundownContext = NULL;
+        RxFreePoolWithTag(Threads[Queue], RX_WORKQ_POOLTAG);
+    }
+
+    /* No timer may fire into an unloaded image */
+    KeCancelTimer(&RxTimer);
+    KeFlushQueuedDpcs();
 }
 
 /*
@@ -9311,7 +9809,15 @@ _RxAllocatePoolWithTag(
     _In_ SIZE_T NumberOfBytes,
     _In_ ULONG Tag)
 {
-    return ExAllocatePoolWithTagPriority(PoolType, NumberOfBytes, Tag, LowPoolPriority);
+    PVOID Buffer;
+
+    Buffer = ExAllocatePoolWithTagPriority(PoolType, NumberOfBytes, Tag, LowPoolPriority);
+    if (Buffer != NULL)
+    {
+        InterlockedIncrement(&RxpLivePoolAllocations);
+    }
+
+    return Buffer;
 }
 
 /*
@@ -9322,6 +9828,7 @@ NTAPI
 _RxFreePool(
     _In_ PVOID Buffer)
 {
+    InterlockedDecrement(&RxpLivePoolAllocations);
     ExFreePoolWithTag(Buffer, 0);
 }
 
@@ -9334,6 +9841,7 @@ _RxFreePoolWithTag(
     _In_ PVOID Buffer,
     _In_ ULONG Tag)
 {
+    InterlockedDecrement(&RxpLivePoolAllocations);
     ExFreePoolWithTag(Buffer, Tag);
 }
 
