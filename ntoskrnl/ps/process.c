@@ -985,6 +985,16 @@ PspCreateProcess(OUT PHANDLE ProcessHandle,
     /* Set the Creation Time */
     KeQuerySystemTime(&Process->CreateTime);
 
+    /*
+     * A process never starts before its parent. The creation times are system times, and the system time
+     * can be set back after the parent was created (a time synchronisation on a machine whose clock holds
+     * local time, a changed time zone, the user setting the clock). csrss refuses to register a process
+     * that is older than its creator, so without this every program the parent starts afterwards would
+     * fail with "Access is denied".
+     */
+    if (Parent && (Process->CreateTime.QuadPart < Parent->CreateTime.QuadPart))
+        Process->CreateTime = Parent->CreateTime;
+
     /* Protect against bad user-mode pointer */
     _SEH2_TRY
     {
