@@ -166,6 +166,11 @@ BOOLEAN DumpDispatchRoutine = FALSE;
     }
 #endif
 
+/* RDBSS-private LOWIO_CONTEXT flag (same value in rdbss.c): RxLowIoCompletion
+ * was called for the current submission. A second call is a mini-redirector
+ * bug (double completion); it is refused instead of completing twice */
+#define RXP_LOWIO_FLAG_COMPLETION_INDICATED 0x8000
+
 #if RX_POOL_WRAPPER
 #undef RxAllocatePool
 #undef RxAllocatePoolWithTag
@@ -5713,6 +5718,8 @@ RxLowIoSubmit(
             {
                 RxContext->IoStatusBlock.Information = 0;
 
+                /* Armed for one RxLowIoCompletion per submission */
+                LowIoContext->Flags &= ~RXP_LOWIO_FLAG_COMPLETION_INDICATED;
                 MINIRDR_CALL(Status, RxContext, Dispatch, MRxLowIOSubmit[Operation], (RxContext));
                 if (Status == STATUS_PENDING)
                 {

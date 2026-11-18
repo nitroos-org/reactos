@@ -37,6 +37,10 @@
 
 #define RX_TOPLEVELCTX_FLAG_FROM_POOL 1
 
+/* RDBSS-private LOWIO_CONTEXT flag (same value in rxce.c, which clears it at
+ * each submission): RxLowIoCompletion was called for the current submission */
+#define RXP_LOWIO_FLAG_COMPLETION_INDICATED 0x8000
+
 typedef
 NTSTATUS
 (NTAPI *PRX_FSD_DISPATCH) (
@@ -8126,6 +8130,18 @@ RxLowIoCompletion(
     DPRINT("RxLowIoCompletion(%p) Status: %lx\n", RxContext, RxContext->IoStatusBlock.Status);
 
     ASSERT(NodeType(RxContext) == RDBSS_NTC_RX_CONTEXT);
+
+    /* One completion per submission. A second one (a mini-redirector that
+     * completes twice) would complete the IRP twice or wake a waiter that
+     * already went on: refuse it, and stop a Debug build right here */
+    if (InterlockedOr16((volatile SHORT *)&RxContext->LowIoContext.Flags,
+                        (SHORT)RXP_LOWIO_FLAG_COMPLETION_INDICATED) & RXP_LOWIO_FLAG_COMPLETION_INDICATED)
+    {
+        DPRINT1("RxLowIoCompletion called twice for RX_CONTEXT %p (operation %u)\n",
+                RxContext, RxContext->LowIoContext.Operation);
+        ASSERTMSG("RxLowIoCompletion called twice for the same low I/O submission\n", FALSE);
+        return STATUS_INVALID_PARAMETER;
+    }
 
     if (!BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_ASYNC_OPERATION))
     {
