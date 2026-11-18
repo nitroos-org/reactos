@@ -228,6 +228,25 @@ LookupBinding(ULONGLONG Id)
     return Binding != NULL ? Binding->Conn : NULL;
 }
 
+/* The connection of a binding, for a request of that binding's logon session only (call with
+ * SmbEng.Lock held). The driver sends every request of a virtual net root with the logon id of
+ * that net root; a request naming the ConnectionId of another logon session's key is refused. */
+static
+PSMBENG_CONN
+LookupBindingFor(ULONGLONG Id, const SMBUP_HEADER *h)
+{
+    PSMBENG_CONN Conn = LookupBinding(Id);
+
+    if (Conn != NULL &&
+        (Conn->LogonId.LowPart != h->LogonIdLow || Conn->LogonId.HighPart != h->LogonIdHigh))
+    {
+        SmbEngLog(0, "request %I64u op %u: logon %08lx:%08lx is not the one of its connection",
+                  h->RequestId, h->Opcode, h->LogonIdHigh, h->LogonIdLow);
+        return NULL;
+    }
+    return Conn;
+}
+
 /*
  * One reference of a binding goes (call with SmbEng.Lock held exclusively). The driver
  * connects a virtual net root per drive letter and UNC prefix, and rxce makes many of
@@ -443,7 +462,7 @@ HandleDisconnect(PSMBENG_OP Op, HANDLE Event)
     BOOLEAN Known = FALSE, Last;
 
     AcquireSRWLockExclusive(&SmbEng.Lock);
-    if (r->ConnectionId != 0 && (Conn = LookupBinding(r->ConnectionId)) != NULL)
+    if (r->ConnectionId != 0 && (Conn = LookupBindingFor(r->ConnectionId, Op->Request)) != NULL)
     {
         Known = TRUE;
         Op->BindingId = r->ConnectionId;
@@ -587,7 +606,7 @@ Dispatch(PUCHAR Buffer, DWORD Got, HANDLE Event)
     ConnectionId = *(const ULONGLONG UNALIGNED *)(Op->Request + 1);
     Op->BindingId = ConnectionId;
     AcquireSRWLockShared(&SmbEng.Lock);
-    Conn = LookupBinding(ConnectionId);
+    Conn = LookupBindingFor(ConnectionId, h);
     if (Conn != NULL)
     {
         SmbEngQueueOp(Conn, Op);
