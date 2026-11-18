@@ -42,6 +42,12 @@ KMT_TESTFUNC Test_MupProvider;
 KMT_TESTFUNC Test_NtCreateSection;
 KMT_TESTFUNC Test_NtSystemDebugControl;
 KMT_TESTFUNC Test_PoIrp;
+KMT_TESTFUNC Test_RdbssLoop;
+KMT_TESTFUNC Test_RdbssLoopStress;
+KMT_TESTFUNC Test_RdbssRaces;
+KMT_TESTFUNC Test_RdbssDupComplete;
+KMT_TESTFUNC Test_RdbssHostile;
+KMT_TESTFUNC Test_RdbssCopy;
 KMT_TESTFUNC Test_RtlAvlTree;
 KMT_TESTFUNC Test_RtlCaptureContext;
 KMT_TESTFUNC Test_RtlException;
@@ -96,6 +102,12 @@ const KMT_TEST TestList[] =
     { "NtCreateSection",              Test_NtCreateSection },
     { "NtSystemDebugControl",         Test_NtSystemDebugControl },
     { "PoIrp",                        Test_PoIrp },
+    { "RdbssLoop",                    Test_RdbssLoop },
+    { "-RdbssLoopStress",             Test_RdbssLoopStress },
+    { "-RdbssRaces",                  Test_RdbssRaces },
+    { "-RdbssDupComplete",            Test_RdbssDupComplete },
+    { "-RdbssHostile",                Test_RdbssHostile },
+    { "-RdbssCopy",                   Test_RdbssCopy },
     { "RtlAvlTree",                   Test_RtlAvlTree },
     { "RtlException",                 Test_RtlException },
     { "RtlIntSafe",                   Test_RtlIntSafe },

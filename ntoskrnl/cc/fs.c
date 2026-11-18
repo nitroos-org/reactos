@@ -197,16 +197,48 @@ CcPurgeCacheSection (
          * have the shared cache map from above, iterate
          * over that cache's private lists.
          */
-        while (!IsListEmpty(&SharedCacheMap->PrivateList))
+        for (;;)
         {
+            PFILE_OBJECT PrivateFileObject;
+
             /*
-             * This list is not empty, grab the
-             * private cache map.
+             * Grab the first private cache map and its file object under the
+             * master lock, which closes (CcUninitializeCacheMap) hold to
+             * free private maps: read unlocked, a map freed by a close
+             * running meanwhile gave a stale file object. A map still on
+             * the list means its file object has not been uninitialized, so
+             * it is alive: reference it for the release below.
              */
+            OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
+            if (IsListEmpty(&SharedCacheMap->PrivateList))
+            {
+                KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
+                break;
+            }
             PrivateCacheMap = CONTAINING_RECORD(SharedCacheMap->PrivateList.Flink, PRIVATE_CACHE_MAP, PrivateLinks);
+            PrivateFileObject = PrivateCacheMap->FileObject;
+            ObReferenceObject(PrivateFileObject);
+            KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
 
             /* Unintialize the private cache now: not deferred, the data is written below */
-            CcRosReleaseFileCache(PrivateCacheMap->FileObject, FALSE, NULL, NULL);
+            CcRosReleaseFileCache(PrivateFileObject, FALSE, NULL, NULL);
+
+            /* Never loop on a map the release did not take off the list */
+            OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
+            if (!IsListEmpty(&SharedCacheMap->PrivateList) &&
+                SharedCacheMap->PrivateList.Flink == &PrivateCacheMap->PrivateLinks &&
+                PrivateCacheMap->FileObject == PrivateFileObject)
+            {
+                KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
+                DPRINT1("Private cache map %p of %p not released\n", PrivateCacheMap, PrivateFileObject);
+                ObDereferenceObjectDeferDelete(PrivateFileObject);
+                break;
+            }
+            KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
+            /* Deferred: if that was the last reference (its handle closed
+             * meanwhile), the close must not run inside the caller, which may
+             * hold file system locks */
+            ObDereferenceObjectDeferDelete(PrivateFileObject);
         }
 
         /*

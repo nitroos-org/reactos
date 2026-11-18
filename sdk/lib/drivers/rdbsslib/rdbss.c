@@ -37,6 +37,10 @@
 
 #define RX_TOPLEVELCTX_FLAG_FROM_POOL 1
 
+/* RDBSS-private LOWIO_CONTEXT flag (same value in rxce.c, which clears it at
+ * each submission): RxLowIoCompletion was called for the current submission */
+#define RXP_LOWIO_FLAG_COMPLETION_INDICATED 0x8000
+
 typedef
 NTSTATUS
 (NTAPI *PRX_FSD_DISPATCH) (
@@ -509,6 +513,41 @@ NTSTATUS
 RxXXXControlFileCallthru(
     PRX_CONTEXT Context);
 
+VOID
+NTAPI
+RxDispatchChangeBufferingStateRequests(
+    PVOID Context);
+
+/* rxce internals used for stop and unload */
+VOID
+RxSpinDownMRxDispatcher(
+    IN OUT PRDBSS_DEVICE_OBJECT pMRxDeviceObject);
+
+VOID
+RxTearDownDispatcher(
+    VOID);
+
+VOID
+RxScavengerFinalizeEntries(
+    PRDBSS_DEVICE_OBJECT DeviceObject);
+
+VOID
+RxStopScavenger(
+    IN PRDBSS_DEVICE_OBJECT DeviceObject);
+
+extern volatile LONG RxpLivePoolAllocations;
+extern volatile LONG RxNumberOfActiveFcbs;
+
+static
+NTSTATUS
+RxpGatherLocksForUnlockAll(
+    IN PRX_CONTEXT RxContext,
+    IN PFCB Fcb,
+    IN PFILE_OBJECT FileObject,
+    IN PEPROCESS Process,
+    IN BOOLEAN ByKey,
+    IN ULONG Key);
+
 PVOID
 NTAPI
 _RxAllocatePoolWithTag(
@@ -864,16 +903,36 @@ RxAdjustFileTimesAndSize(
         return;
     }
 
+    /* The size first: on most servers, changing it moves the last write
+     * time, which the time update below then settles */
+    if (FileModified)
+    {
+        FileEOFInfo.EndOfFile.QuadPart = capFcb->Header.FileSize.QuadPart;
+
+        RxContext->Info.FileInformationClass = FileEndOfFileInformation;
+        RxContext->Info.Buffer = &FileEOFInfo;
+        RxContext->Info.Length = sizeof(FileEOFInfo);
+
+        MINIRDR_CALL(Status, RxContext, capFcb->MRxDispatch, MRxSetFileInfoAtCleanup, (RxContext));
+        (void)Status;
+    }
+
     /* By default, we won't issue any MRxSetFileInfoAtCleanup call */
     NeedUpdate = FALSE;
     RtlZeroMemory(&FileBasicInfo, sizeof(FileBasicInfo));
 
-    /* Update lastwrite time if required */
+    /* Update lastwrite time if required; a time the user set on this
+     * handle is sent again so that the size update cannot override it */
     if (SetLastWrite)
     {
         NeedUpdate = TRUE;
         capFcb->LastWriteTime.QuadPart = CurrentTime.QuadPart;
         FileBasicInfo.LastWriteTime.QuadPart = CurrentTime.QuadPart;
+    }
+    else if (FileModified && BooleanFlagOn(capFobx->Flags, FOBX_FLAG_USER_SET_LAST_WRITE))
+    {
+        NeedUpdate = TRUE;
+        FileBasicInfo.LastWriteTime.QuadPart = capFcb->LastWriteTime.QuadPart;
     }
 
     /* Update lastaccess time if required */
@@ -898,19 +957,6 @@ RxAdjustFileTimesAndSize(
         RxContext->Info.FileInformationClass = FileBasicInformation;
         RxContext->Info.Buffer = &FileBasicInfo;
         RxContext->Info.Length = sizeof(FileBasicInfo);
-
-        MINIRDR_CALL(Status, RxContext, capFcb->MRxDispatch, MRxSetFileInfoAtCleanup, (RxContext));
-        (void)Status;
-    }
-
-    /* If the file was modified, update its EOF */
-    if (FileModified)
-    {
-        FileEOFInfo.EndOfFile.QuadPart = capFcb->Header.FileSize.QuadPart;
-
-        RxContext->Info.FileInformationClass = FileEndOfFileInformation;
-        RxContext->Info.Buffer = &FileEOFInfo;
-        RxContext->Info.Length = sizeof(FileEOFInfo);
 
         MINIRDR_CALL(Status, RxContext, capFcb->MRxDispatch, MRxSetFileInfoAtCleanup, (RxContext));
         (void)Status;
@@ -1319,7 +1365,10 @@ RxCanonicalizeFileNameByServerSpecs(
         {
             if ((CurChar - NextChar) == 1)
             {
-                if (NetRootName->Buffer[NextChar + 2] != '.')
+                /* NextChar + 2 is the separator that ended the component, or
+                 * the end of the name: never read past it (a name ending in a
+                 * two-character component read one WCHAR past the buffer) */
+                if (NextChar + 2 >= MaxChars || NetRootName->Buffer[NextChar + 2] != '.')
                 {
                     continue;
                 }
@@ -1346,6 +1395,77 @@ RxCanonicalizeFileNameByServerSpecs(
     }
 
     return STATUS_MORE_PROCESSING_REQUIRED;
+}
+
+/*
+ * Builds the canonical name of a relative open: the related FCB's V_NET_ROOT
+ * prefix, its path below that prefix, a separator and the relative name. All
+ * lengths are checked: the result must fit a UNICODE_STRING.
+ */
+static
+NTSTATUS
+RxBuildRelativeCanonicalName(
+    PRX_CONTEXT RxContext,
+    PFCB RelatedFcb,
+    PUNICODE_STRING FileName,
+    PUNICODE_STRING CanonicalName)
+{
+    NTSTATUS Status;
+    ULONG Length;
+    BOOLEAN Separator;
+    PV_NET_ROOT VNetRoot;
+    PUNICODE_STRING Prefix, Path;
+
+    PAGED_CODE();
+
+    VNetRoot = RelatedFcb->VNetRoot;
+    if (VNetRoot == NULL || (NodeType(VNetRoot) & ~RX_SCAVENGER_MASK) != RDBSS_NTC_V_NETROOT)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    Prefix = &VNetRoot->PrefixEntry.Prefix;
+    Path = &RelatedFcb->FcbTableEntry.Path;
+
+    /* No separator to add for a re-open (empty name) or after a path that
+     * already ends with one (a share root) */
+    Separator = (FileName->Length != 0);
+    if (Path->Length != 0 && Path->Buffer[Path->Length / sizeof(WCHAR) - 1] == OBJ_NAME_PATH_SEPARATOR)
+    {
+        Separator = FALSE;
+    }
+    else if (Path->Length == 0 && Prefix->Length != 0 &&
+             Prefix->Buffer[Prefix->Length / sizeof(WCHAR) - 1] == OBJ_NAME_PATH_SEPARATOR)
+    {
+        Separator = FALSE;
+    }
+
+    Length = (ULONG)Prefix->Length + Path->Length + FileName->Length + (Separator ? sizeof(WCHAR) : 0);
+    if (Length > MAXUSHORT - 1)
+    {
+        return STATUS_OBJECT_NAME_INVALID;
+    }
+
+    Status = RxAllocateCanonicalNameBuffer(RxContext, CanonicalName, (USHORT)Length);
+    if (!NT_SUCCESS(Status))
+    {
+        return Status;
+    }
+
+    RtlCopyMemory(CanonicalName->Buffer, Prefix->Buffer, Prefix->Length);
+    CanonicalName->Length = Prefix->Length;
+    RtlCopyMemory(Add2Ptr(CanonicalName->Buffer, CanonicalName->Length), Path->Buffer, Path->Length);
+    CanonicalName->Length += Path->Length;
+    if (Separator)
+    {
+        CanonicalName->Buffer[CanonicalName->Length / sizeof(WCHAR)] = OBJ_NAME_PATH_SEPARATOR;
+        CanonicalName->Length += sizeof(WCHAR);
+    }
+    RtlCopyMemory(Add2Ptr(CanonicalName->Buffer, CanonicalName->Length), FileName->Buffer, FileName->Length);
+    CanonicalName->Length += FileName->Length;
+
+    DPRINT("Relative open: %wZ\n", CanonicalName);
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS
@@ -1393,7 +1513,23 @@ RxCanonicalizeNameAndObtainNetRoot(
             return STATUS_INVALID_PARAMETER;
         }
 
-        UNIMPLEMENTED;
+        /* A relative name is never rooted (VERIFY ON PEER: the status) */
+        if (FileName->Length != 0 && FileName->Buffer[0] == OBJ_NAME_PATH_SEPARATOR)
+        {
+            return STATUS_OBJECT_NAME_INVALID;
+        }
+
+        /* The name is the related file's canonical name (its V_NET_ROOT
+         * prefix and its path below it, both canonical already), a
+         * separator and the relative name. The related FCB is referenced by
+         * its open file object, which the I/O manager holds for us */
+        Status = RxBuildRelativeCanonicalName(RxContext, Fcb, FileName, &CanonicalName);
+        if (!NT_SUCCESS(Status))
+        {
+            return Status;
+        }
+
+        NetRootType = Fcb->pNetRoot->Type;
     }
 
     /* Get/Create the associated VNetRoot for opening */
@@ -1621,8 +1757,11 @@ RxCloseAssociatedSrvOpen(
     {
         RxMarkFobxOnClose(Fobx);
     }
-    else
+    else if (Fcb->OpenCount != 0)
     {
+        /* Not for a rename target directory: it never counted as an open,
+         * and an underflow here would keep the FCB (and its V_NET_ROOT)
+         * alive for ever */
         InterlockedDecrement((volatile long *)&Fcb->OpenCount);
     }
 
@@ -1987,6 +2126,9 @@ RxCommonCleanup(
 
         RxUninitializeCacheMap(Context, FileObject, NULL);
 
+        /* As below: no cache map may be initialized on it any more */
+        SetFlag(FileObject->Flags, FO_CLEANUP_COMPLETE);
+
         RxReleaseFcb(Context, Fcb);
 
         return STATUS_SUCCESS;
@@ -2059,13 +2201,27 @@ RxCommonCleanup(
             Context->LowIoContext.Flags |= LOWIO_CONTEXT_FLAG_SAVEUNLOCKS;
             if (NodeType(Fcb) == RDBSS_NTC_STORAGE_TYPE_FILE)
             {
-                /* First, unlock */
+                /* First, collect the locks this handle still holds (the
+                 * server holds them too unless they were buffered locally),
+                 * then drop them locally */
+                Context->LowIoContext.ParamsFor.Locks.LockList = NULL;
+                if (!BooleanFlagOn(Fcb->FcbState, FCB_STATE_LOCK_BUFFERING_ENABLED))
+                {
+                    /* A failure here only means the server keeps the locks
+                     * until the handle is closed there */
+                    RxpGatherLocksForUnlockAll(Context, Fcb, FileObject, RxGetRequestorProcess(Context), FALSE, 0);
+                }
                 FsRtlFastUnlockAll(&Fcb->Specific.Fcb.FileLock, FileObject, RxGetRequestorProcess(Context), Context);
 
                 /* If there are still locks to release, proceed */
                 if (Context->LowIoContext.ParamsFor.Locks.LockList != NULL)
                 {
+                    PLOWIO_LOCK_LIST LockList;
+
+                    /* RxInitializeLowIoContext() keeps the lock list */
+                    LockList = Context->LowIoContext.ParamsFor.Locks.LockList;
                     RxInitializeLowIoContext(&Context->LowIoContext, LOWIO_OP_UNLOCK_MULTIPLE);
+                    Context->LowIoContext.ParamsFor.Locks.LockList = LockList;
                     Context->LowIoContext.ParamsFor.Locks.Flags = 0;
                     Status = RxLowIoLockControlShell(Context);
                 }
@@ -2721,13 +2877,48 @@ RxCommonDevFCBClose(
     return Status;
 }
 
+/*
+ * @implemented
+ *
+ * FSCTLs sent to the device itself (\Device\<minirdr> opened without a
+ * name): user requests go to MRxDevFcbXXXControlFile, like device IOCTLs.
+ */
 NTSTATUS
 NTAPI
 RxCommonDevFCBFsCtl(
     PRX_CONTEXT Context)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    NTSTATUS Status;
+    PIO_STACK_LOCATION Stack;
+
+    PAGED_CODE();
+
+    Stack = Context->CurrentIrpSp;
+    DPRINT("RxCommonDevFCBFsCtl(%p) Minor: %x, Code: %lx\n", Context, Stack->MinorFunction,
+           Stack->Parameters.FileSystemControl.FsControlCode);
+
+    if (Context->pFobx != NULL)
+    {
+        return STATUS_INVALID_HANDLE;
+    }
+
+    if (Stack->MinorFunction != IRP_MN_USER_FS_REQUEST && Stack->MinorFunction != IRP_MN_TRACK_LINK)
+    {
+        return STATUS_INVALID_DEVICE_REQUEST;
+    }
+
+    Context->LowIoContext.ParamsFor.FsCtl.MinorFunction = Stack->MinorFunction;
+    Context->LowIoContext.ParamsFor.FsCtl.FsControlCode = Stack->Parameters.FileSystemControl.FsControlCode;
+
+    Status = RxXXXControlFileCallthru(Context);
+    if (Status != STATUS_PENDING && Context->PostRequest)
+    {
+        Context->ResumeRoutine = RxCommonDevFCBFsCtl;
+        Status = RxFsdPostRequest(Context);
+    }
+
+    DPRINT("Status: %lx\n", Status);
+    return Status;
 }
 
 /*
@@ -2770,13 +2961,19 @@ RxCommonDevFCBIoCtl(
     return Status;
 }
 
+/*
+ * @implemented
+ */
 NTSTATUS
 NTAPI
 RxCommonDevFCBQueryVolInfo(
     PRX_CONTEXT Context)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PAGED_CODE();
+
+    /* Not a request the device itself (opened without a file name) serves */
+    UNREFERENCED_PARAMETER(Context);
+    return STATUS_INVALID_DEVICE_REQUEST;
 }
 
 /*
@@ -2849,21 +3046,39 @@ RxCommonDirectoryControl(
     return Status;
 }
 
+/*
+ * @implemented
+ */
 NTSTATUS
 NTAPI
 RxCommonDispatchProblem(
     PRX_CONTEXT Context)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PAGED_CODE();
+
+    /* Not a request the device itself (opened without a file name) serves */
+    UNREFERENCED_PARAMETER(Context);
+    return STATUS_INVALID_DEVICE_REQUEST;
 }
 
+/*
+ * @implemented
+ *
+ * IRP_MJ_FILE_SYSTEM_CONTROL on a file or directory: user requests go to the
+ * mini-redirector through LOWIO_OP_FSCTL (RxLowIoPopulateFsctlInfo maps the
+ * buffers by transfer method). For METHOD_NEITHER the buffers are the
+ * requestor's own pointers (RequestorMode tells whether to probe them): the
+ * mini-redirector must treat them as untrusted. Mount and verify requests do
+ * not apply to a network file system.
+ */
 NTSTATUS
 NTAPI
 RxCommonFileSystemControl(
     PRX_CONTEXT Context)
 {
     PIRP Irp;
+    PFCB Fcb;
+    NTSTATUS Status;
     ULONG ControlCode;
     PIO_STACK_LOCATION Stack;
 
@@ -2871,39 +3086,340 @@ RxCommonFileSystemControl(
 
     Irp = Context->CurrentIrp;
     Stack = Context->CurrentIrpSp;
+    Fcb = (PFCB)Context->pFcb;
     ControlCode = Stack->Parameters.FileSystemControl.FsControlCode;
 
-    DPRINT1("RxCommonFileSystemControl: %p, %p, %d, %lx\n", Context, Irp, Stack->MinorFunction, ControlCode);
+    DPRINT("RxCommonFileSystemControl: %p, %p, %d, %lx\n", Context, Irp, Stack->MinorFunction, ControlCode);
 
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    if (Stack->MinorFunction != IRP_MN_USER_FS_REQUEST)
+    {
+        return STATUS_INVALID_DEVICE_REQUEST;
+    }
+
+    if (NodeType(Fcb) != RDBSS_NTC_STORAGE_TYPE_FILE && NodeType(Fcb) != RDBSS_NTC_STORAGE_TYPE_DIRECTORY &&
+        NodeType(Fcb) != RDBSS_NTC_STORAGE_TYPE_UNKNOWN)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    RxInitializeLowIoContext(&Context->LowIoContext, LOWIO_OP_FSCTL);
+    Status = RxLowIoSubmit(Context, RxLowIoIoCtlShellCompletion);
+    if (Status == STATUS_PENDING)
+    {
+        /* The completion owns the IRP: drop the dispatcher's reference */
+        RxDereferenceAndDeleteRxContext_Real(Context);
+    }
+
+    DPRINT("Status: %lx\n", Status);
+    return Status;
 }
 
+/*
+ * @implemented
+ *
+ * IRP_MJ_FLUSH_BUFFERS: write back what the cache holds, then ask the
+ * mini-redirector to flush on the server (MRxFlush). Lock order: FCB
+ * exclusive -> (RxFlushFcbInSystemCache) paging I/O resource -> Cc; the
+ * paging writes the flush issues take the paging resource shared again,
+ * which the owner may do. Directories only reach the mini-redirector.
+ */
 NTSTATUS
 NTAPI
 RxCommonFlushBuffers(
     PRX_CONTEXT Context)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PFCB Fcb;
+    NTSTATUS Status, MiniStatus;
+
+    PAGED_CODE();
+
+    Fcb = (PFCB)Context->pFcb;
+    DPRINT("RxCommonFlushBuffers(%p) FCB: %p\n", Context, Fcb);
+
+    if (NodeType(Fcb) != RDBSS_NTC_STORAGE_TYPE_FILE && NodeType(Fcb) != RDBSS_NTC_STORAGE_TYPE_DIRECTORY)
+    {
+        return STATUS_INVALID_DEVICE_REQUEST;
+    }
+
+    Status = RxAcquireExclusiveFcb(Context, Fcb);
+    if (Status == STATUS_LOCK_NOT_GRANTED)
+    {
+        return RxFsdPostRequest(Context);
+    }
+    else if (!NT_SUCCESS(Status))
+    {
+        return Status;
+    }
+
+    Status = STATUS_SUCCESS;
+    if (NodeType(Fcb) == RDBSS_NTC_STORAGE_TYPE_FILE &&
+        Fcb->NonPaged->SectionObjectPointers.DataSectionObject != NULL)
+    {
+        Status = RxFlushFcbInSystemCache(Fcb, TRUE);
+    }
+
+    if (NT_SUCCESS(Status) && Fcb->MRxDispatch->MRxFlush != NULL)
+    {
+        MINIRDR_CALL(MiniStatus, Context, Fcb->MRxDispatch, MRxFlush, (Context));
+        /* A mini-redirector that cannot flush has nothing to flush */
+        if (MiniStatus != STATUS_NOT_IMPLEMENTED && MiniStatus != STATUS_INVALID_DEVICE_REQUEST)
+        {
+            Status = MiniStatus;
+        }
+    }
+
+    RxReleaseFcb(Context, Fcb);
+
+    DPRINT("Status: %lx\n", Status);
+    return Status;
 }
 
+/*
+ * @implemented
+ *
+ * Byte-range locks. Two modes, chosen by the buffering state the
+ * mini-redirector granted for the FCB:
+ * - FCB_STATE_LOCK_BUFFERING_ENABLED (for instance an exclusive oplock): the
+ *   lock is local only, FsRtlProcessFileLock completes the IRP through
+ *   RxLockOperationCompletion;
+ * - otherwise the lock goes to the mini-redirector (LOWIO_OP_*LOCK*) and, once
+ *   the server granted it, is recorded in the FCB's FILE_LOCK so that read
+ *   and write checks (FsRtlCheckLockFor*Access) see it.
+ * Lock order: the FCB resource is held (shared, exclusive for unlock-all)
+ * only to decide the mode and, for unlock-all, to enumerate the local locks;
+ * it is released before the request goes to the mini-redirector, so a lock
+ * that waits on the server never blocks writers that need the FCB.
+ */
 NTSTATUS
 NTAPI
 RxCommonLockControl(
     PRX_CONTEXT Context)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PIRP Irp;
+    PFCB Fcb;
+    PFOBX Fobx;
+    NTSTATUS Status;
+    PIO_STACK_LOCATION Stack;
+    BOOLEAN Exclusive;
+
+    PAGED_CODE();
+
+    Fcb = (PFCB)Context->pFcb;
+    Fobx = (PFOBX)Context->pFobx;
+    Irp = Context->CurrentIrp;
+    Stack = Context->CurrentIrpSp;
+
+    DPRINT("RxCommonLockControl(%p) FCB: %p, FOBX: %p, Minor: %x\n", Context, Fcb, Fobx, Stack->MinorFunction);
+
+    /* Only files have locks */
+    if (NodeType(Fcb) != RDBSS_NTC_STORAGE_TYPE_FILE || Fobx == NULL)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    switch (Stack->MinorFunction)
+    {
+        case IRP_MN_LOCK:
+        case IRP_MN_UNLOCK_SINGLE:
+        case IRP_MN_UNLOCK_ALL:
+        case IRP_MN_UNLOCK_ALL_BY_KEY:
+            break;
+
+        default:
+            return STATUS_INVALID_DEVICE_REQUEST;
+    }
+
+    /* The request may wait on the server: never block the caller's thread
+     * for an asynchronous request */
+    if (!BooleanFlagOn(Context->Flags, RX_CONTEXT_FLAG_WAIT))
+    {
+        return RxFsdPostRequest(Context);
+    }
+
+    Exclusive = (Stack->MinorFunction == IRP_MN_UNLOCK_ALL || Stack->MinorFunction == IRP_MN_UNLOCK_ALL_BY_KEY);
+    Status = (Exclusive ? RxAcquireExclusiveFcb(Context, Fcb) : RxAcquireSharedFcb(Context, Fcb));
+    if (Status == STATUS_LOCK_NOT_GRANTED)
+    {
+        return RxFsdPostRequest(Context);
+    }
+    else if (!NT_SUCCESS(Status))
+    {
+        return Status;
+    }
+
+    /* Let the mini-redirector refuse locks it cannot express on the wire */
+    if (Stack->MinorFunction == IRP_MN_LOCK && Fcb->MRxDispatch->MRxIsLockRealizable != NULL)
+    {
+        Status = Fcb->MRxDispatch->MRxIsLockRealizable(RX_GET_MRX_FCB(Fcb),
+                                                       &Stack->Parameters.LockControl.ByteOffset,
+                                                       Stack->Parameters.LockControl.Length,
+                                                       Stack->Flags);
+        if (!NT_SUCCESS(Status))
+        {
+            RxReleaseFcb(Context, Fcb);
+            return Status;
+        }
+    }
+
+    /* Locks can be kept locally: let FsRtl do everything, it completes the IRP */
+    if (BooleanFlagOn(Fcb->FcbState, FCB_STATE_LOCK_BUFFERING_ENABLED))
+    {
+        KIRQL OldIrql;
+
+        /* FsRtl completes the IRP (or queues it with its own cancel routine
+         * if the lock has to wait): RDBSS's cancel routine goes first */
+        IoAcquireCancelSpinLock(&OldIrql);
+        IoSetCancelRoutine(Irp, NULL);
+        IoReleaseCancelSpinLock(OldIrql);
+
+        IoMarkIrpPending(Irp);
+        FsRtlProcessFileLock(&Fcb->Specific.Fcb.FileLock, Irp, NULL);
+        RxReleaseFcb(Context, Fcb);
+
+        /* The IRP belongs to FsRtl now (it may also still wait for a lock) */
+        Context->CurrentIrp = NULL;
+        RxDereferenceAndDeleteRxContext_Real(Context);
+        return STATUS_PENDING;
+    }
+
+    /* Otherwise, the server decides. Keep buffering state changes from
+     * granting lock buffering while this request is outstanding */
+    InterlockedIncrement((volatile long *)&Fcb->OutstandingLockOperationsCount);
+
+    if (Exclusive)
+    {
+        Status = RxLowIoLockControlShell(Context);
+        RxReleaseFcb(Context, Fcb);
+    }
+    else
+    {
+        RxReleaseFcb(Context, Fcb);
+        Status = RxLowIoLockControlShell(Context);
+    }
+
+    InterlockedDecrement((volatile long *)&Fcb->OutstandingLockOperationsCount);
+
+    DPRINT("Status: %lx\n", Status);
+    return Status;
 }
 
+/*
+ * @implemented
+ *
+ * IRP_MJ_QUERY_EA, passed to MRxQueryEaInfo (Info.Buffer, Info.LengthRemaining
+ * and QueryEa.*). A mini-redirector without EA support (no MRxQueryEaInfo)
+ * gets STATUS_EAS_NOT_SUPPORTED, what a Windows redirector returns for a
+ * server without EAs. The EA name list comes from the requestor and is
+ * captured into pool before the mini-redirector sees it.
+ */
 NTSTATUS
 NTAPI
 RxCommonQueryEa(
     PRX_CONTEXT Context)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PIRP Irp;
+    PFCB Fcb;
+    NTSTATUS Status;
+    PIO_STACK_LOCATION Stack;
+    PVOID CapturedList;
+    ULONG Length, ListLength;
+
+    PAGED_CODE();
+
+    Fcb = (PFCB)Context->pFcb;
+    Irp = Context->CurrentIrp;
+    Stack = Context->CurrentIrpSp;
+    Length = Stack->Parameters.QueryEa.Length;
+    ListLength = Stack->Parameters.QueryEa.EaListLength;
+    CapturedList = NULL;
+
+    DPRINT("RxCommonQueryEa(%p) FCB: %p, Length: %lu\n", Context, Fcb, Length);
+
+    if (NodeType(Fcb) != RDBSS_NTC_STORAGE_TYPE_FILE && NodeType(Fcb) != RDBSS_NTC_STORAGE_TYPE_DIRECTORY)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (Fcb->MRxDispatch->MRxQueryEaInfo == NULL)
+    {
+        return STATUS_EAS_NOT_SUPPORTED;
+    }
+
+    /* An EA list is at most 64 KB on the wire */
+    if (Stack->Parameters.QueryEa.EaList != NULL && (ListLength == 0 || ListLength > 0x10000))
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    Status = RxAcquireSharedFcb(Context, Fcb);
+    if (Status == STATUS_LOCK_NOT_GRANTED)
+    {
+        return RxFsdPostRequest(Context);
+    }
+    else if (!NT_SUCCESS(Status))
+    {
+        return Status;
+    }
+
+    _SEH2_TRY
+    {
+        if (Stack->Parameters.QueryEa.EaList != NULL)
+        {
+            CapturedList = RxAllocatePoolWithTag(PagedPool, ListLength, RX_MISC_POOLTAG);
+            if (CapturedList == NULL)
+            {
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+                _SEH2_LEAVE;
+            }
+
+            if (Irp->RequestorMode != KernelMode)
+            {
+                ProbeForRead(Stack->Parameters.QueryEa.EaList, ListLength, sizeof(UCHAR));
+            }
+            RtlCopyMemory(CapturedList, Stack->Parameters.QueryEa.EaList, ListLength);
+        }
+
+        Context->Info.Buffer = NULL;
+        if (Length != 0)
+        {
+            RxLockUserBuffer(Context, IoWriteAccess, Length);
+            Context->Info.Buffer = RxNewMapUserBuffer(Context);
+            if (Context->Info.Buffer == NULL)
+            {
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+                _SEH2_LEAVE;
+            }
+        }
+
+        Context->Info.LengthRemaining = (LONG)Length;
+        Context->QueryEa.UserEaList = CapturedList;
+        Context->QueryEa.UserEaListLength = (CapturedList != NULL ? ListLength : 0);
+        Context->QueryEa.UserEaIndex = Stack->Parameters.QueryEa.EaIndex;
+        Context->QueryEa.RestartScan = BooleanFlagOn(Stack->Flags, SL_RESTART_SCAN);
+        Context->QueryEa.ReturnSingleEntry = BooleanFlagOn(Stack->Flags, SL_RETURN_SINGLE_ENTRY);
+        Context->QueryEa.IndexSpecified = BooleanFlagOn(Stack->Flags, SL_INDEX_SPECIFIED);
+
+        MINIRDR_CALL(Status, Context, Fcb->MRxDispatch, MRxQueryEaInfo, (Context));
+
+        if (NT_SUCCESS(Status) || Status == STATUS_BUFFER_OVERFLOW)
+        {
+            Irp->IoStatus.Information = Length - Context->Info.LengthRemaining;
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+
+    RxReleaseFcb(Context, Fcb);
+    if (CapturedList != NULL)
+    {
+        RxFreePoolWithTag(CapturedList, RX_MISC_POOLTAG);
+    }
+
+    DPRINT("Status: %lx\n", Status);
+    return Status;
 }
 
 /*
@@ -2952,8 +3468,24 @@ RxCommonQueryInformation(
             Status = STATUS_INSUFFICIENT_RESOURCES;
             _SEH2_LEAVE;
         }
-        /* Zero it */
-        RtlZeroMemory(Buffer, Context->Info.Length);
+        /* Zero it. For FileAllInformation, the I/O manager filled the access,
+         * mode and alignment parts before calling us: keep them */
+        if (FileInfoClass == FileAllInformation && Context->Info.Length >= (LONG)sizeof(FILE_ALL_INFORMATION))
+        {
+            PFILE_ALL_INFORMATION AllInfo = Buffer;
+            FILE_ACCESS_INFORMATION Access = AllInfo->AccessInformation;
+            FILE_MODE_INFORMATION Mode = AllInfo->ModeInformation;
+            FILE_ALIGNMENT_INFORMATION Alignment = AllInfo->AlignmentInformation;
+
+            RtlZeroMemory(Buffer, Context->Info.Length);
+            AllInfo->AccessInformation = Access;
+            AllInfo->ModeInformation = Mode;
+            AllInfo->AlignmentInformation = Alignment;
+        }
+        else
+        {
+            RtlZeroMemory(Buffer, Context->Info.Length);
+        }
 
         /* Validate file type */
         if (NodeType(Fcb) != RDBSS_NTC_STORAGE_TYPE_UNKNOWN)
@@ -3028,47 +3560,41 @@ RxCommonQueryInformation(
                 break;
 
             case FileAllInformation:
-                SET_SIZE_AND_QUERY(0, RxQueryBasicInfo);
+                /* Each part at its place in FILE_ALL_INFORMATION; the access,
+                 * mode and alignment parts are the I/O manager's (they used
+                 * to be skipped as if they were not there, so the position
+                 * landed on the access part and the name 12 bytes early) */
+                SET_SIZE_AND_QUERY(FIELD_OFFSET(FILE_ALL_INFORMATION, BasicInformation), RxQueryBasicInfo);
                 if (!NT_SUCCESS(Status))
                 {
                     break;
                 }
 
-                SET_SIZE_AND_QUERY(sizeof(FILE_BASIC_INFORMATION), RxQueryStandardInfo);
+                SET_SIZE_AND_QUERY(FIELD_OFFSET(FILE_ALL_INFORMATION, StandardInformation), RxQueryStandardInfo);
                 if (!NT_SUCCESS(Status))
                 {
                     break;
                 }
 
-                SET_SIZE_AND_QUERY(sizeof(FILE_BASIC_INFORMATION) +
-                                   sizeof(FILE_STANDARD_INFORMATION), RxQueryInternalInfo);
+                SET_SIZE_AND_QUERY(FIELD_OFFSET(FILE_ALL_INFORMATION, InternalInformation), RxQueryInternalInfo);
                 if (!NT_SUCCESS(Status))
                 {
                     break;
                 }
 
-                SET_SIZE_AND_QUERY(sizeof(FILE_BASIC_INFORMATION) +
-                                   sizeof(FILE_STANDARD_INFORMATION) +
-                                   sizeof(FILE_INTERNAL_INFORMATION), RxQueryEaInfo);
+                SET_SIZE_AND_QUERY(FIELD_OFFSET(FILE_ALL_INFORMATION, EaInformation), RxQueryEaInfo);
                 if (!NT_SUCCESS(Status))
                 {
                     break;
                 }
 
-                SET_SIZE_AND_QUERY(sizeof(FILE_BASIC_INFORMATION) +
-                                   sizeof(FILE_STANDARD_INFORMATION) +
-                                   sizeof(FILE_INTERNAL_INFORMATION) +
-                                   sizeof(FILE_EA_INFORMATION), RxQueryPositionInfo);
+                SET_SIZE_AND_QUERY(FIELD_OFFSET(FILE_ALL_INFORMATION, PositionInformation), RxQueryPositionInfo);
                 if (!NT_SUCCESS(Status))
                 {
                     break;
                 }
 
-                SET_SIZE_AND_QUERY(sizeof(FILE_BASIC_INFORMATION) +
-                                   sizeof(FILE_STANDARD_INFORMATION) +
-                                   sizeof(FILE_INTERNAL_INFORMATION) +
-                                   sizeof(FILE_EA_INFORMATION) +
-                                   sizeof(FILE_POSITION_INFORMATION), RxQueryNameInfo);
+                SET_SIZE_AND_QUERY(FIELD_OFFSET(FILE_ALL_INFORMATION, NameInformation), RxQueryNameInfo);
                 break;
 
             case FileAlternateNameInformation:
@@ -3114,22 +3640,117 @@ RxCommonQueryInformation(
 #undef SET_SIZE_AND_QUERY
 }
 
+/*
+ * @implemented
+ *
+ * Quotas over a redirector: not supported (no M1 consumer); the request is
+ * refused cleanly rather than passed with unvalidated SID lists.
+ */
 NTSTATUS
 NTAPI
 RxCommonQueryQuotaInformation(
     PRX_CONTEXT Context)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PAGED_CODE();
+
+    UNREFERENCED_PARAMETER(Context);
+    return STATUS_INVALID_DEVICE_REQUEST;
 }
 
+/*
+ * @implemented
+ *
+ * IRP_MJ_QUERY_SECURITY: the descriptor is the server's. Contract
+ * (MRxQuerySdInfo): QuerySecurity.SecurityInformation, Info.Buffer (the
+ * locked user buffer) and Info.LengthRemaining in; InformationToReturn out,
+ * the length returned or, with STATUS_BUFFER_TOO_SMALL, the length needed.
+ * A short buffer is reported as STATUS_BUFFER_OVERFLOW with the needed length
+ * in IoStatus.Information, the form the I/O manager turns into
+ * STATUS_BUFFER_TOO_SMALL for NtQuerySecurityObject. Without MRxQuerySdInfo
+ * the request is invalid for the device, so the I/O manager supplies its
+ * default descriptor, as for any file system without security.
+ */
 NTSTATUS
 NTAPI
 RxCommonQuerySecurity(
     PRX_CONTEXT Context)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PIRP Irp;
+    PFCB Fcb;
+    NTSTATUS Status;
+    PIO_STACK_LOCATION Stack;
+    ULONG Length;
+
+    PAGED_CODE();
+
+    Fcb = (PFCB)Context->pFcb;
+    Irp = Context->CurrentIrp;
+    Stack = Context->CurrentIrpSp;
+    Length = Stack->Parameters.QuerySecurity.Length;
+
+    DPRINT("RxCommonQuerySecurity(%p) FCB: %p, Info: %lx, Length: %lu\n", Context, Fcb,
+           Stack->Parameters.QuerySecurity.SecurityInformation, Length);
+
+    if (NodeType(Fcb) != RDBSS_NTC_STORAGE_TYPE_FILE && NodeType(Fcb) != RDBSS_NTC_STORAGE_TYPE_DIRECTORY &&
+        NodeType(Fcb) != RDBSS_NTC_STORAGE_TYPE_UNKNOWN)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (Fcb->MRxDispatch->MRxQuerySdInfo == NULL)
+    {
+        return STATUS_INVALID_DEVICE_REQUEST;
+    }
+
+    Status = RxAcquireSharedFcb(Context, Fcb);
+    if (Status == STATUS_LOCK_NOT_GRANTED)
+    {
+        return RxFsdPostRequest(Context);
+    }
+    else if (!NT_SUCCESS(Status))
+    {
+        return Status;
+    }
+
+    _SEH2_TRY
+    {
+        Context->Info.Buffer = NULL;
+        if (Length != 0)
+        {
+            RxLockUserBuffer(Context, IoWriteAccess, Length);
+            Context->Info.Buffer = RxNewMapUserBuffer(Context);
+            if (Context->Info.Buffer == NULL)
+            {
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+                _SEH2_LEAVE;
+            }
+        }
+
+        Context->QuerySecurity.SecurityInformation = Stack->Parameters.QuerySecurity.SecurityInformation;
+        Context->QuerySecurity.Length = Length;
+        Context->Info.LengthRemaining = (LONG)Length;
+        Context->InformationToReturn = 0;
+
+        MINIRDR_CALL(Status, Context, Fcb->MRxDispatch, MRxQuerySdInfo, (Context));
+
+        if (NT_SUCCESS(Status))
+        {
+            Irp->IoStatus.Information = Context->InformationToReturn;
+        }
+        else if (Status == STATUS_BUFFER_TOO_SMALL || Status == STATUS_BUFFER_OVERFLOW)
+        {
+            Irp->IoStatus.Information = Context->InformationToReturn;
+            Status = STATUS_BUFFER_OVERFLOW;
+        }
+    }
+    _SEH2_FINALLY
+    {
+        RxReleaseFcb(Context, Fcb);
+    }
+    _SEH2_END;
+
+    DPRINT("Status: %lx, Information: %Iu\n", Status, Irp->IoStatus.Information);
+    return Status;
 }
 
 /*
@@ -3284,6 +3905,8 @@ RxCommonRead(
     PostRequest = FALSE;
     ReadCachingDisabled = FALSE;
     OwnerSet = FALSE;
+    RxContext->FcbResourceAcquired = FALSE;
+    RxContext->FcbPagingIoResourceAcquired = FALSE;
     ReadCachingEnabled = BooleanFlagOn(Fcb->FcbState, FCB_STATE_READCACHING_ENABLED);
     FileObject = Stack->FileObject;
     NetRoot = (PNET_ROOT)Fcb->pNetRoot;
@@ -3308,6 +3931,10 @@ RxCommonRead(
             ExAcquireResourceSharedLite(Fcb->Header.PagingIoResource, TRUE);
             CcFlushCache(FileObject->SectionObjectPointer, &ByteOffset, ReadLength, &Irp->IoStatus);
             RxReleasePagingIoResource(RxContext, Fcb);
+
+            /* The FCB was only needed for the flush: the read takes it again
+             * below, in the mode it needs */
+            RxReleaseFcb(RxContext, Fcb);
 
             if (!NT_SUCCESS(Irp->IoStatus.Status))
             {
@@ -3337,7 +3964,18 @@ RxCommonRead(
         }
         else
         {
-            if (!ReadCachingEnabled)
+            /* Every non-paging read holds the FCB shared, cached reads of
+             * an FCB that caches reads included: nothing else orders them
+             * with cleanup and purges, which uninitialize the cache maps and
+             * tear the shared cache map down (a cached read copied from a
+             * map being deleted, and one that initialized a private cache
+             * map between cleanup's uninitialization and the
+             * FO_CLEANUP_COMPLETE mark left it on a file object nobody would
+             * uninitialize again: purges that uninitialize the cache maps
+             * then looped on it or used the freed file object). A paging
+             * read of an FCB that caches reads (it comes here too) takes
+             * nothing, as before */
+            if (!PagingIo)
             {
                 if (!CanWait && NoCache)
                 {
@@ -3360,6 +3998,8 @@ RxCommonRead(
                     }
                     else
                     {
+                        /* Posted: the FSP takes it again (this exit kept it) */
+                        RxReleaseFcb(RxContext, Fcb);
                         PostRequest = TRUE;
                         _SEH2_LEAVE;
                     }
@@ -3382,7 +4022,19 @@ RxCommonRead(
 
         RxItsTheSameContext();
 
-        ReadCachingDisabled = (ReadCachingEnabled == FALSE);
+        /* From here on, ReadCachingDisabled means "this read holds its lock"
+         * (the FCB for every non-paging read; the paging I/O resource for a
+         * paging read of an FCB that does not cache reads) */
+        ReadCachingDisabled = (!PagingIo || ReadCachingEnabled == FALSE);
+        /* What this read holds, for an asynchronous completion to release */
+        if (PagingIo)
+        {
+            RxContext->FcbPagingIoResourceAcquired = ReadCachingDisabled;
+        }
+        else
+        {
+            RxContext->FcbResourceAcquired = ReadCachingDisabled;
+        }
         if (IsPipe)
         {
             UNIMPLEMENTED;
@@ -3514,6 +4166,11 @@ RxCommonRead(
 
                 if (InFsp && ReadCachingDisabled)
                 {
+                    /* The release (by the completion, or below) is for this
+                     * owner: record it, as the write path does. (It stayed
+                     * the FSP thread, so an asynchronous completion released
+                     * a resource that thread did not own: RESOURCE_NOT_OWNED) */
+                    LowIoContext->ResourceThreadId = (ULONG_PTR)RxContext | 3;
                     ExSetResourceOwnerPointer((PagingIo ? Fcb->Header.PagingIoResource : Fcb->Header.Resource),
                                               (PVOID)((ULONG_PTR)RxContext | 3));
                     OwnerSet = TRUE;
@@ -3538,7 +4195,31 @@ RxCommonRead(
                 }
 
                 SystemBuffer = RxNewMapUserBuffer(RxContext);
-                RtlZeroMemory(SystemBuffer, ReadLength);
+                if (SystemBuffer == NULL)
+                {
+                    Status = STATUS_INSUFFICIENT_RESOURCES;
+                    _SEH2_LEAVE;
+                }
+
+                /* Without an MDL this is the caller's buffer, which another
+                 * thread can decommit meanwhile: fail the read, as Cc does
+                 * for the cached read, instead of faulting in the kernel */
+                Status = STATUS_SUCCESS;
+                _SEH2_TRY
+                {
+                    RtlZeroMemory(SystemBuffer, ReadLength);
+                }
+                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    Status = STATUS_INVALID_USER_BUFFER;
+                }
+                _SEH2_END;
+
+                if (Status == STATUS_INVALID_USER_BUFFER)
+                {
+                    _SEH2_LEAVE;
+                }
+
                 Irp->IoStatus.Information = ReadLength;
             }
         }
@@ -3617,8 +4298,9 @@ RxCommonRead(
                 }
             }
 
-            /* We cannot return more than asked */
-            if (Status == STATUS_SUCCESS)
+            /* We cannot return more than asked (Status is stale when an
+             * exception unwinds through here) */
+            if (!_SEH2_AbnormalTermination() && Status == STATUS_SUCCESS)
             {
                 ASSERT(Irp->IoStatus.Information <= Stack->Parameters.Read.Length);
             }
@@ -3635,13 +4317,69 @@ RxCommonRead(
     return Status;
 }
 
+/*
+ * @implemented
+ *
+ * IRP_MJ_SET_EA, passed to MRxSetEaInfo with the buffered EA list in
+ * Info.Buffer (the I/O manager captured it). STATUS_EAS_NOT_SUPPORTED without
+ * EA support, see RxCommonQueryEa.
+ */
 NTSTATUS
 NTAPI
 RxCommonSetEa(
     PRX_CONTEXT Context)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PIRP Irp;
+    PFCB Fcb;
+    NTSTATUS Status;
+    PIO_STACK_LOCATION Stack;
+
+    PAGED_CODE();
+
+    Fcb = (PFCB)Context->pFcb;
+    Irp = Context->CurrentIrp;
+    Stack = Context->CurrentIrpSp;
+
+    DPRINT("RxCommonSetEa(%p) FCB: %p, Length: %lu\n", Context, Fcb, Stack->Parameters.SetEa.Length);
+
+    if (NodeType(Fcb) != RDBSS_NTC_STORAGE_TYPE_FILE && NodeType(Fcb) != RDBSS_NTC_STORAGE_TYPE_DIRECTORY)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (Fcb->MRxDispatch->MRxSetEaInfo == NULL)
+    {
+        return STATUS_EAS_NOT_SUPPORTED;
+    }
+
+    if (Irp->AssociatedIrp.SystemBuffer == NULL && Stack->Parameters.SetEa.Length != 0)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    Status = RxAcquireExclusiveFcb(Context, Fcb);
+    if (Status == STATUS_LOCK_NOT_GRANTED)
+    {
+        return RxFsdPostRequest(Context);
+    }
+    else if (!NT_SUCCESS(Status))
+    {
+        return Status;
+    }
+
+    Context->Info.Buffer = Irp->AssociatedIrp.SystemBuffer;
+    Context->Info.Length = Stack->Parameters.SetEa.Length;
+
+    MINIRDR_CALL(Status, Context, Fcb->MRxDispatch, MRxSetEaInfo, (Context));
+    if (NT_SUCCESS(Status))
+    {
+        ++Fcb->EaModificationCount;
+    }
+
+    RxReleaseFcb(Context, Fcb);
+
+    DPRINT("Status: %lx\n", Status);
+    return Status;
 }
 
 /*
@@ -3889,31 +4627,120 @@ try_exit: NOTHING;
     return Status;
 }
 
+/*
+ * @implemented
+ *
+ * See RxCommonQueryQuotaInformation.
+ */
 NTSTATUS
 NTAPI
 RxCommonSetQuotaInformation(
     PRX_CONTEXT Context)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PAGED_CODE();
+
+    UNREFERENCED_PARAMETER(Context);
+    return STATUS_INVALID_DEVICE_REQUEST;
 }
 
+/*
+ * @implemented
+ *
+ * IRP_MJ_SET_SECURITY: passed to the mini-redirector (MRxSetSdInfo with
+ * SetSecurity.SecurityInformation and SetSecurity.SecurityDescriptor, a
+ * descriptor the I/O manager captured). Without MRxSetSdInfo the request is
+ * invalid for the device and the I/O manager reports success, as for any
+ * file system without security.
+ */
 NTSTATUS
 NTAPI
 RxCommonSetSecurity(
     PRX_CONTEXT Context)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PFCB Fcb;
+    NTSTATUS Status;
+    PIO_STACK_LOCATION Stack;
+
+    PAGED_CODE();
+
+    Fcb = (PFCB)Context->pFcb;
+    Stack = Context->CurrentIrpSp;
+
+    DPRINT("RxCommonSetSecurity(%p) FCB: %p, Info: %lx\n", Context, Fcb,
+           Stack->Parameters.SetSecurity.SecurityInformation);
+
+    if (NodeType(Fcb) != RDBSS_NTC_STORAGE_TYPE_FILE && NodeType(Fcb) != RDBSS_NTC_STORAGE_TYPE_DIRECTORY &&
+        NodeType(Fcb) != RDBSS_NTC_STORAGE_TYPE_UNKNOWN)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (Fcb->MRxDispatch->MRxSetSdInfo == NULL)
+    {
+        return STATUS_INVALID_DEVICE_REQUEST;
+    }
+
+    Status = RxAcquireExclusiveFcb(Context, Fcb);
+    if (Status == STATUS_LOCK_NOT_GRANTED)
+    {
+        return RxFsdPostRequest(Context);
+    }
+    else if (!NT_SUCCESS(Status))
+    {
+        return Status;
+    }
+
+    Context->SetSecurity.SecurityInformation = Stack->Parameters.SetSecurity.SecurityInformation;
+    Context->SetSecurity.SecurityDescriptor = Stack->Parameters.SetSecurity.SecurityDescriptor;
+
+    MINIRDR_CALL(Status, Context, Fcb->MRxDispatch, MRxSetSdInfo, (Context));
+
+    RxReleaseFcb(Context, Fcb);
+
+    DPRINT("Status: %lx\n", Status);
+    return Status;
 }
 
+/*
+ * @implemented
+ *
+ * IRP_MJ_SET_VOLUME_INFORMATION: MRxSetVolumeInfo with Info.FsInformationClass,
+ * Info.Buffer (system buffer) and Info.LengthRemaining.
+ */
 NTSTATUS
 NTAPI
 RxCommonSetVolumeInformation(
     PRX_CONTEXT Context)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PIRP Irp;
+    PFCB Fcb;
+    NTSTATUS Status;
+    PIO_STACK_LOCATION Stack;
+
+    PAGED_CODE();
+
+    Fcb = (PFCB)Context->pFcb;
+    Irp = Context->CurrentIrp;
+    Stack = Context->CurrentIrpSp;
+
+    if (Fcb->MRxDispatch->MRxSetVolumeInfo == NULL)
+    {
+        return STATUS_INVALID_DEVICE_REQUEST;
+    }
+
+    Context->Info.FsInformationClass = Stack->Parameters.SetVolume.FsInformationClass;
+    Context->Info.Buffer = Irp->AssociatedIrp.SystemBuffer;
+    Context->Info.LengthRemaining = Stack->Parameters.SetVolume.Length;
+
+    MINIRDR_CALL(Status, Context, Fcb->MRxDispatch, MRxSetVolumeInfo, (Context));
+
+    if (Context->PostRequest)
+    {
+        Status = RxFsdPostRequest(Context);
+    }
+
+    DPRINT("RxCommonSetVolumeInformation(%p) Status: %lx\n", Context, Status);
+    return Status;
 }
 
 NTSTATUS
@@ -3944,7 +4771,7 @@ RxCommonWrite(
     PRDBSS_DEVICE_OBJECT RxDeviceObject;
     ULONG WriteLength, CapturedRxContextSerialNumber = RxContext->SerialNumber;
     LONGLONG FileSize, ValidDataLength, InitialFileSize, InitialValidDataLength;
-    BOOLEAN CanWait, PagingIo, NoCache, Sync, NormalFile, WriteToEof, IsPipe, NoPreposting, InFsp, RecursiveWriteThrough, CalledByLazyWriter, SwitchBackToAsync, ExtendingFile, ExtendingValidData, UnwindOutstandingAsync, ResourceOwnerSet, PostIrp, ContextReferenced;
+    BOOLEAN CanWait, PagingIo, NoCache, Sync, NormalFile, WriteToEof, IsPipe, InFsp, RecursiveWriteThrough, CalledByLazyWriter, SwitchBackToAsync, ExtendingFile, ExtendingValidData, UnwindOutstandingAsync, ResourceOwnerSet, PostIrp, ContextReferenced;
 
     PAGED_CODE();
 
@@ -3972,7 +4799,6 @@ RxCommonWrite(
 
     /* Get some parameters */
     Irp = RxContext->CurrentIrp;
-    NoPreposting = BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_NO_PREPOSTING_NEEDED);
     InFsp = BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_IN_FSP);
     CanWait = BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_WAIT);
     PagingIo = BooleanFlagOn(Irp->Flags, IRP_PAGING_IO);
@@ -4115,8 +4941,13 @@ RxCommonWrite(
 
         RxItsTheSameContext();
 
-        /* Start locking stuff */
-        if (!PagingIo && !NoPreposting)
+        /* Start locking stuff. Every non-paging write takes the FCB, also when
+         * it runs again after a post or a retry: RX_CONTEXT_FLAG_NO_PREPOSTING_NEEDED
+         * (set by RxPrePostIrp and RxLowIoSubmit) only says the user buffer
+         * was locked already. (A posted write used to run in the FSP with the
+         * paging I/O resource only, unserialized against size changes, and
+         * released an FCB it did not hold when it had to flush) */
+        if (!PagingIo)
         {
             /* If it's already acquired, all fine */
             if (RxContext->FcbResourceAcquired)
@@ -4829,8 +5660,9 @@ try_exit: NOTHING;
                 }
             }
 
-            /* Sanity check for write */
-            if (Status == STATUS_SUCCESS)
+            /* Sanity check for write (Status is stale when an exception
+             * unwinds through here) */
+            if (!_SEH2_AbnormalTermination() && Status == STATUS_SUCCESS)
             {
                 ASSERT(Irp->IoStatus.Information <= Stack->Parameters.Write.Length);
             }
@@ -5014,8 +5846,9 @@ RxConjureOriginalName(
     /* If we still have room to write data */
     if (*LengthRemaining != -1)
     {
-        /* If we can copy everything, it's fine! */
-        if (*LengthRemaining > ToCopy)
+        /* If we can copy everything, it's fine! (an exact fit too: the I/O
+         * manager asks again with exactly the length the first query gave) */
+        if (*LengthRemaining >= ToCopy)
         {
             *LengthRemaining = *LengthRemaining - ToCopy;
         }
@@ -5135,6 +5968,14 @@ RxCreateFromNetRoot(
     if (Context->RxDeviceObject != NetRoot->pSrvCall->RxDeviceObject)
     {
         return STATUS_BAD_NETWORK_PATH;
+    }
+
+    /* Named pipes and mailslots over a redirector are not implemented:
+     * refuse here, before any pipe-specific path is taken. A connection to
+     * the share itself (tree connect) is still possible */
+    if (NetRoot->Type == NET_ROOT_PIPE || NetRoot->Type == NET_ROOT_MAILSLOT)
+    {
+        return STATUS_NOT_SUPPORTED;
     }
 
     if (Context->Create.NtCreateParameters.DfsContext == UIntToPtr(DFS_OPEN_CONTEXT) &&
@@ -5281,11 +6122,13 @@ RxCreateFromNetRoot(
             /* There are already opens, check for conflict */
             if (Fcb->OpenCount != 0)
             {
-                if (!NT_SUCCESS(RxCheckShareAccess(DesiredAccess, DesiredShareAccess,
-                                                   FileObject, &Fcb->ShareAccess,
-                                                   FALSE, "second check per useropens",
-                                                   "2ndAccPerUO")))
+                Status = RxCheckShareAccess(DesiredAccess, DesiredShareAccess,
+                                            FileObject, &Fcb->ShareAccess,
+                                            FALSE, "second check per useropens",
+                                            "2ndAccPerUO");
+                if (!NT_SUCCESS(Status))
                 {
+                    /* Return the sharing failure, not the open's success */
                     ++SrvOpen->UncleanFobxCount;
                     RxDereferenceNetFobx(Fobx, LHS_LockNotHeld);
 
@@ -6080,12 +6923,33 @@ RxFirstCanonicalize(
         }
         else
         {
-            UNIMPLEMENTED;
-            DPRINT1("WARNING: Assuming not special + disk!\n");
-            Type = NET_ROOT_DISK;
+            UNICODE_STRING ShareName, IpcShare;
+            PWSTR ShareEnd;
+
+            /* Classify by share name: IPC$ is the named pipe share, anything
+             * else is taken as a disk (a print share is only known to the
+             * server, the mini-redirector may still change the type) */
+            for (ShareEnd = FirstSlash + 1; ShareEnd != EndOfString; ++ShareEnd)
+            {
+                if (*ShareEnd == OBJ_NAME_PATH_SEPARATOR)
+                {
+                    break;
+                }
+            }
+            ShareName.Buffer = FirstSlash + 1;
+            ShareName.Length = (USHORT)((ULONG_PTR)ShareEnd - (ULONG_PTR)ShareName.Buffer);
+            ShareName.MaximumLength = ShareName.Length;
+            RtlInitUnicodeString(&IpcShare, L"IPC$");
+
+            if (RtlEqualUnicodeString(&ShareName, &IpcShare, TRUE))
+            {
+                Type = NET_ROOT_PIPE;
+            }
+            else
+            {
+                Type = NET_ROOT_DISK;
+            }
             Status = STATUS_SUCCESS;
-            //Status = STATUS_NOT_IMPLEMENTED;
-            /* Should be check against IPC, mailslot, and so on */
         }
     }
 
@@ -6140,7 +7004,7 @@ RxFirstCanonicalize(
             RtlAppendUnicodeStringToString(CanonicalName, &SessionIdString);
             RtlAppendUnicodeStringToString(CanonicalName, FileName);
 
-            DPRINT1("CanonicalName: %wZ\n", CanonicalName);
+            DPRINT("CanonicalName: %wZ\n", CanonicalName);
         }
         /* Otherwise, that's a simple copy */
         else
@@ -6418,12 +7282,33 @@ RxFsdCommonDispatch(
             }
             else
             {
-                /* Retry as long as we have */
-                do
+                /* Retry as long as we have. Cc raises the failures it meets
+                 * on the caller's behalf (STATUS_INVALID_USER_BUFFER for a
+                 * user buffer it cannot copy to or from, the status of a
+                 * failed paging read): the common routines release what they
+                 * hold in their termination handlers, and the request fails
+                 * with that status. Unexpected exceptions (a bug) still
+                 * propagate */
+                _SEH2_TRY
                 {
-                    Status = DispatchFunc(Context);
+                    do
+                    {
+                        Status = DispatchFunc(Context);
+                    }
+                    while (Status == STATUS_RETRY);
                 }
-                while (Status == STATUS_RETRY);
+                _SEH2_EXCEPT(FsRtlIsNtstatusExpected(_SEH2_GetExceptionCode()) ?
+                             EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH)
+                {
+                    Status = _SEH2_GetExceptionCode();
+                    DPRINT1("Exception %lx in the dispatch of %p (major %u)\n", Status, Context, MajorFunction);
+                    /* Nothing was transferred for a failed request */
+                    if (Context->CurrentIrp != NULL)
+                    {
+                        Context->CurrentIrp->IoStatus.Information = 0;
+                    }
+                }
+                _SEH2_END;
 
                 if (Status == STATUS_PENDING)
                 {
@@ -6645,7 +7530,23 @@ RxFspDispatch(
 
             NoComplete = BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_NO_COMPLETE_FROM_FSP);
 
-            Status = RxContext->ResumeRoutine(RxContext);
+            /* Same as in RxFsdCommonDispatch: an expected status raised
+             * below us fails the request instead of the worker thread */
+            _SEH2_TRY
+            {
+                Status = RxContext->ResumeRoutine(RxContext);
+            }
+            _SEH2_EXCEPT(FsRtlIsNtstatusExpected(_SEH2_GetExceptionCode()) ?
+                         EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH)
+            {
+                Status = _SEH2_GetExceptionCode();
+                DPRINT1("Exception %lx in the FSP for %p\n", Status, RxContext);
+                if (RxContext->CurrentIrp != NULL)
+                {
+                    RxContext->CurrentIrp->IoStatus.Information = 0;
+                }
+            }
+            _SEH2_END;
             if (!NoComplete && Status != STATUS_PENDING)
             {
                 if (Status != STATUS_RETRY)
@@ -6875,6 +7776,78 @@ RxGetUid(
     return Luid;
 }
 
+/*
+ * @implemented
+ *
+ * Called by the mini-redirector when the server revokes caching it granted
+ * (an oplock or lease break): SrvOpenKey is the SRV_OPEN's Key, Context is
+ * passed back to MRxComputeNewBufferingState and
+ * MRxCompleteBufferingStateChangeRequest. The request is queued and applied
+ * by RDBSS worker threads (flush, purge, new state, acknowledgement); the
+ * caller holds no FCB and must be at IRQL < DISPATCH_LEVEL (the SRV_CALL is
+ * referenced for the dispatcher).
+ */
+VOID
+NTAPI
+RxIndicateChangeOfBufferingState(
+    PMRX_SRV_CALL SrvCall,
+    PVOID SrvOpenKey,
+    PVOID Context)
+{
+    KIRQL OldIrql;
+    BOOLEAN StartDispatcher;
+    PRX_BUFFERING_MANAGER BufferingManager;
+    PCHANGE_BUFFERING_STATE_REQUEST Request;
+
+    ASSERT(KeGetCurrentIrql() < DISPATCH_LEVEL);
+    ASSERT(NodeType(SrvCall) == RDBSS_NTC_SRVCALL);
+
+    DPRINT("RxIndicateChangeOfBufferingState(%p, %p, %p)\n", SrvCall, SrvOpenKey, Context);
+
+    Request = RxAllocatePoolWithTag(NonPagedPool, sizeof(CHANGE_BUFFERING_STATE_REQUEST), RX_MISC_POOLTAG);
+    if (Request == NULL)
+    {
+        /* Nothing else to do: the server will give up waiting for the
+         * acknowledgement and invalidate the handle */
+        DPRINT1("No memory for a buffering state change request on %p\n", SrvCall);
+        return;
+    }
+
+    RtlZeroMemory(Request, sizeof(*Request));
+#if (_WIN32_WINNT < 0x0600)
+    Request->pSrvCall = (PSRV_CALL)SrvCall;
+#endif
+    Request->SrvOpenKey = SrvOpenKey;
+    Request->MRxContext = Context;
+
+    BufferingManager = &((PSRV_CALL)SrvCall)->BufferingManager;
+    KeAcquireSpinLock(&BufferingManager->SpinLock, &OldIrql);
+    InsertTailList(&BufferingManager->DispatcherList, &Request->ListEntry);
+    InterlockedIncrement(&BufferingManager->CumulativeNumberOfBufferingChangeRequests);
+    StartDispatcher = !BufferingManager->DispatcherActive;
+    if (StartDispatcher)
+    {
+        BufferingManager->DispatcherActive = TRUE;
+    }
+    KeReleaseSpinLock(&BufferingManager->SpinLock, OldIrql);
+
+    if (StartDispatcher)
+    {
+        RxReferenceSrvCall((PSRV_CALL)SrvCall);
+        RxPostToWorkerThread(RxFileSystemDeviceObject, HyperCriticalWorkQueue,
+                             &BufferingManager->DispatcherWorkItem,
+                             RxDispatchChangeBufferingStateRequests, SrvCall);
+    }
+}
+
+/*
+ * @implemented
+ *
+ * Same as RxIndicateChangeOfBufferingState, for a mini-redirector that knows
+ * the SRV_OPEN. At PASSIVE_LEVEL, when the FCB is free, the change is applied
+ * right away; otherwise it is queued like any other request. The caller holds
+ * a reference on the SRV_OPEN.
+ */
 VOID
 NTAPI
 RxIndicateChangeOfBufferingStateForSrvOpen(
@@ -6883,7 +7856,36 @@ RxIndicateChangeOfBufferingStateForSrvOpen(
     PVOID SrvOpenKey,
     PVOID Context)
 {
-    UNIMPLEMENTED;
+    PFCB Fcb;
+
+    DPRINT("RxIndicateChangeOfBufferingStateForSrvOpen(%p, %p, %p, %p)\n", SrvCall, SrvOpen, SrvOpenKey, Context);
+
+    Fcb = (PFCB)SrvOpen->pFcb;
+    if (KeGetCurrentIrql() == PASSIVE_LEVEL && !RxIsFcbAcquired(Fcb) &&
+        RxAcquireExclusiveFcb(CHANGE_BUFFERING_STATE_CONTEXT, Fcb) == STATUS_SUCCESS)
+    {
+        /* Only a live SRV_OPEN has a buffering state to change */
+        if (((PSRV_OPEN)SrvOpen)->Condition == Condition_Good &&
+            !BooleanFlagOn(SrvOpen->Flags, SRVOPEN_FLAG_CLOSED))
+        {
+            /* The pending flag makes RxChangeBufferingState acknowledge
+             * through MRxCompleteBufferingStateChangeRequest */
+            RxAcquireSerializationMutex();
+            SetFlag(SrvOpen->Flags, SRVOPEN_FLAG_BUFFERING_STATE_CHANGE_PENDING);
+            RxReleaseSerializationMutex();
+
+            RxChangeBufferingState((PSRV_OPEN)SrvOpen, Context, TRUE);
+
+            RxAcquireSerializationMutex();
+            ClearFlag(SrvOpen->Flags, SRVOPEN_FLAG_BUFFERING_STATE_CHANGE_PENDING);
+            RxReleaseSerializationMutex();
+        }
+
+        RxReleaseFcb(CHANGE_BUFFERING_STATE_CONTEXT, Fcb);
+        return;
+    }
+
+    RxIndicateChangeOfBufferingState(SrvCall, SrvOpenKey, Context);
 }
 
 /*
@@ -6937,13 +7939,17 @@ RxInitializeDispatchVectors(
     RxData.CacheManagerNoOpCallbacks.ReleaseFromReadAhead = RxNoOpRelease;
 }
 
+/*
+ * @implemented
+ */
 NTSTATUS
 NTAPI
 RxInitializeLog(
     VOID)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    /* RDBSS keeps no log of its own: failures go to the debugger
+     * (RxLogEventWithAnnotation) */
+    return STATUS_SUCCESS;
 }
 
 /*
@@ -7120,14 +8126,28 @@ RxIsThisTheTopLevelIrp(
     return (TopLevelIrp == Irp);
 }
 
+/*
+ * @implemented
+ *
+ * FILE_LOCK completion routine: FsRtl calls it for lock IRPs RDBSS gave to
+ * FsRtlProcessFileLock (locks buffered locally), possibly much later for a
+ * lock that had to wait. Context is always NULL; the IRP is completed here.
+ */
 NTSTATUS
 NTAPI
 RxLockOperationCompletion(
     IN PVOID Context,
     IN PIRP Irp)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    NTSTATUS Status;
+
+    UNREFERENCED_PARAMETER(Context);
+
+    Status = Irp->IoStatus.Status;
+    DPRINT("RxLockOperationCompletion(%p, %p) -> %lx\n", Context, Irp, Status);
+
+    IoCompleteRequest(Irp, IO_DISK_INCREMENT);
+    return Status;
 }
 
 /*
@@ -7167,16 +8187,116 @@ RxLogEventWithAnnotation(
     IN PUNICODE_STRING Annotation,
     IN ULONG AnnotationCount)
 {
-    UNIMPLEMENTED;
+    /* No event log entry: report to the debugger */
+    DPRINT1("RDBSS event %lx status %lx on %p (%wZ)\n", EventId, Status, DeviceObject,
+            (AnnotationCount != 0 && Annotation != NULL) ? Annotation : (PUNICODE_STRING)&unknownId);
 }
 
+/* Worker for a low I/O completion that could not run where it was signalled */
+static
+VOID
+NTAPI
+RxpLowIoCompletionWorker(
+    IN PVOID Context)
+{
+    PRX_CONTEXT RxContext = Context;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    Status = RxLowIoCompletionTail(RxContext);
+    if (Status == STATUS_RETRY)
+    {
+        /* The completion routine wants the operation reissued */
+        RxLowIoSubmit(RxContext, RxContext->LowIoContext.CompletionRoutine);
+    }
+}
+
+/* Worker reissuing a low I/O operation whose completion asked for a retry */
+static
+VOID
+NTAPI
+RxpLowIoResubmitWorker(
+    IN PVOID Context)
+{
+    PRX_CONTEXT RxContext = Context;
+
+    PAGED_CODE();
+
+    RxLowIoSubmit(RxContext, RxContext->LowIoContext.CompletionRoutine);
+}
+
+/*
+ * @implemented
+ *
+ * Called by the mini-redirector when a low I/O operation it returned
+ * STATUS_PENDING for has finished, with RxContext->IoStatusBlock set. A
+ * synchronous caller is waiting in RxLowIoSubmit and is only woken up. An
+ * asynchronous operation is finished here (completion routine, IRP
+ * completion), or from a worker thread when the mini-redirector calls in at
+ * DISPATCH_LEVEL without LOWIO_CONTEXT_FLAG_CAN_COMPLETE_AT_DPC_LEVEL.
+ */
 NTSTATUS
 NTAPI
 RxLowIoCompletion(
     PRX_CONTEXT RxContext)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    NTSTATUS Status;
+
+    DPRINT("RxLowIoCompletion(%p) Status: %lx\n", RxContext, RxContext->IoStatusBlock.Status);
+
+    ASSERT(NodeType(RxContext) == RDBSS_NTC_RX_CONTEXT);
+
+    /* One completion per submission. A second one (a mini-redirector that
+     * completes twice) would complete the IRP twice or wake a waiter that
+     * already went on: refuse it, and stop a Debug build right here */
+    if (InterlockedOr16((volatile SHORT *)&RxContext->LowIoContext.Flags,
+                        (SHORT)RXP_LOWIO_FLAG_COMPLETION_INDICATED) & RXP_LOWIO_FLAG_COMPLETION_INDICATED)
+    {
+        DPRINT1("RxLowIoCompletion called twice for RX_CONTEXT %p (operation %u)\n",
+                RxContext, RxContext->LowIoContext.Operation);
+        ASSERTMSG("RxLowIoCompletion called twice for the same low I/O submission\n", FALSE);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (!BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_ASYNC_OPERATION))
+    {
+        RxSignalSynchronousWaiter(RxContext);
+        return STATUS_SUCCESS;
+    }
+
+    Status = STATUS_MORE_PROCESSING_REQUIRED;
+    if (!RxShouldPostCompletion() ||
+        BooleanFlagOn(RxContext->LowIoContext.Flags, LOWIO_CONTEXT_FLAG_CAN_COMPLETE_AT_DPC_LEVEL))
+    {
+        Status = RxLowIoCompletionTail(RxContext);
+    }
+
+    if (Status == STATUS_MORE_PROCESSING_REQUIRED || Status == STATUS_RETRY)
+    {
+        if (Status == STATUS_MORE_PROCESSING_REQUIRED)
+        {
+            Status = RxPostToWorkerThread(RxContext->RxDeviceObject, CriticalWorkQueue,
+                                          &RxContext->WorkQueueItem,
+                                          RxpLowIoCompletionWorker, RxContext);
+        }
+        else
+        {
+            /* Reissue from a worker: the mini-redirector may have called us
+             * from its own completion path */
+            Status = RxPostToWorkerThread(RxContext->RxDeviceObject, CriticalWorkQueue,
+                                          &RxContext->WorkQueueItem,
+                                          RxpLowIoResubmitWorker, RxContext);
+        }
+
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("Failed to post completion of %p: %lx\n", RxContext, Status);
+        }
+        return STATUS_PENDING;
+    }
+
+    return Status;
 }
 
 /*
@@ -7208,12 +8328,280 @@ RxLowIoIoCtlShellCompletion(
     return Status;
 }
 
+/*
+ * Builds the list of the local locks a file object (and process) holds, for
+ * an unlock-all sent to the mini-redirector. The caller holds the FCB
+ * exclusive, which serializes enumerations of the FILE_LOCK.
+ */
+static
+NTSTATUS
+RxpGatherLocksForUnlockAll(
+    IN PRX_CONTEXT RxContext,
+    IN PFCB Fcb,
+    IN PFILE_OBJECT FileObject,
+    IN PEPROCESS Process,
+    IN BOOLEAN ByKey,
+    IN ULONG Key)
+{
+    PFILE_LOCK_INFO LockInfo;
+    PLOWIO_LOCK_LIST Head, Entry;
+    ULONG Number;
+
+    PAGED_CODE();
+
+    ASSERT(RxIsFcbAcquiredExclusive(Fcb));
+
+    Head = NULL;
+    Number = 0;
+    for (LockInfo = FsRtlGetNextFileLock(&Fcb->Specific.Fcb.FileLock, TRUE);
+         LockInfo != NULL;
+         LockInfo = FsRtlGetNextFileLock(&Fcb->Specific.Fcb.FileLock, FALSE))
+    {
+        if (LockInfo->FileObject != FileObject || LockInfo->ProcessId != (PVOID)Process ||
+            (ByKey && LockInfo->Key != Key))
+        {
+            continue;
+        }
+
+        Entry = RxAllocatePoolWithTag(NonPagedPool, sizeof(LOWIO_LOCK_LIST), RX_MISC_POOLTAG);
+        if (Entry == NULL)
+        {
+            /* Free what we have: the caller fails the unlock */
+            while (Head != NULL)
+            {
+                Entry = Head->Next;
+                RxFreePoolWithTag(Head, RX_MISC_POOLTAG);
+                Head = Entry;
+            }
+            RxContext->LowIoContext.ParamsFor.Locks.LockList = NULL;
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+
+        Entry->LockNumber = ++Number;
+        Entry->ByteOffset = LockInfo->StartingByte.QuadPart;
+        Entry->Length = LockInfo->Length.QuadPart;
+        Entry->ExclusiveLock = LockInfo->ExclusiveLock;
+        Entry->Key = LockInfo->Key;
+        Entry->Next = Head;
+        Head = Entry;
+    }
+
+    RxContext->LowIoContext.ParamsFor.Locks.LockList = Head;
+    return STATUS_SUCCESS;
+}
+
+static
+VOID
+RxpFreeLowIoLockList(
+    IN PRX_CONTEXT RxContext)
+{
+    PLOWIO_LOCK_LIST Entry, Next;
+
+    for (Entry = RxContext->LowIoContext.ParamsFor.Locks.LockList; Entry != NULL; Entry = Next)
+    {
+        Next = Entry->Next;
+        RxFreePoolWithTag(Entry, RX_MISC_POOLTAG);
+    }
+
+    RxContext->LowIoContext.ParamsFor.Locks.LockList = NULL;
+}
+
+/*
+ * Completion of a lock request the mini-redirector handled: mirror the
+ * result in the local FILE_LOCK. FsRtl is called without an IRP, so it never
+ * completes anything here; the request is completed by the caller.
+ */
+static
+NTSTATUS
+NTAPI
+RxLowIoLockControlShellCompletion(
+    PRX_CONTEXT RxContext)
+{
+    PIRP Irp;
+    PFCB Fcb;
+    NTSTATUS Status;
+    PIO_STACK_LOCATION Stack;
+    PLOWIO_CONTEXT LowIoContext;
+
+    PAGED_CODE();
+
+    Irp = RxContext->CurrentIrp;
+    Stack = RxContext->CurrentIrpSp;
+    Fcb = (PFCB)RxContext->pFcb;
+    LowIoContext = &RxContext->LowIoContext;
+    Status = RxContext->IoStatusBlock.Status;
+
+    DPRINT("RxLowIoLockControlShellCompletion(%p) Op: %d, Status: %lx\n", RxContext, LowIoContext->Operation, Status);
+
+    switch (LowIoContext->Operation)
+    {
+        case LOWIO_OP_SHAREDLOCK:
+        case LOWIO_OP_EXCLUSIVELOCK:
+            if (NT_SUCCESS(Status))
+            {
+                IO_STATUS_BLOCK IoStatus;
+                LARGE_INTEGER Length;
+
+                /* The server granted it; the local table cannot conflict with
+                 * what the server accepted, but check anyway */
+                Length.QuadPart = LowIoContext->ParamsFor.Locks.Length;
+                if (!FsRtlFastLock(&Fcb->Specific.Fcb.FileLock, Stack->FileObject,
+                                   &Stack->Parameters.LockControl.ByteOffset, &Length,
+                                   IoGetRequestorProcess(Irp), LowIoContext->ParamsFor.Locks.Key,
+                                   TRUE, (LowIoContext->Operation == LOWIO_OP_EXCLUSIVELOCK),
+                                   &IoStatus, NULL, FALSE) ||
+                    !NT_SUCCESS(IoStatus.Status))
+                {
+                    DPRINT1("Server granted a lock the local table refused: %lx\n", IoStatus.Status);
+                    Status = STATUS_LOCK_NOT_GRANTED;
+                }
+            }
+            break;
+
+        case LOWIO_OP_UNLOCK:
+            /* Drop the local lock whatever the server said: the server's
+             * view is authoritative and a missing local lock is harmless */
+            {
+                LARGE_INTEGER Length;
+                NTSTATUS LocalStatus;
+
+                Length.QuadPart = LowIoContext->ParamsFor.Locks.Length;
+                LocalStatus = FsRtlFastUnlockSingle(&Fcb->Specific.Fcb.FileLock, Stack->FileObject,
+                                                    &Stack->Parameters.LockControl.ByteOffset, &Length,
+                                                    IoGetRequestorProcess(Irp),
+                                                    LowIoContext->ParamsFor.Locks.Key, NULL, FALSE);
+                if (NT_SUCCESS(Status) && !NT_SUCCESS(LocalStatus))
+                {
+                    Status = LocalStatus;
+                }
+            }
+            break;
+
+        case LOWIO_OP_UNLOCK_MULTIPLE:
+            /* Unlock-all always succeeds locally */
+            break;
+
+        default:
+            ASSERT(FALSE);
+            break;
+    }
+
+    Irp->IoStatus.Status = Status;
+    Irp->IoStatus.Information = 0;
+    RxContext->IoStatusBlock.Status = Status;
+
+    return Status;
+}
+
+/*
+ * @implemented
+ *
+ * Sends a lock request to the mini-redirector. Called for IRP_MJ_LOCK_CONTROL
+ * (the operation follows from the minor function) and by cleanup, which
+ * prepares a LOWIO_OP_UNLOCK_MULTIPLE with its own lock list.
+ */
 NTSTATUS
 RxLowIoLockControlShell(
     IN PRX_CONTEXT RxContext)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PIRP Irp;
+    PFCB Fcb;
+    NTSTATUS Status;
+    PIO_STACK_LOCATION Stack;
+    PLOWIO_CONTEXT LowIoContext;
+    BOOLEAN FreeList;
+
+    PAGED_CODE();
+
+    Irp = RxContext->CurrentIrp;
+    Stack = RxContext->CurrentIrpSp;
+    Fcb = (PFCB)RxContext->pFcb;
+    LowIoContext = &RxContext->LowIoContext;
+    FreeList = FALSE;
+
+    DPRINT("RxLowIoLockControlShell(%p)\n", RxContext);
+
+    if (RxContext->MajorFunction == IRP_MJ_LOCK_CONTROL)
+    {
+        switch (Stack->MinorFunction)
+        {
+            case IRP_MN_LOCK:
+                RxInitializeLowIoContext(LowIoContext,
+                                         (BooleanFlagOn(Stack->Flags, SL_EXCLUSIVE_LOCK) ?
+                                          LOWIO_OP_EXCLUSIVELOCK : LOWIO_OP_SHAREDLOCK));
+                LowIoContext->ParamsFor.Locks.Length = Stack->Parameters.LockControl.Length->QuadPart;
+                break;
+
+            case IRP_MN_UNLOCK_SINGLE:
+                RxInitializeLowIoContext(LowIoContext, LOWIO_OP_UNLOCK);
+                LowIoContext->ParamsFor.Locks.Length = Stack->Parameters.LockControl.Length->QuadPart;
+                break;
+
+            case IRP_MN_UNLOCK_ALL:
+            case IRP_MN_UNLOCK_ALL_BY_KEY:
+                RxInitializeLowIoContext(LowIoContext, LOWIO_OP_UNLOCK_MULTIPLE);
+                Status = RxpGatherLocksForUnlockAll(RxContext, Fcb, Stack->FileObject,
+                                                    IoGetRequestorProcess(Irp),
+                                                    (Stack->MinorFunction == IRP_MN_UNLOCK_ALL_BY_KEY),
+                                                    Stack->Parameters.LockControl.Key);
+                if (!NT_SUCCESS(Status))
+                {
+                    return Status;
+                }
+                FreeList = TRUE;
+
+                /* Drop them locally now (the server is told right after) */
+                if (Stack->MinorFunction == IRP_MN_UNLOCK_ALL)
+                {
+                    FsRtlFastUnlockAll(&Fcb->Specific.Fcb.FileLock, Stack->FileObject,
+                                       IoGetRequestorProcess(Irp), NULL);
+                }
+                else
+                {
+                    FsRtlFastUnlockAllByKey(&Fcb->Specific.Fcb.FileLock, Stack->FileObject,
+                                            IoGetRequestorProcess(Irp),
+                                            Stack->Parameters.LockControl.Key, NULL);
+                }
+
+                /* Nothing was locked: nothing to tell the server */
+                if (LowIoContext->ParamsFor.Locks.LockList == NULL)
+                {
+                    return STATUS_SUCCESS;
+                }
+                break;
+
+            default:
+                return STATUS_INVALID_DEVICE_REQUEST;
+        }
+
+        /* Documented contract: IRP stack values, Flags = IrpSp->Flags */
+        if (LowIoContext->Operation != LOWIO_OP_UNLOCK_MULTIPLE)
+        {
+            LowIoContext->ParamsFor.Locks.ByteOffset = Stack->Parameters.LockControl.ByteOffset.QuadPart;
+        }
+        LowIoContext->ParamsFor.Locks.Key = Stack->Parameters.LockControl.Key;
+        LowIoContext->ParamsFor.Locks.Flags = Stack->Flags;
+    }
+    else
+    {
+        /* Cleanup: the caller set up LOWIO_OP_UNLOCK_MULTIPLE and the list */
+        ASSERT(LowIoContext->Operation == LOWIO_OP_UNLOCK_MULTIPLE);
+        FreeList = TRUE;
+    }
+
+    /* Lock requests are always synchronous for the mini-redirector: an
+     * asynchronous caller was posted to the FSP by RxCommonLockControl */
+    ClearFlag(RxContext->Flags, RX_CONTEXT_FLAG_ASYNC_OPERATION);
+    Status = RxLowIoSubmit(RxContext, RxLowIoLockControlShellCompletion);
+
+    /* Lock requests are submitted synchronously: the list is no longer used */
+    if (FreeList)
+    {
+        RxpFreeLowIoLockList(RxContext);
+    }
+
+    DPRINT("Status: %lx\n", Status);
+    return Status;
 }
 
 /*
@@ -7343,10 +8731,15 @@ RxLowIoReadShellCompletion(
 
     Stack = RxContext->CurrentIrpSp;
     IsPipe = BooleanFlagOn(RxContext->FlagsForLowIo, RXCONTEXT_FLAG4LOWIO_PIPE_OPERATION);
-    /* Release lock if required */
+    /* Release the lock RxCommonRead took, if it took one (a read of an FCB
+     * that caches reads takes none; this released it all the same:
+     * RESOURCE_NOT_OWNED, or a corrupted resource) */
     if (PagingIo)
     {
-        RxReleasePagingIoResourceForThread(RxContext, Fcb, LowIoContext->ResourceThreadId);
+        if (RxContext->FcbPagingIoResourceAcquired)
+        {
+            RxReleasePagingIoResourceForThread(RxContext, Fcb, LowIoContext->ResourceThreadId);
+        }
     }
     else
     {
@@ -7360,8 +8753,9 @@ RxLowIoReadShellCompletion(
         {
             RxResumeBlockedOperations_Serially(RxContext, &((PFOBX)RxContext->pFobx)->Specific.NamedPipe.ReadSerializationQueue);
         }
-        else
+        else if (RxContext->FcbResourceAcquired)
         {
+            RxContext->FcbResourceAcquired = FALSE;
             RxReleaseFcbForThread(RxContext, Fcb, LowIoContext->ResourceThreadId);
         }
     }
@@ -7643,8 +9037,10 @@ RxPostStackOverflowRead (
 {
     PAGED_CODE();
 
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    /* Too little stack left for a read (paging I/O nested deep in another
+     * file system, typically): run it from the FSP, which starts fresh */
+    RxContext->ResumeRoutine = RxCommonRead;
+    return RxFsdPostRequest(RxContext);
 }
 
 /*
@@ -7980,12 +9376,61 @@ RxpSetInfoMiniRdr(
     return Status;
 }
 
+/*
+ * @implemented
+ *
+ * Undoes RxRegisterMinirdr: the device leaves the list of registered
+ * mini-redirectors and is deleted. The mini-redirector stopped it before
+ * (RxStopMinirdr) and no file is open on it any more.
+ */
 VOID
 NTAPI
 RxpUnregisterMinirdr(
     IN PRDBSS_DEVICE_OBJECT RxDeviceObject)
 {
-    UNIMPLEMENTED;
+    PAGED_CODE();
+
+    DPRINT("RxpUnregisterMinirdr(%p)\n", RxDeviceObject);
+
+    ExAcquireFastMutex(&RxData.MinirdrRegistrationMutex);
+    if (RxDeviceObject->MiniRdrListLinks.Flink != NULL)
+    {
+        RemoveEntryList(&RxDeviceObject->MiniRdrListLinks);
+        RxDeviceObject->MiniRdrListLinks.Flink = NULL;
+    }
+    ExReleaseFastMutex(&RxData.MinirdrRegistrationMutex);
+
+    if (RxGetRdbssState(RxDeviceObject) == RDBSS_STARTED)
+    {
+        DPRINT1("Unregistering %wZ while started\n", &RxDeviceObject->DeviceName);
+    }
+
+    /* Should not happen: still registered with MUP or the I/O manager */
+    if (RxDeviceObject->MupHandle != NULL)
+    {
+        FsRtlDeregisterUncProvider(RxDeviceObject->MupHandle);
+        ZwClose(RxDeviceObject->MupHandle);
+        RxDeviceObject->MupHandle = NULL;
+    }
+    if (RxDeviceObject->RegisteredAsFileSystem)
+    {
+        IoUnregisterFileSystem(&RxDeviceObject->DeviceObject);
+        RxDeviceObject->RegisteredAsFileSystem = FALSE;
+    }
+
+    /* A scavenger request must not outlive the device */
+    RxStopScavenger(RxDeviceObject);
+
+    /* The name table's lock is an ERESOURCE on the system list */
+    if (RxDeviceObject->pRxNetNameTable == &RxDeviceObject->RxNetNameTableInDeviceObject)
+    {
+        ASSERT(IsListEmpty(&RxDeviceObject->RxNetNameTableInDeviceObject.MemberQueue));
+        ExDeleteResourceLite(&RxDeviceObject->RxNetNameTableInDeviceObject.TableLock);
+        RxDeviceObject->pRxNetNameTable = NULL;
+    }
+
+    --RxFileSystemDeviceObject->ReferenceCount;
+    IoDeleteDevice(&RxDeviceObject->DeviceObject);
 }
 
 /*
@@ -8010,13 +9455,18 @@ RxPurgeNetFcb(
     ASSERT(Status == STATUS_SUCCESS);
 }
 
+/*
+ * @implemented
+ */
 NTSTATUS
 RxQueryAlternateNameInfo(
     PRX_CONTEXT RxContext,
     PFILE_NAME_INFORMATION AltNameInfo)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PAGED_CODE();
+
+    /* Short names are the server's: ask the mini-redirector */
+    return RxpQueryInfoMiniRdr(RxContext, FileAlternateNameInformation, AltNameInfo);
 }
 
 /*
@@ -8036,13 +9486,17 @@ RxQueryBasicInfo(
     return RxpQueryInfoMiniRdr(RxContext, FileBasicInformation, BasicInfo);
 }
 
+/*
+ * @implemented
+ */
 NTSTATUS
 RxQueryCompressedInfo(
     PRX_CONTEXT RxContext,
     PFILE_COMPRESSION_INFORMATION CompressionInfo)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PAGED_CODE();
+
+    return RxpQueryInfoMiniRdr(RxContext, FileCompressionInformation, CompressionInfo);
 }
 
 /*
@@ -8261,22 +9715,72 @@ RxQueryDirectory(
     return Status;
 }
 
+/*
+ * @implemented
+ */
 NTSTATUS
 RxQueryEaInfo(
     PRX_CONTEXT RxContext,
     PFILE_EA_INFORMATION EaInfo)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    if (RxContext->Info.LengthRemaining < (LONG)sizeof(FILE_EA_INFORMATION))
+    {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    /* A mini-redirector without EA support has no EAs: size 0 */
+    EaInfo->EaSize = 0;
+    if (((PFCB)RxContext->pFcb)->MRxDispatch->MRxQueryEaInfo == NULL)
+    {
+        RxContext->Info.LengthRemaining -= sizeof(FILE_EA_INFORMATION);
+        return STATUS_SUCCESS;
+    }
+
+    Status = RxpQueryInfoMiniRdr(RxContext, FileEaInformation, EaInfo);
+    if (Status == STATUS_NOT_IMPLEMENTED || Status == STATUS_INVALID_PARAMETER ||
+        Status == STATUS_EAS_NOT_SUPPORTED || Status == STATUS_NOT_SUPPORTED)
+    {
+        EaInfo->EaSize = 0;
+        RxContext->Info.LengthRemaining -= sizeof(FILE_EA_INFORMATION);
+        Status = STATUS_SUCCESS;
+    }
+
+    return Status;
 }
 
+/*
+ * @implemented
+ */
 NTSTATUS
 RxQueryInternalInfo(
     PRX_CONTEXT RxContext,
     PFILE_INTERNAL_INFORMATION InternalInfo)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    if (RxContext->Info.LengthRemaining < (LONG)sizeof(FILE_INTERNAL_INFORMATION))
+    {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    /* The file ID is the server's; if the mini-redirector has none, derive
+     * one from the name (the FCB table's hash of the path). Never the FCB
+     * address: that would hand a kernel pool address to user mode */
+    Status = RxpQueryInfoMiniRdr(RxContext, FileInternalInformation, InternalInfo);
+    if (!NT_SUCCESS(Status))
+    {
+        InternalInfo->IndexNumber.QuadPart = ((PFCB)RxContext->pFcb)->FcbTableEntry.HashValue;
+        RxContext->Info.LengthRemaining -= sizeof(FILE_INTERNAL_INFORMATION);
+        Status = STATUS_SUCCESS;
+    }
+
+    return Status;
 }
 
 /*
@@ -8321,7 +9825,10 @@ RxQueryNameInfo(
 
 #if 1 // CORE-13938, rfb: please note I replaced 0 with 1 here
     if (NodeType(Fcb) == RDBSS_NTC_STORAGE_TYPE_DIRECTORY &&
-        RxContext->Info.LengthRemaining >= sizeof(WCHAR))
+        RxContext->Info.LengthRemaining >= sizeof(WCHAR) &&
+        /* The share root already ends with one */
+        (NameInfo->FileNameLength == 0 ||
+         NameInfo->FileName[NameInfo->FileNameLength / sizeof(WCHAR) - 1] != L'\\'))
     {
         NameInfo->FileName[NameInfo->FileNameLength / sizeof(WCHAR)] = L'\\';
         NameInfo->FileNameLength += sizeof(WCHAR);
@@ -8333,22 +9840,42 @@ RxQueryNameInfo(
     return STATUS_SUCCESS;
 }
 
+/*
+ * @implemented
+ */
 NTSTATUS
 RxQueryPipeInfo(
     PRX_CONTEXT RxContext,
     PFILE_PIPE_INFORMATION PipeInfo)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PAGED_CODE();
+
+    UNREFERENCED_PARAMETER(PipeInfo);
+
+    /* Named pipes over a redirector are not supported: pipe net roots are
+     * refused at create, so a disk file is asking */
+    return STATUS_INVALID_PARAMETER;
 }
 
+/*
+ * @implemented
+ */
 NTSTATUS
 RxQueryPositionInfo(
     PRX_CONTEXT RxContext,
     PFILE_POSITION_INFORMATION PositionInfo)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PAGED_CODE();
+
+    if (RxContext->Info.LengthRemaining < (LONG)sizeof(FILE_POSITION_INFORMATION))
+    {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    PositionInfo->CurrentByteOffset.QuadPart = RxContext->CurrentIrpSp->FileObject->CurrentByteOffset.QuadPart;
+    RxContext->Info.LengthRemaining -= sizeof(FILE_POSITION_INFORMATION);
+
+    return STATUS_SUCCESS;
 }
 
 /*
@@ -8402,7 +9929,8 @@ RxQueryStandardInfo(
     }
     else
     {
-        RxContext->IoStatusBlock.Information -= sizeof(FILE_STANDARD_INFORMATION);
+        /* Filled from the FCB: account for it like the mini-redirector would */
+        RxContext->Info.LengthRemaining -= sizeof(FILE_STANDARD_INFORMATION);
     }
 
     return Status;
@@ -8860,12 +10388,86 @@ TryAgain:
     return Status;
 }
 
+/*
+ * @implemented
+ *
+ * Called with the FCB exclusive. The server is told first; the FCB sizes and
+ * Cc follow only when it agreed. Lock order: FCB (held) -> paging I/O
+ * resource (taken here to change the sizes) ; Cc is called with only the FCB
+ * held.
+ */
 NTSTATUS
 RxSetAllocationInfo(
     PRX_CONTEXT RxContext)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PFCB Fcb;
+    NTSTATUS Status;
+    PFILE_OBJECT FileObject;
+    LONGLONG NewAllocation;
+    PFILE_ALLOCATION_INFORMATION AllocationInfo;
+
+    PAGED_CODE();
+
+    Fcb = (PFCB)RxContext->pFcb;
+    FileObject = RxContext->CurrentIrpSp->FileObject;
+    AllocationInfo = RxContext->CurrentIrp->AssociatedIrp.SystemBuffer;
+
+    if (NodeType(Fcb) != RDBSS_NTC_STORAGE_TYPE_FILE)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (RxContext->CurrentIrpSp->Parameters.SetFile.Length < sizeof(FILE_ALLOCATION_INFORMATION))
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    NewAllocation = AllocationInfo->AllocationSize.QuadPart;
+    if (NewAllocation < 0)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    /* Shrinking below the end of file truncates: not under a mapped view */
+    if (NewAllocation < Fcb->Header.FileSize.QuadPart)
+    {
+        LARGE_INTEGER NewSize;
+
+        NewSize.QuadPart = NewAllocation;
+        if (!MmCanFileBeTruncated(&Fcb->NonPaged->SectionObjectPointers, &NewSize))
+        {
+            return STATUS_USER_MAPPED_FILE;
+        }
+    }
+
+    Status = RxpSetInfoMiniRdr(RxContext, FileAllocationInformation);
+    if (!NT_SUCCESS(Status))
+    {
+        return Status;
+    }
+
+    RxAcquirePagingIoResource(RxContext, Fcb);
+    Fcb->Header.AllocationSize.QuadPart = NewAllocation;
+    Fcb->ActualAllocationLength = NewAllocation;
+    if (Fcb->Header.FileSize.QuadPart > NewAllocation)
+    {
+        RxSetFileSizeWithLock(Fcb, &NewAllocation);
+        SetFlag(FileObject->Flags, FO_FILE_SIZE_CHANGED);
+    }
+    if (Fcb->Header.ValidDataLength.QuadPart > Fcb->Header.FileSize.QuadPart)
+    {
+        Fcb->Header.ValidDataLength.QuadPart = Fcb->Header.FileSize.QuadPart;
+    }
+    RxReleasePagingIoResource(RxContext, Fcb);
+
+    /* Cc may hold the sizes: update them (a smaller size purges) */
+    if (Fcb->NonPaged->SectionObjectPointers.SharedCacheMap != NULL)
+    {
+        RxAdjustAllocationSizeforCC(Fcb);
+        CcSetFileSizes(FileObject, (PCC_FILE_SIZES)&Fcb->Header.AllocationSize);
+    }
+
+    return STATUS_SUCCESS;
 }
 
 /*
@@ -9014,28 +10616,139 @@ RxSetDispositionInfo(
     return Status;
 }
 
+/*
+ * @implemented
+ *
+ * Called with the FCB exclusive (RxCommonSetInformation). AdvanceOnly
+ * requests (Cc moving the valid data length) never reach this routine. The
+ * server is told first; the FCB and Cc follow only when it agreed. Lock
+ * order: FCB (held) -> paging I/O resource (sizes) ; Cc is called with only
+ * the FCB held, so a purge caused by the truncation can issue paging I/O.
+ */
 NTSTATUS
 RxSetEndOfFileInfo(
     PRX_CONTEXT RxContext)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PFCB Fcb;
+    NTSTATUS Status;
+    PFILE_OBJECT FileObject;
+    LONGLONG NewSize, OldSize;
+    PFILE_END_OF_FILE_INFORMATION EofInfo;
+
+    PAGED_CODE();
+
+    Fcb = (PFCB)RxContext->pFcb;
+    FileObject = RxContext->CurrentIrpSp->FileObject;
+    EofInfo = RxContext->CurrentIrp->AssociatedIrp.SystemBuffer;
+
+    if (NodeType(Fcb) != RDBSS_NTC_STORAGE_TYPE_FILE)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (RxContext->CurrentIrpSp->Parameters.SetFile.Length < sizeof(FILE_END_OF_FILE_INFORMATION))
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    NewSize = EofInfo->EndOfFile.QuadPart;
+    if (NewSize < 0)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    OldSize = Fcb->Header.FileSize.QuadPart;
+    if (NewSize < OldSize)
+    {
+        LARGE_INTEGER Size;
+
+        Size.QuadPart = NewSize;
+        if (!MmCanFileBeTruncated(&Fcb->NonPaged->SectionObjectPointers, &Size))
+        {
+            return STATUS_USER_MAPPED_FILE;
+        }
+    }
+
+    /* Data cached beyond the new end must not be written back after the
+     * server truncated: flush what remains below it first */
+    if (NewSize < OldSize && Fcb->NonPaged->SectionObjectPointers.DataSectionObject != NULL)
+    {
+        RxFlushFcbInSystemCache(Fcb, TRUE);
+    }
+
+    Status = RxpSetInfoMiniRdr(RxContext, FileEndOfFileInformation);
+    if (!NT_SUCCESS(Status))
+    {
+        return Status;
+    }
+
+    RxAcquirePagingIoResource(RxContext, Fcb);
+    RxSetFileSizeWithLock(Fcb, &NewSize);
+    if (Fcb->Header.ValidDataLength.QuadPart > NewSize)
+    {
+        Fcb->Header.ValidDataLength.QuadPart = NewSize;
+    }
+    if (NewSize > Fcb->Header.AllocationSize.QuadPart)
+    {
+        Fcb->Header.AllocationSize.QuadPart = NewSize;
+        Fcb->ActualAllocationLength = NewSize;
+    }
+    RxReleasePagingIoResource(RxContext, Fcb);
+
+    SetFlag(FileObject->Flags, FO_FILE_SIZE_CHANGED);
+
+    if (Fcb->NonPaged->SectionObjectPointers.SharedCacheMap != NULL)
+    {
+        RxAdjustAllocationSizeforCC(Fcb);
+        CcSetFileSizes(FileObject, (PCC_FILE_SIZES)&Fcb->Header.AllocationSize);
+    }
+
+    return STATUS_SUCCESS;
 }
 
+/*
+ * @implemented
+ */
 NTSTATUS
 RxSetPipeInfo(
     PRX_CONTEXT RxContext)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PAGED_CODE();
+
+    /* See RxQueryPipeInfo */
+    return STATUS_INVALID_PARAMETER;
 }
 
+/*
+ * @implemented
+ */
 NTSTATUS
 RxSetPositionInfo(
     PRX_CONTEXT RxContext)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PFILE_OBJECT FileObject;
+    PFILE_POSITION_INFORMATION PositionInfo;
+
+    PAGED_CODE();
+
+    FileObject = RxContext->CurrentIrpSp->FileObject;
+    PositionInfo = RxContext->CurrentIrp->AssociatedIrp.SystemBuffer;
+
+    if (RxContext->CurrentIrpSp->Parameters.SetFile.Length < sizeof(FILE_POSITION_INFORMATION) ||
+        PositionInfo->CurrentByteOffset.QuadPart < 0)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    /* Unbuffered handles may only seek to aligned offsets */
+    if (BooleanFlagOn(FileObject->Flags, FO_NO_INTERMEDIATE_BUFFERING) &&
+        (PositionInfo->CurrentByteOffset.LowPart & RxContext->RxDeviceObject->DeviceObject.AlignmentRequirement) != 0)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    FileObject->CurrentByteOffset.QuadPart = PositionInfo->CurrentByteOffset.QuadPart;
+    return STATUS_SUCCESS;
 }
 
 /*
@@ -9132,12 +10845,17 @@ RxSetShareAccess(
 }
 #endif
 
+/*
+ * @implemented
+ */
 NTSTATUS
 RxSetSimpleInfo(
     PRX_CONTEXT RxContext)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PAGED_CODE();
+
+    /* Short names and other plain sets: the server decides */
+    return RxpSetInfoMiniRdr(RxContext, RxContext->CurrentIrpSp->Parameters.SetFile.FileInformationClass);
 }
 
 /*
@@ -9322,14 +11040,139 @@ RxStartMinirdr(
     return Status;
 }
 
+/*
+ * @implemented
+ *
+ * Stops a started mini-redirector: no new request reaches it (state
+ * RDBSS_STOP_IN_PROGRESS, MUP registration removed), the structures nobody
+ * uses any more are finalized now instead of by the scavenger timer, the
+ * mini-redirector's MRxStop runs, and the device can be started again.
+ * Fails with STATUS_REDIRECTOR_HAS_OPEN_HANDLES while files or connections are
+ * still open (the device stays started). Runs in the FSP, like RxStartMinirdr.
+ * Lock order: RxData.Resource -> prefix table; both are released before the
+ * structures are finalized (which takes the prefix table again, then FCB
+ * table and FCB locks).
+ */
 NTSTATUS
 NTAPI
 RxStopMinirdr(
     IN PRX_CONTEXT RxContext,
     OUT PBOOLEAN PostToFsp)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    NTSTATUS Status;
+    PRDBSS_DEVICE_OBJECT DeviceObject;
+    BOOLEAN Empty;
+    ULONG Tries;
+
+    PAGED_CODE();
+
+    if (!BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_IN_FSP))
+    {
+        *PostToFsp = TRUE;
+        return STATUS_PENDING;
+    }
+
+    DeviceObject = RxContext->RxDeviceObject;
+
+    ExAcquireResourceExclusiveLite(&RxData.Resource, TRUE);
+    if (RxGetRdbssState(DeviceObject) != RDBSS_STARTED)
+    {
+        ExReleaseResourceLite(&RxData.Resource);
+        return STATUS_REDIRECTOR_NOT_STARTED;
+    }
+    RxSetRdbssState(DeviceObject, RDBSS_STOP_IN_PROGRESS);
+    ExReleaseResourceLite(&RxData.Resource);
+
+    /* Finalize what is only waiting for the scavenger; structures freed by a
+     * worker (SRV_CALLs) need a moment, hence a few rounds */
+    Empty = FALSE;
+    for (Tries = 0; Tries < 50; ++Tries)
+    {
+        LARGE_INTEGER Delay;
+
+        RxScavengerFinalizeEntries(DeviceObject);
+
+        /* Requests that passed the state check before the stop began (a
+         * create still on its way to building a connection) must have left
+         * too: each holds an RX_CONTEXT, ours is the only one allowed */
+        RxAcquirePrefixTableLockShared(DeviceObject->pRxNetNameTable, TRUE);
+        Empty = IsListEmpty(&DeviceObject->pRxNetNameTable->MemberQueue);
+        RxReleasePrefixTableLock(DeviceObject->pRxNetNameTable);
+        if (Empty && DeviceObject->NumberOfActiveContexts > 1)
+        {
+            Empty = FALSE;
+        }
+        if (Empty)
+        {
+            break;
+        }
+
+        Delay.QuadPart = -100LL * 10000;
+        KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+    }
+
+    if (!Empty)
+    {
+        PLIST_ENTRY Entry;
+
+        DPRINT1("%wZ: connections still in use, not stopping\n", &DeviceObject->DeviceName);
+        RxAcquirePrefixTableLockShared(DeviceObject->pRxNetNameTable, TRUE);
+        for (Entry = DeviceObject->pRxNetNameTable->MemberQueue.Flink;
+             Entry != &DeviceObject->pRxNetNameTable->MemberQueue;
+             Entry = Entry->Flink)
+        {
+            PRX_PREFIX_ENTRY PrefixEntry = CONTAINING_RECORD(Entry, RX_PREFIX_ENTRY, MemberQLinks);
+
+            DPRINT1("  in use: %wZ (type %x, references %lu)\n", &PrefixEntry->Prefix,
+                    NodeType(PrefixEntry->ContainingRecord),
+                    PrefixEntry->ContainerRefCount != NULL ? *PrefixEntry->ContainerRefCount : 0);
+        }
+        RxReleasePrefixTableLock(DeviceObject->pRxNetNameTable);
+        RxSetRdbssState(DeviceObject, RDBSS_STARTED);
+        return STATUS_REDIRECTOR_HAS_OPEN_HANDLES;
+    }
+
+    /* Nothing left to scavenge: no timer request may outlive the device */
+    RxStopScavenger(DeviceObject);
+
+    ExAcquireResourceExclusiveLite(&RxData.Resource, TRUE);
+    RxAcquirePrefixTableLockExclusive(DeviceObject->pRxNetNameTable, TRUE);
+
+    if (DeviceObject->MupHandle != NULL)
+    {
+        FsRtlDeregisterUncProvider(DeviceObject->MupHandle);
+        /* The handle FsRtlRegisterUncProvider returned is the caller's to
+         * close; MUP releases the provider when it is closed. Start, stop
+         * and unload all run in the system process, where it was opened */
+        ZwClose(DeviceObject->MupHandle);
+        DeviceObject->MupHandle = NULL;
+    }
+
+    if (DeviceObject->RegisteredAsFileSystem)
+    {
+        IoUnregisterFileSystem(&DeviceObject->DeviceObject);
+        DeviceObject->RegisteredAsFileSystem = FALSE;
+    }
+
+    MINIRDR_CALL(Status, RxContext, DeviceObject->Dispatch, MRxStop, (RxContext, DeviceObject));
+    if (Status == STATUS_NOT_IMPLEMENTED)
+    {
+        Status = STATUS_SUCCESS;
+    }
+
+    RxReleasePrefixTableLock(DeviceObject->pRxNetNameTable);
+    ExReleaseResourceLite(&RxData.Resource);
+
+    /* Wait for work this device queued (SRV_CALL destruction, buffering
+     * state handlers, low I/O completions) */
+    RxSpinDownMRxDispatcher(DeviceObject);
+
+    ++DeviceObject->StartStopContext.Version;
+    InterlockedDecrement(&RxData.NumberOfMinirdrsStarted);
+    RxSetRdbssState(DeviceObject, RDBSS_STARTABLE);
+
+    DPRINT("RxStopMinirdr(%wZ): %lx\n", &DeviceObject->DeviceName, Status);
+    return Status;
 }
 
 NTSTATUS
@@ -9337,8 +11180,14 @@ RxSystemControl(
     IN PRDBSS_DEVICE_OBJECT RxDeviceObject,
     IN PIRP Irp)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    NTSTATUS Status;
+
+    /* No WMI provider here and no lower device to pass the request to:
+     * complete it untouched, as WMI expects from such a driver (it used to
+     * be left pending for ever) */
+    Status = Irp->IoStatus.Status;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return Status;
 }
 
 /*
@@ -9426,25 +11275,88 @@ RxUninitializeCacheMap(
     ASSERT(NodeTypeIsFcb(Fcb));
     ASSERT(RxIsFcbAcquiredExclusive(Fcb));
 
-    KeInitializeEvent(&UninitEvent.Event, SynchronizationEvent, FALSE);
-    CcUninitializeCacheMap(FileObject, TruncateSize, &UninitEvent);
+    /*
+     * The FCB is released while the uninitialization completes, and the
+     * caller only marks the file object FO_CLEANUP_COMPLETE afterwards: a
+     * read or write that ran meanwhile found no private cache map and
+     * initialized a new one, which nothing would uninitialize again before
+     * the file object is freed. Start over until none is left; the caller
+     * holds the FCB exclusive from here to the mark.
+     */
+    for (;;)
+    {
+        KeInitializeEvent(&UninitEvent.Event, SynchronizationEvent, FALSE);
+        CcUninitializeCacheMap(FileObject, TruncateSize, &UninitEvent);
 
-    /* Always release the FCB before waiting for the uninit event */
-    RxReleaseFcb(RxContext, Fcb);
+        /* Always release the FCB before waiting for the uninit event */
+        RxReleaseFcb(RxContext, Fcb);
 
-    KeWaitForSingleObject(&UninitEvent.Event, Executive, KernelMode, FALSE, NULL);
+        KeWaitForSingleObject(&UninitEvent.Event, Executive, KernelMode, FALSE, NULL);
 
-    /* Re-acquire it afterwards */
-    Status = RxAcquireExclusiveFcb(RxContext, Fcb);
-    ASSERT(NT_SUCCESS(Status));
+        /* Re-acquire it afterwards */
+        Status = RxAcquireExclusiveFcb(RxContext, Fcb);
+        ASSERT(NT_SUCCESS(Status));
+
+        if (FileObject->PrivateCacheMap == NULL)
+        {
+            break;
+        }
+
+        DPRINT1("Cache map of %p initialized again during its cleanup\n", FileObject);
+    }
 }
 
+/*
+ * @implemented
+ *
+ * Called from the mini-redirector's unload routine (it stopped and
+ * unregistered its device, or RDBSS unregisters what is left). Stops the
+ * RDBSS worker threads and timer, which run code of this image, and frees
+ * the global structures.
+ */
 VOID
 NTAPI
 RxUnload(
     IN PDRIVER_OBJECT DriverObject)
 {
-    UNIMPLEMENTED;
+    PAGED_CODE();
+
+    DPRINT("RxUnload(%p)\n", DriverObject);
+
+    /* A mini-redirector that did not unregister its device (nfs41): do it */
+    for (;;)
+    {
+        PRDBSS_DEVICE_OBJECT RxDeviceObject;
+
+        ExAcquireFastMutex(&RxData.MinirdrRegistrationMutex);
+        if (IsListEmpty(&RxData.RegisteredMiniRdrs))
+        {
+            ExReleaseFastMutex(&RxData.MinirdrRegistrationMutex);
+            break;
+        }
+        RxDeviceObject = CONTAINING_RECORD(RxData.RegisteredMiniRdrs.Flink, RDBSS_DEVICE_OBJECT, MiniRdrListLinks);
+        ExReleaseFastMutex(&RxData.MinirdrRegistrationMutex);
+
+        RxUnregisterMinirdr(RxDeviceObject);
+    }
+
+    RxTearDownDispatcher();
+
+    ExDeleteNPagedLookasideList(&RxContextLookasideList);
+    ExDeleteResourceLite(&RxData.Resource);
+
+#if DBG
+    /* Leak check: every RDBSS pool block is freed by now */
+    if (RxpLivePoolAllocations != 0 || RxNumberOfActiveFcbs != 0)
+    {
+        DPRINT1("RDBSS unload: %ld pool blocks and %ld FCBs not freed\n",
+                RxpLivePoolAllocations, RxNumberOfActiveFcbs);
+    }
+    else
+    {
+        DPRINT1("RDBSS unload: no RDBSS pool block left\n");
+    }
+#endif
 }
 
 VOID
@@ -9453,15 +11365,44 @@ RxUnlockOperation(
     IN PVOID Context,
     IN PFILE_LOCK_INFO LockInfo)
 {
-    UNIMPLEMENTED;
+    /* FILE_LOCK unlock routine. The locks an unlock-all removes are gathered
+     * with FsRtlGetNextFileLock before FsRtl drops them
+     * (RxpGatherLocksForUnlockAll), which works whether or not FsRtl calls
+     * this routine; nothing is left to do here. */
+    UNREFERENCED_PARAMETER(Context);
+    UNREFERENCED_PARAMETER(LockInfo);
 }
 
+/*
+ * @implemented
+ *
+ * Undoes a failed RxStartMinirdr (RxData.Resource and the prefix table lock
+ * are held by the caller).
+ */
 VOID
 RxUnstart(
     PRX_CONTEXT Context,
     PRDBSS_DEVICE_OBJECT DeviceObject)
 {
-    UNIMPLEMENTED;
+    PAGED_CODE();
+
+    if (DeviceObject->MupHandle != NULL)
+    {
+        FsRtlDeregisterUncProvider(DeviceObject->MupHandle);
+        /* The handle FsRtlRegisterUncProvider returned is the caller's to
+         * close; MUP releases the provider when it is closed. Start, stop
+         * and unload all run in the system process, where it was opened */
+        ZwClose(DeviceObject->MupHandle);
+        DeviceObject->MupHandle = NULL;
+    }
+
+    if (DeviceObject->RegisteredAsFileSystem)
+    {
+        IoUnregisterFileSystem(&DeviceObject->DeviceObject);
+        DeviceObject->RegisteredAsFileSystem = FALSE;
+    }
+
+    RxSetRdbssState(DeviceObject, RDBSS_STARTABLE);
 }
 
 /*

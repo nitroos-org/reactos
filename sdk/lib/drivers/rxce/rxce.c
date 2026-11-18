@@ -144,6 +144,10 @@ KDPC RxTimerDpc;
 KTIMER RxTimer;
 ULONG RxTimerTickCount;
 FAST_MUTEX RxContextPerFileSerializationMutex;
+/* Pool blocks RDBSS allocated and has not freed yet (reported at unload) */
+volatile LONG RxpLivePoolAllocations = 0;
+/* The spin-up dispatcher thread, waited for at unload */
+static PETHREAD RxpSpinUpDispatcherThread = NULL;
 #if DBG
 BOOLEAN DumpDispatchRoutine = TRUE;
 #else
@@ -161,6 +165,11 @@ BOOLEAN DumpDispatchRoutine = FALSE;
         RxAssert(#exp, __FILE__, __LINE__, NULL); \
     }
 #endif
+
+/* RDBSS-private LOWIO_CONTEXT flag (same value in rdbss.c): RxLowIoCompletion
+ * was called for the current submission. A second call is a mini-redirector
+ * bug (double completion); it is refused instead of completing twice */
+#define RXP_LOWIO_FLAG_COMPLETION_INDICATED 0x8000
 
 #if RX_POOL_WRAPPER
 #undef RxAllocatePool
@@ -271,22 +280,49 @@ RxAcquireFcbForReadAhead(
     return Ret;
 }
 
+/*
+ * @implemented
+ *
+ * Section creation: Mm wants the file stable while it looks at the sizes;
+ * the FCB is taken exclusive (same lock order as every other path: FCB
+ * before paging I/O resource).
+ */
 VOID
 NTAPI
 RxAcquireFileForNtCreateSection(
     PFILE_OBJECT FileObject)
 {
-    UNIMPLEMENTED;
+    PFCB Fcb;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    Fcb = FileObject->FsContext;
+    ASSERT(NodeTypeIsFcb(Fcb));
+
+    Status = RxAcquireExclusiveFcb(NULL, Fcb);
+    ASSERT(Status == STATUS_SUCCESS);
+    (void)Status;
+#if (_WIN32_WINNT < 0x0600)
+    Fcb->CreateSectionThread = PsGetCurrentThread();
+#endif
 }
 
+/*
+ * @implemented
+ *
+ * Cc/Mm flushes: STATUS_INVALID_DEVICE_REQUEST asks FsRtl for its default,
+ * which takes the main resource (exclusive unless already shared) and then
+ * the paging I/O resource shared: the FCB-before-paging-resource order RDBSS
+ * uses everywhere.
+ */
 NTSTATUS
 NTAPI
 RxAcquireForCcFlush(
     PFILE_OBJECT FileObject,
     PDEVICE_OBJECT DeviceObject)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    return STATUS_INVALID_DEVICE_REQUEST;
 }
 
 /*
@@ -1089,6 +1125,37 @@ RxCompleteRequest_Real(
     }
 }
 
+/* Moves all the entries of Source to the tail of Destination (unlike
+ * RxTransferList, which replaces Destination) */
+static
+VOID
+RxpAppendList(
+    _Inout_ PLIST_ENTRY Destination,
+    _Inout_ PLIST_ENTRY Source)
+{
+    while (!IsListEmpty(Source))
+    {
+        PLIST_ENTRY Entry;
+
+        Entry = RemoveHeadList(Source);
+        InsertTailList(Destination, Entry);
+    }
+}
+
+/* Unlinks a SRV_OPEN from its SRV_CALL's key list (the buffering manager
+ * mutex is held by the caller) */
+static
+VOID
+RxpRemoveSrvOpenKeyAssociation(
+    _Inout_ PSRV_OPEN SrvOpen)
+{
+    if (!IsListEmpty(&SrvOpen->SrvOpenKeyList))
+    {
+        RemoveEntryList(&SrvOpen->SrvOpenKeyList);
+        InitializeListHead(&SrvOpen->SrvOpenKeyList);
+    }
+}
+
 /*
  * @implemented
  */
@@ -1111,8 +1178,10 @@ RxCompleteSrvOpenKeyAssociation(
 
         RxAcquireBufferingManagerMutex(&SrvCall->BufferingManager);
 
-        /* Transfer our requests in the SRV_CALL */
-        RxTransferList(&SrvCall->BufferingManager.SrvOpenLists[0], &SrvOpen->SrvOpenKeyList);
+        /* Make the SRV_OPEN findable by its key: buffering state change
+         * requests the mini-redirector indicates name the key only */
+        ASSERT(IsListEmpty(&SrvOpen->SrvOpenKeyList));
+        InsertTailList(&SrvCall->BufferingManager.SrvOpenLists[0], &SrvOpen->SrvOpenKeyList);
 
         /* Was increased in RxInitiateSrvOpenKeyAssociation(), opening is done */
         InterlockedDecrement(&SrvCall->BufferingManager.NumberOfOutstandingOpens);
@@ -1269,6 +1338,7 @@ RxConstructSrvCall(
     PRDBSS_DEVICE_OBJECT RxDeviceObject;
     PMRX_SRVCALLDOWN_STRUCTURE Calldown;
     PMRX_SRVCALL_CALLBACK_CONTEXT CallbackContext;
+    BOOLEAN AsyncContext;
 
     PAGED_CODE();
 
@@ -1308,15 +1378,16 @@ RxConstructSrvCall(
 
     RxReferenceSrvCall(SrvCall);
 
-    /* If we're async, we'll post, otherwise, we'll have to wait for completion */
-    if (BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_ASYNC_OPERATION))
-    {
-        RxPrePostIrp(RxContext, RxContext->CurrentIrp);
-    }
-    else
-    {
-        KeInitializeEvent(&Calldown->FinishEvent, SynchronizationEvent, FALSE);
-    }
+    /* The construction is always waited for here, as for net roots
+     * (RxConstructNetRoot). The asynchronous variant finished the request
+     * from a worker while this thread was still unwinding through
+     * RxPrefixClaim/RxCommonCreate with the same RX_CONTEXT (a use after free
+     * once the worker completed the IRP, seen with special pool under
+     * stress). The callback decides between waking us and posting from the
+     * context's flag, so the flag is cleared for the duration. */
+    AsyncContext = BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_ASYNC_OPERATION);
+    ClearFlag(RxContext->Flags, RX_CONTEXT_FLAG_ASYNC_OPERATION);
+    KeInitializeEvent(&Calldown->FinishEvent, SynchronizationEvent, FALSE);
 
     Calldown->NumberToWait = 1;
     Calldown->NumberRemaining = 1;
@@ -1335,23 +1406,23 @@ RxConstructSrvCall(
     /* It has to return STATUS_PENDING! */
     ASSERT(Status == STATUS_PENDING);
 
-    /* No async, start completion */
-    if (!BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_ASYNC_OPERATION))
+    /* Wait for the mini-redirector, then finish (still synchronously: the
+     * finish must not complete the IRP) and notify the winner */
+    KeWaitForSingleObject(&Calldown->FinishEvent, Executive, KernelMode, FALSE, NULL);
+    Status = RxFinishSrvCallConstruction(Calldown);
+    if (AsyncContext)
     {
-        KeWaitForSingleObject(&Calldown->FinishEvent, Executive, KernelMode, FALSE, NULL);
-
-        /* Finish construction - we'll notify mini-rdr it's the winner */
-        Status = RxFinishSrvCallConstruction(Calldown);
-        if (!NT_SUCCESS(Status))
-        {
-            RxReleasePrefixTableLock(PrefixTable);
-            *LockHoldingState = LHS_LockNotHeld;
-        }
-        else
-        {
-            ASSERT(RxIsPrefixTableLockAcquired(PrefixTable));
-            *LockHoldingState = LHS_ExclusiveLockHeld;
-        }
+        SetFlag(RxContext->Flags, RX_CONTEXT_FLAG_ASYNC_OPERATION);
+    }
+    if (!NT_SUCCESS(Status))
+    {
+        RxReleasePrefixTableLock(PrefixTable);
+        *LockHoldingState = LHS_LockNotHeld;
+    }
+    else
+    {
+        ASSERT(RxIsPrefixTableLockAcquired(PrefixTable));
+        *LockHoldingState = LHS_ExclusiveLockHeld;
     }
 
     DPRINT("RxConstructSrvCall() = Status: %x\n", Status);
@@ -1385,6 +1456,12 @@ RxConstructVirtualNetRoot(
     Status = RxFindOrCreateConnections(RxContext, CanonicalName, NetRootType,
                                        &LocalNetRootName, &FilePathName,
                                        LockHoldingState, RxConnectionId);
+    /* Active, but the lookup kept no VNetRoot (its NetRoot isn't good) */
+    if (Status == STATUS_CONNECTION_ACTIVE && RxContext->Create.pVNetRoot == NULL)
+    {
+        Status = STATUS_BAD_NETWORK_PATH;
+    }
+
     /* Found and active */
     if (Status == STATUS_CONNECTION_ACTIVE)
     {
@@ -1396,8 +1473,10 @@ RxConstructVirtualNetRoot(
             RxReferenceVNetRoot(VNetRoot);
         }
 
-        /* Dereference previous VNetRoot */
-        RxDereferenceVNetRoot(RxContext->Create.pVNetRoot->pNetRoot, *LockHoldingState);
+        /* Dereference the VNetRoot the lookup referenced (this used to drop
+         * a reference of its NetRoot instead: the NetRoot was then freed
+         * under live VNetRoots when creates raced on a new connection) */
+        RxDereferenceVNetRoot(RxContext->Create.pVNetRoot, *LockHoldingState);
         /* Reset and start construct (new structures will replace old ones) */
         RxContext->Create.pSrvCall = NULL;
         RxContext->Create.pNetRoot = NULL;
@@ -2385,12 +2464,57 @@ RxDereferenceAndDeleteRxContext_Real(
     }
 }
 
+/*
+ * @implemented
+ *
+ * Worker: matches the requests the mini-redirector queued with
+ * RxIndicateChangeOfBufferingState to their SRV_OPENs (by key) and starts
+ * the handler for the accepted ones. Requests whose SRV_OPEN may still be
+ * opening stay queued; RxCompleteSrvOpenKeyAssociation dispatches them again
+ * when the open finished. The SRV_CALL was referenced by whoever posted this.
+ */
 VOID
 NTAPI
 RxDispatchChangeBufferingStateRequests(
     PVOID Context)
 {
-    UNIMPLEMENTED;
+    KIRQL OldIrql;
+    PSRV_CALL SrvCall;
+    BOOLEAN StartHandler;
+    LIST_ENTRY Discarded;
+
+    PAGED_CODE();
+
+    SrvCall = Context;
+    DPRINT("RxDispatchChangeBufferingStateRequests(%p)\n", SrvCall);
+
+    /* DispatcherActive stays set while we run, so that the dispatch below
+     * does not post us again for requests still waiting for their open */
+    RxAcquireBufferingManagerMutex(&SrvCall->BufferingManager);
+    RxpDispatchChangeBufferingStateRequests(SrvCall, NULL, &Discarded);
+    RxReleaseBufferingManagerMutex(&SrvCall->BufferingManager);
+
+    KeAcquireSpinLock(&SrvCall->BufferingManager.SpinLock, &OldIrql);
+    SrvCall->BufferingManager.DispatcherActive = FALSE;
+    StartHandler = (!IsListEmpty(&SrvCall->BufferingManager.HandlerList) &&
+                    !SrvCall->BufferingManager.HandlerInactive);
+    if (StartHandler)
+    {
+        /* HandlerInactive set means "a handler is scheduled" */
+        SrvCall->BufferingManager.HandlerInactive = TRUE;
+    }
+    KeReleaseSpinLock(&SrvCall->BufferingManager.SpinLock, OldIrql);
+
+    if (StartHandler)
+    {
+        RxReferenceSrvCall(SrvCall);
+        RxPostToWorkerThread(RxFileSystemDeviceObject, HyperCriticalWorkQueue,
+                             &SrvCall->BufferingManager.HandlerWorkItem,
+                             RxProcessChangeBufferingStateRequests, SrvCall);
+    }
+
+    RxpDiscardChangeBufferingStateRequests(&Discarded);
+    RxDereferenceSrvCall(SrvCall, LHS_LockNotHeld);
 }
 
 /*
@@ -3041,14 +3165,25 @@ RxFinalizeNetFobx(
 
     ThisFobx->pSrvOpen = NULL;
 
-    /* A FOBX less */
-    InterlockedDecrement((volatile long *)&SrvOpen->pVNetRoot->NumberOfFobxs);
-
-    RxDereferenceSrvOpen(SrvOpen, LHS_ExclusiveLockHeld);
-
-    /* If it wasn't allocated with another object, free the FOBX */
-    if (!BooleanFlagOn(ThisFobx->Flags, FOBX_FLAG_ENCLOSED_ALLOCATED))
+    /* A FOBX less (unless the SRV_OPEN already dropped its V_NET_ROOT, at
+     * its upper finalization) */
+    if (SrvOpen->pVNetRoot != NULL)
     {
+        InterlockedDecrement((volatile long *)&SrvOpen->pVNetRoot->NumberOfFobxs);
+    }
+
+    /* Decide before dropping our SRV_OPEN reference: a FOBX allocated with
+     * the SRV_OPEN (or the FCB) is freed with it, and must not be touched
+     * once the SRV_OPEN reference is gone. It was read after the
+     * dereference, which was a use after free as soon as an FCB had a
+     * second SRV_OPEN */
+    if (BooleanFlagOn(ThisFobx->Flags, FOBX_FLAG_ENCLOSED_ALLOCATED))
+    {
+        RxDereferenceSrvOpen(SrvOpen, LHS_ExclusiveLockHeld);
+    }
+    else
+    {
+        RxDereferenceSrvOpen(SrvOpen, LHS_ExclusiveLockHeld);
         RxFreeFcbObject(ThisFobx);
     }
 
@@ -3144,8 +3279,18 @@ RxFinalizeNetRoot(
         RxRemovePrefixTableEntry(PrefixTable, &ThisNetRoot->PrefixEntry);
     }
 
-    /* Delete the object */
+    /* Let the mini-redirector release what it attached (MRxFinalizeNetRoot) */
     SrvCall = (PSRV_CALL)ThisNetRoot->pSrvCall;
+    if (SrvCall != NULL && SrvCall->RxDeviceObject != NULL)
+    {
+        NTSTATUS Status;
+
+        MINIRDR_CALL_THROUGH(Status, SrvCall->RxDeviceObject->Dispatch,
+                             MRxFinalizeNetRoot, ((PMRX_NET_ROOT)ThisNetRoot, &ForceFinalize));
+        (void)Status;
+    }
+
+    /* Delete the object */
     RxFreeObject(ThisNetRoot);
 
     /* And dereference the associated SRV_CALL */
@@ -3335,8 +3480,15 @@ RxFinalizeSrvOpen(
         return FALSE;
     }
 
-    /* No key association left */
-    ASSERT(IsListEmpty(&ThisSrvOpen->SrvOpenKeyList));
+    /* No key association left (a forced finalization may skip the purge) */
+    if (!IsListEmpty(&ThisSrvOpen->SrvOpenKeyList))
+    {
+        PSRV_CALL SrvCall = (PSRV_CALL)Fcb->VNetRoot->pNetRoot->pSrvCall;
+
+        RxAcquireBufferingManagerMutex(&SrvCall->BufferingManager);
+        RxpRemoveSrvOpenKeyAssociation(ThisSrvOpen);
+        RxReleaseBufferingManagerMutex(&SrvCall->BufferingManager);
+    }
 
     /* If we're still in some FCB, remove us */
     if (!IsListEmpty(&ThisSrvOpen->SrvOpenQLinks))
@@ -3459,8 +3611,11 @@ RxFindOrConstructVirtualNetRoot(
     ASSERT(RxDeviceObject->Dispatch != NULL);
     ASSERT(NodeType(RxDeviceObject->Dispatch) == RDBSS_NTC_MINIRDR_DISPATCH);
 
-    /* Ask the mini-rdr for connection ID */
-    ConnectionID.SessionID = 0;
+    /* Ask the mini-rdr for connection ID. Clear all of it: the prefix table
+     * compares the whole LUID, and setting the SessionID member alone left
+     * its high part to whatever was on the stack, so lookups missed live
+     * entries at random and created duplicate SRV_CALLs and NET_ROOTs */
+    RtlZeroMemory(&ConnectionID, sizeof(ConnectionID));
     if (RxDeviceObject->Dispatch->MRxGetConnectionId != NULL)
     {
         Status = RxDeviceObject->Dispatch->MRxGetConnectionId(RxContext, &ConnectionID);
@@ -3576,6 +3731,11 @@ RxFindOrConstructVirtualNetRoot(
                     {
                         RxReferenceVNetRoot(SavedVNetRoot);
                     }
+                    /* What follows uses the one kept and referenced, not the
+                     * one just dereferenced (another logon's: it was handed
+                     * to the caller without a reference, and dereferenced
+                     * again when the create ended) */
+                    VNetRoot = SavedVNetRoot;
                 }
             }
 
@@ -4370,14 +4530,17 @@ RxGatherRequestsForSrvOpen(
     /* Dispatch any pending operation first */
     RxpDispatchChangeBufferingStateRequests(SrvCall, SrvOpen, &Discarded);
 
-    /* Then, get any entry related to our key and SRV_OPEN */
+    /* Then, get any entry accepted for our SRV_OPEN. Match the SRV_OPEN only:
+     * an accepted request holds a reference on it, and its key may no longer
+     * be the SRV_OPEN's (a close sets the key to -1 before it purges, which
+     * left the request queued for ever with its SRV_OPEN reference) */
     KeAcquireSpinLock(&SrvCall->BufferingManager.SpinLock, &OldIrql);
     Entry = SrvCall->BufferingManager.HandlerList.Flink;
     while (Entry != &SrvCall->BufferingManager.HandlerList)
     {
         Request = CONTAINING_RECORD(Entry, CHANGE_BUFFERING_STATE_REQUEST, ListEntry);
         Entry = Entry->Flink;
-        if (Request->SrvOpenKey == SrvOpen->Key && Request->SrvOpen == SrvOpen)
+        if (Request->SrvOpen == SrvOpen)
         {
             RemoveEntryList(&Request->ListEntry);
             InsertTailList(RequestsListHead, &Request->ListEntry);
@@ -4391,7 +4554,7 @@ RxGatherRequestsForSrvOpen(
     {
         Request = CONTAINING_RECORD(Entry, CHANGE_BUFFERING_STATE_REQUEST, ListEntry);
         Entry = Entry->Flink;
-        if (Request->SrvOpenKey == SrvOpen->Key && Request->SrvOpen == SrvOpen)
+        if (Request->SrvOpen == SrvOpen)
         {
             RemoveEntryList(&Request->ListEntry);
             InsertTailList(RequestsListHead, &Request->ListEntry);
@@ -4729,6 +4892,12 @@ RxInitializeDispatcher(
                                   NULL, NULL, RxSpinUpRequestsDispatcher, &RxDispatcher);
     if (NT_SUCCESS(Status))
     {
+        /* Kept to wait for the thread's end at unload */
+        if (!NT_SUCCESS(ObReferenceObjectByHandle(ThreadHandle, SYNCHRONIZE, *PsThreadType, KernelMode,
+                                                  (PVOID *)&RxpSpinUpDispatcherThread, NULL)))
+        {
+            RxpSpinUpDispatcherThread = NULL;
+        }
         ZwClose(ThreadHandle);
     }
 
@@ -4892,6 +5061,7 @@ RxInitializePrefixTable(
     ThisTable->IsNetNameTable = FALSE;
     ThisTable->CaseInsensitiveMatch = CaseInsensitiveMatch;
     ThisTable->TableSize = TableSize;
+    ExInitializeResourceLite(&ThisTable->TableLock);
 
     if (TableSize > 0)
     {
@@ -5230,11 +5400,8 @@ RxIsThisACscAgentOpen(
 
     CscAgent = FALSE;
 
-    /* Client Side Caching is DFS stuff - we don't support it */
-    if (RxContext->Create.EaLength != 0)
-    {
-        UNIMPLEMENTED;
-    }
+    /* Client-side caching agents (marked through the DFS name context) are
+     * not supported; an EA buffer does not make an open a CSC agent one */
 
     if (RxContext->Create.NtCreateParameters.DfsNameContext != NULL &&
         ((PDFS_NAME_CONTEXT)RxContext->Create.NtCreateParameters.DfsNameContext)->NameContextType == 0xAAAAAAAA)
@@ -5266,8 +5433,12 @@ RxLockUserBuffer(
         }
         else
         {
-            /* That likely means the driver asks for buffered IOs - we don't support it! */
-            ASSERT(!BooleanFlagOn(Irp->Flags, IRP_INPUT_OPERATION));
+            /* That likely means the driver asks for buffered IOs - we don't
+             * support it! IRP_INPUT_OPERATION is also IRP_SYNCHRONOUS_PAGING_IO
+             * (the same bit): a synchronous paging read without an MDL (Mm
+             * reading image headers into its own buffer) is not buffered I/O */
+            ASSERT(!BooleanFlagOn(Irp->Flags, IRP_BUFFERED_IO) &&
+                   (BooleanFlagOn(Irp->Flags, IRP_PAGING_IO) || !BooleanFlagOn(Irp->Flags, IRP_INPUT_OPERATION)));
 
             /* If we have a real length */
             if (BufferLength > 0)
@@ -5559,6 +5730,8 @@ RxLowIoSubmit(
             {
                 RxContext->IoStatusBlock.Information = 0;
 
+                /* Armed for one RxLowIoCompletion per submission */
+                LowIoContext->Flags &= ~RXP_LOWIO_FLAG_COMPLETION_INDICATED;
                 MINIRDR_CALL(Status, RxContext, Dispatch, MRxLowIOSubmit[Operation], (RxContext));
                 if (Status == STATUS_PENDING)
                 {
@@ -5580,7 +5753,12 @@ RxLowIoSubmit(
                         {
                             if (!BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_IN_FSP))
                             {
-                                RxContext->CurrentIrpSp->Flags &= ~SL_PENDING_RETURNED;
+                                /* IoMarkIrpPending sets it in Control. (This
+                                 * cleared a bit of Flags instead, so the IRP
+                                 * was completed as pended while the dispatch
+                                 * returned a final status: the I/O manager
+                                 * then completed it a second time) */
+                                RxContext->CurrentIrpSp->Control &= ~SL_PENDING_RETURNED;
                             }
 
                             InterlockedDecrement((volatile long *)&RxContext->ReferenceCount);
@@ -5794,8 +5972,8 @@ RxNoOpAcquire(
     IN PVOID Fcb,
     IN BOOLEAN Wait)
 {
-    UNIMPLEMENTED;
-    return FALSE;
+    /* Cache callbacks for streams that need no locking */
+    return TRUE;
 }
 
 VOID
@@ -5803,14 +5981,40 @@ NTAPI
 RxNoOpRelease(
     IN PVOID Fcb)
 {
-    UNIMPLEMENTED;
 }
 
 VOID
 RxOrphanThisFcb(
     PFCB Fcb)
 {
-    UNIMPLEMENTED;
+    NTSTATUS Status;
+    PNET_ROOT NetRoot;
+
+    PAGED_CODE();
+
+    /* Called when a delete-on-close handle closes, with the FCB table lock
+     * exclusive and the FCB released. Once no user handle is left, the name
+     * no longer designates this FCB (the file is being deleted): take it out
+     * of the table so that a new open gets a new FCB. SRV_OPENs without
+     * handles (delayed closes) are orphaned. Handles still open keep working:
+     * forced disconnection of live handles is not implemented. */
+    NetRoot = (PNET_ROOT)Fcb->pNetRoot;
+    ASSERT(RxIsFcbTableLockExclusive(&NetRoot->FcbTable));
+
+    Status = RxAcquireExclusiveFcb(NULL, Fcb);
+    if (Status != STATUS_SUCCESS)
+    {
+        return;
+    }
+
+    if (Fcb->UncleanCount == 0 && !BooleanFlagOn(Fcb->FcbState, FCB_STATE_NAME_ALREADY_REMOVED))
+    {
+        RxRemoveNameNetFcb(Fcb);
+    }
+
+    RxReleaseFcb(NULL, Fcb);
+
+    RxOrphanSrvOpensForThisFcb(Fcb, NULL, TRUE);
 }
 
 VOID
@@ -5878,7 +6082,38 @@ RxOrphanSrvOpensForThisFcb(
     IN PV_NET_ROOT ThisVNetRoot,
     IN BOOLEAN OrphanAll)
 {
-    UNIMPLEMENTED;
+    NTSTATUS Status;
+    PLIST_ENTRY Entry;
+
+    PAGED_CODE();
+
+    /* Marks the SRV_OPENs of the V_NET_ROOT (or all of them) that no handle
+     * uses any more as orphaned: no new open collapses onto them. A SRV_OPEN
+     * with handles is left alone (see RxOrphanThisFcb). The caller holds the
+     * FCB table lock; the FCB is taken here. */
+    Status = RxAcquireExclusiveFcb(NULL, Fcb);
+    if (Status != STATUS_SUCCESS)
+    {
+        return;
+    }
+
+    for (Entry = Fcb->SrvOpenList.Flink; Entry != &Fcb->SrvOpenList; Entry = Entry->Flink)
+    {
+        PSRV_OPEN SrvOpen;
+
+        SrvOpen = CONTAINING_RECORD(Entry, SRV_OPEN, SrvOpenQLinks);
+        if (!OrphanAll && (PV_NET_ROOT)SrvOpen->pVNetRoot != ThisVNetRoot)
+        {
+            continue;
+        }
+
+        if (SrvOpen->UncleanFobxCount == 0 && !BooleanFlagOn(SrvOpen->Flags, SRVOPEN_FLAG_CLOSED))
+        {
+            SetFlag(SrvOpen->Flags, SRVOPEN_FLAG_ORPHANED | SRVOPEN_FLAG_COLLAPSING_DISABLED);
+        }
+    }
+
+    RxReleaseFcb(NULL, Fcb);
 }
 
 /*
@@ -6187,8 +6422,9 @@ RxpDispatchChangeBufferingStateRequests(
     }
     else
     {
-        /* Transfer back the list of the not treated entries to the buffering manager */
-        RxTransferList(&BufferingManager->DispatcherList, &DispatcherList);
+        /* Give back the entries not treated yet; new ones may have been
+         * queued meanwhile, keep them */
+        RxpAppendList(&BufferingManager->DispatcherList, &DispatcherList);
         StartDispatcher = (BufferingManager->DispatcherActive == FALSE);
         /* If the dispatcher isn't active, start it */
         if (StartDispatcher)
@@ -6197,10 +6433,11 @@ RxpDispatchChangeBufferingStateRequests(
         }
     }
 
-    /* If there were accepted requests, move them to the buffering manager */
+    /* If there were accepted requests, move them to the buffering manager
+     * (behind those a handler has not taken yet) */
     if (!IsListEmpty(&AcceptedReqs))
     {
-        RxTransferList(&BufferingManager->HandlerList, &AcceptedReqs);
+        RxpAppendList(&BufferingManager->HandlerList, &AcceptedReqs);
     }
     KeReleaseSpinLock(&BufferingManager->SpinLock, OldIrql);
 
@@ -6367,6 +6604,7 @@ RxPostOneShotTimerRequest(
     IN LARGE_INTEGER TimeInterval)
 {
     KIRQL OldIrql;
+    BOOLEAN WasEmpty;
 
     ASSERT(pWorkItem != NULL);
 
@@ -6379,15 +6617,18 @@ RxPostOneShotTimerRequest(
      */
     KeAcquireSpinLock(&RxTimerLock, &OldIrql);
     pWorkItem->LastTick = (TimeInterval.QuadPart / 550000) + RxTimerTickCount + 1;
+    /* The timer runs while the queue is not empty: start it for the first
+     * entry. (The emptiness used to be tested after the insertion, so the
+     * timer never started and nothing posted here, the scavenger included,
+     * ever ran.) */
+    WasEmpty = IsListEmpty(&RxTimerQueueHead);
     /* Insert in work queue */
     InsertTailList(&RxTimerQueueHead, &pWorkItem->WorkQueueItem.List);
-    KeReleaseSpinLock(&RxTimerLock, OldIrql);
-
-    /* If there are queued events, queue an execution */
-    if (IsListEmpty(&RxTimerQueueHead))
+    if (WasEmpty)
     {
         KeSetTimer(&RxTimer, RxTimerInterval, &RxTimerDpc);
     }
+    KeReleaseSpinLock(&RxTimerLock, OldIrql);
 
     return STATUS_SUCCESS;
 }
@@ -6413,12 +6654,136 @@ RxPostToWorkerThread(
     return RxInsertWorkQueueItem(pMRxDeviceObject, WorkQueueType, pWorkQueueItem);
 }
 
+/*
+ * @implemented
+ *
+ * Handler: for every accepted request, takes the FCB of its SRV_OPEN
+ * exclusive (waiting: this runs in a worker or in a create that holds no FCB)
+ * and processes the FCB's pending buffering state changes. Lock order:
+ * FCB exclusive -> (RxChangeBufferingState) Cc flush/purge -> paging I/O.
+ * Nothing else is held. Drops the SRV_CALL reference its caller took.
+ */
 VOID
 RxpProcessChangeBufferingStateRequests(
     PSRV_CALL SrvCall,
     BOOLEAN UpdateHandlerState)
 {
-    UNIMPLEMENTED;
+    KIRQL OldIrql;
+    PFCB Fcb;
+    PSRV_OPEN SrvOpen;
+    NTSTATUS Status;
+    PCHANGE_BUFFERING_STATE_REQUEST Request;
+
+    PAGED_CODE();
+
+    DPRINT("RxpProcessChangeBufferingStateRequests(%p, %d)\n", SrvCall, UpdateHandlerState);
+
+    for (;;)
+    {
+        PLIST_ENTRY Entry;
+        BOOLEAN Stuck;
+
+        /* Requests leave the handler list only under the buffering manager
+         * mutex (RxGatherRequestsForSrvOpen: the purge at close and
+         * finalization, and the FCB processing). While it is held, the head
+         * request keeps its SRV_OPEN referenced, which keeps its FCB: take an
+         * FCB reference before letting go of the mutex. Without it, a close
+         * that purged the request while this thread waited for the FCB
+         * finalized the SRV_OPEN and the FCB under it (use after free of
+         * both, and of the ERESOURCE being waited on). */
+        RxAcquireBufferingManagerMutex(&SrvCall->BufferingManager);
+        KeAcquireSpinLock(&SrvCall->BufferingManager.SpinLock, &OldIrql);
+        if (IsListEmpty(&SrvCall->BufferingManager.HandlerList))
+        {
+            if (UpdateHandlerState)
+            {
+                SrvCall->BufferingManager.HandlerInactive = FALSE;
+            }
+            KeReleaseSpinLock(&SrvCall->BufferingManager.SpinLock, OldIrql);
+            RxReleaseBufferingManagerMutex(&SrvCall->BufferingManager);
+            break;
+        }
+
+        /* The request stays queued: RxProcessFcbChangeBufferingStateRequest
+         * gathers all the requests of the SRV_OPEN, this one included */
+        Request = CONTAINING_RECORD(SrvCall->BufferingManager.HandlerList.Flink,
+                                    CHANGE_BUFFERING_STATE_REQUEST, ListEntry);
+        SrvOpen = Request->SrvOpen;
+        ASSERT(SrvOpen != NULL);
+        Fcb = (PFCB)SrvOpen->pFcb;
+        KeReleaseSpinLock(&SrvCall->BufferingManager.SpinLock, OldIrql);
+        RxReferenceNetFcb(Fcb);
+        RxReleaseBufferingManagerMutex(&SrvCall->BufferingManager);
+
+        Status = RxAcquireExclusiveFcb(CHANGE_BUFFERING_STATE_CONTEXT_WAIT, Fcb);
+        if (Status != STATUS_SUCCESS)
+        {
+            /* Cannot happen with a waiting acquire; never spin on it */
+            DPRINT1("Failed to acquire FCB %p for buffering state change: %lx\n", Fcb, Status);
+            RxDereferenceNetFcb(Fcb);
+            break;
+        }
+
+        /* The SRV_OPEN may have been closed and its requests purged while we
+         * waited, and only the FCB is known to be alive. With the FCB
+         * exclusive, the SRV_OPENs on its list cannot go away: mark them all,
+         * the processing applies whatever requests they still have */
+        RxAcquireSerializationMutex();
+        for (Entry = Fcb->SrvOpenList.Flink; Entry != &Fcb->SrvOpenList; Entry = Entry->Flink)
+        {
+            PSRV_OPEN ThisSrvOpen = CONTAINING_RECORD(Entry, SRV_OPEN, SrvOpenQLinks);
+
+            SetFlag(ThisSrvOpen->Flags, SRVOPEN_FLAG_BUFFERING_STATE_CHANGE_PENDING);
+        }
+        SetFlag(Fcb->FcbState, FCB_STATE_BUFFERING_STATE_CHANGE_PENDING);
+        RxReleaseSerializationMutex();
+
+        RxProcessFcbChangeBufferingStateRequest(Fcb);
+
+        /* The processing gathers every request of the FCB's SRV_OPENs. One
+         * still queued could never be gathered (its SRV_OPEN left the FCB, a
+         * forced finalization): drop it rather than loop on it for ever */
+        Stuck = FALSE;
+        RxAcquireBufferingManagerMutex(&SrvCall->BufferingManager);
+        KeAcquireSpinLock(&SrvCall->BufferingManager.SpinLock, &OldIrql);
+        for (Entry = SrvCall->BufferingManager.HandlerList.Flink;
+             Entry != &SrvCall->BufferingManager.HandlerList;
+             Entry = Entry->Flink)
+        {
+            if (Entry == &Request->ListEntry && Request->SrvOpen == SrvOpen)
+            {
+                RemoveEntryList(Entry);
+                Stuck = TRUE;
+                break;
+            }
+        }
+        KeReleaseSpinLock(&SrvCall->BufferingManager.SpinLock, OldIrql);
+        RxReleaseBufferingManagerMutex(&SrvCall->BufferingManager);
+
+        if (Stuck)
+        {
+            LIST_ENTRY Discarded;
+
+            DPRINT1("Dropping buffering state request %p of SRV_OPEN %p (FCB %p): it could not be gathered\n",
+                    Request, SrvOpen, Fcb);
+            /* With its FCB held, the SRV_OPEN reference is dropped with the
+             * lock held, so that a last reference finalizes it */
+            if ((PFCB)SrvOpen->pFcb == Fcb)
+            {
+                SetFlag(Request->Flags, RX_REQUEST_PREPARED_FOR_HANDLING);
+            }
+            InitializeListHead(&Discarded);
+            InsertTailList(&Discarded, &Request->ListEntry);
+            RxpDiscardChangeBufferingStateRequests(&Discarded);
+        }
+
+        if (!RxDereferenceAndFinalizeNetFcb(Fcb, CHANGE_BUFFERING_STATE_CONTEXT_WAIT, FALSE, FALSE))
+        {
+            RxReleaseFcb(CHANGE_BUFFERING_STATE_CONTEXT_WAIT, Fcb);
+        }
+    }
+
+    RxDereferenceSrvCall(SrvCall, LHS_LockNotHeld);
 }
 
 /*
@@ -6670,22 +7035,103 @@ RxProcessChangeBufferingStateRequestsForSrvOpen(
         PFCB Fcb;
         NTSTATUS Status;
 
-        /* Acquire the FCB and start processing */
+        /* Process now if the FCB is free; a caller holding it (fast I/O
+         * checks run under the FCB resource) leaves the work to the handler,
+         * which waits for the FCB */
         Fcb = (PFCB)SrvOpen->pFcb;
-        Status = RxAcquireExclusiveFcb(NULL, Fcb);
-        if (Status == STATUS_SUCCESS)
+        if (!RxIsFcbAcquired(Fcb))
         {
-            RxProcessFcbChangeBufferingStateRequest(Fcb);
-            RxReleaseFcb(NULL, Fcb);
+            Status = RxAcquireExclusiveFcb(CHANGE_BUFFERING_STATE_CONTEXT, Fcb);
+            if (Status == STATUS_SUCCESS)
+            {
+                RxProcessFcbChangeBufferingStateRequest(Fcb);
+                RxReleaseFcb(CHANGE_BUFFERING_STATE_CONTEXT, Fcb);
+            }
         }
     }
 }
 
+/*
+ * @implemented
+ *
+ * Called with the FCB exclusive. Every SRV_OPEN of the FCB marked
+ * SRVOPEN_FLAG_BUFFERING_STATE_CHANGE_PENDING gets its requests applied
+ * (RxChangeBufferingState with the mini-redirector's context: the
+ * mini-redirector computes the new state, RDBSS flushes and purges, then the
+ * mini-redirector acknowledges through MRxCompleteBufferingStateChangeRequest).
+ * Requests are freed (and their SRV_OPEN references dropped) only after the
+ * walk over the SRV_OPEN list, which a dereference may change.
+ */
 VOID
 RxProcessFcbChangeBufferingStateRequest(
     PFCB Fcb)
 {
-    UNIMPLEMENTED;
+    PSRV_CALL SrvCall;
+    PLIST_ENTRY Entry, ReqEntry;
+    LIST_ENTRY Done;
+
+    PAGED_CODE();
+
+    ASSERT(RxIsFcbAcquiredExclusive(Fcb));
+
+    RxAcquireSerializationMutex();
+    if (!BooleanFlagOn(Fcb->FcbState, FCB_STATE_BUFFERING_STATE_CHANGE_PENDING))
+    {
+        RxReleaseSerializationMutex();
+        return;
+    }
+    RxReleaseSerializationMutex();
+
+    InitializeListHead(&Done);
+    SrvCall = (PSRV_CALL)Fcb->VNetRoot->pNetRoot->pSrvCall;
+
+    for (Entry = Fcb->SrvOpenList.Flink; Entry != &Fcb->SrvOpenList; Entry = Entry->Flink)
+    {
+        PSRV_OPEN SrvOpen;
+        LIST_ENTRY Requests;
+
+        SrvOpen = CONTAINING_RECORD(Entry, SRV_OPEN, SrvOpenQLinks);
+        if (!BooleanFlagOn(SrvOpen->Flags, SRVOPEN_FLAG_BUFFERING_STATE_CHANGE_PENDING))
+        {
+            continue;
+        }
+
+        InitializeListHead(&Requests);
+        RxAcquireBufferingManagerMutex(&SrvCall->BufferingManager);
+        RxGatherRequestsForSrvOpen(SrvCall, SrvOpen, &Requests);
+        RxReleaseBufferingManagerMutex(&SrvCall->BufferingManager);
+
+        for (ReqEntry = Requests.Flink; ReqEntry != &Requests; ReqEntry = ReqEntry->Flink)
+        {
+            PCHANGE_BUFFERING_STATE_REQUEST Request;
+
+            Request = CONTAINING_RECORD(ReqEntry, CHANGE_BUFFERING_STATE_REQUEST, ListEntry);
+            SetFlag(Request->Flags, RX_REQUEST_PREPARED_FOR_HANDLING);
+
+            /* A closed SRV_OPEN has nothing cached any more to give back */
+            if (!BooleanFlagOn(SrvOpen->Flags, SRVOPEN_FLAG_CLOSED) &&
+                SrvOpen->Condition == Condition_Good)
+            {
+                DPRINT("Changing buffering state of %p (key %p, context %p)\n", SrvOpen,
+                       Request->SrvOpenKey, Request->MRxContext);
+                RxChangeBufferingState(SrvOpen, Request->MRxContext, TRUE);
+            }
+        }
+
+        ClearFlag(SrvOpen->Flags, SRVOPEN_FLAG_BUFFERING_STATE_CHANGE_PENDING);
+        RxpAppendList(&Done, &Requests);
+    }
+
+    RxAcquireSerializationMutex();
+    ClearFlag(Fcb->FcbState, FCB_STATE_BUFFERING_STATE_CHANGE_PENDING);
+    if (Fcb->pBufferingStateChangeCompletedEvent != NULL)
+    {
+        KeSetEvent(Fcb->pBufferingStateChangeCompletedEvent, IO_NETWORK_INCREMENT, FALSE);
+    }
+    RxReleaseSerializationMutex();
+
+    /* Frees the requests and drops their SRV_OPEN references (FCB held) */
+    RxpDiscardChangeBufferingStateRequests(&Done);
 }
 
 /*
@@ -6937,8 +7383,9 @@ RxPurgeChangeBufferingStateRequestsForSrvOpen(
     SrvCall = (PSRV_CALL)SrvOpen->Fcb->VNetRoot->pNetRoot->pSrvCall;
     RxAcquireBufferingManagerMutex(&SrvCall->BufferingManager);
 
-    /* Set the flag, and get the requests */
-    InitializeListHead(&SrvOpen->SrvOpenKeyList);
+    /* Set the flag, and get the requests; the SRV_OPEN can no longer be
+     * found by its key */
+    RxpRemoveSrvOpenKeyAssociation(SrvOpen);
     SetFlag(SrvOpen->Flags, SRVOPEN_FLAG_BUFFERING_STATE_CHANGE_REQUESTS_PURGED);
     RxGatherRequestsForSrvOpen(SrvCall, SrvOpen, &Discarded);
 
@@ -7066,6 +7513,7 @@ RxPurgeFobx(
     if (Status != STATUS_SUCCESS)
     {
         DPRINT1("Purge failed for %p (%p)\n", FcbToBePurged, pFobx);
+        RxReleaseFcb(NULL, FcbToBePurged);
         return FALSE;
     }
 
@@ -7073,8 +7521,13 @@ RxPurgeFobx(
     if (!MmFlushImageSection(&FcbToBePurged->NonPaged->SectionObjectPointers, MmFlushForWrite))
     {
         DPRINT1("Image section flush failed for %p (%p)\n", FcbToBePurged, pFobx);
+        RxReleaseFcb(NULL, FcbToBePurged);
         return FALSE;
     }
+
+    /* The FCB was taken for the purge only (it used to stay acquired, so
+     * every purge of a dormant FOBX left its FCB locked for good) */
+    RxReleaseFcb(NULL, FcbToBePurged);
 
     DPRINT("Purge OK for %p (%p)\n", FcbToBePurged, pFobx);
     return TRUE;
@@ -7153,7 +7606,10 @@ RxPurgeRelatedFobxs(
     /* If there's already a purge in progress */
     if (PurgeSyncCtx->PurgeInProgress)
     {
-        /* Add our RX_CONTEXT to the current run */
+        /* Add our RX_CONTEXT to the current run. The context's event may
+         * still be signalled from an earlier use: a stale signal would let
+         * us run (and be freed) while still queued, so clear it first */
+        KeClearEvent(&RxContext->SyncEvent);
         InsertTailList(&PurgeSyncCtx->ContextsAwaitingPurgeCompletion,
                        &RxContext->RxContextSerializationQLinks);
 
@@ -7212,8 +7668,11 @@ RxPurgeRelatedFobxs(
             }
         }
 
-        /* Matching, we'll purge it */
+        /* Matching, we'll purge it. Leave the entry self-linked: the close
+         * of the FOBX (RxMarkFobxOnClose) unlinks it again if it looks
+         * linked, which on stale links corrupts the list */
         RemoveEntryList(&Fobx->ClosePendingList);
+        InitializeListHead(&Fobx->ClosePendingList);
 
         /* Reference it so that it doesn't disappear */
         RxReferenceNetFobx(Fobx);
@@ -7252,6 +7711,11 @@ RxPurgeRelatedFobxs(
         }
 
         RxAcquireScavengerMutex();
+
+        /* The list may have changed while the mutex was released (the next
+         * FOBX closed and freed, for one): start over. Purged FOBXs left the
+         * list, so this ends */
+        Entry = Scavenger->ClosePendingFobxsList.Flink;
     }
 
     /* If no contexts left, purge is not running */
@@ -7573,22 +8037,39 @@ RxReleaseFcbFromReadAhead(
     ExReleaseResourceLite(Fcb->Header.Resource);
 }
 
+/*
+ * @implemented
+ */
 VOID
 NTAPI
 RxReleaseFileForNtCreateSection(
     PFILE_OBJECT FileObject)
 {
-    UNIMPLEMENTED;
+    PFCB Fcb;
+
+    PAGED_CODE();
+
+    Fcb = FileObject->FsContext;
+    ASSERT(NodeTypeIsFcb(Fcb));
+
+#if (_WIN32_WINNT < 0x0600)
+    Fcb->CreateSectionThread = NULL;
+#endif
+    RxReleaseFcb(NULL, Fcb);
 }
 
+/*
+ * @implemented
+ *
+ * See RxAcquireForCcFlush: FsRtl releases what its default took.
+ */
 NTSTATUS
 NTAPI
 RxReleaseForCcFlush(
     PFILE_OBJECT FileObject,
     PDEVICE_OBJECT DeviceObject)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    return STATUS_INVALID_DEVICE_REQUEST;
 }
 
 /*
@@ -7949,11 +8430,123 @@ RxScavengeRelatedFobxs(
     return TRUE;
 }
 
+/*
+ * Finalizes the SRV_CALL/NET_ROOT/V_NET_ROOT structures the scavenger was
+ * given (their last user reference went away without the prefix table lock).
+ * Lock order: prefix table (exclusive) -> scavenger mutex, released before the
+ * finalization, which may take FCB table and FCB locks. V_NET_ROOTs first:
+ * they hold their NET_ROOT, which holds its SRV_CALL. Returns how many
+ * structures were finalized.
+ */
+static
+ULONG
+RxpScavengeNetStructures(
+    PRDBSS_DEVICE_OBJECT DeviceObject,
+    BOOLEAN VNetRootsOnly)
+{
+    ULONG Count;
+    PRDBSS_SCAVENGER Scavenger;
+
+    PAGED_CODE();
+
+    Count = 0;
+    Scavenger = DeviceObject->pRdbssScavenger;
+    for (;;)
+    {
+        PVOID Instance;
+        NODE_TYPE_CODE Type;
+
+        RxAcquirePrefixTableLockExclusive(DeviceObject->pRxNetNameTable, TRUE);
+        RxAcquireScavengerMutex();
+
+        Instance = NULL;
+        if (!IsListEmpty(&Scavenger->VNetRootFinalizationList))
+        {
+            Instance = CONTAINING_RECORD(Scavenger->VNetRootFinalizationList.Flink, V_NET_ROOT, ScavengerFinalizationList);
+        }
+        else if (!VNetRootsOnly && !IsListEmpty(&Scavenger->NetRootFinalizationList))
+        {
+            Instance = CONTAINING_RECORD(Scavenger->NetRootFinalizationList.Flink, NET_ROOT, ScavengerFinalizationList);
+        }
+        else if (!VNetRootsOnly && !IsListEmpty(&Scavenger->SrvCallFinalizationList))
+        {
+            Instance = CONTAINING_RECORD(Scavenger->SrvCallFinalizationList.Flink, SRV_CALL, ScavengerFinalizationList);
+        }
+
+        if (Instance == NULL)
+        {
+            RxReleaseScavengerMutex();
+            RxReleasePrefixTableLock(DeviceObject->pRxNetNameTable);
+            break;
+        }
+
+        /* Drops the scavenger's reference: one reference is left when nobody
+         * else took the structure back in the meantime */
+        RxpUndoScavengerFinalizationMarking(Instance);
+        RxReleaseScavengerMutex();
+
+        Type = NodeType(Instance);
+        switch (Type)
+        {
+            case RDBSS_NTC_V_NETROOT:
+                RxFinalizeVNetRoot((PV_NET_ROOT)Instance, TRUE, FALSE);
+                break;
+
+            case RDBSS_NTC_NETROOT:
+                RxFinalizeNetRoot((PNET_ROOT)Instance, TRUE, FALSE);
+                break;
+
+            case RDBSS_NTC_SRVCALL:
+                RxFinalizeSrvCall((PSRV_CALL)Instance, TRUE, FALSE);
+                break;
+
+            default:
+                ASSERT(FALSE);
+                break;
+        }
+
+        RxReleasePrefixTableLock(DeviceObject->pRxNetNameTable);
+        ++Count;
+    }
+
+    return Count;
+}
+
+/*
+ * @implemented
+ *
+ * Scavenger pass: dormant FOBXs first (they keep SRV_OPENs and FCBs alive),
+ * then the net structures.
+ */
 VOID
 RxScavengerFinalizeEntries(
     PRDBSS_DEVICE_OBJECT DeviceObject)
 {
-    UNIMPLEMENTED;
+    PRDBSS_SCAVENGER Scavenger;
+    LIST_ENTRY FobxToScavenge;
+
+    PAGED_CODE();
+
+    Scavenger = DeviceObject->pRdbssScavenger;
+
+    InitializeListHead(&FobxToScavenge);
+    RxAcquireScavengerMutex();
+    while (!IsListEmpty(&Scavenger->FobxFinalizationList))
+    {
+        PFOBX Fobx;
+
+        Fobx = CONTAINING_RECORD(Scavenger->FobxFinalizationList.Flink, FOBX, ScavengerFinalizationList);
+        /* Same hand-over as RxScavengeFobxsForNetRoot: our reference goes
+         * with the FOBX to RxpScavengeFobxs */
+        RxReferenceNetFobx(Fobx);
+        RxpUndoScavengerFinalizationMarking(Fobx);
+        InsertTailList(&FobxToScavenge, &Fobx->ScavengerFinalizationList);
+    }
+    RxReleaseScavengerMutex();
+
+    RxpScavengeFobxs(Scavenger, &FobxToScavenge);
+
+    RxpScavengeNetStructures(DeviceObject, FALSE);
 }
 
 /*
@@ -8023,12 +8616,17 @@ RxScavengerTimerRoutine(
     KeSetEvent(&Scavenger->ScavengeEvent, IO_NO_INCREMENT, FALSE);
 }
 
+/*
+ * @implemented
+ */
 BOOLEAN
 RxScavengeVNetRoots(
     PRDBSS_DEVICE_OBJECT RxDeviceObject)
 {
-    UNIMPLEMENTED;
-    return FALSE;
+    PAGED_CODE();
+
+    /* The caller must not hold the prefix table lock */
+    return (RxpScavengeNetStructures(RxDeviceObject, TRUE) != 0);
 }
 
 /*
@@ -8059,22 +8657,25 @@ RxSpinUpRequestsDispatcher(
                                        KernelMode, FALSE, &RxSpinUpDispatcherWaitInterval);
         ASSERT((Status == STATUS_SUCCESS) || (Status == STATUS_TIMEOUT));
 
-        KeAcquireSpinLock(&RxDispatcher->SpinUpRequestsLock, &OldIrql);
-        if (!IsListEmpty(&RxDispatcher->SpinUpRequests))
-        {
-            ListEntry = RemoveHeadList(&RxDispatcher->SpinUpRequests);
-        }
-        else
-        {
-            ListEntry = &RxDispatcher->SpinUpRequests;
-        }
-        KeClearEvent(&RxDispatcher->SpinUpRequestsEvent);
-        KeReleaseSpinLock(&RxDispatcher->SpinUpRequestsLock, OldIrql);
-
-        while (ListEntry != &RxDispatcher->SpinUpRequests)
+        /* Drain the requests. The event is cleared only while the list is
+         * seen empty under the lock, so a request queued meanwhile (inserted
+         * under the lock, event set afterwards) is never missed. (The loop
+         * used to call the first request's routine for ever: it never
+         * advanced, which went unnoticed while nothing queued requests.) */
+        for (;;)
         {
             PWORK_QUEUE_ITEM WorkItem;
             PRX_WORK_QUEUE WorkQueue;
+
+            KeAcquireSpinLock(&RxDispatcher->SpinUpRequestsLock, &OldIrql);
+            if (IsListEmpty(&RxDispatcher->SpinUpRequests))
+            {
+                KeClearEvent(&RxDispatcher->SpinUpRequestsEvent);
+                KeReleaseSpinLock(&RxDispatcher->SpinUpRequestsLock, OldIrql);
+                break;
+            }
+            ListEntry = RemoveHeadList(&RxDispatcher->SpinUpRequests);
+            KeReleaseSpinLock(&RxDispatcher->SpinUpRequestsLock, OldIrql);
 
             WorkItem = CONTAINING_RECORD(ListEntry, WORK_QUEUE_ITEM, List);
             WorkQueue = WorkItem->Parameter;
@@ -8087,6 +8688,9 @@ RxSpinUpRequestsDispatcher(
     } while (RxDispatcher->State == RxDispatcherActive);
 
     KeSetEvent(&RxDispatcher->SpinUpRequestsTearDownEvent, IO_NO_INCREMENT, FALSE);
+    /* Drop the reference taken at start; the system keeps the running
+     * thread alive and RxTearDownDispatcher holds its own */
+    ObDereferenceObject(PsGetCurrentThread());
     PsTerminateSystemThread(STATUS_SUCCESS);
 }
 
@@ -8153,18 +8757,97 @@ RxSpinUpWorkerThread(
     return Status;
 }
 
+/* Runs in the spin-up dispatcher thread */
+static
+VOID
+NTAPI
+RxpSpinUpWorkerThreadsRoutine(
+    PVOID Context)
+{
+    KIRQL OldIrql;
+    BOOLEAN SpinUp;
+    PRX_WORK_QUEUE WorkQueue;
+
+    PAGED_CODE();
+
+    WorkQueue = Context;
+    KeAcquireSpinLock(&WorkQueue->SpinLock, &OldIrql);
+    WorkQueue->SpinUpRequestPending = FALSE;
+    SpinUp = (WorkQueue->State == RxWorkQueueActive &&
+              WorkQueue->NumberOfIdleWorkerThreads < WorkQueue->NumberOfWorkItemsToBeDispatched &&
+              WorkQueue->NumberOfActiveWorkerThreads < WorkQueue->MaximumNumberOfWorkerThreads);
+    if (SpinUp)
+    {
+        ++WorkQueue->NumberOfSpinUpRequests;
+    }
+    KeReleaseSpinLock(&WorkQueue->SpinLock, OldIrql);
+
+    if (SpinUp)
+    {
+        RxSpinUpWorkerThread(WorkQueue, RxBootstrapWorkerThreadDispatcher, WorkQueue);
+    }
+}
+
+/*
+ * @implemented
+ *
+ * Asks the spin-up dispatcher (a system thread, so the new worker is created
+ * from a known context) for one more worker thread on the queue: work items
+ * outnumber the idle workers. RxInsertWorkQueueItem set SpinUpRequestPending.
+ */
 VOID
 RxSpinUpWorkerThreads(
    PRX_WORK_QUEUE WorkQueue)
 {
-    UNIMPLEMENTED;
+    KIRQL OldIrql;
+    PWORK_QUEUE_ITEM Item;
+
+    if (InterlockedIncrement(&WorkQueue->WorkQueueItemForSpinUpWorkerThreadInUse) > 1)
+    {
+        /* Already queued: it decides when it runs */
+        InterlockedDecrement(&WorkQueue->WorkQueueItemForSpinUpWorkerThreadInUse);
+        return;
+    }
+
+    Item = (PWORK_QUEUE_ITEM)&WorkQueue->WorkQueueItemForSpinUpWorkerThread;
+    ExInitializeWorkItem(Item, RxpSpinUpWorkerThreadsRoutine, WorkQueue);
+
+    KeAcquireSpinLock(&RxDispatcher.SpinUpRequestsLock, &OldIrql);
+    if (RxDispatcher.State != RxDispatcherActive)
+    {
+        KeReleaseSpinLock(&RxDispatcher.SpinUpRequestsLock, OldIrql);
+        InterlockedDecrement(&WorkQueue->WorkQueueItemForSpinUpWorkerThreadInUse);
+        return;
+    }
+    InsertTailList(&RxDispatcher.SpinUpRequests, &Item->List);
+    KeReleaseSpinLock(&RxDispatcher.SpinUpRequestsLock, OldIrql);
+
+    KeSetEvent(&RxDispatcher.SpinUpRequestsEvent, IO_NO_INCREMENT, FALSE);
 }
 
+/*
+ * @implemented
+ *
+ * Waits until no scavenger pass runs. A caller holding its FCB does not wait:
+ * the scavenger takes FCBs exclusive to finalize FOBXs, so it cannot be
+ * inside this FCB, and waiting could deadlock with it.
+ */
 VOID
 RxSynchronizeWithScavenger(
     IN PRX_CONTEXT RxContext)
 {
-    UNIMPLEMENTED;
+    PRDBSS_SCAVENGER Scavenger;
+
+    PAGED_CODE();
+
+    if (RxContext->pFcb != NULL && RxIsFcbAcquired((PFCB)RxContext->pFcb))
+    {
+        return;
+    }
+
+    Scavenger = RxContext->RxDeviceObject->pRdbssScavenger;
+    KeWaitForSingleObject(&Scavenger->ScavengeEvent, Executive, KernelMode, FALSE, NULL);
+    KeSetEvent(&Scavenger->ScavengeEvent, IO_NO_INCREMENT, FALSE);
 }
 
 /*
@@ -8278,14 +8961,18 @@ RxTableLookupName(
     Container = NULL;
     LookupString.Buffer = Name->Buffer;
     MaxChar = Name->Length / sizeof(WCHAR);
-    /* We'll perform the lookup, path component after another */
-    for (i = 1; i < MaxChar; ++i)
+    /* We'll perform the lookup, path component after another. The whole
+     * name is a candidate too: a share root ("\server\share", the trailing
+     * separator stripped by the create) must find its NET_ROOT, not just
+     * the SRV_CALL (it used to: every such open created another NET_ROOT
+     * of the same name) */
+    for (i = 1; i <= MaxChar; ++i)
     {
         ULONG Hash;
         PRX_PREFIX_ENTRY CurEntry;
 
         /* Don't cut in the middle of a path element */
-        if (Name->Buffer[i] != OBJ_NAME_PATH_SEPARATOR && Name->Buffer[i] != ':')
+        if (i < MaxChar && Name->Buffer[i] != OBJ_NAME_PATH_SEPARATOR && Name->Buffer[i] != ':')
         {
             continue;
         }
@@ -8488,10 +9175,264 @@ NTSTATUS
 RxTearDownBufferingManager(
    PSRV_CALL SrvCall)
 {
+    KIRQL OldIrql;
+    LIST_ENTRY Leftover;
+
     PAGED_CODE();
 
-    /* Nothing to do */
+    /* The SRV_CALL is going away: requests nobody claimed are dropped. The
+     * accepted ones hold a SRV_OPEN reference, so none can be left once all
+     * the SRV_OPENs are gone; the dispatcher and handler hold a SRV_CALL
+     * reference while they run, so none is running either */
+    InitializeListHead(&Leftover);
+    KeAcquireSpinLock(&SrvCall->BufferingManager.SpinLock, &OldIrql);
+    ASSERT(IsListEmpty(&SrvCall->BufferingManager.HandlerList));
+    ASSERT(IsListEmpty(&SrvCall->BufferingManager.LastChanceHandlerList));
+    ASSERT(!SrvCall->BufferingManager.DispatcherActive);
+    RxpAppendList(&Leftover, &SrvCall->BufferingManager.DispatcherList);
+    KeReleaseSpinLock(&SrvCall->BufferingManager.SpinLock, OldIrql);
+
+    RxpDiscardChangeBufferingStateRequests(&Leftover);
     return STATUS_SUCCESS;
+}
+
+/*
+ * @implemented
+ *
+ * Stop support: makes sure the device's scavenger has neither a timer
+ * request queued nor a pass running, so that the device (which holds the
+ * scavenger) can go away. Called when nothing is left to scavenge.
+ */
+VOID
+RxStopScavenger(
+    IN PRDBSS_DEVICE_OBJECT DeviceObject)
+{
+    KIRQL OldIrql;
+    PLIST_ENTRY Entry;
+    BOOLEAN Removed;
+    LARGE_INTEGER Delay;
+    PRDBSS_SCAVENGER Scavenger;
+
+    PAGED_CODE();
+
+    Scavenger = DeviceObject->pRdbssScavenger;
+    if (Scavenger == NULL)
+    {
+        return;
+    }
+
+    for (;;)
+    {
+        RxAcquireScavengerMutex();
+        if (Scavenger->State == RDBSS_SCAVENGER_INACTIVE)
+        {
+            RxReleaseScavengerMutex();
+            break;
+        }
+
+        if (Scavenger->State == RDBSS_SCAVENGER_DORMANT)
+        {
+            /* Waiting for its timer? Take the request back */
+            Removed = FALSE;
+            KeAcquireSpinLock(&RxTimerLock, &OldIrql);
+            for (Entry = RxTimerQueueHead.Flink; Entry != &RxTimerQueueHead; Entry = Entry->Flink)
+            {
+                if (Entry == &Scavenger->WorkItem.WorkQueueItem.List)
+                {
+                    RemoveEntryList(Entry);
+                    Removed = TRUE;
+                    break;
+                }
+            }
+            KeReleaseSpinLock(&RxTimerLock, OldIrql);
+
+            if (Removed)
+            {
+                Scavenger->State = RDBSS_SCAVENGER_INACTIVE;
+                RxReleaseScavengerMutex();
+                break;
+            }
+        }
+
+        /* Running, or posted to a worker: let it finish */
+        RxReleaseScavengerMutex();
+        Delay.QuadPart = -50LL * 10000;
+        KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+    }
+
+    /* The pass sets the event as its last access to the scavenger */
+    KeWaitForSingleObject(&Scavenger->ScavengeEvent, Executive, KernelMode, FALSE, NULL);
+    KeSetEvent(&Scavenger->ScavengeEvent, IO_NO_INCREMENT, FALSE);
+}
+
+/*
+ * @implemented
+ *
+ * Waits until the work items a mini-redirector device queued have run (they
+ * are counted in its DispatcherContext). New items are refused meanwhile
+ * (RxInsertWorkQueueItem checks pTearDownEvent).
+ */
+VOID
+RxSpinDownMRxDispatcher(
+    IN OUT PRDBSS_DEVICE_OBJECT pMRxDeviceObject)
+{
+    KEVENT TearDownEvent;
+
+    PAGED_CODE();
+
+    KeInitializeEvent(&TearDownEvent, NotificationEvent, FALSE);
+    InterlockedExchangePointer((void * volatile *)&pMRxDeviceObject->DispatcherContext.pTearDownEvent, &TearDownEvent);
+
+    if (pMRxDeviceObject->DispatcherContext.NumberOfWorkerThreads != 0)
+    {
+        KeWaitForSingleObject(&TearDownEvent, Executive, KernelMode, FALSE, NULL);
+    }
+
+    /* Take the event back. If a worker took it first, it is about to signal
+     * it (it may have dropped the count to 0 before we looked, and taken the
+     * pointer after): wait for that signal, the event lives on this stack */
+    if (InterlockedExchangePointer((void * volatile *)&pMRxDeviceObject->DispatcherContext.pTearDownEvent, NULL) == NULL)
+    {
+        KeWaitForSingleObject(&TearDownEvent, Executive, KernelMode, FALSE, NULL);
+    }
+}
+
+/* Work item that only wakes a worker thread during rundown */
+static
+VOID
+NTAPI
+RxpRundownWakeUp(
+    PVOID Context)
+{
+    RxFreePoolWithTag(Context, RX_WORKQ_POOLTAG);
+}
+
+/*
+ * Stops the worker threads of one queue and waits until each has left
+ * RDBSS code (by waiting on the thread object), so the image can unload.
+ */
+static
+VOID
+RxpRundownWorkQueue(
+    PRX_WORK_QUEUE WorkQueue,
+    PRX_WORK_QUEUE_RUNDOWN_CONTEXT RundownContext)
+{
+    KIRQL OldIrql;
+    LONG Active, i;
+
+    PAGED_CODE();
+
+    KeAcquireSpinLock(&WorkQueue->SpinLock, &OldIrql);
+    WorkQueue->State = RxWorkQueueRundownInProgress;
+    WorkQueue->pRundownContext = RundownContext;
+    Active = WorkQueue->NumberOfActiveWorkerThreads;
+    KeReleaseSpinLock(&WorkQueue->SpinLock, OldIrql);
+
+    if (Active == 0)
+    {
+        KeSetEvent(&RundownContext->RundownCompletionEvent, IO_NO_INCREMENT, FALSE);
+    }
+
+    /* Workers wait on the queue without a timeout: give each one an item to
+     * wake up for; after it ran, a worker sees the rundown and exits */
+    for (i = 0; i < Active; ++i)
+    {
+        PRX_WORK_QUEUE_ITEM Item;
+
+        Item = RxAllocatePoolWithTag(NonPagedPool, sizeof(RX_WORK_QUEUE_ITEM), RX_WORKQ_POOLTAG);
+        if (Item == NULL)
+        {
+            break;
+        }
+        ExInitializeWorkItem((PWORK_QUEUE_ITEM)Item, RxpRundownWakeUp, Item);
+        Item->pDeviceObject = RxFileSystemDeviceObject;
+        InterlockedIncrement(&RxFileSystemDeviceObject->DispatcherContext.NumberOfWorkerThreads);
+        InterlockedIncrement(&WorkQueue->NumberOfWorkItemsToBeDispatched);
+        KeInsertQueue(&WorkQueue->Queue, &Item->List);
+    }
+}
+
+/*
+ * @implemented
+ *
+ * Unload support: stops the spin-up dispatcher and every worker thread, and
+ * waits for them to be gone. Called by RxUnload once no minirdr device
+ * exists any more, so no new work can be queued.
+ */
+VOID
+RxTearDownDispatcher(
+    VOID)
+{
+    KIRQL OldIrql;
+    ULONG Queue;
+    LONG i;
+    RX_WORK_QUEUE_RUNDOWN_CONTEXT Rundown[RxMaximumWorkQueue];
+    PETHREAD *Threads[RxMaximumWorkQueue];
+
+    PAGED_CODE();
+
+    if (RxDispatcher.State != RxDispatcherActive)
+    {
+        return;
+    }
+
+    /* The spin-up dispatcher first: no new worker after this */
+    KeAcquireSpinLock(&RxDispatcher.SpinUpRequestsLock, &OldIrql);
+    RxDispatcher.State = RxDispatcherInactive;
+    KeReleaseSpinLock(&RxDispatcher.SpinUpRequestsLock, OldIrql);
+    KeSetEvent(&RxDispatcher.SpinUpRequestsEvent, IO_NO_INCREMENT, FALSE);
+    if (RxpSpinUpDispatcherThread != NULL)
+    {
+        KeWaitForSingleObject(RxpSpinUpDispatcherThread, Executive, KernelMode, FALSE, NULL);
+        ObDereferenceObject(RxpSpinUpDispatcherThread);
+        RxpSpinUpDispatcherThread = NULL;
+    }
+    else
+    {
+        KeWaitForSingleObject(&RxDispatcher.SpinUpRequestsTearDownEvent, Executive, KernelMode, FALSE, NULL);
+    }
+
+    for (Queue = 0; Queue < RxMaximumWorkQueue; ++Queue)
+    {
+        PRX_WORK_QUEUE WorkQueue = &RxDispatcher.pWorkQueueDispatcher->WorkQueue[Queue];
+
+        KeInitializeEvent(&Rundown[Queue].RundownCompletionEvent, NotificationEvent, FALSE);
+        Rundown[Queue].NumberOfThreadsSpunDown = 0;
+        Threads[Queue] = RxAllocatePoolWithTag(NonPagedPool,
+                                               sizeof(PETHREAD) * (WorkQueue->MaximumNumberOfWorkerThreads + 1),
+                                               RX_WORKQ_POOLTAG);
+        Rundown[Queue].ThreadPointers = Threads[Queue];
+        if (Threads[Queue] == NULL)
+        {
+            /* Cannot track the threads: leave this queue running (leak, but
+             * no unload under a live thread) */
+            DPRINT1("No memory to run down work queue %lu\n", Queue);
+            continue;
+        }
+        RxpRundownWorkQueue(WorkQueue, &Rundown[Queue]);
+    }
+
+    for (Queue = 0; Queue < RxMaximumWorkQueue; ++Queue)
+    {
+        if (Threads[Queue] == NULL)
+        {
+            continue;
+        }
+
+        KeWaitForSingleObject(&Rundown[Queue].RundownCompletionEvent, Executive, KernelMode, FALSE, NULL);
+        for (i = 0; i < Rundown[Queue].NumberOfThreadsSpunDown; ++i)
+        {
+            /* The worker kept a reference on itself for us */
+            KeWaitForSingleObject(Threads[Queue][i], Executive, KernelMode, FALSE, NULL);
+            ObDereferenceObject(Threads[Queue][i]);
+        }
+        RxDispatcher.pWorkQueueDispatcher->WorkQueue[Queue].pRundownContext = NULL;
+        RxFreePoolWithTag(Threads[Queue], RX_WORKQ_POOLTAG);
+    }
+
+    /* No timer may fire into an unloaded image */
+    KeCancelTimer(&RxTimer);
+    KeFlushQueuedDpcs();
 }
 
 /*
@@ -8657,7 +9598,20 @@ RxTrackPagingIoResource(
     _In_ ULONG Line,
     _In_ PCSTR File)
 {
-    UNIMPLEMENTED;
+    PFCB Fcb = Instance;
+
+    /* Debugging aid: who last took the paging I/O resource (1 exclusive,
+     * 2 shared), and forget it on release (3) */
+    if (Type == 3)
+    {
+        Fcb->PagingIoResourceFile = NULL;
+        Fcb->PagingIoResourceLine = 0;
+    }
+    else
+    {
+        Fcb->PagingIoResourceFile = (PCHAR)File;
+        Fcb->PagingIoResourceLine = Line;
+    }
 }
 
 /*
@@ -8943,7 +9897,15 @@ _RxAllocatePoolWithTag(
     _In_ SIZE_T NumberOfBytes,
     _In_ ULONG Tag)
 {
-    return ExAllocatePoolWithTagPriority(PoolType, NumberOfBytes, Tag, LowPoolPriority);
+    PVOID Buffer;
+
+    Buffer = ExAllocatePoolWithTagPriority(PoolType, NumberOfBytes, Tag, LowPoolPriority);
+    if (Buffer != NULL)
+    {
+        InterlockedIncrement(&RxpLivePoolAllocations);
+    }
+
+    return Buffer;
 }
 
 /*
@@ -8954,6 +9916,7 @@ NTAPI
 _RxFreePool(
     _In_ PVOID Buffer)
 {
+    InterlockedDecrement(&RxpLivePoolAllocations);
     ExFreePoolWithTag(Buffer, 0);
 }
 
@@ -8966,6 +9929,7 @@ _RxFreePoolWithTag(
     _In_ PVOID Buffer,
     _In_ ULONG Tag)
 {
+    InterlockedDecrement(&RxpLivePoolAllocations);
     ExFreePoolWithTag(Buffer, Tag);
 }
 
@@ -8997,21 +9961,18 @@ __RxAcquireFcb(
         SpecialContext = TRUE;
     }
 
-    /* We don't handle buffering state change yet... */
-    if (!RxIsFcbAcquired(Fcb) && !SpecialContext &&
-        BooleanFlagOn(Fcb->FcbState, FCB_STATE_BUFFERING_STATE_CHANGE_PENDING))
-    {
-        UNIMPLEMENTED;
-    }
+    /* A pending buffering state change does not block acquirers: the change
+     * is applied by the buffering state handler, which takes the FCB
+     * exclusive (waiting) in a worker thread; see
+     * RxpProcessChangeBufferingStateRequests */
 
-    /* Nor special contexts */
+    /* The buffering state handler's own contexts: no RX_CONTEXT behind them */
     if (SpecialContext)
     {
-        UNIMPLEMENTED;
+        CanWait = (RxContext == CHANGE_BUFFERING_STATE_CONTEXT_WAIT);
     }
-
     /* If we don't have a context, assume we can wait! */
-    if (RxContext == NULL)
+    else if (RxContext == NULL)
     {
         CanWait = TRUE;
     }
@@ -9154,7 +10115,11 @@ __RxReleaseFcb(
 
     RxAcquireSerializationMutex();
 
-    BufferingPending = BooleanFlagOn(MrxFcb->FcbState, FCB_STATE_BUFFERING_STATE_CHANGE_PENDING);
+    /* A pending buffering state change is not applied here: the releaser
+     * may still hold the FCB recursively, be in the middle of a Cc call or
+     * be the lazy writer. The buffering state handler applies it, waiting
+     * for the FCB in a worker thread (RxpProcessChangeBufferingStateRequests) */
+    BufferingPending = FALSE;
     IsExclusive = !!RxIsResourceOwnershipStateExclusive(MrxFcb->Header.Resource);
 
     /* If no buffering pending, or no exclusive lock (we can only handle with an exclusive lock),
@@ -9201,7 +10166,11 @@ __RxReleaseFcbForThread(
 
     RxAcquireSerializationMutex();
 
-    BufferingPending = BooleanFlagOn(MrxFcb->FcbState, FCB_STATE_BUFFERING_STATE_CHANGE_PENDING);
+    /* A pending buffering state change is not applied here: the releaser
+     * may still hold the FCB recursively, be in the middle of a Cc call or
+     * be the lazy writer. The buffering state handler applies it, waiting
+     * for the FCB in a worker thread (RxpProcessChangeBufferingStateRequests) */
+    BufferingPending = FALSE;
     IsExclusive = !!RxIsResourceOwnershipStateExclusive(MrxFcb->Header.Resource);
 
     /* If no buffering pending, or no exclusive lock (we can only handle with an exclusive lock),
