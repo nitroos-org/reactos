@@ -707,7 +707,7 @@ GetFontCellSize(
     // LONG LogSize, PointSize;
     LONG CharWidth, CharHeight;
     TEXTMETRICW tm;
-    // SIZE CharSize;
+    SIZE CharSize;
 
     if (!hDC)
         hDC = GetDC(NULL);
@@ -735,13 +735,15 @@ GetFontCellSize(
 
     CharHeight = tm.tmHeight + tm.tmExternalLeading;
 
-#if 0
-    /* Measure real char width more precisely if possible */
-    if (GetTextExtentPoint32W(hDC, L"R", 1, &CharSize))
+    /*
+     * The cell is as wide as the glyphs advance. tmAveCharWidth is an average over the font's glyphs
+     * and is wider than the advance of a monospaced font such as Fixedsys Excelsior (14 against 12 pixels at 24):
+     * text drawn in runs then fills less than the cells it stands for, and what an erase leaves of the
+     * cells' right part stays on the screen.
+     */
+    CharWidth = tm.tmAveCharWidth;
+    if (GetTextExtentPoint32W(hDC, L"0", 1, &CharSize) && CharSize.cx > 0)
         CharWidth = CharSize.cx;
-#else
-    CharWidth = tm.tmAveCharWidth; // tm.tmMaxCharWidth;
-#endif
 
 #if 0
     /*** Logical to Point size ***/
