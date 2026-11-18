@@ -341,6 +341,31 @@ SameKey(PSMBENG_CONN Conn, const SMBUP_HEADER *h, const WCHAR *Server, ULONG Ser
            _wcsnicmp(Conn->Share, Share, ShareBytes / 2) == 0;
 }
 
+/*
+ * The token handle of a CONNECT, as the engine's own from here on. The value comes from the
+ * message: closing it unchecked would close whatever else of ours has that value (the device,
+ * a socket, another user's token, whose value a later handle could then take). Only a handle
+ * to a token object is taken (and later closed); anything else is left alone.
+ */
+static
+HANDLE
+TakeTokenHandle(ULONGLONG Value)
+{
+    HANDLE Token = (HANDLE)(ULONG_PTR)Value;
+    TOKEN_TYPE Type;
+    DWORD Size;
+
+    if (Token == NULL)
+        return NULL;
+    if ((ULONGLONG)(ULONG_PTR)Token != Value ||
+        !GetTokenInformation(Token, TokenType, &Type, sizeof(Type), &Size))
+    {
+        SmbEngLog(0, "CONNECT carries a handle that is not a token: not used, not closed");
+        return NULL;
+    }
+    return Token;
+}
+
 /* The token the driver handed over must be an impersonation token of the request's logon session */
 static
 NTSTATUS
@@ -372,7 +397,7 @@ HandleConnect(PSMBENG_OP Op, HANDLE Event)
     NTSTATUS Status;
 
     /* The driver created this handle for us when we took the request: ours now */
-    Op->Token = (HANDLE)(ULONG_PTR)r->TokenHandle;
+    Op->Token = TakeTokenHandle(r->TokenHandle);
 
     if (!SmbEngStringOf(h, FixedEnd, &r->Server, &Server, &ServerBytes) ||
         !SmbEngStringOf(h, FixedEnd, &r->Share, &Share, &ShareBytes) ||
@@ -575,7 +600,7 @@ Dispatch(PUCHAR Buffer, DWORD Got, HANDLE Event)
         /* A CONNECT we cannot use may still carry a token handle the driver made for us */
         if (Got >= sizeof(*h) + sizeof(SMBUP_CONNECT_REQUEST) && h->Opcode == SmbUpConnect)
         {
-            HANDLE Token = (HANDLE)(ULONG_PTR)((PSMBUP_CONNECT_REQUEST)(h + 1))->TokenHandle;
+            HANDLE Token = TakeTokenHandle(((PSMBUP_CONNECT_REQUEST)(h + 1))->TokenHandle);
 
             if (Token != NULL)
                 CloseHandle(Token);
@@ -599,8 +624,13 @@ Dispatch(PUCHAR Buffer, DWORD Got, HANDLE Event)
     if (Op == NULL)
     {
         /* Nothing to answer with: the driver's time limit ends the request */
-        if (h->Opcode == SmbUpConnect && ((PSMBUP_CONNECT_REQUEST)(h + 1))->TokenHandle)
-            CloseHandle((HANDLE)(ULONG_PTR)((PSMBUP_CONNECT_REQUEST)(h + 1))->TokenHandle);
+        if (h->Opcode == SmbUpConnect)
+        {
+            HANDLE Token = TakeTokenHandle(((PSMBUP_CONNECT_REQUEST)(h + 1))->TokenHandle);
+
+            if (Token != NULL)
+                CloseHandle(Token);
+        }
         return;
     }
     InterlockedIncrement(&SmbEng.OpsLive);
