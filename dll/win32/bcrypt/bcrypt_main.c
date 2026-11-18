@@ -126,6 +126,7 @@ struct hash
     SYMCRYPT_GCM_EXPANDED_KEY      gmac;
     UCHAR                          gmac_nonce[GMAC_NONCE_LENGTH];
     BOOL                           gmac_nonce_set;
+    BOOL                           gmac_finished;
     UCHAR                         *gmac_data;
     SIZE_T                         gmac_data_len;
 };
@@ -168,7 +169,6 @@ struct aes_key
 struct gcm_key
 {
     SYMCRYPT_GCM_EXPANDED_KEY handle;
-    SYMCRYPT_GCM_STATE        state;
 };
 
 struct hkdf_key
@@ -190,7 +190,6 @@ struct symmetric_key
     ULONG            secret_len;
     UCHAR            vector[BLOCK_LENGTH_AES];
     CRITICAL_SECTION cs;
-    BOOLEAN          gcm_chain;   /* a chain of AES-GCM calls is open (its state is in gcm.state) */
     union
     {
         struct aes_key  aes;
@@ -960,6 +959,9 @@ static NTSTATUS get_alg_property( const struct algorithm *alg, const WCHAR *prop
 {
     NTSTATUS status;
 
+    /* the nonce of AES-GMAC belongs to a hash: Windows Server 2022 */
+    if (alg->id == ALG_ID_AES_GMAC && !wcscmp( prop, BCRYPT_INITIALIZATION_VECTOR )) return STATUS_NOT_SUPPORTED;
+
     if ((status = get_generic_alg_property( alg->id, prop, buf, size, ret_size )) != STATUS_NOT_IMPLEMENTED)
         return status;
 
@@ -1005,6 +1007,8 @@ static NTSTATUS get_alg_property( const struct algorithm *alg, const WCHAR *prop
 
 static NTSTATUS set_alg_property( struct algorithm *alg, const WCHAR *prop, UCHAR *value, ULONG size, ULONG flags )
 {
+    if (alg->id == ALG_ID_AES_GMAC && !wcscmp( prop, BCRYPT_INITIALIZATION_VECTOR )) return STATUS_INVALID_HANDLE;
+
     switch (alg->id)
     {
     case ALG_ID_3DES:
@@ -1305,9 +1309,17 @@ NTSTATUS WINAPI BCryptSetProperty( BCRYPT_HANDLE handle, const WCHAR *prop, UCHA
         /* the nonce of AES-GMAC (VERIFY ON ORACLE: the property) */
         if ((hash->flags & HASH_FLAG_GMAC) && !wcscmp( prop, BCRYPT_INITIALIZATION_VECTOR ))
         {
-            if (!value || size != sizeof(hash->gmac_nonce)) return STATUS_INVALID_PARAMETER;
+            if (size != sizeof(hash->gmac_nonce)) return STATUS_INVALID_BUFFER_SIZE;
+            if (!value) return STATUS_INVALID_PARAMETER;
+            /* Windows Server 2022: the nonce can come after the data once, but not be replaced after data were hashed */
+            if (hash->gmac_nonce_set && hash->gmac_data_len) return STATUS_REQUEST_OUT_OF_SEQUENCE;
             memcpy( hash->gmac_nonce, value, size );
             hash->gmac_nonce_set = TRUE;
+            /* the nonce starts the message: data hashed before it are dropped (the tag is then E(nonce || 1), as for an empty message) */
+            secure_zero( hash->gmac_data, hash->gmac_data_len );
+            free( hash->gmac_data );
+            hash->gmac_data = NULL;
+            hash->gmac_data_len = 0;
             return STATUS_SUCCESS;
         }
         return STATUS_NOT_SUPPORTED;
@@ -1473,7 +1485,8 @@ static NTSTATUS create_hash( const struct algorithm *alg, UCHAR *secret, ULONG s
     if (is_mac)
     {
         /* the key of the AES MACs is the secret: an AES key of 16, 24 or 32 bytes */
-        if (!secret || (secret_len != 16 && secret_len != 24 && secret_len != 32)) return STATUS_INVALID_PARAMETER;
+        if (!secret || (secret_len != 16 && secret_len != 24 && secret_len != 32))
+            return alg->id == ALG_ID_AES_GMAC ? STATUS_INVALID_BUFFER_SIZE : STATUS_INVALID_PARAMETER;
     }
     else if (secret && !(alg->flags & BCRYPT_ALG_HANDLE_HMAC_FLAG)) return STATUS_INVALID_PARAMETER;
 
@@ -1660,11 +1673,14 @@ static NTSTATUS finish_hash( struct hash *hash, UCHAR *output )
     {
         SYMCRYPT_GCM_STATE state;
 
-        if (!hash->gmac_nonce_set) return STATUS_INVALID_PARAMETER;
+        if (!hash->gmac_nonce_set) return STATUS_REQUEST_OUT_OF_SEQUENCE;
+        /* Windows Server 2022: a hash that was finished cannot be finished again unless it is reusable */
+        if (hash->gmac_finished) return STATUS_INVALID_HANDLE;
         SymCryptGcmInit( &state, &hash->gmac, hash->gmac_nonce, sizeof(hash->gmac_nonce) );
         SymCryptGcmAuthPart( &state, hash->gmac_data, hash->gmac_data_len );
         SymCryptGcmEncryptFinal( &state, output, hash->len );
         secure_zero( &state, sizeof(state) );
+        hash->gmac_finished = !(hash->flags & HASH_FLAG_REUSABLE);
     }
     else if (hash->flags & HASH_FLAG_HMAC)
         SymCryptHmacResult( &hash->hmac_state, output );
@@ -1941,59 +1957,189 @@ static NTSTATUS decrypt_aes_ecb( const struct key *key, const UCHAR *input, ULON
     return status;
 }
 
-static NTSTATUS decrypt_aes_gcm( struct key *key, const UCHAR *input, ULONG input_len,
-                                 const BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO *info, UCHAR *output, ULONG output_len,
-                                 ULONG *ret_len )
+/* Chained calls of AES-GCM, as measured on Windows Server 2022 (x64 and x86 alike; known answer: McGrew and Viega test case 4,
+ * split in two, three and four calls). The state does not live in the key handle: the caller keeps it between the calls.
+ *  - pbIV (16 bytes, cbIV is not looked at) is the running counter block, pbMacContext (at least 16 bytes) the running GHASH state;
+ *    both are needed on every call, as is pbNonce.
+ *  - cbAAD and cbData are the bytes of associated data and of data processed BEFORE the call. A call with both zero starts a message:
+ *    the counter becomes nonce || 2, the GHASH state is cleared and pbAuthData (all of it) is hashed. The associated data of any
+ *    other call is ignored.
+ *  - A call with CHAIN_CALLS takes a multiple of 16 bytes (STATUS_INVALID_BUFFER_SIZE otherwise) and only updates the two buffers.
+ *    A call without it ends the message (flags IN_PROGRESS alone): it may take any length, produces or checks the tag from the length
+ *    block (cbAAD, cbData + this call's length) and the counter block nonce || 1, and wipes the two buffers.
+ *  - cbTag has to be 12 to 16 on every call, pbTag is needed on the last one.
+ * What this does not do: Windows crashes on a final call without pbTag and on a first call with IN_PROGRESS; these answer
+ * STATUS_INVALID_PARAMETER here. */
+VOID SYMCRYPT_CALL SymCryptGHashAppendData( PCSYMCRYPT_GHASH_EXPANDED_KEY expandedKey, PSYMCRYPT_GF128_ELEMENT pState,
+                                            PCBYTE pbData, SIZE_T cbData );
+VOID SYMCRYPT_CALL SymCryptGHashResult( PCSYMCRYPT_GF128_ELEMENT pState, PBYTE pbResult );
+
+#define GCM_STATE_LENGTH 16
+C_ASSERT( sizeof(SYMCRYPT_GF128_ELEMENT) == GCM_STATE_LENGTH );
+
+static void gcm_ghash_padded( const SYMCRYPT_GCM_EXPANDED_KEY *key, SYMCRYPT_GF128_ELEMENT *state, const UCHAR *data,
+                              SIZE_T len )
 {
-    const BOOL chain = info && (info->dwFlags & BCRYPT_AUTH_MODE_CHAIN_CALLS_FLAG);
-    const BOOL progress = info && (info->dwFlags & BCRYPT_AUTH_MODE_IN_PROGRESS_FLAG);
-    SYMCRYPT_ERROR error = SYMCRYPT_NO_ERROR;
-    NTSTATUS status = STATUS_SUCCESS;
+    UCHAR block[16];
+
+    SymCryptGHashAppendData( &key->ghashKey, state, data, len & ~(SIZE_T)15 );
+    if (len & 15)
+    {
+        memset( block, 0, sizeof(block) );
+        memcpy( block, data + (len & ~(SIZE_T)15), len & 15 );
+        SymCryptGHashAppendData( &key->ghashKey, state, block, sizeof(block) );
+    }
+}
+
+static NTSTATUS gcm_chained( const struct key *key, BOOL decrypt, const UCHAR *input, ULONG input_len,
+                             const BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO *info, UCHAR *iv, UCHAR *output,
+                             ULONG output_len, ULONG *ret_len )
+{
+    const SYMCRYPT_GCM_EXPANDED_KEY *gcm = &key->s.gcm.handle;
+    const BOOL chain = info->dwFlags & BCRYPT_AUTH_MODE_CHAIN_CALLS_FLAG;
+    SYMCRYPT_GF128_ELEMENT state;
+    UCHAR counter[16], block[16], stream[16], tag[16];
+    ULONG off, n, i;
+    BOOL start;
+
+    if (!info->pbNonce || SymCryptGcmValidateParameters( SymCryptAesBlockCipher, info->cbNonce, 0, 0, 12 ))
+        return STATUS_INVALID_PARAMETER;
+    if (info->cbTag < 12 || info->cbTag > 16 || (!chain && !info->pbTag)) return STATUS_INVALID_PARAMETER;
+    if (!iv || !info->pbMacContext || info->cbMacContext < GCM_STATE_LENGTH) return STATUS_INVALID_PARAMETER;
+    if (info->cbAuthData && !info->pbAuthData) return STATUS_INVALID_PARAMETER;
+    if (chain && (input_len & 15)) return STATUS_INVALID_BUFFER_SIZE;
+    start = !info->cbAAD && !info->cbData;
+    /* a first call that carries data and IN_PROGRESS with CHAIN_CALLS crashes bcrypt on Windows */
+    if (start && chain && (info->dwFlags & BCRYPT_AUTH_MODE_IN_PROGRESS_FLAG) && input_len) return STATUS_INVALID_PARAMETER;
+
+    if (!output && input_len) return STATUS_SUCCESS;  /* size query */
+    if (output_len < input_len) return STATUS_BUFFER_TOO_SMALL;
+
+    if (start)
+    {
+        memset( &state, 0, sizeof(state) );
+        memcpy( counter, info->pbNonce, 12 );
+        counter[12] = counter[13] = counter[14] = 0;
+        counter[15] = 2;
+        if (info->cbAuthData) gcm_ghash_padded( gcm, &state, info->pbAuthData, info->cbAuthData );
+    }
+    else
+    {
+        memcpy( &state, info->pbMacContext, sizeof(state) );
+        memcpy( counter, iv, sizeof(counter) );
+    }
+
+    for (off = 0; off < input_len; off += 16)
+    {
+        n = input_len - off < 16 ? input_len - off : 16;
+        gcm->pBlockCipher->encryptFunc( &gcm->blockcipherKey, counter, stream );
+        for (i = 15; i >= 12 && !++counter[i]; i--) ;
+        memset( block, 0, sizeof(block) );
+        memcpy( block, input + off, n );
+        if (decrypt) SymCryptGHashAppendData( &gcm->ghashKey, &state, block, sizeof(block) );
+        for (i = 0; i < n; i++) block[i] ^= stream[i];
+        if (!decrypt)
+        {
+            memset( block + n, 0, sizeof(block) - n );
+            SymCryptGHashAppendData( &gcm->ghashKey, &state, block, sizeof(block) );
+        }
+        memcpy( output + off, block, n );
+    }
+
+    if (chain)
+    {
+        memcpy( iv, counter, sizeof(counter) );
+        memcpy( info->pbMacContext, &state, sizeof(state) );
+        SymCryptWipeKnownSize( &state, sizeof(state) );
+        return STATUS_SUCCESS;
+    }
+
+    /* the last call: length block, then the tag E(nonce || 1) xor GHASH; the nonce is the one the counter carries */
+    {
+        UINT64 lens[2];
+        UCHAR lenblock[16], j0[16], mask[16], ghash[16];
+
+        lens[0] = (UINT64)(start ? info->cbAuthData : info->cbAAD) * 8;
+        lens[1] = ((UINT64)info->cbData + input_len) * 8;
+        for (i = 0; i < 8; i++)
+        {
+            lenblock[i] = (UCHAR)(lens[0] >> (56 - 8 * i));
+            lenblock[8 + i] = (UCHAR)(lens[1] >> (56 - 8 * i));
+        }
+        SymCryptGHashAppendData( &gcm->ghashKey, &state, lenblock, sizeof(lenblock) );
+        SymCryptGHashResult( &state, ghash );
+        memcpy( j0, start ? info->pbNonce : iv, 12 );
+        j0[12] = j0[13] = j0[14] = 0;
+        j0[15] = 1;
+        gcm->pBlockCipher->encryptFunc( &gcm->blockcipherKey, j0, mask );
+        for (i = 0; i < 16; i++) tag[i] = ghash[i] ^ mask[i];
+    }
+
+    SymCryptWipeKnownSize( &state, sizeof(state) );
+    memset( iv, 0, sizeof(counter) );
+    memset( info->pbMacContext, 0, GCM_STATE_LENGTH );
+
+    if (!decrypt)
+    {
+        memcpy( info->pbTag, tag, info->cbTag );
+        return STATUS_SUCCESS;
+    }
+    for (i = 0, n = 0; i < info->cbTag; i++) n |= tag[i] ^ info->pbTag[i];
+    if (n)
+    {
+        SymCryptWipe( output, input_len );
+        return STATUS_AUTH_TAG_MISMATCH;
+    }
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS decrypt_aes_gcm( struct key *key, const UCHAR *input, ULONG input_len,
+                                 const BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO *info, UCHAR *iv, UCHAR *output,
+                                 ULONG output_len, ULONG *ret_len )
+{
+    SYMCRYPT_GCM_STATE state;
+    SYMCRYPT_ERROR error;
 
     if (!info) return STATUS_INVALID_PARAMETER;
-    /* the nonce and the associated data start a message, the tag ends it */
-    if (!progress && (!info->pbNonce || SymCryptGcmValidateParameters( SymCryptAesBlockCipher, info->cbNonce,
-                                                                       info->cbAuthData, 0, 12 )))
+    if (info->dwFlags & (BCRYPT_AUTH_MODE_CHAIN_CALLS_FLAG | BCRYPT_AUTH_MODE_IN_PROGRESS_FLAG))
+        return gcm_chained( key, TRUE, input, input_len, info, iv, output, output_len, ret_len );
+
+    if (!info->pbNonce || SymCryptGcmValidateParameters( SymCryptAesBlockCipher, info->cbNonce, info->cbAuthData, 0, 12 ))
         return STATUS_INVALID_PARAMETER;
-    if (!chain && (!info->pbTag || info->cbTag < 12 || info->cbTag > 16)) return STATUS_INVALID_PARAMETER;
-    if (!chain && !progress && SymCryptGcmValidateParameters( SymCryptAesBlockCipher, info->cbNonce, info->cbAuthData,
-                                                              input_len, info->cbTag ))
+    if (!info->pbTag || info->cbTag < 12 || info->cbTag > 16) return STATUS_INVALID_PARAMETER;
+    if (SymCryptGcmValidateParameters( SymCryptAesBlockCipher, info->cbNonce, info->cbAuthData, input_len, info->cbTag ))
         return STATUS_INVALID_PARAMETER;
 
     if (!output) return STATUS_SUCCESS;
     if (output_len < *ret_len) return STATUS_BUFFER_TOO_SMALL;
 
-    EnterCriticalSection( &key->s.cs );
+    SymCryptGcmInit( &state, &key->s.gcm.handle, info->pbNonce, info->cbNonce );
+    SymCryptGcmAuthPart( &state, info->pbAuthData, info->cbAuthData );
+    SymCryptGcmDecryptPart( &state, input, output, input_len );
+    error = SymCryptGcmDecryptFinal( &state, info->pbTag, info->cbTag );
+    SymCryptWipeKnownSize( &state, sizeof(state) );
 
-    /* a chain of calls keeps its state in the key: one chain at a time per key handle */
-    if (progress && !key->s.gcm_chain) status = STATUS_INVALID_PARAMETER;
-    else
-    {
-        if (!progress)
-        {
-            SymCryptGcmInit( &key->s.gcm.state, &key->s.gcm.handle, info->pbNonce, info->cbNonce );
-            SymCryptGcmAuthPart( &key->s.gcm.state, info->pbAuthData, info->cbAuthData );
-        }
-        SymCryptGcmDecryptPart( &key->s.gcm.state, input, output, input_len );
-        key->s.gcm_chain = chain;
-        if (!chain) error = SymCryptGcmDecryptFinal( &key->s.gcm.state, info->pbTag, info->cbTag );
-    }
-
-    LeaveCriticalSection( &key->s.cs );
-
-    if (status) return status;
     if (error == SYMCRYPT_AUTHENTICATION_FAILURE) return STATUS_AUTH_TAG_MISMATCH;
     if (error) return STATUS_INTERNAL_ERROR;
     return STATUS_SUCCESS;
 }
 
 /* AES-CCM (SP800-38C): the whole message in one call; the nonce is 7 to 13 bytes, the tag 4, 6, ... 16 */
-static NTSTATUS validate_aes_ccm( const BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO *info, ULONG input_len )
+static NTSTATUS validate_aes_ccm( const BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO *info, ULONG input_len,
+                                  const UCHAR *output )
 {
-    if (!info || !info->pbNonce || !info->pbTag) return STATUS_INVALID_PARAMETER;
-    /* whether Windows chains calls of CCM is not known: refused (VERIFY ON ORACLE) */
+    if (!info) return STATUS_INVALID_PARAMETER;
+    /* Windows (Server 2022: about 62000 combinations of the members of a first call were tried, none was accepted with an output buffer, see the AES-CCM rows of the
+     * apitest) does not chain CCM: a size query answers as always, a call with CHAIN_CALLS and a pbMacContext first has its input
+     * length checked against the block size, every other call answers STATUS_INVALID_PARAMETER */
     if (info->dwFlags & (BCRYPT_AUTH_MODE_CHAIN_CALLS_FLAG | BCRYPT_AUTH_MODE_IN_PROGRESS_FLAG))
-        return STATUS_NOT_SUPPORTED;
+    {
+        if (!output && input_len) return STATUS_SUCCESS;
+        if ((info->dwFlags & BCRYPT_AUTH_MODE_CHAIN_CALLS_FLAG) && info->pbMacContext && (input_len & 15))
+            return STATUS_INVALID_BUFFER_SIZE;
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (!info->pbNonce || !info->pbTag) return STATUS_INVALID_PARAMETER;
     if (info->cbAuthData && !info->pbAuthData) return STATUS_INVALID_PARAMETER;
     if (SymCryptCcmValidateParameters( SymCryptAesBlockCipher, info->cbNonce, info->cbAuthData, input_len,
                                        info->cbTag ))
@@ -2008,7 +2154,7 @@ static NTSTATUS decrypt_aes_ccm( struct key *key, const UCHAR *input, ULONG inpu
     SYMCRYPT_ERROR error;
     NTSTATUS status;
 
-    if ((status = validate_aes_ccm( info, input_len ))) return status;
+    if ((status = validate_aes_ccm( info, input_len, output ))) return status;
 
     if (!output) return STATUS_SUCCESS;
     if (output_len < *ret_len) return STATUS_BUFFER_TOO_SMALL;
@@ -2086,7 +2232,12 @@ static NTSTATUS decrypt_symmetric( struct key *key, const UCHAR *input, ULONG in
     *ret_len = input_len;
 
     if ((key->s.mode == CHAIN_MODE_GCM || key->s.mode == CHAIN_MODE_CCM) && (flags & BCRYPT_BLOCK_PADDING))
+    {
+        /* Windows Server 2022: a size query succeeds, with a buffer the call fails and reports the unpadded size */
+        if (!output) return STATUS_SUCCESS;
+        *ret_len = input_len >= BLOCK_LENGTH_AES ? input_len - BLOCK_LENGTH_AES : 0;
         return STATUS_INVALID_PARAMETER;
+    }
     if (key->s.mode == CHAIN_MODE_ECB && iv) return STATUS_INVALID_PARAMETER;
 
     switch (key->alg_id)
@@ -2099,7 +2250,7 @@ static NTSTATUS decrypt_symmetric( struct key *key, const UCHAR *input, ULONG in
             return decrypt_aes_ecb( key, input, input_len, output, output_len, ret_len, flags );
 
         case CHAIN_MODE_GCM:
-            return decrypt_aes_gcm( key, input, input_len, info, output, output_len, ret_len );
+            return decrypt_aes_gcm( key, input, input_len, info, iv, output, output_len, ret_len );
 
         case CHAIN_MODE_CCM:
             return decrypt_aes_ccm( key, input, input_len, info, output, output_len, ret_len );
@@ -2359,44 +2510,30 @@ static NTSTATUS encrypt_aes_ecb( const struct key *key, const UCHAR *input, ULON
 }
 
 static NTSTATUS encrypt_aes_gcm( struct key *key, const UCHAR *input, ULONG input_len,
-                                 const BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO *info, UCHAR *output, ULONG output_len,
-                                 ULONG *ret_len )
+                                 const BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO *info, UCHAR *iv, UCHAR *output,
+                                 ULONG output_len, ULONG *ret_len )
 {
-    const BOOL chain = info && (info->dwFlags & BCRYPT_AUTH_MODE_CHAIN_CALLS_FLAG);
-    const BOOL progress = info && (info->dwFlags & BCRYPT_AUTH_MODE_IN_PROGRESS_FLAG);
-    NTSTATUS status = STATUS_SUCCESS;
+    SYMCRYPT_GCM_STATE state;
 
     if (!info) return STATUS_INVALID_PARAMETER;
-    /* the nonce and the associated data start a message, the tag ends it */
-    if (!progress && (!info->pbNonce || SymCryptGcmValidateParameters( SymCryptAesBlockCipher, info->cbNonce,
-                                                                       info->cbAuthData, 0, 12 )))
+    if (info->dwFlags & (BCRYPT_AUTH_MODE_CHAIN_CALLS_FLAG | BCRYPT_AUTH_MODE_IN_PROGRESS_FLAG))
+        return gcm_chained( key, FALSE, input, input_len, info, iv, output, output_len, ret_len );
+
+    if (!info->pbNonce || SymCryptGcmValidateParameters( SymCryptAesBlockCipher, info->cbNonce, info->cbAuthData, 0, 12 ))
         return STATUS_INVALID_PARAMETER;
-    if (!chain && (!info->pbTag || info->cbTag < 12 || info->cbTag > 16)) return STATUS_INVALID_PARAMETER;
-    if (!chain && !progress && SymCryptGcmValidateParameters( SymCryptAesBlockCipher, info->cbNonce, info->cbAuthData,
-                                                              input_len, info->cbTag ))
+    if (!info->pbTag || info->cbTag < 12 || info->cbTag > 16) return STATUS_INVALID_PARAMETER;
+    if (SymCryptGcmValidateParameters( SymCryptAesBlockCipher, info->cbNonce, info->cbAuthData, input_len, info->cbTag ))
         return STATUS_INVALID_PARAMETER;
 
-    if (!chain && !progress && input && !input_len) return STATUS_SUCCESS;
+    if (input && !input_len) return STATUS_SUCCESS;
     if (output_len < *ret_len) return STATUS_BUFFER_TOO_SMALL;
 
-    EnterCriticalSection( &key->s.cs );
-
-    /* a chain of calls keeps its state in the key: one chain at a time per key handle */
-    if (progress && !key->s.gcm_chain) status = STATUS_INVALID_PARAMETER;
-    else
-    {
-        if (!progress)
-        {
-            SymCryptGcmInit( &key->s.gcm.state, &key->s.gcm.handle, info->pbNonce, info->cbNonce );
-            SymCryptGcmAuthPart( &key->s.gcm.state, info->pbAuthData, info->cbAuthData );
-        }
-        SymCryptGcmEncryptPart( &key->s.gcm.state, input, output, input_len );
-        key->s.gcm_chain = chain;
-        if (!chain) SymCryptGcmEncryptFinal( &key->s.gcm.state, info->pbTag, info->cbTag );
-    }
-
-    LeaveCriticalSection( &key->s.cs );
-    return status;
+    SymCryptGcmInit( &state, &key->s.gcm.handle, info->pbNonce, info->cbNonce );
+    SymCryptGcmAuthPart( &state, info->pbAuthData, info->cbAuthData );
+    SymCryptGcmEncryptPart( &state, input, output, input_len );
+    SymCryptGcmEncryptFinal( &state, info->pbTag, info->cbTag );
+    SymCryptWipeKnownSize( &state, sizeof(state) );
+    return STATUS_SUCCESS;
 }
 
 static NTSTATUS encrypt_aes_ccm( struct key *key, const UCHAR *input, ULONG input_len,
@@ -2405,7 +2542,7 @@ static NTSTATUS encrypt_aes_ccm( struct key *key, const UCHAR *input, ULONG inpu
 {
     NTSTATUS status;
 
-    if ((status = validate_aes_ccm( info, input_len ))) return status;
+    if ((status = validate_aes_ccm( info, input_len, output ))) return status;
 
     if (!output) return STATUS_SUCCESS;
     if (output_len < *ret_len) return STATUS_BUFFER_TOO_SMALL;
@@ -2471,7 +2608,13 @@ static NTSTATUS encrypt_symmetric( struct key *key, const UCHAR *input, ULONG in
 
     if (key->s.mode == CHAIN_MODE_ECB && iv) return STATUS_INVALID_PARAMETER;
     if ((key->s.mode == CHAIN_MODE_GCM || key->s.mode == CHAIN_MODE_CCM) && (flags & BCRYPT_BLOCK_PADDING))
+    {
+        /* Windows Server 2022: the size is the padded one; a buffer that is too small for it fails as such, any other call fails */
+        *ret_len = (input_len + BLOCK_LENGTH_AES) & ~(ULONG)(BLOCK_LENGTH_AES - 1);
+        if (!output) return STATUS_SUCCESS;
+        if (output_len < *ret_len) return STATUS_BUFFER_TOO_SMALL;
         return STATUS_INVALID_PARAMETER;
+    }
 
     switch (key->alg_id)
     {
@@ -2483,7 +2626,7 @@ static NTSTATUS encrypt_symmetric( struct key *key, const UCHAR *input, ULONG in
             return encrypt_aes_ecb( key, input, input_len, output, output_len, ret_len, flags );
 
         case CHAIN_MODE_GCM:
-            return encrypt_aes_gcm( key, input, input_len, info, output, output_len, ret_len );
+            return encrypt_aes_gcm( key, input, input_len, info, iv, output, output_len, ret_len );
 
         case CHAIN_MODE_CCM:
             return encrypt_aes_ccm( key, input, input_len, info, output, output_len, ret_len );
@@ -3978,11 +4121,7 @@ static NTSTATUS duplicate_key( const struct key *src, struct key **ret_key )
             destroy_key( dst );
             return status;
         }
-        if (src->s.mode == CHAIN_MODE_GCM)
-        {
-            SymCryptGcmKeyCopy( &src->s.gcm.handle, &dst->s.gcm.handle );
-            SymCryptGcmStateCopy( &src->s.gcm.state, &src->s.gcm.handle, &dst->s.gcm.state );
-        }
+        if (src->s.mode == CHAIN_MODE_GCM) SymCryptGcmKeyCopy( &src->s.gcm.handle, &dst->s.gcm.handle );
         else SymCryptAesKeyCopy( &src->s.aes.handle, &dst->s.aes.handle );
         break;
 
@@ -4992,7 +5131,16 @@ static NTSTATUS key_derivation_sp800_108( const struct key *key, BCryptBufferDes
             switch (buf->BufferType)
             {
             case KDF_HASH_ALGORITHM:
-                if (!hash_name) hash_name = buf->pvBuffer ? buf->pvBuffer : L"";
+                if (!hash_name)
+                {
+                    /* an empty buffer is refused (Windows Server 2022); the name is not looked at beyond its terminator */
+                    if (!buf->cbBuffer || !buf->pvBuffer)
+                    {
+                        *ret_len = 0;
+                        return STATUS_INVALID_PARAMETER;
+                    }
+                    hash_name = buf->pvBuffer;
+                }
                 break;
             case KDF_LABEL:
                 if (have_label) break;
@@ -5015,7 +5163,21 @@ static NTSTATUS key_derivation_sp800_108( const struct key *key, BCryptBufferDes
             }
         }
     }
-    if (hash_name && !(mac = get_hmac_from_hash( hash_name ))) return STATUS_INVALID_PARAMETER;
+    /* Windows takes the SHA family, MD5, AES-CMAC and also MD2 and MD4 (HMAC-MD2 and -MD4 are not in SymCrypt: those two
+     * answer STATUS_NOT_SUPPORTED here), and STATUS_NOT_SUPPORTED for a name it does not know */
+    if (hash_name)
+    {
+        if (!wcscmp( hash_name, BCRYPT_MD5_ALGORITHM )) mac = SymCryptHmacMd5Algorithm;
+        else if (!wcscmp( hash_name, BCRYPT_AES_CMAC_ALGORITHM )) mac = SymCryptAesCmacAlgorithm;
+        else if (!(mac = get_hmac_from_hash( hash_name )))
+        {
+            *ret_len = 0;
+            return STATUS_NOT_SUPPORTED;
+        }
+        /* AES-CMAC needs an AES key as the secret */
+        if (mac == SymCryptAesCmacAlgorithm && key->s.secret_len != 16 && key->s.secret_len != 24 && key->s.secret_len != 32)
+            return STATUS_INVALID_PARAMETER;
+    }
     if (!output_len) return STATUS_INVALID_PARAMETER;
 
     if (SymCryptSp800_108( mac, key->s.secret, key->s.secret_len, label, label_len, context, context_len, output,
