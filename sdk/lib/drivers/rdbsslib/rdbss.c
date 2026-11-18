@@ -509,6 +509,16 @@ NTSTATUS
 RxXXXControlFileCallthru(
     PRX_CONTEXT Context);
 
+static
+NTSTATUS
+RxpGatherLocksForUnlockAll(
+    IN PRX_CONTEXT RxContext,
+    IN PFCB Fcb,
+    IN PFILE_OBJECT FileObject,
+    IN PEPROCESS Process,
+    IN BOOLEAN ByKey,
+    IN ULONG Key);
+
 PVOID
 NTAPI
 _RxAllocatePoolWithTag(
@@ -2062,13 +2072,27 @@ RxCommonCleanup(
             Context->LowIoContext.Flags |= LOWIO_CONTEXT_FLAG_SAVEUNLOCKS;
             if (NodeType(Fcb) == RDBSS_NTC_STORAGE_TYPE_FILE)
             {
-                /* First, unlock */
+                /* First, collect the locks this handle still holds (the
+                 * server holds them too unless they were buffered locally),
+                 * then drop them locally */
+                Context->LowIoContext.ParamsFor.Locks.LockList = NULL;
+                if (!BooleanFlagOn(Fcb->FcbState, FCB_STATE_LOCK_BUFFERING_ENABLED))
+                {
+                    /* A failure here only means the server keeps the locks
+                     * until the handle is closed there */
+                    RxpGatherLocksForUnlockAll(Context, Fcb, FileObject, RxGetRequestorProcess(Context), FALSE, 0);
+                }
                 FsRtlFastUnlockAll(&Fcb->Specific.Fcb.FileLock, FileObject, RxGetRequestorProcess(Context), Context);
 
                 /* If there are still locks to release, proceed */
                 if (Context->LowIoContext.ParamsFor.Locks.LockList != NULL)
                 {
+                    PLOWIO_LOCK_LIST LockList;
+
+                    /* RxInitializeLowIoContext() keeps the lock list */
+                    LockList = Context->LowIoContext.ParamsFor.Locks.LockList;
                     RxInitializeLowIoContext(&Context->LowIoContext, LOWIO_OP_UNLOCK_MULTIPLE);
+                    Context->LowIoContext.ParamsFor.Locks.LockList = LockList;
                     Context->LowIoContext.ParamsFor.Locks.Flags = 0;
                     Status = RxLowIoLockControlShell(Context);
                 }
@@ -2891,13 +2915,133 @@ RxCommonFlushBuffers(
     return STATUS_NOT_IMPLEMENTED;
 }
 
+/*
+ * @implemented
+ *
+ * Byte-range locks. Two modes, chosen by the buffering state the
+ * mini-redirector granted for the FCB:
+ * - FCB_STATE_LOCK_BUFFERING_ENABLED (for instance an exclusive oplock): the
+ *   lock is local only, FsRtlProcessFileLock completes the IRP through
+ *   RxLockOperationCompletion;
+ * - otherwise the lock goes to the mini-redirector (LOWIO_OP_*LOCK*) and, once
+ *   the server granted it, is recorded in the FCB's FILE_LOCK so that read
+ *   and write checks (FsRtlCheckLockFor*Access) see it.
+ * Lock order: the FCB resource is held (shared, exclusive for unlock-all)
+ * only to decide the mode and, for unlock-all, to enumerate the local locks;
+ * it is released before the request goes to the mini-redirector, so a lock
+ * that waits on the server never blocks writers that need the FCB.
+ */
 NTSTATUS
 NTAPI
 RxCommonLockControl(
     PRX_CONTEXT Context)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PIRP Irp;
+    PFCB Fcb;
+    PFOBX Fobx;
+    NTSTATUS Status;
+    PIO_STACK_LOCATION Stack;
+    BOOLEAN Exclusive;
+
+    PAGED_CODE();
+
+    Fcb = (PFCB)Context->pFcb;
+    Fobx = (PFOBX)Context->pFobx;
+    Irp = Context->CurrentIrp;
+    Stack = Context->CurrentIrpSp;
+
+    DPRINT("RxCommonLockControl(%p) FCB: %p, FOBX: %p, Minor: %x\n", Context, Fcb, Fobx, Stack->MinorFunction);
+
+    /* Only files have locks */
+    if (NodeType(Fcb) != RDBSS_NTC_STORAGE_TYPE_FILE || Fobx == NULL)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    switch (Stack->MinorFunction)
+    {
+        case IRP_MN_LOCK:
+        case IRP_MN_UNLOCK_SINGLE:
+        case IRP_MN_UNLOCK_ALL:
+        case IRP_MN_UNLOCK_ALL_BY_KEY:
+            break;
+
+        default:
+            return STATUS_INVALID_DEVICE_REQUEST;
+    }
+
+    /* The request may wait on the server: never block the caller's thread
+     * for an asynchronous request */
+    if (!BooleanFlagOn(Context->Flags, RX_CONTEXT_FLAG_WAIT))
+    {
+        return RxFsdPostRequest(Context);
+    }
+
+    Exclusive = (Stack->MinorFunction == IRP_MN_UNLOCK_ALL || Stack->MinorFunction == IRP_MN_UNLOCK_ALL_BY_KEY);
+    Status = (Exclusive ? RxAcquireExclusiveFcb(Context, Fcb) : RxAcquireSharedFcb(Context, Fcb));
+    if (Status == STATUS_LOCK_NOT_GRANTED)
+    {
+        return RxFsdPostRequest(Context);
+    }
+    else if (!NT_SUCCESS(Status))
+    {
+        return Status;
+    }
+
+    /* Let the mini-redirector refuse locks it cannot express on the wire */
+    if (Stack->MinorFunction == IRP_MN_LOCK && Fcb->MRxDispatch->MRxIsLockRealizable != NULL)
+    {
+        Status = Fcb->MRxDispatch->MRxIsLockRealizable(RX_GET_MRX_FCB(Fcb),
+                                                       &Stack->Parameters.LockControl.ByteOffset,
+                                                       Stack->Parameters.LockControl.Length,
+                                                       Stack->Flags);
+        if (!NT_SUCCESS(Status))
+        {
+            RxReleaseFcb(Context, Fcb);
+            return Status;
+        }
+    }
+
+    /* Locks can be kept locally: let FsRtl do everything, it completes the IRP */
+    if (BooleanFlagOn(Fcb->FcbState, FCB_STATE_LOCK_BUFFERING_ENABLED))
+    {
+        KIRQL OldIrql;
+
+        /* FsRtl completes the IRP (or queues it with its own cancel routine
+         * if the lock has to wait): RDBSS's cancel routine goes first */
+        IoAcquireCancelSpinLock(&OldIrql);
+        IoSetCancelRoutine(Irp, NULL);
+        IoReleaseCancelSpinLock(OldIrql);
+
+        IoMarkIrpPending(Irp);
+        FsRtlProcessFileLock(&Fcb->Specific.Fcb.FileLock, Irp, NULL);
+        RxReleaseFcb(Context, Fcb);
+
+        /* The IRP belongs to FsRtl now (it may also still wait for a lock) */
+        Context->CurrentIrp = NULL;
+        RxDereferenceAndDeleteRxContext_Real(Context);
+        return STATUS_PENDING;
+    }
+
+    /* Otherwise, the server decides. Keep buffering state changes from
+     * granting lock buffering while this request is outstanding */
+    InterlockedIncrement((volatile long *)&Fcb->OutstandingLockOperationsCount);
+
+    if (Exclusive)
+    {
+        Status = RxLowIoLockControlShell(Context);
+        RxReleaseFcb(Context, Fcb);
+    }
+    else
+    {
+        RxReleaseFcb(Context, Fcb);
+        Status = RxLowIoLockControlShell(Context);
+    }
+
+    InterlockedDecrement((volatile long *)&Fcb->OutstandingLockOperationsCount);
+
+    DPRINT("Status: %lx\n", Status);
+    return Status;
 }
 
 NTSTATUS
@@ -7127,14 +7271,28 @@ RxIsThisTheTopLevelIrp(
     return (TopLevelIrp == Irp);
 }
 
+/*
+ * @implemented
+ *
+ * FILE_LOCK completion routine: FsRtl calls it for lock IRPs RDBSS gave to
+ * FsRtlProcessFileLock (locks buffered locally), possibly much later for a
+ * lock that had to wait. Context is always NULL; the IRP is completed here.
+ */
 NTSTATUS
 NTAPI
 RxLockOperationCompletion(
     IN PVOID Context,
     IN PIRP Irp)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    NTSTATUS Status;
+
+    UNREFERENCED_PARAMETER(Context);
+
+    Status = Irp->IoStatus.Status;
+    DPRINT("RxLockOperationCompletion(%p, %p) -> %lx\n", Context, Irp, Status);
+
+    IoCompleteRequest(Irp, IO_DISK_INCREMENT);
+    return Status;
 }
 
 /*
@@ -7301,12 +7459,280 @@ RxLowIoIoCtlShellCompletion(
     return Status;
 }
 
+/*
+ * Builds the list of the local locks a file object (and process) holds, for
+ * an unlock-all sent to the mini-redirector. The caller holds the FCB
+ * exclusive, which serializes enumerations of the FILE_LOCK.
+ */
+static
+NTSTATUS
+RxpGatherLocksForUnlockAll(
+    IN PRX_CONTEXT RxContext,
+    IN PFCB Fcb,
+    IN PFILE_OBJECT FileObject,
+    IN PEPROCESS Process,
+    IN BOOLEAN ByKey,
+    IN ULONG Key)
+{
+    PFILE_LOCK_INFO LockInfo;
+    PLOWIO_LOCK_LIST Head, Entry;
+    ULONG Number;
+
+    PAGED_CODE();
+
+    ASSERT(RxIsFcbAcquiredExclusive(Fcb));
+
+    Head = NULL;
+    Number = 0;
+    for (LockInfo = FsRtlGetNextFileLock(&Fcb->Specific.Fcb.FileLock, TRUE);
+         LockInfo != NULL;
+         LockInfo = FsRtlGetNextFileLock(&Fcb->Specific.Fcb.FileLock, FALSE))
+    {
+        if (LockInfo->FileObject != FileObject || LockInfo->ProcessId != (PVOID)Process ||
+            (ByKey && LockInfo->Key != Key))
+        {
+            continue;
+        }
+
+        Entry = RxAllocatePoolWithTag(NonPagedPool, sizeof(LOWIO_LOCK_LIST), RX_MISC_POOLTAG);
+        if (Entry == NULL)
+        {
+            /* Free what we have: the caller fails the unlock */
+            while (Head != NULL)
+            {
+                Entry = Head->Next;
+                RxFreePoolWithTag(Head, RX_MISC_POOLTAG);
+                Head = Entry;
+            }
+            RxContext->LowIoContext.ParamsFor.Locks.LockList = NULL;
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+
+        Entry->LockNumber = ++Number;
+        Entry->ByteOffset = LockInfo->StartingByte.QuadPart;
+        Entry->Length = LockInfo->Length.QuadPart;
+        Entry->ExclusiveLock = LockInfo->ExclusiveLock;
+        Entry->Key = LockInfo->Key;
+        Entry->Next = Head;
+        Head = Entry;
+    }
+
+    RxContext->LowIoContext.ParamsFor.Locks.LockList = Head;
+    return STATUS_SUCCESS;
+}
+
+static
+VOID
+RxpFreeLowIoLockList(
+    IN PRX_CONTEXT RxContext)
+{
+    PLOWIO_LOCK_LIST Entry, Next;
+
+    for (Entry = RxContext->LowIoContext.ParamsFor.Locks.LockList; Entry != NULL; Entry = Next)
+    {
+        Next = Entry->Next;
+        RxFreePoolWithTag(Entry, RX_MISC_POOLTAG);
+    }
+
+    RxContext->LowIoContext.ParamsFor.Locks.LockList = NULL;
+}
+
+/*
+ * Completion of a lock request the mini-redirector handled: mirror the
+ * result in the local FILE_LOCK. FsRtl is called without an IRP, so it never
+ * completes anything here; the request is completed by the caller.
+ */
+static
+NTSTATUS
+NTAPI
+RxLowIoLockControlShellCompletion(
+    PRX_CONTEXT RxContext)
+{
+    PIRP Irp;
+    PFCB Fcb;
+    NTSTATUS Status;
+    PIO_STACK_LOCATION Stack;
+    PLOWIO_CONTEXT LowIoContext;
+
+    PAGED_CODE();
+
+    Irp = RxContext->CurrentIrp;
+    Stack = RxContext->CurrentIrpSp;
+    Fcb = (PFCB)RxContext->pFcb;
+    LowIoContext = &RxContext->LowIoContext;
+    Status = RxContext->IoStatusBlock.Status;
+
+    DPRINT("RxLowIoLockControlShellCompletion(%p) Op: %d, Status: %lx\n", RxContext, LowIoContext->Operation, Status);
+
+    switch (LowIoContext->Operation)
+    {
+        case LOWIO_OP_SHAREDLOCK:
+        case LOWIO_OP_EXCLUSIVELOCK:
+            if (NT_SUCCESS(Status))
+            {
+                IO_STATUS_BLOCK IoStatus;
+                LARGE_INTEGER Length;
+
+                /* The server granted it; the local table cannot conflict with
+                 * what the server accepted, but check anyway */
+                Length.QuadPart = LowIoContext->ParamsFor.Locks.Length;
+                if (!FsRtlFastLock(&Fcb->Specific.Fcb.FileLock, Stack->FileObject,
+                                   &Stack->Parameters.LockControl.ByteOffset, &Length,
+                                   IoGetRequestorProcess(Irp), LowIoContext->ParamsFor.Locks.Key,
+                                   TRUE, (LowIoContext->Operation == LOWIO_OP_EXCLUSIVELOCK),
+                                   &IoStatus, NULL, FALSE) ||
+                    !NT_SUCCESS(IoStatus.Status))
+                {
+                    DPRINT1("Server granted a lock the local table refused: %lx\n", IoStatus.Status);
+                    Status = STATUS_LOCK_NOT_GRANTED;
+                }
+            }
+            break;
+
+        case LOWIO_OP_UNLOCK:
+            /* Drop the local lock whatever the server said: the server's
+             * view is authoritative and a missing local lock is harmless */
+            {
+                LARGE_INTEGER Length;
+                NTSTATUS LocalStatus;
+
+                Length.QuadPart = LowIoContext->ParamsFor.Locks.Length;
+                LocalStatus = FsRtlFastUnlockSingle(&Fcb->Specific.Fcb.FileLock, Stack->FileObject,
+                                                    &Stack->Parameters.LockControl.ByteOffset, &Length,
+                                                    IoGetRequestorProcess(Irp),
+                                                    LowIoContext->ParamsFor.Locks.Key, NULL, FALSE);
+                if (NT_SUCCESS(Status) && !NT_SUCCESS(LocalStatus))
+                {
+                    Status = LocalStatus;
+                }
+            }
+            break;
+
+        case LOWIO_OP_UNLOCK_MULTIPLE:
+            /* Unlock-all always succeeds locally */
+            break;
+
+        default:
+            ASSERT(FALSE);
+            break;
+    }
+
+    Irp->IoStatus.Status = Status;
+    Irp->IoStatus.Information = 0;
+    RxContext->IoStatusBlock.Status = Status;
+
+    return Status;
+}
+
+/*
+ * @implemented
+ *
+ * Sends a lock request to the mini-redirector. Called for IRP_MJ_LOCK_CONTROL
+ * (the operation follows from the minor function) and by cleanup, which
+ * prepares a LOWIO_OP_UNLOCK_MULTIPLE with its own lock list.
+ */
 NTSTATUS
 RxLowIoLockControlShell(
     IN PRX_CONTEXT RxContext)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PIRP Irp;
+    PFCB Fcb;
+    NTSTATUS Status;
+    PIO_STACK_LOCATION Stack;
+    PLOWIO_CONTEXT LowIoContext;
+    BOOLEAN FreeList;
+
+    PAGED_CODE();
+
+    Irp = RxContext->CurrentIrp;
+    Stack = RxContext->CurrentIrpSp;
+    Fcb = (PFCB)RxContext->pFcb;
+    LowIoContext = &RxContext->LowIoContext;
+    FreeList = FALSE;
+
+    DPRINT("RxLowIoLockControlShell(%p)\n", RxContext);
+
+    if (RxContext->MajorFunction == IRP_MJ_LOCK_CONTROL)
+    {
+        switch (Stack->MinorFunction)
+        {
+            case IRP_MN_LOCK:
+                RxInitializeLowIoContext(LowIoContext,
+                                         (BooleanFlagOn(Stack->Flags, SL_EXCLUSIVE_LOCK) ?
+                                          LOWIO_OP_EXCLUSIVELOCK : LOWIO_OP_SHAREDLOCK));
+                LowIoContext->ParamsFor.Locks.Length = Stack->Parameters.LockControl.Length->QuadPart;
+                break;
+
+            case IRP_MN_UNLOCK_SINGLE:
+                RxInitializeLowIoContext(LowIoContext, LOWIO_OP_UNLOCK);
+                LowIoContext->ParamsFor.Locks.Length = Stack->Parameters.LockControl.Length->QuadPart;
+                break;
+
+            case IRP_MN_UNLOCK_ALL:
+            case IRP_MN_UNLOCK_ALL_BY_KEY:
+                RxInitializeLowIoContext(LowIoContext, LOWIO_OP_UNLOCK_MULTIPLE);
+                Status = RxpGatherLocksForUnlockAll(RxContext, Fcb, Stack->FileObject,
+                                                    IoGetRequestorProcess(Irp),
+                                                    (Stack->MinorFunction == IRP_MN_UNLOCK_ALL_BY_KEY),
+                                                    Stack->Parameters.LockControl.Key);
+                if (!NT_SUCCESS(Status))
+                {
+                    return Status;
+                }
+                FreeList = TRUE;
+
+                /* Drop them locally now (the server is told right after) */
+                if (Stack->MinorFunction == IRP_MN_UNLOCK_ALL)
+                {
+                    FsRtlFastUnlockAll(&Fcb->Specific.Fcb.FileLock, Stack->FileObject,
+                                       IoGetRequestorProcess(Irp), NULL);
+                }
+                else
+                {
+                    FsRtlFastUnlockAllByKey(&Fcb->Specific.Fcb.FileLock, Stack->FileObject,
+                                            IoGetRequestorProcess(Irp),
+                                            Stack->Parameters.LockControl.Key, NULL);
+                }
+
+                /* Nothing was locked: nothing to tell the server */
+                if (LowIoContext->ParamsFor.Locks.LockList == NULL)
+                {
+                    return STATUS_SUCCESS;
+                }
+                break;
+
+            default:
+                return STATUS_INVALID_DEVICE_REQUEST;
+        }
+
+        /* Documented contract: IRP stack values, Flags = IrpSp->Flags */
+        if (LowIoContext->Operation != LOWIO_OP_UNLOCK_MULTIPLE)
+        {
+            LowIoContext->ParamsFor.Locks.ByteOffset = Stack->Parameters.LockControl.ByteOffset.QuadPart;
+        }
+        LowIoContext->ParamsFor.Locks.Key = Stack->Parameters.LockControl.Key;
+        LowIoContext->ParamsFor.Locks.Flags = Stack->Flags;
+    }
+    else
+    {
+        /* Cleanup: the caller set up LOWIO_OP_UNLOCK_MULTIPLE and the list */
+        ASSERT(LowIoContext->Operation == LOWIO_OP_UNLOCK_MULTIPLE);
+        FreeList = TRUE;
+    }
+
+    /* Lock requests are always synchronous for the mini-redirector: an
+     * asynchronous caller was posted to the FSP by RxCommonLockControl */
+    ClearFlag(RxContext->Flags, RX_CONTEXT_FLAG_ASYNC_OPERATION);
+    Status = RxLowIoSubmit(RxContext, RxLowIoLockControlShellCompletion);
+
+    /* Lock requests are submitted synchronously: the list is no longer used */
+    if (FreeList)
+    {
+        RxpFreeLowIoLockList(RxContext);
+    }
+
+    DPRINT("Status: %lx\n", Status);
+    return Status;
 }
 
 /*
@@ -9550,7 +9976,12 @@ RxUnlockOperation(
     IN PVOID Context,
     IN PFILE_LOCK_INFO LockInfo)
 {
-    UNIMPLEMENTED;
+    /* FILE_LOCK unlock routine. The locks an unlock-all removes are gathered
+     * with FsRtlGetNextFileLock before FsRtl drops them
+     * (RxpGatherLocksForUnlockAll), which works whether or not FsRtl calls
+     * this routine; nothing is left to do here. */
+    UNREFERENCED_PARAMETER(Context);
+    UNREFERENCED_PARAMETER(LockInfo);
 }
 
 VOID
