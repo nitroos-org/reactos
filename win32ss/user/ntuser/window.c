@@ -775,6 +775,7 @@ LRESULT co_UserFreeWindow(PWND Window,
    }
 
    GlassBackdropDrop(UserHMGetHandle(Window));
+   UserSpbDrop(Window);
    UserRedirDetachWindow(Window);
    DceFreeWindowDCE(Window);    /* Always do this to catch orphaned DCs */
 

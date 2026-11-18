@@ -567,6 +567,10 @@ UserGetDCEx(PWND Wnd OPTIONAL, HANDLE ClipRegion, ULONG Flags)
    PPROCESSINFO ppi;
    PLIST_ENTRY ListEntry;
 
+   /* Saved bits of popups (spb.c): the desktop DC reaches the screen without the clipping of the popup */
+   if (gSpbCount != 0 && Wnd == NULL)
+      UserSpbNoteDC(Wnd);
+
    if (NULL == Wnd)
    {
       Flags &= ~DCX_USESTYLE;

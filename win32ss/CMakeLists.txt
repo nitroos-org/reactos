@@ -135,6 +135,7 @@ list(APPEND SOURCE
     user/ntuser/kbdlayout.c
     user/ntuser/layered.c
     user/ntuser/redir.c
+    user/ntuser/spb.c
     user/ntuser/menu.c
     user/ntuser/message.c
     user/ntuser/xprocmsg.c
