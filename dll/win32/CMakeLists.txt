@@ -310,6 +310,7 @@ if(DLL_EXPORT_VERSION GREATER_EQUAL 0x600)
     add_subdirectory(bcryptprimitives)
     add_subdirectory(coremessaging)
     add_subdirectory(dwmapi)
+    add_subdirectory(fwpuclnt)
     add_subdirectory(ktmw32)
     if(NOT MSVC) # needs the GNU inline assembler for the C++ vtables
         # msvcp140 uses the Windows Vista kernel32 functions, and the other two load it
