@@ -228,7 +228,142 @@ static void test_opaque_identity(void)
     NetUserDel(NULL, g_user);
 }
 
+/* ---- the data messages: Wrap = EncryptMessage on TOKEN + DATA + PADDING, Unwrap = DecryptMessage on STREAM + DATA ---- */
+
+/* NegotiateAuthenticationPal.Wrap: the sizes come from SECPKG_ATTR_SIZES, the three buffers sit in one allocation
+ * (token, data, padding) and the result is compacted to what the package returned in the buffer sizes. */
+static ULONG dn_wrap(CtxtHandle *ctx, ULONG qop, const BYTE *in, ULONG in_len, BYTE *out, const char *what)
+{
+    SecPkgContext_Sizes sizes;
+    SecBuffer bufs[3];
+    SecBufferDesc desc = { SECBUFFER_VERSION, 3, bufs };
+    SECURITY_STATUS st;
+    BYTE *work;
+    ULONG total = 0;
+
+    st = QueryContextAttributesW(ctx, SECPKG_ATTR_SIZES, &sizes);
+    ok(st == SEC_E_OK, "%s: SECPKG_ATTR_SIZES 0x%08lx\n", what, (unsigned long)st);
+    if (st != SEC_E_OK) return 0;
+    work = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, in_len + sizes.cbSecurityTrailer + sizes.cbBlockSize);
+    memcpy(work + sizes.cbSecurityTrailer, in, in_len);
+    bufs[0].BufferType = SECBUFFER_TOKEN;   bufs[0].pvBuffer = work;                                  bufs[0].cbBuffer = sizes.cbSecurityTrailer;
+    bufs[1].BufferType = SECBUFFER_DATA;    bufs[1].pvBuffer = work + sizes.cbSecurityTrailer;        bufs[1].cbBuffer = in_len;
+    bufs[2].BufferType = SECBUFFER_PADDING; bufs[2].pvBuffer = work + sizes.cbSecurityTrailer + in_len; bufs[2].cbBuffer = sizes.cbBlockSize;
+    st = EncryptMessage(ctx, qop, &desc, 0);
+    ok(st == SEC_E_OK, "%s: EncryptMessage(qop 0x%lx) 0x%08lx\n", what, (unsigned long)qop, (unsigned long)st);
+    if (st == SEC_E_OK)
+    {
+        memcpy(out, bufs[0].pvBuffer, bufs[0].cbBuffer); total = bufs[0].cbBuffer;
+        memcpy(out + total, bufs[1].pvBuffer, bufs[1].cbBuffer); total += bufs[1].cbBuffer;
+        memcpy(out + total, bufs[2].pvBuffer, bufs[2].cbBuffer); total += bufs[2].cbBuffer;
+        ok(bufs[1].cbBuffer == in_len, "%s: data size %lu\n", what, (unsigned long)bufs[1].cbBuffer);
+    }
+    HeapFree(GetProcessHeap(), 0, work);
+    return total;
+}
+
+/* NegotiateAuthenticationPal.UnwrapInPlace: a STREAM buffer with the whole message and an empty DATA buffer; the data
+ * buffer must stay a DATA buffer and point into the stream. .NET relies: SEC_E_OK, then
+ * `dataBuffer->BufferType == SECBUFFER_DATA`, `pvBuffer` inside the input (Debug.Assert) and `wasEncrypted = qop !=
+ * SECQOP_WRAP_NO_ENCRYPT` (expected_qop). */
+static void dn_unwrap_stream(CtxtHandle *ctx, const BYTE *msg, ULONG msg_len, const BYTE *plain, ULONG plain_len,
+                             ULONG expected_qop, const char *what)
+{
+    BYTE *stream = HeapAlloc(GetProcessHeap(), 0, msg_len);
+    SecBuffer bufs[2];
+    SecBufferDesc desc = { SECBUFFER_VERSION, 2, bufs };
+    ULONG qop = 0xdeadbeef;
+    SECURITY_STATUS st;
+
+    memcpy(stream, msg, msg_len);
+    bufs[0].BufferType = SECBUFFER_STREAM; bufs[0].pvBuffer = stream; bufs[0].cbBuffer = msg_len;
+    bufs[1].BufferType = SECBUFFER_DATA;   bufs[1].pvBuffer = NULL;   bufs[1].cbBuffer = 0;
+    st = DecryptMessage(ctx, &desc, 0, &qop);
+    ok(st == SEC_E_OK, "%s: DecryptMessage(STREAM, DATA) 0x%08lx\n", what, (unsigned long)st);
+    if (st == SEC_E_OK)
+    {
+        ok(bufs[1].BufferType == SECBUFFER_DATA, "%s: the data buffer is type 0x%lx\n", what, (unsigned long)bufs[1].BufferType);
+        ok((BYTE *)bufs[1].pvBuffer >= stream && (BYTE *)bufs[1].pvBuffer + bufs[1].cbBuffer <= stream + msg_len,
+           "%s: the data buffer %p/%lu is outside the stream %p/%lu\n", what, bufs[1].pvBuffer,
+           (unsigned long)bufs[1].cbBuffer, stream, (unsigned long)msg_len);
+        ok(bufs[1].cbBuffer == plain_len, "%s: %lu data bytes, expected %lu\n", what, (unsigned long)bufs[1].cbBuffer,
+           (unsigned long)plain_len);
+        ok(bufs[1].cbBuffer == plain_len && !memcmp(bufs[1].pvBuffer, plain, plain_len), "%s: the data differs\n", what);
+        ok(qop == expected_qop, "%s: qop 0x%08lx, expected 0x%08lx\n", what, (unsigned long)qop, (unsigned long)expected_qop);
+    }
+    HeapFree(GetProcessHeap(), 0, stream);
+}
+
+static const ULONG stream_sizes[] = { 1, 23, 300 };
+
+/* a sealed message in each direction, repeated (the RC4 state advances) */
+static void check_stream_messages(PAIR *p, ULONG wrap_qop, ULONG expected_qop, const char *what)
+{
+    int dir;
+    UINT i;
+
+    for (dir = 0; dir < 2; dir++)
+    {
+        CtxtHandle *a = dir ? &p->sctx : &p->cctx, *b = dir ? &p->cctx : &p->sctx;
+
+        for (i = 0; i < ARRAYSIZE(stream_sizes); i++)
+        {
+            BYTE plain[300], msg[300 + 128];
+            ULONG n = stream_sizes[i], msg_len;
+            char label[96];
+
+            memset(plain, 'A' + i + dir, sizeof(plain));
+            _snprintf(label, sizeof(label), "%s %s %lu bytes", what, dir ? "server->client" : "client->server", (unsigned long)n);
+            msg_len = dn_wrap(a, wrap_qop, plain, n, msg, label);
+            if (!msg_len) continue;
+            ok(msg_len >= n + 16, "%s: message of %lu bytes\n", label, (unsigned long)msg_len);
+            dn_unwrap_stream(b, msg, msg_len, plain, n, expected_qop, label);
+        }
+    }
+}
+
+/* the contexts .NET makes: Negotiate and NTLM with the caller's own credentials, Negotiate with explicit ones */
+static void test_stream_decrypt(void)
+{
+    HMODULE hSecur32 = GetModuleHandleW(L"secur32.dll");
+    PFN_ENCODE pEncode = hSecur32 ? (PFN_ENCODE)GetProcAddress(hSecur32, "SspiEncodeStringsAsAuthIdentity") : NULL;
+    PFN_FREEID pFree = hSecur32 ? (PFN_FREEID)GetProcAddress(hSecur32, "SspiFreeAuthIdentity") : NULL;
+    static const WCHAR *packages[] = { L"Negotiate", L"NTLM" };
+    PAIR p;
+    UINT i;
+
+    for (i = 0; i < ARRAYSIZE(packages); i++)
+    {
+        char what[64];
+
+        _snprintf(what, sizeof(what), "%ls, own credentials, encrypt", packages[i]);
+        if (establish(packages[i], NULL, DN_CLIENT_ENCRYPT, DN_SERVER_ENCRYPT, &p, what))
+        {
+            /* qop 0 asks for encryption; .NET relies: the receiver reports qop 0 */
+            check_stream_messages(&p, 0, 0, what);
+            release(&p);
+        }
+    }
+
+    if (pEncode && pFree && create_user())
+    {
+        PVOID identity = NULL;
+
+        if (pEncode(g_user, L".", TEST_PASSWORD, &identity) == SEC_E_OK)
+        {
+            if (establish(L"Negotiate", identity, DN_CLIENT_ENCRYPT, DN_SERVER_ENCRYPT, &p, "Negotiate, explicit, encrypt"))
+            {
+                check_stream_messages(&p, 0, 0, "Negotiate, explicit, encrypt");
+                release(&p);
+            }
+            pFree(identity);
+        }
+        NetUserDel(NULL, g_user);
+    }
+}
+
 START_TEST(DotNetSspi)
 {
     test_opaque_identity();
+    test_stream_decrypt();
 }
