@@ -2264,6 +2264,16 @@ smb2_pread_async(struct smb2_context *smb2, struct smb2fh *fh,
         rd->read_cb_data.offset = offset;
 
         if (count > 0) {
+                /* NitroOS: this block only ever REDUCES the caller's count
+                 * (to the negotiated maximum, the dialect limit and the
+                 * available credits). Keep the caller's count as the ceiling:
+                 * a malformed MaxReadSize of 0 makes (count - 1) underflow and
+                 * the arithmetic below clamp count back UP, and a server that
+                 * drove smb2->credits (a signed int) negative makes
+                 * "smb2->credits * 65536" wrap to a huge uint32_t. Either way
+                 * req.length would exceed the caller's buffer. */
+                uint32_t req_count = count;
+
                 if (count > smb2->max_read_size) {
                         count = smb2->max_read_size;
                 }
@@ -2274,13 +2284,17 @@ smb2_pread_async(struct smb2_context *smb2, struct smb2fh *fh,
                                 count =  (MAX_CREDITS - 16) * 65536;
                         }
                         needed_credits = (count - 1) / 65536 + 1;
-                        if (needed_credits > smb2->credits) {
-                                count = smb2->credits * 65536;
+                        if (smb2->credits > 0 && needed_credits > smb2->credits) {
+                                count = (uint32_t)smb2->credits * 65536;
                         }
                 } else {
                         if (count > 65536) {
                                 count = 65536;
                         }
+                }
+                /* NitroOS: never above what the caller asked for */
+                if (count > req_count) {
+                        count = req_count;
                 }
                 needed_credits = (count - 1) / 65536 + 1;
         }
@@ -2412,6 +2426,13 @@ smb2_pwrite_async(struct smb2_context *smb2, struct smb2fh *fh,
         wr->write_cb_data.offset = offset;
 
         if (count > 0) {
+                /* NitroOS: as in smb2_pread_async() - this block only reduces
+                 * the caller's count, so keep it as the ceiling. A MaxWriteSize
+                 * of 0 underflows (count - 1) and clamps count back up, and a
+                 * negative smb2->credits wraps "smb2->credits * 65536"; req.buf
+                 * is the caller's buffer, so req.length must not exceed it. */
+                uint32_t req_count = count;
+
                 if (count > smb2->max_write_size) {
                         count = smb2->max_write_size;
                 }
@@ -2422,8 +2443,8 @@ smb2_pwrite_async(struct smb2_context *smb2, struct smb2fh *fh,
                                 count =  (MAX_CREDITS - 16) * 65536;
                         }
                         needed_credits = (count - 1) / 65536 + 1;
-                        if (needed_credits > smb2->credits) {
-                                count = smb2->credits * 65536;
+                        if (smb2->credits > 0 && needed_credits > smb2->credits) {
+                                count = (uint32_t)smb2->credits * 65536;
                         }
                 } else {
                         if (count > 65536) {
@@ -2437,6 +2458,10 @@ smb2_pwrite_async(struct smb2_context *smb2, struct smb2fh *fh,
                  */
                 if (!smb2->supports_multi_credit && count > 65536) {
                         count = 65536;
+                }
+                /* NitroOS: never above what the caller asked for */
+                if (count > req_count) {
+                        count = req_count;
                 }
                 needed_credits = (count - 1) / 65536 + 1;
         }

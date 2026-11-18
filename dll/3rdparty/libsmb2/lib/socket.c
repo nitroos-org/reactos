@@ -731,7 +731,19 @@ read_more_data:
                 smb2->payload_offset = smb2->in.num_done;
 
                 if (!smb2_is_server(smb2)) {
-                        smb2->credits += smb2->hdr.credit_request_response;
+                        /* NitroOS: smb2->credits is a signed int a server
+                         * adds a 16-bit CreditResponse to on every reply
+                         * (before any signature check). Left unbounded it
+                         * overflows, and the read/write length math then
+                         * derives "smb2->credits * 65536" from a negative
+                         * value. Cap it well below INT_MAX; no legitimate
+                         * server needs more outstanding credits than this. */
+                        if (smb2->credits <= SMB2_MAX_CLIENT_CREDITS -
+                                        smb2->hdr.credit_request_response) {
+                                smb2->credits += smb2->hdr.credit_request_response;
+                        } else {
+                                smb2->credits = SMB2_MAX_CLIENT_CREDITS;
+                        }
                         /* Got credit, recheck if there are pending pdu to be sent. */
                         smb2_change_events(smb2, smb2->fd, smb2_which_events(smb2));
                 }

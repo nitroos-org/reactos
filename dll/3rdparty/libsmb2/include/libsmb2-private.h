@@ -135,6 +135,10 @@ enum smb2_recv_state {
 #define smb2_tree_id(smb2) (((smb2)->tree_id_cur >= 0)?smb2->tree_id[(smb2)->tree_id_cur]:0xdeadbeef)
 
 #define MAX_CREDITS 1024
+/* NitroOS: ceiling for the credits a client accumulates from server replies,
+ * so the signed counter can never overflow (socket.c). Far above what a
+ * client ever has outstanding (one request needs at most MAX_CREDITS-16). */
+#define SMB2_MAX_CLIENT_CREDITS 0x10000
 #define SMB2_SALT_SIZE 32
 
 /*
