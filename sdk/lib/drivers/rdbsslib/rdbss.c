@@ -509,6 +509,11 @@ NTSTATUS
 RxXXXControlFileCallthru(
     PRX_CONTEXT Context);
 
+VOID
+NTAPI
+RxDispatchChangeBufferingStateRequests(
+    PVOID Context);
+
 static
 NTSTATUS
 RxpGatherLocksForUnlockAll(
@@ -7513,6 +7518,78 @@ RxGetUid(
     return Luid;
 }
 
+/*
+ * @implemented
+ *
+ * Called by the mini-redirector when the server revokes caching it granted
+ * (an oplock or lease break): SrvOpenKey is the SRV_OPEN's Key, Context is
+ * passed back to MRxComputeNewBufferingState and
+ * MRxCompleteBufferingStateChangeRequest. The request is queued and applied
+ * by RDBSS worker threads (flush, purge, new state, acknowledgement); the
+ * caller holds no FCB and must be at IRQL < DISPATCH_LEVEL (the SRV_CALL is
+ * referenced for the dispatcher).
+ */
+VOID
+NTAPI
+RxIndicateChangeOfBufferingState(
+    PMRX_SRV_CALL SrvCall,
+    PVOID SrvOpenKey,
+    PVOID Context)
+{
+    KIRQL OldIrql;
+    BOOLEAN StartDispatcher;
+    PRX_BUFFERING_MANAGER BufferingManager;
+    PCHANGE_BUFFERING_STATE_REQUEST Request;
+
+    ASSERT(KeGetCurrentIrql() < DISPATCH_LEVEL);
+    ASSERT(NodeType(SrvCall) == RDBSS_NTC_SRVCALL);
+
+    DPRINT("RxIndicateChangeOfBufferingState(%p, %p, %p)\n", SrvCall, SrvOpenKey, Context);
+
+    Request = RxAllocatePoolWithTag(NonPagedPool, sizeof(CHANGE_BUFFERING_STATE_REQUEST), RX_MISC_POOLTAG);
+    if (Request == NULL)
+    {
+        /* Nothing else to do: the server will give up waiting for the
+         * acknowledgement and invalidate the handle */
+        DPRINT1("No memory for a buffering state change request on %p\n", SrvCall);
+        return;
+    }
+
+    RtlZeroMemory(Request, sizeof(*Request));
+#if (_WIN32_WINNT < 0x0600)
+    Request->pSrvCall = (PSRV_CALL)SrvCall;
+#endif
+    Request->SrvOpenKey = SrvOpenKey;
+    Request->MRxContext = Context;
+
+    BufferingManager = &((PSRV_CALL)SrvCall)->BufferingManager;
+    KeAcquireSpinLock(&BufferingManager->SpinLock, &OldIrql);
+    InsertTailList(&BufferingManager->DispatcherList, &Request->ListEntry);
+    InterlockedIncrement(&BufferingManager->CumulativeNumberOfBufferingChangeRequests);
+    StartDispatcher = !BufferingManager->DispatcherActive;
+    if (StartDispatcher)
+    {
+        BufferingManager->DispatcherActive = TRUE;
+    }
+    KeReleaseSpinLock(&BufferingManager->SpinLock, OldIrql);
+
+    if (StartDispatcher)
+    {
+        RxReferenceSrvCall((PSRV_CALL)SrvCall);
+        RxPostToWorkerThread(RxFileSystemDeviceObject, HyperCriticalWorkQueue,
+                             &BufferingManager->DispatcherWorkItem,
+                             RxDispatchChangeBufferingStateRequests, SrvCall);
+    }
+}
+
+/*
+ * @implemented
+ *
+ * Same as RxIndicateChangeOfBufferingState, for a mini-redirector that knows
+ * the SRV_OPEN. At PASSIVE_LEVEL, when the FCB is free, the change is applied
+ * right away; otherwise it is queued like any other request. The caller holds
+ * a reference on the SRV_OPEN.
+ */
 VOID
 NTAPI
 RxIndicateChangeOfBufferingStateForSrvOpen(
@@ -7521,7 +7598,36 @@ RxIndicateChangeOfBufferingStateForSrvOpen(
     PVOID SrvOpenKey,
     PVOID Context)
 {
-    UNIMPLEMENTED;
+    PFCB Fcb;
+
+    DPRINT("RxIndicateChangeOfBufferingStateForSrvOpen(%p, %p, %p, %p)\n", SrvCall, SrvOpen, SrvOpenKey, Context);
+
+    Fcb = (PFCB)SrvOpen->pFcb;
+    if (KeGetCurrentIrql() == PASSIVE_LEVEL && !RxIsFcbAcquired(Fcb) &&
+        RxAcquireExclusiveFcb(CHANGE_BUFFERING_STATE_CONTEXT, Fcb) == STATUS_SUCCESS)
+    {
+        /* Only a live SRV_OPEN has a buffering state to change */
+        if (((PSRV_OPEN)SrvOpen)->Condition == Condition_Good &&
+            !BooleanFlagOn(SrvOpen->Flags, SRVOPEN_FLAG_CLOSED))
+        {
+            /* The pending flag makes RxChangeBufferingState acknowledge
+             * through MRxCompleteBufferingStateChangeRequest */
+            RxAcquireSerializationMutex();
+            SetFlag(SrvOpen->Flags, SRVOPEN_FLAG_BUFFERING_STATE_CHANGE_PENDING);
+            RxReleaseSerializationMutex();
+
+            RxChangeBufferingState((PSRV_OPEN)SrvOpen, Context, TRUE);
+
+            RxAcquireSerializationMutex();
+            ClearFlag(SrvOpen->Flags, SRVOPEN_FLAG_BUFFERING_STATE_CHANGE_PENDING);
+            RxReleaseSerializationMutex();
+        }
+
+        RxReleaseFcb(CHANGE_BUFFERING_STATE_CONTEXT, Fcb);
+        return;
+    }
+
+    RxIndicateChangeOfBufferingState(SrvCall, SrvOpenKey, Context);
 }
 
 /*

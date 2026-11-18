@@ -1116,6 +1116,37 @@ RxCompleteRequest_Real(
     }
 }
 
+/* Moves all the entries of Source to the tail of Destination (unlike
+ * RxTransferList, which replaces Destination) */
+static
+VOID
+RxpAppendList(
+    _Inout_ PLIST_ENTRY Destination,
+    _Inout_ PLIST_ENTRY Source)
+{
+    while (!IsListEmpty(Source))
+    {
+        PLIST_ENTRY Entry;
+
+        Entry = RemoveHeadList(Source);
+        InsertTailList(Destination, Entry);
+    }
+}
+
+/* Unlinks a SRV_OPEN from its SRV_CALL's key list (the buffering manager
+ * mutex is held by the caller) */
+static
+VOID
+RxpRemoveSrvOpenKeyAssociation(
+    _Inout_ PSRV_OPEN SrvOpen)
+{
+    if (!IsListEmpty(&SrvOpen->SrvOpenKeyList))
+    {
+        RemoveEntryList(&SrvOpen->SrvOpenKeyList);
+        InitializeListHead(&SrvOpen->SrvOpenKeyList);
+    }
+}
+
 /*
  * @implemented
  */
@@ -1138,8 +1169,10 @@ RxCompleteSrvOpenKeyAssociation(
 
         RxAcquireBufferingManagerMutex(&SrvCall->BufferingManager);
 
-        /* Transfer our requests in the SRV_CALL */
-        RxTransferList(&SrvCall->BufferingManager.SrvOpenLists[0], &SrvOpen->SrvOpenKeyList);
+        /* Make the SRV_OPEN findable by its key: buffering state change
+         * requests the mini-redirector indicates name the key only */
+        ASSERT(IsListEmpty(&SrvOpen->SrvOpenKeyList));
+        InsertTailList(&SrvCall->BufferingManager.SrvOpenLists[0], &SrvOpen->SrvOpenKeyList);
 
         /* Was increased in RxInitiateSrvOpenKeyAssociation(), opening is done */
         InterlockedDecrement(&SrvCall->BufferingManager.NumberOfOutstandingOpens);
@@ -2422,12 +2455,57 @@ RxDereferenceAndDeleteRxContext_Real(
     }
 }
 
+/*
+ * @implemented
+ *
+ * Worker: matches the requests the mini-redirector queued with
+ * RxIndicateChangeOfBufferingState to their SRV_OPENs (by key) and starts
+ * the handler for the accepted ones. Requests whose SRV_OPEN may still be
+ * opening stay queued; RxCompleteSrvOpenKeyAssociation dispatches them again
+ * when the open finished. The SRV_CALL was referenced by whoever posted this.
+ */
 VOID
 NTAPI
 RxDispatchChangeBufferingStateRequests(
     PVOID Context)
 {
-    UNIMPLEMENTED;
+    KIRQL OldIrql;
+    PSRV_CALL SrvCall;
+    BOOLEAN StartHandler;
+    LIST_ENTRY Discarded;
+
+    PAGED_CODE();
+
+    SrvCall = Context;
+    DPRINT("RxDispatchChangeBufferingStateRequests(%p)\n", SrvCall);
+
+    /* DispatcherActive stays set while we run, so that the dispatch below
+     * does not post us again for requests still waiting for their open */
+    RxAcquireBufferingManagerMutex(&SrvCall->BufferingManager);
+    RxpDispatchChangeBufferingStateRequests(SrvCall, NULL, &Discarded);
+    RxReleaseBufferingManagerMutex(&SrvCall->BufferingManager);
+
+    KeAcquireSpinLock(&SrvCall->BufferingManager.SpinLock, &OldIrql);
+    SrvCall->BufferingManager.DispatcherActive = FALSE;
+    StartHandler = (!IsListEmpty(&SrvCall->BufferingManager.HandlerList) &&
+                    !SrvCall->BufferingManager.HandlerInactive);
+    if (StartHandler)
+    {
+        /* HandlerInactive set means "a handler is scheduled" */
+        SrvCall->BufferingManager.HandlerInactive = TRUE;
+    }
+    KeReleaseSpinLock(&SrvCall->BufferingManager.SpinLock, OldIrql);
+
+    if (StartHandler)
+    {
+        RxReferenceSrvCall(SrvCall);
+        RxPostToWorkerThread(RxFileSystemDeviceObject, HyperCriticalWorkQueue,
+                             &SrvCall->BufferingManager.HandlerWorkItem,
+                             RxProcessChangeBufferingStateRequests, SrvCall);
+    }
+
+    RxpDiscardChangeBufferingStateRequests(&Discarded);
+    RxDereferenceSrvCall(SrvCall, LHS_LockNotHeld);
 }
 
 /*
@@ -3393,8 +3471,15 @@ RxFinalizeSrvOpen(
         return FALSE;
     }
 
-    /* No key association left */
-    ASSERT(IsListEmpty(&ThisSrvOpen->SrvOpenKeyList));
+    /* No key association left (a forced finalization may skip the purge) */
+    if (!IsListEmpty(&ThisSrvOpen->SrvOpenKeyList))
+    {
+        PSRV_CALL SrvCall = (PSRV_CALL)Fcb->VNetRoot->pNetRoot->pSrvCall;
+
+        RxAcquireBufferingManagerMutex(&SrvCall->BufferingManager);
+        RxpRemoveSrvOpenKeyAssociation(ThisSrvOpen);
+        RxReleaseBufferingManagerMutex(&SrvCall->BufferingManager);
+    }
 
     /* If we're still in some FCB, remove us */
     if (!IsListEmpty(&ThisSrvOpen->SrvOpenQLinks))
@@ -6245,8 +6330,9 @@ RxpDispatchChangeBufferingStateRequests(
     }
     else
     {
-        /* Transfer back the list of the not treated entries to the buffering manager */
-        RxTransferList(&BufferingManager->DispatcherList, &DispatcherList);
+        /* Give back the entries not treated yet; new ones may have been
+         * queued meanwhile, keep them */
+        RxpAppendList(&BufferingManager->DispatcherList, &DispatcherList);
         StartDispatcher = (BufferingManager->DispatcherActive == FALSE);
         /* If the dispatcher isn't active, start it */
         if (StartDispatcher)
@@ -6255,10 +6341,11 @@ RxpDispatchChangeBufferingStateRequests(
         }
     }
 
-    /* If there were accepted requests, move them to the buffering manager */
+    /* If there were accepted requests, move them to the buffering manager
+     * (behind those a handler has not taken yet) */
     if (!IsListEmpty(&AcceptedReqs))
     {
-        RxTransferList(&BufferingManager->HandlerList, &AcceptedReqs);
+        RxpAppendList(&BufferingManager->HandlerList, &AcceptedReqs);
     }
     KeReleaseSpinLock(&BufferingManager->SpinLock, OldIrql);
 
@@ -6475,12 +6562,77 @@ RxPostToWorkerThread(
     return RxInsertWorkQueueItem(pMRxDeviceObject, WorkQueueType, pWorkQueueItem);
 }
 
+/*
+ * @implemented
+ *
+ * Handler: for every accepted request, takes the FCB of its SRV_OPEN
+ * exclusive (waiting: this runs in a worker or in a create that holds no FCB)
+ * and processes the FCB's pending buffering state changes. Lock order:
+ * FCB exclusive -> (RxChangeBufferingState) Cc flush/purge -> paging I/O.
+ * Nothing else is held. Drops the SRV_CALL reference its caller took.
+ */
 VOID
 RxpProcessChangeBufferingStateRequests(
     PSRV_CALL SrvCall,
     BOOLEAN UpdateHandlerState)
 {
-    UNIMPLEMENTED;
+    KIRQL OldIrql;
+    PFCB Fcb;
+    PSRV_OPEN SrvOpen;
+    NTSTATUS Status;
+    PCHANGE_BUFFERING_STATE_REQUEST Request;
+
+    PAGED_CODE();
+
+    DPRINT("RxpProcessChangeBufferingStateRequests(%p, %d)\n", SrvCall, UpdateHandlerState);
+
+    for (;;)
+    {
+        KeAcquireSpinLock(&SrvCall->BufferingManager.SpinLock, &OldIrql);
+        if (IsListEmpty(&SrvCall->BufferingManager.HandlerList))
+        {
+            if (UpdateHandlerState)
+            {
+                SrvCall->BufferingManager.HandlerInactive = FALSE;
+            }
+            KeReleaseSpinLock(&SrvCall->BufferingManager.SpinLock, OldIrql);
+            break;
+        }
+
+        /* The request stays queued: RxProcessFcbChangeBufferingStateRequest
+         * gathers all the requests of the SRV_OPEN, this one included */
+        Request = CONTAINING_RECORD(SrvCall->BufferingManager.HandlerList.Flink,
+                                    CHANGE_BUFFERING_STATE_REQUEST, ListEntry);
+        SrvOpen = Request->SrvOpen;
+        ASSERT(SrvOpen != NULL);
+        /* Keep the SRV_OPEN (and through it the FCB) for the time we work */
+        Fcb = (PFCB)SrvOpen->pFcb;
+        KeReleaseSpinLock(&SrvCall->BufferingManager.SpinLock, OldIrql);
+
+        RxAcquireSerializationMutex();
+        SetFlag(SrvOpen->Flags, SRVOPEN_FLAG_BUFFERING_STATE_CHANGE_PENDING);
+        SetFlag(Fcb->FcbState, FCB_STATE_BUFFERING_STATE_CHANGE_PENDING);
+        RxReleaseSerializationMutex();
+
+        Status = RxAcquireExclusiveFcb(CHANGE_BUFFERING_STATE_CONTEXT_WAIT, Fcb);
+        if (Status == STATUS_SUCCESS)
+        {
+            RxReferenceNetFcb(Fcb);
+            RxProcessFcbChangeBufferingStateRequest(Fcb);
+            if (!RxDereferenceAndFinalizeNetFcb(Fcb, CHANGE_BUFFERING_STATE_CONTEXT_WAIT, FALSE, FALSE))
+            {
+                RxReleaseFcb(CHANGE_BUFFERING_STATE_CONTEXT_WAIT, Fcb);
+            }
+        }
+        else
+        {
+            /* Cannot happen with a waiting acquire; never spin on it */
+            DPRINT1("Failed to acquire FCB %p for buffering state change: %lx\n", Fcb, Status);
+            break;
+        }
+    }
+
+    RxDereferenceSrvCall(SrvCall, LHS_LockNotHeld);
 }
 
 /*
@@ -6732,22 +6884,103 @@ RxProcessChangeBufferingStateRequestsForSrvOpen(
         PFCB Fcb;
         NTSTATUS Status;
 
-        /* Acquire the FCB and start processing */
+        /* Process now if the FCB is free; a caller holding it (fast I/O
+         * checks run under the FCB resource) leaves the work to the handler,
+         * which waits for the FCB */
         Fcb = (PFCB)SrvOpen->pFcb;
-        Status = RxAcquireExclusiveFcb(NULL, Fcb);
-        if (Status == STATUS_SUCCESS)
+        if (!RxIsFcbAcquired(Fcb))
         {
-            RxProcessFcbChangeBufferingStateRequest(Fcb);
-            RxReleaseFcb(NULL, Fcb);
+            Status = RxAcquireExclusiveFcb(CHANGE_BUFFERING_STATE_CONTEXT, Fcb);
+            if (Status == STATUS_SUCCESS)
+            {
+                RxProcessFcbChangeBufferingStateRequest(Fcb);
+                RxReleaseFcb(CHANGE_BUFFERING_STATE_CONTEXT, Fcb);
+            }
         }
     }
 }
 
+/*
+ * @implemented
+ *
+ * Called with the FCB exclusive. Every SRV_OPEN of the FCB marked
+ * SRVOPEN_FLAG_BUFFERING_STATE_CHANGE_PENDING gets its requests applied
+ * (RxChangeBufferingState with the mini-redirector's context: the
+ * mini-redirector computes the new state, RDBSS flushes and purges, then the
+ * mini-redirector acknowledges through MRxCompleteBufferingStateChangeRequest).
+ * Requests are freed (and their SRV_OPEN references dropped) only after the
+ * walk over the SRV_OPEN list, which a dereference may change.
+ */
 VOID
 RxProcessFcbChangeBufferingStateRequest(
     PFCB Fcb)
 {
-    UNIMPLEMENTED;
+    PSRV_CALL SrvCall;
+    PLIST_ENTRY Entry, ReqEntry;
+    LIST_ENTRY Done;
+
+    PAGED_CODE();
+
+    ASSERT(RxIsFcbAcquiredExclusive(Fcb));
+
+    RxAcquireSerializationMutex();
+    if (!BooleanFlagOn(Fcb->FcbState, FCB_STATE_BUFFERING_STATE_CHANGE_PENDING))
+    {
+        RxReleaseSerializationMutex();
+        return;
+    }
+    RxReleaseSerializationMutex();
+
+    InitializeListHead(&Done);
+    SrvCall = (PSRV_CALL)Fcb->VNetRoot->pNetRoot->pSrvCall;
+
+    for (Entry = Fcb->SrvOpenList.Flink; Entry != &Fcb->SrvOpenList; Entry = Entry->Flink)
+    {
+        PSRV_OPEN SrvOpen;
+        LIST_ENTRY Requests;
+
+        SrvOpen = CONTAINING_RECORD(Entry, SRV_OPEN, SrvOpenQLinks);
+        if (!BooleanFlagOn(SrvOpen->Flags, SRVOPEN_FLAG_BUFFERING_STATE_CHANGE_PENDING))
+        {
+            continue;
+        }
+
+        InitializeListHead(&Requests);
+        RxAcquireBufferingManagerMutex(&SrvCall->BufferingManager);
+        RxGatherRequestsForSrvOpen(SrvCall, SrvOpen, &Requests);
+        RxReleaseBufferingManagerMutex(&SrvCall->BufferingManager);
+
+        for (ReqEntry = Requests.Flink; ReqEntry != &Requests; ReqEntry = ReqEntry->Flink)
+        {
+            PCHANGE_BUFFERING_STATE_REQUEST Request;
+
+            Request = CONTAINING_RECORD(ReqEntry, CHANGE_BUFFERING_STATE_REQUEST, ListEntry);
+            SetFlag(Request->Flags, RX_REQUEST_PREPARED_FOR_HANDLING);
+
+            /* A closed SRV_OPEN has nothing cached any more to give back */
+            if (!BooleanFlagOn(SrvOpen->Flags, SRVOPEN_FLAG_CLOSED) &&
+                SrvOpen->Condition == Condition_Good)
+            {
+                DPRINT("Changing buffering state of %p (key %p, context %p)\n", SrvOpen,
+                       Request->SrvOpenKey, Request->MRxContext);
+                RxChangeBufferingState(SrvOpen, Request->MRxContext, TRUE);
+            }
+        }
+
+        ClearFlag(SrvOpen->Flags, SRVOPEN_FLAG_BUFFERING_STATE_CHANGE_PENDING);
+        RxpAppendList(&Done, &Requests);
+    }
+
+    RxAcquireSerializationMutex();
+    ClearFlag(Fcb->FcbState, FCB_STATE_BUFFERING_STATE_CHANGE_PENDING);
+    if (Fcb->pBufferingStateChangeCompletedEvent != NULL)
+    {
+        KeSetEvent(Fcb->pBufferingStateChangeCompletedEvent, IO_NETWORK_INCREMENT, FALSE);
+    }
+    RxReleaseSerializationMutex();
+
+    /* Frees the requests and drops their SRV_OPEN references (FCB held) */
+    RxpDiscardChangeBufferingStateRequests(&Done);
 }
 
 /*
@@ -6999,8 +7232,9 @@ RxPurgeChangeBufferingStateRequestsForSrvOpen(
     SrvCall = (PSRV_CALL)SrvOpen->Fcb->VNetRoot->pNetRoot->pSrvCall;
     RxAcquireBufferingManagerMutex(&SrvCall->BufferingManager);
 
-    /* Set the flag, and get the requests */
-    InitializeListHead(&SrvOpen->SrvOpenKeyList);
+    /* Set the flag, and get the requests; the SRV_OPEN can no longer be
+     * found by its key */
+    RxpRemoveSrvOpenKeyAssociation(SrvOpen);
     SetFlag(SrvOpen->Flags, SRVOPEN_FLAG_BUFFERING_STATE_CHANGE_REQUESTS_PURGED);
     RxGatherRequestsForSrvOpen(SrvCall, SrvOpen, &Discarded);
 
@@ -8594,9 +8828,24 @@ NTSTATUS
 RxTearDownBufferingManager(
    PSRV_CALL SrvCall)
 {
+    KIRQL OldIrql;
+    LIST_ENTRY Leftover;
+
     PAGED_CODE();
 
-    /* Nothing to do */
+    /* The SRV_CALL is going away: requests nobody claimed are dropped. The
+     * accepted ones hold a SRV_OPEN reference, so none can be left once all
+     * the SRV_OPENs are gone; the dispatcher and handler hold a SRV_CALL
+     * reference while they run, so none is running either */
+    InitializeListHead(&Leftover);
+    KeAcquireSpinLock(&SrvCall->BufferingManager.SpinLock, &OldIrql);
+    ASSERT(IsListEmpty(&SrvCall->BufferingManager.HandlerList));
+    ASSERT(IsListEmpty(&SrvCall->BufferingManager.LastChanceHandlerList));
+    ASSERT(!SrvCall->BufferingManager.DispatcherActive);
+    RxpAppendList(&Leftover, &SrvCall->BufferingManager.DispatcherList);
+    KeReleaseSpinLock(&SrvCall->BufferingManager.SpinLock, OldIrql);
+
+    RxpDiscardChangeBufferingStateRequests(&Leftover);
     return STATUS_SUCCESS;
 }
 
@@ -9116,21 +9365,18 @@ __RxAcquireFcb(
         SpecialContext = TRUE;
     }
 
-    /* We don't handle buffering state change yet... */
-    if (!RxIsFcbAcquired(Fcb) && !SpecialContext &&
-        BooleanFlagOn(Fcb->FcbState, FCB_STATE_BUFFERING_STATE_CHANGE_PENDING))
-    {
-        UNIMPLEMENTED;
-    }
+    /* A pending buffering state change does not block acquirers: the change
+     * is applied by the buffering state handler, which takes the FCB
+     * exclusive (waiting) in a worker thread; see
+     * RxpProcessChangeBufferingStateRequests */
 
-    /* Nor special contexts */
+    /* The buffering state handler's own contexts: no RX_CONTEXT behind them */
     if (SpecialContext)
     {
-        UNIMPLEMENTED;
+        CanWait = (RxContext == CHANGE_BUFFERING_STATE_CONTEXT_WAIT);
     }
-
     /* If we don't have a context, assume we can wait! */
-    if (RxContext == NULL)
+    else if (RxContext == NULL)
     {
         CanWait = TRUE;
     }
@@ -9273,7 +9519,11 @@ __RxReleaseFcb(
 
     RxAcquireSerializationMutex();
 
-    BufferingPending = BooleanFlagOn(MrxFcb->FcbState, FCB_STATE_BUFFERING_STATE_CHANGE_PENDING);
+    /* A pending buffering state change is not applied here: the releaser
+     * may still hold the FCB recursively, be in the middle of a Cc call or
+     * be the lazy writer. The buffering state handler applies it, waiting
+     * for the FCB in a worker thread (RxpProcessChangeBufferingStateRequests) */
+    BufferingPending = FALSE;
     IsExclusive = !!RxIsResourceOwnershipStateExclusive(MrxFcb->Header.Resource);
 
     /* If no buffering pending, or no exclusive lock (we can only handle with an exclusive lock),
@@ -9320,7 +9570,11 @@ __RxReleaseFcbForThread(
 
     RxAcquireSerializationMutex();
 
-    BufferingPending = BooleanFlagOn(MrxFcb->FcbState, FCB_STATE_BUFFERING_STATE_CHANGE_PENDING);
+    /* A pending buffering state change is not applied here: the releaser
+     * may still hold the FCB recursively, be in the middle of a Cc call or
+     * be the lazy writer. The buffering state handler applies it, waiting
+     * for the FCB in a worker thread (RxpProcessChangeBufferingStateRequests) */
+    BufferingPending = FALSE;
     IsExclusive = !!RxIsResourceOwnershipStateExclusive(MrxFcb->Header.Resource);
 
     /* If no buffering pending, or no exclusive lock (we can only handle with an exclusive lock),

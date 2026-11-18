@@ -451,6 +451,13 @@ RxChangeBufferingState(
 
 VOID
 NTAPI
+RxIndicateChangeOfBufferingState(
+    PMRX_SRV_CALL SrvCall,
+    PVOID SrvOpenKey,
+    PVOID Context);
+
+VOID
+NTAPI
 RxIndicateChangeOfBufferingStateForSrvOpen(
     PMRX_SRV_CALL SrvCall,
     PMRX_SRV_OPEN SrvOpen,
