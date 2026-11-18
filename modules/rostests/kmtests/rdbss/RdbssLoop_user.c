@@ -1,0 +1,1825 @@
+/*
+ * PROJECT:     ReactOS kernel-mode tests
+ * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
+ * PURPOSE:     RDBSS tests through the loopback mini-redirector: user-mode part
+ * COPYRIGHT:   Copyright 2026 Tomas Srnka
+ *
+ * Every operation is done on \\looprdr\share\... (RDBSS + loopback
+ * mini-redirector) and, where the result can be compared, on the same local
+ * directory the share maps to. RdbssLoop is the functional set,
+ * RdbssLoopStress the random-operation stress (RDBSS_STRESS_SECONDS,
+ * default 60) with a byte compare against the local directory.
+ */
+
+#include <kmt_test.h>
+#include <winioctl.h>
+#include <ndk/exfuncs.h>
+
+#include "RdbssLoop.h"
+
+#define LOCAL_ROOT      L"C:\\RdbssLoopRoot"
+#define LOCAL_ROOT_NT   L"\\??\\C:\\RdbssLoopRoot"
+#define UNC_ROOT        L"\\\\" LOOPRDR_SERVER L"\\" LOOPRDR_SHARE
+#define FCB_READ_CACHE  0x02000000  /* FCB_STATE_READCACHING_ENABLED */
+#define FCB_READ_BUF    0x01000000  /* FCB_STATE_READBUFFERING_ENABLED */
+#define FCB_WRITE_CACHE 0x08000000  /* FCB_STATE_WRITECACHING_ENABLED */
+#define FCB_WRITE_BUF   0x04000000  /* FCB_STATE_WRITEBUFFERING_ENABLED */
+#define FCB_ALL_CACHE   (FCB_READ_CACHE | FCB_READ_BUF | FCB_WRITE_CACHE | FCB_WRITE_BUF)
+
+static HANDLE LoopDevice = INVALID_HANDLE_VALUE;
+
+/* ---------------------------------------------------------------------- */
+/* Helpers                                                                */
+/* ---------------------------------------------------------------------- */
+
+static
+PCWSTR
+P(
+    _Out_writes_(MAX_PATH) PWSTR Buffer,
+    _In_ BOOLEAN Unc,
+    _In_ PCWSTR Relative)
+{
+    StringCchPrintfW(Buffer, MAX_PATH, L"%s\\%s", Unc ? UNC_ROOT : LOCAL_ROOT, Relative);
+    return Buffer;
+}
+
+static
+BOOL
+LoopIoctl(
+    _In_ DWORD Code,
+    _In_opt_ PVOID In,
+    _In_ DWORD InLength,
+    _Out_opt_ PVOID Out,
+    _In_ DWORD OutLength)
+{
+    DWORD Returned;
+
+    return DeviceIoControl(LoopDevice, Code, In, InLength, Out, OutLength, &Returned, NULL);
+}
+
+static
+VOID
+LoopCounters(
+    _Out_ PLOOPRDR_COUNTERS Counters)
+{
+    RtlZeroMemory(Counters, sizeof(*Counters));
+    ok(LoopIoctl(IOCTL_LOOPRDR_GET_COUNTERS, NULL, 0, Counters, sizeof(*Counters)),
+       "GET_COUNTERS failed: %lu\n", GetLastError());
+}
+
+static
+VOID
+LoopOptions(
+    _In_ ULONG BufferingFlags,
+    _In_ ULONG Flags)
+{
+    LOOPRDR_OPTIONS Options;
+
+    Options.BufferingFlags = BufferingFlags;
+    Options.Flags = Flags;
+    ok(LoopIoctl(IOCTL_LOOPRDR_SET_OPTIONS, &Options, sizeof(Options), NULL, 0),
+       "SET_OPTIONS failed: %lu\n", GetLastError());
+}
+
+static
+VOID
+Fill(
+    _Out_writes_bytes_(Length) PUCHAR Buffer,
+    _In_ SIZE_T Length,
+    _In_ ULONG Seed)
+{
+    SIZE_T i;
+
+    for (i = 0; i < Length; ++i)
+    {
+        Seed = Seed * 1103515245 + 12345;
+        Buffer[i] = (UCHAR)(Seed >> 16);
+    }
+}
+
+/* Reads a whole local file into a heap buffer */
+static
+PUCHAR
+ReadWhole(
+    _In_ PCWSTR Path,
+    _Out_ PSIZE_T Length)
+{
+    HANDLE File;
+    LARGE_INTEGER Size;
+    PUCHAR Buffer;
+    DWORD Read;
+
+    *Length = 0;
+    File = CreateFileW(Path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                       NULL, OPEN_EXISTING, 0, NULL);
+    if (File == INVALID_HANDLE_VALUE)
+    {
+        return NULL;
+    }
+    GetFileSizeEx(File, &Size);
+    Buffer = HeapAlloc(GetProcessHeap(), 0, (SIZE_T)Size.QuadPart + 1);
+    if (Buffer != NULL && Size.QuadPart != 0 &&
+        (!ReadFile(File, Buffer, (DWORD)Size.QuadPart, &Read, NULL) || Read != Size.QuadPart))
+    {
+        HeapFree(GetProcessHeap(), 0, Buffer);
+        Buffer = NULL;
+    }
+    CloseHandle(File);
+    *Length = (SIZE_T)Size.QuadPart;
+    return Buffer;
+}
+
+static
+BOOLEAN
+SameContent(
+    _In_ PCWSTR Relative,
+    _In_reads_bytes_(Length) const UCHAR *Expected,
+    _In_ SIZE_T Length)
+{
+    WCHAR Path[MAX_PATH];
+    PUCHAR Data;
+    SIZE_T Got;
+    BOOLEAN Same;
+
+    Data = ReadWhole(P(Path, FALSE, Relative), &Got);
+    Same = (Data != NULL || Length == 0) && Got == Length && (Length == 0 || memcmp(Data, Expected, Length) == 0);
+    if (Data != NULL)
+    {
+        HeapFree(GetProcessHeap(), 0, Data);
+    }
+    return Same;
+}
+
+/* Waits up to TimeoutMs for a local path to (dis)appear */
+static
+BOOLEAN
+WaitExists(
+    _In_ PCWSTR Relative,
+    _In_ BOOLEAN Exists,
+    _In_ DWORD TimeoutMs)
+{
+    WCHAR Path[MAX_PATH];
+    DWORD Waited;
+
+    P(Path, FALSE, Relative);
+    for (Waited = 0; ; Waited += 50)
+    {
+        BOOLEAN Now = (GetFileAttributesW(Path) != INVALID_FILE_ATTRIBUTES);
+
+        if (Now == Exists)
+        {
+            return TRUE;
+        }
+        if (Waited >= TimeoutMs)
+        {
+            return FALSE;
+        }
+        Sleep(50);
+    }
+}
+
+static
+VOID
+DeleteTree(
+    _In_ PCWSTR Directory)
+{
+    WCHAR Pattern[MAX_PATH], Path[MAX_PATH];
+    WIN32_FIND_DATAW Data;
+    HANDLE Find;
+
+    StringCchPrintfW(Pattern, MAX_PATH, L"%s\\*", Directory);
+    Find = FindFirstFileW(Pattern, &Data);
+    if (Find != INVALID_HANDLE_VALUE)
+    {
+        do
+        {
+            if (!wcscmp(Data.cFileName, L".") || !wcscmp(Data.cFileName, L".."))
+            {
+                continue;
+            }
+            StringCchPrintfW(Path, MAX_PATH, L"%s\\%s", Directory, Data.cFileName);
+            SetFileAttributesW(Path, FILE_ATTRIBUTE_NORMAL);
+            if (Data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            {
+                DeleteTree(Path);
+                RemoveDirectoryW(Path);
+            }
+            else
+            {
+                DeleteFileW(Path);
+            }
+        } while (FindNextFileW(Find, &Data));
+        FindClose(Find);
+    }
+}
+
+/* Sum of the pool tags RDBSS and the loopback driver use ("Rx??", "NxLp") */
+typedef struct _POOL_SUM
+{
+    LONGLONG Outstanding;   /* allocations minus frees */
+    LONGLONG Bytes;
+    CHAR Detail[512];       /* per tag: "RxFc=12/3456 ..." */
+} POOL_SUM;
+
+static
+BOOLEAN
+PoolSum(
+    _Out_ POOL_SUM *Sum)
+{
+    NTSTATUS Status;
+    ULONG Length = 256 * 1024, i;
+    PSYSTEM_POOLTAG_INFORMATION Info;
+
+    Sum->Outstanding = 0;
+    Sum->Bytes = 0;
+    Sum->Detail[0] = 0;
+    for (;;)
+    {
+        Info = HeapAlloc(GetProcessHeap(), 0, Length);
+        if (Info == NULL)
+        {
+            return FALSE;
+        }
+        Status = NtQuerySystemInformation(SystemPoolTagInformation, Info, Length, &Length);
+        if (Status != STATUS_INFO_LENGTH_MISMATCH)
+        {
+            break;
+        }
+        HeapFree(GetProcessHeap(), 0, Info);
+        Length += 64 * 1024;
+    }
+    if (!NT_SUCCESS(Status))
+    {
+        HeapFree(GetProcessHeap(), 0, Info);
+        return FALSE;
+    }
+    for (i = 0; i < Info->Count; ++i)
+    {
+        PSYSTEM_POOLTAG Tag = &Info->TagInfo[i];
+
+        if ((Tag->Tag[0] == 'R' && Tag->Tag[1] == 'x') ||
+            (Tag->Tag[0] == 'N' && Tag->Tag[1] == 'x' && Tag->Tag[2] == 'L' && Tag->Tag[3] == 'p'))
+        {
+            LONGLONG Blocks = (LONGLONG)Tag->PagedAllocs - Tag->PagedFrees +
+                              (LONGLONG)Tag->NonPagedAllocs - Tag->NonPagedFrees;
+            LONGLONG Bytes = (LONGLONG)Tag->PagedUsed + (LONGLONG)Tag->NonPagedUsed;
+
+            Sum->Outstanding += Blocks;
+            Sum->Bytes += Bytes;
+            if (Blocks != 0)
+            {
+                CHAR One[48];
+
+                StringCbPrintfA(One, sizeof(One), "%c%c%c%c=%I64d/%I64d ", Tag->Tag[0], Tag->Tag[1], Tag->Tag[2],
+                                Tag->Tag[3], Blocks, Bytes);
+                StringCbCatA(Sum->Detail, sizeof(Sum->Detail), One);
+            }
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, Info);
+    return TRUE;
+}
+
+/* ---------------------------------------------------------------------- */
+/* Driver setup                                                           */
+/* ---------------------------------------------------------------------- */
+
+static
+BOOLEAN
+LoopSetUp(
+    _Out_ POOL_SUM *Before)
+{
+    DWORD Error;
+    static const WCHAR Root[] = LOCAL_ROOT_NT;
+
+    CreateDirectoryW(LOCAL_ROOT, NULL);
+    DeleteTree(LOCAL_ROOT);
+
+    if (!PoolSum(Before))
+    {
+        trace("SystemPoolTagInformation not available\n");
+    }
+
+    Error = KmtLoadDriver(L"RdbssLoop", TRUE);
+    ok_eq_int(Error, ERROR_SUCCESS);
+    if (Error)
+    {
+        return FALSE;
+    }
+
+    LoopDevice = CreateFileW(LOOPRDR_USER_PATH, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    ok(LoopDevice != INVALID_HANDLE_VALUE, "Opening the device failed: %lu\n", GetLastError());
+    if (LoopDevice == INVALID_HANDLE_VALUE)
+    {
+        KmtUnloadDriver();
+        return FALSE;
+    }
+
+    ok(LoopIoctl(IOCTL_LOOPRDR_SET_ROOT, (PVOID)Root, sizeof(Root), NULL, 0), "SET_ROOT failed: %lu\n", GetLastError());
+    ok(LoopIoctl(IOCTL_LOOPRDR_START, NULL, 0, NULL, 0), "START failed: %lu\n", GetLastError());
+    LoopOptions(FCB_ALL_CACHE, 0);
+    return TRUE;
+}
+
+static
+VOID
+LoopTearDown(
+    _In_ POOL_SUM *Before)
+{
+    LOOPRDR_COUNTERS C;
+    POOL_SUM After;
+    BOOL Stopped = FALSE;
+    ULONG Try;
+
+    /* Structures are finalized by the scavenger (2 s) or by the stop */
+    for (Try = 0; Try < 20 && !Stopped; ++Try)
+    {
+        Stopped = LoopIoctl(IOCTL_LOOPRDR_STOP, NULL, 0, NULL, 0);
+        if (!Stopped)
+        {
+            Sleep(500);
+        }
+    }
+    ok(Stopped, "STOP failed: %lu\n", GetLastError());
+
+    LoopCounters(&C);
+    ok_eq_long(C.SrvCalls, 0L);
+    ok_eq_long(C.NetRoots, 0L);
+    ok_eq_long(C.VNetRoots, 0L);
+    ok_eq_long(C.Fcbs, 0L);
+    ok_eq_long(C.SrvOpens, 0L);
+    ok_eq_long(C.Fobxs, 0L);
+    ok_eq_long(C.BackingHandles, 0L);
+    ok_eq_long(C.PendingAsync, 0L);
+    trace("RDBSS counters: reads %ld writes %ld paging r/w %ld/%ld locks %ld unlocks %ld unlock-multiple %ld flushes %ld fsctl %ld ioctl %ld cbs compute/ack %ld/%ld async %ld\n",
+          C.Reads, C.Writes, C.PagingReads, C.PagingWrites, C.Locks, C.Unlocks, C.UnlockMultiple, C.Flushes,
+          C.FsCtls, C.IoCtls, C.ComputeBufferingState, C.CompleteBufferingState, C.AsyncCompletions);
+
+    CloseHandle(LoopDevice);
+    LoopDevice = INVALID_HANDLE_VALUE;
+    KmtUnloadDriver();
+
+    if (PoolSum(&After))
+    {
+        trace("RDBSS pool tags: before load %I64d blocks/%I64d bytes, after unload %I64d blocks/%I64d bytes\n",
+              Before->Outstanding, Before->Bytes, After.Outstanding, After.Bytes);
+        ok(After.Outstanding == Before->Outstanding,
+           "RDBSS pool blocks leaked: %I64d before, %I64d after\n", Before->Outstanding, After.Outstanding);
+    }
+
+    DeleteTree(LOCAL_ROOT);
+    RemoveDirectoryW(LOCAL_ROOT);
+}
+
+/* ---------------------------------------------------------------------- */
+/* Create, share modes, directories                                       */
+/* ---------------------------------------------------------------------- */
+
+static
+VOID
+TestCreate(VOID)
+{
+    WCHAR U[MAX_PATH], L[MAX_PATH];
+    HANDLE H1, H2;
+    DWORD Error, Written;
+    BOOLEAN Unc;
+
+    for (Unc = 0; Unc <= 1; ++Unc)
+    {
+        PCWSTR Side = Unc ? L"unc" : L"local";
+
+        P(U, Unc, L"create.bin");
+        DeleteFileW(U);
+
+        H1 = CreateFileW(U, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_NEW, 0, NULL);
+        ok(H1 != INVALID_HANDLE_VALUE, "%ls: CREATE_NEW failed: %lu\n", Side, GetLastError());
+        WriteFile(H1, "abc", 3, &Written, NULL);
+        CloseHandle(H1);
+
+        H1 = CreateFileW(U, GENERIC_READ, 0, NULL, CREATE_NEW, 0, NULL);
+        Error = GetLastError();
+        ok(H1 == INVALID_HANDLE_VALUE && Error == ERROR_FILE_EXISTS, "%ls: CREATE_NEW again: %p %lu\n", Side, H1, Error);
+
+        SetLastError(0xdeadbeef);
+        H1 = CreateFileW(U, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_ALWAYS, 0, NULL);
+        Error = GetLastError();
+        ok(H1 != INVALID_HANDLE_VALUE && Error == ERROR_ALREADY_EXISTS, "%ls: OPEN_ALWAYS existing: %p %lu\n", Side, H1, Error);
+        ok_eq_ulong(GetFileSize(H1, NULL), 3UL);
+
+        /* Share modes: read-only sharing refuses a writer */
+        H2 = CreateFileW(U, GENERIC_WRITE, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+        Error = GetLastError();
+        ok(H2 == INVALID_HANDLE_VALUE && Error == ERROR_SHARING_VIOLATION, "%ls: writer vs FILE_SHARE_READ: %p %lu\n", Side, H2, Error);
+        H2 = CreateFileW(U, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+        ok(H2 != INVALID_HANDLE_VALUE, "%ls: second reader failed: %lu\n", Side, GetLastError());
+        CloseHandle(H2);
+        CloseHandle(H1);
+
+        /* No sharing at all */
+        H1 = CreateFileW(U, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
+        ok(H1 != INVALID_HANDLE_VALUE, "%ls: exclusive open failed: %lu\n", Side, GetLastError());
+        H2 = CreateFileW(U, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+        Error = GetLastError();
+        ok(H2 == INVALID_HANDLE_VALUE && Error == ERROR_SHARING_VIOLATION, "%ls: open vs share 0: %p %lu\n", Side, H2, Error);
+        CloseHandle(H1);
+
+        /* CREATE_ALWAYS and TRUNCATE_EXISTING truncate */
+        H1 = CreateFileW(U, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+        Error = GetLastError();
+        ok(H1 != INVALID_HANDLE_VALUE && Error == ERROR_ALREADY_EXISTS, "%ls: CREATE_ALWAYS: %p %lu\n", Side, H1, Error);
+        ok_eq_ulong(GetFileSize(H1, NULL), 0UL);
+        WriteFile(H1, "abcdef", 6, &Written, NULL);
+        CloseHandle(H1);
+        H1 = CreateFileW(U, GENERIC_WRITE, 0, NULL, TRUNCATE_EXISTING, 0, NULL);
+        ok(H1 != INVALID_HANDLE_VALUE, "%ls: TRUNCATE_EXISTING failed: %lu\n", Side, GetLastError());
+        ok_eq_ulong(GetFileSize(H1, NULL), 0UL);
+        CloseHandle(H1);
+
+        /* Missing files and paths */
+        H1 = CreateFileW(P(L, Unc, L"missing.bin"), GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
+        Error = GetLastError();
+        ok(H1 == INVALID_HANDLE_VALUE && Error == ERROR_FILE_NOT_FOUND, "%ls: missing file: %lu\n", Side, Error);
+        H1 = CreateFileW(P(L, Unc, L"nodir\\missing.bin"), GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
+        Error = GetLastError();
+        ok(H1 == INVALID_HANDLE_VALUE && Error == ERROR_PATH_NOT_FOUND, "%ls: missing path: %lu\n", Side, Error);
+
+        /* Directories */
+        ok(CreateDirectoryW(P(L, Unc, L"dir"), NULL), "%ls: CreateDirectory failed: %lu\n", Side, GetLastError());
+        ok(!CreateDirectoryW(P(L, Unc, L"dir"), NULL) && GetLastError() == ERROR_ALREADY_EXISTS,
+           "%ls: CreateDirectory again: %lu\n", Side, GetLastError());
+        H1 = CreateFileW(P(L, Unc, L"dir"), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+                         FILE_FLAG_BACKUP_SEMANTICS, NULL);
+        ok(H1 != INVALID_HANDLE_VALUE, "%ls: opening a directory failed: %lu\n", Side, GetLastError());
+        CloseHandle(H1);
+        H1 = CreateFileW(P(L, Unc, L"dir"), GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
+        Error = GetLastError();
+        ok(H1 == INVALID_HANDLE_VALUE && Error == ERROR_ACCESS_DENIED, "%ls: directory as file: %lu\n", Side, Error);
+        ok(GetFileAttributesW(P(L, Unc, L"dir")) & FILE_ATTRIBUTE_DIRECTORY, "%ls: not a directory\n", Side);
+        ok(RemoveDirectoryW(P(L, Unc, L"dir")), "%ls: RemoveDirectory failed: %lu\n", Side, GetLastError());
+        ok(DeleteFileW(U), "%ls: DeleteFile failed: %lu\n", Side, GetLastError());
+    }
+}
+
+/* Relative opens (a RootDirectory handle): RDBSS joins the related file's
+ * name and the relative name. Each case must behave as it does locally. */
+static
+NTSTATUS
+RelativeOpen(
+    _In_ HANDLE Root,
+    _In_ PCWSTR Name,
+    _In_ ULONG Disposition,
+    _In_ ULONG Options,
+    _Out_ PHANDLE Handle)
+{
+    UNICODE_STRING String;
+    OBJECT_ATTRIBUTES Attributes;
+    IO_STATUS_BLOCK Iosb;
+
+    *Handle = NULL;
+    RtlInitUnicodeString(&String, Name);
+    InitializeObjectAttributes(&Attributes, &String, OBJ_CASE_INSENSITIVE, Root, NULL);
+    return NtCreateFile(Handle, GENERIC_READ | GENERIC_WRITE | SYNCHRONIZE, &Attributes, &Iosb, NULL, 0,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, Disposition,
+                        Options | FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
+}
+
+static
+VOID
+TestRelative(VOID)
+{
+    static const struct
+    {
+        PCWSTR Root;        /* opened by path, relative to the share */
+        PCWSTR Name;        /* opened relative to Root */
+        ULONG Disposition;
+        ULONG Options;
+    } Cases[] =
+    {
+        { L"rel",           L"a.bin",       FILE_OPEN,      FILE_NON_DIRECTORY_FILE },
+        { L"rel",           L"sub\\b.bin",  FILE_OPEN,      FILE_NON_DIRECTORY_FILE },
+        { L"rel",           L"c.bin",       FILE_CREATE,    FILE_NON_DIRECTORY_FILE },
+        { L"rel",           L"",            FILE_OPEN,      FILE_DIRECTORY_FILE },
+        { L"rel",           L"missing.bin", FILE_OPEN,      FILE_NON_DIRECTORY_FILE },
+        { L"rel",           L"\\a.bin",     FILE_OPEN,      FILE_NON_DIRECTORY_FILE },
+        { L"rel\\sub",      L"b.bin",       FILE_OPEN,      FILE_NON_DIRECTORY_FILE },
+        { L"",              L"rel\\a.bin",  FILE_OPEN,      FILE_NON_DIRECTORY_FILE },
+        { L"rel\\a.bin",    L"x.bin",       FILE_OPEN,      FILE_NON_DIRECTORY_FILE },
+    };
+    NTSTATUS Statuses[2][ARRAYSIZE(Cases)];
+    WCHAR Path[MAX_PATH];
+    BOOLEAN Unc;
+    ULONG i;
+    DWORD Written;
+    HANDLE File;
+
+    for (Unc = 0; Unc <= 1; ++Unc)
+    {
+        PCWSTR Side = Unc ? L"unc" : L"local";
+
+        CreateDirectoryW(P(Path, Unc, L"rel"), NULL);
+        CreateDirectoryW(P(Path, Unc, L"rel\\sub"), NULL);
+        File = CreateFileW(P(Path, Unc, L"rel\\a.bin"), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+        ok(File != INVALID_HANDLE_VALUE, "%ls: creating rel\\a.bin failed: %lu\n", Side, GetLastError());
+        WriteFile(File, "rel-a", 5, &Written, NULL);
+        CloseHandle(File);
+        File = CreateFileW(P(Path, Unc, L"rel\\sub\\b.bin"), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+        WriteFile(File, "rel-b", 5, &Written, NULL);
+        CloseHandle(File);
+
+        for (i = 0; i < ARRAYSIZE(Cases); ++i)
+        {
+            HANDLE Root, Handle;
+            NTSTATUS Status;
+
+            Root = CreateFileW(Cases[i].Root[0] ? P(Path, Unc, Cases[i].Root) : (Unc ? UNC_ROOT L"\\" : LOCAL_ROOT L"\\"),
+                               GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                               OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+            ok(Root != INVALID_HANDLE_VALUE, "%ls: case %lu: opening the root %ls failed: %lu\n",
+               Side, i, Cases[i].Root, GetLastError());
+            if (Root == INVALID_HANDLE_VALUE)
+            {
+                Statuses[Unc][i] = STATUS_UNSUCCESSFUL;
+                continue;
+            }
+
+            Status = RelativeOpen(Root, Cases[i].Name, Cases[i].Disposition, Cases[i].Options, &Handle);
+            Statuses[Unc][i] = Status;
+            if (NT_SUCCESS(Status))
+            {
+                CHAR Data[8] = { 0 };
+                DWORD Read = 0;
+
+                /* The right file was opened */
+                if (Cases[i].Options & FILE_NON_DIRECTORY_FILE)
+                {
+                    ReadFile(Handle, Data, sizeof(Data), &Read, NULL);
+                    if (Cases[i].Disposition == FILE_OPEN)
+                    {
+                        ok(Read == 5 && !memcmp(Data, wcsstr(Cases[i].Name, L"b.bin") ? "rel-b" : "rel-a", 5),
+                           "%ls: case %lu: read %lu bytes '%.5s'\n", Side, i, Read, Data);
+                    }
+                }
+                NtClose(Handle);
+            }
+            CloseHandle(Root);
+        }
+
+        DeleteFileW(P(Path, Unc, L"rel\\c.bin"));
+        DeleteFileW(P(Path, Unc, L"rel\\sub\\b.bin"));
+        DeleteFileW(P(Path, Unc, L"rel\\a.bin"));
+        RemoveDirectoryW(P(Path, Unc, L"rel\\sub"));
+        ok(RemoveDirectoryW(P(Path, Unc, L"rel")), "%ls: RemoveDirectory rel failed: %lu\n", Side, GetLastError());
+    }
+
+    for (i = 0; i < ARRAYSIZE(Cases); ++i)
+    {
+        trace("relative open %lu (%ls + %ls): local %lx, unc %lx\n", i, Cases[i].Root, Cases[i].Name,
+              Statuses[0][i], Statuses[1][i]);
+        ok(Statuses[1][i] == Statuses[0][i], "relative open %lu (%ls + %ls): local %lx, unc %lx\n",
+           i, Cases[i].Root, Cases[i].Name, Statuses[0][i], Statuses[1][i]);
+    }
+}
+
+/* CopyFile of files above kernel32's buffered-copy limit (4 MB) both ways:
+ * the copy reads its source with FILE_FLAG_NO_BUFFERING, so a copy from the
+ * share is a run of non-cached reads that flush the cache first, and a
+ * buffered read of a file just written by a copy follows. Done with the
+ * redirector caching and without it (as a mini-redirector that disables
+ * local buffering runs). */
+static
+VOID
+TestCopyFile(VOID)
+{
+    static const ULONG Size = 24 * 1024 * 1024 + 4321;
+    WCHAR L[MAX_PATH], U[MAX_PATH], L2[MAX_PATH];
+    PUCHAR Data, Back;
+    HANDLE File;
+    DWORD Written, Read;
+    ULONG Round;
+
+    Data = HeapAlloc(GetProcessHeap(), 0, Size);
+    Back = HeapAlloc(GetProcessHeap(), 0, Size);
+    if (Data == NULL || Back == NULL)
+    {
+        ok(0, "no memory for the copy test\n");
+        goto Out;
+    }
+
+    for (Round = 0; Round < 2; ++Round)
+    {
+        LoopOptions(Round == 0 ? FCB_ALL_CACHE : 0, 0);
+        Fill(Data, Size, 0x5eed + Round);
+
+        File = CreateFileW(P(L, FALSE, L"copysrc.bin"), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+        ok(File != INVALID_HANDLE_VALUE, "round %lu: creating the source failed: %lu\n", Round, GetLastError());
+        ok(WriteFile(File, Data, Size, &Written, NULL) && Written == Size, "round %lu: writing the source failed\n", Round);
+        CloseHandle(File);
+
+        /* Local to share, then the share's copy read back buffered */
+        ok(CopyFileW(L, P(U, TRUE, L"copy1.bin"), FALSE), "round %lu: copy to the share failed: %lu\n", Round, GetLastError());
+        ok(SameContent(L"copy1.bin", Data, Size), "round %lu: copy to the share differs locally\n", Round);
+        File = CreateFileW(U, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+        ok(File != INVALID_HANDLE_VALUE, "round %lu: reopening the copy failed: %lu\n", Round, GetLastError());
+        Read = 0;
+        ok(ReadFile(File, Back, Size, &Read, NULL) && Read == Size && !memcmp(Back, Data, Size),
+           "round %lu: buffered read of the copy: %lu bytes\n", Round, Read);
+        CloseHandle(File);
+
+        /* Share to local: non-cached reads of the share */
+        ok(CopyFileW(U, P(L2, FALSE, L"copy2.bin"), FALSE), "round %lu: copy from the share failed: %lu\n", Round, GetLastError());
+        ok(SameContent(L"copy2.bin", Data, Size), "round %lu: copy from the share differs\n", Round);
+
+        /* Share to share */
+        ok(CopyFileW(U, P(L2, TRUE, L"copy3.bin"), FALSE), "round %lu: copy within the share failed: %lu\n", Round, GetLastError());
+        ok(SameContent(L"copy3.bin", Data, Size), "round %lu: copy within the share differs\n", Round);
+
+        ok(DeleteFileW(P(U, TRUE, L"copy3.bin")), "round %lu: delete copy3 failed: %lu\n", Round, GetLastError());
+        ok(DeleteFileW(P(U, TRUE, L"copy1.bin")), "round %lu: delete copy1 failed: %lu\n", Round, GetLastError());
+        DeleteFileW(P(L2, FALSE, L"copy2.bin"));
+        DeleteFileW(L);
+    }
+    LoopOptions(FCB_ALL_CACHE, 0);
+
+Out:
+    if (Data != NULL)
+        HeapFree(GetProcessHeap(), 0, Data);
+    if (Back != NULL)
+        HeapFree(GetProcessHeap(), 0, Back);
+}
+
+/* ---------------------------------------------------------------------- */
+/* Read/write                                                             */
+/* ---------------------------------------------------------------------- */
+
+static const DWORD Sizes[] = { 1, 511, 4096, 65535, 65536, 65537, 1048575, 1048576, 1048577, 3 * 1048576 + 123 };
+
+static
+VOID
+TestReadWrite(VOID)
+{
+    WCHAR U[MAX_PATH];
+    PUCHAR Data, Back;
+    HANDLE H;
+    DWORD i, Done;
+    const DWORD Max = 3 * 1048576 + 123 + 4096;
+    LARGE_INTEGER Size;
+    LOOPRDR_COUNTERS C0, C1;
+
+    Data = VirtualAlloc(NULL, Max, MEM_COMMIT, PAGE_READWRITE);
+    Back = VirtualAlloc(NULL, Max, MEM_COMMIT, PAGE_READWRITE);
+    if (!Data || !Back)
+    {
+        skip(0, "No memory\n");
+        return;
+    }
+
+    LoopCounters(&C0);
+
+    /* Cached: write, read back through the redirector, compare locally */
+    for (i = 0; i < RTL_NUMBER_OF(Sizes); ++i)
+    {
+        Fill(Data, Sizes[i], i + 1);
+        H = CreateFileW(P(U, TRUE, L"rw.bin"), GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+        ok(H != INVALID_HANDLE_VALUE, "create failed: %lu\n", GetLastError());
+        if (H == INVALID_HANDLE_VALUE)
+            continue;
+        ok(WriteFile(H, Data, Sizes[i], &Done, NULL) && Done == Sizes[i], "write %lu: %lu (%lu)\n", Sizes[i], Done, GetLastError());
+        SetFilePointer(H, 0, NULL, FILE_BEGIN);
+        RtlZeroMemory(Back, Sizes[i] + 16);
+        ok(ReadFile(H, Back, Sizes[i] + 16, &Done, NULL) && Done == Sizes[i], "read %lu: %lu (%lu)\n", Sizes[i], Done, GetLastError());
+        ok(memcmp(Data, Back, Sizes[i]) == 0, "cached data differs at size %lu\n", Sizes[i]);
+        /* Reading at the end of file */
+        ok(ReadFile(H, Back, 16, &Done, NULL) && Done == 0, "read at EOF: %lu\n", Done);
+        CloseHandle(H);
+        ok(SameContent(L"rw.bin", Data, Sizes[i]), "local copy differs at size %lu\n", Sizes[i]);
+    }
+
+    /* Non-cached, sector-sized */
+    for (i = 0; i < RTL_NUMBER_OF(Sizes); ++i)
+    {
+        DWORD Length = (Sizes[i] + 511) & ~511;
+
+        Fill(Data, Length, 100 + i);
+        H = CreateFileW(P(U, TRUE, L"nc.bin"), GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                        FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH, NULL);
+        ok(H != INVALID_HANDLE_VALUE, "create nc failed: %lu\n", GetLastError());
+        if (H == INVALID_HANDLE_VALUE)
+            continue;
+        ok(WriteFile(H, Data, Length, &Done, NULL) && Done == Length, "nc write %lu: %lu (%lu)\n", Length, Done, GetLastError());
+        SetFilePointer(H, 0, NULL, FILE_BEGIN);
+        ok(ReadFile(H, Back, Length, &Done, NULL) && Done == Length, "nc read %lu: %lu (%lu)\n", Length, Done, GetLastError());
+        ok(memcmp(Data, Back, Length) == 0, "non-cached data differs at size %lu\n", Length);
+        CloseHandle(H);
+        ok(SameContent(L"nc.bin", Data, Length), "local nc copy differs at size %lu\n", Length);
+    }
+
+    /* Extend, truncate, append */
+    H = CreateFileW(P(U, TRUE, L"size.bin"), GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    ok(H != INVALID_HANDLE_VALUE, "create size failed: %lu\n", GetLastError());
+    if (H != INVALID_HANDLE_VALUE)
+    {
+        Fill(Data, 70000, 7);
+        WriteFile(H, Data, 70000, &Done, NULL);
+        Size.QuadPart = 2 * 1048576 + 5;
+        ok(SetFilePointerEx(H, Size, NULL, FILE_BEGIN) && SetEndOfFile(H), "extend failed: %lu\n", GetLastError());
+        ok(GetFileSizeEx(H, &Size) && Size.QuadPart == 2 * 1048576 + 5, "size after extend %I64d\n", Size.QuadPart);
+        SetFilePointer(H, 69990, NULL, FILE_BEGIN);
+        ok(ReadFile(H, Back, 20, &Done, NULL) && Done == 20, "read across old EOF: %lu\n", Done);
+        ok(memcmp(Back, Data + 69990, 10) == 0 && Back[10] == 0 && Back[19] == 0, "extended part not zero\n");
+        Size.QuadPart = 1000;
+        ok(SetFilePointerEx(H, Size, NULL, FILE_BEGIN) && SetEndOfFile(H), "truncate failed: %lu\n", GetLastError());
+        ok(GetFileSizeEx(H, &Size) && Size.QuadPart == 1000, "size after truncate %I64d\n", Size.QuadPart);
+        CloseHandle(H);
+        ok(SameContent(L"size.bin", Data, 1000), "local copy after truncate differs\n");
+    }
+
+    H = CreateFileW(P(U, TRUE, L"size.bin"), FILE_APPEND_DATA | SYNCHRONIZE, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    ok(H != INVALID_HANDLE_VALUE, "append open failed: %lu\n", GetLastError());
+    if (H != INVALID_HANDLE_VALUE)
+    {
+        ok(WriteFile(H, Data + 1000, 500, &Done, NULL) && Done == 500, "append failed: %lu\n", GetLastError());
+        CloseHandle(H);
+        ok(SameContent(L"size.bin", Data, 1500), "local copy after append differs\n");
+    }
+
+    /* Memory mapped: paging reads and writes */
+    H = CreateFileW(P(U, TRUE, L"map.bin"), GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    ok(H != INVALID_HANDLE_VALUE, "create map failed: %lu\n", GetLastError());
+    if (H != INVALID_HANDLE_VALUE)
+    {
+        HANDLE Section;
+        PUCHAR View;
+        const DWORD MapSize = 256 * 1024 + 100;
+
+        Fill(Data, MapSize, 33);
+        WriteFile(H, Data, MapSize, &Done, NULL);
+        FlushFileBuffers(H);
+        Section = CreateFileMappingW(H, NULL, PAGE_READWRITE, 0, 0, NULL);
+        ok(Section != NULL, "CreateFileMapping failed: %lu\n", GetLastError());
+        if (Section != NULL)
+        {
+            View = MapViewOfFile(Section, FILE_MAP_WRITE | FILE_MAP_READ, 0, 0, 0);
+            ok(View != NULL, "MapViewOfFile failed: %lu\n", GetLastError());
+            if (View != NULL)
+            {
+                ok(memcmp(View, Data, MapSize) == 0, "mapped view differs\n");
+                Fill(View + 4096, 8192, 44);
+                Fill(Data + 4096, 8192, 44);
+                ok(FlushViewOfFile(View, 0), "FlushViewOfFile failed: %lu\n", GetLastError());
+                UnmapViewOfFile(View);
+            }
+            CloseHandle(Section);
+        }
+        /* Read through the handle: the cache and the view are one */
+        SetFilePointer(H, 0, NULL, FILE_BEGIN);
+        ok(ReadFile(H, Back, MapSize, &Done, NULL) && Done == MapSize, "read after map: %lu\n", Done);
+        ok(memcmp(Back, Data, MapSize) == 0, "handle read differs from mapped write\n");
+        CloseHandle(H);
+        ok(SameContent(L"map.bin", Data, MapSize), "local copy differs from mapped write\n");
+    }
+
+    /* Asynchronous I/O completed from a worker (RxLowIoCompletion) */
+    LoopOptions(FCB_ALL_CACHE, LOOPRDR_OPT_ASYNC_LOWIO);
+    H = CreateFileW(P(U, TRUE, L"async.bin"), GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                    FILE_FLAG_OVERLAPPED | FILE_FLAG_NO_BUFFERING, NULL);
+    ok(H != INVALID_HANDLE_VALUE, "create async failed: %lu\n", GetLastError());
+    if (H != INVALID_HANDLE_VALUE)
+    {
+        OVERLAPPED Ov;
+        BOOL Ret;
+
+        Fill(Data, 65536, 55);
+        RtlZeroMemory(&Ov, sizeof(Ov));
+        Ov.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+        Ret = WriteFile(H, Data, 65536, NULL, &Ov);
+        ok(Ret || GetLastError() == ERROR_IO_PENDING, "async write: %lu\n", GetLastError());
+        ok(GetOverlappedResult(H, &Ov, &Done, TRUE) && Done == 65536, "async write result: %lu (%lu)\n", Done, GetLastError());
+        ResetEvent(Ov.hEvent);
+        Ov.Offset = 0;
+        Ret = ReadFile(H, Back, 65536, NULL, &Ov);
+        ok(Ret || GetLastError() == ERROR_IO_PENDING, "async read: %lu\n", GetLastError());
+        ok(GetOverlappedResult(H, &Ov, &Done, TRUE) && Done == 65536, "async read result: %lu (%lu)\n", Done, GetLastError());
+        ok(memcmp(Data, Back, 65536) == 0, "async data differs\n");
+
+        /* Close while a read may still be in flight */
+        ResetEvent(Ov.hEvent);
+        Ov.Offset = 0;
+        Ret = ReadFile(H, Back, 65536, NULL, &Ov);
+        CloseHandle(H);
+        if (!Ret)
+        {
+            WaitForSingleObject(Ov.hEvent, 10000);
+        }
+        CloseHandle(Ov.hEvent);
+    }
+    LoopOptions(FCB_ALL_CACHE, 0);
+
+    LoopCounters(&C1);
+    ok(C1.Writes > C0.Writes && C1.Reads > C0.Reads, "no non-paging I/O reached the mini-redirector\n");
+    ok(C1.PagingWrites > C0.PagingWrites, "no paging write reached the mini-redirector\n");
+    ok(C1.AsyncCompletions > C0.AsyncCompletions, "no asynchronous completion\n");
+    trace("paging reads %ld, paging writes %ld, async completions %ld\n",
+          C1.PagingReads - C0.PagingReads, C1.PagingWrites - C0.PagingWrites, C1.AsyncCompletions - C0.AsyncCompletions);
+
+    VirtualFree(Data, 0, MEM_RELEASE);
+    VirtualFree(Back, 0, MEM_RELEASE);
+}
+
+/* ---------------------------------------------------------------------- */
+/* Information classes                                                    */
+/* ---------------------------------------------------------------------- */
+
+static
+NTSTATUS
+SetInfo(
+    _In_ HANDLE File,
+    _In_ PVOID Buffer,
+    _In_ ULONG Length,
+    _In_ FILE_INFORMATION_CLASS Class)
+{
+    IO_STATUS_BLOCK Iosb;
+
+    return NtSetInformationFile(File, &Iosb, Buffer, Length, Class);
+}
+
+static
+NTSTATUS
+QueryInfo(
+    _In_ HANDLE File,
+    _Out_ PVOID Buffer,
+    _In_ ULONG Length,
+    _In_ FILE_INFORMATION_CLASS Class)
+{
+    IO_STATUS_BLOCK Iosb;
+
+    return NtQueryInformationFile(File, &Iosb, Buffer, Length, Class);
+}
+
+static
+VOID
+TestInformation(VOID)
+{
+    WCHAR U[MAX_PATH], L[MAX_PATH];
+    HANDLE H;
+    DWORD Done;
+    BY_HANDLE_FILE_INFORMATION Info;
+    FILE_BASIC_INFORMATION Basic;
+    FILE_STANDARD_INFORMATION Standard;
+    FILE_ALLOCATION_INFORMATION Allocation;
+    FILE_END_OF_FILE_INFORMATION Eof;
+    FILE_POSITION_INFORMATION Position;
+    FILE_INTERNAL_INFORMATION Internal;
+    FILE_DISPOSITION_INFORMATION Disposition;
+    FILETIME Time;
+    NTSTATUS Status;
+    UCHAR NameBuffer[sizeof(FILE_NAME_INFORMATION) + MAX_PATH * sizeof(WCHAR)];
+    PFILE_NAME_INFORMATION NameInfo = (PFILE_NAME_INFORMATION)NameBuffer;
+    UCHAR AllBuffer[1024]; /* FILE_ALL_INFORMATION and the name */
+    LARGE_INTEGER Size;
+
+    H = CreateFileW(P(U, TRUE, L"info.txt"), GENERIC_READ | GENERIC_WRITE | DELETE, FILE_SHARE_READ | FILE_SHARE_DELETE,
+                    NULL, CREATE_ALWAYS, 0, NULL);
+    ok(H != INVALID_HANDLE_VALUE, "create failed: %lu\n", GetLastError());
+    if (H == INVALID_HANDLE_VALUE)
+        return;
+    WriteFile(H, "0123456789", 10, &Done, NULL);
+
+    /* FileAllInformation: basic, standard, internal, EA, position, name */
+    ok(GetFileInformationByHandle(H, &Info), "GetFileInformationByHandle failed: %lu\n", GetLastError());
+    ok_eq_ulong(Info.nFileSizeLow, 10UL);
+    ok_eq_ulong(Info.nNumberOfLinks, 1UL);
+    Status = QueryInfo(H, AllBuffer, sizeof(AllBuffer), FileAllInformation);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = QueryInfo(H, &Internal, sizeof(Internal), FileInternalInformation);
+    ok(NT_SUCCESS(Status) && Internal.IndexNumber.QuadPart != 0, "internal: %lx\n", Status);
+
+    Status = QueryInfo(H, &Standard, sizeof(Standard), FileStandardInformation);
+    ok(NT_SUCCESS(Status) && Standard.EndOfFile.QuadPart == 10 && !Standard.Directory && !Standard.DeletePending,
+       "standard info: %lx %I64d\n", Status, Standard.EndOfFile.QuadPart);
+    Status = QueryInfo(H, NameInfo, sizeof(NameBuffer), FileNameInformation);
+    ok(NT_SUCCESS(Status), "name: %lx\n", Status);
+    if (NT_SUCCESS(Status))
+    {
+        NameInfo->FileName[min(NameInfo->FileNameLength / sizeof(WCHAR), MAX_PATH - 1)] = 0;
+        ok(wcsstr(NameInfo->FileName, L"info.txt") != NULL, "name is %ls\n", NameInfo->FileName);
+    }
+
+    Status = QueryInfo(H, &Position, sizeof(Position), FilePositionInformation);
+    ok(NT_SUCCESS(Status) && Position.CurrentByteOffset.QuadPart == 10, "position %lx %I64d\n", Status, Position.CurrentByteOffset.QuadPart);
+    Position.CurrentByteOffset.QuadPart = 3;
+    Status = SetInfo(H, &Position, sizeof(Position), FilePositionInformation);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok_eq_ulong(SetFilePointer(H, 0, NULL, FILE_CURRENT), 3UL);
+
+    /* Basic: times */
+    Status = QueryInfo(H, &Basic, sizeof(Basic), FileBasicInformation);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+
+    /* End of file and allocation through the information classes */
+    Eof.EndOfFile.QuadPart = 300000;
+    Status = SetInfo(H, &Eof, sizeof(Eof), FileEndOfFileInformation);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok(GetFileSizeEx(H, &Size) && Size.QuadPart == 300000, "size %I64d\n", Size.QuadPart);
+    Allocation.AllocationSize.QuadPart = 4;
+    Status = SetInfo(H, &Allocation, sizeof(Allocation), FileAllocationInformation);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok(GetFileSizeEx(H, &Size) && Size.QuadPart == 4, "size after allocation %I64d\n", Size.QuadPart);
+    CloseHandle(H);
+
+    /* A last write time set through a handle reaches the share (an open
+     * that does not write, so that the share's own update on close does not
+     * interfere) */
+    H = CreateFileW(P(U, TRUE, L"info.txt"), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                    OPEN_EXISTING, 0, NULL);
+    ok(H != INVALID_HANDLE_VALUE, "attribute open failed: %lu\n", GetLastError());
+    Time.dwLowDateTime = 0x12345678;
+    Time.dwHighDateTime = 0x01d00000;
+    ok(SetFileTime(H, NULL, NULL, &Time), "SetFileTime failed: %lu\n", GetLastError());
+    CloseHandle(H);
+    ok(SameContent(L"info.txt", (const UCHAR *)"0123", 4), "local copy after allocation differs\n");
+
+    /* The last write time set through the handle reached the backing file */
+    H = CreateFileW(P(L, FALSE, L"info.txt"), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (H != INVALID_HANDLE_VALUE)
+    {
+        FILETIME Got;
+
+        FILETIME Expected = Time;
+        HANDLE Ref;
+
+        GetFileTime(H, NULL, NULL, &Got);
+        CloseHandle(H);
+
+        /* What the share's file system makes of that time (FAT keeps 2 s) */
+        Ref = CreateFileW(P(L, FALSE, L"timeref.txt"), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+        if (Ref != INVALID_HANDLE_VALUE)
+        {
+            SetFileTime(Ref, NULL, NULL, &Time);
+            CloseHandle(Ref);
+            Ref = CreateFileW(P(L, FALSE, L"timeref.txt"), GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
+            GetFileTime(Ref, NULL, NULL, &Expected);
+            CloseHandle(Ref);
+            DeleteFileW(P(L, FALSE, L"timeref.txt"));
+        }
+        ok(CompareFileTime(&Got, &Expected) == 0, "last write time not set: %08lx%08lx, expected %08lx%08lx\n",
+           Got.dwHighDateTime, Got.dwLowDateTime, Expected.dwHighDateTime, Expected.dwLowDateTime);
+    }
+
+    ok(SetFileAttributesW(P(U, TRUE, L"info.txt"), FILE_ATTRIBUTE_HIDDEN), "SetFileAttributes: %lu\n", GetLastError());
+    ok(GetFileAttributesW(P(L, FALSE, L"info.txt")) & FILE_ATTRIBUTE_HIDDEN, "attribute did not reach the share\n");
+    SetFileAttributesW(P(U, TRUE, L"info.txt"), FILE_ATTRIBUTE_NORMAL);
+
+    /* Rename within the share, replace, delete */
+    ok(MoveFileW(P(U, TRUE, L"info.txt"), P(L, TRUE, L"renamed.txt")), "MoveFile failed: %lu\n", GetLastError());
+    ok(WaitExists(L"renamed.txt", TRUE, 0) && WaitExists(L"info.txt", FALSE, 0), "rename not seen locally\n");
+    H = CreateFileW(P(U, TRUE, L"other.txt"), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    CloseHandle(H);
+    ok(!MoveFileExW(P(U, TRUE, L"renamed.txt"), P(L, TRUE, L"other.txt"), 0) && GetLastError() == ERROR_ALREADY_EXISTS,
+       "rename onto existing: %lu\n", GetLastError());
+    ok(MoveFileExW(P(U, TRUE, L"renamed.txt"), P(L, TRUE, L"other.txt"), MOVEFILE_REPLACE_EXISTING),
+       "rename replacing: %lu\n", GetLastError());
+    ok(SameContent(L"other.txt", (const UCHAR *)"0123", 4), "replaced file content wrong\n");
+    ok(CreateDirectoryW(P(U, TRUE, L"sub"), NULL), "CreateDirectory: %lu\n", GetLastError());
+    ok(MoveFileW(P(U, TRUE, L"other.txt"), P(L, TRUE, L"sub\\moved.txt")), "move into subdirectory: %lu\n", GetLastError());
+    ok(WaitExists(L"sub\\moved.txt", TRUE, 0), "move not seen locally\n");
+    ok(DeleteFileW(P(U, TRUE, L"sub\\moved.txt")), "DeleteFile: %lu\n", GetLastError());
+    ok(WaitExists(L"sub\\moved.txt", FALSE, 5000), "delete not seen locally\n");
+    ok(RemoveDirectoryW(P(U, TRUE, L"sub")), "RemoveDirectory: %lu\n", GetLastError());
+
+    /* Delete on close, with a second handle that allows it */
+    H = CreateFileW(P(U, TRUE, L"doc.txt"), GENERIC_WRITE | DELETE, FILE_SHARE_READ | FILE_SHARE_DELETE, NULL,
+                    CREATE_ALWAYS, FILE_FLAG_DELETE_ON_CLOSE, NULL);
+    ok(H != INVALID_HANDLE_VALUE, "delete-on-close create: %lu\n", GetLastError());
+    if (H != INVALID_HANDLE_VALUE)
+    {
+        HANDLE H2;
+
+        WriteFile(H, "x", 1, &Done, NULL);
+        H2 = CreateFileW(P(U, TRUE, L"doc.txt"), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                         NULL, OPEN_EXISTING, 0, NULL);
+        ok(H2 != INVALID_HANDLE_VALUE, "second open of a delete-on-close file: %lu\n", GetLastError());
+        CloseHandle(H);
+        if (H2 != INVALID_HANDLE_VALUE)
+        {
+            CHAR Byte;
+
+            /* The other handle keeps working until it is closed */
+            ok(ReadFile(H2, &Byte, 1, &Done, NULL), "read on the remaining handle: %lu\n", GetLastError());
+            CloseHandle(H2);
+        }
+        ok(WaitExists(L"doc.txt", FALSE, 5000), "delete-on-close did not delete\n");
+    }
+
+    /* Disposition through the information class */
+    H = CreateFileW(P(U, TRUE, L"disp.txt"), GENERIC_WRITE | DELETE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    if (H != INVALID_HANDLE_VALUE)
+    {
+        Disposition.DeleteFile = TRUE;
+        Status = SetInfo(H, &Disposition, sizeof(Disposition), FileDispositionInformation);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        Status = QueryInfo(H, &Standard, sizeof(Standard), FileStandardInformation);
+        ok(NT_SUCCESS(Status) && Standard.DeletePending, "delete not pending: %lx\n", Status);
+        CloseHandle(H);
+        ok(WaitExists(L"disp.txt", FALSE, 5000), "disposition did not delete\n");
+    }
+}
+
+/* ---------------------------------------------------------------------- */
+/* Directory queries                                                      */
+/* ---------------------------------------------------------------------- */
+
+static
+ULONG
+CountFind(
+    _In_ BOOLEAN Unc,
+    _In_ PCWSTR Pattern,
+    _Out_opt_ PULONG Hash)
+{
+    WCHAR Path[MAX_PATH];
+    WIN32_FIND_DATAW Data;
+    HANDLE Find;
+    ULONG Count = 0, Sum = 0;
+
+    Find = FindFirstFileW(P(Path, Unc, Pattern), &Data);
+    if (Find != INVALID_HANDLE_VALUE)
+    {
+        do
+        {
+            PWCHAR c;
+
+            ++Count;
+            for (c = Data.cFileName; *c; ++c)
+            {
+                Sum += towlower(*c) * (ULONG)(c - Data.cFileName + 1);
+            }
+            Sum += Data.nFileSizeLow;
+        } while (FindNextFileW(Find, &Data));
+        FindClose(Find);
+    }
+    if (Hash)
+        *Hash = Sum;
+    return Count;
+}
+
+static
+VOID
+TestDirectory(VOID)
+{
+    WCHAR U[MAX_PATH];
+    HANDLE H;
+    ULONG i, LocalCount, UncCount, LocalHash, UncHash;
+    static const PCWSTR Patterns[] = { L"dq\\*", L"dq\\*.txt", L"dq\\f?le1*", L"dq\\file17.txt", L"dq\\none*", L"dq\\*.*" };
+    static const FILE_INFORMATION_CLASS Classes[] = { FileDirectoryInformation, FileFullDirectoryInformation,
+                                                      FileBothDirectoryInformation, FileNamesInformation,
+                                                      FileIdBothDirectoryInformation };
+    IO_STATUS_BLOCK Iosb;
+    NTSTATUS Status;
+    UCHAR Buffer[4096];
+    DWORD Done;
+
+    CreateDirectoryW(P(U, TRUE, L"dq"), NULL);
+    for (i = 0; i < 40; ++i)
+    {
+        WCHAR Name[64];
+
+        StringCchPrintfW(Name, 64, i % 2 ? L"dq\\file%lu.txt" : L"dq\\file%lu.dat", i);
+        H = CreateFileW(P(U, TRUE, Name), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+        if (H != INVALID_HANDLE_VALUE)
+        {
+            WriteFile(H, Buffer, i * 3, &Done, NULL);
+            CloseHandle(H);
+        }
+    }
+    CreateDirectoryW(P(U, TRUE, L"dq\\subdir"), NULL);
+
+    for (i = 0; i < RTL_NUMBER_OF(Patterns); ++i)
+    {
+        LocalCount = CountFind(FALSE, Patterns[i], &LocalHash);
+        UncCount = CountFind(TRUE, Patterns[i], &UncHash);
+        ok(LocalCount == UncCount && LocalHash == UncHash, "%ls: local %lu (%lx), unc %lu (%lx)\n",
+           Patterns[i], LocalCount, LocalHash, UncCount, UncHash);
+    }
+
+    /* Classes, restart and single entry, with the native call */
+    H = CreateFileW(P(U, TRUE, L"dq"), FILE_LIST_DIRECTORY | SYNCHRONIZE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                    OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    ok(H != INVALID_HANDLE_VALUE, "directory open: %lu\n", GetLastError());
+    if (H != INVALID_HANDLE_VALUE)
+    {
+        for (i = 0; i < RTL_NUMBER_OF(Classes); ++i)
+        {
+            ULONG Entries = 0;
+            BOOLEAN Restart = TRUE;
+
+            for (;;)
+            {
+                Status = NtQueryDirectoryFile(H, NULL, NULL, NULL, &Iosb, Buffer, sizeof(Buffer), Classes[i],
+                                              FALSE, NULL, Restart);
+                Restart = FALSE;
+                if (Status == STATUS_NO_MORE_FILES)
+                    break;
+                ok(NT_SUCCESS(Status), "class %d: %lx\n", Classes[i], Status);
+                if (!NT_SUCCESS(Status))
+                    break;
+                {
+                    PUCHAR Entry = Buffer;
+                    for (;;)
+                    {
+                        ULONG Next = *(PULONG)Entry;
+                        ++Entries;
+                        if (Next == 0)
+                            break;
+                        Entry += Next;
+                    }
+                }
+            }
+            ok_eq_ulong(Entries, 43UL); /* 40 files, subdir, . and .. */
+        }
+
+        Status = NtQueryDirectoryFile(H, NULL, NULL, NULL, &Iosb, Buffer, sizeof(Buffer), FileNamesInformation,
+                                      TRUE, NULL, TRUE);
+        ok(NT_SUCCESS(Status) && *(PULONG)Buffer == 0, "single entry: %lx\n", Status);
+        CloseHandle(H);
+    }
+}
+
+/* ---------------------------------------------------------------------- */
+/* Volume, flush, security, EAs, controls                                 */
+/* ---------------------------------------------------------------------- */
+
+static
+VOID
+TestVolumeFlushSecurity(VOID)
+{
+    WCHAR U[MAX_PATH], Fs[64];
+    HANDLE H;
+    DWORD Serial, MaxLen, Flags, Done, Needed;
+    ULARGE_INTEGER Free, Total;
+    IO_STATUS_BLOCK Iosb;
+    FILE_FS_DEVICE_INFORMATION Device;
+    NTSTATUS Status;
+    UCHAR Sd[4096];
+    UCHAR Pattern[8192];
+    LOOPRDR_COUNTERS C0, C1;
+
+    /* The steps of GetVolumeInformation, one by one */
+    {
+        UNICODE_STRING Root = RTL_CONSTANT_STRING(L"\\??\\UNC\\" LOOPRDR_SERVER L"\\" LOOPRDR_SHARE L"\\");
+        OBJECT_ATTRIBUTES Attributes;
+        HANDLE V;
+        UCHAR Info[600];
+
+        InitializeObjectAttributes(&Attributes, &Root, OBJ_CASE_INSENSITIVE, NULL, NULL);
+        Status = NtOpenFile(&V, SYNCHRONIZE, &Attributes, &Iosb, 0,
+                            FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_FOR_BACKUP_INTENT);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (NT_SUCCESS(Status))
+        {
+            Status = NtQueryInformationFile(V, &Iosb, Info, sizeof(Info), FileNameInformation);
+            ok_eq_hex(Status, STATUS_SUCCESS);
+            if (NT_SUCCESS(Status))
+            {
+                PFILE_NAME_INFORMATION Name = (PFILE_NAME_INFORMATION)Info;
+                Name->FileName[min(Name->FileNameLength / sizeof(WCHAR), 200)] = 0;
+                ok(wcscmp(Name->FileName, L"\\" LOOPRDR_SERVER L"\\" LOOPRDR_SHARE L"\\") == 0,
+                   "share root name: '%ls'\n", Name->FileName);
+            }
+            Status = NtQueryVolumeInformationFile(V, &Iosb, Info, sizeof(Info), FileFsVolumeInformation);
+            ok_eq_hex(Status, STATUS_SUCCESS);
+            Status = NtQueryVolumeInformationFile(V, &Iosb, Info, sizeof(Info), FileFsAttributeInformation);
+            ok_eq_hex(Status, STATUS_SUCCESS);
+            NtClose(V);
+        }
+    }
+
+    ok_eq_ulong(GetDriveTypeW(UNC_ROOT L"\\"), (ULONG)DRIVE_REMOTE);
+    /* kernel32 checks that a root path is a symbolic link object, which a
+     * UNC share root is not: reported, the native steps above are the test */
+    if (!GetVolumeInformationW(UNC_ROOT L"\\", NULL, 0, &Serial, &MaxLen, &Flags, Fs, 64))
+        trace("GetVolumeInformation on the share root: %lu (kernel32)\n", GetLastError());
+    ok(GetDiskFreeSpaceExW(UNC_ROOT L"\\", &Free, &Total, NULL) && Total.QuadPart != 0, "GetDiskFreeSpaceEx: %lu\n", GetLastError());
+
+    LoopCounters(&C0);
+    H = CreateFileW(P(U, TRUE, L"flush.bin"), GENERIC_READ | GENERIC_WRITE | READ_CONTROL | WRITE_DAC,
+                    FILE_SHARE_READ, NULL, CREATE_ALWAYS, 0, NULL);
+    ok(H != INVALID_HANDLE_VALUE, "create: %lu\n", GetLastError());
+    if (H == INVALID_HANDLE_VALUE)
+        return;
+
+    Status = NtQueryVolumeInformationFile(H, &Iosb, &Device, sizeof(Device), FileFsDeviceInformation);
+    ok(NT_SUCCESS(Status) && (Device.Characteristics & FILE_REMOTE_DEVICE), "device info %lx %lx\n", Status, Device.Characteristics);
+
+    /* Flush: the data is in the share while the handle stays open */
+    Fill(Pattern, sizeof(Pattern), 9);
+    WriteFile(H, Pattern, sizeof(Pattern), &Done, NULL);
+    ok(FlushFileBuffers(H), "FlushFileBuffers: %lu\n", GetLastError());
+    ok(SameContent(L"flush.bin", Pattern, sizeof(Pattern)), "flushed data not in the share\n");
+
+    /* Security: query (short buffer too), set back the same descriptor */
+    ok(!GetFileSecurityW(U, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, Sd, 8, &Needed) &&
+       GetLastError() == ERROR_INSUFFICIENT_BUFFER && Needed > 8, "short security buffer: %lu needed %lu\n", GetLastError(), Needed);
+    ok(GetFileSecurityW(U, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, Sd, sizeof(Sd), &Needed),
+       "GetFileSecurity: %lu\n", GetLastError());
+    ok(SetKernelObjectSecurity(H, DACL_SECURITY_INFORMATION, (PSECURITY_DESCRIPTOR)Sd), "SetKernelObjectSecurity: %lu\n", GetLastError());
+
+    /* FSCTL and IOCTL pass-through */
+    {
+        CHAR In[] = "abcdef", Out[16] = { 0 };
+
+        IO_STATUS_BLOCK Iosb;
+        NTSTATUS Status;
+
+        /* Codes of a network file system device type: kernel32 would send
+         * them as IOCTLs, so use the native call for the FSCTL path */
+        Status = NtFsControlFile(H, NULL, NULL, NULL, &Iosb, FSCTL_LOOPRDR_ECHO, In, 6, Out, sizeof(Out));
+        ok(NT_SUCCESS(Status) && Iosb.Information == 6 && !memcmp(Out, "fedcba", 6),
+           "FSCTL echo: %lx %Iu '%s'\n", Status, Iosb.Information, Out);
+        RtlZeroMemory(Out, sizeof(Out));
+        Status = NtFsControlFile(H, NULL, NULL, NULL, &Iosb, FSCTL_LOOPRDR_ECHO_DIRECT, In, 6, Out, 6);
+        ok(NT_SUCCESS(Status) && Iosb.Information == 6 && !memcmp(Out, "fedcba", 6),
+           "FSCTL direct echo: %lx %Iu\n", Status, Iosb.Information);
+        RtlZeroMemory(Out, sizeof(Out));
+        ok(DeviceIoControl(H, IOCTL_LOOPRDR_FILE_ECHO, In, 6, Out, sizeof(Out), &Done, NULL) && Done == 6 &&
+           !memcmp(Out, "fedcba", 6), "IOCTL echo: %lu %lu\n", GetLastError(), Done);
+    }
+
+    /* Change notification: not provided by this mini-redirector */
+    {
+        HANDLE Dir;
+        UCHAR Notify[512];
+
+        Dir = CreateFileW(UNC_ROOT, FILE_LIST_DIRECTORY, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                          OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+        ok(Dir != INVALID_HANDLE_VALUE, "share root open: %lu\n", GetLastError());
+        if (Dir != INVALID_HANDLE_VALUE)
+        {
+            ok(!ReadDirectoryChangesW(Dir, Notify, sizeof(Notify), FALSE, FILE_NOTIFY_CHANGE_FILE_NAME, &Done, NULL, NULL),
+               "change notification unexpectedly worked\n");
+            CloseHandle(Dir);
+        }
+    }
+
+    CloseHandle(H);
+    LoopCounters(&C1);
+    ok(C1.Flushes > C0.Flushes, "MRxFlush not called\n");
+    ok(C1.QuerySd > C0.QuerySd && C1.SetSd > C0.SetSd, "security not passed to the mini-redirector\n");
+    ok(C1.FsCtls > C0.FsCtls && C1.IoCtls > C0.IoCtls, "controls not passed to the mini-redirector\n");
+}
+
+static
+VOID
+TestEas(VOID)
+{
+    WCHAR U[MAX_PATH], L[MAX_PATH];
+    UCHAR EaBuffer[64];
+    PFILE_FULL_EA_INFORMATION Ea = (PFILE_FULL_EA_INFORMATION)EaBuffer;
+    UNICODE_STRING Name;
+    OBJECT_ATTRIBUTES Attributes;
+    IO_STATUS_BLOCK Iosb;
+    NTSTATUS LocalStatus, UncStatus;
+    HANDLE H;
+    FILE_EA_INFORMATION EaInfo;
+    WCHAR NtPath[MAX_PATH];
+
+    /* An EA in the create: whatever the share's file system does locally,
+     * the redirector must do the same (pass-through) */
+    RtlZeroMemory(EaBuffer, sizeof(EaBuffer));
+    Ea->EaNameLength = 4;
+    Ea->EaValueLength = 3;
+    memcpy(Ea->EaName, "TEST\0abc", 8);
+
+    StringCchPrintfW(NtPath, MAX_PATH, L"\\??\\%s", P(L, FALSE, L"ea.bin"));
+    RtlInitUnicodeString(&Name, NtPath);
+    InitializeObjectAttributes(&Attributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    LocalStatus = NtCreateFile(&H, GENERIC_READ | GENERIC_WRITE | SYNCHRONIZE, &Attributes, &Iosb, NULL, 0, 0,
+                               FILE_OVERWRITE_IF, FILE_SYNCHRONOUS_IO_NONALERT, Ea, sizeof(EaBuffer));
+    if (NT_SUCCESS(LocalStatus))
+        NtClose(H);
+
+    StringCchPrintfW(NtPath, MAX_PATH, L"\\??\\UNC\\%s\\%s\\ea2.bin", LOOPRDR_SERVER, LOOPRDR_SHARE);
+    RtlInitUnicodeString(&Name, NtPath);
+    UncStatus = NtCreateFile(&H, GENERIC_READ | GENERIC_WRITE | SYNCHRONIZE, &Attributes, &Iosb, NULL, 0, 0,
+                             FILE_OVERWRITE_IF, FILE_SYNCHRONOUS_IO_NONALERT, Ea, sizeof(EaBuffer));
+    ok(NT_SUCCESS(UncStatus) == NT_SUCCESS(LocalStatus), "EA create: local %lx, unc %lx\n", LocalStatus, UncStatus);
+    if (NT_SUCCESS(UncStatus))
+    {
+        NTSTATUS Status = NtQueryInformationFile(H, &Iosb, &EaInfo, sizeof(EaInfo), FileEaInformation);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        NtClose(H);
+    }
+    DeleteFileW(P(U, TRUE, L"ea2.bin"));
+    DeleteFileW(P(L, FALSE, L"ea.bin"));
+}
+
+/* ---------------------------------------------------------------------- */
+/* Byte-range locks                                                       */
+/* ---------------------------------------------------------------------- */
+
+typedef struct _WAIT_LOCK
+{
+    HANDLE File;
+    BOOL Result;
+    DWORD Error;
+} WAIT_LOCK;
+
+static
+DWORD
+WINAPI
+WaitLockThread(
+    _In_ PVOID Parameter)
+{
+    WAIT_LOCK *Wait = Parameter;
+    OVERLAPPED Ov;
+
+    RtlZeroMemory(&Ov, sizeof(Ov));
+    Wait->Result = LockFileEx(Wait->File, LOCKFILE_EXCLUSIVE_LOCK, 0, 100, 0, &Ov);
+    Wait->Error = GetLastError();
+    if (Wait->Result)
+    {
+        UnlockFileEx(Wait->File, 0, 100, 0, &Ov);
+    }
+    return 0;
+}
+
+static
+VOID
+TestLocks(VOID)
+{
+    WCHAR U[MAX_PATH];
+    HANDLE H1, H2, Thread;
+    OVERLAPPED Ov;
+    DWORD Done, Error;
+    UCHAR Buffer[200];
+    LOOPRDR_COUNTERS C0, C1;
+    WAIT_LOCK Wait;
+
+    LoopCounters(&C0);
+    P(U, TRUE, L"locks.bin");
+    H1 = CreateFileW(U, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, CREATE_ALWAYS, 0, NULL);
+    H2 = CreateFileW(U, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    ok(H1 != INVALID_HANDLE_VALUE && H2 != INVALID_HANDLE_VALUE, "open: %lu\n", GetLastError());
+    if (H1 == INVALID_HANDLE_VALUE || H2 == INVALID_HANDLE_VALUE)
+        return;
+    Fill(Buffer, sizeof(Buffer), 1);
+    WriteFile(H1, Buffer, sizeof(Buffer), &Done, NULL);
+
+    /* Exclusive lock on h1, conflicts seen from h2: whatever the local file
+     * system does for two handles of one process, the redirector must do the
+     * same (the local check is FsRtl's; a lock conflict for another lock is
+     * always refused) */
+    {
+        BOOLEAN Unc;
+        BOOL ReadOk[2], WriteOk[2], OwnerOk[2];
+
+        for (Unc = 0; Unc <= 1; ++Unc)
+        {
+            WCHAR Path[MAX_PATH];
+            HANDLE A, B;
+
+            P(Path, Unc, L"locks2.bin");
+            A = CreateFileW(Path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                            NULL, CREATE_ALWAYS, 0, NULL);
+            B = CreateFileW(Path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                            NULL, OPEN_EXISTING, 0, NULL);
+            ok(A != INVALID_HANDLE_VALUE && B != INVALID_HANDLE_VALUE, "%d: lock file open: %lu\n", Unc, GetLastError());
+            WriteFile(A, Buffer, sizeof(Buffer), &Done, NULL);
+            RtlZeroMemory(&Ov, sizeof(Ov));
+            ok(LockFileEx(A, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 100, 0, &Ov), "%d: lock: %lu\n", Unc, GetLastError());
+            SetFilePointer(B, 10, NULL, FILE_BEGIN);
+            ReadOk[Unc] = ReadFile(B, Buffer, 10, &Done, NULL);
+            SetFilePointer(B, 10, NULL, FILE_BEGIN);
+            WriteOk[Unc] = WriteFile(B, Buffer, 10, &Done, NULL);
+            ok(!LockFileEx(B, LOCKFILE_FAIL_IMMEDIATELY, 0, 10, 0, &Ov) && GetLastError() == ERROR_LOCK_VIOLATION,
+               "%d: conflicting lock: %lu\n", Unc, GetLastError());
+            SetFilePointer(A, 0, NULL, FILE_BEGIN);
+            OwnerOk[Unc] = ReadFile(A, Buffer, 50, &Done, NULL) && WriteFile(A, Buffer, 50, &Done, NULL);
+            ok(UnlockFileEx(A, 0, 100, 0, &Ov), "%d: unlock: %lu\n", Unc, GetLastError());
+            ok(!UnlockFileEx(A, 0, 100, 0, &Ov) && GetLastError() == ERROR_NOT_LOCKED, "%d: unlock twice: %lu\n", Unc, GetLastError());
+            CloseHandle(A);
+            CloseHandle(B);
+            DeleteFileW(Path);
+        }
+        ok(ReadOk[0] == ReadOk[1] && WriteOk[0] == WriteOk[1] && OwnerOk[1] && OwnerOk[0] == OwnerOk[1],
+           "lock behaviour differs: local read %d write %d owner %d, unc read %d write %d owner %d\n",
+           ReadOk[0], WriteOk[0], OwnerOk[0], ReadOk[1], WriteOk[1], OwnerOk[1]);
+        trace("other handle under an exclusive lock: read %d write %d\n", ReadOk[1], WriteOk[1]);
+    }
+
+    /* Shared locks stack */
+    RtlZeroMemory(&Ov, sizeof(Ov));
+    ok(LockFileEx(H1, LOCKFILE_FAIL_IMMEDIATELY, 0, 100, 0, &Ov), "shared lock 1: %lu\n", GetLastError());
+    ok(LockFileEx(H2, LOCKFILE_FAIL_IMMEDIATELY, 0, 100, 0, &Ov), "shared lock 2: %lu\n", GetLastError());
+    ok(!LockFileEx(H2, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 100, 0, &Ov) &&
+       GetLastError() == ERROR_LOCK_VIOLATION, "exclusive over shared: %lu\n", GetLastError());
+    SetFilePointer(H2, 0, NULL, FILE_BEGIN);
+    ok(ReadFile(H2, Buffer, 10, &Done, NULL), "read under shared locks: %lu\n", GetLastError());
+    UnlockFileEx(H1, 0, 100, 0, &Ov);
+    UnlockFileEx(H2, 0, 100, 0, &Ov);
+
+    /* A waiting lock is granted when the holder unlocks */
+    ok(LockFileEx(H1, LOCKFILE_EXCLUSIVE_LOCK, 0, 100, 0, &Ov), "lock for waiter: %lu\n", GetLastError());
+    Wait.File = H2;
+    Wait.Result = FALSE;
+    Thread = CreateThread(NULL, 0, WaitLockThread, &Wait, 0, NULL);
+    Sleep(500);
+    ok(WaitForSingleObject(Thread, 0) == WAIT_TIMEOUT, "waiting lock did not wait\n");
+    UnlockFileEx(H1, 0, 100, 0, &Ov);
+    ok(WaitForSingleObject(Thread, 15000) == WAIT_OBJECT_0, "waiting lock never granted\n");
+    ok(Wait.Result, "waiting lock failed: %lu\n", Wait.Error);
+    CloseHandle(Thread);
+
+    /* Closing with locks held releases them (unlock-all at cleanup) */
+    ok(LockFileEx(H1, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 10, 0, &Ov), "lock a: %lu\n", GetLastError());
+    Ov.Offset = 20;
+    ok(LockFileEx(H1, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 10, 0, &Ov), "lock b: %lu\n", GetLastError());
+    CloseHandle(H1);
+    Ov.Offset = 0;
+    ok(LockFileEx(H2, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 30, 0, &Ov), "lock after close: %lu\n", GetLastError());
+    Error = GetLastError();
+    UnlockFileEx(H2, 0, 30, 0, &Ov);
+    CloseHandle(H2);
+    (void)Error;
+
+    /* An exclusive open gets local lock buffering (no one else can open):
+     * locks are kept by RDBSS alone (FsRtlProcessFileLock path) */
+    {
+        LOOPRDR_COUNTERS B0, B1;
+        HANDLE X;
+
+        LoopCounters(&B0);
+        X = CreateFileW(U, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+        ok(X != INVALID_HANDLE_VALUE, "exclusive open: %lu\n", GetLastError());
+        if (X != INVALID_HANDLE_VALUE)
+        {
+            RtlZeroMemory(&Ov, sizeof(Ov));
+            ok(LockFileEx(X, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 10, 0, &Ov), "buffered lock: %lu\n", GetLastError());
+            ok(!LockFileEx(X, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 10, 0, &Ov) &&
+               GetLastError() == ERROR_LOCK_VIOLATION, "buffered lock twice: %lu\n", GetLastError());
+            ok(UnlockFileEx(X, 0, 10, 0, &Ov), "buffered unlock: %lu\n", GetLastError());
+            ok(!UnlockFileEx(X, 0, 10, 0, &Ov) && GetLastError() == ERROR_NOT_LOCKED, "buffered unlock twice: %lu\n", GetLastError());
+            ok(LockFileEx(X, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 10, 0, &Ov), "buffered lock again: %lu\n", GetLastError());
+            CloseHandle(X);
+        }
+        LoopCounters(&B1);
+        ok(B1.Locks == B0.Locks, "buffered locks reached the mini-redirector (%ld)\n", B1.Locks - B0.Locks);
+    }
+
+    LoopCounters(&C1);
+    ok(C1.Locks > C0.Locks && C1.Unlocks > C0.Unlocks, "locks did not reach the mini-redirector\n");
+    ok(C1.UnlockMultiple > C0.UnlockMultiple, "no unlock-all at cleanup\n");
+    DeleteFileW(U);
+}
+
+/* ---------------------------------------------------------------------- */
+/* Buffering state changes (the oplock/lease break path)                  */
+/* ---------------------------------------------------------------------- */
+
+static
+VOID
+TestBufferingState(VOID)
+{
+    WCHAR U[MAX_PATH], L[MAX_PATH];
+    HANDLE H, Local;
+    UCHAR Data[4096], Back[4096];
+    DWORD Done, Round;
+    LOOPRDR_BREAK Break;
+    LOOPRDR_COUNTERS C0, C1;
+
+    for (Round = 0; Round < 2; ++Round)
+    {
+        LoopCounters(&C0);
+        H = CreateFileW(P(U, TRUE, L"cbs.bin"), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                        CREATE_ALWAYS, 0, NULL);
+        ok(H != INVALID_HANDLE_VALUE, "create: %lu\n", GetLastError());
+        if (H == INVALID_HANDLE_VALUE)
+            return;
+
+        /* Cached write, then a cached read that fills the cache */
+        Fill(Data, sizeof(Data), 70 + Round);
+        WriteFile(H, Data, sizeof(Data), &Done, NULL);
+        SetFilePointer(H, 0, NULL, FILE_BEGIN);
+        ReadFile(H, Back, sizeof(Back), &Done, NULL);
+
+        /* The "server" revokes all caching and waits for the acknowledgement */
+        Break.FileHandle = (ULONG_PTR)H;
+        Break.NewBufferingState = 0;
+        Break.Flags = LOOPRDR_BREAK_WAIT | (Round ? LOOPRDR_BREAK_FOR_SRVOPEN : 0);
+        ok(LoopIoctl(IOCTL_LOOPRDR_BREAK, &Break, sizeof(Break), NULL, 0), "break (%lu): %lu\n", Round, GetLastError());
+
+        /* Dirty data was written back before the acknowledgement */
+        ok(SameContent(L"cbs.bin", Data, sizeof(Data)), "break (%lu) did not flush\n", Round);
+
+        /* Change the file behind the client's back: no stale cache */
+        Local = CreateFileW(P(L, FALSE, L"cbs.bin"), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                            OPEN_EXISTING, 0, NULL);
+        ok(Local != INVALID_HANDLE_VALUE, "local open: %lu\n", GetLastError());
+        if (Local != INVALID_HANDLE_VALUE)
+        {
+            Fill(Data, 100, 90 + Round);
+            WriteFile(Local, Data, 100, &Done, NULL);
+            CloseHandle(Local);
+        }
+        SetFilePointer(H, 0, NULL, FILE_BEGIN);
+        ok(ReadFile(H, Back, 100, &Done, NULL) && Done == 100 && !memcmp(Back, Data, 100),
+           "break (%lu): stale data after the break\n", Round);
+        CloseHandle(H);
+
+        LoopCounters(&C1);
+        ok(C1.ComputeBufferingState > C0.ComputeBufferingState, "break (%lu): MRxComputeNewBufferingState not called\n", Round);
+        ok(C1.CompleteBufferingState > C0.CompleteBufferingState, "break (%lu): not acknowledged\n", Round);
+    }
+    DeleteFileW(P(U, TRUE, L"cbs.bin"));
+}
+
+static
+VOID
+TestPipeShare(VOID)
+{
+    HANDLE H;
+    DWORD Error;
+    LOOPRDR_COUNTERS C;
+
+    /* IPC$ is a pipe share: classified as such, opens on it refused cleanly */
+    H = CreateFileW(L"\\\\" LOOPRDR_SERVER L"\\" LOOPRDR_IPC_SHARE L"\\somepipe", GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
+    Error = GetLastError();
+    ok(H == INVALID_HANDLE_VALUE, "open on IPC$ succeeded\n");
+    if (H != INVALID_HANDLE_VALUE)
+        CloseHandle(H);
+    trace("open on IPC$: %lu\n", Error);
+    LoopCounters(&C);
+    ok(C.PipeNetRoots > 0, "IPC$ was not classified as a pipe share\n");
+}
+
+START_TEST(RdbssLoop)
+{
+    POOL_SUM Before;
+
+    if (!LoopSetUp(&Before))
+        return;
+
+    TestCreate();
+    TestRelative();
+    TestCopyFile();
+    TestReadWrite();
+    TestInformation();
+    TestDirectory();
+    TestVolumeFlushSecurity();
+    TestEas();
+    TestLocks();
+    TestBufferingState();
+    TestPipeShare();
+
+    LoopTearDown(&Before);
+}
+
+/* ---------------------------------------------------------------------- */
+/* Stress                                                                 */
+/* ---------------------------------------------------------------------- */
+
+#define STRESS_THREADS  8
+#define STRESS_FILES    4
+#define STRESS_MAXSIZE  (2 * 1024 * 1024)
+
+typedef struct _STRESS
+{
+    volatile LONG Op;           /* operation in progress, -1 between operations */
+    volatile DWORD OpStart;     /* GetTickCount() when it started */
+    ULONG Index;
+    DWORD EndTick;
+    ULONG Ops;
+    ULONG Failures;
+    PUCHAR Model;       /* expected content of each file */
+    PUCHAR Buffer;
+} STRESS;
+
+static
+ULONG
+Rand(
+    _Inout_ PULONG Seed)
+{
+    *Seed = *Seed * 1103515245 + 12345;
+    return *Seed >> 8;
+}
+
+static
+DWORD
+WINAPI
+StressThread(
+    _In_ PVOID Parameter)
+{
+    STRESS *S = Parameter;
+    ULONG Seed = 0x1234 + S->Index * 7919;
+    ULONG Sizes[STRESS_FILES] = { 0 };
+    WCHAR U[MAX_PATH], Rel[64];
+
+    /* Each thread works on its own files: the model is exact */
+    while ((LONG)(GetTickCount() - S->EndTick) < 0)
+    {
+        ULONG File = Rand(&Seed) % STRESS_FILES, Op = Rand(&Seed) % 10;
+        PUCHAR Model = S->Model + File * STRESS_MAXSIZE;
+        DWORD Flags = (Rand(&Seed) % 4 == 0) ? FILE_FLAG_WRITE_THROUGH : 0;
+        HANDLE H;
+        DWORD Done;
+
+        StringCchPrintfW(Rel, 64, L"stress\\t%lu_f%lu.bin", S->Index, File);
+        P(U, TRUE, Rel);
+        S->OpStart = GetTickCount();
+        S->Op = 100 + Op;
+        H = CreateFileW(U, GENERIC_READ | GENERIC_WRITE | DELETE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        NULL, OPEN_ALWAYS, Flags, NULL);
+        if (H == INVALID_HANDLE_VALUE)
+        {
+            ++S->Failures;
+            S->Op = -1;
+            continue;
+        }
+
+        S->Op = Op;
+        switch (Op)
+        {
+            case 0: case 1: case 2: case 3:     /* write somewhere */
+            {
+                ULONG Offset = Rand(&Seed) % (STRESS_MAXSIZE - 70000), Length = 1 + Rand(&Seed) % 70000;
+
+                Fill(S->Buffer, Length, Seed);
+                SetFilePointer(H, Offset, NULL, FILE_BEGIN);
+                if (!WriteFile(H, S->Buffer, Length, &Done, NULL) || Done != Length)
+                {
+                    ++S->Failures;
+                    break;
+                }
+                if (Offset > Sizes[File])
+                    RtlZeroMemory(Model + Sizes[File], Offset - Sizes[File]);
+                memcpy(Model + Offset, S->Buffer, Length);
+                if (Offset + Length > Sizes[File])
+                    Sizes[File] = Offset + Length;
+                break;
+            }
+            case 4: case 5: case 6:             /* read and compare */
+            {
+                ULONG Offset = Sizes[File] ? Rand(&Seed) % Sizes[File] : 0, Length = 1 + Rand(&Seed) % 70000;
+                ULONG Expected = (Offset + Length > Sizes[File]) ? Sizes[File] - Offset : Length;
+
+                SetFilePointer(H, Offset, NULL, FILE_BEGIN);
+                if (!ReadFile(H, S->Buffer, Length, &Done, NULL) || Done != Expected ||
+                    memcmp(S->Buffer, Model + Offset, Expected) != 0)
+                {
+                    ++S->Failures;
+                    trace("stress t%lu f%lu: read %lu at %lu got %lu, expected %lu\n", S->Index, File, Length, Offset, Done, Expected);
+                }
+                break;
+            }
+            case 7:                             /* resize */
+            {
+                ULONG NewSize = Rand(&Seed) % STRESS_MAXSIZE;
+
+                SetFilePointer(H, NewSize, NULL, FILE_BEGIN);
+                if (!SetEndOfFile(H))
+                {
+                    ++S->Failures;
+                    break;
+                }
+                if (NewSize > Sizes[File])
+                    RtlZeroMemory(Model + Sizes[File], NewSize - Sizes[File]);
+                Sizes[File] = NewSize;
+                break;
+            }
+            case 8:                             /* lock, write, unlock */
+            {
+                OVERLAPPED Ov;
+
+                RtlZeroMemory(&Ov, sizeof(Ov));
+                if (!LockFileEx(H, LOCKFILE_EXCLUSIVE_LOCK, 0, 4096, 0, &Ov))
+                    ++S->Failures;
+                else if (!UnlockFileEx(H, 0, 4096, 0, &Ov))
+                    ++S->Failures;
+                break;
+            }
+            case 9:                             /* flush, or delete and start over */
+                if (Rand(&Seed) % 8 == 0)
+                {
+                    FILE_DISPOSITION_INFORMATION Disposition;
+
+                    Disposition.DeleteFile = TRUE;
+                    if (!NT_SUCCESS(SetInfo(H, &Disposition, sizeof(Disposition), FileDispositionInformation)))
+                        ++S->Failures;
+                    else
+                        Sizes[File] = 0;
+                }
+                else if (!FlushFileBuffers(H))
+                {
+                    ++S->Failures;
+                }
+                break;
+        }
+        S->Op = 200 + Op;
+        CloseHandle(H);
+        S->Op = -1;
+        ++S->Ops;
+    }
+
+    /* Final byte compare of every file against the local directory */
+    {
+        ULONG File;
+
+        for (File = 0; File < STRESS_FILES; ++File)
+        {
+            StringCchPrintfW(Rel, 64, L"stress\\t%lu_f%lu.bin", S->Index, File);
+            if (Sizes[File] == 0)
+                continue;
+            if (!SameContent(Rel, S->Model + File * STRESS_MAXSIZE, Sizes[File]))
+            {
+                ++S->Failures;
+                trace("stress t%lu f%lu: local file differs from the model\n", S->Index, File);
+            }
+        }
+    }
+    return 0;
+}
+
+START_TEST(RdbssLoopStress)
+{
+    POOL_SUM Before, Mid;
+    HANDLE Threads[STRESS_THREADS];
+    STRESS State[STRESS_THREADS];
+    WCHAR U[MAX_PATH], Env[32];
+    ULONG Seconds = 60, i, Ops = 0, Failures = 0;
+    DWORD Start;
+
+    if (GetEnvironmentVariableW(L"RDBSS_STRESS_SECONDS", Env, RTL_NUMBER_OF(Env)))
+    {
+        PWCHAR c;
+
+        Seconds = 0;
+        for (c = Env; *c >= L'0' && *c <= L'9'; ++c)
+            Seconds = Seconds * 10 + (*c - L'0');
+    }
+
+    if (!LoopSetUp(&Before))
+        return;
+
+    CreateDirectoryW(P(U, TRUE, L"stress"), NULL);
+    Start = GetTickCount();
+    for (i = 0; i < STRESS_THREADS; ++i)
+    {
+        State[i].Index = i;
+        State[i].EndTick = Start + Seconds * 1000;
+        State[i].Ops = State[i].Failures = 0;
+        State[i].Op = -1;
+        State[i].OpStart = Start;
+        State[i].Model = VirtualAlloc(NULL, STRESS_FILES * STRESS_MAXSIZE, MEM_COMMIT, PAGE_READWRITE);
+        State[i].Buffer = VirtualAlloc(NULL, 128 * 1024, MEM_COMMIT, PAGE_READWRITE);
+        Threads[i] = CreateThread(NULL, 0, StressThread, &State[i], 0, NULL);
+    }
+    /* Report operations that take far too long (to the debugger, since a
+     * hung run never writes its output), and sample the pool tags */
+    while (WaitForMultipleObjects(STRESS_THREADS, Threads, TRUE, 15000) == WAIT_TIMEOUT)
+    {
+        static DWORD LastSample;
+
+        if (GetTickCount() - LastSample >= 300000 || LastSample == 0)
+        {
+            POOL_SUM Sample;
+            CHAR Msg[700];
+
+            LastSample = GetTickCount();
+            if (PoolSum(&Sample))
+            {
+                StringCbPrintfA(Msg, sizeof(Msg), "RdbssLoopStress: t+%lus pool %I64d blocks/%I64d bytes: %s\n",
+                                (GetTickCount() - Start) / 1000, Sample.Outstanding, Sample.Bytes, Sample.Detail);
+                OutputDebugStringA(Msg);
+            }
+        }
+
+        for (i = 0; i < STRESS_THREADS; ++i)
+        {
+            LONG Op = State[i].Op;
+
+            if (Op >= 0 && GetTickCount() - State[i].OpStart > 15000)
+            {
+                CHAR Msg[128];
+
+                StringCbPrintfA(Msg, sizeof(Msg), "RdbssLoopStress: thread %lu stuck in op %ld for %lu ms\n",
+                                i, Op, GetTickCount() - State[i].OpStart);
+                OutputDebugStringA(Msg);
+            }
+        }
+    }
+    for (i = 0; i < STRESS_THREADS; ++i)
+    {
+        Ops += State[i].Ops;
+        Failures += State[i].Failures;
+        CloseHandle(Threads[i]);
+        VirtualFree(State[i].Model, 0, MEM_RELEASE);
+        VirtualFree(State[i].Buffer, 0, MEM_RELEASE);
+    }
+    trace("stress: %lu s, %lu threads, %lu operations, %lu failures\n", Seconds, STRESS_THREADS, Ops, Failures);
+    ok_eq_ulong(Failures, 0UL);
+
+    if (PoolSum(&Mid))
+    {
+        trace("RDBSS pool tags at the end of the run (mounted): %I64d blocks/%I64d bytes: %s\n", Mid.Outstanding, Mid.Bytes, Mid.Detail);
+    }
+
+    LoopTearDown(&Before);
+}
