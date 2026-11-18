@@ -5741,7 +5741,12 @@ RxLowIoSubmit(
                         {
                             if (!BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_IN_FSP))
                             {
-                                RxContext->CurrentIrpSp->Flags &= ~SL_PENDING_RETURNED;
+                                /* IoMarkIrpPending sets it in Control. (This
+                                 * cleared a bit of Flags instead, so the IRP
+                                 * was completed as pended while the dispatch
+                                 * returned a final status: the I/O manager
+                                 * then completed it a second time) */
+                                RxContext->CurrentIrpSp->Control &= ~SL_PENDING_RETURNED;
                             }
 
                             InterlockedDecrement((volatile long *)&RxContext->ReferenceCount);
