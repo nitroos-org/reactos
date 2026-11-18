@@ -1702,6 +1702,23 @@ Cleanup:
     return ret;
 }
 
+/* This function is called from the undocumented GetCharWidthInfo (the edit control uses it for the margins of CJK fonts) */
+__kernel_entry
+W32KAPI
+BOOL
+APIENTRY
+NtGdiGetCharWidthInfo(
+    _In_ HDC hdc,
+    _Out_ PCHWIDTHINFO pChWidthInfo)
+{
+    CHWIDTHINFO Info;
+
+    if (!pChWidthInfo || !GreGetCharWidthInfo(hdc, &Info))
+        return FALSE;
+
+    return NT_SUCCESS(MmCopyToCaller(pChWidthInfo, &Info, sizeof(Info)));
+}
+
 /* This function is called from GetGlyphIndicesA/W */
 __kernel_entry
 W32KAPI

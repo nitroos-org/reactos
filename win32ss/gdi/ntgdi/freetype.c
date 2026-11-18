@@ -8488,6 +8488,68 @@ GreGetCharABCWidthsW(
 }
 
 /*
+ * The smallest left and right side bearing of the font, in pixels, from the
+ * 'hhea' table of a scalable font (zero for any other font), as the undocumented
+ * GetCharWidthInfo reports them. The edit control derives the margins it uses for
+ * CJK fonts from them.
+ */
+BOOL APIENTRY
+GreGetCharWidthInfo(
+    _In_ HDC hDC,
+    _Out_ PCHWIDTHINFO pInfo)
+{
+    PDC dc;
+    PTEXTOBJ TextObj;
+    PFONTGDI FontGDI;
+    FT_Face face;
+    TT_HoriHeader *pHori;
+    LONG lMinA = 0, lMinC = 0;
+
+    dc = DC_LockDc(hDC);
+    if (dc == NULL)
+    {
+        EngSetLastError(ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
+
+    TextObj = RealizeFontInit(dc->pdcattr->hlfntNew);
+    DC_UnlockDc(dc);
+
+    if (TextObj == NULL)
+    {
+        EngSetLastError(ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
+
+    FontGDI = ObjToGDI(TextObj->Font, FONT);
+
+    IntLockFreeType();
+    if (!TextIntUpdateSize(TextObj, FontGDI, FALSE))
+    {
+        IntUnLockFreeType();
+        TEXTOBJ_UnlockText(TextObj);
+        EngSetLastError(ERROR_GEN_FAILURE);
+        return FALSE;
+    }
+
+    face = FontGDI->SharedFace->Face;
+    if (FT_IS_SCALABLE(face) && face->size && face->units_per_EM &&
+        (pHori = FT_Get_Sfnt_Table(face, FT_SFNT_HHEA)) != NULL)
+    {
+        FT_Fixed em_scale = FT_MulDiv(face->size->metrics.y_ppem, 1 << 16, face->units_per_EM);
+        lMinA = (SHORT)FT_MulFix(pHori->min_Left_Side_Bearing, em_scale);
+        lMinC = (SHORT)FT_MulFix(pHori->min_Right_Side_Bearing, em_scale);
+    }
+    IntUnLockFreeType();
+    TEXTOBJ_UnlockText(TextObj);
+
+    pInfo->lMinA = lMinA;
+    pInfo->lMinC = lMinC;
+    pInfo->lMinD = 0;
+    return TRUE;
+}
+
+/*
 * @implemented
 */
 BOOL APIENTRY
