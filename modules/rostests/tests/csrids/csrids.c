@@ -29,7 +29,9 @@
 #include <ndk/mmfuncs.h>
 #include <ndk/obfuncs.h>
 #include <ndk/psfuncs.h>
+#include <ndk/kefuncs.h>
 #include <ndk/rtlfuncs.h>
+#include <ndk/setypes.h>
 #include <csr/csr.h>
 #include <win/basemsg.h>
 #include <sm/smmsg.h>
@@ -694,6 +696,86 @@ PidReuseTest(VOID)
     TerminateProcess(Orphan, 0); CloseHandle(Orphan); CloseHandle(OrphanThread);
 }
 
+/*
+ * A system time set back after this process was created must not make the programs it starts fail: csrss
+ * refuses a new process that is older than its creator, and creation times are system times. With the clock
+ * one hour back every child would look an hour older than we are ("Access is denied" for each program the
+ * shell starts after a time synchronisation steps the clock back). Needs SeSystemtimePrivilege (an
+ * administrator); the clock is put forward again by the time that passed.
+ */
+#define CLOCK_STEP_100NS (36000000000LL)
+
+static
+VOID
+ClockStepTest(VOID)
+{
+    WCHAR Self[MAX_PATH], CommandLine[MAX_PATH + 16];
+    STARTUPINFOW StartupInfo = { sizeof(StartupInfo) };
+    PROCESS_INFORMATION ProcessInfo;
+    LARGE_INTEGER Now, Back, Forward;
+    BOOLEAN Old;
+    DWORD ExitCode = 0, Start, I;
+    BOOL Created;
+    NTSTATUS Status;
+
+    Status = RtlAdjustPrivilege(SE_SYSTEMTIME_PRIVILEGE, TRUE, FALSE, &Old);
+    if (!NT_SUCCESS(Status))
+    {
+        Log("CSRIDS clockstep: SeSystemtimePrivilege not available (%08lx) SKIP\n", Status);
+        return;
+    }
+
+    GetModuleFileNameW(NULL, Self, MAX_PATH);
+    _snwprintf(CommandLine, RTL_NUMBER_OF(CommandLine), L"\"%s\" child", Self);
+
+    NtQuerySystemTime(&Now);
+    Start = GetTickCount();
+    Back.QuadPart = Now.QuadPart - CLOCK_STEP_100NS;
+    Status = NtSetSystemTime(&Back, NULL);
+    if (!NT_SUCCESS(Status))
+    {
+        Log("CSRIDS clockstep: the system time cannot be set (%08lx) SKIP\n", Status);
+        return;
+    }
+
+    /* Both the default and the CREATE_SUSPENDED creation go through the same registration */
+    Created = CreateProcessW(NULL, CommandLine, NULL, NULL, FALSE, 0, NULL, NULL, &StartupInfo, &ProcessInfo);
+    if (Created)
+    {
+        WaitForSingleObject(ProcessInfo.hProcess, 60000);
+        GetExitCodeProcess(ProcessInfo.hProcess, &ExitCode);
+        CloseHandle(ProcessInfo.hProcess);
+        CloseHandle(ProcessInfo.hThread);
+    }
+    else
+    {
+        ExitCode = GetLastError();
+    }
+    for (I = 0; I < 3 && Created; I++)
+    {
+        /* The same after a few more children, each created later than the step */
+        if (CreateProcessW(NULL, CommandLine, NULL, NULL, FALSE, CREATE_SUSPENDED, NULL, NULL, &StartupInfo, &ProcessInfo))
+        {
+            TerminateProcess(ProcessInfo.hProcess, 0);
+            CloseHandle(ProcessInfo.hProcess);
+            CloseHandle(ProcessInfo.hThread);
+        }
+        else
+        {
+            Created = FALSE;
+            ExitCode = GetLastError();
+        }
+    }
+
+    /* Put the clock where it was, plus the time that passed meanwhile */
+    NtQuerySystemTime(&Now);
+    Forward.QuadPart = Now.QuadPart + CLOCK_STEP_100NS;
+    NtSetSystemTime(&Forward, NULL);
+    Log("CSRIDS clockstep: clock set back one hour and forward again, %lu ms\n", GetTickCount() - Start);
+
+    Check("clockstep-createprocess", Created ? (NTSTATUS)ExitCode : (NTSTATUS)(0xC0000000 | (ExitCode & 0xFFFF)), CHILD_OK);
+}
+
 static
 VOID
 BaseTests(VOID)
@@ -800,6 +882,7 @@ Tests(BOOL System)
 {
     Log("CSRIDS start pid=%lu system=%d\n", GetCurrentProcessId(), System);
     BaseTests();
+    ClockStepTest();
     ThreadTests();
     DeadThreadTests();
     ProcessLeakTests();
