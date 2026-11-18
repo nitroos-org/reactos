@@ -158,19 +158,21 @@ Ws2HelpDllMain(
             /* Make sure we loaded */
             if (!LibraryHdl) break;
 
-            /* Check if we are cleaning up */
-            if (lpReserved)
-            {
-                /* Free the security descriptor */
-                if (pSDPipe) HeapFree(GlobalHeap, 0, pSDPipe);
+            /* Clean up on FreeLibrary as well as at process exit (lpReserved
+             * set), which was the only case before: the critical section's
+             * debug data outlives this mapping, so every load/unload cycle
+             * leaked it (with a dangling entry in the process's lock list) */
 
-                /* Close the event */
-                if (ghWriterEvent) CloseHandle(ghWriterEvent);
+            /* Free the security descriptor */
+            if (pSDPipe) HeapFree(GlobalHeap, 0, pSDPipe);
 
-                /* Delete the startup CS */
-                DeleteCriticalSection(&StartupSynchronization);
-                Ws2helpInitialized = FALSE;
-            }
+            /* Close the event */
+            if (ghWriterEvent) CloseHandle(ghWriterEvent);
+
+            /* Delete the startup CS */
+            DeleteCriticalSection(&StartupSynchronization);
+            Ws2helpInitialized = FALSE;
+            LibraryHdl = NULL;
 			break;
     }
 

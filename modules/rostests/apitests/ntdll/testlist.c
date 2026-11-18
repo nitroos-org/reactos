@@ -42,6 +42,7 @@ extern void func_LdrGetDllHandleEx(void);
 extern void func_LdrLoadDll(void);
 extern void func_KUserBuildNumber(void);
 extern void func_LdrLoadDllPendingInit(void);
+extern void func_LdrLoadUnloadStress(void);
 extern void func_LdrSharedReadOnlySection(void);
 extern void func_LdrShutdownThread(void);
 extern void func_load_notifications(void);
@@ -338,6 +339,7 @@ const struct test winetest_testlist[] =
     { "LdrLoadDll",                     func_LdrLoadDll },
     { "KUserBuildNumber",              func_KUserBuildNumber },
     { "LdrLoadDllPendingInit",          func_LdrLoadDllPendingInit },
+    { "LdrLoadUnloadStress",            func_LdrLoadUnloadStress },
     { "LdrSharedReadOnlySection",      func_LdrSharedReadOnlySection },
     { "LdrShutdownThread",              func_LdrShutdownThread },
     { "load_notifications",             func_load_notifications },

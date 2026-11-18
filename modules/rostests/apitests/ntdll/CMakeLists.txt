@@ -75,6 +75,7 @@ list(APPEND SOURCE
     LdrLoadDll.c
     KUserBuildNumber.c
     LdrLoadDllPendingInit.c
+    LdrLoadUnloadStress.c
     LdrSharedReadOnlySection.c
     LdrShutdownThread.c
     load_notifications.c
