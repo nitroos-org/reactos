@@ -14,9 +14,12 @@
  *    blog "SMB 2 and SMB 3 security in Windows 10: the anatomy of signing and cryptographic keys" (SMB 3.0 and
  *    SMB 3.1.1 sections), which follow [MS-SMB2] 3.1.4.2. The same blog states the labels and contexts.
  *  - Rows computed with an independent implementation (Python "cryptography" 46, AESCCM and HMAC) are marked.
- * Rows that depend on what Windows answers (lengths, properties, error codes for invalid parameters) are
- * marked "VERIFY ON ORACLE": they hold what this implementation answers; build with -DWINREF_PROBE for the
- * reference system to print what Windows answers for each (the probe only calls bcrypt).
+ * Rows that depend on what Windows answers (lengths, properties, error codes for invalid parameters, the chained calls of
+ * AES-GCM) hold what Windows Server 2022 (20348, x64 and x86) answered when the same code was built with -DWINREF_PROBE and run
+ * there: that build prints every such row with the expected value and counts a difference as a failure, it only calls bcrypt.
+ * AES-GCM call chaining follows the contract measured there (see ChainGcm below), not the one the structure's documentation
+ * suggests: the counter block and the GHASH state are kept by the caller (pbIV, pbMacContext), cbAAD and cbData count what was
+ * processed BEFORE the call, the last call has IN_PROGRESS alone. AES-CCM calls cannot be chained on Windows.
  */
 
 #if defined(WINREF_PROBE)
@@ -28,7 +31,7 @@ static int g_Failures;
 #define ok(cond, ...) do { if (!(cond)) { g_Failures++; printf("FAIL line %d: ", __LINE__); printf(__VA_ARGS__); } } while (0)
 #define START_TEST(x) void func_##x(void)
 #define STAGE(name) printf("-- %s\n", name)
-#define NT_ORACLE(what, got, expected) printf("ROW %-44s status=0x%08lx (this implementation: 0x%08lx)\n", what, (unsigned long)(got), (unsigned long)(expected))
+#define NT_ORACLE(what, got, expected) do { printf("ROW %-44s status=0x%08lx (expected 0x%08lx)%s\n", what, (unsigned long)(got), (unsigned long)(expected), (got) == (expected) ? "" : " DIFFERS"); if ((got) != (expected)) g_Failures++; } while (0)
 #else
 #include <apitest.h>
 #include <stdio.h>
@@ -57,6 +60,9 @@ static int g_Failures;
 #define S_INVALID_PARAMETER ((NTSTATUS)0xC000000D)
 #define S_AUTH_TAG_MISMATCH ((NTSTATUS)0xC000A002)
 #define S_NOT_SUPPORTED ((NTSTATUS)0xC00000BB)
+#define S_INVALID_BUFFER_SIZE ((NTSTATUS)0xC0000206)
+#define S_INVALID_HANDLE ((NTSTATUS)0xC0000008)
+#define S_OUT_OF_SEQUENCE ((NTSTATUS)0xC000042A)
 #define S_BUFFER_TOO_SMALL ((NTSTATUS)0xC0000023)
 
 static int hexval(char c) { return c <= '9' ? c - '0' : (c | 0x20) - 'a' + 10; }
@@ -264,6 +270,205 @@ static BCRYPT_KEY_HANDLE make_aes_key(const WCHAR *mode, const UCHAR *key, ULONG
     return status ? NULL : k;
 }
 
+/* ---------------------------------------------------------------- AES-GCM call chaining (as measured on Windows Server 2022) */
+
+typedef struct
+{
+    UCHAR iv[16];           /* pbIV: the running counter block */
+    UCHAR mac[64];          /* pbMacContext: the running GHASH state (16 bytes used) */
+    ULONG aad_done;         /* cbAAD: bytes of associated data processed before the next call */
+    ULONG data_done;        /* cbData: bytes of data processed before the next call */
+} GCM_CHAIN;
+
+static NTSTATUS chain_call(BCRYPT_KEY_HANDLE k, BOOL decrypt, GCM_CHAIN *c, const UCHAR *nonce, const UCHAR *aad, ULONG aad_len,
+                           const UCHAR *in, ULONG len, UCHAR *out, ULONG flags, UCHAR *tag, ULONG cb_tag)
+{
+    BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO info;
+    ULONG size;
+    NTSTATUS status;
+
+    init_auth(&info, (UCHAR *)nonce, 12, (UCHAR *)aad, aad_len, tag, cb_tag);
+    info.pbMacContext = c->mac;
+    info.cbMacContext = sizeof(c->mac);
+    info.cbAAD = c->aad_done;
+    info.cbData = c->data_done;
+    info.dwFlags = flags;
+    if (decrypt) status = BCryptDecrypt(k, (UCHAR *)in, len, &info, c->iv, sizeof(c->iv), out, len, &size, 0);
+    else status = BCryptEncrypt(k, (UCHAR *)in, len, &info, c->iv, sizeof(c->iv), out, len, &size, 0);
+    if (!status) { c->aad_done += aad_len; c->data_done += len; }
+    return status;
+}
+
+#define CHAIN_FIRST BCRYPT_AUTH_MODE_CHAIN_CALLS_FLAG
+#define CHAIN_MIDDLE (BCRYPT_AUTH_MODE_CHAIN_CALLS_FLAG | BCRYPT_AUTH_MODE_IN_PROGRESS_FLAG)
+#define CHAIN_LAST BCRYPT_AUTH_MODE_IN_PROGRESS_FLAG
+
+/* the message in parts (the last one may have any length, the others a multiple of 16), the associated data in the first data call or in
+ * a call of their own in front of the data; returns the status of the first call that failed */
+static NTSTATUS run_chain(BCRYPT_KEY_HANDLE k, BOOL decrypt, BOOL lead, const ULONG *parts, ULONG count, const UCHAR *nonce,
+                          const UCHAR *aad, const UCHAR *in, UCHAR *out, UCHAR *tag, ULONG cb_tag)
+{
+    GCM_CHAIN c;
+    NTSTATUS status;
+    ULONG i, off = 0, calls = count + (lead ? 1 : 0), n = 0;
+
+    memset(&c, 0, sizeof(c));
+    memset(c.iv, 0x77, sizeof(c.iv));  /* the first call sets it */
+    if (lead)
+    {
+        status = chain_call(k, decrypt, &c, nonce, aad, 20, NULL, 0, NULL, CHAIN_FIRST, NULL, 16);
+        if (status) return status;
+        n++;
+    }
+    for (i = 0; i < count; i++, n++)
+    {
+        BOOL last = (n == calls - 1);
+        ULONG fl = last ? CHAIN_LAST : (n == 0) ? CHAIN_FIRST : CHAIN_MIDDLE;
+
+        status = chain_call(k, decrypt, &c, nonce, (!lead && i == 0) ? aad : NULL, (!lead && i == 0) ? 20 : 0, in + off, parts[i], out + off,
+                            fl, last ? tag : NULL, cb_tag);
+        if (status) return status;
+        off += parts[i];
+    }
+    return S_OK_;
+}
+
+static void ChainGcm(BCRYPT_KEY_HANDLE k, const UCHAR *key, const UCHAR *nonce, const UCHAR *aad, const UCHAR *pt, const UCHAR *ct)
+{
+    static const struct { ULONG parts[4]; ULONG count; } splits[] =
+    {
+        { { 16, 32, 12 }, 3 }, { { 16, 16, 16, 12 }, 4 }, { { 16, 44 }, 2 }, { { 32, 28 }, 2 }, { { 48, 12 }, 2 }, { { 16, 16, 28 }, 3 },
+    };
+    UCHAR out[64], tag[16], tag_vec[16], want[16];
+    GCM_CHAIN c;
+    NTSTATUS status;
+    ULONG i, lead, size;
+
+    unhex(gcm_tag, tag_vec);
+    for (lead = 0; lead < 2; lead++) for (i = 0; i < sizeof(splits) / sizeof(splits[0]); i++)
+    {
+        memset(out, 0xAA, sizeof(out));
+        memset(tag, 0xAA, sizeof(tag));
+        status = run_chain(k, FALSE, lead, splits[i].parts, splits[i].count, nonce, aad, pt, out, tag, 16);
+        ok(status == S_OK_, "chained encrypt, split %lu, lead %lu: 0x%08lx\n", i, lead, (unsigned long)status);
+        expect_hex("chained GCM ciphertext", out, 60, gcm_ct);
+        expect_hex("chained GCM tag", tag, 16, gcm_tag);
+
+        memset(out, 0xAA, sizeof(out));
+        memcpy(tag, tag_vec, 16);
+        status = run_chain(k, TRUE, lead, splits[i].parts, splits[i].count, nonce, aad, ct, out, tag, 16);
+        ok(status == S_OK_, "chained decrypt, split %lu, lead %lu: 0x%08lx\n", i, lead, (unsigned long)status);
+        expect_hex("chained GCM plaintext", out, 60, gcm_pt);
+
+        tag[5] ^= 0x10;
+        status = run_chain(k, TRUE, lead, splits[i].parts, splits[i].count, nonce, aad, ct, out, tag, 16);
+        ok(status == S_AUTH_TAG_MISMATCH, "chained decrypt, tampered tag, split %lu: 0x%08lx\n", i, (unsigned long)status);
+    }
+
+    /* a 12 byte tag is the first 12 bytes of the 16 byte one */
+    memset(tag, 0xAA, sizeof(tag));
+    status = run_chain(k, FALSE, FALSE, splits[0].parts, 3, nonce, aad, pt, out, tag, 12);
+    ok(status == S_OK_ && !memcmp(tag, tag_vec, 12) && tag[12] == 0xAA, "chained 12 byte tag 0x%08lx\n", (unsigned long)status);
+    status = run_chain(k, FALSE, FALSE, splits[0].parts, 3, nonce, aad, pt, out, tag, 11);
+    NT_ORACLE("GCM chain, 11 byte tag", status, S_INVALID_PARAMETER);
+    status = run_chain(k, FALSE, FALSE, splits[0].parts, 3, nonce, aad, pt, out, tag, 17);
+    NT_ORACLE("GCM chain, 17 byte tag", status, S_INVALID_PARAMETER);
+
+    /* the state the caller keeps: the counter block after 16, then 48 bytes, and what the last call wipes */
+    memset(&c, 0, sizeof(c));
+    status = chain_call(k, FALSE, &c, nonce, aad, 20, pt, 16, out, CHAIN_FIRST, NULL, 16);
+    ok(status == S_OK_, "first call 0x%08lx\n", (unsigned long)status);
+    memcpy(want, nonce, 12); want[12] = 0; want[13] = 0; want[14] = 0; want[15] = 3;
+    ok(!memcmp(c.iv, want, 16), "counter block after 16 bytes\n");
+    status = chain_call(k, FALSE, &c, nonce, NULL, 0, pt + 16, 32, out + 16, CHAIN_MIDDLE, NULL, 16);
+    ok(status == S_OK_, "second call 0x%08lx\n", (unsigned long)status);
+    want[15] = 5;
+    ok(!memcmp(c.iv, want, 16), "counter block after 48 bytes\n");
+    status = chain_call(k, FALSE, &c, nonce, NULL, 0, pt + 48, 12, out + 48, CHAIN_LAST, tag, 16);
+    ok(status == S_OK_, "last call 0x%08lx\n", (unsigned long)status);
+    memset(want, 0, 16);
+    ok(!memcmp(c.iv, want, 16) && !memcmp(c.mac, want, 16), "the last call wipes the counter block and the GHASH state\n");
+
+    /* what the caller keeps matters: a flipped bit of the GHASH state, of the nonce in the counter block */
+    for (i = 0; i < 2; i++)
+    {
+        memset(&c, 0, sizeof(c));
+        status = chain_call(k, TRUE, &c, nonce, aad, 20, ct, 16, out, CHAIN_FIRST, NULL, 16);
+        if (i == 0) c.mac[0] ^= 1; else c.iv[0] ^= 1;
+        status = chain_call(k, TRUE, &c, nonce, NULL, 0, ct + 16, 32, out + 16, CHAIN_MIDDLE, NULL, 16);
+        status = chain_call(k, TRUE, &c, nonce, NULL, 0, ct + 48, 12, out + 48, CHAIN_LAST, tag_vec, 16);
+        ok(status == S_AUTH_TAG_MISMATCH, "damaged %s: 0x%08lx\n", i ? "counter block" : "GHASH state", (unsigned long)status);
+    }
+
+    /* what Windows refuses */
+    memset(&c, 0, sizeof(c));
+    status = chain_call(k, FALSE, &c, nonce, aad, 20, pt, 20, out, CHAIN_FIRST, NULL, 16);
+    NT_ORACLE("GCM chain, first part not a multiple of 16", status, S_INVALID_BUFFER_SIZE);
+    memset(&c, 0, sizeof(c));
+    status = chain_call(k, FALSE, &c, nonce, aad, 20, pt, 16, out, CHAIN_FIRST, NULL, 16);
+    status = chain_call(k, FALSE, &c, nonce, NULL, 0, pt + 16, 30, out + 16, CHAIN_MIDDLE, NULL, 16);
+    NT_ORACLE("GCM chain, middle part of 30 bytes", status, S_INVALID_BUFFER_SIZE);
+    memset(&c, 0, sizeof(c));
+    status = chain_call(k, FALSE, &c, nonce, aad, 20, pt, 16, out, CHAIN_FIRST, NULL, 16);
+    status = chain_call(k, FALSE, &c, nonce, NULL, 0, pt + 16, 32, out + 16, CHAIN_MIDDLE, NULL, 16);
+    status = chain_call(k, FALSE, &c, nonce, NULL, 0, pt + 48, 12, out + 48, CHAIN_MIDDLE, NULL, 16);
+    NT_ORACLE("GCM chain, 12 bytes with CHAIN_CALLS", status, S_INVALID_BUFFER_SIZE);
+    {
+        BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO info;
+        UCHAR iv[16], mac[64];
+
+        memset(&c, 0, sizeof(c));
+        status = chain_call(k, FALSE, &c, nonce, aad, 20, pt, 16, out, CHAIN_FIRST, NULL, 16);
+        /* a later call without the nonce, without pbIV, without pbMacContext, with a short pbMacContext, with cbTag 11 */
+        init_auth(&info, NULL, 0, NULL, 0, NULL, 16);
+        info.pbMacContext = c.mac; info.cbMacContext = 64; info.cbData = 16; info.dwFlags = CHAIN_MIDDLE;
+        status = BCryptEncrypt(k, (UCHAR *)pt + 16, 16, &info, c.iv, 16, out + 16, 16, &size, 0);
+        NT_ORACLE("GCM chain, later call without nonce", status, S_INVALID_PARAMETER);
+        init_auth(&info, (UCHAR *)nonce, 12, NULL, 0, NULL, 16);
+        info.pbMacContext = c.mac; info.cbMacContext = 64; info.cbData = 16; info.dwFlags = CHAIN_MIDDLE;
+        status = BCryptEncrypt(k, (UCHAR *)pt + 16, 16, &info, NULL, 0, out + 16, 16, &size, 0);
+        NT_ORACLE("GCM chain, later call without pbIV", status, S_INVALID_PARAMETER);
+        info.pbMacContext = NULL; info.cbMacContext = 0;
+        status = BCryptEncrypt(k, (UCHAR *)pt + 16, 16, &info, c.iv, 16, out + 16, 16, &size, 0);
+        NT_ORACLE("GCM chain, later call without pbMacContext", status, S_INVALID_PARAMETER);
+        info.pbMacContext = c.mac; info.cbMacContext = 15;
+        status = BCryptEncrypt(k, (UCHAR *)pt + 16, 16, &info, c.iv, 16, out + 16, 16, &size, 0);
+        NT_ORACLE("GCM chain, cbMacContext 15", status, S_INVALID_PARAMETER);
+        info.cbMacContext = 16;
+        info.cbTag = 11;
+        status = BCryptEncrypt(k, (UCHAR *)pt + 16, 16, &info, c.iv, 16, out + 16, 16, &size, 0);
+        NT_ORACLE("GCM chain, non-final cbTag 11", status, S_INVALID_PARAMETER);
+        info.cbTag = 17;
+        status = BCryptEncrypt(k, (UCHAR *)pt + 16, 16, &info, c.iv, 16, out + 16, 16, &size, 0);
+        NT_ORACLE("GCM chain, non-final cbTag 17", status, S_INVALID_PARAMETER);
+        /* no chain yet: the caller's buffers are not read before the first call */
+        memset(iv, 0, sizeof(iv)); memset(mac, 0, sizeof(mac));
+        init_auth(&info, (UCHAR *)nonce, 12, NULL, 0, NULL, 16);
+        info.pbMacContext = mac; info.cbMacContext = 15; info.dwFlags = CHAIN_FIRST;
+        status = BCryptEncrypt(k, (UCHAR *)pt, 16, &info, iv, 16, out, 16, &size, 0);
+        NT_ORACLE("GCM chain, first call, cbMacContext 15", status, S_INVALID_PARAMETER);
+    }
+
+    /* BCRYPT_BLOCK_PADDING: the padded size, too small a buffer, nothing else works */
+    {
+        BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO info;
+        UCHAR big[64];
+
+        init_auth(&info, (UCHAR *)nonce, 12, NULL, 0, tag, 16);
+        size = 0xdead;
+        status = BCryptEncrypt(k, (UCHAR *)pt, 16, &info, NULL, 0, NULL, 0, &size, BCRYPT_BLOCK_PADDING);
+        NT_ORACLE("GCM, block padding, size query", status, S_OK_);
+        ok(size == 32, "padded size %lu\n", size);
+        status = BCryptEncrypt(k, (UCHAR *)pt, 16, &info, NULL, 0, big, 16, &size, BCRYPT_BLOCK_PADDING);
+        NT_ORACLE("GCM, block padding, 16 byte output", status, S_BUFFER_TOO_SMALL);
+        status = BCryptEncrypt(k, (UCHAR *)pt, 16, &info, NULL, 0, big, 64, &size, BCRYPT_BLOCK_PADDING);
+        NT_ORACLE("GCM, block padding, 64 byte output", status, S_INVALID_PARAMETER);
+        status = BCryptDecrypt(k, (UCHAR *)ct, 32, &info, NULL, 0, big, 64, &size, BCRYPT_BLOCK_PADDING);
+        NT_ORACLE("GCM decrypt, block padding", status, S_INVALID_PARAMETER);
+    }
+    (void)key;
+}
+
 static void test_gcm_gmac(void)
 {
     UCHAR key[16], nonce[12], aad[20], pt[64], ct[64], out[64], tag[16];
@@ -301,41 +506,8 @@ static void test_gcm_gmac(void)
     status = BCryptDecrypt(k, ct, 60, &info, NULL, 0, out, 60, &size, 0);
     ok(status == S_AUTH_TAG_MISMATCH, "gcm tampered tag 0x%08lx\n", (unsigned long)status);
 
-    /* chained calls: 17 + 20 + 23 bytes. The associated data go in the first call, the tag in the last */
-    {
-        static const ULONG parts[3] = { 17, 20, 23 };
-        ULONG off = 0, i;
-
-        memset(out, 0xAA, sizeof(out));
-        memset(tag, 0xAA, sizeof(tag));
-        for (i = 0; i < 3; i++)
-        {
-            init_auth(&info, nonce, 12, i == 0 ? aad : NULL, i == 0 ? 20 : 0, tag, 16);
-            info.dwFlags = (i == 0) ? BCRYPT_AUTH_MODE_CHAIN_CALLS_FLAG
-                         : (i == 1) ? (BCRYPT_AUTH_MODE_CHAIN_CALLS_FLAG | BCRYPT_AUTH_MODE_IN_PROGRESS_FLAG)
-                                    : BCRYPT_AUTH_MODE_IN_PROGRESS_FLAG;
-            status = BCryptEncrypt(k, pt + off, parts[i], &info, NULL, 0, out + off, parts[i], &size, 0);
-            ok(status == S_OK_ && size == parts[i], "chained encrypt %lu: 0x%08lx %lu\n", i, (unsigned long)status, size);
-            off += parts[i];
-        }
-        expect_hex("chained GCM ciphertext", out, 60, gcm_ct);
-        expect_hex("chained GCM tag", tag, 16, gcm_tag);
-
-        off = 0;
-        memset(out, 0xAA, sizeof(out));
-        unhex(gcm_tag, tag);
-        for (i = 0; i < 3; i++)
-        {
-            init_auth(&info, nonce, 12, i == 0 ? aad : NULL, i == 0 ? 20 : 0, tag, 16);
-            info.dwFlags = (i == 0) ? BCRYPT_AUTH_MODE_CHAIN_CALLS_FLAG
-                         : (i == 1) ? (BCRYPT_AUTH_MODE_CHAIN_CALLS_FLAG | BCRYPT_AUTH_MODE_IN_PROGRESS_FLAG)
-                                    : BCRYPT_AUTH_MODE_IN_PROGRESS_FLAG;
-            status = BCryptDecrypt(k, ct + off, parts[i], &info, NULL, 0, out + off, parts[i], &size, 0);
-            ok(status == S_OK_, "chained decrypt %lu: 0x%08lx\n", i, (unsigned long)status);
-            off += parts[i];
-        }
-        expect_hex("chained GCM plaintext", out, 60, gcm_pt);
-    }
+    /* chained calls: see ChainGcm */
+    ChainGcm(k, key, nonce, aad, pt, ct);
 
     /* GMAC through AES-GCM: associated data only */
     init_auth(&info, nonce, 12, aad, 20, tag, 16);
@@ -379,7 +551,75 @@ static void test_gcm_gmac(void)
             status = BCryptFinishHash(hash, tag, 16, 0);
             NT_ORACLE("GMAC finish", status, S_OK_);
             if (!status) expect_hex("GMAC hash", tag, 16, gmac_tag);
+            status = BCryptFinishHash(hash, tag, 16, 0);
+            NT_ORACLE("GMAC second finish", status, S_INVALID_HANDLE);
             BCryptDestroyHash(hash);
+        }
+
+        /* the statuses of the nonce and of the key, Windows Server 2022 */
+        {
+            ULONG len;
+
+            status = BCryptCreateHash(alg, &hash, NULL, 0, NULL, 0, 0);
+            NT_ORACLE("GMAC create without key", status, S_INVALID_BUFFER_SIZE);
+            status = BCryptCreateHash(alg, &hash, NULL, 0, key, 15, 0);
+            NT_ORACLE("GMAC create, key of 15 bytes", status, S_INVALID_BUFFER_SIZE);
+            for (len = 24; len <= 32; len += 8)
+            {
+                UCHAR long_key[32];
+
+                memset(long_key, 0x42, sizeof(long_key));
+                status = BCryptCreateHash(alg, &hash, NULL, 0, long_key, len, 0);
+                NT_ORACLE(len == 24 ? "GMAC create, key of 24 bytes" : "GMAC create, key of 32 bytes", status, S_OK_);
+                if (!status) BCryptDestroyHash(hash);
+            }
+            status = BCryptCreateHash(alg, &hash, NULL, 0, key, 16, 0);
+            if (!status)
+            {
+                UCHAR buf[16];
+
+                status = BCryptFinishHash(hash, buf, 16, 0);
+                NT_ORACLE("GMAC finish without nonce", status, S_OUT_OF_SEQUENCE);
+                for (len = 0; len <= 16; len++)
+                {
+                    char what[48];
+
+                    status = BCryptSetProperty(hash, BCRYPT_INITIALIZATION_VECTOR, nonce, len, 0);
+                    sprintf(what, "GMAC nonce of %lu bytes", len);
+                    NT_ORACLE(what, status, len == 12 ? S_OK_ : S_INVALID_BUFFER_SIZE);
+                }
+                BCryptHashData(hash, aad, 20, 0);
+                status = BCryptSetProperty(hash, BCRYPT_INITIALIZATION_VECTOR, nonce, 12, 0);
+                NT_ORACLE("GMAC second nonce after hashing began", status, S_OUT_OF_SEQUENCE);
+                status = BCryptFinishHash(hash, buf, 15, 0);
+                NT_ORACLE("GMAC finish, 15 byte buffer", status, S_INVALID_PARAMETER);
+                status = BCryptFinishHash(hash, buf, 16, 0);
+                NT_ORACLE("GMAC finish after a refusal", status, S_OK_);
+                BCryptDestroyHash(hash);
+            }
+            /* the first nonce may come after the data */
+            status = BCryptCreateHash(alg, &hash, NULL, 0, key, 16, 0);
+            if (!status)
+            {
+                UCHAR buf[16];
+
+                BCryptHashData(hash, aad, 20, 0);
+                status = BCryptSetProperty(hash, BCRYPT_INITIALIZATION_VECTOR, nonce, 12, 0);
+                NT_ORACLE("GMAC first nonce after hashing began", status, S_OK_);
+                status = BCryptFinishHash(hash, buf, 16, 0);
+                NT_ORACLE("GMAC finish, nonce set after the data", status, S_OK_);
+                /* the data hashed before the nonce are dropped: the tag is the one of an empty message, E(nonce || 1)
+                 * (AES-128 under the key of test case 4: independent value from Python cryptography ECB; Windows gives the same) */
+                expect_hex("GMAC, nonce after the data", buf, 16, "3247184b3c4f69a44dbcd22887bbb418");
+                BCryptDestroyHash(hash);
+            }
+            status = BCryptSetProperty(alg, BCRYPT_INITIALIZATION_VECTOR, nonce, 12, 0);
+            NT_ORACLE("GMAC nonce on the algorithm handle", status, S_INVALID_HANDLE);
+            len = 0;
+            status = BCryptGetProperty(alg, BCRYPT_INITIALIZATION_VECTOR, (UCHAR *)tag, 16, &len, 0);
+            NT_ORACLE("GMAC get nonce of the algorithm handle", status, S_NOT_SUPPORTED);
+            status = BCryptHash(alg, key, 16, (UCHAR *)aad, 20, tag, 16);
+            NT_ORACLE("GMAC BCryptHash without nonce", status, S_OUT_OF_SEQUENCE);
         }
         BCryptCloseAlgorithmProvider(alg, 0);
     }
@@ -521,11 +761,43 @@ static void test_ccm(void)
     status = BCryptEncrypt(k, pt, 16, NULL, NULL, 0, out, 16, &size, 0);
     NT_ORACLE("CCM, no mode info", status, S_INVALID_PARAMETER);
     status = BCryptEncrypt(k, pt, 16, &info, NULL, 0, out, 16, &size, BCRYPT_BLOCK_PADDING);
-    NT_ORACLE("CCM, block padding", status, S_INVALID_PARAMETER);
-    init_auth(&info, nonce, 11, aad, 32, tag, 16);
-    info.dwFlags = BCRYPT_AUTH_MODE_CHAIN_CALLS_FLAG;
-    status = BCryptEncrypt(k, pt, 16, &info, NULL, 0, out, 16, &size, 0);
-    NT_ORACLE("CCM, chained call", status, S_NOT_SUPPORTED);
+    NT_ORACLE("CCM, block padding", status, S_BUFFER_TOO_SMALL);
+    ok(size == 32, "CCM padded size %lu\n", size);
+    status = BCryptEncrypt(k, pt, 16, &info, NULL, 0, NULL, 0, &size, BCRYPT_BLOCK_PADDING);
+    NT_ORACLE("CCM, block padding, size query", status, S_OK_);
+    status = BCryptEncrypt(k, pt, 16, &info, NULL, 0, out, 64, &size, BCRYPT_BLOCK_PADDING);
+    NT_ORACLE("CCM, block padding, 64 byte output", status, S_INVALID_PARAMETER);
+    status = BCryptDecrypt(k, pt, 32, &info, NULL, 0, out, 64, &size, BCRYPT_BLOCK_PADDING);
+    NT_ORACLE("CCM decrypt, block padding", status, S_INVALID_PARAMETER);
+
+    /* CCM cannot be chained: about 62000 combinations of the members of a first call were tried on Windows Server 2022 and none
+     * was accepted with an output buffer. The input length is checked against the block size first when a pbMacContext is given. */
+    {
+        UCHAR mac[64], iv[16];
+        ULONG fl[3] = { BCRYPT_AUTH_MODE_CHAIN_CALLS_FLAG, BCRYPT_AUTH_MODE_IN_PROGRESS_FLAG,
+                        BCRYPT_AUTH_MODE_CHAIN_CALLS_FLAG | BCRYPT_AUTH_MODE_IN_PROGRESS_FLAG };
+        ULONG f, m;
+
+        memset(mac, 0, sizeof(mac));
+        memset(iv, 0, sizeof(iv));
+        for (f = 0; f < 3; f++) for (m = 0; m < 2; m++)
+        {
+            char what[80];
+
+            init_auth(&info, nonce, 11, aad, 32, tag, 16);
+            info.dwFlags = fl[f];
+            if (m) { info.pbMacContext = mac; info.cbMacContext = sizeof(mac); }
+            status = BCryptEncrypt(k, pt, 16, &info, iv, 16, out, 16, &size, 0);
+            sprintf(what, "CCM chain flags %lu, 16 bytes, macctx %lu", fl[f], m);
+            NT_ORACLE(what, status, S_INVALID_PARAMETER);
+            status = BCryptEncrypt(k, pt, 12, &info, iv, 16, out, 16, &size, 0);
+            sprintf(what, "CCM chain flags %lu, 12 bytes, macctx %lu", fl[f], m);
+            NT_ORACLE(what, status, (m && (fl[f] & BCRYPT_AUTH_MODE_CHAIN_CALLS_FLAG)) ? S_INVALID_BUFFER_SIZE : S_INVALID_PARAMETER);
+            status = BCryptEncrypt(k, pt, 16, &info, iv, 16, NULL, 0, &size, 0);
+            sprintf(what, "CCM chain flags %lu, size query, macctx %lu", fl[f], m);
+            NT_ORACLE(what, status, S_OK_);
+        }
+    }
 
     BCryptDestroyKey(k);
     BCryptCloseAlgorithmProvider(alg, 0);
@@ -647,6 +919,10 @@ static void test_kdf(void)
             { BCRYPT_SHA384_ALGORITHM, 40, "bf624fc904176c690a1aa426c0a50bc1ec01b23c3a64e07429318e1ee4c1952ee7eb34335c8a2c11" },
             { BCRYPT_SHA512_ALGORITHM, 100, "1d88ae2092553331353f14019a70b5b6c4b1339440df386b97df010f38dc7f4d30dac22e320b88a3443ab88e851285ec02efe5a251ed4b1b1b732d1cec3cabee6ca40943dc54cabb253ca570145c56336ba38043910c2312de7fd9634933904f3850e100" },
             { BCRYPT_SHA1_ALGORITHM, 30, "079339046c9aa5d4bf55fa50011540a4eae7bb2c37b4e9a2dd0b96c2655b" },
+            /* HMAC-MD5 and AES-CMAC as the PRF (Windows takes both; the values are from the same Python construction and equal
+             * what Windows Server 2022 derives) */
+            { BCRYPT_MD5_ALGORITHM, 40, "8fe39bc04cdf18e20f064557b1c9b45a69c73cae8f46e9431e206d635ca84ffb169c40fcce77e749" },
+            { BCRYPT_AES_CMAC_ALGORITHM, 40, "00d65c11fccefbee73bf1a57d7fbf5ee9d1cfa274498d92ac6716826934e01cf75a8233884667d30" },
         };
         for (i = 0; i < sizeof(hv) / sizeof(hv[0]); i++)
         {
@@ -664,9 +940,17 @@ static void test_kdf(void)
     derive(alg, "7cd451825d0450d235424e44ba6e78cc", L_SIGN30, C_SIGN30, NULL, 16, out, &status);
     NT_ORACLE("KDF, no hash buffer", status, S_OK_);
     derive(alg, "7cd451825d0450d235424e44ba6e78cc", L_SIGN30, C_SIGN30, L"MD5", 16, out, &status);
-    NT_ORACLE("KDF, hash MD5", status, S_INVALID_PARAMETER);
+    NT_ORACLE("KDF, hash MD5", status, S_OK_);
     derive(alg, "7cd451825d0450d235424e44ba6e78cc", L_SIGN30, C_SIGN30, L"NOSUCHHASH", 16, out, &status);
-    NT_ORACLE("KDF, unknown hash", status, S_INVALID_PARAMETER);
+    NT_ORACLE("KDF, unknown hash", status, S_NOT_SUPPORTED);
+    derive(alg, "7cd451825d0450d235424e44ba6e78cc", L_SIGN30, C_SIGN30, L"", 16, out, &status);
+    NT_ORACLE("KDF, empty hash name", status, S_NOT_SUPPORTED);
+    derive(alg, "7cd451825d0450d235424e44ba6e78cc", L_SIGN30, C_SIGN30, L"sha256", 16, out, &status);
+    NT_ORACLE("KDF, lower case hash name", status, S_NOT_SUPPORTED);
+    derive(alg, "7cd451825d0450d235424e44ba6e78cc", L_SIGN30, C_SIGN30, L"RSA", 16, out, &status);
+    NT_ORACLE("KDF, hash name of another kind", status, S_NOT_SUPPORTED);
+    derive(alg, "000102030405060708090a0b0c0d0e", L_SIGN30, C_SIGN30, BCRYPT_AES_CMAC_ALGORITHM, 16, out, &status);
+    NT_ORACLE("KDF, AES-CMAC with a key of 15 bytes", status, S_INVALID_PARAMETER);
     derive(alg, "7cd451825d0450d235424e44ba6e78cc", L_SIGN30, C_SIGN30, BCRYPT_SHA256_ALGORITHM, 0, out, &status);
     NT_ORACLE("KDF, zero output length", status, S_INVALID_PARAMETER);
     derive(alg, "7cd451825d0450d235424e44ba6e78cc", NULL, NULL, BCRYPT_SHA256_ALGORITHM, 16, out, &status);
