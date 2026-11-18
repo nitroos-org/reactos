@@ -1868,6 +1868,44 @@ static void interleave_addrinfo(struct addrinfo *base)
         }
 }
 
+/*
+ * NitroOS: a context can be connected again after smb2_close_context(), which
+ * restarts the MessageIds at 0 but leaves the requests of the old connection
+ * queued. A reply on the new connection would then be matched to an old
+ * request with the same MessageId (and land in its buffers), and unsent old
+ * requests would go out on the new connection. Complete them here, as
+ * smb2_destroy_context() does.
+ */
+static void
+smb2_fail_stale_pdus(struct smb2_context *smb2)
+{
+        while (smb2->outqueue || smb2->waitqueue) {
+                struct smb2_pdu *pdu, *p;
+
+                if (smb2->outqueue) {
+                        pdu = smb2->outqueue;
+                        smb2->outqueue = pdu->next;
+                        for (p = pdu; p; p = p->next_compound) {
+                                if (p->cb) {
+                                        p->cb(smb2, SMB2_STATUS_SHUTDOWN,
+                                              NULL, p->cb_data);
+                                }
+                        }
+                } else {
+                        pdu = smb2->waitqueue;
+                        smb2->waitqueue = pdu->next;
+                        if (pdu->cb) {
+                                pdu->cb(smb2, SMB2_STATUS_SHUTDOWN, NULL,
+                                        pdu->cb_data);
+                        }
+                        if (pdu == smb2->pdu) {
+                                smb2->pdu = NULL;
+                        }
+                }
+                smb2_free_pdu(smb2, pdu);
+        }
+}
+
 int
 smb2_connect_async(struct smb2_context *smb2, const char *server,
                    smb2_command_cb cb, void *private_data)
@@ -1882,6 +1920,8 @@ smb2_connect_async(struct smb2_context *smb2, const char *server,
                                "connected.");
                 return -EINVAL;
         }
+        /* NitroOS: nothing of an earlier connection on this context survives */
+        smb2_fail_stale_pdus(smb2);
 #ifdef HAVE_LIBRDMACM
         /* SMB2 over RDMA needs dialect 3.0 or later */
         if (smb2->rdma &&

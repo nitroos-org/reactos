@@ -229,11 +229,25 @@ smb2_close_context(struct smb2_context *smb2)
         smb2->tree_id[0] = 0xdeadbeef;
         memset(smb2->signing_key, 0, SMB2_KEY_SIZE);
         memset(smb2->application_key, 0, SMB2_KEY_SIZE);
+        /* NitroOS: the encryption keys and the session key are wiped too */
+        memset(smb2->serverin_key, 0, sizeof(smb2->serverin_key));
+        memset(smb2->serverout_key, 0, sizeof(smb2->serverout_key));
         if (smb2->session_key) {
+                volatile uint8_t *k = smb2->session_key;
+                size_t i;
+
+                for (i = 0; i < smb2->session_key_size; i++) {
+                        k[i] = 0;
+                }
                 free(smb2->session_key);
                 smb2->session_key = NULL;
         }
         smb2->session_key_size = 0;
+        /* NitroOS: a reply cut off by the close must not be continued with
+         * the bytes of the next connection on this context (its vectors
+         * point into the old reply): the next read starts at a new SPL. */
+        smb2->in.num_done = 0;
+        smb2->recv_state = SMB2_RECV_SPL;
 }
 
 static int
