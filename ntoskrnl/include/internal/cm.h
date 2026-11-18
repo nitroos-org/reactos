@@ -845,6 +845,19 @@ CmpCaptureKeySecurity(
     _In_ PCM_KEY_CONTROL_BLOCK Kcb
 );
 
+VOID
+NTAPI
+CmpAclStampHiveRoot(
+    _In_ PCM_KEY_CONTROL_BLOCK Kcb
+);
+
+NTSTATUS
+NTAPI
+CmpStampKeySecurity(
+    _In_ PCM_KEY_CONTROL_BLOCK Kcb,
+    _In_ PSECURITY_DESCRIPTOR SecurityDescriptor
+);
+
 BOOLEAN
 NTAPI
 CmpCheckKeyOpenAccess(

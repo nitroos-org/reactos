@@ -1277,6 +1277,122 @@ CmpFreeParentSecurity(
     ExFreePoolWithTag(ParentSd, TAG_CM_ACL);
 }
 
+/*
+ * The hive roots the kernel stamps (registry ACL plan R5): the root of a hive
+ * linked at \REGISTRY\MACHINE\SAM or \REGISTRY\MACHINE\SECURITY, and of a user
+ * hive linked at \REGISTRY\USER\<SID> (no _Classes suffix, not the system
+ * profile, which is the DEFAULT hive). The kernel creates the SAM and SECURITY
+ * hives at the first boot after setup, and userenv mounts a profile copied
+ * from the Default User hive, whose root has no descriptor on purpose: their
+ * roots have none of their own, and report (and are judged by) the policy
+ * descriptor for their place. Expected rule: the one that place gets.
+ */
+static
+BOOLEAN
+CmpAclStampTarget(
+    _In_ PCM_KEY_CONTROL_BLOCK Kcb,
+    _Out_ PULONG ExpectedRule)
+{
+    static const CHAR Classes[] = "_CLASSES";
+    PCM_KEY_CONTROL_BLOCK Parent = Kcb->ParentKcb;
+    ULONG SidBuffer[SECURITY_MAX_SID_SIZE / sizeof(ULONG)];
+    ULONG Chars, i;
+
+    /* \REGISTRY\<MACHINE|USER>\<hive>: three levels, nothing above \REGISTRY */
+    if (!Parent || !Parent->ParentKcb || Parent->ParentKcb->ParentKcb)
+        return FALSE;
+
+    if (CmpAclNameMatches(Parent, "MACHINE", FALSE))
+    {
+        if (CmpAclNameMatches(Kcb, "SAM", FALSE))
+        {
+            *ExpectedRule = CmpAclRuleHiveRoot;
+            return TRUE;
+        }
+        if (CmpAclNameMatches(Kcb, "SECURITY", FALSE))
+        {
+            *ExpectedRule = CmpAclRuleSamSecurity;
+            return TRUE;
+        }
+        return FALSE;
+    }
+
+    if (!CmpAclNameMatches(Parent, "USER", FALSE) ||
+        CmpAclNameMatches(Kcb, "S-1-5-18", FALSE))
+    {
+        return FALSE;
+    }
+    /* The classes hive of a user: its Windows root descriptor is not measured */
+    Chars = CmpAclNameChars(Kcb);
+    if (Chars > sizeof(Classes) - 1)
+    {
+        for (i = 0; i < sizeof(Classes) - 1; i++)
+        {
+            if (RtlUpcaseUnicodeChar(CmpAclNameChar(Kcb, Chars - (sizeof(Classes) - 1) + i)) != (WCHAR)Classes[i])
+                break;
+        }
+        if (i == sizeof(Classes) - 1)
+            return FALSE;
+    }
+    if (!CmpAclParseUserSid(Kcb, (PSID)SidBuffer))
+        return FALSE;
+    *ExpectedRule = CmpAclRuleUser;
+    return TRUE;
+}
+
+/*
+ * Store the root descriptor of a hive just linked (CmpLinkHiveToMaster) when
+ * the root has none: the policy descriptor of its place (see CmpAclStampTarget),
+ * which is what the root already reports and is judged by, so no access
+ * decision and no query result of the root changes; the descriptor now goes
+ * with the hive file. Keys below without a descriptor of their own inherit
+ * from the stored root from then on (CmpGetEffectiveKeySd, rule 2), with the
+ * same access for every token. Only while new keys get stored descriptors
+ * (not in legacy mode, not while setup runs). Never fails the link.
+ */
+VOID
+NTAPI
+CmpAclStampHiveRoot(
+    _In_ PCM_KEY_CONTROL_BLOCK Kcb)
+{
+    ULONG Buffer[CMP_ACL_SD_BUFFER / sizeof(ULONG)];
+    PSECURITY_DESCRIPTOR Sd, ToFree;
+    PVOID PoolCopy;
+    ULONG Rule, ExpectedRule;
+    NTSTATUS Status = STATUS_UNSUCCESSFUL;
+    PUNICODE_STRING Name;
+    UNICODE_STRING EmptyName = RTL_CONSTANT_STRING(L"?");
+
+    if (!Kcb || !CmpStoreKeySecurity())
+        return;
+
+    CmpLockRegistry();
+    CmpAcquireKcbLockExclusive(Kcb);
+    if (!Kcb->Delete && Kcb->KeyHive &&
+        !(Kcb->KeyHive->HiveFlags & HIVE_VOLATILE) &&
+        !(Kcb->ExtFlags & (CM_KCB_KEY_NON_EXIST | CM_KCB_READ_ONLY_KEY)) &&
+        CmpAclStampTarget(Kcb, &ExpectedRule))
+    {
+        Sd = CmpGetEffectiveKeySd(Kcb, Buffer, sizeof(Buffer), &Rule, &ToFree, &PoolCopy, FALSE);
+        if (Sd && Rule == ExpectedRule)
+        {
+            Status = CmpStampKeySecurity(Kcb, Sd);
+            Name = CmpConstructName(Kcb);
+            DbgPrintEx(DPFLTR_CONFIG_ID, DPFLTR_ERROR_LEVEL,
+                       "CM-ACL: hive root %wZ: %s descriptor stored (0x%lx)\n",
+                       Name ? Name : &EmptyName, CmpAclRuleNames[Rule], Status);
+            if (Name)
+                CmpFree(Name, 0);
+        }
+        CmpAclFreeEffectiveSd(ToFree, PoolCopy);
+    }
+    CmpReleaseKcbLock(Kcb);
+    CmpUnlockRegistry();
+
+    if (!NT_SUCCESS(Status) && Status != STATUS_UNSUCCESSFUL && Status != STATUS_OBJECT_NAME_EXISTS)
+        InterlockedIncrement(&CmpAclErrors);
+}
+
 static
 ULONG64
 CmpAclMix(

@@ -880,7 +880,12 @@ CmpLinkHiveToMaster(IN PUNICODE_STRING LinkName,
                                        NULL);
     ASSERT(NT_SUCCESS(Status));
     if (NT_SUCCESS(Status))
+    {
         RegistryHive->RootKeyBody = KeyBody;
+
+        /* A SAM, SECURITY or user hive root without a descriptor gets its policy one (registry ACL R5) */
+        CmpAclStampHiveRoot(KeyBody->KeyControlBlock);
+    }
 
     /* Close the extra handle */
     ZwClose(KeyHandle);

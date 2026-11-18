@@ -86,6 +86,7 @@ extern void func_RegRenameKeyPersist(void);
 extern void func_RegRenameKeyStress(void);
 extern void func_RegGetValue(void);
 extern void func_RegHiveKeyControl(void);
+extern void func_RegHiveRootStamp(void);
 extern void func_RegSdTemplates(void);
 extern void func_RegSecurityDump(void);
 extern void func_RegSecurityDefaultSd(void);
@@ -240,6 +241,7 @@ const struct test winetest_testlist[] =
     { "RegRenameKeyStress", func_RegRenameKeyStress },
     { "RegGetValue", func_RegGetValue },
     { "RegHiveKeyControl", func_RegHiveKeyControl },
+    { "RegHiveRootStamp", func_RegHiveRootStamp },
     { "RegSdTemplates", func_RegSdTemplates },
     { "RegSecurityDump", func_RegSecurityDump },
     { "RegSecurityDefaultSd", func_RegSecurityDefaultSd },

@@ -698,6 +698,86 @@ CmpAssignSecurityDescriptor(IN PCM_KEY_CONTROL_BLOCK Kcb,
 }
 
 /*
+ * Give a key that has no stored descriptor the one passed (a validated,
+ * self-relative copy): the stamping of hive roots (CmpAclStampHiveRoot).
+ * A key that has one keeps it. Same storage steps as a set (flusher lock
+ * shared, the cell switched under the hive's security lock), but nothing
+ * else changes: no last write time, no notification, as the descriptor the
+ * key reports stays the same. The caller holds the KCB exclusively.
+ */
+NTSTATUS
+NTAPI
+CmpStampKeySecurity(
+    _In_ PCM_KEY_CONTROL_BLOCK Kcb,
+    _In_ PSECURITY_DESCRIPTOR SecurityDescriptor)
+{
+    PHHIVE Hive = Kcb->KeyHive;
+    PCM_KEY_NODE Node;
+    HCELL_INDEX SecurityCell;
+    BOOLEAN Acquired;
+    ULONG Length;
+    NTSTATUS Status;
+
+    if (!Hive || Kcb->KeyCell == HCELL_NIL ||
+        (Kcb->ExtFlags & (CM_KCB_KEY_NON_EXIST | CM_KCB_READ_ONLY_KEY)) || Kcb->Delete)
+    {
+        return STATUS_ACCESS_DENIED;
+    }
+
+    Length = RtlLengthSecurityDescriptor(SecurityDescriptor);
+    if (!(((PISECURITY_DESCRIPTOR)SecurityDescriptor)->Control & SE_SELF_RELATIVE) ||
+        Length > CMP_MAX_STORED_SD_LENGTH ||
+        !RtlValidRelativeSecurityDescriptor(SecurityDescriptor, Length, 0))
+    {
+        return STATUS_INVALID_SECURITY_DESCR;
+    }
+
+    Node = (PCM_KEY_NODE)HvGetCell(Hive, Kcb->KeyCell);
+    if (!Node)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    if (Node->Signature != CM_KEY_NODE_SIGNATURE)
+    {
+        HvReleaseCell(Hive, Kcb->KeyCell);
+        return STATUS_REGISTRY_CORRUPT;
+    }
+
+    /* The same lock order as a set: flusher, dirty mark, then the security lock */
+    CmpLockHiveFlusherShared((PCMHIVE)Hive);
+    if (Node->Security != HCELL_NIL)
+    {
+        /* It has one: stamping never replaces a descriptor */
+        Status = STATUS_OBJECT_NAME_EXISTS;
+    }
+    else if (!HvMarkCellDirty(Hive, Kcb->KeyCell, FALSE))
+    {
+        Status = STATUS_NO_LOG_SPACE;
+    }
+    else
+    {
+        Acquired = CmpAcquireHiveSecurityLock(Hive);
+        /* Looked at again under the lock (the KCB lock already keeps sets out) */
+        if (Node->Security != HCELL_NIL)
+        {
+            Status = STATUS_OBJECT_NAME_EXISTS;
+        }
+        else
+        {
+            Status = CmpInsertSecurityDescriptor((PCMHIVE)Hive,
+                                                 SecurityDescriptor,
+                                                 Length,
+                                                 HvGetCellType(Kcb->KeyCell),
+                                                 &SecurityCell);
+            if (NT_SUCCESS(Status))
+                Node->Security = SecurityCell;
+        }
+        CmpReleaseHiveSecurityLock(Hive, Acquired);
+    }
+    CmpUnlockHiveFlusher((PCMHIVE)Hive);
+    HvReleaseCell(Hive, Kcb->KeyCell);
+    return Status;
+}
+
+/*
  * Copying a key into another hive (save, merge): the destination key gets a
  * reference to a cell of the destination hive holding the same descriptor,
  * shared with the keys copied before that have it. The source cell is read

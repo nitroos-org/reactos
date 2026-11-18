@@ -78,6 +78,7 @@ list(APPEND SOURCE
     RegKeyNameCase.c
     RegRenameKey.c
     RegHiveKeyControl.c
+    RegHiveRootStamp.c
     RegSdTemplates.c
     RegSecurity.c
     RegSecurityQuerySet.c

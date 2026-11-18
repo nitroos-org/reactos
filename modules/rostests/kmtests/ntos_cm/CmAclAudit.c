@@ -340,7 +340,11 @@ GetUserHive(
     if (NT_SUCCESS(RtlConvertSidToUnicodeString(&SidString, User->User.Sid, TRUE)))
     {
         RtlStringCchPrintfW(Path, PathChars, L"\\Registry\\User\\%wZ", &SidString);
-        RtlStringCchPrintfA(Needle, NeedleChars, "%wZ\\\\Software\",\"desired\":\"0x00000002\",\"granted\":\"0x00000000\",\"status\":\"0xc0000022\",\"rule\":\"user\"", &SidString);
+        /*
+         * The rule is "user" (the policy descriptor) while the hive root has no stored
+         * descriptor, "inherited" (from the root) once the kernel stamped it at load
+         */
+        RtlStringCchPrintfA(Needle, NeedleChars, "%wZ\\\\Software\",\"desired\":\"0x00000002\",\"granted\":\"0x00000000\",\"status\":\"0xc0000022\",\"rule\":\"", &SidString);
         RtlFreeUnicodeString(&SidString);
         Result = TRUE;
     }
