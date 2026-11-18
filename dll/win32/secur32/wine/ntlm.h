@@ -40,6 +40,7 @@ typedef struct _NegoHelper {
     ULONG challenge_len;
     BYTE server_challenge[8];
     PNtlmCredentials cred;      /* client: copy of the credentials */
+    WCHAR *target_name;         /* client: the target name (SPN) of the first InitializeSecurityContext */
     WCHAR *user_name;           /* server: the client as it authenticated */
     WCHAR *domain_name;
     HANDLE token;               /* server: the impersonation token of the client */

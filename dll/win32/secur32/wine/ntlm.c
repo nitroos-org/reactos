@@ -79,6 +79,8 @@ VOID WINAPI MD4Final(NTLM_MD4_CTX *ctx);
 #define MSV_AV_NB_DOMAIN_NAME   2
 #define MSV_AV_FLAGS            6
 #define MSV_AV_TIMESTAMP        7
+#define MSV_AV_SINGLE_HOST      8
+#define MSV_AV_TARGET_NAME      9
 #define MSV_AV_CHANNEL_BINDINGS 10
 #define MSV_AV_FLAG_MIC         0x00000002
 
@@ -581,6 +583,7 @@ static void ntlm_free_context(PNegoHelper h)
 {
     if (!h) return;
     if (h->local_context) server_release_local(h);
+    HeapFree(GetProcessHeap(), 0, h->target_name);
     SECUR32_arc4Cleanup(h->crypt.ntlm.a4i);
     SECUR32_arc4Cleanup(h->crypt.ntlm2.send_a4i);
     SECUR32_arc4Cleanup(h->crypt.ntlm2.recv_a4i);
@@ -689,14 +692,56 @@ static SECURITY_STATUS client_negotiate(PNegoHelper h, ULONG req, MsgBuf *m)
     return SEC_E_OK;
 }
 
-/* the target info with the MIC flag, ready for the blob: no terminator yet */
-static BOOL build_client_target_info(const BYTE *info, ULONG info_len, BYTE **out, ULONG *out_len, ULONGLONG *timestamp)
+/* MsvAvSingleHost ([MS-NLMP] 2.2.2.2): Size 48, Z4, CustomData (zero), MachineID (a random number of this
+ * process: the specification has one per computer startup; only a server on the same host compares it) */
+static BYTE single_host_machine_id[32];
+static LONG single_host_ready;
+static CRITICAL_SECTION single_host_lock;
+static CRITICAL_SECTION_DEBUG single_host_lock_debug =
+{
+    0, 0, &single_host_lock,
+    { &single_host_lock_debug.ProcessLocksList, &single_host_lock_debug.ProcessLocksList },
+      0, 0, { (DWORD_PTR)(__FILE__ ": single_host_lock") }
+};
+static CRITICAL_SECTION single_host_lock = { &single_host_lock_debug, -1, 0, 0, 0, 0 };
+
+static void single_host_id(BYTE *out)
+{
+    BYTE id[32];
+
+    /* the first caller sets it; a thread that loses the race uses the winner's value */
+    if (!InterlockedCompareExchange(&single_host_ready, 0, 0))
+    {
+        if (!SystemFunction036(id, sizeof(id))) memset(id, 0, sizeof(id));
+        EnterCriticalSection(&single_host_lock);
+        if (!single_host_ready)
+        {
+            memcpy(single_host_machine_id, id, sizeof(id));
+            InterlockedExchange(&single_host_ready, 1);
+        }
+        LeaveCriticalSection(&single_host_lock);
+    }
+    memcpy(out, single_host_machine_id, 32);
+}
+
+/*
+ * The target info of the client's NTLMv2 blob, ready for the blob (no terminator yet), as a Windows Server 2022
+ * client sends it (measured: SMB 3.1.1 to Samba): the server's pairs but MsvAvFlags, then MsvAvFlags with the MIC
+ * bit, MsvAvSingleHost, MsvAvChannelBindings (the MD5 of the application's channel bindings, zero without), and
+ * MsvAvTargetName (the target name the caller gave, when it gave one). *server_timestamp says whether the server's
+ * target info had MsvAvTimestamp: then the LM response is 24 zero bytes ([MS-NLMP] 3.1.5.1.2).
+ */
+static BOOL build_client_target_info(const BYTE *info, ULONG info_len, const WCHAR *target_name, const BYTE *cb_hash,
+                                     BYTE **out, ULONG *out_len, ULONGLONG *timestamp, BOOL *server_timestamp)
 {
     ULONG pos = 0, flags = 0;
+    ULONG target_len = target_name ? lstrlenW(target_name) * sizeof(WCHAR) : 0;
     BYTE *buf;
     ULONG len = 0;
 
-    buf = HeapAlloc(GetProcessHeap(), 0, info_len + 16);
+    *server_timestamp = FALSE;
+    if (target_len > 0xfff0) target_len = 0;
+    buf = HeapAlloc(GetProcessHeap(), 0, info_len + 8 + (4 + 48) + (4 + 16) + (4 + target_len));
     if (!buf) return FALSE;
 
     while (pos + 4 <= info_len)
@@ -707,12 +752,17 @@ static BOOL build_client_target_info(const BYTE *info, ULONG info_len, BYTE **ou
         if (l > info_len - pos - 4) break;
         if (id == MSV_AV_FLAGS && l == 4)
             flags = get32(info + pos + 4);
+        else if (id == MSV_AV_SINGLE_HOST || id == MSV_AV_CHANNEL_BINDINGS || id == MSV_AV_TARGET_NAME)
+            ;   /* the client's own pairs: not the server's */
         else
         {
             memcpy(buf + len, info + pos, 4 + l);
             len += 4 + l;
             if (id == MSV_AV_TIMESTAMP && l == 8)
+            {
                 memcpy(timestamp, info + pos + 4, 8);
+                *server_timestamp = TRUE;
+            }
         }
         pos += 4 + l;
     }
@@ -720,6 +770,28 @@ static BOOL build_client_target_info(const BYTE *info, ULONG info_len, BYTE **ou
     put16(buf + len + 2, 4);
     put32(buf + len + 4, flags | MSV_AV_FLAG_MIC);
     len += 8;
+
+    put16(buf + len, MSV_AV_SINGLE_HOST);
+    put16(buf + len + 2, 48);
+    put32(buf + len + 4, 48);
+    memset(buf + len + 8, 0, 12);
+    single_host_id(buf + len + 20);
+    len += 4 + 48;
+
+    put16(buf + len, MSV_AV_CHANNEL_BINDINGS);
+    put16(buf + len + 2, 16);
+    if (cb_hash) memcpy(buf + len + 4, cb_hash, 16);
+    else memset(buf + len + 4, 0, 16);
+    len += 4 + 16;
+
+    if (target_len)
+    {
+        put16(buf + len, MSV_AV_TARGET_NAME);
+        put16(buf + len + 2, target_len);
+        memcpy(buf + len + 4, target_name, target_len);
+        len += 4 + target_len;
+    }
+
     *out = buf;
     *out_len = len;
     return TRUE;
@@ -853,7 +925,10 @@ static SECURITY_STATUS client_local_call(PNegoHelper h, const BYTE *challenge, U
     return SEC_E_OK;
 }
 
-static SECURITY_STATUS client_authenticate(PNegoHelper h, const BYTE *challenge, ULONG challenge_len, MsgBuf *m)
+static SECURITY_STATUS app_channel_bindings(PSecBufferDesc input, BOOL *present, BYTE *hash);
+
+static SECURITY_STATUS client_authenticate(PNegoHelper h, const BYTE *challenge, ULONG challenge_len,
+                                           PSecBufferDesc input, MsgBuf *m)
 {
     PNtlmCredentials cred = h->cred;
     const BYTE *target_info = NULL;
@@ -863,7 +938,8 @@ static SECURITY_STATUS client_authenticate(PNegoHelper h, const BYTE *challenge,
     ULONGLONG timestamp = 0;
     BYTE server_challenge[8], client_challenge[8];
     BYTE response_key[16], proof[16], base_key[16], exported[16], enc_key[16];
-    BYTE lm_response[24];
+    BYTE lm_response[24], cb_hash[16];
+    BOOL have_cb = FALSE, server_timestamp = FALSE;
     WCHAR workstation[MAX_COMPUTERNAME_LENGTH + 1];
     DWORD ws_len = ARRAYSIZE(workstation);
     SECURITY_STATUS ret = SEC_E_INSUFFICIENT_MEMORY;
@@ -919,7 +995,11 @@ static SECURITY_STATUS client_authenticate(PNegoHelper h, const BYTE *challenge,
 
     GetSystemTimeAsFileTime(&ft);
     timestamp = ((ULONGLONG)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
-    if (!build_client_target_info(target_info, target_info_len, &av, &av_len, &timestamp))
+    ret = app_channel_bindings(input, &have_cb, cb_hash);
+    if (ret != SEC_E_OK) return ret;
+    ret = SEC_E_INSUFFICIENT_MEMORY;
+    if (!build_client_target_info(target_info, target_info_len, h->target_name, have_cb ? cb_hash : NULL,
+                                  &av, &av_len, &timestamp, &server_timestamp))
         return SEC_E_INSUFFICIENT_MEMORY;
 
     if (!SystemFunction036(client_challenge, sizeof(client_challenge)))
@@ -978,6 +1058,8 @@ static SECURITY_STATUS client_authenticate(PNegoHelper h, const BYTE *challenge,
     memcpy(nt_response, proof, 16);
     memcpy(nt_response + 16, blob, blob_len);
     memcpy(lm_response + 16, client_challenge, 8);
+    /* a server that sent a timestamp gets no LMv2 response ([MS-NLMP] 3.1.5.1.2; Windows sends Z(24)) */
+    if (server_timestamp) memset(lm_response, 0, sizeof(lm_response));
 
     if (key_exch)
     {
@@ -1068,6 +1150,19 @@ SECURITY_STATUS SEC_ENTRY ntlm_InitializeSecurityContextW(
 
         h = ntlm_new_context(NTLM_CLIENT, fContextReq);
         if (!h) return SEC_E_INSUFFICIENT_MEMORY;
+        if (pszTargetName && *pszTargetName)
+        {
+            ULONG tl = lstrlenW(pszTargetName);
+
+            /* MsvAvTargetName of the AUTHENTICATE message */
+            h->target_name = HeapAlloc(GetProcessHeap(), 0, (tl + 1) * sizeof(WCHAR));
+            if (!h->target_name)
+            {
+                ntlm_free_context(h);
+                return SEC_E_INSUFFICIENT_MEMORY;
+            }
+            memcpy(h->target_name, pszTargetName, (tl + 1) * sizeof(WCHAR));
+        }
         h->cred = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*h->cred));
         if (h->cred)
         {
@@ -1116,7 +1211,7 @@ SECURITY_STATUS SEC_ENTRY ntlm_InitializeSecurityContextW(
         if (!h || h->mode != NTLM_CLIENT || h->state != 0) return SEC_E_INVALID_HANDLE;
         if (!get_input_token(pInput, &token, &token_len)) return TOKEN_FAIL();
 
-        ret = client_authenticate(h, token, token_len, &m);
+        ret = client_authenticate(h, token, token_len, pInput, &m);
         if (ret == SEC_E_OK)
         {
             ret = put_output_token(pOutput, fContextReq, &attr, m.data, m.len);
