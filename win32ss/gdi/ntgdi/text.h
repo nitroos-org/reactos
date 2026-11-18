@@ -204,6 +204,11 @@ GreGetCharABCWidthsW(
     _In_ FLONG fl,
     _Out_writes_bytes_(Count * sizeof(ABC)) PVOID SafeBuffer);
 
+BOOL APIENTRY
+GreGetCharWidthInfo(
+    _In_ HDC hDC,
+    _Out_ PCHWIDTHINFO pInfo);
+
 DWORD APIENTRY
 GreGetGlyphIndicesW(
     _In_ HDC hdc,
