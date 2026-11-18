@@ -1678,6 +1678,57 @@ SmbOpenOwnDevice(VOID)
     return Status;
 }
 
+#if DBG
+/*
+ * Tests only (Debug builds): Parameters\RequestTimeoutSeconds (REG_DWORD, 1..120) of
+ * the service key shortens the time limit of a request, so that a test engine that
+ * drops replies on purpose can run many of them. A Release build always uses
+ * NITRO_SMBRDR_REQUEST_TIMEOUT_SECONDS.
+ */
+static
+VOID
+SmbReadDebugParameters(PUNICODE_STRING RegistryPath)
+{
+    UNICODE_STRING Name, Value = RTL_CONSTANT_STRING(L"RequestTimeoutSeconds");
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    struct
+    {
+        KEY_VALUE_PARTIAL_INFORMATION Info;
+        ULONG Data;
+    } Buffer;
+    HANDLE Key;
+    ULONG Length;
+    NTSTATUS Status;
+
+    Name.MaximumLength = RegistryPath->Length + sizeof(L"\\Parameters");
+    Name.Length = 0;
+    Name.Buffer = ExAllocatePoolWithTag(PagedPool, Name.MaximumLength, TAG_SMB_MISC);
+    if (Name.Buffer == NULL)
+        return;
+    RtlAppendUnicodeStringToString(&Name, RegistryPath);
+    RtlAppendUnicodeToString(&Name, L"\\Parameters");
+
+    InitializeObjectAttributes(&ObjectAttributes, &Name, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+    Status = ZwOpenKey(&Key, KEY_QUERY_VALUE, &ObjectAttributes);
+    ExFreePoolWithTag(Name.Buffer, TAG_SMB_MISC);
+    if (!NT_SUCCESS(Status))
+        return;
+
+    Status = ZwQueryValueKey(Key, &Value, KeyValuePartialInformation, &Buffer, sizeof(Buffer), &Length);
+    ZwClose(Key);
+    if (NT_SUCCESS(Status) && Buffer.Info.Type == REG_DWORD && Buffer.Info.DataLength == sizeof(ULONG))
+    {
+        ULONG Seconds = *(PULONG)Buffer.Info.Data;
+
+        if (Seconds >= 1 && Seconds <= NITRO_SMBRDR_REQUEST_TIMEOUT_SECONDS)
+        {
+            SmbRequestTimeoutSeconds = Seconds;
+            DPRINT1("mrxsmb: request time limit %lu s (test setting)\n", Seconds);
+        }
+    }
+}
+#endif
+
 /*
  * No DriverUnload: rdbss's stop and unload (RxStopMinirdr, RxpUnregisterMinirdr,
  * RxUnload) are not implemented, and its worker threads and timer run code of this
@@ -1694,6 +1745,9 @@ DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
     ULONG i;
 
     SmbEngineInitialize();
+#if DBG
+    SmbReadDebugParameters(RegistryPath);
+#endif
 
     Status = RxDriverEntry(DriverObject, RegistryPath);
     if (!NT_SUCCESS(Status))

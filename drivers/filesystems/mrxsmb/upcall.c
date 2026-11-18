@@ -356,7 +356,9 @@ SmbSendRequest(PSMB_REQUEST Request, ULONG TimeoutSeconds)
     if (!NT_SUCCESS(Status))
         return Status;
 
-    Timeout.QuadPart = -10000000LL * (TimeoutSeconds ? TimeoutSeconds : NITRO_SMBRDR_REQUEST_TIMEOUT_SECONDS);
+    if (TimeoutSeconds == 0 || TimeoutSeconds > SmbRequestTimeoutSeconds)
+        TimeoutSeconds = SmbRequestTimeoutSeconds;
+    Timeout.QuadPart = -10000000LL * TimeoutSeconds;
     Status = KeWaitForSingleObject(&Request->Done, Executive, KernelMode, FALSE, &Timeout);
     if (Status == STATUS_TIMEOUT)
     {
