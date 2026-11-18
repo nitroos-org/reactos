@@ -380,6 +380,102 @@ static VOID Test_ContextPointers(VOID)
     ok_eq_hex64(Ctx.Rbx, 0xAABBCCDDAABBCCDDULL);
 }
 
+/*
+ * UWOP_SAVE_XMM128 in a frame whose frame register is set before the
+ * allocation. S is the stack pointer after the allocation. Expected values are
+ * Windows 10 / Server 2022 (measured with the same unwind data): the slot is
+ * taken from the frame base (the frame register minus 16 * FrameOffset) plus
+ * the offset, also when the frame register was set before the allocation.
+ *  V1: mov rbp,rsp; sub rsp,0x108; save xmm6 at offset 0x80: slot rbp+0x80 = S+0x188
+ *  V2: sub rsp,0x108; lea rbp,[rsp+0x20] (FrameOffset 2); offset 0x80: slot S+0x80
+ *  V3: sub rsp,0x108, no frame register; offset 0x80: slot S+0x80
+ *  V4: as V1 with offset 0x100: slot S+0x208
+ */
+static VOID Test_FrameRegBeforeAlloc(VOID)
+{
+    static const struct
+    {
+        const char *Name;
+        BOOLEAN FpFirst, HasFp;
+        UCHAR FrameOffset;
+        USHORT SaveOffset;
+        ULONG RbpFromS, EstFromS, SlotFromS;
+    } Rows[] =
+    {
+        { "V1", TRUE,  TRUE,  0, 0x80,  0x108, 0x108, 0x188 },
+        { "V2", FALSE, TRUE,  2, 0x80,  0x20,  0,     0x80  },
+        { "V3", FALSE, FALSE, 0, 0x80,  0,     0,     0x80  },
+        { "V4", TRUE,  TRUE,  0, 0x100, 0x108, 0x108, 0x208 },
+    };
+    CONTEXT Ctx;
+    KNONVOLATILE_CONTEXT_POINTERS Ptrs;
+    TEST_UNWIND_INFO *Info;
+    ULONG_PTR S = (ULONG_PTR)g_StackBuffer, Est;
+    M128A Expected;
+    ULONG r;
+
+    for (r = 0; r < RTL_NUMBER_OF(Rows); r++)
+    {
+        RtlZeroMemory(g_StackBuffer, sizeof(g_StackBuffer));
+        RtlZeroMemory(&Ptrs, sizeof(Ptrs));
+        g_StackBuffer[0x108 / 8] = 0x7FF600001234ULL;   /* return address */
+        Expected.Low = 0x1111222233334444ULL + r;
+        Expected.High = 0x5555666677778888ULL + r;
+        /* the value at the slot Windows reads (8 mod 16 for V1: written as two quadwords) */
+        g_StackBuffer[Rows[r].SlotFromS / 8] = Expected.Low;
+        g_StackBuffer[Rows[r].SlotFromS / 8 + 1] = Expected.High;
+
+        if (Rows[r].FpFirst)
+        {
+            /* +3 mov rbp,rsp; +10 sub rsp,0x108; +17 movaps [rbp-0x88],xmm6 */
+            Info = ResetUnwindInfo(1, 17, 5);
+            SetCode(Info, 0, 17, UWOP_SAVE_XMM128, 6);
+            Info->UnwindCode[1].FrameOffset = Rows[r].SaveOffset / 16;
+            SetCode(Info, 2, 10, UWOP_ALLOC_LARGE, 0);
+            Info->UnwindCode[3].FrameOffset = 0x108 / 8;
+            SetCode(Info, 4, 3, UWOP_SET_FPREG, 0);
+        }
+        else if (Rows[r].HasFp)
+        {
+            /* +7 sub rsp,0x108; +12 lea rbp,[rsp+0x20]; +19 movaps [rsp+0x80],xmm6 */
+            Info = ResetUnwindInfo(1, 19, 5);
+            SetCode(Info, 0, 19, UWOP_SAVE_XMM128, 6);
+            Info->UnwindCode[1].FrameOffset = Rows[r].SaveOffset / 16;
+            SetCode(Info, 2, 12, UWOP_SET_FPREG, 0);
+            SetCode(Info, 3, 7, UWOP_ALLOC_LARGE, 0);
+            Info->UnwindCode[4].FrameOffset = 0x108 / 8;
+        }
+        else
+        {
+            /* +7 sub rsp,0x108; +14 movaps [rsp+0x80],xmm6 */
+            Info = ResetUnwindInfo(1, 14, 4);
+            SetCode(Info, 0, 14, UWOP_SAVE_XMM128, 6);
+            Info->UnwindCode[1].FrameOffset = Rows[r].SaveOffset / 16;
+            SetCode(Info, 2, 7, UWOP_ALLOC_LARGE, 0);
+            Info->UnwindCode[3].FrameOffset = 0x108 / 8;
+        }
+        if (Rows[r].HasFp)
+        {
+            Info->FrameRegister = REG_RBP;
+            Info->FrameOffset = Rows[r].FrameOffset;
+        }
+
+        InitContext(&Ctx, S);
+        Ctx.Rbp = Rows[r].HasFp ? S + Rows[r].RbpFromS : 0x5A5A5A5A5A5A5A5AULL;
+        Est = DoUnwind(&Ctx, 0x40, &Ptrs);
+
+        ok(Est == S + Rows[r].EstFromS, "%s: EstablisherFrame S+0x%Ix, expected S+0x%lx\n",
+           Rows[r].Name, Est - S, Rows[r].EstFromS);
+        ok(Ctx.Rip == 0x7FF600001234ULL, "%s: Rip %I64x\n", Rows[r].Name, Ctx.Rip);
+        ok(Ctx.Rsp == S + 0x110, "%s: Rsp S+0x%I64x, expected S+0x110\n", Rows[r].Name, Ctx.Rsp - S);
+        ok((ULONG_PTR)Ptrs.Xmm6 == S + Rows[r].SlotFromS, "%s: ContextPointers.Xmm6 S+0x%Ix, expected S+0x%lx\n",
+           Rows[r].Name, (ULONG_PTR)Ptrs.Xmm6 - S, Rows[r].SlotFromS);
+        ok(Ctx.Xmm6.Low == Expected.Low && Ctx.Xmm6.High == Expected.High,
+           "%s: Xmm6 %I64x:%I64x, expected the slot at S+0x%lx\n", Rows[r].Name, Ctx.Xmm6.High, Ctx.Xmm6.Low,
+           Rows[r].SlotFromS);
+    }
+}
+
 static VOID Test_ChainedInfo(VOID)
 {
     CONTEXT Ctx;
@@ -854,6 +950,7 @@ START_TEST(RtlVirtualUnwind)
     Test_TypicalProlog();
     Test_PartialProlog();
     Test_ContextPointers();
+    Test_FrameRegBeforeAlloc();
     Test_ChainedInfo();
     Test_SaveNonvolFar();
     Test_SaveXmm128Far();
