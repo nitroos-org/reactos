@@ -587,9 +587,68 @@ void Test_GetDIBits_BI_BITFIELDS()
 {
 }
 
+/* A BITMAPINFOHEADER of a bitmap that has no color table, placed where the readable memory ends,
+   is all GetDIBits may read (an allocation of exactly the header size is the usual way to ask) */
+static void
+Test_GetDIBits_HeaderAtEndOfMemory(void)
+{
+    static const UINT Bpps[] = { 16, 24, 32 };
+    BITMAPINFO bmi = {{ sizeof(BITMAPINFOHEADER) }};
+    BYTE Bits[4 * 4 * 4];
+    HDC hdc = CreateCompatibleDC(NULL);
+    BYTE *pbPage = VirtualAlloc(NULL, 2 * 4096, MEM_RESERVE, PAGE_NOACCESS);
+    UINT i;
+
+    ok(hdc != NULL, "CreateCompatibleDC failed\n");
+    ok(pbPage != NULL, "VirtualAlloc failed\n");
+    if (!hdc || !pbPage ||
+        !VirtualAlloc(pbPage, 4096, MEM_COMMIT, PAGE_READWRITE))
+    {
+        if (pbPage)
+            VirtualFree(pbPage, 0, MEM_RELEASE);
+        if (hdc)
+            DeleteDC(hdc);
+        return;
+    }
+
+    for (i = 0; i < _countof(Bpps); i++)
+    {
+        BITMAPINFO *pbmi = (BITMAPINFO *)(pbPage + 4096 - sizeof(BITMAPINFOHEADER));
+        HBITMAP hbmp;
+        void *pvBits;
+        INT ret;
+
+        bmi.bmiHeader.biWidth = 4;
+        bmi.bmiHeader.biHeight = 4;
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = Bpps[i];
+        bmi.bmiHeader.biCompression = BI_RGB;
+        hbmp = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &pvBits, NULL, 0);
+        ok(hbmp != NULL, "CreateDIBSection(%u bpp) failed\n", Bpps[i]);
+        if (!hbmp)
+            continue;
+
+        ZeroMemory(pbmi, sizeof(BITMAPINFOHEADER));
+        pbmi->bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        pbmi->bmiHeader.biWidth = 4;
+        pbmi->bmiHeader.biHeight = 4;
+        pbmi->bmiHeader.biPlanes = 1;
+        pbmi->bmiHeader.biBitCount = Bpps[i];
+        pbmi->bmiHeader.biCompression = BI_RGB;
+        SetLastError(0xdeadbeef);
+        ret = GetDIBits(hdc, hbmp, 0, 4, Bits, pbmi, DIB_RGB_COLORS);
+        ok(ret == 4, "GetDIBits(%u bpp) returned %d, error %lu\n", Bpps[i], ret, GetLastError());
+        DeleteObject(hbmp);
+    }
+
+    VirtualFree(pbPage, 0, MEM_RELEASE);
+    DeleteDC(hdc);
+}
+
 START_TEST(GetDIBits)
 {
     Test_GetDIBits_BoundedCopy();
+    Test_GetDIBits_HeaderAtEndOfMemory();
     ok(GdiToolsInit(), "GdiToolsInit failed\n");
 
     Test_GetDIBits_xBpp(1);
