@@ -20,6 +20,16 @@ set_module_type(smbtool win32cui UNICODE)
 add_importlibs(smbtool bcrypt advapi32 msvcrt kernel32 ntdll)
 add_rostests_file(TARGET smbtool)
 
+add_executable(smbfuzz smbfuzz.c)
+set_module_type(smbfuzz win32cui UNICODE)
+add_importlibs(smbfuzz advapi32 msvcrt kernel32 ntdll)
+add_rostests_file(TARGET smbfuzz)
+
+add_executable(smbattack smbattack.c)
+set_module_type(smbattack win32cui UNICODE)
+add_importlibs(smbattack advapi32 msvcrt kernel32 ntdll)
+add_rostests_file(TARGET smbattack)
+
 add_executable(smbmap smbmap.c)
 set_module_type(smbmap win32cui UNICODE)
 add_importlibs(smbmap advapi32 msvcrt kernel32 ntdll)
