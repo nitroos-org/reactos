@@ -113,6 +113,11 @@ typedef struct _DATAGRAM_SEND_REQUEST {
 #define ADDR_SHARE_REUSE      1
 #define ADDR_SHARE_EXCLUSIVE  2
 
+/* The options of ADDRESS_FILE.TcpOptSet */
+#define TCP_OPT_NODELAY        0x01
+#define TCP_OPT_KEEPALIVE      0x02
+#define TCP_OPT_KEEPALIVEVALS  0x04
+
 /* Transport address file context structure. The FileObject->FsContext2
    field holds a pointer to this structure */
 typedef struct _ADDRESS_FILE {
@@ -164,6 +169,15 @@ typedef struct _ADDRESS_FILE {
     PVOID FwImage;                        /* Creator image path for the inbound filter (nitrofw.c), lazy */
     BOOLEAN FwImageTried;                 /* Image resolution already attempted (nitrofw.c) */
     BOOLEAN ExplicitPort;                 /* The client asked for this port (not an ephemeral one): UDP listeners for the block prompt */
+    /* The TCP options the socket set (INFO_TYPE_CONNECTION: TCP_NODELAY, SO_KEEPALIVE, SIO_KEEPALIVE_VALS). They
+       are kept here, because the connection they are for may not exist yet (set before connect or listen), and given
+       to every connection endpoint associated with the address file and to every connection a listener accepts
+       (cinfo.c: TcpOptionsApply) */
+    UCHAR TcpOptSet;                      /* TCP_OPT_xxx: which of the below were set */
+    BOOLEAN TcpNoDelay;
+    BOOLEAN TcpKeepAlive;
+    ULONG TcpKeepAliveTime;               /* The values of SIO_KEEPALIVE_VALS, as lwIP takes them */
+    ULONG TcpKeepAliveInterval;
     /* An IPv6 UDP socket (ip/transport/udp/udp6.c): the multicast hop limit, loop and interface (IPV6_MULTICAST_*)
        and the groups it joined (allocated with the first one, under the object lock); TTL is its unicast hop limit */
     UCHAR McastHops;

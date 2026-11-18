@@ -149,6 +149,7 @@ void        LibTCPAccept(PTCP_PCB pcb, struct tcp_pcb *listen_pcb, void *arg);
 VOID        TCP6CountActiveOpen(VOID);
 VOID        TCP6CountPassiveOpen(VOID);
 void        LibTCPSetNoDelay(PTCP_PCB pcb, BOOLEAN Set);
+void        LibTCPApplyOptions(PTCP_PCB pcb, UCHAR Set, BOOLEAN NoDelay, BOOLEAN KeepAlive, u32_t KeepAliveTime, u32_t KeepAliveInterval);
 void        LibTCPSetKeepAlive(PTCP_PCB pcb, BOOLEAN Set);
 void        LibTcpSetKeepAliveValues(PTCP_PCB pcb, u32_t KeepAliveTime, u32_t KeepAliveInterval);
 void        LibTCPGetSocketStatus(PTCP_PCB pcb, PULONG State);

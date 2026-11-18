@@ -2252,6 +2252,29 @@ LibTCPSetNoDelay(
         pcb->flags &= ~TF_NODELAY;
 }
 
+/* Gives a connection the TCP options its socket set before the connection existed (TCP_OPT_xxx in Set; see
+   ADDRESS_FILE). A listening PCB is left alone: it has no such fields, and what it accepts is given the options
+   when it is accepted. */
+void
+LibTCPApplyOptions(
+    PTCP_PCB pcb,
+    UCHAR Set,
+    BOOLEAN NoDelay,
+    BOOLEAN KeepAlive,
+    u32_t KeepAliveTime,
+    u32_t KeepAliveInterval)
+{
+    if (!pcb || pcb->state == LISTEN)
+        return;
+
+    if (Set & TCP_OPT_NODELAY)
+        LibTCPSetNoDelay(pcb, NoDelay);
+    if (Set & TCP_OPT_KEEPALIVE)
+        LibTCPSetKeepAlive(pcb, KeepAlive);
+    if (Set & TCP_OPT_KEEPALIVEVALS)
+        LibTcpSetKeepAliveValues(pcb, KeepAliveTime, KeepAliveInterval);
+}
+
 void
 LibTCPSetKeepAlive(
     PTCP_PCB pcb,

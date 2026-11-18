@@ -46,6 +46,7 @@ extern void func_routinectx(void);
 extern void func_notconn(void);
 extern void func_tcpnodelay(void);
 extern void func_tcpchurn(void);
+extern void func_tcpnodelaysend(void);
 extern void func_inheritedsocket(void);
 extern void func_inheritedsocketchild(void);
 extern void func_iocpskip(void);
@@ -154,6 +155,7 @@ const struct test winetest_testlist[] =
     { "asyncselect", func_asyncselect },
     { "tcpnodelay", func_tcpnodelay },
     { "tcpchurn", func_tcpchurn },
+    { "tcpnodelaysend", func_tcpnodelaysend },
     { "inheritedsocket", func_inheritedsocket },
     { "inheritedsocketchild", func_inheritedsocketchild },
     { "iocpskip", func_iocpskip },

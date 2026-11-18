@@ -4184,6 +4184,15 @@ WSPSetSockOpt(
 
            case SO_UPDATE_CONNECT_CONTEXT:
            case SO_UPDATE_ACCEPT_CONTEXT:
+              /* The connection AcceptEx made has the TCP_NODELAY of the listener (the stack gave it to the
+               * connection, see tcpip): what getsockopt answers has to follow (VERIFY ON ORACLE) */
+              if (optval && optlen >= (int)sizeof(SOCKET))
+              {
+                  PSOCKET_INFORMATION ListenSocket = GetSocketStructure(*(SOCKET *)optval);
+
+                  if (ListenSocket && ListenSocket->SharedData->Listening)
+                      Socket->SharedData->TcpNoDelay = ListenSocket->SharedData->TcpNoDelay;
+              }
               return MsafdUpdateConnectionContext(s, lpErrno);
 
            case SO_ERROR:

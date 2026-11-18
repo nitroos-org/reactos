@@ -962,7 +962,7 @@ TDI_STATUS InfoTdiSetInformationEx
                     if (AddrStatus != TDI_SUCCESS)
                         return AddrStatus;
 
-                    AddrStatus = SetConnectionInfo(ID, AddressFile->Connection, Buffer, BufferSize);
+                    AddrStatus = SetConnectionInfo(ID, AddressFile, Buffer, BufferSize);
                     DereferenceObject(AddressFile);
                     return AddrStatus;
                 }

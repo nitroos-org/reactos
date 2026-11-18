@@ -478,6 +478,30 @@ TCPAcceptEventHandler(void *arg, PTCP_PCB newpcb)
             /* free previously created socket context (we don't use it, we use newpcb) */
             Bucket->AssociatedEndpoint->SocketContext = newpcb;
 
+            /* The accepted connection has the TCP options of the listening socket (TCP_NODELAY, SO_KEEPALIVE:
+               set before listen, they live in its address file), as on Windows. We run in the lwIP thread:
+               the PCB is ours to change. */
+            if (Connection->AddressFile && Connection->AddressFile->TcpOptSet)
+            {
+                PADDRESS_FILE ListenAddr = Connection->AddressFile;
+                PADDRESS_FILE AcceptAddr = Bucket->AssociatedEndpoint->AddressFile;
+
+                LibTCPApplyOptions(newpcb,
+                                   ListenAddr->TcpOptSet,
+                                   ListenAddr->TcpNoDelay,
+                                   ListenAddr->TcpKeepAlive,
+                                   ListenAddr->TcpKeepAliveTime,
+                                   ListenAddr->TcpKeepAliveInterval);
+                if (AcceptAddr && AcceptAddr != ListenAddr)
+                {
+                    AcceptAddr->TcpNoDelay = ListenAddr->TcpNoDelay;
+                    AcceptAddr->TcpKeepAlive = ListenAddr->TcpKeepAlive;
+                    AcceptAddr->TcpKeepAliveTime = ListenAddr->TcpKeepAliveTime;
+                    AcceptAddr->TcpKeepAliveInterval = ListenAddr->TcpKeepAliveInterval;
+                    AcceptAddr->TcpOptSet = ListenAddr->TcpOptSet;
+                }
+            }
+
             /* The connection is filed under the listener binding, which has no concrete
                address for a wildcard listener: the local address is the one the SYN was
                sent to (a loopback alias, or one of several addresses of an interface) */

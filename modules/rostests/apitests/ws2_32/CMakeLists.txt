@@ -42,6 +42,7 @@ list(APPEND SOURCE
     notconn.c
     tcpnodelay.c
     tcpchurn.c
+    tcpnodelaysend.c
     inheritedsocket.c
     helpers.c
     iocpskip.c

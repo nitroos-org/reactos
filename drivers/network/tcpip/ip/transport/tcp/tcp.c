@@ -1070,6 +1070,31 @@ TCPSetNoDelay(
     return STATUS_SUCCESS;
 }
 
+VOID
+TCPApplyAddressFileOptions(
+    PADDRESS_FILE AddressFile,
+    PCONNECTION_ENDPOINT Connection)
+{
+    PTCP_PCB Pcb;
+
+    if (!AddressFile || !Connection || !AddressFile->TcpOptSet)
+        return;
+
+    /* The PCB is used under the core lock, with no connection lock held (see TCPSetNoDelay) */
+    LOCK_TCPIP_CORE();
+    Pcb = Connection->SocketContext;
+    if (Pcb != NULL)
+    {
+        LibTCPApplyOptions(Pcb,
+                           AddressFile->TcpOptSet,
+                           AddressFile->TcpNoDelay,
+                           AddressFile->TcpKeepAlive,
+                           AddressFile->TcpKeepAliveTime,
+                           AddressFile->TcpKeepAliveInterval);
+    }
+    UNLOCK_TCPIP_CORE();
+}
+
 NTSTATUS
 TCPSetReceiveWindow(
     PCONNECTION_ENDPOINT Connection,
