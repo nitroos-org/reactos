@@ -1269,6 +1269,7 @@ RxConstructSrvCall(
     PRDBSS_DEVICE_OBJECT RxDeviceObject;
     PMRX_SRVCALLDOWN_STRUCTURE Calldown;
     PMRX_SRVCALL_CALLBACK_CONTEXT CallbackContext;
+    BOOLEAN AsyncContext;
 
     PAGED_CODE();
 
@@ -1308,15 +1309,16 @@ RxConstructSrvCall(
 
     RxReferenceSrvCall(SrvCall);
 
-    /* If we're async, we'll post, otherwise, we'll have to wait for completion */
-    if (BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_ASYNC_OPERATION))
-    {
-        RxPrePostIrp(RxContext, RxContext->CurrentIrp);
-    }
-    else
-    {
-        KeInitializeEvent(&Calldown->FinishEvent, SynchronizationEvent, FALSE);
-    }
+    /* The construction is always waited for here, as for net roots
+     * (RxConstructNetRoot). The asynchronous variant finished the request
+     * from a worker while this thread was still unwinding through
+     * RxPrefixClaim/RxCommonCreate with the same RX_CONTEXT (a use after free
+     * once the worker completed the IRP, seen with special pool under
+     * stress). The callback decides between waking us and posting from the
+     * context's flag, so the flag is cleared for the duration. */
+    AsyncContext = BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_ASYNC_OPERATION);
+    ClearFlag(RxContext->Flags, RX_CONTEXT_FLAG_ASYNC_OPERATION);
+    KeInitializeEvent(&Calldown->FinishEvent, SynchronizationEvent, FALSE);
 
     Calldown->NumberToWait = 1;
     Calldown->NumberRemaining = 1;
@@ -1335,23 +1337,23 @@ RxConstructSrvCall(
     /* It has to return STATUS_PENDING! */
     ASSERT(Status == STATUS_PENDING);
 
-    /* No async, start completion */
-    if (!BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_ASYNC_OPERATION))
+    /* Wait for the mini-redirector, then finish (still synchronously: the
+     * finish must not complete the IRP) and notify the winner */
+    KeWaitForSingleObject(&Calldown->FinishEvent, Executive, KernelMode, FALSE, NULL);
+    Status = RxFinishSrvCallConstruction(Calldown);
+    if (AsyncContext)
     {
-        KeWaitForSingleObject(&Calldown->FinishEvent, Executive, KernelMode, FALSE, NULL);
-
-        /* Finish construction - we'll notify mini-rdr it's the winner */
-        Status = RxFinishSrvCallConstruction(Calldown);
-        if (!NT_SUCCESS(Status))
-        {
-            RxReleasePrefixTableLock(PrefixTable);
-            *LockHoldingState = LHS_LockNotHeld;
-        }
-        else
-        {
-            ASSERT(RxIsPrefixTableLockAcquired(PrefixTable));
-            *LockHoldingState = LHS_ExclusiveLockHeld;
-        }
+        SetFlag(RxContext->Flags, RX_CONTEXT_FLAG_ASYNC_OPERATION);
+    }
+    if (!NT_SUCCESS(Status))
+    {
+        RxReleasePrefixTableLock(PrefixTable);
+        *LockHoldingState = LHS_LockNotHeld;
+    }
+    else
+    {
+        ASSERT(RxIsPrefixTableLockAcquired(PrefixTable));
+        *LockHoldingState = LHS_ExclusiveLockHeld;
     }
 
     DPRINT("RxConstructSrvCall() = Status: %x\n", Status);
@@ -1385,6 +1387,12 @@ RxConstructVirtualNetRoot(
     Status = RxFindOrCreateConnections(RxContext, CanonicalName, NetRootType,
                                        &LocalNetRootName, &FilePathName,
                                        LockHoldingState, RxConnectionId);
+    /* Active, but the lookup kept no VNetRoot (its NetRoot isn't good) */
+    if (Status == STATUS_CONNECTION_ACTIVE && RxContext->Create.pVNetRoot == NULL)
+    {
+        Status = STATUS_BAD_NETWORK_PATH;
+    }
+
     /* Found and active */
     if (Status == STATUS_CONNECTION_ACTIVE)
     {
@@ -1396,8 +1404,10 @@ RxConstructVirtualNetRoot(
             RxReferenceVNetRoot(VNetRoot);
         }
 
-        /* Dereference previous VNetRoot */
-        RxDereferenceVNetRoot(RxContext->Create.pVNetRoot->pNetRoot, *LockHoldingState);
+        /* Dereference the VNetRoot the lookup referenced (this used to drop
+         * a reference of its NetRoot instead: the NetRoot was then freed
+         * under live VNetRoots when creates raced on a new connection) */
+        RxDereferenceVNetRoot(RxContext->Create.pVNetRoot, *LockHoldingState);
         /* Reset and start construct (new structures will replace old ones) */
         RxContext->Create.pSrvCall = NULL;
         RxContext->Create.pNetRoot = NULL;
@@ -3041,14 +3051,25 @@ RxFinalizeNetFobx(
 
     ThisFobx->pSrvOpen = NULL;
 
-    /* A FOBX less */
-    InterlockedDecrement((volatile long *)&SrvOpen->pVNetRoot->NumberOfFobxs);
-
-    RxDereferenceSrvOpen(SrvOpen, LHS_ExclusiveLockHeld);
-
-    /* If it wasn't allocated with another object, free the FOBX */
-    if (!BooleanFlagOn(ThisFobx->Flags, FOBX_FLAG_ENCLOSED_ALLOCATED))
+    /* A FOBX less (unless the SRV_OPEN already dropped its V_NET_ROOT, at
+     * its upper finalization) */
+    if (SrvOpen->pVNetRoot != NULL)
     {
+        InterlockedDecrement((volatile long *)&SrvOpen->pVNetRoot->NumberOfFobxs);
+    }
+
+    /* Decide before dropping our SRV_OPEN reference: a FOBX allocated with
+     * the SRV_OPEN (or the FCB) is freed with it, and must not be touched
+     * once the SRV_OPEN reference is gone. It was read after the
+     * dereference, which was a use after free as soon as an FCB had a
+     * second SRV_OPEN */
+    if (BooleanFlagOn(ThisFobx->Flags, FOBX_FLAG_ENCLOSED_ALLOCATED))
+    {
+        RxDereferenceSrvOpen(SrvOpen, LHS_ExclusiveLockHeld);
+    }
+    else
+    {
+        RxDereferenceSrvOpen(SrvOpen, LHS_ExclusiveLockHeld);
         RxFreeFcbObject(ThisFobx);
     }
 
@@ -3144,8 +3165,18 @@ RxFinalizeNetRoot(
         RxRemovePrefixTableEntry(PrefixTable, &ThisNetRoot->PrefixEntry);
     }
 
-    /* Delete the object */
+    /* Let the mini-redirector release what it attached (MRxFinalizeNetRoot) */
     SrvCall = (PSRV_CALL)ThisNetRoot->pSrvCall;
+    if (SrvCall != NULL && SrvCall->RxDeviceObject != NULL)
+    {
+        NTSTATUS Status;
+
+        MINIRDR_CALL_THROUGH(Status, SrvCall->RxDeviceObject->Dispatch,
+                             MRxFinalizeNetRoot, ((PMRX_NET_ROOT)ThisNetRoot, &ForceFinalize));
+        (void)Status;
+    }
+
+    /* Delete the object */
     RxFreeObject(ThisNetRoot);
 
     /* And dereference the associated SRV_CALL */
@@ -3459,8 +3490,11 @@ RxFindOrConstructVirtualNetRoot(
     ASSERT(RxDeviceObject->Dispatch != NULL);
     ASSERT(NodeType(RxDeviceObject->Dispatch) == RDBSS_NTC_MINIRDR_DISPATCH);
 
-    /* Ask the mini-rdr for connection ID */
-    ConnectionID.SessionID = 0;
+    /* Ask the mini-rdr for connection ID. Clear all of it: the prefix table
+     * compares the whole LUID, and setting the SessionID member alone left
+     * its high part to whatever was on the stack, so lookups missed live
+     * entries at random and created duplicate SRV_CALLs and NET_ROOTs */
+    RtlZeroMemory(&ConnectionID, sizeof(ConnectionID));
     if (RxDeviceObject->Dispatch->MRxGetConnectionId != NULL)
     {
         Status = RxDeviceObject->Dispatch->MRxGetConnectionId(RxContext, &ConnectionID);
@@ -4892,6 +4926,7 @@ RxInitializePrefixTable(
     ThisTable->IsNetNameTable = FALSE;
     ThisTable->CaseInsensitiveMatch = CaseInsensitiveMatch;
     ThisTable->TableSize = TableSize;
+    ExInitializeResourceLite(&ThisTable->TableLock);
 
     if (TableSize > 0)
     {
@@ -5230,11 +5265,8 @@ RxIsThisACscAgentOpen(
 
     CscAgent = FALSE;
 
-    /* Client Side Caching is DFS stuff - we don't support it */
-    if (RxContext->Create.EaLength != 0)
-    {
-        UNIMPLEMENTED;
-    }
+    /* Client-side caching agents (marked through the DFS name context) are
+     * not supported; an EA buffer does not make an open a CSC agent one */
 
     if (RxContext->Create.NtCreateParameters.DfsNameContext != NULL &&
         ((PDFS_NAME_CONTEXT)RxContext->Create.NtCreateParameters.DfsNameContext)->NameContextType == 0xAAAAAAAA)
@@ -5794,8 +5826,8 @@ RxNoOpAcquire(
     IN PVOID Fcb,
     IN BOOLEAN Wait)
 {
-    UNIMPLEMENTED;
-    return FALSE;
+    /* Cache callbacks for streams that need no locking */
+    return TRUE;
 }
 
 VOID
@@ -5803,7 +5835,6 @@ NTAPI
 RxNoOpRelease(
     IN PVOID Fcb)
 {
-    UNIMPLEMENTED;
 }
 
 VOID
@@ -6367,6 +6398,7 @@ RxPostOneShotTimerRequest(
     IN LARGE_INTEGER TimeInterval)
 {
     KIRQL OldIrql;
+    BOOLEAN WasEmpty;
 
     ASSERT(pWorkItem != NULL);
 
@@ -6379,15 +6411,18 @@ RxPostOneShotTimerRequest(
      */
     KeAcquireSpinLock(&RxTimerLock, &OldIrql);
     pWorkItem->LastTick = (TimeInterval.QuadPart / 550000) + RxTimerTickCount + 1;
+    /* The timer runs while the queue is not empty: start it for the first
+     * entry. (The emptiness used to be tested after the insertion, so the
+     * timer never started and nothing posted here, the scavenger included,
+     * ever ran.) */
+    WasEmpty = IsListEmpty(&RxTimerQueueHead);
     /* Insert in work queue */
     InsertTailList(&RxTimerQueueHead, &pWorkItem->WorkQueueItem.List);
-    KeReleaseSpinLock(&RxTimerLock, OldIrql);
-
-    /* If there are queued events, queue an execution */
-    if (IsListEmpty(&RxTimerQueueHead))
+    if (WasEmpty)
     {
         KeSetTimer(&RxTimer, RxTimerInterval, &RxTimerDpc);
     }
+    KeReleaseSpinLock(&RxTimerLock, OldIrql);
 
     return STATUS_SUCCESS;
 }
@@ -7066,6 +7101,7 @@ RxPurgeFobx(
     if (Status != STATUS_SUCCESS)
     {
         DPRINT1("Purge failed for %p (%p)\n", FcbToBePurged, pFobx);
+        RxReleaseFcb(NULL, FcbToBePurged);
         return FALSE;
     }
 
@@ -7073,8 +7109,13 @@ RxPurgeFobx(
     if (!MmFlushImageSection(&FcbToBePurged->NonPaged->SectionObjectPointers, MmFlushForWrite))
     {
         DPRINT1("Image section flush failed for %p (%p)\n", FcbToBePurged, pFobx);
+        RxReleaseFcb(NULL, FcbToBePurged);
         return FALSE;
     }
+
+    /* The FCB was taken for the purge only (it used to stay acquired, so
+     * every purge of a dormant FOBX left its FCB locked for good) */
+    RxReleaseFcb(NULL, FcbToBePurged);
 
     DPRINT("Purge OK for %p (%p)\n", FcbToBePurged, pFobx);
     return TRUE;
@@ -7153,7 +7194,10 @@ RxPurgeRelatedFobxs(
     /* If there's already a purge in progress */
     if (PurgeSyncCtx->PurgeInProgress)
     {
-        /* Add our RX_CONTEXT to the current run */
+        /* Add our RX_CONTEXT to the current run. The context's event may
+         * still be signalled from an earlier use: a stale signal would let
+         * us run (and be freed) while still queued, so clear it first */
+        KeClearEvent(&RxContext->SyncEvent);
         InsertTailList(&PurgeSyncCtx->ContextsAwaitingPurgeCompletion,
                        &RxContext->RxContextSerializationQLinks);
 
@@ -7212,8 +7256,11 @@ RxPurgeRelatedFobxs(
             }
         }
 
-        /* Matching, we'll purge it */
+        /* Matching, we'll purge it. Leave the entry self-linked: the close
+         * of the FOBX (RxMarkFobxOnClose) unlinks it again if it looks
+         * linked, which on stale links corrupts the list */
         RemoveEntryList(&Fobx->ClosePendingList);
+        InitializeListHead(&Fobx->ClosePendingList);
 
         /* Reference it so that it doesn't disappear */
         RxReferenceNetFobx(Fobx);
@@ -7252,6 +7299,11 @@ RxPurgeRelatedFobxs(
         }
 
         RxAcquireScavengerMutex();
+
+        /* The list may have changed while the mutex was released (the next
+         * FOBX closed and freed, for one): start over. Purged FOBXs left the
+         * list, so this ends */
+        Entry = Scavenger->ClosePendingFobxsList.Flink;
     }
 
     /* If no contexts left, purge is not running */
@@ -8059,22 +8111,25 @@ RxSpinUpRequestsDispatcher(
                                        KernelMode, FALSE, &RxSpinUpDispatcherWaitInterval);
         ASSERT((Status == STATUS_SUCCESS) || (Status == STATUS_TIMEOUT));
 
-        KeAcquireSpinLock(&RxDispatcher->SpinUpRequestsLock, &OldIrql);
-        if (!IsListEmpty(&RxDispatcher->SpinUpRequests))
-        {
-            ListEntry = RemoveHeadList(&RxDispatcher->SpinUpRequests);
-        }
-        else
-        {
-            ListEntry = &RxDispatcher->SpinUpRequests;
-        }
-        KeClearEvent(&RxDispatcher->SpinUpRequestsEvent);
-        KeReleaseSpinLock(&RxDispatcher->SpinUpRequestsLock, OldIrql);
-
-        while (ListEntry != &RxDispatcher->SpinUpRequests)
+        /* Drain the requests. The event is cleared only while the list is
+         * seen empty under the lock, so a request queued meanwhile (inserted
+         * under the lock, event set afterwards) is never missed. (The loop
+         * used to call the first request's routine for ever: it never
+         * advanced, which went unnoticed while nothing queued requests.) */
+        for (;;)
         {
             PWORK_QUEUE_ITEM WorkItem;
             PRX_WORK_QUEUE WorkQueue;
+
+            KeAcquireSpinLock(&RxDispatcher->SpinUpRequestsLock, &OldIrql);
+            if (IsListEmpty(&RxDispatcher->SpinUpRequests))
+            {
+                KeClearEvent(&RxDispatcher->SpinUpRequestsEvent);
+                KeReleaseSpinLock(&RxDispatcher->SpinUpRequestsLock, OldIrql);
+                break;
+            }
+            ListEntry = RemoveHeadList(&RxDispatcher->SpinUpRequests);
+            KeReleaseSpinLock(&RxDispatcher->SpinUpRequestsLock, OldIrql);
 
             WorkItem = CONTAINING_RECORD(ListEntry, WORK_QUEUE_ITEM, List);
             WorkQueue = WorkItem->Parameter;
@@ -8087,6 +8142,9 @@ RxSpinUpRequestsDispatcher(
     } while (RxDispatcher->State == RxDispatcherActive);
 
     KeSetEvent(&RxDispatcher->SpinUpRequestsTearDownEvent, IO_NO_INCREMENT, FALSE);
+    /* Drop the reference taken at start; the system keeps the running
+     * thread alive and RxTearDownDispatcher holds its own */
+    ObDereferenceObject(PsGetCurrentThread());
     PsTerminateSystemThread(STATUS_SUCCESS);
 }
 
@@ -8278,14 +8336,18 @@ RxTableLookupName(
     Container = NULL;
     LookupString.Buffer = Name->Buffer;
     MaxChar = Name->Length / sizeof(WCHAR);
-    /* We'll perform the lookup, path component after another */
-    for (i = 1; i < MaxChar; ++i)
+    /* We'll perform the lookup, path component after another. The whole
+     * name is a candidate too: a share root ("\server\share", the trailing
+     * separator stripped by the create) must find its NET_ROOT, not just
+     * the SRV_CALL (it used to: every such open created another NET_ROOT
+     * of the same name) */
+    for (i = 1; i <= MaxChar; ++i)
     {
         ULONG Hash;
         PRX_PREFIX_ENTRY CurEntry;
 
         /* Don't cut in the middle of a path element */
-        if (Name->Buffer[i] != OBJ_NAME_PATH_SEPARATOR && Name->Buffer[i] != ':')
+        if (i < MaxChar && Name->Buffer[i] != OBJ_NAME_PATH_SEPARATOR && Name->Buffer[i] != ':')
         {
             continue;
         }

@@ -1621,8 +1621,11 @@ RxCloseAssociatedSrvOpen(
     {
         RxMarkFobxOnClose(Fobx);
     }
-    else
+    else if (Fcb->OpenCount != 0)
     {
+        /* Not for a rename target directory: it never counted as an open,
+         * and an underflow here would keep the FCB (and its V_NET_ROOT)
+         * alive for ever */
         InterlockedDecrement((volatile long *)&Fcb->OpenCount);
     }
 
@@ -3308,6 +3311,10 @@ RxCommonRead(
             ExAcquireResourceSharedLite(Fcb->Header.PagingIoResource, TRUE);
             CcFlushCache(FileObject->SectionObjectPointer, &ByteOffset, ReadLength, &Irp->IoStatus);
             RxReleasePagingIoResource(RxContext, Fcb);
+
+            /* The FCB was only needed for the flush: the read takes it again
+             * below, in the mode it needs */
+            RxReleaseFcb(RxContext, Fcb);
 
             if (!NT_SUCCESS(Irp->IoStatus.Status))
             {
@@ -8321,7 +8328,10 @@ RxQueryNameInfo(
 
 #if 1 // CORE-13938, rfb: please note I replaced 0 with 1 here
     if (NodeType(Fcb) == RDBSS_NTC_STORAGE_TYPE_DIRECTORY &&
-        RxContext->Info.LengthRemaining >= sizeof(WCHAR))
+        RxContext->Info.LengthRemaining >= sizeof(WCHAR) &&
+        /* The share root already ends with one */
+        (NameInfo->FileNameLength == 0 ||
+         NameInfo->FileName[NameInfo->FileNameLength / sizeof(WCHAR) - 1] != L'\\'))
     {
         NameInfo->FileName[NameInfo->FileNameLength / sizeof(WCHAR)] = L'\\';
         NameInfo->FileNameLength += sizeof(WCHAR);
@@ -8402,7 +8412,8 @@ RxQueryStandardInfo(
     }
     else
     {
-        RxContext->IoStatusBlock.Information -= sizeof(FILE_STANDARD_INFORMATION);
+        /* Filled from the FCB: account for it like the mini-redirector would */
+        RxContext->Info.LengthRemaining -= sizeof(FILE_STANDARD_INFORMATION);
     }
 
     return Status;
