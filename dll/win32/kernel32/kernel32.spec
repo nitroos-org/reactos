@@ -1079,6 +1079,8 @@
 @ stub -version=0x600+ QueryProcessAffinityUpdateMode
 @ stdcall -version=0x600+ QueryProcessCycleTime(ptr ptr)
 @ stdcall -version=0x600+ QueryThreadCycleTime(ptr ptr)
+@ stdcall -version=0x601+ QueryInterruptTime(ptr)
+@ stdcall -version=0x601+ QueryInterruptTimePrecise(ptr)
 @ stdcall -version=0x601+ QueryUnbiasedInterruptTime(ptr)
 @ stdcall -version=0x601+ QueryUnbiasedInterruptTimePrecise(ptr)
 @ stdcall QueueUserAPC(ptr long long)

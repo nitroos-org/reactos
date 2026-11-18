@@ -88,6 +88,101 @@ test_Precise(
     ok(Time1 > 900, "Precise time is on clock tick boundaries (%I64u of 1000 off the tick)\n", Time1);
 }
 
+typedef VOID (WINAPI *FN_QueryInterruptTime)(PULONGLONG);
+
+/*
+ * QueryInterruptTime and QueryInterruptTimePrecise (the biased interrupt time) must resolve through
+ * api-ms-win-core-realtime-l1-1-1, which is kernel32 here: Chrome 158 delay-loads QueryInterruptTimePrecise
+ * through the api set, and a failed lookup ends the browser process in its delay-load failure handler.
+ */
+static
+VOID
+test_InterruptTime(
+    _In_ HMODULE hKernel32,
+    _In_ FN_QueryUnbiasedInterruptTime pQueryUnbiasedInterruptTime)
+{
+    FN_QueryInterruptTime pInterrupt, pInterruptPrecise, pApiInterrupt, pApiPrecise;
+    HMODULE hHost = hKernel32, hApi;
+    ULONGLONG Unbiased1, Unbiased2, Time1, Time2, Prev;
+    int i;
+
+    if (!is_reactos())
+    {
+        /* Windows exports them from kernelbase.dll */
+        hHost = LoadLibraryW(L"kernelbase.dll");
+        if (!hHost)
+        {
+            skip("kernelbase.dll does not load\n");
+            return;
+        }
+    }
+    pInterrupt = (FN_QueryInterruptTime)GetProcAddress(hHost, "QueryInterruptTime");
+    pInterruptPrecise = (FN_QueryInterruptTime)GetProcAddress(hHost, "QueryInterruptTimePrecise");
+    if (!pInterrupt && !pInterruptPrecise && is_reactos() && !GetProcAddress(hKernel32, "K32EnumProcesses"))
+    {
+        skip("No NT 6.1 exports\n");
+        return;
+    }
+    ok(pInterrupt != NULL, "QueryInterruptTime is not exported\n");
+    ok(pInterruptPrecise != NULL, "QueryInterruptTimePrecise is not exported\n");
+    if (!pInterrupt || !pInterruptPrecise)
+        return;
+
+    /* The lookups the delay-load helper makes: the api set module, then the function by name */
+    hApi = LoadLibraryW(L"api-ms-win-core-realtime-l1-1-1.dll");
+    if (hApi)
+    {
+        pApiInterrupt = (FN_QueryInterruptTime)GetProcAddress(hApi, "QueryInterruptTime");
+        pApiPrecise = (FN_QueryInterruptTime)GetProcAddress(hApi, "QueryInterruptTimePrecise");
+        ok(pApiInterrupt != NULL, "The api set has no QueryInterruptTime, error %lu\n", GetLastError());
+        ok(pApiPrecise != NULL, "The api set has no QueryInterruptTimePrecise, error %lu\n", GetLastError());
+        if (is_reactos())
+        {
+            ok(pApiInterrupt == pInterrupt, "The api set does not resolve to the kernel32 QueryInterruptTime\n");
+            ok(pApiPrecise == pInterruptPrecise, "The api set does not resolve to the kernel32 QueryInterruptTimePrecise\n");
+        }
+    }
+    else
+    {
+        ok(0, "api-ms-win-core-realtime-l1-1-1.dll does not load, error %lu\n", GetLastError());
+    }
+
+    /* The interrupt time includes sleep, so it is never behind the unbiased time (it is the same while the bias is 0) */
+    pQueryUnbiasedInterruptTime(&Unbiased1);
+    pInterrupt(&Time1);
+    pQueryUnbiasedInterruptTime(&Unbiased2);
+    ok(Time1 + 400000 >= Unbiased1, "Interrupt time %I64u is behind the unbiased time %I64u\n", Time1, Unbiased1);
+    ok(Time1 <= Unbiased2 + 400000, "Interrupt time %I64u is ahead of the unbiased time %I64u\n", Time1, Unbiased2);
+
+    Time1 = 0;
+    pInterrupt(&Time1);
+    ok(Time1 != 0, "QueryInterruptTime gave 0\n");
+    Sleep(100);
+    pInterrupt(&Time2);
+    ok(Time2 >= Time1 + 80 * 10000, "QueryInterruptTime advanced by only %I64u\n", Time2 - Time1);
+
+    /* The precise time agrees with the coarse one to within a clock tick or two, and never goes backwards */
+    pInterrupt(&Time1);
+    pInterruptPrecise(&Time2);
+    ok(Time2 + 400000 >= Time1, "Precise %I64u is behind the interrupt time %I64u\n", Time2, Time1);
+    pInterrupt(&Time1);
+    ok(Time2 <= Time1 + 400000, "Precise %I64u is ahead of the interrupt time %I64u\n", Time2, Time1);
+
+    Sleep(100);
+    pInterruptPrecise(&Time1);
+    ok(Time1 >= Time2 + 80 * 10000, "Precise time advanced by only %I64u\n", Time1 - Time2);
+
+    Prev = Time1;
+    for (i = 0; i < 100000; i++)
+    {
+        pInterruptPrecise(&Time2);
+        if (Time2 < Prev)
+            break;
+        Prev = Time2;
+    }
+    ok(i == 100000, "Precise time went backwards at %d: %I64u -> %I64u\n", i, Prev, Time2);
+}
+
 START_TEST(QueryUnbiasedInterruptTime)
 {
     HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
@@ -143,4 +238,5 @@ START_TEST(QueryUnbiasedInterruptTime)
     ok(i == 100000, "Time went backwards at %d: %I64u -> %I64u\n", i, Time1, Time2);
 
     test_Precise(hKernel32, pQueryUnbiasedInterruptTime);
+    test_InterruptTime(hKernel32, pQueryUnbiasedInterruptTime);
 }

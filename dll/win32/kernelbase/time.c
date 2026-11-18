@@ -50,7 +50,7 @@ QueryInterruptTime(
 /*
  * The precise interrupt time lives in kernel32 (QueryUnbiasedInterruptTimePrecise): programs reach it through
  * api-ms-win-core-realtime-l1-1-1, which resolves to kernel32 here, and a sandboxed process must not have to load
- * another DLL to resolve it. Both precise functions are forwarded there (kernelbase_ros.spec); it returns the unbiased
- * time (the interrupt time minus the sleep bias). QueryInterruptTimePrecise is forwarded there too, so it differs from
- * Windows by the bias, which the kernel keeps at zero; QueryInterruptTime above reads the biased time as Windows does.
+ * another DLL to resolve it. Both precise functions are forwarded there (kernelbase_ros.spec): kernel32 has
+ * QueryUnbiasedInterruptTimePrecise (the interrupt time minus the sleep bias) and QueryInterruptTimePrecise (the
+ * interrupt time, bias included, as Windows). kernel32 exports QueryInterruptTime too, for the same api set.
  */
