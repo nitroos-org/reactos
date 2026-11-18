@@ -90,14 +90,6 @@ SmbReserveBytesFor(ULONG Bytes, PIRP Irp)
     }
 }
 
-/* Not cancellable */
-static inline
-NTSTATUS
-SmbReserveBytes(ULONG Bytes)
-{
-    return SmbReserveBytesFor(Bytes, NULL);
-}
-
 static
 VOID
 SmbUnreserveBytes(ULONG Bytes)
@@ -125,7 +117,7 @@ SmbReserveReplyBytes(PSMB_REQUEST Request, ULONG Bytes)
 
     if (Request->Notification || Bytes == 0)
         return STATUS_SUCCESS;
-    Status = SmbReserveBytes(Bytes);
+    Status = SmbReserveBytesFor(Bytes, Request->Irp);
     if (NT_SUCCESS(Status))
         Request->ReservedBytes += Bytes;
     return Status;
