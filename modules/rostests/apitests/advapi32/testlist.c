@@ -94,6 +94,7 @@ extern void func_RegSecurityAccess(void);
 extern void func_RegSecurityMapping(void);
 extern void func_RegSecurityRoundTrip(void);
 extern void func_RegSecurityCreate(void);
+extern void func_RegSecurityEnforce(void);
 extern void func_RegSecurityQuerySet(void);
 extern void func_RegSharedKeyName(void);
 extern void func_RestrictedSidsCopy(void);
@@ -249,6 +250,7 @@ const struct test winetest_testlist[] =
     { "RegSecurityMapping", func_RegSecurityMapping },
     { "RegSecurityRoundTrip", func_RegSecurityRoundTrip },
     { "RegSecurityCreate", func_RegSecurityCreate },
+    { "RegSecurityEnforce", func_RegSecurityEnforce },
     { "RegSecurityQuerySet", func_RegSecurityQuerySet },
     { "RegSharedKeyName", func_RegSharedKeyName },
     { "RestrictedSidsCopy", func_RestrictedSidsCopy },

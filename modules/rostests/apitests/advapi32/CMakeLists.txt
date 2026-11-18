@@ -81,6 +81,7 @@ list(APPEND SOURCE
     RegHiveRootStamp.c
     RegSdTemplates.c
     RegSecurity.c
+    RegSecurityEnforce.c
     RegSecurityQuerySet.c
     RegSharedKeyName.c
     RegGetValue.c

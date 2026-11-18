@@ -33,10 +33,32 @@
 #define KEY_WIN10_X 0x20039 /* generic execute as Windows 10 maps it */
 #define KEY_A   0xF003F     /* KEY_ALL_ACCESS */
 
-/* CHK(gap, cond, fmt, ...): gap != 0 marks an assertion that fails on reactos today
- * (kernel does not store / enforce key security descriptors). Keyed on is_reactos() and not on
- * WINETEST_PLATFORM, so a plain run of the exe needs no environment. */
-#define CHK(gap, cond, ...) do { todo_if((gap) && is_reactos()) ok(cond, __VA_ARGS__); } while (0)
+/* Does the kernel enforce key descriptors (registry ACL mode 2)? */
+static BOOL RegAclEnforced(void)
+{
+    static int Enforced = -1;
+    HKEY Key;
+    DWORD Mode = 0, Size = sizeof(Mode), Type;
+
+    if (Enforced < 0)
+    {
+        Enforced = 0;
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\RegAcl\\AuditStats",
+                          0, KEY_QUERY_VALUE, &Key) == ERROR_SUCCESS)
+        {
+            if (RegQueryValueExW(Key, L"Mode", NULL, &Type, (LPBYTE)&Mode, &Size) == ERROR_SUCCESS &&
+                Type == REG_DWORD && Mode == 2)
+                Enforced = 1;
+            RegCloseKey(Key);
+        }
+    }
+    return Enforced;
+}
+
+/* CHK(gap, cond, fmt, ...): gap != 0 marks an assertion that fails on reactos unless the kernel
+ * enforces key security descriptors (registry ACL mode 2; audit mode, the default, does not).
+ * Keyed on is_reactos() and not on WINETEST_PLATFORM, so a plain run of the exe needs no environment. */
+#define CHK(gap, cond, ...) do { todo_if((gap) && is_reactos() && !RegAclEnforced()) ok(cond, __VA_ARGS__); } while (0)
 
 /* ---------------------------------------------------------------------- tokens */
 
@@ -444,6 +466,12 @@ static void CheckSecret(const char *Label, PCWSTR Path)
     if (Error == ERROR_FILE_NOT_FOUND)
     {
         skip("%s does not exist\n", Label);
+        goto Done;
+    }
+    if (Error == ERROR_ACCESS_DENIED && !IsAdminNow() && (!is_reactos() || RegAclEnforced()))
+    {
+        /* a standard user may not even read the descriptor (Windows 10, measured) */
+        skip("%s: READ_CONTROL denied to a standard user\n", Label);
         goto Done;
     }
     ok_long(Error, ERROR_SUCCESS);
