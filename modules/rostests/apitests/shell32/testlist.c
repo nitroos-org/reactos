@@ -68,6 +68,7 @@ extern void func_ShellExecuteRunAs(void);
 extern void func_ShellExecuteLinkDir(void);
 extern void func_ShellExecuteW(void);
 extern void func_ShellFolder(void);
+extern void func_ShellAboutVersion(void);
 extern void func_ShellHook(void);
 extern void func_ShellState(void);
 extern void func_SHGetAttributesFromDataObject(void);
@@ -159,6 +160,7 @@ const struct test winetest_testlist[] =
     //{ "ShellExecuteW", func_ShellExecuteW }, Broke on Windows
     { "ShellExecuteLinkDir", func_ShellExecuteLinkDir },
     { "ShellFolder", func_ShellFolder },
+    { "ShellAboutVersion", func_ShellAboutVersion },
     { "ShellHook", func_ShellHook },
     { "ShellState", func_ShellState },
     { "SHGetAttributesFromDataObject", func_SHGetAttributesFromDataObject },

@@ -74,6 +74,7 @@ list(APPEND SOURCE
     ShellExecuteLinkDir.cpp
     ShellExecuteRunAs.cpp
     #ShellExecuteW.cpp # Broke on Windows
+    ShellAboutVersion.cpp
     ShellFolder.cpp
     ShellHook.cpp
     ShellInfo.cpp
