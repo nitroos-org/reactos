@@ -149,6 +149,8 @@ static BOOL msg_reserve(MsgBuf *m, ULONG more)
 /* appends payload and fills the security buffer field at `at` */
 static BOOL msg_add_field(MsgBuf *m, ULONG at, const void *data, ULONG len)
 {
+    /* the field's length is 16 bits: never send one that says less than follows */
+    if (len > 0xffff) return FALSE;
     if (!msg_reserve(m, len)) return FALSE;
     put16(m->data + at, len);
     put16(m->data + at + 2, len);
@@ -784,6 +786,9 @@ static BOOL build_client_target_info(const BYTE *info, ULONG info_len, const WCH
     else memset(buf + len + 4, 0, 16);
     len += 4 + 16;
 
+    /* the NT response (16-byte proof, 28-byte blob header, these pairs, EOL, 4 zero bytes) has a 16-bit
+     * length in the AUTHENTICATE message: a target name that does not fit any more is left out */
+    if (target_len && 16 + 28 + len + 4 + target_len + 4 + 4 > 0xffff) target_len = 0;
     if (target_len)
     {
         put16(buf + len, MSV_AV_TARGET_NAME);
