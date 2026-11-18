@@ -3462,8 +3462,24 @@ RxCommonQueryInformation(
             Status = STATUS_INSUFFICIENT_RESOURCES;
             _SEH2_LEAVE;
         }
-        /* Zero it */
-        RtlZeroMemory(Buffer, Context->Info.Length);
+        /* Zero it. For FileAllInformation, the I/O manager filled the access,
+         * mode and alignment parts before calling us: keep them */
+        if (FileInfoClass == FileAllInformation && Context->Info.Length >= (LONG)sizeof(FILE_ALL_INFORMATION))
+        {
+            PFILE_ALL_INFORMATION AllInfo = Buffer;
+            FILE_ACCESS_INFORMATION Access = AllInfo->AccessInformation;
+            FILE_MODE_INFORMATION Mode = AllInfo->ModeInformation;
+            FILE_ALIGNMENT_INFORMATION Alignment = AllInfo->AlignmentInformation;
+
+            RtlZeroMemory(Buffer, Context->Info.Length);
+            AllInfo->AccessInformation = Access;
+            AllInfo->ModeInformation = Mode;
+            AllInfo->AlignmentInformation = Alignment;
+        }
+        else
+        {
+            RtlZeroMemory(Buffer, Context->Info.Length);
+        }
 
         /* Validate file type */
         if (NodeType(Fcb) != RDBSS_NTC_STORAGE_TYPE_UNKNOWN)
@@ -3538,47 +3554,41 @@ RxCommonQueryInformation(
                 break;
 
             case FileAllInformation:
-                SET_SIZE_AND_QUERY(0, RxQueryBasicInfo);
+                /* Each part at its place in FILE_ALL_INFORMATION; the access,
+                 * mode and alignment parts are the I/O manager's (they used
+                 * to be skipped as if they were not there, so the position
+                 * landed on the access part and the name 12 bytes early) */
+                SET_SIZE_AND_QUERY(FIELD_OFFSET(FILE_ALL_INFORMATION, BasicInformation), RxQueryBasicInfo);
                 if (!NT_SUCCESS(Status))
                 {
                     break;
                 }
 
-                SET_SIZE_AND_QUERY(sizeof(FILE_BASIC_INFORMATION), RxQueryStandardInfo);
+                SET_SIZE_AND_QUERY(FIELD_OFFSET(FILE_ALL_INFORMATION, StandardInformation), RxQueryStandardInfo);
                 if (!NT_SUCCESS(Status))
                 {
                     break;
                 }
 
-                SET_SIZE_AND_QUERY(sizeof(FILE_BASIC_INFORMATION) +
-                                   sizeof(FILE_STANDARD_INFORMATION), RxQueryInternalInfo);
+                SET_SIZE_AND_QUERY(FIELD_OFFSET(FILE_ALL_INFORMATION, InternalInformation), RxQueryInternalInfo);
                 if (!NT_SUCCESS(Status))
                 {
                     break;
                 }
 
-                SET_SIZE_AND_QUERY(sizeof(FILE_BASIC_INFORMATION) +
-                                   sizeof(FILE_STANDARD_INFORMATION) +
-                                   sizeof(FILE_INTERNAL_INFORMATION), RxQueryEaInfo);
+                SET_SIZE_AND_QUERY(FIELD_OFFSET(FILE_ALL_INFORMATION, EaInformation), RxQueryEaInfo);
                 if (!NT_SUCCESS(Status))
                 {
                     break;
                 }
 
-                SET_SIZE_AND_QUERY(sizeof(FILE_BASIC_INFORMATION) +
-                                   sizeof(FILE_STANDARD_INFORMATION) +
-                                   sizeof(FILE_INTERNAL_INFORMATION) +
-                                   sizeof(FILE_EA_INFORMATION), RxQueryPositionInfo);
+                SET_SIZE_AND_QUERY(FIELD_OFFSET(FILE_ALL_INFORMATION, PositionInformation), RxQueryPositionInfo);
                 if (!NT_SUCCESS(Status))
                 {
                     break;
                 }
 
-                SET_SIZE_AND_QUERY(sizeof(FILE_BASIC_INFORMATION) +
-                                   sizeof(FILE_STANDARD_INFORMATION) +
-                                   sizeof(FILE_INTERNAL_INFORMATION) +
-                                   sizeof(FILE_EA_INFORMATION) +
-                                   sizeof(FILE_POSITION_INFORMATION), RxQueryNameInfo);
+                SET_SIZE_AND_QUERY(FIELD_OFFSET(FILE_ALL_INFORMATION, NameInformation), RxQueryNameInfo);
                 break;
 
             case FileAlternateNameInformation:
