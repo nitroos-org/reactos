@@ -708,45 +708,29 @@ ThemeInitApiHook(UAPIHK State, PUSERAPIHOOK puah)
     return TRUE;
 }
 
-typedef BOOL (WINAPI * PREGISTER_UAH_WINXP)(HINSTANCE hInstance, USERAPIHOOKPROC CallbackFunc);
 typedef BOOL (WINAPI * PREGISTER_UUAH_WIN2003)(PUSERAPIHOOKINFO puah);
 
 BOOL WINAPI
 ThemeHooksInstall()
 {
-    PVOID lpFunc;
-    OSVERSIONINFO osvi;
+    PREGISTER_UUAH_WIN2003 lpFunc;
+    USERAPIHOOKINFO uah;
     BOOL ret;
 
-    lpFunc = GetProcAddress(GetModuleHandle("user32.dll"), "RegisterUserApiHook");
+    lpFunc = (PREGISTER_UUAH_WIN2003)GetProcAddress(GetModuleHandle("user32.dll"), "RegisterUserApiHook");
+    if (!lpFunc)
+        return FALSE;
 
-    ZeroMemory(&osvi, sizeof(OSVERSIONINFO));
-    osvi.dwOSVersionInfoSize = sizeof(OSVERSIONINFO);
-    GetVersionEx(&osvi);
+    /* user32's RegisterUserApiHook takes the USERAPIHOOKINFO form on every
+       reported system version (the old one with an instance and callback is
+       gone), so do not pick the call by the version the system reports */
+    uah.m_size = sizeof(uah);
+    uah.m_dllname1 = L"uxtheme.dll";
+    uah.m_funname1 = L"ThemeInitApiHook";
+    uah.m_dllname2 = NULL;
+    uah.m_funname2 = NULL;
 
-    if ( osvi.dwMajorVersion == 5 && osvi.dwMinorVersion == 1)
-    {
-        PREGISTER_UAH_WINXP lpfuncxp = (PREGISTER_UAH_WINXP)lpFunc;
-        ret = lpfuncxp(hDllInst, ThemeInitApiHook);
-    }
-    else if ( osvi.dwMajorVersion == 5 && osvi.dwMinorVersion == 2)
-    {
-        PREGISTER_UUAH_WIN2003 lpfunc2003 = (PREGISTER_UUAH_WIN2003)lpFunc;
-        USERAPIHOOKINFO uah;
-
-        uah.m_size = sizeof(uah);
-        uah.m_dllname1 = L"uxtheme.dll";
-        uah.m_funname1 = L"ThemeInitApiHook";
-        uah.m_dllname2 = NULL;
-        uah.m_funname2 = NULL;
-
-        ret = lpfunc2003(&uah);
-    }
-    else
-    {
-        UNIMPLEMENTED;
-        ret = FALSE;
-    }
+    ret = lpFunc(&uah);
 
     UXTHEME_broadcast_theme_changed (NULL, TRUE);
 
