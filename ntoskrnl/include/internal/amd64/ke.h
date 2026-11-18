@@ -250,6 +250,13 @@ KxQueryProcessorCycleTime(VOID)
 #define KeGetTrapFrameInterruptState(TrapFrame) \
         BooleanFlagOn((TrapFrame)->EFlags, EFLAGS_INTERRUPT_MASK)
 
+/* RFLAGS, then interrupts disabled. Not __readeflags() + _disable() inline: an
+   interrupt right after its pushfq leaves the function with a stack pointer that
+   its unwind data does not describe (trap.S) */
+ULONG_PTR
+NTAPI
+KiSaveFlagsAndDisableInterrupts(VOID);
+
 /* Diable interrupts and return whether they were enabled before */
 FORCEINLINE
 BOOLEAN
@@ -257,11 +264,8 @@ KeDisableInterrupts(VOID)
 {
     ULONG_PTR Flags;
 
-    /* Get EFLAGS and check if the interrupt bit is set */
-    Flags = __readeflags();
-
-    /* Disable interrupts */
-    _disable();
+    /* Get EFLAGS and disable interrupts, then check if the interrupt bit was set */
+    Flags = KiSaveFlagsAndDisableInterrupts();
     return (Flags & EFLAGS_INTERRUPT_MASK) ? TRUE : FALSE;
 }
 

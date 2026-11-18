@@ -1410,6 +1410,29 @@ PUBLIC NtRaiseException
     ret
 .ENDP
 
+/*
+ * ULONG_PTR
+ * KiSaveFlagsAndDisableInterrupts(VOID);
+ *
+ * Returns RFLAGS and disables interrupts. Reading RFLAGS takes a pushfq; inline
+ * (__readeflags) the pushed value is not in the caller's unwind data, and an
+ * interrupt between the pushfq and the pop (interrupts are still enabled there)
+ * stops the caller with a stack pointer 8 bytes below what its unwind data
+ * describes: a kernel stack walk from that interrupt, such as the context read of
+ * NtGetContextThread/NtSetContextThread on that thread, takes the wrong slots for
+ * the saved registers and the return address. Here the pushfq is the prolog,
+ * described as an 8-byte allocation, and interrupts are off before the pop.
+ */
+PUBLIC KiSaveFlagsAndDisableInterrupts
+.PROC KiSaveFlagsAndDisableInterrupts
+    pushfq
+    .allocstack 8
+    .endprolog
+    cli
+    pop rax
+    ret
+.ENDP
+
 EXTERN KiGetTrapContextInternal:PROC
 
 /*
