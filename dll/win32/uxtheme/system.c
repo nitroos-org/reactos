@@ -51,7 +51,6 @@ static DWORD dwThemeAppProperties = STAP_ALLOW_NONCLIENT | STAP_ALLOW_CONTROLS;
 ATOM atWindowTheme;
 static ATOM atSubAppName;
 static ATOM atSubIdList;
-ATOM atWndContext;
 
 PTHEME_FILE g_ActiveThemeFile;
 
@@ -595,7 +594,8 @@ void UXTHEME_InitSystem(HINSTANCE hInst)
     atSubAppName         = GlobalAddAtomW(szSubAppName);
     atSubIdList          = GlobalAddAtomW(szSubIdList);
     atDialogThemeEnabled = GlobalAddAtomW(szDialogThemeEnabled);
-    atWndContext        = GlobalAddAtomW(L"ux_WndContext");
+
+    ThemeInitWndDataTable();
 
     RtlInitializeHandleTable(0xFFF, sizeof(UXTHEME_HANDLE), &g_UxThemeHandleTable);
     g_cHandles = 0;
@@ -609,6 +609,8 @@ void UXTHEME_InitSystem(HINSTANCE hInst)
 void UXTHEME_UnInitSystem(HINSTANCE hInst)
 {
     UXTHEME_DeleteParseErrorInfo();
+
+    ThemeDeleteWndDataTable();
 
     TlsFree(gdwErrorInfoTlsIndex);
     gdwErrorInfoTlsIndex = TLS_OUT_OF_INDEXES;
