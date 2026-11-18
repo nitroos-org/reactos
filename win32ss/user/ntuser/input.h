@@ -110,7 +110,6 @@ VOID FASTCALL DoTheScreenSaver(VOID);
 /* Keyboard */
 CODE_SEG("INIT") NTSTATUS NTAPI InitKeyboardImpl(VOID);
 VOID NTAPI UserInitKeyboard(HANDLE hKeyboardDevice);
-VOID UserApplyMouseMetrics(VOID);
 PKL W32kGetDefaultKeyLayout(VOID);
 VOID NTAPI UserProcessKeyboardInput(PINPUT_DEVICE_INFO pDeviceInfo, PKEYBOARD_INPUT_DATA pKeyInput);
 BOOL NTAPI UserSendKeyboardInput(KEYBDINPUT *pKbdInput, BOOL bInjected);
@@ -164,7 +163,10 @@ VOID FASTCALL IntFreeImeHotKeys(VOID);
 
 extern DWORD gSystemFS;
 extern UINT gSystemCPCharSet; 
-extern HANDLE ghKeyboardDevice;
+#define KBD_UPDATE_LEDS      0x1
+#define KBD_UPDATE_TYPEMATIC 0x2
+extern LONG gKeyboardFlags;
+extern PKEVENT gKeyboardUpdatesEvent;
 extern PTHREADINFO ptiRawInput;
 extern BYTE gafAsyncKeyState[256 * 2 / 8]; // 2 bits per key
 extern PINPUT_DEVICE_INFO gpInputDeviceInfo;
@@ -199,4 +201,5 @@ ReleaseDeviceInfoListMutex(VOID)
                                                               ((ks)[GET_KS_BYTE(vk)] & ~GET_KS_LOCK_BIT(vk)))
 
 extern PKL gspklBaseLayout;
+extern KEYBOARD_INDICATOR_PARAMETERS gIndicators;
 extern KEYBOARD_ATTRIBUTES gKeyboardInfo;

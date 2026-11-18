@@ -30,26 +30,15 @@ PTHREADINFO ptiRawInput;
 PKTIMER MasterTimer = NULL;
 PATTACHINFO gpai = NULL;
 INT paiCount = 0;
-HANDLE ghKeyboardDevice = NULL;
+LONG gKeyboardFlags;
+PKEVENT gKeyboardUpdatesEvent;
 PINPUT_DEVICE_INFO gpInputDeviceInfo = NULL;
 static LONG gRawDeviceSerial = 0;
 PERESOURCE gpDeviceInfoListMutex = NULL;
 
+static DWORD gNumberOfKeyboards = 0;
 static DWORD LastInputTick = 0;
 static PKEVENT gDeviceListChangedEvent;
-
-/* Mouse metrics derived from the attached devices. They are cached here because
- * InitMetrics() rebuilds the whole metrics table (display/winsta/sysparams
- * changes) and must not forget about the mice found by ProcessDeviceChanges(). */
-static struct
-{
-    INT Present;
-    INT Buttons;
-    INT Wheel;
-#if (_WIN32_WINNT >= 0x0600)
-    INT HorizontalWheel;
-#endif
-} gMouseMetrics;
 
 /* FUNCTIONS *****************************************************************/
 
@@ -201,6 +190,9 @@ OpenInputDevice(
         {
             ERR("ZwDeviceIoControlFile('%wZ', IOCTL_KEYBOARD_QUERY_ATTRIBUTES) failed with status 0x%08x\n", &DeviceInfo->DeviceName, Status);
         }
+        UserInitKeyboard(DeviceInfo->Handle);
+        InterlockedOr(&gKeyboardFlags, KBD_UPDATE_LEDS | KBD_UPDATE_TYPEMATIC);
+        KeSetEvent(gKeyboardUpdatesEvent, IO_NO_INCREMENT, FALSE);
     }
     else if (DeviceInfo->DeviceType == RIM_TYPEMOUSE)
     {
@@ -230,9 +222,6 @@ CloseInputDevice(
     ASSERT(DeviceInfo->Handle);
     (void)ZwCancelIoFile(DeviceInfo->Handle, &DeviceInfo->Iosb);
     ObCloseHandle(DeviceInfo->Handle, KernelMode);
-
-    if (DeviceInfo->Handle == ghKeyboardDevice)
-        ghKeyboardDevice = NULL;
 }
 
 static
@@ -313,22 +302,6 @@ RITReadApc(
     StartReadInputDevice(DeviceInfo);
 }
 
-/*
- * UserApplyMouseMetrics
- *
- * Copies the mouse metrics of the attached devices into the system metrics
- */
-VOID
-UserApplyMouseMetrics(VOID)
-{
-    gpsi->aiSysMet[SM_MOUSEPRESENT] = gMouseMetrics.Present;
-    gpsi->aiSysMet[SM_CMOUSEBUTTONS] = gMouseMetrics.Buttons;
-    gpsi->aiSysMet[SM_MOUSEWHEELPRESENT] = gMouseMetrics.Wheel;
-#if (_WIN32_WINNT >= 0x0600)
-    gpsi->aiSysMet[SM_MOUSEHORIZONTALWHEELPRESENT] = gMouseMetrics.HorizontalWheel;
-#endif
-}
-
 static
 VOID
 ProcessDeviceChanges(
@@ -336,6 +309,8 @@ ProcessDeviceChanges(
 {
     PINPUT_DEVICE_INFO DeviceInfo;
     NTSTATUS Status;
+    DWORD PreviousNumberOfKeyboards = gNumberOfKeyboards;
+    DWORD NumberOfKeyboards = 0;
     DWORD NumberOfMice = 0;
     DWORD MaxNumberOfButtons = 0;
     BOOL HasMouseWheel = FALSE;
@@ -356,23 +331,6 @@ ProcessDeviceChanges(
                 if (DeviceInfo->DeviceType == RIM_TYPEKEYBOARD)
                 {
                     TRACE("Keyboard connected!\n");
-                    if (!ghKeyboardDevice)
-                    {
-                        // Get and load keyboard attributes.
-                        UserInitKeyboard(DeviceInfo->Handle);
-                        UserEnterExclusive();
-                        // Register the Window hotkey.
-                        UserRegisterHotKey(PWND_BOTTOM, IDHK_WINKEY, MOD_WIN, 0);
-                        // Register the Window Snap hotkey.
-                        UserRegisterHotKey(PWND_BOTTOM, IDHK_SNAP_LEFT, MOD_WIN, VK_LEFT);
-                        UserRegisterHotKey(PWND_BOTTOM, IDHK_SNAP_RIGHT, MOD_WIN, VK_RIGHT);
-                        UserRegisterHotKey(PWND_BOTTOM, IDHK_SNAP_UP, MOD_WIN, VK_UP);
-                        UserRegisterHotKey(PWND_BOTTOM, IDHK_SNAP_DOWN, MOD_WIN, VK_DOWN);
-                        UserRegisterHotKey(PWND_BOTTOM, IDHK_SNAP_VMAX, MOD_WIN | MOD_SHIFT, VK_UP);
-                        // Register the debug hotkeys.
-                        SetDebugHotKeys();
-                        UserLeave();
-                    }
                 }
                 else if (DeviceInfo->DeviceType == RIM_TYPEMOUSE)
                 {
@@ -384,6 +342,8 @@ ProcessDeviceChanges(
 
         if (DeviceInfo->DeviceType == RIM_TYPEKEYBOARD)
         {
+            NumberOfKeyboards++;
+
             if (DeviceInfo->Keyboard.Attributes.KeyboardIdentifier.Type == 4 /* Enhanced 101- or 102-key keyboard */ ||
                 DeviceInfo->Keyboard.Attributes.KeyboardIdentifier.Type == 7 /* Japanese keyboard */ ||
                 DeviceInfo->Keyboard.Attributes.KeyboardIdentifier.Type == 8 /* Korean keyboard */)
@@ -414,24 +374,117 @@ ProcessDeviceChanges(
     ReleaseDeviceInfoListMutex();
 
     /* Update metrics */
-    gMouseMetrics.Present = NumberOfMice > 0 ? 1 : 0;
-    gMouseMetrics.Buttons = MaxNumberOfButtons;
-    gMouseMetrics.Wheel = HasMouseWheel ? 1 : 0;
+    gpsi->aiSysMet[SM_MOUSEPRESENT] = NumberOfMice > 0 ? 1 : 0;
+    gpsi->aiSysMet[SM_CMOUSEBUTTONS] = MaxNumberOfButtons;
+    gpsi->aiSysMet[SM_MOUSEWHEELPRESENT] = HasMouseWheel ? 1 : 0;
 #if (_WIN32_WINNT >= 0x0600)
-    gMouseMetrics.HorizontalWheel = HasHorizontalMouseWheel ? 1 : 0;
+    gpsi->aiSysMet[SM_MOUSEHORIZONTALWHEELPRESENT] = HasHorizontalMouseWheel ? 1 : 0;
 #endif
-    UserApplyMouseMetrics();
     /* FIXME: show/hide cursor depending of mouse presence */
     TRACE("Mouse present %u, buttons %u, wheel %u\n",
           gpsi->aiSysMet[SM_MOUSEPRESENT],
           gpsi->aiSysMet[SM_CMOUSEBUTTONS],
           gpsi->aiSysMet[SM_MOUSEWHEELPRESENT]);
 
+    /* A session without the console opens no keyboard: no system hotkeys there */
+    if (PreviousNumberOfKeyboards == 0 && NumberOfKeyboards > 0 && !gbHeadlessSession)
+    {
+        UserEnterExclusive();
+        // Register the Window hotkey.
+        UserRegisterHotKey(PWND_BOTTOM, IDHK_WINKEY, MOD_WIN, 0);
+        // Register the Window Snap hotkey.
+        UserRegisterHotKey(PWND_BOTTOM, IDHK_SNAP_LEFT, MOD_WIN, VK_LEFT);
+        UserRegisterHotKey(PWND_BOTTOM, IDHK_SNAP_RIGHT, MOD_WIN, VK_RIGHT);
+        UserRegisterHotKey(PWND_BOTTOM, IDHK_SNAP_UP, MOD_WIN, VK_UP);
+        UserRegisterHotKey(PWND_BOTTOM, IDHK_SNAP_DOWN, MOD_WIN, VK_DOWN);
+        UserRegisterHotKey(PWND_BOTTOM, IDHK_SNAP_VMAX, MOD_WIN | MOD_SHIFT, VK_UP);
+        // Register the debug hotkeys.
+        SetDebugHotKeys();
+        UserLeave();
+    }
+    else if (PreviousNumberOfKeyboards > 0 && NumberOfKeyboards == 0)
+    {
+        UserEnterExclusive();
+        // Unregister the Window hotkey.
+        UserUnregisterHotKey(PWND_BOTTOM, IDHK_WINKEY);
+        // Unregister the Window Snap hotkey.
+        UserUnregisterHotKey(PWND_BOTTOM, IDHK_SNAP_LEFT);
+        UserUnregisterHotKey(PWND_BOTTOM, IDHK_SNAP_RIGHT);
+        UserUnregisterHotKey(PWND_BOTTOM, IDHK_SNAP_UP);
+        UserUnregisterHotKey(PWND_BOTTOM, IDHK_SNAP_DOWN);
+        UserUnregisterHotKey(PWND_BOTTOM, IDHK_SNAP_VMAX);
+        // Unregister the debug hotkeys.
+        UserUnregisterHotKey(PWND_BOTTOM, IDHK_F12);
+        UserUnregisterHotKey(PWND_BOTTOM, IDHK_SHIFTF12);
+        UserLeave();
+    }
+    gNumberOfKeyboards = NumberOfKeyboards;
     gKeyboardInfo.NumberOfFunctionKeys = MaxFunctionKeys;
     TRACE("Keyboard type %u, subtype %u and number of func keys %u\n",
           gKeyboardInfo.KeyboardIdentifier.Type,
           gKeyboardInfo.KeyboardIdentifier.Subtype,
           gKeyboardInfo.NumberOfFunctionKeys);
+}
+
+static
+VOID
+ProcessKeyboardUpdates(
+    VOID)
+{
+    PINPUT_DEVICE_INFO DeviceInfo;
+    KEYBOARD_TYPEMATIC_PARAMETERS GlobalTypematic, LocalTypematic;
+    IO_STATUS_BLOCK Iosb;
+    DWORD Updates;
+
+    Updates = InterlockedExchange(&gKeyboardFlags, 0);
+    if (!Updates)
+        return;
+
+    RtlZeroMemory(&LocalTypematic, sizeof(LocalTypematic));
+    RtlZeroMemory(&GlobalTypematic, sizeof(GlobalTypematic));
+    GlobalTypematic.Rate = gspv.dwKbdSpeed;
+    GlobalTypematic.Delay = gspv.iKbdDelay;
+
+    AcquireDeviceInfoListMutex();
+    for (DeviceInfo = gpInputDeviceInfo; DeviceInfo; DeviceInfo = DeviceInfo->pNextDeviceInfo)
+    {
+        if (!DeviceInfo->Handle || DeviceInfo->DeviceType != RIM_TYPEKEYBOARD)
+            continue;
+
+        if (Updates & KBD_UPDATE_LEDS)
+        {
+            /* Update the lights on the hardware */
+            ZwDeviceIoControlFile(DeviceInfo->Handle,
+                                  NULL,
+                                  NULL,
+                                  NULL,
+                                  &Iosb,
+                                  IOCTL_KEYBOARD_SET_INDICATORS,
+                                  &gIndicators, sizeof(gIndicators),
+                                  NULL, 0);
+        }
+
+        if (Updates & KBD_UPDATE_TYPEMATIC)
+        {
+            /* Update typematic */
+#define CLAMP(v, lo, hi) ((v) < (lo) ? (lo) : (v) > (hi) ? (hi) : (v))
+            LocalTypematic.Rate = CLAMP(GlobalTypematic.Rate,
+                                        DeviceInfo->Keyboard.Attributes.KeyRepeatMinimum.Rate,
+                                        DeviceInfo->Keyboard.Attributes.KeyRepeatMaximum.Rate);
+            LocalTypematic.Delay = CLAMP(GlobalTypematic.Delay,
+                                         DeviceInfo->Keyboard.Attributes.KeyRepeatMinimum.Delay,
+                                         DeviceInfo->Keyboard.Attributes.KeyRepeatMaximum.Delay);
+            ZwDeviceIoControlFile(DeviceInfo->Handle,
+                                  NULL,
+                                  NULL,
+                                  NULL,
+                                  &Iosb,
+                                  IOCTL_KEYBOARD_SET_TYPEMATIC,
+                                  &LocalTypematic, sizeof(LocalTypematic),
+                                  NULL, 0);
+        }
+    }
+    ReleaseDeviceInfoListMutex();
 }
 
 /*
@@ -445,7 +498,7 @@ RawInputThreadMain(VOID)
     PINPUT_DEVICE_INFO DeviceInfo;
     NTSTATUS Status;
     //LARGE_INTEGER WaitTimeout;
-    PVOID WaitObjects[6], pSignaledObject = NULL;
+    PVOID WaitObjects[7], pSignaledObject = NULL;
     ULONG cWaitObjects;
     KWAIT_BLOCK WaitBlockArray[RTL_NUMBER_OF(WaitObjects)];
     PVOID ShutdownEvent;
@@ -459,6 +512,10 @@ RawInputThreadMain(VOID)
     gDeviceListChangedEvent = ExAllocatePoolWithTag(NonPagedPool, sizeof(*gDeviceListChangedEvent), USERTAG_PNP);
     ASSERT(gDeviceListChangedEvent);
     KeInitializeEvent(gDeviceListChangedEvent, SynchronizationEvent, FALSE);
+
+    gKeyboardUpdatesEvent = ExAllocatePoolWithTag(NonPagedPool, sizeof(*gKeyboardUpdatesEvent), USERTAG_PNP);
+    ASSERT(gKeyboardUpdatesEvent);
+    KeInitializeEvent(gKeyboardUpdatesEvent, SynchronizationEvent, FALSE);
 
     //WaitTimeout.QuadPart = (LONGLONG)(-10000000);
 
@@ -502,9 +559,6 @@ RawInputThreadMain(VOID)
     StartTheTimers();
     UserLeave();
 
-    NT_ASSERT(ghKeyboardDevice == NULL);
-    ghKeyboardDevice = Keyboard->Handle;
-
     PoRequestShutdownEvent(&ShutdownEvent);
     for (;;)
     {
@@ -512,14 +566,15 @@ RawInputThreadMain(VOID)
         WaitObjects[0] = ShutdownEvent;
         WaitObjects[1] = MasterTimer;
         WaitObjects[2] = gDeviceListChangedEvent;
+        WaitObjects[3] = gKeyboardUpdatesEvent;
+        cWaitObjects = 4;
         /* Redirected windows (redir.c): presents of DCs that stay in use */
-        WaitObjects[3] = gRedirTimer;
-        cWaitObjects = gRedirTimer ? 4 : 3;
-        /* The tail of a burst of scrolls (redir.c) */
-        if (gRedirTimer && gRedirTailTimer)
+        if (gRedirTimer)
         {
-            WaitObjects[4] = gRedirTailTimer;
-            cWaitObjects = 5;
+            WaitObjects[cWaitObjects++] = gRedirTimer;
+            /* The tail of a burst of scrolls (redir.c) */
+            if (gRedirTailTimer)
+                WaitObjects[cWaitObjects++] = gRedirTailTimer;
         }
         /* Display drivers that batch their copies to the screen (pdevobj.c) */
         if (gDisplaySyncTimer)
@@ -556,6 +611,10 @@ RawInputThreadMain(VOID)
             if (pSignaledObject == gDeviceListChangedEvent)
             {
                 ProcessDeviceChanges();
+            }
+            else if (pSignaledObject == gKeyboardUpdatesEvent)
+            {
+                ProcessKeyboardUpdates();
             }
             else if (pSignaledObject == MasterTimer)
             {
@@ -619,6 +678,7 @@ RawInputThreadMain(VOID)
     ExDeleteResourceLite(gpDeviceInfoListMutex);
     ExFreePoolWithTag(gpDeviceInfoListMutex, USERTAG_SYSTEM);
     ExFreePoolWithTag(gDeviceListChangedEvent, USERTAG_PNP);
+    ExFreePoolWithTag(gKeyboardUpdatesEvent, USERTAG_PNP);
 
     ERR("Raw Input Thread Exit!\n");
 }

@@ -91,6 +91,7 @@ list(APPEND SOURCE
     Win10Exports.c
     DeviceIoControl.c
     DllInitParentPrecondition.c
+    DnsHostnameToComputerName.c
     dosdev.c
     DynamicTls.c
     DynamicTimeZone.c

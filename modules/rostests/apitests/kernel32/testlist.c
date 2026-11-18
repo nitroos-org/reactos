@@ -94,6 +94,7 @@ extern void func_VirtualAllocExNuma(void);
 extern void func_Win10Exports(void);
 extern void func_DeviceIoControl(void);
 extern void func_DllInitParentPrecondition(void);
+extern void func_DnsHostnameToComputerName(void);
 extern void func_dosdev(void);
 extern void func_DynamicTls(void);
 extern void func_DynamicTimeZone(void);
@@ -366,6 +367,7 @@ const struct test winetest_testlist[] =
     { "Win10Exports", func_Win10Exports },
     { "DeviceIoControl",             func_DeviceIoControl },
     { "DllInitParentPrecondition",   func_DllInitParentPrecondition },
+    { "DnsHostnameToComputerName",   func_DnsHostnameToComputerName },
     { "dosdev",                      func_dosdev },
     { "DynamicTls",                  func_DynamicTls },
     { "DynamicTimeZone",             func_DynamicTimeZone },
