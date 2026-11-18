@@ -385,7 +385,29 @@ QueryTokenDefaultDaclTests(
                                      &BufferLength);
     ok_ntstatus(Status, STATUS_SUCCESS);
     ok(Dacl->DefaultDacl->AclRevision == 2, "The ACL revision of token default DACL must be 2 (current revision %u)!\n", Dacl->DefaultDacl->AclRevision);
-    ok(Dacl->DefaultDacl->AceCount == 2, "The ACL's ACE count must be 2 (current ACE count %u)!\n", Dacl->DefaultDacl->AceCount);
+    /*
+     * The owner and SYSTEM, and the logon SID if the token has one (measured on Windows
+     * Server 2022: (BA:GA)(SY:GA)(logon SID:GENERIC_READ|GENERIC_EXECUTE))
+     */
+    {
+        UCHAR GroupsBuffer[2048];
+        PTOKEN_GROUPS Groups = (PTOKEN_GROUPS)GroupsBuffer;
+        ULONG ExpectedAces = 2, GroupIndex;
+
+        Status = NtQueryInformationToken(Token, TokenGroups, Groups, sizeof(GroupsBuffer), &BufferLength);
+        if (NT_SUCCESS(Status))
+        {
+            for (GroupIndex = 0; GroupIndex < Groups->GroupCount; GroupIndex++)
+            {
+                if ((Groups->Groups[GroupIndex].Attributes & SE_GROUP_LOGON_ID) == SE_GROUP_LOGON_ID)
+                {
+                    ExpectedAces = 3;
+                    break;
+                }
+            }
+        }
+        ok(Dacl->DefaultDacl->AceCount == ExpectedAces, "The ACL's ACE count must be %lu (current ACE count %u)!\n", ExpectedAces, Dacl->DefaultDacl->AceCount);
+    }
 
     RtlFreeHeap(RtlGetProcessHeap(), 0, Dacl);
 }

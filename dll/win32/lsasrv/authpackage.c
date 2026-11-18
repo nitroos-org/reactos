@@ -1355,7 +1355,8 @@ LsapAddTokenDefaultDacl(
 {
     PLSA_TOKEN_INFORMATION_V1 TokenInfo1;
     PACL Dacl = NULL;
-    ULONG Length;
+    PSID LogonSid = NULL;
+    ULONG Length, i;
 
     if (TokenInformationType == LsaTokenInformationV1)
     {
@@ -1364,10 +1365,31 @@ LsapAddTokenDefaultDacl(
         if (TokenInfo1->DefaultDacl.DefaultDacl != NULL)
             return STATUS_SUCCESS;
 
+        /*
+         * The logon SID of the token, if it has one. The default DACL lets it read and
+         * execute (Windows: owner, SYSTEM and the logon SID). Objects made with this
+         * default DACL, the token object itself too, are then open to the processes of
+         * the logon session also when they run with restricting SIDs that include the
+         * logon SID, as the sandboxes of web browsers do.
+         */
+        if (TokenInfo1->Groups != NULL)
+        {
+            for (i = 0; i < TokenInfo1->Groups->GroupCount; i++)
+            {
+                if ((TokenInfo1->Groups->Groups[i].Attributes & SE_GROUP_LOGON_ID) == SE_GROUP_LOGON_ID)
+                {
+                    LogonSid = TokenInfo1->Groups->Groups[i].Sid;
+                    break;
+                }
+            }
+        }
+
         Length = sizeof(ACL) +
                  (2 * sizeof(ACCESS_ALLOWED_ACE)) +
                  RtlLengthSid(TokenInfo1->Owner.Owner) +
                  RtlLengthSid(LsapLocalSystemSid);
+        if (LogonSid != NULL)
+            Length += sizeof(ACCESS_ALLOWED_ACE) + RtlLengthSid(LogonSid);
 
         Dacl = DispatchTable.AllocateLsaHeap(Length);
         if (Dacl == NULL)
@@ -1385,6 +1407,14 @@ LsapAddTokenDefaultDacl(
                                ACL_REVISION,
                                GENERIC_ALL,
                                LsapLocalSystemSid);
+
+        if (LogonSid != NULL)
+        {
+            RtlAddAccessAllowedAce(Dacl,
+                                   ACL_REVISION,
+                                   GENERIC_READ | GENERIC_EXECUTE,
+                                   LogonSid);
+        }
 
         TokenInfo1->DefaultDacl.DefaultDacl = Dacl;
     }
