@@ -119,6 +119,7 @@ BOOLEAN SmbIsEngineProcess(PEPROCESS Process);
 ULONG SmbCurrentGeneration(VOID);
 NTSTATUS SmbAllocateRequest(USHORT Opcode, ULONG VariableSize, PLUID LogonId, PSMB_REQUEST *Request);
 NTSTATUS SmbAllocateRequestForIrp(USHORT Opcode, ULONG VariableSize, PLUID LogonId, PIRP Irp, PSMB_REQUEST *Request);
+NTSTATUS SmbReserveReplyBytes(PSMB_REQUEST Request, ULONG Bytes);
 PVOID SmbRequestFixed(PSMB_REQUEST Request);
 NTSTATUS SmbRequestPutBytes(PSMB_REQUEST Request, ULONG *Cursor, const VOID *Data, ULONG Length, PSMBUP_STRING String);
 NTSTATUS SmbSendRequest(PSMB_REQUEST Request, ULONG TimeoutSeconds);

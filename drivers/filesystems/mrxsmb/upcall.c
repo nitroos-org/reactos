@@ -111,6 +111,26 @@ SmbUnreserveBytes(ULONG Bytes)
     KeSetEvent(&SmbEngine.BudgetEvent, IO_NO_INCREMENT, FALSE);
 }
 
+/*
+ * A request whose reply carries data as large as it asks (READ, QUERY_DIRECTORY) counts that
+ * length too, until it is freed: the budget then bounds the reply buffers this driver holds and
+ * the reply buffers the engine allocates for all requests in flight, not only the messages.
+ */
+NTSTATUS
+SmbReserveReplyBytes(PSMB_REQUEST Request, ULONG Bytes)
+{
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    if (Request->Notification || Bytes == 0)
+        return STATUS_SUCCESS;
+    Status = SmbReserveBytes(Bytes);
+    if (NT_SUCCESS(Status))
+        Request->ReservedBytes += Bytes;
+    return Status;
+}
+
 NTSTATUS
 SmbEngineCreateDevice(PDRIVER_OBJECT DriverObject)
 {

@@ -813,6 +813,12 @@ SmbRead(PRX_CONTEXT RxContext)
         Chunk = min(Count - Done, SmbVNetRoot(RxContext->pRelevantSrvOpen->pVNetRoot)->MaxReadSize);
         if (Chunk == 0)
             Chunk = min(Count - Done, SMBUP_MAX_IO);
+        Status = SmbReserveReplyBytes(Request, Chunk);
+        if (!NT_SUCCESS(Status))
+        {
+            SmbReleaseRequest(Request);
+            break;
+        }
         Fixed = SmbRequestFixed(Request);
         Fixed->ConnectionId = Handle->ConnectionId;
         Fixed->FileId = Handle->FileId;
@@ -991,6 +997,8 @@ SmbQueryDirectory(PRX_CONTEXT RxContext)
         Fixed->Flags |= SMBUP_DIR_INDEX_SPECIFIED;
     Status = SmbRequestPutBytes(Request, &Cursor, Pattern->Buffer, Pattern->Length, &Fixed->Pattern);
 
+    if (NT_SUCCESS(Status))
+        Status = SmbReserveReplyBytes(Request, OutputLength);
     if (NT_SUCCESS(Status))
         Status = SmbSendRequest(Request, 0);
     if (NT_SUCCESS(Status))
