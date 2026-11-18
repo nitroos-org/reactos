@@ -1553,7 +1553,9 @@ static SECURITY_STATUS server_authenticate(PNegoHelper h, const BYTE *msg, ULONG
         {
             WARN("MIC mismatch\n");
             SecureZeroMemory(exported, sizeof(exported));
-            return SEC_E_MESSAGE_ALTERED;
+            /* a wrong MIC in the AUTHENTICATE is a malformed token for Windows (measured on Windows Server 2022, NTLM
+             * and Negotiate: SEC_E_INVALID_TOKEN) */
+            return SEC_E_INVALID_TOKEN;
         }
     }
 

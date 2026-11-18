@@ -620,7 +620,7 @@ typedef struct { int kind; ULONG arg; } mut_arg;
 enum { M_REPLACE, M_TRUNC, M_TRAILING, M_FLIP, M_OUTER_TAG, M_FIN_NOMIC, M_FIN_MICFLIP, M_FIN_MICSEQ, M_FIN_MIC15,
        M_FIN_COMPLETED, M_FIN_RAW, M_SF_NOMIC, M_SF_MICFLIP, M_SF_INCOMPLETE, M_SF_REJECT, M_RESP_REJECT,
        M_RESP_KRB, M_RESP_NOTOKEN, M_RESP_NONEG, M_RESP_COMPLETED, M_RESP_RAW, M_HUGE_LEN, M_FIN_MICVERSION,
-       M_SF_TOKEN_NOMIC, M_SF_TOKEN_MIC, M_RESP_STATE7, M_EMPTY, M_FIN_MICPARTS, M_SF_MICPARTS };
+       M_SF_TOKEN_NOMIC, M_SF_TOKEN_MIC, M_RESP_STATE7, M_EMPTY, M_FIN_MICPARTS, M_SF_MICPARTS, M_FIN_AUTHMIC };
 
 /* the parts of a mechListMIC that M_FIN_MICPARTS and M_SF_MICPARTS change (arg is a mask of them) */
 #define MIC_VERSION     1
@@ -669,6 +669,16 @@ static ULONG mutate(const BYTE *in, ULONG len, BYTE *out, void *argp)
     case M_FIN_MICSEQ: mic[12] = 1; return mk_resp(out, 1, NULL, 0, f.tok, f.tok_len, mic, 16);
     case M_FIN_MIC15: return mk_resp(out, 1, NULL, 0, f.tok, f.tok_len, mic, 15);
     case M_FIN_MICVERSION: mic[0] ^= 1; return mk_resp(out, 1, NULL, 0, f.tok, f.tok_len, mic, 16);
+    case M_FIN_AUTHMIC:
+    {
+        /* the MIC inside the AUTHENTICATE (offset 72 of the message), the mechListMIC as it was */
+        BYTE auth[MAX_TOK];
+
+        if (!f.tok || f.tok_len < 88 || f.tok_len > MAX_TOK) return 0;
+        memcpy(auth, f.tok, f.tok_len);
+        auth[72] ^= 1;
+        return mk_resp(out, 1, NULL, 0, auth, f.tok_len, mic, 16);
+    }
     case M_FIN_MICPARTS:
     case M_SF_MICPARTS:
         if (a->arg & MIC_VERSION) mic[0] ^= 1;
@@ -829,6 +839,8 @@ static void test_malformed(CredHandle *cc, CredHandle *sc)
     mal(cc, sc, "final: mechListMIC altered", 3, M_FIN_MICFLIP, 0, SEC_E_MESSAGE_ALTERED);
     mal(cc, sc, "final: mechListMIC with sequence 1", 3, M_FIN_MICSEQ, 0, SEC_E_OUT_OF_SEQUENCE);
     mal(cc, sc, "final: mechListMIC of 15 bytes", 3, M_FIN_MIC15, 0, SEC_E_INVALID_TOKEN);
+    /* a wrong MIC inside the AUTHENTICATE (measured on Windows Server 2022, NTLM and Negotiate: SEC_E_INVALID_TOKEN) */
+    mal(cc, sc, "final: the MIC of the AUTHENTICATE altered", 3, M_FIN_AUTHMIC, 0, SEC_E_INVALID_TOKEN);
     mal(cc, sc, "final: mechListMIC of another version", 3, M_FIN_MICVERSION, 0, SEC_E_INVALID_TOKEN);
     mal(cc, sc, "final: an empty token on the context", 3, M_EMPTY, 0, SEC_E_INVALID_HANDLE);
     mal(cc, sc, "final: negState accept-completed", 3, M_FIN_COMPLETED, 0, SEC_E_INVALID_TOKEN);
