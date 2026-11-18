@@ -2665,8 +2665,8 @@ CmpParseKeyWorker(IN PVOID ParseObject,
                                Kcb,
                                &Current))
         {
-            /* Symlink parse succeeded */
-            Status = STATUS_REPARSE;
+            /* Symlink parse succeeded; a link in a user's hive stays in that user's hives */
+            Status = CmpAclCheckLinkFollow(Kcb, CompleteName) ? STATUS_REPARSE : STATUS_ACCESS_DENIED;
         }
         else
         {
@@ -2755,6 +2755,11 @@ KeyCachedOpenNow:
                             {
                                 /* Symlink parse failed */
                                 Status = STATUS_OBJECT_NAME_NOT_FOUND;
+                            }
+                            else if (!CmpAclCheckLinkFollow(Kcb, CompleteName))
+                            {
+                                /* A link in a user's hive stays in that user's hives */
+                                Status = STATUS_ACCESS_DENIED;
                             }
                         }
 
@@ -2883,8 +2888,8 @@ KeyCachedOpenNow:
                                        Kcb,
                                        &Current))
                 {
-                    /* Symlink parse succeeded */
-                    Status = STATUS_REPARSE;
+                    /* Symlink parse succeeded; a link in a user's hive stays in that user's hives */
+                    Status = CmpAclCheckLinkFollow(Kcb, CompleteName) ? STATUS_REPARSE : STATUS_ACCESS_DENIED;
                 }
                 else
                 {

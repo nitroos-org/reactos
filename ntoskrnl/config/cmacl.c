@@ -146,7 +146,8 @@ static const PCSTR CmpAclRuleNames[CmpAclRuleMax] =
     "taskcache", "eventlog", "default", "user", "user-unknown", "other"
 };
 
-static const PCSTR CmpAclOpNames[] = { "open", "create", "createlink", "linknode" };
+static const PCSTR CmpAclOpNames[] = { "open", "create", "createlink", "linknode", "followlink" };
+C_ASSERT(RTL_NUMBER_OF(CmpAclOpNames) == CM_REGACL_OP_FOLLOWLINK + 1);
 static const PCSTR CmpAclModeNames[] = { "legacy", "audit", "enforce" };
 static const PCSTR CmpAclSourceNames[] = { "default", "registry", "bootoption" };
 
@@ -3090,6 +3091,103 @@ CmpAclCheckKeyCreate(
         return STATUS_SUCCESS;
     }
     return (AccessStatus == STATUS_INSUFFICIENT_RESOURCES) ? AccessStatus : STATUS_ACCESS_DENIED;
+}
+
+/*
+ * May the parse follow the symbolic link LinkKcb to Target (the full name the
+ * reparse starts over with)? A user can make links in its own hives; the target
+ * of an open through such a link is checked with the opener's token, but a
+ * kernel-mode opener is not checked at all (win32k writes the user's settings
+ * that way) and a SYSTEM opener passes any check, so a link in a user's hive
+ * could carry their writes into keys the user cannot write. Like a trust class
+ * (NtLoadKeyEx's TrustClassKey: a user hive and its classes hive), a link in a
+ * hive loaded at \REGISTRY\USER\<name> (not .DEFAULT, not S-1-5-18) is followed
+ * only to \REGISTRY\USER\<name> or \REGISTRY\USER\<name>_Classes and below
+ * (<name> without a _Classes suffix). Links elsewhere (machine hives, which only
+ * administrators can change) are not judged. A refused link is logged in both
+ * modes and refused only when key access is enforced (mode 2). The caller holds
+ * the registry lock (names cannot change).
+ */
+BOOLEAN
+NTAPI
+CmpAclCheckLinkFollow(
+    _In_ PCM_KEY_CONTROL_BLOCK LinkKcb,
+    _In_ PCUNICODE_STRING Target)
+{
+    static const WCHAR Prefix[] = L"\\REGISTRY\\USER\\";
+    static const CHAR Classes[] = "_CLASSES";
+    const ULONG PrefixChars = RTL_NUMBER_OF(Prefix) - 1;
+    const ULONG ClassesChars = sizeof(Classes) - 1;
+    SECURITY_SUBJECT_CONTEXT Subject;
+    PCM_KEY_CONTROL_BLOCK Walk, HiveKey;
+    ULONG Depth = 0, Chars, BaseChars, TargetChars, Pos, i;
+
+    if (!CmpAclReady || CmpRegistryAclEffectiveMode == CM_REGACL_MODE_LEGACY || !LinkKcb || !Target)
+        return TRUE;
+
+    /* The key at \REGISTRY\<USER>\<name> above the link */
+    for (Walk = LinkKcb; Walk; Walk = Walk->ParentKcb)
+        Depth++;
+    if (Depth < 3)
+        return TRUE;
+    HiveKey = LinkKcb;
+    for (i = Depth; i > 3; i--)
+        HiveKey = HiveKey->ParentKcb;
+    if (!CmpAclNameMatches(HiveKey->ParentKcb, "USER", FALSE) ||
+        CmpAclNameMatches(HiveKey, ".DEFAULT", FALSE) ||
+        CmpAclNameMatches(HiveKey, "S-1-5-18", FALSE))
+    {
+        return TRUE;
+    }
+
+    /* <name> without a _Classes suffix */
+    Chars = CmpAclNameChars(HiveKey);
+    BaseChars = Chars;
+    if (Chars > ClassesChars)
+    {
+        for (i = 0; i < ClassesChars; i++)
+        {
+            if (RtlUpcaseUnicodeChar(CmpAclNameChar(HiveKey, Chars - ClassesChars + i)) != (WCHAR)Classes[i])
+                break;
+        }
+        if (i == ClassesChars)
+            BaseChars = Chars - ClassesChars;
+    }
+
+    /* Target: \REGISTRY\USER\<base>, optionally _Classes, then the end or a separator */
+    TargetChars = Target->Length / sizeof(WCHAR);
+    if (TargetChars < PrefixChars + BaseChars)
+        goto Refuse;
+    for (i = 0; i < PrefixChars; i++)
+    {
+        if (RtlUpcaseUnicodeChar(Target->Buffer[i]) != Prefix[i])
+            goto Refuse;
+    }
+    for (i = 0; i < BaseChars; i++)
+    {
+        if (RtlUpcaseUnicodeChar(Target->Buffer[PrefixChars + i]) != RtlUpcaseUnicodeChar(CmpAclNameChar(HiveKey, i)))
+            goto Refuse;
+    }
+    Pos = PrefixChars + BaseChars;
+    if (Pos == TargetChars || Target->Buffer[Pos] == OBJ_NAME_PATH_SEPARATOR)
+        return TRUE;
+    if (TargetChars - Pos >= ClassesChars)
+    {
+        for (i = 0; i < ClassesChars; i++)
+        {
+            if (RtlUpcaseUnicodeChar(Target->Buffer[Pos + i]) != (WCHAR)Classes[i])
+                goto Refuse;
+        }
+        Pos += ClassesChars;
+        if (Pos == TargetChars || Target->Buffer[Pos] == OBJ_NAME_PATH_SEPARATOR)
+            return TRUE;
+    }
+
+Refuse:
+    SeCaptureSubjectContext(&Subject);
+    CmpAclRecordDenial(LinkKcb, Target, CM_REGACL_OP_FOLLOWLINK, &Subject, 0, 0, STATUS_ACCESS_DENIED, CmpAclRuleUser);
+    SeReleaseSubjectContext(&Subject);
+    return !CmpAclEnforcing();
 }
 
 /*

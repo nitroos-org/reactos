@@ -110,6 +110,7 @@
 #define CM_REGACL_OP_CREATE                             1
 #define CM_REGACL_OP_CREATELINK                         2
 #define CM_REGACL_OP_LINKNODE                           3
+#define CM_REGACL_OP_FOLLOWLINK                         4
 
 //
 // EnlistKeyBodyWithKCB Flags
@@ -887,6 +888,13 @@ CmpAclCheckKeyCreate(
     _In_ PACCESS_STATE AccessState,
     _In_ KPROCESSOR_MODE AccessMode,
     _In_ ULONG Options
+);
+
+BOOLEAN
+NTAPI
+CmpAclCheckLinkFollow(
+    _In_ PCM_KEY_CONTROL_BLOCK LinkKcb,
+    _In_ PCUNICODE_STRING Target
 );
 
 NTSTATUS
