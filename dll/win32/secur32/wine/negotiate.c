@@ -214,8 +214,9 @@ typedef struct
     BYTE *mech_list;            /* the DER MechTypeList the mechListMIC covers */
     ULONG mech_list_len;
     BYTE *pending;              /* server: the first part of a token that arrives in pieces */
-    ULONG pending_len;
-    ULONG pending_total;
+    ULONG pending_len;          /* bytes kept */
+    ULONG pending_cap;          /* bytes allocated (grows with what arrives, up to pending_total) */
+    ULONG pending_total;        /* the length the token's own outer header announced */
 } NegoContext;
 
 /* the mechanisms this package can negotiate, in the order it offers them */
@@ -838,6 +839,37 @@ static SECURITY_STATUS nego_server_auth(NegoContext *ctx, PCredHandle phCredenti
 #define NEGO_TAG_INIT   0x60    /* the outer tag of a NegTokenInit (GSS InitialContextToken) */
 #define NEGO_TAG_RESP   0xa1    /* the outer tag of a NegTokenResp */
 
+static void nego_server_collected(NegoContext *ctx);
+
+/* What the peer can make this context hold is bounded by what it sent: the kept part has room for the bytes that
+ * arrived (and doubles from there), never beyond the length the token's own outer header announced, and never for the
+ * announced length before the bytes are there. A token that announces more than SPNEGO_MAX_TOKEN is refused with the
+ * first piece (spnego_outer_length). */
+static BOOL nego_pending_reserve(NegoContext *ctx, ULONG want)
+{
+    ULONG cap;
+    BYTE *p;
+
+    if (want <= ctx->pending_cap) return TRUE;
+    cap = ctx->pending_cap > want / 2 ? ctx->pending_cap * 2 : want;
+    if (cap < want) cap = want;
+    if (cap > ctx->pending_total) cap = ctx->pending_total;
+    p = ctx->pending ? HeapReAlloc(GetProcessHeap(), 0, ctx->pending, cap) : HeapAlloc(GetProcessHeap(), 0, cap);
+    if (!p) return FALSE;
+    ctx->pending = p;
+    ctx->pending_cap = cap;
+    return TRUE;
+}
+
+/* The kept part is dropped with every refusal, and the context takes nothing more (as after any token it refused
+ * for the shape of the exchange): the peer cannot keep a buffer on a context it has spoiled. */
+static SECURITY_STATUS nego_pending_fail(NegoContext *ctx, SECURITY_STATUS ret)
+{
+    nego_server_collected(ctx);
+    ctx->state = NS_SERVER_DEAD;
+    return ret;
+}
+
 /* A client token may arrive in parts (Windows reassembles them, measured): an SPNEGO token whose header is complete,
  * with some content, and whose outer length says there is more, is kept and SEC_I_CONTINUE_NEEDED goes back without
  * output. Returns SEC_E_OK with (*data, *len) = the whole token when it is complete. */
@@ -851,6 +883,7 @@ static SECURITY_STATUS nego_server_collect(NegoContext *ctx, const BYTE **data, 
         ULONG need = ctx->pending_total - ctx->pending_len;
         ULONG take = *len < need ? *len : need;
 
+        if (!nego_pending_reserve(ctx, ctx->pending_len + take)) return nego_pending_fail(ctx, SEC_E_INSUFFICIENT_MEMORY);
         memcpy(ctx->pending + ctx->pending_len, *data, take);
         ctx->pending_len += take;
         if (ctx->pending_len < ctx->pending_total)
@@ -859,7 +892,7 @@ static SECURITY_STATUS nego_server_collect(NegoContext *ctx, const BYTE **data, 
             return SEC_E_OK;
         }
         /* the completing part may not carry bytes behind the token (the parts are only ever one token) */
-        if (take < *len) return SEC_E_INVALID_TOKEN;
+        if (take < *len) return nego_pending_fail(ctx, SEC_E_INVALID_TOKEN);
         *data = ctx->pending;
         *len = ctx->pending_len;
         return SEC_E_OK;
@@ -878,11 +911,14 @@ static SECURITY_STATUS nego_server_collect(NegoContext *ctx, const BYTE **data, 
 
         if (*len <= hdr) return SEC_E_INVALID_TOKEN;
     }
-    ctx->pending = HeapAlloc(GetProcessHeap(), 0, total);
-    if (!ctx->pending) return SEC_E_INSUFFICIENT_MEMORY;
+    ctx->pending_total = total;
+    if (!nego_pending_reserve(ctx, *len))
+    {
+        nego_server_collected(ctx);
+        return SEC_E_INSUFFICIENT_MEMORY;
+    }
     memcpy(ctx->pending, *data, *len);
     ctx->pending_len = *len;
-    ctx->pending_total = total;
     *more = TRUE;
     return SEC_E_OK;
 }
@@ -891,7 +927,7 @@ static void nego_server_collected(NegoContext *ctx)
 {
     HeapFree(GetProcessHeap(), 0, ctx->pending);
     ctx->pending = NULL;
-    ctx->pending_len = ctx->pending_total = 0;
+    ctx->pending_len = ctx->pending_cap = ctx->pending_total = 0;
 }
 
 /***********************************************************************
@@ -977,11 +1013,15 @@ static SECURITY_STATUS SEC_ENTRY nego_AcceptSecurityContext(
             {
                 /* a raw NTLM NEGOTIATE: the exchange is plain NTLM (Windows accepts it, measured). NTLM is handed the
                  * caller's input buffer, so what was checked here must be that buffer, whole */
-                if (ctx->have_ntlm || in != caller_in || in_len != caller_len) { ret = SEC_E_INVALID_TOKEN; break; }
-                ctx->mode = NEGO_RAW;
-                ret = ntlm_AcceptSecurityContext(phCredential, NULL, pInput, fContextReq, TargetDataRep, &ctx->ntlm,
-                                                 pOutput, pfContextAttr, ptsExpiry);
-                if (ret == SEC_E_OK || ret == SEC_I_CONTINUE_NEEDED) ctx->have_ntlm = TRUE;
+                if (ctx->have_ntlm || in != caller_in || in_len != caller_len)
+                    ret = SEC_E_INVALID_TOKEN;
+                else
+                {
+                    ctx->mode = NEGO_RAW;
+                    ret = ntlm_AcceptSecurityContext(phCredential, NULL, pInput, fContextReq, TargetDataRep, &ctx->ntlm,
+                                                     pOutput, pfContextAttr, ptsExpiry);
+                    if (ret == SEC_E_OK || ret == SEC_I_CONTINUE_NEEDED) ctx->have_ntlm = TRUE;
+                }
             }
             else
                 ret = nego_server_init(ctx, phCredential, fContextReq, TargetDataRep, in, in_len, pOutput,
