@@ -43,7 +43,19 @@ typedef struct _SMB_ENGINE
     ULONG Generation;               /* changes at each attach and detach */
     ULONGLONG NextRequestId;
     LONG ActiveGets;
+    ULONGLONG OutstandingBytes;     /* message bytes of requests not yet freed (SMB_MAX_OUTSTANDING_BYTES) */
+    KEVENT BudgetEvent;             /* set when OutstandingBytes went down */
 } SMB_ENGINE, *PSMB_ENGINE;
+
+/* Message bytes all callers together may have allocated for requests: a request
+ * holds up to SMBUP_MAX_MESSAGE of paged pool until it is answered or times out,
+ * and the queue limit counts requests, not bytes. Over the limit a caller waits
+ * (bounded by the request time limit) for others to finish. */
+#define SMB_MAX_OUTSTANDING_BYTES   (64 * 1024 * 1024)
+
+/* NITRO_SMBRDR_REQUEST_TIMEOUT_SECONDS; a Debug build reads a shorter one for tests
+ * from Parameters\RequestTimeoutSeconds of the service key */
+extern ULONG SmbRequestTimeoutSeconds;
 
 typedef enum _SMB_REQUEST_STATE
 {
@@ -70,6 +82,7 @@ typedef struct _SMB_REQUEST
     PACCESS_TOKEN Token;            /* CONNECT: referenced impersonation token, handed to the engine */
     PSMBUP_HEADER Reply;            /* paged pool copy of the engine's reply, NULL if none */
     ULONG ReplySize;
+    ULONG ReservedBytes;            /* counted in SmbEngine.OutstandingBytes */
 } SMB_REQUEST, *PSMB_REQUEST;
 
 /* Extensions of the rdbss structures */

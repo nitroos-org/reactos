@@ -24,6 +24,7 @@
 
 SMB_ENGINE SmbEngine;
 PDEVICE_OBJECT SmbEngineDevice;
+ULONG SmbRequestTimeoutSeconds = NITRO_SMBRDR_REQUEST_TIMEOUT_SECONDS;
 static LIST_ENTRY SmbCopyingList;
 
 VOID
@@ -36,6 +37,59 @@ SmbEngineInitialize(VOID)
     InitializeListHead(&SmbCopyingList);
     KeInitializeSemaphore(&SmbEngine.QueueSemaphore, 0, MAXLONG);
     KeInitializeEvent(&SmbEngine.DetachEvent, NotificationEvent, TRUE);
+    KeInitializeEvent(&SmbEngine.BudgetEvent, NotificationEvent, FALSE);
+}
+
+/*
+ * Counts Bytes of a new request against SMB_MAX_OUTSTANDING_BYTES. Over the limit
+ * the caller waits for requests of others to be freed, at most the request time
+ * limit. A request alone is always admitted.
+ */
+static
+NTSTATUS
+SmbReserveBytes(ULONG Bytes)
+{
+    LARGE_INTEGER Slice;
+    KIRQL OldIrql;
+    ULONG Waited;
+
+    PAGED_CODE();
+
+    Slice.QuadPart = -10000000LL;   /* 1 s: a waiter that misses the event looks again */
+    for (Waited = 0; ; Waited++)
+    {
+        KeClearEvent(&SmbEngine.BudgetEvent);
+        KeAcquireSpinLock(&SmbEngine.Lock, &OldIrql);
+        if (SmbEngine.OutstandingBytes == 0 ||
+            SmbEngine.OutstandingBytes + Bytes <= SMB_MAX_OUTSTANDING_BYTES)
+        {
+            SmbEngine.OutstandingBytes += Bytes;
+            KeReleaseSpinLock(&SmbEngine.Lock, OldIrql);
+            return STATUS_SUCCESS;
+        }
+        KeReleaseSpinLock(&SmbEngine.Lock, OldIrql);
+
+        if (Waited >= SmbRequestTimeoutSeconds)
+        {
+            DPRINT1("mrxsmb: %lu bytes of requests outstanding, refused %lu more\n",
+                    (ULONG)SmbEngine.OutstandingBytes, Bytes);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+        KeWaitForSingleObject(&SmbEngine.BudgetEvent, Executive, KernelMode, FALSE, &Slice);
+    }
+}
+
+static
+VOID
+SmbUnreserveBytes(ULONG Bytes)
+{
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&SmbEngine.Lock, &OldIrql);
+    ASSERT(SmbEngine.OutstandingBytes >= Bytes);
+    SmbEngine.OutstandingBytes -= Bytes;
+    KeReleaseSpinLock(&SmbEngine.Lock, OldIrql);
+    KeSetEvent(&SmbEngine.BudgetEvent, IO_NO_INCREMENT, FALSE);
 }
 
 NTSTATUS
@@ -91,6 +145,8 @@ SmbFreeRequest(PSMB_REQUEST Request)
         ExFreePoolWithTag(Request->Message, TAG_SMB_MESSAGE);
     if (Request->Reply != NULL)
         ExFreePoolWithTag(Request->Reply, TAG_SMB_REPLY);
+    if (Request->ReservedBytes != 0)
+        SmbUnreserveBytes(Request->ReservedBytes);
     ExFreePoolWithTag(Request, TAG_SMB_REQUEST);
 }
 
@@ -110,6 +166,7 @@ SmbAllocateRequest(
 {
     PSMB_REQUEST Request;
     ULONGLONG Total;
+    NTSTATUS Status;
 
     PAGED_CODE();
 
@@ -122,13 +179,29 @@ SmbAllocateRequest(
     if (Total > SMBUP_MAX_MESSAGE)
         return STATUS_INVALID_PARAMETER;
 
+    /* Notifications (small, sent from callbacks and timeouts) are not held back */
+    if (Opcode != SmbUpLogoff && Opcode != SmbUpCancel)
+    {
+        Status = SmbReserveBytes((ULONG)Total);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
+
     Request = ExAllocatePoolZero(NonPagedPool, sizeof(*Request), TAG_SMB_REQUEST);
     if (Request == NULL)
+    {
+        if (Opcode != SmbUpLogoff && Opcode != SmbUpCancel)
+            SmbUnreserveBytes((ULONG)Total);
         return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    if (Opcode != SmbUpLogoff && Opcode != SmbUpCancel)
+        Request->ReservedBytes = (ULONG)Total;
 
     Request->Message = ExAllocatePoolZero(PagedPool, (SIZE_T)Total, TAG_SMB_MESSAGE);
     if (Request->Message == NULL)
     {
+        if (Request->ReservedBytes != 0)
+            SmbUnreserveBytes(Request->ReservedBytes);
         ExFreePoolWithTag(Request, TAG_SMB_REQUEST);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
