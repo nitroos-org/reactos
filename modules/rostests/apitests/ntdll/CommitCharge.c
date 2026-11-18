@@ -586,7 +586,8 @@ VOID
 CommitRange(
     _In_ SIZE_T Pages,
     _In_ BOOLEAN Expected,
-    _In_ BOOLEAN Todo)
+    _In_ BOOLEAN TodoVirtual,
+    _In_ BOOLEAN TodoSection)
 {
     LARGE_INTEGER MaximumSize;
     PVOID Base = NULL;
@@ -603,7 +604,7 @@ CommitRange(
 #endif
     {
         Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Base, 0, &Size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-        todo_if((Todo) && is_reactos())
+        todo_if((TodoVirtual) && is_reactos())
             ok_ntstatus(Status, Expected ? STATUS_SUCCESS : STATUS_COMMITMENT_LIMIT);
         if (NT_SUCCESS(Status))
         {
@@ -615,11 +616,14 @@ CommitRange(
     /* The same for a paging file backed section */
     MaximumSize.QuadPart = (LONGLONG)Pages * PageSize;
     Status = NtCreateSection(&Section, SECTION_ALL_ACCESS, NULL, &MaximumSize, PAGE_READWRITE, SEC_COMMIT, NULL);
-    todo_if((Todo) && is_reactos())
+    todo_if((TodoSection) && is_reactos())
         ok_ntstatus(Status, Expected ? STATUS_SUCCESS : STATUS_COMMITMENT_LIMIT);
     if (NT_SUCCESS(Status))
         NtClose(Section);
 }
+
+/* The test system's paging file is system managed and can grow, see START_TEST */
+static BOOLEAN GrowthFixture;
 
 static
 VOID
@@ -631,14 +635,24 @@ TestCommitBeyondRam(VOID)
     trace("commit %Iu of %Iu pages, physical %lu pages, paging files %Iu pages\n",
           Committed, CommitLimit, PhysicalPages, QueryPagingFilePages());
 
-    /* More than is left below the limit fails */
-    CommitRange(CommitLimit - Committed + MB_PAGES(64), FALSE, FALSE);
+    /*
+     * More than is left below the limit: a system managed paging file with room to grow makes room for private
+     * memory (a shortfall waits for the growth, as on Windows); one that cannot grow leaves the request failing.
+     * VERIFY ON ORACLE: NtAllocateVirtualMemory beyond the limit on a system managed paging file succeeds.
+     */
+    CommitRange(CommitLimit - Committed + MB_PAGES(64), GrowthFixture, FALSE, GrowthFixture);
+
+    /* More than RAM plus every paging file at its maximum (3x RAM) fails with either */
+#ifdef _WIN64
+    Committed = QuerySystemCommit(&CommitLimit);
+    CommitRange(CommitLimit - Committed + 4 * (ULONG_PTR)PhysicalPages + MB_PAGES(1024), FALSE, FALSE, FALSE);
+#endif
 
     /* Inside the limit, with a little to spare: Windows commits it, also when it is more than RAM */
     if (PhysicalPages < MB_PAGES(1024))
         skip("%lu pages of RAM: the gap between the limit and what ReactOS backs is small\n", PhysicalPages);
     else
-        CommitRange(CommitLimit - Committed - MB_PAGES(64), TRUE, TRUE);
+        CommitRange(CommitLimit - Committed - MB_PAGES(64), TRUE, !GrowthFixture, TRUE);
 }
 
 static
@@ -838,9 +852,6 @@ START_TEST(CommitCharge)
 
     if (is_reactos())
     {
-        TestHugeCommit();
-        TestCommitBeyondRam();
-
         /*
          * Over-commit and growth need the test system's fixture: one
          * system-managed paging file (registry) that sits at its initial
@@ -849,17 +860,26 @@ START_TEST(CommitCharge)
          * 1/8 of the volume and to the file plus the free space smss found
          * at boot minus 256 MB. The growth test needs 64 MB plus the
          * kernel reserve (at most 32 MB). Anything else skips.
+         *
+         * Decided before the tests below: a commitment beyond the limit
+         * makes a system managed paging file grow, which would move the
+         * file off its initial size.
          */
         PagingFile = QueryPagingFilePages();
         InitialPages = PhysicalPages / 8;
         if (InitialPages < MB_PAGES(512))
             InitialPages = MB_PAGES(512);
-        if (!IsSystemManagedPagingFile(&Drive[0]) ||
+        GrowthFixture = !(!IsSystemManagedPagingFile(&Drive[0]) ||
             (PagingFile > InitialPages + MB_PAGES(16)) ||
             (PhysicalPages < MB_PAGES(1024)) ||
             !GetDiskFreeSpaceExW(Drive, &FreeBytes, &TotalBytes, NULL) ||
             (FreeBytes.QuadPart < 512LL * 1024 * 1024) ||
-            (TotalBytes.QuadPart / 8 < (LONGLONG)(PagingFile + MB_PAGES(128)) * PageSize))
+            (TotalBytes.QuadPart / 8 < (LONGLONG)(PagingFile + MB_PAGES(128)) * PageSize));
+
+        TestHugeCommit();
+        TestCommitBeyondRam();
+
+        if (!GrowthFixture)
             skip("not the growth fixture: paging files %Iu pages, physical %lu pages, drive %lc\n",
                  PagingFile, PhysicalPages, Drive[0]);
         else
