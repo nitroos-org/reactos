@@ -9264,8 +9264,13 @@ RxSpinDownMRxDispatcher(
         KeWaitForSingleObject(&TearDownEvent, Executive, KernelMode, FALSE, NULL);
     }
 
-    /* The last worker cleared it if it signalled; clear it in any case */
-    InterlockedExchangePointer((void * volatile *)&pMRxDeviceObject->DispatcherContext.pTearDownEvent, NULL);
+    /* Take the event back. If a worker took it first, it is about to signal
+     * it (it may have dropped the count to 0 before we looked, and taken the
+     * pointer after): wait for that signal, the event lives on this stack */
+    if (InterlockedExchangePointer((void * volatile *)&pMRxDeviceObject->DispatcherContext.pTearDownEvent, NULL) == NULL)
+    {
+        KeWaitForSingleObject(&TearDownEvent, Executive, KernelMode, FALSE, NULL);
+    }
 }
 
 /* Work item that only wakes a worker thread during rundown */
