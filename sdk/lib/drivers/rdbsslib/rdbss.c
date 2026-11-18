@@ -2126,6 +2126,9 @@ RxCommonCleanup(
 
         RxUninitializeCacheMap(Context, FileObject, NULL);
 
+        /* As below: no cache map may be initialized on it any more */
+        SetFlag(FileObject->Flags, FO_CLEANUP_COMPLETE);
+
         RxReleaseFcb(Context, Fcb);
 
         return STATUS_SUCCESS;
@@ -11247,17 +11250,35 @@ RxUninitializeCacheMap(
     ASSERT(NodeTypeIsFcb(Fcb));
     ASSERT(RxIsFcbAcquiredExclusive(Fcb));
 
-    KeInitializeEvent(&UninitEvent.Event, SynchronizationEvent, FALSE);
-    CcUninitializeCacheMap(FileObject, TruncateSize, &UninitEvent);
+    /*
+     * The FCB is released while the uninitialization completes, and the
+     * caller only marks the file object FO_CLEANUP_COMPLETE afterwards: a
+     * read or write that ran meanwhile found no private cache map and
+     * initialized a new one, which nothing would uninitialize again before
+     * the file object is freed. Start over until none is left; the caller
+     * holds the FCB exclusive from here to the mark.
+     */
+    for (;;)
+    {
+        KeInitializeEvent(&UninitEvent.Event, SynchronizationEvent, FALSE);
+        CcUninitializeCacheMap(FileObject, TruncateSize, &UninitEvent);
 
-    /* Always release the FCB before waiting for the uninit event */
-    RxReleaseFcb(RxContext, Fcb);
+        /* Always release the FCB before waiting for the uninit event */
+        RxReleaseFcb(RxContext, Fcb);
 
-    KeWaitForSingleObject(&UninitEvent.Event, Executive, KernelMode, FALSE, NULL);
+        KeWaitForSingleObject(&UninitEvent.Event, Executive, KernelMode, FALSE, NULL);
 
-    /* Re-acquire it afterwards */
-    Status = RxAcquireExclusiveFcb(RxContext, Fcb);
-    ASSERT(NT_SUCCESS(Status));
+        /* Re-acquire it afterwards */
+        Status = RxAcquireExclusiveFcb(RxContext, Fcb);
+        ASSERT(NT_SUCCESS(Status));
+
+        if (FileObject->PrivateCacheMap == NULL)
+        {
+            break;
+        }
+
+        DPRINT1("Cache map of %p initialized again during its cleanup\n", FileObject);
+    }
 }
 
 /*
