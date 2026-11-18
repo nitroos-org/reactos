@@ -29,6 +29,7 @@ extern void func_NtlmFailedContext(void);
 extern void func_NtlmLocalCall(void);
 extern void func_NtlmLocalCallExpiry(void);
 extern void func_NtlmLoopback(void);
+extern void func_NtlmServerAuthenticate(void);
 extern void func_NtlmSignatureBytes(void);
 
 const struct test winetest_testlist[] =
@@ -55,6 +56,7 @@ const struct test winetest_testlist[] =
     { "NtlmLocalCall", func_NtlmLocalCall },
     { "NtlmLocalCallExpiry", func_NtlmLocalCallExpiry },
     { "NtlmLoopback", func_NtlmLoopback },
+    { "NtlmServerAuthenticate", func_NtlmServerAuthenticate },
     { "NtlmSignatureBytes", func_NtlmSignatureBytes },
     { 0, 0 }
 };
