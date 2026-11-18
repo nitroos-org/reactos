@@ -230,6 +230,9 @@ static void test_opaque_identity(void)
 
 /* ---- the data messages: Wrap = EncryptMessage on TOKEN + DATA + PADDING, Unwrap = DecryptMessage on STREAM + DATA ---- */
 
+#define QOP_NO_ENCRYPT 0x80000001   /* SECQOP_WRAP_NO_ENCRYPT, what Wrap(requestEncryption: false) passes */
+#define QOP_UNKNOWN    0xfffffffe   /* nobody measured it: the row prints it (VERIFY ON PEER) */
+
 /* NegotiateAuthenticationPal.Wrap: the sizes come from SECPKG_ATTR_SIZES, the three buffers sit in one allocation
  * (token, data, padding) and the result is compacted to what the package returned in the buffer sizes. */
 static ULONG dn_wrap(CtxtHandle *ctx, ULONG qop, const BYTE *in, ULONG in_len, BYTE *out, const char *what)
@@ -289,7 +292,10 @@ static void dn_unwrap_stream(CtxtHandle *ctx, const BYTE *msg, ULONG msg_len, co
         ok(bufs[1].cbBuffer == plain_len, "%s: %lu data bytes, expected %lu\n", what, (unsigned long)bufs[1].cbBuffer,
            (unsigned long)plain_len);
         ok(bufs[1].cbBuffer == plain_len && !memcmp(bufs[1].pvBuffer, plain, plain_len), "%s: the data differs\n", what);
-        ok(qop == expected_qop, "%s: qop 0x%08lx, expected 0x%08lx\n", what, (unsigned long)qop, (unsigned long)expected_qop);
+        if (expected_qop == QOP_UNKNOWN)
+            trace("VERIFY ON PEER %s: qop 0x%08lx\n", what, (unsigned long)qop);
+        else
+            ok(qop == expected_qop, "%s: qop 0x%08lx, expected 0x%08lx\n", what, (unsigned long)qop, (unsigned long)expected_qop);
     }
     HeapFree(GetProcessHeap(), 0, stream);
 }
@@ -362,8 +368,41 @@ static void test_stream_decrypt(void)
     }
 }
 
+/* ---- ProtectionLevel.Sign: the context asked for integrity only (no confidentiality), and Wrap(requestEncryption:
+ * false) passes SECQOP_WRAP_NO_ENCRYPT to EncryptMessage ----
+ * The message each side makes with such a context must be readable by the other one. Measured on Windows Server 2022
+ * (SSPI-only probe, both directions, see the commit that made EncryptMessage seal without SEAL): NTLM with integrity
+ * but no confidentiality seals and the peer decrypts it; Negotiate always offers signing, so its messages always work.
+ * Not measured: the qop DecryptMessage reports for a message made with SECQOP_WRAP_NO_ENCRYPT; the row prints it
+ * (VERIFY ON PEER: `dnprobe.exe` prints it on Windows). */
+static void test_sign_only_messages(void)
+{
+    static const WCHAR *packages[] = { L"Negotiate", L"NTLM" };
+    static const ULONG qops[] = { QOP_NO_ENCRYPT, 0 };
+    PAIR p;
+    UINT i, j;
+
+    for (i = 0; i < ARRAYSIZE(packages); i++)
+    {
+        char what[96];
+
+        _snprintf(what, sizeof(what), "%ls, own credentials, sign only", packages[i]);
+        if (!establish(packages[i], NULL, DN_CLIENT_SIGN, DN_SERVER_SIGN, &p, what))
+            continue;
+        for (j = 0; j < ARRAYSIZE(qops); j++)
+        {
+            char label[128];
+
+            _snprintf(label, sizeof(label), "%s, qop 0x%lx", what, (unsigned long)qops[j]);
+            check_stream_messages(&p, qops[j], QOP_UNKNOWN, label);
+        }
+        release(&p);
+    }
+}
+
 START_TEST(DotNetSspi)
 {
     test_opaque_identity();
     test_stream_decrypt();
+    test_sign_only_messages();
 }
