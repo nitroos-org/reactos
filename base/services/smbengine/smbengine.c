@@ -102,6 +102,7 @@ ReadConfig(VOID)
                                                    NITRO_SMBRDR_REQUEST_TIMEOUT_SECONDS - 10);
     SmbEngConfig.GetThreads = ReadDword(Key, L"GetThreads", 4, 1, SMBENG_MAX_GET_THREADS);
     SmbEngConfig.MaxConnections = ReadDword(Key, L"MaxConnections", 256, 1, 4096);
+    SmbEngConfig.MaxConnectionsPerLogon = ReadDword(Key, L"MaxConnectionsPerLogon", 64, 1, 4096);
     SmbEngConfig.StatsSeconds = ReadDword(Key, L"StatsSeconds", 300, 0, 86400);
     SmbEngConfig.Dialect = ReadDword(Key, L"Dialect", 0, 0, 0x311);
     if (Key != NULL)
@@ -351,7 +352,7 @@ HandleConnect(PSMBENG_OP Op, HANDLE Event)
 {
     PSMBUP_HEADER h = Op->Request;
     PSMBUP_CONNECT_REQUEST r = (PSMBUP_CONNECT_REQUEST)(h + 1);
-    ULONG FixedEnd = sizeof(*h) + sizeof(*r), ServerBytes, ShareBytes, Dummy;
+    ULONG FixedEnd = sizeof(*h) + sizeof(*r), ServerBytes, ShareBytes, Dummy, OfLogon = 0;
     const WCHAR *Server, *Share, *Password;
     PSMBENG_CONN Conn = NULL;
     PSMBENG_BINDING Binding;
@@ -403,6 +404,8 @@ HandleConnect(PSMBENG_OP Op, HANDLE Event)
     {
         PSMBENG_CONN Candidate = CONTAINING_RECORD(Entry, SMBENG_CONN, Link);
 
+        if (Candidate->LogonId.LowPart == h->LogonIdLow && Candidate->LogonId.HighPart == h->LogonIdHigh)
+            OfLogon++;
         if (!Candidate->Closing && !Candidate->LoggedOff &&
             SameKey(Candidate, h, Server, ServerBytes, Share, ShareBytes))
         {
@@ -412,8 +415,14 @@ HandleConnect(PSMBENG_OP Op, HANDLE Event)
     }
     if (Conn == NULL)
     {
-        if (SmbEng.ConnCount >= SmbEngConfig.MaxConnections || SmbEng.Stopping)
+        /* Each key is a thread and (in back-off) stays a while after a failed connect: one
+         * logon session naming many servers must not take the keys of every other user */
+        if (SmbEng.ConnCount >= SmbEngConfig.MaxConnections || OfLogon >= SmbEngConfig.MaxConnectionsPerLogon ||
+            SmbEng.Stopping)
         {
+            if (!SmbEng.Stopping)
+                SmbEngLog(1, "connect refused: %lu connections, %lu of logon %08lx:%08lx",
+                          SmbEng.ConnCount, OfLogon, h->LogonIdHigh, h->LogonIdLow);
             ReleaseSRWLockExclusive(&SmbEng.Lock);
             free(Binding);
             SmbEngAnswerOp(Op, STATUS_INSUFFICIENT_RESOURCES, Event);

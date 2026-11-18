@@ -55,6 +55,7 @@ typedef struct _SMBENG_CONFIG
     DWORD RequestTimeoutSeconds;/* libsmb2 per-request limit, below the driver's */
     DWORD GetThreads;           /* threads waiting for requests of the driver */
     DWORD MaxConnections;       /* (logon id, server, share) keys at a time */
+    DWORD MaxConnectionsPerLogon; /* of those, for one logon session (one user cannot take them all) */
     DWORD StatsSeconds;         /* period of the statistics line (DebugLevel >= 1), 0 = off */
     DWORD Dialect;              /* 0 = negotiate 2.0.2..3.1.1; 0x210, 0x300, 0x302, 0x311 = only that one (tests) */
 } SMBENG_CONFIG;
