@@ -227,3 +227,40 @@ QueryUnbiasedInterruptTimePrecise(
 {
     *UnbiasedInterruptTime = BasepQueryPrecise();
 }
+
+/*
+ * @implemented
+ *
+ * The interrupt time itself, which includes the time spent in sleep and hibernation (the unbiased time leaves it
+ * out). Windows has it in kernelbase.dll, as the two functions before and after; api-ms-win-core-realtime-l1-1-1
+ * resolves to this DLL here, and a program that delay-loads it through the api set (Chrome 158 does, in the browser
+ * process at the first window) must find it here.
+ */
+VOID
+WINAPI
+QueryInterruptTime(
+    _Out_ PULONGLONG InterruptTime)
+{
+    LARGE_INTEGER Time = KiReadSystemTime(&SharedUserData->InterruptTime);
+
+    *InterruptTime = Time.QuadPart;
+}
+
+/*
+ * @implemented
+ *
+ * The precise interrupt time: the precise unbiased time plus the bias for sleep and hibernation (zero while the kernel
+ * does not set it, and absent from the shared user data before NT 6).
+ */
+VOID
+WINAPI
+QueryInterruptTimePrecise(
+    _Out_ PULONGLONG InterruptTime)
+{
+    ULONGLONG Bias = 0;
+
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+    Bias = SharedUserData->InterruptTimeBias;
+#endif
+    *InterruptTime = (ULONGLONG)BasepQueryPrecise() + Bias;
+}

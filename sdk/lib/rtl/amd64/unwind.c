@@ -756,6 +756,74 @@ GetEstablisherFrame(
     return Context->Rsp;
 }
 
+/*
+    Unwind data gives the offsets of saved XMM registers from the frame base, the
+    frame register minus its scaled offset. The compiler of this tree can set the
+    frame register before it allocates the rest of the frame ("mov rbp, rsp; sub
+    rsp, N", frame offset 0) and then gives the XMM offsets from the stack pointer
+    after that allocation, where it stores them. The frame base is then N above
+    the stack pointer the offsets belong to: an XMM slot computed from it is
+    misaligned by the pushes of the frame, and lies in the area above the frame,
+    not where the register was saved (movdqa from it is a general protection fault).
+    So the base of the XMM offsets is the frame base lowered by the pushes and
+    allocations that come after the frame register is set. With a frame register set
+    after the whole allocation (the usual order) there is nothing to lower.
+
+    \param UnwindInfo The unwind info the Index belongs to.
+    \param Index The first op that has been executed in the function (ops are listed last executed first).
+    \param FrameBase The frame base of the function.
+*/
+static
+ULONG64
+RtlpGetXmmBase(
+    _In_ PUNWIND_INFO UnwindInfo,
+    _In_ ULONG Index,
+    _In_ ULONG64 FrameBase)
+{
+    ULONG64 Allocation = 0;
+    UNWIND_CODE UnwindCode;
+    ULONG i;
+
+    if (UnwindInfo->FrameRegister == 0)
+    {
+        return FrameBase;
+    }
+
+    for (i = Index; i < UnwindInfo->CountOfCodes; i += UnwindOpSlots(UnwindInfo->UnwindCode[i]))
+    {
+        UnwindCode = UnwindInfo->UnwindCode[i];
+        if (UnwindCode.UnwindOp == UWOP_SET_FPREG)
+        {
+            return FrameBase - Allocation;
+        }
+        else if (UnwindCode.UnwindOp == UWOP_PUSH_NONVOL)
+        {
+            Allocation += 8;
+        }
+        else if (UnwindCode.UnwindOp == UWOP_ALLOC_SMALL)
+        {
+            Allocation += (ULONG64)(UnwindCode.OpInfo + 1) * 8;
+        }
+        else if (UnwindCode.UnwindOp == UWOP_ALLOC_LARGE)
+        {
+            if ((i + 1) >= UnwindInfo->CountOfCodes)
+                break;
+
+            if (UnwindCode.OpInfo)
+            {
+                if ((i + 2) >= UnwindInfo->CountOfCodes)
+                    break;
+                Allocation += *(ULONG*)(&UnwindInfo->UnwindCode[i + 1]);
+            }
+            else
+                Allocation += (ULONG64)UnwindInfo->UnwindCode[i + 1].FrameOffset * 8;
+        }
+    }
+
+    /* No frame register set in this part: nothing was allocated after it */
+    return FrameBase;
+}
+
 PEXCEPTION_ROUTINE
 NTAPI
 RtlVirtualUnwind(
@@ -775,7 +843,7 @@ RtlVirtualUnwind(
     BYTE Reg;
     PULONG LanguageHandler;
     BOOLEAN InProlog;
-    ULONG64 FrameBase, CodeBase;
+    ULONG64 FrameBase, XmmBase, CodeBase;
     PRUNTIME_FUNCTION CodeEntry;
 
     /* Get relative virtual address */
@@ -871,6 +939,9 @@ RtlVirtualUnwind(
 
 RepeatChainedInfo:
 
+    /* The saved XMM registers lie relative to the stack pointer after the allocation */
+    XmmBase = RtlpGetXmmBase(UnwindInfo, i, FrameBase);
+
     /* Process the remaining unwind ops */
     while (i < UnwindInfo->CountOfCodes)
     {
@@ -942,14 +1013,14 @@ RepeatChainedInfo:
                 Offset = UnwindInfo->UnwindCode[i + 1].FrameOffset;
                 /* The slot stores offset / 16; adding it to an M128A* scales it back to bytes.
                  * See https://github.com/dotnet/runtime/blob/421be955e4b70cddf583b10f5ad99814b713fb87/src/coreclr/unwinder/amd64/unwinder.cpp#L890 */
-                SetXmmRegFromStackValue(Context, ContextPointers, Reg, (M128A*)FrameBase + Offset);
+                SetXmmRegFromStackValue(Context, ContextPointers, Reg, (M128A*)XmmBase + Offset);
                 i += 2;
                 break;
 
             case UWOP_SAVE_XMM128_FAR:
                 Reg = UnwindCode.OpInfo;
                 Offset = *(ULONG*)(&UnwindInfo->UnwindCode[i + 1]);
-                SetXmmRegFromStackValue(Context, ContextPointers, Reg, (M128A*)(FrameBase + Offset));
+                SetXmmRegFromStackValue(Context, ContextPointers, Reg, (M128A*)(XmmBase + Offset));
                 i += 3;
                 break;
 
@@ -1624,6 +1695,31 @@ RtlpCaptureNonVolatileContextPointers(
     ASSERT(EstablisherFrame >= TargetFrame);
 }
 
+/* A saved XMM register is 16 bytes at a 16 byte aligned address. A pointer that is NULL or not aligned is not such
+   a slot (unwind data of an image that stores them elsewhere); touching it with the aligned 128 bit move that the
+   copy compiles to is a general protection fault, in kernel mode a bugcheck, and a store would damage the stack. */
+static
+__inline
+VOID
+RtlpGetSavedXmm(
+    _Out_ M128A *Destination,
+    _In_opt_ M128A *Slot)
+{
+    if ((Slot != NULL) && (((ULONG_PTR)Slot & 15) == 0))
+        *Destination = *Slot;
+}
+
+static
+__inline
+VOID
+RtlpSetSavedXmm(
+    _In_opt_ M128A *Slot,
+    _In_ M128A *Source)
+{
+    if ((Slot != NULL) && (((ULONG_PTR)Slot & 15) == 0))
+        *Slot = *Source;
+}
+
 VOID
 RtlGetUnwindContext(
     _Out_ PCONTEXT Context,
@@ -1648,16 +1744,16 @@ RtlGetUnwindContext(
     }
     if (ContextFlags & CONTEXT_FLOATING_POINT)
     {
-        Context->Xmm6 = *ContextPointers.Xmm6;
-        Context->Xmm7 = *ContextPointers.Xmm7;
-        Context->Xmm8 = *ContextPointers.Xmm8;
-        Context->Xmm9 = *ContextPointers.Xmm9;
-        Context->Xmm10 = *ContextPointers.Xmm10;
-        Context->Xmm11 = *ContextPointers.Xmm11;
-        Context->Xmm12 = *ContextPointers.Xmm12;
-        Context->Xmm13 = *ContextPointers.Xmm13;
-        Context->Xmm14 = *ContextPointers.Xmm14;
-        Context->Xmm15 = *ContextPointers.Xmm15;
+        RtlpGetSavedXmm(&Context->Xmm6, ContextPointers.Xmm6);
+        RtlpGetSavedXmm(&Context->Xmm7, ContextPointers.Xmm7);
+        RtlpGetSavedXmm(&Context->Xmm8, ContextPointers.Xmm8);
+        RtlpGetSavedXmm(&Context->Xmm9, ContextPointers.Xmm9);
+        RtlpGetSavedXmm(&Context->Xmm10, ContextPointers.Xmm10);
+        RtlpGetSavedXmm(&Context->Xmm11, ContextPointers.Xmm11);
+        RtlpGetSavedXmm(&Context->Xmm12, ContextPointers.Xmm12);
+        RtlpGetSavedXmm(&Context->Xmm13, ContextPointers.Xmm13);
+        RtlpGetSavedXmm(&Context->Xmm14, ContextPointers.Xmm14);
+        RtlpGetSavedXmm(&Context->Xmm15, ContextPointers.Xmm15);
     }
 }
 
@@ -1685,16 +1781,16 @@ RtlSetUnwindContext(
     }
     if (ContextFlags & CONTEXT_FLOATING_POINT)
     {
-        *ContextPointers.Xmm6 = Context->Xmm6;
-        *ContextPointers.Xmm7 = Context->Xmm7;
-        *ContextPointers.Xmm8 = Context->Xmm8;
-        *ContextPointers.Xmm9 = Context->Xmm9;
-        *ContextPointers.Xmm10 = Context->Xmm10;
-        *ContextPointers.Xmm11 = Context->Xmm11;
-        *ContextPointers.Xmm12 = Context->Xmm12;
-        *ContextPointers.Xmm13 = Context->Xmm13;
-        *ContextPointers.Xmm14 = Context->Xmm14;
-        *ContextPointers.Xmm15 = Context->Xmm15;
+        RtlpSetSavedXmm(ContextPointers.Xmm6, &Context->Xmm6);
+        RtlpSetSavedXmm(ContextPointers.Xmm7, &Context->Xmm7);
+        RtlpSetSavedXmm(ContextPointers.Xmm8, &Context->Xmm8);
+        RtlpSetSavedXmm(ContextPointers.Xmm9, &Context->Xmm9);
+        RtlpSetSavedXmm(ContextPointers.Xmm10, &Context->Xmm10);
+        RtlpSetSavedXmm(ContextPointers.Xmm11, &Context->Xmm11);
+        RtlpSetSavedXmm(ContextPointers.Xmm12, &Context->Xmm12);
+        RtlpSetSavedXmm(ContextPointers.Xmm13, &Context->Xmm13);
+        RtlpSetSavedXmm(ContextPointers.Xmm14, &Context->Xmm14);
+        RtlpSetSavedXmm(ContextPointers.Xmm15, &Context->Xmm15);
     }
 }
 
