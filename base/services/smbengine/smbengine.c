@@ -381,6 +381,13 @@ HandleConnect(PSMBENG_OP Op, HANDLE Event)
         SmbEngAnswerOp(Op, STATUS_BAD_NETWORK_PATH, Event);
         return;
     }
+    /* libsmb2's connect does not report the share type and the reply says "disk": a tree
+     * connect to IPC$ (named pipes) would reach rdbss as a disk share. Disk shares only. */
+    if (ShareBytes == 4 * sizeof(WCHAR) && _wcsnicmp(Share, L"IPC$", 4) == 0)
+    {
+        SmbEngAnswerOp(Op, STATUS_BAD_DEVICE_TYPE, Event);
+        return;
+    }
     if (r->Flags & SMBUP_CONNECT_EXPLICIT_CREDENTIALS)
     {
         /* Not in this version (the driver does not send them yet): wipe and refuse */
