@@ -352,6 +352,7 @@ missing:
  * has one is built with ros_no_nonvolatile_xmm (sdk/cmake/CMakeMacros.cmake), so that it never saves XMM6-XMM15. */
 
 #define UNW_SECTIONS_MAX 96
+#define UNW_CHAIN_MAX 8
 typedef struct { unsigned int va, vsize, raw, rawsize; } unw_section;
 
 static const unsigned char *unw_ptr(const unsigned char *buffer, size_t len, const unw_section *sec, unsigned int nsec,
@@ -394,7 +395,12 @@ static int check_unwind(const unsigned char *buffer, size_t len)
     opt = pe + 24;
     if ((size_t)opt + optsize > len || optsize < 112 + 4 * 8 || rd16(buffer + opt) != 0x20b) return 0;
     if (rd32(buffer + opt + 108) <= 3) return 0;            /* NumberOfRvaAndSizes: no exception directory */
-    if (nsec > UNW_SECTIONS_MAX || (size_t)opt + optsize + 40 * nsec > len) return 0;
+    if (nsec > UNW_SECTIONS_MAX)
+    {
+        error("%u sections: more than the unwind data check reads (%u)\n", nsec, UNW_SECTIONS_MAX);
+        return 1;
+    }
+    if ((size_t)opt + optsize + 40 * nsec > len) return 0;
     for (i = 0; i < nsec; i++)
     {
         const unsigned char *s = buffer + opt + optsize + 40 * i;
@@ -415,30 +421,70 @@ static int check_unwind(const unsigned char *buffer, size_t len)
     {
         unsigned int begin = rd32(pdata + n), unwind_rva = rd32(pdata + n + 8), depth;
         /* the codes of the function and of its chained parents, in array order (the reverse of the prolog order) */
-        unsigned int op[512], arg[512], count = 0, k, fp_seen = 0, after_fp = 0, saves = 0;
+        unsigned int op[UNW_CHAIN_MAX * 255], arg[UNW_CHAIN_MAX * 255], count = 0, k, fp_seen = 0, after_fp = 0;
+        unsigned int saves = 0;
+        const char *malformed = NULL;
 
         if (unwind_rva & 1) continue;                        /* an indirect entry: the target is checked itself */
-        for (depth = 0; depth < 8; depth++)
+        if (unwind_rva == 0) continue;                       /* no unwind info (an entry the linker cleared) */
+        for (depth = 0; ; depth++)
         {
-            const unsigned char *ui = unw_ptr(buffer, len, sec, nsec, unwind_rva, 4), *codes;
+            const unsigned char *ui, *codes = NULL, *chain;
             unsigned int flags, ncodes, j;
-            if (!ui) break;
+
+            if (depth == UNW_CHAIN_MAX)
+            {
+                malformed = "chained deeper than the check follows";
+                break;
+            }
+            /* Only the bytes each part needs: the unwind info of the last function often ends a few bytes before
+               the end of the section's raw data, and is checked like any other */
+            ui = unw_ptr(buffer, len, sec, nsec, unwind_rva, 4);
+            if (!ui)
+            {
+                malformed = "unwind info outside the file's sections";
+                break;
+            }
             flags = ui[0] >> 3;
             ncodes = ui[2];
-            codes = unw_ptr(buffer, len, sec, nsec, unwind_rva + 4, 2 * ((ncodes + 1) & ~1u) + 12);
-            if (!codes) break;
-            for (j = 0; j < ncodes && count < 512; )
+            if (ncodes)
+            {
+                codes = unw_ptr(buffer, len, sec, nsec, unwind_rva + 4, 2 * ncodes);
+                if (!codes)
+                {
+                    malformed = "unwind codes outside the file's sections";
+                    break;
+                }
+            }
+            for (j = 0; j < ncodes; )
             {
                 unsigned int o = codes[2 * j + 1] & 15, inf = codes[2 * j + 1] >> 4, sl = unw_slots(o, inf), a = 0;
-                if (j + sl > ncodes) break;
+                if (j + sl > ncodes)
+                {
+                    malformed = "an unwind code runs past CountOfCodes";
+                    break;
+                }
                 if (o == 1) a = inf ? rd32(codes + 2 * j + 2) : rd16(codes + 2 * j + 2) * 8;
                 else if (o == 2) a = inf * 8 + 8;
                 else if (o == 0) a = 8;
                 op[count] = o; arg[count] = a; count++;
                 j += sl;
             }
-            if (!(flags & 4)) break;                         /* UNW_FLAG_CHAININFO: a RUNTIME_FUNCTION follows */
-            unwind_rva = rd32(codes + 2 * ((ncodes + 1) & ~1u) + 8) & ~1u;
+            if (malformed || !(flags & 4)) break;            /* UNW_FLAG_CHAININFO: a RUNTIME_FUNCTION follows */
+            chain = unw_ptr(buffer, len, sec, nsec, unwind_rva + 4 + 2 * ((ncodes + 1) & ~1u), 12);
+            if (!chain)
+            {
+                malformed = "chained function entry outside the file's sections";
+                break;
+            }
+            unwind_rva = rd32(chain + 8) & ~1u;
+        }
+        if (malformed)
+        {
+            /* Not data this tree's linker writes; do not pass a function that could not be checked */
+            error("the unwind data of the function at RVA 0x%x cannot be checked: %s\n", begin, malformed);
+            bad++;
+            continue;
         }
 
         /* prolog order */
@@ -824,6 +870,12 @@ int main(int argc, char **argv)
     if (dos_header->e_magic != IMAGE_DOS_SIGNATURE)
     {
         error("Invalid DOS signature: %x\n", dos_header->e_magic);
+        goto Quit;
+    }
+
+    if ((ULONG)dos_header->e_lfanew > len || len - (ULONG)dos_header->e_lfanew < sizeof(IMAGE_NT_HEADERS))
+    {
+        error("Invalid e_lfanew: %x\n", dos_header->e_lfanew);
         goto Quit;
     }
 
