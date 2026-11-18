@@ -4709,7 +4709,7 @@ RxCommonWrite(
     PRDBSS_DEVICE_OBJECT RxDeviceObject;
     ULONG WriteLength, CapturedRxContextSerialNumber = RxContext->SerialNumber;
     LONGLONG FileSize, ValidDataLength, InitialFileSize, InitialValidDataLength;
-    BOOLEAN CanWait, PagingIo, NoCache, Sync, NormalFile, WriteToEof, IsPipe, NoPreposting, InFsp, RecursiveWriteThrough, CalledByLazyWriter, SwitchBackToAsync, ExtendingFile, ExtendingValidData, UnwindOutstandingAsync, ResourceOwnerSet, PostIrp, ContextReferenced;
+    BOOLEAN CanWait, PagingIo, NoCache, Sync, NormalFile, WriteToEof, IsPipe, InFsp, RecursiveWriteThrough, CalledByLazyWriter, SwitchBackToAsync, ExtendingFile, ExtendingValidData, UnwindOutstandingAsync, ResourceOwnerSet, PostIrp, ContextReferenced;
 
     PAGED_CODE();
 
@@ -4737,7 +4737,6 @@ RxCommonWrite(
 
     /* Get some parameters */
     Irp = RxContext->CurrentIrp;
-    NoPreposting = BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_NO_PREPOSTING_NEEDED);
     InFsp = BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_IN_FSP);
     CanWait = BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_WAIT);
     PagingIo = BooleanFlagOn(Irp->Flags, IRP_PAGING_IO);
@@ -4880,8 +4879,13 @@ RxCommonWrite(
 
         RxItsTheSameContext();
 
-        /* Start locking stuff */
-        if (!PagingIo && !NoPreposting)
+        /* Start locking stuff. Every non-paging write takes the FCB, also when
+         * it runs again after a post or a retry: RX_CONTEXT_FLAG_NO_PREPOSTING_NEEDED
+         * (set by RxPrePostIrp and RxLowIoSubmit) only says the user buffer
+         * was locked already. (A posted write used to run in the FSP with the
+         * paging I/O resource only, unserialized against size changes, and
+         * released an FCB it did not hold when it had to flush) */
+        if (!PagingIo)
         {
             /* If it's already acquired, all fine */
             if (RxContext->FcbResourceAcquired)
