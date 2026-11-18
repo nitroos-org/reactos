@@ -1008,6 +1008,13 @@ SmbQueryDirectory(PRX_CONTEXT RxContext)
         }
         else
         {
+            /* One entry when one was asked for, whatever the engine sent: callers rely on it
+             * (kernel32's FindFirstFile asserts that the entry it gets is the last one) */
+            if (RxContext->QueryDirectory.ReturnSingleEntry && *(ULONG UNALIGNED *)Data != 0)
+            {
+                DataLength = *(ULONG UNALIGNED *)Data;
+                *(ULONG UNALIGNED *)Data = 0;
+            }
             RtlCopyMemory(RxContext->Info.Buffer, Data, DataLength);
             RxContext->Info.LengthRemaining -= DataLength;
         }
