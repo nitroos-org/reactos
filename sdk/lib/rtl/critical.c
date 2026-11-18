@@ -52,13 +52,14 @@ extern HANDLE LdrpShutdownThreadId;
  * that state (a lock convoy) until they stop using it.
  */
 
-/* Take the section if it is free. TRUE when the caller now owns it. */
+/* Take the section if it is free, starting from the value Old read from LockCount.
+   TRUE when the caller now owns it. */
 FORCEINLINE
 BOOLEAN
-RtlpTryTakeCriticalSection(
-    _Inout_ PRTL_CRITICAL_SECTION CriticalSection)
+RtlpTryTakeCriticalSectionFrom(
+    _Inout_ PRTL_CRITICAL_SECTION CriticalSection,
+    _In_ LONG Old)
 {
-    LONG Old = *(volatile LONG *)&CriticalSection->LockCount;
     LONG Previous;
 
     while (Old & RTLP_CS_FREE)
@@ -72,6 +73,18 @@ RtlpTryTakeCriticalSection(
     }
 
     return FALSE;
+}
+
+/* Take the section if it is free. TRUE when the caller now owns it. */
+FORCEINLINE
+BOOLEAN
+RtlpTryTakeCriticalSection(
+    _Inout_ PRTL_CRITICAL_SECTION CriticalSection)
+{
+    /* The usual case first, with no load before the CAS: free, nobody waiting */
+    LONG Old = InterlockedCompareExchange(&CriticalSection->LockCount, -2, -1);
+
+    return (Old == -1) || RtlpTryTakeCriticalSectionFrom(CriticalSection, Old);
 }
 
 /*++
@@ -550,8 +563,9 @@ RtlpEnterCriticalSectionContended(
     Spin = CriticalSection->SpinCount & ~RTL_CRITICAL_SECTION_ALL_FLAG_BITS;
     while (Spin)
     {
-        if ((*(volatile LONG *)&CriticalSection->LockCount & RTLP_CS_FREE) &&
-            RtlpTryTakeCriticalSection(CriticalSection))
+        /* Only a free section is tried: a CAS on an owned one would pull its cache line away from the owner */
+        Old = *(volatile LONG *)&CriticalSection->LockCount;
+        if (RtlpTryTakeCriticalSectionFrom(CriticalSection, Old))
         {
             return;
         }
@@ -960,7 +974,11 @@ RtlLeaveCriticalSection(PRTL_CRITICAL_SECTION CriticalSection)
          * the section when it runs. A woken thread that has not come back yet
          * is enough, it wakes no other.
          */
-        Old = *(volatile LONG *)&CriticalSection->LockCount;
+        /* The usual case first: owned, nobody waiting (no load before the CAS) */
+        Old = InterlockedCompareExchange(&CriticalSection->LockCount, -1, -2);
+        if (Old == -2)
+            return STATUS_SUCCESS;
+
         for (;;)
         {
             Wake = (((ULONG)~Old >> 2) != 0) && (Old & RTLP_CS_NOT_WOKEN);
