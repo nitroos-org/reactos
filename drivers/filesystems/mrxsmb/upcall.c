@@ -331,17 +331,35 @@ SmbReplyStatus(PSMB_REQUEST Request, ULONG MaxDataLength, PVOID *Data, PULONG Da
     Status = Reply->Status;
 
     /* Statuses a caller can get back. Anything else would let the engine steer the
-     * I/O manager (STATUS_PENDING, STATUS_REPARSE, other informational codes) */
+     * I/O manager (STATUS_PENDING, STATUS_REPARSE, other informational codes) or
+     * rdbss and rxce, which act on some error codes of a mini-redirector: STATUS_RETRY
+     * (RxFsdCommonDispatch, RxFspDispatch dispatch again) and
+     * STATUS_MORE_PROCESSING_REQUIRED (RxCommonCreate opens again), each time with a
+     * new upcall, for as long as the engine answers so; STATUS_CONNECTION_ACTIVE as
+     * the status of a tree connect makes RxConstructVirtualNetRoot use the virtual
+     * net root that RxFindOrCreateConnections has just cleared. An engine passes the
+     * server's status through, so these come from the network too. Warnings only where the
+     * operation has them: STATUS_BUFFER_OVERFLOW for queries, STATUS_NO_MORE_FILES
+     * for directory queries. */
     if (!NT_ERROR(Status) &&
         Status != STATUS_SUCCESS &&
-        Status != STATUS_BUFFER_OVERFLOW &&
-        Status != STATUS_NO_MORE_FILES)
+        !(Status == STATUS_BUFFER_OVERFLOW &&
+          (Request->Opcode == SmbUpQueryInfo || Request->Opcode == SmbUpQueryVolume ||
+           Request->Opcode == SmbUpQueryDirectory)) &&
+        !(Status == STATUS_NO_MORE_FILES && Request->Opcode == SmbUpQueryDirectory))
     {
-        DPRINT1("mrxsmb: engine status %lx refused\n", Status);
+        DPRINT1("mrxsmb: engine status %lx refused (op %u)\n", Status, Request->Opcode);
         return STATUS_INVALID_NETWORK_RESPONSE;
     }
-    if (Status == STATUS_PENDING || Status == STATUS_REPARSE)
+    if (Status == STATUS_MORE_PROCESSING_REQUIRED ||
+        Status == STATUS_RETRY ||
+        Status == STATUS_CANT_WAIT ||
+        Status == STATUS_CONNECTION_ACTIVE ||
+        Status == STATUS_LOCK_NOT_GRANTED)
+    {
+        DPRINT1("mrxsmb: engine status %lx refused (op %u)\n", Status, Request->Opcode);
         return STATUS_INVALID_NETWORK_RESPONSE;
+    }
 
     if (NT_ERROR(Status) || Status == STATUS_NO_MORE_FILES)
         return Status;
