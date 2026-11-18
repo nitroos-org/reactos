@@ -63,6 +63,16 @@ License: PNG Reference Library version 2
 URL: http://libpng.sourceforge.net/
 Modifications: added .spec file
 
+Title: libsmb2 (SMB2/3 client library)
+Path: dll/3rdparty/libsmb2
+Used Version: git commit d6a364f0b17d7d7b1451cfab23dcebdd384afd3c (2026-11-17)
+License: LGPL-2.1-or-later (https://spdx.org/licenses/LGPL-2.1-or-later.html); include/smb2/smb2-ioctl.h MIT;
+         lib/aes_reference.[ch] and include/portable-endian.h public domain
+URL: https://github.com/sahlberg/libsmb2
+Modifications: built as libsmb2.dll; SSPI authentication backend, bcrypt random bytes and hashes, error mapping
+               (dll/3rdparty/libsmb2/nitro); small marked changes to upstream files; the files without a licence
+               notice are not imported. See dll/3rdparty/libsmb2/README.NitroOS.
+
 Title: libtiff
 Path: dll/3rdparty/libtiff
 Used Version: 4.7.1

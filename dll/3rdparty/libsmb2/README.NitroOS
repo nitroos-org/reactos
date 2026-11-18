@@ -1,0 +1,100 @@
+libsmb2 in NitroOS
+==================
+
+What:      libsmb2, a user-mode SMB2/SMB3 client library, built as libsmb2.dll (the
+           engine of the NitroOS SMB client).
+Upstream:  https://github.com/sahlberg/libsmb2
+Commit:    d6a364f0b17d7d7b1451cfab23dcebdd384afd3c (master, 2026-11-17T20:46:14Z)
+Licence:   LGPL-2.1-or-later (COPYING, LICENCE-LGPL-2.1.txt). libsmb2.dll is a separate
+           shared library: programs use it through its import library only, and its
+           complete source is this directory.
+
+Layout
+------
+include/, lib/     upstream files, in the upstream layout. Byte-identical to the commit above
+                   except the local changes listed below (each marked "NitroOS" in the code).
+nitro/             NitroOS files of this DLL (LGPL-2.1-or-later):
+                     aes-bcrypt.c, nitro-aes.h  AES-128-CCM and AES-CMAC through bcrypt
+                     config.h         build configuration (the "config.h" the sources include)
+                     sspi.c, nitro-sspi.h  SSPI authentication backend (Negotiate/NTLM/Kerberos
+                                      package through secur32), explicit credentials and
+                                      single sign-on, session key from SECPKG_ATTR_SESSION_KEY
+                     crypto.c, sha.h, sha-private.h  random bytes (BCryptGenRandom), SHA-512
+                                      and HMAC-SHA256 (bcrypt) behind libsmb2's USHA/hmac names
+                     errmap.c         NTSTATUS / failure -> Win32 error, as the Windows client
+                     ntlmssp-off.c    stand-ins for the built-in NTLMSSP engine (not built)
+                     asprintf.h       asprintf()/vasprintf()
+                     libsmb2-nitro.h  public header of the NitroOS additions (NitroSmb2*)
+libsmb2.spec       exports: the client API of upstream lib/libsmb2.syms minus the server
+                   API, smb2_set_password_from_file and share enumeration; plus NitroSmb2*
+
+Imported files and their notices
+--------------------------------
+LGPL-2.1-or-later notice: include/libsmb2-private.h, include/slist.h, include/smb2/{libsmb2.h,
+libsmb2-raw.h, libsmb2-share-enum.h, smb2.h, smb2-errors.h}, lib/{aes.c, aes.h, aes128ccm.c,
+aes128ccm.h, alloc.c, asn1-ber.c, asn1-ber.h, compat.c, compat.h, errors.c, init.c, libsmb2.c,
+ntlmssp.h, pdu.c, quic.c, smbdirect.c, smb2-cmd-*.c (20 files), smb2-data-*.c (4 files),
+smb2-share-enum.c, smb2-signing.c, smb2-signing.h, smb3-seal.c, smb3-seal.h, socket.c,
+spnego-wrapper.c, spnego-wrapper.h, sync.c, timestamps.c, unicode.c}.
+MIT: include/smb2/smb2-ioctl.h. Public domain: lib/aes_reference.c, lib/aes_reference.h,
+include/portable-endian.h. Also COPYING, LICENCE-LGPL-2.1.txt, README (upstream).
+
+Not imported (and why):
+  lib/ntlmssp.c                      built-in NTLMSSP: NitroOS authenticates through SSPI
+  lib/krb5-wrapper.[ch]              GSSAPI/krb5 backend: no GSSAPI on NitroOS
+  lib/aes_apple.[ch]                 Apple CommonCrypto backend
+  lib/sha1.c, sha224-256.c, sha384-512.c, usha.c, hmac.c, sha.h, sha-private.h,
+  lib/hmac-md5.[ch], include/asprintf.h   no licence notice in the files: replaced by nitro/
+  lib/md4c.c, md4.h, md5.c, md5.h    only used by the built-in NTLMSSP
+  lib/dreamcast, lib/ps2, include/{amiga_os, apple, esp, picow, ps3, xbox, xbox 360},
+  libdcerpc/ (BSD-2-Clause), examples/, utils/, tests/, build files of other platforms
+
+Local changes to upstream files (marked "NitroOS"; 1-3 inside #ifdef HAVE_SSPI)
+-------------------------------------------------------------------------------
+1. include/libsmb2-private.h: struct smb2_context gets "struct smb2_sspi_ctx *sspi".
+2. lib/libsmb2.c: the SSPI backend beside the NTLMSSP and krb5 ones:
+     connect_cb                  smb2_sspi_transport_connected() (for the error mapping)
+     negotiate_cb                smb2_sspi_negotiate_reply() replaces the mechanism selection
+                                 from libsmb2's own SPNEGO parser; the server's hint goes to SSPI
+     send_session_setup_request  smb2_sspi_session_request()
+     session_setup_cb            smb2_sspi_session_complete(): refuses guest/anonymous sessions,
+                                 checks the server's last SPNEGO token, sets the session key
+     free_c_data                 smb2_sspi_free_auth_data()
+2a. lib/smb2-signing.c: AES-CMAC through nitro/aes-bcrypt.c when NITRO_SMB2_BCRYPT_AES is set.
+3. lib/init.c: signing always offered (SecurityMode SIGNING_ENABLED); smb2_destroy_context()
+   calls smb2_sspi_destroy() (credentials released, keys and password wiped).
+4. Fixes, not conditional (commit "[LIBSMB2] Fix large writes on Windows, keys of SMB 3.0 sessions,
+   and query info buffer leaks"; upstream report drafts in the evidence of that change):
+     lib/compat.h          Windows writev() sets errno (WSAEWOULDBLOCK -> EAGAIN): writes larger than
+                           the socket send buffer failed
+     lib/libsmb2.c         keys derived for every SMB 3.x session (a 3.0 session to a share that
+                           requires encryption failed); query info buffers freed on warning statuses
+                           in the stat/fstat/getinfo callbacks
+     lib/smb2-cmd-query-info.c  the reply buffer freed on every decode failure (+ libsmb2-raw.h include)
+The same changes as patches against the pristine files: git log of this directory; a sync is
+"copy the new upstream files over include/ and lib/, then re-apply the local commits".
+
+Build configuration
+-------------------
+-D_WINDOWS (libsmb2's Windows paths), _WIN32_WINNT 0x600 (WSAPoll), WIN32_LEAN_AND_MEAN,
+NEED_GETLOGIN_R/GETPID/RANDOM/SRANDOM (as libsmb2's own CMake sets for Windows), HAVE_SSPI,
+HAVE_ARC4RANDOM_BUF, NITRO_SMB2_BCRYPT_AES. No OpenSSL, so GCM is not offered (upstream offers GCM
+only with OpenSSL): SMB 3.x encryption is AES-128-CCM. Signing: HMAC-SHA256 (2.x) through bcrypt
+(nitro/crypto.c), AES-CMAC (3.x); keys: libsmb2's SP800-108 KDF over that HMAC.
+AES-CCM and AES-CMAC: NITRO_SMB2_BCRYPT_AES (CMakeLists.txt, default ON) takes them from bcrypt
+(nitro/aes-bcrypt.c: lib/aes128ccm.c is not built; one hook in lib/smb2-signing.c); OFF builds
+libsmb2's own (byte-wise AES for CCM; CMAC with AES-NI on amd64, the compiler's wmmintrin.h/cpuid.h
+for that file). Measured 2026-11-18 (300 MB each way, Windows Server 2022 and Samba 4.19, 3.1.1 and
+3.0, IPv4/IPv6; shared host, indications): encrypted share bcrypt 20-26 MB/s put / 28-32 get,
+own 8-11 / 10-11 (x64 and x86 alike); signed x64 bcrypt 32/37, own (AES-NI) 39/44; signed x86
+bcrypt 28/39, own 15/17; plain 30-48 either way. Default: bcrypt (2.5-3x on encrypted shares, 2x
+for signing on x86; the x64 AES-NI CMAC of libsmb2 is about 15 % faster than bcrypt's, not worth a
+second switch).
+Random bytes: every call site of smb2_random_bytes() is listed in nitro/crypto.c.
+
+Updating
+--------
+1. Fetch the new upstream commit; check every imported file's licence notice again.
+2. Copy include/ and lib/ files of the list above over the tree's copies (new files: decide
+   and list them here); re-apply the local commits; build amd64 and i386.
+3. Re-run modules/rostests/apitests/libsmb2 (smbcli matrix, libsmb2_apitest) and the host fuzz.
