@@ -475,6 +475,7 @@ IntLeaveInputDesktop(IN PDESKTOP pdesk)
     }
 
     gpdeskInputDesktop = pdeskNew;
+    UserSpbDropAll();
     /* Window redirection: no composed pixels of the old input desktop are kept */
     UserRedirFreeFrameBuffer();
     if (pwinsta)
@@ -3708,6 +3709,7 @@ NtUserSwitchDesktop(HDESK hdesk)
 
     /* Set the global state */
     gpdeskInputDesktop = pdesk;
+    UserSpbDropAll();
     /* Window redirection: no composed pixels of the old input desktop are kept */
     UserRedirFreeFrameBuffer();
 

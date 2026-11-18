@@ -673,6 +673,10 @@ IntInvalidateWindows(PWND Wnd, PREGION Rgn, ULONG Flags)
 
    TRACE("IntInvalidateWindows start Rgn %p\n",Rgn);
 
+   /* Saved bits of popups (spb.c): this window will paint there */
+   if (gSpbCount != 0)
+      UserSpbNoteRect(Wnd, (Rgn > PRGN_WINDOW) ? &Rgn->rdh.rcBound : &Wnd->rcWindow);
+
    if ( Rgn > PRGN_WINDOW )
    {
       /*

@@ -2141,6 +2141,17 @@ co_WinPosSetWindowPosEx(
    Window->rcWindow = NewWindowRect;
    Window->rcClient = NewClientRect;
 
+   /* What was saved under a window that moved or was resized is not what is under it now */
+   if (!RtlEqualMemory(&OldWindowRect, &NewWindowRect, sizeof(RECTL)))
+      UserSpbDrop(Window);
+   /* A window moved, shown or hidden changes the screen at both rectangles (older records under it are not used there) */
+   if (gSpbCount != 0 &&
+       (!RtlEqualMemory(&OldWindowRect, &NewWindowRect, sizeof(RECTL)) || (WinPos.flags & (SWP_SHOWWINDOW | SWP_HIDEWINDOW))))
+   {
+      UserSpbNoteRect(Window, &OldWindowRect);
+      UserSpbNoteRect(Window, &NewWindowRect);
+   }
+
    /* erase parent when hiding or resizing child */
    if (WinPos.flags & (SWP_HIDEWINDOW | SWP_SHOWWINDOW))
       GlassBackdropDrop(UserHMGetHandle(Window));
@@ -2188,6 +2199,9 @@ co_WinPosSetWindowPosEx(
 
       Window->style |= WS_VISIBLE; //IntSetStyle( Window, WS_VISIBLE, 0 );
       Window->head.pti->cVisWindows++;
+
+      /* CS_SAVEBITS: keep what the screen shows under the window until it draws, to put it back when it is hidden */
+      UserSpbSave(Window);
 
       IntNotifyWinEvent(EVENT_OBJECT_SHOW, Window, OBJID_WINDOW, CHILDID_SELF, WEF_SETBYWNDPTI);
 
@@ -2523,6 +2537,10 @@ co_WinPosSetWindowPosEx(
 
              if (RgnType != ERROR && RgnType != NULLREGION)
              {
+                /* CS_SAVEBITS: the pixels that were under the window go back at once; the windows below are
+                   still invalidated and paint what changed */
+                if (WinPos.flags & SWP_HIDEWINDOW)
+                   UserSpbRestore(Window, ExposedRgn);
                 co_VIS_WindowLayoutChanged(Window, ExposedRgn);
              }
              REGION_Delete(ExposedRgn);

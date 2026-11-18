@@ -851,6 +851,7 @@ UserChangeDisplaySettings(
         pvOldCursor = UserSetCursor(NULL, TRUE);
 
         /* Do the mode switch */
+        UserSpbDropAll();
         ulResult = PDEVOBJ_bSwitchMode(ppdev, newDevMode);
         /* Window redirection: the compose frame buffer was for the old mode */
         UserRedirFreeFrameBuffer();
