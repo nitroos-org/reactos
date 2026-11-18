@@ -6,6 +6,7 @@ add_library(msvcp140_threaddll SHARED
     msvcp140_threaddll.def
 )
 set_entrypoint(msvcp140_threaddll DllMain 12)
+ros_check_unwind(msvcp140_threaddll)
 if(MSVC)
     target_link_libraries(msvcp140_threaddll runtmchk)
 endif()

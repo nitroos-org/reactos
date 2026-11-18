@@ -157,6 +157,7 @@ if(MSVC)
 else()
     set_subsystem(uefildr 10)
 endif()
+ros_check_unwind(uefildr)
 
 set_entrypoint(uefildr EfiEntry)
 

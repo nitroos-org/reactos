@@ -107,5 +107,6 @@ else()
 endif()
 
 add_importlibs(ucrtbase kernel32 ntdll)
+ros_check_unwind(ucrtbase)
 
 add_cd_file(TARGET ucrtbase DESTINATION reactos/system32 FOR all)

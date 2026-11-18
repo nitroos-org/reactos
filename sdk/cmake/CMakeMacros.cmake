@@ -740,6 +740,17 @@ function(ros_no_nonvolatile_xmm MODULE)
     endif()
 endfunction()
 
+# The build check of ros_no_nonvolatile_xmm for an amd64 GCC image. set_module_type adds it; an image built without
+# set_module_type (ucrtbase, the boot loaders, test DLLs) calls it itself.
+function(ros_check_unwind MODULE)
+    get_target_property(_target_type ${MODULE} TYPE)
+    if(ARCH STREQUAL "amd64" AND NOT MSVC AND _target_type MATCHES "^(EXECUTABLE|MODULE_LIBRARY|SHARED_LIBRARY)$")
+        add_custom_command(TARGET ${MODULE} POST_BUILD
+            COMMAND native-pefixup --check-unwind $<TARGET_FILE:${MODULE}>)
+        set_property(TARGET ${MODULE} APPEND PROPERTY LINK_DEPENDS $<TARGET_PROPERTY:native-pefixup,IMPORTED_LOCATION>)
+    endif()
+endfunction()
+
 function(set_module_type MODULE TYPE)
     cmake_parse_arguments(__module "UNICODE;NO_COMPAT_MANIFEST" "IMAGEBASE" "ENTRYPOINT" ${ARGN})
 
@@ -779,12 +790,7 @@ function(set_module_type MODULE TYPE)
     endif()
 
     # amd64 unwind data Windows reads the way it was written (see ros_no_nonvolatile_xmm)
-    get_target_property(_target_type ${MODULE} TYPE)
-    if(ARCH STREQUAL "amd64" AND NOT MSVC AND _target_type MATCHES "^(EXECUTABLE|MODULE_LIBRARY|SHARED_LIBRARY)$")
-        add_custom_command(TARGET ${MODULE} POST_BUILD
-            COMMAND native-pefixup --check-unwind $<TARGET_FILE:${MODULE}>)
-        set_property(TARGET ${MODULE} APPEND PROPERTY LINK_DEPENDS $<TARGET_PROPERTY:native-pefixup,IMPORTED_LOCATION>)
-    endif()
+    ros_check_unwind(${MODULE})
 
     # Set unicode definitions
     if(__module_UNICODE)
