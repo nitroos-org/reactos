@@ -1,0 +1,9 @@
+; SMB mini-redirector: demand start (loaded when the SMB engine starts it, not at boot)
+[AddReg]
+HKLM,"SYSTEM\CurrentControlSet\Services\mrxsmb","Description",0x00000000,"SMB Mini-Redirector"
+HKLM,"SYSTEM\CurrentControlSet\Services\mrxsmb","DisplayName",0x00000000,"SMB Mini-Redirector"
+HKLM,"SYSTEM\CurrentControlSet\Services\mrxsmb","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\mrxsmb","Group",0x00000000,"Network"
+HKLM,"SYSTEM\CurrentControlSet\Services\mrxsmb","ImagePath",0x00020000,"system32\drivers\mrxsmb.sys"
+HKLM,"SYSTEM\CurrentControlSet\Services\mrxsmb","Start",0x00010001,0x00000003
+HKLM,"SYSTEM\CurrentControlSet\Services\mrxsmb","Type",0x00010001,0x00000002
