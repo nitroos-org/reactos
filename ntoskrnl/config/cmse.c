@@ -61,15 +61,16 @@ C_ASSERT(sizeof(CMP_LEGACY_KEY_SD) <= CMP_LEGACY_SD_BUFFER);
 /* FUNCTIONS *****************************************************************/
 
 /*
- * The access decision of a key open (CmpDoOpen), made in the configuration
- * manager rather than by the object manager: ObCheckObjectAccess would check
- * the descriptor the key reports (NtQuerySecurityObject), which is now the
- * key's real one, and so would enforce key security in every mode. Until
- * enforcement exists (registry ACL plan R8, mode 2 only), the decision is the
- * one opens always had: the check runs against the legacy descriptor, so it
- * grants what was granted before (and still asks for SeSecurityPrivilege for
- * ACCESS_SYSTEM_SECURITY), and the audit mode's shadow check (CmpDoOpen)
- * records what Windows would decide. Same steps as ObCheckObjectAccess: the
+ * The access decision of a key open (CmpDoOpen, through CmpAclCheckKeyOpen)
+ * when key access is not enforced, and for kernel-mode opens: made in the
+ * configuration manager rather than by the object manager, since
+ * ObCheckObjectAccess would check the descriptor the key reports
+ * (NtQuerySecurityObject), which is the key's real one, and so would enforce
+ * key security in every mode. The check runs against the legacy descriptor,
+ * so it grants what was granted before (and still asks for SeSecurityPrivilege
+ * for ACCESS_SYSTEM_SECURITY), and the audit mode's shadow check records what
+ * the key's own descriptor decides; registry ACL mode 2 (enforce) decides by
+ * that descriptor instead (cmacl.c). Same steps as ObCheckObjectAccess: the
  * privileges used go into the access state, the granted access moves from
  * the remaining to the granted mask, and the open audit alarm runs.
  *
