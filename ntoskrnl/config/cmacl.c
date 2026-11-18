@@ -969,6 +969,43 @@ CmpAclFreeEffectiveSd(
         ExFreePoolWithTag(PoolCopy, TAG_CM_ACL);
 }
 
+/* Does an ACL of the (validated) descriptor hold an ACE flagged NO_PROPAGATE_INHERIT_ACE? */
+static
+BOOLEAN
+CmpAclSdHasNoPropagate(
+    _In_ PSECURITY_DESCRIPTOR Sd)
+{
+    BOOLEAN Present, Defaulted;
+    PACL Acl;
+    PACE_HEADER Ace;
+    ULONG Which, i;
+
+    for (Which = 0; Which < 2; Which++)
+    {
+        Acl = NULL;
+        if (Which == 0)
+        {
+            if (!NT_SUCCESS(RtlGetDaclSecurityDescriptor(Sd, &Present, &Acl, &Defaulted)) || !Present)
+                continue;
+        }
+        else
+        {
+            if (!NT_SUCCESS(RtlGetSaclSecurityDescriptor(Sd, &Present, &Acl, &Defaulted)) || !Present)
+                continue;
+        }
+        if (!Acl)
+            continue;
+        for (i = 0; i < Acl->AceCount; i++)
+        {
+            if (!NT_SUCCESS(RtlGetAce(Acl, i, (PVOID *)&Ace)))
+                return TRUE;    /* cannot tell: take the exact path */
+            if (Ace->AceFlags & NO_PROPAGATE_INHERIT_ACE)
+                return TRUE;
+        }
+    }
+    return FALSE;
+}
+
 /*
  * The descriptor a key would be checked against on Windows (see the top of
  * the file), in Buffer or in what *ToFree / *PoolCopy receive (free both with
@@ -986,10 +1023,12 @@ CmpGetEffectiveKeySd(
     _Out_ PVOID *PoolCopy,
     _In_ BOOLEAN Shortcut)
 {
-    PSECURITY_DESCRIPTOR Sd, NewSd = NULL;
+    PSECURITY_DESCRIPTOR Sd, NewSd = NULL, Intermediate;
     PCM_KEY_CONTROL_BLOCK Parent;
     PVOID AncestorCopy;
     NTSTATUS Status;
+    ULONG Distance = 0;
+    BOOLEAN NoPropagate;
 
     *ToFree = NULL;
     *PoolCopy = NULL;
@@ -1005,6 +1044,7 @@ CmpGetEffectiveKeySd(
     /* 2. The nearest ancestor that has one, inherited as SYSTEM would get it */
     for (Parent = Kcb->ParentKcb; Parent; Parent = Parent->ParentKcb)
     {
+        Distance++;
         Sd = CmpAclCopyStoredSd(Parent, Buffer, BufferSize, &AncestorCopy, Shortcut);
         if (!Sd)
             continue;
@@ -1024,10 +1064,42 @@ CmpGetEffectiveKeySd(
                                     &CmpAclSystemSubject,
                                     &CmpKeyObjectType->TypeInfo.GenericMapping,
                                     PagedPool);
+        NoPropagate = (Distance >= 2) && CmpAclSdHasNoPropagate(Sd);
         if (AncestorCopy)
             ExFreePoolWithTag(AncestorCopy, TAG_CM_ACL);
+
+        /*
+         * The ancestor is further up than the parent: the keys between have no
+         * descriptor of their own and stand for what they would have inherited.
+         * One more inheritance step gives what a key two or more levels down
+         * gets: an ACE with NO_PROPAGATE_INHERIT_ACE reaches the first level
+         * only. After two steps the result does not change any more (what
+         * still passes on reproduces itself), so two steps cover any distance;
+         * without such an ACE the second step changes nothing and is skipped.
+         */
+        if (NT_SUCCESS(Status) && NoPropagate)
+        {
+            Intermediate = NewSd;
+            NewSd = NULL;
+            Status = SeAssignSecurityEx(Intermediate,
+                                        NULL,
+                                        &NewSd,
+                                        NULL,
+                                        TRUE,
+                                        (((PISECURITY_DESCRIPTOR)Intermediate)->Control & SE_DACL_AUTO_INHERITED) ?
+                                            SEF_DACL_AUTO_INHERIT : 0,
+                                        &CmpAclSystemSubject,
+                                        &CmpKeyObjectType->TypeInfo.GenericMapping,
+                                        PagedPool);
+            SeDeassignSecurity(&Intermediate);
+        }
+
+        /*
+         * No descriptor rather than the policy one: the policy descriptor of
+         * the place may give more than the stored ancestor does (fail closed)
+         */
         if (!NT_SUCCESS(Status))
-            break;
+            return NULL;
         *Rule = CmpAclRuleInherited;
         *ToFree = NewSd;
         return NewSd;
