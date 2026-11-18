@@ -192,6 +192,7 @@ VOID SmbEngLog(DWORD Level, const char *Format, ...);
 ULONGLONG SmbEngNewId(VOID);
 BOOL SmbEngSendReply(HANDLE Event, PVOID Message, ULONG Size);
 VOID SmbEngRemoveBinding(ULONGLONG Id);
+BOOL SmbEngBindingLive(ULONGLONG Id);
 VOID SmbEngFreeOp(PSMBENG_OP Op);
 
 /* conn.c */

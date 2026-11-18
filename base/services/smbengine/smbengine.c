@@ -273,6 +273,18 @@ ReleaseBindingLocked(ULONGLONG Id)
     return Binding;
 }
 
+/* Whether the driver still holds this binding (any thread; takes the table lock shared) */
+BOOL
+SmbEngBindingLive(ULONGLONG Id)
+{
+    BOOL Live;
+
+    AcquireSRWLockShared(&SmbEng.Lock);
+    Live = (LookupBinding(Id) != NULL);
+    ReleaseSRWLockShared(&SmbEng.Lock);
+    return Live;
+}
+
 /* Drops one reference the driver will not use (it never got the CONNECT reply, or the connect failed) */
 VOID
 SmbEngRemoveBinding(ULONGLONG Id)

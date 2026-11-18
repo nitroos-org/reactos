@@ -1111,9 +1111,13 @@ OpCb(struct smb2_context *smb2, int status, void *command_data, void *private_da
 
             if (!NT_SUCCESS(Status))
                 break;
-            if (cr == NULL || Conn->Smb2 == NULL || (File = calloc(1, sizeof(*File))) == NULL)
+            /* The binding ended (its DISCONNECT ran) while the CREATE was at the server: nobody
+             * would ever close this handle, and an open file keeps the connection from idling */
+            if (cr == NULL || Conn->Smb2 == NULL || !SmbEngBindingLive(Op->BindingId) ||
+                (File = calloc(1, sizeof(*File))) == NULL)
             {
-                Status = cr == NULL ? STATUS_INVALID_NETWORK_RESPONSE : STATUS_INSUFFICIENT_RESOURCES;
+                Status = cr == NULL ? STATUS_INVALID_NETWORK_RESPONSE :
+                         !SmbEngBindingLive(Op->BindingId) ? STATUS_CONNECTION_DISCONNECTED : STATUS_INSUFFICIENT_RESOURCES;
                 if (cr != NULL && Conn->Smb2 != NULL)
                 {
                     /* Opened at the server but we cannot keep it: close it again */
