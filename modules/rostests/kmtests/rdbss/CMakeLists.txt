@@ -13,3 +13,12 @@ target_link_libraries(rdbssloop_drv ntoskrnl_vista rdbsslib rxce copysup memcmp 
 add_importlibs(rdbssloop_drv ntoskrnl hal)
 target_compile_definitions(rdbssloop_drv PRIVATE RDBSS_TRACKER)
 add_rostests_file(TARGET rdbssloop_drv)
+
+#
+# rdbsshostile: the second process of the RdbssHostile kmtest (test only)
+#
+add_executable(rdbsshostile RdbssHostile_child.c)
+set_module_type(rdbsshostile win32cui UNICODE)
+target_link_libraries(rdbsshostile ${PSEH_LIB})
+add_importlibs(rdbsshostile msvcrt kernel32 ntdll)
+add_rostests_file(TARGET rdbsshostile)

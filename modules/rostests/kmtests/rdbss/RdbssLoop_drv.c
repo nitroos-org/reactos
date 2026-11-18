@@ -25,6 +25,7 @@
  */
 
 #include <ntifs.h>
+#include <ndk/ketypes.h>
 #include <rx.h>
 #include <windef.h>
 
@@ -50,6 +51,8 @@ typedef struct _LOOP_FCB
     HANDLE PagingHandle;
     LONG OpenSrvOpens;
     LIST_ENTRY Locks;       /* LOOP_LOCK, protected by LoopLockMutex */
+    LIST_ENTRY AllFcbs;     /* LoopFcbList, for IOCTL_LOOPRDR_DUMP */
+    PMRX_FCB MrxFcb;
 } LOOP_FCB, *PLOOP_FCB;
 
 typedef struct _LOOP_SRV_OPEN
@@ -72,6 +75,9 @@ typedef struct _LOOP_ASYNC_ITEM
 {
     WORK_QUEUE_ITEM WorkItem;
     PRX_CONTEXT RxContext;
+    KDPC Dpc;               /* LOOPRDR_OPT_DPC_COMPLETE */
+    ULONG DelayMs;          /* LOOPRDR_OPT_LATE */
+    BOOLEAN Late;
 } LOOP_ASYNC_ITEM, *PLOOP_ASYNC_ITEM;
 
 typedef struct _LOOP_BREAK_ITEM
@@ -106,9 +112,60 @@ static volatile LONG LoopNextKey;
 /* Buffering state the next MRxComputeNewBufferingState answers with */
 static volatile LONG LoopBreakNewState;
 static KEVENT LoopBreakAckEvent;
+/* Live FCBs, for the hang diagnostic (IOCTL_LOOPRDR_DUMP) */
+static LIST_ENTRY LoopFcbList;
+static FAST_MUTEX LoopFcbListMutex;
 
 #define CountUp(F)   InterlockedIncrement(&LoopCounters.F)
 #define CountDown(F) InterlockedDecrement(&LoopCounters.F)
+
+/* ---------------------------------------------------------------------- */
+/* Fault injection (LOOPRDR_OPT_FAULTS and friends)                       */
+/* ---------------------------------------------------------------------- */
+
+static volatile LONG LoopRandState = 0x2545F491;
+
+static
+ULONG
+LoopRand(VOID)
+{
+    ULONG x = (ULONG)InterlockedIncrement(&LoopRandState) * 0x9E3779B1u;
+
+    x ^= x >> 15;
+    x *= 0x85EBCA77u;
+    x ^= x >> 13;
+    return x;
+}
+
+/* TRUE (and counted) for 1 call in OneIn when fault injection is on */
+static
+BOOLEAN
+LoopFault(
+    _In_ ULONG OneIn)
+{
+    if (!BooleanFlagOn(LoopOptions, LOOPRDR_OPT_FAULTS) || (LoopRand() % OneIn) != 0)
+    {
+        return FALSE;
+    }
+    CountUp(FaultsInjected);
+    return TRUE;
+}
+
+/* A short random delay (a slow server), at PASSIVE_LEVEL only */
+static
+VOID
+LoopMaybeDelay(VOID)
+{
+    LARGE_INTEGER Delay;
+
+    if (!BooleanFlagOn(LoopOptions, LOOPRDR_OPT_FAULTS) || KeGetCurrentIrql() != PASSIVE_LEVEL ||
+        (LoopRand() % 16) != 0)
+    {
+        return;
+    }
+    Delay.QuadPart = -10000LL * (1 + LoopRand() % 20);
+    KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+}
 
 /* ---------------------------------------------------------------------- */
 /* Helpers                                                                */
@@ -414,6 +471,16 @@ LoopLockRange(
                 Conflict = TRUE;
                 break;
             }
+        }
+        /* The SRV_OPEN's server open may be gone while this lock waited (a
+         * delete-on-close cleanup releases it): a server refuses locks on a
+         * closed handle, and the lock would never be dropped */
+        if (!Conflict && (Owner == NULL || ((PMRX_SRV_OPEN)Owner)->Context == NULL ||
+                          LoopSrvOpen(Owner)->Handle == NULL))
+        {
+            ExReleaseFastMutex(&LoopLockMutex);
+            ExFreePoolWithTag(Lock, LOOP_TAG);
+            return STATUS_FILE_CLOSED;
         }
         if (!Conflict)
         {
@@ -749,6 +816,13 @@ LoopCreate(
     FCB_INIT_PACKET InitPacket;
     PLOOP_SRV_OPEN Ext;
 
+    /* Injected failure before anything is set up, as a server refusing */
+    if (LoopFault(16))
+    {
+        return STATUS_UNEXPECTED_NETWORK_ERROR;
+    }
+    LoopMaybeDelay();
+
     Fcb = RxContext->pFcb;
     SrvOpen = RxContext->pRelevantSrvOpen;
     Params = &RxContext->Create.NtCreateParameters;
@@ -790,6 +864,10 @@ LoopCreate(
         LoopFcb(Fcb)->PagingHandle = NULL;
         LoopFcb(Fcb)->OpenSrvOpens = 0;
         InitializeListHead(&LoopFcb(Fcb)->Locks);
+        LoopFcb(Fcb)->MrxFcb = Fcb;
+        ExAcquireFastMutex(&LoopFcbListMutex);
+        InsertTailList(&LoopFcbList, &LoopFcb(Fcb)->AllFcbs);
+        ExReleaseFastMutex(&LoopFcbListMutex);
         CountUp(Fcbs);
     }
     if (Fcb->OpenCount == 0 || NodeType(Fcb) == RDBSS_STORAGE_NTC(FileTypeNotYetKnown))
@@ -857,6 +935,7 @@ LoopReleaseSrvOpen(
     _In_ PMRX_SRV_OPEN SrvOpen)
 {
     PLOOP_SRV_OPEN Ext;
+    HANDLE Handle;
 
     if (SrvOpen->Context == NULL)
     {
@@ -864,11 +943,17 @@ LoopReleaseSrvOpen(
     }
 
     Ext = LoopSrvOpen(SrvOpen);
-    if (Ext->Handle != NULL)
+    /* Take the handle away under the lock mutex first: a lock request that
+     * waited for another owner sees it gone and is refused, instead of being
+     * granted after its owner's locks were dropped */
+    ExAcquireFastMutex(&LoopLockMutex);
+    Handle = Ext->Handle;
+    Ext->Handle = NULL;
+    ExReleaseFastMutex(&LoopLockMutex);
+    if (Handle != NULL)
     {
         LoopDropLocksOfOwner(LoopFcb(Fcb), SrvOpen);
-        LoopCloseBacking(Ext->Handle);
-        Ext->Handle = NULL;
+        LoopCloseBacking(Handle);
         CountDown(SrvOpens);
         if (InterlockedDecrement(&LoopFcb(Fcb)->OpenSrvOpens) == 0)
         {
@@ -907,11 +992,50 @@ NTAPI
 LoopCloseSrvOpen(
     _Inout_ PRX_CONTEXT RxContext)
 {
-    if (RxContext->pRelevantSrvOpen != NULL)
+    PMRX_SRV_OPEN SrvOpen = RxContext->pRelevantSrvOpen;
+
+    /* LOOPRDR_OPT_BREAK_IN_CLOSE: the "server" breaks the oplock of a handle
+     * the client is closing, the classic crossing. RDBSS holds the FCB
+     * exclusive here: the buffering state handler has to wait for it, then
+     * finds the SRV_OPEN closed and its request purged */
+    if (SrvOpen != NULL && BooleanFlagOn(LoopOptions, LOOPRDR_OPT_BREAK_IN_CLOSE) &&
+        SrvOpen->Key != NULL && SrvOpen->Key != (PVOID)-1)
     {
-        LoopReleaseSrvOpen(RxContext->pFcb, RxContext->pRelevantSrvOpen);
+        LARGE_INTEGER Delay;
+
+        CountUp(BreaksInClose);
+        RxIndicateChangeOfBufferingState(RxContext->pFcb->pNetRoot->pSrvCall, SrvOpen->Key, ULongToPtr(0));
+        Delay.QuadPart = -10000LL * 300;
+        KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+    }
+
+    if (SrvOpen != NULL)
+    {
+        LoopReleaseSrvOpen(RxContext->pFcb, SrvOpen);
     }
     return STATUS_SUCCESS;
+}
+
+static
+NTSTATUS
+NTAPI
+LoopGetConnectionId(
+    _Inout_ PRX_CONTEXT RxContext,
+    _Out_ PRX_CONNECTION_ID UniqueId)
+{
+    /* LOOPRDR_OPT_SLOW_CONNECT: a create that is past RDBSS's state check
+     * but has not built any connection structure yet, for a while */
+    if (BooleanFlagOn(LoopOptions, LOOPRDR_OPT_SLOW_CONNECT))
+    {
+        LARGE_INTEGER Delay;
+
+        CountUp(SlowConnects);
+        Delay.QuadPart = -10000LL * 1000;
+        KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+    }
+
+    /* RDBSS zeroed the ID: one connection per server and share */
+    return STATUS_NOT_IMPLEMENTED;
 }
 
 static
@@ -922,8 +1046,20 @@ LoopDeallocateForFcb(
 {
     if (Fcb->Context != NULL && LoopFcb(Fcb)->Inited)
     {
+        ExAcquireFastMutex(&LoopFcbListMutex);
+        RemoveEntryList(&LoopFcb(Fcb)->AllFcbs);
+        ExReleaseFastMutex(&LoopFcbListMutex);
         LoopClosePagingHandle(Fcb);
-        ASSERT(IsListEmpty(&LoopFcb(Fcb)->Locks));
+        /* Server locks nobody dropped: counted (the test fails on them) and
+         * freed, rather than an assertion that stops the machine */
+        while (!IsListEmpty(&LoopFcb(Fcb)->Locks))
+        {
+            PLOOP_LOCK Lock = CONTAINING_RECORD(RemoveHeadList(&LoopFcb(Fcb)->Locks), LOOP_LOCK, Links);
+
+            DPRINT1("Server lock %I64x+%I64x of %p left on FCB %p\n", Lock->Offset, Lock->Length, Lock->Owner, Fcb);
+            ExFreePoolWithTag(Lock, LOOP_TAG);
+            CountUp(LeakedServerLocks);
+        }
         LoopFcb(Fcb)->Inited = FALSE;
         CountDown(Fcbs);
     }
@@ -946,6 +1082,10 @@ NTAPI
 LoopForceClosed(
     _Inout_ PMRX_SRV_OPEN SrvOpen)
 {
+    /* Finalization of a SRV_OPEN RDBSS did not close (MRxCloseSrvOpen is
+     * skipped for one that is not in good condition): release the server
+     * open if it is still there */
+    LoopReleaseSrvOpen(SrvOpen->pFcb, SrvOpen);
     return STATUS_SUCCESS;
 }
 
@@ -1041,6 +1181,27 @@ LoopDoReadWrite(
     return Status;
 }
 
+/* LOOPRDR_OPT_DPC_COMPLETE: the completion is signalled at DISPATCH_LEVEL,
+ * which the RxLowIoCompletion contract allows (RDBSS posts the rest) */
+static
+VOID
+NTAPI
+LoopCompletionDpc(
+    _In_ PKDPC Dpc,
+    _In_opt_ PVOID Context,
+    _In_opt_ PVOID Argument1,
+    _In_opt_ PVOID Argument2)
+{
+    PLOOP_ASYNC_ITEM Item = Context;
+    PRX_CONTEXT RxContext = Item->RxContext;
+
+    ExFreePoolWithTag(Item, LOOP_TAG);
+    CountUp(AsyncCompletions);
+    CountUp(DpcCompletions);
+    CountDown(PendingAsync);
+    RxLowIoCompletion(RxContext);
+}
+
 static
 VOID
 NTAPI
@@ -1050,7 +1211,47 @@ LoopAsyncWorker(
     PLOOP_ASYNC_ITEM Item = Context;
     PRX_CONTEXT RxContext = Item->RxContext;
 
+    if (Item->DelayMs != 0)
+    {
+        LARGE_INTEGER Delay;
+
+        Delay.QuadPart = -10000LL * Item->DelayMs;
+        KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+    }
+
     RxContext->IoStatusBlock.Status = LoopDoReadWrite(RxContext);
+    if (Item->Late)
+    {
+        CountUp(LateCompletions);
+    }
+
+    if (Item->Late && BooleanFlagOn(LoopOptions, LOOPRDR_OPT_DPC_COMPLETE) && (LoopRand() % 2) == 0)
+    {
+        KeInsertQueueDpc(&Item->Dpc, NULL, NULL);
+        return;
+    }
+
+    if (Item->Late && BooleanFlagOn(LoopOptions, LOOPRDR_OPT_DUP_COMPLETE))
+    {
+        NTSTATUS Status;
+
+        /* A buggy mini-redirector completing twice. Our reference keeps the
+         * RX_CONTEXT memory valid for the second call; RDBSS must refuse it
+         * (and stop a Debug build) instead of completing the IRP again */
+        ExFreePoolWithTag(Item, LOOP_TAG);
+        CountUp(AsyncCompletions);
+        CountDown(PendingAsync);
+        InterlockedIncrement((volatile long *)&RxContext->ReferenceCount);
+        RxLowIoCompletion(RxContext);
+        Status = RxLowIoCompletion(RxContext);
+        if (Status == STATUS_INVALID_PARAMETER)
+        {
+            CountUp(DupRefused);
+        }
+        RxDereferenceAndDeleteRxContext(RxContext);
+        return;
+    }
+
     ExFreePoolWithTag(Item, LOOP_TAG);
     CountUp(AsyncCompletions);
     CountDown(PendingAsync);
@@ -1063,10 +1264,22 @@ NTAPI
 LoopReadWrite(
     _Inout_ PRX_CONTEXT RxContext)
 {
+    BOOLEAN Async, Late, Paging;
+
+    Paging = BooleanFlagOn(RxContext->LowIoContext.ParamsFor.ReadWrite.Flags, LOWIO_READWRITEFLAG_PAGING_IO);
+    if (Paging ? (BooleanFlagOn(LoopOptions, LOOPRDR_OPT_PAGING_FAULTS) && LoopFault(64)) : LoopFault(16))
+    {
+        return STATUS_UNEXPECTED_NETWORK_ERROR;
+    }
+    LoopMaybeDelay();
+
     /* Asynchronous requests can be completed from a worker, as a network
-     * mini-redirector completes them from its receive path */
-    if (BooleanFlagOn(LoopOptions, LOOPRDR_OPT_ASYNC_LOWIO) &&
-        BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_ASYNC_OPERATION))
+     * mini-redirector completes them from its receive path. With
+     * LOOPRDR_OPT_LATE, synchronous ones too (RDBSS waits), after a delay */
+    Async = BooleanFlagOn(LoopOptions, LOOPRDR_OPT_ASYNC_LOWIO) &&
+            BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_ASYNC_OPERATION);
+    Late = BooleanFlagOn(LoopOptions, LOOPRDR_OPT_LATE) && (LoopRand() % 2) == 0;
+    if (Async || Late)
     {
         PLOOP_ASYNC_ITEM Item;
 
@@ -1074,6 +1287,9 @@ LoopReadWrite(
         if (Item != NULL)
         {
             Item->RxContext = RxContext;
+            Item->Late = Late;
+            Item->DelayMs = Late ? (LoopRand() % 20) : 0;
+            KeInitializeDpc(&Item->Dpc, LoopCompletionDpc, Item);
             CountUp(PendingAsync);
             ExInitializeWorkItem(&Item->WorkItem, LoopAsyncWorker, Item);
             ExQueueWorkItem(&Item->WorkItem, DelayedWorkQueue);
@@ -1180,6 +1396,18 @@ LoopFlush(
     NTSTATUS Status = STATUS_SUCCESS;
 
     CountUp(Flushes);
+    if (LoopFault(16))
+    {
+        return STATUS_UNEXPECTED_NETWORK_ERROR;
+    }
+    LoopMaybeDelay();
+    if (BooleanFlagOn(LoopOptions, LOOPRDR_OPT_SLOW_FLUSH))
+    {
+        LARGE_INTEGER Delay;
+
+        Delay.QuadPart = -10000LL * 500;
+        KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+    }
     Handle = LoopHandleFromContext(RxContext);
     if (Handle != NULL)
     {
@@ -1215,6 +1443,11 @@ NTAPI
 LoopLowIoLock(
     _Inout_ PRX_CONTEXT RxContext)
 {
+    if (LoopFault(16))
+    {
+        return STATUS_UNEXPECTED_NETWORK_ERROR;
+    }
+    LoopMaybeDelay();
     return LoopLockRange(RxContext, RxContext->LowIoContext.Operation == LOWIO_OP_EXCLUSIVELOCK);
 }
 
@@ -1288,6 +1521,10 @@ LoopLowIoFsCtl(
     NTSTATUS Status;
 
     CountUp(FsCtls);
+    if (LoopFault(16))
+    {
+        return STATUS_UNEXPECTED_NETWORK_ERROR;
+    }
     if (FsCtl->FsControlCode == FSCTL_LOOPRDR_ECHO || FsCtl->FsControlCode == FSCTL_LOOPRDR_ECHO_DIRECT)
     {
         return LoopEcho(FsCtl, RxContext);
@@ -1463,6 +1700,12 @@ LoopQueryDirectory(
     PUNICODE_STRING Template = NULL;
     BOOLEAN Restart;
 
+    if (LoopFault(16))
+    {
+        return STATUS_UNEXPECTED_NETWORK_ERROR;
+    }
+    LoopMaybeDelay();
+
     Handle = LoopHandleFromContext(RxContext);
     if (Handle == NULL)
     {
@@ -1550,6 +1793,18 @@ LoopQueryFileInfo(
     HANDLE Handle;
     IO_STATUS_BLOCK IoStatus;
     PFCB Fcb = (PFCB)RxContext->pFcb;
+
+    if (LoopFault(16))
+    {
+        return STATUS_UNEXPECTED_NETWORK_ERROR;
+    }
+    if (BooleanFlagOn(LoopOptions, LOOPRDR_OPT_NO_INTERNAL_INFO) &&
+        RxContext->Info.FileInformationClass == FileInternalInformation)
+    {
+        /* A server without file IDs: RDBSS answers on its own */
+        return STATUS_INVALID_PARAMETER;
+    }
+    LoopMaybeDelay();
 
     Handle = LoopHandleFromContext(RxContext);
     if (Handle == NULL)
@@ -1728,6 +1983,11 @@ NTAPI
 LoopSetFileInfo(
     _Inout_ PRX_CONTEXT RxContext)
 {
+    if (LoopFault(16))
+    {
+        return STATUS_UNEXPECTED_NETWORK_ERROR;
+    }
+    LoopMaybeDelay();
     return LoopSetInfoCommon(RxContext, FALSE);
 }
 
@@ -1891,6 +2151,16 @@ LoopBreakWorker(
 }
 
 static
+VOID
+NTAPI
+LoopBreakThread(
+    _In_ PVOID Context)
+{
+    LoopBreakWorker(Context);
+    PsTerminateSystemThread(STATUS_SUCCESS);
+}
+
+static
 NTSTATUS
 LoopBreak(
     _In_ PRX_CONTEXT RxContext,
@@ -1936,10 +2206,35 @@ LoopBreak(
     KeInitializeEvent(&Item->Done, NotificationEvent, FALSE);
     KeClearEvent(&LoopBreakAckEvent);
 
-    ExInitializeWorkItem(&Item->WorkItem, LoopBreakWorker, Item);
-    ExQueueWorkItem(&Item->WorkItem, DelayedWorkQueue);
-    /* The file object keeps the SRV_OPEN alive until the worker ran */
-    KeWaitForSingleObject(&Item->Done, Executive, KernelMode, FALSE, NULL);
+    /* Its own thread, as a receive path would be: in a system worker it
+     * could hold the FCB (RxIndicateChangeOfBufferingStateForSrvOpen
+     * flushes under it) while the paging writes of that flush wait for
+     * LOOPRDR_OPT_LATE completions queued behind it on the same queue */
+    {
+        HANDLE ThreadHandle;
+        PVOID Thread = NULL;
+
+        Status = PsCreateSystemThread(&ThreadHandle, THREAD_ALL_ACCESS, NULL, NULL, NULL, LoopBreakThread, Item);
+        if (!NT_SUCCESS(Status))
+        {
+            ExFreePoolWithTag(Item, LOOP_TAG);
+            ObDereferenceObject(FileObject);
+            return Status;
+        }
+        if (!NT_SUCCESS(ObReferenceObjectByHandle(ThreadHandle, SYNCHRONIZE, *PsThreadType, KernelMode, &Thread, NULL)))
+        {
+            Thread = NULL;
+        }
+        ZwClose(ThreadHandle);
+        /* The file object keeps the SRV_OPEN alive until the thread ran;
+         * waiting for the thread itself keeps the image loaded under it */
+        KeWaitForSingleObject(&Item->Done, Executive, KernelMode, FALSE, NULL);
+        if (Thread != NULL)
+        {
+            KeWaitForSingleObject(Thread, Executive, KernelMode, FALSE, NULL);
+            ObDereferenceObject(Thread);
+        }
+    }
     ExFreePoolWithTag(Item, LOOP_TAG);
 
     Status = STATUS_SUCCESS;
@@ -1955,6 +2250,217 @@ LoopBreak(
 
     ObDereferenceObject(FileObject);
     return Status;
+}
+
+/* ---------------------------------------------------------------------- */
+/* Hang diagnostic                                                        */
+/* ---------------------------------------------------------------------- */
+
+extern RX_DISPATCHER RxDispatcher;
+
+/* Exported by the kernel, not declared by the DDK headers */
+NTKERNELAPI VOID NTAPI KeInitializeApc(PKAPC Apc, PKTHREAD Thread, ULONG Environment, PVOID KernelRoutine,
+                                       PVOID RundownRoutine, PVOID NormalRoutine, KPROCESSOR_MODE Mode, PVOID Context);
+NTKERNELAPI BOOLEAN NTAPI KeInsertQueueApc(PKAPC Apc, PVOID SystemArgument1, PVOID SystemArgument2, KPRIORITY Increment);
+
+/* Special kernel APC run by a thread that holds an FCB exclusive while
+ * others wait: stops in the kernel debugger in that thread, so that the
+ * debugger's backtrace is its stack */
+static
+VOID
+NTAPI
+LoopOwnerApc(
+    _In_ PKAPC Apc,
+    _Inout_ PVOID *NormalRoutine,
+    _Inout_ PVOID *NormalContext,
+    _Inout_ PVOID *SystemArgument1,
+    _Inout_ PVOID *SystemArgument2)
+{
+    DbgPrint("LOOPRDR-OWNER: thread %p (%p.%p) holds the FCB; its stack follows\n", KeGetCurrentThread(),
+             PsGetCurrentProcessId(), PsGetCurrentThreadId());
+    ExFreePoolWithTag(Apc, LOOP_TAG);
+    DbgBreakPoint();
+}
+
+static ULONG_PTR LoopImageStart, LoopImageEnd;
+
+/* Where a resource owner waits, for the debugger log: its wait state and the
+ * return addresses on its kernel stack (into ntoskrnl or this driver), when
+ * the owner cannot take the APC that would stop it in the debugger (special
+ * kernel APCs disabled or a wait at APC_LEVEL) */
+static
+VOID
+LoopDumpThread(
+    _In_ PCSTR What,
+    _In_ ULONG_PTR Owner)
+{
+    PKTHREAD Thread = (PKTHREAD)Owner;
+    static ULONG_PTR NtStart, NtEnd;
+    ULONG_PTR *Sp, *Top;
+    ULONG Shown = 0;
+
+    if (Owner == 0 || (Owner & 3) != 0 ||
+        !NT_SUCCESS(ObReferenceObjectByPointer(Thread, 0, *PsThreadType, KernelMode)))
+    {
+        return;
+    }
+    _SEH2_TRY
+    {
+        if (NtStart == 0)
+        {
+            ULONG_PTR Base = (ULONG_PTR)KeBugCheckEx & ~(ULONG_PTR)(PAGE_SIZE - 1);
+            ULONG i;
+
+            /* Back to the image header ('MZ'); PE: e_lfanew at 0x3C, then
+             * "PE\0\0", the file header (20 bytes) and SizeOfImage at 56 in
+             * the optional header (PE32 and PE32+) */
+            for (i = 0; i < 0x2000 && *(PUSHORT)Base != 0x5A4D; ++i)
+            {
+                Base -= PAGE_SIZE;
+            }
+            if (*(PUSHORT)Base == 0x5A4D && *(PULONG)(Base + *(PULONG)(Base + 0x3C)) == 0x4550)
+            {
+                NtEnd = Base + *(PULONG)(Base + *(PULONG)(Base + 0x3C) + 4 + 20 + 56);
+                NtStart = Base;
+            }
+        }
+        DbgPrint("LOOPRDR-THREAD: %s %p (%p.%p) state %u wait reason %u irql %u mode %u object %p\n", What, Thread,
+                 PsGetThreadProcessId((PETHREAD)Thread), PsGetThreadId((PETHREAD)Thread), Thread->State,
+                 Thread->WaitReason, Thread->WaitIrql, Thread->WaitMode,
+                 Thread->WaitBlockList != NULL ? Thread->WaitBlockList->Object : NULL);
+        DbgPrint("LOOPRDR-THREAD: ntoskrnl %p-%p, driver %p-%p, stack %p-%p\n", (PVOID)NtStart, (PVOID)NtEnd,
+                 (PVOID)LoopImageStart, (PVOID)LoopImageEnd, Thread->KernelStack, Thread->InitialStack);
+        Sp = (ULONG_PTR *)Thread->KernelStack;
+        Top = (ULONG_PTR *)Thread->InitialStack;
+        if (Thread->State != Running && Sp != NULL && Sp < Top && Top - Sp < 0x4000)
+        {
+            for (; Sp < Top && Shown < 64; ++Sp)
+            {
+                if ((*Sp >= NtStart && *Sp < NtEnd) || (*Sp >= LoopImageStart && *Sp < LoopImageEnd))
+                {
+                    DbgPrint("LOOPRDR-STACK: %p %s+%lx\n", (PVOID)*Sp, *Sp < NtEnd && *Sp >= NtStart ? "ntoskrnl" : "driver",
+                             (ULONG)(*Sp - (*Sp >= NtStart && *Sp < NtEnd ? NtStart : LoopImageStart)));
+                    ++Shown;
+                }
+            }
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        DbgPrint("LOOPRDR-THREAD: exception %lx reading %p\n", _SEH2_GetExceptionCode(), Thread);
+    }
+    _SEH2_END;
+    ObDereferenceObject(Thread);
+}
+
+static
+VOID
+LoopDumpResource(
+    _In_ PCSTR What,
+    _In_ PERESOURCE Resource)
+{
+    ULONG i, Size;
+
+    if (Resource == NULL)
+    {
+        return;
+    }
+    /* Unlocked reads: a snapshot for the debugger log only */
+    DbgPrint("  %s: active %d flag %x owner %p waiters shared %lu exclusive %lu\n", What,
+             Resource->ActiveCount, Resource->Flag, (PVOID)Resource->OwnerEntry.OwnerThread,
+             Resource->NumberOfSharedWaiters, Resource->NumberOfExclusiveWaiters);
+    if (Resource->OwnerTable != NULL)
+    {
+        Size = Resource->OwnerTable[0].TableSize;
+        for (i = 1; i < Size && i < 16; ++i)
+        {
+            if (Resource->OwnerTable[i].OwnerThread != 0)
+            {
+                DbgPrint("    shared owner %p x%lu\n", (PVOID)Resource->OwnerTable[i].OwnerThread,
+                         Resource->OwnerTable[i].OwnerCount);
+            }
+        }
+    }
+    if (Resource->ActiveCount != 0 &&
+        (Resource->NumberOfSharedWaiters != 0 || Resource->NumberOfExclusiveWaiters != 0))
+    {
+        LoopDumpThread("owner", Resource->OwnerEntry.OwnerThread);
+        if (Resource->OwnerTable != NULL)
+        {
+            Size = Resource->OwnerTable[0].TableSize;
+            for (i = 1; i < Size && i < 16; ++i)
+            {
+                LoopDumpThread("shared owner", Resource->OwnerTable[i].OwnerThread);
+            }
+        }
+    }
+}
+
+/* IOCTL_LOOPRDR_DUMP: the RDBSS state a hang analysis needs, to the debugger
+ * log (owners whose low bits are 3 are RX_CONTEXTs a posted request handed
+ * its lock to) */
+static
+VOID
+LoopDumpState(
+    _In_ BOOLEAN BreakInOwner)
+{
+    PLIST_ENTRY Entry;
+    ULONG q;
+
+    DbgPrint("LOOPRDR-DUMP: posted requests %ld/%ld/%ld overflow %ld/%ld/%ld, pending async %ld\n",
+             RxFileSystemDeviceObject->PostedRequestCount[0], RxFileSystemDeviceObject->PostedRequestCount[1],
+             RxFileSystemDeviceObject->PostedRequestCount[2], RxFileSystemDeviceObject->OverflowQueueCount[0],
+             RxFileSystemDeviceObject->OverflowQueueCount[1], RxFileSystemDeviceObject->OverflowQueueCount[2],
+             LoopCounters.PendingAsync);
+    if (RxDispatcher.pWorkQueueDispatcher != NULL)
+    {
+        for (q = 0; q < RxMaximumWorkQueue; ++q)
+        {
+            PRX_WORK_QUEUE Wq = &RxDispatcher.pWorkQueueDispatcher->WorkQueue[q];
+
+            DbgPrint("LOOPRDR-DUMP: rx queue %lu: to dispatch %ld active %ld idle %ld max %lu\n", q,
+                     Wq->NumberOfWorkItemsToBeDispatched, Wq->NumberOfActiveWorkerThreads,
+                     Wq->NumberOfIdleWorkerThreads, Wq->MaximumNumberOfWorkerThreads);
+        }
+    }
+    ExAcquireFastMutex(&LoopFcbListMutex);
+    for (Entry = LoopFcbList.Flink; Entry != &LoopFcbList; Entry = Entry->Flink)
+    {
+        PLOOP_FCB Ext = CONTAINING_RECORD(Entry, LOOP_FCB, AllFcbs);
+        PFCB Fcb = (PFCB)Ext->MrxFcb;
+
+        DbgPrint("LOOPRDR-DUMP: FCB %p %wZ state %lx open %lu unclean %lu refs %ld async writes %lu\n", Fcb,
+                 &Fcb->FcbTableEntry.Path, Fcb->FcbState, Fcb->OpenCount, Fcb->UncleanCount, Fcb->NodeReferenceCount,
+                 Fcb->NonPaged->OutstandingAsyncWrites);
+        LoopDumpResource("main", Fcb->Header.Resource);
+        LoopDumpResource("paging", Fcb->Header.PagingIoResource);
+
+        /* An exclusive owner that is a thread (not an RX_CONTEXT | 3) and
+         * has waiters: show its stack */
+        if (BreakInOwner && Fcb->Header.Resource->ActiveCount != 0 &&
+            BooleanFlagOn(Fcb->Header.Resource->Flag, ResourceOwnedExclusive) &&
+            Fcb->Header.Resource->NumberOfExclusiveWaiters != 0 &&
+            (Fcb->Header.Resource->OwnerEntry.OwnerThread & 3) == 0 &&
+            Fcb->Header.Resource->OwnerEntry.OwnerThread != 0)
+        {
+            PKAPC Apc = ExAllocatePoolWithTag(NonPagedPool, sizeof(KAPC), LOOP_TAG);
+
+            if (Apc != NULL)
+            {
+                DbgPrint("LOOPRDR-DUMP: asking owner %p of FCB %p for its stack\n",
+                         (PVOID)Fcb->Header.Resource->OwnerEntry.OwnerThread, Fcb);
+                KeInitializeApc(Apc, (PKTHREAD)Fcb->Header.Resource->OwnerEntry.OwnerThread, 0, (PVOID)LoopOwnerApc,
+                                NULL, NULL, KernelMode, NULL);
+                if (!KeInsertQueueApc(Apc, NULL, NULL, 0))
+                {
+                    ExFreePoolWithTag(Apc, LOOP_TAG);
+                }
+                BreakInOwner = FALSE;
+            }
+        }
+    }
+    ExReleaseFastMutex(&LoopFcbListMutex);
+    DbgPrint("LOOPRDR-DUMP: end\n");
 }
 
 /* ---------------------------------------------------------------------- */
@@ -2072,6 +2578,13 @@ LoopDevFcbXXXControlFile(
             Status = STATUS_SUCCESS;
             break;
 
+        case IOCTL_LOOPRDR_DUMP:
+            /* Input (optional): a ULONG, 1 = stop in the debugger in the
+             * thread that holds a contended FCB exclusive */
+            LoopDumpState(InLength >= sizeof(ULONG) && Buffer != NULL && *(PULONG)Buffer == 1);
+            Status = STATUS_SUCCESS;
+            break;
+
         case IOCTL_LOOPRDR_BREAK:
             if (InLength < sizeof(LOOPRDR_BREAK) || Buffer == NULL)
             {
@@ -2143,6 +2656,7 @@ LoopInitDispatch(VOID)
     D->MRxShouldTryToCollapseThisOpen = LoopShouldTryToCollapseThisOpen;
     D->MRxCleanupFobx = LoopCleanupFobx;
     D->MRxCloseSrvOpen = LoopCloseSrvOpen;
+    D->MRxGetConnectionId = LoopGetConnectionId;
     D->MRxDeallocateForFcb = LoopDeallocateForFcb;
     D->MRxDeallocateForFobx = LoopDeallocateForFobx;
     D->MRxForceClosed = LoopForceClosed;
@@ -2194,8 +2708,12 @@ DriverEntry(
     UNICODE_STRING DeviceName, DosName;
     ULONG i;
 
+    LoopImageStart = (ULONG_PTR)DriverObject->DriverStart;
+    LoopImageEnd = LoopImageStart + DriverObject->DriverSize;
     ExInitializeFastMutex(&LoopRootMutex);
     ExInitializeFastMutex(&LoopLockMutex);
+    ExInitializeFastMutex(&LoopFcbListMutex);
+    InitializeListHead(&LoopFcbList);
     ExInitializeFastMutex(&LoopPagingMutex);
     KeInitializeEvent(&LoopBreakAckEvent, NotificationEvent, FALSE);
     RtlZeroMemory(&LoopCounters, sizeof(LoopCounters));

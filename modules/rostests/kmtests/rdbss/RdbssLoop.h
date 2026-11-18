@@ -30,6 +30,7 @@
 #define IOCTL_LOOPRDR_GET_COUNTERS  LOOPRDR_CTL(3, METHOD_BUFFERED)
 #define IOCTL_LOOPRDR_BREAK         LOOPRDR_CTL(4, METHOD_BUFFERED)
 #define IOCTL_LOOPRDR_SET_OPTIONS   LOOPRDR_CTL(5, METHOD_BUFFERED)
+#define IOCTL_LOOPRDR_DUMP          LOOPRDR_CTL(6, METHOD_BUFFERED) /* RDBSS lock state to the debugger */
 
 /* File-level controls, sent to an open file on the share: they go through
  * RDBSS's FSCTL and IOCTL low-I/O paths and the mini-redirector answers them
@@ -59,6 +60,22 @@ typedef struct _LOOPRDR_OPTIONS
 } LOOPRDR_OPTIONS, *PLOOPRDR_OPTIONS;
 
 #define LOOPRDR_OPT_ASYNC_LOWIO     0x1 /* complete reads/writes from a worker */
+/* Fault injection, for the hostile and race tests (RdbssHostile, RdbssRaces) */
+#define LOOPRDR_OPT_FAULTS          0x2  /* random failures (1 in 16) and short delays in the
+                                            mini-redirector entry points (not paging I/O) */
+#define LOOPRDR_OPT_LATE            0x4  /* pend half of the reads/writes, synchronous ones
+                                            included, and complete them late from a worker */
+#define LOOPRDR_OPT_DPC_COMPLETE    0x8  /* with LATE: signal half of those completions from a
+                                            DPC (RxLowIoCompletion at DISPATCH_LEVEL) */
+#define LOOPRDR_OPT_BREAK_IN_CLOSE  0x10 /* MRxCloseSrvOpen indicates a buffering state change
+                                            for the SRV_OPEN, then waits 300 ms */
+#define LOOPRDR_OPT_SLOW_CONNECT    0x20 /* MRxGetConnectionId waits 1 s (before any connection
+                                            structure exists) */
+#define LOOPRDR_OPT_DUP_COMPLETE    0x40 /* with LATE: call RxLowIoCompletion twice (a
+                                            mini-redirector bug RDBSS must refuse) */
+#define LOOPRDR_OPT_NO_INTERNAL_INFO 0x80 /* fail FileInternalInformation queries */
+#define LOOPRDR_OPT_PAGING_FAULTS   0x100 /* with FAULTS: also fail 1 in 64 paging reads/writes */
+#define LOOPRDR_OPT_SLOW_FLUSH      0x200 /* MRxFlush waits 500 ms (RDBSS holds the FCB exclusive) */
 
 /* IOCTL_LOOPRDR_GET_COUNTERS output: live objects as seen by the
  * mini-redirector (created minus finalized) and operation counts */
@@ -95,6 +112,13 @@ typedef struct _LOOPRDR_COUNTERS
     LONG AsyncCompletions;
     LONG Started;
     LONG PipeNetRoots;      /* ipc$ net roots RDBSS classified as pipes */
+    LONG FaultsInjected;
+    LONG LateCompletions;
+    LONG DpcCompletions;
+    LONG DupRefused;        /* second RxLowIoCompletion calls RDBSS refused */
+    LONG BreaksInClose;
+    LONG SlowConnects;
+    LONG LeakedServerLocks; /* server locks still held when their FCB went away */
 } LOOPRDR_COUNTERS, *PLOOPRDR_COUNTERS;
 
 #endif /* _RDBSSLOOP_H_ */
