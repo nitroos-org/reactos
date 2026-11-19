@@ -5728,9 +5728,26 @@ MmFlushImageSection (IN PSECTION_OBJECT_POINTERS SectionObjectPointer,
         case MmFlushForDelete:
         {
             /*
+             * A file with a view of a process cannot be deleted, whether the view is of a data or of an image
+             * section (Windows Server 2022: DeleteFile gives ERROR_ACCESS_DENIED, also when the file and section
+             * handles are closed and only the view is left). The views of the cache manager are not counted.
+             *
              * FIXME: Check for outstanding write probes on Data section.
              * How do we do that ?
              */
+            PMM_SECTION_SEGMENT DataSegment = MiGrabDataSection(SectionObjectPointer);
+
+            if (DataSegment)
+            {
+                BOOLEAN UserMapped = (*(volatile LONG *)&DataSegment->UserMapCount != 0);
+
+                MmDereferenceSegment(DataSegment);
+                if (UserMapped)
+                {
+                    DPRINT("Denying. A process has a view of the data\n");
+                    return FALSE;
+                }
+            }
         }
         /* Fall-through */
         case MmFlushForWrite:
