@@ -6,6 +6,7 @@ include_directories(${REACTOS_SOURCE_DIR}/sdk/include/wine)
 spec2def(combase.dll combase.spec ADD_IMPORTLIB)
 add_idl_headers(combase_idlheader dcom.idl)
 add_rpc_files(client irpcss.idl)
+add_rpc_files(client ${REACTOS_SOURCE_DIR}/sdk/include/reactos/idl/dcomlaunch.idl)
 # irpcss.idl includes these: the generated client stub is stale unless it depends on them too
 add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/irpcss_c.c ${CMAKE_CURRENT_BINARY_DIR}/irpcss_c.h
@@ -26,6 +27,7 @@ list(APPEND SOURCE
     usrmarshal.c
     ${CMAKE_CURRENT_BINARY_DIR}/combase_stubs.c
     ${CMAKE_CURRENT_BINARY_DIR}/irpcss_c.c
+    ${CMAKE_CURRENT_BINARY_DIR}/dcomlaunch_c.c
 )
 
 add_definitions(-Dwcsdup=_wcsdup -Dwcsicmp=_wcsicmp -D_ROAPI_)

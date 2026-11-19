@@ -96,6 +96,7 @@ ServiceControlHandler(DWORD dwControl,
 }
 
 VOID DealWithDeviceEvent();
+VOID StartServiceStartServer(VOID);
 
 VOID WINAPI
 ServiceMain(DWORD argc, LPTSTR *argv)
@@ -117,6 +118,9 @@ ServiceMain(DWORD argc, LPTSTR *argv)
     ShutdownEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
 
     DealWithDeviceEvent();
+
+    /* Start the services of COM classes for clients that may not start them (svcstart.c) */
+    StartServiceStartServer();
 
     UpdateServiceStatus(SERVICE_RUNNING);
 

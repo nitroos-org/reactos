@@ -1,0 +1,24 @@
+/*
+ * PROJECT:     ReactOS DCOM launcher
+ * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
+ * PURPOSE:     Starts the service that hosts a COM class registered with an AppID LocalService value
+ * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
+ */
+
+import "wtypes.idl";
+
+cpp_quote("#define DCOMLAUNCH_START_PROTSEQ L\"ncalrpc\"")
+cpp_quote("#define DCOMLAUNCH_START_ENDPOINT L\"dcomlaunch_svcstart\"")
+
+[
+    uuid(92171bc0-63d7-46fb-8fcc-dd1d5db980ce),
+    version(1.0),
+    pointer_default(unique)
+]
+interface IDcomLaunchServiceStart
+{
+    /* Start the service that the machine's registration of the class names as its LocalService */
+    HRESULT DcomLaunchStartLocalService(
+        [in] handle_t BindingHandle,
+        [in] const GUID *Clsid);
+}
