@@ -76,4 +76,76 @@ START_TEST(UnattendParse)
             ok(!_wcsicmp(klid, layouts[i].klid), "UnattendParseKeyboardLayout('%S') gave '%S', expected '%S'\n",
                layouts[i].text, klid, layouts[i].klid);
     }
+
+    /* Hostile values: over-long text, numeric edges, characters that only look like digits or yes/no */
+    {
+        enum { Long = 100000 };
+        PWSTR text = HeapAlloc(GetProcessHeap(), 0, (Long + 16) * sizeof(WCHAR));
+        WCHAR klid[9];
+        LONG flag = -1;
+        ULONG value = 0xDEAD;
+        ULONG k;
+
+        ok(text != NULL, "no memory for the long values\n");
+        if (!text)
+            return;
+
+        /* blanks around a good value, a hundred thousand of them: still the value */
+        for (k = 0; k < Long; ++k)
+            text[k] = L' ';
+        wcscpy(text + Long, L"yes");
+        ok(UnattendParseBool(text, &flag) && flag == 1, "yes behind %d blanks\n", Long);
+        wcscpy(text, L"no");
+        for (k = 2; k < Long; ++k)
+            text[k] = L'\t';
+        text[Long] = UNICODE_NULL;
+        flag = -1;
+        ok(UnattendParseBool(text, &flag) && flag == 0, "no followed by %d blanks\n", Long);
+
+        /* a long run of other characters is never a yes/no, a number or a layout, and nothing is written past the output */
+        for (k = 0; k < Long; ++k)
+            text[k] = L'x';
+        text[Long] = UNICODE_NULL;
+        ok(!UnattendParseBool(text, &flag), "a long word is no yes/no\n");
+        ok(!UnattendParseUInt(text, 0x7FFFFFFF, &value) && value == 0xDEAD, "a long word is no number\n");
+        for (k = 0; k < Long; ++k)
+            text[k] = L'1';
+        ok(!UnattendParseUInt(text, 0x7FFFFFFF, &value) && value == 0xDEAD, "a long run of digits overflows\n");
+        ok(!UnattendParseKeyboardLayout(text, klid), "a long run of digits is no layout\n");
+        for (k = 0; k < Long; ++k)
+            text[k] = L'0';
+        wcscpy(text + Long, L"7");
+        ok(UnattendParseUInt(text, 0x7FFFFFFF, &value) && value == 7, "leading zeros do not overflow\n");
+
+        HeapFree(GetProcessHeap(), 0, text);
+    }
+
+    {
+        ULONG value = 0xDEAD;
+        WCHAR klid[9] = L"?";
+
+        /* PartitionSizeMB, AutoLogonCount style numbers at the edges of 31 and 32 bits */
+        ok(UnattendParseUInt(L"2147483647", 0x7FFFFFFF, &value) && value == 0x7FFFFFFF, "2^31-1\n");
+        value = 0xDEAD;
+        ok(!UnattendParseUInt(L"2147483648", 0x7FFFFFFF, &value) && value == 0xDEAD, "2^31 is too much\n");
+        ok(UnattendParseUInt(L"4294967295", 0xFFFFFFFF, &value) && value == 0xFFFFFFFF, "2^32-1 with the 32 bit maximum\n");
+        value = 0xDEAD;
+        ok(!UnattendParseUInt(L"4294967296", 0xFFFFFFFF, &value) && value == 0xDEAD, "2^32\n");
+        ok(!UnattendParseUInt(L"+5", 100, &value), "a sign is not a digit\n");
+        ok(!UnattendParseUInt(L"5.0", 100, &value), "a decimal point\n");
+        ok(!UnattendParseUInt(L"\xFF15", 100, &value), "a full-width digit is no digit\n");
+        ok(!UnattendParseUInt(L"\x0665", 100, &value), "an Arabic-Indic digit is no digit\n");
+        ok(!UnattendParseUInt(L"5 6", 100, &value), "two numbers\n");
+
+        /* yes/no spelled with other characters */
+        ok(!UnattendParseBool(L"y\x0435s", &(LONG){0}), "a Cyrillic e in yes\n");
+        ok(!UnattendParseBool(L"yes\x0001", &(LONG){0}), "a control character after yes\n");
+        ok(!UnattendParseBool(L"\"yes\"", &(LONG){0}), "quotes are removed by the caller, not here\n");
+
+        /* layouts: odd lengths, signs, hex prefix */
+        ok(!UnattendParseKeyboardLayout(L"0x407", klid), "0x407\n");
+        ok(!UnattendParseKeyboardLayout(L"-407", klid), "-407\n");
+        ok(!UnattendParseKeyboardLayout(L"00000407 ", klid), "a blank after the layout\n");
+        ok(!UnattendParseKeyboardLayout(L"\xFF14\xFF10\xFF17", klid), "full-width digits\n");
+    }
 }
