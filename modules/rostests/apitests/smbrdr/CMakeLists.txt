@@ -30,6 +30,11 @@ set_module_type(smbattack win32cui UNICODE)
 add_importlibs(smbattack advapi32 msvcrt kernel32 ntdll)
 add_rostests_file(TARGET smbattack)
 
+add_executable(smbengacl smbengacl.c)
+set_module_type(smbengacl win32cui UNICODE)
+add_importlibs(smbengacl advapi32 msvcrt kernel32 ntdll)
+add_rostests_file(TARGET smbengacl)
+
 add_executable(smbmap smbmap.c)
 set_module_type(smbmap win32cui UNICODE)
 add_importlibs(smbmap advapi32 msvcrt kernel32 ntdll)

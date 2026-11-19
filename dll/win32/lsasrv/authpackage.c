@@ -772,6 +772,9 @@ LsapCallAuthenticationPackage(PLSA_API_MSG RequestMsg,
 }
 
 
+/* LocalGroups of one LsaLogonUser request (a token has room for far fewer groups anyway) */
+#define LSAP_MAX_LOCAL_GROUPS 1024
+
 static
 NTSTATUS
 LsapCopyLocalGroups(
@@ -789,6 +792,11 @@ LsapCopyLocalGroups(
     ULONG AllocatedSids = 0;
     ULONG i;
     NTSTATUS Status;
+
+    /* The count comes from the request message: bound it before it sizes anything (a huge one
+     * wrapped the length below, and the copy loop wrote past the buffer) */
+    if (ClientGroupsCount == 0 || ClientGroupsCount > LSAP_MAX_LOCAL_GROUPS)
+        return STATUS_INVALID_PARAMETER;
 
     LocalGroupsLength = sizeof(TOKEN_GROUPS) +
                         (ClientGroupsCount - ANYSIZE_ARRAY) * sizeof(SID_AND_ATTRIBUTES);
@@ -809,6 +817,9 @@ LsapCopyLocalGroups(
     if (!NT_SUCCESS(Status))
         goto done;
 
+    /* GroupCount came with the caller's memory: every later loop (the token, the frees) uses it, so it must
+     * be the count of entries copied here, not the caller's word for it */
+    LocalGroups->GroupCount = ClientGroupsCount;
 
     SidHeaderLength  = RtlLengthRequiredSid(0);
     SidHeader = RtlAllocateHeap(RtlGetProcessHeap(),
@@ -877,6 +888,71 @@ done:
     }
 
     return Status;
+}
+
+
+/*
+ * The LocalGroups of a caller without SeTcbPrivilege (an untrusted connection). Windows refuses every
+ * LocalGroups list there (measured on Windows Server 2022: STATUS_ACCESS_DENIED for Administrators, a
+ * service SID, LOCAL alone, a logon SID alone), and its LSA makes the logon SID itself. Our advapi32
+ * LogonUserExExW makes the logon SID and passes it with LOCAL as LocalGroups, also for callers without
+ * the privilege (LogonUser works for them on Windows), so exactly those two are accepted here:
+ *  - LOCAL (S-1-2-0), attributes within mandatory/enabled/enabled by default;
+ *  - one logon SID (SE_GROUP_LOGON_ID, S-1-5-5-x-y), same attributes plus SE_GROUP_LOGON_ID; its value is
+ *    replaced by a new one made here, so that a caller cannot name the logon SID of another session (its
+ *    window station, desktop, the processes of a service with a service SID admit that SID).
+ * Anything else: STATUS_ACCESS_DENIED, as on Windows.
+ */
+static
+NTSTATUS
+LsapCheckUntrustedLocalGroups(
+    _Inout_ PTOKEN_GROUPS LocalGroups)
+{
+    static const SID_IDENTIFIER_AUTHORITY LocalAuthority = {SECURITY_LOCAL_SID_AUTHORITY};
+    static const SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    const ULONG Plain = SE_GROUP_MANDATORY | SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT;
+    BOOLEAN HaveLocal = FALSE, HaveLogon = FALSE;
+    PISID Sid;
+    LUID Luid;
+    ULONG i;
+    NTSTATUS Status;
+
+    for (i = 0; i < LocalGroups->GroupCount; i++)
+    {
+        Sid = (PISID)LocalGroups->Groups[i].Sid;
+        if (Sid == NULL)
+            return STATUS_ACCESS_DENIED;
+
+        if (!HaveLocal &&
+            Sid->SubAuthorityCount == 1 &&
+            RtlEqualMemory(&Sid->IdentifierAuthority, &LocalAuthority, sizeof(LocalAuthority)) &&
+            Sid->SubAuthority[0] == SECURITY_LOCAL_RID &&
+            (LocalGroups->Groups[i].Attributes & ~Plain) == 0)
+        {
+            HaveLocal = TRUE;
+            continue;
+        }
+
+        if (!HaveLogon &&
+            (LocalGroups->Groups[i].Attributes & SE_GROUP_LOGON_ID) == SE_GROUP_LOGON_ID &&
+            (LocalGroups->Groups[i].Attributes & ~(Plain | SE_GROUP_LOGON_ID)) == 0 &&
+            Sid->SubAuthorityCount == SECURITY_LOGON_IDS_RID_COUNT &&
+            RtlEqualMemory(&Sid->IdentifierAuthority, &NtAuthority, sizeof(NtAuthority)) &&
+            Sid->SubAuthority[0] == SECURITY_LOGON_IDS_RID)
+        {
+            Status = NtAllocateLocallyUniqueId(&Luid);
+            if (!NT_SUCCESS(Status))
+                return Status;
+            Sid->SubAuthority[1] = (ULONG)Luid.HighPart;
+            Sid->SubAuthority[2] = Luid.LowPart;
+            HaveLogon = TRUE;
+            continue;
+        }
+
+        return STATUS_ACCESS_DENIED;
+    }
+
+    return STATUS_SUCCESS;
 }
 
 
@@ -1655,6 +1731,29 @@ LsapLogonUser(PLSA_API_MSG RequestMsg,
         }
 
         TRACE("GroupCount: %lu\n", LocalGroups->GroupCount);
+
+        /* Groups of the caller's choice go into the token only for a caller that holds SeTcbPrivilege:
+         * anybody else could log on with their own password and add Administrators, a service SID or
+         * the logon SID of another session (see LsapCheckUntrustedLocalGroups) */
+        if (!LogonContext->TrustedCaller)
+        {
+            Status = LsapCheckUntrustedLocalGroups(LocalGroups);
+            if (!NT_SUCCESS(Status))
+            {
+                ERR("LsapLogonUser: LocalGroups refused for a caller without SeTcbPrivilege\n");
+                /* Nothing was logged on yet: no logon session to delete (done: would use the reply's
+                 * LogonId, which the request still overlays) */
+                for (i = 0; i < LocalGroups->GroupCount; i++)
+                {
+                    if (LocalGroups->Groups[i].Sid != NULL)
+                        RtlFreeHeap(RtlGetProcessHeap(), 0, LocalGroups->Groups[i].Sid);
+                }
+                RtlFreeHeap(RtlGetProcessHeap(), 0, LocalGroups);
+                if (LocalAuthInfo != NULL)
+                    RtlFreeHeap(RtlGetProcessHeap(), 0, LocalAuthInfo);
+                return Status;
+            }
+        }
     }
 
     if (Package->LsaApLogonUserEx2 != NULL)

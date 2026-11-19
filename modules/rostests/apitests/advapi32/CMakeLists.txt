@@ -47,6 +47,7 @@ list(APPEND SOURCE
     LsaPolicyInfoLeak.c
     LsassLeak.c
     LsassServerLeak.c
+    LsaLogonUserLocalGroups.c
     LsaLogonUserS4U.c
     LsaTrustedClientToken.c
     LsaManageSidNameMapping.c
@@ -111,6 +112,7 @@ list(APPEND SOURCE
     SddlRights.c
     SddlSids.c
     ServiceProcess.c
+    ServiceSidToken.c
     PerfCounterValues.c
     PerfProvider.c
     ServiceStructLayout.c

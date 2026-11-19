@@ -50,6 +50,7 @@
 #include <libsmb2-nitro.h>
 
 #include <drivers/smbrdr/smbupcall.h>
+#include "sysopen.h"
 
 #ifndef FILE_DEVICE_NETWORK_REDIRECTOR
 #define FILE_DEVICE_NETWORK_REDIRECTOR 0x00000028
@@ -1064,7 +1065,7 @@ int wmain(int argc, WCHAR **argv)
     if (!start_driver())
         printf("smbtestd: mrxsmb not started (%lu), trying the device anyway\n", GetLastError());
 
-    dev = CreateFileW(NITRO_SMBRDR_ENGINE_DOS_NAME, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    dev = SmbTestOpenAsSystem(NITRO_SMBRDR_ENGINE_DOS_NAME, GENERIC_READ | GENERIC_WRITE, 0);
     if (dev == INVALID_HANDLE_VALUE)
     {
         printf("smbtestd: open engine device failed %lu\n", GetLastError());

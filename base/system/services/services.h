@@ -60,6 +60,7 @@ typedef struct _SERVICE_IMAGE
     DWORD dwProcessId;
     HANDLE hToken;
     HANDLE hProfile;
+    BOOL bServiceSid;       /* hToken has the service SID: the process gets the descriptor of ScmCreateServiceProcessSd */
     PSERVICE_PROCESS_WATCH pWatch;
     BOOL bProcessEnded; /* Its process is gone: a new start makes a new image */
 } SERVICE_IMAGE, *PSERVICE_IMAGE;

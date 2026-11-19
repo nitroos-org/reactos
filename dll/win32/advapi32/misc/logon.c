@@ -1446,8 +1446,8 @@ LogonUserExW(
  * @implemented
  *
  * LOGON32_LOGON_NETWORK_CLEARTEXT (used by OpenSSH for password logons) is an
- * interactive-format logon that yields an impersonation token. pTokenGroups is not
- * merged into the token yet.
+ * interactive-format logon that yields an impersonation token. The groups of
+ * pTokenGroups are added to the token with the attributes the caller gives them.
  */
 BOOL
 WINAPI
@@ -1629,10 +1629,21 @@ LogonUserExExW(
     if (!NT_SUCCESS(Status))
         goto done;
 
+    /* The caller's groups (pTokenGroups) are added after the logon and local SIDs; the LSA
+     * accepts them as local groups of the logon (the caller needs SeTcbPrivilege to have the
+     * LSA handle at all). The SIDs stay the caller's: they are only referenced here. */
+    if (pTokenGroups != NULL && pTokenGroups->GroupCount > 64)
+    {
+        Status = STATUS_INVALID_PARAMETER;
+        goto done;
+    }
+
     /* Allocate and set the token groups */
     TokenGroups = RtlAllocateHeap(RtlGetProcessHeap(),
                                   HEAP_ZERO_MEMORY,
-                                  sizeof(TOKEN_GROUPS) + ((2 - ANYSIZE_ARRAY) * sizeof(SID_AND_ATTRIBUTES)));
+                                  sizeof(TOKEN_GROUPS) +
+                                  ((2 + (pTokenGroups ? pTokenGroups->GroupCount : 0) - ANYSIZE_ARRAY) *
+                                   sizeof(SID_AND_ATTRIBUTES)));
     if (TokenGroups == NULL)
     {
         Status = STATUS_INSUFFICIENT_RESOURCES;
@@ -1646,6 +1657,22 @@ LogonUserExExW(
     TokenGroups->Groups[1].Sid = LocalSid;
     TokenGroups->Groups[1].Attributes = SE_GROUP_MANDATORY | SE_GROUP_ENABLED |
                                         SE_GROUP_ENABLED_BY_DEFAULT;
+    if (pTokenGroups != NULL)
+    {
+        ULONG i;
+
+        for (i = 0; i < pTokenGroups->GroupCount; i++)
+        {
+            if (pTokenGroups->Groups[i].Sid == NULL || !RtlValidSid(pTokenGroups->Groups[i].Sid))
+            {
+                Status = STATUS_INVALID_PARAMETER;
+                goto done;
+            }
+            TokenGroups->Groups[TokenGroups->GroupCount].Sid = pTokenGroups->Groups[i].Sid;
+            TokenGroups->Groups[TokenGroups->GroupCount].Attributes = pTokenGroups->Groups[i].Attributes;
+            TokenGroups->GroupCount++;
+        }
+    }
 
     /* Set the token source */
     RtlCopyMemory(TokenSource.SourceName,
