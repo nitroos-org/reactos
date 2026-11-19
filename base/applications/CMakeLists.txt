@@ -34,6 +34,7 @@ add_subdirectory(mshta)
 add_subdirectory(mspaint)
 add_subdirectory(mstsc)
 add_subdirectory(network)
+add_subdirectory(nitrodiag)
 add_subdirectory(notepad)
 add_subdirectory(osk)
 # NitroOS: the ReactOS Applications Manager (rapps.exe, rapps.com) is replaced by the feature manager (featmgr, optfeatures).

@@ -1,0 +1,46 @@
+/*
+ * PROJECT:     NitroOS compatibility log tool
+ * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
+ * PURPOSE:     English (United States) resource file
+ */
+
+LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
+
+IDD_STATUS DIALOGEX 0, 0, 250, 96
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+EXSTYLE WS_EX_TOPMOST
+CAPTION "Compatibility log"
+FONT 8, "MS Shell Dlg", 0, 0, 0x1
+BEGIN
+    LTEXT "", IDC_STATUSTEXT, 7, 7, 236, 64
+    PUSHBUTTON "Save report now", IDC_FINISH, 163, 76, 80, 14
+END
+
+IDD_DONE DIALOGEX 0, 0, 280, 130
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Compatibility log"
+FONT 8, "MS Shell Dlg", 0, 0, 0x1
+BEGIN
+    LTEXT "", IDC_DONETEXT, 7, 7, 266, 98
+    DEFPUSHBUTTON "Open folder", IDC_OPENFOLDER, 134, 109, 70, 14
+    PUSHBUTTON "Close", IDCANCEL, 208, 109, 65, 14
+END
+
+IDD_PICK DIALOGEX 0, 0, 290, 82
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Compatibility log"
+FONT 8, "MS Shell Dlg", 0, 0, 0x1
+BEGIN
+    LTEXT "Program that does not start or that crashes:", -1, 7, 7, 276, 10
+    EDITTEXT IDC_PICKPATH, 7, 20, 220, 14, ES_AUTOHSCROLL
+    PUSHBUTTON "Browse...", IDC_BROWSE, 233, 20, 50, 14
+    LTEXT "Arguments (optional):", -1, 7, 40, 90, 10
+    EDITTEXT IDC_PICKARGS, 7, 51, 276, 14, ES_AUTOHSCROLL
+    DEFPUSHBUTTON "Run and report", IDOK, 177, 66, 70, 14
+    PUSHBUTTON "Cancel", IDCANCEL, 251, 66, 32, 14
+END
+
+STRINGTABLE
+BEGIN
+    IDS_VERB "Run with compatibility log"
+END
