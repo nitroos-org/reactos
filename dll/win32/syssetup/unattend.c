@@ -466,7 +466,9 @@ UnattendScrubSecrets(VOID)
         else
             FlushFileBuffers(hFile);
     }
-    UnattendLog(L"answer file copy on this system: %u password value(s) removed", (UINT)scrubbed);
+    /* An installation without an answer file keeps no log and no Panther folder */
+    if (scrubbed)
+        UnattendLog(L"answer file copy on this system: %u password value(s) removed", (UINT)scrubbed);
     HeapFree(GetProcessHeap(), 0, pb);
     CloseHandle(hFile);
 }
