@@ -72,7 +72,7 @@ static void DebugPrintFunc(const char *format, ...)
 {
     va_list list;
     va_start(list, format);
-    vDbgPrintEx(DPFLTR_DEFAULT_ID, 9 | DPFLTR_MASK, format, list);
+    vDbgPrintExWithPrefix("VIOSCSI: ", DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL, format, list);
     va_end(list);
 }
 #else
@@ -87,7 +87,7 @@ void InitializeDebugPrints(IN PDRIVER_OBJECT DriverObject, IN PUNICODE_STRING Re
     bDebugPrint = 1;
     virtioDebugLevel = 0;
 #if !defined(RUN_UNCHECKED)
-    nVioscsiDebugLevel = TRACE_ALL;
+    nVioscsiDebugLevel = TRACE_LEVEL_ERROR; /* errors only: the I/O path must not print */
 #endif
 
 #if defined(PRINT_DEBUG)
