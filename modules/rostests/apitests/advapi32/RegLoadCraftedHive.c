@@ -385,6 +385,23 @@ static void R_RootIsLink(PBYTE Buf, DWORD Size)
     UNREFERENCED_PARAMETER(Size);
     W16(CELL(Buf, D32(Buf, 0x24)), NK_FLAGS) |= 0x0010;    /* the base block's RootCell; KEY_SYM_LINK */
 }
+/*
+ * A subkey name beginning with a NUL: the parser takes it for the end of a path, so no open reaches the key (one by
+ * its name opens the parent) and RegDeleteTreeW of the parent emptied the parent again and again until the stack
+ * overflowed (in-guest fuzz). The check drops the key at load.
+ */
+static void R_NulInName(PBYTE Buf, DWORD Size)
+{
+    CELL(Buf, K(Buf, Size, "0"))[NK_NAME] = 0;     /* C\0 */
+}
+/*
+ * A subkey name with a NUL inside (names are counted; the native API makes such keys): as a C string it names
+ * another key, so RegDeleteTreeW of its parent failed (or deleted the other key); it deletes it by its counted name
+ */
+static void R_NulInsideName(PBYTE Buf, DWORD Size)
+{
+    CELL(Buf, K(Buf, Size, "m0000"))[NK_NAME + 4] = 0;   /* Many\m0000 -> "m000<NUL>": still first in its index */
+}
 /* An allocated cell whose size runs past its bin */
 static void R_CellPastBin(PBYTE Buf, DWORD Size)
 {
@@ -418,6 +435,8 @@ static const RECIPE g_Recipes[] =
     { "Unicode name of an odd length", R_OddNameLength, TRUE },
     { "link flag without a link value", R_LinkFlagNoValue, TRUE },
     { "root flagged as a link", R_RootIsLink, TRUE },
+    { "subkey name beginning with a NUL", R_NulInName, TRUE },
+    { "subkey name with a NUL inside", R_NulInsideName, TRUE },
     { "cell size past its bin", R_CellPastBin, FALSE },
 };
 
@@ -478,9 +497,10 @@ static void Walk(HKEY Key, ULONG Depth)
         ClassLength = _countof(Class);
         if (RegEnumKeyExW(Key, i, Name, &NameLength, NULL, Class, &ClassLength, &Time) == ERROR_NO_MORE_ITEMS)
             break;
-        /* What enumeration gives, a lookup by name finds (a link without its value aside) */
+        /* What enumeration gives, a lookup by name finds (a link without its value aside, and a name with a NUL
+           inside, which as a C string is another name) */
         Error = RegOpenKeyExW(Key, Name, 0, KEY_READ, &Sub);
-        ok(Error == ERROR_SUCCESS || (Depth == 0 && !wcscmp(Name, L"B")),
+        ok(Error == ERROR_SUCCESS || (Depth == 0 && !wcscmp(Name, L"B")) || wcslen(Name) != NameLength,
            "[%s] subkey '%ls' enumerated but not opened: %ld\n", g_Recipe, Name, Error);
         if (Error == ERROR_SUCCESS)
         {
@@ -559,8 +579,27 @@ static void Run(const RECIPE *Recipe)
                 /* Deletes and creates go through the cells the check let in */
                 RegDeleteTreeW(Root, L"A");
                 RegDeleteKeyW(Root, L"A");
-                RegDeleteTreeW(Root, L"C");
+                Error = RegDeleteTreeW(Root, L"C");
+                if (Recipe->Apply == R_NulInName)
+                    ok(Error == ERROR_SUCCESS, "[%s] RegDeleteTreeW(C): %ld\n", Recipe->Name, Error);
                 RegDeleteKeyW(Root, L"C");
+                if (Recipe->Apply == R_NulInName)
+                {
+                    Error = RegOpenKeyExW(Root, L"C", 0, KEY_READ, &Key);
+                    ok(Error == ERROR_FILE_NOT_FOUND, "[%s] C after its deletion: %ld\n", Recipe->Name, Error);
+                    if (Error == ERROR_SUCCESS)
+                        RegCloseKey(Key);
+                }
+                if (Recipe->Apply == R_NulInsideName)
+                {
+                    Error = RegDeleteTreeW(Root, L"Many");
+                    ok(Error == ERROR_SUCCESS, "[%s] RegDeleteTreeW(Many): %ld\n", Recipe->Name, Error);
+                    RegDeleteKeyW(Root, L"Many");
+                    Error = RegOpenKeyExW(Root, L"Many", 0, KEY_READ, &Key);
+                    ok(Error == ERROR_FILE_NOT_FOUND, "[%s] Many after its deletion: %ld\n", Recipe->Name, Error);
+                    if (Error == ERROR_SUCCESS)
+                        RegCloseKey(Key);
+                }
                 RegDeleteKeyW(Root, L"E");
                 RegDeleteTreeW(Root, L"Many\\m0001");
                 RegDeleteKeyW(Root, L"Many\\m0001");
