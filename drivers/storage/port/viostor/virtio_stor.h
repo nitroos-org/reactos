@@ -291,7 +291,7 @@ typedef struct _SRB_EXTENSION
 } SRB_EXTENSION, *PSRB_EXTENSION;
 
 BOOLEAN
-VirtIoInterrupt(IN PVOID DeviceExtension);
+NTAPI VirtIoInterrupt(IN PVOID DeviceExtension);
 
 #ifndef PCIX_TABLE_POINTER
 typedef struct

@@ -41,17 +41,10 @@ BOOLEAN IsCrashDumpMode;
 PVOID TraceContext;
 #endif
 
-sp_DRIVER_INITIALIZE DriverEntry;
-HW_INITIALIZE VirtIoHwInitialize;
-HW_STARTIO VirtIoStartIo;
-HW_FIND_ADAPTER VirtIoFindAdapter;
-HW_RESET_BUS VirtIoResetBus;
-HW_ADAPTER_CONTROL VirtIoAdapterControl;
-HW_INTERRUPT VirtIoInterrupt;
-HW_BUILDIO VirtIoBuildIo;
-HW_DPC_ROUTINE CompleteDpcRoutine;
-HW_MESSAGE_SIGNALED_INTERRUPT_ROUTINE VirtIoMSInterruptRoutine;
-HW_PASSIVE_INITIALIZE_ROUTINE VirtIoPassiveInitializeRoutine;
+/* The function type declarations (sp_DRIVER_INITIALIZE DriverEntry; HW_STARTIO VirtIoStartIo; ...) of the
+ * Windows headers are static analysis annotations; the prototypes follow below. */
+BOOLEAN NTAPI VirtIoInterrupt(IN PVOID DeviceExtension);
+BOOLEAN NTAPI VirtIoPassiveInitializeRoutine(IN PVOID DeviceExtension);
 
 extern int vring_add_buf_stor(IN struct virtqueue *_vq,
                               IN struct VirtIOBufferDescriptor sg[],
@@ -60,23 +53,23 @@ extern int vring_add_buf_stor(IN struct virtqueue *_vq,
                               IN PVOID data);
 
 BOOLEAN
-VirtIoHwInitialize(IN PVOID DeviceExtension);
+NTAPI VirtIoHwInitialize(IN PVOID DeviceExtension);
 
 BOOLEAN
 VirtIoHwReinitialize(IN PVOID DeviceExtension);
 
 BOOLEAN
-VirtIoBuildIo(IN PVOID DeviceExtension, IN PSCSI_REQUEST_BLOCK Srb);
+NTAPI VirtIoBuildIo(IN PVOID DeviceExtension, IN PSCSI_REQUEST_BLOCK Srb);
 
-VOID CompleteDpcRoutine(IN PSTOR_DPC Dpc, IN PVOID Context, IN PVOID SystemArgument1, IN PVOID SystemArgument2);
+VOID NTAPI CompleteDpcRoutine(IN PSTOR_DPC Dpc, IN PVOID Context, IN PVOID SystemArgument1, IN PVOID SystemArgument2);
 BOOLEAN
-VirtIoMSInterruptRoutine(IN PVOID DeviceExtension, IN ULONG MessageID);
+NTAPI VirtIoMSInterruptRoutine(IN PVOID DeviceExtension, IN ULONG MessageID);
 
 BOOLEAN
-VirtIoStartIo(IN PVOID DeviceExtension, IN PSCSI_REQUEST_BLOCK Srb);
+NTAPI VirtIoStartIo(IN PVOID DeviceExtension, IN PSCSI_REQUEST_BLOCK Srb);
 
 ULONG
-VirtIoFindAdapter(IN PVOID DeviceExtension,
+NTAPI VirtIoFindAdapter(IN PVOID DeviceExtension,
                   IN PVOID HwContext,
                   IN PVOID BusInformation,
                   IN PCHAR ArgumentString,
@@ -84,10 +77,10 @@ VirtIoFindAdapter(IN PVOID DeviceExtension,
                   OUT PBOOLEAN Again);
 
 BOOLEAN
-VirtIoResetBus(IN PVOID DeviceExtension, IN ULONG PathId);
+NTAPI VirtIoResetBus(IN PVOID DeviceExtension, IN ULONG PathId);
 
 SCSI_ADAPTER_CONTROL_STATUS
-VirtIoAdapterControl(IN PVOID DeviceExtension, IN SCSI_ADAPTER_CONTROL_TYPE ControlType, IN PVOID Parameters);
+NTAPI VirtIoAdapterControl(IN PVOID DeviceExtension, IN SCSI_ADAPTER_CONTROL_TYPE ControlType, IN PVOID Parameters);
 
 UCHAR
 RhelScsiGetInquiryData(IN PVOID DeviceExtension, IN OUT PSRB_TYPE Srb);
@@ -134,7 +127,7 @@ VOID WppCleanupRoutine(PVOID arg1)
 #endif
 
 ULONG
-DriverEntry(IN PVOID DriverObject, IN PVOID RegistryPath)
+NTAPI DriverEntry(IN PVOID DriverObject, IN PVOID RegistryPath)
 {
 
     HW_INITIALIZATION_DATA hwInitData;
@@ -244,7 +237,7 @@ static BOOLEAN HasWritebackCache(PADAPTER_EXTENSION adaptExt)
 }
 
 ULONG
-VirtIoFindAdapter(IN PVOID DeviceExtension,
+NTAPI VirtIoFindAdapter(IN PVOID DeviceExtension,
                   IN PVOID HwContext,
                   IN PVOID BusInformation,
                   IN PCHAR ArgumentString,
@@ -570,7 +563,7 @@ VirtIoFindAdapter(IN PVOID DeviceExtension,
 }
 
 BOOLEAN
-VirtIoPassiveInitializeRoutine(IN PVOID DeviceExtension)
+NTAPI VirtIoPassiveInitializeRoutine(IN PVOID DeviceExtension)
 {
     ULONG index;
     PADAPTER_EXTENSION adaptExt = (PADAPTER_EXTENSION)DeviceExtension;
@@ -701,7 +694,7 @@ VOID RhelSetGuestFeatures(IN PVOID DeviceExtension)
 }
 
 BOOLEAN
-VirtIoHwInitialize(IN PVOID DeviceExtension)
+NTAPI VirtIoHwInitialize(IN PVOID DeviceExtension)
 {
     PADAPTER_EXTENSION adaptExt;
     BOOLEAN ret = FALSE;
@@ -998,7 +991,7 @@ BOOLEAN VioStorResetBus(IN PVOID DeviceExtension)
 }
 
 BOOLEAN
-VirtIoStartIo(IN PVOID DeviceExtension, IN PSCSI_REQUEST_BLOCK Srb)
+NTAPI VirtIoStartIo(IN PVOID DeviceExtension, IN PSCSI_REQUEST_BLOCK Srb)
 {
     PCDB cdb = SRB_CDB(Srb);
     PADAPTER_EXTENSION adaptExt;
@@ -1292,7 +1285,7 @@ static VOID VirtIoConfigUpdated(PADAPTER_EXTENSION adaptExt)
 }
 
 BOOLEAN
-VirtIoInterrupt(IN PVOID DeviceExtension)
+NTAPI VirtIoInterrupt(IN PVOID DeviceExtension)
 {
     PADAPTER_EXTENSION adaptExt;
     BOOLEAN isInterruptServiced = FALSE;
@@ -1328,7 +1321,7 @@ VirtIoInterrupt(IN PVOID DeviceExtension)
 }
 
 BOOLEAN
-VirtIoMSInterruptRoutine(IN PVOID DeviceExtension, IN ULONG MessageID)
+NTAPI VirtIoMSInterruptRoutine(IN PVOID DeviceExtension, IN ULONG MessageID)
 {
     PADAPTER_EXTENSION adaptExt = (PADAPTER_EXTENSION)DeviceExtension;
 
@@ -1373,7 +1366,7 @@ VirtIoMSInterruptRoutine(IN PVOID DeviceExtension, IN ULONG MessageID)
 }
 
 BOOLEAN
-VirtIoResetBus(IN PVOID DeviceExtension, IN ULONG PathId)
+NTAPI VirtIoResetBus(IN PVOID DeviceExtension, IN ULONG PathId)
 {
     UNREFERENCED_PARAMETER(PathId);
 
@@ -1381,7 +1374,7 @@ VirtIoResetBus(IN PVOID DeviceExtension, IN ULONG PathId)
 }
 
 SCSI_ADAPTER_CONTROL_STATUS
-VirtIoAdapterControl(IN PVOID DeviceExtension, IN SCSI_ADAPTER_CONTROL_TYPE ControlType, IN PVOID Parameters)
+NTAPI VirtIoAdapterControl(IN PVOID DeviceExtension, IN SCSI_ADAPTER_CONTROL_TYPE ControlType, IN PVOID Parameters)
 {
     PSCSI_SUPPORTED_CONTROL_TYPE_LIST ControlTypeList;
     ULONG AdjustedMaxControlType;
@@ -1483,7 +1476,7 @@ VirtIoHwReinitialize(IN PVOID DeviceExtension)
 }
 
 BOOLEAN
-VirtIoBuildIo(IN PVOID DeviceExtension, IN PSCSI_REQUEST_BLOCK Srb)
+NTAPI VirtIoBuildIo(IN PVOID DeviceExtension, IN PSCSI_REQUEST_BLOCK Srb)
 {
     PCDB cdb;
     ULONG i;
@@ -2453,7 +2446,7 @@ VOID VioStorCompleteRequest(IN PVOID DeviceExtension, IN ULONG MessageID, IN BOO
 }
 
 #pragma warning(disable : 4100 4701)
-VOID CompleteDpcRoutine(IN PSTOR_DPC Dpc, IN PVOID Context, IN PVOID SystemArgument1, IN PVOID SystemArgument2)
+VOID NTAPI CompleteDpcRoutine(IN PSTOR_DPC Dpc, IN PVOID Context, IN PVOID SystemArgument1, IN PVOID SystemArgument2)
 {
     ULONG MessageID = PtrToUlong(SystemArgument1);
 
