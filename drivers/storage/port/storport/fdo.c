@@ -509,7 +509,9 @@ PortFdoStartMiniport(
     }
 
     // FIXME: Find an appropriate place
-    DeviceExtension->OutstandingRequestMax = DeviceExtension->Miniport.PortConfig.MaxNumberOfIO;
+    /* A miniport that computes 0 (vioscsi on a small ring without indirect descriptors) would get no
+       request started at all, the boot disk included: one at a time instead */
+    DeviceExtension->OutstandingRequestMax = max(DeviceExtension->Miniport.PortConfig.MaxNumberOfIO, 1);
 
     /* Call the miniports HwInitialize function */
     Status = MiniportHwInitialize(&DeviceExtension->Miniport);
