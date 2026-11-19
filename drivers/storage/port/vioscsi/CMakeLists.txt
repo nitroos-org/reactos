@@ -20,5 +20,8 @@ if(NOT MSVC)
         -Wno-unused-function
         -Wno-unknown-pragmas
         -Wno-attributes
-        -Wno-pointer-sign)
+        -Wno-pointer-sign
+        -Wno-old-style-declaration
+        -Wno-unused-but-set-variable
+        -Wno-unused-variable)
 endif()
