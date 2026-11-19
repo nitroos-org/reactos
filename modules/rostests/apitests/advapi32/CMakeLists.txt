@@ -97,6 +97,7 @@ list(APPEND SOURCE
     TokenIntegrity.c
     TokenLogonSid.c
     TokenQueryParity.c
+    ServiceAccessCheck.c
     ServiceArgs.c
     ServiceControllerQuery.c
     ServiceEnv.c
