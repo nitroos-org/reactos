@@ -40,8 +40,18 @@ _1 = %cdname%,%cdtagfile%,,""
 7 = bin
 
 [DiskSpaceRequirements]
-; Required free system partition disk space in MB
-FreeSysPartDiskSpace = 450
+; Smallest system partition (in MB) setup accepts: the installed set at its peak
+; (including what first-boot add-ons stage and install) plus about 20 % for the
+; file system, the registry hives, logs, and temporary files of the first boot.
+; Measured on Release builds without test binaries: i386 about 390 MB
+; installed. Architectures with a bigger installed set have their own section.
+FreeSysPartDiskSpace = 500
+
+[DiskSpaceRequirements.amd64]
+; amd64 with the 32-bit side (WoW64), the Mesa pack, and PowerShell 7: the
+; installed set peaks at about 1010 MB (the PowerShell 7 MSI is staged, installed,
+; and cached by Windows Installer at the same time before the staged copy is deleted)
+FreeSysPartDiskSpace = 1250
 
 ;
 ; The [SourceDisksFiles] section lists all the files available to the

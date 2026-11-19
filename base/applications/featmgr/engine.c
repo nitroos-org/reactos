@@ -2236,7 +2236,7 @@ static HRESULT SoftwareInstallPiece(const FM_FEATURE *f, HKEY state, FILE *log, 
     BOOL scoopFresh;
     BOOL nat = FmNativeIsProvider(f->Provider);
     BOOL comp = !_wcsicmp(f->Provider, L"component") || nat;
-    BOOL keepFile = FALSE;                 /* the file is the image's own payload: never deleted */
+    BOOL keepFile = FALSE;                 /* the file is the image's own payload: not deleted like a download (FmNativeDropStaged may, on request) */
     WCHAR *pathBefore = NULL;
     FM_COMPONENT c;                        /* the component list entry (comp, not nat): its detect rule is checked after the install */
     BOOL missing = FALSE;                  /* the installer said success but the detect rule does not hold */
@@ -2400,6 +2400,11 @@ static HRESULT SoftwareInstallPiece(const FM_FEATURE *f, HKEY state, FILE *log, 
         }
         return HRESULT_FROM_WIN32(ERROR_INSTALL_FAILURE);
     }
+    /* The image's staged installer (PowerShell 7's MSI) is only needed until Windows Installer has its own cached copy:
+     * delete it after a finished install. Not after a restart request (the install is not complete yet), and not when
+     * the installer failed (that path returned above, so the retry still finds the file). */
+    if (comp && nat && keepFile && !restart)
+        FmNativeDropStaged(f, &c, log);
     if (!_wcsicmp(f->Provider, L"scoop"))
         FmScoopAppDefaults(f->App, log);        /* NitroOS default for VS Code (scoopdefaults.c) */
     else if (!_wcsicmp(f->Id, L"scoop"))
