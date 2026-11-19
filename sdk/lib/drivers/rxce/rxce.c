@@ -8259,6 +8259,41 @@ RxResumeBlockedOperations_Serially(
 
 /*
  * @implemented
+ *
+ * Called by a mini-redirector to set (or, with NULL, clear) the cancel
+ * routine RDBSS calls for an RX_CONTEXT it pended (MS Learn,
+ * RxSetMinirdrCancelRoutine: STATUS_CANCELLED when the context is already
+ * cancelled; the field is set under a spin lock). Same lock as
+ * RxCancelRoutine, which marks the context cancelled: a routine set here
+ * successfully is seen by a later cancel, and a cancel that came first makes
+ * this fail, so the mini-redirector answers the request itself.
+ */
+NTSTATUS
+NTAPI
+RxSetMinirdrCancelRoutine(
+    IN OUT PRX_CONTEXT RxContext,
+    IN PMRX_CALLDOWN MRxCancelRoutine)
+{
+    KIRQL OldIrql;
+    NTSTATUS Status;
+
+    Status = STATUS_SUCCESS;
+    KeAcquireSpinLock(&RxStrucSupSpinLock, &OldIrql);
+    if (BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_CANCELLED) && MRxCancelRoutine != NULL)
+    {
+        Status = STATUS_CANCELLED;
+    }
+    else
+    {
+        RxContext->MRxCancelRoutine = MRxCancelRoutine;
+    }
+    KeReleaseSpinLock(&RxStrucSupSpinLock, OldIrql);
+
+    return Status;
+}
+
+/*
+ * @implemented
  */
 VOID
 RxSetFileSizeWithLock(

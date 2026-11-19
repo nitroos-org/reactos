@@ -544,4 +544,10 @@ VOID
 RxRemoveOperationFromBlockingQueue(
     _Inout_ PRX_CONTEXT RxContext);
 
+NTSTATUS
+NTAPI
+RxSetMinirdrCancelRoutine(
+    _Inout_ PRX_CONTEXT RxContext,
+    _In_ PMRX_CALLDOWN MRxCancelRoutine);
+
 #endif

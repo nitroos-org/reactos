@@ -24,6 +24,7 @@
 
 #include "RdbssLoop.h"
 #include "RdbssHostile.h"
+#include "RdbssLockTorture.h"
 
 int
 wmain(
@@ -31,6 +32,16 @@ wmain(
     WCHAR **argv)
 {
     ULONG Seconds, Seed, Ops, Errors, Problems, Mask = 0xFFFFFFFF;
+
+    /* rdbsshostile lt <root> <seconds> <seed> <process> <model> <terminate>:
+     * the lock torture (RdbssLockTorture.h) */
+    if (argc >= 8 && wcscmp(argv[1], L"lt") == 0)
+    {
+        Problems = LtRun(argv[2], wcstoul(argv[5], NULL, 10), wcstoul(argv[3], NULL, 10), wcstoul(argv[4], NULL, 10),
+                         wcstoul(argv[6], NULL, 10) != 0, wcstoul(argv[7], NULL, 10) != 0);
+        printf("rdbsshostile lt: %lu problems\n", Problems);
+        return (int)Problems;
+    }
 
     if (argc < 4)
     {

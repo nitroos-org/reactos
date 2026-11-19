@@ -40,6 +40,18 @@
 /* RDBSS-private LOWIO_CONTEXT flag (same value in rxce.c, which clears it at
  * each submission): RxLowIoCompletion was called for the current submission */
 #define RXP_LOWIO_FLAG_COMPLETION_INDICATED 0x8000
+/* RDBSS-private LOWIO_CONTEXT flag: this IRP_MJ_LOCK_CONTROL request counts
+ * in its FCB's OutstandingLockOperationsCount (RxCommonLockControl), until
+ * RxpLockRequestDone */
+#define RXP_LOWIO_FLAG_LOCK_COUNTED 0x4000
+/* RDBSS-private FOBX flag (a bit fcb.h does not use): the cleanup of the
+ * handle has started (set under the FCB, before its locks are released) */
+#define RXP_FOBX_FLAG_CLEANUP_STARTED 0x40000000
+/* RDBSS-private LOWIO_CONTEXT flags of a single unlock: the local lock was
+ * released before the request went to the mini-redirector (once, also when
+ * the request is retried), and it was not there */
+#define RXP_LOWIO_FLAG_LOCAL_UNLOCKED 0x2000
+#define RXP_LOWIO_FLAG_LOCAL_MISSED 0x1000
 
 typedef
 NTSTATUS
@@ -142,6 +154,11 @@ NTSTATUS
 NTAPI
 RxCommonLockControl(
     PRX_CONTEXT Context);
+
+static
+VOID
+RxpCancelLockRequestsForFobx(
+    IN PFOBX Fobx);
 
 NTSTATUS
 NTAPI
@@ -1062,16 +1079,26 @@ RxCancelNotifyChangeDirectoryRequestsForFobx(
     /* Now, handle all our "extracted" contexts */
     while (!IsListEmpty(&ContextsToCancel))
     {
+        PMRX_CALLDOWN MRxCancelRoutine;
+
+        /* Back on the active list before anything else: the last
+         * dereference unlinks the context from the list it is on, and
+         * RemoveHeadList leaves its links pointing into this local list
+         * (a stack variable by then). Read the routine once, under the lock
+         * the mini-redirector clears it under */
+        KeAcquireSpinLock(&RxStrucSupSpinLock, &OldIrql);
         Entry = RemoveHeadList(&ContextsToCancel);
         Context = CONTAINING_RECORD(Entry, RX_CONTEXT, ContextListEntry);
+        InsertTailList(&RxActiveContexts, &Context->ContextListEntry);
+        MRxCancelRoutine = Context->MRxCancelRoutine;
+        KeReleaseSpinLock(&RxStrucSupSpinLock, OldIrql);
 
         /* If they had an associated IRP (should be always true) */
-        if (Context->CurrentIrp != NULL)
+        if (Context->CurrentIrp != NULL && MRxCancelRoutine != NULL)
         {
             /* Then, call cancel routine */
-            ASSERT(Context->MRxCancelRoutine != NULL);
-            DPRINT1("Canceling %p with %p\n", Context, Context->MRxCancelRoutine);
-            Context->MRxCancelRoutine(Context);
+            DPRINT1("Canceling %p with %p\n", Context, MRxCancelRoutine);
+            MRxCancelRoutine(Context);
         }
 
         /* And delete the context */
@@ -1159,16 +1186,26 @@ RxCancelNotifyChangeDirectoryRequestsForVNetRoot(
     /* Now, handle all our "extracted" contexts */
     while (!IsListEmpty(&ContextsToCancel))
     {
+        PMRX_CALLDOWN MRxCancelRoutine;
+
+        /* Back on the active list before anything else: the last
+         * dereference unlinks the context from the list it is on, and
+         * RemoveHeadList leaves its links pointing into this local list
+         * (a stack variable by then). Read the routine once, under the lock
+         * the mini-redirector clears it under */
+        KeAcquireSpinLock(&RxStrucSupSpinLock, &OldIrql);
         Entry = RemoveHeadList(&ContextsToCancel);
         Context = CONTAINING_RECORD(Entry, RX_CONTEXT, ContextListEntry);
+        InsertTailList(&RxActiveContexts, &Context->ContextListEntry);
+        MRxCancelRoutine = Context->MRxCancelRoutine;
+        KeReleaseSpinLock(&RxStrucSupSpinLock, OldIrql);
 
         /* If they had an associated IRP (should be always true) */
-        if (Context->CurrentIrp != NULL)
+        if (Context->CurrentIrp != NULL && MRxCancelRoutine != NULL)
         {
             /* Then, call cancel routine */
-            ASSERT(Context->MRxCancelRoutine != NULL);
-            DPRINT1("Canceling %p with %p\n", Context, Context->MRxCancelRoutine);
-            Context->MRxCancelRoutine(Context);
+            DPRINT1("Canceling %p with %p\n", Context, MRxCancelRoutine);
+            MRxCancelRoutine(Context);
         }
 
         /* And delete the context */
@@ -1214,8 +1251,10 @@ RxCancelOperationInOverflowQueue(
                 --RxFileSystemDeviceObject->OverflowQueueCount[DelayedWorkQueue];
             }
 
-            /* Clear the flag */
-            ClearFlag(RxContext->Flags, ~(RX_CONTEXT_FLAG_FSP_DELAYED_OVERFLOW_QUEUE | RX_CONTEXT_FLAG_FSP_CRITICAL_OVERFLOW_QUEUE));
+            /* Clear the flag (only the queue flags: this cleared every other
+             * flag, RX_CONTEXT_FLAG_FROM_POOL included, so the context of a
+             * request cancelled while queued was never freed) */
+            ClearFlag(RxContext->Flags, (RX_CONTEXT_FLAG_FSP_DELAYED_OVERFLOW_QUEUE | RX_CONTEXT_FLAG_FSP_CRITICAL_OVERFLOW_QUEUE));
 
             /* Time to cancel! */
             OperationToCancel = TRUE;
@@ -1246,28 +1285,33 @@ RxCancelRoutine(
     KIRQL OldIrql;
     PLIST_ENTRY Entry;
     PRX_CONTEXT RxContext;
+    BOOLEAN Found;
 
     /* Lock our contexts list */
     KeAcquireSpinLock(&RxStrucSupSpinLock, &OldIrql);
 
-    /* Now, find a context that matches the cancelled IRP */
-    Entry = RxActiveContexts.Flink;
-    while (Entry != &RxActiveContexts)
+    /* Now, find a context that matches the cancelled IRP. (The end of the
+     * walk was the test for "not found", but the walk has already moved past
+     * the match then: a match at the tail of the list, the newest context,
+     * was taken for none and its cancel was lost) */
+    Found = FALSE;
+    RxContext = NULL;
+    for (Entry = RxActiveContexts.Flink; Entry != &RxActiveContexts; Entry = Entry->Flink)
     {
         RxContext = CONTAINING_RECORD(Entry, RX_CONTEXT, ContextListEntry);
-        Entry = Entry->Flink;
 
         /* Found! */
         if (RxContext->CurrentIrp == Irp)
         {
+            Found = TRUE;
             break;
         }
     }
 
-    /* If we reached the end of the list, we didn't find any context, so zero the buffer
-     * If the context is already under cancellation, forget about it too
+    /* If we didn't find any context, or the context is already under
+     * cancellation, forget about it
      */
-    if (Entry == &RxActiveContexts || BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_CANCELLED))
+    if (!Found || BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_CANCELLED))
     {
         RxContext = NULL;
     }
@@ -2106,6 +2150,9 @@ RxCommonCleanup(
     FcbAcquired = TRUE;
 
     Fobx->AssociatedFileObject = NULL;
+    /* From here on, a lock of this handle that the server grants is not kept
+     * (RxLowIoLockControlShellCompletion) */
+    InterlockedOr((volatile LONG *)&Fobx->Flags, RXP_FOBX_FLAG_CLEANUP_STARTED);
 
     /* In case it was already orphaned */
     if (BooleanFlagOn(Fcb->FcbState, FCB_STATE_ORPHANED))
@@ -2142,6 +2189,13 @@ RxCommonCleanup(
 
     /* Cancel any pending notification */
     RxCancelNotifyChangeDirectoryRequestsForFobx(Fobx);
+
+    /* And end the lock requests of this handle that wait on the server: a
+     * lock granted after the cleanup would never be released by it */
+    if (NodeType(Fcb) == RDBSS_NTC_STORAGE_TYPE_FILE)
+    {
+        RxpCancelLockRequestsForFobx(Fobx);
+    }
 
     /* Backup open count before we start playing with it */
     OpenCount = Fcb->ShareAccess.OpenCount;
@@ -3174,6 +3228,81 @@ RxCommonFlushBuffers(
     return Status;
 }
 
+/* Drops a lock request's count in OutstandingLockOperationsCount, once:
+ * called by the completion routine and by RxCommonLockControl when the
+ * request did not go asynchronous (it may never have reached the
+ * completion routine) */
+static
+VOID
+RxpLockRequestDone(
+    IN PRX_CONTEXT RxContext)
+{
+    if (InterlockedAnd16((volatile SHORT *)&RxContext->LowIoContext.Flags, (SHORT)~RXP_LOWIO_FLAG_LOCK_COUNTED) &
+        RXP_LOWIO_FLAG_LOCK_COUNTED)
+    {
+        InterlockedDecrement((volatile long *)&((PFCB)RxContext->pFcb)->OutstandingLockOperationsCount);
+    }
+}
+
+/*
+ * Cleanup of a FOBX: lock requests of this FOBX that wait in the
+ * mini-redirector (sent asynchronously by RxCommonLockControl) are cancelled
+ * through the cancel routine the mini-redirector set for them
+ * (RxSetMinirdrCancelRoutine), so that closing the handle ends a waiting lock
+ * instead of leaving it to be granted after the cleanup. The mini-redirector
+ * completes them (RxLowIoCompletion), with the status of its choice.
+ * Called with the FCB held exclusive; RxStrucSupSpinLock is taken only to
+ * find a request and reference it, never across the cancel routine.
+ */
+static
+VOID
+RxpCancelLockRequestsForFobx(
+    IN PFOBX Fobx)
+{
+    KIRQL OldIrql;
+    PLIST_ENTRY Entry;
+    PRX_CONTEXT Context;
+    PMRX_CALLDOWN CancelRoutine;
+
+    PAGED_CODE();
+
+    for (;;)
+    {
+        Context = NULL;
+        CancelRoutine = NULL;
+
+        KeAcquireSpinLock(&RxStrucSupSpinLock, &OldIrql);
+        for (Entry = RxActiveContexts.Flink; Entry != &RxActiveContexts; Entry = Entry->Flink)
+        {
+            PRX_CONTEXT Candidate = CONTAINING_RECORD(Entry, RX_CONTEXT, ContextListEntry);
+
+            if (Candidate->MajorFunction != IRP_MJ_LOCK_CONTROL || (PFOBX)Candidate->pFobx != Fobx ||
+                Candidate->CurrentIrp == NULL || Candidate->MRxCancelRoutine == NULL ||
+                BooleanFlagOn(Candidate->Flags, RX_CONTEXT_FLAG_CANCELLED))
+            {
+                continue;
+            }
+
+            /* Cancelled once: neither this loop nor RxCancelRoutine picks it again */
+            SetFlag(Candidate->Flags, RX_CONTEXT_FLAG_CANCELLED);
+            InterlockedIncrement((volatile long *)&Candidate->ReferenceCount);
+            Context = Candidate;
+            CancelRoutine = Candidate->MRxCancelRoutine;
+            break;
+        }
+        KeReleaseSpinLock(&RxStrucSupSpinLock, OldIrql);
+
+        if (Context == NULL)
+        {
+            break;
+        }
+
+        DPRINT("Cancelling waiting lock %p of FOBX %p at cleanup\n", Context, Fobx);
+        CancelRoutine(Context);
+        RxDereferenceAndDeleteRxContext(Context);
+    }
+}
+
 /*
  * @implemented
  *
@@ -3189,6 +3318,13 @@ RxCommonFlushBuffers(
  * only to decide the mode and, for unlock-all, to enumerate the local locks;
  * it is released before the request goes to the mini-redirector, so a lock
  * that waits on the server never blocks writers that need the FCB.
+ * Threads: a synchronous request waits in the caller's thread. An
+ * asynchronous one is posted; in the FSP a lock or single unlock is sent
+ * asynchronously (the FSP waits for the FCB only), so a lock that waits on
+ * the server holds no RDBSS thread when the mini-redirector pends it; it is
+ * cancelled by CancelIo (the mini-redirector's cancel routine) and by the
+ * cleanup of its handle (RxpCancelLockRequestsForFobx). Unlock-all stays
+ * synchronous (an unlock does not wait for other owners).
  */
 NTSTATUS
 NTAPI
@@ -3229,8 +3365,13 @@ RxCommonLockControl(
             return STATUS_INVALID_DEVICE_REQUEST;
     }
 
-    /* The request may wait on the server: never block the caller's thread
-     * for an asynchronous request */
+    /* An asynchronous request is never handled in the caller's thread: a
+     * mini-redirector may answer a lock synchronously, after the server
+     * granted it (nfs41 does). In the FSP, a lock or a single unlock is then
+     * sent to the mini-redirector asynchronously (RxLowIoLockControlShell):
+     * the FSP waits for the FCB only, and a lock that the server holds back
+     * no longer holds the FSP work item that every posted request of every
+     * user goes through (unless the mini-redirector itself waits) */
     if (!BooleanFlagOn(Context->Flags, RX_CONTEXT_FLAG_WAIT))
     {
         return RxFsdPostRequest(Context);
@@ -3283,8 +3424,11 @@ RxCommonLockControl(
     }
 
     /* Otherwise, the server decides. Keep buffering state changes from
-     * granting lock buffering while this request is outstanding */
+     * granting lock buffering while this request is outstanding: counted
+     * here under the FCB, dropped once by RxpLockRequestDone (the completion
+     * routine, or below when the request never reached the mini-redirector) */
     InterlockedIncrement((volatile long *)&Fcb->OutstandingLockOperationsCount);
+    InterlockedOr16((volatile SHORT *)&Context->LowIoContext.Flags, (SHORT)RXP_LOWIO_FLAG_LOCK_COUNTED);
 
     if (Exclusive)
     {
@@ -3297,7 +3441,19 @@ RxCommonLockControl(
         Status = RxLowIoLockControlShell(Context);
     }
 
-    InterlockedDecrement((volatile long *)&Fcb->OutstandingLockOperationsCount);
+    if (Status == STATUS_PENDING)
+    {
+        /* Submitted asynchronously: RxLowIoCompletion finishes the request
+         * (completion routine, then the IRP) and drops the reference
+         * RxLowIoSubmit took. Neither the IRP nor the FCB may be touched
+         * here any more; drop the dispatcher's reference to the context, as
+         * an asynchronous read does */
+        ASSERT(BooleanFlagOn(Context->Flags, RX_CONTEXT_FLAG_ASYNC_OPERATION));
+        RxDereferenceAndDeleteRxContext(Context);
+        return STATUS_PENDING;
+    }
+
+    RxpLockRequestDone(Context);
 
     DPRINT("Status: %lx\n", Status);
     return Status;
@@ -8455,25 +8611,45 @@ RxLowIoLockControlShellCompletion(
                     DPRINT1("Server granted a lock the local table refused: %lx\n", IoStatus.Status);
                     Status = STATUS_LOCK_NOT_GRANTED;
                 }
+                else if (RxContext->MajorFunction == IRP_MJ_LOCK_CONTROL)
+                {
+                    PFOBX Fobx = (PFOBX)RxContext->pFobx;
+
+                    /* The handle's cleanup may have run between the server's
+                     * answer and here (an asynchronous lock is completed on
+                     * the mini-redirector's thread): it has already released
+                     * the handle's local locks, so this one would stay in the
+                     * FILE_LOCK, owned by a file object nobody can use, and
+                     * refuse every later overlapping lock of every handle.
+                     * Cleanup marks the FOBX (FCB exclusive)
+                     * before it cancels the handle's lock requests and
+                     * releases its locks, with a spin lock in between: with
+                     * the barrier here, either its release saw this lock or
+                     * this sees the mark. The server drops the lock
+                     * with the handle's server open */
+                    KeMemoryBarrier();
+                    if (Fobx != NULL && BooleanFlagOn(Fobx->Flags, RXP_FOBX_FLAG_CLEANUP_STARTED))
+                    {
+                        DPRINT1("Lock granted after the cleanup of its handle: not kept\n");
+                        FsRtlFastUnlockSingle(&Fcb->Specific.Fcb.FileLock, Stack->FileObject,
+                                              &Stack->Parameters.LockControl.ByteOffset, &Length,
+                                              IoGetRequestorProcess(Irp), LowIoContext->ParamsFor.Locks.Key,
+                                              NULL, FALSE);
+                        Status = STATUS_CANCELLED;
+                    }
+                }
             }
             break;
 
         case LOWIO_OP_UNLOCK:
-            /* Drop the local lock whatever the server said: the server's
-             * view is authoritative and a missing local lock is harmless */
+            /* The local lock was dropped before the request went to the
+             * server (RxLowIoLockControlShell), whatever the server says: the
+             * server's view is authoritative and a missing local lock is
+             * harmless; an unlock of a range the handle did not hold locally
+             * still fails */
+            if (NT_SUCCESS(Status) && BooleanFlagOn(LowIoContext->Flags, RXP_LOWIO_FLAG_LOCAL_MISSED))
             {
-                LARGE_INTEGER Length;
-                NTSTATUS LocalStatus;
-
-                Length.QuadPart = LowIoContext->ParamsFor.Locks.Length;
-                LocalStatus = FsRtlFastUnlockSingle(&Fcb->Specific.Fcb.FileLock, Stack->FileObject,
-                                                    &Stack->Parameters.LockControl.ByteOffset, &Length,
-                                                    IoGetRequestorProcess(Irp),
-                                                    LowIoContext->ParamsFor.Locks.Key, NULL, FALSE);
-                if (NT_SUCCESS(Status) && !NT_SUCCESS(LocalStatus))
-                {
-                    Status = LocalStatus;
-                }
+                Status = STATUS_RANGE_NOT_LOCKED;
             }
             break;
 
@@ -8489,6 +8665,13 @@ RxLowIoLockControlShellCompletion(
     Irp->IoStatus.Status = Status;
     Irp->IoStatus.Information = 0;
     RxContext->IoStatusBlock.Status = Status;
+
+    /* The request is no longer outstanding at the mini-redirector (for an
+     * asynchronous one, the IRP is completed right after this) */
+    if (RxContext->MajorFunction == IRP_MJ_LOCK_CONTROL)
+    {
+        RxpLockRequestDone(RxContext);
+    }
 
     return Status;
 }
@@ -8535,6 +8718,25 @@ RxLowIoLockControlShell(
             case IRP_MN_UNLOCK_SINGLE:
                 RxInitializeLowIoContext(LowIoContext, LOWIO_OP_UNLOCK);
                 LowIoContext->ParamsFor.Locks.Length = Stack->Parameters.LockControl.Length->QuadPart;
+
+                /* Drop the local lock first, as unlock-all does. Dropped
+                 * after the server's answer, it was still in the FILE_LOCK
+                 * when the server already granted the range to another
+                 * handle: that handle's lock was refused locally after the
+                 * server granted it (and stayed held at the server) */
+                if (!BooleanFlagOn(LowIoContext->Flags, RXP_LOWIO_FLAG_LOCAL_UNLOCKED))
+                {
+                    NTSTATUS LocalStatus;
+
+                    LocalStatus = FsRtlFastUnlockSingle(&Fcb->Specific.Fcb.FileLock, Stack->FileObject,
+                                                        &Stack->Parameters.LockControl.ByteOffset,
+                                                        Stack->Parameters.LockControl.Length,
+                                                        IoGetRequestorProcess(Irp),
+                                                        Stack->Parameters.LockControl.Key, NULL, FALSE);
+                    InterlockedOr16((volatile SHORT *)&LowIoContext->Flags,
+                                    (SHORT)(RXP_LOWIO_FLAG_LOCAL_UNLOCKED |
+                                            (NT_SUCCESS(LocalStatus) ? 0 : RXP_LOWIO_FLAG_LOCAL_MISSED)));
+                }
                 break;
 
             case IRP_MN_UNLOCK_ALL:
@@ -8589,12 +8791,26 @@ RxLowIoLockControlShell(
         FreeList = TRUE;
     }
 
-    /* Lock requests are always synchronous for the mini-redirector: an
-     * asynchronous caller was posted to the FSP by RxCommonLockControl */
-    ClearFlag(RxContext->Flags, RX_CONTEXT_FLAG_ASYNC_OPERATION);
+    /* A lock or a single unlock of an asynchronous request goes to the
+     * mini-redirector asynchronously: it may return STATUS_PENDING and call
+     * RxLowIoCompletion when the server answers (MS Learn, RxLowIoCompletion
+     * and MRxLowIOSubmit[LOWIO_OP_EXCLUSIVELOCK]), and may set a cancel
+     * routine for the wait (RxSetMinirdrCancelRoutine). The completion
+     * routine then mirrors the result in the FILE_LOCK and RDBSS completes
+     * the IRP. Everything else (unlock-all, with its lock list, and cleanup's
+     * unlock of the remaining locks) stays synchronous */
+    if (FreeList)
+    {
+        ClearFlag(RxContext->Flags, RX_CONTEXT_FLAG_ASYNC_OPERATION);
+    }
+    else if (BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_ASYNC_OPERATION))
+    {
+        /* A retried request may carry the previous submission's mark */
+        LowIoContext->Flags &= ~LOWIO_CONTEXT_FLAG_SYNCCALL;
+    }
     Status = RxLowIoSubmit(RxContext, RxLowIoLockControlShellCompletion);
 
-    /* Lock requests are submitted synchronously: the list is no longer used */
+    /* Lists only go with synchronous submissions: no longer used */
     if (FreeList)
     {
         RxpFreeLowIoLockList(RxContext);
@@ -9010,16 +9226,26 @@ NTAPI
 RxpCancelRoutine(
     PVOID Context)
 {
+    KIRQL OldIrql;
     PRX_CONTEXT RxContext;
+    PMRX_CALLDOWN MRxCancelRoutine;
 
     PAGED_CODE();
 
     RxContext = Context;
 
+    /* Read the mini-redirector's routine once, under the lock
+     * RxSetMinirdrCancelRoutine writes it under: it may clear it (NULL) at
+     * any time when it answers the request, and the field was read twice
+     * (tested, then called) */
+    KeAcquireSpinLock(&RxStrucSupSpinLock, &OldIrql);
+    MRxCancelRoutine = RxContext->MRxCancelRoutine;
+    KeReleaseSpinLock(&RxStrucSupSpinLock, OldIrql);
+
     /* First, notify mini-rdr about cancellation */
-    if (RxContext->MRxCancelRoutine != NULL)
+    if (MRxCancelRoutine != NULL)
     {
-        RxContext->MRxCancelRoutine(RxContext);
+        MRxCancelRoutine(RxContext);
     }
     /* If we didn't find in overflow queue, try in blocking operations */
     else if (!RxCancelOperationInOverflowQueue(RxContext))
