@@ -833,7 +833,9 @@ static void RunOne(PUCHAR Base, ULONG BaseSize, unsigned Seed, PUCHAR Out)
                 g_CurStep = "walk2";
                 Walk(Hive, FALSE, Seed);
                 g_CurStep = "livecheck";
-                St = CmCheckRegistry(&Cm, CM_CHECK_REGISTRY_DONT_PURGE_VOLATILES | CM_CHECK_REGISTRY_VALIDATE_HIVE);
+                /* As the Debug kernel checks a hive in use after a flush (CmpCheckLiveHive) */
+                St = CmCheckRegistry(&Cm, CM_CHECK_REGISTRY_DONT_PURGE_VOLATILES | CM_CHECK_REGISTRY_VALIDATE_HIVE |
+                                          CM_CHECK_REGISTRY_LIVE_HIVE);
                 if (!CM_CHECK_REGISTRY_SUCCESS(St))
                 {
                     char T[32];
