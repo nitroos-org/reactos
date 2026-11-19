@@ -58,7 +58,7 @@ CompareInfFirstLineString(
 #define UNATTEND_MAX_FILE_SIZE  (1024 * 1024)
 
 static BOOLEAN
-IsUnattendFileSizeOk(
+IsUnattendFileUsable(
     _In_ PCWSTR InfPath)
 {
     NTSTATUS Status;
@@ -70,15 +70,26 @@ IsUnattendFileSizeOk(
 
     RtlInitUnicodeString(&FileName, InfPath);
     InitializeObjectAttributes(&ObjectAttributes, &FileName, OBJ_CASE_INSENSITIVE, NULL, NULL);
-    Status = NtOpenFile(&FileHandle, FILE_READ_ATTRIBUTES | SYNCHRONIZE, &ObjectAttributes, &IoStatusBlock,
+    UCHAR Head[2] = {0, 0};
+
+    Status = NtOpenFile(&FileHandle, FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE, &ObjectAttributes, &IoStatusBlock,
                         FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE);
     if (!NT_SUCCESS(Status))
         return TRUE; /* the open of the parser reports it */
     Status = NtQueryInformationFile(FileHandle, &IoStatusBlock, &FileInfo, sizeof(FileInfo), FileStandardInformation);
-    NtClose(FileHandle);
     if (NT_SUCCESS(Status) && FileInfo.EndOfFile.QuadPart > UNATTEND_MAX_FILE_SIZE)
     {
+        NtClose(FileHandle);
         SetupLogFormat("ignored %S: it is larger than %u bytes, not an answer file", InfPath, (UINT)UNATTEND_MAX_FILE_SIZE);
+        return FALSE;
+    }
+    (void)NtReadFile(FileHandle, NULL, NULL, NULL, &IoStatusBlock, Head, sizeof(Head), NULL, NULL);
+    NtClose(FileHandle);
+    if ((Head[0] == 0xFF && Head[1] == 0xFE) || (Head[0] == 0xFE && Head[1] == 0xFF))
+    {
+        /* The text-mode parser reads UTF-16, the second stage reads the copy of the file as 8-bit text: a
+         * UTF-16 file would erase a disk unattended and then leave the second stage waiting for a person */
+        SetupLogFormat("ignored %S: it is UTF-16 text; save it as ANSI or UTF-8 without a byte order mark", InfPath);
         return FALSE;
     }
     return TRUE;
@@ -94,7 +105,7 @@ IsInfUnattendSetupEnabled(
     UINT ErrorLine;
     BOOLEAN Result = FALSE;
 
-    if (!IsUnattendFileSizeOk(InfPath))
+    if (!IsUnattendFileUsable(InfPath))
         return Result;
 
     hInf = SpInfOpenInfFile(InfPath,
@@ -290,7 +301,7 @@ CheckUnattendedSetup(
     }
     DPRINT1("UnattendInf path: '%S'\n", UnattendInfPath);
 
-    if (!IsUnattendFileSizeOk(UnattendInfPath))
+    if (!IsUnattendFileUsable(UnattendInfPath))
         return IsUnattendedSetup;
 
     /* Load 'unattend.inf' from installation media */
