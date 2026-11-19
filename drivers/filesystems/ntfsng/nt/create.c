@@ -497,6 +497,64 @@ VOID NgDeleteStreams(PNG_VCB Vcb, ULONGLONG MftNo, PNG_FCB Self)
     } while (Count == RTL_NUMBER_OF(Found));
 }
 
+/* The FCB of the named stream Stream of record MftNo other than Self, referenced, or NULL (caller holds nothing). */
+static PNG_FCB NgFindStreamFcb(PNG_VCB Vcb, ULONGLONG MftNo, PCUNICODE_STRING Stream, PNG_FCB Self, PBOOLEAN Busy)
+{
+    PNG_FCB Found = NULL;
+    PLIST_ENTRY Entry, Head = NgFcbBucket(Vcb, MftNo);
+
+    KeAcquireGuardedMutex(&Vcb->FcbListLock);
+    *Busy = NgStreamsInUseLocked(Vcb, MftNo, Self);
+    for (Entry = Head->Flink; Entry != Head; Entry = Entry->Flink)
+    {
+        PNG_FCB F = CONTAINING_RECORD(Entry, NG_FCB, HashLinks);
+        if (F != Self && F->MftNo == MftNo && F->Stream.Length && !F->Deleted &&
+            RtlEqualUnicodeString(&F->Stream, Stream, TRUE))
+        {
+            InterlockedIncrement(&F->RefCount);
+            Found = F;
+            break;
+        }
+    }
+    KeReleaseGuardedMutex(&Vcb->FcbListLock);
+    return Found;
+}
+
+/*
+ * Before a rename replaces the named stream Stream of record MftNo: the data its FCB caches goes, or the pages would show
+ * (and be written back) as the content of the stream that takes the name.  FALSE, and nothing dropped, when the replace
+ * cannot happen (a stream of the record besides Self has a handle or a create in progress, see NgRetireStreams).
+ * No locks held.
+ */
+BOOLEAN NgPurgeStreamForReplace(PNG_VCB Vcb, ULONGLONG MftNo, PCUNICODE_STRING Stream, PNG_FCB Self)
+{
+    BOOLEAN Busy;
+    PNG_FCB Found = NgFindStreamFcb(Vcb, MftNo, Stream, Self, &Busy);
+
+    if (!Found)
+        return TRUE;
+    if (!Busy && (Found->SectionObjectPointers.SharedCacheMap || Found->SectionObjectPointers.DataSectionObject))
+        NgPurgeFrom(Found, 0);
+    NgDereferenceFcb(Found);
+    return !Busy;
+}
+
+/*
+ * After the stream Stream of record MftNo was replaced (CoreLock held): its old FCB is deleted and leaves the lookup list,
+ * as the FCBs of the streams of a removed file do (NgDeleteStreams), so an open makes a new one for the new stream.
+ */
+VOID NgDropStreamFcb(PNG_VCB Vcb, ULONGLONG MftNo, PCUNICODE_STRING Stream, PNG_FCB Self)
+{
+    BOOLEAN Busy;
+    PNG_FCB Found = NgFindStreamFcb(Vcb, MftNo, Stream, Self, &Busy);
+
+    if (!Found)
+        return;
+    NgUnlistFcb(Found);
+    NgParkNode(Found);
+    NgDereferenceFcb(Found);
+}
+
 /*
  * Marks an FCB deleted and takes it out of the lookup list: its MFT record number may be reused.  Both happen in one
  * FcbListLock hold, as in NgDeleteStreams: a create that finds the FCB listed (NgInsertOrFindFcb) must not see it deleted.

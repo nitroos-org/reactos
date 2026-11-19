@@ -842,6 +842,13 @@ static NTSTATUS NgRenameStream(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
     /* What the handles wrote is on disk before it is copied. */
     NgFlushStream(Fcb, &Iosb);
 
+    /* The data a replaced stream has in the cache goes before it does (a refusal leaves it alone). */
+    if (Replace && !NgPurgeStreamForReplace(Vcb, Fcb->MftNo, &NewName, Fcb))
+    {
+        Status = STATUS_ACCESS_DENIED;
+        goto out;
+    }
+
     NgAcquireCore(Vcb);
     Err = NgEnsureNode(Fcb);
     if (!Err)
@@ -871,6 +878,8 @@ static NTSTATUS NgRenameStream(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
                 Err = ngc_delete_stream(Vcb->Core, Target);
                 ngc_put(Target);
                 Target = NULL;
+                if (!Err)
+                    NgDropStreamFcb(Vcb, Fcb->MftNo, &NewName, Fcb);
             }
         }
         if (Target)
