@@ -130,6 +130,15 @@ typedef struct
     //
     KEYBOARD_TYPEMATIC_PARAMETERS KeyboardTypematic;
 
+    //
+    // key repeat: the key that repeats, the timer and its DPC, protected by the lock
+    //
+    KSPIN_LOCK RepeatLock;
+    KTIMER RepeatTimer;
+    KDPC RepeatDpc;
+    KEYBOARD_INPUT_DATA RepeatKey;
+    BOOLEAN RepeatActive;
+
 } KBDHID_DEVICE_EXTENSION, *PKBDHID_DEVICE_EXTENSION;
 
 /* defaults from kbfiltr.h */
