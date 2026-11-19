@@ -25,3 +25,7 @@ if(NOT MSVC)
         -Wno-unused-but-set-variable
         -Wno-unused-variable)
 endif()
+
+add_cd_file(TARGET vioscsi DESTINATION reactos/system32/drivers NO_CAB FOR all)
+add_registry_inf(vioscsi_reg.inf)
+add_driver_inf(vioscsi vioscsi.inf)

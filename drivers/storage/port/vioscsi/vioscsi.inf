@@ -1,0 +1,68 @@
+; VIOSCSI.INF
+;
+; Installation file for VirtIO SCSI controllers (transitional PCI\VEN_1AF4&DEV_1004 and
+; modern PCI\VEN_1AF4&DEV_1048), the IDs listed by the vioscsi driver of the virtio-win project
+;
+[Version]
+Signature  = "$Windows NT$"
+Class      = SCSIAdapter
+ClassGUID  = {4D36E97B-E325-11CE-BFC1-08002BE10318}
+Provider   = %ReactOS%
+DriverVer  = 11/19/2026,1.0
+
+[SourceDisksNames]
+1 = %DiskName%,,,
+
+[SourceDisksFiles]
+vioscsi.sys = 1
+
+[DestinationDirs]
+DefaultDestDir = 12
+
+[Manufacturer]
+%VirtIOMfg% = VirtIOMfg,NTx86,NTamd64
+
+[VirtIOMfg]
+%PCI\VEN_1AF4&DEV_1004.DeviceDesc% = Vioscsi_Inst, PCI\VEN_1AF4&DEV_1004
+%PCI\VEN_1AF4&DEV_1048.DeviceDesc% = Vioscsi_Inst, PCI\VEN_1AF4&DEV_1048
+
+[VirtIOMfg.NTx86]
+%PCI\VEN_1AF4&DEV_1004.DeviceDesc% = Vioscsi_Inst, PCI\VEN_1AF4&DEV_1004
+%PCI\VEN_1AF4&DEV_1048.DeviceDesc% = Vioscsi_Inst, PCI\VEN_1AF4&DEV_1048
+
+[VirtIOMfg.NTamd64]
+%PCI\VEN_1AF4&DEV_1004.DeviceDesc% = Vioscsi_Inst, PCI\VEN_1AF4&DEV_1004
+%PCI\VEN_1AF4&DEV_1048.DeviceDesc% = Vioscsi_Inst, PCI\VEN_1AF4&DEV_1048
+
+[ControlFlags]
+ExcludeFromSelect = *
+
+[Vioscsi_Inst]
+CopyFiles = Vioscsi_CopyFiles
+
+[Vioscsi_Inst.Services]
+AddService = vioscsi, 0x00000002, Vioscsi_Service_Inst
+
+[Vioscsi_Service_Inst]
+DisplayName    = %Vioscsi.ServiceDesc%
+ServiceType    = 1
+StartType      = 0
+ErrorControl   = 1
+ServiceBinary  = %12%\vioscsi.sys
+LoadOrderGroup = SCSI Miniport
+AddReg         = Vioscsi_AddReg
+
+[Vioscsi_AddReg]
+HKR, "Parameters\PnpInterface", "5", 0x00010001, 0x00000001
+HKR, "Parameters", "BusType", 0x00010001, 0x0000000A
+
+[Vioscsi_CopyFiles]
+vioscsi.sys,,,0x00000100
+
+[Strings]
+ReactOS = "ReactOS Project"
+DiskName = "ReactOS installation media"
+VirtIOMfg = "Red Hat, Inc."
+PCI\VEN_1AF4&DEV_1004.DeviceDesc = "VirtIO SCSI Controller"
+PCI\VEN_1AF4&DEV_1048.DeviceDesc = "VirtIO SCSI Controller"
+Vioscsi.ServiceDesc = "VirtIO SCSI Storport Miniport Driver"

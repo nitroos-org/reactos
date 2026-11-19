@@ -1,0 +1,9 @@
+; VirtIO SCSI storport miniport (boot start: setup and the first boot find VirtIO SCSI disks)
+[AddReg]
+HKLM,"SYSTEM\CurrentControlSet\Services\vioscsi","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\vioscsi","Group",0x00000000,"SCSI Miniport"
+HKLM,"SYSTEM\CurrentControlSet\Services\vioscsi","ImagePath",0x00020000,"system32\drivers\vioscsi.sys"
+HKLM,"SYSTEM\CurrentControlSet\Services\vioscsi","Start",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\vioscsi","Type",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\vioscsi\Parameters","BusType",0x00010001,0x0000000A
+HKLM,"SYSTEM\CurrentControlSet\Services\vioscsi\Parameters\PnpInterface","5",0x00010001,0x00000001
