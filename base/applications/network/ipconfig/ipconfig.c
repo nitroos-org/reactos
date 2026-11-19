@@ -1472,6 +1472,23 @@ RegisterDns(VOID)
     DWORD dwVersion;
     INT Result = 0;
     ULONG adaptOutBufLen = 0;
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    PSID pAdminSid = NULL;
+    BOOL bIsAdmin = FALSE;
+
+    /* Windows Server 2022 answers a standard user "The requested operation requires elevation." and exits with 1 */
+    if (AllocateAndInitializeSid(&NtAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS,
+                                 0, 0, 0, 0, 0, 0, &pAdminSid))
+    {
+        if (!CheckTokenMembership(NULL, pAdminSid, &bIsAdmin))
+            bIsAdmin = FALSE;
+        FreeSid(pAdminSid);
+    }
+    if (!bIsAdmin)
+    {
+        DoFormatMessage(ERROR_ELEVATION_REQUIRED);
+        return 1;
+    }
 
     PrintHeader();
 
