@@ -801,7 +801,7 @@ NTAPI VirtIoHwInitialize(IN PVOID DeviceExtension)
                     perfData.FirstRedirectionMessageNumber = adaptExt->msix_has_config_vector ? 1 : 0;
                     perfData.LastRedirectionMessageNumber = perfData.FirstRedirectionMessageNumber +
                                                             adaptExt->num_queues - 1;
-                    ASSERT(perfData.lastRedirectionMessageNumber < adaptExt->num_affinity);
+                    ASSERT(perfData.LastRedirectionMessageNumber < adaptExt->num_affinity);
                 }
                 if (CHECKFLAG(perfData.Flags, STOR_PERF_CONCURRENT_CHANNELS))
                 {
