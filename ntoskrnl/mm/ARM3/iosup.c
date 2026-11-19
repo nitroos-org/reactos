@@ -90,6 +90,16 @@ MmMapIoSpace(IN PHYSICAL_ADDRESS PhysicalAddress,
     // Also translate the cache attribute
     //
     Pfn = (PFN_NUMBER)(PhysicalAddress.QuadPart >> PAGE_SHIFT);
+
+    //
+    // The page frame number has to fit the PTE. The amd64 PTE of this build holds 28 bits (physical addresses
+    // below 1 TiB); a larger one would be stored truncated and the mapping would show another page, page 0
+    // for a device BAR that firmware put at 56 TiB.
+    //
+    TempPte = ValidKernelPte;
+    TempPte.u.Hard.PageFrameNumber = Pfn + PageCount - 1;
+    if (TempPte.u.Hard.PageFrameNumber != (Pfn + PageCount - 1)) return NULL;
+
     Pfn1 = MiGetPfnEntry(Pfn);
     IsIoMapping = (Pfn1 == NULL) ? TRUE : FALSE;
     CacheAttribute = MiPlatformCacheAttributes[IsIoMapping][CacheType];
