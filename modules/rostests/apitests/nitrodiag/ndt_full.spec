@@ -1,0 +1,2 @@
+@ stdcall NdFuncA()
+@ stdcall NdFuncB()
