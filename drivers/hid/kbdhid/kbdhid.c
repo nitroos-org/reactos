@@ -552,10 +552,10 @@ KbdHid_InternalDeviceControl(
         case IOCTL_KEYBOARD_QUERY_INDICATOR_TRANSLATION:
             if (IoStack->Parameters.DeviceIoControl.OutputBufferLength < sizeof(LOCAL_KEYBOARD_INDICATOR_TRANSLATION))
             {
-                /* buffer too small */
+                /* buffer too small: the caller asks again with a larger one only for this status */
                 Irp->IoStatus.Status = STATUS_BUFFER_TOO_SMALL;
                 IoCompleteRequest(Irp, IO_NO_INCREMENT);
-                return STATUS_INVALID_PARAMETER;
+                return STATUS_BUFFER_TOO_SMALL;
             }
 
             /* copy translations */
