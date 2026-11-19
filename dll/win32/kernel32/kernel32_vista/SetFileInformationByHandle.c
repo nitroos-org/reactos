@@ -111,6 +111,11 @@ SetFileInformationByHandle(
             NtClass = FileDispositionInformation;
             break;
 
+        case FileDispositionInfoEx:
+            /* FILE_DISPOSITION_INFO_EX is the flags word of FileDispositionInformationEx (class 64) */
+            NtClass = (FILE_INFORMATION_CLASS)64;
+            break;
+
         case FileAllocationInfo:
             NtClass = FileAllocationInformation;
             break;
@@ -144,6 +149,18 @@ SetFileInformationByHandle(
     }
 
     Status = NtSetInformationFile(hFile, &IoStatusBlock, lpFileInformation, dwBufferSize, NtClass);
+    if (FileInformationClass == FileDispositionInfoEx && dwBufferSize >= sizeof(ULONG) &&
+        (Status == STATUS_INVALID_INFO_CLASS || Status == STATUS_INVALID_PARAMETER || Status == STATUS_NOT_SUPPORTED ||
+         Status == STATUS_NOT_IMPLEMENTED || Status == STATUS_INVALID_DEVICE_REQUEST) &&
+        !(*(PULONG)lpFileInformation & ~0x7UL))
+    {
+        FILE_DISPOSITION_INFORMATION Disposition;
+
+        /* A file system that does not know the class (FAT) gets the classic request, as DeleteFile does: the file goes
+         * when the handle is closed */
+        Disposition.DeleteFile = (*(PULONG)lpFileInformation & 1) != 0;
+        Status = NtSetInformationFile(hFile, &IoStatusBlock, &Disposition, sizeof(Disposition), FileDispositionInformation);
+    }
     if (Status == STATUS_INVALID_INFO_CLASS && FileInformationClass == FileIoPriorityHintInfo)
     {
         FILE_FS_DEVICE_INFORMATION DeviceInfo;

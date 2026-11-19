@@ -185,6 +185,7 @@ list(APPEND SOURCE
     FileDeleteMapped.c
     FileLockCloseOther.c
     FileLockZeroLength.c
+    FileDispositionEx.c
     MappedViewEvict.c
     MultiByteToWideChar.c
     NamedPipeInstanceReuse.c
