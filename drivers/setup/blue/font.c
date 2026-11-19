@@ -28,6 +28,13 @@ ScrSetFont(
     PHYSICAL_ADDRESS BaseAddress;
     PUCHAR Bitplane;
 
+    /* Framebuffer mode: there is no VGA font memory, the text renderer uses the font itself */
+    if (ScrFbIsAvailable())
+    {
+        ScrFbInvalidate();
+        return;
+    }
+
     /* open bit plane for font table access */
     OpenBitPlane();
 

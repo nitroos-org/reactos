@@ -120,4 +120,31 @@ typedef struct tagCONSOLE_CURSOR_INFO
 
 VOID ScrSetFont(_In_ PUCHAR FontBitfield);
 
+/*
+ * Framebuffer text renderer (fbtext.c), used instead of the VGA text mode
+ * when the machine has no VGA but a linear boot framebuffer (UEFI GOP).
+ */
+#define SCRFB_CHAR_WIDTH    8
+#define SCRFB_CHAR_HEIGHT   8       /* Same 80x50 text screen of 8x8 cells that the VGA mode of this driver has */
+#define SCRFB_COLUMNS       80
+#define SCRFB_ROWS          50
+#define SCRFB_FONT_HEIGHT   16
+
+extern const UCHAR ScrFbFont8x16[256 * SCRFB_FONT_HEIGHT];
+
+BOOLEAN ScrFbDetect(VOID);
+BOOLEAN ScrFbIsAvailable(VOID);
+BOOLEAN ScrFbMap(VOID);
+VOID ScrFbUnmap(VOID);
+VOID ScrFbInvalidate(VOID);
+VOID ScrFbClear(VOID);
+VOID
+ScrFbSync(
+    _In_reads_bytes_(SCRFB_COLUMNS * SCRFB_ROWS * 2) const UCHAR* Cells,
+    _In_ USHORT CursorX,
+    _In_ USHORT CursorY,
+    _In_ BOOLEAN CursorVisible,
+    _In_ ULONG CursorSize,
+    _In_opt_ const UCHAR* Font8x8);
+
 #endif /* _BLUE_PCH_ */

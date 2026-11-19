@@ -357,6 +357,62 @@ ScrSetRegisters(const VGA_REGISTERS *Registers)
     WRITE_PORT_UCHAR(PELMASK, 0xff);
 }
 
+/*
+ * Framebuffer mode (no VGA, UEFI GOP): draw the changed character cells of
+ * the text screen kept in VideoMemory, and the cursor, into the framebuffer.
+ */
+static VOID
+ScrFbSyncDevice(
+    _In_ PDEVICE_EXTENSION DeviceExtension)
+{
+    if (!ScrFbIsAvailable() || !DeviceExtension->Enabled || !DeviceExtension->VideoMemory)
+        return;
+
+    ScrFbSync(DeviceExtension->VideoMemory,
+              DeviceExtension->CursorX,
+              DeviceExtension->CursorY,
+              !!DeviceExtension->CursorVisible,
+              DeviceExtension->CursorSize,
+              DeviceExtension->FontBitfield);
+}
+
+static VOID
+ScrFbAcquireOwnership(
+    _In_ PDEVICE_EXTENSION DeviceExtension,
+    _In_ BOOLEAN FullReset)
+{
+    DeviceExtension->Columns = SCRFB_COLUMNS;
+    DeviceExtension->Rows = SCRFB_ROWS;
+    DeviceExtension->ScanLines = SCRFB_CHAR_HEIGHT;
+    if (FullReset)
+    {
+        DeviceExtension->CursorX = 0;
+        DeviceExtension->CursorY = 0;
+    }
+}
+
+/* Releases the video memory, i.e. the VGA text memory or the framebuffer text screen */
+static VOID
+ScrFreeVideoMemory(
+    _In_ PDEVICE_EXTENSION DeviceExtension)
+{
+    if (DeviceExtension->VideoMemory)
+    {
+        ASSERT(DeviceExtension->VideoMemorySize != 0);
+        if (ScrFbIsAvailable())
+        {
+            ExFreePoolWithTag(DeviceExtension->VideoMemory, TAG_BLUE);
+            ScrFbUnmap();
+        }
+        else
+        {
+            MmUnmapIoSpace(DeviceExtension->VideoMemory, DeviceExtension->VideoMemorySize);
+        }
+    }
+    DeviceExtension->VideoMemory = NULL;
+    DeviceExtension->VideoMemorySize = 0;
+}
+
 static VOID
 FASTCALL
 ScrSetCursor(
@@ -365,6 +421,10 @@ ScrSetCursor(
     ULONG Offset;
 
     if (!DeviceExtension->VideoMemory)
+        return;
+
+    /* Framebuffer mode: the cursor is drawn by ScrFbSyncDevice() */
+    if (ScrFbIsAvailable())
         return;
 
     Offset = (DeviceExtension->CursorY * DeviceExtension->Columns) + DeviceExtension->CursorX;
@@ -386,6 +446,10 @@ ScrSetCursorShape(
     UCHAR data, value;
 
     if (!DeviceExtension->VideoMemory)
+        return;
+
+    /* Framebuffer mode: the cursor is drawn by ScrFbSyncDevice() */
+    if (ScrFbIsAvailable())
         return;
 
     height = DeviceExtension->ScanLines;
@@ -526,7 +590,10 @@ ScrResetScreen(
 
     if (Enable)
     {
-        ScrAcquireOwnership(DeviceExtension);
+        if (ScrFbIsAvailable())
+            ScrFbAcquireOwnership(DeviceExtension, FullReset);
+        else
+            ScrAcquireOwnership(DeviceExtension);
 
         if (FullReset)
         {
@@ -535,13 +602,7 @@ ScrResetScreen(
              */
 
             /* Unmap any previously mapped video memory */
-            if (DeviceExtension->VideoMemory)
-            {
-                ASSERT(DeviceExtension->VideoMemorySize != 0);
-                MmUnmapIoSpace(DeviceExtension->VideoMemory, DeviceExtension->VideoMemorySize);
-            }
-            DeviceExtension->VideoMemory = NULL;
-            DeviceExtension->VideoMemorySize = 0;
+            ScrFreeVideoMemory(DeviceExtension);
 
             /* Free any previously allocated backup screenbuffer */
             if (DeviceExtension->ScreenBuffer)
@@ -557,14 +618,35 @@ ScrResetScreen(
             if (DeviceExtension->VideoMemorySize == 0)
                 return FALSE; // STATUS_INVALID_VIEW_SIZE; STATUS_MAPPED_FILE_SIZE_ZERO;
 
-            /* Map the video memory */
-            BaseAddress.QuadPart = VIDMEM_BASE;
-            DeviceExtension->VideoMemory =
-                (PUCHAR)MmMapIoSpace(BaseAddress, DeviceExtension->VideoMemorySize, MmNonCached);
-            if (!DeviceExtension->VideoMemory)
+            if (ScrFbIsAvailable())
             {
-                DeviceExtension->VideoMemorySize = 0;
-                return FALSE; // STATUS_NONE_MAPPED; STATUS_NOT_MAPPED_VIEW; STATUS_CONFLICTING_ADDRESSES;
+                /* No VGA text memory: keep the text screen in memory and draw it into the framebuffer */
+                if (!ScrFbMap())
+                {
+                    DeviceExtension->VideoMemorySize = 0;
+                    return FALSE;
+                }
+                DeviceExtension->VideoMemory =
+                    (PUCHAR)ExAllocatePoolWithTag(NonPagedPool, DeviceExtension->VideoMemorySize, TAG_BLUE);
+                if (!DeviceExtension->VideoMemory)
+                {
+                    ScrFbUnmap();
+                    DeviceExtension->VideoMemorySize = 0;
+                    return FALSE;
+                }
+                RtlZeroMemory(DeviceExtension->VideoMemory, DeviceExtension->VideoMemorySize);
+            }
+            else
+            {
+                /* Map the video memory */
+                BaseAddress.QuadPart = VIDMEM_BASE;
+                DeviceExtension->VideoMemory =
+                    (PUCHAR)MmMapIoSpace(BaseAddress, DeviceExtension->VideoMemorySize, MmNonCached);
+                if (!DeviceExtension->VideoMemory)
+                {
+                    DeviceExtension->VideoMemorySize = 0;
+                    return FALSE; // STATUS_NONE_MAPPED; STATUS_NOT_MAPPED_VIEW; STATUS_CONFLICTING_ADDRESSES;
+                }
             }
 
             /* Initialize the backup screenbuffer in non-paged pool (must be accessible at high IRQL) */
@@ -602,8 +684,13 @@ ScrResetScreen(
             /* Restore the cursor state */
             ScrSetCursor(DeviceExtension);
             ScrSetCursorShape(DeviceExtension);
+
+            /* The framebuffer was cleared by whoever took the display: draw everything again */
+            if (ScrFbIsAvailable())
+                ScrFbClear();
         }
         DeviceExtension->Enabled = TRUE;
+        ScrFbSyncDevice(DeviceExtension);
     }
     else
     {
@@ -618,13 +705,7 @@ ScrResetScreen(
             ScrInbvCleanup();
 
             /* Unmap any previously mapped video memory */
-            if (DeviceExtension->VideoMemory)
-            {
-                ASSERT(DeviceExtension->VideoMemorySize != 0);
-                MmUnmapIoSpace(DeviceExtension->VideoMemory, DeviceExtension->VideoMemorySize);
-            }
-            DeviceExtension->VideoMemory = NULL;
-            DeviceExtension->VideoMemorySize = 0;
+            ScrFreeVideoMemory(DeviceExtension);
 
             /* Free any previously allocated backup screenbuffer */
             if (DeviceExtension->ScreenBuffer)
@@ -833,6 +914,7 @@ ScrWrite(
     DeviceExtension->CursorX = cursorx;
     DeviceExtension->CursorY = cursory;
     ScrSetCursor(DeviceExtension);
+    ScrFbSyncDevice(DeviceExtension);
 
     Status = STATUS_SUCCESS;
 
@@ -1534,6 +1616,9 @@ ScrIoControl(
             Status = STATUS_NOT_IMPLEMENTED;
     }
 
+    /* Framebuffer mode: show what the request changed */
+    ScrFbSyncDevice(DeviceExtension);
+
     Irp->IoStatus.Status = Status;
     IoCompleteRequest(Irp, IO_VIDEO_INCREMENT);
 
@@ -1596,6 +1681,10 @@ DriverEntry(
     Status = IoCreateSymbolicLink(&SymlinkName, &DeviceName);
     if (NT_SUCCESS(Status))
     {
+        /* A machine without VGA text mode but with a boot framebuffer (UEFI GOP) is drawn to the framebuffer */
+        if (ScrFbDetect())
+            DPRINT1("BlueScreen: using the boot framebuffer for the text screen\n");
+
         /* By default disable the screen (but don't touch INBV: ResetDisplayParametersDeviceExtension is still NULL) */
         ScrResetScreen(DeviceObject->DeviceExtension, TRUE, FALSE);
         /* Now set ResetDisplayParametersDeviceExtension to enable synchronizing with INBV */
