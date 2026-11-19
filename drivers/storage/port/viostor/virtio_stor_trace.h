@@ -36,14 +36,12 @@
 #include <storport.h>
 #include <stdarg.h>
 
-//#define PRINT_DEBUG 1
+#define PRINT_DEBUG 1
 //#define COM_DEBUG 1
 
 
 
-#if !defined(DBG)
-#define EVENT_TRACING 1
-#endif
+/* WPP/ETW tracing is not available: the DbgPrint path below is used (silent in a build without DBG) */
 
 #if !defined(EVENT_TRACING)
 #include "kdebugprint.h"
@@ -69,7 +67,7 @@ extern int nViostorDebugLevel;
 #if DBG
 #define RhelDbgPrint(Level, MSG, ...) \
     if ((!bDebugPrint) || Level > nViostorDebugLevel) {} \
-    else VirtioDebugPrintProc (MSG, __VA_ARGS__)
+    else VirtioDebugPrintProc (MSG, ##__VA_ARGS__)
 #define VioStorDbgBreak()\
     if (KD_DEBUGGER_ENABLED && !KD_DEBUGGER_NOT_PRESENT) DbgBreakPoint();
 #else
