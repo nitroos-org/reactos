@@ -184,6 +184,7 @@ list(APPEND SOURCE
     FileCutAfterClose.c
     FileDeleteMapped.c
     FileLockCloseOther.c
+    FileLockSpan.c
     FileLockZeroLength.c
     MappedViewEvict.c
     MultiByteToWideChar.c

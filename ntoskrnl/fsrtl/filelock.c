@@ -157,6 +157,20 @@ static VOID NTAPI LockRemoveIrp(PIO_CSQ Csq, PIRP Irp)
     RemoveEntryList(&Irp->Tail.Overlay.ListEntry);
 }
 
+/* The peek context that picks the waiting requests of one owner (its handle was closed). Its first member is the address
+   of FsRtlpFlushTag, which no COMBINED_LOCK_ELEMENT (list pointers first) can hold. */
+static UCHAR FsRtlpFlushTag;
+
+typedef struct _LOCK_FLUSH_CONTEXT
+{
+    PVOID Tag;
+    PFILE_OBJECT FileObject;
+    PVOID Process;
+    BOOLEAN MatchKey;
+    ULONG Key;
+}
+    LOCK_FLUSH_CONTEXT, *PLOCK_FLUSH_CONTEXT;
+
 static PIRP NTAPI LockPeekNextIrp(PIO_CSQ Csq, PIRP Irp, PVOID PeekContext)
 {
     // Context will be a COMBINED_LOCK_ELEMENT.  We're looking for a
@@ -167,6 +181,25 @@ static PIRP NTAPI LockPeekNextIrp(PIO_CSQ Csq, PIRP Irp, PVOID PeekContext)
     PLOCK_INFORMATION LockInfo = CONTAINING_RECORD(Csq, LOCK_INFORMATION, Csq);
     PLIST_ENTRY Following;
     DPRINT("PeekNextIrp(IRP %p, Context %p)\n", Irp, PeekContext);
+
+    if (PeekContext && ((PLOCK_FLUSH_CONTEXT)PeekContext)->Tag == &FsRtlpFlushTag)
+    {
+        PLOCK_FLUSH_CONTEXT Flush = PeekContext;
+
+        for (Following = Irp ? Irp->Tail.Overlay.ListEntry.Flink : LockInfo->CsqList.Flink;
+             Following != &LockInfo->CsqList;
+             Following = Following->Flink)
+        {
+            PIRP Waiter = CONTAINING_RECORD(Following, IRP, Tail.Overlay.ListEntry);
+            PIO_STACK_LOCATION WaiterStack = IoGetCurrentIrpStackLocation(Waiter);
+
+            if (WaiterStack->FileObject == Flush->FileObject &&
+                IoGetRequestorProcess(Waiter) == Flush->Process &&
+                (!Flush->MatchKey || WaiterStack->Parameters.LockControl.Key == Flush->Key))
+                return Waiter;
+        }
+        return NULL;
+    }
     if (!Irp)
     {
         Following = LockInfo->CsqList.Flink;
@@ -493,56 +526,69 @@ FsRtlpRemoveZeroLengthLockLocked(IN PLOCK_INFORMATION LockInfo,
     return FALSE;
 }
 
-/* Called with RangeLock held */
+/* Called with RangeLock held: may a read (or write) of Start..End by this owner go ahead? Every lock that overlaps the
+   range counts, not only the first one: an I/O that spans two locked ranges is refused when either of them stops it.
+   A read is stopped by an exclusive lock of another owner, a write by every lock but the exclusive lock of its own
+   owner (a shared lock stops every write, its owner's too). */
 static
 BOOLEAN
-FsRtlpFindLockLocked(IN PLOCK_INFORMATION LockInfo,
-                     IN LONGLONG Start,
-                     IN LONGLONG End,
-                     OUT PFILE_LOCK_INFO Found)
+FsRtlpIoAllowedLocked(IN PLOCK_INFORMATION LockInfo,
+                      IN LONGLONG Start,
+                      IN LONGLONG End,
+                      IN BOOLEAN Write,
+                      IN PFILE_OBJECT FileObject,
+                      IN PVOID Process,
+                      IN ULONG Key)
 {
-    COMBINED_LOCK_ELEMENT ToFind;
     PCOMBINED_LOCK_ELEMENT Entry;
     PLOCK_ZERO_LENGTH Zero;
+    PVOID RestartKey = NULL;
 
-    ToFind.Exclusive.FileLock.StartingByte.QuadPart = Start;
-    ToFind.Exclusive.FileLock.EndingByte.QuadPart = End;
-    Entry = RtlLookupElementGenericTable(&LockInfo->RangeTable, &ToFind);
-    if (Entry)
+    for (Entry = RtlEnumerateGenericTableWithoutSplaying(&LockInfo->RangeTable, &RestartKey);
+         Entry != NULL;
+         Entry = RtlEnumerateGenericTableWithoutSplaying(&LockInfo->RangeTable, &RestartKey))
     {
-        *Found = Entry->Exclusive.FileLock;
-        return TRUE;
+        PFILE_LOCK_INFO Lock = &Entry->Exclusive.FileLock;
+        BOOLEAN Owner;
+
+        if (!((ULONGLONG)Start < (ULONGLONG)Lock->EndingByte.QuadPart &&
+              (ULONGLONG)Lock->StartingByte.QuadPart < (ULONGLONG)End))
+            continue;
+        Owner = Lock->ExclusiveLock && Lock->Key == Key && Lock->ProcessId == Process && Lock->FileObject == FileObject;
+        if (Write ? !Owner : (Lock->ExclusiveLock && !Owner))
+            return FALSE;
     }
 
     /* a lock of length zero inside the range stands in the way of an I/O like a lock of that range */
     Zero = FsRtlpFindZeroLengthInside(LockInfo, Start, End, TRUE);
     if (!Zero) Zero = FsRtlpFindZeroLengthInside(LockInfo, Start, End, FALSE);
-    if (!Zero) return FALSE;
-    RtlZeroMemory(Found, sizeof(*Found));
-    Found->FileObject = Zero->FileObject;
-    Found->StartingByte.QuadPart = Zero->Start;
-    Found->EndingByte.QuadPart = Zero->Start;
-    Found->ProcessId = Zero->ProcessId;
-    Found->Key = Zero->Key;
-    Found->ExclusiveLock = Zero->ExclusiveLock;
+    if (Zero)
+    {
+        BOOLEAN Owner = Zero->ExclusiveLock && Zero->Key == Key && Zero->ProcessId == Process && Zero->FileObject == FileObject;
+
+        if (Write ? !Owner : (Zero->ExclusiveLock && !Owner))
+            return FALSE;
+    }
     return TRUE;
 }
 
-/* Copies the lock that overlaps Start..End, if there is one */
 static
 BOOLEAN
-FsRtlpFindLock(IN PFILE_LOCK FileLock,
-               IN LONGLONG Start,
-               IN LONGLONG End,
-               OUT PFILE_LOCK_INFO Found)
+FsRtlpIoAllowed(IN PFILE_LOCK FileLock,
+                IN LONGLONG Start,
+                IN LONGLONG End,
+                IN BOOLEAN Write,
+                IN PFILE_OBJECT FileObject,
+                IN PVOID Process,
+                IN ULONG Key)
 {
     PLOCK_INFORMATION LockInfo = FsRtlpGetLockInformation(FileLock);
     BOOLEAN Result;
     KIRQL OldIrql;
 
-    if (!LockInfo) return FALSE;
+    if (!LockInfo) return TRUE;
     FsRtlpAcquireRangeLock(LockInfo, NULL, &OldIrql);
-    Result = FsRtlpFindLockLocked(LockInfo, Start, End, Found);
+    Result = FsRtlpIoAllowedLocked(LockInfo, Start, End, Write, FileObject, Process, Key);
     FsRtlpReleaseRangeLock(LockInfo, OldIrql);
     return Result;
 }
@@ -1165,27 +1211,20 @@ FsRtlCheckLockForReadAccess(IN PFILE_LOCK FileLock,
 {
     BOOLEAN Result;
     PIO_STACK_LOCATION IoStack = IoGetCurrentIrpStackLocation(Irp);
-    FILE_LOCK_INFO Found;
     PEPROCESS Process = IoGetRequestorProcess(Irp);
     DPRINT("CheckLockForReadAccess(%wZ, Offset %08x%08x, Length %x)\n",
            &IoStack->FileObject->FileName,
            IoStack->Parameters.Read.ByteOffset.HighPart,
            IoStack->Parameters.Read.ByteOffset.LowPart,
            IoStack->Parameters.Read.Length);
-    if (!FsRtlpFindLock(FileLock,
-                        IoStack->Parameters.Read.ByteOffset.QuadPart,
-                        IoStack->Parameters.Read.ByteOffset.QuadPart +
-                        IoStack->Parameters.Read.Length,
-                        &Found))
-    {
-        DPRINT("CheckLockForReadAccess(%wZ) => TRUE\n", &IoStack->FileObject->FileName);
-        return TRUE;
-    }
     /* a lock belongs to a file object (and process and key): another handle of the same process is refused too */
-    Result = !Found.ExclusiveLock ||
-        (IoStack->Parameters.Read.Key == Found.Key &&
-         Process == Found.ProcessId &&
-         IoStack->FileObject == Found.FileObject);
+    Result = FsRtlpIoAllowed(FileLock,
+                             IoStack->Parameters.Read.ByteOffset.QuadPart,
+                             IoStack->Parameters.Read.ByteOffset.QuadPart + IoStack->Parameters.Read.Length,
+                             FALSE,
+                             IoStack->FileObject,
+                             Process,
+                             IoStack->Parameters.Read.Key);
     DPRINT("CheckLockForReadAccess(%wZ) => %s\n", &IoStack->FileObject->FileName, Result ? "TRUE" : "FALSE");
     return Result;
 }
@@ -1200,27 +1239,19 @@ FsRtlCheckLockForWriteAccess(IN PFILE_LOCK FileLock,
 {
     BOOLEAN Result;
     PIO_STACK_LOCATION IoStack = IoGetCurrentIrpStackLocation(Irp);
-    FILE_LOCK_INFO Found;
     PEPROCESS Process = Irp->Tail.Overlay.Thread->ThreadsProcess;
     DPRINT("CheckLockForWriteAccess(%wZ, Offset %08x%08x, Length %x)\n",
            &IoStack->FileObject->FileName,
            IoStack->Parameters.Write.ByteOffset.HighPart,
            IoStack->Parameters.Write.ByteOffset.LowPart,
            IoStack->Parameters.Write.Length);
-    if (!FsRtlpFindLock(FileLock,
-                        IoStack->Parameters.Write.ByteOffset.QuadPart,
-                        IoStack->Parameters.Write.ByteOffset.QuadPart +
-                        IoStack->Parameters.Write.Length,
-                        &Found))
-    {
-        DPRINT("CheckLockForWriteAccess(%wZ) => TRUE\n", &IoStack->FileObject->FileName);
-        return TRUE;
-    }
-    /* only the owner of an exclusive lock writes there; a shared lock stops every write, its owner's too */
-    Result = Found.ExclusiveLock &&
-        IoStack->Parameters.Write.Key == Found.Key &&
-        Process == Found.ProcessId &&
-        IoStack->FileObject == Found.FileObject;
+    Result = FsRtlpIoAllowed(FileLock,
+                             IoStack->Parameters.Write.ByteOffset.QuadPart,
+                             IoStack->Parameters.Write.ByteOffset.QuadPart + IoStack->Parameters.Write.Length,
+                             TRUE,
+                             IoStack->FileObject,
+                             Process,
+                             IoStack->Parameters.Write.Key);
     DPRINT("CheckLockForWriteAccess(%wZ) => %s\n", &IoStack->FileObject->FileName, Result ? "TRUE" : "FALSE");
     return Result;
 }
@@ -1237,8 +1268,6 @@ FsRtlFastCheckLockForRead(IN PFILE_LOCK FileLock,
                           IN PFILE_OBJECT FileObject,
                           IN PVOID Process)
 {
-    PEPROCESS EProcess = Process;
-    FILE_LOCK_INFO Found;
     DPRINT("FsRtlFastCheckLockForRead(%wZ, Offset %08x%08x, Length %08x%08x, Key %x)\n",
            &FileObject->FileName,
            FileOffset->HighPart,
@@ -1246,13 +1275,13 @@ FsRtlFastCheckLockForRead(IN PFILE_LOCK FileLock,
            Length->HighPart,
            Length->LowPart,
            Key);
-    if (!FsRtlpFindLock(FileLock,
-                        FileOffset->QuadPart,
-                        FileOffset->QuadPart + Length->QuadPart,
-                        &Found))
-        return TRUE;
-    if (!Found.ExclusiveLock) return TRUE;
-    return Found.Key == Key && Found.ProcessId == EProcess && Found.FileObject == FileObject;
+    return FsRtlpIoAllowed(FileLock,
+                           FileOffset->QuadPart,
+                           FileOffset->QuadPart + Length->QuadPart,
+                           FALSE,
+                           FileObject,
+                           Process,
+                           Key);
 }
 
 /*
@@ -1268,8 +1297,6 @@ FsRtlFastCheckLockForWrite(IN PFILE_LOCK FileLock,
                            IN PVOID Process)
 {
     BOOLEAN Result;
-    PEPROCESS EProcess = Process;
-    FILE_LOCK_INFO Found;
     DPRINT("FsRtlFastCheckLockForWrite(%wZ, Offset %08x%08x, Length %08x%08x, Key %x)\n",
            &FileObject->FileName,
            FileOffset->HighPart,
@@ -1277,15 +1304,13 @@ FsRtlFastCheckLockForWrite(IN PFILE_LOCK FileLock,
            Length->HighPart,
            Length->LowPart,
            Key);
-    if (!FsRtlpFindLock(FileLock,
-                        FileOffset->QuadPart,
-                        FileOffset->QuadPart + Length->QuadPart,
-                        &Found))
-    {
-        DPRINT("CheckForWrite(%wZ) => TRUE\n", &FileObject->FileName);
-        return TRUE;
-    }
-    Result = Found.ExclusiveLock && Found.Key == Key && Found.ProcessId == EProcess && Found.FileObject == FileObject;
+    Result = FsRtlpIoAllowed(FileLock,
+                             FileOffset->QuadPart,
+                             FileOffset->QuadPart + Length->QuadPart,
+                             TRUE,
+                             FileObject,
+                             Process,
+                             Key);
     DPRINT("CheckForWrite(%wZ) => %s\n", &FileObject->FileName, Result ? "TRUE" : "FALSE");
     return Result;
 }
@@ -1381,6 +1406,20 @@ FsRtlpFastUnlockAll(IN PFILE_LOCK FileLock,
 
     InitializeListHead(&DeferredIrps);
     FsRtlpAcquireRangeLock(LockInfo, &DeferredIrps, &OldIrql);
+    {
+        /* Requests of this owner that are still waiting end with the handle (Windows: STATUS_RANGE_NOT_LOCKED); left in the
+           queue they would be granted to a handle that no longer exists and hold their range for good */
+        LOCK_FLUSH_CONTEXT Flush;
+        PIRP Waiter;
+
+        Flush.Tag = &FsRtlpFlushTag;
+        Flush.FileObject = FileObject;
+        Flush.Process = Process;
+        Flush.MatchKey = MatchKey;
+        Flush.Key = Key;
+        while ((Waiter = IoCsqRemoveNextIrp(&LockInfo->Csq, &Flush)))
+            FsRtlpDeferIrp(&DeferredIrps, Waiter, STATUS_RANGE_NOT_LOCKED);
+    }
     if (FsRtlpUnlockAllLocked(LockInfo, FileObject, Process, MatchKey, Key))
         FsRtlpGrantWaitersLocked(LockInfo, NULL, &DeferredIrps);
     FsRtlpReleaseRangeLock(LockInfo, OldIrql);

@@ -187,6 +187,7 @@ extern void func_FileCloseLockedDup(void);
 extern void func_FileCutAfterClose(void);
 extern void func_FileDeleteMapped(void);
 extern void func_FileLockCloseOther(void);
+extern void func_FileLockSpan(void);
 extern void func_FileLockZeroLength(void);
 extern void func_MappedViewEvict(void);
 extern void func_MultiByteToWideChar(void);
@@ -468,6 +469,7 @@ const struct test winetest_testlist[] =
     { "FileCutAfterClose",           func_FileCutAfterClose },
     { "FileDeleteMapped",            func_FileDeleteMapped },
     { "FileLockCloseOther",          func_FileLockCloseOther },
+    { "FileLockSpan",                func_FileLockSpan },
     { "FileLockZeroLength",          func_FileLockZeroLength },
     { "MappedViewEvict",            func_MappedViewEvict },
     { "MultiByteToWideChar",         func_MultiByteToWideChar },
