@@ -820,9 +820,16 @@ PortPdoScsi(
     Miniport = &FdoExtension->Miniport;
 
     switch (Srb->Function) {
-        /* Both of these should be sent to device and let themselves process this */
+        /*
+         * Sent to the device through the unit's queue. FLUSH and SHUTDOWN too: they take a slot of
+         * the miniport like any request (viostor and vioscsi put them on their ring, which the queue
+         * depth sizes; sent past the limit they found the ring full and failed, and FlushFileBuffers
+         * with them), and as untagged requests they wait for the requests before them to complete.
+         */
         case SRB_FUNCTION_IO_CONTROL:
         case SRB_FUNCTION_EXECUTE_SCSI:
+        case SRB_FUNCTION_FLUSH:
+        case SRB_FUNCTION_SHUTDOWN:
         {
             PQUEUED_REQUEST_REFERENCE RequestReference;
             BOOLEAN IssueRequest;
@@ -862,38 +869,6 @@ PortPdoScsi(
             } else {
                 Status = STATUS_PENDING;
             }
-
-            break;
-        }
-
-        /*
-         * These requests are actually sent to adapters and are not outstanding requests for devices
-         * so we simply pass them down to miniport
-         */
-        case SRB_FUNCTION_FLUSH:
-        case SRB_FUNCTION_SHUTDOWN:
-        {
-            PQUEUED_REQUEST_REFERENCE RequestReference;
-
-            /* Mark IRP as pending */
-            IoMarkIrpPending(Irp);
-
-            /* Allocate private contexts */
-            Status = PortPdoSrbAllocatePrivateContexts(Srb, PdoExtension, FdoExtension);
-            if (Status != STATUS_SUCCESS)
-            {
-                break;
-            }
-            RequestReference = (PQUEUED_REQUEST_REFERENCE)Srb->OriginalRequest;
-
-            /*
-             * Call the non-flow-controlled scheduling function (it does nothing but the model is
-             * preserved for consistency)
-             */
-            PortPdoScheduleRequestNoFlowControl(FdoExtension, RequestReference);
-
-            /* Fire up the request immediately */
-            Status = PortPdoIssueRequest(PdoExtension, RequestReference);
 
             break;
         }
