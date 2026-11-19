@@ -728,8 +728,11 @@ LoadSetupInf(
 
     INF_FreeData(Value);
 
-    /* Open 'DiskSpaceRequirements' section */
-    if (!SpInfFindFirstLine(pSetupData->SetupInf, L"DiskSpaceRequirements", L"FreeSysPartDiskSpace", &Context))
+    /* Open 'DiskSpaceRequirements' section: the architecture's own section
+     * ([DiskSpaceRequirements.amd64], the installed set differs a lot between
+     * architectures) first, then the common one */
+    if (!SpInfFindFirstLine(pSetupData->SetupInf, L"DiskSpaceRequirements." INF_ARCH, L"FreeSysPartDiskSpace", &Context) &&
+        !SpInfFindFirstLine(pSetupData->SetupInf, L"DiskSpaceRequirements", L"FreeSysPartDiskSpace", &Context))
         return ERROR_CORRUPT_TXTSETUPSIF;
 
     pSetupData->RequiredPartitionDiskSpace = ~0;
