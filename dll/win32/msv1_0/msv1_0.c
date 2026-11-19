@@ -1067,8 +1067,9 @@ MsvpGetUserInfo(
     LogonEntry = GetLogonByLogonId(&RequestBuffer->LogonId);
     if (LogonEntry == NULL)
     {
-        ERR("No logon found for LogonId %lx\n", RequestBuffer->LogonId.LowPart);
-        Status = STATUS_INSUFFICIENT_RESOURCES;
+        /* e.g. the logon session of LocalSystem, which this package never logged on */
+        TRACE("No logon found for LogonId %lx\n", RequestBuffer->LogonId.LowPart);
+        Status = STATUS_NO_SUCH_LOGON_SESSION;
         goto done;
     }
 

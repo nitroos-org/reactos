@@ -792,10 +792,25 @@ NetrWkstaUserGetInfo(
                                               &UserInfoResponseBufferSize,
                                               &ProtocolStatus);
         TRACE("LsaCallAuthenticationPackage:MsV1_0GetUserInfo Status 0x%08lx ResponseBufferSize %lu\n", Status, UserInfoResponseBufferSize);
+        if (NT_SUCCESS(Status) && !NT_SUCCESS(ProtocolStatus))
+            Status = ProtocolStatus;
         if (!NT_SUCCESS(Status))
         {
-            ERR("\n");
+            ERR("MsV1_0GetUserInfo failed (Status 0x%08lx)\n", Status);
             return RtlNtStatusToDosError(Status);
+        }
+
+        if (UserInfoResponseBuffer == NULL ||
+            UserInfoResponseBufferSize < sizeof(MSV1_0_GETUSERINFO_RESPONSE))
+            return ERROR_INVALID_DATA;
+
+        /* The logon of a service (a virtual account, LocalService, NetworkService) is not a
+         * user logon: Windows reports no logon session for it ("verify on peer" for NetworkService) */
+        if (UserInfoResponseBuffer->LogonType == Service)
+        {
+            TRACE("Service logon: no user logon session\n");
+            LsaFreeReturnBuffer(UserInfoResponseBuffer);
+            return ERROR_NO_SUCH_LOGON_SESSION;
         }
 
         TRACE("UserName: %wZ\n", &UserInfoResponseBuffer->UserName);

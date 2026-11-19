@@ -12,6 +12,7 @@ list(APPEND SOURCE
     NetServerGetInfo.c
     NetShare.c
     NetUserPassword.c
+    NetWkstaUserGetInfo.c
     testlist.c)
 
 add_executable(netapi32_apitest ${SOURCE})
