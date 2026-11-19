@@ -455,6 +455,67 @@ typedef struct _MM_FLUSH_BUFFER
     PFN_NUMBER MdlBuffer[MM_FLUSH_MDL_WORDS(MM_FLUSH_CLUSTER_PAGES)];
 } MM_FLUSH_BUFFER;
 
+/*
+ * A paging write in flight: the pages it writes are marked as being written (WRITE_SSE) until it returns.  The
+ * file system's handling of that write can come back into the same segment on the same thread: FastFAT's and
+ * RDBSS's non-cached write that extends the valid data length calls CcSetFileSizes, as the WDK asks for
+ * ("its valid data length is increased by a non-cached I/O operation"), and when the cache map's section size is
+ * above the allocation (an allocation cut, which does not have to be reported to Cc) that purges the segment from
+ * the new allocation, in the middle of the page being written.  Whatever waits there for the "being written" mark to
+ * go would wait for itself: the mark goes when this write returns.  The record says which thread writes which
+ * range, so that a purge, a zeroing or a flush skips its own thread's pages instead of waiting for them.
+ */
+typedef struct _MI_SEGMENT_WRITER
+{
+    LIST_ENTRY ListEntry;
+    PETHREAD Thread;
+    LONGLONG Start;
+    LONGLONG End;
+} MI_SEGMENT_WRITER, *PMI_SEGMENT_WRITER;
+
+/* Pages a purge, a zeroing or a flush met being written by its own thread (it did not wait for them) */
+static volatile LONG MiOwnWriteSkips;
+
+/* Does the current thread write the page at Offset of the segment (a paging write further up its stack)? */
+_Requires_exclusive_lock_held_(Segment->Lock)
+static
+BOOLEAN
+MiIsOwnPagingWrite(
+    _In_ PMM_SECTION_SEGMENT Segment,
+    _In_ LONGLONG Offset)
+{
+    PETHREAD Thread = PsGetCurrentThread();
+    PLIST_ENTRY Entry;
+
+    ASSERT(Segment->Locked);
+
+    for (Entry = Segment->Writers.Flink; Entry != &Segment->Writers; Entry = Entry->Flink)
+    {
+        PMI_SEGMENT_WRITER Writer = CONTAINING_RECORD(Entry, MI_SEGMENT_WRITER, ListEntry);
+
+        if ((Writer->Thread == Thread) && (Offset >= Writer->Start) && (Offset < Writer->End))
+            return TRUE;
+    }
+    return FALSE;
+}
+
+/* A page that the current thread itself is writing was skipped instead of waited for: count it, say it (rarely) */
+static
+VOID
+MiNoteOwnPagingWrite(
+    _In_ PMM_SECTION_SEGMENT Segment,
+    _In_ LONGLONG Offset,
+    _In_ PCSTR What)
+{
+    LONG Count = InterlockedIncrement(&MiOwnWriteSkips);
+
+    if ((Count <= 8) || ((Count & (Count - 1)) == 0))
+    {
+        DPRINT1("%s of segment %p: the page at 0x%I64x is being written by this thread, not waited for (%ld so far)\n",
+                What, Segment, Offset, Count);
+    }
+}
+
 static
 NTSTATUS
 MiWritePages(
@@ -471,8 +532,10 @@ MiWritePages(
     PMDL Mdl = (PMDL)MdlBuffer;
     PFILE_OBJECT FileObject = Segment->FileObject;
     LARGE_INTEGER FileOffset;
+    MI_SEGMENT_WRITER Writer;
 
     ASSERT((Count != 0) && (MM_FLUSH_MDL_WORDS(Count) <= MdlWords));
+    ASSERT(FlagOn(*Segment->Flags, MM_DATAFILE_SEGMENT));
 
     FileOffset.QuadPart = Segment->Image.FileOffset + SegOffset;
 
@@ -480,6 +543,14 @@ MiWritePages(
     MmInitializeMdl(Mdl, NULL, Count * PAGE_SIZE);
     MmBuildMdlFromPages(Mdl, Pages);
     Mdl->MdlFlags |= MDL_PAGES_LOCKED;
+
+    /* Say who writes these pages (the callers marked them as being written; see MI_SEGMENT_WRITER) */
+    Writer.Thread = PsGetCurrentThread();
+    Writer.Start = SegOffset;
+    Writer.End = SegOffset + (LONGLONG)Count * PAGE_SIZE;
+    MmLockSectionSegment(Segment);
+    InsertTailList(&Segment->Writers, &Writer.ListEntry);
+    MmUnlockSectionSegment(Segment);
 
     KeInitializeEvent(&Event, NotificationEvent, FALSE);
     Status = IoSynchronousPageWrite(FileObject, Mdl, &FileOffset, &Event, &IoStatus);
@@ -492,6 +563,10 @@ MiWritePages(
     {
         MmUnmapLockedPages (Mdl->MappedSystemVa, Mdl);
     }
+
+    MmLockSectionSegment(Segment);
+    RemoveEntryList(&Writer.ListEntry);
+    MmUnlockSectionSegment(Segment);
 
     if (NT_SUCCESS(Status))
     {
@@ -3330,6 +3405,7 @@ grab_segment:
         RtlZeroMemory(Segment, sizeof(*Segment));
         Segment->SegFlags = MM_DATAFILE_SEGMENT | MM_SEGMENT_INCREATE;
         Segment->RefCount = 1;
+        InitializeListHead(&Segment->Writers);
 
         /* Acquire lock again */
         OldIrql = MiAcquirePfnLock();
@@ -6692,6 +6768,22 @@ restart:
             PageOff.QuadPart = PageOffset;
             Entry = MmGetPageEntrySectionSegment(Segment, &PageOff);
 
+            /*
+             * A page that this thread itself is writing (a paging write further up the stack, see MI_SEGMENT_WRITER)
+             * would be waited for for ever.  Zero it now and leave it dirty: the write in flight may take the old
+             * or the new bytes (past the new end of file either way), and the zeros are written after it.
+             */
+            if ((Entry != 0) && !IS_SWAP_FROM_SSE(Entry) && IS_WRITE_SSE(Entry) &&
+                MiIsOwnPagingWrite(Segment, PageOffset))
+            {
+                MiNoteOwnPagingWrite(Segment, PageOffset, "Zeroing");
+                Address = MiMapPageInHyperSpace(Process, PFN_FROM_SSE(Entry), &Irql);
+                RtlZeroMemory(Address + (ZeroStart - PageOffset), (SIZE_T)(ZeroEnd - ZeroStart));
+                MiUnmapPageInHyperSpace(Process, Address, Irql);
+                MmSetPageEntrySectionSegment(Segment, &PageOff, DIRTY_SSE(Entry));
+                continue;
+            }
+
             /* A read in flight would assign the old contents after us. Dropping the lock invalidates the
              * enumeration, so restart it after the wait. */
             if (MM_IS_WAIT_PTE(Entry))
@@ -6984,7 +7076,7 @@ done:
     return Status;
 }
 
-/* How long MmPurgeSegment waits for a page that is being written (as MmFlushSegment, MI_FLUSH_WRITE_WAIT_100NS) */
+/* How long MmPurgeSegment waits for a page that another thread is writing (as MmFlushSegment, MI_FLUSH_WRITE_WAIT_100NS) */
 #define MI_PURGE_WRITE_WAIT_100NS (30LL * 10000000LL)
 
 /* Like CcPurgeCache but for the in-memory segment */
@@ -7062,10 +7154,22 @@ MmPurgeSegment(
         if (IS_WRITE_SSE(Entry))
         {
             /*
-             * The page is being written: wait for the write, but not for ever. The writer may be this thread:
-             * a flush marks the pages it writes, and the file system's paging write can set the file sizes,
-             * which purges the same segment (FatCommonWrite -> CcSetFileSizes -> CcPurgeCacheSection).
-             * That write only ends when this purge returns. Give up as for a page in use.
+             * Being written by this thread (a paging write further up the stack, whose file system set the file
+             * sizes: see MI_SEGMENT_WRITER): that write ends only after this purge returns.  The page is held by
+             * the write, so it is in use: keep it and go on, as for a page partly outside the range.
+             */
+            if (MiIsOwnPagingWrite(Segment, PurgeStart.QuadPart))
+            {
+                MiNoteOwnPagingWrite(Segment, PurgeStart.QuadPart, "Purge");
+                Success = FALSE;
+                WriteWaitStart = 0;
+                PurgeStart.QuadPart += PAGE_SIZE;
+                continue;
+            }
+
+            /*
+             * Being written by another thread: wait for that write, but not for ever (as MmFlushSegment): a writer
+             * that waits for something this thread holds would never end.  Then fail as for a page in use.
              */
             if (!WriteWaitStart)
             {
@@ -7073,7 +7177,7 @@ MmPurgeSegment(
             }
             else if (KeQueryInterruptTime() - WriteWaitStart >= (ULONGLONG)MI_PURGE_WRITE_WAIT_100NS)
             {
-                DPRINT1("Purge of segment %p gives up on the page at 0x%I64x, still being written\n",
+                DPRINT1("Purge of segment %p gives up on the page at 0x%I64x, still being written by another thread\n",
                         Segment, PurgeStart.QuadPart);
                 MmUnlockSectionSegment(Segment);
                 MmDereferenceSegment(Segment);
@@ -7819,6 +7923,14 @@ MmFlushSegment(
         {
             ULONG_PTR Entry = MmGetPageEntrySectionSegment(Segment, &FlushStart);
             ULONG Pages = 1;
+
+            if (IS_WRITE_SSE(Entry) && !IS_SWAP_FROM_SSE(Entry) && MiIsOwnPagingWrite(Segment, FlushStart.QuadPart))
+            {
+                /* Being written by this thread (a paging write further up the stack): that write is the flush of this page */
+                MiNoteOwnPagingWrite(Segment, FlushStart.QuadPart, "Flush");
+                FlushStart.QuadPart += PAGE_SIZE;
+                continue;
+            }
 
             if (IS_WRITE_SSE(Entry) && !IS_SWAP_FROM_SSE(Entry))
             {
