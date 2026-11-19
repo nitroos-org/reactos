@@ -17,6 +17,140 @@ static HANDLE SamKeyHandle = NULL;
 
 /* FUNCTIONS ***************************************************************/
 
+/*
+ * Descriptors that the earlier setup stored and that give more than the Windows ones do. They are replaced
+ * by the current default, and only when the stored descriptor has the wrong entry, so that a descriptor
+ * that an administrator has set is left alone:
+ *  - the account domain let the Guests alias create users and aliases (Windows: Account Operators);
+ *  - the Administrators and Backup Operators aliases let Account Operators change them.
+ */
+static
+BOOLEAN
+SampDaclAllowsSid(IN PSECURITY_DESCRIPTOR Sd,
+                  IN ULONG SdLength,
+                  IN ULONG Rid,
+                  IN ACCESS_MASK AnyOfMask)
+{
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    PSID BuiltinSid = NULL;
+    PACL Dacl = NULL;
+    BOOLEAN Present = FALSE, Defaulted = FALSE, Found = FALSE;
+    ULONG i;
+
+    if (!RtlValidRelativeSecurityDescriptor(Sd, SdLength, 0))
+        return FALSE;
+
+    if (!NT_SUCCESS(RtlAllocateAndInitializeSid(&NtAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID, Rid,
+                                                0, 0, 0, 0, 0, 0, &BuiltinSid)))
+        return FALSE;
+
+    if (NT_SUCCESS(RtlGetDaclSecurityDescriptor(Sd, &Present, &Dacl, &Defaulted)) && Present && Dacl != NULL)
+    {
+        for (i = 0; i < Dacl->AceCount; i++)
+        {
+            PACCESS_ALLOWED_ACE Ace;
+
+            if (!NT_SUCCESS(RtlGetAce(Dacl, i, (PVOID *)&Ace)))
+                break;
+
+            if (Ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE &&
+                (Ace->Mask & AnyOfMask) != 0 &&
+                RtlEqualSid((PSID)&Ace->SidStart, BuiltinSid))
+            {
+                Found = TRUE;
+                break;
+            }
+        }
+    }
+
+    RtlFreeSid(BuiltinSid);
+    return Found;
+}
+
+
+static
+VOID
+SampRepairStoredSd(IN HANDLE ObjectKey,
+                   IN ULONG BuiltinRid,
+                   IN ACCESS_MASK AnyOfMask,
+                   IN ULONG AliasRid,
+                   IN BOOLEAN IsAccountDomain)
+{
+    PSECURITY_DESCRIPTOR Sd = NULL, NewSd = NULL;
+    ULONG Length = 0, NewLength = 0;
+    NTSTATUS Status;
+
+    Status = SampRegQueryValue(ObjectKey, L"SecDesc", NULL, NULL, &Length);
+    if ((Status != STATUS_BUFFER_OVERFLOW && !NT_SUCCESS(Status)) || Length == 0)
+        return;
+
+    Sd = RtlAllocateHeap(RtlGetProcessHeap(), 0, Length);
+    if (Sd == NULL)
+        return;
+
+    Status = SampRegQueryValue(ObjectKey, L"SecDesc", NULL, Sd, &Length);
+    if (NT_SUCCESS(Status) && SampDaclAllowsSid(Sd, Length, BuiltinRid, AnyOfMask))
+    {
+        if (IsAccountDomain)
+            Status = SampCreateAccountDomainSD(&NewSd, &NewLength);
+        else
+            Status = SampCreateAliasSD(AliasRid, &NewSd, &NewLength);
+
+        if (NT_SUCCESS(Status))
+        {
+            Status = SampRegSetValue(ObjectKey, L"SecDesc", REG_BINARY, NewSd, NewLength);
+            WARN("Replaced a security descriptor of the account database that gave too much access (Status 0x%08lx)\n", Status);
+            RtlFreeHeap(RtlGetProcessHeap(), 0, NewSd);
+        }
+    }
+
+    RtlFreeHeap(RtlGetProcessHeap(), 0, Sd);
+}
+
+
+static
+VOID
+SampRepairDefaultSDs(VOID)
+{
+    HANDLE DomainsKey = NULL, DomainKey = NULL, AliasesKey = NULL, AliasKey = NULL;
+    static const struct { ULONG Rid; WCHAR Key[9]; } Aliases[] =
+    {
+        { DOMAIN_ALIAS_RID_ADMINS, L"00000220" },
+        { DOMAIN_ALIAS_RID_BACKUP_OPS, L"00000227" },
+    };
+    ULONG i;
+
+    if (!NT_SUCCESS(SampRegOpenKey(SamKeyHandle, L"SAM\\Domains", KEY_READ, &DomainsKey)))
+        return;
+
+    if (NT_SUCCESS(SampRegOpenKey(DomainsKey, L"Account", KEY_READ | KEY_SET_VALUE, &DomainKey)))
+    {
+        SampRepairStoredSd(DomainKey, DOMAIN_ALIAS_RID_GUESTS, DOMAIN_CREATE_USER | DOMAIN_CREATE_ALIAS, 0, TRUE);
+        SampRegCloseKey(&DomainKey);
+    }
+
+    if (NT_SUCCESS(SampRegOpenKey(DomainsKey, L"Builtin", KEY_READ, &DomainKey)))
+    {
+        if (NT_SUCCESS(SampRegOpenKey(DomainKey, L"Aliases", KEY_READ, &AliasesKey)))
+        {
+            for (i = 0; i < ARRAYSIZE(Aliases); i++)
+            {
+                if (NT_SUCCESS(SampRegOpenKey(AliasesKey, Aliases[i].Key, KEY_READ | KEY_SET_VALUE, &AliasKey)))
+                {
+                    SampRepairStoredSd(AliasKey, DOMAIN_ALIAS_RID_ACCOUNT_OPS, ALIAS_ALL_ACCESS & ~STANDARD_RIGHTS_REQUIRED,
+                                       Aliases[i].Rid, FALSE);
+                    SampRegCloseKey(&AliasKey);
+                }
+            }
+            SampRegCloseKey(&AliasesKey);
+        }
+        SampRegCloseKey(&DomainKey);
+    }
+
+    SampRegCloseKey(&DomainsKey);
+}
+
+
 NTSTATUS
 SampInitDatabase(VOID)
 {
@@ -33,6 +167,8 @@ SampInitDatabase(VOID)
         ERR("Failed to open the SAM key (Status: 0x%08lx)\n", Status);
         return Status;
     }
+
+    SampRepairDefaultSDs();
 
     TRACE("SampInitDatabase() done\n");
 
@@ -144,7 +280,14 @@ SampCreateDbObject(IN PSAM_DB_OBJECT ParentObject,
     NewObject->ParentObject = ParentObject;
 
     if (ParentObject != NULL)
+    {
         NewObject->Trusted = ParentObject->Trusted;
+        NewObject->Internal = ParentObject->Internal;
+
+        /* The object uses its parent (key, fixed data) for as long as it lives: keep the parent alive
+           when the handle of the parent is closed first */
+        InterlockedIncrement((PLONG)&ParentObject->RefCount);
+    }
 
     *DbObject = NewObject;
 
@@ -272,7 +415,14 @@ SampOpenDbObject(IN PSAM_DB_OBJECT ParentObject,
     NewObject->ParentObject = ParentObject;
 
     if (ParentObject != NULL)
+    {
         NewObject->Trusted = ParentObject->Trusted;
+        NewObject->Internal = ParentObject->Internal;
+
+        /* The object uses its parent (key, fixed data) for as long as it lives: keep the parent alive
+           when the handle of the parent is closed first */
+        InterlockedIncrement((PLONG)&ParentObject->RefCount);
+    }
 
     *DbObject = NewObject;
 
@@ -345,12 +495,13 @@ SampValidateDbObject(SAMPR_HANDLE Handle,
 NTSTATUS
 SampCloseDbObject(PSAM_DB_OBJECT DbObject)
 {
+    PSAM_DB_OBJECT ParentObject;
     NTSTATUS Status = STATUS_SUCCESS;
 
-    DbObject->RefCount--;
-
-    if (DbObject->RefCount > 0)
+    if (InterlockedDecrement((PLONG)&DbObject->RefCount) > 0)
         return STATUS_SUCCESS;
+
+    ParentObject = DbObject->ParentObject;
 
     SampRegCloseKey(&DbObject->KeyHandle);
     SampRegCloseKey(&DbObject->MembersKeyHandle);
@@ -358,7 +509,13 @@ SampCloseDbObject(PSAM_DB_OBJECT DbObject)
     if (DbObject->Name != NULL)
         RtlFreeHeap(RtlGetProcessHeap(), 0, DbObject->Name);
 
+    /* A handle that is used after this fails the signature check instead of using freed data */
+    DbObject->Signature = 0;
     RtlFreeHeap(RtlGetProcessHeap(), 0, DbObject);
+
+    /* Release the reference this object held on its parent */
+    if (ParentObject != NULL)
+        SampCloseDbObject(ParentObject);
 
     return Status;
 }
@@ -367,6 +524,7 @@ SampCloseDbObject(PSAM_DB_OBJECT DbObject)
 NTSTATUS
 SampDeleteAccountDbObject(PSAM_DB_OBJECT DbObject)
 {
+    PSAM_DB_OBJECT ParentObject;
     LPCWSTR ContainerName;
     LPWSTR AccountName = NULL;
     HANDLE ContainerKey = NULL;
@@ -481,8 +639,12 @@ SampDeleteAccountDbObject(PSAM_DB_OBJECT DbObject)
     if (DbObject->Name != NULL)
         RtlFreeHeap(RtlGetProcessHeap(), 0, DbObject->Name);
 
-    /* Release the database object */
+    /* Release the database object and the reference it held on its parent */
+    ParentObject = DbObject->ParentObject;
+    DbObject->Signature = 0;
     RtlFreeHeap(RtlGetProcessHeap(), 0, DbObject);
+    if (ParentObject != NULL)
+        SampCloseDbObject(ParentObject);
 
     Status = STATUS_SUCCESS;
 

@@ -1116,6 +1116,7 @@ LsapAddDefaultGroups(
         switch (LogonType)
         {
             case Interactive:
+            case Unlock:
                 SrcSid = LsapInteractiveSid;
                 break;
 
@@ -1575,10 +1576,8 @@ LsapSetPrivileges(
     {
         TokenInfo1 = (PLSA_TOKEN_INFORMATION_V1)TokenInformation;
 
-        Status = LsarOpenPolicy(NULL,
-                                NULL,
-                                0,
-                                &PolicyHandle);
+        /* The logon runs inside lsass for the logon request, not as an RPC client of the policy: use a trusted handle */
+        Status = LsaIOpenPolicyTrusted(&PolicyHandle);
         if (!NT_SUCCESS(Status))
             return Status;
 
@@ -1640,6 +1639,501 @@ LsapSetPrivileges(
 }
 
 
+/*
+ * The account right that allows a logon of this type and the one that denies it, as
+ * documented for LogonUser / the Windows user rights: "Access this computer from the network",
+ * "Allow log on locally", "Log on as a batch job", "Log on as a service" and the "Deny ..."
+ * rights; a deny right of any of the token's SIDs wins over a grant.
+ * Returns FALSE for a logon type that no right guards (NewCredentials makes no new logon).
+ */
+static
+BOOLEAN
+LsapGetLogonRightsOfType(
+    IN SECURITY_LOGON_TYPE LogonType,
+    OUT PULONG AllowRight,
+    OUT PULONG DenyRight)
+{
+    switch (LogonType)
+    {
+        case Interactive:
+        case Unlock:
+        case CachedInteractive:
+            *AllowRight = SECURITY_ACCESS_INTERACTIVE_LOGON;
+            *DenyRight = SECURITY_ACCESS_DENY_INTERACTIVE_LOGON;
+            return TRUE;
+
+        case Network:
+        case NetworkCleartext:
+            *AllowRight = SECURITY_ACCESS_NETWORK_LOGON;
+            *DenyRight = SECURITY_ACCESS_DENY_NETWORK_LOGON;
+            return TRUE;
+
+        case Batch:
+            *AllowRight = SECURITY_ACCESS_BATCH_LOGON;
+            *DenyRight = SECURITY_ACCESS_DENY_BATCH_LOGON;
+            return TRUE;
+
+        case Service:
+            *AllowRight = SECURITY_ACCESS_SERVICE_LOGON;
+            *DenyRight = SECURITY_ACCESS_DENY_SERVICE_LOGON;
+            return TRUE;
+
+        case RemoteInteractive:
+            *AllowRight = SECURITY_ACCESS_REMOTE_INTERACTIVE_LOGON;
+            *DenyRight = SECURITY_ACCESS_DENY_REMOTE_INTERACTIVE_LOGON;
+            return TRUE;
+
+        default:
+            return FALSE;
+    }
+}
+
+
+/*
+ * LocalSystem, LocalService, NetworkService and the virtual accounts of NT SERVICE are the
+ * accounts the service controller starts services under without a stored password; they need
+ * no account right for the service logon (the rights database has no entry for them).
+ */
+static
+BOOLEAN
+LsapIsImplicitServiceAccount(
+    IN PSID Sid)
+{
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+
+    if (!RtlEqualMemory(RtlIdentifierAuthoritySid(Sid), &NtAuthority, sizeof(NtAuthority)))
+        return FALSE;
+
+    if (*RtlSubAuthorityCountSid(Sid) == 1)
+    {
+        ULONG Rid = *RtlSubAuthoritySid(Sid, 0);
+
+        return (Rid == SECURITY_LOCAL_SYSTEM_RID ||
+                Rid == SECURITY_LOCAL_SERVICE_RID ||
+                Rid == SECURITY_NETWORK_SERVICE_RID);
+    }
+
+    /* S-1-5-80-...: NT SERVICE */
+    return (*RtlSubAuthorityCountSid(Sid) >= 2 && *RtlSubAuthoritySid(Sid, 0) == 80);
+}
+
+
+/* The status of a logon refused because the rights database could not be read: an internal error, or the lack of memory */
+static
+NTSTATUS
+LsapLogonRightsFailure(
+    IN NTSTATUS Status)
+{
+    if (Status == STATUS_INSUFFICIENT_RESOURCES || Status == STATUS_NO_MEMORY)
+        return Status;
+
+    return STATUS_INTERNAL_ERROR;
+}
+
+
+/*
+ * Checks the logon rights of the user and of the groups of the token for the logon type.
+ * Returns STATUS_LOGON_TYPE_NOT_GRANTED (ERROR_LOGON_TYPE_NOT_GRANTED, 1385) when the type is
+ * denied or no SID of the token holds the right.
+ */
+static
+NTSTATUS
+LsapCheckLogonRights(
+    IN PVOID TokenInformation,
+    IN LSA_TOKEN_INFORMATION_TYPE TokenInformationType,
+    IN SECURITY_LOGON_TYPE LogonType)
+{
+    PLSA_TOKEN_INFORMATION_V1 TokenInfo1;
+    LSAPR_HANDLE PolicyHandle = NULL;
+    LSAPR_HANDLE AccountHandle = NULL;
+    ACCESS_MASK SystemAccess;
+    ULONG AllowRight, DenyRight, i;
+    BOOLEAN Allowed = FALSE;
+    NTSTATUS Status;
+
+    /* A logon without a user (anonymous) has no account: no right to check */
+    if (TokenInformationType != LsaTokenInformationV1)
+        return STATUS_SUCCESS;
+
+    if (!LsapGetLogonRightsOfType(LogonType, &AllowRight, &DenyRight))
+        return STATUS_SUCCESS;
+
+    TokenInfo1 = (PLSA_TOKEN_INFORMATION_V1)TokenInformation;
+
+    if (LogonType == Service && LsapIsImplicitServiceAccount(TokenInfo1->User.User.Sid))
+        return STATUS_SUCCESS;
+
+    /* The check runs inside lsass for the logon request, not for an RPC client of the policy: a trusted handle (an
+       LsarOpenPolicy here would check the access of an RPC client that does not exist and refuse every logon) */
+    Status = LsaIOpenPolicyTrusted(&PolicyHandle);
+    if (!NT_SUCCESS(Status))
+        return LsapLogonRightsFailure(Status);
+
+    /* The user itself and every group of the token */
+    for (i = 0; i <= TokenInfo1->Groups->GroupCount; i++)
+    {
+        Status = LsarOpenAccount(PolicyHandle,
+                                 (i < TokenInfo1->Groups->GroupCount) ?
+                                     TokenInfo1->Groups->Groups[i].Sid :
+                                     TokenInfo1->User.User.Sid,
+                                 ACCOUNT_VIEW,
+                                 &AccountHandle);
+        if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+            continue; /* no account object: no rights */
+        if (!NT_SUCCESS(Status))
+        {
+            /* Fail closed: this SID may be the one that holds a Deny right */
+            ERR("LsapCheckLogonRights: the account of a SID of the token cannot be opened (Status 0x%08lx), logon refused\n", Status);
+            LsarClose(&PolicyHandle);
+            return LsapLogonRightsFailure(Status);
+        }
+
+        SystemAccess = 0;
+        Status = LsarGetSystemAccessAccount(AccountHandle, &SystemAccess);
+        LsarClose(&AccountHandle);
+        if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+            continue; /* an account with privileges only: no logon rights */
+        if (!NT_SUCCESS(Status))
+        {
+            ERR("LsapCheckLogonRights: the rights of an account cannot be read (Status 0x%08lx), logon refused\n", Status);
+            LsarClose(&PolicyHandle);
+            return LsapLogonRightsFailure(Status);
+        }
+
+        if (SystemAccess & DenyRight)
+        {
+            LsarClose(&PolicyHandle);
+            return STATUS_LOGON_TYPE_NOT_GRANTED;
+        }
+
+        if (SystemAccess & AllowRight)
+            Allowed = TRUE;
+    }
+
+    LsarClose(&PolicyHandle);
+
+    return Allowed ? STATUS_SUCCESS : STATUS_LOGON_TYPE_NOT_GRANTED;
+}
+
+
+#define FIXUP_POINTER(Pointer, Offset) ((PVOID)((ULONG_PTR)(Pointer) + (Offset)))
+
+/* Queries a variable size class of a token; the buffer is allocated from the process heap */
+static
+NTSTATUS
+LsapQueryTokenBuffer(
+    IN HANDLE TokenHandle,
+    IN TOKEN_INFORMATION_CLASS InformationClass,
+    OUT PVOID *Buffer)
+{
+    ULONG Length = 256, ReturnLength;
+    PVOID Data;
+    NTSTATUS Status;
+
+    for (;;)
+    {
+        Data = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, Length);
+        if (Data == NULL)
+            return STATUS_INSUFFICIENT_RESOURCES;
+
+        Status = NtQueryInformationToken(TokenHandle, InformationClass, Data, Length, &ReturnLength);
+        if (NT_SUCCESS(Status))
+        {
+            *Buffer = Data;
+            return STATUS_SUCCESS;
+        }
+
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Data);
+        if (Status != STATUS_BUFFER_TOO_SMALL || ReturnLength <= Length)
+            return Status;
+        Length = ReturnLength;
+    }
+}
+
+
+/*
+ * A LOGON32_LOGON_NEW_CREDENTIALS logon (NewCredentials): a new logon session that carries the
+ * credentials given for other network connections, and a primary token that is a copy of the token
+ * of the calling process. The credentials are not checked (documented behaviour of LogonUser).
+ * The token is built from the caller's own token (user, groups, privileges, owner, primary group,
+ * default DACL), so the caller gets nothing it does not have already; a restricted or AppContainer
+ * token cannot be copied that way and is refused.
+ */
+static
+NTSTATUS
+LsapNewCredentialsLogon(
+    IN PLSA_API_MSG RequestMsg,
+    IN PLSAP_LOGON_CONTEXT LogonContext,
+    IN PVOID LocalAuthInfo,
+    IN ULONG AuthInfoLength,
+    IN PVOID ClientAuthInfo,
+    IN TOKEN_SOURCE SourceContext)
+{
+    PMSV1_0_INTERACTIVE_LOGON LogonInfo = (PMSV1_0_INTERACTIVE_LOGON)LocalAuthInfo;
+    UNICODE_STRING UserName, DomainName;
+    ULONG_PTR Offset = (ULONG_PTR)LocalAuthInfo - (ULONG_PTR)ClientAuthInfo;
+    HANDLE SourceToken = NULL, NewToken = NULL;
+    PTOKEN_USER User = NULL;
+    PTOKEN_GROUPS Groups = NULL;
+    PTOKEN_PRIVILEGES Privileges = NULL;
+    PTOKEN_OWNER Owner = NULL;
+    PTOKEN_PRIMARY_GROUP PrimaryGroup = NULL;
+    PTOKEN_DEFAULT_DACL DefaultDacl = NULL;
+    PTOKEN_GROUPS Restricted = NULL, NewGroups = NULL;
+    PSID NewLogonSid = NULL, NewConsoleSid = NULL;
+    PSECURITY_DESCRIPTOR TokenSd = NULL;
+    ULONG TokenSdSize, IsAppContainer = 0, ReturnLength, SessionId = 0;
+    TOKEN_STATISTICS SourceStatistics;
+    TOKEN_ORIGIN SourceOrigin;
+    UNICODE_STRING SessionUserName = {0, 0, NULL}, SessionDomainName = {0, 0, NULL};
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    SECURITY_QUALITY_OF_SERVICE Qos;
+    LARGE_INTEGER ExpirationTime;
+    LUID LogonId = {0, 0};
+    HANDLE ClientToken = NULL;
+    BOOLEAN SessionCreated = FALSE;
+    NTSTATUS Status;
+
+    if (AuthInfoLength < sizeof(MSV1_0_INTERACTIVE_LOGON) ||
+        (LogonInfo->MessageType != MsV1_0InteractiveLogon &&
+         LogonInfo->MessageType != MsV1_0WorkstationUnlockLogon))
+        return STATUS_BAD_VALIDATION_CLASS;
+
+    /* Names inside the request buffer (the pointers are the caller's) */
+    UserName = LogonInfo->UserName;
+    DomainName = LogonInfo->LogonDomainName;
+    if (UserName.Length == 0 || UserName.Length > UserName.MaximumLength ||
+        DomainName.Length > DomainName.MaximumLength)
+        return STATUS_INVALID_PARAMETER;
+    UserName.Buffer = FIXUP_POINTER(UserName.Buffer, Offset);
+    DomainName.Buffer = (DomainName.Length != 0) ? FIXUP_POINTER(DomainName.Buffer, Offset) : NULL;
+    if ((ULONG_PTR)UserName.Buffer < (ULONG_PTR)LocalAuthInfo ||
+        (ULONG_PTR)UserName.Buffer + UserName.Length > (ULONG_PTR)LocalAuthInfo + AuthInfoLength ||
+        (DomainName.Length != 0 &&
+         ((ULONG_PTR)DomainName.Buffer < (ULONG_PTR)LocalAuthInfo ||
+          (ULONG_PTR)DomainName.Buffer + DomainName.Length > (ULONG_PTR)LocalAuthInfo + AuthInfoLength)))
+        return STATUS_INVALID_PARAMETER;
+    UserName.MaximumLength = UserName.Length;
+    DomainName.MaximumLength = DomainName.Length;
+
+    /*
+     * The token that is cloned is the effective token of the calling thread: the one it impersonates, else the one of
+     * its process (measured on Windows Server 2022: a thread that impersonates a user gets that user's token back, its
+     * groups, privileges, integrity level and elevation type; documented: "clone its current token", LogonUser,
+     * LOGON32_LOGON_NEW_CREDENTIALS). A thread token below the impersonation level cannot be cloned.
+     */
+    Status = LsapOpenClientTokenRequest((PLSA_CLIENT_REQUEST)LogonContext, &SourceToken);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = NtQueryInformationToken(SourceToken, TokenStatistics, &SourceStatistics, sizeof(SourceStatistics), &ReturnLength);
+    if (!NT_SUCCESS(Status))
+        goto done;
+    if (SourceStatistics.TokenType == TokenImpersonation && SourceStatistics.ImpersonationLevel < SecurityImpersonation)
+    {
+        Status = STATUS_BAD_IMPERSONATION_LEVEL;
+        goto done;
+    }
+
+    /* A restricted or AppContainer token would lose its restrictions in a copy made like this */
+    Status = LsapQueryTokenBuffer(SourceToken, TokenRestrictedSids, (PVOID*)&Restricted);
+    if (!NT_SUCCESS(Status))
+        goto done;
+    if (Restricted->GroupCount != 0)
+    {
+        Status = STATUS_NOT_SUPPORTED;
+        goto done;
+    }
+    if (NT_SUCCESS(NtQueryInformationToken(SourceToken, TokenIsAppContainer, &IsAppContainer,
+                                           sizeof(IsAppContainer), &ReturnLength)) && IsAppContainer)
+    {
+        Status = STATUS_NOT_SUPPORTED;
+        goto done;
+    }
+
+    Status = LsapQueryTokenBuffer(SourceToken, TokenUser, (PVOID*)&User);
+    if (!NT_SUCCESS(Status)) goto done;
+    Status = LsapQueryTokenBuffer(SourceToken, TokenGroups, (PVOID*)&Groups);
+    if (!NT_SUCCESS(Status)) goto done;
+    Status = LsapQueryTokenBuffer(SourceToken, TokenPrivileges, (PVOID*)&Privileges);
+    if (!NT_SUCCESS(Status)) goto done;
+    Status = LsapQueryTokenBuffer(SourceToken, TokenOwner, (PVOID*)&Owner);
+    if (!NT_SUCCESS(Status)) goto done;
+    Status = LsapQueryTokenBuffer(SourceToken, TokenPrimaryGroup, (PVOID*)&PrimaryGroup);
+    if (!NT_SUCCESS(Status)) goto done;
+    Status = LsapQueryTokenBuffer(SourceToken, TokenDefaultDacl, (PVOID*)&DefaultDacl);
+    if (!NT_SUCCESS(Status)) goto done;
+    NtQueryInformationToken(SourceToken, TokenSessionId, &SessionId, sizeof(SessionId), &ReturnLength);
+
+    /* The new logon session */
+    Status = NtAllocateLocallyUniqueId(&LogonId);
+    if (!NT_SUCCESS(Status)) goto done;
+    Status = LsapCreateLogonSession(&LogonId);
+    if (!NT_SUCCESS(Status)) goto done;
+    SessionCreated = TRUE;
+
+    /* The session records the user of the token it carries (the caller's), not the name the credentials are for
+     * (measured on Windows Server 2022: LsaGetLogonSessionData of the new session shows the caller's user name,
+     * domain and SID, logon type 9). A source session without a name keeps the name of the credentials. */
+    Status = LsapCopyLogonSessionNames(&SourceStatistics.AuthenticationId, &SessionUserName, &SessionDomainName);
+    if (NT_SUCCESS(Status))
+    {
+        Status = LsapSetLogonSessionData(&LogonId, NewCredentials, &SessionUserName, &SessionDomainName, User->User.Sid);
+    }
+    else
+    {
+        Status = LsapSetLogonSessionData(&LogonId, NewCredentials, &UserName, &DomainName, User->User.Sid);
+    }
+    if (!NT_SUCCESS(Status)) goto done;
+
+    Status = LsapCreateTokenSd(User, &TokenSd, &TokenSdSize);
+    if (!NT_SUCCESS(Status))
+        TokenSd = NULL;
+
+    Qos.Length = sizeof(SECURITY_QUALITY_OF_SERVICE);
+    Qos.ImpersonationLevel = SecurityImpersonation;
+    Qos.ContextTrackingMode = SECURITY_DYNAMIC_TRACKING;
+    Qos.EffectiveOnly = FALSE;
+
+    ObjectAttributes.Length = sizeof(OBJECT_ATTRIBUTES);
+    ObjectAttributes.RootDirectory = NULL;
+    ObjectAttributes.ObjectName = NULL;
+    ObjectAttributes.Attributes = 0;
+    ObjectAttributes.SecurityDescriptor = TokenSd;
+    ObjectAttributes.SecurityQualityOfService = &Qos;
+
+    ExpirationTime.QuadPart = 0x7FFFFFFFFFFFFFFFLL;
+
+    /*
+     * The groups (Windows Server 2022, measured): the caller's, except the groups of the way the caller logged on
+     * (NETWORK, BATCH, SERVICE, INTERACTIVE, CONSOLE LOGON and the authentication authority groups S-1-5-64-x), then
+     * INTERACTIVE and CONSOLE LOGON, and the logon SID of the new session besides the caller's own logon SID.
+     */
+    {
+        SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+        SID_IDENTIFIER_AUTHORITY LocalAuthority = {SECURITY_LOCAL_SID_AUTHORITY};
+        PSID ConsoleSid = NULL;
+        ULONG i, n = 0;
+
+        NewGroups = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY,
+                                    sizeof(TOKEN_GROUPS) + (Groups->GroupCount + 3) * sizeof(SID_AND_ATTRIBUTES));
+        if (NewGroups == NULL)
+        {
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+            goto done;
+        }
+        Status = RtlAllocateAndInitializeSid(&NtAuthority, SECURITY_LOGON_IDS_RID_COUNT, SECURITY_LOGON_IDS_RID,
+                                             LogonId.HighPart, LogonId.LowPart, 0, 0, 0, 0, 0, &NewLogonSid);
+        if (!NT_SUCCESS(Status))
+            goto done;
+        Status = RtlAllocateAndInitializeSid(&LocalAuthority, 1, 1 /* S-1-2-1: CONSOLE LOGON */, 0, 0, 0, 0, 0, 0, 0, &ConsoleSid);
+        if (!NT_SUCCESS(Status))
+            goto done;
+        NewConsoleSid = ConsoleSid;
+
+        for (i = 0; i < Groups->GroupCount; i++)
+        {
+            PSID Sid = Groups->Groups[i].Sid;
+            PSID_IDENTIFIER_AUTHORITY Auth = RtlIdentifierAuthoritySid(Sid);
+
+            if (!memcmp(Auth, &NtAuthority, sizeof(NtAuthority)))
+            {
+                ULONG Count = *RtlSubAuthorityCountSid(Sid), First = *RtlSubAuthoritySid(Sid, 0);
+
+                if ((Count == 1 && (First == SECURITY_NETWORK_RID || First == SECURITY_BATCH_RID ||
+                                    First == SECURITY_SERVICE_RID || First == SECURITY_INTERACTIVE_RID)) ||
+                    (Count >= 1 && First == 64 /* S-1-5-64-x: authentication authority */))
+                    continue;
+            }
+            else if (RtlEqualSid(Sid, ConsoleSid))
+                continue;
+
+            NewGroups->Groups[n++] = Groups->Groups[i];
+        }
+
+        NewGroups->Groups[n].Sid = LsapInteractiveSid;
+        NewGroups->Groups[n++].Attributes = SE_GROUP_MANDATORY | SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT;
+        NewGroups->Groups[n].Sid = ConsoleSid;
+        NewGroups->Groups[n++].Attributes = SE_GROUP_MANDATORY | SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT;
+        NewGroups->Groups[n].Sid = NewLogonSid;
+        NewGroups->Groups[n++].Attributes = SE_GROUP_MANDATORY | SE_GROUP_ENABLED |
+                                            SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_LOGON_ID;
+        NewGroups->GroupCount = n;
+    }
+
+    Status = NtCreateToken(&NewToken,
+                           TOKEN_ALL_ACCESS,
+                           &ObjectAttributes,
+                           TokenPrimary,
+                           &LogonId,
+                           &ExpirationTime,
+                           User,
+                           NewGroups,
+                           Privileges,
+                           Owner,
+                           PrimaryGroup,
+                           DefaultDacl,
+                           &SourceContext);
+    if (TokenSd != NULL)
+    {
+        RtlFreeHeap(RtlGetProcessHeap(), 0, TokenSd);
+        TokenSd = NULL;
+    }
+    if (!NT_SUCCESS(Status))
+    {
+        ERR("NtCreateToken failed (Status 0x%08lx)\n", Status);
+        goto done;
+    }
+
+    if (SessionId != 0)
+        NtSetInformationToken(NewToken, TokenSessionId, &SessionId, sizeof(SessionId));
+
+    /* The origin of the new token is the logon session of the token it was cloned from (measured) */
+    SourceOrigin.OriginatingLogonSession = SourceStatistics.AuthenticationId;
+    NtSetInformationToken(NewToken, TokenOrigin, &SourceOrigin, sizeof(SourceOrigin));
+
+    Status = NtDuplicateObject(NtCurrentProcess(),
+                               NewToken,
+                               LogonContext->ClientProcessHandle,
+                               &ClientToken,
+                               0,
+                               0,
+                               DUPLICATE_SAME_ACCESS | DUPLICATE_SAME_ATTRIBUTES | DUPLICATE_CLOSE_SOURCE);
+    NewToken = NULL;
+    if (!NT_SUCCESS(Status))
+        goto done;
+
+    /* The reply overlays the request: written last */
+    RequestMsg->LogonUser.Reply.ProfileBuffer = NULL;
+    RequestMsg->LogonUser.Reply.ProfileBufferLength = 0;
+    RequestMsg->LogonUser.Reply.LogonId = LogonId;
+    RequestMsg->LogonUser.Reply.Token = ClientToken;
+    RequestMsg->LogonUser.Reply.SubStatus = STATUS_SUCCESS;
+    RtlZeroMemory(&RequestMsg->LogonUser.Reply.Quotas, sizeof(RequestMsg->LogonUser.Reply.Quotas));
+
+done:
+    if (!NT_SUCCESS(Status) && SessionCreated)
+        LsapDeleteLogonSession(&LogonId);
+    if (NewToken != NULL) NtClose(NewToken);
+    if (SourceToken != NULL) NtClose(SourceToken);
+    if (User) RtlFreeHeap(RtlGetProcessHeap(), 0, User);
+    if (Groups) RtlFreeHeap(RtlGetProcessHeap(), 0, Groups);
+    if (Privileges) RtlFreeHeap(RtlGetProcessHeap(), 0, Privileges);
+    if (Owner) RtlFreeHeap(RtlGetProcessHeap(), 0, Owner);
+    if (PrimaryGroup) RtlFreeHeap(RtlGetProcessHeap(), 0, PrimaryGroup);
+    if (DefaultDacl) RtlFreeHeap(RtlGetProcessHeap(), 0, DefaultDacl);
+    if (Restricted) RtlFreeHeap(RtlGetProcessHeap(), 0, Restricted);
+    if (TokenSd) RtlFreeHeap(RtlGetProcessHeap(), 0, TokenSd);
+    if (SessionUserName.Buffer) RtlFreeHeap(RtlGetProcessHeap(), 0, SessionUserName.Buffer);
+    if (SessionDomainName.Buffer) RtlFreeHeap(RtlGetProcessHeap(), 0, SessionDomainName.Buffer);
+    if (NewGroups) RtlFreeHeap(RtlGetProcessHeap(), 0, NewGroups);
+    if (NewLogonSid) RtlFreeSid(NewLogonSid);
+    if (NewConsoleSid) RtlFreeSid(NewConsoleSid);
+
+    return Status;
+}
+
+
 NTSTATUS
 LsapLogonUser(PLSA_API_MSG RequestMsg,
               PLSAP_LOGON_CONTEXT LogonContext)
@@ -1669,6 +2163,9 @@ LsapLogonUser(PLSA_API_MSG RequestMsg,
 
 
     TRACE("LsapLogonUser(%p %p)\n", RequestMsg, LogonContext);
+
+    /* the thread of the caller (a logon with new credentials clones its effective token) */
+    LogonContext->RequestClientId = RequestMsg->h.ClientId;
 
     PackageId = RequestMsg->LogonUser.Request.AuthenticationPackage;
     LogonType = RequestMsg->LogonUser.Request.LogonType;
@@ -1716,6 +2213,29 @@ LsapLogonUser(PLSA_API_MSG RequestMsg,
         _strnicmp(Package->Name->Buffer, MSV1_0_PACKAGE_NAME, Package->Name->Length) == 0)
     {
         IsS4ULogon = TRUE;
+    }
+
+    /* A logon with new credentials makes no new account logon: no package, no logon rights (an S4U request with
+     * this type is the package's to refuse) */
+    if (LogonType == NewCredentials && !IsS4ULogon)
+    {
+        TOKEN_SOURCE NewCredSource = RequestMsg->LogonUser.Request.SourceContext;
+        ULONG NewCredLength = RequestMsg->LogonUser.Request.AuthenticationInformationLength;
+        PVOID NewCredClient = RequestMsg->LogonUser.Request.AuthenticationInformation;
+
+        if (LocalAuthInfo == NULL)
+            return STATUS_INVALID_PARAMETER;
+
+        Status = LsapNewCredentialsLogon(RequestMsg,
+                                         LogonContext,
+                                         LocalAuthInfo,
+                                         NewCredLength,
+                                         NewCredClient,
+                                         NewCredSource);
+        /* The request holds the plain password, which this logon does not use: never leave it in freed memory */
+        RtlSecureZeroMemory(LocalAuthInfo, NewCredLength);
+        RtlFreeHeap(RtlGetProcessHeap(), 0, LocalAuthInfo);
+        return Status;
     }
 
     if (RequestMsg->LogonUser.Request.LocalGroupsCount > 0)
@@ -1845,6 +2365,16 @@ LsapLogonUser(PLSA_API_MSG RequestMsg,
         goto done;
     }
 
+    /* The groups are complete: the logon rights of the user and its groups decide whether this type of logon is granted */
+    Status = LsapCheckLogonRights(TokenInformation,
+                                  TokenInformationType,
+                                  LogonType);
+    if (!NT_SUCCESS(Status))
+    {
+        WARN("LsapCheckLogonRights() refused the logon type %lu (Status 0x%08lx)\n", LogonType, Status);
+        goto done;
+    }
+
     Status = LsapSetTokenOwner(TokenInformation,
                                TokenInformationType);
     if (!NT_SUCCESS(Status))
@@ -1970,6 +2500,7 @@ LsapLogonUser(PLSA_API_MSG RequestMsg,
     }
 
     if (LogonType == Interactive ||
+        LogonType == Unlock ||
         LogonType == Batch ||
         LogonType == Service ||
         LogonType == NetworkCleartext)

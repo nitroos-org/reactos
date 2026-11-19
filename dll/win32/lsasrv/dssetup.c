@@ -46,11 +46,10 @@ DsRolepGetBasicInfo(
     ULONG Size;
     NTSTATUS Status;
 
+    /* Everybody may ask for the basic information (a standard user cannot open the policy for more); the
+       information that is returned does not depend on the caller's rights on the policy */
     RtlZeroMemory(&ObjectAttributes, sizeof(ObjectAttributes));
-    Status = LsarOpenPolicy(NULL,
-                            &ObjectAttributes,
-                            POLICY_VIEW_LOCAL_INFORMATION,
-                            &PolicyHandle);
+    Status = LsaIOpenPolicyTrusted(&PolicyHandle);
     if (!NT_SUCCESS(Status))
     {
         TRACE("LsarOpenPolicyFailed with NT status %x\n",

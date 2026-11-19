@@ -126,8 +126,9 @@ SampSetupCreateAliasAccount(HANDLE hDomainKey,
     if (!NT_SUCCESS(Status))
         goto done;
 
-    /* Create the server SD */
-    Status = SampCreateAliasSD(&Sd,
+    /* Create the alias SD */
+    Status = SampCreateAliasSD(ulRelativeId,
+                               &Sd,
                                &SdSize);
     if (!NT_SUCCESS(Status))
         goto done;

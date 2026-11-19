@@ -36,6 +36,175 @@ LsapSecretMapping = {SECRET_READ,
 
 /* FUNCTIONS ***************************************************************/
 
+/*
+ * Access check at the open of a policy, account or secret handle: the requested access is checked
+ * against the security descriptor of the object with the token of the RPC client, and the handle
+ * keeps the access that was GRANTED. Opening with no access always succeeds (as on Windows, measured
+ * for the policy). Trusted handles (opened inside lsass) are not checked, and neither are their
+ * children.
+ */
+static
+NTSTATUS
+LsapCheckObjectAccess(
+    IN PLSA_DB_OBJECT DbObject,
+    IN ACCESS_MASK DesiredAccess,
+    IN PGENERIC_MAPPING Mapping)
+{
+    union
+    {
+        PRIVILEGE_SET Set;
+        BYTE Buffer[sizeof(PRIVILEGE_SET) + 4 * sizeof(LUID_AND_ATTRIBUTES)];
+    } Privileges;
+    PSECURITY_DESCRIPTOR Sd = NULL;
+    ULONG SdLength = 0;
+    DWORD PrivilegesLength = sizeof(Privileges);
+    DWORD Granted = 0;
+    BOOL AccessStatus = FALSE;
+    HANDLE Token = NULL;
+    RPC_STATUS RpcStatus;
+    NTSTATUS Status;
+
+    RtlMapGenericMask(&DesiredAccess, Mapping);
+
+    if (DbObject->Trusted)
+    {
+        DbObject->Access = (DesiredAccess & MAXIMUM_ALLOWED) ? Mapping->GenericAll : DesiredAccess;
+        return STATUS_SUCCESS;
+    }
+
+    /* The descriptor of the object; without one nobody is let in */
+    Status = LsapGetObjectAttribute(DbObject, L"SecDesc", NULL, &SdLength);
+    if ((Status != STATUS_BUFFER_OVERFLOW && !NT_SUCCESS(Status)) || SdLength == 0)
+    {
+        ERR("No security descriptor for the object (Status 0x%08lx)\n", Status);
+        return STATUS_ACCESS_DENIED;
+    }
+
+    Sd = RtlAllocateHeap(RtlGetProcessHeap(), 0, SdLength);
+    if (Sd == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = LsapGetObjectAttribute(DbObject, L"SecDesc", Sd, &SdLength);
+    if (!NT_SUCCESS(Status) ||
+        !RtlValidRelativeSecurityDescriptor(Sd, SdLength, 0))
+    {
+        ERR("Invalid security descriptor for the object (Status 0x%08lx)\n", Status);
+        Status = STATUS_ACCESS_DENIED;
+        goto done;
+    }
+
+    /* The token of the client; never fall back to the identity of this process */
+    RpcStatus = RpcImpersonateClient(NULL);
+    if (RpcStatus != RPC_S_OK)
+    {
+        WARN("RpcImpersonateClient() failed (RpcStatus %ld)\n", RpcStatus);
+        Status = STATUS_ACCESS_DENIED;
+        goto done;
+    }
+
+    Status = NtOpenThreadToken(NtCurrentThread(),
+                               TOKEN_QUERY,
+                               TRUE,
+                               &Token);
+
+    if (RpcRevertToSelf() != RPC_S_OK)
+    {
+        HANDLE NullToken = NULL;
+
+        NtSetInformationThread(NtCurrentThread(),
+                               ThreadImpersonationToken,
+                               &NullToken,
+                               sizeof(NullToken));
+    }
+
+    if (!NT_SUCCESS(Status))
+    {
+        Token = NULL;
+        Status = STATUS_ACCESS_DENIED;
+        goto done;
+    }
+
+    /* An anonymous caller is not let in (it cannot connect to the LSA of Windows at all: measured) */
+    {
+        SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+        BYTE UserBuffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+        PSID AnonymousSid = NULL;
+        ULONG Length;
+
+        if (NT_SUCCESS(NtQueryInformationToken(Token, TokenUser, UserBuffer, sizeof(UserBuffer), &Length)) &&
+            NT_SUCCESS(RtlAllocateAndInitializeSid(&NtAuthority, 1, SECURITY_ANONYMOUS_LOGON_RID, 0, 0, 0, 0, 0, 0, 0, &AnonymousSid)))
+        {
+            BOOLEAN Anonymous = RtlEqualSid(((PTOKEN_USER)UserBuffer)->User.Sid, AnonymousSid);
+
+            RtlFreeSid(AnonymousSid);
+            if (Anonymous)
+            {
+                Status = STATUS_ACCESS_DENIED;
+                goto done;
+            }
+        }
+    }
+
+    /* Asking for no access always succeeds and gives a handle without rights (measured on Windows) */
+    if (DesiredAccess == 0)
+    {
+        DbObject->Access = 0;
+        Status = STATUS_SUCCESS;
+        goto done;
+    }
+
+    if (!AccessCheck(Sd,
+                     Token,
+                     DesiredAccess,
+                     Mapping,
+                     &Privileges.Set,
+                     &PrivilegesLength,
+                     &Granted,
+                     &AccessStatus))
+    {
+        Status = (GetLastError() == ERROR_PRIVILEGE_NOT_HELD) ? STATUS_PRIVILEGE_NOT_HELD : STATUS_ACCESS_DENIED;
+        goto done;
+    }
+
+    if (!AccessStatus)
+    {
+        Status = (GetLastError() == ERROR_PRIVILEGE_NOT_HELD) ? STATUS_PRIVILEGE_NOT_HELD : STATUS_ACCESS_DENIED;
+        goto done;
+    }
+
+    DbObject->Access = Granted;
+    Status = STATUS_SUCCESS;
+
+done:
+    if (Token != NULL)
+        NtClose(Token);
+
+    if (Sd != NULL)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Sd);
+
+    return Status;
+}
+
+
+/*
+ * Whether the RPC client may have the given access to the policy, by its token against the descriptor of
+ * the policy and not by the rights of the handle: Windows checks it so for the creation of accounts and
+ * secrets (measured: an administrator may add account rights through a handle that was opened for the
+ * lookup of names only, a standard user may not).
+ */
+static
+NTSTATUS
+LsapCheckClientPolicyAccess(
+    IN PLSA_DB_OBJECT PolicyObject,
+    IN ACCESS_MASK Access)
+{
+    LSA_DB_OBJECT Probe = *PolicyObject;
+
+    Probe.Access = 0;
+    return LsapCheckObjectAccess(&Probe, Access, &LsapPolicyMapping);
+}
+
+
 NTSTATUS
 LsarStartRpcServer(VOID)
 {
@@ -389,14 +558,17 @@ LsarSetSecurityObject(
     TRACE("LsarSetSecurityObject(%p %lx %p)\n",
           ObjectHandle, SecurityInformation, SecurityDescriptor);
 
-    if ((SecurityDescriptor == NULL) ||
-        (SecurityDescriptor->SecurityDescriptor == NULL) ||
-        !RtlValidSecurityDescriptor((PSECURITY_DESCRIPTOR)SecurityDescriptor->SecurityDescriptor))
-        return ERROR_INVALID_PARAMETER;
-
     if (SecurityInformation == 0 ||
         SecurityInformation & ~(OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION
         | DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION))
+        return ERROR_INVALID_PARAMETER;
+
+    /* The self-relative descriptor of Length bytes that the client sent: its parts must lie inside them */
+    if ((SecurityDescriptor == NULL) ||
+        (SecurityDescriptor->SecurityDescriptor == NULL) ||
+        !RtlValidRelativeSecurityDescriptor((PSECURITY_DESCRIPTOR)SecurityDescriptor->SecurityDescriptor,
+                                            SecurityDescriptor->Length,
+                                            0))
         return ERROR_INVALID_PARAMETER;
 
     if (SecurityInformation & SACL_SECURITY_INFORMATION)
@@ -408,12 +580,13 @@ LsarSetSecurityObject(
     if (SecurityInformation & (OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION))
         DesiredAccess |= WRITE_OWNER;
 
+    /* The owner and the group are in the descriptor, not in the structure that carries it */
     if ((SecurityInformation & OWNER_SECURITY_INFORMATION) &&
-        (((PISECURITY_DESCRIPTOR)SecurityDescriptor)->Owner == NULL))
+        (((PISECURITY_DESCRIPTOR_RELATIVE)SecurityDescriptor->SecurityDescriptor)->Owner == 0))
         return ERROR_INVALID_PARAMETER;
 
     if ((SecurityInformation & GROUP_SECURITY_INFORMATION) &&
-        (((PISECURITY_DESCRIPTOR)SecurityDescriptor)->Group == NULL))
+        (((PISECURITY_DESCRIPTOR_RELATIVE)SecurityDescriptor->SecurityDescriptor)->Group == 0))
         return ERROR_INVALID_PARAMETER;
 
     /* Validate the ObjectHandle */
@@ -566,6 +739,18 @@ LsarOpenPolicy(
                               DesiredAccess,
                               FALSE,
                               &PolicyObject);
+
+    if (NT_SUCCESS(Status))
+    {
+        /* Check the requested access against the security descriptor of the policy. A request for
+           POLICY_TRUST_ADMIN alone is answered as a request for nothing, as on Windows (measured on
+           a computer that is not a domain controller: it opens for every caller) */
+        Status = LsapCheckObjectAccess(PolicyObject,
+                                       (DesiredAccess == POLICY_TRUST_ADMIN) ? 0 : DesiredAccess,
+                                       &LsapPolicyMapping);
+        if (!NT_SUCCESS(Status))
+            LsapCloseDbObject(PolicyObject);
+    }
 
     RtlLeaveCriticalSection(&PolicyHandleTableLock);
 
@@ -1515,7 +1700,21 @@ LsarpOpenAccount(
                               AccountObject);
     if (!NT_SUCCESS(Status))
     {
-        ERR("LsapOpenDbObject(Accounts/%S) failed (Status 0x%08lx)\n", SidString, Status);
+        /* A SID without an account object is a normal answer (every logon asks for each group of the token) */
+        if (Status != STATUS_OBJECT_NAME_NOT_FOUND)
+            ERR("LsapOpenDbObject(Accounts/%S) failed (Status 0x%08lx)\n", SidString, Status);
+    }
+    else
+    {
+        /* Check the requested access against the security descriptor of the account */
+        Status = LsapCheckObjectAccess(*AccountObject,
+                                       DesiredAccess,
+                                       &LsapAccountMapping);
+        if (!NT_SUCCESS(Status))
+        {
+            LsapCloseDbObject(*AccountObject);
+            *AccountObject = NULL;
+        }
     }
 
     if (SidString != NULL)
@@ -2191,6 +2390,11 @@ LsarOpenSecret(
         goto done;
     }
 
+    /* Check the requested access against the security descriptor of the secret */
+    Status = LsapCheckObjectAccess(SecretObject,
+                                   DesiredAccess,
+                                   &LsapSecretMapping);
+
 done:
     if (!NT_SUCCESS(Status))
     {
@@ -2691,6 +2895,16 @@ LsarEnumerateAccountsWithUserRight(
         return Status;
     }
 
+    /* Who holds a right is not for every user to see (measured: a standard user is refused, an
+       administrator is not). The right that Windows asks for is not documented; administrators
+       are the ones that have POLICY_VIEW_AUDIT_INFORMATION by default */
+    Status = LsapCheckClientPolicyAccess(PolicyObject, POLICY_VIEW_AUDIT_INFORMATION);
+    if (!NT_SUCCESS(Status))
+    {
+        WARN("The caller may not list the accounts with a right (0x%08lx)\n", Status);
+        return Status;
+    }
+
     Status = LsapRegOpenKey(PolicyObject->KeyHandle,
                             L"Accounts",
                             KEY_READ,
@@ -3129,10 +3343,19 @@ LsarAddAccountRights(
         return Status;
     }
 
-    /* Open the account */
+    /* Adding rights to an account creates its entry if there is none yet, and that is the right
+       POLICY_CREATE_ACCOUNT that the documentation names; the caller's token decides (see above) */
+    Status = LsapCheckClientPolicyAccess(PolicyObject, POLICY_CREATE_ACCOUNT);
+    if (!NT_SUCCESS(Status))
+    {
+        WARN("The caller may not create accounts (0x%08lx)\n", Status);
+        return Status;
+    }
+
+    /* Open the account (the caller must be allowed to change its rights) */
     Status = LsarpOpenAccount(PolicyObject,
                               AccountSid,
-                              0,
+                              ACCOUNT_ADJUST_PRIVILEGES | ACCOUNT_ADJUST_SYSTEM_ACCESS,
                               &AccountObject);
     if (!NT_SUCCESS(Status) && Status != STATUS_OBJECT_NAME_NOT_FOUND)
     {
@@ -3336,10 +3559,10 @@ LsarRemoveAccountRights(
         return Status;
     }
 
-    /* Open the account */
+    /* Open the account (the caller must be allowed to change its rights) */
     Status = LsarpOpenAccount(PolicyObject,
                               AccountSid,
-                              0,
+                              ACCOUNT_ADJUST_PRIVILEGES | ACCOUNT_ADJUST_SYSTEM_ACCESS,
                               &AccountObject);
     if (!NT_SUCCESS(Status) && Status != STATUS_OBJECT_NAME_NOT_FOUND)
     {
@@ -3431,18 +3654,22 @@ LsarRemoveAccountRights(
             }
         }
 
-        /* Get the system access flags, if the attribute exists */
-        Size = 0;
+        /* Get the system access flags, if the attribute exists (a size of 0 would only ask for the size of the value:
+         * the flags stayed 0 and removing one right removed all of them) */
+        SystemAccess = 0;
+        Size = sizeof(ACCESS_MASK);
         Status = LsapGetObjectAttribute(AccountObject,
                                         L"ActSysAc",
                                         &SystemAccess,
                                         &Size);
-        if (!NT_SUCCESS(Status) && Status != STATUS_OBJECT_NAME_NOT_FOUND)
+        if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+            Size = 0;
+        else if (!NT_SUCCESS(Status))
             goto done;
 
         if ((Size != 0) && (RightsToRemove != 0))
         {
-            ERR("Rights: 0x%lx\n", SystemAccess);
+            TRACE("Rights: 0x%lx\n", SystemAccess);
 
             /* Set the new access rights */
             for (i = 0; i < UserRights->Entries; i++)
@@ -3451,7 +3678,7 @@ LsarRemoveAccountRights(
                 if (Value != 0)
                     SystemAccess &= ~Value;
             }
-            ERR("New Rights: 0x%lx\n", SystemAccess);
+            TRACE("New Rights: 0x%lx\n", SystemAccess);
 
             /* Set the system access flags */
             Status = LsapSetObjectAttribute(AccountObject,
@@ -3546,14 +3773,23 @@ LsarStorePrivateData(
     TRACE("LsarStorePrivateData(%p %p %p)\n",
           PolicyHandle, KeyName, EncryptedData);
 
-    /* Validate the SecretHandle */
+    /* Validate the PolicyHandle */
     Status = LsapValidateDbObject(PolicyHandle,
                                   LsaDbPolicyObject,
-                                  POLICY_CREATE_SECRET,
+                                  0,
                                   &PolicyObject);
     if (!NT_SUCCESS(Status))
     {
         ERR("LsapValidateDbObject returned 0x%08lx\n", Status);
+        return Status;
+    }
+
+    /* Storing private data creates or deletes a secret: the caller's token must allow POLICY_CREATE_SECRET
+       (measured: an administrator may do it through any policy handle, a standard user may not) */
+    Status = LsapCheckClientPolicyAccess(PolicyObject, POLICY_CREATE_SECRET);
+    if (!NT_SUCCESS(Status))
+    {
+        WARN("The caller may not create secrets (0x%08lx)\n", Status);
         return Status;
     }
 

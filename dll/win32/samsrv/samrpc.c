@@ -58,6 +58,223 @@ PGENERIC_MAPPING pServerMapping = &ServerMapping;
 
 /* FUNCTIONS *****************************************************************/
 
+/*
+ * Returns the token of the RPC client of the current call (a query-only impersonation token).
+ * The thread is back to its own identity when this returns, on every path. Without a client
+ * token the answer is access denied: the caller must never fall back to the identity of this
+ * process.
+ */
+static
+NTSTATUS
+SampGetClientToken(OUT PHANDLE TokenHandle)
+{
+    RPC_STATUS RpcStatus;
+    NTSTATUS Status;
+
+    *TokenHandle = NULL;
+
+    RpcStatus = RpcImpersonateClient(NULL);
+    if (RpcStatus != RPC_S_OK)
+    {
+        WARN("RpcImpersonateClient() failed (RpcStatus %ld)\n", RpcStatus);
+        return STATUS_ACCESS_DENIED;
+    }
+
+    /* Open the token as the process (OpenAsSelf): there is no thread token if the transport
+     * did not really impersonate, and then the open fails */
+    Status = NtOpenThreadToken(NtCurrentThread(),
+                               TOKEN_QUERY,
+                               TRUE,
+                               TokenHandle);
+
+    if (RpcRevertToSelf() != RPC_S_OK)
+    {
+        /* Never return to the caller while impersonating */
+        HANDLE NullToken = NULL;
+
+        NtSetInformationThread(NtCurrentThread(),
+                               ThreadImpersonationToken,
+                               &NullToken,
+                               sizeof(NullToken));
+    }
+
+    if (!NT_SUCCESS(Status))
+    {
+        WARN("NtOpenThreadToken() failed (Status 0x%08lx)\n", Status);
+        *TokenHandle = NULL;
+        return STATUS_ACCESS_DENIED;
+    }
+
+    return STATUS_SUCCESS;
+}
+
+
+static
+BOOLEAN
+SampIsAnonymousToken(IN HANDLE Token)
+{
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    BYTE Buffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+    PSID AnonymousSid = NULL;
+    ULONG Length;
+    BOOLEAN Anonymous = FALSE;
+
+    if (NT_SUCCESS(NtQueryInformationToken(Token, TokenUser, Buffer, sizeof(Buffer), &Length)) &&
+        NT_SUCCESS(RtlAllocateAndInitializeSid(&NtAuthority, 1, SECURITY_ANONYMOUS_LOGON_RID, 0, 0, 0, 0, 0, 0, 0, &AnonymousSid)))
+    {
+        Anonymous = RtlEqualSid(((PTOKEN_USER)Buffer)->User.Sid, AnonymousSid);
+        RtlFreeSid(AnonymousSid);
+    }
+
+    return Anonymous;
+}
+
+
+/*
+ * Access check at the open of a handle ([MS-SAMR] 3.1.1.1.x, "Standard Handle-Based Access
+ * Checks"): the access requested by the RPC client is checked against the security descriptor
+ * of the object with the token of the client, and the handle keeps the GRANTED access. Every
+ * method then checks the right it needs against the granted access.
+ *
+ * Trusted handles (SamIConnect(..., TRUE), used by lsasrv and the authentication packages
+ * inside lsass) are not checked. Their children inherit the flag.
+ */
+static
+NTSTATUS
+SampCheckObjectAccess(IN PSAM_DB_OBJECT DbObject,
+                      IN ACCESS_MASK DesiredAccess)
+{
+    union
+    {
+        PRIVILEGE_SET Set;
+        BYTE Buffer[sizeof(PRIVILEGE_SET) + 4 * sizeof(LUID_AND_ATTRIBUTES)];
+    } Privileges;
+    PGENERIC_MAPPING Mapping;
+    PSECURITY_DESCRIPTOR Sd = NULL;
+    ULONG SdLength = 0;
+    DWORD PrivilegesLength = sizeof(Privileges);
+    DWORD Granted = 0;
+    BOOL AccessStatus = FALSE;
+    HANDLE Token = NULL;
+    NTSTATUS Status;
+
+    switch (DbObject->ObjectType)
+    {
+        case SamDbServerObject:
+            Mapping = &ServerMapping;
+            break;
+
+        case SamDbDomainObject:
+            Mapping = &DomainMapping;
+            break;
+
+        case SamDbAliasObject:
+            Mapping = &AliasMapping;
+            break;
+
+        case SamDbGroupObject:
+            Mapping = &GroupMapping;
+            break;
+
+        case SamDbUserObject:
+            Mapping = &UserMapping;
+            break;
+
+        default:
+            return STATUS_INVALID_HANDLE;
+    }
+
+    RtlMapGenericMask(&DesiredAccess, Mapping);
+
+    /* Handles of the code inside lsass (SamIConnect) are not RPC clients: nothing to check. Trusted
+       ones also see the data that is private to the authentication packages */
+    if (DbObject->Trusted || DbObject->Internal)
+    {
+        DbObject->Access = (DesiredAccess & MAXIMUM_ALLOWED) ? Mapping->GenericAll : DesiredAccess;
+        return STATUS_SUCCESS;
+    }
+
+    /* The token of the client. Without one nobody is let in; an anonymous caller is not let in either
+       (it cannot even connect to the account database of Windows: measured) */
+    Status = SampGetClientToken(&Token);
+    if (!NT_SUCCESS(Status))
+        goto done;
+
+    if (SampIsAnonymousToken(Token))
+    {
+        Status = STATUS_ACCESS_DENIED;
+        goto done;
+    }
+
+    /* Asking for no access always succeeds and gives a handle without rights (measured on Windows Server 2022
+       for every caller and every object type) */
+    if (DesiredAccess == 0)
+    {
+        DbObject->Access = 0;
+        Status = STATUS_SUCCESS;
+        goto done;
+    }
+
+    /* The security descriptor of the object (stored self-relative). No descriptor: nobody is let in */
+    Status = SampGetObjectAttribute(DbObject, L"SecDesc", NULL, NULL, &SdLength);
+    if ((Status != STATUS_BUFFER_OVERFLOW && !NT_SUCCESS(Status)) || SdLength == 0)
+    {
+        ERR("No security descriptor for the object (Status 0x%08lx)\n", Status);
+        Status = STATUS_ACCESS_DENIED;
+        goto done;
+    }
+
+    Sd = RtlAllocateHeap(RtlGetProcessHeap(), 0, SdLength);
+    if (Sd == NULL)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto done;
+    }
+
+    Status = SampGetObjectAttribute(DbObject, L"SecDesc", NULL, Sd, &SdLength);
+    if (!NT_SUCCESS(Status) ||
+        !RtlValidRelativeSecurityDescriptor(Sd, SdLength, 0))
+    {
+        ERR("Invalid security descriptor for the object (Status 0x%08lx)\n", Status);
+        Status = STATUS_ACCESS_DENIED;
+        goto done;
+    }
+
+    if (!AccessCheck(Sd,
+                     Token,
+                     DesiredAccess,
+                     Mapping,
+                     &Privileges.Set,
+                     &PrivilegesLength,
+                     &Granted,
+                     &AccessStatus))
+    {
+        DWORD Error = GetLastError();
+
+        Status = (Error == ERROR_PRIVILEGE_NOT_HELD) ? STATUS_PRIVILEGE_NOT_HELD : STATUS_ACCESS_DENIED;
+        goto done;
+    }
+
+    if (!AccessStatus)
+    {
+        Status = (GetLastError() == ERROR_PRIVILEGE_NOT_HELD) ? STATUS_PRIVILEGE_NOT_HELD : STATUS_ACCESS_DENIED;
+        goto done;
+    }
+
+    DbObject->Access = Granted;
+    Status = STATUS_SUCCESS;
+
+done:
+    if (Token != NULL)
+        NtClose(Token);
+
+    if (Sd != NULL)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Sd);
+
+    return Status;
+}
+
+
 static
 LARGE_INTEGER
 SampAddRelativeTimeToTime(IN LARGE_INTEGER AbsoluteTime,
@@ -209,14 +426,18 @@ SamrSetSecurityObject(IN SAMPR_HANDLE ObjectHandle,
     TRACE("SamrSetSecurityObject(%p %lx %p)\n",
           ObjectHandle, SecurityInformation, SecurityDescriptor);
 
-    if ((SecurityDescriptor == NULL) ||
-        (SecurityDescriptor->SecurityDescriptor == NULL) ||
-        !RtlValidSecurityDescriptor((PSECURITY_DESCRIPTOR)SecurityDescriptor->SecurityDescriptor))
-        return ERROR_INVALID_PARAMETER;
-
     if (SecurityInformation == 0 ||
         SecurityInformation & ~(OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION
         | DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION))
+        return ERROR_INVALID_PARAMETER;
+
+    /* The descriptor is the self-relative one of Length bytes that the client sent: its parts must lie inside
+       those bytes (RtlValidSecurityDescriptor alone follows the offsets wherever they point) */
+    if ((SecurityDescriptor == NULL) ||
+        (SecurityDescriptor->SecurityDescriptor == NULL) ||
+        !RtlValidRelativeSecurityDescriptor((PSECURITY_DESCRIPTOR)SecurityDescriptor->SecurityDescriptor,
+                                            SecurityDescriptor->Length,
+                                            0))
         return ERROR_INVALID_PARAMETER;
 
     if (SecurityInformation & SACL_SECURITY_INFORMATION)
@@ -229,11 +450,11 @@ SamrSetSecurityObject(IN SAMPR_HANDLE ObjectHandle,
         DesiredAccess |= WRITE_OWNER;
 
     if ((SecurityInformation & OWNER_SECURITY_INFORMATION) &&
-        (((PISECURITY_DESCRIPTOR)SecurityDescriptor)->Owner == NULL))
+        (((PISECURITY_DESCRIPTOR_RELATIVE)SecurityDescriptor->SecurityDescriptor)->Owner == 0))
         return ERROR_INVALID_PARAMETER;
 
     if ((SecurityInformation & GROUP_SECURITY_INFORMATION) &&
-        (((PISECURITY_DESCRIPTOR)SecurityDescriptor)->Group == NULL))
+        (((PISECURITY_DESCRIPTOR_RELATIVE)SecurityDescriptor->SecurityDescriptor)->Group == 0))
         return ERROR_INVALID_PARAMETER;
 
     /* Validate the server handle */
@@ -907,7 +1128,14 @@ SamrOpenDomain(IN SAMPR_HANDLE ServerHandle,
     }
 
     if (NT_SUCCESS(Status))
-        *DomainHandle = (SAMPR_HANDLE)DomainObject;
+    {
+        /* Check the requested access against the security descriptor of the domain */
+        Status = SampCheckObjectAccess(DomainObject, DesiredAccess);
+        if (NT_SUCCESS(Status))
+            *DomainHandle = (SAMPR_HANDLE)DomainObject;
+        else
+            SampCloseDbObject(DomainObject);
+    }
 
 done:
     RtlReleaseResource(&SampResource);
@@ -2971,7 +3199,8 @@ SamrCreateAliasInDomain(IN SAMPR_HANDLE DomainHandle,
     }
 
     /* Create the security descriptor */
-    Status = SampCreateAliasSD(&Sd,
+    Status = SampCreateAliasSD(0,
+                               &Sd,
                                &SdSize);
     if (!NT_SUCCESS(Status))
     {
@@ -4032,6 +4261,14 @@ SamrOpenGroup(IN SAMPR_HANDLE DomainHandle,
         goto done;
     }
 
+    /* Check the requested access against the security descriptor of the group */
+    Status = SampCheckObjectAccess(GroupObject, DesiredAccess);
+    if (!NT_SUCCESS(Status))
+    {
+        SampCloseDbObject(GroupObject);
+        goto done;
+    }
+
     *GroupHandle = (SAMPR_HANDLE)GroupObject;
 
 done:
@@ -4875,6 +5112,14 @@ SamrOpenAlias(IN SAMPR_HANDLE DomainHandle,
         goto done;
     }
 
+    /* Check the requested access against the security descriptor of the alias */
+    Status = SampCheckObjectAccess(AliasObject, DesiredAccess);
+    if (!NT_SUCCESS(Status))
+    {
+        SampCloseDbObject(AliasObject);
+        goto done;
+    }
+
     *AliasHandle = (SAMPR_HANDLE)AliasObject;
 
 done:
@@ -5473,6 +5718,14 @@ SamrOpenUser(IN SAMPR_HANDLE DomainHandle,
     if (!NT_SUCCESS(Status))
     {
         TRACE("failed with status 0x%08lx\n", Status);
+        goto done;
+    }
+
+    /* Check the requested access against the security descriptor of the user */
+    Status = SampCheckObjectAccess(UserObject, DesiredAccess);
+    if (!NT_SUCCESS(Status))
+    {
+        SampCloseDbObject(UserObject);
         goto done;
     }
 
@@ -6675,6 +6928,12 @@ SampQueryUserInternal2(PSAM_DB_OBJECT UserObject,
     ULONG Length = 0;
     NTSTATUS Status;
 
+    /* The logon statistics are for the trusted callers inside lsass: the class needs no right on the handle,
+       so every other caller would read them through a handle opened for no access (Windows Server 2022
+       answers STATUS_INVALID_INFO_CLASS, measured) */
+    if (UserObject->Trusted == FALSE)
+        return STATUS_INVALID_INFO_CLASS;
+
     *Buffer = NULL;
 
     InfoBuffer = midl_user_allocate(sizeof(SAMPR_USER_INFO_BUFFER));
@@ -7851,6 +8110,29 @@ done:
 }
 
 
+/* Fields of UserAllInformation that only the trusted callers inside lsass may set, and the ones that are never valid ([MS-SAMR] 3.1.5.6.4.2) */
+#define SAMP_USER_ALL_TRUSTED_ONLY_FIELDS (USER_ALL_WRITE_TRUSTED_MASK | USER_ALL_WRITE_CANT_MASK)
+
+/* The access a user handle needs to set the given fields of UserAllInformation ([MS-SAMR] 3.1.5.6.4.2) */
+static
+ACCESS_MASK
+SampGetUserAllSetAccess(IN ULONG WhichFields)
+{
+    ACCESS_MASK Access = 0;
+
+    if (WhichFields & USER_ALL_WRITE_ACCOUNT_MASK)
+        Access |= USER_WRITE_ACCOUNT;
+
+    if (WhichFields & USER_ALL_WRITE_PREFERENCES_MASK)
+        Access |= USER_WRITE_PREFERENCES;
+
+    if (WhichFields & (USER_ALL_WRITE_FORCE_PASSWORD_CHANGE_MASK | USER_ALL_OWFPASSWORD))
+        Access |= USER_FORCE_PASSWORD_CHANGE;
+
+    return Access;
+}
+
+
 /* Function 37 */
 NTSTATUS
 NTAPI
@@ -8361,10 +8643,12 @@ SamrGetUserDomainPasswordInformation(IN SAMPR_HANDLE UserHandle,
         goto done;
     }
 
-    /* Validate the domain object */
+    /* The domain of the user. Its password parameters are read for the caller of the user handle: the rights of the
+       domain handle the user was opened with do not matter (everyone may read them, and samlib checks a new password
+       against them before it sets it) */
     Status = SampValidateDbObject((SAMPR_HANDLE)UserObject->ParentObject,
                                   SamDbDomainObject,
-                                  DOMAIN_READ_PASSWORD_PARAMETERS,
+                                  0,
                                   &DomainObject);
     if (!NT_SUCCESS(Status))
     {
@@ -8415,7 +8699,121 @@ SamrGetUserDomainPasswordInformation(IN SAMPR_HANDLE UserHandle,
 done:
     RtlReleaseResource(&SampResource);
 
-    return STATUS_SUCCESS;
+    /* A failure is reported: the structure is not filled then */
+    return Status;
+}
+
+
+/*
+ * SamrRemoveMemberFromForeignDomain needs only DOMAIN_LOOKUP on the domain, which everyone has. The removal
+ * itself is a change of every alias that has the member, so the caller must be allowed ALIAS_REMOVE_MEMBER on
+ * each of them; nothing is removed unless it is allowed on all of them (Windows Server 2022, measured: a
+ * standard user gets STATUS_ACCESS_DENIED for an administrator account in the Builtin domain and success
+ * in the account domain, where no alias has it).
+ */
+static
+NTSTATUS
+SampCheckRemoveFromAllAliases(IN PSAM_DB_OBJECT DomainObject,
+                              IN PRPC_SID MemberSid)
+{
+    WCHAR AliasKeyName[64];
+    LPWSTR MemberSidString = NULL;
+    HANDLE AliasesKey = NULL;
+    HANDLE AliasKey = NULL;
+    HANDLE MembersKey = NULL;
+    PSAM_DB_OBJECT AliasObject;
+    ULONG Index, Length;
+    NTSTATUS Status, MemberStatus;
+
+    if (DomainObject->Trusted || DomainObject->Internal)
+        return STATUS_SUCCESS;
+
+    if (!ConvertSidToStringSidW(MemberSid, &MemberSidString))
+        return STATUS_INVALID_PARAMETER;
+
+    Status = SampRegOpenKey(DomainObject->KeyHandle,
+                            L"Aliases",
+                            KEY_READ,
+                            &AliasesKey);
+    if (!NT_SUCCESS(Status))
+    {
+        /* No aliases: there is nothing to remove the member from */
+        if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+            Status = STATUS_SUCCESS;
+        goto done;
+    }
+
+    for (Index = 0; ; Index++)
+    {
+        Status = SampRegEnumerateSubKey(AliasesKey,
+                                        Index,
+                                        64,
+                                        AliasKeyName);
+        if (!NT_SUCCESS(Status))
+        {
+            if (Status == STATUS_NO_MORE_ENTRIES)
+                Status = STATUS_SUCCESS;
+            break;
+        }
+
+        /* The containers next to the aliases */
+        if (_wcsicmp(AliasKeyName, L"Names") == 0 || _wcsicmp(AliasKeyName, L"Members") == 0)
+            continue;
+
+        /* Is the SID a member of this alias? */
+        Status = SampRegOpenKey(AliasesKey,
+                                AliasKeyName,
+                                KEY_READ,
+                                &AliasKey);
+        if (!NT_SUCCESS(Status))
+            break;
+
+        MemberStatus = SampRegOpenKey(AliasKey,
+                                      L"Members",
+                                      KEY_READ,
+                                      &MembersKey);
+        if (NT_SUCCESS(MemberStatus))
+        {
+            Length = 0;
+            MemberStatus = SampRegQueryValue(MembersKey,
+                                             MemberSidString,
+                                             NULL,
+                                             NULL,
+                                             &Length);
+            SampRegCloseKey(&MembersKey);
+        }
+        SampRegCloseKey(&AliasKey);
+
+        if (!NT_SUCCESS(MemberStatus) && MemberStatus != STATUS_BUFFER_OVERFLOW)
+            continue;
+
+        /* It is: the caller must be allowed to remove members from the alias */
+        Status = SampOpenDbObject(DomainObject,
+                                  L"Aliases",
+                                  AliasKeyName,
+                                  wcstoul(AliasKeyName, NULL, 16),
+                                  SamDbAliasObject,
+                                  0,
+                                  &AliasObject);
+        if (!NT_SUCCESS(Status))
+            break;
+
+        Status = SampCheckObjectAccess(AliasObject, ALIAS_REMOVE_MEMBER);
+        SampCloseDbObject(AliasObject);
+        if (!NT_SUCCESS(Status))
+        {
+            TRACE("The caller may not remove members from alias %S (Status 0x%08lx)\n", AliasKeyName, Status);
+            break;
+        }
+    }
+
+done:
+    SampRegCloseKey(&AliasesKey);
+
+    if (MemberSidString != NULL)
+        LocalFree(MemberSidString);
+
+    return Status;
 }
 
 
@@ -8460,6 +8858,15 @@ SamrRemoveMemberFromForeignDomain(IN SAMPR_HANDLE DomainHandle,
     {
         TRACE("Cannot remove a special account (RID: %lu)\n", Rid);
         Status = STATUS_SPECIAL_ACCOUNT;
+        goto done;
+    }
+
+    /* The caller must be allowed to remove members from every alias it would be removed from */
+    Status = SampCheckRemoveFromAllAliases(DomainObject,
+                                           MemberSid);
+    if (!NT_SUCCESS(Status))
+    {
+        TRACE("SampCheckRemoveFromAllAliases failed with status 0x%08lx\n", Status);
         goto done;
     }
 
@@ -9535,8 +9942,13 @@ SamrSetInformationUser2(IN SAMPR_HANDLE UserHandle,
             break;
 
         case UserAllInformation:
+            /* The access depends on the fields that are set ([MS-SAMR] 3.1.5.6.4.2) */
+            DesiredAccess = SampGetUserAllSetAccess(Buffer->All.WhichFields);
+            break;
+
         case UserInternal2Information:
-            DesiredAccess = 0; /* FIXME */
+            /* Logon statistics: only for the trusted callers inside lsass */
+            DesiredAccess = 0;
             break;
 
         default:
@@ -9555,6 +9967,24 @@ SamrSetInformationUser2(IN SAMPR_HANDLE UserHandle,
     {
         TRACE("failed with status 0x%08lx\n", Status);
         goto done;
+    }
+
+    if (!UserObject->Trusted)
+    {
+        /* These classes and fields are set by the authentication packages only */
+        if (UserInformationClass == UserInternal2Information)
+        {
+            Status = STATUS_INVALID_INFO_CLASS;
+            goto done;
+        }
+
+        if ((UserInformationClass == UserAllInformation) &&
+            ((Buffer->All.WhichFields == 0) ||
+             (Buffer->All.WhichFields & SAMP_USER_ALL_TRUSTED_ONLY_FIELDS)))
+        {
+            Status = STATUS_INVALID_PARAMETER;
+            goto done;
+        }
     }
 
     switch (UserInformationClass)
@@ -9796,6 +10226,13 @@ SamrConnect5(IN PSAMPR_SERVER_NAME ServerName,
                               &ServerObject);
     if (NT_SUCCESS(Status))
     {
+        Status = SampCheckObjectAccess(ServerObject, DesiredAccess);
+        if (!NT_SUCCESS(Status))
+        {
+            SampCloseDbObject(ServerObject);
+            goto done;
+        }
+
         *OutVersion = 1;
 
         OutRevisionInfo->V1.Revision = 3;
@@ -9804,6 +10241,7 @@ SamrConnect5(IN PSAMPR_SERVER_NAME ServerName,
         *ServerHandle = (SAMPR_HANDLE)ServerObject;
     }
 
+done:
     RtlReleaseResource(&SampResource);
 
     TRACE("SamrConnect5 done (Status 0x%08lx)\n", Status);

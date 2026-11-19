@@ -133,6 +133,12 @@ LsapTerminateLogon(
     _In_ PLUID LogonId);
 
 
+/* policy.c */
+NTSTATUS
+WINAPI
+LsaIOpenPolicyTrusted(
+    _Out_ LSAPR_HANDLE *PolicyHandle);
+
 /* authport.c */
 NTSTATUS
 StartAuthenticationPort(VOID);
@@ -489,6 +495,13 @@ LsapSetLogonSessionData(
     _In_ PUNICODE_STRING UserName,
     _In_ PUNICODE_STRING LogonDomain,
     _In_ PSID Sid);
+
+/* Copies the user and domain names of a logon session (heap buffers, freed by the caller) */
+NTSTATUS
+LsapCopyLogonSessionNames(
+    _In_ PLUID LogonId,
+    _Out_ PUNICODE_STRING UserName,
+    _Out_ PUNICODE_STRING LogonDomain);
 
 NTSTATUS
 LsapEnumLogonSessions(IN OUT PLSA_API_MSG RequestMsg);

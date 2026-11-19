@@ -35,6 +35,31 @@ ULONG EnumCounter;
 
 /* FUNCTIONS ***************************************************************/
 
+/*
+ * The strings of a submit buffer are addresses in the client's copy of the buffer. One that does not lie
+ * inside the SubmitBufferSize bytes the client sent would be read from whatever follows the local copy in
+ * this process, or from memory that is not there at all.
+ */
+static
+BOOLEAN
+MsvpIsStringInSubmitBuffer(
+    _In_opt_ PVOID ClientPointer,
+    _In_ USHORT Length,
+    _In_ PVOID ClientBufferBase,
+    _In_ ULONG SubmitBufferSize)
+{
+    ULONG_PTR Offset;
+
+    if (Length == 0)
+        return TRUE;
+
+    if ((ULONG_PTR)ClientPointer < (ULONG_PTR)ClientBufferBase)
+        return FALSE;
+
+    Offset = (ULONG_PTR)ClientPointer - (ULONG_PTR)ClientBufferBase;
+    return (Offset <= SubmitBufferSize && Length <= SubmitBufferSize - Offset);
+}
+
 static
 PLOGON_LIST_ENTRY
 GetLogonByLogonId(
@@ -639,6 +664,19 @@ MsvpChangePassword(IN PLSA_CLIENT_REQUEST ClientRequest,
 
     /* Fix-up pointers in the request buffer info */
     PtrOffset = (ULONG_PTR)ProtocolSubmitBuffer - (ULONG_PTR)ClientBufferBase;
+
+    if (!MsvpIsStringInSubmitBuffer(RequestBuffer->DomainName.Buffer, RequestBuffer->DomainName.Length,
+                                    ClientBufferBase, SubmitBufferLength) ||
+        !MsvpIsStringInSubmitBuffer(RequestBuffer->AccountName.Buffer, RequestBuffer->AccountName.Length,
+                                    ClientBufferBase, SubmitBufferLength) ||
+        !MsvpIsStringInSubmitBuffer(RequestBuffer->OldPassword.Buffer, RequestBuffer->OldPassword.Length,
+                                    ClientBufferBase, SubmitBufferLength) ||
+        !MsvpIsStringInSubmitBuffer(RequestBuffer->NewPassword.Buffer, RequestBuffer->NewPassword.Length,
+                                    ClientBufferBase, SubmitBufferLength))
+    {
+        ERR("A string of the request is outside the submit buffer\n");
+        return STATUS_INVALID_PARAMETER;
+    }
 
     Status = RtlValidateUnicodeString(0, &RequestBuffer->DomainName);
     if (!NT_SUCCESS(Status))
@@ -1673,6 +1711,32 @@ LsaApLogonUserEx2_Network(
         return STATUS_INVALID_PARAMETER;
     }
 
+    /* The buffer is read as an MSV1_0_LM20_LOGON: another message type (LogonUser sends an interactive logon
+       buffer for a network logon) has its strings where this one has the challenge and the response */
+    if (LogonInfo->MessageType != MsV1_0Lm20Logon &&
+        LogonInfo->MessageType != MsV1_0NetworkLogon)
+    {
+        ERR("Invalid MessageType %lu for a network logon\n", LogonInfo->MessageType);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (!MsvpIsStringInSubmitBuffer(LogonInfo->LogonDomainName.Buffer, LogonInfo->LogonDomainName.Length,
+                                    ClientBufferBase, SubmitBufferSize) ||
+        !MsvpIsStringInSubmitBuffer(LogonInfo->UserName.Buffer, LogonInfo->UserName.Length,
+                                    ClientBufferBase, SubmitBufferSize) ||
+        !MsvpIsStringInSubmitBuffer(LogonInfo->Workstation.Buffer, LogonInfo->Workstation.Length,
+                                    ClientBufferBase, SubmitBufferSize) ||
+        !MsvpIsStringInSubmitBuffer(LogonInfo->CaseSensitiveChallengeResponse.Buffer,
+                                    LogonInfo->CaseSensitiveChallengeResponse.Length,
+                                    ClientBufferBase, SubmitBufferSize) ||
+        !MsvpIsStringInSubmitBuffer(LogonInfo->CaseInsensitiveChallengeResponse.Buffer,
+                                    LogonInfo->CaseInsensitiveChallengeResponse.Length,
+                                    ClientBufferBase, SubmitBufferSize))
+    {
+        ERR("A string of the logon information is outside the submit buffer\n");
+        return STATUS_INVALID_PARAMETER;
+    }
+
     /* Fix-up pointers in the authentication info */
     PtrOffset = (ULONG_PTR)ProtocolSubmitBuffer - (ULONG_PTR)ClientBufferBase;
 
@@ -2009,6 +2073,12 @@ LsaApLogonUserEx2(IN PLSA_CLIENT_REQUEST ClientRequest,
     PUNICODE_STRING ErasePassword = NULL;
     PLOGON_LIST_ENTRY LogonEntry = NULL;
     BOOLEAN UserValidated = FALSE;
+    /* LogonUser(LOGON32_LOGON_NETWORK) sends the user, the domain and the plain password (like the interactive
+       logons), not a challenge and its response: the password is verified like the one of a cleartext network logon */
+    BOOLEAN IsNetworkWithPassword = (LogonType == Network &&
+                                     SubmitBufferSize >= sizeof(ULONG) &&
+                                     ProtocolSubmitBuffer != NULL &&
+                                     *(PULONG)ProtocolSubmitBuffer == MsV1_0InteractiveLogon);
 
     TRACE("LsaApLogonUserEx2()\n");
 
@@ -2059,9 +2129,11 @@ LsaApLogonUserEx2(IN PLSA_CLIENT_REQUEST ClientRequest,
         UserValidated = TRUE;
     }
     else if (LogonType == Interactive ||
+        LogonType == Unlock ||
         LogonType == Batch ||
         LogonType == Service ||
-        LogonType == NetworkCleartext)
+        LogonType == NetworkCleartext ||
+        IsNetworkWithPassword)
     {
         PMSV1_0_INTERACTIVE_LOGON LogonInfo;
         ULONG_PTR PtrOffset;
@@ -2096,6 +2168,19 @@ LsaApLogonUserEx2(IN PLSA_CLIENT_REQUEST ClientRequest,
 
         /* Fix-up pointers in the authentication info */
         PtrOffset = (ULONG_PTR)ProtocolSubmitBuffer - (ULONG_PTR)ClientBufferBase;
+
+        /* The strings must lie inside the buffer the client sent (the length of the password without its
+           run-encoding seed in the high byte) */
+        if (!MsvpIsStringInSubmitBuffer(LogonInfo->LogonDomainName.Buffer, LogonInfo->LogonDomainName.Length,
+                                        ClientBufferBase, SubmitBufferSize) ||
+            !MsvpIsStringInSubmitBuffer(LogonInfo->UserName.Buffer, LogonInfo->UserName.Length,
+                                        ClientBufferBase, SubmitBufferSize) ||
+            !MsvpIsStringInSubmitBuffer(LogonInfo->Password.Buffer, LogonInfo->Password.Length & 0xFF,
+                                        ClientBufferBase, SubmitBufferSize))
+        {
+            ERR("A string of the logon information is outside the submit buffer\n");
+            return STATUS_INVALID_PARAMETER;
+        }
 
         /* LogonDomainName is optional and can be an empty string */
         if (LogonInfo->LogonDomainName.Length)
@@ -2284,8 +2369,8 @@ LsaApLogonUserEx2(IN PLSA_CLIENT_REQUEST ClientRequest,
     {
         /* The profile buffer of an S4U logon has been built already */
     }
-    else if (LogonType == Interactive || LogonType == Batch || LogonType == Service ||
-        LogonType == NetworkCleartext)
+    else if (LogonType == Interactive || LogonType == Unlock || LogonType == Batch || LogonType == Service ||
+        LogonType == NetworkCleartext || IsNetworkWithPassword)
     {
         /* Build and fill the interactive profile buffer */
         Status = BuildInteractiveProfileBuffer(ClientRequest,

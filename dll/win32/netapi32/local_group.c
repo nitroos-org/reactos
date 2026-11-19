@@ -548,6 +548,7 @@ NetLocalGroupAddMembers(
     SAM_HANDLE DomainHandle = NULL;
     SAM_HANDLE AliasHandle = NULL;
     PLOCALGROUP_MEMBERS_INFO_0 MemberList = NULL;
+    BOOLEAN AliasMissing = FALSE;
     ULONG i;
     NET_API_STATUS ApiStatus = NERR_Success;
     NTSTATUS Status = STATUS_SUCCESS;
@@ -570,15 +571,8 @@ NetLocalGroupAddMembers(
             break;
 
         case 3:
-            ApiStatus = BuildSidListFromDomainAndName(pServerName,
-                                                      (PLOCALGROUP_MEMBERS_INFO_3)buf,
-                                                      totalentries,
-                                                      &MemberList);
-            if (ApiStatus != NERR_Success)
-            {
-                ERR("BuildSidListFromDomainAndName failed (ApiStatus %lu)\n", ApiStatus);
-                goto done;
-            }
+            /* The names are resolved once an existing alias is open: a caller who may not change the alias is refused
+               before anything is looked up (as on Windows: access denied, not "member does not exist") */
             break;
 
         default:
@@ -645,10 +639,31 @@ NetLocalGroupAddMembers(
         if (ApiStatus != NERR_Success)
         {
             ERR("OpenAliasByName(%wZ) failed (ApiStatus %lu)\n", &AliasName, ApiStatus);
-            if (ApiStatus == ERROR_NONE_MAPPED)
-                ApiStatus = NERR_GroupNotFound;
+            if (ApiStatus != ERROR_NONE_MAPPED)
+                goto done;
+
+            /* No such alias: names that do not exist are reported first, then the missing alias */
+            AliasMissing = TRUE;
+        }
+    }
+
+    if (level == 3)
+    {
+        ApiStatus = BuildSidListFromDomainAndName(pServerName,
+                                                  (PLOCALGROUP_MEMBERS_INFO_3)buf,
+                                                  totalentries,
+                                                  &MemberList);
+        if (ApiStatus != NERR_Success)
+        {
+            ERR("BuildSidListFromDomainAndName failed (ApiStatus %lu)\n", ApiStatus);
             goto done;
         }
+    }
+
+    if (AliasMissing)
+    {
+        ApiStatus = NERR_GroupNotFound;
+        goto done;
     }
 
     /* Add new members to the alias */
@@ -847,6 +862,7 @@ NetLocalGroupDelMembers(
     SAM_HANDLE DomainHandle = NULL;
     SAM_HANDLE AliasHandle = NULL;
     PLOCALGROUP_MEMBERS_INFO_0 MemberList = NULL;
+    BOOLEAN AliasMissing = FALSE;
     ULONG i;
     NET_API_STATUS ApiStatus = NERR_Success;
     NTSTATUS Status = STATUS_SUCCESS;
@@ -869,15 +885,7 @@ NetLocalGroupDelMembers(
             break;
 
         case 3:
-            ApiStatus = BuildSidListFromDomainAndName(pServerName,
-                                                      (PLOCALGROUP_MEMBERS_INFO_3)buf,
-                                                      totalentries,
-                                                      &MemberList);
-            if (ApiStatus)
-            {
-                ERR("BuildSidListFromDomainAndName failed (ApiStatus %lu)\n", ApiStatus);
-                goto done;
-            }
+            /* The names are resolved once an existing alias is open, as in NetLocalGroupAddMembers */
             break;
 
         default:
@@ -944,10 +952,31 @@ NetLocalGroupDelMembers(
         if (ApiStatus != NERR_Success)
         {
             ERR("OpenAliasByName(%wZ) failed (ApiStatus %lu)\n", &AliasName, ApiStatus);
-            if (ApiStatus == ERROR_NONE_MAPPED)
-                ApiStatus = NERR_GroupNotFound;
+            if (ApiStatus != ERROR_NONE_MAPPED)
+                goto done;
+
+            /* No such alias: names that do not exist are reported first, then the missing alias */
+            AliasMissing = TRUE;
+        }
+    }
+
+    if (level == 3)
+    {
+        ApiStatus = BuildSidListFromDomainAndName(pServerName,
+                                                  (PLOCALGROUP_MEMBERS_INFO_3)buf,
+                                                  totalentries,
+                                                  &MemberList);
+        if (ApiStatus)
+        {
+            ERR("BuildSidListFromDomainAndName failed (ApiStatus %lu)\n", ApiStatus);
             goto done;
         }
+    }
+
+    if (AliasMissing)
+    {
+        ApiStatus = NERR_GroupNotFound;
+        goto done;
     }
 
     /* Remove members from the alias */

@@ -1279,7 +1279,10 @@ NtQueryInformationToken(
                 {
                     if (TokenInformationLength >= RequiredLength)
                     {
-                        to->OriginatingLogonSession = Token->AuthenticationId;
+                        /* The origin that the logon set (LsaLogonUser of a logon with new credentials), else the logon session */
+                        to->OriginatingLogonSession = RtlIsZeroLuid(&Token->OriginatingLogonSession) ?
+                                                      Token->AuthenticationId :
+                                                      Token->OriginatingLogonSession;
                     }
                     else
                     {

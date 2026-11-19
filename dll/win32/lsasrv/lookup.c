@@ -31,11 +31,14 @@ VOID
 NTAPI
 SamIFree_SAMPR_ULONG_ARRAY(PSAMPR_ULONG_ARRAY Ptr);
 
+/* The lookups run inside lsass for the caller of the LSA function (its access to the policy was checked
+   when it opened the policy handle): they use a trusted connection, not the caller's rights on the SAM */
 NTSTATUS
 NTAPI
-SamrConnect(IN PSAMPR_SERVER_NAME ServerName,
+SamIConnect(IN PSAMPR_SERVER_NAME ServerName,
             OUT SAMPR_HANDLE *ServerHandle,
-            IN ACCESS_MASK DesiredAccess);
+            IN ACCESS_MASK DesiredAccess,
+            IN BOOLEAN Trusted);
 
 NTSTATUS
 NTAPI
@@ -1375,9 +1378,10 @@ LsapLookupIsolatedBuiltinNames(DWORD Count,
     ULONG i;
     NTSTATUS Status = STATUS_SUCCESS;
 
-    Status = SamrConnect(NULL,
+    Status = SamIConnect(NULL,
                          &ServerHandle,
-                         SAM_SERVER_CONNECT | SAM_SERVER_LOOKUP_DOMAIN);
+                         SAM_SERVER_CONNECT | SAM_SERVER_LOOKUP_DOMAIN,
+                         TRUE);
     if (!NT_SUCCESS(Status))
     {
         TRACE("SamrConnect failed (Status %08lx)\n", Status);
@@ -1473,9 +1477,10 @@ LsapLookupIsolatedAccountNames(DWORD Count,
 
     TRACE("()\n");
 
-    Status = SamrConnect(NULL,
+    Status = SamIConnect(NULL,
                          &ServerHandle,
-                         SAM_SERVER_CONNECT | SAM_SERVER_LOOKUP_DOMAIN);
+                         SAM_SERVER_CONNECT | SAM_SERVER_LOOKUP_DOMAIN,
+                         TRUE);
     if (!NT_SUCCESS(Status))
     {
         TRACE("SamrConnect failed (Status %08lx)\n", Status);
@@ -1792,9 +1797,10 @@ LsapLookupBuiltinNames(DWORD Count,
     ULONG i;
     NTSTATUS Status = STATUS_SUCCESS;
 
-    Status = SamrConnect(NULL,
+    Status = SamIConnect(NULL,
                          &ServerHandle,
-                         SAM_SERVER_CONNECT | SAM_SERVER_LOOKUP_DOMAIN);
+                         SAM_SERVER_CONNECT | SAM_SERVER_LOOKUP_DOMAIN,
+                         TRUE);
     if (!NT_SUCCESS(Status))
     {
         TRACE("SamrConnect failed (Status %08lx)\n", Status);
@@ -1889,9 +1895,10 @@ LsapLookupAccountNames(DWORD Count,
     ULONG i;
     NTSTATUS Status = STATUS_SUCCESS;
 
-    Status = SamrConnect(NULL,
+    Status = SamIConnect(NULL,
                          &ServerHandle,
-                         SAM_SERVER_CONNECT | SAM_SERVER_LOOKUP_DOMAIN);
+                         SAM_SERVER_CONNECT | SAM_SERVER_LOOKUP_DOMAIN,
+                         TRUE);
     if (!NT_SUCCESS(Status))
     {
         TRACE("SamrConnect failed (Status %08lx)\n", Status);
@@ -2323,9 +2330,10 @@ LsapLookupBuiltinDomainSids(PLSAPR_SID_ENUM_BUFFER SidEnumBuffer,
     ULONG i;
     NTSTATUS Status = STATUS_SUCCESS;
 
-    Status = SamrConnect(NULL,
+    Status = SamIConnect(NULL,
                          &ServerHandle,
-                         SAM_SERVER_CONNECT | SAM_SERVER_LOOKUP_DOMAIN);
+                         SAM_SERVER_CONNECT | SAM_SERVER_LOOKUP_DOMAIN,
+                         TRUE);
     if (!NT_SUCCESS(Status))
     {
         TRACE("SamrConnect failed (Status %08lx)\n", Status);
@@ -2462,9 +2470,10 @@ LsapLookupAccountDomainSids(PLSAPR_SID_ENUM_BUFFER SidEnumBuffer,
     ULONG i;
     NTSTATUS Status = STATUS_SUCCESS;
 
-    Status = SamrConnect(NULL,
+    Status = SamIConnect(NULL,
                          &ServerHandle,
-                         SAM_SERVER_CONNECT | SAM_SERVER_LOOKUP_DOMAIN);
+                         SAM_SERVER_CONNECT | SAM_SERVER_LOOKUP_DOMAIN,
+                         TRUE);
     if (!NT_SUCCESS(Status))
     {
         TRACE("SamrConnect failed (Status %08lx)\n", Status);
