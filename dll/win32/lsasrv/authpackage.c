@@ -1763,9 +1763,11 @@ LsapCheckLogonRights(
     if (LogonType == Service && LsapIsImplicitServiceAccount(TokenInfo1->User.User.Sid))
         return STATUS_SUCCESS;
 
-    Status = LsarOpenPolicy(NULL, NULL, 0, &PolicyHandle);
+    /* The check runs inside lsass for the logon request, not for an RPC client of the policy: a trusted handle (an
+       LsarOpenPolicy here would check the access of an RPC client that does not exist and refuse every logon) */
+    Status = LsaIOpenPolicyTrusted(&PolicyHandle);
     if (!NT_SUCCESS(Status))
-        return Status;
+        return LsapLogonRightsFailure(Status);
 
     /* The user itself and every group of the token */
     for (i = 0; i <= TokenInfo1->Groups->GroupCount; i++)
