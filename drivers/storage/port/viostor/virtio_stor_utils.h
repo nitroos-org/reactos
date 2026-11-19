@@ -42,4 +42,4 @@ void InitializeDebugPrints(IN PDRIVER_OBJECT DriverObject, IN PUNICODE_STRING Re
 
 VOID LogError(IN PVOID HwDeviceExtension, IN ULONG ErrorCode, IN ULONG UniqueId);
 
-#endif ___VIOSTOR_UTILS_H___
+#endif // ___VIOSTOR_UTILS_H___

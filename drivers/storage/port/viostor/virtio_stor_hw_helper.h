@@ -163,4 +163,4 @@ VOID CompleteRequestWithStatus(IN PVOID DeviceExtension, IN PSRB_TYPE Srb, IN UC
 
 extern VirtIOSystemOps VioStorSystemOps;
 
-#endif ___VIOSTOR_HW_HELPER_H___
+#endif // ___VIOSTOR_HW_HELPER_H___
