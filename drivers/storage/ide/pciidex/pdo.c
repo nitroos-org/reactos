@@ -39,7 +39,14 @@ PciIdeXPdoGetDmaAdapter(
     DeviceDescription.Version = DEVICE_DESCRIPTION_VERSION;
     DeviceDescription.Master = TRUE;
     DeviceDescription.ScatterGather = TRUE;
+    /*
+     * Without Dma64BitAddresses the HAL limits the common buffers of a bus master
+     * that is not 32-bit to the first 16 MB of memory (HalpGetAdapterMaximumPhysicalAddress).
+     * Six AHCI ports then need most of what the UEFI memory map leaves below 16 MB,
+     * and the later ports fail to allocate their command list.
+     */
     DeviceDescription.Dma32BitAddresses = !(ChanData->ChanInfo & CHANNEL_FLAG_64_BIT_DMA);
+    DeviceDescription.Dma64BitAddresses = !!(ChanData->ChanInfo & CHANNEL_FLAG_64_BIT_DMA);
     DeviceDescription.InterfaceType = PCIBus;
     DeviceDescription.MaximumLength = ChanData->MaximumTransferLength;
 
