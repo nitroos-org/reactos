@@ -42,6 +42,13 @@
 #include "VirtIO.h"
 #include "virtio_ring.h"
 
+#ifdef __REACTOS__
+/* osdep.h of the VirtIO library redefines FORCEINLINE as a plain function attribute, which makes every inline helper
+ * of the driver (and of srbhelper.h, included after this) an external function defined in each file: make them static. */
+#undef FORCEINLINE
+#define FORCEINLINE static __inline__ __attribute__((__always_inline__))
+#endif
+
 typedef struct VirtIOBufferDescriptor VIO_SG, *PVIO_SG;
 
 #define VIRTIO_SCSI_CDB_SIZE   32
