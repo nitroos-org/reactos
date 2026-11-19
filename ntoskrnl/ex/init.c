@@ -71,6 +71,7 @@ CHAR NtBuildLab[] = KERNEL_VERSION_BUILD_STR "."
 /* Init flags and settings */
 ULONG ExpInitializationPhase;
 BOOLEAN ExpInTextModeSetup;
+BOOLEAN ExpBootedViaEfi; // Reported through SystemBootEnvironmentInformation
 BOOLEAN IoRemoteBootClient;
 ULONG InitSafeBootMode;
 BOOLEAN InitIsWinPEMode, InitWinPEModeType;
@@ -1024,6 +1025,18 @@ ExpInitializeExecutive(IN ULONG Cpu,
     /* Assume no text-mode or remote boot */
     ExpInTextModeSetup = FALSE;
     IoRemoteBootClient = FALSE;
+
+    /* Remember whether the loader was started by UEFI firmware */
+#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+    ExpBootedViaEfi = !!LoaderBlock->FirmwareInformation.FirmwareTypeEfi;
+#else
+    ExpBootedViaEfi = FALSE;
+    if (LoaderBlock->Extension &&
+        LoaderBlock->Extension->Size >= FIELD_OFFSET(LOADER_PARAMETER_EXTENSION, LoaderPerformanceData))
+    {
+        ExpBootedViaEfi = !!LoaderBlock->Extension->BootViaEFI;
+    }
+#endif
 
     /* Check if we have a setup loader block */
     if (LoaderBlock->SetupLdrBlock)
