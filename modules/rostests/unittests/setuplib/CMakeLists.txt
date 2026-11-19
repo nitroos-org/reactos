@@ -5,6 +5,7 @@ include_directories(${REACTOS_SOURCE_DIR}/modules/rostests/apitests/include)
 
 list(APPEND SOURCE
     IsValidInstallDirectory.c
+    UnattendParse.c
     testlist.c
     precomp.h)
 

@@ -76,6 +76,22 @@ static BOOLEAN RepairUpdateFlag = FALSE;
  * a bounded time instead of blocking on a popup, and reboots */
 static PCSTR UnattendedFailureText[5] = {NULL};
 
+/* Record a fatal problem of an unattended setup: the message stays on the screen
+ * (QuitPage) and goes to the debug log. All arguments are string literals. */
+static VOID
+UnattendedFatal(
+    _In_ PCSTR Reason,
+    _In_opt_ PCSTR Hint1,
+    _In_opt_ PCSTR Hint2)
+{
+    UnattendedFailureText[0] = "Unattended setup cannot continue:";
+    UnattendedFailureText[1] = Reason;
+    UnattendedFailureText[2] = Hint1;
+    UnattendedFailureText[3] = Hint2;
+    UnattendedFailureText[4] = NULL;
+    SetupLogFormat("FATAL: %s. %s %s", Reason, Hint1 ? Hint1 : "", Hint2 ? Hint2 : "");
+}
+
 /* Global partition list on the system */
 static PPARTLIST PartitionList = NULL;
 
@@ -281,6 +297,18 @@ PopupError(PCCH Text,
     SHORT Width;
     SHORT Height;
 
+    /* An unattended setup stops at a popup until a key is pressed: say why in the log */
+    if (IsUnattendedSetup && WaitEvent != POPUP_WAIT_NONE)
+    {
+        CHAR Line[256];
+        ULONG i;
+
+        for (i = 0; i < sizeof(Line) - 1 && Text[i]; ++i)
+            Line[i] = (Text[i] == '\n') ? ' ' : Text[i];
+        Line[i] = ANSI_NULL;
+        SetupLogFormat("popup (waits for a key): %s", Line);
+    }
+
     /* Count text lines and longest line */
     MaxLength = 0;
     Lines = 0;
@@ -415,6 +443,23 @@ PopupError(PCCH Text,
 
     if (WaitEvent == POPUP_WAIT_NONE)
         return;
+
+    if (IsUnattendedSetup)
+    {
+        /* Nobody may be there: show the message for 20 seconds, then go on as if ENTER
+         * was pressed (the choice every one of these popups offers). A key skips the wait. */
+        LARGE_INTEGER Delay;
+        ULONG Tries;
+
+        Delay.QuadPart = -2500000LL; /* 250 ms */
+        for (Tries = 0; Tries < 80; ++Tries)
+        {
+            if (CONSOLE_ConInKeyPeek(Ir))
+                return;
+            NtDelayExecution(FALSE, &Delay);
+        }
+        return;
+    }
 
     while (TRUE)
     {
@@ -622,9 +667,27 @@ SetupStartPage(PINPUT_RECORD Ir)
 
         USetupData.LanguageList = CreateLanguageList(USetupData.SetupInf, DefaultLanguage);
 
-        /* new part */
+        /* new part. A LocaleID the language list does not know (or none) is logged
+         * and the default language of the list is used instead. */
         SelectedLanguageId = DefaultLanguage;
-        wcscpy(DefaultLanguage, USetupData.LocaleID);
+        if (USetupData.LocaleID[0])
+        {
+            BOOLEAN Known = FALSE;
+
+            for (ListEntry = GetFirstListEntry(USetupData.LanguageList); ListEntry;
+                 ListEntry = GetNextListEntry(ListEntry))
+            {
+                if (!_wcsicmp(USetupData.LocaleID, ((PGENENTRY)GetListEntryData(ListEntry))->Id))
+                {
+                    Known = TRUE;
+                    break;
+                }
+            }
+            if (Known)
+                wcscpy(DefaultLanguage, USetupData.LocaleID);
+            else
+                SetupLogFormat("LocaleID %S is not a language this setup offers: using %S", USetupData.LocaleID, DefaultLanguage);
+        }
         USetupData.LanguageId = (LANGID)(wcstol(SelectedLanguageId, NULL, 16) & 0xFFFF);
 
         USetupData.LayoutList = CreateKeyboardLayoutList(USetupData.SetupInf, SelectedLanguageId, DefaultKBLayout);
@@ -634,7 +697,7 @@ SetupStartPage(PINPUT_RECORD Ir)
              ListEntry = GetNextListEntry(ListEntry))
         {
             LocaleId = ((PGENENTRY)GetListEntryData(ListEntry))->Id;
-            if (!_wcsicmp(USetupData.LocaleID, LocaleId))
+            if (!_wcsicmp(SelectedLanguageId, LocaleId))
             {
                 DPRINT("found %S in LanguageList\n", LocaleId);
                 SetCurrentListEntry(USetupData.LanguageList, ListEntry);
@@ -642,18 +705,24 @@ SetupStartPage(PINPUT_RECORD Ir)
             }
         }
 
-        /* now LayoutList */
+        /* now LayoutList: the layout the file names (KeyboardLayout), else the one of the language */
         for (ListEntry = GetFirstListEntry(USetupData.LayoutList); ListEntry;
              ListEntry = GetNextListEntry(ListEntry))
         {
             LocaleId = ((PGENENTRY)GetListEntryData(ListEntry))->Id;
-            if (!_wcsicmp(USetupData.LocaleID, LocaleId))
+            if (USetupData.KeyboardLayout[0] ? !_wcsicmp(USetupData.KeyboardLayout, LocaleId)
+                                             : !_wcsicmp(SelectedLanguageId, LocaleId))
             {
                 DPRINT("found %S in LayoutList\n", LocaleId);
                 SetCurrentListEntry(USetupData.LayoutList, ListEntry);
+                if (USetupData.KeyboardLayout[0])
+                    SetupLogFormat("keyboard layout %S selected", LocaleId);
                 break;
             }
         }
+        if (USetupData.KeyboardLayout[0] && !ListEntry)
+            SetupLogFormat("KeyboardLayout %S is not a layout this setup offers: using the default of the language",
+                           USetupData.KeyboardLayout);
 
         SetConsoleCodePage();
 
@@ -1624,11 +1693,22 @@ SelectPartitionPage(PINPUT_RECORD Ir)
         PartitionList = CreatePartitionList();
         if (PartitionList == NULL)
         {
+            if (IsUnattendedSetup)
+            {
+                UnattendedFatal("the list of disks could not be read", NULL, NULL);
+                return QUIT_PAGE;
+            }
             MUIDisplayError(ERROR_DRIVE_INFORMATION, Ir, POPUP_WAIT_ENTER);
             return QUIT_PAGE;
         }
         else if (IsListEmpty(&PartitionList->DiskListHead))
         {
+            if (IsUnattendedSetup)
+            {
+                UnattendedFatal("no hard disk was found",
+                                "Attach the disk the system is to be installed on.", NULL);
+                return QUIT_PAGE;
+            }
             DisplayNoHardDiskError(Ir);
             return QUIT_PAGE;
         }
@@ -1701,8 +1781,25 @@ SelectPartitionPage(PINPUT_RECORD Ir)
         {
             CurrentPartition = ListUi.CurrentPartition;
             // TODO: Do more checks, and loop until we find a valid partition.
-            goto CreateInstallPartition;
+            if (CurrentPartition && !IsContainerPartition(CurrentPartition->PartitionType))
+            {
+                SetupLogFormat("AutoPartition: using the first entry of the disk list (disk %lu, %s)",
+                               CurrentPartition->DiskEntry->DiskNumber,
+                               CurrentPartition->IsPartitioned ? "an existing partition" : "free space");
+                goto CreateInstallPartition;
+            }
         }
+
+        /* Nothing to install to and nobody to ask: stop with a message
+         * instead of showing the partition list and waiting for a key */
+        if (CurrentPartition && IsContainerPartition(CurrentPartition->PartitionType))
+            UnattendedFatal("the selected partition is an extended partition",
+                            "Choose a primary or logical partition (DestinationPartitionNumber)", NULL);
+        else
+            UnattendedFatal("the disk or partition named in unattend.inf does not exist",
+                            "Check DestinationDiskNumber and DestinationPartitionNumber,",
+                            "or set AutoPartition = 1 to use free space.");
+        return QUIT_PAGE;
     } while (0);
 
     while (TRUE)
@@ -1874,28 +1971,56 @@ CreateInstallPartition:
     /* Create the partition if the selected region is empty */
     if (!CurrentPartition->IsPartitioned)
     {
-        Error = PartitionCreateChecks(CurrentPartition, 0ULL, 0);
+        ULONGLONG NewSize = 0ULL;
+
+        /* Unattended: PartitionSizeMB limits the new partition (0 = the whole empty space) */
+        if (IsUnattendedSetup && USetupData.PartitionSizeMB)
+        {
+            NewSize = (ULONGLONG)USetupData.PartitionSizeMB * MB;
+            if (NewSize >= GetPartEntrySizeInBytes(CurrentPartition))
+            {
+                SetupLogFormat("PartitionSizeMB %lu is not smaller than the free space: using all of it",
+                               USetupData.PartitionSizeMB);
+                NewSize = 0ULL;
+            }
+        }
+
+        Error = PartitionCreateChecks(CurrentPartition, NewSize, 0);
         if (Error != NOT_AN_ERROR)
         {
+            if (IsUnattendedSetup)
+            {
+                UnattendedFatal("the partition cannot be created in the free space",
+                                "Check PartitionSizeMB and the disk (an MBR disk holds four partitions).", NULL);
+                return QUIT_PAGE;
+            }
             MUIDisplayError(Error, Ir, POPUP_WAIT_ANY_KEY);
             return SELECT_PARTITION_PAGE;
         }
 
-        /* Automatically create the partition on the whole empty space;
-         * it will be formatted later with default parameters */
+        /* Automatically create the partition on the whole empty space (or the
+         * size the answer file asks for); it will be formatted later with default parameters */
         CreatePartition(PartitionList,
                         CurrentPartition,
-                        0ULL,
+                        NewSize,
                         0);
         ASSERT(CurrentPartition->IsPartitioned);
         if (CurrentPartition->Volume)
             CurrentPartition->Volume->New |= VOLUME_NEW_AUTOCREATE;
+        if (IsUnattendedSetup)
+            SetupLogFormat("created a partition of %lu MB", (ULONG)(GetPartEntrySizeInBytes(CurrentPartition) / MB));
     }
 
     /* Verify the target medium size */
     MaxTargetSize = GetPartEntrySizeInBytes(CurrentPartition);
     if (!IsMediumLargeEnough(MaxTargetSize))
     {
+        if (IsUnattendedSetup)
+        {
+            UnattendedFatal("the partition is too small for the installation",
+                            "Use a larger disk or a larger PartitionSizeMB.", NULL);
+            return QUIT_PAGE;
+        }
         MUIDisplayError(ERROR_INSUFFICIENT_PARTITION_SIZE, Ir, POPUP_WAIT_ANY_KEY,
                         USetupData.RequiredPartitionDiskSpace);
         return SELECT_PARTITION_PAGE; /* Let the user select another partition */
@@ -2539,18 +2664,36 @@ Restart:
     {
         /* In unattended setup, directly format the partition if requested.
          * Otherwise, skip the partition if it doesn't require formatting.
-         * Else, ask the user what to do. */
-        if (USetupData.FormatPartition)
+         * A volume that has to be formatted (a new partition, an unformatted
+         * one) is formatted whatever FormatPartition says: there is nobody to ask. */
+        if (USetupData.FormatPartition || ForceFormat)
         {
+            /* QuickFormat = 0: choose the full-format entry of the same file system */
+            if (!USetupData.QuickFormat && FileSystemList->Selected && FileSystemList->Selected->FileSystem)
+            {
+                PLIST_ENTRY Entry;
+                for (Entry = FileSystemList->ListHead.Flink; Entry != &FileSystemList->ListHead; Entry = Entry->Flink)
+                {
+                    PFILE_SYSTEM_ITEM Item = CONTAINING_RECORD(Entry, FILE_SYSTEM_ITEM, ListEntry);
+                    if (Item->FileSystem && !Item->QuickFormat &&
+                        !_wcsicmp(Item->FileSystem, FileSystemList->Selected->FileSystem))
+                    {
+                        FileSystemList->Selected = Item;
+                        break;
+                    }
+                }
+            }
+            if (!USetupData.FormatPartition)
+                SetupLogLine("FormatPartition = 0 ignored: the partition is new or unformatted and has to be formatted");
+            SetupLogFormat("formatting %S (%s)", FileSystemList->Selected->FileSystem ? FileSystemList->Selected->FileSystem : L"?",
+                           FileSystemList->Selected->QuickFormat ? "quick" : "full");
             return FSVOL_DOIT;
         }
-        else if (!ForceFormat)
+        else
         {
             /* Skip formatting this volume, but file system checks will be performed */
             return FSVOL_SKIP;
         }
-        // TODO: If unattended mode doesn't allow interaction,
-        // popup or log error and exit, since we don't allow regular interaction.
     }
 
     DrawFileSystemList(FileSystemList);
@@ -4080,10 +4223,24 @@ QuitPage(PINPUT_RECORD Ir)
     {
         ULONG i;
 
-        /* Show why an unattended setup failed, below the countdown bar, for at most 15 seconds, then reboot */
+        /* Show why an unattended setup failed and stop there: nothing was
+         * installed, a reboot would only start the same setup again.
+         * ENTER restarts the computer. */
+        CONSOLE_ClearScreen();
+        CONSOLE_SetTextXY(6, 6, BRAND_PRODUCT_NAME " Setup");
         for (i = 0; i < RTL_NUMBER_OF(UnattendedFailureText); ++i)
-            CONSOLE_SetTextXY(6, 14 + i, UnattendedFailureText[i]);
-        ProgressCountdown(Ir, 15);
+        {
+            if (UnattendedFailureText[i])
+                CONSOLE_SetTextXY(6, 9 + i, UnattendedFailureText[i]);
+        }
+        CONSOLE_SetTextXY(6, 16, "Nothing was installed. Fix unattend.inf and start again.");
+        CONSOLE_SetStatusText("   ENTER = Restart computer");
+        while (TRUE)
+        {
+            CONSOLE_ConInKey(Ir);
+            if (Ir->Event.KeyEvent.uChar.AsciiChar == 0x0D) /* ENTER */
+                break;
+        }
         return FLUSH_PAGE;
     }
 
