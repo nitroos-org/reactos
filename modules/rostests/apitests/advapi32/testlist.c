@@ -33,6 +33,7 @@ extern void func_OpenThreadTokenLeak(void);
 extern void func_OwnerRightsAccess(void);
 extern void func_Hash(void);
 extern void func_HKEY_CLASSES_ROOT(void);
+extern void func_GetUserNameImpersonated(void);
 extern void func_IsTextUnicode(void);
 extern void func_LockServiceDatabase(void);
 extern void func_LookupAccountSidCaller(void);
@@ -193,6 +194,7 @@ const struct test winetest_testlist[] =
     { "OwnerRightsAccess", func_OwnerRightsAccess },
     { "Hash", func_Hash },
     { "HKEY_CLASSES_ROOT", func_HKEY_CLASSES_ROOT },
+    { "GetUserNameImpersonated", func_GetUserNameImpersonated },
     { "IsTextUnicode" , func_IsTextUnicode },
     { "LockServiceDatabase" , func_LockServiceDatabase },
     { "LookupAccountSidCaller", func_LookupAccountSidCaller },

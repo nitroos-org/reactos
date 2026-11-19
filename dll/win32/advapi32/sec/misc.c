@@ -300,7 +300,10 @@ GetUserNameW(LPWSTR lpszName,
     WCHAR* domain_name = NULL;
     DWORD dn_len = 0;
 
-    if (!OpenThreadToken (GetCurrentThread(), TOKEN_QUERY, FALSE, &hToken))
+    /* The thread token is opened as the process (OpenAsSelf): the token of an impersonated logon is a copy made
+     * by the caller and its DACL does not allow the impersonated user to open it (measured on Windows Server
+     * 2022: OpenThreadToken with FALSE fails with 5 under an impersonated interactive token, GetUserName works) */
+    if (!OpenThreadToken (GetCurrentThread(), TOKEN_QUERY, TRUE, &hToken))
     {
         DWORD dwLastError = GetLastError();
         if (dwLastError != ERROR_NO_TOKEN
