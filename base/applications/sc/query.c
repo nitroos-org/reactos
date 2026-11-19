@@ -353,6 +353,11 @@ Query(LPCTSTR *ServiceArgs,
 
             HeapFree(GetProcessHeap(), 0, pStatus);
         }
+        else
+        {
+            /* The error is printed: sc exits with it */
+            return FALSE;
+        }
     }
     else
     {

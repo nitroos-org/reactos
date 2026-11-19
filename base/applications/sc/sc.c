@@ -11,6 +11,9 @@
 
 SC_HANDLE hSCManager;
 
+/* The error a failed command reported: sc exits with it, as on Windows (e.g. 5 for access denied) */
+static DWORD dwReportedError = ERROR_SUCCESS;
+
 VOID
 ReportLastError(VOID)
 {
@@ -20,6 +23,8 @@ ReportLastError(VOID)
     DWORD ErrorCode = GetLastError();
     if (ErrorCode != ERROR_SUCCESS)
     {
+        dwReportedError = ErrorCode;
+
         RetVal = FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER |
                                FORMAT_MESSAGE_FROM_SYSTEM |
                                FORMAT_MESSAGE_IGNORE_INSERTS,
@@ -47,6 +52,7 @@ ScControl(LPCTSTR Server,       // remote machine name
 {
     LPCTSTR ServiceName = NULL;
     INT nResult = 0;
+    BOOL bResult = TRUE;
 
     if (Server)
     {
@@ -56,15 +62,15 @@ ScControl(LPCTSTR Server,       // remote machine name
 
     if (!lstrcmpi(Command, _T("query")))
     {
-        Query(ServiceArgs,
-              ArgCount,
-              FALSE);
+        bResult = Query(ServiceArgs,
+                        ArgCount,
+                        FALSE);
     }
     else if (!lstrcmpi(Command, _T("queryex")))
     {
-        Query(ServiceArgs,
-              ArgCount,
-              TRUE);
+        bResult = Query(ServiceArgs,
+                        ArgCount,
+                        TRUE);
     }
     else if (!lstrcmpi(Command, _T("start")))
     {
@@ -73,9 +79,9 @@ ScControl(LPCTSTR Server,       // remote machine name
             ServiceName = *ServiceArgs++;
             ArgCount--;
 
-            Start(ServiceName,
-                  ServiceArgs,
-                  ArgCount);
+            bResult = Start(ServiceName,
+                            ServiceArgs,
+                            ArgCount);
         }
         else
             StartUsage();
@@ -87,7 +93,7 @@ ScControl(LPCTSTR Server,       // remote machine name
             ServiceName = *ServiceArgs++;
             ArgCount--;
 
-            Control(SERVICE_CONTROL_PAUSE,
+            bResult = Control(SERVICE_CONTROL_PAUSE,
                     ServiceName,
                     ServiceArgs,
                     ArgCount);
@@ -102,7 +108,7 @@ ScControl(LPCTSTR Server,       // remote machine name
             ServiceName = *ServiceArgs++;
             ArgCount--;
 
-            Control(SERVICE_CONTROL_INTERROGATE,
+            bResult = Control(SERVICE_CONTROL_INTERROGATE,
                     ServiceName,
                     ServiceArgs,
                     ArgCount);
@@ -117,7 +123,7 @@ ScControl(LPCTSTR Server,       // remote machine name
             ServiceName = *ServiceArgs++;
             ArgCount--;
 
-            Control(SERVICE_CONTROL_STOP,
+            bResult = Control(SERVICE_CONTROL_STOP,
                     ServiceName,
                     ServiceArgs,
                     ArgCount);
@@ -132,7 +138,7 @@ ScControl(LPCTSTR Server,       // remote machine name
             ServiceName = *ServiceArgs++;
             ArgCount--;
 
-            Control(SERVICE_CONTROL_CONTINUE,
+            bResult = Control(SERVICE_CONTROL_CONTINUE,
                     ServiceName,
                     ServiceArgs,
                     ArgCount);
@@ -147,14 +153,14 @@ ScControl(LPCTSTR Server,       // remote machine name
             ServiceName = *ServiceArgs++;
             ArgCount--;
 
-            Delete(ServiceName);
+            bResult = Delete(ServiceName);
         }
         else
             DeleteUsage();
     }
     else if (!lstrcmpi(Command, _T("create")))
     {
-        Create(ServiceArgs, ArgCount);
+        bResult = Create(ServiceArgs, ArgCount);
     }
     else if (!lstrcmpi(Command, _T("control")))
     {
@@ -186,7 +192,7 @@ ScControl(LPCTSTR Server,       // remote machine name
             ArgCount--;
 
             if (ControlCode != 0)
-                Control(ControlCode,
+                bResult = Control(ControlCode,
                         ServiceName,
                         ServiceArgs,
                         ArgCount);
@@ -203,7 +209,7 @@ ScControl(LPCTSTR Server,       // remote machine name
             ServiceName = *ServiceArgs++;
             ArgCount--;
 
-            SdShow(ServiceName);
+            bResult = SdShow(ServiceName);
         }
         else
             SdShowUsage();
@@ -220,7 +226,7 @@ ScControl(LPCTSTR Server,       // remote machine name
             SecurityDescriptor = *ServiceArgs++;
             ArgCount--;
 
-            SdSet(ServiceName, SecurityDescriptor);
+            bResult = SdSet(ServiceName, SecurityDescriptor);
         }
         else
             SdSetUsage();
@@ -232,7 +238,7 @@ ScControl(LPCTSTR Server,       // remote machine name
             ServiceName = *ServiceArgs++;
             ArgCount--;
 
-            QueryConfig(ServiceName);
+            bResult = QueryConfig(ServiceName);
         }
         else
             QueryConfigUsage();
@@ -244,7 +250,7 @@ ScControl(LPCTSTR Server,       // remote machine name
             ServiceName = *ServiceArgs++;
             ArgCount--;
 
-            QueryDescription(ServiceName);
+            bResult = QueryDescription(ServiceName);
         }
         else
             QueryDescriptionUsage();
@@ -256,7 +262,7 @@ ScControl(LPCTSTR Server,       // remote machine name
             ServiceName = *ServiceArgs++;
             ArgCount--;
 
-            QueryFailure(ServiceName);
+            bResult = QueryFailure(ServiceName);
         }
         else
             QueryFailureUsage();
@@ -276,18 +282,18 @@ ScControl(LPCTSTR Server,       // remote machine name
                 ArgCount--;
             }
 
-            SetDescription(ServiceName, Description);
+            bResult = SetDescription(ServiceName, Description);
         }
         else
             SetDescriptionUsage();
     }
     else if (!lstrcmpi(Command, _T("config")))
     {
-        SetConfig(ServiceArgs, ArgCount);
+        bResult = SetConfig(ServiceArgs, ArgCount);
     }
     else if (!lstrcmpi(Command, _T("failure")))
     {
-        SetFailure(ServiceArgs, ArgCount);
+        bResult = SetFailure(ServiceArgs, ArgCount);
     }
     else if (!lstrcmpi(Command, _T("GetDisplayName")))
     {
@@ -296,7 +302,7 @@ ScControl(LPCTSTR Server,       // remote machine name
             ServiceName = *ServiceArgs++;
             ArgCount--;
 
-            GetDisplayName(ServiceName);
+            bResult = GetDisplayName(ServiceName);
         }
         else
             GetDisplayNameUsage();
@@ -308,7 +314,7 @@ ScControl(LPCTSTR Server,       // remote machine name
             ServiceName = *ServiceArgs++;
             ArgCount--;
 
-            GetKeyName(ServiceName);
+            bResult = GetKeyName(ServiceName);
         }
         else
             GetKeyNameUsage();
@@ -320,7 +326,7 @@ ScControl(LPCTSTR Server,       // remote machine name
             ServiceName = *ServiceArgs++;
             ArgCount--;
 
-            EnumDepend(ServiceName);
+            bResult = EnumDepend(ServiceName);
         }
         else
             EnumDependUsage();
@@ -399,6 +405,17 @@ ScControl(LPCTSTR Server,       // remote machine name
         _tprintf(_T("ERROR:  Unrecognized command\n"));
         MainUsage(FALSE);
         nResult = ERROR_INVALID_COMMAND_LINE;
+    }
+
+    /* A command that failed exits with its error, not 0 (Windows Server 2022: "sc start" of a service the
+       user may not start exits with 5) */
+    if (!bResult && nResult == 0)
+    {
+        nResult = (INT)dwReportedError;
+        if (nResult == 0)
+            nResult = (INT)GetLastError();
+        if (nResult == 0)
+            nResult = 1;
     }
 
     return nResult;
