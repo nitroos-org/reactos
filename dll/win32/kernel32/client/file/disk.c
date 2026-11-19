@@ -579,9 +579,11 @@ GetDriveTypeW(IN LPCWSTR lpRootPathName)
             {
                 return DeviceMap.Query.DriveType[Index];
             }
-            /* Otherwise, return we don't know the type */
-            else
+            /* The kernel could not tell the type (a drive letter made with DefineDosDevice whose target is a
+             * directory, not a device: DOSDEVICE_DRIVE_CALCULATE): ask the file system, the slow way below */
+            else if (DeviceMap.Query.DriveType[Index] != DOSDEVICE_DRIVE_CALCULATE)
             {
+                /* Otherwise, return we don't know the type */
                 return DRIVE_UNKNOWN;
             }
         }
