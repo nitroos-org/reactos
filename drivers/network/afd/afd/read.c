@@ -386,8 +386,10 @@ static NTSTATUS ReceiveActivity( PAFD_FCB FCB, PIRP Irp ) {
         FCB->PollState &= ~AFD_EVENT_RECEIVE;
     }
 
-    /* Signal FD_CLOSE if no buffered data remains and the socket can't receive any more */
-    if (CantReadMore(FCB))
+    /* Signal FD_CLOSE when the socket can't receive any more (the peer's end or a failure), also while data it
+     * delivered before is still unread: Windows reports FD_READ and FD_CLOSE at once (measured on Windows Server 2022).
+     * A graceful end is a disconnect; a failure (a reset) is an abort, which polls as POLLHUP|POLLERR. */
+    if (FCB->TdiReceiveClosed)
     {
         if (FCB->LastReceiveStatus == STATUS_SUCCESS)
         {
@@ -395,7 +397,7 @@ static NTSTATUS ReceiveActivity( PAFD_FCB FCB, PIRP Irp ) {
         }
         else
         {
-            FCB->PollState |= AFD_EVENT_CLOSE;
+            FCB->PollState |= AFD_EVENT_ABORT;
         }
         FCB->PollStatus[FD_CLOSE_BIT] = FCB->LastReceiveStatus;
         PollReeval(FCB->DeviceExt, FCB->FileObject);

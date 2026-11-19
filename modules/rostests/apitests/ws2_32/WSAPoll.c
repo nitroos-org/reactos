@@ -490,8 +490,9 @@ static void test_WSAPoll(void)
     ret = shutdown(client, SD_SEND);
 
     check_poll_todo(client, POLLWRNORM);
-    check_poll_mask_todo(server, 0, POLLHUP);
-    check_poll_todo(server, POLLWRNORM | POLLRDNORM | POLLHUP);
+    /* the peer's end of the stream is POLLHUP, with the data not read yet as well (Windows Server 2022) */
+    check_poll_mask(server, 0, POLLHUP);
+    check_poll(server, POLLWRNORM | POLLRDNORM | POLLHUP);
 
     closesocket(client);
     closesocket(server);

@@ -14,6 +14,15 @@
  * msafd caps its own buffer at 128 bytes; every supported address type fits. */
 #define AFD_MAX_SEND_TA_LENGTH 256
 
+/* The socket cannot take more data now: it is not writable, and the FD_WRITE of a stream socket is signalled again
+ * when it can (a datagram socket signals FD_WRITE when it is bound or connected only) */
+#define AfdWriteBlocked(FCB) \
+    do { \
+        (FCB)->PollState &= ~AFD_EVENT_SEND; \
+        if (!((FCB)->Flags & AFD_ENDPOINT_CONNECTIONLESS)) \
+            (FCB)->EventSelectDisabled &= ~AFD_EVENT_SEND; \
+    } while (0)
+
 /* Caller-supplied buffer lengths are summed without wrapping: an overflow
  * would let a huge request pass the SendLength > SpaceAvail check. */
 static __inline UINT AfdSaturatedAdd(UINT Total, UINT Add)
@@ -447,7 +456,7 @@ AfdSendCompleted
                if (!Whole && SendLength <= FCB->Send.Size &&
                    !((SendReq->AfdFlags & AFD_IMMEDIATE) || (FCB->NonBlocking)))
                {
-                   FCB->PollState &= ~AFD_EVENT_SEND;
+                   AfdWriteBlocked(FCB);
 
                    Fill = FALSE;
                }
@@ -455,7 +464,7 @@ AfdSendCompleted
                /* Check if we can send anything */
                if (SpaceAvail == 0)
                {
-                   FCB->PollState &= ~AFD_EVENT_SEND;
+                   AfdWriteBlocked(FCB);
 
                    /* We should never be non-overlapped and get to this point */
                    ASSERT(SendReq->AfdFlags & AFD_OVERLAPPED);
@@ -535,7 +544,7 @@ AfdSendCompleted
     }
     else
     {
-        FCB->PollState &= ~AFD_EVENT_SEND;
+        AfdWriteBlocked(FCB);
     }
 
 
@@ -780,7 +789,7 @@ static BOOLEAN AfdQueueDatagramSend
     Ctx->TransportIrp = NULL;
     Ctx->CancelRequested = FALSE;
 
-    FCB->PollState &= ~AFD_EVENT_SEND;
+    AfdWriteBlocked(FCB);
 
     Status = QueueUserModeIrp(FCB, Irp, FUNCTION_SEND);
     if (Status != STATUS_PENDING)
@@ -859,9 +868,9 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     if( !SocketAcquireStateLock( FCB ) ) return LostSocket( Irp );
 
-    /* A datagram socket signals FD_WRITE when it is bound or connected, not on each send */
-    if( !(FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS) )
-        FCB->EventSelectDisabled &= ~AFD_EVENT_SEND;
+    /* A stream socket signals FD_WRITE when it is connected and again after a send that found no room for its
+     * data (AfdWriteBlocked), not after each send (measured on Windows Server 2022: after a send that was taken
+     * no FD_WRITE, and none comes with the FD_CLOSE of a reset); a datagram socket when it is bound or connected */
 
     if( FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS )
     {
@@ -1043,7 +1052,7 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     if (SendLength != 0 && FCB->SendIrp.InFlightRequest &&
         (SendReq->AfdFlags & AFD_IMMEDIATE) && !(SendReq->AfdFlags & AFD_OVERLAPPED))
     {
-        FCB->PollState &= ~AFD_EVENT_SEND;
+        AfdWriteBlocked(FCB);
         UnlockBuffers( SendReq->BufferArray, SendReq->BufferCount, FALSE );
         return UnlockAndMaybeComplete( FCB, STATUS_CANT_WAIT, Irp, 0 );
     }
@@ -1054,7 +1063,7 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         /* Blocking sockets have to wait here */
         if (SendLength <= FCB->Send.Size && !((SendReq->AfdFlags & AFD_IMMEDIATE) || (FCB->NonBlocking)))
         {
-            FCB->PollState &= ~AFD_EVENT_SEND;
+            AfdWriteBlocked(FCB);
             Irp->IoStatus.Information = 0;
             AfdSetSendState(Irp, Whole ? SendLength : 0, 0);
             return LeaveIrpUntilLater(FCB, Irp, FUNCTION_SEND);
@@ -1063,7 +1072,7 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         /* Check if we can send anything */
         if (SpaceAvail == 0)
         {
-            FCB->PollState &= ~AFD_EVENT_SEND;
+            AfdWriteBlocked(FCB);
 
             /* Non-overlapped sockets will fail if we can send nothing */
             if (!(SendReq->AfdFlags & AFD_OVERLAPPED))
@@ -1145,7 +1154,7 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     }
     else
     {
-        FCB->PollState &= ~AFD_EVENT_SEND;
+        AfdWriteBlocked(FCB);
     }
 
     /* A send that cannot wait completes with what is in the window now. The transport takes the bytes when it
