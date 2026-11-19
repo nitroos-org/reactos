@@ -8691,6 +8691,119 @@ done:
 }
 
 
+/*
+ * SamrRemoveMemberFromForeignDomain needs only DOMAIN_LOOKUP on the domain, which everyone has. The removal
+ * itself is a change of every alias that has the member, so the caller must be allowed ALIAS_REMOVE_MEMBER on
+ * each of them; nothing is removed unless it is allowed on all of them (Windows Server 2022, measured: a
+ * standard user gets STATUS_ACCESS_DENIED for an administrator account in the Builtin domain and success
+ * in the account domain, where no alias has it).
+ */
+static
+NTSTATUS
+SampCheckRemoveFromAllAliases(IN PSAM_DB_OBJECT DomainObject,
+                              IN PRPC_SID MemberSid)
+{
+    WCHAR AliasKeyName[64];
+    LPWSTR MemberSidString = NULL;
+    HANDLE AliasesKey = NULL;
+    HANDLE AliasKey = NULL;
+    HANDLE MembersKey = NULL;
+    PSAM_DB_OBJECT AliasObject;
+    ULONG Index, Length;
+    NTSTATUS Status, MemberStatus;
+
+    if (DomainObject->Trusted || DomainObject->Internal)
+        return STATUS_SUCCESS;
+
+    if (!ConvertSidToStringSidW(MemberSid, &MemberSidString))
+        return STATUS_INVALID_PARAMETER;
+
+    Status = SampRegOpenKey(DomainObject->KeyHandle,
+                            L"Aliases",
+                            KEY_READ,
+                            &AliasesKey);
+    if (!NT_SUCCESS(Status))
+    {
+        /* No aliases: there is nothing to remove the member from */
+        if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+            Status = STATUS_SUCCESS;
+        goto done;
+    }
+
+    for (Index = 0; ; Index++)
+    {
+        Status = SampRegEnumerateSubKey(AliasesKey,
+                                        Index,
+                                        64,
+                                        AliasKeyName);
+        if (!NT_SUCCESS(Status))
+        {
+            if (Status == STATUS_NO_MORE_ENTRIES)
+                Status = STATUS_SUCCESS;
+            break;
+        }
+
+        /* The containers next to the aliases */
+        if (_wcsicmp(AliasKeyName, L"Names") == 0 || _wcsicmp(AliasKeyName, L"Members") == 0)
+            continue;
+
+        /* Is the SID a member of this alias? */
+        Status = SampRegOpenKey(AliasesKey,
+                                AliasKeyName,
+                                KEY_READ,
+                                &AliasKey);
+        if (!NT_SUCCESS(Status))
+            break;
+
+        MemberStatus = SampRegOpenKey(AliasKey,
+                                      L"Members",
+                                      KEY_READ,
+                                      &MembersKey);
+        if (NT_SUCCESS(MemberStatus))
+        {
+            Length = 0;
+            MemberStatus = SampRegQueryValue(MembersKey,
+                                             MemberSidString,
+                                             NULL,
+                                             NULL,
+                                             &Length);
+            SampRegCloseKey(&MembersKey);
+        }
+        SampRegCloseKey(&AliasKey);
+
+        if (!NT_SUCCESS(MemberStatus) && MemberStatus != STATUS_BUFFER_OVERFLOW)
+            continue;
+
+        /* It is: the caller must be allowed to remove members from the alias */
+        Status = SampOpenDbObject(DomainObject,
+                                  L"Aliases",
+                                  AliasKeyName,
+                                  wcstoul(AliasKeyName, NULL, 16),
+                                  SamDbAliasObject,
+                                  0,
+                                  &AliasObject);
+        if (!NT_SUCCESS(Status))
+            break;
+
+        Status = SampCheckObjectAccess(AliasObject, ALIAS_REMOVE_MEMBER);
+        SampCloseDbObject(AliasObject);
+        if (!NT_SUCCESS(Status))
+        {
+            TRACE("The caller may not remove members from alias %S (Status 0x%08lx)\n", AliasKeyName, Status);
+            break;
+        }
+    }
+
+done:
+    SampRegCloseKey(&AliasesKey);
+
+    if (MemberSidString != NULL)
+        LocalFree(MemberSidString);
+
+    return Status;
+}
+
+
 /* Function 45 */
 NTSTATUS
 NTAPI
@@ -8732,6 +8845,15 @@ SamrRemoveMemberFromForeignDomain(IN SAMPR_HANDLE DomainHandle,
     {
         TRACE("Cannot remove a special account (RID: %lu)\n", Rid);
         Status = STATUS_SPECIAL_ACCOUNT;
+        goto done;
+    }
+
+    /* The caller must be allowed to remove members from every alias it would be removed from */
+    Status = SampCheckRemoveFromAllAliases(DomainObject,
+                                           MemberSid);
+    if (!NT_SUCCESS(Status))
+    {
+        TRACE("SampCheckRemoveFromAllAliases failed with status 0x%08lx\n", Status);
         goto done;
     }
 
