@@ -463,6 +463,8 @@ StorpNeedsSystemBuffer(
         case STOR_MAP_NON_READ_WRITE_BUFFERS:
             return (Srb->Function != SRB_FUNCTION_EXECUTE_SCSI) ||
                    !StorpIsReadWriteCdb(Srb->Cdb[0]);
+        case STOR_MAP_ALL_BUFFERS_INCLUDING_READ_WRITE:
+            return TRUE;
         default:
             return FALSE;
     }
