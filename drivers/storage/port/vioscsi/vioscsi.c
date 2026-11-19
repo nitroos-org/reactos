@@ -455,8 +455,23 @@ NTAPI VioScsiFindAdapter(IN PVOID DeviceExtension,
             adaptExt->max_physical_breaks = adaptExt->scsi_config.max_sectors * SECTOR_SIZE / PAGE_SIZE;
         }
     }
+#ifdef __REACTOS__
+    /* A device max_sectors under one page made it 0, and a maximum transfer length of 0 leaves the
+       class driver nothing to split a transfer into: keep one page, but no more bytes than the device takes */
+    if (adaptExt->max_physical_breaks == 0)
+    {
+        adaptExt->max_physical_breaks = 1;
+    }
+#endif
     ConfigInfo->NumberOfPhysicalBreaks = adaptExt->max_physical_breaks + 1;
     ConfigInfo->MaximumTransferLength = adaptExt->max_physical_breaks * PAGE_SIZE;
+#ifdef __REACTOS__
+    if (!adaptExt->dump_mode && adaptExt->scsi_config.max_sectors > 0 && adaptExt->scsi_config.max_sectors != 0xFFFF &&
+        ConfigInfo->MaximumTransferLength > adaptExt->scsi_config.max_sectors * SECTOR_SIZE)
+    {
+        ConfigInfo->MaximumTransferLength = adaptExt->scsi_config.max_sectors * SECTOR_SIZE;
+    }
+#endif
 
     RhelDbgPrint(TRACE_LEVEL_INFORMATION, " NumberOfPhysicalBreaks %d\n", ConfigInfo->NumberOfPhysicalBreaks);
     RhelDbgPrint(TRACE_LEVEL_INFORMATION, " MaximumTransferLength %d\n", ConfigInfo->MaximumTransferLength);
@@ -552,7 +567,23 @@ NTAPI VioScsiFindAdapter(IN PVOID DeviceExtension,
     }
     else
     {
+#ifdef __REACTOS__
+        /* Without indirect descriptors a request takes up to NumberOfPhysicalBreaks data entries plus the
+         * command and the response. A ring smaller than about twice that made the depth below 0 (a wrapped
+         * ULONG: no limit at all) or 0 (no request ever started). Make one request of the largest size fit
+         * the ring, and the depth at least 1. */
+        if (ConfigInfo->NumberOfPhysicalBreaks + 2 > queueLength && queueLength > 3)
+        {
+            adaptExt->max_physical_breaks = queueLength - 3;
+            ConfigInfo->NumberOfPhysicalBreaks = adaptExt->max_physical_breaks + 1;
+            ConfigInfo->MaximumTransferLength = min(ConfigInfo->MaximumTransferLength,
+                                                    adaptExt->max_physical_breaks * PAGE_SIZE);
+        }
+        adaptExt->queue_depth = (queueLength / ConfigInfo->NumberOfPhysicalBreaks > 1) ?
+                                queueLength / ConfigInfo->NumberOfPhysicalBreaks - 1 : 1;
+#else
         adaptExt->queue_depth = queueLength / ConfigInfo->NumberOfPhysicalBreaks - 1;
+#endif
     }
     ConfigInfo->MaxIOsPerLun = adaptExt->queue_depth * adaptExt->num_queues;
     ConfigInfo->InitialLunQueueDepth = ConfigInfo->MaxIOsPerLun;
