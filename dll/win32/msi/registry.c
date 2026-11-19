@@ -38,6 +38,27 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(msi);
 
+#ifdef __REACTOS__
+/*
+ * The installer's own keys are opened with KEY_ALL_ACCESS throughout, also to read them. A standard user
+ * may only read the per-machine ones (HKLM\Software\Classes\Installer, ...\CurrentVersion\Installer: users
+ * read, administrators and SYSTEM change, as on Windows), so with registry key security enforced every such
+ * open failed, and a standard user's queries (MsiQueryProductState, MsiEnumProducts, the client side of an
+ * install) saw no per-machine product at all. Where the access asked for is refused, the key is opened for
+ * reading: what a standard user can do on Windows. A later write through the handle fails, as it would there.
+ */
+static LONG msi_reg_open_key( HKEY root, LPCWSTR path, DWORD options, REGSAM access, PHKEY key )
+{
+    static const REGSAM views = KEY_WOW64_64KEY | KEY_WOW64_32KEY;
+    LONG r = RegOpenKeyExW( root, path, options, access, key );
+
+    if (r == ERROR_ACCESS_DENIED && (access & ~(views | KEY_READ)))
+        r = RegOpenKeyExW( root, path, options, (access & views) | KEY_READ, key );
+    return r;
+}
+#define RegOpenKeyExW msi_reg_open_key
+#endif
+
 BOOL unsquash_guid(LPCWSTR in, LPWSTR out)
 {
     DWORD i,n=0;
