@@ -1610,8 +1610,8 @@ CmpWalkTree(
             continue;
         }
 
-        /* Kept: at its place in the leaf, with the hash or hint of its name */
-        if (Level->Kept != Level->Entry || Level->Leaf->Signature != CM_KEY_INDEX_LEAF)
+        /* Kept: at its place in the leaf, with the hash or hint of its name (a live hive is only read) */
+        if (!Ctx->Live && (Level->Kept != Level->Entry || Level->Leaf->Signature != CM_KEY_INDEX_LEAF))
         {
             PCM_KEY_FAST_INDEX Fast = (PCM_KEY_FAST_INDEX)Level->Leaf;
 
