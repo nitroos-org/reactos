@@ -37,7 +37,7 @@
 
 #include "osdep.h"
 #include "virtio_pci.h"
-#include "virtio.h"
+#include "VirtIO.h"
 #include "virtio_ring.h"
 #include "virtio_stor_utils.h"
 
