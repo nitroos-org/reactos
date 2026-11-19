@@ -33,7 +33,9 @@
 
 #include <ntddk.h>
 #include <storport.h>
+#ifdef VIOSCSI_WMI
 #include "scsiwmi.h"
+#endif
 
 #include "osdep.h"
 #include "virtio_pci.h"
@@ -342,7 +344,9 @@ typedef struct _ADAPTER_EXTENSION
     BOOLEAN dpc_ok;
     PSTOR_DPC dpc;
     ULONG max_physical_breaks;
+#ifdef VIOSCSI_WMI
     SCSI_WMILIB_CONTEXT WmiLibContext;
+#endif
     ULONGLONG hba_id;
     PUCHAR ser_num;
     ULONGLONG wwn;

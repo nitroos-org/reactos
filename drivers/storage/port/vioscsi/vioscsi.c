@@ -31,12 +31,14 @@
  */
 #include "vioscsi.h"
 #include "helper.h"
-#include "vioscsidt.h"
 #include "trace.h"
 
 #if defined(EVENT_TRACING)
 #include "vioscsi.tmh"
 #endif
+
+#ifdef VIOSCSI_WMI
+#include "vioscsidt.h"
 
 #define MS_SM_HBA_API
 #include <hbapiwmi.h>
@@ -48,6 +50,7 @@
 
 #include "resources.h"
 #include "..\build\vendor.ver"
+#endif
 
 #define VIOSCSI_SETUP_GUID_INDEX             0
 #define VIOSCSI_MS_ADAPTER_INFORM_GUID_INDEX 1
@@ -128,12 +131,15 @@ VOID ParamChange(IN PVOID DeviceExtension, IN PVirtIOSCSIEvent evt);
 BOOLEAN
 VioScsiMSInterrupt(IN PVOID DeviceExtension, IN ULONG MessageID);
 
+#ifdef VIOSCSI_WMI
 VOID VioScsiWmiInitialize(IN PVOID DeviceExtension);
 
 VOID VioScsiWmiSrb(IN PVOID DeviceExtension, IN OUT PSRB_TYPE Srb);
+#endif
 
 VOID VioScsiIoControl(IN PVOID DeviceExtension, IN OUT PSRB_TYPE Srb);
 
+#ifdef VIOSCSI_WMI
 BOOLEAN
 VioScsiQueryWmiDataBlock(IN PVOID Context,
                          IN PSCSIWMI_REQUEST_CONTEXT RequestContext,
@@ -159,11 +165,13 @@ VioScsiQueryWmiRegInfo(IN PVOID Context, IN PSCSIWMI_REQUEST_CONTEXT RequestCont
 
 VOID VioScsiReadExtendedData(IN PVOID Context, OUT PUCHAR Buffer);
 VOID VioScsiReadDiagData(IN PVOID Context, OUT PUCHAR Buffer);
+#endif /* VIOSCSI_WMI */
 
 VOID VioScsiSaveInquiryData(IN PVOID DeviceExtension, IN OUT PSRB_TYPE Srb);
 
 VOID VioScsiPatchInquiryData(IN PVOID DeviceExtension, IN OUT PSRB_TYPE Srb);
 
+#ifdef VIOSCSI_WMI
 GUID VioScsiWmiExtendedInfoGuid = VioScsiWmi_ExtendedInfo_Guid;
 GUID VioScsiWmiAdapterInformationQueryGuid = MS_SM_AdapterInformationQueryGuid;
 GUID VioScsiWmiPortInformationMethodsGuid = MS_SM_PortInformationMethodsGuid;
@@ -180,6 +188,7 @@ SCSIWMIGUIDREGINFO VioScsiGuidList[] =
 // clang-format on
 
 #define VioScsiGuidCount (sizeof(VioScsiGuidList) / sizeof(SCSIWMIGUIDREGINFO))
+#endif /* VIOSCSI_WMI */
 
 void CopyUnicodeString(void *_pDest, const void *_pSrc, size_t _maxlength)
 {
@@ -371,14 +380,18 @@ VioScsiFindAdapter(IN PVOID DeviceExtension,
     ConfigInfo->DmaWidth = Width32Bits;
     ConfigInfo->Dma32BitAddresses = TRUE;
     ConfigInfo->Dma64BitAddresses = SCSI_DMA64_MINIPORT_FULL64BIT_SUPPORTED;
+#ifdef VIOSCSI_WMI
     ConfigInfo->WmiDataProvider = TRUE;
+#endif
     ConfigInfo->AlignmentMask = 0x3;
     ConfigInfo->MapBuffers = STOR_MAP_NON_READ_WRITE_BUFFERS;
     ConfigInfo->SynchronizationModel = StorSynchronizeFullDuplex;
     ConfigInfo->HwMSInterruptRoutine = VioScsiMSInterrupt;
     ConfigInfo->InterruptSynchronizationMode = InterruptSynchronizePerMessage;
 
+#ifdef VIOSCSI_WMI
     VioScsiWmiInitialize(DeviceExtension);
+#endif
 
     if (!InitHW(DeviceExtension, ConfigInfo))
     {
@@ -1711,9 +1724,11 @@ PreProcessRequest(IN PVOID DeviceExtension, IN PSRB_TYPE Srb)
                     KeBugCheckEx(0xDEADDEAD, (ULONG_PTR)Srb, SRB_PATH_ID(Srb), SRB_TARGET_ID(Srb), SRB_LUN(Srb));
                     return TRUE;
             }
+#ifdef VIOSCSI_WMI
         case SRB_FUNCTION_WMI:
             VioScsiWmiSrb(DeviceExtension, Srb);
             return TRUE;
+#endif
         case SRB_FUNCTION_IO_CONTROL:
             VioScsiIoControl(DeviceExtension, Srb);
             return TRUE;
@@ -1884,6 +1899,7 @@ VOID ParamChange(IN PVOID DeviceExtension, IN PVirtIOSCSIEvent evt)
     EXIT_FN();
 }
 
+#ifdef VIOSCSI_WMI
 VOID VioScsiWmiInitialize(IN PVOID DeviceExtension)
 {
     PADAPTER_EXTENSION adaptExt;
@@ -1949,6 +1965,7 @@ VOID VioScsiWmiSrb(IN PVOID DeviceExtension, IN OUT PSRB_TYPE Srb)
 
     EXIT_FN_SRB();
 }
+#endif /* VIOSCSI_WMI */
 
 VOID VioScsiIoControl(IN PVOID DeviceExtension, IN OUT PSRB_TYPE Srb)
 {
@@ -2287,6 +2304,7 @@ VOID VioScsiPatchInquiryData(IN PVOID DeviceExtension, IN OUT PSRB_TYPE Srb)
     EXIT_FN_SRB();
 }
 
+#ifdef VIOSCSI_WMI
 BOOLEAN
 VioScsiQueryWmiDataBlock(IN PVOID Context,
                          IN PSCSIWMI_REQUEST_CONTEXT RequestContext,
@@ -2715,3 +2733,4 @@ VOID VioScsiReadDiagData(IN PVOID Context, OUT PUCHAR Buffer)
     diagInfo->UnmatchedCompletions = adaptExt->diagCounters.unmatched_completions;
     EXIT_FN();
 }
+#endif /* VIOSCSI_WMI */
