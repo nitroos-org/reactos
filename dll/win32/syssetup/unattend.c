@@ -893,10 +893,24 @@ ApplyNetworkConfiguration(VOID)
         SetMultiSz(hKey, L"SubnetMask", szMaskText);
         SetMultiSz(hKey, L"DefaultGateway", szGw[0] ? szGw : L"0.0.0.0");
         /* the DNS servers: comma separated in the registry as Windows keeps them */
-        for (p = szDns; *p; p++)
         {
-            if (*p == L' ' || *p == L';')
-                *p = L',';
+            /* "a, b", "a b", "a;b": one comma between the servers, none at the ends */
+            PWSTR pOut = szDns;
+            BOOL bSep = FALSE;
+
+            for (p = szDns; *p; p++)
+            {
+                if (*p == L' ' || *p == L';' || *p == L',' || *p == L'\t')
+                {
+                    bSep = TRUE;
+                    continue;
+                }
+                if (bSep && pOut != szDns)
+                    *pOut++ = L',';
+                bSep = FALSE;
+                *pOut++ = *p;
+            }
+            *pOut = UNICODE_NULL;
         }
         RegSetValueExW(hKey, L"NameServer", 0, REG_SZ, (const BYTE *)szDns, (DWORD)((wcslen(szDns) + 1) * sizeof(WCHAR)));
     }
