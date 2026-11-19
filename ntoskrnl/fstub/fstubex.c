@@ -415,8 +415,9 @@ FstubCreateDiskEFI(IN PDEVICE_OBJECT DeviceObject,
     SectorsForPartitions = (MaxPartitionCount * PARTITION_ENTRY_SIZE) / Disk->SectorSize;
     /* Set first usable LBA: Legacy MBR + GPT header + Partitions entries */
     FirstUsableLBA = SectorsForPartitions + 2;
-    /* Set last usable LBA: Last sector - GPT header - Partitions entries */
-    LastUsableLBA = Disk->SectorCount - SectorsForPartitions - 1;
+    /* Set last usable LBA: the sector before the backup entries, which
+     * are followed by the backup header in the last sector (UEFI 2.10, 5.3.2) */
+    LastUsableLBA = Disk->SectorCount - SectorsForPartitions - 2;
 
     /* First, write primary table */
     Status = FstubWritePartitionTableEFI(Disk,
@@ -1043,7 +1044,7 @@ FstubReadPartitionTableEFI(IN PDISK_INFORMATION Disk,
     DriveLayoutEx->PartitionStyle = PARTITION_STYLE_GPT;
     /* Translate LBA -> Offset */
     DriveLayoutEx->Gpt.StartingUsableOffset.QuadPart = EfiHeader->FirstUsableLBA * Disk->SectorSize;
-    DriveLayoutEx->Gpt.UsableLength.QuadPart = (EfiHeader->LastUsableLBA - EfiHeader->FirstUsableLBA) * Disk->SectorSize;
+    DriveLayoutEx->Gpt.UsableLength.QuadPart = (EfiHeader->LastUsableLBA - EfiHeader->FirstUsableLBA + 1) * Disk->SectorSize;
     DriveLayoutEx->Gpt.MaxPartitionCount = EfiHeader->NumberOfEntries;
     DriveLayoutEx->Gpt.DiskId = EfiHeader->DiskGUID;
 
@@ -1460,7 +1461,9 @@ FstubWriteBootSectorEFI(IN PDISK_INFORMATION Disk)
     MasterBootRecord->PartitionTable[0].EndSector = 0xFF;
     MasterBootRecord->PartitionTable[0].EndCylinder = 0xFF;
     MasterBootRecord->PartitionTable[0].SectorCountBeforePartition = 1;
-    MasterBootRecord->PartitionTable[0].PartitionSectorCount = 0xFFFFFFFF;
+    /* The partition covers the disk after the MBR, up to 0xFFFFFFFF sectors (UEFI 2.10, 5.2.3) */
+    MasterBootRecord->PartitionTable[0].PartitionSectorCount =
+        (Disk->SectorCount - 1 > 0xFFFFFFFFULL) ? 0xFFFFFFFF : (ULONG)(Disk->SectorCount - 1);
     MasterBootRecord->MasterBootRecordMagic = BOOT_RECORD_SIGNATURE;
 
     /* Finally, write that MBR */
@@ -2514,8 +2517,8 @@ IoWritePartitionTableEx(IN PDEVICE_OBJECT DeviceObject,
                     SectorsForPartitions = ((ULONGLONG)NumberOfEntries * PARTITION_ENTRY_SIZE) / Disk->SectorSize;
                     /* Set first usable LBA: Legacy MBR + GPT header + Partitions entries */
                     FirstUsableLBA = SectorsForPartitions + 2;
-                    /* Set last usable LBA: Last sector - GPT header - Partitions entries */
-                    LastUsableLBA = Disk->SectorCount - SectorsForPartitions - 1;
+                    /* Set last usable LBA: the sector before the backup entries (see IoCreateDisk) */
+                    LastUsableLBA = Disk->SectorCount - SectorsForPartitions - 2;
                     /* Write primary table */
                     Status = FstubWritePartitionTableEFI(Disk,
                                                          DiskGuid,
