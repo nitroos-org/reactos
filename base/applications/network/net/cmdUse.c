@@ -37,6 +37,16 @@ extern HMODULE hModuleNetMsg;
 #define MSG_UNAVAILABLE         4728
 #define MSG_FORCE_CLOSE         5289
 #define MSG_SUCCESS             3500
+#define MSG_BAD_OPTION_VALUE    3505
+#define MSG_CONFLICTING_SWITCHES 3510
+#define MSG_CONNECTIONS_HEADER  3670
+#define MSG_CONNECTIONS_CANCEL  3671
+#define MSG_NO_RESPONSE         3757
+#define MSG_CONTINUE_PROMPT     5284
+#define MSG_YES_NO_NO           4341
+
+/* The answer to the questions of NET USE /DELETE: asked of the user, or given by /YES and /NO */
+typedef enum { ANSWER_ASK, ANSWER_YES, ANSWER_NO } ANSWER;
 
 static const WCHAR PersistentKey[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\Network\\Persistent Connections";
 
@@ -227,25 +237,70 @@ ListConnections(LPCWSTR Only)
     return 0;
 }
 
+/*
+ * A yes/no question (Message takes "(Y/N) [N]" as its insert). Windows reads the answer from the
+ * console only: with input from a pipe or a file it ends the line and says "No valid response was
+ * provided." (exit code -1; measured on Windows Server 2022 with "echo y | net use X: /delete").
+ * Returns 1 = yes, 0 = no, -1 = no valid response (already reported).
+ */
 static
 INT
-DeleteConnection(LPCWSTR Name)
+AskQuestion(DWORD Message)
+{
+    HANDLE Input = GetStdHandle(STD_INPUT_HANDLE);
+    WCHAR Line[8];
+    DWORD Mode;
+
+    PrintMessageStringV(Message, L"(Y/N) [N]");
+    if (!GetConsoleMode(Input, &Mode))
+    {
+        ConPuts(StdOut, L"\n");
+        PrintMessageString(MSG_NO_RESPONSE);
+        ConPuts(StdOut, L"\n");
+        return -1;
+    }
+    ReadLine(Line, ARRAYSIZE(Line), TRUE);
+    if (towupper(Line[0]) == L'Y')
+        return 1;
+    if (Line[0] == 0 || towupper(Line[0]) == L'N')
+        return 0;
+    PrintMessageString(MSG_NO_RESPONSE);
+    ConPuts(StdOut, L"\n");
+    return -1;
+}
+
+/* Cancels one connection; with open files it asks (or takes the answer of /YES, /NO) before it
+ * closes them. Returns the exit code of the command: 0, 2, or -1 (no valid answer) */
+static
+INT
+DeleteConnection(LPCWSTR Name, ANSWER Answer)
 {
     DWORD Error;
-    WCHAR Answer[8];
+    INT Reply;
 
     Error = WNetCancelConnection2W(Name, CONNECT_UPDATE_PROFILE, FALSE);
+    if (Error == ERROR_FILE_NOT_FOUND)
+    {
+        /* mpr keeps the answer of the NFS provider for a name that is no connection of any: "the network
+         * connection could not be found" is what Windows says for it (measured) */
+        Error = ERROR_NOT_CONNECTED;
+    }
     if (Error == ERROR_OPEN_FILES)
     {
-        /* Windows asks before it closes them */
         PrintMessageStringV(MSG_OPEN_FILES, Name);
-        ConPuts(StdOut, L"\n\n");
-        PrintMessageStringV(MSG_FORCE_CLOSE, L"(Y/N) [N]");
-        ReadLine(Answer, ARRAYSIZE(Answer), TRUE);
-        if (towupper(Answer[0]) != L'Y')
+        if (Answer == ANSWER_NO)
         {
-            PrintErrorMessage(ERROR_CANCELLED);
+            ConPuts(StdOut, L"\n");
             return 2;
+        }
+        ConPuts(StdOut, L"\n\n");
+        if (Answer == ANSWER_ASK)
+        {
+            Reply = AskQuestion(MSG_FORCE_CLOSE);
+            if (Reply < 0)
+                return -1;
+            if (Reply == 0)
+                return 2;
         }
         Error = WNetCancelConnection2W(Name, CONNECT_UPDATE_PROFILE, TRUE);
     }
@@ -259,6 +314,107 @@ DeleteConnection(LPCWSTR Name)
     return 0;
 }
 
+/* NET USE * /DELETE: lists what it would cancel, asks once (or takes /YES, /NO), then cancels all of them
+ * (open files included: the question was about all of them) */
+static
+INT
+DeleteAllConnections(ANSWER Answer)
+{
+    HANDLE Enum;
+    LPNETRESOURCEW Buffer;
+    DWORD Count, BufSize, i, Shown = 0, Error;
+    INT Reply, Ret = 0;
+    PWSTR *Names;
+    DWORD NameCount = 0;
+
+    Buffer = HeapAlloc(GetProcessHeap(), 0, 0x4000);
+    Names = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 256 * sizeof(PWSTR));
+    if (Buffer == NULL || Names == NULL)
+        return 1;
+
+    if (WNetOpenEnumW(RESOURCE_CONNECTED, RESOURCETYPE_ANY, 0, NULL, &Enum) == WN_SUCCESS)
+    {
+        for (;;)
+        {
+            Count = (DWORD)-1;
+            BufSize = 0x4000;
+            if (WNetEnumResourceW(Enum, &Count, Buffer, &BufSize) != WN_SUCCESS)
+                break;
+            for (i = 0; i < Count && NameCount < 256; i++)
+            {
+                LPCWSTR Local = (Buffer[i].lpLocalName && Buffer[i].lpLocalName[0]) ? Buffer[i].lpLocalName : NULL;
+                LPCWSTR Name = Local ? Local : Buffer[i].lpRemoteName;
+
+                if (Name == NULL || Buffer[i].lpRemoteName == NULL)
+                    continue;
+                if (Shown++ == 0)
+                {
+                    PrintMessageString(MSG_CONNECTIONS_HEADER);
+                    ConPuts(StdOut, L"\n\n");
+                }
+                ConPrintf(StdOut, L"    %-16s%s\n", Local ? Local : L"", Buffer[i].lpRemoteName);
+                Names[NameCount] = HeapAlloc(GetProcessHeap(), 0, (wcslen(Name) + 1) * sizeof(WCHAR));
+                if (Names[NameCount] != NULL)
+                    wcscpy(Names[NameCount++], Name);
+            }
+        }
+        WNetCloseEnum(Enum);
+    }
+    HeapFree(GetProcessHeap(), 0, Buffer);
+
+    if (NameCount == 0)
+    {
+        PrintMessageString(MSG_NO_ENTRIES);
+        ConPuts(StdOut, L"\n");
+        HeapFree(GetProcessHeap(), 0, Names);
+        return 0;
+    }
+
+    PrintMessageString(MSG_CONNECTIONS_CANCEL);
+    ConPuts(StdOut, L"\n");
+    if (Answer == ANSWER_NO)
+        Ret = 2;
+    else
+    {
+        ConPuts(StdOut, L"\n");
+        Reply = 1;
+        if (Answer == ANSWER_ASK)
+            Reply = AskQuestion(MSG_CONTINUE_PROMPT);
+        if (Reply < 0)
+            Ret = -1;
+        else if (Reply == 0)
+            Ret = 2;
+        else
+        {
+            for (i = 0; i < NameCount; i++)
+            {
+                Error = WNetCancelConnection2W(Names[i], CONNECT_UPDATE_PROFILE, FALSE);
+                if (Error == ERROR_OPEN_FILES)
+                {
+                    /* Said, then closed with the rest: the question was about all of them */
+                    PrintMessageStringV(MSG_OPEN_FILES, Names[i]);
+                    ConPuts(StdOut, L"\n\n");
+                    Error = WNetCancelConnection2W(Names[i], CONNECT_UPDATE_PROFILE, TRUE);
+                }
+                if (Error != NO_ERROR)
+                {
+                    PrintErrorMessage(Error);
+                    Ret = 2;
+                }
+            }
+            if (Ret == 0)
+            {
+                PrintMessageString(MSG_SUCCESS);
+                ConPuts(StdOut, L"\n\n");
+            }
+        }
+    }
+    for (i = 0; i < NameCount; i++)
+        HeapFree(GetProcessHeap(), 0, Names[i]);
+    HeapFree(GetProcessHeap(), 0, Names);
+    return Ret;
+}
+
 INT
 cmdUse(
     INT argc,
@@ -268,9 +424,10 @@ cmdUse(
     LPWSTR Password = NULL;
     WCHAR Typed[PWLEN + 1], Access[MAX_PATH];
     BOOL Delete = FALSE, PasswordPrompt = FALSE, HaveRemember = FALSE, Remember = FALSE, BadDevice = FALSE;
+    ANSWER Answer = ANSWER_ASK;
     DWORD Error, Flags, Size = ARRAYSIZE(Access), Result = 0;
     NETRESOURCEW Resource;
-    INT i, Positional = 0, Ret;
+    INT i, Positional = 0;
 
     for (i = 2; i < argc; i++)
     {
@@ -285,6 +442,19 @@ cmdUse(
             }
             else if (_wcsicmp(a, L"/delete") == 0 || _wcsicmp(a, L"/d") == 0)
                 Delete = TRUE;
+            else if (_wcsnicmp(a, L"/delete:", 8) == 0 || _wcsnicmp(a, L"/d:", 3) == 0)
+                return PrintCommandSyntax(MSG_USE_SYNTAX, MSG_BAD_OPTION_VALUE, NULL);
+            else if (_wcsicmp(a, L"/yes") == 0 || _wcsicmp(a, L"/y") == 0 ||
+                     _wcsicmp(a, L"/no") == 0 || _wcsicmp(a, L"/n") == 0)
+            {
+                /* The answer to the questions of /DELETE, given before they are asked (measured on
+                 * Windows Server 2022; the questions are not answered from a pipe there either) */
+                ANSWER Given = (towlower(a[1]) == L'y') ? ANSWER_YES : ANSWER_NO;
+
+                if (Answer != ANSWER_ASK && Answer != Given)
+                    return PrintCommandError(MSG_CONFLICTING_SWITCHES, NULL);
+                Answer = Given;
+            }
             else if (_wcsnicmp(a, L"/user:", 6) == 0 || _wcsnicmp(a, L"/u:", 3) == 0)
                 User = wcschr(a, L':') + 1;
             else if (_wcsnicmp(a, L"/persistent:", 12) == 0 || _wcsnicmp(a, L"/p:", 3) == 0)
@@ -376,36 +546,8 @@ cmdUse(
             return 2;
         }
         if (Device != NULL && Device[0] == L'*')
-        {
-            /* All of them (Windows asks first) */
-            HANDLE Enum;
-            LPNETRESOURCEW Buffer = HeapAlloc(GetProcessHeap(), 0, 0x4000);
-            DWORD Count = (DWORD)-1, BufSize = 0x4000, j;
-
-            if (Buffer == NULL)
-                return 1;
-            Ret = 0;
-            if (WNetOpenEnumW(RESOURCE_CONNECTED, RESOURCETYPE_ANY, 0, NULL, &Enum) == WN_SUCCESS)
-            {
-                while (WNetEnumResourceW(Enum, &Count, Buffer, &BufSize) == WN_SUCCESS)
-                {
-                    for (j = 0; j < Count; j++)
-                    {
-                        LPCWSTR Name = (Buffer[j].lpLocalName && Buffer[j].lpLocalName[0]) ?
-                                       Buffer[j].lpLocalName : Buffer[j].lpRemoteName;
-
-                        if (Name && DeleteConnection(Name) != 0)
-                            Ret = 2;
-                    }
-                    Count = (DWORD)-1;
-                    BufSize = 0x4000;
-                }
-                WNetCloseEnum(Enum);
-            }
-            HeapFree(GetProcessHeap(), 0, Buffer);
-            return Ret;
-        }
-        return DeleteConnection(Device != NULL ? Device : Remote);
+            return DeleteAllConnections(Answer);
+        return DeleteConnection(Device != NULL ? Device : Remote, Answer);
     }
 
     /* NET USE X: or NET USE \\server\share: show that one */
