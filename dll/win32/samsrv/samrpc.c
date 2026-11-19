@@ -6924,6 +6924,12 @@ SampQueryUserInternal2(PSAM_DB_OBJECT UserObject,
     ULONG Length = 0;
     NTSTATUS Status;
 
+    /* The logon statistics are for the trusted callers inside lsass: the class needs no right on the handle,
+       so every other caller would read them through a handle opened for no access (Windows Server 2022
+       answers STATUS_INVALID_INFO_CLASS, measured) */
+    if (UserObject->Trusted == FALSE)
+        return STATUS_INVALID_INFO_CLASS;
+
     *Buffer = NULL;
 
     InfoBuffer = midl_user_allocate(sizeof(SAMPR_USER_INFO_BUFFER));
