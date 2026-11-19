@@ -1131,18 +1131,18 @@ CmpSplitLeaf(IN PHHIVE Hive,
     FirstHalf = (LeafKey->Count / 2);
     LastHalf = LeafKey->Count - FirstHalf;
 
-    /* Now check what kind of hive we're dealing with,
-     * and compute entry size
+    /*
+     * The size of an entry is that of the leaf's own kind: a hive file may
+     * hold any kind of leaf whatever its version says (the check accepts
+     * them all), and an entry size taken from the version would read and
+     * copy the entries of the other kind with the wrong stride.
      */
-    if (Hive->Version >= 5)
+    if (LeafKey->Signature == CM_KEY_FAST_LEAF || LeafKey->Signature == CM_KEY_HASH_LEAF)
     {
-        /* XP Hive: Use hash leaf */
-        ASSERT(LeafKey->Signature == CM_KEY_HASH_LEAF);
         EntrySize = sizeof(CM_INDEX);
     }
     else
     {
-        /* Use index leaf */
         ASSERT(LeafKey->Signature == CM_KEY_INDEX_LEAF);
         EntrySize = sizeof(HCELL_INDEX);
     }
@@ -1173,17 +1173,8 @@ CmpSplitLeaf(IN PHHIVE Hive,
     /* Release the newly created cell */
     HvReleaseCell(Hive, NewCell);
 
-    /* Set its signature according to the version of the hive */
-    if (Hive->Version >= 5)
-    {
-        /* XP Hive: Use hash leaf signature */
-        NewKey->Signature = CM_KEY_HASH_LEAF;
-    }
-    else
-    {
-        /* Use index leaf signature */
-        NewKey->Signature = CM_KEY_INDEX_LEAF;
-    }
+    /* The new half is a leaf of the same kind: its entries (and their hashes or hints) are copied as they are */
+    NewKey->Signature = LeafKey->Signature;
 
     /* Calculate the size of the free entries in the root key */
     TotalSize = HvGetCellSize(Hive, IndexKey) -
@@ -1215,10 +1206,8 @@ CmpSplitLeaf(IN PHHIVE Hive,
         }
     }
 
-    /* Splitting is done, now we need to copy the contents,
-     * according to the hive version
-     */
-    if (Hive->Version >= 5)
+    /* Splitting is done, now we need to copy the contents, by the kind of the leaf */
+    if (EntrySize == sizeof(CM_INDEX))
     {
         /* Copy the fast indexes */
         FastLeaf = (PCM_KEY_FAST_INDEX)LeafKey;
