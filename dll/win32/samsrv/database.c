@@ -283,6 +283,10 @@ SampCreateDbObject(IN PSAM_DB_OBJECT ParentObject,
     {
         NewObject->Trusted = ParentObject->Trusted;
         NewObject->Internal = ParentObject->Internal;
+
+        /* The object uses its parent (key, fixed data) for as long as it lives: keep the parent alive
+           when the handle of the parent is closed first */
+        InterlockedIncrement((PLONG)&ParentObject->RefCount);
     }
 
     *DbObject = NewObject;
@@ -414,6 +418,10 @@ SampOpenDbObject(IN PSAM_DB_OBJECT ParentObject,
     {
         NewObject->Trusted = ParentObject->Trusted;
         NewObject->Internal = ParentObject->Internal;
+
+        /* The object uses its parent (key, fixed data) for as long as it lives: keep the parent alive
+           when the handle of the parent is closed first */
+        InterlockedIncrement((PLONG)&ParentObject->RefCount);
     }
 
     *DbObject = NewObject;
@@ -487,12 +495,13 @@ SampValidateDbObject(SAMPR_HANDLE Handle,
 NTSTATUS
 SampCloseDbObject(PSAM_DB_OBJECT DbObject)
 {
+    PSAM_DB_OBJECT ParentObject;
     NTSTATUS Status = STATUS_SUCCESS;
 
-    DbObject->RefCount--;
-
-    if (DbObject->RefCount > 0)
+    if (InterlockedDecrement((PLONG)&DbObject->RefCount) > 0)
         return STATUS_SUCCESS;
+
+    ParentObject = DbObject->ParentObject;
 
     SampRegCloseKey(&DbObject->KeyHandle);
     SampRegCloseKey(&DbObject->MembersKeyHandle);
@@ -500,7 +509,13 @@ SampCloseDbObject(PSAM_DB_OBJECT DbObject)
     if (DbObject->Name != NULL)
         RtlFreeHeap(RtlGetProcessHeap(), 0, DbObject->Name);
 
+    /* A handle that is used after this fails the signature check instead of using freed data */
+    DbObject->Signature = 0;
     RtlFreeHeap(RtlGetProcessHeap(), 0, DbObject);
+
+    /* Release the reference this object held on its parent */
+    if (ParentObject != NULL)
+        SampCloseDbObject(ParentObject);
 
     return Status;
 }
@@ -509,6 +524,7 @@ SampCloseDbObject(PSAM_DB_OBJECT DbObject)
 NTSTATUS
 SampDeleteAccountDbObject(PSAM_DB_OBJECT DbObject)
 {
+    PSAM_DB_OBJECT ParentObject;
     LPCWSTR ContainerName;
     LPWSTR AccountName = NULL;
     HANDLE ContainerKey = NULL;
@@ -623,8 +639,12 @@ SampDeleteAccountDbObject(PSAM_DB_OBJECT DbObject)
     if (DbObject->Name != NULL)
         RtlFreeHeap(RtlGetProcessHeap(), 0, DbObject->Name);
 
-    /* Release the database object */
+    /* Release the database object and the reference it held on its parent */
+    ParentObject = DbObject->ParentObject;
+    DbObject->Signature = 0;
     RtlFreeHeap(RtlGetProcessHeap(), 0, DbObject);
+    if (ParentObject != NULL)
+        SampCloseDbObject(ParentObject);
 
     Status = STATUS_SUCCESS;
 
