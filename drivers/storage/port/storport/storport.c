@@ -1545,7 +1545,9 @@ StorPortGetUncachedExtension(
     DeviceDescription.ScatterGather = ConfigInfo->ScatterGather;
     DeviceDescription.DemandMode = ConfigInfo->DemandMode;
     DeviceDescription.Dma32BitAddresses = ConfigInfo->Dma32BitAddresses;
-    DeviceDescription.Dma64BitAddresses = (ConfigInfo->Dma64BitAddresses & SCSI_DMA64_MINIPORT_SUPPORTED) ? TRUE : FALSE;
+    /* Any flag but SCSI_DMA64_SYSTEM_SUPPORTED (which Storport sets itself) is the miniport saying it handles 64-bit
+       addresses: MINIPORT_SUPPORTED, or one of the FULL64BIT and 4 GB region values */
+    DeviceDescription.Dma64BitAddresses = (ConfigInfo->Dma64BitAddresses & ~SCSI_DMA64_SYSTEM_SUPPORTED) ? TRUE : FALSE;
     DeviceDescription.BusNumber = ConfigInfo->SystemIoBusNumber;
     DeviceDescription.DmaChannel = ConfigInfo->DmaChannel;
     DeviceDescription.InterfaceType = ConfigInfo->AdapterInterfaceType;
