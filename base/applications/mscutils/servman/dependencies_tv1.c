@@ -93,7 +93,7 @@ TV1_AddDependantsToTree(PDEPENDDATA pDependData,
 
     hSCManager = OpenSCManagerW(NULL,
                                 NULL,
-                                SC_MANAGER_ALL_ACCESS);
+                                SC_MANAGER_CONNECT);
     if (hSCManager)
     {
         hService = OpenServiceW(hSCManager,

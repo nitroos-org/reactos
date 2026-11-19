@@ -19,7 +19,7 @@ TV2_HasDependantServices(LPWSTR lpServiceName)
 
     hSCManager = OpenSCManagerW(NULL,
                                 NULL,
-                                SC_MANAGER_ALL_ACCESS);
+                                SC_MANAGER_CONNECT);
     if (hSCManager)
     {
         hService = OpenServiceW(hSCManager,
@@ -64,7 +64,7 @@ TV2_GetDependants(LPWSTR lpServiceName,
     /* Set the first items in each tree view */
     hSCManager = OpenSCManagerW(NULL,
                                 NULL,
-                                SC_MANAGER_ALL_ACCESS);
+                                SC_MANAGER_CONNECT);
     if (hSCManager)
     {
         hService = OpenServiceW(hSCManager,
