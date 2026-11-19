@@ -162,6 +162,7 @@ static const PCSTR CmpAclSourceNames[] = { "default", "registry", "bootoption" }
 
 /* AuditStats EnforceFallback: why a boot that should enforce does not */
 #define CMP_ACL_FALLBACK_SYSTEM     0x1     /* a SYSTEM-hive boot key: SYSTEM lacks full control, not repaired */
+#define CMP_ACL_FALLBACK_HIVES      0x2     /* the same for a key of another machine hive */
 
 /* Well-known SIDs the policy descriptors use */
 typedef enum _CMP_ACL_SID
@@ -2848,7 +2849,10 @@ CmpAclTransition(VOID)
 
 /*
  * The machine hives other than SYSTEM are linked (NtInitializeRegistry, before
- * any process but smss runs), and the file system is there: the transition
+ * any process but smss runs), and the file system is there: the self-check of
+ * their keys that SYSTEM needs (the rule of the SYSTEM hive's at CmInitSystem1:
+ * a stored descriptor that keeps SYSTEM from full control is replaced, and
+ * only if that fails does the boot fall back to audit), then the transition
  * check. Not for a setup boot (text mode: the hives are setup's own).
  */
 VOID
@@ -2856,8 +2860,48 @@ NTAPI
 CmpAclBootHivesLoaded(
     _In_ BOOLEAN SetupBoot)
 {
+    static const PCWSTR Keys[] =
+    {
+        L"\\Registry\\Machine\\SOFTWARE",
+        L"\\Registry\\Machine\\SOFTWARE\\Classes",
+        L"\\Registry\\Machine\\SOFTWARE\\Microsoft",
+        L"\\Registry\\Machine\\SOFTWARE\\Microsoft\\Windows",
+        L"\\Registry\\Machine\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion",
+        L"\\Registry\\Machine\\SOFTWARE\\Microsoft\\Windows NT",
+        L"\\Registry\\Machine\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
+        L"\\Registry\\Machine\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon",
+        L"\\Registry\\Machine\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList",
+        L"\\Registry\\Machine\\SAM",
+        L"\\Registry\\Machine\\SAM\\SAM",
+        L"\\Registry\\Machine\\SECURITY",
+        L"\\Registry\\User\\.DEFAULT",
+    };
+    UNICODE_STRING Path;
+    ULONG i;
+    BOOLEAN Failed = FALSE;
+
     if (SetupBoot)
         return;
+
+    if (CmpAclReady && CmpRegistryAclEffectiveMode == CM_REGACL_MODE_ENFORCE)
+    {
+        for (i = 0; i < RTL_NUMBER_OF(Keys); i++)
+        {
+            RtlInitUnicodeString(&Path, Keys[i]);
+            if (CmpAclJudgeKey(&Path, CmpAclJudgeSystemFullControl))
+                continue;
+            CmpAclRepairSystemAccess(&Path);
+            if (!CmpAclJudgeKey(&Path, CmpAclJudgeSystemFullControl))
+                Failed = TRUE;
+        }
+        if (Failed)
+        {
+            CmpAclEnforceFallback |= CMP_ACL_FALLBACK_HIVES;
+            CmpRegistryAclEffectiveMode = CM_REGACL_MODE_AUDIT;
+            DbgPrintEx(DPFLTR_CONFIG_ID, DPFLTR_ERROR_LEVEL,
+                       "CM-ACL-AUDIT: NOT ENFORCED: SYSTEM lacks full control of a machine hive key\n");
+        }
+    }
 
     if (!CmpAclReady || CmpRegistryAclEffectiveMode != CM_REGACL_MODE_ENFORCE)
     {
