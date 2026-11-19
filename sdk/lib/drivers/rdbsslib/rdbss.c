@@ -1071,16 +1071,26 @@ RxCancelNotifyChangeDirectoryRequestsForFobx(
     /* Now, handle all our "extracted" contexts */
     while (!IsListEmpty(&ContextsToCancel))
     {
+        PMRX_CALLDOWN MRxCancelRoutine;
+
+        /* Back on the active list before anything else: the last
+         * dereference unlinks the context from the list it is on, and
+         * RemoveHeadList leaves its links pointing into this local list
+         * (a stack variable by then). Read the routine once, under the lock
+         * the mini-redirector clears it under */
+        KeAcquireSpinLock(&RxStrucSupSpinLock, &OldIrql);
         Entry = RemoveHeadList(&ContextsToCancel);
         Context = CONTAINING_RECORD(Entry, RX_CONTEXT, ContextListEntry);
+        InsertTailList(&RxActiveContexts, &Context->ContextListEntry);
+        MRxCancelRoutine = Context->MRxCancelRoutine;
+        KeReleaseSpinLock(&RxStrucSupSpinLock, OldIrql);
 
         /* If they had an associated IRP (should be always true) */
-        if (Context->CurrentIrp != NULL)
+        if (Context->CurrentIrp != NULL && MRxCancelRoutine != NULL)
         {
             /* Then, call cancel routine */
-            ASSERT(Context->MRxCancelRoutine != NULL);
-            DPRINT1("Canceling %p with %p\n", Context, Context->MRxCancelRoutine);
-            Context->MRxCancelRoutine(Context);
+            DPRINT1("Canceling %p with %p\n", Context, MRxCancelRoutine);
+            MRxCancelRoutine(Context);
         }
 
         /* And delete the context */
@@ -1168,16 +1178,26 @@ RxCancelNotifyChangeDirectoryRequestsForVNetRoot(
     /* Now, handle all our "extracted" contexts */
     while (!IsListEmpty(&ContextsToCancel))
     {
+        PMRX_CALLDOWN MRxCancelRoutine;
+
+        /* Back on the active list before anything else: the last
+         * dereference unlinks the context from the list it is on, and
+         * RemoveHeadList leaves its links pointing into this local list
+         * (a stack variable by then). Read the routine once, under the lock
+         * the mini-redirector clears it under */
+        KeAcquireSpinLock(&RxStrucSupSpinLock, &OldIrql);
         Entry = RemoveHeadList(&ContextsToCancel);
         Context = CONTAINING_RECORD(Entry, RX_CONTEXT, ContextListEntry);
+        InsertTailList(&RxActiveContexts, &Context->ContextListEntry);
+        MRxCancelRoutine = Context->MRxCancelRoutine;
+        KeReleaseSpinLock(&RxStrucSupSpinLock, OldIrql);
 
         /* If they had an associated IRP (should be always true) */
-        if (Context->CurrentIrp != NULL)
+        if (Context->CurrentIrp != NULL && MRxCancelRoutine != NULL)
         {
             /* Then, call cancel routine */
-            ASSERT(Context->MRxCancelRoutine != NULL);
-            DPRINT1("Canceling %p with %p\n", Context, Context->MRxCancelRoutine);
-            Context->MRxCancelRoutine(Context);
+            DPRINT1("Canceling %p with %p\n", Context, MRxCancelRoutine);
+            MRxCancelRoutine(Context);
         }
 
         /* And delete the context */
