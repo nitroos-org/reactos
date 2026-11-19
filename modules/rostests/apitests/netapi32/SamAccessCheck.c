@@ -339,6 +339,115 @@ static void RawRows(PCWSTR Self)
     pSamClose(Srv);
 }
 
+/*
+ * Methods that act on more than the handle they are given, as a standard user (the expected codes were measured on Windows
+ * Server 2022 with the same calls): removing an administrator account from every alias of the Builtin domain, the logon
+ * statistics and all the fields of a user through a handle opened for no access, and a user handle that is used after the
+ * handle of its domain has been closed.
+ */
+typedef LONG (WINAPI *F_SamRemoveForeign)(HANDLE, PSID);
+typedef LONG (WINAPI *F_SamQueryUser)(HANDLE, ULONG, PVOID *);
+typedef LONG (WINAPI *F_SamFreeMemory)(PVOID);
+static F_SamRemoveForeign pSamRemoveForeign;
+static F_SamQueryUser pSamQueryUser;
+static F_SamFreeMemory pSamFreeMemory;
+
+static BOOL IsAdministratorsMember(PCWSTR Name)
+{
+    LOCALGROUP_MEMBERS_INFO_3 *m = NULL;
+    DWORD n = 0, t = 0, i;
+    BOOL Found = FALSE;
+    WCHAR Cn[MAX_COMPUTERNAME_LENGTH + 2], Full[300];
+    DWORD Cl = MAX_COMPUTERNAME_LENGTH + 1;
+
+    GetComputerNameW(Cn, &Cl);
+    _snwprintf(Full, ARRAYSIZE(Full) - 1, L"%ls\\%ls", Cn, Name);
+    Full[ARRAYSIZE(Full) - 1] = 0;
+    if (NetLocalGroupGetMembers(NULL, L"Administrators", 3, (LPBYTE *)&m, MAX_PREFERRED_LENGTH, &n, &t, NULL) != NERR_Success)
+        return FALSE;
+    for (i = 0; i < n; i++)
+        if (!_wcsicmp(m[i].lgrmi3_domainandname, Full))
+            Found = TRUE;
+    NetApiBufferFree(m);
+    return Found;
+}
+
+static void ReviewRows(PCWSTR Self)
+{
+    HANDLE Srv = NULL, Acc = NULL, Bi = NULL, u = NULL;
+    PSID AccSid = NULL, BiSid = NULL;
+    BYTE AdmSid[SECURITY_MAX_SID_SIZE];
+    DWORD sl = sizeof(AdmSid), dl = 256;
+    WCHAR Dom[256], Cn[MAX_COMPUTERNAME_LENGTH + 2];
+    DWORD Cl = MAX_COMPUTERNAME_LENGTH + 1;
+    static WCHAR Builtin[] = L"Builtin";
+    SID_NAME_USE Use;
+    PVOID Buf;
+    US Us;
+    LONG st;
+    ULONG AdmRid, SelfRid = RidOf(Self);
+
+    if (!pSamRemoveForeign || !pSamQueryUser || !LookupAccountNameW(NULL, NAdm, AdmSid, &sl, Dom, &dl, &Use))
+    {
+        skip("%s: review rows not run\n", g_Caller);
+        return;
+    }
+    AdmRid = *GetSidSubAuthority(AdmSid, *GetSidSubAuthorityCount(AdmSid) - 1);
+
+    if (pSamConnect(NULL, &Srv, 0x21, NULL) != 0)
+        return;
+    GetComputerNameW(Cn, &Cl);
+    Us.Buffer = Cn; Us.Length = (USHORT)(Cl * 2); Us.MaximumLength = Us.Length + 2;
+    if (pSamLookupDomain(Srv, &Us, &AccSid) != 0)
+        AccSid = NULL;
+    Us.Buffer = Builtin; Us.Length = 14; Us.MaximumLength = 16;
+    if (pSamLookupDomain(Srv, &Us, &BiSid) != 0)
+        BiSid = NULL;
+
+    if (BiSid && pSamOpenDomain(Srv, 0x200, BiSid, &Bi) == 0)
+    {
+        st = pSamRemoveForeign(Bi, (PSID)AdmSid);
+        Row("SamRemoveMemberFromForeignDomain(Builtin) administrator account", "0x%08lx", (unsigned long)st);
+        pSamClose(Bi);
+    }
+    if (AccSid && pSamOpenDomain(Srv, 0x200, AccSid, &Acc) == 0)
+    {
+        st = pSamRemoveForeign(Acc, (PSID)AdmSid);
+        Row("SamRemoveMemberFromForeignDomain(Account) administrator account", "0x%08lx", (unsigned long)st);
+
+        if (pSamOpenUser(Acc, 0, AdmRid, &u) == 0)
+        {
+            Buf = NULL;
+            st = pSamQueryUser(u, 19 /* UserInternal2Information */, &Buf);
+            Row("SamQueryInformationUser no-access handle UserInternal2Information", "0x%08lx", (unsigned long)st);
+            if (Buf && pSamFreeMemory) pSamFreeMemory(Buf);
+            Buf = NULL;
+            st = pSamQueryUser(u, 21 /* UserAllInformation */, &Buf);
+            Row("SamQueryInformationUser no-access handle UserAllInformation", "0x%08lx", (unsigned long)st);
+            if (Buf && pSamFreeMemory) pSamFreeMemory(Buf);
+            pSamClose(u);
+        }
+
+        /* The user handle outlives the handle of its domain (contract: it keeps working) */
+        u = NULL;
+        if (SelfRid && pSamOpenUser(Acc, 1 /* USER_READ_GENERAL */, SelfRid, &u) == 0)
+        {
+            pSamClose(Acc);
+            Acc = NULL;
+            Buf = NULL;
+            st = pSamQueryUser(u, 1 /* UserGeneralInformation */, &Buf);
+            ok(st == 0, "%s: user handle after the domain handle was closed: 0x%08lx\n", g_Caller, (unsigned long)st);
+            if (Buf && pSamFreeMemory) pSamFreeMemory(Buf);
+            pSamClose(u);
+        }
+        if (Acc)
+            pSamClose(Acc);
+    }
+    pSamClose(Srv);
+
+    ok(IsAdministratorsMember(NAdm), "%s: the administrator account was removed from Administrators\n", g_Caller);
+}
+
 static void NetRows(PCWSTR Self, PCWSTR SelfPw, PCWSTR TgtPw)
 {
     static const DWORD Levels[] = { 0, 1, 2, 3, 4, 10, 11, 20, 23 };
@@ -748,6 +857,8 @@ static void RunCaller(PCSTR Caller, PCWSTR Self, PCWSTR SelfPw)
     {
         PipeRows();
         RawRows(Self);
+        if (!strcmp(Caller, "std"))
+            ReviewRows(Self);
         NetRows(Self, SelfPw, g_Pw[3]);
         LsaRows();
         RevertToSelf();
@@ -785,6 +896,9 @@ START_TEST(SamAccessCheck)
     pSamCreateAlias = (F_SamCreate)GetProcAddress(hSam, "SamCreateAliasInDomain");
     pSamDeleteUser = (F_SamDelete)GetProcAddress(hSam, "SamDeleteUser");
     pSamDeleteAlias = (F_SamDelete)GetProcAddress(hSam, "SamDeleteAlias");
+    pSamRemoveForeign = (F_SamRemoveForeign)GetProcAddress(hSam, "SamRemoveMemberFromForeignDomain");
+    pSamQueryUser = (F_SamQueryUser)GetProcAddress(hSam, "SamQueryInformationUser");
+    pSamFreeMemory = (F_SamFreeMemory)GetProcAddress(hSam, "SamFreeMemory");
     if (!pSamConnect || !pSamOpenDomain || !pSamOpenUser || !pSamOpenAlias || !pSamOpenGroup || !pSamClose || !pSamLookupDomain ||
         !pSamCreateUser || !pSamCreateAlias || !pSamDeleteUser || !pSamDeleteAlias)
     {
