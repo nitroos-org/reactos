@@ -49,8 +49,86 @@ static ULONG PanH, PanV;
 
 static RGBQUAD CachedPalette[BV_MAX_COLORS];
 
+/*
+ * Position and width of the red, green and blue channels in a framebuffer
+ * pixel, and the bits that are not part of any channel. The default is
+ * the usual 0xAARRGGBB layout (blue in the lowest byte); it is replaced by
+ * the layout the firmware reports (UEFI GOP: RGB, BGR or a bit mask).
+ */
+static UCHAR ChannelShift[3] = {16, 8, 0};  /* Red, Green, Blue */
+static UCHAR ChannelBits[3] = {8, 8, 8};
+static ULONG ReservedMask = 0xFF000000;
+
 
 /* PRIVATE FUNCTIONS *********************************************************/
+
+/**
+ * @brief
+ * Set up the channel positions from the pixel masks of the boot framebuffer.
+ * Masks that are not usable (missing or channels wider than 8 bits) leave the
+ * default 0xAARRGGBB layout.
+ **/
+static VOID
+SetPixelMasks(
+    _In_ ULONG RedMask,
+    _In_ ULONG GreenMask,
+    _In_ ULONG BlueMask,
+    _In_ ULONG Reserved)
+{
+    ULONG Masks[3] = {RedMask, GreenMask, BlueMask};
+    UCHAR Shift[3], Bits[3];
+    ULONG i, Mask;
+
+    for (i = 0; i < 3; ++i)
+    {
+        Mask = Masks[i];
+        if (Mask == 0)
+            return;
+
+        Shift[i] = 0;
+        while (!(Mask & 1))
+        {
+            Mask >>= 1;
+            ++Shift[i];
+        }
+
+        Bits[i] = 0;
+        while (Mask & 1)
+        {
+            Mask >>= 1;
+            ++Bits[i];
+        }
+
+        /* The channel must be one run of at most 8 bits */
+        if ((Mask != 0) || (Bits[i] > 8))
+            return;
+    }
+
+    for (i = 0; i < 3; ++i)
+    {
+        ChannelShift[i] = Shift[i];
+        ChannelBits[i] = Bits[i];
+    }
+    ReservedMask = Reserved;
+}
+
+/**
+ * @brief
+ * Convert a 0x00RRGGBB palette entry to a framebuffer pixel.
+ **/
+static ULONG
+PackColor(
+    _In_ ULONG Color)
+{
+    ULONG Red   = (Color >> 16) & 0xFF;
+    ULONG Green = (Color >> 8) & 0xFF;
+    ULONG Blue  = Color & 0xFF;
+
+    return ((Red   >> (8 - ChannelBits[0])) << ChannelShift[0]) |
+           ((Green >> (8 - ChannelBits[1])) << ChannelShift[1]) |
+           ((Blue  >> (8 - ChannelBits[2])) << ChannelShift[2]) |
+           ReservedMask;
+}
 
 static VOID
 ApplyPalette(VOID)
@@ -173,6 +251,12 @@ VidInitialize(
         DPRINT1("Unsupported BytesPerPixel = %u\n", BytesPerPixel);
         return FALSE;
     }
+
+    /* Use the pixel layout of the framebuffer (BGR, RGB, ...) */
+    SetPixelMasks(VideoConfigData.PixelMasks.RedMask,
+                  VideoConfigData.PixelMasks.GreenMask,
+                  VideoConfigData.PixelMasks.BlueMask,
+                  VideoConfigData.PixelMasks.ReservedMask);
 
     ASSERT(ScreenWidth <= VideoConfigData.PixelsPerScanLine);
     BytesPerScanLine = VideoConfigData.PixelsPerScanLine * BytesPerPixel;
@@ -331,8 +415,10 @@ InitPaletteWithTable(
 
     for (i = 0; i < Count; i++, Entry++)
     {
-        HasChanged |= !!((CachedPalette[i] ^ *Entry) & 0x00FFFFFF);
-        CachedPalette[i] = *Entry | 0xFF000000;
+        ULONG Pixel = PackColor(*Entry);
+
+        HasChanged |= (CachedPalette[i] != Pixel);
+        CachedPalette[i] = Pixel;
     }
 
     /* Re-apply the palette if it has changed */

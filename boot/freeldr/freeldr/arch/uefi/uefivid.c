@@ -428,6 +428,28 @@ UefiInitializeBgrtLogo(VOID)
           UefiBgrtLogo.DrawWidth, UefiBgrtLogo.DrawHeight);
 }
 
+/**
+ * @brief   Places an 8-bit color channel at the position given by a pixel mask.
+ **/
+static
+ULONG
+UefiPackChannel(
+    _In_ ULONG Value,
+    _In_ ULONG Mask)
+{
+    ULONG Shift = 0, Bits = 0;
+
+    if (Mask == 0)
+        return 0;
+    while (!(Mask & (1UL << Shift)))
+        ++Shift;
+    while ((Shift + Bits < 32) && (Mask & (1UL << (Shift + Bits))))
+        ++Bits;
+    if (Bits > 8)
+        Bits = 8;
+    return (Value >> (8 - Bits)) << Shift;
+}
+
 static
 VOID
 UefiDrawBgrtLogo(VOID)
@@ -435,6 +457,7 @@ UefiDrawBgrtLogo(VOID)
     PUCHAR VramBase;
     ULONG BytesPerPixel, Pitch;
     ULONG Row, Col;
+    ULONG RedMask, GreenMask, BlueMask, ReservedMask;
 
     if (!UefiBgrtLogo.Valid || !UiProgressBar.Show)
         return;
@@ -448,6 +471,19 @@ UefiDrawBgrtLogo(VOID)
     BytesPerPixel = FrameBufferData->BitsPerPixel / 8;
     Pitch = FrameBufferData->PixelsPerScanLine * BytesPerPixel;
     VramBase = (PUCHAR)VramAddress;
+
+    /* The pixel layout of the framebuffer (BGR, RGB, ...) */
+    RedMask = FrameBufferData->PixelMasks.RedMask;
+    GreenMask = FrameBufferData->PixelMasks.GreenMask;
+    BlueMask = FrameBufferData->PixelMasks.BlueMask;
+    ReservedMask = FrameBufferData->PixelMasks.ReservedMask;
+    if ((RedMask == 0) || (GreenMask == 0) || (BlueMask == 0))
+    {
+        RedMask = 0x00FF0000;
+        GreenMask = 0x0000FF00;
+        BlueMask = 0x000000FF;
+        ReservedMask = 0xFF000000;
+    }
 
     for (Row = 0; Row < UefiBgrtLogo.DrawHeight; ++Row)
     {
@@ -470,10 +506,11 @@ UefiDrawBgrtLogo(VOID)
 
             SourcePixel = UefiGetLogoPixelAddress(&UefiBgrtLogo, SourceX, SourceY);
 
-            DestinationRow[Col] = 0xFF000000 |
-                                  (SourcePixel[2] << 16) |
-                                  (SourcePixel[1] << 8) |
-                                  SourcePixel[0];
+            /* The BMP pixel is stored as blue, green, red */
+            DestinationRow[Col] = ReservedMask |
+                                  UefiPackChannel(SourcePixel[2], RedMask) |
+                                  UefiPackChannel(SourcePixel[1], GreenMask) |
+                                  UefiPackChannel(SourcePixel[0], BlueMask);
         }
     }
 }
