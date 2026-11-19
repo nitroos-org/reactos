@@ -229,6 +229,16 @@ START_TEST(LogonUserTypes)
     ok(Ret == ERROR_SUCCESS, "SERVICE with the right: %lu\n", Ret);
     SetRight(Policy, Sid, (PWSTR)L"SeServiceLogonRight", FALSE);
 
+    /* Removing one right keeps the others of the account */
+    SetRight(Policy, Sid, (PWSTR)L"SeBatchLogonRight", TRUE);
+    SetRight(Policy, Sid, (PWSTR)L"SeServiceLogonRight", TRUE);
+    SetRight(Policy, Sid, (PWSTR)L"SeBatchLogonRight", FALSE);
+    Ret = TryLogon(User, L".", LOGON32_LOGON_SERVICE, LOGON32_PROVIDER_DEFAULT, NULL);
+    ok(Ret == ERROR_SUCCESS, "SERVICE after SeBatchLogonRight was removed: %lu\n", Ret);
+    Ret = TryLogon(User, L".", LOGON32_LOGON_BATCH, LOGON32_PROVIDER_DEFAULT, NULL);
+    ok(Ret == ERROR_LOGON_TYPE_NOT_GRANTED, "BATCH after SeBatchLogonRight was removed: %lu\n", Ret);
+    SetRight(Policy, Sid, (PWSTR)L"SeServiceLogonRight", FALSE);
+
     /* A Deny right wins over the right the user has through Users */
     SetRight(Policy, Sid, (PWSTR)L"SeDenyNetworkLogonRight", TRUE);
     Ret = TryLogon(User, L".", LOGON32_LOGON_NETWORK, LOGON32_PROVIDER_DEFAULT, NULL);

@@ -3653,18 +3653,22 @@ LsarRemoveAccountRights(
             }
         }
 
-        /* Get the system access flags, if the attribute exists */
-        Size = 0;
+        /* Get the system access flags, if the attribute exists (a size of 0 would only ask for the size of the value:
+         * the flags stayed 0 and removing one right removed all of them) */
+        SystemAccess = 0;
+        Size = sizeof(ACCESS_MASK);
         Status = LsapGetObjectAttribute(AccountObject,
                                         L"ActSysAc",
                                         &SystemAccess,
                                         &Size);
-        if (!NT_SUCCESS(Status) && Status != STATUS_OBJECT_NAME_NOT_FOUND)
+        if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+            Size = 0;
+        else if (!NT_SUCCESS(Status))
             goto done;
 
         if ((Size != 0) && (RightsToRemove != 0))
         {
-            ERR("Rights: 0x%lx\n", SystemAccess);
+            TRACE("Rights: 0x%lx\n", SystemAccess);
 
             /* Set the new access rights */
             for (i = 0; i < UserRights->Entries; i++)
@@ -3673,7 +3677,7 @@ LsarRemoveAccountRights(
                 if (Value != 0)
                     SystemAccess &= ~Value;
             }
-            ERR("New Rights: 0x%lx\n", SystemAccess);
+            TRACE("New Rights: 0x%lx\n", SystemAccess);
 
             /* Set the system access flags */
             Status = LsapSetObjectAttribute(AccountObject,
