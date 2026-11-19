@@ -1887,12 +1887,12 @@ RegpDeleteTreeCounted(HKEY hKey, LPCWSTR Name, DWORD Length)
     OBJECT_ATTRIBUTES ObjectAttributes;
     UNICODE_STRING SubKeyName;
     HANDLE SubKeyHandle;
+    PKEY_NAME_INFORMATION ParentName = NULL;
+    ULONG Size = 0, Total;
     NTSTATUS Status;
     LONG ret;
 
-    /* A name that begins with a NUL opens the parent itself (the parser takes
-       it for the end of the path): never recurse into that */
-    if (Length == 0 || Name[0] == UNICODE_NULL)
+    if (Length == 0)
         return ERROR_INVALID_NAME;
     if (Length > MAXUSHORT / sizeof(WCHAR))
         return ERROR_INVALID_PARAMETER;
@@ -1903,7 +1903,47 @@ RegpDeleteTreeCounted(HKEY hKey, LPCWSTR Name, DWORD Length)
                                OBJ_CASE_INSENSITIVE,
                                (HANDLE)hKey,
                                NULL);
-    Status = NtOpenKey(&SubKeyHandle, KEY_READ | KEY_SET_VALUE | DELETE, &ObjectAttributes);
+
+    /*
+     * A name that begins with a NUL: as the first component of a name relative
+     * to its parent, the parser takes the NUL for the end of the path and would
+     * open the parent itself. As a later component of the parent's full name it
+     * is found as it is, so open the key by that name (the exact name: no
+     * Wow64 view applies to it).
+     */
+    if (Name[0] == UNICODE_NULL)
+    {
+        Status = NtQueryKey((HANDLE)hKey, KeyNameInformation, NULL, 0, &Size);
+        if (Status != STATUS_BUFFER_TOO_SMALL && Status != STATUS_BUFFER_OVERFLOW)
+            return RtlNtStatusToDosError(NT_SUCCESS(Status) ? STATUS_UNSUCCESSFUL : Status);
+        /* A key's full name fits a UNICODE_STRING, so Size is small; the total is checked again below */
+        if (Size > 2 * MAXUSHORT)
+            return ERROR_INVALID_PARAMETER;
+        Total = Size + sizeof(WCHAR) + SubKeyName.Length;
+        ParentName = RtlAllocateHeap(RtlGetProcessHeap(), 0, Total);
+        if (!ParentName)
+            return ERROR_NOT_ENOUGH_MEMORY;
+        Status = NtQueryKey((HANDLE)hKey, KeyNameInformation, ParentName, Size, &Size);
+        if (!NT_SUCCESS(Status) ||
+            ParentName->NameLength + sizeof(WCHAR) + SubKeyName.Length > MAXUSHORT ||
+            FIELD_OFFSET(KEY_NAME_INFORMATION, Name) + ParentName->NameLength + sizeof(WCHAR) + SubKeyName.Length > Total)
+        {
+            RtlFreeHeap(RtlGetProcessHeap(), 0, ParentName);
+            return NT_SUCCESS(Status) ? ERROR_INVALID_PARAMETER : RtlNtStatusToDosError(Status);
+        }
+        ParentName->Name[ParentName->NameLength / sizeof(WCHAR)] = OBJ_NAME_PATH_SEPARATOR;
+        RtlCopyMemory(&ParentName->Name[ParentName->NameLength / sizeof(WCHAR) + 1], Name, SubKeyName.Length);
+        SubKeyName.Buffer = ParentName->Name;
+        SubKeyName.Length = SubKeyName.MaximumLength =
+            (USHORT)(ParentName->NameLength + sizeof(WCHAR) + Length * sizeof(WCHAR));
+        ObjectAttributes.RootDirectory = NULL;
+    }
+
+    Status = NtOpenKey(&SubKeyHandle,
+                       KEY_READ | KEY_SET_VALUE | DELETE | (ParentName ? KEY_WOW64_64KEY : 0),
+                       &ObjectAttributes);
+    if (ParentName)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, ParentName);
     if (!NT_SUCCESS(Status))
         return RtlNtStatusToDosError(Status);
 
