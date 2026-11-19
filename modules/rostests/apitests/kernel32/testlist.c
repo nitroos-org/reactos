@@ -222,6 +222,7 @@ extern void func_QueueUserWorkItemStream(void);
 extern void func_RaiseFailFastException(void);
 extern void func_ReadDirectoryChanges(void);
 extern void func_ReadDirectoryChangesEx(void);
+extern void func_ReadDirectoryChangesMatrix(void);
 extern void func_ReadDirectoryChangesRename(void);
 extern void func_RegisterWait(void);
 extern void func_ResolveDelayLoadedAPI(void);
@@ -502,6 +503,7 @@ const struct test winetest_testlist[] =
     { "RaiseFailFastException",      func_RaiseFailFastException },
     { "ReadDirectoryChanges",       func_ReadDirectoryChanges },
     { "ReadDirectoryChangesEx",     func_ReadDirectoryChangesEx },
+    { "ReadDirectoryChangesMatrix", func_ReadDirectoryChangesMatrix },
     { "ReadDirectoryChangesRename", func_ReadDirectoryChangesRename },
     { "RegisterWait",                func_RegisterWait },
     { "ResolveDelayLoadedAPI",       func_ResolveDelayLoadedAPI },

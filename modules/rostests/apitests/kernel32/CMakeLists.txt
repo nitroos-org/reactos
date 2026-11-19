@@ -216,6 +216,7 @@ list(APPEND SOURCE
     RaiseFailFastException.c
     ReadDirectoryChanges.c
     ReadDirectoryChangesEx.c
+    ReadDirectoryChangesMatrix.c
     ReadDirectoryChangesRename.c
     ReadFile.c
     RegisterWait.c

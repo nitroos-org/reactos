@@ -2210,6 +2210,12 @@ NTSTATUS NgDeleteNow(PNG_FCB Fcb, BOOLEAN KeepOpen)
 VOID NgSetDeletePending(PNG_FCB Fcb, PNG_CCB Ccb)
 {
     Fcb->DeletePending = TRUE;
+    /* The pending notifications of a directory that is going away end now (STATUS_DELETE_PENDING), as a
+     * watcher of a removed directory is signalled on FAT: FsRtl matches them by the FCB (the stream id).
+     * Nothing is left to complete the second time. */
+    if (Fcb->IsDirectory && Fcb->Vcb->NotifySync)
+        FsRtlNotifyFullChangeDirectory(Fcb->Vcb->NotifySync, &Fcb->Vcb->DirNotifyList, Fcb, NULL, FALSE, FALSE, 0,
+                                       NULL, NULL, NULL);
     Fcb->DelParentMftNo = Ccb->ParentMftNo;
     Fcb->DelNameLength = Ccb->NameLength;
     RtlCopyMemory(Fcb->DelName, Ccb->Name, Ccb->NameLength * sizeof(WCHAR));
