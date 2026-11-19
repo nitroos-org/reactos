@@ -513,8 +513,17 @@ SmbEngSamePassword(PSMBENG_CONN Conn, const WCHAR *Password, ULONG Bytes)
     LeaveCriticalSection(&Conn->QueueLock);
     if (Clear == NULL)
         return FALSE;
-    if (NT_SUCCESS(SystemFunction041(Clear, Alloc, SMBENG_ENCRYPT_SAME_PROCESS)))
-        Same = (Held == Bytes) && (Bytes == 0 || memcmp(Clear, Password, Bytes) == 0);
+    if (NT_SUCCESS(SystemFunction041(Clear, Alloc, SMBENG_ENCRYPT_SAME_PROCESS)) && Held == Bytes)
+    {
+        /* Every byte is looked at whatever the first difference: a credential check (\;#:) can ask
+         * this as often as it likes, without the server, so its time must not tell how much fits */
+        volatile UCHAR Diff = 0;
+        ULONG i;
+
+        for (i = 0; i < Bytes; i++)
+            Diff |= Clear[i] ^ ((const UCHAR *)Password)[i];
+        Same = (Diff == 0);
+    }
     SecureZeroMemory(Clear, Alloc);
     free(Clear);
     return Same;
