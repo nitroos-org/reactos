@@ -182,6 +182,10 @@ HKCR,"exefile","FriendlyTypeName",0x00020000,"@%SystemRoot%\system32\shell32.dll
 HKCR,"exefile\DefaultIcon","",0x00000000,"%1"
 HKCR,"exefile\shell\open\command","",0x00000000,"""%1"" %*"
 HKCR,"exefile\shell\runas\command","",0x00020000,"""%1"" %*"
+; Run with compatibility log: an extended verb (shown with Shift held), see base/applications/nitrodiag
+HKCR,"exefile\shell\nitrodiag","MUIVerb",0x00020000,"@%SystemRoot%\system32\nitrodiag.exe,-1"
+HKCR,"exefile\shell\nitrodiag","Extended",0x00000000,""
+HKCR,"exefile\shell\nitrodiag\command","",0x00020000,"""%SystemRoot%\system32\nitrodiag.exe"" /gui -- ""%1"" %*"
 HKCR,"exefile\shellex\DropHandler","",0x00000000,"{86C86720-42A0-1069-A2E8-08002B30309D}"
 
 ; National Language Support File
@@ -396,6 +400,10 @@ HKCR,"lnkfile","FriendlyTypeName",0x00020000,"@%SystemRoot%\system32\shell32.dll
 HKCR,"lnkfile","IsShortcut",0x00000000,"yes"
 HKCR,"lnkfile","NeverShowExt",0x00000000,""
 HKCR,"lnkfile\CLSID","",0x00000000,"{00021401-0000-0000-C000-000000000046}"
+; Run with compatibility log (extended verb); nitrodiag resolves the shortcut itself
+HKCR,"lnkfile\shell\nitrodiag","MUIVerb",0x00020000,"@%SystemRoot%\system32\nitrodiag.exe,-1"
+HKCR,"lnkfile\shell\nitrodiag","Extended",0x00000000,""
+HKCR,"lnkfile\shell\nitrodiag\command","",0x00020000,"""%SystemRoot%\system32\nitrodiag.exe"" /gui -- ""%1"""
 HKCR,"lnkfile\shellex\IconHandler","",0x00000000,"{00021401-0000-0000-C000-000000000046}"
 HKCR,"lnkfile\shellex\DropHandler","",0x00000000,"{00021401-0000-0000-C000-000000000046}"
 HKCR,"lnkfile\shellex\ContextMenuHandlers\{00021401-0000-0000-C000-000000000046}","",0x00000000,""
