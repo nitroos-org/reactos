@@ -629,7 +629,7 @@ RhelGetSectors(IN PVOID DeviceExtension, IN PCDB Cdb)
         default:
             {
                 ASSERT(FALSE);
-                return (ULONGLONG)-1;
+                return (ULONG)-1;
             }
     }
     return (sector.AsULong * (adaptExt->info.blk_size / SECTOR_SIZE));
