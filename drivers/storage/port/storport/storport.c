@@ -2265,25 +2265,38 @@ StorPortSetDeviceQueueDepth(
     PPDO_DEVICE_EXTENSION PdoExtension;
     KLOCK_QUEUE_HANDLE LockHandle;
 
-    DPRINT1("StorPortSetDeviceQueueDepth(%p %d %d %d %d)\n",
-            HwDeviceExtension, PathId, TargetId, Lun, Depth);
+    DPRINT("StorPortSetDeviceQueueDepth(%p %d %d %d %d)\n",
+           HwDeviceExtension, PathId, TargetId, Lun, Depth);
 
     FdoExtension = StorpGetMiniportFdo(HwDeviceExtension);
-    PdoExtension = FdoFindLun(FdoExtension, PathId, TargetId, Lun);
 
-    /* 254 is pre-Windows-8 per LUN queue limit */
-    if (PdoExtension == NULL || Depth > 254)
+    /* A miniport calls this when it completes an INQUIRY, from its interrupt routine too */
+    PdoExtension = FdoFindLunAboveDispatch(FdoExtension, PathId, TargetId, Lun);
+
+    if (PdoExtension == NULL)
     {
         return FALSE;
     }
 
-    KeAcquireInStackQueuedSpinLock(&FdoExtension->FlowControl.Lock, &LockHandle);
-    PdoExtension->OutstandingRequestMax = Depth;
-    KeReleaseInStackQueuedSpinLock(&LockHandle);
+    /* 254 is pre-Windows-8 per LUN queue limit; a larger request (a miniport asks for its ring size) gets the limit */
+    if (Depth > 254)
+        Depth = 254;
+
+    if (KeGetCurrentIrql() <= DISPATCH_LEVEL)
+    {
+        KeAcquireInStackQueuedSpinLock(&FdoExtension->FlowControl.Lock, &LockHandle);
+        PdoExtension->OutstandingRequestMax = Depth;
+        KeReleaseInStackQueuedSpinLock(&LockHandle);
+    }
+    else
+    {
+        /* The lock would lower the IRQL; the limit is one aligned ULONG, read under the lock only */
+        PdoExtension->OutstandingRequestMax = Depth;
+    }
 
     DPRINT("Set Path %d Target %d Lun %d Queue depth to %d\n", PathId, TargetId, Lun, Depth);
 
-    return FALSE;
+    return TRUE;
 }
 
 
