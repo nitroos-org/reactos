@@ -573,12 +573,18 @@ CmpDoFindSubKeyByNumber(IN PHHIVE Hive,
             }
         }
 
-        /* Should never get here */
-        ASSERT(FALSE);
+        /*
+         * Fewer entries than the key counts: the root is no leaf, never read
+         * it as one (and release the last leaf looked at)
+         */
+        if (Index->Count)
+            HvReleaseCell(Hive, LeafCell);
+        return HCELL_NIL;
     }
 
-    /* If we got here, then the cell is in this index */
-    ASSERT(Number < Index->Count);
+    /* If we got here, then the cell is in this index, unless the index holds fewer entries than the key counts */
+    if (Number >= Index->Count)
+        return HCELL_NIL;
 
     /* Check if we're a fast or hash leaf */
     if ((Index->Signature == CM_KEY_FAST_LEAF) ||
@@ -944,6 +950,10 @@ CmpAddToLeaf(IN PHHIVE Hive,
     /* Release it */
     HvReleaseCell(Hive, LeafCell);
 
+    /* The count of a leaf is 16 bits: a leaf of a hive file may be full (the writer splits far earlier) */
+    if (Leaf->Count == MAXUSHORT)
+        return HCELL_NIL;
+
     /* Check if this is an index leaf */
     if (Leaf->Signature == CM_KEY_INDEX_LEAF)
     {
@@ -1119,6 +1129,9 @@ CmpSplitLeaf(IN PHHIVE Hive,
 
     /* Check if we've got valid IndexKey */
     if (!IndexKey) return HCELL_NIL;
+
+    /* The count of the root is 16 bits: a root of a hive file may hold as many leaves as it can */
+    if (IndexKey->Count == MAXUSHORT) return HCELL_NIL;
 
     /* Get the leaf cell and key */
     LeafCell = IndexKey->List[RootSelect];
@@ -1602,9 +1615,15 @@ CmpAddSubKey(IN PHHIVE Hive,
             /* Set the new type value */
             Index->Signature = CM_KEY_INDEX_LEAF;
         }
-        else if (((Index->Signature == CM_KEY_INDEX_LEAF) ||
-                  (Index->Signature == CM_KEY_HASH_LEAF)) &&
-                  (Index->Count >= CmpMaxIndexPerHblock))
+
+        /*
+         * An old/hashed leaf (also one just converted: a fast leaf of a hive
+         * file may hold more entries than an index leaf is allowed) that is
+         * full gets a root, and the new entry goes into a leaf of it
+         */
+        if (((Index->Signature == CM_KEY_INDEX_LEAF) ||
+             (Index->Signature == CM_KEY_HASH_LEAF)) &&
+             (Index->Count >= CmpMaxIndexPerHblock))
         {
             /* This is an old/hashed leaf that's gotten too large, root it */
             IndexCell = HvAllocateCell(Hive,
