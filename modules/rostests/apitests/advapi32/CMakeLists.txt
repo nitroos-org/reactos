@@ -35,6 +35,7 @@ list(APPEND SOURCE
     OpenThreadTokenLeak.c
     Hash.c
     HKEY_CLASSES_ROOT.c
+    GetUserNameImpersonated.c
     IsTextUnicode.c
     LockServiceDatabase.c
     LookupAccountSidCaller.c
