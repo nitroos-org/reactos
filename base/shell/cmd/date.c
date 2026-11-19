@@ -43,6 +43,8 @@ static WORD awMonths[2][13] =
 };
 
 
+static DWORD dwSetDateError = ERROR_SUCCESS;
+
 static VOID
 PromptDateString(VOID)
 {
@@ -165,11 +167,26 @@ ParseDate (LPTSTR s)
         (d.wDay >= 1 && d.wDay <= awMonths[leap][d.wMonth]) &&
         (d.wYear >= 1980 && d.wYear <= 2099))
     {
-        SetLocalTime (&d);
+        /* The entry was understood; whether the clock could be set is reported by the caller */
+        if (!SetLocalTime(&d))
+            dwSetDateError = GetLastError();
         return TRUE;
     }
 
     return FALSE;
+}
+
+/* The result of a date that was understood: 0, or the system's text for why the clock was not set
+ * (for a user without SeSystemtimePrivilege, error 1314) and errorlevel 1 */
+static INT
+SetDateResult(VOID)
+{
+    if (dwSetDateError == ERROR_SUCCESS)
+        return 0;
+
+    ErrorMessage(dwSetDateError, NULL);
+    nErrorLevel = 1;
+    return 1;
 }
 
 
@@ -189,6 +206,7 @@ INT cmd_date(LPTSTR param)
     }
 
     nErrorLevel = 0;
+    dwSetDateError = ERROR_SUCCESS;
 
     /* Build the parameter array */
     arg = split(param, &argc, FALSE, FALSE);
@@ -230,7 +248,7 @@ INT cmd_date(LPTSTR param)
             if (ParseDate(szDate))
             {
                 freep(arg);
-                return 0;
+                return SetDateResult();
             }
         }
         else
@@ -238,7 +256,7 @@ INT cmd_date(LPTSTR param)
             if (ParseDate(arg[nDateString]))
             {
                 freep(arg);
-                return 0;
+                return SetDateResult();
             }
 
             /* Force input the next time around */

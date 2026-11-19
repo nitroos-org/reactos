@@ -29,6 +29,8 @@
 #ifdef INCLUDE_CMD_TIME
 
 
+static DWORD dwSetTimeError = ERROR_SUCCESS;
+
 static BOOL ParseTime (LPTSTR s)
 {
     SYSTEMTIME t;
@@ -123,9 +125,23 @@ static BOOL ParseTime (LPTSTR s)
     if (t.wHour > 23 || t.wMinute > 60 || t.wSecond > 60 || t.wMilliseconds > 999)
         return FALSE;
 
-    SetLocalTime (&t);
+    /* The entry was understood; whether the clock could be set is reported by the caller */
+    if (!SetLocalTime(&t))
+        dwSetTimeError = GetLastError();
 
     return TRUE;
+}
+
+/* The result of a time that was understood: 0, or the system's text for why the clock was not set
+ * (for a user without SeSystemtimePrivilege, error 1314) and errorlevel 1 */
+static INT SetTimeResult(VOID)
+{
+    if (dwSetTimeError == ERROR_SUCCESS)
+        return 0;
+
+    ErrorMessage(dwSetTimeError, NULL);
+    nErrorLevel = 1;
+    return 1;
 }
 
 
@@ -144,6 +160,7 @@ INT cmd_time(LPTSTR param)
     }
 
     nErrorLevel = 0;
+    dwSetTimeError = ERROR_SUCCESS;
 
     /* Build the parameter array */
     arg = split(param, &argc, FALSE, FALSE);
@@ -187,7 +204,7 @@ INT cmd_time(LPTSTR param)
             if (ParseTime(szTime))
             {
                 freep(arg);
-                return 0;
+                return SetTimeResult();
             }
         }
         else
@@ -195,7 +212,7 @@ INT cmd_time(LPTSTR param)
             if (ParseTime(arg[nTimeString]))
             {
                 freep(arg);
-                return 0;
+                return SetTimeResult();
             }
 
             /* Force input the next time around */
