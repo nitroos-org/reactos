@@ -19,6 +19,10 @@
 #define NDEBUG
 #include <debug.h>
 
+#ifndef SE_TAKE_OWNERSHIP_PRIVILEGE
+#define SE_TAKE_OWNERSHIP_PRIVILEGE 9L
+#endif
+
 /*
  * The DACLs are built entry by entry, not from an SDDL string: the string parser of advapi32 mis-reads a SID
  * written as S-1-5-x in every entry but the last (it gets the sub-authorities of the text behind it).
@@ -792,7 +796,124 @@ static const PCWSTR BootFiles[] =
     L"freeldr.sys", L"freeldr.ini", L"rosload.exe", L"bootsect.ros", L"mbr.old"
 };
 
-/* Each boot file in the root RootPath ("X:\") gets the DACL of a boot file, unless its DACL is protected already */
+static BOOL
+IsSystemOrAdministrators(
+    _In_ PSID pSid)
+{
+    return IsWellKnownSid(pSid, WinLocalSystemSid) || IsWellKnownSid(pSid, WinBuiltinAdministratorsSid);
+}
+
+/* What only SYSTEM and the Administrators may do to a boot file: change it, delete it, change its security */
+#define BOOT_FILE_WRITE_ACCESS (FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES | \
+                                DELETE | WRITE_DAC | WRITE_OWNER | GENERIC_WRITE | GENERIC_ALL)
+
+/*
+ * A boot file is in order when SYSTEM or the Administrators own it (the owner may always change the DACL) and
+ * no entry of its DACL lets anybody else write, delete or re-secure it. Such a file is left as it is: an
+ * administrator may have added entries that only read. Whether the DACL is protected says nothing: a user who
+ * could replace the file on an older install (Authenticated Users: Modify) owns the new one and may have given
+ * it a protected DACL of its own.
+ */
+static BOOL
+BootFileIsSecured(
+    _In_ PCWSTR pszPath)
+{
+    PSECURITY_DESCRIPTOR pSd = NULL;
+    PSID pOwner = NULL;
+    PACL pDacl = NULL;
+    PACE_HEADER pHeader;
+    BOOL bResult = FALSE;
+    DWORD i;
+
+    if (GetNamedSecurityInfoW((PWSTR)pszPath, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                              &pOwner, NULL, &pDacl, NULL, &pSd) != ERROR_SUCCESS)
+    {
+        return FALSE;
+    }
+
+    /* No DACL grants everything */
+    if (pOwner && IsValidSid(pOwner) && IsSystemOrAdministrators(pOwner) && pDacl)
+    {
+        bResult = TRUE;
+        for (i = 0; i < pDacl->AceCount; i++)
+        {
+            if (!GetAce(pDacl, i, (PVOID *)&pHeader))
+            {
+                bResult = FALSE;
+                break;
+            }
+            if (pHeader->AceFlags & INHERIT_ONLY_ACE)
+                continue;
+            if (pHeader->AceType == ACCESS_DENIED_ACE_TYPE || pHeader->AceType == ACCESS_DENIED_OBJECT_ACE_TYPE ||
+                pHeader->AceType == ACCESS_DENIED_CALLBACK_ACE_TYPE || pHeader->AceType == ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE)
+            {
+                continue;
+            }
+            /* An allowing entry of another kind is not judged: secure the file */
+            if (pHeader->AceType != ACCESS_ALLOWED_ACE_TYPE)
+            {
+                bResult = FALSE;
+                break;
+            }
+            if ((((PACCESS_ALLOWED_ACE)pHeader)->Mask & BOOT_FILE_WRITE_ACCESS) &&
+                !IsSystemOrAdministrators((PSID)&((PACCESS_ALLOWED_ACE)pHeader)->SidStart))
+            {
+                bResult = FALSE;
+                break;
+            }
+        }
+    }
+
+    LocalFree(pSd);
+    return bResult;
+}
+
+/*
+ * The boot file pszPath gets the Administrators for its owner and the DACL of a boot file, unless it is in order
+ * already. The owner goes first (with the take-ownership privilege, whatever the DACL a user left on the file
+ * says): the owner may always change the DACL, so a user who stays the owner could open the file again.
+ */
+static VOID
+SecureBootFile(
+    _In_ PCWSTR pszPath)
+{
+    BYTE Administrators[SECURITY_MAX_SID_SIZE];
+    DWORD cbAdministrators = sizeof(Administrators), dwError;
+    PSECURITY_DESCRIPTOR pSd;
+    PACL pAcl = NULL;
+    BOOL bPresent, bDefaulted;
+    BOOLEAN bWasEnabled;
+    NTSTATUS Status;
+
+    if (GetFileAttributesW(pszPath) == INVALID_FILE_ATTRIBUTES || BootFileIsSecured(pszPath))
+        return;
+    if (!CreateWellKnownSid(WinBuiltinAdministratorsSid, NULL, Administrators, &cbAdministrators))
+        return;
+
+    Status = RtlAdjustPrivilege(SE_TAKE_OWNERSHIP_PRIVILEGE, TRUE, FALSE, &bWasEnabled);
+    dwError = SetNamedSecurityInfoW((PWSTR)pszPath, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION,
+                                    (PSID)Administrators, NULL, NULL, NULL);
+    if (NT_SUCCESS(Status) && !bWasEnabled)
+        RtlAdjustPrivilege(SE_TAKE_OWNERSHIP_PRIVILEGE, FALSE, FALSE, &bWasEnabled);
+    if (dwError != ERROR_SUCCESS)
+        DPRINT1("Failed to give %S to the Administrators, error: %lu\n", pszPath, dwError);
+
+    pSd = BuildProfileDescriptor(ProfileDirBootFile, NULL);
+    if (!pSd)
+        return;
+    if (GetSecurityDescriptorDacl(pSd, &bPresent, &pAcl, &bDefaulted) && bPresent && pAcl)
+    {
+        dwError = SetNamedSecurityInfoW((PWSTR)pszPath,
+                                        SE_FILE_OBJECT,
+                                        DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                                        NULL, NULL, pAcl, NULL);
+        if (dwError != ERROR_SUCCESS)
+            DPRINT1("Failed to secure %S, error: %lu\n", pszPath, dwError);
+    }
+    LocalFree(pSd);
+}
+
+/* Each boot file in the root RootPath ("X:\") is secured (SecureBootFile) */
 static VOID
 SecureBootFiles(
     _In_ PCWSTR pszRoot)
@@ -803,7 +924,7 @@ SecureBootFiles(
     for (i = 0; i < ARRAYSIZE(BootFiles); i++)
     {
         if (SUCCEEDED(StringCchPrintfW(szPath, ARRAYSIZE(szPath), L"%s%s", pszRoot, BootFiles[i])))
-            SecureExistingProfileDirectory(szPath, ProfileDirBootFile, NULL, FALSE);
+            SecureBootFile(szPath);
     }
 }
 
