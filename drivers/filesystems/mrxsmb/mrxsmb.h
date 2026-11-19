@@ -104,6 +104,7 @@ typedef struct _SMB_VNETROOT
     BOOLEAN Explicit;               /* explicit credentials: reconnects must not fall back to single sign-on */
     BOOLEAN Deleted;                /* IOCTL_SMBCONN_DELETE ended it: no reconnect, not listed */
     BOOLEAN IsUse;                  /* made by a tree connect (holds the identity for the server, smbupcall.h) */
+    BOOLEAN Probe;                  /* a \;#: name: asks the engine whether the credentials fit the identity held for the server */
     WCHAR Local;                    /* drive letter of a \;X: name, 0 = none */
     ULONGLONG UseId;
     PMRX_V_NET_ROOT VNetRoot;

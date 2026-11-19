@@ -203,6 +203,53 @@ EntryServerIs(PSMBCONN_ENUM_OUTPUT Uses, PSMBCONN_ENTRY e, LPCWSTR Remote)
     return n == m && _wcsnicmp(Theirs, Remote, n) == 0;
 }
 
+/* The password (and the rest) of an EA buffer never outlives the call that used it */
+static
+VOID
+WipeEa(PVOID Ea, ULONG Bytes)
+{
+    if (Ea != NULL)
+    {
+        SecureZeroMemory(Ea, Bytes);
+        HeapFree(GetProcessHeap(), 0, Ea);
+    }
+}
+
+/*
+ * Do the credentials of Ea (user, domain, password) fit the identity the caller's logon session
+ * uses for the server of Remote? A second explicit use of a name that is connected never reaches
+ * the driver (rdbss reuses the connection), so the driver is asked with a create of a \;#: name
+ * (smbconn.h) that the engine answers by comparing and the driver never keeps.
+ */
+static
+NTSTATUS
+ProbeCredentials(LPCWSTR Remote, SIZE_T RemoteChars, const LUID *LogonId, PVOID Ea, ULONG EaLength)
+{
+    static const WCHAR Device[] = SMBCONN_REDIRECTOR_PREFIX;
+    UNICODE_STRING NtName;
+    OBJECT_ATTRIBUTES Attributes;
+    IO_STATUS_BLOCK Iosb;
+    HANDLE Handle;
+    PWSTR Name;
+    SIZE_T Chars = wcslen(Device) + 24 + RemoteChars + 1;
+    NTSTATUS Status;
+
+    Name = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, Chars * sizeof(WCHAR));
+    if (Name == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    _snwprintf(Name, Chars - 1, L"%s\\;#:%08lx%08lx%.*s", Device, (ULONG)LogonId->HighPart, LogonId->LowPart,
+               (int)(RemoteChars - 1), Remote + 1);
+    RtlInitUnicodeString(&NtName, Name);
+    InitializeObjectAttributes(&Attributes, &NtName, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = NtCreateFile(&Handle, SYNCHRONIZE, &Attributes, &Iosb, NULL, FILE_ATTRIBUTE_NORMAL,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_OPEN_IF,
+                          FILE_CREATE_TREE_CONNECTION | FILE_SYNCHRONOUS_IO_NONALERT, Ea, EaLength);
+    if (NT_SUCCESS(Status))
+        NtClose(Handle);
+    HeapFree(GetProcessHeap(), 0, Name);
+    return Status;
+}
+
 /* "\\server\share[\path]" without trailing separators; FALSE when it is not one */
 static
 BOOL
@@ -466,9 +513,25 @@ NPAddConnection3(HWND hwndOwner,
             return WN_BAD_PASSWORD;
     }
 
+    /* The explicit credentials, as the EA buffer of the tree connect (and of the credential check) */
+    if (Explicit)
+    {
+        EaAlloc = 3 * (FIELD_OFFSET(FILE_FULL_EA_INFORMATION, EaName) + 32 + 8) +
+                  (ULONG)((UserChars + DomainChars + PasswordChars) * sizeof(WCHAR));
+        Ea = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, EaAlloc);
+        if (Ea == NULL)
+            return WN_OUT_OF_MEMORY;
+        EaLength = PutEa(Ea, 0, &Previous, SMBCONN_EA_USERNAME, User, UserChars);
+        EaLength = PutEa(Ea, EaLength, &Previous, SMBCONN_EA_DOMAIN, Domain, DomainChars);
+        EaLength = PutEa(Ea, EaLength, &Previous, SMBCONN_EA_PASSWORD, lpPassword, PasswordChars);
+    }
+
     Uses = GetUses(&Error);
     if (Uses == NULL)
+    {
+        WipeEa(Ea, EaAlloc);
         return Error;
+    }
     if (Explicit)
     {
         /* Explicit credentials become the identity for the server, and connections that plain UNC
@@ -484,15 +547,19 @@ NPAddConnection3(HWND hwndOwner,
         HeapFree(GetProcessHeap(), 0, Uses);
         Uses = GetUses(&Error);
         if (Uses == NULL)
+        {
+            WipeEa(Ea, EaAlloc);
             return Error;
+        }
     }
 
     /* A connection to the same name without a drive letter may exist: rdbss would use it whatever
-     * the credentials of this call, so they are compared first */
+     * the credentials of this call, so they are compared first. The user name here; the password
+     * by the engine (ProbeCredentials), which is the only one that has the other one. */
     if (Letter == 0 && Explicit)
     {
         WCHAR Want[DNLEN + UNLEN + 260];
-        BOOL Conflict = FALSE;
+        BOOL Conflict = FALSE, Held = FALSE;
 
         _snwprintf(Want, ARRAYSIZE(Want), L"%.*s%s%.*s", (int)DomainChars, Domain ? Domain : L"",
                    DomainChars ? L"\\" : L"", (int)UserChars, User);
@@ -507,10 +574,29 @@ NPAddConnection3(HWND hwndOwner,
                 e->UserLength != wcslen(Want) * sizeof(WCHAR) ||
                 _wcsnicmp((PCWSTR)((PUCHAR)Uses + e->UserOffset), Want, wcslen(Want)) != 0)
                 Conflict = TRUE;    /* another identity, or a connection in use that could not be ended */
+            else
+                Held = TRUE;
         }
         HeapFree(GetProcessHeap(), 0, Uses);
         if (Conflict)
+        {
+            WipeEa(Ea, EaAlloc);
             return SESSION_CREDENTIAL_CONFLICT;
+        }
+        if (Held && lpPassword == NULL)
+        {
+            /* The user again with no password given: the connection that is there (Windows Server 2022:
+             * net use \\server\share /user:u with a connection of u is a success) */
+            WipeEa(Ea, EaAlloc);
+            return WN_SUCCESS;
+        }
+        if (Held)
+        {
+            /* The same user already uses the name: the connection stays, if the password is the same */
+            Status = ProbeCredentials(Remote, RemoteChars, &LogonId, Ea, EaLength);
+            WipeEa(Ea, EaAlloc);
+            return (Status == SMBCONN_STATUS_PROBE_OK || NT_SUCCESS(Status)) ? WN_SUCCESS : StatusToError(Status);
+        }
     }
     else
     {
@@ -521,7 +607,10 @@ NPAddConnection3(HWND hwndOwner,
     i = (DWORD)(wcslen(Device) + 24 + RemoteChars + 1);
     Name = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, i * sizeof(WCHAR));
     if (Name == NULL)
+    {
+        WipeEa(Ea, EaAlloc);
         return WN_OUT_OF_MEMORY;
+    }
     if (Letter != 0)
         _snwprintf(Name, i - 1, L"%s\\;%c:%08lx%08lx%.*s", Device, Letter, (ULONG)LogonId.HighPart, LogonId.LowPart,
                    (int)(RemoteChars - 1), Remote + 1);
@@ -531,34 +620,16 @@ NPAddConnection3(HWND hwndOwner,
     {
         /* A drive whose target could not be read back could not be cancelled either */
         HeapFree(GetProcessHeap(), 0, Name);
+        WipeEa(Ea, EaAlloc);
         return ERROR_BAD_NETPATH;
     }
     RtlInitUnicodeString(&NtName, Name);
-
-    if (Explicit)
-    {
-        EaAlloc = 3 * (FIELD_OFFSET(FILE_FULL_EA_INFORMATION, EaName) + 32 + 8) +
-                  (ULONG)((UserChars + DomainChars + PasswordChars) * sizeof(WCHAR));
-        Ea = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, EaAlloc);
-        if (Ea == NULL)
-        {
-            HeapFree(GetProcessHeap(), 0, Name);
-            return WN_OUT_OF_MEMORY;
-        }
-        EaLength = PutEa(Ea, 0, &Previous, SMBCONN_EA_USERNAME, User, UserChars);
-        EaLength = PutEa(Ea, EaLength, &Previous, SMBCONN_EA_DOMAIN, Domain, DomainChars);
-        EaLength = PutEa(Ea, EaLength, &Previous, SMBCONN_EA_PASSWORD, lpPassword, PasswordChars);
-    }
 
     InitializeObjectAttributes(&Attributes, &NtName, OBJ_CASE_INSENSITIVE, NULL, NULL);
     Status = NtCreateFile(&Handle, SYNCHRONIZE, &Attributes, &Iosb, NULL, FILE_ATTRIBUTE_NORMAL,
                           FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_OPEN_IF,
                           FILE_CREATE_TREE_CONNECTION | FILE_SYNCHRONOUS_IO_NONALERT, Ea, EaLength);
-    if (Ea != NULL)
-    {
-        SecureZeroMemory(Ea, EaAlloc);
-        HeapFree(GetProcessHeap(), 0, Ea);
-    }
+    WipeEa(Ea, EaAlloc);
     if (!NT_SUCCESS(Status))
     {
         TRACE("tree connect %wZ: %lx\n", &NtName, Status);
