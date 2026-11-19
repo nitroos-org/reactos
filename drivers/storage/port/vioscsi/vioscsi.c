@@ -47,10 +47,9 @@
 #include <ntddscsi.h>
 
 #define VioScsiWmi_MofResourceName L"MofResource"
+#endif
 
 #include "resources.h"
-#include "..\build\vendor.ver"
-#endif
 
 #define VIOSCSI_SETUP_GUID_INDEX             0
 #define VIOSCSI_MS_ADAPTER_INFORM_GUID_INDEX 1
@@ -61,7 +60,7 @@ BOOLEAN IsCrashDumpMode;
 
 /* The function type declarations (sp_DRIVER_INITIALIZE DriverEntry; HW_STARTIO VioScsiStartIo; ...) of the
  * Windows headers are static analysis annotations; the prototypes follow below. */
-NTSTATUS NTAPI DriverEntry(IN PDRIVER_OBJECT DriverObject, IN PUNICODE_STRING RegistryPath);
+ULONG DriverEntry(IN PVOID DriverObject, IN PVOID RegistryPath);
 
 #ifdef EVENT_TRACING
 PVOID TraceContext = NULL;
