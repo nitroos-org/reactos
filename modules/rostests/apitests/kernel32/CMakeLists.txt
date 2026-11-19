@@ -183,6 +183,7 @@ list(APPEND SOURCE
     FileCloseLockedDup.c
     FileCutAfterClose.c
     FileDeleteMapped.c
+    FileFlushAllocCut.c
     FileLockCloseOther.c
     FileLockSpan.c
     FileLockZeroLength.c
