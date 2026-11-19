@@ -47,6 +47,11 @@
 /* RDBSS-private FOBX flag (a bit fcb.h does not use): the cleanup of the
  * handle has started (set under the FCB, before its locks are released) */
 #define RXP_FOBX_FLAG_CLEANUP_STARTED 0x40000000
+/* RDBSS-private LOWIO_CONTEXT flags of a single unlock: the local lock was
+ * released before the request went to the mini-redirector (once, also when
+ * the request is retried), and it was not there */
+#define RXP_LOWIO_FLAG_LOCAL_UNLOCKED 0x2000
+#define RXP_LOWIO_FLAG_LOCAL_MISSED 0x1000
 
 typedef
 NTSTATUS
@@ -8637,21 +8642,14 @@ RxLowIoLockControlShellCompletion(
             break;
 
         case LOWIO_OP_UNLOCK:
-            /* Drop the local lock whatever the server said: the server's
-             * view is authoritative and a missing local lock is harmless */
+            /* The local lock was dropped before the request went to the
+             * server (RxLowIoLockControlShell), whatever the server says: the
+             * server's view is authoritative and a missing local lock is
+             * harmless; an unlock of a range the handle did not hold locally
+             * still fails */
+            if (NT_SUCCESS(Status) && BooleanFlagOn(LowIoContext->Flags, RXP_LOWIO_FLAG_LOCAL_MISSED))
             {
-                LARGE_INTEGER Length;
-                NTSTATUS LocalStatus;
-
-                Length.QuadPart = LowIoContext->ParamsFor.Locks.Length;
-                LocalStatus = FsRtlFastUnlockSingle(&Fcb->Specific.Fcb.FileLock, Stack->FileObject,
-                                                    &Stack->Parameters.LockControl.ByteOffset, &Length,
-                                                    IoGetRequestorProcess(Irp),
-                                                    LowIoContext->ParamsFor.Locks.Key, NULL, FALSE);
-                if (NT_SUCCESS(Status) && !NT_SUCCESS(LocalStatus))
-                {
-                    Status = LocalStatus;
-                }
+                Status = STATUS_RANGE_NOT_LOCKED;
             }
             break;
 
@@ -8720,6 +8718,25 @@ RxLowIoLockControlShell(
             case IRP_MN_UNLOCK_SINGLE:
                 RxInitializeLowIoContext(LowIoContext, LOWIO_OP_UNLOCK);
                 LowIoContext->ParamsFor.Locks.Length = Stack->Parameters.LockControl.Length->QuadPart;
+
+                /* Drop the local lock first, as unlock-all does. Dropped
+                 * after the server's answer, it was still in the FILE_LOCK
+                 * when the server already granted the range to another
+                 * handle: that handle's lock was refused locally after the
+                 * server granted it (and stayed held at the server) */
+                if (!BooleanFlagOn(LowIoContext->Flags, RXP_LOWIO_FLAG_LOCAL_UNLOCKED))
+                {
+                    NTSTATUS LocalStatus;
+
+                    LocalStatus = FsRtlFastUnlockSingle(&Fcb->Specific.Fcb.FileLock, Stack->FileObject,
+                                                        &Stack->Parameters.LockControl.ByteOffset,
+                                                        Stack->Parameters.LockControl.Length,
+                                                        IoGetRequestorProcess(Irp),
+                                                        Stack->Parameters.LockControl.Key, NULL, FALSE);
+                    InterlockedOr16((volatile SHORT *)&LowIoContext->Flags,
+                                    (SHORT)(RXP_LOWIO_FLAG_LOCAL_UNLOCKED |
+                                            (NT_SUCCESS(LocalStatus) ? 0 : RXP_LOWIO_FLAG_LOCAL_MISSED)));
+                }
                 break;
 
             case IRP_MN_UNLOCK_ALL:
