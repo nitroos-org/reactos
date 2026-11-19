@@ -869,6 +869,10 @@ FormatPartition(
         return STATUS_UNRECOGNIZED_VOLUME;
     }
 
+    /* The EFI system partition is always FAT32: that is what the firmware reads */
+    if (IsEfiSystemPartition(PartEntry))
+        FileSystemName = L"FAT32";
+
     /*
      * Prepare the partition for formatting (for MBR disks, reset the
      * partition type), and adjust the file system name in case of FAT

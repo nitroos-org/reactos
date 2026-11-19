@@ -2026,6 +2026,19 @@ CreateInstallPartition:
     ASSERT(CurrentPartition);
     ASSERT(!IsContainerPartition(CurrentPartition->PartitionType));
 
+    /* UEFI firmware boots from GPT disks only; an MBR disk that still holds partitions cannot be used */
+    if (IsMbrDiskUnusableForUefi(CurrentPartition->DiskEntry))
+    {
+        PopupError("The disk you have selected uses the MBR partition style,\n"
+                   "which this UEFI computer cannot start " BRAND_PRODUCT_NAME " from.\n"
+                   "Delete all its partitions to let Setup convert it to GPT,\n"
+                   "or select another disk.\n"
+                   "Press ENTER to continue.",
+                   MUIGetString(STRING_CONTINUE),
+                   Ir, POPUP_WAIT_ENTER);
+        return SELECT_PARTITION_PAGE;
+    }
+
     /* Create the partition if the selected region is empty */
     if (!CurrentPartition->IsPartitioned)
     {
@@ -2329,6 +2342,13 @@ CreatePartitionPage(PINPUT_RECORD Ir)
     CONSOLE_SetStatusText(MUIGetString(STRING_CREATEPARTITION));
 
     MaxPartSize = GetPartEntrySizeInBytes(PartEntry);
+
+    /* UEFI: the EFI system and the reserved partitions are created first, out of this space */
+    {
+        ULONGLONG Overhead = GetEfiPartitionsOverhead(PartEntry);
+        if (Overhead && MaxPartSize > Overhead + MB)
+            MaxPartSize -= Overhead;
+    }
 
     while (TRUE)
     {
@@ -3741,6 +3761,13 @@ BootLoaderSelectPage(PINPUT_RECORD Ir)
     if (RepairUpdateFlag)
     {
         USetupData.BootLoaderLocation = 0;
+        goto Quit;
+    }
+
+    /* UEFI: the loader is a file on the EFI system partition, there is nothing to choose */
+    if (USetupData.ArchType == ARCH_Efi)
+    {
+        USetupData.BootLoaderLocation = 3;
         goto Quit;
     }
 

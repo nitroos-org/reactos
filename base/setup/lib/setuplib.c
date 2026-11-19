@@ -1008,6 +1008,44 @@ InitSystemPartition(
     PPARTENTRY OldActivePart;
 
     /*
+     * UEFI computer: the system partition is the EFI system partition of the
+     * disk where we install; it is created there if the disk has none.
+     */
+    if (PartitionList->IsUefi && InstallPartition->DiskEntry->MediaType == FixedMedia)
+    {
+        PDISKENTRY InstallDisk = InstallPartition->DiskEntry;
+
+        if (InstallDisk->DiskStyle != PARTITION_STYLE_GPT)
+        {
+            /* The firmware cannot boot from an MBR disk */
+            FsVolCallback(Context, FSVOLNOTIFY_PARTITIONERROR,
+                          ERROR_SYSTEM_PARTITION_NOT_FOUND, 0);
+            return FALSE;
+        }
+
+        SystemPartition = EnsureEfiSystemPartition(PartitionList, InstallDisk);
+        if (!SystemPartition)
+        {
+            FsVolCallback(Context, FSVOLNOTIFY_PARTITIONERROR,
+                          ERROR_SYSTEM_PARTITION_NOT_FOUND, 0);
+            return FALSE;
+        }
+        *pSystemPartition = SystemPartition;
+        PartitionList->ForeignBootPartition = NULL;
+
+        if (!SetActivePartition(PartitionList, SystemPartition, NULL))
+        {
+            DPRINT1("SetActivePartition(0x%p) failed?!\n", SystemPartition);
+            ASSERT(FALSE);
+        }
+
+        /* A file system check of the system partition is always needed */
+        if (SystemPartition->Volume)
+            SystemPartition->Volume->NeedsCheck = TRUE;
+        return TRUE;
+    }
+
+    /*
      * If we install on a fixed disk, try to find a supported system
      * partition on the system. Otherwise if we install on a removable disk
      * use the install partition as the system partition.
@@ -1520,8 +1558,11 @@ InitializeSetup(
 #if defined(SARCH_XBOX)
     pSetupData->ArchType = ARCH_Xbox;
 // #elif defined(SARCH_PC98)
-#else // TODO: Arc, UEFI
-    pSetupData->ArchType = (IsNEC_98 ? ARCH_NEC98x86 : ARCH_PcAT);
+#else // TODO: Arc
+    if (IsUefiBoot())
+        pSetupData->ArchType = ARCH_Efi;
+    else
+        pSetupData->ArchType = (IsNEC_98 ? ARCH_NEC98x86 : ARCH_PcAT);
 #endif
 
     return ERROR_SUCCESS;
