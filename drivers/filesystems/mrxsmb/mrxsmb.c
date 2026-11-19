@@ -815,6 +815,32 @@ SmbListVNetRoot(PMRX_V_NET_ROOT VNetRoot, PSMB_VNETROOT Ext)
     ExReleaseFastMutex(&SmbConnLock);
 }
 
+/* A failed tree connect that is about the user (the credentials, the token, the identity held for the
+ * server), not about the server or the share */
+static
+BOOLEAN
+SmbIsUsersRefusal(NTSTATUS Status)
+{
+    switch (Status)
+    {
+        case STATUS_LOGON_FAILURE:
+        case STATUS_WRONG_PASSWORD:
+        case STATUS_NO_SUCH_USER:
+        case STATUS_ACCOUNT_DISABLED:
+        case STATUS_ACCOUNT_LOCKED_OUT:
+        case STATUS_ACCOUNT_RESTRICTION:
+        case STATUS_PASSWORD_EXPIRED:
+        case STATUS_NETWORK_CREDENTIAL_CONFLICT:
+        case STATUS_ACCESS_DENIED:
+        case STATUS_NO_TOKEN:
+        case STATUS_BAD_IMPERSONATION_LEVEL:
+        case STATUS_INVALID_PARAMETER:
+            return TRUE;
+        default:
+            return FALSE;
+    }
+}
+
 static
 NTSTATUS
 NTAPI
@@ -937,7 +963,19 @@ SmbCreateVNetRoot(PMRX_CREATENETROOT_CONTEXT Context)
 Done:
     SmbWipeCredentials(&Creds);
     Context->VirtualNetRootStatus = Status;
-    Context->NetRootStatus = Status;
+    if (SmbIsUsersRefusal(Status))
+    {
+        /* The share is fine; this user's tree connect to it is what failed. Saying the net root failed
+         * would make rdbss mark it bad for everyone who uses it (other connections to the share, and
+         * every later connect to it) until it is scavenged */
+        NetRoot->MRxNetRootState = MRX_NET_ROOT_STATE_GOOD;
+        NetRoot->DeviceType = FILE_DEVICE_DISK;
+        Context->NetRootStatus = STATUS_SUCCESS;
+    }
+    else
+    {
+        Context->NetRootStatus = Status;
+    }
     Context->Callback(Context);
 
     /* rdbss expects STATUS_PENDING, the result is in the context */
