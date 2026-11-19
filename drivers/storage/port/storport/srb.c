@@ -743,9 +743,11 @@ PortPdoScheduleRequestFlowControlled(
 
         /* Check FDO flow control status. */
 
-        /* If the FDO can't handle more requests, then the request should be queued. */
+        /* If the FDO can't handle more requests, then the request should be queued: the adapter's
+           count against the adapter's limit (the unit's count against it let more through than the
+           adapter takes with several units, and parked a request of a single unit one early) */
         if (FlowControl->IsBusy || FlowControl->IsPaused ||
-            FlowControl->OutstandingRequestCount == FdoExtension->OutstandingRequestMax)
+            FdoExtension->FlowControl.OutstandingRequestCount >= FdoExtension->OutstandingRequestMax)
         {
             /* Put into FDO queue */
             InsertHeadList(&FdoExtension->FlowControl.FdoBlockedRequestsListHead,
@@ -1034,6 +1036,21 @@ PortFdoKickRequests(
 
     if (!FdoExtension->FlowControl.IsBusy && !FdoExtension->FlowControl.IsPaused)
     {
+        /*
+         * First the requests a unit admitted but the adapter had no room for, oldest first. Only
+         * a completion issued them before; when every request outstanding completed while the
+         * adapter was paused or busy, none is left to complete, and they would wait forever
+         * (they are not armed, so no timeout runs for them either).
+         */
+        while (!IsListEmpty(&FdoExtension->FlowControl.FdoBlockedRequestsListHead) &&
+               FdoExtension->FlowControl.OutstandingRequestCount < FdoExtension->OutstandingRequestMax)
+        {
+            Entry = RemoveTailList(&FdoExtension->FlowControl.FdoBlockedRequestsListHead);
+            RequestReference = CONTAINING_RECORD(Entry, QUEUED_REQUEST_REFERENCE, FdoEntry);
+            ++FdoExtension->FlowControl.OutstandingRequestCount;
+            InsertTailList(&Ready, &RequestReference->FdoEntry);
+        }
+
         KeAcquireInStackQueuedSpinLock(&FdoExtension->PdoListLock, &ListHandle);
 
         for (PdoEntry = FdoExtension->PdoListHead.Flink;
