@@ -171,7 +171,7 @@ FreeUse(LPUSE_INFO_2 Info)
 }
 
 NET_API_STATUS
-WksUseAdd(DWORD Level, LPUSE_INFO InfoStruct, DWORD *ErrorParameter)
+WksUseAdd(DWORD Level, LPUSE_INFO_ADD InfoStruct, DWORD *ErrorParameter)
 {
     LPUSE_INFO_1 Info1;
     LPWSTR User = NULL, UserName = NULL, Domain = NULL;

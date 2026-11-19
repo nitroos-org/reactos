@@ -648,7 +648,7 @@ NetUseAdd(
     _Out_ LPDWORD ParmError)
 {
     NET_API_STATUS status;
-    USE_INFO UseInfo;
+    USE_INFO_ADD UseInfo;
 
     TRACE("NetUseAdd(%s %d %p %p)\n", debugstr_w(UncServerName),
           Level, Buf, ParmError);

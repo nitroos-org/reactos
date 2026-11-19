@@ -1012,7 +1012,7 @@ __stdcall
 NetrUseAdd(
     WKSSVC_IMPERSONATE_HANDLE ServerName,
     unsigned long Level,
-    LPUSE_INFO InfoStruct,
+    LPUSE_INFO_ADD InfoStruct,
     unsigned long *ErrorParameter)
 {
     TRACE("NetrUseAdd(%S %lu)\n", ServerName, Level);
