@@ -130,8 +130,13 @@ SmbConnect(PMRX_V_NET_ROOT VNetRoot, PSMB_VNETROOT Ext, PIRP Irp)
         return Status;
     }
 
-    /* The engine gets a handle to the user's (copied) token when it takes the request */
-    Request->Token = Ext->ClientContext.ClientToken;
+    /* The engine gets a handle to the reduced copy of the user's token when it takes the request */
+    if (Ext->EngineToken == NULL)
+    {
+        SmbReleaseRequest(Request);
+        return STATUS_NO_TOKEN;
+    }
+    Request->Token = Ext->EngineToken;
     ObReferenceObject(Request->Token);
     Request->Irp = Irp;
 
@@ -404,6 +409,148 @@ SmbSrvCallWinnerNotify(PMRX_SRV_CALL SrvCall, BOOLEAN ThisMinirdrIsTheWinner, PV
     return STATUS_SUCCESS;
 }
 
+#ifndef SE_GROUP_USE_FOR_DENY_ONLY
+#define SE_GROUP_USE_FOR_DENY_ONLY 0x00000010
+#endif
+#ifndef SE_GROUP_INTEGRITY
+#define SE_GROUP_INTEGRITY 0x00000020
+#endif
+#ifndef DISABLE_MAX_PRIVILEGE
+#define DISABLE_MAX_PRIVILEGE 0x1
+#endif
+
+/* ntoskrnl export (NDK) */
+NTSTATUS
+NTAPI
+ObSetSecurityObjectByPointer(
+    _In_ PVOID Object,
+    _In_ SECURITY_INFORMATION SecurityInformation,
+    _In_ PSECURITY_DESCRIPTOR SecurityDescriptor);
+
+/* Groups that stay enabled in the engine's copy: broad groups every local user has, which
+ * the LSA port (Everyone: connect) and system-wide readable objects grant */
+static
+BOOLEAN
+SmbKeepGroupEnabled(PSID Sid)
+{
+    static SID_IDENTIFIER_AUTHORITY LocalAuthority = {SECURITY_LOCAL_SID_AUTHORITY};
+    static SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    PISID s = Sid;
+
+    if (RtlEqualSid(Sid, SeExports->SeWorldSid) ||
+        RtlEqualSid(Sid, SeExports->SeLocalSid) ||
+        RtlEqualSid(Sid, SeExports->SeAuthenticatedUsersSid) ||
+        RtlEqualSid(Sid, SeExports->SeInteractiveSid) ||
+        RtlEqualSid(Sid, SeExports->SeAliasUsersSid))
+        return TRUE;
+    /* CONSOLE LOGON (S-1-2-1), This Organization (S-1-5-15) */
+    if (s->SubAuthorityCount == 1 &&
+        ((!memcmp(&s->IdentifierAuthority, &LocalAuthority, sizeof(LocalAuthority)) && s->SubAuthority[0] == 1) ||
+         (!memcmp(&s->IdentifierAuthority, &NtAuthority, sizeof(NtAuthority)) &&
+          s->SubAuthority[0] == SECURITY_THIS_ORGANIZATION_RID)))
+        return TRUE;
+    return FALSE;
+}
+
+/*
+ * The token the engine receives for a CONNECT: a filtered copy of the caller's (static,
+ * impersonation-level) token. Same user, same logon session (AuthenticationId), so that the
+ * engine's single sign-on works: the LSA computes the NTLM response from the logon session of the
+ * impersonating thread and needs nothing else of the token. Every privilege is removed but
+ * SeChangeNotifyPrivilege, and the user SID, the logon SID, Administrators and every other
+ * group but the broad ones of SmbKeepGroupEnabled are deny-only: impersonating it, the engine
+ * cannot open what the user, the user's logon session (window station, desktop) or the user's
+ * groups were granted, and cannot open the token again with the user's rights.
+ */
+static
+NTSTATUS
+SmbCreateEngineToken(PACCESS_TOKEN ClientToken, PACCESS_TOKEN *EngineToken)
+{
+    PTOKEN_USER User = NULL;
+    PTOKEN_GROUPS Groups = NULL, Disable = NULL;
+    ULONG i, Count;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    *EngineToken = NULL;
+    Status = SeQueryInformationToken(ClientToken, TokenUser, (PVOID *)&User);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    Status = SeQueryInformationToken(ClientToken, TokenGroups, (PVOID *)&Groups);
+    if (!NT_SUCCESS(Status))
+        goto Quit;
+
+    Count = Groups->GroupCount + 1;
+    Disable = ExAllocatePoolZero(PagedPool,
+                                 FIELD_OFFSET(TOKEN_GROUPS, Groups) + Count * sizeof(SID_AND_ATTRIBUTES),
+                                 TAG_SMB_MISC);
+    if (Disable == NULL)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Quit;
+    }
+
+    Disable->Groups[Disable->GroupCount++].Sid = User->User.Sid;
+    for (i = 0; i < Groups->GroupCount; i++)
+    {
+        if ((Groups->Groups[i].Attributes & SE_GROUP_INTEGRITY) ||
+            (Groups->Groups[i].Attributes & SE_GROUP_USE_FOR_DENY_ONLY) ||
+            SmbKeepGroupEnabled(Groups->Groups[i].Sid))
+            continue;
+        Disable->Groups[Disable->GroupCount++].Sid = Groups->Groups[i].Sid;
+    }
+
+    Status = SeFilterToken(ClientToken, DISABLE_MAX_PRIVILEGE, Disable, NULL, NULL, EngineToken);
+    if (!NT_SUCCESS(Status))
+    {
+        *EngineToken = NULL;
+        goto Quit;
+    }
+
+    /* Who may open the copy: SYSTEM, and the engine (query and impersonate only). The engine's SSPI
+     * backend opens its thread token again (OpenAsSelf) to keep it for single sign-on; with the user
+     * SID deny-only the default descriptor (the user's) no longer admits that open. */
+    {
+        static SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+        static const ULONG EngineRids[6] = {SECURITY_SERVICE_ID_BASE_RID, 589501614, 767465580, 2714278881,
+                                            1358990225, 2449632110};   /* NT SERVICE\smbengine, see upcall.c */
+        ULONG SidBuffer[2 + 6], AclBuffer[64];
+        PSID EngineSid = (PSID)SidBuffer;
+        PACL Acl = (PACL)AclBuffer;
+        SECURITY_DESCRIPTOR Sd;
+
+        RtlInitializeSid(EngineSid, &NtAuthority, 6);
+        for (i = 0; i < 6; i++)
+            *RtlSubAuthoritySid(EngineSid, i) = EngineRids[i];
+        Status = RtlCreateAcl(Acl, sizeof(AclBuffer), ACL_REVISION);
+        if (NT_SUCCESS(Status))
+            Status = RtlAddAccessAllowedAce(Acl, ACL_REVISION, TOKEN_ALL_ACCESS, SeExports->SeLocalSystemSid);
+        if (NT_SUCCESS(Status))
+            Status = RtlAddAccessAllowedAce(Acl, ACL_REVISION, TOKEN_QUERY | TOKEN_IMPERSONATE, EngineSid);
+        if (NT_SUCCESS(Status))
+            Status = RtlCreateSecurityDescriptor(&Sd, SECURITY_DESCRIPTOR_REVISION);
+        if (NT_SUCCESS(Status))
+            Status = RtlSetDaclSecurityDescriptor(&Sd, TRUE, Acl, FALSE);
+        if (NT_SUCCESS(Status))
+            Status = ObSetSecurityObjectByPointer(*EngineToken, DACL_SECURITY_INFORMATION, &Sd);
+        if (!NT_SUCCESS(Status))
+        {
+            ObDereferenceObject(*EngineToken);
+            *EngineToken = NULL;
+        }
+    }
+
+Quit:
+    if (Disable != NULL)
+        ExFreePoolWithTag(Disable, TAG_SMB_MISC);
+    if (Groups != NULL)
+        ExFreePool(Groups);
+    if (User != NULL)
+        ExFreePool(User);
+    return Status;
+}
+
 static
 NTSTATUS
 NTAPI
@@ -459,6 +606,14 @@ SmbCreateVNetRoot(PMRX_CREATENETROOT_CONTEXT Context)
         SeTokenType(Ext->ClientContext.ClientToken) == TokenImpersonation)
     {
         Status = STATUS_BAD_IMPERSONATION_LEVEL;
+        goto Done;
+    }
+
+    Status = SmbCreateEngineToken(Ext->ClientContext.ClientToken, &Ext->EngineToken);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("mrxsmb: no engine token (0x%08lx)\n", Status);
+        Ext->EngineToken = NULL;
         goto Done;
     }
 
@@ -558,6 +713,11 @@ SmbFinalizeVNetRoot(PMRX_V_NET_ROOT VNetRoot, PBOOLEAN Force)
     }
     Ext->ConnectionId = 0;
 
+    if (Ext->EngineToken != NULL)
+    {
+        ObDereferenceObject(Ext->EngineToken);
+        Ext->EngineToken = NULL;
+    }
     if (Ext->ClientContextValid)
     {
         SeDeleteClientSecurity(&Ext->ClientContext);

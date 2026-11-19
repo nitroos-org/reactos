@@ -112,6 +112,62 @@ static const NTSTATUS SpecialStatus[] = {
 
 /* NtQueryObject wants the exact size of OBJECT_BASIC_INFORMATION */
 
+/* What the token lets the engine do besides single sign-on: its privileges, the groups and the user
+ * SID that are enabled, and (SMBFUZZ_PRIVATE = a file only that user may open) whether impersonating it
+ * opens the user's own files */
+static void check_token_reduction(const SMBUP_HEADER *h, HANDLE token)
+{
+    UCHAR buf[4096];
+    TOKEN_PRIVILEGES *privs = (TOKEN_PRIVILEGES *)buf;
+    TOKEN_GROUPS *groups = (TOKEN_GROUPS *)buf;
+    TOKEN_USER *user = (TOKEN_USER *)buf;
+    ULONG nprivs = 0, enabled = 0, denyonly = 0, i, userattr = 0, admin = 0;
+    char path[MAX_PATH] = "", *gsid;
+    DWORD len, privateErr = 0;
+    HANDLE f;
+    SID_IDENTIFIER_AUTHORITY nt = {SECURITY_NT_AUTHORITY};
+    PSID admins = NULL;
+
+    AllocateAndInitializeSid(&nt, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &admins);
+    if (GetTokenInformation(token, TokenPrivileges, buf, sizeof(buf), &len))
+        nprivs = privs->PrivilegeCount;
+    if (GetTokenInformation(token, TokenUser, buf, sizeof(buf), &len))
+        userattr = user->User.Attributes;
+    if (GetTokenInformation(token, TokenGroups, buf, sizeof(buf), &len))
+    {
+        for (i = 0; i < groups->GroupCount; i++)
+        {
+            if (groups->Groups[i].Attributes & SE_GROUP_USE_FOR_DENY_ONLY)
+                denyonly++;
+            else if (groups->Groups[i].Attributes & SE_GROUP_ENABLED)
+            {
+                enabled++;
+                if (admins && EqualSid(groups->Groups[i].Sid, admins))
+                    admin = 1;
+                if (ConvertSidToStringSidA(groups->Groups[i].Sid, &gsid))
+                {
+                    logmsg("TOKENGROUP req=%I64u enabled %s", h->RequestId, gsid);
+                    LocalFree(gsid);
+                }
+            }
+        }
+    }
+    if (admins)
+        FreeSid(admins);
+    if (GetEnvironmentVariableA("SMBFUZZ_PRIVATE", path, sizeof(path)) && SetThreadToken(NULL, token))
+    {
+        f = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+        if (f != INVALID_HANDLE_VALUE)
+            CloseHandle(f);
+        else
+            privateErr = GetLastError();
+        RevertToSelf();
+    }
+    logmsg("TOKENREDUCED req=%I64u privileges=%lu user-attributes=%#lx enabled-groups=%lu deny-only=%lu admin-enabled=%lu "
+           "private-file=%s(%lu)", h->RequestId, nprivs, userattr, enabled, denyonly, admin,
+           path[0] ? (privateErr ? "denied" : "opened") : "n/a", privateErr);
+}
+
 static void check_token(const SMBUP_HEADER *h, HANDLE token)
 {
     OBJECT_BASIC_INFORMATION obi;
@@ -174,6 +230,7 @@ static void check_token(const SMBUP_HEADER *h, HANDLE token)
            dupErr, openErr, dup2Err);
     if (sid)
         LocalFree(sid);
+    check_token_reduction(h, token);
 }
 
 /* The fake share ***********************************************************/

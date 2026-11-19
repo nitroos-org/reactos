@@ -96,6 +96,7 @@ typedef struct _SMB_VNETROOT
     ULONG MaxWriteSize;
     BOOLEAN ClientContextValid;
     SECURITY_CLIENT_CONTEXT ClientContext;  /* the user who connected, for reconnects */
+    PACCESS_TOKEN EngineToken;      /* what the engine gets of it: SmbCreateEngineToken */
 } SMB_VNETROOT, *PSMB_VNETROOT;
 
 typedef struct _SMB_SRVOPEN
