@@ -133,6 +133,12 @@ LsapTerminateLogon(
     _In_ PLUID LogonId);
 
 
+/* policy.c */
+NTSTATUS
+WINAPI
+LsaIOpenPolicyTrusted(
+    _Out_ LSAPR_HANDLE *PolicyHandle);
+
 /* authport.c */
 NTSTATUS
 StartAuthenticationPort(VOID);

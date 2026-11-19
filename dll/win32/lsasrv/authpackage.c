@@ -1575,10 +1575,8 @@ LsapSetPrivileges(
     {
         TokenInfo1 = (PLSA_TOKEN_INFORMATION_V1)TokenInformation;
 
-        Status = LsarOpenPolicy(NULL,
-                                NULL,
-                                0,
-                                &PolicyHandle);
+        /* The logon runs inside lsass for the logon request, not as an RPC client of the policy: use a trusted handle */
+        Status = LsaIOpenPolicyTrusted(&PolicyHandle);
         if (!NT_SUCCESS(Status))
             return Status;
 
