@@ -116,7 +116,7 @@ SmbConnect(PMRX_V_NET_ROOT VNetRoot, PSMB_VNETROOT Ext, PIRP Irp)
     if (!Ext->ClientContextValid)
         return STATUS_NO_TOKEN;
 
-    Status = SmbAllocateRequest(SmbUpConnect, Server.Length + Share.Length, &LogonId, &Request);
+    Status = SmbAllocateRequestForIrp(SmbUpConnect, Server.Length + Share.Length, &LogonId, Irp, &Request);
     if (!NT_SUCCESS(Status))
         return Status;
 
@@ -208,7 +208,7 @@ SmbAllocateHandleRequest(PRX_CONTEXT RxContext, USHORT Opcode, ULONG VariableSiz
     if (!NT_SUCCESS(Status))
         return Status;
     VNetRoot = RxContext->pRelevantSrvOpen->pVNetRoot;
-    Status = SmbAllocateRequest(Opcode, VariableSize, &VNetRoot->LogonId, Request);
+    Status = SmbAllocateRequestForIrp(Opcode, VariableSize, &VNetRoot->LogonId, RxContext->CurrentIrp, Request);
     if (NT_SUCCESS(Status))
         (*Request)->Irp = RxContext->CurrentIrp;
     return Status;
@@ -462,6 +462,12 @@ SmbCreateVNetRoot(PMRX_CREATENETROOT_CONTEXT Context)
         goto Done;
     }
 
+    /* The routine registered with SeRegisterLogonSessionTerminatedRoutine is called only for logon
+     * sessions marked for it: without this the engine never heard of a logoff */
+    if (!NT_SUCCESS(SeMarkLogonSessionForTerminationNotification(&VNetRoot->LogonId)))
+        DPRINT1("mrxsmb: logon %lx:%lx not marked for its termination notice\n",
+                VNetRoot->LogonId.HighPart, VNetRoot->LogonId.LowPart);
+
     ExAcquireFastMutex(&Ext->ConnectLock);
     Status = SmbConnect(VNetRoot, Ext, RxContext->CurrentIrp);
     ExReleaseFastMutex(&Ext->ConnectLock);
@@ -620,7 +626,7 @@ SmbCreate(PRX_CONTEXT RxContext)
     if (!NT_SUCCESS(Status))
         return Status;
 
-    Status = SmbAllocateRequest(SmbUpCreate, Path.Length, &VNetRoot->LogonId, &Request);
+    Status = SmbAllocateRequestForIrp(SmbUpCreate, Path.Length, &VNetRoot->LogonId, RxContext->CurrentIrp, &Request);
     if (!NT_SUCCESS(Status))
         return Status;
     Request->Irp = RxContext->CurrentIrp;
@@ -813,6 +819,12 @@ SmbRead(PRX_CONTEXT RxContext)
         Chunk = min(Count - Done, SmbVNetRoot(RxContext->pRelevantSrvOpen->pVNetRoot)->MaxReadSize);
         if (Chunk == 0)
             Chunk = min(Count - Done, SMBUP_MAX_IO);
+        Status = SmbReserveReplyBytes(Request, Chunk);
+        if (!NT_SUCCESS(Status))
+        {
+            SmbReleaseRequest(Request);
+            break;
+        }
         Fixed = SmbRequestFixed(Request);
         Fixed->ConnectionId = Handle->ConnectionId;
         Fixed->FileId = Handle->FileId;
@@ -991,6 +1003,8 @@ SmbQueryDirectory(PRX_CONTEXT RxContext)
         Fixed->Flags |= SMBUP_DIR_INDEX_SPECIFIED;
     Status = SmbRequestPutBytes(Request, &Cursor, Pattern->Buffer, Pattern->Length, &Fixed->Pattern);
 
+    if (NT_SUCCESS(Status))
+        Status = SmbReserveReplyBytes(Request, OutputLength);
     if (NT_SUCCESS(Status))
         Status = SmbSendRequest(Request, 0);
     if (NT_SUCCESS(Status))

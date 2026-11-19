@@ -43,20 +43,26 @@ SmbEngineInitialize(VOID)
 /*
  * Counts Bytes of a new request against SMB_MAX_OUTSTANDING_BYTES. Over the limit
  * the caller waits for requests of others to be freed, at most the request time
- * limit. A request alone is always admitted.
+ * limit. A request alone is always admitted. The wait ends within a second when Irp
+ * (the user's request this is for; NULL for closes and other cleanup, which must not
+ * be given up) is cancelled or its thread terminates (SmbIrpCancelled), as the wait
+ * for the reply does: a killed process does not sit out the request time limit when
+ * the budget does not move (server or engine stalled).
  */
 static
 NTSTATUS
-SmbReserveBytes(ULONG Bytes)
+SmbReserveBytesFor(ULONG Bytes, PIRP Irp)
 {
     LARGE_INTEGER Slice;
     KIRQL OldIrql;
-    ULONG Waited;
+    ULONGLONG Deadline, Now;
 
     PAGED_CODE();
 
-    Slice.QuadPart = -10000000LL;   /* 1 s: a waiter that misses the event looks again */
-    for (Waited = 0; ; Waited++)
+    /* The limit is real time: every freed request wakes the waiters, so a count of wake-ups
+     * would refuse a waiter after a second or two under load */
+    Deadline = KeQueryInterruptTime() + (ULONGLONG)SmbRequestTimeoutSeconds * 10000000ULL;
+    for (;;)
     {
         KeClearEvent(&SmbEngine.BudgetEvent);
         KeAcquireSpinLock(&SmbEngine.Lock, &OldIrql);
@@ -69,12 +75,17 @@ SmbReserveBytes(ULONG Bytes)
         }
         KeReleaseSpinLock(&SmbEngine.Lock, OldIrql);
 
-        if (Waited >= SmbRequestTimeoutSeconds)
+        Now = KeQueryInterruptTime();
+        if (Now >= Deadline)
         {
             DPRINT1("mrxsmb: %lu bytes of requests outstanding, refused %lu more\n",
                     (ULONG)SmbEngine.OutstandingBytes, Bytes);
             return STATUS_INSUFFICIENT_RESOURCES;
         }
+        if (SmbIrpCancelled(Irp))
+            return STATUS_CANCELLED;
+        /* at most 1 s: a waiter that misses the event looks again */
+        Slice.QuadPart = -(LONGLONG)min(Deadline - Now, 10000000ULL);
         KeWaitForSingleObject(&SmbEngine.BudgetEvent, Executive, KernelMode, FALSE, &Slice);
     }
 }
@@ -90,6 +101,26 @@ SmbUnreserveBytes(ULONG Bytes)
     SmbEngine.OutstandingBytes -= Bytes;
     KeReleaseSpinLock(&SmbEngine.Lock, OldIrql);
     KeSetEvent(&SmbEngine.BudgetEvent, IO_NO_INCREMENT, FALSE);
+}
+
+/*
+ * A request whose reply carries data as large as it asks (READ, QUERY_DIRECTORY) counts that
+ * length too, until it is freed: the budget then bounds the reply buffers this driver holds and
+ * the reply buffers the engine allocates for all requests in flight, not only the messages.
+ */
+NTSTATUS
+SmbReserveReplyBytes(PSMB_REQUEST Request, ULONG Bytes)
+{
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    if (Request->Notification || Bytes == 0)
+        return STATUS_SUCCESS;
+    Status = SmbReserveBytesFor(Bytes, Request->Irp);
+    if (NT_SUCCESS(Status))
+        Request->ReservedBytes += Bytes;
+    return Status;
 }
 
 NTSTATUS
@@ -164,11 +195,13 @@ SmbReleaseRequest(PSMB_REQUEST Request)
         SmbFreeRequest(Request);
 }
 
+/* Irp: the user's request this message is for, whose cancellation ends the wait for the budget (NULL: none) */
 NTSTATUS
-SmbAllocateRequest(
+SmbAllocateRequestForIrp(
     USHORT Opcode,
     ULONG VariableSize,
     PLUID LogonId,
+    PIRP Irp,
     PSMB_REQUEST *Out)
 {
     PSMB_REQUEST Request;
@@ -189,7 +222,7 @@ SmbAllocateRequest(
     /* Notifications (small, sent from callbacks and timeouts) are not held back */
     if (Opcode != SmbUpLogoff && Opcode != SmbUpCancel)
     {
-        Status = SmbReserveBytes((ULONG)Total);
+        Status = SmbReserveBytesFor((ULONG)Total, Irp);
         if (!NT_SUCCESS(Status))
             return Status;
     }
@@ -237,6 +270,16 @@ SmbAllocateRequest(
 
     *Out = Request;
     return STATUS_SUCCESS;
+}
+
+NTSTATUS
+SmbAllocateRequest(
+    USHORT Opcode,
+    ULONG VariableSize,
+    PLUID LogonId,
+    PSMB_REQUEST *Out)
+{
+    return SmbAllocateRequestForIrp(Opcode, VariableSize, LogonId, NULL, Out);
 }
 
 PVOID
@@ -724,6 +767,7 @@ SmbEngineReply(PIRP Irp, PIO_STACK_LOCATION Stack)
     PSMB_REQUEST Request = NULL;
     PLIST_ENTRY Entry;
     KIRQL OldIrql;
+    BOOLEAN Valid;
 
     PAGED_CODE();
 
@@ -738,16 +782,12 @@ SmbEngineReply(PIRP Irp, PIO_STACK_LOCATION Stack)
         return STATUS_INSUFFICIENT_RESOURCES;
     RtlCopyMemory(Reply, Irp->AssociatedIrp.SystemBuffer, Length);
 
-    if (Reply->Magic != SMBUP_MAGIC ||
-        Reply->Version != SMBUP_VERSION ||
-        Reply->HeaderSize != sizeof(SMBUP_HEADER) ||
-        Reply->TotalSize != Length ||
-        Reply->Opcode <= SmbUpInvalid || Reply->Opcode >= SmbUpMaximumOpcode ||
-        Reply->Opcode == SmbUpLogoff || Reply->Opcode == SmbUpCancel)
-    {
-        ExFreePoolWithTag(Reply, TAG_SMB_REPLY);
-        return STATUS_INVALID_PARAMETER;
-    }
+    Valid = (Reply->Magic == SMBUP_MAGIC &&
+             Reply->Version == SMBUP_VERSION &&
+             Reply->HeaderSize == sizeof(SMBUP_HEADER) &&
+             Reply->TotalSize == Length &&
+             Reply->Opcode > SmbUpInvalid && Reply->Opcode < SmbUpMaximumOpcode &&
+             Reply->Opcode != SmbUpLogoff && Reply->Opcode != SmbUpCancel);
 
     KeAcquireSpinLock(&SmbEngine.Lock, &OldIrql);
     for (Entry = SmbEngine.Sent.Flink; Entry != &SmbEngine.Sent; Entry = Entry->Flink)
@@ -760,12 +800,28 @@ SmbEngineReply(PIRP Irp, PIO_STACK_LOCATION Stack)
             break;
         }
     }
-    if (Request == NULL || Request->Opcode != Reply->Opcode || Request->Generation != SmbEngine.Generation)
+    if (Request == NULL || Request->Generation != SmbEngine.Generation)
     {
         KeReleaseSpinLock(&SmbEngine.Lock, OldIrql);
         ExFreePoolWithTag(Reply, TAG_SMB_REPLY);
-        /* Unknown, already timed out, or the wrong opcode for that id */
-        return STATUS_NOT_FOUND;
+        /* Unknown or already completed (timed out, cancelled, answered: a late second reply ends here) */
+        return Valid ? STATUS_NOT_FOUND : STATUS_INVALID_PARAMETER;
+    }
+    if (!Valid || Request->Opcode != Reply->Opcode)
+    {
+        /* A malformed reply, or the wrong opcode, for a request the engine took: that is its answer.
+         * Fail the request now; it waited for the full time limit before (and everything queued
+         * behind its thread with it). The request leaves the Sent list, so a later reply for the
+         * same id finds nothing and is not completed twice. */
+        ULONGLONG RequestId = Request->RequestId;
+
+        /* After this the waiter may free the request: do not touch it again */
+        SmbCompleteLocked(Request, STATUS_INVALID_NETWORK_RESPONSE);
+        KeReleaseSpinLock(&SmbEngine.Lock, OldIrql);
+        ExFreePoolWithTag(Reply, TAG_SMB_REPLY);
+        DPRINT1("mrxsmb: reply for request %I64u refused (%s), request failed\n",
+                RequestId, Valid ? "opcode" : "header");
+        return Valid ? STATUS_NOT_FOUND : STATUS_INVALID_PARAMETER;
     }
 
     Request->Reply = Reply;
