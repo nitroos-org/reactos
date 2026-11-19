@@ -938,6 +938,62 @@ RepairIntroPage(PINPUT_RECORD Ir)
 }
 
 /*
+ * Tells that no harddisk was found, and which kinds of storage controllers
+ * this Setup has a driver for. The names are the keys of the boot-start
+ * storage driver sections of txtsetup.sif ([SCSI.Load] and [BusExtenders.Load]),
+ * so the list follows the drivers of the build. "disk" is the disk class
+ * driver and not a controller driver.
+ */
+static VOID
+DisplayNoHardDiskError(PINPUT_RECORD Ir)
+{
+    static const PCWSTR Sections[] = {L"SCSI.Load", L"BusExtenders.Load"};
+    CHAR Names[256] = ", ";
+    CHAR Name[32], Search[40];
+    INFCONTEXT Context;
+    PCWSTR Key;
+    ULONG i, j;
+    SIZE_T Length;
+
+    if (USetupData.SetupInf != INVALID_HANDLE_VALUE)
+    {
+        for (i = 0; i < RTL_NUMBER_OF(Sections); ++i)
+        {
+            if (!SpInfFindFirstLine(USetupData.SetupInf, Sections[i], NULL, &Context))
+                continue;
+            do
+            {
+                if (!INF_GetDataField(&Context, 0, &Key) || !Key)
+                    continue;
+                for (j = 0; j < sizeof(Name) - 1 && Key[j]; ++j)
+                    Name[j] = (CHAR)Key[j];
+                Name[j] = ANSI_NULL;
+                INF_FreeData(Key);
+
+                RtlStringCbPrintfA(Search, sizeof(Search), ", %s, ", Name);
+                if (_stricmp(Name, "disk") != 0 && strstr(Names, Search) == NULL)
+                {
+                    RtlStringCbCatA(Names, sizeof(Names), Name);
+                    RtlStringCbCatA(Names, sizeof(Names), ", ");
+                }
+            } while (SpInfFindNextLine(&Context, &Context));
+        }
+    }
+
+    /* Strip the leading and trailing separators */
+    Length = strlen(Names);
+    if (Length > 2)
+    {
+        Names[Length - 2] = ANSI_NULL;
+        MUIDisplayError(ERROR_NO_HDD, Ir, POPUP_WAIT_ENTER, Names + 2);
+    }
+    else
+    {
+        MUIDisplayError(ERROR_NO_HDD, Ir, POPUP_WAIT_ENTER, "none");
+    }
+}
+
+/*
  * Displays the UpgradeRepairPage.
  *
  * Next pages:
@@ -966,7 +1022,7 @@ UpgradeRepairPage(PINPUT_RECORD Ir)
         }
         else if (IsListEmpty(&PartitionList->DiskListHead))
         {
-            MUIDisplayError(ERROR_NO_HDD, Ir, POPUP_WAIT_ENTER);
+            DisplayNoHardDiskError(Ir);
             return QUIT_PAGE;
         }
     }
@@ -1573,7 +1629,7 @@ SelectPartitionPage(PINPUT_RECORD Ir)
         }
         else if (IsListEmpty(&PartitionList->DiskListHead))
         {
-            MUIDisplayError(ERROR_NO_HDD, Ir, POPUP_WAIT_ENTER);
+            DisplayNoHardDiskError(Ir);
             return QUIT_PAGE;
         }
     }
