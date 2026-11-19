@@ -1718,6 +1718,19 @@ LsapIsImplicitServiceAccount(
 }
 
 
+/* The status of a logon refused because the rights database could not be read: an internal error, or the lack of memory */
+static
+NTSTATUS
+LsapLogonRightsFailure(
+    IN NTSTATUS Status)
+{
+    if (Status == STATUS_INSUFFICIENT_RESOURCES || Status == STATUS_NO_MEMORY)
+        return Status;
+
+    return STATUS_INTERNAL_ERROR;
+}
+
+
 /*
  * Checks the logon rights of the user and of the groups of the token for the logon type.
  * Returns STATUS_LOGON_TYPE_NOT_GRANTED (ERROR_LOGON_TYPE_NOT_GRANTED, 1385) when the type is
@@ -1763,14 +1776,27 @@ LsapCheckLogonRights(
                                      TokenInfo1->User.User.Sid,
                                  ACCOUNT_VIEW,
                                  &AccountHandle);
-        if (!NT_SUCCESS(Status))
+        if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
             continue; /* no account object: no rights */
+        if (!NT_SUCCESS(Status))
+        {
+            /* Fail closed: this SID may be the one that holds a Deny right */
+            ERR("LsapCheckLogonRights: the account of a SID of the token cannot be opened (Status 0x%08lx), logon refused\n", Status);
+            LsarClose(&PolicyHandle);
+            return LsapLogonRightsFailure(Status);
+        }
 
         SystemAccess = 0;
         Status = LsarGetSystemAccessAccount(AccountHandle, &SystemAccess);
         LsarClose(&AccountHandle);
+        if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+            continue; /* an account with privileges only: no logon rights */
         if (!NT_SUCCESS(Status))
-            continue;
+        {
+            ERR("LsapCheckLogonRights: the rights of an account cannot be read (Status 0x%08lx), logon refused\n", Status);
+            LsarClose(&PolicyHandle);
+            return LsapLogonRightsFailure(Status);
+        }
 
         if (SystemAccess & DenyRight)
         {
