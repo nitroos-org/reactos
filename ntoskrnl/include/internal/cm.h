@@ -111,6 +111,7 @@
 #define CM_REGACL_OP_CREATELINK                         2
 #define CM_REGACL_OP_LINKNODE                           3
 #define CM_REGACL_OP_FOLLOWLINK                         4
+#define CM_REGACL_OP_RESTAMP                            5   /* a stored descriptor reset at boot */
 
 //
 // EnlistKeyBodyWithKCB Flags
@@ -805,6 +806,12 @@ CmpAclInitialize(VOID);
 VOID
 NTAPI
 CmpAclShutdownSystem(VOID);
+
+VOID
+NTAPI
+CmpAclBootHivesLoaded(
+    _In_ BOOLEAN SetupBoot
+);
 
 VOID
 NTAPI

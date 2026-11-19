@@ -1570,6 +1570,9 @@ NtInitializeRegistry(IN USHORT Flag)
 
     /* Release the registry lock */
     CmpUnlockRegistry();
+
+    /* Registry key security: the checks that need every machine hive (and the file system) */
+    CmpAclBootHivesLoaded(SetupBoot);
     return STATUS_SUCCESS;
 }
 
