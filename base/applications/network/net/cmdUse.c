@@ -267,7 +267,7 @@ cmdUse(
     LPCWSTR Device = NULL, Remote = NULL, User = NULL;
     LPWSTR Password = NULL;
     WCHAR Typed[PWLEN + 1], Access[MAX_PATH];
-    BOOL Delete = FALSE, PasswordPrompt = FALSE, HaveRemember = FALSE, Remember = FALSE;
+    BOOL Delete = FALSE, PasswordPrompt = FALSE, HaveRemember = FALSE, Remember = FALSE, BadDevice = FALSE;
     DWORD Error, Flags, Size = ARRAYSIZE(Access), Result = 0;
     NETRESOURCEW Resource;
     INT i, Positional = 0, Ret;
@@ -321,6 +321,13 @@ cmdUse(
                 }
                 else if (IsDeviceName(a) || (a[0] == L'*' && !a[1]))
                     Device = a;
+                else if (wcslen(a) != 0 && a[wcslen(a) - 1] == L':')
+                {
+                    /* A device name that is no drive letter (CON:, XY:, X::): a name the network cannot
+                     * connect, answered as Windows does (measured: 67 for a connect, 2250 for a delete) */
+                    Device = a;
+                    BadDevice = TRUE;
+                }
                 else
                     return PrintCommandSyntax(MSG_USE_SYNTAX, 3952, a);
                 break;
@@ -363,6 +370,11 @@ cmdUse(
 
     if (Delete)
     {
+        if (BadDevice)
+        {
+            PrintErrorMessage(ERROR_NOT_CONNECTED);
+            return 2;
+        }
         if (Device != NULL && Device[0] == L'*')
         {
             /* All of them (Windows asks first) */
@@ -399,6 +411,11 @@ cmdUse(
     /* NET USE X: or NET USE \\server\share: show that one */
     if (Remote == NULL)
         return ListConnections(Device);
+    if (BadDevice)
+    {
+        PrintErrorMessage(ERROR_BAD_NET_NAME);
+        return 2;
+    }
 
     if (PasswordPrompt)
     {
@@ -428,6 +445,21 @@ cmdUse(
     else if (Password != NULL)
         SecureZeroMemory(Password, wcslen(Password) * sizeof(WCHAR));
 
+    if (Error == ERROR_INVALID_PASSWORD)
+    {
+        /* The provider says "the specified network password is not correct" (86), as WNetAddConnection2
+         * does on Windows; NET USE there goes through NetUseAdd and reports a refused logon as 1326
+         * (measured on Windows Server 2022: wrong password, unknown user, after a delete, with and
+         * without a connection to the server) */
+        Error = ERROR_LOGON_FAILURE;
+    }
+    else if (Error == ERROR_NO_NET_OR_BAD_PATH || Error == ERROR_NO_NETWORK)
+    {
+        /* No SMB client to connect with (the Workstation service is stopped, the engine cannot be
+         * started): "the network name cannot be found" (measured on Windows Server 2022 with the
+         * Workstation service stopped: net use X: and net use \\server\share both give 67) */
+        Error = ERROR_BAD_NET_NAME;
+    }
     if (Error != NO_ERROR)
     {
         PrintErrorMessage(Error);

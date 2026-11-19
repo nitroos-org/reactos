@@ -42,6 +42,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(ntlanman);
 
 #define PROVIDER_NAME L"Microsoft Windows Network"
 #define SESSION_CREDENTIAL_CONFLICT 1219    /* ERROR_SESSION_CREDENTIAL_CONFLICT */
+#define SMB_GUEST_LOGON_BLOCKED 1272        /* ERROR_SMB_GUEST_LOGON_BLOCKED */
 #define NOT_CONNECTED 2250                  /* ERROR_NOT_CONNECTED */
 #define OPEN_FILES 2401                     /* ERROR_OPEN_FILES */
 
@@ -83,6 +84,7 @@ StatusToError(NTSTATUS Status)
         case STATUS_NO_SUCH_USER:
             return ERROR_INVALID_PASSWORD;
         case STATUS_NETWORK_CREDENTIAL_CONFLICT: return SESSION_CREDENTIAL_CONFLICT;
+        case STATUS_SMB_GUEST_LOGON_BLOCKED: return SMB_GUEST_LOGON_BLOCKED;
         case STATUS_FILES_OPEN: return OPEN_FILES;
         case STATUS_NOT_FOUND: return NOT_CONNECTED;
         default: return RtlNtStatusToDosError(Status);
@@ -201,6 +203,62 @@ EntryServerIs(PSMBCONN_ENUM_OUTPUT Uses, PSMBCONN_ENTRY e, LPCWSTR Remote)
     while (m < TheirChars && Theirs[m] != L'\\')
         m++;
     return n == m && _wcsnicmp(Theirs, Remote, n) == 0;
+}
+
+/* A share or folder name longer than a name can be (255 characters): Windows answers 53, not 67 */
+static
+BOOL
+RemoteComponentTooLong(LPCWSTR Remote, SIZE_T Chars)
+{
+    SIZE_T i = 2, Start = 2;
+
+    while (i < Chars && Remote[i] != L'\\')
+        i++;
+    for (Start = i + 1; Start < Chars; Start = i + 1)
+    {
+        for (i = Start; i < Chars && Remote[i] != L'\\'; i++)
+            ;
+        if (i - Start > 255)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+/* Is there a path beyond "\\server\share" in Remote (Chars long, no trailing separators) */
+static
+BOOL
+RemoteHasPath(LPCWSTR Remote, SIZE_T Chars)
+{
+    SIZE_T i = 2;
+
+    while (i < Chars && Remote[i] != L'\\')
+        i++;
+    for (i++; i < Chars && Remote[i] != L'\\'; i++)
+        ;
+    return i < Chars;
+}
+
+/* The connection a call just made is not wanted after all (the drive could not be defined, the
+ * folder is not there): the drive's, or the one of that name without a drive */
+static
+VOID
+TakeConnectionBack(WCHAR Letter, LPCWSTR Remote, SIZE_T RemoteChars)
+{
+    PSMBCONN_ENUM_OUTPUT Uses;
+    DWORD i, Error;
+
+    Uses = GetUses(&Error);
+    if (Uses == NULL)
+        return;
+    for (i = 0; i < Uses->Count; i++)
+    {
+        PSMBCONN_ENTRY e = &Uses->Entries[i];
+
+        if ((Letter != 0 && e->Local == Letter) ||
+            (Letter == 0 && e->Local == 0 && (e->Flags & SMBCONN_FLAG_TREE_CONNECTED) && EntryRemoteIs(Uses, e, Remote, RemoteChars)))
+            DeleteUse(e->Id, TRUE);
+    }
+    HeapFree(GetProcessHeap(), 0, Uses);
 }
 
 /* The password (and the rest) of an EA buffer never outlives the call that used it */
@@ -462,6 +520,9 @@ NPAddConnection3(HWND hwndOwner,
     Remote = lpNetResource->lpRemoteName;
     if (!CheckRemoteName(Remote, &RemoteChars))
         return WN_BAD_NETNAME;
+    /* A trailing separator, or a name that cannot be one: not found (Windows Server 2022, measured) */
+    if (wcslen(Remote) != RemoteChars || RemoteComponentTooLong(Remote, RemoteChars))
+        return ERROR_BAD_NETPATH;
     Letter = 0;
     if (lpNetResource->lpLocalName != NULL && lpNetResource->lpLocalName[0])
     {
@@ -654,6 +715,28 @@ NPAddConnection3(HWND hwndOwner,
     /* The connection stays after this handle (the redirector keeps it until NPCancelConnection) */
     NtClose(Handle);
 
+    /* A name with a path beyond the share connects to that folder, which has to be there (Windows
+     * Server 2022, measured: 55 for a folder that does not exist, 267 for a file) */
+    if (RemoteHasPath(Remote, RemoteChars))
+    {
+        InitializeObjectAttributes(&Attributes, &NtName, OBJ_CASE_INSENSITIVE, NULL, NULL);
+        Status = NtCreateFile(&Handle, FILE_LIST_DIRECTORY | SYNCHRONIZE, &Attributes, &Iosb, NULL, FILE_ATTRIBUTE_NORMAL,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_OPEN,
+                              FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
+        if (NT_SUCCESS(Status))
+        {
+            NtClose(Handle);
+        }
+        else
+        {
+            TakeConnectionBack(Letter, Remote, RemoteChars);
+            HeapFree(GetProcessHeap(), 0, Name);
+            if (Status == STATUS_OBJECT_NAME_NOT_FOUND || Status == STATUS_OBJECT_PATH_NOT_FOUND || Status == STATUS_NO_SUCH_FILE)
+                return ERROR_DEV_NOT_EXIST;
+            return StatusToError(Status);
+        }
+    }
+
     Error = WN_SUCCESS;
     if (Letter != 0)
     {
@@ -662,17 +745,7 @@ NPAddConnection3(HWND hwndOwner,
         if (!DefineDosDeviceW(DDD_RAW_TARGET_PATH, Drive, Name))
         {
             Error = GetLastError();
-            /* Take the connection back */
-            Uses = GetUses(&i);
-            if (Uses != NULL)
-            {
-                for (i = 0; i < Uses->Count; i++)
-                {
-                    if (Uses->Entries[i].Local == Letter)
-                        DeleteUse(Uses->Entries[i].Id, TRUE);
-                }
-                HeapFree(GetProcessHeap(), 0, Uses);
-            }
+            TakeConnectionBack(Letter, Remote, RemoteChars);
         }
     }
     HeapFree(GetProcessHeap(), 0, Name);
