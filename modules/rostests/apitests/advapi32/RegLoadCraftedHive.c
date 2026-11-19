@@ -369,6 +369,12 @@ static void R_LinkFlagNoValue(PBYTE Buf, DWORD Size)
 {
     W16(CELL(Buf, K(Buf, Size, "B")), NK_FLAGS) |= 0x0010;  /* KEY_SYM_LINK */
 }
+/* The root key flagged as a link: linking the hive used a key body the open had not made (in-VM fuzz, bugcheck 0x1E) */
+static void R_RootIsLink(PBYTE Buf, DWORD Size)
+{
+    UNREFERENCED_PARAMETER(Size);
+    W16(CELL(Buf, D32(Buf, 0x24)), NK_FLAGS) |= 0x0010;    /* the base block's RootCell; KEY_SYM_LINK */
+}
 /* An allocated cell whose size runs past its bin */
 static void R_CellPastBin(PBYTE Buf, DWORD Size)
 {
@@ -400,6 +406,7 @@ static const RECIPE g_Recipes[] =
     { "subkey count larger than the index", R_SubkeyCountTooLarge, TRUE },
     { "Unicode name of an odd length", R_OddNameLength, TRUE },
     { "link flag without a link value", R_LinkFlagNoValue, TRUE },
+    { "root flagged as a link", R_RootIsLink, TRUE },
     { "cell size past its bin", R_CellPastBin, FALSE },
 };
 
