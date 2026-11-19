@@ -2074,7 +2074,12 @@ SmbCallerLogonId(PLUID LogonId)
     PAGED_CODE();
 
     SeCaptureSubjectContext(&Subject);
-    Status = SeQueryAuthenticationIdToken(SeQuerySubjectContextToken(&Subject), LogonId);
+    /* An identification token (a server that may only look at its client) is no licence to act
+     * on that client's connections */
+    if (Subject.ClientToken != NULL && Subject.ImpersonationLevel < SecurityImpersonation)
+        Status = STATUS_BAD_IMPERSONATION_LEVEL;
+    else
+        Status = SeQueryAuthenticationIdToken(SeQuerySubjectContextToken(&Subject), LogonId);
     SeReleaseSubjectContext(&Subject);
     return Status;
 }
