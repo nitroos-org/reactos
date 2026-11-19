@@ -2732,10 +2732,15 @@ RxFcbTableRemoveFcb(
 
     ASSERT(RxIsPrefixTableLockExclusive(FcbTable));
 
-    /* If no path, then remove entry for null */
+    /* If no path, then remove entry for null. The lookup does not find the
+     * null entry by an empty name, so a second FCB of the empty name can
+     * have replaced this one there: only clear the entry if it is ours */
     if (Fcb->FcbTableEntry.Path.Length == 0)
     {
-        FcbTable->TableEntryForNull = NULL;
+        if (FcbTable->TableEntryForNull == &Fcb->FcbTableEntry)
+        {
+            FcbTable->TableEntryForNull = NULL;
+        }
     }
     /* Otherwise, remove from the bucket */
     else
@@ -6061,10 +6066,12 @@ RxOrphanSrvOpens(
             }
         }
 
-        /* Of course, don't forget about NULL-entry */
+        /* Of course, don't forget about NULL-entry. It points at the FCB's
+         * table entry itself (RxFcbTableInsertFcb), not at its hash links:
+         * the FCB of the net root's own name (empty path) is in no bucket */
         if (FcbTable->TableEntryForNull != NULL)
         {
-            Fcb = CONTAINING_RECORD(FcbTable->TableEntryForNull, FCB, FcbTableEntry.HashLinks);
+            Fcb = CONTAINING_RECORD(FcbTable->TableEntryForNull, FCB, FcbTableEntry);
             ASSERT(NodeTypeIsFcb(Fcb));
             RxOrphanSrvOpensForThisFcb(Fcb, ThisVNetRoot, FALSE);
         }
