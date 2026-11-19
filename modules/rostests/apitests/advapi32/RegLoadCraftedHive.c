@@ -333,6 +333,16 @@ static void R_MaxNameTooLarge(PBYTE Buf, DWORD Size)
     D32(CELL(Buf, K(Buf, Size, "C")), NK_MAX_NAME) = 0x12345;
     D32(CELL(Buf, K(Buf, Size, "C")), NK_MAX_VALUE_NAME) = 0x23456;
 }
+/*
+ * The longest value name and class of a key without values or subkeys past 16 bits: RegDeleteTreeW sized its
+ * buffer by them (in 32 bits: a tiny buffer on i386) and the heap of the process was damaged (in-guest fuzz)
+ */
+static void R_MaxFieldsNoValues(PBYTE Buf, DWORD Size)
+{
+    D32(CELL(Buf, K(Buf, Size, "E")), NK_MAX_VALUE_NAME) = 0xFFFFFFFE;
+    D32(CELL(Buf, K(Buf, Size, "E")), NK_MAX_NAME + 4) = 0xFFFFFFF0;        /* MaxClassLen */
+    D32(CELL(Buf, K(Buf, Size, "E")), NK_MAX_VALUE_NAME + 4) = 0xFFFFFFF0;  /* MaxValueDataLen */
+}
 /* Flags a key of a file cannot have: hive exit (its subkey fields taken for a pointer), predefined handle */
 static void R_ExitAndPredefFlags(PBYTE Buf, DWORD Size)
 {
@@ -400,6 +410,7 @@ static const RECIPE g_Recipes[] =
     { "security cell under-counted", R_SecurityUnderCounted, TRUE },
     { "descriptor past its cell", R_SecurityLengthPastCell, TRUE },
     { "longest name fields past 16 bits", R_MaxNameTooLarge, TRUE },
+    { "longest value name, class, data of a key without values", R_MaxFieldsNoValues, TRUE },
     { "hive exit and predefined handle flags", R_ExitAndPredefFlags, TRUE },
     { "subkey names another parent", R_WrongParent, TRUE },
     { "subkeys out of order", R_OutOfOrder, TRUE },
@@ -442,8 +453,13 @@ static void Walk(HKEY Key, ULONG Depth)
     if (Depth > 32 || ++g_Keys > 2000)
         return;
     ClassLength = _countof(Class);
-    RegQueryInfoKeyW(Key, Class, &ClassLength, NULL, &SubKeys, &MaxSubKey, NULL, &Values, &MaxValueName,
-                     &MaxValueData, NULL, &Time);
+    MaxSubKey = MaxValueName = MaxValueData = 0;
+    Error = RegQueryInfoKeyW(Key, Class, &ClassLength, NULL, &SubKeys, &MaxSubKey, NULL, &Values, &MaxValueName,
+                             &MaxValueData, NULL, &Time);
+    /* What programs size their buffers by is within what a key can hold (and what the hive can) */
+    ok(Error != ERROR_SUCCESS || (MaxSubKey <= 0x7FFF && MaxValueName <= 0x7FFF && MaxValueData < 0x1000000),
+       "[%s] RegQueryInfoKeyW: longest subkey name %lu, value name %lu, data %lu\n", g_Recipe, MaxSubKey,
+       MaxValueName, MaxValueData);
     SdLength = sizeof(Sd);
     RegGetKeySecurity(Key, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
                       Sd, &SdLength);

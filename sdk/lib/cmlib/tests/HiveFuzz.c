@@ -637,6 +637,13 @@ static void UseKey(PHHIVE Hive, HCELL_INDEX Cell, PCM_KEY_NODE Node, BOOLEAN Fla
     WCHAR Buf[300];
 
     Touch(Node->Name, Node->NameLength);
+
+    /* The maxima a key reports are what programs size buffers by, and the kernel keeps some in 16 bits */
+    if (Node->MaxNameLen > MAXUSHORT || Node->MaxClassLen > MAXUSHORT || Node->MaxValueNameLen > MAXUSHORT ||
+        Node->MaxValueDataLen > Hive->Storage[Stable].Length * HBLOCK_SIZE + (Flat ? Hive->BaseBlock->Length : 0))
+    {
+        Note(0, Seed, "a key reports a longest name, class or data it cannot have");
+    }
     if (Node->ClassLength && Node->Class != HCELL_NIL)
         Touch(HvGetCell(Hive, Node->Class), Node->ClassLength);
     if (Node->Security != HCELL_NIL)
