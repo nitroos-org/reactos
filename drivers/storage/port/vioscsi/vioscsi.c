@@ -59,18 +59,9 @@
 
 BOOLEAN IsCrashDumpMode;
 
-sp_DRIVER_INITIALIZE DriverEntry;
-HW_INITIALIZE VioScsiHwInitialize;
-HW_BUILDIO VioScsiBuildIo;
-HW_STARTIO VioScsiStartIo;
-HW_FIND_ADAPTER VioScsiFindAdapter;
-HW_RESET_BUS VioScsiResetBus;
-HW_ADAPTER_CONTROL VioScsiAdapterControl;
-HW_UNIT_CONTROL VioScsiUnitControl;
-HW_INTERRUPT VioScsiInterrupt;
-HW_DPC_ROUTINE VioScsiCompleteDpcRoutine;
-HW_PASSIVE_INITIALIZE_ROUTINE VioScsiPassiveInitializeRoutine;
-HW_MESSAGE_SIGNALED_INTERRUPT_ROUTINE VioScsiMSInterrupt;
+/* The function type declarations (sp_DRIVER_INITIALIZE DriverEntry; HW_STARTIO VioScsiStartIo; ...) of the
+ * Windows headers are static analysis annotations; the prototypes follow below. */
+NTSTATUS NTAPI DriverEntry(IN PDRIVER_OBJECT DriverObject, IN PUNICODE_STRING RegistryPath);
 
 #ifdef EVENT_TRACING
 PVOID TraceContext = NULL;
