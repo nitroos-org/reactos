@@ -488,8 +488,18 @@ ScmReadTokenConfig(
     }
 
     dwSize = 0;
-    if (RegQueryValueExW(hServiceKey, L"RequiredPrivileges", NULL, &dwType, NULL, &dwSize) == ERROR_SUCCESS &&
-        dwType == REG_MULTI_SZ && dwSize >= 2 * sizeof(WCHAR) && dwSize <= 64 * 1024)
+    dwType = REG_NONE;
+    if (RegQueryValueExW(hServiceKey, L"RequiredPrivileges", NULL, &dwType, NULL, &dwSize) != ERROR_SUCCESS)
+        dwType = REG_NONE;
+    /* a value of another type is a configuration error that stops the start (Windows Server 2022: REG_SZ, even an
+     * empty one, and REG_BINARY give ERROR_INVALID_PARAMETER; an empty or zero length REG_MULTI_SZ is no list) */
+    if (dwType != REG_NONE && dwType != REG_MULTI_SZ)
+    {
+        DPRINT1("Service %S: RequiredPrivileges has the type %lu\n", pService->lpServiceName, dwType);
+        RegCloseKey(hServiceKey);
+        return ERROR_INVALID_PARAMETER;
+    }
+    if (dwType == REG_MULTI_SZ && dwSize >= 2 * sizeof(WCHAR) && dwSize <= 64 * 1024)
     {
         /* two extra NULs: the list is terminated even when the value is not */
         pConfig->pszPrivileges = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, dwSize + 2 * sizeof(WCHAR));
@@ -706,15 +716,32 @@ ScmApplyRequiredPrivileges(
         goto done;
     }
 
+    /* A name that is no privilege stops the start: ERROR_INVALID_PARAMETER when none of the names is one,
+     * ERROR_INVALID_DATA when the list holds known and unknown names (Windows Server 2022) */
+    {
+        ULONG nKnown = 0, nUnknown = 0;
+
+        for (pszName = pszPrivileges; *pszName != UNICODE_NULL; pszName += wcslen(pszName) + 1)
+        {
+            if (LookupPrivilegeValueW(NULL, pszName, &Luid))
+                nKnown++;
+            else
+            {
+                DPRINT1("Service %S: unknown required privilege %S\n", pService->lpServiceName, pszName);
+                nUnknown++;
+            }
+        }
+        if (nUnknown != 0)
+        {
+            dwError = (nKnown != 0) ? ERROR_INVALID_DATA : ERROR_INVALID_PARAMETER;
+            goto done;
+        }
+    }
+
     /* Every listed privilege must be one the account holds */
     for (pszName = pszPrivileges; *pszName != UNICODE_NULL; pszName += wcslen(pszName) + 1)
     {
-        if (!LookupPrivilegeValueW(NULL, pszName, &Luid))
-        {
-            DPRINT1("Service %S: unknown required privilege %S\n", pService->lpServiceName, pszName);
-            dwError = ERROR_INCOMPATIBLE_SERVICE_PRIVILEGE;
-            goto done;
-        }
+        LookupPrivilegeValueW(NULL, pszName, &Luid);
         for (i = 0; i < pPrivileges->PrivilegeCount; i++)
         {
             if (RtlEqualLuid(&pPrivileges->Privileges[i].Luid, &Luid))

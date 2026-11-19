@@ -365,6 +365,45 @@ StopAndDelete(SC_HANDLE hService)
     CloseServiceHandle(hService);
 }
 
+/* A scratch LocalService service whose RequiredPrivileges value is written to the registry as it is (a type or a content
+ * the API cannot make); returns the StartService error. The controller reads the value when the service starts. Measured
+ * on Windows Server 2022 after a reload of its database: REG_SZ and REG_BINARY 87, only unknown names 87, known and unknown
+ * names 13, an empty or zero length REG_MULTI_SZ no filter. */
+static DWORD
+StartWithRawPrivileges(SC_HANDLE hScm, PCSTR Name, DWORD Type, const VOID *Data, DWORD Size)
+{
+    CHAR Exe[MAX_PATH], Command[2 * MAX_PATH + 64], File[MAX_PATH], Key[256];
+    SC_HANDLE hService;
+    HKEY hKey;
+    DWORD Error = ERROR_SUCCESS;
+    LONG Result;
+
+    GetModuleFileNameA(NULL, Exe, sizeof(Exe));
+    StringCbPrintfA(File, sizeof(File), "%s\\%s.txt", OutDir, Name);
+    DeleteFileA(File);
+    StringCbPrintfA(Command, sizeof(Command), "\"%s\" ServiceSidToken service %s \"%s\"", Exe, Name, File);
+    hService = CreateServiceA(hScm, Name, Name, SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS,
+                              SERVICE_DEMAND_START, SERVICE_ERROR_IGNORE, Command, NULL, NULL, NULL,
+                              "NT AUTHORITY\\LocalService", "");
+    ok(hService != NULL, "%s: CreateService failed with %lu\n", Name, GetLastError());
+    if (!hService)
+        return GetLastError();
+    StringCbPrintfA(Key, sizeof(Key), "SYSTEM\\CurrentControlSet\\Services\\%s", Name);
+    Result = RegOpenKeyExA(HKEY_LOCAL_MACHINE, Key, 0, KEY_SET_VALUE, &hKey);
+    ok(Result == ERROR_SUCCESS, "%s: RegOpenKeyEx failed with %ld\n", Name, Result);
+    if (Result == ERROR_SUCCESS)
+    {
+        Result = RegSetValueExA(hKey, "RequiredPrivileges", 0, Type, Data, Size);
+        ok(Result == ERROR_SUCCESS, "%s: RegSetValueEx failed with %ld\n", Name, Result);
+        RegCloseKey(hKey);
+    }
+    if (!StartServiceA(hService, 0, NULL))
+        Error = GetLastError();
+    StopAndDelete(hService);
+    DeleteFileA(File);
+    return Error;
+}
+
 /* Create, configure and start a scratch service; its token facts into Dump. Returns the StartService error */
 static DWORD
 RunService(SC_HANDLE hScm, PCSTR Name, PCSTR Account, DWORD SidType, PCSTR Privileges, PTOKEN_DUMP Dump)
@@ -592,6 +631,25 @@ START_TEST(ServiceSidToken)
                        "SeDebugPrivilege,SeImpersonatePrivilege", &Dump);
     ok(Error == ERROR_INCOMPATIBLE_SERVICE_PRIVILEGE, "missing priv: StartService error %lu, expected %d\n",
        Error, ERROR_INCOMPATIBLE_SERVICE_PRIVILEGE);
+
+    /* 6b. A RequiredPrivileges value that is malformed stops the start as on Windows Server 2022 */
+    {
+        static const CHAR Unknown[] = "SeNoSuchPrivilege\0";
+        static const CHAR Mixed[] = "SeImpersonatePrivilege\0SeNoSuchPrivilege\0";
+        static const BYTE Bin[] = { 1, 2, 3, 4, 5 };
+
+        StringCbPrintfA(Name, sizeof(Name), "%sj", Base);
+        Error = StartWithRawPrivileges(hScm, Name, REG_SZ, "SeImpersonatePrivilege", 23);
+        ok(Error == ERROR_INVALID_PARAMETER, "REG_SZ: StartService error %lu, expected %d\n", Error, ERROR_INVALID_PARAMETER);
+        Error = StartWithRawPrivileges(hScm, Name, REG_SZ, "", 1);
+        ok(Error == ERROR_INVALID_PARAMETER, "empty REG_SZ: StartService error %lu, expected %d\n", Error, ERROR_INVALID_PARAMETER);
+        Error = StartWithRawPrivileges(hScm, Name, REG_BINARY, Bin, sizeof(Bin));
+        ok(Error == ERROR_INVALID_PARAMETER, "REG_BINARY: StartService error %lu, expected %d\n", Error, ERROR_INVALID_PARAMETER);
+        Error = StartWithRawPrivileges(hScm, Name, REG_MULTI_SZ, Unknown, sizeof(Unknown) + 1);
+        ok(Error == ERROR_INVALID_PARAMETER, "unknown name: StartService error %lu, expected %d\n", Error, ERROR_INVALID_PARAMETER);
+        Error = StartWithRawPrivileges(hScm, Name, REG_MULTI_SZ, Mixed, sizeof(Mixed) + 1);
+        ok(Error == ERROR_INVALID_DATA, "known and unknown names: StartService error %lu, expected %d\n", Error, ERROR_INVALID_DATA);
+    }
 
     /* 7. NetworkService */
     StringCbPrintfA(Name, sizeof(Name), "%sg", Base);
