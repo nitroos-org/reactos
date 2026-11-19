@@ -2265,7 +2265,6 @@ StorPortSetDeviceQueueDepth(
 {
     PFDO_DEVICE_EXTENSION FdoExtension;
     PPDO_DEVICE_EXTENSION PdoExtension;
-    KLOCK_QUEUE_HANDLE LockHandle;
 
     DPRINT("StorPortSetDeviceQueueDepth(%p %d %d %d %d)\n",
            HwDeviceExtension, PathId, TargetId, Lun, Depth);
@@ -2275,7 +2274,8 @@ StorPortSetDeviceQueueDepth(
     /* A miniport calls this when it completes an INQUIRY, from its interrupt routine too */
     PdoExtension = FdoFindLunAboveDispatch(FdoExtension, PathId, TargetId, Lun);
 
-    if (PdoExtension == NULL)
+    /* A depth of 0 would let no request start, and the tag is taken modulo the depth */
+    if (PdoExtension == NULL || Depth == 0)
     {
         return FALSE;
     }
@@ -2284,17 +2284,14 @@ StorPortSetDeviceQueueDepth(
     if (Depth > 254)
         Depth = 254;
 
-    if (KeGetCurrentIrql() <= DISPATCH_LEVEL)
-    {
-        KeAcquireInStackQueuedSpinLock(&FdoExtension->FlowControl.Lock, &LockHandle);
-        PdoExtension->OutstandingRequestMax = Depth;
-        KeReleaseInStackQueuedSpinLock(&LockHandle);
-    }
-    else
-    {
-        /* The lock would lower the IRQL; the limit is one aligned ULONG, read under the lock only */
-        PdoExtension->OutstandingRequestMax = Depth;
-    }
+    /*
+     * Never under the flow control lock: besides the interrupt routine, a miniport calls this from
+     * HwBuildIo or HwStartIo (viostor answers INQUIRY there), and storport issues a request it held
+     * back from the completion of another one with that lock held: a second acquire on the same
+     * processor never returns. The limit is one aligned ULONG; the scheduler compares against it
+     * with >=, so a limit lowered below what is outstanding only holds new requests back.
+     */
+    InterlockedExchange((PLONG)&PdoExtension->OutstandingRequestMax, (LONG)Depth);
 
     DPRINT("Set Path %d Target %d Lun %d Queue depth to %d\n", PathId, TargetId, Lun, Depth);
 

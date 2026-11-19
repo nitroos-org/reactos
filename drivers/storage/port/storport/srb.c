@@ -688,16 +688,14 @@ PortPdoScheduleRequestFlowControlled(
     {
         /* Check PDO flow control conditions */
 
-        /* Sanity check */
-        NT_ASSERT(FlowControl->OutstandingRequestCount <= PdoExtension->OutstandingRequestMax);
-
-        /* If PDO is not suitable to receive a request, make it wait */
+        /* If PDO is not suitable to receive a request, make it wait. The unit's limit can drop below
+           what is outstanding (StorPortSetDeviceQueueDepth): nothing more starts until it is under it */
         if (FdoExtension->FlowControl.IsBusy || FdoExtension->FlowControl.IsPaused ||
             FlowControl->IsBusy || FlowControl->IsPaused ||
             (FlowControl->IsFrozen && !TEST_FLAG(Srb->SrbFlags, SRB_FLAGS_BYPASS_FROZEN_QUEUE)) ||
             (FlowControl->IsLocked && !TEST_FLAG(Srb->SrbFlags, SRB_FLAGS_BYPASS_LOCKED_QUEUE)) ||
             FlowControl->StrongOrderedCount ||
-            FlowControl->OutstandingRequestCount == PdoExtension->OutstandingRequestMax ||
+            FlowControl->OutstandingRequestCount >= PdoExtension->OutstandingRequestMax ||
             (!IsListEmpty(&FlowControl->AwaitingRequestsListHead)))
         {
             InsertHeadList(&FlowControl->AwaitingRequestsListHead,
@@ -975,13 +973,11 @@ PortScheduleComingRequestsOnCompletion(
         return;
     }
 
-    /* FDO's got no request, check the PDO of the just-finished request for awaiting requests */
-    if (!IsListEmpty(&PdoExtension->FlowControl.AwaitingRequestsListHead))
+    /* FDO's got no request, check the PDO of the just-finished request for awaiting requests,
+       as far as the unit's limit allows (it may have been lowered with requests outstanding) */
+    if (!IsListEmpty(&PdoExtension->FlowControl.AwaitingRequestsListHead) &&
+        PdoExtension->FlowControl.OutstandingRequestCount < PdoExtension->OutstandingRequestMax)
     {
-        /* Sanity check */
-        NT_ASSERT(PdoExtension->FlowControl.OutstandingRequestCount <
-                  PdoExtension->OutstandingRequestMax);
-
         /* Take one request */
         Entry = RemoveTailList(&PdoExtension->FlowControl.AwaitingRequestsListHead);
         RequestReference = CONTAINING_RECORD(Entry, QUEUED_REQUEST_REFERENCE, PdoEntry);
