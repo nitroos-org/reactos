@@ -2469,6 +2469,27 @@ CmFlushKey(IN PCM_KEY_CONTROL_BLOCK Kcb,
     return Status;
 }
 
+/* Is the caller (its thread's token, impersonated or not) LocalSystem */
+static
+BOOLEAN
+CmpCallerIsSystem(VOID)
+{
+    SECURITY_SUBJECT_CONTEXT SubjectContext;
+    PTOKEN_USER User = NULL;
+    BOOLEAN Result = FALSE;
+
+    SeCaptureSubjectContext(&SubjectContext);
+    if (NT_SUCCESS(SeQueryInformationToken(SeQuerySubjectContextToken(&SubjectContext),
+                                           TokenUser,
+                                           (PVOID*)&User)))
+    {
+        Result = RtlEqualSid(User->User.Sid, SeLocalSystemSid);
+        ExFreePool(User);
+    }
+    SeReleaseSubjectContext(&SubjectContext);
+    return Result;
+}
+
 NTSTATUS
 NTAPI
 CmLoadKey(IN POBJECT_ATTRIBUTES TargetKey,
@@ -2567,6 +2588,16 @@ CmLoadKey(IN POBJECT_ATTRIBUTES TargetKey,
 
     /* Set flag */
     if (Flags & REG_NO_LAZY_FLUSH) CmHive->Hive.HiveFlags |= HIVE_NOLAZYFLUSH;
+
+    /*
+     * The root of a hive is stamped with the descriptor of the place it is
+     * linked at, and the file keeps it. Only the system's loads (the profile
+     * service, the boot hive list) do that: an administrator who loads a
+     * user's hive under another name would give the file that name's
+     * descriptor.
+     */
+    if (!CmpCallerIsSystem())
+        CmHive->Flags |= CMHIVE_FLAG_NO_ROOT_STAMP;
 
     /* Link the hive */
     Status = CmpLinkHiveToMaster(TargetKey->ObjectName,
