@@ -1856,7 +1856,13 @@ MUI_ERROR enUSErrorEntries[] =
     },
     {
         // ERROR_NO_HDD
-        "Setup could not find a harddisk.\n",
+        /* The %s is the list of the storage drivers of this Setup, see DisplayNoHardDiskError() in usetup.c */
+        "Setup could not find a harddisk.\n"
+        "The disk may be attached to a controller that has no driver in\n"
+        "this Setup. Storage drivers included in this Setup:\n"
+        "%s\n"
+        "Attach the disk to a controller type handled by one of them (in a\n"
+        "virtual machine, change the disk bus type) and restart Setup.\n",
         "ENTER = Reboot computer"
     },
     {
