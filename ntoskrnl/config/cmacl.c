@@ -1913,6 +1913,10 @@ CmpAclRecordDenial(
 #define CMP_ACL_PLANTED_ACETYPE     0x8
 /* Boot self-check only: what an ancestor passes on shuts SYSTEM out, the key got its policy descriptor */
 #define CMP_ACL_PLANTED_INHERIT     0x10
+/* A symbolic link that a non-administrator created in a machine hive: deleted, not restamped */
+#define CMP_ACL_PLANTED_LINK        0x20
+/* Not a reason: the link was deleted (the walk's index of its parent moves back by one) */
+#define CMP_ACL_LINK_DELETED        0x40
 
 /* Restamped keys printed to the debug channel per boot (all are counted and logged to the file) */
 #define CMP_ACL_RESTAMP_PRINT_MAX   256
@@ -2229,6 +2233,7 @@ CmpAclCheckStoredKey(
     PVOID PoolCopy = NULL;
     PSID Owner = NULL;
     ULONG Reasons = 0;
+    BOOLEAN Link = FALSE;
     NTSTATUS Status;
 
     if (!NT_SUCCESS(ObReferenceObjectByHandle(Key, 0, CmpKeyObjectType, KernelMode, (PVOID *)&KeyBody, NULL)))
@@ -2239,6 +2244,7 @@ CmpAclCheckStoredKey(
     if (Kcb && !Kcb->Delete)
     {
         CmpAcquireKcbLockShared(Kcb);
+        Link = (Kcb->Flags & KEY_SYM_LINK) != 0;
         Sd = CmpAclCopyStoredSd(Kcb, Buffer, sizeof(Buffer), &PoolCopy, FALSE);
         if (Sd)
         {
@@ -2258,9 +2264,20 @@ CmpAclCheckStoredKey(
         }
         CmpAclFreeEffectiveSd(NULL, PoolCopy);
         CmpReleaseKcbLock(Kcb);
+        /*
+         * A symbolic link owned by a non-administrator: no Windows component lets a
+         * standard user create one in a machine hive (KEY_CREATE_LINK on the parent),
+         * so it was made while a boot did not enforce. A new descriptor would leave
+         * its target (a value, SymbolicLinkValue) as the user chose it, for example a
+         * key of the user's own hive that every program opening the link's path then
+         * reads, and the user still writes. It is deleted instead.
+         */
+        if (Link && !Force && (Reasons & CMP_ACL_PLANTED_OWNER))
+            Reasons |= CMP_ACL_PLANTED_LINK;
         if (Reasons)
         {
-            NewSd = CmpAclDefaultKeySd(Kcb);
+            if (!(Reasons & CMP_ACL_PLANTED_LINK))
+                NewSd = CmpAclDefaultKeySd(Kcb);
             Name = CmpConstructName(Kcb);
         }
     }
@@ -2269,6 +2286,20 @@ CmpAclCheckStoredKey(
 
     if (!Reasons)
         return 0;
+
+    if (Reasons & CMP_ACL_PLANTED_LINK)
+    {
+        /* The handle was opened with OBJ_OPENLINK: it is the link key itself */
+        Status = ZwDeleteKey(Key);
+        if (NT_SUCCESS(Status))
+            Reasons |= CMP_ACL_LINK_DELETED;
+        if (Name)
+        {
+            CmpAclRecordRestamp(Name, Reasons & ~CMP_ACL_LINK_DELETED, Owner, Status);
+            CmpFree(Name, 0);
+        }
+        return Reasons;
+    }
 
     Status = STATUS_INSUFFICIENT_RESOURCES;
     if (NewSd)
@@ -2288,13 +2319,14 @@ CmpAclCheckStoredKey(
 }
 
 #define CMP_ACL_RESET_ACCESS (KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS | READ_CONTROL | WRITE_DAC | \
-                              WRITE_OWNER | ACCESS_SYSTEM_SECURITY)
+                              WRITE_OWNER | ACCESS_SYSTEM_SECURITY | DELETE)
 
 /*
  * Check every key from the key at Path down (or only that key): stored
  * descriptors that are planted are replaced, top-down, so that a key's
  * replacement inherits from an already repaired parent. Links are looked at
- * (their own descriptor) but not followed. Boot only; kernel handles.
+ * (their own descriptor) but not followed; one a non-administrator owns is
+ * deleted (CmpAclCheckStoredKey). Boot only; kernel handles.
  */
 static
 VOID
@@ -2362,7 +2394,13 @@ CmpAclWalk(
         Status = ZwOpenKey(&Child, CMP_ACL_RESET_ACCESS, &Attributes);
         if (!NT_SUCCESS(Status))
             continue;
-        CmpAclCheckStoredKey(Child, FALSE);
+        if (CmpAclCheckStoredKey(Child, FALSE) & CMP_ACL_LINK_DELETED)
+        {
+            /* A deleted link: the next subkey now has its index */
+            ZwClose(Child);
+            Stack[Depth].Index--;
+            continue;
+        }
         if (Depth + 1 >= CMP_ACL_WALK_MAX_DEPTH)
         {
             ZwClose(Child);
