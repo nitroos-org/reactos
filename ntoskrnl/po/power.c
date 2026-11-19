@@ -327,6 +327,99 @@ PopSetSystemPowerStateTraverse(PDEVICE_NODE DeviceNode,
 #endif
 }
 
+typedef struct _POWER_PDO_LIST
+{
+    PDEVICE_OBJECT *Pdos;   /* Referenced PDOs in device tree order (parents first) */
+    ULONG Count;
+    ULONG Capacity;
+    BOOLEAN Failed;
+} POWER_PDO_LIST, *PPOWER_PDO_LIST;
+
+static
+NTSTATUS
+PopCollectPdoTraverse(PDEVICE_NODE DeviceNode,
+                      PVOID Context)
+{
+    PPOWER_PDO_LIST List = Context;
+
+    if (DeviceNode == IopRootDeviceNode)
+        return STATUS_SUCCESS;
+
+    if (List->Count == List->Capacity)
+    {
+        ULONG NewCapacity = List->Capacity ? List->Capacity * 2 : 64;
+        PDEVICE_OBJECT *NewPdos;
+
+        NewPdos = ExAllocatePoolWithTag(PagedPool,
+                                        NewCapacity * sizeof(*NewPdos),
+                                        TAG_PO_NODELIST);
+        if (!NewPdos)
+        {
+            List->Failed = TRUE;
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+        if (List->Pdos)
+        {
+            RtlCopyMemory(NewPdos, List->Pdos, List->Count * sizeof(*NewPdos));
+            ExFreePoolWithTag(List->Pdos, TAG_PO_NODELIST);
+        }
+        List->Pdos = NewPdos;
+        List->Capacity = NewCapacity;
+    }
+
+    ObReferenceObject(DeviceNode->PhysicalDeviceObject);
+    List->Pdos[List->Count++] = DeviceNode->PhysicalDeviceObject;
+    return STATUS_SUCCESS;
+}
+
+/*
+ * Send the system power-down IRPs to the children before their parents, as the
+ * power manager does on Windows: a driver that owns the power policy of a bus
+ * (e.g. a WDF host controller) must not see its own Sx IRP while the devices on
+ * the bus are still in D0.
+ */
+static
+VOID
+PopSetSystemPowerStateChildrenFirst(PPOWER_STATE_TRAVERSE_CONTEXT PowerContext)
+{
+    DEVICETREE_TRAVERSE_CONTEXT Context;
+    POWER_PDO_LIST List = {0};
+    ULONG i;
+
+    IopInitDeviceTreeTraverseContext(&Context,
+                                     IopRootDeviceNode,
+                                     PopCollectPdoTraverse,
+                                     &List);
+    IopTraverseDeviceTree(&Context);
+
+    if (List.Failed)
+    {
+        /* Out of memory: fall back to the device tree order */
+        IopInitDeviceTreeTraverseContext(&Context,
+                                         IopRootDeviceNode,
+                                         PopSetSystemPowerStateTraverse,
+                                         PowerContext);
+        IopTraverseDeviceTree(&Context);
+    }
+    else
+    {
+        /* The list is in pre-order, so its reverse has every node after all its descendants */
+        for (i = List.Count; i > 0; i--)
+        {
+            PDEVICE_NODE DeviceNode = IopGetDeviceNode(List.Pdos[i - 1]);
+
+            if (DeviceNode)
+                PopSetSystemPowerStateTraverse(DeviceNode, PowerContext);
+        }
+    }
+
+    for (i = 0; i < List.Count; i++)
+        ObDereferenceObject(List.Pdos[i]);
+
+    if (List.Pdos)
+        ExFreePoolWithTag(List.Pdos, TAG_PO_NODELIST);
+}
+
 NTSTATUS
 NTAPI
 PopSetSystemPowerState(SYSTEM_POWER_STATE PowerState, POWER_ACTION PowerAction)
@@ -371,12 +464,20 @@ PopSetSystemPowerState(SYSTEM_POWER_STATE PowerState, POWER_ACTION PowerAction)
     }
 
     /* Set system power change */
-    IopInitDeviceTreeTraverseContext(&Context,
-                                     IopRootDeviceNode,
-                                     PopSetSystemPowerStateTraverse,
-                                     &PowerContext);
+    if (PowerState != PowerSystemWorking)
+    {
+        /* Powering down: children first */
+        PopSetSystemPowerStateChildrenFirst(&PowerContext);
+    }
+    else
+    {
+        IopInitDeviceTreeTraverseContext(&Context,
+                                         IopRootDeviceNode,
+                                         PopSetSystemPowerStateTraverse,
+                                         &PowerContext);
 
-    IopTraverseDeviceTree(&Context);
+        IopTraverseDeviceTree(&Context);
+    }
 
     if (!PopAcpiPresent) return STATUS_NOT_IMPLEMENTED;
 
