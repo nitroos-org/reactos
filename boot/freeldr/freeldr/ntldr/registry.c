@@ -65,6 +65,23 @@ CmpFree(
     FrLdrHeapFree(Ptr, 0);
 }
 
+/* The check of a hive frees these before it returns */
+PVOID
+NTAPI
+CmpAllocateTemporary(
+    IN SIZE_T Size)
+{
+    return FrLdrTempAlloc(Size, TAG_CM);
+}
+
+VOID
+NTAPI
+CmpFreeTemporary(
+    IN PVOID Ptr)
+{
+    FrLdrTempFree(Ptr, TAG_CM);
+}
+
 /**
  * @brief
  * Initializes a flat hive descriptor for the

@@ -1061,13 +1061,25 @@ static
 PCM_KEY_NODE
 CmpGetSubKeyNodeForCase(
     _In_ PHHIVE Hive,
-    _In_ HCELL_INDEX Cell)
+    _In_ HCELL_INDEX Cell,
+    _In_opt_ PCMP_CASE_REPAIR_STATS Stats)
 {
     PCM_KEY_NODE Node;
     LONG CellSize;
 
-    if (Cell == HCELL_NIL || !HvIsCellAllocated(Hive, Cell))
+    if (Cell == HCELL_NIL)
         return NULL;
+
+    /* An index entry is not checked yet: only the check knows where cells start */
+    if (Stats && Stats->IsKeyCell)
+    {
+        if (!Stats->IsKeyCell(Stats->CheckContext, Cell))
+            return NULL;
+    }
+    else if (!HvIsCellAllocated(Hive, Cell))
+    {
+        return NULL;
+    }
 
     Node = (PCM_KEY_NODE)HvGetCell(Hive, Cell);
     if (!Node || Node->Signature != CM_KEY_NODE_SIGNATURE || Node->NameLength == 0)
@@ -1146,10 +1158,11 @@ LONG
 CmpCompareIndexEntries(
     _In_ PHHIVE Hive,
     _In_ PCM_INDEX Entry1,
-    _In_ PCM_INDEX Entry2)
+    _In_ PCM_INDEX Entry2,
+    _In_opt_ PCMP_CASE_REPAIR_STATS Stats)
 {
-    PCM_KEY_NODE Node1 = CmpGetSubKeyNodeForCase(Hive, Entry1->Cell);
-    PCM_KEY_NODE Node2 = CmpGetSubKeyNodeForCase(Hive, Entry2->Cell);
+    PCM_KEY_NODE Node1 = CmpGetSubKeyNodeForCase(Hive, Entry1->Cell, Stats);
+    PCM_KEY_NODE Node2 = CmpGetSubKeyNodeForCase(Hive, Entry2->Cell, Stats);
 
     /* The nodes were all checked by the caller */
     if (!Node1 || !Node2)
@@ -1164,7 +1177,8 @@ CmpSortIndexEntries(
     _In_ PHHIVE Hive,
     _Inout_ PCM_INDEX Entries,
     _Inout_ PCM_INDEX Temp,
-    _In_ ULONG Count)
+    _In_ ULONG Count,
+    _In_opt_ PCMP_CASE_REPAIR_STATS Stats)
 {
     PCM_INDEX From = Entries, To = Temp, Swap;
     ULONG Width, Low, Mid, High, i, j, k;
@@ -1180,7 +1194,7 @@ CmpSortIndexEntries(
             k = Low;
 
             /* Two runs that are already in order are just copied */
-            if (Mid >= High || CmpCompareIndexEntries(Hive, &From[Mid - 1], &From[Mid]) <= 0)
+            if (Mid >= High || CmpCompareIndexEntries(Hive, &From[Mid - 1], &From[Mid], Stats) <= 0)
             {
                 RtlCopyMemory(&To[Low], &From[Low], (High - Low) * sizeof(CM_INDEX));
                 continue;
@@ -1188,7 +1202,7 @@ CmpSortIndexEntries(
 
             while (i < Mid && j < High)
             {
-                if (CmpCompareIndexEntries(Hive, &From[j], &From[i]) < 0)
+                if (CmpCompareIndexEntries(Hive, &From[j], &From[i], Stats) < 0)
                     To[k++] = From[j++];
                 else
                     To[k++] = From[i++];
@@ -1300,7 +1314,7 @@ CmpRepairSubKeyIndexCase(
         Dirty = FALSE;
         for (i = 0; i < Leaf->Count; i++)
         {
-            Node = CmpGetSubKeyNodeForCase(Hive, CmpGetLeafEntryCell(Leaf, i));
+            Node = CmpGetSubKeyNodeForCase(Hive, CmpGetLeafEntryCell(Leaf, i), Stats);
             if (!Node)
                 return;
 
@@ -1387,7 +1401,7 @@ CmpRepairSubKeyIndexCase(
         return;
     }
 
-    CmpSortIndexEntries(Hive, Entries, Temp, Total);
+    CmpSortIndexEntries(Hive, Entries, Temp, Total, Stats);
 
     k = 0;
     for (LeafNumber = 0; LeafNumber < LeafCount; LeafNumber++)

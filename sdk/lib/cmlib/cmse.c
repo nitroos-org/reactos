@@ -182,8 +182,8 @@ CmpAclInBounds(
 }
 
 /* Structure only (offsets inside the length); the ACEs are not interpreted */
-static
 BOOLEAN
+NTAPI
 CmpIsSaneRelativeDescriptor(
     IN PVOID Descriptor,
     IN ULONG Length)

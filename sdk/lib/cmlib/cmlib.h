@@ -250,6 +250,14 @@ typedef ULONG CM_CHECK_REGISTRY_STATUS;
  * (CmpBuildSecurityCache) and from the ring of every other cell a key names.
  */
 #define CM_CHECK_REGISTRY_CACHE_SECURITY              0x40
+/*
+ * The hive is in use (the Debug builds' check after a flush, an unload or a
+ * replace): its keys are only read, never repaired, volatile keys and cells are
+ * checked as well. Without this flag the hive is one being loaded from a file
+ * (or the boot loader's image of one): a file holds no volatile key, and what
+ * the check finds wrong is repaired where that is safe or makes it fail.
+ */
+#define CM_CHECK_REGISTRY_LIVE_HIVE                   0x80
 
 //
 // Check Registry status codes
@@ -433,15 +441,14 @@ typedef struct _HV_TRACK_CELL_REF
 extern ULONG CmlibTraceLevel;
 
 //
-// Hack since big keys are not yet supported
+// Hack since big keys are not yet supported: the data of a value is read and
+// written as one cell whatever its length. A hive file may hold a value that
+// long (any length passes in a hive older than XP); the check of a loaded hive
+// keeps a value only if one cell holds all of its data, so this is not a
+// state to assert on.
 //
-#ifdef _BLDR_ 
 #define ASSERT_VALUE_BIG(h, s) \
-    do { if (CmpIsKeyValueBig(h,s)) DbgPrint("Big keys aren't supported!\n"); } while (0)
-#else 
-#define ASSERT_VALUE_BIG(h, s)  \
-    ASSERTMSG("Big keys not supported!\n", !CmpIsKeyValueBig(h, s));
-#endif
+    do { if (CmpIsKeyValueBig(h,s)) DPRINT("Big keys aren't supported!\n"); } while (0)
 
 //
 // Returns whether or not this is a small valued key
@@ -708,6 +715,13 @@ typedef struct _CMP_CASE_REPAIR_STATS
     ULONG Skipped;  /* subkey indexes out of order that could not be sorted */
     ULONG SecurityReset;    /* keys whose bad Security was reset to HCELL_NIL (not a case repair) */
     struct _CMP_SK_TALLY *SecurityTally; /* private to cmcheck.c: the recount of the 'sk' references, or NULL */
+    /*
+     * Private to cmcheck.c: is Cell a key node cell of the hive (an allocated
+     * cell, as large as a key node with its name, signature 'nk')? The entries
+     * of a subkey index are read before the keys they name are checked.
+     */
+    BOOLEAN (*IsKeyCell)(PVOID Context, HCELL_INDEX Cell);
+    PVOID CheckContext;
 } CMP_CASE_REPAIR_STATS, *PCMP_CASE_REPAIR_STATS;
 
 VOID
@@ -986,6 +1000,14 @@ CmpGetCheckedSecurityCell(
     OUT PULONG CellSize OPTIONAL
 );
 
+/* The offsets of a self-relative descriptor lie inside Length (the ACEs are not interpreted) */
+BOOLEAN
+NTAPI
+CmpIsSaneRelativeDescriptor(
+    IN PVOID Descriptor,
+    IN ULONG Length
+);
+
 BOOLEAN
 NTAPI
 CmpValidateSecurityCell(
@@ -1087,5 +1109,24 @@ CmpFree(
     IN PVOID Ptr,
     IN ULONG Quota
 );
+
+#if defined(_BLDR_)
+/*
+ * The boot loader's memory for the check of a hive (cmcheck.c), which is
+ * freed before the check returns: its default heap is too small for the
+ * cell map of a large hive.
+ */
+PVOID
+NTAPI
+CmpAllocateTemporary(
+    IN SIZE_T Size
+);
+
+VOID
+NTAPI
+CmpFreeTemporary(
+    IN PVOID Ptr
+);
+#endif
 
 #endif /* _CMLIB_H_ */
