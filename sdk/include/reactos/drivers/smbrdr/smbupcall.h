@@ -323,6 +323,14 @@ typedef struct _SMBUP_CANCEL_REQUEST
  * ULONG 0/1). */
 #define IOCTL_SMBRDR_QUERY_STATE        SMBUP_CTL_CODE(16, METHOD_BUFFERED)
 
+/* On the engine device, for the service that starts the engine (the Workstation service,
+ * SYSTEM): IOCTL_SMBRDR_WAIT_ENGINE_NEEDED completes (STATUS_SUCCESS) when a user's request
+ * needs an engine and none is attached; the caller then starts the engine service. It stays
+ * pending otherwise (cancellable). One waiter at a time (a second gets STATUS_DEVICE_BUSY). */
+#define IOCTL_SMBRDR_WAIT_ENGINE_NEEDED SMBUP_CTL_CODE(17, METHOD_BUFFERED)
+/* How long a request waits for an engine to attach after asking for one */
+#define NITRO_SMBRDR_ENGINE_START_WAIT_SECONDS 20
+
 #ifdef __cplusplus
 #define SMBUP_STATIC_ASSERT(e, m) static_assert(e, #m)
 #else

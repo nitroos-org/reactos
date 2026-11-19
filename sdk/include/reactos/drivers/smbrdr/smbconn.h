@@ -86,4 +86,13 @@ typedef struct _SMBCONN_DELETE_INPUT
     ULONG Reserved;
 } SMBCONN_DELETE_INPUT, *PSMBCONN_DELETE_INPUT;
 
+/*
+ * Machine switch of the client (administrators only: the Services key):
+ * HKLM\SYSTEM\CurrentControlSet\Services\smbengine\Parameters, ClientEnabled (REG_DWORD).
+ * 0 or absent = the SMB client stays off (nothing loads it); 1 = the Workstation service
+ * loads mrxsmb at its start and starts the engine service when the redirector first needs it.
+ */
+#define SMBCONN_SWITCH_KEY               L"SYSTEM\\CurrentControlSet\\Services\\smbengine\\Parameters"
+#define SMBCONN_SWITCH_VALUE             L"ClientEnabled"
+
 #endif /* _NITRO_SMBCONN_H_ */

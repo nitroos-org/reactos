@@ -27,6 +27,12 @@ PDEVICE_OBJECT SmbEngineDevice;
 ULONG SmbRequestTimeoutSeconds = NITRO_SMBRDR_REQUEST_TIMEOUT_SECONDS;
 static LIST_ENTRY SmbCopyingList;
 
+/* Demand start: the starter (the Workstation service) waits in IOCTL_SMBRDR_WAIT_ENGINE_NEEDED for
+ * SmbNeedEvent; a request without an engine sets it and waits for SmbAttachedEvent */
+static KEVENT SmbNeedEvent;             /* synchronization: one wake-up per need */
+static KEVENT SmbAttachedEvent;         /* notification: set while an engine is attached */
+static volatile LONG SmbStarterSeen;    /* a starter has waited since the driver loaded */
+
 VOID
 SmbEngineInitialize(VOID)
 {
@@ -38,6 +44,59 @@ SmbEngineInitialize(VOID)
     KeInitializeSemaphore(&SmbEngine.QueueSemaphore, 0, MAXLONG);
     KeInitializeEvent(&SmbEngine.DetachEvent, NotificationEvent, TRUE);
     KeInitializeEvent(&SmbEngine.BudgetEvent, NotificationEvent, FALSE);
+    KeInitializeEvent(&SmbNeedEvent, SynchronizationEvent, FALSE);
+    KeInitializeEvent(&SmbAttachedEvent, NotificationEvent, FALSE);
+}
+
+/*
+ * An engine for a user's request: at once if one is attached; otherwise, if a starter is
+ * there, ask it for one and wait (NITRO_SMBRDR_ENGINE_START_WAIT_SECONDS at most, in 1 s
+ * slices that end early when Irp is given up). Without a starter (the client is switched
+ * off, or the engine was started by hand) there is nothing to wait for.
+ */
+NTSTATUS
+SmbEnsureEngine(PIRP Irp)
+{
+    LARGE_INTEGER Slice;
+    ULONG i;
+
+    PAGED_CODE();
+
+    if (SmbEngine.FileObject != NULL)
+        return STATUS_SUCCESS;
+    if (!SmbStarterSeen)
+        return STATUS_REDIRECTOR_NOT_STARTED;
+
+    KeSetEvent(&SmbNeedEvent, IO_NO_INCREMENT, FALSE);
+    Slice.QuadPart = -10000000LL;
+    for (i = 0; i < NITRO_SMBRDR_ENGINE_START_WAIT_SECONDS; i++)
+    {
+        if (KeWaitForSingleObject(&SmbAttachedEvent, Executive, KernelMode, FALSE, &Slice) == STATUS_SUCCESS)
+            return STATUS_SUCCESS;
+        if (SmbIrpCancelled(Irp))
+            return STATUS_CANCELLED;
+    }
+    DPRINT1("mrxsmb: no engine attached within %lu s\n", NITRO_SMBRDR_ENGINE_START_WAIT_SECONDS);
+    return STATUS_REDIRECTOR_NOT_STARTED;
+}
+
+/* IOCTL_SMBRDR_WAIT_ENGINE_NEEDED: the starter's thread waits here (alertable, so it can be
+ * terminated), at most 5 minutes per call */
+static
+NTSTATUS
+SmbWaitEngineNeeded(VOID)
+{
+    LARGE_INTEGER Timeout;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    InterlockedExchange(&SmbStarterSeen, 1);
+    Timeout.QuadPart = -10000000LL * 300;
+    Status = KeWaitForSingleObject(&SmbNeedEvent, UserRequest, UserMode, TRUE, &Timeout);
+    if (Status == STATUS_SUCCESS)
+        return SmbEngine.FileObject == NULL ? STATUS_SUCCESS : STATUS_ALREADY_REGISTERED;
+    return Status == STATUS_TIMEOUT ? STATUS_IO_TIMEOUT : Status;
 }
 
 /*
@@ -594,6 +653,7 @@ SmbEngineAttach(PIRP Irp, PIO_STACK_LOCATION Stack)
     SmbEngine.Process = Process;
     SmbEngine.Generation++;
     KeClearEvent(&SmbEngine.DetachEvent);
+    KeSetEvent(&SmbAttachedEvent, IO_NO_INCREMENT, FALSE);
     KeReleaseSpinLock(&SmbEngine.Lock, OldIrql);
 
     DPRINT1("mrxsmb: engine attached (process %p, generation %lu)\n", Process, SmbEngine.Generation);
@@ -642,6 +702,7 @@ SmbEngineDetach(PFILE_OBJECT FileObject)
         }
     }
     KeSetEvent(&SmbEngine.DetachEvent, IO_NO_INCREMENT, FALSE);
+    KeClearEvent(&SmbAttachedEvent);
     KeReleaseSpinLock(&SmbEngine.Lock, OldIrql);
 
     while (!IsListEmpty(&Release))
@@ -902,6 +963,11 @@ SmbEngineDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
                     *(PULONG)Irp->AssociatedIrp.SystemBuffer = (SmbEngine.FileObject != NULL);
                     Irp->IoStatus.Information = sizeof(ULONG);
                     Status = STATUS_SUCCESS;
+                    break;
+                case IOCTL_SMBRDR_WAIT_ENGINE_NEEDED:
+                    /* Not for the engine itself (its handle would hold a GET thread) */
+                    Status = (SmbEngine.FileObject == Stack->FileObject) ? STATUS_INVALID_DEVICE_REQUEST :
+                             SmbWaitEngineNeeded();
                     break;
                 default:
                     Status = STATUS_INVALID_DEVICE_REQUEST;

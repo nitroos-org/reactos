@@ -8,6 +8,7 @@ add_library(wkssvc MODULE
     info.c
     netuse.c
     rpcserver.c
+    smbstart.c
     wkssvc.c
     wkssvc.rc
     ${CMAKE_CURRENT_BINARY_DIR}/wkssvc_s.c

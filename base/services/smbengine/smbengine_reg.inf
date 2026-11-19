@@ -16,3 +16,7 @@ HKLM,"SYSTEM\CurrentControlSet\Services\smbengine","RequiredPrivileges",0x000100
 HKLM,"SYSTEM\CurrentControlSet\Services\smbengine","ServiceSidType",0x00010001,0x00000001
 HKLM,"SYSTEM\CurrentControlSet\Services\smbengine","FailureActions",0x00000001,80,51,01,00,00,00,00,00,00,00,00,00,03,00,00,00,14,00,00,00,01,00,00,00,E8,03,00,00,01,00,00,00,88,13,00,00,01,00,00,00,30,75,00,00
 HKLM,"SYSTEM\CurrentControlSet\Services\smbengine","FailureActionsOnNonCrashFailures",0x00010001,0x00000001
+; The machine switch of the SMB client (sdk/include/reactos/drivers/smbrdr/smbconn.h). 0 = off: nothing
+; loads mrxsmb or starts this service. 1 = on: the Workstation service loads mrxsmb at its start and
+; starts this service when a user first needs the redirector. Administrators only (the Services key).
+HKLM,"SYSTEM\CurrentControlSet\Services\smbengine\Parameters","ClientEnabled",0x00010001,0x00000000

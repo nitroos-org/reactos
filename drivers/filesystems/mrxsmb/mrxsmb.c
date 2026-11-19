@@ -143,6 +143,11 @@ SmbConnect(PMRX_V_NET_ROOT VNetRoot, PSMB_VNETROOT Ext, PIRP Irp, PSMB_CREDENTIA
     if (!Ext->ClientContextValid)
         return STATUS_NO_TOKEN;
 
+    /* No engine yet: the starter (Workstation service) starts one when the client is switched on */
+    Status = SmbEnsureEngine(Irp);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
     Variable = Server.Length + Share.Length;
     if (Creds != NULL)
         Variable += Creds->User.Length + Creds->Domain.Length + Creds->Password.Length;
@@ -2003,10 +2008,12 @@ SmbQueryPathEx(PIRP Irp, PIO_STACK_LOCATION Stack)
         goto Complete;
     }
 
-    /* Without an engine nothing can be claimed: do not make rdbss build connections */
-    if (SmbEngine.FileObject == NULL || SmbRdrDeviceFileObject == NULL ||
+    /* Without an engine nothing can be claimed: do not make rdbss build connections. The starter
+     * (when the client is switched on) is asked for one first. */
+    if (SmbRdrDeviceFileObject == NULL ||
         RequestEx->PathName.Length == 0 || RequestEx->PathName.Length >= MAXUSHORT - sizeof(WCHAR) ||
-        SmbIsEngineProcess(IoGetCurrentProcess()))
+        SmbIsEngineProcess(IoGetCurrentProcess()) ||
+        !NT_SUCCESS(SmbEnsureEngine(NULL)))
     {
         Status = STATUS_BAD_NETWORK_PATH;
         goto Complete;

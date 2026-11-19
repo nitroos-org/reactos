@@ -59,6 +59,10 @@ VOID
 SaveWorkstationInfo(
     _In_ DWORD Level);
 
+/* smbstart.c */
+VOID StartSmbClientStarter(VOID);
+VOID StopSmbClientStarter(VOID);
+
 /* netuse.c */
 NET_API_STATUS WksUseAdd(DWORD Level, LPUSE_INFO_ADD InfoStruct, DWORD *ErrorParameter);
 NET_API_STATUS WksUseDel(LPWSTR UseName, DWORD ForceLevel);

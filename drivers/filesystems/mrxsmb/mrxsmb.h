@@ -129,6 +129,7 @@ NTSTATUS SmbEngineDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 NTSTATUS SmbEngineCreateDevice(PDRIVER_OBJECT DriverObject);
 VOID SmbEngineDeleteDevice(VOID);
 BOOLEAN SmbIsEngineProcess(PEPROCESS Process);
+NTSTATUS SmbEnsureEngine(PIRP Irp);
 ULONG SmbCurrentGeneration(VOID);
 NTSTATUS SmbAllocateRequest(USHORT Opcode, ULONG VariableSize, PLUID LogonId, PSMB_REQUEST *Request);
 NTSTATUS SmbAllocateRequestForIrp(USHORT Opcode, ULONG VariableSize, PLUID LogonId, PIRP Irp, PSMB_REQUEST *Request);

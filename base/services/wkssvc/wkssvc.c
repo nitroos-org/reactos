@@ -108,6 +108,9 @@ ServiceInit(VOID)
 
     StartRpcServer();
 
+    /* The SMB client, when the machine switch has it on */
+    StartSmbClientStarter();
+
     /* Report a running workstation service */
     SetServiceBits(ServiceStatusHandle,
                    SV_TYPE_WORKSTATION,
@@ -125,6 +128,8 @@ ServiceShutdown(VOID)
     NTSTATUS Status;
 
     ERR("ServiceShutdown()\n");
+
+    StopSmbClientStarter();
 
     Status = LsaDeregisterLogonProcess(LsaHandle);
     if (!NT_SUCCESS(Status))
