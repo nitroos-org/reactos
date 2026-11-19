@@ -21,6 +21,7 @@ extern void func_NetServerGetInfo(void);
 extern void func_NetUserPassword(void);
 extern void func_NetShare(void);
 extern void func_NetWkstaUserGetInfo(void);
+extern void func_SamAccessCheck(void);
 
 const struct test winetest_testlist[] =
 {
@@ -37,6 +38,7 @@ const struct test winetest_testlist[] =
     { "NetShare", func_NetShare },
     { "NetUserPassword", func_NetUserPassword },
     { "NetWkstaUserGetInfo", func_NetWkstaUserGetInfo },
+    { "SamAccessCheck", func_SamAccessCheck },
 
     { 0, 0 }
 };
