@@ -2059,7 +2059,7 @@ SmbQueryPathEx(PIRP Irp, PIO_STACK_LOCATION Stack)
     if (SmbRdrDeviceFileObject == NULL ||
         RequestEx->PathName.Length == 0 || RequestEx->PathName.Length >= MAXUSHORT - sizeof(WCHAR) ||
         SmbIsEngineProcess(IoGetCurrentProcess()) ||
-        !NT_SUCCESS(SmbEnsureEngine(NULL)))
+        !NT_SUCCESS(SmbEnsureEngine(Irp)))
     {
         Status = STATUS_BAD_NETWORK_PATH;
         goto Complete;
