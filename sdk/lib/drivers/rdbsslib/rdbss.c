@@ -44,6 +44,9 @@
  * in its FCB's OutstandingLockOperationsCount (RxCommonLockControl), until
  * RxpLockRequestDone */
 #define RXP_LOWIO_FLAG_LOCK_COUNTED 0x4000
+/* RDBSS-private FOBX flag (a bit fcb.h does not use): the cleanup of the
+ * handle has started (set under the FCB, before its locks are released) */
+#define RXP_FOBX_FLAG_CLEANUP_STARTED 0x40000000
 
 typedef
 NTSTATUS
@@ -2142,6 +2145,9 @@ RxCommonCleanup(
     FcbAcquired = TRUE;
 
     Fobx->AssociatedFileObject = NULL;
+    /* From here on, a lock of this handle that the server grants is not kept
+     * (RxLowIoLockControlShellCompletion) */
+    InterlockedOr((volatile LONG *)&Fobx->Flags, RXP_FOBX_FLAG_CLEANUP_STARTED);
 
     /* In case it was already orphaned */
     if (BooleanFlagOn(Fcb->FcbState, FCB_STATE_ORPHANED))
@@ -8599,6 +8605,33 @@ RxLowIoLockControlShellCompletion(
                 {
                     DPRINT1("Server granted a lock the local table refused: %lx\n", IoStatus.Status);
                     Status = STATUS_LOCK_NOT_GRANTED;
+                }
+                else if (RxContext->MajorFunction == IRP_MJ_LOCK_CONTROL)
+                {
+                    PFOBX Fobx = (PFOBX)RxContext->pFobx;
+
+                    /* The handle's cleanup may have run between the server's
+                     * answer and here (an asynchronous lock is completed on
+                     * the mini-redirector's thread): it has already released
+                     * the handle's local locks, so this one would stay in the
+                     * FILE_LOCK, owned by a file object nobody can use, and
+                     * refuse every later overlapping lock of every handle.
+                     * Cleanup marks the FOBX (FCB exclusive)
+                     * before it cancels the handle's lock requests and
+                     * releases its locks, with a spin lock in between: with
+                     * the barrier here, either its release saw this lock or
+                     * this sees the mark. The server drops the lock
+                     * with the handle's server open */
+                    KeMemoryBarrier();
+                    if (Fobx != NULL && BooleanFlagOn(Fobx->Flags, RXP_FOBX_FLAG_CLEANUP_STARTED))
+                    {
+                        DPRINT1("Lock granted after the cleanup of its handle: not kept\n");
+                        FsRtlFastUnlockSingle(&Fcb->Specific.Fcb.FileLock, Stack->FileObject,
+                                              &Stack->Parameters.LockControl.ByteOffset, &Length,
+                                              IoGetRequestorProcess(Irp), LowIoContext->ParamsFor.Locks.Key,
+                                              NULL, FALSE);
+                        Status = STATUS_CANCELLED;
+                    }
                 }
             }
             break;
