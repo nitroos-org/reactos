@@ -358,6 +358,17 @@ static void R_SubkeyCountTooLarge(PBYTE Buf, DWORD Size)
 {
     D32(CELL(Buf, K(Buf, Size, "C")), NK_SUBKEY_COUNT) = 0x7FFFFFFF;
 }
+/* A Unicode name of an odd number of bytes (the compressed flag cleared): lookups compared lengths and missed it */
+static void R_OddNameLength(PBYTE Buf, DWORD Size)
+{
+    DWORD C = K(Buf, Size, "C");
+    W16(CELL(Buf, C), NK_FLAGS) &= ~0x0020;     /* KEY_COMP_NAME; the name "C" is 1 byte */
+}
+/* A key flagged as a link without a link value: its KCB stayed referenced and the hive did not unload (F13) */
+static void R_LinkFlagNoValue(PBYTE Buf, DWORD Size)
+{
+    W16(CELL(Buf, K(Buf, Size, "B")), NK_FLAGS) |= 0x0010;  /* KEY_SYM_LINK */
+}
 /* An allocated cell whose size runs past its bin */
 static void R_CellPastBin(PBYTE Buf, DWORD Size)
 {
@@ -387,6 +398,8 @@ static const RECIPE g_Recipes[] =
     { "subkey names another parent", R_WrongParent, TRUE },
     { "subkeys out of order", R_OutOfOrder, TRUE },
     { "subkey count larger than the index", R_SubkeyCountTooLarge, TRUE },
+    { "Unicode name of an odd length", R_OddNameLength, TRUE },
+    { "link flag without a link value", R_LinkFlagNoValue, TRUE },
     { "cell size past its bin", R_CellPastBin, FALSE },
 };
 
@@ -407,6 +420,7 @@ static DWORD WINAPI LoadThread(PVOID Parameter)
 }
 
 static ULONG g_Keys;
+static PCSTR g_Recipe = "";
 
 /* Everything a key has, as a program would read it */
 static void Walk(HKEY Key, ULONG Depth)
@@ -414,6 +428,7 @@ static void Walk(HKEY Key, ULONG Depth)
     WCHAR Name[300], Class[300];
     BYTE Data[512], Sd[1024];
     DWORD i, NameLength, DataLength, Type, ClassLength, SubKeys, MaxSubKey, Values, MaxValueName, MaxValueData, SdLength;
+    LONG Error;
     FILETIME Time;
     HKEY Sub;
 
@@ -440,7 +455,11 @@ static void Walk(HKEY Key, ULONG Depth)
         ClassLength = _countof(Class);
         if (RegEnumKeyExW(Key, i, Name, &NameLength, NULL, Class, &ClassLength, &Time) == ERROR_NO_MORE_ITEMS)
             break;
-        if (RegOpenKeyExW(Key, Name, 0, KEY_READ, &Sub) == ERROR_SUCCESS)
+        /* What enumeration gives, a lookup by name finds (a link without its value aside) */
+        Error = RegOpenKeyExW(Key, Name, 0, KEY_READ, &Sub);
+        ok(Error == ERROR_SUCCESS || (Depth == 0 && !wcscmp(Name, L"B")),
+           "[%s] subkey '%ls' enumerated but not opened: %ld\n", g_Recipe, Name, Error);
+        if (Error == ERROR_SUCCESS)
         {
             Walk(Sub, Depth + 1);
             RegCloseKey(Sub);
@@ -573,6 +592,7 @@ START_TEST(RegLoadCraftedHive)
     for (i = 0; i < _countof(g_Recipes); i++)
     {
         trace("recipe %lu: %s\n", i, g_Recipes[i].Name);
+        g_Recipe = g_Recipes[i].Name;
         Run(&g_Recipes[i]);
     }
 
