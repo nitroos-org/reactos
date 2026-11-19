@@ -3448,6 +3448,16 @@ ScmStartService(PSERVICE Service,
     /* Really start the service */
     dwError = ScmLoadService(Service, argc, argv);
 
+    /* A start that the required privileges stop (1297 for a privilege the account lacks, 87 or 13 for an invalid
+     * list) leaves the win32 exit code 0, not ERROR_SERVICE_NEVER_STARTED (measured on Windows Server 2022) */
+    if ((dwError == ERROR_INCOMPATIBLE_SERVICE_PRIVILEGE ||
+         dwError == ERROR_INVALID_PARAMETER ||
+         dwError == ERROR_INVALID_DATA) &&
+        Service->Status.dwWin32ExitCode == ERROR_SERVICE_NEVER_STARTED)
+    {
+        Service->Status.dwWin32ExitCode = ERROR_SUCCESS;
+    }
+
     /* Release the service start lock, if needed, and the critical section */
     if (Lock) ScmReleaseServiceStartLock(&Lock);
 

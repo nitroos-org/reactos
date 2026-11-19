@@ -32,12 +32,29 @@ BOOL SdShow(LPCTSTR ServiceName)
         goto done;
     }
 
-    hService = OpenService(hManager, ServiceName, READ_CONTROL);
-    if (hService == NULL)
+    /* "scmanager" is the descriptor of the service control manager database (measured on Windows Server 2022) */
+    if (!lstrcmpi(ServiceName, _T("scmanager")))
     {
-        _tprintf(_T("[SC] OpenService FAILED %lu:\n\n"), GetLastError());
-        bResult = FALSE;
-        goto done;
+        CloseServiceHandle(hManager);
+        hManager = OpenSCManager(NULL, NULL, READ_CONTROL);
+        if (hManager == NULL)
+        {
+            _tprintf(_T("[SC] OpenSCManager FAILED %lu:\n\n"), GetLastError());
+            bResult = FALSE;
+            goto done;
+        }
+        hService = hManager;
+        hManager = NULL;
+    }
+    else
+    {
+        hService = OpenService(hManager, ServiceName, READ_CONTROL);
+        if (hService == NULL)
+        {
+            _tprintf(_T("[SC] OpenService FAILED %lu:\n\n"), GetLastError());
+            bResult = FALSE;
+            goto done;
+        }
     }
 
     if (!QueryServiceObjectSecurity(hService,
