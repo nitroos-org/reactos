@@ -1570,6 +1570,9 @@ NtInitializeRegistry(IN USHORT Flag)
 
     /* Release the registry lock */
     CmpUnlockRegistry();
+
+    /* Registry key security: the checks that need every machine hive (and the file system) */
+    CmpAclBootHivesLoaded(SetupBoot);
     return STATUS_SUCCESS;
 }
 
@@ -2620,6 +2623,22 @@ NtUnloadKey(IN POBJECT_ATTRIBUTES KeyObjectAttributes)
     return NtUnloadKey2(KeyObjectAttributes, 0);
 }
 
+/* A hive of the boot hive list (CmpMachineHiveList): the system's own, never unloaded */
+static
+BOOLEAN
+CmpIsBootListHive(
+    _In_ PHHIVE Hive)
+{
+    ULONG i;
+
+    for (i = 0; CmpMachineHiveList[i].Name; i++)
+    {
+        if (Hive == (PHHIVE)CmpMachineHiveList[i].CmHive || Hive == (PHHIVE)CmpMachineHiveList[i].CmHive2)
+            return TRUE;
+    }
+    return FALSE;
+}
+
 NTSTATUS
 NTAPI
 NtUnloadKey2(IN POBJECT_ATTRIBUTES TargetKey,
@@ -2746,6 +2765,23 @@ NtUnloadKey2(IN POBJECT_ATTRIBUTES TargetKey,
     if (KeyBody->KeyControlBlock->ExtFlags & CM_KCB_READ_ONLY_KEY)
     {
         /* Return appropriate status */
+        Status = STATUS_ACCESS_DENIED;
+        goto Quit;
+    }
+
+    /*
+     * The hives of the boot hive list (SYSTEM, SOFTWARE, SAM, SECURITY, the
+     * default user's) belong to the system: Windows refuses to unload them,
+     * even for a caller with the restore privilege (advapi32 winetest
+     * registry: NtUnloadKey of \REGISTRY\User\.Default and
+     * RegUnLoadKey(HKEY_USERS, ".Default") fail with access denied). Here the
+     * default user's hive was unloaded, and HKEY_USERS\.DEFAULT stayed gone
+     * until the next boot. A key below a hive root is no hive to unload: CmUnloadKey answers
+     * STATUS_INVALID_PARAMETER for it, as before (ntdll_apitest NtUnloadKeyBuffer).
+     */
+    if (KeyBody->KeyControlBlock->KeyCell == KeyBody->KeyControlBlock->KeyHive->BaseBlock->RootCell &&
+        CmpIsBootListHive(KeyBody->KeyControlBlock->KeyHive))
+    {
         Status = STATUS_ACCESS_DENIED;
         goto Quit;
     }

@@ -185,6 +185,23 @@ static void TestSecretDacl(void)
 /* A standard user: the same process token without its user and its administrators group (both deny-only) and
    without privileges, as an impersonation token. The key's stored descriptor must refuse it: AccessCheck against
    the descriptor the key reports, and the open itself. The parent key opens (control). */
+/* Registry key security enforced at this boot (AuditStats Mode 2): key opens are decided by the keys' descriptors */
+static BOOL RegistryAclEnforced(void)
+{
+    HKEY Key;
+    DWORD Mode = 0, Size = sizeof(Mode), Type;
+    BOOL Enforced = FALSE;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\RegAcl\\AuditStats", 0,
+                      KEY_QUERY_VALUE, &Key) == ERROR_SUCCESS)
+    {
+        Enforced = RegQueryValueExW(Key, L"Mode", NULL, &Type, (BYTE *)&Mode, &Size) == ERROR_SUCCESS &&
+                   Type == REG_DWORD && Mode == 2;
+        RegCloseKey(Key);
+    }
+    return Enforced;
+}
+
 static void TestSecretDeniedToUser(void)
 {
     HANDLE Token = NULL, Filtered = NULL, Imp = NULL;
@@ -202,6 +219,7 @@ static void TestSecretDeniedToUser(void)
     PSECURITY_DESCRIPTOR Sd = NULL;
     HKEY Key;
     LONG Error;
+    BOOL Enforced = RegistryAclEnforced();
 
     CreateWellKnownSid(WinBuiltinAdministratorsSid, NULL, AdminsSid, &SidSize);
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY, &Token) ||
@@ -254,10 +272,10 @@ static void TestSecretDeniedToUser(void)
     ok(Error == ERROR_SUCCESS, "standard user: Tcpip6\\Parameters open error %ld (control)\n", Error);
     if (Error == ERROR_SUCCESS)
         RegCloseKey(Key);
-    /* This kernel stores and reports key descriptors but does not enforce them on open yet (registry ACL
-       enforcement, slice R8): todo until it does */
+    /* Key descriptors are enforced on open only in registry ACL mode 2 (the default once it is flipped); in audit
+       mode the open succeeds: todo there */
     Error = RegOpenKeyExW(HKEY_LOCAL_MACHINE, SECRET_KEY, 0, KEY_QUERY_VALUE, &Key);
-    todo_if(is_reactos())
+    todo_if(is_reactos() && !Enforced)
     ok(Error == ERROR_ACCESS_DENIED, "standard user: secret key open error %ld, want ERROR_ACCESS_DENIED\n", Error);
     if (Error == ERROR_SUCCESS)
         RegCloseKey(Key);

@@ -3,7 +3,8 @@
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
  * PURPOSE:     CreateProcessWithLogonW (the secondary logon behind runas.exe): a GUI program started for
  *              another user gets a window on the interactive desktop (WinSta0\Default), a console program
- *              runs, a wrong password fails with ERROR_LOGON_FAILURE
+ *              runs, with LOGON_WITH_PROFILE the child's HKEY_CURRENT_USER is its own loaded hive, a wrong
+ *              password fails with ERROR_LOGON_FAILURE
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  *
  * The test is run by an administrator from the interactive desktop. The child is this program with
@@ -15,6 +16,8 @@
 #include <wingdi.h>
 #include <winuser.h>
 #include <lm.h>
+#include <sddl.h>
+#include <ndk/cmfuncs.h>
 
 #define STEP_WINSTA     1   /* no window station                */
 #define STEP_WINSTANAME 2   /* not WinSta0                      */
@@ -23,6 +26,11 @@
 #define STEP_WINDOW     5   /* CreateWindowEx failed            */
 #define STEP_VISIBLE    6   /* the window is not visible        */
 #define STEP_OPENDESK   7   /* OpenInputDesktop-free check: OpenDesktop(Default) failed */
+#define STEP_SID        8   /* the child cannot read its own user SID */
+#define STEP_HIVE       9   /* HKEY_USERS\<own SID> is not loaded while the child runs */
+#define STEP_HKCU       10  /* RegOpenCurrentUser failed */
+#define STEP_HKCUNAME   11  /* HKEY_CURRENT_USER is not \REGISTRY\USER\<own SID> */
+#define STEP_HKCUWRITE  12  /* a key cannot be created under HKEY_CURRENT_USER\Software */
 #define CONSOLE_EXIT    42
 
 static WCHAR TestPassword[] = L"RunAsGui-Test-2026!";
@@ -131,7 +139,116 @@ static DWORD ChildGui(PCWSTR ExpectWinSta, PCWSTR ExpectDesktop)
     return 0;
 }
 
+/* The string SID of this process's user, LocalFree it */
+static PWSTR OwnSidString(VOID)
+{
+    BYTE Buffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+    PTOKEN_USER User = (PTOKEN_USER)Buffer;
+    HANDLE Token;
+    DWORD Length;
+    PWSTR Sid = NULL;
+
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &Token))
+        return NULL;
+    if (GetTokenInformation(Token, TokenUser, User, sizeof(Buffer), &Length))
+        ConvertSidToStringSidW(User->User.Sid, &Sid);
+    CloseHandle(Token);
+    return Sid;
+}
+
+/*
+ * LOGON_WITH_PROFILE: the child's HKEY_CURRENT_USER is its own hive, loaded under HKEY_USERS\<SID>
+ * for as long as the child runs (CreateProcessWithLogonW documents that the profile is loaded), and
+ * the child can create keys in it.
+ */
+static DWORD ChildProfile(VOID)
+{
+    BYTE Buffer[sizeof(KEY_NAME_INFORMATION) + 512 * sizeof(WCHAR)];
+    PKEY_NAME_INFORMATION Name = (PKEY_NAME_INFORMATION)Buffer;
+    WCHAR Expected[256];
+    HKEY Users, Current, Key;
+    ULONG Length;
+    NTSTATUS Status;
+    LONG Error;
+    PWSTR Sid;
+    DWORD Result = 0;
+
+    Sid = OwnSidString();
+    if (Sid == NULL)
+        return Fail(STEP_SID);
+
+    Error = RegOpenKeyExW(HKEY_USERS, Sid, 0, KEY_QUERY_VALUE, &Users);
+    if (Error != ERROR_SUCCESS)
+    {
+        LocalFree(Sid);
+        return (Error << 8) | STEP_HIVE;
+    }
+    RegCloseKey(Users);
+
+    Error = RegOpenCurrentUser(KEY_READ | KEY_CREATE_SUB_KEY, &Current);
+    if (Error != ERROR_SUCCESS)
+    {
+        LocalFree(Sid);
+        return (Error << 8) | STEP_HKCU;
+    }
+
+    StringCchPrintfW(Expected, RTL_NUMBER_OF(Expected), L"\\REGISTRY\\USER\\%ls", Sid);
+    Status = NtQueryKey(Current, KeyNameInformation, Name, sizeof(Buffer) - sizeof(WCHAR), &Length);
+    if (!NT_SUCCESS(Status))
+    {
+        Result = (RtlNtStatusToDosError(Status) << 8) | STEP_HKCUNAME;
+    }
+    else
+    {
+        Name->Name[Name->NameLength / sizeof(WCHAR)] = UNICODE_NULL;
+        if (_wcsicmp(Name->Name, Expected))
+            Result = STEP_HKCUNAME;
+    }
+
+    if (Result == 0)
+    {
+        Error = RegCreateKeyExW(Current, L"Software\\RunAsProfileTest", 0, NULL, REG_OPTION_VOLATILE,
+                                KEY_ALL_ACCESS, NULL, &Key, NULL);
+        if (Error != ERROR_SUCCESS)
+        {
+            Result = (Error << 8) | STEP_HKCUWRITE;
+        }
+        else
+        {
+            RegDeleteKeyW(Key, L"");
+            RegCloseKey(Key);
+        }
+    }
+
+    RegCloseKey(Current);
+    LocalFree(Sid);
+    return Result;
+}
+
+/* The string SID of a local account, LocalFree it */
+static PWSTR AccountSidString(PCWSTR Account)
+{
+    BYTE SidBuffer[SECURITY_MAX_SID_SIZE];
+    WCHAR Domain[64];
+    DWORD SidLength = sizeof(SidBuffer), DomainLength = RTL_NUMBER_OF(Domain);
+    SID_NAME_USE Use;
+    PWSTR Sid = NULL;
+
+    if (LookupAccountNameW(NULL, Account, SidBuffer, &SidLength, Domain, &DomainLength, &Use))
+        ConvertSidToStringSidW(SidBuffer, &Sid);
+    return Sid;
+}
+
+static DWORD RunChildFlags(PCWSTR User, PCWSTR Password, DWORD LogonFlags, PCSTR ModeA, PCWSTR Desktop,
+                           BOOL *Started, DWORD *Error);
+
 static DWORD RunChild(PCWSTR User, PCWSTR Password, PCSTR ModeA, PCWSTR Desktop, BOOL *Started, DWORD *Error)
+{
+    return RunChildFlags(User, Password, 0, ModeA, Desktop, Started, Error);
+}
+
+static DWORD RunChildFlags(PCWSTR User, PCWSTR Password, DWORD LogonFlags, PCSTR ModeA, PCWSTR Desktop,
+                           BOOL *Started, DWORD *Error)
 {
     WCHAR Exe[MAX_PATH], Command[MAX_PATH + 128], Mode[96];
     STARTUPINFOW Si;
@@ -146,7 +263,7 @@ static DWORD RunChild(PCWSTR User, PCWSTR Password, PCSTR ModeA, PCWSTR Desktop,
     Si.cb = sizeof(Si);
     Si.lpDesktop = (LPWSTR)Desktop;
     SetLastError(0xdeadbeef);
-    Ok = CreateProcessWithLogonW(User, L".", Password, 0, NULL, Command, 0, NULL, NULL, &Si, &Pi);
+    Ok = CreateProcessWithLogonW(User, L".", Password, LogonFlags, NULL, Command, 0, NULL, NULL, &Si, &Pi);
     *Error = GetLastError();
     *Started = Ok;
     if (!Ok)
@@ -188,6 +305,8 @@ START_TEST(CreateProcessWithLogon)
             }
             ExitProcess(ChildGui(WinSta, Desktop));
         }
+        if (!strcmp(argv[3], "profile"))
+            ExitProcess(ChildProfile());
         ExitProcess(CONSOLE_EXIT);
     }
 
@@ -260,6 +379,44 @@ START_TEST(CreateProcessWithLogon)
     ok(Started, "CreateProcessWithLogonW (console) failed: %lu\n", Error);
     if (Started)
         ok(Exit == CONSOLE_EXIT, "console child: exit code %lu\n", Exit);
+
+    /*
+     * LOGON_WITH_PROFILE (runas' default): the child runs with its own hive loaded as HKEY_CURRENT_USER
+     * and can write it; the profile is unloaded again once the child has exited (CreateProcessWithLogonW
+     * documents this for LOGON_WITH_PROFILE; the time it takes is not measured, so a few seconds are allowed).
+     */
+    {
+        PWSTR Sid = AccountSidString(User);
+        HKEY Loaded;
+        LONG Open = ERROR_SUCCESS;
+
+        ok(Sid != NULL, "LookupAccountName(%ls) failed: %lu\n", User, GetLastError());
+        Exit = RunChildFlags(User, TestPassword, LOGON_WITH_PROFILE, "profile", NULL, &Started, &Error);
+        ok(Started, "CreateProcessWithLogonW (LOGON_WITH_PROFILE) failed: %lu\n", Error);
+        if (Started)
+            ok(Exit == 0, "profile child: step %lu, error %lu (exit 0x%lx)\n", Exit & 0xff, Exit >> 8, Exit);
+        if (Started && Sid != NULL)
+        {
+            for (i = 0; i < 100; i++)
+            {
+                Open = RegOpenKeyExW(HKEY_USERS, Sid, 0, KEY_QUERY_VALUE, &Loaded);
+                if (Open != ERROR_SUCCESS)
+                    break;
+                RegCloseKey(Loaded);
+                Sleep(100);
+            }
+            ok(Open == ERROR_FILE_NOT_FOUND, "the hive of %ls is still loaded after the child exited: %ld\n", User, Open);
+        }
+
+        /* The same again: the profile exists now and is loaded a second time */
+        Exit = RunChildFlags(User, TestPassword, LOGON_WITH_PROFILE, "profile", NULL, &Started, &Error);
+        ok(Started, "CreateProcessWithLogonW (LOGON_WITH_PROFILE, existing profile) failed: %lu\n", Error);
+        if (Started)
+            ok(Exit == 0, "profile child, existing profile: step %lu, error %lu (exit 0x%lx)\n",
+               Exit & 0xff, Exit >> 8, Exit);
+        if (Sid != NULL)
+            LocalFree(Sid);
+    }
 
     /* A wrong password */
     Exit = RunChild(User, L"not-the-password", "console", NULL, &Started, &Error);

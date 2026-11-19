@@ -307,6 +307,10 @@ HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer","NoSimpleStar
 ; itself; this policy asks for the same explicitly, as belt-and-braces (it also covers a hardware GL
 ; renderer, where Chromium would otherwise try the GPU path). A policy, unlike a shortcut argument,
 ; applies to every launch path and survives Chrome's updates.
+; Windows ships SOFTWARE\Policies\Microsoft (empty on a fresh install): programs that look for their policies
+; there with RegCreateKeyEx (VS Code) open it for reading; without it the call is a create, which a standard
+; user may not do there.
+HKLM,"SOFTWARE\Policies\Microsoft",,0x00000012
 HKLM,"SOFTWARE\Policies\Google",,0x00000012
 HKLM,"SOFTWARE\Policies\Google\Chrome",,0x00000012
 HKLM,"SOFTWARE\Policies\Google\Chrome","HardwareAccelerationModeEnabled",0x00010001,0

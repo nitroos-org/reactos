@@ -56,10 +56,16 @@ typedef struct _SECL_EXIT_WAIT
 {
     SECL_DESKTOP_ACCESS *Access;
     HANDLE hProcess;
+    HANDLE hToken;
+    HANDLE hProfile;
 } SECL_EXIT_WAIT, *PSECL_EXIT_WAIT;
 
 
-/* Takes the logon SID out of the window station and the desktop when the process is gone */
+/*
+ * When the process is gone: takes the logon SID out of the window station and the desktop, and
+ * unloads the user profile loaded for it (LOGON_WITH_PROFILE). CreateProcessWithLogonW documents
+ * that the profile stays loaded for the new process and is unloaded after it has terminated.
+ */
 static DWORD
 WINAPI
 WaitForProcessExit(
@@ -69,21 +75,34 @@ WaitForProcessExit(
 
     WaitForSingleObject(Wait->hProcess, INFINITE);
     SeclRevokeDesktopAccess(Wait->Access);
+    if (Wait->hProfile != NULL)
+    {
+        if (!UnloadUserProfile(Wait->hToken, Wait->hProfile))
+            WARN("UnloadUserProfile() failed with Error %lu\n", GetLastError());
+    }
+    if (Wait->hToken != NULL)
+        CloseHandle(Wait->hToken);
     CloseHandle(Wait->hProcess);
     HeapFree(GetProcessHeap(), 0, Wait);
     return 0;
 }
 
 
+/*
+ * Hands the desktop access and the loaded profile (each may be NULL) to a thread that releases
+ * them when the process exits. On success the thread owns both; on failure the caller keeps them.
+ */
 static BOOL
 StartExitWait(
-    _In_ SECL_DESKTOP_ACCESS *Access,
+    _In_opt_ SECL_DESKTOP_ACCESS *Access,
+    _In_opt_ HANDLE hToken,
+    _In_opt_ HANDLE hProfile,
     _In_ HANDLE hProcess)
 {
     PSECL_EXIT_WAIT Wait;
     HANDLE hThread;
 
-    Wait = HeapAlloc(GetProcessHeap(), 0, sizeof(*Wait));
+    Wait = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*Wait));
     if (Wait == NULL)
         return FALSE;
 
@@ -95,9 +114,24 @@ StartExitWait(
         return FALSE;
     }
 
+    /* UnloadUserProfile needs the token of the logon the profile was loaded for */
+    if (hProfile != NULL)
+    {
+        if (!DuplicateHandle(GetCurrentProcess(), hToken, GetCurrentProcess(), &Wait->hToken,
+                             0, FALSE, DUPLICATE_SAME_ACCESS))
+        {
+            CloseHandle(Wait->hProcess);
+            HeapFree(GetProcessHeap(), 0, Wait);
+            return FALSE;
+        }
+        Wait->hProfile = hProfile;
+    }
+
     hThread = CreateThread(NULL, 0, WaitForProcessExit, Wait, 0, NULL);
     if (hThread == NULL)
     {
+        if (Wait->hToken != NULL)
+            CloseHandle(Wait->hToken);
         CloseHandle(Wait->hProcess);
         HeapFree(GetProcessHeap(), 0, Wait);
         return FALSE;
@@ -246,11 +280,24 @@ SeclCreateProcessWithLogonW(
         goto done;
     }
 
-    /* Keep the access of the logon until the process has exited */
-    if (DesktopAccess != NULL)
+    /*
+     * Keep the access of the logon and the user's profile (HKEY_CURRENT_USER of the new process is
+     * its hive) until the process has exited. If that cannot be arranged, the profile stays loaded
+     * (it is reference counted, a later logon of the user reuses it) rather than being unloaded
+     * under the running process.
+     */
+    if (DesktopAccess != NULL || ProfileInfo.hProfile != NULL)
     {
-        if (StartExitWait(DesktopAccess, ProcessInfo.hProcess))
+        if (StartExitWait(DesktopAccess, hToken, ProfileInfo.hProfile, ProcessInfo.hProcess))
+        {
             DesktopAccess = NULL;
+            ProfileInfo.hProfile = NULL;
+        }
+        else
+        {
+            WARN("Cannot wait for the process to exit, Error %lu\n", GetLastError());
+            ProfileInfo.hProfile = NULL;
+        }
     }
 
     /* Return process info to the caller */
