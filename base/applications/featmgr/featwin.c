@@ -375,6 +375,7 @@ static void Toggle(HTREEITEM h)
     NODE *n;
     int idx, i;
 
+    if (!FmIsAdministrator()) return;       /* read-only for everyone else */
     ZeroMemory(&tv, sizeof(tv));
     tv.mask = TVIF_PARAM;
     tv.hItem = h;
@@ -462,6 +463,11 @@ static void DoApply(void)
     FM_UIRESULT res;
     WCHAR log[MAX_PATH];
 
+    if (!FmIsAdministrator())
+    {
+        if (jobs) HeapFree(GetProcessHeap(), 0, jobs);
+        return;
+    }
     if (!n)
     {
         if (jobs) HeapFree(GetProcessHeap(), 0, jobs);
@@ -572,6 +578,12 @@ static LRESULT CALLBACK TreeProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             for (c = GetWindow(hwnd, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT))
                 SendMessageW(c, WM_SETFONT, (WPARAM)g_font, TRUE);
             SendMessageW(g_hHead, WM_SETFONT, (WPARAM)g_headFont, TRUE);
+            if (!FmIsAdministrator())
+            {
+                /* the list stays visible, nothing can be changed: say it once, here, not as a failure after OK */
+                SetWindowTextW(g_hInstr, FM_NEED_ADMIN_TEXT L" Sign in as an administrator to turn features on or off. This list is read-only.");
+                EnableWindow(g_hOK, FALSE);
+            }
             FillTree();
             ShowDesc(TreeView_GetSelection(g_hTree));
             return 0;

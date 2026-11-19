@@ -31,6 +31,7 @@ static void Usage(void)
 {
     Out(L"featmgr - " BRAND_PRODUCT_NAME_W L" Features manager (FEATMGMT-01)\n\n");
     Out(L"Usage:\n");
+    Out(L"  (every command that changes something needs an administrator; for anyone else it prints one error line, exit code 5)\n");
     Out(L"  featmgr /list [/state:<Enabled|Disabled|NotInstalled>] [/tier:<os|software>] [/source:<src>]\n");
     Out(L"                [/search:<text>] [/timing]\n");
     Out(L"                               list catalog features + state, version and installed version\n");
@@ -409,6 +410,21 @@ static void PrintPathHint(void)
     Out(L"\n%s", text);
 }
 
+/* The commands that create or change something need an administrator; they stop here, before the first
+ * file or key is made, with one line and exit code 5 (ERROR_ACCESS_DENIED). */
+static BOOL ChangesSystem(LPCWSTR cmd)
+{
+    static const LPCWSTR names[] = {
+        L"/enable", L"enable", L"/install", L"install", L"/disable", L"disable", L"/uninstall", L"uninstall",
+        L"/update", L"update", L"/add-bucket", L"add-bucket", L"/shell-defaults", L"/update-catalog", L"update-catalog",
+        L"/import-rapps", L"import-rapps", L"/import-scoop", L"import-scoop"
+    };
+    UINT i;
+    for (i = 0; i < ARRAYSIZE(names); i++)
+        if (!_wcsicmp(cmd, names[i])) return TRUE;
+    return FALSE;
+}
+
 int wmain(int argc, WCHAR **argv)
 {
     LPCWSTR cmd;
@@ -416,6 +432,12 @@ int wmain(int argc, WCHAR **argv)
 
     if (argc < 2) { Usage(); return 0; }
     cmd = argv[1];
+
+    if (ChangesSystem(cmd) && !FmIsAdministrator())
+    {
+        Out(L"error: %s Sign in as an administrator and try again.\n", FM_NEED_ADMIN_TEXT);
+        return ERROR_ACCESS_DENIED;
+    }
 
     if (!_wcsicmp(cmd, L"/list") || !_wcsicmp(cmd, L"list"))
         return DoList(argc, argv);

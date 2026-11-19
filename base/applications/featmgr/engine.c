@@ -43,6 +43,36 @@ void FmGetLastMessage(LPWSTR buf, DWORD cch)
 
 #define SetLastMsg FmSetLastMessage
 
+BOOL FmIsAdministrator(void)
+{
+    static LONG known;      /* 0 = not asked, 1 = no, 2 = yes (the token of a process does not change) */
+    LONG k = known;
+
+    if (!k)
+    {
+        BOOL is = FALSE;
+        PSID sid = NULL;
+        SID_IDENTIFIER_AUTHORITY nt = { SECURITY_NT_AUTHORITY };
+
+        if (AllocateAndInitializeSid(&nt, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &sid))
+        {
+            if (!CheckTokenMembership(NULL, sid, &is)) is = FALSE;
+            FreeSid(sid);
+        }
+        k = is ? 2 : 1;
+        known = k;
+    }
+    return k == 2;
+}
+
+HRESULT FmRequireAdministrator(FILE *log)
+{
+    if (FmIsAdministrator()) return S_OK;
+    LOGF(log, L"error: %s Sign in as an administrator and try again.\n", FM_NEED_ADMIN_TEXT);
+    SetLastMsg(L"%s Sign in as an administrator and try again.", FM_NEED_ADMIN_TEXT);
+    return HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED);
+}
+
 /* ---- layout helpers ------------------------------------------------------ */
 
 BOOL FmGetRootDir(LPWSTR buf, DWORD cch)
@@ -3232,7 +3262,8 @@ HRESULT FmEnable(LPCWSTR id, FILE *log)
     HRESULT result;
 
     if (g_OpDepth++ == 0) { g_LastMsg[0] = L'\0'; g_Tail[0] = L'\0'; }
-    result = FmEnableInner(id, log);
+    result = FmRequireAdministrator(log);
+    if (SUCCEEDED(result)) result = FmEnableInner(id, log);
     g_OpDepth--;
     return result;
 }
@@ -3782,6 +3813,8 @@ HRESULT FmDisableEx(LPCWSTR id, DWORD flags, FILE *log)
     HRESULT hr;
 
     if (g_OpDepth == 0) { g_LastMsg[0] = L'\0'; g_Tail[0] = L'\0'; }
+    hr = FmRequireAdministrator(log);
+    if (FAILED(hr)) return hr;
     hr = CheckRemovable(id, log);      /* first: base component guard (GFX-FU) */
     if (FAILED(hr)) return hr;
 
@@ -3823,6 +3856,8 @@ HRESULT FmUninstallEx(LPCWSTR id, DWORD flags, FILE *log)
     BOOL pending = FALSE;
     LONG rdk;
 
+    hr = FmRequireAdministrator(log);
+    if (FAILED(hr)) return hr;
     hr = CheckRemovable(id, log);
     if (FAILED(hr)) return hr;
 
@@ -3974,7 +4009,8 @@ HRESULT FmUpdate(LPCWSTR id, FILE *log)
 {
     HRESULT hr;
     if (g_OpDepth++ == 0) { g_LastMsg[0] = L'\0'; g_Tail[0] = L'\0'; }
-    hr = FmUpdateInner(id, log);
+    hr = FmRequireAdministrator(log);
+    if (SUCCEEDED(hr)) hr = FmUpdateInner(id, log);
     g_OpDepth--;
     return hr;
 }
@@ -3984,6 +4020,8 @@ HRESULT FmUpdateAll(FILE *log)
     HRESULT hr;
 
     if (g_OpDepth++ == 0) { g_LastMsg[0] = L'\0'; g_Tail[0] = L'\0'; }
+    hr = FmRequireAdministrator(log);
+    if (FAILED(hr)) { g_OpDepth--; return hr; }
     LOGF(log, L"updating Scoop and its buckets\n");
     hr = RunScoop(L"update", log);
     if (SUCCEEDED(hr))
@@ -4015,6 +4053,8 @@ HRESULT FmScoopAddBucket(LPCWSTR name, LPCWSTR url, DWORD flags, FILE *log)
     int n, skipped = 0;
 
     if (g_OpDepth++ == 0) { g_LastMsg[0] = L'\0'; g_Tail[0] = L'\0'; }
+    hr = FmRequireAdministrator(log);
+    if (FAILED(hr)) goto out;
     hr = ScoopPrereq(log);
     if (FAILED(hr)) goto out;
     if (!FmScoopValidBucket(name))
