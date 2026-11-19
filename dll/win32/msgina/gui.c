@@ -1202,6 +1202,14 @@ DoLogon(
     if (!GetTextboxText(hwndDlg, IDC_LOGON_PASSWORD, &Password))
         goto done;
 
+    /*
+     * An automatic logon with a count is used up by the attempt, whatever its outcome: a stored password that
+     * does not work is tried as many times as the count says and then deleted, never at every start (an
+     * account lock-out policy would count each try). The password is in memory (Password) already.
+     */
+    if (pgContext->bAutoAdminLogon)
+        ConsumeAutoLogon();
+
     Status = DoLoginTasks(pgContext, UserName, Domain, Password, &SubStatus);
     if (Status == STATUS_LOGON_FAILURE)
     {
@@ -1320,10 +1328,6 @@ DoLogon(
 
     SecureZeroMemory(pgContext->Password, sizeof(pgContext->Password));
     wcscpy(pgContext->Password, Password);
-
-    /* An automatic logon with a count is used up by this logon */
-    if (pgContext->bAutoAdminLogon)
-        ConsumeAutoLogon();
 
     result = TRUE;
 
