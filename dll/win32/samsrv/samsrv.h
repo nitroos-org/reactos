@@ -355,7 +355,8 @@ SampCreateAccountDomainSD(OUT PSECURITY_DESCRIPTOR *DomainSd,
                           OUT PULONG Size);
 
 NTSTATUS
-SampCreateAliasSD(OUT PSECURITY_DESCRIPTOR *AliasSd,
+SampCreateAliasSD(IN ULONG RelativeId,
+                  OUT PSECURITY_DESCRIPTOR *AliasSd,
                   OUT PULONG Size);
 
 NTSTATUS

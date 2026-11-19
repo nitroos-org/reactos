@@ -2971,7 +2971,8 @@ SamrCreateAliasInDomain(IN SAMPR_HANDLE DomainHandle,
     }
 
     /* Create the security descriptor */
-    Status = SampCreateAliasSD(&Sd,
+    Status = SampCreateAliasSD(0,
+                               &Sd,
                                &SdSize);
     if (!NT_SUCCESS(Status))
     {
