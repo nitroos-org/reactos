@@ -1167,13 +1167,16 @@ CmpCheckKey(
          * root is a hive entry. The flags come from the file: drop them.
          */
         if ((Node->Flags & CMP_FILE_KEY_FLAGS_DROPPED) ||
-            (Parent != HCELL_NIL && (Node->Flags & KEY_HIVE_ENTRY)))
+            (Parent != HCELL_NIL && (Node->Flags & KEY_HIVE_ENTRY)) ||
+            (Parent == HCELL_NIL && (Node->Flags & KEY_SYM_LINK)))
         {
             DPRINT1("Key 0x%x: flags 0x%x a key of a hive file cannot have, dropped\n", Cell, Node->Flags);
             CmpCheckDirty(Ctx, Cell);
             Node->Flags &= ~CMP_FILE_KEY_FLAGS_DROPPED;
             if (Parent != HCELL_NIL)
                 Node->Flags &= ~KEY_HIVE_ENTRY;
+            else
+                Node->Flags &= ~KEY_SYM_LINK;   /* the root is linked into the registry, never followed as a link */
             Ctx->FieldsReset++;
         }
 

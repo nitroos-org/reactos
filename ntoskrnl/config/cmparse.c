@@ -1173,6 +1173,20 @@ CmpCreateLinkNode(IN PHHIVE Hive,
                            Context->CreateOptions,
                            Object);
         HvReleaseCell(Context->ChildHive.KeyHive, KeyCell);
+
+        /*
+         * A root flagged as a symbolic link: CmpDoOpen made the link's KCB, no
+         * key body, and returned STATUS_REPARSE, which is a success code. A
+         * hive is never linked through such a root (the hive check drops the
+         * flag); refuse rather than use the key body that is not there.
+         */
+        if (Status == STATUS_REPARSE)
+        {
+            if (Kcb != ParentKcb)
+                CmpDereferenceKeyControlBlockWithLock(Kcb, FALSE);
+            Status = STATUS_REGISTRY_CORRUPT;
+            goto Exit;
+        }
     }
     else
     {
