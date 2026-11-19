@@ -65,7 +65,7 @@
 #define NITRO_SMBRDR_PROVIDER_NAME      L"\\Device\\LanmanRedirector"
 
 #define SMBUP_MAGIC                     0x50554253UL    /* "SBUP" */
-#define SMBUP_VERSION                   1
+#define SMBUP_VERSION                   2       /* 2: explicit credentials, CONNECT reply flags */
 
 /* Size limits, both sides */
 #define SMBUP_MAX_IO                    (1024 * 1024)   /* READ/WRITE data per request */
@@ -77,7 +77,9 @@
 #define SMBUP_CTL_CODE(f, m) CTL_CODE(FILE_DEVICE_NETWORK_REDIRECTOR, 0xA00 | (f), (m), FILE_ANY_ACCESS)
 
 #define IOCTL_SMBRDR_ENGINE_ATTACH      SMBUP_CTL_CODE(1, METHOD_BUFFERED)  /* in: SMBUP_ATTACH */
-#define IOCTL_SMBRDR_ENGINE_GET         SMBUP_CTL_CODE(2, METHOD_BUFFERED)  /* out: request message */
+/* out: request message. Direct I/O: the message goes straight into the engine's buffer, so that no
+ * kernel copy of a CONNECT (it may carry a password) is left in pool for the I/O manager to free */
+#define IOCTL_SMBRDR_ENGINE_GET         SMBUP_CTL_CODE(2, METHOD_OUT_DIRECT)
 #define IOCTL_SMBRDR_ENGINE_REPLY       SMBUP_CTL_CODE(3, METHOD_BUFFERED)  /* in: reply message */
 #define IOCTL_SMBRDR_ENGINE_DETACH      SMBUP_CTL_CODE(4, METHOD_BUFFERED)
 
@@ -138,15 +140,44 @@ typedef struct _SMBUP_STRING
     ULONG Length;               /* bytes */
 } SMBUP_STRING, *PSMBUP_STRING;
 
-/* CONNECT */
+/*
+ * CONNECT
+ *
+ * Credentials. One logon session has one identity per server (as typed) at a time, as on
+ * Windows (ERROR_SESSION_CREDENTIAL_CONFLICT, 1219):
+ * - SMBUP_CONNECT_EXPLICIT_CREDENTIALS: UserName (non-empty), Domain (may be empty) and
+ *   Password (may be empty) are the identity. If another connection of this logon session to
+ *   the same server is in use with a different identity (single sign-on, or another user or
+ *   domain), the answer is STATUS_NETWORK_CREDENTIAL_CONFLICT. The engine keeps the password
+ *   (encrypted for its own process) while a connection of that identity lives, for reconnects,
+ *   and wipes every other copy at once.
+ * - SMBUP_CONNECT_REQUIRE_EXPLICIT (no strings): a reconnect of a connection that used explicit
+ *   credentials; the engine uses those of a live connection of this logon session to the
+ *   server, or fails with STATUS_LOGON_FAILURE (after an engine restart the password is gone:
+ *   the user connects again). It never falls back to single sign-on.
+ * - neither: the identity of a live connection of this logon session to the server if there
+ *   is one (so a UNC open after "net use \\server\share /user:..." uses that user, as on
+ *   Windows), else single sign-on.
+ * The reply says in Flags which identity the connection got (SMBUP_CONNECT_REPLY_EXPLICIT).
+ *
+ * Measured on Windows Server 2022 as a client (evidence of ticket SMB-07), and so done here:
+ * - the identity is held by "uses" (connections made by a tree connect: net use, a mapped drive),
+ *   SMBUP_CONNECT_USE; a plain UNC open does not hold it (after "dir \\server\share" a "net use"
+ *   with other credentials to that server succeeds);
+ * - the same user with another password is another identity (1219);
+ * - an explicit CONNECT for a key no driver connection holds any more is authenticated again
+ *   (a wrong password right after "net use /delete" fails with 86, it does not reuse the session).
+ */
 #define SMBUP_CONNECT_EXPLICIT_CREDENTIALS 0x00000001
+#define SMBUP_CONNECT_REQUIRE_EXPLICIT     0x00000002
+#define SMBUP_CONNECT_USE                  0x00000004
 typedef struct _SMBUP_CONNECT_REQUEST
 {
     SMBUP_STRING Server;        /* as typed: name, IPv4, ipv6-literal.net name or [IPv6] */
     SMBUP_STRING Share;
     SMBUP_STRING UserName;      /* only with SMBUP_CONNECT_EXPLICIT_CREDENTIALS */
     SMBUP_STRING Domain;
-    SMBUP_STRING Password;      /* the engine wipes it after use */
+    SMBUP_STRING Password;      /* the engine wipes it after use; the driver wipes its message */
     ULONGLONG TokenHandle;      /* handle in the engine's process (TOKEN_QUERY|TOKEN_IMPERSONATE); 0 if none */
     ULONG Flags;
     ULONG Reserved;
@@ -159,11 +190,18 @@ typedef struct _SMBUP_CONNECT_REPLY
     ULONG MaxWriteSize;
     ULONG ShareType;            /* 1 = disk; anything else is refused by the driver in M1 */
     ULONG ShareFlags;
+    ULONG Flags;                /* SMBUP_CONNECT_REPLY_* */
+    ULONG Reserved;
 } SMBUP_CONNECT_REPLY, *PSMBUP_CONNECT_REPLY;
 
+#define SMBUP_CONNECT_REPLY_EXPLICIT    0x00000001  /* explicit credentials (given, or of another connection) */
+
+#define SMBUP_DISCONNECT_USE            0x00000001  /* the connection was a use (SMBUP_CONNECT_USE) */
 typedef struct _SMBUP_DISCONNECT_REQUEST
 {
     ULONGLONG ConnectionId;
+    ULONG Flags;
+    ULONG Reserved;
 } SMBUP_DISCONNECT_REQUEST, *PSMBUP_DISCONNECT_REQUEST;
 
 /* CREATE: Path is relative to the share root, without a leading backslash ("" = the root) */
@@ -285,6 +323,16 @@ typedef struct _SMBUP_CANCEL_REQUEST
  * ULONG 0/1). */
 #define IOCTL_SMBRDR_QUERY_STATE        SMBUP_CTL_CODE(16, METHOD_BUFFERED)
 
+/* On the engine device, for the service that starts the engine (the Workstation service,
+ * SYSTEM): IOCTL_SMBRDR_WAIT_ENGINE_NEEDED completes (STATUS_SUCCESS) when a user's request
+ * needs an engine and none is attached (STATUS_ALREADY_REGISTERED if one attached meanwhile); the
+ * caller then starts the engine service. Otherwise it waits, alertably (the waiting thread can be
+ * woken by an APC or terminated; the IRP has no cancel routine), at most 5 minutes
+ * (STATUS_IO_TIMEOUT). Several waiters are allowed; each need wakes one of them. */
+#define IOCTL_SMBRDR_WAIT_ENGINE_NEEDED SMBUP_CTL_CODE(17, METHOD_BUFFERED)
+/* How long a request waits for an engine to attach after asking for one */
+#define NITRO_SMBRDR_ENGINE_START_WAIT_SECONDS 20
+
 #ifdef __cplusplus
 #define SMBUP_STATIC_ASSERT(e, m) static_assert(e, #m)
 #else
@@ -292,6 +340,7 @@ typedef struct _SMBUP_CANCEL_REQUEST
 #endif
 SMBUP_STATIC_ASSERT(sizeof(SMBUP_HEADER) == 48, header_size);
 SMBUP_STATIC_ASSERT(sizeof(SMBUP_CONNECT_REQUEST) == 56, connect_size);
+SMBUP_STATIC_ASSERT(sizeof(SMBUP_CONNECT_REPLY) == 32, connect_reply_size);
 SMBUP_STATIC_ASSERT(sizeof(SMBUP_CREATE_REQUEST) == 40, create_size);
 SMBUP_STATIC_ASSERT(sizeof(SMBUP_CREATE_REPLY) == 72, create_reply_size);
 SMBUP_STATIC_ASSERT(sizeof(SMBUP_IO_REQUEST) == 32, io_size);

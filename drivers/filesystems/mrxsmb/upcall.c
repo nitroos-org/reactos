@@ -27,6 +27,12 @@ PDEVICE_OBJECT SmbEngineDevice;
 ULONG SmbRequestTimeoutSeconds = NITRO_SMBRDR_REQUEST_TIMEOUT_SECONDS;
 static LIST_ENTRY SmbCopyingList;
 
+/* Demand start: the starter (the Workstation service) waits in IOCTL_SMBRDR_WAIT_ENGINE_NEEDED for
+ * SmbNeedEvent; a request without an engine sets it and waits for SmbAttachedEvent */
+static KEVENT SmbNeedEvent;             /* synchronization: one wake-up per need */
+static KEVENT SmbAttachedEvent;         /* notification: set while an engine is attached */
+static volatile LONG SmbStarterSeen;    /* a starter has waited since the driver loaded */
+
 VOID
 SmbEngineInitialize(VOID)
 {
@@ -38,6 +44,59 @@ SmbEngineInitialize(VOID)
     KeInitializeSemaphore(&SmbEngine.QueueSemaphore, 0, MAXLONG);
     KeInitializeEvent(&SmbEngine.DetachEvent, NotificationEvent, TRUE);
     KeInitializeEvent(&SmbEngine.BudgetEvent, NotificationEvent, FALSE);
+    KeInitializeEvent(&SmbNeedEvent, SynchronizationEvent, FALSE);
+    KeInitializeEvent(&SmbAttachedEvent, NotificationEvent, FALSE);
+}
+
+/*
+ * An engine for a user's request: at once if one is attached; otherwise, if a starter is
+ * there, ask it for one and wait (NITRO_SMBRDR_ENGINE_START_WAIT_SECONDS at most, in 1 s
+ * slices that end early when Irp is given up). Without a starter (the client is switched
+ * off, or the engine was started by hand) there is nothing to wait for.
+ */
+NTSTATUS
+SmbEnsureEngine(PIRP Irp)
+{
+    LARGE_INTEGER Slice;
+    ULONG i;
+
+    PAGED_CODE();
+
+    if (SmbEngine.FileObject != NULL)
+        return STATUS_SUCCESS;
+    if (!SmbStarterSeen)
+        return STATUS_REDIRECTOR_NOT_STARTED;
+
+    KeSetEvent(&SmbNeedEvent, IO_NO_INCREMENT, FALSE);
+    Slice.QuadPart = -10000000LL;
+    for (i = 0; i < NITRO_SMBRDR_ENGINE_START_WAIT_SECONDS; i++)
+    {
+        if (KeWaitForSingleObject(&SmbAttachedEvent, Executive, KernelMode, FALSE, &Slice) == STATUS_SUCCESS)
+            return STATUS_SUCCESS;
+        if (SmbIrpCancelled(Irp))
+            return STATUS_CANCELLED;
+    }
+    DPRINT1("mrxsmb: no engine attached within %lu s\n", NITRO_SMBRDR_ENGINE_START_WAIT_SECONDS);
+    return STATUS_REDIRECTOR_NOT_STARTED;
+}
+
+/* IOCTL_SMBRDR_WAIT_ENGINE_NEEDED: the starter's thread waits here (alertable, so it can be
+ * terminated), at most 5 minutes per call */
+static
+NTSTATUS
+SmbWaitEngineNeeded(VOID)
+{
+    LARGE_INTEGER Timeout;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    InterlockedExchange(&SmbStarterSeen, 1);
+    Timeout.QuadPart = -10000000LL * 300;
+    Status = KeWaitForSingleObject(&SmbNeedEvent, UserRequest, UserMode, TRUE, &Timeout);
+    if (Status == STATUS_SUCCESS)
+        return SmbEngine.FileObject == NULL ? STATUS_SUCCESS : STATUS_ALREADY_REGISTERED;
+    return Status == STATUS_TIMEOUT ? STATUS_IO_TIMEOUT : Status;
 }
 
 /*
@@ -180,7 +239,12 @@ SmbFreeRequest(PSMB_REQUEST Request)
     if (Request->Token != NULL)
         ObDereferenceObject(Request->Token);
     if (Request->Message != NULL)
+    {
+        /* A CONNECT may carry a password: never leave it in freed pool */
+        if (Request->Opcode == SmbUpConnect)
+            RtlSecureZeroMemory(Request->Message, Request->MessageAllocation);
         ExFreePoolWithTag(Request->Message, TAG_SMB_MESSAGE);
+    }
     if (Request->Reply != NULL)
         ExFreePoolWithTag(Request->Reply, TAG_SMB_REPLY);
     if (Request->ReservedBytes != 0)
@@ -237,7 +301,9 @@ SmbAllocateRequestForIrp(
     if (Opcode != SmbUpLogoff && Opcode != SmbUpCancel)
         Request->ReservedBytes = (ULONG)Total;
 
-    Request->Message = ExAllocatePoolZero(PagedPool, (SIZE_T)Total, TAG_SMB_MESSAGE);
+    /* A CONNECT may carry a password: nonpaged, so that it never reaches the paging file */
+    Request->Message = ExAllocatePoolZero(Opcode == SmbUpConnect ? NonPagedPool : PagedPool,
+                                          (SIZE_T)Total, TAG_SMB_MESSAGE);
     if (Request->Message == NULL)
     {
         if (Request->ReservedBytes != 0)
@@ -587,6 +653,7 @@ SmbEngineAttach(PIRP Irp, PIO_STACK_LOCATION Stack)
     SmbEngine.Process = Process;
     SmbEngine.Generation++;
     KeClearEvent(&SmbEngine.DetachEvent);
+    KeSetEvent(&SmbAttachedEvent, IO_NO_INCREMENT, FALSE);
     KeReleaseSpinLock(&SmbEngine.Lock, OldIrql);
 
     DPRINT1("mrxsmb: engine attached (process %p, generation %lu)\n", Process, SmbEngine.Generation);
@@ -635,6 +702,7 @@ SmbEngineDetach(PFILE_OBJECT FileObject)
         }
     }
     KeSetEvent(&SmbEngine.DetachEvent, IO_NO_INCREMENT, FALSE);
+    KeClearEvent(&SmbAttachedEvent);
     KeReleaseSpinLock(&SmbEngine.Lock, OldIrql);
 
     while (!IsListEmpty(&Release))
@@ -660,12 +728,18 @@ SmbEngineGet(PIRP Irp, PIO_STACK_LOCATION Stack)
     KIRQL OldIrql;
     HANDLE TokenHandle;
     BOOLEAN Delivered;
-    PUCHAR Out = Irp->AssociatedIrp.SystemBuffer;
+    ULONG MessageSize;
+    PUCHAR Out;
 
     PAGED_CODE();
 
-    if (Stack->Parameters.DeviceIoControl.OutputBufferLength < SMBUP_MAX_MESSAGE || Out == NULL)
+    /* METHOD_OUT_DIRECT: the engine's own pages, locked by the I/O manager, mapped here. Written
+     * only, never read back (the engine may change them at any time). */
+    if (Stack->Parameters.DeviceIoControl.OutputBufferLength < SMBUP_MAX_MESSAGE || Irp->MdlAddress == NULL)
         return STATUS_BUFFER_TOO_SMALL;
+    Out = MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority);
+    if (Out == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
 
     for (;;)
     {
@@ -703,7 +777,8 @@ SmbEngineGet(PIRP Irp, PIO_STACK_LOCATION Stack)
         KeReleaseSpinLock(&SmbEngine.Lock, OldIrql);
 
         ASSERT(Request->MessageSize <= SMBUP_MAX_MESSAGE);
-        RtlCopyMemory(Out, Request->Message, Request->MessageSize);
+        MessageSize = Request->MessageSize;
+        RtlCopyMemory(Out, Request->Message, MessageSize);
 
         /* CONNECT: a handle to the user's token, in this (the engine's) process,
          * allowing query and impersonation only */
@@ -747,13 +822,15 @@ SmbEngineGet(PIRP Irp, PIO_STACK_LOCATION Stack)
 
         if (!Delivered)
         {
-            /* Timed out or detached meanwhile: do not hand out a token for it */
+            /* Timed out or detached meanwhile: do not hand out a token for it, and do not leave
+             * its message (a CONNECT may carry a password) in the engine's buffer */
             if (TokenHandle != NULL)
                 ZwClose(TokenHandle);   /* a handle of this (the engine's) process */
+            RtlSecureZeroMemory(Out, MessageSize);
             continue;
         }
 
-        Irp->IoStatus.Information = ((PSMBUP_HEADER)Out)->TotalSize;
+        Irp->IoStatus.Information = MessageSize;
         return STATUS_SUCCESS;
     }
 }
@@ -886,6 +963,11 @@ SmbEngineDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
                     *(PULONG)Irp->AssociatedIrp.SystemBuffer = (SmbEngine.FileObject != NULL);
                     Irp->IoStatus.Information = sizeof(ULONG);
                     Status = STATUS_SUCCESS;
+                    break;
+                case IOCTL_SMBRDR_WAIT_ENGINE_NEEDED:
+                    /* Not for the engine itself (its handle would hold a GET thread) */
+                    Status = (SmbEngine.FileObject == Stack->FileObject) ? STATUS_INVALID_DEVICE_REQUEST :
+                             SmbWaitEngineNeeded();
                     break;
                 default:
                     Status = STATUS_INVALID_DEVICE_REQUEST;

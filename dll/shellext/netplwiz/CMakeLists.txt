@@ -3,6 +3,7 @@ spec2def(netplwiz.dll netplwiz.spec)
 
 list(APPEND SOURCE
     netplwiz.c
+    MapNetDrive.c
     SHDisconnectNetDrives.c)
 
 add_library(netplwiz MODULE

@@ -6,7 +6,9 @@ spec2def(wkssvc.dll wkssvc.spec ADD_IMPORTLIB)
 add_library(wkssvc MODULE
     domain.c
     info.c
+    netuse.c
     rpcserver.c
+    smbstart.c
     wkssvc.c
     wkssvc.rc
     ${CMAKE_CURRENT_BINARY_DIR}/wkssvc_s.c

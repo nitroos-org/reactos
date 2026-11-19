@@ -1046,7 +1046,7 @@ HKLM,"SYSTEM\CurrentControlSet\Control\Network\{4D36E974-E325-11CE-BFC1-08002BE1
 HKLM,"SYSTEM\CurrentControlSet\Control\Network\{4D36E974-E325-11CE-BFC1-08002BE10318}","Class",0x00000000,"NetService"
 HKLM,"SYSTEM\CurrentControlSet\Control\Network\{4D36E975-E325-11CE-BFC1-08002BE10318}",,0x00000000,"Network Protocol"
 HKLM,"SYSTEM\CurrentControlSet\Control\Network\{4D36E975-E325-11CE-BFC1-08002BE10318}","Class",0x00000000,"NetTrans"
-HKLM,"SYSTEM\CurrentControlSet\Control\NetworkProvider\Order","ProviderOrder",0x00000000,"nfs41_driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\NetworkProvider\Order","ProviderOrder",0x00000000,"LanmanWorkstation,nfs41_driver"
 
 ; NLS Files
 HKLM,"SYSTEM\CurrentControlSet\Control\Nls\CodePage","37",0x00000000,"c_037.nls"
@@ -2046,6 +2046,9 @@ HKLM,"SYSTEM\CurrentControlSet\Services\lanmanworkstation","ObjectName",0x000000
 HKLM,"SYSTEM\CurrentControlSet\Services\lanmanworkstation","Start",0x00010001,0x00000002
 HKLM,"SYSTEM\CurrentControlSet\Services\lanmanworkstation","Type",0x00010001,0x00000020
 HKLM,"SYSTEM\CurrentControlSet\Services\lanmanworkstation\Parameters","ServiceDll",0x00020000,"%SystemRoot%\system32\wkssvc.dll"
+HKLM,"SYSTEM\CurrentControlSet\Services\lanmanworkstation\NetworkProvider","DeviceName",0x00000000,"\Device\LanmanRedirector"
+HKLM,"SYSTEM\CurrentControlSet\Services\lanmanworkstation\NetworkProvider","Name",0x00000000,"Microsoft Windows Network"
+HKLM,"SYSTEM\CurrentControlSet\Services\lanmanworkstation\NetworkProvider","ProviderPath",0x00020000,"%SystemRoot%\System32\ntlanman.dll"
 
 ; Multiple UNC provider driver
 HKLM,"SYSTEM\CurrentControlSet\Services\Mup","Description",0x00000000,"Multiple UNC Provider (MUP)"

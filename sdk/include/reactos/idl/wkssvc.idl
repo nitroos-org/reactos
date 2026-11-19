@@ -249,22 +249,38 @@ typedef [switch_type(unsigned long)] union _USE_INFO
     [default] ;
 } USE_INFO, *PUSE_INFO, *LPUSE_INFO;
 
+/*
+ * The same union for NetrUseAdd (the same wire format). widl writes one type format string for a
+ * type with the stack offset of its switch parameter in it, and every procedure that uses the
+ * type gets the last one written: Level is the second parameter of NetrUseAdd and the third of
+ * NetrUseGetInfo, so with one type NetrUseAdd read its switch from the wrong stack slot and the
+ * union arrived empty (ERROR_INVALID_PARAMETER). Its own type gets its own format string.
+ */
+typedef [switch_type(unsigned long)] union _USE_INFO_ADD
+{
+    [case(0)] LPUSE_INFO_0 UseInfo0;
+    [case(1)] LPUSE_INFO_1 UseInfo1;
+    [case(2)] LPUSE_INFO_2 UseInfo2;
+    [case(3)] LPUSE_INFO_3 UseInfo3;
+    [default] ;
+} USE_INFO_ADD, *PUSE_INFO_ADD, *LPUSE_INFO_ADD;
+
 typedef struct _USE_INFO_0_CONTAINER
 {
     unsigned long EntriesRead;
-    LPUSE_INFO_0 Buffer;
+    [size_is(EntriesRead)] LPUSE_INFO_0 Buffer;
 } USE_INFO_0_CONTAINER, *PUSE_INFO_0_CONTAINER, *LPUSE_INFO_0_CONTAINER;
 
 typedef struct _USE_INFO_1_CONTAINER
 {
     unsigned long EntriesRead;
-    LPUSE_INFO_1 Buffer;
+    [size_is(EntriesRead)] LPUSE_INFO_1 Buffer;
 } USE_INFO_1_CONTAINER, *PUSE_INFO_1_CONTAINER, *LPUSE_INFO_1_CONTAINER;
 
 typedef struct _USE_INFO_2_CONTAINER
 {
     unsigned long EntriesRead;
-    LPUSE_INFO_2 Buffer;
+    [size_is(EntriesRead)] LPUSE_INFO_2 Buffer;
 } USE_INFO_2_CONTAINER, *PUSE_INFO_2_CONTAINER, *LPUSE_INFO_2_CONTAINER;
 
 typedef struct _USE_ENUM_STRUCT
@@ -448,7 +464,7 @@ interface wkssvc
     NetrUseAdd(
         [in, string, unique] WKSSVC_IMPERSONATE_HANDLE ServerName,
         [in] unsigned long Level,
-        [in, switch_is(Level)] LPUSE_INFO InfoStruct,
+        [in, switch_is(Level)] LPUSE_INFO_ADD InfoStruct,
         [in, out, unique] unsigned long *ErrorParameter);
 
     /* Function 9 */

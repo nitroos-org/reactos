@@ -81,6 +81,8 @@ SysWOW64/lz32.dll
 SysWOW64/mbedtls.dll
 SysWOW64/mlang.dll
 SysWOW64/mpr.dll
+# The network provider mpr loads for the SMB client (WNetGetConnection, WNetAddConnection2 from 32-bit programs)
+SysWOW64/ntlanman.dll
 SysWOW64/msimg32.dll
 SysWOW64/msctf.dll
 SysWOW64/msimtf.dll

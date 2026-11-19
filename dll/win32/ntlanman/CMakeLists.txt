@@ -10,5 +10,5 @@ list(APPEND SOURCE
 add_library(ntlanman MODULE ${SOURCE})
 set_module_type(ntlanman win32dll UNICODE)
 target_link_libraries(ntlanman wine)
-add_importlibs(ntlanman netapi32 msvcrt kernel32 ntdll)
+add_importlibs(ntlanman advapi32 msvcrt kernel32 ntdll)
 add_cd_file(TARGET ntlanman DESTINATION reactos/system32 FOR all)

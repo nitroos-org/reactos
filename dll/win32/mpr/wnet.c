@@ -38,6 +38,9 @@
 #include "mprres.h"
 #include "wnetpriv.h"
 #ifdef __REACTOS__
+#include "wincred.h"
+#endif
+#ifdef __REACTOS__
 #include <wine/unicode.h>
 #endif
 
@@ -66,6 +69,8 @@ typedef struct _WNetProvider
     PF_NPCancelConnection cancelConnection;
 #ifdef __REACTOS__
     PF_NPGetConnection getConnection;
+    PF_NPGetUniversalName getUniversalName;
+    PF_NPGetUser getUser;
 #endif
 } WNetProvider, *PWNetProvider;
 
@@ -233,7 +238,12 @@ static void _tryLoadProvider(PCWSTR provider)
                             provider->cancelConnection = MPR_GETPROC(NPCancelConnection);
 #ifdef __REACTOS__
                         if (connectCap & WNNC_CON_GETCONNECTIONS)
+                        {
                             provider->getConnection = MPR_GETPROC(NPGetConnection);
+                            provider->getUniversalName = MPR_GETPROC(NPGetUniversalName);
+                        }
+                        if (getCaps(WNNC_USER) & WNNC_USR_GETUSER)
+                            provider->getUser = MPR_GETPROC(NPGetUser);
 #endif
                         TRACE("NPAddConnection %p\n", provider->addConnection);
                         TRACE("NPAddConnection3 %p\n", provider->addConnection3);
@@ -273,10 +283,10 @@ static void _tryLoadProvider(PCWSTR provider)
 }
 
 #ifdef __REACTOS__
-static void _restoreSavedConnection(HKEY connection, WCHAR * local)
+static DWORD _restoreSavedConnection(HKEY connection, WCHAR * local)
 {
     NETRESOURCEW net;
-    DWORD type, prov, index, size;
+    DWORD type, prov, index, size, ret = WN_BAD_PROFILE;
 
     net.lpProvider = NULL;
     net.lpRemoteName = NULL;
@@ -286,20 +296,20 @@ static void _restoreSavedConnection(HKEY connection, WCHAR * local)
 
     size = sizeof(DWORD);
     if (RegQueryValueExW(connection, L"ConnectionType", NULL, &type, (BYTE *)&net.dwType, &size) != ERROR_SUCCESS)
-       return;
+       return ret;
 
     if (type != REG_DWORD || size != sizeof(DWORD))
-        return;
+        return ret;
 
     if (RegQueryValueExW(connection, L"ProviderName", NULL, &type, NULL, &size) != ERROR_SUCCESS)
-        return;
+        return ret;
 
     if (type != REG_SZ)
-        return;
+        return ret;
 
-    net.lpProvider = HeapAlloc(GetProcessHeap(), 0, size);
+    net.lpProvider = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, size + sizeof(WCHAR));
     if (!net.lpProvider)
-        return;
+        return WN_OUT_OF_MEMORY;
 
     if (RegQueryValueExW(connection, L"ProviderName", NULL, NULL, (BYTE *)net.lpProvider, &size) != ERROR_SUCCESS)
         goto cleanup;
@@ -324,7 +334,7 @@ static void _restoreSavedConnection(HKEY connection, WCHAR * local)
     if (type != REG_SZ)
         goto cleanup;
 
-    net.lpRemoteName = HeapAlloc(GetProcessHeap(), 0, size);
+    net.lpRemoteName = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, size + sizeof(WCHAR));
     if (!net.lpRemoteName)
         goto cleanup;
 
@@ -342,12 +352,13 @@ static void _restoreSavedConnection(HKEY connection, WCHAR * local)
 
     TRACE("Attempting connection\n");
 
-    WNetAddConnection2W(&net, NULL, NULL, 0);
+    ret = WNetAddConnection2W(&net, NULL, NULL, 0);
 
 cleanup:
     HeapFree(GetProcessHeap(), 0, net.lpProvider);
     HeapFree(GetProcessHeap(), 0, net.lpRemoteName);
     HeapFree(GetProcessHeap(), 0, net.lpLocalName);
+    return ret;
 }
 #endif
 
@@ -431,63 +442,72 @@ void wnetInit(HINSTANCE hInstDll)
     }
 
 #ifdef __REACTOS__
-    if (providerTable)
-    {
-        HKEY user_profile;
-
-        if (RegOpenCurrentUser(KEY_ALL_ACCESS, &user_profile) == ERROR_SUCCESS)
-        {
-            HKEY network;
-            WCHAR subkey[8] = {'N', 'e', 't', 'w', 'o', 'r', 'k', 0};
-
-            if (RegOpenKeyExW(user_profile, subkey, 0, KEY_READ, &network) == ERROR_SUCCESS)
-            {
-                DWORD size, max;
-
-                TRACE("Enumerating remembered connections\n");
-
-                if (RegQueryInfoKey(network, NULL, NULL, NULL, &max, &size, NULL, NULL, NULL, NULL, NULL, NULL) == ERROR_SUCCESS)
-                {
-                    WCHAR *local;
-
-                    TRACE("There are %lu connections\n", max);
-
-                    local = HeapAlloc(GetProcessHeap(), 0, (size + 1) * sizeof(WCHAR));
-                    if (local)
-                    {
-                        DWORD index;
-
-                        for (index = 0; index < max; ++index)
-                        {
-                            DWORD len = size + 1;
-                            HKEY connection;
-
-                            TRACE("Trying connection %lu\n", index);
-
-                            if (RegEnumKeyExW(network, index, local, &len, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
-                                continue;
-
-                            TRACE("It is %S\n", local);
-
-                            if (RegOpenKeyExW(network, local, 0, KEY_READ, &connection) != ERROR_SUCCESS)
-                                continue;
-
-                            _restoreSavedConnection(connection, local);
-                            RegCloseKey(connection);
-                        }
-
-                        HeapFree(GetProcessHeap(), 0, local);
-                    }
-                }
-
-                RegCloseKey(network);
-            }
-
-            RegCloseKey(user_profile);
-        }
-    }
+    /* Remembered connections (HKCU\Network) are restored once at logon (WNetRestoreConnectionW,
+     * called by the shell in the background), not by every process that loads this library:
+     * a server that is away would hold up each process start for the connect time */
 #endif
 }
+
+#ifdef __REACTOS__
+/* Restores the remembered connections of the current user: all (device NULL) or one ("X:"
+ * or "X"). Connections remembered with a user name other than the caller's own are left for an
+ * explicit "net use" (no password is stored: there is no credential manager), as are drive
+ * letters already in use. Returns the error of the last failed one, WN_SUCCESS if none failed. */
+static DWORD _restoreSavedConnections(LPCWSTR device)
+{
+    HKEY user_profile, network;
+    DWORD ret = WN_SUCCESS;
+
+    if (!providerTable)
+        return WN_NO_NETWORK;
+    if (RegOpenCurrentUser(KEY_READ, &user_profile) != ERROR_SUCCESS)
+        return WN_SUCCESS;
+    if (RegOpenKeyExW(user_profile, L"Network", 0, KEY_READ, &network) == ERROR_SUCCESS)
+    {
+        DWORD size, max;
+
+        if (RegQueryInfoKey(network, NULL, NULL, NULL, &max, &size, NULL, NULL, NULL, NULL, NULL, NULL) == ERROR_SUCCESS)
+        {
+            WCHAR *local = HeapAlloc(GetProcessHeap(), 0, (size + 1) * sizeof(WCHAR));
+
+            if (local)
+            {
+                DWORD index;
+
+                for (index = 0; index < max; ++index)
+                {
+                    DWORD len = size + 1, type, user_size = 0;
+                    HKEY connection;
+
+                    if (RegEnumKeyExW(network, index, local, &len, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
+                        continue;
+                    if (device && (towupper(device[0]) != towupper(local[0]) || local[1]))
+                        continue;
+                    if (RegOpenKeyExW(network, local, 0, KEY_READ, &connection) != ERROR_SUCCESS)
+                        continue;
+                    if (RegQueryValueExW(connection, L"UserName", NULL, &type, NULL, &user_size) == ERROR_SUCCESS &&
+                        type == REG_SZ && user_size > sizeof(WCHAR))
+                    {
+                        TRACE("%S: remembered with a user name, left for the user\n", local);
+                    }
+                    else
+                    {
+                        DWORD err = _restoreSavedConnection(connection, local);
+
+                        if (err != WN_SUCCESS && err != WN_ALREADY_CONNECTED)
+                            ret = err;
+                    }
+                    RegCloseKey(connection);
+                }
+                HeapFree(GetProcessHeap(), 0, local);
+            }
+        }
+        RegCloseKey(network);
+    }
+    RegCloseKey(user_profile);
+    return ret;
+}
+#endif
 
 void wnetFree(void)
 {
@@ -1501,11 +1521,22 @@ static DWORD _enumerateConnectedW(PWNetEnumerator enumerator, DWORD* user_count,
 
                     memcpy(curr, &buffer[i], sizeof(NETRESOURCEW));
                     left -= sizeof(NETRESOURCEW);
-
+#ifdef __REACTOS__
+                    /* not copied: it would point into the provider's buffer, freed below */
+                    curr->lpComment = NULL;
+                    /* a connection without a drive letter has no local name */
+                    if (!buffer[i].lpLocalName)
+                        curr->lpLocalName = NULL;
+                    else
+                    {
+#endif
                     ret = _copyStringToEnumW(buffer[i].lpLocalName, &left, &end);
                     if (ret == WN_MORE_DATA)
                         break;
                     curr->lpLocalName = end;
+#ifdef __REACTOS__
+                    }
+#endif
 
                     ret = _copyStringToEnumW(buffer[i].lpRemoteName, &left, &end);
                     if (ret == WN_MORE_DATA)
@@ -2091,6 +2122,9 @@ struct use_connection_context
     DWORD *result;
     DWORD (*pre_set_accessname)(struct use_connection_context*, WCHAR *);
     void  (*set_accessname)(struct use_connection_context*, WCHAR *);
+#ifdef __REACTOS__
+    WCHAR *prompted_user;   /* user name typed into the credentials prompt (heap) */
+#endif
 };
 
 static DWORD use_connection_pre_set_accessnameW(struct use_connection_context *ctxt, WCHAR *local_name)
@@ -2158,6 +2192,86 @@ static DWORD wnet_use_provider( struct use_connection_context *ctxt, NETRESOURCE
 static const WCHAR providerType[] = { 'P','r','o','v','i','d','e','r','T','y','p','e',0 };
 static const WCHAR userName[] = { 'U','s','e','r','N','a','m','e',0 };
 
+#ifdef __REACTOS__
+typedef DWORD (WINAPI *PFN_CREDUI_PROMPT)(PCREDUI_INFOW, PCWSTR, PCtxtHandle, DWORD, PWSTR, ULONG, PWSTR, ULONG,
+                                          BOOL *, DWORD);
+
+/* CONNECT_INTERACTIVE and refused credentials: ask the user (credui's prompt, nothing saved) and
+ * try again with what was typed, at most three times. The password lives on the stack of this
+ * call only and is wiped. */
+static DWORD wnet_prompt_and_retry( struct use_connection_context *ctxt, NETRESOURCEW *netres,
+                                    WNetProvider *provider, BOOLEAN redirect, DWORD error )
+{
+    HMODULE credui = LoadLibraryW(L"credui.dll");
+    PFN_CREDUI_PROMPT prompt = credui ? (PFN_CREDUI_PROMPT)GetProcAddress(credui, "CredUIPromptForCredentialsW") : NULL;
+    WCHAR user[CREDUI_MAX_USERNAME_LENGTH + 1], pass[CREDUI_MAX_PASSWORD_LENGTH + 1], target[MAX_PATH];
+    WCHAR *saved_password = ctxt->password, *saved_user = ctxt->userid;
+    CREDUI_INFOW info;
+    DWORD ret = error, i, r;
+    const WCHAR *p;
+    BOOL save = FALSE;
+
+    if (!prompt || !netres->lpRemoteName)
+    {
+        if (credui) FreeLibrary(credui);
+        return error;
+    }
+    /* the server part: "\\server" */
+    lstrcpynW(target, netres->lpRemoteName, ARRAY_SIZE(target));
+    p = wcschr(target + 2, '\\');
+    if (p) target[p - target] = 0;
+
+    memset(&info, 0, sizeof(info));
+    info.cbSize = sizeof(info);
+    info.hwndParent = ctxt->hwndOwner;
+    for (i = 0; i < 3; i++)
+    {
+        user[0] = 0;
+        if (saved_user) lstrcpynW(user, saved_user, ARRAY_SIZE(user));
+        pass[0] = 0;
+        /* (CREDUI_FLAGS_ALWAYS_SHOW_UI is valid only with GENERIC_CREDENTIALS; nothing is stored here anyway) */
+        r = prompt(&info, target + 2, NULL, ret, user, ARRAY_SIZE(user), pass, ARRAY_SIZE(pass), &save,
+                   CREDUI_FLAGS_DO_NOT_PERSIST | CREDUI_FLAGS_EXCLUDE_CERTIFICATES |
+                   (i ? CREDUI_FLAGS_INCORRECT_PASSWORD : 0));
+        if (r == ERROR_CANCELLED)
+        {
+            ret = ERROR_CANCELLED;
+            break;
+        }
+        if (r != NO_ERROR)
+        {
+            /* no prompt: the first answer stands */
+            ERR("credentials prompt failed: %u\n", r);
+            break;
+        }
+        ctxt->password = pass;
+        ctxt->userid = user;
+        ret = wnet_use_provider(ctxt, netres, provider, redirect);
+        ctxt->password = saved_password;
+        ctxt->userid = saved_user;
+        SecureZeroMemory(pass, sizeof(pass));
+        if (ret == WN_SUCCESS)
+        {
+            /* remembered (not the password) if the connection is remembered */
+            HeapFree(GetProcessHeap(), 0, ctxt->prompted_user);
+            ctxt->prompted_user = HeapAlloc(GetProcessHeap(), 0, (lstrlenW(user) + 1) * sizeof(WCHAR));
+            if (ctxt->prompted_user)
+            {
+                lstrcpyW(ctxt->prompted_user, user);
+                ctxt->userid = ctxt->prompted_user;
+            }
+            break;
+        }
+        if (ret != ERROR_ACCESS_DENIED && ret != ERROR_LOGON_FAILURE && ret != ERROR_INVALID_PASSWORD &&
+            ret != ERROR_BAD_USERNAME)
+            break;
+    }
+    SecureZeroMemory(pass, sizeof(pass));
+    FreeLibrary(credui);
+    return ret;
+}
+#endif
+
 static DWORD wnet_use_connection( struct use_connection_context *ctxt )
 {
     WNetProvider *provider = NULL;
@@ -2188,8 +2302,10 @@ static DWORD wnet_use_connection( struct use_connection_context *ctxt )
         netres.lpLocalName = letter;
     }
 
+#ifndef __REACTOS__
     if (ctxt->flags & CONNECT_INTERACTIVE)
         return ERROR_BAD_NET_NAME;
+#endif
 
     if ((ret = ctxt->pre_set_accessname(ctxt, netres.lpLocalName)))
         return ret;
@@ -2205,16 +2321,66 @@ static DWORD wnet_use_connection( struct use_connection_context *ctxt )
     }
     else
     {
+#ifdef __REACTOS__
+        /* The answer of the first provider that recognised the name: a provider that is not
+         * started or does not handle such names does not hide another's error (the SMB
+         * provider's "logon failure" must not become the next provider's "bad net name") */
+        DWORD first = 0;
+        WNetProvider *first_provider = NULL;
+#endif
         for (index = 0; index < providerTable->numProviders; index++)
         {
             provider = &providerTable->table[index];
             ret = wnet_use_provider(ctxt, &netres, provider, redirect);
             if (ret == WN_SUCCESS || ret == WN_ALREADY_CONNECTED)
                 break;
+#ifdef __REACTOS__
+            if (!first && ret != WN_NO_NETWORK && ret != WN_BAD_PROVIDER && ret != WN_NOT_SUPPORTED &&
+                ret != ERROR_BAD_PROVIDER)
+            {
+                first = ret;
+                first_provider = provider;
+            }
+            /* A provider that reached the server and refused these credentials owns the name:
+             * the user name and password are not offered to the next provider */
+            if (ret == ERROR_ACCESS_DENIED || ret == ERROR_INVALID_PASSWORD || ret == ERROR_LOGON_FAILURE ||
+                ret == ERROR_SESSION_CREDENTIAL_CONFLICT || ret == ERROR_ACCOUNT_RESTRICTION ||
+                ret == ERROR_INVALID_LOGON_HOURS || ret == ERROR_INVALID_WORKSTATION ||
+                ret == ERROR_PASSWORD_EXPIRED || ret == ERROR_ACCOUNT_DISABLED ||
+                ret == ERROR_ACCOUNT_LOCKED_OUT || ret == ERROR_ACCOUNT_EXPIRED ||
+                ret == ERROR_PASSWORD_MUST_CHANGE || ret == ERROR_LOGON_TYPE_NOT_GRANTED)
+            {
+                first = ret;
+                first_provider = provider;
+                break;
+            }
+#endif
         }
+#ifdef __REACTOS__
+        if (ret != WN_SUCCESS && ret != WN_ALREADY_CONNECTED && first)
+        {
+            ret = first;
+            provider = first_provider;
+        }
+#endif
     }
 
-    if (ret == WN_SUCCESS && ctxt->flags & CONNECT_UPDATE_PROFILE)
+#ifdef __REACTOS__
+    /* CONNECT_INTERACTIVE: the user may give other credentials when these are refused */
+    if ((ctxt->flags & CONNECT_INTERACTIVE) && provider &&
+        (ret == ERROR_ACCESS_DENIED || ret == ERROR_LOGON_FAILURE || ret == ERROR_INVALID_PASSWORD ||
+         ret == ERROR_BAD_USERNAME))
+    {
+        ret = wnet_prompt_and_retry(ctxt, &netres, provider, redirect, ret);
+    }
+#endif
+
+    if (ret == WN_SUCCESS && ctxt->flags & CONNECT_UPDATE_PROFILE
+#ifdef __REACTOS__
+        /* only drive letters are remembered (HKCU\Network\<letter>) */
+        && netres.lpLocalName && netres.lpLocalName[0]
+#endif
+        )
     {
         HKEY user_profile;
 
@@ -2241,8 +2407,19 @@ static DWORD wnet_use_connection( struct use_connection_context *ctxt )
                 RegSetValueExW(network, providerType, 0, REG_DWORD, (const BYTE *)&provider->dwNetType, sizeof(DWORD));
                 len = (lstrlenW(netres.lpRemoteName) + 1) * sizeof(WCHAR);
                 RegSetValueExW(network, remotePath, 0, REG_SZ, (const BYTE *)netres.lpRemoteName, len);
+#ifdef __REACTOS__
+                /* The user name (never a password) of an explicit-credential connection */
+                if (ctxt->userid && ctxt->userid[0])
+                {
+                    len = (lstrlenW(ctxt->userid) + 1) * sizeof(WCHAR);
+                    RegSetValueExW(network, userName, 0, REG_SZ, (const BYTE *)ctxt->userid, len);
+                }
+                else
+#endif
+                {
                 len = sizeof(empty);
                 RegSetValueExW(network, userName, 0, REG_SZ, (const BYTE *)empty, len);
+                }
                 RegCloseKey(network);
             }
 
@@ -2276,8 +2453,19 @@ DWORD WINAPI WNetUseConnectionW( HWND hwndOwner, NETRESOURCEW *resource, LPCWSTR
     ctxt.result = result;
     ctxt.pre_set_accessname = use_connection_pre_set_accessnameW;
     ctxt.set_accessname = use_connection_set_accessnameW;
+#ifdef __REACTOS__
+    {
+        DWORD ret;
+
+        ctxt.prompted_user = NULL;
+        ret = wnet_use_connection(&ctxt);
+        HeapFree(GetProcessHeap(), 0, ctxt.prompted_user);
+        return ret;
+    }
+#else
 
     return wnet_use_connection(&ctxt);
+#endif
 }
 
 static DWORD use_connection_pre_set_accessnameA(struct use_connection_context *ctxt, WCHAR *local_name)
@@ -2375,9 +2563,17 @@ DWORD WINAPI WNetUseConnectionA( HWND hwndOwner, NETRESOURCEA *resource,
     ctxt.result = result;
     ctxt.pre_set_accessname = use_connection_pre_set_accessnameA;
     ctxt.set_accessname = use_connection_set_accessnameA;
+#ifdef __REACTOS__
+    ctxt.prompted_user = NULL;
+#endif
 
     ret = wnet_use_connection(&ctxt);
 
+#ifdef __REACTOS__
+    HeapFree(GetProcessHeap(), 0, ctxt.prompted_user);
+    if (ctxt.password)
+        SecureZeroMemory(ctxt.password, lstrlenW(ctxt.password) * sizeof(WCHAR));
+#endif
     free_netresourceW(&resourceW);
     HeapFree(GetProcessHeap(), 0, ctxt.password);
     HeapFree(GetProcessHeap(), 0, ctxt.userid);
@@ -2424,6 +2620,9 @@ DWORD WINAPI WNetCancelConnection2W( LPCWSTR lpName, DWORD dwFlags, BOOL fForce 
 {
     DWORD ret = WN_NO_NETWORK;
     DWORD index;
+#ifdef __REACTOS__
+    DWORD first = 0;
+#endif
 
     if (providerTable != NULL)
     {
@@ -2438,9 +2637,37 @@ DWORD WINAPI WNetCancelConnection2W( LPCWSTR lpName, DWORD dwFlags, BOOL fForce 
                     ret = WN_NO_NETWORK;
                 if (ret == WN_SUCCESS || ret == WN_OPEN_FILES)
                     break;
+#ifdef __REACTOS__
+                /* keep the answer of a provider that knew the name (see wnet_use_connection) */
+                if (!first && ret != WN_NO_NETWORK && ret != WN_NOT_CONNECTED && ret != WN_BAD_NETNAME &&
+                    ret != WN_NOT_SUPPORTED && ret != WN_BAD_PROVIDER)
+                    first = ret;
+#endif
             }
         }
+#ifdef __REACTOS__
+        if (ret != WN_SUCCESS && ret != WN_OPEN_FILES)
+            ret = first ? first : WN_NOT_CONNECTED;
+#endif
     }
+
+#ifdef __REACTOS__
+    /* A remembered drive that is not connected (its server was away at logon) is forgotten too */
+    if (ret == WN_NOT_CONNECTED && (dwFlags & CONNECT_UPDATE_PROFILE) && lpName && iswalpha(lpName[0]) &&
+        lpName[1] == ':' && !lpName[2])
+    {
+        HKEY user_profile;
+
+        if (RegOpenCurrentUser(KEY_ALL_ACCESS, &user_profile) == ERROR_SUCCESS)
+        {
+            WCHAR subkey[10] = {'N', 'e', 't', 'w', 'o', 'r', 'k', '\\', lpName[0], 0};
+
+            if (RegDeleteKeyW(user_profile, subkey) == ERROR_SUCCESS)
+                ret = WN_SUCCESS;
+            RegCloseKey(user_profile);
+        }
+    }
+#endif
 
     if (ret == WN_SUCCESS && dwFlags & CONNECT_UPDATE_PROFILE)
     {
@@ -2466,10 +2693,18 @@ DWORD WINAPI WNetCancelConnection2W( LPCWSTR lpName, DWORD dwFlags, BOOL fForce 
  */
 DWORD WINAPI WNetRestoreConnectionA( HWND hwndOwner, LPCSTR lpszDevice )
 {
+#ifdef __REACTOS__
+    WCHAR *device = strdupAtoW(lpszDevice);
+    DWORD ret = WNetRestoreConnectionW(hwndOwner, device);
+
+    HeapFree(GetProcessHeap(), 0, device);
+    return ret;
+#else
     FIXME( "(%p, %s), stub\n", hwndOwner, debugstr_a(lpszDevice) );
 
     SetLastError(WN_NO_NETWORK);
     return WN_NO_NETWORK;
+#endif
 }
 
 /*****************************************************************
@@ -2477,10 +2712,20 @@ DWORD WINAPI WNetRestoreConnectionA( HWND hwndOwner, LPCSTR lpszDevice )
  */
 DWORD WINAPI WNetRestoreConnectionW( HWND hwndOwner, LPCWSTR lpszDevice )
 {
+#ifdef __REACTOS__
+    DWORD ret;
+
+    TRACE( "(%p, %s)\n", hwndOwner, debugstr_w(lpszDevice) );
+    ret = _restoreSavedConnections(lpszDevice && lpszDevice[0] ? lpszDevice : NULL);
+    if (ret != WN_SUCCESS)
+        SetLastError(ret);
+    return ret;
+#else
     FIXME( "(%p, %s), stub\n", hwndOwner, debugstr_w(lpszDevice) );
 
     SetLastError(WN_NO_NETWORK);
     return WN_NO_NETWORK;
+#endif
 }
 
 /**************************************************************************
@@ -2784,7 +3029,29 @@ DWORD WINAPI WNetGetUniversalNameW ( LPCWSTR lpLocalPath, DWORD dwInfoLevel,
 {
     DWORD err, size;
 
-    FIXME( "(%s, 0x%08X, %p, %p): stub\n",
+#ifdef __REACTOS__
+    /* The provider whose drive it is answers */
+    if (lpLocalPath && lpBufferSize && providerTable &&
+        (dwInfoLevel == UNIVERSAL_NAME_INFO_LEVEL || dwInfoLevel == REMOTE_NAME_INFO_LEVEL))
+    {
+        DWORD index;
+
+        for (index = 0; index < providerTable->numProviders; index++)
+        {
+            if (!providerTable->table[index].getUniversalName)
+                continue;
+            err = providerTable->table[index].getUniversalName((LPWSTR)lpLocalPath, dwInfoLevel, lpBuffer, lpBufferSize);
+            if (err == WN_SUCCESS)
+                return WN_NO_ERROR;
+            if (err == WN_MORE_DATA)
+            {
+                SetLastError(err);
+                return err;
+            }
+        }
+    }
+#endif
+    TRACE( "(%s, 0x%08X, %p, %p)\n",
            debugstr_w(lpLocalPath), dwInfoLevel, lpBuffer, lpBufferSize);
 
     switch (dwInfoLevel)
@@ -2906,6 +3173,27 @@ DWORD WINAPI WNetGetUserA( LPCSTR lpName, LPSTR lpUserID, LPDWORD lpBufferSize )
  */
 DWORD WINAPI WNetGetUserW( LPCWSTR lpName, LPWSTR lpUserID, LPDWORD lpBufferSize )
 {
+#ifdef __REACTOS__
+    /* A connection's user: the provider that has it */
+    if (lpName && lpName[0] && lpBufferSize && providerTable)
+    {
+        DWORD index, err;
+
+        for (index = 0; index < providerTable->numProviders; index++)
+        {
+            if (!providerTable->table[index].getUser)
+                continue;
+            err = providerTable->table[index].getUser((LPWSTR)lpName, lpUserID, lpBufferSize);
+            if (err == WN_SUCCESS || err == WN_MORE_DATA)
+            {
+                if (err) SetLastError(err);
+                return err;
+            }
+        }
+        SetLastError(WN_NOT_CONNECTED);
+        return WN_NOT_CONNECTED;
+    }
+#endif
     if (GetUserNameW( lpUserID, lpBufferSize )) return WN_SUCCESS;
     return GetLastError();
 }
@@ -2945,10 +3233,44 @@ DWORD WINAPI WNetConnectionDialog1A( LPCONNECTDLGSTRUCTA lpConnDlgStruct )
  */
 DWORD WINAPI WNetConnectionDialog1W( LPCONNECTDLGSTRUCTW lpConnDlgStruct )
 {
+#ifdef __REACTOS__
+    /* The Map Network Drive dialog lives beside the Disconnect one (netplwiz) */
+    typedef DWORD (WINAPI *PFN_MAP)(HWND, LPCWSTR, LPWSTR, DWORD);
+    HMODULE hDll;
+    PFN_MAP pMap;
+    WCHAR drive[3] = {0};
+    DWORD ret;
+
+    if (!lpConnDlgStruct || lpConnDlgStruct->cbStructure < sizeof(*lpConnDlgStruct))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return ERROR_INVALID_PARAMETER;
+    }
+    if (lpConnDlgStruct->lpConnRes && lpConnDlgStruct->lpConnRes->dwType == RESOURCETYPE_PRINT)
+    {
+        SetLastError(WN_BAD_DEV_TYPE);
+        return WN_BAD_DEV_TYPE;
+    }
+    hDll = LoadLibraryW(L"netplwiz.dll");
+    pMap = hDll ? (PFN_MAP)GetProcAddress(hDll, "NitroMapNetworkDriveDialog") : NULL;
+    if (!pMap)
+    {
+        if (hDll) FreeLibrary(hDll);
+        SetLastError(WN_NO_NETWORK);
+        return WN_NO_NETWORK;
+    }
+    ret = pMap(lpConnDlgStruct->hwndOwner,
+               lpConnDlgStruct->lpConnRes ? lpConnDlgStruct->lpConnRes->lpRemoteName : NULL, drive, ARRAY_SIZE(drive));
+    FreeLibrary(hDll);
+    if (ret == WN_SUCCESS && drive[0])
+        lpConnDlgStruct->dwDevNum = toupperW(drive[0]) - 'A' + 1;
+    return ret;
+#else
     FIXME( "(%p): stub\n", lpConnDlgStruct );
 
     SetLastError(WN_NO_NETWORK);
     return WN_NO_NETWORK;
+#endif
 }
 
 /*********************************************************************

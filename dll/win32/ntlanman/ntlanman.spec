@@ -39,5 +39,6 @@
 39 stub -noname Ordinal39
 40 stdcall NPGetUniversalName(wstr long ptr ptr)
 41 stdcall NPGetResourceParent(ptr ptr ptr)
+@ stdcall NPGetResourceInformation(ptr ptr ptr ptr)
 42 stub -noname Ordinal42
 43 stub -noname Ordinal43

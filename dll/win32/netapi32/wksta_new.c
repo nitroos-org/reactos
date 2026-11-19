@@ -648,15 +648,19 @@ NetUseAdd(
     _Out_ LPDWORD ParmError)
 {
     NET_API_STATUS status;
+    USE_INFO_ADD UseInfo;
 
     TRACE("NetUseAdd(%s %d %p %p)\n", debugstr_w(UncServerName),
           Level, Buf, ParmError);
+
+    /* The RPC argument is the union of pointers, not the caller's structure */
+    UseInfo.UseInfo2 = (LPUSE_INFO_2)Buf;
 
     RpcTryExcept
     {
         status = NetrUseAdd(UncServerName,
                             Level,
-                            (LPUSE_INFO)Buf,
+                            &UseInfo,
                             ParmError);
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)

@@ -59,6 +59,16 @@ VOID
 SaveWorkstationInfo(
     _In_ DWORD Level);
 
+/* smbstart.c */
+VOID StartSmbClientStarter(VOID);
+VOID StopSmbClientStarter(VOID);
+
+/* netuse.c */
+NET_API_STATUS WksUseAdd(DWORD Level, LPUSE_INFO_ADD InfoStruct, DWORD *ErrorParameter);
+NET_API_STATUS WksUseDel(LPWSTR UseName, DWORD ForceLevel);
+NET_API_STATUS WksUseGetInfo(LPWSTR UseName, DWORD Level, LPUSE_INFO InfoStruct);
+NET_API_STATUS WksUseEnum(LPUSE_ENUM_STRUCT InfoStruct, DWORD *TotalEntries, DWORD *ResumeHandle);
+
 /* rpcserver.c */
 
 VOID

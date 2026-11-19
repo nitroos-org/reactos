@@ -287,13 +287,19 @@ SmbEngBindingLive(ULONGLONG Id)
 
 /* Drops one reference the driver will not use (it never got the CONNECT reply, or the connect failed) */
 VOID
-SmbEngRemoveBinding(ULONGLONG Id)
+SmbEngRemoveBinding(ULONGLONG Id, const SMBENG_OP *Connect)
 {
     PSMBENG_BINDING Binding;
     PSMBENG_CONN Conn;
 
     AcquireSRWLockExclusive(&SmbEng.Lock);
     Conn = LookupBinding(Id);
+    /* A use that failed (or was given up) holds no identity for the server */
+    if (Conn != NULL && Connect != NULL && Connect->Request != NULL &&
+        (((const SMBUP_CONNECT_REQUEST *)(Connect->Request + 1))->Flags & SMBUP_CONNECT_USE) && Conn->UseRefs > 0)
+    {
+        Conn->UseRefs--;
+    }
     Binding = ReleaseBindingLocked(Id);
     if (Conn != NULL)
         SmbEngWakeConn(Conn);
@@ -339,6 +345,69 @@ SameKey(PSMBENG_CONN Conn, const SMBUP_HEADER *h, const WCHAR *Server, ULONG Ser
            wcslen(Conn->Share) * sizeof(WCHAR) == ShareBytes &&
            _wcsnicmp(Conn->Server, Server, ServerBytes / 2) == 0 &&
            _wcsnicmp(Conn->Share, Share, ShareBytes / 2) == 0;
+}
+
+/* Same logon session and server (as typed) */
+static
+BOOL
+SameServer(PSMBENG_CONN Conn, const SMBUP_HEADER *h, const WCHAR *Server, ULONG ServerBytes)
+{
+    return Conn->LogonId.LowPart == h->LogonIdLow && Conn->LogonId.HighPart == h->LogonIdHigh &&
+           wcslen(Conn->Server) * sizeof(WCHAR) == ServerBytes &&
+           _wcsnicmp(Conn->Server, Server, ServerBytes / 2) == 0;
+}
+
+static
+BOOL
+SameCountedString(const WCHAR *Held, const WCHAR *s, ULONG Bytes)
+{
+    return Held != NULL && wcslen(Held) * sizeof(WCHAR) == Bytes && _wcsnicmp(Held, s, Bytes / 2) == 0;
+}
+
+/* The explicit identity of Conn is (User, Domain), compared as Windows compares account names */
+static
+BOOL
+SameIdentity(PSMBENG_CONN Conn, const WCHAR *User, ULONG UserBytes, const WCHAR *Domain, ULONG DomainBytes)
+{
+    return Conn->Explicit && SameCountedString(Conn->User, User, UserBytes) &&
+           SameCountedString(Conn->Domain, Domain, DomainBytes);
+}
+
+static
+WCHAR *
+CopyCounted(const WCHAR *s, ULONG Bytes)
+{
+    WCHAR *Out = calloc(1, Bytes + sizeof(WCHAR));
+
+    if (Out != NULL && Bytes != 0)
+        memcpy(Out, s, Bytes);
+    return Out;
+}
+
+/* Under SmbEng.Lock, for a key without bindings: an explicit identity (the password separately) */
+static
+BOOL
+SetIdentity(PSMBENG_CONN Conn, const WCHAR *User, ULONG UserBytes, const WCHAR *Domain, ULONG DomainBytes)
+{
+    Conn->User = CopyCounted(User, UserBytes);
+    Conn->Domain = CopyCounted(Domain, DomainBytes);
+    Conn->Explicit = TRUE;
+    return Conn->User != NULL && Conn->Domain != NULL;
+}
+
+/* The password in our copy of a CONNECT request, wiped as soon as it is not needed */
+static
+VOID
+WipeConnectPassword(const SMBUP_HEADER *h, ULONG FixedEnd, const SMBUP_CONNECT_REQUEST *r)
+{
+    const WCHAR *Password;
+    ULONG Bytes;
+
+    if ((r->Flags & SMBUP_CONNECT_EXPLICIT_CREDENTIALS) &&
+        SmbEngStringOf(h, FixedEnd, &r->Password, &Password, &Bytes) && Bytes != 0)
+    {
+        SecureZeroMemory((PVOID)Password, Bytes);
+    }
 }
 
 /*
@@ -389,9 +458,12 @@ HandleConnect(PSMBENG_OP Op, HANDLE Event)
 {
     PSMBUP_HEADER h = Op->Request;
     PSMBUP_CONNECT_REQUEST r = (PSMBUP_CONNECT_REQUEST)(h + 1);
-    ULONG FixedEnd = sizeof(*h) + sizeof(*r), ServerBytes, ShareBytes, Dummy, OfLogon = 0;
-    const WCHAR *Server, *Share, *Password;
-    PSMBENG_CONN Conn = NULL;
+    ULONG FixedEnd = sizeof(*h) + sizeof(*r), ServerBytes, ShareBytes, OfLogon = 0;
+    ULONG UserBytes = 0, DomainBytes = 0, PasswordBytes = 0;
+    const WCHAR *Server, *Share, *User = NULL, *Domain = NULL, *Password = NULL;
+    BOOLEAN WantExplicit = (r->Flags & SMBUP_CONNECT_EXPLICIT_CREDENTIALS) != 0;
+    BOOLEAN RequireExplicit = (r->Flags & SMBUP_CONNECT_REQUIRE_EXPLICIT) != 0;
+    PSMBENG_CONN Conn = NULL, Live = NULL;
     PSMBENG_BINDING Binding;
     PLIST_ENTRY Entry;
     NTSTATUS Status;
@@ -413,13 +485,18 @@ HandleConnect(PSMBENG_OP Op, HANDLE Event)
         SmbEngAnswerOp(Op, STATUS_BAD_DEVICE_TYPE, Event);
         return;
     }
-    if (r->Flags & SMBUP_CONNECT_EXPLICIT_CREDENTIALS)
+    if (WantExplicit)
     {
-        /* Not in this version (the driver does not send them yet): wipe and refuse */
-        if (SmbEngStringOf(h, FixedEnd, &r->Password, &Password, &Dummy) && Dummy != 0)
-            SecureZeroMemory((PVOID)Password, Dummy);
-        SmbEngAnswerOp(Op, STATUS_NOT_SUPPORTED, Event);
-        return;
+        if (!SmbEngStringOf(h, FixedEnd, &r->UserName, &User, &UserBytes) ||
+            !SmbEngStringOf(h, FixedEnd, &r->Domain, &Domain, &DomainBytes) ||
+            !SmbEngStringOf(h, FixedEnd, &r->Password, &Password, &PasswordBytes) ||
+            UserBytes == 0 || UserBytes > 256 * sizeof(WCHAR) || DomainBytes > 256 * sizeof(WCHAR) ||
+            PasswordBytes > 256 * sizeof(WCHAR) || (r->Flags & SMBUP_CONNECT_REQUIRE_EXPLICIT))
+        {
+            WipeConnectPassword(h, FixedEnd, r);
+            SmbEngAnswerOp(Op, STATUS_INVALID_PARAMETER, Event);
+            return;
+        }
     }
     if (Op->Token == NULL)
     {
@@ -450,13 +527,108 @@ HandleConnect(PSMBENG_OP Op, HANDLE Event)
 
         if (Candidate->LogonId.LowPart == h->LogonIdLow && Candidate->LogonId.HighPart == h->LogonIdHigh)
             OfLogon++;
-        if (!Candidate->Closing && !Candidate->LoggedOff &&
-            SameKey(Candidate, h, Server, ServerBytes, Share, ShareBytes))
+        if (Candidate->Closing || Candidate->LoggedOff)
+            continue;
+        /* The identity this logon session uses for the server: that of a use the driver still holds */
+        if (Live == NULL && Candidate->UseRefs > 0 && SameServer(Candidate, h, Server, ServerBytes))
+            Live = Candidate;
+    }
+
+    /* One identity per (logon session, server): see smbupcall.h, CONNECT */
+    if (WantExplicit && Live != NULL &&
+        (!Live->Explicit || !SameIdentity(Live, User, UserBytes, Domain, DomainBytes) ||
+         !SmbEngSamePassword(Live, Password, PasswordBytes)))
+    {
+        ReleaseSRWLockExclusive(&SmbEng.Lock);
+        free(Binding);
+        SmbEngLog(1, "connect %.*S\\%.*S logon %08lx:%08lx: another identity is in use for the server (1219)",
+                  (int)(ServerBytes / 2), Server, (int)(ShareBytes / 2), Share, h->LogonIdHigh, h->LogonIdLow);
+        WipeConnectPassword(h, FixedEnd, r);
+        Op->Win32Error = ERROR_SESSION_CREDENTIAL_CONFLICT;
+        SmbEngAnswerOp(Op, STATUS_NETWORK_CREDENTIAL_CONFLICT, Event);
+        return;
+    }
+    if (RequireExplicit && (Live == NULL || !Live->Explicit))
+    {
+        /* The password is gone (engine restart, or the connection that had it ended): never single sign-on */
+        ReleaseSRWLockExclusive(&SmbEng.Lock);
+        free(Binding);
+        SmbEngLog(1, "reconnect %.*S\\%.*S logon %08lx:%08lx: its explicit credentials are gone",
+                  (int)(ServerBytes / 2), Server, (int)(ShareBytes / 2), Share, h->LogonIdHigh, h->LogonIdLow);
+        Op->Win32Error = ERROR_LOGON_FAILURE;
+        SmbEngAnswerOp(Op, STATUS_LOGON_FAILURE, Event);
+        return;
+    }
+    if (!WantExplicit && Live != NULL && !Live->Explicit)
+        Live = NULL;    /* single sign-on: nothing to take over */
+
+    /* The key: (logon id, server, share) with this identity; else one the driver no longer holds,
+     * which takes this identity. A key a plain UNC open holds with another identity stays as it is
+     * (such opens do not hold the identity for the server, as on Windows), beside a new one. */
+    for (Entry = SmbEng.Conns.Flink; Entry != &SmbEng.Conns; Entry = Entry->Flink)
+    {
+        PSMBENG_CONN Candidate = CONTAINING_RECORD(Entry, SMBENG_CONN, Link);
+        BOOL Same;
+
+        if (Candidate->Closing || Candidate->LoggedOff || !SameKey(Candidate, h, Server, ServerBytes, Share, ShareBytes))
+            continue;
+        if (WantExplicit)
+            Same = SameIdentity(Candidate, User, UserBytes, Domain, DomainBytes);
+        else if (Live != NULL)
+            Same = SameIdentity(Candidate, Live->User, (ULONG)wcslen(Live->User) * sizeof(WCHAR),
+                                Live->Domain, (ULONG)wcslen(Live->Domain) * sizeof(WCHAR));
+        else
+            Same = !Candidate->Explicit;
+        if (Same && (Candidate->Bindings > 0 || Conn == NULL))
         {
             Conn = Candidate;
-            break;
+            if (Candidate->Bindings > 0)
+                break;
+        }
+        else if (Conn == NULL && Candidate->Bindings == 0)
+        {
+            Conn = Candidate;
         }
     }
+
+    /* A key the driver no longer holds takes the identity of this CONNECT and authenticates again
+     * (Windows: a wrong password right after "net use /delete" fails; it does not reuse the session) */
+    if (Conn != NULL && Conn->Bindings == 0)
+    {
+        BOOL Ok = TRUE;
+
+        InterlockedExchange(&Conn->Reauth, 1);
+        SmbEngFreeCredentials(Conn);
+        if (WantExplicit)
+            Ok = SetIdentity(Conn, User, UserBytes, Domain, DomainBytes) && SmbEngSetPassword(Conn, Password, PasswordBytes);
+        else if (Live != NULL)
+            Ok = SetIdentity(Conn, Live->User, (ULONG)wcslen(Live->User) * sizeof(WCHAR),
+                             Live->Domain, (ULONG)wcslen(Live->Domain) * sizeof(WCHAR)) && SmbEngCopyPassword(Conn, Live);
+        if (!Ok)
+        {
+            SmbEngFreeCredentials(Conn);
+            ReleaseSRWLockExclusive(&SmbEng.Lock);
+            free(Binding);
+            WipeConnectPassword(h, FixedEnd, r);
+            SmbEngAnswerOp(Op, STATUS_INSUFFICIENT_RESOURCES, Event);
+            return;
+        }
+    }
+    else if (Conn != NULL && WantExplicit && !SmbEngSamePassword(Conn, Password, PasswordBytes))
+    {
+        /* Held (by a plain UNC open: a use with another password got 1219 above) with the same user:
+         * the newest password, checked at the next session setup */
+        InterlockedExchange(&Conn->Reauth, 1);
+        if (!SmbEngSetPassword(Conn, Password, PasswordBytes))
+        {
+            ReleaseSRWLockExclusive(&SmbEng.Lock);
+            free(Binding);
+            WipeConnectPassword(h, FixedEnd, r);
+            SmbEngAnswerOp(Op, STATUS_INSUFFICIENT_RESOURCES, Event);
+            return;
+        }
+    }
+
     if (Conn == NULL)
     {
         /* Each key is a thread and (in back-off) stays a while after a failed connect: one
@@ -473,10 +645,32 @@ HandleConnect(PSMBENG_OP Op, HANDLE Event)
             return;
         }
         Conn = SmbEngCreateConn(h, Server, ServerBytes, Share, ShareBytes);
+        if (Conn != NULL)
+        {
+            BOOL Ok = TRUE;
+
+            /* Its thread reads the identity only for a queued CONNECT: set before the first */
+            if (WantExplicit)
+                Ok = SetIdentity(Conn, User, UserBytes, Domain, DomainBytes) && SmbEngSetPassword(Conn, Password, PasswordBytes);
+            else if (Live != NULL)
+                Ok = SetIdentity(Conn, Live->User, (ULONG)wcslen(Live->User) * sizeof(WCHAR),
+                                 Live->Domain, (ULONG)wcslen(Live->Domain) * sizeof(WCHAR)) && SmbEngCopyPassword(Conn, Live);
+            if (!Ok)
+            {
+                /* A key without a binding leaves by itself; it must not connect as anyone */
+                SmbEngFreeCredentials(Conn);
+                Conn->Explicit = TRUE;
+                InsertTailList(&SmbEng.Conns, &Conn->Link);
+                SmbEng.ConnCount++;
+                SmbEngWakeConn(Conn);
+                Conn = NULL;
+            }
+        }
         if (Conn == NULL)
         {
             ReleaseSRWLockExclusive(&SmbEng.Lock);
             free(Binding);
+            WipeConnectPassword(h, FixedEnd, r);
             SmbEngAnswerOp(Op, STATUS_INSUFFICIENT_RESOURCES, Event);
             return;
         }
@@ -500,6 +694,14 @@ HandleConnect(PSMBENG_OP Op, HANDLE Event)
     }
     Op->BindingId = Binding->Id;
     Conn->Bindings++;
+    if (r->Flags & SMBUP_CONNECT_USE)
+        Conn->UseRefs++;
+    if (WantExplicit)
+        SmbEngLog(1, "connect %S\\%S logon %08lx:%08lx with explicit credentials of %.*S%s%.*S",
+                  Conn->Server, Conn->Share, h->LogonIdHigh, h->LogonIdLow, (int)(DomainBytes / 2), Domain,
+                  DomainBytes ? "\\" : "", (int)(UserBytes / 2), User);
+    /* The key keeps the only copy (encrypted); the one in the request goes now */
+    WipeConnectPassword(h, FixedEnd, r);
     SmbEngQueueOp(Conn, Op);
     SmbEngWakeConn(Conn);
     ReleaseSRWLockExclusive(&SmbEng.Lock);
@@ -519,6 +721,8 @@ HandleDisconnect(PSMBENG_OP Op, HANDLE Event)
     {
         Known = TRUE;
         Op->BindingId = r->ConnectionId;
+        if ((r->Flags & SMBUP_DISCONNECT_USE) && Conn->UseRefs > 0)
+            Conn->UseRefs--;
         Binding = ReleaseBindingLocked(r->ConnectionId);
         if (Binding != NULL)
         {
@@ -605,6 +809,8 @@ Dispatch(PUCHAR Buffer, DWORD Got, HANDLE Event)
             if (Token != NULL)
                 CloseHandle(Token);
         }
+        /* Whatever it was, it may carry a password: not left in the GET buffer */
+        SecureZeroMemory(Buffer, Got <= SMBUP_MAX_MESSAGE ? Got : SMBUP_MAX_MESSAGE);
         SmbEngLog(0, "invalid request from the driver (%lu bytes)", Got);
         return;
     }
@@ -630,6 +836,7 @@ Dispatch(PUCHAR Buffer, DWORD Got, HANDLE Event)
 
             if (Token != NULL)
                 CloseHandle(Token);
+            SecureZeroMemory(Buffer, Got);
         }
         return;
     }

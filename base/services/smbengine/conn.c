@@ -203,7 +203,7 @@ VOID
 FailOp(PSMBENG_CONN Conn, PSMBENG_OP Op, NTSTATUS Status)
 {
     if (Op->Opcode == SmbUpConnect && !Op->Internal && Op->BindingId != 0)
-        SmbEngRemoveBinding(Op->BindingId);
+        SmbEngRemoveBinding(Op->BindingId, Op);
     SmbEngAnswerOp(Op, Status, Conn->ReplyEvent);
 }
 
@@ -239,7 +239,7 @@ SendBuiltReply(PSMBENG_CONN Conn, PSMBENG_OP Op, NTSTATUS Status)
         }
         else if (Op->Opcode == SmbUpConnect)
         {
-            SmbEngRemoveBinding(Op->BindingId);
+            SmbEngRemoveBinding(Op->BindingId, Op);
         }
     }
     SmbEngFreeOp(Op);
@@ -273,6 +273,7 @@ AnswerConnect(PSMBENG_CONN Conn, PSMBENG_OP Op)
     Rep->MaxReadSize = Conn->MaxRead;
     Rep->MaxWriteSize = Conn->MaxWrite;
     Rep->ShareType = 1;     /* libsmb2 does not report the share type; non-disk names are refused by the driver */
+    Rep->Flags = Conn->Explicit ? SMBUP_CONNECT_REPLY_EXPLICIT : 0;
     SendBuiltReply(Conn, Op, STATUS_SUCCESS);
 }
 
@@ -328,7 +329,9 @@ ConnectFailed(PSMBENG_CONN Conn, NTSTATUS Status, ULONG Win32)
     Conn->State = ConnDown;
     /* A connect refused at once as unreachable (seen for the first connects after boot, while
      * the stack resolves the neighbour) is tried again shortly, before the waiting requests fail */
-    if (Win32 == ERROR_BAD_NETPATH && Conn->QuickRetries < 10 &&
+    /* Only for a server that did not answer: a share the server refused (STATUS_BAD_NETWORK_NAME,
+     * Win32 53 too) is an answer, and Windows reports it at once */
+    if (Win32 == ERROR_BAD_NETPATH && Status == STATUS_BAD_NETWORK_PATH && Conn->QuickRetries < 10 &&
         !TimeReached(GetTickCount(), Conn->ConnectStart, 2000) && !SmbEng.Stopping)
     {
         Conn->QuickRetries++;
@@ -417,6 +420,173 @@ ConnectCb(struct smb2_context *smb2, int status, void *command_data, void *priva
     }
 }
 
+/* Explicit credentials *****************************************************/
+
+static char *ToUtf8(const WCHAR *s, ULONG Bytes);
+
+/* advapi32 RtlEncryptMemory / RtlDecryptMemory (ntsecapi.h; declared here, the NDK headers clash) */
+NTSTATUS WINAPI SystemFunction040(PVOID Memory, ULONG Length, ULONG Flags);
+NTSTATUS WINAPI SystemFunction041(PVOID Memory, ULONG Length, ULONG Flags);
+#define SMBENG_ENCRYPT_BLOCK        8   /* RTL_ENCRYPT_MEMORY_SIZE */
+#define SMBENG_ENCRYPT_SAME_PROCESS 0   /* RTL_ENCRYPT_OPTION_SAME_PROCESS */
+
+/* Under SmbEng.Lock (exclusive): the password of Conn becomes Password (Bytes, UTF-16), kept
+ * encrypted for this process only; the caller wipes its own copy. FALSE: no memory or the
+ * encryption failed (nothing is kept in clear). */
+BOOL
+SmbEngSetPassword(PSMBENG_CONN Conn, const WCHAR *Password, ULONG Bytes)
+{
+    ULONG Alloc = ((Bytes / SMBENG_ENCRYPT_BLOCK) + 1) * SMBENG_ENCRYPT_BLOCK;
+    PUCHAR New = calloc(1, Alloc), Old;
+    ULONG OldAlloc;
+
+    if (New == NULL)
+        return FALSE;
+    if (Bytes != 0)
+        memcpy(New, Password, Bytes);
+    if (!NT_SUCCESS(SystemFunction040(New, Alloc, SMBENG_ENCRYPT_SAME_PROCESS)))
+    {
+        SecureZeroMemory(New, Alloc);
+        free(New);
+        SmbEngLog(0, "the password could not be encrypted in memory: not kept");
+        return FALSE;
+    }
+    EnterCriticalSection(&Conn->QueueLock);
+    Old = Conn->Password;
+    OldAlloc = Conn->PasswordAlloc;
+    Conn->Password = New;
+    Conn->PasswordAlloc = Alloc;
+    Conn->PasswordBytes = Bytes;
+    LeaveCriticalSection(&Conn->QueueLock);
+    if (Old != NULL)
+    {
+        SecureZeroMemory(Old, OldAlloc);
+        free(Old);
+    }
+    InterlockedExchange(&Conn->CredentialsChanged, 1);
+    return TRUE;
+}
+
+/* Under SmbEng.Lock: Conn gets the identity of From (a live connection of the same logon session
+ * to the same server). The ciphertext is copied as it is (same process). */
+BOOL
+SmbEngCopyPassword(PSMBENG_CONN Conn, const SMBENG_CONN *From)
+{
+    PUCHAR New;
+
+    EnterCriticalSection((LPCRITICAL_SECTION)&From->QueueLock);
+    New = From->PasswordAlloc ? malloc(From->PasswordAlloc) : NULL;
+    if (New != NULL)
+        memcpy(New, From->Password, From->PasswordAlloc);
+    LeaveCriticalSection((LPCRITICAL_SECTION)&From->QueueLock);
+    if (New == NULL)
+        return FALSE;
+    EnterCriticalSection(&Conn->QueueLock);
+    if (Conn->Password != NULL)
+    {
+        SecureZeroMemory(Conn->Password, Conn->PasswordAlloc);
+        free(Conn->Password);
+    }
+    Conn->Password = New;
+    Conn->PasswordAlloc = From->PasswordAlloc;
+    Conn->PasswordBytes = From->PasswordBytes;
+    LeaveCriticalSection(&Conn->QueueLock);
+    InterlockedExchange(&Conn->CredentialsChanged, 1);
+    return TRUE;
+}
+
+/* Is Password (Bytes, UTF-16) the password Conn keeps? The clear copy lives only for the comparison */
+BOOL
+SmbEngSamePassword(PSMBENG_CONN Conn, const WCHAR *Password, ULONG Bytes)
+{
+    PUCHAR Clear = NULL;
+    ULONG Alloc = 0, Held = 0;
+    BOOL Same = FALSE;
+
+    EnterCriticalSection(&Conn->QueueLock);
+    if (Conn->Password != NULL && (Clear = malloc(Conn->PasswordAlloc)) != NULL)
+    {
+        memcpy(Clear, Conn->Password, Conn->PasswordAlloc);
+        Alloc = Conn->PasswordAlloc;
+        Held = Conn->PasswordBytes;
+    }
+    LeaveCriticalSection(&Conn->QueueLock);
+    if (Clear == NULL)
+        return FALSE;
+    if (NT_SUCCESS(SystemFunction041(Clear, Alloc, SMBENG_ENCRYPT_SAME_PROCESS)))
+        Same = (Held == Bytes) && (Bytes == 0 || memcmp(Clear, Password, Bytes) == 0);
+    SecureZeroMemory(Clear, Alloc);
+    free(Clear);
+    return Same;
+}
+
+VOID
+SmbEngFreeCredentials(PSMBENG_CONN Conn)
+{
+    if (Conn->Password != NULL)
+    {
+        SecureZeroMemory(Conn->Password, Conn->PasswordAlloc);
+        free(Conn->Password);
+        Conn->Password = NULL;
+    }
+    Conn->PasswordAlloc = Conn->PasswordBytes = 0;
+    free(Conn->User);
+    free(Conn->Domain);
+    Conn->User = Conn->Domain = NULL;
+    Conn->Explicit = FALSE;
+}
+
+static
+VOID
+WipeFreeA(char *s)
+{
+    if (s != NULL)
+    {
+        SecureZeroMemory(s, strlen(s));
+        free(s);
+    }
+}
+
+/* Connection thread: libsmb2's credentials for an explicit-credential key, acquired as the
+ * user's (filtered) token. The clear password exists only for this call. */
+static
+int
+SetExplicitCredentials(PSMBENG_CONN Conn, struct smb2_context *smb2)
+{
+    char *User = NULL, *Domain = NULL, *Password = NULL;
+    PUCHAR Clear = NULL;
+    ULONG Alloc = 0, Bytes = 0;
+    int Rc = -ENOMEM;
+
+    EnterCriticalSection(&Conn->QueueLock);
+    if (Conn->Password != NULL && (Clear = malloc(Conn->PasswordAlloc)) != NULL)
+    {
+        memcpy(Clear, Conn->Password, Conn->PasswordAlloc);
+        Alloc = Conn->PasswordAlloc;
+        Bytes = Conn->PasswordBytes;
+    }
+    LeaveCriticalSection(&Conn->QueueLock);
+    if (Clear == NULL)
+        return -ENOMEM;
+    if (!NT_SUCCESS(SystemFunction041(Clear, Alloc, SMBENG_ENCRYPT_SAME_PROCESS)))
+        goto Out;
+
+    User = ToUtf8(Conn->User, (ULONG)wcslen(Conn->User) * sizeof(WCHAR));
+    Domain = ToUtf8(Conn->Domain, (ULONG)wcslen(Conn->Domain) * sizeof(WCHAR));
+    Password = ToUtf8((const WCHAR *)Clear, Bytes);
+    if (User == NULL || Domain == NULL || Password == NULL)
+        goto Out;
+    Rc = NitroSmb2SetCredentials(smb2, User, Domain[0] ? Domain : NULL, Password, NULL);
+
+Out:
+    SecureZeroMemory(Clear, Alloc);
+    free(Clear);
+    WipeFreeA(Password);
+    free(User);
+    free(Domain);
+    return Rc;
+}
+
 /* Starts a connect (no session, a request waits for one); the result comes in ConnectCb */
 static
 VOID
@@ -444,7 +614,8 @@ ConnStart(PSMBENG_CONN Conn)
                            SmbEngConfig.Dialect == 0x311 ? SMB2_VERSION_0311 : SMB2_VERSION_ANY);
     smb2_set_timeout(smb2, (int)SmbEngConfig.RequestTimeoutSeconds);
 
-    /* Single sign-on: the credentials of the user's logon session */
+    /* Single sign-on: the credentials of the user's logon session; explicit credentials: those,
+     * acquired as the user too (the filtered token of the connecting user) */
     if (!SetThreadToken(NULL, Conn->Token))
     {
         Win32 = GetLastError();
@@ -452,7 +623,12 @@ ConnStart(PSMBENG_CONN Conn)
         ConnectFailed(Conn, STATUS_BAD_IMPERSONATION_LEVEL, Win32);
         return;
     }
-    Rc = NitroSmb2SetCredentials(smb2, NULL, NULL, NULL, NULL);
+    InterlockedExchange(&Conn->CredentialsChanged, 0);
+    InterlockedExchange(&Conn->Reauth, 0);
+    if (Conn->Explicit)
+        Rc = SetExplicitCredentials(Conn, smb2);
+    else
+        Rc = NitroSmb2SetCredentials(smb2, NULL, NULL, NULL, NULL);
     RevertToSelf();
     if (Rc < 0)
     {
@@ -471,7 +647,13 @@ ConnStart(PSMBENG_CONN Conn)
         Status = ConnectStatus(smb2, Rc, &Win32);
         Conn->Smb2 = NULL;
         smb2_destroy_context(smb2);
+        /* A failure before any packet (the name does not resolve) is not the "unreachable at once
+         * after boot" case the quick retries are for: report it now (Windows: about 1 s for an
+         * unknown name; ten quick retries made it 10 s, and every UNC open of another provider's
+         * prefix, a WinFsp volume for one, waited for them in MUP) */
+        Conn->QuickRetries = 10;
         ConnectFailed(Conn, Status, Win32);
+        Conn->QuickRetries = 0;
         return;
     }
     SmbEngLog(1, "connecting %S\\%S logon %08lx:%08lx", Conn->Server, Conn->Share,
@@ -1332,7 +1514,7 @@ ConnTake(PSMBENG_CONN Conn, PSMBENG_OP Op, BOOLEAN FromBacklog)
             {
                 RemoveEntryList(&Target->Link);
                 if (Target->Opcode == SmbUpConnect)
-                    SmbEngRemoveBinding(Target->BindingId);
+                    SmbEngRemoveBinding(Target->BindingId, Target);
                 SmbEngFreeOp(Target);
                 return;
             }
@@ -1360,6 +1542,13 @@ ConnTake(PSMBENG_CONN Conn, PSMBENG_OP Op, BOOLEAN FromBacklog)
                     CloseHandle(Conn->Token);
                 Conn->Token = Op->Token;
                 Op->Token = NULL;
+            }
+            /* A new identity or password for this key: a new session, not the old one (only while
+             * no file of the key is open: those belong to the old session) */
+            if (Conn->Reauth && Conn->State == ConnUp && Conn->FileCount == 0 && Conn->InFlightCount == 0)
+            {
+                InterlockedExchange(&Conn->Reauth, 0);
+                TearDown(Conn, STATUS_SUCCESS, 0);
             }
             if (Conn->State == ConnLoggedOff)
                 FailOp(Conn, Op, STATUS_USER_SESSION_DELETED);
@@ -1549,6 +1738,7 @@ FreeConn(PSMBENG_CONN Conn)
         CloseHandle(Conn->ReplyEvent);
     if (Conn->Thread != NULL)
         CloseHandle(Conn->Thread);
+    SmbEngFreeCredentials(Conn);
     DeleteCriticalSection(&Conn->QueueLock);
     free(Conn->Server);
     free(Conn->Share);
@@ -1669,6 +1859,9 @@ ConnThread(LPVOID Parameter)
         Now = GetTickCount();
         if (Conn->State == ConnDown && !IsListEmpty(&Conn->Pending))
         {
+            /* New credentials (a user typing the password again) end the back-off of a failed connect */
+            if (Conn->CredentialsChanged && Conn->Backoff != 0)
+                Conn->Backoff = 0;
             if (Conn->QuickRetries != 0 && !TimeReached(Now, Conn->RetryTick, 300))
                 ;   /* a quick retry is due shortly (the poll below wakes in time) */
             else if (Conn->Backoff != 0 && !TimeReached(Now, Conn->FailTick, Conn->Backoff * 1000))
@@ -1682,12 +1875,17 @@ ConnThread(LPVOID Parameter)
             TearDown(Conn, STATUS_BAD_NETWORK_PATH, ERROR_BAD_NETPATH);
         }
 
-        /* Idle: no open file, nothing at the server, nothing waiting */
+        /* Idle: no open file, nothing at the server, nothing waiting. A key with explicit
+         * credentials that the driver no longer holds (net use /delete, the last use gone) is not
+         * kept for the idle time: its session, the credentials acquired for it and its password
+         * go now (FreeConn wipes them when the key leaves below) */
         if (Conn->State == ConnUp && Conn->FileCount == 0 && Conn->InFlightCount == 0 &&
             IsListEmpty(&Conn->Pending) && IsListEmpty(&Conn->Backlog) &&
-            TimeReached(Now, Conn->LastActivity, SmbEngConfig.IdleSeconds * 1000))
+            (TimeReached(Now, Conn->LastActivity, SmbEngConfig.IdleSeconds * 1000) ||
+             (Conn->Explicit && *(volatile LONG *)&Conn->Bindings == 0)))
         {
-            SmbEngLog(1, "connection %S\\%S idle for %lu s", Conn->Server, Conn->Share, SmbEngConfig.IdleSeconds);
+            SmbEngLog(1, "connection %S\\%S %s", Conn->Server, Conn->Share,
+                      Conn->Explicit && *(volatile LONG *)&Conn->Bindings == 0 ? "with explicit credentials no longer held" : "idle");
             TearDown(Conn, STATUS_SUCCESS, 0);
         }
         /* A key in back-off stays (without bindings too), so that repeated CONNECTs fail at once
