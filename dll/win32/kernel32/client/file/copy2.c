@@ -22,6 +22,10 @@
 #define MAXIMUM_REPARSE_DATA_BUFFER_SIZE (16 * 1024)
 #endif
 
+#ifndef SE_CREATE_SYMBOLIC_LINK_PRIVILEGE
+#define SE_CREATE_SYMBOLIC_LINK_PRIVILEGE 35L
+#endif
+
 #define COPY2_CHUNK_SIZE        0x80000
 #define COPY2_INVALID_FLAGS     0x80000000
 #define COPY2_SHARE_ALL         (FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
@@ -998,7 +1002,8 @@ Copy2CopyLink(
     PUCHAR Reparse = NULL;
     NTSTATUS Status;
     DWORD SourceLength = 0, OldLength, Ignored, Error = ERROR_SUCCESS;
-    BOOL Made = FALSE, CanDelete = FALSE;
+    BOOL Made = FALSE, CanDelete = FALSE, Set, Adjusted = FALSE, OnThread = FALSE;
+    BOOLEAN WasEnabled = FALSE;
     COPYFILE2_COPY_PHASE Phase = COPYFILE2_PHASE_PREPARE_SOURCE;
 
     *Handled = FALSE;
@@ -1121,11 +1126,34 @@ Copy2CopyLink(
     }
 
     Made = TRUE;
-    if (!DeviceIoControl(Dest, FSCTL_SET_REPARSE_POINT, Reparse, SourceLength, NULL, 0, &Ignored, NULL))
+
+    /*
+     * Creating a symbolic link takes SeCreateSymbolicLinkPrivilege. Administrators hold it, disabled in their
+     * token until a program turns it on, as CreateSymbolicLink does around the same request. It is enabled for
+     * the thread if it impersonates and for the process otherwise, and put back as it was. Without the privilege
+     * the adjustment fails and the file system refuses the request.
+     */
+    Status = RtlAdjustPrivilege(SE_CREATE_SYMBOLIC_LINK_PRIVILEGE, TRUE, TRUE, &WasEnabled);
+    if (NT_SUCCESS(Status))
     {
-        Error = GetLastError();
-        goto Done;
+        Adjusted = OnThread = TRUE;
     }
+    else if (Status == STATUS_NO_TOKEN)
+    {
+        Status = RtlAdjustPrivilege(SE_CREATE_SYMBOLIC_LINK_PRIVILEGE, TRUE, FALSE, &WasEnabled);
+        if (NT_SUCCESS(Status))
+            Adjusted = TRUE;
+    }
+
+    Set = DeviceIoControl(Dest, FSCTL_SET_REPARSE_POINT, Reparse, SourceLength, NULL, 0, &Ignored, NULL);
+    if (!Set)
+        Error = GetLastError();
+
+    if (Adjusted && !WasEnabled)
+        RtlAdjustPrivilege(SE_CREATE_SYMBOLIC_LINK_PRIVILEGE, FALSE, OnThread, &WasEnabled);
+
+    if (!Set)
+        goto Done;
 
     RtlZeroMemory(&Basic, sizeof(Basic));
     Basic.FileAttributes = SourceInfo.dwFileAttributes & FILE_ATTRIBUTE_VALID_SET_FLAGS;
