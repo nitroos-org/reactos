@@ -595,10 +595,14 @@ HandleConnect(PSMBENG_OP Op, HANDLE Event)
      * (Windows: a wrong password right after "net use /delete" fails; it does not reuse the session) */
     if (Conn != NULL && Conn->Bindings == 0)
     {
-        BOOL Ok = TRUE;
+        BOOL Ok = TRUE, WasExplicit = Conn->Explicit;
 
         InterlockedExchange(&Conn->Reauth, 1);
         SmbEngFreeCredentials(Conn);
+        /* Single sign-on after a failed explicit identity: the back-off of that identity (its refused
+         * logon, a guest session it was offered) is no answer for the caller's own one */
+        if (!WantExplicit && Live == NULL && WasExplicit)
+            InterlockedExchange(&Conn->CredentialsChanged, 1);
         if (WantExplicit)
             Ok = SetIdentity(Conn, User, UserBytes, Domain, DomainBytes) && SmbEngSetPassword(Conn, Password, PasswordBytes);
         else if (Live != NULL)
