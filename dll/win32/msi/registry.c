@@ -299,8 +299,17 @@ static WCHAR *get_user_sid(void)
     return ret;
 }
 
+#ifdef __REACTOS__
+/* The Add/Remove Programs entry of a per-user product of a standard user is under HKEY_CURRENT_USER (an
+   administrator keeps the one under HKEY_LOCAL_MACHINE, as the winetests of Wine expect) */
+UINT MSIREG_OpenUninstallKey(const WCHAR *product, enum platform platform, MSIINSTALLCONTEXT context, HKEY *key, BOOL create)
+#else
 UINT MSIREG_OpenUninstallKey(const WCHAR *product, enum platform platform, HKEY *key, BOOL create)
+#endif
 {
+#ifdef __REACTOS__
+    HKEY root = (context == MSIINSTALLCONTEXT_USERUNMANAGED && !msi_user_is_admin()) ? HKEY_CURRENT_USER : HKEY_LOCAL_MACHINE;
+#endif
     REGSAM access = KEY_ALL_ACCESS;
     WCHAR keypath[0x200];
 
@@ -312,12 +321,24 @@ UINT MSIREG_OpenUninstallKey(const WCHAR *product, enum platform platform, HKEY 
         access |= KEY_WOW64_64KEY;
     lstrcpyW(keypath, L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\");
     lstrcatW(keypath, product);
+#ifdef __REACTOS__
+    if (create) return RegCreateKeyExW(root, keypath, 0, NULL, 0, access, NULL, key, NULL);
+    return RegOpenKeyExW(root, keypath, 0, access, key);
+#else
     if (create) return RegCreateKeyExW(HKEY_LOCAL_MACHINE, keypath, 0, NULL, 0, access, NULL, key, NULL);
     return RegOpenKeyExW(HKEY_LOCAL_MACHINE, keypath, 0, access, key);
+#endif
 }
 
+#ifdef __REACTOS__
+UINT MSIREG_DeleteUninstallKey(const WCHAR *product, enum platform platform, MSIINSTALLCONTEXT context)
+#else
 UINT MSIREG_DeleteUninstallKey(const WCHAR *product, enum platform platform)
+#endif
 {
+#ifdef __REACTOS__
+    HKEY root = (context == MSIINSTALLCONTEXT_USERUNMANAGED && !msi_user_is_admin()) ? HKEY_CURRENT_USER : HKEY_LOCAL_MACHINE;
+#endif
     REGSAM access = KEY_ALL_ACCESS;
     HKEY parent;
     LONG r;
@@ -328,8 +349,13 @@ UINT MSIREG_DeleteUninstallKey(const WCHAR *product, enum platform platform)
         access |= KEY_WOW64_32KEY;
     else
         access |= KEY_WOW64_64KEY;
+#ifdef __REACTOS__
+    if ((r = RegOpenKeyExW(root, L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\",
+                           0, access, &parent))) return r;
+#else
     if ((r = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\",
                            0, access, &parent))) return r;
+#endif
     r = RegDeleteTreeW(parent, product);
     RegCloseKey(parent);
     return r;

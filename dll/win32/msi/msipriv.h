@@ -412,6 +412,7 @@ typedef struct tagMSIPACKAGE
 #ifdef __REACTOS__
     BOOL folders_chosen;    /* the ALLUSERS folders were set, for the all-users ones if folders_common */
     BOOL folders_common;
+    BOOL peruser_choice;    /* ALLUSERS 2 with MSIINSTALLPERUSER 1 chose the per-user context */
 #endif
     INT version;
     enum platform platform;
@@ -942,6 +943,7 @@ extern void msi_adjust_privilege_properties(MSIPACKAGE *);
 #ifdef __REACTOS__
 extern void msi_set_context_folders(MSIPACKAGE *);
 extern BOOL msi_user_is_admin(void);
+extern void msi_set_peruser_program_folders(MSIPACKAGE *);
 #endif
 extern UINT MSI_GetFeatureCost(MSIPACKAGE *, MSIFEATURE *, MSICOSTTREE, INSTALLSTATE, LPINT);
 
@@ -953,8 +955,13 @@ extern BOOL unsquash_guid(LPCWSTR in, LPWSTR out);
 extern BOOL squash_guid(LPCWSTR in, LPWSTR out);
 extern BOOL encode_base85_guid(GUID *,LPWSTR);
 extern BOOL decode_base85_guid(LPCWSTR,GUID*);
+#ifdef __REACTOS__
+extern UINT MSIREG_OpenUninstallKey(const WCHAR *, enum platform, MSIINSTALLCONTEXT, HKEY *, BOOL);
+extern UINT MSIREG_DeleteUninstallKey(const WCHAR *, enum platform, MSIINSTALLCONTEXT);
+#else
 extern UINT MSIREG_OpenUninstallKey(const WCHAR *, enum platform, HKEY *, BOOL);
 extern UINT MSIREG_DeleteUninstallKey(const WCHAR *, enum platform);
+#endif
 extern UINT MSIREG_OpenProductKey(LPCWSTR szProduct, LPCWSTR szUserSid,
                                   MSIINSTALLCONTEXT context, HKEY* key, BOOL create);
 extern UINT MSIREG_OpenFeaturesKey(LPCWSTR szProduct, LPCWSTR szUserSid, MSIINSTALLCONTEXT context,

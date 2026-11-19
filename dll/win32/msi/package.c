@@ -462,7 +462,13 @@ static UINT set_installed_prop( MSIPACKAGE *package )
 
     if (!package->ProductCode) return ERROR_FUNCTION_FAILED;
 
+#ifdef __REACTOS__
+    r = MSIREG_OpenUninstallKey( package->ProductCode, package->platform, MSIINSTALLCONTEXT_MACHINE, &hkey, FALSE );
+    if (r != ERROR_SUCCESS)
+        r = MSIREG_OpenUninstallKey( package->ProductCode, package->platform, MSIINSTALLCONTEXT_USERUNMANAGED, &hkey, FALSE );
+#else
     r = MSIREG_OpenUninstallKey( package->ProductCode, package->platform, &hkey, FALSE );
+#endif
     if (r == ERROR_SUCCESS)
     {
         RegCloseKey( hkey );
@@ -707,6 +713,30 @@ void msi_set_context_folders( MSIPACKAGE *package )
     }
     package->folders_chosen = TRUE;
     package->folders_common = common;
+}
+
+/* A package installed per user with MSIINSTALLPERUSER (ALLUSERS 2) has its program files folders in the Programs
+   folder of the user, %LOCALAPPDATA%\Programs, and the common files folders in its Common folder (Windows
+   Installer 5.0 and later, "Installation Context" and "Single Package Authoring" in the Windows Installer
+   documentation). A package with ALLUSERS unset keeps the program files folders of the machine. */
+void msi_set_peruser_program_folders( MSIPACKAGE *package )
+{
+    WCHAR programs[MAX_PATH], common[MAX_PATH];
+
+    if (!package->peruser_choice || msi_get_property_int( package->db, L"ALLUSERS", 0 )) return;
+    if (SHGetFolderPathW( NULL, CSIDL_LOCAL_APPDATA | CSIDL_FLAG_CREATE, NULL, SHGFP_TYPE_CURRENT, programs ) != S_OK)
+        return;
+    lstrcatW( programs, L"\\Programs" );
+    lstrcpyW( common, programs );
+    lstrcatW( common, L"\\Common\\" );
+    lstrcatW( programs, L"\\" );
+    msi_set_property( package->db, L"ProgramFilesFolder", programs, -1 );
+    msi_set_property( package->db, L"CommonFilesFolder", common, -1 );
+    if (msi_get_property_int( package->db, L"MsiAMD64", 0 ) || msi_get_property_int( package->db, L"Msix64", 0 ))
+    {
+        msi_set_property( package->db, L"ProgramFiles64Folder", programs, -1 );
+        msi_set_property( package->db, L"CommonFiles64Folder", common, -1 );
+    }
 }
 #endif
 
@@ -1070,6 +1100,7 @@ void msi_adjust_privilege_properties( MSIPACKAGE *package )
     if (allusers == 2 && msi_get_property_int( package->db, L"MSIINSTALLPERUSER", 0 ) == 1)
     {
         TRACE("ALLUSERS 2 with MSIINSTALLPERUSER, installing per user\n");
+        package->peruser_choice = TRUE;
         msi_set_property( package->db, L"ALLUSERS", L"", -1 );
     }
     else

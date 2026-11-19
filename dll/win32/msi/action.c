@@ -5372,7 +5372,11 @@ static UINT ACTION_RegisterProduct(MSIPACKAGE *package)
     if (!msi_get_property_int( package->db, L"ProductToBeRegistered", 0 ) && !check_publish(package))
         return ERROR_SUCCESS;
 
+#ifdef __REACTOS__
+    rc = MSIREG_OpenUninstallKey(package->ProductCode, package->platform, package->Context, &hkey, TRUE);
+#else
     rc = MSIREG_OpenUninstallKey(package->ProductCode, package->platform, &hkey, TRUE);
+#endif
     if (rc != ERROR_SUCCESS)
         return rc;
 
@@ -5508,7 +5512,11 @@ static UINT ACTION_UnpublishProduct(MSIPACKAGE *package)
 
     MSIREG_DeleteProductKey(package->ProductCode);
     MSIREG_DeleteUserDataProductKey(package->ProductCode, package->Context);
+#ifdef __REACTOS__
+    MSIREG_DeleteUninstallKey(package->ProductCode, package->platform, package->Context);
+#else
     MSIREG_DeleteUninstallKey(package->ProductCode, package->platform);
+#endif
 
     MSIREG_DeleteLocalClassesProductKey(package->ProductCode);
     MSIREG_DeleteLocalClassesFeaturesKey(package->ProductCode);
@@ -8479,6 +8487,7 @@ UINT MSI_InstallPackage( MSIPACKAGE *package, LPCWSTR szPackagePath,
     msi_adjust_privilege_properties( package );
 #ifdef __REACTOS__
     msi_set_context_folders( package );
+    msi_set_peruser_program_folders( package );
 #endif
     msi_set_context( package );
 #ifdef __REACTOS__
