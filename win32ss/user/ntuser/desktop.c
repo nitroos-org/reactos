@@ -1704,10 +1704,13 @@ IntGetActiveDesktop(VOID)
 }
 
 /*
- * Returns or creates a handle to the desktop object
+ * Returns or creates a handle to the desktop object. A handle that has to be created is
+ * opened for DesiredAccess, and the access check runs on it: zero access is always refused
+ * for an object with a security descriptor (as the desktops have), so with 0 only a handle
+ * the process already has can be returned.
  */
 HDESK FASTCALL
-IntGetDesktopObjectHandle(PDESKTOP DesktopObject)
+IntGetDesktopObjectHandle(PDESKTOP DesktopObject, ACCESS_MASK DesiredAccess)
 {
     NTSTATUS Status;
     HDESK hDesk;
@@ -1723,7 +1726,7 @@ IntGetDesktopObjectHandle(PDESKTOP DesktopObject)
         Status = ObOpenObjectByPointer(DesktopObject,
                                        0,
                                        NULL,
-                                       0,
+                                       DesiredAccess,
                                        ExDesktopObjectType,
                                        UserMode,
                                        (PHANDLE)&hDesk);
@@ -3830,7 +3833,7 @@ NtUserGetThreadDesktop(DWORD dwThreadId, HDESK hConsoleDesktop)
          * If not, create one.
          * QUESTION: Do we really need to create a handle in case it doesn't exist??
          */
-        hDesk = IntGetDesktopObjectHandle(DesktopObject);
+        hDesk = IntGetDesktopObjectHandle(DesktopObject, 0);
 
         /* All done, we got a valid handle to the desktop */
         ObDereferenceObject(DesktopObject);
