@@ -109,6 +109,7 @@ typedef enum _CONSRV_API_NUMBER
     ConsolepSetHistory,                     // Added in Vista+
     ConsolepGetScrollback,                  // NitroOS: rows scrolled off the top of a pseudoconsole buffer
     ConsolepGetExtColors,                   // NitroOS: 256-color / 24-bit color of the cells of a pseudoconsole buffer
+    ConsolepCancelIo,                       // NitroOS: end the reads another thread has pending on an input handle (CancelIoEx)
     // ConsolepSetCurrentFont,                 // Added in Vista+
     // ConsolepSetScreenBufferInfo,            // Added in Vista+
     // ConsolepClientConnect,                  // Added in Win7
@@ -495,6 +496,14 @@ typedef struct _CONSOLE_FLUSHINPUTBUFFER
     HANDLE ConsoleHandle;
     HANDLE InputHandle;
 } CONSOLE_FLUSHINPUTBUFFER, *PCONSOLE_FLUSHINPUTBUFFER;
+
+/* ConsolepCancelIo: the reads (ReadConsole, ReadFile, ReadConsoleInput) that other threads of the caller's
+ * process have pending on InputHandle end with STATUS_CANCELLED (ERROR_OPERATION_ABORTED) */
+typedef struct _CONSOLE_CANCELIO
+{
+    HANDLE ConsoleHandle;
+    HANDLE InputHandle;
+} CONSOLE_CANCELIO, *PCONSOLE_CANCELIO;
 
 typedef struct _CONSOLE_SCROLLSCREENBUFFER
 {
@@ -1113,6 +1122,7 @@ typedef struct _CONSOLE_API_MESSAGE
         CONSOLE_SETHISTORYMODE SetHistoryModeRequest;
         CONSOLE_SCROLLBACK ScrollbackRequest;
         CONSOLE_EXTCOLORS ExtColorsRequest;
+        CONSOLE_CANCELIO CancelIoRequest;
 
         /* Input and Output Code Pages; keyboard */
         CONSOLE_GETINPUTOUTPUTCP GetConsoleCPRequest;

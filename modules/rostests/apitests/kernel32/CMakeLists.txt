@@ -39,6 +39,7 @@ list(APPEND SOURCE
     ConsoleOrphanChild.c
     UnbufferedReadLimit.c
     ConsoleInheritForeign.c
+    ConsoleCancelIo.c
     ConsoleCloseTerminate.c
     ConsoleCsrRequests.c
     ConsoleCtrlEventRace.c
