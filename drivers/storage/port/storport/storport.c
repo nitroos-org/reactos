@@ -788,6 +788,15 @@ StorPortExtendedFunction(
                 break;
             }
 
+            /* Documented for <= DISPATCH_LEVEL with STOR_STATUS_INVALID_IRQL above it: a miniport
+               that allocates from its interrupt routine or under its interrupt lock (vioscsi saves the
+               serial number of the first VPD 0x80 INQUIRY it completes) gets that, not a bugcheck */
+            if (KeGetCurrentIrql() > DISPATCH_LEVEL) {
+                *AllocatedPoolPointer = NULL;
+                Status = STOR_STATUS_INVALID_IRQL;
+                break;
+            }
+
             PoolPointer = ExAllocatePoolWithTag(NonPagedPool, AllocatePoolSize, PoolTag);
 
             if (PoolPointer == NULL) {
@@ -808,6 +817,11 @@ StorPortExtendedFunction(
 
             if (PoolPointer == NULL) {
                 Status =  STOR_STATUS_INVALID_PARAMETER;
+                break;
+            }
+
+            if (KeGetCurrentIrql() > DISPATCH_LEVEL) {
+                Status = STOR_STATUS_INVALID_IRQL;
                 break;
             }
 
