@@ -1833,13 +1833,19 @@ SelectPartitionPage(PINPUT_RECORD Ir)
         {
             CurrentPartition = ListUi.CurrentPartition;
             // TODO: Do more checks, and loop until we find a valid partition.
-            if (CurrentPartition && !IsContainerPartition(CurrentPartition->PartitionType))
+            if (CurrentPartition && !IsContainerPartition(CurrentPartition->PartitionType) &&
+                !CurrentPartition->IsPartitioned)
             {
-                SetupLogFormat("AutoPartition: using the first entry of the disk list (disk %lu, %s)",
-                               CurrentPartition->DiskEntry->DiskNumber,
-                               CurrentPartition->IsPartitioned ? "an existing partition" : "free space");
+                SetupLogFormat("AutoPartition: using the free space at the start of the disk list (disk %lu)",
+                               CurrentPartition->DiskEntry->DiskNumber);
                 goto CreateInstallPartition;
             }
+            /* The first entry is a partition that exists (and holds somebody's data): AutoPartition only
+             * creates a partition in free space, it never picks an existing partition the file did not name */
+            if (CurrentPartition && CurrentPartition->IsPartitioned)
+                SetupLogFormat("AutoPartition: the partition named in the file does not exist and the first entry of the"
+                               " disk list (disk %lu) is a partition in use: not used",
+                               CurrentPartition->DiskEntry->DiskNumber);
         }
 
         /* Nothing to install to and nobody to ask: stop with a message
@@ -1849,8 +1855,8 @@ SelectPartitionPage(PINPUT_RECORD Ir)
                             "Choose a primary or logical partition (DestinationPartitionNumber)", NULL);
         else
             UnattendedFatal("the disk or partition named in unattend.inf does not exist",
-                            "Check DestinationDiskNumber and DestinationPartitionNumber,",
-                            "or set AutoPartition = 1 to use free space.");
+                            "Check DestinationDiskNumber and DestinationPartitionNumber, or",
+                            "use a disk with free space and AutoPartition = 1.");
         return QUIT_PAGE;
     } while (0);
 
