@@ -2420,14 +2420,6 @@ HKLM,"SYSTEM\CurrentControlSet\Services\NitroCertSeed","ImagePath",0x00020000,"%
 HKLM,"SYSTEM\CurrentControlSet\Services\NitroCertSeed","ObjectName",0x00000000,"LocalSystem"
 HKLM,"SYSTEM\CurrentControlSet\Services\NitroCertSeed","Start",0x00010001,0x00000002
 HKLM,"SYSTEM\CurrentControlSet\Services\NitroCertSeed","Type",0x00010001,0x00000010
-; Installs the features an unattended setup could not install while it ran (HKLM\SOFTWARE\ReactOS\Nitro\Unattend PendingFeatures); nothing to do otherwise
-HKLM,"SYSTEM\CurrentControlSet\Services\NitroFirstRun","Description",0x00000000,"Installs the features of an unattended setup that needed the network, at the first start, as SYSTEM."
-HKLM,"SYSTEM\CurrentControlSet\Services\NitroFirstRun","DisplayName",0x00000000,"NitroOS First-Start Feature Installer"
-HKLM,"SYSTEM\CurrentControlSet\Services\NitroFirstRun","ErrorControl",0x00010001,0x00000000
-HKLM,"SYSTEM\CurrentControlSet\Services\NitroFirstRun","ImagePath",0x00020000,"%SystemRoot%\system32\nitro-firstrun.exe /service"
-HKLM,"SYSTEM\CurrentControlSet\Services\NitroFirstRun","ObjectName",0x00000000,"LocalSystem"
-HKLM,"SYSTEM\CurrentControlSet\Services\NitroFirstRun","Start",0x00010001,0x00000002
-HKLM,"SYSTEM\CurrentControlSet\Services\NitroFirstRun","Type",0x00010001,0x00000010
 HKLM,"SYSTEM\CurrentControlSet\Services\Schedule","DependOnService",0x00010000,"RPCSS"
 HKLM,"SYSTEM\CurrentControlSet\Services\Schedule","Description",0x00000000,%SCHEDULE_SERVICE_DESCRIPTION%
 HKLM,"SYSTEM\CurrentControlSet\Services\Schedule","DisplayName",0x00000000,%SCHEDULE_SERVICE%

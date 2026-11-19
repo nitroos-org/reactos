@@ -23,9 +23,33 @@
 #include <lmaccess.h>
 #include <lmapibuf.h>
 #include <lmerr.h>
+#include <sddl.h>
 
 #define NDEBUG
 #include <debug.h>
+
+/* PROTECTED FILES **********************************************************/
+
+/*
+ * What setup leaves in <windir>\Panther is read by services and by every user's logon (the list of features
+ * for NitroFirstRun, the first-logon batch files): only SYSTEM and the Administrators may change them,
+ * everybody else may read. On a volume without access control lists (FAT) the call fails and nothing
+ * more can be done: there every user can change every system file.
+ */
+static VOID
+ProtectPath(
+    _In_ PCWSTR pszPath)
+{
+    PSECURITY_DESCRIPTOR pSd = NULL;
+
+    if (ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFX;;;BU)",
+                                                             SDDL_REVISION_1, &pSd, NULL))
+    {
+        if (!SetFileSecurityW(pszPath, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, pSd))
+            DPRINT1("SetFileSecurityW(%S) failed (error %lu)\n", pszPath, GetLastError());
+        LocalFree(pSd);
+    }
+}
 
 /* LOG **********************************************************************/
 
@@ -34,6 +58,7 @@ GetUnattendLogPath(
     _Out_writes_(cchMax) PWSTR pszPath,
     _In_ UINT cchMax)
 {
+    static BOOL bProtected = FALSE;
     WCHAR szDir[MAX_PATH];
 
     if (!GetWindowsDirectoryW(szDir, _countof(szDir)))
@@ -41,6 +66,11 @@ GetUnattendLogPath(
     if (FAILED(StringCchPrintfW(pszPath, cchMax, L"%s\\Panther", szDir)))
         return FALSE;
     CreateDirectoryW(pszPath, NULL);
+    if (!bProtected)
+    {
+        bProtected = TRUE;
+        ProtectPath(pszPath);
+    }
     return SUCCEEDED(StringCchCatW(pszPath, cchMax, L"\\unattend.log"));
 }
 
@@ -320,17 +350,34 @@ UnattendScrubSecrets(VOID)
         return;
     }
     cb = GetFileSize(hFile, NULL);
-    if (cb == INVALID_FILE_SIZE || cb == 0 || cb > 4 * 1024 * 1024)
+    if (cb == INVALID_FILE_SIZE || cb == 0)
     {
         CloseHandle(hFile);
         return;
     }
-    pb = HeapAlloc(GetProcessHeap(), 0, cb);
+    pb = (cb <= 4 * 1024 * 1024) ? HeapAlloc(GetProcessHeap(), 0, cb) : NULL;
     if (!pb || !ReadFile(hFile, pb, cb, &cbRead, NULL) || cbRead != cb)
     {
-        UnattendLog(L"cannot read the installed answer file to remove the passwords");
+        /* Too big to look through (setup does not take such a file: this is the second line of defence), or
+         * not readable: the passwords cannot be found, so nothing of the file stays: it is overwritten with
+         * zeros, in place, and no other part of setup finds an answer in it */
+        UnattendLog(L"cannot remove the passwords from the installed answer file (size %lu): the file is overwritten", cb);
         if (pb)
             HeapFree(GetProcessHeap(), 0, pb);
+        {
+            BYTE zero[4096] = { 0 };
+            DWORD done = 0, chunk;
+
+            SetFilePointer(hFile, 0, NULL, FILE_BEGIN);
+            while (done < cb)
+            {
+                chunk = (cb - done < sizeof(zero)) ? (cb - done) : sizeof(zero);
+                if (!WriteFile(hFile, zero, chunk, &cbWritten, NULL) || !cbWritten)
+                    break;
+                done += cbWritten;
+            }
+            FlushFileBuffers(hFile);
+        }
         CloseHandle(hFile);
         return;
     }
@@ -418,6 +465,9 @@ UnattendCaptureSecrets(VOID)
         return;
     UnattendGetString(L"Unattend", L"AdminPassword", g_szAdminPassword, _countof(g_szAdminPassword));
     UnattendGetString(L"UserAccount", L"Password", g_szAccountPassword, _countof(g_szAccountPassword));
+    if (wcslen(g_szAdminPassword) >= _countof(g_szAdminPassword) - 1 ||
+        wcslen(g_szAccountPassword) >= _countof(g_szAccountPassword) - 1)
+        UnattendLog(L"a password in the answer file has 127 characters or more: it is cut at 127");
     UnattendScrubSecrets();
 }
 
@@ -861,6 +911,70 @@ FeatureLogSaysNoNetwork(
 }
 
 /*
+ * The features that need the network are installed by the NitroFirstRun service at the first start. Only
+ * now, when there is something to install, the service is made (an installation without such features
+ * has no such service): the names go to <windir>\Panther\firstrun.lst, a file only SYSTEM and the
+ * Administrators can change (the service refuses a list that others can change), and the service
+ * deletes the list and itself when it is done. pszNames: names separated by blanks, already checked.
+ */
+static VOID
+QueueFirstRunFeatures(
+    _In_ PCWSTR pszNames)
+{
+    WCHAR szPath[MAX_PATH], szImage[] = L"\"%SystemRoot%\\system32\\nitro-firstrun.exe\" /service";
+    HANDLE hFile;
+    HKEY hKey;
+    DWORD dwValue, cbWritten;
+    CHAR szLine[80];
+    PCWSTR p = pszNames;
+
+    if (!GetWindowsDirectoryW(szPath, _countof(szPath) - 32) || FAILED(StringCchCatW(szPath, _countof(szPath), L"\\Panther\\firstrun.lst")))
+        return;
+    hFile = CreateFileW(szPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE)
+    {
+        UnattendLog(L"cannot write %s (error %lu): the features are not installed at the first start", szPath, GetLastError());
+        return;
+    }
+    ProtectPath(szPath);
+    while (*p)
+    {
+        size_t n = 0;
+
+        while (*p == L' ')
+            p++;
+        while (*p && *p != L' ' && n < sizeof(szLine) - 3)
+            szLine[n++] = (CHAR)*p++;
+        if (!n)
+            continue;
+        szLine[n++] = '\r';
+        szLine[n++] = '\n';
+        WriteFile(hFile, szLine, (DWORD)n, &cbWritten, NULL);
+    }
+    CloseHandle(hFile);
+
+    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Services\\NitroFirstRun", 0, NULL, 0,
+                        KEY_SET_VALUE, NULL, &hKey, NULL) != ERROR_SUCCESS)
+    {
+        UnattendLog(L"cannot create the NitroFirstRun service: the features are not installed at the first start");
+        DeleteFileW(szPath);
+        return;
+    }
+    RegSetValueExW(hKey, L"DisplayName", 0, REG_SZ, (const BYTE *)L"NitroOS First-Start Feature Installer",
+                   (DWORD)((wcslen(L"NitroOS First-Start Feature Installer") + 1) * sizeof(WCHAR)));
+    RegSetValueExW(hKey, L"ImagePath", 0, REG_EXPAND_SZ, (const BYTE *)szImage, (DWORD)((wcslen(szImage) + 1) * sizeof(WCHAR)));
+    RegSetValueExW(hKey, L"ObjectName", 0, REG_SZ, (const BYTE *)L"LocalSystem", 12 * sizeof(WCHAR));
+    dwValue = SERVICE_WIN32_OWN_PROCESS;
+    RegSetValueExW(hKey, L"Type", 0, REG_DWORD, (const BYTE *)&dwValue, sizeof(dwValue));
+    dwValue = SERVICE_AUTO_START;
+    RegSetValueExW(hKey, L"Start", 0, REG_DWORD, (const BYTE *)&dwValue, sizeof(dwValue));
+    dwValue = SERVICE_ERROR_IGNORE;
+    RegSetValueExW(hKey, L"ErrorControl", 0, REG_DWORD, (const BYTE *)&dwValue, sizeof(dwValue));
+    RegCloseKey(hKey);
+    UnattendLog(L"the NitroFirstRun service will install the late features at the first start");
+}
+
+/*
  * [Features]  Install = powershell-7, firefox   (names of the feature manager's catalog: featmgr /list)
  * Each is installed by "featmgr /enable <name>" at the end of setup, before the first start; a feature that
  * is not available on this system, or that fails, is logged and setup goes on.
@@ -957,17 +1071,7 @@ InstallConfiguredFeatures(VOID)
     }
 
     if (szPending[0])
-    {
-        HKEY hKey;
-
-        if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\ReactOS\\Nitro\\Unattend", 0, NULL, 0, KEY_SET_VALUE,
-                            NULL, &hKey, NULL) == ERROR_SUCCESS)
-        {
-            RegSetValueExW(hKey, L"PendingFeatures", 0, REG_SZ, (const BYTE *)szPending,
-                           (DWORD)((wcslen(szPending) + 1) * sizeof(WCHAR)));
-            RegCloseKey(hKey);
-        }
-    }
+        QueueFirstRunFeatures(szPending);
 }
 
 /* FIRST LOGON COMMANDS *****************************************************/
@@ -1037,6 +1141,8 @@ RegisterFirstLogonCommands(VOID)
         WriteFile(hFile, szCmd, (DWORD)strlen(szCmd), &cbWritten, NULL);
         WriteFile(hFile, "\r\n", 2, &cbWritten, NULL);
         CloseHandle(hFile);
+        /* every user's logon runs it: only SYSTEM and the Administrators may change it */
+        ProtectPath(szFile);
 
         StringCchPrintfW(szName, _countof(szName), L"UnattendFirstLogon%d", n);
         StringCchPrintfW(szRun, _countof(szRun), L"cmd.exe /c call \"%s\"", szFile);
