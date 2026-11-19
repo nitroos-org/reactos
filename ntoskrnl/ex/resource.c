@@ -47,8 +47,8 @@ ExAcquireResourceLock(IN PERESOURCE Resource,
     {
         if (!(*(volatile LONG64 *)&Resource->SpinLock & 1))
         {
-            Flags = __readeflags();
-            _disable();
+            /* Not __readeflags() + _disable(): see KiSaveFlagsAndDisableInterrupts */
+            Flags = KiSaveFlagsAndDisableInterrupts();
 #ifdef CONFIG_SMP
             if (!InterlockedBitTestAndSet64((PLONG64)&Resource->SpinLock, 0))
                 break;

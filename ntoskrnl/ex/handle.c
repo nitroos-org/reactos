@@ -426,9 +426,8 @@ FORCEINLINE
 ULONG_PTR
 ExpPinHandleCache(VOID)
 {
-    ULONG_PTR Flags = __readeflags();
-    _disable();
-    return Flags;
+    /* Not __readeflags() + _disable(): see KiSaveFlagsAndDisableInterrupts */
+    return KiSaveFlagsAndDisableInterrupts();
 }
 
 FORCEINLINE

@@ -65,8 +65,7 @@ KiSwitchKernelStack(PVOID StackBase, PVOID StackLimit)
     StackOffset = (PUCHAR)StackBase - (PUCHAR)CurrentThread->StackBase;
 
     /* Disable interrupts while messing with the stack */
-    Eflags = __readeflags();
-    _disable();
+    Eflags = KiSaveFlagsAndDisableInterrupts();
 
     /* Set the new trap frame */
     CurrentThread->TrapFrame = (PKTRAP_FRAME)Add2Ptr(CurrentThread->TrapFrame,

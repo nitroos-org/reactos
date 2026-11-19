@@ -1623,7 +1623,11 @@ RtlpCaptureNonVolatileContextPointers(
                              &EstablisherFrame,
                              NonvolatileContextPointers);
 
-            ASSERT(EstablisherFrame != 0);
+            /* No check of EstablisherFrame here: a thread stopped by an interrupt
+               in an epilog after it popped its frame register (on the ret of a
+               GCC frame function) gets the frame register's restored value, the
+               caller's, which can be anything, also 0. The walk does not use it;
+               the last frame's is checked below */
         }
         else
         {
