@@ -1147,18 +1147,14 @@ CmpCheckKey(
     }
 
     /*
-     * A name that begins with a NUL is the end of a path to the parser
-     * (CmpGetNextName): no open reaches the key, one by its own name opens its
-     * parent, and enumerating and deleting the subkeys by name never ends
-     * (RegDeleteTreeW). No create makes such a key. The root's name is not
-     * parsed.
+     * A name may begin with a NUL: names are counted, and the native API
+     * makes such a key (NtCreateKey with a path whose last component begins
+     * with one). It is a key like any other and is kept: dropping it would
+     * lose what a program wrote, and the check of a live hive would refuse
+     * every hive that holds one. Its name is no pointer or length; the code
+     * that reads names as C strings (RegDeleteTreeW) handles it by its
+     * counted name.
      */
-    if (Parent != HCELL_NIL &&
-        ((Node->Flags & KEY_COMP_NAME) ? ((PUCHAR)Node->Name)[0] == 0 : Node->Name[0] == UNICODE_NULL))
-    {
-        DPRINT1("Key 0x%x: the name begins with a NUL\n", Cell);
-        return FALSE;
-    }
 
     /* The parent named by the key is the one it is found under */
     if (Parent != HCELL_NIL && Node->Parent != Parent)
