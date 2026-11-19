@@ -196,6 +196,14 @@ BOOL   FmWriteManifest(LPCWSTR path, const FM_OUTBUF *o);
 void   FmGetLastMessage(LPWSTR buf, DWORD cch);
 void   FmSetLastMessage(LPCWSTR fmt, ...);
 
+/* Changing features writes under %SystemRoot%\Featmgr, HKLM and System32, which only an administrator can do (there is no
+ * UAC split token and the Run as verb never asks for credentials). FmIsAdministrator: the caller's token is in the
+ * Administrators group (LocalSystem's is too). FmRequireAdministrator: S_OK for an administrator; otherwise nothing has
+ * been created yet, the one explanation is in the log and in FmGetLastMessage, and ERROR_ACCESS_DENIED comes back. */
+#define FM_NEED_ADMIN_TEXT L"You need to be an administrator to change features."
+BOOL    FmIsAdministrator(void);
+HRESULT FmRequireAdministrator(FILE *log);
+
 /* An install changed the registry PATH (machine or user): programs already running, including the shell that
  * started us, keep the old one. FmTakePathChange returns TRUE once after such an install (and clears it);
  * name = the feature that did it. FmPathHint formats the user-facing text. When refreshenv ships in

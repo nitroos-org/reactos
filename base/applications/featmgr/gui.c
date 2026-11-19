@@ -639,6 +639,14 @@ static DWORD WINAPI OpThreadProc(LPVOID param)
 static void StartOp(HWND hwnd, OPCTX *c)
 {
     if (g_busy) { FreeOp(c); return; }
+    if (!FmIsAdministrator())
+    {
+        /* every operation changes something; none can work for this user, and none has started */
+        FreeOp(c);
+        MessageBoxW(hwnd, FM_NEED_ADMIN_TEXT L" Sign in as an administrator and try again.",
+                    BRAND_PRODUCT_NAME_W L" Features", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
     g_closeAfterOp = FALSE;
     FmOpBegin(ProgressSink, NULL);      /* arm cancel + progress before the worker exists */
     SetBusy(hwnd, TRUE);
@@ -1550,6 +1558,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR lpCmd, int nShow)
     ShowWindow(hwnd, nShow);
     UpdateWindow(hwnd);
     if (g_openAddBucket) PostMessageW(hwnd, WM_COMMAND, IDC_ADDBUCKET, 0);
+    if (!FmIsAdministrator())
+        MessageBoxW(hwnd, FM_NEED_ADMIN_TEXT L" You can look at the list, but turning features on or off needs an administrator.",
+                    BRAND_PRODUCT_NAME_W L" Features", MB_OK | MB_ICONINFORMATION);
 
     while (GetMessageW(&m, NULL, 0, 0) > 0)
     {
