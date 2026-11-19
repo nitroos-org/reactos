@@ -109,6 +109,10 @@ static void release_np_event(RpcConnection_np *connection, HANDLE event)
 }
 
 #ifdef __REACTOS__
+/* What a client of an RPC pipe needs: it reads and writes the pipe, nothing that changes it */
+#define RPC_PIPE_CLIENT_ACCESS (FILE_READ_DATA | FILE_WRITE_DATA | FILE_READ_EA | FILE_WRITE_EA | \
+                                FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | SYNCHRONIZE | READ_CONTROL)
+
 /**
  * @brief
  * Creates a security descriptor for RPC4 pipe
@@ -132,8 +136,11 @@ rpcrt4_create_pipe_security(PSECURITY_DESCRIPTOR *SecDesc)
     DWORD ErrCode;
     PACL Dacl;
     ULONG DaclSize, RelSDSize = 0;
-    PSID EveryoneSid = NULL, AnonymousSid = NULL, AdminsSid = NULL;
+    PSID EveryoneSid = NULL, AnonymousSid = NULL, AdminsSid = NULL, CreatorSid = NULL;
     PSECURITY_DESCRIPTOR AbsSD = NULL, RelSD = NULL;
+    HANDLE Token = NULL;
+    PTOKEN_USER UserInfo = NULL;
+    DWORD UserInfoLength = 0;
     static SID_IDENTIFIER_AUTHORITY WorldAuthority = {SECURITY_WORLD_SID_AUTHORITY};
     static SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
 
@@ -186,10 +193,27 @@ rpcrt4_create_pipe_security(PSECURITY_DESCRIPTOR *SecDesc)
         goto Quit;
     }
 
+    /* The user of this process (the server) */
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &Token))
+    {
+        GetTokenInformation(Token, TokenUser, NULL, 0, &UserInfoLength);
+        if (UserInfoLength != 0)
+        {
+            UserInfo = HeapAlloc(GetProcessHeap(), 0, UserInfoLength);
+            if (UserInfo != NULL &&
+                GetTokenInformation(Token, TokenUser, UserInfo, UserInfoLength, &UserInfoLength))
+            {
+                CreatorSid = UserInfo->User.Sid;
+            }
+        }
+        CloseHandle(Token);
+    }
+
     DaclSize = sizeof(ACL) +
                sizeof(ACCESS_ALLOWED_ACE) + RtlLengthSid(EveryoneSid) +
                sizeof(ACCESS_ALLOWED_ACE) + RtlLengthSid(AnonymousSid) +
-               sizeof(ACCESS_ALLOWED_ACE) + RtlLengthSid(AdminsSid);
+               sizeof(ACCESS_ALLOWED_ACE) + RtlLengthSid(AdminsSid) +
+               ((CreatorSid != NULL) ? (sizeof(ACCESS_ALLOWED_ACE) + RtlLengthSid(CreatorSid)) : 0);
 
     Dacl = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, DaclSize);
     if (Dacl == NULL)
@@ -206,9 +230,12 @@ rpcrt4_create_pipe_security(PSECURITY_DESCRIPTOR *SecDesc)
         goto Quit;
     }
 
+    /* No FILE_APPEND_DATA (= FILE_CREATE_PIPE_INSTANCE): another user must not be able to create one more instance of
+       the pipe, because the clients of the server would then connect to that instance (and the one who made it could
+       impersonate them) */
     if (!AddAccessAllowedAce(Dacl,
                              ACL_REVISION,
-                             GENERIC_READ | GENERIC_WRITE | SYNCHRONIZE | READ_CONTROL,
+                             RPC_PIPE_CLIENT_ACCESS,
                              EveryoneSid))
     {
         ErrCode = GetLastError();
@@ -218,7 +245,7 @@ rpcrt4_create_pipe_security(PSECURITY_DESCRIPTOR *SecDesc)
 
     if (!AddAccessAllowedAce(Dacl,
                              ACL_REVISION,
-                             GENERIC_READ | GENERIC_WRITE | SYNCHRONIZE | READ_CONTROL,
+                             RPC_PIPE_CLIENT_ACCESS,
                              AnonymousSid))
     {
         ErrCode = GetLastError();
@@ -233,6 +260,19 @@ rpcrt4_create_pipe_security(PSECURITY_DESCRIPTOR *SecDesc)
     {
         ErrCode = GetLastError();
         ERR("rpcrt4_create_pipe_security(): Failed to set up ACE for Admins SID (error %lu)\n", ErrCode);
+        goto Quit;
+    }
+
+    /* The server that makes the pipe keeps full access (it creates the instances for the next clients), also when it
+       does not run as an administrator (LocalService, NetworkService, a standard user's program) */
+    if (CreatorSid != NULL &&
+        !AddAccessAllowedAce(Dacl,
+                             ACL_REVISION,
+                             GENERIC_ALL,
+                             CreatorSid))
+    {
+        ErrCode = GetLastError();
+        ERR("rpcrt4_create_pipe_security(): Failed to set up ACE for the creator (error %lu)\n", ErrCode);
         goto Quit;
     }
 
@@ -293,6 +333,9 @@ Quit:
 
     if (AdminsSid != NULL)
         FreeSid(AdminsSid);
+
+    if (UserInfo != NULL)
+        HeapFree(GetProcessHeap(), 0, UserInfo);
 
     if (Dacl != NULL)
         HeapFree(GetProcessHeap(), 0, Dacl);
