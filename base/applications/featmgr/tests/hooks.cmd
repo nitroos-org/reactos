@@ -57,6 +57,24 @@ reg query HKLM\SOFTWARE\ReactOS\Nitro\FmTest /v HookFail >nul 2>&1
 call :rc1 "H14 its registry value was rolled back"
 if exist %R%\fmt-hookfail.log (echo PASS H15 the Disable hook ran once for the rollback>> %LOG%) else (call :fail "H15 Disable hook on rollback" "log missing")
 
+rem --- a hook program without its full path is refused (no search path, no current directory), before it runs
+mkdir %R%\Payload\fmt-hookrel 2>nul
+copy /y %FX%\fmt-hookrel.ini %R%\Catalog\ >nul
+copy /y %FX%\fmt-hook.cmd %R%\Payload\fmt-hookrel\ >nul
+del %R%\fmt-hookrel.log 2>nul
+%FM% /enable fmt-hookrel >> %LOG% 2>&1
+call :rc1 "H17 enable fails when the hook program is not a full path"
+if exist %R%\fmt-hookrel.log (call :fail "H18 the refused hook did not run" "it ran") else (echo PASS H18 the refused hook did not run>> %LOG%)
+if exist %R%\fmt-hookrel.out (call :fail "H19 payload file rolled back" "still there") else (echo PASS H19 payload file rolled back>> %LOG%)
+
+rem --- a service may only run as its own virtual account (or LocalService / NetworkService)
+copy /y %FX%\fmt-acct.ini %R%\Catalog\ >nul
+%FM% /enable fmt-acct >> %LOG% 2>&1
+call :rc1 "H20 enable fails when the service names another service's virtual account"
+rem (sc qc of a missing service does not set errorlevel here: check what featmgr did, as H8 does)
+find "service: created FmtAcctSvc" %LOG% >nul
+call :rc1 "H21 no service was created for it"
+
 rem --- HideOnOtherArch: an x86-only entry is listed on x86 and not listed elsewhere
 %FM% /list > %O%\l.txt 2>&1
 find "fmt-hide" %O%\l.txt >nul
@@ -66,8 +84,8 @@ call :rc1 "H16 not x86: the x86-only entry is hidden from /list"
 
 rem cleanup
 %FM% /disable fmt-hook >nul 2>&1
-del %R%\Catalog\fmt-hook.ini %R%\Catalog\fmt-hookfail.ini %R%\Catalog\fmt-hide.ini 2>nul
-rmdir /s /q %R%\Payload\fmt-hook %R%\Payload\fmt-hookfail 2>nul
+del %R%\Catalog\fmt-hook.ini %R%\Catalog\fmt-hookfail.ini %R%\Catalog\fmt-hide.ini %R%\Catalog\fmt-hookrel.ini %R%\Catalog\fmt-acct.ini 2>nul
+rmdir /s /q %R%\Payload\fmt-hook %R%\Payload\fmt-hookfail %R%\Payload\fmt-hookrel 2>nul
 echo DONE hooks fails=%FAILS% >> %LOG%
 exit /b %FAILS%
 

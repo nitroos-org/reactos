@@ -1251,10 +1251,42 @@ static DWORD ParseSvcStart(LPCWSTR s)
  * %VAR% is expanded; the program is started without a shell, no window, and must finish within 120 s (it is
  * killed otherwise). Exit code 0 = success. A failed Enable rolls the whole feature back and runs Disable once
  * (so a hook that did half of its work can undo it); a failed Disable is logged and does not stop the removal.
- * The command line comes from the manifest in the image's catalog, never from a download. */
+ * The command line comes from the manifest in the image's catalog, never from a download.
+ * The program is the first token of the expanded line ("quoted" when it holds a space) and must be an absolute
+ * path to an existing file: it is passed to CreateProcess as the application name, so no search path, no
+ * "C:\Program.exe" reading of an unquoted path and no current directory takes part. The hook runs in the
+ * system directory, whatever directory featmgr was started from. */
+static BOOL HookProgram(LPCWSTR cmd, LPWSTR prog, DWORD cch)
+{
+    LPCWSTR s = cmd, e;
+    DWORD attr;
+    size_t n;
+
+    if (*s == L'"')
+    {
+        s++;
+        e = wcschr(s, L'"');
+        if (!e) return FALSE;
+    }
+    else
+    {
+        e = s;
+        while (*e && *e != L' ' && *e != L'\t') e++;
+    }
+    n = (size_t)(e - s);
+    if (n < 3 || n >= cch) return FALSE;
+    memcpy(prog, s, n * sizeof(WCHAR));
+    prog[n] = L'\0';
+    /* X:\... only: no relative name, no UNC or device path */
+    if (!((prog[0] >= L'A' && prog[0] <= L'Z') || (prog[0] >= L'a' && prog[0] <= L'z')) || prog[1] != L':' || prog[2] != L'\\')
+        return FALSE;
+    attr = GetFileAttributesW(prog);
+    return attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY);
+}
+
 static HRESULT RunHook(LPCWSTR manifest, LPCWSTR key, FILE *log)
 {
-    WCHAR raw[1024], cmd[1024];
+    WCHAR raw[1024], cmd[1024], prog[MAX_PATH], sysdir[MAX_PATH];
     STARTUPINFOW si;
     PROCESS_INFORMATION pi;
     DWORD code = 1, w;
@@ -1266,10 +1298,17 @@ static HRESULT RunHook(LPCWSTR manifest, LPCWSTR key, FILE *log)
         LOGF(log, L"  hook %s: command line too long\n", key);
         return E_INVALIDARG;
     }
+    if (!HookProgram(cmd, prog, ARRAYSIZE(prog)))
+    {
+        LOGF(log, L"  hook %s: the program is not an existing file given by its full path (quoted if it has a space): %s\n", key, cmd);
+        return E_INVALIDARG;
+    }
+    if (!GetSystemDirectoryW(sysdir, ARRAYSIZE(sysdir)))
+        return HRESULT_FROM_WIN32(GetLastError());
     ZeroMemory(&si, sizeof(si));
     si.cb = sizeof(si);
     LOGF(log, L"  hook %s: %s\n", key, cmd);
-    if (!CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
+    if (!CreateProcessW(prog, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, sysdir, &si, &pi))
     {
         LOGF(log, L"  hook %s: cannot start (%lu)\n", key, GetLastError());
         return HRESULT_FROM_WIN32(GetLastError());
@@ -1287,6 +1326,17 @@ static HRESULT RunHook(LPCWSTR manifest, LPCWSTR key, FILE *log)
     CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
     LOGF(log, L"  hook %s: exit code %lu\n", key, code);
     return code == 0 ? S_OK : E_FAIL;
+}
+
+/* The accounts a manifest may give a service, none with a password: the service's own virtual account (another
+ * service's NT SERVICE\<name> would hand this one that service's SID and with it its files), LocalService or
+ * NetworkService. LocalSystem is the empty field. */
+static BOOL SvcAccountAllowed(LPCWSTR svcName, LPCWSTR account)
+{
+    static const WCHAR vs[] = L"NT SERVICE\\";
+    if (!_wcsicmp(account, L"NT AUTHORITY\\LocalService") || !_wcsicmp(account, L"NT AUTHORITY\\NetworkService"))
+        return TRUE;
+    return !_wcsnicmp(account, vs, ARRAYSIZE(vs) - 1) && !_wcsicmp(account + ARRAYSIZE(vs) - 1, svcName);
 }
 
 static HRESULT ApplyServiceAction(LPCWSTR spec, HKEY state, FILE *log)
@@ -1318,9 +1368,22 @@ static HRESULT ApplyServiceAction(LPCWSTR spec, HKEY state, FILE *log)
         LOGF(log, L"  bad service spec (an account needs Type=win32): %s\n", spec);
         return E_INVALIDARG;
     }
+    if (ti > 6 && tok[6][0] && !SvcAccountAllowed(tok[0], tok[6]))
+    {
+        LOGF(log, L"  bad service spec (account must be NT SERVICE\\<the service's own name>, NT AUTHORITY\\LocalService or NetworkService): %s\n", spec);
+        return E_INVALIDARG;
+    }
     if (!ExpandEnvironmentStringsW(tok[3], image, ARRAYSIZE(image)) || wcslen(image) >= MAX_PATH)
     {
         LOGF(log, L"  bad service spec (image path too long): %s\n", spec);
+        return E_INVALIDARG;
+    }
+    /* an unquoted path with a space would be read as "C:\Program" + arguments by the service controller
+     * (an unquoted program without a space followed by arguments, "...\x.exe -k y", stays allowed) */
+    if (ParseSvcType(tok[1]) == SERVICE_WIN32_OWN_PROCESS && image[0] != L'"' && (p = wcschr(image, L' ')) != NULL &&
+        (p - image < 4 || _wcsnicmp(p - 4, L".exe", 4)))
+    {
+        LOGF(log, L"  bad service spec (an image path with a space must be quoted): %s\n", spec);
         return E_INVALIDARG;
     }
 
