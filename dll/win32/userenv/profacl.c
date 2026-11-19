@@ -129,6 +129,18 @@ static const PROFILE_ACE ConfigAces[] =
     {WinCreatorOwnerSid, FILE_ALL_ACCESS, OI_CI_IO},
 };
 
+/*
+ * The boot files in the root of the system partition (freeldr.sys, freeldr.ini, ...): SYSTEM and Administrators
+ * full, Users read and execute, protected. They name the kernel, the HAL and the boot options; in the root they
+ * inherit Authenticated Users: Modify (the root's entry for what is created in it), so any user could change them.
+ */
+static const PROFILE_ACE BootFileAces[] =
+{
+    {WinLocalSystemSid, FILE_ALL_ACCESS, 0},
+    {WinBuiltinAdministratorsSid, FILE_ALL_ACCESS, 0},
+    {WinBuiltinUsersSid, RX_ACCESS, 0},
+};
+
 /* A user profile: SYSTEM, Administrators and the user, full and inherited by all */
 static const PROFILE_ACE UserAces[] =
 {
@@ -230,6 +242,11 @@ BuildProfileDescriptor(
         case ProfileDirConfig:
             pAces = ConfigAces;
             cAces = ARRAYSIZE(ConfigAces);
+            break;
+
+        case ProfileDirBootFile:
+            pAces = BootFileAces;
+            cAces = ARRAYSIZE(BootFileAces);
             break;
 
         case ProfileDirUser:
@@ -767,6 +784,67 @@ ReadPathValue(
 }
 
 /*
+ * The files setup puts in the root of the system partition (base/setup/lib/bootsup.c): the loader, its
+ * configuration (boot options, the kernel and HAL to load), the boot sector and MBR copies it chains to.
+ */
+static const PCWSTR BootFiles[] =
+{
+    L"freeldr.sys", L"freeldr.ini", L"rosload.exe", L"bootsect.ros", L"mbr.old"
+};
+
+/* Each boot file in the root RootPath ("X:\") gets the DACL of a boot file, unless its DACL is protected already */
+static VOID
+SecureBootFiles(
+    _In_ PCWSTR pszRoot)
+{
+    WCHAR szPath[MAX_PATH];
+    UINT i;
+
+    for (i = 0; i < ARRAYSIZE(BootFiles); i++)
+    {
+        if (SUCCEEDED(StringCchPrintfW(szPath, ARRAYSIZE(szPath), L"%s%s", pszRoot, BootFiles[i])))
+            SecureExistingProfileDirectory(szPath, ProfileDirBootFile, NULL, FALSE);
+    }
+}
+
+/*
+ * The drive letter of the system partition (setup records its device in HKLM\SYSTEM\Setup\SystemPartition), as
+ * "X:\". FALSE if it has none (a partition without a letter is out of the users' reach through a path anyway).
+ */
+static BOOL
+GetSystemPartitionRoot(
+    _Out_writes_(cchRoot) PWSTR pszRoot,
+    _In_ DWORD cchRoot)
+{
+    WCHAR szDevice[MAX_PATH], szTarget[MAX_PATH], szDrive[3] = L"A:";
+    DWORD dwType, dwSize = sizeof(szDevice) - sizeof(WCHAR);
+    HKEY hKey;
+    LONG lError;
+
+    lError = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\Setup", 0, KEY_QUERY_VALUE, &hKey);
+    if (lError != ERROR_SUCCESS)
+        return FALSE;
+    lError = RegQueryValueExW(hKey, L"SystemPartition", NULL, &dwType, (PBYTE)szDevice, &dwSize);
+    RegCloseKey(hKey);
+    if (lError != ERROR_SUCCESS || dwType != REG_SZ || cchRoot < 4)
+        return FALSE;
+    szDevice[dwSize / sizeof(WCHAR)] = UNICODE_NULL;
+
+    for (szDrive[0] = L'A'; szDrive[0] <= L'Z'; szDrive[0]++)
+    {
+        if (QueryDosDeviceW(szDrive, szTarget, ARRAYSIZE(szTarget)) && !_wcsicmp(szTarget, szDevice))
+        {
+            pszRoot[0] = szDrive[0];
+            pszRoot[1] = L':';
+            pszRoot[2] = L'\\';
+            pszRoot[3] = UNICODE_NULL;
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+/*
  * Called by winlogon at every start: an install from before the well-known folders had the DACLs of Windows has the
  * one of the volume root on them (Authenticated Users: Modify, for ProgramData, Program Files, Windows and the
  * root itself). Each of them gets the DACL of Windows and what is in it inherits it afresh, entries put there on purpose
@@ -815,6 +893,16 @@ SecureSystemDirectories(VOID)
         szPath[2] = L'\\';
         szPath[3] = UNICODE_NULL;
         SecureExistingProfileDirectory(szPath, ProfileDirRoot, NULL, FALSE);
+
+        /* The boot files, where setup puts them when the system partition is this volume */
+        SecureBootFiles(szPath);
+    }
+
+    /* The boot files on the system partition, when it is another volume with a letter */
+    if (GetSystemPartitionRoot(szPath, ARRAYSIZE(szPath)) &&
+        !(GetWindowsDirectoryW(szWindows, ARRAYSIZE(szWindows)) && towupper(szWindows[0]) == towupper(szPath[0])))
+    {
+        SecureBootFiles(szPath);
     }
 
     return bResult;

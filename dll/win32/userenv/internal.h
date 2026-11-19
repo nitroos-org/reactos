@@ -59,6 +59,7 @@ typedef enum _PROFILE_DIR_KIND
     ProfileDirTemp,         /* Windows\Temp */
     ProfileDirRoot,         /* the root of the system volume */
     ProfileDirConfig,       /* Windows\System32\config: SYSTEM and Administrators only */
+    ProfileDirBootFile,     /* A boot file in the root of the system partition: Users read only */
     ProfileDirUser      /* The profile of a user: SYSTEM, Administrators and that user */
 } PROFILE_DIR_KIND;
 
