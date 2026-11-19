@@ -39,6 +39,9 @@ static volatile LONG SmbStarterWaiters; /* threads inside IOCTL_SMBRDR_WAIT_ENGI
  * so requests that need an engine fail at once until ... */
 static volatile ULONGLONG SmbStarterBusyUntil;
 static volatile ULONGLONG SmbStartFailedUntil;
+/* Read and written from several threads without a common lock: whole 64-bit values (two halves on x86) */
+#define SmbReadTime(p)     ((ULONGLONG)InterlockedCompareExchange64((volatile LONGLONG *)(p), 0, 0))
+#define SmbWriteTime(p, v) ((VOID)InterlockedExchange64((volatile LONGLONG *)(p), (LONGLONG)(v)))
 
 VOID
 SmbEngineInitialize(VOID)
@@ -98,8 +101,8 @@ static
 VOID
 SmbNoteStartFailed(VOID)
 {
-    SmbStartFailedUntil = KeQueryInterruptTime() + (ULONGLONG)NITRO_SMBRDR_ENGINE_FAIL_CACHE_SECONDS * 10000000ULL;
-    SmbStarterBusyUntil = 0;
+    SmbWriteTime(&SmbStartFailedUntil, KeQueryInterruptTime() + (ULONGLONG)NITRO_SMBRDR_ENGINE_FAIL_CACHE_SECONDS * 10000000ULL);
+    SmbWriteTime(&SmbStarterBusyUntil, 0);
     KeSetEvent(&SmbStartFailedEvent, IO_NO_INCREMENT, FALSE);
 }
 
@@ -125,9 +128,9 @@ SmbEnsureEngine(PIRP Irp)
     if (SmbEngine.FileObject != NULL)
         return STATUS_SUCCESS;
     Now = KeQueryInterruptTime();
-    if (SmbStarterWaiters == 0 && Now >= SmbStarterBusyUntil)
+    if (SmbStarterWaiters == 0 && Now >= SmbReadTime(&SmbStarterBusyUntil))
         return STATUS_REDIRECTOR_NOT_STARTED;
-    if (Now < SmbStartFailedUntil)
+    if (Now < SmbReadTime(&SmbStartFailedUntil))
         return STATUS_REDIRECTOR_NOT_STARTED;
 
     KeClearEvent(&SmbStartFailedEvent);
@@ -144,8 +147,11 @@ SmbEnsureEngine(PIRP Irp)
         if (SmbCallerGaveUp(Irp))
             return STATUS_CANCELLED;
         Now = KeQueryInterruptTime();
-        if (SmbStarterWaiters == 0 && Now >= SmbStarterBusyUntil)
+        if (SmbStarterWaiters == 0 && Now >= SmbReadTime(&SmbStarterBusyUntil))
             return STATUS_REDIRECTOR_NOT_STARTED;   /* the starter went away meanwhile */
+        /* A failed start that another request's KeClearEvent hid from this wait */
+        if (Now < SmbReadTime(&SmbStartFailedUntil))
+            return STATUS_REDIRECTOR_NOT_STARTED;
         if (Now >= Deadline)
             break;
     }
@@ -186,7 +192,7 @@ SmbWaitEngineNeeded(VOID)
     Timeout.QuadPart = -10000000LL * 300;
     Status = KeWaitForSingleObject(&SmbNeedEvent, UserRequest, UserMode, TRUE, &Timeout);
     if (Status == STATUS_SUCCESS && SmbEngine.FileObject == NULL)
-        SmbStarterBusyUntil = KeQueryInterruptTime() + (ULONGLONG)NITRO_SMBRDR_ENGINE_START_WAIT_SECONDS * 10000000ULL;
+        SmbWriteTime(&SmbStarterBusyUntil, KeQueryInterruptTime() + (ULONGLONG)NITRO_SMBRDR_ENGINE_START_WAIT_SECONDS * 10000000ULL);
     InterlockedDecrement(&SmbStarterWaiters);
     if (Status == STATUS_SUCCESS)
         return SmbEngine.FileObject == NULL ? STATUS_SUCCESS : STATUS_ALREADY_REGISTERED;
@@ -747,8 +753,8 @@ SmbEngineAttach(PIRP Irp, PIO_STACK_LOCATION Stack)
     SmbEngine.Process = Process;
     SmbEngine.Generation++;
     KeClearEvent(&SmbEngine.DetachEvent);
-    SmbStartFailedUntil = 0;
-    SmbStarterBusyUntil = 0;
+    SmbWriteTime(&SmbStartFailedUntil, 0);
+    SmbWriteTime(&SmbStarterBusyUntil, 0);
     KeClearEvent(&SmbStartFailedEvent);
     KeSetEvent(&SmbAttachedEvent, IO_NO_INCREMENT, FALSE);
     KeReleaseSpinLock(&SmbEngine.Lock, OldIrql);
