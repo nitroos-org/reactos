@@ -63,6 +63,23 @@ extern "C" {
 #define SCSI_DMA64_MINIPORT_FULL64BIT_SUPPORTED  0x02
 #endif
 
+/* StorPortLogError error codes */
+#define SP_BUS_PARITY_ERROR                 0x0001
+#define SP_UNEXPECTED_DISCONNECT            0x0002
+#define SP_INVALID_RESELECTION              0x0003
+#define SP_BUS_TIME_OUT                     0x0004
+#define SP_PROTOCOL_ERROR                   0x0005
+#ifndef SP_INTERNAL_ADAPTER_ERROR
+#define SP_INTERNAL_ADAPTER_ERROR           0x0006
+#endif
+#define SP_REQUEST_TIMEOUT                  0x0007
+#define SP_IRQ_NOT_RESPONDING               0x0008
+#define SP_BAD_FW_WARNING                   0x0009
+#define SP_BAD_FW_ERROR                     0x000a
+
+/* STOR_LOG_EVENT_DETAILS.InterfaceRevision */
+#define STOR_CURRENT_LOG_INTERFACE_REVISION 0x00000100
+
 #define SP_UNINITIALIZED_VALUE            ((ULONG) ~0)
 #define SP_UNTAGGED                       ((UCHAR) ~0)
 
@@ -7691,6 +7708,11 @@ StorPortReadRegisterUshort(
     _In_ PVOID HwDeviceExtension,
     _In_ PUSHORT Register);
 
+/* StorPortRegistryRead / StorPortRegistryWrite value types, the registry type numbers */
+#define MINIPORT_REG_SZ                     1
+#define MINIPORT_REG_BINARY                 3
+#define MINIPORT_REG_DWORD                  4
+
 STORPORT_API
 BOOLEAN
 NTAPI
@@ -7763,7 +7785,7 @@ StorPortStallExecution(
     _In_ ULONG Delay);
 
 STORPORT_API
-VOID
+BOOLEAN
 NTAPI
 StorPortSynchronizeAccess(
     _In_ PVOID HwDeviceExtension,
@@ -8194,6 +8216,29 @@ StorPortLogSystemEvent(
                                     HwDeviceExtension,
                                     LogDetails,
                                     MaximumSize);
+}
+
+FORCEINLINE
+ULONG
+StorPortStateChangeDetected(
+    _In_ PVOID HwDeviceExtension,
+    _In_ ULONG ChangedEntity,
+    _In_opt_ PSTOR_ADDRESS Address,
+    _In_ ULONG Attributes,
+    _In_opt_ PHW_STATE_CHANGE HwStateChange,
+    _In_opt_ PVOID HwStateChangeContext)
+{
+    ULONG Status = STOR_STATUS_UNSUCCESSFUL;
+
+    StorPortNotification(StateChangeDetectedCall,
+                         HwDeviceExtension,
+                         ChangedEntity,
+                         Address,
+                         Attributes,
+                         HwStateChange,
+                         HwStateChangeContext,
+                         &Status);
+    return Status;
 }
 
 
