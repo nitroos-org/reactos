@@ -24,6 +24,9 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <msi.h>
+#ifdef __REACTOS__
+#include <msiquery.h>
+#endif
 #include <winsvc.h>
 #include <objbase.h>
 
@@ -111,6 +114,39 @@ static BOOL IsProductCode(LPWSTR str)
 	return ( (CLSIDFromString(str, &ProductCode) == NOERROR) );
 
 }
+
+#ifdef __REACTOS__
+/* msiexec /f takes a package or a product code, MsiReinstallProduct only a product code: read the code from the
+   Property table of the package (its source is the registered one, or the package given, as Windows does). */
+static UINT ReinstallPackage(LPCWSTR package, DWORD mode)
+{
+	MSIHANDLE db, view, rec;
+	WCHAR code[64];
+	DWORD len = ARRAY_SIZE(code);
+	UINT r;
+
+	r = MsiOpenDatabaseW(package, MSIDBOPEN_READONLY, &db);
+	if (r != ERROR_SUCCESS)
+		return r == ERROR_OPEN_FAILED ? ERROR_FILE_NOT_FOUND : r;
+	r = MsiDatabaseOpenViewW(db, L"SELECT `Value` FROM `Property` WHERE `Property`='ProductCode'", &view);
+	if (r == ERROR_SUCCESS)
+	{
+		r = MsiViewExecute(view, 0);
+		if (r == ERROR_SUCCESS)
+			r = MsiViewFetch(view, &rec);
+		if (r == ERROR_SUCCESS)
+		{
+			r = MsiRecordGetStringW(rec, 1, code, &len);
+			MsiCloseHandle(rec);
+		}
+		MsiCloseHandle(view);
+	}
+	MsiCloseHandle(db);
+	if (r != ERROR_SUCCESS)
+		return ERROR_INSTALL_PACKAGE_INVALID;
+	return MsiReinstallProductW(code, mode);
+}
+#endif
 
 static VOID StringListAppend(struct string_list **list, LPCWSTR str)
 {
@@ -1156,9 +1192,21 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	}
 	else if(FunctionRepair)
 	{
+#ifdef __REACTOS__
+		if(IsProductCode(package_unquoted))
+			ReturnCode = MsiReinstallProductW(package_unquoted, RepairMode);
+		else if ((ReturnCode = ReinstallPackage(package_unquoted, RepairMode)) == ERROR_FILE_NOT_FOUND
+				&& (path = get_path_with_extension(package_unquoted)))
+		{
+			ReturnCode = ReinstallPackage(path, RepairMode);
+			free(path);
+		}
+#else
 		if(IsProductCode(package_unquoted))
 			WINE_FIXME("Product code treatment not implemented yet\n");
 		else
+#endif
+#ifndef __REACTOS__
 		{
 			if ((ReturnCode = MsiReinstallProductW(package_unquoted, RepairMode)) == ERROR_FILE_NOT_FOUND
 					&& (path = get_path_with_extension(package_unquoted)))
@@ -1167,6 +1215,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 				free(path);
 			}
 		}
+#endif
 	}
 	else if(FunctionAdvertise)
 	{
