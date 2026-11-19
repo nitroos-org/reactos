@@ -2192,13 +2192,15 @@ ULONG
 GetVolumeSortRank(
     _In_ PVOLENTRY VolumeEntry)
 {
+    /* Windows Server 2022 (one disk, one CD-ROM drive) lists the optical drive as volume 0, before the partitions of
+       the disk; where the other removable drives belong is not measured and stays after the partitions */
     switch (VolumeEntry->VolumeType)
     {
-        case VOLUME_TYPE_PARTITION:
-            return 0;
-        case VOLUME_TYPE_REMOVABLE:
-            return 1;
         case VOLUME_TYPE_CDROM:
+            return 0;
+        case VOLUME_TYPE_PARTITION:
+            return 1;
+        case VOLUME_TYPE_REMOVABLE:
             return 2;
         default:
             return 3;
