@@ -137,14 +137,33 @@ UnattendGetString(
         p++;
     if (p != pszValue)
         memmove(pszValue, p, (wcslen(p) + 1) * sizeof(WCHAR));
+    /*
+     * A quoted value ends at the closing quote (a comment may follow it); an unquoted one ends at a ';'
+     * (the comment). The text-mode stage reads the file the same way; GetPrivateProfileString leaves the
+     * comment in the value, and a line such as  UnattendSetupEnabled = yes   ; text  was not "yes" to the
+     * second stage, which then skipped every answer of this file.
+     */
+    if (pszValue[0] == L'"')
+    {
+        PWSTR pEnd = wcschr(pszValue + 1, L'"');
+
+        if (pEnd)
+        {
+            *pEnd = UNICODE_NULL;
+            memmove(pszValue, pszValue + 1, (wcslen(pszValue + 1) + 1) * sizeof(WCHAR));
+            return pszValue[0] != UNICODE_NULL;
+        }
+    }
+    else
+    {
+        PWSTR pSemi = wcschr(pszValue, L';');
+
+        if (pSemi)
+            *pSemi = UNICODE_NULL;
+    }
     len = wcslen(pszValue);
     while (len && (pszValue[len - 1] == L' ' || pszValue[len - 1] == L'\t'))
         pszValue[--len] = UNICODE_NULL;
-    if (len >= 2 && pszValue[0] == L'"' && pszValue[len - 1] == L'"')
-    {
-        memmove(pszValue, pszValue + 1, (len - 1) * sizeof(WCHAR));
-        pszValue[len - 2] = UNICODE_NULL;
-    }
     return pszValue[0] != UNICODE_NULL;
 }
 
