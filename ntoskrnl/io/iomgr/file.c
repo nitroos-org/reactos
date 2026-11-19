@@ -216,6 +216,19 @@ IopDoNameTransmogrify(IN PIRP Irp,
                                     DataBuffer->MountPointReparseBuffer.SubstituteNameOffset);
         Length = DataBuffer->MountPointReparseBuffer.SubstituteNameLength;
 
+        /*
+         * A volume mount point's substitute name ends in a backslash (\??\Volume{guid}\) and what follows the
+         * mount point in the opened name starts with one: the two have to meet in a single backslash, as the
+         * file system of the volume refuses an empty name component.
+         */
+        if (DataBuffer->Reserved >= sizeof(WCHAR) && Length > sizeof(WCHAR) &&
+            Buffer[Length / sizeof(WCHAR) - 1] == L'\\' &&
+            *(PWCHAR)((ULONG_PTR)FileObject->FileName.Buffer + FileObject->FileName.Length -
+                      DataBuffer->Reserved) == L'\\')
+        {
+            Length -= sizeof(WCHAR);
+        }
+
         /* Check we don't overflow */
         if (((ULONG)MAXUSHORT - DataBuffer->Reserved) <= (Length + sizeof(UNICODE_NULL)))
         {
@@ -381,6 +394,14 @@ IopDoSymlinkTransmogrify(IN PIRP Irp,
     Tail = (PWCHAR)((ULONG_PTR)FileObject->FileName.Buffer + FileObject->FileName.Length - TailLength);
     Relative = (DataBuffer->SymbolicLinkReparseBuffer.Flags & SYMLINK_FLAG_RELATIVE) != 0;
     Rooted = (Sub[0] == L'\\');
+
+    /* A target with a trailing backslash ("C:\dir\") and a remaining name that starts with one meet in a single
+       backslash: the file system refuses an empty component */
+    if (SubLength > sizeof(WCHAR) && TailLength >= sizeof(WCHAR) &&
+        Sub[SubLength / sizeof(WCHAR) - 1] == L'\\' && Tail[0] == L'\\')
+    {
+        SubLength -= sizeof(WCHAR);
+    }
 
     /* An absolute link replaces the whole name, so its substitute has to be an absolute name too
        (Windows 10 gives ERROR_INVALID_NAME when such a link is opened) */
