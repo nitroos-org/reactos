@@ -55,6 +55,11 @@ if(ARCH STREQUAL "amd64")
         add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/Storage/${_stor_file} DESTINATION ${_PSM_DST}/Storage/2.0.0.0 FOR all)
     endforeach()
 
+    # NitroDiag: Start-NitroDiag, a thin wrapper over nitrodiag.exe (the compatibility log tool)
+    foreach(_nd_file NitroDiag.psd1 NitroDiag.psm1)
+        add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/NitroDiag/${_nd_file} DESTINATION ${_PSM_DST}/NitroDiag FOR all)
+    endforeach()
+
     # ScheduledTasks (Get-/Register-/Unregister-/Start-/Stop-/Enable-/Disable-ScheduledTask, Get-ScheduledTaskInfo, New-ScheduledTask*):
     # a plain script over the Schedule.Service COM object, nothing is compiled.
     foreach(_st_file
