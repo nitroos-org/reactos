@@ -9156,16 +9156,26 @@ NTAPI
 RxpCancelRoutine(
     PVOID Context)
 {
+    KIRQL OldIrql;
     PRX_CONTEXT RxContext;
+    PMRX_CALLDOWN MRxCancelRoutine;
 
     PAGED_CODE();
 
     RxContext = Context;
 
+    /* Read the mini-redirector's routine once, under the lock
+     * RxSetMinirdrCancelRoutine writes it under: it may clear it (NULL) at
+     * any time when it answers the request, and the field was read twice
+     * (tested, then called) */
+    KeAcquireSpinLock(&RxStrucSupSpinLock, &OldIrql);
+    MRxCancelRoutine = RxContext->MRxCancelRoutine;
+    KeReleaseSpinLock(&RxStrucSupSpinLock, OldIrql);
+
     /* First, notify mini-rdr about cancellation */
-    if (RxContext->MRxCancelRoutine != NULL)
+    if (MRxCancelRoutine != NULL)
     {
-        RxContext->MRxCancelRoutine(RxContext);
+        MRxCancelRoutine(RxContext);
     }
     /* If we didn't find in overflow queue, try in blocking operations */
     else if (!RxCancelOperationInOverflowQueue(RxContext))
