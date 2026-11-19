@@ -1917,8 +1917,15 @@ CmpAclRecordDenial(
 /* Restamped keys printed to the debug channel per boot (all are counted and logged to the file) */
 #define CMP_ACL_RESTAMP_PRINT_MAX   256
 
-/* Deepest key the walks follow */
-#define CMP_ACL_WALK_MAX_DEPTH      128
+/*
+ * Deepest key the walks follow: every key that can be opened at all. A KCB is
+ * created only for a key fewer than 512 levels below \REGISTRY
+ * (CmpCreateKeyControlBlock), so no walk root has a key that can be opened
+ * 512 or more levels below it. A smaller bound
+ * left the keys below it unchecked (fail-open): while a boot did not enforce,
+ * any user could create a chain that deep anywhere and plant there.
+ */
+#define CMP_ACL_WALK_MAX_DEPTH      512
 
 /* AuditStats Transition: what the transition check did this boot */
 #define CMP_ACL_TRANSITION_NONE     0   /* not enforcing, or before the machine hives were loaded */
