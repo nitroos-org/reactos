@@ -1015,8 +1015,8 @@ NetrUseAdd(
     LPUSE_INFO InfoStruct,
     unsigned long *ErrorParameter)
 {
-    UNIMPLEMENTED;
-    return 0;
+    TRACE("NetrUseAdd(%S %lu)\n", ServerName, Level);
+    return WksUseAdd(Level, InfoStruct, ErrorParameter);
 }
 
 
@@ -1029,8 +1029,8 @@ NetrUseGetInfo(
     unsigned long Level,
     LPUSE_INFO InfoStruct)
 {
-    UNIMPLEMENTED;
-    return 0;
+    TRACE("NetrUseGetInfo(%S %lu)\n", UseName, Level);
+    return WksUseGetInfo(UseName, Level, InfoStruct);
 }
 
 
@@ -1042,8 +1042,8 @@ NetrUseDel(
     wchar_t *UseName,
     unsigned long ForceLevel)
 {
-    UNIMPLEMENTED;
-    return 0;
+    TRACE("NetrUseDel(%S %lu)\n", UseName, ForceLevel);
+    return WksUseDel(UseName, ForceLevel);
 }
 
 
@@ -1057,8 +1057,9 @@ NetrUseEnum(
     unsigned long *TotalEntries,
     unsigned long *ResumeHandle)
 {
-    UNIMPLEMENTED;
-    return 0;
+    TRACE("NetrUseEnum()\n");
+    UNREFERENCED_PARAMETER(PreferredMaximumLength);
+    return WksUseEnum(InfoStruct, TotalEntries, ResumeHandle);
 }
 
 

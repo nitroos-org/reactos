@@ -226,6 +226,40 @@ StartWithCommandLine(IN HINSTANCE hInstance)
 }
 #endif
 
+/* The user's remembered network drives (HKCU\Network), once per logon, in the background: a server
+ * that is away must not hold up the desktop */
+static DWORD WINAPI
+RestoreNetworkDrivesThread(LPVOID Parameter)
+{
+    typedef DWORD (WINAPI *PFN_WNET_RESTORE)(HWND, LPCWSTR);
+    HMODULE hMpr = LoadLibraryW(L"mpr.dll");
+
+    UNREFERENCED_PARAMETER(Parameter);
+    if (hMpr != NULL)
+    {
+        PFN_WNET_RESTORE pRestore = (PFN_WNET_RESTORE)GetProcAddress(hMpr, "WNetRestoreConnectionW");
+        if (pRestore != NULL)
+            pRestore(NULL, NULL);
+        FreeLibrary(hMpr);
+    }
+    return 0;
+}
+
+static VOID
+RestoreNetworkDrives(VOID)
+{
+    HKEY hNetwork;
+    HANDLE hThread;
+
+    /* Nothing remembered: nothing to load */
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Network", 0, KEY_READ, &hNetwork) != ERROR_SUCCESS)
+        return;
+    RegCloseKey(hNetwork);
+    hThread = CreateThread(NULL, 0, RestoreNetworkDrivesThread, NULL, 0, NULL);
+    if (hThread != NULL)
+        CloseHandle(hThread);
+}
+
 static INT
 StartWithDesktop(IN HINSTANCE hInstance)
 {
@@ -277,6 +311,8 @@ StartWithDesktop(IN HINSTANCE hInstance)
     HANDLE hShellDesktop = NULL;
     if (Tray != NULL)
         hShellDesktop = DesktopCreateWindow(Tray);
+
+    RestoreNetworkDrives();
 
     /* WinXP: Notify msgina to hide the welcome screen */
     if (!SetShellReadyEvent(L"msgina: ShellReadyEvent"))

@@ -252,19 +252,19 @@ typedef [switch_type(unsigned long)] union _USE_INFO
 typedef struct _USE_INFO_0_CONTAINER
 {
     unsigned long EntriesRead;
-    LPUSE_INFO_0 Buffer;
+    [size_is(EntriesRead)] LPUSE_INFO_0 Buffer;
 } USE_INFO_0_CONTAINER, *PUSE_INFO_0_CONTAINER, *LPUSE_INFO_0_CONTAINER;
 
 typedef struct _USE_INFO_1_CONTAINER
 {
     unsigned long EntriesRead;
-    LPUSE_INFO_1 Buffer;
+    [size_is(EntriesRead)] LPUSE_INFO_1 Buffer;
 } USE_INFO_1_CONTAINER, *PUSE_INFO_1_CONTAINER, *LPUSE_INFO_1_CONTAINER;
 
 typedef struct _USE_INFO_2_CONTAINER
 {
     unsigned long EntriesRead;
-    LPUSE_INFO_2 Buffer;
+    [size_is(EntriesRead)] LPUSE_INFO_2 Buffer;
 } USE_INFO_2_CONTAINER, *PUSE_INFO_2_CONTAINER, *LPUSE_INFO_2_CONTAINER;
 
 typedef struct _USE_ENUM_STRUCT
