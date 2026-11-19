@@ -2,8 +2,9 @@
  * PROJECT:     ReactOS API Tests
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
  * PURPOSE:     diskpart.exe "list volume": the order and the numbers of the volumes do not change
- *              between runs on the same disks, and the order is the one diskpart documents:
- *              partition volumes, removable volumes, CD-ROM volumes (read-only command only)
+ *              between runs on the same disks, and the order is the one of Windows Server 2022 (one disk and one
+ *              CD-ROM drive: the CD-ROM volume is volume 0): CD-ROM volumes, partition volumes, removable volumes
+ *              (read-only command only)
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
@@ -64,11 +65,11 @@ static BOOL RunListVolume(const char *Script, char *Out, size_t OutSize)
 
 static int TypeRank(const char *Type)
 {
-    if (!strncmp(Type, "Partition", 9))
+    if (!strncmp(Type, "DVD", 3) || !strncmp(Type, "CD-ROM", 6))
         return 0;
-    if (!strncmp(Type, "Removable", 9))
+    if (!strncmp(Type, "Partition", 9))
         return 1;
-    if (!strncmp(Type, "DVD", 3))
+    if (!strncmp(Type, "Removable", 9))
         return 2;
     return 3;
 }
@@ -130,7 +131,7 @@ START_TEST(diskpart_volumes)
                     char Root[4] = { Line[LtrCol], ':', '\\', 0 };
 
                     /* a CD-ROM drive is listed as DVD whether or not its medium is recognised */
-                    ok((GetDriveTypeA(Root) == DRIVE_CDROM) == (Rank == 2),
+                    ok((GetDriveTypeA(Root) == DRIVE_CDROM) == (Rank == 0),
                        "volume %d (%s) is typed %.10s but GetDriveType says %lu\n", Number, Root, Type,
                        GetDriveTypeA(Root));
                 }
