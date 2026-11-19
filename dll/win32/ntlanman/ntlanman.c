@@ -188,6 +188,21 @@ EntryRemoteIs(PSMBCONN_ENUM_OUTPUT Uses, PSMBCONN_ENTRY e, LPCWSTR Remote, SIZE_
            _wcsnicmp((PCWSTR)((PUCHAR)Uses + e->RemoteOffset), Remote, RemoteChars) == 0;
 }
 
+/* Is the connection to the server (the "\\server" of Remote, as the caller wrote it) */
+static
+BOOL
+EntryServerIs(PSMBCONN_ENUM_OUTPUT Uses, PSMBCONN_ENTRY e, LPCWSTR Remote)
+{
+    PCWSTR Theirs = (PCWSTR)((PUCHAR)Uses + e->RemoteOffset);
+    SIZE_T TheirChars = e->RemoteLength / sizeof(WCHAR), n = 2, m = 2;
+
+    while (Remote[n] != 0 && Remote[n] != L'\\')
+        n++;
+    while (m < TheirChars && Theirs[m] != L'\\')
+        m++;
+    return n == m && _wcsnicmp(Theirs, Remote, n) == 0;
+}
+
 /* "\\server\share[\path]" without trailing separators; FALSE when it is not one */
 static
 BOOL
@@ -451,41 +466,56 @@ NPAddConnection3(HWND hwndOwner,
             return WN_BAD_PASSWORD;
     }
 
-    /* A connection to the same name without a drive letter may exist (also from a plain UNC
-     * open): rdbss would use it whatever the credentials, so compare them first */
     Uses = GetUses(&Error);
     if (Uses == NULL)
         return Error;
-    if (Letter == 0)
+    if (Explicit)
     {
+        /* Explicit credentials become the identity for the server, and connections that plain UNC
+         * opens made do not hold one (Windows Server 2022, measured): they are ended and made
+         * again with it when used. One that has files open cannot be ended; it stays. */
         for (i = 0; i < Uses->Count; i++)
+        {
+            PSMBCONN_ENTRY e = &Uses->Entries[i];
+
+            if (!(e->Flags & SMBCONN_FLAG_TREE_CONNECTED) && EntryServerIs(Uses, e, Remote))
+                DeleteUse(e->Id, FALSE);
+        }
+        HeapFree(GetProcessHeap(), 0, Uses);
+        Uses = GetUses(&Error);
+        if (Uses == NULL)
+            return Error;
+    }
+
+    /* A connection to the same name without a drive letter may exist: rdbss would use it whatever
+     * the credentials of this call, so they are compared first */
+    if (Letter == 0 && Explicit)
+    {
+        WCHAR Want[DNLEN + UNLEN + 260];
+        BOOL Conflict = FALSE;
+
+        _snwprintf(Want, ARRAYSIZE(Want), L"%.*s%s%.*s", (int)DomainChars, Domain ? Domain : L"",
+                   DomainChars ? L"\\" : L"", (int)UserChars, User);
+        Want[ARRAYSIZE(Want) - 1] = 0;
+        for (i = 0; i < Uses->Count && !Conflict; i++)
         {
             PSMBCONN_ENTRY e = &Uses->Entries[i];
 
             if (e->Local != 0 || !EntryRemoteIs(Uses, e, Remote, RemoteChars))
                 continue;
-            if (Explicit)
-            {
-                WCHAR Want[DNLEN + UNLEN + 260];
-
-                _snwprintf(Want, ARRAYSIZE(Want), L"%.*s%s%.*s", (int)DomainChars, Domain ? Domain : L"",
-                           DomainChars ? L"\\" : L"", (int)UserChars, User);
-                Want[ARRAYSIZE(Want) - 1] = 0;
-                if (!(e->Flags & SMBCONN_FLAG_EXPLICIT) || e->UserLength != wcslen(Want) * sizeof(WCHAR) ||
-                    _wcsnicmp((PCWSTR)((PUCHAR)Uses + e->UserOffset), Want, wcslen(Want)) != 0)
-                {
-                    HeapFree(GetProcessHeap(), 0, Uses);
-                    return SESSION_CREDENTIAL_CONFLICT;
-                }
-            }
-            else if (e->Flags & SMBCONN_FLAG_EXPLICIT)
-            {
-                /* Single sign-on asked; the existing connection has explicit credentials: Windows
-                 * keeps one identity per server, the existing one (verify on the peer) */
-            }
+            if (!(e->Flags & SMBCONN_FLAG_TREE_CONNECTED) || !(e->Flags & SMBCONN_FLAG_EXPLICIT) ||
+                e->UserLength != wcslen(Want) * sizeof(WCHAR) ||
+                _wcsnicmp((PCWSTR)((PUCHAR)Uses + e->UserOffset), Want, wcslen(Want)) != 0)
+                Conflict = TRUE;    /* another identity, or a connection in use that could not be ended */
         }
+        HeapFree(GetProcessHeap(), 0, Uses);
+        if (Conflict)
+            return SESSION_CREDENTIAL_CONFLICT;
     }
-    HeapFree(GetProcessHeap(), 0, Uses);
+    else
+    {
+        HeapFree(GetProcessHeap(), 0, Uses);
+    }
 
     /* \Device\LanmanRedirector\;X:<logon id>\server\share  or  \Device\LanmanRedirector\server\share */
     i = (DWORD)(wcslen(Device) + 24 + RemoteChars + 1);
