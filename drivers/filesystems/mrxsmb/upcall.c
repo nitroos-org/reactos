@@ -667,12 +667,18 @@ SmbEngineGet(PIRP Irp, PIO_STACK_LOCATION Stack)
     KIRQL OldIrql;
     HANDLE TokenHandle;
     BOOLEAN Delivered;
-    PUCHAR Out = Irp->AssociatedIrp.SystemBuffer;
+    ULONG MessageSize;
+    PUCHAR Out;
 
     PAGED_CODE();
 
-    if (Stack->Parameters.DeviceIoControl.OutputBufferLength < SMBUP_MAX_MESSAGE || Out == NULL)
+    /* METHOD_OUT_DIRECT: the engine's own pages, locked by the I/O manager, mapped here. Written
+     * only, never read back (the engine may change them at any time). */
+    if (Stack->Parameters.DeviceIoControl.OutputBufferLength < SMBUP_MAX_MESSAGE || Irp->MdlAddress == NULL)
         return STATUS_BUFFER_TOO_SMALL;
+    Out = MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority);
+    if (Out == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
 
     for (;;)
     {
@@ -710,7 +716,8 @@ SmbEngineGet(PIRP Irp, PIO_STACK_LOCATION Stack)
         KeReleaseSpinLock(&SmbEngine.Lock, OldIrql);
 
         ASSERT(Request->MessageSize <= SMBUP_MAX_MESSAGE);
-        RtlCopyMemory(Out, Request->Message, Request->MessageSize);
+        MessageSize = Request->MessageSize;
+        RtlCopyMemory(Out, Request->Message, MessageSize);
 
         /* CONNECT: a handle to the user's token, in this (the engine's) process,
          * allowing query and impersonation only */
@@ -754,13 +761,15 @@ SmbEngineGet(PIRP Irp, PIO_STACK_LOCATION Stack)
 
         if (!Delivered)
         {
-            /* Timed out or detached meanwhile: do not hand out a token for it */
+            /* Timed out or detached meanwhile: do not hand out a token for it, and do not leave
+             * its message (a CONNECT may carry a password) in the engine's buffer */
             if (TokenHandle != NULL)
                 ZwClose(TokenHandle);   /* a handle of this (the engine's) process */
+            RtlSecureZeroMemory(Out, MessageSize);
             continue;
         }
 
-        Irp->IoStatus.Information = ((PSMBUP_HEADER)Out)->TotalSize;
+        Irp->IoStatus.Information = MessageSize;
         return STATUS_SUCCESS;
     }
 }

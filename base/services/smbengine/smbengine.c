@@ -809,6 +809,8 @@ Dispatch(PUCHAR Buffer, DWORD Got, HANDLE Event)
             if (Token != NULL)
                 CloseHandle(Token);
         }
+        /* Whatever it was, it may carry a password: not left in the GET buffer */
+        SecureZeroMemory(Buffer, Got <= SMBUP_MAX_MESSAGE ? Got : SMBUP_MAX_MESSAGE);
         SmbEngLog(0, "invalid request from the driver (%lu bytes)", Got);
         return;
     }
@@ -834,6 +836,7 @@ Dispatch(PUCHAR Buffer, DWORD Got, HANDLE Event)
 
             if (Token != NULL)
                 CloseHandle(Token);
+            SecureZeroMemory(Buffer, Got);
         }
         return;
     }

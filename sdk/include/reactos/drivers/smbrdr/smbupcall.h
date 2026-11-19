@@ -77,7 +77,9 @@
 #define SMBUP_CTL_CODE(f, m) CTL_CODE(FILE_DEVICE_NETWORK_REDIRECTOR, 0xA00 | (f), (m), FILE_ANY_ACCESS)
 
 #define IOCTL_SMBRDR_ENGINE_ATTACH      SMBUP_CTL_CODE(1, METHOD_BUFFERED)  /* in: SMBUP_ATTACH */
-#define IOCTL_SMBRDR_ENGINE_GET         SMBUP_CTL_CODE(2, METHOD_BUFFERED)  /* out: request message */
+/* out: request message. Direct I/O: the message goes straight into the engine's buffer, so that no
+ * kernel copy of a CONNECT (it may carry a password) is left in pool for the I/O manager to free */
+#define IOCTL_SMBRDR_ENGINE_GET         SMBUP_CTL_CODE(2, METHOD_OUT_DIRECT)
 #define IOCTL_SMBRDR_ENGINE_REPLY       SMBUP_CTL_CODE(3, METHOD_BUFFERED)  /* in: reply message */
 #define IOCTL_SMBRDR_ENGINE_DETACH      SMBUP_CTL_CODE(4, METHOD_BUFFERED)
 
