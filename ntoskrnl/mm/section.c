@@ -6984,6 +6984,9 @@ done:
     return Status;
 }
 
+/* How long MmPurgeSegment waits for a page that is being written (as MmFlushSegment, MI_FLUSH_WRITE_WAIT_100NS) */
+#define MI_PURGE_WRITE_WAIT_100NS (30LL * 10000000LL)
+
 /* Like CcPurgeCache but for the in-memory segment */
 BOOLEAN
 NTAPI
@@ -6996,6 +6999,7 @@ MmPurgeSegment(
     LONGLONG RangeStart;
     PMM_SECTION_SEGMENT Segment;
     BOOLEAN Success = TRUE;
+    ULONGLONG WriteWaitStart = 0;
 
     PurgeStart.QuadPart = Offset ? Offset->QuadPart : 0LL;
     if (Length && Offset)
@@ -7057,12 +7061,30 @@ MmPurgeSegment(
 
         if (IS_WRITE_SSE(Entry))
         {
-            /* We're trying to purge an entry which is being written. Restart this loop iteration */
+            /*
+             * The page is being written: wait for the write, but not for ever. The writer may be this thread:
+             * a flush marks the pages it writes, and the file system's paging write can set the file sizes,
+             * which purges the same segment (FatCommonWrite -> CcSetFileSizes -> CcPurgeCacheSection).
+             * That write only ends when this purge returns. Give up as for a page in use.
+             */
+            if (!WriteWaitStart)
+            {
+                WriteWaitStart = KeQueryInterruptTime();
+            }
+            else if (KeQueryInterruptTime() - WriteWaitStart >= (ULONGLONG)MI_PURGE_WRITE_WAIT_100NS)
+            {
+                DPRINT1("Purge of segment %p gives up on the page at 0x%I64x, still being written\n",
+                        Segment, PurgeStart.QuadPart);
+                MmUnlockSectionSegment(Segment);
+                MmDereferenceSegment(Segment);
+                return FALSE;
+            }
             MmUnlockSectionSegment(Segment);
             KeDelayExecutionThread(KernelMode, FALSE, &TinyTime);
             MmLockSectionSegment(Segment);
             continue;
         }
+        WriteWaitStart = 0;
 
         if (IS_DIRTY_SSE(Entry) &&
             (PurgeStart.QuadPart < RangeStart || PurgeStart.QuadPart + PAGE_SIZE > PurgeEnd.QuadPart))
