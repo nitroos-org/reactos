@@ -535,6 +535,145 @@ done:
 }
 
 
+/*
+ * One-time seeding of the default assignments of the logon rights that the logon starts to enforce.
+ *
+ * A database made before the batch and the service logon were checked has no entries for them: without
+ * them the batch logon of an administrator and the service logon of every account would fail. The
+ * assignments are those of the default INF (the one setup applies: %SystemRoot%\inf\defltwk.inf, section
+ * [Privilege Rights]), read from the file so that there is one list. The seeding runs once per database:
+ * the version value of the policy object says it ran (a new database gets the value without a seeding,
+ * setup applies the INF to it), so a right that an administrator removed afterwards is never granted again.
+ */
+#define LSAP_LOGON_RIGHTS_VERSION   1
+#define LSAP_LOGON_RIGHTS_VERSION_ATTR   L"LgnRtVer"
+
+static BOOLEAN LsapDatabaseCreated = FALSE;
+
+static const PCWSTR LsapSeededLogonRights[] =
+{
+    SE_BATCH_LOGON_NAME,
+    SE_SERVICE_LOGON_NAME
+};
+
+static NTSTATUS
+LsapSeedLogonRight(
+    _In_ LSAPR_HANDLE PolicyHandle,
+    _In_ PCWSTR RightName,
+    _In_ PCWSTR InfPath)
+{
+    WCHAR Value[512];
+    PWSTR Token, Next;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    GetPrivateProfileStringW(L"Privilege Rights", RightName, L"", Value, ARRAYSIZE(Value), InfPath);
+
+    /* "*S-1-5-32-544, *S-1-5-32-551": the entries that are SIDs (the names of the INF are not used by these rights) */
+    for (Token = Value; *Token != UNICODE_NULL; Token = Next)
+    {
+        PSID Sid = NULL;
+        RPC_UNICODE_STRING Right;
+        LSAPR_USER_RIGHT_SET Set;
+
+        while (*Token == L' ' || *Token == L',' || *Token == L'\t')
+            Token++;
+        if (*Token == UNICODE_NULL)
+            break;
+        for (Next = Token; *Next != UNICODE_NULL && *Next != L','; Next++)
+            ;
+        if (*Next == L',')
+            *Next++ = UNICODE_NULL;
+        /* trailing blanks */
+        {
+            PWSTR End = Token + wcslen(Token);
+            while (End > Token && (End[-1] == L' ' || End[-1] == L'\t'))
+                *--End = UNICODE_NULL;
+        }
+
+        if (*Token != L'*' || !ConvertStringSidToSidW(Token + 1, &Sid))
+        {
+            ERR("LsapSeedLogonRight: %S: %S is not a SID, skipped\n", RightName, Token);
+            continue;
+        }
+
+        Right.Length = (USHORT)(wcslen(RightName) * sizeof(WCHAR));
+        Right.MaximumLength = Right.Length + sizeof(WCHAR);
+        Right.Buffer = (PWSTR)RightName;
+        Set.Entries = 1;
+        Set.UserRights = &Right;
+        Status = LsarAddAccountRights(PolicyHandle, Sid, &Set);
+        LocalFree(Sid);
+        if (!NT_SUCCESS(Status))
+        {
+            ERR("LsapSeedLogonRight: %S for %S failed (Status 0x%08lx)\n", RightName, Token, Status);
+            return Status;
+        }
+    }
+
+    return STATUS_SUCCESS;
+}
+
+
+static VOID
+LsapSeedDefaultLogonRights(VOID)
+{
+    PLSA_DB_OBJECT PolicyObject = NULL;
+    LSAPR_HANDLE PolicyHandle = NULL;
+    WCHAR InfPath[MAX_PATH];
+    ULONG Version = 0, Size = sizeof(Version), i;
+    NTSTATUS Status;
+
+    Status = LsapOpenDbObject(NULL, NULL, L"Policy", LsaDbPolicyObject, POLICY_LOOKUP_NAMES, TRUE, &PolicyObject);
+    if (!NT_SUCCESS(Status))
+    {
+        ERR("LsapSeedDefaultLogonRights: the policy object cannot be opened (Status 0x%08lx)\n", Status);
+        return;
+    }
+
+    Status = LsapGetObjectAttribute(PolicyObject, LSAP_LOGON_RIGHTS_VERSION_ATTR, &Version, &Size);
+    if (NT_SUCCESS(Status) && Version >= LSAP_LOGON_RIGHTS_VERSION)
+        goto done;      /* it ran already */
+
+    if (LsapDatabaseCreated)
+    {
+        /* A new database: setup applies the INF (the rights are all there is) */
+        TRACE("A new LSA database: logon rights version %u\n", LSAP_LOGON_RIGHTS_VERSION);
+    }
+    else
+    {
+        if (!GetWindowsDirectoryW(InfPath, ARRAYSIZE(InfPath) - 24))
+            goto done;
+        wcscat(InfPath, L"\\inf\\defltwk.inf");
+        if (GetFileAttributesW(InfPath) == INVALID_FILE_ATTRIBUTES)
+        {
+            /* Not marked: the next start tries again */
+            ERR("LsapSeedDefaultLogonRights: %S is missing, the default logon rights are not seeded\n", InfPath);
+            goto done;
+        }
+
+        /* The policy object opened above is the handle (LsarOpenPolicy takes a lock that is created when the RPC server starts) */
+        PolicyHandle = (LSAPR_HANDLE)PolicyObject;
+
+        for (i = 0; i < ARRAYSIZE(LsapSeededLogonRights); i++)
+        {
+            Status = LsapSeedLogonRight(PolicyHandle, LsapSeededLogonRights[i], InfPath);
+            if (!NT_SUCCESS(Status))
+                goto done;      /* not marked: the next start tries again (the grants are idempotent) */
+        }
+        ERR("LsapSeedDefaultLogonRights: the default batch and service logon rights were seeded (version %u)\n",
+            LSAP_LOGON_RIGHTS_VERSION);
+    }
+
+    Version = LSAP_LOGON_RIGHTS_VERSION;
+    Status = LsapSetObjectAttribute(PolicyObject, LSAP_LOGON_RIGHTS_VERSION_ATTR, &Version, sizeof(Version));
+    if (!NT_SUCCESS(Status))
+        ERR("LsapSeedDefaultLogonRights: the version value cannot be written (Status 0x%08lx)\n", Status);
+
+done:
+    LsapCloseDbObject(PolicyObject);
+}
+
+
 NTSTATUS
 LsapInitDatabase(VOID)
 {
@@ -564,6 +703,8 @@ LsapInitDatabase(VOID)
             ERR("Failed to create the LSA database objects (Status: 0x%08lx)\n", Status);
             return Status;
         }
+
+        LsapDatabaseCreated = TRUE;
     }
     else
     {
@@ -581,6 +722,8 @@ LsapInitDatabase(VOID)
         ERR("Failed to get the domain information (Status: 0x%08lx)\n", Status);
         return Status;
     }
+
+    LsapSeedDefaultLogonRights();
 
     TRACE("LsapInitDatabase() done\n");
 
