@@ -558,14 +558,17 @@ LsarSetSecurityObject(
     TRACE("LsarSetSecurityObject(%p %lx %p)\n",
           ObjectHandle, SecurityInformation, SecurityDescriptor);
 
-    if ((SecurityDescriptor == NULL) ||
-        (SecurityDescriptor->SecurityDescriptor == NULL) ||
-        !RtlValidSecurityDescriptor((PSECURITY_DESCRIPTOR)SecurityDescriptor->SecurityDescriptor))
-        return ERROR_INVALID_PARAMETER;
-
     if (SecurityInformation == 0 ||
         SecurityInformation & ~(OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION
         | DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION))
+        return ERROR_INVALID_PARAMETER;
+
+    /* The self-relative descriptor of Length bytes that the client sent: its parts must lie inside them */
+    if ((SecurityDescriptor == NULL) ||
+        (SecurityDescriptor->SecurityDescriptor == NULL) ||
+        !RtlValidRelativeSecurityDescriptor((PSECURITY_DESCRIPTOR)SecurityDescriptor->SecurityDescriptor,
+                                            SecurityDescriptor->Length,
+                                            0))
         return ERROR_INVALID_PARAMETER;
 
     if (SecurityInformation & SACL_SECURITY_INFORMATION)
@@ -577,12 +580,13 @@ LsarSetSecurityObject(
     if (SecurityInformation & (OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION))
         DesiredAccess |= WRITE_OWNER;
 
+    /* The owner and the group are in the descriptor, not in the structure that carries it */
     if ((SecurityInformation & OWNER_SECURITY_INFORMATION) &&
-        (((PISECURITY_DESCRIPTOR)SecurityDescriptor)->Owner == NULL))
+        (((PISECURITY_DESCRIPTOR_RELATIVE)SecurityDescriptor->SecurityDescriptor)->Owner == 0))
         return ERROR_INVALID_PARAMETER;
 
     if ((SecurityInformation & GROUP_SECURITY_INFORMATION) &&
-        (((PISECURITY_DESCRIPTOR)SecurityDescriptor)->Group == NULL))
+        (((PISECURITY_DESCRIPTOR_RELATIVE)SecurityDescriptor->SecurityDescriptor)->Group == 0))
         return ERROR_INVALID_PARAMETER;
 
     /* Validate the ObjectHandle */
