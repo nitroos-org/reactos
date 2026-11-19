@@ -258,6 +258,22 @@ InbvReleaseLock(VOID)
 
 VOID
 NTAPI
+InbvBreakLockForBugCheck(VOID)
+{
+    /*
+     * Called by the bugcheck screen once the other processors are frozen.
+     * The boot video lock may be held by a processor that will never run
+     * again (e.g. the one drawing the boot animation) or by the code this
+     * processor interrupted. Nobody can release it any more and waiting
+     * for it would leave the system hung without showing the stop screen,
+     * so take the lock over.
+     */
+    KeInitializeSpinLock(&BootDriverLock);
+    InbvOldIrql = KeGetCurrentIrql();
+}
+
+VOID
+NTAPI
 InbvEnableBootDriver(
     _In_ BOOLEAN Enable)
 {

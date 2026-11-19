@@ -1080,11 +1080,22 @@ Language=English
 KERNEL_DATA_INPAGE_ERROR
 .
 
+; // 0x7B: the controller types named in the text must match the boot-start
+; // storage drivers of the build: boot/bootdata/txtsetup.sif ([SCSI.Load],
+; // [HardwareIdsDatabase]) and the CriticalDeviceDatabase entries in
+; // boot/bootdata/hivesys.inf. Update the text when a boot storage driver
+; // is added or removed.
 MessageId=0x7B
 Severity=Success
 Facility=System
 SymbolicName=INACCESSIBLE_BOOT_DEVICE
 Language=English
+INACCESSIBLE_BOOT_DEVICE: the system could not access the disk it starts
+from. Most often this disk is attached to a controller type that has no
+driver in this system. Supported boot disk controllers: IDE, SATA (AHCI),
+NVMe and BusLogic SCSI. Attach the disk to one of these (in a virtual
+machine, change the disk bus type) and restart the computer.
+
 Check for viruses on your computer. Remove any newly installed
 hard drives or hard drive controllers. Check your hard drive
 to make sure it is properly configured and terminated.

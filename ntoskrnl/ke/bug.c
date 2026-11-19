@@ -632,6 +632,9 @@ KiDisplayBlueScreen(IN ULONG MessageId,
     /* Check if bootvid is installed */
     if (InbvIsBootDriverInstalled())
     {
+        /* Nobody else can run now: do not wait for a lock held by a frozen processor */
+        InbvBreakLockForBugCheck();
+
         /* Acquire ownership and reset the display */
         InbvAcquireDisplayOwnership();
         InbvResetDisplay();

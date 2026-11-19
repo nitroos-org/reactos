@@ -36,6 +36,10 @@ VOID
 NTAPI
 InbvReleaseLock(VOID);
 
+VOID
+NTAPI
+InbvBreakLockForBugCheck(VOID);
+
 PUCHAR
 NTAPI
 InbvGetResourceAddress(
