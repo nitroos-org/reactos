@@ -1111,6 +1111,9 @@ void msi_adjust_privilege_properties( MSIPACKAGE *package )
     if (msi_get_property_int( package->db, L"ALLUSERS", 0 ) == 2)
     {
         TRACE("resetting ALLUSERS property from 2 to 1\n");
+#ifdef __REACTOS__
+        package->allusers_was_2 = TRUE;
+#endif
         msi_set_property( package->db, L"ALLUSERS", L"1", -1 );
     }
 #ifdef __REACTOS__

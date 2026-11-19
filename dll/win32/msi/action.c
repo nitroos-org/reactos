@@ -8484,6 +8484,16 @@ UINT MSI_InstallPackage( MSIPACKAGE *package, LPCWSTR szPackagePath,
 
     msi_set_original_database_property( package->db, szPackagePath );
     msi_parse_command_line( package, szCommandLine, FALSE );
+#ifdef __REACTOS__
+    /* Opening the package resolved ALLUSERS 2 to 1 before the command line was read: with MSIINSTALLPERUSER on the
+       command line and no ALLUSERS there, the choice of the user is still open */
+    if (package->allusers_was_2 && msi_get_property_int( package->db, L"ALLUSERS", 0 ) == 1)
+    {
+        UINT optlen;
+        if (!msi_get_command_line_option( szCommandLine, L"ALLUSERS", &optlen ))
+            msi_set_property( package->db, L"ALLUSERS", L"2", -1 );
+    }
+#endif
     msi_adjust_privilege_properties( package );
 #ifdef __REACTOS__
     msi_set_context_folders( package );
@@ -8491,6 +8501,17 @@ UINT MSI_InstallPackage( MSIPACKAGE *package, LPCWSTR szPackagePath,
 #endif
     msi_set_context( package );
 #ifdef __REACTOS__
+    /* A product installed per user with MSIINSTALLPERUSER is reconfigured and removed in the context it was installed
+       in (Single Package Authoring), whatever the command line says */
+    if (package->allusers_was_2 && package->Context == MSIINSTALLCONTEXT_USERUNMANAGED &&
+        msi_get_property_int( package->db, L"ALLUSERS", 0 ) == 1)
+    {
+        msi_set_property( package->db, L"ALLUSERS", L"", -1 );
+        msi_set_property( package->db, L"MSIINSTALLPERUSER", L"1", -1 );
+        package->peruser_choice = TRUE;
+        msi_set_context_folders( package );
+        msi_set_peruser_program_folders( package );
+    }
     if ((rc = msi_check_install_privileges( package, action )))
     {
         free( action );

@@ -413,6 +413,7 @@ typedef struct tagMSIPACKAGE
     BOOL folders_chosen;    /* the ALLUSERS folders were set, for the all-users ones if folders_common */
     BOOL folders_common;
     BOOL peruser_choice;    /* ALLUSERS 2 with MSIINSTALLPERUSER 1 chose the per-user context */
+    BOOL allusers_was_2;    /* the package has ALLUSERS 2, which opening the package resolved to 1 */
 #endif
     INT version;
     enum platform platform;
