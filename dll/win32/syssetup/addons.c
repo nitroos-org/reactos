@@ -197,6 +197,14 @@ InstallOptionalComponents(
         if (hr == HRESULT_FROM_WIN32(ERROR_CANCELLED))
             hr = S_OK;
 
+        if (!SUCCEEDED(hr) && pSetupData->UnattendSetup)
+        {
+            /* an unattended setup shows no box to wait on: log it and go on with the next add-on */
+            UnattendLog(L"optional component \"%s\" could not be installed (0x%08lx): setup goes on",
+                        Addons[i].Title, (ULONG)hr);
+            hr = S_OK;
+        }
+
         if (!SUCCEEDED(hr))
         {
             WCHAR szMessage[256], szCaption[64];

@@ -112,6 +112,52 @@ SetAdministratorPassword(LPCWSTR Password);
 VOID
 SetAutoAdminLogon(VOID);
 
+/* unattend.c: the answers of an unattended installation (see unattend.inf) */
+VOID
+UnattendLog(
+    _In_ PCWSTR pszFormat,
+    ...);
+
+BOOL
+UnattendGetString(
+    _In_ PCWSTR pszSection,
+    _In_ PCWSTR pszKey,
+    _Out_writes_(cchMax) PWSTR pszValue,
+    _In_ DWORD cchMax);
+
+BOOL
+UnattendGetBool(
+    _In_ PCWSTR pszSection,
+    _In_ PCWSTR pszKey,
+    _In_ BOOL bDefault);
+
+BOOL
+UnattendResolveTimeZone(
+    _In_ PCWSTR pszName,
+    _Out_ PDWORD pdwIndex);
+
+BOOL
+UnattendIsValidComputerName(
+    _In_ PCWSTR pszName);
+
+VOID
+UnattendScrubSecrets(VOID);
+
+VOID
+UnattendCaptureSecrets(VOID);
+
+PCWSTR
+UnattendGetAdminPassword(VOID);
+
+VOID
+UnattendForgetSecrets(VOID);
+
+VOID
+ProcessUnattendedExtras(VOID);
+
+BOOL
+UnattendWantsShutdown(VOID);
+
 /* wizard.c */
 VOID
 InstallWizard(VOID);

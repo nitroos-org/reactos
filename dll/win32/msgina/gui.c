@@ -1321,6 +1321,10 @@ DoLogon(
     SecureZeroMemory(pgContext->Password, sizeof(pgContext->Password));
     wcscpy(pgContext->Password, Password);
 
+    /* An automatic logon with a count is used up by this logon */
+    if (pgContext->bAutoAdminLogon)
+        ConsumeAutoLogon();
+
     result = TRUE;
 
 done:

@@ -76,6 +76,52 @@ LocaleID = 409
 ; 3 - ReactOS Nano Server (Reserved)
 InstallationType = 0
 
+; ---- More answers (all optional; see the user guide "Unattended installation") ----
+
+; Files outside the installation ISO (a second CD, a floppy, a disk) are only used when they
+; also say UnattendForDetached = yes. A stray unattend.inf can then never wipe a computer.
+;UnattendForDetached = yes
+
+; Size, in MB, of the partition AutoPartition creates (default: all the free space)
+;PartitionSizeMB = 40960
+
+; Quick format (default) or a full format
+;QuickFormat = yes
+
+; Language of the installed system and its keyboard layout (hexadecimal ids)
+;LocaleID = 407
+;KeyboardLayout = 00000407
+
+; Time zone by name: a Windows time zone name or an id such as Europe/Berlin (beats TimeZoneIndex)
+;TimeZone = "W. Europe Standard Time"
+
+; What setup does when the installation is finished: reboot (default) or shutdown
+;FinalAction = reboot
+
+; A second account. Its password is removed from the installed copy of this file.
+;[UserAccount]
+;Name = "alice"
+;Password = "ChangeMe123"
+;Group = Users
+;FullName = "Alice Example"
+; Log this account on automatically AutoLogonCount times (default 1; 0 = at every start,
+; which keeps the password in the registry)
+;AutoLogon = yes
+;AutoLogonCount = 1
+
+; Network: DHCP is the default. A fixed IPv4 configuration of the first adapter:
+;[Network]
+;Mode = static
+;IPAddress = 10.0.2.15
+;SubnetMask = 255.255.255.0
+;Gateway = 10.0.2.2
+;DNS = 10.0.2.3
+
+; Features of the feature manager to install at the end of setup (featmgr /list shows the names)
+;[Features]
+;Install = firefox
+;FirstBootDefaults = yes
+
 ;[GuiUnattended]
 ; Run a program early in 2nd-stage setup.
 ;DetachedProgram=%SystemRoot%\system32\cmd.exe

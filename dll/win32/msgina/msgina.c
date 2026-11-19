@@ -229,6 +229,60 @@ GetRegistrySettings(PGINA_CONTEXT pgContext)
     return TRUE;
 }
 
+/*
+ * An automatic logon with a count ([UserAccount] AutoLogonCount of an unattended setup, the Winlogon value
+ * AutoLogonCount of Windows) is used up by a successful automatic logon: the count goes down by one and, when
+ * it reaches zero, automatic logon is turned off and the stored password is overwritten and deleted. A logon
+ * without a count (the Administrator without a password) stays on, as before.
+ */
+VOID
+ConsumeAutoLogon(VOID)
+{
+    HKEY hKey;
+    DWORD dwCount = 0, dwType, dwSize = sizeof(dwCount);
+    LONG rc;
+
+    rc = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                       L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon",
+                       0,
+                       KEY_QUERY_VALUE | KEY_SET_VALUE,
+                       &hKey);
+    if (rc != ERROR_SUCCESS)
+        return;
+
+    rc = RegQueryValueExW(hKey, L"AutoLogonCount", NULL, &dwType, (PBYTE)&dwCount, &dwSize);
+    if (rc != ERROR_SUCCESS || dwType != REG_DWORD)
+    {
+        RegCloseKey(hKey);
+        return;
+    }
+
+    if (dwCount > 1)
+    {
+        dwCount--;
+        RegSetValueExW(hKey, L"AutoLogonCount", 0, REG_DWORD, (const BYTE *)&dwCount, sizeof(dwCount));
+    }
+    else
+    {
+        WCHAR szWipe[256];
+        DWORD dwPwdSize = 0;
+
+        /* Overwrite the password in place (same length), then delete it */
+        if (RegQueryValueExW(hKey, L"DefaultPassword", NULL, NULL, NULL, &dwPwdSize) == ERROR_SUCCESS &&
+            dwPwdSize >= sizeof(WCHAR) && dwPwdSize <= sizeof(szWipe))
+        {
+            ZeroMemory(szWipe, sizeof(szWipe));
+            RegSetValueExW(hKey, L"DefaultPassword", 0, REG_SZ, (const BYTE *)szWipe, dwPwdSize);
+            RegFlushKey(hKey);
+        }
+        RegDeleteValueW(hKey, L"DefaultPassword");
+        RegSetValueExW(hKey, L"AutoAdminLogon", 0, REG_SZ, (const BYTE *)L"0", 2 * sizeof(WCHAR));
+        RegDeleteValueW(hKey, L"AutoLogonCount");
+        RegFlushKey(hKey);
+    }
+    RegCloseKey(hKey);
+}
+
 typedef DWORD (WINAPI *pThemeWait)(DWORD dwTimeout);
 typedef BOOL (WINAPI *pThemeWatch)(void);
 

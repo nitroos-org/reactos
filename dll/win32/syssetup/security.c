@@ -1800,7 +1800,6 @@ SetAdministratorPassword(LPCWSTR Password)
 
     DPRINT("Administrator Name: %S\n", AdminInfo.Name);
     DPRINT("Administrator Domain: %S\n", AdminInfo.Domain);
-    DPRINT("Administrator Password: %S\n", AdminInfo.Password);
 
 done:
     if (AccountNameInfo != NULL)
@@ -1854,7 +1853,20 @@ SetAutoAdminLogon(VOID)
     if (lError != ERROR_SUCCESS)
         goto done;
 
-    if (wcscmp(szAutoAdminLogon, L"1") == 0)
+    if (wcscmp(szAutoAdminLogon, L"1") == 0 &&
+        AdminInfo.Password != NULL && AdminInfo.Password[0] != UNICODE_NULL &&
+        UnattendGetBool(L"Unattend", L"UnattendSetupEnabled", FALSE))
+    {
+        /*
+         * An unattended setup that gives the Administrator a password does not keep a plain text copy
+         * of it in the registry for an automatic logon: the automatic logon is turned off, the
+         * Administrator logs on with the password. (An account of the answer file can be logged on
+         * automatically a number of times: [UserAccount] AutoLogon, see unattend.c.)
+         */
+        RegSetValueExW(hKey, L"AutoAdminLogon", 0, REG_SZ, (const BYTE *)L"0", 2 * sizeof(WCHAR));
+        UnattendLog(L"the Administrator has a password: automatic logon of the Administrator is off");
+    }
+    else if (wcscmp(szAutoAdminLogon, L"1") == 0)
     {
         RegSetValueExW(hKey,
                        L"DefaultDomainName",

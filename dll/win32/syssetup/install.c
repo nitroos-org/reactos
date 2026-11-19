@@ -1800,6 +1800,9 @@ InstallReactOS(VOID)
 
     SetAutoAdminLogon();
 
+    /* The extra user account, its automatic logon, the network configuration, the features */
+    ProcessUnattendedExtras();
+
     SetupCloseInfFile(hSysSetupInf);
     SetSetupType(0);
 
@@ -1817,14 +1820,21 @@ InstallReactOS(VOID)
         RtlFreeHeap(RtlGetProcessHeap(), 0, AdminInfo.Domain);
 
     if (AdminInfo.Password != NULL)
+    {
+        SecureZeroMemory(AdminInfo.Password, (wcslen(AdminInfo.Password) + 1) * sizeof(WCHAR));
         RtlFreeHeap(RtlGetProcessHeap(), 0, AdminInfo.Password);
+    }
+
+    /* Everything that reads the answer file is done: remove its passwords from the installed copy */
+    UnattendScrubSecrets();
+    UnattendForgetSecrets();
 
 Quit:
     // HACK: This shouldn't be done here, but by the caller of InstallWindowsNt()
-    /* Enable the shutdown privilege and reboot the machine */
+    /* Enable the shutdown privilege and reboot (or, with [Unattend] FinalAction = shutdown, switch off) the machine */
     if (!pSetupEnablePrivilege(SE_SHUTDOWN_NAME, TRUE))
         DPRINT1("pSetupEnablePrivilege(SE_SHUTDOWN_NAME) failed (Error %lu)\n", GetLastError());
-    ExitWindowsEx(EWX_REBOOT, 0);
+    ExitWindowsEx(UnattendWantsShutdown() ? (EWX_SHUTDOWN | EWX_POWEROFF) : EWX_REBOOT, 0);
     return 0;
 }
 
