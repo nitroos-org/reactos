@@ -1314,6 +1314,31 @@ DoLogon(
             goto done;
         }
     }
+    else if (Status == STATUS_LOGON_TYPE_NOT_GRANTED)
+    {
+        /* The account has no right to log on this way (or it is denied): the system message of ERROR_LOGON_TYPE_NOT_GRANTED */
+        WCHAR szCaption[256];
+        WCHAR szText[512];
+
+        LoadStringW(pgContext->hDllInstance, IDS_LOGONTITLE, szCaption, _countof(szCaption));
+        if (!FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                            NULL,
+                            ERROR_LOGON_TYPE_NOT_GRANTED,
+                            0,
+                            szText,
+                            _countof(szText),
+                            NULL))
+        {
+            StringCchPrintfW(szText, _countof(szText), L"Error %lu", (ULONG)ERROR_LOGON_TYPE_NOT_GRANTED);
+        }
+
+        pgContext->pWlxFuncs->WlxMessageBox(pgContext->hWlx,
+                                            hwndDlg,
+                                            szText,
+                                            szCaption,
+                                            MB_OK | MB_ICONERROR);
+        goto done;
+    }
     else if (!NT_SUCCESS(Status))
     {
         TRACE("DoLoginTasks failed! Status 0x%08lx\n", Status);
