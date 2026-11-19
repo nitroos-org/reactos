@@ -136,6 +136,7 @@ typedef struct _USETUP_DATA
     LONG QuickFormat;           /* unattended: 1 = quick format (default), 0 = full format */
     ULONG PartitionSizeMB;      /* unattended: size of a partition created by AutoPartition, 0 = all the free space */
     WCHAR KeyboardLayout[9];    /* unattended: keyboard layout id ("00000407"), empty = the language's default */
+    WCHAR UnattendDetachedDrive;/* unattended: letter of the other volume the answer file was found on, 0 = the installation medium */
 
 /* Settings lists *****/
     PGENERIC_LIST ComputerList;
@@ -172,6 +173,10 @@ BOOLEAN
 NTAPI
 CheckUnattendedSetup(
     IN OUT PUSETUP_DATA pSetupData);
+
+VOID
+NTAPI
+DisableUnattendedSetup(VOID);
 
 /* Setup log of an unattended installation (unattlog.c) */
 VOID

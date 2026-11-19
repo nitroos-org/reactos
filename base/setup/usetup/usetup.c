@@ -630,6 +630,47 @@ USetupErrorRoutine(
  *   Number of the next page.
  */
 static PAGE_NUMBER
+SetupStartPage(PINPUT_RECORD Ir);
+
+/*
+ * An answer file found on another volume (a second CD, a stick, a disk) than the installation medium starts an
+ * installation that erases a disk without a question. Show that, with the drive, for ten seconds: ESC refuses the
+ * file (the installation goes on interactively), ENTER or any other key or the end of the time starts it.
+ * Returns TRUE to go on unattended.
+ */
+static BOOLEAN
+ConfirmDetachedAnswerFile(PINPUT_RECORD Ir)
+{
+    CHAR Line[100];
+    LARGE_INTEGER Delay;
+    ULONG Tries;
+
+    CONSOLE_ClearScreen();
+    CONSOLE_SetTextXY(6, 6, BRAND_PRODUCT_NAME " Setup");
+    RtlStringCbPrintfA(Line, sizeof(Line), "An answer file (unattend.inf) was found on drive %c:.",
+                       (CHAR)USetupData.UnattendDetachedDrive);
+    CONSOLE_SetTextXY(6, 9, Line);
+    CONSOLE_SetTextXY(6, 10, "Setup will install without asking and will erase a disk.");
+    CONSOLE_SetTextXY(6, 12, "ENTER = continue now (it continues by itself in 10 seconds)");
+    CONSOLE_SetTextXY(6, 13, "ESC   = do not use the file: install interactively");
+    CONSOLE_SetStatusText("   ESC = Install interactively   ENTER = Continue");
+    CONSOLE_Flush();
+
+    Delay.QuadPart = -2500000LL; /* 250 ms */
+    for (Tries = 0; Tries < 40; ++Tries)
+    {
+        if (CONSOLE_ConInKeyPeek(Ir))
+        {
+            if (Ir->Event.KeyEvent.wVirtualKeyCode == VK_ESCAPE || Ir->Event.KeyEvent.uChar.AsciiChar == 0x1B)
+                return FALSE;
+            return TRUE;
+        }
+        NtDelayExecution(FALSE, &Delay);
+    }
+    return TRUE;
+}
+
+static PAGE_NUMBER
 SetupStartPage(PINPUT_RECORD Ir)
 {
     ULONG Error;
@@ -656,6 +697,17 @@ SetupStartPage(PINPUT_RECORD Ir)
         DPRINT1("WaitNoPendingInstallEvents() failed to wait!\n");
 
     IsUnattendedSetup = CheckUnattendedSetup(&USetupData);
+    if (IsUnattendedSetup && USetupData.UnattendDetachedDrive)
+    {
+        /* The answer file is on a disk, CD or stick that was only attached: give the person at the
+         * keyboard, if there is one, ten seconds to say no */
+        if (!ConfirmDetachedAnswerFile(Ir))
+        {
+            DisableUnattendedSetup();
+            IsUnattendedSetup = FALSE;
+        }
+        MUIDisplayPage(SETUP_INIT_PAGE);
+    }
     if (IsUnattendedSetup)
     {
         // TODO: Read options from inf

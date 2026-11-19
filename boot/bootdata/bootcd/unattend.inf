@@ -79,7 +79,8 @@ InstallationType = 0
 ; ---- More answers (all optional; see the user guide "Unattended installation") ----
 
 ; Files outside the installation ISO (a second CD, a floppy, a disk) are only used when they
-; also say UnattendForDetached = yes. A stray unattend.inf can then never wipe a computer.
+; also say UnattendForDetached = yes, and setup then shows a notice for ten seconds (ESC refuses
+; the file). A stray unattend.inf can then never wipe a computer without somebody having said yes.
 ;UnattendForDetached = yes
 
 ; Size, in MB, of the partition AutoPartition creates (default: all the free space)

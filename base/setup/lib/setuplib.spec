@@ -60,6 +60,7 @@
 
 ;; setuplib
 @ stdcall CheckUnattendedSetup(ptr)
+@ stdcall DisableUnattendedSetup()
 @ stdcall SetupLogLine(str)
 @ varargs SetupLogFormat(str)
 @ stdcall FinishSetup(ptr)

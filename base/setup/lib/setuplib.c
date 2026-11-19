@@ -25,6 +25,7 @@
 
 HANDLE ProcessHeap;
 BOOLEAN IsUnattendedSetup = FALSE;
+static BOOLEAN UnattendRefused = FALSE;
 static PCWSTR InfUnattendSignature = L"$ReactOS$";
 
 /* FUNCTIONS ****************************************************************/
@@ -52,6 +53,37 @@ CompareInfFirstLineString(
     return Result;
 }
 
+/* An answer file is a few KB. The whole file is read into memory by the INF parser, appended to the
+ * installed copy and read again by the second stage: a file larger than this is not an answer file. */
+#define UNATTEND_MAX_FILE_SIZE  (1024 * 1024)
+
+static BOOLEAN
+IsUnattendFileSizeOk(
+    _In_ PCWSTR InfPath)
+{
+    NTSTATUS Status;
+    HANDLE FileHandle;
+    UNICODE_STRING FileName;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    IO_STATUS_BLOCK IoStatusBlock;
+    FILE_STANDARD_INFORMATION FileInfo;
+
+    RtlInitUnicodeString(&FileName, InfPath);
+    InitializeObjectAttributes(&ObjectAttributes, &FileName, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = NtOpenFile(&FileHandle, FILE_READ_ATTRIBUTES | SYNCHRONIZE, &ObjectAttributes, &IoStatusBlock,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE);
+    if (!NT_SUCCESS(Status))
+        return TRUE; /* the open of the parser reports it */
+    Status = NtQueryInformationFile(FileHandle, &IoStatusBlock, &FileInfo, sizeof(FileInfo), FileStandardInformation);
+    NtClose(FileHandle);
+    if (NT_SUCCESS(Status) && FileInfo.EndOfFile.QuadPart > UNATTEND_MAX_FILE_SIZE)
+    {
+        SetupLogFormat("ignored %S: it is larger than %u bytes, not an answer file", InfPath, (UINT)UNATTEND_MAX_FILE_SIZE);
+        return FALSE;
+    }
+    return TRUE;
+}
+
 static BOOLEAN
 IsInfUnattendSetupEnabled(
     _In_ PUSETUP_DATA pSetupData,
@@ -61,6 +93,9 @@ IsInfUnattendSetupEnabled(
     HINF hInf;
     UINT ErrorLine;
     BOOLEAN Result = FALSE;
+
+    if (!IsUnattendFileSizeOk(InfPath))
+        return Result;
 
     hInf = SpInfOpenInfFile(InfPath,
                             NULL,
@@ -102,12 +137,21 @@ GetUnattendInfPath(
     NTSTATUS Status;
     USHORT Types;
 
+    /* The operator refused the answer file (DisableUnattendedSetup): there is none */
+    if (UnattendRefused)
+    {
+        if (cch)
+            InfPath[0] = UNICODE_NULL;
+        return FALSE;
+    }
+
     /* If the unattend.inf file has already been looked for, return
      * its cached path if it was found, or fail otherwise. */
     if (UnattendInfLookedUp)
         goto Quit;
 
     UnattendInfLookedUp = TRUE;
+    pSetupData->UnattendDetachedDrive = UNICODE_NULL;
 
     /*
      * Search order (the answer file is always named unattend.inf):
@@ -169,6 +213,7 @@ GetUnattendInfPath(
                 {
                     /* Cache the alternative unattend.inf path and return it */
                     (void)RtlStringCchCopyW(UnattendInfPath, _countof(UnattendInfPath), szInf);
+                    pSetupData->UnattendDetachedDrive = (WCHAR)Drive;
                     SetupLogFormat("answer file: %S (drive %c:)", szInf, Drive);
                     return NT_SUCCESS(RtlStringCchCopyW(InfPath, cch, szInf));
                 }
@@ -185,6 +230,19 @@ Quit:
     if (*UnattendInfPath)
         return NT_SUCCESS(RtlStringCchCopyW(InfPath, cch, UnattendInfPath));
     return FALSE;
+}
+
+/*
+ * The operator of the computer refused the answer file that was found on another volume (ESC at the notice
+ * of usetup): the installation goes on as an interactive one, and the file is neither used nor copied.
+ */
+VOID
+NTAPI
+DisableUnattendedSetup(VOID)
+{
+    UnattendRefused = TRUE;
+    IsUnattendedSetup = FALSE;
+    SetupLogLine("the answer file was refused at the keyboard: interactive installation");
 }
 
 /* A decimal number key of [Unattend]: absent = *pValue is left as it is; present and valid
@@ -231,6 +289,9 @@ CheckUnattendedSetup(
         return IsUnattendedSetup;
     }
     DPRINT1("UnattendInf path: '%S'\n", UnattendInfPath);
+
+    if (!IsUnattendFileSizeOk(UnattendInfPath))
+        return IsUnattendedSetup;
 
     /* Load 'unattend.inf' from installation media */
     UnattendInf = SpInfOpenInfFile(UnattendInfPath,
