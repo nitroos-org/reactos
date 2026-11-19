@@ -553,13 +553,16 @@ NPAddConnection3(HWND hwndOwner,
         }
     }
 
-    /* A connection to the same name without a drive letter may exist: rdbss would use it whatever
-     * the credentials of this call, so they are compared first. The user name here; the password
-     * by the engine (ProbeCredentials), which is the only one that has the other one. */
+    /* A connection to the same name may exist: rdbss would use it whatever the credentials of this
+     * call, so they are compared first. The user name here; the password by the engine
+     * (ProbeCredentials), which is the only one that has the other one. A drive of the caller to the
+     * same share counts too: when rdbss finds a connection of that name of another logon session
+     * first, it takes any connection of the caller's logon session to the share instead, the
+     * drive's included, and the tree connect of a name without a drive then never reaches the driver. */
     if (Letter == 0 && Explicit)
     {
         WCHAR Want[DNLEN + UNLEN + 260];
-        BOOL Conflict = FALSE, Held = FALSE;
+        BOOL Conflict = FALSE, Held = FALSE, HeldByDrive = FALSE;
 
         _snwprintf(Want, ARRAYSIZE(Want), L"%.*s%s%.*s", (int)DomainChars, Domain ? Domain : L"",
                    DomainChars ? L"\\" : L"", (int)UserChars, User);
@@ -568,14 +571,16 @@ NPAddConnection3(HWND hwndOwner,
         {
             PSMBCONN_ENTRY e = &Uses->Entries[i];
 
-            if (e->Local != 0 || !EntryRemoteIs(Uses, e, Remote, RemoteChars))
+            if (!EntryRemoteIs(Uses, e, Remote, RemoteChars))
                 continue;
             if (!(e->Flags & SMBCONN_FLAG_TREE_CONNECTED) || !(e->Flags & SMBCONN_FLAG_EXPLICIT) ||
                 e->UserLength != wcslen(Want) * sizeof(WCHAR) ||
                 _wcsnicmp((PCWSTR)((PUCHAR)Uses + e->UserOffset), Want, wcslen(Want)) != 0)
                 Conflict = TRUE;    /* another identity, or a connection in use that could not be ended */
-            else
+            else if (e->Local == 0)
                 Held = TRUE;
+            else
+                HeldByDrive = TRUE;
         }
         HeapFree(GetProcessHeap(), 0, Uses);
         if (Conflict)
@@ -583,7 +588,7 @@ NPAddConnection3(HWND hwndOwner,
             WipeEa(Ea, EaAlloc);
             return SESSION_CREDENTIAL_CONFLICT;
         }
-        if (Held && lpPassword == NULL)
+        if ((Held || HeldByDrive) && lpPassword == NULL)
         {
             /* The user again with no password given: the connection that is there (Windows Server 2022:
              * net use \\server\share /user:u with a connection of u is a success) */
@@ -596,6 +601,16 @@ NPAddConnection3(HWND hwndOwner,
             Status = ProbeCredentials(Remote, RemoteChars, &LogonId, Ea, EaLength);
             WipeEa(Ea, EaAlloc);
             return (Status == SMBCONN_STATUS_PROBE_OK || NT_SUCCESS(Status)) ? WN_SUCCESS : StatusToError(Status);
+        }
+        if (HeldByDrive)
+        {
+            /* Only a drive of the same user: the password first, then the use without a drive */
+            Status = ProbeCredentials(Remote, RemoteChars, &LogonId, Ea, EaLength);
+            if (Status != SMBCONN_STATUS_PROBE_OK && !NT_SUCCESS(Status))
+            {
+                WipeEa(Ea, EaAlloc);
+                return StatusToError(Status);
+            }
         }
     }
     else
