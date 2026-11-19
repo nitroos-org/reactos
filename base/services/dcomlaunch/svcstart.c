@@ -143,7 +143,10 @@ StartServiceStartServer(VOID)
         return;
     }
 
-    Status = RpcServerRegisterIf(IDcomLaunchServiceStart_v1_0_s_ifspec, NULL, NULL);
+    /* An interface is served on every endpoint of the process (the Plug and Play service of this svchost listens on
+       a named pipe): only local callers may use this one */
+    Status = RpcServerRegisterIfEx(IDcomLaunchServiceStart_v1_0_s_ifspec, NULL, NULL,
+                                   RPC_IF_ALLOW_LOCAL_ONLY, RPC_C_LISTEN_MAX_CALLS_DEFAULT, NULL);
     if (Status != RPC_S_OK)
     {
         DPRINT1("RpcServerRegisterIf() failed (Status %lx)\n", Status);
