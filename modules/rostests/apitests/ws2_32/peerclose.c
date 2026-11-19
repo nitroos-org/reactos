@@ -10,6 +10,21 @@
 
 #include "ws2_32.h"
 
+#ifndef POLLRDNORM
+#define POLLRDNORM  0x0100
+#define POLLWRNORM  0x0010
+#define POLLERR     0x0001
+#define POLLHUP     0x0002
+typedef struct pollfd
+{
+    SOCKET fd;
+    SHORT events;
+    SHORT revents;
+} WSAPOLLFD, *PWSAPOLLFD, *LPWSAPOLLFD;
+#endif
+
+static int (WINAPI *pWSAPoll)(WSAPOLLFD *, ULONG, INT);
+
 /* A connected loopback pair; FALSE after a skip */
 static
 BOOL
@@ -122,6 +137,10 @@ Test_PeerClose(int How, BOOL NonBlocking)
         /* WSAEventSelect puts the socket in non-blocking mode and reports FD_CLOSE */
         Event = WSACreateEvent();
         ok(!WSAEventSelect(Client, Event, FD_READ | FD_WRITE | FD_CLOSE), "WSAEventSelect failed: %d\n", WSAGetLastError());
+        /* a connected socket reports FD_WRITE once; sends that are taken do not report it again */
+        ZeroMemory(&Events, sizeof(Events));
+        ok(!WSAEnumNetworkEvents(Client, Event, &Events), "WSAEnumNetworkEvents failed: %d\n", WSAGetLastError());
+        ok(Events.lNetworkEvents == FD_WRITE, "initial events %lx, expected FD_WRITE\n", Events.lNetworkEvents);
     }
 
     switch (How)
@@ -144,6 +163,30 @@ Test_PeerClose(int How, BOOL NonBlocking)
         ok(!closesocket(Server), "closesocket failed: %d\n", WSAGetLastError());
     Sleep(100);
     ok(WaitReadable(Client), "The client saw no event after the peer ended the connection\n");
+
+    /* WSAPoll (Windows Server 2022): the end of the stream is POLLHUP, data not read yet POLLRDNORM with it, a reset
+     * POLLHUP and POLLERR; the socket stays writable (the send fails at once) */
+    if (pWSAPoll)
+    {
+        WSAPOLLFD Poll;
+        SHORT Expected = (How == PEER_CLOSE) ? (POLLWRNORM | POLLHUP) :
+                         (How == PEER_CLOSE_DATA) ? (POLLRDNORM | POLLWRNORM | POLLHUP) :
+                         (How == PEER_CLOSE_UNREAD) ? (POLLWRNORM | POLLHUP | POLLERR) : (POLLWRNORM | POLLHUP);
+
+        Poll.fd = Client;
+        Poll.events = POLLRDNORM | POLLWRNORM;
+        Poll.revents = 0;
+        ok(pWSAPoll(&Poll, 1, 0) == 1, "WSAPoll found nothing: %d\n", WSAGetLastError());
+        ok(Poll.revents == Expected, "WSAPoll revents 0x%x, expected 0x%x (How %d)\n", Poll.revents, Expected, How);
+    }
+
+    if (Event && How == PEER_CLOSE_DATA)
+    {
+        /* the data and the end of the stream at once, the data not read (Windows Server 2022) */
+        ZeroMemory(&Events, sizeof(Events));
+        ok(!WSAEnumNetworkEvents(Client, Event, &Events), "WSAEnumNetworkEvents failed: %d\n", WSAGetLastError());
+        ok(Events.lNetworkEvents == (FD_READ | FD_CLOSE), "events %lx, expected FD_READ|FD_CLOSE\n", Events.lNetworkEvents);
+    }
     if (Event)
         WSAResetEvent(Event);
 
@@ -156,7 +199,7 @@ Test_PeerClose(int How, BOOL NonBlocking)
                  * (Windows Server 2022, WSAEnumNetworkEvents before any send) */
                 ZeroMemory(&Events, sizeof(Events));
                 ok(!WSAEnumNetworkEvents(Client, Event, &Events), "WSAEnumNetworkEvents failed: %d\n", WSAGetLastError());
-                ok(Events.lNetworkEvents & FD_CLOSE, "No FD_CLOSE after the reset (events %lx)\n", Events.lNetworkEvents);
+                ok(Events.lNetworkEvents == FD_CLOSE, "events %lx after the reset, expected FD_CLOSE alone\n", Events.lNetworkEvents);
                 ok(Events.iErrorCode[FD_CLOSE_BIT] == WSAECONNABORTED, "FD_CLOSE error %d, expected WSAECONNABORTED\n",
                    Events.iErrorCode[FD_CLOSE_BIT]);
             }
@@ -223,6 +266,7 @@ START_TEST(peerclose)
     int How;
 
     ok(!WSAStartup(MAKEWORD(2, 2), &WsaData), "WSAStartup failed\n");
+    pWSAPoll = (void *)GetProcAddress(GetModuleHandleA("ws2_32.dll"), "WSAPoll");
     for (How = PEER_CLOSE; How <= PEER_SHUTDOWN_SEND; How++)
     {
         Test_PeerClose(How, FALSE);
