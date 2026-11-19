@@ -339,6 +339,36 @@ ScControl(LPCTSTR Server,       // remote machine name
         else
             QueryPrivilegesUsage();
     }
+    else if (!lstrcmpi(Command, _T("sidtype")))
+    {
+        if (ArgCount > 1)
+            nResult = (INT)SetSidType(ServiceArgs[0], ServiceArgs[1]);
+        else
+        {
+            SetSidTypeUsage();
+            nResult = ERROR_INVALID_COMMAND_LINE;
+        }
+    }
+    else if (!lstrcmpi(Command, _T("qsidtype")))
+    {
+        if (ArgCount > 0)
+            nResult = (INT)QuerySidType(ServiceArgs[0]);
+        else
+        {
+            QuerySidTypeUsage();
+            nResult = ERROR_INVALID_COMMAND_LINE;
+        }
+    }
+    else if (!lstrcmpi(Command, _T("showsid")))
+    {
+        if (ArgCount > 0)
+            nResult = (INT)ShowSid(ServiceArgs[0]);
+        else
+        {
+            ShowSidUsage();
+            nResult = ERROR_INVALID_COMMAND_LINE;
+        }
+    }
     else if (!lstrcmpi(Command, _T("triggerinfo")))
     {
         if (ArgCount > 1)
@@ -365,7 +395,9 @@ ScControl(LPCTSTR Server,       // remote machine name
     }
     else
     {
-        MainUsage();
+        /* an unknown command: the usage, no prompt, a failure exit code */
+        MainUsage(FALSE);
+        nResult = ERROR_INVALID_COMMAND_LINE;
     }
 
     return nResult;
@@ -379,7 +411,7 @@ int _tmain(int argc, LPCTSTR argv[])
 
     if (argc < 2)
     {
-        MainUsage();
+        MainUsage(TRUE);
         return -1;
     }
 
@@ -388,7 +420,7 @@ int _tmain(int argc, LPCTSTR argv[])
     {
         if (argc < 3)
         {
-            MainUsage();
+            MainUsage(TRUE);
             return -1;
         }
 

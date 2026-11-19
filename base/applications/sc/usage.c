@@ -10,8 +10,14 @@
 #include "sc.h"
 
 #include <conio.h>
+#include <wincon.h>
 
-VOID MainUsage(VOID)
+/*
+ * bPrompt: ask whether to show the help of QUERY and QUERYEX (the bare "sc" of Windows does). The prompt
+ * waits for a key, so it is shown only for the bare command and only when both standard input and output are
+ * a console; a wrong command and any redirected run print the usage and return at once.
+ */
+VOID MainUsage(BOOL bPrompt)
 {
     INT c;
 
@@ -41,6 +47,9 @@ VOID MainUsage(VOID)
     _T("\t  qfailure       : Queries the actions taken by a service upon failure.\n")
     _T("\t  privs          : Changes the required privileges of a service.\n")
     _T("\t  qprivs         : Queries the required privileges of a service.\n")
+    _T("\t  sidtype        : Changes the service SID type of a service.\n")
+    _T("\t  qsidtype       : Queries the service SID type of a service.\n")
+    _T("\t  showsid        : Displays the service SID of a service name.\n")
     _T("\t  triggerinfo    : Configures the trigger parameters of a service.\n")
     _T("\t  qtriggerinfo   : Queries the trigger parameters of a service.\n")
     _T("\t  delete         : Deletes a service (from the registry).\n")
@@ -57,6 +66,17 @@ VOID MainUsage(VOID)
 //    "\t                   be saved as the last-known-good boot configuration\n")
 //    "\t  Lock           : Locks the SCM Database\n")
 //    "\t  QueryLock      : Queries the LockStatus for the SCM Database\n")
+
+    if (bPrompt)
+    {
+        DWORD dwMode;
+
+        if (!GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &dwMode) ||
+            !GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), &dwMode))
+            bPrompt = FALSE;
+    }
+    if (!bPrompt)
+        return;
 
     _tprintf(_T("\nWould you like to see help for the QUERY and QUERYEX commands? [ y | n ]: "));
     c = _getch(); // _gettch isn't defined in our tchar.h

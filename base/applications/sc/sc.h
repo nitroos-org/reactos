@@ -58,6 +58,11 @@ BOOL EnumDepend(LPCTSTR ServiceName);
 /* privs.c and triggerinfo.c: they return the error code of what failed (what sc exits with) */
 DWORD SetPrivileges(LPCTSTR ServiceName, LPCTSTR Privileges);
 DWORD QueryPrivileges(LPCTSTR ServiceName, LPCTSTR BufferSize);
+DWORD SetSidType(LPCTSTR ServiceName, LPCTSTR Type);
+DWORD QuerySidType(LPCTSTR ServiceName);
+DWORD ShowSid(LPCTSTR ServiceName);
+VOID ReportApiFailure(LPCTSTR pszApi, DWORD dwError);
+DWORD OpenServiceForConfig(LPCTSTR ServiceName, DWORD dwAccess, SC_HANDLE *phManager, SC_HANDLE *phService);
 DWORD SetTriggerInfo(LPCTSTR ServiceName, LPCTSTR *Options, INT OptionCount);
 DWORD QueryTriggerInfo(LPCTSTR ServiceName, LPCTSTR BufferSize);
 VOID ReportApiFailure(LPCTSTR pszApi, DWORD dwError);
@@ -85,7 +90,7 @@ ParseFailureArguments(
     OUT LPSERVICE_FAILURE_ACTIONS pFailureActions);
 
 /* usage functions */
-VOID MainUsage(VOID);
+VOID MainUsage(BOOL bPrompt);
 VOID StartUsage(VOID);
 VOID PauseUsage(VOID);
 VOID InterrogateUsage(VOID);
@@ -107,6 +112,9 @@ VOID GetKeyNameUsage(VOID);
 VOID EnumDependUsage(VOID);
 VOID SetPrivilegesUsage(VOID);
 VOID QueryPrivilegesUsage(VOID);
+VOID SetSidTypeUsage(VOID);
+VOID QuerySidTypeUsage(VOID);
+VOID ShowSidUsage(VOID);
 VOID SetTriggerInfoUsage(VOID);
 VOID QueryTriggerInfoUsage(VOID);
 
