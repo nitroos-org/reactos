@@ -3233,10 +3233,44 @@ DWORD WINAPI WNetConnectionDialog1A( LPCONNECTDLGSTRUCTA lpConnDlgStruct )
  */
 DWORD WINAPI WNetConnectionDialog1W( LPCONNECTDLGSTRUCTW lpConnDlgStruct )
 {
+#ifdef __REACTOS__
+    /* The Map Network Drive dialog lives beside the Disconnect one (netplwiz) */
+    typedef DWORD (WINAPI *PFN_MAP)(HWND, LPCWSTR, LPWSTR, DWORD);
+    HMODULE hDll;
+    PFN_MAP pMap;
+    WCHAR drive[3] = {0};
+    DWORD ret;
+
+    if (!lpConnDlgStruct || lpConnDlgStruct->cbStructure < sizeof(*lpConnDlgStruct))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return ERROR_INVALID_PARAMETER;
+    }
+    if (lpConnDlgStruct->lpConnRes && lpConnDlgStruct->lpConnRes->dwType == RESOURCETYPE_PRINT)
+    {
+        SetLastError(WN_BAD_DEV_TYPE);
+        return WN_BAD_DEV_TYPE;
+    }
+    hDll = LoadLibraryW(L"netplwiz.dll");
+    pMap = hDll ? (PFN_MAP)GetProcAddress(hDll, "NitroMapNetworkDriveDialog") : NULL;
+    if (!pMap)
+    {
+        if (hDll) FreeLibrary(hDll);
+        SetLastError(WN_NO_NETWORK);
+        return WN_NO_NETWORK;
+    }
+    ret = pMap(lpConnDlgStruct->hwndOwner,
+               lpConnDlgStruct->lpConnRes ? lpConnDlgStruct->lpConnRes->lpRemoteName : NULL, drive, ARRAY_SIZE(drive));
+    FreeLibrary(hDll);
+    if (ret == WN_SUCCESS && drive[0])
+        lpConnDlgStruct->dwDevNum = toupperW(drive[0]) - 'A' + 1;
+    return ret;
+#else
     FIXME( "(%p): stub\n", lpConnDlgStruct );
 
     SetLastError(WN_NO_NETWORK);
     return WN_NO_NETWORK;
+#endif
 }
 
 /*********************************************************************

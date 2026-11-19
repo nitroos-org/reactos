@@ -459,8 +459,22 @@ SHStartNetConnectionDialogW(
     _In_ LPCWSTR pszRemoteName,
     _In_ DWORD dwType)
 {
-    FIXME("SHStartNetConnectionDialogW() stub\n");
-    return E_FAIL;
+    /* The Map Network Drive dialog of mpr */
+    CONNECTDLGSTRUCTW Dialog;
+    NETRESOURCEW Resource;
+    DWORD Error;
+
+    ZeroMemory(&Dialog, sizeof(Dialog));
+    ZeroMemory(&Resource, sizeof(Resource));
+    Resource.dwType = dwType;
+    Resource.lpRemoteName = (LPWSTR)pszRemoteName;
+    Dialog.cbStructure = sizeof(Dialog);
+    Dialog.hwndOwner = hwnd;
+    Dialog.lpConnRes = &Resource;
+    Error = WNetConnectionDialog1W(&Dialog);
+    if (Error == NO_ERROR)
+        return S_OK;
+    return Error == (DWORD)-1 ? S_FALSE : HRESULT_FROM_WIN32(Error);
 }
 
 /*

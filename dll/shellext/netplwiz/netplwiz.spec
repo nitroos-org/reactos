@@ -13,3 +13,4 @@
 12 stub NetAccessWizard
 13 stub NetPlacesWizardDoModal
 14 stdcall SHDisconnectNetDrives(ptr)
+@ stdcall -private NitroMapNetworkDriveDialog(ptr wstr ptr long)

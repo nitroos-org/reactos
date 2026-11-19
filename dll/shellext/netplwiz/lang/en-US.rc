@@ -12,8 +12,27 @@ BEGIN
     PUSHBUTTON "Cancel", IDCANCEL, 243, 179, 50, 14
 END
 
+IDD_MAPNETDRIVE DIALOGEX 0, 0, 300, 140
+STYLE DS_SHELLFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Map Network Drive"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    LTEXT "What network folder would you like to map?", -1, 7, 7, 286, 8
+    LTEXT "Specify the drive letter for the connection and the folder that you want to connect to:", -1, 7, 19, 286, 8
+    LTEXT "&Drive:", -1, 7, 38, 45, 8
+    COMBOBOX IDC_MAPDRIVE, 60, 36, 50, 200, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT "&Folder:", -1, 7, 56, 45, 8
+    EDITTEXT IDC_MAPFOLDER, 60, 54, 233, 12, ES_AUTOHSCROLL | WS_TABSTOP
+    LTEXT "Example: \\\\server\\share", -1, 60, 70, 233, 8
+    AUTOCHECKBOX "&Reconnect at sign-in", IDC_MAPRECONNECT, 60, 84, 200, 10
+    AUTOCHECKBOX "Connect using different &credentials", IDC_MAPCREDS, 60, 98, 200, 10
+    DEFPUSHBUTTON "&Finish", IDOK, 186, 119, 50, 14
+    PUSHBUTTON "Cancel", IDCANCEL, 243, 119, 50, 14
+END
+
 STRINGTABLE
 BEGIN
+    IDS_MAP_CAPTION "Map Network Drive"
     IDS_DIALOG_CAPTION "Disconnect Network Drive"
     IDS_DRIVE_LETTER "Drive Letter"
     IDS_NETWORK_PATH "Network Path"
