@@ -367,7 +367,15 @@ SetXmmRegFromStackValue(
     _In_ BYTE Reg,
     _In_ M128A *ValuePointer)
 {
-    SetXmmReg(Context, Reg, *ValuePointer);
+    M128A Value;
+
+    /* Not with an aligned 128 bit load: unwind data that saves XMM registers
+       in a frame whose frame register is set before the allocation (GCC
+       output) gives a slot that need not be 16 byte aligned under Windows'
+       rule, and Windows reads it without a fault */
+    Value.Low = ((ULONG64 UNALIGNED *)ValuePointer)[0];
+    Value.High = ((LONG64 UNALIGNED *)ValuePointer)[1];
+    SetXmmReg(Context, Reg, Value);
     if (ContextPointers != NULL)
     {
         ContextPointers->FloatingContext[Reg] = ValuePointer;
@@ -756,74 +764,6 @@ GetEstablisherFrame(
     return Context->Rsp;
 }
 
-/*
-    Unwind data gives the offsets of saved XMM registers from the frame base, the
-    frame register minus its scaled offset. The compiler of this tree can set the
-    frame register before it allocates the rest of the frame ("mov rbp, rsp; sub
-    rsp, N", frame offset 0) and then gives the XMM offsets from the stack pointer
-    after that allocation, where it stores them. The frame base is then N above
-    the stack pointer the offsets belong to: an XMM slot computed from it is
-    misaligned by the pushes of the frame, and lies in the area above the frame,
-    not where the register was saved (movdqa from it is a general protection fault).
-    So the base of the XMM offsets is the frame base lowered by the pushes and
-    allocations that come after the frame register is set. With a frame register set
-    after the whole allocation (the usual order) there is nothing to lower.
-
-    \param UnwindInfo The unwind info the Index belongs to.
-    \param Index The first op that has been executed in the function (ops are listed last executed first).
-    \param FrameBase The frame base of the function.
-*/
-static
-ULONG64
-RtlpGetXmmBase(
-    _In_ PUNWIND_INFO UnwindInfo,
-    _In_ ULONG Index,
-    _In_ ULONG64 FrameBase)
-{
-    ULONG64 Allocation = 0;
-    UNWIND_CODE UnwindCode;
-    ULONG i;
-
-    if (UnwindInfo->FrameRegister == 0)
-    {
-        return FrameBase;
-    }
-
-    for (i = Index; i < UnwindInfo->CountOfCodes; i += UnwindOpSlots(UnwindInfo->UnwindCode[i]))
-    {
-        UnwindCode = UnwindInfo->UnwindCode[i];
-        if (UnwindCode.UnwindOp == UWOP_SET_FPREG)
-        {
-            return FrameBase - Allocation;
-        }
-        else if (UnwindCode.UnwindOp == UWOP_PUSH_NONVOL)
-        {
-            Allocation += 8;
-        }
-        else if (UnwindCode.UnwindOp == UWOP_ALLOC_SMALL)
-        {
-            Allocation += (ULONG64)(UnwindCode.OpInfo + 1) * 8;
-        }
-        else if (UnwindCode.UnwindOp == UWOP_ALLOC_LARGE)
-        {
-            if ((i + 1) >= UnwindInfo->CountOfCodes)
-                break;
-
-            if (UnwindCode.OpInfo)
-            {
-                if ((i + 2) >= UnwindInfo->CountOfCodes)
-                    break;
-                Allocation += *(ULONG*)(&UnwindInfo->UnwindCode[i + 1]);
-            }
-            else
-                Allocation += (ULONG64)UnwindInfo->UnwindCode[i + 1].FrameOffset * 8;
-        }
-    }
-
-    /* No frame register set in this part: nothing was allocated after it */
-    return FrameBase;
-}
-
 PEXCEPTION_ROUTINE
 NTAPI
 RtlVirtualUnwind(
@@ -843,7 +783,7 @@ RtlVirtualUnwind(
     BYTE Reg;
     PULONG LanguageHandler;
     BOOLEAN InProlog;
-    ULONG64 FrameBase, XmmBase, CodeBase;
+    ULONG64 FrameBase, CodeBase;
     PRUNTIME_FUNCTION CodeEntry;
 
     /* Get relative virtual address */
@@ -924,9 +864,15 @@ RtlVirtualUnwind(
         }
     }
 
-    /* Registers saved with mov lie relative to the stack pointer after the
-       fixed allocation; once a frame register is set, the frame register is
-       what that stack pointer is derived from */
+    /* Registers saved with mov (UWOP_SAVE_NONVOL[_FAR], UWOP_SAVE_XMM128[_FAR])
+       lie relative to the frame base: the frame register minus 16 times the
+       frame offset once it is set, else the stack pointer after the prolog.
+       That is Windows' rule also for a frame register set before the
+       allocation (measured: the slot is the frame register plus the offset).
+       GCC records the offsets of such a frame relative to the stack pointer
+       after the allocation; the build keeps those out of this tree
+       (pefixup --check-unwind), and RtlGetUnwindContext/RtlSetUnwindContext
+       skip a misaligned XMM slot that such third-party data yields. */
     FrameBase = *EstablisherFrame;
 
     /* Skip all Ops with an offset greater than the current Offset */
@@ -938,9 +884,6 @@ RtlVirtualUnwind(
     }
 
 RepeatChainedInfo:
-
-    /* The saved XMM registers lie relative to the stack pointer after the allocation */
-    XmmBase = RtlpGetXmmBase(UnwindInfo, i, FrameBase);
 
     /* Process the remaining unwind ops */
     while (i < UnwindInfo->CountOfCodes)
@@ -1013,14 +956,14 @@ RepeatChainedInfo:
                 Offset = UnwindInfo->UnwindCode[i + 1].FrameOffset;
                 /* The slot stores offset / 16; adding it to an M128A* scales it back to bytes.
                  * See https://github.com/dotnet/runtime/blob/421be955e4b70cddf583b10f5ad99814b713fb87/src/coreclr/unwinder/amd64/unwinder.cpp#L890 */
-                SetXmmRegFromStackValue(Context, ContextPointers, Reg, (M128A*)XmmBase + Offset);
+                SetXmmRegFromStackValue(Context, ContextPointers, Reg, (M128A*)FrameBase + Offset);
                 i += 2;
                 break;
 
             case UWOP_SAVE_XMM128_FAR:
                 Reg = UnwindCode.OpInfo;
                 Offset = *(ULONG*)(&UnwindInfo->UnwindCode[i + 1]);
-                SetXmmRegFromStackValue(Context, ContextPointers, Reg, (M128A*)(XmmBase + Offset));
+                SetXmmRegFromStackValue(Context, ContextPointers, Reg, (M128A*)(FrameBase + Offset));
                 i += 3;
                 break;
 

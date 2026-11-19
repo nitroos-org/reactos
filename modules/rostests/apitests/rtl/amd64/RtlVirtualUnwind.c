@@ -380,6 +380,292 @@ static VOID Test_ContextPointers(VOID)
     ok_eq_hex64(Ctx.Rbx, 0xAABBCCDDAABBCCDDULL);
 }
 
+/*
+ * UWOP_SAVE_XMM128 in a frame whose frame register is set before the
+ * allocation. S is the stack pointer after the allocation. Expected values are
+ * Windows 10 / Server 2022 (measured with the same unwind data): the slot is
+ * taken from the frame base (the frame register minus 16 * FrameOffset) plus
+ * the offset, also when the frame register was set before the allocation.
+ *  V1: mov rbp,rsp; sub rsp,0x108; save xmm6 at offset 0x80: slot rbp+0x80 = S+0x188
+ *  V2: sub rsp,0x108; lea rbp,[rsp+0x20] (FrameOffset 2); offset 0x80: slot S+0x80
+ *  V3: sub rsp,0x108, no frame register; offset 0x80: slot S+0x80
+ *  V4: as V1 with offset 0x100: slot S+0x208
+ */
+static VOID Test_FrameRegBeforeAlloc(VOID)
+{
+    static const struct
+    {
+        const char *Name;
+        BOOLEAN FpFirst, HasFp;
+        UCHAR FrameOffset;
+        USHORT SaveOffset;
+        ULONG RbpFromS, EstFromS, SlotFromS;
+    } Rows[] =
+    {
+        { "V1", TRUE,  TRUE,  0, 0x80,  0x108, 0x108, 0x188 },
+        { "V2", FALSE, TRUE,  2, 0x80,  0x20,  0,     0x80  },
+        { "V3", FALSE, FALSE, 0, 0x80,  0,     0,     0x80  },
+        { "V4", TRUE,  TRUE,  0, 0x100, 0x108, 0x108, 0x208 },
+    };
+    CONTEXT Ctx;
+    KNONVOLATILE_CONTEXT_POINTERS Ptrs;
+    TEST_UNWIND_INFO *Info;
+    ULONG_PTR S = (ULONG_PTR)g_StackBuffer, Est;
+    M128A Expected;
+    ULONG r;
+
+    for (r = 0; r < RTL_NUMBER_OF(Rows); r++)
+    {
+        RtlZeroMemory(g_StackBuffer, sizeof(g_StackBuffer));
+        RtlZeroMemory(&Ptrs, sizeof(Ptrs));
+        g_StackBuffer[0x108 / 8] = 0x7FF600001234ULL;   /* return address */
+        Expected.Low = 0x1111222233334444ULL + r;
+        Expected.High = 0x5555666677778888ULL + r;
+        /* the value at the slot Windows reads (8 mod 16 for V1: written as two quadwords) */
+        g_StackBuffer[Rows[r].SlotFromS / 8] = Expected.Low;
+        g_StackBuffer[Rows[r].SlotFromS / 8 + 1] = Expected.High;
+
+        if (Rows[r].FpFirst)
+        {
+            /* +3 mov rbp,rsp; +10 sub rsp,0x108; +17 movaps [rbp-0x88],xmm6 */
+            Info = ResetUnwindInfo(1, 17, 5);
+            SetCode(Info, 0, 17, UWOP_SAVE_XMM128, 6);
+            Info->UnwindCode[1].FrameOffset = Rows[r].SaveOffset / 16;
+            SetCode(Info, 2, 10, UWOP_ALLOC_LARGE, 0);
+            Info->UnwindCode[3].FrameOffset = 0x108 / 8;
+            SetCode(Info, 4, 3, UWOP_SET_FPREG, 0);
+        }
+        else if (Rows[r].HasFp)
+        {
+            /* +7 sub rsp,0x108; +12 lea rbp,[rsp+0x20]; +19 movaps [rsp+0x80],xmm6 */
+            Info = ResetUnwindInfo(1, 19, 5);
+            SetCode(Info, 0, 19, UWOP_SAVE_XMM128, 6);
+            Info->UnwindCode[1].FrameOffset = Rows[r].SaveOffset / 16;
+            SetCode(Info, 2, 12, UWOP_SET_FPREG, 0);
+            SetCode(Info, 3, 7, UWOP_ALLOC_LARGE, 0);
+            Info->UnwindCode[4].FrameOffset = 0x108 / 8;
+        }
+        else
+        {
+            /* +7 sub rsp,0x108; +14 movaps [rsp+0x80],xmm6 */
+            Info = ResetUnwindInfo(1, 14, 4);
+            SetCode(Info, 0, 14, UWOP_SAVE_XMM128, 6);
+            Info->UnwindCode[1].FrameOffset = Rows[r].SaveOffset / 16;
+            SetCode(Info, 2, 7, UWOP_ALLOC_LARGE, 0);
+            Info->UnwindCode[3].FrameOffset = 0x108 / 8;
+        }
+        if (Rows[r].HasFp)
+        {
+            Info->FrameRegister = REG_RBP;
+            Info->FrameOffset = Rows[r].FrameOffset;
+        }
+
+        InitContext(&Ctx, S);
+        Ctx.Rbp = Rows[r].HasFp ? S + Rows[r].RbpFromS : 0x5A5A5A5A5A5A5A5AULL;
+        Est = DoUnwind(&Ctx, 0x40, &Ptrs);
+
+        ok(Est == S + Rows[r].EstFromS, "%s: EstablisherFrame S+0x%Ix, expected S+0x%lx\n",
+           Rows[r].Name, Est - S, Rows[r].EstFromS);
+        ok(Ctx.Rip == 0x7FF600001234ULL, "%s: Rip %I64x\n", Rows[r].Name, Ctx.Rip);
+        ok(Ctx.Rsp == S + 0x110, "%s: Rsp S+0x%I64x, expected S+0x110\n", Rows[r].Name, Ctx.Rsp - S);
+        ok((ULONG_PTR)Ptrs.Xmm6 == S + Rows[r].SlotFromS, "%s: ContextPointers.Xmm6 S+0x%Ix, expected S+0x%lx\n",
+           Rows[r].Name, (ULONG_PTR)Ptrs.Xmm6 - S, Rows[r].SlotFromS);
+        ok(Ctx.Xmm6.Low == Expected.Low && Ctx.Xmm6.High == Expected.High,
+           "%s: Xmm6 %I64x:%I64x, expected the slot at S+0x%lx\n", Rows[r].Name, Ctx.Xmm6.High, Ctx.Xmm6.Low,
+           Rows[r].SlotFromS);
+    }
+}
+
+/*
+ * The frame base rule for the other operations that take an offset, from the x64 exception handling specification
+ * ("Unwind operation code": the offset is from the frame register minus 16 * FrameOffset when a frame register is
+ * set, else from RSP after the prolog; chained unwind info has the frame register of the primary one), the same as
+ * Wine's RtlVirtualUnwind computes it. S is the stack pointer after the allocation, the return address is at S+0x108
+ * unless noted.
+ *  W1: mov rbp,rsp; sub rsp,0x108; UWOP_SAVE_NONVOL rbx offset 0x80: slot rbp+0x80 = S+0x188
+ *  W2: as W1, UWOP_SAVE_NONVOL_FAR r12 offset 0x90: slot S+0x198
+ *  W3: as W1, UWOP_SAVE_XMM128_FAR xmm7 offset 0x100: slot S+0x208 (8 mod 16)
+ *  W4: sub rsp,0x108; lea rbp,[rsp+0xF0] (FrameOffset 15); SAVE_NONVOL rsi 0x40, SAVE_XMM128 xmm8 0x60: S+0x40, S+0x60
+ *  W5: W4's prolog with FrameOffset 2 in the primary info; a chained info (same frame register and offset) saves r13
+ *      at 0x20: slot S+0x20
+ *  W6: W1's prolog stopped after mov rbp,rsp (code offset 5, before the allocation): RSP = rbp = S'; the return
+ *      address is at S', the establisher frame is rbp
+ *  W7: UWOP_PUSH_MACHFRAME without an error code: RIP at [RSP], RSP at [RSP+0x18]
+ */
+static VOID Test_FrameBaseOps(VOID)
+{
+    CONTEXT Ctx;
+    KNONVOLATILE_CONTEXT_POINTERS Ptrs;
+    TEST_UNWIND_INFO *Info, *Parent;
+    PRUNTIME_FUNCTION ParentFunc;
+    ULONG_PTR S = (ULONG_PTR)g_StackBuffer, Est;
+    M128A Expected;
+
+    /* W1 - W3: frame register set before the allocation */
+    {
+        static const struct { const char *Name; UCHAR Op, Reg; ULONG Offset; } Rows[] =
+        {
+            { "W1", UWOP_SAVE_NONVOL, REG_RBX, 0x80 },
+            { "W2", UWOP_SAVE_NONVOL_FAR, REG_R12, 0x90 },
+            { "W3", UWOP_SAVE_XMM128_FAR, 7, 0x100 },
+        };
+        ULONG r;
+
+        for (r = 0; r < RTL_NUMBER_OF(Rows); r++)
+        {
+            ULONG Slot = 0x108 + Rows[r].Offset;
+
+            RtlZeroMemory(g_StackBuffer, sizeof(g_StackBuffer));
+            RtlZeroMemory(&Ptrs, sizeof(Ptrs));
+            g_StackBuffer[Slot / 8] = 0x0102030405060708ULL + r;
+            g_StackBuffer[Slot / 8 + 1] = 0x1112131415161718ULL + r;
+            /* where GCC would have stored it (S + offset): must not be taken */
+            g_StackBuffer[Rows[r].Offset / 8] = 0xBADBADBADBADBAD0ULL;
+            g_StackBuffer[Rows[r].Offset / 8 + 1] = 0xBADBADBADBADBAD1ULL;
+            /* the return address last: W3's decoy covers its slot */
+            g_StackBuffer[0x108 / 8] = 0x7FF600005678ULL;
+
+            if (Rows[r].Op == UWOP_SAVE_NONVOL)
+            {
+                Info = ResetUnwindInfo(1, 18, 5);
+                SetCode(Info, 0, 18, UWOP_SAVE_NONVOL, Rows[r].Reg);
+                Info->UnwindCode[1].FrameOffset = (USHORT)(Rows[r].Offset / 8);
+                SetCode(Info, 2, 10, UWOP_ALLOC_LARGE, 0);
+                Info->UnwindCode[3].FrameOffset = 0x108 / 8;
+                SetCode(Info, 4, 3, UWOP_SET_FPREG, 0);
+            }
+            else
+            {
+                Info = ResetUnwindInfo(1, 18, 6);
+                SetCode(Info, 0, 18, Rows[r].Op, Rows[r].Reg);
+                *(ULONG *)&Info->UnwindCode[1] = Rows[r].Offset;
+                SetCode(Info, 3, 10, UWOP_ALLOC_LARGE, 0);
+                Info->UnwindCode[4].FrameOffset = 0x108 / 8;
+                SetCode(Info, 5, 3, UWOP_SET_FPREG, 0);
+            }
+            Info->FrameRegister = REG_RBP;
+            Info->FrameOffset = 0;
+
+            InitContext(&Ctx, S);
+            Ctx.Rbp = S + 0x108;
+            Est = DoUnwind(&Ctx, 0x40, &Ptrs);
+
+            ok(Est == S + 0x108, "%s: EstablisherFrame S+0x%Ix, expected S+0x108\n", Rows[r].Name, Est - S);
+            ok(Ctx.Rip == 0x7FF600005678ULL, "%s: Rip %I64x\n", Rows[r].Name, Ctx.Rip);
+            ok(Ctx.Rsp == S + 0x110, "%s: Rsp S+0x%I64x, expected S+0x110\n", Rows[r].Name, Ctx.Rsp - S);
+            if (Rows[r].Op == UWOP_SAVE_XMM128_FAR)
+            {
+                ok((ULONG_PTR)Ptrs.FloatingContext[Rows[r].Reg] == S + Slot,
+                   "%s: ContextPointers.Xmm%u S+0x%Ix, expected S+0x%lx\n", Rows[r].Name, Rows[r].Reg,
+                   (ULONG_PTR)Ptrs.FloatingContext[Rows[r].Reg] - S, Slot);
+                ok(Ctx.Xmm7.Low == 0x0102030405060708ULL + r && Ctx.Xmm7.High == 0x1112131415161718ULL + r,
+                   "%s: Xmm7 %I64x:%I64x, expected the slot at S+0x%lx\n", Rows[r].Name, Ctx.Xmm7.High, Ctx.Xmm7.Low,
+                   Slot);
+            }
+            else
+            {
+                ok((ULONG_PTR)Ptrs.IntegerContext[Rows[r].Reg] == S + Slot,
+                   "%s: ContextPointers[%u] S+0x%Ix, expected S+0x%lx\n", Rows[r].Name, Rows[r].Reg,
+                   (ULONG_PTR)Ptrs.IntegerContext[Rows[r].Reg] - S, Slot);
+                ok((&Ctx.Rax)[Rows[r].Reg] == 0x0102030405060708ULL + r, "%s: register %u = %I64x\n",
+                   Rows[r].Name, Rows[r].Reg, (&Ctx.Rax)[Rows[r].Reg]);
+            }
+        }
+    }
+
+    /* W4: the largest frame offset */
+    RtlZeroMemory(g_StackBuffer, sizeof(g_StackBuffer));
+    RtlZeroMemory(&Ptrs, sizeof(Ptrs));
+    g_StackBuffer[0x108 / 8] = 0x7FF600009ABCULL;
+    g_StackBuffer[0x40 / 8] = 0x4444444455555555ULL;
+    Expected.Low = 0x6666666677777777ULL;
+    Expected.High = 0x8888888899999999ULL;
+    *(M128A *)&g_StackBuffer[0x60 / 8] = Expected;
+    Info = ResetUnwindInfo(1, 22, 7);
+    SetCode(Info, 0, 22, UWOP_SAVE_XMM128, 8);
+    Info->UnwindCode[1].FrameOffset = 0x60 / 16;
+    SetCode(Info, 2, 16, UWOP_SAVE_NONVOL, REG_RSI);
+    Info->UnwindCode[3].FrameOffset = 0x40 / 8;
+    SetCode(Info, 4, 12, UWOP_SET_FPREG, 0);
+    SetCode(Info, 5, 7, UWOP_ALLOC_LARGE, 0);
+    Info->UnwindCode[6].FrameOffset = 0x108 / 8;
+    Info->FrameRegister = REG_RBP;
+    Info->FrameOffset = 15;
+    InitContext(&Ctx, S);
+    Ctx.Rbp = S + 0xF0;
+    Est = DoUnwind(&Ctx, 0x40, &Ptrs);
+    ok(Est == S, "W4: EstablisherFrame S+0x%Ix, expected S\n", Est - S);
+    ok(Ctx.Rip == 0x7FF600009ABCULL, "W4: Rip %I64x\n", Ctx.Rip);
+    ok(Ctx.Rsp == S + 0x110, "W4: Rsp S+0x%I64x, expected S+0x110\n", Ctx.Rsp - S);
+    ok(Ctx.Rsi == 0x4444444455555555ULL, "W4: Rsi %I64x\n", Ctx.Rsi);
+    ok((ULONG_PTR)Ptrs.Rsi == S + 0x40, "W4: ContextPointers.Rsi S+0x%Ix\n", (ULONG_PTR)Ptrs.Rsi - S);
+    ok_eq_xmm(Ctx.Xmm8, Expected);
+    ok((ULONG_PTR)Ptrs.Xmm8 == S + 0x60, "W4: ContextPointers.Xmm8 S+0x%Ix\n", (ULONG_PTR)Ptrs.Xmm8 - S);
+
+    /* W5: a save in chained unwind info */
+    RtlZeroMemory(g_StackBuffer, sizeof(g_StackBuffer));
+    RtlZeroMemory(&Ptrs, sizeof(Ptrs));
+    g_StackBuffer[0x108 / 8] = 0x7FF60000DEF0ULL;
+    g_StackBuffer[0x20 / 8] = 0x1313131313131313ULL;
+    Info = ResetUnwindInfo(1, 4, 2);
+    Info->Flags = UNW_FLAG_CHAININFO;
+    Info->FrameRegister = REG_RBP;
+    Info->FrameOffset = 2;
+    SetCode(Info, 0, 4, UWOP_SAVE_NONVOL, REG_R13);
+    Info->UnwindCode[1].FrameOffset = 0x20 / 8;
+    ParentFunc = (PRUNTIME_FUNCTION)&Info->UnwindCode[2];
+    ParentFunc->BeginAddress = FIELD_OFFSET(IMAGE_STRUCT, Code);
+    ParentFunc->EndAddress = FIELD_OFFSET(IMAGE_STRUCT, Data);
+    ParentFunc->UnwindData = FIELD_OFFSET(IMAGE_STRUCT, Unwind) + PARENT_OFFSET;
+    Parent = (TEST_UNWIND_INFO *)(g_Image.Unwind + PARENT_OFFSET);
+    RtlZeroMemory(Parent, sizeof(*Parent));
+    Parent->Version = 1;
+    Parent->SizeOfProlog = 12;
+    Parent->CountOfCodes = 3;
+    Parent->FrameRegister = REG_RBP;
+    Parent->FrameOffset = 2;
+    SetCode(Parent, 0, 12, UWOP_SET_FPREG, 0);
+    SetCode(Parent, 1, 7, UWOP_ALLOC_LARGE, 0);
+    Parent->UnwindCode[2].FrameOffset = 0x108 / 8;
+    InitContext(&Ctx, S);
+    Ctx.Rbp = S + 0x20;
+    Est = DoUnwind(&Ctx, 0x40, &Ptrs);
+    ok(Est == S, "W5: EstablisherFrame S+0x%Ix, expected S\n", Est - S);
+    ok(Ctx.Rip == 0x7FF60000DEF0ULL, "W5: Rip %I64x\n", Ctx.Rip);
+    ok(Ctx.Rsp == S + 0x110, "W5: Rsp S+0x%I64x, expected S+0x110\n", Ctx.Rsp - S);
+    ok(Ctx.R13 == 0x1313131313131313ULL, "W5: R13 %I64x\n", Ctx.R13);
+    ok((ULONG_PTR)Ptrs.R13 == S + 0x20, "W5: ContextPointers.R13 S+0x%Ix\n", (ULONG_PTR)Ptrs.R13 - S);
+
+    /* W6: in the prolog, between the frame register and the allocation */
+    RtlZeroMemory(g_StackBuffer, sizeof(g_StackBuffer));
+    g_StackBuffer[0x10 / 8] = 0x7FF600001111ULL;
+    Info = ResetUnwindInfo(1, 17, 5);
+    SetCode(Info, 0, 17, UWOP_SAVE_XMM128, 6);
+    Info->UnwindCode[1].FrameOffset = 0x80 / 16;
+    SetCode(Info, 2, 10, UWOP_ALLOC_LARGE, 0);
+    Info->UnwindCode[3].FrameOffset = 0x108 / 8;
+    SetCode(Info, 4, 3, UWOP_SET_FPREG, 0);
+    Info->FrameRegister = REG_RBP;
+    InitContext(&Ctx, S + 0x10);
+    Ctx.Rbp = S + 0x10;
+    Ctx.Xmm6.Low = 0x6;
+    Est = DoUnwind(&Ctx, 5, NULL);
+    ok(Est == S + 0x10, "W6: EstablisherFrame S+0x%Ix, expected S+0x10\n", Est - S);
+    ok(Ctx.Rip == 0x7FF600001111ULL, "W6: Rip %I64x\n", Ctx.Rip);
+    ok(Ctx.Rsp == S + 0x18, "W6: Rsp S+0x%I64x, expected S+0x18\n", Ctx.Rsp - S);
+    ok(Ctx.Xmm6.Low == 0x6, "W6: Xmm6 taken from a slot not yet written: %I64x\n", Ctx.Xmm6.Low);
+
+    /* W7: machine frame without an error code */
+    RtlZeroMemory(g_StackBuffer, sizeof(g_StackBuffer));
+    g_StackBuffer[0] = 0xFFFFF80000123456ULL;   /* Rip */
+    g_StackBuffer[3] = S + 0x200;               /* Rsp */
+    Info = ResetUnwindInfo(1, 1, 1);
+    SetCode(Info, 0, 1, UWOP_PUSH_MACHFRAME, 0);
+    RunUnwind(&Ctx, S, 1, NULL);
+    ok(Ctx.Rip == 0xFFFFF80000123456ULL, "W7: Rip %I64x\n", Ctx.Rip);
+    ok(Ctx.Rsp == S + 0x200, "W7: Rsp S+0x%I64x, expected S+0x200\n", Ctx.Rsp - S);
+}
+
 static VOID Test_ChainedInfo(VOID)
 {
     CONTEXT Ctx;
@@ -854,6 +1140,8 @@ START_TEST(RtlVirtualUnwind)
     Test_TypicalProlog();
     Test_PartialProlog();
     Test_ContextPointers();
+    Test_FrameRegBeforeAlloc();
+    Test_FrameBaseOps();
     Test_ChainedInfo();
     Test_SaveNonvolFar();
     Test_SaveXmm128Far();

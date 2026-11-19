@@ -104,6 +104,8 @@ set_target_properties(shell32_apitest
 
 target_link_libraries(shell32_apitest wine uuid ${PSEH_LIB} cpprt atl_classes)
 set_module_type(shell32_apitest win32cui)
+# amd64 GCC: a try block next to XMM register use (see ros_no_nonvolatile_xmm)
+ros_no_nonvolatile_xmm(shell32_apitest)
 target_compile_definitions(shell32_apitest PRIVATE UNICODE _UNICODE)
 add_importlibs(shell32_apitest user32 gdi32 shell32 shlwapi ole32 oleaut32 advapi32 shlwapi msvcrt kernel32 ntdll userenv)
 add_pch(shell32_apitest shelltest.h "${PCH_SKIP_SOURCE}")
