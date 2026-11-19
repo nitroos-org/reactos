@@ -1170,6 +1170,22 @@ NTSTATUS NgSetInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             ExAcquireResourceExclusiveLite(Fcb->Header.Resource, TRUE);
             Status = NgSetBasic(Fcb, Buffer, (FileObject->Flags & FO_FILE_MODIFIED) != 0);
             ExReleaseResourceLite(Fcb->Header.Resource);
+            if (NT_SUCCESS(Status) && FileObject->FsContext2)
+            {
+                /* What the request sets is reported, whether or not the value differs from the one on disk */
+                PFILE_BASIC_INFORMATION B = Buffer;
+                ULONG Filter = 0;
+                if (B->FileAttributes)
+                    Filter |= FILE_NOTIFY_CHANGE_ATTRIBUTES;
+                if (B->CreationTime.QuadPart > 0)
+                    Filter |= FILE_NOTIFY_CHANGE_CREATION;
+                if (B->LastAccessTime.QuadPart > 0)
+                    Filter |= FILE_NOTIFY_CHANGE_LAST_ACCESS;
+                if (B->LastWriteTime.QuadPart > 0)
+                    Filter |= FILE_NOTIFY_CHANGE_LAST_WRITE;
+                if (Filter)
+                    NgNotifyCcb(Vcb, FileObject->FsContext2, Fcb, Filter, FILE_ACTION_MODIFIED);
+            }
             return Status;
         case FileEndOfFileInformation:
         case FileAllocationInformation:
