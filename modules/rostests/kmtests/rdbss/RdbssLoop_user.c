@@ -19,6 +19,7 @@
 #include "RdbssLoop.h"
 #include <pseh/pseh2.h>
 #include "RdbssHostile.h"
+#include "RdbssLockTorture.h"
 
 #define LOCAL_ROOT      L"C:\\RdbssLoopRoot"
 #define LOCAL_ROOT_NT   L"\\??\\C:\\RdbssLoopRoot"
@@ -28,6 +29,7 @@
 #define FCB_WRITE_CACHE 0x08000000  /* FCB_STATE_WRITECACHING_ENABLED */
 #define FCB_WRITE_BUF   0x04000000  /* FCB_STATE_WRITEBUFFERING_ENABLED */
 #define FCB_ALL_CACHE   (FCB_READ_CACHE | FCB_READ_BUF | FCB_WRITE_CACHE | FCB_WRITE_BUF)
+#define FCB_LOCK_BUF    0x00200000  /* FCB_STATE_LOCK_BUFFERING_ENABLED */
 
 static HANDLE LoopDevice = INVALID_HANDLE_VALUE;
 
@@ -2597,6 +2599,218 @@ out:
     LoopOptions(FCB_ALL_CACHE, 0);
 }
 
+/* c: a lock request still queued for the FSP when its handle is closed. The
+ * FSP is kept busy by a read posted behind a slow flush on another file; an
+ * overlapped lock of handle H queues behind it; H is closed (its cleanup
+ * runs at once: its FCB is free). When the FSP gets to the lock, the handle
+ * is cleaned up: the lock must not be granted (it would be held, locally and
+ * at the server, by a handle that no longer exists, and nobody could unlock
+ * it), and another handle must get the range. Both with locks sent to the
+ * server and with lock buffering (FsRtl). (RDBSS refuses it with
+ * STATUS_FILE_CLOSED when it takes the FCB: RxVerifyOperationIsLegal) */
+static
+VOID
+TestLockQueuedAtClose(VOID)
+{
+    WCHAR U[MAX_PATH];
+    HANDLE H, G, Writer, Reader, Thread;
+    OVERLAPPED LockOv, ReadOv;
+    PUCHAR Data;
+    DWORD Done, Error, Buffering;
+    BOOL Ok, Granted;
+    ULONG Round, Orphans = 0, Cancelled = 0, Early = 0;
+
+    Data = VirtualAlloc(NULL, 65536, MEM_COMMIT, PAGE_READWRITE);
+    if (Data == NULL)
+        return;
+    LoopOptions(0, 0);
+    Writer = CreateFileW(P(U, TRUE, L"race\\qother.bin"), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                         NULL, CREATE_ALWAYS, 0, NULL);
+    Reader = CreateFileW(P(U, TRUE, L"race\\qother.bin"), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                         OPEN_EXISTING, FILE_FLAG_OVERLAPPED | FILE_FLAG_NO_BUFFERING, NULL);
+    G = CreateFileW(P(U, TRUE, L"race\\qlock.bin"), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    NULL, CREATE_ALWAYS, 0, NULL);
+    if (Writer == INVALID_HANDLE_VALUE || Reader == INVALID_HANDLE_VALUE || G == INVALID_HANDLE_VALUE)
+    {
+        ok(FALSE, "opens failed: %lu\n", GetLastError());
+        goto out;
+    }
+    WriteFile(Writer, Data, 65536, &Done, NULL);
+    RtlZeroMemory(&LockOv, sizeof(LockOv));
+    RtlZeroMemory(&ReadOv, sizeof(ReadOv));
+    LockOv.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    ReadOv.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+
+    CloseHandle(G);
+    G = INVALID_HANDLE_VALUE;
+    for (Round = 0; Round < 4; ++Round)
+    {
+        /* Rounds 0-1: locks go to the "server" (which refuses a lock on a
+         * server open that the cleanup closed: the loopback has one per
+         * handle). Rounds 2-3: lock buffering granted, locks are kept by
+         * RDBSS in the FCB's FILE_LOCK (FsRtl) */
+        Buffering = (Round < 2) ? 0 : FCB_LOCK_BUF;
+        LoopOptions(Buffering, 0);
+        G = CreateFileW(P(U, TRUE, L"race\\qlock.bin"), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                        NULL, OPEN_EXISTING, 0, NULL);
+        H = CreateFileW(P(U, TRUE, L"race\\qlock.bin"), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                        NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
+        if (H == INVALID_HANDLE_VALUE || G == INVALID_HANDLE_VALUE)
+        {
+            ok(FALSE, "open H/G: %lu\n", GetLastError());
+            break;
+        }
+        {
+            LOOPRDR_COUNTERS C0, C1;
+            OVERLAPPED Ov0;
+
+            /* Where do this FCB's locks go (the server counts its locks)? */
+            RtlZeroMemory(&Ov0, sizeof(Ov0));
+            Ov0.Offset = 8192;
+            LoopCounters(&C0);
+            LockFileEx(G, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 16, 0, &Ov0);
+            LoopCounters(&C1);
+            UnlockFileEx(G, 0, 16, 0, &Ov0);
+            trace("round %lu: a lock of this FCB went to the %s\n", Round, (C1.Locks != C0.Locks) ? "server" : "FCB's FILE_LOCK");
+        }
+
+        /* Occupy the FSP: a read posted behind a 500 ms flush of its FCB */
+        LoopOptions(Buffering, LOOPRDR_OPT_SLOW_FLUSH);
+        Thread = CreateThread(NULL, 0, SlowFlushThread, Writer, 0, NULL);
+        Sleep(150);
+        ResetEvent(ReadOv.hEvent);
+        Ok = ReadFile(Reader, Data, 4096, NULL, &ReadOv);
+        Sleep(50);
+
+        /* The lock queues behind the read; then its handle goes away */
+        ResetEvent(LockOv.hEvent);
+        LockOv.Offset = 0;
+        Ok = LockFileEx(H, LOCKFILE_EXCLUSIVE_LOCK, 0, 4096, 0, &LockOv);
+        if (Ok || GetLastError() != ERROR_IO_PENDING)
+            ++Early;
+        CloseHandle(H);
+
+        Granted = GetOverlappedResult(H, &LockOv, &Done, TRUE);
+        Error = Granted ? 0 : GetLastError();
+        if (Error == ERROR_INVALID_HANDLE)
+        {
+            /* H is closed: wait on the event itself */
+            WaitForSingleObject(LockOv.hEvent, 60000);
+            Granted = (LockOv.Internal == 0);
+            Error = (ULONG)LockOv.Internal;
+        }
+        GetOverlappedResult(Reader, &ReadOv, &Done, TRUE);
+        if (Thread != NULL)
+        {
+            WaitForSingleObject(Thread, INFINITE);
+            CloseHandle(Thread);
+        }
+        LoopOptions(Buffering, 0);
+        Sleep(200);
+
+        /* Another handle must get the range now */
+        RtlZeroMemory(&ReadOv, sizeof(ReadOv) - sizeof(HANDLE));
+        Ok = LockFileEx(G, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 4096, 0, &ReadOv);
+        trace("round %lu (%s): queued lock of the closed handle: %s (status %lx); other handle's lock afterwards: %s (%lu)\n",
+              Round, Buffering ? "lock buffering" : "server locks", Granted ? "granted" : "not granted", Error,
+              Ok ? "granted" : "refused", Ok ? 0 : GetLastError());
+        if (Ok)
+        {
+            UnlockFileEx(G, 0, 4096, 0, &ReadOv);
+        }
+        else
+        {
+            ++Orphans;
+        }
+        if (!Granted)
+            ++Cancelled;
+        CloseHandle(G);
+        G = INVALID_HANDLE_VALUE;
+    }
+    ok(Orphans == 0, "%lu of 4 locks were left held by a closed handle\n", Orphans);
+    ok(Cancelled == 4, "%lu of 4 queued locks of a closed handle were not granted (expected 4)\n", Cancelled);
+    trace("locks not queued (answered at once): %lu\n", Early);
+    CloseHandle(LockOv.hEvent);
+    CloseHandle(ReadOv.hEvent);
+
+out:
+    if (Writer != INVALID_HANDLE_VALUE) CloseHandle(Writer);
+    if (Reader != INVALID_HANDLE_VALUE) CloseHandle(Reader);
+    if (G != INVALID_HANDLE_VALUE) CloseHandle(G);
+    VirtualFree(Data, 0, MEM_RELEASE);
+    LoopOptions(FCB_ALL_CACHE, 0);
+}
+
+/* t: the end of file and a mapped view (RdbssHostile's "truncated under a
+ * mapped view" check). (1) A view of the whole 64 KB file: setting the end
+ * of file to 2000 must fail, and the size stays. (2) The race of the
+ * hostile check, done in order: the size is queried (64 KB), another handle
+ * sets the end of file to 100, the file is mapped (the section is 100
+ * bytes), and the end of file is set to 2000: an extension past the
+ * section, which must succeed although 2000 is below the size queried */
+static
+VOID
+TestEofUnderView(VOID)
+{
+    WCHAR U[MAX_PATH];
+    HANDLE F, Other, Section;
+    PUCHAR View;
+    LARGE_INTEGER Size, Small, Now;
+    BOOL Ok;
+
+    LoopOptions(FCB_ALL_CACHE, 0);
+    F = CreateFileW(P(U, TRUE, L"race\\eofview.bin"), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    NULL, CREATE_ALWAYS, 0, NULL);
+    Other = CreateFileW(P(U, TRUE, L"race\\eofview.bin"), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                        NULL, OPEN_EXISTING, 0, NULL);
+    if (F == INVALID_HANDLE_VALUE || Other == INVALID_HANDLE_VALUE)
+    {
+        ok(FALSE, "opens failed: %lu\n", GetLastError());
+        goto out;
+    }
+
+    /* (1) */
+    Size.QuadPart = 65536;
+    SetFilePointerEx(F, Size, NULL, FILE_BEGIN);
+    ok(SetEndOfFile(F), "extend: %lu\n", GetLastError());
+    Section = CreateFileMappingW(F, NULL, PAGE_READWRITE, 0, 0, NULL);
+    ok(Section != NULL, "section: %lu\n", GetLastError());
+    View = Section ? MapViewOfFile(Section, FILE_MAP_WRITE, 0, 0, 0) : NULL;
+    ok(View != NULL, "view: %lu\n", GetLastError());
+    Small.QuadPart = 2000;
+    SetFilePointerEx(F, Small, NULL, FILE_BEGIN);
+    Ok = SetEndOfFile(F);
+    ok(!Ok && GetLastError() == ERROR_USER_MAPPED_FILE, "truncation under a view: %d, %lu\n", Ok, GetLastError());
+    ok(GetFileSizeEx(F, &Now) && Now.QuadPart == 65536, "size after: %I64d\n", Now.QuadPart);
+    if (View != NULL)
+        UnmapViewOfFile(View);
+    if (Section != NULL)
+        CloseHandle(Section);
+
+    /* (2) */
+    ok(GetFileSizeEx(F, &Size) && Size.QuadPart == 65536, "queried size %I64d\n", Size.QuadPart);
+    Small.QuadPart = 100;
+    SetFilePointerEx(Other, Small, NULL, FILE_BEGIN);
+    ok(SetEndOfFile(Other), "other handle's truncation (no view yet): %lu\n", GetLastError());
+    Section = CreateFileMappingW(F, NULL, PAGE_READWRITE, 0, 0, NULL);
+    View = Section ? MapViewOfFile(Section, FILE_MAP_WRITE, 0, 0, 0) : NULL;
+    ok(View != NULL, "view: %lu\n", GetLastError());
+    Small.QuadPart = 2000;
+    SetFilePointerEx(F, Small, NULL, FILE_BEGIN);
+    Ok = SetEndOfFile(F);
+    ok(Ok, "extension past a 100-byte section: %lu\n", GetLastError());
+    trace("queried %I64d, end of file set to 2000 under a view of the 100-byte section: %s (what RdbssHostile used to report as a truncation)\n",
+          Size.QuadPart, Ok ? "allowed" : "refused");
+    if (View != NULL)
+        UnmapViewOfFile(View);
+    if (Section != NULL)
+        CloseHandle(Section);
+
+out:
+    if (F != INVALID_HANDLE_VALUE) CloseHandle(F);
+    if (Other != INVALID_HANDLE_VALUE) CloseHandle(Other);
+}
+
 /* Names the server-specs canonicalization walks to their last character:
  * short last components, dots, stream colons (with special pool on the RDBSS
  * tags, a read past the name stops the machine) */
@@ -2932,6 +3146,10 @@ START_TEST(RdbssRaces)
         TestWaitingLockBlocksFsp();
     if (RaceSelected(L'w'))
         TestWaitingLockNoStall();
+    if (RaceSelected(L'c'))
+        TestLockQueuedAtClose();
+    if (RaceSelected(L't'))
+        TestEofUnderView();
     if (RaceSelected(L'n'))
         TestOddNames();
     if (RaceSelected(L'm'))
@@ -3195,5 +3413,159 @@ START_TEST(RdbssHostile)
     if (PoolSum(&Mid))
         trace("RDBSS pool tags at the end of the run (mounted): %I64d blocks/%I64d bytes: %s\n", Mid.Outstanding, Mid.Bytes, Mid.Detail);
 
+    LoopTearDown(&Before);
+}
+
+/* Byte-range lock torture (RdbssLockTorture.h): 6 model and 2 chaos threads
+ * in this process and in a second one (whose chaos threads are terminated at
+ * random), plus a third process that takes waiting locks and is terminated
+ * every 1-3 s. RDBSS_LT_SECONDS (60), RDBSS_LT_FLAGS (loopback options, 0).
+ * At the end every range must be free again and nothing may wait at the
+ * mini-redirector */
+typedef struct _LT_ARGS
+{
+    PCWSTR Root;
+    ULONG Seconds;
+    ULONG Seed;
+    ULONG Problems;
+} LT_ARGS;
+
+static
+DWORD
+WINAPI
+LtSelfThread(
+    _In_ PVOID Parameter)
+{
+    LT_ARGS *Args = Parameter;
+
+    /* This process: model and chaos threads, none terminated (a handle a
+     * terminated thread had not closed would outlive the test here) */
+    Args->Problems = LtRun(Args->Root, 0, Args->Seconds, Args->Seed, TRUE, FALSE);
+    return 0;
+}
+
+START_TEST(RdbssLockTorture)
+{
+    POOL_SUM Before;
+    WCHAR L[MAX_PATH], Root[MAX_PATH], Exe[MAX_PATH], Cmd[MAX_PATH + 128];
+    PROCESS_INFORMATION Partner, Victim;
+    STARTUPINFOW Si;
+    ULONG Seconds, Flags, Seed, Problems, File, Victims = 0;
+    DWORD Code, End;
+    LOOPRDR_COUNTERS C;
+    PWCHAR Slash;
+    HANDLE F;
+
+    Seconds = EnvNumber(L"RDBSS_LT_SECONDS", 60);
+    Flags = EnvNumber(L"RDBSS_LT_FLAGS", 0);
+    Seed = EnvNumber(L"RDBSS_LT_SEED", 7);
+    if (!LoopSetUp(&Before))
+        return;
+    CreateDirectoryW(P(L, FALSE, L"lt"), NULL);
+    for (File = 0; File < LT_FILES; ++File)
+    {
+        WCHAR Name[32];
+
+        StringCchPrintfW(Name, RTL_NUMBER_OF(Name), L"lt\\f%lu.bin", File);
+        F = CreateFileW(P(L, TRUE, Name), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                        CREATE_ALWAYS, 0, NULL);
+        ok(F != INVALID_HANDLE_VALUE, "create %ls: %lu\n", Name, GetLastError());
+        if (F != INVALID_HANDLE_VALUE)
+            CloseHandle(F);
+    }
+    LoopOptions(0, Flags);
+    StringCchPrintfW(Root, RTL_NUMBER_OF(Root), L"%s\\lt", UNC_ROOT);
+
+    GetModuleFileNameW(NULL, Exe, MAX_PATH);
+    Slash = wcsrchr(Exe, L'\\');
+    if (Slash != NULL)
+        StringCchCopyW(Slash + 1, MAX_PATH - (Slash + 1 - Exe), L"rdbsshostile.exe");
+    RtlZeroMemory(&Si, sizeof(Si));
+    Si.cb = sizeof(Si);
+    RtlZeroMemory(&Partner, sizeof(Partner));
+    RtlZeroMemory(&Victim, sizeof(Victim));
+    /* The shared table must exist before the other processes open it: the
+     * partner creates or opens the same named mapping, so either order works */
+    StringCchPrintfW(Cmd, RTL_NUMBER_OF(Cmd), L"\"%s\" lt %s %lu %lu 1 1 1", Exe, Root, Seconds, Seed + 1);
+    ok(CreateProcessW(Exe, Cmd, NULL, NULL, FALSE, 0, NULL, NULL, &Si, &Partner), "start partner: %lu\n", GetLastError());
+
+    /* The victim process: started and terminated in a loop by a thread of
+     * ours would complicate things; do it from here, in slices, while this
+     * process's own threads run */
+    {
+        HANDLE Self;
+        static LT_ARGS Args;
+
+        Args.Root = Root;
+        Args.Seconds = Seconds;
+        Args.Seed = Seed;
+        Self = CreateThread(NULL, 0, LtSelfThread, &Args, 0, NULL);
+        End = GetTickCount() + Seconds * 1000;
+        while ((LONG)(GetTickCount() - End) < 0)
+        {
+            StringCchPrintfW(Cmd, RTL_NUMBER_OF(Cmd), L"\"%s\" lt %s %lu %lu 2 0 0", Exe, Root, Seconds + 60, Seed + 100 + Victims);
+            if (CreateProcessW(Exe, Cmd, NULL, NULL, FALSE, 0, NULL, NULL, &Si, &Victim))
+            {
+                Sleep(1000 + (Victims * 7919) % 2000);
+                TerminateProcess(Victim.hProcess, 99);
+                WaitForSingleObject(Victim.hProcess, 60000);
+                CloseHandle(Victim.hProcess);
+                CloseHandle(Victim.hThread);
+                ++Victims;
+            }
+            else
+            {
+                Sleep(1000);
+            }
+        }
+        ok(WaitForSingleObject(Self, 300000) == WAIT_OBJECT_0, "the torture threads of this process did not end\n");
+        CloseHandle(Self);
+        Problems = Args.Problems;
+    }
+    trace("lock torture (kmtest process): %lu problems; %lu victim processes terminated\n", Problems, Victims);
+    ok_eq_ulong(Problems, 0UL);
+
+    if (Partner.hProcess != NULL)
+    {
+        Code = 0xFFFFFFFF;
+        ok(WaitForSingleObject(Partner.hProcess, 300000) == WAIT_OBJECT_0, "partner did not end\n");
+        GetExitCodeProcess(Partner.hProcess, &Code);
+        ok(Code == 0, "partner reported %lu problems\n", Code);
+        CloseHandle(Partner.hProcess);
+        CloseHandle(Partner.hThread);
+    }
+
+    /* Everything released: each range free for a new handle */
+    Sleep(500);
+    for (File = 0; File < LT_FILES; ++File)
+    {
+        WCHAR Name[32];
+        ULONG Region;
+
+        StringCchPrintfW(Name, RTL_NUMBER_OF(Name), L"lt\\f%lu.bin", File);
+        F = CreateFileW(P(L, TRUE, Name), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                        OPEN_EXISTING, 0, NULL);
+        if (F == INVALID_HANDLE_VALUE)
+            continue;
+        for (Region = 0; Region < 2; ++Region)
+        {
+            OVERLAPPED Ov;
+            LONGLONG Offset = Region ? LT_HIGH_BASE : 0;
+
+            RtlZeroMemory(&Ov, sizeof(Ov));
+            Ov.Offset = (DWORD)Offset;
+            Ov.OffsetHigh = (DWORD)(Offset >> 32);
+            ok(LockFileEx(F, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, (LT_SLOTS + 3) * LT_SLOT, 0, &Ov),
+               "file %lu region %lu: a lock is left behind (%lu)\n", File, Region, GetLastError());
+            UnlockFileEx(F, 0, (LT_SLOTS + 3) * LT_SLOT, 0, &Ov);
+        }
+        CloseHandle(F);
+    }
+    LoopCounters(&C);
+    trace("loopback: locks %ld, unlocks %ld, pended %ld, granted after a wait %ld, cancelled %ld, timed out %ld, pending now %ld\n",
+          C.Locks, C.Unlocks, C.LocksPended, C.LocksPendingGranted, C.LocksPendingCancelled, C.LocksPendingTimedOut,
+          C.LocksPendingNow);
+    ok(C.LocksPendingNow == 0, "%ld locks still pending at the mini-redirector\n", C.LocksPendingNow);
+    LoopOptions(FCB_ALL_CACHE, 0);
     LoopTearDown(&Before);
 }

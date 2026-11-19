@@ -47,6 +47,7 @@ KMT_TESTFUNC Test_RdbssLoopStress;
 KMT_TESTFUNC Test_RdbssRaces;
 KMT_TESTFUNC Test_RdbssDupComplete;
 KMT_TESTFUNC Test_RdbssHostile;
+KMT_TESTFUNC Test_RdbssLockTorture;
 KMT_TESTFUNC Test_RdbssCopy;
 KMT_TESTFUNC Test_RtlAvlTree;
 KMT_TESTFUNC Test_RtlCaptureContext;
@@ -107,6 +108,7 @@ const KMT_TEST TestList[] =
     { "-RdbssRaces",                  Test_RdbssRaces },
     { "-RdbssDupComplete",            Test_RdbssDupComplete },
     { "-RdbssHostile",                Test_RdbssHostile },
+    { "-RdbssLockTorture",            Test_RdbssLockTorture },
     { "-RdbssCopy",                   Test_RdbssCopy },
     { "RtlAvlTree",                   Test_RtlAvlTree },
     { "RtlException",                 Test_RtlException },

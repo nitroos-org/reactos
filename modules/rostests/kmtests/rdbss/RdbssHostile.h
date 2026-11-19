@@ -302,13 +302,51 @@ HostileOneOp(
                 }
                 _SEH2_END;
 
-                /* Must be refused while the view exists (STATUS_USER_MAPPED_FILE) */
-                Small.QuadPart = HostileRand(&H->Seed) % 4096;
-                SetFilePointerEx(F, Small, NULL, FILE_BEGIN);
-                if (SetEndOfFile(F) && Small.QuadPart < Size.QuadPart)
+                /* Must be refused while the view exists (STATUS_USER_MAPPED_FILE).
+                 * The size queried before the mapping is not the section's:
+                 * another thread may have changed the end of file in between.
+                 * Only an end of file below the section's own size is a
+                 * truncation under the view; at or above it, an extension */
                 {
-                    ++H->Problems;
-                    OutputDebugStringA("RdbssHostile: truncated under a mapped view\n");
+                    typedef LONG (NTAPI *PFN_NTQUERYSECTION)(HANDLE, ULONG, PVOID, SIZE_T, PSIZE_T);
+                    typedef struct { PVOID Base; ULONG Attributes; LARGE_INTEGER Size; } HOSTILE_SECTION_BASIC;
+                    static PFN_NTQUERYSECTION pNtQuerySection;
+                    HOSTILE_SECTION_BASIC Basic;
+                    LARGE_INTEGER Before, After;
+                    BOOL Set;
+
+                    if (pNtQuerySection == NULL)
+                        pNtQuerySection = (PFN_NTQUERYSECTION)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQuerySection");
+                    Basic.Size.QuadPart = -1;
+                    if (pNtQuerySection == NULL || pNtQuerySection(Section, 0, &Basic, sizeof(Basic), NULL) < 0)
+                        Basic.Size.QuadPart = -1;
+                    if (!GetFileSizeEx(F, &Before))
+                        Before.QuadPart = -1;
+                    Small.QuadPart = HostileRand(&H->Seed) % 4096;
+                    SetFilePointerEx(F, Small, NULL, FILE_BEGIN);
+                    Set = SetEndOfFile(F);
+                    if (!GetFileSizeEx(F, &After))
+                        After.QuadPart = -1;
+                    if (Set && Small.QuadPart < Size.QuadPart)
+                    {
+                        CHAR Msg[256];
+
+                        if (Basic.Size.QuadPart < 0 || Small.QuadPart < Basic.Size.QuadPart)
+                        {
+                            ++H->Problems;
+                            _snprintf(Msg, sizeof(Msg), "RdbssHostile: truncated under a mapped view: "
+                                      "queried %I64d, section %I64d, end of file before %I64d, set %I64d, after %I64d\n",
+                                      Size.QuadPart, Basic.Size.QuadPart, Before.QuadPart, Small.QuadPart, After.QuadPart);
+                        }
+                        else
+                        {
+                            _snprintf(Msg, sizeof(Msg), "RdbssHostile: extension past a smaller section (size changed "
+                                      "before the mapping): queried %I64d, section %I64d, before %I64d, set %I64d, after %I64d\n",
+                                      Size.QuadPart, Basic.Size.QuadPart, Before.QuadPart, Small.QuadPart, After.QuadPart);
+                        }
+                        Msg[sizeof(Msg) - 1] = 0;
+                        OutputDebugStringA(Msg);
+                    }
                 }
                 if (Op == 4)
                     FlushViewOfFile(View, 0);
