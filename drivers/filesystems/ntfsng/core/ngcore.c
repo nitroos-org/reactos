@@ -1076,6 +1076,9 @@ int ngc_delete_stream(ngc_vol *v, ngc_node *n)
 	mutex_lock(&base->mrec_lock);
 	err = ntfs_attr_rm(ni);
 	mutex_unlock(&base->mrec_lock);
+	/* For a non-resident stream ntfs_attr_rm returns the number of clusters it freed: that is success. */
+	if (err > 0)
+		err = 0;
 	if (!err)
 		mark_inode_dirty(VFS_I(base));
 	return err;

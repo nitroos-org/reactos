@@ -791,6 +791,15 @@ static NTSTATUS NgRenameStream(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
     NewName.Length = NewName.MaximumLength = (USHORT)((Chars - 1) * sizeof(WCHAR));
     if (!NgValidName(&NewName))
         return STATUS_OBJECT_NAME_INVALID;
+    {
+        /* ":$DATA" names the type of the default stream ("::$DATA" does too), not a stream called "$DATA" */
+        UNICODE_STRING Type;
+
+        Type.Buffer = (PWCHAR)DataSuffix + 1;
+        Type.Length = Type.MaximumLength = Suffix.Length - sizeof(WCHAR);
+        if (RtlEqualUnicodeString(&NewName, &Type, TRUE))
+            return STATUS_OBJECT_NAME_INVALID;
+    }
     if (RtlEqualUnicodeString(&NewName, &Fcb->Stream, FALSE))
         return STATUS_SUCCESS;                  /* renaming to itself */
     if (RtlEqualUnicodeString(&NewName, &Fcb->Stream, TRUE))
