@@ -609,6 +609,14 @@ ScmReadSecurityDescriptor(
     }
 
     DPRINT("dwBufferLength: %lu\n", dwBufferLength);
+
+    /* A descriptor is at most a few kilobytes (its ACLs are limited to 64 KB each) */
+    if (dwType != REG_BINARY || dwBufferLength < sizeof(SECURITY_DESCRIPTOR_RELATIVE) || dwBufferLength > 0x30000)
+    {
+        DPRINT1("Ignoring a stored security descriptor of type %lu and size %lu\n", dwType, dwBufferLength);
+        goto done;
+    }
+
     pRelativeSD = RtlAllocateHeap(RtlGetProcessHeap(),
                                   HEAP_ZERO_MEMORY,
                                   dwBufferLength);
@@ -626,6 +634,15 @@ ScmReadSecurityDescriptor(
                                &dwBufferLength);
     if (dwError != ERROR_SUCCESS)
     {
+        goto done;
+    }
+
+    /* A malformed descriptor grants nothing: the caller assigns the default one instead */
+    if (dwType != REG_BINARY || !ScmIsValidStoredSD(pRelativeSD, dwBufferLength))
+    {
+        DPRINT1("Ignoring a malformed stored security descriptor (size %lu)\n", dwBufferLength);
+        RtlFreeHeap(RtlGetProcessHeap(), 0, pRelativeSD);
+        pRelativeSD = NULL;
         goto done;
     }
 

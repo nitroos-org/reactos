@@ -10,113 +10,112 @@
 
 #include "services.h"
 
+#include <sddl.h>
+#include <strsafe.h>
+
 #define NDEBUG
 #include <debug.h>
 
-static PSID pNullSid = NULL;
-static PSID pWorldSid = NULL;
 static PSID pLocalSystemSid = NULL;
-static PSID pAuthenticatedUserSid = NULL;
-static PSID pAliasAdminsSid = NULL;
+static PSID pWorldSid = NULL;
 
-static PACL pDefaultDacl = NULL;
-static PACL pDefaultSacl = NULL;
 static PACL pPipeDacl = NULL;
 
+/* Self-relative descriptors, process heap */
 static PSECURITY_DESCRIPTOR pDefaultSD = NULL;
+PSECURITY_DESCRIPTOR pScmManagerSD = NULL;
 PSECURITY_DESCRIPTOR pPipeSD = NULL;
+
+/*
+ * The descriptors below are the ones Windows uses (Windows Server 2022 build 20348, read with
+ * QueryServiceObjectSecurity / "sc sdshow"). "Service Security and Access Rights" (learn.microsoft.com)
+ * describes the same grants: on the service control manager, local interactive and service logons get
+ * connect, enumerate, query lock status and read control, every authenticated user (a network logon too)
+ * connect only, LocalSystem also the boot configuration, administrators everything; on a service,
+ * interactive and service logons get the query rights, interrogate and user-defined controls, LocalSystem
+ * also start, stop and pause, administrators everything.
+ */
+static const WCHAR ScmManagerSddl[] =
+    L"O:SYG:SY"
+    L"D:(A;;CC;;;AU)(A;;CCLCRPRC;;;IU)(A;;CCLCRPRC;;;SU)(A;;CCLCRPWPRC;;;SY)(A;;KA;;;BA)(A;;CC;;;AC)"
+    L"(A;;CC;;;S-1-15-3-1024-528118966-3876874398-709513571-1907873084-3598227634-3698730060-278077788-3990600205)"
+    L"S:(AU;FA;KA;;;WD)(AU;OIIOFA;GA;;;WD)";
+
+static const WCHAR ScmDefaultServiceSddl[] =
+    L"O:SYG:SY"
+    L"D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLOCRRC;;;IU)(A;;CCLCSWLOCRRC;;;SU)"
+    L"S:(AU;FA;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;WD)";
+
+/*
+ * Services of this tree whose Windows descriptor differs from the default one (same source). Used when the
+ * service has no stored descriptor yet (first boot, or a service created by an INF): the stored one is
+ * written from it. These are the grants applications rely on, e.g. an interactive user may start the
+ * Windows Installer service and the DNS client, every authenticated user Windows Update.
+ */
+static const struct
+{
+    PCWSTR pszServiceName;
+    PCWSTR pszSddl;
+} ScmBuiltinServiceSddl[] =
+{
+    { L"AudioSrv",      L"O:SYG:SYD:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLOCRRC;;;IU)(A;;CCLCSWLOCRRC;;;SU)(A;;CCLCSWLORC;;;AC)" },
+    { L"BITS",          L"O:BAG:BAD:(A;CI;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLOCRRC;;;IU)(A;;CCLCSWLOCRRC;;;SU)" },
+    { L"CertPropSvc",   L"O:BAG:BAD:(A;CI;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(A;;CCDCLCSWRPWPDTLOCRRC;;;BA)(A;;CCLCSWLOCRRC;;;IU)(A;;CCLCSWLOCRRC;;;SU)" },
+    { L"DcomLaunch",    L"O:SYG:SYD:(A;;CCLCLORC;;;AU)(A;;CCDCLCSWRPWPDTLORCWDWO;;;SY)(A;;CCLCSWRPWPDTLORCWDWO;;;BA)(A;;CCLCLO;;;BU)" },
+    { L"Dhcp",          L"O:SYG:SYD:(A;;CCLCSWLOCRRC;;;AU)(A;;CCLCSWRPWPDTLOCRRC;;;NO)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWRPLOCRRC;;;S-1-2-1)(A;;CCLCSWRPWPDTLOCRRC;;;SY)" },
+    { L"Dnscache",      L"O:SYG:SYD:(A;CI;CCLCSWRPLORC;;;BU)(A;CI;CCLCSWRPDTLORC;;;BA)(A;CI;CCLCSWRPDTLORC;;;SY)(A;;CCLCSWRPLORC;;;IU)(A;CI;CCLCSWRPLORC;;;NS)(A;CI;CCLCSWRPLORC;;;LS)(A;CI;CCLCSWRPDTLORC;;;NO)(A;CI;CCLCSWRPLORC;;;AC)" },
+    { L"EventLog",      L"O:SYG:SYD:(A;;CCLCSWLOCRRC;;;AU)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;LCLO;;;AC)" },
+    { L"MpsSvc",        L"O:SYG:SYD:(A;;CCLCLORC;;;AU)(A;;CCDCLCSWRPLORCWDWO;;;SY)(A;;CCLCSWRPLORCWDWO;;;BA)(A;;CCLCLO;;;BU)" },
+    /* Windows gives administrators less here but still grants them OpenService(SERVICE_ALL_ACCESS) (measured):
+       administrators keep every right, the grants to users are Windows' */
+    { L"MSIServer",     L"O:SYG:SYD:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWRPLOCRRC;;;IU)(A;;CCLCSWRPLOCRRC;;;SU)" },
+    { L"RpcSs",         L"O:SYG:SYD:(A;;CCLCLORC;;;AU)(A;;CCDCLCSWRPWPDTLORCWDWO;;;SY)(A;;CCLCSWRPWPDTLORCWDWO;;;BA)(A;;CCLCLO;;;BU)" },
+    { L"SamSs",         L"O:SYG:SYD:(A;;CCLCSWLORC;;;AU)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLO;;;IU)(A;;CCLCSWLO;;;BU)" },
+    { L"SCardSvr",      L"O:BAG:BAD:(A;CI;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(A;;CCDCLCSWRPWPDTLOCRRC;;;BA)(A;;CCLCSWLOCRRC;;;IU)(A;;CCLCSWLOCRRC;;;SU)" },
+    { L"ScDeviceEnum",  L"O:BAG:BAD:(A;CI;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(A;;CCDCLCSWRPWPDTLOCRRC;;;BA)(A;;CCLCSWLOCRRC;;;IU)(A;;CCLCSWLOCRRC;;;SU)" },
+    { L"Schedule",      L"O:SYG:SYD:(A;;CCLCSWLORC;;;AU)(A;;CCLCSWRPDTLOCRRCWDWO;;;BA)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(A;;CCLCSWLORC;;;BU)" },
+    { L"seclogon",      L"O:SYG:SYD:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWRPDTLOCRRC;;;IU)(A;;CCLCSWDTLOCRRC;;;SU)(A;;CCLCSWRPDTLOCRRC;;;AU)" },
+    { L"Spooler",       L"O:SYG:SYD:(A;;CCLCSWLOCRRC;;;AU)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWRPWPDTLOCRRC;;;SY)" },
+    { L"W32Time",       L"O:SYG:SYD:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLOCRRC;;;IU)(A;;CCLCSWLOCRRC;;;SU)(A;;CCLCSWRPLOCRRC;;;LS)(A;;CCSWWPLORC;;;LS)" },
+    { L"wuauserv",      L"O:SYG:SYD:(A;;CCLCSWRPLORC;;;AU)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)" },
+};
+
+static const WCHAR ScmServiceSaclSddl[] = L"S:(AU;FA;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;WD)";
 
 
 /* FUNCTIONS ****************************************************************/
 
-static
-VOID
-ScmFreeSids(VOID)
-{
-    if (pNullSid != NULL)
-        RtlFreeHeap(RtlGetProcessHeap(), 0, pNullSid);
-
-    if (pWorldSid != NULL)
-        RtlFreeHeap(RtlGetProcessHeap(), 0, pWorldSid);
-
-    if (pLocalSystemSid != NULL)
-        RtlFreeHeap(RtlGetProcessHeap(), 0, pLocalSystemSid);
-
-    if (pAuthenticatedUserSid != NULL)
-        RtlFreeHeap(RtlGetProcessHeap(), 0, pAuthenticatedUserSid);
-
-    if (pAliasAdminsSid != NULL)
-        RtlFreeHeap(RtlGetProcessHeap(), 0, pAliasAdminsSid);
-}
-
-
+/* An SDDL string as a self-relative descriptor on the process heap */
 static
 DWORD
-ScmCreateSids(VOID)
+ScmSddlToSD(
+    _In_ PCWSTR pszSddl,
+    _Out_ PSECURITY_DESCRIPTOR *ppSD)
 {
-    SID_IDENTIFIER_AUTHORITY NullAuthority = {SECURITY_NULL_SID_AUTHORITY};
-    SID_IDENTIFIER_AUTHORITY WorldAuthority = {SECURITY_WORLD_SID_AUTHORITY};
-    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
-    PULONG pSubAuthority;
-    ULONG ulLength1 = RtlLengthRequiredSid(1);
-    ULONG ulLength2 = RtlLengthRequiredSid(2);
+    PSECURITY_DESCRIPTOR pLocalSD = NULL;
+    ULONG ulLength = 0;
 
-    /* Create the Null SID */
-    pNullSid = RtlAllocateHeap(RtlGetProcessHeap(), 0, ulLength1);
-    if (pNullSid == NULL)
+    *ppSD = NULL;
+
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(pszSddl,
+                                                              SDDL_REVISION_1,
+                                                              &pLocalSD,
+                                                              &ulLength))
     {
+        DWORD dwError = GetLastError();
+        DPRINT1("Descriptor %S failed to convert (Error %lu)\n", pszSddl, dwError);
+        return dwError;
+    }
+
+    *ppSD = RtlAllocateHeap(RtlGetProcessHeap(), 0, ulLength);
+    if (*ppSD == NULL)
+    {
+        LocalFree(pLocalSD);
         return ERROR_OUTOFMEMORY;
     }
 
-    RtlInitializeSid(pNullSid, &NullAuthority, 1);
-    pSubAuthority = RtlSubAuthoritySid(pNullSid, 0);
-    *pSubAuthority = SECURITY_NULL_RID;
-
-    /* Create the World SID */
-    pWorldSid = RtlAllocateHeap(RtlGetProcessHeap(), 0, ulLength1);
-    if (pWorldSid == NULL)
-    {
-        return ERROR_OUTOFMEMORY;
-    }
-
-    RtlInitializeSid(pWorldSid, &WorldAuthority, 1);
-    pSubAuthority = RtlSubAuthoritySid(pWorldSid, 0);
-    *pSubAuthority = SECURITY_WORLD_RID;
-
-    /* Create the LocalSystem SID */
-    pLocalSystemSid = RtlAllocateHeap(RtlGetProcessHeap(), 0, ulLength1);
-    if (pLocalSystemSid == NULL)
-    {
-        return ERROR_OUTOFMEMORY;
-    }
-
-    RtlInitializeSid(pLocalSystemSid, &NtAuthority, 1);
-    pSubAuthority = RtlSubAuthoritySid(pLocalSystemSid, 0);
-    *pSubAuthority = SECURITY_LOCAL_SYSTEM_RID;
-
-    /* Create the AuthenticatedUser SID */
-    pAuthenticatedUserSid = RtlAllocateHeap(RtlGetProcessHeap(), 0, ulLength1);
-    if (pAuthenticatedUserSid == NULL)
-    {
-        return ERROR_OUTOFMEMORY;
-    }
-
-    RtlInitializeSid(pAuthenticatedUserSid, &NtAuthority, 1);
-    pSubAuthority = RtlSubAuthoritySid(pAuthenticatedUserSid, 0);
-    *pSubAuthority = SECURITY_AUTHENTICATED_USER_RID;
-
-    /* Create the AliasAdmins SID */
-    pAliasAdminsSid = RtlAllocateHeap(RtlGetProcessHeap(), 0, ulLength2);
-    if (pAliasAdminsSid == NULL)
-    {
-        return ERROR_OUTOFMEMORY;
-    }
-
-    RtlInitializeSid(pAliasAdminsSid, &NtAuthority, 2);
-    pSubAuthority = RtlSubAuthoritySid(pAliasAdminsSid, 0);
-    *pSubAuthority = SECURITY_BUILTIN_DOMAIN_RID;
-    pSubAuthority = RtlSubAuthoritySid(pAliasAdminsSid, 1);
-    *pSubAuthority = DOMAIN_ALIAS_RID_ADMINS;
+    RtlCopyMemory(*ppSD, pLocalSD, ulLength);
+    LocalFree(pLocalSD);
 
     return ERROR_SUCCESS;
 }
@@ -124,60 +123,48 @@ ScmCreateSids(VOID)
 
 static
 DWORD
-ScmCreateAcls(VOID)
+ScmCreateSids(VOID)
+{
+    SID_IDENTIFIER_AUTHORITY WorldAuthority = {SECURITY_WORLD_SID_AUTHORITY};
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+
+    pWorldSid = RtlAllocateHeap(RtlGetProcessHeap(), 0, RtlLengthRequiredSid(1));
+    if (pWorldSid == NULL)
+        return ERROR_OUTOFMEMORY;
+    RtlInitializeSid(pWorldSid, &WorldAuthority, 1);
+    *RtlSubAuthoritySid(pWorldSid, 0) = SECURITY_WORLD_RID;
+
+    pLocalSystemSid = RtlAllocateHeap(RtlGetProcessHeap(), 0, RtlLengthRequiredSid(1));
+    if (pLocalSystemSid == NULL)
+        return ERROR_OUTOFMEMORY;
+    RtlInitializeSid(pLocalSystemSid, &NtAuthority, 1);
+    *RtlSubAuthoritySid(pLocalSystemSid, 0) = SECURITY_LOCAL_SYSTEM_RID;
+
+    return ERROR_SUCCESS;
+}
+
+
+static
+VOID
+ScmFreeSids(VOID)
+{
+    if (pWorldSid != NULL)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, pWorldSid);
+
+    if (pLocalSystemSid != NULL)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, pLocalSystemSid);
+}
+
+
+static
+DWORD
+ScmCreatePipeSD(VOID)
 {
     ULONG ulLength;
+    NTSTATUS Status;
 
-    /* Create DACL */
-    ulLength = sizeof(ACL) +
-               (sizeof(ACE) + RtlLengthSid(pLocalSystemSid)) +
-               (sizeof(ACE) + RtlLengthSid(pAliasAdminsSid)) +
-               (sizeof(ACE) + RtlLengthSid(pAuthenticatedUserSid));
-
-    pDefaultDacl = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, ulLength);
-    if (pDefaultDacl == NULL)
-        return ERROR_OUTOFMEMORY;
-
-    RtlCreateAcl(pDefaultDacl, ulLength, ACL_REVISION);
-
-    RtlAddAccessAllowedAce(pDefaultDacl,
-                           ACL_REVISION,
-                           READ_CONTROL | SERVICE_ENUMERATE_DEPENDENTS | SERVICE_INTERROGATE |
-                           SERVICE_PAUSE_CONTINUE | SERVICE_QUERY_CONFIG | SERVICE_QUERY_STATUS |
-                           SERVICE_START | SERVICE_STOP | SERVICE_USER_DEFINED_CONTROL,
-                           pLocalSystemSid);
-
-    RtlAddAccessAllowedAce(pDefaultDacl,
-                           ACL_REVISION,
-                           SERVICE_ALL_ACCESS,
-                           pAliasAdminsSid);
-
-    RtlAddAccessAllowedAce(pDefaultDacl,
-                           ACL_REVISION,
-                           READ_CONTROL | SERVICE_ENUMERATE_DEPENDENTS | SERVICE_INTERROGATE |
-                           SERVICE_QUERY_CONFIG | SERVICE_QUERY_STATUS | SERVICE_USER_DEFINED_CONTROL,
-                           pAuthenticatedUserSid);
-
-    /* Create SACL */
-    ulLength = sizeof(ACL) +
-               (sizeof(ACE) + RtlLengthSid(pNullSid));
-
-    pDefaultSacl = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, ulLength);
-    if (pDefaultSacl == NULL)
-        return ERROR_OUTOFMEMORY;
-
-    RtlCreateAcl(pDefaultSacl, ulLength, ACL_REVISION);
-
-    RtlAddAuditAccessAce(pDefaultSacl,
-                         ACL_REVISION,
-                         SERVICE_ALL_ACCESS,
-                         pNullSid,
-                         FALSE,
-                         TRUE);
-
-    /* Create the pipe DACL */
-    ulLength = sizeof(ACL) +
-               (sizeof(ACE) + RtlLengthSid(pWorldSid));
+    /* The control pipes: everybody may connect */
+    ulLength = sizeof(ACL) + (sizeof(ACE) + RtlLengthSid(pWorldSid));
 
     pPipeDacl = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, ulLength);
     if (pPipeDacl == NULL)
@@ -190,94 +177,12 @@ ScmCreateAcls(VOID)
                            GENERIC_ALL,
                            pWorldSid);
 
-    return ERROR_SUCCESS;
-}
-
-
-static
-VOID
-ScmFreeAcls(VOID)
-{
-    if (pDefaultDacl != NULL)
-        RtlFreeHeap(RtlGetProcessHeap(), 0, pDefaultDacl);
-
-    if (pDefaultSacl != NULL)
-        RtlFreeHeap(RtlGetProcessHeap(), 0, pDefaultSacl);
-
-    if (pPipeDacl != NULL)
-        RtlFreeHeap(RtlGetProcessHeap(), 0, pPipeDacl);
-}
-
-
-static
-DWORD
-ScmCreateDefaultSD(VOID)
-{
-    NTSTATUS Status;
-
-    /* Create the absolute security descriptor */
-    pDefaultSD = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(SECURITY_DESCRIPTOR));
-    if (pDefaultSD == NULL)
-        return ERROR_OUTOFMEMORY;
-
-    DPRINT("pDefaultSD %p\n", pDefaultSD);
-
-    Status = RtlCreateSecurityDescriptor(pDefaultSD,
-                                         SECURITY_DESCRIPTOR_REVISION);
-    if (!NT_SUCCESS(Status))
-        return RtlNtStatusToDosError(Status);
-
-    Status = RtlSetOwnerSecurityDescriptor(pDefaultSD,
-                                           pLocalSystemSid,
-                                           FALSE);
-    if (!NT_SUCCESS(Status))
-        return RtlNtStatusToDosError(Status);
-
-    Status = RtlSetGroupSecurityDescriptor(pDefaultSD,
-                                           pLocalSystemSid,
-                                           FALSE);
-    if (!NT_SUCCESS(Status))
-        return RtlNtStatusToDosError(Status);
-
-    Status = RtlSetDaclSecurityDescriptor(pDefaultSD,
-                                          TRUE,
-                                          pDefaultDacl,
-                                          FALSE);
-    if (!NT_SUCCESS(Status))
-        return RtlNtStatusToDosError(Status);
-
-    Status = RtlSetSaclSecurityDescriptor(pDefaultSD,
-                                          TRUE,
-                                          pDefaultSacl,
-                                          FALSE);
-    if (!NT_SUCCESS(Status))
-        return RtlNtStatusToDosError(Status);
-
-    return ERROR_SUCCESS;
-}
-
-
-static
-VOID
-ScmFreeDefaultSD(VOID)
-{
-    if (pDefaultSD != NULL)
-        RtlFreeHeap(RtlGetProcessHeap(), 0, pDefaultSD);
-}
-
-
-static
-DWORD
-ScmCreatePipeSD(VOID)
-{
-    NTSTATUS Status;
-
     /* Create the absolute security descriptor */
     pPipeSD = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(SECURITY_DESCRIPTOR));
     if (pPipeSD == NULL)
         return ERROR_OUTOFMEMORY;
 
-    DPRINT("pPipeSD %p\n", pDefaultSD);
+    DPRINT("pPipeSD %p\n", pPipeSD);
 
     Status = RtlCreateSecurityDescriptor(pPipeSD,
                                          SECURITY_DESCRIPTOR_REVISION);
@@ -313,59 +218,115 @@ ScmFreePipeSD(VOID)
 {
     if (pPipeSD != NULL)
         RtlFreeHeap(RtlGetProcessHeap(), 0, pPipeSD);
+
+    if (pPipeDacl != NULL)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, pPipeDacl);
 }
 
 
+static
+DWORD
+ScmCopySD(
+    _In_ PSECURITY_DESCRIPTOR pSource,
+    _Out_ PSECURITY_DESCRIPTOR *ppSecurityDescriptor)
+{
+    ULONG ulLength = RtlLengthSecurityDescriptor(pSource);
+
+    *ppSecurityDescriptor = RtlAllocateHeap(RtlGetProcessHeap(), 0, ulLength);
+    if (*ppSecurityDescriptor == NULL)
+        return ERROR_OUTOFMEMORY;
+
+    RtlCopyMemory(*ppSecurityDescriptor, pSource, ulLength);
+    return ERROR_SUCCESS;
+}
+
+
+/* The default descriptor of a new service (self-relative, process heap: the caller frees it) */
 DWORD
 ScmCreateDefaultServiceSD(
     PSECURITY_DESCRIPTOR *ppSecurityDescriptor)
 {
-    PSECURITY_DESCRIPTOR pRelativeSD = NULL;
-    DWORD dwBufferLength = 0;
-    NTSTATUS Status;
-    DWORD dwError = ERROR_SUCCESS;
+    *ppSecurityDescriptor = NULL;
 
-    /* Convert the absolute SD to a self-relative SD */
-    Status = RtlAbsoluteToSelfRelativeSD(pDefaultSD,
-                                         NULL,
-                                         &dwBufferLength);
-    if (Status != STATUS_BUFFER_TOO_SMALL)
+    if (pDefaultSD == NULL)
+        return ERROR_INVALID_SECURITY_DESCR;
+
+    return ScmCopySD(pDefaultSD, ppSecurityDescriptor);
+}
+
+
+/* The default descriptor itself, read-only */
+PSECURITY_DESCRIPTOR
+ScmGetDefaultServiceSD(VOID)
+{
+    return pDefaultSD;
+}
+
+
+/*
+ * The descriptor a service gets when it has none stored: the Windows one for the services listed above,
+ * else the default one.
+ */
+DWORD
+ScmCreateServiceSDByName(
+    _In_ PCWSTR pszServiceName,
+    _Out_ PSECURITY_DESCRIPTOR *ppSecurityDescriptor)
+{
+    WCHAR szSddl[512];
+    ULONG i;
+
+    for (i = 0; i < ARRAYSIZE(ScmBuiltinServiceSddl); i++)
     {
-        dwError = RtlNtStatusToDosError(Status);
-        goto done;
+        if (_wcsicmp(pszServiceName, ScmBuiltinServiceSddl[i].pszServiceName) != 0)
+            continue;
+
+        if (FAILED(StringCchCopyW(szSddl, ARRAYSIZE(szSddl), ScmBuiltinServiceSddl[i].pszSddl)) ||
+            FAILED(StringCchCatW(szSddl, ARRAYSIZE(szSddl), ScmServiceSaclSddl)))
+            break;
+
+        if (ScmSddlToSD(szSddl, ppSecurityDescriptor) == ERROR_SUCCESS)
+            return ERROR_SUCCESS;
+        break;
     }
 
-    DPRINT("BufferLength %lu\n", dwBufferLength);
+    return ScmCreateDefaultServiceSD(ppSecurityDescriptor);
+}
 
-    pRelativeSD = RtlAllocateHeap(RtlGetProcessHeap(),
-                                  HEAP_ZERO_MEMORY,
-                                  dwBufferLength);
-    if (pRelativeSD == NULL)
-    {
-        dwError = ERROR_OUTOFMEMORY;
-        goto done;
-    }
-    DPRINT("pRelativeSD %p\n", pRelativeSD);
 
-    Status = RtlAbsoluteToSelfRelativeSD(pDefaultSD,
-                                         pRelativeSD,
-                                         &dwBufferLength);
-    if (!NT_SUCCESS(Status))
-    {
-        dwError = RtlNtStatusToDosError(Status);
-        goto done;
-    }
+/*
+ * A descriptor read from the registry is used only when it is a complete, valid self-relative descriptor of
+ * the given length with an owner and a group. A malformed one must not grant anything: the caller falls
+ * back to the default descriptor.
+ */
+BOOL
+ScmIsValidStoredSD(
+    _In_ PSECURITY_DESCRIPTOR pSecurityDescriptor,
+    _In_ DWORD dwLength)
+{
+    PSID pOwner = NULL, pGroup = NULL;
+    BOOLEAN bDefaulted;
 
-    *ppSecurityDescriptor = pRelativeSD;
+    if (dwLength < sizeof(SECURITY_DESCRIPTOR_RELATIVE))
+        return FALSE;
 
-done:
-    if (dwError != ERROR_SUCCESS)
-    {
-        if (pRelativeSD != NULL)
-            RtlFreeHeap(RtlGetProcessHeap(), 0, pRelativeSD);
-    }
+    if (!RtlValidRelativeSecurityDescriptor(pSecurityDescriptor,
+                                            dwLength,
+                                            OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION))
+        return FALSE;
 
-    return dwError;
+    if (!(((PISECURITY_DESCRIPTOR_RELATIVE)pSecurityDescriptor)->Control & SE_SELF_RELATIVE))
+        return FALSE;
+
+    if (RtlLengthSecurityDescriptor(pSecurityDescriptor) > dwLength)
+        return FALSE;
+
+    if (!NT_SUCCESS(RtlGetOwnerSecurityDescriptor(pSecurityDescriptor, &pOwner, &bDefaulted)) || pOwner == NULL)
+        return FALSE;
+
+    if (!NT_SUCCESS(RtlGetGroupSecurityDescriptor(pSecurityDescriptor, &pGroup, &bDefaulted)) || pGroup == NULL)
+        return FALSE;
+
+    return TRUE;
 }
 
 
@@ -378,11 +339,11 @@ ScmInitializeSecurity(VOID)
     if (dwError != ERROR_SUCCESS)
         return dwError;
 
-    dwError = ScmCreateAcls();
+    dwError = ScmSddlToSD(ScmDefaultServiceSddl, &pDefaultSD);
     if (dwError != ERROR_SUCCESS)
         return dwError;
 
-    dwError = ScmCreateDefaultSD();
+    dwError = ScmSddlToSD(ScmManagerSddl, &pScmManagerSD);
     if (dwError != ERROR_SUCCESS)
         return dwError;
 
@@ -398,8 +359,13 @@ VOID
 ScmShutdownSecurity(VOID)
 {
     ScmFreePipeSD();
-    ScmFreeDefaultSD();
-    ScmFreeAcls();
+
+    if (pScmManagerSD != NULL)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, pScmManagerSD);
+
+    if (pDefaultSD != NULL)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, pDefaultSD);
+
     ScmFreeSids();
 }
 

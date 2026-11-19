@@ -1,0 +1,163 @@
+/*
+ * PROJECT:     ReactOS API tests
+ * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
+ * PURPOSE:     ServiceAccessCheck: the opens that succeed per caller and object, measured on Windows
+ *              Server 2022 (build 20348); every other open of the right list fails with 5.
+ *              WRITE_OWNER and ACCESS_SYSTEM_SECURITY depend on enabled privileges and are tested apart.
+ *              Callers: system = LocalSystem; admin = interactive logon of an administrator, full token;
+ *              nobadmin = LocalSystem with Administrators deny-only; std / stdnet = interactive / network
+ *              logon of a standard user; restr = std with the restricting SIDs Everyone and Users;
+ *              anon = the anonymous token; lsvc / nsvc = LocalService / NetworkService.
+ * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
+ */
+
+#define MGR_ALL "CONNECT CREATE_SERVICE ENUMERATE_SERVICE LOCK QUERY_LOCK_STATUS MODIFY_BOOT_CONFIG DELETE READ_CONTROL WRITE_DAC MAXIMUM_ALLOWED GENERIC_READ GENERIC_WRITE GENERIC_EXECUTE GENERIC_ALL ALL_ACCESS"
+#define MGR_USER "CONNECT ENUMERATE_SERVICE QUERY_LOCK_STATUS READ_CONTROL MAXIMUM_ALLOWED GENERIC_READ"
+#define SVC_ALL "QUERY_CONFIG CHANGE_CONFIG QUERY_STATUS ENUMERATE_DEPENDENTS START STOP PAUSE_CONTINUE INTERROGATE USER_DEFINED_CONTROL DELETE READ_CONTROL WRITE_DAC MAXIMUM_ALLOWED GENERIC_READ GENERIC_WRITE GENERIC_EXECUTE GENERIC_ALL ALL_ACCESS"
+/* The default service descriptor, LocalSystem's entry, and the owner LocalSystem's WRITE_DAC */
+#define SVC_SY "QUERY_CONFIG QUERY_STATUS ENUMERATE_DEPENDENTS START STOP PAUSE_CONTINUE INTERROGATE USER_DEFINED_CONTROL READ_CONTROL MAXIMUM_ALLOWED GENERIC_READ GENERIC_EXECUTE"
+#define SVC_SY_OWNER SVC_SY " WRITE_DAC"
+/* The default service descriptor, the entries of interactive and service logons */
+#define SVC_IU "QUERY_CONFIG QUERY_STATUS ENUMERATE_DEPENDENTS INTERROGATE USER_DEFINED_CONTROL READ_CONTROL MAXIMUM_ALLOWED GENERIC_READ"
+/* Schedule and wuauserv give Authenticated Users read rights without the user-defined controls */
+#define SVC_AU_READ "QUERY_CONFIG QUERY_STATUS ENUMERATE_DEPENDENTS INTERROGATE READ_CONTROL MAXIMUM_ALLOWED GENERIC_READ"
+
+    { "system", "SCM", MGR_ALL },
+    { "system", "scmp_def", SVC_ALL },
+    { "system", "scmp_ustart", SVC_ALL },
+    { "system", "scmp_deny", SVC_ALL },
+    { "system", "scmp_owner", SVC_ALL },
+    { "system", "scmp_ownrt", SVC_ALL },
+    { "system", "scmp_null", SVC_ALL },
+    { "system", "scmp_empty", "READ_CONTROL WRITE_DAC MAXIMUM_ALLOWED" },
+    { "system", "scmp_lsvc", SVC_ALL },
+    { "system", "scmp_gx", SVC_ALL },
+    { "system", "scmp_gr", SVC_ALL },
+    { "system", "LanmanWorkstation", SVC_ALL },
+    { "system", "EventLog", SVC_ALL },
+    { "system", "Spooler", SVC_ALL },
+    { "system", "wuauserv", SVC_ALL },
+    { "system", "Schedule", SVC_ALL },
+    { "system", "mrxsmb", SVC_ALL },
+    { "system", "Tcpip", SVC_ALL },
+
+    { "nobadmin", "SCM", "CONNECT ENUMERATE_SERVICE QUERY_LOCK_STATUS MODIFY_BOOT_CONFIG READ_CONTROL WRITE_DAC MAXIMUM_ALLOWED GENERIC_READ" },
+    { "nobadmin", "scmp_def", SVC_SY_OWNER },
+    { "nobadmin", "scmp_ustart", SVC_SY_OWNER },
+    { "nobadmin", "scmp_deny", SVC_SY_OWNER },
+    { "nobadmin", "scmp_owner", SVC_SY },
+    { "nobadmin", "scmp_ownrt", SVC_SY },
+    { "nobadmin", "scmp_null", SVC_ALL },
+    { "nobadmin", "scmp_empty", "READ_CONTROL WRITE_DAC MAXIMUM_ALLOWED" },
+    { "nobadmin", "scmp_lsvc", SVC_SY_OWNER },
+    { "nobadmin", "scmp_gx", SVC_SY_OWNER },
+    { "nobadmin", "scmp_gr", SVC_SY_OWNER },
+    { "nobadmin", "LanmanWorkstation", SVC_SY_OWNER },
+    { "nobadmin", "EventLog", SVC_SY_OWNER },
+    { "nobadmin", "Spooler", SVC_SY_OWNER },
+    { "nobadmin", "wuauserv", SVC_ALL },
+    { "nobadmin", "Schedule", SVC_ALL },
+    { "nobadmin", "mrxsmb", SVC_SY_OWNER },
+    { "nobadmin", "Tcpip", SVC_SY_OWNER },
+
+    { "admin", "SCM", MGR_ALL },
+    { "admin", "scmp_def", SVC_ALL },
+    { "admin", "scmp_ustart", SVC_ALL },
+    { "admin", "scmp_deny", SVC_ALL },
+    { "admin", "scmp_owner", SVC_ALL },
+    { "admin", "scmp_ownrt", SVC_ALL },
+    { "admin", "scmp_null", SVC_ALL },
+    { "admin", "scmp_empty", "" },
+    { "admin", "scmp_lsvc", SVC_ALL },
+    { "admin", "scmp_gx", SVC_ALL },
+    { "admin", "scmp_gr", SVC_ALL },
+    { "admin", "LanmanWorkstation", SVC_ALL },
+    { "admin", "EventLog", SVC_ALL },
+    { "admin", "Spooler", SVC_ALL },
+    { "admin", "wuauserv", SVC_ALL },
+    { "admin", "Schedule", "QUERY_CONFIG QUERY_STATUS ENUMERATE_DEPENDENTS START PAUSE_CONTINUE INTERROGATE USER_DEFINED_CONTROL READ_CONTROL WRITE_DAC MAXIMUM_ALLOWED GENERIC_READ" },
+    { "admin", "mrxsmb", SVC_ALL },
+    { "admin", "Tcpip", SVC_ALL },
+
+    { "std", "SCM", MGR_USER },
+    { "std", "scmp_def", SVC_IU },
+    { "std", "scmp_ustart", "QUERY_CONFIG QUERY_STATUS ENUMERATE_DEPENDENTS START INTERROGATE USER_DEFINED_CONTROL READ_CONTROL MAXIMUM_ALLOWED GENERIC_READ" },
+    { "std", "scmp_deny", "QUERY_CONFIG QUERY_STATUS ENUMERATE_DEPENDENTS PAUSE_CONTINUE INTERROGATE USER_DEFINED_CONTROL READ_CONTROL MAXIMUM_ALLOWED GENERIC_READ" },
+    { "std", "scmp_owner", "READ_CONTROL WRITE_DAC MAXIMUM_ALLOWED" },
+    { "std", "scmp_ownrt", "QUERY_STATUS MAXIMUM_ALLOWED" },
+    { "std", "scmp_null", SVC_ALL },
+    { "std", "scmp_empty", "" },
+    { "std", "scmp_lsvc", SVC_IU },
+    { "std", "scmp_gx", "START STOP PAUSE_CONTINUE USER_DEFINED_CONTROL READ_CONTROL MAXIMUM_ALLOWED GENERIC_EXECUTE" },
+    { "std", "scmp_gr", "QUERY_CONFIG QUERY_STATUS ENUMERATE_DEPENDENTS INTERROGATE READ_CONTROL MAXIMUM_ALLOWED GENERIC_READ" },
+    { "std", "msiserver", "QUERY_CONFIG QUERY_STATUS ENUMERATE_DEPENDENTS START INTERROGATE USER_DEFINED_CONTROL READ_CONTROL MAXIMUM_ALLOWED GENERIC_READ" },
+    { "std", "LanmanWorkstation", SVC_IU },
+    { "std", "EventLog", SVC_IU },
+    { "std", "Spooler", SVC_IU },
+    { "std", "wuauserv", "QUERY_CONFIG QUERY_STATUS ENUMERATE_DEPENDENTS START INTERROGATE READ_CONTROL MAXIMUM_ALLOWED GENERIC_READ" },
+    { "std", "Schedule", SVC_AU_READ },
+    { "std", "mrxsmb", SVC_IU },
+    { "std", "Tcpip", SVC_IU },
+
+    { "stdnet", "SCM", "CONNECT MAXIMUM_ALLOWED" },
+    { "stdnet", "scmp_def", "" },
+    { "stdnet", "scmp_ustart", "START MAXIMUM_ALLOWED" },
+    { "stdnet", "scmp_deny", "QUERY_CONFIG QUERY_STATUS ENUMERATE_DEPENDENTS PAUSE_CONTINUE INTERROGATE USER_DEFINED_CONTROL READ_CONTROL MAXIMUM_ALLOWED GENERIC_READ" },
+    { "stdnet", "scmp_owner", "READ_CONTROL WRITE_DAC MAXIMUM_ALLOWED" },
+    { "stdnet", "scmp_ownrt", "QUERY_STATUS MAXIMUM_ALLOWED" },
+    { "stdnet", "scmp_null", SVC_ALL },
+    { "stdnet", "scmp_empty", "" },
+    { "stdnet", "scmp_lsvc", "" },
+    { "stdnet", "scmp_gx", "START STOP PAUSE_CONTINUE USER_DEFINED_CONTROL READ_CONTROL MAXIMUM_ALLOWED GENERIC_EXECUTE" },
+    { "stdnet", "scmp_gr", "QUERY_CONFIG QUERY_STATUS ENUMERATE_DEPENDENTS INTERROGATE READ_CONTROL MAXIMUM_ALLOWED GENERIC_READ" },
+    { "stdnet", "msiserver", "" },
+    { "stdnet", "LanmanWorkstation", "" },
+    { "stdnet", "EventLog", SVC_IU },
+    { "stdnet", "Spooler", SVC_IU },
+    { "stdnet", "wuauserv", "QUERY_CONFIG QUERY_STATUS ENUMERATE_DEPENDENTS START INTERROGATE READ_CONTROL MAXIMUM_ALLOWED GENERIC_READ" },
+    { "stdnet", "Schedule", SVC_AU_READ },
+    { "stdnet", "mrxsmb", "" },
+    { "stdnet", "Tcpip", "" },
+
+    { "restr", "SCM", "" },
+    { "anon", "SCM", "" },
+
+    { "lsvc", "SCM", MGR_USER },
+    { "lsvc", "scmp_def", SVC_IU },
+    { "lsvc", "scmp_ustart", SVC_IU },
+    { "lsvc", "scmp_deny", SVC_SY },
+    { "lsvc", "scmp_owner", "" },
+    { "lsvc", "scmp_ownrt", "" },
+    { "lsvc", "scmp_null", SVC_ALL },
+    { "lsvc", "scmp_empty", "" },
+    { "lsvc", "scmp_lsvc", "QUERY_CONFIG QUERY_STATUS ENUMERATE_DEPENDENTS START STOP INTERROGATE USER_DEFINED_CONTROL READ_CONTROL MAXIMUM_ALLOWED GENERIC_READ" },
+    { "lsvc", "scmp_gx", "" },
+    { "lsvc", "scmp_gr", "" },
+    { "lsvc", "msiserver", "QUERY_CONFIG QUERY_STATUS ENUMERATE_DEPENDENTS START INTERROGATE USER_DEFINED_CONTROL READ_CONTROL MAXIMUM_ALLOWED GENERIC_READ" },
+    { "lsvc", "LanmanWorkstation", SVC_IU },
+    { "lsvc", "EventLog", SVC_IU },
+    { "lsvc", "Spooler", SVC_IU },
+    { "lsvc", "wuauserv", "QUERY_CONFIG QUERY_STATUS ENUMERATE_DEPENDENTS START INTERROGATE READ_CONTROL MAXIMUM_ALLOWED GENERIC_READ" },
+    { "lsvc", "Schedule", SVC_AU_READ },
+    { "lsvc", "mrxsmb", SVC_IU },
+    { "lsvc", "Tcpip", SVC_IU },
+
+    { "nsvc", "SCM", MGR_USER },
+    { "nsvc", "scmp_def", SVC_IU },
+    { "nsvc", "scmp_ustart", SVC_IU },
+    { "nsvc", "scmp_deny", SVC_SY },
+    { "nsvc", "scmp_owner", "" },
+    { "nsvc", "scmp_ownrt", "" },
+    { "nsvc", "scmp_null", SVC_ALL },
+    { "nsvc", "scmp_empty", "" },
+    { "nsvc", "scmp_lsvc", SVC_IU },
+    { "nsvc", "scmp_gx", "" },
+    { "nsvc", "scmp_gr", "" },
+    { "nsvc", "msiserver", "QUERY_CONFIG QUERY_STATUS ENUMERATE_DEPENDENTS START INTERROGATE USER_DEFINED_CONTROL READ_CONTROL MAXIMUM_ALLOWED GENERIC_READ" },
+    { "nsvc", "LanmanWorkstation", SVC_IU },
+    { "nsvc", "EventLog", SVC_IU },
+    { "nsvc", "Spooler", SVC_IU },
+    { "nsvc", "wuauserv", "QUERY_CONFIG QUERY_STATUS ENUMERATE_DEPENDENTS START INTERROGATE READ_CONTROL MAXIMUM_ALLOWED GENERIC_READ" },
+    { "nsvc", "Schedule", SVC_AU_READ },
+    { "nsvc", "mrxsmb", SVC_IU },
+    { "nsvc", "Tcpip", SVC_IU },

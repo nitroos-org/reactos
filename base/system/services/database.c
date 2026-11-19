@@ -20,6 +20,7 @@
 #include <strsafe.h>
 #include <ntsecapi.h>
 #include <svcsid.h>
+#include <ndk/iofuncs.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -68,7 +69,9 @@ ScmCreateNewControlPipe(
     DWORD dwKeyDisposition;
     DWORD dwKeySize;
     DWORD dwError;
+    DWORD dwAttempt = 0;
 
+retry:
     /* Get the service number */
     if (bSecurityServiceProcess == FALSE)
     {
@@ -137,10 +140,15 @@ ScmCreateNewControlPipe(
     SecurityAttributes.lpSecurityDescriptor = pPipeSD;
     SecurityAttributes.bInheritHandle = FALSE;
 
+    /*
+     * The pipe must be ours: FILE_FLAG_FIRST_PIPE_INSTANCE fails when somebody else created a pipe of that
+     * name first (the name is predictable), and a single instance keeps anybody from adding a server end
+     * the service process could connect to. A name that is taken: use the next number.
+     */
     pServiceImage->hControlPipe = CreateNamedPipeW(szControlPipeName,
-                                                   PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+                                                   PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
                                                    PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
-                                                   100,
+                                                   1,
                                                    8000,
                                                    4,
                                                    PipeTimeout,
@@ -148,8 +156,17 @@ ScmCreateNewControlPipe(
     DPRINT("CreateNamedPipeW(%S) done\n", szControlPipeName);
     if (pServiceImage->hControlPipe == INVALID_HANDLE_VALUE)
     {
-        DPRINT1("Failed to create control pipe\n");
-        return GetLastError();
+        dwError = GetLastError();
+        if (bSecurityServiceProcess == FALSE &&
+            (dwError == ERROR_ACCESS_DENIED || dwError == ERROR_PIPE_BUSY) &&
+            ++dwAttempt < 64)
+        {
+            DPRINT1("Control pipe %S exists already (Error %lu), taking the next one\n", szControlPipeName, dwError);
+            goto retry;
+        }
+
+        DPRINT1("Failed to create control pipe (Error %lu)\n", dwError);
+        return dwError;
     }
 
     return ERROR_SUCCESS;
@@ -2256,7 +2273,8 @@ CreateServiceListEntry(LPCWSTR lpServiceName,
         if (lpService->pSecurityDescriptor == NULL)
         {
             DPRINT("No security descriptor found! Assign default security descriptor\n");
-            dwError = ScmCreateDefaultServiceSD(&lpService->pSecurityDescriptor);
+            dwError = ScmCreateServiceSDByName(lpService->lpServiceName,
+                                               &lpService->pSecurityDescriptor);
             if (dwError != ERROR_SUCCESS)
                 goto done;
 
@@ -2824,12 +2842,82 @@ ScmControlService(
 }
 
 
+/*
+ * Who connected to the control pipe: the process the service controller started, or another process of the
+ * service's own account (a service program may hand the dispatcher to a child process). The process id comes
+ * from the pipe, not from what the client writes. Anybody else - any process may open the pipe - is refused
+ * before the service controller sends it anything.
+ */
+static BOOL
+ScmIsControlPipeClientValid(
+    _In_ PSERVICE_IMAGE pImage)
+{
+    static const LUID SystemLuid = SYSTEM_LUID;
+    TOKEN_STATISTICS ClientStats, ServiceStats;
+    IO_STATUS_BLOCK IoStatusBlock;
+    HANDLE hProcess = NULL, hToken = NULL;
+    LUID ServiceLogon = SystemLuid;
+    ULONG ulClientPid = 0;
+    DWORD dwLength;
+    NTSTATUS Status;
+    BOOL bValid = FALSE;
+
+    Status = NtFsControlFile(pImage->hControlPipe,
+                             NULL,
+                             NULL,
+                             NULL,
+                             &IoStatusBlock,
+                             FSCTL_PIPE_GET_CONNECTION_ATTRIBUTE,
+                             (PVOID)"ClientProcessId",
+                             sizeof("ClientProcessId"),
+                             &ulClientPid,
+                             sizeof(ulClientPid));
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("Cannot query the control pipe client (Status 0x%08lx)\n", Status);
+        return FALSE;
+    }
+
+    if (ulClientPid == pImage->dwProcessId)
+        return TRUE;
+
+    /* Another process: it must run in the logon session of the service's account */
+    if (pImage->hToken != NULL)
+    {
+        if (!GetTokenInformation(pImage->hToken, TokenStatistics, &ServiceStats, sizeof(ServiceStats), &dwLength))
+            return FALSE;
+        ServiceLogon = ServiceStats.AuthenticationId;
+    }
+
+    hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, ulClientPid);
+    if (hProcess == NULL)
+        goto done;
+    if (!OpenProcessToken(hProcess, TOKEN_QUERY, &hToken))
+        goto done;
+    if (!GetTokenInformation(hToken, TokenStatistics, &ClientStats, sizeof(ClientStats), &dwLength))
+        goto done;
+
+    bValid = RtlEqualLuid(&ClientStats.AuthenticationId, &ServiceLogon);
+
+done:
+    if (hToken != NULL)
+        CloseHandle(hToken);
+    if (hProcess != NULL)
+        CloseHandle(hProcess);
+
+    DPRINT1("Control pipe of %S: client process %lu, started process %lu: %s\n",
+            pImage->pszImagePath, ulClientPid, pImage->dwProcessId, bValid ? "same account" : "refused");
+    return bValid;
+}
+
+
 static DWORD
 ScmWaitForServiceConnect(PSERVICE Service)
 {
     DWORD dwRead = 0;
     DWORD dwProcessId = 0;
     DWORD dwError = ERROR_SUCCESS;
+    DWORD dwRefused = 0;
     BOOL bResult;
     OVERLAPPED Overlapped = {0};
 #if 0
@@ -2840,6 +2928,8 @@ ScmWaitForServiceConnect(PSERVICE Service)
 
     DPRINT("ScmWaitForServiceConnect()\n");
 
+reconnect:
+    RtlZeroMemory(&Overlapped, sizeof(Overlapped));
     bResult = ConnectNamedPipe(Service->lpImage->hControlPipe,
                                &Overlapped);
     if (bResult == FALSE)
@@ -2902,6 +2992,16 @@ ScmWaitForServiceConnect(PSERVICE Service)
     }
 
     DPRINT("Control pipe connected\n");
+
+    /* Not the service's process: drop it and wait for the service again */
+    if (ScmIsSecurityService(Service->lpImage) == FALSE &&
+        !ScmIsControlPipeClientValid(Service->lpImage))
+    {
+        DisconnectNamedPipe(Service->lpImage->hControlPipe);
+        if (++dwRefused < 4)
+            goto reconnect;
+        return ERROR_SERVICE_REQUEST_TIMEOUT;
+    }
 
     Overlapped.hEvent = NULL;
 

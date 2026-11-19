@@ -29,7 +29,7 @@
 typedef struct _SCMGR_HANDLE
 {
     DWORD Tag;
-    DWORD DesiredAccess;
+    DWORD GrantedAccess; /* What the access check granted the caller at open time */
 } SCMGR_HANDLE;
 
 
@@ -57,12 +57,11 @@ typedef struct _SERVICE_HANDLE
    SC_MANAGER_MODIFY_BOOT_CONFIG | \
    SC_MANAGER_CREATE_SERVICE)
 
+/* "Service Security and Access Rights": GENERIC_EXECUTE = STANDARD_RIGHTS_EXECUTE, CONNECT and LOCK */
 #define SC_MANAGER_EXECUTE \
   (STANDARD_RIGHTS_EXECUTE | \
    SC_MANAGER_LOCK | \
-   SC_MANAGER_ENUMERATE_SERVICE | \
-   SC_MANAGER_CONNECT | \
-   SC_MANAGER_CREATE_SERVICE)
+   SC_MANAGER_CONNECT)
 
 
 #define SERVICE_READ \
@@ -277,33 +276,293 @@ ScmCheckServiceStartName(
 }
 
 
+/*
+ * The token of the RPC client of the current call (an impersonation or identification token), for
+ * AccessCheck. The thread impersonates only inside this function and reverts on every path. No token
+ * (no call active, or the transport could not impersonate the client) means no access: a failed
+ * impersonation must never leave the check running against the service controller's own token.
+ */
+static DWORD
+ScmGetClientToken(
+    _Out_ PHANDLE phToken)
+{
+    RPC_STATUS RpcStatus;
+    DWORD dwError = ERROR_SUCCESS;
+
+    *phToken = NULL;
+
+    RpcStatus = RpcImpersonateClient(NULL);
+    if (RpcStatus != RPC_S_OK)
+    {
+        DPRINT1("RpcImpersonateClient() failed (Status %lx)\n", RpcStatus);
+        return ERROR_ACCESS_DENIED;
+    }
+
+    if (!OpenThreadToken(GetCurrentThread(),
+                         TOKEN_QUERY,
+                         TRUE,
+                         phToken))
+    {
+        DPRINT1("OpenThreadToken() failed (Error %lu)\n", GetLastError());
+        *phToken = NULL;
+        dwError = ERROR_ACCESS_DENIED;
+    }
+
+    if (RpcRevertToSelf() != RPC_S_OK)
+    {
+        /* Never return to the caller while impersonating */
+        RevertToSelf();
+    }
+
+    return dwError;
+}
+
+
+/*
+ * AccessCheck of the client token against a descriptor. dwDesiredAccess may hold generic rights and
+ * MAXIMUM_ALLOWED. Returns ERROR_SUCCESS and the granted rights, or the error of the check:
+ * ERROR_ACCESS_DENIED, or ERROR_PRIVILEGE_NOT_HELD for ACCESS_SYSTEM_SECURITY without SeSecurityPrivilege
+ * enabled (what Windows returns, measured).
+ */
+static DWORD
+ScmAccessCheckToken(
+    _In_ HANDLE hToken,
+    _In_ PSECURITY_DESCRIPTOR pSecurityDescriptor,
+    _In_ DWORD dwDesiredAccess,
+    _In_ PGENERIC_MAPPING pMapping,
+    _Out_ PDWORD pdwGrantedAccess)
+{
+    union
+    {
+        PRIVILEGE_SET Set;
+        BYTE Buffer[sizeof(PRIVILEGE_SET) + 4 * sizeof(LUID_AND_ATTRIBUTES)];
+    } Privileges;
+    DWORD dwPrivilegesLength = sizeof(Privileges);
+    DWORD dwGranted = 0;
+    BOOL bAccessStatus = FALSE;
+
+    *pdwGrantedAccess = 0;
+
+    if (pSecurityDescriptor == NULL)
+        return ERROR_ACCESS_DENIED;
+
+    RtlMapGenericMask(&dwDesiredAccess, pMapping);
+
+    if (!AccessCheck(pSecurityDescriptor,
+                     hToken,
+                     dwDesiredAccess,
+                     pMapping,
+                     &Privileges.Set,
+                     &dwPrivilegesLength,
+                     &dwGranted,
+                     &bAccessStatus))
+    {
+        DWORD dwError = GetLastError();
+        DPRINT1("AccessCheck() failed (Error %lu)\n", dwError);
+        return (dwError == ERROR_SUCCESS) ? ERROR_ACCESS_DENIED : dwError;
+    }
+
+    if (!bAccessStatus)
+    {
+        DWORD dwError = GetLastError();
+        return (dwError == ERROR_PRIVILEGE_NOT_HELD) ? ERROR_PRIVILEGE_NOT_HELD : ERROR_ACCESS_DENIED;
+    }
+
+    *pdwGrantedAccess = dwGranted;
+    return ERROR_SUCCESS;
+}
+
+
+/* AccessCheck of the RPC client of the current call */
+static DWORD
+ScmAccessCheckClient(
+    _In_ PSECURITY_DESCRIPTOR pSecurityDescriptor,
+    _In_ DWORD dwDesiredAccess,
+    _In_ PGENERIC_MAPPING pMapping,
+    _Out_ PDWORD pdwGrantedAccess)
+{
+    HANDLE hToken;
+    DWORD dwError;
+
+    *pdwGrantedAccess = 0;
+
+    dwError = ScmGetClientToken(&hToken);
+    if (dwError != ERROR_SUCCESS)
+        return dwError;
+
+    dwError = ScmAccessCheckToken(hToken,
+                                  pSecurityDescriptor,
+                                  dwDesiredAccess,
+                                  pMapping,
+                                  pdwGrantedAccess);
+    CloseHandle(hToken);
+
+    return dwError;
+}
+
+
+/*
+ * The access check at handle open ("Service Security and Access Rights": OpenSCManager and OpenService check
+ * the requested rights against the descriptor of the service control manager or of the service). The
+ * handle keeps the rights that were granted; every operation checks the right it needs against them.
+ * For a service handle the caller holds the service database lock.
+ */
 static DWORD
 ScmCheckAccess(SC_HANDLE Handle,
                DWORD dwDesiredAccess)
 {
     PMANAGER_HANDLE hMgr;
+    PSERVICE_HANDLE hSvc;
+    DWORD dwGranted = 0;
+    DWORD dwError;
 
     hMgr = (PMANAGER_HANDLE)Handle;
     if (hMgr->Handle.Tag == MANAGER_TAG)
     {
-        RtlMapGenericMask(&dwDesiredAccess,
-                          &ScmManagerMapping);
+        /* A caller who may not connect gets access denied, also when it asks for the SACL (measured on
+           Windows: 5, not the 1314 of a caller who may connect but lacks SeSecurityPrivilege) */
+        if (dwDesiredAccess & ACCESS_SYSTEM_SECURITY)
+        {
+            dwError = ScmAccessCheckClient(pScmManagerSD,
+                                           SC_MANAGER_CONNECT,
+                                           &ScmManagerMapping,
+                                           &dwGranted);
+            if (dwError != ERROR_SUCCESS)
+                return dwError;
+        }
 
-        hMgr->Handle.DesiredAccess = dwDesiredAccess;
+        dwError = ScmAccessCheckClient(pScmManagerSD,
+                                       dwDesiredAccess,
+                                       &ScmManagerMapping,
+                                       &dwGranted);
+        if (dwError != ERROR_SUCCESS)
+            return dwError;
 
+        hMgr->Handle.GrantedAccess = dwGranted;
         return ERROR_SUCCESS;
     }
     else if (hMgr->Handle.Tag == SERVICE_TAG)
     {
-        RtlMapGenericMask(&dwDesiredAccess,
-                          &ScmServiceMapping);
+        hSvc = (PSERVICE_HANDLE)Handle;
 
-        hMgr->Handle.DesiredAccess = dwDesiredAccess;
+        /* OpenService without any right is denied, also for administrators (measured on Windows) */
+        if (dwDesiredAccess == 0)
+            return ERROR_ACCESS_DENIED;
 
+        /* Drivers come without a descriptor: they get the default one, as on Windows */
+        if (hSvc->ServiceEntry->pSecurityDescriptor == NULL)
+        {
+            dwError = ScmCreateDefaultServiceSD(&hSvc->ServiceEntry->pSecurityDescriptor);
+            if (dwError != ERROR_SUCCESS)
+                return dwError;
+        }
+
+        dwError = ScmAccessCheckClient(hSvc->ServiceEntry->pSecurityDescriptor,
+                                       dwDesiredAccess,
+                                       &ScmServiceMapping,
+                                       &dwGranted);
+        if (dwError != ERROR_SUCCESS)
+            return dwError;
+
+        hSvc->Handle.GrantedAccess = dwGranted;
         return ERROR_SUCCESS;
     }
 
     return ERROR_INVALID_HANDLE;
+}
+
+
+/*
+ * EnumServicesStatus(Ex): "if the caller does not have the SERVICE_QUERY_STATUS access right to a service,
+ * the service is silently omitted from the list" (Service Security and Access Rights). The caller holds the
+ * service database lock. hToken NULL: nothing is visible.
+ */
+static BOOL
+ScmIsServiceVisible(
+    _In_opt_ HANDLE hToken,
+    _In_ PSERVICE lpService)
+{
+    DWORD dwGranted;
+    PSECURITY_DESCRIPTOR pSD;
+
+    if (hToken == NULL)
+        return FALSE;
+
+    /* A shared lock: a driver without its own descriptor is checked against the default one */
+    pSD = lpService->pSecurityDescriptor;
+    if (pSD == NULL)
+        pSD = ScmGetDefaultServiceSD();
+
+    return ScmAccessCheckToken(hToken,
+                               pSD,
+                               SERVICE_QUERY_STATUS,
+                               &ScmServiceMapping,
+                               &dwGranted) == ERROR_SUCCESS;
+}
+
+
+/*
+ * The status calls (SetServiceStatus, SetServiceBits) name a service by its status handle, a small counter:
+ * they are accepted only from the logon session the service's process runs in (the session of its account
+ * token, LocalSystem's for services without one). The named pipe transport does not tell the client's
+ * process, so the logon session of the client token is what is compared; a standard user's token never
+ * matches a service's.
+ */
+static BOOL
+ScmIsCallerInServiceLogon(
+    _In_ PSERVICE lpService)
+{
+    static const LUID SystemLuid = SYSTEM_LUID;
+    TOKEN_STATISTICS ClientStats, ServiceStats;
+    PSERVICE_IMAGE lpImage;
+    HANDLE hClient = NULL;
+    LUID ServiceLogon;
+    DWORD dwLength;
+    BOOL bResult = FALSE;
+
+    if (ScmGetClientToken(&hClient) != ERROR_SUCCESS)
+        return FALSE;
+    if (!GetTokenInformation(hClient, TokenStatistics, &ClientStats, sizeof(ClientStats), &dwLength))
+        goto done;
+
+    ScmLockDatabaseShared();
+    lpImage = lpService->lpImage;
+    if (lpImage != NULL)
+    {
+        ServiceLogon = SystemLuid;
+        if (lpImage->hToken == NULL ||
+            GetTokenInformation(lpImage->hToken, TokenStatistics, &ServiceStats, sizeof(ServiceStats), &dwLength))
+        {
+            if (lpImage->hToken != NULL)
+                ServiceLogon = ServiceStats.AuthenticationId;
+            bResult = RtlEqualLuid(&ClientStats.AuthenticationId, &ServiceLogon);
+        }
+    }
+    ScmUnlockDatabase();
+
+done:
+    CloseHandle(hClient);
+    return bResult;
+}
+
+
+/* Is the RPC client of the current call LocalSystem */
+static BOOL
+ScmIsCallerLocalSystem(VOID)
+{
+    BYTE Buffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+    HANDLE hToken;
+    DWORD dwLength;
+    BOOL bResult = FALSE;
+
+    if (ScmGetClientToken(&hToken) != ERROR_SUCCESS)
+        return FALSE;
+
+    if (GetTokenInformation(hToken, TokenUser, Buffer, sizeof(Buffer), &dwLength))
+        bResult = IsWellKnownSid(((PTOKEN_USER)Buffer)->User.Sid, WinLocalSystemSid);
+
+    CloseHandle(hToken);
+    return bResult;
 }
 
 
@@ -1108,7 +1367,7 @@ RControlService(
             break;
     }
 
-    if (!RtlAreAllAccessesGranted(hSvc->Handle.DesiredAccess,
+    if (!RtlAreAllAccessesGranted(hSvc->Handle.GrantedAccess,
                                   DesiredAccess))
         return ERROR_ACCESS_DENIED;
 
@@ -1296,7 +1555,7 @@ RDeleteService(
         return ERROR_INVALID_HANDLE;
     }
 
-    if (!RtlAreAllAccessesGranted(hSvc->Handle.DesiredAccess,
+    if (!RtlAreAllAccessesGranted(hSvc->Handle.GrantedAccess,
                                   DELETE))
         return ERROR_ACCESS_DENIED;
 
@@ -1352,7 +1611,7 @@ RLockServiceDatabase(
         return ERROR_INVALID_HANDLE;
     }
 
-    if (!RtlAreAllAccessesGranted(hMgr->Handle.DesiredAccess,
+    if (!RtlAreAllAccessesGranted(hMgr->Handle.GrantedAccess,
                                   SC_MANAGER_LOCK))
         return ERROR_ACCESS_DENIED;
 
@@ -1393,14 +1652,9 @@ RQueryServiceObjectSecurity(
     DWORD dwBytesNeeded;
     DWORD dwError;
 
-    DPRINT("RQueryServiceObjectSecurity() called\n");
+    PMANAGER_HANDLE hMgr;
 
-    hSvc = ScmGetServiceFromHandle(hService);
-    if (hSvc == NULL)
-    {
-        DPRINT1("Invalid service handle\n");
-        return ERROR_INVALID_HANDLE;
-    }
+    DPRINT("RQueryServiceObjectSecurity() called\n");
 
     if (dwSecurityInformation & (DACL_SECURITY_INFORMATION |
                                  GROUP_SECURITY_INFORMATION |
@@ -1410,10 +1664,44 @@ RQueryServiceObjectSecurity(
     if (dwSecurityInformation & SACL_SECURITY_INFORMATION)
         DesiredAccess |= ACCESS_SYSTEM_SECURITY;
 
-    if (!RtlAreAllAccessesGranted(hSvc->Handle.DesiredAccess,
+    /* "A handle to the service control manager or the service" (QueryServiceObjectSecurity) */
+    hMgr = ScmGetServiceManagerFromHandle(hService);
+    if (hMgr != NULL)
+    {
+        if (!RtlAreAllAccessesGranted(hMgr->Handle.GrantedAccess,
+                                      DesiredAccess))
+            return ERROR_ACCESS_DENIED;
+
+        /* The descriptor of the service control manager does not change after the start */
+        Status = RtlQuerySecurityObject(pScmManagerSD,
+                                        dwSecurityInformation,
+                                        (PSECURITY_DESCRIPTOR)lpSecurityDescriptor,
+                                        cbBufSize,
+                                        &dwBytesNeeded);
+        if (NT_SUCCESS(Status))
+        {
+            *pcbBytesNeeded = dwBytesNeeded;
+            return ERROR_SUCCESS;
+        }
+        if (Status == STATUS_BUFFER_TOO_SMALL)
+        {
+            *pcbBytesNeeded = dwBytesNeeded;
+            return ERROR_INSUFFICIENT_BUFFER;
+        }
+        return RtlNtStatusToDosError(Status);
+    }
+
+    hSvc = ScmGetServiceFromHandle(hService);
+    if (hSvc == NULL)
+    {
+        DPRINT1("Invalid service handle\n");
+        return ERROR_INVALID_HANDLE;
+    }
+
+    if (!RtlAreAllAccessesGranted(hSvc->Handle.GrantedAccess,
                                   DesiredAccess))
     {
-        DPRINT("Insufficient access rights! 0x%lx\n", hSvc->Handle.DesiredAccess);
+        DPRINT("Insufficient access rights! 0x%lx\n", hSvc->Handle.GrantedAccess);
         return ERROR_ACCESS_DENIED;
     }
 
@@ -1467,6 +1755,30 @@ RQueryServiceObjectSecurity(
 }
 
 
+/* Map the generic rights of every entry of an ACL (in place) to service rights */
+static
+VOID
+ScmMapGenericAcl(
+    _Inout_opt_ PACL pAcl)
+{
+    PACE_HEADER pAce;
+    ULONG i;
+
+    if (pAcl == NULL)
+        return;
+
+    for (i = 0; i < pAcl->AceCount; i++)
+    {
+        if (!NT_SUCCESS(RtlGetAce(pAcl, i, (PVOID *)&pAce)))
+            break;
+
+        /* Every ACE type keeps its access mask right after the header */
+        if (pAce->AceSize >= sizeof(ACE_HEADER) + sizeof(ACCESS_MASK))
+            RtlMapGenericMask((PACCESS_MASK)(pAce + 1), &ScmServiceMapping);
+    }
+}
+
+
 /* Function 5 */
 DWORD
 WINAPI
@@ -1501,7 +1813,10 @@ RSetServiceObjectSecurity(
         return ERROR_INVALID_PARAMETER;
     }
 
-    if (!RtlValidSecurityDescriptor((PSECURITY_DESCRIPTOR)lpSecurityDescriptor))
+    /* A self-relative descriptor that lies entirely inside the buffer the caller sent */
+    if (!RtlValidRelativeSecurityDescriptor((PSECURITY_DESCRIPTOR)lpSecurityDescriptor,
+                                            dwSecurityDescriptorSize,
+                                            0))
         return ERROR_INVALID_PARAMETER;
 
     if (dwSecurityInformation & SACL_SECURITY_INFORMATION)
@@ -1513,22 +1828,29 @@ RSetServiceObjectSecurity(
     if (dwSecurityInformation & (OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION))
         DesiredAccess |= WRITE_OWNER;
 
-    if ((dwSecurityInformation & OWNER_SECURITY_INFORMATION) &&
-        (((PISECURITY_DESCRIPTOR)lpSecurityDescriptor)->Owner == NULL))
+    /* The descriptor is self-relative: read its owner and group through the Rtl accessors */
+    if (dwSecurityInformation & OWNER_SECURITY_INFORMATION)
     {
-        return ERROR_INVALID_PARAMETER;
+        PSID pOwner = NULL;
+        BOOLEAN bDefaulted;
+        if (!NT_SUCCESS(RtlGetOwnerSecurityDescriptor((PSECURITY_DESCRIPTOR)lpSecurityDescriptor, &pOwner, &bDefaulted)) ||
+            pOwner == NULL)
+            return ERROR_INVALID_PARAMETER;
     }
 
-    if ((dwSecurityInformation & GROUP_SECURITY_INFORMATION) &&
-        (((PISECURITY_DESCRIPTOR)lpSecurityDescriptor)->Group == NULL))
+    if (dwSecurityInformation & GROUP_SECURITY_INFORMATION)
     {
-        return ERROR_INVALID_PARAMETER;
+        PSID pGroup = NULL;
+        BOOLEAN bDefaulted;
+        if (!NT_SUCCESS(RtlGetGroupSecurityDescriptor((PSECURITY_DESCRIPTOR)lpSecurityDescriptor, &pGroup, &bDefaulted)) ||
+            pGroup == NULL)
+            return ERROR_INVALID_PARAMETER;
     }
 
-    if (!RtlAreAllAccessesGranted(hSvc->Handle.DesiredAccess,
+    if (!RtlAreAllAccessesGranted(hSvc->Handle.GrantedAccess,
                                   DesiredAccess))
     {
-        DPRINT1("Insufficient access rights! 0x%lx\n", hSvc->Handle.DesiredAccess);
+        DPRINT1("Insufficient access rights! 0x%lx\n", hSvc->Handle.GrantedAccess);
         return ERROR_ACCESS_DENIED;
     }
 
@@ -1562,6 +1884,23 @@ RSetServiceObjectSecurity(
     dwError = ScmEnsureServiceSD(lpService);
     if (dwError != ERROR_SUCCESS)
         goto Done;
+
+    /* Generic rights in the new entries are stored mapped to service rights (measured on Windows: an entry
+       given as GENERIC_EXECUTE reads back as start, stop, pause, user-defined control and read control) */
+    if (dwSecurityInformation & DACL_SECURITY_INFORMATION)
+    {
+        PACL pAcl = NULL;
+        BOOLEAN bPresent = FALSE, bDefaulted;
+        if (NT_SUCCESS(RtlGetDaclSecurityDescriptor((PSECURITY_DESCRIPTOR)lpSecurityDescriptor, &bPresent, &pAcl, &bDefaulted)) && bPresent)
+            ScmMapGenericAcl(pAcl);
+    }
+    if (dwSecurityInformation & SACL_SECURITY_INFORMATION)
+    {
+        PACL pAcl = NULL;
+        BOOLEAN bPresent = FALSE, bDefaulted;
+        if (NT_SUCCESS(RtlGetSaclSecurityDescriptor((PSECURITY_DESCRIPTOR)lpSecurityDescriptor, &bPresent, &pAcl, &bDefaulted)) && bPresent)
+            ScmMapGenericAcl(pAcl);
+    }
 
     /* Build the new security descriptor */
     Status = RtlSetSecurityObject(dwSecurityInformation,
@@ -1627,10 +1966,10 @@ RQueryServiceStatus(
         return ERROR_INVALID_HANDLE;
     }
 
-    if (!RtlAreAllAccessesGranted(hSvc->Handle.DesiredAccess,
+    if (!RtlAreAllAccessesGranted(hSvc->Handle.GrantedAccess,
                                   SERVICE_QUERY_STATUS))
     {
-        DPRINT("Insufficient access rights! 0x%lx\n", hSvc->Handle.DesiredAccess);
+        DPRINT("Insufficient access rights! 0x%lx\n", hSvc->Handle.GrantedAccess);
         return ERROR_ACCESS_DENIED;
     }
 
@@ -1838,6 +2177,19 @@ RSetServiceStatus(
     if (lpService == NULL)
         return ERROR_INVALID_HANDLE;
 
+    /* Only the service reports its status */
+    if (!ScmIsCallerInServiceLogon(lpService))
+    {
+        /* A stopped service that reports STOPPED again changes nothing */
+        if (lpServiceStatus->dwCurrentState == SERVICE_STOPPED &&
+            lpService->Status.dwCurrentState == SERVICE_STOPPED &&
+            lpService->lpImage == NULL)
+            return ERROR_SUCCESS;
+
+        DPRINT1("SetServiceStatus for %S from outside the service's logon session\n", lpService->lpServiceName);
+        return ERROR_INVALID_HANDLE;
+    }
+
     /* Check current state */
     if (!ScmIsValidServiceState(lpServiceStatus->dwCurrentState))
     {
@@ -2004,8 +2356,20 @@ RNotifyBootConfigStatus(
     SVCCTL_HANDLEW lpMachineName,
     DWORD BootAcceptable)
 {
+    DWORD dwGranted;
+    DWORD dwError;
+
     DPRINT("RNotifyBootConfigStatus(%p %lu)\n",
            lpMachineName, BootAcceptable);
+
+    /* "This function call requires the caller's token to have permission to acquire the
+       SC_MANAGER_MODIFY_BOOT_CONFIG access right" (NotifyBootConfigStatus) */
+    dwError = ScmAccessCheckClient(pScmManagerSD,
+                                   SC_MANAGER_MODIFY_BOOT_CONFIG,
+                                   &ScmManagerMapping,
+                                   &dwGranted);
+    if (dwError != ERROR_SUCCESS)
+        return dwError;
 
     if (BootAcceptable)
         return ScmAcceptBoot();
@@ -2042,9 +2406,12 @@ RI_ScSetServiceBitsW(
         return ERROR_INVALID_HANDLE;
     }
 
-    // FIXME: Validate the status handle
     pService = ScmGetServiceByStatusHandle(hServiceStatus);
     if (pService == NULL)
+        return ERROR_INVALID_HANDLE;
+
+    /* Only the service sets its service bits */
+    if (!ScmIsCallerInServiceLogon(pService))
         return ERROR_INVALID_HANDLE;
 
     if (bSetBitsOn)
@@ -2117,10 +2484,10 @@ RChangeServiceConfigW(
         return ERROR_INVALID_HANDLE;
     }
 
-    if (!RtlAreAllAccessesGranted(hSvc->Handle.DesiredAccess,
+    if (!RtlAreAllAccessesGranted(hSvc->Handle.GrantedAccess,
                                   SERVICE_CHANGE_CONFIG))
     {
-        DPRINT("Insufficient access rights! 0x%lx\n", hSvc->Handle.DesiredAccess);
+        DPRINT("Insufficient access rights! 0x%lx\n", hSvc->Handle.GrantedAccess);
         return ERROR_ACCESS_DENIED;
     }
 
@@ -2478,11 +2845,11 @@ RCreateServiceW(
     }
 
     /* Check access rights */
-    if (!RtlAreAllAccessesGranted(hManager->Handle.DesiredAccess,
+    if (!RtlAreAllAccessesGranted(hManager->Handle.GrantedAccess,
                                   SC_MANAGER_CREATE_SERVICE))
     {
         DPRINT("Insufficient access rights! 0x%lx\n",
-               hManager->Handle.DesiredAccess);
+               hManager->Handle.GrantedAccess);
         return ERROR_ACCESS_DENIED;
     }
 
@@ -2640,10 +3007,11 @@ RCreateServiceW(
             goto done;
     }
 
-    /* Assign the default security descriptor */
+    /* Assign the default security descriptor (the Windows one for the system services that have their own:
+       setup creates some of them, e.g. the DHCP and DNS clients, through this call) */
     if (dwServiceType & SERVICE_WIN32)
     {
-        dwError = ScmCreateDefaultServiceSD(&lpService->pSecurityDescriptor);
+        dwError = ScmCreateServiceSDByName(lpServiceName, &lpService->pSecurityDescriptor);
         if (dwError != ERROR_SUCCESS)
             goto done;
     }
@@ -2800,10 +3168,23 @@ RCreateServiceW(
     if (dwError != ERROR_SUCCESS)
         goto done;
 
-    dwError = ScmCheckAccess(hServiceHandle,
-                             dwDesiredAccess);
-    if (dwError != ERROR_SUCCESS)
-        goto done;
+    /*
+     * The creator holds SC_MANAGER_CREATE_SERVICE and gets the rights it asked for, also none (Windows does
+     * not check the new service's descriptor for them; the advapi32 winetest creates a service with no rights
+     * and then sees DeleteService denied). MAXIMUM_ALLOWED and ACCESS_SYSTEM_SECURITY go through the check.
+     */
+    if (dwDesiredAccess & (MAXIMUM_ALLOWED | ACCESS_SYSTEM_SECURITY))
+    {
+        dwError = ScmCheckAccess(hServiceHandle,
+                                 dwDesiredAccess);
+        if (dwError != ERROR_SUCCESS)
+            goto done;
+    }
+    else
+    {
+        RtlMapGenericMask(&dwDesiredAccess, &ScmServiceMapping);
+        ((PSERVICE_HANDLE)hServiceHandle)->Handle.GrantedAccess = dwDesiredAccess & SERVICE_ALL_ACCESS;
+    }
 
     ScmReferenceService(lpService);
 
@@ -2901,11 +3282,11 @@ REnumDependentServicesW(
     lpService = hSvc->ServiceEntry;
 
     /* A service handle needs SERVICE_ENUMERATE_DEPENDENTS (SC_MANAGER_ENUMERATE_SERVICE is a manager right) */
-    if (!RtlAreAllAccessesGranted(hSvc->Handle.DesiredAccess,
+    if (!RtlAreAllAccessesGranted(hSvc->Handle.GrantedAccess,
                                   SERVICE_ENUMERATE_DEPENDENTS))
     {
         DPRINT("Insufficient access rights! 0x%lx\n",
-               hSvc->Handle.DesiredAccess);
+               hSvc->Handle.GrantedAccess);
         return ERROR_ACCESS_DENIED;
     }
 
@@ -3197,10 +3578,10 @@ RQueryServiceConfigW(
         return ERROR_INVALID_HANDLE;
     }
 
-    if (!RtlAreAllAccessesGranted(hSvc->Handle.DesiredAccess,
+    if (!RtlAreAllAccessesGranted(hSvc->Handle.GrantedAccess,
                                   SERVICE_QUERY_CONFIG))
     {
-        DPRINT("Insufficient access rights! 0x%lx\n", hSvc->Handle.DesiredAccess);
+        DPRINT("Insufficient access rights! 0x%lx\n", hSvc->Handle.GrantedAccess);
         return ERROR_ACCESS_DENIED;
     }
 
@@ -3395,10 +3776,10 @@ RQueryServiceLockStatusW(
         return ERROR_INVALID_HANDLE;
     }
 
-    if (!RtlAreAllAccessesGranted(hMgr->Handle.DesiredAccess,
+    if (!RtlAreAllAccessesGranted(hMgr->Handle.GrantedAccess,
                                   SC_MANAGER_QUERY_LOCK_STATUS))
     {
-        DPRINT("Insufficient access rights! 0x%lx\n", hMgr->Handle.DesiredAccess);
+        DPRINT("Insufficient access rights! 0x%lx\n", hMgr->Handle.GrantedAccess);
         return ERROR_ACCESS_DENIED;
     }
 
@@ -3445,10 +3826,10 @@ RStartServiceW(
         return ERROR_INVALID_HANDLE;
     }
 
-    if (!RtlAreAllAccessesGranted(hSvc->Handle.DesiredAccess,
+    if (!RtlAreAllAccessesGranted(hSvc->Handle.GrantedAccess,
                                   SERVICE_START))
     {
-        DPRINT("Insufficient access rights! 0x%lx\n", hSvc->Handle.DesiredAccess);
+        DPRINT("Insufficient access rights! 0x%lx\n", hSvc->Handle.GrantedAccess);
         return ERROR_ACCESS_DENIED;
     }
 
@@ -3493,14 +3874,12 @@ RGetServiceDisplayNameW(
     DPRINT("lpDisplayName: %p\n", lpDisplayName);
     DPRINT("*lpcchBuffer: %lu\n", *lpcchBuffer);
 
-#if 0
-    hManager = (PMANAGER_HANDLE)hSCManager;
-    if (hManager->Handle.Tag != MANAGER_TAG)
+    /* Any manager handle will do (measured on Windows: a handle with SC_MANAGER_CONNECT only) */
+    if (ScmGetServiceManagerFromHandle(hSCManager) == NULL)
     {
         DPRINT("Invalid manager handle\n");
         return ERROR_INVALID_HANDLE;
     }
-#endif
 
     /* Get service database entry */
     lpService = ScmGetServiceEntryByName(lpServiceName);
@@ -3555,14 +3934,12 @@ RGetServiceKeyNameW(
     DPRINT("lpServiceName: %p\n", lpServiceName);
     DPRINT("*lpcchBuffer: %lu\n", *lpcchBuffer);
 
-#if 0
-    hManager = (PMANAGER_HANDLE)hSCManager;
-    if (hManager->Handle.Tag != MANAGER_TAG)
+    /* Any manager handle will do (measured on Windows: a handle with SC_MANAGER_CONNECT only) */
+    if (ScmGetServiceManagerFromHandle(hSCManager) == NULL)
     {
         DPRINT("Invalid manager handle\n");
         return ERROR_INVALID_HANDLE;
     }
-#endif
 
     /* Get service database entry */
     lpService = ScmGetServiceEntryByDisplayName(lpDisplayName);
@@ -3936,11 +4313,11 @@ REnumDependentServicesA(
     lpService = hSvc->ServiceEntry;
 
     /* A service handle needs SERVICE_ENUMERATE_DEPENDENTS (SC_MANAGER_ENUMERATE_SERVICE is a manager right) */
-    if (!RtlAreAllAccessesGranted(hSvc->Handle.DesiredAccess,
+    if (!RtlAreAllAccessesGranted(hSvc->Handle.GrantedAccess,
                                   SERVICE_ENUMERATE_DEPENDENTS))
     {
         DPRINT("Insufficient access rights! 0x%lx\n",
-               hSvc->Handle.DesiredAccess);
+               hSvc->Handle.GrantedAccess);
         return ERROR_ACCESS_DENIED;
     }
 
@@ -4265,10 +4642,10 @@ RQueryServiceConfigA(
         return ERROR_INVALID_HANDLE;
     }
 
-    if (!RtlAreAllAccessesGranted(hSvc->Handle.DesiredAccess,
+    if (!RtlAreAllAccessesGranted(hSvc->Handle.GrantedAccess,
                                   SERVICE_QUERY_CONFIG))
     {
-        DPRINT("Insufficient access rights! 0x%lx\n", hSvc->Handle.DesiredAccess);
+        DPRINT("Insufficient access rights! 0x%lx\n", hSvc->Handle.GrantedAccess);
         return ERROR_ACCESS_DENIED;
     }
 
@@ -4496,10 +4873,10 @@ RQueryServiceLockStatusA(
         return ERROR_INVALID_HANDLE;
     }
 
-    if (!RtlAreAllAccessesGranted(hMgr->Handle.DesiredAccess,
+    if (!RtlAreAllAccessesGranted(hMgr->Handle.GrantedAccess,
                                   SC_MANAGER_QUERY_LOCK_STATUS))
     {
-        DPRINT("Insufficient access rights! 0x%lx\n", hMgr->Handle.DesiredAccess);
+        DPRINT("Insufficient access rights! 0x%lx\n", hMgr->Handle.GrantedAccess);
         return ERROR_ACCESS_DENIED;
     }
 
@@ -4537,10 +4914,10 @@ RStartServiceA(
         return ERROR_INVALID_HANDLE;
     }
 
-    if (!RtlAreAllAccessesGranted(hSvc->Handle.DesiredAccess,
+    if (!RtlAreAllAccessesGranted(hSvc->Handle.GrantedAccess,
                                   SERVICE_START))
     {
-        DPRINT("Insufficient access rights! 0x%lx\n", hSvc->Handle.DesiredAccess);
+        DPRINT("Insufficient access rights! 0x%lx\n", hSvc->Handle.GrantedAccess);
         return ERROR_ACCESS_DENIED;
     }
 
@@ -4633,14 +5010,12 @@ RGetServiceDisplayNameA(
     DPRINT("lpDisplayName: %p\n", lpDisplayName);
     DPRINT("*lpcchBuffer: %lu\n", *lpcchBuffer);
 
-#if 0
-    hManager = (PMANAGER_HANDLE)hSCManager;
-    if (hManager->Handle.Tag != MANAGER_TAG)
+    /* Any manager handle will do (measured on Windows: a handle with SC_MANAGER_CONNECT only) */
+    if (ScmGetServiceManagerFromHandle(hSCManager) == NULL)
     {
         DPRINT("Invalid manager handle\n");
         return ERROR_INVALID_HANDLE;
     }
-#endif
 
     /* Get service database entry */
     if (lpServiceName != NULL)
@@ -4754,14 +5129,12 @@ RGetServiceKeyNameA(
     DPRINT("lpServiceName: %p\n", lpServiceName);
     DPRINT("*lpcchBuffer: %lu\n", *lpcchBuffer);
 
-#if 0
-    hManager = (PMANAGER_HANDLE)hSCManager;
-    if (hManager->Handle.Tag != MANAGER_TAG)
+    /* Any manager handle will do (measured on Windows: a handle with SC_MANAGER_CONNECT only) */
+    if (ScmGetServiceManagerFromHandle(hSCManager) == NULL)
     {
         DPRINT("Invalid manager handle\n");
         return ERROR_INVALID_HANDLE;
     }
-#endif
 
     /* Get service database entry */
 
@@ -4873,11 +5246,11 @@ RI_ScGetCurrentGroupStateW(
     }
 
     /* Check for SC_MANAGER_ENUMERATE_SERVICE access right */
-    if (!RtlAreAllAccessesGranted(hManager->Handle.DesiredAccess,
+    if (!RtlAreAllAccessesGranted(hManager->Handle.GrantedAccess,
                                   SC_MANAGER_ENUMERATE_SERVICE))
     {
         DPRINT("Insufficient access rights! 0x%lx\n",
-                hManager->Handle.DesiredAccess);
+                hManager->Handle.GrantedAccess);
         return ERROR_ACCESS_DENIED;
     }
 
@@ -4919,6 +5292,7 @@ REnumServiceGroupW(
     LPBOUNDED_DWORD_256K lpResumeIndex,
     LPCWSTR pszGroupName)
 {
+    HANDLE hClientToken = NULL;
     PMANAGER_HANDLE hManager;
     PSERVICE lpService;
     DWORD dwError = ERROR_SUCCESS;
@@ -4967,16 +5341,19 @@ REnumServiceGroupW(
     }
 
     /* Check access rights */
-    if (!RtlAreAllAccessesGranted(hManager->Handle.DesiredAccess,
+    if (!RtlAreAllAccessesGranted(hManager->Handle.GrantedAccess,
                                   SC_MANAGER_ENUMERATE_SERVICE))
     {
         DPRINT("Insufficient access rights! 0x%lx\n",
-                hManager->Handle.DesiredAccess);
+                hManager->Handle.GrantedAccess);
         return ERROR_ACCESS_DENIED;
     }
 
     if (lpResumeIndex)
         dwLastResumeCount = *lpResumeIndex;
+
+    /* Services the caller may not query are left out: no token, nothing listed */
+    ScmGetClientToken(&hClientToken);
 
     /* Lock the service database shared */
     ScmLockDatabaseShared();
@@ -5007,6 +5384,9 @@ REnumServiceGroupW(
             dwState = SERVICE_INACTIVE;
 
         if ((dwState & dwServiceState) == 0)
+            continue;
+
+        if (!ScmIsServiceVisible(hClientToken, CurrentService))
             continue;
 
         if (pszGroupName)
@@ -5059,6 +5439,9 @@ REnumServiceGroupW(
             dwState = SERVICE_INACTIVE;
 
         if ((dwState & dwServiceState) == 0)
+            continue;
+
+        if (!ScmIsServiceVisible(hClientToken, CurrentService))
             continue;
 
         if (pszGroupName)
@@ -5114,6 +5497,9 @@ REnumServiceGroupW(
         if ((dwState & dwServiceState) == 0)
             continue;
 
+        if (!ScmIsServiceVisible(hClientToken, CurrentService))
+            continue;
+
         if (pszGroupName)
         {
             if (*pszGroupName == 0)
@@ -5164,6 +5550,9 @@ REnumServiceGroupW(
 Done:
     /* Unlock the service database */
     ScmUnlockDatabase();
+
+    if (hClientToken != NULL)
+        CloseHandle(hClientToken);
 
     DPRINT("REnumServiceGroupW() done (Error %lu)\n", dwError);
 
@@ -6261,10 +6650,10 @@ RChangeServiceConfig2W(
         RequiredAccess |= SERVICE_START;
 
     /* Check the access rights */
-    if (!RtlAreAllAccessesGranted(hSvc->Handle.DesiredAccess,
+    if (!RtlAreAllAccessesGranted(hSvc->Handle.GrantedAccess,
                                   RequiredAccess))
     {
-        DPRINT("Insufficient access rights! 0x%lx\n", hSvc->Handle.DesiredAccess);
+        DPRINT("Insufficient access rights! 0x%lx\n", hSvc->Handle.GrantedAccess);
         return ERROR_ACCESS_DENIED;
     }
 
@@ -6479,10 +6868,10 @@ RQueryServiceConfig2A(
         return ERROR_INVALID_HANDLE;
     }
 
-    if (!RtlAreAllAccessesGranted(hSvc->Handle.DesiredAccess,
+    if (!RtlAreAllAccessesGranted(hSvc->Handle.GrantedAccess,
                                   SERVICE_QUERY_CONFIG))
     {
-        DPRINT("Insufficient access rights! 0x%lx\n", hSvc->Handle.DesiredAccess);
+        DPRINT("Insufficient access rights! 0x%lx\n", hSvc->Handle.GrantedAccess);
         return ERROR_ACCESS_DENIED;
     }
 
@@ -6745,10 +7134,10 @@ RQueryServiceConfig2W(
         return ERROR_INVALID_HANDLE;
     }
 
-    if (!RtlAreAllAccessesGranted(hSvc->Handle.DesiredAccess,
+    if (!RtlAreAllAccessesGranted(hSvc->Handle.GrantedAccess,
                                   SERVICE_QUERY_CONFIG))
     {
-        DPRINT("Insufficient access rights! 0x%lx\n", hSvc->Handle.DesiredAccess);
+        DPRINT("Insufficient access rights! 0x%lx\n", hSvc->Handle.GrantedAccess);
         return ERROR_ACCESS_DENIED;
     }
 
@@ -6983,10 +7372,10 @@ RQueryServiceStatusEx(
         return ERROR_INVALID_HANDLE;
     }
 
-    if (!RtlAreAllAccessesGranted(hSvc->Handle.DesiredAccess,
+    if (!RtlAreAllAccessesGranted(hSvc->Handle.GrantedAccess,
                                   SERVICE_QUERY_STATUS))
     {
-        DPRINT("Insufficient access rights! 0x%lx\n", hSvc->Handle.DesiredAccess);
+        DPRINT("Insufficient access rights! 0x%lx\n", hSvc->Handle.GrantedAccess);
         return ERROR_ACCESS_DENIED;
     }
 
@@ -7176,6 +7565,7 @@ REnumServicesStatusExW(
     LPBOUNDED_DWORD_256K lpResumeIndex,
     LPCWSTR pszGroupName)
 {
+    HANDLE hClientToken = NULL;
     PMANAGER_HANDLE hManager;
     PSERVICE lpService;
     DWORD dwError = ERROR_SUCCESS;
@@ -7227,16 +7617,19 @@ REnumServicesStatusExW(
     }
 
     /* Check access rights */
-    if (!RtlAreAllAccessesGranted(hManager->Handle.DesiredAccess,
+    if (!RtlAreAllAccessesGranted(hManager->Handle.GrantedAccess,
                                   SC_MANAGER_ENUMERATE_SERVICE))
     {
         DPRINT("Insufficient access rights 0x%lx\n",
-               hManager->Handle.DesiredAccess);
+               hManager->Handle.GrantedAccess);
         return ERROR_ACCESS_DENIED;
     }
 
     if (lpResumeIndex)
         dwLastResumeCount = *lpResumeIndex;
+
+    /* Services the caller may not query are left out: no token, nothing listed */
+    ScmGetClientToken(&hClientToken);
 
     /* Lock the service database shared */
     ScmLockDatabaseShared();
@@ -7267,6 +7660,9 @@ REnumServicesStatusExW(
             dwState = SERVICE_INACTIVE;
 
         if ((dwState & dwServiceState) == 0)
+            continue;
+
+        if (!ScmIsServiceVisible(hClientToken, CurrentService))
             continue;
 
         if (pszGroupName)
@@ -7322,6 +7718,9 @@ REnumServicesStatusExW(
             dwState = SERVICE_INACTIVE;
 
         if ((dwState & dwServiceState) == 0)
+            continue;
+
+        if (!ScmIsServiceVisible(hClientToken, CurrentService))
             continue;
 
         if (pszGroupName)
@@ -7382,6 +7781,9 @@ REnumServicesStatusExW(
             dwState = SERVICE_INACTIVE;
 
         if ((dwState & dwServiceState) == 0)
+            continue;
+
+        if (!ScmIsServiceVisible(hClientToken, CurrentService))
             continue;
 
         if (pszGroupName)
@@ -7449,6 +7851,9 @@ REnumServicesStatusExW(
 Done:
     /* Unlock the service database */
     ScmUnlockDatabase();
+
+    if (hClientToken != NULL)
+        CloseHandle(hClientToken);
 
     DPRINT("REnumServicesStatusExW() done (Error %lu)\n", dwError);
 
@@ -7540,7 +7945,7 @@ RI_ScQueryServiceTagInfo(
     /* FIXME: should check whether client is local */
 
     /* Check access rights */
-    if (!RtlAreAllAccessesGranted(hManager->Handle.DesiredAccess,
+    if (!RtlAreAllAccessesGranted(hManager->Handle.GrantedAccess,
                                   SC_MANAGER_ENUMERATE_SERVICE))
     {
         return ERROR_ACCESS_DENIED;
@@ -7650,7 +8055,10 @@ RI_ScSendPnPMessage(
     DPRINT("RI_ScSendPnPMessage(%p %lx %lu %lu %p)\n",
            hServiceStatus, dwControl, dwEventType, dwEventSize, pEventData);
 
-    /* FIXME: Verify the status handle */
+    /* The Plug and Play manager (LocalSystem) delivers device events; nobody else sends them to a service */
+    if (!ScmIsCallerLocalSystem())
+        return ERROR_ACCESS_DENIED;
+
     pService = ScmGetServiceByStatusHandle(hServiceStatus);
     if (pService == NULL)
         return ERROR_INVALID_HANDLE;
@@ -7757,7 +8165,7 @@ RI_ScValidatePnPService(
     /* FIXME: should check whether client is local */
 
     /* Check access rights */
-    if (!RtlAreAllAccessesGranted(hManager->Handle.DesiredAccess,
+    if (!RtlAreAllAccessesGranted(hManager->Handle.GrantedAccess,
                                   SC_MANAGER_CONNECT))
     {
         DPRINT1("No SC_MANAGER_CONNECT access\n");

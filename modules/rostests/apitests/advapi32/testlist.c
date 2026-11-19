@@ -114,6 +114,7 @@ extern void func_TokenElevation(void);
 extern void func_TokenIntegrity(void);
 extern void func_TokenLogonSid(void);
 extern void func_TokenQueryParity(void);
+extern void func_ServiceAccessCheck(void);
 extern void func_ServiceArgs(void);
 extern void func_ServiceControllerQuery(void);
 extern void func_ServiceEnv(void);
@@ -273,6 +274,7 @@ const struct test winetest_testlist[] =
     { "TokenIntegrity", func_TokenIntegrity },
     { "TokenLogonSid", func_TokenLogonSid },
     { "TokenQueryParity", func_TokenQueryParity },
+    { "ServiceAccessCheck", func_ServiceAccessCheck },
     { "ServiceArgs", func_ServiceArgs },
     { "ServiceControllerQuery", func_ServiceControllerQuery },
     { "ServiceEnv", func_ServiceEnv },

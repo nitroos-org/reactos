@@ -36,6 +36,7 @@
 
 #ifdef __REACTOS__
 #include <wine/irot.h>
+#include "dcomlaunch_c.h"
 #endif
 
 WINE_DEFAULT_DEBUG_CHANNEL(ole);
@@ -394,6 +395,43 @@ static HRESULT rpcss_get_class_object(REFCLSID rclsid, PMInterfacePointer *objre
     RPCSS_CALL_END
 }
 
+#ifdef __REACTOS__
+/*
+ * The caller may not start the service (a standard user and most services): as on Windows, the DCOM
+ * launcher (LocalSystem) starts the service the machine's registration of the class names.
+ */
+static HRESULT launcher_start_local_service(REFCLSID rclsid)
+{
+    RPC_WSTR binding_str = NULL;
+    handle_t binding = NULL;
+    HRESULT hr;
+
+    if (RpcStringBindingComposeW(NULL, (RPC_WSTR)DCOMLAUNCH_START_PROTSEQ, NULL, (RPC_WSTR)DCOMLAUNCH_START_ENDPOINT,
+                                 NULL, &binding_str) != RPC_S_OK)
+        return E_FAIL;
+    if (RpcBindingFromStringBindingW(binding_str, &binding) != RPC_S_OK)
+    {
+        RpcStringFreeW(&binding_str);
+        return E_FAIL;
+    }
+    RpcStringFreeW(&binding_str);
+
+    __TRY
+    {
+        hr = DcomLaunchStartLocalService(binding, rclsid);
+    }
+    __EXCEPT(rpc_filter)
+    {
+        hr = HRESULT_FROM_WIN32(GetExceptionCode());
+    }
+    __ENDTRY
+
+    RpcBindingFree(&binding);
+    TRACE("launcher: 0x%08lx\n", hr);
+    return hr;
+}
+#endif
+
 static DWORD start_local_service(const WCHAR *name, DWORD num, LPCWSTR *params)
 {
     SC_HANDLE handle, hsvc;
@@ -497,6 +535,10 @@ static HRESULT create_local_service(REFCLSID rclsid)
 
         TRACE("LocalService %s, %lu argument(s)\n", debugstr_w(name), num_args);
         r = start_local_service(name, num_args, num_args ? args : NULL);
+#ifdef __REACTOS__
+        if (r == ERROR_ACCESS_DENIED && SUCCEEDED(launcher_start_local_service(rclsid)))
+            r = ERROR_SUCCESS;
+#endif
         if (r != ERROR_SUCCESS)
             hr = REGDB_E_CLASSNOTREG; /* FIXME: check retval */
     }

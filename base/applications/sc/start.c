@@ -45,7 +45,8 @@ BOOL Start(LPCTSTR ServiceName, LPCTSTR *ServiceArgs, INT ArgCount)
                       SERVICE_START | SERVICE_QUERY_STATUS);
     if (hSc == NULL)
     {
-        _tprintf(_T("[SC] OpenService FAILED %lu:\n\n"), GetLastError());
+        /* The text of Windows Server 2022 */
+        _tprintf(_T("[SC] StartService: OpenService FAILED %lu:\n\n"), GetLastError());
         bResult = FALSE;
         goto done;
     }
