@@ -1875,12 +1875,17 @@ ConnThread(LPVOID Parameter)
             TearDown(Conn, STATUS_BAD_NETWORK_PATH, ERROR_BAD_NETPATH);
         }
 
-        /* Idle: no open file, nothing at the server, nothing waiting */
+        /* Idle: no open file, nothing at the server, nothing waiting. A key with explicit
+         * credentials that the driver no longer holds (net use /delete, the last use gone) is not
+         * kept for the idle time: its session, the credentials acquired for it and its password
+         * go now (FreeConn wipes them when the key leaves below) */
         if (Conn->State == ConnUp && Conn->FileCount == 0 && Conn->InFlightCount == 0 &&
             IsListEmpty(&Conn->Pending) && IsListEmpty(&Conn->Backlog) &&
-            TimeReached(Now, Conn->LastActivity, SmbEngConfig.IdleSeconds * 1000))
+            (TimeReached(Now, Conn->LastActivity, SmbEngConfig.IdleSeconds * 1000) ||
+             (Conn->Explicit && *(volatile LONG *)&Conn->Bindings == 0)))
         {
-            SmbEngLog(1, "connection %S\\%S idle for %lu s", Conn->Server, Conn->Share, SmbEngConfig.IdleSeconds);
+            SmbEngLog(1, "connection %S\\%S %s", Conn->Server, Conn->Share,
+                      Conn->Explicit && *(volatile LONG *)&Conn->Bindings == 0 ? "with explicit credentials no longer held" : "idle");
             TearDown(Conn, STATUS_SUCCESS, 0);
         }
         /* A key in back-off stays (without bindings too), so that repeated CONNECTs fail at once
