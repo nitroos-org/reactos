@@ -821,32 +821,19 @@ SmbListVNetRoot(PMRX_V_NET_ROOT VNetRoot, PSMB_VNETROOT Ext)
 
 static VOID SmbDisconnectNow(PMRX_V_NET_ROOT VNetRoot);
 
-/* A failed tree connect that is about the user (the credentials, the token, the identity held for the
- * server), not about the server or the share */
+/*
+ * A failed tree connect that says something about the name itself, the same for every caller (not a
+ * disk share, a name that cannot be one). Every other failure belongs to the caller's own connection:
+ * the engine connects per (logon session, server, share), so what one logon session gets (its
+ * credentials refused, the identity it holds for the server, its own connection limit or back-off,
+ * a cancelled or timed-out wait, a server or share that answers this user only) says nothing about
+ * the share for another one.
+ */
 static
 BOOLEAN
-SmbIsUsersRefusal(NTSTATUS Status)
+SmbIsNameFailure(NTSTATUS Status)
 {
-    switch (Status)
-    {
-        case STATUS_LOGON_FAILURE:
-        case STATUS_WRONG_PASSWORD:
-        case STATUS_NO_SUCH_USER:
-        case STATUS_ACCOUNT_DISABLED:
-        case STATUS_ACCOUNT_LOCKED_OUT:
-        case STATUS_ACCOUNT_RESTRICTION:
-        case STATUS_PASSWORD_EXPIRED:
-        case STATUS_NETWORK_CREDENTIAL_CONFLICT:
-        case STATUS_ACCESS_DENIED:
-        case STATUS_SMB_GUEST_LOGON_BLOCKED:
-        case STATUS_NO_TOKEN:
-        case STATUS_BAD_IMPERSONATION_LEVEL:
-        case STATUS_INVALID_PARAMETER:
-        case SMBCONN_STATUS_PROBE_OK:
-            return TRUE;
-        default:
-            return FALSE;
-    }
+    return Status == STATUS_BAD_DEVICE_TYPE || Status == STATUS_OBJECT_NAME_INVALID;
 }
 
 static
@@ -984,11 +971,11 @@ SmbCreateVNetRoot(PMRX_CREATENETROOT_CONTEXT Context)
 Done:
     SmbWipeCredentials(&Creds);
     Context->VirtualNetRootStatus = Status;
-    if (SmbIsUsersRefusal(Status))
+    if (!NT_SUCCESS(Status) && !SmbIsNameFailure(Status))
     {
-        /* The share is fine; this user's tree connect to it is what failed. Saying the net root failed
+        /* This logon session's connection to the share is what failed. Saying the net root failed
          * would make rdbss mark it bad for everyone who uses it (other connections to the share, and
-         * every later connect to it) until it is scavenged */
+         * every later connect to it, of every logon session) until it is scavenged */
         NetRoot->MRxNetRootState = MRX_NET_ROOT_STATE_GOOD;
         NetRoot->DeviceType = FILE_DEVICE_DISK;
         Context->NetRootStatus = STATUS_SUCCESS;
