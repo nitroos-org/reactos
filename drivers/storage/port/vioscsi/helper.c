@@ -594,6 +594,7 @@ VOID VioScsiVQUnlock(IN PVOID DeviceExtension, IN ULONG MessageID, IN PSTOR_LOCK
     EXIT_FN();
 }
 
+#ifdef VIOSCSI_FIRMWARE
 VOID FirmwareRequest(IN PVOID DeviceExtension, IN PSRB_TYPE Srb)
 {
     PADAPTER_EXTENSION adaptExt;
@@ -724,3 +725,4 @@ VOID FirmwareRequest(IN PVOID DeviceExtension, IN PSRB_TYPE Srb)
     }
     EXIT_FN();
 }
+#endif /* VIOSCSI_FIRMWARE */

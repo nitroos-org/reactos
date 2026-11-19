@@ -1986,10 +1986,12 @@ VOID VioScsiIoControl(IN PVOID DeviceExtension, IN OUT PSRB_TYPE Srb)
                          srbControl->Signature[7]);
             RhelDbgPrint(TRACE_LEVEL_INFORMATION, " <--> IOCTL_SCSI_MINIPORT_NOT_QUORUM_CAPABLE\n");
             break;
+#ifdef VIOSCSI_FIRMWARE
         case IOCTL_SCSI_MINIPORT_FIRMWARE:
             FirmwareRequest(DeviceExtension, Srb);
             RhelDbgPrint(TRACE_LEVEL_INFORMATION, " <--> IOCTL_SCSI_MINIPORT_FIRMWARE\n");
             break;
+#endif
         default:
             SRB_SET_SRB_STATUS(Srb, SRB_STATUS_INVALID_REQUEST);
             SRB_SET_DATA_TRANSFER_LENGTH(Srb, 0);

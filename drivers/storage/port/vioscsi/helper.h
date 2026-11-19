@@ -145,7 +145,9 @@ VioScsiPoolAlloc(IN PVOID DeviceExtension, IN SIZE_T size);
 
 VOID CompleteRequest(IN PVOID DeviceExtension, IN PSRB_TYPE Srb);
 
+#ifdef VIOSCSI_FIRMWARE
 VOID FirmwareRequest(IN PVOID DeviceExtension, IN PSRB_TYPE Srb);
+#endif
 
 extern VirtIOSystemOps VioScsiSystemOps;
 
