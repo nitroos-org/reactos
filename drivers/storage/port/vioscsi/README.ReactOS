@@ -1,0 +1,30 @@
+VirtIO SCSI Storport miniport (vioscsi)
+
+Origin
+  Project:  virtio-win/kvm-guest-drivers-windows
+  URL:      https://github.com/virtio-win/kvm-guest-drivers-windows
+  Tag:      mm326
+  Commit:   47e330f26153619255c3190c6aa8810cd9e7b7fd (2026-11-13)
+  Imported: the vioscsi/ directory, source files only (no vcxproj, sln, bat, props, ctl, mof,
+            INF template or binaries).
+  License:  BSD-3-Clause, see LICENSE (Copyright Red Hat, Google, Virtuozzo, IBM). Every .c and .h
+            file but vioscsidt.h carries the notice in its header; vioscsidt.h is covered by LICENSE.
+
+The VirtIO transport library is not copied here: the driver is built against the tree's copy in
+sdk/lib/drivers/virtio (see "3rd Party Files.txt").
+
+Imported files, sha256 of the upstream bytes (git normalises the line ending of vioscsidt.h):
+  0b746405990b26786497184b54f72f8e721cc5237fd75ab1ad27455762306fdd  LICENSE
+  b8aa1ccf7da49cd8605505de0e61ade129b2e3f5fe7c6f1b7a4f0ac5620f8dd6  helper.c
+  b54bb34b712681c1d897111cae70b238e3f8c61da75eaead69a3cdfffc03fc3d  helper.h
+  84ec56469b775a0addec89928b3c6a847daa3b69fedcf1e91e0499926e9b51f1  resources.h
+  1f9e3d6569cdc3e2aeb6001eb04fbed4c8a243b8ed4200b5b2f6a9d2de0a3319  trace.h
+  34a0df1b3085b7fe9bebc77a7217bfce1eff5385d48d7625429abf271984ef3f  utils.c
+  9e27cee557f21ed6ebca971270c97cdfda956af3213c8e60e610c4c2e7f59f8b  vioscsi.c
+  47d0f57bdc63f57278f9fdd830f37dd2c2edd65b25dd072e34c27213575a486d  vioscsi.h
+  8e4707a4f0759e3c3084bd12c618f996b73e4b282c7823661cf2e502b7c7f963  vioscsi.rc
+  5cb7f92a5e645580b2aa93d05ed62fdb853d01e27abb5ab274a86544d557858f  vioscsidt.h
+  21619070da48736852146fd3a06b8b2ba91c379febc824753386658359f39648  virtio_pci.c
+
+Local changes are kept as separate commits on top of the pristine import, one reason each, so that
+a later re-import of a newer tag is a mechanical merge: git log -- drivers/storage/port/vioscsi.

@@ -186,6 +186,12 @@ Used Version: git commit 16022c5
 License: MS-PL (https://spdx.org/licenses/MS-PL.html)
 URL: https://github.com/microsoft/Windows-driver-samples/tree/master/filesys/fastfat
 
+Title: VirtIO SCSI Windows guest driver (vioscsi)
+Path: drivers/storage/port/vioscsi
+Used Version: tag mm326, git commit 47e330f
+License: BSD-3-Clause (https://spdx.org/licenses/BSD-3-Clause.html)
+URL: https://github.com/virtio-win/kvm-guest-drivers-windows/tree/mm326/vioscsi
+
 Title: VirtIO NetKVM Windows guest driver
 Path: drivers/network/dd/netkvm
 Used Version: git commit 5e01b36
