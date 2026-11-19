@@ -238,6 +238,45 @@ ScmGetServiceFromHandle(SC_RPC_HANDLE Handle)
 }
 
 
+/*
+ * The account a service runs as must exist: the short names LocalService and NetworkService are no account names
+ * (the full names are NT AUTHORITY\\LocalService and NT AUTHORITY\\NetworkService) and a name the LSA cannot map is
+ * refused; Windows Server 2022 answers both CreateService and ChangeServiceConfig with ERROR_INVALID_SERVICE_ACCOUNT
+ * (1057). A lookup that fails for another reason lets the name pass.
+ */
+static DWORD
+ScmCheckServiceStartName(
+    _In_opt_ LPCWSTR lpServiceStartName)
+{
+    BYTE SidBuffer[SECURITY_MAX_SID_SIZE];
+    WCHAR szDomain[256];
+    DWORD dwSidSize, dwDomainSize;
+    SID_NAME_USE Use;
+
+    if (lpServiceStartName == NULL || *lpServiceStartName == UNICODE_NULL ||
+        !_wcsicmp(lpServiceStartName, L"LocalSystem"))
+        return ERROR_SUCCESS;
+
+    if (!_wcsicmp(lpServiceStartName, L"LocalService") || !_wcsicmp(lpServiceStartName, L"NetworkService"))
+        return ERROR_INVALID_SERVICE_ACCOUNT;
+
+    /* virtual accounts have no entry in the account database, the LSA derives their SIDs */
+    if (!_wcsnicmp(lpServiceStartName, L"NT SERVICE\\", 11))
+        return ERROR_SUCCESS;
+
+    dwSidSize = sizeof(SidBuffer);
+    dwDomainSize = ARRAYSIZE(szDomain);
+    if (!LookupAccountNameW(NULL, lpServiceStartName, (PSID)SidBuffer, &dwSidSize, szDomain, &dwDomainSize, &Use) &&
+        GetLastError() == ERROR_NONE_MAPPED)
+    {
+        DPRINT1("Service account %S is not known\n", lpServiceStartName);
+        return ERROR_INVALID_SERVICE_ACCOUNT;
+    }
+
+    return ERROR_SUCCESS;
+}
+
+
 static DWORD
 ScmCheckAccess(SC_HANDLE Handle,
                DWORD dwDesiredAccess)
@@ -2085,6 +2124,10 @@ RChangeServiceConfigW(
         return ERROR_ACCESS_DENIED;
     }
 
+    dwError = ScmCheckServiceStartName(lpServiceStartName);
+    if (dwError != ERROR_SUCCESS)
+        return dwError;
+
     /* Check for invalid service type value */
     if ((dwServiceType != SERVICE_NO_CHANGE) &&
         (dwServiceType != SERVICE_KERNEL_DRIVER) &&
@@ -2487,6 +2530,10 @@ RCreateServiceW(
     {
         return ERROR_INVALID_PARAMETER;
     }
+
+    dwError = ScmCheckServiceStartName(lpServiceStartName);
+    if (dwError != ERROR_SUCCESS)
+        return dwError;
 
     if ((dwServiceType == (SERVICE_WIN32_OWN_PROCESS | SERVICE_INTERACTIVE_PROCESS)) &&
         (lpServiceStartName))
