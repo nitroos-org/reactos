@@ -1028,17 +1028,22 @@ CmpCheckValue(
  * The value list of a key: the list cell holds Count entries, every entry is
  * a sound value. A value that is not is removed from the list (the list is
  * compacted in place, in one pass); a list cell that is not sound is dropped.
+ * Gives the longest name (bytes, as Unicode) and data of the values kept.
  */
 static
 BOOLEAN
 CmpCheckValueList(
     _In_ PCMP_CHECK Ctx,
     _In_ HCELL_INDEX KeyCell,
-    _Inout_ PCM_KEY_NODE Node)
+    _Inout_ PCM_KEY_NODE Node,
+    _Out_ PULONG MaxNameBytes,
+    _Out_ PULONG MaxDataBytes)
 {
     PHCELL_INDEX List;
     ULONG Size, Count, i, Kept, NameBytes, DataBytes, MaxName = 0, MaxData = 0;
 
+    *MaxNameBytes = 0;
+    *MaxDataBytes = 0;
     Count = Node->ValueList.Count;
     if (Count == 0)
     {
@@ -1094,14 +1099,8 @@ CmpCheckValueList(
         CmpCheckHealed(Ctx);
     }
 
-    /* The kernel keeps these in 16 bits in the key control block */
-    if (Node->MaxValueNameLen > MAXUSHORT && !Ctx->Live)
-    {
-        CmpCheckDirty(Ctx, KeyCell);
-        Node->MaxValueNameLen = MaxName;
-        Ctx->FieldsReset++;
-    }
-    (void)MaxData;
+    *MaxNameBytes = MaxName;
+    *MaxDataBytes = MaxData;
     return TRUE;
 }
 
@@ -1126,7 +1125,7 @@ CmpCheckKey(
     _Out_ PCM_KEY_NODE *KeyNode)
 {
     PCM_KEY_NODE Node;
-    ULONG Size;
+    ULONG Size, MaxValueName, MaxValueData;
 
     *KeyNode = NULL;
     Node = CmpTakeCell(Ctx, Cell, FIELD_OFFSET(CM_KEY_NODE, Name), &Size);
@@ -1236,8 +1235,29 @@ CmpCheckKey(
         CmpCheckHealed(Ctx);
     }
 
-    if (!CmpCheckValueList(Ctx, Cell, Node))
+    if (!CmpCheckValueList(Ctx, Cell, Node, &MaxValueName, &MaxValueData))
         return FALSE;
+
+    /*
+     * The longest value name and data the key reports are hints, larger
+     * than the real ones after deletes, but programs size buffers by them
+     * (RegQueryInfoKey: advapi32's RegDeleteTreeW multiplies the name length
+     * in 32 bits) and the kernel keeps the name length in 16 bits in the key
+     * control block (and asserts that both agree). A name length that does not
+     * fit 16 bits, or a data length larger than the hive, becomes the real one.
+     */
+    if (!Ctx->Live && Node->MaxValueNameLen > MAXUSHORT)
+    {
+        CmpCheckDirty(Ctx, Cell);
+        Node->MaxValueNameLen = MaxValueName;
+        Ctx->FieldsReset++;
+    }
+    if (!Ctx->Live && Node->MaxValueDataLen > Ctx->Map.Length[Stable])
+    {
+        CmpCheckDirty(Ctx, Cell);
+        Node->MaxValueDataLen = MaxValueData;
+        Ctx->FieldsReset++;
+    }
 
     *KeyNode = Node;
     return TRUE;
@@ -1375,7 +1395,8 @@ typedef struct _CMP_WALK_LEVEL
     ULONG Entry, Kept;
     ULONG Total;                /* keys kept in this storage */
     PCM_KEY_NODE Previous;      /* the last key kept, for the order */
-    ULONG MaxName;
+    ULONG MaxName;              /* the longest subkey name (bytes, as Unicode) and class kept */
+    ULONG MaxClass;
 } CMP_WALK_LEVEL, *PCMP_WALK_LEVEL;
 
 static
@@ -1588,6 +1609,13 @@ CmpWalkTree(
                 Level->Node->MaxNameLen = Level->MaxName;
                 Ctx->FieldsReset++;
             }
+            /* A class is at most 64 KB (ClassLength): so is the longest one reported */
+            if (!Ctx->Live && Level->Node->MaxClassLen > MAXUSHORT)
+            {
+                CmpCheckDirty(Ctx, Level->Cell);
+                Level->Node->MaxClassLen = Level->MaxClass;
+                Ctx->FieldsReset++;
+            }
             Depth--;
             continue;
         }
@@ -1645,6 +1673,7 @@ CmpWalkTree(
         Level->Previous = Child;
         NameBytes = (Child->Flags & KEY_COMP_NAME) ? Child->NameLength * sizeof(WCHAR) : Child->NameLength;
         Level->MaxName = CMP_MAX(Level->MaxName, NameBytes);
+        Level->MaxClass = CMP_MAX(Level->MaxClass, Child->ClassLength);
 
         /* Down to the child */
         if (Depth + 1 >= CMP_REGISTRY_MAX_LEVELS_TREE_DEPTH - 1)
