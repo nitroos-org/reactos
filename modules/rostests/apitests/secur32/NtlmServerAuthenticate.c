@@ -605,6 +605,86 @@ static void test_cases(const WCHAR *pkg)
         run_case(pkg, &cases[i], g_user, TEST_PASSWORD);
 }
 
+/* The first leg for NEGOTIATE messages of other shapes, measured on Windows Server 2022 (NTLM and Negotiate give the
+ * same): the status and the flags of the CHALLENGE. Always set: NTLM, target info, server target type, request target,
+ * version (0x02a20205 minus the key bits); Unicode unless the client has only OEM; the SIGN, SEAL, KEY_EXCH, ALWAYS_SIGN,
+ * 128 and 56 bits are the client's; NTLM2 when the client has it, else the LM key when the client has it. SEAL without
+ * 128 bit keys is SEC_E_UNSUPPORTED_FUNCTION, neither Unicode nor OEM SEC_E_INVALID_TOKEN. */
+static const struct
+{
+    ULONG negotiate;
+    SECURITY_STATUS status;
+    ULONG challenge;
+} negotiate_shapes[] =
+{
+    { 0xe20882b7, SEC_I_CONTINUE_NEEDED, 0xe28a8235 },    /* the credssp client */
+    { 0xe20082b7, SEC_I_CONTINUE_NEEDED, 0xe28282b5 },    /* without NTLM2: LM key */
+    { 0xe2008237, SEC_I_CONTINUE_NEEDED, 0xe2828235 },    /* without NTLM2 and LM key */
+    { 0x00080283, SEC_I_CONTINUE_NEEDED, 0x028a0205 },    /* without 56, 128, SIGN, SEAL, KEY_EXCH */
+    { 0x00000283, SEC_I_CONTINUE_NEEDED, 0x02820285 },
+    { 0x00080203, SEC_I_CONTINUE_NEEDED, 0x028a0205 },
+    { 0x00080293, SEC_I_CONTINUE_NEEDED, 0x028a0215 },    /* SIGN alone */
+    { 0x00088283, SEC_I_CONTINUE_NEEDED, 0x028a8205 },    /* ALWAYS_SIGN alone */
+    { 0x40080283, SEC_I_CONTINUE_NEEDED, 0x428a0205 },    /* KEY_EXCH alone */
+    { 0x20080283, SEC_I_CONTINUE_NEEDED, 0x228a0205 },    /* 128 alone */
+    { 0x80080283, SEC_I_CONTINUE_NEEDED, 0x828a0205 },    /* 56 alone */
+    { 0x200802a3, SEC_I_CONTINUE_NEEDED, 0x228a0225 },    /* SEAL with 128 */
+    { 0x00080282, SEC_I_CONTINUE_NEEDED, 0x028a0206 },    /* OEM only */
+    { 0xe2088297, SEC_I_CONTINUE_NEEDED, 0xe28a8215 },
+    { 0xc0080283, SEC_I_CONTINUE_NEEDED, 0xc28a0205 },
+    { 0xa0080283, SEC_I_CONTINUE_NEEDED, 0xa28a0205 },
+    { 0x000802a3, SEC_E_UNSUPPORTED_FUNCTION, 0 },        /* SEAL without 128 */
+    { 0x800802a3, SEC_E_UNSUPPORTED_FUNCTION, 0 },
+    { 0x000002a3, SEC_E_UNSUPPORTED_FUNCTION, 0 },
+    { 0x00080200, SEC_E_INVALID_TOKEN, 0 },               /* neither Unicode nor OEM */
+};
+
+static void test_negotiate_shapes(const WCHAR *pkg)
+{
+    ULONG i;
+
+    for (i = 0; i < ARRAYSIZE(negotiate_shapes); i++)
+    {
+        CredHandle sc;
+        CtxtHandle sctx;
+        TimeStamp ts;
+        BYTE neg[64], chal[MAXT];
+        ULONG neg_len, chal_len = 0, first = MAXT, at;
+        SECURITY_STATUS st;
+
+        st = AcquireCredentialsHandleW(NULL, (SEC_WCHAR *)pkg, SECPKG_CRED_INBOUND, NULL, NULL, NULL, NULL, &sc, &ts);
+        ok(st == SEC_E_OK, "%ls: AcquireCredentialsHandle 0x%08lx\n", pkg, (unsigned long)st);
+        if (st != SEC_E_OK) continue;
+
+        g_neg = negotiate_shapes[i].negotiate;
+        neg_len = build_negotiate(neg);
+        st = asc(&sc, &sctx, TRUE, neg, neg_len, FALSE, chal, &chal_len);
+        ok(st == negotiate_shapes[i].status, "%ls NEGOTIATE %08lx: first leg 0x%08lx, expected 0x%08lx\n", pkg,
+           negotiate_shapes[i].negotiate, (unsigned long)st, (unsigned long)negotiate_shapes[i].status);
+        if (st == SEC_I_CONTINUE_NEEDED && chal_len >= 56)
+        {
+            ULONG flags = chal[20] | chal[21] << 8 | chal[22] << 16 | (ULONG)chal[23] << 24;
+
+            ok(flags == negotiate_shapes[i].challenge, "%ls NEGOTIATE %08lx: CHALLENGE flags %08lx, expected %08lx\n", pkg,
+               negotiate_shapes[i].negotiate, flags, negotiate_shapes[i].challenge);
+            /* the header has the version field: the first payload (the target name) starts at 56 */
+            for (at = 12; at <= 40; at += 28)
+            {
+                ULONG off = chal[at + 4] | chal[at + 5] << 8 | chal[at + 6] << 16 | (ULONG)chal[at + 7] << 24;
+                if (chal[at] | chal[at + 1] && off < first) first = off;
+            }
+            ok(first == 56, "%ls NEGOTIATE %08lx: the payload starts at %lu\n", pkg, negotiate_shapes[i].negotiate, first);
+            ok(chal[55] == 0x0f, "%ls NEGOTIATE %08lx: NTLMSSP revision %u\n", pkg, negotiate_shapes[i].negotiate, chal[55]);
+        }
+        else if (st == SEC_I_CONTINUE_NEEDED)
+            ok(0, "%ls NEGOTIATE %08lx: CHALLENGE of %lu bytes\n", pkg, negotiate_shapes[i].negotiate, chal_len);
+        if (st == SEC_I_CONTINUE_NEEDED || st == SEC_E_OK)
+            DeleteSecurityContext(&sctx);
+        FreeCredentialsHandle(&sc);
+    }
+    g_neg = NEG_FLAGS;
+}
+
 /* an account with a blank password does not log on over the network (LimitBlankPasswordUse as landed) */
 static void test_blank(const WCHAR *pkg)
 {
@@ -623,6 +703,8 @@ START_TEST(NtlmServerAuthenticate)
     if (!create_user(g_user, L"srvauth", TEST_PASSWORD)) return;
     test_cases(L"NTLM");
     test_cases(L"Negotiate");
+    test_negotiate_shapes(L"NTLM");
+    test_negotiate_shapes(L"Negotiate");
     if (create_user(g_blank, L"srvblank", L""))
     {
         test_blank(L"NTLM");

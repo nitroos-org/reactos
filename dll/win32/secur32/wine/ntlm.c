@@ -90,8 +90,10 @@ VOID WINAPI MD4Final(NTLM_MD4_CTX *ctx);
 #define NEGOTIATE_HEADER_VERSION_LEN 40
 #define NTLMSSP_NEGOTIATE_VERSION   0x02000000
 #define NTLMSSP_REVISION_W2K3       15
-/* CHALLENGE: signature, type, target name, flags, challenge, reserved, target info */
-#define CHALLENGE_HEADER_LEN    48
+/* CHALLENGE: signature, type, target name, flags, challenge, reserved, target info, version (as the server of
+ * Windows Server 2022 sends it); the shorter header without the version is read as well */
+#define CHALLENGE_HEADER_LEN    56
+#define CHALLENGE_HEADER_MIN    48
 /* AUTHENTICATE: signature, type, 5 fields, session key field, flags, version, mic */
 #define AUTH_HEADER_NO_MIC      64
 #define AUTH_HEADER_LEN         88
@@ -955,7 +957,7 @@ static SECURITY_STATUS client_authenticate(PNegoHelper h, const BYTE *challenge,
     BOOL key_exch;
     FILETIME ft;
 
-    if (challenge_len < CHALLENGE_HEADER_LEN || memcmp(challenge, ntlm_signature, 8) ||
+    if (challenge_len < CHALLENGE_HEADER_MIN || memcmp(challenge, ntlm_signature, 8) ||
         get32(challenge + 8) != NTLM_CHALLENGE_MESSAGE)
         return TOKEN_FAIL();
     flags = get32(challenge + 20);
@@ -1397,18 +1399,29 @@ static SECURITY_STATUS server_challenge(PNegoHelper h, const BYTE *negotiate, UL
         get32(negotiate + 8) != NTLM_NEGOTIATE_MESSAGE)
         return TOKEN_FAIL();
     client_flags = get32(negotiate + 12);
-    if (!(client_flags & NTLMSSP_NEGOTIATE_UNICODE) || !(client_flags & NTLMSSP_NEGOTIATE_NTLM2) ||
-        !(client_flags & NTLMSSP_NEGOTIATE_128))
+    /* Measured on Windows Server 2022 (NTLM and Negotiate, 21 NEGOTIATE flag sets): a client needs Unicode or OEM
+     * (neither: SEC_E_INVALID_TOKEN) and 128 bit keys only for sealing (SEAL without 128: SEC_E_UNSUPPORTED_FUNCTION);
+     * extended session security is not required. */
+    if (!(client_flags & (NTLMSSP_NEGOTIATE_UNICODE | NTLMSSP_NEGOTIATE_OEM)))
+        return SEC_E_INVALID_TOKEN;
+    if ((client_flags & NTLMSSP_NEGOTIATE_SEAL) && !(client_flags & NTLMSSP_NEGOTIATE_128))
     {
-        FIXME("client does not offer unicode, extended session security and 128 bit keys: 0x%08x\n", client_flags);
+        WARN("sealing without 128 bit keys: 0x%08x\n", client_flags);
         return SEC_E_UNSUPPORTED_FUNCTION;
     }
 
-    flags = NTLMSSP_NEGOTIATE_UNICODE | NTLMSSP_NEGOTIATE_NTLM | NTLMSSP_NEGOTIATE_NTLM2 |
-            NTLMSSP_NEGOTIATE_128 | NTLMSSP_NEGOTIATE_TARGET_INFO | NTLMSSP_NEGOTIATE_TARGET_TYPE_SERVER |
-            (client_flags & (NTLMSSP_NEGOTIATE_SIGN | NTLMSSP_NEGOTIATE_SEAL |
-                             NTLMSSP_NEGOTIATE_KEY_EXCHANGE | NTLMSSP_NEGOTIATE_ALWAYS_SIGN |
-                             NTLMSSP_REQUEST_TARGET));
+    /* The CHALLENGE always has the NTLM, target info, server target type, request target and version flags; the
+     * character set is Unicode when the client has it (else OEM); the key strengths, SIGN, SEAL, KEY_EXCH and
+     * ALWAYS_SIGN are the client's own; NTLM2 when the client has it, else the LM key when the client has it. */
+    flags = NTLMSSP_NEGOTIATE_NTLM | NTLMSSP_NEGOTIATE_TARGET_INFO | NTLMSSP_NEGOTIATE_TARGET_TYPE_SERVER |
+            NTLMSSP_REQUEST_TARGET | NTLMSSP_NEGOTIATE_VERSION |
+            (client_flags & NTLMSSP_NEGOTIATE_UNICODE ? NTLMSSP_NEGOTIATE_UNICODE : NTLMSSP_NEGOTIATE_OEM) |
+            (client_flags & (NTLMSSP_NEGOTIATE_SIGN | NTLMSSP_NEGOTIATE_SEAL | NTLMSSP_NEGOTIATE_KEY_EXCHANGE |
+                             NTLMSSP_NEGOTIATE_ALWAYS_SIGN | NTLMSSP_NEGOTIATE_128 | NTLMSSP_NEGOTIATE_56));
+    if (client_flags & NTLMSSP_NEGOTIATE_NTLM2)
+        flags |= NTLMSSP_NEGOTIATE_NTLM2;
+    else
+        flags |= client_flags & NTLMSSP_NEGOTIATE_LM_SESSION_KEY;
 
     if (!GetComputerNameW(name, &name_len)) return SEC_E_INTERNAL_ERROR;
     upcase_buffer(name, name_len);
@@ -1439,9 +1452,20 @@ static SECURITY_STATUS server_challenge(PNegoHelper h, const BYTE *negotiate, UL
     memcpy(m->data + 24, h->server_challenge, 8);
     put32(m->data + 32, (ULONG)h->local_context);
     put32(m->data + 36, (ULONG)(h->local_context >> 32));
-    if (!msg_add_field(m, 12, (client_flags & NTLMSSP_REQUEST_TARGET) ? (const void *)name : NULL,
-                       (client_flags & NTLMSSP_REQUEST_TARGET) ? name_bytes : 0) ||
-        !msg_add_field(m, 40, av, av_len))
+    put_version(m->data + 48);
+    /* the target name is always there (measured on Windows Server 2022), in the character set of the client */
+    if (flags & NTLMSSP_NEGOTIATE_UNICODE)
+    {
+        if (!msg_add_field(m, 12, name, name_bytes)) return SEC_E_INSUFFICIENT_MEMORY;
+    }
+    else
+    {
+        char oem[MAX_COMPUTERNAME_LENGTH * 2 + 1];
+        int oem_len = WideCharToMultiByte(CP_OEMCP, 0, name, name_len, oem, sizeof(oem), NULL, NULL);
+
+        if (oem_len < 0 || !msg_add_field(m, 12, oem, oem_len)) return SEC_E_INSUFFICIENT_MEMORY;
+    }
+    if (!msg_add_field(m, 40, av, av_len))
         return SEC_E_INSUFFICIENT_MEMORY;
     h->offered_flags = flags;
     return SEC_E_OK;
@@ -1752,7 +1776,10 @@ static SECURITY_STATUS server_authenticate(PNegoHelper h, const BYTE *msg, ULONG
         return SEC_E_INSUFFICIENT_MEMORY;
     }
 
-    h->neg_flags = flags & h->offered_flags;
+    /* NTLM2 and 128 are the AUTHENTICATE's even when the NEGOTIATE did not have them (the response is NTLMv2 and the
+     * keys follow the strength the client set: the CHALLENGE only echoes the NEGOTIATE); the rest is limited to what
+     * the CHALLENGE offered */
+    h->neg_flags = flags & (h->offered_flags | NTLMSSP_NEGOTIATE_NTLM2 | NTLMSSP_NEGOTIATE_128);
     ntlm_setup_session(h, exported);
     SecureZeroMemory(exported, sizeof(exported));
     /* a client that answered as usual leaves the local call context unused */
