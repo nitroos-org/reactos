@@ -79,6 +79,7 @@ list(APPEND SOURCE
     RegKeyNameCase.c
     RegRenameKey.c
     RegHiveKeyControl.c
+    RegAuditShare.c
     RegEnforceGaps.c
     RegEnforceTransition.c
     RegHiveRootStamp.c

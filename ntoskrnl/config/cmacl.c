@@ -1685,6 +1685,84 @@ CmpAclPutString(
 }
 
 /*
+ * The audit log's distinct entries per boot are bounded (CMP_ACL_MAX_ENTRIES).
+ * A standard user can make denials at will (any key it may not open), so
+ * without a share of its own it could use the whole budget up and keep later
+ * denials (an administrator's, a service's, another user's) out of the log.
+ * Tokens of users that are not administrators and not trusted service
+ * principals (CmpAclTrustedSid) get at most CMP_ACL_USER_ENTRIES distinct
+ * entries each per boot, and all such users together at most half of the
+ * budget; the rest is kept for administrators, SYSTEM and services. Denials
+ * over a share are counted (Denials, Dropped, ShareDropped), not logged.
+ */
+#define CMP_ACL_USER_ENTRIES        128
+#define CMP_ACL_UNTRUSTED_ENTRIES   (CMP_ACL_MAX_ENTRIES / 2)
+#define CMP_ACL_SHARE_SLOTS         64
+
+static LONG64 CmpAclShareKey[CMP_ACL_SHARE_SLOTS];
+static LONG CmpAclShareCount[CMP_ACL_SHARE_SLOTS];
+static LONG CmpAclUntrustedEntries;
+static LONG CmpAclShareDropped;
+
+static
+BOOLEAN
+CmpAclWithinUserShare(
+    _In_ PSECURITY_SUBJECT_CONTEXT Subject)
+{
+    ULONG64 Hash = 0xCBF29CE484222325ULL;
+    PTOKEN Token;
+    PSID UserSid;
+    PUCHAR Bytes;
+    ULONG Length, i, Slot;
+    LONG64 Previous;
+    BOOLEAN Trusted = TRUE;
+
+    SeLockSubjectContext(Subject);
+    Token = (PTOKEN)SeQuerySubjectContextToken(Subject);
+    if (Token && Token->UserAndGroups && Token->UserAndGroupCount)
+    {
+        UserSid = Token->UserAndGroups[0].Sid;
+        Trusted = CmpAclTrustedSid(UserSid);
+        Bytes = UserSid;
+        Length = RtlLengthSid(UserSid);
+        for (i = 0; i < Length; i++)
+            Hash = CmpAclMix(Hash, Bytes[i]);
+    }
+    SeUnlockSubjectContext(Subject);
+    /* An administrator's token (it locks the token itself; the subject context keeps it referenced) */
+    if (!Trusted && Token && SeTokenIsAdmin(Token))
+        Trusted = TRUE;
+    if (Trusted)
+        return TRUE;
+
+    if (Hash == 0)
+        Hash = 1;
+    /* The user's counter; with every slot taken the last one is shared by the rest */
+    Slot = (ULONG)(Hash ^ (Hash >> 32)) & (CMP_ACL_SHARE_SLOTS - 1);
+    for (i = 0; i < CMP_ACL_SHARE_SLOTS; i++)
+    {
+        Previous = InterlockedCompareExchange64(&CmpAclShareKey[(Slot + i) & (CMP_ACL_SHARE_SLOTS - 1)],
+                                                (LONG64)Hash, 0);
+        if (Previous == 0 || Previous == (LONG64)Hash)
+            break;
+    }
+    Slot = (i == CMP_ACL_SHARE_SLOTS) ? (CMP_ACL_SHARE_SLOTS - 1) : ((Slot + i) & (CMP_ACL_SHARE_SLOTS - 1));
+
+    if (InterlockedIncrement(&CmpAclShareCount[Slot]) > CMP_ACL_USER_ENTRIES)
+    {
+        InterlockedDecrement(&CmpAclShareCount[Slot]);
+        return FALSE;
+    }
+    if (InterlockedIncrement(&CmpAclUntrustedEntries) > CMP_ACL_UNTRUSTED_ENTRIES)
+    {
+        InterlockedDecrement(&CmpAclUntrustedEntries);
+        InterlockedDecrement(&CmpAclShareCount[Slot]);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+/*
  * Record a denial: count it, and on its first occurrence build the entry the
  * worker writes. Runs in the open/create path with the KCB lock held, so it
  * does no I/O and takes no Cm lock; it allocates and reads the token.
@@ -1779,7 +1857,14 @@ CmpAclRecordDenial(
     Slot = i;
     InterlockedIncrement(&CmpAclSlotCount[Slot]);
 
-    /* A new distinct denial */
+    /* A new distinct denial: within its user's share (CmpAclWithinUserShare) */
+    if (!CmpAclWithinUserShare(Subject))
+    {
+        CmpAclReleaseSlot(Slot);
+        InterlockedIncrement(&CmpAclShareDropped);
+        CmpAclArmTimer();
+        return;
+    }
     if (InterlockedIncrement(&CmpAclEntryCount) > CMP_ACL_MAX_ENTRIES)
     {
         InterlockedDecrement(&CmpAclEntryCount);
@@ -3209,6 +3294,7 @@ CmpAclPublish(VOID)
     CmpAclSetDword(Key, L"SetupExclusion", CmpAclSetupRunning ? 1 : 0);
     CmpAclSetDword(Key, L"SwitchesIgnored", CmpAclSwitchesIgnored);
     CmpAclSetDword(Key, L"EnforceFallback", CmpAclEnforceFallback);
+    CmpAclSetDword(Key, L"ShareDropped", (ULONG)CmpAclShareDropped);
     CmpAclSetDword(Key, L"Transition", CmpAclTransitionState);
     CmpAclSetDword(Key, L"TransitionMs", CmpAclTransitionMs);
     CmpAclSetDword(Key, L"Restamped", (ULONG)CmpAclRestamped);
