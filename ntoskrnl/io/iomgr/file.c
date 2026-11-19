@@ -3142,6 +3142,21 @@ IoChangeFileObjectFilterContext(IN PFILE_OBJECT FileObject,
     return STATUS_SUCCESS;
 }
 
+/*
+ * The kernel copy of a create's extended attributes: a file system may receive credentials
+ * there (a redirector's tree connect), so the copy is wiped before the pool gets it back.
+ */
+static
+VOID
+IopFreeOpenPacketEaBuffer(IN POPEN_PACKET OpenPacket)
+{
+    if (OpenPacket->EaBuffer == NULL)
+        return;
+    RtlSecureZeroMemory(OpenPacket->EaBuffer, OpenPacket->EaLength);
+    ExFreePool(OpenPacket->EaBuffer);
+    OpenPacket->EaBuffer = NULL;
+}
+
 NTSTATUS
 NTAPI
 IopCreateFile(OUT PHANDLE FileHandle,
@@ -3376,7 +3391,7 @@ IopCreateFile(OUT PHANDLE FileHandle,
         _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
         {
             /* Return the exception code */
-            if (OpenPacket->EaBuffer != NULL) ExFreePool(OpenPacket->EaBuffer);
+            IopFreeOpenPacketEaBuffer(OpenPacket);
             ExFreePool(OpenPacket);
             _SEH2_YIELD(return _SEH2_GetExceptionCode());
         }
@@ -3430,7 +3445,7 @@ IopCreateFile(OUT PHANDLE FileHandle,
             {
                 /* Undo everything if it's invalid */
                 DPRINT1("Invalid EA buffer\n");
-                ExFreePool(OpenPacket->EaBuffer);
+                IopFreeOpenPacketEaBuffer(OpenPacket);
                 IoStatusBlock->Status = Status;
                 IoStatusBlock->Information = EaErrorOffset;
                 ExFreePool(OpenPacket);
@@ -3474,7 +3489,7 @@ IopCreateFile(OUT PHANDLE FileHandle,
                                 &LocalHandle);
 
     /* Free the EA Buffer */
-    if (OpenPacket->EaBuffer) ExFreePool(OpenPacket->EaBuffer);
+    IopFreeOpenPacketEaBuffer(OpenPacket);
 
     /* Now check for Ob or Io failure */
     if (!(NT_SUCCESS(Status)) || (OpenPacket->ParseCheck == FALSE))
