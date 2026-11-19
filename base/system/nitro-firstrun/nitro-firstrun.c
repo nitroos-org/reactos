@@ -165,16 +165,18 @@ done:
 static BOOL
 IsListTrusted(PCWSTR pszDir, PCWSTR pszFile)
 {
-    WCHAR szRoot[MAX_PATH];
+    WCHAR szRoot[MAX_PATH], szFs[32] = L"";
     DWORD dwFlags = 0;
 
     if (!GetWindowsDirectoryW(szRoot, MAX_PATH) || szRoot[1] != L':')
         return FALSE;
     szRoot[3] = 0;
     szRoot[2] = L'\\';
-    if (!GetVolumeInformationW(szRoot, NULL, 0, NULL, NULL, &dwFlags, NULL, 0))
+    if (!GetVolumeInformationW(szRoot, NULL, 0, NULL, NULL, &dwFlags, szFs, sizeof(szFs) / sizeof(WCHAR)))
         return FALSE;
-    if (!(dwFlags & FILE_PERSISTENT_ACLS))
+    /* NOTE: the NTFS driver does not set FILE_PERSISTENT_ACLS (it enforces the lists all the same), so the
+     * flag cannot tell: only the FAT family is known not to keep lists */
+    if (!_wcsnicmp(szFs, L"FAT", 3) || !_wcsnicmp(szFs, L"EXFAT", 5))
     {
         /* FAT: no file has an owner or a list of who may write it; every user can change every system file */
         LogLine(L"the volume keeps no access control lists: the list of features is taken as it is");
