@@ -186,6 +186,69 @@ LsapSetLogonSessionData(
 
 
 NTSTATUS
+LsapCopyLogonSessionNames(
+    _In_ PLUID LogonId,
+    _Out_ PUNICODE_STRING UserName,
+    _Out_ PUNICODE_STRING LogonDomain)
+{
+    PLSAP_LOGON_SESSION Session;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    RtlInitEmptyUnicodeString(UserName, NULL, 0);
+    RtlInitEmptyUnicodeString(LogonDomain, NULL, 0);
+
+    RtlEnterCriticalSection(&SessionListLock);
+
+    Session = LsapGetLogonSession(LogonId);
+    if (Session == NULL || Session->UserName.Length == 0 || Session->UserName.Buffer == NULL)
+    {
+        Status = STATUS_NO_SUCH_LOGON_SESSION;
+    }
+    else
+    {
+        UserName->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, Session->UserName.Length + sizeof(WCHAR));
+        if (UserName->Buffer == NULL)
+        {
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+        }
+        else
+        {
+            RtlCopyMemory(UserName->Buffer, Session->UserName.Buffer, Session->UserName.Length);
+            UserName->Length = Session->UserName.Length;
+            UserName->MaximumLength = Session->UserName.Length + sizeof(WCHAR);
+        }
+
+        if (NT_SUCCESS(Status) && Session->LogonDomain.Length != 0 && Session->LogonDomain.Buffer != NULL)
+        {
+            LogonDomain->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, Session->LogonDomain.Length + sizeof(WCHAR));
+            if (LogonDomain->Buffer == NULL)
+            {
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+            }
+            else
+            {
+                RtlCopyMemory(LogonDomain->Buffer, Session->LogonDomain.Buffer, Session->LogonDomain.Length);
+                LogonDomain->Length = Session->LogonDomain.Length;
+                LogonDomain->MaximumLength = Session->LogonDomain.Length + sizeof(WCHAR);
+            }
+        }
+
+        if (!NT_SUCCESS(Status))
+        {
+            if (UserName->Buffer != NULL)
+                RtlFreeHeap(RtlGetProcessHeap(), 0, UserName->Buffer);
+            RtlInitEmptyUnicodeString(UserName, NULL, 0);
+            RtlInitEmptyUnicodeString(LogonDomain, NULL, 0);
+        }
+    }
+
+    RtlLeaveCriticalSection(&SessionListLock);
+
+    return Status;
+}
+
+
+NTSTATUS
 NTAPI
 LsapCreateLogonSession(IN PLUID LogonId)
 {

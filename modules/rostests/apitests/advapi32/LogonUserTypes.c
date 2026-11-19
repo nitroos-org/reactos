@@ -59,6 +59,98 @@ static BOOL TokenUserIsNot(HANDLE Token, PSID Sid)
            !EqualSid(((PTOKEN_USER)Buffer)->User.Sid, Sid);
 }
 
+/* A thread that impersonates a user clones the token it impersonates, not the one of its process (Windows Server 2022,
+ * measured: user, groups, privileges, integrity level and origin of the impersonated token; INTERACTIVE and CONSOLE LOGON
+ * groups instead of the groups of the way it logged on; the new session records the impersonated user's name and SID). */
+typedef NTSTATUS (NTAPI *LSA_GET_SESSION_DATA)(PLUID, PSECURITY_LOGON_SESSION_DATA *);
+
+static void TestNewCredentialsImpersonated(PCWSTR User)
+{
+    HANDLE Imp = NULL, Copy = NULL, ThreadToken = NULL;
+    HMODULE Secur32 = LoadLibraryW(L"secur32.dll");
+    LSA_GET_SESSION_DATA pGetSession = Secur32 ? (LSA_GET_SESSION_DATA)GetProcAddress(Secur32, "LsaGetLogonSessionData") : NULL;
+    UCHAR ImpUser[256], CopyUser[256], GroupsBuffer[4096];
+    TOKEN_STATISTICS ImpStats, CopyStats;
+    TOKEN_ORIGIN Origin;
+    DWORD Length, i;
+    BOOL Interactive = FALSE, Network = FALSE;
+    PTOKEN_GROUPS Groups = (PTOKEN_GROUPS)GroupsBuffer;
+    DWORD Ret;
+
+    if (!LogonUserW((LPWSTR)User, (LPWSTR)L".", TestPassword, LOGON32_LOGON_NETWORK, LOGON32_PROVIDER_DEFAULT, &Imp))
+    {
+        skip("LogonUser failed: %lu\n", GetLastError());
+        return;
+    }
+    ok(ImpersonateLoggedOnUser(Imp), "ImpersonateLoggedOnUser: %lu\n", GetLastError());
+    ok(OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &ThreadToken), "OpenThreadToken: %lu\n", GetLastError());
+
+    Ret = TryLogon(L"lutypes-no-such-user", L".", LOGON32_LOGON_NEW_CREDENTIALS, LOGON32_PROVIDER_WINNT50, &Copy);
+    RevertToSelf();
+    ok(Ret == ERROR_SUCCESS, "NEW_CREDENTIALS under an impersonation: %lu\n", Ret);
+    if (Ret == ERROR_SUCCESS && ThreadToken)
+    {
+        ok(GetTokenInformation(ThreadToken, TokenUser, ImpUser, sizeof(ImpUser), &Length), "TokenUser: %lu\n", GetLastError());
+        ok(GetTokenInformation(Copy, TokenUser, CopyUser, sizeof(CopyUser), &Length), "TokenUser: %lu\n", GetLastError());
+        ok(EqualSid(((PTOKEN_USER)ImpUser)->User.Sid, ((PTOKEN_USER)CopyUser)->User.Sid),
+           "the token of NEW_CREDENTIALS is not of the impersonated user\n");
+
+        ok(GetTokenInformation(ThreadToken, TokenStatistics, &ImpStats, sizeof(ImpStats), &Length), "TokenStatistics: %lu\n", GetLastError());
+        ok(GetTokenInformation(Copy, TokenStatistics, &CopyStats, sizeof(CopyStats), &Length), "TokenStatistics: %lu\n", GetLastError());
+        ok(CopyStats.PrivilegeCount == ImpStats.PrivilegeCount, "privileges %lu, impersonated token %lu\n",
+           CopyStats.PrivilegeCount, ImpStats.PrivilegeCount);
+        ok(CopyStats.TokenType == TokenPrimary, "token type %d\n", CopyStats.TokenType);
+
+        /* the origin is the logon session of the token that was cloned */
+        ok(GetTokenInformation(Copy, TokenOrigin, &Origin, sizeof(Origin), &Length), "TokenOrigin: %lu\n", GetLastError());
+        ok(Origin.OriginatingLogonSession.LowPart == ImpStats.AuthenticationId.LowPart &&
+           Origin.OriginatingLogonSession.HighPart == ImpStats.AuthenticationId.HighPart,
+           "origin %lx:%lx, expected %lx:%lx\n", Origin.OriginatingLogonSession.HighPart, Origin.OriginatingLogonSession.LowPart,
+           ImpStats.AuthenticationId.HighPart, ImpStats.AuthenticationId.LowPart);
+
+        /* the groups of the way the impersonated token logged on (NETWORK) are replaced by INTERACTIVE */
+        if (GetTokenInformation(Copy, TokenGroups, GroupsBuffer, sizeof(GroupsBuffer), &Length))
+        {
+            SID_IDENTIFIER_AUTHORITY Nt = {SECURITY_NT_AUTHORITY};
+            PSID InteractiveSid = NULL, NetworkSid = NULL;
+
+            AllocateAndInitializeSid(&Nt, 1, SECURITY_INTERACTIVE_RID, 0, 0, 0, 0, 0, 0, 0, &InteractiveSid);
+            AllocateAndInitializeSid(&Nt, 1, SECURITY_NETWORK_RID, 0, 0, 0, 0, 0, 0, 0, &NetworkSid);
+            for (i = 0; i < Groups->GroupCount; i++)
+            {
+                if (EqualSid(Groups->Groups[i].Sid, InteractiveSid)) Interactive = TRUE;
+                if (EqualSid(Groups->Groups[i].Sid, NetworkSid)) Network = TRUE;
+            }
+            FreeSid(InteractiveSid);
+            FreeSid(NetworkSid);
+            ok(Interactive, "no INTERACTIVE group\n");
+            ok(!Network, "the NETWORK group of the impersonated token is kept\n");
+        }
+
+        /* the new session records the impersonated user's name and SID */
+        if (pGetSession)
+        {
+            PSECURITY_LOGON_SESSION_DATA Data = NULL;
+            NTSTATUS Status = pGetSession(&CopyStats.AuthenticationId, &Data);
+
+            ok(Status == STATUS_SUCCESS, "LsaGetLogonSessionData returned %08lx\n", Status);
+            if (NT_SUCCESS(Status) && Data)
+            {
+                ok(Data->UserName.Length / sizeof(WCHAR) == wcslen(User) &&
+                   !_wcsnicmp(Data->UserName.Buffer, User, wcslen(User)), "session user name %.*ls, expected %ls\n",
+                   Data->UserName.Length / (int)sizeof(WCHAR), Data->UserName.Buffer, User);
+                ok(Data->Sid && EqualSid(Data->Sid, ((PTOKEN_USER)ImpUser)->User.Sid), "session SID is not the impersonated user's\n");
+                ok(Data->LogonType == NewCredentials, "session logon type %lu\n", (ULONG)Data->LogonType);
+                ((NTSTATUS (NTAPI *)(PVOID))GetProcAddress(Secur32, "LsaFreeReturnBuffer"))(Data);
+            }
+        }
+    }
+
+    if (Copy) CloseHandle(Copy);
+    if (ThreadToken) CloseHandle(ThreadToken);
+    CloseHandle(Imp);
+}
+
 START_TEST(LogonUserTypes)
 {
     WCHAR User[32];
@@ -194,6 +286,8 @@ START_TEST(LogonUserTypes)
     if (Token)
         CloseHandle(Token);
     CloseHandle(OwnToken);
+
+    TestNewCredentialsImpersonated(User);
 
     LsaRemoveAccountRights(Policy, Sid, TRUE, NULL, 0);
     LsaClose(Policy);

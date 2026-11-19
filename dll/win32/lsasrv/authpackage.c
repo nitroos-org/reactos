@@ -1878,9 +1878,12 @@ LsapNewCredentialsLogon(
     PTOKEN_PRIMARY_GROUP PrimaryGroup = NULL;
     PTOKEN_DEFAULT_DACL DefaultDacl = NULL;
     PTOKEN_GROUPS Restricted = NULL, NewGroups = NULL;
-    PSID NewLogonSid = NULL;
+    PSID NewLogonSid = NULL, NewConsoleSid = NULL;
     PSECURITY_DESCRIPTOR TokenSd = NULL;
     ULONG TokenSdSize, IsAppContainer = 0, ReturnLength, SessionId = 0;
+    TOKEN_STATISTICS SourceStatistics;
+    TOKEN_ORIGIN SourceOrigin;
+    UNICODE_STRING SessionUserName = {0, 0, NULL}, SessionDomainName = {0, 0, NULL};
     OBJECT_ATTRIBUTES ObjectAttributes;
     SECURITY_QUALITY_OF_SERVICE Qos;
     LARGE_INTEGER ExpirationTime;
@@ -1911,9 +1914,24 @@ LsapNewCredentialsLogon(
     UserName.MaximumLength = UserName.Length;
     DomainName.MaximumLength = DomainName.Length;
 
-    Status = NtOpenProcessToken(LogonContext->ClientProcessHandle, TOKEN_QUERY, &SourceToken);
+    /*
+     * The token that is cloned is the effective token of the calling thread: the one it impersonates, else the one of
+     * its process (measured on Windows Server 2022: a thread that impersonates a user gets that user's token back, its
+     * groups, privileges, integrity level and elevation type; documented: "clone its current token", LogonUser,
+     * LOGON32_LOGON_NEW_CREDENTIALS). A thread token below the impersonation level cannot be cloned.
+     */
+    Status = LsapOpenClientTokenRequest((PLSA_CLIENT_REQUEST)LogonContext, &SourceToken);
     if (!NT_SUCCESS(Status))
         return Status;
+
+    Status = NtQueryInformationToken(SourceToken, TokenStatistics, &SourceStatistics, sizeof(SourceStatistics), &ReturnLength);
+    if (!NT_SUCCESS(Status))
+        goto done;
+    if (SourceStatistics.TokenType == TokenImpersonation && SourceStatistics.ImpersonationLevel < SecurityImpersonation)
+    {
+        Status = STATUS_BAD_IMPERSONATION_LEVEL;
+        goto done;
+    }
 
     /* A restricted or AppContainer token would lose its restrictions in a copy made like this */
     Status = LsapQueryTokenBuffer(SourceToken, TokenRestrictedSids, (PVOID*)&Restricted);
@@ -1952,7 +1970,18 @@ LsapNewCredentialsLogon(
     if (!NT_SUCCESS(Status)) goto done;
     SessionCreated = TRUE;
 
-    Status = LsapSetLogonSessionData(&LogonId, NewCredentials, &UserName, &DomainName, User->User.Sid);
+    /* The session records the user of the token it carries (the caller's), not the name the credentials are for
+     * (measured on Windows Server 2022: LsaGetLogonSessionData of the new session shows the caller's user name,
+     * domain and SID, logon type 9). A source session without a name keeps the name of the credentials. */
+    Status = LsapCopyLogonSessionNames(&SourceStatistics.AuthenticationId, &SessionUserName, &SessionDomainName);
+    if (NT_SUCCESS(Status))
+    {
+        Status = LsapSetLogonSessionData(&LogonId, NewCredentials, &SessionUserName, &SessionDomainName, User->User.Sid);
+    }
+    else
+    {
+        Status = LsapSetLogonSessionData(&LogonId, NewCredentials, &UserName, &DomainName, User->User.Sid);
+    }
     if (!NT_SUCCESS(Status)) goto done;
 
     Status = LsapCreateTokenSd(User, &TokenSd, &TokenSdSize);
@@ -1973,12 +2002,19 @@ LsapNewCredentialsLogon(
 
     ExpirationTime.QuadPart = 0x7FFFFFFFFFFFFFFFLL;
 
-    /* The groups of the caller and the logon SID of the new session (Windows Server 2022: both logon SIDs) */
+    /*
+     * The groups (Windows Server 2022, measured): the caller's, except the groups of the way the caller logged on
+     * (NETWORK, BATCH, SERVICE, INTERACTIVE, CONSOLE LOGON and the authentication authority groups S-1-5-64-x), then
+     * INTERACTIVE and CONSOLE LOGON, and the logon SID of the new session besides the caller's own logon SID.
+     */
     {
         SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+        SID_IDENTIFIER_AUTHORITY LocalAuthority = {SECURITY_LOCAL_SID_AUTHORITY};
+        PSID ConsoleSid = NULL;
+        ULONG i, n = 0;
 
         NewGroups = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY,
-                                    sizeof(TOKEN_GROUPS) + Groups->GroupCount * sizeof(SID_AND_ATTRIBUTES));
+                                    sizeof(TOKEN_GROUPS) + (Groups->GroupCount + 3) * sizeof(SID_AND_ATTRIBUTES));
         if (NewGroups == NULL)
         {
             Status = STATUS_INSUFFICIENT_RESOURCES;
@@ -1988,11 +2024,39 @@ LsapNewCredentialsLogon(
                                              LogonId.HighPart, LogonId.LowPart, 0, 0, 0, 0, 0, &NewLogonSid);
         if (!NT_SUCCESS(Status))
             goto done;
-        RtlCopyMemory(NewGroups->Groups, Groups->Groups, Groups->GroupCount * sizeof(SID_AND_ATTRIBUTES));
-        NewGroups->Groups[Groups->GroupCount].Sid = NewLogonSid;
-        NewGroups->Groups[Groups->GroupCount].Attributes = SE_GROUP_MANDATORY | SE_GROUP_ENABLED |
-                                                           SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_LOGON_ID;
-        NewGroups->GroupCount = Groups->GroupCount + 1;
+        Status = RtlAllocateAndInitializeSid(&LocalAuthority, 1, 1 /* S-1-2-1: CONSOLE LOGON */, 0, 0, 0, 0, 0, 0, 0, &ConsoleSid);
+        if (!NT_SUCCESS(Status))
+            goto done;
+        NewConsoleSid = ConsoleSid;
+
+        for (i = 0; i < Groups->GroupCount; i++)
+        {
+            PSID Sid = Groups->Groups[i].Sid;
+            PSID_IDENTIFIER_AUTHORITY Auth = RtlIdentifierAuthoritySid(Sid);
+
+            if (!memcmp(Auth, &NtAuthority, sizeof(NtAuthority)))
+            {
+                ULONG Count = *RtlSubAuthorityCountSid(Sid), First = *RtlSubAuthoritySid(Sid, 0);
+
+                if ((Count == 1 && (First == SECURITY_NETWORK_RID || First == SECURITY_BATCH_RID ||
+                                    First == SECURITY_SERVICE_RID || First == SECURITY_INTERACTIVE_RID)) ||
+                    (Count >= 1 && First == 64 /* S-1-5-64-x: authentication authority */))
+                    continue;
+            }
+            else if (RtlEqualSid(Sid, ConsoleSid))
+                continue;
+
+            NewGroups->Groups[n++] = Groups->Groups[i];
+        }
+
+        NewGroups->Groups[n].Sid = LsapInteractiveSid;
+        NewGroups->Groups[n++].Attributes = SE_GROUP_MANDATORY | SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT;
+        NewGroups->Groups[n].Sid = ConsoleSid;
+        NewGroups->Groups[n++].Attributes = SE_GROUP_MANDATORY | SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT;
+        NewGroups->Groups[n].Sid = NewLogonSid;
+        NewGroups->Groups[n++].Attributes = SE_GROUP_MANDATORY | SE_GROUP_ENABLED |
+                                            SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_LOGON_ID;
+        NewGroups->GroupCount = n;
     }
 
     Status = NtCreateToken(&NewToken,
@@ -2021,6 +2085,10 @@ LsapNewCredentialsLogon(
 
     if (SessionId != 0)
         NtSetInformationToken(NewToken, TokenSessionId, &SessionId, sizeof(SessionId));
+
+    /* The origin of the new token is the logon session of the token it was cloned from (measured) */
+    SourceOrigin.OriginatingLogonSession = SourceStatistics.AuthenticationId;
+    NtSetInformationToken(NewToken, TokenOrigin, &SourceOrigin, sizeof(SourceOrigin));
 
     Status = NtDuplicateObject(NtCurrentProcess(),
                                NewToken,
@@ -2054,8 +2122,11 @@ done:
     if (DefaultDacl) RtlFreeHeap(RtlGetProcessHeap(), 0, DefaultDacl);
     if (Restricted) RtlFreeHeap(RtlGetProcessHeap(), 0, Restricted);
     if (TokenSd) RtlFreeHeap(RtlGetProcessHeap(), 0, TokenSd);
+    if (SessionUserName.Buffer) RtlFreeHeap(RtlGetProcessHeap(), 0, SessionUserName.Buffer);
+    if (SessionDomainName.Buffer) RtlFreeHeap(RtlGetProcessHeap(), 0, SessionDomainName.Buffer);
     if (NewGroups) RtlFreeHeap(RtlGetProcessHeap(), 0, NewGroups);
     if (NewLogonSid) RtlFreeSid(NewLogonSid);
+    if (NewConsoleSid) RtlFreeSid(NewConsoleSid);
 
     return Status;
 }
@@ -2090,6 +2161,9 @@ LsapLogonUser(PLSA_API_MSG RequestMsg,
 
 
     TRACE("LsapLogonUser(%p %p)\n", RequestMsg, LogonContext);
+
+    /* the thread of the caller (a logon with new credentials clones its effective token) */
+    LogonContext->RequestClientId = RequestMsg->h.ClientId;
 
     PackageId = RequestMsg->LogonUser.Request.AuthenticationPackage;
     LogonType = RequestMsg->LogonUser.Request.LogonType;
