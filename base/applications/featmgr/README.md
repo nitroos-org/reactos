@@ -162,7 +162,11 @@ with `-DNITRO_SHIP_RAPPS=ON`). Everything it did for us is done here:
   (NSIS runs in place with `_?=` so that it finishes before featmgr looks). `[Rapps] UninstallCmd[.amd64|.x86]` still overrides.
 - **Installed state**: a native entry is also `Enabled` when its Uninstall key exists (RegName / UninstallName / Name), as RAPPS saw it.
 - **Local-first**: `[Rapps] LocalInstaller=` names a file in the feature's payload folder (PowerShell 7's MSI, put there by the
-  image); it is used, with no download, when its hash matches `[Source] ArtifactSHA256`.
+  image); it is used, with no download, when its hash matches `[Source] ArtifactSHA256`. `[Rapps] LocalInstallerDrop=1` (PowerShell 7)
+  deletes that staged file after a successful install (exit code 0, no restart pending, and a Windows Installer cached copy of the
+  package, found by its Add/Remove Programs name under `Installer\UserData`, exists with the same size): msiexec keeps its own copy
+  in `%SystemRoot%\Installer`, so repair (`msiexec /fa`) and uninstall still work and the 118 MB are not on the disk twice. A failed
+  or restart-pending install keeps the file.
 - **Catalog**: `featmgr /update-catalog` (the GUI's *Update catalog* button) downloads `https://rapps.reactos.org/rappmgr2.cab`
   (the address rapps used; the server certificate chain must end in the ISRG Root X1/X2 pins rapps had), unpacks the entries
   into `%SystemRoot%\Featmgr\RappsDb\appdb` (admin-writable, replaced only when complete) and runs `/import-rapps` on it. The

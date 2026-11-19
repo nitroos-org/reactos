@@ -235,7 +235,76 @@ BOOL FmNativePlan(const FM_FEATURE *f, FM_COMPONENT *c)
         if (FmGetPayloadDir(f->Id, dir, MAX_PATH))
             StringCchPrintfW(c->LocalFile, ARRAYSIZE(c->LocalFile), L"%s\\%s", dir, local);
     }
+    Rk(f, L"Rapps", L"LocalInstallerDrop", tmp, ARRAYSIZE(tmp));
+    c->LocalDrop = (tmp[0] == L'1');
     return c->Url[0] != L'\0';
+}
+
+static BOOL RegStr(HKEY k, LPCWSTR name, LPWSTR out, DWORD cch);
+
+#define MSI_USERDATA_PRODUCTS L"Software\\Microsoft\\Windows\\CurrentVersion\\Installer\\UserData\\S-1-5-18\\Products"
+
+static BOOL FileSize64(LPCWSTR path, ULONGLONG *size)
+{
+    WIN32_FILE_ATTRIBUTE_DATA d;
+    if (!GetFileAttributesExW(path, GetFileExInfoStandard, &d) || (d.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) return FALSE;
+    *size = ((ULONGLONG)d.nFileSizeHigh << 32) | d.nFileSizeLow;
+    return TRUE;
+}
+
+/* Does Windows Installer hold its own copy of this package? Looks for the product by its Add/Remove Programs name in the
+ * machine's Installer\UserData records and checks that the LocalPackage file named there exists and has the size of the
+ * staged installer (msiexec /fa and /x, and Programs and Features, work from that copy). */
+static BOOL MsiCacheHolds(LPCWSTR productName, ULONGLONG wantSize)
+{
+    HKEY products;
+    DWORD i;
+    BOOL ok = FALSE;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, MSI_USERDATA_PRODUCTS, 0, KEY_READ, &products) != ERROR_SUCCESS) return FALSE;
+    for (i = 0; !ok; i++)
+    {
+        WCHAR code[64], sub[256], name[256], pkg[MAX_PATH];
+        DWORD cc = ARRAYSIZE(code);
+        HKEY props;
+        ULONGLONG sz;
+
+        if (RegEnumKeyExW(products, i, code, &cc, NULL, NULL, NULL, NULL) != ERROR_SUCCESS) break;
+        StringCchPrintfW(sub, ARRAYSIZE(sub), L"%s\\InstallProperties", code);
+        if (RegOpenKeyExW(products, sub, 0, KEY_READ, &props) != ERROR_SUCCESS) continue;
+        if (RegStr(props, L"DisplayName", name, ARRAYSIZE(name)) && !_wcsicmp(name, productName) &&
+            RegStr(props, L"LocalPackage", pkg, ARRAYSIZE(pkg)) && FileSize64(pkg, &sz) && sz == wantSize)
+            ok = TRUE;
+        RegCloseKey(props);
+    }
+    RegCloseKey(products);
+    return ok;
+}
+
+/* After a successful install (the caller checks the exit code, that no restart is pending and that the detect rule
+ * holds): delete the image's staged installer when the entry says so ([Rapps] LocalInstallerDrop=1) and Windows
+ * Installer's own cached copy of the same package is there. Returns TRUE when the file was deleted. A failed or
+ * deferred install never gets here, so the staged copy stays for the retry. */
+BOOL FmNativeDropStaged(const FM_FEATURE *f, const FM_COMPONENT *c, FILE *log)
+{
+    WCHAR uname[128];
+    ULONGLONG size;
+
+    if (!c->LocalDrop || !c->LocalFile[0] || !FileSize64(c->LocalFile, &size)) return FALSE;
+    Rk(f, L"Rapps", L"UninstallName", uname, ARRAYSIZE(uname));
+    if (!uname[0]) StringCchCopyW(uname, ARRAYSIZE(uname), f->Name);
+    if (!MsiCacheHolds(uname, size))
+    {
+        LOGF(log, L"  keeping the staged installer %s: no Windows Installer cached copy of '%s' found\n", c->LocalFile, uname);
+        return FALSE;
+    }
+    if (!DeleteFileW(c->LocalFile))
+    {
+        LOGF(log, L"  could not delete the staged installer %s (error %lu)\n", c->LocalFile, GetLastError());
+        return FALSE;
+    }
+    LOGF(log, L"  deleted the staged installer %s (%I64u bytes): Windows Installer keeps its own copy\n", c->LocalFile, size);
+    return TRUE;
 }
 
 /* Can the install be attempted on this system: an address, a checksum, this architecture. */

@@ -255,6 +255,7 @@ typedef struct _FM_COMPONENT
     WCHAR    Sha256[72];
     WCHAR    Sha1[48];           /* native provider: RAPPS entries that only publish SHA-1 (checked when Sha256 is empty, else in addition) */
     WCHAR    LocalFile[MAX_PATH];/* native provider: a file already on this system (the image's payload); used, once its hash matches, instead of a download */
+    BOOL     LocalDrop;          /* native provider: [Rapps] LocalInstallerDrop=1: delete LocalFile after a successful install (see FmNativeDropStaged) */
     BOOL     AllowHttp;          /* native provider: plain http is allowed because the hash is checked (RAPPS entries); components stay https-only */
     WCHAR    FileName[96];
     WCHAR    DetectReg[320];     /* HKLM\key|value|>=N  (or just key|value: the value exists) */
@@ -310,6 +311,7 @@ void   FmNativeInvalidate(void);                       /* forget the installed-p
 BOOL   FmNativeIsInstalled(LPCWSTR regName, LPCWSTR name);
 BOOL   FmNativePlan(const FM_FEATURE *f, FM_COMPONENT *c);
 BOOL   FmNativeAvailable(const FM_FEATURE *f);
+BOOL   FmNativeDropStaged(const FM_FEATURE *f, const FM_COMPONENT *c, FILE *log);   /* delete the staged installer once Windows Installer holds its own copy */
 HRESULT FmNativeInstallLine(const FM_FEATURE *f, LPCWSTR file, LPWSTR out, DWORD cch);
 BOOL   FmNativeUninstallLine(const FM_FEATURE *f, LPWSTR out, DWORD cch);
 int    FmNativeFileKind(LPCWSTR path);                 /* FM_FK_* */

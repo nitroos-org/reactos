@@ -28,8 +28,9 @@ typedef struct _ADDON_INSTALL_DATA
 } ADDON_INSTALL_DATA, *PADDON_INSTALL_DATA;
 typedef const ADDON_INSTALL_DATA* PCADDON_INSTALL_DATA;
 
-/* The installer file stays on disk after a successful install (the optional feature manager reuses it)
- * and a failure is only logged: setup shows no message box and goes on with the next addon. */
+/* Setup itself never deletes the installer file (the feature manager owns the staged PowerShell 7 MSI and deletes it
+ * after a successful install, once Windows Installer has its own copy) and a failure is only logged: setup shows
+ * no message box and goes on with the next addon. */
 #define ADDON_KEEP_FILE_QUIET   0x1
 
 /* TODO: Move this out of code and into an .inf or something. */
