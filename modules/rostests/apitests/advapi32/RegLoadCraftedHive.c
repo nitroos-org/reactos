@@ -19,6 +19,8 @@
 #include "precomp.h"
 #include <winbase.h>
 #include <sddl.h>
+#include <ndk/cmfuncs.h>
+#include <ndk/obfuncs.h>
 
 #define LOAD_TIMEOUT 30000
 #define BASE_KEY L"Software\\ReactOSCraftedHiveBase"
@@ -386,9 +388,11 @@ static void R_RootIsLink(PBYTE Buf, DWORD Size)
     W16(CELL(Buf, D32(Buf, 0x24)), NK_FLAGS) |= 0x0010;    /* the base block's RootCell; KEY_SYM_LINK */
 }
 /*
- * A subkey name beginning with a NUL: the parser takes it for the end of a path, so no open reaches the key (one by
- * its name opens the parent) and RegDeleteTreeW of the parent emptied the parent again and again until the stack
- * overflowed (in-guest fuzz). The check drops the key at load.
+ * A subkey name beginning with a NUL: as the first component of a relative name the parser takes it for the end of
+ * the path (an open by that name opens the parent), and RegDeleteTreeW of the parent emptied the parent again and
+ * again until the stack overflowed (in-guest fuzz). The native API makes such keys (NtCreateKey with a full name
+ * whose last component begins with a NUL), so the check keeps them and RegDeleteTreeW deletes them by their full
+ * counted name.
  */
 static void R_NulInName(PBYTE Buf, DWORD Size)
 {
@@ -579,6 +583,26 @@ static void Run(const RECIPE *Recipe)
                 /* Deletes and creates go through the cells the check let in */
                 RegDeleteTreeW(Root, L"A");
                 RegDeleteKeyW(Root, L"A");
+                if (Recipe->Apply == R_NulInName)
+                {
+                    /* The key is kept: C has a subkey whose name is one NUL */
+                    WCHAR Sub[8];
+                    DWORD SubLength, n, Found = 0;
+
+                    Error = RegOpenKeyExW(Root, L"C", 0, KEY_READ, &Key);
+                    ok(Error == ERROR_SUCCESS, "[%s] RegOpenKeyExW(C): %ld\n", Recipe->Name, Error);
+                    for (n = 0; Error == ERROR_SUCCESS && n < 16; n++)
+                    {
+                        SubLength = _countof(Sub);
+                        if (RegEnumKeyExW(Key, n, Sub, &SubLength, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
+                            break;
+                        if (SubLength == 1 && Sub[0] == UNICODE_NULL)
+                            Found++;
+                    }
+                    ok(Found == 1, "[%s] subkeys of C named by one NUL: %lu, expected 1 (kept)\n", Recipe->Name, Found);
+                    if (Error == ERROR_SUCCESS)
+                        RegCloseKey(Key);
+                }
                 Error = RegDeleteTreeW(Root, L"C");
                 if (Recipe->Apply == R_NulInName)
                     ok(Error == ERROR_SUCCESS, "[%s] RegDeleteTreeW(C): %ld\n", Recipe->Name, Error);
@@ -624,6 +648,85 @@ static void Run(const RECIPE *Recipe)
     }
 }
 
+/*
+ * A key whose name begins with a NUL, made through the native API (a full name whose last component begins with a
+ * NUL): the live hive that holds it passes the check (the Debug kernel checks it at a save), a saved copy loads
+ * with the key in it, and RegDeleteTreeW deletes it by its counted name.
+ */
+static void TestNulKeyRoundTrip(PCWSTR Dir)
+{
+    static const WCHAR Parent[] = L"\\Registry\\Machine\\SOFTWARE\\ReactOSCraftedHiveNul";
+    WCHAR Full[_countof(Parent) + 4], Sub[8], File[MAX_PATH];
+    UNICODE_STRING Name;
+    OBJECT_ATTRIBUTES Attributes;
+    HANDLE ParentHandle, Child;
+    ULONG Disposition, n, Found;
+    DWORD SubLength;
+    NTSTATUS Status;
+    HKEY Loaded;
+    LONG Error;
+
+    RtlInitUnicodeString(&Name, Parent);
+    InitializeObjectAttributes(&Attributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = NtCreateKey(&ParentHandle, KEY_ALL_ACCESS, &Attributes, 0, NULL, 0, &Disposition);
+    ok(Status == STATUS_SUCCESS, "NtCreateKey(parent): 0x%lx\n", Status);
+    if (!NT_SUCCESS(Status))
+        return;
+
+    /* "<parent>\<NUL>k", counted */
+    RtlCopyMemory(Full, Parent, sizeof(Parent) - sizeof(WCHAR));
+    n = _countof(Parent) - 1;
+    Full[n] = L'\\';
+    Full[n + 1] = UNICODE_NULL;
+    Full[n + 2] = L'k';
+    Name.Buffer = Full;
+    Name.Length = Name.MaximumLength = (USHORT)((n + 3) * sizeof(WCHAR));
+    InitializeObjectAttributes(&Attributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = NtCreateKey(&Child, KEY_ALL_ACCESS, &Attributes, 0, NULL, 0, &Disposition);
+    ok(Status == STATUS_SUCCESS && Disposition == REG_CREATED_NEW_KEY, "NtCreateKey(<NUL>k): 0x%lx, %lu\n", Status, Disposition);
+    if (NT_SUCCESS(Status))
+        NtClose(Child);
+
+    StringCchPrintfW(File, _countof(File), L"%sRegLoadCraftedHiveNul.hiv", Dir);
+    DeleteFileW(File);
+    Error = RegSaveKeyW((HKEY)ParentHandle, File, NULL);
+    ok(Error == ERROR_SUCCESS, "RegSaveKeyW: %ld\n", Error);
+    if (Error == ERROR_SUCCESS)
+    {
+        Error = RegLoadKeyW(HKEY_LOCAL_MACHINE, MOUNT, File);
+        ok(Error == ERROR_SUCCESS, "RegLoadKeyW(saved copy): %ld\n", Error);
+        if (Error == ERROR_SUCCESS)
+        {
+            Error = RegOpenKeyExW(HKEY_LOCAL_MACHINE, MOUNT, 0, KEY_READ, &Loaded);
+            ok(Error == ERROR_SUCCESS, "RegOpenKeyExW(loaded): %ld\n", Error);
+            Found = 0;
+            for (n = 0; Error == ERROR_SUCCESS && n < 16; n++)
+            {
+                SubLength = _countof(Sub);
+                if (RegEnumKeyExW(Loaded, n, Sub, &SubLength, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
+                    break;
+                if (SubLength == 2 && Sub[0] == UNICODE_NULL && Sub[1] == L'k')
+                    Found++;
+            }
+            ok(Found == 1, "the loaded copy has %lu keys named <NUL>k, expected 1\n", Found);
+            if (Error == ERROR_SUCCESS)
+                RegCloseKey(Loaded);
+            Error = RegUnLoadKeyW(HKEY_LOCAL_MACHINE, MOUNT);
+            ok(Error == ERROR_SUCCESS, "RegUnLoadKeyW: %ld\n", Error);
+        }
+        DeleteFileW(File);
+    }
+
+    Error = pRegDeleteTreeW((HKEY)ParentHandle, NULL);
+    ok(Error == ERROR_SUCCESS, "RegDeleteTreeW(parent, NULL): %ld\n", Error);
+    SubLength = _countof(Sub);
+    Error = RegEnumKeyExW((HKEY)ParentHandle, 0, Sub, &SubLength, NULL, NULL, NULL, NULL);
+    ok(Error == ERROR_NO_MORE_ITEMS, "a subkey is left after RegDeleteTreeW: %ld\n", Error);
+    Status = NtDeleteKey(ParentHandle);
+    ok(Status == STATUS_SUCCESS, "NtDeleteKey(parent): 0x%lx\n", Status);
+    NtClose(ParentHandle);
+}
+
 START_TEST(RegLoadCraftedHive)
 {
     WCHAR Dir[MAX_PATH];
@@ -657,6 +760,8 @@ START_TEST(RegLoadCraftedHive)
         g_Recipe = g_Recipes[i].Name;
         Run(&g_Recipes[i]);
     }
+
+    TestNulKeyRoundTrip(Dir);
 
     DeleteFileW(g_File);
     HeapFree(GetProcessHeap(), 0, g_Base);
