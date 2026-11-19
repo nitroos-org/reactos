@@ -79,10 +79,37 @@ SmbSendAndCheck(PSMB_REQUEST Request, ULONG Timeout)
     return SmbReplyStatus(Request, 0, NULL, NULL);
 }
 
-/* Tree connect (again, after an engine restart) for a virtual net root */
+/* Explicit credentials of a tree connect (smbconn.h): nonpaged copies, wiped by SmbWipeCredentials */
+typedef struct _SMB_CREDENTIALS
+{
+    UNICODE_STRING User;
+    UNICODE_STRING Domain;
+    UNICODE_STRING Password;
+} SMB_CREDENTIALS, *PSMB_CREDENTIALS;
+
+static
+VOID
+SmbWipeCredentials(PSMB_CREDENTIALS Creds)
+{
+    UNICODE_STRING *s[3] = { &Creds->User, &Creds->Domain, &Creds->Password };
+    ULONG i;
+
+    for (i = 0; i < 3; i++)
+    {
+        if (s[i]->Buffer != NULL)
+        {
+            RtlSecureZeroMemory(s[i]->Buffer, s[i]->MaximumLength);
+            ExFreePoolWithTag(s[i]->Buffer, TAG_SMB_MISC);
+        }
+        RtlInitEmptyUnicodeString(s[i], NULL, 0);
+    }
+}
+
+/* Tree connect (again, after an engine restart) for a virtual net root. Creds: the explicit
+ * credentials of a new tree connect (NULL for reconnects and UNC opens) */
 static
 NTSTATUS
-SmbConnect(PMRX_V_NET_ROOT VNetRoot, PSMB_VNETROOT Ext, PIRP Irp)
+SmbConnect(PMRX_V_NET_ROOT VNetRoot, PSMB_VNETROOT Ext, PIRP Irp, PSMB_CREDENTIALS Creds)
 {
     PMRX_NET_ROOT NetRoot = VNetRoot->pNetRoot;
     PMRX_SRV_CALL SrvCall = NetRoot->pSrvCall;
@@ -91,7 +118,7 @@ SmbConnect(PMRX_V_NET_ROOT VNetRoot, PSMB_VNETROOT Ext, PIRP Irp)
     PSMBUP_CONNECT_REPLY Reply;
     PSMB_REQUEST Request;
     LUID LogonId = VNetRoot->LogonId;
-    ULONG Cursor = 0;
+    ULONG Cursor = 0, Variable;
     NTSTATUS Status;
 
     PAGED_CODE();
@@ -116,7 +143,10 @@ SmbConnect(PMRX_V_NET_ROOT VNetRoot, PSMB_VNETROOT Ext, PIRP Irp)
     if (!Ext->ClientContextValid)
         return STATUS_NO_TOKEN;
 
-    Status = SmbAllocateRequestForIrp(SmbUpConnect, Server.Length + Share.Length, &LogonId, Irp, &Request);
+    Variable = Server.Length + Share.Length;
+    if (Creds != NULL)
+        Variable += Creds->User.Length + Creds->Domain.Length + Creds->Password.Length;
+    Status = SmbAllocateRequestForIrp(SmbUpConnect, Variable, &LogonId, Irp, &Request);
     if (!NT_SUCCESS(Status))
         return Status;
 
@@ -124,11 +154,27 @@ SmbConnect(PMRX_V_NET_ROOT VNetRoot, PSMB_VNETROOT Ext, PIRP Irp)
     Status = SmbRequestPutBytes(Request, &Cursor, Server.Buffer, Server.Length, &Fixed->Server);
     if (NT_SUCCESS(Status))
         Status = SmbRequestPutBytes(Request, &Cursor, Share.Buffer, Share.Length, &Fixed->Share);
+    if (NT_SUCCESS(Status) && Creds != NULL)
+    {
+        Fixed->Flags |= SMBUP_CONNECT_EXPLICIT_CREDENTIALS;
+        Status = SmbRequestPutBytes(Request, &Cursor, Creds->User.Buffer, Creds->User.Length, &Fixed->UserName);
+        if (NT_SUCCESS(Status))
+            Status = SmbRequestPutBytes(Request, &Cursor, Creds->Domain.Buffer, Creds->Domain.Length, &Fixed->Domain);
+        if (NT_SUCCESS(Status))
+            Status = SmbRequestPutBytes(Request, &Cursor, Creds->Password.Buffer, Creds->Password.Length, &Fixed->Password);
+    }
+    else if (NT_SUCCESS(Status) && Ext->Explicit)
+    {
+        /* A reconnect of an explicit-credential connection never becomes single sign-on */
+        Fixed->Flags |= SMBUP_CONNECT_REQUIRE_EXPLICIT;
+    }
     if (!NT_SUCCESS(Status))
     {
         SmbReleaseRequest(Request);
         return Status;
     }
+    if (Ext->IsUse)
+        Fixed->Flags |= SMBUP_CONNECT_USE;
 
     /* The engine gets a handle to the reduced copy of the user's token when it takes the request */
     if (Ext->EngineToken == NULL)
@@ -154,6 +200,9 @@ SmbConnect(PMRX_V_NET_ROOT VNetRoot, PSMB_VNETROOT Ext, PIRP Irp)
             Ext->Generation = Request->Generation;
             Ext->MaxReadSize = min(max(Reply->MaxReadSize, 4096), SMBUP_MAX_IO);
             Ext->MaxWriteSize = min(max(Reply->MaxWriteSize, 4096), SMBUP_MAX_IO);
+            /* Once explicit (given, or those of another connection to the server), always explicit */
+            if (Reply->Flags & SMBUP_CONNECT_REPLY_EXPLICIT)
+                Ext->Explicit = TRUE;
         }
     }
 
@@ -173,10 +222,16 @@ SmbGetConnection(PMRX_V_NET_ROOT VNetRoot, PULONGLONG ConnectionId, PIRP Irp)
     PAGED_CODE();
 
     ExAcquireFastMutex(&Ext->ConnectLock);
-    if (Ext->ConnectionId == 0 || Ext->Generation != SmbCurrentGeneration())
+    if (Ext->Deleted)
+    {
+        /* net use /delete ended it: the files it orphaned do not bring it back */
+        Ext->ConnectionId = 0;
+        Status = STATUS_NETWORK_NAME_DELETED;
+    }
+    else if (Ext->ConnectionId == 0 || Ext->Generation != SmbCurrentGeneration())
     {
         Ext->ConnectionId = 0;
-        Status = SmbConnect(VNetRoot, Ext, Irp);
+        Status = SmbConnect(VNetRoot, Ext, Irp, NULL);
     }
     *ConnectionId = Ext->ConnectionId;
     ExReleaseFastMutex(&Ext->ConnectLock);
@@ -551,6 +606,210 @@ Quit:
     return Status;
 }
 
+/* Connection list (smbconn.h) ***********************************************/
+
+static FAST_MUTEX SmbConnLock;
+static LIST_ENTRY SmbConnList;
+static ULONGLONG SmbConnNextId;
+
+static
+NTSTATUS
+SmbCopyString(PUNICODE_STRING Out, PCWCH Buffer, ULONG Bytes, POOL_TYPE Pool)
+{
+    RtlInitEmptyUnicodeString(Out, NULL, 0);
+    if (Bytes == 0)
+        return STATUS_SUCCESS;
+    if (Bytes > MAXUSHORT - sizeof(WCHAR))
+        return STATUS_NAME_TOO_LONG;
+    Out->Buffer = ExAllocatePoolZero(Pool, Bytes + sizeof(WCHAR), TAG_SMB_MISC);
+    if (Out->Buffer == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    RtlCopyMemory(Out->Buffer, Buffer, Bytes);
+    Out->Length = (USHORT)Bytes;
+    Out->MaximumLength = (USHORT)(Bytes + sizeof(WCHAR));
+    return STATUS_SUCCESS;
+}
+
+/*
+ * The name of a new virtual net root: "\;X:<logon id>\server\share[\path]" (drive letter),
+ * "\;:<session>\server\share[\path]" (rdbss's UNC form) or "\server\share[\path]". The logon id
+ * of a drive-letter name must be the caller's (rdbss would otherwise build a connection of this
+ * caller under another logon session's name). Sets Ext->Local and Ext->Remote ("\\server\...").
+ */
+static
+NTSTATUS
+SmbParseVNetRootName(PMRX_V_NET_ROOT VNetRoot, PSMB_VNETROOT Ext)
+{
+    PUNICODE_STRING Prefix = &((PV_NET_ROOT)VNetRoot)->PrefixEntry.Prefix;
+    ULONG Chars = Prefix->Length / sizeof(WCHAR), i, Rest = 0;
+    PWCH p = Prefix->Buffer;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    Ext->Local = 0;
+    if (p == NULL || Chars < 2 || p[0] != OBJ_NAME_PATH_SEPARATOR)
+        return STATUS_OBJECT_NAME_INVALID;
+
+    if (p[1] == L';')
+    {
+        for (i = 2; i < Chars && p[i] != OBJ_NAME_PATH_SEPARATOR; i++)
+            ;
+        if (i == Chars)
+            return STATUS_OBJECT_NAME_INVALID;
+        Rest = i;
+        if (i >= 4 && p[3] == L':' && ((p[2] >= L'A' && p[2] <= L'Z') || (p[2] >= L'a' && p[2] <= L'z')))
+        {
+            ULONGLONG Id = 0, Mine;
+            ULONG Digits = i - 4, d;
+
+            if (Digits != 16)
+                return STATUS_ACCESS_DENIED;
+            for (d = 4; d < i; d++)
+            {
+                WCHAR c = p[d];
+
+                Id <<= 4;
+                if (c >= L'0' && c <= L'9') Id |= c - L'0';
+                else if (c >= L'a' && c <= L'f') Id |= c - L'a' + 10;
+                else if (c >= L'A' && c <= L'F') Id |= c - L'A' + 10;
+                else return STATUS_ACCESS_DENIED;
+            }
+            Mine = ((ULONGLONG)(ULONG)VNetRoot->LogonId.HighPart << 32) | VNetRoot->LogonId.LowPart;
+            if (Id != Mine)
+            {
+                DPRINT1("mrxsmb: drive name of another logon session refused\n");
+                return STATUS_ACCESS_DENIED;
+            }
+            Ext->Local = (p[2] >= L'a') ? (WCHAR)(p[2] - L'a' + L'A') : p[2];
+        }
+        else if (p[2] != L':')
+        {
+            return STATUS_OBJECT_NAME_INVALID;
+        }
+    }
+
+    /* "\" + "\server\share..." */
+    Ext->Remote.MaximumLength = (USHORT)((Chars - Rest + 2) * sizeof(WCHAR));
+    Ext->Remote.Buffer = ExAllocatePoolZero(PagedPool, Ext->Remote.MaximumLength, TAG_SMB_MISC);
+    if (Ext->Remote.Buffer == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    Ext->Remote.Buffer[0] = OBJ_NAME_PATH_SEPARATOR;
+    RtlCopyMemory(Ext->Remote.Buffer + 1, p + Rest, (Chars - Rest) * sizeof(WCHAR));
+    Ext->Remote.Length = (USHORT)((Chars - Rest + 1) * sizeof(WCHAR));
+    Status = STATUS_SUCCESS;
+    return Status;
+}
+
+/* One EA value of a validated buffer, as a nonpaged copy; Found = it was there. The IRP's buffer
+ * is left as it is: rdbss constructs the virtual net root a second time after
+ * STATUS_NETWORK_CREDENTIAL_CONFLICT (RxCreateTreeConnect) and needs the values again; the I/O
+ * manager frees that kernel copy when the create returns. */
+static
+NTSTATUS
+SmbTakeEaString(PFILE_FULL_EA_INFORMATION Ea, ULONG EaLength, PCSTR Name, ULONG MaxChars,
+                PUNICODE_STRING Out, PBOOLEAN Found)
+{
+    PFILE_FULL_EA_INFORMATION e = Ea;
+    ULONG NameLength = (ULONG)strlen(Name);
+    NTSTATUS Status;
+
+    *Found = FALSE;
+    RtlInitEmptyUnicodeString(Out, NULL, 0);
+    for (;;)
+    {
+        if (e->EaNameLength == NameLength && RtlEqualMemory(e->EaName, Name, NameLength))
+        {
+            PUCHAR Value = (PUCHAR)e->EaName + e->EaNameLength + 1;
+
+            if (*Found || (e->EaValueLength & 1) || e->EaValueLength > MaxChars * sizeof(WCHAR))
+                return STATUS_INVALID_PARAMETER;
+            *Found = TRUE;
+            Status = SmbCopyString(Out, (PCWCH)Value, e->EaValueLength, NonPagedPool);
+            if (!NT_SUCCESS(Status))
+                return Status;
+        }
+        if (e->NextEntryOffset == 0)
+            break;
+        e = (PFILE_FULL_EA_INFORMATION)((PUCHAR)e + e->NextEntryOffset);
+    }
+    UNREFERENCED_PARAMETER(EaLength);
+    return STATUS_SUCCESS;
+}
+
+/*
+ * A tree connect (net use, a mapped drive): an IRP_MJ_CREATE with FILE_CREATE_TREE_CONNECTION.
+ * Not RxContext->Create.ThisIsATreeConnectOpen alone: rdbss sets it for MUP's prefix claims too
+ * (RxPrefixClaim), which are plain UNC opens.
+ */
+static
+BOOLEAN
+SmbIsTreeConnect(PRX_CONTEXT RxContext)
+{
+    PIO_STACK_LOCATION Stack = RxContext->CurrentIrpSp;
+
+    return RxContext->Create.ThisIsATreeConnectOpen && RxContext->CurrentIrp != NULL && Stack != NULL &&
+           Stack->MajorFunction == IRP_MJ_CREATE &&
+           BooleanFlagOn(Stack->Parameters.Create.Options, FILE_CREATE_TREE_CONNECTION);
+}
+
+/* The explicit credentials of a tree connect, from the create's EA buffer (smbconn.h).
+ * *Explicit = FALSE: none given (single sign-on). */
+static
+NTSTATUS
+SmbCaptureCredentials(PRX_CONTEXT RxContext, PSMB_CREDENTIALS Creds, PBOOLEAN Explicit)
+{
+    PFILE_FULL_EA_INFORMATION Ea = RxContext->Create.EaBuffer;
+    ULONG EaLength = RxContext->Create.EaLength, ErrorOffset;
+    BOOLEAN HasUser, HasDomain, HasPassword;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    *Explicit = FALSE;
+    RtlZeroMemory(Creds, sizeof(*Creds));
+    if (!SmbIsTreeConnect(RxContext) || Ea == NULL || EaLength == 0)
+        return STATUS_SUCCESS;
+
+    /* The I/O manager checks a user-mode caller's buffer; a kernel-mode one is checked here */
+    Status = IoCheckEaBufferValidity(Ea, EaLength, &ErrorOffset);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = SmbTakeEaString(Ea, EaLength, SMBCONN_EA_USERNAME, SMBCONN_MAX_USER_CHARS, &Creds->User, &HasUser);
+    if (NT_SUCCESS(Status))
+        Status = SmbTakeEaString(Ea, EaLength, SMBCONN_EA_DOMAIN, SMBCONN_MAX_DOMAIN_CHARS, &Creds->Domain, &HasDomain);
+    if (NT_SUCCESS(Status))
+        Status = SmbTakeEaString(Ea, EaLength, SMBCONN_EA_PASSWORD, SMBCONN_MAX_PASSWORD_CHARS, &Creds->Password, &HasPassword);
+    if (!NT_SUCCESS(Status))
+    {
+        SmbWipeCredentials(Creds);
+        return Status;
+    }
+    if (!HasUser && !HasDomain && !HasPassword)
+        return STATUS_SUCCESS;
+    /* A password or domain without a user name is not an identity */
+    if (Creds->User.Length == 0)
+    {
+        SmbWipeCredentials(Creds);
+        return STATUS_INVALID_PARAMETER;
+    }
+    *Explicit = TRUE;
+    return STATUS_SUCCESS;
+}
+
+static
+VOID
+SmbListVNetRoot(PMRX_V_NET_ROOT VNetRoot, PSMB_VNETROOT Ext)
+{
+    ExAcquireFastMutex(&SmbConnLock);
+    Ext->VNetRoot = VNetRoot;
+    Ext->UseId = ++SmbConnNextId;
+    InsertTailList(&SmbConnList, &Ext->UseLink);
+    Ext->Listed = TRUE;
+    ExReleaseFastMutex(&SmbConnLock);
+}
+
 static
 NTSTATUS
 NTAPI
@@ -562,11 +821,24 @@ SmbCreateVNetRoot(PMRX_CREATENETROOT_CONTEXT Context)
     PSMB_VNETROOT Ext = SmbVNetRoot(VNetRoot);
     SECURITY_QUALITY_OF_SERVICE Qos;
     PIO_SECURITY_CONTEXT SecurityContext;
+    SMB_CREDENTIALS Creds;
+    BOOLEAN Explicit = FALSE;
     NTSTATUS Status;
 
     PAGED_CODE();
 
     ExInitializeFastMutex(&Ext->ConnectLock);
+    RtlZeroMemory(&Creds, sizeof(Creds));
+
+    /* Credentials first: whatever happens below, their copies in the IRP are wiped */
+    Status = SmbCaptureCredentials(RxContext, &Creds, &Explicit);
+    if (!NT_SUCCESS(Status))
+        goto Done;
+
+    Status = SmbParseVNetRootName(VNetRoot, Ext);
+    if (!NT_SUCCESS(Status))
+        goto Done;
+    Ext->IsUse = SmbIsTreeConnect(RxContext);
 
     if (NetRoot->Type != NET_ROOT_DISK && NetRoot->Type != NET_ROOT_WILD)
     {
@@ -623,17 +895,38 @@ SmbCreateVNetRoot(PMRX_CREATENETROOT_CONTEXT Context)
         DPRINT1("mrxsmb: logon %lx:%lx not marked for its termination notice\n",
                 VNetRoot->LogonId.HighPart, VNetRoot->LogonId.LowPart);
 
+    /* "DOMAIN\user" (or "user") for the connection list; not a secret */
+    if (Explicit)
+    {
+        Ext->User.MaximumLength = Creds.Domain.Length + Creds.User.Length + 2 * sizeof(WCHAR);
+        Ext->User.Buffer = ExAllocatePoolZero(PagedPool, Ext->User.MaximumLength, TAG_SMB_MISC);
+        if (Ext->User.Buffer == NULL)
+        {
+            Ext->User.MaximumLength = 0;
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+            goto Done;
+        }
+        if (Creds.Domain.Length != 0)
+        {
+            RtlAppendUnicodeStringToString(&Ext->User, &Creds.Domain);
+            RtlAppendUnicodeToString(&Ext->User, L"\\");
+        }
+        RtlAppendUnicodeStringToString(&Ext->User, &Creds.User);
+    }
+
     ExAcquireFastMutex(&Ext->ConnectLock);
-    Status = SmbConnect(VNetRoot, Ext, RxContext->CurrentIrp);
+    Status = SmbConnect(VNetRoot, Ext, RxContext->CurrentIrp, Explicit ? &Creds : NULL);
     ExReleaseFastMutex(&Ext->ConnectLock);
 
     if (NT_SUCCESS(Status))
     {
         NetRoot->MRxNetRootState = MRX_NET_ROOT_STATE_GOOD;
         NetRoot->DeviceType = FILE_DEVICE_DISK;
+        SmbListVNetRoot(VNetRoot, Ext);
     }
 
 Done:
+    SmbWipeCredentials(&Creds);
     Context->VirtualNetRootStatus = Status;
     Context->NetRootStatus = Status;
     Context->Callback(Context);
@@ -703,11 +996,31 @@ SmbFinalizeVNetRoot(PMRX_V_NET_ROOT VNetRoot, PBOOLEAN Force)
     if (Ext == NULL)
         return STATUS_SUCCESS;
 
+    /* Off the connection list before the memory goes (rdbss holds the prefix table lock here) */
+    if (Ext->Listed)
+    {
+        ExAcquireFastMutex(&SmbConnLock);
+        RemoveEntryList(&Ext->UseLink);
+        Ext->Listed = FALSE;
+        ExReleaseFastMutex(&SmbConnLock);
+    }
+    if (Ext->Remote.Buffer != NULL)
+    {
+        ExFreePoolWithTag(Ext->Remote.Buffer, TAG_SMB_MISC);
+        RtlInitEmptyUnicodeString(&Ext->Remote, NULL, 0);
+    }
+    if (Ext->User.Buffer != NULL)
+    {
+        ExFreePoolWithTag(Ext->User.Buffer, TAG_SMB_MISC);
+        RtlInitEmptyUnicodeString(&Ext->User, NULL, 0);
+    }
+
     if (Ext->ConnectionId != 0 && Ext->Generation == SmbCurrentGeneration() &&
         NT_SUCCESS(SmbAllocateRequest(SmbUpDisconnect, 0, &VNetRoot->LogonId, &Request)))
     {
         Fixed = SmbRequestFixed(Request);
         Fixed->ConnectionId = Ext->ConnectionId;
+        Fixed->Flags = Ext->IsUse ? SMBUP_DISCONNECT_USE : 0;
         SmbSendAndCheck(Request, SMB_CLOSE_TIMEOUT_SECONDS);
         SmbReleaseRequest(Request);
     }
@@ -1748,6 +2061,242 @@ Complete:
     return Status;
 }
 
+/* Connection list IOCTLs (smbconn.h) ****************************************/
+
+/* The logon session of the caller (its impersonation token if it impersonates) */
+static
+NTSTATUS
+SmbCallerLogonId(PLUID LogonId)
+{
+    SECURITY_SUBJECT_CONTEXT Subject;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    SeCaptureSubjectContext(&Subject);
+    Status = SeQueryAuthenticationIdToken(SeQuerySubjectContextToken(&Subject), LogonId);
+    SeReleaseSubjectContext(&Subject);
+    return Status;
+}
+
+static
+BOOLEAN
+SmbConnVisible(PSMB_VNETROOT Ext, PLUID LogonId)
+{
+    PV_NET_ROOT V = (PV_NET_ROOT)Ext->VNetRoot;
+
+    return RtlEqualLuid(&Ext->VNetRoot->LogonId, LogonId) && !V->UpperFinalizationDone &&
+           !Ext->Deleted && Ext->Remote.Length != 0;
+}
+
+/*
+ * After a delete: the engine gives up the connection now. rdbss finalizes the virtual net root
+ * only when its scavenger gets to it, and until then the engine would keep the session (and its
+ * identity for the server: a following connect with other credentials would get 1219, where
+ * Windows lets it through right after "net use /delete").
+ */
+static
+VOID
+SmbDisconnectNow(PMRX_V_NET_ROOT VNetRoot)
+{
+    PSMB_VNETROOT Ext = SmbVNetRoot(VNetRoot);
+    PSMBUP_DISCONNECT_REQUEST Fixed;
+    PSMB_REQUEST Request;
+
+    PAGED_CODE();
+
+    ExAcquireFastMutex(&Ext->ConnectLock);
+    Ext->Deleted = TRUE;
+    if (Ext->ConnectionId != 0 && Ext->Generation == SmbCurrentGeneration() &&
+        NT_SUCCESS(SmbAllocateRequest(SmbUpDisconnect, 0, &VNetRoot->LogonId, &Request)))
+    {
+        Fixed = SmbRequestFixed(Request);
+        Fixed->ConnectionId = Ext->ConnectionId;
+        Fixed->Flags = Ext->IsUse ? SMBUP_DISCONNECT_USE : 0;
+        SmbSendAndCheck(Request, SMB_CLOSE_TIMEOUT_SECONDS);
+        SmbReleaseRequest(Request);
+    }
+    Ext->ConnectionId = 0;
+    ExReleaseFastMutex(&Ext->ConnectLock);
+}
+
+static
+NTSTATUS
+SmbConnEnum(PIRP Irp, PIO_STACK_LOCATION Stack)
+{
+    ULONG OutLength = Stack->Parameters.DeviceIoControl.OutputBufferLength;
+    PSMBCONN_ENUM_OUTPUT Out = Irp->AssociatedIrp.SystemBuffer;
+    ULONG Count = 0, Needed, Fixed, Strings;
+    PLIST_ENTRY Entry;
+    LUID LogonId;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    if (OutLength < FIELD_OFFSET(SMBCONN_ENUM_OUTPUT, Entries) || Out == NULL)
+        return STATUS_BUFFER_TOO_SMALL;
+    Status = SmbCallerLogonId(&LogonId);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    ExAcquireFastMutex(&SmbConnLock);
+    /* Sizes first */
+    Strings = 0;
+    for (Entry = SmbConnList.Flink; Entry != &SmbConnList; Entry = Entry->Flink)
+    {
+        PSMB_VNETROOT Ext = CONTAINING_RECORD(Entry, SMB_VNETROOT, UseLink);
+
+        if (!SmbConnVisible(Ext, &LogonId))
+            continue;
+        Count++;
+        Strings += Ext->Remote.Length + Ext->User.Length;
+    }
+    Fixed = FIELD_OFFSET(SMBCONN_ENUM_OUTPUT, Entries) + Count * sizeof(SMBCONN_ENTRY);
+    Needed = Fixed + Strings;
+    if (Needed > OutLength)
+    {
+        ExReleaseFastMutex(&SmbConnLock);
+        Out->Count = 0;
+        Out->Needed = Needed;
+        Irp->IoStatus.Information = FIELD_OFFSET(SMBCONN_ENUM_OUTPUT, Entries);
+        return STATUS_BUFFER_OVERFLOW;
+    }
+
+    RtlZeroMemory(Out, Needed);
+    Out->Count = Count;
+    Out->Needed = Needed;
+    Count = 0;
+    Strings = Fixed;
+    for (Entry = SmbConnList.Flink; Entry != &SmbConnList; Entry = Entry->Flink)
+    {
+        PSMB_VNETROOT Ext = CONTAINING_RECORD(Entry, SMB_VNETROOT, UseLink);
+        PSMBCONN_ENTRY e;
+
+        if (!SmbConnVisible(Ext, &LogonId))
+            continue;
+        e = &Out->Entries[Count++];
+        e->Id = Ext->UseId;
+        e->Local = Ext->Local;
+        if (((PV_NET_ROOT)Ext->VNetRoot)->AdditionalReferenceForDeleteFsctlTaken != 0)
+            e->Flags |= SMBCONN_FLAG_TREE_CONNECTED;
+        if (Ext->Explicit)
+            e->Flags |= SMBCONN_FLAG_EXPLICIT;
+        if (Ext->ConnectionId != 0 && Ext->Generation == SmbCurrentGeneration())
+            e->Flags |= SMBCONN_FLAG_CONNECTED;
+        e->RemoteOffset = Strings;
+        e->RemoteLength = Ext->Remote.Length;
+        RtlCopyMemory((PUCHAR)Out + Strings, Ext->Remote.Buffer, Ext->Remote.Length);
+        Strings += Ext->Remote.Length;
+        e->UserOffset = Strings;
+        e->UserLength = Ext->User.Length;
+        if (Ext->User.Length != 0)
+            RtlCopyMemory((PUCHAR)Out + Strings, Ext->User.Buffer, Ext->User.Length);
+        Strings += Ext->User.Length;
+    }
+    ExReleaseFastMutex(&SmbConnLock);
+
+    Irp->IoStatus.Information = Needed;
+    return STATUS_SUCCESS;
+}
+
+/*
+ * Ends one connection of the caller's logon session (WNetCancelConnection2). Without FORCE, a
+ * connection with open files or directory handles is kept and STATUS_FILES_OPEN returned; with
+ * FORCE they are orphaned (their later I/O fails). Either way the connection leaves the list at once.
+ */
+static
+NTSTATUS
+SmbConnDelete(PIRP Irp, PIO_STACK_LOCATION Stack)
+{
+    PSMBCONN_DELETE_INPUT In = Irp->AssociatedIrp.SystemBuffer;
+    PRX_PREFIX_TABLE Table = SmbRdrDevice->pRxNetNameTable;
+    PMRX_V_NET_ROOT VNetRoot = NULL;
+    PLIST_ENTRY Entry;
+    LUID LogonId;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    if (Stack->Parameters.DeviceIoControl.InputBufferLength < sizeof(SMBCONN_DELETE_INPUT) || In == NULL)
+        return STATUS_INVALID_PARAMETER;
+    Status = SmbCallerLogonId(&LogonId);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    /* rdbss finalizes virtual net roots with its prefix table lock held exclusive (and our
+     * finalize routine unlists them under SmbConnLock): shared + ours keeps the one found alive
+     * until it is referenced */
+    FsRtlEnterFileSystem();
+    RxAcquirePrefixTableLockShared(Table, TRUE);
+    ExAcquireFastMutex(&SmbConnLock);
+    for (Entry = SmbConnList.Flink; Entry != &SmbConnList; Entry = Entry->Flink)
+    {
+        PSMB_VNETROOT Ext = CONTAINING_RECORD(Entry, SMB_VNETROOT, UseLink);
+
+        if (Ext->UseId == In->Id && SmbConnVisible(Ext, &LogonId))
+        {
+            VNetRoot = Ext->VNetRoot;
+            RxReferenceVNetRoot((PV_NET_ROOT)VNetRoot);
+            break;
+        }
+    }
+    ExReleaseFastMutex(&SmbConnLock);
+    RxReleasePrefixTableLock(Table);
+
+    if (VNetRoot == NULL)
+    {
+        FsRtlExitFileSystem();
+        return STATUS_NOT_FOUND;
+    }
+
+    if (!(In->Flags & SMBCONN_DELETE_FORCE) && VNetRoot->NumberOfFobxs != 0)
+        Status = STATUS_FILES_OPEN;
+    else
+        Status = RxFinalizeConnection((PNET_ROOT)VNetRoot->pNetRoot, (PV_NET_ROOT)VNetRoot, TRUE);
+    DPRINT1("mrxsmb: delete connection %I64u (force %lu): %lx\n", In->Id, In->Flags & SMBCONN_DELETE_FORCE, Status);
+    if (NT_SUCCESS(Status) || (Status == STATUS_FILES_OPEN && (In->Flags & SMBCONN_DELETE_FORCE)))
+        SmbDisconnectNow(VNetRoot);
+
+    RxDereferenceVNetRoot((PV_NET_ROOT)VNetRoot, LHS_LockNotHeld);
+    FsRtlExitFileSystem();
+    /* Open files orphaned by force are not an error for the caller */
+    if (Status == STATUS_FILES_OPEN && (In->Flags & SMBCONN_DELETE_FORCE))
+        Status = STATUS_SUCCESS;
+    return Status;
+}
+
+static
+BOOLEAN
+SmbIsUseIoctl(PIO_STACK_LOCATION Stack)
+{
+    return Stack->MajorFunction == IRP_MJ_DEVICE_CONTROL &&
+           (Stack->Parameters.DeviceIoControl.IoControlCode == IOCTL_SMBCONN_ENUM ||
+            Stack->Parameters.DeviceIoControl.IoControlCode == IOCTL_SMBCONN_DELETE);
+}
+
+static
+NTSTATUS
+SmbConnDispatch(PIRP Irp, PIO_STACK_LOCATION Stack)
+{
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    Irp->IoStatus.Information = 0;
+    /* On the device itself only (opened without a name), from the caller's own thread */
+    if (Stack->FileObject == NULL || Stack->FileObject->FileName.Length != 0 ||
+        Stack->FileObject->RelatedFileObject != NULL)
+        Status = STATUS_INVALID_DEVICE_REQUEST;
+    else if (Stack->Parameters.DeviceIoControl.IoControlCode == IOCTL_SMBCONN_ENUM)
+        Status = SmbConnEnum(Irp, Stack);
+    else
+        Status = SmbConnDelete(Irp, Stack);
+
+    Irp->IoStatus.Status = Status;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return Status;
+}
+
 static
 NTSTATUS
 NTAPI
@@ -1771,6 +2320,8 @@ SmbFsdDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     {
         return SmbQueryPathEx(Irp, Stack);
     }
+    if (SmbIsUseIoctl(Stack))
+        return SmbConnDispatch(Irp, Stack);
 
     return RxFsdDispatch(SmbRdrDevice, Irp);
 }
@@ -1947,6 +2498,8 @@ DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
     ULONG i;
 
     SmbEngineInitialize();
+    ExInitializeFastMutex(&SmbConnLock);
+    InitializeListHead(&SmbConnList);
 #if DBG
     SmbReadDebugParameters(RegistryPath);
 #endif

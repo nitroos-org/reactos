@@ -123,9 +123,22 @@ typedef struct _SMBENG_CONN
     char *ServerA;              /* for libsmb2 (an ipv6-literal.net name as [address]) */
     char *ShareA;
     LONG Bindings;              /* references of driver CONNECTs on this key (under SmbEng.Lock) */
+    LONG UseRefs;               /* of those, uses (SMBUP_CONNECT_USE): they hold the identity (under SmbEng.Lock) */
+    volatile LONG Reauth;       /* the next CONNECT sets up a new session (new identity or password) */
     struct _SMBENG_BINDING *Shared; /* the binding every CONNECT of this key gets (under SmbEng.Lock) */
     BOOLEAN Closing;            /* leaving the table (under SmbEng.Lock) */
     volatile LONG LoggedOff;    /* the logon session ended (set by the LOGOFF notification) */
+
+    /* Identity (smbupcall.h, CONNECT). Explicit and the names change only under SmbEng.Lock while
+     * the key has no binding; the password is replaced under SmbEng.Lock + QueueLock and read by
+     * the connection thread under QueueLock. */
+    BOOLEAN Explicit;
+    WCHAR *User;                /* explicit credentials: user and domain (may be empty) */
+    WCHAR *Domain;
+    PUCHAR Password;            /* RtlEncryptMemory(SAME_PROCESS) of the UTF-16 password, padded */
+    ULONG PasswordAlloc;        /* bytes of Password (a multiple of RTL_ENCRYPT_MEMORY_SIZE) */
+    ULONG PasswordBytes;        /* bytes of the password itself */
+    volatile LONG CredentialsChanged; /* a new password: end the back-off of a failed connect */
 
     CRITICAL_SECTION QueueLock; /* Queue and Wake only, never held across I/O */
     LIST_ENTRY Queue;
@@ -191,7 +204,7 @@ extern SMBENG_GLOBAL SmbEng;
 VOID SmbEngLog(DWORD Level, const char *Format, ...);
 ULONGLONG SmbEngNewId(VOID);
 BOOL SmbEngSendReply(HANDLE Event, PVOID Message, ULONG Size);
-VOID SmbEngRemoveBinding(ULONGLONG Id);
+VOID SmbEngRemoveBinding(ULONGLONG Id, const SMBENG_OP *Connect);
 BOOL SmbEngBindingLive(ULONGLONG Id);
 VOID SmbEngFreeOp(PSMBENG_OP Op);
 
@@ -203,5 +216,9 @@ VOID SmbEngWakeConn(PSMBENG_CONN Conn);
 NTSTATUS SmbEngMapStatus(USHORT Opcode, uint32_t Status);
 VOID SmbEngAnswerOp(PSMBENG_OP Op, NTSTATUS Status, HANDLE Event);
 BOOL SmbEngStringOf(const SMBUP_HEADER *h, ULONG FixedEnd, const SMBUP_STRING *s, const WCHAR **Out, ULONG *Bytes);
+BOOL SmbEngSetPassword(PSMBENG_CONN Conn, const WCHAR *Password, ULONG Bytes);
+BOOL SmbEngCopyPassword(PSMBENG_CONN Conn, const SMBENG_CONN *From);
+BOOL SmbEngSamePassword(PSMBENG_CONN Conn, const WCHAR *Password, ULONG Bytes);
+VOID SmbEngFreeCredentials(PSMBENG_CONN Conn);
 
 #endif /* _SMBENGINE_H_ */

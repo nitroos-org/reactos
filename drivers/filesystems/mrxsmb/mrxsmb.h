@@ -14,6 +14,7 @@
 #include <ntstrsafe.h>
 #include <pseh/pseh2.h>
 #include <drivers/smbrdr/smbupcall.h>
+#include <drivers/smbrdr/smbconn.h>
 
 /* Exported by the kernel, not declared by the DDK headers of this tree */
 NTKERNELAPI
@@ -97,6 +98,17 @@ typedef struct _SMB_VNETROOT
     BOOLEAN ClientContextValid;
     SECURITY_CLIENT_CONTEXT ClientContext;  /* the user who connected, for reconnects */
     PACCESS_TOKEN EngineToken;      /* what the engine gets of it: SmbCreateEngineToken */
+    /* Connection list (smbconn.h), under SmbConnLock; Listed once on SmbConnList */
+    LIST_ENTRY UseLink;
+    BOOLEAN Listed;
+    BOOLEAN Explicit;               /* explicit credentials: reconnects must not fall back to single sign-on */
+    BOOLEAN Deleted;                /* IOCTL_SMBCONN_DELETE ended it: no reconnect, not listed */
+    BOOLEAN IsUse;                  /* made by a tree connect (holds the identity for the server, smbupcall.h) */
+    WCHAR Local;                    /* drive letter of a \;X: name, 0 = none */
+    ULONGLONG UseId;
+    PMRX_V_NET_ROOT VNetRoot;
+    UNICODE_STRING Remote;          /* "\\server\share[\path]", paged pool */
+    UNICODE_STRING User;            /* "DOMAIN\user" of explicit credentials, paged pool; empty = single sign-on */
 } SMB_VNETROOT, *PSMB_VNETROOT;
 
 typedef struct _SMB_SRVOPEN

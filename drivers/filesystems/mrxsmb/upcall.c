@@ -180,7 +180,12 @@ SmbFreeRequest(PSMB_REQUEST Request)
     if (Request->Token != NULL)
         ObDereferenceObject(Request->Token);
     if (Request->Message != NULL)
+    {
+        /* A CONNECT may carry a password: never leave it in freed pool */
+        if (Request->Opcode == SmbUpConnect)
+            RtlSecureZeroMemory(Request->Message, Request->MessageAllocation);
         ExFreePoolWithTag(Request->Message, TAG_SMB_MESSAGE);
+    }
     if (Request->Reply != NULL)
         ExFreePoolWithTag(Request->Reply, TAG_SMB_REPLY);
     if (Request->ReservedBytes != 0)
@@ -237,7 +242,9 @@ SmbAllocateRequestForIrp(
     if (Opcode != SmbUpLogoff && Opcode != SmbUpCancel)
         Request->ReservedBytes = (ULONG)Total;
 
-    Request->Message = ExAllocatePoolZero(PagedPool, (SIZE_T)Total, TAG_SMB_MESSAGE);
+    /* A CONNECT may carry a password: nonpaged, so that it never reaches the paging file */
+    Request->Message = ExAllocatePoolZero(Opcode == SmbUpConnect ? NonPagedPool : PagedPool,
+                                          (SIZE_T)Total, TAG_SMB_MESSAGE);
     if (Request->Message == NULL)
     {
         if (Request->ReservedBytes != 0)
