@@ -30,6 +30,20 @@ typedef union _COMBINED_LOCK_ELEMENT
 }
     COMBINED_LOCK_ELEMENT, *PCOMBINED_LOCK_ELEMENT;
 
+/* A lock of length zero: Windows grants it, keeps it until the exact range is unlocked and treats it as a point between
+   two bytes: it conflicts with a range that holds the point strictly inside, never with another lock of length zero
+   (measured on Windows Server 2022, NTFS). It cannot live in the range table, whose elements are ranges. */
+typedef struct _LOCK_ZERO_LENGTH
+{
+    LIST_ENTRY Entry;
+    LONGLONG Start;
+    ULONG Key;
+    PVOID ProcessId;
+    PFILE_OBJECT FileObject;
+    BOOLEAN ExclusiveLock;
+}
+    LOCK_ZERO_LENGTH, *PLOCK_ZERO_LENGTH;
+
 typedef struct _LOCK_INFORMATION
 {
     RTL_GENERIC_TABLE RangeTable;
@@ -38,6 +52,7 @@ typedef struct _LOCK_INFORMATION
     LIST_ENTRY CsqList;
     PFILE_LOCK BelongsTo;
     LIST_ENTRY SharedLocks;
+    LIST_ENTRY ZeroLengthLocks;
     ULONG Generation;
     /* Guards RangeTable, SharedLocks and Generation; lookups splay the table, so readers take it too.
        A spin lock, because callers may run at APC_LEVEL. Ordered before CsqLock. */
@@ -297,6 +312,7 @@ FsRtlpCreateLockInformation(IN PFILE_LOCK FileLock)
     LockInfo->BelongsTo = FileLock;
     LockInfo->CompleteLockIrpRoutine = FileLock->CompleteLockIrpRoutine;
     InitializeListHead(&LockInfo->SharedLocks);
+    InitializeListHead(&LockInfo->ZeroLengthLocks);
     RtlInitializeGenericTable(&LockInfo->RangeTable,
                               LockCompare,
                               LockAllocate,
@@ -312,6 +328,10 @@ FsRtlpCreateLockInformation(IN PFILE_LOCK FileLock)
                       LockReleaseQueueLock,
                       LockCompleteCanceledIrp);
     KeInitializeSpinLock(&LockInfo->RangeLock);
+
+    /* FsRtlAreThereCurrentFileLocks reads this flag: the file systems that ask it before they check a read or a write
+       against the locks (FAT) never did, whatever the file held */
+    FileLock->FastIoIsQuestionable = TRUE;
 
     /* Publish only a complete structure; a concurrent first caller may have won */
     Published = InterlockedCompareExchangePointer(&FileLock->LockInformation, LockInfo, NULL);
@@ -399,6 +419,80 @@ FsRtlpInitLockElement(OUT PCOMBINED_LOCK_ELEMENT Element,
     Element->Exclusive.FileLock.ExclusiveLock = ExclusiveLock;
 }
 
+/* Called with RangeLock held: a lock of length zero that lies strictly inside Start..End (unsigned) */
+static
+PLOCK_ZERO_LENGTH
+FsRtlpFindZeroLengthInside(IN PLOCK_INFORMATION LockInfo,
+                           IN LONGLONG Start,
+                           IN LONGLONG End,
+                           IN BOOLEAN ExclusiveRequest)
+{
+    PLIST_ENTRY Entry;
+
+    for (Entry = LockInfo->ZeroLengthLocks.Flink; Entry != &LockInfo->ZeroLengthLocks; Entry = Entry->Flink)
+    {
+        PLOCK_ZERO_LENGTH Zero = CONTAINING_RECORD(Entry, LOCK_ZERO_LENGTH, Entry);
+
+        if ((ULONGLONG)Start < (ULONGLONG)Zero->Start && (ULONGLONG)Zero->Start < (ULONGLONG)End &&
+            (Zero->ExclusiveLock || ExclusiveRequest))
+            return Zero;
+    }
+    return NULL;
+}
+
+/* Called with RangeLock held: a lock of the table that holds Point strictly inside, and that conflicts with the request.
+   A shared request of the owner of the exclusive lock is let through (Windows Server 2022); an exclusive one is not. */
+static
+PCOMBINED_LOCK_ELEMENT
+FsRtlpFindRangeAround(IN PLOCK_INFORMATION LockInfo,
+                      IN LONGLONG Point,
+                      IN BOOLEAN ExclusiveRequest,
+                      IN PCOMBINED_LOCK_ELEMENT Request)
+{
+    PCOMBINED_LOCK_ELEMENT Entry;
+    PVOID RestartKey = NULL;
+
+    for (Entry = RtlEnumerateGenericTableWithoutSplaying(&LockInfo->RangeTable, &RestartKey);
+         Entry != NULL;
+         Entry = RtlEnumerateGenericTableWithoutSplaying(&LockInfo->RangeTable, &RestartKey))
+    {
+        if ((ULONGLONG)Entry->Exclusive.FileLock.StartingByte.QuadPart < (ULONGLONG)Point &&
+            (ULONGLONG)Point < (ULONGLONG)Entry->Exclusive.FileLock.EndingByte.QuadPart &&
+            (Entry->Exclusive.FileLock.ExclusiveLock || ExclusiveRequest) &&
+            !(!ExclusiveRequest &&
+              Entry->Exclusive.FileLock.FileObject == Request->Exclusive.FileLock.FileObject &&
+              Entry->Exclusive.FileLock.ProcessId == Request->Exclusive.FileLock.ProcessId &&
+              Entry->Exclusive.FileLock.Key == Request->Exclusive.FileLock.Key))
+            return Entry;
+    }
+    return NULL;
+}
+
+/* Removes the zero length lock of exactly this owner and offset, if there is one. Called with RangeLock held. */
+static
+BOOLEAN
+FsRtlpRemoveZeroLengthLockLocked(IN PLOCK_INFORMATION LockInfo,
+                                 IN PFILE_OBJECT FileObject,
+                                 IN LONGLONG Start,
+                                 IN PVOID Process,
+                                 IN ULONG Key)
+{
+    PLIST_ENTRY Entry;
+
+    for (Entry = LockInfo->ZeroLengthLocks.Flink; Entry != &LockInfo->ZeroLengthLocks; Entry = Entry->Flink)
+    {
+        PLOCK_ZERO_LENGTH Zero = CONTAINING_RECORD(Entry, LOCK_ZERO_LENGTH, Entry);
+
+        if (Zero->Start == Start && Zero->Key == Key && Zero->ProcessId == Process && Zero->FileObject == FileObject)
+        {
+            RemoveEntryList(&Zero->Entry);
+            ExFreePoolWithTag(Zero, TAG_RANGE);
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
 /* Called with RangeLock held */
 static
 BOOLEAN
@@ -409,12 +503,28 @@ FsRtlpFindLockLocked(IN PLOCK_INFORMATION LockInfo,
 {
     COMBINED_LOCK_ELEMENT ToFind;
     PCOMBINED_LOCK_ELEMENT Entry;
+    PLOCK_ZERO_LENGTH Zero;
 
     ToFind.Exclusive.FileLock.StartingByte.QuadPart = Start;
     ToFind.Exclusive.FileLock.EndingByte.QuadPart = End;
     Entry = RtlLookupElementGenericTable(&LockInfo->RangeTable, &ToFind);
-    if (!Entry) return FALSE;
-    *Found = Entry->Exclusive.FileLock;
+    if (Entry)
+    {
+        *Found = Entry->Exclusive.FileLock;
+        return TRUE;
+    }
+
+    /* a lock of length zero inside the range stands in the way of an I/O like a lock of that range */
+    Zero = FsRtlpFindZeroLengthInside(LockInfo, Start, End, TRUE);
+    if (!Zero) Zero = FsRtlpFindZeroLengthInside(LockInfo, Start, End, FALSE);
+    if (!Zero) return FALSE;
+    RtlZeroMemory(Found, sizeof(*Found));
+    Found->FileObject = Zero->FileObject;
+    Found->StartingByte.QuadPart = Zero->Start;
+    Found->EndingByte.QuadPart = Zero->Start;
+    Found->ProcessId = Zero->ProcessId;
+    Found->Key = Zero->Key;
+    Found->ExclusiveLock = Zero->ExclusiveLock;
     return TRUE;
 }
 
@@ -496,6 +606,24 @@ FsRtlpRebuildSharedLockRange
     return Conflict;
 }
 
+/* A request that must wait: refused at once, or queued (the IRP belongs to the queue then). Called with RangeLock held. */
+static
+NTSTATUS
+FsRtlpQueueOrRefuseLocked(IN PLOCK_INFORMATION LockInfo,
+                          IN BOOLEAN FailImmediately,
+                          IN PIRP Irp OPTIONAL)
+{
+    if (FailImmediately) return STATUS_FILE_LOCK_CONFLICT;
+    if (Irp)
+    {
+        /* FsRtlpGrantWaitersLocked looks at each waiter once per generation */
+        Irp->IoStatus.Information = LockInfo->Generation;
+        IoMarkIrpPending(Irp);
+        IoCsqInsertIrpEx(&LockInfo->Csq, Irp, NULL, NULL);
+    }
+    return STATUS_PENDING;
+}
+
 /*
  * Grants or queues one lock. Called with RangeLock held.
  * Returns STATUS_SUCCESS when granted, STATUS_PENDING when the IRP was queued (or
@@ -514,6 +642,33 @@ FsRtlpLockRangeLocked(IN PLOCK_INFORMATION LockInfo,
     BOOLEAN ExclusiveLock = ToInsert->Exclusive.FileLock.ExclusiveLock;
     BOOLEAN InsertedNew, MustWait;
     ULONG i;
+
+    if (ToInsert->Exclusive.FileLock.Length.QuadPart == 0)
+    {
+        /* a lock of length zero: refused only inside a range of the table that conflicts, otherwise kept in a list */
+        if (FsRtlpFindRangeAround(LockInfo, ToInsert->Exclusive.FileLock.StartingByte.QuadPart, ExclusiveLock, ToInsert))
+            return FsRtlpQueueOrRefuseLocked(LockInfo, FailImmediately, Irp);
+        else
+        {
+            PLOCK_ZERO_LENGTH Zero = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Zero), TAG_RANGE);
+
+            if (!Zero) return STATUS_NO_MEMORY;
+            Zero->Start = ToInsert->Exclusive.FileLock.StartingByte.QuadPart;
+            Zero->Key = ToInsert->Exclusive.FileLock.Key;
+            Zero->ProcessId = ToInsert->Exclusive.FileLock.ProcessId;
+            Zero->FileObject = ToInsert->Exclusive.FileLock.FileObject;
+            Zero->ExclusiveLock = ExclusiveLock;
+            InsertTailList(&LockInfo->ZeroLengthLocks, &Zero->Entry);
+            return STATUS_SUCCESS;
+        }
+    }
+
+    /* a lock of length zero inside the range stands in the way */
+    if (FsRtlpFindZeroLengthInside(LockInfo,
+                                   ToInsert->Exclusive.FileLock.StartingByte.QuadPart,
+                                   ToInsert->Exclusive.FileLock.EndingByte.QuadPart,
+                                   ExclusiveLock))
+        return FsRtlpQueueOrRefuseLocked(LockInfo, FailImmediately, Irp);
 
     /* Allocate before changing the table, so that a failure leaves it as it was */
     if (!ExclusiveLock)
@@ -737,6 +892,18 @@ FsRtlpUnlockAllLocked(IN PLOCK_INFORMATION LockInfo,
     PLIST_ENTRY ListEntry;
     PVOID RestartKey = NULL;
     BOOLEAN Removed = FALSE;
+
+    /* The locks of length zero of the owner go with the others */
+    for (ListEntry = LockInfo->ZeroLengthLocks.Flink; ListEntry != &LockInfo->ZeroLengthLocks;)
+    {
+        PLOCK_ZERO_LENGTH Zero = CONTAINING_RECORD(ListEntry, LOCK_ZERO_LENGTH, Entry);
+        ListEntry = ListEntry->Flink;
+        if (Zero->FileObject != FileObject || Zero->ProcessId != Process || (MatchKey && Zero->Key != Key))
+            continue;
+        RemoveEntryList(&Zero->Entry);
+        ExFreePoolWithTag(Zero, TAG_RANGE);
+        Removed = TRUE;
+    }
 
     /* Shared ranges first; removing one only unlinks that list entry */
     for (ListEntry = LockInfo->SharedLocks.Flink;
@@ -1014,9 +1181,11 @@ FsRtlCheckLockForReadAccess(IN PFILE_LOCK FileLock,
         DPRINT("CheckLockForReadAccess(%wZ) => TRUE\n", &IoStack->FileObject->FileName);
         return TRUE;
     }
+    /* a lock belongs to a file object (and process and key): another handle of the same process is refused too */
     Result = !Found.ExclusiveLock ||
         (IoStack->Parameters.Read.Key == Found.Key &&
-         Process == Found.ProcessId);
+         Process == Found.ProcessId &&
+         IoStack->FileObject == Found.FileObject);
     DPRINT("CheckLockForReadAccess(%wZ) => %s\n", &IoStack->FileObject->FileName, Result ? "TRUE" : "FALSE");
     return Result;
 }
@@ -1047,7 +1216,11 @@ FsRtlCheckLockForWriteAccess(IN PFILE_LOCK FileLock,
         DPRINT("CheckLockForWriteAccess(%wZ) => TRUE\n", &IoStack->FileObject->FileName);
         return TRUE;
     }
-    Result = Process == Found.ProcessId;
+    /* only the owner of an exclusive lock writes there; a shared lock stops every write, its owner's too */
+    Result = Found.ExclusiveLock &&
+        IoStack->Parameters.Write.Key == Found.Key &&
+        Process == Found.ProcessId &&
+        IoStack->FileObject == Found.FileObject;
     DPRINT("CheckLockForWriteAccess(%wZ) => %s\n", &IoStack->FileObject->FileName, Result ? "TRUE" : "FALSE");
     return Result;
 }
@@ -1079,7 +1252,7 @@ FsRtlFastCheckLockForRead(IN PFILE_LOCK FileLock,
                         &Found))
         return TRUE;
     if (!Found.ExclusiveLock) return TRUE;
-    return Found.Key == Key && Found.ProcessId == EProcess;
+    return Found.Key == Key && Found.ProcessId == EProcess && Found.FileObject == FileObject;
 }
 
 /*
@@ -1112,7 +1285,7 @@ FsRtlFastCheckLockForWrite(IN PFILE_LOCK FileLock,
         DPRINT("CheckForWrite(%wZ) => TRUE\n", &FileObject->FileName);
         return TRUE;
     }
-    Result = Found.Key == Key && Found.ProcessId == EProcess;
+    Result = Found.ExclusiveLock && Found.Key == Key && Found.ProcessId == EProcess && Found.FileObject == FileObject;
     DPRINT("CheckForWrite(%wZ) => %s\n", &FileObject->FileName, Result ? "TRUE" : "FALSE");
     return Result;
 }
@@ -1158,15 +1331,29 @@ FsRtlFastUnlockSingle(IN PFILE_LOCK FileLock,
     Size = Length->QuadPart;
     InitializeListHead(&DeferredIrps);
     FsRtlpAcquireRangeLock(LockInfo, &DeferredIrps, &OldIrql);
-    Status = FsRtlpUnlockRangeLocked(LockInfo,
-                                     FileObject,
-                                     Start,
-                                     Size,
-                                     Process,
-                                     Key,
-                                     &Unlocked);
-    if (NT_SUCCESS(Status))
-        FsRtlpGrantWaitersLocked(LockInfo, &Unlocked, &DeferredIrps);
+    if (Size == 0)
+    {
+        /* a lock of length zero is found by its offset; the requests it held up may go on */
+        if (FsRtlpRemoveZeroLengthLockLocked(LockInfo, FileObject, Start, Process, Key))
+        {
+            Status = STATUS_SUCCESS;
+            FsRtlpGrantWaitersLocked(LockInfo, NULL, &DeferredIrps);
+        }
+        else
+            Status = STATUS_RANGE_NOT_LOCKED;
+    }
+    else
+    {
+        Status = FsRtlpUnlockRangeLocked(LockInfo,
+                                         FileObject,
+                                         Start,
+                                         Size,
+                                         Process,
+                                         Key,
+                                         &Unlocked);
+        if (NT_SUCCESS(Status))
+            FsRtlpGrantWaitersLocked(LockInfo, &Unlocked, &DeferredIrps);
+    }
     FsRtlpReleaseRangeLock(LockInfo, OldIrql);
     FsRtlpCompleteDeferredIrps(FileLock, &DeferredIrps);
 
@@ -1385,6 +1572,11 @@ FsRtlUninitializeFileLock(IN PFILE_LOCK FileLock)
         SharedEntry = SharedEntry->Flink;
         RemoveEntryList(&SharedRange->Entry);
         ExFreePoolWithTag(SharedRange, TAG_RANGE);
+    }
+    while (!IsListEmpty(&LockInfo->ZeroLengthLocks))
+    {
+        PLOCK_ZERO_LENGTH Zero = CONTAINING_RECORD(RemoveHeadList(&LockInfo->ZeroLengthLocks), LOCK_ZERO_LENGTH, Entry);
+        ExFreePoolWithTag(Zero, TAG_RANGE);
     }
     while ((Entry = RtlGetElementGenericTable(&LockInfo->RangeTable, 0)) != NULL)
     {

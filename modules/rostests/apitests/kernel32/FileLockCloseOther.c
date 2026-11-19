@@ -200,6 +200,53 @@ static void TestOtherProcess(const char *Exe)
     Cleanup(Path, A, B, Probe);
 }
 
+/* Reads and writes: a lock belongs to the handle that took it, a second handle of the same process is refused as well
+ * (Windows Server 2022: exclusive lock: the owner reads and writes, the other handle gets ERROR_LOCK_VIOLATION for both;
+ * shared lock: both handles read, no handle writes, the owner's write included) */
+static DWORD ReadAt(HANDLE File, DWORD Offset)
+{
+    OVERLAPPED Ov = { 0 };
+    BYTE Buffer[4];
+    DWORD Read;
+
+    Ov.Offset = Offset;
+    return ReadFile(File, Buffer, sizeof(Buffer), &Read, &Ov) ? 0 : GetLastError();
+}
+
+static DWORD WriteAt(HANDLE File, DWORD Offset)
+{
+    OVERLAPPED Ov = { 0 };
+    BYTE Buffer[4] = { 0 };
+    DWORD Written;
+
+    Ov.Offset = Offset;
+    return WriteFile(File, Buffer, sizeof(Buffer), &Written, &Ov) ? 0 : GetLastError();
+}
+
+static void TestIoOwner(void)
+{
+    char Path[MAX_PATH];
+    HANDLE A, B, Probe;
+
+    if (!Setup("io", Path, &A, &B, &Probe)) return;
+    EXPECT("io: A exclusive [8,16)", Lock(A, 8, 8, TRUE), 0);
+    EXPECT("io: A read in its range", ReadAt(A, 10), 0);
+    EXPECT("io: A write in its range", WriteAt(A, 10), 0);
+    EXPECT("io: B read in A's range", ReadAt(B, 10), ERROR_LOCK_VIOLATION);
+    EXPECT("io: B write in A's range", WriteAt(B, 10), ERROR_LOCK_VIOLATION);
+    EXPECT("io: B read outside", ReadAt(B, 20), 0);
+    EXPECT("io: B write outside", WriteAt(B, 20), 0);
+    EXPECT("io: A unlock", Unlock(A, 8, 8), 0);
+    EXPECT("io: B read after the unlock", ReadAt(B, 10), 0);
+    EXPECT("io: A shared [8,16)", Lock(A, 8, 8, FALSE), 0);
+    EXPECT("io: A read in a shared range", ReadAt(A, 10), 0);
+    EXPECT("io: A write in a shared range", WriteAt(A, 10), ERROR_LOCK_VIOLATION);
+    EXPECT("io: B read in a shared range", ReadAt(B, 10), 0);
+    EXPECT("io: B write in a shared range", WriteAt(B, 10), ERROR_LOCK_VIOLATION);
+    EXPECT("io: A unlock the shared range", Unlock(A, 8, 8), 0);
+    Cleanup(Path, A, B, Probe);
+}
+
 #ifdef LOCKSEP_PROBE
 int main(int argc, char **argv)
 #else
@@ -224,6 +271,7 @@ START_TEST(FileLockCloseOther)
     TestSharedMerged();
     TestDuplicate();
     TestOtherProcess(Exe);
+    TestIoOwner();
 #ifdef LOCKSEP_PROBE
     printf("mismatches: %d\n", g_fail);
     return 0;
