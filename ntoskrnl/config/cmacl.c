@@ -2773,7 +2773,22 @@ CmpAclTransition(VOID)
         { L"\\Registry\\Machine\\SOFTWARE\\Microsoft\\Rpc", TRUE },
         { L"\\Registry\\Machine\\SOFTWARE\\Microsoft\\.NETFramework", TRUE },
         { L"\\Registry\\Machine\\SOFTWARE\\Microsoft\\Windows Script Host", TRUE },
+        /*
+         * Also what decides what is trusted or loaded into other users' and the
+         * system's processes: the machine certificate stores (crypt32's
+         * LocalMachine Root, CA, TrustedPublisher, Disallowed...), WinRT
+         * activatable classes (DllPath), text services (CTF TIP), the mail
+         * client MAPI loads (Clients\Mail DLLPath), and Windows Error Reporting
+         * (LocalDumps: where and whose dumps are written).
+         */
+        { L"\\Registry\\Machine\\SOFTWARE\\Microsoft\\SystemCertificates", TRUE },
+        { L"\\Registry\\Machine\\SOFTWARE\\Microsoft\\EnterpriseCertificates", TRUE },
+        { L"\\Registry\\Machine\\SOFTWARE\\Microsoft\\WindowsRuntime", TRUE },
+        { L"\\Registry\\Machine\\SOFTWARE\\Microsoft\\CTF", TRUE },
+        { L"\\Registry\\Machine\\SOFTWARE\\Microsoft\\Windows\\Windows Error Reporting", TRUE },
+        { L"\\Registry\\Machine\\SOFTWARE\\Clients", TRUE },
         { L"\\Registry\\Machine\\SOFTWARE\\Wow6432Node", FALSE },
+        { L"\\Registry\\Machine\\SOFTWARE\\Wow6432Node\\Clients", TRUE },
         { L"\\Registry\\Machine\\SOFTWARE\\Wow6432Node\\Classes", TRUE },
         { L"\\Registry\\Machine\\SOFTWARE\\Wow6432Node\\Policies", TRUE },
         { L"\\Registry\\Machine\\SOFTWARE\\Wow6432Node\\Microsoft", FALSE },
@@ -2784,6 +2799,8 @@ CmpAclTransition(VOID)
         { L"\\Registry\\Machine\\SOFTWARE\\Wow6432Node\\Microsoft\\Command Processor", TRUE },
         { L"\\Registry\\Machine\\SOFTWARE\\Wow6432Node\\Microsoft\\Ole", TRUE },
         { L"\\Registry\\Machine\\SOFTWARE\\Wow6432Node\\Microsoft\\.NETFramework", TRUE },
+        { L"\\Registry\\Machine\\SOFTWARE\\Wow6432Node\\Microsoft\\WindowsRuntime", TRUE },
+        { L"\\Registry\\Machine\\SOFTWARE\\Wow6432Node\\Microsoft\\CTF", TRUE },
     };
     ULONG i;
 
