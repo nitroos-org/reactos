@@ -84,6 +84,10 @@ typedef struct _GINA_UI
     PFGINA_DISPLAYLOCKEDNOTICE DisplayLockedNotice;
 } GINA_UI, *PGINA_UI;
 
+/* msgina.c */
+VOID
+ConsumeAutoLogon(VOID);
+
 /* gui.c */
 BOOL
 DrawBrandingBitmap(

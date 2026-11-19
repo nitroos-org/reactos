@@ -33,6 +33,7 @@ list(APPEND SOURCE
     registry.c
     settings.c
     setuplib.c
+    unattlog.c
     precomp.h)
 
 # Static library used for the dll and for setuplib_unittest.

@@ -68,7 +68,7 @@ static BOOLEAN IsoSearchDirectoryBufferForFile(PVOID DirectoryBuffer, ULONG Dire
     PDIR_RECORD    Record;
     ULONG        Offset;
     ULONG i;
-    CHAR Name[32];
+    CHAR Name[256]; /* a file identifier has up to 255 bytes (ISO 9660:1999, Joliet-less long names) */
 
     TRACE("IsoSearchDirectoryBufferForFile() DirectoryBuffer = 0x%x DirectoryLength = %d FileName = %s\n", DirectoryBuffer, DirectoryLength, FileName);
 
@@ -98,8 +98,13 @@ static BOOLEAN IsoSearchDirectoryBufferForFile(PVOID DirectoryBuffer, ULONG Dire
         }
         else
         {
-            for (i = 0; i < Record->FileIdLength && Record->FileId[i] != ';'; i++)
+            /* The identifier up to the version number (";1"), never past the end of Name */
+            for (i = 0; i < Record->FileIdLength && Record->FileId[i] != ';' && i < sizeof(Name) - 1; i++)
                 Name[i] = Record->FileId[i];
+            /* A file without extension is stored as "SYSTEM." (plus ";1") by the ECMA-119 name rules
+             * that mkisofs -iso-level 1/2 and xorriso apply: the final dot is not part of the name */
+            if (i > 1 && Name[i - 1] == '.')
+                i--;
             Name[i] = ANSI_NULL;
             TRACE("Name '%s'\n", Name);
 

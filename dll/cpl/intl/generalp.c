@@ -1411,7 +1411,9 @@ GeneralPageProc(HWND hwndDlg,
                     }
                     else
                     {
+                        /* An unknown language id: nobody is there to choose, so do not wait for it */
                         DPRINT1("VerifyUnattendLCID failed\n");
+                        PostQuitMessage(0);
                     }
                     return TRUE;
                 }

@@ -1216,15 +1216,40 @@ ComputerPageDlgProc(HWND hwndDlg,
             {
                 /* "*" or no ComputerName at all means use a random name
                  * (we have already generated it above), as Windows does */
+                NTSTATUS PwStatus;
+
                 if (!pSetupData->ComputerName[0] ||
                     (pSetupData->ComputerName[0] == L'*' && !pSetupData->ComputerName[1]))
+                {
                     wcscpy(pSetupData->ComputerName, ComputerName);
+                }
+                else if (!UnattendIsValidComputerName(pSetupData->ComputerName))
+                {
+                    /* a bad name must not open the interactive page: log it and use a generated one */
+                    UnattendLog(L"ComputerName \"%s\" is not a valid computer name (1 to 15 characters, none of"
+                                L" \" / \\ [ ] : | < > + = ; , ? *, not only digits): using the generated name %s",
+                                pSetupData->ComputerName, ComputerName);
+                    wcscpy(pSetupData->ComputerName, ComputerName);
+                }
                 else
+                {
                     SetDlgItemTextW(hwndDlg, IDC_COMPUTERNAME, pSetupData->ComputerName);
+                }
                 SetDlgItemTextW(hwndDlg, IDC_ADMINPASSWORD1, pSetupData->AdminPassword);
                 SetDlgItemTextW(hwndDlg, IDC_ADMINPASSWORD2, pSetupData->AdminPassword);
-                WriteComputerSettings(pSetupData->ComputerName, NULL);
-                SetAdministratorPassword(pSetupData->AdminPassword);
+                if (!WriteComputerSettings(pSetupData->ComputerName, NULL))
+                {
+                    UnattendLog(L"the computer name \"%s\" could not be set: using the generated name %s",
+                                pSetupData->ComputerName, ComputerName);
+                    wcscpy(pSetupData->ComputerName, ComputerName);
+                    WriteComputerSettings(pSetupData->ComputerName, NULL);
+                }
+                UnattendLog(L"computer name: %s", pSetupData->ComputerName);
+                PwStatus = SetAdministratorPassword(pSetupData->AdminPassword);
+                if (!NT_SUCCESS(PwStatus))
+                    UnattendLog(L"the Administrator password could not be set (status 0x%08lx)", (ULONG)PwStatus);
+                else
+                    UnattendLog(L"Administrator password: %s", pSetupData->AdminPassword[0] ? L"set" : L"empty");
             }
 
             /* Store the administrator account name as the default user name */
@@ -1241,8 +1266,10 @@ ComputerPageDlgProc(HWND hwndDlg,
                 case PSN_SETACTIVE:
                     /* Enable the Back and Next buttons */
                     PropSheet_SetWizButtons(GetParent(hwndDlg), PSWIZB_BACK | PSWIZB_NEXT);
-                    if (pSetupData->UnattendSetup && WriteComputerSettings(pSetupData->ComputerName, hwndDlg))
+                    if (pSetupData->UnattendSetup)
                     {
+                        /* already set (and logged) when the page was created: never show it */
+                        WriteComputerSettings(pSetupData->ComputerName, NULL);
                         SetWindowLongPtr(hwndDlg, DWLP_MSGRESULT, IDD_DATETIMEPAGE);
                         return TRUE;
                     }
@@ -1678,7 +1705,35 @@ LocalePageDlgProc(HWND hwndDlg,
                     {
                         // if (!*SetupData->SourcePath)
                         {
-                            RunControlPanelApplet(hwndDlg, L"intl.cpl,,/f:\"$winnt$.inf\""); // Should be in System32
+                            WCHAR szLocale[16];
+                            BOOL bRun = FALSE;
+
+                            /* The applet only acts unattended when the file names a LocaleID; without one,
+                             * or with one this system does not know, it would open its dialog and wait for
+                             * somebody: skip it (the language of the first stage stays) and say so */
+                            if (UnattendGetString(L"Unattend", L"LocaleID", szLocale, _countof(szLocale)))
+                            {
+                                PWSTR pEnd = NULL;
+                                ULONG ulLang = wcstoul(szLocale, &pEnd, 16);
+
+                                if (*pEnd || !ulLang || !IsValidLocale(MAKELCID(ulLang, SORT_DEFAULT), LCID_SUPPORTED))
+                                {
+                                    UnattendLog(L"LocaleID \"%s\" is not a locale of this system: the language chosen by"
+                                                L" the first stage stays", szLocale);
+                                    bRun = FALSE;
+                                }
+                                else
+                                {
+                                    UnattendLog(L"language (LocaleID) %s", szLocale);
+                                    bRun = TRUE;
+                                }
+                            }
+                            else
+                            {
+                                UnattendLog(L"no LocaleID: the language chosen by the first stage stays");
+                            }
+                            if (bRun)
+                                RunControlPanelApplet(hwndDlg, L"intl.cpl,,/f:\"$winnt$.inf\""); // Should be in System32
                         }
 
                         SetWindowLongPtr(hwndDlg, DWLP_MSGRESULT, IDD_OWNERPAGE);
@@ -1892,6 +1947,10 @@ ShowTimeZoneList(HWND hwnd, PSETUPDATA SetupData, DWORD dwEntryIndex)
     DWORD dwIndex = 0;
     DWORD dwCount;
 
+    BOOL bFound = FALSE;
+    DWORD dwGmt = 0;
+    BOOL bAsked = (dwEntryIndex != (DWORD)-1);
+
     GetTimeZoneListIndex(&dwEntryIndex);
 
     Entry = SetupData->TimeZoneListHead;
@@ -1903,9 +1962,21 @@ ShowTimeZoneList(HWND hwnd, PSETUPDATA SetupData, DWORD dwEntryIndex)
                               (LPARAM)Entry->Description);
 
         if (dwEntryIndex != 0 && dwEntryIndex == Entry->Index)
+        {
             dwIndex = dwCount;
+            bFound = TRUE;
+        }
+        if (Entry->Index == 85)
+            dwGmt = dwCount;
 
         Entry = Entry->Next;
+    }
+
+    /* An answer file naming a time zone this system does not have: GMT, and say so */
+    if (bAsked && !bFound)
+    {
+        UnattendLog(L"TimeZoneIndex %lu is not a time zone of this system: using GMT (index 85)", dwEntryIndex);
+        dwIndex = dwGmt;
     }
 
     SendMessage(hwnd,
@@ -2053,6 +2124,12 @@ WriteDateTimeSettings(HWND hwndDlg, PSETUPDATA SetupData)
 
     if (!SetSystemLocalTime(hwndDlg, SetupData))
     {
+        if (SetupData->UnattendSetup)
+        {
+            /* nobody is there to close a box: log it and go on with the time as it is */
+            UnattendLog(L"setup was unable to set the local time (error %lu): the clock stays as it is", GetLastError());
+            return TRUE;
+        }
         if (0 == LoadStringW(hDllInstance, IDS_REACTOS_SETUP, Title, ARRAYSIZE(Title)))
         {
             wcscpy(Title, BRAND_PRODUCT_NAME_W L" Setup");
@@ -2096,8 +2173,9 @@ DateTimePageDlgProc(HWND hwndDlg,
 
             if (SetupData->UnattendSetup)
             {
+                /* no TimeZone / TimeZoneIndex in the file: the time zone of the language, as the interactive page */
                 ShowTimeZoneList(GetDlgItem(hwndDlg, IDC_TIMEZONELIST),
-                                 SetupData, SetupData->TimeZoneIndex);
+                                 SetupData, SetupData->TimeZoneIndex ? SetupData->TimeZoneIndex : (DWORD)-1);
 
                 Entry = GetSelectedTimeZoneEntry(SetupData, SetupData->TimeZoneIndex);
                 if (!SetupData->DisableAutoDaylightTimeSet && Entry != NULL && HasDaylightSavingTime(Entry))
@@ -3037,7 +3115,10 @@ ProcessPageDlgProc(HWND hwndDlg,
             else
             {
                 SendDlgItemMessage(hwndDlg, IDC_CHECK1 + wParam, STM_SETIMAGE, IMAGE_ICON, (LPARAM)s_hCrossIcon);
-                ShowItemError(hwndDlg, (DWORD)lParam);
+                if (SetupData->UnattendSetup)
+                    UnattendLog(L"setup step %lu failed (error %lu): continuing", (ULONG)wParam, (ULONG)lParam);
+                else
+                    ShowItemError(hwndDlg, (DWORD)lParam);
             }
             break;
 
@@ -3054,7 +3135,12 @@ ProcessPageDlgProc(HWND hwndDlg,
             SendDlgItemMessage(hwndDlg, IDC_PROCESSPROGRESS, PBM_SETPOS, RegistrationNotify->Progress, 0);
             if (RegistrationNotify->LastError != ERROR_SUCCESS)
             {
-                ShowStepError(hwndDlg, RegistrationNotify);
+                if (SetupData->UnattendSetup)
+                    UnattendLog(L"setup step \"%s\" failed (error %lu): continuing",
+                                RegistrationNotify->CurrentItem ? RegistrationNotify->CurrentItem : L"?",
+                                (ULONG)RegistrationNotify->LastError);
+                else
+                    ShowStepError(hwndDlg, RegistrationNotify);
             }
             break;
 
@@ -3433,6 +3519,7 @@ ProcessUnattendSection(
     INFCONTEXT InfContext;
     WCHAR szName[256];
     WCHAR szValue[MAX_PATH];
+    WCHAR szTimeZoneName[128] = L"";
     DWORD LineLength;
     HKEY hKey;
 
@@ -3481,24 +3568,30 @@ ProcessUnattendSection(
                                   &LineLength))
         {
             DPRINT1("Error: SetupGetStringField failed with %d\n", GetLastError());
-            return;
+            continue; /* one unreadable line does not stop the others */
         }
 
+        /* A key with an empty or unreadable value: read as empty, so the keys after it still apply */
         if (!SetupGetStringFieldW(&InfContext,
                                   1,
                                   szValue,
                                   ARRAYSIZE(szValue),
                                   &LineLength))
         {
-            DPRINT1("Error: SetupGetStringField failed with %d\n", GetLastError());
-            return;
+            szValue[0] = UNICODE_NULL;
+            LineLength = 1;
         }
-        DPRINT1("Name %S Value %S\n", szName, szValue);
+        /* never print the value of a password */
+        DPRINT1("Name %S Value %S\n", szName, wcsstr(szName, L"Password") ? L"(hidden)" : szValue);
         if (!_wcsicmp(szName, L"FullName"))
         {
             if (ARRAYSIZE(pSetupData->OwnerName) > LineLength)
             {
                 wcscpy(pSetupData->OwnerName, szValue);
+            }
+            else
+            {
+                UnattendLog(L"FullName is longer than %u characters: ignored", (UINT)ARRAYSIZE(pSetupData->OwnerName) - 1);
             }
         }
         else if (!_wcsicmp(szName, L"OrgName"))
@@ -3507,12 +3600,20 @@ ProcessUnattendSection(
             {
                 wcscpy(pSetupData->OwnerOrganization, szValue);
             }
+            else
+            {
+                UnattendLog(L"OrgName is longer than %u characters: ignored", (UINT)ARRAYSIZE(pSetupData->OwnerOrganization) - 1);
+            }
         }
         else if (!_wcsicmp(szName, L"ComputerName"))
         {
             if (ARRAYSIZE(pSetupData->ComputerName) > LineLength)
             {
                 wcscpy(pSetupData->ComputerName, szValue);
+            }
+            else
+            {
+                UnattendLog(L"ComputerName is longer than %u characters: a name is generated", (UINT)ARRAYSIZE(pSetupData->ComputerName) - 1);
             }
         }
         else if (!_wcsicmp(szName, L"AdminPassword"))
@@ -3521,10 +3622,19 @@ ProcessUnattendSection(
             {
                 wcscpy(pSetupData->AdminPassword, szValue);
             }
+            else
+            {
+                UnattendLog(L"AdminPassword is longer than %u characters: ignored, the Administrator has no password", (UINT)ARRAYSIZE(pSetupData->AdminPassword) - 1);
+            }
         }
         else if (!_wcsicmp(szName, L"TimeZoneIndex"))
         {
             pSetupData->TimeZoneIndex = _wtoi(szValue);
+        }
+        else if (!_wcsicmp(szName, L"TimeZone"))
+        {
+            /* a name wins over the number; remembered and resolved after the loop (the number may come after it) */
+            wcsncpy(szTimeZoneName, szValue, ARRAYSIZE(szTimeZoneName) - 1);
         }
         else if (!_wcsicmp(szName, L"DisableAutoDaylightTimeSet"))
         {
@@ -3539,9 +3649,36 @@ ProcessUnattendSection(
         }
         else if (!_wcsicmp(szName, L"InstallationType"))
         {
-            pSetupData->InstallationType = (INSTALLATION_TYPE)_wtoi(szValue);
+            int iType = _wtoi(szValue);
+
+            /* 0 server, 1 workstation, 2 server core (3 is reserved); anything else keeps the default */
+            if (iType >= 0 && iType <= 2)
+                pSetupData->InstallationType = (INSTALLATION_TYPE)iType;
+            else
+                UnattendLog(L"bad value for InstallationType (0, 1 or 2 expected): using the default");
         }
     } while (SetupFindNextLine(&InfContext, &InfContext));
+
+    /* The Administrator password was taken out of the file at the start (UnattendCaptureSecrets) */
+    if (UnattendGetAdminPassword()[0])
+    {
+        if (wcslen(UnattendGetAdminPassword()) < ARRAYSIZE(pSetupData->AdminPassword))
+            wcscpy(pSetupData->AdminPassword, UnattendGetAdminPassword());
+        else
+            UnattendLog(L"AdminPassword is longer than %u characters: ignored, the Administrator has no password",
+                        (UINT)ARRAYSIZE(pSetupData->AdminPassword) - 1);
+    }
+
+    if (szTimeZoneName[0])
+    {
+        DWORD dwIndex;
+
+        if (UnattendResolveTimeZone(szTimeZoneName, &dwIndex))
+        {
+            pSetupData->TimeZoneIndex = dwIndex;
+            UnattendLog(L"time zone \"%s\" (index %lu)", szTimeZoneName, dwIndex);
+        }
+    }
 
     if (SetupFindFirstLineW(pSetupData->hSetupInf,
                             L"Display",
@@ -3634,34 +3771,52 @@ ProcessUnattendSection(
                             NULL,
                             &InfContext))
     {
-        int i = 0;
-        do
-        {
-            if (SetupGetStringFieldW(&InfContext,
-                                     0,
-                                     szValue,
-                                     ARRAYSIZE(szValue),
-                                     NULL))
-            {
-                WCHAR szPath[MAX_PATH];
-                _swprintf(szName, L"%d", i);
-                DPRINT("szName %S szValue %S\n", szName, szValue);
+        /* A command line may be long (a script on one line): not MAX_PATH. The environment
+         * variables (%SystemRoot%, ...) are expanded now, as before. */
+        PWSTR pszCmd = HeapAlloc(GetProcessHeap(), 0, 2 * 4096 * sizeof(WCHAR));
+        int i = 0, nLine = 0;
 
-                if (ExpandEnvironmentStringsW(szValue, szPath, MAX_PATH))
+        if (pszCmd)
+        {
+            PWSTR pszExpanded = pszCmd + 4096;
+
+            do
+            {
+                nLine++;
+                if (!SetupGetStringFieldW(&InfContext, 0, pszCmd, 4096, NULL))
                 {
-                    DPRINT("value %S\n", szPath);
+                    UnattendLog(L"[GuiRunOnce] line %d could not be read (longer than 4095 characters?): skipped", nLine);
+                    continue;
+                }
+
+                _swprintf(szName, L"%d", i);
+                DPRINT("szName %S szValue %S\n", szName, pszCmd);
+
+                DWORD cchExpanded = ExpandEnvironmentStringsW(pszCmd, pszExpanded, 4096);
+                if (cchExpanded && cchExpanded <= 4096)
+                {
                     if (RegSetValueExW(hKey,
                                        szName,
                                        0,
                                        REG_SZ,
-                                       (const BYTE*)szPath,
-                                       (wcslen(szPath) + 1) * sizeof(WCHAR)) == ERROR_SUCCESS)
+                                       (const BYTE*)pszExpanded,
+                                       (wcslen(pszExpanded) + 1) * sizeof(WCHAR)) == ERROR_SUCCESS)
                     {
                         i++;
+                        UnattendLog(L"first-logon command %d registered (%u characters)", i, (UINT)wcslen(pszExpanded));
+                    }
+                    else
+                    {
+                        UnattendLog(L"[GuiRunOnce] line %d could not be stored in the registry: skipped", nLine);
                     }
                 }
-            }
-        } while (SetupFindNextLine(&InfContext, &InfContext));
+                else
+                {
+                    UnattendLog(L"[GuiRunOnce] line %d is too long once the environment variables are expanded: skipped", nLine);
+                }
+            } while (SetupFindNextLine(&InfContext, &InfContext));
+            HeapFree(GetProcessHeap(), 0, pszCmd);
+        }
     }
 
     RegCloseKey(hKey);
@@ -3846,6 +4001,10 @@ ProcessSetupInf(
 
     /* Retrieve the path of the setup INF */
     GetSetupInfPath(szPath, _countof(szPath));
+
+    /* Take the passwords of an unattended setup into memory and remove them from the file
+     * before it is written again below (the old text would stay in the freed disk blocks) */
+    UnattendCaptureSecrets();
 
     /* Open the setup INF */
     pSetupData->hSetupInf = SetupOpenInfFileW(szPath,

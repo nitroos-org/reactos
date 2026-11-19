@@ -11,6 +11,7 @@ list(APPEND SOURCE
     programfiles.c
     proppage.c
     security.c
+    unattend.c
     windowsjunction.c
     wizard.c
     precomp.h

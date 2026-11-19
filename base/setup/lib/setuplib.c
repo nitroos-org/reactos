@@ -25,6 +25,7 @@
 
 HANDLE ProcessHeap;
 BOOLEAN IsUnattendedSetup = FALSE;
+static BOOLEAN UnattendRefused = FALSE;
 static PCWSTR InfUnattendSignature = L"$ReactOS$";
 
 /* FUNCTIONS ****************************************************************/
@@ -52,6 +53,48 @@ CompareInfFirstLineString(
     return Result;
 }
 
+/* An answer file is a few KB. The whole file is read into memory by the INF parser, appended to the
+ * installed copy and read again by the second stage: a file larger than this is not an answer file. */
+#define UNATTEND_MAX_FILE_SIZE  (1024 * 1024)
+
+static BOOLEAN
+IsUnattendFileUsable(
+    _In_ PCWSTR InfPath)
+{
+    NTSTATUS Status;
+    HANDLE FileHandle;
+    UNICODE_STRING FileName;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    IO_STATUS_BLOCK IoStatusBlock;
+    FILE_STANDARD_INFORMATION FileInfo;
+
+    RtlInitUnicodeString(&FileName, InfPath);
+    InitializeObjectAttributes(&ObjectAttributes, &FileName, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    UCHAR Head[2] = {0, 0};
+
+    Status = NtOpenFile(&FileHandle, FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE, &ObjectAttributes, &IoStatusBlock,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE);
+    if (!NT_SUCCESS(Status))
+        return TRUE; /* the open of the parser reports it */
+    Status = NtQueryInformationFile(FileHandle, &IoStatusBlock, &FileInfo, sizeof(FileInfo), FileStandardInformation);
+    if (NT_SUCCESS(Status) && FileInfo.EndOfFile.QuadPart > UNATTEND_MAX_FILE_SIZE)
+    {
+        NtClose(FileHandle);
+        SetupLogFormat("ignored %S: it is larger than %u bytes, not an answer file", InfPath, (UINT)UNATTEND_MAX_FILE_SIZE);
+        return FALSE;
+    }
+    (void)NtReadFile(FileHandle, NULL, NULL, NULL, &IoStatusBlock, Head, sizeof(Head), NULL, NULL);
+    NtClose(FileHandle);
+    if ((Head[0] == 0xFF && Head[1] == 0xFE) || (Head[0] == 0xFE && Head[1] == 0xFF))
+    {
+        /* The text-mode parser reads UTF-16, the second stage reads the copy of the file as 8-bit text: a
+         * UTF-16 file would erase a disk unattended and then leave the second stage waiting for a person */
+        SetupLogFormat("ignored %S: it is UTF-16 text; save it as ANSI or UTF-8 without a byte order mark", InfPath);
+        return FALSE;
+    }
+    return TRUE;
+}
+
 static BOOLEAN
 IsInfUnattendSetupEnabled(
     _In_ PUSETUP_DATA pSetupData,
@@ -61,6 +104,9 @@ IsInfUnattendSetupEnabled(
     HINF hInf;
     UINT ErrorLine;
     BOOLEAN Result = FALSE;
+
+    if (!IsUnattendFileUsable(InfPath))
+        return Result;
 
     hInf = SpInfOpenInfFile(InfPath,
                             NULL,
@@ -102,30 +148,56 @@ GetUnattendInfPath(
     NTSTATUS Status;
     USHORT Types;
 
+    /* The operator refused the answer file (DisableUnattendedSetup): there is none */
+    if (UnattendRefused)
+    {
+        if (cch)
+            InfPath[0] = UNICODE_NULL;
+        return FALSE;
+    }
+
     /* If the unattend.inf file has already been looked for, return
      * its cached path if it was found, or fail otherwise. */
     if (UnattendInfLookedUp)
         goto Quit;
 
     UnattendInfLookedUp = TRUE;
+    pSetupData->UnattendDetachedDrive = UNICODE_NULL;
 
-    /* Find first the default unattend.inf file on the installation media.
-     * If it specifies an unattended setup, we have found it. */
+    /*
+     * Search order (the answer file is always named unattend.inf):
+     *  1. the installation source directory of the medium setup was started
+     *     from (\reactos, \amd64, \i386 on the ISO: the file the ISO ships);
+     *  2. the root of that medium (a remastered ISO: no need to know the
+     *     source directory);
+     *  3. the root of every other volume, removable media and CD/DVD drives
+     *     first, then fixed disks: a second CD, a floppy, an IDE/USB disk.
+     *     These need UnattendForDetached = yes in the file (see
+     *     IsInfUnattendSetupEnabled), so a stray unattend.inf on a disk can
+     *     never start an unattended installation by itself.
+     * The first file that enables unattended setup wins.
+     */
     Status = CombinePaths(UnattendInfPath, _countof(UnattendInfPath), 2,
                           pSetupData->SourcePath.Buffer, L"unattend.inf");
     if (NT_SUCCESS(Status) && DoesFileExist(NULL, UnattendInfPath) &&
         IsInfUnattendSetupEnabled(pSetupData, UnattendInfPath, FALSE))
     {
+        SetupLogFormat("answer file: %S (installation source directory)", UnattendInfPath);
         return NT_SUCCESS(RtlStringCchCopyW(InfPath, cch, UnattendInfPath));
     }
 
-    /*
-     * The default unattend.inf file does not exist, or does not enable an
-     * unattended setup. Check all DOS drives, removable first, then fixed,
-     * for an alternative unattend.inf that enables unattended setup.
-     * If we find one, use it; otherwise, return the default unattend.inf
-     * path, if it exists.
-     */
+    Status = CombinePaths(UnattendInfPath, _countof(UnattendInfPath), 2,
+                          pSetupData->SourceRootPath.Buffer, L"unattend.inf");
+    if (NT_SUCCESS(Status) && DoesFileExist(NULL, UnattendInfPath) &&
+        IsInfUnattendSetupEnabled(pSetupData, UnattendInfPath, FALSE))
+    {
+        SetupLogFormat("answer file: %S (root of the installation medium)", UnattendInfPath);
+        return NT_SUCCESS(RtlStringCchCopyW(InfPath, cch, UnattendInfPath));
+    }
+    /* Nothing found on the medium so far: keep the first candidate for the fall-back below */
+    (void)CombinePaths(UnattendInfPath, _countof(UnattendInfPath), 2,
+                       pSetupData->SourcePath.Buffer, L"unattend.inf");
+
     for (Types = 0; Types <= 1; ++Types)
     {
         CHAR Drive;
@@ -133,21 +205,32 @@ GetUnattendInfPath(
         {
             UCHAR DriveType;
             WCHAR szInf[MAX_PATH];
-            UNICODE_STRING NtDrive = {0, sizeof(szInf), szInf};
+            UNICODE_STRING NtDrive;
+
+            RtlInitEmptyUnicodeString(&NtDrive, szInf, sizeof(szInf) - sizeof(L"\\unattend.inf"));
+            RtlZeroMemory(szInf, sizeof(szInf));
 
             DriveType = GetNtDevicePathOfDriveNumber(Drive - 'A', &NtDrive);
             if (DriveType <= DRIVE_NO_ROOT_DIR)
                 continue; /* Invalid drive */
             if ((Types == 0) != (DriveType == DRIVE_REMOVABLE || DriveType == DRIVE_CDROM))
                 continue; /* Not the expected drive type */
+            szInf[NtDrive.Length / sizeof(WCHAR)] = UNICODE_NULL;
 
             Status = ConcatPaths(szInf, _countof(szInf), 1, L"unattend.inf");
-            if (NT_SUCCESS(Status) && DoesFileExist(NULL, szInf) &&
-                IsInfUnattendSetupEnabled(pSetupData, szInf, TRUE))
+            if (NT_SUCCESS(Status) && DoesFileExist(NULL, szInf))
             {
-                /* Cache the alternative unattend.inf path and return it */
-                (void)RtlStringCchCopyW(UnattendInfPath, _countof(UnattendInfPath), szInf);
-                return NT_SUCCESS(RtlStringCchCopyW(InfPath, cch, szInf));
+                if (IsInfUnattendSetupEnabled(pSetupData, szInf, TRUE))
+                {
+                    /* Cache the alternative unattend.inf path and return it */
+                    (void)RtlStringCchCopyW(UnattendInfPath, _countof(UnattendInfPath), szInf);
+                    pSetupData->UnattendDetachedDrive = (WCHAR)Drive;
+                    SetupLogFormat("answer file: %S (drive %c:)", szInf, Drive);
+                    return NT_SUCCESS(RtlStringCchCopyW(InfPath, cch, szInf));
+                }
+                SetupLogFormat("ignored %S: it does not enable unattended setup"
+                               " (UnattendSetupEnabled = yes and UnattendForDetached = yes are required"
+                               " outside the installation medium)", szInf);
             }
         }
     }
@@ -160,6 +243,46 @@ Quit:
     return FALSE;
 }
 
+/*
+ * The operator of the computer refused the answer file that was found on another volume (ESC at the notice
+ * of usetup): the installation goes on as an interactive one, and the file is neither used nor copied.
+ */
+VOID
+NTAPI
+DisableUnattendedSetup(VOID)
+{
+    UnattendRefused = TRUE;
+    IsUnattendedSetup = FALSE;
+    SetupLogLine("the answer file was refused at the keyboard: interactive installation");
+}
+
+/* A decimal number key of [Unattend]: absent = *pValue is left as it is; present and valid
+ * (Min..Max) = *pValue is set; present and bad = logged, *pValue is left as it is.
+ * NOTE: SpInfGetIntField() would read "abc" as 0 without failing, so the text is checked. */
+static VOID
+GetUnattendNumber(
+    _In_ HINF hInf,
+    _In_ PCWSTR Key,
+    _In_ LONG Min,
+    _In_ LONG Max,
+    _Inout_ PLONG pValue)
+{
+    INFCONTEXT Context;
+    PCWSTR Text;
+    ULONG Number;
+
+    if (!SpInfFindFirstLine(hInf, L"Unattend", Key, &Context))
+        return;
+    if (INF_GetData(&Context, NULL, &Text))
+    {
+        if (UnattendParseUInt(Text, 0x7FFFFFFF, &Number) && (LONG)Number >= Min && (LONG)Number <= Max)
+            *pValue = (LONG)Number;
+        else
+            SetupLogFormat("bad value for %S (a number from %ld to %ld expected): using %ld", Key, Min, Max, *pValue);
+        INF_FreeData(Text);
+    }
+}
+
 BOOLEAN
 NTAPI
 CheckUnattendedSetup(
@@ -168,7 +291,6 @@ CheckUnattendedSetup(
     INFCONTEXT Context;
     HINF UnattendInf;
     UINT ErrorLine;
-    INT IntValue;
     PCWSTR Value;
     WCHAR UnattendInfPath[MAX_PATH];
 
@@ -178,6 +300,9 @@ CheckUnattendedSetup(
         return IsUnattendedSetup;
     }
     DPRINT1("UnattendInf path: '%S'\n", UnattendInfPath);
+
+    if (!IsUnattendFileUsable(UnattendInfPath))
+        return IsUnattendedSetup;
 
     /* Load 'unattend.inf' from installation media */
     UnattendInf = SpInfOpenInfFile(UnattendInfPath,
@@ -237,35 +362,15 @@ CheckUnattendedSetup(
 
     INF_FreeData(Value);
 
-    /* Search for 'DestinationDiskNumber' */
-    if (!SpInfFindFirstLine(UnattendInf, L"Unattend", L"DestinationDiskNumber", &Context))
-    {
-        DPRINT("SpInfFindFirstLine() failed for key 'DestinationDiskNumber'\n");
-        goto Quit;
-    }
+    /*
+     * From here on the file is accepted: every problem with a value is logged
+     * (and the documented default is used instead), none of them hands the
+     * installation over to the interactive pages.
+     */
 
-    if (!SpInfGetIntField(&Context, 1, &IntValue))
-    {
-        DPRINT("SpInfGetIntField() failed for key 'DestinationDiskNumber'\n");
-        goto Quit;
-    }
-
-    pSetupData->DestinationDiskNumber = (LONG)IntValue;
-
-    /* Search for 'DestinationPartitionNumber' */
-    if (!SpInfFindFirstLine(UnattendInf, L"Unattend", L"DestinationPartitionNumber", &Context))
-    {
-        DPRINT("SpInfFindFirstLine() failed for key 'DestinationPartitionNumber'\n");
-        goto Quit;
-    }
-
-    if (!SpInfGetIntField(&Context, 1, &IntValue))
-    {
-        DPRINT("SpInfGetIntField() failed for key 'DestinationPartitionNumber'\n");
-        goto Quit;
-    }
-
-    pSetupData->DestinationPartitionNumber = (LONG)IntValue;
+    /* 'DestinationDiskNumber' and 'DestinationPartitionNumber': default is disk 0, partition 1 */
+    GetUnattendNumber(UnattendInf, L"DestinationDiskNumber", 0, 0xFFFF, &pSetupData->DestinationDiskNumber);
+    GetUnattendNumber(UnattendInf, L"DestinationPartitionNumber", 0, 0xFFFF, &pSetupData->DestinationPartitionNumber);
 
     /* Search for 'InstallationDirectory' (optional) */
     if (SpInfFindFirstLine(UnattendInf, L"Unattend", L"InstallationDirectory", &Context))
@@ -279,53 +384,134 @@ CheckUnattendedSetup(
         }
         else
         {
-            DPRINT("INF_GetData() failed for key 'InstallationDirectory'\n");
+            SetupLogLine("bad value for InstallationDirectory: using the default");
         }
     }
 
     IsUnattendedSetup = TRUE;
     DPRINT("Running unattended setup\n");
 
-    /* Search for 'BootLoaderLocation' (optional) */
-    if (SpInfFindFirstLine(UnattendInf, L"Unattend", L"BootLoaderLocation", &Context))
+    /* Search for 'BootLoaderLocation' (optional): 0 none, 1 removable media, 2 system partition, 3 VBR only */
+    GetUnattendNumber(UnattendInf, L"BootLoaderLocation", 0, 3, &pSetupData->BootLoaderLocation);
+
+    /* 'FormatPartition' and 'AutoPartition' (optional): 1 or 0, yes or no */
+    if (SpInfFindFirstLine(UnattendInf, L"Unattend", L"FormatPartition", &Context) &&
+        INF_GetData(&Context, NULL, &Value))
     {
-        if (SpInfGetIntField(&Context, 1, &IntValue))
-            pSetupData->BootLoaderLocation = IntValue;
+        LONG Flag;
+        if (UnattendParseBool(Value, &Flag))
+            pSetupData->FormatPartition = Flag;
+        else
+            SetupLogFormat("bad value for FormatPartition (0 or 1, yes or no expected): using %ld",
+                           pSetupData->FormatPartition);
+        INF_FreeData(Value);
     }
 
-    /* Search for 'FormatPartition' (optional) */
-    if (SpInfFindFirstLine(UnattendInf, L"Unattend", L"FormatPartition", &Context))
+    if (SpInfFindFirstLine(UnattendInf, L"Unattend", L"AutoPartition", &Context) &&
+        INF_GetData(&Context, NULL, &Value))
     {
-        if (SpInfGetIntField(&Context, 1, &IntValue))
-            pSetupData->FormatPartition = IntValue;
+        LONG Flag;
+        if (UnattendParseBool(Value, &Flag))
+            pSetupData->AutoPartition = Flag;
+        else
+            SetupLogFormat("bad value for AutoPartition (0 or 1, yes or no expected): using %ld",
+                           pSetupData->AutoPartition);
+        INF_FreeData(Value);
     }
 
-    /* Search for 'AutoPartition' (optional) */
-    if (SpInfFindFirstLine(UnattendInf, L"Unattend", L"AutoPartition", &Context))
+    /* Search for 'PartitionSizeMB' (optional): size of the partition AutoPartition creates, 0 = all the free space */
+    if (SpInfFindFirstLine(UnattendInf, L"Unattend", L"PartitionSizeMB", &Context))
     {
-        if (SpInfGetIntField(&Context, 1, &IntValue))
-            pSetupData->AutoPartition = IntValue;
-    }
-
-    /* Search for 'LocaleID' (optional) */
-    if (SpInfFindFirstLine(UnattendInf, L"Unattend", L"LocaleID", &Context))
-    {
+        ULONG Size;
         if (INF_GetData(&Context, NULL, &Value))
         {
-            LONG Id = wcstol(Value, NULL, 16);
-            RtlStringCchPrintfW(pSetupData->LocaleID,
-                                ARRAYSIZE(pSetupData->LocaleID),
-                                L"%08lx", Id);
+            if (UnattendParseUInt(Value, 0x7FFFFFFF, &Size))
+                pSetupData->PartitionSizeMB = Size;
+            else
+                SetupLogLine("bad value for PartitionSizeMB (a number of megabytes expected): using all the free space");
             INF_FreeData(Value);
         }
     }
 
-    /* Search for 'FsType' (optional) */
+    /* Search for 'QuickFormat' (optional): 1 (default) quick, 0 full format */
+    pSetupData->QuickFormat = 1;
+    if (SpInfFindFirstLine(UnattendInf, L"Unattend", L"QuickFormat", &Context))
+    {
+        if (INF_GetData(&Context, NULL, &Value))
+        {
+            LONG Flag;
+            if (UnattendParseBool(Value, &Flag))
+                pSetupData->QuickFormat = Flag;
+            else
+                SetupLogLine("bad value for QuickFormat (yes/no or 1/0 expected): using quick format");
+            INF_FreeData(Value);
+        }
+    }
+
+    /* Search for 'LocaleID' (optional). Whether the system knows it is checked by the caller */
+    if (SpInfFindFirstLine(UnattendInf, L"Unattend", L"LocaleID", &Context))
+    {
+        if (INF_GetData(&Context, NULL, &Value))
+        {
+            PWSTR End = NULL;
+            ULONG Id = wcstoul(Value, &End, 16);
+            if (!*Value || *End || Id == 0 || Id > 0xFFFF)
+            {
+                SetupLogLine("bad value for LocaleID (a hexadecimal language id such as 409 expected): using the default");
+            }
+            else
+            {
+                RtlStringCchPrintfW(pSetupData->LocaleID,
+                                    ARRAYSIZE(pSetupData->LocaleID),
+                                    L"%08lx", Id);
+            }
+            INF_FreeData(Value);
+        }
+    }
+
+    /* Search for 'KeyboardLayout' (optional): a keyboard layout id, e.g. 00000407; the language's default when absent */
+    if (SpInfFindFirstLine(UnattendInf, L"Unattend", L"KeyboardLayout", &Context))
+    {
+        if (INF_GetData(&Context, NULL, &Value))
+        {
+            if (!UnattendParseKeyboardLayout(Value, pSetupData->KeyboardLayout))
+            {
+                pSetupData->KeyboardLayout[0] = UNICODE_NULL;
+                SetupLogLine("bad value for KeyboardLayout (a layout id such as 00000407 expected): using the default of the language");
+            }
+            INF_FreeData(Value);
+        }
+    }
+
+    /* Search for 'FsType' (optional): 0 FAT, 1 BtrFS, 2 NTFS (any other number: FAT); the names are accepted too */
     if (SpInfFindFirstLine(UnattendInf, L"Unattend", L"FsType", &Context))
     {
-        if (SpInfGetIntField(&Context, 1, &IntValue))
-            pSetupData->FsType = IntValue;
+        /* NOTE: a name must be recognised first: SpInfGetIntField() reads "NTFS" as 0 without failing */
+        if (INF_GetData(&Context, NULL, &Value))
+        {
+            ULONG Number;
+
+            if (!_wcsicmp(Value, L"NTFS"))
+                pSetupData->FsType = 2;
+            else if (!_wcsicmp(Value, L"BTRFS"))
+                pSetupData->FsType = 1;
+            else if (!_wcsicmp(Value, L"FAT") || !_wcsicmp(Value, L"FAT32"))
+                pSetupData->FsType = 0;
+            else if (UnattendParseUInt(Value, 0x7FFFFFFF, &Number))
+                pSetupData->FsType = (LONG)Number;  /* 0 FAT, 1 BtrFS, 2 NTFS, any other number FAT */
+            else
+                SetupLogFormat("bad value for FsType (NTFS, FAT, BTRFS or 2, 0, 1 expected): using %ld",
+                               pSetupData->FsType);
+            INF_FreeData(Value);
+        }
     }
+
+    SetupLogFormat("answer file read: disk %ld partition %ld, AutoPartition %ld, FormatPartition %ld, FsType %ld,"
+                   " QuickFormat %ld, PartitionSizeMB %lu, BootLoaderLocation %ld, LocaleID %S",
+                   pSetupData->DestinationDiskNumber, pSetupData->DestinationPartitionNumber,
+                   pSetupData->AutoPartition, pSetupData->FormatPartition, pSetupData->FsType,
+                   pSetupData->QuickFormat, pSetupData->PartitionSizeMB,
+                   pSetupData->BootLoaderLocation, pSetupData->LocaleID);
 
 Quit:
     SpInfCloseInfFile(UnattendInf);
@@ -358,6 +544,10 @@ InstallSetupInfFile(
     PINI_SECTION IniSection;
     WCHAR PathBuffer[MAX_PATH];
     WCHAR UnattendInfPath[MAX_PATH];
+
+    /* The installation directory exists now: write the text-mode setup log
+     * the graphical stage appends to (<installation directory>\Panther\unattend.log) */
+    (void)SetupLogWrite(pSetupData->DestinationPath.Buffer);
 
     /* Create a $winnt$.inf file with default entries */
     IniCache = IniCacheCreate();
