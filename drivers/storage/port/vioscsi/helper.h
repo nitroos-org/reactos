@@ -128,7 +128,7 @@ KickEvent(IN PVOID DeviceExtension, IN PVirtIOSCSIEventNode event);
 BOOLEAN
 SynchronizedKickEventRoutine(IN PVOID DeviceExtension, IN PVOID Context);
 
-VOID VioScsiCompleteDpcRoutine(IN PSTOR_DPC Dpc, IN PVOID Context, IN PVOID SystemArgument1, IN PVOID SystemArgument2);
+VOID NTAPI VioScsiCompleteDpcRoutine(IN PSTOR_DPC Dpc, IN PVOID Context, IN PVOID SystemArgument1, IN PVOID SystemArgument2);
 
 VOID ProcessBuffer(IN PVOID DeviceExtension, IN ULONG MessageId, IN STOR_SPINLOCK LockMode);
 

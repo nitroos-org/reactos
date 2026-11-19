@@ -60,7 +60,7 @@ BOOLEAN IsCrashDumpMode;
 
 /* The function type declarations (sp_DRIVER_INITIALIZE DriverEntry; HW_STARTIO VioScsiStartIo; ...) of the
  * Windows headers are static analysis annotations; the prototypes follow below. */
-ULONG DriverEntry(IN PVOID DriverObject, IN PVOID RegistryPath);
+ULONG NTAPI DriverEntry(IN PVOID DriverObject, IN PVOID RegistryPath);
 
 #ifdef EVENT_TRACING
 PVOID TraceContext = NULL;
@@ -72,19 +72,19 @@ VOID WppCleanupRoutine(PVOID arg1)
 #endif
 
 BOOLEAN
-VioScsiHwInitialize(IN PVOID DeviceExtension);
+NTAPI VioScsiHwInitialize(IN PVOID DeviceExtension);
 
 BOOLEAN
 VioScsiHwReinitialize(IN PVOID DeviceExtension);
 
 BOOLEAN
-VioScsiBuildIo(IN PVOID DeviceExtension, IN PSCSI_REQUEST_BLOCK Srb);
+NTAPI VioScsiBuildIo(IN PVOID DeviceExtension, IN PSCSI_REQUEST_BLOCK Srb);
 
 BOOLEAN
-VioScsiStartIo(IN PVOID DeviceExtension, IN PSCSI_REQUEST_BLOCK Srb);
+NTAPI VioScsiStartIo(IN PVOID DeviceExtension, IN PSCSI_REQUEST_BLOCK Srb);
 
 ULONG
-VioScsiFindAdapter(IN PVOID DeviceExtension,
+NTAPI VioScsiFindAdapter(IN PVOID DeviceExtension,
                    IN PVOID HwContext,
                    IN PVOID BusInformation,
                    IN PCHAR ArgumentString,
@@ -92,13 +92,13 @@ VioScsiFindAdapter(IN PVOID DeviceExtension,
                    IN PBOOLEAN Again);
 
 BOOLEAN
-VioScsiResetBus(IN PVOID DeviceExtension, IN ULONG PathId);
+NTAPI VioScsiResetBus(IN PVOID DeviceExtension, IN ULONG PathId);
 
 SCSI_ADAPTER_CONTROL_STATUS
-VioScsiAdapterControl(IN PVOID DeviceExtension, IN SCSI_ADAPTER_CONTROL_TYPE ControlType, IN PVOID Parameters);
+NTAPI VioScsiAdapterControl(IN PVOID DeviceExtension, IN SCSI_ADAPTER_CONTROL_TYPE ControlType, IN PVOID Parameters);
 
 SCSI_UNIT_CONTROL_STATUS
-VioScsiUnitControl(IN PVOID DeviceExtension, IN SCSI_UNIT_CONTROL_TYPE ControlType, IN PVOID Parameters);
+NTAPI VioScsiUnitControl(IN PVOID DeviceExtension, IN SCSI_UNIT_CONTROL_TYPE ControlType, IN PVOID Parameters);
 
 UCHAR
 VioScsiProcessPnP(IN PVOID DeviceExtension, IN PSRB_TYPE Srb);
@@ -112,14 +112,14 @@ VOID FORCEINLINE PostProcessRequest(IN PVOID DeviceExtension, IN PSRB_TYPE Srb);
 VOID FORCEINLINE DispatchQueue(IN PVOID DeviceExtension, IN ULONG MessageId);
 
 BOOLEAN
-VioScsiInterrupt(IN PVOID DeviceExtension);
+NTAPI VioScsiInterrupt(IN PVOID DeviceExtension);
 
 VOID TransportReset(IN PVOID DeviceExtension, IN PVirtIOSCSIEvent evt);
 
 VOID ParamChange(IN PVOID DeviceExtension, IN PVirtIOSCSIEvent evt);
 
 BOOLEAN
-VioScsiMSInterrupt(IN PVOID DeviceExtension, IN ULONG MessageID);
+NTAPI VioScsiMSInterrupt(IN PVOID DeviceExtension, IN ULONG MessageID);
 
 #ifdef VIOSCSI_WMI
 VOID VioScsiWmiInitialize(IN PVOID DeviceExtension);
@@ -255,7 +255,7 @@ BOOLEAN VioScsiReadRegistryParameter(IN PVOID DeviceExtension, IN PUCHAR ValueNa
 }
 
 ULONG
-DriverEntry(IN PVOID DriverObject, IN PVOID RegistryPath)
+NTAPI DriverEntry(IN PVOID DriverObject, IN PVOID RegistryPath)
 {
 
     HW_INITIALIZATION_DATA hwInitData;
@@ -334,7 +334,7 @@ DriverEntry(IN PVOID DriverObject, IN PVOID RegistryPath)
 }
 
 ULONG
-VioScsiFindAdapter(IN PVOID DeviceExtension,
+NTAPI VioScsiFindAdapter(IN PVOID DeviceExtension,
                    IN PVOID HwContext,
                    IN PVOID BusInformation,
                    IN PCHAR ArgumentString,
@@ -621,7 +621,7 @@ VioScsiFindAdapter(IN PVOID DeviceExtension,
 }
 
 BOOLEAN
-VioScsiPassiveInitializeRoutine(IN PVOID DeviceExtension)
+NTAPI VioScsiPassiveInitializeRoutine(IN PVOID DeviceExtension)
 {
     ULONG index;
     PADAPTER_EXTENSION adaptExt = (PADAPTER_EXTENSION)DeviceExtension;
@@ -668,7 +668,7 @@ VioScsiPoolAlloc(IN PVOID DeviceExtension, IN SIZE_T size)
 }
 
 BOOLEAN
-VioScsiHwInitialize(IN PVOID DeviceExtension)
+NTAPI VioScsiHwInitialize(IN PVOID DeviceExtension)
 {
     PADAPTER_EXTENSION adaptExt = (PADAPTER_EXTENSION)DeviceExtension;
     ULONG i;
@@ -864,7 +864,7 @@ VioScsiHwReinitialize(IN PVOID DeviceExtension)
 }
 
 BOOLEAN
-VioScsiStartIo(IN PVOID DeviceExtension, IN PSCSI_REQUEST_BLOCK Srb)
+NTAPI VioScsiStartIo(IN PVOID DeviceExtension, IN PSCSI_REQUEST_BLOCK Srb)
 {
     ENTER_FN_SRB();
     if (PreProcessRequest(DeviceExtension, (PSRB_TYPE)Srb))
@@ -970,7 +970,7 @@ VOID HandleResponse(IN PVOID DeviceExtension, IN PVirtIOSCSICmd cmd)
 }
 
 BOOLEAN
-VioScsiInterrupt(IN PVOID DeviceExtension)
+NTAPI VioScsiInterrupt(IN PVOID DeviceExtension)
 {
     PVirtIOSCSICmd cmd = NULL;
     PVirtIOSCSIEventNode evtNode = NULL;
@@ -1132,7 +1132,7 @@ static BOOLEAN VioScsiMSInterruptWorker(IN PVOID DeviceExtension, IN ULONG Messa
 }
 
 BOOLEAN
-VioScsiMSInterrupt(IN PVOID DeviceExtension, IN ULONG MessageID)
+NTAPI VioScsiMSInterrupt(IN PVOID DeviceExtension, IN ULONG MessageID)
 {
     PADAPTER_EXTENSION adaptExt = (PADAPTER_EXTENSION)DeviceExtension;
     BOOLEAN isInterruptServiced = FALSE;
@@ -1161,7 +1161,7 @@ VioScsiMSInterrupt(IN PVOID DeviceExtension, IN ULONG MessageID)
 }
 
 BOOLEAN
-VioScsiResetBus(IN PVOID DeviceExtension, IN ULONG PathId)
+NTAPI VioScsiResetBus(IN PVOID DeviceExtension, IN ULONG PathId)
 {
     UNREFERENCED_PARAMETER(PathId);
 
@@ -1169,7 +1169,7 @@ VioScsiResetBus(IN PVOID DeviceExtension, IN ULONG PathId)
 }
 
 SCSI_ADAPTER_CONTROL_STATUS
-VioScsiAdapterControl(IN PVOID DeviceExtension, IN SCSI_ADAPTER_CONTROL_TYPE ControlType, IN PVOID Parameters)
+NTAPI VioScsiAdapterControl(IN PVOID DeviceExtension, IN SCSI_ADAPTER_CONTROL_TYPE ControlType, IN PVOID Parameters)
 {
     PSCSI_SUPPORTED_CONTROL_TYPE_LIST ControlTypeList;
     ULONG AdjustedMaxControlType;
@@ -1243,7 +1243,7 @@ VioScsiAdapterControl(IN PVOID DeviceExtension, IN SCSI_ADAPTER_CONTROL_TYPE Con
 }
 
 SCSI_UNIT_CONTROL_STATUS
-VioScsiUnitControl(IN PVOID DeviceExtension, IN SCSI_UNIT_CONTROL_TYPE ControlType, IN PVOID Parameters)
+NTAPI VioScsiUnitControl(IN PVOID DeviceExtension, IN SCSI_UNIT_CONTROL_TYPE ControlType, IN PVOID Parameters)
 {
     PSCSI_SUPPORTED_CONTROL_TYPE_LIST ControlTypeList;
     ULONG AdjustedMaxControlType;
@@ -1329,7 +1329,7 @@ VioScsiUnitControl(IN PVOID DeviceExtension, IN SCSI_UNIT_CONTROL_TYPE ControlTy
 }
 
 BOOLEAN
-VioScsiBuildIo(IN PVOID DeviceExtension, IN PSCSI_REQUEST_BLOCK Srb)
+NTAPI VioScsiBuildIo(IN PVOID DeviceExtension, IN PSCSI_REQUEST_BLOCK Srb)
 {
     PCDB cdb;
     ULONG i;
@@ -1542,7 +1542,7 @@ VOID ProcessQueue(IN PVOID DeviceExtension, IN ULONG MessageID, IN BOOLEAN isr)
     EXIT_FN();
 }
 
-VOID VioScsiCompleteDpcRoutine(IN PSTOR_DPC Dpc, IN PVOID Context, IN PVOID SystemArgument1, IN PVOID SystemArgument2)
+VOID NTAPI VioScsiCompleteDpcRoutine(IN PSTOR_DPC Dpc, IN PVOID Context, IN PVOID SystemArgument1, IN PVOID SystemArgument2)
 {
     ULONG MessageId;
 

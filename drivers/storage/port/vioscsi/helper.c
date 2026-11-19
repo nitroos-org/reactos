@@ -179,7 +179,7 @@ VOID SendSRB(IN PVOID DeviceExtension, IN PSRB_TYPE Srb)
 }
 
 BOOLEAN
-SynchronizedTMFRoutine(IN PVOID DeviceExtension, IN PVOID Context)
+NTAPI SynchronizedTMFRoutine(IN PVOID DeviceExtension, IN PVOID Context)
 {
     PADAPTER_EXTENSION adaptExt = (PADAPTER_EXTENSION)DeviceExtension;
     PSCSI_REQUEST_BLOCK Srb = (PSCSI_REQUEST_BLOCK)Context;
