@@ -1929,7 +1929,7 @@ LsapNewCredentialsLogon(
     Status = LsapSetLogonSessionData(&LogonId, NewCredentials, &UserName, &DomainName, User->User.Sid);
     if (!NT_SUCCESS(Status)) goto done;
 
-    Status = LsapCreateTokenSd(&User->User, &TokenSd, &TokenSdSize);
+    Status = LsapCreateTokenSd(User, &TokenSd, &TokenSdSize);
     if (!NT_SUCCESS(Status))
         TokenSd = NULL;
 

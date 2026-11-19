@@ -24,7 +24,7 @@ static DWORD TryLogon(PCWSTR User, PCWSTR Domain, DWORD Type, DWORD Provider, PH
     BOOL Ret;
 
     SetLastError(0xdeadbeef);
-    Ret = LogonUserW(User, Domain, TestPassword, Type, Provider, &Tok);
+    Ret = LogonUserW((LPWSTR)User, (LPWSTR)Domain, TestPassword, Type, Provider, &Tok);
     if (!Ret)
         return GetLastError();
     if (Token)
