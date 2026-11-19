@@ -8,8 +8,9 @@
  *              HMAC-MD5, RC4, NTOWFv2, the NTLMv2 response, the key exchange, the MIC) so that every field can be
  *              changed. The application's channel bindings (SECBUFFER_CHANNEL_BINDINGS) are checked when the client
  *              names some and ignored when it does not.
- *              The expected statuses are those of this tree's server; where the one of Windows is not measured the case
- *              says so (VERIFY ON PEER).
+ *              The expected statuses are those of Windows Server 2022 (10.0.20348), measured with the same cases on a peer
+ *              (NTLM and Negotiate): the cases that start with UNOFFERED set a flag in the AUTHENTICATE that the NEGOTIATE
+ *              did not ask for.
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
@@ -257,6 +258,7 @@ typedef struct
     BOOL wrong_pw;
     BOOL bad_mic;
     SECURITY_STATUS expect;
+    ULONG negclr;       /* flags cleared in the NEGOTIATE (so not offered in the CHALLENGE), the AUTHENTICATE keeps them */
 } CASE;
 
 static WCHAR g_user[32], g_blank[32], g_machine[MAX_COMPUTERNAME_LENGTH + 1];
@@ -283,12 +285,14 @@ static BOOL create_user(WCHAR *name, const WCHAR *prefix, const WCHAR *password)
     return TRUE;
 }
 
+static ULONG g_neg = NEG_FLAGS;
+
 static ULONG build_negotiate(BYTE *m)
 {
     memset(m, 0, 40);
     memcpy(m, "NTLMSSP", 8);
     st32(m + 8, 1);
-    st32(m + 12, NEG_FLAGS);
+    st32(m + 12, g_neg);
     st32(m + 24, 40); st32(m + 32, 40);     /* the empty domain and workstation at the end */
     m[40 - 8] = 0x0a; m[40 - 6] = 0x67; m[40 - 5] = 0x58; m[40 - 1] = 0x0f;
     return 40;
@@ -488,6 +492,7 @@ static void run_case(const WCHAR *pkg, const CASE *c, const WCHAR *user, const W
     ok(st == SEC_E_OK, "%ls %s: AcquireCredentialsHandle 0x%08lx\n", pkg, c->name, (unsigned long)st);
     if (st != SEC_E_OK) return;
 
+    g_neg = NEG_FLAGS & ~c->negclr;
     neg_len = build_negotiate(neg);
     st = asc(&sc, &sctx, TRUE, neg, neg_len, FALSE, chal, &chal_len);
     ok(st == SEC_I_CONTINUE_NEEDED, "%ls %s: first leg 0x%08lx\n", pkg, c->name, (unsigned long)st);
@@ -529,7 +534,7 @@ static const CASE cases[] =
     { "credssp (empty domain, zero LM, 56, MIC, ts, zero bindings, SPN)",
       DOM_EMPTY, 0, 1, 1, 1, CB_ZERO, TN_SPN, 0, 0, 1, 0, 0, 0, OK },
     { "credssp with application bindings",
-      DOM_EMPTY, 0, 1, 1, 1, CB_ZERO, TN_SPN, 0, 0, 1, 1, 0, 0, OK },
+      DOM_EMPTY, 0, 1, 1, 1, CB_ZERO, TN_SPN, 0, 0, 1, 1, 0, 0, SEC_E_BAD_BINDINGS },
     { "plain (machine domain, no 56, no MIC)",
       DOM_MACHINE, 0, 0, 0, 1, CB_NONE, TN_NONE, 0, 0, 0, 0, 0, 0, OK },
     { "only 56 added to plain",
@@ -543,13 +548,13 @@ static const CASE cases[] =
     { "MIC, machine domain",
       DOM_MACHINE, 0, 0, 1, 1, CB_NONE, TN_NONE, 0, 0, 0, 0, 0, 0, OK },
     { "MIC, no timestamp",
-      DOM_MACHINE, 0, 0, 1, 0, CB_NONE, TN_NONE, 0, 0, 0, 0, 0, 0, OK },
+      DOM_MACHINE, 0, 0, 1, 0, CB_NONE, TN_NONE, 0, 0, 0, 0, 0, 0, SEC_E_INVALID_TOKEN },
     { "no timestamp",
-      DOM_MACHINE, 0, 0, 0, 0, CB_NONE, TN_NONE, 0, 0, 0, 0, 0, 0, OK },
+      DOM_MACHINE, 0, 0, 0, 0, CB_NONE, TN_NONE, 0, 0, 0, 0, 0, 0, SEC_E_INVALID_TOKEN },
     { "zero bindings",
       DOM_MACHINE, 0, 0, 0, 1, CB_ZERO, TN_NONE, 0, 0, 0, 0, 0, 0, OK },
     { "zero bindings, application bindings",
-      DOM_MACHINE, 0, 0, 0, 1, CB_ZERO, TN_NONE, 0, 0, 0, 1, 0, 0, OK },
+      DOM_MACHINE, 0, 0, 0, 1, CB_ZERO, TN_NONE, 0, 0, 0, 1, 0, 0, SEC_E_BAD_BINDINGS },
     { "real bindings, none from the application (ignored)",
       DOM_MACHINE, 0, 0, 0, 1, CB_REAL, TN_NONE, 0, 0, 0, 0, 0, 0, OK },
     { "wrong bindings, none from the application (ignored)",
@@ -559,12 +564,12 @@ static const CASE cases[] =
     { "wrong bindings, the application's (differ)",
       DOM_MACHINE, 0, 0, 1, 1, CB_WRONG, TN_NONE, 0, 0, 0, 1, 0, 0, SEC_E_BAD_BINDINGS },
     { "no bindings pair, application bindings",
-      DOM_MACHINE, 0, 0, 0, 1, CB_NONE, TN_NONE, 0, 0, 0, 1, 0, 0, OK },
+      DOM_MACHINE, 0, 0, 0, 1, CB_NONE, TN_NONE, 0, 0, 0, 1, 0, 0, SEC_E_BAD_BINDINGS },
     { "target name empty",
       DOM_MACHINE, 0, 0, 0, 1, CB_NONE, TN_EMPTY, 0, 0, 0, 0, 0, 0, OK },
     { "target name TERMSRV/host",
       DOM_MACHINE, 0, 0, 0, 1, CB_NONE, TN_SPN, 0, 0, 0, 0, 0, 0, OK },
-    { "target name of another host (not checked: VERIFY ON PEER)",
+    { "target name of another host (not checked, as on Windows)",
       DOM_MACHINE, 0, 0, 0, 1, CB_NONE, TN_WRONG, 0, 0, 0, 0, 0, 0, OK },
     { "unknown AV pair",
       DOM_MACHINE, 0, 0, 0, 1, CB_NONE, TN_NONE, 1, 0, 0, 0, 0, 0, OK },
@@ -580,6 +585,15 @@ static const CASE cases[] =
       DOM_EMPTY, 0, 1, 1, 1, CB_ZERO, TN_SPN, 0, 0, 1, 0, 0, 1, SEC_E_INVALID_TOKEN },
     { "wrong MIC, 56 not set",
       DOM_MACHINE, 0, 0, 1, 1, CB_NONE, TN_NONE, 0, 0, 0, 0, 0, 1, SEC_E_INVALID_TOKEN },
+    { "UNOFFERED 56 (NEGOTIATE without 56)", DOM_MACHINE, 0, 1, 0, 1, CB_NONE, TN_NONE, 0, 0, 0, 0, 0, 0, OK, F_56 },
+    { "UNOFFERED SEAL (NEGOTIATE without SEAL)", DOM_MACHINE, 0, 0, 0, 1, CB_NONE, TN_NONE, 0, 0, 0, 0, 0, 0, OK, F_SEAL },
+    { "UNOFFERED SIGN (NEGOTIATE without SIGN)", DOM_MACHINE, 0, 0, 0, 1, CB_NONE, TN_NONE, 0, 0, 0, 0, 0, 0, OK, F_SIGN },
+    { "UNOFFERED KEY_EXCH (NEGOTIATE without KEY_EXCH)", DOM_MACHINE, 0, 0, 0, 1, CB_NONE, TN_NONE, 0, 0, 0, 0, 0, 0, OK, F_KEYEXCH },
+    { "UNOFFERED ALWAYS_SIGN (NEGOTIATE without it)", DOM_MACHINE, 0, 0, 0, 1, CB_NONE, TN_NONE, 0, 0, 0, 0, 0, 0, OK, F_ALWAYS },
+    { "UNOFFERED SIGN+SEAL+KEY_EXCH+ALWAYS (bare NEGOTIATE)", DOM_MACHINE, 0, 0, 0, 1, CB_NONE, TN_NONE, 0, 0, 0, 0, 0, 0, OK,
+      F_SIGN | F_SEAL | F_KEYEXCH | F_ALWAYS },
+    { "UNOFFERED REQUEST_TARGET (NEGOTIATE without it)", DOM_MACHINE, 0, 0, 0, 1, CB_NONE, TN_NONE, 0, 0, 0, 0, 0, 0, OK, F_REQTARGET },
+    { "UNOFFERED VERSION (NEGOTIATE without it)", DOM_MACHINE, 0, 0, 0, 1, CB_NONE, TN_NONE, 0, 0, 0, 0, 0, 0, OK, F_VERSION },
 };
 #undef OK
 

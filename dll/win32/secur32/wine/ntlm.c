@@ -1605,7 +1605,7 @@ static SECURITY_STATUS server_authenticate(PNegoHelper h, const BYTE *msg, ULONG
     ULONG flags, pos, first_payload;
     BYTE session_base[16], exported[16];
     BYTE client_cb[16], app_cb[16];
-    BOOL mic_required = FALSE, have_client_cb = FALSE, have_app_cb;
+    BOOL mic_required = FALSE, have_client_cb = FALSE, have_client_ts = FALSE, have_app_cb;
     SECURITY_STATUS ret;
     WCHAR computer[MAX_COMPUTERNAME_LENGTH + 1];
     DWORD computer_len = ARRAYSIZE(computer);
@@ -1628,13 +1628,10 @@ static SECURITY_STATUS server_authenticate(PNegoHelper h, const BYTE *msg, ULONG
     }
 
     /* The exchange needs Unicode and the extended session security. A flag that the server did not offer is not an
-     * error ([MS-NLMP] 3.2.5.1.2: the server takes what it offered and ignores the rest): clients set bits of their
-     * own, NEGOTIATE_56 (0x80000000) of every one that supports it, which this server does not offer. The session
-     * runs on flags & offered_flags (below). Only the flags that change what the messages hold stay checked: signing,
-     * sealing and the key exchange are there only when the server offered them. */
-    if (!(flags & NTLMSSP_NEGOTIATE_UNICODE) || !(flags & NTLMSSP_NEGOTIATE_NTLM2) ||
-        (flags & (NTLMSSP_NEGOTIATE_SIGN | NTLMSSP_NEGOTIATE_SEAL | NTLMSSP_NEGOTIATE_KEY_EXCHANGE |
-                  NTLMSSP_NEGOTIATE_ALWAYS_SIGN) & ~h->offered_flags))
+     * error: clients set bits of their own (NEGOTIATE_56 of every one that supports it, and measured on Windows Server
+     * 2022 also SIGN, SEAL, KEY_EXCH and ALWAYS_SIGN that the NEGOTIATE did not ask for: the AUTHENTICATE is accepted).
+     * The session runs on flags & offered_flags (below). */
+    if (!(flags & NTLMSSP_NEGOTIATE_UNICODE) || !(flags & NTLMSSP_NEGOTIATE_NTLM2))
         return TOKEN_FAIL();
 
     /* the local call: no response and no name, the client is the one that bound the context in the LSA */
@@ -1667,10 +1664,19 @@ static SECURITY_STATUS server_authenticate(PNegoHelper h, const BYTE *msg, ULONG
                 memcpy(client_cb, av + p + 4, 16);
                 have_client_cb = TRUE;
             }
-            /* the other pairs (the names, the timestamp, the target name, the ones this server does not know) are
-             * covered by the response; they need no check here */
+            else if (id == MSV_AV_TIMESTAMP && l == 8)
+                have_client_ts = TRUE;
+            /* the other pairs (the names, the target name, the ones this server does not know) are covered by the
+             * response; they need no check here */
             p += 4 + l;
         }
+    }
+    /* The CHALLENGE carried a timestamp: an AUTHENTICATE whose target info does not give it back is a malformed token
+     * (measured on Windows Server 2022, NTLM and Negotiate: SEC_E_INVALID_TOKEN, with and without the MIC) */
+    if (!have_client_ts)
+    {
+        WARN("the target info of the AUTHENTICATE has no timestamp\n");
+        return SEC_E_INVALID_TOKEN;
     }
     if (mic_required && (first_payload < AUTH_HEADER_LEN || msg_len < AUTH_HEADER_LEN))
         return TOKEN_FAIL();
@@ -1716,19 +1722,14 @@ static SECURITY_STATUS server_authenticate(PNegoHelper h, const BYTE *msg, ULONG
         }
     }
 
-    /* Channel bindings: checked when the application gave some and the client says which it has (a non-zero hash). A
-     * client without bindings sends zeros and a server that does not require them accepts that. Not checked when the
-     * application gave none. (VERIFY ON PEER: Windows' default policy, no extended protection configured.) */
+    /* Channel bindings, measured on Windows Server 2022 (NTLM and Negotiate): when the application gave some, the
+     * client's MsvAvChannelBindings must be there and equal to them (an absent pair, an all-zero one and a wrong one are
+     * SEC_E_BAD_BINDINGS); when the application gave none, whatever the client sends is ignored. */
     ret = app_channel_bindings(input, &have_app_cb, app_cb);
-    if (ret == SEC_E_OK && have_app_cb && have_client_cb)
+    if (ret == SEC_E_OK && have_app_cb && (!have_client_cb || memcmp(client_cb, app_cb, 16)))
     {
-        static const BYTE zero_cb[16] = { 0 };
-
-        if (memcmp(client_cb, zero_cb, 16) && memcmp(client_cb, app_cb, 16))
-        {
-            WARN("channel bindings of the client are not the ones of the application\n");
-            ret = SEC_E_BAD_BINDINGS;
-        }
+        WARN("channel bindings of the client are not the ones of the application\n");
+        ret = SEC_E_BAD_BINDINGS;
     }
     if (ret != SEC_E_OK)
     {
