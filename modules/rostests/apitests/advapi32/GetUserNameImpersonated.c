@@ -20,7 +20,7 @@ static void TestType(PCWSTR User, DWORD Type, PCSTR Name)
     WCHAR Got[128];
     DWORD Size = RTL_NUMBER_OF(Got);
 
-    if (!LogonUserW(User, L".", TestPassword, Type, LOGON32_PROVIDER_DEFAULT, &Token))
+    if (!LogonUserW((LPWSTR)User, L".", TestPassword, Type, LOGON32_PROVIDER_DEFAULT, &Token))
     {
         ok(0, "%s: LogonUser failed: %lu\n", Name, GetLastError());
         return;
