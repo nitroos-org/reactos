@@ -19,6 +19,9 @@
 #define PARTITION_DELL          0xDE    // Dell partition
 #define PARTITION_IBM           0xFE    // IBM Initial Microprogram Load (IML) partition
 
+/* Stand-in MBR type of a GPT partition that is neither basic data nor an EFI system partition */
+#define PARTITION_GPT_OTHER     0xF8
+
 #define IsOEMPartition(PartitionType) \
     ( ((PartitionType) == PARTITION_EISA)        || \
       ((PartitionType) == PARTITION_HIBERNATION) || \
@@ -85,6 +88,18 @@ typedef struct _PARTENTRY
     BOOLEAN New;
 
     /*
+     * GPT partition identity, valid only if the disk is GPT-partitioned
+     * (DiskEntry->DiskStyle == PARTITION_STYLE_GPT). For such partitions
+     * PartitionType holds a stand-in MBR type that only serves the generic
+     * code (volume recognition): PARTITION_IFS for a basic data partition,
+     * PARTITION_FAT32 for an EFI system partition, PARTITION_GPT_OTHER else.
+     */
+    GUID GptType;
+    GUID GptId;
+    ULONG64 GptAttributes;
+    WCHAR GptName[36];
+
+    /*
      * Volume-related properties:
      * NULL: No volume is associated to this partition (either because it is
      *       an empty disk region, or the partition type is unrecognized).
@@ -138,6 +153,13 @@ typedef struct _DISKENTRY
     BOOLEAN NewDisk; /* If TRUE, the disk is uninitialized */
     PARTITION_STYLE DiskStyle;  /* MBR/GPT-partitioned disk, or uninitialized disk (RAW) */
 
+    /* GPT-partitioned disks only */
+    GUID GptDiskId;
+    ULONG GptMaxEntries;
+    ULONGLONG GptFirstUsable;   /* First sector a partition may use */
+    ULONGLONG GptEndUsable;     /* One past the last sector a partition may use */
+    BOOLEAN GptCreate;          /* No GPT on the disk yet: it is created when the layout is written */
+
     UNICODE_STRING DriverName;
 
     PDRIVE_LAYOUT_INFORMATION LayoutBuffer;
@@ -186,6 +208,9 @@ typedef struct _PARTLIST
      * entry that boots its volume boot record.
      */
     PPARTENTRY ForeignBootPartition;
+
+    /* The computer was started by UEFI firmware: disks get a GPT and an EFI system partition */
+    BOOLEAN IsUefi;
 
     LIST_ENTRY DiskListHead;
     LIST_ENTRY BiosDiskListHead;
@@ -375,6 +400,36 @@ DeletePartition(
 BOOLEAN
 IsForeignNtfsBootPartition(
     _In_ PPARTENTRY PartEntry);
+
+/* UEFI computers: GPT disks with an EFI system partition */
+
+BOOLEAN
+IsUefiBoot(VOID);
+
+BOOLEAN
+IsEfiSystemPartition(
+    _In_ PPARTENTRY PartEntry);
+
+BOOLEAN
+IsReservedGptPartition(
+    _In_ PPARTENTRY PartEntry);
+
+PPARTENTRY
+FindEfiSystemPartition(
+    _In_ PDISKENTRY DiskEntry);
+
+ULONGLONG
+GetEfiPartitionsOverhead(
+    _In_ PPARTENTRY PartEntry);
+
+PPARTENTRY
+EnsureEfiSystemPartition(
+    _In_ PPARTLIST List,
+    _In_ PDISKENTRY DiskEntry);
+
+BOOLEAN
+IsMbrDiskUnusableForUefi(
+    _In_ PDISKENTRY DiskEntry);
 
 PPARTENTRY
 FindSupportedSystemPartition(

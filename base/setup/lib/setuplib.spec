@@ -38,6 +38,8 @@
 ;;;;
 @ cdecl IsPartitionActive(ptr)          ## -private
 @ cdecl SelectPartition(ptr long long)
+@ cdecl IsMbrDiskUnusableForUefi(ptr)
+@ cdecl -ret64 GetEfiPartitionsOverhead(ptr)
 
 ;; partinfo
 @ stdcall LookupPartitionTypeString(long ptr)
