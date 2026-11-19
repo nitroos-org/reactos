@@ -2640,10 +2640,11 @@ RCreateServiceW(
             goto done;
     }
 
-    /* Assign the default security descriptor */
+    /* Assign the default security descriptor (the Windows one for the system services that have their own:
+       setup creates some of them, e.g. the DHCP and DNS clients, through this call) */
     if (dwServiceType & SERVICE_WIN32)
     {
-        dwError = ScmCreateDefaultServiceSD(&lpService->pSecurityDescriptor);
+        dwError = ScmCreateServiceSDByName(lpServiceName, &lpService->pSecurityDescriptor);
         if (dwError != ERROR_SUCCESS)
             goto done;
     }

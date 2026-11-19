@@ -312,9 +312,24 @@ ScmReadFailureActions(HKEY hServiceKey,
 DWORD ScmInitializeSecurity(VOID);
 VOID ScmShutdownSecurity(VOID);
 
+extern PSECURITY_DESCRIPTOR pScmManagerSD;
+
 DWORD
 ScmCreateDefaultServiceSD(
     PSECURITY_DESCRIPTOR *ppSecurityDescriptor);
+
+PSECURITY_DESCRIPTOR
+ScmGetDefaultServiceSD(VOID);
+
+DWORD
+ScmCreateServiceSDByName(
+    _In_ PCWSTR pszServiceName,
+    _Out_ PSECURITY_DESCRIPTOR *ppSecurityDescriptor);
+
+BOOL
+ScmIsValidStoredSD(
+    _In_ PSECURITY_DESCRIPTOR pSecurityDescriptor,
+    _In_ DWORD dwLength);
 
 
 /* services.c */

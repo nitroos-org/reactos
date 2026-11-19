@@ -2256,7 +2256,8 @@ CreateServiceListEntry(LPCWSTR lpServiceName,
         if (lpService->pSecurityDescriptor == NULL)
         {
             DPRINT("No security descriptor found! Assign default security descriptor\n");
-            dwError = ScmCreateDefaultServiceSD(&lpService->pSecurityDescriptor);
+            dwError = ScmCreateServiceSDByName(lpService->lpServiceName,
+                                               &lpService->pSecurityDescriptor);
             if (dwError != ERROR_SUCCESS)
                 goto done;
 
