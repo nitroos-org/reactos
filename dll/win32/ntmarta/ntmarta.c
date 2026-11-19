@@ -2181,10 +2181,11 @@ ParseRegErr:
                 lpServiceName = lpPath;
             }
 
-            /* open the service */
+            /* open the service: the rights are the service's, the manager is only connected to (a user who may
+               read or change the service's security has no such right on the service controller) */
             *Handle2 = (HANDLE)OpenSCManager(lpMachineName,
                                              NULL,
-                                             (DWORD)DesiredAccess);
+                                             SC_MANAGER_CONNECT);
             if (*Handle2 == NULL)
             {
                 Ret = GetLastError();
