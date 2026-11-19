@@ -345,8 +345,8 @@ ScControl(LPCTSTR Server,       // remote machine name
             nResult = (INT)SetSidType(ServiceArgs[0], ServiceArgs[1]);
         else
         {
+            /* Windows Server 2022 prints the usage and exits with 0 */
             SetSidTypeUsage();
-            nResult = ERROR_INVALID_COMMAND_LINE;
         }
     }
     else if (!lstrcmpi(Command, _T("qsidtype")))
@@ -355,8 +355,8 @@ ScControl(LPCTSTR Server,       // remote machine name
             nResult = (INT)QuerySidType(ServiceArgs[0]);
         else
         {
+            /* Windows Server 2022 prints the usage and exits with 0 */
             QuerySidTypeUsage();
-            nResult = ERROR_INVALID_COMMAND_LINE;
         }
     }
     else if (!lstrcmpi(Command, _T("showsid")))
@@ -395,7 +395,8 @@ ScControl(LPCTSTR Server,       // remote machine name
     }
     else
     {
-        /* an unknown command: the usage, no prompt, a failure exit code */
+        /* an unknown command: the error line of Windows Server 2022, the usage, no prompt, ERROR_INVALID_COMMAND_LINE */
+        _tprintf(_T("ERROR:  Unrecognized command\n"));
         MainUsage(FALSE);
         nResult = ERROR_INVALID_COMMAND_LINE;
     }

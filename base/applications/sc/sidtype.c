@@ -46,8 +46,9 @@ SetSidType(LPCTSTR ServiceName,
         Info.dwServiceSidType = SERVICE_SID_TYPE_RESTRICTED;
     else
     {
+        /* Windows Server 2022: the usage and the exit code 0 */
         SetSidTypeUsage();
-        return ERROR_INVALID_COMMAND_LINE;
+        return ERROR_SUCCESS;
     }
 
     dwError = OpenServiceForConfig(ServiceName, SERVICE_CHANGE_CONFIG, &hManager, &hService);
@@ -90,10 +91,10 @@ QuerySidType(LPCTSTR ServiceName)
     }
     else
     {
-        /* wording verify on oracle */
+        /* the lines of Windows Server 2022: the type follows the colon after two spaces */
         _tprintf(_T("[SC] QueryServiceConfig2 SUCCESS\n\n"));
         _tprintf(_T("SERVICE_NAME: %s\n"), ServiceName);
-        _tprintf(_T("SERVICE_SID_TYPE:      %s\n"), SidTypeName(Info.dwServiceSidType));
+        _tprintf(_T("SERVICE_SID_TYPE:  %s\n"), SidTypeName(Info.dwServiceSidType));
     }
 
     CloseServiceHandle(hService);
