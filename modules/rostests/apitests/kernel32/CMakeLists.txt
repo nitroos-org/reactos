@@ -18,6 +18,7 @@ list(APPEND SOURCE
     Wow64CreateThreadAccess.c
     Wow64Environment.c
     BindIoCompletionCallback.c
+    CancelIo.c
     CancelIoEx.c
     IocpCancelStatus.c
     IocpThreadExit.c

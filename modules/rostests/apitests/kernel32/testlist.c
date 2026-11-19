@@ -21,6 +21,7 @@ extern void func_Wow64ReviewFixes(void);
 
 extern void func_ActCtxWithXmlNamespaces(void);
 extern void func_BindIoCompletionCallback(void);
+extern void func_CancelIo(void);
 extern void func_CancelIoEx(void);
 extern void func_IocpCancelStatus(void);
 extern void func_IocpThreadExit(void);
@@ -297,6 +298,7 @@ const struct test winetest_testlist[] =
     { "Wow64ReviewFixes", func_Wow64ReviewFixes },
     { "ActCtxWithXmlNamespaces",     func_ActCtxWithXmlNamespaces },
     { "BindIoCompletionCallback",    func_BindIoCompletionCallback },
+    { "CancelIo",                    func_CancelIo },
     { "CancelIoEx",                  func_CancelIoEx },
     { "IocpCancelStatus",            func_IocpCancelStatus },
     { "IocpThreadExit",              func_IocpThreadExit },

@@ -4756,42 +4756,43 @@ NtCancelIoFile(IN HANDLE FileHandle,
     /* Lower the IRQL */
     KeLowerIrql(OldIrql);
 
-    /* Check if we had found an IRP */
-    if (OurIrpsInList)
+    /* Setup a 10ms wait */
+    Interval.QuadPart = -100000;
+
+    /* A canceled request that its driver completes at once has left the list by now: its
+     * completion APC ran when the IRQL dropped. Look at the list again before waiting and
+     * wait only while a request of this file is still queued (an owner that cancels and
+     * closes its handles in a loop would otherwise sleep a clock tick per call) */
+    while (OurIrpsInList)
     {
-        /* Setup a 10ms wait */
-        Interval.QuadPart = -100000;
+        OurIrpsInList = FALSE;
 
-        /* Start looping */
-        while (OurIrpsInList)
+        /* Raise IRQL */
+        KeRaiseIrql(APC_LEVEL, &OldIrql);
+
+        /* Loop the list again */
+        NextEntry = ListHead->Flink;
+        while (NextEntry != ListHead)
         {
-            /* Do the wait */
-            KeDelayExecutionThread(KernelMode, FALSE, &Interval);
-            OurIrpsInList = FALSE;
-
-            /* Raise IRQL */
-            KeRaiseIrql(APC_LEVEL, &OldIrql);
-
-            /* Now loop the list again */
-            NextEntry = ListHead->Flink;
-            while (NextEntry != ListHead)
+            /* Get the IRP and check if the File Object matches */
+            Irp = CONTAINING_RECORD(NextEntry, IRP, ThreadListEntry);
+            if (Irp->Tail.Overlay.OriginalFileObject == FileObject)
             {
-                /* Get the IRP and check if the File Object matches */
-                Irp = CONTAINING_RECORD(NextEntry, IRP, ThreadListEntry);
-                if (Irp->Tail.Overlay.OriginalFileObject == FileObject)
-                {
-                    /* Keep looping */
-                    OurIrpsInList = TRUE;
-                    break;
-                }
-
-                /* Go to the next entry */
-                NextEntry = NextEntry->Flink;
+                /* Keep looping */
+                OurIrpsInList = TRUE;
+                break;
             }
 
-            /* Lower the IRQL */
-            KeLowerIrql(OldIrql);
+            /* Go to the next entry */
+            NextEntry = NextEntry->Flink;
         }
+
+        /* Lower the IRQL */
+        KeLowerIrql(OldIrql);
+
+        /* Do the wait, for the requests that are still queued */
+        if (OurIrpsInList)
+            KeDelayExecutionThread(KernelMode, FALSE, &Interval);
     }
 
     /* Enter SEH for writing back the I/O Status */
