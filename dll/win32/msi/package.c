@@ -462,7 +462,13 @@ static UINT set_installed_prop( MSIPACKAGE *package )
 
     if (!package->ProductCode) return ERROR_FUNCTION_FAILED;
 
+#ifdef __REACTOS__
+    r = MSIREG_OpenUninstallKey( package->ProductCode, package->platform, MSIINSTALLCONTEXT_MACHINE, &hkey, FALSE );
+    if (r != ERROR_SUCCESS)
+        r = MSIREG_OpenUninstallKey( package->ProductCode, package->platform, MSIINSTALLCONTEXT_USERUNMANAGED, &hkey, FALSE );
+#else
     r = MSIREG_OpenUninstallKey( package->ProductCode, package->platform, &hkey, FALSE );
+#endif
     if (r == ERROR_SUCCESS)
     {
         RegCloseKey( hkey );
@@ -708,6 +714,49 @@ void msi_set_context_folders( MSIPACKAGE *package )
     package->folders_chosen = TRUE;
     package->folders_common = common;
 }
+
+/* A package installed per user with MSIINSTALLPERUSER (ALLUSERS 2) has its program files folders in the Programs
+   folder of the user, %LOCALAPPDATA%\Programs, and the common files folders in its Common folder (Windows
+   Installer 5.0 and later, "Installation Context" and "Single Package Authoring" in the Windows Installer
+   documentation). A package with ALLUSERS unset keeps the program files folders of the machine. */
+void msi_set_peruser_program_folders( MSIPACKAGE *package )
+{
+    WCHAR programs[MAX_PATH], common[MAX_PATH];
+
+    if (!package->peruser_choice || msi_get_property_int( package->db, L"ALLUSERS", 0 )) return;
+    if (SHGetFolderPathW( NULL, CSIDL_LOCAL_APPDATA | CSIDL_FLAG_CREATE, NULL, SHGFP_TYPE_CURRENT, programs ) != S_OK)
+        return;
+    lstrcatW( programs, L"\\Programs" );
+    lstrcpyW( common, programs );
+    lstrcatW( common, L"\\Common\\" );
+    lstrcatW( programs, L"\\" );
+    msi_set_property( package->db, L"ProgramFilesFolder", programs, -1 );
+    msi_set_property( package->db, L"CommonFilesFolder", common, -1 );
+    if (msi_get_property_int( package->db, L"MsiAMD64", 0 ) || msi_get_property_int( package->db, L"Msix64", 0 ))
+    {
+        msi_set_property( package->db, L"ProgramFiles64Folder", programs, -1 );
+        msi_set_property( package->db, L"CommonFiles64Folder", common, -1 );
+    }
+}
+#endif
+
+#ifdef __REACTOS__
+/* Whether the user of this process is an administrator (the Administrators group is enabled in the token). The
+   engine runs in the client, so the answer is the client's: Windows runs it in the installer service for the
+   machine-wide part of an installation. */
+BOOL msi_user_is_admin(void)
+{
+    SID_IDENTIFIER_AUTHORITY nt_auth = { SECURITY_NT_AUTHORITY };
+    PSID admins;
+    BOOL member = FALSE;
+
+    if (!AllocateAndInitializeSid( &nt_auth, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS,
+                                   0, 0, 0, 0, 0, 0, &admins ))
+        return FALSE;
+    if (!CheckTokenMembership( NULL, admins, &member )) member = FALSE;
+    FreeSid( admins );
+    return member;
+}
 #endif
 
 static VOID set_installer_properties(MSIPACKAGE *package)
@@ -800,10 +849,15 @@ static VOID set_installer_properties(MSIPACKAGE *package)
     msi_set_property( package->db, L"TempFolder", pth, len );
 
     /* in a wine environment the user is always admin and privileged */
+#ifdef __REACTOS__
+    if (msi_user_is_admin())
+#endif
+    {
     msi_set_property( package->db, L"AdminUser", L"1", -1 );
     msi_set_property( package->db, L"Privileged", L"1", -1 );
     msi_set_property( package->db, L"MsiRunningElevated", L"1", -1 );
     msi_set_property( package->db, L"MsiTrueAdminUser", L"1", -1 );
+    }
 
     /* set the os things */
     /* Windows reports the version the process sees, so that a manifest that does not list Windows 10
@@ -1046,6 +1100,7 @@ void msi_adjust_privilege_properties( MSIPACKAGE *package )
     if (allusers == 2 && msi_get_property_int( package->db, L"MSIINSTALLPERUSER", 0 ) == 1)
     {
         TRACE("ALLUSERS 2 with MSIINSTALLPERUSER, installing per user\n");
+        package->peruser_choice = TRUE;
         msi_set_property( package->db, L"ALLUSERS", L"", -1 );
     }
     else
@@ -1056,10 +1111,16 @@ void msi_adjust_privilege_properties( MSIPACKAGE *package )
     if (msi_get_property_int( package->db, L"ALLUSERS", 0 ) == 2)
     {
         TRACE("resetting ALLUSERS property from 2 to 1\n");
+#ifdef __REACTOS__
+        package->allusers_was_2 = TRUE;
+#endif
         msi_set_property( package->db, L"ALLUSERS", L"1", -1 );
     }
 #ifdef __REACTOS__
     }
+#endif
+#ifdef __REACTOS__
+    if (!msi_user_is_admin()) return;
 #endif
     msi_set_property( package->db, L"AdminUser", L"1", -1 );
     msi_set_property( package->db, L"Privileged", L"1", -1 );
@@ -1160,6 +1221,60 @@ UINT msi_download_file( LPCWSTR szUrl, LPWSTR filename )
     return ERROR_SUCCESS;
 }
 
+#ifdef __REACTOS__
+/* Windows caches the package in %WINDIR%\Installer, written by the installer service. The engine runs in the
+   client here, so a user who cannot write that directory caches it in his own profile instead. */
+static UINT create_empty_local_file_in( LPWSTR path, LPCWSTR suffix, UINT *denied )
+{
+    DWORD time, len, i, offset;
+    HANDLE handle;
+
+    time = GetTickCount();
+    len = lstrlenW(path);
+    for (i = 0; i < 0x10000; i++)
+    {
+        offset = swprintf( path + len, MAX_PATH - len, L"%x", (time + i) & 0xffff );
+        memcpy( path + len + offset, suffix, (lstrlenW( suffix ) + 1) * sizeof(WCHAR) );
+        handle = CreateFileW( path, GENERIC_WRITE, 0, NULL,
+                              CREATE_NEW, FILE_ATTRIBUTE_NORMAL, 0 );
+        if (handle != INVALID_HANDLE_VALUE)
+        {
+            CloseHandle(handle);
+            return ERROR_SUCCESS;
+        }
+        if (GetLastError() != ERROR_FILE_EXISTS &&
+            GetLastError() != ERROR_SHARING_VIOLATION)
+        {
+            *denied = GetLastError();
+            return ERROR_FUNCTION_FAILED;
+        }
+    }
+    return ERROR_SUCCESS;
+}
+
+UINT msi_create_empty_local_file( LPWSTR path, LPCWSTR suffix )
+{
+    UINT r, denied = 0;
+
+    GetWindowsDirectoryW( path, MAX_PATH );
+    lstrcatW( path, L"\\Installer\\" );
+    CreateDirectoryW( path, NULL );
+
+    r = create_empty_local_file_in( path, suffix, &denied );
+    if (r != ERROR_SUCCESS && (denied == ERROR_ACCESS_DENIED || denied == ERROR_PATH_NOT_FOUND))
+    {
+        /* the per-user installer folder, %LOCALAPPDATA%\Microsoft\Installer */
+        if (SHGetFolderPathW( NULL, CSIDL_LOCAL_APPDATA | CSIDL_FLAG_CREATE, NULL, SHGFP_TYPE_CURRENT, path ) != S_OK)
+            return ERROR_FUNCTION_FAILED;
+        lstrcatW( path, L"\\Microsoft" );
+        CreateDirectoryW( path, NULL );
+        lstrcatW( path, L"\\Installer\\" );
+        CreateDirectoryW( path, NULL );
+        r = create_empty_local_file_in( path, suffix, &denied );
+    }
+    return r;
+}
+#else
 UINT msi_create_empty_local_file( LPWSTR path, LPCWSTR suffix )
 {
     DWORD time, len, i, offset;
@@ -1189,6 +1304,7 @@ UINT msi_create_empty_local_file( LPWSTR path, LPCWSTR suffix )
 
     return ERROR_SUCCESS;
 }
+#endif
 
 static enum platform parse_platform( const WCHAR *str )
 {
@@ -1736,6 +1852,27 @@ UINT MSI_OpenPackageW(LPCWSTR szPackage, DWORD dwOptions, MSIPACKAGE **pPackage)
         msiobj_release( &db->hdr );
         TRACE("opening package %s\n", debugstr_w( localfile ));
         r = MSI_OpenDatabaseW( localfile, MSIDBOPEN_TRANSACT, &db );
+#ifdef __REACTOS__
+        if (r != ERROR_SUCCESS && !delete_on_close && !msi_user_is_admin())
+        {
+            /* the registered copy is in the Installer folder of the machine, which a standard user cannot write:
+               work on a copy in the profile of the user */
+            WCHAR usercopy[MAX_PATH];
+
+            if (!msi_create_empty_local_file( usercopy, L".msi" ))
+            {
+                if (CopyFileW( file, usercopy, FALSE ))
+                {
+                    DWORD attr = GetFileAttributesW( usercopy );
+                    if (attr & FILE_ATTRIBUTE_READONLY) SetFileAttributesW( usercopy, attr & ~FILE_ATTRIBUTE_READONLY );
+                    lstrcpyW( localfile, usercopy );
+                    delete_on_close = TRUE;
+                    r = MSI_OpenDatabaseW( localfile, MSIDBOPEN_TRANSACT, &db );
+                }
+                else DeleteFileW( usercopy );
+            }
+        }
+#endif
         if (r != ERROR_SUCCESS)
         {
             free( product_version );

@@ -61,6 +61,9 @@ STRINGTABLE
 
     IDS_ERR_INSERTDISK "Please insert the disk: [2]"
     IDS_ERR_CABNOTFOUND "Source file not found{{(cabinet)}}: [2]. Verify that the file exists and that you can access it."
+    IDS_ERR_POLICY "This installation is forbidden by system policy. Contact your system administrator."
+    IDS_ERR_ADMIN_REMOVE "You must be an Administrator to remove this application. To remove this application, you can log on as an administrator, or contact your technical support group for assistance."
+    IDS_ERR_ADMIN_INSTALL "You do not have sufficient privileges to complete this installation for all users of the machine. Log on as administrator and then retry this installation."
 }
 
 /* Standard action description strings */
