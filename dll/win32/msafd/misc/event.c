@@ -253,7 +253,12 @@ WSPEnumNetworkEvents(
     if (EnumReq.PollEvents &
             (AFD_EVENT_DISCONNECT | AFD_EVENT_ABORT | AFD_EVENT_CLOSE)) {
         lpNetworkEvents->lNetworkEvents |= FD_CLOSE;
-        lpNetworkEvents->iErrorCode[FD_CLOSE_BIT] = TranslateNtStatusError(EnumReq.EventStatus[FD_CLOSE_BIT]);
+        /* A reset ends the connection as WSAECONNABORTED in FD_CLOSE while recv and send report WSAECONNRESET
+         * (measured on Windows Server 2022: peer closesocket with unread data, abortive close, send after close) */
+        if (EnumReq.EventStatus[FD_CLOSE_BIT] == STATUS_CONNECTION_RESET)
+            lpNetworkEvents->iErrorCode[FD_CLOSE_BIT] = WSAECONNABORTED;
+        else
+            lpNetworkEvents->iErrorCode[FD_CLOSE_BIT] = TranslateNtStatusError(EnumReq.EventStatus[FD_CLOSE_BIT]);
     }
 
     if (EnumReq.PollEvents & AFD_EVENT_QOS) {

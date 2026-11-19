@@ -150,6 +150,16 @@ Test_PeerClose(int How, BOOL NonBlocking)
     switch (How)
     {
         case PEER_CLOSE_UNREAD:
+            if (Event)
+            {
+                /* FD_CLOSE of a reset carries WSAECONNABORTED, though recv and send fail with WSAECONNRESET
+                 * (Windows Server 2022, WSAEnumNetworkEvents before any send) */
+                ZeroMemory(&Events, sizeof(Events));
+                ok(!WSAEnumNetworkEvents(Client, Event, &Events), "WSAEnumNetworkEvents failed: %d\n", WSAGetLastError());
+                ok(Events.lNetworkEvents & FD_CLOSE, "No FD_CLOSE after the reset (events %lx)\n", Events.lNetworkEvents);
+                ok(Events.iErrorCode[FD_CLOSE_BIT] == WSAECONNABORTED, "FD_CLOSE error %d, expected WSAECONNABORTED\n",
+                   Events.iErrorCode[FD_CLOSE_BIT]);
+            }
             /* the reset was sent when the peer closed: the first send fails already */
             Result = SendOne(Client, &Error);
             ok(Result == SOCKET_ERROR, "send after the reset returned %d\n", Result);
