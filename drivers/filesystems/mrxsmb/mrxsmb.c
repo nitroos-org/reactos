@@ -861,14 +861,18 @@ SmbCreateVNetRoot(PMRX_CREATENETROOT_CONTEXT Context)
     }
 
     /* The user who connects: a static copy of the token, at impersonation level, so
-     * that the engine can act as this user (and only as this user) for the connection */
+     * that the engine can act as this user (and only as this user) for the connection.
+     * The engine that uses it is on this machine (ServerIsRemote FALSE): a service that
+     * impersonates its caller at impersonation level (the Workstation service in NetUseAdd)
+     * connects as that caller; delegation level is not needed for that, as on Windows,
+     * where the logon session's own credentials authenticate the connection */
     Qos.Length = sizeof(Qos);
     Qos.ImpersonationLevel = SecurityImpersonation;
     Qos.ContextTrackingMode = SECURITY_STATIC_TRACKING;
     Qos.EffectiveOnly = FALSE;
     Status = SeCreateClientSecurityFromSubjectContext(&SecurityContext->AccessState->SubjectSecurityContext,
                                                       &Qos,
-                                                      TRUE,
+                                                      FALSE,
                                                       &Ext->ClientContext);
     if (!NT_SUCCESS(Status))
         goto Done;
