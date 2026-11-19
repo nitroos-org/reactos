@@ -20,6 +20,8 @@ SystemSetLocalTime(LPSYSTEMTIME lpSystemTime)
     DWORD PrevSize;
     TOKEN_PRIVILEGES priv, previouspriv;
     BOOL Ret = FALSE;
+    /* Why it failed: a token that does not hold the privilege (a standard user's) never gets past the adjust below */
+    DWORD Error = ERROR_PRIVILEGE_NOT_HELD;
 
     /*
      * Enable the SeSystemtimePrivilege privilege
@@ -50,6 +52,8 @@ SystemSetLocalTime(LPSYSTEMTIME lpSystemTime)
                  */
                 Ret = SetLocalTime(lpSystemTime) &&
                       SetLocalTime(lpSystemTime);
+                if (!Ret)
+                    Error = GetLastError();
 
                 /*
                  * For the sake of security, restore the previous status again
@@ -68,11 +72,32 @@ SystemSetLocalTime(LPSYSTEMTIME lpSystemTime)
         CloseHandle(hToken);
     }
 
+    if (!Ret)
+        SetLastError(Error);
     return Ret;
 }
 
+/*
+ * Did the user ask for another date or time? While the page is untouched its time picker follows the clock and the
+ * calendar shows today, so a value that is the same day and within two seconds of now was not entered. Only a
+ * request that differs is worth a message when the clock is refused.
+ */
+static BOOL
+IsTimeRequested(const SYSTEMTIME *Wanted)
+{
+    SYSTEMTIME Now;
+    LONG WantedSec, NowSec;
 
-static VOID
+    GetLocalTime(&Now);
+    if (Wanted->wYear != Now.wYear || Wanted->wMonth != Now.wMonth || Wanted->wDay != Now.wDay)
+        return TRUE;
+
+    WantedSec = (Wanted->wHour * 60 + Wanted->wMinute) * 60 + Wanted->wSecond;
+    NowSec = (Now.wHour * 60 + Now.wMinute) * 60 + Now.wSecond;
+    return (WantedSec > NowSec + 2) || (WantedSec < NowSec - 2);
+}
+
+static BOOL
 SetLocalSystemTime(HWND hwnd)
 {
     SYSTEMTIME Time;
@@ -86,7 +111,22 @@ SetLocalSystemTime(HWND hwnd)
                      (WPARAM)&Time,
                      0))
     {
-        SystemSetLocalTime(&Time);
+        if (!SystemSetLocalTime(&Time))
+        {
+            /* Not allowed (a standard user has no SeSystemtimePrivilege): say so with the system's text, and keep the
+             * page as it is. The caller does not start the clock again with a time that was not set. */
+            DWORD Error = GetLastError();
+
+            if (!IsTimeRequested(&Time))
+            {
+                /* nothing was asked of the clock (only the time zone page changed): not a failure */
+                SetWindowLongPtrW(hwnd, DWLP_MSGRESULT, PSNRET_NOERROR);
+                return TRUE;
+            }
+            DisplayWin32Error(Error);
+            SetWindowLongPtrW(hwnd, DWLP_MSGRESULT, PSNRET_INVALID_NOCHANGEPAGE);
+            return FALSE;
+        }
 
         SetWindowLongPtrW(hwnd,
                           DWLP_MSGRESULT,
@@ -107,6 +147,8 @@ SetLocalSystemTime(HWND hwnd)
                             5000,
                             NULL);
     }
+
+    return TRUE;
 }
 
 
@@ -384,7 +426,8 @@ DateTimePageProc(HWND hwndDlg,
                             break;
 
                         case PSN_APPLY:
-                            SetLocalSystemTime(hwndDlg);
+                            if (!SetLocalSystemTime(hwndDlg))
+                                return TRUE;    /* the page stays, with what the user entered and the clock stopped */
 
                             /* Tell the clock to start ticking */
                             SendDlgItemMessageW(hwndDlg, IDC_CLOCKWND, CLM_STARTCLOCK,
