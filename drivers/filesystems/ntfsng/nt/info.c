@@ -746,6 +746,225 @@ VOID NgPosixUnlink(PNG_FCB Fcb)
     NgFreeRetitles(Spare, Spares);
 }
 
+/*
+ * FileRenameInformation on a handle of a named stream.  The new name is ":name" or ":name:$DATA" (FILE_RENAME_INFO:
+ * a name that starts with a colon renames the stream, in the file the handle names).  The core keeps no operation
+ * that changes the name of an attribute, so the stream is made again under the new name: the data is copied, the old
+ * stream is removed, and the FCB (so every handle of the stream, which keep their access to the data) takes the new
+ * stream's node and name.  An existing stream of that name is replaced if ReplaceIfExists is set and nothing has it
+ * open, else STATUS_OBJECT_NAME_COLLISION.  Caller holds CreateGate and the FCB's main resource exclusive.
+ * Not supported: a change of case alone (STATUS_NOT_SUPPORTED), a named stream of the file that is open besides
+ * the renamed one while a stream of that name is replaced (STATUS_ACCESS_DENIED).
+ */
+static NTSTATUS NgRenameStream(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stack, PFILE_RENAME_INFORMATION R)
+{
+    static const WCHAR DataSuffix[] = L":$DATA";
+    PNG_VCB Vcb = Fcb->Vcb;
+    BOOLEAN Replace = Stack->Parameters.SetFile.ReplaceIfExists || R->ReplaceIfExists;
+    UNICODE_STRING NewName, Suffix;
+    ULONG Chars = R->FileNameLength / sizeof(WCHAR), Spares = 0, MaxPath = 0, i;
+    ngc_node *Base = NULL, *Target = NULL, *New = NULL, *Old;
+    PUCHAR Buffer = NULL;
+    PWCHAR Tmp = NULL;
+    NG_RETITLE *Spare = NULL;
+    IO_STATUS_BLOCK Iosb;
+    UNICODE_STRING OldPath;
+    NTSTATUS Status = STATUS_SUCCESS;
+    PLIST_ENTRY Entry;
+    ULONGLONG Size, Off;
+    BOOLEAN Done = FALSE;
+    int Err;
+
+    if (Chars < 2 || R->FileName[0] != L':')
+        return STATUS_OBJECT_NAME_INVALID;
+    RtlInitUnicodeString(&Suffix, DataSuffix);
+    if (Chars - 1 > Suffix.Length / sizeof(WCHAR))
+    {
+        UNICODE_STRING Tail;
+
+        Tail.Buffer = R->FileName + Chars - Suffix.Length / sizeof(WCHAR);
+        Tail.Length = Tail.MaximumLength = Suffix.Length;
+        if (RtlEqualUnicodeString(&Tail, &Suffix, TRUE))
+            Chars -= Suffix.Length / sizeof(WCHAR);
+    }
+    NewName.Buffer = R->FileName + 1;
+    NewName.Length = NewName.MaximumLength = (USHORT)((Chars - 1) * sizeof(WCHAR));
+    if (!NgValidName(&NewName))
+        return STATUS_OBJECT_NAME_INVALID;
+    if (RtlEqualUnicodeString(&NewName, &Fcb->Stream, FALSE))
+        return STATUS_SUCCESS;                  /* renaming to itself */
+    if (RtlEqualUnicodeString(&NewName, &Fcb->Stream, TRUE))
+        return STATUS_NOT_SUPPORTED;
+    if (Fcb->Orphan || Ccb->Orphaned || Fcb->DeletePending)
+        return STATUS_ACCESS_DENIED;
+
+    /* The handles' new names and the buffers are allocated first: what is done on disk is not undone. */
+    KeAcquireGuardedMutex(&Vcb->FcbListLock);
+    for (Entry = Fcb->CcbList.Flink; Entry != &Fcb->CcbList; Entry = Entry->Flink)
+    {
+        PNG_CCB C = CONTAINING_RECORD(Entry, NG_CCB, FcbLinks);
+        Spares++;
+        if (C->Path.Length > MaxPath)
+            MaxPath = C->Path.Length;
+    }
+    KeReleaseGuardedMutex(&Vcb->FcbListLock);
+    MaxPath += (255 + 2) * sizeof(WCHAR);
+    Spare = ExAllocatePoolWithTag(PagedPool, Spares * sizeof(NG_RETITLE), TAG_NTFSNG);
+    Tmp = ExAllocatePoolWithTag(PagedPool, MaxPath, TAG_NTFSNG);
+    Buffer = ExAllocatePoolWithTag(PagedPool, 0x10000, TAG_NTFSNG);
+    if (Spare)
+        RtlZeroMemory(Spare, Spares * sizeof(NG_RETITLE));
+    if (!Spare || !Tmp || !Buffer)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto out;
+    }
+    for (i = 0; i < Spares; i++)
+    {
+        Spare[i].Buffer = ExAllocatePoolWithTag(PagedPool, MaxPath, TAG_NTFSNG);
+        Spare[i].Old = ExAllocatePoolWithTag(PagedPool, 2 * sizeof(PVOID), TAG_NTFSNG);
+        if (!Spare[i].Buffer || !Spare[i].Old)
+        {
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+            goto out;
+        }
+    }
+
+    /* What the handles wrote is on disk before it is copied. */
+    NgFlushStream(Fcb, &Iosb);
+
+    NgAcquireCore(Vcb);
+    Err = NgEnsureNode(Fcb);
+    if (!Err)
+        Err = ngc_iget(Vcb->Core, Fcb->MftNo, &Base);
+    if (!Err)
+    {
+        Err = ngc_open_stream(Vcb->Core, Base, NewName.Buffer, NewName.Length / sizeof(WCHAR), &Target);
+        if (Err == -NGC_ENOENT)
+            Err = 0;
+    }
+    if (!Err && Target)
+    {
+        if (!Replace)
+            Status = STATUS_OBJECT_NAME_COLLISION;
+        else
+        {
+            /* The stream that is replaced has to be closed: the nodes of the unused streams are given back
+             * (CoreLock held), then it is opened again and removed. */
+            ngc_put(Target);
+            Target = NULL;
+            if (!NgRetireStreams(Vcb, Fcb->MftNo, Fcb, TRUE))
+                Status = STATUS_ACCESS_DENIED;
+            else
+                Err = ngc_open_stream(Vcb->Core, Base, NewName.Buffer, NewName.Length / sizeof(WCHAR), &Target);
+            if (NT_SUCCESS(Status) && !Err && Target)
+            {
+                Err = ngc_delete_stream(Vcb->Core, Target);
+                ngc_put(Target);
+                Target = NULL;
+            }
+        }
+        if (Target)
+        {
+            ngc_put(Target);
+            Target = NULL;
+        }
+    }
+    if (!Err && NT_SUCCESS(Status))
+        Err = NgEnsureNode(Fcb);        /* the retire above may have parked it */
+    if (!Err && NT_SUCCESS(Status))
+    {
+        struct ngc_stat St;
+
+        Old = Fcb->Node;
+        ngc_stat(Old, &St);
+        Size = St.size;
+        Err = ngc_create_stream(Vcb->Core, Base, NewName.Buffer, NewName.Length / sizeof(WCHAR), &New);
+        if (!Err && Size)
+            Err = ngc_set_size(Vcb->Core, New, Size);       /* the writes below stay inside the size */
+        for (Off = 0; !Err && Off < Size;)
+        {
+            ULONG Chunk = Size - Off < 0x10000 ? (ULONG)(Size - Off) : 0x10000;
+            long Got = ngc_read(Old, Off, Chunk, Buffer, 0);
+
+            if (Got != (long)Chunk)
+                Err = Got < 0 ? (int)Got : -NGC_EIO;
+            else if (ngc_write(Vcb->Core, New, Off, Chunk, Buffer) != (long)Chunk)
+                Err = -NGC_EIO;
+            Off += Chunk;
+        }
+        if (!Err)
+            Err = ngc_delete_stream(Vcb->Core, Old);
+        if (Err && New)
+        {
+            ngc_delete_stream(Vcb->Core, New);      /* the copy is dropped, the stream stays as it was */
+            ngc_put(New);
+            New = NULL;
+        }
+        if (!Err)
+        {
+            /* The handles follow the data: the FCB takes the new stream's node and name. */
+            Fcb->Node = New;
+            ngc_put(Old);
+            ngc_stat(New, &Fcb->Stat);
+            Done = TRUE;
+        }
+    }
+    if (Base)
+        ngc_put(Base);
+    if (Done)
+        NgAfterChange(Vcb);
+    NgReleaseCore(Vcb);
+    if (Err && NT_SUCCESS(Status))
+        Status = NgErrnoToStatus(Err);
+    if (!Done)
+        goto out;
+
+    /* The new name for the FCB and for the path of every handle (the old buffers are kept until close). */
+    OldPath.Buffer = NULL;
+    KeAcquireGuardedMutex(&Vcb->FcbListLock);
+    OldPath.Length = OldPath.MaximumLength = Ccb->Path.Length;
+    OldPath.Buffer = ExAllocatePoolWithTag(PagedPool, Ccb->Path.Length ? Ccb->Path.Length : sizeof(WCHAR), TAG_NTFSNG);
+    if (OldPath.Buffer)
+        RtlCopyMemory(OldPath.Buffer, Ccb->Path.Buffer, Ccb->Path.Length);
+    RtlCopyMemory(Fcb->StreamBuffer, NewName.Buffer, NewName.Length);
+    Fcb->Stream.Length = NewName.Length;
+    for (Entry = Fcb->CcbList.Flink, i = 0; Entry != &Fcb->CcbList && i < Spares; Entry = Entry->Flink, i++)
+    {
+        PNG_CCB C = CONTAINING_RECORD(Entry, NG_CCB, FcbLinks);
+        UNICODE_STRING NewPath, FileName;
+        ULONG Keep = C->Path.Length / sizeof(WCHAR);
+
+        while (Keep && C->Path.Buffer[Keep - 1] != L':')
+            Keep--;                             /* the path up to and with the colon of the stream */
+        if (!Keep || Keep * sizeof(WCHAR) + NewName.Length > MaxPath - sizeof(WCHAR))
+            continue;
+        RtlCopyMemory(Tmp, C->Path.Buffer, Keep * sizeof(WCHAR));
+        RtlCopyMemory(Tmp + Keep, NewName.Buffer, NewName.Length);
+        NewPath.Buffer = Tmp;
+        NewPath.Length = NewPath.MaximumLength = (USHORT)(Keep * sizeof(WCHAR) + NewName.Length);
+        FileName.Buffer = C->Name;
+        FileName.Length = FileName.MaximumLength = C->NameLength * sizeof(WCHAR);
+        NgRetitleCcb(Vcb, C, &Spare[i], &NewPath, C->ParentMftNo, &FileName);
+    }
+    KeReleaseGuardedMutex(&Vcb->FcbListLock);
+    if (OldPath.Buffer)
+    {
+        /* what a watcher of the file's directory sees: the stream is gone under the old name and added under the new one */
+        NgNotifyFcb(Vcb, &OldPath, FILE_NOTIFY_CHANGE_STREAM_NAME, FILE_ACTION_REMOVED_STREAM, Fcb, Ccb->ParentMftNo);
+        NgNotifyCcb(Vcb, Ccb, Fcb, FILE_NOTIFY_CHANGE_STREAM_NAME, FILE_ACTION_ADDED_STREAM);
+        ExFreePoolWithTag(OldPath.Buffer, TAG_NTFSNG);
+    }
+
+out:
+    NgFreeRetitles(Spare, Spares);
+    if (Tmp)
+        ExFreePoolWithTag(Tmp, TAG_NTFSNG);
+    if (Buffer)
+        ExFreePoolWithTag(Buffer, TAG_NTFSNG);
+    return Status;
+}
+
 static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stack, PFILE_RENAME_INFORMATION R,
                                ULONG Length, BOOLEAN IsLink, BOOLEAN Check)
 {
@@ -769,8 +988,15 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
     if (Length < FIELD_OFFSET(FILE_RENAME_INFORMATION, FileName) ||
         R->FileNameLength > Length - FIELD_OFFSET(FILE_RENAME_INFORMATION, FileName))
         return STATUS_INVALID_PARAMETER;
-    if (Fcb->IsRoot || Fcb->IsVolume || Fcb->Stream.Length || !Ccb->NameLength)
+    if (Fcb->IsRoot || Fcb->IsVolume || !Ccb->NameLength)
         return STATUS_INVALID_PARAMETER;
+    if (Fcb->Stream.Length)
+    {
+        /* a stream is renamed within its file; it cannot be linked or moved to another directory */
+        if (IsLink || Stack->Parameters.SetFile.FileObject)
+            return STATUS_INVALID_PARAMETER;
+        return NgRenameStream(Fcb, Ccb, Stack, R);
+    }
     if (Fcb->MftNo < 16 || Ccb->ParentMftNo == 11)
         return STATUS_ACCESS_DENIED;   /* metadata files and $Extend children are never renamed or linked */
     if (Fcb->Orphan || Ccb->Orphaned)

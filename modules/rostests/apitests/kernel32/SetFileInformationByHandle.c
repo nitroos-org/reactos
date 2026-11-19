@@ -231,7 +231,7 @@ static void Test_Rename(void)
 static void Test_RenameStream(void)
 {
     WCHAR Path[MAX_PATH], Volume[MAX_PATH];
-    DWORD FsFlags = 0;
+    DWORD FsFlags = 0, Written = 0;
     HANDLE File;
     BOOL Ret;
 
@@ -252,12 +252,57 @@ static void Test_RenameStream(void)
     ok(File != INVALID_HANDLE_VALUE, "CreateFileW failed: %lu\n", GetLastError());
     if (File == INVALID_HANDLE_VALUE)
         return;
+    ok(WriteFile(File, "DATA", 4, &Written, NULL) && Written == 4, "Writing the stream failed: %lu\n", GetLastError());
 
     Ret = RenameTo(File, L":two", FALSE, 0);
     ok(Ret, "Stream rename failed: %lu\n", GetLastError());
+    /* the handle goes on with the renamed stream */
+    ok(WriteFile(File, "MORE", 4, &Written, NULL) && Written == 4, "Writing after the rename failed: %lu\n", GetLastError());
     CloseHandle(File);
     ok(ExistsIn(FileDir, L"s.txt:two") && !ExistsIn(FileDir, L"s.txt:one") && !ExistsIn(CwdDir, L"two"),
        "Stream rename did not happen\n");
+    ok(FileHolds(FileDir, L"s.txt:two", "DATAMORE"), "The renamed stream does not hold its data\n");
+    ok(FileHolds(FileDir, L"s.txt", "S"), "The unnamed stream of the file changed\n");
+
+    /* onto a stream that exists: without ReplaceIfExists it stays, with it it is replaced */
+    ok(WriteFileIn(FileDir, L"s.txt:three", "OLD"), "Creating the second stream failed: %lu\n", GetLastError());
+    File = OpenFileIn(FileDir, L"s.txt:two", OPEN_EXISTING);
+    ok(File != INVALID_HANDLE_VALUE, "CreateFileW failed: %lu\n", GetLastError());
+    if (File != INVALID_HANDLE_VALUE)
+    {
+        SetLastError(0xdeadbeef);
+        Ret = RenameTo(File, L":three", FALSE, 0);
+        ok(!Ret && (GetLastError() == ERROR_ALREADY_EXISTS || GetLastError() == ERROR_FILE_EXISTS),
+           "Rename onto a stream without replace: %d, error %lu\n", Ret, GetLastError());
+        ok(FileHolds(FileDir, L"s.txt:three", "OLD") && ExistsIn(FileDir, L"s.txt:two"),
+           "A refused rename changed the streams\n");
+        Ret = RenameTo(File, L":three", TRUE, 0);
+        ok(Ret, "Rename onto a stream with replace failed: %lu\n", GetLastError());
+        CloseHandle(File);
+        ok(FileHolds(FileDir, L"s.txt:three", "DATAMORE") && !ExistsIn(FileDir, L"s.txt:two"),
+           "The replace did not leave the data under the new name\n");
+    }
+
+    /* the form with the stream type */
+    File = OpenFileIn(FileDir, L"s.txt:three", OPEN_EXISTING);
+    ok(File != INVALID_HANDLE_VALUE, "CreateFileW failed: %lu\n", GetLastError());
+    if (File != INVALID_HANDLE_VALUE)
+    {
+        Ret = RenameTo(File, L":four:$DATA", FALSE, 0);
+        ok(Ret, "Rename to :four:$DATA failed: %lu\n", GetLastError());
+
+        /* names that are no stream names; the stream stays where it is */
+        SetLastError(0xdeadbeef);
+        ok(!RenameTo(File, L"five", FALSE, 0), "Rename to a name without a colon worked\n");
+        ok(!RenameTo(File, L":", FALSE, 0), "Rename to an empty stream name worked\n");
+        ok(!RenameTo(File, L"::$DATA", FALSE, 0), "Rename to the unnamed stream worked\n");
+        ok(!RenameTo(File, L":a:b", FALSE, 0), "Rename to :a:b worked\n");
+        ok(!RenameTo(File, L":a\\b", FALSE, 0), "Rename to :a\\b worked\n");
+        ok(!RenameTo(File, L":six", FALSE, 4000), "Rename with a name length past the buffer worked\n");
+        CloseHandle(File);
+        ok(FileHolds(FileDir, L"s.txt:four", "DATAMORE") && !ExistsIn(FileDir, L"s.txt:three"),
+           "The stream is not where it was left\n");
+    }
 
     StringCchPrintfW(Path, _countof(Path), L"%s\\s.txt", FileDir);
     DeleteFileW(Path);
