@@ -545,6 +545,50 @@ START_TEST(ServiceSidToken)
         ok(!Dump.Restricted, "sid: restricted token\n");
     }
 
+    /* 2b. The account name must exist (Windows Server 2022: ERROR_INVALID_SERVICE_ACCOUNT from CreateService and
+     * from ChangeServiceConfig for the short names LocalService and NetworkService and for a name nobody has) */
+    {
+        SC_HANDLE hAcct;
+        PCSTR Bad[] = { "LocalService", "NetworkService", ".\\NoSuchAccountXYZ", "NoSuchAccountXYZ" };
+        SIZE_T k;
+
+        StringCbPrintfA(Name, sizeof(Name), "%sx", Base);
+        for (k = 0; k < ARRAYSIZE(Bad); k++)
+        {
+            hAcct = CreateServiceA(hScm, Name, Name, SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS, SERVICE_DEMAND_START,
+                                   SERVICE_ERROR_IGNORE, "C:\\nothing.exe", NULL, NULL, NULL, Bad[k], "x");
+            Error = hAcct ? ERROR_SUCCESS : GetLastError();
+            ok(Error == ERROR_INVALID_SERVICE_ACCOUNT, "CreateService(%s): error %lu, expected %d\n", Bad[k], Error,
+               ERROR_INVALID_SERVICE_ACCOUNT);
+            if (hAcct)
+            {
+                DeleteService(hAcct);
+                CloseServiceHandle(hAcct);
+            }
+        }
+        hAcct = CreateServiceA(hScm, Name, Name, SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS, SERVICE_DEMAND_START,
+                               SERVICE_ERROR_IGNORE, "C:\\nothing.exe", NULL, NULL, NULL, NULL, NULL);
+        ok(hAcct != NULL, "CreateService(LocalSystem) failed with %lu\n", GetLastError());
+        if (hAcct)
+        {
+            for (k = 0; k < ARRAYSIZE(Bad); k++)
+            {
+                SetLastError(0xdeadbeef);
+                ok(!ChangeServiceConfigA(hAcct, SERVICE_NO_CHANGE, SERVICE_NO_CHANGE, SERVICE_NO_CHANGE, NULL, NULL, NULL, NULL,
+                                         Bad[k], "x", NULL) && GetLastError() == ERROR_INVALID_SERVICE_ACCOUNT,
+                   "ChangeServiceConfig(%s): error %lu, expected %d\n", Bad[k], GetLastError(), ERROR_INVALID_SERVICE_ACCOUNT);
+            }
+            ok(ChangeServiceConfigA(hAcct, SERVICE_NO_CHANGE, SERVICE_NO_CHANGE, SERVICE_NO_CHANGE, NULL, NULL, NULL, NULL,
+                                    "NT AUTHORITY\\LocalService", "", NULL),
+               "ChangeServiceConfig(NT AUTHORITY\\LocalService) failed with %lu\n", GetLastError());
+            ok(ChangeServiceConfigA(hAcct, SERVICE_NO_CHANGE, SERVICE_NO_CHANGE, SERVICE_NO_CHANGE, NULL, NULL, NULL, NULL,
+                                    "NT AUTHORITY\\System", "", NULL),
+               "ChangeServiceConfig(NT AUTHORITY\\System) failed with %lu\n", GetLastError());
+            DeleteService(hAcct);
+            CloseServiceHandle(hAcct);
+        }
+    }
+
     /* 3. LocalService, UNRESTRICTED + SeImpersonatePrivilege: that one and SeChangeNotifyPrivilege */
     StringCbPrintfA(Name, sizeof(Name), "%sc", Base);
     Error = RunService(hScm, Name, "NT AUTHORITY\\LocalService", SERVICE_SID_TYPE_UNRESTRICTED,
