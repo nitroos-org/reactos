@@ -143,11 +143,37 @@ START_TEST(LogonUserServiceSecret)
         if (OtherToken)
             CloseHandle(OtherToken);
 
-        /* The password itself still works for a service logon */
-        Ok = LogonUserW(Service, L".", AccountPassword, LOGON32_LOGON_SERVICE, LOGON32_PROVIDER_DEFAULT, &Token);
-        ok(Ok, "service logon with the password failed: %lu\n", GetLastError());
-        if (Ok && Token)
-            CloseHandle(Token);
+        /* The password itself works for a service logon of an account that has the right (Windows: 1385 without it) */
+        {
+            LSA_OBJECT_ATTRIBUTES Attributes = {0};
+            LSA_HANDLE Policy = NULL;
+            LSA_UNICODE_STRING Right;
+            static WCHAR RightName[] = L"SeServiceLogonRight";
+            BYTE Sid[SECURITY_MAX_SID_SIZE];
+            WCHAR Domain[256];
+            DWORD SidLength = sizeof(Sid), DomainLength = RTL_NUMBER_OF(Domain);
+            SID_NAME_USE Use;
+
+            Ok = LogonUserW(Service, L".", AccountPassword, LOGON32_LOGON_SERVICE, LOGON32_PROVIDER_DEFAULT, &Token);
+            ok(!Ok && GetLastError() == ERROR_LOGON_TYPE_NOT_GRANTED, "service logon without the right: %d, %lu\n", Ok, GetLastError());
+            if (Ok && Token)
+                CloseHandle(Token);
+
+            Right.Buffer = RightName;
+            Right.Length = (USHORT)(wcslen(RightName) * sizeof(WCHAR));
+            Right.MaximumLength = Right.Length + sizeof(WCHAR);
+            if (LookupAccountNameW(NULL, Service, Sid, &SidLength, Domain, &DomainLength, &Use) &&
+                NT_SUCCESS(LsaOpenPolicy(NULL, &Attributes, POLICY_ALL_ACCESS, &Policy)))
+            {
+                ok(NT_SUCCESS(LsaAddAccountRights(Policy, Sid, &Right, 1)), "LsaAddAccountRights failed\n");
+                Ok = LogonUserW(Service, L".", AccountPassword, LOGON32_LOGON_SERVICE, LOGON32_PROVIDER_DEFAULT, &Token);
+                ok(Ok, "service logon with the password failed: %lu\n", GetLastError());
+                if (Ok && Token)
+                    CloseHandle(Token);
+                LsaRemoveAccountRights(Policy, Sid, TRUE, NULL, 0);
+                LsaClose(Policy);
+            }
+        }
 
         NtStatus = StoreSecret(SecretText, NULL);
         ok(NT_SUCCESS(NtStatus), "deleting the secret failed: 0x%08lx\n", NtStatus);

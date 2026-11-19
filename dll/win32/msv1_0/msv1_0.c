@@ -2073,6 +2073,12 @@ LsaApLogonUserEx2(IN PLSA_CLIENT_REQUEST ClientRequest,
     PUNICODE_STRING ErasePassword = NULL;
     PLOGON_LIST_ENTRY LogonEntry = NULL;
     BOOLEAN UserValidated = FALSE;
+    /* LogonUser(LOGON32_LOGON_NETWORK) sends the user, the domain and the plain password (like the interactive
+       logons), not a challenge and its response: the password is verified like the one of a cleartext network logon */
+    BOOLEAN IsNetworkWithPassword = (LogonType == Network &&
+                                     SubmitBufferSize >= sizeof(ULONG) &&
+                                     ProtocolSubmitBuffer != NULL &&
+                                     *(PULONG)ProtocolSubmitBuffer == MsV1_0InteractiveLogon);
 
     TRACE("LsaApLogonUserEx2()\n");
 
@@ -2123,9 +2129,11 @@ LsaApLogonUserEx2(IN PLSA_CLIENT_REQUEST ClientRequest,
         UserValidated = TRUE;
     }
     else if (LogonType == Interactive ||
+        LogonType == Unlock ||
         LogonType == Batch ||
         LogonType == Service ||
-        LogonType == NetworkCleartext)
+        LogonType == NetworkCleartext ||
+        IsNetworkWithPassword)
     {
         PMSV1_0_INTERACTIVE_LOGON LogonInfo;
         ULONG_PTR PtrOffset;
@@ -2361,8 +2369,8 @@ LsaApLogonUserEx2(IN PLSA_CLIENT_REQUEST ClientRequest,
     {
         /* The profile buffer of an S4U logon has been built already */
     }
-    else if (LogonType == Interactive || LogonType == Batch || LogonType == Service ||
-        LogonType == NetworkCleartext)
+    else if (LogonType == Interactive || LogonType == Unlock || LogonType == Batch || LogonType == Service ||
+        LogonType == NetworkCleartext || IsNetworkWithPassword)
     {
         /* Build and fill the interactive profile buffer */
         Status = BuildInteractiveProfileBuffer(ClientRequest,
