@@ -2761,6 +2761,18 @@ KeyCachedOpenNow:
                                 /* A link in a user's hive stays in that user's hives */
                                 Status = STATUS_ACCESS_DENIED;
                             }
+
+                            /*
+                             * CmpDoOpen made (or found and referenced) the KCB of the link for this open,
+                             * and no key body takes that reference: give it back, or the KCB stays
+                             * referenced and the hive can never be unloaded (review F13). A cached link
+                             * KCB was not referenced (CMP_OPEN_KCB_NO_CREATE).
+                             */
+                            if (!IsKeyCached && Kcb != ParentKcb)
+                            {
+                                CmpDereferenceKeyControlBlock(Kcb);
+                                Kcb = ParentKcb;
+                            }
                         }
 
                         /* We are done */
