@@ -1277,6 +1277,7 @@ VioScsiUnitControl(IN PVOID DeviceExtension, IN SCSI_UNIT_CONTROL_TYPE ControlTy
             break;
         case ScsiUnitRemove:
         case ScsiUnitSurpriseRemoval:
+        {
             ULONG QueuNum;
             ULONG MsgId;
             STOR_LOCK_HANDLE LockHandle = {0};
@@ -1317,6 +1318,7 @@ VioScsiUnitControl(IN PVOID DeviceExtension, IN SCSI_UNIT_CONTROL_TYPE ControlTy
             }
             Status = ScsiUnitControlSuccess;
             break;
+        }
         default:
             RhelDbgPrint(TRACE_LEVEL_ERROR, " Unsupported Unit ControlType %d\n", ControlType);
             break;
