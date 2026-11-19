@@ -117,6 +117,7 @@ PCSR_API_ROUTINE ConsoleServerApiDispatchTable[ConsolepMaxApiNumber - CONSRV_FIR
     SrvSetConsoleHistory,                   // Added in Vista+
     SrvGetConsoleScrollback,                // NitroOS
     SrvGetConsoleExtColors,                 // NitroOS
+    SrvCancelConsoleIo,                     // NitroOS
     // SrvSetConsoleCurrentFont,               // Added in Vista+
     // SrvSetScreenBufferInfo,                 // Added in Vista+
     // SrvConsoleClientConnect,                // Added in Win7
@@ -215,6 +216,7 @@ BOOLEAN ConsoleServerApiServerValidTable[ConsolepMaxApiNumber - CONSRV_FIRST_API
     FALSE,   // SrvSetConsoleHistory
     FALSE,   // SrvGetConsoleScrollback
     FALSE,   // SrvGetConsoleExtColors
+    FALSE,   // SrvCancelConsoleIo
     // FALSE,   // SrvSetConsoleCurrentFont,
     // FALSE,   // SrvSetScreenBufferInfo,
     // FALSE,   // SrvConsoleClientConnect,
@@ -318,6 +320,7 @@ PCHAR ConsoleServerApiNameTable[ConsolepMaxApiNumber - CONSRV_FIRST_API_NUMBER] 
     "SetConsoleHistory",
     "GetConsoleScrollback",
     "GetConsoleExtColors",
+    "CancelConsoleIo",
     // "SetConsoleCurrentFont",
     // "SetScreenBufferInfo",
     // "ConsoleClientConnect",

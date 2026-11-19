@@ -47,6 +47,9 @@ do { \
 } while (0)
 
 
+/* WaitArgument1 of the read waiters' notification that marks a cancel (the handle is still open) */
+#define CONSRV_WAIT_CANCEL  ((PVOID)(ULONG_PTR)0x43414e43)
+
 typedef struct _GET_INPUT_INFO
 {
     PCSR_THREAD           CallingThread;    // The thread which called the input API.
@@ -343,8 +346,10 @@ ReadCharsThread(IN PLIST_ENTRY WaitList,
      */
     if (InputHandle != NULL)
     {
-        Status = (InputHandle == InputInfo->HandleEntry ? STATUS_ALERTED
-                                                        : STATUS_PENDING);
+        /* A cancel (SrvCancelConsoleIo) ends the read as a cancelled request, a close as an alerted one */
+        Status = (InputHandle == InputInfo->HandleEntry
+                  ? (WaitArgument1 == CONSRV_WAIT_CANCEL ? STATUS_CANCELLED : STATUS_ALERTED)
+                  : STATUS_PENDING);
         goto Quit;
     }
 
@@ -507,8 +512,10 @@ ReadInputBufferThread(IN PLIST_ENTRY WaitList,
      */
     if (InputHandle != NULL)
     {
-        Status = (InputHandle == InputInfo->HandleEntry ? STATUS_ALERTED
-                                                        : STATUS_PENDING);
+        /* A cancel (SrvCancelConsoleIo) ends the read as a cancelled request, a close as an alerted one */
+        Status = (InputHandle == InputInfo->HandleEntry
+                  ? (WaitArgument1 == CONSRV_WAIT_CANCEL ? STATUS_CANCELLED : STATUS_ALERTED)
+                  : STATUS_PENDING);
         goto Quit;
     }
 
@@ -846,6 +853,43 @@ CON_API(SrvWriteConsoleInput,
 NTSTATUS NTAPI
 ConDrvFlushConsoleInputBuffer(IN PCONSOLE Console,
                               IN PCONSOLE_INPUT_BUFFER InputBuffer);
+/*
+ * API_NUMBER: ConsolepCancelIo (NitroOS)
+ * CancelIoEx on a console input handle: the reads the calling process has pending on this handle
+ * (blocked ReadConsole / ReadFile / ReadConsoleInput) end with STATUS_CANCELLED. The waiters are
+ * told with the close-handle notification, marked as a cancel.
+ */
+CON_API(SrvCancelConsoleIo,
+        CONSOLE_CANCELIO, CancelIoRequest)
+{
+    NTSTATUS Status;
+    PVOID HandleEntry;
+    PCONSOLE_INPUT_BUFFER InputBuffer;
+
+    Status = ConSrvGetInputBufferAndHandleEntry(ProcessData,
+                                                CancelIoRequest->InputHandle,
+                                                &InputBuffer,
+                                                &HandleEntry,
+                                                GENERIC_READ,
+                                                TRUE);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    ASSERT((PCONSOLE)Console == InputBuffer->Header.Console);
+
+    CsrNotifyWait(&Console->ReadWaitQueue,
+                  TRUE,
+                  CONSRV_WAIT_CANCEL,
+                  HandleEntry);
+    if (!IsListEmpty(&Console->ReadWaitQueue))
+    {
+        CsrDereferenceWait(&Console->ReadWaitQueue);
+    }
+
+    ConSrvReleaseInputBuffer(InputBuffer, TRUE);
+    return STATUS_SUCCESS;
+}
+
 /* API_NUMBER: ConsolepFlushInputBuffer */
 CON_API(SrvFlushConsoleInputBuffer,
         CONSOLE_FLUSHINPUTBUFFER, FlushInputBufferRequest)

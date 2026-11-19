@@ -99,6 +99,7 @@ CSR_API(SrvReadConsole);
 CSR_API(SrvGetConsoleInput);
 CSR_API(SrvWriteConsoleInput);
 CSR_API(SrvFlushConsoleInputBuffer);
+CSR_API(SrvCancelConsoleIo);
 CSR_API(SrvGetConsoleNumberOfInputEvents);
 
 /* conoutput.c */

@@ -51,6 +51,7 @@ static const char *ConsoleApiNames[] =
     "ConsolepSetNlsMode", "ConsolepRegisterConsoleIME", "ConsolepUnregisterConsoleIME", "ConsolepGetLangId",
     "ConsolepAttach", "ConsolepGetSelectionInfo", "ConsolepGetProcessList", "ConsolepGetHistory",
     "ConsolepSetHistory", "ConsolepGetScrollback", "ConsolepGetExtColors",
+    "ConsolepCancelIo",
 };
 static const char *UserApiNames[] =
 {
