@@ -45,7 +45,7 @@
 
 /* EVENT_TRACING - CHOOSE BETWEEN DEBUG OR TRACING
  * if EVENT_TRACING is undefined, DEBUG (DBG) will be enabled below... */
-#define EVENT_TRACING 1
+//#define EVENT_TRACING 1  /* WPP/ETW is not available: the DbgPrint path below is used */
 //#undef EVENT_TRACING  // <== switch me here with comment
 
 #include <ntddk.h>
@@ -60,7 +60,9 @@ char *DbgGetScsiOpStr(IN UCHAR opCode);
 void InitializeDebugPrints(IN PDRIVER_OBJECT  DriverObject, IN PUNICODE_STRING RegistryPath);
 
 #if !defined(EVENT_TRACING)
+#ifndef DBG
 #define DBG 1
+#endif
 /* EVENT_TRACING - CHOOSE BETWEEN DEBUG TO STDIO OR SERIAL PORT
  * if PRINT_DEBUG is undefined, output to the serial port (COM_DEBUG) will be enabled below... */
 #define PRINT_DEBUG 1
@@ -104,7 +106,7 @@ extern int nVioscsiDebugLevel;
 
 #define RhelDbgPrint(Level, MSG, ...) \
     if ((!bDebugPrint) || Level > nVioscsiDebugLevel) {} \
-    else VirtioDebugPrintProc (MSG, __VA_ARGS__)
+    else VirtioDebugPrintProc (MSG, ##__VA_ARGS__)
 #define VioScsiDbgBreak()\
     if (KD_DEBUGGER_ENABLED && !KD_DEBUGGER_NOT_PRESENT) DbgBreakPoint();
 
