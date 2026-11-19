@@ -1911,6 +1911,8 @@ CmpAclRecordDenial(
 #define CMP_ACL_PLANTED_WRITE       0x2
 #define CMP_ACL_PLANTED_SYSTEM      0x4
 #define CMP_ACL_PLANTED_ACETYPE     0x8
+/* Boot self-check only: what an ancestor passes on shuts SYSTEM out, the key got its policy descriptor */
+#define CMP_ACL_PLANTED_INHERIT     0x10
 
 /* Restamped keys printed to the debug channel per boot (all are counted and logged to the file) */
 #define CMP_ACL_RESTAMP_PRINT_MAX   256
@@ -2201,13 +2203,15 @@ CmpAclDefaultKeySd(
 /*
  * Look at the stored descriptor of the key behind Key (a kernel handle opened
  * with WRITE_DAC, WRITE_OWNER and ACCESS_SYSTEM_SECURITY) and replace it when
- * it is planted (above). Keys without a stored descriptor are judged through
- * the ancestor they inherit from. Returns the reasons found (0: nothing done).
+ * it is planted (above), or whatever it is with Force (the boot self-check's
+ * repair). A key without a stored descriptor is left alone (it inherits).
+ * Returns the reasons found (0: nothing done).
  */
 static
 ULONG
 CmpAclCheckStoredKey(
-    _In_ HANDLE Key)
+    _In_ HANDLE Key,
+    _In_ BOOLEAN Force)
 {
     ULONG Buffer[CMP_ACL_SD_BUFFER / sizeof(ULONG)];
     ULONG OwnerBuffer[SECURITY_MAX_SID_SIZE / sizeof(ULONG)];
@@ -2232,6 +2236,9 @@ CmpAclCheckStoredKey(
         if (Sd)
         {
             Reasons = CmpAclSdPlanted(Sd, &Owner);
+            /* The boot self-check's repair: this descriptor is what shuts SYSTEM out of a boot key */
+            if (Force && !Reasons)
+                Reasons = CMP_ACL_PLANTED_SYSTEM | CMP_ACL_PLANTED_INHERIT;
             if (Owner && RtlLengthSid(Owner) <= sizeof(OwnerBuffer))
             {
                 RtlCopySid(sizeof(OwnerBuffer), (PSID)OwnerBuffer, Owner);
@@ -2317,7 +2324,7 @@ CmpAclWalk(
         ExFreePoolWithTag(Stack, TAG_CM_ACL);
         return;
     }
-    CmpAclCheckStoredKey(Stack[0].Key);
+    CmpAclCheckStoredKey(Stack[0].Key, FALSE);
     Stack[0].Index = 0;
     if (!Subtree)
     {
@@ -2348,7 +2355,7 @@ CmpAclWalk(
         Status = ZwOpenKey(&Child, CMP_ACL_RESET_ACCESS, &Attributes);
         if (!NT_SUCCESS(Status))
             continue;
-        CmpAclCheckStoredKey(Child);
+        CmpAclCheckStoredKey(Child, FALSE);
         if (Depth + 1 >= CMP_ACL_WALK_MAX_DEPTH)
         {
             ZwClose(Child);
@@ -2362,12 +2369,140 @@ CmpAclWalk(
 }
 
 /*
+ * Store the policy descriptor of its place (CmpAclSynthesizeSd: the Windows
+ * one, which gives SYSTEM full control) on the key at Path, whatever its
+ * ancestors pass on. Boot self-check only (CmpAclRepairSystemAccess).
+ */
+static
+VOID
+CmpAclStampPolicySd(
+    _In_ PCUNICODE_STRING Path)
+{
+    ULONG Buffer[CMP_ACL_SD_BUFFER / sizeof(ULONG)];
+    OBJECT_ATTRIBUTES Attributes;
+    PCM_KEY_BODY KeyBody;
+    PCM_KEY_CONTROL_BLOCK Kcb;
+    PSECURITY_DESCRIPTOR Sd, Copy = NULL;
+    PUNICODE_STRING Name = NULL;
+    HANDLE Key;
+    ULONG Rule;
+    NTSTATUS Status;
+
+    /* The object the self-check judged (links followed, as there) */
+    InitializeObjectAttributes(&Attributes, (PUNICODE_STRING)Path, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+    if (!NT_SUCCESS(ZwOpenKey(&Key, CMP_ACL_RESET_ACCESS, &Attributes)))
+        return;
+    if (!NT_SUCCESS(ObReferenceObjectByHandle(Key, 0, CmpKeyObjectType, KernelMode, (PVOID *)&KeyBody, NULL)))
+    {
+        ZwClose(Key);
+        return;
+    }
+
+    CmpLockRegistry();
+    Kcb = KeyBody->KeyControlBlock;
+    if (Kcb && !Kcb->Delete)
+    {
+        Sd = CmpAclSynthesizeSd(Kcb, Buffer, sizeof(Buffer), &Rule);
+        if (Sd)
+        {
+            Copy = ExAllocatePoolWithTag(PagedPool, RtlLengthSecurityDescriptor(Sd), TAG_CM_ACL);
+            if (Copy)
+                RtlCopyMemory(Copy, Sd, RtlLengthSecurityDescriptor(Sd));
+        }
+        Name = CmpConstructName(Kcb);
+    }
+    CmpUnlockRegistry();
+    ObDereferenceObject(KeyBody);
+
+    Status = STATUS_INSUFFICIENT_RESOURCES;
+    if (Copy)
+    {
+        Status = ZwSetSecurityObject(Key,
+                                     OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
+                                     DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION,
+                                     Copy);
+        ExFreePoolWithTag(Copy, TAG_CM_ACL);
+    }
+    ZwClose(Key);
+    if (Name)
+    {
+        CmpAclRecordRestamp(Name, CMP_ACL_PLANTED_SYSTEM | CMP_ACL_PLANTED_INHERIT, NULL, Status);
+        CmpFree(Name, 0);
+    }
+}
+
+/*
+ * The name of the key Level levels above the key behind Key (0: the key
+ * itself) if it has a stored descriptor, else NULL (CmpFree it).
+ */
+static
+PUNICODE_STRING
+CmpAclStoredAncestorName(
+    _In_ HANDLE Key,
+    _In_ ULONG Level)
+{
+    ULONG Buffer[CMP_ACL_SD_BUFFER / sizeof(ULONG)];
+    PCM_KEY_BODY KeyBody;
+    PCM_KEY_CONTROL_BLOCK Walk;
+    PUNICODE_STRING Name = NULL;
+    PVOID PoolCopy;
+    ULONG i;
+
+    if (!NT_SUCCESS(ObReferenceObjectByHandle(Key, 0, CmpKeyObjectType, KernelMode, (PVOID *)&KeyBody, NULL)))
+        return NULL;
+    CmpLockRegistry();
+    Walk = KeyBody->KeyControlBlock;
+    for (i = 0; Walk && i < Level; i++)
+        Walk = Walk->ParentKcb;
+    if (Walk && !Walk->Delete)
+    {
+        CmpAcquireKcbLockShared(Walk);
+        if (CmpAclCopyStoredSd(Walk, Buffer, sizeof(Buffer), &PoolCopy, FALSE))
+        {
+            CmpAclFreeEffectiveSd(NULL, PoolCopy);
+            Name = CmpConstructName(Walk);
+        }
+        CmpReleaseKcbLock(Walk);
+    }
+    CmpUnlockRegistry();
+    ObDereferenceObject(KeyBody);
+    return Name;
+}
+
+/* Replace the stored descriptor of the key named Name by its default (CmpAclDefaultKeySd), whatever it is */
+static
+BOOLEAN
+CmpAclForceDefault(
+    _In_ PUNICODE_STRING Name)
+{
+    OBJECT_ATTRIBUTES Attributes;
+    HANDLE Key;
+    ULONG Reasons;
+
+    InitializeObjectAttributes(&Attributes, Name, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE | OBJ_OPENLINK, NULL, NULL);
+    if (!NT_SUCCESS(ZwOpenKey(&Key, CMP_ACL_RESET_ACCESS, &Attributes)))
+        return FALSE;
+    Reasons = CmpAclCheckStoredKey(Key, TRUE);
+    ZwClose(Key);
+    return Reasons != 0;
+}
+
+/*
  * The boot self-check found that SYSTEM does not get full control of the key
- * at Path: replace the stored descriptor it is judged by (its own, or the
- * nearest ancestor's it inherits from) when that descriptor is planted, and
- * look again (an ancestor further up may be next). An administrator's own
- * descriptor that shuts SYSTEM out of a boot key is planted by the same rule
- * (SYSTEM lacks full control): the boot would not work with it either.
+ * at Path. What it is judged by is its own stored descriptor, or what the
+ * nearest ancestor with a stored descriptor passes on. Replace the key's own
+ * descriptor by its default (inherited from its parent, or the policy one of
+ * its place); if that still shuts SYSTEM out, the fault is an ancestor's:
+ * replace the nearest stored ancestor's (the next one up each round), then
+ * every stored descriptor below it down to the key again, top-down, so that
+ * each inherits from a repaired parent. Such an ancestor's own descriptor can
+ * be sound by the planted rule (a trusted owner, no untrusted grant, SYSTEM has
+ * full control of the ancestor itself) and still pass nothing on, or deny its
+ * subkeys to SYSTEM: falling back to audit for it handed whoever could store
+ * it while a boot did not enforce the switch out of enforcement. An
+ * administrator's own descriptor that does this to a boot key is replaced by
+ * the same rule: the boot would not work with it either. If nothing of that
+ * helps, the key gets the policy descriptor of its place.
  */
 static
 VOID
@@ -2379,79 +2514,81 @@ CmpAclRepairSystemAccess(
     PCM_KEY_BODY KeyBody;
     PCM_KEY_CONTROL_BLOCK Kcb, Walk;
     PSECURITY_DESCRIPTOR Sd, ToFree;
-    PUNICODE_STRING Target;
+    PUNICODE_STRING Name;
     PVOID PoolCopy;
-    HANDLE Key, TargetKey;
-    ULONG Rule, Try;
-    BOOLEAN Done;
+    HANDLE Key;
+    ULONG Rule, Round, Level, Depth, Above = 0;
+    BOOLEAN Lacks;
 
-    for (Try = 0; Try < 16; Try++)
+    /* The object the self-check judged (links followed, as there); the handle keeps its ancestors */
+    InitializeObjectAttributes(&Attributes, (PUNICODE_STRING)Path, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+    if (!NT_SUCCESS(ZwOpenKey(&Key, KEY_QUERY_VALUE, &Attributes)))
+        return;
+
+    for (Round = 0; Round <= CMP_ACL_WALK_MAX_DEPTH; Round++)
     {
-        InitializeObjectAttributes(&Attributes, (PUNICODE_STRING)Path, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
-        if (!NT_SUCCESS(ZwOpenKey(&Key, KEY_QUERY_VALUE, &Attributes)))
-            return;
+        /* Does SYSTEM still lack full control, and how deep is the key */
+        Lacks = FALSE;
+        Depth = 0;
         if (!NT_SUCCESS(ObReferenceObjectByHandle(Key, 0, CmpKeyObjectType, KernelMode, (PVOID *)&KeyBody, NULL)))
-        {
-            ZwClose(Key);
-            return;
-        }
-
-        Done = TRUE;
-        Target = NULL;
+            break;
         CmpLockRegistry();
         Kcb = KeyBody->KeyControlBlock;
-        if (Kcb)
+        if (Kcb && !Kcb->Delete)
         {
+            for (Walk = Kcb->ParentKcb; Walk; Walk = Walk->ParentKcb)
+                Depth++;
             CmpAcquireKcbLockShared(Kcb);
             Sd = CmpGetEffectiveKeySd(Kcb, Buffer, sizeof(Buffer), &Rule, &ToFree, &PoolCopy, FALSE);
-            if (Sd && !CmpAclSdGivesSystemFullControl(Sd))
-            {
-                if (Rule == CmpAclRuleCell)
-                {
-                    Target = CmpConstructName(Kcb);
-                    Done = FALSE;
-                }
-                else if (Rule == CmpAclRuleInherited)
-                {
-                    /* The nearest ancestor with a stored descriptor */
-                    for (Walk = Kcb->ParentKcb; Walk; Walk = Walk->ParentKcb)
-                    {
-                        PVOID AncestorCopy;
-                        ULONG AncestorBuffer[CMP_ACL_SD_BUFFER / sizeof(ULONG)];
-
-                        if (CmpAclCopyStoredSd(Walk, AncestorBuffer, sizeof(AncestorBuffer), &AncestorCopy, FALSE))
-                        {
-                            CmpAclFreeEffectiveSd(NULL, AncestorCopy);
-                            Target = CmpConstructName(Walk);
-                            Done = FALSE;
-                            break;
-                        }
-                    }
-                }
-                /* A policy descriptor always gives SYSTEM full control: nothing to repair */
-            }
+            Lacks = Sd && !CmpAclSdGivesSystemFullControl(Sd);
             CmpAclFreeEffectiveSd(ToFree, PoolCopy);
             CmpReleaseKcbLock(Kcb);
         }
         CmpUnlockRegistry();
         ObDereferenceObject(KeyBody);
-        ZwClose(Key);
-
-        if (Done || !Target)
-            return;
-
-        InitializeObjectAttributes(&Attributes, Target, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE | OBJ_OPENLINK, NULL, NULL);
-        if (!NT_SUCCESS(ZwOpenKey(&TargetKey, CMP_ACL_RESET_ACCESS, &Attributes)))
+        if (!Lacks)
         {
-            CmpFree(Target, 0);
+            ZwClose(Key);
             return;
         }
-        CmpFree(Target, 0);
-        Rule = CmpAclCheckStoredKey(TargetKey);
-        ZwClose(TargetKey);
-        if (!Rule)
-            return;     /* nothing replaced: no progress possible */
+
+        if (Round > 0)
+        {
+            /* The nearest stored ancestor above the ones replaced so far */
+            Name = NULL;
+            for (Level = Above + 1; Level <= Depth && !Name; Level++)
+                Name = CmpAclStoredAncestorName(Key, Level);
+            if (!Name)
+                break;
+            Above = Level - 1;
+            CmpAclForceDefault(Name);
+            CmpFree(Name, 0);
+        }
+
+        /* Below it (or from the parent in the first round) down to the key, top-down */
+        for (Level = Above; Level-- > 0;)
+        {
+            Name = CmpAclStoredAncestorName(Key, Level);
+            if (Name)
+            {
+                CmpAclForceDefault(Name);
+                CmpFree(Name, 0);
+            }
+        }
+        if (Round == 0)
+        {
+            Name = CmpAclStoredAncestorName(Key, 0);
+            if (Name)
+            {
+                CmpAclForceDefault(Name);
+                CmpFree(Name, 0);
+            }
+        }
     }
+    ZwClose(Key);
+
+    /* Nothing of that helped (a policy descriptor always gives SYSTEM full control) */
+    CmpAclStampPolicySd(Path);
 }
 
 /*
