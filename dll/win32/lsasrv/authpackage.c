@@ -2232,6 +2232,8 @@ LsapLogonUser(PLSA_API_MSG RequestMsg,
                                          NewCredLength,
                                          NewCredClient,
                                          NewCredSource);
+        /* The request holds the plain password, which this logon does not use: never leave it in freed memory */
+        RtlSecureZeroMemory(LocalAuthInfo, NewCredLength);
         RtlFreeHeap(RtlGetProcessHeap(), 0, LocalAuthInfo);
         return Status;
     }
