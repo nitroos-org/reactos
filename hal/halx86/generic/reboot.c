@@ -16,8 +16,22 @@
 static VOID
 HalpWriteResetCommand(VOID)
 {
+    ULONG i;
+
     /* Generate RESET signal via keyboard controller */
     WRITE_PORT_UCHAR((PUCHAR)0x64, 0xFE);
+
+    /* The controller needs some time to pulse the reset line. If it has not
+       reset the machine after 20 ms there is no keyboard controller (machines
+       with only USB input devices have none): use the reset control register
+       of the chipset, first requesting a system reset, then the hard reset. */
+    for (i = 0; i < 20; i++)
+        KeStallExecutionProcessor(1000);
+
+    WRITE_PORT_UCHAR((PUCHAR)0xCF9, 0x02);
+    KeStallExecutionProcessor(50);
+    WRITE_PORT_UCHAR((PUCHAR)0xCF9, 0x06);
+    KeStallExecutionProcessor(50);
 };
 
 DECLSPEC_NORETURN
