@@ -879,9 +879,32 @@ NetrWkstaUserGetInfo(
                        UserInfoResponseBuffer->UserName.Buffer,
                        UserInfoResponseBuffer->UserName.Length);
 
-            /* Logon Domain Name */
-            pUserInfo1->wkui1_logon_domain =
-                midl_user_allocate(UserInfoResponseBuffer->LogonDomainName.Length + sizeof(WCHAR));
+            /* Logon Domain Name: a logon as "." (this machine) names the machine, as on Windows Server 2022 */
+            if (UserInfoResponseBuffer->LogonDomainName.Length == sizeof(WCHAR) &&
+                UserInfoResponseBuffer->LogonDomainName.Buffer[0] == L'.')
+            {
+                WCHAR szComputer[MAX_COMPUTERNAME_LENGTH + 1];
+                DWORD dwComputer = ARRAYSIZE(szComputer);
+
+                if (!GetComputerNameW(szComputer, &dwComputer))
+                    dwComputer = 0, szComputer[0] = UNICODE_NULL;
+                pUserInfo1->wkui1_logon_domain = midl_user_allocate((dwComputer + 1) * sizeof(WCHAR));
+                if (pUserInfo1->wkui1_logon_domain != NULL)
+                    wcscpy(pUserInfo1->wkui1_logon_domain, szComputer);
+            }
+            else
+            {
+                pUserInfo1->wkui1_logon_domain =
+                    midl_user_allocate(UserInfoResponseBuffer->LogonDomainName.Length + sizeof(WCHAR));
+                if (pUserInfo1->wkui1_logon_domain != NULL)
+                {
+                    ZeroMemory(pUserInfo1->wkui1_logon_domain,
+                               UserInfoResponseBuffer->LogonDomainName.Length + sizeof(WCHAR));
+                    CopyMemory(pUserInfo1->wkui1_logon_domain,
+                               UserInfoResponseBuffer->LogonDomainName.Buffer,
+                               UserInfoResponseBuffer->LogonDomainName.Length);
+                }
+            }
             if (pUserInfo1->wkui1_logon_domain == NULL)
             {
                 ERR("\n");
@@ -891,13 +914,18 @@ NetrWkstaUserGetInfo(
                 break;
             }
 
-            ZeroMemory(pUserInfo1->wkui1_logon_domain,
-                       UserInfoResponseBuffer->LogonDomainName.Length + sizeof(WCHAR));
-            CopyMemory(pUserInfo1->wkui1_logon_domain,
-                       UserInfoResponseBuffer->LogonDomainName.Buffer,
-                       UserInfoResponseBuffer->LogonDomainName.Length);
-
-            /* FIXME: wkui1_oth_domains */
+            /* Other domains: the empty string (Windows Server 2022), not NULL */
+            pUserInfo1->wkui1_oth_domains = midl_user_allocate(sizeof(WCHAR));
+            if (pUserInfo1->wkui1_oth_domains == NULL)
+            {
+                ERR("\n");
+                midl_user_free(pUserInfo1->wkui1_username);
+                midl_user_free(pUserInfo1->wkui1_logon_domain);
+                midl_user_free(pUserInfo1);
+                dwResult = ERROR_NOT_ENOUGH_MEMORY;
+                break;
+            }
+            pUserInfo1->wkui1_oth_domains[0] = UNICODE_NULL;
 
             /* Logon Server */
             pUserInfo1->wkui1_logon_server =
@@ -907,6 +935,7 @@ NetrWkstaUserGetInfo(
                 ERR("\n");
                 midl_user_free(pUserInfo1->wkui1_username);
                 midl_user_free(pUserInfo1->wkui1_logon_domain);
+                midl_user_free(pUserInfo1->wkui1_oth_domains);
                 midl_user_free(pUserInfo1);
                 dwResult = ERROR_NOT_ENOUGH_MEMORY;
                 break;
@@ -932,7 +961,15 @@ NetrWkstaUserGetInfo(
 
             ZeroMemory(pUserInfo1101, sizeof(WKSTA_USER_INFO_1101));
 
-            /* FIXME: wkui1101_oth_domains */
+            /* the empty string (Windows Server 2022), not NULL */
+            pUserInfo1101->wkui1101_oth_domains = midl_user_allocate(sizeof(WCHAR));
+            if (pUserInfo1101->wkui1101_oth_domains == NULL)
+            {
+                midl_user_free(pUserInfo1101);
+                dwResult = ERROR_NOT_ENOUGH_MEMORY;
+                break;
+            }
+            pUserInfo1101->wkui1101_oth_domains[0] = UNICODE_NULL;
 
             UserInfo->UserInfo1101 = pUserInfo1101;
             break;

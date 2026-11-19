@@ -123,7 +123,27 @@ static void TestCaller(void)
            "Level 1: empty logon domain\n");
         ok(Info1->wkui1_logon_server != NULL && Info1->wkui1_logon_server[0] != UNICODE_NULL,
            "Level 1: empty logon server\n");
+        /* Windows Server 2022: the other domains are the empty string, and a logon as "." names the machine */
+        ok(Info1->wkui1_oth_domains != NULL && Info1->wkui1_oth_domains[0] == UNICODE_NULL,
+           "Level 1: other domains %ls, expected the empty string\n",
+           Info1->wkui1_oth_domains ? Info1->wkui1_oth_domains : L"(null)");
+        ok(Info1->wkui1_logon_domain != NULL && wcscmp(Info1->wkui1_logon_domain, L"."),
+           "Level 1: logon domain %ls\n", Info1->wkui1_logon_domain ? Info1->wkui1_logon_domain : L"(null)");
         NetApiBufferFree(Info1);
+    }
+
+    {
+        LPWKSTA_USER_INFO_1101 Info1101 = NULL;
+
+        Status = NetWkstaUserGetInfo(NULL, 1101, (PBYTE *)&Info1101);
+        ok(Status == NERR_Success, "Level 1101: Status %lu\n", Status);
+        if (Status == NERR_Success)
+        {
+            ok(Info1101->wkui1101_oth_domains != NULL && Info1101->wkui1101_oth_domains[0] == UNICODE_NULL,
+               "Level 1101: other domains %ls, expected the empty string\n",
+               Info1101->wkui1101_oth_domains ? Info1101->wkui1101_oth_domains : L"(null)");
+            NetApiBufferFree(Info1101);
+        }
     }
 
     Status = NetWkstaUserGetInfo(NULL, 2, (PBYTE *)&Info1);
