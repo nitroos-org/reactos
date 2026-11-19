@@ -56,6 +56,22 @@ NTSTATUS virtio_device_initialize(VirtIODevice *vdev,
     vdev->maxQueues = ARRAYSIZE(vdev->inline_info);
 
     status = vio_modern_initialize(vdev);
+#ifdef __REACTOS__
+    if (!NT_SUCCESS(status) && status != STATUS_DEVICE_NOT_CONNECTED) {
+        /* A transitional device whose modern registers cannot be mapped (a 64-bit BAR the kernel cannot
+           map, see MmMapIoSpace) still has the legacy interface in its I/O BAR 0: use that */
+        u32 bar0 = 0;
+        pci_read_config_dword(vdev, 0x10, &bar0);
+        if (bar0 & 1) {
+            DPrintf(0, "%s: modern interface unusable (0x%x), using the legacy one\n", __FUNCTION__, status);
+            vdev->common = NULL;
+            vdev->isr = NULL;
+            vdev->notify_base = NULL;
+            vdev->config = NULL;
+            status = STATUS_DEVICE_NOT_CONNECTED;
+        }
+    }
+#endif
     if (status == STATUS_DEVICE_NOT_CONNECTED) {
         /* fall back to legacy virtio device */
         status = vio_legacy_initialize(vdev);
