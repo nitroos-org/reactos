@@ -832,13 +832,16 @@ HidClass_Write(
     IN PIRP Irp)
 {
     PIO_STACK_LOCATION IoStack;
-    PHIDCLASS_COMMON_DEVICE_EXTENSION CommonDeviceExtension;
+    PHIDCLASS_PDO_DEVICE_EXTENSION PDODeviceExtension;
     PIRP SubIrp;
     KEVENT Event;
     IO_STATUS_BLOCK IoStatusBlock;
     HID_XFER_PACKET XferPacket;
     NTSTATUS Status;
     ULONG Length;
+
+    PDODeviceExtension = DeviceObject->DeviceExtension;
+    ASSERT(PDODeviceExtension->Common.IsFDO == FALSE);
 
     IoStack = IoGetCurrentIrpStackLocation(Irp);
     Length = IoStack->Parameters.Write.Length;
@@ -854,10 +857,12 @@ HidClass_Write(
     XferPacket.reportBuffer = Irp->UserBuffer;
     XferPacket.reportId = XferPacket.reportBuffer[0];
 
-    CommonDeviceExtension = DeviceObject->DeviceExtension;
+    /* the report goes to the minidriver of the device, like a read does: sending it to the
+       device object below the HID FDO would hand it to the bus driver */
+    KeInitializeEvent(&Event, SynchronizationEvent, FALSE);
     SubIrp = IoBuildDeviceIoControlRequest(
         IOCTL_HID_WRITE_REPORT,
-        CommonDeviceExtension->HidDeviceExtension.NextDeviceObject,
+        PDODeviceExtension->FDODeviceObject,
         NULL, 0,
         NULL, 0,
         TRUE,
@@ -867,11 +872,12 @@ HidClass_Write(
     {
         Irp->IoStatus.Status = STATUS_NO_MEMORY;
         IoCompleteRequest(Irp, IO_NO_INCREMENT);
-        return STATUS_NOT_IMPLEMENTED;
+        return STATUS_NO_MEMORY;
     }
     SubIrp->UserBuffer = &XferPacket;
-    KeInitializeEvent(&Event, SynchronizationEvent, FALSE);
-    Status = IoCallDriver(CommonDeviceExtension->HidDeviceExtension.NextDeviceObject, SubIrp);
+    IoSetNextIrpStackLocation(SubIrp);
+    IoGetCurrentIrpStackLocation(SubIrp)->DeviceObject = PDODeviceExtension->FDODeviceObject;
+    Status = PDODeviceExtension->Common.DriverExtension->MajorFunction[IRP_MJ_INTERNAL_DEVICE_CONTROL](PDODeviceExtension->FDODeviceObject, SubIrp);
     if (Status == STATUS_PENDING)
     {
         KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);

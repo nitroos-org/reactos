@@ -91,6 +91,11 @@ typedef struct
     ULONG ReportLength;
 
     //
+    // output report length, 0 when the keyboard has no indicators to set
+    //
+    ULONG OutputReportLength;
+
+    //
     // file object the device is reading reports from
     //
     PFILE_OBJECT FileObject;

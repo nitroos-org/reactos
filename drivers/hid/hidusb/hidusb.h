@@ -84,6 +84,7 @@ Hid_DispatchUrb(
     IN PDEVICE_OBJECT DeviceObject,
     IN PURB Urb);
 
+#define USB_SET_REPORT_REQUEST 0x9
 #define USB_SET_IDLE_REQUEST 0xA
 #define USB_GET_PROTOCOL_REQUEST 0x3
 

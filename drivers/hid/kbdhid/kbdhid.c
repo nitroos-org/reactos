@@ -374,6 +374,66 @@ KbdHid_Close(
     return IoCallDriver(DeviceExtension->NextDeviceObject, Irp);
 }
 
+/*
+ * Send the indicators to the keyboard as an output report. The report layout is
+ * the one of the boot protocol keyboard: a report id of 0 and one byte with bit 0 =
+ * num lock, bit 1 = caps lock, bit 2 = scroll lock. Keyboards with another layout
+ * (report ids, more indicators) are left alone.
+ */
+static VOID
+KbdHid_SendIndicators(
+    IN PKBDHID_DEVICE_EXTENSION DeviceExtension)
+{
+    KEVENT Event;
+    IO_STATUS_BLOCK IoStatus;
+    LARGE_INTEGER Offset;
+    PIO_STACK_LOCATION IoStack;
+    PIRP Irp;
+    PUCHAR Report;
+
+    /* the report id byte and one byte of indicators */
+    if (DeviceExtension->OutputReportLength != 2 || !DeviceExtension->FileObject)
+        return;
+
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+        return;
+
+    Report = ExAllocatePoolWithTag(NonPagedPool, 2, KBDHID_TAG);
+    if (!Report)
+        return;
+
+    Report[0] = 0;
+    Report[1] = 0;
+    if (DeviceExtension->KeyboardIndicator.LedFlags & KEYBOARD_NUM_LOCK_ON)
+        Report[1] |= 0x01;
+    if (DeviceExtension->KeyboardIndicator.LedFlags & KEYBOARD_CAPS_LOCK_ON)
+        Report[1] |= 0x02;
+    if (DeviceExtension->KeyboardIndicator.LedFlags & KEYBOARD_SCROLL_LOCK_ON)
+        Report[1] |= 0x04;
+
+    KeInitializeEvent(&Event, NotificationEvent, FALSE);
+    Offset.QuadPart = 0;
+    Irp = IoBuildSynchronousFsdRequest(IRP_MJ_WRITE,
+                                       DeviceExtension->NextDeviceObject,
+                                       Report,
+                                       2,
+                                       &Offset,
+                                       &Event,
+                                       &IoStatus);
+    if (Irp)
+    {
+        /* the HID class reads the report from the user buffer of the request */
+        Irp->UserBuffer = Report;
+        IoStack = IoGetNextIrpStackLocation(Irp);
+        IoStack->FileObject = DeviceExtension->FileObject;
+
+        if (IoCallDriver(DeviceExtension->NextDeviceObject, Irp) == STATUS_PENDING)
+            KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+    }
+
+    ExFreePoolWithTag(Report, KBDHID_TAG);
+}
+
 NTSTATUS
 NTAPI
 KbdHid_InternalDeviceControl(
@@ -522,6 +582,9 @@ KbdHid_InternalDeviceControl(
             RtlCopyMemory(&DeviceExtension->KeyboardIndicator,
                           Irp->AssociatedIrp.SystemBuffer,
                           sizeof(KEYBOARD_INDICATOR_PARAMETERS));
+
+            /* light the indicators of the keyboard */
+            KbdHid_SendIndicators(DeviceExtension);
 
             /* done */
             Irp->IoStatus.Status = STATUS_SUCCESS;
@@ -738,6 +801,9 @@ KbdHid_StartDevice(
     }
 
     DPRINT("[KBDHID] Usage %x UsagePage %x InputReportLength %lu\n", Capabilities.Usage, Capabilities.UsagePage, Capabilities.InputReportByteLength);
+
+    /* the output report carries the indicators (num/caps/scroll lock) */
+    DeviceExtension->OutputReportLength = Capabilities.OutputReportByteLength;
 
     /* init input report */
     DeviceExtension->ReportLength = Capabilities.InputReportByteLength;

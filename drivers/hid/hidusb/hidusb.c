@@ -721,6 +721,77 @@ HidUsb_GetReportDescriptor(
 }
 
 NTSTATUS
+HidUsb_WriteReport(
+    IN PDEVICE_OBJECT DeviceObject,
+    IN PIRP Irp)
+{
+    PHID_USB_DEVICE_EXTENSION HidDeviceExtension;
+    PHID_DEVICE_EXTENSION DeviceExtension;
+    PHID_XFER_PACKET Packet;
+    PURB Urb;
+    PUCHAR Data;
+    ULONG Length;
+    NTSTATUS Status;
+
+    //
+    // get device extension
+    //
+    DeviceExtension = DeviceObject->DeviceExtension;
+    HidDeviceExtension = DeviceExtension->MiniDeviceExtension;
+
+    //
+    // get the transfer packet
+    //
+    Packet = Irp->UserBuffer;
+    if (!Packet || !Packet->reportBuffer || Packet->reportBufferLen == 0 || !HidDeviceExtension->InterfaceInfo)
+        return STATUS_INVALID_PARAMETER;
+
+    //
+    // the buffer starts with the report id, which is only sent to devices that use report ids
+    //
+    Data = Packet->reportBuffer;
+    Length = Packet->reportBufferLen;
+    if (Packet->reportId == 0)
+    {
+        Data++;
+        Length--;
+        if (Length == 0)
+            return STATUS_INVALID_PARAMETER;
+    }
+
+    //
+    // allocate urb
+    //
+    Urb = ExAllocatePoolWithTag(NonPagedPool, sizeof(struct _URB_CONTROL_VENDOR_OR_CLASS_REQUEST), HIDUSB_URB_TAG);
+    if (!Urb)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    RtlZeroMemory(Urb, sizeof(struct _URB_CONTROL_VENDOR_OR_CLASS_REQUEST));
+
+    //
+    // SET_REPORT, report type output (2) in the high byte of the value
+    //
+    UsbBuildVendorRequest(Urb,
+                          URB_FUNCTION_CLASS_INTERFACE,
+                          sizeof(struct _URB_CONTROL_VENDOR_OR_CLASS_REQUEST),
+                          USBD_TRANSFER_DIRECTION_OUT,
+                          0,
+                          USB_SET_REPORT_REQUEST,
+                          (USHORT)((2 << 8) | Packet->reportId),
+                          HidDeviceExtension->InterfaceInfo->InterfaceNumber,
+                          Data,
+                          NULL,
+                          Length,
+                          NULL);
+
+    //
+    // dispatch urb
+    //
+    Status = Hid_DispatchUrb(DeviceObject, Urb);
+    ExFreePoolWithTag(Urb, HIDUSB_URB_TAG);
+    return Status;
+}
+
+NTSTATUS
 NTAPI
 HidInternalDeviceControl(
     IN PDEVICE_OBJECT DeviceObject,
@@ -821,11 +892,11 @@ HidInternalDeviceControl(
         }
         case IOCTL_HID_WRITE_REPORT:
         {
-            DPRINT1("[HIDUSB] IOCTL_HID_WRITE_REPORT not implemented \n");
-            ASSERT(FALSE);
-            Irp->IoStatus.Status = STATUS_NOT_IMPLEMENTED;
+            Status = HidUsb_WriteReport(DeviceObject, Irp);
+            DPRINT("[HIDUSB] IOCTL_HID_WRITE_REPORT Status %x\n", Status);
+            Irp->IoStatus.Status = Status;
             IoCompleteRequest(Irp, IO_NO_INCREMENT);
-            return STATUS_NOT_IMPLEMENTED;
+            return Status;
         }
         case IOCTL_GET_PHYSICAL_DESCRIPTOR:
         {
