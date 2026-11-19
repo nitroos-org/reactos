@@ -426,14 +426,18 @@ SamrSetSecurityObject(IN SAMPR_HANDLE ObjectHandle,
     TRACE("SamrSetSecurityObject(%p %lx %p)\n",
           ObjectHandle, SecurityInformation, SecurityDescriptor);
 
-    if ((SecurityDescriptor == NULL) ||
-        (SecurityDescriptor->SecurityDescriptor == NULL) ||
-        !RtlValidSecurityDescriptor((PSECURITY_DESCRIPTOR)SecurityDescriptor->SecurityDescriptor))
-        return ERROR_INVALID_PARAMETER;
-
     if (SecurityInformation == 0 ||
         SecurityInformation & ~(OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION
         | DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION))
+        return ERROR_INVALID_PARAMETER;
+
+    /* The descriptor is the self-relative one of Length bytes that the client sent: its parts must lie inside
+       those bytes (RtlValidSecurityDescriptor alone follows the offsets wherever they point) */
+    if ((SecurityDescriptor == NULL) ||
+        (SecurityDescriptor->SecurityDescriptor == NULL) ||
+        !RtlValidRelativeSecurityDescriptor((PSECURITY_DESCRIPTOR)SecurityDescriptor->SecurityDescriptor,
+                                            SecurityDescriptor->Length,
+                                            0))
         return ERROR_INVALID_PARAMETER;
 
     if (SecurityInformation & SACL_SECURITY_INFORMATION)
