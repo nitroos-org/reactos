@@ -1698,10 +1698,11 @@ LsarpOpenAccount(
                               DesiredAccess,
                               PolicyObject->Trusted,
                               AccountObject);
-    /* A SID without an account object is a normal answer (every logon asks for each group of the token) */
-    if (!NT_SUCCESS(Status) && Status != STATUS_OBJECT_NAME_NOT_FOUND)
+    if (!NT_SUCCESS(Status))
     {
-        ERR("LsapOpenDbObject(Accounts/%S) failed (Status 0x%08lx)\n", SidString, Status);
+        /* A SID without an account object is a normal answer (every logon asks for each group of the token) */
+        if (Status != STATUS_OBJECT_NAME_NOT_FOUND)
+            ERR("LsapOpenDbObject(Accounts/%S) failed (Status 0x%08lx)\n", SidString, Status);
     }
     else
     {
