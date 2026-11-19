@@ -216,7 +216,9 @@ CmpInitializeHive(
                                                                CM_CHECK_REGISTRY_CACHE_SECURITY);
         if (!CM_CHECK_REGISTRY_SUCCESS(CheckStatus))
         {
-            /* Cleanup allocations and fail */
+            /* Cleanup allocations, the hive's storage and base block included, and fail */
+            CmpFreeSecurityCache(Hive);
+            HvFree(&Hive->Hive);
             ExDeleteResourceLite(Hive->FlusherLock);
             ExFreePoolWithTag(Hive->FlusherLock, TAG_CMHIVE);
             ExFreePoolWithTag(Hive->ViewLock, TAG_CMHIVE);

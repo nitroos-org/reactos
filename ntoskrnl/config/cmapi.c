@@ -152,7 +152,8 @@ CmpCheckLiveHive(
     BOOLEAN Acquired;
 
     Acquired = CmpAcquireHiveSecurityLock(&Hive->Hive);
-    Status = CmCheckRegistry(Hive, CM_CHECK_REGISTRY_DONT_PURGE_VOLATILES | CM_CHECK_REGISTRY_VALIDATE_HIVE);
+    Status = CmCheckRegistry(Hive, CM_CHECK_REGISTRY_DONT_PURGE_VOLATILES | CM_CHECK_REGISTRY_VALIDATE_HIVE |
+                                   CM_CHECK_REGISTRY_LIVE_HIVE);
     CmpReleaseHiveSecurityLock(&Hive->Hive, Acquired);
     return Status;
 }
