@@ -2341,6 +2341,19 @@ static DWORD wnet_use_connection( struct use_connection_context *ctxt )
                 first = ret;
                 first_provider = provider;
             }
+            /* A provider that reached the server and refused these credentials owns the name:
+             * the user name and password are not offered to the next provider */
+            if (ret == ERROR_ACCESS_DENIED || ret == ERROR_INVALID_PASSWORD || ret == ERROR_LOGON_FAILURE ||
+                ret == ERROR_SESSION_CREDENTIAL_CONFLICT || ret == ERROR_ACCOUNT_RESTRICTION ||
+                ret == ERROR_INVALID_LOGON_HOURS || ret == ERROR_INVALID_WORKSTATION ||
+                ret == ERROR_PASSWORD_EXPIRED || ret == ERROR_ACCOUNT_DISABLED ||
+                ret == ERROR_ACCOUNT_LOCKED_OUT || ret == ERROR_ACCOUNT_EXPIRED ||
+                ret == ERROR_PASSWORD_MUST_CHANGE || ret == ERROR_LOGON_TYPE_NOT_GRANTED)
+            {
+                first = ret;
+                first_provider = provider;
+                break;
+            }
 #endif
         }
 #ifdef __REACTOS__
