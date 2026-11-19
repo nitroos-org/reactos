@@ -1872,6 +1872,67 @@ Cleanup:
 
 #endif // _ADVAPI32_VISTA_
 
+/*
+ * A key or value name may hold a NUL (the native API counts names; a hive file
+ * can hold such names too). Read as a C string, the name is another key or
+ * value (or, empty, the key itself, which RegDeleteTreeW would then empty
+ * again and again until the stack overflows). These delete the one entry by
+ * its counted name.
+ */
+LSTATUS WINAPI RegDeleteTreeW(HKEY hKey, LPCWSTR lpszSubKey);
+
+static LONG
+RegpDeleteTreeCounted(HKEY hKey, LPCWSTR Name, DWORD Length)
+{
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    UNICODE_STRING SubKeyName;
+    HANDLE SubKeyHandle;
+    NTSTATUS Status;
+    LONG ret;
+
+    /* A name that begins with a NUL opens the parent itself (the parser takes
+       it for the end of the path): never recurse into that */
+    if (Length == 0 || Name[0] == UNICODE_NULL)
+        return ERROR_INVALID_NAME;
+    if (Length > MAXUSHORT / sizeof(WCHAR))
+        return ERROR_INVALID_PARAMETER;
+    SubKeyName.Buffer = (PWSTR)Name;
+    SubKeyName.Length = SubKeyName.MaximumLength = (USHORT)(Length * sizeof(WCHAR));
+    InitializeObjectAttributes(&ObjectAttributes,
+                               &SubKeyName,
+                               OBJ_CASE_INSENSITIVE,
+                               (HANDLE)hKey,
+                               NULL);
+    Status = NtOpenKey(&SubKeyHandle, KEY_READ | KEY_SET_VALUE | DELETE, &ObjectAttributes);
+    if (!NT_SUCCESS(Status))
+        return RtlNtStatusToDosError(Status);
+
+    /* Its subkeys and values, then the key */
+    ret = RegDeleteTreeW((HKEY)SubKeyHandle, NULL);
+    if (ret == ERROR_SUCCESS)
+    {
+        Status = NtDeleteKey(SubKeyHandle);
+        if (!NT_SUCCESS(Status))
+            ret = RtlNtStatusToDosError(Status);
+    }
+    NtClose(SubKeyHandle);
+    return ret;
+}
+
+static LONG
+RegpDeleteValueCounted(HKEY hKey, LPCWSTR Name, DWORD Length)
+{
+    UNICODE_STRING ValueName;
+    NTSTATUS Status;
+
+    if (Length > MAXUSHORT / sizeof(WCHAR))
+        return ERROR_INVALID_PARAMETER;
+    ValueName.Buffer = (PWSTR)Name;
+    ValueName.Length = ValueName.MaximumLength = (USHORT)(Length * sizeof(WCHAR));
+    Status = NtDeleteValueKey((HANDLE)hKey, &ValueName);
+    return NT_SUCCESS(Status) ? ERROR_SUCCESS : RtlNtStatusToDosError(Status);
+}
+
 /************************************************************************
  *  RegDeleteTreeW
  *
@@ -1944,7 +2005,10 @@ RegDeleteTreeW(HKEY hKey,
         if (RegEnumKeyExW(hSubKey, 0, lpszName, &dwSize, NULL,
                           NULL, NULL, NULL)) break;
 
-        ret = RegDeleteTreeW(hSubKey, lpszName);
+        if (wcslen(lpszName) != dwSize)
+            ret = RegpDeleteTreeCounted(hSubKey, lpszName, dwSize);
+        else
+            ret = RegDeleteTreeW(hSubKey, lpszName);
         if (ret) goto cleanup;
     }
 
@@ -1957,7 +2021,10 @@ RegDeleteTreeW(HKEY hKey,
             if (RegEnumValueW(KeyHandle, 0, lpszName, &dwSize,
                   NULL, NULL, NULL, NULL)) break;
 
-            ret = RegDeleteValueW(KeyHandle, lpszName);
+            if (wcslen(lpszName) != dwSize)
+                ret = RegpDeleteValueCounted(KeyHandle, lpszName, dwSize);
+            else
+                ret = RegDeleteValueW(KeyHandle, lpszName);
             if (ret) goto cleanup;
         }
 
