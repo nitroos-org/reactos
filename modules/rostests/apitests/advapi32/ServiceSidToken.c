@@ -398,7 +398,15 @@ StartWithRawPrivileges(SC_HANDLE hScm, PCSTR Name, DWORD Type, const VOID *Data,
         RegCloseKey(hKey);
     }
     if (!StartServiceA(hService, 0, NULL))
+    {
+        SERVICE_STATUS Status;
+
         Error = GetLastError();
+        /* the start never reached the service: the win32 exit code is 0, not ERROR_SERVICE_NEVER_STARTED (Windows Server 2022) */
+        ok(QueryServiceStatus(hService, &Status), "%s: QueryServiceStatus failed with %lu\n", Name, GetLastError());
+        ok(Status.dwWin32ExitCode == ERROR_SUCCESS, "%s: win32 exit code %lu after the failed start (error %lu), expected 0\n",
+           Name, Status.dwWin32ExitCode, Error);
+    }
     StopAndDelete(hService);
     DeleteFileA(File);
     return Error;
@@ -445,7 +453,17 @@ RunService(SC_HANDLE hScm, PCSTR Name, PCSTR Account, DWORD SidType, PCSTR Privi
     }
 
     if (!StartServiceA(hService, 0, NULL))
+    {
+        SERVICE_STATUS Status;
+
         Error = GetLastError();
+        if (Error == ERROR_INCOMPATIBLE_SERVICE_PRIVILEGE)
+        {
+            ok(QueryServiceStatus(hService, &Status), "%s: QueryServiceStatus failed with %lu\n", Name, GetLastError());
+            ok(Status.dwWin32ExitCode == ERROR_SUCCESS, "%s: win32 exit code %lu after the failed start, expected 0\n",
+               Name, Status.dwWin32ExitCode);
+        }
+    }
     else
     {
         ok(WaitState(hService, SERVICE_RUNNING), "%s: not running\n", Name);
@@ -604,6 +622,15 @@ START_TEST(ServiceSidToken)
                 DeleteService(hAcct);
                 CloseServiceHandle(hAcct);
             }
+        }
+        /* ".\\user" is a local account (Windows Server 2022: CreateService succeeds) */
+        hAcct = CreateServiceA(hScm, Name, Name, SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS, SERVICE_DEMAND_START,
+                               SERVICE_ERROR_IGNORE, "C:\\nothing.exe", NULL, NULL, NULL, ".\\Administrator", "x");
+        ok(hAcct != NULL, "CreateService(.\\Administrator) failed with %lu\n", GetLastError());
+        if (hAcct)
+        {
+            DeleteService(hAcct);
+            CloseServiceHandle(hAcct);
         }
         hAcct = CreateServiceA(hScm, Name, Name, SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS, SERVICE_DEMAND_START,
                                SERVICE_ERROR_IGNORE, "C:\\nothing.exe", NULL, NULL, NULL, NULL, NULL);

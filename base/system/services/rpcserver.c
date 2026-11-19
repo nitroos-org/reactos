@@ -263,6 +263,28 @@ ScmCheckServiceStartName(
     if (!_wcsnicmp(lpServiceStartName, L"NT SERVICE\\", 11))
         return ERROR_SUCCESS;
 
+    /* ".\\user" is a local account (Windows Server 2022 accepts it, like the computer name and a backslash), but the
+     * account lookup does not know the dot: use the name of this computer */
+    if (lpServiceStartName[0] == L'.' && lpServiceStartName[1] == L'\\')
+    {
+        WCHAR szFullName[MAX_COMPUTERNAME_LENGTH + 1 + 257];
+        DWORD dwNameSize = MAX_COMPUTERNAME_LENGTH + 1;
+
+        if (wcslen(lpServiceStartName + 2) <= 256 && GetComputerNameW(szFullName, &dwNameSize))
+        {
+            szFullName[dwNameSize] = L'\\';
+            wcscpy(szFullName + dwNameSize + 1, lpServiceStartName + 2);
+            lpServiceStartName = szFullName;
+            /* szFullName lives to the end of the function: the lookup below is the last use */
+            dwSidSize = sizeof(SidBuffer);
+            dwDomainSize = ARRAYSIZE(szDomain);
+            if (!LookupAccountNameW(NULL, lpServiceStartName, (PSID)SidBuffer, &dwSidSize, szDomain, &dwDomainSize, &Use) &&
+                GetLastError() == ERROR_NONE_MAPPED)
+                return ERROR_INVALID_SERVICE_ACCOUNT;
+            return ERROR_SUCCESS;
+        }
+    }
+
     dwSidSize = sizeof(SidBuffer);
     dwDomainSize = ARRAYSIZE(szDomain);
     if (!LookupAccountNameW(NULL, lpServiceStartName, (PSID)SidBuffer, &dwSidSize, szDomain, &dwDomainSize, &Use) &&
