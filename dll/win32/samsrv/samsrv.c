@@ -88,6 +88,7 @@ SamIConnect(IN PSAMPR_SERVER_NAME ServerName,
     if (NT_SUCCESS(Status))
     {
         ServerObject->Trusted = Trusted;
+        ServerObject->Internal = TRUE;
         *ServerHandle = (SAMPR_HANDLE)ServerObject;
     }
 

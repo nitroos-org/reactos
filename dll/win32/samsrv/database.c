@@ -280,7 +280,10 @@ SampCreateDbObject(IN PSAM_DB_OBJECT ParentObject,
     NewObject->ParentObject = ParentObject;
 
     if (ParentObject != NULL)
+    {
         NewObject->Trusted = ParentObject->Trusted;
+        NewObject->Internal = ParentObject->Internal;
+    }
 
     *DbObject = NewObject;
 
@@ -408,7 +411,10 @@ SampOpenDbObject(IN PSAM_DB_OBJECT ParentObject,
     NewObject->ParentObject = ParentObject;
 
     if (ParentObject != NULL)
+    {
         NewObject->Trusted = ParentObject->Trusted;
+        NewObject->Internal = ParentObject->Internal;
+    }
 
     *DbObject = NewObject;
 

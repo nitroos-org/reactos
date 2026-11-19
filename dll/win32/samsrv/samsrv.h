@@ -24,6 +24,8 @@
 #include <ndk/ketypes.h>
 #include <ndk/kefuncs.h>
 #include <ndk/obfuncs.h>
+#include <ndk/psfuncs.h>
+#include <ndk/sefuncs.h>
 #include <ndk/rtlfuncs.h>
 #include <ddk/ntsam.h>
 #include <sddl.h>
@@ -53,6 +55,7 @@ typedef struct _SAM_DB_OBJECT
     HANDLE MembersKeyHandle;  // only used by Aliases
     ULONG RelativeId;
     BOOLEAN Trusted;
+    BOOLEAN Internal;   // opened with SamIConnect by code inside lsass: there is no RPC client whose access could be checked
     struct _SAM_DB_OBJECT *ParentObject;
 } SAM_DB_OBJECT, *PSAM_DB_OBJECT;
 
