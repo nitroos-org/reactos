@@ -151,4 +151,4 @@ VOID FirmwareRequest(IN PVOID DeviceExtension, IN PSRB_TYPE Srb);
 
 extern VirtIOSystemOps VioScsiSystemOps;
 
-#endif ___HELPER_H___
+#endif // ___HELPER_H___

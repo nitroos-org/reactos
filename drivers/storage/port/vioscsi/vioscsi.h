@@ -431,4 +431,4 @@ typedef enum VIOSCSI_VPD_IDENTIFIER_TYPE
     VioscsiVpdIdentifierTypeFCTargetPortRelativeTargetPort = 0x94,
 } VIOSCSI_VPD_IDENTIFIER_TYPE, *PVIOSCSI_VPD_IDENTIFIER_TYPE;
 
-#endif ___VIOSCSI__H__
+#endif // ___VIOSCSI__H__
