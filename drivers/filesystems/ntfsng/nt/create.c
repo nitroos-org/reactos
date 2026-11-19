@@ -1095,6 +1095,14 @@ static NTSTATUS NgCreateLocked(PDEVICE_OBJECT DeviceObject, PIRP Irp, PFILE_NETW
         goto out;
     }
     FullLength = Full.Length;
+    /* One trailing backslash asks for a directory; an empty component, also the last one ("\\dir\\\\"), is not
+     * a name (FAT refuses it, and so does NTFS on Windows). */
+    if (Full.Length > 2 * sizeof(WCHAR) && Full.Buffer[Full.Length / sizeof(WCHAR) - 1] == L'\\' &&
+        Full.Buffer[Full.Length / sizeof(WCHAR) - 2] == L'\\')
+    {
+        Status = STATUS_OBJECT_NAME_INVALID;
+        goto out;
+    }
     while (Full.Length > sizeof(WCHAR) && Full.Buffer[Full.Length / sizeof(WCHAR) - 1] == L'\\')
     {
         Full.Length -= sizeof(WCHAR);
