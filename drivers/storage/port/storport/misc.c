@@ -526,4 +526,133 @@ GetGenericType(
     }
 }
 
+/**
+ * @brief StorPortRegistryRead: a value of the miniport's Parameters\Device key (Global) or
+ * Parameters\Device<port number> key. PASSIVE_LEVEL.
+ *
+ * On entry *BufferLength is the room in Buffer; on success it is the bytes stored; when the room
+ * is too small it is the room needed and the result is FALSE; any other failure sets it to 0.
+ * A REG_SZ or REG_EXPAND_SZ value is stored as an ANSI string, as the routine documents.
+ */
+BOOLEAN
+PortReadMiniportRegistryValue(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension,
+    _In_ PCSTR ValueName,
+    _In_ ULONG Global,
+    _In_ ULONG Type,
+    _Out_writes_bytes_to_opt_(*BufferLength, *BufferLength) PUCHAR Buffer,
+    _Inout_ PULONG BufferLength)
+{
+    WCHAR PathBuffer[200];
+    UNICODE_STRING Path, Name;
+    ANSI_STRING AnsiName;
+    OBJECT_ATTRIBUTES Attributes;
+    HANDLE Key = NULL;
+    PKEY_VALUE_PARTIAL_INFORMATION Info = NULL;
+    ULONG InfoLength = 0, Needed, Room = *BufferLength;
+    NTSTATUS Status;
+    BOOLEAN Result = FALSE;
+
+    *BufferLength = 0;
+
+    if (ValueName == NULL || Buffer == NULL || KeGetCurrentIrql() != PASSIVE_LEVEL)
+        return FALSE;
+
+    RtlZeroMemory(PathBuffer, sizeof(PathBuffer));
+    RtlInitEmptyUnicodeString(&Path, PathBuffer, sizeof(PathBuffer) - sizeof(WCHAR));
+    Status = RtlAppendUnicodeToString(&Path, L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\");
+    if (NT_SUCCESS(Status))
+        Status = RtlAppendUnicodeStringToString(&Path,
+                                                &FdoExtension->Device->DriverObject->DriverExtension->ServiceKeyName);
+    if (NT_SUCCESS(Status))
+        Status = RtlAppendUnicodeToString(&Path, L"\\Parameters\\Device");
+    if (NT_SUCCESS(Status) && !Global)
+    {
+        UNICODE_STRING Number;
+        WCHAR NumberBuffer[12];
+
+        RtlInitEmptyUnicodeString(&Number, NumberBuffer, sizeof(NumberBuffer));
+        /* The adapter gets its port number once it has started; the miniport reads while it starts */
+        ULONG Port = (FdoExtension->ScsiPortNumber >= 0) ? (ULONG)FdoExtension->ScsiPortNumber :
+                                                           IoGetConfigurationInformation()->ScsiPortCount;
+
+        Status = RtlIntegerToUnicodeString(Port, 10, &Number);
+        if (NT_SUCCESS(Status))
+            Status = RtlAppendUnicodeStringToString(&Path, &Number);
+    }
+    if (!NT_SUCCESS(Status))
+        return FALSE;
+
+    RtlInitAnsiString(&AnsiName, ValueName);
+    Status = RtlAnsiStringToUnicodeString(&Name, &AnsiName, TRUE);
+    if (!NT_SUCCESS(Status))
+        return FALSE;
+
+    InitializeObjectAttributes(&Attributes, &Path, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+    Status = ZwOpenKey(&Key, KEY_QUERY_VALUE, &Attributes);
+    if (!NT_SUCCESS(Status))
+        goto Done;
+
+    Status = ZwQueryValueKey(Key, &Name, KeyValuePartialInformation, NULL, 0, &InfoLength);
+    if (Status != STATUS_BUFFER_TOO_SMALL && Status != STATUS_BUFFER_OVERFLOW)
+        goto Done;
+
+    Info = ExAllocatePoolWithTag(PagedPool, InfoLength, 'gRtS');
+    if (Info == NULL)
+        goto Done;
+
+    Status = ZwQueryValueKey(Key, &Name, KeyValuePartialInformation, Info, InfoLength, &InfoLength);
+    if (!NT_SUCCESS(Status) || Info->Type != Type)
+        goto Done;
+
+    if (Type == REG_SZ || Type == REG_EXPAND_SZ || Type == REG_MULTI_SZ)
+    {
+        /* Stored as ANSI; the terminator is part of what is counted */
+        Needed = Info->DataLength / sizeof(WCHAR);
+        if (Needed > Room)
+        {
+            *BufferLength = Needed;
+            goto Done;
+        }
+
+        {
+            UNICODE_STRING Wide;
+            ANSI_STRING Narrow;
+
+            Wide.Buffer = (PWCH)Info->Data;
+            Wide.Length = Wide.MaximumLength = (USHORT)Info->DataLength;
+            Narrow.Buffer = (PCHAR)Buffer;
+            Narrow.Length = 0;
+            Narrow.MaximumLength = (USHORT)min(Room, MAXUSHORT);
+
+            Status = RtlUnicodeStringToAnsiString(&Narrow, &Wide, FALSE);
+            if (!NT_SUCCESS(Status))
+                goto Done;
+            Needed = Narrow.Length;
+        }
+    }
+    else
+    {
+        Needed = Info->DataLength;
+        if (Needed > Room)
+        {
+            *BufferLength = Needed;
+            goto Done;
+        }
+
+        RtlCopyMemory(Buffer, Info->Data, Needed);
+    }
+
+    *BufferLength = Needed;
+    Result = TRUE;
+
+Done:
+    if (Info != NULL)
+        ExFreePoolWithTag(Info, 'gRtS');
+    if (Key != NULL)
+        ZwClose(Key);
+    RtlFreeUnicodeString(&Name);
+    return Result;
+}
+
 /* EOF */

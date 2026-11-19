@@ -1534,7 +1534,6 @@ FdoFindLun(
  *
  * @return The IRQL to hand back to PortFdoReleaseInterruptLocks.
  */
-static
 KIRQL
 PortFdoAcquireInterruptLocks(
     _In_ PFDO_DEVICE_EXTENSION FdoExtension)
@@ -1565,7 +1564,6 @@ PortFdoAcquireInterruptLocks(
 }
 
 
-static
 VOID
 PortFdoReleaseInterruptLocks(
     _In_ PFDO_DEVICE_EXTENSION FdoExtension,
@@ -1692,6 +1690,23 @@ PortFdoBusChangeDpc(
     DPRINT1("Bus change, invalidating bus relations\n");
 
     IoInvalidateDeviceRelations(FdoExtension->PhysicalDevice, BusRelations);
+
+    /* StorPortStateChangeDetected: the scan is requested, the miniport may report the next change */
+    if (InterlockedCompareExchange(&FdoExtension->StateChangePending, 0, 0) != 0)
+    {
+        PHW_STATE_CHANGE Routine = FdoExtension->StateChangeRoutine;
+        PVOID Context = FdoExtension->StateChangeContext;
+
+        InterlockedExchange(&FdoExtension->StateChangePending, 0);
+        if (Routine != NULL)
+        {
+            Routine(FdoExtension->Miniport.MiniportExtension->HwDeviceExtension,
+                    Context,
+                    STOR_ADDRESS_TYPE_BTL8,
+                    &FdoExtension->StateChangeAddress,
+                    STOR_STATUS_SUCCESS);
+        }
+    }
 }
 
 
@@ -1767,6 +1782,12 @@ PortFdoPnp(
             MiniportFreeAdapterResources(&DeviceExtension->Miniport);
             PortFlushStarvedRequests(DeviceExtension);
             PortFreeRequestReserve(DeviceExtension);
+            if (DeviceExtension->RegistryBuffer != NULL)
+            {
+                /* A miniport that never freed its registry buffer */
+                ExFreePoolWithTag(DeviceExtension->RegistryBuffer, TAG_REGISTRY_BUFFER);
+                DeviceExtension->RegistryBuffer = NULL;
+            }
             if (DeviceExtension->RequestReferenceLookasideInitialized)
             {
                 ExDeleteNPagedLookasideList(&DeviceExtension->RequestReferenceLookaside);

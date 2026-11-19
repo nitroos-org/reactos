@@ -286,7 +286,9 @@ PortAddDevice(
     DeviceExtension->FlowControl.RemainingBusyRequests = 0;
     DeviceExtension->FlowControl.RemainingPauseTime = 0;
     DeviceExtension->FlowControl.OutstandingRequestCount = 0;
+    DeviceExtension->FlowControl.KickNeeded = 0;
     InitializeListHead(&DeviceExtension->FlowControl.FdoBlockedRequestsListHead);
+    KeInitializeDpc(&DeviceExtension->FlowKickDpc, PortFdoFlowKickDpc, DeviceExtension);
 
     /* Attach the FDO to the device stack */
     Status = IoAttachDeviceToDeviceStackSafe(Fdo,
@@ -539,7 +541,7 @@ DriverEntry(
 
 
 /*
- * @unimplemented
+ * @implemented
  */
 STORPORT_API
 PUCHAR
@@ -548,14 +550,34 @@ StorPortAllocateRegistryBuffer(
     _In_ PVOID HwDeviceExtension,
     _In_ PULONG Length)
 {
-    DPRINT1("StorPortAllocateRegistryBuffer()\n");
-    UNIMPLEMENTED;
-    return NULL;
+    PFDO_DEVICE_EXTENSION FdoExtension;
+    PVOID Buffer;
+
+    DPRINT("StorPortAllocateRegistryBuffer()\n");
+
+    if (HwDeviceExtension == NULL || Length == NULL || *Length == 0)
+        return NULL;
+
+    FdoExtension = StorpGetMiniportFdo(HwDeviceExtension);
+
+    Buffer = ExAllocatePoolWithTag(NonPagedPool, *Length, TAG_REGISTRY_BUFFER);
+    if (Buffer == NULL)
+        return NULL;
+    RtlZeroMemory(Buffer, *Length);
+
+    /* One buffer at a time for each adapter */
+    if (InterlockedCompareExchangePointer(&FdoExtension->RegistryBuffer, Buffer, NULL) != NULL)
+    {
+        ExFreePoolWithTag(Buffer, TAG_REGISTRY_BUFFER);
+        return NULL;
+    }
+
+    return Buffer;
 }
 
 
 /*
- * @unimplemented
+ * @implemented
  */
 STORPORT_API
 BOOLEAN
@@ -564,9 +586,29 @@ StorPortBusy(
     _In_ PVOID HwDeviceExtension,
     _In_ ULONG RequestsToComplete)
 {
-    DPRINT1("StorPortBuzy()\n");
-    UNIMPLEMENTED;
-    return FALSE;
+    PFDO_DEVICE_EXTENSION FdoExtension;
+
+    DPRINT("StorPortBusy(%p %lu)\n", HwDeviceExtension, RequestsToComplete);
+
+    if (HwDeviceExtension == NULL)
+        return FALSE;
+
+    FdoExtension = StorpGetMiniportFdo(HwDeviceExtension);
+
+    /*
+     * Not under the flow control lock: a miniport calls this from HwStartIo, which Storport can
+     * run with that lock held. The scheduler reads the flags under the lock; a request that slips
+     * past a flag being set is harmless, one that is held is issued when the flag clears.
+     * Nothing outstanding means nothing to wait for.
+     */
+    if (RequestsToComplete == 0 || FdoExtension->FlowControl.OutstandingRequestCount == 0)
+        return TRUE;
+
+    FdoExtension->FlowControl.RemainingBusyRequests = RequestsToComplete;
+    KeMemoryBarrier();
+    FdoExtension->FlowControl.IsBusy = TRUE;
+
+    return TRUE;
 }
 
 
@@ -728,8 +770,8 @@ StorPortExtendedFunction(
     PVOID* AllocatedPoolPointer;
     PVOID PoolPointer;
 
-    DPRINT1("StorPortExtendedFunction(%d %p ...)\n",
-            FunctionCode, HwDeviceExtension);
+    DPRINT("StorPortExtendedFunction(%d %p ...)\n",
+           FunctionCode, HwDeviceExtension);
 
     va_start(va, HwDeviceExtension);
 
@@ -1015,6 +1057,154 @@ StorPortExtendedFunction(
             break;
         }
 
+        case ExtFunctionQueryPerformanceCounter:
+        {
+            PLARGE_INTEGER PerformanceFrequency = va_arg(va, PLARGE_INTEGER);
+            PLARGE_INTEGER PerformanceCounter = va_arg(va, PLARGE_INTEGER);
+
+            if (PerformanceCounter == NULL)
+            {
+                Status = STOR_STATUS_INVALID_PARAMETER;
+                break;
+            }
+
+            *PerformanceCounter = KeQueryPerformanceCounter(PerformanceFrequency);
+            Status = STOR_STATUS_SUCCESS;
+            break;
+        }
+
+        case ExtFunctionGetStartIoPerformanceParameters:
+        {
+            PSCSI_REQUEST_BLOCK Srb = va_arg(va, PSCSI_REQUEST_BLOCK);
+            PSTARTIO_PERFORMANCE_PARAMETERS Parameters = va_arg(va, PSTARTIO_PERFORMANCE_PARAMETERS);
+
+            if (HwDeviceExtension == NULL || Srb == NULL || Parameters == NULL ||
+                Parameters->Size < sizeof(STARTIO_PERFORMANCE_PARAMETERS))
+            {
+                Status = STOR_STATUS_INVALID_PARAMETER;
+                break;
+            }
+
+            /* No completion steering: every request is on the first channel and message */
+            Parameters->Version = STOR_PERF_VERSION;
+            Parameters->MessageNumber = 0;
+            Parameters->ChannelNumber = 0;
+            Status = STOR_STATUS_SUCCESS;
+            break;
+        }
+
+        case ExtFunctionLogSystemEvent:
+        {
+            PSTOR_LOG_EVENT_DETAILS LogDetails = va_arg(va, PSTOR_LOG_EVENT_DETAILS);
+            PULONG MaximumSize = va_arg(va, PULONG);
+
+            UNREFERENCED_PARAMETER(MaximumSize);
+
+            if (HwDeviceExtension == NULL || LogDetails == NULL)
+            {
+                Status = STOR_STATUS_INVALID_PARAMETER;
+                break;
+            }
+
+            if (KeGetCurrentIrql() > DISPATCH_LEVEL)
+            {
+                Status = STOR_STATUS_INVALID_IRQL;
+                break;
+            }
+
+            /* Only the three high bytes of the revision are compared */
+            if ((LogDetails->InterfaceRevision >> 8) != (STOR_CURRENT_LOG_INTERFACE_REVISION >> 8))
+            {
+                LogDetails->InterfaceRevision = STOR_CURRENT_LOG_INTERFACE_REVISION;
+                Status = STOR_STATUS_UNSUPPORTED_VERSION;
+                break;
+            }
+
+            /* There is no system event log entry yet: the code is visible on the debug port only */
+            DPRINT("StorPortLogSystemEvent: %u:%u:%u code 0x%lx\n",
+                   LogDetails->PathId, LogDetails->TargetId, LogDetails->LunId, LogDetails->ErrorCode);
+            Status = STOR_STATUS_SUCCESS;
+            break;
+        }
+
+        case ExtFunctionSetUnitAttributes:
+        {
+            PSTOR_ADDRESS Address = va_arg(va, PSTOR_ADDRESS);
+            STOR_UNIT_ATTRIBUTES Attributes = va_arg(va, STOR_UNIT_ATTRIBUTES);
+            PSTOR_ADDR_BTL8 Btl8 = (PSTOR_ADDR_BTL8)Address;
+            PPDO_DEVICE_EXTENSION PdoExtension;
+
+            if (HwDeviceExtension == NULL || Address == NULL ||
+                Address->Type != STOR_ADDRESS_TYPE_BTL8 ||
+                Address->AddressLength != STOR_ADDR_BTL8_ADDRESS_LENGTH ||
+                Attributes.Reserved != 0)
+            {
+                Status = STOR_STATUS_INVALID_PARAMETER;
+                break;
+            }
+
+            PdoExtension = FdoFindLunAboveDispatch(StorpGetMiniportFdo(HwDeviceExtension),
+                                                   Btl8->Path, Btl8->Target, Btl8->Lun);
+            if (PdoExtension == NULL)
+            {
+                Status = STOR_STATUS_INVALID_PARAMETER;
+                break;
+            }
+
+            PdoExtension->UnitAttributes = Attributes;
+            Status = STOR_STATUS_SUCCESS;
+            break;
+        }
+
+        case ExtFunctionAcquireMSISpinLock:
+        {
+            ULONG MessageId = va_arg(va, ULONG);
+            PULONG OldIrql = va_arg(va, PULONG);
+            PFDO_DEVICE_EXTENSION FdoExtension;
+
+            if (HwDeviceExtension == NULL || OldIrql == NULL)
+            {
+                Status = STOR_STATUS_INVALID_PARAMETER;
+                break;
+            }
+
+            FdoExtension = StorpGetMiniportFdo(HwDeviceExtension);
+            if (!FdoExtension->MessageInterrupts || MessageId >= FdoExtension->MessageInfo->MessageCount)
+            {
+                Status = STOR_STATUS_INVALID_PARAMETER;
+                break;
+            }
+
+            *OldIrql = KeAcquireInterruptSpinLock(FdoExtension->MessageInfo->MessageInfo[MessageId].InterruptObject);
+            Status = STOR_STATUS_SUCCESS;
+            break;
+        }
+
+        case ExtFunctionReleaseMSISpinLock:
+        {
+            ULONG MessageId = va_arg(va, ULONG);
+            ULONG OldIrql = va_arg(va, ULONG);
+            PFDO_DEVICE_EXTENSION FdoExtension;
+
+            if (HwDeviceExtension == NULL)
+            {
+                Status = STOR_STATUS_INVALID_PARAMETER;
+                break;
+            }
+
+            FdoExtension = StorpGetMiniportFdo(HwDeviceExtension);
+            if (!FdoExtension->MessageInterrupts || MessageId >= FdoExtension->MessageInfo->MessageCount)
+            {
+                Status = STOR_STATUS_INVALID_PARAMETER;
+                break;
+            }
+
+            KeReleaseInterruptSpinLock(FdoExtension->MessageInfo->MessageInfo[MessageId].InterruptObject,
+                                       (KIRQL)OldIrql);
+            Status = STOR_STATUS_SUCCESS;
+            break;
+        }
+
         default:
         {
             UNIMPLEMENTED;
@@ -1044,7 +1234,7 @@ StorPortFreeDeviceBase(
 
 
 /*
- * @unimplemented
+ * @implemented
  */
 STORPORT_API
 VOID
@@ -1053,8 +1243,18 @@ StorPortFreeRegistryBuffer(
     _In_ PVOID HwDeviceExtension,
     _In_ PUCHAR Buffer)
 {
-    DPRINT1("StorPortFreeRegistryBuffer()\n");
-    UNIMPLEMENTED;
+    PFDO_DEVICE_EXTENSION FdoExtension;
+
+    DPRINT("StorPortFreeRegistryBuffer()\n");
+
+    if (HwDeviceExtension == NULL || Buffer == NULL)
+        return;
+
+    FdoExtension = StorpGetMiniportFdo(HwDeviceExtension);
+
+    /* Only the buffer this adapter holds is freed */
+    if (InterlockedCompareExchangePointer(&FdoExtension->RegistryBuffer, NULL, Buffer) == Buffer)
+        ExFreePoolWithTag(Buffer, TAG_REGISTRY_BUFFER);
 }
 
 
@@ -1658,6 +1858,52 @@ StorPortNotification(
                 KeInsertQueueDpc(&FdoExtension->BusChangeDpc, NULL, NULL);
             break;
 
+        case StateChangeDetectedCall:
+        {
+            ULONG ChangedEntity = va_arg(ap, ULONG);
+            PSTOR_ADDRESS Address = va_arg(ap, PSTOR_ADDRESS);
+            ULONG Attributes = va_arg(ap, ULONG);
+            PHW_STATE_CHANGE StateChangeRoutine = va_arg(ap, PHW_STATE_CHANGE);
+            PVOID StateChangeContext = va_arg(ap, PVOID);
+            PULONG StateChangeStatus = va_arg(ap, PULONG);
+            ULONG Result;
+
+            UNREFERENCED_PARAMETER(Attributes);
+
+            if (FdoExtension == NULL ||
+                ChangedEntity == 0 ||
+                (ChangedEntity & ~(STATE_CHANGE_LUN | STATE_CHANGE_TARGET | STATE_CHANGE_BUS)) != 0 ||
+                (ChangedEntity != STATE_CHANGE_BUS &&
+                 (Address == NULL ||
+                  Address->Type != STOR_ADDRESS_TYPE_BTL8 ||
+                  Address->AddressLength != STOR_ADDR_BTL8_ADDRESS_LENGTH)))
+            {
+                Result = STOR_STATUS_INVALID_PARAMETER;
+            }
+            else if (InterlockedCompareExchange(&FdoExtension->StateChangePending, 1, 0) != 0)
+            {
+                /* One state change at a time, the next one after the callback */
+                Result = STOR_STATUS_UNSUCCESSFUL;
+            }
+            else
+            {
+                RtlZeroMemory(&FdoExtension->StateChangeAddress, sizeof(FdoExtension->StateChangeAddress));
+                if (Address != NULL && Address->Type == STOR_ADDRESS_TYPE_BTL8)
+                    RtlCopyMemory(&FdoExtension->StateChangeAddress, Address, sizeof(STOR_ADDR_BTL8));
+                FdoExtension->StateChangeRoutine = StateChangeRoutine;
+                FdoExtension->StateChangeContext = StateChangeContext;
+
+                /* The whole bus is scanned again whatever the entity: the same path as BusChangeDetected */
+                if (FdoExtension->PhysicalDevice != NULL)
+                    KeInsertQueueDpc(&FdoExtension->BusChangeDpc, NULL, NULL);
+                Result = STOR_STATUS_SUCCESS;
+            }
+
+            if (StateChangeStatus != NULL)
+                *StateChangeStatus = Result;
+            break;
+        }
+
         case GetExtendedFunctionTable:
             DPRINT1("GetExtendedFunctionTable\n");
             ppExtendedFunctions = (PSTORPORT_EXTENDED_FUNCTIONS*)va_arg(ap, PSTORPORT_EXTENDED_FUNCTIONS*);
@@ -1773,7 +2019,7 @@ StorPortNotification(
 
 
 /*
- * @unimplemented
+ * @implemented
  */
 STORPORT_API
 BOOLEAN
@@ -1782,9 +2028,22 @@ StorPortPause(
     _In_ PVOID HwDeviceExtension,
     _In_ ULONG TimeOut)
 {
-    DPRINT1("StorPortPause()\n");
-    UNIMPLEMENTED;
-    return FALSE;
+    PFDO_DEVICE_EXTENSION FdoExtension;
+
+    DPRINT("StorPortPause(%p %lu)\n", HwDeviceExtension, TimeOut);
+
+    if (HwDeviceExtension == NULL)
+        return FALSE;
+
+    FdoExtension = StorpGetMiniportFdo(HwDeviceExtension);
+
+    /* TimeOut is in seconds; the one second timer of the adapter counts it down, and its first tick comes
+       less than a second from now, so one more tick makes the pause last at least TimeOut. 0 = until resumed */
+    FdoExtension->FlowControl.RemainingPauseTime = (TimeOut != 0) ? TimeOut + 1 : 0;
+    KeMemoryBarrier();
+    FdoExtension->FlowControl.IsPaused = TRUE;
+
+    return TRUE;
 }
 
 
@@ -1827,7 +2086,7 @@ StorPortQuerySystemTime(
 
 
 /*
- * @unimplemented
+ * @implemented
  */
 STORPORT_API
 BOOLEAN
@@ -1835,14 +2094,26 @@ NTAPI
 StorPortReady(
     _In_ PVOID HwDeviceExtension)
 {
-    DPRINT1("StorPortReady()\n");
-    UNIMPLEMENTED;
-    return FALSE;
+    PFDO_DEVICE_EXTENSION FdoExtension;
+
+    DPRINT("StorPortReady(%p)\n", HwDeviceExtension);
+
+    if (HwDeviceExtension == NULL)
+        return FALSE;
+
+    FdoExtension = StorpGetMiniportFdo(HwDeviceExtension);
+
+    FdoExtension->FlowControl.IsBusy = FALSE;
+    FdoExtension->FlowControl.RemainingBusyRequests = 0;
+    InterlockedExchange(&FdoExtension->FlowControl.KickNeeded, 1);
+    KeInsertQueueDpc(&FdoExtension->FlowKickDpc, NULL, NULL);
+
+    return TRUE;
 }
 
 
 /*
- * @unimplemented
+ * @implemented
  */
 STORPORT_API
 BOOLEAN
@@ -1855,9 +2126,17 @@ StorPortRegistryRead(
     _In_ PUCHAR Buffer,
     _In_ PULONG BufferLength)
 {
-    DPRINT1("StorPortRegistryRead()\n");
-    UNIMPLEMENTED;
-    return FALSE;
+    DPRINT("StorPortRegistryRead()\n");
+
+    if (HwDeviceExtension == NULL || BufferLength == NULL)
+        return FALSE;
+
+    return PortReadMiniportRegistryValue(StorpGetMiniportFdo(HwDeviceExtension),
+                                         (PCSTR)ValueName,
+                                         Global,
+                                         Type,
+                                         Buffer,
+                                         BufferLength);
 }
 
 
@@ -1882,7 +2161,7 @@ StorPortRegistryWrite(
 
 
 /*
- * @unimplemented
+ * @implemented
  */
 STORPORT_API
 BOOLEAN
@@ -1890,9 +2169,23 @@ NTAPI
 StorPortResume(
     _In_ PVOID HwDeviceExtension)
 {
-    DPRINT1("StorPortResume()\n");
-    UNIMPLEMENTED;
-    return FALSE;
+    PFDO_DEVICE_EXTENSION FdoExtension;
+
+    DPRINT("StorPortResume(%p)\n", HwDeviceExtension);
+
+    if (HwDeviceExtension == NULL)
+        return FALSE;
+
+    FdoExtension = StorpGetMiniportFdo(HwDeviceExtension);
+
+    FdoExtension->FlowControl.IsPaused = FALSE;
+    FdoExtension->FlowControl.RemainingPauseTime = 0;
+    InterlockedExchange(&FdoExtension->FlowControl.KickNeeded, 1);
+
+    /* May be called from an interrupt routine or with the flow control lock held: issue from a DPC */
+    KeInsertQueueDpc(&FdoExtension->FlowKickDpc, NULL, NULL);
+
+    return TRUE;
 }
 
 
@@ -2008,18 +2301,42 @@ StorPortStallExecution(
 
 
 /*
- * @unimplemented
+ * @implemented
  */
 STORPORT_API
-VOID
+BOOLEAN
 NTAPI
 StorPortSynchronizeAccess(
     _In_ PVOID HwDeviceExtension,
     _In_ PSTOR_SYNCHRONIZED_ACCESS SynchronizedAccessRoutine,
     _In_opt_ PVOID Context)
 {
-    DPRINT1("StorPortSynchronizeAccess()\n");
-    UNIMPLEMENTED;
+    PFDO_DEVICE_EXTENSION FdoExtension;
+    KIRQL OldIrql;
+    BOOLEAN Result;
+
+    DPRINT("StorPortSynchronizeAccess()\n");
+
+    if (HwDeviceExtension == NULL || SynchronizedAccessRoutine == NULL)
+        return FALSE;
+
+    FdoExtension = StorpGetMiniportFdo(HwDeviceExtension);
+
+    if (FdoExtension->Interrupt == NULL)
+    {
+        /* No interrupt (a virtual miniport): nothing to exclude, keep the routine at DISPATCH_LEVEL */
+        KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
+        Result = SynchronizedAccessRoutine(HwDeviceExtension, Context);
+        KeLowerIrql(OldIrql);
+        return Result;
+    }
+
+    /* Every interrupt service routine of the adapter is held off, one lock for each message */
+    OldIrql = PortFdoAcquireInterruptLocks(FdoExtension);
+    Result = SynchronizedAccessRoutine(HwDeviceExtension, Context);
+    PortFdoReleaseInterruptLocks(FdoExtension, OldIrql);
+
+    return Result;
 }
 
 

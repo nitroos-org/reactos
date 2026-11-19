@@ -442,6 +442,29 @@ PortTimeoutWorker(
 }
 
 
+/**
+ * @brief One second of a StorPortPause time-out has passed. DISPATCH_LEVEL.
+ */
+VOID
+PortTimeoutPauseTick(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension)
+{
+    LONG Remaining;
+
+    if (!FdoExtension->FlowControl.IsPaused || FdoExtension->FlowControl.RemainingPauseTime == 0)
+        return;
+
+    Remaining = InterlockedDecrement((PLONG)&FdoExtension->FlowControl.RemainingPauseTime);
+    if (Remaining <= 0)
+    {
+        FdoExtension->FlowControl.RemainingPauseTime = 0;
+        FdoExtension->FlowControl.IsPaused = FALSE;
+        InterlockedExchange(&FdoExtension->FlowControl.KickNeeded, 1);
+        KeInsertQueueDpc(&FdoExtension->FlowKickDpc, NULL, NULL);
+    }
+}
+
+
 static
 VOID
 NTAPI
@@ -459,6 +482,8 @@ PortTimeoutDpc(
     UNREFERENCED_PARAMETER(Dpc);
     UNREFERENCED_PARAMETER(SystemArgument1);
     UNREFERENCED_PARAMETER(SystemArgument2);
+
+    PortTimeoutPauseTick(FdoExtension);
 
     KeAcquireSpinLockAtDpcLevel(&FdoExtension->TimeoutLock);
     for (Entry = FdoExtension->IssuedRequestsListHead.Flink;
@@ -523,6 +548,7 @@ PortStopTimeouts(
     KIRQL OldIrql;
 
     KeCancelTimer(&FdoExtension->TimeoutTimer);
+    KeRemoveQueueDpc(&FdoExtension->FlowKickDpc);
 
     /* The miniport's timers (RequestTimerCall, StorPortRequestTimer) must not fire into an
        adapter that is going away either */
