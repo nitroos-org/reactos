@@ -45,6 +45,11 @@ WINE_DEFAULT_DEBUG_CHANNEL(ntlanman);
 #define NOT_CONNECTED 2250                  /* ERROR_NOT_CONNECTED */
 #define OPEN_FILES 2401                     /* ERROR_OPEN_FILES */
 
+/* Longest DOS device target of a drive letter of ours (characters with the NUL): every function
+ * that reads a drive's target back (cancel, NPGetConnection, NPGetUser, NPGetUniversalName) has
+ * room for it, and NPAddConnection3 makes no longer one (a drive it could not cancel) */
+#define NP_MAX_TARGET 1024
+
 /* Helpers *******************************************************************/
 
 /*
@@ -248,7 +253,7 @@ DriveRemote(WCHAR Letter, LPWSTR Remote, DWORD RemoteChars, DWORD *Needed, LPWST
 {
     static const WCHAR Prefix[] = SMBCONN_REDIRECTOR_PREFIX L"\\;";
     WCHAR Drive[3] = { Letter, L':', 0 };
-    WCHAR Buffer[MAX_PATH + 64];
+    WCHAR Buffer[NP_MAX_TARGET];
     PWCHAR p;
     SIZE_T n;
 
@@ -492,6 +497,12 @@ NPAddConnection3(HWND hwndOwner,
                    (int)(RemoteChars - 1), Remote + 1);
     else
         _snwprintf(Name, i - 1, L"%s%.*s", Device, (int)(RemoteChars - 1), Remote + 1);
+    if (Letter != 0 && wcslen(Name) >= NP_MAX_TARGET)
+    {
+        /* A drive whose target could not be read back could not be cancelled either */
+        HeapFree(GetProcessHeap(), 0, Name);
+        return ERROR_BAD_NETPATH;
+    }
     RtlInitUnicodeString(&NtName, Name);
 
     if (Explicit)
@@ -567,7 +578,7 @@ NPCancelConnection(LPWSTR lpName,
                    BOOL fForce)
 {
     PSMBCONN_ENUM_OUTPUT Uses;
-    WCHAR Letter, Target[MAX_PATH + 64], Remote[4];
+    WCHAR Letter, Target[NP_MAX_TARGET], Remote[4];
     SIZE_T RemoteChars;
     DWORD Error, Needed, i, Found = 0;
     NTSTATUS Status;
@@ -789,7 +800,7 @@ NPGetUser(LPWSTR lpName,
           LPWSTR lpUserName,
           LPDWORD lpBufferSize)
 {
-    WCHAR Own[UNLEN + DNLEN + 260], Remote[MAX_PATH + 64];
+    WCHAR Own[UNLEN + DNLEN + 260], Remote[NP_MAX_TARGET];
     PSMBCONN_ENUM_OUTPUT Uses;
     LPCWSTR Which = NULL;
     SIZE_T Chars = 0, RemoteChars;
@@ -859,7 +870,7 @@ NPGetUniversalName(LPCWSTR lpLocalPath,
                    LPVOID lpBuffer,
                    LPDWORD lpBufferSize)
 {
-    WCHAR Remote[MAX_PATH + 64];
+    WCHAR Remote[NP_MAX_TARGET];
     LPCWSTR Rest;
     DWORD Needed, Error, Size, RemoteChars, RestChars;
     WCHAR Letter;
