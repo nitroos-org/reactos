@@ -1897,9 +1897,8 @@ RhelScsiGetModeSense(IN PVOID DeviceExtension, IN OUT PSRB_TYPE Srb)
     SrbStatus = SRB_STATUS_INVALID_REQUEST;
 
     RhelDbgPrint(TRACE_LEVEL_INFORMATION,
-                 " MODE SENSE page = 0x%x, subpage = 0x%x, Pc = %d\n",
+                 " MODE SENSE page = 0x%x, Pc = %d\n",
                  cdb->MODE_SENSE.PageCode,
-                 cdb->MODE_SENSE.SubPageCode,
                  cdb->MODE_SENSE.Pc);
 
     /* We don't support saved values */
