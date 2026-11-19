@@ -279,12 +279,14 @@ ScConnectControlPipe(HANDLE *hPipe)
      */
     for (dwRetry = 0; ; dwRetry++)
     {
+        /* The service controller never impersonates the service: a pipe server that is not the service
+           controller (the name is predictable) must not get the service's account either */
         *hPipe = CreateFileW(NtControlPipeName,
                              GENERIC_READ | GENERIC_WRITE,
                              FILE_SHARE_READ | FILE_SHARE_WRITE,
                              NULL,
                              OPEN_EXISTING,
-                             FILE_ATTRIBUTE_NORMAL,
+                             FILE_ATTRIBUTE_NORMAL | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
                              NULL);
         if (*hPipe != INVALID_HANDLE_VALUE)
             break;
