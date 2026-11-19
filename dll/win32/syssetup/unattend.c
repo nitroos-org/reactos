@@ -412,7 +412,9 @@ UnattendScrubSecrets(VOID)
             for (k = 0; k < _countof(SecretKeys); k++)
             {
                 size_t kl = strlen(SecretKeys[k].Key), q;
-                if (_stricmp(szSection, SecretKeys[k].Section) || !MatchAt(pb + p, eol - p, w, SecretKeys[k].Key))
+                /* Whatever section it is in: a header such as "[ UserAccount ]" is no section for the reader
+                 * but the text is on the disk all the same */
+                if (!MatchAt(pb + p, eol - p, w, SecretKeys[k].Key))
                     continue;
                 q = p + kl * w;
                 while (q < eol && (pb[q] == ' ' || pb[q] == '\t'))
