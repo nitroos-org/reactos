@@ -572,10 +572,13 @@ static NTSTATUS NgPassToStorage(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     PNG_VCB Vcb = DeviceObject->DeviceExtension;
     if (!NgIsVolumeOpen(Irp))
     {
-        Irp->IoStatus.Status = STATUS_INVALID_DEVICE_REQUEST;
+        /* A device control on a file or directory handle is a bad parameter, not an unknown request: a program
+         * that asks for the volume of such a handle (GetVolumeNameForVolumeMountPoint on a folder that is no
+         * mount point) is expected to see ERROR_INVALID_PARAMETER (kernel32 volume test). */
+        Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
         Irp->IoStatus.Information = 0;
         IoCompleteRequest(Irp, IO_NO_INCREMENT);
-        return STATUS_INVALID_DEVICE_REQUEST;
+        return STATUS_INVALID_PARAMETER;
     }
     IoSkipCurrentIrpStackLocation(Irp);
     return IoCallDriver(Vcb->StorageDevice, Irp);

@@ -172,10 +172,18 @@ IsThisARootDirectory(IN HANDLE VolumeHandle,
         }
 
         /* Check we properly end with a \ */
-        if (FileNameInfo.FileName[FileNameInfo.FileNameLength / sizeof(WCHAR) - 1] != L'\\')
+        if (FileNameInfo.FileNameLength < sizeof(WCHAR) ||
+            FileNameInfo.FileName[FileNameInfo.FileNameLength / sizeof(WCHAR) - 1] != L'\\')
         {
             return FALSE;
         }
+
+        /*
+         * The file system names the open file "\": it is the root of its volume. That holds for a drive letter
+         * and for a folder that has a volume mounted on it (a mount point, or a symbolic link that leads to
+         * one), whose NT name is no symbolic link in the object namespace.
+         */
+        return TRUE;
     }
 
     /* If we have a path */
@@ -961,6 +969,13 @@ GetVolumePathNameW(IN LPCWSTR lpszFileName,
     /* Not a mount point, bail out */
     if (!MountPoint && FilePart == NULL)
     {
+        /* No volume was found for any part of the name: the name is invalid, not a path to a missing machine
+         * (what the last attempt, an open of a bogus UNC or device name, reported) */
+        if (GetLastError() == ERROR_BAD_NETPATH)
+        {
+            SetLastError(ERROR_INVALID_NAME);
+        }
+
         RtlFreeHeap(RtlGetProcessHeap(), 0, FullPathBuf);
         return FALSE;
     }
