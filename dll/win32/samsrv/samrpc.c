@@ -8643,10 +8643,12 @@ SamrGetUserDomainPasswordInformation(IN SAMPR_HANDLE UserHandle,
         goto done;
     }
 
-    /* Validate the domain object */
+    /* The domain of the user. Its password parameters are read for the caller of the user handle: the rights of the
+       domain handle the user was opened with do not matter (everyone may read them, and samlib checks a new password
+       against them before it sets it) */
     Status = SampValidateDbObject((SAMPR_HANDLE)UserObject->ParentObject,
                                   SamDbDomainObject,
-                                  DOMAIN_READ_PASSWORD_PARAMETERS,
+                                  0,
                                   &DomainObject);
     if (!NT_SUCCESS(Status))
     {
@@ -8697,7 +8699,8 @@ SamrGetUserDomainPasswordInformation(IN SAMPR_HANDLE UserHandle,
 done:
     RtlReleaseResource(&SampResource);
 
-    return STATUS_SUCCESS;
+    /* A failure is reported: the structure is not filled then */
+    return Status;
 }
 
 
