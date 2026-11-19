@@ -1093,7 +1093,7 @@ Language=English
 INACCESSIBLE_BOOT_DEVICE: the system could not access the disk it starts
 from. Most often this disk is attached to a controller type that has no
 driver in this system. Supported boot disk controllers: IDE, SATA (AHCI),
-NVMe and BusLogic SCSI. Attach the disk to one of these (in a virtual
+NVMe, VirtIO SCSI and BusLogic SCSI. Attach the disk to one of these (in a virtual
 machine, change the disk bus type) and restart the computer.
 
 Check for viruses on your computer. Remove any newly installed
