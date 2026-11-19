@@ -941,6 +941,7 @@ extern UINT msi_set_context(MSIPACKAGE *);
 extern void msi_adjust_privilege_properties(MSIPACKAGE *);
 #ifdef __REACTOS__
 extern void msi_set_context_folders(MSIPACKAGE *);
+extern BOOL msi_user_is_admin(void);
 #endif
 extern UINT MSI_GetFeatureCost(MSIPACKAGE *, MSIFEATURE *, MSICOSTTREE, INSTALLSTATE, LPINT);
 

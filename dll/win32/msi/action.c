@@ -8372,6 +8372,53 @@ static void msi_log_stopped( MSIPACKAGE *package )
     msiobj_release( &row->hdr );
 }
 
+#ifdef __REACTOS__
+/* The policy DisableMSI, then: a per-machine installation or removal needs an administrator. On Windows the installer service does the
+   machine-wide part after the elevation prompt; here the engine runs as the user, so a user without
+   administrator rights is refused up front, with the message of the documented errors 1925 (install) and
+   1730 (removal), instead of failing in the middle on the first write to the system. An administrative
+   installation (ACTION=ADMIN) writes to its target directory only. */
+static UINT msi_check_install_privileges( MSIPACKAGE *package, const WCHAR *action )
+{
+    MSIRECORD *rec;
+    WCHAR *remove;
+    UINT error;
+    DWORD policy = 0, len = sizeof(policy);
+
+    /* the DisableMSI policy: 2 blocks every installation, 1 the installations that are not elevated */
+    if (!RegGetValueW( HKEY_LOCAL_MACHINE, L"Software\\Policies\\Microsoft\\Windows\\Installer", L"DisableMSI",
+                       RRF_RT_REG_DWORD, NULL, &policy, &len ) &&
+        (policy == 2 || (policy == 1 && !msi_user_is_admin())))
+    {
+        WARN("blocked by the DisableMSI policy (%lu)\n", policy);
+        if ((rec = MSI_CreateRecord( 1 )))
+        {
+            MSI_RecordSetInteger( rec, 1, 1625 );
+            MSI_ProcessMessage( package, INSTALLMESSAGE_ERROR | MB_OK | MB_ICONWARNING, rec );
+            msiobj_release( &rec->hdr );
+        }
+        return ERROR_INSTALL_PACKAGE_REJECTED;
+    }
+
+    if (msi_user_is_admin() || !wcscmp( action, L"ADMIN" )) return ERROR_SUCCESS;
+    if (package->Context != MSIINSTALLCONTEXT_MACHINE && package->Context != MSIINSTALLCONTEXT_USERMANAGED)
+        return ERROR_SUCCESS;
+
+    remove = msi_dup_property( package->db, L"REMOVE" );
+    error = (remove && remove[0]) ? 1730 : 1925;
+    free( remove );
+    WARN("a per-machine package needs an administrator (error %u)\n", error);
+
+    if ((rec = MSI_CreateRecord( 1 )))
+    {
+        MSI_RecordSetInteger( rec, 1, error );
+        MSI_ProcessMessage( package, INSTALLMESSAGE_ERROR | MB_OK | MB_ICONWARNING, rec );
+        msiobj_release( &rec->hdr );
+    }
+    return ERROR_INSTALL_FAILURE;
+}
+#endif
+
 UINT MSI_InstallPackage( MSIPACKAGE *package, LPCWSTR szPackagePath,
                          LPCWSTR szCommandLine )
 {
@@ -8434,6 +8481,14 @@ UINT MSI_InstallPackage( MSIPACKAGE *package, LPCWSTR szPackagePath,
     msi_set_context_folders( package );
 #endif
     msi_set_context( package );
+#ifdef __REACTOS__
+    if ((rc = msi_check_install_privileges( package, action )))
+    {
+        free( action );
+        msi_log_stopped( package );
+        return rc;
+    }
+#endif
 
     productcode = msi_dup_property( package->db, L"ProductCode" );
     if (wcsicmp( productcode, package->ProductCode ))
