@@ -757,6 +757,81 @@ static VOID TestStatusHandle(SC_HANDLE Admin)
     }
 }
 
+/* The number of the control pipe the service controller made last (HKLM\...\Control\ServiceCurrent) */
+static DWORD CurrentControlPipe(VOID)
+{
+    DWORD Value = 0, Size = sizeof(Value);
+    HKEY Key;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\ServiceCurrent", 0, KEY_QUERY_VALUE, &Key) == ERROR_SUCCESS)
+    {
+        RegQueryValueExW(Key, L"", NULL, NULL, (LPBYTE)&Value, &Size);
+        RegCloseKey(Key);
+    }
+    return Value;
+}
+
+/*
+ * The control pipe of a service has a predictable name and every user may open it. A pipe a standard user
+ * created under the next name must not become the service's pipe (the service still starts and connects to
+ * the service controller), and nobody can add a server end to a service's pipe.
+ */
+static VOID TestControlPipe(SC_HANDLE Admin)
+{
+    WCHAR Name[64];
+    HANDLE Token, Squat = INVALID_HANDLE_VALUE, Extra = INVALID_HANDLE_VALUE;
+    SERVICE_STATUS St;
+    SC_HANDLE Svc;
+    DWORD Err;
+    BOOL Connected;
+
+    Svc = OpenServiceW(Admin, L"scmp_def", SERVICE_ALL_ACCESS);
+    ok(Svc != NULL, "OpenService(scmp_def) failed with %lu\n", GetLastError());
+    if (!Svc)
+        return;
+    EnsureStopped(Svc);
+
+    if (Enter("std", &Token))
+    {
+        StringCchPrintfW(Name, ARRAYSIZE(Name), L"\\\\.\\pipe\\net\\NtControlPipe%lu", CurrentControlPipe() + 1);
+        Squat = CreateNamedPipeW(Name, PIPE_ACCESS_DUPLEX, PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_NOWAIT,
+                                 PIPE_UNLIMITED_INSTANCES, 512, 512, 0, NULL);
+        Leave(Token);
+    }
+    if (Squat == INVALID_HANDLE_VALUE)
+    {
+        skip("The standard user could not create %S (%lu)\n", Name, GetLastError());
+        CloseServiceHandle(Svc);
+        return;
+    }
+    /* Listening (a non-blocking pipe answers at once) */
+    ConnectNamedPipe(Squat, NULL);
+
+    ok(StartServiceW(Svc, 0, NULL), "StartService with a squatted control pipe name failed with %lu\n", GetLastError());
+    WaitState(Svc, SERVICE_RUNNING);
+    ok(QueryServiceStatus(Svc, &St) && St.dwCurrentState == SERVICE_RUNNING, "state %lu\n", St.dwCurrentState);
+
+    SetLastError(0xdeadbeef);
+    Connected = ConnectNamedPipe(Squat, NULL);
+    Err = GetLastError();
+    ok(!Connected && Err == ERROR_PIPE_LISTENING, "the squatted pipe got a client (%d, error %lu)\n", Connected, Err);
+    CloseHandle(Squat);
+
+    /* The running service's own pipe takes no second server end, not even from an administrator */
+    StringCchPrintfW(Name, ARRAYSIZE(Name), L"\\\\.\\pipe\\net\\NtControlPipe%lu", CurrentControlPipe());
+    SetLastError(0xdeadbeef);
+    Extra = CreateNamedPipeW(Name, PIPE_ACCESS_DUPLEX, PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_NOWAIT,
+                             PIPE_UNLIMITED_INSTANCES, 512, 512, 0, NULL);
+    Err = GetLastError();
+    ok(Extra == INVALID_HANDLE_VALUE, "a second server end of %S was created\n", Name);
+    ok(Extra != INVALID_HANDLE_VALUE || Err == ERROR_PIPE_BUSY || Err == ERROR_ACCESS_DENIED, "error %lu\n", Err);
+    if (Extra != INVALID_HANDLE_VALUE)
+        CloseHandle(Extra);
+
+    EnsureStopped(Svc);
+    CloseServiceHandle(Svc);
+}
+
 START_TEST(ServiceAccessCheck)
 {
     static const PCSTR Callers[] = { "system", "admin", "nobadmin", "std", "stdnet", "restr", "anon", "lsvc", "nsvc" };
@@ -845,6 +920,7 @@ START_TEST(ServiceAccessCheck)
     TestOperationRights(Admin);
     TestDescriptors(Admin);
     TestStatusHandle(Admin);
+    TestControlPipe(Admin);
 
     for (i = 0; i < ARRAYSIZE(Scratch); i++)
         RemoveService(Admin, Scratch[i]);
