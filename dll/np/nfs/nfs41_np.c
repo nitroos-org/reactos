@@ -450,7 +450,8 @@ NPAddConnection3(
 
     DbgP(( L"[aglo] NPAddConnection3('%s', '%s')\n",
         lpNetResource->lpLocalName, lpNetResource->lpRemoteName ));
-    DbgP(( L"[aglo] username = '%s', passwd = '%s'\n", lpUserName, lpPassword));
+    /* Never the password itself: debug output ends up in logs */
+    DbgP(( L"[aglo] username = '%s', password %s\n", lpUserName, lpPassword ? L"given" : L"(none)"));
 
     Status = InitializeConnectionInfo(&Connection,
         (PMOUNT_OPTION_BUFFER)lpNetResource->lpComment,
