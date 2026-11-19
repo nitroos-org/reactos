@@ -727,6 +727,142 @@ static void TestNulKeyRoundTrip(PCWSTR Dir)
     NtClose(ParentHandle);
 }
 
+/* The checksum of a base block: XOR of its first 127 ULONGs, 0 and -1 avoided */
+static void FixHeaderChecksum(PBYTE Buf)
+{
+    ULONG Sum = 0, i;
+
+    for (i = 0; i < 127; i++)
+        Sum ^= ((PULONG)Buf)[i];
+    if (Sum == (ULONG)-1)
+        Sum = (ULONG)-2;
+    else if (Sum == 0)
+        Sum = 1;
+    ((PULONG)Buf)[127] = Sum;
+}
+
+/* The subkeys of Key: how many, and how many of them an open by name did not find */
+static void CountSubkeys(HKEY Key, PULONG Count, PULONG Missed)
+{
+    WCHAR Sub[64];
+    DWORD SubLength;
+    HKEY Child;
+
+    *Count = *Missed = 0;
+    for (;;)
+    {
+        SubLength = _countof(Sub);
+        if (RegEnumKeyExW(Key, *Count, Sub, &SubLength, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
+            break;
+        (*Count)++;
+        if (RegOpenKeyExW(Key, Sub, 0, KEY_READ, &Child) == ERROR_SUCCESS)
+            RegCloseKey(Child);
+        else
+            (*Missed)++;
+    }
+}
+
+/*
+ * A hive whose version (1.5, which a ReactOS hive file is not) and leaf kind ('li' leaves under an index root,
+ * which ReactOS writes in its 1.3 hives) do not go together: keys added to the key until its leaves split stay
+ * found by name, in the live hive and in its file. The split took the size of an entry from the version.
+ */
+static void TestSplitLeafOfOtherKind(PCWSTR Dir)
+{
+    static const WCHAR Source[] = L"Software\\ReactOSCraftedHiveSplit";
+    WCHAR File[MAX_PATH], Name[32];
+    HKEY Key, Big, Child;
+    HANDLE Handle;
+    PBYTE Buf;
+    DWORD Size, Done;
+    ULONG i, Count, Missed;
+    LONG Error;
+
+    Error = RegCreateKeyExW(HKEY_LOCAL_MACHINE, Source, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &Key, NULL);
+    ok(Error == ERROR_SUCCESS, "RegCreateKeyExW(source): %ld\n", Error);
+    if (Error != ERROR_SUCCESS)
+        return;
+    Error = RegCreateKeyExW(Key, L"Big", 0, NULL, 0, KEY_ALL_ACCESS, NULL, &Big, NULL);
+    ok(Error == ERROR_SUCCESS, "RegCreateKeyExW(Big): %ld\n", Error);
+    /* More than a leaf holds: an index root of 'li' leaves */
+    for (i = 0; Error == ERROR_SUCCESS && i < 1100; i++)
+    {
+        StringCchPrintfW(Name, _countof(Name), L"k%05lu", i * 2);
+        Error = RegCreateKeyExW(Big, Name, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &Child, NULL);
+        if (Error == ERROR_SUCCESS)
+            RegCloseKey(Child);
+    }
+    ok(Error == ERROR_SUCCESS, "RegCreateKeyExW(k...): %ld\n", Error);
+    RegCloseKey(Big);
+    StringCchPrintfW(File, _countof(File), L"%sRegLoadCraftedHiveSplit.hiv", Dir);
+    DeleteFileW(File);
+    Error = RegSaveKeyW(Key, File, NULL);
+    ok(Error == ERROR_SUCCESS, "RegSaveKeyW: %ld\n", Error);
+    RegCloseKey(Key);
+    pRegDeleteTreeW(HKEY_LOCAL_MACHINE, Source);
+    RegDeleteKeyW(HKEY_LOCAL_MACHINE, Source);
+    if (Error != ERROR_SUCCESS)
+        return;
+
+    /* Version 1.5 in the base block */
+    Handle = CreateFileW(File, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    ok(Handle != INVALID_HANDLE_VALUE, "CreateFileW: %lu\n", GetLastError());
+    if (Handle == INVALID_HANDLE_VALUE)
+        return;
+    Size = 4096;
+    Buf = HeapAlloc(GetProcessHeap(), 0, Size);
+    if (Buf && ReadFile(Handle, Buf, Size, &Done, NULL) && Done == Size)
+    {
+        ((PULONG)Buf)[6] = 5;   /* Minor */
+        FixHeaderChecksum(Buf);
+        SetFilePointer(Handle, 0, NULL, FILE_BEGIN);
+        WriteFile(Handle, Buf, Size, &Done, NULL);
+    }
+    HeapFree(GetProcessHeap(), 0, Buf);
+    CloseHandle(Handle);
+
+    Error = RegLoadKeyW(HKEY_LOCAL_MACHINE, MOUNT, File);
+    ok(Error == ERROR_SUCCESS, "RegLoadKeyW(1.5 with li leaves): %ld\n", Error);
+    if (Error == ERROR_SUCCESS)
+    {
+        Error = RegOpenKeyExW(HKEY_LOCAL_MACHINE, MOUNT L"\\Big", 0, KEY_ALL_ACCESS, &Big);
+        ok(Error == ERROR_SUCCESS, "RegOpenKeyExW(Big): %ld\n", Error);
+        if (Error == ERROR_SUCCESS)
+        {
+            /* Between the names there: every leaf fills and splits */
+            for (i = 0; Error == ERROR_SUCCESS && i < 1100; i++)
+            {
+                StringCchPrintfW(Name, _countof(Name), L"k%05lu", i * 2 + 1);
+                Error = RegCreateKeyExW(Big, Name, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &Child, NULL);
+                if (Error == ERROR_SUCCESS)
+                    RegCloseKey(Child);
+            }
+            ok(Error == ERROR_SUCCESS, "RegCreateKeyExW(added %lu): %ld\n", i, Error);
+            CountSubkeys(Big, &Count, &Missed);
+            ok(Count == 2200 && Missed == 0, "after the splits: %lu subkeys, %lu not found by name\n", Count, Missed);
+            RegFlushKey(Big);
+            RegCloseKey(Big);
+        }
+        Error = RegUnLoadKeyW(HKEY_LOCAL_MACHINE, MOUNT);
+        ok(Error == ERROR_SUCCESS, "RegUnLoadKeyW: %ld\n", Error);
+
+        /* And so in the file it was written to */
+        Error = RegLoadKeyW(HKEY_LOCAL_MACHINE, MOUNT, File);
+        ok(Error == ERROR_SUCCESS, "RegLoadKeyW(written): %ld\n", Error);
+        if (Error == ERROR_SUCCESS)
+        {
+            if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, MOUNT L"\\Big", 0, KEY_READ, &Big) == ERROR_SUCCESS)
+            {
+                CountSubkeys(Big, &Count, &Missed);
+                ok(Count == 2200 && Missed == 0, "written: %lu subkeys, %lu not found by name\n", Count, Missed);
+                RegCloseKey(Big);
+            }
+            RegUnLoadKeyW(HKEY_LOCAL_MACHINE, MOUNT);
+        }
+    }
+    DeleteFileW(File);
+}
+
 START_TEST(RegLoadCraftedHive)
 {
     WCHAR Dir[MAX_PATH];
@@ -762,6 +898,7 @@ START_TEST(RegLoadCraftedHive)
     }
 
     TestNulKeyRoundTrip(Dir);
+    TestSplitLeafOfOtherKind(Dir);
 
     DeleteFileW(g_File);
     HeapFree(GetProcessHeap(), 0, g_Base);
