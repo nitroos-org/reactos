@@ -113,7 +113,9 @@ BOOLEAN
 FORCEINLINE
 CompleteDPC(IN PVOID DeviceExtension, IN ULONG MessageID);
 
+#ifdef VIOSTOR_FIRMWARE
 UCHAR FirmwareRequest(IN PVOID DeviceExtension, IN PSRB_TYPE Srb);
+#endif
 
 VOID ReportDeviceIdentifier(IN PVOID DeviceExtension, IN PSRB_TYPE Srb);
 
@@ -1032,10 +1034,12 @@ NTAPI VirtIoStartIo(IN PVOID DeviceExtension, IN PSCSI_REQUEST_BLOCK Srb)
                 UCHAR srbStatus = SRB_STATUS_INVALID_REQUEST;
                 switch (srbControl->ControlCode)
                 {
+#ifdef VIOSTOR_FIRMWARE
                     case IOCTL_SCSI_MINIPORT_FIRMWARE:
                         srbStatus = FirmwareRequest(DeviceExtension, (PSRB_TYPE)Srb);
                         RhelDbgPrint(TRACE_LEVEL_INFORMATION, " <--> IOCTL_SCSI_MINIPORT_FIRMWARE\n");
                         break;
+#endif
                     default:
                         RhelDbgPrint(TRACE_LEVEL_INFORMATION,
                                      " <--> Unsupport control code 0x%x\n",
@@ -2484,6 +2488,7 @@ VioStorPoolAlloc(IN PVOID DeviceExtension, IN SIZE_T size)
     return NULL;
 }
 
+#ifdef VIOSTOR_FIRMWARE
 UCHAR FirmwareRequest(IN PVOID DeviceExtension, IN PSRB_TYPE Srb)
 {
     PADAPTER_EXTENSION adaptExt;
@@ -2612,3 +2617,4 @@ UCHAR FirmwareRequest(IN PVOID DeviceExtension, IN PSRB_TYPE Srb)
 
     return srbStatus;
 }
+#endif /* VIOSTOR_FIRMWARE */
