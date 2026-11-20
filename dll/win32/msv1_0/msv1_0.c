@@ -2587,18 +2587,15 @@ done:
         RtlEraseUnicodeString(ErasePassword);
     }
 
-    /* Update the logon time/count or the bad password time/count */
-    if ((UserHandle != NULL) &&
-        (Status == STATUS_SUCCESS || Status == STATUS_WRONG_PASSWORD))
+    /* Update the logon time/count and clear the bad password count (a bad password is counted where the
+       password is checked, SamValidateUser). An S4U logon proves no password: it must not reset the count of
+       an account somebody is guessing the password of */
+    if (UserHandle != NULL && Status == STATUS_SUCCESS && !LogonPwdData.IsS4U)
     {
         SAMPR_USER_INFO_BUFFER InternalInfo;
 
         RtlZeroMemory(&InternalInfo, sizeof(InternalInfo));
-
-        if (Status == STATUS_SUCCESS)
-            InternalInfo.Internal2.Flags = USER_LOGON_SUCCESS;
-        else
-            InternalInfo.Internal2.Flags = USER_LOGON_BAD_PASSWORD;
+        InternalInfo.Internal2.Flags = USER_LOGON_SUCCESS;
 
         SamrSetInformationUser(UserHandle,
                                UserInternal2Information,

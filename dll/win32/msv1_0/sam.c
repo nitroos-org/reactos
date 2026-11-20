@@ -459,7 +459,30 @@ SamValidateNormalUser(
     {
         BOOLEAN BlankPassword = FALSE;
 
+        /* A locked account: every logon with a password fails with STATUS_ACCOUNT_LOCKED_OUT, the right
+           password as well, and the attempt is not counted (measured). The built-in Administrator is not
+           locked out (documented: "Account lockout threshold"; measured: count and flag, but its logons work) */
+        if (RelativeIds.Element[0] != DOMAIN_USER_RID_ADMIN &&
+            (UserInfo->All.UserAccountControl & USER_ACCOUNT_AUTO_LOCKED))
+        {
+            ERR("Account locked out\n");
+            Status = STATUS_ACCOUNT_LOCKED_OUT;
+            goto done;
+        }
+
         Status = MsvpCheckPassword(PwdData, UserInfo, &BlankPassword);
+        if (Status == STATUS_WRONG_PASSWORD)
+        {
+            SAMPR_USER_INFO_BUFFER InternalInfo;
+            NTSTATUS CountStatus;
+
+            /* Count the bad password (SAM locks the account at the threshold) through the trusted handle */
+            RtlZeroMemory(&InternalInfo, sizeof(InternalInfo));
+            InternalInfo.Internal2.Flags = USER_LOGON_BAD_PASSWORD;
+            CountStatus = SamrSetInformationUser(UserHandle, UserInternal2Information, &InternalInfo);
+            if (!NT_SUCCESS(CountStatus))
+                ERR("Cannot count the bad password (Status %08lx)\n", CountStatus);
+        }
         if (!NT_SUCCESS(Status))
         {
             ERR("MsvpCheckPassword failed (Status %08lx)\n", Status);
