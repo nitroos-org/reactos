@@ -8,7 +8,10 @@
  * observes the registered services with QueryServiceStatusEx and queues the
  * callback as a user APC to the registering thread when the state of the
  * service is one of the requested states (also when it already is at the time
- * of the call). Closing the service handle cancels its registrations.
+ * of the call, unless that same registration - handle, structure and mask - was
+ * already queued in that state: Wine's service test and the documentation say it
+ * then waits for the next change). Closing the service handle cancels its
+ * registrations.
  *
  * The caller's notification structure is written by the APC, on the calling
  * thread, just before the callback runs: the worker never touches it, so a
@@ -16,8 +19,8 @@
  * pending cannot make the worker write to freed memory. As on Windows, the
  * small block of a notification that is never delivered is lost with the thread.
  *
- * Limits: a registration made in a state that is already requested is queued at once every time (Windows
- * queues it again only when the state changed since it was last queued: not reproduced); the state is polled (100 ms), so a state that lasts less than that
+ * Limits: Windows alternates when one registration is repeated again and again in an unchanged state (measured:
+ * queued, not queued, queued, ...); here it is queued once and then waits for a change; the state is polled (100 ms), so a state that lasts less than that
  * can be missed; the notifications of the service control manager handle
  * (SERVICE_NOTIFY_CREATED, SERVICE_NOTIFY_DELETED) and SERVICE_NOTIFY_DELETE_PENDING
  * report ERROR_CALL_NOT_IMPLEMENTED; a service marked for deletion is not
@@ -39,9 +42,20 @@ typedef struct _SVC_NOTIFY_REG
     ULONG Id;                   /* never reused: the worker finds its registration again by it */
     SC_HANDLE hService;
     DWORD dwMask;
+    DWORD dwSeen;               /* the state last seen for this registration: it fires on a change into a requested state */
     HANDLE hThread;
     PSERVICE_NOTIFY_2W Notify;
 } SVC_NOTIFY_REG;
+
+/* The state in which a registration (handle, structure, mask) was last queued */
+typedef struct _SVC_NOTIFY_LAST
+{
+    struct _SVC_NOTIFY_LAST *Next;
+    SC_HANDLE hService;
+    PSERVICE_NOTIFY_2W Notify;
+    DWORD dwMask;
+    DWORD dwState;
+} SVC_NOTIFY_LAST;
 
 /* What the APC needs: allocated by the one who queues it, freed by the APC */
 typedef struct _SVC_NOTIFY_DELIVERY
@@ -62,6 +76,7 @@ typedef struct _SVC_NOTIFY_SNAP
 
 static volatile LONG g_NotifyLock;     /* a spin lock: needs no initialization and no Vista-only import. Never held across an RPC. */
 static SVC_NOTIFY_REG *g_NotifyList;
+static SVC_NOTIFY_LAST *g_NotifyLastList;
 static BOOL g_NotifyWorker;
 static volatile LONG g_NotifyNextId;
 
@@ -92,6 +107,46 @@ StateToNotifyBit(DWORD dwState)
         case SERVICE_PAUSED: return SERVICE_NOTIFY_PAUSED;
     }
     return 0;
+}
+
+/* Called with the lock held. Notes that the registration was queued in this state. */
+static VOID
+NotifySetLast(SC_HANDLE hService, PSERVICE_NOTIFY_2W Notify, DWORD dwMask, DWORD dwState)
+{
+    SVC_NOTIFY_LAST *Last;
+
+    for (Last = g_NotifyLastList; Last; Last = Last->Next)
+    {
+        if (Last->hService == hService && Last->Notify == Notify && Last->dwMask == dwMask)
+        {
+            Last->dwState = dwState;
+            return;
+        }
+    }
+
+    Last = HeapAlloc(GetProcessHeap(), 0, sizeof(*Last));
+    if (Last == NULL)
+        return;     /* it is then queued again in the same state */
+    Last->hService = hService;
+    Last->Notify = Notify;
+    Last->dwMask = dwMask;
+    Last->dwState = dwState;
+    Last->Next = g_NotifyLastList;
+    g_NotifyLastList = Last;
+}
+
+/* Called with the lock held. */
+static BOOL
+NotifyWasQueuedIn(SC_HANDLE hService, PSERVICE_NOTIFY_2W Notify, DWORD dwMask, DWORD dwState)
+{
+    SVC_NOTIFY_LAST *Last;
+
+    for (Last = g_NotifyLastList; Last; Last = Last->Next)
+    {
+        if (Last->hService == hService && Last->Notify == Notify && Last->dwMask == dwMask)
+            return Last->dwState == dwState;
+    }
+    return FALSE;
 }
 
 /* Runs on the registering thread, in its alertable wait */
@@ -235,12 +290,14 @@ NotifyWorkerThread(PVOID Context)
                 QueueNotification(Reg->hThread, Reg->Notify, NULL, 0, Snap[i].dwError);
                 NotifyDropReg(pp);
             }
-            else
+            else if (Snap[i].Status.dwCurrentState != Reg->dwSeen)
             {
                 DWORD dwBit = StateToNotifyBit(Snap[i].Status.dwCurrentState);
 
+                Reg->dwSeen = Snap[i].Status.dwCurrentState;
                 if (dwBit & Reg->dwMask)
                 {
+                    NotifySetLast(Reg->hService, Reg->Notify, Reg->dwMask, Snap[i].Status.dwCurrentState);
                     QueueNotification(Reg->hThread, Reg->Notify, &Snap[i].Status, dwBit, ERROR_SUCCESS);
                     NotifyDropReg(pp);
                 }
@@ -257,6 +314,7 @@ VOID
 ScmCancelServiceNotifications(SC_HANDLE hService)
 {
     SVC_NOTIFY_REG **pp;
+    SVC_NOTIFY_LAST **ppLast;
 
     NotifyLock();
     pp = &g_NotifyList;
@@ -268,6 +326,22 @@ ScmCancelServiceNotifications(SC_HANDLE hService)
             pp = &(*pp)->Next;
     }
 
+
+    ppLast = &g_NotifyLastList;
+    while (*ppLast)
+    {
+        SVC_NOTIFY_LAST *Last = *ppLast;
+
+        if (Last->hService == hService)
+        {
+            *ppLast = Last->Next;
+            HeapFree(GetProcessHeap(), 0, Last);
+        }
+        else
+        {
+            ppLast = &Last->Next;
+        }
+    }
     NotifyUnlock();
 }
 
@@ -321,13 +395,24 @@ NotifyServiceStatusChange(SC_HANDLE hService,
     /* The registration clears the status of the structure (measured); the other fields are written when it fires */
     Notify->dwNotificationStatus = ERROR_SUCCESS;
 
-    /* The service is already in a requested state: notify at once (measured on Windows Server 2022) */
+    /*
+     * The service is already in a requested state: notify at once, unless this registration was queued in that
+     * state before and the state has not changed since: it then waits for the next time the service enters it.
+     */
     dwBit = StateToNotifyBit(Status.dwCurrentState);
     if (dwBit & dwNotifyMask)
     {
-        dwError = QueueNotification(hThread, Notify, &Status, dwBit, ERROR_SUCCESS);
-        CloseHandle(hThread);
-        return dwError;
+        NotifyLock();
+        if (!NotifyWasQueuedIn(hService, Notify, dwNotifyMask, Status.dwCurrentState))
+        {
+            NotifySetLast(hService, Notify, dwNotifyMask, Status.dwCurrentState);
+            NotifyUnlock();
+
+            dwError = QueueNotification(hThread, Notify, &Status, dwBit, ERROR_SUCCESS);
+            CloseHandle(hThread);
+            return dwError;
+        }
+        NotifyUnlock();
     }
 
     Reg = HeapAlloc(GetProcessHeap(), 0, sizeof(*Reg));
@@ -340,6 +425,7 @@ NotifyServiceStatusChange(SC_HANDLE hService,
     Reg->Id = (ULONG)InterlockedIncrement(&g_NotifyNextId);
     Reg->hService = hService;
     Reg->dwMask = dwNotifyMask;
+    Reg->dwSeen = Status.dwCurrentState;
     Reg->hThread = hThread;
     Reg->Notify = Notify;
 
