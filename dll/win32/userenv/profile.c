@@ -358,6 +358,55 @@ done:
 }
 
 
+/* Sets the counter of a profile whose hive is not loaded to zero; a missing counter stays missing */
+static
+VOID
+ResetRefCount(
+    PWSTR pszSidString)
+{
+    HKEY hProfilesKey = NULL, hProfileKey = NULL;
+    DWORD dwRefCount = 0, dwLength, dwType;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                      L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList",
+                      0,
+                      KEY_QUERY_VALUE,
+                      &hProfilesKey) != ERROR_SUCCESS)
+        return;
+
+    if (RegOpenKeyExW(hProfilesKey,
+                      pszSidString,
+                      0,
+                      KEY_QUERY_VALUE | KEY_SET_VALUE,
+                      &hProfileKey) == ERROR_SUCCESS)
+    {
+        dwLength = sizeof(dwRefCount);
+        if (RegQueryValueExW(hProfileKey,
+                             L"RefCount",
+                             NULL,
+                             &dwType,
+                             (PBYTE)&dwRefCount,
+                             &dwLength) == ERROR_SUCCESS && dwRefCount != 0)
+        {
+            DPRINT1("ResetRefCount(%S): the count %lu is left from a session that did not end\n",
+                    pszSidString, dwRefCount);
+
+            dwRefCount = 0;
+            RegSetValueExW(hProfileKey,
+                           L"RefCount",
+                           0,
+                           REG_DWORD,
+                           (PBYTE)&dwRefCount,
+                           sizeof(dwRefCount));
+        }
+
+        RegCloseKey(hProfileKey);
+    }
+
+    RegCloseKey(hProfilesKey);
+}
+
+
 static
 DWORD
 DecrementRefCount(
@@ -2154,6 +2203,7 @@ LoadUserProfileW(
     UNICODE_STRING SidString = { 0, 0, NULL };
     HANDLE hProfileMutex = NULL;
     DWORD dwError = MAXDWORD;
+    BOOL bLoaded;
     BOOL ret = FALSE;
 
     DPRINT("LoadUserProfileW(%p %p)\n", hToken, lpProfileInfo);
@@ -2277,6 +2327,8 @@ LoadUserProfileW(
                               szUserHivePath);
         AcquireRemoveRestorePrivilege(FALSE);
 
+        bLoaded = (dwError == ERROR_SUCCESS);
+
         /* HACK: Do not fail if the profile has already been loaded! */
         if (dwError == ERROR_SHARING_VIOLATION)
             dwError = ERROR_SUCCESS;
@@ -2288,6 +2340,14 @@ LoadUserProfileW(
         }
 
         StampUserHiveRootSecurity(SidString.Buffer);
+
+        /* The hive has been loaded just now, so nobody holds it, whatever the count in the
+           registry says: it survives a restart, and a count left behind by a session that
+           was not logged off (power loss, a killed machine) would keep the hive loaded at
+           every logoff of this boot. Only a load that succeeded is reset: with a sharing
+           violation (see above) the hive may be in use. */
+        if (bLoaded)
+            ResetRefCount(SidString.Buffer);
 
         SetProfileData(SidString.Buffer,
                        lpProfileInfo->dwFlags,
