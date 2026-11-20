@@ -351,6 +351,17 @@ bool CCabinet::SetCabinetReservedFile(const char* FileName)
         return false;
     }
 
+    /* The size of the per-cabinet reserved area is a 16-bit field of the cabinet header: a larger file would be
+     * written whole after a truncated size and corrupt the cabinet */
+    if (CabinetReservedFileSize > 0xffff)
+    {
+        printf("ERROR: the cabinet reserved file '%s' is %lu bytes, more than the 65535 a cabinet header can hold.\n",
+               FileName, (unsigned long)CabinetReservedFileSize);
+        CabinetReservedFileSize = 0;
+        fclose(FileHandle);
+        return false;
+    }
+
     CabinetReservedFileBuffer = malloc(CabinetReservedFileSize);
     if (!CabinetReservedFileBuffer)
     {

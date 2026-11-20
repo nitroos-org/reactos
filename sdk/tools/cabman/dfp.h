@@ -75,7 +75,7 @@ private:
     virtual bool OnDiskLabel(ULONG Number, char* Label) override;
     virtual bool OnCabinetName(ULONG Number, char* Name) override;
 
-    void WriteInfLine(char* InfLine);
+    void WriteInfLine(char* InfLine, const char* SizedLine = NULL);
     bool SetDiskName(PCABINET_NAME *List, ULONG Number, char* String);
     bool GetDiskName(PCABINET_NAME *List, ULONG Number, char* String);
     bool SetDiskNumber(PDISK_NUMBER *List, ULONG Number, ULONG Value);
@@ -141,6 +141,7 @@ private:
     ULONG ReservePerFolderSize;
     char SourceDir[256];
     FILE* InfFileHandle;
+    FILE* SizeFileHandle;
     bool InfModeEnabled;
 };
 
