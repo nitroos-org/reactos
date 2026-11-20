@@ -230,8 +230,13 @@ cmdAccounts(
         PrintPaddedMessageString(4572, nPaddedLength);
         ConPrintf(StdOut, L"%lu\n", Info0->usrmod0_min_passwd_age / 86400);
 
+        /* TIMEQ_FOREVER ("/maxpwage:unlimited") reads "Unlimited", as on Windows (measured on Windows Server 2022) */
         PrintPaddedMessageString(4573, nPaddedLength);
-        ConPrintf(StdOut, L"%lu\n", Info0->usrmod0_max_passwd_age / 86400);
+        if (Info0->usrmod0_max_passwd_age == TIMEQ_FOREVER)
+            PrintMessageString(4306);
+        else
+            ConPrintf(StdOut, L"%lu", Info0->usrmod0_max_passwd_age / 86400);
+        ConPuts(StdOut, L"\n");
 
         PrintPaddedMessageString(4574, nPaddedLength);
         ConPrintf(StdOut, L"%lu\n", Info0->usrmod0_min_passwd_len);
