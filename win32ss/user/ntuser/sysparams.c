@@ -846,6 +846,24 @@ SpiNotifyNCMetricsChanged(VOID)
     return TRUE;
 }
 
+/* While a screen saver runs or the workstation is locked (the Winlogon desktop has the input) the settings
+ * of the screen saver cannot be changed: Windows fails the call with ERROR_OPERATION_IN_PROGRESS */
+static
+BOOL
+SpiScreenSaverSetBlocked(VOID)
+{
+    PDESKTOP pdeskActive = IntGetActiveDesktop();
+
+    if (gspv.bScrSaverRunning ||
+        (pdeskActive != NULL && pdeskActive->pDeskInfo != NULL &&
+         _wcsicmp(pdeskActive->pDeskInfo->szDesktopName, L"Winlogon") == 0))
+    {
+        EngSetLastError(ERROR_OPERATION_IN_PROGRESS);
+        return TRUE;
+    }
+    return FALSE;
+}
+
 static
 UINT_PTR
 SpiGetSet(UINT uiAction, UINT uiParam, PVOID pvParam, FLONG fl)
@@ -897,12 +915,16 @@ SpiGetSet(UINT uiAction, UINT uiParam, PVOID pvParam, FLONG fl)
             return SpiGetInt(pvParam, &gspv.iScrSaverTimeout, fl);
 
         case SPI_SETSCREENSAVETIMEOUT:
+            if (SpiScreenSaverSetBlocked())
+                return 0;
             return SpiSetInt(&gspv.iScrSaverTimeout, uiParam, KEY_DESKTOP, VAL_SCRTO, fl);
 
         case SPI_GETSCREENSAVEACTIVE:
             return SpiGetInt(pvParam, &gspv.bScrSaverActive, fl);
 
         case SPI_SETSCREENSAVEACTIVE:
+            if (SpiScreenSaverSetBlocked())
+                return 0;
             return SpiSetInt(&gspv.bScrSaverActive, uiParam, KEY_DESKTOP, VAL_SCRACT, fl);
 
         case SPI_GETGRIDGRANULARITY:
@@ -1600,8 +1622,11 @@ SpiGetSet(UINT uiAction, UINT uiParam, PVOID pvParam, FLONG fl)
             return SpiGetInt(pvParam, &gspv.bScrSaverRunning, fl);
 
         case SPI_SETSCREENSAVERRUNNING:
-            // FIXME: also return value?
-            return SpiSetBool(&gspv.bScrSaverRunning, uiParam, KEY_MOUSE, L"", fl);
+            /* Only the logon process (winlogon, which runs the screen saver) says that a saver runs.
+             * On Windows the call of any other process fails and changes nothing. */
+            if (gpidLogon != PsGetCurrentProcessId())
+                return 0;
+            return SpiSetBool(&gspv.bScrSaverRunning, uiParam, KEY_MOUSE, L"", fl & ~SPIF_UPDATEINIFILE);
 
 #if(WINVER >= 0x0600)
         case SPI_GETAUDIODESCRIPTION:
@@ -1618,7 +1643,9 @@ SpiGetSet(UINT uiAction, UINT uiParam, PVOID pvParam, FLONG fl)
             return SpiGetInt(pvParam, &gspv.bScrSaverSecure, fl);
 
         case SPI_SETSCREENSAVESECURE:
-            return SpiSetBool(&gspv.bScrSaverSecure, uiParam, KEY_DESKTOP, L"ScreenSaverIsSecure", fl);
+            if (SpiScreenSaverSetBlocked())
+                return 0;
+            return SpiSetBool(&gspv.bScrSaverSecure, uiParam ? 1 : 0, KEY_DESKTOP, L"ScreenSaverIsSecure", fl);
 
         case SPI_GETACTIVEWINDOWTRACKING:
             return SpiGetUserPref(UPM_ACTIVEWINDOWTRACKING, pvParam, fl);
