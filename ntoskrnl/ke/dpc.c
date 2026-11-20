@@ -973,9 +973,15 @@ KeFlushQueuedDpcs(VOID)
 {
     ULONG ProcessorIndex;
     PKPRCB TargetPrcb;
+    BOOLEAN WasPinned;
+    KAFFINITY OldAffinity;
 
     PAGED_CODE();
-    ASSERT(KeGetCurrentThread()->SystemAffinityActive == FALSE);
+
+    /* A caller can run with a system affinity (the thread that shuts the system down runs on the
+       boot processor): put it back at the end instead of dropping it */
+    WasPinned = KeGetCurrentThread()->SystemAffinityActive;
+    OldAffinity = KeGetCurrentThread()->Affinity;
 
     /* Loop all processors */
     for (ProcessorIndex = 0; ProcessorIndex < KeNumberProcessors; ProcessorIndex++)
@@ -1004,8 +1010,12 @@ KeFlushQueuedDpcs(VOID)
         }
     }
 
-    /* Revert back to user affinity */
-    if (KeGetCurrentThread()->SystemAffinityActive)
+    /* Revert back to the affinity the caller had */
+    if (WasPinned)
+    {
+        KeSetSystemAffinityThread(OldAffinity);
+    }
+    else if (KeGetCurrentThread()->SystemAffinityActive)
     {
         KeRevertToUserAffinityThread();
     }
