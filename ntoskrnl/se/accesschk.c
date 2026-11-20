@@ -158,13 +158,16 @@ SepDaclHasOwnerRightsAce(
  * normal and the restricting SIDs are granted. A write restricted token (see
  * SEP_TOKEN_WRITE_RESTRICTED) compares the restricting SIDs only for write
  * access, also when it has none (then no write access is granted). Measured on
- * Windows Server 2022 with files, directories, registry keys and events, for
- * tokens from CreateRestrictedToken(WRITE_RESTRICTED): the restricting SIDs
- * have to grant the rights GenericMapping->GenericWrite holds, DELETE, WRITE_DAC
- * and WRITE_OWNER; READ_CONTROL and SYNCHRONIZE are not checked (although
- * the write mapping of a file holds them), nor is any other right (the file
- * rights FILE_DELETE_CHILD, FILE_EXECUTE, the key rights KEY_NOTIFY and
- * KEY_CREATE_LINK stay with the normal pass).
+ * Windows Server 2022 with files, directories, registry keys and events, and
+ * with generic mappings of their own, for tokens from
+ * CreateRestrictedToken(WRITE_RESTRICTED): the restricting SIDs have to grant
+ * the rights of GenericMapping->GenericWrite that GenericRead and GenericExecute
+ * do not hold (so READ_CONTROL and SYNCHRONIZE of a file, a key or an event are
+ * not compared, a right that the write and the read mapping share is not, and
+ * READ_CONTROL or SYNCHRONIZE that only the write mapping holds is), and DELETE,
+ * WRITE_DAC and WRITE_OWNER always; every other right (the file rights
+ * FILE_DELETE_CHILD, FILE_EXECUTE, the key rights KEY_NOTIFY and KEY_CREATE_LINK)
+ * stays with the normal pass.
  *
  * @param[in] Token
  * The token the access check is for.
@@ -190,8 +193,9 @@ SepGetRestrictedAccessMask(
 
     if (((PTOKEN)Token)->TokenFlags & SEP_TOKEN_WRITE_RESTRICTED)
     {
-        *RestrictedMask = (GenericMapping->GenericWrite | DELETE | WRITE_DAC | WRITE_OWNER) &
-                          ~(READ_CONTROL | SYNCHRONIZE);
+        *RestrictedMask = (GenericMapping->GenericWrite &
+                           ~(GenericMapping->GenericRead | GenericMapping->GenericExecute)) |
+                          DELETE | WRITE_DAC | WRITE_OWNER;
         return TRUE;
     }
 
