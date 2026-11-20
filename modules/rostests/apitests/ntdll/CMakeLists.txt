@@ -45,6 +45,7 @@ add_dependencies(ntdll_crt_test_lib psdk)
 
 list(APPEND SOURCE
     CrtSecure.c
+    PortableOperatingSystem.c
     RtlBitmapRanges.c
     RtlCrc64.c
     RtlExtractBitMap.c
