@@ -21,10 +21,11 @@
  * store has been converted.
  *
  * Conversion of plaintext values stored by earlier versions runs once, before the RPC server starts, and
- * survives a power cut at any point (LsapProtectValue). The policy attribute PolSecPr says that it has run to
- * completion; from then on values are never classified again.
+ * survives a power cut at any point (LsapProtectValue). When it has run to completion the policy attribute
+ * PolSecPr and then a flag in the key file record it; from then on values are never classified again. The flag
+ * decides, not the registry value (LsapInitSecretProtection): a registry writer cannot reopen the conversion.
  *
- * The key is made when it is first needed (the first secret written, or the conversion), written to
+ * The key is made when the database is made, or when it is first needed (the conversion), written to
  * LsaKey.new, flushed and renamed, and only then used. In memory it is kept encrypted with RtlEncryptMemory and
  * decrypted only for the duration of one encryption or decryption.
  */
@@ -65,7 +66,8 @@ typedef struct _LSAP_SECRET_RECORD
     /* ciphertext (PlainLength bytes), tag (LSAP_TAG_SIZE bytes) */
 } LSAP_SECRET_RECORD, *PLSAP_SECRET_RECORD;
 
-typedef struct _LSAP_KEY_FILE
+/* Version 1 of the key file (written by the first version of this code), read only */
+typedef struct _LSAP_KEY_FILE_V1
 {
     UCHAR Magic[8];
     ULONG Version;
@@ -73,11 +75,35 @@ typedef struct _LSAP_KEY_FILE
     UCHAR KeyId[LSAP_KEY_ID_SIZE];
     UCHAR Key[LSAP_KEY_SIZE];
     UCHAR Check[SYMCRYPT_SHA256_RESULT_SIZE];   /* SHA-256 of the fields before it: detects a damaged file */
+} LSAP_KEY_FILE_V1, *PLSAP_KEY_FILE_V1;
+
+/* Version 2: version 1 with flags */
+typedef struct _LSAP_KEY_FILE
+{
+    UCHAR Magic[8];
+    ULONG Version;
+    ULONG Algorithm;
+    UCHAR KeyId[LSAP_KEY_ID_SIZE];
+    UCHAR Key[LSAP_KEY_SIZE];
+    ULONG Flags;                                /* LSAP_KEY_FLAG_* */
+    ULONG Reserved;
+    UCHAR Check[SYMCRYPT_SHA256_RESULT_SIZE];   /* SHA-256 of the fields before it: detects a damaged file */
 } LSAP_KEY_FILE, *PLSAP_KEY_FILE;
 #include <poppack.h>
 
 C_ASSERT(sizeof(LSAP_SECRET_RECORD) == 48);
-C_ASSERT(sizeof(LSAP_KEY_FILE) == 96);
+C_ASSERT(sizeof(LSAP_KEY_FILE_V1) == 96);
+C_ASSERT(sizeof(LSAP_KEY_FILE) == 104);
+
+#define LSAP_KEY_FILE_VERSION_1     1
+#define LSAP_KEY_FILE_VERSION       2
+
+/*
+ * Every value of the store under this key is a record (the conversion of plaintext has completed, or there never
+ * was any): values are never classified as plaintext again, whatever the registry says
+ */
+#define LSAP_KEY_FLAG_CONVERTED     0x00000001
+#define LSAP_KEY_FLAGS_KNOWN        LSAP_KEY_FLAG_CONVERTED
 
 #define LSAP_RECORD_OVERHEAD    (sizeof(LSAP_SECRET_RECORD) + LSAP_TAG_SIZE)
 
@@ -96,6 +122,8 @@ static BOOLEAN LsapKeyLooked = FALSE;       /* the key file has been read (or fo
 static NTSTATUS LsapKeyState = STATUS_OBJECT_NAME_NOT_FOUND;   /* success: a key is loaded */
 static UCHAR LsapKeyId[LSAP_KEY_ID_SIZE];
 static UCHAR LsapKeyHidden[LSAP_KEY_SIZE];  /* RtlEncryptMemory(SAME_PROCESS) of the key */
+static ULONG LsapKeyFlags;                  /* of the loaded key file */
+static ULONG LsapNewKeyFlags;               /* for a key made now: LSAP_KEY_FLAG_CONVERTED unless a conversion is open */
 
 
 /* SymCrypt callbacks *********************************************************/
@@ -386,9 +414,15 @@ LsapReadKeyFile(LPCWSTR Path, PLSAP_KEY_FILE File)
     IO_STATUS_BLOCK Iosb;
     FILE_STANDARD_INFORMATION Standard;
     UCHAR Check[SYMCRYPT_SHA256_RESULT_SIZE];
+    union
+    {
+        LSAP_KEY_FILE_V1 V1;
+        LSAP_KEY_FILE V2;
+    } Raw;
     HANDLE FileHandle;
     NTSTATUS Status;
 
+    RtlZeroMemory(&Standard, sizeof(Standard));
     RtlInitUnicodeString(&Name, Path);
     InitializeObjectAttributes(&ObjectAttributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
 
@@ -406,12 +440,17 @@ LsapReadKeyFile(LPCWSTR Path, PLSAP_KEY_FILE File)
         return STATUS_INTERNAL_DB_CORRUPTION;
     }
 
+    /* Version 1 (96 bytes) or 2 (104 bytes), told apart by the size and checked by the version field */
     Status = NtQueryInformationFile(FileHandle, &Iosb, &Standard, sizeof(Standard), FileStandardInformation);
-    if (NT_SUCCESS(Status) && Standard.EndOfFile.QuadPart != sizeof(LSAP_KEY_FILE))
+    if (NT_SUCCESS(Status) &&
+        Standard.EndOfFile.QuadPart != sizeof(LSAP_KEY_FILE_V1) &&
+        Standard.EndOfFile.QuadPart != sizeof(LSAP_KEY_FILE))
+    {
         Status = STATUS_INTERNAL_DB_CORRUPTION;
+    }
     if (NT_SUCCESS(Status))
-        Status = NtReadFile(FileHandle, NULL, NULL, NULL, &Iosb, File, sizeof(*File), NULL, NULL);
-    if (NT_SUCCESS(Status) && Iosb.Information != sizeof(*File))
+        Status = NtReadFile(FileHandle, NULL, NULL, NULL, &Iosb, &Raw, (ULONG)Standard.EndOfFile.QuadPart, NULL, NULL);
+    if (NT_SUCCESS(Status) && Iosb.Information != Standard.EndOfFile.QuadPart)
         Status = STATUS_INTERNAL_DB_CORRUPTION;
 
     if (NT_SUCCESS(Status) && !LsapCheckKeyFileSecurity(FileHandle))
@@ -419,17 +458,46 @@ LsapReadKeyFile(LPCWSTR Path, PLSAP_KEY_FILE File)
 
     NtClose(FileHandle);
 
-    if (NT_SUCCESS(Status))
+    if (NT_SUCCESS(Status) && Standard.EndOfFile.QuadPart == sizeof(LSAP_KEY_FILE_V1))
     {
-        LsapKeyFileChecksum(File, Check);
-        if (RtlCompareMemory(File->Magic, LsapKeyFileMagic, sizeof(File->Magic)) != sizeof(File->Magic) ||
-            File->Version != LSAP_RECORD_VERSION ||
-            File->Algorithm != LSAP_ALGORITHM_AES_GCM ||
-            RtlCompareMemory(File->Check, Check, sizeof(Check)) != sizeof(Check))
+        SymCryptSha256((PCBYTE)&Raw.V1, FIELD_OFFSET(LSAP_KEY_FILE_V1, Check), Check);
+        if (RtlCompareMemory(Raw.V1.Magic, LsapKeyFileMagic, sizeof(Raw.V1.Magic)) != sizeof(Raw.V1.Magic) ||
+            Raw.V1.Version != LSAP_KEY_FILE_VERSION_1 ||
+            Raw.V1.Algorithm != LSAP_ALGORITHM_AES_GCM ||
+            RtlCompareMemory(Raw.V1.Check, Check, sizeof(Check)) != sizeof(Check))
         {
             Status = STATUS_INTERNAL_DB_CORRUPTION;
         }
+        else
+        {
+            /* No flags: the conversion state of the store comes from the registry this once (upgrade) */
+            RtlZeroMemory(File, sizeof(*File));
+            RtlCopyMemory(File->Magic, Raw.V1.Magic, sizeof(File->Magic));
+            File->Version = LSAP_KEY_FILE_VERSION_1;
+            File->Algorithm = Raw.V1.Algorithm;
+            RtlCopyMemory(File->KeyId, Raw.V1.KeyId, sizeof(File->KeyId));
+            RtlCopyMemory(File->Key, Raw.V1.Key, sizeof(File->Key));
+        }
     }
+    else if (NT_SUCCESS(Status))
+    {
+        LsapKeyFileChecksum(&Raw.V2, Check);
+        if (RtlCompareMemory(Raw.V2.Magic, LsapKeyFileMagic, sizeof(Raw.V2.Magic)) != sizeof(Raw.V2.Magic) ||
+            Raw.V2.Version != LSAP_KEY_FILE_VERSION ||
+            Raw.V2.Algorithm != LSAP_ALGORITHM_AES_GCM ||
+            (Raw.V2.Flags & ~LSAP_KEY_FLAGS_KNOWN) != 0 ||
+            Raw.V2.Reserved != 0 ||
+            RtlCompareMemory(Raw.V2.Check, Check, sizeof(Check)) != sizeof(Check))
+        {
+            Status = STATUS_INTERNAL_DB_CORRUPTION;
+        }
+        else
+        {
+            RtlCopyMemory(File, &Raw.V2, sizeof(*File));
+        }
+    }
+
+    RtlSecureZeroMemory(&Raw, sizeof(Raw));
 
     if (!NT_SUCCESS(Status))
     {
@@ -474,9 +542,9 @@ LsapFlushKeyDirectory(VOID)
     }
 }
 
-/* Renames LsaKey.new to LsaKey (never over an existing LsaKey) and flushes it */
+/* Renames LsaKey.new to LsaKey (over an existing LsaKey only for Replace) and flushes it */
 static NTSTATUS
-LsapCommitKeyFile(HANDLE NewFileHandle)
+LsapCommitKeyFile(HANDLE NewFileHandle, BOOLEAN Replace)
 {
     /* The I/O manager checks the alignment of the information: no byte array */
     union
@@ -489,7 +557,7 @@ LsapCommitKeyFile(HANDLE NewFileHandle)
     NTSTATUS Status;
 
     RtlZeroMemory(&Buffer, sizeof(Buffer));
-    Rename->ReplaceIfExists = FALSE;
+    Rename->ReplaceIfExists = Replace;
     Rename->RootDirectory = NULL;
     Rename->FileNameLength = sizeof(LsapKeyFileName) - sizeof(WCHAR);
     RtlCopyMemory(Rename->FileName, LsapKeyFileName, Rename->FileNameLength);
@@ -515,18 +583,41 @@ LsapLoadKey(PLSAP_KEY_FILE File)
         LsapKeyState = STATUS_INTERNAL_ERROR;
         return;
     }
+    LsapKeyFlags = File->Flags;
     LsapKeyState = STATUS_SUCCESS;
 }
 
-/* Under LsapKeyLock: the key file is read once; a valid LsaKey.new left by a cut before its rename is finished */
-static VOID
-LsapLookForKey(VOID)
+/* Renames a valid LsaKey.new to LsaKey: a creation or a flag change cut short before its rename */
+static NTSTATUS
+LsapFinishKeyFile(BOOLEAN Replace)
 {
-    LSAP_KEY_FILE File;
     OBJECT_ATTRIBUTES ObjectAttributes;
     UNICODE_STRING Name;
     IO_STATUS_BLOCK Iosb;
     HANDLE FileHandle;
+    NTSTATUS Status;
+
+    RtlInitUnicodeString(&Name, LsapKeyFileNewName);
+    InitializeObjectAttributes(&ObjectAttributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = NtOpenFile(&FileHandle, DELETE | SYNCHRONIZE, &ObjectAttributes, &Iosb, 0,
+                        FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT);
+    if (NT_SUCCESS(Status))
+    {
+        Status = LsapCommitKeyFile(FileHandle, Replace);
+        NtClose(FileHandle);
+    }
+    return Status;
+}
+
+/*
+ * Under LsapKeyLock: the key file is read once. A valid LsaKey.new left by a cut before its rename is finished:
+ * when there is no LsaKey (a creation), or when it holds the same key as LsaKey with more flags (a flag change,
+ * LsapSetKeyFlags). Flags are only ever added, so a stale LsaKey.new can never take one away.
+ */
+static VOID
+LsapLookForKey(VOID)
+{
+    LSAP_KEY_FILE File, NewFile;
     NTSTATUS Status;
 
     LsapKeyLooked = TRUE;
@@ -534,6 +625,19 @@ LsapLookForKey(VOID)
     Status = LsapReadKeyFile(LsapKeyFileName, &File);
     if (NT_SUCCESS(Status))
     {
+        if (NT_SUCCESS(LsapReadKeyFile(LsapKeyFileNewName, &NewFile)))
+        {
+            if (RtlCompareMemory(NewFile.KeyId, File.KeyId, sizeof(File.KeyId)) == sizeof(File.KeyId) &&
+                RtlCompareMemory(NewFile.Key, File.Key, sizeof(File.Key)) == sizeof(File.Key) &&
+                (NewFile.Flags & File.Flags) == File.Flags &&
+                NewFile.Flags != File.Flags &&
+                NT_SUCCESS(LsapFinishKeyFile(TRUE)))
+            {
+                WARN("The LSA secret key file was completed after an interrupted change\n");
+                RtlCopyMemory(&File, &NewFile, sizeof(File));
+            }
+            RtlSecureZeroMemory(&NewFile, sizeof(NewFile));
+        }
         LsapDeleteFileByName(LsapKeyFileNewName);
         LsapLoadKey(&File);
         RtlSecureZeroMemory(&File, sizeof(File));
@@ -551,15 +655,7 @@ LsapLookForKey(VOID)
     Status = LsapReadKeyFile(LsapKeyFileNewName, &File);
     if (NT_SUCCESS(Status))
     {
-        RtlInitUnicodeString(&Name, LsapKeyFileNewName);
-        InitializeObjectAttributes(&ObjectAttributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
-        Status = NtOpenFile(&FileHandle, DELETE | SYNCHRONIZE, &ObjectAttributes, &Iosb, 0,
-                            FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT);
-        if (NT_SUCCESS(Status))
-        {
-            Status = LsapCommitKeyFile(FileHandle);
-            NtClose(FileHandle);
-        }
+        Status = LsapFinishKeyFile(FALSE);
         if (NT_SUCCESS(Status))
         {
             WARN("The LSA secret key file was completed after an interrupted creation\n");
@@ -574,13 +670,15 @@ LsapLookForKey(VOID)
     LsapKeyState = STATUS_OBJECT_NAME_NOT_FOUND;
 }
 
-/* Under LsapKeyLock: a new key, durable on disk before it is used */
+/*
+ * Under LsapKeyLock: writes File (its checksum is computed here) as LsaKey.new, flushed, then renames it to LsaKey
+ * (over an existing one only for Replace). The caller wipes File.
+ */
 static NTSTATUS
-LsapCreateKey(VOID)
+LsapWriteKeyFile(PLSAP_KEY_FILE File, BOOLEAN Replace)
 {
     SECURITY_DESCRIPTOR SdBuffer;
     ULONG_PTR DaclBuffer[16];
-    LSAP_KEY_FILE File;
     OBJECT_ATTRIBUTES ObjectAttributes;
     UNICODE_STRING Name;
     IO_STATUS_BLOCK Iosb;
@@ -592,18 +690,7 @@ LsapCreateKey(VOID)
     if (!NT_SUCCESS(Status))
         return Status;
 
-    RtlZeroMemory(&File, sizeof(File));
-    RtlCopyMemory(File.Magic, LsapKeyFileMagic, sizeof(File.Magic));
-    File.Version = LSAP_RECORD_VERSION;
-    File.Algorithm = LSAP_ALGORITHM_AES_GCM;
-    if (!SystemFunction036(File.KeyId, sizeof(File.KeyId)) ||
-        !SystemFunction036(File.Key, sizeof(File.Key)))
-    {
-        RtlSecureZeroMemory(&File, sizeof(File));
-        ERR("No random data for the LSA secret key: the secret is not stored\n");
-        return STATUS_INTERNAL_ERROR;
-    }
-    LsapKeyFileChecksum(&File, File.Check);
+    LsapKeyFileChecksum(File, File->Check);
 
     LsapDeleteFileByName(LsapKeyFileNewName);
 
@@ -622,18 +709,17 @@ LsapCreateKey(VOID)
                           0);
     if (!NT_SUCCESS(Status))
     {
-        RtlSecureZeroMemory(&File, sizeof(File));
         ERR("The LSA secret key file cannot be created (Status 0x%08lx)\n", Status);
         return Status;
     }
 
-    Status = NtWriteFile(FileHandle, NULL, NULL, NULL, &Iosb, &File, sizeof(File), NULL, NULL);
-    if (NT_SUCCESS(Status) && Iosb.Information != sizeof(File))
+    Status = NtWriteFile(FileHandle, NULL, NULL, NULL, &Iosb, File, sizeof(*File), NULL, NULL);
+    if (NT_SUCCESS(Status) && Iosb.Information != sizeof(*File))
         Status = STATUS_DISK_FULL;
     if (NT_SUCCESS(Status))
         Status = NtFlushBuffersFile(FileHandle, &Iosb);
     if (NT_SUCCESS(Status))
-        Status = LsapCommitKeyFile(FileHandle);
+        Status = LsapCommitKeyFile(FileHandle, Replace);
 
     if (!NT_SUCCESS(Status))
     {
@@ -641,17 +727,72 @@ LsapCreateKey(VOID)
         Disposition.DeleteFile = TRUE;
         NtSetInformationFile(FileHandle, &Iosb, &Disposition, sizeof(Disposition), FileDispositionInformation);
         NtClose(FileHandle);
-        RtlSecureZeroMemory(&File, sizeof(File));
         return Status;
     }
 
     /* Made now with its descriptor: only the FAT notice can come of this */
     (VOID)LsapCheckKeyFileSecurity(FileHandle);
     NtClose(FileHandle);
+    return STATUS_SUCCESS;
+}
 
-    LsapLoadKey(&File);
+/* Under LsapKeyLock: a new key with Flags, durable on disk before it is used */
+static NTSTATUS
+LsapCreateKey(ULONG Flags)
+{
+    LSAP_KEY_FILE File;
+    NTSTATUS Status;
+
+    RtlZeroMemory(&File, sizeof(File));
+    RtlCopyMemory(File.Magic, LsapKeyFileMagic, sizeof(File.Magic));
+    File.Version = LSAP_KEY_FILE_VERSION;
+    File.Algorithm = LSAP_ALGORITHM_AES_GCM;
+    File.Flags = Flags;
+    if (!SystemFunction036(File.KeyId, sizeof(File.KeyId)) ||
+        !SystemFunction036(File.Key, sizeof(File.Key)))
+    {
+        RtlSecureZeroMemory(&File, sizeof(File));
+        ERR("No random data for the LSA secret key: the secret is not stored\n");
+        return STATUS_INTERNAL_ERROR;
+    }
+
+    Status = LsapWriteKeyFile(&File, FALSE);
+    if (NT_SUCCESS(Status))
+    {
+        LsapLoadKey(&File);
+        Status = LsapKeyState;
+    }
     RtlSecureZeroMemory(&File, sizeof(File));
-    return LsapKeyState;
+    return Status;
+}
+
+/*
+ * Under LsapKeyLock, with a key loaded: adds Flags to the key file. The same key is written to LsaKey.new and
+ * renamed over LsaKey; a cut before the rename is finished by LsapLookForKey, a torn LsaKey.new is deleted.
+ */
+static NTSTATUS
+LsapSetKeyFlags(ULONG Flags)
+{
+    LSAP_KEY_FILE File;
+    NTSTATUS Status;
+
+    if ((LsapKeyFlags & Flags) == Flags)
+        return STATUS_SUCCESS;
+
+    RtlZeroMemory(&File, sizeof(File));
+    RtlCopyMemory(File.Magic, LsapKeyFileMagic, sizeof(File.Magic));
+    File.Version = LSAP_KEY_FILE_VERSION;
+    File.Algorithm = LSAP_ALGORITHM_AES_GCM;
+    File.Flags = LsapKeyFlags | Flags;
+    RtlCopyMemory(File.KeyId, LsapKeyId, sizeof(File.KeyId));
+    RtlCopyMemory(File.Key, LsapKeyHidden, sizeof(File.Key));
+    Status = SystemFunction041(File.Key, sizeof(File.Key), 0);
+    if (NT_SUCCESS(Status))
+        Status = LsapWriteKeyFile(&File, TRUE);
+    if (NT_SUCCESS(Status))
+        LsapKeyFlags = File.Flags;
+    RtlSecureZeroMemory(&File, sizeof(File));
+    return Status;
 }
 
 /*
@@ -683,7 +824,7 @@ LsapGetKey(BOOLEAN Create,
         LsapLookForKey();
 
     if (LsapKeyState == STATUS_OBJECT_NAME_NOT_FOUND && Create)
-        LsapCreateKey();
+        LsapCreateKey(LsapNewKeyFlags);
 
     Status = LsapKeyState;
     if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
@@ -1194,6 +1335,35 @@ LsapSetStoreProtected(PLSA_DB_OBJECT PolicyObject)
     return Status;
 }
 
+/*
+ * Records in the key file that the store holds no plaintext (making the key now if there is none): from then on
+ * values are never classified again, whatever the registry says. FALSE: not recorded, tried at the next start.
+ */
+static BOOLEAN
+LsapMarkStoreConverted(VOID)
+{
+    NTSTATUS Status;
+
+    RtlEnterCriticalSection(&LsapKeyLock);
+
+    LsapNewKeyFlags = LSAP_KEY_FLAG_CONVERTED;
+    if (!LsapKeyLooked)
+        LsapLookForKey();
+
+    if (LsapKeyState == STATUS_OBJECT_NAME_NOT_FOUND)
+        Status = LsapCreateKey(LSAP_KEY_FLAG_CONVERTED);
+    else if (NT_SUCCESS(LsapKeyState))
+        Status = LsapSetKeyFlags(LSAP_KEY_FLAG_CONVERTED);
+    else
+        Status = LsapKeyState;
+
+    RtlLeaveCriticalSection(&LsapKeyLock);
+
+    if (!NT_SUCCESS(Status))
+        ERR("The protection of the stored secrets cannot be recorded in the key file (Status 0x%08lx)\n", Status);
+    return NT_SUCCESS(Status);
+}
+
 static VOID
 LsapProtectStoredSecrets(PLSA_DB_OBJECT PolicyObject)
 {
@@ -1276,23 +1446,33 @@ LsapProtectStoredSecrets(PLSA_DB_OBJECT PolicyObject)
         ERR("LSA: %lu secrets, %lu values protected now, %lu unreadable, %s\n",
             Secrets, Converted, Refused, AllDone ? "done" : "not complete: retried at the next start");
 
+    /* PolicyObject's PolSecPr first, then the key file: a cut between them is finished by the next start */
     if (AllDone)
     {
         Status = LsapSetStoreProtected(PolicyObject);
         if (!NT_SUCCESS(Status))
             ERR("The protection of the stored secrets cannot be recorded (Status 0x%08lx)\n", Status);
+        else
+            LsapMarkStoreConverted();
     }
 }
 
 /*
- * At the start of lsass, before the RPC server: NewDatabase marks a database made now as converted; otherwise
- * plaintext values left by an earlier version are converted (once: until PolSecPr records it).
+ * At the start of lsass, before the RPC server. Whether stored values may still be legacy plaintext is decided by
+ * the key file, which only SYSTEM can write, not by the registry:
+ * - the key file has LSAP_KEY_FLAG_CONVERTED: nothing is classified, even if PolSecPr is gone (a registry writer
+ *   who deletes it and plants plaintext gets a secret that fails closed, never one that is adopted);
+ * - no flag (no key file yet, or a key file of the first version), and PolSecPr is set or the database is made
+ *   now: the flag is recorded (an install converted by the first version is not converted again);
+ * - no flag and no PolSecPr: plaintext left by a version before encryption is converted; PolSecPr, then the flag,
+ *   are recorded when every value is a record. Until then every start goes on with it.
  */
 VOID
 LsapInitSecretProtection(BOOLEAN NewDatabase)
 {
     PLSA_DB_OBJECT PolicyObject = NULL;
     ULONG Value = 0, Size = sizeof(Value);
+    BOOLEAN Converted;
     NTSTATUS Status;
 
     if (!LsapKeyLockReady)
@@ -1309,17 +1489,34 @@ LsapInitSecretProtection(BOOLEAN NewDatabase)
         return;
     }
 
-    if (NewDatabase)
+    RtlEnterCriticalSection(&LsapKeyLock);
+    if (!LsapKeyLooked)
+        LsapLookForKey();
+    Converted = NT_SUCCESS(LsapKeyState) && (LsapKeyFlags & LSAP_KEY_FLAG_CONVERTED);
+    RtlLeaveCriticalSection(&LsapKeyLock);
+
+    if (Converted)
+    {
+        LsapNewKeyFlags = LSAP_KEY_FLAG_CONVERTED;
+        Status = LsapGetObjectAttribute(PolicyObject, L"PolSecPr", &Value, &Size);
+        if (!NT_SUCCESS(Status) || Size != sizeof(Value) || Value != LSAP_STORE_PROTECTED)
+            ERR("LSA: the policy has lost its record of the protected secrets: ignored, the key file has it\n");
+    }
+    else if (NewDatabase)
     {
         Status = LsapSetStoreProtected(PolicyObject);
         if (!NT_SUCCESS(Status))
             ERR("The protection of the stored secrets cannot be recorded (Status 0x%08lx)\n", Status);
+        else
+            LsapMarkStoreConverted();
     }
     else
     {
         Status = LsapGetObjectAttribute(PolicyObject, L"PolSecPr", &Value, &Size);
         if (!NT_SUCCESS(Status) || Size != sizeof(Value) || Value != LSAP_STORE_PROTECTED)
             LsapProtectStoredSecrets(PolicyObject);
+        else
+            LsapMarkStoreConverted();
     }
 
     LsapCloseDbObject(PolicyObject);
