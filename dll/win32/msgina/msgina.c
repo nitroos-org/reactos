@@ -766,11 +766,22 @@ DoUnlockLogon(
         return Status;
     }
 
-    UnlockUser = GetTokenInfo(hToken, TokenUser);
+    Status = STATUS_SUCCESS;
+
+    /* A logon that did not hand back a token, or a token whose user cannot be read, proves nothing: refuse */
+    if (hToken != NULL)
+        UnlockUser = GetTokenInfo(hToken, TokenUser);
+    if (UnlockUser == NULL)
+    {
+        WARN("The unlock logon gave no usable token\n");
+        Status = STATUS_UNSUCCESSFUL;
+        goto done;
+    }
+
     if (pgContext->UserToken != NULL)
         SessionUser = GetTokenInfo(pgContext->UserToken, TokenUser);
 
-    if ((UnlockUser != NULL && SessionUser != NULL &&
+    if ((SessionUser != NULL &&
          RtlEqualSid(UnlockUser->User.Sid, SessionUser->User.Sid)) ||
         (SessionUser == NULL && _wcsicmp(UserName, pgContext->UserName) == 0))
     {
@@ -802,9 +813,10 @@ done:
         HeapFree(GetProcessHeap(), 0, UnlockUser);
 
     /* The token of the unlock logon is not kept (and with it the logon session goes) */
-    CloseHandle(hToken);
+    if (hToken != NULL)
+        CloseHandle(hToken);
 
-    return STATUS_SUCCESS;
+    return Status;
 }
 
 
