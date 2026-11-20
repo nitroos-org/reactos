@@ -402,6 +402,53 @@ static void TestOrderingGroups(HMODULE Avrt)
 #undef GROUP_FAILS
 }
 
+static DWORD g_SharedIndex;
+static HANDLE g_SharedHandle;
+static BOOL g_JoinedShared, g_JoinedOther;
+static DWORD g_JoinedIndex, g_OtherError;
+
+static DWORD WINAPI JoinSharedTask(PVOID Context)
+{
+    DWORD Index = g_SharedIndex;
+    HANDLE Handle = pSet(L"games", &Index);
+
+    g_JoinedShared = Handle != NULL;
+    g_JoinedIndex = Index;
+    if (Handle)
+    {
+        ok(Handle != g_SharedHandle, "the second thread got the handle of the first\n");
+        pRevert(Handle);
+    }
+    Index = g_SharedIndex;
+    SetLastError(0xdeadbeef);
+    Handle = pSet(L"Audio", &Index);
+    g_JoinedOther = Handle != NULL;
+    g_OtherError = GetLastError();
+    if (Handle)
+        pRevert(Handle);
+    return 0;
+}
+
+/* another thread joins the task a thread is in with its index and the name of the task; with the index of another task it is refused */
+static void TestSharedTask(void)
+{
+    DWORD Index = 0;
+    HANDLE Thread;
+
+    g_SharedHandle = SetTask(L"Games", &Index);
+    ok(g_SharedHandle != NULL, "Games: %lu\n", g_Error);
+    if (!g_SharedHandle)
+        return;
+    g_SharedIndex = Index;
+    Thread = CreateThread(NULL, 0, JoinSharedTask, NULL, 0, NULL);
+    WaitForSingleObject(Thread, 10000);
+    CloseHandle(Thread);
+    ok(g_JoinedShared, "a second thread was refused the task by its index\n");
+    ok(g_JoinedIndex == Index, "the second thread got index %lu, expected %lu\n", g_JoinedIndex, Index);
+    ok(!g_JoinedOther && g_OtherError == ERROR_INVALID_TASK_INDEX, "the index of Games used for Audio: %d, error %lu\n", g_JoinedOther, g_OtherError);
+    ok(pRevert(g_SharedHandle), "revert failed\n");
+}
+
 START_TEST(AvrtScheduler)
 {
     HMODULE Avrt = LoadLibraryW(L"avrt.dll");
@@ -426,6 +473,7 @@ START_TEST(AvrtScheduler)
     TestRegistration();
     TestMax();
     TestEndedThreads();
+    TestSharedTask();
     TestOrderingGroups(Avrt);
     if (MakeCustomTasks())
         TestCustomTasks();

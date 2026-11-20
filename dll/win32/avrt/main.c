@@ -203,7 +203,8 @@ static HANDLE join_tasks(const WCHAR *name1, const WCHAR *name2, DWORD *index)
     int category1, category2, category;
     DWORD priority1, priority2, priority;
     const WCHAR *name;
-    TASK *task, *existing;
+    TASK *task, *existing, *member;
+    DWORD shared_index = 0;
     DWORD thread_id = GetCurrentThreadId();
 
     if (!name1 || !index)
@@ -248,9 +249,17 @@ static HANDLE join_tasks(const WCHAR *name1, const WCHAR *name2, DWORD *index)
     }
     if (*index != 0)
     {
-        SetLastError(ERROR_INVALID_TASK_INDEX);
-        LeaveCriticalSection(&g_lock);
-        return NULL;
+        /* a thread joins the task another thread is in by giving the index of that task and the name it was made with */
+        for (member = g_tasks; member; member = member->Next)
+            if (member->Index == *index && !_wcsicmp(member->Name, name) && WaitForSingleObject(member->Thread, 0) == WAIT_TIMEOUT)
+                break;
+        if (!member)
+        {
+            SetLastError(ERROR_INVALID_TASK_INDEX);
+            LeaveCriticalSection(&g_lock);
+            return NULL;
+        }
+        shared_index = member->Index; /* (the list may be trimmed below) */
     }
 
     if (g_count >= REAP_AT)
@@ -266,7 +275,7 @@ static HANDLE join_tasks(const WCHAR *name1, const WCHAR *name2, DWORD *index)
         return NULL;
     }
     task->ThreadId = thread_id;
-    task->Index = g_next_index++;
+    task->Index = shared_index ? shared_index : g_next_index++;
     task->Handle = (HANDLE)g_next_handle;
     g_next_handle += 4;
     wcscpy(task->Name, name);
