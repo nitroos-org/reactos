@@ -123,6 +123,7 @@ extern void func_TokenIntegrity(void);
 extern void func_TokenLogonSid(void);
 extern void func_WriteRestrictedToken(void);
 extern void func_TokenQueryParity(void);
+extern void func_OpenProcessTokenLimited(void);
 extern void func_ServiceAccessCheck(void);
 extern void func_ServiceArgs(void);
 extern void func_ServiceControllerQuery(void);
@@ -293,6 +294,7 @@ const struct test winetest_testlist[] =
     { "TokenLogonSid", func_TokenLogonSid },
     { "WriteRestrictedToken", func_WriteRestrictedToken },
     { "TokenQueryParity", func_TokenQueryParity },
+    { "OpenProcessTokenLimited", func_OpenProcessTokenLimited },
     { "ServiceAccessCheck", func_ServiceAccessCheck },
     { "ServiceArgs", func_ServiceArgs },
     { "ServiceControllerQuery", func_ServiceControllerQuery },

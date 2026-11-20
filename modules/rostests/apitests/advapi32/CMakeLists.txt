@@ -106,6 +106,7 @@ list(APPEND SOURCE
     TokenLogonSid.c
     WriteRestrictedToken.c
     TokenQueryParity.c
+    OpenProcessTokenLimited.c
     ServiceAccessCheck.c
     ServiceArgs.c
     ServiceControllerQuery.c
