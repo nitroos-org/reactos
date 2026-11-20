@@ -108,6 +108,7 @@ static LIST_ENTRY IgmpInterfaces;
 static ULONG IgmpInterfaceCount;
 static KTIMER IgmpTimer;
 static KDPC IgmpDpc;
+static ULONGLONG IgmpTimerDue;      /* interrupt time the timer is set for, 0: not set (IgmpArm, IgmpDpcRoutine) */
 static BOOLEAN IgmpStarted;
 
 static ULONGLONG
@@ -206,8 +207,14 @@ IgmpArm(VOID)
     }
     if (!Next || !IgmpStarted)
         return;
-    /* relative, at least 1 ms */
-    Due.QuadPart = -(LONGLONG)((Next > Now + MS(1)) ? (Next - Now) : MS(1));
+    /* at least 1 ms from now; a deadline already armed is never moved later: setting the timer again for every query
+       would push something due now out by 1 ms each time, and queries 1 ms apart would hold every report back */
+    if (Next < Now + MS(1))
+        Next = Now + MS(1);
+    if (IgmpTimerDue && IgmpTimerDue <= Next)
+        return;
+    IgmpTimerDue = Next;
+    Due.QuadPart = -(LONGLONG)(Next - Now);
     KeSetTimer(&IgmpTimer, Due, &IgmpDpc);
 }
 
@@ -499,6 +506,9 @@ IgmpDpcRoutine(PKDPC Dpc, PVOID Context, PVOID Arg1, PVOID Arg2)
     for (n = 0; n < IGMP_SENDS_PER_RUN; n++)
     {
         KeAcquireSpinLock(&IgmpLock, &OldIrql);
+        /* the timer fired: whatever comes due from now on sets it again (IgmpArm) */
+        if (n == 0)
+            IgmpTimerDue = 0;
         if (!S)
         {
             /* no memory for a message now: try again later */
