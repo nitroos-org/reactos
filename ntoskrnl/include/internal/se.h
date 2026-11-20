@@ -404,6 +404,15 @@ SepTokenIsOwner(
     _In_ PSECURITY_DESCRIPTOR SecurityDescriptor,
     _In_ BOOLEAN TokenLocked);
 
+/*
+ * The token was made with NtFilterToken(WRITE_RESTRICTED): the access check
+ * compares the restricting SIDs for write access only. A TokenFlags bit of
+ * the kernel's own: TOKEN_WRITE_RESTRICTED (0x8) is the flag this kernel uses
+ * for TOKEN_HAS_ADMIN_GROUP, and no flag of a token is set from user mode.
+ * It is not reported through TokenAccessInformation.
+ */
+#define SEP_TOKEN_WRITE_RESTRICTED  0x00010000
+
 /* Lowbox (AppContainer) tokens, lowbox.c */
 
 /*

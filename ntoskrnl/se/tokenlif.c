@@ -812,9 +812,12 @@ Quit:
     return Status;
 }
 
-/* The headers declare the flag for NT 6 and newer only; NtFilterToken takes it whatever this kernel is built for */
+/* The headers declare the flags for NT 6 and newer only; NtFilterToken takes them whatever this kernel is built for */
 #ifndef LUA_TOKEN
 #define LUA_TOKEN 0x4
+#endif
+#ifndef WRITE_RESTRICTED
+#define WRITE_RESTRICTED 0x8
 #endif
 
 /**
@@ -1000,6 +1003,18 @@ SepPerformTokenFiltering(
     /* Ensure that the source token is valid, and lock it */
     ASSERT(Token);
     SepAcquireTokenLockShared(Token);
+
+    /*
+     * The restricting SIDs of a token cannot be replaced: the list a caller
+     * gives would take the place of the one the token has, and that loosens
+     * the token (also a write restricted one). Windows Server 2022 refuses
+     * every list for a token that has restricting SIDs.
+     */
+    if (RestrictedSidsIntoToken != NULL && Token->RestrictedSidCount != 0)
+    {
+        SepReleaseTokenLock(Token);
+        return STATUS_INVALID_PARAMETER;
+    }
 
     /* Assume the caller doesn't want privileges disabled */
     WantPrivilegesDisabled = FALSE;
@@ -1361,6 +1376,17 @@ SepPerformTokenFiltering(
     {
         /* The caller wants an inert token, store the TOKEN_SANDBOX_INERT flag now */
         AccessToken->TokenFlags |= TOKEN_SANDBOX_INERT;
+    }
+
+    /*
+     * The restricting SIDs of the new token are compared for write access
+     * only. A token that has restricting SIDs already is not turned into a
+     * write restricted one (that would loosen it); a write restricted source
+     * stays one (the flag is copied with the other flags above).
+     */
+    if ((PrivilegeFlags & WRITE_RESTRICTED) && Token->RestrictedSidCount == 0)
+    {
+        AccessToken->TokenFlags |= SEP_TOKEN_WRITE_RESTRICTED;
     }
 
     /*

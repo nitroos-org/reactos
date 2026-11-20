@@ -2646,9 +2646,9 @@ SeTokenIsWriteRestricted(
 {
     PAGED_CODE();
 
-    // NOTE: NT 5.1 SP2 x86 checks the SE_BACKUP_PRIVILEGES_CHECKED flag
-    // while Vista+ checks the TOKEN_WRITE_RESTRICTED flag as one expects.
-    return (((PTOKEN)Token)->TokenFlags & SE_BACKUP_PRIVILEGES_CHECKED) != 0;
+    // NOTE: TOKEN_WRITE_RESTRICTED (0x8) is the flag of TOKEN_HAS_ADMIN_GROUP
+    // in this kernel, so a write restricted token carries a flag of its own.
+    return (((PTOKEN)Token)->TokenFlags & SEP_TOKEN_WRITE_RESTRICTED) != 0;
 }
 
 /**
