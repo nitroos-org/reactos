@@ -50,7 +50,7 @@ list(APPEND SOURCE
     inc/ws2_32.h)
 
 if(DLL_EXPORT_VERSION GREATER_EQUAL 0x600)
-    list(APPEND PCH_SKIP_SOURCE src/poll.c)
+    list(APPEND PCH_SKIP_SOURCE src/poll.c src/connbyname.c)
 endif()
 
 add_library(ws2_32 MODULE
