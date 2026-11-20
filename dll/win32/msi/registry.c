@@ -380,7 +380,7 @@ static BOOL userdata_is_admin( void )
     return state == 1;
 }
 
-static LONG msi_userdata_open( const WCHAR *keypath, REGSAM access, BOOL create, HKEY *key )
+static LONG userdata_open( const WCHAR *keypath, REGSAM access, BOOL create, BOOL allow_hku, HKEY *key )
 {
     WCHAR sid[128], path[0x200];
     const WCHAR *rest, *own;
@@ -394,7 +394,7 @@ static LONG msi_userdata_open( const WCHAR *keypath, REGSAM access, BOOL create,
     {
         if (create) return RegCreateKeyExW( HKEY_LOCAL_MACHINE, keypath, 0, NULL, 0, access, NULL, key, NULL );
         r = RegOpenKeyExW( HKEY_LOCAL_MACHINE, keypath, 0, access, key );
-        if ((r == ERROR_FILE_NOT_FOUND || r == ERROR_PATH_NOT_FOUND) && admin &&
+        if ((r == ERROR_FILE_NOT_FOUND || r == ERROR_PATH_NOT_FOUND) && admin && allow_hku &&
             userdata_split( keypath, sid, ARRAY_SIZE(sid), &rest ) && wcsicmp( sid, L"S-1-5-18" ) &&
             !wcschr( sid, '\\' ))
         {
@@ -427,6 +427,11 @@ static LONG msi_userdata_open( const WCHAR *keypath, REGSAM access, BOOL create,
     if (r == ERROR_FILE_NOT_FOUND || r == ERROR_PATH_NOT_FOUND)
         r = RegOpenKeyExW( HKEY_LOCAL_MACHINE, keypath, 0, access, key );
     return r;
+}
+
+static LONG msi_userdata_open( const WCHAR *keypath, REGSAM access, BOOL create, HKEY *key )
+{
+    return userdata_open( keypath, access, create, TRUE, key );
 }
 
 /* delete the key child of the HKLM UserData path parent; the own SID is deleted from both places */
@@ -912,7 +917,12 @@ UINT MSIREG_OpenUserDataProductPatchesKey(LPCWSTR product, MSIINSTALLCONTEXT con
 #endif
 }
 
+#ifdef __REACTOS__
+static UINT open_install_props(LPCWSTR szProduct, MSIINSTALLCONTEXT dwContext, LPCWSTR szUserSid, HKEY *key, BOOL create,
+                               BOOL allow_hku)
+#else
 UINT MSIREG_OpenInstallProps(LPCWSTR szProduct, MSIINSTALLCONTEXT dwContext, LPCWSTR szUserSid, HKEY *key, BOOL create)
+#endif
 {
     static const WCHAR fmtW[] =
         L"Software\\Microsoft\\Windows\\CurrentVersion\\Installer\\UserData\\%s\\Products\\%s\\InstallProperties";
@@ -937,12 +947,26 @@ UINT MSIREG_OpenInstallProps(LPCWSTR szProduct, MSIINSTALLCONTEXT dwContext, LPC
         LocalFree(usersid);
     }
 #ifdef __REACTOS__
-    return msi_userdata_open( keypath, access, create, key );
+    return userdata_open( keypath, access, create, allow_hku, key );
 #else
     if (create) return RegCreateKeyExW(HKEY_LOCAL_MACHINE, keypath, 0, NULL, 0, access, NULL, key, NULL);
     return RegOpenKeyExW(HKEY_LOCAL_MACHINE, keypath, 0, access, key);
 #endif
 }
+
+#ifdef __REACTOS__
+UINT MSIREG_OpenInstallProps(LPCWSTR szProduct, MSIINSTALLCONTEXT dwContext, LPCWSTR szUserSid, HKEY *key, BOOL create)
+{
+    return open_install_props( szProduct, dwContext, szUserSid, key, create, TRUE );
+}
+
+/* the product data of another user as an administrator may trust it: never from that user's own hive, whose
+   values (LocalPackage is a path the engine opens) the user wrote */
+UINT MSIREG_OpenInstallPropsTrusted(LPCWSTR szProduct, MSIINSTALLCONTEXT dwContext, LPCWSTR szUserSid, HKEY *key)
+{
+    return open_install_props( szProduct, dwContext, szUserSid, key, FALSE, FALSE );
+}
+#endif
 
 UINT MSIREG_DeleteUserDataProductKey(LPCWSTR szProduct, MSIINSTALLCONTEXT context)
 {
