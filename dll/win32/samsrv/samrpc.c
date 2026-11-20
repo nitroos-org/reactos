@@ -8251,6 +8251,16 @@ SamrChangePasswordUser(IN SAMPR_HANDLE UserHandle,
     }
 
     /*
+     * No stored hash (an account whose password was never set, "net user x /add") is the blank password, as for a
+     * logon: decrypt and compare with the hash of the empty password. The buffers were used uninitialized here: such an
+     * account's empty old password was refused (and counted as a bad password) while Windows accepts it.
+     */
+    if (!StoredLmPresent)
+        RtlCopyMemory(&StoredLmPassword, &EmptyLmHash, sizeof(StoredLmPassword));
+    if (!StoredNtPresent)
+        RtlCopyMemory(&StoredNtPassword, &EmptyNtHash, sizeof(StoredNtPassword));
+
+    /*
      * An account without a stored LM hash (NetUserAdd and the change path store none) cannot
      * be checked against the LM half of the request, which a client always sends for an old
      * password of up to 14 characters. Verify the NT hash alone then, and do not store an LM
