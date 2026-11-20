@@ -40,6 +40,7 @@
 @ cdecl SelectPartition(ptr long long)
 @ cdecl IsMbrDiskUnusableForUefi(ptr)
 @ cdecl GetUefiInstallRefusal(ptr)
+@ cdecl WasEfiFallbackLoaderKept()
 @ cdecl -ret64 GetEfiPartitionsOverhead(ptr)
 
 ;; partinfo

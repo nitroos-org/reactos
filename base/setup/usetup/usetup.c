@@ -4037,6 +4037,23 @@ BootLoaderHardDiskPage(PINPUT_RECORD Ir)
         if (!NT_SUCCESS(EntryStatus))
             DPRINT1("AddPartitionBootEntry() failed: Status 0x%lx\n", EntryStatus);
     }
+    if (Status == STATUS_SUCCESS && USetupData.ArchType == ARCH_Efi && WasEfiFallbackLoaderKept())
+    {
+        /* Another system's loader is at \EFI\BOOT\BOOTX64.EFI: ours is only in its own directory */
+        SetupLogFormat("The boot loader of another system was found at \\EFI\\BOOT and kept; "
+                       BRAND_PRODUCT_NAME " was installed to \\EFI\\NITROOS: add that file to the firmware boot menu");
+        if (!IsUnattendedSetup)
+        {
+            PopupError("The EFI system partition holds the boot loader of another\n"
+                       "operating system in \\EFI\\BOOT, which was left as it is.\n"
+                       BRAND_PRODUCT_NAME " was installed to \\EFI\\NITROOS: add the file\n"
+                       "BOOTX64.EFI there as a boot option in the firmware menu of\n"
+                       "your computer to start it.\n"
+                       "Press ENTER to continue.",
+                       MUIGetString(STRING_CONTINUE),
+                       Ir, POPUP_WAIT_ENTER);
+        }
+    }
     if (Status == STATUS_SUCCESS)
         return TRUE; /* Successful installation */
 
