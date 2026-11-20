@@ -37,8 +37,8 @@
  *    list whose count fits its cell, a class inside its cell.
  *  - Values: signature 'vk', a name inside the cell, small data at most 4
  *    bytes, no data cell only for no data, other data in one cell that holds
- *    all of it (ReactOS has no reader for big data chains: a value whose
- *    data is not one such cell is removed).
+ *    all of it or, in a hive of format 1.4 or later, in a sound big data
+ *    chain (a 'db' cell, its list, its segments; see CmpCheckBigData).
  *  - Security: a key's 'sk' cell is in a ring of sound 'sk' cells (each named
  *    by its neighbours, descriptor inside the cell) and holds a valid
  *    self-relative descriptor; reference counts are recounted.
@@ -584,6 +584,7 @@ typedef struct _CMP_CHECK
     ULONG ValuesRemoved;
     ULONG ListsPurged;
     ULONG FieldsReset;
+    ULONG BigDataDropped;   /* of ValuesRemoved: values whose big data chain is not sound */
 } CMP_CHECK, *PCMP_CHECK;
 
 static
@@ -814,6 +815,19 @@ CmpClaimCell(
     return TRUE;
 }
 
+/* Take back the use CmpClaimCell gave Cell (a big data chain that is not sound) */
+static
+VOID
+CmpUnclaimCell(
+    _In_ PCMP_CHECK Ctx,
+    _In_ HCELL_INDEX Cell)
+{
+    ULONG Type = HvGetCellType(Cell);
+    ULONG Bit = (Cell & ~HCELL_TYPE_MASK) >> 3;
+
+    Ctx->Map.Used[Type][Bit >> 5] &= ~(1UL << (Bit & 31));
+}
+
 /* A cell checked and given its use; NULL if it is not a cell, too small, or in use */
 static
 PVOID
@@ -978,6 +992,80 @@ CmpCheckKeySecurity(
 
 /* VALUES *********************************************************************/
 
+/*
+ * Is the big data of a value (Length bytes, more than CM_KEY_VALUE_BIG, in a
+ * hive of format 1.4 or later; see cmlib.h) a sound chain: Cell is a 'db'
+ * cell whose segment count is at least the number of segments the data
+ * needs and whose list cell holds that many entries; every entry is the start
+ * of an allocated cell, every segment but the last holds CM_KEY_VALUE_BIG
+ * bytes, the last one the rest. Every cell of the chain (the 'db' cell, the
+ * list, each segment) is taken for this value: a cell used twice (by another
+ * value, a key, an 'sk' ring, twice in the list, the list or the 'db' cell
+ * itself listed as a segment) makes the chain unsound, so there is no cycle.
+ * The readers (cmvalue.c) read only the segments the data needs; a chain
+ * that lists more keeps them (they are freed with the value).
+ *
+ * The cells are taken only once all of them are found to be what they must
+ * be, and a chain that turns out to use a cell twice gives back what it took:
+ * a value that is dropped leaves no cell taken, so a key or value that comes
+ * later in the walk and owns such a cell is not lost for it.
+ */
+static
+BOOLEAN
+CmpCheckBigData(
+    _In_ PCMP_CHECK Ctx,
+    _In_ HCELL_INDEX Cell,
+    _In_ ULONG Length)
+{
+    PCM_BIG_DATA BigData;
+    PHCELL_INDEX List;
+    ULONG Count, Needed, i, Want;
+
+    BigData = CmpMapCell(Ctx, Cell, sizeof(CM_BIG_DATA), NULL);
+    if (!BigData || BigData->Signature != CM_BIG_DATA_SIGNATURE)
+        return FALSE;
+
+    /* A length below 2^31 may need more segments than a 16-bit count holds */
+    Needed = CMP_BIG_DATA_SEGMENTS(Length);
+    Count = BigData->Count;
+    if (Needed > MAXUSHORT || Count < Needed)
+        return FALSE;
+
+    List = CmpMapCell(Ctx, BigData->List, Count * sizeof(HCELL_INDEX), NULL);
+    if (!List)
+        return FALSE;
+
+    for (i = 0; i < Count; i++)
+    {
+        /* Count >= Needed >= 2: the last segment holds what the others do not */
+        Want = (i + 1 < Count) ? CM_KEY_VALUE_BIG :
+               (Length > i * CM_KEY_VALUE_BIG) ? Length - i * CM_KEY_VALUE_BIG : 0;
+        if (!CmpMapCell(Ctx, List[i], Want, NULL))
+            return FALSE;
+    }
+
+    /* Every cell once: the 'db' cell, the list, the segments */
+    if (!CmpClaimCell(Ctx, Cell))
+        return FALSE;
+    if (!CmpClaimCell(Ctx, BigData->List))
+    {
+        CmpUnclaimCell(Ctx, Cell);
+        return FALSE;
+    }
+    for (i = 0; i < Count; i++)
+    {
+        if (!CmpClaimCell(Ctx, List[i]))
+        {
+            while (i-- > 0)
+                CmpUnclaimCell(Ctx, List[i]);
+            CmpUnclaimCell(Ctx, BigData->List);
+            CmpUnclaimCell(Ctx, Cell);
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
 /* Is the value at Cell sound; its name length in bytes as a Unicode string, its data length */
 static
 BOOLEAN
@@ -988,7 +1076,7 @@ CmpCheckValue(
     _Out_ PULONG DataBytes)
 {
     PCM_KEY_VALUE Value;
-    ULONG Size, Length;
+    ULONG Size, Length, DataSize;
 
     Value = CmpTakeCell(Ctx, Cell, FIELD_OFFSET(CM_KEY_VALUE, Name), &Size);
     if (!Value ||
@@ -1018,9 +1106,22 @@ CmpCheckValue(
         if (Length != 0)
             return FALSE;
     }
+    else if (CmpIsKeyValueBig(Ctx->Hive, Length) &&
+             CmpMapCell(Ctx, Value->Data, 0, &DataSize) &&
+             DataSize < Length)
+    {
+        /* Big data (1.4+, see cmlib.h): a 'db' cell and its chain */
+        if (!CmpCheckBigData(Ctx, Value->Data, Length))
+        {
+            DPRINT1("Value 0x%x: the big data chain at 0x%x (%lu bytes) is not sound\n",
+                    Cell, Value->Data, (unsigned long)Length);
+            Ctx->BigDataDropped++;
+            return FALSE;
+        }
+    }
     else
     {
-        /* One cell holds all of the data (a big data chain does not, see above) */
+        /* One cell holds all of the data */
         if (!CmpTakeCell(Ctx, Value->Data, Length, NULL))
             return FALSE;
     }
@@ -1908,10 +2009,10 @@ CmCheckRegistry(
 
     if (Ctx.KeysRemoved || Ctx.ValuesRemoved || Ctx.ListsPurged || Ctx.FieldsReset || Ctx.Stats.SecurityReset)
     {
-        DPRINT1("Hive 0x%p repaired: %lu keys and %lu values removed, %lu lists dropped, %lu fields reset, "
-                "%lu keys lost a security cell that is not valid\n",
+        DPRINT1("Hive 0x%p repaired: %lu keys and %lu values removed (%lu of them big data chains that are "
+                "not sound), %lu lists dropped, %lu fields reset, %lu keys lost a security cell that is not valid\n",
                 Hive, (unsigned long)Ctx.KeysRemoved, (unsigned long)Ctx.ValuesRemoved,
-                (unsigned long)Ctx.ListsPurged, (unsigned long)Ctx.FieldsReset,
+                (unsigned long)Ctx.BigDataDropped, (unsigned long)Ctx.ListsPurged, (unsigned long)Ctx.FieldsReset,
                 (unsigned long)Ctx.Stats.SecurityReset);
     }
     if (Ctx.Stats.Hashes || Ctx.Stats.Sorted || Ctx.Stats.Skipped)
