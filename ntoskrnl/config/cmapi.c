@@ -3391,12 +3391,6 @@ CmSaveKey(IN PCM_KEY_CONTROL_BLOCK Kcb,
         goto Cleanup;
     }
 
-#if DBG
-    /* Make sure this control block has a sane hive */
-    CheckStatus = CmpCheckLiveHive(HiveToValidate);
-    ASSERT(CM_CHECK_REGISTRY_SUCCESS(CheckStatus));
-#endif
-
     /* Create a new hive that will hold the key */
     Status = CmpInitializeHive(&KeyHive,
                                HINIT_CREATE,
@@ -3411,12 +3405,29 @@ CmSaveKey(IN PCM_KEY_CONTROL_BLOCK Kcb,
                                CM_CHECK_REGISTRY_DONT_PURGE_VOLATILES);
     if (!NT_SUCCESS(Status)) goto Cleanup;
 
+    /*
+     * The copy reads every key and value below this one without their KCB
+     * locks, and a writer of any of them holds only its own KCB lock and the
+     * flusher lock of the hive shared: hold that lock exclusively while the
+     * hive is read (as NtFlushKey does), so that no value is read while it
+     * changes (a data length and a data cell of two different writes, a big
+     * data chain being freed).
+     */
+    CmpLockHiveFlusherExclusive((PCMHIVE)Kcb->KeyHive);
+
+#if DBG
+    /* Make sure this control block has a sane hive */
+    CheckStatus = CmpCheckLiveHive(HiveToValidate);
+    ASSERT(CM_CHECK_REGISTRY_SUCCESS(CheckStatus));
+#endif
+
     /* Copy the key recursively into the new hive */
     Status = CmpDeepCopyKey(Kcb->KeyHive,
                             Kcb->KeyCell,
                             &KeyHive->Hive,
                             Stable,
                             &KeyHive->Hive.BaseBlock->RootCell);
+    CmpUnlockHiveFlusher((PCMHIVE)Kcb->KeyHive);
     if (!NT_SUCCESS(Status)) goto Cleanup;
 
     /* Set the primary handle of the hive */
@@ -3437,7 +3448,9 @@ Cleanup:
     if (NT_SUCCESS(Status))
     {
         /* Before we say goodbye, make sure the hive is still OK */
+        CmpLockHiveFlusherExclusive(HiveToValidate);
         CheckStatus = CmpCheckLiveHive(HiveToValidate);
+        CmpUnlockHiveFlusher(HiveToValidate);
         ASSERT(CM_CHECK_REGISTRY_SUCCESS(CheckStatus));
     }
 #endif
@@ -3663,10 +3676,14 @@ CmSaveMergedKeys(IN PCM_KEY_CONTROL_BLOCK HighKcb,
     }
 
 #if DBG
-    /* Make sure that both the high and low precedence hives are OK */
+    /* Make sure that both the high and low precedence hives are OK (each read with no writer in it, see below) */
+    CmpLockHiveFlusherExclusive(HighHiveToValidate);
     CheckStatus = CmpCheckLiveHive(HighHiveToValidate);
+    CmpUnlockHiveFlusher(HighHiveToValidate);
     ASSERT(CM_CHECK_REGISTRY_SUCCESS(CheckStatus));
+    CmpLockHiveFlusherExclusive(LowHiveToValidate);
     CheckStatus = CmpCheckLiveHive(LowHiveToValidate);
+    CmpUnlockHiveFlusher(LowHiveToValidate);
     ASSERT(CM_CHECK_REGISTRY_SUCCESS(CheckStatus));
 #endif
 
@@ -3686,7 +3703,9 @@ CmSaveMergedKeys(IN PCM_KEY_CONTROL_BLOCK HighKcb,
         goto done;
 
     /* Copy the high precedence key into the new hive without its volatile subkeys. Its values come first in the
-     * result, in its order */
+     * result, in its order. The subtree is read without the KCB locks of its keys: the flusher lock of its hive,
+     * which every writer of the hive holds shared, is held exclusively meanwhile (one hive at a time) */
+    CmpLockHiveFlusherExclusive((PCMHIVE)HighKcb->KeyHive);
     Status = CmpDeepCopyKeyInternal(HighKcb->KeyHive,
                                     HighKcb->KeyCell,
                                     &KeyHive->Hive,
@@ -3694,16 +3713,19 @@ CmSaveMergedKeys(IN PCM_KEY_CONTROL_BLOCK HighKcb,
                                     Stable,
                                     TRUE,
                                     &KeyHive->Hive.BaseBlock->RootCell);
+    CmpUnlockHiveFlusher((PCMHIVE)HighKcb->KeyHive);
     if (!NT_SUCCESS(Status))
         goto done;
 
     /* Merge the low precedence key into the copy: it adds the values of other names (compared without case, the
      * high key's spelling stays) after those, and the subkeys the copy does not have; subkeys of both are merged */
+    CmpLockHiveFlusherExclusive((PCMHIVE)LowKcb->KeyHive);
     Status = CmpMergeKeyInternal(LowKcb->KeyHive,
                                  LowKcb->KeyCell,
                                  &KeyHive->Hive,
                                  KeyHive->Hive.BaseBlock->RootCell,
                                  Stable);
+    CmpUnlockHiveFlusher((PCMHIVE)LowKcb->KeyHive);
     if (!NT_SUCCESS(Status))
         goto done;
 
@@ -3725,9 +3747,13 @@ done:
     if (NT_SUCCESS(Status))
     {
         /* Check those hives again before we say goodbye */
+        CmpLockHiveFlusherExclusive(HighHiveToValidate);
         CheckStatus = CmpCheckLiveHive(HighHiveToValidate);
+        CmpUnlockHiveFlusher(HighHiveToValidate);
         ASSERT(CM_CHECK_REGISTRY_SUCCESS(CheckStatus));
+        CmpLockHiveFlusherExclusive(LowHiveToValidate);
         CheckStatus = CmpCheckLiveHive(LowHiveToValidate);
+        CmpUnlockHiveFlusher(LowHiveToValidate);
         ASSERT(CM_CHECK_REGISTRY_SUCCESS(CheckStatus));
     }
 #endif
