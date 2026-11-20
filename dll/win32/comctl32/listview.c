@@ -10947,9 +10947,9 @@ static LRESULT LISTVIEW_NCPaint(const LISTVIEW_INFO *infoPtr, HRGN region)
 
 #ifdef __REACTOS__ /* r73789 */
     dc = GetWindowDC(infoPtr->hwndSelf);
-    /* Exclude client part */
-    ExcludeClipRect(dc, r.left + cxEdge, r.top + cyEdge,
-        r.right - cxEdge, r.bottom - cyEdge);
+    /* Exclude client part (the window DC has its origin at the window's top left corner) */
+    ExcludeClipRect(dc, cxEdge, cyEdge,
+        r.right - r.left - cxEdge, r.bottom - r.top - cyEdge);
 #else
     dc = GetDCEx(infoPtr->hwndSelf, region, DCX_WINDOW | DCX_INTERSECTRGN);
 #endif
